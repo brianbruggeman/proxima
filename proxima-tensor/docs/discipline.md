@@ -11021,6 +11021,294 @@ own tables are the kept, citable record.
 - `cargo test -p proxima-model-interop --features metal,metal-tiled-gemm --release --lib -- --exact --nocapture --ignored bind::real_openchat_file::runs_the_cached_decode_loop_on_the_metal_backend_and_reports_the_plan_cache` (production-shaped prefill/decode/generated-text, with `PROXIMA_PREFAULT=1 PROXIMA_MAX_TOKENS=24`)
 - `cargo clippy -p proxima-gguf --all-targets -- -D warnings` (reproduces the pre-existing, out-of-scope block in isolation)
 
+## ROW 114 — clippy fixed workspace-wide (23 files, not the 2 named); attention Q/K/V/O now takes the tiled path by reusing `classify_packed_row_block`'s own multi-axis fold, not new machinery. Attention bucket growth: 2.48x -> 1.18x across a 2.58x token increase
+
+### Task 1 — the scope was mine to set and I set it too narrowly
+
+ROW 113 found `clippy::chunks_exact_to_as_chunks` red in `proxima-gguf`/
+`proxima-protocols` and reported it out of scope. Fixing it surfaced FIVE
+more crates the lint touched once the workspace-wide graph was actually
+walked to green, one crate at a time: `proxima-net`, `proxima-recording`
+(dev-deps of `proxima-protocols`), `proxima-tensor` (31 sites in `cpu.rs` +
+3 in `spec.rs`, its own test modules), `proxima-centauri`, and
+`proxima-model-interop` (1 lint site plus one genuinely pre-existing
+compile error — a missing `ToString` import in a `no_std` test module,
+unrelated to this lint but blocking the same workspace-wide gate). Every
+site converted `chunks_exact(N)`/`chunks_exact_mut(N)` (`N` a compile-time
+constant) to `as_chunks::<N>()`/`as_chunks_mut::<N>()`; two sites
+(`checksum.rs` in both `proxima-protocols` and `proxima-net`) needed
+`ChunksExact::remainder()` rewritten as the tuple's own `.1`.
+
+`cargo clippy --workspace --all-targets -- -D warnings`: **0 errors**, from
+a starting point where the same command errored in six different crates as
+each one was reached. 21 files changed, one commit
+(`99a5e7d fix: clear chunks_exact_to_as_chunks clippy lint workspace-wide`).
+
+### Task 2, step 1 — the rejection table, printed from the real bound graph
+
+New probe, `omega/examples/attention_tiled_gemm_probe.rs`, sibling to ROW
+113's `real_forward_packed_probe.rs`: same `mistral_cached_forward_program`
+(Mistral-7B/openchat-3.5 architecture), same `bind` +
+`correct_packed_matmul_layouts` sequence, extended to also visit the
+two-operand attention reduces that carry NO packed weight at all
+(`score_product`/`value_product`, identified structurally: a fused
+two-operand `Add`-reduce with neither operand a `q4k_operands` node is
+`rmsnorm`'s `x*x` self-product if both operand slots are the SAME `NodeId`,
+otherwise an attention product; `value_product` is the one where an
+operand's immediate producer in the raw `Vec<Op>` is `Op::Elementwise {
+body: ScalarOp::Exponential, .. }` — the softmax numerator; everything else
+in that bucket is `score_product`). For every candidate it runs BOTH
+`omega::msl::diagnose_packed_row_block` (existing) and a new
+`omega::msl::diagnose_tiled_gemm_block` (added this row, same
+`#[cfg(feature = "instrument")]` shape as the row-blocked one, backed by a
+new public `TiledGemmRejection` enum mirroring `PackedRowBlockRejection`).
+
+At a real decode-step shape (`symbols = [1, 0]`, one new position, matching
+ROW 113's own reference shape):
+
+| op family | count | output_axes | reduce_dims | row-blocked gate | tiled-gemm gate (before this row) |
+|---|---|---|---|---|---|
+| `attn_q` | 32 | `[0,1,2]` (3 axes) | `[3]` | PASS | `OutputAxisCountNotTwo { count: 3 }` |
+| `attn_k` | 32 | `[0,1,2]` (3 axes) | `[3]` | PASS | `OutputAxisCountNotTwo { count: 3 }` |
+| `attn_v` | 32 | `[0,1,2]` (3 axes) | `[3]` | PASS | `OutputAxisCountNotTwo { count: 3 }` |
+| `attn_output` | 32 | `[0,4]` (2 axes) | `[1,2,3]` (3 dims) | PASS | `ReduceDimCountNotOne { reduce_dims: [1,2,3] }` |
+| `score_product (Q @ K)` | 128 | `[0,1,2,3]` | `[4]` | `NotExactlyOnePackedOperand` | `NotPackedRowBlock(NotExactlyOnePackedOperand)` |
+| `value_product (softmax_weights @ V)` | 64 | `[0,2,3,4]` | `[1]` | `NotExactlyOnePackedOperand` | `NotPackedRowBlock(NotExactlyOnePackedOperand)` |
+
+**Two structurally distinct reasons block the four real weight matmuls, not
+one:** `attn_q`/`attn_k`/`attn_v` keep the token axis (`s`) and TWO
+weight-owned axes (`heads`, `head_dim`) that the old `classify_tiled_gemm`
+required to be exactly one axis each side (`[axis_a, axis_b] =
+output_axes[..]` destructuring only ever matched rank-2). `attn_output`
+already clears that 2-output-axis bar (row-blocked's own multi-dim-reduce
+fold already collapses `kv_head_group x query_group x head_dim` into one
+output axis, `o`) but then fails the tiled path's SEPARATE, stricter
+`reduction_dims(...).len() != 1` check, because that reduce still spans
+THREE raw axes even though row-blocked already proved they fold
+contiguously into one logical reduction.
+
+**60% of the attention-matmul-shaped op instances (192 of 320:
+`score_product` + `value_product`) are structurally ineligible for this
+entire class of fix, not merely unoptimized** — `Q @ K^T` and
+`softmax(scores) @ V` are pure activation-activation reduces with no
+weight operand at all, so there is no weight tile to reuse across token
+columns in the first place. This bounds the addressable share of the
+353.4 ms attention bucket ROW 113 measured to the 128 of 320 instances
+(40%) that are real weight matmuls.
+
+### Task 2, step 2 — the fix reuses `classify_packed_row_block`'s own fold, twice, not new machinery
+
+Both blocking reasons turned out to be the SAME identity
+`classify_packed_row_block`'s reduce-dim fold already proves, applied to a
+different axis set:
+
+1. **Extracted the shared identity.** `classify_packed_row_block`'s
+   reduce-dim contiguity loop (`outer_stride == inner_extent *
+   inner_stride`, checked for both operands) became a standalone
+   `axes_fold_contiguously(dims, extents, layout)` — one function, called
+   from the row-blocked path (unchanged behavior, refactor only) AND from
+   the tiled path's new axis-group check below. Zero new math.
+2. **Generalized `classify_tiled_gemm`'s axis-ownership check from "exactly
+   one axis per side" to "one or more CONTIGUOUS axes per side."** Every
+   `output_axes` entry partitions into a token group (activation-owned,
+   weight stride zero) or a feature group (weight-owned, activation stride
+   zero); an axis owned by both or neither is still
+   `AxisOwnershipAmbiguous`. The groups must reassemble `output_axes`
+   exactly (token group first, feature group last — `native_packed_layout`'s
+   own on-disk convention, now checked structurally instead of assumed for
+   exactly 2 axes). A multi-axis group must fold contiguously
+   (`axes_fold_contiguously`, same call as above) for the OWNING operand
+   AND for the op's own `out_layout` — the tile write-back's `coord[axis] =
+   o_feat` trick (a FLAT combined index times the innermost axis's stride)
+   is exactly the reduce-dim fold's identity applied to the output tensor,
+   so it needed the same proof, not an assumption.
+3. **Deleted the separate `reduction_dims(...).len() != 1` check entirely.**
+   `classify_tiled_gemm` already destructures `PackedRowBlock { reduce_dim,
+   .. }` from `classify_packed_row_block`'s own return — that `reduce_dim`
+   IS the already-validated innermost axis of whatever contiguous fold the
+   row-blocked gate proved, multi-dim or not. The tiled path was
+   re-deriving a STRICTER, redundant version of a check the more basic gate
+   already passed. Trusting it instead of re-checking is what let
+   `attn_output` through with zero kernel-body changes.
+4. **`push_tiled_gemm_body` needed exactly one real code change:**
+   `feature_extent`/`token_extent` (previously a single `u.output_extents[i]`
+   uniform read) became the PRODUCT of every axis in the group's own
+   `u.output_extents` entries, computed in the emitted MSL source (the
+   kernel is reused across concrete shapes, so this cannot be a baked
+   literal). Every per-tile stride read, and the output write-back's
+   `coord[axis] = o_feat` line, needed NO changes — they already operated on
+   a single flat index and a single stride, and the group-contiguity
+   identity is exactly why that was already correct for a multi-axis group.
+
+`TiledGemmBlock` gained `token_axes`/`feature_axes: Vec<u16>` (the full
+groups, needed for the extent-product codegen); the old single
+`token_axis`/`feature_axis: usize` fields were DELETED, not kept alongside
+— `push_tiled_gemm_body` derives the innermost axis from `.last()` on the
+group it already has. `TiledGemmRejection` dropped `OutputAxisCountNotTwo`,
+`ReduceDimCountNotOne`, and `FeatureAxisNotLast` (all provably subsumed by
+the reassembly/contiguity checks) and gained `AxisGroupNotContiguous`.
+
+Re-running the SAME probe after this fix, decode shape unchanged
+(`symbols = [1, 0]`):
+
+| op family | tiled-gemm gate, this row |
+|---|---|
+| `attn_q`/`attn_k`/`attn_v`/`attn_output` | `TokenExtentBelowMinimum { token_extent: 1, min_tokens: 8 }` |
+| `score_product`/`value_product` | unchanged, `NotPackedRowBlock(NotExactlyOnePackedOperand)` |
+
+Decode's own per-token shape (`token_extent=1 < 8`) is correctly still
+rejected — the fix widens WHICH shapes can qualify, not the minimum-token
+floor ROW 107 set. At a prefill shape (`symbols = [31, 0]`), all four
+`attn_*` families now read `PASS (tiled-gemm)`.
+
+### Correctness — an independent reference, not two backends agreeing
+
+The module doc's own warning (an earlier axis-order attempt measured
+`relative=0.497`, dimensionally valid MSL, semantically wrong, only parity
+caught it) applies here just as much: NEITHER existing test exercised the
+NEW multi-axis-feature-group code path (`metal_real_forward.rs`'s fixture
+hardcodes `new_positions=1`, below `TILED_GEMM_MIN_TOKENS`, and never packs
+a Q4_K weight at all; `q4k_matmul_layout.rs`'s own tile-scale test is a
+single-feature-axis 2-D matmul). New test,
+`omega/tests/attn_multi_axis_tiled_gemm_parity.rs`:
+
+- `metal_takes_the_tiled_path_and_agrees_with_the_independent_reference_on_a_two_axis_feature_group`
+  — `[tokens=20, in_dim=512] x [in_dim=512, heads=3, head_dim=8] ->
+  [tokens=20, heads=3, head_dim=8]`, reduced over `in_dim`: `attn_q`'s exact
+  iteration shape (`heads`/`head_dim` folded feature group), neither
+  `tokens` nor `heads*head_dim` a whole multiple of its own tile dimension.
+  Checked against dequantize-then-dot, computed independently of both
+  `proxima_tensor::cpu` and the Metal emitter — asserts the kernel source
+  actually contains `simdgroup_multiply_accumulate` first, so the
+  correctness claim cannot be hollow-passed by silently staying on
+  row-blocked. **relative = 5.4795e-5** (metal vs. the independent
+  reference), inside the existing tiled-path bound (`5e-3`,
+  `metal_matmul_on_packed_q4k_weights_matches_the_dequantized_f32_cpu_path_at_tile_scale`'s
+  own established ceiling) and the same order of magnitude as that test's
+  own **3.318e-5** — re-measured this row, unchanged (this row's refactor
+  of `classify_packed_row_block` is a pure extraction, same math, same
+  result).
+- `metal_decode_shaped_attention_matmul_stays_on_the_row_blocked_vector_path`
+  — same shape at `tokens=1`: asserts the emitted kernel source does NOT
+  contain `simdgroup_multiply_accumulate` and DOES contain `q4k_run8`
+  (row-blocked's own call site) — the codegen-level proof decode still
+  takes the vector path, not an inference from `classify_tiled_gemm`'s own
+  logic.
+
+Generated text, real openchat-3.5-1210 checkpoint, default prompt,
+`max_tokens=24`, Metal backend, this row's fix active
+(`--features metal,metal-tiled-gemm`, no `instrument`):
+`"Here is a simple Python function that returns the nth Fibonacci number
+using recursion:\n\n\`\`\`"` — byte-identical to the required string.
+
+### The scaling curve — attention bucket, before and after, FFN in the same runs
+
+Harness: `cargo test -p proxima-model-interop --features
+metal,instrument,metal-tiled-gemm --release --lib -- --ignored
+profiles_one_real_prefill_step_by_per_op_gpu_time --nocapture`, varying
+`PROXIMA_PROMPT` for `new_count` (this row's own prompts land on
+`new_count = 12/24/31`, not exactly ROW 113's `12/23/31` — tokenizer
+granularity, reported as-is rather than forced). "Before" is HEAD's own
+`omega/src/msl.rs` (post-ROW-113, this row's fix reverted via a plain file
+copy from `git show HEAD:omega/src/msl.rs` and restored afterward — never
+`git stash`/`checkout`, the working tree's uncommitted diff is the only
+thing that moved). Bucket = sum of `op_profile_family` lines by weight
+family (`attn_q`+`attn_k`+`attn_v`+`attn_output` vs
+`ffn_gate`+`ffn_up`+`ffn_down`+`output.weight`), 3 runs each, `uptime`
+polled before each batch (load 1.6-5.1 throughout, all polls pasted in the
+session transcript).
+
+| bucket | state | `new_count=12` | `new_count=24` | `new_count=31` | growth 12->31 |
+|---|---|---|---|---|---|
+| attention (attn_q/k/v/output) | BEFORE | 116.483 ms, CoV 3.50% | 226.765 ms, CoV 1.24% | 289.316 ms, CoV 0.83% | **2.484x for 2.583x tokens — LINEAR** |
+| attention (attn_q/k/v/output) | **AFTER** | 102.901 ms, CoV 0.48% | 115.368 ms, CoV 1.28% | 121.143 ms, CoV 1.87% | **1.177x for 2.583x tokens — FLAT** |
+| FFN+output (ROW 113, reference) | BEFORE | 249.600 ms, CoV 5.91%\* | 277.364 ms, CoV 2.50% | 303.436 ms, CoV 2.71% | 1.216x |
+| FFN+output (ROW 113, reference) | AFTER | 241.177 ms, CoV 1.20% | 279.820 ms, CoV 3.73% | 299.884 ms, CoV 1.51% | 1.243x |
+| total device GPU time (`total_gpu_ms`) | BEFORE | 438.259 ms, CoV 5.10%\* | 655.918 ms, CoV 1.81% | 800.140 ms, CoV 1.70% | 1.826x |
+| total device GPU time (`total_gpu_ms`) | AFTER | 415.544 ms, CoV 0.63% | 552.722 ms, CoV 2.70% | 633.791 ms, CoV 1.47% | 1.525x |
+| full step wall clock (`step_wall_ms`) | BEFORE | 1579.928 ms, CoV 1.41% | 1826.259 ms, CoV 1.87% | 1971.152 ms, CoV 0.56% | 1.248x |
+| full step wall clock (`step_wall_ms`) | AFTER | 1593.823 ms, CoV 5.09%\* | 1698.747 ms, CoV 1.09% | 1792.622 ms, CoV 1.93% | 1.125x |
+
+\* At or fractionally above the 5% trust floor — quoted as the mean with
+the CoV shown, not rounded up; the underlying min/max range for each
+flagged cell is in the session's raw run logs, not reproduced here.
+
+**The falsifiable criterion, met:** attention bucket growth from
+`new_count=12` to `31` (a 2.583x token increase) collapses from **2.484x
+(linear, tracking token count)** to **1.177x (flat)** — the same shape
+ROW 113 measured for its own fix (1.09x). The FFN+output reference bucket
+and the model architecture are UNCHANGED between before/after (this row
+touches only `omega/src/msl.rs`'s tiled-gemm classifier); its own growth
+(1.216x before, 1.243x after) is consistent across both states, confirming
+the reference did not move and the attention delta is not noise leaking
+from elsewhere.
+
+**At `new_count=31`:** attention bucket falls 289.316 -> 121.143 ms (a
+168.2 ms drop, -58.1%). Total device GPU time falls 800.140 -> 633.791 ms
+(166.3 ms drop, -20.8%) — within 2 ms of the attention delta alone,
+confirming the win is concentrated exactly where the fix targets it, not
+diffused across unrelated buckets. Full step wall clock (includes CPU-side
+dispatch, encode, and non-GPU overhead the `total_gpu_ms` figure excludes)
+falls 1971.152 -> 1792.622 ms (178.5 ms, -9.06%).
+
+**Not measured this row:** llama.cpp's own comparable figure at these
+exact `new_count` values (ROW 113's cited `103.2 ms` is llama's TOTAL
+prefill at its own `new_count=31`, a different session, different host
+load — reported here as "not measured," per the per-term-table rule, not
+re-derived from a different row's number).
+
+### Gates, actual numbers
+
+- `cargo nextest run -p omega` -> **76 passed**, 1 skipped
+- `cargo nextest run -p omega --features std,cpu,metal,metal-tiled-gemm` ->
+  **82 passed** (80 baseline + this row's 2 new tests in
+  `attn_multi_axis_tiled_gemm_parity.rs`), 1 skipped
+- `cargo nextest run -p proxima-tensor --features std,instrument` -> **365
+  passed**, 4 skipped
+- `cargo build -p omega --features std,cpu,metal --lib` -> exit 0
+- `cargo clippy --workspace --all-targets -- -D warnings` -> **0 errors**
+  (Task 1's own gate, re-confirmed after Task 2's diff)
+- `cargo clippy -p omega --all-targets --features
+  std,cpu,metal,metal-tiled-gemm -- -D warnings` -> 0 errors
+- `cargo clippy -p omega --all-targets --features
+  std,cpu,metal,instrument,metal-tiled-gemm -- -D warnings` -> 0 errors
+
+### Re-provable now
+
+- `cargo nextest run -p omega`
+- `cargo nextest run -p omega --features std,cpu,metal,metal-tiled-gemm`
+- `cargo nextest run -p proxima-tensor --features std,instrument`
+- `cargo build -p omega --features std,cpu,metal --lib`
+- `cargo clippy --workspace --all-targets -- -D warnings`
+- `cargo run -p omega --example attention_tiled_gemm_probe --features
+  std,cpu,metal,instrument,metal-tiled-gemm` (step 1's rejection table +
+  step 2's post-fix table, symbols hardcoded to the decode shape in the
+  example; edit the `symbols` binding to `[31, 0]` for the prefill shape)
+- `cargo test -p omega --test attn_multi_axis_tiled_gemm_parity --features
+  std,cpu,metal,metal-tiled-gemm -- --nocapture` (parity 5.48e-5 + the
+  decode-shape codegen assertion)
+- `cargo test -p proxima-model-interop --features
+  metal,instrument,metal-tiled-gemm --release --lib -- --ignored
+  profiles_one_real_prefill_step_by_per_op_gpu_time --nocapture` (scaling
+  curve; vary `PROXIMA_PROMPT` for `new_count`)
+- `cargo test -p proxima-model-interop --features metal,metal-tiled-gemm
+  --release --lib -- --ignored
+  runs_a_cached_greedy_decode_loop_and_reports_per_token_wall_clock
+  --nocapture` (generated text, byte-identical)
+
+### Cleanup
+
+`$CARGO_TARGET_DIR` (`attntile-target`, debug and release profiles both
+built this row) deleted after extraction. Intermediate logs under
+`attntile/` (per-run capture files from the clippy sweep and the 18-run
+before/after scaling sweep) deleted; this row's own tables are the kept,
+citable record. `omega/src/msl.rs` was temporarily reverted to `HEAD` (via
+`git show HEAD:omega/src/msl.rs`, a plain file copy, never `git
+stash`/`checkout`) to measure the BEFORE state, then restored from a
+session-local backup copy — `git diff --stat omega/src/msl.rs` against
+this row's own commit shows the intended diff only, no residue from the
+swap.
+
 ## ROW 115 — standing scoreboard after ROW 113, with provenance on every cell
 
 ROW 110 set the rule that a SYSTEM claim is total wall clock. This row applies
