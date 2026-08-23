@@ -7,8 +7,14 @@
 //! already-sized job": the parser reports a tensor's [`crate::GgmlType`]
 //! and byte range faithfully, and this module turns those raw bytes into
 //! numbers (and back), one block format at a time. [`q4_k`] landed first;
-//! [`q8_0`], [`q6_k`], [`q5_k`], and [`q4_0`] followed.
+//! [`q8_0`], [`q6_k`], [`q5_k`], and [`q4_0`] followed. [`f16`]/[`bf16`]
+//! closed a different gap: both types were tag-only in
+//! [`crate::types::GgmlType`] (readable byte ranges, no conversion) until
+//! these two landed — not a block codec at all (`block_elements: 1`), just
+//! a widening convert composed from the existing `half` crate dependency.
 
+pub mod bf16;
+pub mod f16;
 pub mod q4_0;
 pub mod q4_k;
 pub mod q5_k;
