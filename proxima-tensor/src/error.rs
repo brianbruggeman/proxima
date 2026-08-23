@@ -196,4 +196,12 @@ pub enum TensorError {
         expert_count: u32,
         expert_used_count: u32,
     },
+
+    /// [`crate::align::AlignedBuffer::new`]'s requested element count does
+    /// not fit a `usize` byte length, or the caller-supplied `page_size` is
+    /// not a valid `Layout` alignment (not a power of two, or the rounded
+    /// byte length overflows `isize::MAX`) — a caller-controlled allocation
+    /// request, never a plain out-of-memory condition.
+    #[error("aligned buffer allocation rejected: {reason}")]
+    AlignedAllocationRejected { reason: &'static str },
 }
