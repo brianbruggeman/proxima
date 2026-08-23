@@ -167,4 +167,11 @@ pub enum InteropError {
         in_dim: usize,
         expected: usize,
     },
+
+    /// [`crate::hf_config::parse_hf_config`]'s `config.json` bytes were not
+    /// valid JSON, or were missing/mis-typing one of [`crate::hf_config::HfConfig`]'s
+    /// required fields (`hidden_size`, `num_attention_heads`,
+    /// `num_hidden_layers`, `intermediate_size`, or `vocab_size`).
+    #[error("malformed hf config.json: {reason}")]
+    MalformedHfConfig { reason: String },
 }

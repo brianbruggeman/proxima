@@ -29,6 +29,7 @@ mod dtype;
 mod error;
 #[cfg(feature = "std")]
 mod generate;
+mod hf_config;
 #[cfg(feature = "std")]
 mod loader;
 mod serving;
@@ -41,6 +42,7 @@ pub use dtype::{dtype_to_ggml, ggml_to_dtype};
 pub use error::InteropError;
 #[cfg(feature = "std")]
 pub use generate::LoadedModel;
+pub use hf_config::{HfConfig, architecture_from_hf_config, parse_hf_config};
 #[cfg(feature = "std")]
 pub use loader::{PREFAULT_OVERSUBSCRIBE, PREFAULT_STRIDE_BYTES, prefault};
 pub use serving::{

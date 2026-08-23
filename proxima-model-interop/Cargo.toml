@@ -79,6 +79,13 @@ proxima-tensor = { path = "../proxima-tensor", default-features = false, feature
 # -- optional, wired on only by this crate's own `std` feature above, so the
 # alloc-only floor never pulls it in.
 proxima-tokenizer = { path = "../proxima-tokenizer", default-features = false, features = ["gguf"], optional = true }
+serde = { workspace = true, features = ["derive", "alloc"] }
+# `hf_config::HfConfig` deserializes a real HF config.json (alloc-tier, no
+# std needed -- `cargo add` rejects this crate's own "alloc" feature entry
+# on a validation quirk unrelated to the actual build; the workspace root
+# already pins the version/features this line inherits, same as
+# `proxima-safetensors`'s identical `serde_json.workspace = true`.
+serde_json.workspace = true
 thiserror.workspace = true
 
 [lints]
