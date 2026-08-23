@@ -109,9 +109,8 @@ impl DType {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
-    use rstest::rstest;
 
-    #[rstest]
+    #[proxima::test]
     #[case::boolean(DType::Bool, 1)]
     #[case::narrow_int(DType::Int8, 1)]
     #[case::narrow_uint(DType::UInt8, 1)]
@@ -127,11 +126,11 @@ mod tests {
     #[case::double(DType::Float64, 8)]
     #[case::int128(DType::Int128, 16)]
     #[case::uint128(DType::UInt128, 16)]
-    fn size_bytes_matches_width(#[case] dtype: DType, #[case] expected: usize) {
+    async fn size_bytes_matches_width(#[case] dtype: DType, #[case] expected: usize) {
         assert_eq!(dtype.size_bytes(), expected);
     }
 
-    #[rstest]
+    #[proxima::test]
     #[case::narrow_int_widens(DType::Int8, false)]
     #[case::narrow_uint_widens(DType::UInt8, false)]
     #[case::int16_widens(DType::Int16, false)]
@@ -143,7 +142,10 @@ mod tests {
     #[case::uint64_in_place(DType::UInt64, true)]
     #[case::int128_in_place(DType::Int128, true)]
     #[case::float64_in_place(DType::Float64, true)]
-    fn narrow_integers_require_a_wider_accumulator(#[case] dtype: DType, #[case] in_place: bool) {
+    async fn narrow_integers_require_a_wider_accumulator(
+        #[case] dtype: DType,
+        #[case] in_place: bool,
+    ) {
         assert_eq!(dtype.accumulates_in_place(), in_place);
     }
 
@@ -157,7 +159,7 @@ mod tests {
         assert!(!DType::Bool.is_float());
     }
 
-    #[rstest]
+    #[proxima::test]
     #[case::int8(DType::Int8, true)]
     #[case::uint8(DType::UInt8, true)]
     #[case::int16(DType::Int16, true)]
@@ -170,18 +172,18 @@ mod tests {
     #[case::uint128(DType::UInt128, true)]
     #[case::bool_is_not_integer(DType::Bool, false)]
     #[case::float32_is_not_integer(DType::Float32, false)]
-    fn only_whole_number_types_report_integer(#[case] dtype: DType, #[case] integer: bool) {
+    async fn only_whole_number_types_report_integer(#[case] dtype: DType, #[case] integer: bool) {
         assert_eq!(dtype.is_integer(), integer);
     }
 
-    #[rstest]
+    #[proxima::test]
     #[case::int8_signed(DType::Int8, true)]
     #[case::uint8_unsigned(DType::UInt8, false)]
     #[case::int64_signed(DType::Int64, true)]
     #[case::uint64_unsigned(DType::UInt64, false)]
     #[case::int128_signed(DType::Int128, true)]
     #[case::uint128_unsigned(DType::UInt128, false)]
-    fn signedness_matches_the_variant_name(#[case] dtype: DType, #[case] signed: bool) {
+    async fn signedness_matches_the_variant_name(#[case] dtype: DType, #[case] signed: bool) {
         assert_eq!(dtype.is_signed_integer(), signed);
     }
 }

@@ -301,25 +301,24 @@ pub fn append(program: &mut Vec<Op>, expr: Op) -> NodeId {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
-    use rstest::rstest;
 
-    #[rstest]
+    #[proxima::test]
     #[case::unary(ScalarOp::Exponential, 1)]
     #[case::negate(ScalarOp::Negate, 1)]
     #[case::binary(ScalarOp::Add, 2)]
     #[case::compare(ScalarOp::Greater, 2)]
     #[case::ternary(ScalarOp::Select, 3)]
-    fn arity_matches_the_body(#[case] body: ScalarOp, #[case] expected: usize) {
+    async fn arity_matches_the_body(#[case] body: ScalarOp, #[case] expected: usize) {
         assert_eq!(body.arity(), expected);
     }
 
-    #[rstest]
+    #[proxima::test]
     #[case::add(ScalarOp::Add, true)]
     #[case::multiply(ScalarOp::Multiply, true)]
     #[case::maximum(ScalarOp::Maximum, true)]
     #[case::subtract(ScalarOp::Subtract, false)]
     #[case::divide(ScalarOp::Divide, false)]
-    fn only_associative_bodies_may_be_reassociated(
+    async fn only_associative_bodies_may_be_reassociated(
         #[case] body: ScalarOp,
         #[case] associative: bool,
     ) {

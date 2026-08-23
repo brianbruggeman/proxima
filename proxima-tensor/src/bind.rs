@@ -1168,7 +1168,6 @@ mod tests {
     use crate::dtype::DType;
     use crate::map;
     use crate::op::{Extent, append};
-    use rstest::rstest;
 
     fn matmul_program() -> (Vec<Op>, NodeId, NodeId, NodeId) {
         let mut program = Vec::new();
@@ -1912,12 +1911,15 @@ mod tests {
         }
     }
 
-    #[rstest]
+    #[proxima::test]
     #[case::scalar_reduction(scalar_reduction_op(), 2)]
     #[case::keep_scan_scan(scan_op(), 2)]
     #[case::too_few_parts(elementwise_op(), 1)]
     #[case::extent_smaller_than_parts(elementwise_op(), 999)]
-    fn split_returns_none_when_unsound_or_unhelpful(#[case] op: BoundOp, #[case] parts: usize) {
+    async fn split_returns_none_when_unsound_or_unhelpful(
+        #[case] op: BoundOp,
+        #[case] parts: usize,
+    ) {
         assert!(op.split(parts).is_none());
     }
 

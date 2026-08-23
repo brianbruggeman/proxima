@@ -1382,7 +1382,6 @@ pub fn mistral_cached_forward_program(
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
-    use rstest::rstest;
 
     const MATMUL_TOML: &str = r#"
 [[node]]
@@ -1600,13 +1599,13 @@ name = "weights.embedding"
         assert_eq!(program[0].name(), Some("weights.embedding"));
     }
 
-    #[rstest]
+    #[proxima::test]
     #[case::identity("ij->ij", 2, &[0, 1])]
     #[case::transpose("ji->ij", 2, &[1, 0])]
     #[case::broadcast("j->ij", 2, &[1])]
     #[case::contraction_lhs("ik->ijk", 3, &[0, 2])]
     #[case::full_reduction("->i", 1, &[])]
-    fn projection_notation_reads_like_einsum(
+    async fn projection_notation_reads_like_einsum(
         #[case] notation: &str,
         #[case] rank: u16,
         #[case] projected: &[u16],
