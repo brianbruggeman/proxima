@@ -12251,3 +12251,89 @@ This is the same shape as five other findings today: a capability that exists in
 `proxima-gguf` + `proxima-safetensors` + `proxima-onnx`: **177 run, 177 passed, 4 skipped** by default. With ignored tests included: **4 more run, 4 passed** — real ONNX (`all-MiniLM-L6-v2.onnx`), real GGUF, real-models report, and a real 25 GB Mixtral expert restack.
 
 `proxima-safetensors` has **zero** ignored tests and **zero** real-file references — every test drives synthetic in-memory buffers, despite three real `.safetensors` files existing on this host under `Qwen3-30B-A3B-MLX-4bit/`.
+
+## ROW 122 — codec gap table across all three GGML capability columns, then Metal execution landed for `Q8_0` (fourth `PackedCodec` variant, generic-path only)
+
+Owner asked for the full parse/CPU/Metal capability table across every GGML type before any code, then to close the highest-value gap.
+
+### The three-column table
+
+`GgmlType` (`proxima-gguf/src/types.rs:109-141`), `QuantizedBlock` (`proxima-tensor/src/cpu.rs:453-476`), `PackedCodec`/`unsupported_gpu_codec` (`omega/src/msl.rs:457-475` pre-landing, `omega/src/metal.rs:844-856` pre-landing, deleted this row).
+
+| type | parse (tag decode + dequant fn) | CPU execute | Metal execute (pre-landing) | Metal execute (post-landing) |
+|---|---|---|---|---|
+| F32 | yes (native, no dequant needed) | yes | yes | yes |
+| F16 | tag only — no dequant fn in `proxima-gguf/src/quant/` | no (`bind.rs:64-67` `UnrepresentableGgmlType`) | no | no |
+| Bf16 | tag only, no dequant fn | no | no (folds into Float32 upload arm unreached today, `metal.rs:1531` pre-landing) | no |
+| Q4_0, Q4_1, Q5_0, Q5_1 | tag only, no dequant fn | no | no | no |
+| Q8_0 | yes (`quant/q8_0.rs:77-109`) | yes (`cpu.rs:6001` `matmul_q8_0_f32`, dequant-based; no `q8k`-int8-dot fold, `dot_fn_for` returns `None`, `cpu.rs:2891`) | **no** (`unsupported_gpu_codec`, `metal.rs:850` pre-landing) | **yes** — this row |
+| Q8_1 | no (not a GGUF tensor type at all — `q8_0.rs:8-13`: runtime activation format only) | no | no | no |
+| Q2_K, Q3_K | tag only, no dequant fn | no | no | no |
+| Q4_K | yes (`quant/q4_k.rs`) | yes (`dot_q4k_q8k`, `cpu.rs:6808`) | yes (`Q4K_UNPACK_MSL`, row-blocked + tiled-GEMM) | yes (unchanged) |
+| Q5_K | yes (`quant/q5_k.rs`) | yes (`dot_q5k_q8k`, `cpu.rs:7442`) | yes (`Q5K_UNPACK_MSL`, row-blocked only) | yes (unchanged) |
+| Q6_K | yes (`quant/q6_k.rs`) | yes (`dot_q6k_q8k`, `cpu.rs:7812`) | yes (`Q6K_UNPACK_MSL`, row-blocked only) | yes (unchanged) |
+| Q8_K | tag only, no dequant fn (it is the CPU-only int8 *activation* format `dot_qXk_q8k` quantizes INTO, never a stored weight type this crate reads from GGUF) | n/a | no | no |
+| Iq2Xxs, Iq2Xs, Iq3Xxs, Iq1S, Iq4Nl, Iq3S, Iq2S, Iq4Xs, Iq1M | tag only, no dequant fn | no | no | no |
+| Tq10, Tq20 | tag only, no dequant fn | no | no | no |
+| I8, I16, I32, I64, F64 | tag only (native, block_elements=1); no reinterpret path wired beyond `F32` in `bind.rs:59` | no | no | no |
+
+Real checkpoints reachable on this host (`Nous-Hermes-2-Mixtral-8x7B-DPO.Q4_K_S.gguf`, `openchat-3.5-1210.Q4_K_S.gguf`, `deepseek-coder-33b-instruct.Q4_K_S.gguf` — parsed directly, tensor-type histogram MEASURED not assumed) carry **only** `F32`, `F16`, `Q4_K`, `Q5_K`, `Q6_K`, `Q8_0` between them. Every other row in the table above is untestable against real bytes on this machine — marked synthetic-only, not pretended otherwise.
+
+### Ranking and basis
+
+`Q8_0` ranked #1: (a) it already has a working CPU codec and a real-checkpoint presence (64 tensors, `blk.{0..31}.attn_k/attn_v.weight`, Mixtral) — the ONLY remaining gap was Metal, a narrower slice than parse+CPU+Metal from scratch; (b) it is a "classic widely-distributed format" per the owner's own framing; (c) `Q4_0`/`Q2_K`/`Q3_K`/IQ* all require a NEW dequantize function in `proxima-gguf/src/quant/` first (none exists) plus new CPU and Metal support — three-column work, not one — and none is present in any real checkpoint reachable on this host, so landing one would be synthetic-only per the correctness gate.
+
+### What landed: Metal execution for `Q8_0` — a fourth `PackedCodec` variant, with a real structural difference named and isolated
+
+Followed the `Q5_K`/`Q6_K` path exactly for the shared packed-operand plumbing: `PackedCodec` widened 3 -> 4 variants (`msl.rs:497-513`), a new `Q8_0_UNPACK_MSL` MSL function ported line-for-line from `proxima_gguf::quant::q8_0::dequantize_block` (`msl.rs:475-489`), wired into `preamble` and the generic per-element `operand_read` accessor (`msl.rs:1779,1800-1803`), `packed_operands_of` (`metal.rs:351-362`), the upload match arms in `execute_plan`/`execute_plan_op_timed` (`metal.rs:443-448,625-630`), and `block_element_count` (`metal.rs:800-823`). `unsupported_gpu_codec` deleted entirely (`metal.rs`, was 844-856) — every `QuantizedBlock` variant now has a real Metal path, so the function had no remaining call site.
+
+**`Q8_0` is NOT a fourth variant of the row-blocked/tiled-GEMM fast paths** — read before assuming otherwise. `Q4_K`/`Q5_K`/`Q6_K` share ONE super-block shape: 256 elements, 8-lane amortization keyed to `Q4K_BLOCK_ELEMENTS`, hard-coded across `classify_packed_row_block` (`msl.rs:1017-1076` pre-landing) and `push_packed_row_blocked_body` (`msl.rs:2116-2352` pre-landing). `Q8_0` is a flat 32-element block with one `f16` scale and NO sub-block structure at all — genuinely different in kind, not size. `classify_packed_row_block`'s codec check (`quantized[weight]` is only `.is_some()`-gated, not codec-typed) would have silently ADMITTED a `Q8_0` operand into the K-quant row-blocked kernel whenever its reduction extent happened to be a multiple of 256 (common: e.g. a 4096-wide embedding axis) — a real correctness landmine, not a hypothetical. Closed it with an explicit `PackedRowBlockRejection::NotKQuantCodec` check (`msl.rs:1013-1015`) before the codec ever reaches the row-blocked body; the tiled-GEMM path was already safe (`classify_tiled_gemm`'s own `TiledGemmRejection::NotQ4K` predates this landing and rejects everything except `Q4_K`, `Q5_K`/`Q6_K`/`Q8_0` all excluded). `Q8_0` always takes the fully generic per-element path — correct, unoptimized, the same posture `Q5_K`/`Q6_K` already have relative to the tiled-GEMM path (`TiledGemmRejection::NotQ4K`'s own doc).
+
+**No magic numbers (§12):** `Q8_0_BLOCK_BYTES`/`Q8_0_BLOCK_ELEMENTS` are bare `pub const`s, same posture as the pre-existing `Q4K_BLOCK_BYTES`/`Q5K_BLOCK_BYTES`/`Q6K_BLOCK_BYTES` — a structurally-justified exception, not an oversight: these are GGUF WIRE-FORMAT constants (block byte width, elements per block), fixed by the spec, never a per-system tunable a downstream user would reasonably override at build time (unlike a queue depth or worker count). Pinned by `omega/tests/q8_0_unpack.rs::q8_0_block_geometry_matches_the_gguf_codec` against `proxima_gguf::quant::q8_0::{BLOCK_BYTES, QK8_0}` so drift between the two crates' restated copies fails loud.
+
+### Real-checkpoint parity test
+
+`omega/tests/q8_0_real_checkpoint_parity.rs`, real bytes of `blk.0.attn_k.weight` (Q8_0, dims `[4096, 1024]`) from `Nous-Hermes-2-Mixtral-8x7B-DPO.Q4_K_S.gguf` — the only host-local real checkpoint carrying a `Q8_0` weight tensor (`openchat`/`deepseek-coder` carry none, MEASURED via a direct parse dump of all three files' tensor-type histograms, not assumed). 64 of 1024 rows, `k=4096`.
+
+**Measured relative error: `1.4868917e-6`** (`max_diff=0.000012874603`, `max_magnitude=8.658736`), well inside the `1e-5` threshold every other codec's real-checkpoint test uses.
+
+**Proof the test can fail:** perturbed `dequantized[0] += 1000.0` after the CPU dequant oracle ran (before the Metal-vs-CPU comparison). Assertion fired: `relative=1.0013691 max_diff=2115.817`, test FAILED (exit 101) as expected. Reverted; test passes again (`relative=1.4868917e-6`).
+
+Also landed (mirroring the existing `q4k`/`q5k`/`q6k_unpack.rs` posture): `omega/tests/q8_0_unpack.rs` (4 tests: MSL-toolchain-assembles, index-arithmetic bit-exact against the codec over 16 randomized blocks x 32 elements = 512 compared, a no-sub-block-structure pin, and the block-geometry cross-check) and two synthetic cases added to `metal_matmul_parity_across_codec_and_dtype` (`q8_0_at_float32`/`q8_0_at_float16`, epsilon `1e-5`/`1e-2` matching the other codecs' cells exactly).
+
+**Retired, not left blank:** `metal_rejects_a_codec_with_no_unpack_kernel_and_names_it` (single case: `q8_0`) asserted Metal REJECTS `Q8_0` — true before this row, false after. No `QuantizedBlock` variant remains unsupported to test this negative contract against, so a single-case parameterized test with a now-false premise was deleted rather than left green-by-vacuity (a `#[case]` list this test could still run against would be an `N==0`-shaped landmine for a future reader trusting a "still passing" green). A comment at the deletion site names exactly what would resurrect it: a future codec added to `QuantizedBlock` ahead of its own MSL kernel.
+
+### Gate counts
+
+| gate | count | command |
+|---|---|---|
+| `cargo nextest run -p omega` | **83 passed** (was 77 pre-session: +2 `q8_0_at_float32/16` cases, -1 retired `metal_rejects_a_codec_with_no_unpack_kernel_and_names_it`, +1 `q8_0_real_checkpoint_parity`, +4 `q8_0_unpack.rs` = 77+2-1+1+4=83), 1 skipped (pre-existing `#[ignore]`, unrelated to this row) | `cargo nextest run -p omega` |
+| `cargo nextest run -p proxima-tensor --features std,instrument` | **365 passed**, 4 skipped — UNCHANGED, this row touched no `proxima-tensor` source (CPU already executed `Q8_0`) | same |
+| `cargo nextest run -p proxima-gguf --features std` | **96 passed**, 3 skipped — UNCHANGED, this row touched no `proxima-gguf` source | same |
+| `cargo build --workspace --lib` | **BLOCKED** — `proxima-model-interop` fails to compile (`bind.rs:33`, unused imports `discover_experts`/`plan_stack`/`restack_into`); `git status` confirms `bind.rs`/`generate.rs`/`serving.rs` are uncommitted, dirty, and out of this row's file boundary (a concurrent sampling-implementation agent's WIP in this shared worktree). `cargo build --workspace --lib --exclude proxima-model-interop` -> **exit 0** | see log excerpt below |
+| `cargo clippy --workspace --all-targets -- -D warnings` | **BLOCKED** — same `proxima-model-interop` failure, plus `proxima-tokenizer/src/sample.rs` (2 clippy lint errors, also dirty/uncommitted, also another agent's concurrent WIP). `cargo clippy --workspace --all-targets --exclude proxima-model-interop --exclude proxima-tokenizer -- -D warnings` -> **exit 0** (one benign upstream `proc-macro-error2` future-incompat notice, unrelated) | same |
+| `cargo clippy -p omega -p proxima-gguf -p proxima-tensor --all-targets --all-features -- -D warnings` (this row's own files, narrow) | **exit 0** | |
+| `cargo clippy -p omega --all-targets --features metal,cpu,std,instrument,metal-tiled-gemm -- -D warnings` (tiled-GEMM feature combination) | **exit 0** | |
+
+**Uncovered, named rather than buried:**
+
+- The end-to-end byte-identical generated-text invariant (`"Here is a simple Python function that returns the nth Fibonacci number using recursion:\n\n\`\`\`"`) could NOT be re-run this session — its only test lives in `proxima-model-interop`, currently broken by the concurrent agent's uncommitted work above. Structural argument, not a re-run: `ServingConfig::DEFAULT_MODEL_PATH` (`serving.rs:54`, read at `HEAD` before the other agent's edits) is the `openchat` checkpoint, which this row's own parse dump proved carries ZERO `Q8_0` tensors — this row's code path is unreachable for that specific generation, so it cannot have changed that output. This is a reasoned argument standing in for a gate that could not be mechanically re-run right now, not a substitute claim of having run it.
+- `F16`/`Bf16` remain unexecuted on both backends despite being present in real checkpoints (32 `F16` tensors, Mixtral's MoE router) — no dequantize function exists in `proxima-gguf/src/quant/` for either. Same finding ROW 121 already named; unchanged by this row.
+- The `Q8_0`-as-KV-cache seam (`proxima-model-interop/src/bind.rs`'s `q8_0_quantized_key_value_cache_cannot_cross_the_weight_matmul_quantized_seam`, `#[ignore]`d) is a DIFFERENT, orthogonal gap — an `Op::Reduce` shape limitation (no way to express the KV cache's extra broadcast `kv_heads` axis against a quantized operand), not a codec gap. Untouched; out of this row's file boundary regardless.
+- `Q8_0` on Metal is the generic per-element path only, same posture `Q5_K`/`Q6_K` already have relative to the row-blocked/tiled-GEMM fast paths — a real optimization opportunity, not a correctness gap, and not benched this row (no throughput claim is made).
+- `Q4_0`, `Q5_0`, `Q2_K`, `Q3_K`, the `IQ*` family, `Q8_1`, `Q8_K` remain entirely unparseable (no dequant fn anywhere) and unreachable on any real checkpoint on this host.
+
+### Re-prove
+
+```sh
+cd <this worktree>
+cargo nextest run -p omega
+cargo nextest run -p proxima-tensor --features std,instrument
+cargo nextest run -p proxima-gguf --features std
+cargo test -p omega --test q8_0_real_checkpoint_parity -- --nocapture   # relative= line
+cargo clippy -p omega -p proxima-gguf -p proxima-tensor --all-targets --all-features -- -D warnings
+```
+
+### Cleanup
+
+`$CARGO_TARGET_DIR` (isolated scratch path) and all per-run `.log` files removed after this row; the throwaway `proxima-gguf/examples/dump_types.rs` probe used to produce the real-checkpoint tensor-type histograms above was deleted after use (not committed) — its output is transcribed above and independently re-derivable from `proxima_gguf::pipe::parse_complete` against the three cited host paths.
