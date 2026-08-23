@@ -9411,3 +9411,60 @@ PROXIMA_COHORT_SPIN_POLLS={2000,1000,250,0} PROXIMA_MATMUL_WORKERS={8,1} \
 Re-run this sweep on a quiet host (`uptime` 1-min load under ~2, no concurrent
 worktree activity on this repo) before treating either ranking above as
 settled.
+
+## ROW 103 — the measurement worktree must not be the commit worktree; the "foreign session" in ROW 101 was the coordinator
+
+ROW 101 reported a concurrent session writing into `agent-a585f8281e4851e98`
+mid-sweep — landing two commits and leaving a 10-file uncommitted diff — and
+correctly named it an infrastructure collision rather than blaming its own
+numbers.
+
+**That session was the coordinator.** ROW 100 and ROW 102 were committed into
+that worktree while ROW 101's 64-run timing sweep was executing in it, and a
+test-migration agent was then dispatched against the same tree. Host load ran
+20-138 for most of the window; 7 of ROW 101's 8 repetitions are unusable.
+
+This is the second contamination of the day from the same root and both are
+the coordinator's. ROW 100's own notice records the first: two timing agents
+dispatched concurrently, giving `llama-cpu` a 53.35% CoV.
+
+### The rule this earns
+
+**A worktree that is being measured is frozen. No commits, no dispatches that
+edit it, until the sweep reports.** The existing "measure alone, implement in
+parallel" rule was read as applying only to agents; it applies to the main
+loop, which is a writer like any other. A doc-only commit is still a write:
+it dirties the index, and on this box it landed while `rustc` was already
+contending.
+
+Mechanically: measurement runs get their own `git worktree` at a pinned SHA
+(ROW 101 did exactly this for its GATES and that half was clean), or the
+coordinator holds every write until the notification arrives.
+
+### What survives from ROW 101 regardless
+
+The mechanism is confirmed from source and from counters, independent of the
+noisy timings:
+
+- `prime/src/os/cohort.rs:294-296` documents spin-then-park; `:729-777`
+  (`wait_for_round`) implements it; `:468-471` spawns it on `members-1`
+  member threads only.
+- At `w=1`, `members-1 == 0`, so the spin/park path never executes on any
+  thread: `parks == spin_hits == 0` in all 32 `w=1` runs at every knob value.
+  A degenerate control that behaved as a control should.
+- Lowering `spin_polls` moves the counters monotonically in the predicted
+  direction (`parks` 32251 -> 32683, `spin_hits` 3962 -> 0) and
+  `elementwise` falls monotonically 9.2%.
+- `loop_overhead` moves the WRONG way (+1.3%). Reported, not omitted.
+
+**Verdict withheld:** the one clean repetition shows decode -12.7%; a second,
+mildly-loaded repetition shows the opposite ranking. Measured, plausible,
+unconfirmed. `COHORT_SPIN_POLLS` stays 2000. This is a third outcome distinct
+from win and from rollback, and it needs a quiet box to resolve, not more
+argument.
+
+### Every timing number taken after roughly 18:00 today is suspect
+
+ROW 100's CPU arms (CoV 53.35%) and ROW 101's reps 2-8 are known bad. Any
+row citing a wall-clock figure from that window should be re-read against its
+own `uptime` log before it is quoted.
