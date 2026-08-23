@@ -3505,6 +3505,7 @@ dependencies = [
  "proxima-core",
  "proxima-primitives",
  "proxima-runtime",
+ "proxima-telemetry",
  "rayon",
  "socket2 0.5.10",
  "temp-env",
@@ -3512,7 +3513,6 @@ dependencies = [
  "tokio",
  "tokio-uring",
  "toml 0.8.23",
- "tracing",
 ]
 
 [[package]]
@@ -3866,14 +3866,13 @@ dependencies = [
  "mimalloc",
  "postcard",
  "proxima",
+ "proxima-telemetry",
  "serde_json",
  "tempfile",
  "time",
  "tokio",
  "tokio-util",
  "toml 0.8.23",
- "tracing",
- "tracing-subscriber",
 ]
 
 [[package]]
@@ -3917,7 +3916,6 @@ dependencies = [
  "quick-xml",
  "regex",
  "ron",
- "rstest",
  "serde",
  "serde-value",
  "serde_json",
@@ -3975,7 +3973,6 @@ dependencies = [
  "proxima-protocols",
  "proxima-runtime",
  "proxima-telemetry",
- "rstest",
  "serde",
  "serde_json",
  "temp-env",
@@ -4096,10 +4093,10 @@ dependencies = [
  "proxima-primitives",
  "proxima-protocols",
  "proxima-recording",
+ "proxima-telemetry",
  "proxima-tls",
  "rand 0.10.2",
  "rcgen",
- "rstest",
  "rustls",
  "rustls-webpki",
  "serde",
@@ -4109,8 +4106,6 @@ dependencies = [
  "tokio",
  "tokio-rustls",
  "toml 0.8.23",
- "tracing",
- "tracing-subscriber",
  "webpki-roots",
  "x509-parser",
  "zstd",
@@ -4134,7 +4129,6 @@ dependencies = [
  "proxima-protocols",
  "proxima-runtime",
  "proxima-telemetry",
- "rstest",
  "serde",
  "serde_json",
  "temp-env",
@@ -4165,7 +4159,6 @@ dependencies = [
  "proxima-runtime",
  "proxima-telemetry",
  "proxima-tls",
- "rstest",
  "serde",
  "serde_json",
  "socket2 0.5.10",
@@ -4269,7 +4262,6 @@ dependencies = [
  "proxima-primitives",
  "proxima-protocols",
  "proxima-runtime",
- "rstest",
  "socket2 0.5.10",
  "tempfile",
  "thiserror 2.0.19",
@@ -4317,7 +4309,6 @@ dependencies = [
  "thiserror 2.0.19",
  "tokio",
  "toml 0.8.23",
- "tracing",
  "ulid",
  "xxhash-rust",
  "zeroize",
@@ -4351,7 +4342,6 @@ dependencies = [
  "proxima-telemetry",
  "proxima-tls",
  "rand 0.10.2",
- "rstest",
  "rustls",
  "serde",
  "serde_json",
@@ -4476,6 +4466,7 @@ dependencies = [
  "proxima-macros",
  "proxima-net",
  "proxima-primitives",
+ "proxima-telemetry",
  "quinn-proto",
  "rand_chacha 0.10.0",
  "rand_core 0.10.1",
@@ -4575,7 +4566,6 @@ dependencies = [
  "proxima-protocols",
  "proxima-runtime",
  "proxima-telemetry",
- "rstest",
  "serde",
  "serde_json",
  "temp-env",
@@ -5121,12 +5111,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "relative-path"
-version = "1.9.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ba39f3699c378cd8970968dcbff9c43159ea4cfbd88d43c00b22f2ef10a435d2"
-
-[[package]]
 name = "ring"
 version = "0.17.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5150,35 +5134,6 @@ dependencies = [
  "bitflags 2.13.1",
  "serde",
  "serde_derive",
-]
-
-[[package]]
-name = "rstest"
-version = "0.26.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f5a3193c063baaa2a95a33f03035c8a72b83d97a54916055ba22d35ed3839d49"
-dependencies = [
- "futures-timer",
- "futures-util",
- "rstest_macros",
-]
-
-[[package]]
-name = "rstest_macros"
-version = "0.26.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9c845311f0ff7951c5506121a9ad75aec44d083c31583b2ea5a30bcb0b0abba0"
-dependencies = [
- "cfg-if",
- "glob",
- "proc-macro-crate",
- "proc-macro2",
- "quote",
- "regex",
- "relative-path",
- "rustc_version",
- "syn 2.0.119",
- "unicode-ident",
 ]
 
 [[package]]

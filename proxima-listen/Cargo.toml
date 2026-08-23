@@ -53,7 +53,6 @@ proxima-protocols = { workspace = true, optional = true, default-features = fals
 # `Listener::builder()...serve()` — the crate's own tests never register a
 # wire protocol themselves.
 proxima = { workspace = true, features = ["test-support", "tokio", "http1-native"] }
-rstest = { workspace = true }
 temp-env = { workspace = true }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread", "time"] }
