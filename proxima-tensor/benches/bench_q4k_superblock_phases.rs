@@ -53,8 +53,15 @@ use core::arch::aarch64::{
     vshrq_n_u8,
 };
 
-const GGUF_PATH: &str =
-    "/Users/brianbruggeman/.lmstudio/models/TheBloke/openchat-3.5-1210-GGUF/openchat-3.5-1210.Q4_K_S.gguf";
+/// real GGUF checkpoint path, overridable per-operator via
+/// `PROXIMA_BENCH_GGUF_PATH` — the hardcoded default only ever resolved on
+/// one machine, which made this bench unrunnable anywhere else.
+fn gguf_path() -> String {
+    std::env::var("PROXIMA_BENCH_GGUF_PATH").unwrap_or_else(|_| {
+        "/Users/brianbruggeman/.lmstudio/models/TheBloke/openchat-3.5-1210-GGUF/openchat-3.5-1210.Q4_K_S.gguf"
+            .to_string()
+    })
+}
 
 /// `cpu.rs` keeps its `Q4_K`/`Q8_K` layout constants private, so they are
 /// re-derived here from `proxima_gguf::quant::q4_k` -- the same source
@@ -695,12 +702,13 @@ fn bench_quantize(in_dims: &[usize]) {
 
 #[cfg(target_arch = "aarch64")]
 fn main() {
-    if !Path::new(GGUF_PATH).exists() {
-        println!("real gguf file not found at {GGUF_PATH}; nothing to bench");
+    let path = gguf_path();
+    if !Path::new(&path).exists() {
+        println!("real gguf file not found at {path}; nothing to bench");
         return;
     }
-    let (parsed, file_len) = parse_header(Path::new(GGUF_PATH));
-    let mut file = File::open(GGUF_PATH).expect("reopen real gguf file for tensor data");
+    let (parsed, file_len) = parse_header(Path::new(&path));
+    let mut file = File::open(&path).expect("reopen real gguf file for tensor data");
 
     let warm_tensor = find_tensor(&parsed, "blk.0.attn_q.weight");
     let in_dim = warm_tensor.dims[0] as usize;

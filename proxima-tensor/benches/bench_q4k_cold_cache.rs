@@ -42,8 +42,15 @@ use proxima_tensor::cpu::{dot_q4k_q8k, matmul_q4k_q8k_f32, quantize_row_q8k};
 use proxima_tensor::test_support::Lcg;
 use std::hint::black_box;
 
-const GGUF_PATH: &str =
-    "/Users/brianbruggeman/.lmstudio/models/TheBloke/openchat-3.5-1210-GGUF/openchat-3.5-1210.Q4_K_S.gguf";
+/// real GGUF checkpoint path, overridable per-operator via
+/// `PROXIMA_BENCH_GGUF_PATH` — the hardcoded default only ever resolved on
+/// one machine, which made this bench unrunnable anywhere else.
+fn gguf_path() -> String {
+    std::env::var("PROXIMA_BENCH_GGUF_PATH").unwrap_or_else(|_| {
+        "/Users/brianbruggeman/.lmstudio/models/TheBloke/openchat-3.5-1210-GGUF/openchat-3.5-1210.Q4_K_S.gguf"
+            .to_string()
+    })
+}
 
 /// `cpu.rs`'s own `Q4K_BLOCK_ELEMENTS`/`Q8K_BLOCK_BYTES` are private to that
 /// module; re-derived here from `proxima_gguf::quant::q4_k::QK_K` (the same
@@ -139,8 +146,8 @@ fn read_tensor_bytes(file: &mut File, parsed: &ParsedGguf, tensor: &TensorInfo, 
 }
 
 fn bench_cold_cache(c: &mut Criterion) {
-    let (parsed, file_len) = parse_header(Path::new(GGUF_PATH));
-    let mut file = File::open(GGUF_PATH).expect("reopen real gguf file for tensor data");
+    let (parsed, file_len) = parse_header(Path::new(&gguf_path()));
+    let mut file = File::open(gguf_path()).expect("reopen real gguf file for tensor data");
 
     // WARM arm: one buffer, `bench_q4k_matmul.rs`'s exact shape.
     let warm_tensor = find_tensor(&parsed, "blk.0.attn_q.weight");
@@ -275,8 +282,9 @@ fn bench_cold_cache(c: &mut Criterion) {
 }
 
 fn main() {
-    if !Path::new(GGUF_PATH).exists() {
-        println!("real gguf file not found at {GGUF_PATH}; nothing to bench");
+    let path = gguf_path();
+    if !Path::new(&path).exists() {
+        println!("real gguf file not found at {path}; nothing to bench");
         return;
     }
 
