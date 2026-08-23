@@ -12,31 +12,44 @@
 //! present, no `lm_head.weight`) -- the exact gap this session's
 //! `hf_bind.rs` change closes.
 //!
-//! # Known, named divergence beyond the first generated token
+//! # Resolved: token 2 onward used to diverge from the GGUF oracles
 //!
-//! The FIRST generated token matches `llama-cli` bit-for-bit against TWO
+//! Every generated token matches `llama-cli` bit-for-bit against TWO
 //! independent GGUF conversions of the identical checkpoint at two
 //! different precisions (`Felladrin/gguf-Q8_0-SmolLM2-135M-Instruct` and
 //! `bartowski/SmolLM2-135M-Instruct-GGUF`'s `f16` variant), both under the
-//! identical (BOS-forced) tokenization -- strong evidence the full-depth
-//! forward (30 layers, GQA, RoPE, RMSNorm, tied embedding/output
-//! projection) is computing the right thing. A follow-on probe
-//! ([`probe_one_shot_prefill_after_the_first_token_matches_the_cached_decode_step`])
+//! identical (BOS-forced) tokenization.
+//!
+//! This crate's real bf16-weight forward used to diverge starting at the
+//! SECOND generated token: proxima continued "...is the **capital of
+//! France**", both GGUF oracles continued "...is the **city of Paris**, a
+//! city of". Root-caused by comparing raw logit vectors (never a decoded
+//! token, which is an argmax and destroys the deciding information) and
+//! then bisecting layer-by-layer against `llama.cpp`'s own per-tensor
+//! activation dump: the divergence was a GROSS one (different top-1 token,
+//! an 8.8-point raw logit gap, only partial top-5 overlap), not a
+//! near-tied bf16-vs-f16 rounding margin, and it first appeared inside
+//! layer 0's own attention block, at exactly the RoPE positions where a
+//! rotation angle is nonzero (position 0, where every pair's angle is
+//! zero regardless of pairing convention, matched to noise-floor; position
+//! 1 onward did not).
+//!
+//! The cause: `hf_bind.rs`'s HF-safetensors path bound `q_proj`/`k_proj`
+//! directly from their on-disk HF layout (`transformers`' `rotate_half`
+//! convention: a head's channels split into two contiguous halves) into a
+//! forward program whose RoPE math (`proxima-tensor/src/spec.rs`) rotates
+//! adjacent-channel pairs instead -- the same per-head row permutation
+//! `llama.cpp`'s own `convert_hf_to_gguf.py` applies before ever writing a
+//! GGUF file, which is why the GGUF-sourced path (`bind.rs`) never needed
+//! it: a GGUF checkpoint's on-disk bytes already carry it. Fixed by
+//! `hf_bind.rs`'s `permute_rope_rows`/`hf_bind_rope_weight`, applied only
+//! to `q_proj`/`k_proj`.
+//!
+//! A follow-on probe
+//! ([`one_shot_prefill_after_the_matches_the_cached_decode_step_and_the_real_oracle`])
 //! confirms the cached-decode step is self-consistent with a fresh
 //! one-shot prefill at the same position, ruling out the KV-cache
-//! append/read path as the cause of anything downstream.
-//!
-//! Beyond token 1, this crate's real bf16-weight forward diverges from
-//! BOTH GGUF oracles (which agree with each other): proxima continues
-//! "...is the **capital of France**", both GGUF oracles continue "...is
-//! the **city of Paris**, a city of". This is a genuine, unresolved
-//! residual, not explained away here: with the caching path ruled out and
-//! token 1 matching exactly, the two live hypotheses are (a) bf16 rounding
-//! in this specific real checkpoint's weights compounding differently than
-//! GGUF's own f16/Q8_0 dequantization by the second decode step, or (b) a
-//! subtler numerical divergence a one-token prefill does not expose.
-//! Neither is confirmed; distinguishing them needs layer-by-layer
-//! activation diffing against `llama.cpp`, which this change does not do.
+//! append/read path as ever having been the cause.
 
 #![cfg(feature = "std")]
 #![allow(clippy::unwrap_used, clippy::expect_used)]
@@ -159,6 +172,9 @@ fn runs_one_real_forward_pass_and_greedy_picks_a_real_token() {
 /// Determinism: the same prompt, run twice through two independently loaded
 /// `LoadedModel`s, must produce byte-identical ids and text -- no shared
 /// mutable state between calls, no uninitialized-memory nondeterminism.
+/// Also the regression guard for the RoPE-permutation fix
+/// (`hf_bind.rs::permute_rope_rows`): the full 8-token greedy continuation
+/// must match both real GGUF oracles' own answer, not just token 1.
 #[test]
 #[ignore = "depends on a host-local SmolLM2-135M-Instruct safetensors download outside this repo"]
 fn greedy_decode_is_deterministic_across_two_independent_loads() {
@@ -181,21 +197,24 @@ fn greedy_decode_is_deterministic_across_two_independent_loads() {
 
     assert_eq!(first_ids, second_ids, "greedy decode must be byte-identical across independent loads");
     assert_eq!(first_text, second_text, "decoded text must be byte-identical across independent loads");
-    assert!(!first_text.is_empty(), "a real forward pass must produce non-empty generated text");
+    assert_eq!(
+        first_text, " the city of Paris, a city of",
+        "must match both real GGUF oracles' own 8-token greedy continuation, not just token 1"
+    );
 }
 
-/// Diagnostic probe (not a correctness assertion): re-prefills the ENTIRE
-/// six-token prompt from scratch (`"The capital of France is the"`, no KV
-/// cache at all -- a fresh `LoadedModel`, `max_tokens: 1`) and prints the
-/// single predicted next token, to compare against the SECOND id the cached
-/// decode loop produced continuing from `"The capital of France is"`. If
-/// the two agree, the cached-decode step is consistent with a one-shot
-/// prefill at the same position, and the divergence from `llama-cli`'s own
-/// answer (see the task report) is in the shared forward math, not the KV
-/// cache append/read path specifically.
+/// Re-prefills the ENTIRE seven-token prompt from scratch (`"The capital of
+/// France is the"`, no KV cache at all -- a fresh `LoadedModel`, `max_tokens:
+/// 1`) and asserts the single predicted next token matches both real GGUF
+/// oracles' own answer (`" city"`) -- the SECOND id the cached decode loop
+/// produces continuing from `"The capital of France is"`. Agreement here
+/// proves the cached-decode step is consistent with a one-shot prefill at
+/// the same position, ruling out the KV-cache append/read path as the cause
+/// of anything downstream (it was never that path; see this file's own
+/// module doc for the actual root cause, the RoPE weight permutation).
 #[test]
 #[ignore = "depends on a host-local SmolLM2-135M-Instruct safetensors download outside this repo"]
-fn probe_one_shot_prefill_after_the_first_token_matches_the_cached_decode_step() {
+fn one_shot_prefill_after_the_matches_the_cached_decode_step_and_the_real_oracle() {
     if !checkpoint_present() {
         eprintln!("skipping: no host-local smollm2 safetensors checkpoint at {MODEL_DIR}");
         return;
@@ -205,4 +224,9 @@ fn probe_one_shot_prefill_after_the_first_token_matches_the_cached_decode_step()
     let (ids, text, _) =
         block_on(Pipe::call(&model, ("The capital of France is the".to_string(), 1))).expect("one-shot prefill succeeds");
     std::println!("one_shot_prefill_after_the token_id={} token={text:?}", ids[0]);
+
+    assert_eq!(
+        text, " city",
+        "must match both real GGUF oracles' own second token, agreeing with the cached decode step above"
+    );
 }
