@@ -288,8 +288,7 @@ mod tests {
     use alloc::vec::Vec;
 
     use bytes::Bytes;
-    use rstest::rstest;
-
+    
     use super::{NestedValue, ScalarValue, Tag};
 
     // 1. Tag::Scalar with ScalarValue::I64 constructs and fields are readable
@@ -328,7 +327,7 @@ mod tests {
     }
 
     // 3. each ScalarValue variant constructs from its native type via From
-    #[rstest]
+    #[proxima::test]
     #[case::i64(ScalarValue::from(7i64), ScalarValue::I64(7))]
     #[case::u64(ScalarValue::from(8u64), ScalarValue::U64(8))]
     #[case::f64(ScalarValue::from(1.5f64), ScalarValue::F64(1.5))]
@@ -339,7 +338,7 @@ mod tests {
         ScalarValue::from(Bytes::from_static(b"raw")),
         ScalarValue::Bytes(Bytes::from_static(b"raw"))
     )]
-    fn scalar_value_from_native(#[case] got: ScalarValue, #[case] expected: ScalarValue) {
+    async fn scalar_value_from_native(#[case] got: ScalarValue, #[case] expected: ScalarValue) {
         assert_eq!(got, expected);
     }
 

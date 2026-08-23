@@ -134,8 +134,7 @@ mod tests {
 
     use alloc::vec;
 
-    use rstest::rstest;
-
+    
     use super::{CompiledEmit, EmitRule, MatchMode};
     use crate::emit::{Coord, Decision, EmitThreshold};
     use crate::level::Level;
@@ -157,7 +156,7 @@ mod tests {
         )
     }
 
-    #[rstest]
+    #[proxima::test]
     // hpack matches its own rule (floor warn), info is below -> drop...
     #[case::hpack_info_dropped(
         "proxima::h2::hpack::evict",
@@ -174,7 +173,7 @@ mod tests {
     #[case::default_error_kept("downstream::store", Coord::from(Level::ERROR), Decision::Keep)]
     // no rule matches -> default warn drops debug.
     #[case::default_debug_dropped("downstream::store", Coord::from(Level::DEBUG), Decision::Drop)]
-    fn longest_prefix_wins(#[case] target: &str, #[case] coord: Coord, #[case] want: Decision) {
+    async fn longest_prefix_wins(#[case] target: &str, #[case] coord: Coord, #[case] want: Decision) {
         assert_eq!(fixture().decide(target, coord), want);
     }
 

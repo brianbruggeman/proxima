@@ -239,19 +239,18 @@ mod tests {
         clippy::default_constructed_unit_structs
     )]
 
-    use rstest::rstest;
-
+    
     use super::{Coord, CoordError, SEG_MAX};
     use crate::level::Level;
 
     // a more-severe band orders above a less-severe one — Level's contract,
     // preserved through Coord (error > warn > info > debug > trace).
-    #[rstest]
+    #[proxima::test]
     #[case::error_over_warn(Level::ERROR, Level::WARN)]
     #[case::warn_over_info(Level::WARN, Level::INFO)]
     #[case::info_over_debug(Level::INFO, Level::DEBUG)]
     #[case::debug_over_trace(Level::DEBUG, Level::TRACE)]
-    fn severity_band_dominates_ordering(#[case] higher: Level, #[case] lower: Level) {
+    async fn severity_band_dominates_ordering(#[case] higher: Level, #[case] lower: Level) {
         assert!(Coord::from(higher) > Coord::from(lower));
     }
 
@@ -265,14 +264,14 @@ mod tests {
     }
 
     // prefix == subtree, and a flat-band filter catches the whole band subtree.
-    #[rstest]
+    #[proxima::test]
     #[case::leaf_in_subband("17.3.5", "17.3", true)]
     #[case::root_in_self("17.3", "17.3", true)]
     #[case::sibling_excluded("17.4", "17.3", false)]
     #[case::shorter_not_in_deeper("17.3", "17.3.5", false)]
     #[case::deep_in_band("17.2.1", "17", true)]
     #[case::other_band_excluded("13.2.1", "17", false)]
-    fn subtree_membership(#[case] candidate: &str, #[case] ancestor: &str, #[case] want: bool) {
+    async fn subtree_membership(#[case] candidate: &str, #[case] ancestor: &str, #[case] want: bool) {
         let candidate = Coord::parse(candidate).unwrap();
         let ancestor = Coord::parse(ancestor).unwrap();
         assert_eq!(candidate.in_subtree_of(ancestor), want);
@@ -299,23 +298,23 @@ mod tests {
     }
 
     // parse rejects every malformed shape with a specific, listable error.
-    #[rstest]
+    #[proxima::test]
     #[case::empty("", CoordError::Empty)]
     #[case::empty_segment("1..2", CoordError::Empty)]
     #[case::too_deep("1.2.3.4.5", CoordError::TooDeep { got: 5, max: 4 })]
     #[case::overflow("9999", CoordError::SegmentOverflow { index: 0, value: 9999, max: SEG_MAX })]
     #[case::not_numeric("17.x", CoordError::NotNumeric)]
-    fn parse_rejects_malformed(#[case] text: &str, #[case] want: CoordError) {
+    async fn parse_rejects_malformed(#[case] text: &str, #[case] want: CoordError) {
         assert_eq!(Coord::parse(text).unwrap_err(), want);
     }
 
     // Display is the inverse of parse for well-formed input (teaching + config).
-    #[rstest]
+    #[proxima::test]
     #[case::flat("17")]
     #[case::two("17.3")]
     #[case::leaf("17.2.1")]
     #[case::zero_segment("5.0.3")] // a literal 0 segment survives (depth, not sentinel)
-    fn display_round_trips_parse(#[case] text: &str) {
+    async fn display_round_trips_parse(#[case] text: &str) {
         let coord = Coord::parse(text).unwrap();
         assert_eq!(coord.to_string(), text);
     }
