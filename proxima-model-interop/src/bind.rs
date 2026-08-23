@@ -30,6 +30,8 @@ use alloc::vec::Vec;
 use proxima_gguf::MetadataValue;
 use proxima_gguf::pipe::ParsedGguf;
 use proxima_gguf::quant::{q4_k, q5_k, q6_k, q8_0};
+#[cfg(feature = "std")]
+use proxima_gguf::restack::{discover_experts, plan_stack, restack_into};
 use proxima_gguf::tensor::TensorInfo;
 use proxima_gguf::types::GgmlType;
 
@@ -216,6 +218,20 @@ pub struct ModelArchitecture {
     pub kv_heads: u32,
     pub head_dim: u32,
     pub block_count: u32,
+    /// `{architecture}.expert_count` (llama.cpp's own key for a sparse
+    /// mixture-of-experts checkpoint's total expert count per layer, e.g.
+    /// `8` for Mixtral-8x7B) -- `0` when the key is absent, which is every
+    /// dense checkpoint this crate has evaluated (openchat-3.5 included)
+    /// and is read as "not a mixture-of-experts model", not an error: unlike
+    /// every other field on this struct, no dense checkpoint carries this
+    /// key at all, so requiring it would turn every dense load into a
+    /// [`InteropError::MissingMetadataKey`].
+    pub expert_count: u32,
+    /// `{architecture}.expert_used_count` (how many of `expert_count`
+    /// experts each token routes to per layer, e.g. `2` for Mixtral-8x7B's
+    /// top-2 routing) -- `0` alongside `expert_count == 0` for the same
+    /// dense-checkpoint reason.
+    pub expert_used_count: u32,
 }
 
 /// Reads [`ModelArchitecture`] out of `parsed`'s own metadata: looks up
@@ -244,6 +260,8 @@ pub fn architecture_from_metadata(parsed: &ParsedGguf) -> Result<ModelArchitectu
     let block_count = metadata_u32(parsed, &alloc::format!("{architecture}.block_count"))?;
     let head_dim = metadata_u32(parsed, &alloc::format!("{architecture}.rope.dimension_count"))?;
     let vocab = vocab_from_token_embedding(parsed, embedding)?;
+    let expert_count = metadata_u32_optional(parsed, &alloc::format!("{architecture}.expert_count"));
+    let expert_used_count = metadata_u32_optional(parsed, &alloc::format!("{architecture}.expert_used_count"));
     Ok(ModelArchitecture {
         vocab,
         embedding,
@@ -252,6 +270,8 @@ pub fn architecture_from_metadata(parsed: &ParsedGguf) -> Result<ModelArchitectu
         kv_heads,
         head_dim,
         block_count,
+        expert_count,
+        expert_used_count,
     })
 }
 
@@ -267,6 +287,15 @@ fn metadata_u32(parsed: &ParsedGguf, key: &str) -> Result<u32, InteropError> {
         .metadata_value(key)
         .and_then(MetadataValue::as_u32)
         .ok_or_else(|| InteropError::MissingMetadataKey { key: key.into() })
+}
+
+/// Same lookup as [`metadata_u32`], but `0` rather than
+/// [`InteropError::MissingMetadataKey`] when `key` is absent -- for a
+/// mixture-of-experts-only key (`expert_count`/`expert_used_count`) that no
+/// dense checkpoint carries, absence is data ("this is not a
+/// mixture-of-experts model"), not a malformed file.
+fn metadata_u32_optional(parsed: &ParsedGguf, key: &str) -> u32 {
+    parsed.metadata_value(key).and_then(MetadataValue::as_u32).unwrap_or(0)
 }
 
 fn vocab_from_token_embedding(parsed: &ParsedGguf, embedding: u32) -> Result<u32, InteropError> {
@@ -350,12 +379,117 @@ pub(crate) fn bind_matmul_weight<'file>(
     }
 }
 
+/// Row-major transpose of one `[expert_count, out_dim, in_dim]` stack into
+/// `[expert_count, in_dim, out_dim]`, expert-by-expert, via the same
+/// [`transpose_out_in_to_in_out`] a dense matmul weight already uses --
+/// every expert's own slab is on-disk in the identical `[out_dim, in_dim]`
+/// layout a non-MoE projection weight would carry, `restack.rs`'s pure byte
+/// concatenation just keeps them side by side instead of collapsing them
+/// into one.
+#[cfg(feature = "std")]
+fn transpose_expert_stack(flat: &[f32], expert_count: usize, out_dim: usize, in_dim: usize) -> Vec<f32> {
+    let per_expert = out_dim * in_dim;
+    let mut transposed = vec![0.0f32; flat.len()];
+    for expert in 0..expert_count {
+        let slab = &flat[expert * per_expert..(expert + 1) * per_expert];
+        let slab_transposed = transpose_out_in_to_in_out(slab, out_dim, in_dim);
+        transposed[expert * per_expert..(expert + 1) * per_expert].copy_from_slice(&slab_transposed);
+    }
+    transposed
+}
+
+/// [`InteropError`] has no dedicated [`proxima_gguf::restack::RestackError`]
+/// variant (that enum lives outside this change's file ownership), so a
+/// restack failure folds into [`InteropError::UnknownTensor`] -- the
+/// existing variant closest in meaning ("the checkpoint's tensor directory
+/// does not have what was expected"), with the underlying `RestackError`'s
+/// own message embedded in `name` rather than discarded.
+#[cfg(feature = "std")]
+fn restack_error_as_interop_error(layer: u32, projection: &str, error: proxima_gguf::restack::RestackError) -> InteropError {
+    InteropError::UnknownTensor {
+        name: alloc::format!("blk.{layer}.{projection}.*.weight (restack failed: {error})"),
+    }
+}
+
+/// One MoE-only weight family (`ffn_gate`/`ffn_up`/`ffn_down`) for one
+/// layer, decoded and transposed into the `[expert_count, in_dim, out_dim]`
+/// layout `proxima_tensor::spec::mistral_forward_program`'s routed FFN
+/// expects (matching [`bind_matmul_weight`]'s own `[out_dim, in_dim]` ->
+/// `[in_dim, out_dim]` convention, applied per expert).
+///
+/// Tries a single native stacked tensor first
+/// (`blk.{layer}.{projection}_exps.weight`, the layout some GGUF exporters
+/// use) before falling back to
+/// [`proxima_gguf::restack::discover_experts`]/`plan_stack`/`restack_into`
+/// for the per-expert-tensor convention (`blk.{layer}.{projection}.{expert}.weight`)
+/// `restack.rs`'s own module doc verified against a real Mixtral-8x7B
+/// checkpoint. Always binds owned (dequantized): a restacked buffer is a
+/// fresh concatenation this function itself allocated, never a byte range
+/// still inside `file_bytes`, so the zero-copy packed path
+/// [`bind_matmul_weight`] takes for a dense weight has nothing to borrow
+/// from here.
+///
+/// # Errors
+///
+/// [`InteropError::UnknownTensor`] if neither tensor layout is present, or
+/// discovery/planning/restacking failed (see
+/// [`restack_error_as_interop_error`]); [`InteropError::UnrepresentableGgmlType`]
+/// for a block-quantized type this crate has no dequantizer for.
+#[cfg(feature = "std")]
+fn bind_moe_expert_weights(
+    parsed: &ParsedGguf,
+    file_bytes: &[u8],
+    layer: u32,
+    projection: &str,
+    expert_count: u32,
+    out_dim: usize,
+    in_dim: usize,
+) -> Result<Vec<f32>, InteropError> {
+    let stacked_name = alloc::format!("blk.{layer}.{projection}_exps.weight");
+    if find_tensor(parsed, &stacked_name).is_ok() {
+        let decoded = gguf_tensor_as_f32(parsed, file_bytes, &stacked_name)?;
+        return Ok(transpose_expert_stack(&decoded, expert_count as usize, out_dim, in_dim));
+    }
+
+    let experts = discover_experts(&parsed.tensors, u64::from(layer), projection, u64::from(expert_count))
+        .map_err(|error| restack_error_as_interop_error(layer, projection, error))?;
+    let plan = plan_stack(&experts).map_err(|error| restack_error_as_interop_error(layer, projection, error))?;
+
+    let mut sources: Vec<&[u8]> = Vec::with_capacity(experts.len());
+    for tensor in &experts {
+        let range = parsed.tensor_data_range(tensor, file_bytes.len() as u64)?;
+        sources.push(&file_bytes[range.start as usize..range.end as usize]);
+    }
+
+    let mut stacked_bytes = vec![0u8; plan.total_bytes as usize];
+    restack_into(&mut stacked_bytes, &plan, &sources).map_err(|error| restack_error_as_interop_error(layer, projection, error))?;
+
+    let total_elements = out_dim * in_dim * expert_count as usize;
+    let decoded = match plan.ggml_type {
+        GgmlType::F32 => reinterpret_f32(&stacked_bytes),
+        GgmlType::Q4_K => dequantize(&stacked_bytes, total_elements, q4_k::dequantize)?,
+        GgmlType::Q5_K => dequantize(&stacked_bytes, total_elements, q5_k::dequantize)?,
+        GgmlType::Q6_K => dequantize(&stacked_bytes, total_elements, q6_k::dequantize)?,
+        GgmlType::Q8_0 => dequantize(&stacked_bytes, total_elements, q8_0::dequantize)?,
+        other => {
+            return Err(InteropError::UnrepresentableGgmlType {
+                tensor: alloc::format!("blk.{layer}.{projection}.*.weight"),
+                ggml_type: other,
+            });
+        }
+    };
+    Ok(transpose_expert_stack(&decoded, expert_count as usize, out_dim, in_dim))
+}
+
 /// Runs [`bind_dense`]/[`bind_matmul_weight`] over every one of
 /// `architecture`'s `block_count` layers plus `token_embd.weight` and
 /// `output.weight` -- the load loop [`crate::generate::LoadedModel::load`]
 /// runs once per checkpoint, so every [`Pipe::call`](proxima_primitives::pipe::Pipe::call)
 /// after that reuses the result instead of re-walking the tensor
-/// directory per request.
+/// directory per request. `architecture.expert_count > 0` binds the routed
+/// FFN's weight family instead of the dense triple (see
+/// [`bind_moe_expert_weights`]) -- every other weight is identical between
+/// the two shapes.
 #[cfg(feature = "std")]
 pub(crate) fn bind_all_weights<'file>(
     parsed: &ParsedGguf,
@@ -382,9 +516,32 @@ pub(crate) fn bind_all_weights<'file>(
         bind_matmul_weight(parsed, file_bytes, alloc::format!("blk.{layer}.attn_k.weight"), kv_dim, embedding, &mut state);
         bind_matmul_weight(parsed, file_bytes, alloc::format!("blk.{layer}.attn_v.weight"), kv_dim, embedding, &mut state);
         bind_matmul_weight(parsed, file_bytes, alloc::format!("blk.{layer}.attn_output.weight"), embedding, embedding, &mut state);
-        bind_matmul_weight(parsed, file_bytes, alloc::format!("blk.{layer}.ffn_gate.weight"), feed_forward, embedding, &mut state);
-        bind_matmul_weight(parsed, file_bytes, alloc::format!("blk.{layer}.ffn_up.weight"), feed_forward, embedding, &mut state);
-        bind_matmul_weight(parsed, file_bytes, alloc::format!("blk.{layer}.ffn_down.weight"), embedding, feed_forward, &mut state);
+
+        if architecture.expert_count == 0 {
+            bind_matmul_weight(parsed, file_bytes, alloc::format!("blk.{layer}.ffn_gate.weight"), feed_forward, embedding, &mut state);
+            bind_matmul_weight(parsed, file_bytes, alloc::format!("blk.{layer}.ffn_up.weight"), feed_forward, embedding, &mut state);
+            bind_matmul_weight(parsed, file_bytes, alloc::format!("blk.{layer}.ffn_down.weight"), embedding, feed_forward, &mut state);
+        } else {
+            let expert_count = architecture.expert_count;
+            bind_matmul_weight(
+                parsed,
+                file_bytes,
+                alloc::format!("blk.{layer}.ffn_gate_inp.weight"),
+                expert_count as usize,
+                embedding,
+                &mut state,
+            );
+            for (projection, out_dim, in_dim) in [
+                ("ffn_gate", feed_forward, embedding),
+                ("ffn_up", feed_forward, embedding),
+                ("ffn_down", embedding, feed_forward),
+            ] {
+                let decoded = bind_moe_expert_weights(parsed, file_bytes, layer, projection, expert_count, out_dim, in_dim)
+                    .unwrap_or_else(|error| panic!("bind real moe expert weights blk.{layer}.{projection}.*: {error}"));
+                state.resident_bytes += decoded.len() * core::mem::size_of::<f32>();
+                state.owned.push((alloc::format!("blk.{layer}.{projection}_exps.weight"), decoded));
+            }
+        }
     }
 
     bind_dense(parsed, file_bytes, "output_norm.weight".into(), &mut state);
@@ -568,7 +725,51 @@ mod tests {
                 kv_heads: 1,
                 head_dim: 4,
                 block_count: 4,
-            }
+                expert_count: 0,
+                expert_used_count: 0,
+            },
+            "a checkpoint with no expert_count/expert_used_count key is dense: both fields must read as 0, \
+             not error"
+        );
+    }
+
+    /// A mixture-of-experts checkpoint carries `{architecture}.expert_count`/
+    /// `{architecture}.expert_used_count` alongside every dense key --
+    /// `architecture_from_metadata` must read both rather than silently
+    /// treating the checkpoint as dense.
+    #[test]
+    fn architecture_from_metadata_reads_expert_count_when_present() {
+        use proxima_gguf::value::MetadataValue as Value;
+
+        let embed_bytes = vec![0u8; 8 * 3 * 4]; // [embedding=8, vocab=3] f32
+        let model = GgufModel {
+            version: 3,
+            metadata: vec![
+                ("general.architecture".to_string(), Value::String("llama".to_string())),
+                ("llama.embedding_length".to_string(), Value::U32(8)),
+                ("llama.feed_forward_length".to_string(), Value::U32(32)),
+                ("llama.attention.head_count".to_string(), Value::U32(2)),
+                ("llama.attention.head_count_kv".to_string(), Value::U32(1)),
+                ("llama.block_count".to_string(), Value::U32(4)),
+                ("llama.rope.dimension_count".to_string(), Value::U32(4)),
+                ("llama.expert_count".to_string(), Value::U32(8)),
+                ("llama.expert_used_count".to_string(), Value::U32(2)),
+            ],
+            tensors: vec![TensorPayload {
+                name: "token_embd.weight".to_string(),
+                dims: dims(&[8, 3]),
+                ggml_type: WireType::F32,
+                data: &embed_bytes,
+            }],
+        };
+        let file_bytes = write_complete(&model).expect("writes gguf with moe metadata");
+        let parsed = proxima_gguf::parse_complete(&file_bytes).expect("parses gguf with moe metadata");
+
+        let architecture = architecture_from_metadata(&parsed).expect("derive architecture from real metadata keys");
+        assert_eq!(architecture.expert_count, 8, "expert_count must read the real metadata key, not default to 0");
+        assert_eq!(
+            architecture.expert_used_count, 2,
+            "expert_used_count must read the real metadata key, not default to 0"
         );
     }
 
@@ -1465,5 +1666,150 @@ mod real_openchat_file {
             "degenerate control: expected dot product is ~zero ({expected}), this run proves nothing about real agreement"
         );
         assert!(max_diff < 1e-3, "interpreter and independent dequantize-then-multiply diverged: max_diff={max_diff}");
+    }
+}
+
+// -- Real-data proof for the MoE metadata + expert-discovery wiring this
+// change adds: a real Mixtral-8x7B checkpoint's own `general.architecture`
+// metadata and `blk.0.ffn_gate.{0..8}.weight` tensor directory, read through
+// this crate's public `architecture_from_metadata` and this module's own
+// `bind_moe_expert_weights` internals -- never a synthetic fixture standing
+// in for what the audit's citations already verified against this exact
+// file (`proxima-gguf/src/restack.rs`'s own `real_mixtral_file` module).
+// `#[ignore]`d and skips cleanly when the host-local model cache is absent,
+// the same convention `real_openchat_file`/`restack.rs::real_mixtral_file`
+// both use. Only the metadata/tensor-directory prefix and each of the 8
+// experts' own `Q4_K` byte range for one layer's `ffn_gate` projection are
+// read via direct `seek`+`read` -- never the whole 25 GB file.
+#[cfg(all(test, feature = "std"))]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod real_mixtral_file {
+    use std::io::{Read, Seek, SeekFrom};
+
+    use proxima_gguf::pipe::parse_complete;
+    use proxima_gguf::quant::q4_k;
+
+    use super::*;
+
+    const FIXTURE_PATH: &str =
+        "/Users/brianbruggeman/.lmstudio/models/NousResearch/Nous-Hermes-2-Mixtral-8x7B-DPO-GGUF/Nous-Hermes-2-Mixtral-8x7B-DPO.Q4_K_S.gguf";
+
+    /// Grows `header_buf` and re-parses until [`parse_complete`] stops
+    /// reporting truncation, the same growing loop `restack.rs`'s own real
+    /// Mixtral test uses -- Mixtral's tensor directory (995 tensors) fits
+    /// well under a few MiB, nowhere near the multi-gigabyte payload.
+    /// Inlined per test rather than factored into a function returning
+    /// [`proxima_gguf::pipe::ParsedGguf`]: that type borrows from
+    /// `header_buf`, so the buffer must outlive it in the same scope.
+    macro_rules! parse_header_region {
+        ($file:expr, $header_buf:ident) => {{
+            let mut parsed = None;
+            for cap in [4usize << 20, 16 << 20, 64 << 20] {
+                $header_buf.resize(cap, 0);
+                $file.seek(SeekFrom::Start(0)).expect("seek to file start");
+                let read = $file.read(&mut $header_buf).expect("read gguf header region");
+                $header_buf.truncate(read);
+                if let Ok(result) = parse_complete(&$header_buf) {
+                    parsed = Some(result);
+                    break;
+                }
+            }
+            parsed.expect("gguf metadata region did not fit in 64 MiB")
+        }};
+    }
+
+    /// [`architecture_from_metadata`] must read `llama.expert_count`/
+    /// `llama.expert_used_count` off this real checkpoint (Mixtral-8x7B's
+    /// own published config: 8 experts, top-2 routing) rather than silently
+    /// treating it as dense the way openchat-3.5 (a real checkpoint with
+    /// neither key) legitimately is.
+    #[test]
+    #[ignore = "depends on a 25 GB host-local mixtral gguf checkout outside this repo"]
+    fn architecture_from_metadata_reads_the_real_mixtral_expert_config() {
+        let path = std::path::Path::new(FIXTURE_PATH);
+        if !path.exists() {
+            eprintln!("skipping: no host-local mixtral gguf fixture at {FIXTURE_PATH}");
+            return;
+        }
+
+        let mut file = std::fs::File::open(path).expect("open host-local mixtral gguf fixture");
+        let mut header_buf: Vec<u8> = Vec::new();
+        let parsed = parse_header_region!(file, header_buf);
+
+        let architecture = architecture_from_metadata(&parsed).expect("derive architecture from the real mixtral checkpoint");
+        std::println!("real_mixtral architecture={architecture:?}");
+        assert_eq!(architecture.expert_count, 8, "Mixtral-8x7B carries 8 experts per layer");
+        assert_eq!(architecture.expert_used_count, 2, "Mixtral-8x7B routes top-2");
+    }
+
+    /// [`bind_moe_expert_weights`]'s per-expert-tensor fallback path
+    /// (`discover_experts`/`plan_stack`/`restack_into`, this crate's own
+    /// [`transpose_expert_stack`] on top) against the real file: restacks
+    /// layer 0's 8 real `ffn_gate` experts and independently dequantizes
+    /// each expert's own untransposed bytes via
+    /// [`proxima_gguf::quant::q4_k::dequantize`], then un-transposes the
+    /// bound result back to compare -- proving the bound buffer really is
+    /// each real expert's own weights in the right order, not a
+    /// transposition/gather bug that happens to have the right shape.
+    #[test]
+    #[ignore = "depends on a 25 GB host-local mixtral gguf checkout outside this repo"]
+    fn binds_one_real_layers_ffn_gate_experts_and_matches_independent_dequantize() {
+        let path = std::path::Path::new(FIXTURE_PATH);
+        if !path.exists() {
+            eprintln!("skipping: no host-local mixtral gguf fixture at {FIXTURE_PATH}");
+            return;
+        }
+
+        let mut file = std::fs::File::open(path).expect("open host-local mixtral gguf fixture");
+        let file_len = file.metadata().expect("stat gguf fixture").len();
+        let mut header_buf: Vec<u8> = Vec::new();
+        let parsed = parse_header_region!(file, header_buf);
+
+        let architecture = architecture_from_metadata(&parsed).expect("derive architecture from the real mixtral checkpoint");
+        let layer = 0u64;
+        let projection = "ffn_gate";
+
+        let experts = discover_experts(&parsed.tensors, layer, projection, u64::from(architecture.expert_count))
+            .expect("discovers all 8 real experts for layer 0's ffn_gate projection");
+
+        let mut sources_owned: Vec<Vec<u8>> = Vec::with_capacity(experts.len());
+        for expert in &experts {
+            let range = parsed.tensor_data_range(expert, file_len).expect("expert tensor range within file");
+            let mut bytes = alloc::vec![0u8; (range.end - range.start) as usize];
+            file.seek(SeekFrom::Start(range.start)).expect("seek to expert tensor data");
+            file.read_exact(&mut bytes).expect("read expert tensor bytes");
+            sources_owned.push(bytes);
+        }
+        let sources: Vec<&[u8]> = sources_owned.iter().map(Vec::as_slice).collect();
+
+        let plan = plan_stack(&experts).expect("plans stack for real experts");
+        let mut stacked_bytes = alloc::vec![0u8; plan.total_bytes as usize];
+        restack_into(&mut stacked_bytes, &plan, &sources).expect("restacks real experts into destination buffer");
+
+        let out_dim = architecture.feed_forward as usize;
+        let in_dim = architecture.embedding as usize;
+        let per_expert_elements = out_dim * in_dim;
+        let total_elements = per_expert_elements * experts.len();
+        let decoded = dequantize(&stacked_bytes, total_elements, q4_k::dequantize).expect("dequantizes the real restacked experts");
+        let bound = transpose_expert_stack(&decoded, experts.len(), out_dim, in_dim);
+
+        for (expert_index, expert_bytes) in sources.iter().enumerate() {
+            let mut expected = alloc::vec![0.0f32; per_expert_elements];
+            q4_k::dequantize(expert_bytes, &mut expected).expect("independently dequantizes expert's own real bytes");
+
+            let bound_slab = &bound[expert_index * per_expert_elements..(expert_index + 1) * per_expert_elements];
+            let un_transposed = transpose_out_in_to_in_out(bound_slab, in_dim, out_dim);
+            let max_diff = un_transposed
+                .iter()
+                .zip(&expected)
+                .map(|(found, wanted)| (found - wanted).abs())
+                .fold(0.0f32, f32::max);
+            std::println!("real_mixtral expert={expert_index} max_diff={max_diff}");
+            assert!(
+                max_diff < 1e-6,
+                "expert {expert_index}: bound-then-transposed-back weights must equal an independent \
+                 dequantize of that expert's own real bytes, got max_diff={max_diff}"
+            );
+        }
     }
 }
