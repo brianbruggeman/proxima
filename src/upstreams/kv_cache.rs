@@ -452,7 +452,6 @@ pub use proxima_patterns::kv::{
 mod tests {
     use super::*;
     use bytes::Bytes;
-    use rstest::rstest;
 
     fn build_request(method: &str, path: &str) -> crate::request::Request<Bytes> {
         crate::request::Request::builder()
@@ -594,20 +593,20 @@ mod tests {
         assert!(matches!(outcome, Err(ProximaError::Config(_))));
     }
 
-    #[rstest]
+    #[proxima::test]
     #[case::secs("90s", Duration::from_secs(90))]
     #[case::millis("500ms", Duration::from_millis(500))]
     #[case::hours("2h", Duration::from_secs(7200))]
-    fn duration_parse(#[case] input: &str, #[case] expected: Duration) {
+    async fn duration_parse(#[case] input: &str, #[case] expected: Duration) {
         assert_eq!(parse_duration(input).expect("parse"), expected);
     }
 
-    #[rstest]
+    #[proxima::test]
     #[case::raw_int("1024", 1024)]
     #[case::kb("64KB", 64 * 1024)]
     #[case::mb("16MB", 16 * 1024 * 1024)]
     #[case::gb("2GB", 2 * 1024 * 1024 * 1024)]
-    fn size_parse(#[case] input: &str, #[case] expected: u64) {
+    async fn size_parse(#[case] input: &str, #[case] expected: u64) {
         assert_eq!(parse_size(input).expect("parse"), expected);
     }
 
