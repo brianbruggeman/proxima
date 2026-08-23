@@ -10,13 +10,19 @@
 //!   no `config.rs` alongside it: a runtime override would let a caller ask
 //!   for a value the hardware does not have, which is not configurability,
 //!   it is a footgun.
-//! - **Execution policy, build-time-configurable**: [`TILED_GEMM_MIN_TOKENS`]
-//!   (`metal-tiled-gemm`-only). This one traces to `omega-runtime.toml` via
-//!   `build.rs`'s `emit_sizing_consts` (mirrors
-//!   `proxima-tensor/build.rs`'s function of the same name over
-//!   `proxima-tensor-runtime.toml`) and can be overridden per-build via an
-//!   `OMEGA_<SECTION>_<KEY>` env var (`build.rs`'s `resolve_int`), each
-//!   override consulted emitting its own `cargo:rerun-if-env-changed` line.
+//! - **Execution policy, build-time-configurable**: [`TILED_GEMM_MIN_TOKENS`],
+//!   `TILED_GEMM_BLOCK_M`, `TILED_GEMM_BLOCK_N`, `TILED_GEMM_BLOCK_K`
+//!   (`metal-tiled-gemm`-only, ROW 109's multi-simdgroup redesign — ports
+//!   `ggml-metal.metal:6487-6489`'s `BLOCK_SIZE_M`/`BLOCK_SIZE_N`/
+//!   `BLOCK_SIZE_K`). These trace to `omega-runtime.toml` via `build.rs`'s
+//!   `emit_sizing_consts` (mirrors `proxima-tensor/build.rs`'s function of
+//!   the same name over `proxima-tensor-runtime.toml`) and can be
+//!   overridden per-build via an `OMEGA_<SECTION>_<KEY>` env var
+//!   (`build.rs`'s `resolve_int`), each override consulted emitting its own
+//!   `cargo:rerun-if-env-changed` line. `build.rs`'s
+//!   `require_multiple_of_sixteen`/`require_divides_q4k_block` enforce the
+//!   cross-axis constraints `omega/src/msl.rs`'s `push_tiled_gemm_body`
+//!   depends on.
 //!
 //! `msl` (this module's own crate) is alloc-tier and target-independent --
 //! emission never touches a device -- so [`SIMD_WIDTH`] is visible at every

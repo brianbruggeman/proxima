@@ -514,7 +514,7 @@ pub fn emit(resolved: &BoundOp, packed_operands: &PackedOperands) -> Result<Kern
         bindings: bindings(resolved),
         grid: GridSpec {
             threads: grid_threads(resolved, &quantized),
-            threadgroup_width: reduce_is_cooperative(resolved).then_some(SIMD_WIDTH),
+            threadgroup_width: tiled_gemm_threadgroup_width(resolved, &quantized),
         },
     })
 }
@@ -612,7 +612,7 @@ pub(crate) fn kernel_dispatch_shape(
         bindings(resolved),
         GridSpec {
             threads: grid_threads(resolved, &quantized),
-            threadgroup_width: reduce_is_cooperative(resolved).then_some(SIMD_WIDTH),
+            threadgroup_width: tiled_gemm_threadgroup_width(resolved, &quantized),
         },
     ))
 }
@@ -819,8 +819,27 @@ const PACKED_ROWS_PER_GROUP: usize = 4;
 /// (`crate::sized`'s own module doc draws this exact line): there is no
 /// tuning that would make this anything but 8, so it stays a bare `const`
 /// rather than threading through the sizing-config mechanism
-/// [`crate::sized::TILED_GEMM_MIN_TOKENS`] uses.
+/// [`crate::sized::TILED_GEMM_MIN_TOKENS`] uses. Only [`push_tiled_gemm_body`]
+/// reads it, so it is gated the same as that function -- see its `#[cfg(not(..))]`
+/// stub's own doc for why the non-feature build never needs it.
+#[cfg(feature = "metal-tiled-gemm")]
 const TILE_DIM: usize = 8;
+
+/// Number of `simdgroup`s cooperating in one [`push_tiled_gemm_body`]
+/// threadgroup — ports `ggml-metal.metal:6500`'s `kernel_mul_mm` dispatch
+/// (`ggml-metal.m:3102`'s `threadsPerThreadgroup:MTLSizeMake(128, 1, 1)`,
+/// 128/32 = 4 `simdgroup`s). Fixed at 4 (a 2x2 grid: `sgitg & 1` selects
+/// which half of [`crate::sized::TILED_GEMM_BLOCK_M`]'s rows, `sgitg >> 1`
+/// selects which half of [`crate::sized::TILED_GEMM_BLOCK_N`]'s columns,
+/// exactly ggml's own `mc[8]`/`THREAD_MAT_M`/`THREAD_MAT_N` split) rather
+/// than threaded through the sizing-config mechanism: the 2x2 halving is
+/// baked into the pointer arithmetic `push_tiled_gemm_body` emits, so a
+/// value other than 4 would need a different kernel body, not just a
+/// different constant — the same "hardware fact, not a policy knob" class
+/// [`TILE_DIM`] and [`crate::sized::SIMD_WIDTH`] are in. `BLOCK_M`/`BLOCK_N`
+/// themselves ARE the tunable axes (`crate::sized::TILED_GEMM_BLOCK_M`/
+/// `TILED_GEMM_BLOCK_N`) — this only fixes how many simdgroups split them.
+const TILED_GEMM_NSG: usize = 4;
 
 /// The one decision that both [`grid_threads`] and
 /// [`push_cooperative_reduce_body`] must reach identically: whether this
@@ -979,8 +998,14 @@ fn packed_row_block(resolved: &BoundOp, quantized: &[Option<PackedCodec>]) -> Op
 /// own concrete-stride gate, so [`kernel_cache_key`] re-derives this too
 /// rather than caching by structure alone (`docs/discipline.md` ROW 107).
 struct TiledGemmBlock {
+    // only [`push_tiled_gemm_body`] reads these three -- gated the same as
+    // that function, so the non-feature build does not carry three
+    // never-read fields.
+    #[cfg(feature = "metal-tiled-gemm")]
     weight: usize,
+    #[cfg(feature = "metal-tiled-gemm")]
     other: usize,
+    #[cfg(feature = "metal-tiled-gemm")]
     reduce_dim: usize,
     /// output axis the ACTIVATION owns exclusively (nonzero stride on
     /// `other`, zero on `weight`) -- the token/sequence dimension the tile
@@ -1137,6 +1162,29 @@ pub fn diagnose_packed_row_block(
     classify_packed_row_block(resolved, quantized).map(drop)
 }
 
+/// Thread count [`grid_threads`]' tiled-GEMM arm dispatches -- one
+/// `TILED_GEMM_NSG * SIMD_WIDTH`-thread threadgroup per
+/// `crate::sized::TILED_GEMM_BLOCK_M x TILED_GEMM_BLOCK_N` output tile,
+/// tiling both `feature_extent` and `token_extent`. Only ever called from
+/// behind `tiled_gemm_block(..).is_some()` (`grid_threads`' own call site),
+/// which is itself only `Some` behind `feature = "metal-tiled-gemm"` (see
+/// [`classify_tiled_gemm`]'s doc) -- the `#[cfg(not(..))]` arm is therefore
+/// as unreachable as [`push_tiled_gemm_body`]'s own stub, for the same
+/// reason.
+fn tiled_gemm_threadgroups(feature_extent: u64, token_extent: u64) -> u64 {
+    #[cfg(not(feature = "metal-tiled-gemm"))]
+    {
+        let _ = (feature_extent, token_extent);
+        unreachable!("only called when tiled_gemm_block returned Some, which requires the feature")
+    }
+    #[cfg(feature = "metal-tiled-gemm")]
+    {
+        let row_tiles = feature_extent.div_ceil(crate::sized::TILED_GEMM_BLOCK_M);
+        let col_tiles = token_extent.div_ceil(crate::sized::TILED_GEMM_BLOCK_N);
+        row_tiles * col_tiles * (TILED_GEMM_NSG as u64) * SIMD_WIDTH
+    }
+}
+
 fn grid_threads(resolved: &BoundOp, quantized: &[Option<PackedCodec>]) -> u64 {
     match &resolved.kind {
         BoundOpKind::Elementwise { .. } => resolved.extents.iter().product(),
@@ -1152,13 +1200,15 @@ fn grid_threads(resolved: &BoundOp, quantized: &[Option<PackedCodec>]) -> u64 {
                 .map(|dim| resolved.extents[*dim as usize])
                 .product();
             if let Some(block) = tiled_gemm_block(resolved, quantized, *reduce_op, *init, output_axes) {
-                // one SIMD group per TILE_DIM x TILE_DIM output tile, tiled
-                // over BOTH the feature axis and the token axis — the
-                // amortization the row-blocked path does not do (it tiles
-                // the feature axis alone; see `push_tiled_gemm_body`'s doc).
-                let row_tiles = resolved.extents[block.feature_axis].div_ceil(TILE_DIM as u64);
-                let col_tiles = resolved.extents[block.token_axis].div_ceil(TILE_DIM as u64);
-                row_tiles * col_tiles * SIMD_WIDTH
+                // TILED_GEMM_NSG simdgroups per BLOCK_M x BLOCK_N output
+                // tile, tiled over BOTH the feature axis and the token axis
+                // — the amortization the row-blocked path does not do (it
+                // tiles the feature axis alone; see `push_tiled_gemm_body`'s
+                // doc).
+                tiled_gemm_threadgroups(
+                    resolved.extents[block.feature_axis],
+                    resolved.extents[block.token_axis],
+                )
             } else if packed_row_block(resolved, quantized).is_some() {
                 // one SIMD group per PACKED_ROWS_PER_GROUP outputs
                 output_total.div_ceil(PACKED_ROWS_PER_GROUP as u64) * SIMD_WIDTH
@@ -2247,45 +2297,72 @@ fn push_packed_row_blocked_body(
     }
 }
 
-/// `simdgroup_matrix`-tiled Q4_K x F32 GEMM (`docs/discipline.md` ROW 107) --
-/// ports the shape `ggml-metal.metal:6500-6600`'s `kernel_mul_mm` takes
-/// (`simdgroup_float8x8`/`simdgroup_load`/`simdgroup_multiply_accumulate`
-/// staging both operand tiles into threadgroup memory before the hardware
-/// matrix unit runs), attributed and simplified to ONE `TILE_DIM x TILE_DIM`
-/// tile per simdgroup rather than ggml's multi-simdgroup 64x32 block: this
-/// crate's operand model reads through generic per-axis strides (never
-/// assumes row-major-contiguous device memory the way ggml's raw `nb01`
-/// byte strides do), so both operand tiles are staged the same way
+/// `simdgroup_matrix`-tiled Q4_K x F32 GEMM (`docs/discipline.md` ROW 109,
+/// superseding ROW 107's single-simdgroup design) -- ports
+/// `ggml-metal.metal:6500-6600`'s `kernel_mul_mm` GEOMETRY, not just its
+/// `simdgroup_float8x8` primitives: [`TILED_GEMM_NSG`] (4) `simdgroup`s
+/// cooperate in ONE threadgroup, each owning a
+/// `crate::sized::TILED_GEMM_BLOCK_M`/2 x `crate::sized::TILED_GEMM_BLOCK_N`/2
+/// sub-tile of the threadgroup's full `BLOCK_M x BLOCK_N` output block (a
+/// 2x2 simdgroup grid -- `sgitg & 1` the row half, `sgitg >> 1` the column
+/// half, exactly ggml's own split), and the reduction steps by
+/// `crate::sized::TILED_GEMM_BLOCK_K` (ggml's `BLOCK_SIZE_K`) rather than by
+/// `TILE_DIM` alone: ROW 107's own root cause was pairing ONE simdgroup with
+/// an 8-wide K-step, paying two `threadgroup_barrier`s per 8 elements of K
+/// (up to 512 barrier round-trips at k=4096) for 64 output elements each --
+/// this design pays the same two barriers per `BLOCK_K`(32)-wide step (128
+/// round-trips at k=4096, 4x fewer) and each pair now amortizes across
+/// `TILED_GEMM_NSG` simdgroups x `BLOCK_K`/`TILE_DIM` K-substeps computing
+/// `BLOCK_M x BLOCK_N`(2048) output elements, not 64 -- the "work per
+/// barrier" ROW 107's own recommendation named as the actual fix.
+///
+/// This crate's operand model reads through generic per-axis strides
+/// (never assumes row-major-contiguous device memory the way ggml's raw
+/// `nb01` byte strides do), so both operand tiles are staged the same way
 /// [`push_packed_row_blocked_body`] already reads a strided operand, just
 /// written into a fixed `threadgroup` array instead of a private register.
 ///
-/// One simdgroup computes one `TILE_DIM x TILE_DIM` output tile:
-/// `TILE_DIM` weight rows (the feature axis) by `TILE_DIM` tokens (the
-/// token axis), reusing EVERY loaded byte across the whole tile instead of
-/// [`push_packed_row_blocked_body`]'s `PACKED_ROWS_PER_GROUP` rows for a
-/// SINGLE token -- the reuse a many-token (prefill) dispatch has to exploit
-/// and a one-token (decode) dispatch does not, which is exactly why
-/// [`classify_tiled_gemm`] gates this on [`crate::sized::TILED_GEMM_MIN_TOKENS`]
-/// rather than taking it unconditionally.
-///
-/// Threadgroup memory is two FIXED-SIZE local arrays (`TILE_DIM * TILE_DIM`
-/// `half` for the dequantized weight tile, the same count of `float` for the
-/// activation tile) declared directly in the kernel body -- `TILE_DIM` is a
-/// compile-time constant, so this needs no `[[threadgroup(n)]]` kernel
-/// parameter and no `setThreadgroupMemoryLength` call on the driver side,
-/// unlike ggml's dynamically-sized `shmem` (`ggml-metal.m:3101`): every
-/// existing call site in `crate::metal` keeps dispatching through the same
-/// `dispatchThreads:threadsPerThreadgroup:` path unchanged.
+/// Threadgroup memory is three FIXED-SIZE local arrays declared directly in
+/// the kernel body (`weight_tile`: `BLOCK_M * BLOCK_K` `half`; `act_tile`:
+/// `BLOCK_N * BLOCK_K` `float`; `out_tile`: `BLOCK_M * BLOCK_N` `float`,
+/// reused across `k0` steps but allocated once) -- every dimension is a
+/// compile-time constant (`crate::sized::TILED_GEMM_BLOCK_M`/`_N`/`_K`), so
+/// this needs no `[[threadgroup(n)]]` kernel parameter and no
+/// `setThreadgroupMemoryLength` call on the driver side, unlike ggml's
+/// dynamically-sized `shmem` (`ggml-metal.m:3101`): every existing call
+/// site in `crate::metal` keeps dispatching through the same
+/// `dispatchThreads:threadsPerThreadgroup:` path unchanged, now with
+/// [`TILED_GEMM_NSG`] `* SIMD_WIDTH` (128) threads per threadgroup instead
+/// of one simdgroup ([`crate::msl::tiled_gemm_threadgroup_width`]).
 ///
 /// Boundary tiles (feature or token extent not a whole multiple of
-/// `TILE_DIM`) are handled by zero-padding out-of-range reads during
-/// staging (a true-zero contribution changes nothing) and skipping
+/// `BLOCK_M`/`BLOCK_N`) are handled by zero-padding out-of-range reads
+/// during staging (a true-zero contribution changes nothing) and skipping
 /// out-of-range writes entirely during the final scatter -- the same
-/// n_rows/n_cols masking `ggml-metal.metal`'s own kernel applies at
-/// `BLOCK_SIZE_M`/`BLOCK_SIZE_N` boundaries, at `TILE_DIM` granularity
-/// instead. The reduction dimension needs no such mask: [`PackedRowBlock`]
-/// already guarantees it is a whole number of [`Q4K_BLOCK_ELEMENTS`]
-/// super-blocks, and 256 is a multiple of `TILE_DIM`.
+/// n_rows/n_cols masking `ggml-metal.metal`'s own kernel applies, at
+/// `BLOCK_M`/`BLOCK_N` granularity instead of `TILE_DIM`'s. The reduction
+/// dimension needs no such mask: [`PackedRowBlock`] already guarantees it
+/// is a whole number of [`Q4K_BLOCK_ELEMENTS`] (256) super-blocks, and
+/// `build.rs`'s `require_divides_q4k_block` guarantees `BLOCK_K` divides
+/// 256 evenly.
+///
+/// `weight_tile`/`act_tile` are both stored simple row-major (`weight_tile`:
+/// feature-row-major, `act_tile`: token-row-major, K fastest in both --
+/// UNLIKE ggml's own custom bit-shuffled `sa`/`sb` packing, which exists
+/// only so its `simdgroup_load` calls can omit `elements_per_row` and read
+/// each fragment pre-packed). `a_frag` reads a `feature x k` fragment
+/// straight off `weight_tile`, but `b_frag` reads `act_tile` in its
+/// NATURAL `token x k` orientation -- the wrong shape for
+/// `simdgroup_multiply_accumulate(acc, a_frag, b_frag, acc)`, which needs
+/// its second operand `k x token` for the inner (`k`) dimensions to align.
+/// `simdgroup_load`'s `transpose_matrix` flag supplies that without
+/// restructuring the staging loop: `b_frag` is loaded with
+/// `transpose_matrix = true`, turning the physical `token x k` read into
+/// the logical `k x token` fragment the multiply needs. (A first pass
+/// without this flag measured `relative=0.497` against the CPU oracle --
+/// dimensionally valid MSL, semantically wrong matrix product -- caught by
+/// `metal_matmul_on_packed_q4k_weights_matches_the_dequantized_f32_cpu_path_at_tile_scale`.)
+#[cfg(feature = "metal-tiled-gemm")]
 fn push_tiled_gemm_body(
     source: &mut String,
     output_axes: &[u16],
@@ -2301,7 +2378,21 @@ fn push_tiled_gemm_body(
         feature_axis,
     } = *block;
     let rank_len = rank.max(1);
-    let tile_area = TILE_DIM * TILE_DIM;
+
+    let block_m = crate::sized::TILED_GEMM_BLOCK_M;
+    let block_n = crate::sized::TILED_GEMM_BLOCK_N;
+    let block_k = crate::sized::TILED_GEMM_BLOCK_K;
+    let block_threads = (TILED_GEMM_NSG as u64) * SIMD_WIDTH;
+    // 2 row-halves x TILE_DIM(8)-wide simdgroup-matrix fragments per half --
+    // ggml's own `THREAD_MAT_M`/`THREAD_MAT_N` (`ggml-metal.metal:6490-6491`).
+    let thread_mat_m = block_m / (TILE_DIM as u64 * 2);
+    let thread_mat_n = block_n / (TILE_DIM as u64 * 2);
+    let mc_count = thread_mat_m * thread_mat_n;
+    let sub_k_steps = block_k / TILE_DIM as u64;
+    let weight_tile_elems = block_m * block_k;
+    let act_tile_elems = block_n * block_k;
+    let out_tile_elems = block_m * block_n;
+
     let token_axis_index = output_axes
         .iter()
         .position(|&dim| dim as usize == token_axis)
@@ -2318,22 +2409,30 @@ fn push_tiled_gemm_body(
         "    long token_extent = u.output_extents[{token_axis_index}];\n"
     ));
     source.push_str(&format!(
-        "    long num_col_tiles = (token_extent + {}) / {TILE_DIM};\n",
-        TILE_DIM - 1
+        "    long num_col_tiles = (token_extent + {}) / {block_n};\n",
+        block_n - 1
     ));
-    source.push_str("    long row_tile = output_index / num_col_tiles;\n");
-    source.push_str("    long col_tile = output_index % num_col_tiles;\n");
-    source.push_str(&format!("    threadgroup half weight_tile[{tile_area}];\n"));
-    source.push_str(&format!("    threadgroup float act_tile[{tile_area}];\n"));
-    source.push_str("    simdgroup_float8x8 acc = make_filled_simdgroup_matrix<float, 8>(0.0f);\n");
-    source.push_str("    for (long k0 = 0; k0 < u.reduction_total; k0 += 8) {\n");
+    source.push_str(&format!("    long tiitg = (long)gid % {block_threads};\n"));
+    source.push_str(&format!("    long sgitg = tiitg / {SIMD_WIDTH};\n"));
+    source.push_str(&format!("    long tile_index = (long)gid / {block_threads};\n"));
+    source.push_str("    long row_tile = tile_index / num_col_tiles;\n");
+    source.push_str("    long col_tile = tile_index % num_col_tiles;\n");
+    source.push_str("    long row_half = sgitg & 1;\n");
+    source.push_str("    long col_half = sgitg >> 1;\n");
+    source.push_str(&format!("    threadgroup half weight_tile[{weight_tile_elems}];\n"));
+    source.push_str(&format!("    threadgroup float act_tile[{act_tile_elems}];\n"));
+    source.push_str(&format!("    simdgroup_float8x8 acc[{mc_count}];\n"));
     source.push_str(&format!(
-        "        for (uint idx = lane; idx < {tile_area}u; idx += {SIMD_WIDTH}u) {{\n"
+        "    for (int i = 0; i < {mc_count}; ++i) {{ acc[i] = make_filled_simdgroup_matrix<float, 8>(0.0f); }}\n"
     ));
-    source.push_str(&format!("            uint w_row = idx / {TILE_DIM}u;\n"));
-    source.push_str(&format!("            uint w_k = idx % {TILE_DIM}u;\n"));
-    source.push_str(&format!("            long w_feat = row_tile * {TILE_DIM} + (long)w_row;\n"));
-    source.push_str("            long w_k_global = k0 + (long)w_k;\n");
+    source.push_str(&format!("    for (long k0 = 0; k0 < u.reduction_total; k0 += {block_k}) {{\n"));
+    source.push_str(&format!(
+        "        for (long idx = tiitg; idx < {weight_tile_elems}; idx += {block_threads}) {{\n"
+    ));
+    source.push_str(&format!("            long w_row = idx / {block_k};\n"));
+    source.push_str(&format!("            long w_k = idx % {block_k};\n"));
+    source.push_str(&format!("            long w_feat = row_tile * {block_m} + w_row;\n"));
+    source.push_str("            long w_k_global = k0 + w_k;\n");
     source.push_str("            half w_value = 0.0h;\n");
     source.push_str("            if (w_feat < feature_extent) {\n");
     source.push_str(&format!(
@@ -2344,11 +2443,15 @@ fn push_tiled_gemm_body(
         operand_read(weight, "woff", Some(PackedCodec::Q4K))
     ));
     source.push_str("            }\n");
-    source.push_str("            weight_tile[idx] = w_value;\n");
-    source.push_str(&format!("            uint a_k = idx / {TILE_DIM}u;\n"));
-    source.push_str(&format!("            uint a_col = idx % {TILE_DIM}u;\n"));
-    source.push_str(&format!("            long a_tok = col_tile * {TILE_DIM} + (long)a_col;\n"));
-    source.push_str("            long a_k_global = k0 + (long)a_k;\n");
+    source.push_str(&format!("            weight_tile[w_row * {block_k} + w_k] = w_value;\n"));
+    source.push_str("        }\n");
+    source.push_str(&format!(
+        "        for (long idx = tiitg; idx < {act_tile_elems}; idx += {block_threads}) {{\n"
+    ));
+    source.push_str(&format!("            long a_col = idx / {block_k};\n"));
+    source.push_str(&format!("            long a_k = idx % {block_k};\n"));
+    source.push_str(&format!("            long a_tok = col_tile * {block_n} + a_col;\n"));
+    source.push_str("            long a_k_global = k0 + a_k;\n");
     source.push_str("            float a_value = 0.0f;\n");
     source.push_str("            if (a_tok < token_extent) {\n");
     source.push_str(&format!(
@@ -2356,26 +2459,49 @@ fn push_tiled_gemm_body(
     ));
     source.push_str(&format!("                a_value = {};\n", operand_read(other, "aoff", None)));
     source.push_str("            }\n");
-    source.push_str("            act_tile[idx] = a_value;\n");
+    source.push_str(&format!("            act_tile[a_col * {block_k} + a_k] = a_value;\n"));
     source.push_str("        }\n");
     source.push_str("        threadgroup_barrier(mem_flags::mem_threadgroup);\n");
-    source.push_str("        simdgroup_half8x8 a_mat;\n");
-    source.push_str("        simdgroup_float8x8 b_mat;\n");
-    source.push_str("        simdgroup_load(a_mat, weight_tile, 8);\n");
-    source.push_str("        simdgroup_load(b_mat, act_tile, 8);\n");
-    source.push_str("        simdgroup_multiply_accumulate(acc, a_mat, b_mat, acc);\n");
+    source.push_str(&format!("        for (int sub_k = 0; sub_k < {sub_k_steps}; ++sub_k) {{\n"));
+    source.push_str(&format!("            simdgroup_half8x8 a_frag[{thread_mat_m}];\n"));
+    source.push_str(&format!("            for (int i = 0; i < {thread_mat_m}; ++i) {{\n"));
+    source.push_str(&format!(
+        "                simdgroup_load(a_frag[i], weight_tile + (row_half * {thread_mat_m} + i) * 8 * {block_k} + sub_k * 8, {block_k});\n"
+    ));
+    source.push_str("            }\n");
+    source.push_str("            simdgroup_barrier(mem_flags::mem_none);\n");
+    source.push_str(&format!("            simdgroup_float8x8 b_frag[{thread_mat_n}];\n"));
+    source.push_str(&format!("            for (int j = 0; j < {thread_mat_n}; ++j) {{\n"));
+    source.push_str(&format!(
+        "                simdgroup_load(b_frag[j], act_tile + (col_half * {thread_mat_n} + j) * 8 * {block_k} + sub_k * 8, {block_k}, ulong2(0), true);\n"
+    ));
+    source.push_str("            }\n");
+    source.push_str(&format!("            for (int i = 0; i < {thread_mat_m}; ++i) {{\n"));
+    source.push_str(&format!("                for (int j = 0; j < {thread_mat_n}; ++j) {{\n"));
+    source.push_str(&format!(
+        "                    simdgroup_multiply_accumulate(acc[i * {thread_mat_n} + j], a_frag[i], b_frag[j], acc[i * {thread_mat_n} + j]);\n"
+    ));
+    source.push_str("                }\n");
+    source.push_str("            }\n");
+    source.push_str("        }\n");
     source.push_str("        threadgroup_barrier(mem_flags::mem_threadgroup);\n");
     source.push_str("    }\n");
-    source.push_str(&format!("    threadgroup float out_tile[{tile_area}];\n"));
-    source.push_str("    simdgroup_store(acc, out_tile, 8);\n");
+    source.push_str(&format!("    threadgroup float out_tile[{out_tile_elems}];\n"));
+    source.push_str(&format!("    for (int i = 0; i < {thread_mat_m}; ++i) {{\n"));
+    source.push_str(&format!("        for (int j = 0; j < {thread_mat_n}; ++j) {{\n"));
+    source.push_str(&format!(
+        "            simdgroup_store(acc[i * {thread_mat_n} + j], out_tile + (row_half * {thread_mat_m} + i) * 8 * {block_n} + (col_half * {thread_mat_n} + j) * 8, {block_n});\n"
+    ));
+    source.push_str("        }\n");
+    source.push_str("    }\n");
     source.push_str("    threadgroup_barrier(mem_flags::mem_threadgroup);\n");
     source.push_str(&format!(
-        "    for (uint idx = lane; idx < {tile_area}u; idx += {SIMD_WIDTH}u) {{\n"
+        "    for (long idx = tiitg; idx < {out_tile_elems}; idx += {block_threads}) {{\n"
     ));
-    source.push_str(&format!("        uint o_row = idx / {TILE_DIM}u;\n"));
-    source.push_str(&format!("        uint o_col = idx % {TILE_DIM}u;\n"));
-    source.push_str(&format!("        long o_feat = row_tile * {TILE_DIM} + (long)o_row;\n"));
-    source.push_str(&format!("        long o_tok = col_tile * {TILE_DIM} + (long)o_col;\n"));
+    source.push_str(&format!("        long o_row = idx / {block_n};\n"));
+    source.push_str(&format!("        long o_col = idx % {block_n};\n"));
+    source.push_str(&format!("        long o_feat = row_tile * {block_m} + o_row;\n"));
+    source.push_str(&format!("        long o_tok = col_tile * {block_n} + o_col;\n"));
     source.push_str("        if (o_feat < feature_extent && o_tok < token_extent) {\n");
     source.push_str(&format!("            long coord[{rank_len}];\n"));
     source.push_str(&format!("            for (int d = 0; d < {rank}; ++d) {{ coord[d] = 0; }}\n"));
@@ -2390,6 +2516,47 @@ fn push_tiled_gemm_body(
     ));
     source.push_str("        }\n");
     source.push_str("    }\n");
+}
+
+/// Never actually invoked: [`classify_tiled_gemm`]'s own `#[cfg(not(feature
+/// = "metal-tiled-gemm"))]` arm always returns `None`, so no caller ever
+/// holds a `&TiledGemmBlock` to pass here without the feature -- this stub
+/// exists only so [`push_cooperative_reduce_body`]'s `if let Some(block) =
+/// tiled_gemm_block(...)` arm still type-checks in that build.
+#[cfg(not(feature = "metal-tiled-gemm"))]
+fn push_tiled_gemm_body(
+    source: &mut String,
+    output_axes: &[u16],
+    rank: usize,
+    block: &TiledGemmBlock,
+    element_type: &str,
+) {
+    let _ = (source, output_axes, rank, block, element_type);
+    unreachable!("classify_tiled_gemm only ever returns Some behind feature = \"metal-tiled-gemm\"")
+}
+
+/// The threadgroup width [`emit`]/[`kernel_dispatch_shape`] must dispatch
+/// with -- [`TILED_GEMM_NSG`]` * SIMD_WIDTH` (128) when `resolved` takes
+/// [`push_tiled_gemm_body`]'s multi-simdgroup path (its coordinate math
+/// depends on exactly this many threads per threadgroup, the same
+/// correctness requirement `crate::metal::dispatch`'s own doc states for
+/// `SIMD_WIDTH`), `SIMD_WIDTH` for every other cooperative-reduce kernel,
+/// `None` otherwise. Single source of truth both dispatch-shape functions
+/// read, so they cannot drift the way two independent copies of this
+/// `if`/`else` could.
+fn tiled_gemm_threadgroup_width(resolved: &BoundOp, quantized: &[Option<PackedCodec>]) -> Option<u64> {
+    if let BoundOpKind::Reduce {
+        keep: Keep::Reduce,
+        reduce_op,
+        init,
+        output_axes,
+        ..
+    } = &resolved.kind
+        && tiled_gemm_block(resolved, quantized, *reduce_op, *init, output_axes).is_some()
+    {
+        return Some((TILED_GEMM_NSG as u64) * SIMD_WIDTH);
+    }
+    reduce_is_cooperative(resolved).then_some(SIMD_WIDTH)
 }
 
 // the emitter threads a bound op's full shape (rank, axes, reduce op, init,
@@ -2414,15 +2581,13 @@ fn push_cooperative_reduce_body(
     let reduce_rank_len = reduce_rank.max(1);
     let operand_count = resolved.operands().len();
 
-    // the tiled GEMM path owns its own preamble too: `output_index` is a
-    // flat TILE index there, one simdgroup per `TILE_DIM x TILE_DIM` output
-    // tile, not one simdgroup per `PACKED_ROWS_PER_GROUP` flat outputs the
-    // way the row-blocked path below reads it. Checked FIRST: see
+    // the tiled GEMM path owns its own preamble entirely (`tiitg`/`sgitg`/
+    // `tile_index`, derived straight from `gid` against `TILED_GEMM_NSG *
+    // SIMD_WIDTH` threads per threadgroup, ROW 109) -- it needs neither
+    // `output_index` nor `lane` the way the row-blocked path below does, see
     // `kernel_cache_key`'s own comment for why the two are mutually
     // exclusive by construction.
     if let Some(block) = tiled_gemm_block(resolved, quantized, reduce_op, init, output_axes) {
-        source.push_str(&format!("    long output_index = (long)gid / {SIMD_WIDTH};\n"));
-        source.push_str(&format!("    uint lane = gid % {SIMD_WIDTH}u;\n"));
         push_tiled_gemm_body(source, output_axes, rank, &block, element_type);
         return;
     }
