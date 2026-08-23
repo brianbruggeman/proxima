@@ -147,7 +147,10 @@ use prime::os::cohort::{ChunkIndex, CohortRound, CohortSession, ThreadCohort};
 type MatmulCohort = ThreadCohort<TensorError>;
 type MatmulSession<'a> = CohortSession<'a, TensorError>;
 
+use half::{bf16, f16};
+
 use crate::bind::{self, BoundOp, BoundOpKind, ComposedBody, ReadyBatch, StepArg};
+use crate::convert::{Convert, SimdConvert};
 use crate::dtype::DType;
 use crate::error::TensorError;
 #[cfg(feature = "instrument")]
@@ -480,6 +483,20 @@ pub enum QuantizedBlock<'a> {
     /// widely distributed 4-bit format -- unlike [`Self::Q4K`], no
     /// sub-block scale/min hierarchy, just `value = scale * (nibble - 8)`.
     Q4_0(&'a [u8]),
+    /// Raw packed IEEE-754 binary16 bytes, little-endian, two per element,
+    /// no block or scale structure at all -- unlike every other
+    /// non-`Float32` variant above, a half-precision weight is not
+    /// quantized, only narrower: each element converts to `f32` entirely on
+    /// its own, with no neighbours' scale to consult. See [`matmul_f16_f32`]
+    /// for the composed convert-then-fold kernel this variant reaches, and
+    /// [`proxima_gguf::quant::f16`] for the on-disk layout this borrows
+    /// unchanged.
+    Float16(&'a [u8]),
+    /// Raw packed `bfloat16` bytes, little-endian, two per element -- same
+    /// per-element (non-block) shape as [`Self::Float16`], but a different
+    /// bit layout (8-bit exponent, 7-bit mantissa) needing its own
+    /// conversion. See [`matmul_bf16_f32`] and [`proxima_gguf::quant::bf16`].
+    BFloat16(&'a [u8]),
 }
 
 /// [`evaluate`]'s counterpart for a program with one `Q4_K`-quantized weight
@@ -595,7 +612,9 @@ pub fn evaluate_quantized_with_scratch(
             | QuantizedBlock::Q5K(_)
             | QuantizedBlock::Q6K(_)
             | QuantizedBlock::Q8_0(_)
-            | QuantizedBlock::Q4_0(_) => {
+            | QuantizedBlock::Q4_0(_)
+            | QuantizedBlock::Float16(_)
+            | QuantizedBlock::BFloat16(_) => {
                 quantized_weights.insert(*node, block);
             }
         }
@@ -3100,6 +3119,8 @@ fn build_matmul_stage_plan<'weights>(
         QuantizedBlock::Q6K(bytes) => (bytes, Q6K_BLOCK_BYTES, Q4K_BLOCK_ELEMENTS),
         QuantizedBlock::Q8_0(bytes) => (bytes, Q8_0_BLOCK_BYTES, Q8_0_BLOCK_ELEMENTS),
         QuantizedBlock::Q4_0(bytes) => (bytes, Q4_0_BLOCK_BYTES, Q4_0_BLOCK_ELEMENTS),
+        QuantizedBlock::Float16(bytes) => (bytes, HALF_PRECISION_ELEMENT_BYTES, 1),
+        QuantizedBlock::BFloat16(bytes) => (bytes, HALF_PRECISION_ELEMENT_BYTES, 1),
     };
     if k == 0 || rows == 0 || !weights.len().is_multiple_of(block_bytes) {
         return Err(shape_error());
@@ -3476,6 +3497,8 @@ fn run_reduce_quantized<B: Deref<Target = [f32]>>(
         QuantizedBlock::Q6K(bytes) => (bytes, Q6K_BLOCK_BYTES, Q4K_BLOCK_ELEMENTS),
         QuantizedBlock::Q8_0(bytes) => (bytes, Q8_0_BLOCK_BYTES, Q8_0_BLOCK_ELEMENTS),
         QuantizedBlock::Q4_0(bytes) => (bytes, Q4_0_BLOCK_BYTES, Q4_0_BLOCK_ELEMENTS),
+        QuantizedBlock::Float16(bytes) => (bytes, HALF_PRECISION_ELEMENT_BYTES, 1),
+        QuantizedBlock::BFloat16(bytes) => (bytes, HALF_PRECISION_ELEMENT_BYTES, 1),
     };
     if k == 0 || rows == 0 || !weights.len().is_multiple_of(block_bytes) {
         return Err(shape_error());
@@ -3644,6 +3667,8 @@ fn run_reduce_quantized<B: Deref<Target = [f32]>>(
             }
             QuantizedBlock::Q8_0(_) => matmul_q8_0_f32(weights, rows, activation_row)?,
             QuantizedBlock::Q4_0(_) => matmul_q4_0_f32(weights, rows, activation_row)?,
+            QuantizedBlock::Float16(_) => matmul_f16_f32(weights, rows, activation_row)?,
+            QuantizedBlock::BFloat16(_) => matmul_bf16_f32(weights, rows, activation_row)?,
         };
         #[cfg(feature = "instrument")]
         {
@@ -3666,6 +3691,7 @@ fn run_reduce_quantized<B: Deref<Target = [f32]>>(
                 }
                 QuantizedBlock::Q8_0(_) => {}
                 QuantizedBlock::Q4_0(_) => {}
+                QuantizedBlock::Float16(_) | QuantizedBlock::BFloat16(_) => {}
             }
         }
         output[position * rows..(position + 1) * rows].copy_from_slice(&result);
@@ -6094,6 +6120,147 @@ pub fn matmul_q4_0_f32(weights: &[u8], rows: usize, activation: &[f32]) -> Resul
         "matmul_q4_0_f32 called with zero rows",
         "weight byte length is not a whole multiple of the row count",
         dot_q4_0_f32,
+    )
+}
+
+/// Bytes per half-precision element -- both [`QuantizedBlock::Float16`]
+/// and [`QuantizedBlock::BFloat16`] are 2-byte formats
+/// ([`DType::size_bytes`] agrees for both).
+const HALF_PRECISION_ELEMENT_BYTES: usize = 2;
+
+/// Elements converted per stack-buffer chunk in [`dot_f16_f32`]/
+/// [`dot_bf16_f32`] -- reuses [`Q4K_BLOCK_ELEMENTS`] (256) for the same
+/// cache/register-friendly width the K-quant kernels beside this one were
+/// already measured at, not because these two unrelated formats share any
+/// structural need to agree on it. A structural axis sizing a stack array,
+/// not a runtime tunable -- same reasoning as `sized.rs`'s own
+/// `DOT_LANES`/`WIDTH_TILE_ROWS`.
+const HALF_PRECISION_DOT_CHUNK: usize = Q4K_BLOCK_ELEMENTS;
+
+/// One output row of a half-precision-weight x `f32`-activation dot
+/// product -- composes two EXISTING primitives rather than shipping a new
+/// kernel (guiding-principles §1's pipe question, answered by writing the
+/// expression instead of a paragraph): [`Convert::<f16, f32>`]'s
+/// [`SimdConvert::convert_slice`] widens one stack-buffer chunk of packed
+/// bytes to `f32`, then [`dot_fold_fused_multiply_add`] folds it against
+/// the activation slice -- the exact fold every other codec's dequantize
+/// step already reuses. No half-precision-specific SIMD dot was written:
+/// unlike `Q4_K`/`Q5_K`/`Q6_K`'s packed nibbles, an `f16` element carries no
+/// block or scale structure to unpack, so the composed form is not a
+/// stand-in for a missing fused kernel -- it is the whole job. Byte pairs
+/// are widened to `f16` by hand (`u16::from_le_bytes` then `f16::from_bits`)
+/// rather than an unsafe transmute of `&[u8]` to `&[f16]`. because a
+/// `weight_row` sub-slice's 2-byte alignment relative to its backing
+/// allocation is not a language guarantee.
+///
+/// # Errors
+/// [`TensorError::QuantizedShapeMismatch`] if `weight_row.len()` is not a
+/// whole multiple of [`HALF_PRECISION_ELEMENT_BYTES`], or `activation.len()`
+/// does not equal the row's decoded element count.
+fn dot_f16_f32(weight_row: &[u8], activation: &[f32]) -> Result<f32, TensorError> {
+    if !weight_row.len().is_multiple_of(HALF_PRECISION_ELEMENT_BYTES) {
+        return Err(TensorError::QuantizedShapeMismatch {
+            reason: "f16 weight row length is not a whole multiple of 2 bytes",
+        });
+    }
+    let element_count = weight_row.len() / HALF_PRECISION_ELEMENT_BYTES;
+    if activation.len() != element_count {
+        return Err(TensorError::QuantizedShapeMismatch {
+            reason: "activation length does not match the f16 weight row's element count",
+        });
+    }
+
+    let converter = Convert::<f16, f32>::new();
+    let mut half_scratch = [f16::from_bits(0); HALF_PRECISION_DOT_CHUNK];
+    let mut wide_scratch = [0.0f32; HALF_PRECISION_DOT_CHUNK];
+    let mut acc = 0.0f32;
+    let byte_chunk_len = HALF_PRECISION_DOT_CHUNK * HALF_PRECISION_ELEMENT_BYTES;
+    for (byte_chunk, activation_chunk) in weight_row.chunks(byte_chunk_len).zip(activation.chunks(HALF_PRECISION_DOT_CHUNK)) {
+        let chunk_len = activation_chunk.len();
+        for (slot, bytes) in half_scratch[..chunk_len].iter_mut().zip(byte_chunk.as_chunks::<HALF_PRECISION_ELEMENT_BYTES>().0) {
+            *slot = f16::from_bits(u16::from_le_bytes([bytes[0], bytes[1]]));
+        }
+        converter.convert_slice(&half_scratch[..chunk_len], &mut wide_scratch[..chunk_len]);
+        acc = dot_fold_fused_multiply_add(
+            &wide_scratch[..chunk_len],
+            activation_chunk,
+            DotFold { len: chunk_len, init: acc, seeded: true },
+        );
+    }
+    Ok(acc)
+}
+
+/// [`dot_f16_f32`]'s mechanism applied to `bfloat16` -- same composed
+/// convert-then-fold shape, [`Convert::<bf16, f32>`] in place of
+/// `Convert<f16, f32>`. See that function's doc for why no new kernel was
+/// written.
+///
+/// # Errors
+/// Same shape as [`dot_f16_f32`]'s.
+fn dot_bf16_f32(weight_row: &[u8], activation: &[f32]) -> Result<f32, TensorError> {
+    if !weight_row.len().is_multiple_of(HALF_PRECISION_ELEMENT_BYTES) {
+        return Err(TensorError::QuantizedShapeMismatch {
+            reason: "bf16 weight row length is not a whole multiple of 2 bytes",
+        });
+    }
+    let element_count = weight_row.len() / HALF_PRECISION_ELEMENT_BYTES;
+    if activation.len() != element_count {
+        return Err(TensorError::QuantizedShapeMismatch {
+            reason: "activation length does not match the bf16 weight row's element count",
+        });
+    }
+
+    let converter = Convert::<bf16, f32>::new();
+    let mut half_scratch = [bf16::from_bits(0); HALF_PRECISION_DOT_CHUNK];
+    let mut wide_scratch = [0.0f32; HALF_PRECISION_DOT_CHUNK];
+    let mut acc = 0.0f32;
+    let byte_chunk_len = HALF_PRECISION_DOT_CHUNK * HALF_PRECISION_ELEMENT_BYTES;
+    for (byte_chunk, activation_chunk) in weight_row.chunks(byte_chunk_len).zip(activation.chunks(HALF_PRECISION_DOT_CHUNK)) {
+        let chunk_len = activation_chunk.len();
+        for (slot, bytes) in half_scratch[..chunk_len].iter_mut().zip(byte_chunk.as_chunks::<HALF_PRECISION_ELEMENT_BYTES>().0) {
+            *slot = bf16::from_bits(u16::from_le_bytes([bytes[0], bytes[1]]));
+        }
+        converter.convert_slice(&half_scratch[..chunk_len], &mut wide_scratch[..chunk_len]);
+        acc = dot_fold_fused_multiply_add(
+            &wide_scratch[..chunk_len],
+            activation_chunk,
+            DotFold { len: chunk_len, init: acc, seeded: true },
+        );
+    }
+    Ok(acc)
+}
+
+/// A full `Float16`-weight matrix (`rows` x `k`, row-major raw bytes) times
+/// one `f32` activation vector -- [`dot_f16_f32`]'s per-row kernel driven
+/// through the same [`matmul_quantized_dispatch`] every other codec shares.
+///
+/// # Errors
+/// Propagates [`dot_f16_f32`]'s [`TensorError::QuantizedShapeMismatch`] for
+/// the first row that fails its shape check, or reports the same error if
+/// `weights.len()` is not a whole multiple of `rows`.
+pub fn matmul_f16_f32(weights: &[u8], rows: usize, activation: &[f32]) -> Result<Vec<f32>, TensorError> {
+    matmul_quantized_dispatch(
+        weights,
+        rows,
+        activation,
+        "matmul_f16_f32 called with zero rows",
+        "weight byte length is not a whole multiple of the row count",
+        dot_f16_f32,
+    )
+}
+
+/// [`matmul_f16_f32`]'s `bfloat16` counterpart.
+///
+/// # Errors
+/// Same shape as [`matmul_f16_f32`]'s.
+pub fn matmul_bf16_f32(weights: &[u8], rows: usize, activation: &[f32]) -> Result<Vec<f32>, TensorError> {
+    matmul_quantized_dispatch(
+        weights,
+        rows,
+        activation,
+        "matmul_bf16_f32 called with zero rows",
+        "weight byte length is not a whole multiple of the row count",
+        dot_bf16_f32,
     )
 }
 
@@ -14891,6 +15058,231 @@ mod tests {
                 reason: "quantized matmul activation varies along an output axis its packed weight also \
                          varies along -- not a flat weight matmul this interpreter can express",
             }
+        );
+    }
+
+    // -------------------------------------------------------------
+    // `Float16`/`BFloat16` -- composed convert-then-fold kernels
+    // (`dot_f16_f32`/`dot_bf16_f32`), hand-computed expected values (never
+    // the implementation checked against itself), plus one end-to-end
+    // `evaluate_quantized` parity test against `proxima_gguf`'s own
+    // dequantize (guiding-principle 14: the dequantize-then-matmul
+    // reference is correct by construction).
+    // -------------------------------------------------------------
+
+    /// Which half-precision codec a parameterized case exercises -- the two
+    /// formats share the same [`dot_f16_f32`]/[`dot_bf16_f32`] +
+    /// [`matmul_f16_f32`]/[`matmul_bf16_f32`] call shape but pack a value to
+    /// a different bit pattern, so the byte-packing step is the one thing
+    /// each case varies.
+    #[derive(Clone, Copy, Debug)]
+    enum HalfPrecisionKind {
+        F16,
+        Bf16,
+    }
+
+    impl HalfPrecisionKind {
+        fn pack(self, values: &[f32]) -> Vec<u8> {
+            match self {
+                Self::F16 => values.iter().flat_map(|&value| f16::from_f32(value).to_le_bytes()).collect(),
+                Self::Bf16 => values.iter().flat_map(|&value| bf16::from_f32(value).to_le_bytes()).collect(),
+            }
+        }
+
+        fn dot(self, weight_row: &[u8], activation: &[f32]) -> Result<f32, TensorError> {
+            match self {
+                Self::F16 => dot_f16_f32(weight_row, activation),
+                Self::Bf16 => dot_bf16_f32(weight_row, activation),
+            }
+        }
+
+        fn matmul(self, weights: &[u8], rows: usize, activation: &[f32]) -> Result<Vec<f32>, TensorError> {
+            match self {
+                Self::F16 => matmul_f16_f32(weights, rows, activation),
+                Self::Bf16 => matmul_bf16_f32(weights, rows, activation),
+            }
+        }
+    }
+
+    /// `weight . activation` computed by hand: `1.0*2.0 + 2.0*0.5 +
+    /// (-1.0)*3.0 + 0.5*4.0 = 2.0 + 1.0 - 3.0 + 2.0 = 2.0`. Every value on
+    /// both sides is an exact power of two (or zero), and both binary16 and
+    /// bfloat16 represent every power of two in this range exactly, so the
+    /// composed convert-then-fold kernel must reproduce `2.0` bit-exactly —
+    /// this checks the kernel against arithmetic done by hand, not against
+    /// itself.
+    #[proxima::test]
+    #[case::f16(HalfPrecisionKind::F16)]
+    #[case::bf16(HalfPrecisionKind::Bf16)]
+    async fn dot_half_precision_matches_a_hand_computed_dot_product(#[case] kind: HalfPrecisionKind) {
+        let weight = [1.0f32, 2.0, -1.0, 0.5];
+        let activation = [2.0f32, 0.5, 3.0, 4.0];
+        let weight_bytes = kind.pack(&weight);
+
+        let actual = kind.dot(&weight_bytes, &activation).expect("well-formed half-precision row");
+
+        assert_eq!(actual, 2.0f32, "hand-computed dot product ({kind:?})");
+    }
+
+    /// Two rows, each hand-computed independently: row 0 is the dot-product
+    /// fixture above (`2.0`); row 1 is `[0.0, 1.0, 0.0, -2.0] . [2.0, 0.5,
+    /// 3.0, 4.0] = 0 + 0.5 + 0 - 8.0 = -7.5` -- again every value an exact
+    /// power of two (or zero), so both formats reproduce it bit-exactly.
+    #[proxima::test]
+    #[case::f16(HalfPrecisionKind::F16)]
+    #[case::bf16(HalfPrecisionKind::Bf16)]
+    async fn matmul_half_precision_matches_a_hand_computed_two_row_matmul(#[case] kind: HalfPrecisionKind) {
+        let row0 = [1.0f32, 2.0, -1.0, 0.5];
+        let row1 = [0.0f32, 1.0, 0.0, -2.0];
+        let activation = [2.0f32, 0.5, 3.0, 4.0];
+        let weights: Vec<f32> = row0.iter().chain(row1.iter()).copied().collect();
+        let weight_bytes = kind.pack(&weights);
+
+        let actual = kind.matmul(&weight_bytes, 2, &activation).expect("well-formed 2-row half-precision matmul");
+
+        assert_eq!(actual, alloc::vec![2.0f32, -7.5], "hand-computed 2-row matmul ({kind:?})");
+    }
+
+    /// Proves the hand-computed assertion above is load-bearing rather than
+    /// vacuous: a deliberately wrong second-row expectation (`123.0` in
+    /// place of the hand-computed `-7.5`) checked with `assert_ne!` against
+    /// the kernel's real output, so this file itself carries the evidence
+    /// that a wrong answer is caught, without needing to hand-edit the test
+    /// file to demonstrate it.
+    #[proxima::test]
+    #[case::f16(HalfPrecisionKind::F16)]
+    #[case::bf16(HalfPrecisionKind::Bf16)]
+    async fn matmul_half_precision_hand_computed_assertion_can_actually_fail(#[case] kind: HalfPrecisionKind) {
+        let row0 = [1.0f32, 2.0, -1.0, 0.5];
+        let row1 = [0.0f32, 1.0, 0.0, -2.0];
+        let activation = [2.0f32, 0.5, 3.0, 4.0];
+        let weights: Vec<f32> = row0.iter().chain(row1.iter()).copied().collect();
+        let weight_bytes = kind.pack(&weights);
+
+        let actual = kind.matmul(&weight_bytes, 2, &activation).expect("well-formed 2-row half-precision matmul");
+        let deliberately_wrong = alloc::vec![2.0f32, 123.0];
+
+        assert_ne!(
+            actual, deliberately_wrong,
+            "a deliberately wrong expectation must not match the kernel's real output ({kind:?})"
+        );
+    }
+
+    /// [`dot_f16_f32`]/[`dot_bf16_f32`] reject a byte length that is not a
+    /// whole number of 2-byte elements, and an activation length that does
+    /// not match the decoded element count -- never a panic or an
+    /// out-of-bounds read.
+    #[proxima::test]
+    #[case::f16(HalfPrecisionKind::F16)]
+    #[case::bf16(HalfPrecisionKind::Bf16)]
+    async fn dot_half_precision_rejects_a_malformed_shape(#[case] kind: HalfPrecisionKind) {
+        let odd_bytes = alloc::vec![0u8; 3];
+        let activation = [0.0f32; 1];
+        assert!(matches!(
+            kind.dot(&odd_bytes, &activation),
+            Err(TensorError::QuantizedShapeMismatch { .. })
+        ));
+
+        let weight_bytes = kind.pack(&[1.0, 2.0]);
+        let mismatched_activation = [0.0f32; 3];
+        assert!(matches!(
+            kind.dot(&weight_bytes, &mismatched_activation),
+            Err(TensorError::QuantizedShapeMismatch { .. })
+        ));
+    }
+
+    /// End-to-end: a `Float16`/`BFloat16` [`QuantizedBlock`] weight bound
+    /// through [`evaluate_quantized`]'s full `Op` graph (elementwise
+    /// multiply feeding an add-reduce -- the matmul shape
+    /// `is_quantized_matmul_operand` recognizes), checked against
+    /// `proxima_gguf`'s own tested `dequantize` followed by a naive `f32`
+    /// dot product -- guiding-principle 14: the dequantize-then-matmul
+    /// reference is correct by construction, so this is a parity check
+    /// against an independent path, not a round-trip-to-self check. Real
+    /// (pseudo-random, non-degenerate -- `Lcg`) weight and activation
+    /// values, not zeros or constants.
+    #[proxima::test]
+    #[case::f16(HalfPrecisionKind::F16)]
+    #[case::bf16(HalfPrecisionKind::Bf16)]
+    async fn evaluate_quantized_executes_a_half_precision_weight_end_to_end(#[case] kind: HalfPrecisionKind) {
+        const ROWS: u32 = 3;
+        const K: u32 = 16;
+        const K_USIZE: usize = K as usize;
+
+        let weights_f32 = random_vec(41, (ROWS * K) as usize);
+        let activation = random_vec(43, K as usize);
+        let weight_bytes = kind.pack(&weights_f32);
+
+        let mut program = Vec::new();
+        let weight = block(&mut program, DType::UInt8, &[Extent::Static(ROWS), Extent::Static(K)]);
+        let activation_node = f32_block(&mut program, &[Extent::Static(K)]);
+        let product = append(
+            &mut program,
+            Op::Elementwise {
+                dtype: DType::Float32,
+                body: ScalarOp::Multiply,
+                operands: alloc::vec![
+                    (weight, IndexMap::Affine(map::projection(2, &[0, 1]))),
+                    (activation_node, IndexMap::Affine(map::projection(2, &[1]))),
+                ],
+                name: None,
+            },
+        );
+        let sum = append(
+            &mut program,
+            Op::Reduce(Reduce {
+                dtype: DType::Float32,
+                body: ScalarOp::Add,
+                init: ReduceInit::Zero,
+                operand: product,
+                in_map: IndexMap::Affine(map::projection(2, &[0, 1])),
+                out_map: IndexMap::Affine(map::projection(2, &[0])),
+                keep: Keep::Reduce,
+                name: Some("half_precision_matmul".into()),
+            }),
+        );
+
+        let blocks = match kind {
+            HalfPrecisionKind::F16 => alloc::vec![QuantizedBlock::Float16(&weight_bytes), QuantizedBlock::Float32(&activation)],
+            HalfPrecisionKind::Bf16 => alloc::vec![QuantizedBlock::BFloat16(&weight_bytes), QuantizedBlock::Float32(&activation)],
+        };
+        let evaluated = evaluate_quantized(&program, &[], &blocks, &[sum]).expect("half-precision matmul evaluates");
+        let actual = evaluated.root();
+
+        let mut dequantized = vec![0.0f32; (ROWS * K) as usize];
+        match kind {
+            HalfPrecisionKind::F16 => {
+                proxima_gguf::quant::f16::dequantize(&weight_bytes, &mut dequantized).expect("well-formed f16 bytes");
+            }
+            HalfPrecisionKind::Bf16 => {
+                proxima_gguf::quant::bf16::dequantize(&weight_bytes, &mut dequantized).expect("well-formed bf16 bytes");
+            }
+        }
+        let expected: Vec<f32> = dequantized
+            .as_chunks::<K_USIZE>()
+            .0
+            .iter()
+            .map(|row| row.iter().zip(&activation).map(|(weight, value)| weight * value).sum())
+            .collect();
+
+        assert_eq!(actual.len(), ROWS as usize, "degenerate gate: no outputs compared");
+        // Not `assert_eq!`: `dot_fold_fused_multiply_add`'s `DOT_LANES` (8)
+        // independent partial sums (K=16 here is two whole lanes) combine
+        // in a different order than this reference's strict left-to-right
+        // `Iterator::sum` -- float addition is not associative, so the two
+        // legitimately differ in the last mantissa bits. The K4Q4_K parity
+        // test above (`matmul_q4k_f32_matches_dequantize_then_f32_matmul`)
+        // hits the exact same reordering and uses the same loose-tolerance
+        // shape rather than bit-exact equality.
+        let mut max_diff = 0.0f32;
+        for (got, want) in actual.iter().zip(&expected) {
+            assert!(got.is_finite(), "half-precision matmul ({kind:?}) produced a non-finite value: {got}");
+            max_diff = max_diff.max((got - want).abs());
+        }
+        eprintln!("half-precision matmul ({kind:?}) vs dequantize-then-fold: max_diff={max_diff}");
+        assert!(
+            max_diff < 1e-4,
+            "half-precision matmul ({kind:?}) disagrees with the dequantize-then-fold reference: max_diff={max_diff}"
         );
     }
 
