@@ -474,13 +474,12 @@ mod tests {
         use alloc::collections::VecDeque;
         use alloc::vec;
         use alloc::vec::Vec;
-        use rstest::rstest;
 
-        #[rstest]
+        #[proxima::test]
         #[case::push_all_drain_all(8)]
         #[case::small_cap(2)]
         #[case::large_cap(64)]
-        fn happy_push_n_drain_n_in_order(#[case] cap: usize) {
+        async fn happy_push_n_drain_n_in_order(#[case] cap: usize) {
             let ring = Ring::new(cap).unwrap();
             for item in 0..cap {
                 ring.push(item as u32).unwrap();
@@ -496,10 +495,10 @@ mod tests {
             }
         }
 
-        #[rstest]
+        #[proxima::test]
         #[case::small(2)]
         #[case::many(16)]
-        fn sad_push_into_full_ring_returns_full(#[case] cap: usize) {
+        async fn sad_push_into_full_ring_returns_full(#[case] cap: usize) {
             let ring = Ring::<u64>::new(cap).unwrap();
             for item in 0..ring.cap() {
                 ring.push(item as u64).unwrap();
@@ -833,11 +832,11 @@ mod tests {
             }
         }
 
-        #[rstest]
+        #[proxima::test]
         #[case::tiny(4, 100)]
         #[case::medium(32, 1_000)]
         #[case::large(256, 10_000)]
-        fn property_random_push_drain_interleaving_preserves_fifo(
+        async fn property_random_push_drain_interleaving_preserves_fifo(
             #[case] cap: usize,
             #[case] total_ops: usize,
         ) {
