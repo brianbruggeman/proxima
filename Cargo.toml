@@ -524,7 +524,13 @@ sync-wrappers = [
 # so a caller who only wants (say) `.redis(handler)` is never ALSO forced to
 # enable `http1`/`http1-native` just to reach the builder methods that
 # resolve it — see `src/listener/handle.rs`'s `any_mode` field doc for the
-# bug this closes.
+# bug this closes. `http-listener` itself now folds in `proxima-http`'s
+# `uds-listener` (a minimal tokio + tokio-util pair, no hyper), so a UDS
+# bind spec works for every one of these consumers too — it used to be
+# gated on `http1` there, which meant e.g. `--features pgwire` alone could
+# never bind pgwire over a unix socket even though this comment already
+# promised it wouldn't need `http1` (see `proxima-http/Cargo.toml`'s
+# `uds-listener` doc for the fix).
 any-listener = ["proxima-http/http-listener"]
 
 # HTTP wire version gates. `http1-native` is the tokio-free base: the

@@ -210,12 +210,29 @@ websocket = ["dep:async-tungstenite", "dep:proxima-net", "proxima-net/tokio", "d
 # `H2ListenProtocol`'s non-native arm). Add `http1` on top to restore the
 # legacy tokio `TcpListener`/UDS accept loop for when no factory is
 # available — see `listener/mod.rs`'s internal `#[cfg(feature = "http1")]`
-# split.
+# split. `uds-listener` (below) rides along unconditionally: every
+# `AnyListenProtocol` consumer (h1 included) needs a working UDS bind, and
+# that bind is genuinely protocol-agnostic — see `uds-listener`'s own doc.
 http-listener = [
     "http1-native",
     "proxima-core/io-async-compat",
     "proxima-protocols/proxy_protocol-std",
+    "uds-listener",
 ]
+# `AnyListenProtocol::serve`'s UDS bind path (`serve_uds`/`UdsStream` in
+# `any_listener.rs`) — used by EVERY `.any()`-family consumer (h1, pgwire,
+# redis, kafka, mqtt, amqp, memcached, dns) whenever the bind spec carries a
+# unix-socket `path`, regardless of whether that consumer speaks HTTP.
+# `AcceptorFactory` was never extended to unix sockets for this listener, so
+# the bind still goes through a hardcoded `tokio::net::UnixListener` — a
+# real, unavoidable dependency, but on raw tokio + the `tokio-util` compat
+# bridge only, not on `http1`'s hyper/legacy-client stack. This feature pulls
+# exactly that minimal pair, so a non-HTTP `.any()` consumer's UDS bind works
+# without dragging hyper in (previously it was gated on `http1` itself,
+# which meant e.g. `--features pgwire` alone could never bind pgwire over a
+# unix socket — see root `Cargo.toml`'s `any-listener` doc, which already
+# states these protocols need only `http-listener`, never `http1`).
+uds-listener = ["dep:tokio", "dep:tokio-util"]
 # TLS termination for the `listener` module (folded from the former
 # `proxima-listeners-http` crate's own `tls` feature).
 tls = [
