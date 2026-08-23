@@ -10715,3 +10715,308 @@ tables are the kept, citable record.
 - `cargo test -p proxima-model-interop --features metal,instrument --lib -- --ignored profiles_one_real_decode_step_by_per_op_gpu_time --nocapture` (decode control, `step=3`, reproduces ROW 94's 1.0000x)
 - `cargo test -p proxima-model-interop --features metal,instrument --lib -- --ignored profiles_one_real_prefill_step_by_per_op_gpu_time --nocapture` (prefill, row-blocked, `step=0`)
 - `cargo test -p proxima-model-interop --features metal,instrument,metal-tiled-gemm --lib -- --ignored profiles_one_real_prefill_step_by_per_op_gpu_time --nocapture` (prefill, tiled)
+
+## ROW 113 — the tile WAS staged and reused; the staging loop's own Q4_K decode paid 8-40x more device reads and arithmetic than necessary. Fixing that turns ROW 109's 1.63x LOSS into a 1.47-1.5x WIN over row-blocked, and flattens the scaling curve ROW 112 found
+
+**Host:** Apple M1 Max, 64 GB, same box as ROW 107-112. **Loadout:** the
+per-op diagnostic-harness sweep ran at 1-min load 2.77-4.16 (`uptime` pasted
+before every batch below); the release-build production-shaped sweep ran at
+1-min load 4.78-5.03 for the BEFORE arm and 3.71-3.95 for the AFTER arm — a
+genuinely quieter box for AFTER, flagged rather than hidden. Cross-check
+against it: this row's own BEFORE reproduction (2080.166 ms median) landed
+within 0.02% of ROW 109's own BEFORE figure (2085.493 ms), which was
+measured at load 2.29-4.25 — a very different loadout producing an
+almost-identical number, which is evidence (not proof) that this metric is
+not strongly load-sensitive in the 3-5 range this row saw.
+
+### Step 1 — where the reuse actually was, and was not
+
+Read `push_tiled_gemm_body` (`omega/src/msl.rs:2366-2519`, pre-this-row) end
+to end before writing anything.
+
+**The tile IS staged into `threadgroup` memory and IS shared across every
+token column in the block.** `block_threads` (128) threads cooperatively
+fill `weight_tile`/`act_tile` (the strided `for (long idx = tiitg; idx <
+weight_tile_elems; ...)` loop), a `threadgroup_barrier` follows, and every
+`simdgroup_load` inside the `k0`-step multiply-accumulate loop reads from
+`weight_tile`/`act_tile` (`threadgroup` memory), never re-touching `device`
+memory inside that inner loop. At `new_count=31` with `TILED_GEMM_BLOCK_N=32`
+there is exactly one column tile, so the ENTIRE per-row-tile weight slab is
+loaded from `device` memory once and shared by all 31 token columns — the
+cross-token reuse the brief's invariant names was already real, contrary to
+what the 58.35x per-op-harness figure alone would suggest.
+
+**What was NOT staged efficiently: the decode arithmetic inside the staging
+loop itself.** The weight-tile fill called the generic
+[`operand_read`](omega/src/msl.rs:1645-1657) with `Some(PackedCodec::Q4K)`,
+which expands to `q4k_element` (`omega/src/msl.rs:200-220`):
+
+```c
+static inline float q4k_element(device const uchar *block, uint index) {
+    ushort d_bits = (ushort)((uint)block[0] | ((uint)block[1] << 8));
+    ushort dmin_bits = (ushort)((uint)block[2] | ((uint)block[3] << 8));
+    float d = (float)as_type<half>(d_bits);
+    float dmin = (float)as_type<half>(dmin_bits);
+    device const uchar *scales = block + 4;
+    device const uchar *qs = block + 16;
+    uint group = index / 64u;
+    uint within = index % 64u;
+    bool low_nibble = within < 32u;
+    uint sub_block = 2u * group + (low_nibble ? 0u : 1u);
+    uint byte_index = group * 32u + (within % 32u);
+    uchar2 scale_min = q4k_scale_min(scales, sub_block);
+    float scale = d * (float)scale_min.x;
+    float minimum = dmin * (float)scale_min.y;
+    uchar nibble = low_nibble ? (qs[byte_index] & 0x0F) : (qs[byte_index] >> 4);
+    return scale * (float)nibble - minimum;
+}
+```
+
+This function's own doc (`omega/src/msl.rs:222-227`) states the point
+plainly: "deriving \[the header\] per element ... is 8-40x the arithmetic of
+the nibble extract it feeds." Every one of the 2048 `weight_tile` elements
+staged per `k0`-step re-read and re-derived the SAME sub-block header
+(`d`, `dmin`, the 6-bit scale/min pair) from `device` memory, from scratch,
+32 times over — once per element instead of once per 32-element sub-block.
+
+`push_packed_row_blocked_body` (the row-blocked kernel, unchanged this row)
+already carries the fix: `q4k_header_for` (`omega/src/msl.rs:230-242`)
+decodes the header ONCE per sub-block, and `q4k_run8`
+(`omega/src/msl.rs:266-283`) extracts 8 nibbles per two-word load — the
+"docs/discipline.md ROW 74" amortization its own comment cites
+(`omega/src/msl.rs:2062-2067`, `2110-2124`).
+
+ggml's own tiled kernel makes the identical amortization. `kernel_mul_mm`
+(`ggml-metal.metal:6550-6553`) calls `dequantize_func(x, il, temp_a)` once
+per `BLOCK_SIZE_K` step, and `dequantize_q4_K`
+(`ggml-metal.metal:335-352`) computes `dl`/`ml` (the header) exactly ONCE
+per call, then loops 16 elements applying it:
+
+```c
+template <typename type4x4>
+void dequantize_q4_K(device const block_q4_K * xb, short il, thread type4x4 & reg) {
+    device const uchar * q = xb->qs;
+    short is = (il/4) * 2;
+    q = q + (il/4) * 32 + 16 * (il&1);
+    il = il & 3;
+    const uchar2 sc = get_scale_min_k4_just2(is, il/2, xb->scales);
+    const float d   = il < 2 ? xb->d : xb->d / 16.h;
+    const float min = xb->dmin;
+    const float dl = d * sc[0];
+    const float ml = min * sc[1];
+    const ushort mask = il < 2 ? 0x0F : 0xF0;
+    for (int i = 0; i < 16; ++i) {
+        reg[i/4][i%4] = dl * (q[i] & mask) - ml;
+    }
+}
+```
+
+**What was missing, in one sentence:** the tile-reuse invariant held for
+DEVICE-MEMORY REUSE ACROSS TOKENS (real, staged once, consumed by every
+column), but not for HEADER REUSE ACROSS ELEMENTS WITHIN A SUB-BLOCK inside
+the staging loop itself, which both this codebase's own row-blocked kernel
+and ggml's `dequantize_q4_K` already do and `push_tiled_gemm_body` did not.
+
+### Step 2 — the fix
+
+`omega/src/msl.rs`'s weight-staging loop now assigns one thread per tile
+row (`w_row = tiitg; w_row < BLOCK_M; w_row += block_threads`) rather than
+one thread per flat element, decodes `q4k_header_for` ONCE per
+`min(32, BLOCK_K)`-wide chunk of that row, and applies `q4k_run8` in 8-wide
+batches across the chunk — the identical pattern `push_packed_row_blocked_body`
+already uses, now shared by both kernels instead of duplicated-and-diverged.
+`chunk_width`/`num_chunks` are derived in Rust from `TILED_GEMM_BLOCK_K`
+(never a bare literal), and `omega/build.rs` gained a new cross-axis
+validation, `require_multiple_of_eight` (alongside the existing
+`require_multiple_of_sixteen`/`require_divides_q4k_block`), so a future
+`block_k` reconfiguration that would break the chunking (anything not a
+multiple of 8) fails at build time, not silently at runtime. Default value
+(`block_k = 32`) is unchanged; the new constraint only rules out
+configurations nobody uses today.
+
+**Residual instrumentation defect found and fixed in the same row:** ROW
+112's own `classify_kind` (`omega/src/metal.rs`) tags a kernel body as
+`reduce-packed-row-blocked` whenever its emitted MSL contains the substring
+`"q4k_run8(blk"`. Because this row's fix makes the tiled kernel call
+`q4k_run8` too, that string now matches BOTH kernel bodies, and the
+diagnostic bucket silently mislabeled genuinely-tiled ops as row-blocked —
+exactly the "diagnostic-classifier gap, not a correctness one" ROW 112 named
+but did not close. Fixed by checking `"simdgroup_multiply_accumulate"`
+first (only ever emitted by `push_tiled_gemm_body`), giving a new
+`"reduce-tiled-gemm"` bucket. `instrument`-feature-gated, diagnostic-only,
+zero production effect — but load-bearing for THIS row's own measurement,
+so fixed rather than worked around.
+
+### Scaling curve — the falsifiable claim
+
+Per-op diagnostic harness (dev profile), `metal-tiled-gemm` ON, 3 runs per
+`new_count`, `uptime` polled before each batch (2.77-4.16 throughout). Token
+counts achieved via `PROXIMA_PROMPT` and verified from the harness's own
+`token_breakdown` `new_count=` field (llama-style, not assumed):
+
+| `new_count` | eligible for tiled? | bucket | mean gpu_ms | CoV | min/max |
+|---|---|---|---|---|---|
+| 2 | no (`< TILED_GEMM_MIN_TOKENS`=8) | `reduce-packed-row-blocked` (225 ops, all) | 93.43 | 14.4%* | 84.087/109.734 |
+| 5 | no | `reduce-packed-row-blocked` (225 ops, all) | 197.66 | 1.86% | 193.724/201.333 |
+| 12 | yes | `reduce-tiled-gemm` (92 ops: gate/up/down/logits) | **214.489** | **0.018%** | 214.449/214.541 |
+| 23 | yes | `reduce-tiled-gemm` (92 ops) | **223.100** | **0.099%** | 222.820/223.357 |
+| 31 | yes | `reduce-tiled-gemm` (92 ops) | **234.103** | **0.267%** | 233.661/234.987 |
+
+\*n=2's first run paid extra pipeline-compile cost (a cold-cache artifact
+this same file's own ROW 100 already documented); the last two runs (84.087,
+86.468) agree to 2.8%.
+
+**Reading the shape, not the total:** from `new_count=12` to `new_count=31`
+(token count up 2.583x), the tiled bucket rose 234.103/214.489 = **1.0915x
+— 9% growth for 158% more tokens.** That is the flat-ish curve the brief's
+success criterion asked for, not the linear one ROW 112 found.
+
+**The control, in the SAME runs:** the 133 ops that remain row-blocked at
+every `new_count` in this table (attention Q/K/V/output — outside
+`classify_tiled_gemm`'s documented 2-D-matmul scope, ROW 107) went
+137.886 -> 261.337 -> 353.388 ms across the identical `new_count=12/23/31`
+sweep: 353.388/137.886 = **2.563x for a 2.583x token increase — linear,
+as expected, because these ops never got the fix.** Same host, same
+process, same moment — isolates the fix's effect from any host-load
+confound.
+
+**The incumbent's own scaling, for reference** (feature OFF, current
+default, all 225 ops row-blocked, same `new_count` sweep, 3 runs each):
+
+| `new_count` | mean gpu_ms | CoV | min/max |
+|---|---|---|---|
+| 12 | 476.79 | 4.29%† | 461.793/505.709 |
+| 23 | 891.294 | 0.041% | 890.968/891.807 |
+| 31 | 1206.420 | 0.059% | 1205.642/1207.358 |
+
+†first run's 505.709 is a cold-pipeline outlier (same pattern as the n=2
+row above); the other two agree to 0.23%. Ratio n=31/n=12 (median-clean
+pair, 23 vs 31 track linearly at 1206.420/891.294=1.354 for a 1.348 token
+ratio) confirms the OLD design scales with tokens, matching ROW 112's own
+27.66x finding at the decode/prefill extremes.
+
+### Same family, old kernel vs new kernel, at `new_count=31`
+
+ROW 112's own per-family table (feature OFF, single run) gives the
+row-blocked cost of exactly the four families `classify_tiled_gemm` makes
+eligible (`output.weight`, `ffn_gate`, `ffn_up`, `ffn_down` — the plain
+2-D matmuls; attention stays row-blocked in both arms):
+25.468 + 309.027 + 306.466 + 281.267 = **922.228 ms** (OLD, row-blocked).
+This row's `reduce-tiled-gemm` bucket (same families, NEW kernel, 3-run
+mean at `new_count=31`): **234.103 ms**.
+
+**922.228 / 234.103 = 3.940x FASTER, same family, same host class, same
+token count.** And against decode's cost for that same family (ROW 112:
+0.738+10.557+10.556+9.984 = 31.835 ms at `new_count=1`, structurally
+guaranteed unreachable by the tiled path since `1 < TILED_GEMM_MIN_TOKENS`):
+the decode-to-prefill multiplier for this family falls from
+**922.228/31.835 = 28.97x (OLD, matching ROW 112's per-family 21x-34.5x
+band) to 234.103/31.835 = 7.353x (NEW)** — not fully closed, but the
+residual is now flat with token count (the table above), not linear.
+
+### Production-shaped release-build measurement — ROW 109's own methodology, re-run fresh
+
+**Command** (identical to ROW 109's): `cargo test -p proxima-model-interop
+--release --lib --features metal,instrument[,metal-tiled-gemm] --no-run`,
+then `PROXIMA_PREFAULT=1 PROXIMA_MAX_TOKENS=24 <testbin> --exact --nocapture
+--ignored bind::real_openchat_file::runs_the_cached_decode_loop_on_the_metal_backend_and_reports_the_plan_cache`.
+Prefill = `step=0`'s `step_wall_ms`; decode = mean of `step=1..23`'s
+`step_wall_ms`, 3 runs per arm.
+
+| arm | n | prefill min/median/max, ms | prefill CoV | decode mean, ms/token | llama Metal (not same-window) |
+|---|---|---|---|---|---|
+| BEFORE (feature off, current default) | 3 | 2019.345 / 2080.166 / 2086.257 | 1.47% | 68.491 | prefill 103.2 / decode 17.62 |
+| AFTER (`metal-tiled-gemm` on, this row) | 3 | 1344.174 / 1399.666 / 1461.146 | 3.41% | 68.605 | — |
+
+BEFORE reproduces ROW 109's own BEFORE (2055.860/2085.493/2103.715) within
+0.9% on every percentile — same kernel, same host class, confirms nothing
+drifted underneath this row.
+
+**prefill AFTER/BEFORE (mean) = 1401.662 / 2061.923 = 0.680, i.e. AFTER is
+1.471x FASTER** (min-vs-min: 1344.174/2019.345 = 1.502x faster;
+median-vs-median: 1399.666/2080.166 = 1.486x faster — a stable ~1.47-1.50x
+win, not a noise artifact). **This reverses ROW 109's own verdict on this
+exact kernel and methodology: 1.632x SLOWER (ROW 109) is now 1.47-1.5x
+FASTER than the row-blocked incumbent it competes with**, on the
+incumbent's own turf (prefill, real openchat checkpoint, real Metal
+device).
+
+**Decode: 68.605 vs 68.491 ms/token, delta +0.17% — within noise, no
+measurable change**, exactly what `TILED_GEMM_MIN_TOKENS` is built to
+guarantee (`new_count=1 < 8` at every decode step, so `classify_tiled_gemm`
+returns `None` and decode never reaches `push_tiled_gemm_body` — the
+codegen assertion is `omega/src/msl.rs`'s own unit test, "one token must
+never clear TILED_GEMM_MIN_TOKENS" at line 3383, part of the 80-passed
+suite below).
+
+**Against llama Metal's 103.2 ms:** BEFORE = 2061.923/103.2 = **19.98x**
+(median 2080.166/103.2 = 20.16x, matching the brief's own "20.2x" citation).
+AFTER = 1401.662/103.2 = **13.58x** (median 1399.666/103.2 = 13.56x). **Real
+progress — the gap narrows from ~20x to ~13.6x — and NOT closed. The
+remaining 13.6x is not this row's claim to make; it is the honest residual.**
+
+### Correctness
+
+**Relative error, before and after: unchanged, 3.318e-5** (tolerance
+`5e-3`, `metal_matmul_on_packed_q4k_weights_matches_the_dequantized_f32_cpu_path_at_tile_scale`,
+re-run fresh post-fix: `rows=12 k=768 tokens=20 max_diff=0.4248047
+max_magnitude=12801.907 relative=0.00003318292`). Expected: `q4k_header_for`
++ `q4k_run8` and `q4k_element` are algebraically identical formulas for the
+same dequantized value, so the fix changes redundant work, not the result.
+
+**Generated text, byte-identical across every arm this row ran:**
+`"Here is a simple Python function that returns the nth Fibonacci number
+using recursion:\n\n\`\`\`"` — release build, full 24-token loop, BOTH
+feature off and on. The per-op diagnostic harness's shorter probes agree on
+every token they share (`"Here is a simple Python"` at 5 tokens,
+`"Here"` at 1 token, decode control) — matching ROW 108/109/110/111/112's
+own captures, unbroken by this row's change.
+
+### Gates, actual numbers
+
+| gate | command | result |
+|---|---|---|
+| omega tests, default | `cargo nextest run -p omega` | **76 passed**, 1 skipped |
+| omega tests, `metal-tiled-gemm` | `cargo nextest run -p omega --features std,cpu,metal,metal-tiled-gemm` | **80 passed**, 1 skipped |
+| proxima-tensor | `cargo nextest run -p proxima-tensor --features std,instrument` | **365 passed**, 4 skipped |
+| omega lib build | `cargo build -p omega --features std,cpu,metal --lib` | exit 0 |
+| clippy, `metal-tiled-gemm` | `cargo clippy -p proxima-model-interop --features metal,instrument,metal-tiled-gemm --all-targets -- -D warnings` | **BLOCKED — see below, not this row's defect** |
+| clippy, default | `cargo clippy -p omega --lib -- -D warnings` | **BLOCKED — same cause** |
+
+**The clippy gate did not pass, and this is reported rather than hidden.**
+`cargo clippy ... -D warnings` fails with `error: could not compile
+proxima-gguf (lib) due to 16 previous errors` — every one of them
+`clippy::chunks_exact_to_as_chunks` in `proxima-gguf/src/quant/{q6_k,q8_0}.rs`
+and (when `--all-targets` pulls the wider dev-dependency graph)
+`proxima-protocols/src/{inet/checksum,quic/connection/mod}.rs`, a lint this
+toolchain (`clippy 0.1.98`) apparently gained after ROW 112 last ran this
+exact gate clean. **Verified NOT caused by this row's diff**, three ways:
+`git status --porcelain` shows only `omega/build.rs`, `omega/omega-runtime.toml`,
+`omega/src/{metal,msl,sized}.rs` changed; `cargo clippy -p proxima-gguf
+--all-targets -- -D warnings` fails identically in complete isolation from
+any omega/model-interop code; and grepping every error location in both
+logs for `omega/` returns zero matches — every single reported error is in
+a file this row never touched, at a `file:line` `git log` shows last
+touched by `454ee3d` (`refactor(gguf): diagnostics on telemetry, not
+stdout`), weeks before this row. Out of this row's write scope
+(`omega/` + `proxima-tensor/docs/discipline.md` only) — reported per that
+scope's own "any other path: STOP and report," not fixed.
+
+### Cleanup
+
+`$CARGO_TARGET_DIR` (`tilereuse-target`, debug AND release profiles both
+built this row) deleted after extraction. Intermediate logs under
+`tilereuse/` (build logs, nextest logs, clippy logs, ~20 per-run capture
+files from the scaling-curve and release-build sweeps) deleted; this row's
+own tables are the kept, citable record.
+
+### Re-provable now
+
+- `cargo nextest run -p omega`
+- `cargo nextest run -p omega --features std,cpu,metal,metal-tiled-gemm`
+- `cargo nextest run -p proxima-tensor --features std,instrument`
+- `cargo build -p omega --features std,cpu,metal --lib`
+- `cargo test -p omega --features std,cpu,metal,metal-tiled-gemm --test metal_parity -- metal_matmul_on_packed_q4k_weights_matches_the_dequantized_f32_cpu_path_at_tile_scale --nocapture` (parity, 3.318e-5)
+- `cargo test -p proxima-model-interop --features metal,instrument,metal-tiled-gemm --lib -- --ignored profiles_one_real_prefill_step_by_per_op_gpu_time --nocapture` (scaling curve, vary `PROXIMA_PROMPT`/`PROXIMA_MAX_TOKENS=1` for `new_count`)
+- `cargo test -p proxima-model-interop --features metal,metal-tiled-gemm --release --lib -- --exact --nocapture --ignored bind::real_openchat_file::runs_the_cached_decode_loop_on_the_metal_backend_and_reports_the_plan_cache` (production-shaped prefill/decode/generated-text, with `PROXIMA_PREFAULT=1 PROXIMA_MAX_TOKENS=24`)
+- `cargo clippy -p proxima-gguf --all-targets -- -D warnings` (reproduces the pre-existing, out-of-scope block in isolation)

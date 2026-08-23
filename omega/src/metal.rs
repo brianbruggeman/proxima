@@ -707,11 +707,11 @@ pub fn execute_plan_named_op_timed(
 
 /// Classifies one [`BoundOp`]'s emitted kernel body the same way
 /// `omega/examples/real_forward_packed_probe.rs` (discipline log ROW 85)
-/// does: by grepping the SOURCE for the row-blocked call site vs the
-/// generic per-element scalar call site vs a SIMD cooperative combine,
-/// since [`crate::msl::emit`] is the one place that decides which of the
-/// three a given `Reduce` gets and none of that decision is exposed as its
-/// own accessor.
+/// does: by grepping the SOURCE for the tiled-GEMM simdgroup-matrix call
+/// site vs the row-blocked call site vs the generic per-element scalar call
+/// site vs a SIMD cooperative combine, since [`crate::msl::emit`] is the one
+/// place that decides which of the four a given `Reduce` gets and none of
+/// that decision is exposed as its own accessor.
 #[cfg(feature = "instrument")]
 fn classify_kind(bound: &BoundOp, packed_operands: &PackedOperands) -> &'static str {
     match &bound.kind {
@@ -722,6 +722,15 @@ fn classify_kind(bound: &BoundOp, packed_operands: &PackedOperands) -> &'static 
         BoundOpKind::Reduce {
             keep: Keep::Reduce, ..
         } => match emit(bound, packed_operands) {
+            // Checked BEFORE the row-blocked arm below: ROW 113's
+            // weight-staging fix made `push_tiled_gemm_body` call
+            // `q4k_run8`/`q4k_header_for` too (the same amortized decode
+            // `push_packed_row_blocked_body` already used), so the row-blocked
+            // arm's own `"q4k_run8(blk"` substring match now fires on BOTH
+            // kernel bodies -- `simdgroup_multiply_accumulate` only ever
+            // appears in [`crate::msl::push_tiled_gemm_body`]'s emitted
+            // source, so it is the one marker that still disambiguates them.
+            Ok(kernel) if kernel.source.contains("simdgroup_multiply_accumulate") => "reduce-tiled-gemm",
             Ok(kernel)
                 if kernel.source.contains("q4k_run8(blk")
                     || kernel.source.contains("q5k_value(blk")

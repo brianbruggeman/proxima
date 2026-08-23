@@ -45,6 +45,19 @@ fn require_divides_q4k_block(name: &str, value: usize) -> usize {
     value
 }
 
+/// ROW 113's weight-staging amortization (`push_tiled_gemm_body`'s
+/// `q4k_header_for`/`q4k_run8` loop, replacing the per-element `q4k_element`
+/// rederive) batches the nibble extract 8 elements at a time
+/// (`q4k_run8`'s own fixed width). Combined with [`require_divides_q4k_block`]
+/// (a power-of-two divisor of 256), this guarantees `block_k` is always
+/// either <= the Q4_K sub-block width (32) or a whole multiple of it, so
+/// `push_tiled_gemm_body`'s per-row staging loop never has a ragged
+/// remainder chunk.
+fn require_multiple_of_eight(name: &str, value: usize) -> usize {
+    assert!(value.is_multiple_of(8), "{name} must be a multiple of 8; got {value}");
+    value
+}
+
 fn get_int(table: &Value, section: &str, key: &str) -> i64 {
     table
         .get(section)
@@ -111,9 +124,12 @@ fn emit_sizing_consts() {
             "tiled_gemm.block_n",
             require_nonzero("tiled_gemm.block_n", resolve_int(&root, "tiled_gemm", "block_n")),
         );
-        let block_k = require_divides_q4k_block(
+        let block_k = require_multiple_of_eight(
             "tiled_gemm.block_k",
-            require_nonzero("tiled_gemm.block_k", resolve_int(&root, "tiled_gemm", "block_k")),
+            require_divides_q4k_block(
+                "tiled_gemm.block_k",
+                require_nonzero("tiled_gemm.block_k", resolve_int(&root, "tiled_gemm", "block_k")),
+            ),
         );
         out.push_str(&format!("pub const TILED_GEMM_BLOCK_M: u64 = {block_m};\n"));
         out.push_str(&format!("pub const TILED_GEMM_BLOCK_N: u64 = {block_n};\n"));
