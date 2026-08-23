@@ -10468,3 +10468,250 @@ kept, citable record.
   (`--ignored --exact --nocapture`), reading `step=0`'s `step_wall_ms` for
   prefill and the mean of `step=1..23` for decode — reproduces both columns
   of this row's own table.
+
+## ROW 112 — prefill's own byte question: the declared operand-buffer size barely moves (1.14x), but the packed-weight matmul family's GPU time rises 27.7x at essentially the same declared bytes — DERIVED, not directly counted, but the mechanism (grid size scales with `new_count`, one threadgroup per token independently streams the same weight row) explains it, and it is concentrated almost entirely in the row-blocked reduce family
+
+**Host:** Apple M1 Max, 64 GB, same box as every prior row. **Loadout:** noisy
+— shared-worktree contention from sibling agents drove 1-min load to
+16.42-23.67 partway through this row's own timed runs (`uptime` pasted
+before/after every command below); every GPU-timed number nonetheless came
+back CoV < 1% across 3 runs (`GPUStartTime`/`GPUEndTime` are a hardware
+timestamp, not a CPU wall-clock sample, so host scheduling jitter on THIS
+box did not visibly leak into the numbers this row reports — noted as an
+observation, not a general claim about every future noisy run).
+
+### The question this row answers
+
+Does a prefill forward (`new_count=31`) sweep the packed weight matrix once,
+like ROW 94 measured a decode step (`new_count=1`) does, or once per
+prompt position (~31x)? Reused ROW 94's own instrumentation exactly —
+`omega::metal::execute_plan_op_timed`'s `operand_bytes` field and
+`proxima-model-interop`'s `PROXIMA_METAL_OP_PROFILE_STEP`/`report_op_timings`
+harness — nothing parallel built. The only code change: a new ignored test,
+`bind::real_openchat_file::profiles_one_real_prefill_step_by_per_op_gpu_time`,
+identical to the existing decode-step probe but targeting `step=0` (where
+`run_decode_loop`'s `next_ids` is still the full prompt,
+`new_count=31` — `run_decode_loop`'s own `next_ids = ids` vs
+later `next_ids = alloc::vec![token_id]` split), plus a
+`metal-tiled-gemm` passthrough feature on `proxima-model-interop` (it had
+none before this row — `omega`'s own feature existed but nothing above it
+could turn it on without also hand-editing `omega`'s dependency line).
+
+### Task 1 — decode control (step=3, new_count=1): does it reproduce ROW 94's 1.0000x?
+
+3 fresh runs, `cargo test -p proxima-model-interop --features metal,instrument
+--lib -- --ignored profiles_one_real_decode_step_by_per_op_gpu_time
+--nocapture`, `uptime` before each: 23.67/22.82/18.21 (run1), 12.94/12.30
+(run2), 11.56/10.87 (run3) — noisy, declining.
+
+| run | total_gpu_ms | total_operand_bytes | row-blocked bucket bytes | row-blocked bucket gpu_ms |
+|---|---|---|---|---|
+| 1 | 59.899 | 4,621,123,540 | 4,069,849,664 | 43.701 |
+| 2 | 60.345 | 4,621,123,540 | 4,069,849,664 | 44.105 |
+| 3 | 59.611 | 4,621,123,540 | 4,069,849,664 | 43.612 |
+| **mean** | **59.952** | **4,621,123,540 (identical, 3/3)** | **4,069,849,664 (identical, 3/3)** | **43.806** |
+| **CoV** | **0.50%** | n/a (deterministic) | n/a (deterministic) | **0.49%** |
+
+`op_count=1196` and `op_count=225` (the row-blocked bucket) identical every
+run — **N asserted, not RED.** `4,069,849,664 / 4.07e9 = 1.0000x` against
+the declared weight set — **byte-for-byte identical to ROW 94's own
+figure, reproduced independently this session. The control passes: this
+instrument reads what ROW 94 says it reads.**
+
+### Task 2 — prefill (step=0, new_count=31), row-blocked path (default, `metal-tiled-gemm` off)
+
+Same harness, new test, 3 runs, `uptime` 9.05-10.24 (quieter than task 1 by
+the time these ran):
+
+| run | total_gpu_ms | total_operand_bytes | row-blocked bucket bytes | row-blocked bucket gpu_ms |
+|---|---|---|---|---|
+| 1 | 1418.567 | 5,277,073,972 | 4,219,763,264 | 1212.183 |
+| 2 | 1423.435 | 5,277,073,972 | 4,219,763,264 | 1216.086 |
+| 3 | 1411.495 | 5,277,073,972 | 4,219,763,264 | 1207.000 |
+| **mean** | **1417.832** | **5,277,073,972 (identical, 3/3)** | **4,219,763,264 (identical, 3/3)** | **1211.756** |
+| **CoV** | **0.35%** | n/a (deterministic) | n/a (deterministic) | **0.31%** |
+
+**MEASURED directly: the declared operand-byte total rises only 1.142x**
+(5,277,073,972 / 4,621,123,540) **from decode to prefill, and the
+row-blocked bucket's own declared bytes rise only 1.037x** (4,219,763,264 /
+4,069,849,664) **— nowhere near 31x.** Taken alone, this metric would say
+"no re-read problem." It does not settle the question, because
+`operand_bytes` (from `execute_plan_op_timed`'s own field, `omega/src/
+metal.rs:633-642`) sums `buffer.length()` — the STATIC size of the bound
+`MTLBuffer` — which is fixed once, at upload time, and does not grow with
+`new_count`. Only the activation-side buffers grow with `new_count`
+(hence the small +3.7%/+14.2% rises, both attributable to the
+`new_count`-sized activation and KV-cache operands riding alongside the
+weight in the same op's operand list); a kernel that reads the SAME weight
+buffer multiple times inside one dispatch is invisible to a metric that
+only ever sees the buffer's declared length once per op. **This is the
+residual this row cannot close with the brief's named instrument alone.**
+
+**What IS measured, and is the strongest evidence available: GPU time on
+that same, byte-flat row-blocked bucket rose 1211.756 / 43.806 = 27.66x**
+(mean-to-mean, both CoV-clean, no overlap between the two 3-run ranges —
+1207.000-1216.086 vs 43.612-44.105). Per named weight family (single run,
+run 1 of each — not independently 3-run-CoV'd per family, only the bucket
+aggregate above is):
+
+| family | decode gpu_ms | prefill gpu_ms | ratio |
+|---|---|---|---|
+| `output.weight` | 0.738 | 25.468 | 34.51x |
+| `blk.ffn_gate.weight` | 10.557 | 309.027 | 29.27x |
+| `blk.ffn_up.weight` | 10.556 | 306.466 | 29.04x |
+| `blk.ffn_down.weight` | 9.984 | 281.267 | 28.17x |
+| `blk.attn_q.weight` | 5.023 | 132.200 | 26.32x |
+| `blk.attn_output.weight` | 3.854 | 92.406 | 23.98x |
+| `blk.attn_k.weight` | 1.466 | 33.263 | 22.69x |
+| `blk.attn_v.weight` | 1.524 | 32.087 | 21.05x |
+
+**Every single packed-weight family rises in the SAME 21x-34.5x band,
+clustered around `new_count=31` — not concentrated in one weight, uniform
+across the whole row-blocked family.** (Residual, not chased further this
+row: the spread itself, smaller families like `attn_k`/`attn_v` landing
+lower at ~21-23x and larger ones like `ffn_gate`/`ffn_up`/`output.weight`
+landing higher at ~29-34.5x, is consistent with fixed per-dispatch
+launch overhead diluting the multiplier more at the decode baseline for
+small families than large ones — plausible, unconfirmed, not the load-bearing
+claim of this row.)
+
+**Mechanism, traced to source, not inferred:** `omega/src/msl.rs:1212-1214`,
+the row-blocked arm of `grid_threads`: `output_total.div_ceil(PACKED_ROWS_PER_GROUP
+as u64) * SIMD_WIDTH`, where `output_total` is the product of
+`output_axes`' extents — for a batched matmul this product includes the
+TOKEN axis alongside the feature axis, so at `new_count=31` the dispatch
+literally launches ~31x as many threadgroups as at `new_count=1`. The
+row-blocked kernel body (`push_packed_row_blocked_body`) assigns one
+threadgroup per (token, output-row-group) pair, and each threadgroup
+independently streams its own copy of the packed weight row from device
+memory — there is no cross-threadgroup reuse of an already-loaded row
+across the 31 tokens that share it. That is exactly what a `buffer.length()`-based
+byte counter cannot see (the buffer is the same one, read from repeatedly)
+and exactly what GPU time, at a near-flat declared-byte denominator, does
+show.
+
+**Labeled per Principle 18/19: the 27.66x figure is DERIVED (from GPU time,
+not a direct byte count) and explained by a traced mechanism (source-level,
+not a guess) — it is a RESULT, not a raw measurement, and it is NOT the same
+thing as a directly-counted memory-traffic multiplier, which this
+instrumentation cannot produce without a GPU performance-counter capture
+this row did not build.** Getting a directly-counted figure would need
+Metal's own GPU counter sampling (`MTLCounterSampleBuffer` /
+`os_signpost`-visible DRAM-traffic counters) or a kernel-side atomic byte
+counter — neither exists in this repo today; naming that gap, not closing
+it, is this row's own scope per the task brief ("do not attempt the fix").
+
+### Task 3 — same measurement with `metal-tiled-gemm` ON
+
+New passthrough feature this row added (`proxima-model-interop/Cargo.toml`):
+`metal-tiled-gemm = ["omega?/metal-tiled-gemm"]` — did not exist before
+(`omega`'s own `metal-tiled-gemm` feature, `eeadc2d`, had no path in from
+this crate). 3 runs, same prefill test, `--features
+metal,instrument,metal-tiled-gemm`:
+
+| run | total_gpu_ms | total_operand_bytes | generic-scalar (tiled) bucket bytes | generic-scalar bucket gpu_ms | row-blocked-remainder bucket gpu_ms |
+|---|---|---|---|---|---|
+| 1 | 2766.748 | 5,277,073,972 | 3,121,053,696 | 2207.047 | 352.484 |
+| 2 | 2767.178 | 5,277,073,972 | 3,121,053,696 | 2204.394 | 355.484 |
+| 3 | 2752.933 | 5,277,073,972 | 3,121,053,696 | 2198.153 | 350.392 |
+| **mean** | **2762.286** | **identical, 3/3, AND identical to the row-blocked run's own total** | **identical, 3/3** | **2203.198** | **352.787** |
+| **CoV** | **0.24%** | n/a | n/a | **0.17%** | **0.42%** |
+
+`op_count` splits 225 -> 133 still-classified `reduce-packed-row-blocked`
+(did not clear the tiled-gemm eligibility gate — `TILED_GEMM_MIN_TOKENS`/
+shape checks) + 92 reclassified `reduce-generic-scalar` (the tiled kernel's
+MSL body doesn't match `classify_kind`'s `q4k_run8(blk`/`simd_sum(`
+string-grep heuristic, `omega/src/metal.rs:716-740`, so it falls through
+to the generic bucket — a diagnostic-classifier gap, not a correctness
+one; `diagnose_kind`'s own structural gate still reports `"PASS"` for
+these families regardless of which body actually ran).
+
+**Directly answering the brief's own question: total_operand_bytes is not
+"not materially lower" — it is byte-for-byte IDENTICAL** (5,277,073,972,
+all 6 runs across both feature sets) **— confirming the tiled path is not
+reusing anything by this metric's own definition, because this metric
+cannot see reuse either way (it counts declared buffer size, which never
+changes). The GPU-time signal is unambiguous and goes the WRONG direction
+for a reuse story: matmul-family time (row-blocked-remainder + generic-scalar)
+rose to 352.787 + 2203.198 = 2555.985 ms mean, a further 2.11x SLOWER than
+the untiled row-blocked path's own 1211.756 ms, and 58.35x slower than the
+decode-control baseline (43.806 ms) — worse, not better, than the untiled
+path's 27.66x.** This is consistent with, not a re-derivation of, the
+existing ROW 109 finding ("multi-simdgroup GEMM ... still 1.63x slower
+... default off") — **that figure came from a DIFFERENT harness** (the
+production-shaped single-shared-command-buffer path) **and must not be
+conflated with this row's own 1.95x/2.11x** (this harness pays a per-op
+command-buffer submission cost neither production path pays — see
+`execute_plan_op_timed`'s own doc, `omega/src/metal.rs:587-601`). Both are
+real, from different measurement contexts, and both agree on the
+direction: tiled-gemm loses on prefill and correctly stays off.
+
+### What this means for the 20.2x prefill gap
+
+The packed-weight matmul family is 1211.756 of this harness's own 1417.832 ms
+total (85.5%) at `new_count=31`, row-blocked path — the dominant term, same
+as ROW 94 found for decode (71.6%). Its GPU-time multiplier (27.66x,
+mean-to-mean, CoV-clean on both sides, uniform across every named weight
+family in the 21x-34.5x band) sits close to, though systematically below,
+`new_count=31` — **consistent with, not conclusive proof of,** the
+brief's hypothesis that the row-blocked kernel re-streams the packed
+weight matrix roughly once per prompt position rather than once total.
+The gap between 27.66x and the naive 31x prediction is itself informative:
+either some genuine cross-token amortization already exists in parts of
+the row-blocked path (plausible but not traced this row), or per-dispatch
+fixed costs at the `new_count=1` baseline inflate the DECODE denominator
+enough to understate the true per-token multiplier (the family-level spread
+above, 21x-34.5x, is consistent with exactly this). **Either way, the
+redirect is the same the brief names: no amount of kernel-instruction
+tuning on the row-blocked path fixes a re-read problem — only genuine
+cross-token tile reuse would — and `metal-tiled-gemm`, the one path
+built toward that reuse, measurably does NOT reduce the declared byte
+footprint at all and is slower in both harnesses that have measured it.**
+**A directly-counted (not time-derived) memory-traffic multiplier is the
+one number this row could not produce with the named instrument, and is
+named here as the open item, not silently closed.**
+
+### Gates, actual numbers
+
+| gate | command | result |
+|---|---|---|
+| omega tests, default | `cargo nextest run -p omega` | **76 passed**, 1 skipped |
+| omega tests, `metal-tiled-gemm` | `cargo nextest run -p omega --features std,cpu,metal,metal-tiled-gemm` | **80 passed**, 1 skipped |
+| proxima-tensor | `cargo nextest run -p proxima-tensor --features std,instrument` | **365 passed**, 4 skipped |
+| omega lib build | `cargo build -p omega --features std,cpu,metal --lib` | exit 0 |
+| clippy | `cargo clippy -p proxima-model-interop --features metal,instrument,metal-tiled-gemm --all-targets -- -D warnings` | exit 0, zero warnings |
+| generated text, decode control (3 runs) | `op_profile_run` line, `--ignored profiles_one_real_decode_step_by_per_op_gpu_time` | `"Here is a simple Python"`, byte-identical all 3 runs |
+| generated text, prefill row-blocked (3 runs) | `--ignored profiles_one_real_prefill_step_by_per_op_gpu_time` | `"Here"`, byte-identical all 3 runs, and identical to decode control's own first token |
+| generated text, prefill `metal-tiled-gemm` (3 runs) | same test, `+metal-tiled-gemm` | `"Here"`, byte-identical all 3 runs AND identical to the row-blocked arm's own output — correctness parity holds despite the timing/classification differences |
+
+### Notes — host loadout
+
+Noisiest session recorded in this file to date at the CPU level (1-min load
+peaked 23.67, a sibling-agent contamination event per this repo's own
+`feedback_own_agents_contaminate_the_bench` pattern, NOT this row's own
+process — `git status --porcelain` in this worktree stayed limited to this
+row's own two edits throughout). Declared-byte counts were unaffected
+(deterministic, as ROW 94 already established). GPU-time CoV stayed under
+1% on every arm despite the CPU load spike, because `GPUStartTime`/
+`GPUEndTime` are a hardware command-buffer timestamp, not a CPU wall clock
+sample — reported as an observation about THIS row's own numbers, not a
+general claim that GPU timing is always insensitive to host contention.
+
+### Cleanup
+
+`$CARGO_TARGET_DIR` (this row's own scratch build output under
+`prefillbytes-target`, `debug` profile only) deleted after extraction.
+Intermediate per-run logs under `prefillbytes/` (9 `*_run{1,2,3}.log` op-profile
+captures, 3 build logs, 1 clippy log, 3 gate logs) deleted; this row's own
+tables are the kept, citable record.
+
+### Re-provable now
+
+- `cargo nextest run -p omega`
+- `cargo nextest run -p omega --features std,cpu,metal,metal-tiled-gemm`
+- `cargo nextest run -p proxima-tensor --features std,instrument`
+- `cargo build -p omega --features std,cpu,metal --lib`
+- `cargo clippy -p proxima-model-interop --features metal,instrument,metal-tiled-gemm --all-targets -- -D warnings`
+- `cargo test -p proxima-model-interop --features metal,instrument --lib -- --ignored profiles_one_real_decode_step_by_per_op_gpu_time --nocapture` (decode control, `step=3`, reproduces ROW 94's 1.0000x)
+- `cargo test -p proxima-model-interop --features metal,instrument --lib -- --ignored profiles_one_real_prefill_step_by_per_op_gpu_time --nocapture` (prefill, row-blocked, `step=0`)
+- `cargo test -p proxima-model-interop --features metal,instrument,metal-tiled-gemm --lib -- --ignored profiles_one_real_prefill_step_by_per_op_gpu_time --nocapture` (prefill, tiled)
