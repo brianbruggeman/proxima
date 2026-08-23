@@ -9547,3 +9547,100 @@ shape.
 
 15.0x on Metal and 1.11x on CPU in one session, and **neither arm wins.**
 Both columns belong in every row from here.
+
+## ROW 105 — we read their source. ROW 68's premise is REFUTED, most of the "craft" is identical, and three real differences remain
+
+Owner, three times: *"you have the llama code"* / *"there's no reason to guess"* / *"I don't understand why you don't compare it"*. Correct. Every gap claim in this file was a black-box ratio. Their checkout is
+`/Users/brianbruggeman/repos/others/llama.cpp` @ `b2534622` (2025-06-26).
+
+### REFUTED — ROW 68's central premise, with citation
+
+ROW 68 states llama.cpp *"is split across all threads, and there is no
+per-node open/close"*, and every CPU execution-model attempt since has been
+built on it.
+
+`ggml/src/ggml-cpu/ggml-cpu.c:2810-2826`:
+
+```
+for (int node_n = 0; ...; node_n++) {
+    ggml_compute_forward(&params, node);
+    if (node_n + 1 < cgraph->n_nodes) { ggml_barrier(state->threadpool); }
+}
+ggml_barrier(state->threadpool);
+```
+
+**They barrier after every node.** `ggml_barrier` (`ggml-cpu.c:522-558`) is a
+lock-free atomic-counter spin barrier, not an OS primitive — but it is a full
+synchronization point per node, exactly like ours.
+
+What they actually avoid is thread **SPAWN**: workers are parked in a
+persistent pool, never recreated. The claim conflated spawn cost with
+synchronization cost, and three sessions of work followed from the conflation.
+
+### REFUTED — the "5.7x from independent accumulators" attribution
+
+`arch/arm/quants.c:2405-2406` uses **two** scalar accumulators, `sumi1`/`sumi2`,
+horizontally reduced every sub-block pair. `cpu.rs:7015-7016` uses two, the
+same shape. That figure measured our SCALAR fallback against an older scalar
+baseline; it was never a NEON-vs-NEON difference and must not be cited as one.
+
+### SAME on both sides — hypotheses now closed, do not chase them
+
+| | ggml | ours |
+|---|---|---|
+| rows per SIMD group | `N_R0_Q4_K 4`, `N_SG_Q4_K 2` (`ggml-metal-impl.h:32-33`) | `PACKED_ROWS_PER_GROUP = 4` (`msl.rs:791`) |
+| threadgroup memory, decode kernel | none (`shmem` passed but unused for Q4_K mv) | none |
+| NEON dot | `ggml_vdotq_s32` (`quants.c:2408-2427`) | `sdot_s32` (`cpu.rs:7009-7042`) |
+| min correction | once per super-block (`quants.c:2384-2398`) | once per super-block (`cpu.rs:7081-7093`) |
+
+Our NEON dot is a byte-for-byte port and our own comments already cite their
+line ranges. "They use wider loads", "more accumulator chains", "no barrier" —
+all refuted by direct citation.
+
+### DIFFERENT — three, ranked by what the code shows
+
+**1. `simdgroup_matrix` — Apple's hardware matrix units. PREFILL ONLY.**
+`ggml-metal.metal:6526-6592`: `simdgroup_float8x8`, `simdgroup_load`,
+`simdgroup_multiply_accumulate`, staging 8192 bytes of threadgroup memory for
+both operand tiles (`:6510-6511`, `ggml-metal.m:3101`). Instantiated for Q4_K
+at `:6927`. **Zero occurrences of any `simdgroup_*` token in `omega`.**
+
+Gated at `ne11 > 4` (`ggml-metal.m:3038`, `ne11_mm_min = 4` at `:2857`), so it
+**never runs at m=1 decode** and explains none of our 3.73x per-token gap. It
+is squarely a prefill lever — and our Metal prefill is 2217 ms against our own
+CPU's 1236 and their 103. Adopting it is a second, tiled-GEMM kernel, not a
+tuning pass: our kernel is a vector kernel end to end and has no tiled form to
+promote.
+
+**2. Scale deferral on the decode kernel.** `ggml-metal.metal:5157-5175`
+accumulates raw nibble x activation into float4 partials and applies the
+sub-block scale once per group; `msl.rs:247-253` (`q4k_value`) applies
+`scale * nibble - minimum` PER ELEMENT. Roughly 3 of every 4 scale multiplies
+are avoidable. ROW 72 measured this kernel compute-bound, so float-op count
+should matter. Dispatched as ROW 106.
+
+**3. Dynamic work-stealing vs static split.** `ggml-cpu.c:1359-1385`: threads
+race an atomic `current_chunk` counter, chunk size 16 (64 when a dimension is
+1, `:1332-1336`). `cpu.rs:6271-6280` builds fixed row ranges via `split_at_mut`
+once, and a member that finishes early cannot take a neighbour's remainder.
+Mechanism difference, cost unmeasured.
+
+### Per-op comparison — what is actually available
+
+`GGML_PERF`, `perf_total_per_op_us`, `node->perf_runs`: **all removed upstream
+before this commit**, zero hits. `ggml_graph_print` prints op name and shape,
+no timing. `llama-bench` reports `avg_ns`/`avg_ts` per whole test config.
+`llama_perf_context_data` (`include/llama.h:1424-1432`) gives `t_p_eval_ms`
+and `t_eval_ms` — **phase averages**, which is the true provenance of every
+"ms/token" figure in this file.
+
+Metal per-encoder timing exists behind
+`ggml_backend_metal_capture_next_compute` (`ggml-metal.m:5811-5816`) writing a
+`.gputrace` for Xcode, but **no shipped binary calls it** and no env var
+enables it.
+
+**So the honest comparison granularity this checkout ships is whole-phase.**
+Our per-term tables have no like-for-like incumbent column and must not invent
+one (ROW 104's correction). The one route not yet opened:
+`tests/test-backend-ops` reports per-op numbers for synthetic single-op graphs.
+That is the next thing to open if per-op ggml figures are wanted.
