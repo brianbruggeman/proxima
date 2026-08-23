@@ -86,5 +86,11 @@ workspace = true
 
 [dev-dependencies]
 half = { version = "2.7.1", default-features = false }
-proxima-tensor = { path = "../proxima-tensor", features = ["config", "std"] }
+proxima-tensor = { path = "../proxima-tensor", features = ["config", "std", "test-support"] }
 rustix.workspace = true
+# `#[proxima::test]`/`#[case::desc(..)]` for the capability matrix in
+# `tests/capability_matrix.rs` -- the adaptive default driver (`::proxima::
+# test_support::run`) needs only `test-support`, no tokio/prime: every case
+# body is synchronous CPU work through `LoadedModel`'s own `Pipe`, matching
+# `generate.rs`'s own doc for why that pipe never yields.
+proxima = { workspace = true, features = ["test-support"] }

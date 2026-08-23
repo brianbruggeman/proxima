@@ -4216,6 +4216,7 @@ dependencies = [
  "half",
  "omega",
  "prime",
+ "proxima",
  "proxima-core",
  "proxima-gguf",
  "proxima-primitives",
