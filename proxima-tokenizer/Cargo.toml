@@ -31,6 +31,17 @@ bon = { workspace = true, optional = true }
 conflaguration = { workspace = true, features = ["derive", "toml"], optional = true }
 serde = { workspace = true, features = ["derive"], optional = true }
 proxima-gguf = { workspace = true, optional = true }
+# direct, not workspace-inherited: the workspace entry locks default-features
+# on, whose `std` feature pulls std; `sample.rs` is part of this crate's
+# no_std+alloc floor (never gated on the `std` feature), so this mirrors
+# proxima-primitives' own override (`proxima-primitives/Cargo.toml:131`) for
+# the same reason.
+# exp/ln for `sample.rs`'s softmax and min-p threshold: `f32::exp`/`f32::ln`
+# are `std`-only (no `core` equivalent without a libm), and this module is
+# part of the no_std+alloc floor -- same dependency proxima-gguf already
+# carries for the identical reason (`proxima-gguf/Cargo.toml:23`).
+fastrand = { version = "2.4.1", default-features = false }
+libm = { version = "0.2.16", default-features = false }
 
 [lints]
 workspace = true
