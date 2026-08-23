@@ -109,7 +109,6 @@ futures-rustls = { workspace = true, features = ["aws_lc_rs", "tls12"] }
 rustls = { workspace = true, features = ["std", "aws_lc_rs", "tls12"] }
 tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread", "net", "io-util", "time", "process"] }
 tokio-postgres = { workspace = true }
-rstest = { workspace = true }
 temp-env = { workspace = true }
 proxima = { workspace = true, features = ["test-support-tokio"] }
 
