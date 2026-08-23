@@ -264,6 +264,19 @@ pub struct ModelArchitecture {
     /// the key explicitly, so that fallback has not yet been exercised
     /// against a real load.
     pub rope_freq_base: f32,
+    /// `true` when the checkpoint reuses its token-embedding table as the LM
+    /// head instead of shipping a separate output-projection tensor (HF's
+    /// `tie_word_embeddings`, e.g. SmolLM2-135M-Instruct's real
+    /// `config.json`). Always `false` on the GGUF path
+    /// ([`architecture_from_metadata`]): llama.cpp's own writer always
+    /// emits a standalone `output.weight` tensor regardless of whether the
+    /// source checkpoint tied its embeddings, so this crate's GGUF loader has
+    /// never needed to distinguish the two. [`crate::hf_bind::bind_all_weights_from_safetensors`]
+    /// reads this field to decide which on-disk tensor to bind at the
+    /// forward program's `output.weight` node -- no new bind path, the same
+    /// [`crate::hf_bind::hf_bind_matmul_weight`] call with a different
+    /// source tensor name.
+    pub tied_embeddings: bool,
 }
 
 /// Reads [`ModelArchitecture`] out of `parsed`'s own metadata: looks up
@@ -325,6 +338,7 @@ pub fn architecture_from_metadata(parsed: &ParsedGguf) -> Result<ModelArchitectu
         expert_count,
         expert_used_count,
         rope_freq_base,
+        tied_embeddings: false,
     })
 }
 
@@ -1045,6 +1059,7 @@ mod tests {
                 expert_count: 0,
                 expert_used_count: 0,
                 rope_freq_base: proxima_tensor::sized::ROPE_FREQ_BASE_DEFAULT,
+                tied_embeddings: false,
             },
             "a checkpoint with no expert_count/expert_used_count key is dense: both fields must read as 0, \
              not error; a checkpoint with no rope.freq_base key must fall back to the sizing-config default"

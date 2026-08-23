@@ -90,6 +90,16 @@ pub struct HfConfig {
     /// How many of `num_experts` each token routes to, MoE-only.
     #[serde(default)]
     pub num_experts_per_tok: Option<u32>,
+    /// `true` when the checkpoint reuses `model.embed_tokens.weight` as its
+    /// LM head rather than shipping a separate `lm_head.weight` tensor.
+    /// Confirmed on the real
+    /// `~/.lmstudio/models/HuggingFaceTB/SmolLM2-135M-Instruct/config.json`
+    /// (`"tie_word_embeddings": true`, and that checkpoint's own
+    /// `model.safetensors` manifest carries no `lm_head.weight` entry at
+    /// all). Defaults to `false` for a `config.json` that omits the key,
+    /// matching HF's own schema default.
+    #[serde(default)]
+    pub tie_word_embeddings: bool,
 }
 
 fn default_rms_norm_eps() -> f32 {
@@ -185,6 +195,7 @@ pub fn architecture_from_hf_config(config: &HfConfig) -> ModelArchitecture {
         expert_count,
         expert_used_count,
         rope_freq_base: config.rope_theta,
+        tied_embeddings: config.tie_word_embeddings,
     }
 }
 
@@ -279,6 +290,7 @@ mod tests {
                 expert_count: 128,
                 expert_used_count: 8,
                 rope_freq_base: 1_000_000.0,
+                tied_embeddings: false,
             },
             "feed_forward must read moe_intermediate_size (768), not intermediate_size (6144), \
              once expert_count is nonzero"
@@ -315,6 +327,7 @@ mod tests {
                 expert_count: 0,
                 expert_used_count: 0,
                 rope_freq_base: proxima_tensor::sized::ROPE_FREQ_BASE_DEFAULT,
+                tied_embeddings: false,
             },
             "kv_heads falls back to query_heads, head_dim to hidden_size/num_attention_heads, \
              expert_count/expert_used_count to 0, rope_theta to the sizing-config default"
@@ -341,6 +354,59 @@ mod tests {
 
         assert_eq!(config.num_experts, Some(8), "num_local_experts must alias into num_experts");
         assert_eq!(architecture_from_hf_config(&config).expert_count, 8);
+    }
+
+    /// The real, on-disk `config.json` this session downloaded --
+    /// `~/.lmstudio/models/HuggingFaceTB/SmolLM2-135M-Instruct/config.json`,
+    /// copied verbatim -- a dense, tied-embedding Llama-family checkpoint:
+    /// the fixture that proves `tie_word_embeddings` is read into
+    /// [`ModelArchitecture::tied_embeddings`], not just the MoE fields the
+    /// Qwen3 fixture above exercises.
+    const REAL_SMOLLM2_CONFIG_JSON: &str = r#"{
+        "architectures": ["LlamaForCausalLM"],
+        "model_type": "llama",
+        "hidden_size": 576,
+        "intermediate_size": 1536,
+        "num_hidden_layers": 30,
+        "num_attention_heads": 9,
+        "num_key_value_heads": 3,
+        "rms_norm_eps": 1e-05,
+        "rope_theta": 100000,
+        "vocab_size": 49152,
+        "tie_word_embeddings": true,
+        "torch_dtype": "bfloat16",
+        "max_position_embeddings": 8192,
+        "hidden_act": "silu",
+        "attention_bias": false,
+        "mlp_bias": false,
+        "rope_scaling": null
+    }"#;
+
+    #[test]
+    fn real_smollm2_config_json_derives_a_tied_dense_architecture() {
+        let config = parse_hf_config(REAL_SMOLLM2_CONFIG_JSON.as_bytes()).expect("real smollm2 config.json parses");
+
+        assert!(config.tie_word_embeddings, "smollm2 ships tie_word_embeddings: true");
+
+        let architecture = architecture_from_hf_config(&config);
+        assert_eq!(
+            architecture,
+            ModelArchitecture {
+                vocab: 49_152,
+                embedding: 576,
+                feed_forward: 1536,
+                query_heads: 9,
+                kv_heads: 3,
+                head_dim: 64,
+                block_count: 30,
+                expert_count: 0,
+                expert_used_count: 0,
+                rope_freq_base: 100_000.0,
+                tied_embeddings: true,
+            },
+            "head_dim must derive as hidden_size/num_attention_heads (576/9=64) since no explicit \
+             head_dim key is present, and tied_embeddings must read config's tie_word_embeddings"
+        );
     }
 
     #[test]
