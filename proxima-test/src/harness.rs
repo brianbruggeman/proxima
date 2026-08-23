@@ -211,7 +211,7 @@ impl<F: Future> Future for CatchUnwind<F> {
 pub fn run<Body, Fut>(cassette: Option<CassetteSpec>, body: Body)
 where
     Body: FnOnce(TestCtx) -> Fut + Send + 'static,
-    Fut: Future<Output = ()> + Send + 'static,
+    Fut: Future<Output = ()> + 'static,
 {
     finish(drive_prime(cassette.as_ref(), body));
 }
@@ -229,7 +229,7 @@ where
 pub fn run_prime<Body, Fut>(cassette: Option<CassetteSpec>, body: Body)
 where
     Body: FnOnce(TestCtx) -> Fut + Send + 'static,
-    Fut: Future<Output = ()> + Send + 'static,
+    Fut: Future<Output = ()> + 'static,
 {
     finish(drive_prime(cassette.as_ref(), body));
 }
@@ -372,7 +372,7 @@ fn shared_prime_runtime() -> &'static PrimeRuntime {
 fn drive_prime<Body, Fut>(cassette: Option<&CassetteSpec>, body: Body) -> Option<CapturedPanic>
 where
     Body: FnOnce(TestCtx) -> Fut + Send + 'static,
-    Fut: Future<Output = ()> + Send + 'static,
+    Fut: Future<Output = ()> + 'static,
 {
     install_panic_hook_once();
     raise_fd_limit_once();
@@ -381,16 +381,25 @@ where
     let runtime = shared_prime_runtime();
     let (sender, receiver) = sync_channel::<Option<CapturedPanic>>(1);
 
-    let task = async move {
-        arm();
-        let result = CatchUnwind { inner: body(ctx) }.await;
-        let body_outcome = outcome_of(result);
-        let teardown_panic = run_teardowns(&teardowns).await;
-        disarm();
-        let _ = sender.send(body_outcome.or(teardown_panic));
-    };
+    // `spawn_factory_on_core`, not `spawn_on_core`: the factory (Send) crosses
+    // the per-core channel and constructs the test body's future ON the
+    // target core, so `Fut` itself never needs `Send` — this is what lets a
+    // `#[proxima::test]` body await a `?Send` base-rung `Pipe::call`
+    // (proxima-runtime/src/lib.rs:299-305 documents the same mechanism for
+    // `App::run_until_signal`'s per-core listener loop).
+    let factory: Box<dyn FnOnce() -> Pin<Box<dyn Future<Output = ()> + 'static>> + Send + 'static> =
+        Box::new(move || {
+            Box::pin(async move {
+                arm();
+                let result = CatchUnwind { inner: body(ctx) }.await;
+                let body_outcome = outcome_of(result);
+                let teardown_panic = run_teardowns(&teardowns).await;
+                disarm();
+                let _ = sender.send(body_outcome.or(teardown_panic));
+            })
+        });
 
-    match runtime.spawn_on_core(CoreId(0), Box::pin(task)) {
+    match runtime.spawn_factory_on_core(CoreId(0), factory) {
         Ok(()) => {}
         Err(SpawnError::InboxFull) => return failed("prime core 0 inbox full on dispatch"),
         Err(SpawnError::Disconnected) => return failed("prime core 0 disconnected"),
@@ -454,6 +463,42 @@ mod tests {
         let captured = drive_prime(None, |_cx| async { panic!("boom-prime") })
             .expect("a panicking body must be reported as failed");
         assert!(captured.message.contains("boom-prime"));
+    }
+
+    // mirrors `proxima_primitives::pipe::Pipe::call` (base rung, no `Send`
+    // bound on the returned future — `proxima-primitives/src/pipe/primitives.rs:100-101`)
+    // via the same `RefCell` idiom as `proxima_autograd::optimizer::AdamStep`
+    // (`proxima-autograd/src/optimizer.rs:217-254`): `RefCell` is `!Sync`, so
+    // `&RefCellPipe` is `!Send` and any future holding it — as `call`'s does —
+    // is `!Send` too, which is exactly what `drive_prime` could not accept
+    // before this change. The guard is dropped before the `.await` (never
+    // held across it) to stay clean under `clippy::await_holding_refcell_ref`.
+    #[cfg(feature = "test-prime")]
+    struct RefCellPipe {
+        state: RefCell<u32>,
+    }
+
+    #[cfg(feature = "test-prime")]
+    impl RefCellPipe {
+        async fn call(&self, delta: u32) -> u32 {
+            {
+                let mut guard = self.state.borrow_mut();
+                *guard += delta;
+            }
+            std::future::ready(()).await;
+            *self.state.borrow()
+        }
+    }
+
+    #[cfg(feature = "test-prime")]
+    #[test]
+    fn prime_drives_a_non_send_refcell_backed_pipe_future() {
+        let outcome = drive_prime(None, |_cx| async move {
+            let pipe = RefCellPipe { state: RefCell::new(0) };
+            assert_eq!(pipe.call(5).await, 5);
+            assert_eq!(pipe.call(3).await, 8);
+        });
+        assert!(outcome.is_none(), "non-Send body must run to completion");
     }
 
     #[cfg(feature = "tokio-driver")]
