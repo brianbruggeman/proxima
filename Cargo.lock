@@ -4603,6 +4603,7 @@ dependencies = [
  "bon",
  "bytes",
  "conflaguration",
+ "half",
  "proxima",
  "proxima-codec",
  "proxima-primitives",
