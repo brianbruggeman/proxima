@@ -76,8 +76,13 @@ pub enum SafetensorsError {
     #[error("tensor name {name:?} is reserved for the __metadata__ map")]
     ReservedTensorName { name: String },
 
-    /// A tensor's `data` byte length doesn't match what its `shape` and
-    /// `dtype` imply.
+    /// A tensor's byte range doesn't match what its `shape` and `dtype`
+    /// imply: `shape.iter().product() * dtype.size_bytes()`. The writer
+    /// checks this against the caller's `data` slice before ever emitting a
+    /// header; the reader checks the identical arithmetic against the
+    /// header's own declared `data_offsets` range, so a malformed or
+    /// adversarial header cannot declare a shape wider than its own
+    /// byte range and have a downstream consumer read past it.
     #[error("tensor {tensor:?} data is {found} bytes, expected {expected} from its shape and dtype")]
     TensorDataLengthMismatch {
         tensor: String,

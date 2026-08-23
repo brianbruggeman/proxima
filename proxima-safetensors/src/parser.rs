@@ -284,6 +284,17 @@ fn parse_tensor_entry(name: &str, value: &serde_json::Value) -> Result<TensorEnt
         });
     }
 
+    let element_count: u64 = shape.iter().product();
+    let expected = element_count * dtype.size_bytes() as u64;
+    let found = end - start;
+    if expected != found {
+        return Err(SafetensorsError::TensorDataLengthMismatch {
+            tensor: name.to_string(),
+            expected,
+            found,
+        });
+    }
+
     Ok(TensorEntry {
         name: name.to_string(),
         dtype,
