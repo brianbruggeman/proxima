@@ -32,6 +32,13 @@ thiserror.workspace = true
 tempfile.workspace = true
 temp-env.workspace = true
 proxima = { workspace = true, features = ["test-support"] }
+# real-file parity test only (`tests/bf16_real_checkpoint_parity.rs`):
+# the crate's own [dependencies] entry above stays alloc-tier (no
+# dequantization is this crate's job), but exercising the actual matmul
+# kernel a real bf16 tensor reaches needs proxima-tensor's std-gated
+# cpu.rs -- dev-only, so a default build's dependency graph is unaffected.
+proxima-tensor = { path = "../proxima-tensor", features = ["std", "config", "test-support"] }
+half = { version = "2.7.1", default-features = false }
 
 [lints]
 workspace = true
