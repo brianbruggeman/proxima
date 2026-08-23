@@ -175,7 +175,7 @@ impl ListenProtocol for FramedListenProtocol {
                 })?
             };
             if let Some(sender) = ready_signal {
-                let _ = sender.send(());
+                let _ = sender.send(Ok(()));
             }
             debug!(label = %label, %bind, use_reuseport, "framed listener bound");
             loop {

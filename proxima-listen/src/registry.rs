@@ -33,6 +33,16 @@ pub enum HandlerDispatch {
     },
 }
 
+/// The readiness channel every [`ListenProtocol::serve`] implementation is
+/// handed via [`ServeContext::ready_signal`]. Carries `Ok(())` once the real
+/// `bind`/`listen` syscalls succeed, or `Err(ProximaError)` when startup
+/// fails — so a caller blocked on [`crate::handle::LISTENER_READY_TIMEOUT`]
+/// sees the actual cause (bind permission, port-in-use, missing-feature
+/// config error) instead of a bare timeout. A genuine timeout (no message at
+/// all within the window) still means "nothing ever reported in either
+/// direction", which is a real hang, not a masked failure.
+pub type ReadySignal = std::sync::mpsc::Sender<Result<(), ProximaError>>;
+
 pub struct ServeContext {
     pub telemetry: TelemetryHandle,
     pub runtime: Option<Arc<dyn Runtime>>,
@@ -43,11 +53,14 @@ pub struct ServeContext {
     pub datagram_factory: Option<Arc<dyn proxima_primitives::stream::DatagramFactory>>,
     pub handler_dispatch: HandlerDispatch,
     /// fired once this lane's listening socket has completed its real
-    /// `bind`/`listen` syscalls. `Listener::run_with_runtime` blocks on one
-    /// signal per lane before handing back a `ListenerHandle` — closing the
+    /// `bind`/`listen` syscalls (`Ok(())`), or once startup has definitively
+    /// failed (`Err`). `Listener::run_with_runtime` blocks on one signal per
+    /// lane before handing back a `ListenerHandle` — closing both the
     /// startup race where `bind_addr()` reports a resolved address before
-    /// any lane has actually started accepting on it.
-    pub ready_signal: Option<std::sync::mpsc::Sender<()>>,
+    /// any lane has actually started accepting on it, AND the failure-
+    /// swallowing race where a bind error was logged and dropped while the
+    /// caller sat out the full timeout. See [`ReadySignal`].
+    pub ready_signal: Option<ReadySignal>,
 }
 
 impl ServeContext {
@@ -94,7 +107,7 @@ impl ServeContext {
     }
 
     #[must_use]
-    pub fn with_ready_signal(mut self, ready_signal: std::sync::mpsc::Sender<()>) -> Self {
+    pub fn with_ready_signal(mut self, ready_signal: ReadySignal) -> Self {
         self.ready_signal = Some(ready_signal);
         self
     }

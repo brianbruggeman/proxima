@@ -56,8 +56,9 @@ pub use serve_multiplexed::{WireEvent, wait_for_wire_event};
 mod registry;
 #[cfg(feature = "std")]
 pub use registry::{
-    HandlerDispatch, ListenProtocol, ListenProtocolFluent, ListenRegistry, ServeBuilder,
-    ServeContext, ThreadLocalListenProtocol, ThreadLocalListenRegistry, dispatch_handler, peer_ip,
+    HandlerDispatch, ListenProtocol, ListenProtocolFluent, ListenRegistry, ReadySignal,
+    ServeBuilder, ServeContext, ThreadLocalListenProtocol, ThreadLocalListenRegistry,
+    dispatch_handler, peer_ip,
 };
 
 /// Sans-IO HTTP connection-preface classifier, folded in from the former
