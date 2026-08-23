@@ -64,15 +64,14 @@ mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
     use proptest::prelude::*;
-    use rstest::rstest;
-
-    #[rstest]
+    
+    #[proxima::test]
     #[case::forward(1, 2, true)]
     #[case::backward(2, 1, false)]
     #[case::equal(5, 5, false)]
     #[case::wrap_forward(0xFFFF_FFFF, 0, true)]
     #[case::wrap_backward(0, 0xFFFF_FFFF, false)]
-    fn precedes_follows_rfc1982(#[case] left: u32, #[case] right: u32, #[case] expected: bool) {
+    async fn precedes_follows_rfc1982(#[case] left: u32, #[case] right: u32, #[case] expected: bool) {
         assert_eq!(SeqNum(left).precedes(SeqNum(right)), expected);
     }
 
@@ -135,7 +134,7 @@ mod tests {
     }
 
     // RFC 9293 §3.4 Table 6 worked examples (see docs/tcp-data-path/discipline.md).
-    #[rstest]
+    #[proxima::test]
     #[case::left_edge(100, 10, 100, 0, true)]
     #[case::right_edge_inclusive(100, 10, 109, 0, true)]
     #[case::past_window(100, 10, 110, 0, false)]
@@ -144,7 +143,7 @@ mod tests {
     #[case::data_into_zero_window(100, 0, 100, 5, false)]
     #[case::tail_lands_in_window(100, 10, 95, 10, true)]
     #[case::wraparound(0xFFFF_FFFE, 8, 2, 0, true)]
-    fn segment_acceptable_matches_table6(
+    async fn segment_acceptable_matches_table6(
         #[case] rcv_nxt: u32,
         #[case] rcv_wnd: u32,
         #[case] seg_seq: u32,
