@@ -11867,3 +11867,41 @@ consistent leader-advantage direction across every one of six runs. That
 residual is real information this log did not have before, but it targets a
 narrower, unasked-for hypothesis (chunk-floor tuning / wake-order bias) that
 was not built this row. No code changed; no rollback applies.
+
+## ROW 118 — CORRECTION to ROW 105: we already have work-stealing. The coordinator shipped the error into a brief.
+
+ROW 105 listed three differences against ggml. The third claimed we use a static split while ggml steals. **The half about us is false.**
+
+`cpu.rs:6271-6280` only BUILDS the chunk vector; it does not assign it. `row_chunk_count` (`cpu.rs:6187-6192`) oversubscribes to `workers * ROW_OVERSUBSCRIBE` (= 4) chunks, and both dispatch paths claim from a shared atomic cursor by `fetch_add` — the pool path via `claim_and_run_rows`, the cohort path at `prime/src/os/cohort.rs:789-895`. That is ggml's shape.
+
+Landed `b8b4bb1` (2026-08-19), refined `388d93a` (2026-08-20). **Both predate ROW 105.**
+
+### How it got in, which matters more than the error
+
+The source-diff agent read the `split_at_mut` that constructs the vector and concluded static assignment without following through to the claim loop. **The coordinator then quoted that conclusion into a build brief without opening `cpu.rs`.** The next agent verified it as its first step, found it false, and stopped — the only reason a duplicate of a production primitive did not land.
+
+**A citation is only as good as the last person who opened the file. A brief that acts on one must re-open it.** Reading an artifact once does not make a downstream quotation of that reading an artifact.
+
+ROW 105's other findings stand: the ROW 68 barrier refutation was verified directly (`ggml-cpu.c:2810-2826`), and simdgroup absence by grep. Only the work-stealing row is retracted.
+
+### What got measured anyway — new, and real
+
+Per-worker busy time inside a matmul round, reusing prime's existing `cohort-instrument` counters already printed at `proxima-model-interop/src/bind.rs:899-909`. Nothing new built. 3 reps, 8 workers, host NOT quiet (load 5-11, sibling contention seen via `ps aux`):
+
+| phase | spread (max-min)/max | CoV across reps |
+|---|---|---|
+| prefill | **2.06%-7.00%**, mean 4.56% | 54% (n=3, above floor) |
+| **decode** | **13.12%-22.66%**, mean 18.30% | 26% |
+
+**Decode imbalance persists WITH stealing already running**, and its shape is not random: all 6 runs show slot 0 busiest, slot 7 least, monotonic between. A reproducible leader advantage.
+
+Two candidate mechanisms, neither tested:
+
+- leader wake-order bias — slot 0 claims before later slots are awake
+- `MIN_MACS_PER_CHUNK` too coarse for decode's small matmuls, so oversubscription collapses toward one chunk per worker and nothing is left to steal
+
+The second is checkable from the constant and the decode shapes without executing anything.
+
+### Bounding it before anyone builds
+
+Decode is our worst CPU ratio: **56.55 ms/tok vs llama's 39.14, 1.445x** (ROW 116, one window). If the slowest worker sets the round and spread is ~18%, perfect balance recovers at most that fraction of the parallel portion. It narrows the ratio; it does not close it. **Size it before building it.** Three kernel attempts today were built before their deciding property was measured, and all three lost.
