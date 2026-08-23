@@ -101,3 +101,4 @@ rustix.workspace = true
 # body is synchronous CPU work through `LoadedModel`'s own `Pipe`, matching
 # `generate.rs`'s own doc for why that pipe never yields.
 proxima = { workspace = true, features = ["test-support"] }
+proxima-tokenizer = { path = "../proxima-tokenizer", default-features = false, features = ["hf"] }
