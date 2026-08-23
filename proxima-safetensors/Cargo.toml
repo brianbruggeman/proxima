@@ -29,9 +29,9 @@ serde_json.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]
-rstest.workspace = true
 tempfile.workspace = true
 temp-env.workspace = true
+proxima = { workspace = true, features = ["test-support"] }
 
 [lints]
 workspace = true

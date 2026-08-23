@@ -50,7 +50,6 @@ mod tests {
     use alloc::vec;
     use alloc::vec::Vec;
     use proxima_tensor::DType;
-    use rstest::rstest;
 
     /// Builds a real safetensors wire buffer in memory: `[u64 LE header
     /// len][header JSON][raw tensor bytes, contiguous, in declaration
@@ -291,13 +290,13 @@ mod tests {
         ));
     }
 
-    #[rstest]
+    #[proxima::test]
     #[case::inverted_offsets(br#"{"t":{"dtype":"F32","shape":[1],"data_offsets":[8,0]}}"#)]
     #[case::missing_dtype(br#"{"t":{"shape":[1],"data_offsets":[0,4]}}"#)]
     #[case::missing_shape(br#"{"t":{"dtype":"F32","data_offsets":[0,4]}}"#)]
     #[case::missing_offsets(br#"{"t":{"dtype":"F32","shape":[1]}}"#)]
     #[case::header_not_object(b"[1,2,3]")]
-    fn malformed_header_shapes_never_panic(#[case] json: &[u8]) {
+    async fn malformed_header_shapes_never_panic(#[case] json: &[u8]) {
         let mut wire = Vec::new();
         wire.extend_from_slice(&(json.len() as u64).to_le_bytes());
         wire.extend_from_slice(json);

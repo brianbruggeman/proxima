@@ -78,9 +78,8 @@ pub fn dtype_to_wire(dtype: DType) -> Option<&'static str> {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
-    use rstest::rstest;
 
-    #[rstest]
+    #[proxima::test]
     #[case::bool_dtype("BOOL", DType::Bool)]
     #[case::int8("I8", DType::Int8)]
     #[case::uint8("U8", DType::UInt8)]
@@ -89,20 +88,20 @@ mod tests {
     #[case::bfloat16("BF16", DType::BFloat16)]
     #[case::float16("F16", DType::Float16)]
     #[case::float32("F32", DType::Float32)]
-    fn known_dtype_strings_map(#[case] wire: &str, #[case] expected: DType) {
+    async fn known_dtype_strings_map(#[case] wire: &str, #[case] expected: DType) {
         assert_eq!(map_dtype("t", wire), Ok(expected));
     }
 
     /// The dtype widening in `a0f5f97` added `Int16, UInt16, Int64,
     /// UInt64, Float64` to `proxima_tensor::DType`, so these five wire
     /// strings — previously `UnsupportedDtype` — now map to real variants.
-    #[rstest]
+    #[proxima::test]
     #[case::int16("I16", DType::Int16)]
     #[case::uint16("U16", DType::UInt16)]
     #[case::int64("I64", DType::Int64)]
     #[case::uint64("U64", DType::UInt64)]
     #[case::float64("F64", DType::Float64)]
-    fn widened_dtype_strings_now_map(#[case] wire: &str, #[case] expected: DType) {
+    async fn widened_dtype_strings_now_map(#[case] wire: &str, #[case] expected: DType) {
         assert_eq!(map_dtype("t", wire), Ok(expected));
     }
 
@@ -110,7 +109,7 @@ mod tests {
     /// machine scalar counterpart at all, and the micro-float family
     /// (sub-byte / 8-bit) has no `DType` variant either. These must keep
     /// returning a typed error rather than a silent, wrong-width guess.
-    #[rstest]
+    #[proxima::test]
     #[case::complex("C64")]
     #[case::fp6_e2m3("F6_E2M3")]
     #[case::fp6_e3m2("F6_E3M2")]
@@ -121,12 +120,12 @@ mod tests {
     #[case::fp8_e5m2fnuz("F8_E5M2FNUZ")]
     #[case::sub_byte("F4")]
     #[case::unknown_junk("NOT_A_DTYPE")]
-    fn unsupported_dtype_strings_return_typed_error(#[case] wire: &str) {
+    async fn unsupported_dtype_strings_return_typed_error(#[case] wire: &str) {
         let error = map_dtype("t", wire).expect_err("dtype has no DType counterpart");
         assert!(matches!(error, SafetensorsError::UnsupportedDtype { .. }));
     }
 
-    #[rstest]
+    #[proxima::test]
     #[case::bool_dtype(DType::Bool)]
     #[case::int8(DType::Int8)]
     #[case::uint8(DType::UInt8)]
@@ -140,15 +139,15 @@ mod tests {
     #[case::float16(DType::Float16)]
     #[case::float32(DType::Float32)]
     #[case::float64(DType::Float64)]
-    fn dtype_to_wire_round_trips_through_map_dtype(#[case] dtype: DType) {
+    async fn dtype_to_wire_round_trips_through_map_dtype(#[case] dtype: DType) {
         let wire = dtype_to_wire(dtype).expect("dtype has a wire representation");
         assert_eq!(map_dtype("t", wire), Ok(dtype));
     }
 
-    #[rstest]
+    #[proxima::test]
     #[case::int128(DType::Int128)]
     #[case::uint128(DType::UInt128)]
-    fn dtype_to_wire_returns_none_for_dtypes_safetensors_cannot_represent(#[case] dtype: DType) {
+    async fn dtype_to_wire_returns_none_for_dtypes_safetensors_cannot_represent(#[case] dtype: DType) {
         assert_eq!(dtype_to_wire(dtype), None);
     }
 }
