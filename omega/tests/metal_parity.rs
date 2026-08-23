@@ -1720,11 +1720,11 @@ fn codec_matmul_program(rows: u32, k: u32, weight_dtype: DType, compute_dtype: D
 
 /// The stratified matrix the coordinator asked for: [`QuantizedBlock`]'s
 /// codec axis crossed with the compute dtype axis, one parameterized body
-/// instead of one test per cell. `float32`/`q4_k`/`q5_k`/`q6_k` are the
-/// codecs with a real Metal unpack kernel today (see `unsupported_gpu_codec`'s
-/// doc in `omega::metal`) -- `q8_0` has no successful cell to compare here
-/// at all, so it gets its own dedicated error-path test below instead of a
-/// case that can never pass.
+/// instead of one test per cell. `float32`/`q4_k`/`q5_k`/`q6_k`/`q8_0` all
+/// have a real Metal unpack kernel today -- `q8_0`'s is the fully generic
+/// per-element path (`omega::msl::Q8_0_UNPACK_MSL`), not the row-blocked
+/// fast path the K-quants take, since its 32-element flat block has no
+/// analogue to their shared 256-element super-block.
 ///
 /// The oracle is always the plain-`f32` CPU path, weight dequantized first
 /// when the cell's codec is packed -- the same reasoning
@@ -1746,10 +1746,13 @@ fn codec_matmul_program(rows: u32, k: u32, weight_dtype: DType, compute_dtype: D
 #[case::q5k_at_float16("q5_k", DType::Float16, 1e-2)]
 #[case::q6k_at_float32("q6_k", DType::Float32, 1e-5)]
 #[case::q6k_at_float16("q6_k", DType::Float16, 1e-2)]
+#[case::q8_0_at_float32("q8_0", DType::Float32, 1e-5)]
+#[case::q8_0_at_float16("q8_0", DType::Float16, 1e-2)]
 async fn metal_matmul_parity_across_codec_and_dtype(#[case] codec: &str, #[case] compute_dtype: DType, #[case] epsilon: f32) {
     use proxima_gguf::quant::q4_k;
     use proxima_gguf::quant::q5_k;
     use proxima_gguf::quant::q6_k;
+    use proxima_gguf::quant::q8_0;
 
     let rows: u32 = 5;
     let blocks_per_row = 3usize;
@@ -1799,6 +1802,20 @@ async fn metal_matmul_parity_across_codec_and_dtype(#[case] codec: &str, #[case]
             }
             Some(weight_blocks)
         }
+        "q8_0" => {
+            // `Q8_0`'s block is 32 elements, not the K-quants' 256 --
+            // `blocks_per_row` above counts K-quant super-blocks, so this
+            // codec's own per-row block count is `k / QK8_0` instead.
+            let q8_blocks_per_row = k as usize / q8_0::QK8_0;
+            let mut weight_blocks = vec![0u8; rows as usize * q8_blocks_per_row * q8_0::BLOCK_BYTES];
+            for (row_f32, row_blocks) in weight_f32
+                .chunks_exact(k as usize)
+                .zip(weight_blocks.chunks_exact_mut(q8_blocks_per_row * q8_0::BLOCK_BYTES))
+            {
+                q8_0::quantize(row_f32, row_blocks).expect("row length is a whole multiple of QK8_0");
+            }
+            Some(weight_blocks)
+        }
         other => panic!("unhandled codec case in this matrix: {other}"),
     };
 
@@ -1808,6 +1825,7 @@ async fn metal_matmul_parity_across_codec_and_dtype(#[case] codec: &str, #[case]
         (Some(bytes), "q4_k") => QuantizedBlock::Q4K(bytes),
         (Some(bytes), "q5_k") => QuantizedBlock::Q5K(bytes),
         (Some(bytes), "q6_k") => QuantizedBlock::Q6K(bytes),
+        (Some(bytes), "q8_0") => QuantizedBlock::Q8_0(bytes),
         (Some(_), other) => panic!("unhandled codec case in this matrix: {other}"),
         (None, _) => QuantizedBlock::Float32(&weight_f32),
     };
@@ -1846,6 +1864,17 @@ async fn metal_matmul_parity_across_codec_and_dtype(#[case] codec: &str, #[case]
             }
             dequantized
         }
+        (Some(bytes), "q8_0") => {
+            let q8_blocks_per_row = k as usize / q8_0::QK8_0;
+            let mut dequantized = vec![0.0f32; rows as usize * k as usize];
+            for (row_blocks, row_f32) in bytes
+                .chunks_exact(q8_blocks_per_row * q8_0::BLOCK_BYTES)
+                .zip(dequantized.chunks_exact_mut(k as usize))
+            {
+                q8_0::dequantize(row_blocks, row_f32).expect("a whole number of q8_0 blocks");
+            }
+            dequantized
+        }
         (Some(_), other) => panic!("unhandled codec case in this matrix: {other}"),
     };
     let (f32_program, f32_sum) = codec_matmul_program(rows, k, DType::Float32, DType::Float32);
@@ -1867,37 +1896,11 @@ async fn metal_matmul_parity_across_codec_and_dtype(#[case] codec: &str, #[case]
     );
 }
 
-/// The other half of the matrix: [`QuantizedBlock`] codecs Metal has NO
-/// unpack kernel for yet must fail loud and NAME the codec -- never silent
-/// garbage, and never a silent CPU fallback. This is `unsupported_gpu_codec`
-/// pinned as a tested contract rather than an assumption: a silent wrong
-/// answer at exactly this boundary is what produced this session's 24
-/// tokens of `"開開開..."` garbage from a Metal decode the omega suite's own
-/// 45/45-green run never caught.
-#[proxima::test(runtime = "tokio")]
-#[case::q8_0("q8_0")]
-async fn metal_rejects_a_codec_with_no_unpack_kernel_and_names_it(#[case] codec: &str) {
-    let rows: u32 = 3;
-    let k: u32 = 32;
-    let weight_bytes = vec![0u8; 64];
-    let activation = vec![0.0f32; k as usize];
-
-    let (program, sum) = codec_matmul_program(rows, k, DType::UInt8, DType::Float32);
-    let weight_block = match codec {
-        "q8_0" => QuantizedBlock::Q8_0(&weight_bytes),
-        other => panic!("unhandled codec case in this matrix: {other}"),
-    };
-
-    let error = omega::execute(&program, &[], &[weight_block, QuantizedBlock::Float32(&activation)], &[sum])
-        .expect_err(&format!("{codec}: metal has no unpack kernel for this codec and must reject it, not fall back"));
-
-    let rendered = error.to_string();
-    assert!(
-        rendered.contains(codec),
-        "{codec}: error does not name the rejected codec -- rendered: {rendered:?}"
-    );
-    assert!(
-        rendered.contains("unpack kernel"),
-        "{codec}: error does not explain WHY the codec is rejected -- rendered: {rendered:?}"
-    );
-}
+// `metal_rejects_a_codec_with_no_unpack_kernel_and_names_it` (single case:
+// `q8_0`) retired here: `Q8_0` now has a real Metal unpack kernel
+// (`omega::msl::Q8_0_UNPACK_MSL`), covered instead by
+// `metal_matmul_parity_across_codec_and_dtype`'s `q8_0_at_float32`/
+// `q8_0_at_float16` cases above. No `QuantizedBlock` variant remains
+// unsupported on Metal, so this contract has no live case to assert against
+// -- a future codec added to `QuantizedBlock` ahead of its own MSL unpack
+// kernel should get this test (and a single `#[case]`) back.
