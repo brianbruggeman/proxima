@@ -12202,3 +12202,52 @@ PROXIMA_PREFAULT=1 PROXIMA_MAX_TOKENS=2 PROXIMA_MATMUL_WORKERS=1 cargo test -p p
 ### Cleanup
 
 `$CARGO_TARGET_DIR` (isolated scratch path) and all per-run `.log` files under this session's scratch directory removed after this row; the raw logs cited above were read in-session and their numbers transcribed here, satisfying re-provability without keeping the scratch tree.
+
+## ROW 121 — the format matrix, and the real blocker for HuggingFace checkpoints is that nothing executes half precision
+
+Owner asked which model formats we support and whether we can convert between them. Answered from source, not from crate descriptions.
+
+### Read / run
+
+| format | read | run | load-bearing citation |
+|---|---|---|---|
+| GGUF | yes | **yes** | `proxima-gguf/src/parser.rs` -> `generate.rs:340-361` -> `bind.rs:360-393`; runnable dtypes are F32 + Q4_K/Q5_K/Q6_K/Q8_0 only (`cpu.rs:453-476`) |
+| safetensors | yes | **no** | reader `proxima-safetensors/src/parser.rs`, writer `writer.rs:50`. `LoadedModel::load` (`generate.rs:340`) accepts only `&ParsedGguf`; `SafetensorsModel` appears nowhere in `generate.rs`/`cpu.rs`/`omega` |
+| ONNX | yes (container only) | **no** | `op_type: &'a str` (`proxima-onnx/src/messages.rs:125`), zero `op_type ==` matches in the crate. Crate doc `lib.rs:14-16`: "ONNX is out of scope here: it carries a computation graph ... a different, larger job" |
+| pytorch, CoreML, TFLite, TensorRT, ExecuTorch, MLX, npz | none | none | workspace-wide case-insensitive grep: zero hits. No crate, module, or dependency |
+
+### Conversion, A to B
+
+| from \ to | GGUF | safetensors | ONNX |
+|---|---|---|---|
+| **GGUF** | — | **lossy** | no |
+| **safetensors** | **yes**, F32/F16/Bf16/int scalars | — | no |
+| **ONNX** | no | no | — |
+
+GGUF -> safetensors: block-quantized tensors REJECT rather than convert (`transform.rs:53-79`, `UnrepresentableGgmlType` at `:59-62`), and typed KV metadata degrades to text — `transform.rs:36-46` states it: "The VALUE survives ... the ORIGINAL TYPE does not." Round-trip tested at `transform.rs:172-266`, plus a rejection test at `:268-289` proving quantized tensors error rather than silently drop.
+
+safetensors -> GGUF: `transform.rs:100`, dtype map `dtype.rs:34-52`. Bool/unsigned/128-bit rejected (`transform.rs:291-305`). Metadata is documented as NOT lossy in this direction (`transform.rs:85-92`).
+
+**A coordinator claim corrected:** I said safetensors -> GGUF "requires choosing a quantization." False. `safetensors_to_gguf` never calls a quantizer; F32/F16/Bf16 map 1:1 to `GgmlType::F32`/`F16`/`Bf16` (`dtype.rs:36-38`). `proxima-gguf` does ship quantizers (`q4_k.rs:396`, `q5_k.rs:407`, `q6_k.rs:328`, `q8_0.rs:143`) and this transform calls none of them.
+
+### The finding that actually matters
+
+`DType` has 15 variants including `BFloat16` and `Float16` (`proxima-tensor/src/dtype.rs:17-31`), both sized at 2 bytes, both `is_float()`, both tested. `convert.rs:147-161` ships a tested `f32 <-> bf16` pipe over `half::bf16`.
+
+**None of it executes.**
+
+- The typed evaluator rejects them outright: `cpu.rs:9979-9994`, `if matches!(dtype, DType::Bool | DType::BFloat16 | DType::Float16) { return Err(..) }`, reason "the typed evaluator does not support Bool, BFloat16, or Float16 yet".
+- The LLM-forward operand enum `QuantizedBlock` (`cpu.rs:453-476`) has **no** `BFloat16` or `Float16` variant at all — only `Float32`, `Q4K`, `Q5K`, `Q6K`, `Q8_0`.
+- Metal folds `BFloat16` into the `Float32` match arm (`omega/src/msl.rs:1432`, `omega/src/metal.rs:1531,2037`) and routes it to `upload_block_as_float(&[f32])`. That driver's own comment at `metal.rs:1525-1528` calls the arm "unreached by every program this driver compiles today ... none declares a `Float16` block input."
+
+So bf16 is a plumbed-through type tag with a conversion pipe and **zero executable path on either backend.**
+
+**Consequence:** the blocker for running HuggingFace checkpoints is not the container and not the converter — both work. It is that the evaluator has no half-precision execution path. A bf16 safetensors model must be narrowed to f32 by something outside anything currently shipped, which quadruples its memory footprint, or quantized to a K-quant, which is a lossy decision the pipeline does not currently make.
+
+This is the same shape as five other findings today: a capability that exists in the type system, is tested at the type level, and is executed by nothing.
+
+### Test counts, with the skip gap named
+
+`proxima-gguf` + `proxima-safetensors` + `proxima-onnx`: **177 run, 177 passed, 4 skipped** by default. With ignored tests included: **4 more run, 4 passed** — real ONNX (`all-MiniLM-L6-v2.onnx`), real GGUF, real-models report, and a real 25 GB Mixtral expert restack.
+
+`proxima-safetensors` has **zero** ignored tests and **zero** real-file references — every test drives synthetic in-memory buffers, despite three real `.safetensors` files existing on this host under `Qwen3-30B-A3B-MLX-4bit/`.
