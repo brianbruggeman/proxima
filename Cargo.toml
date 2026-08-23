@@ -9,6 +9,7 @@ members = [
     "prime",
     "proxima-amqp",
     "proxima-auth",
+    "proxima-autograd",
     "proxima-build",
     "proxima-centauri",
     "proxima-clock",

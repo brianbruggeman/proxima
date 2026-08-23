@@ -1,0 +1,51 @@
+[package]
+name = "proxima-autograd"
+description = "Reverse-mode autodiff over a proxima-tensor program: an adjoint transform (Expr -> Expr), relu/softmax as graph-building functions, and Adam as an elementwise update expression — no Optimizer trait, no Tensor value type, no Module tree"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+
+[features]
+default = ["std", "config"]
+# graph construction only: the adjoint transform, relu/softmax, and the Adam
+# expression builder touch nothing but `proxima-tensor`'s alloc-tier surface
+# (op/map/shape/error) -- no evaluation, no config derive stack.
+alloc = ["proxima-tensor/alloc"]
+# `cpu::evaluate_named` (proxima-tensor's own std-gated module) is what
+# actually runs a compiled step and what the gradient checker and training
+# example both need -- see that module's own `#[cfg(feature = "std")]` gate
+# in proxima-tensor/src/lib.rs.
+std = ["alloc", "proxima-tensor/std", "thiserror/std"]
+# `AdamConfig`'s bon builder + conflaguration Settings + serde derive --
+# the same three-crate composition `proxima-tensor::spec::ProgramSpec`
+# already uses (guiding principle 4: no bespoke config mechanism).
+config = ["std", "dep:bon", "dep:conflaguration", "dep:serde", "proxima-tensor/config"]
+# structured loss/gradient-norm telemetry via `proxima::telemetry` macros
+# and a file-sink `Exporter`, never a hand-rolled `println!`.
+instrument = ["std", "dep:proxima-telemetry", "proxima-telemetry/macros"]
+
+[dependencies]
+bon = { workspace = true, optional = true }
+conflaguration = { workspace = true, features = ["derive", "toml"], optional = true }
+# `ln`/`sqrt` for `f32` are `std` inherent methods -- this crate's alloc
+# tier has no `std`, so the two host-side (graph-construction-time, not
+# hot-path) transcendental calls in `optimizer::bias_correction` and
+# `adjoint`'s `Erf` adjoint go through `libm` instead, the standard no_std
+# math crate already in this workspace's dependency tree (pulled in
+# transitively today; declared directly here since this crate calls it).
+libm = "0.2"
+proxima-telemetry = { workspace = true, optional = true }
+proxima-tensor = { path = "../proxima-tensor", default-features = false, features = ["alloc"] }
+serde = { workspace = true, features = ["derive"], optional = true }
+thiserror = { workspace = true, default-features = false }
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+proxima = { workspace = true, features = ["test-support"] }
+proxima-tensor = { path = "../proxima-tensor", features = ["std", "config", "test-support"] }
