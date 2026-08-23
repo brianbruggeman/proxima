@@ -12,10 +12,10 @@ use proxima::{
     ListenProtocolFluent, McpListenProtocol, PipelineControlPlanePipe, ProximaError, ServeContext,
     into_handle, serve_h1_connection,
 };
+use proxima_telemetry::emit::{EnvFilter, global};
+use proxima_telemetry::error;
 use tokio::signal::unix::{SignalKind, signal};
 use tokio_util::compat::TokioAsyncReadCompatExt;
-use tracing::error;
-use tracing_subscriber::EnvFilter;
 
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
@@ -65,12 +65,13 @@ enum Command {
 
 #[proxima::main(runtime = "tokio", flavor = "multi_thread")]
 async fn main() -> ExitCode {
-    let filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| EnvFilter::new("warn,proxima=info,proximad=info"));
-    tracing_subscriber::fmt()
-        .with_env_filter(filter)
-        .with_target(false)
-        .init();
+    let directive = std::env::var("RUST_LOG")
+        .unwrap_or_else(|_| "warn,proxima=info,proximad=info".to_string());
+    global::install(EnvFilter::parse(&directive));
+    let Ok(_recorder) = proxima::init_telemetry() else {
+        eprintln!("proximad: failed to install console telemetry");
+        return ExitCode::from(1);
+    };
 
     let cli = Cli::parse();
     match run(cli).await {
