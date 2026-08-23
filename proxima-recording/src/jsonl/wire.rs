@@ -352,7 +352,6 @@ fn hex_decode_32(text: &str) -> Result<[u8; 32], ProximaError> {
 mod tests {
     use super::*;
     use crate::event::HttpEvent;
-    use rstest::rstest;
 
     fn make_id() -> InteractionId {
         InteractionId::from_bytes([7; 16])
@@ -388,7 +387,7 @@ mod tests {
         }
     }
 
-    #[rstest]
+    #[proxima::test]
     #[case::http_started(envelope(make_id(), 0, ProtocolEvent::Http(HttpEvent::Started {
         ts: OffsetDateTime::UNIX_EPOCH,
         pipe: "echo".into(),
@@ -483,7 +482,7 @@ mod tests {
         kind: "redis".into(),
         payload: serde_json::json!({"cmd": "GET", "key": "x"}),
     }))]
-    fn round_trips_through_jsonl_envelope(#[case] event: RecordingEvent) {
+    async fn round_trips_through_jsonl_envelope(#[case] event: RecordingEvent) {
         assert_eq!(round_trip(event.clone()), event);
     }
 

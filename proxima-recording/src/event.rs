@@ -288,7 +288,6 @@ impl RecordingEvent {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
-    use rstest::rstest;
 
     fn make_id() -> InteractionId {
         InteractionId::from_bytes([42; 16])
@@ -348,11 +347,11 @@ mod tests {
         }
     }
 
-    #[rstest]
+    #[proxima::test]
     #[case::http_start(http_started())]
     #[case::http_resp_chunk(http_response_chunk(b"hello"))]
     #[case::http_end(http_ended())]
-    fn id_accessor_returns_envelope_id(#[case] event: RecordingEvent) {
+    async fn id_accessor_returns_envelope_id(#[case] event: RecordingEvent) {
         assert_eq!(event.id(), make_id());
     }
 
