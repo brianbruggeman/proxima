@@ -1754,6 +1754,39 @@ fn push_serial_reduce_body(
 /// See [`PackedRowBlock`]. Emits the whole body for the row-blocked packed
 /// path; the caller has already emitted `output_index` (a GROUP index here)
 /// and `lane`.
+///
+/// Whether the Q4_K arm below may defer a sub-block's scale/min to ONCE per
+/// sub-block instead of once per element. The identity that makes this legal,
+/// `sum_j (scale*nibble_j - min)*act_j == scale*sum(nibble_j*act_j) -
+/// min*sum(act_j)`, holds only when the reduction is a plain sum of products:
+/// `reduce_op == Add` (`Multiply`/`Maximum`/`Minimum` are also legal under
+/// [`is_cooperative_reduce_op`] and all break the identity — a `Maximum`
+/// reduce cannot be pulled outside a per-element scale at all) AND the fused
+/// element body is EXACTLY `scratch[weight] * scratch[other]`, no other
+/// steps (a fused body inserts arbitrary extra `ScalarOp`s between the raw
+/// product and the reduce, any of which the identity does not survive).
+/// Mirrors `ggml-metal.metal:5157-5175`'s `acc1`/`dall` shape
+/// (`docs/discipline.md` ROW 106); the other two codecs are untouched — see
+/// this function's own Q5_K/Q6_K arms for why.
+fn is_plain_product_reduce(resolved: &BoundOp, reduce_op: ScalarOp, weight: usize, other: usize) -> bool {
+    if reduce_op != ScalarOp::Add {
+        return false;
+    }
+    let [step] = resolved.element_body().steps.as_slice() else {
+        return false;
+    };
+    if step.op != ScalarOp::Multiply {
+        return false;
+    }
+    let weight = weight as u16;
+    let other = other as u16;
+    matches!(
+        step.args.as_slice(),
+        [StepArg::Operand(first), StepArg::Operand(second)]
+            if (*first == weight && *second == other) || (*first == other && *second == weight)
+    )
+}
+
 #[allow(clippy::too_many_arguments)]
 fn push_packed_row_blocked_body(
     source: &mut String,
@@ -1872,34 +1905,69 @@ fn push_packed_row_blocked_body(
         match codec {
             PackedCodec::Q4K => {
                 source.push_str("            q4k_header hdr = q4k_header_for(blk, slot);\n");
-                source.push_str(&format!("            for (int c = 0; c < {}; ++c) {{\n", sub / run));
-                // raw 4-bit levels (0..15) are exact in float regardless of
-                // the kernel's element type; q4k_run8 takes `thread float
-                // *out`, and the narrowing to element_type happens where
-                // levels combine into scratch below, same as every other
-                // operand read.
-                source.push_str(&format!("                float levels[{run}];\n"));
-                source.push_str(&format!(
-                    "                q4k_run8(blk, slot + (uint)(c * {run}), levels);\n"
-                ));
-                source.push_str(&format!("                for (int j = 0; j < {run}; ++j) {{\n"));
-                source.push_str(&format!(
-                    "                    {element_type} scratch[{}];\n",
-                    operand_count.max(1)
-                ));
-                source.push_str(&format!(
-                    "                    scratch[{weight}] = hdr.scale * levels[j] - hdr.minimum;\n"
-                ));
-                source.push_str(&format!(
-                    "                    scratch[{other}] = acts[c * {run} + j];\n"
-                ));
-                let value_expr =
-                    push_body_steps(source, resolved.element_body(), "                    ", element_type);
-                source.push_str(&format!("                    {element_type} value = {value_expr};\n"));
-                let combine_expr = scalar_op_expr(reduce_op, &["sumf[q]", "value"]);
-                source.push_str(&format!("                    sumf[q] = {combine_expr};\n"));
-                source.push_str("                }\n");
-                source.push_str("            }\n");
+                if is_plain_product_reduce(resolved, reduce_op, weight, other) {
+                    // SCALE-DEFERRED PATH (`docs/discipline.md` ROW 106).
+                    // Accumulate the raw nibble x activation product and the
+                    // activation sum UNSCALED across the whole sub-block, then
+                    // apply `hdr.scale`/`hdr.minimum` ONCE at the end instead
+                    // of once per element — legal here because
+                    // `is_plain_product_reduce` already proved reduce_op is
+                    // `Add` and the body is exactly `weight * other`, so
+                    // `sum_j (scale*nibble_j - min)*act_j == scale*sum(nibble_j
+                    // *act_j) - min*sum(act_j)`. Mirrors
+                    // `ggml-metal.metal:5157-5175`'s `acc1`/`dall` split.
+                    source.push_str(&format!("            {element_type} raw_acc = 0;\n"));
+                    source.push_str(&format!("            {element_type} act_sum = 0;\n"));
+                    source.push_str(&format!("            for (int c = 0; c < {}; ++c) {{\n", sub / run));
+                    // raw 4-bit levels (0..15) are exact in float regardless
+                    // of the kernel's element type; q4k_run8 takes `thread
+                    // float *out`, narrowed to element_type at the multiply
+                    // below, same as the per-element path.
+                    source.push_str(&format!("                float levels[{run}];\n"));
+                    source.push_str(&format!(
+                        "                q4k_run8(blk, slot + (uint)(c * {run}), levels);\n"
+                    ));
+                    source.push_str(&format!("                for (int j = 0; j < {run}; ++j) {{\n"));
+                    source.push_str(&format!(
+                        "                    {element_type} act = acts[c * {run} + j];\n"
+                    ));
+                    source.push_str("                    raw_acc += levels[j] * act;\n");
+                    source.push_str("                    act_sum += act;\n");
+                    source.push_str("                }\n");
+                    source.push_str("            }\n");
+                    source.push_str(
+                        "            sumf[q] = sumf[q] + hdr.scale * raw_acc - hdr.minimum * act_sum;\n",
+                    );
+                } else {
+                    source.push_str(&format!("            for (int c = 0; c < {}; ++c) {{\n", sub / run));
+                    // raw 4-bit levels (0..15) are exact in float regardless of
+                    // the kernel's element type; q4k_run8 takes `thread float
+                    // *out`, and the narrowing to element_type happens where
+                    // levels combine into scratch below, same as every other
+                    // operand read.
+                    source.push_str(&format!("                float levels[{run}];\n"));
+                    source.push_str(&format!(
+                        "                q4k_run8(blk, slot + (uint)(c * {run}), levels);\n"
+                    ));
+                    source.push_str(&format!("                for (int j = 0; j < {run}; ++j) {{\n"));
+                    source.push_str(&format!(
+                        "                    {element_type} scratch[{}];\n",
+                        operand_count.max(1)
+                    ));
+                    source.push_str(&format!(
+                        "                    scratch[{weight}] = hdr.scale * levels[j] - hdr.minimum;\n"
+                    ));
+                    source.push_str(&format!(
+                        "                    scratch[{other}] = acts[c * {run} + j];\n"
+                    ));
+                    let value_expr =
+                        push_body_steps(source, resolved.element_body(), "                    ", element_type);
+                    source.push_str(&format!("                    {element_type} value = {value_expr};\n"));
+                    let combine_expr = scalar_op_expr(reduce_op, &["sumf[q]", "value"]);
+                    source.push_str(&format!("                    sumf[q] = {combine_expr};\n"));
+                    source.push_str("                }\n");
+                    source.push_str("            }\n");
+                }
             }
             PackedCodec::Q5K => {
                 // No `q5k_run8`-style batched unpack yet — `Q5_K`'s `qh`
@@ -2522,6 +2590,115 @@ mod tests {
             .into_iter()
             .next()
             .expect("one fused bound emitted")
+    }
+
+    /// Same shape as [`matmul_op`] but with a caller-chosen reduce op, so a
+    /// test can hold the fused `weight * activation` body fixed and vary only
+    /// `reduce_op` — the one axis [`is_plain_product_reduce`] gates on beyond
+    /// the body shape itself.
+    fn matmul_op_with_reduce(m: u32, k: u32, n: u32, reduce_op: ScalarOp) -> BoundOp {
+        let mut program = Vec::new();
+        let lhs = append(
+            &mut program,
+            Op::Input {
+                dtype: DType::Float32,
+                shape: vec![Extent::Static(m), Extent::Static(k)],
+                name: None,
+            },
+        );
+        let rhs = append(
+            &mut program,
+            Op::Input {
+                dtype: DType::Float32,
+                shape: vec![Extent::Static(k), Extent::Static(n)],
+                name: None,
+            },
+        );
+        let product = append(
+            &mut program,
+            Op::Elementwise {
+                dtype: DType::Float32,
+                body: ScalarOp::Multiply,
+                operands: vec![
+                    (lhs, IndexMap::Affine(map::projection(3, &[0, 2]))),
+                    (rhs, IndexMap::Affine(map::projection(3, &[2, 1]))),
+                ],
+                name: None,
+            },
+        );
+        append(
+            &mut program,
+            Op::Reduce(Reduce {
+                dtype: DType::Float32,
+                body: reduce_op,
+                init: ReduceInit::Zero,
+                operand: product,
+                in_map: IndexMap::Affine(map::projection(3, &[0, 1, 2])),
+                out_map: IndexMap::Affine(map::projection(3, &[0, 1])),
+                keep: Keep::Reduce,
+                name: Some("matmul_reduce".into()),
+            }),
+        );
+        let shapes = infer(&program, &[]).expect("matmul infers");
+        bind(&program, &shapes, &[])
+            .expect("matmul lowers")
+            .into_iter()
+            .next()
+            .expect("one fused bound emitted")
+    }
+
+    #[test]
+    fn q4k_row_blocked_matmul_defers_scale_to_once_per_sub_block() {
+        // 256 == Q4K_BLOCK_ELEMENTS exactly: one super-block, so
+        // packed_row_block matches and this is the real matmul shape the
+        // scale-deferred path exists for (`docs/discipline.md` ROW 106).
+        let bound = matmul_op(4, 256, 5);
+        let weight_node = bound.operands()[0].0;
+        let mut q4k = BTreeMap::new();
+        q4k.insert(weight_node, PackedCodec::Q4K);
+
+        assert!(
+            packed_row_block(&bound, &operand_codecs(&bound, &q4k)).is_some(),
+            "test fixture must actually take the row-blocked path for this assertion to mean anything"
+        );
+
+        let source = emit(&bound, &q4k).expect("emits").source;
+        assert!(
+            source.contains("raw_acc"),
+            "Add-reduce over a plain weight*activation body must take the scale-deferred path:\n{source}"
+        );
+        assert!(
+            !source.contains("hdr.scale * levels[j] - hdr.minimum"),
+            "the per-element dequant expression must not remain once the scale-deferred path is taken:\n{source}"
+        );
+    }
+
+    #[test]
+    fn q4k_row_blocked_non_add_reduce_keeps_the_per_element_path() {
+        // Same fused `weight * activation` body as the matmul shape above,
+        // but `Maximum` in place of `Add` — the identity
+        // `sum_j (scale*nibble_j - min)*act_j == scale*sum(...) - min*sum(...)`
+        // does not hold under `max`, so this must fall back to dequantizing
+        // per element exactly as before this landing.
+        let bound = matmul_op_with_reduce(4, 256, 5, ScalarOp::Maximum);
+        let weight_node = bound.operands()[0].0;
+        let mut q4k = BTreeMap::new();
+        q4k.insert(weight_node, PackedCodec::Q4K);
+
+        assert!(
+            packed_row_block(&bound, &operand_codecs(&bound, &q4k)).is_some(),
+            "test fixture must actually take the row-blocked path for this assertion to mean anything"
+        );
+
+        let source = emit(&bound, &q4k).expect("emits").source;
+        assert!(
+            !source.contains("raw_acc"),
+            "a Maximum reduce must never take the scale-deferred path, its identity does not hold under max:\n{source}"
+        );
+        assert!(
+            source.contains("hdr.scale * levels[j] - hdr.minimum"),
+            "a Maximum reduce must keep dequantizing per element:\n{source}"
+        );
     }
 
     fn cumsum_op(extent: u32) -> BoundOp {
