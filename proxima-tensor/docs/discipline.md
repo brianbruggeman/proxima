@@ -9203,3 +9203,211 @@ two processes and subtracted, which pays the mmap/parse/load cost twice.
 
 **Do not quote 44.09 as measured until it is re-run on a quiet box with this
 command.** Do not quote ROW 100's CPU figures either; both arms were noise.
+
+## ROW 101 — `spin_polls` swept DOWN for the first time; mechanism confirmed by source and by data, but the effect is smaller than this session's own host noise, so NOTHING LANDS
+
+ROW 68 swept `PROXIMA_COHORT_SPIN_POLLS` UP (2000 -> 200,000 -> 5,000,000) and
+found 20-33% WORSE, concluding "parking is the cheap option... do not re-run
+this sweep." That conclusion is about the up-direction only. Nobody had tried
+down. This row does, and the reason it cannot recommend a change is not that
+the direction was wrong — the clean sample and the mechanism counters both say
+it helps — it is that this session's own host could not hold still long enough
+to prove it past its own noise floor.
+
+### Task 1 — the mechanism, read from source, `file:line`
+
+`prime/src/os/cohort.rs:294-296` (`CohortConfig::spin_polls` doc): "bounded
+spin budget, in `core::hint::spin_loop()` polls, a member spends waiting for
+the round counter to advance before parking." The implementation,
+`wait_for_round` (`cohort.rs:729-777`): a member spins up to `spin_polls`
+times (`cohort.rs:745`, `core::hint::spin_loop()` + `round.load(Acquire)`),
+then parks unbounded (`cohort.rs:777`, `diag::PARKS.fetch_add`) if the round
+counter never advanced. This runs on dedicated MEMBER threads only
+(`member_loop`, `cohort.rs:698`), spawned `members - 1` times
+(`cohort.rs:468-471`) — **at `members = 1` (our `w=1` arm), zero dedicated
+threads are spawned, so this function never runs on any thread.** The knob is
+therefore not merely "expected to matter less" at `w=1`, it is **structurally
+inert** there — a stronger, cleaner control than the task asked for, confirmed
+by data below (parks/spin_hits are exactly 0 at `w=1` in all 32 runs, every
+`spin_polls` value).
+
+Confirmed live during elementwise, per the brief's premise: the cohort session
+is entered ONCE per forward pass (`cpu.rs:677`, `nest_cohort().and_then(|c|
+c.enter())`) and stays open across the whole node loop — matmul rounds AND
+every serial node. `run_elementwise_dispatch` (`cpu.rs:2304-2371`) explicitly
+falls through to the serial `run_elementwise` for small elementwise ops
+*while `session` is `Some`* (the exact case ROW 68 diagnosed) — so during
+every elementwise call at decode, cohort members are alive and either
+spinning or parked, contending with the leader for the same cores. **Read
+before design, per principle 6: the mechanism holds. Proceeding to the sweep.**
+
+### Task 2 — the sweep, every point, contamination disclosed rather than hidden
+
+**Host:** Apple M1 Max. **Repo:** `feat/tensor-consolidated` @ `705a663`
+(release profile, `-C opt-level=3 -C lto=fat -C codegen-units=1`, matching the
+compiled test binary's own rustc invocation). **Harness:** exactly ROW 102's
+canonical command,
+`bind::real_openchat_file::runs_a_cached_greedy_decode_loop_and_reports_per_token_wall_clock`,
+`PROXIMA_MAX_TOKENS=24 PROXIMA_PREFAULT=1`, `PROXIMA_COHORT_SPIN_POLLS` in
+`{2000 (default), 1000 (half), 250 (eighth), 0 (near-zero)}`,
+`PROXIMA_MATMUL_WORKERS` in `{8, 1}` — 8 points, round-robin interleaved
+(outer loop over 8 repetitions, inner loop over all 8 points), one full 24-token
+decode per run, `--features std,instrument`.
+
+**Contamination, worse than ROW 100's own and reported the same way that row
+did:** `uptime` 1-min load ranged **3.47 (rep1's own low point) to 138.70**
+across this sweep's 8 repetitions (64 runs total; full per-run log at
+`$SCRATCH/uptime_sweep.log`, not committed — see Re-provable below for how to
+regenerate it). Worse: mid-sweep, this exact worktree (`agent-a585f8281e4851e98`)
+picked up two commits (`875ef86` ROW 100, `705a663` ROW 102) from a concurrent
+session, plus an uncommitted 10-file diff to `proxima-tensor` sources
+(`cpu.rs`, `dtype.rs`, `convert.rs`, `op.rs`, `shape.rs`, `spec.rs`, `bind.rs`,
+`Cargo.toml`) that was never authored by this row. This is a live worktree
+collision, not merely ambient sibling load — flagged because principle 18
+requires the provenance of every number, and "which tree the gate ran against"
+is part of that provenance. All gating below runs against an isolated
+`git worktree add` checkout at the shared HEAD (`705a663`), never against the
+foreign in-flight diff, and nothing from that diff is touched, staged, or
+committed by this row.
+
+**Only repetition 1 (all 8 points) ran under load this file's other rows would
+call quiet: 3.47-4.91.** Every other repetition was contaminated to varying
+degrees, up to total noise (rep2's `w=1` half spiked to load 23 mid-run; every
+point in reps 4-8 ran at load 17-138). Full 8-repetition min/median/range/CoV,
+reported per instructions rather than hidden:
+
+| spin_polls | workers | n | mean ms | min ms | max ms | CoV |
+|---|---|---|---|---|---|---|
+| 2000 | 8 | 8 | 378.75 | 83.12 | 1271.51 | 103.3% |
+| 1000 | 8 | 8 | 351.83 | 77.95 | 1229.61 | 112.5% |
+| 250 | 8 | 8 | 267.33 | 79.19 | 702.65 | 75.2% |
+| 0 | 8 | 8 | 336.01 | 72.59 | 1346.74 | 121.2% |
+| 2000 | 1 | 8 | 296.08 | 194.78 | 639.49 | 53.7% |
+| 1000 | 1 | 8 | 395.77 | 193.29 | 961.64 | 64.2% |
+| 250 | 1 | 8 | 465.25 | 205.94 | 1022.68 | 69.3% |
+| 0 | 1 | 8 | 306.60 | 195.91 | 964.84 | 81.4% |
+
+**Every CoV here is far above the 5% trust floor. Per this file's own rule,
+none of these means is a claim.** They are shown so nobody re-derives them and
+believes a point estimate. The one thing contamination cannot hide: **decode
+CoV at `w=1` (54-81%) is consistently lower than at `w=8` (75-121%)** —
+consistent with, though not proof of, the mechanism: contention hurts a
+phase with live spinning workers (`w=8`) more than a phase with none (`w=1`).
+
+**Rep1 only — the one clean cohort, load 3.47-4.91, all 8 points back to back:**
+
+| spin_polls | workers | decode ms/tok | elementwise ms | loop_overhead ms | parks | spin_hits | rounds | unpark_rounds |
+|---|---|---|---|---|---|---|---|---|
+| 2000 (default) | 8 | 83.1242 | 4.2337 | 1.5415 | 32251 | 3962 | 4668 | 4628 |
+| 1000 (half) | 8 | 85.5377 | 4.2022 | 1.5444 | 32604 | 1962 | 4668 | 4665 |
+| 250 (eighth) | 8 | 79.1885 | 3.9548 | 1.5576 | 32675 | 276 | 4668 | 4668 |
+| 0 (near-zero) | 8 | 72.5870 | 3.8447 | 1.5621 | 32683 | 0 | 4668 | 4668 |
+| 2000 (default) | 1 | 197.8823 | 2.8537 | 1.1968 | 0 | 0 | 1536 | 0 |
+| 1000 (half) | 1 | 195.5491 | 2.9214 | 1.2510 | 0 | 0 | 1536 | 0 |
+| 250 (eighth) | 1 | 219.8042 | 3.0988 | 1.2805 | 0 | 0 | 1536 | 0 |
+| 0 (near-zero) | 1 | 195.9098 | 2.9297 | 1.2150 | 0 | 0 | 1536 | 0 |
+
+**`w=1` control, exactly as asked:** parks/spin_hits/unpark_rounds are 0 at
+every `spin_polls` value (structurally, per Task 1) in every one of the 32
+`w=1` runs across all 8 repetitions, not just rep1. decode ms/tok at `w=1`
+bounces 195.5-219.8 with no trend tied to `spin_polls` — the knob has no
+mechanism to act through here, and the data shows no effect beyond noise. **A
+large `w=1` change would have falsified the mechanism; none appeared.**
+
+**`w=8`, rep1: parks rises and spin_hits falls exactly as predicted** —
+32251 -> 32604 -> 32675 -> 32683 (parks) and 3962 -> 1962 -> 276 -> 0
+(spin_hits) as `spin_polls` falls 2000 -> 0. These counters are event counts,
+not wall-clock durations, and stayed in this same monotonic order across ALL
+8 repetitions regardless of host load (verified: rep8's values, measured at
+load 30-35, are 32571/2697, 32619/1793, 32676/247, 32683/0 — same order, same
+magnitude, as rep1's 32251/3962 ... 32683/0). **The knob does exactly what its
+doc claims, independent of contention.** `elementwise` falls monotonically
+with it, matching the second predicted term: 4.2337 -> 4.2022 -> 3.9548 ->
+3.8447 ms, -9.2% end to end. `loop_overhead` moves the WRONG way, rising
+1.5415 -> 1.5621 ms (+1.3%) — small, opposite of its own prediction, reported
+rather than glossed over. decode ms/tok is not cleanly monotonic (`1000` is
+slightly worse than `2000`) but the two extremes are clear: near-zero fastest
+(72.59), default/half slowest (83.12/85.54) — a -12.7% floor-to-default delta
+in this one sample.
+
+**A second, less-clean sample contradicts the ordering.** Rep2's `w=8` half
+ran at load 5.32-6.44 (mild, above rep1's but still far below this session's
+median): `2000`=97.22, `1000`=77.95, `250`=92.59, `0`=112.54 ms — `1000` is
+FASTEST here and `0` is SLOWEST, the opposite ranking from rep1. Both samples
+show `parks`/`spin_hits` moving in the textbook direction; neither agrees on
+what that does to wall-clock decode time. **This is the actual finding: on
+this host, today, the effect size this row is chasing is smaller than the
+run-to-run noise floor, even at "mild" load.**
+
+### Task 3 — decision: NOTHING LANDS
+
+Per principles 18 and 19, a production default does not change on `n=1`, and
+`n=1` (rep1) is all this session produced under conditions this file already
+calls quiet. The full `n=8` table exists and is reported (nobody hides a
+negative or an inconclusive result here), but its CoV (53-121%) is far too
+high to certify any ordering, and the one apples-to-apples "mild load"
+cross-check (rep2's `w=8` half) directly contradicts rep1's ranking. **This is
+not a rollback** — no source changed, so there is nothing to revert — **and it
+is not a win.** It is a third, honest outcome: measured, mechanism confirmed,
+verdict not reached, because the host that was supposed to test it never held
+still. `COHORT_SPIN_POLLS` stays `2000` in `proxima-tensor-runtime.toml`;
+`PROXIMA_COHORT_SPIN_POLLS` remains available, unchanged, for the next
+attempt at this sweep on a quiet host — the harness and scripts below are
+reusable as-is, no new code needed.
+
+**What ROW 68's own "do not re-run this sweep" instruction actually covered:**
+only the up-direction (200,000 / 5,000,000), which this row did not re-run.
+The down-direction was never tried before this row, and remains the one
+candidate this file has not yet refuted — it is also not yet confirmed. Both
+are true at once; say so rather than picking the flattering half.
+
+### Correctness
+
+Bit-exact across all 64 runs: `generated_text` identical —
+`"Here is a simple Python function that returns the nth Fibonacci number using
+recursion:\n\n\`\`\`"` — one value, verified by `sort -u` over every run's
+`decode_summary` line. No source changed this row (the sweep is entirely
+env-var driven through `PROXIMA_COHORT_SPIN_POLLS`, already wired by ROW 98's
+sizing-config work — `build.rs`'s `resolve_int` for the compile-time default,
+`cpu.rs:1673`'s `nest_cohort()` for the no-rebuild runtime override), so
+correctness risk from this row is zero by construction, confirmed empirically
+by the identical text across every spin_polls value tested.
+
+### Gates, actual numbers, run in an isolated `git worktree` at `705a663` to
+avoid the foreign in-flight diff described above
+
+| gate | result |
+|---|---|
+| `cargo nextest run -p proxima-tensor --features std` | **361 passed** |
+| `cargo nextest run -p proxima-tensor --features std,instrument` | **365 passed** |
+| `cargo nextest run -p proxima-model-interop --features metal,instrument` | **24 passed** |
+| `cargo nextest run -p omega` | **73 passed** |
+| clippy `-D warnings` | clean on `proxima-tensor --features std,instrument`, `omega --features std,cpu,metal`, `proxima-model-interop --features metal,instrument` |
+
+### Rollback rows
+
+None — nothing landed to roll back. This row's own conclusion IS the negative
+result: the down-sweep is measured, plausible, and unconfirmed, which is a
+different status than ROW 68's "measured and refuted" for the up-sweep. Do
+not conflate the two when a future row cites this one.
+
+### Re-provable now
+
+```
+cargo nextest run -p proxima-tensor --features std
+cargo nextest run -p proxima-tensor --features std,instrument
+cargo clippy -p proxima-tensor --features std,instrument --all-targets -- -D warnings
+cargo clippy -p omega --features std,cpu,metal --all-targets -- -D warnings
+cargo clippy -p proxima-model-interop --features metal,instrument --all-targets -- -D warnings
+cargo nextest run -p proxima-model-interop --features metal,instrument
+cargo nextest run -p omega
+PROXIMA_COHORT_SPIN_POLLS={2000,1000,250,0} PROXIMA_MATMUL_WORKERS={8,1} \
+  PROXIMA_PREFAULT=1 PROXIMA_MAX_TOKENS=24 \
+  cargo test -p proxima-model-interop --release --features std,instrument --lib -- \
+  --exact --nocapture --ignored \
+  bind::real_openchat_file::runs_a_cached_greedy_decode_loop_and_reports_per_token_wall_clock
+```
+
+Re-run this sweep on a quiet host (`uptime` 1-min load under ~2, no concurrent
+worktree activity on this repo) before treating either ranking above as
+settled.
