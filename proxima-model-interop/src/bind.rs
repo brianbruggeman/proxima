@@ -425,23 +425,88 @@ fn restack_error_as_interop_error(layer: u32, projection: &str, error: proxima_g
     }
 }
 
-/// One MoE-only weight family (`ffn_gate`/`ffn_up`/`ffn_down`) for one
-/// layer, decoded and transposed into the `[expert_count, in_dim, out_dim]`
-/// layout `proxima_tensor::spec::mistral_forward_program`'s routed FFN
-/// expects (matching [`bind_matmul_weight`]'s own `[out_dim, in_dim]` ->
-/// `[in_dim, out_dim]` convention, applied per expert).
+/// A native, single, pre-stacked `blk.{layer}.{projection}_exps.weight`
+/// tensor (the layout some GGUF exporters use): one on-disk byte range
+/// covering every expert already. Bound zero-copy *only* when it is `F32`
+/// -- [`proxima_tensor::cpu::QuantizedBlock::Float32`] is the one packed
+/// variant [`proxima_tensor::cpu`]'s own evaluator binds straight through
+/// as a plain `&[f32]` buffer (never inserted into its `quantized_weights`
+/// map), so a gather over it (`IndexMap::Computed`, which
+/// `specs/moe_block.toml`'s routed FFN uses to pick one expert's slab per
+/// token) resolves exactly like any other f32 operand.
 ///
-/// Tries a single native stacked tensor first
-/// (`blk.{layer}.{projection}_exps.weight`, the layout some GGUF exporters
-/// use) before falling back to
+/// Every OTHER packed codec ([`gguf_tensor_as_packed_block`] can decode
+/// `Q4_K`/`Q5_K`/`Q6_K` too) is deliberately NOT bound packed here even
+/// though it could be: [`bind_moe_expert_weights`]'s own doc names the
+/// reason -- the packed matmul kernel that would consume it has no notion
+/// of a gather at all, so a packed binding would silently feed the
+/// interpreter a buffer whose per-token expert selection is dropped, not
+/// rejected. Falls back to dequantize-then-[`transpose_expert_stack`] (not
+/// [`transpose_out_in_to_in_out`]: the flat buffer is `[expert_count,
+/// out_dim, in_dim]`, not one 2-D matrix, so a plain global transpose
+/// would scramble the expert axis into the wrong place in memory).
+///
+/// # Errors
+///
+/// [`InteropError::Gguf`] if `name`'s declared byte range doesn't fit
+/// `file_bytes`; [`InteropError::UnrepresentableGgmlType`] for a
+/// block-quantized type this crate has no dequantizer for.
+#[cfg(feature = "std")]
+fn bind_moe_stacked_experts<'file>(
+    parsed: &ParsedGguf,
+    file_bytes: &'file [u8],
+    name: alloc::string::String,
+    expert_count: usize,
+    out_dim: usize,
+    in_dim: usize,
+    state: &mut BoundWeights<'file>,
+) -> Result<(), InteropError> {
+    match gguf_tensor_as_packed_block(parsed, file_bytes, &name) {
+        Ok(block @ proxima_tensor::cpu::QuantizedBlock::Float32(_)) => state.packed.push((name, block)),
+        Ok(_) | Err(_) => {
+            let decoded = gguf_tensor_as_f32(parsed, file_bytes, &name)?;
+            let transposed = transpose_expert_stack(&decoded, expert_count, out_dim, in_dim);
+            state.resident_bytes += transposed.len() * core::mem::size_of::<f32>();
+            state.owned.push((name, transposed));
+        }
+    }
+    Ok(())
+}
+
+/// One MoE-only weight family (`ffn_gate`/`ffn_up`/`ffn_down`) for one
+/// layer. Tries a single native stacked tensor first
+/// (`blk.{layer}.{projection}_exps.weight`, see
+/// [`bind_moe_stacked_experts`] -- zero-copy when `F32`, dequantized
+/// otherwise) before falling back to
 /// [`proxima_gguf::restack::discover_experts`]/`plan_stack`/`restack_into`
-/// for the per-expert-tensor convention (`blk.{layer}.{projection}.{expert}.weight`)
-/// `restack.rs`'s own module doc verified against a real Mixtral-8x7B
-/// checkpoint. Always binds owned (dequantized): a restacked buffer is a
-/// fresh concatenation this function itself allocated, never a byte range
-/// still inside `file_bytes`, so the zero-copy packed path
-/// [`bind_matmul_weight`] takes for a dense weight has nothing to borrow
-/// from here.
+/// for the per-expert-tensor convention
+/// (`blk.{layer}.{projection}.{expert}.weight`, `restack.rs`'s own module
+/// doc verified against a real Mixtral-8x7B checkpoint) -- **always
+/// dequantized** in that fallback, never packed, for the same reason
+/// [`bind_moe_stacked_experts`]'s non-`F32` arm is: this function exists
+/// specifically so a routed expert's weight slab can be gathered by
+/// `IndexMap::Computed` (`proxima_tensor::spec::gathered_expert_product`,
+/// `spec.rs:847`), and that gather is resolved *only* over a plain `&[f32]`
+/// buffer (`proxima_tensor::cpu::operand_buffers`/`GatherCursor`,
+/// `cpu.rs:2177`/`cpu.rs:1841-2654` -- the sole runtime consumer of a
+/// `Computed` map). The packed matmul path
+/// (`proxima_tensor::cpu::run_reduce_quantized`, `cpu.rs:3348-3660`, the
+/// sole consumer of a non-`Float32` `QuantizedBlock`) never reads the
+/// `Lookup` a `Computed` map produces at bind time
+/// (`proxima_tensor::bind::build_operand`, `bind.rs:761-788`, returns
+/// `(node, layout, Some(lookup))` for a `Computed` map, but
+/// `run_reduce_quantized` only ever destructures `(_, layout, _)`) -- it
+/// classifies every output axis purely from the operand's own `Layout`
+/// stride (`cpu.rs:3436-3448`), which for a gathered axis is the *base*
+/// pattern's stride (a constant/broadcast axis, `AxisIndex::default()` in
+/// `gathered_expert_product`), not the per-token expert selection the
+/// gather actually encodes. Binding a routed expert stack packed would
+/// therefore not fail loudly -- it would silently run every token against
+/// whichever expert the base pattern's constant offset picks, regardless
+/// of that token's own `route`. This is a real `proxima-tensor` interpreter
+/// gap (no packed-operand gather support), not something this crate's own
+/// binder can safely route around: keeping the owned dequantized path here
+/// is the correct, if memory-expensive, choice until that gap closes.
 ///
 /// # Errors
 ///
@@ -450,19 +515,25 @@ fn restack_error_as_interop_error(layer: u32, projection: &str, error: proxima_g
 /// [`restack_error_as_interop_error`]); [`InteropError::UnrepresentableGgmlType`]
 /// for a block-quantized type this crate has no dequantizer for.
 #[cfg(feature = "std")]
-fn bind_moe_expert_weights(
+// one weight family's own tensor shape (layer/projection/expert_count/
+// out_dim/in_dim) plus the file/state every binder in this module threads
+// through -- the same real parameter count `append_moe_ffn`/
+// `append_mistral_moe_layer` (proxima-tensor/src/spec.rs) carry for the
+// identical MoE shape, not accidental complexity.
+#[allow(clippy::too_many_arguments)]
+fn bind_moe_expert_weights<'file>(
     parsed: &ParsedGguf,
-    file_bytes: &[u8],
+    file_bytes: &'file [u8],
     layer: u32,
     projection: &str,
     expert_count: u32,
     out_dim: usize,
     in_dim: usize,
-) -> Result<Vec<f32>, InteropError> {
+    state: &mut BoundWeights<'file>,
+) -> Result<(), InteropError> {
     let stacked_name = alloc::format!("blk.{layer}.{projection}_exps.weight");
     if find_tensor(parsed, &stacked_name).is_ok() {
-        let decoded = gguf_tensor_as_f32(parsed, file_bytes, &stacked_name)?;
-        return Ok(transpose_expert_stack(&decoded, expert_count as usize, out_dim, in_dim));
+        return bind_moe_stacked_experts(parsed, file_bytes, stacked_name, expert_count as usize, out_dim, in_dim, state);
     }
 
     let experts = discover_experts(&parsed.tensors, u64::from(layer), projection, u64::from(expert_count))
@@ -492,7 +563,10 @@ fn bind_moe_expert_weights(
             });
         }
     };
-    Ok(transpose_expert_stack(&decoded, expert_count as usize, out_dim, in_dim))
+    let transposed = transpose_expert_stack(&decoded, expert_count as usize, out_dim, in_dim);
+    state.resident_bytes += transposed.len() * core::mem::size_of::<f32>();
+    state.owned.push((stacked_name, transposed));
+    Ok(())
 }
 
 /// Runs [`bind_dense`]/[`bind_matmul_weight`] over every one of
@@ -558,9 +632,7 @@ pub(crate) fn bind_all_weights<'file>(
                 ("ffn_up", feed_forward, embedding),
                 ("ffn_down", embedding, feed_forward),
             ] {
-                let decoded = bind_moe_expert_weights(parsed, file_bytes, layer, projection, expert_count, out_dim, in_dim)?;
-                state.resident_bytes += decoded.len() * core::mem::size_of::<f32>();
-                state.owned.push((alloc::format!("blk.{layer}.{projection}_exps.weight"), decoded));
+                bind_moe_expert_weights(parsed, file_bytes, layer, projection, expert_count, out_dim, in_dim, &mut state)?;
             }
         }
     }
@@ -809,6 +881,225 @@ mod tests {
             outcome,
             Err(InteropError::MissingMetadataKey { key }) if key == "general.architecture"
         ));
+    }
+}
+
+/// The allocation-shape gate this change exists for: a mixture-of-experts
+/// checkpoint's owned-allocation total must scale with the number of bytes
+/// its packed codec actually needs, never with `experts * rows * cols * 4`
+/// (a real Mixtral-8x7B's own figure -- 8 experts, 3 matrices, `4096x14336`,
+/// 32 layers, `f32` -- is ~180 GB against this checkpoint's own ~25 GB
+/// on-disk size). Two cases, both real GGUF (`write_complete`/
+/// `parse_complete`, never a hand-built buffer), both using
+/// [`q4_k::quantize`] to encode real (non-degenerate) weight data:
+///
+/// - [`moe_owned_allocation_matches_the_checkpoints_own_layout_convention`]'s
+///   `native_stacked_f32` case is GREEN today: a native single-stacked
+///   `_exps.weight` tensor binds through [`bind_moe_stacked_experts`],
+///   which is safe to keep packed only for `F32` (this crate's own doc on
+///   that function names why a quantized codec is not). This fixture is
+///   `F32`, so the assertion is "zero new owned bytes, borrowed straight
+///   out of the mmap" -- and it is real proof, not a tautology: reverting
+///   to the pre-change `gguf_tensor_as_f32`-always path makes it fail,
+///   because that path allocates and copies regardless of codec.
+/// - [`moe_experts_do_not_yet_stay_packed_for_the_real_per_expert_tensor_convention`]
+///   is `#[ignore]`d and RED by design: the real Mixtral convention
+///   (`restack.rs`'s own module doc) stores `n_experts` independent
+///   tensors, which `bind_moe_expert_weights` must dequantize into one
+///   flat `f32` buffer for [`proxima_tensor`]'s `IndexMap::Computed` gather
+///   to read (see [`bind_moe_expert_weights`]'s own doc for the exact
+///   `proxima-tensor` incompatibility this hits). Nothing in this crate,
+///   `bind.rs` included, can safely close this without a
+///   `proxima-tensor` interpreter capability this change does not add --
+///   this test exists so that capability landing is the thing that turns
+///   it green, not a silent memory regression nobody is watching.
+#[cfg(all(test, feature = "std"))]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod moe_memory_shape {
+    use alloc::string::String;
+
+    use proxima_gguf::quant::q4_k;
+    use proxima_gguf::{GgmlType as WireType, GgufModel, TensorPayload, write_complete};
+
+    use super::*;
+
+    const EXPERT_COUNT: u32 = 2;
+    const OUT_DIM: usize = q4_k::QK_K;
+    const IN_DIM: usize = q4_k::QK_K;
+
+    fn dims(values: &[u64]) -> arrayvec::ArrayVec<u64, { proxima_gguf::tensor::MAX_DIMS }> {
+        values.iter().copied().collect()
+    }
+
+    /// Deterministic, non-degenerate weight data for one expert's own row
+    /// -- distinct per `seed` so no two experts' bytes collide, the same
+    /// non-degeneracy concern `tests/support/mod.rs`'s own `random_vec` doc
+    /// names for this exact fixture shape.
+    fn expert_values(seed: u32) -> alloc::vec::Vec<f32> {
+        (0..(OUT_DIM * IN_DIM))
+            .map(|index| ((index as u32).wrapping_mul(2_654_435_761).wrapping_add(seed) % 1000) as f32 / 1000.0 - 0.5)
+            .collect()
+    }
+
+    fn quantize_q4_k(values: &[f32]) -> alloc::vec::Vec<u8> {
+        let mut bytes = alloc::vec![0u8; values.len() / q4_k::QK_K * q4_k::BLOCK_BYTES];
+        q4_k::quantize(values, &mut bytes).expect("real q4_k encoder quantizes this fixture's own weight data");
+        bytes
+    }
+
+    /// A native single stacked `blk.0.ffn_gate_exps.weight` tensor -- every
+    /// expert's own `[OUT_DIM, IN_DIM]` slab back to back, `F32` so
+    /// [`bind_moe_stacked_experts`]'s safe packed arm actually fires (see
+    /// that function's own doc for why only `F32` is safe here).
+    fn checkpoint_with_native_stacked_f32_experts() -> alloc::vec::Vec<u8> {
+        let mut values: alloc::vec::Vec<f32> = alloc::vec::Vec::with_capacity(EXPERT_COUNT as usize * OUT_DIM * IN_DIM);
+        for expert in 0..EXPERT_COUNT {
+            values.extend(expert_values(expert));
+        }
+        let bytes: alloc::vec::Vec<u8> = values.iter().flat_map(|value| value.to_le_bytes()).collect();
+        let model = GgufModel {
+            version: 3,
+            metadata: alloc::vec::Vec::new(),
+            tensors: vec![TensorPayload {
+                name: String::from("blk.0.ffn_gate_exps.weight"),
+                dims: dims(&[IN_DIM as u64, OUT_DIM as u64, u64::from(EXPERT_COUNT)]),
+                ggml_type: WireType::F32,
+                data: &bytes,
+            }],
+        };
+        write_complete(&model).expect("writes a well-formed synthetic native-stacked moe checkpoint")
+    }
+
+    /// The real Mixtral-8x7B on-disk convention (`restack.rs`'s own module
+    /// doc): `n_experts` independent `Q4_K` tensors, one per
+    /// `blk.0.ffn_gate.{expert}.weight`, no native stack tensor at all.
+    fn checkpoint_with_per_expert_q4_k_tensors() -> alloc::vec::Vec<u8> {
+        let mut owned_bytes: alloc::vec::Vec<alloc::vec::Vec<u8>> = alloc::vec::Vec::new();
+        let mut tensors: alloc::vec::Vec<(String, alloc::vec::Vec<u8>)> = alloc::vec::Vec::new();
+        for expert in 0..EXPERT_COUNT {
+            let quantized = quantize_q4_k(&expert_values(expert));
+            owned_bytes.push(quantized);
+        }
+        for (expert, quantized) in owned_bytes.into_iter().enumerate() {
+            tensors.push((alloc::format!("blk.0.ffn_gate.{expert}.weight"), quantized));
+        }
+        let payloads: alloc::vec::Vec<TensorPayload<'_>> = tensors
+            .iter()
+            .map(|(name, data)| TensorPayload {
+                name: name.clone(),
+                dims: dims(&[IN_DIM as u64, OUT_DIM as u64]),
+                ggml_type: WireType::Q4_K,
+                data: data.as_slice(),
+            })
+            .collect();
+        let model = GgufModel {
+            version: 3,
+            metadata: alloc::vec::Vec::new(),
+            tensors: payloads,
+        };
+        write_complete(&model).expect("writes a well-formed synthetic per-expert-tensor moe checkpoint")
+    }
+
+    fn empty_state(file_bytes: &[u8]) -> BoundWeights<'_> {
+        BoundWeights {
+            resident_bytes: file_bytes.len(),
+            owned: Vec::new(),
+            packed: Vec::new(),
+        }
+    }
+
+    fn owned_bytes_total(state: &BoundWeights) -> usize {
+        state.owned.iter().map(|(_, data)| data.len() * core::mem::size_of::<f32>()).sum()
+    }
+
+    /// A real Mixtral-8x7B's own shape, for the assertion's own numbers to
+    /// mean something rather than an arbitrary threshold: `experts * out *
+    /// in * 4` is the dequantized-owned ceiling this test's per-expert-tensor
+    /// case (deliberately) still hits, and the packed floor
+    /// (`experts * (out*in/QK_K) * BLOCK_BYTES`) it never reaches without a
+    /// `proxima-tensor` capability this crate does not add.
+    fn dequantized_owned_ceiling_bytes() -> usize {
+        EXPERT_COUNT as usize * OUT_DIM * IN_DIM * core::mem::size_of::<f32>()
+    }
+
+    fn packed_floor_bytes() -> usize {
+        EXPERT_COUNT as usize * (OUT_DIM * IN_DIM / q4_k::QK_K) * q4_k::BLOCK_BYTES
+    }
+
+    /// Two real GGUF layout conventions for the same weight family, one
+    /// shared assertion: does binding this checkpoint's experts allocate
+    /// owned `f32` bytes proportional to the *packed* size, or to
+    /// `experts * rows * cols * 4`? `native_stacked_f32` is GREEN today
+    /// (zero owned bytes -- [`bind_moe_stacked_experts`]'s packed arm
+    /// borrows straight out of `file_bytes`, the same zero-copy contract
+    /// [`bind_matmul_weight`] already gives a dense weight); reverting to
+    /// the pre-change `gguf_tensor_as_f32`-always path makes this case fail,
+    /// because that path allocates and copies regardless of codec.
+    /// `per_expert_q4_k` is the real Mixtral-8x7B on-disk convention
+    /// (`restack.rs`'s own module doc) and hits exactly the dequantized
+    /// ceiling -- documented here as a passing, concrete measurement of the
+    /// gap's own size (see [`moe_experts_do_not_yet_stay_packed_for_the_real_per_expert_tensor_convention`]
+    /// for the same gap asserted the other way, `#[ignore]`d).
+    #[proxima::test]
+    #[case::native_stacked_f32(true)]
+    #[case::per_expert_q4_k(false)]
+    async fn moe_owned_allocation_matches_the_checkpoints_own_layout_convention(#[case] native_stacked: bool) {
+        let file_bytes = if native_stacked {
+            checkpoint_with_native_stacked_f32_experts()
+        } else {
+            checkpoint_with_per_expert_q4_k_tensors()
+        };
+        let parsed = proxima_gguf::parse_complete(&file_bytes).expect("parses synthetic moe checkpoint");
+        let mut state = empty_state(&file_bytes);
+
+        bind_moe_expert_weights(&parsed, &file_bytes, 0, "ffn_gate", EXPERT_COUNT, OUT_DIM, IN_DIM, &mut state)
+            .expect("binds this case's own expert tensor layout");
+
+        if native_stacked {
+            assert_eq!(state.packed.len(), 1, "one packed entry for the whole native stack, no per-expert split");
+            assert_eq!(owned_bytes_total(&state), 0, "an f32 native stack must borrow zero-copy, allocating no owned f32 bytes");
+        } else {
+            assert!(state.packed.is_empty(), "the per-expert-tensor path never binds packed -- see bind_moe_expert_weights's own doc");
+            assert_eq!(
+                owned_bytes_total(&state),
+                dequantized_owned_ceiling_bytes(),
+                "today's owned allocation is exactly experts * rows * cols * 4, the shape this change cannot yet avoid"
+            );
+        }
+    }
+
+    /// RED by design (`#[ignore]`d, matching this crate's own convention for
+    /// a real, named, not-yet-closed capability gap -- `capability_matrix.rs`'s
+    /// own module doc: "a cell that cannot pass yet is still written and
+    /// `#[ignore]`d with the exact missing piece named"): the real Mixtral
+    /// per-expert-tensor convention still dequantizes every expert to owned
+    /// `f32`, so the owned total hits the dequantized ceiling, not the
+    /// packed floor. Un-ignoring this and seeing it pass is the acceptance
+    /// criterion for whatever lands the `proxima-tensor` gather-over-packed
+    /// -blocks capability [`bind_moe_expert_weights`]'s own doc names.
+    #[proxima::test]
+    #[ignore = "blocked on a proxima-tensor interpreter capability (gather over a packed QuantizedBlock) this change does not add -- see bind_moe_expert_weights's own doc"]
+    async fn moe_experts_do_not_yet_stay_packed_for_the_real_per_expert_tensor_convention() {
+        let file_bytes = checkpoint_with_per_expert_q4_k_tensors();
+        let parsed = proxima_gguf::parse_complete(&file_bytes).expect("parses synthetic per-expert-tensor moe checkpoint");
+        let mut state = empty_state(&file_bytes);
+
+        bind_moe_expert_weights(&parsed, &file_bytes, 0, "ffn_gate", EXPERT_COUNT, OUT_DIM, IN_DIM, &mut state)
+            .expect("binds the per-expert-tensor q4_k experts");
+
+        let owned = owned_bytes_total(&state);
+        std::println!(
+            "moe_memory_shape owned_bytes={owned} packed_floor_bytes={} dequantized_ceiling_bytes={}",
+            packed_floor_bytes(),
+            dequantized_owned_ceiling_bytes()
+        );
+        assert!(
+            owned <= packed_floor_bytes() * 2,
+            "owned allocation ({owned} bytes) must be proportional to the packed size ({} bytes), not to \
+             experts * rows * cols * 4 ({} bytes)",
+            packed_floor_bytes(),
+            dequantized_owned_ceiling_bytes()
+        );
     }
 }
 
