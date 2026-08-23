@@ -66,7 +66,7 @@ use alloc::vec::Vec;
 use alloc::collections::BTreeMap;
 
 use proxima_tensor::{
-    BoundOp, BoundOpKind, ComposedBody, DType, Keep, NodeId, ReduceInit, ScalarOp, StepArg,
+    BoundOp, BoundOpKind, ComposedBody, DType, Keep, Layout, NodeId, ReduceInit, ScalarOp, StepArg,
 };
 
 use crate::error::EmitError;
@@ -897,6 +897,29 @@ pub enum PackedRowBlockRejection {
     ExtentNotBlockMultiple { extent: u64 },
 }
 
+/// Whether `dims` (given OUTERMOST-first, i.e. `dims.last()` is the
+/// fastest/innermost axis — the same convention [`reduction_dims`]'s own
+/// callers already use) is one contiguous nested block in `layout`: each
+/// outer axis's stride equals the extent of every axis nested inside it
+/// times that inner axis's own stride. A single dim (or empty) trivially
+/// passes (`windows(2)` yields nothing to check).
+///
+/// The one identity two independent folds both lean on: `classify_packed_row_block`'s
+/// reduce-dim fold (below) and [`classify_tiled_gemm`]'s token/feature-axis-group
+/// fold both need "a single flat index times the innermost axis's stride
+/// addresses the same memory a full per-axis decomposition would" to be
+/// true, and it is true exactly when this check passes — never a special
+/// case for how many dims fold, or for reduce vs. output axes.
+fn axes_fold_contiguously(dims: &[u16], extents: &[u64], layout: &Layout) -> bool {
+    dims.windows(2).all(|window| {
+        let [outer, inner] = window else {
+            unreachable!("windows(2) always yields a two-element slice")
+        };
+        let inner_extent = extents[*inner as usize] as i64;
+        layout.stride(*outer) == inner_extent * layout.stride(*inner)
+    })
+}
+
 /// The one decision [`packed_row_block`] and [`diagnose_packed_row_block`]
 /// both need — this function is the single source of truth;
 /// `packed_row_block` is `.ok()` over it so there is exactly one place the
@@ -949,20 +972,12 @@ fn classify_packed_row_block(
     // already packs `reduction_total` as the product across every reduce
     // dim, generic in dim count), so folding is sound exactly when this
     // check passes — never a special case for three dims specifically.
-    for window in reduce_dims.windows(2) {
-        let [outer, inner] = window else {
-            unreachable!("windows(2) always yields a two-element slice")
-        };
-        let inner_extent = resolved.extents[*inner as usize] as i64;
-        for operand in [weight, other] {
-            let layout = &resolved.operands()[operand].1;
-            let outer_stride = layout.stride(*outer);
-            let inner_stride = layout.stride(*inner);
-            if outer_stride != inner_extent * inner_stride {
-                return Err(PackedRowBlockRejection::ReduceDimsNotContiguous {
-                    reduce_dims: reduce_dims.clone(),
-                });
-            }
+    for operand in [weight, other] {
+        let layout = &resolved.operands()[operand].1;
+        if !axes_fold_contiguously(&reduce_dims, &resolved.extents, layout) {
+            return Err(PackedRowBlockRejection::ReduceDimsNotContiguous {
+                reduce_dims: reduce_dims.clone(),
+            });
         }
     }
     // the packed operand must be contiguous along the INNERMOST (fastest)
@@ -988,6 +1003,51 @@ fn packed_row_block(resolved: &BoundOp, quantized: &[Option<PackedCodec>]) -> Op
     classify_packed_row_block(resolved, quantized).ok()
 }
 
+/// Public diagnostic seam for [`classify_tiled_gemm`], same shape as
+/// [`PackedRowBlockRejection`] for [`classify_packed_row_block`]: one variant
+/// per `return`/`None` site in that function, in the order they are checked,
+/// so a caller printing `{rejection:?}` sees exactly which condition gave up
+/// on a real op instead of an inferred guess. `NotPackedRowBlock` wraps the
+/// more basic gate's own rejection when that one fails first -- the tiled
+/// path can never be more permissive than the row-blocked path it narrows.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum TiledGemmRejection {
+    /// The `metal-tiled-gemm` feature is not compiled in -- the tiled path
+    /// does not exist as far as this build can observe (see
+    /// [`classify_tiled_gemm`]'s own doc).
+    FeatureDisabled,
+    /// [`classify_packed_row_block`] itself rejected first; the tiled path
+    /// can only narrow that gate's `Ok`, never rescue its `Err`.
+    NotPackedRowBlock(PackedRowBlockRejection),
+    /// The packed operand's codec is not [`PackedCodec::Q4K`] -- Q5_K/Q6_K
+    /// have no batched-unpack helper for this path yet (see
+    /// [`classify_tiled_gemm`]'s own comment).
+    NotQ4K,
+    /// `reduce_op`/`init` are not the plain `Add`-from-`Zero` shape
+    /// `simdgroup_matrix` accumulation requires.
+    NotAddZeroReduce,
+    /// [`is_plain_product_reduce`] is false -- the fused body carries more
+    /// than a bare `weight * activation` product.
+    NotPlainProductReduce,
+    /// Every output axis partitions into a token group (activation-owned)
+    /// and a feature group (weight-owned) by nonzero-stride ownership; an
+    /// axis neither or both operands depend on, an empty group, or the two
+    /// groups interleaving in `output_axes` rather than token-group-then-
+    /// feature-group (`native_packed_layout`'s own convention) is a
+    /// broadcast/ordering shape this restricted path has never been
+    /// measured against.
+    AxisOwnershipAmbiguous,
+    /// The token or feature group has more than one axis, but they do NOT
+    /// nest contiguously (for the owning operand, or for the op's own
+    /// output layout) — see [`axes_fold_contiguously`].
+    AxisGroupNotContiguous,
+    /// The token group's flattened extent is below
+    /// [`crate::sized::TILED_GEMM_MIN_TOKENS`] -- tiling overhead is not
+    /// amortized at this size.
+    TokenExtentBelowMinimum { token_extent: u64, min_tokens: u64 },
+}
+
 /// The additional narrowing [`push_tiled_gemm_body`]'s `simdgroup_matrix`
 /// path requires on top of [`packed_row_block`]'s own row-blocked
 /// eligibility -- the one decision [`grid_threads`] and
@@ -998,23 +1058,27 @@ fn packed_row_block(resolved: &BoundOp, quantized: &[Option<PackedCodec>]) -> Op
 /// own concrete-stride gate, so [`kernel_cache_key`] re-derives this too
 /// rather than caching by structure alone (`docs/discipline.md` ROW 107).
 struct TiledGemmBlock {
-    // only [`push_tiled_gemm_body`] reads these three -- gated the same as
-    // that function, so the non-feature build does not carry three
-    // never-read fields.
+    // only [`push_tiled_gemm_body`] reads these -- gated the same as that
+    // function, so the non-feature build does not carry never-read fields.
     #[cfg(feature = "metal-tiled-gemm")]
     weight: usize,
     #[cfg(feature = "metal-tiled-gemm")]
     other: usize,
     #[cfg(feature = "metal-tiled-gemm")]
     reduce_dim: usize,
-    /// output axis the ACTIVATION owns exclusively (nonzero stride on
-    /// `other`, zero on `weight`) -- the token/sequence dimension the tile
-    /// loop's N side walks.
-    token_axis: usize,
-    /// output axis the WEIGHT owns exclusively (nonzero stride on
-    /// `weight`, zero on `other`) -- the out-features dimension the tile
-    /// loop's M side walks.
-    feature_axis: usize,
+    /// every output axis the ACTIVATION owns exclusively (nonzero stride on
+    /// `other`, zero on `weight`), outermost first -- more than one only
+    /// when [`axes_fold_contiguously`] validated them as one flattened
+    /// block, the identical identity [`classify_packed_row_block`]'s own
+    /// reduce-dim fold relies on. The tile loop's N side walks the
+    /// flattened product of these.
+    token_axes: Vec<u16>,
+    /// every output axis the WEIGHT owns exclusively (nonzero stride on
+    /// `weight`, zero on `other`), outermost first -- `attn_q`/`attn_k`/
+    /// `attn_v`'s own `heads`/`head_dim` split folds here the same way
+    /// `attn_output`'s reduce already folds three axes. The tile loop's M
+    /// side walks the flattened product of these.
+    feature_axes: Vec<u16>,
 }
 
 /// `resolved`/`quantized`/`reduce_op`/`init`/`output_axes` are exactly
@@ -1024,21 +1088,21 @@ struct TiledGemmBlock {
 ///
 /// Feature-gated: without `metal-tiled-gemm`,
 /// [`crate::sized::TILED_GEMM_MIN_TOKENS`] does not exist (see that
-/// constant's own doc), so this always returns `None` and every dispatch
-/// keeps taking the row-blocked or generic path exactly as it does today —
-/// the tiled kernel does not exist as far as the rest of this module can
-/// observe.
+/// constant's own doc), so this always returns
+/// `Err(TiledGemmRejection::FeatureDisabled)` and every dispatch keeps taking
+/// the row-blocked or generic path exactly as it does today — the tiled
+/// kernel does not exist as far as the rest of this module can observe.
 fn classify_tiled_gemm(
     resolved: &BoundOp,
     quantized: &[Option<PackedCodec>],
     reduce_op: ScalarOp,
     init: ReduceInit,
     output_axes: &[u16],
-) -> Option<TiledGemmBlock> {
+) -> Result<TiledGemmBlock, TiledGemmRejection> {
     #[cfg(not(feature = "metal-tiled-gemm"))]
     {
         let _ = (resolved, quantized, reduce_op, init, output_axes);
-        None
+        Err(TiledGemmRejection::FeatureDisabled)
     }
     #[cfg(feature = "metal-tiled-gemm")]
     {
@@ -1047,7 +1111,7 @@ fn classify_tiled_gemm(
             other,
             reduce_dim,
             codec,
-        } = classify_packed_row_block(resolved, quantized).ok()?;
+        } = classify_packed_row_block(resolved, quantized).map_err(TiledGemmRejection::NotPackedRowBlock)?;
         // Q4_K only -- Q5_K/Q6_K have no batched-unpack helper yet
         // (`push_packed_row_blocked_body`'s own comment on their arms) and,
         // more to the point, have never been measured on this path.
@@ -1055,7 +1119,7 @@ fn classify_tiled_gemm(
         // would violate the same discipline this landing's own gate
         // demands (principle 18).
         if codec != PackedCodec::Q4K {
-            return None;
+            return Err(TiledGemmRejection::NotQ4K);
         }
         // `simdgroup_multiply_accumulate` IS a sum-of-products -- there is
         // no hardware knob for `Maximum`/`Subtract`/etc, so this only ever
@@ -1063,75 +1127,74 @@ fn classify_tiled_gemm(
         // over a plain `weight * activation` body, seeded from zero. Every
         // other combination keeps taking the row-blocked or generic path.
         if reduce_op != ScalarOp::Add || init != ReduceInit::Zero {
-            return None;
+            return Err(TiledGemmRejection::NotAddZeroReduce);
         }
         if !is_plain_product_reduce(resolved, reduce_op, weight, other) {
-            return None;
+            return Err(TiledGemmRejection::NotPlainProductReduce);
         }
-        // Restricted to a plain 2-D matmul (one token axis, one feature
-        // axis, one folded reduce dim) -- the exact shape every FFN/logits
-        // matmul in `proxima-tensor/src/spec.rs` takes (`gate`/`up`/`down`/
-        // `logits`). The multi-head attention projections (Q/K/V/
-        // attn_output) keep more than one weight-owned output axis and stay
-        // on the row-blocked path -- a documented scope limit, not a silent
-        // gap (ROW 107).
-        let [axis_a, axis_b] = output_axes[..] else {
-            return None;
-        };
-        if reduction_dims(resolved, output_axes).len() != 1 {
-            return None;
-        }
+        // A plain matmul: every output axis is EITHER token (activation-
+        // owned) or feature (weight-owned) -- never both, never neither.
+        // `attn_q`/`attn_k`/`attn_v` keep TWO weight-owned axes (`heads` and
+        // `head_dim`, split by the einsum but one flat out-features run on
+        // disk); folding them the same way `classify_packed_row_block`
+        // already folds `attn_output`'s three reduce axes is what lets this
+        // path reach them at all (ROW 114 -- ROW 107's "documented scope
+        // limit" was this fold, not yet written).
         let weight_layout = &resolved.operands()[weight].1;
         let other_layout = &resolved.operands()[other].1;
-        // Structural, not conventional: whichever axis the activation alone
-        // depends on (nonzero stride there, zero on the weight) is the
-        // token axis; whichever the weight alone depends on is the feature
-        // axis. A shape where either operand depends on BOTH axes (a
-        // broadcast this restricted path was never measured against) falls
-        // through to `None` rather than guessing an axis assignment.
-        let (token_axis, feature_axis) = if weight_layout.stride(axis_a) == 0
-            && other_layout.stride(axis_a) != 0
-            && weight_layout.stride(axis_b) != 0
-            && other_layout.stride(axis_b) == 0
-        {
-            (axis_a, axis_b)
-        } else if weight_layout.stride(axis_b) == 0
-            && other_layout.stride(axis_b) != 0
-            && weight_layout.stride(axis_a) != 0
-            && other_layout.stride(axis_a) == 0
-        {
-            (axis_b, axis_a)
-        } else {
-            return None;
+        let mut token_axes: Vec<u16> = Vec::new();
+        let mut feature_axes: Vec<u16> = Vec::new();
+        for &axis in output_axes {
+            match (weight_layout.stride(axis) == 0, other_layout.stride(axis) == 0) {
+                (true, false) => token_axes.push(axis),
+                (false, true) => feature_axes.push(axis),
+                _ => return Err(TiledGemmRejection::AxisOwnershipAmbiguous),
+            }
+        }
+        if token_axes.is_empty() || feature_axes.is_empty() {
+            return Err(TiledGemmRejection::AxisOwnershipAmbiguous);
+        }
+        // `native_packed_layout`'s own doc: a packed weight's on-disk layout
+        // is `[out_dim, in_dim]` row-major, reconstructed by walking
+        // `output_axes` so the "out" (feature) side must sit LAST, after
+        // every token axis -- checked here as "the two groups reassemble
+        // `output_axes` in order", which also catches an interleaved shape
+        // (token/feature/token) this path has never been measured against.
+        let reassembled: Vec<u16> = token_axes.iter().chain(feature_axes.iter()).copied().collect();
+        if reassembled != output_axes {
+            return Err(TiledGemmRejection::AxisOwnershipAmbiguous);
+        }
+        // A group with more than one axis is only a single logical token/
+        // feature dimension if it nests contiguously -- same identity
+        // `classify_packed_row_block`'s reduce-dim fold already leans on,
+        // checked for the OWNING operand (the other operand's stride is
+        // uniformly zero across the group, trivially "contiguous") AND for
+        // the op's own output layout, since the tile write-back below also
+        // walks the flattened group with one stride.
+        let out_layout = match &resolved.kind {
+            BoundOpKind::Reduce { out_layout, .. } => out_layout,
+            _ => unreachable!("classify_packed_row_block above only matches Keep::Reduce"),
         };
-        let token_extent = resolved.extents[token_axis as usize];
+        let groups_contiguous = axes_fold_contiguously(&token_axes, &resolved.extents, other_layout)
+            && axes_fold_contiguously(&feature_axes, &resolved.extents, weight_layout)
+            && axes_fold_contiguously(&token_axes, &resolved.extents, out_layout)
+            && axes_fold_contiguously(&feature_axes, &resolved.extents, out_layout);
+        if !groups_contiguous {
+            return Err(TiledGemmRejection::AxisGroupNotContiguous);
+        }
+        let token_extent: u64 = token_axes.iter().map(|&axis| resolved.extents[axis as usize]).product();
         if token_extent < crate::sized::TILED_GEMM_MIN_TOKENS {
-            return None;
+            return Err(TiledGemmRejection::TokenExtentBelowMinimum {
+                token_extent,
+                min_tokens: crate::sized::TILED_GEMM_MIN_TOKENS,
+            });
         }
-        // `proxima_tensor::bind::native_packed_layout`'s own doc: a packed
-        // weight's on-disk layout is `[out_dim, in_dim]` row-major, and
-        // WITHIN the "out" side, "relative axis order is preserved from the
-        // declared shape" -- reconstructed by walking `output_axes` in
-        // REVERSE, so the operand's OWN axis must be the LAST-listed output
-        // axis (innermost, adjacent to the reduce group) for the
-        // reconstructed stride to describe real bytes. Every real matmul in
-        // `spec.rs` lists the token axis first and the weight's own axis
-        // last (`"sg->sdg"`, `"so->sugdo"`, ...) -- this is that same
-        // convention, checked structurally rather than assumed. A shape
-        // that violates it (weight's axis listed first) would read a
-        // corrupted stride here: `native_packed_layout` folds the WRONG
-        // (broadcast) axis's extent into the weight's own stride before
-        // zeroing that axis back out, one axis too late to undo the
-        // contamination for a swapped order.
-        if output_axes[output_axes.len() - 1] != feature_axis {
-            return None;
-        }
-        Some(TiledGemmBlock {
+        Ok(TiledGemmBlock {
             weight,
             other,
             reduce_dim,
-            token_axis: token_axis as usize,
-            feature_axis: feature_axis as usize,
+            token_axes,
+            feature_axes,
         })
     }
 }
@@ -1143,7 +1206,25 @@ fn tiled_gemm_block(
     init: ReduceInit,
     output_axes: &[u16],
 ) -> Option<TiledGemmBlock> {
-    classify_tiled_gemm(resolved, quantized, reduce_op, init, output_axes)
+    classify_tiled_gemm(resolved, quantized, reduce_op, init, output_axes).ok()
+}
+
+/// Public diagnostic seam: which condition, if any, rejected `resolved` from
+/// the tiled-GEMM `simdgroup_matrix` kernel. `Ok(())` means it WOULD take (or
+/// does take) the tiled path. Same shape as [`diagnose_packed_row_block`],
+/// one narrowing further -- see [`TiledGemmRejection`]'s own doc.
+///
+/// # Errors
+/// Returns the specific [`TiledGemmRejection`] gate that rejected this op.
+#[cfg(feature = "instrument")]
+pub fn diagnose_tiled_gemm_block(
+    resolved: &BoundOp,
+    quantized: &[Option<PackedCodec>],
+    reduce_op: ScalarOp,
+    init: ReduceInit,
+    output_axes: &[u16],
+) -> Result<(), TiledGemmRejection> {
+    classify_tiled_gemm(resolved, quantized, reduce_op, init, output_axes).map(drop)
 }
 
 /// Public diagnostic seam: which condition, if any, rejected `resolved`
@@ -1206,8 +1287,8 @@ fn grid_threads(resolved: &BoundOp, quantized: &[Option<PackedCodec>]) -> u64 {
                 // tiles the feature axis alone; see `push_tiled_gemm_body`'s
                 // doc).
                 tiled_gemm_threadgroups(
-                    resolved.extents[block.feature_axis],
-                    resolved.extents[block.token_axis],
+                    block.feature_axes.iter().map(|&axis| resolved.extents[axis as usize]).product(),
+                    block.token_axes.iter().map(|&axis| resolved.extents[axis as usize]).product(),
                 )
             } else if packed_row_block(resolved, quantized).is_some() {
                 // one SIMD group per PACKED_ROWS_PER_GROUP outputs
@@ -2387,9 +2468,17 @@ fn push_tiled_gemm_body(
         weight,
         other,
         reduce_dim,
-        token_axis,
-        feature_axis,
+        ref token_axes,
+        ref feature_axes,
     } = *block;
+    // innermost (fastest, last-listed) of each group -- the single stride
+    // the per-element reads below use; see `TiledGemmBlock`'s own doc.
+    let Some(&token_axis) = token_axes.last() else {
+        unreachable!("classify_tiled_gemm never builds an empty token group")
+    };
+    let Some(&feature_axis) = feature_axes.last() else {
+        unreachable!("classify_tiled_gemm never builds an empty feature group")
+    };
     let rank_len = rank.max(1);
 
     let block_m = crate::sized::TILED_GEMM_BLOCK_M;
@@ -2406,20 +2495,35 @@ fn push_tiled_gemm_body(
     let act_tile_elems = block_n * block_k;
     let out_tile_elems = block_m * block_n;
 
-    let token_axis_index = output_axes
-        .iter()
-        .position(|&dim| dim as usize == token_axis)
-        .unwrap_or(0);
-    let feature_axis_index = output_axes
-        .iter()
-        .position(|&dim| dim as usize == feature_axis)
-        .unwrap_or(1);
+    // `attn_q`/`attn_k`/`attn_v` fold TWO weight-owned axes (`heads`,
+    // `head_dim`) into one flattened feature dimension -- `axes_fold_
+    // contiguously` already proved the group is one contiguous block, so
+    // the runtime extent is the PRODUCT of every axis's own
+    // `u.output_extents` entry, read fresh per dispatch the same way a
+    // single-axis group already was (the kernel source is reused across
+    // concrete shapes; see `TiledGemmBlock`'s own doc). Every real matmul
+    // this path has measured keeps `token_axes` a single axis, but the
+    // product generalizes to that case for free (one factor, no-op).
+    let group_extent_expr = |group: &[u16]| -> String {
+        group
+            .iter()
+            .map(|&dim| {
+                let Some(index) = output_axes.iter().position(|&candidate| candidate == dim) else {
+                    unreachable!("every token/feature axis is one of output_axes by construction")
+                };
+                format!("u.output_extents[{index}]")
+            })
+            .collect::<Vec<_>>()
+            .join(" * ")
+    };
 
     source.push_str(&format!(
-        "    long feature_extent = u.output_extents[{feature_axis_index}];\n"
+        "    long feature_extent = {};\n",
+        group_extent_expr(feature_axes)
     ));
     source.push_str(&format!(
-        "    long token_extent = u.output_extents[{token_axis_index}];\n"
+        "    long token_extent = {};\n",
+        group_extent_expr(token_axes)
     ));
     source.push_str(&format!(
         "    long num_col_tiles = (token_extent + {}) / {block_n};\n",
