@@ -20,9 +20,9 @@
 //!   overridden per-build via an `OMEGA_<SECTION>_<KEY>` env var
 //!   (`build.rs`'s `resolve_int`), each override consulted emitting its own
 //!   `cargo:rerun-if-env-changed` line. `build.rs`'s
-//!   `require_multiple_of_sixteen`/`require_divides_q4k_block` enforce the
-//!   cross-axis constraints `omega/src/msl.rs`'s `push_tiled_gemm_body`
-//!   depends on.
+//!   `require_multiple_of_sixteen`/`require_divides_q4k_block`/
+//!   `require_multiple_of_eight` enforce the cross-axis constraints
+//!   `omega/src/msl.rs`'s `push_tiled_gemm_body` depends on.
 //!
 //! `msl` (this module's own crate) is alloc-tier and target-independent --
 //! emission never touches a device -- so [`SIMD_WIDTH`] is visible at every

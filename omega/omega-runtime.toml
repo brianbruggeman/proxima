@@ -28,6 +28,7 @@ block_m = 64
 block_n = 32
 # ports `ggml-metal.metal:6489` (`BLOCK_SIZE_K`) — the K-step width one
 # threadgroup barrier pair amortizes over. Must divide 256 (`Q4K_BLOCK_ELEMENTS`)
-# evenly so the reduction loop never reads past a real Q4_K weight's extent —
-# see sized::TILED_GEMM_BLOCK_K.
+# evenly so the reduction loop never reads past a real Q4_K weight's extent,
+# AND must be a multiple of 8 (ROW 113's `q4k_run8`-batched weight-staging
+# loop) — see sized::TILED_GEMM_BLOCK_K.
 block_k = 32

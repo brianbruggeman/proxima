@@ -2322,6 +2322,19 @@ fn push_packed_row_blocked_body(
 /// [`push_packed_row_blocked_body`] already reads a strided operand, just
 /// written into a fixed `threadgroup` array instead of a private register.
 ///
+/// ROW 113 correction: the weight-tile staging loop itself now decodes with
+/// [`push_packed_row_blocked_body`]'s OWN amortized pattern (`q4k_header_for`
+/// once per 32-element sub-block, `q4k_run8` batching the nibble extract 8
+/// at a time), matching ggml's `dequantize_q4_K` (`ggml-metal.metal:336-352`,
+/// which computes `dl`/`ml` once and loops 16 elements). Before this row it
+/// called the generic [`operand_read`] (`q4k_element`), which rederives the
+/// full header from `device` memory on every element -- correct (cross-token
+/// tile reuse via `threadgroup` staging was always real, confirmed by
+/// reading the emitted MSL) but roughly 8-40x more device reads and
+/// arithmetic per weight element than necessary, which a per-op profiling
+/// harness measured as 58.35x slower than decode (ROW 112) even though the
+/// tile itself was never re-streamed per token.
+///
 /// Threadgroup memory is three FIXED-SIZE local arrays declared directly in
 /// the kernel body (`weight_tile`: `BLOCK_M * BLOCK_K` `half`; `act_tile`:
 /// `BLOCK_N * BLOCK_K` `float`; `out_tile`: `BLOCK_M * BLOCK_N` `float`,
@@ -2426,24 +2439,68 @@ fn push_tiled_gemm_body(
         "    for (int i = 0; i < {mc_count}; ++i) {{ acc[i] = make_filled_simdgroup_matrix<float, 8>(0.0f); }}\n"
     ));
     source.push_str(&format!("    for (long k0 = 0; k0 < u.reduction_total; k0 += {block_k}) {{\n"));
+    // ROW 113: weight staging amortizes the Q4_K sub-block header the same
+    // way `push_packed_row_blocked_body` and ggml's own `dequantize_q4_K`
+    // (ggml-metal.metal:336-352) both do -- one `q4k_header_for` per
+    // 32-element sub-block, `q4k_run8` batching the nibble extract 8 at a
+    // time -- instead of `operand_read`'s generic `q4k_element`, which
+    // rederives the header (two `device` header reads plus the 6-bit
+    // scale/min unpack) from scratch on every one of the tile's individual
+    // elements. Staged by ROW rather than by flat index: `block_threads`
+    // (128) exceeds `block_m` (64) with the default sizing, so the first
+    // `block_m` threads each own exactly one row of the tile for this phase
+    // and the rest do no extra weight work (`act_tile`'s own load below
+    // still uses every thread).
     source.push_str(&format!(
-        "        for (long idx = tiitg; idx < {weight_tile_elems}; idx += {block_threads}) {{\n"
+        "        for (long w_row = tiitg; w_row < {block_m}; w_row += {block_threads}) {{\n"
     ));
-    source.push_str(&format!("            long w_row = idx / {block_k};\n"));
-    source.push_str(&format!("            long w_k = idx % {block_k};\n"));
     source.push_str(&format!("            long w_feat = row_tile * {block_m} + w_row;\n"));
-    source.push_str("            long w_k_global = k0 + w_k;\n");
-    source.push_str("            half w_value = 0.0h;\n");
     source.push_str("            if (w_feat < feature_extent) {\n");
     source.push_str(&format!(
-        "                long woff = u.operand_base[{weight}] + w_feat * u.operand_strides[{weight}][{feature_axis}] + w_k_global * u.operand_strides[{weight}][{reduce_dim}];\n"
+        "                long row_base = u.operand_base[{weight}] + w_feat * u.operand_strides[{weight}][{feature_axis}] + k0 * u.operand_strides[{weight}][{reduce_dim}];\n"
     ));
+    // `block_k` divides 256 (`Q4K_BLOCK_ELEMENTS`, `build.rs`'s
+    // `require_divides_q4k_block`) and is a multiple of 8 (`build.rs`'s own
+    // `require_multiple_of_eight`, added alongside this row), so it is
+    // always either <= the Q4_K sub-block width (32) or a whole multiple of
+    // it -- `chunk_width` picks the smaller, `num_chunks` covers `block_k`
+    // exactly with no ragged remainder either way.
+    let q4k_subblock_width: u64 = (Q4K_BLOCK_ELEMENTS / 8) as u64;
+    let chunk_width = q4k_subblock_width.min(block_k);
+    let num_chunks = block_k.div_ceil(chunk_width);
+    for chunk_index in 0..num_chunks {
+        let chunk_offset = chunk_index * chunk_width;
+        source.push_str("                {\n");
+        source.push_str(&format!(
+            "                    long slot_off = row_base + {chunk_offset};\n"
+        ));
+        source.push_str(&format!(
+            "                    device const uchar *blk = in{weight} + (slot_off / {Q4K_BLOCK_ELEMENTS}) * {Q4K_BLOCK_BYTES};\n"
+        ));
+        source.push_str(&format!(
+            "                    uint slot = (uint)(slot_off % {Q4K_BLOCK_ELEMENTS});\n"
+        ));
+        source.push_str("                    q4k_header hdr = q4k_header_for(blk, slot);\n");
+        let runs = chunk_width / 8;
+        for run_index in 0..runs {
+            let run_offset = run_index * 8;
+            source.push_str("                    {\n");
+            source.push_str("                        float levels[8];\n");
+            source.push_str(&format!(
+                "                        q4k_run8(blk, slot + {run_offset}u, levels);\n"
+            ));
+            source.push_str(&format!(
+                "                        for (int j = 0; j < 8; ++j) {{ weight_tile[w_row * {block_k} + {chunk_offset} + {run_offset} + j] = (half)(hdr.scale * levels[j] - hdr.minimum); }}\n"
+            ));
+            source.push_str("                    }\n");
+        }
+        source.push_str("                }\n");
+    }
+    source.push_str("            } else {\n");
     source.push_str(&format!(
-        "                w_value = (half)({});\n",
-        operand_read(weight, "woff", Some(PackedCodec::Q4K))
+        "                for (long fill_k = 0; fill_k < {block_k}; ++fill_k) {{ weight_tile[w_row * {block_k} + fill_k] = 0.0h; }}\n"
     ));
     source.push_str("            }\n");
-    source.push_str(&format!("            weight_tile[w_row * {block_k} + w_k] = w_value;\n"));
     source.push_str("        }\n");
     source.push_str(&format!(
         "        for (long idx = tiitg; idx < {act_tile_elems}; idx += {block_threads}) {{\n"
