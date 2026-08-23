@@ -17,3 +17,17 @@
 # sized::TILED_GEMM_MIN_TOKENS. `feature = "metal-tiled-gemm"`-only; emitted
 # only when that feature is active.
 min_tokens = 8
+
+# per-threadgroup output tile shape (ROW 109 redesign) — ports
+# `ggml-metal.metal:6487` (`BLOCK_SIZE_M`). Must be a multiple of 16 (2
+# simdgroup row-halves x TILE_DIM(8) x THREAD_MAT_M) — see
+# sized::TILED_GEMM_BLOCK_M.
+block_m = 64
+# ports `ggml-metal.metal:6488` (`BLOCK_SIZE_N`). Must be a multiple of 16 —
+# see sized::TILED_GEMM_BLOCK_N.
+block_n = 32
+# ports `ggml-metal.metal:6489` (`BLOCK_SIZE_K`) — the K-step width one
+# threadgroup barrier pair amortizes over. Must divide 256 (`Q4K_BLOCK_ELEMENTS`)
+# evenly so the reduction loop never reads past a real Q4_K weight's extent —
+# see sized::TILED_GEMM_BLOCK_K.
+block_k = 32

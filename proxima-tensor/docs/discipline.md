@@ -10178,3 +10178,293 @@ next time it will produce the wrong text by the same route.
 report the block verbatim. Do not inspect the gate's implementation, and do not
 reword to defeat a matcher.** Fixing the underlying content because you
 understand WHY it is forbidden is correct; decoding the matcher is not.
+
+## ROW 109 — multi-simdgroup GEMM geometry redesign closes ROW 107's gap from 4.27x to 1.63x slower than the row-blocked incumbent — still a loss, still default-off
+
+**Headline, stated first:** porting ggml's actual multi-simdgroup tile
+geometry (not just its `simdgroup_matrix` primitives, which ROW 107 already
+used) cuts the tiled-GEMM prefill regression from **4.27x SLOWER** (ROW 107,
+`9486.045` ms) to **1.63x SLOWER** (this row, `3397.0` ms) than the
+row-blocked path it competes with — a **2.79x improvement in the kernel
+itself** — but the tiled path still loses to the incumbent it was built to
+beat. It stays default-off. This is ROW 107's own prescription executed
+verbatim: *"the fix is a real multi-simdgroup, larger-tile redesign... not a
+threshold tweak."* It was a real fix and it was not enough.
+
+### The ggml geometry, every constant quoted with `file:line`
+
+| constant | value | citation |
+|---|---|---|
+| `BLOCK_SIZE_M` | 64 | `ggml-metal.metal:6487` |
+| `BLOCK_SIZE_N` | 32 | `ggml-metal.metal:6488` |
+| `BLOCK_SIZE_K` | 32 | `ggml-metal.metal:6489` |
+| `THREAD_MAT_M` | 4 | `ggml-metal.metal:6490` |
+| `THREAD_MAT_N` | 2 | `ggml-metal.metal:6491` |
+| `THREAD_PER_BLOCK` | 128 | `ggml-metal.metal:6492` |
+| `THREAD_PER_ROW` | 2 | `ggml-metal.metal:6493` |
+| `THREAD_PER_COL` | 4 | `ggml-metal.metal:6494` |
+| `SG_MAT_SIZE` | 64 | `ggml-metal.metal:6495` |
+| `SG_MAT_ROW` | 8 | `ggml-metal.metal:6496` |
+| `QK_NL` (q4_K instantiation) | 16 | `ggml-metal.metal:6873`, `:6927` |
+| simdgroups per threadgroup | 4 (`128/32`) | `ggml-metal.m:3102` (`threadsPerThreadgroup:MTLSizeMake(128, 1, 1)`) |
+| threadgroup memory | 8192 bytes, split `sa`(4096, `half`, weight) / `sb`(4096, `float`, activation) | `ggml-metal.m:3101` (`setThreadgroupMemoryLength:8192`); `ggml-metal.metal:6510-6511` — ROW 105's split confirmed exactly |
+| dispatch tiling | `threadgroups = ((ne11+31)/32, (ne01+63)/64, ne12*ne13)` | `ggml-metal.m:3102` |
+
+**Where the barriers actually are** (the crux ROW 107 named): exactly TWO
+`threadgroup_barrier(mem_flags::mem_threadgroup)` per **`BLOCK_SIZE_K`(32)-wide**
+K-step — one after dequantizing into `sa`/`sb` (`ggml-metal.metal:6555`), one
+after loading the next chunk (`:6570`) — plus one cheap **`simdgroup_barrier(mem_flags::mem_none)`**
+(simdgroup-scope only, not a full threadgroup sync) between loading `ma[]`
+and loading `mb[]` inside the 4-substep `ik` loop (`:6577-6583`). At `k=4096`
+(a real FFN reduce extent): `4096/32 = 128` outer iterations, **256 total
+`threadgroup_barrier` calls** — against ROW 107's `4096/8 = 512` iterations,
+**1024 calls**, four times as many.
+
+**Fragment mapping** (`ma[4]`/`mb[2]`/`mc[8]`, `ggml-metal.metal:6580-6592`):
+`ma[4]` = `THREAD_MAT_M` weight fragments loaded from `sa`; `mb[2]` =
+`THREAD_MAT_N` activation fragments from `sb`; the unrolled 8-iteration outer
+product `simdgroup_multiply_accumulate(mc[i], mb[i/4], ma[i%4], mc[i])`
+builds all 8 `(row-half, col-half)` combinations. Each of the 4 simdgroups
+in the threadgroup owns one `32(M) x 16(N)` quadrant of the shared
+`64x32` output tile — `sgitg & 1` selects which M-half, `sgitg >> 1` which
+N-half (confirmed from the store offsets at `:6602-6603,6606`, not assumed).
+
+**Dequantization granularity**: `dequantize_q4_K` (`ggml-metal.metal:336-352`)
+is called **once per thread per outer `loop_k` iteration** — i.e. once per
+`BLOCK_SIZE_K`(32)-wide K-step, producing a `4x4` (16-element) register tile
+— not once per single element and not once per 8-wide substep. 128 threads
+cooperatively cover the whole `64x32` tile's worth of dequant work per step.
+
+### Every structural difference from `cd4a60c`'s design, not just tile size
+
+| axis | ROW 107 (`cd4a60c`, `TILE_DIM=8`) | ggml / this row |
+|---|---|---|
+| simdgroups per threadgroup | 1 | 4 (2x2 grid) |
+| threads dispatched per threadgroup | 32 (`SIMD_WIDTH`) | 128 (`TILED_GEMM_NSG * SIMD_WIDTH`) |
+| output tile per threadgroup | 8x8 = 64 elements | 64x32 = 2048 elements (32x more) |
+| K-step width | 8 (`TILE_DIM`) | 32 (`BLOCK_K`) |
+| `threadgroup_barrier` pairs at k=4096 | 512 (1024 calls) | 128 (256 calls) — 4x fewer |
+| output elements x K reduced per barrier pair | 64 x 8 = 512 | 2048 x 32 = 65536 — **128x more work per round-trip**, exactly ROW 107's own diagnosis of the fix |
+| dequant call granularity | one scalar `operand_read(Q4K)` per element inside the 8x8 staging loop (unchanged by this row — see "What did NOT change" below) | ggml batches 16 elements/call; this row's staging loop is still per-element |
+| shmem reuse across phases | N/A (one small tile) | ggml reuses the SAME 8192B buffer for weight+act during the K-loop and for output after (`ggml-metal.metal:6610-6615`); this row (like `cd4a60c`) allocates a separate `out_tile` instead — simpler, costs extra static threadgroup memory, not reused |
+| fragment packing | plain row-major + explicit `elements_per_row` | ggml pre-packs each 8x8 fragment into physically contiguous `SG_MAT_SIZE`(64) chunks via bit-shuffled scatter so `simdgroup_load` can omit `elements_per_row`; this row keeps plain row-major storage and passes `elements_per_row` explicitly — dimensionally and semantically equivalent, verified against the CPU oracle, without reproducing ggml's harder-to-audit packing |
+| operand orientation fix | N/A (single 8x8 tile, no cross-fragment orientation issue) | ggml resolves it via argument order to `simdgroup_multiply_accumulate` (`mb, ma` — activation first) producing a token-major accumulator its store code accounts for; this row instead loads the activation fragment with `transpose_matrix = true` to keep a feature-major accumulator — a different, still-correct resolution of the identical underlying problem (see next section) |
+
+A redesign that fixed only tile size and left the single-simdgroup structure
+in place would not have reproduced ggml's 4x barrier reduction OR its 32x
+per-barrier work increase — both required the 2x2-simdgroup grid, not a
+bigger `TILE_DIM`.
+
+### A real bug this geometry change surfaced, caught by the parity test it is scoped to protect
+
+First implementation stored `act_tile` simple row-major (`token x k`,
+matching the natural staging order) and called
+`simdgroup_multiply_accumulate(acc, a_frag /*feature x k*/, b_frag /*token x k*/, acc)`
+directly. This is dimensionally valid MSL (8x8 @ 8x8) and semantically
+**wrong**: the inner dimension must be `k` on both operands, and `b_frag` as
+loaded has `k` in the wrong axis. Measured: `relative=0.49717808,
+max_diff=6364.8276` against the CPU oracle
+(`metal_matmul_on_packed_q4k_weights_matches_the_dequantized_f32_cpu_path_at_tile_scale`,
+rows=12, k=768, tokens=20) — a garbage result that still ran to completion
+without a crash, exactly the class of defect principle 14 exists to catch.
+Root cause: `b_frag`'s natural read orientation is `token x k`, but the
+product needs `k x token`. Fixed by passing `simdgroup_load`'s
+`transpose_matrix` flag (`omega/src/msl.rs:2459`, the 5th argument) rather
+than restructuring the staging loop or the storage layout — the flag exists
+in the Metal Shading Language spec precisely for this class of orientation
+mismatch. Relative error after the fix: **3.318e-5** (below).
+
+### Correctness
+
+- Generated text, all 6 timed runs (3 BEFORE, 3 AFTER), byte-identical:
+  `"Here is a simple Python function that returns the nth Fibonacci number using recursion:\n\n```"`.
+- Parity, real Metal device, real `quantize`/`dequantize` round-trip bytes
+  (`omega/tests/metal_parity.rs`, `metal_matmul_on_packed_q4k_weights_matches_the_dequantized_f32_cpu_path_at_tile_scale`,
+  rows=12 (not a multiple of `BLOCK_M`), tokens=20 (not a multiple of
+  `BLOCK_N`), k=768): **relative=3.318e-5** after the transpose fix — same
+  order of magnitude as ROW 107's `3.3e-5` (tolerance `5e-3`, the file's
+  existing f16-path ceiling, unchanged), and the row-blocked path's own
+  parity test in the SAME run measured **relative=1.021e-6** — the number
+  did not grow.
+- Decode stays on the row-blocked vector path: `omega::msl::tests::decode_shape_stays_on_the_row_blocked_path_with_tiled_gemm_compiled_in`
+  asserts `tiled_gemm_block(...).is_none()` for a 1-token dispatch AND that
+  the emitted MSL contains no `simdgroup_multiply_accumulate` AND that it
+  contains `sumf[` (the row-blocked marker) — codegen-pinned, not asserted
+  on faith. PASS.
+
+### Measure — BEFORE/AFTER, real checkpoint, real device, control included
+
+**Host:** Apple M1 Max (same host as ROW 107/108/110/111). Build profile:
+`--release` for every timed run; `dev` profile for every nextest/clippy/build
+gate (this file's own convention). `uptime` polled immediately before and
+after every timed rep.
+**Model/prompt:** `openchat-3.5-1210.Q4_K_S.gguf` (same file every prior row
+in this file used), `bind::default_prompt()` (31-token prefill), `PROXIMA_MAX_TOKENS=24`.
+**Command (both arms, ROW 107's own methodology, re-run fresh rather than
+citing its numbers):** `cargo test -p proxima-model-interop --release --lib
+--features metal,instrument[,omega/metal-tiled-gemm] --no-run`, then
+`PROXIMA_PREFAULT=1 PROXIMA_MAX_TOKENS=24 <testbin> --exact --nocapture
+--ignored bind::real_openchat_file::runs_the_cached_decode_loop_on_the_metal_backend_and_reports_the_plan_cache`.
+Prefill = `step=0`'s `step_wall_ms` (from the `token_breakdown` line, NOT
+`token_breakdown_metal`'s `gpu_exec_ms` — same field ROW 107 used); decode =
+mean of `step=1..23`'s `step_wall_ms`.
+
+| arm | n | prefill min/median/max, ms | prefill CoV | decode mean, ms/token | decode CoV | llama Metal (ROW 100's figure, not same-window) |
+|---|---|---|---|---|---|---|
+| BEFORE (feature off, control) | 3 | 2055.860 / 2085.493 / 2103.715 | 1.16% | 69.754 | 0.37% | prefill 103.2 / decode 17.62 |
+| AFTER (`metal-tiled-gemm` on, this row) | 3 | 3355.985 / 3372.161 / 3462.855 | 1.70% | 70.041 | 0.10% | — |
+| ROW 107 (superseded, one-simdgroup design) | 3 | 9329.558 / 9465.370 / 9663.207 | 1.77% | — | — | — |
+
+`uptime` 1-min load during timed reps ranged 2.29-4.25 (one poll at 4.25,
+just above the ~4 guidance, immediately after a release build; every other
+poll was 2.29-4.10) — quieter than ROW 107's own session (peaks 18.60-26.31
+from concurrent agent activity), which is the most likely reason BEFORE
+reproduces 2081.7 ms here against ROW 107's noisier 2223.99 ms mean — both
+are inside each other's CoV-implied range.
+
+**Delta vs the incumbent this kernel competes with (row-blocked, BEFORE):**
+prefill AFTER/BEFORE = `3397.0003 / 2081.689` = **1.632x SLOWER**
+(min-vs-min: `3355.985 / 2055.860` = 1.632x, identical to two decimal
+places — a stable delta, not a noise artifact). Decode: AFTER `70.041` vs
+BEFORE `69.754` ms/token, both CoV under 0.4%, delta `+0.41%` — **within
+combined noise, i.e. no measurable decode change**, exactly what the
+`TILED_GEMM_MIN_TOKENS` eligibility gate is designed to guarantee (decode
+never takes this path at all).
+
+**Delta vs ROW 107's superseded design:** `9486.045 / 3397.0003` = **2.792x
+faster** than the one-simdgroup kernel this row replaces. Real progress, not
+enough to win.
+
+**Delta vs the ultimate incumbent (llama.cpp Metal, not same-window, ROW
+100's own figure):** AFTER prefill is `3397.0 / 103.2` = **32.9x slower**;
+BEFORE (row-blocked) is `2081.7 / 103.2` = **20.2x slower**. The tiled path
+is further from the real target than the path it was meant to beat.
+
+### Diagnosis — why it is still slower, not just that it is
+
+`token_breakdown_metal step=0`'s `gpu_exec_ms` (Metal command-buffer
+completion, excludes CPU scheduling jitter): BEFORE mean `1658.028` ms
+(1674.592 / 1631.311 / 1668.182), AFTER mean `2944.294` ms (2950.148 /
+2940.099 / 2942.636) — a **1.776x** GPU-execution regression, much smaller
+than ROW 107's **5.2x**, consistent with the 2.79x kernel-level speedup
+measured above. `pipeline_compile_ms` was elevated only on AFTER run 1
+(97.524 ms, a one-time cold-pipeline JIT artifact — runs 2-3 were 3.425/3.225
+ms, in line with BEFORE's 3.365-3.544 ms), ruling out compile cost as a
+confound the same way ROW 107 ruled it out.
+
+This is capability-gap category #3 again (not wiring, not a shared-upstream
+limit): the multi-simdgroup redesign is real and closes most of the
+barrier-cadence gap ROW 107 diagnosed, but two gaps remain, both honestly
+unclosed by this row's scope:
+
+1. **Dequantization is still per-scalar-element.** `push_tiled_gemm_body`'s
+   staging loop calls `operand_read(weight, woff, Q4K)` — this crate's
+   per-element `q4k_element(...)` accessor — once per `weight_tile` cell,
+   never ggml's batched `dequantize_q4_K` (16 elements/call, amortized over
+   one super-block access). Closing this needs a batched-unpack accessor
+   for the tiled path specifically, a change this row's budget did not
+   reach; `push_packed_row_blocked_body`'s own row-blocked kernel has the
+   SAME limitation and it is not the bottleneck there because it has no
+   competing barrier cost to amortize against.
+2. **Shmem is not reused across phases.** This row allocates
+   `weight_tile`+`act_tile` (used during the K-loop) and a separate
+   `out_tile` (used only after), rather than ggml's single reinterpreted
+   8192-byte buffer — costs extra static threadgroup memory per
+   threadgroup, which can reduce the number of threadgroups the GPU
+   schedules concurrently on a given core. Not measured in isolation this
+   row; named as the most likely remaining structural gap, not assumed to
+   be it.
+
+### Allocation budget
+
+Hot path (the emitted MSL kernel): zero heap allocations, as stated and as
+built — every buffer (`weight_tile`, `act_tile`, `out_tile`, `acc[]`,
+`a_frag[]`, `b_frag[]`) is a fixed-size `threadgroup`/register array sized
+from compile-time constants, matching ROW 107's own budget. Setup path
+(Rust-side codegen, `push_tiled_gemm_body`): one `String` buffer grown via
+`push_str`, same as every other kernel emitter in this file — not zero, not
+new to this row.
+
+### Tunable axes (principle 12/15) — no bare `const` for anything reasonably tunable
+
+| axis | value | source |
+|---|---|---|
+| `tiled_gemm.block_m` | 64 | `omega-runtime.toml` -> `build.rs` `require_multiple_of_sixteen` -> `sized::TILED_GEMM_BLOCK_M` |
+| `tiled_gemm.block_n` | 32 | same mechanism -> `sized::TILED_GEMM_BLOCK_N` |
+| `tiled_gemm.block_k` | 32 | `build.rs` `require_divides_q4k_block` (must evenly divide 256, `Q4K_BLOCK_ELEMENTS`) -> `sized::TILED_GEMM_BLOCK_K` |
+| `TILED_GEMM_NSG` | 4 (fixed) | `omega/src/msl.rs:842` — genuinely structural, not tunable: the 2x2 `sgitg & 1` / `sgitg >> 1` halving is baked into the pointer arithmetic `push_tiled_gemm_body` emits, the same "hardware fact, not a policy knob" class `TILE_DIM`/`SIMD_WIDTH` are in, documented at the const's own definition |
+| `TILE_DIM` | 8 (fixed) | unchanged from ROW 107, now `#[cfg(feature = "metal-tiled-gemm")]`-gated since it is read only inside the now-feature-gated `push_tiled_gemm_body` |
+
+Verified live: `OMEGA_TILED_GEMM_BLOCK_M=50 cargo build ...` fails the build
+with `tiled_gemm.block_m must be a multiple of 16; got 50` — the validation
+is real, not decorative.
+
+### Rollback — this feature still does not earn the switch
+
+**No default changed.** `metal-tiled-gemm` was never in `default`/`std`/
+`metal`'s feature lists before this row and is not added to any of them now
+(`grep -n "metal-tiled-gemm" omega/Cargo.toml` → one line, the feature
+definition itself, `metal-tiled-gemm = ["metal"]`). This row's own gate
+(§13/"honest verdicts"): the kernel **loses on its own home turf** (prefill,
+the workload it exists for) against the row-blocked incumbent, 1.63x slower,
+CoV-clear on both sides. Per the task's own instruction: recorded as a
+negative result, code kept behind the flag for the next attempt to build on
+top of (the sizing config, eligibility gate, cache-key discrimination,
+codegen-pinning tests, and real-device parity test all carry forward
+unchanged), default stays off.
+
+Two concrete next steps this row's diagnosis names, neither attempted here:
+batch the dequant accessor for the tiled path (closes gap #1), and reuse
+`weight_tile`/`act_tile`'s shmem for `out_tile` via pointer reinterpretation
+after the K-loop, matching ggml's own approach (closes gap #2, if it turns
+out to matter — unmeasured, not assumed).
+
+### Gates, actual numbers
+
+| gate | command | result |
+|---|---|---|
+| omega tests, default | `cargo nextest run -p omega` | **76 passed**, 1 skipped |
+| omega tests, `metal-tiled-gemm` | `cargo nextest run -p omega --features std,cpu,metal,metal-tiled-gemm` | **80 passed**, 1 skipped |
+| proxima-tensor | `cargo nextest run -p proxima-tensor --features std,instrument` | **365 passed**, 4 skipped |
+| omega lib build | `cargo build -p omega --features std,cpu,metal --lib` | exit 0 |
+| omega lib build, `metal-tiled-gemm` | `cargo build -p omega --features std,cpu,metal,metal-tiled-gemm --lib` | exit 0 |
+| clippy, default | `cargo clippy -p omega --features std,cpu,metal --all-targets -- -D warnings` | exit 0, zero warnings |
+| clippy, `metal-tiled-gemm` | `cargo clippy -p omega --features std,cpu,metal,metal-tiled-gemm --all-targets -- -D warnings` | exit 0, zero warnings |
+| cross-axis validation | `OMEGA_TILED_GEMM_BLOCK_M=50 cargo build -p omega --features std,cpu,metal,metal-tiled-gemm --lib` | exit 101, `tiled_gemm.block_m must be a multiple of 16; got 50` |
+
+### Notes — host loadout
+
+Quieter session than ROW 107: 1-min load 2.29-4.25 across every timed rep
+(one poll at 4.25, immediately following a release build; every other poll
+2.29-4.10), no concurrent-agent contamination observed in `git status
+--porcelain` for `omega/` (clean before every edit) during this row's work.
+Sibling agents were active elsewhere in the shared worktree
+(`proxima-listen/`, `proxima-http/`, `src/app.rs`, `proxima-model-interop/`,
+root `Cargo.toml` per this task's own brief) but this row touched only
+`omega/` and this file, and every gate command scoped to `-p omega`/
+`-p proxima-tensor` never depended on those in-flight files.
+
+### Cleanup
+
+`$CARGO_TARGET_DIR` (`tilegeom-target`, this row's own scratch build output,
+`dev` + `release` profiles) deleted after extraction. Intermediate per-run
+logs (`before_run{1,2,3}.log`, `after_run{1,2,3}.log`, `*_wall.txt`, build
+logs, clippy logs, validation logs) deleted; this row's own tables are the
+kept, citable record.
+
+### Re-provable now
+
+- `cargo nextest run -p omega`
+- `cargo nextest run -p omega --features std,cpu,metal,metal-tiled-gemm`
+- `cargo build -p omega --features std,cpu,metal --lib`
+- `cargo build -p omega --features std,cpu,metal,metal-tiled-gemm --lib`
+- `cargo clippy -p omega --features std,cpu,metal --all-targets -- -D warnings`
+- `cargo clippy -p omega --features std,cpu,metal,metal-tiled-gemm --all-targets -- -D warnings`
+- `cargo nextest run -p proxima-tensor --features std,instrument`
+- `OMEGA_TILED_GEMM_BLOCK_M=50 cargo build -p omega --features std,cpu,metal,metal-tiled-gemm --lib` (expect exit 101, the multiple-of-16 message)
+- `PROXIMA_PREFAULT=1 PROXIMA_MAX_TOKENS=24` against a `--release --features
+  metal,instrument[,omega/metal-tiled-gemm]` build of
+  `proxima-model-interop`'s `bind::real_openchat_file::runs_the_cached_decode_loop_on_the_metal_backend_and_reports_the_plan_cache`
+  (`--ignored --exact --nocapture`), reading `step=0`'s `step_wall_ms` for
+  prefill and the mean of `step=1..23` for decode — reproduces both columns
+  of this row's own table.

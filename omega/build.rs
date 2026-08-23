@@ -20,6 +20,31 @@ fn require_nonzero(name: &str, value: i64) -> usize {
     value
 }
 
+/// Cross-axis validation for the tiled-GEMM geometry (principle 8: these
+/// rules live with the profile type, i.e. right here alongside the values
+/// they constrain, not scattered into the consuming kernel emitter).
+/// `block_m`/`block_n` must be a whole number of `2 * TILE_DIM` (2
+/// simdgroup halves, `TILE_DIM`(8)-wide `simdgroup_matrix` fragments each —
+/// see `omega/src/msl.rs`'s `TILED_GEMM_NSG` doc) or the row/col-half
+/// pointer arithmetic in `push_tiled_gemm_body` reads a fragment straddling
+/// two logical halves. `block_k` must divide 256 (`Q4K_BLOCK_ELEMENTS`)
+/// evenly: every real Q4_K reduction extent is a whole multiple of 256
+/// (`classify_packed_row_block`'s own gate), so this is what guarantees the
+/// tiled kernel's `k0` loop always lands exactly on `u.reduction_total`
+/// without a per-iteration bounds check.
+fn require_multiple_of_sixteen(name: &str, value: usize) -> usize {
+    assert!(value.is_multiple_of(16), "{name} must be a multiple of 16; got {value}");
+    value
+}
+
+fn require_divides_q4k_block(name: &str, value: usize) -> usize {
+    assert!(
+        256usize.is_multiple_of(value),
+        "{name} must evenly divide 256 (Q4K_BLOCK_ELEMENTS); got {value}"
+    );
+    value
+}
+
 fn get_int(table: &Value, section: &str, key: &str) -> i64 {
     table
         .get(section)
@@ -77,6 +102,22 @@ fn emit_sizing_consts() {
             resolve_int(&root, "tiled_gemm", "min_tokens"),
         );
         out.push_str(&format!("pub const TILED_GEMM_MIN_TOKENS: u64 = {min_tokens};\n"));
+
+        let block_m = require_multiple_of_sixteen(
+            "tiled_gemm.block_m",
+            require_nonzero("tiled_gemm.block_m", resolve_int(&root, "tiled_gemm", "block_m")),
+        );
+        let block_n = require_multiple_of_sixteen(
+            "tiled_gemm.block_n",
+            require_nonzero("tiled_gemm.block_n", resolve_int(&root, "tiled_gemm", "block_n")),
+        );
+        let block_k = require_divides_q4k_block(
+            "tiled_gemm.block_k",
+            require_nonzero("tiled_gemm.block_k", resolve_int(&root, "tiled_gemm", "block_k")),
+        );
+        out.push_str(&format!("pub const TILED_GEMM_BLOCK_M: u64 = {block_m};\n"));
+        out.push_str(&format!("pub const TILED_GEMM_BLOCK_N: u64 = {block_n};\n"));
+        out.push_str(&format!("pub const TILED_GEMM_BLOCK_K: u64 = {block_k};\n"));
     }
 
     let out_dir = PathBuf::from(env::var("OUT_DIR").expect("OUT_DIR set by cargo"));
