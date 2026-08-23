@@ -72,7 +72,6 @@ proxima-core = { workspace = true, features = ["time-driver-mock", "std"] }
 # (`pipe::clock::testing::{MockClock, RecordingClock}`), built over the
 # MockDriver above — see `proxima-primitives/src/pipe/clock.rs`.
 proxima-primitives = { workspace = true, features = ["test-support"] }
-rstest = { workspace = true }
 toml = { workspace = true }
 proxima-net = { workspace = true, features = ["prime", "tokio"] }
 proxima-protocols = { workspace = true, features = ["quic-tls-rustls", "quic-mock-tls"] }

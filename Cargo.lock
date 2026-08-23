@@ -4060,7 +4060,6 @@ dependencies = [
  "quinn",
  "rand 0.10.2",
  "rcgen",
- "rstest",
  "rustc-hash",
  "rustls",
  "serde",
