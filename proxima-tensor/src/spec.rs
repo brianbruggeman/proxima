@@ -1497,6 +1497,145 @@ fn append_mistral_cached_layer(
     Ok((x_next, (rotated_k_new_even, rotated_k_new_odd, v_new)))
 }
 
+/// [`append_mistral_cached_layer`]'s mixture-of-experts counterpart, the
+/// same relationship [`append_mistral_moe_layer`] bears to
+/// [`append_mistral_layer`]: identical cached attention block (RoPE + GQA +
+/// online-softmax combine over the cached/new key split, node-for-node the
+/// same code as [`append_mistral_cached_layer`]), [`append_moe_ffn`] in
+/// place of the dense SwiGLU triple. Kept as a separate function for the
+/// same reason [`append_mistral_moe_layer`] is: the dense cached path's own
+/// node sequence never changes shape merely because this function exists
+/// next to it.
+#[allow(clippy::too_many_arguments)]
+fn append_mistral_cached_moe_layer(
+    program: &mut Vec<Op>,
+    x: NodeId,
+    inv_dim: NodeId,
+    eps: NodeId,
+    ones: NodeId,
+    inv_sqrt_head_dim: NodeId,
+    cos_new: NodeId,
+    sin_new: NodeId,
+    group_ones: NodeId,
+    is_future: NodeId,
+    group: u32,
+    attn_norm_weight: NodeId,
+    ffn_norm_weight: NodeId,
+    wq: NodeId,
+    wk: NodeId,
+    wv: NodeId,
+    wo: NodeId,
+    gate_inp: NodeId,
+    expert_w_gate: NodeId,
+    expert_w_up: NodeId,
+    expert_w_down: NodeId,
+    expert_count: u32,
+    expert_used_count: u32,
+    k_even_cache: NodeId,
+    k_odd_cache: NodeId,
+    v_cache: NodeId,
+) -> Result<(NodeId, CachedLayerRoots), TensorError> {
+    let normed = rmsnorm(program, x, attn_norm_weight, inv_dim, eps)?;
+
+    let q_product = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(normed, "si->shdi"), (wq, "ihd->shdi")])?;
+    let q = reduce(program, DType::Float32, ScalarOp::Add, ReduceInit::Zero, q_product, "shdi->shdi", "shd->shdi")?;
+
+    let k_new_product = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(normed, "si->sudi"), (wk, "iud->sudi")])?;
+    let k_new = reduce(program, DType::Float32, ScalarOp::Add, ReduceInit::Zero, k_new_product, "sudi->sudi", "sud->sudi")?;
+
+    let v_product = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(normed, "si->sudi"), (wv, "iud->sudi")])?;
+    let v_new = reduce(program, DType::Float32, ScalarOp::Add, ReduceInit::Zero, v_product, "sudi->sudi", "sud->sudi")?;
+
+    let q_even_cos = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(q, "s,h,2*i->shi"), (cos_new, "si->shi")])?;
+    let q_odd_sin = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(q, "s,h,2*i+1->shi"), (sin_new, "si->shi")])?;
+    let rotated_q_even = elementwise(program, DType::Float32, ScalarOp::Subtract, &[(q_even_cos, "shi->shi"), (q_odd_sin, "shi->shi")])?;
+    let q_even_sin = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(q, "s,h,2*i->shi"), (sin_new, "si->shi")])?;
+    let q_odd_cos = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(q, "s,h,2*i+1->shi"), (cos_new, "si->shi")])?;
+    let rotated_q_odd = elementwise(program, DType::Float32, ScalarOp::Add, &[(q_even_sin, "shi->shi"), (q_odd_cos, "shi->shi")])?;
+
+    let k_new_even_cos = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(k_new, "s,u,2*i->sui"), (cos_new, "si->sui")])?;
+    let k_new_odd_sin = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(k_new, "s,u,2*i+1->sui"), (sin_new, "si->sui")])?;
+    let rotated_k_new_even =
+        elementwise(program, DType::Float32, ScalarOp::Subtract, &[(k_new_even_cos, "sui->sui"), (k_new_odd_sin, "sui->sui")])?;
+    let k_new_even_sin = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(k_new, "s,u,2*i->sui"), (sin_new, "si->sui")])?;
+    let k_new_odd_cos = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(k_new, "s,u,2*i+1->sui"), (cos_new, "si->sui")])?;
+    let rotated_k_new_odd =
+        elementwise(program, DType::Float32, ScalarOp::Add, &[(k_new_even_sin, "sui->sui"), (k_new_odd_cos, "sui->sui")])?;
+
+    let group_map = alloc::format!("s,{group}*u+g,i->sugi");
+    let q_even_grouped = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(rotated_q_even, group_map.as_str()), (group_ones, "ug->sugi")])?;
+    let q_odd_grouped = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(rotated_q_odd, group_map.as_str()), (group_ones, "ug->sugi")])?;
+
+    let score_cached_even_product =
+        elementwise(program, DType::Float32, ScalarOp::Multiply, &[(q_even_grouped, "sugi->stugi"), (k_even_cache, "tui->stugi")])?;
+    let score_cached_even = reduce(program, DType::Float32, ScalarOp::Add, ReduceInit::Zero, score_cached_even_product, "stugi->stugi", "stug->stugi")?;
+    let score_cached_odd_product =
+        elementwise(program, DType::Float32, ScalarOp::Multiply, &[(q_odd_grouped, "sugi->stugi"), (k_odd_cache, "tui->stugi")])?;
+    let score_cached_odd = reduce(program, DType::Float32, ScalarOp::Add, ReduceInit::Zero, score_cached_odd_product, "stugi->stugi", "stug->stugi")?;
+    let score_cached = elementwise(program, DType::Float32, ScalarOp::Add, &[(score_cached_even, "stug->stug"), (score_cached_odd, "stug->stug")])?;
+    let score_cached_scaled = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(score_cached, "stug->stug"), (inv_sqrt_head_dim, "->stug")])?;
+
+    let score_new_even_product =
+        elementwise(program, DType::Float32, ScalarOp::Multiply, &[(q_even_grouped, "sugi->swugi"), (rotated_k_new_even, "wui->swugi")])?;
+    let score_new_even = reduce(program, DType::Float32, ScalarOp::Add, ReduceInit::Zero, score_new_even_product, "swugi->swugi", "swug->swugi")?;
+    let score_new_odd_product =
+        elementwise(program, DType::Float32, ScalarOp::Multiply, &[(q_odd_grouped, "sugi->swugi"), (rotated_k_new_odd, "wui->swugi")])?;
+    let score_new_odd = reduce(program, DType::Float32, ScalarOp::Add, ReduceInit::Zero, score_new_odd_product, "swugi->swugi", "swug->swugi")?;
+    let score_new = elementwise(program, DType::Float32, ScalarOp::Add, &[(score_new_even, "swug->swug"), (score_new_odd, "swug->swug")])?;
+    let score_new_scaled = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(score_new, "swug->swug"), (inv_sqrt_head_dim, "->swug")])?;
+    let neg_infinity = scalar_constant(program, f32::NEG_INFINITY);
+    let score_new_masked = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Select,
+        &[(is_future, "sw->swug"), (neg_infinity, "->swug"), (score_new_scaled, "swug->swug")],
+    )?;
+
+    let score_max_cached = reduce(program, DType::Float32, ScalarOp::Maximum, ReduceInit::NegativeInfinity, score_cached_scaled, "stug->stug", "sug->stug")?;
+    let score_max_new = reduce(program, DType::Float32, ScalarOp::Maximum, ReduceInit::NegativeInfinity, score_new_masked, "swug->swug", "sug->swug")?;
+    let global_max = elementwise(program, DType::Float32, ScalarOp::Maximum, &[(score_max_cached, "sug->sug"), (score_max_new, "sug->sug")])?;
+
+    let shifted_cached = elementwise(program, DType::Float32, ScalarOp::Subtract, &[(score_cached_scaled, "stug->stug"), (global_max, "sug->stug")])?;
+    let weights_cached = elementwise(program, DType::Float32, ScalarOp::Exponential, &[(shifted_cached, "stug->stug")])?;
+    let shifted_new = elementwise(program, DType::Float32, ScalarOp::Subtract, &[(score_new_masked, "swug->swug"), (global_max, "sug->swug")])?;
+    let weights_new = elementwise(program, DType::Float32, ScalarOp::Exponential, &[(shifted_new, "swug->swug")])?;
+
+    let sum_cached = reduce(program, DType::Float32, ScalarOp::Add, ReduceInit::Zero, weights_cached, "stug->stug", "sug->stug")?;
+    let sum_new = reduce(program, DType::Float32, ScalarOp::Add, ReduceInit::Zero, weights_new, "swug->swug", "sug->swug")?;
+    let weight_sum = elementwise(program, DType::Float32, ScalarOp::Add, &[(sum_cached, "sug->sug"), (sum_new, "sug->sug")])?;
+    let inv_weight_sum = elementwise(program, DType::Float32, ScalarOp::Reciprocal, &[(weight_sum, "sug->sug")])?;
+
+    let attended_cached_product = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(weights_cached, "stug->stugd"), (v_cache, "tud->stugd")])?;
+    let attended_cached = reduce(program, DType::Float32, ScalarOp::Add, ReduceInit::Zero, attended_cached_product, "stugd->stugd", "sugd->stugd")?;
+    let attended_new_product = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(weights_new, "swug->swugd"), (v_new, "wud->swugd")])?;
+    let attended_new = reduce(program, DType::Float32, ScalarOp::Add, ReduceInit::Zero, attended_new_product, "swugd->swugd", "sugd->swugd")?;
+    let attended_sum = elementwise(program, DType::Float32, ScalarOp::Add, &[(attended_cached, "sugd->sugd"), (attended_new, "sugd->sugd")])?;
+    let attended = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(attended_sum, "sugd->sugd"), (inv_weight_sum, "sug->sugd")])?;
+
+    let wo_product = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(attended, "sugd->sugdo"), (wo, "ugdo->sugdo")])?;
+    let attn_out = reduce(program, DType::Float32, ScalarOp::Add, ReduceInit::Zero, wo_product, "sugdo->sugdo", "so->sugdo")?;
+
+    let residual1 = elementwise(program, DType::Float32, ScalarOp::Add, &[(attn_out, "sd->sd"), (x, "sd->sd")])?;
+
+    let normed2 = rmsnorm(program, residual1, ffn_norm_weight, inv_dim, eps)?;
+
+    let ffn_out = append_moe_ffn(
+        program,
+        normed2,
+        gate_inp,
+        expert_w_gate,
+        expert_w_up,
+        expert_w_down,
+        expert_count,
+        expert_used_count,
+        ones,
+    )?;
+
+    let x_next = elementwise(program, DType::Float32, ScalarOp::Add, &[(ffn_out, "sd->sd"), (residual1, "sd->sd")])?;
+
+    Ok((x_next, (rotated_k_new_even, rotated_k_new_odd, v_new)))
+}
+
 /// [`mistral_forward_program`]'s key/value-cached counterpart: the same
 /// architecture, but `ids`/`rope_cos`/`rope_sin` carry only the `new`
 /// positions this call introduces (symbol 0), attention also draws on a
@@ -1513,6 +1652,16 @@ fn append_mistral_cached_layer(
 /// empty range, which [`ReduceInit::Zero`]/[`ReduceInit::NegativeInfinity`]
 /// already define as identity/`-inf`, so the first call degenerates to
 /// plain causal self-attention over the whole prompt with no special case.
+///
+/// Dense-only: always binds [`append_mistral_cached_layer`]'s plain
+/// `ffn_{gate,up,down}.weight` triple. Delegates to
+/// [`mistral_cached_forward_program_with_experts`] with `expert_count = 0`,
+/// `expert_used_count = 0` -- that function's own doc explains why those two
+/// values select the identical dense program this function has always
+/// built. Kept as its own entry point (rather than folding the two extra
+/// parameters in here) because this signature already has real callers
+/// outside this crate that a dense-only checkpoint never needs to pass an
+/// expert config to.
 #[allow(clippy::too_many_arguments)]
 pub fn mistral_cached_forward_program(
     vocab: u32,
@@ -1522,6 +1671,33 @@ pub fn mistral_cached_forward_program(
     kv_heads: u32,
     head_dim: u32,
     block_count: u32,
+) -> Result<(Vec<Op>, NodeId, Vec<CachedLayerRoots>), TensorError> {
+    mistral_cached_forward_program_with_experts(vocab, embedding, feed_forward, query_heads, kv_heads, head_dim, block_count, 0, 0)
+}
+
+/// [`mistral_cached_forward_program`]'s mixture-of-experts-capable
+/// counterpart, carrying the same `expert_count`/`expert_used_count`
+/// parameters [`mistral_forward_program`] already takes. `expert_count == 0`
+/// binds every layer through [`append_mistral_cached_layer`]'s plain
+/// `ffn_{gate,up,down}.weight` triple, node-for-node the same program
+/// [`mistral_cached_forward_program`] has always built, so a dense
+/// checkpoint's generated program is unaffected by this function's
+/// existence. `expert_count > 0` routes each layer through
+/// [`append_mistral_cached_moe_layer`] instead, gathering one of
+/// `expert_count` experts' weight slabs per token per [`append_moe_ffn`]'s
+/// doc -- the same routed FFN [`mistral_forward_program`]'s own MoE branch
+/// already runs, reused rather than reconstructed.
+#[allow(clippy::too_many_arguments)]
+pub fn mistral_cached_forward_program_with_experts(
+    vocab: u32,
+    embedding: u32,
+    feed_forward: u32,
+    query_heads: u32,
+    kv_heads: u32,
+    head_dim: u32,
+    block_count: u32,
+    expert_count: u32,
+    expert_used_count: u32,
 ) -> Result<(Vec<Op>, NodeId, Vec<CachedLayerRoots>), TensorError> {
     let group = query_heads / kv_heads;
     let pairs = head_dim / 2;
@@ -1607,24 +1783,6 @@ pub fn mistral_cached_forward_program(
             ],
             &alloc::format!("blk.{layer}.attn_output.weight"),
         );
-        let w_gate = input_leaf(
-            &mut program,
-            DType::Float32,
-            alloc::vec![Extent::Static(embedding), Extent::Static(feed_forward)],
-            &alloc::format!("blk.{layer}.ffn_gate.weight"),
-        );
-        let w_up = input_leaf(
-            &mut program,
-            DType::Float32,
-            alloc::vec![Extent::Static(embedding), Extent::Static(feed_forward)],
-            &alloc::format!("blk.{layer}.ffn_up.weight"),
-        );
-        let w_down = input_leaf(
-            &mut program,
-            DType::Float32,
-            alloc::vec![Extent::Static(feed_forward), Extent::Static(embedding)],
-            &alloc::format!("blk.{layer}.ffn_down.weight"),
-        );
         let k_even_cache = input_leaf(
             &mut program,
             DType::Float32,
@@ -1644,31 +1802,106 @@ pub fn mistral_cached_forward_program(
             &alloc::format!("kv_cache.{layer}.v"),
         );
 
-        let (x_next, layer_roots) = append_mistral_cached_layer(
-            &mut program,
-            x,
-            inv_dim,
-            eps,
-            ones,
-            inv_sqrt_head_dim,
-            cos_new,
-            sin_new,
-            group_ones,
-            is_future,
-            group,
-            attn_norm_weight,
-            ffn_norm_weight,
-            wq,
-            wk,
-            wv,
-            wo,
-            w_gate,
-            w_up,
-            w_down,
-            k_even_cache,
-            k_odd_cache,
-            v_cache,
-        )?;
+        let (x_next, layer_roots) = if expert_count == 0 {
+            let w_gate = input_leaf(
+                &mut program,
+                DType::Float32,
+                alloc::vec![Extent::Static(embedding), Extent::Static(feed_forward)],
+                &alloc::format!("blk.{layer}.ffn_gate.weight"),
+            );
+            let w_up = input_leaf(
+                &mut program,
+                DType::Float32,
+                alloc::vec![Extent::Static(embedding), Extent::Static(feed_forward)],
+                &alloc::format!("blk.{layer}.ffn_up.weight"),
+            );
+            let w_down = input_leaf(
+                &mut program,
+                DType::Float32,
+                alloc::vec![Extent::Static(feed_forward), Extent::Static(embedding)],
+                &alloc::format!("blk.{layer}.ffn_down.weight"),
+            );
+
+            append_mistral_cached_layer(
+                &mut program,
+                x,
+                inv_dim,
+                eps,
+                ones,
+                inv_sqrt_head_dim,
+                cos_new,
+                sin_new,
+                group_ones,
+                is_future,
+                group,
+                attn_norm_weight,
+                ffn_norm_weight,
+                wq,
+                wk,
+                wv,
+                wo,
+                w_gate,
+                w_up,
+                w_down,
+                k_even_cache,
+                k_odd_cache,
+                v_cache,
+            )?
+        } else {
+            let gate_inp = input_leaf(
+                &mut program,
+                DType::Float32,
+                alloc::vec![Extent::Static(embedding), Extent::Static(expert_count)],
+                &alloc::format!("blk.{layer}.ffn_gate_inp.weight"),
+            );
+            let expert_w_gate = input_leaf(
+                &mut program,
+                DType::Float32,
+                alloc::vec![Extent::Static(expert_count), Extent::Static(embedding), Extent::Static(feed_forward)],
+                &alloc::format!("blk.{layer}.ffn_gate_exps.weight"),
+            );
+            let expert_w_up = input_leaf(
+                &mut program,
+                DType::Float32,
+                alloc::vec![Extent::Static(expert_count), Extent::Static(embedding), Extent::Static(feed_forward)],
+                &alloc::format!("blk.{layer}.ffn_up_exps.weight"),
+            );
+            let expert_w_down = input_leaf(
+                &mut program,
+                DType::Float32,
+                alloc::vec![Extent::Static(expert_count), Extent::Static(feed_forward), Extent::Static(embedding)],
+                &alloc::format!("blk.{layer}.ffn_down_exps.weight"),
+            );
+
+            append_mistral_cached_moe_layer(
+                &mut program,
+                x,
+                inv_dim,
+                eps,
+                ones,
+                inv_sqrt_head_dim,
+                cos_new,
+                sin_new,
+                group_ones,
+                is_future,
+                group,
+                attn_norm_weight,
+                ffn_norm_weight,
+                wq,
+                wk,
+                wv,
+                wo,
+                gate_inp,
+                expert_w_gate,
+                expert_w_up,
+                expert_w_down,
+                expert_count,
+                expert_used_count,
+                k_even_cache,
+                k_odd_cache,
+                v_cache,
+            )?
+        };
         x = x_next;
         cache_roots.push(layer_roots);
     }
