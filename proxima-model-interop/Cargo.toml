@@ -44,7 +44,7 @@ interop-bgpool = ["dep:prime", "dep:proxima-core"]
 # per-token attribution counters in `omega::metal` alongside this crate's own
 # generate.rs-side ones, so a single feature flag lights up both halves of
 # the decode-loop split rather than needing two.
-instrument = ["proxima-tensor/instrument", "omega?/instrument"]
+instrument = ["proxima-tensor/instrument", "omega?/instrument", "dep:proxima-telemetry", "proxima-telemetry/macros"]
 # Metal decode path (macOS + Metal only). `generate.rs`'s decode loop runs
 # the cached forward through `omega::backend::plan_named`/`execute_plan_named`
 # instead of `proxima_tensor::cpu::evaluate_quantized_named_with_scratch`
@@ -73,6 +73,7 @@ proxima-core = { workspace = true, features = ["alloc"], optional = true }
 proxima-gguf = { path = "../proxima-gguf", default-features = false }
 proxima-primitives = { workspace = true, default-features = false }
 proxima-safetensors = { path = "../proxima-safetensors", default-features = false, features = ["alloc"] }
+proxima-telemetry = { workspace = true, optional = true }
 proxima-tensor = { path = "../proxima-tensor", default-features = false, features = ["alloc"] }
 # `gguf` implies its own `std`, which is exactly the tier `generate::LoadedModel`
 # already requires (it evaluates through `proxima_tensor::cpu`, itself std-gated)
@@ -102,3 +103,17 @@ rustix.workspace = true
 # `generate.rs`'s own doc for why that pipe never yields.
 proxima = { workspace = true, features = ["test-support"] }
 proxima-tokenizer = { path = "../proxima-tokenizer", default-features = false, features = ["hf"] }
+
+# Both examples below need `LoadedModel` (`std`-gated in `lib.rs`) and
+# `proxima_telemetry`'s recorder/macros (only pulled in by `instrument`,
+# `dep:proxima-telemetry` above) -- `required-features` keeps a default
+# (no-feature) `cargo build/nextest --workspace` from trying to build them
+# at all, matching `proxima-tensor/Cargo.toml`'s own `q4k_ggml_fidelity`
+# entry for the identical reason.
+[[example]]
+name = "smollm2_logit_oracle_diff"
+required-features = ["std", "instrument"]
+
+[[example]]
+name = "smollm2_layer_oracle_diff"
+required-features = ["std", "instrument"]

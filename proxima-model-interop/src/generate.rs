@@ -77,6 +77,8 @@ use omega::metal::OpGpuTiming;
 use omega::metal::metal_stage_totals;
 #[cfg(feature = "instrument")]
 use proxima_tensor::instrument::{elapsed_ticks, read_ticks, ticks_to_nanos};
+#[cfg(feature = "instrument")]
+use proxima_telemetry::debug;
 
 use crate::bind::{BoundWeights, ModelArchitecture, architecture_from_metadata, bind_all_weights};
 use crate::error::InteropError;
@@ -1042,6 +1044,128 @@ impl<'file> LoadedModel<'file> {
 
         let text = proxima_tokenizer::decode(&generated_ids, &self.vocab)?;
         Ok((generated_ids, text, stopped_by_eos))
+    }
+
+    /// A one-shot forward pass over `prompt` (BOS forced, fresh KV state,
+    /// same input-binding shape as [`Self::run_decode_loop`]'s own first
+    /// step) that returns the raw values for each requested `NodeId`
+    /// instead of sampling a token from the final logits.
+    ///
+    /// Exists as this crate's cross-oracle diagnostic surface: a decoded
+    /// token is an argmax, and an argmax destroys exactly the information
+    /// that tells a near-tied bf16-vs-f16 rounding gap apart from a gross
+    /// defect. [`Self::forward_logits`] is the `node_ids == [logits_root]`
+    /// convenience most callers want; this general form additionally lets a
+    /// caller bisect a numeric divergence by depth: build
+    /// [`proxima_tensor::spec::mistral_cached_forward_program_with_experts`]
+    /// again at a shorter `block_count` against this same architecture and
+    /// read off the last shared `NodeId` (`proxima_tensor::op::append`'s
+    /// id-is-index invariant guarantees the two programs agree on every
+    /// `NodeId` up to the point they diverge) -- that id is the residual
+    /// stream's value right after that layer, comparable directly against
+    /// an oracle's own per-layer tensor dump.
+    /// `examples/smollm2_logit_oracle_diff.rs` is the worked tool.
+    ///
+    /// # Errors
+    ///
+    /// Whatever tokenizing `prompt` against this checkpoint's own
+    /// [`Vocab`] or evaluating its forward program can fail with, plus
+    /// [`InteropError::MissingEvaluatedNode`] if any `node_ids` entry was
+    /// never computed by this checkpoint's own forward program (a caller
+    /// passed a `NodeId` from a differently-shaped program).
+    pub fn forward_node_values(&self, prompt: &str, node_ids: &[NodeId]) -> Result<Vec<Vec<f32>>, InteropError> {
+        let serving_config = supported_serving_config();
+        let mut runtime = BackendRuntime::new(&serving_config);
+
+        let ids = proxima_tokenizer::encode_with_bos_eos(prompt, &self.vocab, true, false)?;
+        apply_serving_config(&serving_config, ids.len())?;
+        let inputs = build_position_inputs(&ids, 0, self.architecture.head_dim, self.architecture.rope_freq_base);
+
+        let block_count = self.architecture.block_count as usize;
+        let empty_cache = LayerCache::new();
+        let kv_cache_names: Vec<(String, String, String)> = (0..block_count)
+            .map(|layer| {
+                (
+                    alloc::format!("kv_cache.{layer}.k_even"),
+                    alloc::format!("kv_cache.{layer}.k_odd"),
+                    alloc::format!("kv_cache.{layer}.v"),
+                )
+            })
+            .collect();
+
+        let mut named_blocks: Vec<(&str, QuantizedBlock)> =
+            Vec::with_capacity(self.weights.owned.len() + self.weights.packed.len() + 3 + block_count * 3);
+        named_blocks.push(("ids", QuantizedBlock::Float32(inputs.ids_f32.as_slice())));
+        for (name, data) in &self.weights.owned {
+            named_blocks.push((name.as_str(), QuantizedBlock::Float32(data.as_slice())));
+        }
+        for (name, block) in &self.weights.packed {
+            named_blocks.push((name.as_str(), *block));
+        }
+        named_blocks.push(("eps", QuantizedBlock::Float32(inputs.epsilon.as_slice())));
+        named_blocks.push(("rope_cos", QuantizedBlock::Float32(inputs.cos.as_slice())));
+        named_blocks.push(("rope_sin", QuantizedBlock::Float32(inputs.sin.as_slice())));
+        for (k_even_name, k_odd_name, v_name) in &kv_cache_names {
+            named_blocks.extend(empty_cache.named_blocks(k_even_name, k_odd_name, v_name));
+        }
+
+        let resident_names: BTreeSet<&str> = self
+            .weights
+            .owned
+            .iter()
+            .map(|(name, _)| name.as_str())
+            .chain(self.weights.packed.iter().map(|(name, _)| name.as_str()))
+            .collect();
+
+        let symbols = [ids.len() as u64, 0u64];
+        let evaluated = runtime.evaluate(&self.program, &symbols, &named_blocks, node_ids, &resident_names)?;
+
+        node_ids
+            .iter()
+            .map(|node| {
+                evaluated
+                    .get(*node)
+                    .map(|(data, _shape)| data.to_vec())
+                    .ok_or(InteropError::MissingEvaluatedNode { node: *node })
+            })
+            .collect()
+    }
+
+    /// [`Self::forward_node_values`] against `[Self::logits_root]`, sliced
+    /// to just the LAST prompt position -- the convenience a caller
+    /// cross-checking a decoded token's own logits (not an intermediate
+    /// layer) wants. See that method's own doc for why a raw logit vector,
+    /// not a sampled token, is what this crate's cross-oracle diagnostics
+    /// need.
+    ///
+    /// # Errors
+    ///
+    /// Whatever [`Self::forward_node_values`] can fail with.
+    pub fn forward_logits(&self, prompt: &str) -> Result<Vec<f32>, InteropError> {
+        let ids = proxima_tokenizer::encode_with_bos_eos(prompt, &self.vocab, true, false)?;
+        let mut values = self.forward_node_values(prompt, &[self.logits_root])?;
+        let logits = values.remove(0);
+        let vocab_size = self.architecture.vocab as usize;
+        let new_count = ids.len();
+        let last_position = logits[(new_count - 1) * vocab_size..new_count * vocab_size].to_vec();
+
+        #[cfg(feature = "instrument")]
+        {
+            let mut ranked: Vec<usize> = (0..last_position.len()).collect();
+            ranked.sort_by(|left, right| {
+                last_position[*right].total_cmp(&last_position[*left]).then_with(|| left.cmp(right))
+            });
+            let top1_token = ranked[0] as u64;
+            let top1_logit = f64::from(last_position[ranked[0]]);
+            debug!(
+                prompt_tokens = ids.len() as u64,
+                top1_token,
+                top1_logit,
+                "computed one-shot forward logits for cross-oracle comparison"
+            );
+        }
+
+        Ok(last_position)
     }
 }
 
