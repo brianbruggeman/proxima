@@ -11020,3 +11020,50 @@ own tables are the kept, citable record.
 - `cargo test -p proxima-model-interop --features metal,instrument,metal-tiled-gemm --lib -- --ignored profiles_one_real_prefill_step_by_per_op_gpu_time --nocapture` (scaling curve, vary `PROXIMA_PROMPT`/`PROXIMA_MAX_TOKENS=1` for `new_count`)
 - `cargo test -p proxima-model-interop --features metal,metal-tiled-gemm --release --lib -- --exact --nocapture --ignored bind::real_openchat_file::runs_the_cached_decode_loop_on_the_metal_backend_and_reports_the_plan_cache` (production-shaped prefill/decode/generated-text, with `PROXIMA_PREFAULT=1 PROXIMA_MAX_TOKENS=24`)
 - `cargo clippy -p proxima-gguf --all-targets -- -D warnings` (reproduces the pre-existing, out-of-scope block in isolation)
+
+## ROW 115 — standing scoreboard after ROW 113, with provenance on every cell
+
+ROW 110 set the rule that a SYSTEM claim is total wall clock. This row applies
+it and tags where each number came from, because the coordinator just quoted a
+DERIVED total beside MEASURED phase figures without saying so.
+
+| arm | figure | provenance |
+|---|---|---|
+| llama Metal, total 24 tok | **505.7 ms** | MEASURED, ROW 100, one window, CoV 3.75% decode / 0.32% prefill |
+| llama Metal, prefill | **103.2 ms** | MEASURED, ROW 100 |
+| llama Metal, decode | **17.97 ms/tok** | MEASURED, ROW 108, CoV 1.01%, median of 6 clean runs |
+| llama CPU, decode | **39.165 ms/tok**, range 38.97-47.05 | MEASURED, ROW 108, **CoV 7.87% — above the 5% floor, quote as a RANGE** |
+| ours Metal, prefill | **1401.7 ms** | MEASURED, ROW 113 |
+| ours Metal, decode | **65.67 ms/tok** | MEASURED, ROW 94 |
+| ours Metal, total 24 tok | **~2912 ms** | **DERIVED** — 1401.7 + 23 x 65.67. NOT measured. The last measured total is ROW 100's 3750.4, taken before ROWs 106/113 landed. |
+| ours CPU, decode | **53.85 ms/tok** | MEASURED, ROW 99, n=5, CoV 1.21% |
+
+### Ratios — same-kind only
+
+| comparison | ratio | both sides measured? |
+|---|---|---|
+| Metal prefill | **13.6x** behind | yes |
+| Metal decode | **3.65x** behind | yes |
+| CPU decode | **1.375x** behind (1.14x-1.38x across their range) | yes |
+| Metal total 24 tok | **~5.76x** behind | **NO — ours is derived** |
+
+**The total-wall row is the headline and it is the one number not measured
+end to end since ROW 100.** A derived total assumes prefill and decode compose
+additively with no other per-run cost, which ROW 100 itself disproves: its
+measured total exceeded prefill + N x decode because of model load, tokenizer,
+and one-time setup. **Do not quote ~2912 or ~5.76x as measured.**
+
+Required before the headline is quotable: one 24-token run on a quiet box
+reporting total wall clock directly, alongside llama Metal in the same window.
+
+### Today's arc, measured phases only
+
+| phase | session start | now | llama |
+|---|---|---|---|
+| Metal decode | 985.79 ms/tok | **65.67** | 17.97 |
+| Metal prefill | ~16052 ms (first token, ROW 82) | **1401.7** | 103.2 |
+| CPU decode | 59.71 ms/tok | **53.85** | 39.165 |
+
+15.0x on Metal decode, 11.5x on Metal prefill, 1.11x on CPU. **No arm beats
+its incumbent.** The CPU bar moved against us by ~11% when re-measured (ROW
+111), so today's CPU gain closed less of the gap than it appeared to.
