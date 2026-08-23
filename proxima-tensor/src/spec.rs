@@ -837,6 +837,256 @@ fn append_mistral_layer(
     elementwise(program, DType::Float32, ScalarOp::Add, &[(ffn_out, "sd->sd"), (residual1, "sd->sd")])
 }
 
+/// Rust-code counterpart of `specs/moe_block.toml`'s `ffn_product` node:
+/// gathers `stack[route[s], :, :]` (`stack` is a `[expert_count, d_in,
+/// d_out]` weight slab) and multiplies it elementwise against `x`'s `[s,
+/// d_in]`, broadcast over the `d_out` axis, ready for a later [`reduce`]
+/// over `d_in` to finish the matmul. The same [`IndexMap::Computed`] gather
+/// [`embedding_lookup`] uses, with one extra non-gathered axis (`d_out`)
+/// spliced in after the gathered one instead of none.
+fn gathered_expert_product(program: &mut Vec<Op>, stack: NodeId, route: NodeId, x: NodeId) -> NodeId {
+    let gathered_map = IndexMap::Computed {
+        indices: route,
+        index_map: map::projection(3, &[0]),
+        base: IndexPattern {
+            iter_rank: 3,
+            axes: alloc::vec![
+                AxisIndex::default(),
+                AxisIndex {
+                    terms: core::iter::once(AxisTerm::projection(1)).collect(),
+                    offset: 0,
+                },
+                AxisIndex {
+                    terms: core::iter::once(AxisTerm::projection(2)).collect(),
+                    offset: 0,
+                },
+            ],
+        },
+        gathered_dim: 0,
+    };
+    let x_map = IndexMap::Affine(map::projection(3, &[0, 1]));
+    op::append(
+        program,
+        Op::Elementwise {
+            dtype: DType::Float32,
+            body: ScalarOp::Multiply,
+            operands: alloc::vec![(stack, gathered_map), (x, x_map)],
+            name: None,
+        },
+    )
+}
+
+/// The routed feed-forward `specs/moe_block.toml`/`specs/moe_topk2_probe.toml`
+/// describe: a gate projects `x` to one logit per expert, `expert_used_count`
+/// rounds of top-1 argmax-with-exclusion each route one token to one more
+/// expert (`moe_topk2_probe.toml`'s own header proves a *fixed* k stays
+/// inside the affine-only + `Iota`/`Computed`-gather algebra, no new
+/// `Op`/`ScalarOp` variant, unrolled at spec-build time the same way this
+/// whole function is), and each round's gathered expert runs the same
+/// SwiGLU [`append_mistral_layer`]'s dense path uses, weighted by its own
+/// softmax share among only the selected experts
+/// (`weight_r = exp(max_logit_r - max_logit_0)`, shifted the same way
+/// [`append_mistral_layer`]'s attention softmax shifts by its own running
+/// max so nothing overflows) — the standard Mixtral combination formula,
+/// not the topk2 probe's own simpler unweighted sum.
+#[allow(clippy::too_many_arguments)]
+fn append_moe_ffn(
+    program: &mut Vec<Op>,
+    x: NodeId,
+    gate_inp: NodeId,
+    expert_w_gate: NodeId,
+    expert_w_up: NodeId,
+    expert_w_down: NodeId,
+    expert_count: u32,
+    expert_used_count: u32,
+    ones: NodeId,
+) -> Result<NodeId, TensorError> {
+    if expert_used_count == 0 || expert_used_count > expert_count {
+        return Err(TensorError::InvalidExpertConfig {
+            expert_count,
+            expert_used_count,
+        });
+    }
+
+    let gate_product = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(x, "sd->sde"), (gate_inp, "de->sde")])?;
+    let mut logits = reduce(program, DType::Float32, ScalarOp::Add, ReduceInit::Zero, gate_product, "sde->sde", "se->sde")?;
+
+    let expert_index = op::append(program, Op::Iota { dtype: DType::Float32, extent: Extent::Static(expert_count) });
+    let neg_infinity = scalar_constant(program, f32::NEG_INFINITY);
+
+    let mut weighted_sum: Option<NodeId> = None;
+    let mut weight_total: Option<NodeId> = None;
+    let mut max_logit_0: Option<NodeId> = None;
+
+    for round in 0..expert_used_count {
+        let max_logit = reduce(program, DType::Float32, ScalarOp::Maximum, ReduceInit::NegativeInfinity, logits, "se->se", "s->se")?;
+        let mask = elementwise(program, DType::Float32, ScalarOp::Equal, &[(logits, "se->se"), (max_logit, "s->se")])?;
+        let candidate = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(mask, "se->se"), (expert_index, "e->se")])?;
+        let route = reduce(program, DType::Int32, ScalarOp::Maximum, ReduceInit::Zero, candidate, "se->se", "s->se")?;
+
+        let first_max = *max_logit_0.get_or_insert(max_logit);
+        let shifted = elementwise(program, DType::Float32, ScalarOp::Subtract, &[(max_logit, "s->s"), (first_max, "s->s")])?;
+        let weight = elementwise(program, DType::Float32, ScalarOp::Exponential, &[(shifted, "s->s")])?;
+
+        let gate_expert_product = gathered_expert_product(program, expert_w_gate, route, x);
+        let gate_expert = reduce(program, DType::Float32, ScalarOp::Add, ReduceInit::Zero, gate_expert_product, "sio->sio", "so->sio")?;
+        let up_expert_product = gathered_expert_product(program, expert_w_up, route, x);
+        let up_expert = reduce(program, DType::Float32, ScalarOp::Add, ReduceInit::Zero, up_expert_product, "sio->sio", "so->sio")?;
+
+        let neg_gate = elementwise(program, DType::Float32, ScalarOp::Negate, &[(gate_expert, "sg->sg")])?;
+        let exp_neg_gate = elementwise(program, DType::Float32, ScalarOp::Exponential, &[(neg_gate, "sg->sg")])?;
+        let one_plus_exp = elementwise(program, DType::Float32, ScalarOp::Add, &[(exp_neg_gate, "sg->sg"), (ones, "->sg")])?;
+        let sigmoid_gate = elementwise(program, DType::Float32, ScalarOp::Reciprocal, &[(one_plus_exp, "sg->sg")])?;
+        let silu_gate = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(gate_expert, "sg->sg"), (sigmoid_gate, "sg->sg")])?;
+        let ffn_hidden = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(silu_gate, "sg->sg"), (up_expert, "sg->sg")])?;
+
+        let down_expert_product = gathered_expert_product(program, expert_w_down, route, ffn_hidden);
+        let round_ffn = reduce(program, DType::Float32, ScalarOp::Add, ReduceInit::Zero, down_expert_product, "sio->sio", "so->sio")?;
+
+        let weighted_round = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(round_ffn, "sd->sd"), (weight, "s->sd")])?;
+        weighted_sum = Some(match weighted_sum {
+            Some(accum) => elementwise(program, DType::Float32, ScalarOp::Add, &[(accum, "sd->sd"), (weighted_round, "sd->sd")])?,
+            None => weighted_round,
+        });
+        weight_total = Some(match weight_total {
+            Some(accum) => elementwise(program, DType::Float32, ScalarOp::Add, &[(accum, "s->s"), (weight, "s->s")])?,
+            None => weight,
+        });
+
+        if round + 1 < expert_used_count {
+            logits = elementwise(program, DType::Float32, ScalarOp::Select, &[(mask, "se->se"), (neg_infinity, "->se"), (logits, "se->se")])?;
+        }
+    }
+
+    // `expert_used_count > 0` was checked above, so exactly that many rounds
+    // ran and both accumulators are `Some`.
+    let weight_total = weight_total.ok_or(TensorError::InvalidExpertConfig {
+        expert_count,
+        expert_used_count,
+    })?;
+    let weighted_sum = weighted_sum.ok_or(TensorError::InvalidExpertConfig {
+        expert_count,
+        expert_used_count,
+    })?;
+    let inv_weight_total = elementwise(program, DType::Float32, ScalarOp::Reciprocal, &[(weight_total, "s->s")])?;
+    elementwise(program, DType::Float32, ScalarOp::Multiply, &[(weighted_sum, "sd->sd"), (inv_weight_total, "s->sd")])
+}
+
+/// [`append_mistral_layer`]'s mixture-of-experts counterpart: identical
+/// attention block (RoPE + GQA + causal mask, node-for-node the same code),
+/// [`append_moe_ffn`] in place of the dense SwiGLU triple. Kept as a
+/// separate function rather than a branch inside [`append_mistral_layer`]
+/// so the dense path's own node sequence — and therefore its generated
+/// program bytes — never changes shape by so much as one node merely
+/// because this function exists next to it.
+#[allow(clippy::too_many_arguments)]
+fn append_mistral_moe_layer(
+    program: &mut Vec<Op>,
+    x: NodeId,
+    inv_dim: NodeId,
+    eps: NodeId,
+    ones: NodeId,
+    inv_sqrt_head_dim: NodeId,
+    cos: NodeId,
+    sin: NodeId,
+    group_ones: NodeId,
+    is_future: NodeId,
+    neg_infinity: NodeId,
+    group: u32,
+    attn_norm_weight: NodeId,
+    ffn_norm_weight: NodeId,
+    wq: NodeId,
+    wk: NodeId,
+    wv: NodeId,
+    wo: NodeId,
+    gate_inp: NodeId,
+    expert_w_gate: NodeId,
+    expert_w_up: NodeId,
+    expert_w_down: NodeId,
+    expert_count: u32,
+    expert_used_count: u32,
+) -> Result<NodeId, TensorError> {
+    let normed = rmsnorm(program, x, attn_norm_weight, inv_dim, eps)?;
+
+    let q_product = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(normed, "si->shdi"), (wq, "ihd->shdi")])?;
+    let q = reduce(program, DType::Float32, ScalarOp::Add, ReduceInit::Zero, q_product, "shdi->shdi", "shd->shdi")?;
+
+    let k_product = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(normed, "si->sudi"), (wk, "iud->sudi")])?;
+    let k = reduce(program, DType::Float32, ScalarOp::Add, ReduceInit::Zero, k_product, "sudi->sudi", "sud->sudi")?;
+
+    let v_product = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(normed, "si->sudi"), (wv, "iud->sudi")])?;
+    let v = reduce(program, DType::Float32, ScalarOp::Add, ReduceInit::Zero, v_product, "sudi->sudi", "sud->sudi")?;
+
+    let q_even_cos = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(q, "s,h,2*i->shi"), (cos, "si->shi")])?;
+    let q_odd_sin = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(q, "s,h,2*i+1->shi"), (sin, "si->shi")])?;
+    let rotated_q_even = elementwise(program, DType::Float32, ScalarOp::Subtract, &[(q_even_cos, "shi->shi"), (q_odd_sin, "shi->shi")])?;
+    let q_even_sin = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(q, "s,h,2*i->shi"), (sin, "si->shi")])?;
+    let q_odd_cos = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(q, "s,h,2*i+1->shi"), (cos, "si->shi")])?;
+    let rotated_q_odd = elementwise(program, DType::Float32, ScalarOp::Add, &[(q_even_sin, "shi->shi"), (q_odd_cos, "shi->shi")])?;
+
+    let k_even_cos = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(k, "s,u,2*i->sui"), (cos, "si->sui")])?;
+    let k_odd_sin = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(k, "s,u,2*i+1->sui"), (sin, "si->sui")])?;
+    let rotated_k_even = elementwise(program, DType::Float32, ScalarOp::Subtract, &[(k_even_cos, "sui->sui"), (k_odd_sin, "sui->sui")])?;
+    let k_even_sin = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(k, "s,u,2*i->sui"), (sin, "si->sui")])?;
+    let k_odd_cos = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(k, "s,u,2*i+1->sui"), (cos, "si->sui")])?;
+    let rotated_k_odd = elementwise(program, DType::Float32, ScalarOp::Add, &[(k_even_sin, "sui->sui"), (k_odd_cos, "sui->sui")])?;
+
+    let group_map = alloc::format!("s,{group}*u+g,i->sugi");
+    let q_even_grouped = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(rotated_q_even, group_map.as_str()), (group_ones, "ug->sugi")])?;
+    let q_odd_grouped = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(rotated_q_odd, group_map.as_str()), (group_ones, "ug->sugi")])?;
+
+    let score_even_product = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(q_even_grouped, "sugi->stugi"), (rotated_k_even, "tui->stugi")])?;
+    let score_even = reduce(program, DType::Float32, ScalarOp::Add, ReduceInit::Zero, score_even_product, "stugi->stugi", "stug->stugi")?;
+    let score_odd_product = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(q_odd_grouped, "sugi->stugi"), (rotated_k_odd, "tui->stugi")])?;
+    let score_odd = reduce(program, DType::Float32, ScalarOp::Add, ReduceInit::Zero, score_odd_product, "stugi->stugi", "stug->stugi")?;
+    let scores = elementwise(program, DType::Float32, ScalarOp::Add, &[(score_even, "stug->stug"), (score_odd, "stug->stug")])?;
+
+    let scores_scaled = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Multiply,
+        &[(scores, "stug->stug"), (inv_sqrt_head_dim, "->stug")],
+    )?;
+
+    let scores_masked = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Select,
+        &[(is_future, "st->stug"), (neg_infinity, "->stug"), (scores_scaled, "stug->stug")],
+    )?;
+
+    let score_max = reduce(program, DType::Float32, ScalarOp::Maximum, ReduceInit::NegativeInfinity, scores_masked, "stug->stug", "sug->stug")?;
+    let shifted = elementwise(program, DType::Float32, ScalarOp::Subtract, &[(scores_masked, "stug->stug"), (score_max, "sug->stug")])?;
+    let weights = elementwise(program, DType::Float32, ScalarOp::Exponential, &[(shifted, "stug->stug")])?;
+    let weight_sum = reduce(program, DType::Float32, ScalarOp::Add, ReduceInit::Zero, weights, "stug->stug", "sug->stug")?;
+    let inv_weight_sum = elementwise(program, DType::Float32, ScalarOp::Reciprocal, &[(weight_sum, "sug->sug")])?;
+    let probabilities = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(weights, "stug->stug"), (inv_weight_sum, "sug->stug")])?;
+
+    let attended_product = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(probabilities, "stug->stugd"), (v, "tud->stugd")])?;
+    let attended = reduce(program, DType::Float32, ScalarOp::Add, ReduceInit::Zero, attended_product, "stugd->stugd", "sugd->stugd")?;
+
+    let wo_product = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(attended, "sugd->sugdo"), (wo, "ugdo->sugdo")])?;
+    let attn_out = reduce(program, DType::Float32, ScalarOp::Add, ReduceInit::Zero, wo_product, "sugdo->sugdo", "so->sugdo")?;
+
+    let residual1 = elementwise(program, DType::Float32, ScalarOp::Add, &[(attn_out, "sd->sd"), (x, "sd->sd")])?;
+
+    let normed2 = rmsnorm(program, residual1, ffn_norm_weight, inv_dim, eps)?;
+
+    let ffn_out = append_moe_ffn(
+        program,
+        normed2,
+        gate_inp,
+        expert_w_gate,
+        expert_w_up,
+        expert_w_down,
+        expert_count,
+        expert_used_count,
+        ones,
+    )?;
+
+    elementwise(program, DType::Float32, ScalarOp::Add, &[(ffn_out, "sd->sd"), (residual1, "sd->sd")])
+}
+
 /// The whole model as one program: token embedding lookup, `block_count`
 /// copies of `specs/mistral_layer.toml`'s layer (each with its own weights,
 /// same node shape, generated rather than hand-authored — this is the whole
@@ -852,6 +1102,15 @@ fn append_mistral_layer(
 /// `embedding_lookup` (`shape.rs`'s `embedding_lookup_program` unit test is
 /// the addressing reference), and `append_mistral_layer` (mirrors
 /// `specs/mistral_layer.toml` node for node).
+///
+/// `expert_count == 0` means dense: every layer binds
+/// [`append_mistral_layer`]'s plain `ffn_{gate,up,down}.weight` triple,
+/// node-for-node the same program this function has always built, so a
+/// dense checkpoint's generated program (and therefore its output) is
+/// unaffected by this parameter's existence. `expert_count > 0` routes each
+/// layer through [`append_mistral_moe_layer`] instead, gathering one of
+/// `expert_count` experts' weight slabs per token per
+/// [`append_moe_ffn`]'s doc.
 #[allow(clippy::too_many_arguments)]
 pub fn mistral_forward_program(
     vocab: u32,
@@ -861,6 +1120,8 @@ pub fn mistral_forward_program(
     kv_heads: u32,
     head_dim: u32,
     block_count: u32,
+    expert_count: u32,
+    expert_used_count: u32,
 ) -> Result<Vec<Op>, TensorError> {
     let group = query_heads / kv_heads;
     let pairs = head_dim / 2;
@@ -950,48 +1211,102 @@ pub fn mistral_forward_program(
             ],
             &alloc::format!("blk.{layer}.attn_output.weight"),
         );
-        let w_gate = input_leaf(
-            &mut program,
-            DType::Float32,
-            alloc::vec![Extent::Static(embedding), Extent::Static(feed_forward)],
-            &alloc::format!("blk.{layer}.ffn_gate.weight"),
-        );
-        let w_up = input_leaf(
-            &mut program,
-            DType::Float32,
-            alloc::vec![Extent::Static(embedding), Extent::Static(feed_forward)],
-            &alloc::format!("blk.{layer}.ffn_up.weight"),
-        );
-        let w_down = input_leaf(
-            &mut program,
-            DType::Float32,
-            alloc::vec![Extent::Static(feed_forward), Extent::Static(embedding)],
-            &alloc::format!("blk.{layer}.ffn_down.weight"),
-        );
+        x = if expert_count == 0 {
+            let w_gate = input_leaf(
+                &mut program,
+                DType::Float32,
+                alloc::vec![Extent::Static(embedding), Extent::Static(feed_forward)],
+                &alloc::format!("blk.{layer}.ffn_gate.weight"),
+            );
+            let w_up = input_leaf(
+                &mut program,
+                DType::Float32,
+                alloc::vec![Extent::Static(embedding), Extent::Static(feed_forward)],
+                &alloc::format!("blk.{layer}.ffn_up.weight"),
+            );
+            let w_down = input_leaf(
+                &mut program,
+                DType::Float32,
+                alloc::vec![Extent::Static(feed_forward), Extent::Static(embedding)],
+                &alloc::format!("blk.{layer}.ffn_down.weight"),
+            );
 
-        x = append_mistral_layer(
-            &mut program,
-            x,
-            inv_dim,
-            eps,
-            ones,
-            inv_sqrt_head_dim,
-            cos,
-            sin,
-            group_ones,
-            is_future,
-            neg_infinity,
-            group,
-            attn_norm_weight,
-            ffn_norm_weight,
-            wq,
-            wk,
-            wv,
-            wo,
-            w_gate,
-            w_up,
-            w_down,
-        )?;
+            append_mistral_layer(
+                &mut program,
+                x,
+                inv_dim,
+                eps,
+                ones,
+                inv_sqrt_head_dim,
+                cos,
+                sin,
+                group_ones,
+                is_future,
+                neg_infinity,
+                group,
+                attn_norm_weight,
+                ffn_norm_weight,
+                wq,
+                wk,
+                wv,
+                wo,
+                w_gate,
+                w_up,
+                w_down,
+            )?
+        } else {
+            let gate_inp = input_leaf(
+                &mut program,
+                DType::Float32,
+                alloc::vec![Extent::Static(embedding), Extent::Static(expert_count)],
+                &alloc::format!("blk.{layer}.ffn_gate_inp.weight"),
+            );
+            let expert_w_gate = input_leaf(
+                &mut program,
+                DType::Float32,
+                alloc::vec![Extent::Static(expert_count), Extent::Static(embedding), Extent::Static(feed_forward)],
+                &alloc::format!("blk.{layer}.ffn_gate_exps.weight"),
+            );
+            let expert_w_up = input_leaf(
+                &mut program,
+                DType::Float32,
+                alloc::vec![Extent::Static(expert_count), Extent::Static(embedding), Extent::Static(feed_forward)],
+                &alloc::format!("blk.{layer}.ffn_up_exps.weight"),
+            );
+            let expert_w_down = input_leaf(
+                &mut program,
+                DType::Float32,
+                alloc::vec![Extent::Static(expert_count), Extent::Static(feed_forward), Extent::Static(embedding)],
+                &alloc::format!("blk.{layer}.ffn_down_exps.weight"),
+            );
+
+            append_mistral_moe_layer(
+                &mut program,
+                x,
+                inv_dim,
+                eps,
+                ones,
+                inv_sqrt_head_dim,
+                cos,
+                sin,
+                group_ones,
+                is_future,
+                neg_infinity,
+                group,
+                attn_norm_weight,
+                ffn_norm_weight,
+                wq,
+                wk,
+                wv,
+                wo,
+                gate_inp,
+                expert_w_gate,
+                expert_w_up,
+                expert_w_down,
+                expert_count,
+                expert_used_count,
+            )?
+        };
     }
 
     let output_norm_weight = input_leaf(&mut program, DType::Float32, alloc::vec![Extent::Static(embedding)], "output_norm.weight");
@@ -2357,6 +2672,172 @@ shape = ["seq"]
         );
     }
 
+    /// SwiGLU over a raw `f32` slice, independent of the graph
+    /// [`append_moe_ffn`] builds -- the same role [`matvec`] plays for the
+    /// bare-linear probes above, just with the real per-layer nonlinearity
+    /// [`append_mistral_layer`]'s dense FFN also runs.
+    fn swiglu_ffn(x: &[f32], gate_w: &[f32], up_w: &[f32], down_w: &[f32], d_in: usize, hidden: usize) -> alloc::vec::Vec<f32> {
+        let gate = matvec(x, gate_w, d_in, hidden);
+        let up = matvec(x, up_w, d_in, hidden);
+        let activated: alloc::vec::Vec<f32> = gate
+            .iter()
+            .zip(&up)
+            .map(|(&gate_value, &up_value)| {
+                let silu = gate_value / (1.0 + (-gate_value).exp());
+                silu * up_value
+            })
+            .collect();
+        matvec(&activated, down_w, hidden, d_in)
+    }
+
+    /// Independent top-`k` reference: which experts a token's `logits` route
+    /// to (descending order, ties broken toward the lower index the same
+    /// way [`append_moe_ffn`]'s `mask * iota` construction does) and their
+    /// softmax shares among only that selected set --
+    /// `weight_i = exp(logit_i - max) / sum_selected`, the same shift
+    /// [`append_moe_ffn`]'s doc names.
+    fn top_k_routes_and_weights(logits: &[f32], k: usize) -> alloc::vec::Vec<(usize, f32)> {
+        let mut remaining: alloc::vec::Vec<usize> = (0..logits.len()).collect();
+        let mut routes = alloc::vec::Vec::new();
+        for _ in 0..k {
+            let winner = *remaining
+                .iter()
+                .max_by(|&&left, &&right| logits[left].partial_cmp(&logits[right]).expect("logits are finite"))
+                .expect("k does not exceed the expert count");
+            routes.push(winner);
+            remaining.retain(|&candidate| candidate != winner);
+        }
+        let max_logit = routes.iter().map(|&expert| logits[expert]).fold(f32::NEG_INFINITY, f32::max);
+        let unnormalized: alloc::vec::Vec<f32> = routes.iter().map(|&expert| (logits[expert] - max_logit).exp()).collect();
+        let total: f32 = unnormalized.iter().sum();
+        routes.into_iter().zip(unnormalized).map(|(expert, weight)| (expert, weight / total)).collect()
+    }
+
+    /// End-to-end proof for [`append_moe_ffn`]/[`append_mistral_moe_layer`]:
+    /// two tokens, three experts, top-2 routing, real SwiGLU per expert
+    /// (not the bare-linear stand-in the two probes above use) and a real
+    /// softmax combination weight -- everything [`a_moe_block_written_as_toml_...`]
+    /// and [`a_topk2_probe_...`] proved the algebra can express, now proven
+    /// for the actual generated code this crate ships, not just the TOML
+    /// worked examples.
+    ///
+    /// Router weights are chosen so token 0 (`[3, 2]`) routes to experts
+    /// `2, 0` (logits `[3, 2, 4]`) and token 1 (`[1, 4]`) routes to experts
+    /// `2, 1` (logits `[1, 4, 8]`) -- a different pair per token, so a
+    /// cross-token routing bug (using token 0's route for token 1 or vice
+    /// versa) is not masked by both tokens agreeing. `expected` is computed
+    /// entirely independently: [`top_k_routes_and_weights`] picks the route
+    /// and softmax shares from the same raw `logits` the graph computes
+    /// on-the-fly, and [`swiglu_ffn`] runs each selected expert's own
+    /// weights with no dependency on [`Op`]/[`IndexMap`]/[`append_moe_ffn`]
+    /// itself.
+    #[test]
+    fn a_routed_ffn_built_by_append_moe_ffn_matches_an_independent_topk_swiglu_reference() {
+        const SEQUENCE: usize = 2;
+        const EMBEDDING: usize = 2;
+        const FEED_FORWARD: usize = 2;
+        const EXPERT_COUNT: u32 = 3;
+        const EXPERT_USED_COUNT: u32 = 2;
+
+        let x: [f32; SEQUENCE * EMBEDDING] = [3.0, 2.0, 1.0, 4.0];
+        // gate_inp[d, e]: logits[s, e] = sum_d x[s, d] * gate_inp[d, e].
+        let gate_inp: [f32; EMBEDDING * EXPERT_COUNT as usize] = [1.0, 0.0, 0.0, 0.0, 1.0, 2.0];
+
+        let gate_weights: [[f32; EMBEDDING * FEED_FORWARD]; 3] =
+            [[1.0, 0.0, 0.0, 1.0], [2.0, 0.0, 0.0, 2.0], [1.0, 1.0, 1.0, 1.0]];
+        let up_weights: [[f32; EMBEDDING * FEED_FORWARD]; 3] =
+            [[1.0, 1.0, 1.0, 1.0], [0.0, 1.0, 1.0, 0.0], [2.0, 0.0, 0.0, 2.0]];
+        let down_weights: [[f32; FEED_FORWARD * EMBEDDING]; 3] =
+            [[1.0, 0.0, 0.0, 1.0], [1.0, 1.0, 1.0, 1.0], [0.0, 1.0, 1.0, 0.0]];
+
+        let stack_experts = |weights: &[[f32; EMBEDDING * FEED_FORWARD]; 3]| -> alloc::vec::Vec<f32> {
+            weights.iter().flatten().copied().collect()
+        };
+        let expert_w_gate = stack_experts(&gate_weights);
+        let expert_w_up = stack_experts(&up_weights);
+        let expert_w_down: alloc::vec::Vec<f32> = down_weights.iter().flatten().copied().collect();
+
+        let mut program = Vec::new();
+        let x_node = input_leaf(&mut program, DType::Float32, alloc::vec![Extent::Symbolic(0), Extent::Static(EMBEDDING as u32)], "x");
+        let gate_inp_node = input_leaf(
+            &mut program,
+            DType::Float32,
+            alloc::vec![Extent::Static(EMBEDDING as u32), Extent::Static(EXPERT_COUNT)],
+            "gate_inp",
+        );
+        let expert_w_gate_node = input_leaf(
+            &mut program,
+            DType::Float32,
+            alloc::vec![Extent::Static(EXPERT_COUNT), Extent::Static(EMBEDDING as u32), Extent::Static(FEED_FORWARD as u32)],
+            "expert_w_gate",
+        );
+        let expert_w_up_node = input_leaf(
+            &mut program,
+            DType::Float32,
+            alloc::vec![Extent::Static(EXPERT_COUNT), Extent::Static(EMBEDDING as u32), Extent::Static(FEED_FORWARD as u32)],
+            "expert_w_up",
+        );
+        let expert_w_down_node = input_leaf(
+            &mut program,
+            DType::Float32,
+            alloc::vec![Extent::Static(EXPERT_COUNT), Extent::Static(FEED_FORWARD as u32), Extent::Static(EMBEDDING as u32)],
+            "expert_w_down",
+        );
+        let ones = scalar_constant(&mut program, 1.0);
+
+        let root = append_moe_ffn(
+            &mut program,
+            x_node,
+            gate_inp_node,
+            expert_w_gate_node,
+            expert_w_up_node,
+            expert_w_down_node,
+            EXPERT_COUNT,
+            EXPERT_USED_COUNT,
+            ones,
+        )
+        .expect("the routed ffn lowers");
+
+        let symbols = [SEQUENCE as u64];
+        crate::shape::infer(&program, &symbols).expect("the routed ffn infers");
+
+        let blocks: [&[f32]; 5] = [&x, &gate_inp, &expert_w_gate, &expert_w_up, &expert_w_down];
+        let workers = core::num::NonZeroUsize::new(1).expect("one worker is nonzero");
+        let evaluated =
+            crate::cpu::evaluate_parallel(&program, &symbols, &blocks, &[root], workers).expect("the routed ffn evaluates");
+        let output = evaluated.root();
+        assert_eq!(output.len(), SEQUENCE * EMBEDDING, "a vacuous output proves nothing");
+
+        for (token, x_row) in x.chunks(EMBEDDING).enumerate() {
+            let logits: alloc::vec::Vec<f32> = (0..EXPERT_COUNT as usize)
+                .map(|expert| (0..EMBEDDING).map(|dim| x_row[dim] * gate_inp[dim * EXPERT_COUNT as usize + expert]).sum())
+                .collect();
+            let routes = top_k_routes_and_weights(&logits, EXPERT_USED_COUNT as usize);
+            let mut expected = alloc::vec![0.0f32; EMBEDDING];
+            for (expert, weight) in routes {
+                let expert_out = swiglu_ffn(
+                    x_row,
+                    &gate_weights[expert],
+                    &up_weights[expert],
+                    &down_weights[expert],
+                    EMBEDDING,
+                    FEED_FORWARD,
+                );
+                for (accum, value) in expected.iter_mut().zip(&expert_out) {
+                    *accum += weight * value;
+                }
+            }
+            let found = &output[token * EMBEDDING..(token + 1) * EMBEDDING];
+            for (found_value, expected_value) in found.iter().zip(&expected) {
+                assert!(
+                    (found_value - expected_value).abs() < 1e-4,
+                    "token {token}: got {found:?}, expected {expected:?} (independent top-{EXPERT_USED_COUNT} \
+                     softmax-weighted swiglu reference)"
+                );
+            }
+        }
+    }
+
     /// Independent reference for grouped-query attention: a plain
     /// `q @ k^T` -> causal softmax -> `@ v` over raw f32 slices, with no
     /// dependency on `Op`, `IndexMap`, or anything else the graph under test
@@ -3022,7 +3503,7 @@ shape = ["seq"]
     /// on forever, which is the drift class this asserts is gone.
     #[test]
     fn no_repeated_scalar_crosses_the_binding_surface() {
-        let program = mistral_forward_program(128, 64, 172, 8, 4, 16, 2)
+        let program = mistral_forward_program(128, 64, 172, 8, 4, 16, 2, 0, 0)
             .expect("the forward pass lowers to a program");
 
         let bound: Vec<&str> = program
@@ -3091,7 +3572,7 @@ value = 1.0
         const REAL_CONTEXT: u64 = 8192;
 
         let build_start = std::time::Instant::now();
-        let program = mistral_forward_program(32_002, 4096, 14336, 32, 8, 128, 32)
+        let program = mistral_forward_program(32_002, 4096, 14336, 32, 8, 128, 32, 0, 0)
             .expect("the whole forward pass lowers to a program");
         let build_elapsed = build_start.elapsed();
 
@@ -3140,7 +3621,7 @@ value = 1.0
         };
         let per_layer = nodes_of(2) - nodes_of(1);
         let full = nodes_of(32);
-        let uncached = mistral_forward_program(32_002, 4096, 14336, 32, 8, 128, 32)
+        let uncached = mistral_forward_program(32_002, 4096, 14336, 32, 8, 128, 32, 0, 0)
             .expect("the whole forward pass lowers to a program")
             .len();
         // a built `Op` is not an executed op: `crate::bind` fuses
@@ -3304,6 +3785,8 @@ value = 1.0
             KV_HEADS as u32,
             HEAD_DIM as u32,
             BLOCK_COUNT,
+            0,
+            0,
         )
         .expect("the whole forward pass lowers to a program");
 
@@ -3477,9 +3960,18 @@ value = 1.0
         let lm_head = random_vec(seed, EMBEDDING * VOCAB);
 
         // -- uncached oracle: the whole 3-token sequence in one shot.
-        let uncached_program =
-            mistral_forward_program(VOCAB as u32, EMBEDDING as u32, FEED_FORWARD as u32, QUERY_HEADS as u32, KV_HEADS as u32, HEAD_DIM as u32, BLOCK_COUNT)
-                .expect("uncached forward pass lowers");
+        let uncached_program = mistral_forward_program(
+            VOCAB as u32,
+            EMBEDDING as u32,
+            FEED_FORWARD as u32,
+            QUERY_HEADS as u32,
+            KV_HEADS as u32,
+            HEAD_DIM as u32,
+            BLOCK_COUNT,
+            0,
+            0,
+        )
+        .expect("uncached forward pass lowers");
         // real `blk.{layer}.*` names, built with `alloc::format!` so
         // ownership outlives the `&str` borrows below.
         let layer_names: Vec<[alloc::string::String; 9]> = layers
