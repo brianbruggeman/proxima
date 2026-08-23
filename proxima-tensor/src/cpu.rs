@@ -473,6 +473,13 @@ pub enum QuantizedBlock<'a> {
     /// super-blocks would straddle more than one cached position, while a
     /// 32-element `Q8_0` block divides a typical head dimension evenly.
     Q8_0(&'a [u8]),
+    /// Raw packed `Q4_0` bytes -- 32-element blocks, one `f16` scale per
+    /// block, no sub-block structure and no shared super-block with the
+    /// K-quant family; see [`proxima_gguf::quant::q4_0`] for the on-disk
+    /// layout this borrows unchanged. Legacy llama.cpp's simplest and most
+    /// widely distributed 4-bit format -- unlike [`Self::Q4K`], no
+    /// sub-block scale/min hierarchy, just `value = scale * (nibble - 8)`.
+    Q4_0(&'a [u8]),
 }
 
 /// [`evaluate`]'s counterpart for a program with one `Q4_K`-quantized weight
@@ -584,7 +591,11 @@ pub fn evaluate_quantized_with_scratch(
                 }
                 buffers[node.0 as usize] = Some(Cow::Borrowed(data));
             }
-            QuantizedBlock::Q4K(_) | QuantizedBlock::Q5K(_) | QuantizedBlock::Q6K(_) | QuantizedBlock::Q8_0(_) => {
+            QuantizedBlock::Q4K(_)
+            | QuantizedBlock::Q5K(_)
+            | QuantizedBlock::Q6K(_)
+            | QuantizedBlock::Q8_0(_)
+            | QuantizedBlock::Q4_0(_) => {
                 quantized_weights.insert(*node, block);
             }
         }
@@ -3088,6 +3099,7 @@ fn build_matmul_stage_plan<'weights>(
         QuantizedBlock::Q5K(bytes) => (bytes, Q5K_BLOCK_BYTES, Q4K_BLOCK_ELEMENTS),
         QuantizedBlock::Q6K(bytes) => (bytes, Q6K_BLOCK_BYTES, Q4K_BLOCK_ELEMENTS),
         QuantizedBlock::Q8_0(bytes) => (bytes, Q8_0_BLOCK_BYTES, Q8_0_BLOCK_ELEMENTS),
+        QuantizedBlock::Q4_0(bytes) => (bytes, Q4_0_BLOCK_BYTES, Q4_0_BLOCK_ELEMENTS),
     };
     if k == 0 || rows == 0 || !weights.len().is_multiple_of(block_bytes) {
         return Err(shape_error());
@@ -3463,6 +3475,7 @@ fn run_reduce_quantized<B: Deref<Target = [f32]>>(
         QuantizedBlock::Q5K(bytes) => (bytes, Q5K_BLOCK_BYTES, Q4K_BLOCK_ELEMENTS),
         QuantizedBlock::Q6K(bytes) => (bytes, Q6K_BLOCK_BYTES, Q4K_BLOCK_ELEMENTS),
         QuantizedBlock::Q8_0(bytes) => (bytes, Q8_0_BLOCK_BYTES, Q8_0_BLOCK_ELEMENTS),
+        QuantizedBlock::Q4_0(bytes) => (bytes, Q4_0_BLOCK_BYTES, Q4_0_BLOCK_ELEMENTS),
     };
     if k == 0 || rows == 0 || !weights.len().is_multiple_of(block_bytes) {
         return Err(shape_error());
@@ -3630,6 +3643,7 @@ fn run_reduce_quantized<B: Deref<Target = [f32]>>(
                 }
             }
             QuantizedBlock::Q8_0(_) => matmul_q8_0_f32(weights, rows, activation_row)?,
+            QuantizedBlock::Q4_0(_) => matmul_q4_0_f32(weights, rows, activation_row)?,
         };
         #[cfg(feature = "instrument")]
         {
@@ -3651,6 +3665,7 @@ fn run_reduce_quantized<B: Deref<Target = [f32]>>(
                     counter!(instrument::MATMUL_Q6K_CALL_TICKS, diag_call_ticks);
                 }
                 QuantizedBlock::Q8_0(_) => {}
+                QuantizedBlock::Q4_0(_) => {}
             }
         }
         output[position * rows..(position + 1) * rows].copy_from_slice(&result);
@@ -6006,6 +6021,79 @@ pub fn matmul_q8_0_f32(weights: &[u8], rows: usize, activation: &[f32]) -> Resul
         "matmul_q8_0_f32 called with zero rows",
         "weight byte length is not a whole multiple of the row count",
         dot_q8_0_f32,
+    )
+}
+
+/// Packed bytes per `Q4_0` block -- needed unconditionally, same reasoning
+/// as [`Q8_0_BLOCK_BYTES`].
+const Q4_0_BLOCK_BYTES: usize = proxima_gguf::quant::q4_0::BLOCK_BYTES;
+
+/// Decoded `f32` elements per `Q4_0` block (`QK4_0`, 32) -- the same flat
+/// 32-element shape as [`QuantizedBlock::Q8_0`], not [`Q4K_BLOCK_ELEMENTS`]'s
+/// 256-wide super-block; see [`QuantizedBlock::Q4_0`]'s own doc.
+const Q4_0_BLOCK_ELEMENTS: usize = proxima_gguf::quant::q4_0::QK4_0;
+
+/// [`dot_q8_0_f32`]'s mechanism applied to `Q4_0`: dequantizes one
+/// 32-element block at a time into a reused stack buffer via
+/// [`proxima_gguf::quant::q4_0::dequantize_block`], then folds against the
+/// matching activation slice with the same [`dot_fold_fused_multiply_add`]
+/// fold. `Q4_0` has no shared super-block with the K-quant family and no
+/// `dot_fn_for` entry (see that function's own doc) -- this scalar
+/// dequantize-then-fold path is the only one this codec takes on the CPU
+/// backend.
+///
+/// # Errors
+/// [`TensorError::QuantizedShapeMismatch`] if `weight_row.len()` is not a
+/// whole multiple of [`Q4_0_BLOCK_BYTES`], or `activation.len()` does not
+/// equal the row's block count times [`Q4_0_BLOCK_ELEMENTS`].
+fn dot_q4_0_f32(weight_row: &[u8], activation: &[f32]) -> Result<f32, TensorError> {
+    if !weight_row.len().is_multiple_of(Q4_0_BLOCK_BYTES) {
+        return Err(TensorError::QuantizedShapeMismatch {
+            reason: "weight row length is not a whole multiple of the q4_0 block size",
+        });
+    }
+    let block_count = weight_row.len() / Q4_0_BLOCK_BYTES;
+    if activation.len() != block_count * Q4_0_BLOCK_ELEMENTS {
+        return Err(TensorError::QuantizedShapeMismatch {
+            reason: "activation length does not match the weight row's decoded element count",
+        });
+    }
+
+    let mut scratch = [0.0f32; Q4_0_BLOCK_ELEMENTS];
+    let mut acc = 0.0f32;
+    for (block, activation_chunk) in weight_row
+        .as_chunks::<Q4_0_BLOCK_BYTES>()
+        .0
+        .iter()
+        .zip(activation.as_chunks::<Q4_0_BLOCK_ELEMENTS>().0)
+    {
+        proxima_gguf::quant::q4_0::dequantize_block(block, &mut scratch);
+        acc = dot_fold_fused_multiply_add(
+            &scratch,
+            activation_chunk,
+            DotFold { len: Q4_0_BLOCK_ELEMENTS, init: acc, seeded: true },
+        );
+    }
+    Ok(acc)
+}
+
+/// A full `Q4_0`-quantized weight matrix (`rows` x `k`) times one `f32`
+/// activation vector -- `dot_q4_0_f32`'s per-row kernel, same scalar
+/// dequantize-then-fold shape as [`matmul_q8_0_f32`] (no packed int8-dot
+/// wide fold exists for this codec either).
+///
+/// # Errors
+/// Propagates `dot_q4_0_f32`'s [`TensorError::QuantizedShapeMismatch`], or
+/// reports the same error if `weights.len()` is not a whole multiple of
+/// `rows`.
+pub fn matmul_q4_0_f32(weights: &[u8], rows: usize, activation: &[f32]) -> Result<Vec<f32>, TensorError> {
+    matmul_quantized_dispatch(
+        weights,
+        rows,
+        activation,
+        "matmul_q4_0_f32 called with zero rows",
+        "weight byte length is not a whole multiple of the row count",
+        dot_q4_0_f32,
     )
 }
 
@@ -15376,6 +15464,7 @@ mod tests {
     #[case::q5_k("q5_k", 0.01)]
     #[case::q6_k("q6_k", 0.01)]
     #[case::q8_0("q8_0", 0.01)]
+    #[case::q4_0("q4_0", 0.01)]
     async fn evaluate_quantized_matmul_matches_dequantized_reference_across_every_codec(
         #[case] codec: &str,
         #[case] tolerance: f32,
@@ -15458,6 +15547,23 @@ mod tests {
                 let blocks = [QuantizedBlock::Q8_0(&weight_blocks), QuantizedBlock::Float32(&activation)];
                 evaluate_quantized(&program, &[], &blocks, &[sum])
                     .expect("q8_0-quantized matmul evaluates")
+                    .root()
+                    .to_vec()
+            }
+            "q4_0" => {
+                use proxima_gguf::quant::q4_0::{BLOCK_BYTES, QK4_0, quantize};
+                let blocks_per_row = k as usize / QK4_0;
+                let mut weight_blocks = vec![0u8; rows as usize * blocks_per_row * BLOCK_BYTES];
+                for (row_f32, row_blocks) in weight_f32
+                    .chunks_exact(k as usize)
+                    .zip(weight_blocks.chunks_exact_mut(blocks_per_row * BLOCK_BYTES))
+                {
+                    quantize(row_f32, row_blocks).expect("row length is a whole multiple of QK4_0 by construction");
+                }
+                let (program, sum) = quantized_matmul_program(rows, k);
+                let blocks = [QuantizedBlock::Q4_0(&weight_blocks), QuantizedBlock::Float32(&activation)];
+                evaluate_quantized(&program, &[], &blocks, &[sum])
+                    .expect("q4_0-quantized matmul evaluates")
                     .root()
                     .to_vec()
             }
