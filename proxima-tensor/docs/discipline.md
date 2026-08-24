@@ -13049,6 +13049,64 @@ That last line is the finding in miniature: the original test passing while the 
 - `cargo nextest run -p proxima-tensor --features std,instrument catches_a_transposed_block_weight`
 - `cargo nextest run -p proxima-tensor --features std,instrument causal_conv1d` (the single-channel test and its multi-channel companion)
 
+## ROW 137 — LFM2's router: 1/24 to 22/24 expert agreement. A shared reader widened for a safe caller silently broke an unsafe one. And a third vacuous fixture, degenerate in REACHABILITY rather than dimension
+
+Commits `2c3786a` (gguf), `719ff9f` (safetensors), `d4be751` (packed gather), `fbe44ec` (harness), plus test-only `0013f2f` and the packed-MoE proofs. `proxima-tensor` 403 -> **406**, `proxima-model-interop` 70 -> **72**.
+
+### The router defect, and the class it belongs to
+
+`bind_matmul_weight_as` (`proxima-model-interop/src/bind.rs:615` pre-fix) accepted a raw-packed `QuantizedBlock::Float32` unconditionally for a **matmul** operand. **Nothing downstream corrects a packed F32 layout on either backend:**
+- **CPU** — `evaluate_quantized_with_scratch` binds `Float32` as a plain buffer; it never enters `run_reduce_quantized`'s byte-native bypass, which explicitly rejects `Float32` at its own dispatch (`cpu.rs` ~`:3529`). The CPU path never calls `correct_packed_matmul_layouts` at all.
+- **GPU** — `packed_operands_of` (`omega/src/metal.rs:369`) **explicitly excludes** `Float32` from the set handed to `correct_packed_matmul_layouts` (`metal.rs:967`).
+
+Other codecs are safe for concrete, different reasons: `Q4_K`/`Q5_K`/`Q6_K`/`Q8_0`/`Q4_0` are walked byte-natively (only the *sign* of `Layout::stride()` is used, never its value); `F16`/`Bf16` get an identical raw contiguous-row read on CPU via `matmul_f16_f32`/`matmul_bf16_f32` **and** are included in the GPU correction set.
+
+**The regression, found by `git log -S`: `d5f2405`, "borrow f32 tensors from the mapping instead of copying."** It added an `F32` arm to the **shared** `gguf_tensor_as_packed_block` reader for `bind_dense`'s gather-consumed use — which is genuinely safe — and `bind_matmul_weight_as` shares that reader and was never updated to exclude F32 from its own dispatch.
+
+**This is a distinct defect class and it is worth naming: a shared reader widened for one caller's safe use case, silently changing a second caller's behaviour.** Both call sites read correctly in isolation. The defect exists only in the relationship between them, and no amount of reading either one in isolation reveals it. The twin at `hf_bind.rs:304-305` (safetensors) had the identical shape and was fixed the same way in `719ff9f`.
+
+**Measured effect, LFM2 layer 2, real checkpoint, real oracle dumps:**
+
+| | before | after |
+|---|---|---|
+| our gate-logit range | `0.0266 .. 1.3308` | **`-2.7445 .. 0.3626`** |
+| oracle gate-logit range | `-3.9842 .. -2.8192` | same |
+| expert picks agreeing | **1 / 24** | **22 / 24** |
+
+The two remaining disagreements are near-tie rank swaps — a materially different situation from a systematic layout error. Pre-gate mixer and norm values are byte-identical before and after, confirming the fix is scoped exactly to the router.
+
+**A coordinator hypothesis refuted:** F16 was predicted to share this defect via `cb60941`'s routing. It does not — Mixtral's real F16 router binds and matches an independent decode to ~1e-6. F16 is safe on both backends for the reasons above.
+
+### The third vacuous fixture — and it is a NEW sub-class
+
+ROW 135 recorded two tests that passed while unable to discriminate, both degenerate in a **dimension** (`embedding=1` hiding a transpose; a gradient point where the broken term contributed ~0). The `hf_bind` fix produced a third, and it is degenerate in **reachability**:
+
+Its first draft passed under the *buggy* dispatch. A single-tensor safetensors file's data offset landed 4-byte-misaligned, so `aligned_f32_view` rejected it regardless of the fix, and **both branches fell through to the same safe `Err(_)` path**. The test never entered the code path it existed to test, and **nothing in the test body showed that** — the dimensions were asymmetric and correct, the assertion was real, the fixture looked fine.
+
+Fixed by forcing alignment (a dummy leading `Int8` tensor swept over `0..4` bytes of padding, inverting a technique an existing test already used), after which it discriminated properly: `ours=[436, 457, 506, 507]` against `oracle=[70, 280, 490, 700]`.
+
+**So the discipline needs a second clause.** ROW 135 said: to prove a test discriminates, apply the exact defect it exists to catch. That is necessary and not sufficient. **Also confirm the test reaches the branch under test** — an alignment guard, a feature gate, an early return, or a fallback can silently route the fixture around the code being verified, and every surface-level property of the test will still look right.
+
+### Harness timeouts were measuring the wrong thing
+
+`fbe44ec`. `recv_timeout` started its clock at `spawn_factory_on_core` dispatch, not at the body's first poll, so queueing delay counted against a 60s hang budget and was indistinguishable from a hang. **A coordinator hypothesis was refuted from source:** `CoreId(0)` does **not** pin — `prime/src/os/runtime.rs:41-50`, `PrimeRuntime::new` calls `new_inner(num_cores, false)`, documented "UNPINNED (the default — workers float, the OS schedules them)", and `new_inner_placed` (`:139-207`) leaves `affinity = None`. A PID probe also confirmed nextest gives each test its own process, killing the cross-process contention theory too.
+
+Fixed by splitting into a dispatch phase (`PROXIMA_TEST_DISPATCH_TIMEOUT_MS`, 300s) that absorbs queueing and a body phase (`PROXIMA_TEST_TIMEOUT_MS`, 60s, unchanged) that measures execution. Hang detection is preserved: a hung body sends `Started` promptly and never sends `Done`. Deterministic repro rather than a fight with the scheduler — saturate the runtime with a 300ms busy loop, dispatch a no-op behind it at 50ms, get the exact production error; after, `outcome=None`; `pending::<()>()` still fails identically.
+
+**Consequence for every count in this log:** workspace test counts taken during heavy fan-out before `fbe44ec` were contaminated, and a 60s failure now means genuine execution time.
+
+### Mixtral: three of four links verified, the fourth is one binder change
+
+`restack.rs` stacking (all 8 experts bit-identical, block-aligned by arithmetic) + `d4be751`'s packed gather (bit-identical per expert; forcing the index constant gives a 20x miss) + `spec.rs` **already supporting it unmodified** — `gathered_expert_product`'s `DType::Float32` is the multiply node's *output* dtype, `evaluate_quantized_named` binds blocks **positionally** regardless of declared dtype, and `reject_non_float32` is a no-op for a Float32-declared node. **Fifteenth "the primitive already exists" this session, and the most deceptive: a declared dtype that reads as load-bearing and is not.**
+
+Remaining: `bind_moe_expert_weights` supplying `QuantizedBlock::Q4K(&stacked_bytes)` instead of dequantising. 180 GiB -> 26 GiB.
+
+**Re-prove commands:**
+- `cargo run --release -p proxima-model-interop --features std --example lfm2_moe_route_diff` (expect 22/24 expert agreement)
+- `cargo nextest run -p proxima-model-interop --features std raw_packed_f32_matmul_weight` (both the gguf and safetensors twins)
+- `cargo nextest run -p proxima-tensor --features std,instrument packed_q4k_stack`
+- `git log -S "correct_packed_matmul_layouts" --oneline` (one production caller, `omega/src/metal.rs:967`, from `65c3582`)
+
 ## ROW 136 — ROW 135's own fix was still MISSING from `spec.rs`; landed it, re-measured the real checkpoint relative-diff sweep, and found a SECOND, larger, unfixed defect one layer later
 
 Commits `6a36a41` (the `causal_conv1d` fix itself), `b39a23d`/`f33dc4b`/`7ce8177` (tooling). `proxima-tensor --features std,instrument` 403 (unchanged -- ROW 135's own commit already added the test count this row's fix makes green). `proxima-model-interop --features std` 70. `omega` 94. Workspace 5665. Clippy exit 0.
