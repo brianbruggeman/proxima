@@ -1050,6 +1050,17 @@ impl<'file> LoadedModel<'file> {
                     residual_ns as f64 / 1e6,
                     (named_ns + residual_ns) as f64 / 1e6,
                 );
+                // ROW 140's own redundant-activation-quantize hypothesis
+                // check: `total_calls` vs `distinct_nodes` across every
+                // matmul reduce node this step evaluated. 1:1 kills the
+                // hypothesis; a ratio near the QKV/gate-up fan-out (2-3x)
+                // confirms it.
+                let (quantize_total_calls, quantize_distinct_nodes) = proxima_tensor::instrument::quantize_activation_call_stats();
+                let quantize_cache_hits = proxima_tensor::instrument::QUANTIZE_ACTIVATION_CACHE_HITS.get();
+                std::println!(
+                    "token_quantize_calls step={_step} total_calls={quantize_total_calls} distinct_nodes={quantize_distinct_nodes} \
+                     cache_hits={quantize_cache_hits}"
+                );
                 #[cfg(feature = "metal")]
                 std::println!(
                     "token_breakdown_metal step={_step} prepare_calls={} prepare_ms={:.3} \
