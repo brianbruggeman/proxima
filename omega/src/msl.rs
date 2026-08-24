@@ -704,6 +704,10 @@ pub fn emit(resolved: &BoundOp, packed_operands: &PackedOperands) -> Result<Kern
 /// # Errors
 /// Propagates [`type_token`]'s unsupported-dtype rejection — the same gate
 /// [`emit`] enforces before ever building a kernel.
+// metal-only production caller (`crate::metal::encode_op`); the `mod tests`
+// call sites below are the second, so `cfg(test)` keeps a non-macOS
+// `cargo test` build honest without a blanket `allow(dead_code)`.
+#[cfg(any(test, all(feature = "metal", target_os = "macos")))]
 pub(crate) fn kernel_cache_key(resolved: &BoundOp, packed_operands: &PackedOperands) -> Result<String, EmitError> {
     let quantized = operand_codecs(resolved, packed_operands);
     let mut key = entry_name(resolved);
@@ -763,6 +767,7 @@ pub(crate) fn kernel_cache_key(resolved: &BoundOp, packed_operands: &PackedOpera
 /// # Errors
 /// Propagates [`validate`]'s structural rejection — the same gate [`emit`]
 /// enforces before ever building a kernel.
+#[cfg(any(test, all(feature = "metal", target_os = "macos")))]
 pub(crate) fn kernel_dispatch_shape(
     resolved: &BoundOp,
     packed_operands: &PackedOperands,
