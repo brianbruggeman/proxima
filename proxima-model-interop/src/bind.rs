@@ -546,13 +546,32 @@ pub(crate) fn bind_dense_as<'file>(
 
 /// A 2-D projection weight the cached forward program uses as one
 /// `Multiply`-then-`Add`-reduce (matmul) operand. Tries
-/// [`gguf_tensor_as_packed_block`] first: a `Q4_K`/`Q5_K`/`Q6_K` tensor
-/// binds packed, zero-copy, straight out of the mmap's bytes; only `F32`
-/// falls back to dequantize-then-transpose (`transpose_out_in_to_in_out`),
-/// since GGUF's on-disk row-major `[out, in]` layout needs an explicit
-/// transpose to become the `[in, out]` layout the forward program's
-/// access patterns expect, and a packed weight's own matmul kernel walks
-/// the native `[out, in]` layout directly instead.
+/// [`gguf_tensor_as_packed_block`] first: a `Q4_K`/`Q5_K`/`Q6_K`/`F16`/`Bf16`
+/// tensor binds packed, zero-copy, straight out of the mmap's bytes, because
+/// every one of those codecs reaches the interpreter through a path that
+/// either walks its own physical row-major bytes directly
+/// (`proxima_tensor::cpu::run_reduce_quantized`'s own doc: it derives `rows`/`k`
+/// from the packed byte length, never from the resolved `Layout`'s numeric
+/// strides) or has that `Layout` explicitly corrected downstream
+/// (`proxima_tensor::bind::correct_packed_matmul_layouts`, the GPU driver's own
+/// call site, `omega::metal.rs`).
+///
+/// `F32` is the one codec this function does NOT hand to
+/// [`gguf_tensor_as_packed_block`]'s packed path, even though that function can
+/// decode an aligned `F32` tensor too: neither the CPU generic evaluator (a
+/// raw-packed `F32` operand binds as a plain buffer,
+/// `proxima_tensor::cpu::evaluate_quantized_with_scratch`'s own `QuantizedBlock::Float32`
+/// arm, never entering `run_reduce_quantized`'s bypass) nor the GPU driver
+/// (`omega::metal.rs`'s own `packed_operands_of` explicitly excludes
+/// `QuantizedBlock::Float32` from the node set `correct_packed_matmul_layouts`
+/// corrects) has any mechanism that rewrites a packed `F32` matmul operand's
+/// `Layout` from GGUF's native `[out, in]` to the `[in, out]` every consuming
+/// `IndexMap` declares. So `F32` always takes the dequantize-then-transpose
+/// path (`transpose_out_in_to_in_out`) instead, the same as any other
+/// undecodable-packed `GgmlType` -- this is what makes a plain `f32` matmul
+/// operand's bytes match its declared axis order at every downstream reader,
+/// exactly the invariant [`gguf_tensor_as_packed_block`]'s own doc already
+/// assumes every OTHER consumer of a bound `f32` buffer can rely on.
 ///
 /// # Errors
 ///
@@ -593,13 +612,13 @@ pub(crate) fn bind_matmul_weight_as<'file>(
     state: &mut BoundWeights<'file>,
 ) -> Result<(), InteropError> {
     match gguf_tensor_as_packed_block(parsed, file_bytes, source_name) {
-        Ok(block) => state.packed.push((target_name, block)),
-        Err(_) => {
+        Ok(proxima_tensor::cpu::QuantizedBlock::Float32(_)) | Err(_) => {
             let decoded = gguf_tensor_as_f32(parsed, file_bytes, source_name)?;
             state.resident_bytes += decoded.len() * core::mem::size_of::<f32>();
             let transposed = transpose_out_in_to_in_out(&decoded, source_name, out_dim, in_dim)?;
             state.owned.push((target_name, transposed));
         }
+        Ok(block) => state.packed.push((target_name, block)),
     }
     Ok(())
 }
@@ -941,6 +960,144 @@ mod tests {
 
     fn dims(values: &[u64]) -> arrayvec::ArrayVec<u64, { proxima_gguf::tensor::MAX_DIMS }> {
         values.iter().copied().collect()
+    }
+
+    /// The decisive proof for this file's own fix: a raw-packed `F32` matmul
+    /// weight bound through [`bind_matmul_weight_as`] must land in
+    /// [`BoundWeights::owned`], transposed, and produce the exact same
+    /// matmul result as an independent hand computation over the tensor's
+    /// own on-disk bytes -- run through the real
+    /// [`proxima_tensor::cpu::evaluate_quantized_named`] evaluation a forward
+    /// program actually uses, not merely compared byte-for-byte against the
+    /// dequantize-then-transpose path.
+    ///
+    /// `out_dim=4`/`in_dim=6` are deliberately asymmetric: this is exactly
+    /// what let the bug this test guards against hide behind a
+    /// one-channel or square fixture (see this module's own dense-vs-packed
+    /// history) -- a transpose of a square or single-row buffer can
+    /// coincidentally read back correctly, or silently permute symmetric
+    /// data, so it proves nothing. With `out_dim != in_dim`, a buffer
+    /// addressed through the wrong axis order reads flatly wrong values.
+    #[cfg(feature = "std")]
+    #[test]
+    fn raw_packed_f32_matmul_weight_matches_an_independent_hand_computed_matmul() {
+        let out_dim = 4usize;
+        let in_dim = 6usize;
+        // GGUF's own on-disk convention: `out_dim` rows, each a contiguous
+        // run of `in_dim` elements -- weight(out, in) = out*10 + in, distinct
+        // per element so a scrambled read is detectable.
+        let mut on_disk = vec![0.0f32; out_dim * in_dim];
+        for out_index in 0..out_dim {
+            for in_index in 0..in_dim {
+                on_disk[out_index * in_dim + in_index] = (out_index * 10 + in_index) as f32;
+            }
+        }
+        let bytes: Vec<u8> = on_disk.iter().flat_map(|value| value.to_le_bytes()).collect();
+
+        let model = GgufModel {
+            version: 3,
+            metadata: Vec::new(),
+            tensors: vec![TensorPayload {
+                name: "blk.0.ffn_gate_inp.weight".to_string(),
+                dims: dims(&[in_dim as u64, out_dim as u64]),
+                ggml_type: WireType::F32,
+                data: &bytes,
+            }],
+        };
+        let file_bytes = write_complete(&model).expect("writes gguf with an asymmetric f32 matmul weight");
+        let parsed = proxima_gguf::pipe::parse_complete(&file_bytes).expect("parses gguf with an asymmetric f32 matmul weight");
+
+        let mut state = BoundWeights {
+            resident_bytes: 0,
+            owned: Vec::new(),
+            packed: Vec::new(),
+        };
+        bind_matmul_weight_as(&parsed, &file_bytes, "blk.0.ffn_gate_inp.weight", "gate".to_string(), out_dim, in_dim, &mut state)
+            .expect("binds the asymmetric f32 matmul weight");
+        assert!(
+            state.packed.is_empty(),
+            "an F32 matmul weight must never take the raw-packed path -- nothing downstream corrects its layout"
+        );
+        assert_eq!(state.owned.len(), 1, "the F32 matmul weight must land in the transposed owned path");
+        let bound_weight = &state.owned[0].1;
+
+        // Deliberately NOT symmetric around zero (an earlier draft used
+        // `index - 2.5`, whose sum over `0..6` is exactly zero -- that
+        // silently canceled every `out_dim`-dependent term below and made
+        // all four outputs identical regardless of which axis order the
+        // buffer was actually read in, a vacuous test that would pass under
+        // a transpose too. `index + 1` sums to a nonzero, out-axis-coupled
+        // value instead.
+        let activation: Vec<f32> = (0..in_dim).map(|index| (index as f32) + 1.0).collect();
+
+        let mut program: Vec<proxima_tensor::op::Op> = Vec::new();
+        let activation_node = proxima_tensor::op::append(
+            &mut program,
+            proxima_tensor::op::Op::Input {
+                dtype: proxima_tensor::dtype::DType::Float32,
+                shape: alloc::vec![proxima_tensor::op::Extent::Static(in_dim as u32)],
+                name: Some("activation".to_string()),
+            },
+        );
+        let weight_node = proxima_tensor::op::append(
+            &mut program,
+            proxima_tensor::op::Op::Input {
+                dtype: proxima_tensor::dtype::DType::Float32,
+                shape: alloc::vec![
+                    proxima_tensor::op::Extent::Static(in_dim as u32),
+                    proxima_tensor::op::Extent::Static(out_dim as u32)
+                ],
+                name: Some("gate".to_string()),
+            },
+        );
+        let product = proxima_tensor::op::append(
+            &mut program,
+            proxima_tensor::op::Op::Elementwise {
+                dtype: proxima_tensor::dtype::DType::Float32,
+                body: proxima_tensor::op::ScalarOp::Multiply,
+                operands: alloc::vec![
+                    (activation_node, proxima_tensor::map::IndexMap::Affine(proxima_tensor::map::projection(2, &[1]))),
+                    (weight_node, proxima_tensor::map::IndexMap::Affine(proxima_tensor::map::projection(2, &[1, 0]))),
+                ],
+                name: None,
+            },
+        );
+        let logits = proxima_tensor::op::append(
+            &mut program,
+            proxima_tensor::op::Op::Reduce(proxima_tensor::op::Reduce {
+                dtype: proxima_tensor::dtype::DType::Float32,
+                body: proxima_tensor::op::ScalarOp::Add,
+                init: proxima_tensor::op::ReduceInit::Zero,
+                operand: product,
+                in_map: proxima_tensor::map::IndexMap::Affine(proxima_tensor::map::projection(2, &[0, 1])),
+                out_map: proxima_tensor::map::IndexMap::Affine(proxima_tensor::map::projection(2, &[0])),
+                keep: proxima_tensor::op::Keep::Reduce,
+                name: Some("logits".to_string()),
+            }),
+        );
+
+        let named = [
+            ("activation", proxima_tensor::cpu::QuantizedBlock::Float32(activation.as_slice())),
+            ("gate", proxima_tensor::cpu::QuantizedBlock::Float32(bound_weight.as_slice())),
+        ];
+        let evaluated = proxima_tensor::cpu::evaluate_quantized_named(&program, &[], &named, &[logits])
+            .expect("evaluate the bound matmul weight through the real interpreter");
+        let ours = evaluated.root();
+
+        let mut oracle = vec![0.0f32; out_dim];
+        for (out_index, logit) in oracle.iter_mut().enumerate() {
+            let mut accumulator = 0.0f32;
+            for in_index in 0..in_dim {
+                accumulator += activation[in_index] * on_disk[out_index * in_dim + in_index];
+            }
+            *logit = accumulator;
+        }
+
+        std::println!("raw_packed_f32_matmul ours={ours:?} oracle={oracle:?}");
+        for (out_index, (found, wanted)) in ours.iter().zip(&oracle).enumerate() {
+            let diff = (found - wanted).abs();
+            assert!(diff < 1e-4, "output {out_index}: found={found} wanted={wanted} diff={diff}");
+        }
     }
 
     /// The defect this signature change fixes, proved directly: a decoded
@@ -2766,7 +2923,7 @@ mod real_mixtral_file {
         for (expert_index, logit) in expected.iter_mut().enumerate() {
             let row = &router_bytes[expert_index * embedding * 2..(expert_index + 1) * embedding * 2];
             let mut accumulator = 0.0f32;
-            for (element_index, chunk) in row.chunks_exact(2).enumerate() {
+            for (element_index, chunk) in row.as_chunks::<2>().0.iter().enumerate() {
                 let weight = half::f16::from_bits(u16::from_le_bytes([chunk[0], chunk[1]])).to_f32();
                 accumulator += weight * activation[element_index];
             }
