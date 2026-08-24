@@ -243,6 +243,11 @@ fn permute_rope_rows(flat: &[f32], head_count: usize, head_dim: usize, in_dim: u
 /// byte move a borrowed packed block cannot express) and applies
 /// [`permute_rope_rows`] before the same transpose
 /// [`hf_bind_matmul_weight`] already does.
+// one weight's own real shape (lookup/store names, head geometry, in_dim)
+// plus the file/state every binder in this module threads through -- the
+// same shape `proxima_tensor::spec::append_mistral_cached_moe_layer`
+// carries its own `#[allow(clippy::too_many_arguments)]` for.
+#[allow(clippy::too_many_arguments)]
 fn hf_bind_rope_weight<'file>(
     manifest: &Manifest,
     file_bytes: &'file [u8],
