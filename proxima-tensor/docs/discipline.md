@@ -12866,7 +12866,7 @@ Commits `e1fd2c7` (hybrid program), `cb12f82` (bos/eos consumption). `proxima-te
 - `cargo nextest run -p proxima-tensor --features std,instrument causal_conv` (the hand-computed arithmetic)
 - `sed -n '434,465p' ~/repos/others/transformers/src/transformers/models/lfm2_moe/modeling_lfm2_moe.py` (the `B, C, x` order; adjust the path to wherever transformers lives on this box)
 
-## ROW 132 — LFM2 runs on the real 4.79 GiB checkpoint and is WRONG; three defects fixed with hand-computed proofs; an oracle was built; and the residual divergence is NOT a defect in this repo — it is quantisation noise crossing a discrete top-4-of-32 selection boundary
+## ROW 132 — LFM2 runs on the real 4.79 GiB checkpoint and is WRONG; three defects fixed with hand-computed proofs; an oracle was built; and the residual divergence is NOT a defect in this repo — it is quantisation noise crossing a discrete top-4-of-32 selection boundary — **CONCLUSION REFUTED, see ROW 133**
 
 Commits `b5fd968` (bind and run), `ea41823` (sigmoid gating), `f8f39ff` (expert-selection bias), `7c4ee42` (per-head QK-norm before RoPE), `6b68cb0` + `5078e68` (cross-oracle tooling). `proxima-tensor --features std,instrument` 389 -> **393**. Workspace **5651**. Clippy exit 0.
 
@@ -12927,3 +12927,35 @@ Blocks 0-1 are conv+dense, block 2 is attention+MoE, blocks 3/4/5 are conv+MoE. 
 - `cargo run --release -p proxima-model-interop --features std --example lfm2_layer_oracle_diff`
 - `cargo run --release -p proxima-model-interop --features std --example lfm2_moe_route_diff`
 - `cargo nextest run -p proxima-tensor --features std,instrument sigmoid_topk` (the hand-computed selection proofs)
+
+## ROW 133 — ROW 132's "no defect found" is REFUTED. Q4_K dequant is bit-exact; the layer-0-4 "noise floor" was never a noise floor; and a SIGN FLIP is not something summation order can produce
+
+No commit — `proxima-gguf` ended with zero diff, the comparison harness having been scaffolding. `proxima-gguf` 116 passed, `proxima-tensor --features std,instrument` 398, workspace 5656, clippy exit 0.
+
+**Q4_K dequantisation is BIT-EXACT with llama.cpp.** Full tensor `blk.0.shortconv.out_proj.weight` (`[2048,2048]`, 16384 super-blocks, **4,194,304 elements — the whole thing, not a sample**), ours (`proxima-gguf/src/quant/q4_k.rs:181`) against `ggml_get_type_traits(GGML_TYPE_Q4_K)->to_float` (`dequantize_row_q4_K`, `ggml-quants.c:1529`) called directly on bytes read via `gguf_init_from_file`, no model graph involved. Result: `bit_exact = true, max_abs_diff = 0`. Proved able to fail: one byte of the oracle dump was flipped, the comparison FAILED (exit 101) and located the diff at exactly that byte; restored, passed again. **Dequantisation is ruled out as a divergence source.**
+
+**AND THE PREMISE UNDER ROW 132 WAS FALSE — including the coordinator's own version of it.** The coordinator asserted, in the brief that produced this measurement, that "layer-0 activations run ~25-40." Measured from the oracle's own dumps (`scratchpad/oracle/dump_lfm2/l_out-{0..4}.f32`):
+
+| tensor | oracle mean_abs | oracle max_abs |
+|---|---|---|
+| `l_out-0 .. l_out-4` | **0.0045 - 0.0074** | **0.11 - 0.61** |
+| `l_out-5` onward | — | ~25-53 (`min = -47.04`) |
+
+**Two orders of magnitude smaller than asserted.** The 25-53 scale that made `2.4e-1` look like rounding does not exist until layer 5 — the layer where ROW 132 said the problem *starts*.
+
+**So ROW 132's `2.4e-1 .. 5.7e-1` at layers 0-4 is not a noise floor. It is comparable to, and at points larger than, the entire signal.** Reporting absolute max-abs-diff without the signal magnitude beside it is what hid this, and it is the same defect as reporting a metric without its payload records.
+
+**The decisive observation, which no amount of reassociation explains.** At `l_out-4`'s worst position, ROW 132 itself recorded ours `0.277` against oracle `-0.062`. That value was independently reproduced here by reading the flat f32 at index 8318 of `l_out-4.f32`: `-0.062358`, matching to three significant figures.
+
+**That is a SIGN FLIP with a 4.44x magnitude ratio.** f32 summation reassociation preserves sign. Q8_K activation quantisation (`q4k-int8-dot`, on by default per `proxima-tensor/Cargo.toml:13`, quantiser at `cpu.rs:7002`) preserves sign. Neither can turn `-0.062` into `+0.277`. **A sign flip is categorically not a noise phenomenon**, independent of any argument about magnitude.
+
+**Therefore a real defect exists by layer 4 at the latest, and layer 5's documented ~90x jump is amplifying an error that already exists rather than originating it.** ROW 132's expert-flip mechanism may still be the correct account of how a small early error becomes a large late one — but it is the amplifier, not the cause, and "no `file:line` fix is prescribed because no defect was found" is withdrawn.
+
+**What this row does NOT establish:** where the defect starts. Layers 0-4 were only ever compared in absolute terms, and the embedding (`inp_embd`) has never been compared at all — if the token embedding lookup or the tied-`token_embd_norm` aliasing already diverges, everything downstream is moot. A relative-diff sweep from `inp_embd` forward is in flight.
+
+**The methodological finding, which is the transferable part.** ROW 132 concluded "no defect" from a characterisation — "layers 0-4 are the noise floor" — that was **asserted and never measured against the signal it was a floor for.** Every downstream inference in that row was sound *given* that premise, which is exactly why it read as rigorous: real citations, real bisection, real mechanism, one unexamined assumption at the base. This is the fourth instance this session of a conclusion resting on an unverified frame rather than an unverified fact (ROW 127's headline, ROW 129's dead code path, ROW 130's inert-knob claim, and now this). **A "noise floor" is a claim about a ratio and must be reported as one: absolute difference beside signal magnitude, or it is not a floor, it is a number.**
+
+**Re-prove commands:**
+- dequant parity: rebuild the scratch C probe against `scratchpad/oracle/llama.cpp` and call `to_float` on `blk.0.shortconv.out_proj.weight`; expect `max_abs_diff = 0` (the harness was scaffolding and was reverted; `proxima-gguf` has zero diff from this row)
+- signal magnitude: read `scratchpad/oracle/dump_lfm2/l_out-{0..4}.f32` as flat f32 and compute mean/max abs — **session-scoped path, defective by gate 16, same as ROW 129 and 130's citations**
+- the sign flip: index 8318 of `l_out-4.f32` == `-0.062358`
