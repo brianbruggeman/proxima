@@ -3831,6 +3831,7 @@ dependencies = [
  "proxima-primitives",
  "proxima-telemetry",
  "proxima-tensor",
+ "proxima-tokenizer",
  "serde",
  "thiserror 2.0.19",
 ]
