@@ -4009,6 +4009,419 @@ shape = ["seq"]
         }
     }
 
+    /// Deterministic, dependency-free pseudo-random `f32` row generator for
+    /// the two packed-`Q4_K` tests below -- no RNG crate needed (principle 1:
+    /// a `u64` multiply-and-shift is the whole requirement), just enough
+    /// spread across `[-scale, scale]` that a wrong-expert read (a different
+    /// `scale`, see [`quantized_moe_ffn_over_a_packed_q4k_expert_stack_matches_the_routed_experts_own_swiglu`]'s
+    /// `1x`/`5x`/`20x` asymmetric per-expert scales) cannot land on the right
+    /// answer by coincidence.
+    fn synth_row(seed: u64, len: usize, scale: f32) -> alloc::vec::Vec<f32> {
+        (0..len)
+            .map(|index| {
+                let mixed = seed.wrapping_mul(2_654_435_761).wrapping_add((index as u64).wrapping_mul(40_503));
+                let unit = ((mixed >> 16) & 0xFFFF) as f32 / 65_535.0;
+                (unit * 2.0 - 1.0) * scale
+            })
+            .collect()
+    }
+
+    /// Packs `rows` independent `[k]`-length `f32` rows (`k` must be
+    /// [`proxima_gguf::quant::q4_k::QK_K`] exactly, one super-block per row)
+    /// into one `Q4_K` byte buffer, row-major -- the same physical layout
+    /// [`proxima_gguf::restack`] produces when it byte-concatenates a real
+    /// GGUF checkpoint's per-expert tensors (see [`crate::cpu::run_reduce_quantized`]'s
+    /// own doc on `per_expert_bytes`).
+    fn quantize_rows(matrix: &[f32], rows: usize, k: usize) -> alloc::vec::Vec<u8> {
+        use proxima_gguf::quant::q4_k::{BLOCK_BYTES, quantize};
+
+        let mut packed = alloc::vec![0u8; rows * BLOCK_BYTES];
+        for (row, out_block) in matrix.chunks_exact(k).zip(packed.as_chunks_mut::<BLOCK_BYTES>().0) {
+            quantize(row, out_block).expect("k is QK_K by construction");
+        }
+        packed
+    }
+
+    /// The exact inverse of [`quantize_rows`] -- the "equivalent dequantised
+    /// f32 experts" the binder hand-off names: what a caller gets by
+    /// dequantizing the packed bytes back to `f32` before handing them to
+    /// [`crate::cpu::evaluate_parallel`], the non-quantized evaluator.
+    fn dequantize_rows(packed: &[u8], rows: usize, k: usize) -> alloc::vec::Vec<f32> {
+        use proxima_gguf::quant::q4_k::dequantize;
+
+        let mut matrix = alloc::vec![0.0f32; rows * k];
+        dequantize(packed, &mut matrix).expect("packed rows dequantize");
+        matrix
+    }
+
+    /// Transposes a `[rows, cols]` row-major matrix into `[cols, rows]`.
+    /// Needed because a packed `Q4_K` node's `rows`/`k` split
+    /// ([`crate::cpu::run_reduce_quantized`]'s own derivation: `rows` is
+    /// whichever axis the weight's `IndexMap` varies over among the
+    /// reduce's OUTPUT axes, `k` is the reduced axis's own extent) and an
+    /// `Op::Input`'s *declared* axis order (row-major, last axis fastest --
+    /// [`matvec`]'s own `matrix[inp * d_out + out]` is the same convention)
+    /// are two different, unrelated conventions for the SAME node: the
+    /// packed bytes are whatever a real GGUF file's own native layout is
+    /// (never read through the ordinary strided path at all), while a
+    /// plain `f32` binding of the identical node IS read through it. The
+    /// "equivalent dequantised f32 experts" this session's brief asks for
+    /// therefore is not simply [`dequantize_rows`]'s own output -- it is
+    /// that output transposed into the declared-shape convention.
+    fn transpose_rows(matrix: &[f32], rows: usize, cols: usize) -> alloc::vec::Vec<f32> {
+        let mut transposed = alloc::vec![0.0f32; rows * cols];
+        for row in 0..rows {
+            for col in 0..cols {
+                transposed[col * rows + row] = matrix[row * cols + col];
+            }
+        }
+        transposed
+    }
+
+    /// The crate's own packed-`Q4_K` matmul kernel, whichever one
+    /// [`crate::cpu::run_reduce_quantized`]'s own `q4k-int8-dot`-gated arm
+    /// would actually call for this build -- comparing the graph's gathered
+    /// output against the OTHER kernel would fail on that kernel's own lossy
+    /// `Q8_K` activation quantization, not on a wrong-expert read, exactly
+    /// [`crate::cpu`]'s own `evaluate_quantized_gathered_moe_weight_matches_the_routed_experts_own_matmul`
+    /// avoids.
+    fn matmul_q4k_active(weights: &[u8], rows: usize, activation: &[f32]) -> alloc::vec::Vec<f32> {
+        #[cfg(feature = "q4k-int8-dot")]
+        {
+            crate::cpu::matmul_q4k_q8k_f32(weights, rows, activation).expect("packed q4k matmul evaluates")
+        }
+        #[cfg(not(feature = "q4k-int8-dot"))]
+        {
+            crate::cpu::matmul_q4k_f32(weights, rows, activation).expect("packed q4k matmul evaluates")
+        }
+    }
+
+    /// The decisive proof this session's hand-off exists for:
+    /// [`gathered_expert_product`] -- unchanged, no widening, the exact
+    /// construction [`append_moe_ffn`]'s callers (LFM2, Mistral) already
+    /// build -- correctly gathers one expert's `[rows, k]` slab out of a
+    /// stacked packed `Q4_K` buffer through the real evaluator
+    /// (`evaluate_quantized` -> `run_reduce_quantized`'s gather-resolution
+    /// branch), not a hand-rolled duplicate of the construction.
+    ///
+    /// Three tokens, three DISTINCT experts (`route = [2, 0, 1]`, chosen so
+    /// no token's true route is its own position), asymmetric per-expert
+    /// scales (`1x`/`5x`/`20x`) so a wrong-expert read is off by that same
+    /// factor, not a rounding difference -- this is a mechanism check.
+    ///
+    /// The discriminator this session's brief calls for lives in the same
+    /// function body: the identical program and packed bytes are evaluated a
+    /// SECOND time with `route` forced to the constant `[0, 0, 0]` --
+    /// proving the assertion below is capable of failing, not just capable
+    /// of passing -- then the real route is restored and re-asserted, so the
+    /// test ends green.
+    #[test]
+    fn gathered_expert_product_over_a_packed_q4k_stack_reads_the_routed_experts_own_bytes() {
+        use proxima_gguf::quant::q4_k::QK_K;
+
+        const EXPERT_COUNT: u32 = 3;
+        const ROWS: usize = 2;
+        const SEQUENCE: usize = 3;
+        let k = QK_K;
+
+        let expert_scales = [1.0f32, 5.0, 20.0];
+        let expert_matrices: alloc::vec::Vec<alloc::vec::Vec<f32>> = expert_scales
+            .iter()
+            .enumerate()
+            .map(|(expert, &scale)| synth_row(101 + expert as u64, ROWS * k, scale))
+            .collect();
+        let expert_blocks: alloc::vec::Vec<alloc::vec::Vec<u8>> =
+            expert_matrices.iter().map(|matrix| quantize_rows(matrix, ROWS, k)).collect();
+        let stacked_weight: alloc::vec::Vec<u8> = expert_blocks.iter().flatten().copied().collect();
+
+        let activation: alloc::vec::Vec<f32> = synth_row(211, SEQUENCE * k, 1.0);
+
+        let mut program = Vec::new();
+        // `[expert_count, k, rows]` -- NOT `[expert_count, rows, k]` --
+        // matches [`gathered_expert_product`]'s own `x_map` (`Affine`
+        // over iteration axes `0, 1`): the operand's declared axis 1 is
+        // what iteration axis 1 (the CONTRACTED `i`/`k` axis `x` also maps
+        // its own axis 1 onto) draws its extent from, and axis 2 is the
+        // kept, non-reduced `o`/`rows` axis -- the same order
+        // [`append_moe_ffn`]'s own `expert_w_gate`/`expert_w_up`
+        // (`[expert_count, embedding, feed_forward]`, embedding is the
+        // reduced axis) already declare.
+        let stack_node = input_leaf(
+            &mut program,
+            DType::Float32,
+            alloc::vec![Extent::Static(EXPERT_COUNT), Extent::Static(k as u32), Extent::Static(ROWS as u32)],
+            "expert_stack",
+        );
+        // `Int32`, not `Float32` -- the same declared dtype
+        // `gathered_quantized_matmul_program` (`cpu.rs`'s own test) uses for
+        // a gather-indices node: `reject_non_float32`'s `index_node_ids`
+        // exemption keys off usage (any node referenced as a gather's
+        // `indices`), not this declaration, but the gather-resolution code
+        // itself (`run_reduce_quantized`'s `raw_index = *index_buffer.get(..)`)
+        // always reads the bound buffer as `f32` regardless -- `Int32` here
+        // is shape-inference metadata, not a storage format.
+        let route_node = input_leaf(&mut program, DType::Int32, alloc::vec![Extent::Static(SEQUENCE as u32)], "route");
+        let x_node = input_leaf(&mut program, DType::Float32, alloc::vec![Extent::Static(SEQUENCE as u32), Extent::Static(k as u32)], "x");
+
+        let product = gathered_expert_product(&mut program, stack_node, route_node, x_node);
+        let sum = op::append(
+            &mut program,
+            Op::Reduce(Reduce {
+                dtype: DType::Float32,
+                body: ScalarOp::Add,
+                init: ReduceInit::Zero,
+                operand: product,
+                in_map: IndexMap::Affine(map::projection(3, &[0, 1, 2])),
+                // keeps `s` (axis 0) and `rows`/`o` (axis 2); reduces `i`/`k`
+                // (axis 1) -- the same "so->sio" shape [`append_moe_ffn`]'s
+                // own gate/up reduces use.
+                out_map: IndexMap::Affine(map::projection(3, &[0, 2])),
+                keep: Keep::Reduce,
+                name: Some("gathered_q4k_matmul".into()),
+            }),
+        );
+
+        let true_route = [2.0f32, 0.0, 1.0];
+        let expected: alloc::vec::Vec<f32> = true_route
+            .iter()
+            .enumerate()
+            .flat_map(|(token, &route)| {
+                let expert = route as usize;
+                let activation_row = &activation[token * k..(token + 1) * k];
+                matmul_q4k_active(&expert_blocks[expert], ROWS, activation_row)
+            })
+            .collect();
+
+        let run = |route_data: &[f32]| -> alloc::vec::Vec<f32> {
+            let quantized_blocks = [
+                crate::cpu::QuantizedBlock::Q4K(&stacked_weight),
+                crate::cpu::QuantizedBlock::Float32(route_data),
+                crate::cpu::QuantizedBlock::Float32(&activation),
+            ];
+            crate::cpu::evaluate_quantized(&program, &[], &quantized_blocks, &[sum])
+                .expect("the gathered packed matmul evaluates")
+                .root()
+                .to_vec()
+        };
+
+        let constant_route = [0.0f32, 0.0, 0.0];
+        let broken = run(&constant_route);
+        assert_ne!(
+            broken, expected,
+            "forcing every token's route to expert 0 must diverge from the true per-token routing \
+             (tokens 0 and 2 route elsewhere) -- if this passed, the assertion below could not be trusted"
+        );
+
+        let fixed = run(&true_route);
+        assert_eq!(
+            fixed, expected,
+            "gathered_expert_product over a packed Q4_K stack must read exactly the routed expert's own bytes"
+        );
+    }
+
+    /// The headline proof: the full [`append_moe_ffn`] graph -- the same
+    /// function LFM2's own `blk.{layer}.ffn_gate_exps.weight` call site
+    /// (`spec.rs`'s own LFM2 builder) invokes, unmodified -- run over a
+    /// stacked packed `Q4_K` expert block reproduces, per token, to within a
+    /// single-ULP `f32` rounding bound (see the per-element assertion below
+    /// for why this is not literal `assert_eq!`), what an independent
+    /// SwiGLU built from the SAME packed bytes' own matmul kernel produces
+    /// for that token's TRUE routed expert. Three
+    /// tokens, three distinct experts (`x` is one-hot per token; `gate_inp`
+    /// is built so token 0 routes to expert 2, token 1 to expert 0, token 2
+    /// to expert 1 -- no token routes to its own position, so a routing bug
+    /// that reused one token's route for another could not hide), top-1
+    /// selection so the softmax combination weight is always exactly `1.0`
+    /// and cannot mask a wrong-expert read behind a partial blend.
+    ///
+    /// This is [`gathered_expert_product_over_a_packed_q4k_stack_reads_the_routed_experts_own_bytes`]'s
+    /// same discriminating construction (asymmetric `1x`/`5x`/`20x`
+    /// per-expert scales), lifted to the whole FFN graph `append_moe_ffn`
+    /// actually builds -- gate, up, SiLU, down, three packed operands, one
+    /// per projection -- proving the widening this session's brief asked
+    /// for needs no code change: `expert_w_gate`/`expert_w_up`/`expert_w_down`
+    /// are declared exactly the way [`append_moe_ffn`]'s real callers
+    /// already declare them (`DType::Float32`, `[expert_count, ..]`), and
+    /// `evaluate_quantized` binds a `QuantizedBlock::Q4K` to that same node
+    /// with no spec-side change at all.
+    #[test]
+    fn quantized_moe_ffn_over_a_packed_q4k_expert_stack_matches_the_routed_experts_own_swiglu() {
+        use proxima_gguf::quant::q4_k::QK_K;
+
+        const EMBEDDING: usize = QK_K;
+        const FEED_FORWARD: usize = QK_K;
+        const EXPERT_COUNT: u32 = 3;
+        const EXPERT_USED_COUNT: u32 = 1;
+        const SEQUENCE: usize = 3;
+
+        let expert_scales = [1.0f32, 5.0, 20.0];
+        let gate_matrices: alloc::vec::Vec<alloc::vec::Vec<f32>> =
+            expert_scales.iter().enumerate().map(|(expert, &scale)| synth_row(1_001 + expert as u64, FEED_FORWARD * EMBEDDING, scale)).collect();
+        let up_matrices: alloc::vec::Vec<alloc::vec::Vec<f32>> =
+            expert_scales.iter().enumerate().map(|(expert, &scale)| synth_row(2_002 + expert as u64, FEED_FORWARD * EMBEDDING, scale)).collect();
+        let down_matrices: alloc::vec::Vec<alloc::vec::Vec<f32>> =
+            expert_scales.iter().enumerate().map(|(expert, &scale)| synth_row(3_003 + expert as u64, EMBEDDING * FEED_FORWARD, scale)).collect();
+
+        let gate_blocks: alloc::vec::Vec<alloc::vec::Vec<u8>> =
+            gate_matrices.iter().map(|matrix| quantize_rows(matrix, FEED_FORWARD, EMBEDDING)).collect();
+        let up_blocks: alloc::vec::Vec<alloc::vec::Vec<u8>> =
+            up_matrices.iter().map(|matrix| quantize_rows(matrix, FEED_FORWARD, EMBEDDING)).collect();
+        let down_blocks: alloc::vec::Vec<alloc::vec::Vec<u8>> =
+            down_matrices.iter().map(|matrix| quantize_rows(matrix, EMBEDDING, FEED_FORWARD)).collect();
+
+        let stacked_gate: alloc::vec::Vec<u8> = gate_blocks.iter().flatten().copied().collect();
+        let stacked_up: alloc::vec::Vec<u8> = up_blocks.iter().flatten().copied().collect();
+        let stacked_down: alloc::vec::Vec<u8> = down_blocks.iter().flatten().copied().collect();
+
+        // token s is the one-hot vector at index s; gate_inp's rows 0..3
+        // make index 0 favor expert 2, index 1 favor expert 0, index 2
+        // favor expert 1 -- every other row is zero, so only the one-hot
+        // position drives the route.
+        let mut x = alloc::vec![0.0f32; SEQUENCE * EMBEDDING];
+        for token in 0..SEQUENCE {
+            x[token * EMBEDDING + token] = 1.0;
+        }
+        let true_route = [2usize, 0, 1];
+        let mut gate_inp = alloc::vec![0.0f32; EMBEDDING * EXPERT_COUNT as usize];
+        for (token, &expert) in true_route.iter().enumerate() {
+            gate_inp[token * EXPERT_COUNT as usize + expert] = 5.0;
+        }
+
+        let mut program = Vec::new();
+        let x_node = input_leaf(&mut program, DType::Float32, alloc::vec![Extent::Symbolic(0), Extent::Static(EMBEDDING as u32)], "x");
+        let gate_inp_node = input_leaf(
+            &mut program,
+            DType::Float32,
+            alloc::vec![Extent::Static(EMBEDDING as u32), Extent::Static(EXPERT_COUNT)],
+            "gate_inp",
+        );
+        let expert_w_gate_node = input_leaf(
+            &mut program,
+            DType::Float32,
+            alloc::vec![Extent::Static(EXPERT_COUNT), Extent::Static(EMBEDDING as u32), Extent::Static(FEED_FORWARD as u32)],
+            "expert_w_gate",
+        );
+        let expert_w_up_node = input_leaf(
+            &mut program,
+            DType::Float32,
+            alloc::vec![Extent::Static(EXPERT_COUNT), Extent::Static(EMBEDDING as u32), Extent::Static(FEED_FORWARD as u32)],
+            "expert_w_up",
+        );
+        let expert_w_down_node = input_leaf(
+            &mut program,
+            DType::Float32,
+            alloc::vec![Extent::Static(EXPERT_COUNT), Extent::Static(FEED_FORWARD as u32), Extent::Static(EMBEDDING as u32)],
+            "expert_w_down",
+        );
+        let ones = scalar_constant(&mut program, 1.0);
+
+        let root = append_moe_ffn(
+            &mut program,
+            x_node,
+            gate_inp_node,
+            expert_w_gate_node,
+            expert_w_up_node,
+            expert_w_down_node,
+            EXPERT_COUNT,
+            EXPERT_USED_COUNT,
+            ones,
+            ExpertGatingFunc::Softmax,
+            None,
+        )
+        .expect("the packed-stack routed ffn lowers");
+
+        let symbols = [SEQUENCE as u64];
+        crate::shape::infer(&program, &symbols).expect("the packed-stack routed ffn infers");
+
+        let quantized_blocks = [
+            crate::cpu::QuantizedBlock::Float32(&x),
+            crate::cpu::QuantizedBlock::Float32(&gate_inp),
+            crate::cpu::QuantizedBlock::Q4K(&stacked_gate),
+            crate::cpu::QuantizedBlock::Q4K(&stacked_up),
+            crate::cpu::QuantizedBlock::Q4K(&stacked_down),
+        ];
+        let evaluated = crate::cpu::evaluate_quantized(&program, &symbols, &quantized_blocks, &[root])
+            .expect("the packed-stack routed ffn evaluates over Q4_K");
+        let output = evaluated.root();
+        assert_eq!(output.len(), SEQUENCE * EMBEDDING, "a vacuous output proves nothing");
+
+        for (token, &expert) in true_route.iter().enumerate() {
+            let x_row = &x[token * EMBEDDING..(token + 1) * EMBEDDING];
+            let gate = matmul_q4k_active(&gate_blocks[expert], FEED_FORWARD, x_row);
+            let up = matmul_q4k_active(&up_blocks[expert], FEED_FORWARD, x_row);
+            let hidden: alloc::vec::Vec<f32> = gate
+                .iter()
+                .zip(&up)
+                .map(|(&gate_value, &up_value)| {
+                    let silu = gate_value / (1.0 + (-gate_value).exp());
+                    silu * up_value
+                })
+                .collect();
+            let expected = matmul_q4k_active(&down_blocks[expert], EMBEDDING, &hidden);
+
+            let found = &output[token * EMBEDDING..(token + 1) * EMBEDDING];
+            // A tight relative bound, not `assert_eq!`: at `rows=EMBEDDING=
+            // FEED_FORWARD=256` (mandatory -- `Q4_K` needs a whole
+            // `QK_K`-multiple contraction axis on BOTH projections), every
+            // one of these matmuls clears `PARALLEL_THRESHOLD` (4096 macs;
+            // `crate::sized::PARALLEL_THRESHOLD`), so `quantized_matmul_workers`
+            // threads the row batch. This direct reference call's own
+            // `session: None` and the graph's own internal session context
+            // are not the same value, so they are not guaranteed to pick the
+            // identical worker chunking -- rows are still computed
+            // independently either way (no cross-row summation), so the
+            // measured gap tops out at single-ULP `f32` rounding (~1e-7
+            // relative, observed), five orders of magnitude below the
+            // 1x/5x/20x scale gap a wrong-routed expert would produce. The
+            // discriminator test above already proves THIS reads the right
+            // expert; this bound proves it reads it correctly.
+            for (found_value, expected_value) in found.iter().zip(expected.iter()) {
+                let scale = found_value.abs().max(expected_value.abs()).max(1.0);
+                assert!(
+                    (found_value - expected_value).abs() / scale < 1e-4,
+                    "token {token} routed to expert {expert}: append_moe_ffn over a packed Q4_K expert \
+                     stack ({found_value}) diverges from that expert's own standalone Q4_K swiglu \
+                     ({expected_value}) past single-ULP rounding"
+                );
+            }
+        }
+
+        // Secondary, honestly-labeled sanity check, not the primary
+        // correctness gate: the SAME graph run over the DEQUANTIZED f32
+        // experts (`evaluate_parallel`, no int8 activation path at all)
+        // stays close to the packed-quantized run -- a LOOSE bound, since
+        // `q4k-int8-dot`'s own `Q8_K` activation quantization is a real,
+        // already-measured, expected source of numerical difference from a
+        // naive f32 dot on dequantized weights (see `cpu.rs`'s own
+        // `relative_max_diff < 0.01` sanity bound for the dense codec path),
+        // not a routing defect this test exists to catch.
+        let dequantized_gate: alloc::vec::Vec<f32> = gate_blocks
+            .iter()
+            .flat_map(|bytes| transpose_rows(&dequantize_rows(bytes, FEED_FORWARD, EMBEDDING), FEED_FORWARD, EMBEDDING))
+            .collect();
+        let dequantized_up: alloc::vec::Vec<f32> = up_blocks
+            .iter()
+            .flat_map(|bytes| transpose_rows(&dequantize_rows(bytes, FEED_FORWARD, EMBEDDING), FEED_FORWARD, EMBEDDING))
+            .collect();
+        let dequantized_down: alloc::vec::Vec<f32> = down_blocks
+            .iter()
+            .flat_map(|bytes| transpose_rows(&dequantize_rows(bytes, EMBEDDING, FEED_FORWARD), EMBEDDING, FEED_FORWARD))
+            .collect();
+        let f32_blocks: [&[f32]; 5] = [&x, &gate_inp, &dequantized_gate, &dequantized_up, &dequantized_down];
+        let workers = core::num::NonZeroUsize::new(1).expect("one worker is nonzero");
+        let dequantized_evaluated = crate::cpu::evaluate_parallel(&program, &symbols, &f32_blocks, &[root], workers)
+            .expect("the dequantized-f32 routed ffn evaluates");
+        let dequantized_output = dequantized_evaluated.root();
+        for (found_value, dequantized_value) in output.iter().zip(dequantized_output.iter()) {
+            let scale = found_value.abs().max(dequantized_value.abs()).max(1.0);
+            assert!(
+                (found_value - dequantized_value).abs() / scale < 0.05,
+                "packed-Q4_K output {found_value} and dequantized-f32 output {dequantized_value} diverge \
+                 past Q8_K activation-quantization's own expected error budget"
+            );
+        }
+    }
+
     /// Independent reference for grouped-query attention: a plain
     /// `q @ k^T` -> causal softmax -> `@ v` over raw f32 slices, with no
     /// dependency on `Op`, `IndexMap`, or anything else the graph under test
