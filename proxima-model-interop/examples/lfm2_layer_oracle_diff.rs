@@ -1,3 +1,10 @@
+// a diagnostic binary, not library surface: every `.expect()` below is a
+// setup precondition (real checkpoint present, oracle dump present, program
+// builds) whose only correct response is to panic with the failing step
+// named, matching this crate's own sibling examples (`any_listener.rs` and
+// friends carry the identical allow for the identical reason).
+#![allow(clippy::expect_used)]
+
 //! Depth-bisection of the real `LFM2.5-8B-A1B-Q4_K_M.gguf` forward pass
 //! against `llama.cpp`'s own per-layer residual-stream dump (`l_out-<layer>`,
 //! produced OUTSIDE this repo by the same `oracle-dump` probe
@@ -30,7 +37,7 @@ use proxima_tensor::spec::lfm2_forward_program_with_experts;
 
 fn read_oracle_activation(path: &PathBuf) -> Vec<f32> {
     let bytes = fs::read(path).unwrap_or_else(|error| panic!("read oracle activation at {path:?}: {error}"));
-    bytes.chunks_exact(4).map(|chunk| f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]])).collect()
+    bytes.as_chunks::<4>().0.iter().map(|chunk| f32::from_le_bytes(*chunk)).collect()
 }
 
 /// The last `NodeId` a `depth`-deep throwaway program shares with a

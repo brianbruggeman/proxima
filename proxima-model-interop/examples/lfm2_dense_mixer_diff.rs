@@ -1,3 +1,10 @@
+// a diagnostic binary, not library surface: every `.expect()` below is a
+// setup precondition (real checkpoint present, program builds) whose only
+// correct response is to panic with the failing step named, matching this
+// crate's own sibling examples (`any_listener.rs` and friends carry the
+// identical allow for the identical reason).
+#![allow(clippy::expect_used)]
+
 //! Within-layer bisection for a DENSE (non-MoE) LFM2 block -- `layer 0` and
 //! `layer 1` on the real `LFM2.5-8B-A1B-Q4_K_M.gguf` checkpoint
 //! (`leading_dense_block_count = 2`), the two layers
@@ -39,7 +46,7 @@ use proxima_tensor::spec::lfm2_forward_program_with_experts;
 
 fn read_oracle_activation(path: &PathBuf) -> Vec<f32> {
     let bytes = fs::read(path).unwrap_or_else(|error| panic!("read oracle activation at {path:?}: {error}"));
-    bytes.chunks_exact(4).map(|chunk| f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]])).collect()
+    bytes.as_chunks::<4>().0.iter().map(|chunk| f32::from_le_bytes(*chunk)).collect()
 }
 
 /// `lfm2_moe_route_diff.rs`'s own `reduce_operand`, duplicated -- see that
@@ -69,10 +76,10 @@ fn elementwise_first_operand(program: &[Op], node: NodeId, expected_body: Scalar
 /// own `input_node_id`, duplicated.
 fn input_node_id(program: &[Op], name: &str) -> NodeId {
     for (index, op) in program.iter().enumerate() {
-        if let Op::Input { name: Some(candidate), .. } = op {
-            if candidate == name {
-                return NodeId(index as u32);
-            }
+        if let Op::Input { name: Some(candidate), .. } = op
+            && candidate == name
+        {
+            return NodeId(index as u32);
         }
     }
     panic!("no Op::Input named {name:?} in this program");
@@ -88,10 +95,11 @@ fn input_node_id(program: &[Op], name: &str) -> NodeId {
 /// this layer's own `w_gate` as an operand.
 fn gate_product_node_id(program: &[Op], w_gate_id: NodeId) -> NodeId {
     for (index, op) in program.iter().enumerate() {
-        if let Op::Elementwise { body: ScalarOp::Multiply, operands, .. } = op {
-            if operands.len() == 2 && operands[1].0 == w_gate_id {
-                return NodeId(index as u32);
-            }
+        if let Op::Elementwise { body: ScalarOp::Multiply, operands, .. } = op
+            && operands.len() == 2
+            && operands[1].0 == w_gate_id
+        {
+            return NodeId(index as u32);
         }
     }
     panic!("no Elementwise(Multiply) node consumes w_gate {w_gate_id:?}");

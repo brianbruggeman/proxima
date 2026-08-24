@@ -1,3 +1,10 @@
+// a diagnostic binary, not library surface: every `.expect()` below is a
+// setup precondition (real checkpoint present, parses, architecture
+// derives) whose only correct response is to panic with the failing step
+// named, matching this crate's own sibling examples (`any_listener.rs` and
+// friends carry the identical allow for the identical reason).
+#![allow(clippy::expect_used)]
+
 //! Prints the real Mixtral checkpoint's derived [`ModelArchitecture`] and
 //! flags whether `blk.0.ffn_gate_exps.weight` (the native stacked layout
 //! [`bind::bind_moe_stacked_experts`] can bind zero-copy) exists, or only
