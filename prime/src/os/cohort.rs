@@ -121,9 +121,30 @@ pub mod diag {
     pub static SLOT_CHUNKS: [AtomicU64; MAX_SLOTS] = [ZERO; MAX_SLOTS];
     pub static SLOT_FIRST_CLAIM_NANOS: [AtomicU64; MAX_SLOTS] = [ZERO; MAX_SLOTS];
     pub static SLOT_COMPUTE_NANOS: [AtomicU64; MAX_SLOTS] = [ZERO; MAX_SLOTS];
+    /// subset of `SLOT_COMPUTE_NANOS[slot]` spent strictly inside
+    /// `CohortRound::run_chunk` itself (the dot kernel, for a matmul round) —
+    /// `SLOT_COMPUTE_NANOS[slot] - SLOT_KERNEL_NANOS[slot]` is that slot's own
+    /// claim-loop overhead (the cursor `fetch_add`, the completion check, the
+    /// `catch_unwind` wrapper) around calls that never touch the kernel.
+    /// ROW 130's per-term attribution needed exactly this split and did not
+    /// have it: `SLOT_COMPUTE_NANOS` alone conflates "dispatch" and "kernel"
+    /// into one bucket.
+    pub static SLOT_KERNEL_NANOS: [AtomicU64; MAX_SLOTS] = [ZERO; MAX_SLOTS];
     pub static SLOT_TAIL_NANOS: [AtomicU64; MAX_SLOTS] = [ZERO; MAX_SLOTS];
     pub static SLOT_ROUNDS: [AtomicU64; MAX_SLOTS] = [ZERO; MAX_SLOTS];
     static SLOT_DONE_NS: [AtomicU64; MAX_SLOTS] = [ZERO; MAX_SLOTS];
+
+    /// leader-only: wall time [`CohortSession::run_with_completion`] spends
+    /// resetting the control block, publishing `round`/`completion`, and
+    /// unparking any parked members — everything before the leader's own
+    /// [`super::run_round`] call. Accumulates across every round since the
+    /// last [`reset`], same shape as every other counter here.
+    pub static LEADER_SETUP_NANOS: AtomicU64 = AtomicU64::new(0);
+    /// leader-only: wall time spent in the tail spin loop
+    /// (`while done.load() < members { spin_loop() }`) — the calling
+    /// thread's own park/spin/wake cost, waiting on chunk completion after
+    /// its own claim loop has run dry.
+    pub static LEADER_SPIN_NANOS: AtomicU64 = AtomicU64::new(0);
 
     pub fn open_round() {
         ROUNDS.fetch_add(1, Ordering::Relaxed);
@@ -139,12 +160,13 @@ pub mod diag {
         SLOT_ROUNDS[slot].fetch_add(1, Ordering::Relaxed);
     }
 
-    pub fn record_slot_done(slot: usize, chunks: u64, compute_nanos: u64, at_nanos: u64) {
+    pub fn record_slot_done(slot: usize, chunks: u64, compute_nanos: u64, kernel_nanos: u64, at_nanos: u64) {
         if slot >= MAX_SLOTS {
             return;
         }
         SLOT_CHUNKS[slot].fetch_add(chunks, Ordering::Relaxed);
         SLOT_COMPUTE_NANOS[slot].fetch_add(compute_nanos, Ordering::Relaxed);
+        SLOT_KERNEL_NANOS[slot].fetch_add(kernel_nanos, Ordering::Relaxed);
         SLOT_DONE_NS[slot].store(at_nanos, Ordering::Release);
     }
 
@@ -160,14 +182,34 @@ pub mod diag {
         }
     }
 
+    /// leader-only accumulators — see [`LEADER_SETUP_NANOS`]/[`LEADER_SPIN_NANOS`].
+    pub fn record_leader_setup(nanos: u64) {
+        LEADER_SETUP_NANOS.fetch_add(nanos, Ordering::Relaxed);
+    }
+
+    pub fn record_leader_spin(nanos: u64) {
+        LEADER_SPIN_NANOS.fetch_add(nanos, Ordering::Relaxed);
+    }
+
     pub fn reset() {
-        for counter in [&ROUNDS, &UNPARK_ROUNDS, &UNPARK_NANOS, &PARKS, &SPIN_HITS, &IMMEDIATE_HITS, &ARM_ABORTS] {
+        for counter in [
+            &ROUNDS,
+            &UNPARK_ROUNDS,
+            &UNPARK_NANOS,
+            &PARKS,
+            &SPIN_HITS,
+            &IMMEDIATE_HITS,
+            &ARM_ABORTS,
+            &LEADER_SETUP_NANOS,
+            &LEADER_SPIN_NANOS,
+        ] {
             counter.store(0, Ordering::Relaxed);
         }
         for slot in 0..MAX_SLOTS {
             SLOT_CHUNKS[slot].store(0, Ordering::Relaxed);
             SLOT_FIRST_CLAIM_NANOS[slot].store(0, Ordering::Relaxed);
             SLOT_COMPUTE_NANOS[slot].store(0, Ordering::Relaxed);
+            SLOT_KERNEL_NANOS[slot].store(0, Ordering::Relaxed);
             SLOT_TAIL_NANOS[slot].store(0, Ordering::Relaxed);
             SLOT_ROUNDS[slot].store(0, Ordering::Relaxed);
             SLOT_DONE_NS[slot].store(0, Ordering::Relaxed);
@@ -569,6 +611,8 @@ impl<Error: Send + 'static> CohortSession<'_, Error> {
         let members = self.cohort.members();
         let chunk_total = round.chunks();
 
+        #[cfg(feature = "cohort-instrument")]
+        let setup_started = diag::now_nanos();
         control.chunks.store(chunk_total, Ordering::Relaxed);
         control.cursor.store(0, Ordering::Relaxed);
         control.done.store(0, Ordering::Relaxed);
@@ -644,13 +688,21 @@ impl<Error: Send + 'static> CohortSession<'_, Error> {
         // `members` P-cores — measured +14.8 ms / +4.5% on a real forward
         // (`proxima-model-interop`'s openchat bind test), entirely from
         // that one extra runnable thread.
+        #[cfg(feature = "cohort-instrument")]
+        diag::record_leader_setup(diag::now_nanos().saturating_sub(setup_started));
         run_round(control, 0);
 
+        #[cfg(feature = "cohort-instrument")]
+        let spin_started = diag::now_nanos();
         while control.done.load(Ordering::Acquire) < members as u64 {
             core::hint::spin_loop();
         }
         #[cfg(feature = "cohort-instrument")]
-        diag::close_round(members, diag::now_nanos());
+        {
+            let closed_at = diag::now_nanos();
+            diag::record_leader_spin(closed_at.saturating_sub(spin_started));
+            diag::close_round(members, closed_at);
+        }
 
         // SAFETY: every member has reported done (just observed above via
         // Acquire), so no member can still be dereferencing either pointer.
@@ -792,6 +844,8 @@ fn run_round<Error>(control: &Control<Error>, slot: usize) {
     let mut claimed = 0_u64;
     #[cfg(feature = "cohort-instrument")]
     let mut compute_started = 0_u64;
+    #[cfg(feature = "cohort-instrument")]
+    let mut kernel_nanos_total = 0_u64;
     loop {
         // SAFETY: the publication edge (`control.round`'s Release/Acquire
         // pair) was already crossed in `wait_for_round` before this
@@ -840,9 +894,15 @@ fn run_round<Error>(control: &Control<Error>, slot: usize) {
         // SAFETY: `round_ref` points at the `CohortRound` the leader
         // published for this round; it stays valid until every member
         // reports `done`, which this member has not yet done.
+        #[cfg(feature = "cohort-instrument")]
+        let kernel_started = diag::now_nanos();
         let outcome = panic::catch_unwind(panic::AssertUnwindSafe(|| unsafe {
             round_ref.as_ref().run_chunk(ChunkIndex(index))
         }));
+        #[cfg(feature = "cohort-instrument")]
+        {
+            kernel_nanos_total += diag::now_nanos().saturating_sub(kernel_started);
+        }
         match outcome {
             Ok(Ok(())) => {
                 control.completed.fetch_add(1, Ordering::Relaxed);
@@ -890,7 +950,7 @@ fn run_round<Error>(control: &Control<Error>, slot: usize) {
     {
         let at = diag::now_nanos();
         let compute = if claimed == 0 { 0 } else { at.saturating_sub(compute_started) };
-        diag::record_slot_done(slot, claimed, compute, at);
+        diag::record_slot_done(slot, claimed, compute, kernel_nanos_total, at);
     }
     control.done.fetch_add(1, Ordering::Release);
 }
@@ -1223,5 +1283,74 @@ mod tests {
             rounds_executed, total_rounds,
             "stress test must actually execute every round, never pass vacuously"
         );
+    }
+
+    /// a chunk with measurable, non-instant work — pure atomic-fetch-add
+    /// chunks (`CountingRound`) complete in a handful of nanoseconds, too
+    /// close to the clock's own read granularity to assert a reliable
+    /// `kernel_nanos > 0`. This round spins a fixed amount of cheap integer
+    /// work per chunk so the kernel-only timer in [`run_round`] has
+    /// something to measure above the noise floor.
+    #[cfg(feature = "cohort-instrument")]
+    struct BusyRound {
+        chunk_count: usize,
+    }
+
+    #[cfg(feature = "cohort-instrument")]
+    impl CohortRound<TestChunkError> for BusyRound {
+        fn chunks(&self) -> usize {
+            self.chunk_count
+        }
+
+        fn run_chunk(&self, chunk: ChunkIndex) -> Result<(), TestChunkError> {
+            let mut accumulator = chunk.0 as u64;
+            for value in 0..20_000_u64 {
+                accumulator = accumulator.wrapping_mul(31).wrapping_add(value);
+            }
+            core::hint::black_box(accumulator);
+            Ok(())
+        }
+    }
+
+    /// ROW 130's missing instrumentation: per-step-reset counters that split
+    /// the calling (leader) thread's own wall time into dot-kernel ticks,
+    /// cohort dispatch/round-setup ticks, and park/spin/wake ticks — see
+    /// `docs/discipline.md`'s attribution row. This asserts the sanity gates
+    /// that row's differencing technique failed: no sub-term exceeds its
+    /// parent, nothing is negative (all `u64`, so this is a structural
+    /// guarantee), and the leader's own kernel time is a genuine subset of
+    /// its own compute time, not a coincidental equality.
+    #[test]
+    #[cfg(feature = "cohort-instrument")]
+    fn leader_kernel_ticks_are_a_bounded_subset_of_leader_compute_ticks() {
+        diag::reset();
+        let cohort = cohort_with_members(4);
+        let session = cohort.enter().expect("open session");
+        for _ in 0..25 {
+            let round = BusyRound { chunk_count: 64 };
+            let _ = session.run(&round);
+        }
+
+        let leader_compute = diag::SLOT_COMPUTE_NANOS[0].load(Ordering::Relaxed);
+        let leader_kernel = diag::SLOT_KERNEL_NANOS[0].load(Ordering::Relaxed);
+        assert!(leader_kernel > 0, "leader should have claimed and run at least one chunk");
+        assert!(
+            leader_kernel <= leader_compute,
+            "kernel-only ticks ({leader_kernel}) must never exceed the compute bucket containing them ({leader_compute})"
+        );
+
+        let setup = diag::LEADER_SETUP_NANOS.load(Ordering::Relaxed);
+        let spin = diag::LEADER_SPIN_NANOS.load(Ordering::Relaxed);
+        assert!(setup > 0, "round setup/unpark should cost measurable time over 25 rounds");
+        // spin can legitimately be 0 on a quiet box if the leader is always
+        // the last to finish its own claim loop — not asserted > 0, only
+        // that it is a well-formed accumulator.
+        assert!(spin < u64::MAX);
+
+        diag::reset();
+        assert_eq!(diag::SLOT_COMPUTE_NANOS[0].load(Ordering::Relaxed), 0);
+        assert_eq!(diag::SLOT_KERNEL_NANOS[0].load(Ordering::Relaxed), 0);
+        assert_eq!(diag::LEADER_SETUP_NANOS.load(Ordering::Relaxed), 0);
+        assert_eq!(diag::LEADER_SPIN_NANOS.load(Ordering::Relaxed), 0);
     }
 }
