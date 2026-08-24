@@ -356,9 +356,15 @@ fn differentiate_elementwise(
                 (gradient, full.clone()),
                 (condition, condition_map.clone()),
             );
-            let one = expr::constant(program, dtype, 1.0);
+            // `condition_map` may broadcast over an axis (a causal mask
+            // shared across every attention head, say) that this Select's
+            // OTHER operands do not, so anchoring `one` at a bare rank-0
+            // broadcast can leave that axis unconstrained even though the
+            // forward `Select` itself lowered fine (`scaled`'s full-rank
+            // operand covered it there) -- see `broadcast_anchor`'s own doc.
+            let one = expr::broadcast_anchor(program, dtype, shapes.of(node), 1.0);
             let inverse_condition =
-                expr::binary(program, dtype, ScalarOp::Subtract, (one, broadcast), (condition, condition_map));
+                expr::binary(program, dtype, ScalarOp::Subtract, (one, full.clone()), (condition, condition_map));
             let false_mask =
                 expr::binary(program, dtype, ScalarOp::Multiply, (gradient, full.clone()), (inverse_condition, full));
             vec![None, Some(true_mask), Some(false_mask)]
@@ -486,7 +492,7 @@ fn differentiate_reduce(
     let out_map_as_operand = IndexMap::Affine(reduce.out_map.affine().clone());
 
     let anchor_extents = expr::iter_extents(shapes, reduce.operand, in_pattern);
-    let anchor = expr::broadcast_anchor(program, reduce.dtype, &anchor_extents);
+    let anchor = expr::broadcast_anchor(program, reduce.dtype, &anchor_extents, 0.0);
 
     let contribution = match reduce.body {
         ScalarOp::Add => expr::binary(
@@ -622,5 +628,127 @@ mod pipe_tests {
             via_function.gradient_of_named("x"),
             "the Pipe wrapper must delegate to the exact same transform"
         );
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod select_broadcast_condition_tests {
+    use alloc::vec;
+
+    use proxima_tensor::op::Extent;
+
+    use super::*;
+
+    fn leaf(program: &mut Vec<Op>, name: &str, shape: Vec<Extent>) -> NodeId {
+        proxima_tensor::op::append(program, Op::Input { dtype: DType::Float32, shape, name: Some(name.into()) })
+    }
+
+    fn elementwise(program: &mut Vec<Op>, body: ScalarOp, operands: Vec<(NodeId, IndexMap)>) -> NodeId {
+        proxima_tensor::op::append(program, Op::Elementwise { dtype: DType::Float32, body, operands, name: None })
+    }
+
+    fn relative_error(analytic: f32, numeric: f32) -> f32 {
+        (analytic - numeric).abs() / (analytic.abs().max(numeric.abs()) + 1e-6)
+    }
+
+    /// A `Select` whose condition operand broadcasts over an axis (`h`, a
+    /// stand-in for an attention head) that the true/false branches do
+    /// NOT broadcast over -- `proxima-autograd/tests/language_model.rs`'s
+    /// causal mask hit exactly this shape (`is_future[s,t]` selecting
+    /// across every `h`) and failed shape inference with
+    /// `TensorError::UnconstrainedDim` before this rule anchored `one` at
+    /// the consumer's own full extents (`shapes.of(node)`) instead of a
+    /// bare rank-0 broadcast. Central difference against the real forward
+    /// program is the oracle: it does not know or care that `condition`
+    /// broadcasts, so it is a correct check for this shape regardless.
+    #[proxima::test]
+    async fn select_with_a_condition_broadcast_over_an_axis_the_branches_do_not_share_gradient_checks() {
+        let mut program = Vec::new();
+        let a = leaf(&mut program, "a", vec![Extent::Static(2), Extent::Static(3)]);
+        let b = leaf(&mut program, "b", vec![Extent::Static(2), Extent::Static(3)]);
+        let condition = elementwise(&mut program, ScalarOp::Greater, vec![(a, expr::identity(2)), (b, expr::identity(2))]);
+        let true_branch = leaf(&mut program, "true_branch", vec![Extent::Static(2), Extent::Static(3), Extent::Static(2)]);
+        let false_branch = leaf(&mut program, "false_branch", vec![Extent::Static(2), Extent::Static(3), Extent::Static(2)]);
+        let condition_broadcast_over_h = IndexMap::Affine(proxima_tensor::map::projection(3, &[0, 1]));
+        let selected = elementwise(
+            &mut program,
+            ScalarOp::Select,
+            vec![(condition, condition_broadcast_over_h), (true_branch, expr::identity(3)), (false_branch, expr::identity(3))],
+        );
+        let loss = proxima_tensor::op::append(
+            &mut program,
+            Op::Reduce(Reduce {
+                dtype: DType::Float32,
+                body: ScalarOp::Add,
+                init: ReduceInit::Zero,
+                operand: selected,
+                in_map: expr::identity(3),
+                out_map: IndexMap::Affine(proxima_tensor::map::projection(3, &[])),
+                keep: Keep::Reduce,
+                name: None,
+            }),
+        );
+
+        let differentiated = differentiate(&program, loss).expect(
+            "differentiates without TensorError::UnconstrainedDim -- this is the regression this test guards",
+        );
+        let grad_true = differentiated.gradient_of_named("true_branch").expect("true_branch feeds the loss");
+        let grad_false = differentiated.gradient_of_named("false_branch").expect("false_branch feeds the loss");
+
+        let a_values = [3.0f32, 1.0, 5.0, 0.0, 2.0, 4.0];
+        let b_values = [1.0f32, 1.0, 2.0, 2.0, 2.0, 1.0];
+        let true_values: alloc::vec::Vec<f32> = (0..12).map(|index| (index as f32 - 5.0) / 2.0).collect();
+        let false_values: alloc::vec::Vec<f32> = (0..12).map(|index| (index as f32 * 2.0 - 3.0) / 3.0).collect();
+
+        let evaluated = proxima_tensor::cpu::evaluate_named(
+            &differentiated.program,
+            &[],
+            &[("a", &a_values), ("b", &b_values), ("true_branch", &true_values), ("false_branch", &false_values)],
+            &[grad_true, grad_false],
+        )
+        .expect("adjoint program lowers and evaluates");
+        let analytic_true = evaluated.get(grad_true).expect("requested").0.to_vec();
+        let analytic_false = evaluated.get(grad_false).expect("requested").0.to_vec();
+
+        let step = 1e-3f32;
+        let mut worst = (0.0f32, "", 0usize);
+        for (label, values, analytic) in
+            [("true_branch", true_values.clone(), &analytic_true), ("false_branch", false_values.clone(), &analytic_false)]
+        {
+            let mut perturbed = values;
+            for index in 0..perturbed.len() {
+                let original = perturbed[index];
+                let evaluate_loss = |perturbed: &[f32]| {
+                    let (true_input, false_input) = if label == "true_branch" {
+                        (perturbed, false_values.as_slice())
+                    } else {
+                        (true_values.as_slice(), perturbed)
+                    };
+                    proxima_tensor::cpu::evaluate_named(
+                        &program,
+                        &[],
+                        &[("a", &a_values), ("b", &b_values), ("true_branch", true_input), ("false_branch", false_input)],
+                        &[loss],
+                    )
+                    .expect("forward program lowers and evaluates")
+                    .get(loss)
+                    .expect("loss requested")
+                    .0[0]
+                };
+                perturbed[index] = original + step;
+                let plus = evaluate_loss(&perturbed);
+                perturbed[index] = original - step;
+                let minus = evaluate_loss(&perturbed);
+                perturbed[index] = original;
+
+                let numeric = (plus - minus) / (2.0 * step);
+                let relative = relative_error(analytic[index], numeric);
+                if relative > worst.0 {
+                    worst = (relative, label, index);
+                }
+            }
+        }
+        assert!(worst.0 < 5e-3, "select adjoint disagreed with central difference: {worst:?}");
     }
 }

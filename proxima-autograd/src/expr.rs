@@ -90,7 +90,7 @@ pub(crate) fn constant(program: &mut Vec<Op>, dtype: DType, value: f32) -> NodeI
     )
 }
 
-/// A same-shaped zeros anchor: [`proxima_tensor::op::Op::Constant`] carries
+/// A same-shaped anchor at a caller-chosen `value`: [`proxima_tensor::op::Op::Constant`] carries
 /// a concrete `Vec<Extent>`, not just a rank-0 broadcast (that variant's
 /// own doc, `proxima-tensor/src/op.rs:256-258`: "a higher-rank constant is
 /// what carries extents a consumer cannot otherwise infer"). A node
@@ -98,11 +98,15 @@ pub(crate) fn constant(program: &mut Vec<Op>, dtype: DType, value: f32) -> NodeI
 /// every axis of a wider iteration space when broadcast back up alone —
 /// `unify_iteration_space` needs at least one operand per axis with a real
 /// term, and a fully-broadcast (empty-axes) operand supplies none. Pairing
-/// the reduced node with this anchor via `Add` (adding zero) gives shape
-/// inference that missing per-axis information without changing any value.
-pub(crate) fn broadcast_anchor(program: &mut Vec<Op>, dtype: DType, extents: &[u64]) -> NodeId {
+/// the reduced node with a `value: 0.0` anchor via `Add` (adding zero) gives
+/// shape inference that missing per-axis information without changing any
+/// value; `crate::adjoint`'s `Select` adjoint rule reuses the same
+/// constructor at `value: 1.0` for the identical reason -- a broadcast
+/// condition operand can leave an axis just as unconstrained as a reduced
+/// one does.
+pub(crate) fn broadcast_anchor(program: &mut Vec<Op>, dtype: DType, extents: &[u64], value: f32) -> NodeId {
     let shape = extents.iter().map(|&extent| Extent::Static(extent as u32)).collect();
-    op::append(program, Op::Constant { dtype, shape, value: 0.0 })
+    op::append(program, Op::Constant { dtype, shape, value })
 }
 
 /// Reconstructs the full iteration-space extents an already-validated
