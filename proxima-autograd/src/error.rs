@@ -2,7 +2,8 @@ use proxima_tensor::NodeId;
 use proxima_tensor::TensorError;
 use proxima_tensor::op::ScalarOp;
 
-/// Every fault [`crate::adjoint::differentiate`] can raise.
+/// Every fault [`crate::adjoint::differentiate`] (or [`crate::sparse`]'s
+/// helpers) can raise.
 ///
 /// Each variant names the node and the shape of the program that defeated
 /// it, mirroring [`proxima_tensor::TensorError`]'s own convention
@@ -48,14 +49,23 @@ pub enum AutogradError {
     NonProjectionOperandMap { node: NodeId, operand: NodeId },
 
     #[error(
-        "node {node} operand {operand} is read through a gather (IndexMap::Computed); \
-         its adjoint is a scatter-add via mask composition \
-         (proxima-tensor/src/cpu.rs:16062) but that composition is \
-         O(destination x source) dense -- at embedding scale (vocab 128k x \
-         4k updates) that is 524M mask elements to accumulate 4k values, so \
-         it is rejected here rather than shipped unverified"
+        "node {node} operand {operand} is read through a gather (IndexMap::Computed) \
+         whose index_map is not a pure projection -- this adjoint cannot line up \
+         each gathered row with the index that selected it, so the compact \
+         GatheredContribution this crate would otherwise hand back cannot be built"
     )]
-    GatherAdjointUnsupported { node: NodeId, operand: NodeId },
+    NonProjectionIndexMap { node: NodeId, operand: NodeId },
+
+    #[error(
+        "node {node}'s Reduce::in_map reads operand {operand} through a gather \
+         (IndexMap::Computed) -- reducing directly over a gathered operand needs a \
+         different derivation (reusing that in_map as this Reduce's own adjoint \
+         out_map would itself be data-dependent, which \
+         proxima-tensor/src/shape.rs:166-171 rejects at evaluation time with no \
+         adjoint-specific diagnosis) and is not implemented; route the gather \
+         through a separate Elementwise(Identity) node first"
+    )]
+    ReduceOverGatherUnsupported { node: NodeId, operand: NodeId },
 
     #[error(
         "node {node}'s Reduce::out_map is data-dependent (a scatter); \
@@ -63,6 +73,12 @@ pub enum AutogradError {
          shape-inference time, so it never reaches an adjoint"
     )]
     ScatterOutputUnsupported { node: NodeId },
+
+    #[error(
+        "sparse row buffers disagree: {found} values for {row_len} elements per row \
+         do not divide evenly by index count"
+    )]
+    SparseRowLengthMismatch { row_len: usize, found: usize },
 
     #[error("differentiate could not infer shapes for the program handed to it: {0}")]
     ShapeInference(#[from] TensorError),

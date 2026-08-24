@@ -1,19 +1,21 @@
 //! Cross-module correctness oracle for [`proxima_autograd::adjoint::differentiate`]:
 //! a small dense net (matmul + bias + relu, matmul + bias + softmax,
 //! cross-entropy), the central-difference gradient check, an end-to-end
-//! Adam training run whose loss actually decreases, and proof the checker
-//! can fail. Cross-module (adjoint + activation + optimizer + evaluation)
-//! is exactly the case this workspace's own testing convention reserves an
-//! integration test for, rather than a `#[cfg(test)]` module.
+//! Adam training run whose loss actually decreases, proof the checker can
+//! fail, and the gather-adjoint's own gradient check with a colliding
+//! index. Cross-module (adjoint + activation + optimizer + sparse +
+//! evaluation) is exactly the case this workspace's own testing convention
+//! reserves an integration test for, rather than a `#[cfg(test)]` module.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 
 use proxima_autograd::activation::{relu, softmax};
 use proxima_autograd::adjoint::differentiate;
 use proxima_autograd::optimizer::{AdamConfig, AdamOperands, adam_step, step_input};
+use proxima_autograd::sparse;
 use proxima_tensor::cpu::evaluate_named;
 use proxima_tensor::dtype::DType;
-use proxima_tensor::map::{self, IndexMap};
+use proxima_tensor::map::{self, AxisIndex, AxisTerm, IndexMap};
 use proxima_tensor::op::{self, Extent, NodeId, Op, ReduceInit, ScalarOp};
 
 const IN_DIM: usize = 3;
@@ -35,6 +37,23 @@ fn leaf(program: &mut Vec<Op>, name: &str, shape: Vec<Extent>) -> NodeId {
         Op::Input {
             dtype: DType::Float32,
             shape,
+            name: Some(name.into()),
+        },
+    )
+}
+
+/// An integer-dtype leaf — the [`IndexMap::Computed`] convention a gather's
+/// `indices` operand needs (`proxima-tensor/src/shape.rs`'s
+/// `check_indices_dtype` rejects a float-tagged one), even though the
+/// buffer bound to it at evaluation time is still `&[f32]` like every other
+/// buffer this crate's CPU backend carries
+/// (`proxima_tensor::map::IndexMap::Computed`'s own doc).
+fn int_leaf(program: &mut Vec<Op>, name: &str, extent: u32) -> NodeId {
+    op::append(
+        program,
+        Op::Input {
+            dtype: DType::Int32,
+            shape: alloc::vec![Extent::Static(extent)],
             name: Some(name.into()),
         },
     )
@@ -66,6 +85,29 @@ fn reduce_add(program: &mut Vec<Op>, operand: NodeId, in_map: IndexMap, out_map:
 
 fn identity(rank: u16) -> IndexMap {
     IndexMap::Affine(map::projection(rank, &(0..rank).collect::<Vec<u16>>()))
+}
+
+/// `table[ids[s], d]` over iteration space `(s, d)` — the same shape
+/// `proxima-tensor/src/cpu.rs:12206`'s own
+/// `embedding_lookup_program` test builds: dim 0 (vocab) is gathered by
+/// `ids`, dim 1 (feature) is a plain projection.
+fn embedding_gather(program: &mut Vec<Op>, table: NodeId, ids: NodeId) -> NodeId {
+    let gathered_map = IndexMap::Computed {
+        indices: ids,
+        index_map: map::projection(2, &[0]),
+        base: map::IndexPattern {
+            iter_rank: 2,
+            axes: alloc::vec![
+                AxisIndex::default(),
+                AxisIndex {
+                    terms: core::iter::once(AxisTerm::projection(1)).collect(),
+                    offset: 0,
+                },
+            ],
+        },
+        gathered_dim: 0,
+    };
+    elementwise(program, ScalarOp::Identity, alloc::vec![(table, gathered_map)])
 }
 
 /// `x @ w + b` — a dense layer, matmul via `Elementwise(Multiply)` then
@@ -404,4 +446,125 @@ fn reduce_op_max(program: &mut Vec<Op>, operand: NodeId) -> NodeId {
             name: None,
         }),
     )
+}
+
+fn embedding_loss_at(program: &[Op], loss: NodeId, table: &[f32], ids: &[f32], target: &[f32]) -> f32 {
+    let evaluated = evaluate_named(
+        program,
+        &[],
+        &[("table", table), ("ids", ids), ("target", target)],
+        &[loss],
+    )
+    .expect("embedding network program lowers and evaluates");
+    evaluated.get(loss).expect("loss requested").0[0]
+}
+
+/// The gather adjoint, gradient-checked end to end: `table[ids[s], d]` fed
+/// into `sum((gathered - target)^2)`. `ids = [0, 2, 0, 1]` is the exact
+/// index/collision pattern `proxima-tensor/src/cpu.rs:16067`'s own
+/// `scatter_add_into_a_known_destination_via_mask_composition` test uses —
+/// vocab row 0 is read twice (positions 0 and 2), so its analytic gradient
+/// must be the *sum* of both positions' local contributions, not either one
+/// alone; central difference over the real forward program is oblivious to
+/// "scatter-add" as a concept and simply differentiates the actual
+/// function, so it is a correct oracle for the collision case without this
+/// test needing to reason about it separately. Rows 3 and 4 never appear in
+/// `ids`, so their gradient must be exactly zero — proof this path never
+/// touches an untouched vocab row, unlike a dense mask which would visit
+/// every row regardless.
+#[proxima::test]
+async fn gathered_gradient_matches_the_analytic_scatter_add_with_a_colliding_index() {
+    const VOCAB: usize = 5;
+    const EMBED_DIM: usize = 2;
+    const SEQ: usize = 4;
+
+    let mut program = Vec::new();
+    let table = leaf(&mut program, "table", alloc::vec![Extent::Static(VOCAB as u32), Extent::Static(EMBED_DIM as u32)]);
+    let ids = int_leaf(&mut program, "ids", SEQ as u32);
+    let target = leaf(&mut program, "target", alloc::vec![Extent::Static(SEQ as u32), Extent::Static(EMBED_DIM as u32)]);
+
+    let gathered = embedding_gather(&mut program, table, ids);
+    let diff = elementwise(&mut program, ScalarOp::Subtract, alloc::vec![(gathered, identity(2)), (target, identity(2))]);
+    let squared = elementwise(&mut program, ScalarOp::Multiply, alloc::vec![(diff, identity(2)), (diff, identity(2))]);
+    let loss = reduce_add(&mut program, squared, identity(2), IndexMap::Affine(map::projection(2, &[])));
+
+    let differentiated = differentiate(&program, loss).expect("scalar loss differentiates");
+    let contributions: Vec<_> = differentiated.gathered_gradients_of_named("table").collect();
+    assert_eq!(contributions.len(), 1, "table is gathered by exactly one forward site");
+    let contribution = contributions[0];
+    assert_eq!(contribution.gathered_dim, 0, "vocab is the leading, gathered axis");
+    assert!(
+        differentiated.gradient_of_named("table").is_none(),
+        "table is read only through the gather, so it has no dense gradient entry"
+    );
+
+    let table_values = counter_pattern(11, VOCAB * EMBED_DIM);
+    let ids_values = [0.0f32, 2.0, 0.0, 1.0];
+    let target_values = counter_pattern(17, SEQ * EMBED_DIM);
+
+    let evaluated = evaluate_named(
+        &differentiated.program,
+        &[],
+        &[("table", &table_values), ("ids", &ids_values), ("target", &target_values)],
+        &[contribution.values],
+    )
+    .expect("adjoint program lowers and evaluates");
+    let contribution_values = evaluated.get(contribution.values).expect("contribution requested").0;
+
+    let (unique_ids, summed) = sparse::dedupe_and_sum_rows(&ids_values, contribution_values, EMBED_DIM)
+        .expect("ids and the compact contribution line up row for row");
+
+    let mut analytic_table = alloc::vec![0.0f32; VOCAB * EMBED_DIM];
+    for (position, &id) in unique_ids.iter().enumerate() {
+        let row = &summed[position * EMBED_DIM..(position + 1) * EMBED_DIM];
+        analytic_table[id as usize * EMBED_DIM..id as usize * EMBED_DIM + EMBED_DIM].copy_from_slice(row);
+    }
+
+    let step = 1e-3f32;
+    let mut worst = (0.0f32, 0usize);
+    let mut table_perturbed = table_values.clone();
+    for index in 0..VOCAB * EMBED_DIM {
+        let original = table_perturbed[index];
+        table_perturbed[index] = original + step;
+        let plus = embedding_loss_at(&program, loss, &table_perturbed, &ids_values, &target_values);
+        table_perturbed[index] = original - step;
+        let minus = embedding_loss_at(&program, loss, &table_perturbed, &ids_values, &target_values);
+        table_perturbed[index] = original;
+
+        let numeric = (plus - minus) / (2.0 * step);
+        let relative = relative_error(analytic_table[index], numeric);
+        if relative > worst.0 {
+            worst = (relative, index);
+        }
+    }
+
+    std::eprintln!(
+        "embedding gather-adjoint max relative error: {} at table[row {}, col {}]",
+        worst.0,
+        worst.1 / EMBED_DIM,
+        worst.1 % EMBED_DIM
+    );
+    assert!(worst.0 < 5e-3, "central difference disagreed with the gathered adjoint: {worst:?}");
+
+    let mut touched_rows = unique_ids.clone();
+    touched_rows.sort_unstable();
+    assert_eq!(touched_rows, alloc::vec![0, 1, 2], "only the three distinct token ids in this batch are touched");
+    assert_eq!(
+        &analytic_table[3 * EMBED_DIM..4 * EMBED_DIM],
+        [0.0, 0.0],
+        "vocab row 3 never appears in ids, so its gradient must be exactly zero"
+    );
+    assert_eq!(
+        &analytic_table[4 * EMBED_DIM..5 * EMBED_DIM],
+        [0.0, 0.0],
+        "vocab row 4 never appears in ids, so its gradient must be exactly zero"
+    );
+
+    let dense_mask_elements = VOCAB * SEQ;
+    let compact_elements = unique_ids.len() * EMBED_DIM;
+    std::eprintln!(
+        "dense mask-composition would materialize {dense_mask_elements} elements (vocab {VOCAB} x batch {SEQ}); \
+         this path materializes {compact_elements} (unique rows {} x dim {EMBED_DIM})",
+        unique_ids.len()
+    );
 }
