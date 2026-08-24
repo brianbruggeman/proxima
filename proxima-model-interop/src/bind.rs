@@ -85,6 +85,17 @@ pub fn gguf_tensor_as_f32(parsed: &ParsedGguf, file_bytes: &[u8], name: &str) ->
 /// type alone. A per-type entry point would be that `match` arm rewritten as
 /// a signature, three times over.
 ///
+/// `F16`/`Bf16` route through the same packed path rather than through
+/// [`gguf_tensor_as_f32`]: unlike a block-quantized codec, a half-precision
+/// tensor carries no scale/block structure to dequantize, so there is no
+/// owned decode to fall back to -- [`gguf_tensor_as_f32`] has never had an
+/// `F16`/`Bf16` arm and gains none here. `proxima_tensor::cpu::matmul_f16_f32`/
+/// `matmul_bf16_f32` (the sole consumers of [`proxima_tensor::cpu::QuantizedBlock::Float16`]/
+/// [`proxima_tensor::cpu::QuantizedBlock::BFloat16`]) walk the exact same
+/// `rows` contiguous per-row byte layout the k-quant matmul family does, so
+/// this function's existing "bytes straight out of the file, no transpose"
+/// contract already covers them -- routing, not new machinery.
+///
 /// This works without a transpose, unlike `gguf_tensor_as_f32`'s callers
 /// for a 2D projection weight (see `transpose_out_in_to_in_out` in this
 /// crate's real-forward-pass test): a packed [`proxima_tensor::cpu::QuantizedBlock`]
@@ -107,8 +118,8 @@ pub fn gguf_tensor_as_f32(parsed: &ParsedGguf, file_bytes: &[u8], name: &str) ->
 /// (page-aligned by the kernel) does. [`aligned_f32_view`] checks the
 /// *actual* runtime pointer, not the assumption, and this function returns
 /// [`InteropError::MisalignedFloat32Tensor`] rather than reinterpreting
-/// unaligned bytes -- callers fall back to [`gguf_tensor_as_f32`]'s owned,
-/// byte-at-a-time decode, which never assumes alignment.
+/// unaligned bytes -- non-`F32` callers fall back to [`gguf_tensor_as_f32`]'s
+/// owned, byte-at-a-time decode, which never assumes alignment.
 ///
 /// # Errors
 ///
@@ -117,9 +128,10 @@ pub fn gguf_tensor_as_f32(parsed: &ParsedGguf, file_bytes: &[u8], name: &str) ->
 /// `file_bytes`; [`InteropError::MisalignedFloat32Tensor`] if `name`'s
 /// tensor is `F32` but `file_bytes`'s base pointer leaves its byte range
 /// unaligned for `&[f32]`; [`InteropError::UnrepresentableGgmlType`] if
-/// `name`'s tensor is none of `F32`/`Q4_K`/`Q5_K`/`Q6_K` -- callers route
-/// anything else through [`gguf_tensor_as_f32`] instead, which is what this
-/// crate has a decoder for.
+/// `name`'s tensor is none of `F32`/`Q4_K`/`Q5_K`/`Q6_K`/`F16`/`Bf16` -- a
+/// block-quantized type this crate has no dequantizer for at all, since
+/// every codec this function decodes packed is also the only route
+/// [`gguf_tensor_as_f32`] does not independently cover for `F16`/`Bf16`.
 #[cfg(feature = "std")]
 pub fn gguf_tensor_as_packed_block<'a>(
     parsed: &ParsedGguf,
@@ -138,6 +150,8 @@ pub fn gguf_tensor_as_packed_block<'a>(
         GgmlType::Q4_K => Ok(proxima_tensor::cpu::QuantizedBlock::Q4K(bytes)),
         GgmlType::Q5_K => Ok(proxima_tensor::cpu::QuantizedBlock::Q5K(bytes)),
         GgmlType::Q6_K => Ok(proxima_tensor::cpu::QuantizedBlock::Q6K(bytes)),
+        GgmlType::F16 => Ok(proxima_tensor::cpu::QuantizedBlock::Float16(bytes)),
+        GgmlType::Bf16 => Ok(proxima_tensor::cpu::QuantizedBlock::BFloat16(bytes)),
         other => Err(InteropError::UnrepresentableGgmlType {
             tensor: tensor.name.clone(),
             ggml_type: other,
