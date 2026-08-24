@@ -330,13 +330,15 @@ pub fn execute_plan_named(
 /// soundness argument for why this needs a caller-supplied name set rather
 /// than being inferred from bytes alone. A no-op on [`Plan::Cpu`]: the CPU
 /// evaluator has no device buffer to cache.
-#[cfg_attr(not(any(feature = "cpu", all(feature = "metal", target_os = "macos"))), allow(unused_variables))]
-pub fn mark_resident(plan: &mut Plan, resident_names: &std::collections::BTreeSet<&str>) {
+// leading underscore: only the metal arm below reads this, so a Linux
+// `cpu`-only build (metal cfg'd out) would otherwise warn on an unused
+// parameter -- the binding is still fully used wherever the metal arm exists.
+pub fn mark_resident(plan: &mut Plan, _resident_names: &std::collections::BTreeSet<&str>) {
     match plan {
         #[cfg(feature = "cpu")]
         Plan::Cpu(_) => {}
         #[cfg(all(feature = "metal", target_os = "macos"))]
-        Plan::Metal(metal_plan) => metal_plan.mark_resident(resident_names),
+        Plan::Metal(metal_plan) => metal_plan.mark_resident(_resident_names),
     }
 }
 
