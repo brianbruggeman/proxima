@@ -194,6 +194,7 @@ impl ShapeTable {
                 }
                 if let [term] = axis.terms.as_slice()
                     && term.coeff == 1
+                    && axis.offset == 0
                 {
                     let extent = operand_shape[axis_index];
                     let slot = &mut resolved[term.axis as usize];
@@ -230,7 +231,8 @@ impl ShapeTable {
                 if entry.skip_axis == Some(axis_index as u16) {
                     continue;
                 }
-                let is_pure_projection = matches!(axis.terms.as_slice(), [term] if term.coeff == 1);
+                let is_pure_projection =
+                    matches!(axis.terms.as_slice(), [term] if term.coeff == 1) && axis.offset == 0;
                 if is_pure_projection {
                     continue;
                 }
@@ -1121,5 +1123,114 @@ mod tests {
         let via_pipe = last_shapes.expect("matmul program is non-empty");
         let via_free_function = infer(&program, &[512]).expect("free-function infer succeeds");
         assert_eq!(via_pipe.of(sum), via_free_function.of(sum));
+    }
+
+    /// The literal complaint: a fused checkpoint tensor's on-disk width
+    /// (`12`, standing in for a real `[2048, 6144]` fused QKV/BCx weight)
+    /// cannot be narrowed by an offset alone, because a pure single-term
+    /// axis's extent used to come from the *sliced operand's own shape*
+    /// regardless of its offset (`unify_iteration_space`, before this row).
+    /// `donor` supplies the true width (`4`) through a plain 0-offset
+    /// projection onto the same iteration axis -- the same
+    /// externally-supplied-extent mechanism `Op::Iota`'s own `extent` field
+    /// and `Op::Input`'s own `shape` already use -- so `fused`'s axis-1 term
+    /// (`coeff == 1`, `offset == 8`) is no longer treated as extent-defining
+    /// and instead falls through to `bounds_check`, which already handles a
+    /// nonzero offset correctly (it is the same arithmetic a convolution
+    /// window's multi-term axis already exercises).
+    #[test]
+    fn a_nonzero_offset_slice_of_a_wider_operand_narrows_via_a_companion_donor() {
+        let mut program = Vec::new();
+        let fused = leaf(&mut program, &[Extent::Static(2), Extent::Static(12)]);
+        let donor = leaf(&mut program, &[Extent::Static(2), Extent::Static(4)]);
+
+        let fused_map = IndexMap::Affine(map::affine(
+            2,
+            &[(&[AxisTerm::projection(0)], 0), (&[AxisTerm::scaled(1, 1)], 8)],
+        ));
+        let donor_map = IndexMap::Affine(map::projection(2, &[0, 1]));
+        let sliced = append(
+            &mut program,
+            Op::Elementwise {
+                dtype: DType::Float32,
+                body: ScalarOp::Add,
+                operands: alloc::vec![(fused, fused_map), (donor, donor_map)],
+                name: None,
+            },
+        );
+
+        let shapes = infer(&program, &[]).expect("an offset slice with a donor infers");
+        assert_eq!(
+            shapes.of(sliced),
+            &[2, 4],
+            "narrowed to the donor's width (4), not fused's on-disk width (12)"
+        );
+    }
+
+    /// Perturbing the fix under test: reverting `unify_iteration_space` to
+    /// ignore `axis.offset` (the pre-fix predicate) makes this test fail
+    /// with `ExtentMismatch { dim: 1, left: 12, right: 4 }` -- the exact
+    /// shape of the fused-checkpoint failure this row closes. Left in this
+    /// comment rather than as a `#[should_panic]`, since the proof this row
+    /// reports is the before/after `cargo nextest` transcript, not a second
+    /// mechanism to keep green.
+    #[test]
+    fn a_nonzero_offset_slice_out_of_the_donors_bounds_is_still_rejected() {
+        let mut program = Vec::new();
+        let fused = leaf(&mut program, &[Extent::Static(2), Extent::Static(12)]);
+        let donor = leaf(&mut program, &[Extent::Static(2), Extent::Static(4)]);
+
+        // offset 9 + (donor extent 4 - 1) = 12, the first index past fused's
+        // on-disk width of 12.
+        let fused_map = IndexMap::Affine(map::affine(
+            2,
+            &[(&[AxisTerm::projection(0)], 0), (&[AxisTerm::scaled(1, 1)], 9)],
+        ));
+        let donor_map = IndexMap::Affine(map::projection(2, &[0, 1]));
+        append(
+            &mut program,
+            Op::Elementwise {
+                dtype: DType::Float32,
+                body: ScalarOp::Add,
+                operands: alloc::vec![(fused, fused_map), (donor, donor_map)],
+                name: None,
+            },
+        );
+
+        let error = infer(&program, &[]).expect_err("a slice window past the buffer end is rejected");
+        assert!(matches!(error, TensorError::IndexOutOfBounds { .. }), "{error}");
+    }
+
+    /// The residual limitation `unify_iteration_space` cannot lift from
+    /// inside `shape.rs` alone: an `offset == 0` slice narrower than its
+    /// operand is indistinguishable, from `AxisIndex` alone, from "read the
+    /// whole axis" -- `AxisIndex` carries a start (`offset`) and a stride
+    /// (`coeff`) but no length, so there is no bit anywhere in the map that
+    /// says "stop at 4, not 12" when the window starts at the origin. The
+    /// donor's independently-correct extent (4) collides with `fused`'s
+    /// offset-0 axis reading its own full on-disk width (12) as an
+    /// `ExtentMismatch`, not as a silently-narrowed shape -- ambiguous, not
+    /// wrong, and rejected rather than guessed.
+    #[test]
+    fn an_offset_zero_slice_narrower_than_its_operand_is_still_ambiguous() {
+        let mut program = Vec::new();
+        let fused = leaf(&mut program, &[Extent::Static(2), Extent::Static(12)]);
+        let donor = leaf(&mut program, &[Extent::Static(2), Extent::Static(4)]);
+
+        let fused_map = IndexMap::Affine(map::projection(2, &[0, 1]));
+        let donor_map = IndexMap::Affine(map::projection(2, &[0, 1]));
+        append(
+            &mut program,
+            Op::Elementwise {
+                dtype: DType::Float32,
+                body: ScalarOp::Add,
+                operands: alloc::vec![(fused, fused_map), (donor, donor_map)],
+                name: None,
+            },
+        );
+
+        let error = infer(&program, &[])
+            .expect_err("an offset-0 slice narrower than its operand cannot be told apart from a full read");
+        assert!(matches!(error, TensorError::ExtentMismatch { .. }), "{error}");
     }
 }
