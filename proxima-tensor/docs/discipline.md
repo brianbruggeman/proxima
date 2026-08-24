@@ -12959,3 +12959,51 @@ No commit — `proxima-gguf` ended with zero diff, the comparison harness having
 - dequant parity: rebuild the scratch C probe against `scratchpad/oracle/llama.cpp` and call `to_float` on `blk.0.shortconv.out_proj.weight`; expect `max_abs_diff = 0` (the harness was scaffolding and was reverted; `proxima-gguf` has zero diff from this row)
 - signal magnitude: read `scratchpad/oracle/dump_lfm2/l_out-{0..4}.f32` as flat f32 and compute mean/max abs — **session-scoped path, defective by gate 16, same as ROW 129 and 130's citations**
 - the sign flip: index 8318 of `l_out-4.f32` == `-0.062358`
+
+## ROW 134 — ROW 131's Limitation 1 is CLOSED for the real use case by reframing, not by a type change; ROW 131's Limitation 2 is CLOSED by a one-line traversal fix; and two coordinator claims were false
+
+Commits `7d1d934` (materialisation), `ef87ebb` (offset predicate), `368bb43` (fused-QKV proof). `proxima-tensor --features std,instrument` 393 -> **401**. Workspace **5655**. Clippy exit 0.
+
+### Limitation 2 — closed. Two traversals over one structure, one complete and one not.
+
+`BoundOpBuilder::push` (`bind.rs:521-609`) iterated each op's `operands: &[(NodeId, IndexMap)]` and called `materialize_if_held(*operand_node)` — visiting the operand's own NodeId but **never the map's `indices` field** (`map.rs:121`), which is a live backwards NodeId reference. Meanwhile `live::annotate` (`live.rs:67-73`) **did** walk `indices` correctly for liveness. So the same structure had one correct traversal and one incomplete one, which is why the defect surfaced as an emission-ordering bug rather than a missing-liveness bug:
+
+```
+resolved must stay topologically ordered: the indices node (2) must be
+built before the gather that reads it (1)
+```
+
+Fixed by `materialize_computed_indices` (`bind.rs:649-668`), reusing the existing `materialize_if_held` — a no-op for an `Input` or an already-materialised `Reduce`-sourced index, so both of today's other computed-index call sites are unaffected. **The `spec.rs` workaround (routing a conv index through `Op::Reduce` purely to force materialisation) is no longer necessary**, though it was left in place as a sibling's file and remains harmless.
+
+### Limitation 1 — the real use case works today, by asking the question differently
+
+**The half that was over-restriction:** `shape.rs:195-198` resolved a single-`coeff==1`-term axis's extent from the operand's full shape while **ignoring `axis.offset` entirely**, and the mirrored predicate at `:233` used that same test to *skip* `bounds_check`. But `bounds_check` (`:411-437`) had always computed `offset + coeff*(extent-1)` correctly — it was never wrong, merely never invoked for that axis shape. **Redundant, not load-bearing — the third instance of that exact pattern this session** (ROW 128's scatter gate, ROW 129's dead channel path, this). Requiring `axis.offset == 0` for the branch made nonzero-offset slices work, with the extent supplied by a companion operand's own 0-offset projection.
+
+**PRECEDENCE EMPIRICALLY REFUTED, not reasoned about.** Both natural rules were applied to `unify_iteration_space`, run against the suite, and reverted:
+- *narrower wins* (`*slot = Some(existing.min(extent))`): `disagreeing_operand_extents_are_rejected` **FAILED** — `infer` returned `Ok(Shapes { extents: [[4], [5], [4]] })`, silently narrowing a genuine 4-vs-5 shape mismatch.
+- *first operand wins*: identical failure. `bounds_check` only rejects an operand **narrower** than the iteration space, never one **wider**, so it cannot double as "these operands were never compatible."
+
+Both collapse *"this narrower operand is the true donor"* and *"these two operands are simply the wrong size"* into the same bit pattern. **No precedence rule survives**, and that is now demonstrated rather than asserted.
+
+**THE ACTUAL RESOLUTION — the framing was wrong, not the algebra.** The question had been posed as *three offset slices of a fused tensor*, whose first chunk is offset 0 and therefore structurally ambiguous (`AxisIndex` carries a start and a stride but no length). Posed instead as **one genuine two-term axis — `chunk*2048 + within` — the split needs nothing new.** `a_fused_qkv_split_evaluates_all_three_chunks_by_a_real_chunk_axis` splits a real `[2048, 6144]` into three `[2048, 2048]` chunks at offsets 0/2048/4096, evaluated through `cpu::evaluate` with real f32 values spot-checked at all three boundaries, using the same mechanism `a_conv_window_within_bounds_infers` already exercises. **Zero type changes.**
+
+**This is the thirteenth time this session the answer has been "an existing primitive already expresses it"** — and the first where the obstacle was purely how the question was phrased. A slice is a restriction; a chunk is a dimension. Reaching for the first is what made `AxisIndex`'s missing length look like a blocker.
+
+**The `len: Option<Extent>` field was designed and correctly NOT landed.** 21 struct-literal construction sites (`map.rs` x3, `shape.rs` x1, `spec.rs` x8, `cpu.rs` x2, a bench x1, **`bind.rs` x1**, plus 5 in the separately-versioned `omega`). `bind.rs:996`, inside `remap_pattern`'s operand-fusion rebuild, necessarily breaks — a Rust struct literal cannot omit a field conditionally — and `bind.rs` was out of that task's scope. The design and its blast radius are recorded as a dated doc-comment in `shape.rs`, not a TODO. **It remains genuinely needed only for the literal single-slice framing, which the chunk-axis form makes unnecessary.**
+
+### Two coordinator claims that were false
+
+**"Nothing in the workspace tests `ShapeTable::Pipe::call`."** Asserted in two separate agent briefs. `infer_as_a_pipe_matches_the_free_function` (`shape.rs:1109-1126`) has existed since commit `aa1dde9`, is an ancestor of HEAD, and already asserts the `Pipe` path's `Shapes` matches `infer`'s. Found by `git log --all --oneline -S` in seconds. **The check was cheap, never run, and propagated into instructions twice.**
+
+**"`bind.rs:1581/:2819` panics on an F16 router."** Relayed from an earlier report. `grep -n "panic!" proxima-model-interop/src/bind.rs` returns **nothing**. The real path returned a clean typed `InteropError::UnrepresentableGgmlType`; the gap was a missing match arm, not a panic. Same failure shape: a `file:line` passed into a brief without being opened.
+
+### A systemic finding worth acting on separately
+
+`#[proxima::test]` bodies are **wall-clock sensitive and flake under system load.** Under induced contention (CPU saturated, `PROXIMA_TEST_TIMEOUT_MS=3`), **15 pre-existing tests** in `cpu.rs`/`spec.rs` — none written this session — failed identically with `"proxima::test: body did not complete within the timeout"`. A newly-added `ShapeTable` pipe test flaked the same way under a normal workspace run while four agents saturated 8 P-cores, and was removed as redundant with the two pre-existing tests that already cover it. **A workspace test count taken during heavy parallel work is not trustworthy without an isolated rerun**, and a single red test from a loaded run must be treated as unproven rather than real.
+
+**Re-prove commands:**
+- `cargo nextest run -p proxima-tensor --features std,instrument fused_qkv` (the chunk-axis split)
+- `cargo nextest run -p proxima-tensor --features std,instrument disagreeing_operand_extents_are_rejected` (the test both precedence rules broke)
+- `cargo nextest run -p proxima-tensor --features std,instrument materialized_before_the_gather` (Limitation 2)
+- `git log --all --oneline -S infer_as_a_pipe_matches_the_free_function` (the test that already existed)
+- `grep -rn "AxisIndex[[:space:]]*{" --include=*.rs .` (expect 21 construction sites)
