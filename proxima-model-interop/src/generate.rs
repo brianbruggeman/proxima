@@ -841,6 +841,17 @@ impl<'file> LoadedModel<'file> {
         let vocab_size = self.architecture.vocab as usize;
 
         let (generated_ids, stopped_by_eos) = decode_until_stop_or_budget(&self.vocab, max_tokens, |_step| {
+            // ROW 130's own fix, built: every counter this step's
+            // `evaluate_ms` decomposition reads is zeroed HERE, at step
+            // start, and read back after `evaluate_ticks` below is computed
+            // -- a single step's own cost, measured directly inside one
+            // process, never inferred by differencing two independent
+            // launches' cumulative-since-start counters (that differencing
+            // is exact for the integer counts ROW 129 used it for, and NOT
+            // for timings -- ROW 130's own postmortem on why it produced a
+            // sub-bucket larger than its parent and a negative duration).
+            #[cfg(feature = "instrument")]
+            proxima_tensor::instrument::reset_step();
             #[cfg(feature = "instrument")]
             let step_started = read_ticks();
 
@@ -1006,6 +1017,38 @@ impl<'file> LoadedModel<'file> {
                     ms(layer_cache_append_ticks),
                     layer_cache_append_elements * 4,
                     ms(greedy_pick_ticks),
+                );
+                // ROW 130's per-step-reset attribution: kernel / dispatch+
+                // setup / park+spin+wake, all on the CALLING thread's own
+                // wall clock (never summed across the cohort's other worker
+                // threads, which run concurrently with it, not serially
+                // inside it -- see `CohortLeaderAttribution`'s own doc).
+                // `evaluate_ns` is this step's own tick-based total, already
+                // reset per step by `reset_step`; `residual_ns` is
+                // everything `evaluate_ms` paid for that these three terms
+                // do not name -- non-matmul ops (elementwise/reduce/scan),
+                // quantize/transpose bookkeeping, and staged-batch setup
+                // outside the cohort round itself. `saturating_sub` so a
+                // negative residual is impossible to construct by
+                // arithmetic; reported as 0 with `residual_underflow=true`
+                // if the three named terms would have exceeded the parent,
+                // which is itself a sanity-gate failure worth seeing rather
+                // than silently wrapping.
+                let attribution = proxima_tensor::instrument::cohort_leader_attribution();
+                let evaluate_ns = ticks_to_nanos(evaluate_ticks);
+                let named_ns = attribution.kernel_nanos + attribution.dispatch_nanos + attribution.park_spin_wake_nanos;
+                let residual_underflow = named_ns > evaluate_ns;
+                let residual_ns = evaluate_ns.saturating_sub(named_ns);
+                std::println!(
+                    "token_attribution step={_step} evaluate_ms={:.3} kernel_ms={:.3} dispatch_ms={:.3} \
+                     park_spin_wake_ms={:.3} residual_ms={:.3} residual_underflow={residual_underflow} \
+                     named_plus_residual_ms={:.3}",
+                    evaluate_ns as f64 / 1e6,
+                    attribution.kernel_nanos as f64 / 1e6,
+                    attribution.dispatch_nanos as f64 / 1e6,
+                    attribution.park_spin_wake_nanos as f64 / 1e6,
+                    residual_ns as f64 / 1e6,
+                    (named_ns + residual_ns) as f64 / 1e6,
                 );
                 #[cfg(feature = "metal")]
                 std::println!(
