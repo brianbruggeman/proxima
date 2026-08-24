@@ -117,3 +117,14 @@ required-features = ["std", "instrument"]
 [[example]]
 name = "smollm2_layer_oracle_diff"
 required-features = ["std", "instrument"]
+
+# Both examples below reuse the two shapes above, adapted to the real,
+# hybrid `lfm2moe` checkpoint (GGUF bind + `lfm2_forward_values` in place of
+# `LoadedModel`'s dense safetensors path). Same `required-features` reason.
+[[example]]
+name = "lfm2_logit_oracle_diff"
+required-features = ["std", "instrument"]
+
+[[example]]
+name = "lfm2_layer_oracle_diff"
+required-features = ["std", "instrument"]
