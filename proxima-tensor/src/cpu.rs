@@ -710,6 +710,21 @@ pub fn evaluate_quantized_with_scratch(
     // `matmul_rows_threaded` falls back to the `nest_pool` dispatch path in
     // that case, unchanged.
     let session = nest_cohort().and_then(|cohort| cohort.enter().ok());
+    // `docs/discipline.md` ROW 140's own cache: scoped to this ONE
+    // `evaluate_quantized_with_scratch` call (one decode/prefill step),
+    // never carried across steps -- a later step's `activation_node` slot
+    // holds a genuinely different value, and this map is dropped with the
+    // rest of this function's locals at the end of the call, so there is no
+    // staleness window to reason about. Keyed by the activation's own
+    // `NodeId` rather than threaded through `MatmulSession`/`CohortSession`
+    // (`prime::os::cohort`): that type is a generic thread-cohort round
+    // driver with no knowledge of `NodeId`/`Q8_K`, so extending it would
+    // mean teaching a reusable concurrency primitive one tensor-specific
+    // cache -- the same reuse-first question this crate already answers by
+    // keeping `free_buffers`/`validated_weight_nodes` as this function's own
+    // scratch parameters instead of bolting them onto a foreign type.
+    #[cfg(feature = "cohort-staged-graph")]
+    let mut staged_quantize_cache: BTreeMap<NodeId, Arc<[u8]>> = BTreeMap::new();
     let mut position = 0usize;
     while position < resolved.len() {
         #[cfg(feature = "cohort-staged-graph")]
@@ -727,6 +742,7 @@ pub fn evaluate_quantized_with_scratch(
                     free_buffers,
                     &retires,
                     &mut live_now,
+                    &mut staged_quantize_cache,
                 )?;
                 peak_live_buffers = peak_live_buffers.max(live_now);
                 #[cfg(feature = "instrument")]
@@ -2994,7 +3010,18 @@ fn staged_batch_run_end(resolved: &[BoundOp], start: usize, quantized_weights: &
 #[cfg(feature = "cohort-staged-graph")]
 struct MatmulStagePlan<'plan> {
     weights: &'plan [u8],
-    activation_q8k: Vec<u8>,
+    // `Arc<[u8]>`, not `Vec<u8>`: `docs/discipline.md` ROW 140's own
+    // measured hypothesis check (`instrument::quantize_activation_call_stats`,
+    // 225 calls / 129 distinct activation nodes on the real checkpoint) --
+    // `attn_q`/`attn_k`/`attn_v` (and `ffn_gate`/`ffn_up`) are consecutive
+    // [`is_staged_batch_eligible`] nodes reading the SAME `activation_node`,
+    // so [`build_matmul_stage_plan`]'s own `staged_quantize_cache` quantizes
+    // it once and every later sibling in the same run clones the `Arc`
+    // (one atomic refcount bump) instead of re-running
+    // [`quantize_row_q8k_dispatch`]'s per-superblock scale search. A `Vec<u8>`
+    // field would still force a byte-for-byte memcpy per cache hit; `Arc<[u8]>`
+    // makes the reuse itself allocation-free.
+    activation_q8k: Arc<[u8]>,
     row_bytes: usize,
     q8k_row_bytes: usize,
     /// `leading_total` — [`matmul_rows_threaded`]'s own `width` parameter:
@@ -3058,6 +3085,7 @@ fn build_matmul_stage_plan<'weights>(
     weight_block: QuantizedBlock<'weights>,
     weight_node: NodeId,
     session: &MatmulSession<'_>,
+    quantize_cache: &mut BTreeMap<NodeId, Arc<[u8]>>,
 ) -> Result<Option<MatmulStagePlan<'weights>>, TensorError> {
     let activation_node = resolved
         .operands()
@@ -3167,31 +3195,58 @@ fn build_matmul_stage_plan<'weights>(
 
     let block_count = activation.len() / Q4K_BLOCK_ELEMENTS;
     let q8k_row_bytes = (k / Q4K_BLOCK_ELEMENTS) * Q8K_BLOCK_BYTES;
-    let mut activation_q8k = vec![0u8; block_count * Q8K_BLOCK_BYTES];
-    // `Some(session)` here is safe, unlike inside a stage's own
-    // `run_stage_chunk` closure: this call runs during the precompute pass,
-    // strictly BEFORE `run_staged_batch` opens its round (`session.run(&round)`
-    // has not been called yet), so there is no in-flight round for a second
-    // `session.run` to collide with. Matches `run_reduce_quantized`'s own
-    // unbatched call exactly (same function, same session), so a wide
-    // (prefill-shaped) activation keeps its existing parallel quantize
-    // instead of losing it just because this node got folded.
-    //
-    // instrumentation-only: a DEDICATED counter (`STAGED_MATMUL_QUANTIZE_TICKS`),
-    // not a second call site into `MATMUL_QUANTIZE_ACTIVATION_TICKS` -- see
-    // that counter's own doc for why sharing it across both call sites broke
-    // `matmul_split`'s own nested-subset arithmetic. Before this counter
-    // existed, this call site had no attribution at all: the staged path's
-    // own quantize cost (160/225 matmul nodes per step, ROW97/98's dominant
-    // bucket) was invisible.
-    #[cfg(feature = "instrument")]
-    let diag_staged_quantize_started = instrument::read_ticks();
-    quantize_row_q8k_dispatch(activation, &mut activation_q8k, Some(session))?;
-    #[cfg(feature = "instrument")]
-    counter!(
-        instrument::STAGED_MATMUL_QUANTIZE_TICKS,
-        instrument::elapsed_ticks(diag_staged_quantize_started)
-    );
+    // ROW 140's own fix: the SAME `activation_node` feeds every one of
+    // `attn_q`/`attn_k`/`attn_v` (and `ffn_gate`/`ffn_up`) -- 129 distinct
+    // activation nodes measured against 225 quantize calls on the real
+    // checkpoint before this cache existed
+    // (`instrument::quantize_activation_call_stats`, ROW 140's own doc).
+    // `quantize_cache` is scoped to ONE `evaluate_quantized_with_scratch`
+    // call (one decode/prefill step) -- see that function's own
+    // `staged_quantize_cache` local. A hit clones the `Arc` (one atomic
+    // refcount bump, no bytes touched); a miss pays the real quantize once
+    // and seeds the cache for whichever sibling node reads this same
+    // activation next.
+    let activation_q8k: Arc<[u8]> = if let Some(cached) = quantize_cache.get(&activation_node) {
+        #[cfg(feature = "instrument")]
+        instrument::record_quantize_activation_cache_hit();
+        Arc::clone(cached)
+    } else {
+        let mut buffer = vec![0u8; block_count * Q8K_BLOCK_BYTES];
+        // `Some(session)` here is safe, unlike inside a stage's own
+        // `run_stage_chunk` closure: this call runs during the precompute
+        // pass, strictly BEFORE `run_staged_batch` opens its round
+        // (`session.run(&round)` has not been called yet), so there is no
+        // in-flight round for a second `session.run` to collide with.
+        // Matches `run_reduce_quantized`'s own unbatched call exactly (same
+        // function, same session), so a wide (prefill-shaped) activation
+        // keeps its existing parallel quantize instead of losing it just
+        // because this node got folded.
+        //
+        // instrumentation-only: a DEDICATED counter (`STAGED_MATMUL_QUANTIZE_TICKS`),
+        // not a second call site into `MATMUL_QUANTIZE_ACTIVATION_TICKS` -- see
+        // that counter's own doc for why sharing it across both call sites broke
+        // `matmul_split`'s own nested-subset arithmetic. Before this counter
+        // existed, this call site had no attribution at all: the staged path's
+        // own quantize cost (160/225 matmul nodes per step, ROW97/98's dominant
+        // bucket) was invisible.
+        #[cfg(feature = "instrument")]
+        let diag_staged_quantize_started = instrument::read_ticks();
+        // ROW 140's own redundant-quantize hypothesis check: recorded on a
+        // CACHE MISS only, i.e. once per distinct activation node this step
+        // actually pays a real quantize for -- see
+        // `instrument::quantize_activation_call_stats`'s own doc.
+        #[cfg(feature = "instrument")]
+        instrument::record_quantize_activation_call(activation_node);
+        quantize_row_q8k_dispatch(activation, &mut buffer, Some(session))?;
+        #[cfg(feature = "instrument")]
+        counter!(
+            instrument::STAGED_MATMUL_QUANTIZE_TICKS,
+            instrument::elapsed_ticks(diag_staged_quantize_started)
+        );
+        let shared: Arc<[u8]> = Arc::from(buffer);
+        quantize_cache.insert(activation_node, Arc::clone(&shared));
+        shared
+    };
     #[cfg(feature = "instrument")]
     {
         let macs = (rows as u64).saturating_mul(k as u64).saturating_mul(leading_total as u64);
@@ -3269,6 +3324,7 @@ fn run_staged_batch(
     free_buffers: &mut Vec<Vec<f32>>,
     retires: &[Vec<NodeId>],
     live_now: &mut usize,
+    quantize_cache: &mut BTreeMap<NodeId, Arc<[u8]>>,
 ) -> Result<(), TensorError> {
     let mut run_outputs: Vec<Vec<f32>> =
         run.iter().map(|node| take_or_allocate(free_buffers, node_output_len(node))).collect();
@@ -3282,7 +3338,7 @@ fn run_staged_batch(
                     node: weight_node,
                     reason: "quantized weight node has no bound byte buffer",
                 })?;
-                build_matmul_stage_plan(node, buffers_ref, weight_block, weight_node, session)?
+                build_matmul_stage_plan(node, buffers_ref, weight_block, weight_node, session, quantize_cache)?
             }
             None => None,
         };
@@ -3443,6 +3499,14 @@ fn run_reduce_quantized<B: Deref<Target = [f32]>>(
         node: activation_node,
         reason: "quantized matmul activation operand has no bound buffer",
     })?;
+    // ROW 140's own redundant-quantize hypothesis check, unbatched-path
+    // twin of `build_matmul_stage_plan`'s call: this function's own
+    // wide-fold arms below (`matmul_q4k_q8k_f32_impl` et al.) each quantize
+    // `activation` fresh, so if two sibling matmul nodes (`ffn_gate`,
+    // `ffn_up`) both reach `run_reduce_quantized` with the SAME
+    // `activation_node`, this key sees two calls for one distinct node.
+    #[cfg(feature = "instrument")]
+    instrument::record_quantize_activation_call(activation_node);
 
     let BoundOpKind::Reduce { output_axes, .. } = &resolved.kind else {
         unreachable!("run_reduce_quantized is only called for a Keep::Reduce fold")

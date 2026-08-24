@@ -1238,6 +1238,65 @@ pub static STAGED_MATMUL_NODES: Counter = Counter::new("proxima_tensor.matmul.st
 // reinterpretation of what `quantize_activation_ms` used to mean.
 pub static STAGED_MATMUL_QUANTIZE_TICKS: Counter = Counter::new("proxima_tensor.matmul.staged_quantize_ticks");
 
+// discipline.md ROW 140's own hypothesis check: does the SAME activation
+// node (e.g. the post-attention-norm vector feeding `attn_q`/`attn_k`/
+// `attn_v`, or the post-FFN-norm vector feeding `ffn_gate`/`ffn_up`) get
+// re-quantized to Q8_K once per CONSUMING matmul node, rather than once
+// per DISTINCT activation? Keyed by `activation_node` (never `resolved.node`,
+// the matmul node itself -- the whole point is to see several different
+// matmul nodes collapse onto the same key), incremented once per call to
+// `cpu::build_matmul_stage_plan`/`cpu::run_reduce_quantized`, the two call
+// sites that each independently quantize their own `activation` operand
+// before this counter existed. `total_calls` (`.values().sum()`) vs
+// `distinct_nodes` (`.len()`) is the ratio the hypothesis lives or dies on:
+// 1:1 kills it, >1:1 by roughly the fan-out (3 for QKV, 2 for gate/up)
+// confirms it.
+static QUANTIZE_ACTIVATION_CALLS_BY_NODE: Mutex<BTreeMap<NodeId, u64>> = Mutex::new(BTreeMap::new());
+
+/// Records one activation-quantize call against `activation_node` — called
+/// from `cpu::build_matmul_stage_plan` (the staged-batch path) and
+/// `cpu::run_reduce_quantized` (the unbatched path), both BEFORE this
+/// counter existed had no way to tell "quantized once, reused three times"
+/// apart from "quantized three times, once per consumer".
+pub fn record_quantize_activation_call(activation_node: NodeId) {
+    let mut calls = QUANTIZE_ACTIVATION_CALLS_BY_NODE.lock().unwrap_or_else(PoisonError::into_inner);
+    *calls.entry(activation_node).or_insert(0) += 1;
+}
+
+/// `(total_calls, distinct_activation_nodes)` across every
+/// [`record_quantize_activation_call`] since the last [`reset_step`] —
+/// `total_calls / distinct_activation_nodes` is the redundancy ratio ROW
+/// 140's hypothesis names: `1.0` kills it, `> 1.0` confirms real re-quantize
+/// fan-out and states its own size.
+#[must_use]
+pub fn quantize_activation_call_stats() -> (u64, u64) {
+    let calls = QUANTIZE_ACTIVATION_CALLS_BY_NODE.lock().unwrap_or_else(PoisonError::into_inner);
+    let total_calls: u64 = calls.values().sum();
+    let distinct_nodes = calls.len() as u64;
+    (total_calls, distinct_nodes)
+}
+
+fn reset_quantize_activation_calls() {
+    let mut calls = QUANTIZE_ACTIVATION_CALLS_BY_NODE.lock().unwrap_or_else(PoisonError::into_inner);
+    calls.clear();
+    let _ = QUANTIZE_ACTIVATION_CACHE_HITS.snapshot_and_reset();
+}
+
+/// How many times `cpu::build_matmul_stage_plan`'s own per-step
+/// `staged_quantize_cache` (ROW 140's fix) served an already-quantized
+/// `Arc<[u8]>` instead of paying [`quantize_row_q8k_dispatch`] again for the
+/// same activation node. Zero on a build that never lands the fix; nonzero
+/// is the direct witness that the cache is doing real work, not just
+/// compiling.
+pub static QUANTIZE_ACTIVATION_CACHE_HITS: Counter = Counter::new("proxima_tensor.matmul.quantize_activation_cache_hits");
+
+/// Records one cache hit — called from `cpu::build_matmul_stage_plan` when
+/// `activation_node` is already present in this step's own
+/// `staged_quantize_cache`.
+pub fn record_quantize_activation_cache_hit() {
+    counter!(QUANTIZE_ACTIVATION_CACHE_HITS, 1);
+}
+
 /// The cohort's own round-level forensics (`prime::os::cohort::diag`),
 /// re-exported so a consumer of this crate's `instrument` feature reads
 /// park/spin/unpark tallies and per-slot claim latencies without taking its
@@ -1312,6 +1371,7 @@ pub fn reset_step() {
     reset_serial();
     reset_path();
     reset_parallel();
+    reset_quantize_activation_calls();
     #[cfg(feature = "tensor-cohort")]
     reset_cohort_attribution();
 }
