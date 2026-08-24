@@ -175,7 +175,7 @@ pub(crate) fn aligned_f32_view(bytes: &[u8]) -> Option<&[f32]> {
     Some(unsafe { core::slice::from_raw_parts(bytes.as_ptr().cast::<f32>(), bytes.len() / float_size) })
 }
 
-fn find_tensor<'a>(parsed: &'a ParsedGguf, name: &str) -> Result<&'a TensorInfo, InteropError> {
+pub(crate) fn find_tensor<'a>(parsed: &'a ParsedGguf, name: &str) -> Result<&'a TensorInfo, InteropError> {
     parsed
         .tensors
         .iter()
@@ -342,14 +342,14 @@ pub fn architecture_from_metadata(parsed: &ParsedGguf) -> Result<ModelArchitectu
     })
 }
 
-fn metadata_str<'parsed>(parsed: &'parsed ParsedGguf, key: &str) -> Result<&'parsed str, InteropError> {
+pub(crate) fn metadata_str<'parsed>(parsed: &'parsed ParsedGguf, key: &str) -> Result<&'parsed str, InteropError> {
     parsed
         .metadata_value(key)
         .and_then(MetadataValue::as_str)
         .ok_or_else(|| InteropError::MissingMetadataKey { key: key.into() })
 }
 
-fn metadata_u32(parsed: &ParsedGguf, key: &str) -> Result<u32, InteropError> {
+pub(crate) fn metadata_u32(parsed: &ParsedGguf, key: &str) -> Result<u32, InteropError> {
     parsed
         .metadata_value(key)
         .and_then(MetadataValue::as_u32)
@@ -361,7 +361,7 @@ fn metadata_u32(parsed: &ParsedGguf, key: &str) -> Result<u32, InteropError> {
 /// mixture-of-experts-only key (`expert_count`/`expert_used_count`) that no
 /// dense checkpoint carries, absence is data ("this is not a
 /// mixture-of-experts model"), not a malformed file.
-fn metadata_u32_optional(parsed: &ParsedGguf, key: &str) -> u32 {
+pub(crate) fn metadata_u32_optional(parsed: &ParsedGguf, key: &str) -> u32 {
     metadata_u32_optional_or(parsed, key, 0)
 }
 
@@ -370,7 +370,7 @@ fn metadata_u32_optional(parsed: &ParsedGguf, key: &str) -> u32 {
 /// `key` is absent -- for a key whose absence still has a principled
 /// derived value, unlike a mixture-of-experts-only key where `0` genuinely
 /// means "not present."
-fn metadata_u32_optional_or(parsed: &ParsedGguf, key: &str, default: u32) -> u32 {
+pub(crate) fn metadata_u32_optional_or(parsed: &ParsedGguf, key: &str, default: u32) -> u32 {
     parsed.metadata_value(key).and_then(MetadataValue::as_u32).unwrap_or(default)
 }
 
@@ -440,7 +440,7 @@ fn uniform_u32_array(key: &str, values: impl Iterator<Item = u32>) -> Result<u32
 /// both float widths and nothing in the format's own spec forbids a
 /// writer choosing `F64`, so this reads whichever the checkpoint actually
 /// declares.
-fn metadata_f32_optional(parsed: &ParsedGguf, key: &str, default: f32) -> f32 {
+pub(crate) fn metadata_f32_optional(parsed: &ParsedGguf, key: &str, default: f32) -> f32 {
     match parsed.metadata_value(key) {
         Some(MetadataValue::F32(value)) => *value,
         Some(MetadataValue::F64(value)) => *value as f32,
@@ -448,7 +448,7 @@ fn metadata_f32_optional(parsed: &ParsedGguf, key: &str, default: f32) -> f32 {
     }
 }
 
-fn vocab_from_token_embedding(parsed: &ParsedGguf, embedding: u32) -> Result<u32, InteropError> {
+pub(crate) fn vocab_from_token_embedding(parsed: &ParsedGguf, embedding: u32) -> Result<u32, InteropError> {
     let tensor = find_tensor(parsed, "token_embd.weight")?;
     let elements = tensor.element_count();
     let divisor = u64::from(embedding);
@@ -494,15 +494,37 @@ pub(crate) fn bind_dense<'file>(
     name: alloc::string::String,
     state: &mut BoundWeights<'file>,
 ) -> Result<(), InteropError> {
-    match gguf_tensor_as_packed_block(parsed, file_bytes, &name) {
+    bind_dense_as(parsed, file_bytes, &name.clone(), name, state)
+}
+
+/// [`bind_dense`]'s underlying step, split out so a caller whose real
+/// on-disk tensor is named differently than the forward program's own
+/// `Input` (`crate::lfm2`'s tied-embedding output projection and
+/// differently-named final norm, both confirmed on the real LFM2.5-8B-A1B
+/// checkpoint) can bind `source_name`'s bytes under `target_name` without
+/// duplicating this function's body. `bind_dense` is exactly this with
+/// `source_name == target_name`.
+///
+/// # Errors
+///
+/// See [`bind_dense`].
+#[cfg(feature = "std")]
+pub(crate) fn bind_dense_as<'file>(
+    parsed: &ParsedGguf,
+    file_bytes: &'file [u8],
+    source_name: &str,
+    target_name: alloc::string::String,
+    state: &mut BoundWeights<'file>,
+) -> Result<(), InteropError> {
+    match gguf_tensor_as_packed_block(parsed, file_bytes, source_name) {
         Ok(block @ proxima_tensor::cpu::QuantizedBlock::Float32(borrowed)) => {
             state.resident_bytes += core::mem::size_of_val(borrowed);
-            state.packed.push((name, block));
+            state.packed.push((target_name, block));
         }
         Ok(_) | Err(_) => {
-            let decoded = gguf_tensor_as_f32(parsed, file_bytes, &name)?;
+            let decoded = gguf_tensor_as_f32(parsed, file_bytes, source_name)?;
             state.resident_bytes += decoded.len() * core::mem::size_of::<f32>();
-            state.owned.push((name, decoded));
+            state.owned.push((target_name, decoded));
         }
     }
     Ok(())
@@ -532,12 +554,37 @@ pub(crate) fn bind_matmul_weight<'file>(
     in_dim: usize,
     state: &mut BoundWeights<'file>,
 ) -> Result<(), InteropError> {
-    match gguf_tensor_as_packed_block(parsed, file_bytes, &name) {
-        Ok(block) => state.packed.push((name, block)),
+    bind_matmul_weight_as(parsed, file_bytes, &name.clone(), name, out_dim, in_dim, state)
+}
+
+/// [`bind_matmul_weight`]'s underlying step, split out the same way
+/// [`bind_dense_as`] is: a caller whose real on-disk tensor and the
+/// forward program's own `Input` name disagree (`crate::lfm2`'s tied
+/// output projection, bound from the real `token_embd.weight` tensor
+/// under the program's own `output.weight` alias) binds `source_name`'s
+/// bytes under `target_name` directly, instead of duplicating this
+/// function's body under a new name.
+///
+/// # Errors
+///
+/// See [`bind_matmul_weight`].
+#[cfg(feature = "std")]
+pub(crate) fn bind_matmul_weight_as<'file>(
+    parsed: &ParsedGguf,
+    file_bytes: &'file [u8],
+    source_name: &str,
+    target_name: alloc::string::String,
+    out_dim: usize,
+    in_dim: usize,
+    state: &mut BoundWeights<'file>,
+) -> Result<(), InteropError> {
+    match gguf_tensor_as_packed_block(parsed, file_bytes, source_name) {
+        Ok(block) => state.packed.push((target_name, block)),
         Err(_) => {
-            let decoded = gguf_tensor_as_f32(parsed, file_bytes, &name)?;
+            let decoded = gguf_tensor_as_f32(parsed, file_bytes, source_name)?;
             state.resident_bytes += decoded.len() * core::mem::size_of::<f32>();
-            state.owned.push((name.clone(), transpose_out_in_to_in_out(&decoded, &name, out_dim, in_dim)?));
+            let transposed = transpose_out_in_to_in_out(&decoded, source_name, out_dim, in_dim)?;
+            state.owned.push((target_name, transposed));
         }
     }
     Ok(())
@@ -698,7 +745,7 @@ fn bind_moe_stacked_experts<'file>(
 // `append_mistral_moe_layer` (proxima-tensor/src/spec.rs) carry for the
 // identical MoE shape, not accidental complexity.
 #[allow(clippy::too_many_arguments)]
-fn bind_moe_expert_weights<'file>(
+pub(crate) fn bind_moe_expert_weights<'file>(
     parsed: &ParsedGguf,
     file_bytes: &'file [u8],
     layer: u32,

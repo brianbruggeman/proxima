@@ -208,4 +208,37 @@ pub enum InteropError {
     /// typed, named gap rather than a silent wrong bind.
     #[error("checkpoint has expert_count={expert_count}, but hf mixture-of-experts weight binding is not implemented (dense hf checkpoints only)")]
     HfMoeWeightsUnsupported { expert_count: u32 },
+
+    /// [`crate::lfm2::split_shortconv_in_proj`]'s fused `blk.{layer}.shortconv.in_proj.weight`
+    /// did not have exactly `3 * embedding * embedding` elements -- the
+    /// real checkpoint's own declared shape disagrees with the
+    /// `embedding` this call derived from `lfm2moe.embedding_length`.
+    #[error(
+        "blk.{layer}.shortconv.in_proj.weight has {elements} elements, but embedding={embedding} needs {expected} (3 * embedding * embedding)"
+    )]
+    ShortConvInProjShapeMismatch {
+        layer: u32,
+        elements: u64,
+        embedding: u32,
+        expected: u64,
+    },
+
+    /// [`crate::lfm2::bind_lfm2_shortconv_in_proj`]'s row-split precondition:
+    /// `embedding` (the row width, GGUF's `in_dim` axis) is not a whole
+    /// multiple of the fused tensor's own codec `block_elements` -- never
+    /// observed on the real checkpoint (`embedding = 2048 = 8 * 256`), but
+    /// a row-boundary split is only provably block-aligned when this holds,
+    /// so it is checked rather than assumed.
+    #[error("blk.{layer}.shortconv.in_proj.weight has ggml type {ggml_type:?}, whose block size does not evenly divide embedding={embedding}")]
+    ShortConvInProjNotBlockAligned { layer: u32, ggml_type: GgmlType, embedding: u32 },
+
+    /// [`crate::lfm2::lfm2_architecture_from_metadata`]'s `key` (e.g.
+    /// `lfm2moe.attention.head_count_kv`) is a per-layer array whose
+    /// nonzero entries (the real attention layers' own kv head count)
+    /// disagree with each other -- the zero entries (convolution layers)
+    /// are expected and skipped, but every attention layer must still
+    /// share one real kv head count for [`crate::lfm2::Lfm2Architecture::kv_heads`]
+    /// to mean anything.
+    #[error("gguf metadata key {key:?} has {distinct_values} distinct nonzero per-layer values; Lfm2Architecture cannot represent per-layer variation")]
+    HeterogeneousNonzeroMetadataArray { key: String, distinct_values: usize },
 }
