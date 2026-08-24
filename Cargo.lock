@@ -3834,6 +3834,7 @@ dependencies = [
  "proxima-tokenizer",
  "serde",
  "thiserror 2.0.19",
+ "toml 0.8.23",
 ]
 
 [[package]]
