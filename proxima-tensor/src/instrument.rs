@@ -1245,6 +1245,77 @@ pub static STAGED_MATMUL_QUANTIZE_TICKS: Counter = Counter::new("proxima_tensor.
 #[cfg(feature = "tensor-cohort")]
 pub use prime::os::cohort::diag as cohort;
 
+/// Per-step-reset attribution of the CALLING (leader) thread's own wall
+/// clock inside every `CohortSession::run`/`run_with_completion` call this
+/// step made — the instrumentation `docs/discipline.md` ROW 130 named and
+/// did not build. Every field is nanoseconds on the calling thread's own
+/// timeline, never a sum across the cohort's other worker threads: those
+/// run concurrently with the leader, not serially inside its wall clock, so
+/// summing their ticks in would not sum to the step's own wall time.
+///
+/// - `kernel_nanos`: time strictly inside `CohortRound::run_chunk` for
+///   chunks the leader itself claimed (`prime::os::cohort::diag::SLOT_KERNEL_NANOS[0]`).
+/// - `dispatch_nanos`: round setup (control-block reset, `round` publish,
+///   issuing unparks) plus the leader's own claim-loop overhead (the cursor
+///   `fetch_add`, the completion check, the `catch_unwind` wrapper) around
+///   chunks that were not kernel time — everything the calling thread pays
+///   to DISPATCH work, whether to itself or to other members.
+/// - `park_spin_wake_nanos`: the calling thread's own wait for chunk
+///   completion after its own claim loop ran dry — the tail spin-wait
+///   (`prime::os::cohort::diag::LEADER_SPIN_NANOS`) plus the time spent
+///   issuing unpark wakeups (`UNPARK_NANOS`, itself a wait-adjacent action:
+///   it exists only because something is parked waiting to be told to stop).
+#[cfg(feature = "tensor-cohort")]
+#[derive(Debug, Clone, Copy, Default)]
+pub struct CohortLeaderAttribution {
+    pub kernel_nanos: u64,
+    pub dispatch_nanos: u64,
+    pub park_spin_wake_nanos: u64,
+}
+
+/// Reads the leader-thread attribution accumulated since the last
+/// [`reset_cohort_attribution`] (or process start, before any reset).
+#[cfg(feature = "tensor-cohort")]
+#[must_use]
+pub fn cohort_leader_attribution() -> CohortLeaderAttribution {
+    let leader_kernel = cohort::SLOT_KERNEL_NANOS[0].load(Ordering::Relaxed);
+    let leader_compute = cohort::SLOT_COMPUTE_NANOS[0].load(Ordering::Relaxed);
+    let leader_claim_overhead = leader_compute.saturating_sub(leader_kernel);
+    let setup = cohort::LEADER_SETUP_NANOS.load(Ordering::Relaxed);
+    let spin = cohort::LEADER_SPIN_NANOS.load(Ordering::Relaxed);
+    let unpark = cohort::UNPARK_NANOS.load(Ordering::Relaxed);
+    CohortLeaderAttribution {
+        kernel_nanos: leader_kernel,
+        dispatch_nanos: setup + leader_claim_overhead,
+        park_spin_wake_nanos: spin + unpark,
+    }
+}
+
+/// Zeroes every cohort diag counter — the leader-attribution fields above
+/// plus every field [`cohort`] already carried (rounds/parks/spin
+/// hits/per-slot claim latencies). One call so a caller resetting for a new
+/// decode step does not have to enumerate the cohort's own internals.
+#[cfg(feature = "tensor-cohort")]
+pub fn reset_cohort_attribution() {
+    cohort::reset();
+}
+
+/// Resets every counter this module's `evaluate_ms` decomposition depends
+/// on, in one call — matmul dispatch, serial bookkeeping, op-kind dispatch,
+/// and (when `tensor-cohort` is enabled) the cohort's own leader
+/// attribution. Intended to be called once at the START of a decode step,
+/// paired with a read of the same families at the step's end, so a single
+/// step's cost is measured directly rather than inferred by differencing
+/// two process launches (`docs/discipline.md` ROW 130's own postmortem).
+pub fn reset_step() {
+    reset_matmul_dispatch();
+    reset_serial();
+    reset_path();
+    reset_parallel();
+    #[cfg(feature = "tensor-cohort")]
+    reset_cohort_attribution();
+}
+
 // achieved-ns/element investigation (nsper task, 2026-08-21): `body_shape`
 // (`cpu.rs`'s `BodyShape` enum) is a DIFFERENT axis from `Path`
 // (`WidthFast`/`Generic`, the affine-operand fast-path gate) -- a `Generic`
