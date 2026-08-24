@@ -13048,3 +13048,47 @@ That last line is the finding in miniature: the original test passing while the 
 - `cargo nextest run -p proxima-tensor --features std,instrument correct_packed_matmul_layouts_derives`
 - `cargo nextest run -p proxima-tensor --features std,instrument catches_a_transposed_block_weight`
 - `cargo nextest run -p proxima-tensor --features std,instrument causal_conv1d` (the single-channel test and its multi-channel companion)
+
+## ROW 136 — ROW 135's own fix was still MISSING from `spec.rs`; landed it, re-measured the real checkpoint relative-diff sweep, and found a SECOND, larger, unfixed defect one layer later
+
+Commits `6a36a41` (the `causal_conv1d` fix itself), `b39a23d`/`f33dc4b`/`7ce8177` (tooling). `proxima-tensor --features std,instrument` 403 (unchanged -- ROW 135's own commit already added the test count this row's fix makes green). `proxima-model-interop --features std` 70. `omega` 94. Workspace 5665. Clippy exit 0.
+
+**ROW 135 documented the bug and added two ADJACENT discriminator tests, but the actual one-line fix in `causal_conv1d` (`spec.rs:1903`, `"ld->sld"` -> `"dl->sld"`) and its caller's shape (`spec.rs:2272`, `[l_cache, embedding]` -> `[embedding, l_cache]`) were still absent from `HEAD` when this row started** (`git show HEAD:proxima-tensor/src/spec.rs | grep 'ld->sld'` still matched). Landed both, plus a third multi-channel test (`causal_conv1d_keeps_channels_independent_and_catches_a_transposed_weight`) proved to fail under the reverted map (`ExtentMismatch`, all three `causal_conv1d` tests red) and to pass under the fix.
+
+**Measured on the real checkpoint, before and after, relative to each layer's OWN oracle scale (`max_abs_diff / oracle_max_abs`) rather than an absolute cutoff — the fix this whole investigation exists to make, per `lfm2_layer_oracle_diff.rs`'s own updated doc:**
+
+| label | relative_diff BEFORE | relative_diff AFTER |
+|---|---|---|
+| `inp_embd` (`model.embed_tokens`, not the dead `inp_embd` name — see below) | 0 (bit-exact) | 0 (bit-exact, unchanged) |
+| `l_out-0` (shortconv) | **0.805** | **0.011** |
+| `l_out-1` (shortconv) | **0.445** | **0.012** |
+| `l_out-2` (attention, first MoE layer) | 2.030 | **1.231** (unchanged by this fix — see below) |
+
+**Prime suspect #3 (`inp_embd`) is REFUTED with a code read, not an assumption.** `oracle_dump.cpp`'s own `dump_ctx.targets.push_back({"inp_embd", false, {}})` names `build_inp_embd`'s raw-embedding INPUT LEAF (`llama-graph.cpp:2322`) — live only on the never-exercised vector-embeddings path, and a pure input leaf never reaches the eval callback either way, so this target has NEVER produced a file. The real, computed embedding-lookup result is named one line after `build_inp_embd` returns, in `models/lfm2.cpp:236-237`: `cb(cur, "model.embed_tokens", -1)`. Rebuilt the probe with this target added; the real checkpoint's own gather is **bit-exact**, `max_abs_diff = 0.0`, `ours=0.001519 theirs=0.001519` at the worst position. `token_embd_norm.weight` (also named a suspect) was independently confirmed bound as `output_norm.weight` (final norm, not embedding norm) at `proxima-model-interop/src/lfm2.rs:388` -- matches llama.cpp's own `LLM_TENSOR_OUTPUT_NORM_LFM2` remap (`llama-arch.cpp:409`, comment "fix for wrong tensor name"). Neither suspect is live.
+
+**Within-layer-0 bisection, in program order, relative to oracle scale (`lfm2_dense_mixer_diff.rs`, new this row):**
+
+| node | BEFORE | AFTER |
+|---|---|---|
+| `normed` (mixer rmsnorm output) | 2.8e-8 | 2.8e-8 (unchanged, already exact) |
+| `branch_b`/`branch_x`/`branch_c` (post-projection) | 0.0044 / 0.0054 / 0.0059 | unchanged |
+| `convolved` (post causal-conv, PRE C-gate) | **3.78** | **0.0054** |
+| `mixer_out` / `post_mixer` | **0.86** / **0.84** | **0.0069** / **0.0067** |
+
+`convolved` is the ONLY node between the correct projections and the broken mixer output, and it is the ONLY node that reads `conv_weight` — the fix's own target. **Root cause, proven exactly, no longer a hypothesis:** `causal_conv1d`'s tap-weight map read a `[embedding, l_cache]`-shaped buffer as if it were `[l_cache, embedding]`. `row_major_strides` (`bind.rs:1065-1073`) makes the LAST declared shape axis fastest; GGUF's own `ne[0] = l_cache` (confirmed against `llama.cpp`'s `create_tensor(.., {n_shortconv_l_cache, n_embd}, ..)`, `models/lfm2moe.cpp`) is ggml's fastest axis; `bind_dense_as` (`proxima-model-interop/src/bind.rs:526-545`, off-limits this session) loads the tensor's bytes raw, with no transpose, correct only for a genuine rank-1 vector. `blk.{layer}.shortconv.conv.weight` is Q4_K_M's own tiny `F32`, `dims=[3, 2048]` (measured directly from the parsed GGUF tensor directory) — a real rank-2 tensor the binder never transposed. Blocks 0 and 1 are the model's only two dense-FFN, shortconv layers, so this corrupted the residual stream from the very first layer.
+
+**A SECOND, UNFIXED, LARGER defect starts at `l_out-2` (the first attention+MoE layer) and this fix does not touch it.** `l_out-2`'s relative divergence barely moved (2.03 -> 1.23) because layer 2's OWN mixer is attention, not shortconv — my fix only touches `causal_conv1d`. Bisected the same way (`lfm2_moe_route_diff.rs`, extended this row to resolve attention layers' own `self_attn.out_proj` oracle name instead of the hardcoded `conv.out_proj`, which silently found nothing for every attention layer before this row):
+
+- `mixer_out` (attention's own pre-residual output): matches oracle within noise (`max_abs_diff=0.0054`).
+- `post_mixer`/`normed2` (FFN's own gated input): also within noise at the SPECIFIC sign-flipped position the full sweep named (`token=1, dim=126`: `ours=0.010558 theirs=0.010615`).
+- **The MoE gate's own raw logits, for the SAME (token, expert) pair, are on a completely different scale and sign**: `ours≈0.20..1.33`, `theirs≈-2.82..-3.98` (`lfm2_moe_route_diff.rs`'s own gate-pipeline table, layer 2). Expert selection diverges almost completely (23/24 token/round picks disagree).
+- **Root cause traced, not fixed (file is off-limits this session).** `blk.{layer}.ffn_gate_inp.weight` is ALSO the checkpoint's own tiny `F32` (measured: `dims=[2048, 32]`). It binds via `bind_matmul_weight_as` (`proxima-model-interop/src/bind.rs:586-605`), whose own doc claims F32 "falls back to dequantize-then-transpose" — but `gguf_tensor_as_packed_block` (`bind.rs:136-160`) returns `Ok(QuantizedBlock::Float32(..))` for ANY aligned F32 tensor, and GGUF's own byte-alignment padding makes real tensors aligned in the common case, so the `Err(_) => {..transpose..}` arm the doc describes is **not reached** for this tensor. The packed `Float32` block is then REJECTED by the dedicated quantized fast-matmul path (`cpu.rs`'s `run_reduce_quantized`, `QuantizedBlock::Float32(_) => return Err(shape_error())` at three call sites, confirmed by grep) and falls to the generic elementwise+reduce evaluator, which derives strides from the crate's own last-axis-fastest convention with NO native-layout correction — because `correct_packed_matmul_layouts`/`native_packed_layout` (`bind.rs:1105-1168`, the exact mechanism that WOULD fix this) has **zero call sites outside its own unit test** (`grep -rn correct_packed_matmul_layouts` across `proxima-tensor/src` and `proxima-model-interop/src`), i.e. it is a tested, unwired primitive, never invoked by the real evaluation path `lfm2_forward_values` actually runs.
+
+**Where the fix belongs, for whoever next holds `proxima-model-interop/src/bind.rs`:** either make `bind_matmul_weight_as`'s packed-F32 branch actually transpose (skip `gguf_tensor_as_packed_block`'s success for a matmul-weight caller, or reject `QuantizedBlock::Float32` there the same way `run_reduce_quantized` already does), or wire `correct_packed_matmul_layouts` into the production evaluation path it currently never reaches.
+
+**Re-prove commands:**
+- `cargo nextest run -p proxima-tensor --features std,instrument causal_conv1d` (all three tests, including the new multi-channel one)
+- `cargo run --release -p proxima-model-interop --features std,instrument --example lfm2_layer_oracle_diff -- /Users/brianbruggeman/.lmstudio/models/LiquidAI/LFM2.5-8B-A1B-GGUF/LFM2.5-8B-A1B-Q4_K_M.gguf <oracle_dir> "The capital of France is"` (the relative-diff sweep, `inp_embd` first)
+- `cargo run --release -p proxima-model-interop --features std --example lfm2_dense_mixer_diff -- <model> <oracle_dir> "The capital of France is" 0` (layer-0 within-layer bisection)
+- `cargo run --release -p proxima-model-interop --features std --example lfm2_moe_route_diff -- <model> <oracle_dir> "The capital of France is" 2` (layer-2 gate-logit divergence)
+- `grep -rn correct_packed_matmul_layouts proxima-tensor/src proxima-model-interop/src` (expect zero call sites outside `bind.rs`'s own test module — the unwired mechanism)
