@@ -567,6 +567,7 @@ impl BoundOpBuilder {
                     if !fuses {
                         self.materialize_if_held(*operand_node, shapes, &mut emitted)?;
                     }
+                    self.materialize_computed_indices(map, shapes, &mut emitted)?;
                 }
                 self.held.borrow_mut().insert(
                     node,
@@ -594,6 +595,7 @@ impl BoundOpBuilder {
                     compose_fused_operands(shapes, &self.held, reduce.operand, &reduce.in_map)
                 } else {
                     self.materialize_if_held(reduce.operand, shapes, &mut emitted)?;
+                    self.materialize_computed_indices(&reduce.in_map, shapes, &mut emitted)?;
                     let operand = build_operand(reduce.operand, &reduce.in_map, shapes);
                     (ComposedBody::leaf(ScalarOp::Identity), vec![operand])
                 };
@@ -642,6 +644,28 @@ impl BoundOpBuilder {
         }
         built.reverse();
         Ok(built)
+    }
+
+    /// A [`IndexMap::Computed`]'s `indices` is a backwards [`NodeId`]
+    /// reference that never appears in any op's own `operands` list — it
+    /// only ever lives inside a sibling operand's *map* — so the operand
+    /// walk in [`Self::push`] must force it here too, or a lone held
+    /// `Elementwise` reached only this way sits un-materialized past the
+    /// point a gather reads it (`docs/discipline.md` ROW 131 Limitation 2).
+    /// `indices` is always read as a plain buffer at evaluation time
+    /// ([`build_operand`]'s `Lookup`, never composed through by
+    /// [`compose_operand`]), so unlike `operand_node` this is unconditional
+    /// — there is no fusion path for it to opt out of.
+    fn materialize_computed_indices(
+        &self,
+        map: &IndexMap,
+        shapes: &Shapes,
+        emitted: &mut ReadyBatch,
+    ) -> Result<(), TensorError> {
+        if let IndexMap::Computed { indices, .. } = map {
+            self.materialize_if_held(*indices, shapes, emitted)?;
+        }
+        Ok(())
     }
 
     fn materialize_if_held(
@@ -2047,5 +2071,112 @@ mod tests {
         assert_eq!(built_via_pipe, built_via_free_function);
         assert_eq!(built_via_pipe.len(), 1, "matmul fuses into one op");
         assert_eq!(built_via_pipe[0].node, sum);
+    }
+
+    /// `docs/discipline.md` ROW 131 Limitation 2: a lone dtype-relabelling
+    /// `Elementwise` (`indices_node`) is reached only through a sibling
+    /// operand's `IndexMap::Computed { indices, .. }` field -- never through
+    /// its own entry in any op's `operands` list. `gathered`'s first
+    /// consumer (`first_use`) is not `gathered`'s *last* use, so `push`
+    /// force-materializes `gathered` standalone, right there, long before
+    /// the program ends -- while `indices_node`, visited by nothing but the
+    /// map field this walk used to skip, would otherwise sit `held` until
+    /// `finish`'s end-of-program sweep and land in `resolved` after the very
+    /// op that reads its buffer. This is the exact shape the LFM2 causal
+    /// conv gather hit (`spec.rs`'s `causal_conv1d`, which works around it
+    /// by routing its own index through an `Op::Reduce` instead).
+    fn computed_index_via_lone_elementwise_program() -> (Vec<Op>, NodeId) {
+        let mut program = Vec::new();
+        let base = append(
+            &mut program,
+            Op::Input {
+                dtype: DType::Float32,
+                shape: alloc::vec![Extent::Static(4)],
+                name: None,
+            },
+        );
+        let identity = || IndexMap::Affine(map::projection(1, &[0]));
+        let index_seed = append(
+            &mut program,
+            Op::Iota {
+                dtype: DType::Float32,
+                extent: Extent::Static(4),
+            },
+        );
+        let indices_node = append(
+            &mut program,
+            Op::Elementwise {
+                dtype: DType::Int32,
+                body: ScalarOp::Identity,
+                operands: alloc::vec![(index_seed, identity())],
+                name: None,
+            },
+        );
+        let gathered_map = IndexMap::Computed {
+            indices: indices_node,
+            index_map: map::projection(1, &[0]),
+            base: IndexPattern {
+                iter_rank: 1,
+                axes: alloc::vec![AxisIndex::default()],
+            },
+            gathered_dim: 0,
+        };
+        let gathered = append(
+            &mut program,
+            Op::Elementwise {
+                dtype: DType::Float32,
+                body: ScalarOp::Identity,
+                operands: alloc::vec![(base, gathered_map)],
+                name: None,
+            },
+        );
+        let first_use = append(
+            &mut program,
+            Op::Elementwise {
+                dtype: DType::Float32,
+                body: ScalarOp::Identity,
+                operands: alloc::vec![(gathered, identity())],
+                name: None,
+            },
+        );
+        let second_use = append(
+            &mut program,
+            Op::Elementwise {
+                dtype: DType::Float32,
+                body: ScalarOp::Add,
+                operands: alloc::vec![(gathered, identity()), (first_use, identity())],
+                name: None,
+            },
+        );
+        (program, second_use)
+    }
+
+    #[test]
+    fn a_computed_index_reached_only_through_a_sibling_map_is_materialized_before_the_gather_reads_it()
+     {
+        let (program, output) = computed_index_via_lone_elementwise_program();
+        let shapes = shape::infer(&program, &[]).expect("computed-index program infers");
+        let base_data: Vec<f32> = alloc::vec![10.0, 20.0, 30.0, 40.0];
+
+        let built = bind(&program, &shapes, &[output]).expect("binding itself never errors");
+        let indices_position = built
+            .iter()
+            .position(|op| matches!(op.kind, BoundOpKind::Elementwise { .. }) && op.dtype == DType::Int32)
+            .expect("the indices node must appear as its own BoundOp");
+        let gather_position = built
+            .iter()
+            .position(|op| op.operands().iter().any(|(_, _, lookup)| lookup.is_some()))
+            .expect("the gathering node must appear as its own BoundOp");
+        assert!(
+            indices_position < gather_position,
+            "resolved must stay topologically ordered: the indices node ({indices_position}) \
+             must be built before the gather that reads it ({gather_position}), got {built:#?}"
+        );
+
+        let evaluated = crate::cpu::evaluate(&program, &[], &[&base_data], &[output]);
+        assert!(
+            evaluated.is_ok(),
+            "the gather's indices buffer must be ready by the time the gather runs: {evaluated:?}"
+        );
     }
 }
