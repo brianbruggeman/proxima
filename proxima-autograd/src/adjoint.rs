@@ -229,7 +229,16 @@ pub fn differentiate(program: &[Op], loss: NodeId) -> Result<Differentiated, Aut
         }
     }
 
-    let gradients = program
+    // `program[..=loss_index]`, not the full `program` slice: `grad_of` is
+    // sized `loss_index + 1` on purpose (this crate's own differentiate
+    // never needs a node past the loss to compute anything), and a caller
+    // is free to hand `differentiate` a `program` that keeps growing PAST
+    // `loss` -- e.g. a second, later loss node on the same forward graph
+    // (`proxima-autograd/tests/actor_critic.rs`'s two-loss-node actor-critic
+    // program). Indexing `grad_of` by every `Op::Input` in the FULL
+    // `program` would walk off the end of `grad_of` the moment any such
+    // later node existed.
+    let gradients = program[..=loss_index]
         .iter()
         .enumerate()
         .filter(|(_, op)| matches!(op, Op::Input { .. }))
