@@ -876,6 +876,24 @@ fn gathered_expert_product(program: &mut Vec<Op>, stack: NodeId, route: NodeId, 
     )
 }
 
+/// Which function turns a MoE gate's raw logits into per-expert routing
+/// scores -- llama.cpp's own `llama_expert_gating_func_type`
+/// (`llama-hparams.h:11-14`), read from a checkpoint's own
+/// `{architecture}.expert_gating_func` metadata key when present.
+/// `Softmax` is llama.cpp's own fallback when that key is absent
+/// (`llama-model.cpp:1237-1240`, "existing models that have no
+/// `expert_gating_func` model parameter set") -- Mixtral carries no such
+/// key, so [`append_mistral_moe_layer`]/[`append_mistral_cached_moe_layer`]
+/// always pass `Softmax` unconditionally rather than reading a key that
+/// does not exist on that checkpoint. `Sigmoid` is `_TYPE_SIGMOID` (`2`),
+/// LFM2's own value (`transformers/models/lfm2_moe/modeling_lfm2_moe.py:209`'s
+/// `router_logits.sigmoid()`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExpertGatingFunc {
+    Softmax,
+    Sigmoid,
+}
+
 /// The routed feed-forward `specs/moe_block.toml`/`specs/moe_topk2_probe.toml`
 /// describe: a gate projects `x` to one logit per expert, `expert_used_count`
 /// rounds of top-1 argmax-with-exclusion each route one token to one more
@@ -884,11 +902,22 @@ fn gathered_expert_product(program: &mut Vec<Op>, stack: NodeId, route: NodeId, 
 /// `Op`/`ScalarOp` variant, unrolled at spec-build time the same way this
 /// whole function is), and each round's gathered expert runs the same
 /// SwiGLU [`append_mistral_layer`]'s dense path uses, weighted by its own
-/// softmax share among only the selected experts
-/// (`weight_r = exp(max_logit_r - max_logit_0)`, shifted the same way
-/// [`append_mistral_layer`]'s attention softmax shifts by its own running
-/// max so nothing overflows) — the standard Mixtral combination formula,
-/// not the topk2 probe's own simpler unweighted sum.
+/// share among only the selected experts.
+///
+/// `gating` picks how raw `logits` become the per-expert `scores` used both
+/// to select AND (absent a bias) to weight experts:
+/// [`ExpertGatingFunc::Softmax`] leaves `scores` aliased to `logits` --
+/// `weight_r = exp(max_logit_r - max_logit_0)` then a final
+/// divide-by-`weight_total` is *exactly* softmax restricted to the selected
+/// top-k and renormalized (the standard Mixtral combination formula), so
+/// this never diverges by so much as one node from the code this function
+/// has always built. [`ExpertGatingFunc::Sigmoid`] materializes
+/// `sigmoid(logits)` up front via the same `Negate`+`Exponential`+`Add(1)`+
+/// `Reciprocal` construction the dense SwiGLU path already builds
+/// (`spec.rs`'s own `silu_gate` node a few lines below this one) --
+/// `ScalarOp` gained no `Sigmoid` variant for this, since the four ops
+/// already existed for a different consumer.
+///
 #[allow(clippy::too_many_arguments)]
 fn append_moe_ffn(
     program: &mut Vec<Op>,
@@ -900,6 +929,7 @@ fn append_moe_ffn(
     expert_count: u32,
     expert_used_count: u32,
     ones: NodeId,
+    gating: ExpertGatingFunc,
 ) -> Result<NodeId, TensorError> {
     if expert_used_count == 0 || expert_used_count > expert_count {
         return Err(TensorError::InvalidExpertConfig {
@@ -909,24 +939,45 @@ fn append_moe_ffn(
     }
 
     let gate_product = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(x, "sd->sde"), (gate_inp, "de->sde")])?;
-    let mut logits = reduce(program, DType::Float32, ScalarOp::Add, ReduceInit::Zero, gate_product, "sde->sde", "se->sde")?;
+    let logits = reduce(program, DType::Float32, ScalarOp::Add, ReduceInit::Zero, gate_product, "sde->sde", "se->sde")?;
+
+    let scores = match gating {
+        ExpertGatingFunc::Softmax => logits,
+        ExpertGatingFunc::Sigmoid => {
+            let neg_logits = elementwise(program, DType::Float32, ScalarOp::Negate, &[(logits, "se->se")])?;
+            let exp_neg_logits = elementwise(program, DType::Float32, ScalarOp::Exponential, &[(neg_logits, "se->se")])?;
+            let one_plus_exp = elementwise(program, DType::Float32, ScalarOp::Add, &[(exp_neg_logits, "se->se"), (ones, "->se")])?;
+            elementwise(program, DType::Float32, ScalarOp::Reciprocal, &[(one_plus_exp, "se->se")])?
+        }
+    };
+    let mut selection_scores = scores;
 
     let expert_index = op::append(program, Op::Iota { dtype: DType::Float32, extent: Extent::Static(expert_count) });
     let neg_infinity = scalar_constant(program, f32::NEG_INFINITY);
 
     let mut weighted_sum: Option<NodeId> = None;
     let mut weight_total: Option<NodeId> = None;
-    let mut max_logit_0: Option<NodeId> = None;
+    let mut max_selection_0: Option<NodeId> = None;
 
     for round in 0..expert_used_count {
-        let max_logit = reduce(program, DType::Float32, ScalarOp::Maximum, ReduceInit::NegativeInfinity, logits, "se->se", "s->se")?;
-        let mask = elementwise(program, DType::Float32, ScalarOp::Equal, &[(logits, "se->se"), (max_logit, "s->se")])?;
+        let max_selection = reduce(program, DType::Float32, ScalarOp::Maximum, ReduceInit::NegativeInfinity, selection_scores, "se->se", "s->se")?;
+        let mask = elementwise(program, DType::Float32, ScalarOp::Equal, &[(selection_scores, "se->se"), (max_selection, "s->se")])?;
         let candidate = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(mask, "se->se"), (expert_index, "e->se")])?;
         let route = reduce(program, DType::Int32, ScalarOp::Maximum, ReduceInit::Zero, candidate, "se->se", "s->se")?;
 
-        let first_max = *max_logit_0.get_or_insert(max_logit);
-        let shifted = elementwise(program, DType::Float32, ScalarOp::Subtract, &[(max_logit, "s->s"), (first_max, "s->s")])?;
-        let weight = elementwise(program, DType::Float32, ScalarOp::Exponential, &[(shifted, "s->s")])?;
+        let weight = match gating {
+            ExpertGatingFunc::Softmax => {
+                let first_max = *max_selection_0.get_or_insert(max_selection);
+                let shifted = elementwise(program, DType::Float32, ScalarOp::Subtract, &[(max_selection, "s->s"), (first_max, "s->s")])?;
+                elementwise(program, DType::Float32, ScalarOp::Exponential, &[(shifted, "s->s")])?
+            }
+            ExpertGatingFunc::Sigmoid => {
+                // unbiased `scores` at the masked (selected) position, never
+                // `max_selection` itself -- that would be the biased score.
+                let masked_scores = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(mask, "se->se"), (scores, "se->se")])?;
+                reduce(program, DType::Float32, ScalarOp::Add, ReduceInit::Zero, masked_scores, "se->se", "s->se")?
+            }
+        };
 
         let gate_expert_product = gathered_expert_product(program, expert_w_gate, route, x);
         let gate_expert = reduce(program, DType::Float32, ScalarOp::Add, ReduceInit::Zero, gate_expert_product, "sio->sio", "so->sio")?;
@@ -954,7 +1005,7 @@ fn append_moe_ffn(
         });
 
         if round + 1 < expert_used_count {
-            logits = elementwise(program, DType::Float32, ScalarOp::Select, &[(mask, "se->se"), (neg_infinity, "->se"), (logits, "se->se")])?;
+            selection_scores = elementwise(program, DType::Float32, ScalarOp::Select, &[(mask, "se->se"), (neg_infinity, "->se"), (selection_scores, "se->se")])?;
         }
     }
 
@@ -1082,6 +1133,7 @@ fn append_mistral_moe_layer(
         expert_count,
         expert_used_count,
         ones,
+        ExpertGatingFunc::Softmax,
     )?;
 
     elementwise(program, DType::Float32, ScalarOp::Add, &[(ffn_out, "sd->sd"), (residual1, "sd->sd")])
@@ -1629,6 +1681,7 @@ fn append_mistral_cached_moe_layer(
         expert_count,
         expert_used_count,
         ones,
+        ExpertGatingFunc::Softmax,
     )?;
 
     let x_next = elementwise(program, DType::Float32, ScalarOp::Add, &[(ffn_out, "sd->sd"), (residual1, "sd->sd")])?;
@@ -2216,6 +2269,7 @@ pub fn lfm2_forward_program_with_experts(
                 expert_count,
                 expert_used_count,
                 ones,
+                ExpertGatingFunc::Sigmoid,
             )?
         };
 
@@ -3624,6 +3678,7 @@ shape = ["seq"]
             EXPERT_COUNT,
             EXPERT_USED_COUNT,
             ones,
+            ExpertGatingFunc::Softmax,
         )
         .expect("the routed ffn lowers");
 
@@ -3662,6 +3717,143 @@ shape = ["seq"]
                     (found_value - expected_value).abs() < 1e-4,
                     "token {token}: got {found:?}, expected {expected:?} (independent top-{EXPERT_USED_COUNT} \
                      softmax-weighted swiglu reference)"
+                );
+            }
+        }
+    }
+
+    /// [`ExpertGatingFunc::Sigmoid`]'s independent reference:
+    /// `route_tokens_to_experts` (`modeling_lfm2_moe.py:208-220`) selects
+    /// top-`k` by `sigmoid(logits)`, then weights each selected expert by
+    /// that same `sigmoid(logits)` value, normalized over only the
+    /// selected set. Mirrors [`top_k_routes_and_weights`]'s own shape
+    /// (max-by, retain, normalize) with a sigmoid instead of a softmax.
+    fn sigmoid_topk_routes_and_weights(logits: &[f32], k: usize) -> alloc::vec::Vec<(usize, f32)> {
+        let scores: alloc::vec::Vec<f32> = logits.iter().map(|&logit| 1.0 / (1.0 + (-logit).exp())).collect();
+        let mut remaining: alloc::vec::Vec<usize> = (0..logits.len()).collect();
+        let mut routes = alloc::vec::Vec::new();
+        for _ in 0..k {
+            let winner = *remaining
+                .iter()
+                .max_by(|&&left, &&right| scores[left].partial_cmp(&scores[right]).expect("scores are finite"))
+                .expect("k does not exceed the expert count");
+            routes.push(winner);
+            remaining.retain(|&candidate| candidate != winner);
+        }
+        let total: f32 = routes.iter().map(|&expert| scores[expert]).sum();
+        routes.into_iter().map(|expert| (expert, scores[expert] / total)).collect()
+    }
+
+    /// End-to-end proof for [`append_moe_ffn`]'s `Sigmoid` branch, same
+    /// shape as [`a_routed_ffn_built_by_append_moe_ffn_matches_an_independent_topk_swiglu_reference`]
+    /// (same `x`/`gate_inp`/expert weights, so the same logits `[3, 2, 4]`/
+    /// `[1, 4, 8]` this time run through `sigmoid` instead of `softmax`):
+    /// sigmoid preserves the raw-logit ranking, so both tokens route to the
+    /// same PAIR of experts as the softmax test above -- the only thing
+    /// that must differ is each selected expert's combination WEIGHT, which
+    /// this asserts against an independently computed sigmoid share.
+    #[test]
+    fn a_routed_ffn_built_by_append_moe_ffn_with_sigmoid_gating_matches_an_independent_reference() {
+        const SEQUENCE: usize = 2;
+        const EMBEDDING: usize = 2;
+        const FEED_FORWARD: usize = 2;
+        const EXPERT_COUNT: u32 = 3;
+        const EXPERT_USED_COUNT: u32 = 2;
+
+        let x: [f32; SEQUENCE * EMBEDDING] = [3.0, 2.0, 1.0, 4.0];
+        let gate_inp: [f32; EMBEDDING * EXPERT_COUNT as usize] = [1.0, 0.0, 0.0, 0.0, 1.0, 2.0];
+
+        let gate_weights: [[f32; EMBEDDING * FEED_FORWARD]; 3] =
+            [[1.0, 0.0, 0.0, 1.0], [2.0, 0.0, 0.0, 2.0], [1.0, 1.0, 1.0, 1.0]];
+        let up_weights: [[f32; EMBEDDING * FEED_FORWARD]; 3] =
+            [[1.0, 1.0, 1.0, 1.0], [0.0, 1.0, 1.0, 0.0], [2.0, 0.0, 0.0, 2.0]];
+        let down_weights: [[f32; FEED_FORWARD * EMBEDDING]; 3] =
+            [[1.0, 0.0, 0.0, 1.0], [1.0, 1.0, 1.0, 1.0], [0.0, 1.0, 1.0, 0.0]];
+
+        let stack_experts = |weights: &[[f32; EMBEDDING * FEED_FORWARD]; 3]| -> alloc::vec::Vec<f32> {
+            weights.iter().flatten().copied().collect()
+        };
+        let expert_w_gate = stack_experts(&gate_weights);
+        let expert_w_up = stack_experts(&up_weights);
+        let expert_w_down: alloc::vec::Vec<f32> = down_weights.iter().flatten().copied().collect();
+
+        let mut program = Vec::new();
+        let x_node = input_leaf(&mut program, DType::Float32, alloc::vec![Extent::Symbolic(0), Extent::Static(EMBEDDING as u32)], "x");
+        let gate_inp_node = input_leaf(
+            &mut program,
+            DType::Float32,
+            alloc::vec![Extent::Static(EMBEDDING as u32), Extent::Static(EXPERT_COUNT)],
+            "gate_inp",
+        );
+        let expert_w_gate_node = input_leaf(
+            &mut program,
+            DType::Float32,
+            alloc::vec![Extent::Static(EXPERT_COUNT), Extent::Static(EMBEDDING as u32), Extent::Static(FEED_FORWARD as u32)],
+            "expert_w_gate",
+        );
+        let expert_w_up_node = input_leaf(
+            &mut program,
+            DType::Float32,
+            alloc::vec![Extent::Static(EXPERT_COUNT), Extent::Static(EMBEDDING as u32), Extent::Static(FEED_FORWARD as u32)],
+            "expert_w_up",
+        );
+        let expert_w_down_node = input_leaf(
+            &mut program,
+            DType::Float32,
+            alloc::vec![Extent::Static(EXPERT_COUNT), Extent::Static(FEED_FORWARD as u32), Extent::Static(EMBEDDING as u32)],
+            "expert_w_down",
+        );
+        let ones = scalar_constant(&mut program, 1.0);
+
+        let root = append_moe_ffn(
+            &mut program,
+            x_node,
+            gate_inp_node,
+            expert_w_gate_node,
+            expert_w_up_node,
+            expert_w_down_node,
+            EXPERT_COUNT,
+            EXPERT_USED_COUNT,
+            ones,
+            ExpertGatingFunc::Sigmoid,
+        )
+        .expect("the sigmoid-gated routed ffn lowers");
+
+        let symbols = [SEQUENCE as u64];
+        crate::shape::infer(&program, &symbols).expect("the sigmoid-gated routed ffn infers");
+
+        let blocks: [&[f32]; 5] = [&x, &gate_inp, &expert_w_gate, &expert_w_up, &expert_w_down];
+        let workers = core::num::NonZeroUsize::new(1).expect("one worker is nonzero");
+        let evaluated =
+            crate::cpu::evaluate_parallel(&program, &symbols, &blocks, &[root], workers).expect("the sigmoid-gated routed ffn evaluates");
+        let output = evaluated.root();
+        assert_eq!(output.len(), SEQUENCE * EMBEDDING, "a vacuous output proves nothing");
+
+        for (token, x_row) in x.chunks(EMBEDDING).enumerate() {
+            let logits: alloc::vec::Vec<f32> = (0..EXPERT_COUNT as usize)
+                .map(|expert| (0..EMBEDDING).map(|dim| x_row[dim] * gate_inp[dim * EXPERT_COUNT as usize + expert]).sum())
+                .collect();
+            let routes = sigmoid_topk_routes_and_weights(&logits, EXPERT_USED_COUNT as usize);
+            let mut expected = alloc::vec![0.0f32; EMBEDDING];
+            for (expert, weight) in &routes {
+                let expert_out = swiglu_ffn(
+                    x_row,
+                    &gate_weights[*expert],
+                    &up_weights[*expert],
+                    &down_weights[*expert],
+                    EMBEDDING,
+                    FEED_FORWARD,
+                );
+                for (accum, value) in expected.iter_mut().zip(&expert_out) {
+                    *accum += weight * value;
+                }
+            }
+            let found = &output[token * EMBEDDING..(token + 1) * EMBEDDING];
+            for (found_value, expected_value) in found.iter().zip(&expected) {
+                assert!(
+                    (found_value - expected_value).abs() < 1e-4,
+                    "token {token}: got {found:?}, expected {expected:?} (independent sigmoid top-{EXPERT_USED_COUNT} \
+                     swiglu reference); routes={routes:?}"
                 );
             }
         }

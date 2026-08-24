@@ -12,23 +12,21 @@
 //! architecture's own forward program is prefill-only --
 //! [`lfm2_forward_program_with_experts`]'s own doc), greedy-pick, repeat.
 //!
-//! Two real-checkpoint gaps this module does NOT close, surfaced loudly
+//! Two real-checkpoint gaps this module does NOT yet close, surfaced loudly
 //! rather than silently: `attn_q_norm.weight`/`attn_k_norm.weight` (a
 //! per-head QK-RMSNorm on the 6 attention layers) and
 //! `blk.{layer}.exp_probs_b.bias` (a learned per-expert bias added before
 //! top-k expert selection, present on this checkpoint's 22 MoE layers) are
 //! never bound -- [`proxima_tensor::spec::lfm2_forward_program_with_experts`]'s
 //! own program has no `Input` for either name, so binding them would have
-//! no consumer. [`run_lfm2_prefill`] emits a `WARN` record naming both gaps
-//! the first time it runs, and a third: `{architecture}.expert_gating_func`
+//! no consumer. This session DOES close a third: `{architecture}.expert_gating_func`
 //! reads `2` on the real checkpoint (`llama.cpp`'s own
-//! `LLAMA_EXPERT_GATING_FUNC_TYPE_SIGMOID`, `llama-hparams.h:14`) but
-//! [`proxima_tensor::spec::append_moe_ffn`] (`spec.rs:893`) always computes
-//! a softmax-style top-k reweighting, never `router_logits.sigmoid()`
-//! (`transformers/models/lfm2_moe/modeling_lfm2_moe.py:208-219`'s
-//! `route_tokens_to_experts`). All three are real correctness gaps, named
-//! here rather than fixed, since fixing them is new `proxima-tensor` MoE/
-//! attention-block work this change's own scope does not cover.
+//! `LLAMA_EXPERT_GATING_FUNC_TYPE_SIGMOID`, `llama-hparams.h:14`) --
+//! [`run_lfm2_prefill`] now builds the program with
+//! [`proxima_tensor::spec::ExpertGatingFunc::Sigmoid`] (`router_logits.sigmoid()`,
+//! `transformers/models/lfm2_moe/modeling_lfm2_moe.py:208-219`'s
+//! `route_tokens_to_experts`) rather than the softmax-style top-k
+//! reweighting a dense-gated checkpoint (Mixtral) still gets.
 
 use alloc::collections::BTreeSet;
 use alloc::format;
@@ -42,8 +40,6 @@ use proxima_gguf::value::{MetadataArray, MetadataValue};
 use proxima_tensor::cpu::{QuantizedBlock, evaluate_quantized_named_with_scratch};
 use proxima_tensor::spec::{LayerKind, lfm2_forward_program_with_experts};
 use proxima_tokenizer::Vocab;
-#[cfg(feature = "instrument")]
-use proxima_telemetry::warn;
 
 use crate::bind::{
     BoundWeights, aligned_f32_view, bind_dense_as, bind_matmul_weight, bind_matmul_weight_as, bind_moe_expert_weights,
@@ -413,11 +409,6 @@ fn build_lfm2_position_inputs(ids: &[u32], head_dim: u32, rope_freq_base: f32, r
 /// early on the vocab's own `eos_token_id`, matching every other decode
 /// loop in this crate.
 ///
-/// Emits one `WARN` record naming the QK-norm/expert-bias/expert-gating-
-/// function gaps this module's own doc names, so a caller reading logs
-/// (not just this module's source) sees the correctness gap before reading
-/// generated text that may be affected by it.
-///
 /// # Errors
 ///
 /// Whatever [`bind_lfm2_weights`], [`lfm2_forward_program_with_experts`],
@@ -431,13 +422,6 @@ pub fn run_lfm2_prefill(
     prompt: &str,
     max_new_tokens: usize,
 ) -> Result<(Vec<u32>, String), InteropError> {
-    #[cfg(feature = "instrument")]
-    warn!(
-        gaps = "qk_norm,expert_bias,expert_gating_func",
-        "run_lfm2_prefill does not apply attn_q_norm/attn_k_norm, blk.N.exp_probs_b.bias, \
-         or lfm2moe.expert_gating_func=2 (sigmoid, not softmax) -- generated text reflects this"
-    );
-
     let weights = bind_lfm2_weights(parsed, file_bytes, architecture)?;
     let (program, logits_root) = lfm2_forward_program_with_experts(
         architecture.vocab,
