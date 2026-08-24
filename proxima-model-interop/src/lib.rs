@@ -33,6 +33,8 @@ mod generate;
 mod hf_bind;
 mod hf_config;
 #[cfg(feature = "std")]
+mod lfm2;
+#[cfg(feature = "std")]
 mod loader;
 mod serving;
 mod transform;
@@ -45,6 +47,8 @@ pub use error::InteropError;
 #[cfg(feature = "std")]
 pub use generate::LoadedModel;
 pub use hf_config::{HfConfig, architecture_from_hf_config, parse_hf_config};
+#[cfg(feature = "std")]
+pub use lfm2::{Lfm2Architecture, lfm2_architecture_from_metadata, run_lfm2_prefill};
 #[cfg(feature = "std")]
 pub use loader::{PREFAULT_OVERSUBSCRIBE, PREFAULT_STRIDE_BYTES, prefault};
 pub use serving::{
