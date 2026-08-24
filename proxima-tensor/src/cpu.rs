@@ -16050,6 +16050,78 @@ mod tests {
         assert_eq!(block1, &[7.0, -1.0], "weight1 @ (x2, x3)");
     }
 
+    /// The test above's own `weight0`/`weight1` are both symmetric matrices
+    /// (`[[2,1],[1,2]]`, `[[1,1],[1,-1]]`), so a row/col axis-order bug in
+    /// `block_output`'s `projection(2, &[0, 1])` weight read -- transposing
+    /// which axis is "row" (kept in `out_map`) and which is "col" (reduced)
+    /// -- would still land on the exact same numbers and pass silently: the
+    /// same shape of blind spot `causal_conv1d`'s `embedding=1` fixture had,
+    /// here from symmetric data rather than a degenerate extent. This uses
+    /// deliberately asymmetric `2x2` blocks (`weight0 @ x0` and its
+    /// transpose disagree) so that exact bug is observable.
+    #[test]
+    fn a_static_block_sparse_matmul_catches_a_transposed_block_weight() {
+        let mut program = Vec::new();
+        let x_block0 = f32_block(&mut program, &[Extent::Static(2)]);
+        let x_block1 = f32_block(&mut program, &[Extent::Static(2)]);
+        let weight_block0 = f32_block(&mut program, &[Extent::Static(2), Extent::Static(2)]);
+        let weight_block1 = f32_block(&mut program, &[Extent::Static(2), Extent::Static(2)]);
+
+        let block_output = |program: &mut Vec<Op>, weight: NodeId, x: NodeId| {
+            let product = append(
+                program,
+                Op::Elementwise {
+                    dtype: DType::Float32,
+                    body: ScalarOp::Multiply,
+                    operands: alloc::vec![
+                        (weight, IndexMap::Affine(map::projection(2, &[0, 1]))),
+                        (x, IndexMap::Affine(map::projection(2, &[1]))),
+                    ],
+                    name: None,
+                },
+            );
+            append(
+                program,
+                Op::Reduce(Reduce {
+                    dtype: DType::Float32,
+                    body: ScalarOp::Add,
+                    init: ReduceInit::Zero,
+                    operand: product,
+                    in_map: IndexMap::Affine(map::projection(2, &[0, 1])),
+                    out_map: IndexMap::Affine(map::projection(2, &[0])),
+                    keep: Keep::Reduce,
+                    name: None,
+                }),
+            )
+        };
+
+        let block0_output = block_output(&mut program, weight_block0, x_block0);
+        let block1_output = block_output(&mut program, weight_block1, x_block1);
+
+        // weight0 = [[1, 2], [3, 4]], weight1 = [[5, 6], [7, 8]] -- neither
+        // symmetric, so weight @ x and weight^T @ x disagree below.
+        let x0 = [1.0f32, 0.0];
+        let x1 = [0.0f32, 1.0];
+        let weight0 = [1.0f32, 2.0, 3.0, 4.0];
+        let weight1 = [5.0f32, 6.0, 7.0, 8.0];
+        let evaluated = evaluate(
+            &program,
+            &[],
+            &[&x0, &x1, &weight0, &weight1],
+            &[block0_output, block1_output],
+        )
+        .expect("static block-sparse matmul lowers and evaluates");
+
+        let (block0, _) = evaluated.get(block0_output).expect("block0 output present");
+        let (block1, _) = evaluated.get(block1_output).expect("block1 output present");
+        // weight0 @ x0 = [1*1+2*0, 3*1+4*0] = [1, 3]; the transposed
+        // reading would give [1*1+3*0, 2*1+4*0] = [1, 2] instead.
+        assert_eq!(block0, &[1.0, 3.0], "weight0 @ x0, not weight0^T @ x0");
+        // weight1 @ x1 = [5*0+6*1, 7*0+8*1] = [6, 8]; transposed would give
+        // [6, 7] instead.
+        assert_eq!(block1, &[6.0, 8.0], "weight1 @ x1, not weight1^T @ x1");
+    }
+
     /// The adjoint of a gather -- and gradient accumulation into a
     /// fixed-shape destination -- is expressible today with the same three
     /// generators the crate's own causal-mask idiom already composes

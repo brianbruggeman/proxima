@@ -1708,6 +1708,102 @@ mod tests {
         assert_eq!(layout.stride(1), 5);
     }
 
+    /// [`correct_packed_matmul_layouts`]/[`native_packed_layout`] on a
+    /// **two-axis output group** (`heads`, `head_dim`), the exact iteration
+    /// shape `mistral_cached_forward_program`'s `wq`/`wk`/`wv` projections
+    /// take (`tok`, `in`, `head`, `hd`), with `heads=3 != head_dim=4` so a
+    /// swapped output-axis order changes the numbers, not just the labels —
+    /// unlike `causal_conv1d`'s own `embedding=1` fixture, which made an
+    /// `ld`/`dl` axis swap byte-identical and let the bug through. GGUF's
+    /// native `[out_dim, in_dim]` row-major layout packs `out_dim` rows
+    /// (`out_dim = heads * head_dim`, row index `head * head_dim + hd`) of
+    /// `in_dim` contiguous elements each.
+    #[test]
+    fn correct_packed_matmul_layouts_derives_ggml_native_strides_for_a_two_axis_output_group() {
+        const IN_DIM: u64 = 5;
+        const HEADS: u64 = 3;
+        const HEAD_DIM: u64 = 4;
+
+        let mut program = Vec::new();
+        let weight = append(
+            &mut program,
+            Op::Input {
+                dtype: DType::UInt8,
+                shape: alloc::vec![Extent::Static(IN_DIM as u32), Extent::Static(HEADS as u32), Extent::Static(HEAD_DIM as u32)],
+                name: None,
+            },
+        );
+        let activation = append(
+            &mut program,
+            Op::Input {
+                dtype: DType::Float32,
+                shape: alloc::vec![Extent::Static(2), Extent::Static(IN_DIM as u32)],
+                name: None,
+            },
+        );
+        // iteration space (tok=0, in=1, head=2, hd=3): weight reads (in,
+        // head, hd), ignoring tok; activation reads (tok, in).
+        let product = append(
+            &mut program,
+            Op::Elementwise {
+                dtype: DType::Float32,
+                body: ScalarOp::Multiply,
+                operands: alloc::vec![
+                    (weight, IndexMap::Affine(map::projection(4, &[1, 2, 3]))),
+                    (activation, IndexMap::Affine(map::projection(4, &[0, 1]))),
+                ],
+                name: None,
+            },
+        );
+        let sum = append(
+            &mut program,
+            Op::Reduce(Reduce {
+                dtype: DType::Float32,
+                body: ScalarOp::Add,
+                init: crate::op::ReduceInit::Zero,
+                operand: product,
+                in_map: IndexMap::Affine(map::projection(4, &[0, 1, 2, 3])),
+                out_map: IndexMap::Affine(map::projection(4, &[0, 2, 3])),
+                keep: Keep::Reduce,
+                name: None,
+            }),
+        );
+
+        let shapes = shape::infer(&program, &[]).expect("two-axis output group infers");
+        let mut built = bind(&program, &shapes, &[]).expect("two-axis output group binds");
+        let packed: BTreeSet<NodeId> = core::iter::once(weight).collect();
+        correct_packed_matmul_layouts(&mut built, &packed);
+
+        let reduce = built.iter().find(|op| op.node == sum).expect("reduce emitted");
+        let weight_layout = &reduce
+            .operands()
+            .iter()
+            .find(|(node, _, _)| *node == weight)
+            .expect("weight operand present in the reduce")
+            .1;
+
+        assert_eq!(
+            weight_layout.stride(1),
+            1,
+            "in_dim is the innermost, contiguous axis of a GGUF row"
+        );
+        assert_eq!(
+            weight_layout.stride(3),
+            IN_DIM as i64,
+            "head_dim steps by one whole in_dim row -- swapped with heads' stride below if the output-axis order flips"
+        );
+        assert_eq!(
+            weight_layout.stride(2),
+            (IN_DIM * HEAD_DIM) as i64,
+            "heads steps by one whole head_dim block of rows -- swapped with head_dim's stride above if the output-axis order flips"
+        );
+        assert_eq!(
+            weight_layout.stride(0),
+            0,
+            "weight never varies over the token batch axis"
+        );
+    }
+
     fn elementwise_op() -> BoundOp {
         let mut program = Vec::new();
         let source = append(
