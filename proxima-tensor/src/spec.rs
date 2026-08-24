@@ -1900,7 +1900,16 @@ fn causal_conv1d(program: &mut Vec<Op>, x: NodeId, weight: NodeId, l_cache: u32)
         },
     );
 
-    let tap_product = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(windowed, "sld->sld"), (weight, "ld->sld")])?;
+    // `weight`'s own declared shape is `[embedding, l_cache]` (`d` axis
+    // first/outer, `l` axis last/fastest) -- `dl->sld`, not `ld->sld` --
+    // matching `row_major_strides`'s (`bind.rs`) own last-axis-fastest
+    // convention against the REAL on-disk tensor's physical layout: GGUF's
+    // own `ne[0] = l_cache` is ggml's fastest axis (confirmed against
+    // `llama.cpp`'s own `create_tensor(.., {n_shortconv_l_cache, n_embd},
+    // ..)`), so `l_cache` -- not `embedding` -- is genuinely contiguous per
+    // channel on disk. Every caller of this function must declare `weight`'s
+    // `Op::Input` shape the same way.
+    let tap_product = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(windowed, "sld->sld"), (weight, "dl->sld")])?;
     let zero_tap = scalar_constant(program, 0.0);
     let masked_tap = elementwise(
         program,
@@ -2266,10 +2275,15 @@ pub fn lfm2_forward_program_with_experts(
                     alloc::vec![Extent::Static(embedding), Extent::Static(embedding)],
                     &alloc::format!("blk.{layer}.shortconv.in_proj.weight.x"),
                 );
+                // `[embedding, l_cache]`, NOT `[l_cache, embedding]` --
+                // `causal_conv1d`'s own doc on its `dl->sld` map explains why:
+                // the real on-disk tensor has `l_cache` as its fastest axis,
+                // and `row_major_strides` (`bind.rs`) makes the LAST declared
+                // shape axis the fastest one.
                 let conv_weight = input_leaf(
                     &mut program,
                     DType::Float32,
-                    alloc::vec![Extent::Static(l_cache), Extent::Static(embedding)],
+                    alloc::vec![Extent::Static(embedding), Extent::Static(l_cache)],
                     &alloc::format!("blk.{layer}.shortconv.conv.weight"),
                 );
                 let out_proj = input_leaf(
@@ -5324,7 +5338,14 @@ value = 1.0
             &mut program,
             Op::Input {
                 dtype: DType::Float32,
-                shape: alloc::vec![Extent::Static(3), Extent::Static(1)],
+                // `[embedding=1, l_cache=3]`, matching `causal_conv1d`'s own
+                // `dl->sld` map -- `l_cache` last/fastest, the real
+                // checkpoint's own on-disk axis order (`spec.rs`'s own doc on
+                // this map explains why). One channel makes this
+                // indistinguishable from the old `[3, 1]` shape byte-for-byte
+                // (see `causal_conv1d_catches_a_transposed_multi_channel_weight`
+                // below for the shape this single-channel test cannot catch).
+                shape: alloc::vec![Extent::Static(1), Extent::Static(3)],
                 name: Some("weight".into()),
             },
         );
@@ -5358,7 +5379,8 @@ value = 1.0
             &mut program,
             Op::Input {
                 dtype: DType::Float32,
-                shape: alloc::vec![Extent::Static(3), Extent::Static(1)],
+                // see the previous test's own doc on why `[1, 3]`, not `[3, 1]`.
+                shape: alloc::vec![Extent::Static(1), Extent::Static(3)],
                 name: Some("weight".into()),
             },
         );
@@ -5379,6 +5401,57 @@ value = 1.0
             "a perturbed tap weight must move the output away from the hand-computed reference \
              (if this assertion cannot fail, the test above proves nothing)"
         );
+    }
+
+    /// `causal_conv1d_matches_a_hand_computed_causal_window`'s own single
+    /// channel (`embedding=1`) cannot distinguish `weight`'s `[l_cache,
+    /// embedding]` axis order from `[embedding, l_cache]` -- with one
+    /// channel, transposing does not move a single byte. This is exactly the
+    /// gap that let the real checkpoint's own `blk.{layer}.shortconv.conv.weight`
+    /// (GGUF on-disk `[l_cache=3, embedding=2048]`, `l_cache` the FASTEST
+    /// axis) get bound with its axes swapped for months: two DIFFERENT
+    /// per-channel weight patterns, so a transposed read produces
+    /// hand-verifiably wrong numbers instead of silently-correct ones.
+    /// Channel 0 reuses the single-channel test's own `weight = [1, 10,
+    /// 100]`/`x = [1, 2, 3, 4]` (`out = [100, 210, 321, 432]`, worked out
+    /// there); channel 1 uses `weight = [1000, 1, 1]`/`x = [2, 2, 2, 2]`:
+    /// - `out[0] = 1*x[0]                       = 1*2                = 2`
+    /// - `out[1] = 1*x[0]  + 1*x[1]             = 1*2 + 1*2          = 4`
+    /// - `out[2] = 1000*x[0] + 1*x[1] + 1*x[2]  = 1000*2 + 2 + 2     = 2004`
+    /// - `out[3] = 1000*x[1] + 1*x[2] + 1*x[3]  = 1000*2 + 2 + 2     = 2004`
+    #[proxima::test]
+    async fn causal_conv1d_keeps_channels_independent_and_catches_a_transposed_weight() {
+        let mut program = Vec::new();
+        let x = op::append(
+            &mut program,
+            Op::Input {
+                dtype: DType::Float32,
+                shape: alloc::vec![Extent::Symbolic(0), Extent::Static(2)],
+                name: Some("x".into()),
+            },
+        );
+        let weight = op::append(
+            &mut program,
+            Op::Input {
+                dtype: DType::Float32,
+                shape: alloc::vec![Extent::Static(2), Extent::Static(3)],
+                name: Some("weight".into()),
+            },
+        );
+        let output = causal_conv1d(&mut program, x, weight, 3).expect("causal conv lowers");
+
+        // sequence-major, channel-fastest: `[s0_ch0, s0_ch1, s1_ch0, s1_ch1, ...]`.
+        let x_data = [1.0f32, 2.0, 2.0, 2.0, 3.0, 2.0, 4.0, 2.0];
+        // channel-major, tap-fastest: `[ch0_l0, ch0_l1, ch0_l2, ch1_l0, ch1_l1, ch1_l2]`
+        // -- the real checkpoint's own on-disk axis order.
+        let weight_data = [1.0f32, 10.0, 100.0, 1000.0, 1.0, 1.0];
+        let evaluated = crate::cpu::evaluate_named(&program, &[4], &[("x", &x_data), ("weight", &weight_data)], &[output])
+            .expect("causal conv evaluates");
+        let (result, shape) = evaluated.get(output).expect("conv output present");
+
+        std::println!("multi-channel causal_conv1d result={result:?} shape={shape:?}");
+        assert_eq!(shape, [4u64, 2u64]);
+        assert_eq!(result, [100.0, 2.0, 210.0, 4.0, 321.0, 2004.0, 432.0, 2004.0]);
     }
 
     /// [`rmsnorm_per_head`] against a hand-computed RMS norm -- one token,
