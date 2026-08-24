@@ -51,3 +51,4 @@ workspace = true
 proxima = { workspace = true, features = ["test-support"] }
 proxima-tensor = { path = "../proxima-tensor", features = ["std", "config", "test-support"] }
 proxima-tokenizer = { path = "../proxima-tokenizer", features = ["hf"] }
+toml.workspace = true
