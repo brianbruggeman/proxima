@@ -13149,4 +13149,39 @@ Commits `6a36a41` (the `causal_conv1d` fix itself), `b39a23d`/`f33dc4b`/`7ce8177
 - `cargo run --release -p proxima-model-interop --features std,instrument --example lfm2_layer_oracle_diff -- /Users/brianbruggeman/.lmstudio/models/LiquidAI/LFM2.5-8B-A1B-GGUF/LFM2.5-8B-A1B-Q4_K_M.gguf <oracle_dir> "The capital of France is"` (the relative-diff sweep, `inp_embd` first)
 - `cargo run --release -p proxima-model-interop --features std --example lfm2_dense_mixer_diff -- <model> <oracle_dir> "The capital of France is" 0` (layer-0 within-layer bisection)
 - `cargo run --release -p proxima-model-interop --features std --example lfm2_moe_route_diff -- <model> <oracle_dir> "The capital of France is" 2` (layer-2 gate-logit divergence)
-- `grep -rn correct_packed_matmul_layouts proxima-tensor/src proxima-model-interop/src` (expect zero call sites outside `bind.rs`'s own test module — the unwired mechanism)
+- `grep -rn correct_packed_matmul_layouts proxima-tensor/src proxima-model-interop/src omega/src` — **CORRECTION: not zero.** There is exactly one production caller, `omega/src/metal.rs:967` (from `65c3582`). The Metal path corrects packed layouts; the CPU path never calls it. That asymmetry — not an unwired mechanism — is the actual finding, and ROW 137 records the consequence.
+
+## ROW 138 — Mixtral runs at 4.80 GB instead of 180 GiB; versailles (x86_64) builds and gets AVX2 without a flag
+
+Commits `46c269b`, `e279efb` (Mixtral), `8e5ca8e`, `da761bf` (x86_64). `proxima-tensor` 406 -> **413**, `proxima-model-interop` 72 -> **73**, workspace **5685**.
+
+**Mixtral, real 26 GB `Nous-Hermes-2-Mixtral-8x7B-DPO.Q4_K_S.gguf`:**
+```
+generated_text="The vast, mysterious ocean covers more than"
+peak RSS = 4.80 GB          (previously ~180 GiB dequantised; kernel SIGKILL at 90 GB)
+```
+`bind_moe_expert_weights` now binds `restack.rs`'s byte-concatenated per-expert Q4_K straight through as packed bytes. This required one new field — `BoundWeights::packed_owned: Vec<(String, Vec<u8>, PackedOwnedKind)>` — because the restacked buffer is a fresh allocation, not a `'file`-borrowed slice, so it cannot live in the existing `packed: Vec<(String, QuantizedBlock<'file>)>`. **A lifetime difference, not a taxonomy difference** — that is the justification, and it is the kind that earns a field.
+
+**An over-reach the agent caught in itself and reverted:** it first widened `bind_moe_stacked_experts` (the *native* single-stacked-tensor path) to bind every packed codec. LFM2.5-8B-A1B uses exactly that path with Q4_K, and its just-corrected router numbers (`2c3786a`, 22/24 agreement) would have ridden on an unaudited path switch. Reverted to F32-only-packed there; the fix is scoped strictly to the restack fallback.
+
+**Discriminator, per ROW 135's rule:** three tokens routed to three different experts (`[2,0,1]`); forcing `expert_index = 0` gives `-11.386172` where the routed expert's own SwiGLU gives `-42123.58`. The test cannot pass with the gather disabled.
+
+**An N==0 false-green found while gating:** `cargo clippy -p proxima-model-interop --all-targets` **silently skips** every example carrying `required-features` when those features are not passed. Running it with `--features std,instrument` surfaced five additional already-red files beyond the two known. **A gate that skips its targets reports green having checked nothing** — same family as `--doc` exiting 0 on an empty match.
+
+**x86_64 / versailles.** `omega` was the only crate failing for `x86_64-unknown-linux-gnu`, on three `-D warnings` dead-code errors: `msl.rs`'s `kernel_cache_key`/`kernel_dispatch_shape` are `pub(crate)` with their only caller in the macOS-gated `metal.rs`, and `backend.rs:333`'s `cfg_attr` condition did not cover the real Linux case (`cpu` on, metal off). Now `#[cfg(any(test, all(feature = "metal", target_os = "macos")))]` — honest about which target they are for rather than suppressed.
+
+**Runtime AVX2 dispatch landed.** Previously `build.rs:87-97` emitted the AVX2 cfg only when `CARGO_CFG_TARGET_FEATURE` already contained `avx2`, so a plain `cargo build --release` on x86_64 compiled the **scalar** quantized dot kernel — not slower, unusable for a 7B. Now the AVX2 kernel always compiles on `target_arch = "x86_64"` and `avx2_runtime_available()` caches `is_x86_feature_detected!("avx2")` in a `OnceLock`, hoisted once before the block loop. `-C target-cpu=native` builds still take the compile-time arm and skip the check.
+
+**Gate verification of ISA-vs-vendor gating:** `--target x86_64-unknown-linux-gnu` exit 0 workspace-wide; `--target aarch64-unknown-linux-gnu` exit 0 for `proxima-tensor`/`omega`/`prime`/`proxima-primitives`, proving NEON stays enabled on non-Apple ARM. (The full-workspace aarch64-linux check fails on `aws-lc-sys`'s `AT_HWCAP2` in this Mac's cross-sysroot — a `proxima-tls` dependency, unrelated.)
+
+**Two honest limits, stated by the agent rather than papered over:**
+- the AVX2-vs-scalar bit-exactness test is `#[cfg(target_arch = "x86_64")]`, so it **does not exist in the aarch64 test binary and was never executed** — compiled-only, verified by `cargo check --tests --target x86_64-unknown-linux-gnu`. It runs for real on versailles or Linux CI, not here.
+- AVX-512 VNNI / AVX-VNNI deliberately not implemented: `_mm512_dpbusd_epi32`'s saturation semantics need byte-for-byte verification against the scalar kernel on real hardware, and shipping unverified single-instruction accumulation is worse than deferring it.
+
+`sched_getaffinity` was also deliberately **not** re-implemented — `std::thread::available_parallelism`'s own documentation confirms it already honours cgroup and affinity limits, and `matmul_worker_count`'s existing `.filter(|&count| count <= available)` already bounds the P-core count. A second source of truth for the same fact was the wrong fix.
+
+**Re-prove commands:**
+- `cargo check --workspace --lib --target x86_64-unknown-linux-gnu`
+- `cargo check -p proxima-tensor -p omega -p prime -p proxima-primitives --lib --target aarch64-unknown-linux-gnu`
+- `cargo nextest run -p proxima-model-interop --features std attempts_a_real_mixtral --run-ignored all -- --nocapture`
+- `cargo clippy -p proxima-model-interop --all-targets --features std,instrument -- -D warnings` (the features matter; without them it skips the examples entirely)
