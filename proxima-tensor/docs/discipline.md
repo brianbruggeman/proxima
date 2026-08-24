@@ -13007,3 +13007,44 @@ Both collapse *"this narrower operand is the true donor"* and *"these two operan
 - `cargo nextest run -p proxima-tensor --features std,instrument materialized_before_the_gather` (Limitation 2)
 - `git log --all --oneline -S infer_as_a_pipe_matches_the_free_function` (the test that already existed)
 - `grep -rn "AxisIndex[[:space:]]*{" --include=*.rs .` (expect 21 construction sites)
+
+## ROW 135 — a transposed conv weight survived a CORRECT hand-computed test because the test used one channel; the class was swept and two more blind spots closed
+
+Commit `0013f2f`. `proxima-tensor --features std,instrument` 401 -> **403**.
+
+**The bug.** `causal_conv1d` mapped its weight `ld->sld` when the real on-disk layout requires `dl->sld`. GGUF's `ne[0] = l_cache` is ggml's **fastest** axis (confirmed against llama.cpp's own `create_tensor(.., {n_shortconv_l_cache, n_embd}, ..)`), and `row_major_strides` (`bind.rs`) makes the **last** declared shape axis fastest — so the declared shape must be `[embedding, l_cache]`, not `[l_cache, embedding]`. Blocks 0 and 1 of LFM2 are convolution layers, so this corrupts the residual stream from the first layer onward, which is consistent with the sign flip ROW 133 found at `l_out-4`.
+
+**Why it survived verification.** ROW 131 recorded the conv as proven by hand-computed arithmetic: `l_cache=3`, weight `[1,10,100]`, `x=[1,2,3,4]` -> `[100,210,321,432]`, exact. That test was **correct**. It used `embedding = 1`, at which `[3,1]` and `[1,3]` are **byte-identical** — so no transposition of the weight axis could ever change its result. The arithmetic was right, the assertion was real, and the chosen dimension made the defect structurally unobservable.
+
+**This is the second instance today of a test that passes and cannot discriminate.** The first: `proxima-autograd`'s central-difference gradient check stayed **bit-identical** at `0.0014963379` through a deliberately broken max-reduce adjoint, because softmax's max-subtraction contributed ~0 gradient at that data point; only a small closed-form test caught it. Two instances is a class, so the class was swept.
+
+**Findings of the sweep, ranked:**
+
+| site | claim under test | degenerate property | what it could not catch |
+|---|---|---|---|
+| `bind.rs` `correct_packed_matmul_layouts` / `native_packed_layout` | GGUF-native packed strides for a two-axis output group (`heads`, `head_dim`) | **no unit test in the owning crate at all** — reachable only via `omega`'s macOS + `metal` + `metal-tiled-gemm`-gated integration tests | a swapped output-axis order on any non-macOS or non-Metal build. **Same function shape as the conv bug**: axis-order stride derivation for a packed weight |
+| `cpu.rs` `a_static_block_sparse_matmul_needs_no_data_dependent_map` | block-sparse lowers via plain affine projections | weights `[[2,1],[1,2]]` and `[[1,1],[1,-1]]` are **symmetric** — read identically transposed | a weight-operand projection swap `[0,1]` -> `[1,0]` |
+
+Cleared as genuinely fine, with reasons rather than silence: the transpose tests (`shape.rs:589`, `bind.rs:1676`, `cpu.rs:12567`) all use non-square `[3,5]`; `matmul_program_rhs_transposed` uses asymmetric `4,7,5`; `omega`'s MSL axis-order assertions are on generated source text and cache keys, where extent size is irrelevant; the quantized-vs-f32 tests use `n=1` but assert numeric agreement, not axis order, and `n=1` is the real decode shape.
+
+**Both were fixed by ADDING a discriminating case, never by replacing the existing test**, and each new test was proved to discriminate by injecting the exact defect it exists to catch:
+
+```
+FAIL bind::tests::correct_packed_matmul_layouts_derives_ggml_native_strides_for_a_two_axis_output_group
+  left: 30   right: 5      (after output_axes.iter().rev() -> .iter())
+
+FAIL cpu::tests::a_static_block_sparse_matmul_catches_a_transposed_block_weight
+  left: [1.0, 2.0]   right: [1.0, 3.0]      (after projection &[0,1] -> &[1,0])
+PASS cpu::tests::a_static_block_sparse_matmul_needs_no_data_dependent_map   <-- original STILL GREEN under the same injected defect
+```
+
+That last line is the finding in miniature: the original test passing while the bug is live **is** its blind spot, demonstrated rather than argued.
+
+**The transferable discipline, and it is cheap.** Perturbing an expected value only proves the assertion is wired up. **To prove a test discriminates, apply the exact defect it exists to catch** — transpose the weight, swap the operand order, reverse the taps, flip the axis — and confirm it fails. A test added to catch a transposition that still passes under transposition is worse than no test: it converts an unknown risk into a false assurance.
+
+**A coverage corollary worth acting on separately:** `correct_packed_matmul_layouts` was reachable only under macOS + Metal feature gates. Any axis-order defect in that function is invisible to a Linux or CPU-only CI run. **There is likely more code in this position**, and a gated-only-coverage sweep is a distinct piece of work from this one.
+
+**Re-prove commands:**
+- `cargo nextest run -p proxima-tensor --features std,instrument correct_packed_matmul_layouts_derives`
+- `cargo nextest run -p proxima-tensor --features std,instrument catches_a_transposed_block_weight`
+- `cargo nextest run -p proxima-tensor --features std,instrument causal_conv1d` (the single-channel test and its multi-channel companion)
