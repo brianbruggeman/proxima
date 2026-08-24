@@ -128,3 +128,11 @@ required-features = ["std", "instrument"]
 [[example]]
 name = "lfm2_layer_oracle_diff"
 required-features = ["std", "instrument"]
+
+# Layer-5-only routing diff: which four expert indices `append_moe_ffn`'s own
+# `route` nodes picked per token, ours vs `llama.cpp`'s `ffn_moe_topk-<il>`
+# dump -- no telemetry recorder, so no `instrument` requirement, only `std`
+# for the same GGUF-bind/tokenizer/`cpu` interpreter reason as the two above.
+[[example]]
+name = "lfm2_moe_route_diff"
+required-features = ["std"]
