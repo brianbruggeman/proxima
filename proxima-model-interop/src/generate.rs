@@ -833,6 +833,7 @@ impl<'file> LoadedModel<'file> {
             .iter()
             .map(|(name, _)| name.as_str())
             .chain(self.weights.packed.iter().map(|(name, _)| name.as_str()))
+            .chain(self.weights.packed_owned.iter().map(|(name, _, _)| name.as_str()))
             .collect();
 
         let mut cached_len = 0usize;
@@ -862,7 +863,7 @@ impl<'file> LoadedModel<'file> {
             let build_position_inputs_ticks = elapsed_ticks(build_position_inputs_started);
 
             let mut named_blocks: Vec<(&str, QuantizedBlock)> = Vec::with_capacity(
-                self.weights.owned.len() + self.weights.packed.len() + 3 + layer_caches.len() * 3,
+                self.weights.owned.len() + self.weights.packed.len() + self.weights.packed_owned.len() + 3 + layer_caches.len() * 3,
             );
             #[cfg(feature = "instrument")]
             let named_blocks_weights_started = read_ticks();
@@ -872,6 +873,9 @@ impl<'file> LoadedModel<'file> {
             }
             for (name, block) in &self.weights.packed {
                 named_blocks.push((name.as_str(), *block));
+            }
+            for (name, bytes, kind) in &self.weights.packed_owned {
+                named_blocks.push((name.as_str(), kind.as_block(bytes)));
             }
             named_blocks.push(("eps", QuantizedBlock::Float32(inputs.epsilon.as_slice())));
             named_blocks.push(("rope_cos", QuantizedBlock::Float32(inputs.cos.as_slice())));
@@ -1103,14 +1107,18 @@ impl<'file> LoadedModel<'file> {
             })
             .collect();
 
-        let mut named_blocks: Vec<(&str, QuantizedBlock)> =
-            Vec::with_capacity(self.weights.owned.len() + self.weights.packed.len() + 3 + block_count * 3);
+        let mut named_blocks: Vec<(&str, QuantizedBlock)> = Vec::with_capacity(
+            self.weights.owned.len() + self.weights.packed.len() + self.weights.packed_owned.len() + 3 + block_count * 3,
+        );
         named_blocks.push(("ids", QuantizedBlock::Float32(inputs.ids_f32.as_slice())));
         for (name, data) in &self.weights.owned {
             named_blocks.push((name.as_str(), QuantizedBlock::Float32(data.as_slice())));
         }
         for (name, block) in &self.weights.packed {
             named_blocks.push((name.as_str(), *block));
+        }
+        for (name, bytes, kind) in &self.weights.packed_owned {
+            named_blocks.push((name.as_str(), kind.as_block(bytes)));
         }
         named_blocks.push(("eps", QuantizedBlock::Float32(inputs.epsilon.as_slice())));
         named_blocks.push(("rope_cos", QuantizedBlock::Float32(inputs.cos.as_slice())));
@@ -1125,6 +1133,7 @@ impl<'file> LoadedModel<'file> {
             .iter()
             .map(|(name, _)| name.as_str())
             .chain(self.weights.packed.iter().map(|(name, _)| name.as_str()))
+            .chain(self.weights.packed_owned.iter().map(|(name, _, _)| name.as_str()))
             .collect();
 
         let symbols = [ids.len() as u64, 0u64];

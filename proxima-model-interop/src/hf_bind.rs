@@ -473,6 +473,7 @@ pub(crate) fn bind_all_weights_from_safetensors<'file>(
         resident_bytes: file_bytes.len(),
         owned: Vec::new(),
         packed: Vec::new(),
+        packed_owned: Vec::new(),
     };
 
     let embedding = architecture.embedding as usize;
@@ -752,6 +753,7 @@ mod tests {
             resident_bytes: 0,
             owned: Vec::new(),
             packed: Vec::new(),
+            packed_owned: Vec::new(),
         };
         hf_bind_dense(&manifest, &file_bytes, data_start, names::embed_tokens(), node_names::token_embd(), &mut state)
             .expect("binds the real bf16 embedding table");
@@ -889,6 +891,7 @@ mod tests {
                     resident_bytes: 0,
                     owned: Vec::new(),
                     packed: Vec::new(),
+                    packed_owned: Vec::new(),
                 },
             );
 
@@ -981,6 +984,7 @@ mod tests {
             resident_bytes: 0,
             owned: Vec::new(),
             packed: Vec::new(),
+            packed_owned: Vec::new(),
         };
         hf_bind_matmul_weight(
             &manifest,

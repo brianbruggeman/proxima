@@ -312,7 +312,7 @@ pub(crate) fn bind_lfm2_weights<'file>(
     file_bytes: &'file [u8],
     architecture: &Lfm2Architecture,
 ) -> Result<BoundWeights<'file>, InteropError> {
-    let mut state = BoundWeights { resident_bytes: file_bytes.len(), owned: Vec::new(), packed: Vec::new() };
+    let mut state = BoundWeights { resident_bytes: file_bytes.len(), owned: Vec::new(), packed: Vec::new(), packed_owned: Vec::new() };
 
     let embedding = architecture.embedding as usize;
     let feed_forward = architecture.feed_forward as usize;
@@ -666,7 +666,7 @@ mod tests {
     fn splits_a_real_q4_k_in_proj_into_its_three_row_ranges() {
         let embedding = 256u32;
         let (parsed, file_bytes) = quantized_fused_in_proj(embedding);
-        let mut state = BoundWeights { resident_bytes: 0, owned: Vec::new(), packed: Vec::new() };
+        let mut state = BoundWeights { resident_bytes: 0, owned: Vec::new(), packed: Vec::new(), packed_owned: Vec::new() };
 
         bind_lfm2_shortconv_in_proj(&parsed, &file_bytes, 0, embedding, &mut state).expect("split a real q4_k in_proj");
 
@@ -729,7 +729,7 @@ mod tests {
     fn shape_mismatch_is_a_typed_error_not_a_panic() {
         let embedding = 256u32;
         let (parsed, file_bytes) = quantized_fused_in_proj(embedding);
-        let mut state = BoundWeights { resident_bytes: 0, owned: Vec::new(), packed: Vec::new() };
+        let mut state = BoundWeights { resident_bytes: 0, owned: Vec::new(), packed: Vec::new(), packed_owned: Vec::new() };
 
         let outcome = bind_lfm2_shortconv_in_proj(&parsed, &file_bytes, 0, embedding + 1, &mut state);
         assert!(
