@@ -349,14 +349,26 @@ fn main() {
     // the SAME `ffn_norm_out` tensor, so the value dumped under the
     // misleading `ffn_out` label is actually the norm's own output, exactly
     // what `normed2`/`append_moe_ffn`'s `x` parameter holds on our side.
-    let mixer_out_path = oracle_intra_dir.join(format!("model.layers.{{}}.conv.out_proj-{layer}.f32"));
+    // llama.cpp names the mixer's own pre-residual output differently per
+    // mixer kind (`build_shortconv_block`'s `conv.out_proj` vs
+    // `build_attn_block`'s `self_attn.out_proj`) -- this tool's own
+    // `layer_boundary_node_id`/`route_node_ids` walk is mixer-agnostic, so it
+    // silently found nothing for every ATTENTION layer until this matched
+    // the oracle's own per-kind name.
+    let mixer_out_suffix = match architecture.layer_kinds[layer as usize] {
+        proxima_tensor::spec::LayerKind::Attention => "self_attn.out_proj",
+        proxima_tensor::spec::LayerKind::ShortConv => "conv.out_proj",
+    };
+    let mixer_out_path = oracle_intra_dir.join(format!("model.layers.{{}}.{mixer_out_suffix}-{layer}.f32"));
     let normed2_path = oracle_intra_dir.join(format!("model.layers.{{}}.ffn_out-{layer}.f32"));
     // `post_mixer = mixer_out + (layer `layer`'s own residual input)`
     // (`spec.rs:1991`) -- for `layer > 0` that residual input is exactly
     // `l_out-{layer-1}` (`lfm2_layer_oracle_diff.rs`'s own convention), so
     // `their_post_mixer` is computed EXACTLY here, never approximated by
-    // reusing our own `post_mixer` as a stand-in for theirs.
-    let layer_input_path = if layer == 0 { oracle_dir.join("inp_embd.f32") } else { oracle_dir.join(format!("l_out-{}.f32", layer - 1)) };
+    // reusing our own `post_mixer` as a stand-in for theirs. `inp_embd.f32`
+    // was never real for a tokenized prompt (see `lfm2_layer_oracle_diff.rs`'s
+    // own doc); the real first tensor is `model.embed_tokens.f32`.
+    let layer_input_path = if layer == 0 { oracle_dir.join("model.embed_tokens.f32") } else { oracle_dir.join(format!("l_out-{}.f32", layer - 1)) };
     if mixer_out_path.exists() && normed2_path.exists() && layer_input_path.exists() {
         let their_mixer_out = read_oracle_route(&mixer_out_path);
         let their_normed2 = read_oracle_route(&normed2_path);
@@ -422,6 +434,30 @@ fn main() {
         let ours_layer_input_worst = ours_post_mixer[normed2_worst] - ours_mixer_out[normed2_worst];
         let their_layer_input_worst = their_layer_input[normed2_worst];
         let mixer_out_worst_at_dim = (ours_mixer_out[normed2_worst] - their_mixer_out[normed2_worst]).abs();
+
+        // `lfm2_layer_oracle_diff.rs`'s own full-sweep table named a
+        // DIFFERENT worst position for this exact layer's `l_out` --
+        // `(token=1, dim=126)`, a sign flip at ordinary (non-near-zero)
+        // magnitude, not this function's own `normed2_worst` (which a
+        // near-zero oracle denominator can inflate into the global max
+        // without any code defect behind it). Tracing THAT specific position
+        // through every stage this function already evaluated, rather than
+        // trusting whichever position happens to have the largest RATIO,
+        // is what tells apart "RMSNorm dividing two small numbers" from
+        // a real defect.
+        let named_token = 1usize;
+        let named_dim = 126usize;
+        let named_index = named_token * embedding + named_dim;
+        println!(
+            "named (token={named_token}, dim={named_dim}): mixer_out ours={:.6} theirs={:.6} | post_mixer ours={:.6} theirs={:.6} | normed2 ours={:.6} theirs={:.6}",
+            ours_mixer_out[named_index],
+            their_mixer_out[named_index],
+            ours_post_mixer[named_index],
+            their_post_mixer[named_index],
+            ours_normed2[named_index],
+            their_normed2[named_index]
+        );
+
         println!(
             "at (token={worst_token}, dim={worst_dim}): layer_input(=l_out-{}) ours={:.6} theirs={:.6} diff={:.6} | this layer's own mixer_out diff={:.6}",
             layer.wrapping_sub(1),
