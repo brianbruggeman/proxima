@@ -12,24 +12,20 @@
 //! architecture's own forward program is prefill-only --
 //! [`lfm2_forward_program_with_experts`]'s own doc), greedy-pick, repeat.
 //!
-//! One real-checkpoint gap this module does NOT yet close, surfaced loudly
-//! rather than silently: `attn_q_norm.weight`/`attn_k_norm.weight` (a
-//! per-head QK-RMSNorm on the 6 attention layers) is never bound --
-//! [`proxima_tensor::spec::lfm2_forward_program_with_experts`]'s own program
-//! has no `Input` for either name, so binding them would have no consumer.
-//! This session closes two others: `{architecture}.expert_gating_func`
-//! reads `2` on the real checkpoint (`llama.cpp`'s own
-//! `LLAMA_EXPERT_GATING_FUNC_TYPE_SIGMOID`, `llama-hparams.h:14`) --
-//! [`run_lfm2_prefill`] now builds the program with
-//! [`proxima_tensor::spec::ExpertGatingFunc::Sigmoid`] (`router_logits.sigmoid()`,
-//! `transformers/models/lfm2_moe/modeling_lfm2_moe.py:208-219`'s
-//! `route_tokens_to_experts`) rather than the softmax-style top-k
-//! reweighting a dense-gated checkpoint (Mixtral) still gets -- and
-//! `blk.{layer}.exp_probs_b.bias` (a learned per-expert bias, present on
-//! this checkpoint's 22 MoE layers), now bound and passed as
-//! [`proxima_tensor::spec::append_moe_ffn`]'s own `expert_bias` parameter,
-//! which gates top-k *selection* only, never the selected experts'
-//! combination weight.
+//! Three real-checkpoint gaps a prior session named rather than closed are
+//! closed here: `attn_q_norm.weight`/`attn_k_norm.weight` (a per-head
+//! RMSNorm on Q/K, applied BEFORE RoPE, on the 6 attention layers --
+//! [`proxima_tensor::spec::append_attention_mixer`]'s own doc cites
+//! `Lfm2MoeAttention`'s exact placement), `blk.{layer}.exp_probs_b.bias`
+//! (a learned per-expert bias that gates top-k *selection* only, never the
+//! selected experts' combination weight -- bound here, consumed by
+//! [`proxima_tensor::spec::append_moe_ffn`]'s own `expert_bias` parameter),
+//! and `{architecture}.expert_gating_func == 2`
+//! (`LLAMA_EXPERT_GATING_FUNC_TYPE_SIGMOID`, `llama-hparams.h:14`) --
+//! [`bind_lfm2_weights`] binds all three, and [`run_lfm2_prefill`] builds
+//! the program with [`proxima_tensor::spec::ExpertGatingFunc::Sigmoid`]
+//! rather than the softmax-style top-k reweighting a dense-gated checkpoint
+//! (Mixtral) still gets.
 
 use alloc::collections::BTreeSet;
 use alloc::format;
@@ -336,6 +332,20 @@ pub(crate) fn bind_lfm2_weights<'file>(
                 bind_matmul_weight(parsed, file_bytes, format!("blk.{layer}.attn_k.weight"), kv_dim, embedding, &mut state)?;
                 bind_matmul_weight(parsed, file_bytes, format!("blk.{layer}.attn_v.weight"), kv_dim, embedding, &mut state)?;
                 bind_matmul_weight(parsed, file_bytes, format!("blk.{layer}.attn_output.weight"), embedding, embedding, &mut state)?;
+                bind_dense_as(
+                    parsed,
+                    file_bytes,
+                    &format!("blk.{layer}.attn_q_norm.weight"),
+                    format!("blk.{layer}.attn_q_norm.weight"),
+                    &mut state,
+                )?;
+                bind_dense_as(
+                    parsed,
+                    file_bytes,
+                    &format!("blk.{layer}.attn_k_norm.weight"),
+                    format!("blk.{layer}.attn_k_norm.weight"),
+                    &mut state,
+                )?;
             }
             LayerKind::ShortConv => {
                 bind_lfm2_shortconv_in_proj(parsed, file_bytes, layer, architecture.embedding, &mut state)?;

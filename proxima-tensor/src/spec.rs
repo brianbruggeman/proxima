@@ -693,6 +693,45 @@ fn rmsnorm(program: &mut Vec<Op>, x: NodeId, gamma: NodeId, inv_dim: NodeId, eps
     )
 }
 
+/// [`rmsnorm`]'s per-head counterpart -- [`Lfm2MoeAttention.q_layernorm`]/
+/// `.k_layernorm`'s own shape (`transformers/models/lfm2_moe/modeling_lfm2_moe.py:317-318,331-332`):
+/// normalizes over the head-dim axis only, broadcasting per token AND per
+/// head, applied to Q/K right after the head reshape and BEFORE RoPE
+/// (`apply_rotary_pos_emb` runs on the ALREADY-normalized `query_states`/
+/// `key_states`, `modeling_lfm2_moe.py:331-336`) -- normalizing after RoPE
+/// would rotate un-normalized vectors, silently degrading with position the
+/// same way the SmolLM2 RoPE-ordering bug did. `head` distinguishes Q's
+/// query-head axis (`h`, [`append_attention_mixer`]'s own letter) from K's
+/// kv-head axis (`u`) so this one function serves both call sites without
+/// two copies of the same six ops.
+fn rmsnorm_per_head(program: &mut Vec<Op>, x: NodeId, gamma: NodeId, inv_head_dim: NodeId, eps: NodeId, head: char) -> Result<NodeId, TensorError> {
+    let full = alloc::format!("s{head}d->s{head}d");
+    let identity = alloc::format!("s{head}->s{head}");
+    let broadcast_over_d = alloc::format!("s{head}->s{head}d");
+    let inv_head_dim_map = alloc::format!("->s{head}");
+    let eps_map = alloc::format!("s->s{head}");
+    let gamma_map = alloc::format!("d->s{head}d");
+
+    let squared = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(x, full.as_str()), (x, full.as_str())])?;
+    let sum_squares = reduce(program, DType::Float32, ScalarOp::Add, ReduceInit::Zero, squared, full.as_str(), broadcast_over_d.as_str())?;
+    let mean_square = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Multiply,
+        &[(sum_squares, identity.as_str()), (inv_head_dim, inv_head_dim_map.as_str())],
+    )?;
+    let mean_square_eps = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Add,
+        &[(mean_square, identity.as_str()), (eps, eps_map.as_str())],
+    )?;
+    let rms = elementwise(program, DType::Float32, ScalarOp::SquareRoot, &[(mean_square_eps, identity.as_str())])?;
+    let inv_rms = elementwise(program, DType::Float32, ScalarOp::Reciprocal, &[(rms, identity.as_str())])?;
+    let normed = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(x, full.as_str()), (inv_rms, broadcast_over_d.as_str())])?;
+    elementwise(program, DType::Float32, ScalarOp::Multiply, &[(normed, full.as_str()), (gamma, gamma_map.as_str())])
+}
+
 /// The causal mask's data-independent half: `is_future` (a `(query, key)`
 /// comparison between two [`Op::Iota`]s) and `neg_infinity`, built once and
 /// shared by every layer — position-only, no learned state, exactly like
@@ -1968,6 +2007,7 @@ fn append_attention_mixer(
     inv_dim: NodeId,
     eps: NodeId,
     inv_sqrt_head_dim: NodeId,
+    inv_head_dim: NodeId,
     cos: NodeId,
     sin: NodeId,
     group_ones: NodeId,
@@ -1975,6 +2015,8 @@ fn append_attention_mixer(
     neg_infinity: NodeId,
     group: u32,
     attn_norm_weight: NodeId,
+    q_norm_weight: NodeId,
+    k_norm_weight: NodeId,
     wq: NodeId,
     wk: NodeId,
     wv: NodeId,
@@ -1983,10 +2025,15 @@ fn append_attention_mixer(
     let normed = rmsnorm(program, x, attn_norm_weight, inv_dim, eps)?;
 
     let q_product = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(normed, "si->shdi"), (wq, "ihd->shdi")])?;
-    let q = reduce(program, DType::Float32, ScalarOp::Add, ReduceInit::Zero, q_product, "shdi->shdi", "shd->shdi")?;
+    let q_raw = reduce(program, DType::Float32, ScalarOp::Add, ReduceInit::Zero, q_product, "shdi->shdi", "shd->shdi")?;
+    // [`Lfm2MoeAttention.q_layernorm`]'s own placement
+    // (`modeling_lfm2_moe.py:331`): normalizes right after the head
+    // reshape, BEFORE `apply_rotary_pos_emb` -- never after.
+    let q = rmsnorm_per_head(program, q_raw, q_norm_weight, inv_head_dim, eps, 'h')?;
 
     let k_product = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(normed, "si->sudi"), (wk, "iud->sudi")])?;
-    let k = reduce(program, DType::Float32, ScalarOp::Add, ReduceInit::Zero, k_product, "sudi->sudi", "sud->sudi")?;
+    let k_raw = reduce(program, DType::Float32, ScalarOp::Add, ReduceInit::Zero, k_product, "sudi->sudi", "sud->sudi")?;
+    let k = rmsnorm_per_head(program, k_raw, k_norm_weight, inv_head_dim, eps, 'u')?;
 
     let v_product = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(normed, "si->sudi"), (wv, "iud->sudi")])?;
     let v = reduce(program, DType::Float32, ScalarOp::Add, ReduceInit::Zero, v_product, "sudi->sudi", "sud->sudi")?;
@@ -2099,6 +2146,7 @@ pub fn lfm2_forward_program_with_experts(
     let eps = symbolic_leaf(&mut program, DType::Float32, "eps");
     let ones = scalar_constant(&mut program, 1.0);
     let inv_sqrt_head_dim = scalar_constant(&mut program, 1.0 / (head_dim as f32).sqrt());
+    let inv_head_dim = scalar_constant(&mut program, 1.0 / head_dim as f32);
     let cos = input_leaf(&mut program, DType::Float32, alloc::vec![Extent::Symbolic(0), Extent::Static(pairs)], "rope_cos");
     let sin = input_leaf(&mut program, DType::Float32, alloc::vec![Extent::Symbolic(0), Extent::Static(pairs)], "rope_sin");
     let group_ones = op::append(
@@ -2157,12 +2205,25 @@ pub fn lfm2_forward_program_with_experts(
                     ],
                     &alloc::format!("blk.{layer}.attn_output.weight"),
                 );
+                let q_norm_weight = input_leaf(
+                    &mut program,
+                    DType::Float32,
+                    alloc::vec![Extent::Static(head_dim)],
+                    &alloc::format!("blk.{layer}.attn_q_norm.weight"),
+                );
+                let k_norm_weight = input_leaf(
+                    &mut program,
+                    DType::Float32,
+                    alloc::vec![Extent::Static(head_dim)],
+                    &alloc::format!("blk.{layer}.attn_k_norm.weight"),
+                );
                 append_attention_mixer(
                     &mut program,
                     x,
                     inv_dim,
                     eps,
                     inv_sqrt_head_dim,
+                    inv_head_dim,
                     cos,
                     sin,
                     group_ones,
@@ -2170,6 +2231,8 @@ pub fn lfm2_forward_program_with_experts(
                     neg_infinity,
                     group,
                     attn_norm_weight,
+                    q_norm_weight,
+                    k_norm_weight,
                     wq,
                     wk,
                     wv,
@@ -5314,6 +5377,110 @@ value = 1.0
         assert_ne!(
             result, [100.0, 210.0, 321.0, 432.0],
             "a perturbed tap weight must move the output away from the hand-computed reference \
+             (if this assertion cannot fail, the test above proves nothing)"
+        );
+    }
+
+    /// [`rmsnorm_per_head`] against a hand-computed RMS norm -- one token,
+    /// two heads, `head_dim = 2`: head 0's raw values `[3, 4]` have
+    /// `mean_square = (9+16)/2 = 12.5`, `rms = sqrt(12.5) ≈ 3.535534`,
+    /// `inv_rms ≈ 0.282843`; scaled by `gamma = [2.0, 0.5]` that is
+    /// `[3*0.282843*2, 4*0.282843*0.5] ≈ [1.697056, 0.565685]`. Head 1's
+    /// `[1, 1]` have `mean_square = 1`, `rms = 1`, so `gamma` passes
+    /// through unchanged: `[2.0, 0.5]`. Two heads with DIFFERENT norms in
+    /// the same call proves the reduce is scoped per-head, not pooled
+    /// across both (a pooled reduce would give both heads the same
+    /// `inv_rms`, which is not `[1.697056, ...]` next to `[2.0, ...]`).
+    #[proxima::test]
+    async fn rmsnorm_per_head_matches_a_hand_computed_rms_norm() {
+        let mut program = Vec::new();
+        let x = op::append(
+            &mut program,
+            Op::Input {
+                dtype: DType::Float32,
+                shape: alloc::vec![Extent::Symbolic(0), Extent::Static(2), Extent::Static(2)],
+                name: Some("x".into()),
+            },
+        );
+        let gamma = op::append(
+            &mut program,
+            Op::Input {
+                dtype: DType::Float32,
+                shape: alloc::vec![Extent::Static(2)],
+                name: Some("gamma".into()),
+            },
+        );
+        let eps = op::append(
+            &mut program,
+            Op::Input {
+                dtype: DType::Float32,
+                shape: alloc::vec![Extent::Symbolic(0)],
+                name: Some("eps".into()),
+            },
+        );
+        let inv_head_dim = scalar_constant(&mut program, 0.5);
+        let output = rmsnorm_per_head(&mut program, x, gamma, inv_head_dim, eps, 'h').expect("per-head rmsnorm lowers");
+
+        let x_data = [3.0f32, 4.0, 1.0, 1.0];
+        let gamma_data = [2.0f32, 0.5];
+        let eps_data = [0.0f32];
+        let evaluated = crate::cpu::evaluate_named(&program, &[1], &[("x", &x_data), ("gamma", &gamma_data), ("eps", &eps_data)], &[output])
+            .expect("per-head rmsnorm evaluates");
+        let (result, shape) = evaluated.get(output).expect("rmsnorm output present");
+
+        std::println!("rmsnorm_per_head result={result:?} shape={shape:?}");
+        assert_eq!(shape, [1u64, 2u64, 2u64]);
+        let expected = [1.6970563f32, 0.56568545, 2.0, 0.5];
+        for (found, wanted) in result.iter().zip(&expected) {
+            assert!((found - wanted).abs() < 1e-5, "got {result:?}, expected {expected:?}");
+        }
+    }
+
+    /// Proof the new test can fail: perturbing `gamma` must move the
+    /// output away from the hand-computed reference.
+    #[proxima::test]
+    async fn rmsnorm_per_head_hand_computed_check_actually_detects_a_wrong_gamma() {
+        let mut program = Vec::new();
+        let x = op::append(
+            &mut program,
+            Op::Input {
+                dtype: DType::Float32,
+                shape: alloc::vec![Extent::Symbolic(0), Extent::Static(2), Extent::Static(2)],
+                name: Some("x".into()),
+            },
+        );
+        let gamma = op::append(
+            &mut program,
+            Op::Input {
+                dtype: DType::Float32,
+                shape: alloc::vec![Extent::Static(2)],
+                name: Some("gamma".into()),
+            },
+        );
+        let eps = op::append(
+            &mut program,
+            Op::Input {
+                dtype: DType::Float32,
+                shape: alloc::vec![Extent::Symbolic(0)],
+                name: Some("eps".into()),
+            },
+        );
+        let inv_head_dim = scalar_constant(&mut program, 0.5);
+        let output = rmsnorm_per_head(&mut program, x, gamma, inv_head_dim, eps, 'h').expect("per-head rmsnorm lowers");
+
+        let x_data = [3.0f32, 4.0, 1.0, 1.0];
+        // gamma[0] perturbed from 2.0 to 3.0.
+        let perturbed_gamma_data = [3.0f32, 0.5];
+        let eps_data = [0.0f32];
+        let evaluated = crate::cpu::evaluate_named(&program, &[1], &[("x", &x_data), ("gamma", &perturbed_gamma_data), ("eps", &eps_data)], &[output])
+            .expect("per-head rmsnorm evaluates");
+        let (result, _shape) = evaluated.get(output).expect("rmsnorm output present");
+
+        std::println!("perturbed rmsnorm_per_head result={result:?}");
+        let unperturbed = [1.6970563f32, 0.56568545, 2.0, 0.5];
+        assert!(
+            (result[0] - unperturbed[0]).abs() > 1e-3,
+            "a perturbed gamma must move the output away from the hand-computed reference \
              (if this assertion cannot fail, the test above proves nothing)"
         );
     }
