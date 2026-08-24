@@ -2705,6 +2705,81 @@ mod real_mixtral_file {
         }
     }
 
+    /// Real-data proof for this change's own fix:
+    /// [`gguf_tensor_as_packed_block`] now decodes `blk.0.ffn_gate_inp.weight`
+    /// (the MoE router, this real checkpoint's own `F16` tensor -- confirmed
+    /// by [`inventories_the_real_checkpoints_tensor_codecs_and_chat_template`]'s
+    /// own `real_mixtral UNSUPPORTED codec` line before this fix landed)
+    /// into [`proxima_tensor::cpu::QuantizedBlock::Float16`] instead of
+    /// [`InteropError::UnrepresentableGgmlType`]. Reads only the router
+    /// tensor's own tiny byte range (`embedding * expert_count * 2` bytes --
+    /// 65536 for this checkpoint) plus the file prefix up to that range's
+    /// end (needed only because [`gguf_tensor_as_packed_block`] indexes
+    /// `file_bytes` by the tensor's real on-disk offset, not a
+    /// tensor-relative one) -- never the multi-gigabyte expert tensors that
+    /// precede it in layer 0's own tensor order.
+    ///
+    /// Cross-checks [`proxima_tensor::cpu::matmul_f16_f32`] (the packed
+    /// kernel [`crate::generate::LoadedModel`] now drives this tensor
+    /// through) against an independent per-element `f16`-bits decode of the
+    /// SAME real bytes, proving the packed binding is this file's own real
+    /// router weights in the right row-major order, not a shape-compatible
+    /// but scrambled read.
+    #[test]
+    #[ignore = "depends on a 25 GB host-local mixtral gguf checkout outside this repo"]
+    fn binds_the_real_f16_router_weight_packed_and_matches_independent_f16_decode() {
+        let path = std::path::Path::new(FIXTURE_PATH);
+        if !path.exists() {
+            eprintln!("skipping: no host-local mixtral gguf fixture at {FIXTURE_PATH}");
+            return;
+        }
+
+        let mut file = std::fs::File::open(path).expect("open host-local mixtral gguf fixture");
+        let file_len = file.metadata().expect("stat gguf fixture").len();
+        let mut header_buf: Vec<u8> = Vec::new();
+        let parsed = parse_header_region!(file, header_buf);
+
+        let architecture = architecture_from_metadata(&parsed).expect("derive architecture from the real mixtral checkpoint");
+        let router_name = "blk.0.ffn_gate_inp.weight";
+        let router_tensor = parsed.tensors.iter().find(|tensor| tensor.name == router_name).expect("real checkpoint carries a layer-0 router tensor");
+        assert_eq!(router_tensor.ggml_type, GgmlType::F16, "this real checkpoint's own router tensor must be F16 for this test to prove anything");
+
+        let range = parsed.tensor_data_range(router_tensor, file_len).expect("router tensor range within file");
+        let mut prefix = alloc::vec![0u8; range.end as usize];
+        file.seek(SeekFrom::Start(0)).expect("seek to file start");
+        file.read_exact(&mut prefix[..range.end as usize]).expect("read file prefix through the router tensor's own byte range");
+
+        let block = gguf_tensor_as_packed_block(&parsed, &prefix, router_name).expect("f16 router tensor now decodes packed instead of UnrepresentableGgmlType");
+        let router_bytes = match block {
+            proxima_tensor::cpu::QuantizedBlock::Float16(bytes) => bytes,
+            other => panic!("expected a Float16 packed block for the real f16 router tensor, got {other:?}"),
+        };
+
+        let embedding = architecture.embedding as usize;
+        let expert_count = architecture.expert_count as usize;
+        assert_eq!(router_bytes.len(), embedding * expert_count * 2, "router byte length must match embedding * expert_count f16 elements");
+
+        let activation: Vec<f32> = (0..embedding).map(|index| ((index % 7) as f32) - 3.0).collect();
+        let ours = proxima_tensor::cpu::matmul_f16_f32(router_bytes, expert_count, &activation).expect("matmul_f16_f32 runs against the real router bytes");
+
+        let mut expected = alloc::vec![0.0f32; expert_count];
+        for (expert_index, logit) in expected.iter_mut().enumerate() {
+            let row = &router_bytes[expert_index * embedding * 2..(expert_index + 1) * embedding * 2];
+            let mut accumulator = 0.0f32;
+            for (element_index, chunk) in row.chunks_exact(2).enumerate() {
+                let weight = half::f16::from_bits(u16::from_le_bytes([chunk[0], chunk[1]])).to_f32();
+                accumulator += weight * activation[element_index];
+            }
+            *logit = accumulator;
+        }
+
+        std::println!("real_mixtral router ours={ours:?} expected={expected:?}");
+        for (expert_index, (found, wanted)) in ours.iter().zip(&expected).enumerate() {
+            let diff = (found - wanted).abs();
+            assert!(diff < 1e-3, "router logit for expert {expert_index}: found={found} wanted={wanted} diff={diff}");
+        }
+    }
+
     /// A read-only `mmap` of the real 25 GB Mixtral fixture -- same
     /// technique and same justification as `real_openchat_file::MappedGguf`
     /// (this module's own doc), duplicated here rather than shared because
@@ -2784,36 +2859,57 @@ mod real_mixtral_file {
     /// one-turn-no-reply shape [`real_openchat_file::default_prompt`] uses
     /// for its own template.
     ///
-    /// **This is not expected to reach a decode step, for two independent
-    /// reasons, and this test observes whichever one the current code hits
-    /// first.** `LoadedModel::load` always builds
-    /// `proxima_tensor::spec::mistral_cached_forward_program`
-    /// (`generate.rs:344`), which has no `expert_count`/`expert_used_count`
-    /// parameter at all and unconditionally binds a dense
-    /// `blk.{layer}.ffn_gate.weight`/`ffn_up.weight`/`ffn_down.weight` triple
-    /// per layer (`spec.rs:1610-1627`) -- the routed alternative
-    /// (`append_mistral_moe_layer`/`append_moe_ffn`, `spec.rs:983`/`893`) is
-    /// only ever reachable through the separate, uncached
-    /// `mistral_forward_program` (`spec.rs:1115`), which nothing in this
-    /// crate calls. That mismatch would surface as
-    /// `TensorError::UnboundInputName("blk.0.ffn_gate.weight")` out of the
-    /// forward `call` itself, once weight loading gets that far.
+    /// **Stale-doc correction (this change): the two gaps this doc used to
+    /// describe are not both live any more.** `LoadedModel::load` now calls
+    /// `proxima_tensor::spec::mistral_cached_forward_program_with_experts`
+    /// (`generate.rs:351`), which DOES carry `expert_count`/`expert_used_count`
+    /// and selects the routed FFN for a MoE checkpoint -- the first gap this
+    /// doc used to name (the cached program being permanently dense) closed
+    /// separately from this change, evidenced by `generate.rs`'s own doc at
+    /// that call site. The second gap this doc named -- `ffn_gate_inp.weight`
+    /// (`F16`) hitting [`InteropError::UnrepresentableGgmlType`] before
+    /// `bind_all_weights` ever reaches the expert-weight loop -- IS this
+    /// change's own fix: [`gguf_tensor_as_packed_block`] now decodes `F16`
+    /// (see [`binds_the_real_f16_router_weight_packed_and_matches_independent_f16_decode`]
+    /// for the real-bytes proof), so `bind_all_weights` now reaches
+    /// [`bind_moe_expert_weights`] for every layer.
     ///
-    /// It does not get that far: this real checkpoint stores every layer's
-    /// `ffn_gate_inp.weight` (the MoE router) as `F16` (confirmed above --
-    /// all 32 `F16` tensors in this file are exactly the 32 layers' own
-    /// `ffn_gate_inp.weight`), and neither `gguf_tensor_as_packed_block` nor
-    /// `gguf_tensor_as_f32` decodes `F16`, so `bind_matmul_weight` (`bind.rs`)
-    /// returns [`InteropError::UnrepresentableGgmlType`] for
-    /// `blk.0.ffn_gate_inp.weight` on the very first layer, and
-    /// `LoadedModel::load` propagates that cleanly as `Err` (`generate.rs`'s
-    /// own `bind_all_weights(..)?`) -- before `bind_all_weights` ever reaches
-    /// the expert-weight loop this module's other tests already prove
-    /// correct in isolation. Still wrapped in `catch_unwind`: this observes
-    /// whatever the current code does, and a stale assumption about which of
-    /// the two gaps fires first should not abort the test binary.
+    /// **What replaces it, confirmed by running this exact test (`--ignored
+    /// --nocapture`, no `ulimit` cap macOS would honor):** this real
+    /// checkpoint carries no native `blk.{layer}.ffn_gate_exps.weight` stack
+    /// (`blk.0.ffn_gate_exps.weight present=false`, confirmed against this
+    /// exact file), so `bind_moe_expert_weights` (`bind.rs`) falls back to
+    /// `discover_experts`/`plan_stack`/`restack_into` plus this crate's own
+    /// `transpose_expert_stack` -- a path that, by this function's own doc,
+    /// **always dequantizes every expert to owned `f32`**, never packed,
+    /// because the compiled graph's `gathered_expert_product`
+    /// (`proxima_tensor::spec.rs`) can only gather over a `Float32`
+    /// operand -- a non-`Float32` `QuantizedBlock` routes to
+    /// `run_reduce_quantized` (`proxima_tensor::cpu.rs`), which has no gather
+    /// semantics at all and would silently pick one constant-offset expert
+    /// per token rather than error. For this file's real dims (32 layers x
+    /// 8 experts x 3 projections x 4096x14336 `f32` elements), that owned
+    /// ceiling is `32 * 8 * 3 * 4096 * 14336 * 4` bytes = **~180 GiB**. Run
+    /// for real on a 64 GiB host: `kernel: memorystatus: killing largest
+    /// compressed process proxima_model_interop-<hash> [<pid>] 90160 MB`
+    /// (`/usr/bin/log show`, captured verbatim from this exact invocation) --
+    /// the OS kills the process partway through layer binding, before any
+    /// decode step, exactly the gap
+    /// [`moe_experts_do_not_yet_stay_packed_for_the_real_per_expert_tensor_convention`]
+    /// (`#[ignore]`d two tests above) already named and is blocked on: a
+    /// `proxima-tensor` interpreter capability (gather over a packed
+    /// `QuantizedBlock`) this change does not add. `catch_unwind` cannot
+    /// observe a `SIGKILL` from the kernel's own memory-pressure killer --
+    /// unlike a Rust panic, there is no unwind to catch -- so a caller
+    /// running this ignored test outside a memory-bounded sandbox risks the
+    /// same fate this run hit. Left `#[ignore]`d and now documented with the
+    /// exact failure this crate's own maintainers will hit if they try it.
     #[test]
-    #[ignore = "depends on a 25 GB host-local mixtral gguf checkout outside this repo"]
+    #[ignore = "depends on a 25 GB host-local mixtral gguf checkout outside this repo; \
+                DO NOT run unsandboxed -- this checkpoint's per-expert-tensor MoE layout \
+                forces bind_moe_expert_weights's owned-f32 fallback, whose real ceiling for \
+                this file's dims is ~180 GiB and gets SIGKILL'd by the OS around 90 GiB \
+                compressed (see this fn's own doc for the captured kernel log line)"]
     fn attempts_a_real_mixtral_forward_pass_and_reports_the_outcome() {
         let path = std::path::Path::new(FIXTURE_PATH);
         if !path.exists() {

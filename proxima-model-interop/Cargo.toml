@@ -136,3 +136,19 @@ required-features = ["std", "instrument"]
 [[example]]
 name = "lfm2_moe_route_diff"
 required-features = ["std"]
+
+# Layer-0/1-only bisection (the dense-FFN layers before any MoE gate exists):
+# normed / mixer_out / post_mixer / normed2 within one conv-mixer block, ours
+# vs `llama.cpp`'s own per-tensor dumps -- no telemetry recorder needed, same
+# `std`-only reason as `lfm2_moe_route_diff`.
+[[example]]
+name = "lfm2_dense_mixer_diff"
+required-features = ["std"]
+
+# Scratch sizing tool for the real Mixtral checkpoint: prints the derived
+# architecture and whether the native stacked `_exps` tensor is present, so
+# the owned-vs-packed MoE memory shape is known before attempting a forward
+# pass. Same `std`-only reason as `lfm2_moe_route_diff`.
+[[example]]
+name = "mixtral_architecture_dump"
+required-features = ["std"]
