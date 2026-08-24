@@ -1,3 +1,11 @@
+// a diagnostic binary, not library surface: every `.expect()`/`.unwrap()`
+// below is a setup precondition (real checkpoint present, oracle dump
+// present, program builds, label present in this run's own `labels` vec)
+// whose only correct response is to panic with the failing step named,
+// matching this crate's own sibling examples (`any_listener.rs` and friends
+// carry the identical allow for the identical reason).
+#![allow(clippy::expect_used, clippy::unwrap_used)]
+
 //! Depth-bisection of the real SmolLM2-135M-Instruct forward pass against
 //! `llama.cpp`'s own per-layer residual-stream dump
 //! (`l_out-<layer>`/`inp_embd`, produced OUTSIDE this repo by a small
@@ -24,10 +32,7 @@ use proxima_tensor::spec::mistral_cached_forward_program_with_experts;
 
 fn read_oracle_activation(path: &PathBuf) -> Vec<f32> {
     let bytes = fs::read(path).unwrap_or_else(|error| panic!("read oracle activation at {path:?}: {error}"));
-    bytes
-        .chunks_exact(4)
-        .map(|chunk| f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
-        .collect()
+    bytes.as_chunks::<4>().0.iter().map(|chunk| f32::from_le_bytes(*chunk)).collect()
 }
 
 /// The last `NodeId` a `block_count`-deep throwaway program shares with a
@@ -126,8 +131,8 @@ fn main() {
     length_prefix.copy_from_slice(&file_bytes[..8]);
     let data_start = 8 + u64::from_le_bytes(length_prefix);
 
-    let model = LoadedModel::load_from_safetensors(&manifest, &file_bytes, data_start, architecture.clone(), vocab)
-        .expect("load real smollm2 checkpoint");
+    let model =
+        LoadedModel::load_from_safetensors(&manifest, &file_bytes, data_start, architecture, vocab).expect("load real smollm2 checkpoint");
 
     let block_count = architecture.block_count;
     let mut node_ids = Vec::with_capacity(block_count as usize + 1);

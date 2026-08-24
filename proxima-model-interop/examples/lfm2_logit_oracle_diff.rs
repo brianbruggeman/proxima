@@ -1,3 +1,10 @@
+// a diagnostic binary, not library surface: every `.expect()` below is a
+// setup precondition (real checkpoint present, oracle dump present, program
+// builds) whose only correct response is to panic with the failing step
+// named, matching this crate's own sibling examples (`any_listener.rs` and
+// friends carry the identical allow for the identical reason).
+#![allow(clippy::expect_used)]
+
 //! Cross-oracle logit diff for the real, downloaded
 //! `LFM2.5-8B-A1B-Q4_K_M.gguf` checkpoint: this crate's own
 //! [`lfm2_forward_values`] against a raw `f32` dump of `llama.cpp`'s
@@ -39,7 +46,7 @@ fn ranked_indices(logits: &[f32]) -> Vec<usize> {
 
 fn read_oracle_logits(path: &PathBuf) -> Vec<f32> {
     let bytes = fs::read(path).unwrap_or_else(|error| panic!("read oracle logits at {path:?}: {error}"));
-    bytes.chunks_exact(4).map(|chunk| f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]])).collect()
+    bytes.as_chunks::<4>().0.iter().map(|chunk| f32::from_le_bytes(*chunk)).collect()
 }
 
 fn main() {
