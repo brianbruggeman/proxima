@@ -3096,6 +3096,23 @@ fn build_matmul_stage_plan<'weights>(
         .map(|(_, layout, _)| layout)
         .ok_or_else(shape_error)?;
 
+    // A gathered weight operand (`moe_block.toml`'s `expert_w`) picks a
+    // different expert slab per position -- this staged precompute assumes
+    // one flat weight matrix shared across the whole round
+    // (`run_stage_chunk`'s own dispatch). Rather than duplicate
+    // `run_reduce_quantized`'s gather resolution a second time in this
+    // already-deliberately-duplicated shape derivation, bail to `None`: the
+    // same fallback this function already takes for `dot_fn_for`/
+    // `quantized_matmul_workers` ineligibility, which routes back through
+    // `run_node_into`'s plain (gather-aware) path.
+    if resolved
+        .operands()
+        .iter()
+        .any(|(node, _, gather)| *node == weight_node && gather.is_some())
+    {
+        return Ok(None);
+    }
+
     let mut rows_total: u64 = 1;
     let mut leading_total_u64: u64 = 1;
     for axis in output_axes.as_slice() {
@@ -3466,8 +3483,22 @@ fn run_reduce_quantized<B: Deref<Target = [f32]>>(
     // folded into either bucket: the loop below dots ONE activation vector
     // against every packed row, which only holds when the activation is
     // constant across whichever axes the weight's own rows enumerate.
+    // A packed weight carrying `IndexMap::Computed` over its own leading
+    // (batch) axis -- `moe_block.toml`'s `expert_w` gather -- selects one
+    // whole `[rows, k]` expert slab per batch position out of an
+    // `[n_experts, rows, k]` stack (`proxima-gguf/src/restack.rs`'s own
+    // module doc: byte concatenation, block-aligned by construction). The
+    // gathered axis itself never appears in `output_axes`/`resolved.extents`
+    // at all -- only the token axis that *drives* the gather does, and that
+    // axis already lands in the broadcast (`stride == 0`) bucket below, same
+    // as any other batch position. `leading_axes`/`leading_extents` are only
+    // populated when a gather is present, so the non-gathered path (every
+    // codec this crate ran before Mixtral) allocates nothing extra here.
+    let weight_gather = resolved.operands().iter().find(|(node, _, _)| *node == weight_node).and_then(|(_, _, gather)| gather.clone());
     let mut rows_total: u64 = 1;
     let mut leading_total_u64: u64 = 1;
+    let mut leading_axes: Vec<u16> = Vec::new();
+    let mut leading_extents: Vec<u64> = Vec::new();
     for axis in output_axes.as_slice() {
         let extent = resolved.extents[*axis as usize];
         if weight_layout.stride(*axis) != 0 {
@@ -3477,6 +3508,10 @@ fn run_reduce_quantized<B: Deref<Target = [f32]>>(
             rows_total *= extent;
         } else {
             leading_total_u64 *= extent;
+            if weight_gather.is_some() {
+                leading_axes.push(*axis);
+                leading_extents.push(extent);
+            }
         }
     }
     let rows = usize::try_from(rows_total).map_err(|_| shape_error())?;
@@ -3503,12 +3538,38 @@ fn run_reduce_quantized<B: Deref<Target = [f32]>>(
     if k == 0 || rows == 0 || !weights.len().is_multiple_of(block_bytes) {
         return Err(shape_error());
     }
-    // The packed buffer's own byte length must hold exactly the
-    // structurally-derived `rows * k` elements -- still validated, just no
-    // longer the SOURCE `rows` is derived from.
-    let total_weight_elements = (weights.len() / block_bytes) * block_elements;
-    if total_weight_elements != rows * k {
-        return Err(shape_error());
+    // A gathered weight packs `n_experts` (`weight_gather.extent`) whole
+    // `[rows, k]` slabs back to back -- `per_expert_bytes` below is the same
+    // byte-concatenation arithmetic `proxima-gguf::restack::plan_stack`
+    // already validated at load time (block-aligned by construction, per
+    // that module's own doc), re-derived here rather than trusted blind so
+    // a stacked buffer that does NOT evenly divide by `rows * k` blocks is a
+    // typed `NotLowerable`, never a silent wrong-expert read. The
+    // non-gathered check below (`total_weight_elements != rows * k`) stays
+    // byte-for-byte what it always was.
+    let per_expert_bytes = if weight_gather.is_some() {
+        let per_expert_elements = rows.checked_mul(k).ok_or_else(shape_error)?;
+        if per_expert_elements == 0 || !per_expert_elements.is_multiple_of(block_elements) {
+            return Err(shape_error());
+        }
+        (per_expert_elements / block_elements) * block_bytes
+    } else {
+        0
+    };
+    if let Some(gather) = weight_gather.as_ref() {
+        let expert_count = usize::try_from(gather.extent).map_err(|_| shape_error())?;
+        let expected_total_bytes = per_expert_bytes.checked_mul(expert_count).ok_or_else(shape_error)?;
+        if weights.len() != expected_total_bytes {
+            return Err(shape_error());
+        }
+    } else {
+        // The packed buffer's own byte length must hold exactly the
+        // structurally-derived `rows * k` elements -- still validated, just no
+        // longer the SOURCE `rows` is derived from.
+        let total_weight_elements = (weights.len() / block_bytes) * block_elements;
+        if total_weight_elements != rows * k {
+            return Err(shape_error());
+        }
     }
     if output.len() != leading_total * rows || activation.len() != leading_total * k {
         return Err(shape_error());
@@ -3524,8 +3585,16 @@ fn run_reduce_quantized<B: Deref<Target = [f32]>>(
     // below re-streaming the whole weight matrix once per position.
     // `Q5_K`/`Q6_K` (9 of 225 weights) use the identically-shaped
     // `matmul_q5k_q8k_f32_impl`/`matmul_q6k_q8k_f32_impl` wide calls below.
+    // A gathered weight varies its whole slab per position -- the wide fold
+    // below streams `weights` once and reuses it across every position in
+    // `leading_total`, which only holds when every position dots against the
+    // SAME weight. Skipping it here (rather than teaching it a per-position
+    // slab swap) routes a gathered node into the per-position loop below,
+    // which resolves the gather itself.
     #[cfg(feature = "q4k-int8-dot")]
-    if let QuantizedBlock::Q4K(_) = weight_block {
+    if weight_gather.is_none()
+        && let QuantizedBlock::Q4K(_) = weight_block
+    {
         #[cfg(feature = "instrument")]
         let diag_call_started = instrument::read_ticks();
         let wide = matmul_q4k_q8k_f32_impl(weights, rows, activation, leading_total, session)?;
@@ -3564,9 +3633,12 @@ fn run_reduce_quantized<B: Deref<Target = [f32]>>(
     // per-codec transpose-tick counter exists for `Q5_K` (only
     // `MATMUL_Q4K_TRANSPOSE_TICKS` does); the transpose's cost is still
     // captured inside `MATMUL_REDUCE_QUANTIZED_TICKS` below, which is not
-    // codec-specific.
+    // codec-specific. Gated the same way the `Q4_K` arm above is -- a
+    // gathered weight cannot use this single-flat-matrix wide fold.
     #[cfg(feature = "q5k-int8-dot")]
-    if let QuantizedBlock::Q5K(_) = weight_block {
+    if weight_gather.is_none()
+        && let QuantizedBlock::Q5K(_) = weight_block
+    {
         #[cfg(feature = "instrument")]
         let diag_call_started = instrument::read_ticks();
         let wide = matmul_q5k_q8k_f32_impl(weights, rows, activation, leading_total, session)?;
@@ -3587,9 +3659,12 @@ fn run_reduce_quantized<B: Deref<Target = [f32]>>(
     }
 
     // `Q6_K`'s wide-fold arm -- same mechanism as the `Q4_K` arm above,
-    // `matmul_q6k_q8k_f32_impl` in place of `matmul_q4k_q8k_f32_impl`.
+    // `matmul_q6k_q8k_f32_impl` in place of `matmul_q4k_q8k_f32_impl`. Gated
+    // the same way the `Q4_K` arm above is.
     #[cfg(feature = "q6k-int8-dot")]
-    if let QuantizedBlock::Q6K(_) = weight_block {
+    if weight_gather.is_none()
+        && let QuantizedBlock::Q6K(_) = weight_block
+    {
         #[cfg(feature = "instrument")]
         let diag_call_started = instrument::read_ticks();
         let wide = matmul_q6k_q8k_f32_impl(weights, rows, activation, leading_total, session)?;
@@ -3609,10 +3684,40 @@ fn run_reduce_quantized<B: Deref<Target = [f32]>>(
         return Ok(());
     }
 
+    // A gathered weight resolves one expert slab out of the stacked buffer
+    // per position, using the same coordinate -> `Layout::offset_of`
+    // machinery `fill_gather_cursors` uses for the dense f32 gather path
+    // (`fill_gather_cursors`/`GatherCursor`, this module) -- reused here as
+    // a byte-offset computation layered on the packed weight's byte buffer,
+    // not a second index-resolution mechanism. `leading_coordinate`/
+    // `full_coordinate` stay empty `Vec`s (no allocation) on the
+    // non-gathered path.
+    let mut leading_coordinate = if weight_gather.is_some() { vec![0u64; leading_axes.len()] } else { Vec::new() };
+    let mut full_coordinate = if weight_gather.is_some() { vec![0u64; resolved.extents.len()] } else { Vec::new() };
+
     #[cfg(feature = "instrument")]
     counter!(instrument::MATMUL_POSITION_LOOP_ITERS, leading_total as u64);
     for position in 0..leading_total {
         let activation_row = &activation[position * k..(position + 1) * k];
+        let weights: &[u8] = if let Some(gather) = weight_gather.as_ref() {
+            unflatten_into(position as u64, &leading_extents, &mut leading_coordinate);
+            merge_coordinates_into(&leading_axes, &leading_coordinate, &[], &[], &mut full_coordinate);
+            let index_buffer = buffer_of(buffers, gather.indices)?;
+            let index_offset = usize::try_from(gather.index_layout.offset_of(&full_coordinate)).map_err(|_| shape_error())?;
+            let raw_index = *index_buffer.get(index_offset).ok_or_else(shape_error)?;
+            let expert_index = raw_index as i64;
+            if expert_index < 0 || expert_index as u64 >= gather.extent {
+                return Err(TensorError::GatherIndexOutOfRange {
+                    node: resolved.node,
+                    index: expert_index,
+                    extent: gather.extent,
+                });
+            }
+            let start = expert_index as usize * per_expert_bytes;
+            weights.get(start..start + per_expert_bytes).ok_or_else(shape_error)?
+        } else {
+            weights
+        };
         // proxima-debugger diagnostic: per-position, per-codec call timer
         // plus `rows * k` mac count -- localizes whether the missing 2x is
         // inside one codec's kernel (ns/mac far above the isolated
@@ -14856,6 +14961,149 @@ mod tests {
             "relative_max_diff={relative_max_diff} (max_diff={max_diff} over magnitude {max_magnitude}) \
              exceeds loose sanity bound"
         );
+    }
+
+    /// `sum_k weight[route[s], o, k] * activation[s, k]` -- `moe_block.toml`'s
+    /// `expert_w` gather, mirroring [`embedding_matmul_program`]'s `(s, o, k)`
+    /// iteration shape with the gather moved from the activation side to the
+    /// weight side. `weight`'s own physical shape is `[n_experts, rows, k]`;
+    /// `gathered_dim: 0` and `index_map` reading iteration axis 0 (`s`) is the
+    /// same [`IndexMap::Computed`] wiring [`embedding_lookup_program`] uses,
+    /// just on the operand [`run_reduce_quantized`] actually dequantizes.
+    fn gathered_quantized_matmul_program(n_experts: u32, rows: u32, k: u32, seq: u32) -> (Vec<Op>, NodeId) {
+        let mut program = Vec::new();
+        let weight = block(
+            &mut program,
+            DType::UInt8,
+            &[Extent::Static(n_experts), Extent::Static(rows), Extent::Static(k)],
+        );
+        let route = block(&mut program, DType::Int32, &[Extent::Static(seq)]);
+        let activation = f32_block(&mut program, &[Extent::Static(seq), Extent::Static(k)]);
+
+        let gather_map = IndexMap::Computed {
+            indices: route,
+            index_map: map::projection(3, &[0]),
+            base: map::IndexPattern {
+                iter_rank: 3,
+                axes: alloc::vec![
+                    map::AxisIndex::default(),
+                    map::AxisIndex {
+                        terms: core::iter::once(AxisTerm::projection(1)).collect(),
+                        offset: 0,
+                    },
+                    map::AxisIndex {
+                        terms: core::iter::once(AxisTerm::projection(2)).collect(),
+                        offset: 0,
+                    },
+                ],
+            },
+            gathered_dim: 0,
+        };
+        let activation_map = IndexMap::Affine(map::projection(3, &[0, 2]));
+
+        let product = append(
+            &mut program,
+            Op::Elementwise {
+                dtype: DType::Float32,
+                body: ScalarOp::Multiply,
+                operands: alloc::vec![(weight, gather_map), (activation, activation_map)],
+                name: None,
+            },
+        );
+        let sum = append(
+            &mut program,
+            Op::Reduce(Reduce {
+                dtype: DType::Float32,
+                body: ScalarOp::Add,
+                init: ReduceInit::Zero,
+                operand: product,
+                in_map: IndexMap::Affine(map::projection(3, &[0, 1, 2])),
+                out_map: IndexMap::Affine(map::projection(3, &[0, 1])),
+                keep: Keep::Reduce,
+                name: Some("gathered_quantized_matmul".into()),
+            }),
+        );
+        (program, sum)
+    }
+
+    /// The decisive test this whole change exists for: gathering expert `k`
+    /// out of a stacked packed weight must dequantize BIT-IDENTICALLY to
+    /// expert `k`'s own standalone tensor, exercised through the evaluator
+    /// (`evaluate_quantized` -> `run_node_into` -> `run_reduce_with_quantized_weights`
+    /// -> `run_reduce_quantized`'s new gather-resolution branch), not through
+    /// `restack::gather_expert` called directly. Three tokens, three DISTINCT
+    /// experts with asymmetric weight magnitudes (1x / 5x / 20x): a token
+    /// reading the wrong expert's slab produces a value off by that same
+    /// asymmetric factor, not a subtle rounding difference, so this is a
+    /// mechanism check, not a tolerance check.
+    #[test]
+    fn evaluate_quantized_gathered_moe_weight_matches_the_routed_experts_own_matmul() {
+        use proxima_gguf::quant::q4_k::{BLOCK_BYTES, QK_K, quantize};
+
+        let n_experts: u32 = 3;
+        let rows: u32 = 4;
+        let blocks_per_row = 1;
+        let k = QK_K as u32 * blocks_per_row as u32;
+        let seq: u32 = 3;
+        // token `t` routes to a DIFFERENT expert than its own position (a
+        // constant or identity route could not distinguish a working gather
+        // from the pre-fix constant-offset read this change closes).
+        let route_data = [2.0f32, 0.0, 1.0];
+        let expert_scales = [1.0f32, 5.0, 20.0];
+
+        let mut expert_blocks: Vec<Vec<u8>> = Vec::new();
+        for (expert, &scale) in expert_scales.iter().enumerate() {
+            let weight_f32: Vec<f32> = random_vec(101 + expert as u64, rows as usize * k as usize)
+                .into_iter()
+                .map(|value| (value * 4.0 - 2.0) * scale)
+                .collect();
+            let mut blocks = vec![0u8; rows as usize * blocks_per_row * BLOCK_BYTES];
+            for (row_f32, row_blocks) in
+                weight_f32.chunks_exact(k as usize).zip(blocks.chunks_exact_mut(blocks_per_row * BLOCK_BYTES))
+            {
+                quantize(row_f32, row_blocks).expect("row length is QK_K by construction");
+            }
+            expert_blocks.push(blocks);
+        }
+        let stacked_weight: Vec<u8> = expert_blocks.iter().flatten().copied().collect();
+
+        let activation: Vec<f32> =
+            random_vec(211, seq as usize * k as usize).into_iter().map(|value| value * 2.0 - 1.0).collect();
+
+        let (program, sum) = gathered_quantized_matmul_program(n_experts, rows, k, seq);
+        let quantized_blocks = [
+            QuantizedBlock::Q4K(&stacked_weight),
+            QuantizedBlock::Float32(&route_data),
+            QuantizedBlock::Float32(&activation),
+        ];
+        let evaluated = evaluate_quantized(&program, &[], &quantized_blocks, &[sum])
+            .expect("gathered quantized moe matmul evaluates end to end");
+        let actual = evaluated.root();
+        assert_eq!(actual.len(), seq as usize * rows as usize);
+
+        for (token, &route) in route_data.iter().enumerate() {
+            let expert = route as usize;
+            let activation_row = &activation[token * k as usize..(token + 1) * k as usize];
+            // Same codec kernel `run_reduce_quantized`'s per-position loop
+            // itself calls for a `Q4K` block (`q4k-int8-dot` default-on
+            // routes through `matmul_q4k_q8k_f32`; off, the plain
+            // `matmul_q4k_f32`) -- comparing against the OTHER kernel would
+            // fail on that kernel's own lossy Q8_K quantization step, not on
+            // a wrong-expert read, which is the one thing this test exists
+            // to catch.
+            #[cfg(feature = "q4k-int8-dot")]
+            let expected = matmul_q4k_q8k_f32(&expert_blocks[expert], rows as usize, activation_row)
+                .expect("the routed expert's own standalone matmul evaluates");
+            #[cfg(not(feature = "q4k-int8-dot"))]
+            let expected = matmul_q4k_f32(&expert_blocks[expert], rows as usize, activation_row)
+                .expect("the routed expert's own standalone matmul evaluates");
+            let actual_row = &actual[token * rows as usize..(token + 1) * rows as usize];
+            assert_eq!(
+                actual_row, expected,
+                "token {token} routed to expert {expert}: gathered result does not bit-match that \
+                 expert's own standalone matmul call"
+            );
+        }
     }
 
     /// `evaluate_quantized`'s `live_now` running count treats every operand
