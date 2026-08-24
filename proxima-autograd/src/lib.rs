@@ -4,7 +4,7 @@
 //! the graph already IS the value (`proxima_tensor`'s own crate doc:
 //! "there is no `Tensor` type... what writing it produces is a program"),
 //! and Adam is nine elementwise nodes over existing `Op::Input` leaves,
-//! not a method on anything. Three pieces:
+//! not a method on anything. Four pieces:
 //!
 //! - [`adjoint::differentiate`] — the adjoint transform, `&[Op] -> Differentiated`,
 //!   a pure synchronous function, not a [`proxima_primitives::pipe::Pipe`]
@@ -14,22 +14,33 @@
 //!   a new variant.
 //! - [`optimizer::adam_step`] — the Adam update as an elementwise
 //!   expression over `(param, grad, m, v, step)`.
+//! - [`sparse::dedupe_and_sum_rows`] — the host-side scatter-add a gathered
+//!   operand's adjoint (`adjoint::GatheredContribution`) needs applied back
+//!   onto its full shape, `O(touched x row_len)` rather than the dense
+//!   `O(vocab x touched)` mask composition `proxima-tensor` itself uses for
+//!   a statically-known destination.
 //!
-//! Gradient-to-parameter binding is `Differentiated::gradient_of_named`,
-//! a lookup over [`proxima_tensor::op::Op::Input::name`] — the same name
+//! Gradient-to-parameter binding is `Differentiated::gradient_of_named`
+//! (dense) or `Differentiated::gathered_gradients_of_named` (a gathered
+//! operand, e.g. an embedding table), both lookups over
+//! [`proxima_tensor::op::Op::Input::name`] — the same name
 //! [`proxima_tensor::cpu::evaluate_named`] already binds by — not a second
 //! tree structure next to the program.
 //!
 //! # Tiers
 //!
-//! [`adjoint`], [`activation`], and [`expr`] touch nothing but
+//! [`adjoint`], [`activation`], [`expr`], and [`sparse`] touch nothing but
 //! `proxima-tensor`'s alloc-tier surface (`op`/`map`/`shape`/`error`) and
 //! build under `--no-default-features --features alloc`: pure graph
-//! construction, no evaluation. [`optimizer::adam_step`]/[`optimizer::step_input`]
-//! are the same tier. `optimizer::AdamConfig`'s `bon`/`conflaguration`/`serde`
-//! derive stack is behind the `config` feature (std-gated, mirroring
-//! `proxima-tensor`'s own `config` feature); running any of it —
-//! [`proxima_tensor::cpu::evaluate_named`] — needs `std`.
+//! construction and host-side buffer reduction, no evaluation. `sparse`
+//! additionally touches nothing but `alloc::collections::BTreeMap`, so it
+//! needs no new dependency to stay off the `O(n^2)` linear-scan path a
+//! `Vec`-based dedupe would otherwise take.
+//! [`optimizer::adam_step`]/[`optimizer::step_input`] are the same tier.
+//! `optimizer::AdamConfig`'s `bon`/`conflaguration`/`serde` derive stack is
+//! behind the `config` feature (std-gated, mirroring `proxima-tensor`'s own
+//! `config` feature); running any of it — [`proxima_tensor::cpu::evaluate_named`]
+//! — needs `std`.
 
 #![cfg_attr(not(feature = "std"), no_std)]
 
@@ -47,5 +58,6 @@ pub mod adjoint;
 pub mod error;
 pub(crate) mod expr;
 pub mod optimizer;
+pub mod sparse;
 
 pub use error::AutogradError;

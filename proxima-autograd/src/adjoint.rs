@@ -36,14 +36,35 @@
 //!   prefix-sum for `Add`; no known closed form here for `Maximum`), and is
 //!   rejected with [`AutogradError::ScanAdjointUnsupported`] rather than
 //!   silently mishandled.
-//! - **A gathered (`IndexMap::Computed`) operand's adjoint is a
-//!   scatter-add** by the same mask-composition recipe, but it is
-//!   `O(destination x source)` dense (`cpu.rs:16062`'s own doc: at
-//!   embedding scale, 128k x 4k is 524M mask elements to accumulate 4k
-//!   values) and is rejected here with
-//!   [`AutogradError::GatherAdjointUnsupported`] rather than shipped
-//!   half-verified under time pressure — see this crate's own report for
-//!   why that trade was made deliberately, not by omission.
+//! - **A gathered (`IndexMap::Computed`) operand's adjoint needs no scatter
+//!   at all to *compute*.** `differentiate_elementwise`'s per-operand
+//!   contribution is already produced at the *consuming* iteration space —
+//!   `table[ids[s], d]`'s own `(s, d)` shape — which is exactly the compact
+//!   `[len(ids), row_len]` gradient a caller needs, not the operand's full
+//!   `[vocab, row_len]` shape. [`route_contribution`] hands that
+//!   contribution back as a [`GatheredContribution`] (paired with the same
+//!   `indices` node the forward gather read from) instead of forcing it
+//!   through `proxima-tensor/src/cpu.rs:16062`'s dense mask-composition
+//!   scatter-add, which is `O(destination x source)` — at embedding scale
+//!   (vocab 128k, 4k touched rows) that is 524M mask elements to place 4k
+//!   rows. *Applying* a [`GatheredContribution`] back onto its full operand
+//!   — the step this crate stops short of, the same way it already stops
+//!   short of writing a trained parameter buffer back to disk — is
+//!   `O(len(ids) x row_len)`, not `O(vocab x len(ids))`, via
+//!   [`crate::sparse::dedupe_and_sum_rows`] plus the existing
+//!   [`crate::optimizer::adam_step`] run at a rank sized to the *unique*
+//!   touched rows, not the full vocab. See this crate's own report for the
+//!   worked example and the element count at realistic dims.
+//! - **`Reduce` directly over a gathered operand** (`Reduce::in_map` itself
+//!   data-dependent — summing gathered rows before this crate's own
+//!   `Reduce` adjoint reuses that same `in_map` as the backward node's
+//!   `out_map`) is a materially different derivation from the elementwise
+//!   case above: it would need shape.rs's data-dependent-`out_map` gate
+//!   (`proxima-tensor/src/shape.rs:166-171`) taught a new lowering, not just
+//!   a compact host-side buffer, so it stays out of scope and is rejected
+//!   with [`AutogradError::ReduceOverGatherUnsupported`] rather than
+//!   silently building a backward program shape.rs would only reject later,
+//!   at evaluation time, with no adjoint-specific diagnosis.
 //! - **A non-pure-projection operand map** (a convolution-style window,
 //!   multi-term or non-unit-coefficient) cannot be reused as a backward
 //!   `Reduce`'s `out_map` — `proxima-tensor/src/shape.rs:437-453` rejects
@@ -63,9 +84,32 @@ use proxima_tensor::shape::{self, Shapes};
 use crate::error::AutogradError;
 use crate::expr;
 
+/// One gathered operand's adjoint contribution, before anything scatters it
+/// back onto the operand's full shape.
+///
+/// `values` is already the correct, compact gradient — computing it needed
+/// no scatter at all, since [`route_contribution`] hands back the
+/// contribution exactly as produced at the *consuming* iteration space
+/// (`table[ids[s], d]`'s own `(s, d)` shape), not the operand's own
+/// `[vocab, row_len]` shape. `indices` is the same [`NodeId`] the forward
+/// gather's [`IndexMap::Computed::indices`] read its row selector from, so
+/// `values`'s row `n` belongs at the operand row named by `indices`'s
+/// element `n`. `gathered_dim` is the operand axis the forward gather
+/// selected (`IndexMap::Computed::gathered_dim`) — [`crate::sparse`]'s
+/// helpers assume this is `0` (the operand's leading axis, the canonical
+/// embedding-table layout); a caller with a non-leading gathered axis must
+/// permute before applying.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GatheredContribution {
+    pub values: NodeId,
+    pub indices: NodeId,
+    pub gathered_dim: u16,
+}
+
 /// The forward program's own nodes (unchanged, same indices) plus every
-/// adjoint node this transform appended, and the gradient node for each
-/// [`Op::Input`] the loss actually depends on.
+/// adjoint node this transform appended, the gradient node for each
+/// [`Op::Input`] the loss actually depends on densely, and every gathered
+/// operand's compact [`GatheredContribution`].
 ///
 /// Bundling `program` and `gradients` in one value — rather than returning
 /// a bare `(Vec<Op>, Vec<(NodeId, NodeId)>)` tuple — closes a real hazard:
@@ -79,10 +123,21 @@ pub struct Differentiated {
     pub program: Vec<Op>,
     pub loss: NodeId,
     gradients: Vec<(NodeId, NodeId)>,
+    gathered: Vec<(NodeId, GatheredContribution)>,
 }
 
 impl Differentiated {
-    /// The gradient node for `node`, if the loss depends on it.
+    fn input_named(&self, name: &str) -> Option<NodeId> {
+        self.program.iter().enumerate().find_map(|(index, op)| match op {
+            Op::Input { name: Some(candidate), .. } if candidate == name => Some(NodeId(index as u32)),
+            _ => None,
+        })
+    }
+
+    /// The dense gradient node for `node`, if the loss depends on it
+    /// through at least one non-gathered (`IndexMap::Affine`) read. A node
+    /// read *only* through a gather has no entry here — see
+    /// [`Self::gathered_gradients_of`] instead.
     #[must_use]
     pub fn gradient_of(&self, node: NodeId) -> Option<NodeId> {
         self.gradients
@@ -99,16 +154,31 @@ impl Differentiated {
     /// is a lookup over that same name, not a second tree structure.
     #[must_use]
     pub fn gradient_of_named(&self, name: &str) -> Option<NodeId> {
-        self.program
+        self.input_named(name).and_then(|node| self.gradient_of(node))
+    }
+
+    /// Every [`GatheredContribution`] recorded for `node` — one per forward
+    /// site that gathered `node` as an `IndexMap::Computed` operand. Most
+    /// programs gather a given table exactly once, so this is usually a
+    /// single-element iterator, but nothing here assumes that: a table read
+    /// by two separate gathers yields two contributions, both legitimate,
+    /// neither one silently dropped.
+    pub fn gathered_gradients_of(&self, node: NodeId) -> impl Iterator<Item = GatheredContribution> + '_ {
+        self.gathered
             .iter()
-            .enumerate()
-            .find_map(|(index, op)| match op {
-                Op::Input { name: Some(candidate), .. } if candidate == name => {
-                    Some(NodeId(index as u32))
-                }
-                _ => None,
-            })
-            .and_then(|node| self.gradient_of(node))
+            .filter(move |(candidate, _)| *candidate == node)
+            .map(|(_, contribution)| *contribution)
+    }
+
+    /// [`Self::gathered_gradients_of`], looked up by the operand's
+    /// [`Op::Input::name`] instead of its [`NodeId`] — the same convenience
+    /// [`Self::gradient_of_named`] gives the dense case.
+    pub fn gathered_gradients_of_named(&self, name: &str) -> impl Iterator<Item = GatheredContribution> + '_ {
+        let node = self.input_named(name);
+        self.gathered
+            .iter()
+            .filter(move |(candidate, _)| Some(*candidate) == node)
+            .map(|(_, contribution)| *contribution)
     }
 }
 
@@ -127,6 +197,7 @@ pub fn differentiate(program: &[Op], loss: NodeId) -> Result<Differentiated, Aut
 
     let mut new_program: Vec<Op> = program[..=loss_index].to_vec();
     let mut grad_of: Vec<Option<NodeId>> = vec![None; loss_index + 1];
+    let mut gathered_of: Vec<Vec<GatheredContribution>> = vec![Vec::new(); loss_index + 1];
     grad_of[loss_index] = Some(expr::constant(&mut new_program, DType::Float32, 1.0));
 
     for index in (0..=loss_index).rev() {
@@ -137,6 +208,7 @@ pub fn differentiate(program: &[Op], loss: NodeId) -> Result<Differentiated, Aut
             Op::Elementwise { dtype, body, operands, .. } => differentiate_elementwise(
                 &mut new_program,
                 &mut grad_of,
+                &mut gathered_of,
                 program,
                 &shapes,
                 node,
@@ -164,7 +236,15 @@ pub fn differentiate(program: &[Op], loss: NodeId) -> Result<Differentiated, Aut
         .filter_map(|(index, _)| grad_of[index].map(|gradient| (NodeId(index as u32), gradient)))
         .collect();
 
-    Ok(Differentiated { program: new_program, loss, gradients })
+    let gathered = gathered_of
+        .into_iter()
+        .enumerate()
+        .flat_map(|(index, contributions)| {
+            contributions.into_iter().map(move |contribution| (NodeId(index as u32), contribution))
+        })
+        .collect();
+
+    Ok(Differentiated { program: new_program, loss, gradients, gathered })
 }
 
 fn accumulate(
@@ -188,6 +268,7 @@ fn accumulate(
 fn differentiate_elementwise(
     program: &mut Vec<Op>,
     grad_of: &mut [Option<NodeId>],
+    gathered_of: &mut [Vec<GatheredContribution>],
     original_program: &[Op],
     shapes: &Shapes,
     node: NodeId,
@@ -286,7 +367,7 @@ fn differentiate_elementwise(
 
     for (operand, contribution) in operands.iter().zip(contributions) {
         let Some(contribution) = contribution else { continue };
-        route_contribution(program, grad_of, original_program, shapes, node, operand, contribution, iter_rank)?;
+        route_contribution(program, grad_of, gathered_of, original_program, shapes, node, operand, contribution, iter_rank)?;
     }
     Ok(())
 }
@@ -326,10 +407,14 @@ fn maximum_minimum_grads(
     vec![Some(grad_a), Some(grad_b)]
 }
 
+/// Routes one operand's local contribution back into `grad_of` (an
+/// `IndexMap::Affine` operand) or `gathered_of` (an `IndexMap::Computed`
+/// operand) — see this module's own doc for why the two cases differ.
 #[allow(clippy::too_many_arguments)]
 fn route_contribution(
     program: &mut Vec<Op>,
     grad_of: &mut [Option<NodeId>],
+    gathered_of: &mut [Vec<GatheredContribution>],
     original_program: &[Op],
     shapes: &Shapes,
     consumer: NodeId,
@@ -342,15 +427,15 @@ fn route_contribution(
         return Ok(());
     }
 
-    let operand_rank = shapes.of(*operand_node).len() as u16;
     let dtype = original_program[operand_node.0 as usize].dtype();
 
-    let routed = match operand_map {
+    match operand_map {
         IndexMap::Affine(pattern) => {
             if !expr::is_pure_projection(pattern) {
                 return Err(AutogradError::NonProjectionOperandMap { node: consumer, operand: *operand_node });
             }
-            expr::reduce(
+            let operand_rank = shapes.of(*operand_node).len() as u16;
+            let routed = expr::reduce(
                 program,
                 dtype,
                 ScalarOp::Add,
@@ -358,14 +443,20 @@ fn route_contribution(
                 contribution,
                 expr::identity(iter_rank),
                 IndexMap::Affine(pattern.clone()),
-            )
+            );
+            accumulate(program, grad_of, dtype, operand_rank, operand_node.0 as usize, routed);
         }
-        IndexMap::Computed { .. } => {
-            return Err(AutogradError::GatherAdjointUnsupported { node: consumer, operand: *operand_node });
+        IndexMap::Computed { indices, index_map, gathered_dim, .. } => {
+            if !expr::is_pure_projection(index_map) {
+                return Err(AutogradError::NonProjectionIndexMap { node: consumer, operand: *operand_node });
+            }
+            gathered_of[operand_node.0 as usize].push(GatheredContribution {
+                values: contribution,
+                indices: *indices,
+                gathered_dim: *gathered_dim,
+            });
         }
-    };
-
-    accumulate(program, grad_of, dtype, operand_rank, operand_node.0 as usize, routed);
+    }
     Ok(())
 }
 
@@ -383,6 +474,9 @@ fn differentiate_reduce(
     }
     if reduce.out_map.is_data_dependent() {
         return Err(AutogradError::ScatterOutputUnsupported { node });
+    }
+    if reduce.in_map.is_data_dependent() {
+        return Err(AutogradError::ReduceOverGatherUnsupported { node, operand: reduce.operand });
     }
     let in_pattern = reduce.in_map.affine();
     if !expr::is_pure_projection(in_pattern) {
