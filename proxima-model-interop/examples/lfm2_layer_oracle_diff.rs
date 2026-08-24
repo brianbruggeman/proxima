@@ -105,15 +105,26 @@ fn layer_kind_label(architecture: &Lfm2Architecture, layer: usize) -> &'static s
     }
 }
 
-/// The residual stream's own per-layer noise floor on this real, Q4_K,
-/// 24-layer, 2048-wide checkpoint -- MEASURED, not the smollm2 harness's own
-/// `1e-1` (a much smaller f16 dense model's tolerance): layers 0-4 here
-/// carry `2.4e-1..5.7e-1` of ordinary dequantization/summation-order noise,
-/// so `1e-1` would flag EVERY layer as "gross" and hide the real signal --
-/// the actual root-cause layer's jump to `4.6e1` (roughly two orders of
-/// magnitude above the noise floor) is unmistakable at this threshold and
-/// would remain so even at 10x the measured noise ceiling.
-const GROSS_DIVERGENCE_THRESHOLD: f32 = 5.0;
+/// An ABSOLUTE threshold here is exactly what hid the real divergence: the
+/// residual stream's own magnitude grows roughly 100x from `inp_embd`
+/// (`mean_abs` around `4.5e-3`, `max_abs` around `0.11`) to `l_out-5` onward
+/// (magnitude `25..53`), so a `5.0` absolute cutoff reads layers 0-4's
+/// `2.4e-1..5.7e-1` diffs as "noise" purely because they are smaller than the
+/// LATER layers' own scale, never because they are small relative to what
+/// the EARLY layers actually carry -- at `l_out-4` the worst position is
+/// `ours=0.277` vs `theirs=-0.062`, a sign flip at 4.44x magnitude, on a
+/// signal whose own max is `0.61`. Comparing every layer's diff against ITS
+/// OWN oracle scale (`max_abs_diff / oracle_max_abs`) is the only threshold
+/// that cannot be fooled by the residual stream's own growth across depth.
+const RELATIVE_DIVERGENCE_THRESHOLD: f32 = 0.15;
+
+fn mean_abs(values: &[f32]) -> f32 {
+    values.iter().map(|value| value.abs()).sum::<f32>() / values.len() as f32
+}
+
+fn max_abs(values: &[f32]) -> f32 {
+    values.iter().fold(0f32, |acc, value| acc.max(value.abs()))
+}
 
 fn main() {
     let model_path = env::args().nth(1).unwrap_or_else(|| {
@@ -147,8 +158,15 @@ fn main() {
     let ids = proxima_tokenizer::encode_with_bos_eos(&prompt, &vocab, add_bos, false).expect("tokenize prompt");
 
     let block_count = architecture.block_count;
-    let mut node_ids = Vec::with_capacity(block_count as usize);
-    let mut labels: Vec<String> = Vec::with_capacity(block_count as usize);
+    // `inp_embd` first: the token-embedding gather is the first tensor
+    // comparable against the oracle at all, and ROW 132 never checked it --
+    // `layer_boundary_node_id(architecture, 0)` is exactly this program's
+    // embedding-gather `NodeId`, not a throwaway-diff trick (see its own
+    // `depth == 0` branch).
+    let mut node_ids = Vec::with_capacity(block_count as usize + 1);
+    let mut labels: Vec<String> = Vec::with_capacity(block_count as usize + 1);
+    node_ids.push(layer_boundary_node_id(&architecture, 0));
+    labels.push("inp_embd".to_string());
     for layer in 0..block_count {
         node_ids.push(layer_boundary_node_id(&architecture, layer + 1));
         labels.push(format!("l_out-{layer}"));
@@ -156,12 +174,19 @@ fn main() {
 
     let (_logits, activations) = lfm2_forward_values(&parsed, &file_bytes, &architecture, &ids, &node_ids).expect("compute our own layer activations");
 
-    println!("label kind node_id max_abs_diff worst_index ours_value theirs_value");
-    let mut first_gross_divergence: Option<(String, &'static str)> = None;
+    // `oracle_dump.cpp`'s `build_inp_embd`-path leaf, `"inp_embd"`, is a
+    // structurally dead name for a tokenized prompt (see that file's own
+    // updated doc); the real first-comparable tensor is
+    // `model.embed_tokens.f32`, dumped by this run's rebuilt probe.
+    let inp_embd_oracle_path = oracle_dir.join("model.embed_tokens.f32");
+
+    println!("label kind node_id oracle_mean_abs oracle_max_abs our_mean_abs max_abs_diff relative_diff worst_index ours_value theirs_value");
+    let mut relative_bound: Option<f32> = None;
+    let mut first_divergence: Option<(String, &'static str, f32)> = None;
     for (layer, (label, values)) in labels.iter().zip(activations.iter()).enumerate() {
-        let oracle_path = oracle_dir.join(format!("{label}.f32"));
+        let oracle_path = if label == "inp_embd" { inp_embd_oracle_path.clone() } else { oracle_dir.join(format!("{label}.f32")) };
         if !oracle_path.exists() {
-            println!("{label} MISSING_ORACLE_FILE");
+            println!("{label} MISSING_ORACLE_FILE at {oracle_path:?}");
             continue;
         }
         let theirs = read_oracle_activation(&oracle_path);
@@ -189,30 +214,57 @@ fn main() {
                 worst_index = index;
             }
         }
-        let kind = layer_kind_label(&architecture, layer);
-        println!("{label} {kind} node={} {:e} {worst_index} {:.6} {:.6}", node_ids[layer].0, max_abs_diff, ours[worst_index], theirs[worst_index]);
+        let oracle_mean = mean_abs(&theirs);
+        let oracle_max = max_abs(&theirs);
+        let our_mean = mean_abs(ours);
+        // guard against a degenerate all-zero oracle slice (would divide by
+        // zero and print `inf`, masking a real signal as "worse than
+        // everything").
+        let relative_diff = if oracle_max > 0.0 { max_abs_diff / oracle_max } else { f32::INFINITY };
+        let kind = if label == "inp_embd" { "embedding" } else { layer_kind_label(&architecture, layer - 1) };
+        println!(
+            "{label} {kind} node={} {oracle_mean:.6e} {oracle_max:.6e} {our_mean:.6e} {max_abs_diff:.6e} {relative_diff:.6e} {worst_index} {:.6} {:.6}",
+            node_ids[layer].0,
+            ours[worst_index],
+            theirs[worst_index]
+        );
 
-        let level = if max_abs_diff > GROSS_DIVERGENCE_THRESHOLD { Level::WARN } else { Level::DEBUG };
+        // `inp_embd`'s own relative diff is pure per-element dequantization
+        // noise (a table lookup, zero reassociated summation) -- the
+        // cleanest floor this checkpoint offers. 10x that floor is the bound:
+        // generous enough to absorb GEMM/conv summation-order noise growth
+        // across depth, tight enough that a real bug (measured: a sign flip
+        // at 4.44x magnitude by `l_out-4`) still clears it by orders of
+        // magnitude.
+        if label == "inp_embd" {
+            relative_bound = Some((relative_diff * 10.0).max(1e-3));
+        }
+        let bound = relative_bound.unwrap_or(RELATIVE_DIVERGENCE_THRESHOLD);
+
+        let level = if relative_diff > bound { Level::WARN } else { Level::DEBUG };
         let layer_label: &'static str = Box::leak(label.clone().into_boxed_str());
         recorder
             .log()
             .level(level)
-            .message("lfm2 layer activation compared against oracle")
+            .message("lfm2 layer activation compared against oracle, relative to oracle's own scale")
             .module_path(module_path!())
             .tag("layer", layer_label)
             .tag("kind", kind)
+            .tag("oracle_max_abs", f64::from(oracle_max))
             .tag("max_abs_diff", f64::from(max_abs_diff))
+            .tag("relative_diff", f64::from(relative_diff))
             .tag("worst_index", worst_index as u64)
             .emit();
 
-        if max_abs_diff > GROSS_DIVERGENCE_THRESHOLD && first_gross_divergence.is_none() {
-            first_gross_divergence = Some((label.clone(), kind));
+        if relative_diff > bound && first_divergence.is_none() {
+            first_divergence = Some((label.clone(), kind, relative_diff));
         }
     }
     while recorder.drain() > 0 {}
 
-    match first_gross_divergence {
-        Some((label, kind)) => println!("\nfirst gross divergence at: {label} (kind={kind})"),
-        None => println!("\nno gross divergence found at any dumped layer"),
+    println!("\nrelative_bound_used={:e} (10x inp_embd's own measured relative diff)", relative_bound.unwrap_or(RELATIVE_DIVERGENCE_THRESHOLD));
+    match first_divergence {
+        Some((label, kind, relative_diff)) => println!("\nfirst relative divergence at: {label} (kind={kind}, relative_diff={relative_diff:e})"),
+        None => println!("\nno relative divergence found at any dumped layer"),
     }
 }
