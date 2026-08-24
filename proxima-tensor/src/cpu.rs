@@ -103,8 +103,13 @@ use core::arch::aarch64::{vorrq_u8, vshlq_n_u8};
 use core::arch::aarch64::{vdupq_n_s8, vsubq_s8};
 // `dot_q4k_q8k_block_avx2`'s own intrinsics -- the x86 sibling of the
 // aarch64 `use` block above, same reasoning: a separate cfg-gated block so
-// a default build never imports symbols nothing references.
-#[cfg(all(q4k_avx2, feature = "q4k-int8-dot"))]
+// a default build never imports symbols nothing references. Gated on
+// `target_arch = "x86_64"` alone, NOT `q4k_avx2`: the kernel itself must
+// compile on every x86_64 build (runtime dispatch needs it present
+// regardless of `-C target-feature=+avx2`), the `#[target_feature(enable =
+// "avx2")]` on the functions below is what keeps the actual instructions
+// gated, not this import.
+#[cfg(all(target_arch = "x86_64", feature = "q4k-int8-dot"))]
 use core::arch::x86_64::{
     __m256i, _mm256_and_si256, _mm256_castsi256_si128, _mm256_extracti128_si256, _mm256_loadu_si256,
     _mm256_maddubs_epi16, _mm256_madd_epi16, _mm256_set1_epi16, _mm256_set1_epi8, _mm256_srli_epi16,
@@ -6418,7 +6423,56 @@ fn performance_core_count() -> Option<usize> {
     Some(value as usize)
 }
 
-#[cfg(not(target_vendor = "apple"))]
+/// Linux's analogue of Apple's `hw.perflevel0.logicalcpu`: on a hybrid
+/// Intel part (Alder Lake and later) the kernel exposes the P-core set at
+/// `/sys/devices/cpu_core/cpus` (`E`-cores at the sibling `cpu_atom/cpus`,
+/// which this function has no need to read since it only wants the
+/// performance set). The path is absent on a non-hybrid CPU -- that IS the
+/// answer there, not a missing one: every core is already a performance
+/// core, so `None` here is this crate's existing "nothing extra to learn"
+/// contract, and [`matmul_worker_count`]'s own `available_parallelism()`
+/// fallback already returns the right count for that case.
+///
+/// Deliberately does NOT re-derive process affinity
+/// (`sched_getaffinity`/cgroup quota) here: `std::thread::available_parallelism`'s
+/// own documentation ("Host environments such as VMs or container
+/// orchestrators may want to restrict the amount of parallelism...") states
+/// that it already honors those limits on Linux, and
+/// [`matmul_worker_count`]'s `.filter(|&count| count >= 1 && count <=
+/// available)` bound is what keeps a global P-core count from ever
+/// exceeding what the process may actually use -- duplicating the affinity
+/// read here would be a second source of truth for the same fact.
+#[cfg(target_os = "linux")]
+fn performance_core_count() -> Option<usize> {
+    let text = std::fs::read_to_string("/sys/devices/cpu_core/cpus").ok()?;
+    parse_cpu_list_count(&text)
+}
+
+/// Parses a Linux sysfs CPU list (`/sys/devices/cpu_core/cpus`'s own
+/// format, e.g. `"0-7,16-23"` or a bare `"4"`) into the count of CPU ids it
+/// names -- [`performance_core_count`]'s only consumer, split out so the
+/// parsing itself is testable on every host (this crate's dev boxes are
+/// aarch64-darwin; the file this reads only exists on a real Linux kernel).
+#[cfg(any(test, target_os = "linux"))]
+fn parse_cpu_list_count(text: &str) -> Option<usize> {
+    let text = text.trim();
+    if text.is_empty() {
+        return None;
+    }
+    let mut count = 0usize;
+    for range in text.split(',') {
+        let mut bounds = range.splitn(2, '-');
+        let start: usize = bounds.next()?.trim().parse().ok()?;
+        let end: usize = match bounds.next() {
+            Some(end) => end.trim().parse().ok()?,
+            None => start,
+        };
+        count += end.checked_sub(start)?.checked_add(1)?;
+    }
+    if count == 0 { None } else { Some(count) }
+}
+
+#[cfg(not(any(target_vendor = "apple", target_os = "linux")))]
 fn performance_core_count() -> Option<usize> {
     None
 }
@@ -7150,22 +7204,59 @@ fn quantize_q8k_block(chunk: &[f32], out_block: &mut [u8]) {
 /// correct codec path for non-matmul consumers (module-level comment
 /// above) -- this is an additional arm, not a replacement.
 ///
+/// Caches `std::is_x86_feature_detected!("avx2")`, probed once per process
+/// life -- the same [`OnceLock`] shape [`matmul_worker_count`] already uses
+/// for `PROXIMA_MATMUL_WORKERS`/`performance_core_count`, so
+/// [`dot_q4k_q8k`]'s per-block hot loop never repeats the CPUID probe the
+/// detection macro performs. Only compiled when the build itself did NOT
+/// already declare AVX2 present at compile time (`q4k_avx2` off): a
+/// `-C target-feature=+avx2` / `-C target-cpu=native` build already knows
+/// the answer statically and calls [`dot_q4k_q8k_block_avx2`] unconditionally
+/// (`dot_q4k_q8k`'s `q4k_avx2` arm), skipping this check entirely -- this
+/// function exists for the DEFAULT `cargo build --release` on an ordinary
+/// x86_64 host, which has no reason to know at compile time whether the
+/// CPU it will run on has AVX2 (essentially universal since 2013, but not
+/// guaranteed by the bare `x86_64` target triple).
+#[cfg(all(target_arch = "x86_64", feature = "q4k-int8-dot", not(q4k_avx2)))]
+fn avx2_runtime_available() -> bool {
+    static AVAILABLE: OnceLock<bool> = OnceLock::new();
+    *AVAILABLE.get_or_init(|| std::is_x86_feature_detected!("avx2"))
+}
+
 /// Dispatches to `dot_q4k_q8k_block_neon_dotprod` when built with the
 /// `q4k_dotprod` cfg (`build.rs`: every aarch64 target this workspace
 /// builds for), to `dot_q4k_q8k_block_avx2` when built with the
 /// `q4k_avx2` cfg (`build.rs`: an x86 target whose `CARGO_CFG_TARGET_FEATURE`
 /// lists `avx2` -- unlike aarch64's `FEAT_DotProd`, AVX2 is NOT in the x86-64
 /// baseline ISA, so this one is opt-in via `-C target-feature=+avx2` /
-/// `-C target-cpu`, not implied by the target triple alone), and to the
-/// portable `dot_q4k_q8k_block_scalar` everywhere else. All three compute
-/// the identical mechanism -- read 4.5 bits/weight off `weight_row` and do
-/// the multiply-accumulate against `Q8_K` `i8` activations directly, no
-/// `f32` intermediate at all -- the NEON arm is an acceleration of that
+/// `-C target-cpu`, not implied by the target triple alone), to the SAME
+/// `dot_q4k_q8k_block_avx2` chosen at RUNTIME via
+/// [`avx2_runtime_available`] on a plain x86_64 build that did not opt in
+/// at compile time (so a default `cargo build --release` on a modern
+/// x86_64 host still gets the fast kernel instead of silently falling back
+/// to scalar), and to the portable `dot_q4k_q8k_block_scalar` everywhere
+/// else (or when the runtime probe reports AVX2 absent). All three/four
+/// compute the identical mechanism -- read 4.5 bits/weight off `weight_row`
+/// and do the multiply-accumulate against `Q8_K` `i8` activations directly,
+/// no `f32` intermediate at all -- the NEON arm is an acceleration of that
 /// mechanism (`vdotq_s32`'s 16-lane int8 dot via inline `sdot`,
 /// `core::arch::aarch64::vdotq_s32` itself being unstable on this toolchain
 /// -- `stdarch_neon_dotprod`), and the AVX2 arm is a second, independent
 /// acceleration of it (`_mm256_maddubs_epi16` + `_mm256_madd_epi16`'s
 /// 32-lane unsigned-times-signed int8 dot), not a different one.
+///
+/// AVX-512 VNNI (`_mm512_dpbusd_epi32`) and AVX-VNNI
+/// (`_mm256_dpbusd_epi32`) would each do this same dot in one instruction
+/// instead of AVX2's maddubs+madd pair -- not implemented here: this crate
+/// cannot execute either on its aarch64-darwin dev boxes, so shipping an
+/// unverified single-instruction accumulation path (whose saturation
+/// semantics need re-checking against `dot_q4k_q8k_block_scalar` byte for
+/// byte, not assumed) is deferred rather than guessed at. AVX2 is the
+/// floor that matters (present on essentially every x86_64 CPU since
+/// 2013); the follow-up is a `dpbusd`-based
+/// `dot_q4k_q8k_block_avxvnni`/`_avx512vnni` pair selected ahead of the
+/// AVX2 arm in [`avx2_runtime_available`]'s priority order, verified on
+/// real VNNI hardware before it lands.
 ///
 /// # Errors
 /// [`TensorError::QuantizedShapeMismatch`] if `weight_row.len()` is not a
@@ -7185,6 +7276,9 @@ pub fn dot_q4k_q8k(weight_row: &[u8], activation_q8k: &[u8]) -> Result<f32, Tens
         });
     }
 
+    #[cfg(all(target_arch = "x86_64", not(q4k_avx2)))]
+    let use_avx2_runtime = avx2_runtime_available();
+
     let mut acc = 0.0f32;
     for (weight_block, q8k_block) in weight_row
         .as_chunks::<Q4K_BLOCK_BYTES>()
@@ -7202,7 +7296,17 @@ pub fn dot_q4k_q8k(weight_row: &[u8], activation_q8k: &[u8]) -> Result<f32, Tens
         // doc) -- the caller opted the build itself into AVX2, so the
         // instructions this block issues are guaranteed present.
         let block_sum = unsafe { dot_q4k_q8k_block_avx2(weight_block, q8k_block) };
-        #[cfg(not(any(q4k_dotprod, q4k_avx2)))]
+        #[cfg(all(target_arch = "x86_64", not(q4k_dotprod), not(q4k_avx2)))]
+        let block_sum = if use_avx2_runtime {
+            // SAFETY: `use_avx2_runtime` is true only when
+            // `avx2_runtime_available` confirmed
+            // `std::is_x86_feature_detected!("avx2")` before this loop
+            // started.
+            unsafe { dot_q4k_q8k_block_avx2(weight_block, q8k_block) }
+        } else {
+            dot_q4k_q8k_block_scalar(weight_block, q8k_block)
+        };
+        #[cfg(not(any(q4k_dotprod, q4k_avx2, target_arch = "x86_64")))]
         let block_sum = dot_q4k_q8k_block_scalar(weight_block, q8k_block);
         acc += block_sum;
     }
@@ -7524,8 +7628,12 @@ fn scale_byte(word: u32, index: u32) -> i32 {
 /// function's `#[target_feature(enable = "avx2")]` statically guarantees
 /// the feature, which is why the body below needs no inner `unsafe {}` --
 /// this function itself stays `unsafe fn` only so its signature doesn't
-/// imply it is callable outside an AVX2-guaranteed build.
-#[cfg(all(q4k_avx2, feature = "q4k-int8-dot"))]
+/// imply it is callable outside an AVX2-guaranteed build. Compiled on every
+/// x86_64 target (`target_arch` gate, not `q4k_avx2`): `dot_q4k_q8k`'s
+/// runtime-dispatch arm calls this on a plain `cargo build` x86_64 host too,
+/// gated by `std::is_x86_feature_detected!("avx2")` at the call site rather
+/// than by a build-time flag -- see `avx2_runtime_available`'s own doc.
+#[cfg(all(target_arch = "x86_64", feature = "q4k-int8-dot"))]
 #[target_feature(enable = "avx2")]
 #[inline]
 unsafe fn hsum_epi32_avx2(v: __m256i) -> i32 {
@@ -7562,8 +7670,10 @@ unsafe fn hsum_epi32_avx2(v: __m256i) -> i32 {
 /// Caller guarantees AVX2 is available; `weight_block.len() ==
 /// Q4K_BLOCK_BYTES` and `q8k_block.len() == Q8K_BLOCK_BYTES` (both
 /// [`dot_q4k_q8k`]'s own `chunks_exact` calls already guarantee before
-/// calling this).
-#[cfg(all(q4k_avx2, feature = "q4k-int8-dot"))]
+/// calling this). Compiled on every x86_64 target -- see
+/// [`hsum_epi32_avx2`]'s own doc for why this is `target_arch`-gated rather
+/// than `q4k_avx2`-gated.
+#[cfg(all(target_arch = "x86_64", feature = "q4k-int8-dot"))]
 #[target_feature(enable = "avx2")]
 unsafe fn dot_q4k_q8k_block_avx2(weight_block: &[u8], q8k_block: &[u8]) -> f32 {
     let d_weight = f16_le_at(weight_block, Q4K_D_OFFSET);
@@ -10909,6 +11019,25 @@ mod tests {
     /// the precondition the barrier's deadlock-freedom argument rests on, so
     /// the test reproduces it rather than assuming it.
     ///
+    /// [`parse_cpu_list_count`] against the exact shapes
+    /// `/sys/devices/cpu_core/cpus` produces on a real hybrid Linux host --
+    /// this crate's dev boxes are aarch64-darwin, so the sysfs file itself
+    /// is unreachable here; this exercises the parser this Mac CAN run,
+    /// leaving the `std::fs::read_to_string` wiring in
+    /// [`performance_core_count`] compiled (`cargo check --target
+    /// x86_64-unknown-linux-gnu`) but unexecuted on this machine.
+    #[proxima::test]
+    #[case::single_range("0-7,16-23", Some(16))]
+    #[case::bare_id("4", Some(1))]
+    #[case::single_cpu_range("4-4", Some(1))]
+    #[case::trailing_newline("0-3\n", Some(4))]
+    #[case::empty_file("", None)]
+    #[case::whitespace_only("   \n", None)]
+    #[case::malformed_range("abc", None)]
+    async fn parse_cpu_list_count_matches_sysfs_shapes(#[case] text: &str, #[case] expected: Option<usize>) {
+        assert_eq!(parse_cpu_list_count(text), expected);
+    }
+
     /// Each stage's chunk asserts every earlier stage is fully published,
     /// then publishes its own slot. A missing barrier shows up as a stage
     /// reading a slot its predecessor had not written yet.
@@ -14578,6 +14707,61 @@ mod tests {
             "relative_max_error={relative_max_error} (max_error={max_error} over magnitude {max_magnitude}) \
              exceeds loose sanity bound"
         );
+    }
+
+    /// [`dot_q4k_q8k_block_avx2`]'s equivalence proof, the x86_64 sibling of
+    /// [`matmul_q4k_q8k_f32_agrees_bit_exact_with_the_portable_arm`] below --
+    /// same reasoning: every intermediate value both kernels compute is
+    /// integer (`i32` partial sums via `_mm256_maddubs_epi16` +
+    /// `_mm256_madd_epi16`, `i32` mins correction) until the final `f32`
+    /// scale multiply, so [`dot_q4k_q8k_block_avx2`] and
+    /// [`dot_q4k_q8k_block_scalar`] must agree bit-for-bit on the same
+    /// input.
+    ///
+    /// This crate's dev boxes are all aarch64-darwin, so this test is
+    /// COMPILED (verified via `cargo check -p proxima-tensor --target
+    /// x86_64-unknown-linux-gnu --tests`) but never EXECUTED on this
+    /// machine -- `#[cfg(target_arch = "x86_64")]` means it does not even
+    /// exist in the aarch64 test binary this crate's own `cargo nextest
+    /// run` builds. It runs for real on any x86_64 CI runner (this
+    /// workspace's `proxima-tensor-gate.sh` targets
+    /// `x86_64-unknown-linux-gnu`) or on `versailles`; the `is_x86_feature_detected!`
+    /// guard skips it rather than failing on a pre-2013 x86_64 host with no
+    /// AVX2 at all.
+    #[cfg(all(test, target_arch = "x86_64", feature = "q4k-int8-dot"))]
+    #[test]
+    fn dot_q4k_q8k_block_avx2_agrees_bit_exact_with_scalar_when_avx2_is_present() {
+        if !std::is_x86_feature_detected!("avx2") {
+            return;
+        }
+        use proxima_gguf::quant::q4_k::{BLOCK_BYTES, QK_K, quantize};
+
+        let blocks_per_row = 3;
+        let k = QK_K * blocks_per_row;
+        let activation: Vec<f32> = random_vec(29, k).into_iter().map(|value| value * 6.0 - 3.0).collect();
+        let weight_f32: Vec<f32> = random_vec(31, k).into_iter().map(|value| value * 6.0 - 3.0).collect();
+
+        let mut weight_row = vec![0u8; blocks_per_row * BLOCK_BYTES];
+        quantize(&weight_f32, &mut weight_row).expect("row length is a whole multiple of QK_K by construction");
+
+        let mut activation_q8k = vec![0u8; blocks_per_row * Q8K_BLOCK_BYTES];
+        quantize_row_q8k(&activation, &mut activation_q8k).expect("well-formed activation");
+
+        for (weight_block, q8k_block) in weight_row
+            .as_chunks::<Q4K_BLOCK_BYTES>()
+            .0
+            .iter()
+            .zip(activation_q8k.as_chunks::<Q8K_BLOCK_BYTES>().0)
+        {
+            let scalar = dot_q4k_q8k_block_scalar(weight_block, q8k_block);
+            // SAFETY: `is_x86_feature_detected!("avx2")` confirmed above.
+            let avx2 = unsafe { dot_q4k_q8k_block_avx2(weight_block, q8k_block) };
+            assert_eq!(
+                scalar.to_bits(),
+                avx2.to_bits(),
+                "AVX2 block dot diverged from the scalar reference -- not merely an acceleration"
+            );
+        }
     }
 
     /// The whole point of [`dot_q4k_q8k_block_neon_dotprod`]: it is an
