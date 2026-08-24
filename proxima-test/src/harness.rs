@@ -379,7 +379,7 @@ where
     let ctx = build_test_ctx(cassette);
     let teardowns = ctx.teardowns.clone();
     let runtime = shared_prime_runtime();
-    let (sender, receiver) = sync_channel::<Option<CapturedPanic>>(1);
+    let (sender, receiver) = sync_channel::<BodyProgress>(2);
 
     // `spawn_factory_on_core`, not `spawn_on_core`: the factory (Send) crosses
     // the per-core channel and constructs the test body's future ON the
@@ -387,15 +387,20 @@ where
     // `#[proxima::test]` body await a `?Send` base-rung `Pipe::call`
     // (proxima-runtime/src/lib.rs:299-305 documents the same mechanism for
     // `App::run_until_signal`'s per-core listener loop).
+    let started_sender = sender.clone();
     let factory: Box<dyn FnOnce() -> Pin<Box<dyn Future<Output = ()> + 'static>> + Send + 'static> =
         Box::new(move || {
             Box::pin(async move {
+                // sent the instant this future is first polled — the executor
+                // has genuinely begun the body, as opposed to still queueing
+                // behind other work on the shared single worker.
+                let _ = started_sender.send(BodyProgress::Started);
                 arm();
                 let result = CatchUnwind { inner: body(ctx) }.await;
                 let body_outcome = outcome_of(result);
                 let teardown_panic = run_teardowns(&teardowns).await;
                 disarm();
-                let _ = sender.send(body_outcome.or(teardown_panic));
+                let _ = sender.send(BodyProgress::Done(body_outcome.or(teardown_panic)));
             })
         });
 
@@ -405,8 +410,25 @@ where
         Err(SpawnError::Disconnected) => return failed("prime core 0 disconnected"),
     }
 
+    // phase 1 — wait for the worker to actually begin polling the body. This
+    // window absorbs OS scheduling / machine-wide contention (queueing), not
+    // body work, so its budget is deliberately generous: see `dispatch_timeout`.
+    match receiver.recv_timeout(dispatch_timeout()) {
+        Ok(BodyProgress::Started) => {}
+        Ok(BodyProgress::Done(outcome)) => return outcome,
+        Err(RecvTimeoutError::Timeout) => {
+            return failed("worker never began polling the test body within the dispatch timeout");
+        }
+        Err(RecvTimeoutError::Disconnected) => {
+            return failed("prime core 0 disconnected before the body started");
+        }
+    }
+
+    // phase 2 — the body is genuinely running now, so this clock measures
+    // actual execution and only actual execution: a real hang still fails.
     match receiver.recv_timeout(body_timeout()) {
-        Ok(outcome) => outcome,
+        Ok(BodyProgress::Done(outcome)) => outcome,
+        Ok(BodyProgress::Started) => failed("worker reported a second start signal"),
         Err(RecvTimeoutError::Timeout) => failed("body did not complete within the timeout"),
         Err(RecvTimeoutError::Disconnected) => {
             failed("worker dropped the completion channel without reporting")
@@ -415,12 +437,32 @@ where
 }
 
 #[cfg(feature = "test-prime")]
+enum BodyProgress {
+    Started,
+    Done(Option<CapturedPanic>),
+}
+
+#[cfg(feature = "test-prime")]
 fn body_timeout() -> Duration {
-    match std::env::var("PROXIMA_TEST_TIMEOUT_MS") {
+    duration_from_env("PROXIMA_TEST_TIMEOUT_MS", Duration::from_secs(60))
+}
+
+/// Generous by design (default: 5 minutes) — this phase absorbs machine-wide
+/// scheduling contention (many concurrent test processes, sibling builds)
+/// that is not the test's fault, so it must not fire on contention alone.
+/// `body_timeout` — not this one — is what catches a genuine hang.
+#[cfg(feature = "test-prime")]
+fn dispatch_timeout() -> Duration {
+    duration_from_env("PROXIMA_TEST_DISPATCH_TIMEOUT_MS", Duration::from_secs(300))
+}
+
+#[cfg(feature = "test-prime")]
+fn duration_from_env(key: &str, default: Duration) -> Duration {
+    match std::env::var(key) {
         Ok(value) => value
             .parse::<u64>()
-            .map_or_else(|_| Duration::from_secs(60), Duration::from_millis),
-        Err(_) => Duration::from_secs(60),
+            .map_or(default, Duration::from_millis),
+        Err(_) => default,
     }
 }
 
