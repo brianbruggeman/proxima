@@ -918,6 +918,20 @@ pub enum ExpertGatingFunc {
 /// `ScalarOp` gained no `Sigmoid` variant for this, since the four ops
 /// already existed for a different consumer.
 ///
+/// `expert_bias` (`blk.{layer}.exp_probs_b.bias` on a real LFM2 checkpoint,
+/// `[expert_count]`) is llama.cpp's own `ffn_exp_probs_b` /
+/// `route_tokens_to_experts`'s own `self.expert_bias`
+/// (`modeling_lfm2_moe.py:210-213`, `llama-graph.cpp`'s own
+/// `build_moe_ffn`'s `selection_probs = ggml_add(probs, exp_probs_b)`
+/// comment: "leave probs unbiased as it's later used to get expert
+/// weights"): added to `scores` ONLY for the argmax that picks
+/// `expert_used_count` experts, never for the weight a selected expert's
+/// output is scaled by -- getting that backwards would still select
+/// *plausible* experts (the bias is small relative to genuine routing
+/// signal) while silently reweighting every token's combination, exactly
+/// the "plausible output, wrong routing" failure mode metadata-absent
+/// checkpoints (Mixtral, `expert_bias: None`) cannot exhibit since they
+/// never reach this branch.
 #[allow(clippy::too_many_arguments)]
 fn append_moe_ffn(
     program: &mut Vec<Op>,
@@ -930,6 +944,7 @@ fn append_moe_ffn(
     expert_used_count: u32,
     ones: NodeId,
     gating: ExpertGatingFunc,
+    expert_bias: Option<NodeId>,
 ) -> Result<NodeId, TensorError> {
     if expert_used_count == 0 || expert_used_count > expert_count {
         return Err(TensorError::InvalidExpertConfig {
@@ -950,7 +965,10 @@ fn append_moe_ffn(
             elementwise(program, DType::Float32, ScalarOp::Reciprocal, &[(one_plus_exp, "se->se")])?
         }
     };
-    let mut selection_scores = scores;
+    let mut selection_scores = match expert_bias {
+        Some(bias) => elementwise(program, DType::Float32, ScalarOp::Add, &[(scores, "se->se"), (bias, "e->se")])?,
+        None => scores,
+    };
 
     let expert_index = op::append(program, Op::Iota { dtype: DType::Float32, extent: Extent::Static(expert_count) });
     let neg_infinity = scalar_constant(program, f32::NEG_INFINITY);
@@ -1134,6 +1152,7 @@ fn append_mistral_moe_layer(
         expert_used_count,
         ones,
         ExpertGatingFunc::Softmax,
+        None,
     )?;
 
     elementwise(program, DType::Float32, ScalarOp::Add, &[(ffn_out, "sd->sd"), (residual1, "sd->sd")])
@@ -1682,6 +1701,7 @@ fn append_mistral_cached_moe_layer(
         expert_used_count,
         ones,
         ExpertGatingFunc::Softmax,
+        None,
     )?;
 
     let x_next = elementwise(program, DType::Float32, ScalarOp::Add, &[(ffn_out, "sd->sd"), (residual1, "sd->sd")])?;
@@ -2259,6 +2279,12 @@ pub fn lfm2_forward_program_with_experts(
                 alloc::vec![Extent::Static(expert_count), Extent::Static(expert_feed_forward), Extent::Static(embedding)],
                 &alloc::format!("blk.{layer}.ffn_down_exps.weight"),
             );
+            let expert_bias = input_leaf(
+                &mut program,
+                DType::Float32,
+                alloc::vec![Extent::Static(expert_count)],
+                &alloc::format!("blk.{layer}.exp_probs_b.bias"),
+            );
             append_moe_ffn(
                 &mut program,
                 normed2,
@@ -2270,6 +2296,7 @@ pub fn lfm2_forward_program_with_experts(
                 expert_used_count,
                 ones,
                 ExpertGatingFunc::Sigmoid,
+                Some(expert_bias),
             )?
         };
 
@@ -3679,6 +3706,7 @@ shape = ["seq"]
             EXPERT_USED_COUNT,
             ones,
             ExpertGatingFunc::Softmax,
+            None,
         )
         .expect("the routed ffn lowers");
 
@@ -3724,18 +3752,21 @@ shape = ["seq"]
 
     /// [`ExpertGatingFunc::Sigmoid`]'s independent reference:
     /// `route_tokens_to_experts` (`modeling_lfm2_moe.py:208-220`) selects
-    /// top-`k` by `sigmoid(logits)`, then weights each selected expert by
-    /// that same `sigmoid(logits)` value, normalized over only the
-    /// selected set. Mirrors [`top_k_routes_and_weights`]'s own shape
-    /// (max-by, retain, normalize) with a sigmoid instead of a softmax.
-    fn sigmoid_topk_routes_and_weights(logits: &[f32], k: usize) -> alloc::vec::Vec<(usize, f32)> {
+    /// top-`k` by `sigmoid(logits) + bias`, then weights each selected
+    /// expert by its OWN unbiased `sigmoid(logits)` value, normalized over
+    /// only the selected set. Mirrors [`top_k_routes_and_weights`]'s own
+    /// shape (max-by, retain, normalize) with the two extra steps LFM2's
+    /// gating needs: a sigmoid instead of a softmax, and a bias that
+    /// participates in the `max_by` but never in the returned weight.
+    fn sigmoid_topk_routes_and_weights(logits: &[f32], bias: &[f32], k: usize) -> alloc::vec::Vec<(usize, f32)> {
         let scores: alloc::vec::Vec<f32> = logits.iter().map(|&logit| 1.0 / (1.0 + (-logit).exp())).collect();
+        let selection: alloc::vec::Vec<f32> = scores.iter().zip(bias).map(|(&score, &b)| score + b).collect();
         let mut remaining: alloc::vec::Vec<usize> = (0..logits.len()).collect();
         let mut routes = alloc::vec::Vec::new();
         for _ in 0..k {
             let winner = *remaining
                 .iter()
-                .max_by(|&&left, &&right| scores[left].partial_cmp(&scores[right]).expect("scores are finite"))
+                .max_by(|&&left, &&right| selection[left].partial_cmp(&selection[right]).expect("selection scores are finite"))
                 .expect("k does not exceed the expert count");
             routes.push(winner);
             remaining.retain(|&candidate| candidate != winner);
@@ -3744,16 +3775,55 @@ shape = ["seq"]
         routes.into_iter().map(|expert| (expert, scores[expert] / total)).collect()
     }
 
+    /// [`sigmoid_topk_routes_and_weights`]'s own contract, proved directly
+    /// against hand-computed `sigmoid` values before any graph is involved:
+    /// a bias large enough to overturn one token's ranking changes which
+    /// two experts are selected (proof the bias drives SELECTION), while
+    /// the returned weight is always the UNBIASED score (proof the bias
+    /// never reaches the weight) -- the two halves of `exp_probs_b`'s own
+    /// contract this session closes.
+    #[test]
+    fn sigmoid_topk_reference_lets_bias_change_selection_but_never_the_weight() {
+        let logits = [3.0f32, 2.0, 4.0];
+        let sigmoid = |value: f32| 1.0 / (1.0 + (-value).exp());
+
+        let unbiased = sigmoid_topk_routes_and_weights(&logits, &[0.0, 0.0, 0.0], 2);
+        let mut unbiased_experts: alloc::vec::Vec<usize> = unbiased.iter().map(|(expert, _)| *expert).collect();
+        unbiased_experts.sort_unstable();
+        assert_eq!(unbiased_experts, alloc::vec![0, 2], "unbiased sigmoid ranking matches raw-logit ranking: e2 > e0 > e1");
+
+        // pushes e1 (raw sigmoid ~0.881) above e0 (raw sigmoid ~0.953) for
+        // SELECTION only: 0.881 + 0.2 = 1.081 > 0.953, but e2 (~0.982) still
+        // wins outright, so the selected PAIR changes from {e0, e2} to {e1, e2}.
+        let biased = sigmoid_topk_routes_and_weights(&logits, &[0.0, 0.2, 0.0], 2);
+        let mut biased_experts: alloc::vec::Vec<usize> = biased.iter().map(|(expert, _)| *expert).collect();
+        biased_experts.sort_unstable();
+        assert_eq!(biased_experts, alloc::vec![1, 2], "a large-enough bias on e1 must swap it in for e0");
+
+        let e1_weight = biased.iter().find(|(expert, _)| *expert == 1).map(|(_, weight)| *weight).expect("e1 was selected");
+        let e2_weight = biased.iter().find(|(expert, _)| *expert == 2).map(|(_, weight)| *weight).expect("e2 was selected");
+        let expected_e1 = sigmoid(2.0) / (sigmoid(2.0) + sigmoid(4.0));
+        let expected_e2 = sigmoid(4.0) / (sigmoid(2.0) + sigmoid(4.0));
+        assert!(
+            (e1_weight - expected_e1).abs() < 1e-6,
+            "e1's weight must be its UNBIASED sigmoid share ({expected_e1}), got {e1_weight} -- the bias must never reach the weight"
+        );
+        assert!((e2_weight - expected_e2).abs() < 1e-6, "e2's weight must be its unbiased sigmoid share ({expected_e2}), got {e2_weight}");
+    }
+
     /// End-to-end proof for [`append_moe_ffn`]'s `Sigmoid` branch, same
     /// shape as [`a_routed_ffn_built_by_append_moe_ffn_matches_an_independent_topk_swiglu_reference`]
     /// (same `x`/`gate_inp`/expert weights, so the same logits `[3, 2, 4]`/
-    /// `[1, 4, 8]` this time run through `sigmoid` instead of `softmax`):
-    /// sigmoid preserves the raw-logit ranking, so both tokens route to the
-    /// same PAIR of experts as the softmax test above -- the only thing
-    /// that must differ is each selected expert's combination WEIGHT, which
-    /// this asserts against an independently computed sigmoid share.
+    /// `[1, 4, 8]` this time run through `sigmoid` + a per-expert bias
+    /// instead of softmax): token 0's bias (`+0.2` on expert 1) flips its
+    /// selected pair from `{0, 2}` (sigmoid-ranking-only) to `{1, 2}` --
+    /// proof the graph's OWN `Op::Select` exclusion, not just the
+    /// hand-rolled reference above, routes by the biased score. Token 1
+    /// keeps the same pair its unbiased ranking already picked, proving the
+    /// bias is a per-expert additive term the graph applies uniformly, not
+    /// a per-token special case.
     #[test]
-    fn a_routed_ffn_built_by_append_moe_ffn_with_sigmoid_gating_matches_an_independent_reference() {
+    fn a_routed_ffn_built_by_append_moe_ffn_with_sigmoid_gating_and_bias_matches_an_independent_reference() {
         const SEQUENCE: usize = 2;
         const EMBEDDING: usize = 2;
         const FEED_FORWARD: usize = 2;
@@ -3762,6 +3832,7 @@ shape = ["seq"]
 
         let x: [f32; SEQUENCE * EMBEDDING] = [3.0, 2.0, 1.0, 4.0];
         let gate_inp: [f32; EMBEDDING * EXPERT_COUNT as usize] = [1.0, 0.0, 0.0, 0.0, 1.0, 2.0];
+        let bias: [f32; EXPERT_COUNT as usize] = [0.0, 0.2, 0.0];
 
         let gate_weights: [[f32; EMBEDDING * FEED_FORWARD]; 3] =
             [[1.0, 0.0, 0.0, 1.0], [2.0, 0.0, 0.0, 2.0], [1.0, 1.0, 1.0, 1.0]];
@@ -3803,6 +3874,7 @@ shape = ["seq"]
             alloc::vec![Extent::Static(EXPERT_COUNT), Extent::Static(FEED_FORWARD as u32), Extent::Static(EMBEDDING as u32)],
             "expert_w_down",
         );
+        let bias_node = input_leaf(&mut program, DType::Float32, alloc::vec![Extent::Static(EXPERT_COUNT)], "bias");
         let ones = scalar_constant(&mut program, 1.0);
 
         let root = append_moe_ffn(
@@ -3816,13 +3888,14 @@ shape = ["seq"]
             EXPERT_USED_COUNT,
             ones,
             ExpertGatingFunc::Sigmoid,
+            Some(bias_node),
         )
         .expect("the sigmoid-gated routed ffn lowers");
 
         let symbols = [SEQUENCE as u64];
         crate::shape::infer(&program, &symbols).expect("the sigmoid-gated routed ffn infers");
 
-        let blocks: [&[f32]; 5] = [&x, &gate_inp, &expert_w_gate, &expert_w_up, &expert_w_down];
+        let blocks: [&[f32]; 6] = [&x, &gate_inp, &expert_w_gate, &expert_w_up, &expert_w_down, &bias];
         let workers = core::num::NonZeroUsize::new(1).expect("one worker is nonzero");
         let evaluated =
             crate::cpu::evaluate_parallel(&program, &symbols, &blocks, &[root], workers).expect("the sigmoid-gated routed ffn evaluates");
@@ -3833,7 +3906,7 @@ shape = ["seq"]
             let logits: alloc::vec::Vec<f32> = (0..EXPERT_COUNT as usize)
                 .map(|expert| (0..EMBEDDING).map(|dim| x_row[dim] * gate_inp[dim * EXPERT_COUNT as usize + expert]).sum())
                 .collect();
-            let routes = sigmoid_topk_routes_and_weights(&logits, EXPERT_USED_COUNT as usize);
+            let routes = sigmoid_topk_routes_and_weights(&logits, &bias, EXPERT_USED_COUNT as usize);
             let mut expected = alloc::vec![0.0f32; EMBEDDING];
             for (expert, weight) in &routes {
                 let expert_out = swiglu_ffn(
@@ -3852,7 +3925,7 @@ shape = ["seq"]
             for (found_value, expected_value) in found.iter().zip(&expected) {
                 assert!(
                     (found_value - expected_value).abs() < 1e-4,
-                    "token {token}: got {found:?}, expected {expected:?} (independent sigmoid top-{EXPERT_USED_COUNT} \
+                    "token {token}: got {found:?}, expected {expected:?} (independent sigmoid+bias top-{EXPERT_USED_COUNT} \
                      swiglu reference); routes={routes:?}"
                 );
             }
