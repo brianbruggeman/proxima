@@ -1233,4 +1233,229 @@ mod tests {
             .expect_err("an offset-0 slice narrower than its operand cannot be told apart from a full read");
         assert!(matches!(error, TensorError::ExtentMismatch { .. }), "{error}");
     }
+
+    /// Row 131's own question -- "is this a precedence rule rather than a
+    /// missing field?" -- tried directly against `unify_iteration_space`
+    /// above, twice, each patch applied to this file, the suite run, then
+    /// reverted; nothing below reflects either patch, only what the run
+    /// showed:
+    ///
+    /// - *Narrower wins*: replace the `ExtentMismatch` arm (the `match *slot`
+    ///   in `unify_iteration_space`, above) with
+    ///   `Some(existing) => *slot = Some(existing.min(extent))`.
+    ///   `disagreeing_operand_extents_are_rejected` FAILED:
+    ///   `infer` returned `Ok(Shapes { extents: [[4], [5], [4]] })` -- a
+    ///   genuine 4-vs-5 shape mismatch silently narrowed to 4.
+    /// - *First operand wins*: ignore a later disagreement at an
+    ///   already-resolved axis instead of erroring, and always run
+    ///   `bounds_check` instead of skipping it for what looks like a pure
+    ///   projection. Same test, same failure, same `Ok(Shapes { extents:
+    ///   [[4], [5], [4]] })` -- because `bounds_check` only rejects an
+    ///   operand *narrower* than the iteration space demands. Reading fewer
+    ///   than all of a wider operand's elements is exactly what a legitimate
+    ///   broadcast does everywhere else in this file, so `bounds_check`
+    ///   cannot also be made to mean "these two operands were never
+    ///   compatible."
+    ///
+    /// Both rules collapse two situations that must stay distinct -- "this
+    /// narrower operand is the true donor" and "these two operands are
+    /// simply the wrong sizes" -- into the same bit pattern: two 0-offset,
+    /// `coeff == 1` pure projections onto the same axis that disagree.
+    /// `unify_iteration_space` has no other information to tell them apart,
+    /// so precedence is not the fix; the missing bit is real.
+    ///
+    /// That bit would need to live as a `len: Option<Extent>` on
+    /// [`AxisIndex`] -- resolved the same way [`Op::Iota`]'s own `extent`
+    /// field is, and, when present, always routed through `bounds_check`
+    /// exactly like a nonzero offset already is, never treated as a pure
+    /// projection. Its blast radius, by construction site
+    /// (`grep -rn 'AxisIndex[[:space:]]*{'`, checked against this row's own
+    /// worktree): 21 struct-literal sites across two crates need an added
+    /// `len: None` to keep compiling. 16 sit in `proxima-tensor`: `map.rs`
+    /// (x3) and this file (x1) are test-only and mine to change; `spec.rs`
+    /// (x8), `cpu.rs` (x2), `benches/bench_vs_ggml.rs` (x1), and `bind.rs`
+    /// (x1, inside `remap_pattern`'s operand-fusion rebuild of a remapped
+    /// `AxisIndex`) are not. The other 5 sit in `omega` (`msl.rs` x1, two
+    /// integration-test files x2 each), a separately-versioned downstream
+    /// crate. `bind.rs`'s one site is the one this task's own scope forbids
+    /// touching, and a Rust struct literal cannot omit a field
+    /// conditionally: `cargo build --workspace --lib` would fail the moment
+    /// `len` existed, independent of how many of the other 20 sites got
+    /// fixed. The field is the right answer to the standalone,
+    /// offset-0-alone case just above; landing it is not this session's to
+    /// do.
+    ///
+    /// What follows is this row's acceptance criterion: a real fused-QKV
+    /// checkpoint tensor, `[2048, 6144]`, read as three `[2048, 2048]`
+    /// chunks at on-disk offsets 0, 2048, and 4096 -- values checked via
+    /// [`crate::cpu::evaluate`], not shape alone.
+    ///
+    /// The three offsets are one iteration axis (`chunk`, extent 3) rather
+    /// than three separately-offset ops, because that is the primitive this
+    /// crate already has for exactly this shape of problem: `fused`'s wide
+    /// axis reads as `chunk * 2048 + within`, a genuine two-term axis with
+    /// real, non-zero coefficients -- the same mechanism
+    /// `a_conv_window_within_bounds_infers` (above) already exercises for a
+    /// convolution window, not a new one. Because the axis carries two
+    /// terms, `unify_iteration_space` never treats it as a "pure
+    /// projection" (that match only ever fires for a *single*, `coeff == 1`,
+    /// 0-offset term), so it always goes through `bounds_check` and never
+    /// competes with `donor` for `chunk`'s or `within`'s extent -- exactly
+    /// where the standalone offset-0 case just above gets stuck, because
+    /// there the axis genuinely is one term with nothing to keep it from
+    /// looking like a full read. `donor` (a zero-valued [`Op::Constant`],
+    /// exactly the "carries an extent a consumer cannot otherwise infer"
+    /// role its own doc names) supplies `chunk`'s and `within`'s extents
+    /// through a plain 0-offset projection, unambiguous because nothing
+    /// else here offers a competing value for either axis.
+    #[test]
+    fn a_fused_qkv_split_evaluates_all_three_chunks_by_a_real_chunk_axis() {
+        let rows: u32 = 2048;
+        let fused_cols: u32 = 6144;
+        let chunk_extent: u32 = 3;
+        let chunk_width: u32 = 2048;
+
+        let mut program = Vec::new();
+        let fused = leaf(
+            &mut program,
+            &[Extent::Static(rows), Extent::Static(fused_cols)],
+        );
+        let donor = append(
+            &mut program,
+            Op::Constant {
+                dtype: DType::Float32,
+                shape: alloc::vec![
+                    Extent::Static(chunk_extent),
+                    Extent::Static(chunk_width)
+                ],
+                value: 0.0,
+            },
+        );
+
+        let fused_map = IndexMap::Affine(map::affine(
+            3,
+            &[
+                (&[AxisTerm::projection(0)], 0),
+                (
+                    &[
+                        AxisTerm::scaled(1, chunk_width as i32),
+                        AxisTerm::scaled(2, 1),
+                    ],
+                    0,
+                ),
+            ],
+        ));
+        let donor_map = IndexMap::Affine(map::projection(3, &[1, 2]));
+        let split = append(
+            &mut program,
+            Op::Elementwise {
+                dtype: DType::Float32,
+                body: ScalarOp::Add,
+                operands: alloc::vec![(fused, fused_map), (donor, donor_map)],
+                name: None,
+            },
+        );
+
+        let shapes = infer(&program, &[]).expect("the chunk-axis split infers");
+        assert_eq!(
+            shapes.of(split),
+            &[
+                u64::from(rows),
+                u64::from(chunk_extent),
+                u64::from(chunk_width)
+            ],
+            "row x chunk x within, not row x fused_cols"
+        );
+
+        let fused_data: Vec<f32> = (0..rows)
+            .flat_map(|row| (0..fused_cols).map(move |col| (row * fused_cols + col) as f32))
+            .collect();
+        let evaluated = crate::cpu::evaluate(&program, &[], &[&fused_data], &[split])
+            .expect("the chunk-axis split evaluates");
+        let (data, shape) = evaluated.get(split).expect("split is a requested output");
+        assert_eq!(
+            shape,
+            &[
+                u64::from(rows),
+                u64::from(chunk_extent),
+                u64::from(chunk_width)
+            ]
+        );
+
+        let at = |row: u32, chunk: u32, within: u32| {
+            data[((row * chunk_extent + chunk) * chunk_width + within) as usize]
+        };
+        assert_eq!(at(0, 0, 0), 0.0, "chunk 0 (offset 0) reads fused's first column");
+        assert_eq!(
+            at(0, 1, 0),
+            2048.0,
+            "chunk 1 (offset 2048) reads fused's column 2048"
+        );
+        assert_eq!(
+            at(0, 2, 0),
+            4096.0,
+            "chunk 2 (offset 4096) reads fused's column 4096"
+        );
+        assert_eq!(
+            at(2047, 2, 2047),
+            (2047 * fused_cols + 4096 + 2047) as f32,
+            "the last row, last chunk, last column reads fused's final element"
+        );
+    }
+
+    /// The literal per-chunk framing -- three independently offset-addressed
+    /// ops, matching
+    /// `a_nonzero_offset_slice_of_a_wider_operand_narrows_via_a_companion_donor`
+    /// above -- already resolves shapes correctly for a nonzero offset; this
+    /// checks it also evaluates the right *values*, for both nonzero chunks
+    /// a real fused-QKV split needs (offsets `2048` and `4096`). The
+    /// `0`-offset chunk is the one this row's remaining gap blocks -- see
+    /// the doc above.
+    #[proxima::test]
+    #[case::second_chunk_offset_2048(2048)]
+    #[case::third_chunk_offset_4096(4096)]
+    async fn a_nonzero_offset_slice_evaluates_the_correct_chunk_values(#[case] offset: i32) {
+        let mut program = Vec::new();
+        let fused = leaf(&mut program, &[Extent::Static(2), Extent::Static(6144)]);
+        let donor = leaf(&mut program, &[Extent::Static(2), Extent::Static(2048)]);
+
+        let fused_map = IndexMap::Affine(map::affine(
+            2,
+            &[
+                (&[AxisTerm::projection(0)], 0),
+                (&[AxisTerm::scaled(1, 1)], offset),
+            ],
+        ));
+        let donor_map = IndexMap::Affine(map::projection(2, &[0, 1]));
+        let sliced = append(
+            &mut program,
+            Op::Elementwise {
+                dtype: DType::Float32,
+                body: ScalarOp::Add,
+                operands: alloc::vec![(fused, fused_map), (donor, donor_map)],
+                name: None,
+            },
+        );
+
+        let fused_data: Vec<f32> = (0..2 * 6144).map(|index| index as f32).collect();
+        let donor_data = alloc::vec![0.0f32; 2 * 2048];
+        let evaluated =
+            crate::cpu::evaluate(&program, &[], &[&fused_data, &donor_data], &[sliced])
+                .expect("a nonzero-offset slice with a donor evaluates");
+        let (data, shape) = evaluated.get(sliced).expect("sliced is a requested output");
+
+        assert_eq!(shape, &[2, 2048]);
+        let start = offset as usize;
+        assert_eq!(data[0], fused_data[start], "row 0, column 0 of the chunk");
+        assert_eq!(
+            data[2047],
+            fused_data[start + 2047],
+            "row 0, last column of the chunk"
+        );
+        assert_eq!(
+            data[2048],
+            fused_data[6144 + start],
+            "row 1, column 0 of the chunk"
+        );
+    }
 }
