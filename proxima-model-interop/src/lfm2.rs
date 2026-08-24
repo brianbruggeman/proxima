@@ -37,6 +37,7 @@ use proxima_gguf::pipe::ParsedGguf;
 use proxima_gguf::types::GgmlType;
 use proxima_gguf::value::{MetadataArray, MetadataValue};
 use proxima_tensor::cpu::{QuantizedBlock, evaluate_quantized_named_with_scratch};
+use proxima_tensor::op::NodeId;
 use proxima_tensor::spec::{LayerKind, lfm2_forward_program_with_experts};
 use proxima_tokenizer::Vocab;
 
@@ -509,6 +510,95 @@ pub fn run_lfm2_prefill(
 
     let text = proxima_tokenizer::decode(&ids, vocab)?;
     Ok((ids, text))
+}
+
+/// One forward pass over `ids` (no generation loop) -- [`run_lfm2_prefill`]'s
+/// cross-oracle counterpart, mirroring [`crate::generate::LoadedModel::forward_logits`]/
+/// [`crate::generate::LoadedModel::forward_node_values`]'s dense-checkpoint
+/// shape for this hybrid checkpoint's own GGUF bind + program build. Returns
+/// the LAST position's full-vocab logits, plus one raw evaluated buffer per
+/// entry in `extra_node_ids`, in the same order.
+///
+/// `extra_node_ids` are typically derived by building
+/// [`lfm2_forward_program_with_experts`] at two adjacent `block_count`s and
+/// diffing their `Op` sequences (`smollm2_layer_oracle_diff.rs`'s own
+/// technique) -- the id-is-index invariant that relies on holds here
+/// identically, since a shallower build only ever appends nodes to the
+/// deeper one's own prefix.
+///
+/// # Errors
+///
+/// Whatever [`bind_lfm2_weights`]/[`lfm2_forward_program_with_experts`]/
+/// evaluating the program can fail with, plus
+/// [`InteropError::MissingEvaluatedNode`] if the evaluator's output is
+/// missing the logits root or one of `extra_node_ids` -- an
+/// interpreter/program-construction invariant violation, never a caller
+/// mistake.
+pub fn lfm2_forward_values(
+    parsed: &ParsedGguf,
+    file_bytes: &[u8],
+    architecture: &Lfm2Architecture,
+    ids: &[u32],
+    extra_node_ids: &[NodeId],
+) -> Result<(Vec<f32>, Vec<Vec<f32>>), InteropError> {
+    let weights = bind_lfm2_weights(parsed, file_bytes, architecture)?;
+    let (program, logits_root) = lfm2_forward_program_with_experts(
+        architecture.vocab,
+        architecture.embedding,
+        architecture.feed_forward,
+        architecture.expert_feed_forward,
+        architecture.query_heads,
+        architecture.kv_heads,
+        architecture.head_dim,
+        architecture.block_count,
+        architecture.expert_count,
+        architecture.expert_used_count,
+        architecture.leading_dense_block_count,
+        architecture.l_cache,
+        &architecture.layer_kinds,
+    )?;
+
+    let inputs = build_lfm2_position_inputs(ids, architecture.head_dim, architecture.rope_freq_base, architecture.rms_epsilon);
+    let vocab_size = architecture.vocab as usize;
+
+    let mut named_blocks: Vec<(&str, QuantizedBlock)> = Vec::with_capacity(weights.owned.len() + weights.packed.len() + 3);
+    named_blocks.push(("ids", QuantizedBlock::Float32(inputs.ids_f32.as_slice())));
+    for (name, data) in &weights.owned {
+        named_blocks.push((name.as_str(), QuantizedBlock::Float32(data.as_slice())));
+    }
+    for (name, block) in &weights.packed {
+        named_blocks.push((name.as_str(), *block));
+    }
+    named_blocks.push(("eps", QuantizedBlock::Float32(inputs.epsilon.as_slice())));
+    named_blocks.push(("rope_cos", QuantizedBlock::Float32(inputs.cos.as_slice())));
+    named_blocks.push(("rope_sin", QuantizedBlock::Float32(inputs.sin.as_slice())));
+
+    let symbols = [ids.len() as u64];
+    let mut free_buffers: Vec<Vec<f32>> = Vec::new();
+    let mut validated_weight_nodes: Option<BTreeSet<NodeId>> = None;
+
+    let mut outputs: Vec<NodeId> = vec![logits_root];
+    outputs.extend_from_slice(extra_node_ids);
+
+    let evaluated = evaluate_quantized_named_with_scratch(
+        &program,
+        &symbols,
+        &named_blocks,
+        &outputs,
+        &mut free_buffers,
+        &mut validated_weight_nodes,
+    )?;
+
+    let (logits, _shape) = evaluated.get(logits_root).ok_or(InteropError::MissingEvaluatedNode { node: logits_root })?;
+    let last_position = logits[(ids.len() - 1) * vocab_size..ids.len() * vocab_size].to_vec();
+
+    let mut extras = Vec::with_capacity(extra_node_ids.len());
+    for &node in extra_node_ids {
+        let (values, _shape) = evaluated.get(node).ok_or(InteropError::MissingEvaluatedNode { node })?;
+        extras.push(values.to_vec());
+    }
+
+    Ok((last_position, extras))
 }
 
 #[cfg(all(test, feature = "std"))]

@@ -48,7 +48,7 @@ pub use error::InteropError;
 pub use generate::LoadedModel;
 pub use hf_config::{HfConfig, architecture_from_hf_config, parse_hf_config};
 #[cfg(feature = "std")]
-pub use lfm2::{Lfm2Architecture, lfm2_architecture_from_metadata, run_lfm2_prefill};
+pub use lfm2::{Lfm2Architecture, lfm2_architecture_from_metadata, lfm2_forward_values, run_lfm2_prefill};
 #[cfg(feature = "std")]
 pub use loader::{PREFAULT_OVERSUBSCRIBE, PREFAULT_STRIDE_BYTES, prefault};
 pub use serving::{
