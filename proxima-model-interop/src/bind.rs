@@ -2093,7 +2093,7 @@ mod real_openchat_file {
             let quant = proxima_tensor::instrument::matmul_dispatch_totals();
             let q4k_ns = proxima_tensor::instrument::ticks_to_nanos(quant.q4k_call_ticks);
             std::println!(
-                "quant_arm q4k_macs={} q4k_ms={:.3} q4k_ns_per_mac={:.5} q5k_macs={} q6k_macs={} q5k_f32_calls={} q6k_f32_calls={} reduce_quantized_calls={}",
+                "quant_arm q4k_macs={} q4k_ms={:.3} q4k_ns_per_mac={:.5} q5k_macs={} q6k_macs={} q5k_f32_calls={} q6k_f32_calls={} reduce_quantized_calls={} workers_calls={} workers_none={}",
                 quant.q4k_macs,
                 q4k_ns as f64 / 1e6,
                 if quant.q4k_macs == 0 { 0.0 } else { q4k_ns as f64 / quant.q4k_macs as f64 },
@@ -2101,7 +2101,14 @@ mod real_openchat_file {
                 quant.q6k_macs,
                 quant.q5k_f32_calls,
                 quant.q6k_f32_calls,
-                quant.reduce_quantized_calls
+                quant.reduce_quantized_calls,
+                // `workers_calls == workers_none` is the mechanical proof
+                // `PROXIMA_MATMUL_WORKERS=1` actually took effect
+                // (`cpu::quantized_matmul_workers`'s own `workers > 1`
+                // gate) -- a prior session's single-threaded comparison
+                // was invalidated by never checking this.
+                quant.workers_calls,
+                quant.workers_none
             );
             // is the matmul bucket actually KERNEL, or is it orchestration?
             // reduce_quantized is the whole bucket; q4k/q5k/q6k_call are the
