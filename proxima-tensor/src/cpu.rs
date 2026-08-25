@@ -713,7 +713,7 @@ pub fn evaluate_quantized_with_scratch(
     // `docs/discipline.md` ROW 140's own cache: scoped to this ONE
     // `evaluate_quantized_with_scratch` call (one decode/prefill step),
     // never carried across steps -- a later step's `activation_node` slot
-    // holds a genuinely different value, and this map is dropped with the
+    // holds a genuinely different value, and this vec is dropped with the
     // rest of this function's locals at the end of the call, so there is no
     // staleness window to reason about. Keyed by the activation's own
     // `NodeId` rather than threaded through `MatmulSession`/`CohortSession`
@@ -723,8 +723,15 @@ pub fn evaluate_quantized_with_scratch(
     // cache -- the same reuse-first question this crate already answers by
     // keeping `free_buffers`/`validated_weight_nodes` as this function's own
     // scratch parameters instead of bolting them onto a foreign type.
+    //
+    // `NodeId` is a position in `program`'s own flat `Vec<Op>` (`op.rs`'s
+    // own doc), the exact same fact `buffers` above already exploits
+    // (`vec![None; program.len()]`, indexed by `node.0 as usize`) -- so this
+    // cache is sized and indexed identically, an O(1) direct slot lookup
+    // instead of a `BTreeMap`'s per-hit key-comparison chain over up to 96
+    // hits/step (ROW 140's own measured hit count).
     #[cfg(feature = "cohort-staged-graph")]
-    let mut staged_quantize_cache: BTreeMap<NodeId, Arc<[u8]>> = BTreeMap::new();
+    let mut staged_quantize_cache: Vec<Option<Arc<[u8]>>> = vec![None; program.len()];
     let mut position = 0usize;
     while position < resolved.len() {
         #[cfg(feature = "cohort-staged-graph")]
@@ -3085,7 +3092,7 @@ fn build_matmul_stage_plan<'weights>(
     weight_block: QuantizedBlock<'weights>,
     weight_node: NodeId,
     session: &MatmulSession<'_>,
-    quantize_cache: &mut BTreeMap<NodeId, Arc<[u8]>>,
+    quantize_cache: &mut [Option<Arc<[u8]>>],
 ) -> Result<Option<MatmulStagePlan<'weights>>, TensorError> {
     let activation_node = resolved
         .operands()
@@ -3206,7 +3213,7 @@ fn build_matmul_stage_plan<'weights>(
     // refcount bump, no bytes touched); a miss pays the real quantize once
     // and seeds the cache for whichever sibling node reads this same
     // activation next.
-    let activation_q8k: Arc<[u8]> = if let Some(cached) = quantize_cache.get(&activation_node) {
+    let activation_q8k: Arc<[u8]> = if let Some(cached) = quantize_cache[activation_node.0 as usize].as_ref() {
         #[cfg(feature = "instrument")]
         instrument::record_quantize_activation_cache_hit();
         Arc::clone(cached)
@@ -3244,7 +3251,7 @@ fn build_matmul_stage_plan<'weights>(
             instrument::elapsed_ticks(diag_staged_quantize_started)
         );
         let shared: Arc<[u8]> = Arc::from(buffer);
-        quantize_cache.insert(activation_node, Arc::clone(&shared));
+        quantize_cache[activation_node.0 as usize] = Some(Arc::clone(&shared));
         shared
     };
     #[cfg(feature = "instrument")]
@@ -3324,7 +3331,7 @@ fn run_staged_batch(
     free_buffers: &mut Vec<Vec<f32>>,
     retires: &[Vec<NodeId>],
     live_now: &mut usize,
-    quantize_cache: &mut BTreeMap<NodeId, Arc<[u8]>>,
+    quantize_cache: &mut [Option<Arc<[u8]>>],
 ) -> Result<(), TensorError> {
     let mut run_outputs: Vec<Vec<f32>> =
         run.iter().map(|node| take_or_allocate(free_buffers, node_output_len(node))).collect();

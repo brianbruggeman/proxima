@@ -1247,11 +1247,27 @@ pub static STAGED_MATMUL_QUANTIZE_TICKS: Counter = Counter::new("proxima_tensor.
 // matmul nodes collapse onto the same key), incremented once per call to
 // `cpu::build_matmul_stage_plan`/`cpu::run_reduce_quantized`, the two call
 // sites that each independently quantize their own `activation` operand
-// before this counter existed. `total_calls` (`.values().sum()`) vs
-// `distinct_nodes` (`.len()`) is the ratio the hypothesis lives or dies on:
-// 1:1 kills it, >1:1 by roughly the fan-out (3 for QKV, 2 for gate/up)
-// confirms it.
-static QUANTIZE_ACTIVATION_CALLS_BY_NODE: Mutex<BTreeMap<NodeId, u64>> = Mutex::new(BTreeMap::new());
+// before this counter existed. `total_calls` (`.iter().sum()`) vs
+// `distinct_nodes` (count of nonzero entries) is the ratio the hypothesis
+// lives or dies on: 1:1 kills it, >1:1 by roughly the fan-out (3 for QKV, 2
+// for gate/up) confirms it.
+//
+// ROW 141: this was a `Mutex<BTreeMap<NodeId, u64>>` -- a per-call
+// `O(log n)` key comparison chain PLUS a mutex acquisition, on the exact
+// path ROW 140 measured a `-1.104 ms` residual delta from. `NodeId` is a
+// position in the program's own flat `Vec<Op>` (`op.rs`'s own doc, and the
+// same fact `cpu.rs`'s `staged_quantize_cache` now exploits directly), so a
+// `Vec<u64>` indexed by `node.0` is the same O(1)-slot shape, grown once to
+// cover the largest node id this process has seen (never shrunk on
+// [`reset_step`] -- only zeroed -- so steady-state decode pays no further
+// resize after the first step touches every node this checkpoint's graph
+// has). The `Mutex` itself stays: both call sites run on the leader thread
+// only, serially, strictly before any cohort round opens (`cpu.rs`'s own
+// doc on why `Some(session)` is safe there), so there is never real
+// contention -- but a bare `static mut`/`UnsafeCell` would need an unsafe
+// single-writer invariant this instrument-only diagnostic has no
+// reason to take on.
+static QUANTIZE_ACTIVATION_CALLS_BY_NODE: Mutex<Vec<u64>> = Mutex::new(Vec::new());
 
 /// Records one activation-quantize call against `activation_node` — called
 /// from `cpu::build_matmul_stage_plan` (the staged-batch path) and
@@ -1260,7 +1276,11 @@ static QUANTIZE_ACTIVATION_CALLS_BY_NODE: Mutex<BTreeMap<NodeId, u64>> = Mutex::
 /// apart from "quantized three times, once per consumer".
 pub fn record_quantize_activation_call(activation_node: NodeId) {
     let mut calls = QUANTIZE_ACTIVATION_CALLS_BY_NODE.lock().unwrap_or_else(PoisonError::into_inner);
-    *calls.entry(activation_node).or_insert(0) += 1;
+    let index = activation_node.0 as usize;
+    if index >= calls.len() {
+        calls.resize(index + 1, 0);
+    }
+    calls[index] += 1;
 }
 
 /// `(total_calls, distinct_activation_nodes)` across every
@@ -1271,14 +1291,14 @@ pub fn record_quantize_activation_call(activation_node: NodeId) {
 #[must_use]
 pub fn quantize_activation_call_stats() -> (u64, u64) {
     let calls = QUANTIZE_ACTIVATION_CALLS_BY_NODE.lock().unwrap_or_else(PoisonError::into_inner);
-    let total_calls: u64 = calls.values().sum();
-    let distinct_nodes = calls.len() as u64;
+    let total_calls: u64 = calls.iter().sum();
+    let distinct_nodes = calls.iter().filter(|&&count| count > 0).count() as u64;
     (total_calls, distinct_nodes)
 }
 
 fn reset_quantize_activation_calls() {
     let mut calls = QUANTIZE_ACTIVATION_CALLS_BY_NODE.lock().unwrap_or_else(PoisonError::into_inner);
-    calls.clear();
+    calls.iter_mut().for_each(|count| *count = 0);
     let _ = QUANTIZE_ACTIVATION_CACHE_HITS.snapshot_and_reset();
 }
 
