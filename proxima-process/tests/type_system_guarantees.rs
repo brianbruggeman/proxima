@@ -310,7 +310,7 @@ fn command_is_a_pipe() {
 fn wire_format_child_request_discriminants_locked() {
     use proxima_process::protocol::ChildRequest;
     let read = ChildRequest::Read {
-        path: alloc::string::String::from("/dev/null"),
+        handle: 0,
         max_bytes: 0,
         offset: 0,
     };
@@ -320,7 +320,7 @@ fn wire_format_child_request_discriminants_locked() {
     assert_eq!(bytes[0], 0, "ChildRequest::Read must be variant 0");
 
     let write = ChildRequest::Write {
-        path: alloc::string::String::new(),
+        handle: 0,
         bytes: alloc::vec::Vec::new(),
     };
     assert_eq!(
@@ -339,18 +339,14 @@ fn wire_format_child_request_discriminants_locked() {
         "ChildRequest::Open must be variant 2"
     );
 
-    let close = ChildRequest::Close {
-        path: alloc::string::String::new(),
-    };
+    let close = ChildRequest::Close { handle: 0 };
     assert_eq!(
         postcard::to_allocvec(&close).expect("encode")[0],
         3,
         "ChildRequest::Close must be variant 3"
     );
 
-    let stat = ChildRequest::Stat {
-        path: alloc::string::String::new(),
-    };
+    let stat = ChildRequest::Stat { handle: 0 };
     assert_eq!(
         postcard::to_allocvec(&stat).expect("encode")[0],
         4,
@@ -415,7 +411,7 @@ fn wire_format_child_response_discriminants_locked() {
 fn wire_format_round_trip_via_postcard_proves_parity_baseline() {
     use proxima_process::protocol::ChildRequest;
     let original = ChildRequest::Read {
-        path: alloc::string::String::from("/proc/sys/kernel/hostname"),
+        handle: 0,
         max_bytes: 256,
         offset: 0,
     };

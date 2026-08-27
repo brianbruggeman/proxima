@@ -27,6 +27,14 @@ use proxima_primitives::pipe::alloc_tier::SendDynPipe;
 /// prefix. Walks `routes` in order; the first whose path matches the
 /// request handles it. If nothing matches, dispatches to `fallback`.
 ///
+/// Only [`super::protocol::ChildRequest::Open`] carries a path —
+/// every other variant is fd-keyed (handle, not path) per
+/// `tools/proxima-vm/ROADMAP.md` P0, so it has nothing for a prefix
+/// match to read and falls straight to `fallback`. Resolving a
+/// handle back to the ground that owns it is the dispatcher's job,
+/// not this router's: the routing decision was already made once,
+/// at `Open`.
+///
 /// This is `Match (first)` semantics from the operator catalog.
 /// `Match (any)` (parallel predicate eval, first match wins) is a
 /// follow-up.
@@ -49,9 +57,11 @@ where
             Err = proxima_primitives::pipe::ProximaError,
         > + Sync,
 {
-    for (prefix, handler) in routes {
-        if request.path().starts_with(prefix) {
-            return handler.call_dyn(request).await;
+    if let Some(path) = request.path() {
+        for (prefix, handler) in routes {
+            if path.starts_with(prefix) {
+                return handler.call_dyn(request).await;
+            }
         }
     }
     SendPipe::call(fallback, request).await

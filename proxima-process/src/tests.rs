@@ -217,7 +217,7 @@ fn seeded_entropy_carries_non_random_without_markers() {
 fn seeded_entropy_same_seed_produces_same_bytes() {
     let entropy = SeededEntropy::new(42);
     let request = entropy.call_sync(ChildRequest::Read {
-        path: "/dev/urandom".to_string(),
+        handle: 0,
         max_bytes: 16,
         offset: 0,
     });
@@ -227,7 +227,7 @@ fn seeded_entropy_same_seed_produces_same_bytes() {
     };
 
     let again = entropy.call_sync(ChildRequest::Read {
-        path: "/dev/urandom".to_string(),
+        handle: 0,
         max_bytes: 16,
         offset: 0,
     });
@@ -272,7 +272,7 @@ fn fixed_clock_carries_non_time_without_markers() {
 fn fixed_clock_emits_configured_epoch_decimal() {
     let clock = FixedClock::new(1_700_000_000);
     let response = clock.call_sync(ChildRequest::Read {
-        path: "/proc/uptime".to_string(),
+        handle: 0,
         max_bytes: 32,
         offset: 0,
     });
@@ -367,16 +367,30 @@ fn dispatch_loop_handles_a_single_round_trip_over_socketpair() {
     // Parent end + shim end of a socketpair.
     let (parent_end, shim_end) = UnixStream::pair().expect("socketpair");
 
-    // Shim simulator: write one framed request, read one framed
-    // response, drop the connection to signal EOF.
+    // Shim simulator: open the resource by path (routing happens
+    // here), then read it by the returned handle (fd-keyed, no path
+    // on the wire), then drop the connection to signal EOF.
     let shim_handle = thread::spawn(move || {
         let mut shim_end = shim_end;
-        let request = ChildRequest::Read {
+        let open_request = ChildRequest::Open {
             path: "/proc/sys/kernel/hostname".to_string(),
+            flags: 0,
+        };
+        write_frame(&mut shim_end, &open_request).expect("shim open write");
+        let open_response: ChildResponse = read_frame(&mut shim_end)
+            .expect("shim open read")
+            .expect("open response present");
+        let handle = match open_response {
+            ChildResponse::Open { handle } => handle,
+            other => panic!("expected Open response, got {other:?}"),
+        };
+
+        let read_request = ChildRequest::Read {
+            handle,
             max_bytes: 256,
             offset: 0,
         };
-        write_frame(&mut shim_end, &request).expect("shim write");
+        write_frame(&mut shim_end, &read_request).expect("shim read write");
         let response: ChildResponse = read_frame(&mut shim_end)
             .expect("shim read")
             .expect("response present");
@@ -385,7 +399,11 @@ fn dispatch_loop_handles_a_single_round_trip_over_socketpair() {
         response
     });
 
-    // Parent dispatch loop with a single canned hostname.
+    // Parent dispatch loop with a single canned hostname. Resolving a
+    // handle back to the ground that owns it is the dispatch loop's
+    // job — `dispatch_match` only routes the path-keyed `Open`; the
+    // handle table below is the caller-owned state that closes that
+    // loop, per operators.rs's doc comment.
     let mut parent_read = parent_end.try_clone().expect("dup parent end for read");
     let mut parent_write = parent_end;
     let hostname = canned(&b"honeypot.proxima.local"[..]);
@@ -394,8 +412,41 @@ fn dispatch_loop_handles_a_single_round_trip_over_socketpair() {
         &str,
         &dyn proxima_primitives::pipe::alloc_tier::SendDynPipe<ChildRequest, ChildResponse>,
     )] = &[("/proc/sys/kernel/hostname", &hostname)];
+    let mut handle_table: Vec<(
+        i32,
+        &dyn proxima_primitives::pipe::alloc_tier::SendDynPipe<ChildRequest, ChildResponse>,
+    )> = Vec::new();
+    let mut next_handle = 0i32;
     run_dispatch_loop(&mut parent_read, &mut parent_write, |request| {
-        block_on(dispatch_match(request, routes, &fallback))
+        if let Some(path) = request.path() {
+            let matched = routes.iter().find(|(prefix, _)| path.starts_with(prefix));
+            let Some((_, handler)) = matched else {
+                return block_on(SendPipe::call(&fallback, request));
+            };
+            let handler = *handler;
+            let response = block_on(handler.call_dyn(request))?;
+            // The ground's own Open stub always answers `handle: 0`
+            // (grounds.rs has no real per-call allocator yet); the
+            // dispatcher mints the handle the child actually sees so
+            // concurrently open resources resolve to distinct grounds.
+            if matches!(response, ChildResponse::Open { .. }) {
+                let minted_handle = next_handle;
+                handle_table.push((minted_handle, handler));
+                next_handle += 1;
+                return Ok(ChildResponse::Open {
+                    handle: minted_handle,
+                });
+            }
+            return Ok(response);
+        }
+        let resolved = request
+            .handle()
+            .and_then(|target| handle_table.iter().find(|(handle, _)| *handle == target))
+            .map(|(_, handler)| *handler);
+        match resolved {
+            Some(handler) => block_on(handler.call_dyn(request)),
+            None => block_on(SendPipe::call(&fallback, request)),
+        }
     })
     .expect("dispatch loop should terminate cleanly on EOF");
 
@@ -428,12 +479,25 @@ fn dispatch_loop_handles_multiple_requests_in_one_session() {
             "/proc/sys/kernel/osrelease",
             "/proc/sys/kernel/ostype",
         ] {
-            let request = ChildRequest::Read {
+            let open_request = ChildRequest::Open {
                 path: path.to_string(),
+                flags: 0,
+            };
+            write_frame(&mut shim_end, &open_request).expect("shim open write");
+            let open_response: ChildResponse = read_frame(&mut shim_end)
+                .expect("shim open read")
+                .expect("open response present");
+            let handle = match open_response {
+                ChildResponse::Open { handle } => handle,
+                other => panic!("expected Open response, got {other:?}"),
+            };
+
+            let read_request = ChildRequest::Read {
+                handle,
                 max_bytes: 256,
                 offset: 0,
             };
-            write_frame(&mut shim_end, &request).expect("shim write");
+            write_frame(&mut shim_end, &read_request).expect("shim read write");
             let response: ChildResponse = read_frame(&mut shim_end)
                 .expect("shim read")
                 .expect("response present");
@@ -457,8 +521,41 @@ fn dispatch_loop_handles_multiple_requests_in_one_session() {
         ("/proc/sys/kernel/osrelease", &osrelease),
         ("/proc/sys/kernel/ostype", &ostype),
     ];
+    let mut handle_table: Vec<(
+        i32,
+        &dyn proxima_primitives::pipe::alloc_tier::SendDynPipe<ChildRequest, ChildResponse>,
+    )> = Vec::new();
+    let mut next_handle = 0i32;
     run_dispatch_loop(&mut parent_read, &mut parent_write, |request| {
-        block_on(dispatch_match(request, routes, &fallback))
+        if let Some(path) = request.path() {
+            let matched = routes.iter().find(|(prefix, _)| path.starts_with(prefix));
+            let Some((_, handler)) = matched else {
+                return block_on(SendPipe::call(&fallback, request));
+            };
+            let handler = *handler;
+            let response = block_on(handler.call_dyn(request))?;
+            // The ground's own Open stub always answers `handle: 0`
+            // (grounds.rs has no real per-call allocator yet); the
+            // dispatcher mints the handle the child actually sees so
+            // concurrently open resources resolve to distinct grounds.
+            if matches!(response, ChildResponse::Open { .. }) {
+                let minted_handle = next_handle;
+                handle_table.push((minted_handle, handler));
+                next_handle += 1;
+                return Ok(ChildResponse::Open {
+                    handle: minted_handle,
+                });
+            }
+            return Ok(response);
+        }
+        let resolved = request
+            .handle()
+            .and_then(|target| handle_table.iter().find(|(handle, _)| *handle == target))
+            .map(|(_, handler)| *handler);
+        match resolved {
+            Some(handler) => block_on(handler.call_dyn(request)),
+            None => block_on(SendPipe::call(&fallback, request)),
+        }
     })
     .expect("dispatch loop");
 
@@ -521,13 +618,13 @@ fn end_to_end_chain_synthesizes_honeypot_hostname() {
     let ostype_source = canned(&b"ProximaOS"[..]);
     let fallback = deny_writes();
 
-    // Simulate the shim's outbound frame: the child wants to read
+    // Simulate the shim's outbound frame: the child opens
     // /proc/sys/kernel/hostname (translated by the shim from
-    // gethostname(2) or uname(2)).
-    let request = ChildRequest::Read {
+    // gethostname(2) or uname(2)). Only `Open` is path-keyed
+    // post-P0 — routing happens here, once.
+    let request = ChildRequest::Open {
         path: "/proc/sys/kernel/hostname".to_string(),
-        max_bytes: 256,
-        offset: 0,
+        flags: 0,
     };
     let wire_bytes = encode_frame(&request);
 
@@ -546,7 +643,7 @@ fn end_to_end_chain_synthesizes_honeypot_hostname() {
         "frame decode preserved the request"
     );
 
-    // Stage 2: dispatch_match routes by path to the right ground.
+    // Stage 2: dispatch_match routes the Open by path to the right ground.
     let routes: &[(
         &str,
         &dyn proxima_primitives::pipe::alloc_tier::SendDynPipe<ChildRequest, ChildResponse>,
@@ -555,14 +652,26 @@ fn end_to_end_chain_synthesizes_honeypot_hostname() {
         ("/proc/sys/kernel/osrelease", &osrelease_source),
         ("/proc/sys/kernel/ostype", &ostype_source),
     ];
-    let response = block_on(dispatch_match(decoded_request, routes, &fallback))
+    let open_response = block_on(dispatch_match(decoded_request, routes, &fallback))
         .expect("dispatch_match should succeed");
+    let handle = match open_response {
+        ChildResponse::Open { handle } => handle,
+        other => panic!("expected Open response, got {other:?}"),
+    };
 
-    // Stage 3: FrameEncoder turns the typed ChildResponse into
-    // wire bytes the shim can decode.
+    // Stage 3: the fd-keyed Read addresses the already-selected
+    // ground directly by handle — resolving a handle back to its
+    // ground is the dispatcher's job, not the path router's.
+    let response = hostname_source
+        .call_sync(ChildRequest::Read {
+            handle,
+            max_bytes: 256,
+            offset: 0,
+        });
+
+    // Stage 4: FrameEncoder turns the typed ChildResponse into
+    // wire bytes the shim can decode, then decode it back.
     let response_bytes = FrameEncoder.call_sync(response.clone());
-
-    // Stage 4: simulate the shim decoding the response back.
     let recovered_response: ChildResponse =
         postcard::from_bytes(&response_bytes).expect("decode response");
 
@@ -593,10 +702,9 @@ fn end_to_end_chain_falls_through_to_deny_on_unrouted_path() {
         &dyn proxima_primitives::pipe::alloc_tier::SendDynPipe<ChildRequest, ChildResponse>,
     )] = &[];
 
-    let request = ChildRequest::Read {
+    let request = ChildRequest::Open {
         path: "/unknown/path".to_string(),
-        max_bytes: 256,
-        offset: 0,
+        flags: 0,
     };
     let response = block_on(dispatch_match(request, routes, &fallback))
         .expect("dispatch_match should succeed");
@@ -612,24 +720,20 @@ fn end_to_end_chain_falls_through_to_deny_on_unrouted_path() {
 fn frame_round_trip_for_each_child_request_variant() {
     let cases = vec![
         ChildRequest::Read {
-            path: "/etc/passwd".to_string(),
+            handle: 3,
             max_bytes: 4096,
             offset: 0,
         },
         ChildRequest::Write {
-            path: "/dev/null".to_string(),
+            handle: 4,
             bytes: vec![1, 2, 3, 4, 5],
         },
         ChildRequest::Open {
             path: "/proc/self/status".to_string(),
             flags: 0o644,
         },
-        ChildRequest::Close {
-            path: "/proc/self/status".to_string(),
-        },
-        ChildRequest::Stat {
-            path: "/proc/uptime".to_string(),
-        },
+        ChildRequest::Close { handle: 5 },
+        ChildRequest::Stat { handle: 6 },
     ];
 
     for original in cases {
@@ -701,7 +805,7 @@ fn decode_frame_rejects_invalid_postcard() {
 #[test]
 fn frame_decoder_dispatches_postcard_bytes_to_typed_request() {
     let original = ChildRequest::Read {
-        path: "/proc/sys/kernel/hostname".to_string(),
+        handle: 0,
         max_bytes: 256,
         offset: 0,
     };
@@ -852,18 +956,29 @@ fn const_path_promotes_to_trusted_without_runtime_check() {
 
 // ---- Ground dispatch correctness ----
 
-fn read_request(path: &str, max_bytes: u32, offset: u64) -> ChildRequest {
+// `path` is accepted for call-site readability (which resource a case
+// exercises) even though the ground types below ignore the field —
+// Read/Write are fd-keyed post-P0, so the string never reaches the
+// wire; it stands in for "the handle a prior Open would have returned".
+fn read_request(_path: &str, max_bytes: u32, offset: u64) -> ChildRequest {
     ChildRequest::Read {
-        path: path.to_string(),
+        handle: 0,
         max_bytes,
         offset,
     }
 }
 
-fn write_request(path: &str, bytes: &[u8]) -> ChildRequest {
+fn write_request(_path: &str, bytes: &[u8]) -> ChildRequest {
     ChildRequest::Write {
-        path: path.to_string(),
+        handle: 0,
         bytes: bytes.to_vec(),
+    }
+}
+
+fn open_request(path: &str) -> ChildRequest {
+    ChildRequest::Open {
+        path: path.to_string(),
+        flags: 0,
     }
 }
 
@@ -971,7 +1086,9 @@ fn deny_returns_configured_errno_for_any_request() {
 // ---- AndThen operator dispatch ----
 
 /// A trivial transform pipe for testing AndThen type-chaining:
-/// extracts the path string from a ChildRequest.
+/// extracts the path string from a ChildRequest. Only `Open` carries
+/// one post-P0; every other variant is fd-keyed, so this pipe is
+/// exercised against `Open` requests.
 struct ExtractPath;
 
 impl SendPipe for ExtractPath {
@@ -982,7 +1099,7 @@ impl SendPipe for ExtractPath {
         &self,
         request: Self::In,
     ) -> impl core::future::Future<Output = Result<Self::Out, ProximaError>> + Send {
-        let path = request.path().to_string();
+        let path = request.path().unwrap_or_default().to_string();
         async move { Ok(path) }
     }
 }
@@ -1032,14 +1149,14 @@ impl Pipe for LengthOnly {
 #[test]
 fn series_chains_intermediate_types() {
     let pipeline = ExtractPath.and_then(LengthOnly);
-    let length = pipeline.call_sync(read_request("/etc/passwd", 256, 0));
+    let length = pipeline.call_sync(open_request("/etc/passwd"));
     assert_eq!(length, "/etc/passwd".len());
 }
 
 #[test]
 fn nested_series_chains_three_stages() {
     let pipeline = ExtractPath.and_then(LengthOnly).and_then(IntoBytes);
-    let bytes: Vec<u8> = pipeline.call_sync(read_request("/etc/passwd", 256, 0));
+    let bytes: Vec<u8> = pipeline.call_sync(open_request("/etc/passwd"));
     assert_eq!(bytes, (11usize).to_le_bytes().to_vec());
 }
 
@@ -1087,16 +1204,30 @@ fn dispatch_match_routes_by_path_prefix() {
     ];
 
     let response = block_on(dispatch_match(
-        read_request("/proc/sys/kernel/hostname", 256, 0),
+        open_request("/proc/sys/kernel/hostname"),
         routes,
         &fallback,
     ))
     .expect("dispatch_match should succeed");
     match response {
-        ChildResponse::Read(ReadResponse { bytes, .. }) => {
-            assert_eq!(bytes, b"honeypot.proxima.local");
+        ChildResponse::Open { handle } => {
+            let read_response = block_on(SendPipe::call(
+                &hostname_source,
+                ChildRequest::Read {
+                    handle,
+                    max_bytes: 256,
+                    offset: 0,
+                },
+            ))
+            .expect("read after open should succeed");
+            match read_response {
+                ChildResponse::Read(ReadResponse { bytes, .. }) => {
+                    assert_eq!(bytes, b"honeypot.proxima.local");
+                }
+                other => panic!("expected Read response, got {other:?}"),
+            }
         }
-        other => panic!("expected Read response, got {other:?}"),
+        other => panic!("expected Open response, got {other:?}"),
     }
 }
 
@@ -1109,7 +1240,7 @@ fn dispatch_match_falls_through_to_fallback() {
     let fallback = deny_writes();
 
     let response = block_on(dispatch_match(
-        read_request("/unmatched/path", 256, 0),
+        open_request("/unmatched/path"),
         routes,
         &fallback,
     ))
@@ -1135,42 +1266,80 @@ fn dispatch_match_first_matching_route_wins() {
     ];
 
     let response = block_on(dispatch_match(
-        read_request("/proc/sys/kernel/hostname", 256, 0),
+        open_request("/proc/sys/kernel/hostname"),
         routes,
         &fallback,
     ))
     .expect("dispatch_match should succeed");
     match response {
-        ChildResponse::Read(ReadResponse { bytes, .. }) => {
-            assert_eq!(bytes, b"first", "first matching route should win");
+        ChildResponse::Open { handle } => {
+            let read_response = block_on(SendPipe::call(
+                &first,
+                ChildRequest::Read {
+                    handle,
+                    max_bytes: 256,
+                    offset: 0,
+                },
+            ))
+            .expect("read after open should succeed");
+            match read_response {
+                ChildResponse::Read(ReadResponse { bytes, .. }) => {
+                    assert_eq!(bytes, b"first", "first matching route should win");
+                }
+                other => panic!("expected Read response, got {other:?}"),
+            }
         }
-        other => panic!("expected Read response, got {other:?}"),
+        other => panic!("expected Open response, got {other:?}"),
     }
 }
 
-// ---- ChildRequest::path() accessor ----
+// ---- ChildRequest::path() / handle() accessors ----
 
 #[test]
-fn child_request_path_accessor_covers_all_variants() {
+fn child_request_path_accessor_covers_only_open() {
+    let open = ChildRequest::Open {
+        path: "/proc/open".to_string(),
+        flags: 0,
+    };
+    assert_eq!(open.path(), Some("/proc/open"));
+
     let read = read_request("/proc/read", 0, 0);
-    assert_eq!(read.path(), "/proc/read");
+    assert_eq!(read.path(), None, "fd-keyed variants carry no path");
 
     let write = write_request("/proc/write", b"");
-    assert_eq!(write.path(), "/proc/write");
+    assert_eq!(write.path(), None, "fd-keyed variants carry no path");
+
+    let close = ChildRequest::Close { handle: 9 };
+    assert_eq!(close.path(), None, "fd-keyed variants carry no path");
+
+    let stat = ChildRequest::Stat { handle: 9 };
+    assert_eq!(stat.path(), None, "fd-keyed variants carry no path");
+}
+
+#[test]
+fn child_request_handle_accessor_covers_all_fd_keyed_variants() {
+    let read = ChildRequest::Read {
+        handle: 1,
+        max_bytes: 0,
+        offset: 0,
+    };
+    assert_eq!(read.handle(), Some(1));
+
+    let write = ChildRequest::Write {
+        handle: 2,
+        bytes: Vec::new(),
+    };
+    assert_eq!(write.handle(), Some(2));
+
+    let close = ChildRequest::Close { handle: 3 };
+    assert_eq!(close.handle(), Some(3));
+
+    let stat = ChildRequest::Stat { handle: 4 };
+    assert_eq!(stat.handle(), Some(4));
 
     let open = ChildRequest::Open {
         path: "/proc/open".to_string(),
         flags: 0,
     };
-    assert_eq!(open.path(), "/proc/open");
-
-    let close = ChildRequest::Close {
-        path: "/proc/close".to_string(),
-    };
-    assert_eq!(close.path(), "/proc/close");
-
-    let stat = ChildRequest::Stat {
-        path: "/proc/stat".to_string(),
-    };
-    assert_eq!(stat.path(), "/proc/stat");
+    assert_eq!(open.handle(), None, "Open is path-keyed, not fd-keyed");
 }
