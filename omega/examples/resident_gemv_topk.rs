@@ -273,7 +273,8 @@ fn run() {
 
     fn bench_size(rows: usize) -> Result<SizeRow, String> {
         let page = omega::metal::page_size();
-        let mut corpus = AlignedBuffer::new(rows * DIMENSION, page);
+        let mut corpus = AlignedBuffer::new(rows * DIMENSION, page)
+            .map_err(|error| format!("aligned corpus allocation failed at rows={rows}: {error}"))?;
         assert_eq!(
             corpus.len(),
             rows * DIMENSION,
