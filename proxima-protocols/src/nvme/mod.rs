@@ -16,7 +16,7 @@ pub mod command;
 pub mod completion;
 pub mod error;
 pub mod queue;
-mod raw;
+pub mod raw;
 
 pub use command::{CommandBuilder, DataTransfer, SubmissionEntry};
 pub use completion::{CompletionEntry, StatusField, write_completion};
