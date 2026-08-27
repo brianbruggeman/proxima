@@ -13,7 +13,7 @@
 //! (offset 0x000) is the guest emitting one console byte. Everything else
 //! this module models exists only so a real kernel's earlycon/console probe
 //! sequence completes without the guest wedging on an unmodeled register —
-//! see [`tests::linux_pl011_earlycon_probe_then_two_byte_write_sequence`] for
+//! see `tests::linux_pl011_earlycon_probe_then_two_byte_write_sequence` for
 //! the exact register sequence a Linux `pl011` earlycon performs.
 //!
 //! # Spec citations

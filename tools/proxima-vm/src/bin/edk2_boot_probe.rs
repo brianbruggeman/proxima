@@ -4,7 +4,7 @@
 //! `tests/edk2_boot.rs` can sign this small binary with the hypervisor
 //! entitlement instead of the whole nextest test harness.
 //!
-//! argv[1]: path to a real edk2/AAVMF `-pflash` CODE volume (e.g.
+//! `argv[1]`: path to a real edk2/AAVMF `-pflash` CODE volume (e.g.
 //! `/opt/homebrew/share/qemu/edk2-aarch64-code.fd`). Writes the guest's
 //! pl011 byte count and the trap statistics to stderr, and every byte the
 //! guest wrote to `UARTDR` to stdout as raw bytes — `tests/edk2_boot.rs`

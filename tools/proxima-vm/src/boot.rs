@@ -17,7 +17,7 @@
 //! `[0, guest_memory_size)` accordingly. A real Linux aarch64 guest instead
 //! expects QEMU virt's own RAM base (`crate::dtb`'s module doc,
 //! `hw/arm/virt.c`'s memmap) — `0x4000_0000` — because that is the address
-//! its own devicetree (this module's own [`build_boot_dtb`]) advertises for
+//! its own devicetree ([`crate::dtb::build_minimal_aarch64_boot_dtb`]) advertises for
 //! `/memory`, and the arm64 boot protocol (`Documentation/arm64/booting`)
 //! requires the kernel `Image` to load at `RAM_base + text_offset`.
 //!
@@ -32,7 +32,7 @@
 //! blk windows (`dispatch_trampoline.h`'s `0x1000000000+`) sit far above
 //! this RAM window's own end instead. Every one of these ranges is disjoint
 //! from `[RAM_BASE, RAM_BASE + RAM_SIZE)` by construction — this module's
-//! own [`tests::ram_window_is_disjoint_from_every_fixed_mmio_window`] checks
+//! own `tests::ram_window_is_disjoint_from_every_fixed_mmio_window` checks
 //! it at compile time.
 //!
 //! # Tier
@@ -81,7 +81,7 @@ pub const DTB_OFFSET: u64 = 240 * 1024 * 1024;
 /// root filesystem) relative to [`RAM_BASE`] — clear of both the `Image`
 /// (this slice's own worked example never exceeds ~38 MiB) and, at the
 /// other end, [`DTB_OFFSET`] (this module's own
-/// [`tests::initrd_window_sits_between_the_image_ceiling_and_the_dtb`]
+/// `tests::initrd_window_sits_between_the_image_ceiling_and_the_dtb`
 /// checks both margins at compile time). The kernel reads `/chosen`'s
 /// `linux,initrd-start`/`linux,initrd-end` (`crate::dtb::write_chosen`) to
 /// find it, exactly the way it reads `bootargs` from the same node.
@@ -460,7 +460,7 @@ pub const FLASH_BASE: u64 = 0x0000_0000;
 /// shorter than this is still accepted (mapped at its own length); one
 /// longer is rejected, since it would run into [`crate::dtb::QemuVirtLayout::CANONICAL`]'s
 /// own `gicd_base` at `0x0800_0000` (this module's own
-/// [`tests::flash_window_is_disjoint_from_the_gic`] checks the boundary at
+/// `tests::flash_window_is_disjoint_from_the_gic` checks the boundary at
 /// compile time).
 pub const FLASH_CODE_MAX_SIZE: u64 = 64 * 1024 * 1024;
 

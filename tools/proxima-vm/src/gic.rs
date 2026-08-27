@@ -10,12 +10,12 @@
 //!
 //! # ID banking: GICD owns 32-255, GICR owns 0-31, no overlap and no gap
 //!
-//! GICv3 affinity routing splits [`NUM_INTERRUPT_IDS`] (256) architected IDs
+//! GICv3 affinity routing splits `NUM_INTERRUPT_IDS` (256) architected IDs
 //! across the two register blocks with no ID modeled twice and none
 //! unmodeled: [`GicDistributor`] holds real per-ID state for SPIs
-//! ([`SPI_BASE`]..[`NUM_INTERRUPT_IDS`], i.e. 32-255) and RAZ/WI's every
+//! (`SPI_BASE`..`NUM_INTERRUPT_IDS`, i.e. 32-255) and RAZ/WI's every
 //! register's "word 0" (the sub-range that would otherwise cover 0-31 —
-//! see [`GicDistributor::apply_group_bitmap`]'s doc). [`GicRedistributor`]
+//! see `GicDistributor::apply_group_bitmap`'s doc). [`GicRedistributor`]
 //! holds real per-ID state for exactly that banked-away range, SGIs (0-15)
 //! and PPIs (16-31), in its SGI_base frame. A guest probing ID 40 reads live
 //! state from the Distributor; a guest probing ID 5 reads live state from
@@ -76,7 +76,7 @@ const NUM_INTERRUPT_IDS: u32 = 256;
 /// Distributor (spec: GICD_ISENABLER0 and its siblings' "n=0 word" note).
 const SPI_BASE: u32 = 32;
 
-/// SPIs this GICD implements: [`NUM_INTERRUPT_IDS`] minus the SGI/PPI range.
+/// SPIs this GICD implements: `NUM_INTERRUPT_IDS` minus the SGI/PPI range.
 pub const SPI_COUNT: usize = (NUM_INTERRUPT_IDS - SPI_BASE) as usize;
 
 /// `GICD_TYPER.ITLinesNumber`: `N` such that the highest implemented SPI ID
@@ -189,7 +189,7 @@ pub enum GicdEffect {
 pub enum GicdError {
     /// No register this GICD implements exists at this offset — either a
     /// genuinely undefined offset, or an offset that would extend past
-    /// [`SPI_COUNT`] SPIs / [`IT_LINES_NUMBER`] words for this fixed-size
+    /// [`SPI_COUNT`] SPIs / `IT_LINES_NUMBER` words for this fixed-size
     /// GIC. Never silently RAZ/WI'd: an out-of-range probe is a bug worth
     /// surfacing, not hiding.
     UnknownRegister { offset: u64 },
@@ -840,7 +840,7 @@ pub enum GicrEffect {
     /// A `GICR_CTLR` write changed `EnableLPIs`.
     ControlUpdated { lpis_enabled: bool },
     /// A `GICR_WAKER` write changed the processor-sleep/children-asleep
-    /// state — see [`GicRedistributor::apply_waker`]'s worked-example doc
+    /// state — see `GicRedistributor::apply_waker`'s worked-example doc
     /// for the wake-up dance this models.
     WakerUpdated {
         processor_sleep: bool,
@@ -981,7 +981,7 @@ impl GicRedistributor {
 
     /// Apply one register access, returning the effect the caller must carry
     /// out. `access.offset` spans this Redistributor's whole combined
-    /// window (RD_base then SGI_base, [`RD_BASE_FRAME_SIZE`] apart) — the
+    /// window (RD_base then SGI_base, `RD_BASE_FRAME_SIZE` apart) — the
     /// same flattened addressing [`GicDistributor::apply`] uses for its own
     /// single window.
     pub fn apply(&mut self, access: GicAccess) -> Result<GicrEffect, GicrError> {
@@ -1471,7 +1471,7 @@ impl IccCpuInterface {
     }
 
     /// Records `intid` pending in this interface's one-deep slot
-    /// ([`InterruptState`]'s own doc names the scope). The HVF exit loop
+    /// (`InterruptState`'s own doc names the scope). The HVF exit loop
     /// calls this the instant `HV_EXIT_REASON_VTIMER_ACTIVATED` fires
     /// (`backend_macos.c`), before telling HVF the guest's IRQ line is
     /// asserted via `hv_vcpu_set_pending_interrupt`. Overwrites whatever was

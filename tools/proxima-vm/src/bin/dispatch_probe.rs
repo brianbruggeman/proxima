@@ -1,5 +1,5 @@
 //! Signed-subprocess probe for `dispatch::run_dispatch_loop`: reads the
-//! already-built `proxima-vm-guest-lambda` ELF (path supplied as argv[1] by
+//! already-built `proxima-vm-guest-lambda` ELF (path supplied as `argv[1]` by
 //! `tests/dispatch_hypercall.rs`, which builds it for
 //! `aarch64-unknown-none` before signing and running this probe), boots it
 //! against a real hypervisor, and drives its two `ChildRequest` hypercalls
@@ -8,8 +8,8 @@
 //! through a postcard decode, since they are the guest's own emitted-byte
 //! proof, not a `ChildResponse`.
 //!
-//! argv[2] selects the dispatcher's `configured_response` variant ("read"
-//! [default] or "close") — `tests/dispatch_hypercall.rs` runs this probe
+//! `argv[2]` selects the dispatcher's `configured_response` variant ("read"
+//! `[default]` or "close") — `tests/dispatch_hypercall.rs` runs this probe
 //! once per variant against the identical guest and asserts the guest's
 //! emitted bytes differ, proving the host's response (not a guest-compiled
 //! constant) decides what the guest emits.
