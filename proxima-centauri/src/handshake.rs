@@ -1,10 +1,10 @@
 //! The IKE-style SA_INIT handshake as a sans-IO state machine.
 //!
 //! X25519 key agreement, BLAKE3 key derivation, two messages. This is the
-//! handshake the relay runs today, rebuilt to the sans-IO contract: no
-//! clock, no entropy source, no key provider, no socket. The wire format and
-//! the derivation chain are byte-compatible with `csr-security`'s `IkeSa`,
-//! which is the behaviour oracle.
+//! handshake a production relay runs today, rebuilt to the sans-IO contract:
+//! no clock, no entropy source, no key provider, no socket. The wire format
+//! and the derivation chain are byte-compatible with that relay's own
+//! `IkeSa`, which is the behaviour oracle.
 //!
 //! # The contract every Centauri state machine shares
 //!
@@ -1312,7 +1312,6 @@ mod tests {
     use core::fmt::Write;
 
     use proxima_clock::ticks::Ticks;
-    use rstest::rstest;
 
     use super::{
         AUTH_MAX_LEN, DH_LEN, EPHEMERAL_CONTEXT, HEADER_LEN, Handshake, IkeSpi, MESSAGE_LEN,
@@ -2202,16 +2201,11 @@ mod tests {
         ],
     ];
 
-    // `#[rstest]` rather than `#[proxima::test]`: the latter requires an
-    // `async fn`, and nothing here awaits. rust.md reserves `#[proxima::test]`
-    // for async or parameterized-async tests and lets plain sync ones stay
-    // ordinary — `proxima-core`'s histogram cases are the in-repo precedent
-    // for sync parameterisation.
-    #[rstest]
+    #[proxima::test]
     #[case::all_zero(LOW_ORDER_POINTS[0])]
     #[case::order_one(LOW_ORDER_POINTS[1])]
     #[case::order_eight(LOW_ORDER_POINTS[2])]
-    fn a_low_order_dh_value_is_refused_by_the_responder(#[case] point: [u8; 32]) {
+    async fn a_low_order_dh_value_is_refused_by_the_responder(#[case] point: [u8; 32]) {
         // an active attacker substituting the peer's DH value would otherwise
         // get an ephemeral that contributes nothing: key secrecy would still
         // rest on the PSK, but forward secrecy would be gone silently.
