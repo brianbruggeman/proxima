@@ -1,13 +1,22 @@
+# excluded from the host workspace (`Cargo.toml`'s `workspace.exclude`) since
+# this is a bare no_std, no_alloc aarch64-unknown-none binary that a plain
+# `cargo build --workspace` on the host cannot compile; the empty table below
+# makes this its own workspace root, as cargo itself suggests for an excluded
+# path that has no in-tree workspace of its own.
+[workspace]
+
 [package]
 name = "proxima-vm-guest-lambda"
 description = "bare no_std, no_alloc guest binary proxima-vm's ELF loader boots: fixed-address entry point, no hypercall ABI wired yet"
-version.workspace = true
-edition.workspace = true
-rust-version.workspace = true
-license.workspace = true
-repository.workspace = true
-homepage.workspace = true
-readme.workspace = true
+# this crate is its own workspace root (see [workspace] above), so it cannot
+# inherit `workspace.package` from the host root Cargo.toml; these mirror
+# that root's values verbatim and must be kept in sync by hand.
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.96"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/brianbruggeman/proxima"
+homepage = "https://github.com/brianbruggeman/proxima"
 publish = false
 
 [[bin]]
@@ -38,5 +47,11 @@ path = "src/bin/gic_probe.rs"
 name = "proxima-vm-guest-lambda-pl011"
 path = "src/bin/pl011_probe.rs"
 
-[lints]
-workspace = true
+# mirrors the host workspace's [workspace.lints] (see root Cargo.toml);
+# `workspace = true` is unavailable since this crate is its own workspace root
+[lints.rust]
+warnings = "deny"
+
+[lints.clippy]
+unwrap_used = "deny"
+expect_used = "deny"
