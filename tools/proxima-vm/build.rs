@@ -7,6 +7,7 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     println!("cargo:rerun-if-changed=src/backend_linux.c");
     println!("cargo:rerun-if-changed=src/backend_macos.c");
+    println!("cargo:rerun-if-changed=src/probe_cow.h");
 
     match (target_os.as_str(), target_arch.as_str()) {
         ("linux", "x86_64") => {

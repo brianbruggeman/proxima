@@ -126,16 +126,12 @@ mod tests {
 
     use super::*;
 
-    /// `ChildRequest::Read { path: "/etc/hostname", max_bytes: 256, offset: 0 }`,
-    /// postcard-encoded, byte-for-byte the buffer `src/dispatch.rs:124-138`'s
-    /// `wire_format_round_trips_for_parity` pins as `expected` — the same
-    /// pinned bytes `guests/lambda/src/main.rs`'s
-    /// `CHILD_REQUEST_READ_WIRE_BYTES` carries onto the guest side of this
-    /// same channel.
-    const CHILD_REQUEST_READ_WIRE_BYTES: [u8; 18] = [
-        0x00, 13, b'/', b'e', b't', b'c', b'/', b'h', b'o', b's', b't', b'n', b'a', b'm', b'e',
-        0x80, 0x02, 0x00,
-    ];
+    /// `ChildRequest::Read { handle: 0, max_bytes: 256, offset: 0 }`,
+    /// postcard-encoded — fd-keyed post-P0 (`tools/proxima-vm/ROADMAP.md`
+    /// P0), byte-for-byte the same pinned bytes
+    /// `guests/lambda/src/main.rs`'s `CHILD_REQUEST_READ_WIRE_BYTES`
+    /// carries onto the guest side of this same channel.
+    const CHILD_REQUEST_READ_WIRE_BYTES: [u8; 5] = [0x00, 0x00, 0x80, 0x02, 0x00];
 
     /// Postcard variant discriminant for `ChildRequest::Read`, reused as the
     /// hypercall verb — matches `guests/lambda/src/main.rs`'s
@@ -172,7 +168,8 @@ mod tests {
     fn decodes_a_zero_length_payload_at_the_end_of_memory() {
         let memory = [0_u8; 8];
 
-        let view = decode_hypercall(1, 8, 0, &memory).expect("zero-length payload at the boundary is in range");
+        let view = decode_hypercall(1, 8, 0, &memory)
+            .expect("zero-length payload at the boundary is in range");
 
         assert_eq!(view.verb(), 1);
         assert!(view.payload().is_empty());
@@ -183,7 +180,8 @@ mod tests {
         let memory = guest_memory_with_pinned_request_at(4);
         let out_of_range_length = (memory.len() - 4 + 1) as u64;
 
-        let error = decode_hypercall(CHILD_REQUEST_READ_VERB, 4, out_of_range_length, &memory).unwrap_err();
+        let error =
+            decode_hypercall(CHILD_REQUEST_READ_VERB, 4, out_of_range_length, &memory).unwrap_err();
 
         assert_eq!(
             error,

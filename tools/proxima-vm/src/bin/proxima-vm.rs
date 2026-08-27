@@ -1,17 +1,11 @@
 //! `proxima-vm run <path-to-elf>` -- reads a guest ELF from disk, validates
-//! and maps its `PT_LOAD` segments into a real hypervisor guest address
-//! space via [`elf::parse_elf`] and [`GuestMemory::map`], then drives the
-//! S9 hypercall trampoline ([`dispatch::run_hypercall_guest`]) and writes
-//! the response bytes it emits to stdout.
-//!
-//! The trampoline run below exercises the same synthesized single-hypercall
-//! guest `dispatch_probe.rs` already proves against a real hypervisor --
-//! `run_hypercall_guest` has no API yet to execute the segments this
-//! command just mapped; wiring a vCPU to the real loaded guest and driving
-//! its own hypercalls is a later milestone step named in
-//! `tools/proxima-vm/ROADMAP.md`'s M1 section. What this command proves
-//! today is real: an arbitrary guest ELF the loader has never seen parses
-//! and maps end to end against a live hypervisor.
+//! its `PT_LOAD` segments via [`elf::parse_elf`], then drives it against a
+//! real hypervisor guest through [`dispatch::run_dispatch_loop`]: every
+//! `hvc #0` / `out dx, al` the guest issues is a real VM exit
+//! (`src/backend_macos.c`'s / `src/backend_linux.c`'s
+//! `proxima_vm_run_dispatch_loop`), not a synthesized in-memory dispatch.
+//! Writes the guest's emitted bytes to stdout and the recorded
+//! `ChildRequest`s to stderr.
 
 use std::env;
 use std::error::Error;
@@ -19,9 +13,8 @@ use std::fs;
 use std::io::{self, Write};
 
 use proxima_protocols::process::{ChildResponse, ReadResponse};
-use proxima_vm::dispatch::{self, RecordingDispatcher};
+use proxima_vm::dispatch;
 use proxima_vm::elf;
-use proxima_vm::loader::GuestMemory;
 
 /// Largest segment count any lambda guest built so far links -- `.text`,
 /// `.rodata`, `.data` -- with headroom, matching `elf.rs`'s own guidance
@@ -30,21 +23,15 @@ use proxima_vm::loader::GuestMemory;
 /// milestone would give the same concept two configuration surfaces.
 const MAX_SEGMENTS: usize = 4;
 
-/// Postcard variant discriminant for `ChildRequest::Read`, reused as the
-/// hypercall verb -- matches `dispatch.rs`'s and `dispatch_probe.rs`'s
-/// constant of the same name.
-const CHILD_REQUEST_READ_VERB: u16 = 0x00;
+/// Upper bound on hypercalls a single `run` drives before the loop reports
+/// a runaway guest instead of hanging the host.
+const MAX_HYPERCALLS: usize = 16;
 
-/// `ChildRequest::Read { path: "/etc/hostname", max_bytes: 256, offset: 0 }`,
-/// postcard-encoded -- byte-for-byte the payload the M1 lambda guest's
-/// `_start` issues (`guests/lambda/src/main.rs`'s
-/// `CHILD_REQUEST_READ_WIRE_BYTES`) and `dispatch_probe.rs` drives.
-const CHILD_REQUEST_READ_WIRE_BYTES: [u8; 18] = [
-    0x00, 13, b'/', b'e', b't', b'c', b'/', b'h', b'o', b's', b't', b'n', b'a', b'm', b'e', 0x80,
-    0x02, 0x00,
-];
-
-const RESPONSE_CAPACITY: usize = 256;
+const EMITTED_CAPACITY: usize = 256;
+const MMIO_EMITTED_CAPACITY: usize = 256;
+const NET_EMITTED_CAPACITY: usize = 256;
+const BLK_EMITTED_CAPACITY: usize = 2048;
+const PL011_EMITTED_CAPACITY: usize = 256;
 
 fn main() -> Result<(), Box<dyn Error>> {
     let mut arguments = env::args().skip(1);
@@ -64,24 +51,54 @@ fn run(path: &str) -> Result<(), Box<dyn Error>> {
         segments.len()
     );
 
-    let guest_memory = GuestMemory::<MAX_SEGMENTS>::map(&segments)?;
-    eprintln!(
-        "mapped {} segment(s) into guest memory",
-        guest_memory.segment_count()
-    );
-
     let configured = ChildResponse::Read(ReadResponse {
         bytes: b"vm-side-canned".to_vec(),
         eof: true,
     });
-    let dispatcher = RecordingDispatcher::new(configured);
-    let response = dispatch::run_hypercall_guest(
-        &dispatcher,
-        CHILD_REQUEST_READ_VERB,
-        &CHILD_REQUEST_READ_WIRE_BYTES,
-        RESPONSE_CAPACITY,
+    let (
+        requests,
+        emitted,
+        mmio_emitted,
+        net_emitted,
+        blk_emitted,
+        pl011_emitted,
+        create_to_first_exit_nanos,
+        touch_all_pages_nanos,
+        mmio_trap_count,
+    ) = dispatch::run_dispatch_loop(
+        entry,
+        &segments,
+        configured,
+        MAX_HYPERCALLS,
+        EMITTED_CAPACITY,
+        MMIO_EMITTED_CAPACITY,
+        NET_EMITTED_CAPACITY,
+        BLK_EMITTED_CAPACITY,
+        PL011_EMITTED_CAPACITY,
+        dispatch::GUEST_MEMORY_SIZE,
     )?;
 
-    io::stdout().write_all(&response)?;
+    eprintln!("guest issued {} request(s): {requests:?}", requests.len());
+    eprintln!(
+        "guest drained {} mmio byte(s): {mmio_emitted:?}",
+        mmio_emitted.len()
+    );
+    eprintln!(
+        "guest drained {} net byte(s): {net_emitted:?}",
+        net_emitted.len()
+    );
+    eprintln!(
+        "guest drained {} blk byte(s): {blk_emitted:?}",
+        blk_emitted.len()
+    );
+    eprintln!(
+        "guest drained {} pl011 byte(s): {pl011_emitted:?}",
+        pl011_emitted.len()
+    );
+    eprintln!(
+        "m3 create_to_first_exit_nanos={create_to_first_exit_nanos} \
+         touch_all_pages_nanos={touch_all_pages_nanos} mmio_trap_count={mmio_trap_count}"
+    );
+    io::stdout().write_all(&emitted)?;
     Ok(())
 }
