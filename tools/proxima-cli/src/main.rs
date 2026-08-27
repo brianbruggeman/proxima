@@ -14,12 +14,12 @@ use proxima::{
     App, LoadContext, MetricsSnapshot, MountTarget, ProximaError, Request, RunConfig, Scenario,
     ScenarioReport, SendPipe, Spec, default_config_format_registry, load,
 };
+use proxima_telemetry::emit::{EnvFilter, global};
+use proxima_telemetry::error;
 use serde_json::Value;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UnixStream;
 use tokio::signal::unix::{SignalKind, signal};
-use tracing::error;
-use tracing_subscriber::EnvFilter;
 
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
@@ -312,12 +312,13 @@ fn parse_header(raw: &str) -> Result<(String, String), String> {
 
 #[proxima::main(runtime = "tokio", flavor = "multi_thread")]
 async fn main() -> ExitCode {
-    let filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| EnvFilter::new("warn,proxima=info,proxima_cli=info"));
-    tracing_subscriber::fmt()
-        .with_env_filter(filter)
-        .with_target(false)
-        .init();
+    let directive = std::env::var("RUST_LOG")
+        .unwrap_or_else(|_| "warn,proxima=info,proxima_cli=info".to_string());
+    global::install(EnvFilter::parse(&directive));
+    let Ok(_recorder) = proxima::init_telemetry() else {
+        eprintln!("proxima: failed to install console telemetry");
+        return ExitCode::from(1);
+    };
 
     let cli = Cli::parse();
     // Verify owns its exit code semantics (0/1/2); other commands map

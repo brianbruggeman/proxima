@@ -211,7 +211,7 @@ async fn serve_legacy(
     pipe: AcceptHandle,
     label: String,
     mut shutdown: oneshot::Receiver<()>,
-    ready_signal: Option<std::sync::mpsc::Sender<()>>,
+    ready_signal: Option<proxima_listen::ReadySignal>,
 ) -> Result<(), ProximaError> {
     use proxima_net::tokio::tokio_stream_listener::TokioTcpListener;
     use proxima_primitives::stream::StreamListenerExt;
@@ -220,7 +220,7 @@ async fn serve_legacy(
         ProximaError::Io(io::Error::other(format!("{label} bind {bind}: {error}")))
     })?;
     if let Some(sender) = ready_signal {
-        let _ = sender.send(());
+        let _ = sender.send(Ok(()));
     }
     debug!(label = %label, %bind, "pgwire listener bound (legacy tokio)");
     loop {
@@ -251,7 +251,7 @@ async fn serve_legacy(
     _pipe: AcceptHandle,
     label: String,
     _shutdown: oneshot::Receiver<()>,
-    _ready_signal: Option<std::sync::mpsc::Sender<()>>,
+    _ready_signal: Option<proxima_listen::ReadySignal>,
 ) -> Result<(), ProximaError> {
     Err(ProximaError::Config(format!(
         "{label}: pgwire listener needs a runtime-matched acceptor factory \

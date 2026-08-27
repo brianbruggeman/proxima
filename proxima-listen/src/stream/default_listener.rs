@@ -138,13 +138,13 @@ async fn serve_via_factory(
     chunk_bytes: usize,
     label: String,
     mut shutdown: oneshot::Receiver<()>,
-    ready_signal: Option<std::sync::mpsc::Sender<()>>,
+    ready_signal: Option<crate::ReadySignal>,
     runtime: Option<Arc<dyn Runtime>>,
 ) -> Result<(), ProximaError> {
     let options = proxima_primitives::stream::TcpBindOptions::default();
     let mut acceptor = factory.bind(bind, options).map_err(ProximaError::Io)?;
     if let Some(sender) = ready_signal {
-        let _ = sender.send(());
+        let _ = sender.send(Ok(()));
     }
     debug!(label = %label, %bind, "stream listener bound (factory)");
     let mut core = ListenerCore::new(DispatchPolicy::Inline);

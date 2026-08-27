@@ -501,7 +501,6 @@ fn combine_unix_nanos(lo: u64, hi: u64, negative: bool) -> i128 {
 mod tests {
     use super::*;
     use bytes::Bytes;
-    use rstest::rstest;
     // tests only run under the std tier (cargo nextest run); PathBuf isn't
     // available on the alloc-only no_std target, so it stays local to here
     // rather than becoming a crate-wide alloc-tier import.
@@ -534,7 +533,7 @@ mod tests {
         }
     }
 
-    #[rstest]
+    #[proxima::test]
     #[case::http_started(envelope(make_id(), 0, ProtocolEvent::Http(HttpEvent::Started {
         ts: OffsetDateTime::UNIX_EPOCH,
         pipe: "echo".into(),
@@ -581,7 +580,7 @@ mod tests {
         kind: "redis".into(),
         payload: serde_json::json!({"cmd": "GET", "key": "x"}),
     }))]
-    fn round_trips_through_postcard(#[case] event: RecordingEvent) {
+    async fn round_trips_through_postcard(#[case] event: RecordingEvent) {
         let envelope = event_to_bin(event.clone());
         let bytes = postcard::to_allocvec(&envelope).expect("encode postcard");
         let parsed: BinEnvelope = postcard::from_bytes(&bytes).expect("parse postcard");

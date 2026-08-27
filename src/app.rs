@@ -929,7 +929,8 @@ impl App {
         // listening yet — block on one ack from the serve future's real
         // bind/listen so a caller dialing immediately after this returns
         // never sees ECONNREFUSED.
-        let (ready_tx, ready_rx) = std::sync::mpsc::channel::<()>();
+        let (ready_tx, ready_rx) = std::sync::mpsc::channel::<Result<(), ProximaError>>();
+        let ready_tx_for_outcome = ready_tx.clone();
         // ship a Send factory cross-core; serve future is constructed on the
         // target worker (where it can spawn_local `?Send` connection futures).
         // setup-time spawn: surface failure to the caller rather than
@@ -953,6 +954,7 @@ impl App {
                             .await
                         {
                             warn!(?error, %bind, "listener exited with error");
+                            let _ = ready_tx_for_outcome.send(Err(error));
                         }
                         drain_notify_for_factory.notify_waiters();
                     })
@@ -963,14 +965,18 @@ impl App {
                     "listener spawn on core 0 failed: {err}"
                 ))
             })?;
-        if ready_rx
-            .recv_timeout(proxima_listen::handle::LISTENER_READY_TIMEOUT)
-            .is_err()
-        {
-            return Err(crate::error::ProximaError::Config(format!(
-                "listener did not become ready within {:?}",
-                proxima_listen::handle::LISTENER_READY_TIMEOUT
-            )));
+        match ready_rx.recv_timeout(proxima_listen::handle::LISTENER_READY_TIMEOUT) {
+            Ok(Ok(())) => {}
+            // real startup failure (bind permission, port-in-use, missing
+            // feature, …) — surface the actual cause instead of masking it
+            // behind a timeout the caller has no way to diagnose.
+            Ok(Err(error)) => return Err(error),
+            Err(_) => {
+                return Err(crate::error::ProximaError::Config(format!(
+                    "listener did not become ready within {:?}",
+                    proxima_listen::handle::LISTENER_READY_TIMEOUT
+                )));
+            }
         }
         // Sources drive unconditionally once registered (TARGET 4) — every
         // `App::source(...)` entry gets spawned onto a fresh
@@ -1787,6 +1793,8 @@ impl SendPipe for RouterDispatch {
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
+    use std::pin::Pin;
+
     use super::*;
     use serde_json::json;
 
@@ -2063,6 +2071,70 @@ mod tests {
         // "echo-cached" is the observable behavior.
         assert!(app.lookup_pipe("echo-cached").is_some());
         let _ = &handle;
+    }
+
+    /// Fake protocol whose `serve` fails immediately with a distinctive,
+    /// known cause — WITHOUT ever touching `ServeContext::ready_signal`
+    /// (the same shape as a real startup failure: `AnyListenProtocol`'s
+    /// UDS branch, a bind-permission error, or a port already in use all
+    /// return `Err` before any readiness signal fires).
+    struct FailingListenProtocol;
+
+    impl proxima_listen::ListenProtocol for FailingListenProtocol {
+        fn name(&self) -> &str {
+            "failing-listen-protocol"
+        }
+
+        fn serve(
+            &self,
+            _bind: SocketAddr,
+            _dispatch: PipeHandle,
+            _spec: &Value,
+            _context: proxima_listen::ServeContext,
+            _shutdown: oneshot::Receiver<()>,
+        ) -> Pin<Box<dyn Future<Output = Result<(), ProximaError>> + Send + '_>> {
+            Box::pin(async move {
+                Err(ProximaError::Config(
+                    "synthetic startup failure: missing required feature `never-enabled`"
+                        .into(),
+                ))
+            })
+        }
+    }
+
+    // closes the class defect at `src/app.rs`'s `run_until_signal` readiness
+    // wait: before the fix, a `serve()` failure was `warn!`-logged and
+    // dropped, so this test would have timed out on `LISTENER_READY_TIMEOUT`
+    // (5s) and reported the generic "did not become ready" message instead
+    // of the real cause.
+    #[proxima::test]
+    async fn run_until_signal_surfaces_serve_startup_error_instead_of_timeout() {
+        let app = App::new().expect("app");
+        app.register_listen_protocol(Arc::new(FailingListenProtocol))
+            .expect("register");
+        let config = RunConfig {
+            bind: "127.0.0.1:0".parse().expect("addr"),
+            protocol: "failing-listen-protocol".into(),
+            spec: Value::Null,
+        };
+
+        let outcome = app.run_until_signal(config).await;
+
+        let error = match outcome {
+            Ok(_) => panic!("a listener whose serve() fails must not report success"),
+            Err(error) => error,
+        };
+        let message = error.to_string();
+        assert!(
+            message.contains("synthetic startup failure"),
+            "caller must see the actual startup cause, not a generic ready-timeout \
+             message; got: {message}"
+        );
+        assert!(
+            !message.contains("did not become ready"),
+            "a listener that failed BEFORE ever reporting ready must not present as \
+             a bare timeout; got: {message}"
+        );
     }
 
     // same condition as `default_runtime`/`runtime_cores`: this test asserts

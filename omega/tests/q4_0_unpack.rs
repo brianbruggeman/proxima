@@ -1,0 +1,137 @@
+//! The `Q4_0` unpack the GPU path needs, gated two ways -- mirrors
+//! `q8_0_unpack.rs` one codec over.
+//!
+//! `Q4_0` is a flat 32-element block with one `f16` scale and no sub-block
+//! structure at all -- genuinely different in KIND from `Q4_K`/`Q5_K`/
+//! `Q6_K`'s shared 256-element super-block, not a widening or narrowing of
+//! one (see [`omega::Q4_0_UNPACK_MSL`]'s own doc). llama.cpp's simplest and
+//! most widely distributed legacy 4-bit format -- no host-local checkpoint
+//! this repo has carries it (every real `.gguf` fixture on this host is
+//! `Q4_K_S`-quantized, which never emits `Q4_0`), so this file's bit-exact
+//! comparison is synthetic-only; see this landing's task report for the
+//! search that established that.
+//!
+//! Two claims, tested separately because they fail separately:
+//!
+//! 1. the MSL is valid MSL — assembled by the real `xcrun metal` toolchain,
+//!    never "looks like MSL". A missing toolchain is a RED gate, not a skip.
+//! 2. the index arithmetic that MSL encodes is the arithmetic
+//!    `proxima_gguf::quant::q4_0::dequantize_block` performs — bit-exact
+//!    against that codec over randomized blocks.
+
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+
+use std::process::Command;
+
+use proxima_gguf::quant::q4_0;
+use proxima_tensor::test_support::Lcg;
+
+/// A `Q4_0` block with plausible field values: `d` is a real `f16` in the
+/// range a trained checkpoint carries, and every nibble spans the full 4-bit
+/// range. An all-zero fixture would pass under an index bug (every level
+/// would decode to nibble 0 regardless of which byte/half a wrong index
+/// read).
+fn random_block(seed: u64) -> Vec<u8> {
+    let mut lcg = Lcg(seed);
+    let mut block = vec![0u8; omega::Q4_0_BLOCK_BYTES];
+
+    let scale = half::f16::from_f32(0.01 + lcg.next_unit() * 0.05);
+    block[0..2].copy_from_slice(&scale.to_le_bytes());
+    for byte in &mut block[2..2 + omega::Q4_0_BLOCK_ELEMENTS / 2] {
+        let low = ((lcg.next_unit() * 16.0) as u8).min(15);
+        let high = ((lcg.next_unit() * 16.0) as u8).min(15);
+        *byte = low | (high << 4);
+    }
+    block
+}
+
+/// The Rust twin of `q4_0_element` in [`omega::Q4_0_UNPACK_MSL`] -- the same
+/// index arithmetic, transcribed. Kept beside the MSL so a change to one
+/// that is not mirrored in the other fails this file.
+fn q4_0_element_host(block: &[u8], index: usize) -> f32 {
+    let d = f32::from(half::f16::from_le_bytes([block[0], block[1]]));
+    let byte = block[2 + (index % 16)];
+    let nibble = if index < 16 { byte & 0x0F } else { byte >> 4 };
+    (i32::from(nibble) - 8) as f32 * d
+}
+
+#[test]
+fn q4_0_unpack_index_arithmetic_matches_the_gguf_codec_bit_exactly() {
+    let mut compared = 0usize;
+    for seed in 1..=16u64 {
+        let block = random_block(seed);
+        let mut expected = vec![0.0f32; omega::Q4_0_BLOCK_ELEMENTS];
+        q4_0::dequantize_block(&block, &mut expected);
+
+        for (index, reference) in expected.iter().enumerate() {
+            let ours = q4_0_element_host(&block, index);
+            assert_eq!(
+                ours.to_bits(),
+                reference.to_bits(),
+                "seed {seed} element {index}: unpack {ours} vs codec {reference}"
+            );
+            compared += 1;
+        }
+    }
+    assert_eq!(
+        compared,
+        16 * omega::Q4_0_BLOCK_ELEMENTS,
+        "degenerate gate: every element of every block must be compared"
+    );
+}
+
+/// `Q4_0` has no sub-block scale/min pair at all, unlike every K-quant --
+/// pinned directly so a "simplification" that reuses `q4k_scale_min`-style
+/// machinery fails with a name that says what broke.
+#[test]
+fn q4_0_has_no_sub_block_structure() {
+    let mut block = vec![0u8; omega::Q4_0_BLOCK_BYTES];
+    block[0..2].copy_from_slice(&half::f16::from_f32(2.0).to_le_bytes());
+    block[2] = 3u8; // low nibble 3, high nibble 0
+
+    // element 0: (3 - 8) * 2.0 = -10.0, with NOTHING else read -- no
+    // scale/min sub-block byte exists to get this wrong by construction.
+    assert_eq!(q4_0_element_host(&block, 0), -10.0);
+    // element 16 (this byte's HIGH nibble): (0 - 8) * 2.0 = -16.0.
+    assert_eq!(q4_0_element_host(&block, 16), -16.0);
+}
+
+#[test]
+fn q4_0_unpack_msl_assembles_with_the_real_metal_toolchain() {
+    let source = format!(
+        "#include <metal_stdlib>\nusing namespace metal;\n{}\nkernel void q4_0_unpack_probe(\n    device const uchar *block [[buffer(0)]],\n    device float *out [[buffer(1)]],\n    uint gid [[thread_position_in_grid]]) {{\n    out[gid] = q4_0_element(block, gid);\n}}\n",
+        omega::Q4_0_UNPACK_MSL
+    );
+
+    let dir = tempfile::tempdir().expect("temp dir for the metal source");
+    let metal_path = dir.path().join("q4_0_unpack.metal");
+    std::fs::write(&metal_path, &source).expect("write metal source");
+
+    let output = Command::new("xcrun")
+        .args(["-sdk", "macosx", "metal", "-c"])
+        .arg(&metal_path)
+        .arg("-o")
+        .arg(dir.path().join("q4_0_unpack.air"))
+        .output()
+        .unwrap_or_else(|error| {
+            panic!(
+                "metal toolchain unavailable ({error}) -- this is a red gate, not a skip; \
+                 install the Xcode command line tools"
+            )
+        });
+
+    assert!(
+        output.status.success(),
+        "metal compile failed:\n--- source ---\n{}\n--- stderr ---\n{}",
+        source,
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+/// omega restates `Q4_0`'s block geometry rather than depending on
+/// `proxima-gguf` at build time. That is only safe if the two agree.
+#[test]
+fn q4_0_block_geometry_matches_the_gguf_codec() {
+    assert_eq!(omega::Q4_0_BLOCK_BYTES, q4_0::BLOCK_BYTES);
+    assert_eq!(omega::Q4_0_BLOCK_ELEMENTS, q4_0::QK4_0);
+}

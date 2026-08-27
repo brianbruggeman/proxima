@@ -56,6 +56,7 @@ use proxima::pipe::PipeHandle;
 use proxima::request::{Request, RequestContext, Response};
 use proxima_primitives::pipe::Method as ProximaMethod;
 use proxima_primitives::pipe::SendPipe;
+use proxima_telemetry::warn;
 
 type HandlerFuture = Pin<Box<dyn std::future::Future<Output = Result<(), ProximaError>> + Send>>;
 
@@ -108,7 +109,7 @@ where
             }
             Some(handler_outcome) = in_flight_handlers.next(), if !in_flight_handlers.is_empty() => {
                 if let Err(error) = handler_outcome {
-                    tracing::warn!(?error, "h2 stream error");
+                    warn!(?error, "h2 stream error");
                 }
                 in_flight.fetch_sub(1, Ordering::Relaxed);
             }
@@ -118,7 +119,7 @@ where
     // frames they enqueued get a chance to flush.
     while let Some(handler_outcome) = in_flight_handlers.next().await {
         if let Err(error) = handler_outcome {
-            tracing::warn!(?error, "h2 stream drain error");
+            warn!(?error, "h2 stream drain error");
         }
         in_flight.fetch_sub(1, Ordering::Relaxed);
     }

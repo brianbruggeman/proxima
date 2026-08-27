@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # produces a per-workload absolute-perf coverage map for proxima across every
 # bench category. comparison vs alternative implementations lives in
-# bench-vs-{hyper,pingora,rayon}. runtime variance lives in bench-proxima-runtimes.
+# bench-vs-{hyper,pingora,rayon,ggml}. runtime variance lives in bench-proxima-runtimes.
 #
 # usage: scripts/bench-proxima.sh
 #
@@ -50,17 +50,12 @@ run_bench() {
   printf -- '--- %s / %s%s ---\n' "$category" "$bench_name" "${filter:+ (filter: $filter)}"
 
   if [[ -n "$filter" ]]; then
-    cargo bench \
-      --no-default-features \
-      --features "$FEATURES" \
-      --bench "$bench_name" \
-      -- "$filter" 2>&1 | tee "${LOGS_DIR}/${bench_name}.log" || true
+    run_bench_logged "$bench_name" "${LOGS_DIR}/${bench_name}.log" \
+      cargo bench --no-default-features --features "$FEATURES" --bench "$bench_name" \
+      -- "$filter"
   else
-    cargo bench \
-      --no-default-features \
-      --features "$FEATURES" \
-      --bench "$bench_name" \
-      2>&1 | tee "${LOGS_DIR}/${bench_name}.log" || true
+    run_bench_logged "$bench_name" "${LOGS_DIR}/${bench_name}.log" \
+      cargo bench --no-default-features --features "$FEATURES" --bench "$bench_name"
   fi
 
   # walk criterion output for this bench and emit table rows
@@ -222,3 +217,5 @@ done
 
 printf '\n---\nRun completed: %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" >> "$RESULTS"
 printf 'bench-proxima complete. results: %s\n' "$RESULTS"
+
+report_bench_failures

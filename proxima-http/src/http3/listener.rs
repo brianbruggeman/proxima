@@ -81,7 +81,7 @@ impl ListenProtocol for H3ListenProtocol {
         };
         debug!(?bind, local = ?endpoint.local_addr(), "h3 listener bound");
         if let Some(sender) = context.ready_signal.clone() {
-            let _ = sender.send(());
+            let _ = sender.send(Ok(()));
         }
         let runtime_for_conns = context.runtime.clone();
 

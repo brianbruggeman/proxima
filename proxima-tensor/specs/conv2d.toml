@@ -1,0 +1,65 @@
+# A real 2D convolution: 1 input channel, 2 output channels, a 3x3 kernel,
+# stride 1, padding 1 ("SAME" — output spatial size equals input spatial
+# size). `Conv` is `Reduce(Add)` over `Elementwise(Multiply)`, exactly like
+# `matmul` in this file's own doc, with one twist: the image's spatial axis
+# is windowed by a *two-term* affine expression (`h+y`, `w+x` — the stride
+# and dilation terms `map.rs`'s `a_convolution_axis_is_two_terms` unit test
+# exists to prove), where a bare single-letter run cannot reach it. That is
+# `spec.rs`'s `Reduce::in_map` change this file exists to exercise: routing
+# `in_map` through the same comma-aware parser `Elementwise` operands already
+# use.
+#
+# Padding is materialized in `image`'s own data rather than folded into a
+# negative `offset`: an iteration axis always starts at 0
+# (`bind`/`shape::unify_iteration_space` give no axis a nonzero origin), so
+# for the corner iteration point `h=0, y=0` a negative offset evaluates to
+# exactly that negative value — always out of bounds against an *unpadded*
+# buffer, regardless of how large the output axis is chosen to be. This was
+# verified empirically (`shape::infer` rejects it with `IndexOutOfBounds`),
+# not assumed. `image` is therefore declared here at its already-padded 7x7
+# extent (a 5x5 image plus a 1-pixel zero border the caller supplies), which
+# is the same "pad, then convolve `VALID`" decomposition ONNX/XLA backends
+# use — `offset` in the resulting `AxisIndex` is 0, but the axis still sums
+# two terms (`coeff=1` stride, `coeff=1` dilation), which is the structural
+# claim this file demonstrates.
+#
+# `kernel` is declared at `[2, 5, 5, 3, 3]` (`co, ho, wo, kh, kw`), not
+# ONNX's position-independent `[co, kh, kw]`: `image`'s spatial axes are both
+# consumed by the two-term window expression, so — exactly the reason
+# `rope.toml`'s header gives for `cos`/`sin` — neither `ho` nor `wo` is a
+# pure single-term projection anywhere in this node, and nothing else here
+# constrains their extent. `kernel`'s bare `chwyx->chwyx` map is the sibling
+# operand that fixes it, at the cost of replicating each of the 18 real
+# kernel weights across all 25 output positions before this graph is called.
+
+[[node]]
+op = "input"
+id = "image"
+dtype = "float32"
+shape = [7, 7]
+
+[[node]]
+op = "input"
+id = "kernel"
+dtype = "float32"
+shape = [2, 5, 5, 3, 3]
+
+[[node]]
+op = "elementwise"
+id = "product"
+dtype = "float32"
+body = "multiply"
+inputs = ["image", "kernel"]
+maps = ["h+y,w+x->chwyx", "chwyx->chwyx"]
+
+[[node]]
+op = "reduce"
+id = "output"
+dtype = "float32"
+body = "add"
+init = "zero"
+input = "product"
+in_map = "chwyx->chwyx"
+out_map = "chw->chwyx"
+keep = "reduce"
+name = "conv2d"

@@ -124,7 +124,7 @@ async fn accept_and_drive(
 /// `ApiVersions` is answered protocol-level and never reaches the
 /// handler pipe — mirrors the deleted `connection.rs`'s
 /// `api_versions_is_answered_protocol_level_without_reaching_the_handler`.
-#[tokio::test]
+#[proxima::test(runtime = "tokio")]
 async fn api_versions_is_answered_without_reaching_the_handler() {
     let (listener, addr) = bind_loopback().await;
     let protocol = KafkaAnyProtocol::new("kafka", handler_that_must_not_be_called());
@@ -152,7 +152,7 @@ async fn api_versions_is_answered_without_reaching_the_handler() {
 
 /// A well-formed Produce request reaches the handler pipe and its reply
 /// rides back under the same `correlation_id`.
-#[tokio::test]
+#[proxima::test(runtime = "tokio")]
 async fn a_produce_request_reaches_the_handler_and_replies() {
     let (listener, addr) = bind_loopback().await;
     let protocol = KafkaAnyProtocol::new("kafka", echo_produce_handler());
@@ -179,7 +179,7 @@ async fn a_produce_request_reaches_the_handler_and_replies() {
 /// well-formed, data-free reply under the request's own `correlation_id`
 /// WITHOUT reaching the handler — mirrors the deleted `connection.rs`'s
 /// `unsupported_version_gets_a_well_formed_empty_reply_not_a_dropped_connection`.
-#[tokio::test]
+#[proxima::test(runtime = "tokio")]
 async fn unsupported_version_replies_without_reaching_the_handler() {
     let (listener, addr) = bind_loopback().await;
     let protocol = KafkaAnyProtocol::new("kafka", handler_that_must_not_be_called());
@@ -207,7 +207,7 @@ async fn unsupported_version_replies_without_reaching_the_handler() {
 /// `api_version`/`correlation_id`/`client_id`) has no trustworthy
 /// `correlation_id` to answer against — the connection closes with no
 /// reply at all, mirroring the deleted `Advanced::ProtocolError` arm.
-#[tokio::test]
+#[proxima::test(runtime = "tokio")]
 async fn a_malformed_header_closes_the_connection_with_no_reply() {
     let (listener, addr) = bind_loopback().await;
     let protocol = KafkaAnyProtocol::new("kafka", handler_that_must_not_be_called());
@@ -234,7 +234,7 @@ async fn a_malformed_header_closes_the_connection_with_no_reply() {
 /// A still-incomplete frame whose declared size already exceeds the
 /// configured cap closes with no reply (there is no complete header yet
 /// to answer against) — mirrors the deleted `Advanced::MessageTooLarge`.
-#[tokio::test]
+#[proxima::test(runtime = "tokio")]
 async fn an_oversized_declared_frame_closes_with_no_reply() {
     let (listener, addr) = bind_loopback().await;
     let config = KafkaServerConfig::builder().max_message_bytes(10).build();
@@ -266,7 +266,7 @@ async fn an_oversized_declared_frame_closes_with_no_reply() {
 /// generic `AdmittedApp` checks admission on EVERY frame uniformly, so a
 /// handler that would panic if ever called proves the shed path never
 /// dispatched to it.
-#[tokio::test]
+#[proxima::test(runtime = "tokio")]
 async fn a_business_request_is_shed_with_an_empty_reply_while_admission_is_quiescing() {
     let (listener, addr) = bind_loopback().await;
     let protocol = KafkaAnyProtocol::new("kafka", handler_that_must_not_be_called());
@@ -292,7 +292,7 @@ async fn a_business_request_is_shed_with_an_empty_reply_while_admission_is_quies
 /// driver's own admission check ran only AFTER `ApiVersions` had already
 /// short-circuited to its answer, so it was never actually sheddable;
 /// `KafkaFramedApp`'s `shed_reply` reproduces that exemption.
-#[tokio::test]
+#[proxima::test(runtime = "tokio")]
 async fn api_versions_bypasses_admission_shedding() {
     let (listener, addr) = bind_loopback().await;
     let protocol = KafkaAnyProtocol::new("kafka", handler_that_must_not_be_called());

@@ -7,18 +7,18 @@
 //!
 //! [`execute`] mirrors [`proxima_tensor::cpu::evaluate`]'s semantics
 //! exactly, over the same public API that function itself is built from:
-//! [`proxima_tensor::infer`] resolves shapes and symbols, [`proxima_tensor::lower`]
-//! produces the flat [`Nest`] sequence (with `Fold(Zip)` fusion already
+//! [`proxima_tensor::infer`] resolves shapes and symbols, [`proxima_tensor::bind`]
+//! produces the flat [`BoundOp`] sequence (with `Reduce(Elementwise)` fusion already
 //! decided), and per-nest buffer retirement is recomputed from that sequence
-//! the same way `cpu::evaluate`'s own `nest_retirement` does — a node's
+//! the same way `cpu::evaluate`'s own `bound_op_retirement` does — a node's
 //! device buffer is freed the moment nothing later in the sequence reads it.
-//! What differs is only the last mile: instead of interpreting a `Nest` with
+//! What differs is only the last mile: instead of interpreting a `BoundOp` with
 //! nested loops, each one is emitted to MSL, compiled (or reused from cache),
 //! and dispatched.
 //!
 //! # Uniforms packing
 //!
-//! `msl.rs` never bakes a `Nest`'s concrete extents/strides/bases into
+//! `msl.rs` never bakes a `BoundOp`'s concrete extents/strides/bases into
 //! source text — they are read at kernel runtime out of a `constant
 //! Uniforms&` buffer whose MSL struct layout is rendered field-by-field in
 //! [`crate::msl::render_elementwise`], [`render_reduce`](crate::msl::render_reduce)
@@ -32,17 +32,46 @@
 //!
 //! # Execution model
 //!
-//! One `MTLCommandBuffer` per nest (correctness first, per the module's v1
-//! stance — batching multiple nests into one command buffer is a later
-//! optimization, not a correctness requirement). Every `MTLBuffer` is
-//! `storageModeShared`: on Apple Silicon's unified memory, that makes
-//! reading a result back a plain pointer read, no blit pass. Compiled
-//! `MTLLibrary`/`MTLComputePipelineState` pairs are cached by kernel source
-//! text within one [`execute`] call, since `msl.rs`'s own module doc proves
-//! two structurally-identical `Nest`s emit byte-identical source.
-//! `MTLCompileOptions::mathMode` is pinned to `Safe`, never the default —
-//! parity against the CPU interpreter demands IEEE behavior, not whatever
-//! Metal's fast-math would substitute.
+//! One `MTLCommandBuffer` per [`execute`] call, not per op: every `BoundOp`
+//! in the program is encoded — its own `MTLComputeCommandEncoder`, ended
+//! before the next op's encoder is opened — into that SAME command buffer,
+//! and only then is it `commit()`ted and `waitUntilCompleted()` exactly
+//! once, in [`execute`]. Every expression used to pay a full CPU<->GPU
+//! round trip; batching means only the genuine program outputs
+//! ([`finish`]'s `effective_outputs`) ever cross back to the host, and
+//! intermediates never do (they already didn't — `device_buffers` keeps
+//! them GPU-resident between ops; what changes here is that the CPU no
+//! longer blocks between ops either).
+//!
+//! Ordering is guaranteed, not assumed: a later op reading a buffer an
+//! earlier op wrote is correct because every buffer here comes from
+//! `device.newBuffer*` (see [`allocate_buffer`], [`upload_block`]) with
+//! `MTLResourceOptions::StorageModeShared` only — never
+//! `HazardTrackingModeUntracked` — and a buffer's `hazardTrackingMode` for
+//! any resource created directly from a device (as opposed to a heap)
+//! defaults to tracked (`objc2-metal-0.3.2`'s
+//! `src/generated/MTLResource.rs:326-329`: "Resources created from heaps
+//! are by default untracked, whereas resources created from the device are
+//! by default tracked."). Metal's documented contract for a tracked
+//! resource is that it inserts an implicit execution barrier between two
+//! encoders in the *same* command buffer whenever the later one reads what
+//! the earlier one wrote. That guarantee composes with [`execute`] encoding
+//! `prepared.resolved` strictly in program order (the same order
+//! [`prepare`]'s `bound_op_retirement` already relies on for liveness), so
+//! sequential encode order plus default hazard tracking is the mechanism —
+//! not an assumption that the GPU happens to serialize. This holds equally
+//! for the no-copy buffers [`upload_block`] hands out (see "Host buffer
+//! upload" below): `newBufferWithBytesNoCopy_length_options_deallocator`
+//! takes the same `MTLResourceOptions`, so its hazard mode is identical.
+//!
+//! Every `MTLBuffer` is `storageModeShared`: on Apple Silicon's unified
+//! memory, that makes reading a result back a plain pointer read, no blit
+//! pass. Compiled `MTLLibrary`/`MTLComputePipelineState` pairs are cached
+//! by kernel source text within one [`execute`] call, since `msl.rs`'s own
+//! module doc proves two structurally-identical `BoundOp`s emit
+//! byte-identical source. `MTLCompileOptions::mathMode` is pinned to
+//! `Safe`, never the default — parity against the CPU interpreter demands
+//! IEEE behavior, not whatever Metal's fast-math would substitute.
 //!
 //! # Gather fault reporting
 //!
@@ -50,13 +79,85 @@
 //! fetched index falls outside its dim's extent; a GPU kernel cannot
 //! propagate a `Result`, so `msl.rs` clamps for memory safety but also
 //! `atomic_fetch_max`s the offending index into a per-gather-slot `Fault`
-//! buffer (see that module's doc). [`dispatch_nest`] allocates and
-//! zero-fills that buffer before every dispatch that gathers, and after
-//! `waitUntilCompleted` reads it back and — via [`check_gather_fault`] —
-//! turns any nonzero slot into the identical `TensorError` `cpu.rs` would
+//! buffer (see that module's doc). [`encode_op`] allocates and zero-fills
+//! that buffer before every dispatch that gathers, but a fault buffer is
+//! only CPU-visible once the whole command buffer completes, so — unlike a
+//! per-op wait — [`execute`] cannot check it until after its single
+//! end-of-program `waitUntilCompleted`. It then walks every op that
+//! gathered, in program order, and — via [`check_gather_fault`] — turns the
+//! first nonzero slot into the identical `TensorError` `cpu.rs` would
 //! report for the same fetched index, wired through [`MetalError`]'s
 //! `#[from]` so [`execute`] and `cpu::evaluate` produce `assert_eq!`-equal
-//! errors.
+//! errors. Ops after the one that would have faulted still get encoded and
+//! dispatched (clamping keeps that memory-safe) — but the `Err` [`execute`]
+//! returns is unaffected: everything downstream of the fault is discarded
+//! the moment that `Err` propagates, so it is exactly what a fail-fast
+//! per-op wait would have reported.
+//!
+//! # Host buffer upload
+//!
+//! [`upload_block`] is the one call on the copy of a caller-owned `&[f32]`
+//! into device memory ([`upload_uniforms`] copies too, but a *locally
+//! packed* `Vec<u8>`, not caller data, so it is out of scope here). On
+//! unified memory that copy is pointless for the `Float32` path — CPU and
+//! GPU already address the same DRAM — so [`upload_block_as_float`] takes
+//! the zero-copy `newBufferWithBytesNoCopy` path whenever `data`'s pointer
+//! AND byte length are both a multiple of [`page_size`] (that API's hard
+//! requirement), and otherwise falls back to the copying `newBufferWithBytes`
+//! path used everywhere else in this file. A `Float16` node's buffer is
+//! narrowed into a freshly allocated `Vec<f16>` first (see the dtype
+//! section below); that allocation is local to [`upload_block_as_half`] and
+//! drops when it returns, so it can never take the no-copy path — doing so
+//! would hand Metal a dangling pointer the instant the function returns,
+//! since no deallocator callback is wired to keep the `Vec` alive for the
+//! GPU's sake. `Float16` uploads therefore always copy. Which path ran is
+//! never silent: [`NOCOPY_BUFFER_UPLOADS`] / [`COPYING_BUFFER_UPLOADS`]
+//! (`proxima_telemetry::metric::Counter`, the same instrument
+//! `proxima_tensor::instrument` already uses) are incremented on every
+//! real call, so a caller — or this driver's own test suite — can read back
+//! what fraction of real uploads actually took the no-copy path instead of
+//! assuming it from the code alone.
+//!
+//! # Resident blocks — the copying path's own cache
+//!
+//! "Copying uploads are deliberately not cached" (see [`NOCOPY_BUFFERS`]'s own
+//! doc) is right for a block whose bytes genuinely change every call --
+//! `ids`/`rope_cos`/`rope_sin`/the KV cache's own blocks -- because a stale
+//! copy would silently serve last token's data forever. It is wrong for a
+//! model's own weights: `proxima-model-interop`'s `BoundWeights::owned`/
+//! `packed` are bound once at load and never mutated again, so their
+//! `(pointer, len)` is stable for the caller's whole process, and re-copying
+//! them every token moves ~5.84 GB/token for data that never changed
+//! (`proxima-tensor/docs/discipline.md` ROW 82). That distinction -- which
+//! names are the caller's own static weights versus which change every step
+//! -- is known to the CALLER (`generate.rs` builds `named_blocks` from two
+//! structurally different sources) and destroyed the moment they flatten
+//! into one `&[(&str, QuantizedBlock)]`. [`Plan::mark_resident`] hands that
+//! knowledge back in: a caller-supplied name set, checked once per [`Plan`]
+//! build against the program's own declared [`Op::name`]s, never against raw
+//! bytes -- see that method's own doc for why NAME is safe to classify
+//! against here even though [`NOCOPY_BUFFERS`]-style caching must never be
+//! keyed on name.
+//!
+//! # dtype and device-buffer marshalling
+//!
+//! `execute`'s own host contract stays f32 in and f32 out — `blocks:
+//! &[&[f32]]`, [`Evaluated`] carries `Vec<f32>` — the same contract
+//! `cpu::evaluate` has, so a caller compares the two directly. What varies
+//! *underneath* that contract is the device buffer each node's own dtype
+//! ([`Op::dtype`]) gets: a `Float32` node uploads/allocates/reads back
+//! 4-byte-per-element buffers exactly as before, but a `Float16` node's
+//! buffer is 2 bytes per element — [`upload_block`] narrows the caller's
+//! `f32` host data to `half::f16` once, at the host/device boundary, and
+//! [`read_back`] widens it back once, at the same boundary, on the way out.
+//! Every byte a dispatch's kernel actually reads or writes in between —
+//! every input, every intermediate `BoundOp` output, the final result
+//! buffer — is genuinely half-width; the narrowing/widening is a one-time
+//! host-boundary conversion, not a disguise for still moving 4 bytes per
+//! element on the GPU-resident path this feature targets. A gather's
+//! `indices` node is the one exemption, exactly as in
+//! [`reject_unsupported_gpu_dtype`]: an index value stays f32-encoded
+//! regardless of its own declared dtype, matching `cpu.rs`'s own stance.
 
 #[link(name = "CoreGraphics", kind = "framework")]
 unsafe extern "C" {}
@@ -68,7 +169,10 @@ use alloc::vec::Vec;
 use core::ffi::c_void;
 use core::mem::{size_of, size_of_val};
 use core::ptr::NonNull;
+use std::sync::OnceLock;
+use core::cell::RefCell;
 
+use half::f16;
 use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
 use objc2_foundation::{NSError, NSString};
@@ -77,20 +181,36 @@ use objc2_metal::{
     MTLComputeCommandEncoder, MTLComputePipelineState, MTLCreateSystemDefaultDevice, MTLDevice,
     MTLLibrary, MTLMathMode, MTLResourceOptions, MTLSize,
 };
+use proxima_telemetry::counter;
+use proxima_telemetry::metric::Counter;
 
 use proxima_tensor::{
-    DType, Expr, GatherAccess, IndexMap, Keep, Nest, NodeId, Reduction, Shapes, TensorError, infer,
-    lower,
+    BoundOp, BoundOpKind, DType, Evaluated, IndexMap, Keep, Lookup, NodeId, Op, QuantizedBlock,
+    Shapes, TensorError, bind, correct_packed_matmul_layouts, infer, resolve_named_blocks,
 };
+#[cfg(feature = "instrument")]
+use proxima_tensor::instrument::{elapsed_ticks, read_ticks};
 
 use crate::error::EmitError;
-use crate::msl::{gather_count, reduction_dims};
-use crate::{Binding, Kernel, emit};
+use crate::msl::{gather_count, kernel_cache_key, kernel_dispatch_shape, reduction_dims};
+#[cfg(feature = "instrument")]
+use crate::msl::diagnose_packed_row_block;
+use crate::{Binding, GridSpec, Kernel, PackedCodec, PackedOperands, emit};
+
+/// A live Metal buffer handle — the shape every device-buffer table and
+/// return value in this file traffics in.
+type MetalBuffer = Retained<ProtocolObject<dyn MTLBuffer>>;
+
+/// One gathering op's deferred fault check: the op it came from, its fault
+/// buffer, and how many gather slots that buffer holds. [`encode_op`]
+/// produces these; [`execute`] checks them all after its single
+/// end-of-program wait (see the module doc's "Gather fault reporting").
+type PendingFault<'a> = (&'a BoundOp, MetalBuffer, usize);
 
 /// Everything [`execute`] can fail with: a missing device, any device
 /// operation that returned a Metal-side failure (compiling source, creating
 /// a pipeline, or one of the handful of `Option`-returning calls that are
-/// only ever `None` on a broken host), or a `Nest`/program-shaped fault
+/// only ever `None` on a broken host), or a `BoundOp`/program-shaped fault
 /// [`proxima_tensor`] or [`crate::msl`] already have a name for.
 #[derive(Debug, thiserror::Error)]
 pub enum MetalError {
@@ -103,88 +223,588 @@ pub enum MetalError {
     #[error(transparent)]
     Emit(#[from] EmitError),
 }
+/// This thread's Metal device paired with its command queue — both created
+/// once per thread rather than per [`execute`] call.
+type DeviceAndQueue = (
+    Retained<ProtocolObject<dyn MTLDevice>>,
+    Retained<ProtocolObject<dyn MTLCommandQueue>>,
+);
 
-/// The result of [`execute`]: every requested output's data and shape,
-/// already read back from device memory. Same shape as
-/// [`proxima_tensor::cpu::Evaluated`], on purpose — a parity test diffs the
-/// two directly.
-#[derive(Debug)]
-pub struct Executed {
-    root: NodeId,
-    results: Vec<(NodeId, Vec<u64>, Vec<f32>)>,
+thread_local! {
+    /// Compiled pipelines, keyed by [`kernel_cache_key`]'s cheap structural
+    /// fingerprint (not [`Kernel::source`] — deriving that string is exactly
+    /// the cost this cache exists to avoid on a hit), for the lifetime of
+    /// the thread rather than of one [`execute`] call.
+    ///
+    /// This was per-call, which meant EVERY `execute` compiled every kernel
+    /// from MSL source before dispatching it. A serving loop runs the same
+    /// graph thousands of times, so that is thousands of redundant
+    /// compiles — measured at 3.2 ms for a 2.36 MB matvec and 8.3 ms for a
+    /// 9.44 MB one, against llama.cpp's 17.62 ms for an entire 7B token.
+    /// `thread_local` rather than a process-wide `OnceLock`: `Retained<_>` of
+    /// an `objc2` protocol object is not `Send`/`Sync`, and a per-thread
+    /// cache needs no lock on the dispatch path anyway.
+    static PIPELINE_CACHE: RefCell<BTreeMap<String, Retained<ProtocolObject<dyn MTLComputePipelineState>>>> =
+        RefCell::new(BTreeMap::new());
+
+    /// The device and its command queue, created once per thread. Both were
+    /// also per-call; `MTLCreateSystemDefaultDevice` plus `newCommandQueue`
+    /// is not free, and nothing about either depends on the program being
+    /// run.
+    static DEVICE_AND_QUEUE: RefCell<Option<DeviceAndQueue>> = const { RefCell::new(None) };
 }
 
-impl Executed {
-    #[must_use]
-    pub fn root(&self) -> &[f32] {
-        self.get(self.root).map_or(&[], |(data, _)| data)
-    }
-
-    #[must_use]
-    pub fn shape(&self) -> &[u64] {
-        self.get(self.root).map_or(&[], |(_, shape)| shape)
-    }
-
-    /// The data and shape of a specific requested output, or `None` if
-    /// `node` was not in the `outputs` passed to [`execute`].
-    #[must_use]
-    pub fn get(&self, node: NodeId) -> Option<(&[f32], &[u64])> {
-        self.results
-            .iter()
-            .find(|(candidate, _, _)| *candidate == node)
-            .map(|(_, shape, data)| (data.as_slice(), shape.as_slice()))
-    }
+/// This thread's Metal device and command queue, created on first use.
+fn device_and_queue() -> Result<DeviceAndQueue, MetalError> {
+    DEVICE_AND_QUEUE.with(|slot| {
+        let mut slot = slot.borrow_mut();
+        if let Some(existing) = slot.as_ref() {
+            return Ok(existing.clone());
+        }
+        let device = MTLCreateSystemDefaultDevice().ok_or(MetalError::NoDevice)?;
+        let queue = device
+            .newCommandQueue()
+            .ok_or_else(|| MetalError::CompileFailed {
+                log: "device refused to create a command queue".to_string(),
+            })?;
+        let pair = (device, queue);
+        *slot = Some(pair.clone());
+        Ok(pair)
+    })
 }
 
 /// Runs a tensor program on the system's default Metal device.
 ///
-/// Same contract as [`proxima_tensor::cpu::evaluate`]: `blocks` binds
-/// [`Expr::Block`] inputs positionally, `outputs` selects which nodes to
-/// return data for (the root only, if empty).
-pub fn execute(
-    program: &[Expr],
-    symbols: &[u64],
-    blocks: &[&[f32]],
-    outputs: &[NodeId],
-) -> Result<Executed, MetalError> {
-    let prepared = prepare(program, symbols, blocks, outputs)?;
+/// Everything about a program that does not change between runs, resolved
+/// ONCE so a serving loop stops re-deriving it per token.
+///
+/// [`execute`] re-ran `infer` + `bind` on every call, then re-derived which
+/// operands are packed, allocated fresh device buffers, and read the result
+/// back. Measured on this box (`omega/examples/q4k_matvec_probe.rs`, two
+/// problem sizes so the intercept separates from the slope): **0.191 ms of
+/// fixed cost per call on the f32 arm and 0.400 ms on the packed arm**. A
+/// real forward is 1196 nodes, so at one `execute` per node that is 228-478
+/// ms per forward of overhead against llama.cpp Metal's 17.62 ms for the
+/// whole token (`proxima-tensor/docs/discipline.md` ROW 71).
+///
+/// What a caller can do with this that they could not do before: prepare a
+/// program once and run it many times. That is the entire justification for
+/// the type — the shapes, the bound ops, the retirement schedule and the
+/// codec set are all functions of the PROGRAM, and a serving loop holds the
+/// program fixed while the block DATA changes every token.
+pub struct Plan {
+    /// The plan owns its program: `finish` needs it for output dtypes, and a
+    /// plan that borrowed it could not outlive the caller's buffer.
+    program: Vec<Op>,
+    prepared: Prepared,
+    packed_operands: PackedOperands,
+    block_dtypes: Vec<DType>,
+    /// Every block-input node a caller has told this plan, via
+    /// [`Plan::mark_resident`], is bound to data that never changes across
+    /// calls -- empty until that method runs, since [`plan`] itself has no
+    /// way to know a caller's residency intent from codecs/shapes alone.
+    resident_nodes: BTreeSet<NodeId>,
+}
 
-    let device = MTLCreateSystemDefaultDevice().ok_or(MetalError::NoDevice)?;
-    let queue = device
-        .newCommandQueue()
+impl Plan {
+    /// Tells this plan which of its named block inputs are the CALLER's own
+    /// static data -- model weights bound once at load and never mutated
+    /// again -- so [`execute_plan`]'s upload loop may cache and reuse their
+    /// device buffer on the copying path instead of re-copying every call.
+    /// See the module doc's "Resident blocks" section for the full argument.
+    ///
+    /// `resident_names` is checked against each block-input node's own
+    /// declared [`Op::name`] -- a one-time string compare over the program's
+    /// declared inputs, off the per-token upload path -- never against the
+    /// block's bytes or pointer. That is the necessary half of the
+    /// invariant this driver's [`NOCOPY_BUFFERS`] cache cannot provide on its
+    /// own: an address match alone cannot distinguish a weight buffer that
+    /// never moves from a freshly reallocated `ids`/KV-cache buffer that
+    /// coincidentally lands at a freed address of the same size. The NAME
+    /// check happens here, once per plan, specifically so the per-token
+    /// upload path never has to trust an address by itself.
+    ///
+    /// Safe and cheap to call every token even though [`plan`]/[`plan_named`]
+    /// currently rebuild a fresh [`Plan`] every step (`plan_hits=0`,
+    /// `proxima-tensor/docs/discipline.md` ROW 82): this is a scan over the
+    /// block-input node list matching each node's name against
+    /// `resident_names`, not a device operation.
+    pub fn mark_resident(&mut self, resident_names: &BTreeSet<&str>) {
+        self.resident_nodes = self
+            .prepared
+            .block_nodes
+            .iter()
+            .filter(|node| {
+                self.program[node.0 as usize]
+                    .name()
+                    .is_some_and(|name| resident_names.contains(name))
+            })
+            .copied()
+            .collect();
+    }
+}
+
+/// Which of `block_nodes`' entries carry a codec [`crate::msl::emit`] has an
+/// unpack kernel for (`Q4_K`, `Q5_K`, `Q6_K`, `Q8_0`, `Q4_0`, `Float16`,
+/// `BFloat16`), keyed to its [`PackedCodec`] — the single place this crate
+/// decides "packed AND which codec," shared by [`plan`] and [`prepare`] so
+/// the two cannot drift on it. `Float16` earns a codec slot despite needing
+/// no unpack FUNCTION (see `msl::FLOAT16_BLOCK_BYTES`'s own doc) because its
+/// buffer still needs a non-`float`, non-`uchar` binding type -- `None`
+/// would route it through `Float32`'s plain-array path and bind it as the
+/// kernel's own accumulator type, which is wrong the moment a `Float16`
+/// weight multiplies an `f32` activation.
+fn packed_operands_of(block_nodes: &[NodeId], blocks: &[QuantizedBlock<'_>]) -> PackedOperands {
+    block_nodes
+        .iter()
+        .zip(blocks.iter())
+        .filter_map(|(node, block)| match block {
+            QuantizedBlock::Q4K(_) => Some((*node, PackedCodec::Q4K)),
+            QuantizedBlock::Q5K(_) => Some((*node, PackedCodec::Q5K)),
+            QuantizedBlock::Q6K(_) => Some((*node, PackedCodec::Q6K)),
+            QuantizedBlock::Q8_0(_) => Some((*node, PackedCodec::Q8_0)),
+            QuantizedBlock::Q4_0(_) => Some((*node, PackedCodec::Q4_0)),
+            QuantizedBlock::Float16(_) => Some((*node, PackedCodec::Float16)),
+            QuantizedBlock::BFloat16(_) => Some((*node, PackedCodec::BFloat16)),
+            QuantizedBlock::Float32(_) => None,
+        })
+        .collect()
+}
+
+/// Resolves a program into a reusable [`Plan`]. `blocks` is read for its
+/// CODECS and shapes only — the data is not captured, so the same plan runs
+/// against fresh block data every call.
+///
+/// # Errors
+/// Propagates inference, binding, dtype-gate and block-shape failures.
+pub fn plan(
+    program: &[Op],
+    symbols: &[u64],
+    blocks: &[QuantizedBlock<'_>],
+    outputs: &[NodeId],
+) -> Result<Plan, MetalError> {
+    #[cfg(feature = "instrument")]
+    let prepare_started = read_ticks();
+    let prepared = prepare(program, symbols, blocks, outputs)?;
+    #[cfg(feature = "instrument")]
+    {
+        counter!(PREPARE_CALLS, 1);
+        counter!(PREPARE_TICKS, elapsed_ticks(prepare_started));
+    }
+    let packed_operands = packed_operands_of(&prepared.block_nodes, blocks);
+    let block_dtypes = prepared
+        .block_nodes
+        .iter()
+        .map(|node| gpu_dtype(program, &prepared.index_nodes, *node))
+        .collect();
+    Ok(Plan {
+        program: program.to_vec(),
+        prepared,
+        packed_operands,
+        block_dtypes,
+        resident_nodes: BTreeSet::new(),
+    })
+}
+
+/// Same contract as [`proxima_tensor::cpu::evaluate`], and returns the same
+/// [`Evaluated`] type — a CPU run and a Metal run report the identical
+/// shape, so a parity test compares them directly with no adapter on either
+/// side (see `Evaluated`'s own doc). `blocks` binds [`Op::Input`] inputs
+/// positionally, `outputs` selects which nodes to return data for (the root
+/// only, if empty).
+pub fn execute(
+    program: &[Op],
+    symbols: &[u64],
+    blocks: &[QuantizedBlock<'_>],
+    outputs: &[NodeId],
+) -> Result<Evaluated, MetalError> {
+    let resolved_plan = plan(program, symbols, blocks, outputs)?;
+    execute_plan(&resolved_plan, blocks)
+}
+
+/// Runs an already-resolved [`Plan`] against fresh block data. This is the
+/// serving-loop entry point: the plan is built once, this is called per
+/// token, and none of `infer`/`bind`/codec-resolution happens here.
+///
+/// # Errors
+/// Propagates block-codec and Metal driver failures.
+pub fn execute_plan(plan: &Plan, blocks: &[QuantizedBlock<'_>]) -> Result<Evaluated, MetalError> {
+    let prepared = &plan.prepared;
+    let packed_operands = &plan.packed_operands;
+
+    let (device, queue) = device_and_queue()?;
+
+    let mut device_buffers: BTreeMap<NodeId, MetalBuffer> = BTreeMap::new();
+    #[cfg(feature = "instrument")]
+    let block_upload_started = read_ticks();
+    for ((node, block), dtype) in prepared
+        .block_nodes
+        .iter()
+        .zip(blocks.iter())
+        .zip(plan.block_dtypes.iter())
+    {
+        #[cfg(feature = "instrument")]
+        {
+            counter!(BLOCK_UPLOAD_CALLS, 1);
+            counter!(BLOCK_UPLOAD_BYTES, block_byte_len(block) as u64);
+        }
+        let resident = plan.resident_nodes.contains(node);
+        let buffer = match block {
+            QuantizedBlock::Float32(data) => upload_block(&device, data, *node, *dtype, resident)?,
+            // `Float16`/`BFloat16` upload their bytes UNCHANGED, same as
+            // every packed codec above -- there is no host-side narrowing
+            // step (unlike `upload_block`'s `Float32 -> Float16` path,
+            // which narrows a caller's `&[f32]`): a `Float16` weight's on-
+            // disk bytes already ARE its device buffer's bytes (native
+            // `half`), and a `BFloat16` weight's bytes are widened entirely
+            // on the GPU at the read (`msl::BF16_UNPACK_MSL`), never on the
+            // host.
+            QuantizedBlock::Q4K(bytes)
+            | QuantizedBlock::Q5K(bytes)
+            | QuantizedBlock::Q6K(bytes)
+            | QuantizedBlock::Q8_0(bytes)
+            | QuantizedBlock::Q4_0(bytes)
+            | QuantizedBlock::Float16(bytes)
+            | QuantizedBlock::BFloat16(bytes) => upload_packed_bytes(&device, bytes, resident)?,
+        };
+        device_buffers.insert(*node, buffer);
+    }
+    #[cfg(feature = "instrument")]
+    counter!(BLOCK_UPLOAD_TICKS, elapsed_ticks(block_upload_started));
+
+    let command_buffer = queue
+        .commandBuffer()
         .ok_or_else(|| MetalError::CompileFailed {
-            log: "device refused to create a command queue".to_string(),
+            log: "command queue refused to hand out a command buffer".to_string(),
         })?;
 
-    let mut device_buffers: BTreeMap<NodeId, Retained<ProtocolObject<dyn MTLBuffer>>> =
-        BTreeMap::new();
-    for (node, data) in prepared.block_nodes.iter().zip(blocks.iter()) {
-        device_buffers.insert(*node, upload_block(&device, data)?);
-    }
+    // ONE `MTLComputeCommandEncoder` for the whole program, opened here and
+    // `endEncoding()`d once below, after every op has been encoded into it --
+    // not one per op. `computeCommandEncoder()` (no dispatch-type argument)
+    // defaults to `MTLDispatchTypeSerial` (Apple's own documented default,
+    // confirmed against `objc2-metal-0.3.2`'s own `MTLDispatchType` doc:
+    // "Command encoder dispatches are executed in dispatched order"), the
+    // IDENTICAL dispatch type every one of the former per-op encoders already
+    // used -- this change narrows encoder COUNT, not dispatch semantics.
+    // Ordering and hazard-tracked visibility between two dispatches in one
+    // serial encoder is Metal's documented behavior for tracked resources
+    // (every buffer here is `storageModeShared`, never
+    // `HazardTrackingModeUntracked` -- see the module doc's "Execution
+    // model"), so this is the SAME correctness argument that section already
+    // makes for two encoders in one command buffer, just one level tighter:
+    // one encoder's own dispatches were always ordered and hazard-tracked
+    // relative to each other, encoder boundaries or not.
+    let encoder = command_buffer
+        .computeCommandEncoder()
+        .ok_or_else(|| MetalError::CompileFailed {
+            log: "command buffer refused to hand out a compute encoder".to_string(),
+        })?;
 
-    let mut pipeline_cache: BTreeMap<
-        String,
-        Retained<ProtocolObject<dyn MTLComputePipelineState>>,
-    > = BTreeMap::new();
-    for (position, nest) in prepared.nests.iter().enumerate() {
-        dispatch_nest(
-            &device,
-            &queue,
-            &mut pipeline_cache,
-            &mut device_buffers,
-            nest,
-        )?;
+    // pipelines live in this thread's `PIPELINE_CACHE`, not here: see that
+    // static's own doc for why per-call was the defect.
+    // (bound op, its fault buffer, gather count) for every op that gathered —
+    // checked only after the single end-of-program wait below, since a fault
+    // buffer is not CPU-visible until the command buffer it was written in
+    // completes. See the module doc's "Gather fault reporting" section.
+    let mut pending_faults: Vec<PendingFault<'_>> = Vec::new();
+    for (position, bound) in prepared.resolved.iter().enumerate() {
+        let fault = encode_op(&device, &encoder, &mut device_buffers, bound, packed_operands)?;
+        if let Some((fault_buffer, gathers)) = fault {
+            pending_faults.push((bound, fault_buffer, gathers));
+        }
         for retired in &prepared.retires[position] {
             device_buffers.remove(retired);
         }
     }
+    encoder.endEncoding();
+
+    #[cfg(feature = "instrument")]
+    let gpu_exec_started = read_ticks();
+    command_buffer.commit();
+    command_buffer.waitUntilCompleted();
+    #[cfg(feature = "instrument")]
+    {
+        counter!(GPU_EXEC_CALLS, 1);
+        counter!(GPU_EXEC_TICKS, elapsed_ticks(gpu_exec_started));
+    }
+
+    for (bound, fault_buffer, gathers) in &pending_faults {
+        check_gather_fault(bound, fault_buffer, *gathers)?;
+    }
 
     finish(
+        &plan.program,
+        &prepared.index_nodes,
         &prepared.shapes,
         &prepared.effective_outputs,
         &device_buffers,
         prepared.root,
     )
+}
+
+/// [`plan`] against a name-keyed block set — the shape a model binds its
+/// weights in. Resolution goes through
+/// [`proxima_tensor::resolve_named_blocks`], the same function the CPU
+/// evaluator uses, so the two backends cannot disagree about which name is
+/// which position.
+///
+/// # Errors
+/// Propagates name-resolution and planning failures.
+pub fn plan_named(
+    program: &[Op],
+    symbols: &[u64],
+    named: &[(&str, QuantizedBlock<'_>)],
+    outputs: &[NodeId],
+) -> Result<Plan, MetalError> {
+    let blocks = resolve_named_blocks(program, named)?;
+    plan(program, symbols, &blocks, outputs)
+}
+
+/// [`execute_plan`] against a name-keyed block set. The plan owns its
+/// program, so the caller hands over only the per-call data.
+///
+/// # Errors
+/// Propagates name-resolution and Metal driver failures.
+pub fn execute_plan_named(
+    plan: &Plan,
+    named: &[(&str, QuantizedBlock<'_>)],
+) -> Result<Evaluated, MetalError> {
+    let blocks = resolve_named_blocks(&plan.program, named)?;
+    execute_plan(plan, &blocks)
+}
+
+/// One [`BoundOp`]'s GPU-only execution time and the operand bytes it read,
+/// as gathered by [`execute_plan_op_timed`]. `weight_name` is
+/// [`Op::name`](proxima_tensor::Op::name) off whichever operand is a named
+/// block input (a model weight or the `ids`/`eps`/`rope_*`/KV-cache block
+/// this program declares by name) -- `None` when every operand is itself a
+/// computed node, which is the common case for a chained elementwise op.
+#[cfg(feature = "instrument")]
+#[derive(Debug, Clone)]
+pub struct OpGpuTiming {
+    pub node: NodeId,
+    pub kind: &'static str,
+    pub operand_bytes: u64,
+    pub gpu_ns: u64,
+    pub weight_name: Option<String>,
+    /// `bound.operands().len()` -- surfaced so a diagnostic caller can tell
+    /// a two-operand (weight, activation) reduce, the shape
+    /// [`crate::msl::packed_row_block`] requires, from a fused reduce whose
+    /// element body absorbed a third operand (e.g. a gate/up product ahead
+    /// of a down-projection), which disqualifies the row-blocked kernel via
+    /// that same function's `quantized.len() != 2` check.
+    pub operand_count: usize,
+    /// [`crate::msl::diagnose_packed_row_block`]'s own verdict on THIS op,
+    /// against a REAL bound program rather than a synthetic symbolic one --
+    /// `None` when the op is not a `Reduce { keep: Keep::Reduce, .. }` at
+    /// all (the diagnosis does not apply), `Some("PASS")` when it took the
+    /// row-blocked path, `Some(<rejection debug>)` otherwise. Exists
+    /// because a synthetic probe's rejection table and a real production
+    /// run's own `classify_kind` bucket disagreed on `ffn_down`/
+    /// `output.weight` -- printing this against the REAL bound op is what
+    /// settles which one was wrong, rather than trusting either by
+    /// inference.
+    pub packed_row_block_rejection: Option<String>,
+}
+
+/// Diagnostic-only counterpart of [`execute_plan`]: instead of sharing ONE
+/// command buffer across the whole program and `commit`/`waitUntilCompleted`ing
+/// it exactly once (see the module doc's "Execution model"), this commits
+/// and waits on its OWN command buffer per [`BoundOp`], so each op's
+/// `GPUStartTime`/`GPUEndTime` -- `MTLCommandBuffer`'s own documented
+/// per-buffer GPU occupancy, not a CPU-side measurement -- can be read back
+/// individually. It exists to answer exactly one question: does GPU time
+/// track operand bytes, or is it flat per dispatch regardless of size. That
+/// answer costs exactly what [`execute_plan`]'s own module doc says ROW 73
+/// measured and removed -- one submission-boundary intercept per split, now
+/// paid `prepared.resolved.len()` times instead of once -- which is why this
+/// function is reachable only behind the `instrument` feature, from this
+/// crate's own diagnostic call sites, and never from the serving loop
+/// ([`execute_plan`]/[`execute_plan_named`] remain the only production
+/// entry points and are completely unchanged by this function's existence).
+///
+/// # Errors
+/// Same as [`execute_plan`].
+#[cfg(feature = "instrument")]
+pub fn execute_plan_op_timed(
+    plan: &Plan,
+    blocks: &[QuantizedBlock<'_>],
+) -> Result<(Evaluated, Vec<OpGpuTiming>), MetalError> {
+    let prepared = &plan.prepared;
+    let packed_operands = &plan.packed_operands;
+
+    let (device, queue) = device_and_queue()?;
+
+    let mut device_buffers: BTreeMap<NodeId, MetalBuffer> = BTreeMap::new();
+    for ((node, block), dtype) in prepared
+        .block_nodes
+        .iter()
+        .zip(blocks.iter())
+        .zip(plan.block_dtypes.iter())
+    {
+        let resident = plan.resident_nodes.contains(node);
+        let buffer = match block {
+            QuantizedBlock::Float32(data) => upload_block(&device, data, *node, *dtype, resident)?,
+            // `Float16`/`BFloat16` upload their bytes UNCHANGED, same as
+            // every packed codec above -- there is no host-side narrowing
+            // step (unlike `upload_block`'s `Float32 -> Float16` path,
+            // which narrows a caller's `&[f32]`): a `Float16` weight's on-
+            // disk bytes already ARE its device buffer's bytes (native
+            // `half`), and a `BFloat16` weight's bytes are widened entirely
+            // on the GPU at the read (`msl::BF16_UNPACK_MSL`), never on the
+            // host.
+            QuantizedBlock::Q4K(bytes)
+            | QuantizedBlock::Q5K(bytes)
+            | QuantizedBlock::Q6K(bytes)
+            | QuantizedBlock::Q8_0(bytes)
+            | QuantizedBlock::Q4_0(bytes)
+            | QuantizedBlock::Float16(bytes)
+            | QuantizedBlock::BFloat16(bytes) => upload_packed_bytes(&device, bytes, resident)?,
+        };
+        device_buffers.insert(*node, buffer);
+    }
+
+    let mut timings: Vec<OpGpuTiming> = Vec::with_capacity(prepared.resolved.len());
+    for (position, bound) in prepared.resolved.iter().enumerate() {
+        let operand_bytes: u64 = bound
+            .operands()
+            .iter()
+            .map(|(source, _, _)| {
+                device_buffers
+                    .get(source)
+                    .map(|buffer| buffer.length() as u64)
+                    .unwrap_or(0)
+            })
+            .sum();
+        let weight_name = bound
+            .operands()
+            .iter()
+            .find_map(|(source, _, _)| plan.program[source.0 as usize].name())
+            .map(ToString::to_string);
+        let kind = classify_kind(bound, packed_operands);
+        let packed_row_block_rejection = diagnose_kind(bound, packed_operands);
+
+        let command_buffer = queue
+            .commandBuffer()
+            .ok_or_else(|| MetalError::CompileFailed {
+                log: "command queue refused to hand out a command buffer".to_string(),
+            })?;
+        let encoder = command_buffer
+            .computeCommandEncoder()
+            .ok_or_else(|| MetalError::CompileFailed {
+                log: "command buffer refused to hand out a compute encoder".to_string(),
+            })?;
+        let fault = encode_op(&device, &encoder, &mut device_buffers, bound, packed_operands)?;
+        encoder.endEncoding();
+        command_buffer.commit();
+        command_buffer.waitUntilCompleted();
+        let gpu_ns = ((command_buffer.GPUEndTime() - command_buffer.GPUStartTime()) * 1e9).max(0.0) as u64;
+        if let Some((fault_buffer, gathers)) = fault {
+            check_gather_fault(bound, &fault_buffer, gathers)?;
+        }
+        for retired in &prepared.retires[position] {
+            device_buffers.remove(retired);
+        }
+        timings.push(OpGpuTiming {
+            node: bound.node,
+            kind,
+            operand_bytes,
+            gpu_ns,
+            weight_name,
+            operand_count: bound.operands().len(),
+            packed_row_block_rejection,
+        });
+    }
+
+    let evaluated = finish(
+        &plan.program,
+        &prepared.index_nodes,
+        &prepared.shapes,
+        &prepared.effective_outputs,
+        &device_buffers,
+        prepared.root,
+    )?;
+    Ok((evaluated, timings))
+}
+
+/// [`execute_plan_op_timed`] against a name-keyed block set, mirroring
+/// [`execute_plan_named`]'s own name resolution.
+///
+/// # Errors
+/// Propagates name-resolution and Metal driver failures.
+#[cfg(feature = "instrument")]
+pub fn execute_plan_named_op_timed(
+    plan: &Plan,
+    named: &[(&str, QuantizedBlock<'_>)],
+) -> Result<(Evaluated, Vec<OpGpuTiming>), MetalError> {
+    let blocks = resolve_named_blocks(&plan.program, named)?;
+    execute_plan_op_timed(plan, &blocks)
+}
+
+/// Classifies one [`BoundOp`]'s emitted kernel body the same way
+/// `omega/examples/real_forward_packed_probe.rs` (discipline log ROW 85)
+/// does: by grepping the SOURCE for the tiled-GEMM simdgroup-matrix call
+/// site vs the row-blocked call site vs the generic per-element scalar call
+/// site vs a SIMD cooperative combine, since [`crate::msl::emit`] is the one
+/// place that decides which of the four a given `Reduce` gets and none of
+/// that decision is exposed as its own accessor.
+#[cfg(feature = "instrument")]
+fn classify_kind(bound: &BoundOp, packed_operands: &PackedOperands) -> &'static str {
+    match &bound.kind {
+        BoundOpKind::Elementwise { .. } => "elementwise",
+        BoundOpKind::Iota => "iota",
+        BoundOpKind::Constant { .. } => "constant",
+        BoundOpKind::Reduce { keep: Keep::Scan, .. } => "scan",
+        BoundOpKind::Reduce {
+            keep: Keep::Reduce, ..
+        } => match emit(bound, packed_operands) {
+            // Checked BEFORE the row-blocked arm below: ROW 113's
+            // weight-staging fix made `push_tiled_gemm_body` call
+            // `q4k_run8`/`q4k_header_for` too (the same amortized decode
+            // `push_packed_row_blocked_body` already used), so the row-blocked
+            // arm's own `"q4k_run8(blk"` substring match now fires on BOTH
+            // kernel bodies -- `simdgroup_multiply_accumulate` only ever
+            // appears in [`crate::msl::push_tiled_gemm_body`]'s emitted
+            // source, so it is the one marker that still disambiguates them.
+            Ok(kernel) if kernel.source.contains("simdgroup_multiply_accumulate") => "reduce-tiled-gemm",
+            Ok(kernel)
+                if kernel.source.contains("q4k_run8(blk")
+                    || kernel.source.contains("q5k_value(blk")
+                    || kernel.source.contains("q6k_value(blk") =>
+            {
+                "reduce-packed-row-blocked"
+            }
+            Ok(kernel)
+                if kernel.source.contains("simd_sum(")
+                    || kernel.source.contains("simd_max(")
+                    || kernel.source.contains("simd_min(")
+                    || kernel.source.contains("simd_product(") =>
+            {
+                "reduce-cooperative"
+            }
+            Ok(_) => "reduce-generic-scalar",
+            Err(_) => "reduce-unclassified",
+        },
+    }
+}
+
+/// [`diagnose_packed_row_block`]'s verdict for THIS bound op, against the
+/// REAL production layout rather than a synthetic symbolic probe --
+/// `None` for anything that is not a `Reduce { keep: Keep::Reduce, .. }`
+/// (the row-blocked kernel does not apply). `Some("PASS")` means it took
+/// (or would take) the row-blocked path; `Some(<debug of the rejection>)`
+/// names the exact gate that rejected it.
+#[cfg(feature = "instrument")]
+fn diagnose_kind(bound: &BoundOp, packed_operands: &PackedOperands) -> Option<String> {
+    if !matches!(bound.kind, BoundOpKind::Reduce { keep: Keep::Reduce, .. }) {
+        return None;
+    }
+    let quantized: Vec<Option<PackedCodec>> =
+        bound.operands().iter().map(|(node, _, _)| packed_operands.get(node).copied()).collect();
+    Some(match diagnose_packed_row_block(bound, &quantized) {
+        Ok(()) => "PASS".to_string(),
+        Err(rejection) => format!("{rejection:?}"),
+    })
 }
 
 /// Everything [`execute`] needs before touching a device — the same
@@ -195,18 +815,108 @@ struct Prepared {
     shapes: Shapes,
     effective_outputs: Vec<NodeId>,
     block_nodes: Vec<NodeId>,
-    nests: Vec<Nest>,
+    resolved: Vec<BoundOp>,
     retires: Vec<Vec<NodeId>>,
+    /// Every node referenced as a gather's `indices` anywhere in the
+    /// program — see [`gpu_dtype`]'s doc for why upload/read-back both
+    /// need this set alongside a node's own declared dtype.
+    index_nodes: BTreeSet<NodeId>,
+}
+
+
+/// Element count of one bound block, whatever codec carries it. The CPU
+/// evaluator's own block table is [`QuantizedBlock`]; this driver now takes
+/// the identical type rather than an `&[&[f32]]` of its own, so the two
+/// evaluators cannot drift on what a block IS. A packed codec's element
+/// count is derived from its own block geometry, never from `data.len()` —
+/// packed bytes and elements are not the same unit. Infallible now that
+/// every `QuantizedBlock` variant has a real Metal path (`Float16`/
+/// `BFloat16` were the last two arms that could still fail here); kept
+/// returning a `Result` regardless, so a future codec added without an
+/// entry here is still a typed error rather than a silent miscount.
+fn block_element_count(block: &QuantizedBlock<'_>) -> Result<usize, MetalError> {
+    match block {
+        QuantizedBlock::Float32(data) => Ok(data.len()),
+        // packed bytes and elements are NOT the same unit: a `Q4_K`
+        // super-block is 144 bytes carrying 256 elements, so the count the
+        // shape check compares against comes from block geometry, never
+        // from `bytes.len()`.
+        QuantizedBlock::Q4K(bytes) => {
+            Ok((bytes.len() / crate::msl::Q4K_BLOCK_BYTES) * crate::msl::Q4K_BLOCK_ELEMENTS)
+        }
+        // `Q6_K`'s super-block is a different byte width (210, not 144) but
+        // the SAME element count per super-block (256) as `Q4_K`/`Q5_K` —
+        // see `crate::msl::Q4K_BLOCK_ELEMENTS`'s own doc.
+        QuantizedBlock::Q6K(bytes) => {
+            Ok((bytes.len() / crate::msl::Q6K_BLOCK_BYTES) * crate::msl::Q4K_BLOCK_ELEMENTS)
+        }
+        // `Q5_K`'s super-block is yet another byte width (176) over the
+        // same 256-element count.
+        QuantizedBlock::Q5K(bytes) => {
+            Ok((bytes.len() / crate::msl::Q5K_BLOCK_BYTES) * crate::msl::Q4K_BLOCK_ELEMENTS)
+        }
+        // `Q8_0`'s block is a different shape entirely (34 bytes carrying
+        // 32 elements, no super-block) — its own constants, never
+        // `Q4K_BLOCK_ELEMENTS`.
+        QuantizedBlock::Q8_0(bytes) => {
+            Ok((bytes.len() / crate::msl::Q8_0_BLOCK_BYTES) * crate::msl::Q8_0_BLOCK_ELEMENTS)
+        }
+        // `Q4_0`'s block is the same flat shape as `Q8_0` (18 bytes
+        // carrying 32 elements, no super-block) but a different byte
+        // width -- its own constants, never `Q8_0_BLOCK_BYTES`.
+        QuantizedBlock::Q4_0(bytes) => {
+            Ok((bytes.len() / crate::msl::Q4_0_BLOCK_BYTES) * crate::msl::Q4_0_BLOCK_ELEMENTS)
+        }
+        // Half-precision weights are one element per block -- no
+        // super-block to divide out, unlike every quantized codec above.
+        QuantizedBlock::Float16(bytes) => {
+            Ok((bytes.len() / crate::msl::FLOAT16_BLOCK_BYTES) * crate::msl::FLOAT16_BLOCK_ELEMENTS)
+        }
+        QuantizedBlock::BFloat16(bytes) => {
+            Ok((bytes.len() / crate::msl::BFLOAT16_BLOCK_BYTES) * crate::msl::BFLOAT16_BLOCK_ELEMENTS)
+        }
+    }
+}
+
+/// Raw host bytes one [`QuantizedBlock`] hands [`upload_block`]/
+/// [`upload_packed_bytes`] — the split-4019 "block upload" term's byte count,
+/// distinct from [`block_element_count`]'s element count (a `Q4_K`
+/// super-block's bytes and elements are not the same unit either).
+#[cfg(feature = "instrument")]
+fn block_byte_len(block: &QuantizedBlock<'_>) -> usize {
+    match block {
+        QuantizedBlock::Float32(data) => size_of_val(*data),
+        QuantizedBlock::Q4K(bytes)
+        | QuantizedBlock::Q5K(bytes)
+        | QuantizedBlock::Q6K(bytes)
+        | QuantizedBlock::Q8_0(bytes)
+        | QuantizedBlock::Q4_0(bytes)
+        | QuantizedBlock::Float16(bytes)
+        | QuantizedBlock::BFloat16(bytes) => bytes.len(),
+    }
 }
 
 fn prepare(
-    program: &[Expr],
+    program: &[Op],
     symbols: &[u64],
-    blocks: &[&[f32]],
+    blocks: &[QuantizedBlock<'_>],
     outputs: &[NodeId],
 ) -> Result<Prepared, MetalError> {
     let shapes = infer(program, symbols)?;
-    reject_non_float32(program)?;
+    let packed_operands = packed_operands_of(&block_node_ids(program), blocks);
+    // every packed codec's declared dtype is the "these are bytes" marker
+    // `reject_unsupported_gpu_dtype`'s own doc already claims as its
+    // exemption's rationale -- not just the codecs `packed_operands` above
+    // has a kernel for, so any future codec added to `QuantizedBlock` before
+    // it has an unpack kernel here still gets the right dtype exemption
+    // rather than an unrelated "not float" rejection.
+    let packed_operand_nodes: BTreeSet<NodeId> = block_node_ids(program)
+        .iter()
+        .zip(blocks.iter())
+        .filter(|(_, block)| !matches!(block, QuantizedBlock::Float32(_)))
+        .map(|(node, _)| *node)
+        .collect();
+    reject_unsupported_gpu_dtype(program, &packed_operand_nodes)?;
 
     let root = program
         .len()
@@ -226,70 +936,120 @@ fn prepare(
 
     let block_nodes = block_node_ids(program);
     if blocks.len() != block_nodes.len() {
-        return Err(TensorError::BlockCountMismatch {
+        return Err(TensorError::InputCountMismatch {
             expected: block_nodes.len(),
             found: blocks.len(),
         }
         .into());
     }
-    for (node, data) in block_nodes.iter().zip(blocks.iter()) {
+    for (node, block) in block_nodes.iter().zip(blocks.iter()) {
         let expected = element_count(shapes.of(*node));
-        if data.len() != expected {
-            return Err(TensorError::BlockSizeMismatch {
+        let found = block_element_count(block)?;
+        if found != expected {
+            return Err(TensorError::InputSizeMismatch {
                 node: *node,
                 expected,
-                found: data.len(),
+                found,
             }
             .into());
         }
     }
 
-    let nests = lower(program, &shapes, &effective_outputs)?;
-    let retires = nest_retirement(&nests, &effective_outputs);
+    let mut resolved = bind(program, &shapes, &effective_outputs)?;
+    // `bind`'s own `layout_of` assumes every operand is stored row-major in
+    // its DECLARED axis order -- true for every f32 buffer this driver reads
+    // (bound-time-transposed to match, `bind_matmul_weight`'s own doc), but
+    // never true for a packed `Q4_K`/`Q5_K`/`Q6_K` weight, whose bytes are GGUF's
+    // native `[out, in]` regardless of what the declared shape says. Left
+    // uncorrected, every quantized matmul reads its weight through the wrong
+    // stride -- see `correct_packed_matmul_layouts`'s own doc (already
+    // codec-agnostic: it takes any `packed_operands` node set).
+    correct_packed_matmul_layouts(&mut resolved, &packed_operands.keys().copied().collect());
+    let retires = bound_op_retirement(&resolved, &effective_outputs);
+    let index_nodes = index_node_ids(program);
 
     Ok(Prepared {
         root,
         shapes,
         effective_outputs,
         block_nodes,
-        nests,
+        resolved,
         retires,
+        index_nodes,
     })
 }
 
-// mirrors `proxima_tensor::cpu::reject_non_float32`: every device buffer
-// this driver uploads is f32 (see `upload_block`), indices included — an
-// index value is an exact integer carried as f32 — so a gather's `indices`
-// node is the one deliberate exception, exactly as on the CPU path.
-fn reject_non_float32(program: &[Expr]) -> Result<(), TensorError> {
+// mirrors `proxima_tensor::cpu::reject_non_float32`'s exemption (a gather's
+// `indices` node is the one deliberate exception, since an index value is
+// an exact integer carried as f32 regardless of its own declared dtype) but
+// this driver's own dtype ceiling is wider than the CPU oracle's: `Float32`
+// or `Float16` may reach a device buffer, since `msl.rs` now emits a
+// `half`-typed kernel for a `Float16` node instead of assuming `float`
+// unconditionally (see `msl.rs`'s own dtype doc). A `BFloat16` node clears
+// this gate only via the `packed_nodes` exemption below (it is never a bare
+// `Float32`/`Float16` node itself) -- `packed_operands_of` puts every
+// `BFloat16` block-input node into that set. Any other dtype is still
+// rejected exactly as before.
+fn reject_unsupported_gpu_dtype(
+    program: &[Op],
+    packed_nodes: &BTreeSet<NodeId>,
+) -> Result<(), TensorError> {
     let index_nodes = index_node_ids(program);
     for (position, expr) in program.iter().enumerate() {
         let node = NodeId(position as u32);
-        if expr.dtype() != DType::Float32 && !index_nodes.contains(&node) {
+        // a gather's indices are exempt (see this function's doc); so is a
+        // packed quantized weight, whose declared dtype is the marker for
+        // "these are bytes" and never the element type the kernel computes
+        // in — the same exemption `cpu::reject_non_float32` makes via
+        // `is_quantized_matmul_operand`.
+        if index_nodes.contains(&node) || packed_nodes.contains(&node) {
+            continue;
+        }
+        if !matches!(expr.dtype(), DType::Float32 | DType::Float16) {
             return Err(TensorError::NotLowerable {
                 node,
-                reason: "metal execution is f32-only in v1, except for a gather's indices",
+                reason: "metal execution supports float32 or float16 in v1, \
+                         except for a gather's indices",
             });
         }
     }
     Ok(())
 }
 
+/// The dtype `node`'s own device buffer marshals as: `Float32` when `node`
+/// is a gather's `indices` (an index value is an exact integer carried as
+/// f32 regardless of its own declared dtype — see
+/// [`reject_unsupported_gpu_dtype`]'s doc), otherwise `node`'s own declared
+/// dtype straight off the program. `BoundOp::dtype` already carries this
+/// same value for a computed node (it is built from the identical `Op`),
+/// so callers that already have a `BoundOp` in hand read `bound.dtype`
+/// directly instead of calling this — this exists for the two places that
+/// only have a bare `NodeId`: uploading a block input and reading back a
+/// requested output, either of which may name a plain `Op::Input` node
+/// this driver never resolves into a `BoundOp` at all.
+fn gpu_dtype(program: &[Op], index_nodes: &BTreeSet<NodeId>, node: NodeId) -> DType {
+    if index_nodes.contains(&node) {
+        DType::Float32
+    } else {
+        program[node.0 as usize].dtype()
+    }
+}
+
 /// Every node referenced as a gather's `indices` anywhere in `program` —
 /// mirrors `proxima_tensor::cpu::index_node_ids`.
-fn index_node_ids(program: &[Expr]) -> BTreeSet<NodeId> {
+fn index_node_ids(program: &[Op]) -> BTreeSet<NodeId> {
     let mut nodes = BTreeSet::new();
     for expr in program {
         match expr {
-            Expr::Block { .. } => {}
-            Expr::Zip { operands, .. } => {
+            Op::Input { .. } | Op::Iota { .. } | Op::Constant { .. } => {}
+            Op::Elementwise { operands, .. } => {
                 for (_, map) in operands {
                     push_indices_node(map, &mut nodes);
                 }
             }
-            Expr::Fold(fold) => {
-                push_indices_node(&fold.in_map, &mut nodes);
-                push_indices_node(&fold.out_map, &mut nodes);
+            Op::Reduce(reduce) => {
+                push_indices_node(&reduce.in_map, &mut nodes);
+                push_indices_node(&reduce.out_map, &mut nodes);
             }
         }
     }
@@ -302,11 +1062,11 @@ fn push_indices_node(map: &IndexMap, nodes: &mut BTreeSet<NodeId>) {
     }
 }
 
-fn block_node_ids(program: &[Expr]) -> Vec<NodeId> {
+fn block_node_ids(program: &[Op]) -> Vec<NodeId> {
     program
         .iter()
         .enumerate()
-        .filter(|(_, expr)| matches!(expr, Expr::Block { .. }))
+        .filter(|(_, expr)| matches!(expr, Op::Input { .. }))
         .map(|(position, _)| NodeId(position as u32))
         .collect()
 }
@@ -315,23 +1075,23 @@ fn element_count(shape: &[u64]) -> usize {
     shape.iter().product::<u64>() as usize
 }
 
-/// Per-nest retire sets over the emitted nest sequence: `result[p]` is every
-/// node whose last read is `nests[p]`. Mirrors `cpu::evaluate`'s own
-/// (private) `nest_retirement` exactly, over the same public `Nest.operands`
-/// field.
-fn nest_retirement(nests: &[Nest], outputs: &[NodeId]) -> Vec<Vec<NodeId>> {
+/// Per-op retire sets over the emitted op sequence: `result[p]` is every
+/// node whose last read is `resolved[p]`. Mirrors `cpu::evaluate`'s own
+/// (private) `bound_op_retirement` exactly, over the same public
+/// `BoundOp::operands` accessor.
+fn bound_op_retirement(resolved: &[BoundOp], outputs: &[NodeId]) -> Vec<Vec<NodeId>> {
     let outputs: BTreeSet<NodeId> = outputs.iter().copied().collect();
     let mut last_use: BTreeMap<NodeId, usize> = BTreeMap::new();
-    for (position, nest) in nests.iter().enumerate() {
-        for (source, _, gather) in &nest.operands {
+    for (position, bound) in resolved.iter().enumerate() {
+        for (source, _, gather) in bound.operands() {
             last_use.insert(*source, position);
-            if let Some(gather_access) = gather {
-                last_use.insert(gather_access.indices, position);
+            if let Some(lookup) = gather {
+                last_use.insert(lookup.indices, position);
             }
         }
     }
 
-    let mut retires = alloc::vec![Vec::new(); nests.len()];
+    let mut retires = alloc::vec![Vec::new(); resolved.len()];
     for (node, position) in last_use {
         if !outputs.contains(&node) {
             retires[position].push(node);
@@ -340,21 +1100,28 @@ fn nest_retirement(nests: &[Nest], outputs: &[NodeId]) -> Vec<Vec<NodeId>> {
     retires
 }
 
-/// The output length a nest needs allocated: the reduced (product of
-/// surviving dims) length for a `Keep::Last` fold, or the full iteration
-/// space otherwise (elementwise and `Keep::All` both write one value per
-/// coordinate). Deliberately independent of [`Kernel::grid`]'s thread count —
-/// a `Keep::All` scan dispatches one thread per *line* but writes
-/// `inner_len` values per thread, so grid threads and output length diverge
-/// there.
-fn nest_output_len(nest: &Nest) -> usize {
-    match &nest.reduction {
-        Some(reduction) if reduction.keep == Keep::Last => reduction
-            .output_dims
+/// The output length an op needs allocated: the reduced (product of
+/// surviving axes) length for a `Keep::Reduce` reduce, or the full
+/// iteration space otherwise (elementwise and `Keep::Scan` both write one
+/// value per coordinate). Deliberately independent of [`Kernel::grid`]'s
+/// thread count — a `Keep::Scan` scan dispatches one thread per *line* but
+/// writes `inner_len` values per thread, so grid threads and output length
+/// diverge there.
+fn bound_output_len(bound: &BoundOp) -> usize {
+    match &bound.kind {
+        BoundOpKind::Reduce {
+            keep: Keep::Reduce,
+            output_axes,
+            ..
+        } => output_axes
             .iter()
-            .map(|dim| nest.extents[*dim as usize] as usize)
+            .map(|axis| bound.extents[*axis as usize] as usize)
             .product(),
-        _ => nest.extents.iter().map(|extent| *extent as usize).product(),
+        _ => bound
+            .extents
+            .iter()
+            .map(|extent| *extent as usize)
+            .product(),
     }
 }
 
@@ -363,9 +1130,9 @@ fn push_i64(bytes: &mut Vec<u8>, value: i64) {
 }
 
 /// Pushes `values` as a fixed-`width` MSL array, zero-padding any slot
-/// `values` does not fill — the only case that happens is a rank-0 nest,
+/// `values` does not fill — the only case that happens is a rank-0 op,
 /// where the declared array width is `max(rank, 1)` but there is no real
-/// dim to supply, and that padding slot is never read by the generated
+/// axis to supply, and that padding slot is never read by the generated
 /// source (see each `render_*`'s `if rank > 0` / `.saturating_sub(1)` guards).
 fn push_i64_row(bytes: &mut Vec<u8>, values: &[i64], width: usize) {
     for slot in 0..width {
@@ -374,18 +1141,18 @@ fn push_i64_row(bytes: &mut Vec<u8>, values: &[i64], width: usize) {
 }
 
 /// Appends the four gather arrays every `Uniforms` struct declares last (via
-/// `crate::msl::push_gather_uniform_fields`) when `nest` has at least one
+/// `crate::msl::push_gather_uniform_fields`) when `bound` has at least one
 /// gathered operand: `gather_index_base`, `gather_index_strides`,
 /// `gather_element_stride`, `gather_extent` — each one array of length
 /// `gather_count`. `crate::msl::gather_slots` numbers gathered operands by
-/// encounter order over `nest.operands`, so filtering in that same order
+/// encounter order over `bound.operands()`, so filtering in that same order
 /// (below) reproduces the identical numbering without needing to re-derive
-/// or look up the slot indices themselves. A no-op when `nest` has no
+/// or look up the slot indices themselves. A no-op when `bound` has no
 /// gather, matching `push_gather_uniform_fields`'s own empty-array early
 /// return.
-fn push_gather_uniforms(bytes: &mut Vec<u8>, nest: &Nest, rank_len: usize) {
-    let ordered: Vec<&GatherAccess> = nest
-        .operands
+fn push_gather_uniforms(bytes: &mut Vec<u8>, bound: &BoundOp, rank_len: usize) {
+    let ordered: Vec<&Lookup> = bound
+        .operands()
         .iter()
         .filter_map(|(_, _, gather)| gather.as_ref())
         .collect();
@@ -394,10 +1161,10 @@ fn push_gather_uniforms(bytes: &mut Vec<u8>, nest: &Nest, rank_len: usize) {
     }
 
     for gather in &ordered {
-        push_i64(bytes, gather.index_view.base);
+        push_i64(bytes, gather.index_layout.base);
     }
     for gather in &ordered {
-        push_i64_row(bytes, &gather.index_view.strides, rank_len);
+        push_i64_row(bytes, &gather.index_layout.strides, rank_len);
     }
     for gather in &ordered {
         push_i64(bytes, gather.element_stride);
@@ -407,35 +1174,53 @@ fn push_gather_uniforms(bytes: &mut Vec<u8>, nest: &Nest, rank_len: usize) {
     }
 }
 
-fn pack_uniforms(nest: &Nest) -> Vec<u8> {
-    match &nest.reduction {
-        None => pack_elementwise_uniforms(nest),
-        Some(reduction) if reduction.keep == Keep::Last => pack_reduce_uniforms(nest, reduction),
-        Some(reduction) => pack_scan_uniforms(nest, reduction),
+fn pack_uniforms(bound: &BoundOp) -> Vec<u8> {
+    match &bound.kind {
+        BoundOpKind::Elementwise { .. } => pack_elementwise_uniforms(bound),
+        BoundOpKind::Reduce {
+            keep: Keep::Reduce, ..
+        } => pack_reduce_uniforms(bound),
+        BoundOpKind::Reduce {
+            keep: Keep::Scan, ..
+        } => pack_scan_uniforms(bound),
+        BoundOpKind::Iota | BoundOpKind::Constant { .. } => pack_leaf_uniforms(bound),
     }
+}
+
+/// Mirrors the `Uniforms` struct `crate::msl::render_iota` and
+/// `crate::msl::render_constant` both declare: just `total_elements` —
+/// neither leaf has operands, a per-axis extents array, or a gather, so
+/// there is nothing else this struct needs to carry. `render_constant`
+/// bakes its literal into the source instead of adding a field here, which
+/// is what lets one packer serve both.
+fn pack_leaf_uniforms(bound: &BoundOp) -> Vec<u8> {
+    let total: i64 = bound.extents.iter().map(|extent| *extent as i64).product();
+    let mut bytes = Vec::new();
+    push_i64(&mut bytes, total);
+    bytes
 }
 
 /// Mirrors the `Uniforms` struct `crate::msl::render_elementwise` declares
 /// at `omega/src/msl.rs:328-335`: `total_elements`, `extents[rank_len]`,
 /// `operand_base[operand_count]`, `operand_strides[operand_count][rank_len]`,
-/// then — only when `nest` has a gathered operand — the four
+/// then — only when `bound` has a gathered operand — the four
 /// `push_gather_uniform_fields` arrays [`push_gather_uniforms`] appends, in
 /// that order — every field `long`, so a flat `i64` concatenation is the
 /// struct's byte layout.
-fn pack_elementwise_uniforms(nest: &Nest) -> Vec<u8> {
-    let rank_len = nest.extents.len().max(1);
-    let extents: Vec<i64> = nest.extents.iter().map(|extent| *extent as i64).collect();
+fn pack_elementwise_uniforms(bound: &BoundOp) -> Vec<u8> {
+    let rank_len = bound.extents.len().max(1);
+    let extents: Vec<i64> = bound.extents.iter().map(|extent| *extent as i64).collect();
 
     let mut bytes = Vec::new();
     push_i64(&mut bytes, extents.iter().product());
     push_i64_row(&mut bytes, &extents, rank_len);
-    for (_, view, _) in &nest.operands {
-        push_i64(&mut bytes, view.base);
+    for (_, layout, _) in bound.operands() {
+        push_i64(&mut bytes, layout.base);
     }
-    for (_, view, _) in &nest.operands {
-        push_i64_row(&mut bytes, &view.strides, rank_len);
+    for (_, layout, _) in bound.operands() {
+        push_i64_row(&mut bytes, &layout.strides, rank_len);
     }
-    push_gather_uniforms(&mut bytes, nest, rank_len);
+    push_gather_uniforms(&mut bytes, bound, rank_len);
     bytes
 }
 
@@ -446,20 +1231,27 @@ fn pack_elementwise_uniforms(nest: &Nest) -> Vec<u8> {
 /// `operand_strides[operand_count][rank_len]`, `out_base`,
 /// `out_strides[rank_len]`, then the gather arrays (see
 /// [`pack_elementwise_uniforms`]'s doc), in that order.
-fn pack_reduce_uniforms(nest: &Nest, reduction: &Reduction) -> Vec<u8> {
-    let rank_len = nest.extents.len().max(1);
-    let output_dims = &reduction.output_dims;
-    let output_rank_len = output_dims.len().max(1);
-    let reduce_dims = reduction_dims(nest, output_dims);
-    let reduce_rank_len = reduce_dims.len().max(1);
+fn pack_reduce_uniforms(bound: &BoundOp) -> Vec<u8> {
+    let BoundOpKind::Reduce {
+        output_axes,
+        out_layout,
+        ..
+    } = &bound.kind
+    else {
+        unreachable!("pack_reduce_uniforms is only called for a Keep::Reduce reduce")
+    };
+    let rank_len = bound.extents.len().max(1);
+    let output_rank_len = output_axes.len().max(1);
+    let reduce_axes = reduction_dims(bound, output_axes);
+    let reduce_rank_len = reduce_axes.len().max(1);
 
-    let output_extents: Vec<i64> = output_dims
+    let output_extents: Vec<i64> = output_axes
         .iter()
-        .map(|dim| nest.extents[*dim as usize] as i64)
+        .map(|axis| bound.extents[*axis as usize] as i64)
         .collect();
-    let reduction_extents: Vec<i64> = reduce_dims
+    let reduction_extents: Vec<i64> = reduce_axes
         .iter()
-        .map(|dim| nest.extents[*dim as usize] as i64)
+        .map(|axis| bound.extents[*axis as usize] as i64)
         .collect();
 
     let mut bytes = Vec::new();
@@ -467,15 +1259,15 @@ fn pack_reduce_uniforms(nest: &Nest, reduction: &Reduction) -> Vec<u8> {
     push_i64(&mut bytes, reduction_extents.iter().product());
     push_i64_row(&mut bytes, &output_extents, output_rank_len);
     push_i64_row(&mut bytes, &reduction_extents, reduce_rank_len);
-    for (_, view, _) in &nest.operands {
-        push_i64(&mut bytes, view.base);
+    for (_, layout, _) in bound.operands() {
+        push_i64(&mut bytes, layout.base);
     }
-    for (_, view, _) in &nest.operands {
-        push_i64_row(&mut bytes, &view.strides, rank_len);
+    for (_, layout, _) in bound.operands() {
+        push_i64_row(&mut bytes, &layout.strides, rank_len);
     }
-    push_i64(&mut bytes, reduction.out_view.base);
-    push_i64_row(&mut bytes, &reduction.out_view.strides, rank_len);
-    push_gather_uniforms(&mut bytes, nest, rank_len);
+    push_i64(&mut bytes, out_layout.base);
+    push_i64_row(&mut bytes, &out_layout.strides, rank_len);
+    push_gather_uniforms(&mut bytes, bound, rank_len);
     bytes
 }
 
@@ -486,32 +1278,35 @@ fn pack_reduce_uniforms(nest: &Nest, reduction: &Reduction) -> Vec<u8> {
 /// `out_strides[rank_len]`, then the gather arrays (see
 /// [`pack_elementwise_uniforms`]'s doc), in that order. `crate::msl::validate`
 /// already rejected a rank-0 scan before `emit` (and therefore this) ever
-/// runs, so `nest.extents` is never empty here.
-fn pack_scan_uniforms(nest: &Nest, reduction: &Reduction) -> Vec<u8> {
-    let rank = nest.extents.len();
+/// runs, so `bound.extents` is never empty here.
+fn pack_scan_uniforms(bound: &BoundOp) -> Vec<u8> {
+    let BoundOpKind::Reduce { out_layout, .. } = &bound.kind else {
+        unreachable!("pack_scan_uniforms is only called for a Keep::Scan reduce")
+    };
+    let rank = bound.extents.len();
     let rank_len = rank.max(1);
     let outer_rank = rank.saturating_sub(1);
     let outer_rank_len = outer_rank.max(1);
 
-    let outer_extents: Vec<i64> = nest.extents[..outer_rank]
+    let outer_extents: Vec<i64> = bound.extents[..outer_rank]
         .iter()
         .map(|extent| *extent as i64)
         .collect();
-    let inner_len = nest.extents.last().copied().unwrap_or(1) as i64;
+    let inner_len = bound.extents.last().copied().unwrap_or(1) as i64;
 
     let mut bytes = Vec::new();
     push_i64(&mut bytes, outer_extents.iter().product());
     push_i64(&mut bytes, inner_len);
     push_i64_row(&mut bytes, &outer_extents, outer_rank_len);
-    for (_, view, _) in &nest.operands {
-        push_i64(&mut bytes, view.base);
+    for (_, layout, _) in bound.operands() {
+        push_i64(&mut bytes, layout.base);
     }
-    for (_, view, _) in &nest.operands {
-        push_i64_row(&mut bytes, &view.strides, rank_len);
+    for (_, layout, _) in bound.operands() {
+        push_i64_row(&mut bytes, &layout.strides, rank_len);
     }
-    push_i64(&mut bytes, reduction.out_view.base);
-    push_i64_row(&mut bytes, &reduction.out_view.strides, rank_len);
-    push_gather_uniforms(&mut bytes, nest, rank_len);
+    push_i64(&mut bytes, out_layout.base);
+    push_i64_row(&mut bytes, &out_layout.strides, rank_len);
+    push_gather_uniforms(&mut bytes, bound, rank_len);
     bytes
 }
 
@@ -552,24 +1347,44 @@ fn compile_pipeline(
         })
 }
 
+/// Resolves `bound`'s compiled pipeline against `cache_key`
+/// ([`kernel_cache_key`]) rather than [`Kernel::source`] — a hit never builds
+/// the MSL source text at all, only a genuine miss calls [`emit`] to render
+/// it and compile. See this module's `ROW 92`/`ROW 93` discipline-log entries
+/// for the measured cost `emit` paid on every call, hit or miss, before this
+/// split existed.
 fn pipeline_for(
     device: &ProtocolObject<dyn MTLDevice>,
-    pipeline_cache: &mut BTreeMap<String, Retained<ProtocolObject<dyn MTLComputePipelineState>>>,
-    kernel: &Kernel,
+    bound: &BoundOp,
+    packed_operands: &PackedOperands,
+    cache_key: &str,
 ) -> Result<Retained<ProtocolObject<dyn MTLComputePipelineState>>, MetalError> {
-    if let Some(pipeline) = pipeline_cache.get(&kernel.source) {
-        return Ok(pipeline.clone());
+    if let Some(pipeline) = PIPELINE_CACHE.with(|cache| cache.borrow().get(cache_key).cloned()) {
+        #[cfg(feature = "instrument")]
+        counter!(PIPELINE_HITS, 1);
+        return Ok(pipeline);
     }
-    let pipeline = compile_pipeline(device, kernel)?;
-    pipeline_cache.insert(kernel.source.clone(), pipeline.clone());
+    #[cfg(feature = "instrument")]
+    let compile_started = read_ticks();
+    let kernel = emit(bound, packed_operands)?;
+    let pipeline = compile_pipeline(device, &kernel)?;
+    #[cfg(feature = "instrument")]
+    {
+        counter!(PIPELINE_MISSES, 1);
+        counter!(PIPELINE_COMPILE_TICKS, elapsed_ticks(compile_started));
+    }
+    PIPELINE_CACHE.with(|cache| {
+        cache.borrow_mut().insert(cache_key.to_string(), pipeline.clone());
+    });
     Ok(pipeline)
 }
 
 fn allocate_buffer(
     device: &ProtocolObject<dyn MTLDevice>,
     element_count: usize,
+    dtype: DType,
 ) -> Result<Retained<ProtocolObject<dyn MTLBuffer>>, MetalError> {
-    let byte_length = element_count.max(1) * size_of::<f32>();
+    let byte_length = element_count.max(1) * dtype.size_bytes();
     device
         .newBufferWithLength_options(byte_length, MTLResourceOptions::StorageModeShared)
         .ok_or_else(|| MetalError::CompileFailed {
@@ -577,18 +1392,356 @@ fn allocate_buffer(
         })
 }
 
+/// split-4019 per-token attribution counters — each is a (`_CALLS`, `_TICKS`)
+/// pair over one named stage of [`execute_plan`], read back via `.get()`
+/// (cumulative) or `.snapshot_and_reset()` (per-token delta) by a caller that
+/// wants to attribute wall clock rather than assume it. Every wrap site notes
+/// which term of the split-4019 table it feeds.
+#[cfg(feature = "instrument")]
+pub static PREPARE_CALLS: Counter = Counter::new("omega.metal.prepare_calls");
+#[cfg(feature = "instrument")]
+pub static PREPARE_TICKS: Counter = Counter::new("omega.metal.prepare_ticks");
+#[cfg(feature = "instrument")]
+pub static EMIT_CALLS: Counter = Counter::new("omega.metal.emit_calls");
+#[cfg(feature = "instrument")]
+pub static EMIT_TICKS: Counter = Counter::new("omega.metal.emit_ticks");
+#[cfg(feature = "instrument")]
+pub static PIPELINE_HITS: Counter = Counter::new("omega.metal.pipeline_hits");
+#[cfg(feature = "instrument")]
+pub static PIPELINE_MISSES: Counter = Counter::new("omega.metal.pipeline_misses");
+#[cfg(feature = "instrument")]
+pub static PIPELINE_COMPILE_TICKS: Counter = Counter::new("omega.metal.pipeline_compile_ticks");
+#[cfg(feature = "instrument")]
+pub static BLOCK_UPLOAD_CALLS: Counter = Counter::new("omega.metal.block_upload_calls");
+#[cfg(feature = "instrument")]
+pub static BLOCK_UPLOAD_TICKS: Counter = Counter::new("omega.metal.block_upload_ticks");
+#[cfg(feature = "instrument")]
+pub static BLOCK_UPLOAD_BYTES: Counter = Counter::new("omega.metal.block_upload_bytes");
+#[cfg(feature = "instrument")]
+pub static OP_SETUP_CALLS: Counter = Counter::new("omega.metal.op_setup_calls");
+#[cfg(feature = "instrument")]
+pub static OP_SETUP_TICKS: Counter = Counter::new("omega.metal.op_setup_ticks");
+/// ROW 93's split of ROW 92's "inside-backend residual": the whole
+/// [`pipeline_for`] call (cache lookup on a hit, lookup+compile on a miss),
+/// distinct from `EMIT_TICKS` (now the cheap `kernel_cache_key`/
+/// `kernel_dispatch_shape` pair, no MSL text) and from
+/// `PIPELINE_COMPILE_TICKS` (the compile-only sub-span that fires on a miss).
+#[cfg(feature = "instrument")]
+pub static PIPELINE_LOOKUP_CALLS: Counter = Counter::new("omega.metal.pipeline_lookup_calls");
+#[cfg(feature = "instrument")]
+pub static PIPELINE_LOOKUP_TICKS: Counter = Counter::new("omega.metal.pipeline_lookup_ticks");
+/// ROW 93's split of ROW 92's residual, part two: `setComputePipelineState`
+/// + `bind_buffers` + `dispatch`, `encode_op`'s three remaining calls.
+#[cfg(feature = "instrument")]
+pub static ENCODE_DISPATCH_CALLS: Counter = Counter::new("omega.metal.encode_dispatch_calls");
+#[cfg(feature = "instrument")]
+pub static ENCODE_DISPATCH_TICKS: Counter = Counter::new("omega.metal.encode_dispatch_ticks");
+#[cfg(feature = "instrument")]
+pub static GPU_EXEC_CALLS: Counter = Counter::new("omega.metal.gpu_exec_calls");
+#[cfg(feature = "instrument")]
+pub static GPU_EXEC_TICKS: Counter = Counter::new("omega.metal.gpu_exec_ticks");
+#[cfg(feature = "instrument")]
+pub static READBACK_CALLS: Counter = Counter::new("omega.metal.readback_calls");
+#[cfg(feature = "instrument")]
+pub static READBACK_TICKS: Counter = Counter::new("omega.metal.readback_ticks");
+#[cfg(feature = "instrument")]
+pub static READBACK_BYTES: Counter = Counter::new("omega.metal.readback_bytes");
+
+/// One [`execute_plan`] call's worth of the split-4019 counters above,
+/// snapshot-and-reset so a caller (the metal decode test) can read a
+/// PER-TOKEN delta rather than a cumulative mean over the whole run —
+/// guiding-principle 19's "per-token records, not just a mean".
+#[cfg(feature = "instrument")]
+#[derive(Debug, Clone, Copy, Default)]
+pub struct MetalStageTotals {
+    pub prepare_calls: u64,
+    pub prepare_ticks: u64,
+    pub emit_calls: u64,
+    pub emit_ticks: u64,
+    pub pipeline_hits: u64,
+    pub pipeline_misses: u64,
+    pub pipeline_compile_ticks: u64,
+    pub block_upload_calls: u64,
+    pub block_upload_ticks: u64,
+    pub block_upload_bytes: u64,
+    pub op_setup_calls: u64,
+    pub op_setup_ticks: u64,
+    pub pipeline_lookup_calls: u64,
+    pub pipeline_lookup_ticks: u64,
+    pub encode_dispatch_calls: u64,
+    pub encode_dispatch_ticks: u64,
+    pub gpu_exec_calls: u64,
+    pub gpu_exec_ticks: u64,
+    pub readback_calls: u64,
+    pub readback_ticks: u64,
+    pub readback_bytes: u64,
+    /// Split of `block_upload_calls` above by host->device path — reads back
+    /// the ALREADY-EXISTING [`NOCOPY_BUFFER_UPLOADS`]/[`COPYING_BUFFER_UPLOADS`]/
+    /// [`NOCOPY_BUFFER_REUSES`] counters (see this module's "Host buffer
+    /// upload" doc) rather than adding parallel ones, so a caller can tell
+    /// whether the 380+ ms/token `block_upload_ticks` figure is genuine
+    /// no-copy cache misses (a real `newBufferWithBytes*` driver call) or a
+    /// growing count of small COPYING allocations (the KV cache's own
+    /// re-`Vec`-allocated-every-append pointer, which can never take the
+    /// no-copy path).
+    pub nocopy_uploads: u64,
+    pub copying_uploads: u64,
+    pub nocopy_reuses: u64,
+    /// How many of `block_upload_calls` were a caller-declared-static weight
+    /// -- see [`Plan::mark_resident`] and [`upload_resident_copy`]. A resident
+    /// upload happens once per distinct weight buffer; a resident reuse
+    /// happens every token after that. `resident_reuses` growing while
+    /// `resident_uploads` stays flat at the weight count is the direct
+    /// witness that the ~5.84 GB/token copy `proxima-tensor/docs/discipline.md`
+    /// ROW 82 measured moved exactly once, not every step.
+    pub resident_uploads: u64,
+    pub resident_reuses: u64,
+}
+
+/// Reads and resets every split-4019 counter in one call — see
+/// [`MetalStageTotals`]'s own doc for why snapshot-and-reset rather than
+/// `.get()`.
+#[cfg(feature = "instrument")]
+pub fn metal_stage_totals() -> MetalStageTotals {
+    MetalStageTotals {
+        prepare_calls: PREPARE_CALLS.snapshot_and_reset(),
+        prepare_ticks: PREPARE_TICKS.snapshot_and_reset(),
+        emit_calls: EMIT_CALLS.snapshot_and_reset(),
+        emit_ticks: EMIT_TICKS.snapshot_and_reset(),
+        pipeline_hits: PIPELINE_HITS.snapshot_and_reset(),
+        pipeline_misses: PIPELINE_MISSES.snapshot_and_reset(),
+        pipeline_compile_ticks: PIPELINE_COMPILE_TICKS.snapshot_and_reset(),
+        block_upload_calls: BLOCK_UPLOAD_CALLS.snapshot_and_reset(),
+        block_upload_ticks: BLOCK_UPLOAD_TICKS.snapshot_and_reset(),
+        block_upload_bytes: BLOCK_UPLOAD_BYTES.snapshot_and_reset(),
+        op_setup_calls: OP_SETUP_CALLS.snapshot_and_reset(),
+        op_setup_ticks: OP_SETUP_TICKS.snapshot_and_reset(),
+        pipeline_lookup_calls: PIPELINE_LOOKUP_CALLS.snapshot_and_reset(),
+        pipeline_lookup_ticks: PIPELINE_LOOKUP_TICKS.snapshot_and_reset(),
+        encode_dispatch_calls: ENCODE_DISPATCH_CALLS.snapshot_and_reset(),
+        encode_dispatch_ticks: ENCODE_DISPATCH_TICKS.snapshot_and_reset(),
+        gpu_exec_calls: GPU_EXEC_CALLS.snapshot_and_reset(),
+        gpu_exec_ticks: GPU_EXEC_TICKS.snapshot_and_reset(),
+        readback_calls: READBACK_CALLS.snapshot_and_reset(),
+        readback_ticks: READBACK_TICKS.snapshot_and_reset(),
+        readback_bytes: READBACK_BYTES.snapshot_and_reset(),
+        nocopy_uploads: NOCOPY_BUFFER_UPLOADS.snapshot_and_reset(),
+        copying_uploads: COPYING_BUFFER_UPLOADS.snapshot_and_reset(),
+        nocopy_reuses: NOCOPY_BUFFER_REUSES.snapshot_and_reset(),
+        resident_uploads: RESIDENT_BUFFER_UPLOADS.snapshot_and_reset(),
+        resident_reuses: RESIDENT_BUFFER_REUSES.snapshot_and_reset(),
+    }
+}
+
+/// How many real [`upload_block`] calls took each host->device path —
+/// incremented once per call, never per byte, so a caller can read back the
+/// no-copy hit rate after a run without an external profiler. See the
+/// module doc's "Host buffer upload" section.
+pub static NOCOPY_BUFFER_UPLOADS: Counter = Counter::new("omega.metal.upload_block.nocopy");
+pub static COPYING_BUFFER_UPLOADS: Counter = Counter::new("omega.metal.upload_block.copy");
+
+/// The host's page size, queried once and cached — the alignment unit
+/// `newBufferWithBytesNoCopy` requires for both the pointer and the length
+/// (16384 on Apple silicon, but this asks the OS rather than hard-coding
+/// that). Public so a caller building block inputs (e.g.
+/// `proxima_tensor::AlignedBuffer::new`) can size an allocation to this
+/// exact host's page size instead of duplicating the sysconf call.
+pub fn page_size() -> usize {
+    static PAGE_SIZE: OnceLock<usize> = OnceLock::new();
+    // SAFETY: `sysconf` takes a plain `c_int` name and has no preconditions;
+    // `_SC_PAGESIZE` is POSIX-portable (macOS's `libc` crate has no
+    // `getpagesize()` binding, unlike Linux's).
+    *PAGE_SIZE.get_or_init(|| unsafe { libc::sysconf(libc::_SC_PAGESIZE) as usize })
+}
+
+/// `newBufferWithBytesNoCopy`'s hard requirement: `pointer` and `length`
+/// must both land on a page boundary.
+fn is_page_aligned(pointer: *const c_void, length: usize) -> bool {
+    let page = page_size();
+    (pointer as usize).is_multiple_of(page) && length.is_multiple_of(page)
+}
+
+/// Narrows the caller's f32 host data to `dtype`'s own width before
+/// uploading — see this module's dtype doc for why that narrowing happens
+/// exactly once, here, rather than the device buffer staying 4 bytes per
+/// element regardless of `dtype`. `node` names the block input this upload
+/// is for, used only to point an [`EmitError::UnsupportedDType`] at the
+/// right place — [`reject_unsupported_gpu_dtype`] already keeps anything
+/// but `Float32`/`Float16` from reaching this call inside [`execute`], so
+/// the new arm below is a totality guard, not a path this driver's own
+/// pipeline can actually hit.
 fn upload_block(
     device: &ProtocolObject<dyn MTLDevice>,
     data: &[f32],
-) -> Result<Retained<ProtocolObject<dyn MTLBuffer>>, MetalError> {
+    node: NodeId,
+    dtype: DType,
+    resident: bool,
+) -> Result<MetalBuffer, MetalError> {
+    match dtype {
+        // unreached by every program this driver compiles today (none
+        // declares a `Float16` block input -- `proxima-tensor/src/spec.rs`'s
+        // `mistral_cached_forward_program` is `Float32` throughout), so it is
+        // not worth the residency cache's extra bookkeeping: the narrowed
+        // `Vec<f16>` this allocates is dropped every call regardless.
+        DType::Float16 => upload_block_as_half(device, data),
+        DType::Float32
+        | DType::BFloat16
+        | DType::Bool
+        | DType::Int8
+        | DType::UInt8
+        | DType::Int32
+        | DType::UInt32 => upload_block_as_float(device, data, resident),
+        DType::Int16
+        | DType::UInt16
+        | DType::Int64
+        | DType::UInt64
+        | DType::Int128
+        | DType::UInt128
+        | DType::Float64 => Err(EmitError::UnsupportedDType { node, dtype }.into()),
+    }
+}
+
+/// The only path that can take the no-copy upload: the caller's own
+/// `&[f32]` slice is borrowed for [`execute`]'s entire call, which
+/// `waitUntilCompleted`s its single command buffer (every op's reads
+/// included) before that borrow can end, so handing the GPU the caller's
+/// own pointer is sound whenever it is page-aligned. See the module doc's
+/// "Host buffer upload" section for why [`upload_block_as_half`] can never
+/// take this path. `resident` is [`Plan::mark_resident`]'s classification of
+/// this block's own node -- see the module doc's "Resident blocks" section
+/// for why a misaligned RESIDENT block still gets a cache, just a different
+/// one than the no-copy path's.
+fn upload_block_as_float(
+    device: &ProtocolObject<dyn MTLDevice>,
+    data: &[f32],
+    resident: bool,
+) -> Result<MetalBuffer, MetalError> {
     if data.is_empty() {
-        return allocate_buffer(device, 0);
+        return allocate_buffer(device, 0, DType::Float32);
     }
     let byte_length = size_of_val(data);
-    // SAFETY: `data` is a live, non-empty `&[f32]` for the duration of this
-    // call, so its first element's address is a valid, non-null pointer that
-    // stays valid while `newBufferWithBytes_length_options` copies from it.
-    let pointer = unsafe { NonNull::new_unchecked(data.as_ptr() as *mut c_void) };
+    let pointer = data.as_ptr().cast::<c_void>();
+    if is_page_aligned(pointer, byte_length) {
+        counter!(NOCOPY_BUFFER_UPLOADS, 1);
+        return upload_block_no_copy(device, pointer, byte_length);
+    }
+    if resident {
+        return upload_resident_copy(device, pointer, byte_length);
+    }
+    counter!(COPYING_BUFFER_UPLOADS, 1);
+    upload_block_copy(device, pointer, byte_length)
+}
+
+/// Uploads a packed quantized weight buffer as raw BYTES — no dequantize on
+/// the host, which is the entire point. A 7B `Q4_K_S` checkpoint is 3.784 GB
+/// packed against 14.5 GB as `f16`; decode is a weight sweep, so that 3.56x
+/// in traffic IS the token rate. Reuses the same page-aligned no-copy path
+/// [`upload_block_as_float`] uses, since a memory-mapped GGUF tensor is very
+/// often already page-aligned. `resident` is the same "caller's own static
+/// weight" classification [`upload_block_as_float`] takes; a packed weight
+/// too misaligned for the no-copy path takes the same resident-copy cache.
+fn upload_packed_bytes(
+    device: &ProtocolObject<dyn MTLDevice>,
+    bytes: &[u8],
+    resident: bool,
+) -> Result<MetalBuffer, MetalError> {
+    if bytes.is_empty() {
+        return allocate_buffer(device, 0, DType::Float32);
+    }
+    let byte_length = bytes.len();
+    let pointer = bytes.as_ptr().cast::<c_void>();
+    if is_page_aligned(pointer, byte_length) {
+        counter!(NOCOPY_BUFFER_UPLOADS, 1);
+        return upload_block_no_copy(device, pointer, byte_length);
+    }
+    if resident {
+        return upload_resident_copy(device, pointer, byte_length);
+    }
+    counter!(COPYING_BUFFER_UPLOADS, 1);
+    upload_block_copy(device, pointer, byte_length)
+}
+
+thread_local! {
+    /// No-copy block buffers, keyed by the exact host range they wrap.
+    ///
+    /// `newBufferWithBytesNoCopy` does not copy, but it is NOT free: every
+    /// call creates a fresh `MTLBuffer` and Metal has to wire those pages
+    /// for GPU access. `execute` rebuilt every block buffer on every call,
+    /// so a serving loop re-wired the entire weight set per token — a cost
+    /// that scales with BYTES, which is exactly what made it invisible in a
+    /// bytes-normalized probe.
+    ///
+    /// CALLER PRECONDITION, not yet enforced by a type: a cached wrapper
+    /// aliases the caller's pages and Metal does NOT own them, so the host
+    /// range `(pointer, len)` must stay mapped for as long as this thread
+    /// keeps using omega. That holds for mmap'd GGUF weights, which is the
+    /// case this exists for; it does NOT hold for a `Vec` the caller drops
+    /// between calls, where the wrapper would alias freed pages. The sound
+    /// version of this is a resident-blocks handle whose lifetime borrows
+    /// the caller's data — see `proxima-tensor/docs/discipline.md` ROW 70.
+    ///
+    /// Reuse is otherwise safe on the data-freshness axis precisely BECAUSE
+    /// it is no-copy: writes through the caller's own slice are visible to
+    /// the GPU, so a wrapper never goes stale. Copying uploads are
+    /// deliberately NOT cached — those snapshot the data, and reuse would
+    /// serve a stale snapshot.
+    static NOCOPY_BUFFERS: RefCell<BTreeMap<(usize, usize), MetalBuffer>> =
+        RefCell::new(BTreeMap::new());
+}
+
+/// Counts the no-copy wrappers this thread reused instead of recreating —
+/// the direct witness that a serving loop stops re-wiring its weights.
+pub static NOCOPY_BUFFER_REUSES: Counter = Counter::new("omega.metal.upload_block.nocopy_reuse");
+
+/// The zero-copy path: shares `pointer`'s memory directly with the GPU
+/// instead of duplicating it. Sound only because every caller of
+/// [`upload_block`] binds the returned buffer to a `device const float*`
+/// kernel argument (see `msl::kernel_signature`) — the GPU never writes
+/// through it, matching the `&[f32]` (never `&mut`) the caller handed us —
+/// and because [`execute`] `waitUntilCompleted`s the one command buffer
+/// every op (including this buffer's reads) is encoded into before
+/// [`upload_block_as_float`]'s caller-owned slice's borrow can end.
+fn upload_block_no_copy(
+    device: &ProtocolObject<dyn MTLDevice>,
+    pointer: *const c_void,
+    byte_length: usize,
+) -> Result<MetalBuffer, MetalError> {
+    // SAFETY: `pointer` is non-null (it comes from a non-empty slice) and,
+    // per `is_page_aligned`, page-aligned with a page-aligned `byte_length`
+    // — `newBufferWithBytesNoCopy`'s documented precondition. Passing `None`
+    // as the deallocator tells Metal it never owns this memory, so it is
+    // never freed or written out from under the caller.
+    let key = (pointer as usize, byte_length);
+    if let Some(existing) = NOCOPY_BUFFERS.with(|cache| cache.borrow().get(&key).cloned()) {
+        counter!(NOCOPY_BUFFER_REUSES, 1);
+        return Ok(existing);
+    }
+    let pointer = unsafe { NonNull::new_unchecked(pointer as *mut c_void) };
+    let buffer = unsafe {
+        device.newBufferWithBytesNoCopy_length_options_deallocator(
+            pointer,
+            byte_length,
+            MTLResourceOptions::StorageModeShared,
+            None,
+        )
+    }
+    .ok_or_else(|| MetalError::CompileFailed {
+        log: "device refused a no-copy shared buffer for a page-aligned block input".to_string(),
+    })?;
+    NOCOPY_BUFFERS.with(|cache| cache.borrow_mut().insert(key, buffer.clone()));
+    Ok(buffer)
+}
+
+fn upload_block_copy(
+    device: &ProtocolObject<dyn MTLDevice>,
+    pointer: *const c_void,
+    byte_length: usize,
+) -> Result<MetalBuffer, MetalError> {
+    // SAFETY: `pointer` is a live, non-null address for the duration of this
+    // call (borrowed from the caller's own `&[f32]`, or a locally owned
+    // narrowed `Vec<f16>` that outlives this call), so it stays valid while
+    // `newBufferWithBytes_length_options` copies from it.
+    let pointer = unsafe { NonNull::new_unchecked(pointer as *mut c_void) };
     unsafe {
         device.newBufferWithBytes_length_options(
             pointer,
@@ -599,6 +1752,72 @@ fn upload_block(
     .ok_or_else(|| MetalError::CompileFailed {
         log: "device refused to allocate a shared buffer for a block input".to_string(),
     })
+}
+
+thread_local! {
+    /// Copied device buffers for blocks [`Plan::mark_resident`] classified as
+    /// the caller's own static weights -- a SEPARATE map from
+    /// [`NOCOPY_BUFFERS`], not a shared one, because the two caches rest on
+    /// different soundness arguments: a no-copy entry is safe to reuse
+    /// unconditionally because it aliases whatever is CURRENTLY at that
+    /// address (never stale by construction); this cache instead reuses a
+    /// SNAPSHOT taken at first upload, which is sound only because the
+    /// caller already proved -- by name, once, in `mark_resident` -- that
+    /// the address holds a model weight nothing overwrites again. Keeping
+    /// them apart keeps that distinction visible at the call site instead of
+    /// folding two different proofs into one lookup.
+    static RESIDENT_BUFFERS: RefCell<BTreeMap<(usize, usize), MetalBuffer>> =
+        RefCell::new(BTreeMap::new());
+}
+
+/// How many resident (caller-declared-static) blocks took a real copy versus
+/// how many were served from [`RESIDENT_BUFFERS`] instead -- the direct
+/// witness that the ~5.84 GB/token `proxima-tensor/docs/discipline.md` ROW 82
+/// measured moving through [`upload_block_copy`] on every step now moves
+/// exactly once per distinct weight buffer, never once per token.
+pub static RESIDENT_BUFFER_UPLOADS: Counter = Counter::new("omega.metal.upload_block.resident_upload");
+pub static RESIDENT_BUFFER_REUSES: Counter = Counter::new("omega.metal.upload_block.resident_reuse");
+
+/// The copy-path counterpart to [`upload_block_no_copy`]: called only for a
+/// block [`upload_block_as_float`]/[`upload_packed_bytes`] already found
+/// misaligned AND [`Plan::mark_resident`] already classified as static, so
+/// unlike [`upload_block_copy`] this one is allowed to remember the buffer it
+/// creates and hand the SAME one back next time the SAME `(pointer, len)`
+/// shows up -- sound only because that classification, not an address guess,
+/// is what proves the bytes behind `pointer` never change again.
+fn upload_resident_copy(
+    device: &ProtocolObject<dyn MTLDevice>,
+    pointer: *const c_void,
+    byte_length: usize,
+) -> Result<MetalBuffer, MetalError> {
+    let key = (pointer as usize, byte_length);
+    if let Some(existing) = RESIDENT_BUFFERS.with(|cache| cache.borrow().get(&key).cloned()) {
+        counter!(RESIDENT_BUFFER_REUSES, 1);
+        return Ok(existing);
+    }
+    counter!(COPYING_BUFFER_UPLOADS, 1);
+    counter!(RESIDENT_BUFFER_UPLOADS, 1);
+    let buffer = upload_block_copy(device, pointer, byte_length)?;
+    RESIDENT_BUFFERS.with(|cache| cache.borrow_mut().insert(key, buffer.clone()));
+    Ok(buffer)
+}
+
+/// Always copies — see the module doc's "Host buffer upload" section for
+/// why a freshly narrowed `Vec<f16>` can never take the no-copy path: it
+/// drops the instant this function returns, so no-copy would hand Metal a
+/// dangling pointer.
+fn upload_block_as_half(
+    device: &ProtocolObject<dyn MTLDevice>,
+    data: &[f32],
+) -> Result<MetalBuffer, MetalError> {
+    if data.is_empty() {
+        return allocate_buffer(device, 0, DType::Float16);
+    }
+    let narrowed: Vec<f16> = data.iter().map(|value| f16::from_f32(*value)).collect();
+    let byte_length = size_of_val(narrowed.as_slice());
+    let pointer = narrowed.as_ptr().cast::<c_void>();
+    counter!(COPYING_BUFFER_UPLOADS, 1);
+    upload_block_copy(device, pointer, byte_length)
 }
 
 /// Allocates a `gather_count`-long `uint` buffer for a dispatch's gather
@@ -629,15 +1848,34 @@ fn zero_fault_buffer(buffer: &ProtocolObject<dyn MTLBuffer>, gather_count: usize
     slots.fill(0);
 }
 
+
+thread_local! {
+    /// Uniform blobs, keyed by their own bytes. A plan's uniforms are a
+    /// function of the BOUND OP — extents, strides, bases — so they are
+    /// byte-identical on every call, and `execute` was allocating a fresh
+    /// `MTLBuffer` for each of them per op per call. Safe to share: the
+    /// kernel binds them `constant` and never writes through them, and two
+    /// ops with identical uniform bytes want identical contents by
+    /// definition.
+    static UNIFORM_BUFFERS: RefCell<BTreeMap<Vec<u8>, MetalBuffer>> =
+        RefCell::new(BTreeMap::new());
+}
+
+/// Counts uniform buffers served from cache rather than allocated.
+pub static UNIFORM_BUFFER_REUSES: Counter = Counter::new("omega.metal.uniforms.reuse");
 fn upload_uniforms(
     device: &ProtocolObject<dyn MTLDevice>,
     bytes: &[u8],
 ) -> Result<Retained<ProtocolObject<dyn MTLBuffer>>, MetalError> {
+    if let Some(existing) = UNIFORM_BUFFERS.with(|cache| cache.borrow().get(bytes).cloned()) {
+        counter!(UNIFORM_BUFFER_REUSES, 1);
+        return Ok(existing);
+    }
     // SAFETY: `bytes` is always non-empty (every `Uniforms` struct has at
     // least two `long` fields), so its first byte's address is valid and
     // stays valid while this call copies from it.
     let pointer = unsafe { NonNull::new_unchecked(bytes.as_ptr() as *mut c_void) };
-    unsafe {
+    let buffer = unsafe {
         device.newBufferWithBytes_length_options(
             pointer,
             bytes.len(),
@@ -646,7 +1884,9 @@ fn upload_uniforms(
     }
     .ok_or_else(|| MetalError::CompileFailed {
         log: "device refused to allocate the uniforms buffer".to_string(),
-    })
+    })?;
+    UNIFORM_BUFFERS.with(|cache| cache.borrow_mut().insert(bytes.to_vec(), buffer.clone()));
+    Ok(buffer)
 }
 
 fn buffer_for(
@@ -664,13 +1904,13 @@ fn buffer_for(
 
 fn bind_buffers(
     encoder: &ProtocolObject<dyn MTLComputeCommandEncoder>,
-    kernel: &Kernel,
+    bindings: &[Binding],
     device_buffers: &BTreeMap<NodeId, Retained<ProtocolObject<dyn MTLBuffer>>>,
     output: &Retained<ProtocolObject<dyn MTLBuffer>>,
     uniforms: &Retained<ProtocolObject<dyn MTLBuffer>>,
     fault: Option<&Retained<ProtocolObject<dyn MTLBuffer>>>,
 ) -> Result<(), MetalError> {
-    for (index, binding) in kernel.bindings.iter().enumerate() {
+    for (index, binding) in bindings.iter().enumerate() {
         let buffer = match binding {
             Binding::Input(node) | Binding::Indices(node) => buffer_for(device_buffers, *node)?,
             Binding::Output(_) => output.clone(),
@@ -679,7 +1919,7 @@ fn bind_buffers(
                 log: "kernel binds a fault buffer but none was allocated".to_string(),
             })?,
         };
-        // SAFETY: `buffer`'s length was sized from the same nest this
+        // SAFETY: `buffer`'s length was sized from the same op this
         // kernel was emitted from, so every byte the kernel indexes through
         // this binding is in bounds.
         unsafe { encoder.setBuffer_offset_atIndex(Some(&buffer), 0, index) };
@@ -687,18 +1927,26 @@ fn bind_buffers(
     Ok(())
 }
 
+/// `grid.threadgroup_width`, when present, is not an occupancy hint — it is
+/// a correctness requirement a cooperative-reduce kernel's own coordinate
+/// math depends on (`gid / SIMD_WIDTH` as an output index; see
+/// `crate::msl::push_cooperative_reduce_body`'s doc), so it is honored
+/// exactly rather than folded into the generic `min(threads, max)` pick.
 fn dispatch(
     encoder: &ProtocolObject<dyn MTLComputeCommandEncoder>,
     pipeline: &ProtocolObject<dyn MTLComputePipelineState>,
-    threads: u64,
+    grid: GridSpec,
 ) {
-    if threads == 0 {
+    if grid.threads == 0 {
         return;
     }
     let max_threadgroup = pipeline.maxTotalThreadsPerThreadgroup();
-    let threadgroup_width = (threads as usize).min(max_threadgroup).max(1);
-    let grid = MTLSize {
-        width: threads as usize,
+    let threadgroup_width = match grid.threadgroup_width {
+        Some(width) => (width as usize).min(max_threadgroup).max(1),
+        None => (grid.threads as usize).min(max_threadgroup).max(1),
+    };
+    let grid_size = MTLSize {
+        width: grid.threads as usize,
         height: 1,
         depth: 1,
     };
@@ -707,80 +1955,106 @@ fn dispatch(
         height: 1,
         depth: 1,
     };
-    encoder.dispatchThreads_threadsPerThreadgroup(grid, threadgroup);
+    encoder.dispatchThreads_threadsPerThreadgroup(grid_size, threadgroup);
 }
 
-fn dispatch_nest(
+/// Encodes one `BoundOp` as a compute dispatch into the CALLER's already-open
+/// `encoder` — neither opened nor `endEncoding()`d here. [`execute_plan`]
+/// opens exactly one `MTLComputeCommandEncoder` for the whole program and
+/// ends it once, after every op has been encoded into it (see the module
+/// doc's "Execution model"); [`execute_plan_op_timed`]'s diagnostic path
+/// instead opens and ends one per call, one op at a time. Either way this
+/// function only ever binds a pipeline, binds buffers, and dispatches —
+/// exactly the same three calls regardless of how many other ops share the
+/// encoder it was handed. Returns the op's fault buffer and gather count
+/// when it gathers, so the caller can check it after its own wait instead
+/// of here, where the buffer is not yet CPU-visible.
+fn encode_op(
     device: &ProtocolObject<dyn MTLDevice>,
-    queue: &ProtocolObject<dyn MTLCommandQueue>,
-    pipeline_cache: &mut BTreeMap<String, Retained<ProtocolObject<dyn MTLComputePipelineState>>>,
-    device_buffers: &mut BTreeMap<NodeId, Retained<ProtocolObject<dyn MTLBuffer>>>,
-    nest: &Nest,
-) -> Result<(), MetalError> {
-    let kernel = emit(nest)?;
-    let pipeline = pipeline_for(device, pipeline_cache, &kernel)?;
-    let output = allocate_buffer(device, nest_output_len(nest))?;
-    let uniforms = upload_uniforms(device, &pack_uniforms(nest))?;
-    let gathers = gather_count(nest);
+    encoder: &ProtocolObject<dyn MTLComputeCommandEncoder>,
+    device_buffers: &mut BTreeMap<NodeId, MetalBuffer>,
+    bound: &BoundOp,
+    packed_operands: &PackedOperands,
+) -> Result<Option<(MetalBuffer, usize)>, MetalError> {
+    #[cfg(feature = "instrument")]
+    let emit_started = read_ticks();
+    // `kernel_cache_key`/`kernel_dispatch_shape` are the cheap halves of
+    // `emit`'s work -- structural fingerprint, bindings, grid -- with no MSL
+    // body text rendered. On a pipeline-cache HIT (the steady-decode case,
+    // `plan_hits`/`gpu_exec`'s own row) `emit` itself is never called; only a
+    // genuine miss inside `pipeline_for` pays for the full render + compile.
+    let cache_key = kernel_cache_key(bound, packed_operands)?;
+    let (bindings, grid) = kernel_dispatch_shape(bound, packed_operands)?;
+    #[cfg(feature = "instrument")]
+    {
+        counter!(EMIT_CALLS, 1);
+        counter!(EMIT_TICKS, elapsed_ticks(emit_started));
+    }
+    #[cfg(feature = "instrument")]
+    let pipeline_started = read_ticks();
+    let pipeline = pipeline_for(device, bound, packed_operands, &cache_key)?;
+    #[cfg(feature = "instrument")]
+    {
+        counter!(PIPELINE_LOOKUP_CALLS, 1);
+        counter!(PIPELINE_LOOKUP_TICKS, elapsed_ticks(pipeline_started));
+    }
+    #[cfg(feature = "instrument")]
+    let op_setup_started = read_ticks();
+    let output = allocate_buffer(device, bound_output_len(bound), bound.dtype)?;
+    let uniforms = upload_uniforms(device, &pack_uniforms(bound))?;
+    let gathers = gather_count(bound);
     let fault = (gathers > 0)
         .then(|| allocate_fault_buffer(device, gathers))
         .transpose()?;
-
-    let command_buffer = queue
-        .commandBuffer()
-        .ok_or_else(|| MetalError::CompileFailed {
-            log: "command queue refused to hand out a command buffer".to_string(),
-        })?;
-    let encoder =
-        command_buffer
-            .computeCommandEncoder()
-            .ok_or_else(|| MetalError::CompileFailed {
-                log: "command buffer refused to hand out a compute encoder".to_string(),
-            })?;
-
-    encoder.setComputePipelineState(&pipeline);
-    bind_buffers(
-        &encoder,
-        &kernel,
-        device_buffers,
-        &output,
-        &uniforms,
-        fault.as_ref(),
-    )?;
-    dispatch(&encoder, &pipeline, kernel.grid.threads);
-    encoder.endEncoding();
-    command_buffer.commit();
-    command_buffer.waitUntilCompleted();
-
-    if let Some(fault_buffer) = &fault {
-        check_gather_fault(nest, fault_buffer, gathers)?;
+    #[cfg(feature = "instrument")]
+    {
+        counter!(OP_SETUP_CALLS, 1);
+        counter!(OP_SETUP_TICKS, elapsed_ticks(op_setup_started));
     }
 
-    device_buffers.insert(nest.node, output);
-    Ok(())
+    // ROW 92 named this residual (`omega/src/metal.rs:1873-1908` at that
+    // row's line numbers) as four uncounted Metal API calls: `pipeline_for`'s
+    // own lookup (now `PIPELINE_LOOKUP_TICKS` above), `setComputePipelineState`,
+    // `bind_buffers`, `dispatch` -- the three below, wrapped together since
+    // none does per-op device work heavy enough to need its own counter, and
+    // splitting them finer would cost more ticks reading the clock than the
+    // calls themselves take.
+    #[cfg(feature = "instrument")]
+    let encode_dispatch_started = read_ticks();
+    encoder.setComputePipelineState(&pipeline);
+    bind_buffers(encoder, &bindings, device_buffers, &output, &uniforms, fault.as_ref())?;
+    dispatch(encoder, &pipeline, grid);
+    #[cfg(feature = "instrument")]
+    {
+        counter!(ENCODE_DISPATCH_CALLS, 1);
+        counter!(ENCODE_DISPATCH_TICKS, elapsed_ticks(encode_dispatch_started));
+    }
+
+    device_buffers.insert(bound.node, output);
+    Ok(fault.map(|fault_buffer| (fault_buffer, gathers)))
 }
 
 /// Reads back a dispatch's fault buffer and, if any slot recorded a fault,
 /// turns it into the same `TensorError::GatherIndexOutOfRange`
 /// `cpu::evaluate` reports for the identical fetched index. Slot order
-/// matches `nest.operands`' gather order — the same numbering
+/// matches `bound.operands()`' gather order — the same numbering
 /// `crate::msl::gather_slots` and `push_gather_uniforms` both use — so the
-/// first faulted slot's own `GatherAccess` supplies the extent to report.
+/// first faulted slot's own `Lookup` supplies the extent to report.
 fn check_gather_fault(
-    nest: &Nest,
+    bound: &BoundOp,
     fault_buffer: &ProtocolObject<dyn MTLBuffer>,
     gather_count: usize,
 ) -> Result<(), MetalError> {
     let slots = read_fault_slots(fault_buffer, gather_count);
-    let gathers: Vec<&GatherAccess> = nest
-        .operands
+    let gathers: Vec<&Lookup> = bound
+        .operands()
         .iter()
         .filter_map(|(_, _, gather)| gather.as_ref())
         .collect();
     for (slot, recorded) in slots.iter().enumerate() {
         if *recorded != 0 {
             return Err(TensorError::GatherIndexOutOfRange {
-                node: nest.node,
+                node: bound.node,
                 index: i64::from(*recorded - 1),
                 extent: gathers[slot].extent,
             }
@@ -799,33 +2073,92 @@ fn read_fault_slots(buffer: &ProtocolObject<dyn MTLBuffer>, gather_count: usize)
         .to_vec()
 }
 
-fn read_back(buffer: &ProtocolObject<dyn MTLBuffer>, element_count: usize) -> Vec<f32> {
+/// Widens a device buffer back to the host's f32 contract — see this
+/// module's dtype doc for why that widening happens exactly once, here,
+/// mirroring the narrowing [`upload_block`] does on the way in. `node`
+/// names the output this read-back is for, used only to point an
+/// [`EmitError::UnsupportedDType`] at the right place — same totality-guard
+/// stance as [`upload_block`]'s `node` parameter.
+fn read_back(
+    buffer: &ProtocolObject<dyn MTLBuffer>,
+    element_count: usize,
+    node: NodeId,
+    dtype: DType,
+) -> Result<Vec<f32>, MetalError> {
     if element_count == 0 {
-        return Vec::new();
+        return Ok(Vec::new());
     }
+    match dtype {
+        DType::Float16 => Ok(read_back_half(buffer, element_count)),
+        DType::Float32
+        | DType::BFloat16
+        | DType::Bool
+        | DType::Int8
+        | DType::UInt8
+        | DType::Int32
+        | DType::UInt32 => Ok(read_back_float(buffer, element_count)),
+        DType::Int16
+        | DType::UInt16
+        | DType::Int64
+        | DType::UInt64
+        | DType::Int128
+        | DType::UInt128
+        | DType::Float64 => Err(EmitError::UnsupportedDType { node, dtype }.into()),
+    }
+}
+
+fn read_back_float(buffer: &ProtocolObject<dyn MTLBuffer>, element_count: usize) -> Vec<f32> {
     let pointer = buffer.contents();
     // SAFETY: `buffer` is `storageModeShared`, so `contents()` is a
     // CPU-visible pointer to at least `element_count` initialized `f32`s —
     // every output buffer this driver allocates is sized to at least that
-    // many elements (see `allocate_buffer`'s caller, `dispatch_nest`) before
+    // many elements (see `allocate_buffer`'s caller, `dispatch_op`) before
     // this point is reached.
     unsafe { core::slice::from_raw_parts(pointer.as_ptr().cast::<f32>(), element_count) }.to_vec()
 }
 
+fn read_back_half(buffer: &ProtocolObject<dyn MTLBuffer>, element_count: usize) -> Vec<f32> {
+    let pointer = buffer.contents();
+    // SAFETY: `buffer` is `storageModeShared`, so `contents()` is a
+    // CPU-visible pointer to at least `element_count` initialized `f16`s —
+    // the same sizing guarantee `read_back_float` relies on, just over the
+    // narrower element width `allocate_buffer` used for a `Float16` node.
+    let narrow =
+        unsafe { core::slice::from_raw_parts(pointer.as_ptr().cast::<f16>(), element_count) };
+    narrow.iter().map(|value| value.to_f32()).collect()
+}
+
 fn finish(
+    program: &[Op],
+    index_nodes: &BTreeSet<NodeId>,
     shapes: &Shapes,
     effective_outputs: &[NodeId],
     device_buffers: &BTreeMap<NodeId, Retained<ProtocolObject<dyn MTLBuffer>>>,
     root: NodeId,
-) -> Result<Executed, MetalError> {
+) -> Result<Evaluated, MetalError> {
     let mut results = Vec::with_capacity(effective_outputs.len());
+    #[cfg(feature = "instrument")]
+    let readback_started = read_ticks();
     for node in effective_outputs {
         let shape = shapes.of(*node).to_vec();
+        let dtype = gpu_dtype(program, index_nodes, *node);
         let data = match device_buffers.get(node) {
-            Some(buffer) => read_back(buffer, element_count(&shape)),
+            Some(buffer) => read_back(buffer, element_count(&shape), *node, dtype)?,
             None => Vec::new(),
         };
+        #[cfg(feature = "instrument")]
+        {
+            counter!(READBACK_CALLS, 1);
+            counter!(READBACK_BYTES, size_of_val(data.as_slice()) as u64);
+        }
         results.push((*node, shape, data));
     }
-    Ok(Executed { root, results })
+    #[cfg(feature = "instrument")]
+    counter!(READBACK_TICKS, elapsed_ticks(readback_started));
+    // this backend's buffer lifetime is managed by Metal's own
+    // retain/release, not counted the way `cpu::evaluate` counts its
+    // `Vec<Option<Vec<f32>>>` table, so peak_live_buffers is not tracked
+    // here — see `Evaluated`'s own doc for why `None` is the honest answer
+    // rather than a number that would not mean the same thing.
+    Ok(Evaluated::from_parts(root, results, None))
 }

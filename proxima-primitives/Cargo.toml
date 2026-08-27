@@ -167,7 +167,6 @@ features = ["fallback"]
 [dev-dependencies]
 criterion.workspace = true
 rand = { workspace = true }
-rstest = { workspace = true }
 # incumbent arm for the bucket_table bench (P14): dashmap is no longer a runtime dep.
 dashmap = { workspace = true }
 proxima-core = { workspace = true, features = ["time-driver-mock", "std", "time-driver-std-thread"] }

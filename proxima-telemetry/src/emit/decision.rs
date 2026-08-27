@@ -70,8 +70,7 @@ mod tests {
         clippy::default_constructed_unit_structs
     )]
 
-    use rstest::rstest;
-
+    
     use super::EmitThreshold;
     use crate::emit::Coord;
     use crate::level::Level;
@@ -79,12 +78,12 @@ mod tests {
 
     // a plain floor behaves exactly like the flat FilterByLevelPipe: keep at or
     // above the floor severity, drop below.
-    #[rstest]
+    #[proxima::test]
     #[case::error_kept_at_warn_floor(Level::WARN, Level::ERROR, Decision::Keep)]
     #[case::warn_kept_at_warn_floor(Level::WARN, Level::WARN, Decision::Keep)]
     #[case::info_dropped_at_warn_floor(Level::WARN, Level::INFO, Decision::Drop)]
     #[case::trace_dropped_at_info_floor(Level::INFO, Level::TRACE, Decision::Drop)]
-    fn flat_floor_matches_filter_by_level(
+    async fn flat_floor_matches_filter_by_level(
         #[case] floor: Level,
         #[case] record: Level,
         #[case] want: Decision,

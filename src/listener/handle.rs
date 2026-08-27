@@ -436,16 +436,16 @@ impl ListenerBuilder {
     /// also uses at `src/app.rs:1055,1111`) so every path routes to
     /// `.handle(pipe)`, not just the literal root.
     ///
-    /// Readiness race: unlike `proxima_listen::handle::Listener::run_with_runtime`
-    /// (which blocks for a per-lane ready ack before returning), `App::serve`
-    /// returns as soon as the listener lane is SPAWNED, before its `serve`
-    /// future gets its first poll and runs the real `bind`/`listen` syscalls.
-    /// A caller that dials immediately after `.serve()` resolves can race a
-    /// not-yet-listening socket (`ECONNREFUSED`) — wiring the same ready-ack
-    /// into `App::run_until_signal` is a change to shared, widely-used serve
-    /// plumbing, out of scope here; callers needing a synchronization point
-    /// today poll-connect with a bounded retry loop (see
-    /// `tests/e2e/listener_client_interop.rs`'s `wait_until_listening`).
+    /// Readiness: `App::serve` (via `App::run_until_signal`) waits on the
+    /// SAME per-lane ready ack `proxima_listen::handle::Listener::run_with_runtime`
+    /// blocks on — a `std::sync::mpsc::Sender<()>` threaded through
+    /// `ServeContext::ready_signal` and fired by every `ListenProtocol::serve`
+    /// impl right after its real `bind`/`listen` (or UDP `bind`) syscalls
+    /// succeed (`src/app.rs`'s `run_until_signal`, `ready_rx.recv_timeout`).
+    /// A caller dialing immediately after `.serve()` resolves therefore never
+    /// races a not-yet-listening socket — no poll-connect retry loop is
+    /// needed, and the hand-rolled ones this doc used to point callers at
+    /// (`wait_until_listening` in several examples/tests) have been deleted.
     pub async fn serve(self) -> Result<Server, ProximaError> {
         reject_dead_axes(&self.spec)?;
         reject_invalid_axis_combinations(&self)?;

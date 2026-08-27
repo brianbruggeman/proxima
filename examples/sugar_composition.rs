@@ -52,14 +52,12 @@ fn free_loopback_addr() -> Result<SocketAddr, ProximaError> {
     Ok(addr)
 }
 
+/// `Listener::builder().serve()` already waited on the real bind/listen
+/// ready ack before returning (see `src/listener/handle.rs`'s
+/// `ListenerBuilder::serve` doc), so one direct connect proves reachability
+/// — no retry loop needed.
 fn tcp_connect_succeeds(addr: SocketAddr) -> bool {
-    for _ in 0..20 {
-        if StdTcpStream::connect(addr).is_ok() {
-            return true;
-        }
-        std::thread::sleep(Duration::from_millis(20));
-    }
-    false
+    StdTcpStream::connect(addr).is_ok()
 }
 
 #[proxima::main]

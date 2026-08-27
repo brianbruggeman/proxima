@@ -1,0 +1,83 @@
+# build-time execution-policy sizing for proxima-tensor's cpu kernels.
+# read by build.rs, emitted as consts into OUT_DIR/proxima_tensor_sized.rs.
+# every execution-policy constant in src/sized.rs traces back to here --
+# mirrors prime/prime-runtime.toml's shape (prime/build.rs's
+# emit_sizing_consts). every key below can also be overridden per-build via
+# a `PROXIMA_TENSOR_<SECTION>_<KEY>` env var (uppercased) -- mirrors
+# prime/build.rs's `resolve_int`; each override consulted emits its own
+# `cargo:rerun-if-env-changed` line so a cached build never ignores it.
+#
+# the full measurement record behind each value (sweeps, rejected
+# candidates, degenerate controls) lives on the consuming const's doc
+# comment in src/sized.rs, not here -- this file carries only the number
+# and a one-line pointer, so the record stays intra-doc-linkable
+# (`[`MIN_MACS_PER_CHUNK`]` etc., which only resolves in a Rust doc
+# comment).
+
+[parallel]
+# below this many iteration-space elements, a nest runs the plain
+# sequential path even when workers > 1. see sized::PARALLEL_THRESHOLD.
+threshold = 4096
+# chunk-count multiplier over `workers` for run_chunks_threaded. see
+# sized::OVERSUBSCRIBE.
+oversubscribe = 1
+# chunk-count multiplier over `workers` for matmul_rows_threaded's dynamic-
+# claiming row split. see sized::ROW_OVERSUBSCRIBE for the 1/2/4/8 sweep
+# that picked 4.
+row_oversubscribe = 4
+# row-alignment applied to every non-final chunk boundary via
+# BoundOp::split_aligned. see sized::SPLIT_ALIGNMENT.
+split_alignment = 1
+# floor on multiply-adds per chunk for matmul_rows_threaded's row split --
+# caps oversubscribed dispatch down when a call's total work is small. see
+# sized::MIN_MACS_PER_CHUNK for the 500_000-vs-700_000 measurement (700_000
+# was rejected).
+min_macs_per_chunk = 500000
+
+[cohort]
+# core::hint::spin_loop() polls a cohort member burns waiting for the next
+# round before it parks. prime's own default is 2000 (prime/src/os/cohort.rs
+# CohortConfig::default), sized for a cohort whose rounds are far apart; a
+# forward pass opens rounds back to back, so a member that parks pays a
+# futex wake the spin would have avoided. see
+# sized::COHORT_SPIN_POLLS.
+spin_polls = 2000
+
+[quantize]
+# floor on Q8_K super-blocks (256 elements each) before
+# quantize_row_q8k_dispatch splits a call's activation buffer across the
+# cohort instead of running it serially on the leader. see
+# sized::MIN_QUANTIZE_BLOCKS_FOR_DISPATCH.
+min_blocks_for_dispatch = 200
+
+[transpose]
+# floor on rows * leading_total output elements before run_reduce_quantized
+# splits the Q4_K wide-fold transpose copy-back across the cohort. see
+# sized::MIN_TRANSPOSE_ELEMENTS_FOR_DISPATCH.
+min_elements_for_dispatch = 64000
+
+[neon]
+# bytes of L2 budgeted for a resident `b` column panel in the tiled GEMM
+# pass. aarch64-only -- see sized::NEON_COLUMN_PANEL_BUDGET_BYTES; emitted
+# only when CARGO_CFG_TARGET_ARCH is aarch64.
+column_panel_budget_bytes = 2621440
+
+[rope]
+# fallback RoPE frequency base ("theta") when a checkpoint's own
+# `{architecture}.rope.freq_base` metadata key is absent. 10000.0 is the
+# value every checkpoint this crate has evaluated so far (openchat-3.5)
+# declares explicitly, so this fallback has never yet been exercised on a
+# real load -- see sized::ROPE_FREQ_BASE_DEFAULT. Not swept against
+# alternatives (ROW 98's own precedent for STAGED_BATCH_MIN_LEN): the
+# value is a definitional default, not a measured tuning knob.
+freq_base_default = 10000.0
+
+[staged_batch]
+# below this many consecutive is_staged_batch_eligible nodes,
+# run_staged_batch is not worth calling -- a run of one node has nothing to
+# amortize a round-open against. `cohort-staged-graph`-only -- see
+# sized::STAGED_BATCH_MIN_LEN; emitted only when the feature is active.
+# not yet swept against alternatives (ROW 98): the value simply encodes
+# "a run of length 1 has nothing to batch against", the smallest run length
+# for which batching is even definable.
+min_len = 2

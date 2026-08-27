@@ -9,11 +9,11 @@ use futures::{FutureExt, select};
 use serde_json::Value;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
-use tracing::{debug, warn};
 
 use proxima_primitives::pipe::Method;
 use proxima_primitives::pipe::SendPipe;
 use proxima_protocols::jsonrpc::{JsonRpcError, JsonRpcRequest, JsonRpcResponse};
+use proxima_telemetry::{debug, warn};
 
 use crate::error::ProximaError;
 use crate::pipe::PipeHandle;
@@ -89,12 +89,12 @@ impl ListenProtocol for McpListenProtocol {
 async fn serve_stdio(
     dispatch: PipeHandle,
     mut shutdown: oneshot::Receiver<()>,
-    ready_signal: Option<std::sync::mpsc::Sender<()>>,
+    ready_signal: Option<proxima_listen::ReadySignal>,
 ) -> Result<(), ProximaError> {
     debug!("mcp listener bound (stdio)");
     // stdio has no bind step — it is ready the instant the handles exist.
     if let Some(sender) = ready_signal {
-        let _ = sender.send(());
+        let _ = sender.send(Ok(()));
     }
     let stdin = tokio::io::stdin();
     let stdout = tokio::io::stdout();
@@ -113,7 +113,7 @@ async fn serve_unix(
     path: PathBuf,
     dispatch: PipeHandle,
     mut shutdown: oneshot::Receiver<()>,
-    ready_signal: Option<std::sync::mpsc::Sender<()>>,
+    ready_signal: Option<proxima_listen::ReadySignal>,
 ) -> Result<(), ProximaError> {
     if path.exists() {
         std::fs::remove_file(&path).map_err(|err| {
@@ -125,7 +125,7 @@ async fn serve_unix(
     let listener = UnixListener::bind(&path)
         .map_err(|err| ProximaError::Io(std::io::Error::other(format!("mcp uds bind: {err}"))))?;
     if let Some(sender) = ready_signal {
-        let _ = sender.send(());
+        let _ = sender.send(Ok(()));
     }
     debug!(?path, "mcp listener bound (uds)");
     loop {

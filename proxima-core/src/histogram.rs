@@ -164,8 +164,6 @@ mod tests {
 
     use std::sync::Arc;
 
-    use rstest::rstest;
-
     use super::{Histogram, MAX_BUCKETS};
 
     fn bucket_pick_linear(value: f64, bucket_count: usize) -> usize {
@@ -225,7 +223,7 @@ mod tests {
     }
 
     // 4. correctness: branchless matches linear reference across a range of values
-    #[rstest]
+    #[proxima::test]
     #[case::sub_min(0.0001)]
     #[case::at_min(0.001)]
     #[case::small(0.01)]
@@ -240,10 +238,10 @@ mod tests {
     #[case::hundred_thousand(100_000.0)]
     #[case::million(1_000_000.0)]
     #[case::over_max(5_000_000.0)]
-    fn branchless_matches_linear_reference(#[case] value: f64) {
+    async fn branchless_matches_linear_reference(#[case] value: f64) {
         let bits = value.abs().to_bits();
         let exp_field = (bits >> 52) & 0x7FF;
-        let raw = exp_field.saturating_sub(super::EXP_BIAS_OFFSET);
+        let raw = exp_field.saturating_sub(crate::histogram::EXP_BIAS_OFFSET);
         let branchless_slot = raw.min(MAX_BUCKETS as u64 - 1) as usize;
         let linear_slot = bucket_pick_linear(value, MAX_BUCKETS);
         assert_eq!(branchless_slot, linear_slot, "mismatch for value={value}");

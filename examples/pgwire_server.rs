@@ -88,23 +88,14 @@ fn free_loopback_addr() -> Result<SocketAddr, ProximaError> {
     Ok(addr)
 }
 
-fn wait_until_listening(addr: SocketAddr) -> Result<TcpStream, ProximaError> {
-    for _ in 0..200 {
-        if let Ok(stream) = TcpStream::connect(addr) {
-            return Ok(stream);
-        }
-        std::thread::sleep(std::time::Duration::from_millis(20));
-    }
-    Err(ProximaError::Config(format!(
-        "pgwire listener at {addr} never came up"
-    )))
-}
-
 /// The blocking client side, run on its own OS thread (`PgClient` is
 /// synchronous `Read + Write`, not a `Future` — driving it inline on the
-/// async task would block the whole worker).
+/// async task would block the whole worker). `Listener::builder().serve()`
+/// already waited on the real bind/listen ready ack (see
+/// `src/listener/handle.rs`'s `ListenerBuilder::serve` doc) before this
+/// thread was spawned, so a single direct connect is enough — no retry loop.
 fn run_client(addr: SocketAddr) -> Result<(), ProximaError> {
-    let stream = wait_until_listening(addr)?;
+    let stream = TcpStream::connect(addr)?;
     let mut client = proxima_pgwire::PgClient::connect(stream, "smoke", "", "smokedb")
         .map_err(|error| ProximaError::Config(format!("pgwire startup + auth: {error}")))?;
     let result = client

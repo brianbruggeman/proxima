@@ -1667,14 +1667,17 @@ where
     }
 }
 
+/// one `ProximaScope::spawn` handle: type-erased so `ProximaScope::handles`
+/// can hold every closure a caller passes in, regardless of its concrete
+/// future type.
+type ScopedSpawnFuture = Pin<Box<dyn Future<Output = Result<(), ProximaError>> + Send + 'static>>;
+
 /// handle passed to the closure inside `scope(|s| { s.spawn(...); })`.
 /// `spawn` queues work on the pool; all queued work is awaited before
 /// the enclosing `scope(...)` future resolves.
 pub struct ProximaScope {
     pool: Arc<ProximaBackgroundPool>,
-    handles: std::cell::RefCell<
-        Vec<Pin<Box<dyn Future<Output = Result<(), ProximaError>> + Send + 'static>>>,
-    >,
+    handles: std::cell::RefCell<Vec<ScopedSpawnFuture>>,
 }
 
 impl ProximaScope {
@@ -2497,7 +2500,7 @@ mod tests {
         let pool = build_pool(4);
         let data: Vec<u32> = (0..10_000_u32).rev().collect();
         let mut expected = data.clone();
-        expected.sort_by(|a, b| a.cmp(b));
+        expected.sort();
         let sorted = par_sort_by(&pool, data, |a, b| a.cmp(b)).await;
         assert_eq!(sorted, expected);
     }

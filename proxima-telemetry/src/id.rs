@@ -262,11 +262,10 @@ mod tests {
     use super::*;
     use rand::rngs::SmallRng;
     use rand::{Rng, SeedableRng};
-    use rstest::rstest;
-
+    
     const REF_INPUT: &[u8] = b"00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01";
 
-    #[rstest]
+    #[proxima::test]
     #[case::w3c_reference(
         b"00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01",
         [0x0a, 0xf7, 0x65, 0x19, 0x16, 0xcd, 0x43, 0xdd, 0x84, 0x48, 0xeb, 0x21, 0x1c, 0x80, 0x31, 0x9c],
@@ -279,7 +278,7 @@ mod tests {
         [0xb7, 0xad, 0x6b, 0x71, 0x69, 0x20, 0x33, 0x31],
         0x00,
     )]
-    fn parse_happy(
+    async fn parse_happy(
         #[case] input: &[u8],
         #[case] expected_trace: [u8; 16],
         #[case] expected_span: [u8; 8],
@@ -291,21 +290,21 @@ mod tests {
         assert_eq!(result.2.0, expected_flags);
     }
 
-    #[rstest]
+    #[proxima::test]
     #[case::too_short(b"00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-0")]
     #[case::too_long(b"00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01x")]
     #[case::wrong_version(b"01-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01")]
     #[case::uppercase_hex(b"00-0AF7651916CD43DD8448EB211C80319C-b7ad6b7169203331-01")]
     #[case::non_hex_trace(b"00-zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz-b7ad6b7169203331-01")]
     #[case::missing_dash(b"00x0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01")]
-    fn parse_sad(#[case] input: &[u8]) {
+    async fn parse_sad(#[case] input: &[u8]) {
         assert!(parse_traceparent(input).is_none());
     }
 
-    #[rstest]
+    #[proxima::test]
     #[case::zero_trace_id(b"00-00000000000000000000000000000000-b7ad6b7169203331-01")]
     #[case::zero_span_id(b"00-0af7651916cd43dd8448eb211c80319c-0000000000000000-01")]
-    fn parse_zero_ids_rejected(#[case] input: &[u8]) {
+    async fn parse_zero_ids_rejected(#[case] input: &[u8]) {
         assert!(parse_traceparent(input).is_none());
     }
 

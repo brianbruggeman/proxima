@@ -69,7 +69,7 @@ workspace = true
 criterion.workspace = true
 iai-callgrind = "0.16.1"
 proptest.workspace = true
-rstest.workspace = true
+proxima = { workspace = true, features = ["test-support"] }
 temp-env.workspace = true
 tempfile.workspace = true
 toml.workspace = true

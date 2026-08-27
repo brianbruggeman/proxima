@@ -272,62 +272,61 @@ pub mod error_field {
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-    use rstest::rstest;
-
+    
     use super::*;
 
-    #[rstest]
+    #[proxima::test]
     #[case::text(0i16, Some(FormatCode::Text))]
     #[case::binary(1i16, Some(FormatCode::Binary))]
     #[case::invalid_2(2i16, None)]
     #[case::invalid_7(7i16, None)]
     #[case::negative(-1i16, None)]
-    fn format_code_from_i16(#[case] input: i16, #[case] expected: Option<FormatCode>) {
+    async fn format_code_from_i16(#[case] input: i16, #[case] expected: Option<FormatCode>) {
         assert_eq!(FormatCode::from_i16(input), expected);
     }
 
-    #[rstest]
+    #[proxima::test]
     #[case::text(FormatCode::Text, 0i16)]
     #[case::binary(FormatCode::Binary, 1i16)]
-    fn format_code_as_i16(#[case] code: FormatCode, #[case] expected: i16) {
+    async fn format_code_as_i16(#[case] code: FormatCode, #[case] expected: i16) {
         assert_eq!(code.as_i16(), expected);
     }
 
-    #[rstest]
+    #[proxima::test]
     #[case::idle(b'I', Some(TransactionStatus::Idle))]
     #[case::in_transaction(b'T', Some(TransactionStatus::InTransaction))]
     #[case::failed(b'E', Some(TransactionStatus::Failed))]
     #[case::invalid_x(b'X', None)]
     #[case::invalid_zero(0u8, None)]
-    fn transaction_status_from_byte(
+    async fn transaction_status_from_byte(
         #[case] input: u8,
         #[case] expected: Option<TransactionStatus>,
     ) {
         assert_eq!(TransactionStatus::from_byte(input), expected);
     }
 
-    #[rstest]
+    #[proxima::test]
     #[case::idle(TransactionStatus::Idle, b'I')]
     #[case::in_transaction(TransactionStatus::InTransaction, b'T')]
     #[case::failed(TransactionStatus::Failed, b'E')]
-    fn transaction_status_as_byte(#[case] status: TransactionStatus, #[case] expected: u8) {
+    async fn transaction_status_as_byte(#[case] status: TransactionStatus, #[case] expected: u8) {
         assert_eq!(status.as_byte(), expected);
     }
 
-    #[rstest]
+    #[proxima::test]
     #[case::statement(b'S', Some(StatementTarget::Statement))]
     #[case::portal(b'P', Some(StatementTarget::Portal))]
     #[case::invalid_x(b'X', None)]
-    fn statement_target_from_byte(#[case] input: u8, #[case] expected: Option<StatementTarget>) {
+    async fn statement_target_from_byte(#[case] input: u8, #[case] expected: Option<StatementTarget>) {
         assert_eq!(StatementTarget::from_byte(input), expected);
     }
 
-    #[rstest]
+    #[proxima::test]
     #[case::text(0i8, Some(CopyFormat::Text))]
     #[case::binary(1i8, Some(CopyFormat::Binary))]
     #[case::invalid_2(2i8, None)]
     #[case::negative(-1i8, None)]
-    fn copy_format_from_i8(#[case] input: i8, #[case] expected: Option<CopyFormat>) {
+    async fn copy_format_from_i8(#[case] input: i8, #[case] expected: Option<CopyFormat>) {
         assert_eq!(CopyFormat::from_i8(input), expected);
     }
 

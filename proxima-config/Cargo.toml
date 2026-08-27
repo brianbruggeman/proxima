@@ -68,7 +68,6 @@ url = { version = "2.5.8", default-features = false, optional = true }
 thiserror = { workspace = true, optional = true }
 
 [dev-dependencies]
-rstest = { workspace = true }
 temp-env = { workspace = true }
 tempfile = { workspace = true }
 

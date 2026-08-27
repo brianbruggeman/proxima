@@ -75,8 +75,7 @@ mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
     use proptest::prelude::*;
-    use rstest::rstest;
-
+    
     // RFC 1071 §3 worked example: derived by hand in the discipline log.
     #[test]
     fn rfc1071_section3_example() {
@@ -96,11 +95,11 @@ mod tests {
 
     // Incremental summing across arbitrary split points must equal the
     // one-shot result, including splits that fall on an odd boundary.
-    #[rstest]
+    #[proxima::test]
     #[case::split_even(4)]
     #[case::split_odd(3)]
     #[case::split_one(1)]
-    fn incremental_matches_oneshot(#[case] split: usize) {
+    async fn incremental_matches_oneshot(#[case] split: usize) {
         let bytes = [0x00, 0x01, 0xf2, 0x03, 0xf4, 0xf5, 0xf6, 0xf7];
         let (head, tail) = bytes.split_at(split);
         let mut accumulator = Checksum::new();

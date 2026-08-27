@@ -7,9 +7,9 @@ use async_stream::stream;
 use futures::Stream;
 use parking_lot::Mutex;
 use proxima_primitives::sync::broadcast;
+use proxima_telemetry::error;
 use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
-use tracing::error;
 
 use crate::error::ProximaError;
 use crate::pipelines::executor::PipelineExecutor;

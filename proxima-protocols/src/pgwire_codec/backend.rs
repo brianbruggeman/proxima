@@ -1002,8 +1002,7 @@ pub fn encode_error_response(
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-    use rstest::rstest;
-
+    
     use super::super::error::ParseError;
     use super::super::types::{CopyFormat, FormatCode, Oid, TransactionStatus};
     use super::super::views::FieldDescription;
@@ -1015,11 +1014,11 @@ mod tests {
         buf[..written].to_vec()
     }
 
-    #[rstest]
+    #[proxima::test]
     #[case::idle(TransactionStatus::Idle, b'I')]
     #[case::in_transaction(TransactionStatus::InTransaction, b'T')]
     #[case::failed(TransactionStatus::Failed, b'E')]
-    fn ready_for_query_all_statuses_round_trip(
+    async fn ready_for_query_all_statuses_round_trip(
         #[case] status: TransactionStatus,
         #[case] expected_byte: u8,
     ) {
@@ -1148,14 +1147,14 @@ mod tests {
         assert_eq!(secret_key, key.as_slice());
     }
 
-    #[rstest]
+    #[proxima::test]
     #[case::bind_complete(BackendMessage::BindComplete, b'2')]
     #[case::close_complete(BackendMessage::CloseComplete, b'3')]
     #[case::parse_complete(BackendMessage::ParseComplete, b'1')]
     #[case::portal_suspended(BackendMessage::PortalSuspended, b's')]
     #[case::no_data(BackendMessage::NoData, b'n')]
     #[case::empty_query(BackendMessage::EmptyQueryResponse, b'I')]
-    fn zero_body_backend_messages_round_trip(
+    async fn zero_body_backend_messages_round_trip(
         #[case] msg: BackendMessage<'static>,
         #[case] expected_tag: u8,
     ) {

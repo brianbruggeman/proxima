@@ -86,7 +86,6 @@ middleware = [
     "dep:zeroize",
     "dep:fastrand",
     "dep:thiserror",
-    "dep:tracing",
     "dep:proxima-telemetry",
 ]
 runtime-prime-full = ["middleware", "proxima-primitives/runtime-prime-full"]
@@ -133,7 +132,6 @@ bon = { workspace = true, optional = true }
 conflaguration = { workspace = true, features = ["derive", "toml"], optional = true }
 fastrand = { workspace = true, optional = true }
 thiserror = { workspace = true, optional = true }
-tracing = { workspace = true, optional = true }
 zeroize = { version = "1.9.0", default-features = false, features = ["alloc"], optional = true }
 
 # kv deps.
@@ -146,7 +144,6 @@ toml = { workspace = true }
 
 [dev-dependencies]
 proxima = { workspace = true, features = ["test-support-tokio"] }
-rstest = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread", "test-util", "time", "sync"] }
 tempfile = { workspace = true }
 proxima-telemetry = { workspace = true }

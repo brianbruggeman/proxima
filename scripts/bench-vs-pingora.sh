@@ -26,7 +26,13 @@ cd "$crate_dir"
 PLATFORM="$(detect_platform)"
 TRIALS="${TRIALS:-1}"
 
-FEATURES="http1,http2,tcp,runtime-tokio,runtime-prime-full,tls"
+# `http-hyper` is required, not incidental: h1_vs_pingora/h2_vs_pingora both
+# also carry a `hyper::http2::Builder` arm (`use hyper::...`) alongside the
+# pingora arm, which needs the optional hyper/hyper-util deps this feature
+# gates. Measured 2026-08-23: without it, `cargo bench --bench h2_vs_pingora`
+# errors "requires the features: http-hyper" and this script's `|| true`
+# swallowed that -- the bench had never actually run.
+FEATURES="http1,http2,tcp,runtime-tokio,runtime-prime-full,tls,http-hyper"
 RESULTS="benches/RESULTS_bench-vs-pingora_${PLATFORM}.md"
 CRITERION_DIR="target/criterion"
 LOGS_DIR="/tmp/bench-vs-pingora-logs"
@@ -83,21 +89,17 @@ run_bench_pingora() {
     if [[ "$TRIALS" -ge 5 ]]; then
         printf -- '--- running %s (5-trial) ---\n' "$bench_name"
         for trial in 1 2 3 4 5; do
-            cargo bench \
-                --no-default-features \
-                --features "$FEATURES" \
-                --bench "$bench_name" \
-                -- --save-baseline "trial-${trial}" \
-                2>&1 | tee "${LOGS_DIR}/${bench_name}_trial${trial}.log" || true
+            run_bench_logged "${bench_name}_trial${trial}" "${LOGS_DIR}/${bench_name}_trial${trial}.log" \
+                cargo bench --no-default-features --features "$FEATURES" --bench "$bench_name" \
+                -- --save-baseline "trial-${trial}"
         done
-        cat "${LOGS_DIR}/${bench_name}_trial5.log" > "$log_file" || true
+        if [[ -f "${LOGS_DIR}/${bench_name}_trial5.log" ]]; then
+            cp "${LOGS_DIR}/${bench_name}_trial5.log" "$log_file"
+        fi
     else
         printf -- '--- running %s ---\n' "$bench_name"
-        cargo bench \
-            --no-default-features \
-            --features "$FEATURES" \
-            --bench "$bench_name" \
-            2>&1 | tee "$log_file" || true
+        run_bench_logged "$bench_name" "$log_file" \
+            cargo bench --no-default-features --features "$FEATURES" --bench "$bench_name"
     fi
 }
 
@@ -260,3 +262,5 @@ run_bench_pingora "h1_vs_pingora" "$h1_log"
 } > "$RESULTS"
 
 printf 'wrote %s\n' "$RESULTS"
+
+report_bench_failures

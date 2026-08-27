@@ -32,16 +32,6 @@ fn free_loopback_addr() -> Result<SocketAddr, ProximaError> {
     Ok(addr)
 }
 
-fn wait_until_listening(addr: SocketAddr) {
-    for _ in 0..200 {
-        if std::net::TcpStream::connect(addr).is_ok() {
-            return;
-        }
-        std::thread::sleep(Duration::from_millis(20));
-    }
-    panic!("listener at {addr} never came up");
-}
-
 struct NullHttp;
 
 impl SendPipe for NullHttp {
@@ -128,7 +118,6 @@ async fn memcached_section() -> Result<(), ProximaError> {
         .memcached(into_memcached_handle(KvStore::default()))
         .serve()
         .await?;
-    wait_until_listening(bind);
 
     let client = Client::builder()
         .memcached(format!("memcached://{bind}"))
@@ -245,7 +234,6 @@ async fn kafka_section() -> Result<(), ProximaError> {
         .kafka(into_kafka_handle(EchoProduce))
         .serve()
         .await?;
-    wait_until_listening(bind);
 
     let client = Client::builder().kafka(format!("kafka://{bind}")).build()?;
     let request = RequestBody::Produce(ProduceRequest {
@@ -310,7 +298,6 @@ async fn mqtt_section() -> Result<(), ProximaError> {
         .mqtt(into_mqtt_handle(AllowAll))
         .serve()
         .await?;
-    wait_until_listening(bind);
 
     let client = Client::builder().mqtt(format!("mqtt://{bind}")).build()?;
     let response = client.call("PING", "").send().await?;
@@ -331,6 +318,10 @@ async fn amqp_section() -> Result<(), ProximaError> {
     #[derive(Default, Clone)]
     struct RecordPublishes {
         seen: Arc<Mutex<Vec<AmqpMessage>>>,
+        // signals the awaiting test task the moment a publish lands, so the
+        // wait below is an edge-triggered await instead of a polling loop —
+        // see `proxima::sync::Notify` at `proxima-primitives/src/sync/notify.rs`.
+        published: Arc<proxima::sync::Notify>,
     }
 
     impl SendPipe for RecordPublishes {
@@ -343,12 +334,17 @@ async fn amqp_section() -> Result<(), ProximaError> {
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner())
                 .push(request.payload);
+            self.published.notify_one();
             Ok(Response::typed(200, ()))
         }
     }
 
     let seen = Arc::new(Mutex::new(Vec::new()));
-    let recorder = RecordPublishes { seen: seen.clone() };
+    let published = Arc::new(proxima::sync::Notify::new());
+    let recorder = RecordPublishes {
+        seen: seen.clone(),
+        published: published.clone(),
+    };
 
     let bind = free_loopback_addr()?;
     let server = Listener::builder()
@@ -358,7 +354,6 @@ async fn amqp_section() -> Result<(), ProximaError> {
         .amqp(into_amqp_handle(recorder))
         .serve()
         .await?;
-    wait_until_listening(bind);
 
     let client = Client::builder().amqp(format!("amqp://{bind}")).build()?;
     client
@@ -367,16 +362,7 @@ async fn amqp_section() -> Result<(), ProximaError> {
         .send()
         .await?;
 
-    for _ in 0..50 {
-        if !seen
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .is_empty()
-        {
-            break;
-        }
-        std::thread::sleep(Duration::from_millis(20));
-    }
+    let _ = proxima::time::timeout(Duration::from_secs(1), published.notified()).await;
     let recorded = seen
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -464,7 +450,6 @@ async fn kafka_conflaguration_section() -> Result<(), ProximaError> {
         .protocol(configured)
         .serve()
         .await?;
-    wait_until_listening(bind);
 
     let client = Client::builder().kafka(format!("kafka://{bind}")).build()?;
     let request = RequestBody::Produce(ProduceRequest {

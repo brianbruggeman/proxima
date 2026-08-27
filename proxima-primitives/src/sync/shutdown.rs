@@ -138,12 +138,28 @@ pub fn drain_current_core() -> usize {
 /// 2. Caller awaits in-flight drain via its own counters.
 /// 3. Caller invokes `broadcast_drop` here: every core runs
 ///    `drain_current_core` in its own LocalSet so `!Send` hooks fire on
-///    their owning core. The future resolves when every core acks.
+///    their owning core. The future resolves when every core acks, or
+///    when [`BROADCAST_DROP_DEADLINE`] elapses, whichever comes first.
 /// 4. Caller drops the `Arc<Runtime>` to join worker threads.
 #[cfg(feature = "std")]
 pub struct ShutdownBarrier {
     runtime: Arc<dyn Runtime>,
 }
+
+/// Ceiling on how long [`ShutdownBarrier::broadcast_drop`] waits for every
+/// core to ack before giving up and returning a partial [`ShutdownReport`].
+///
+/// `dispatch_factory`'s inbox is bounded (`prime/src/os/core_shard.rs`'s
+/// `try_send_mpsc`) -- under core saturation it returns
+/// `Err(SpawnError::InboxFull)`, which `broadcast_drop` already logs and
+/// treats as "this core's ack never bumps". Before this constant existed,
+/// that meant `report_notify.notified().await` waited forever: a single
+/// saturated core's dropped dispatch left the count permanently short of
+/// `num_cores`, hanging the entire shutdown with no way out -- exactly the
+/// failure the comment above it already claimed ("the barrier waits out
+/// its deadline") without a deadline ever being implemented.
+#[cfg(feature = "std")]
+const BROADCAST_DROP_DEADLINE: core::time::Duration = core::time::Duration::from_secs(5);
 
 #[cfg(feature = "std")]
 impl ShutdownBarrier {
@@ -196,8 +212,14 @@ impl ShutdownBarrier {
         let report_drained = drained_total;
         Box::pin(async move {
             // Re-check in case every ack already arrived before we started awaiting.
+            // Bounded by BROADCAST_DROP_DEADLINE: a core whose dispatch was
+            // dropped for InboxFull above never bumps its ack, so this wait
+            // must not be unconditional -- see that constant's own doc. A
+            // timed-out wait still returns a `ShutdownReport` whose
+            // `cores_acked < num_cores` is the caller-visible signal that
+            // the deadline, not every core, ended the drain.
             if report_acked.load(Ordering::SeqCst) < num_cores {
-                report_notify.notified().await;
+                let _ = proxima_core::time::timeout(BROADCAST_DROP_DEADLINE, report_notify.notified()).await;
             }
             ShutdownReport {
                 cores_acked: report_acked.load(Ordering::SeqCst),

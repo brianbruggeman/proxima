@@ -236,8 +236,6 @@ fn authority(host: &str, port: u16, secure: bool) -> String {
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
-    use rstest::rstest;
-
     use super::*;
 
     #[test]
@@ -384,13 +382,13 @@ mod tests {
         );
     }
 
-    #[rstest]
+    #[proxima::test]
     #[case::no_path("/", "")]
     #[case::single_segment("/v1", "/v1")]
     #[case::trailing_slash("/v1/", "/v1")]
     #[case::nested("/llm/openai/v1", "/llm/openai/v1")]
     #[case::nested_trailing_slash("/llm/openai/v1/", "/llm/openai/v1")]
-    fn base_path_prefix_normalizes_trailing_slash(#[case] path: &str, #[case] expected: &str) {
+    async fn base_path_prefix_normalizes_trailing_slash(#[case] path: &str, #[case] expected: &str) {
         assert_eq!(base_path_prefix(path), expected);
     }
 

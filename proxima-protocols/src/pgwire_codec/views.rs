@@ -163,8 +163,8 @@ impl<'a> FormatCodes<'a> {
         let count = reader.take_count16(field)?;
         let tag = reader.tag();
         let raw = reader.take_bytes(count * 2)?;
-        for chunk in raw.chunks_exact(2) {
-            let code = i16::from_be_bytes([chunk[0], chunk[1]]);
+        for chunk in raw.as_chunks::<2>().0 {
+            let code = i16::from_be_bytes(*chunk);
             if FormatCode::from_i16(code).is_none() {
                 return Err(ParseError::InvalidValue { tag, field });
             }
@@ -593,8 +593,7 @@ impl<'a> IntoIterator for CountedCStrs<'a> {
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-    use rstest::rstest;
-
+    
     use super::super::cursor::Reader;
     use super::*;
 
@@ -665,10 +664,10 @@ mod tests {
         assert!(result.is_err(), "truncated oids must fail");
     }
 
-    #[rstest]
+    #[proxima::test]
     #[case::zero_codes_resolves_text(0usize, FormatCode::Text)]
     #[case::one_code_applies_to_all(0usize, FormatCode::Text)]
-    fn format_codes_resolve_zero_codes_is_text(#[case] index: usize, #[case] expected: FormatCode) {
+    async fn format_codes_resolve_zero_codes_is_text(#[case] index: usize, #[case] expected: FormatCode) {
         let raw = &[0u8, 0][..];
         let mut reader = reader_from(raw);
         let codes = FormatCodes::validate(&mut reader, "test").expect("validate must succeed");

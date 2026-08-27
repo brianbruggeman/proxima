@@ -9,6 +9,7 @@ members = [
     "prime",
     "proxima-amqp",
     "proxima-auth",
+    "proxima-autograd",
     "proxima-build",
     "proxima-centauri",
     "proxima-clock",
@@ -16,13 +17,16 @@ members = [
     "proxima-config",
     "proxima-core",
     "proxima-dns",
+    "proxima-gguf",
     "proxima-http",
     "proxima-kafka",
     "proxima-storage",
     "proxima-listen",
     "proxima-macros",
     "proxima-memcached",
+    "proxima-model-interop",
     "proxima-mqtt",
+    "proxima-onnx",
     "proxima-patterns",
     "proxima-test",
     "proxima-net",
@@ -34,8 +38,10 @@ members = [
     "proxima-recording",
     "proxima-redis",
     "proxima-runtime",
+    "proxima-safetensors",
     "proxima-telemetry",
     "proxima-tensor",
+    "proxima-tokenizer",
     "proxima-intercept",
     "proxima-tls",
     "tools/proxima-cli",
@@ -84,12 +90,15 @@ proxima-codec = { path = "proxima-codec", default-features = false }
 proxima-config = { path = "proxima-config", default-features = false }
 proxima-core = { path = "proxima-core", default-features = false }
 proxima-dns = { path = "proxima-dns", default-features = false }
+proxima-gguf = { path = "proxima-gguf", default-features = false }
+proxima-tokenizer = { path = "proxima-tokenizer", default-features = false }
 proxima-http = { path = "proxima-http", default-features = false }
 proxima-kafka = { path = "proxima-kafka", default-features = false }
 proxima-listen = { path = "proxima-listen" }
 proxima-macros = { path = "proxima-macros" }
 proxima-memcached = { path = "proxima-memcached", default-features = false }
 proxima-mqtt = { path = "proxima-mqtt", default-features = false }
+proxima-onnx = { path = "proxima-onnx", default-features = false }
 proxima-patterns = { path = "proxima-patterns", default-features = false }
 proxima-test = { path = "proxima-test" }
 proxima-net = { path = "proxima-net", default-features = false }
@@ -191,7 +200,6 @@ rcgen = { version = "0.14.7", default-features = false }
 redis-protocol = "6.0.0"
 regex = "1.12.3"
 ron = "0.8"
-rstest = "0.26"
 rustix = { version = "1.1", default-features = false, features = ["std", "mm"] }
 rustc-hash = { version = "2.1.2", default-features = false }
 rustls = { version = "0.23.40", default-features = false }
@@ -441,7 +449,6 @@ amq-protocol = { workspace = true }
 # parser-shape advantage. Earlier comment ("0.13 fails to build")
 # was resolved upstream by 0.14; 0.17 builds cleanly.
 kafka-protocol = { workspace = true }
-rstest.workspace = true
 temp-env = { workspace = true }
 trybuild = { workspace = true }
 tempfile.workspace = true
@@ -526,7 +533,13 @@ sync-wrappers = [
 # so a caller who only wants (say) `.redis(handler)` is never ALSO forced to
 # enable `http1`/`http1-native` just to reach the builder methods that
 # resolve it — see `src/listener/handle.rs`'s `any_mode` field doc for the
-# bug this closes.
+# bug this closes. `http-listener` itself now folds in `proxima-http`'s
+# `uds-listener` (a minimal tokio + tokio-util pair, no hyper), so a UDS
+# bind spec works for every one of these consumers too — it used to be
+# gated on `http1` there, which meant e.g. `--features pgwire` alone could
+# never bind pgwire over a unix socket even though this comment already
+# promised it wouldn't need `http1` (see `proxima-http/Cargo.toml`'s
+# `uds-listener` doc for the fix).
 any-listener = ["proxima-http/http-listener"]
 
 # HTTP wire version gates. `http1-native` is the tokio-free base: the
@@ -1241,19 +1254,26 @@ required-features = ["http2", "tls"]
 name = "h2_vs_hyper"
 path = "benches/http/h2_vs_hyper.rs"
 harness = false
-required-features = ["http2", "tls"]
+# `hyper`/`hyper-util` are optional deps gated behind `http-hyper` (this
+# file's own `use hyper::...`) -- `["http2", "tls"]` alone let cargo accept
+# the invocation and then error "requires the features: http-hyper" or
+# silently skip the target, which is how this bench sat unexecuted behind
+# an under-declared gate rather than a missing one.
+required-features = ["http2", "tls", "http-hyper"]
 
 [[bench]]
 name = "h2_vs_pingora"
 path = "benches/http/h2_vs_pingora.rs"
 harness = false
-required-features = ["http2", "tls"]
+# same gap as h2_vs_hyper above -- this file also does `use hyper::...`.
+required-features = ["http2", "tls", "http-hyper"]
 
 [[bench]]
 name = "h2_tail_vs_incumbents"
 path = "benches/http/h2_tail_vs_incumbents.rs"
 harness = false
-required-features = ["http2", "tls"]
+# same gap as h2_vs_hyper above -- this file also does `use hyper::...`.
+required-features = ["http2", "tls", "http-hyper"]
 
 [[bench]]
 name = "h2_native_frame"
@@ -1826,6 +1846,7 @@ required-features = [
     "kafka-listener", "kafka-client",
     "mqtt-listener", "mqtt-client",
     "amqp-listener", "amqp-client",
+    "sync-wrappers",
 ]
 
 # `.pgwire(query)` through Listener::builder(): native PgWireListenProtocol +

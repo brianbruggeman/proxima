@@ -10,9 +10,25 @@ homepage.workspace = true
 readme.workspace = true
 
 [features]
-default = ["std"]
+# `metal` is default because the objc2 deps live in a macOS target section, so
+# a non-darwin build never resolves them. It was default-off, which meant the
+# 13 `metal_parity` cases compiled to zero on an ordinary test run — and
+# nextest's "0 skipped" reads exactly like "everything passed". They sat
+# broken and uncompiled behind that flag.
+default = ["std", "metal", "cpu"]
 std = ["alloc", "thiserror/std"]
 alloc = []
+# Backends are MIX-AND-MATCH, the same shape `runtime-prime` and
+# `runtime-tokio` take at the workspace root (`Cargo.toml`): both may be
+# compiled in at once and the choice made at runtime, rather than one
+# excluding the other. That is what lets one binary measure CPU against
+# Metal on the same program and the same blocks — the comparison this whole
+# backend exists to win.
+#
+# `cpu` is the `proxima_tensor::cpu` evaluator reached through omega's own
+# entry points, so a caller depends on omega alone and never on a specific
+# backend crate.
+cpu = ["std", "proxima-tensor/std"]
 # Runtime Metal execution driver (src/metal.rs, macOS-only via
 # `target_os = "macos"` on the module itself). `proxima-tensor/std` is turned
 # on here because the parity test binary links proxima-tensor's
@@ -23,10 +39,46 @@ metal = [
     "dep:objc2",
     "dep:objc2-metal",
     "dep:objc2-foundation",
+    "dep:half",
+    "dep:proxima-telemetry",
+    "dep:libc",
+    "dep:block2",
     "proxima-tensor/std",
 ]
+# Name reservations for `Backend`'s remaining variants (`src/backend.rs`) —
+# every variant exists regardless of which of these are on, so a caller can
+# name and select a backend that has no execution arm yet and get a real
+# "not implemented" error instead of the type not existing. No dependencies:
+# there is no driver behind any of these four yet, only the name and the
+# feature-gated branch in `backend::plan_named` that reports so.
+vulkan = []
+cuda = []
+npu = []
+ane = []
+# Per-token wall-clock attribution for the Metal decode path (split-4019
+# initiative): tick counters over prepare (infer+bind), MSL emit, pipeline
+# cache hit/miss, block upload, per-op setup, GPU execute, and readback --
+# mirroring the shape `proxima_tensor::instrument`'s own `MATMUL_Q4K_CALL_TICKS`
+# already uses. Default-off and additive only: every wrap is
+# `#[cfg(feature = "instrument")]`, so an instrument-off build never pays the
+# `read_ticks()` call it would otherwise cost.
+instrument = ["metal", "proxima-tensor/instrument"]
+# `simdgroup_matrix`-tiled Q4_K GEMM path (`msl.rs`'s `push_tiled_gemm_body`),
+# selected over the row-blocked packed path (`push_packed_row_blocked_body`)
+# only above `sized::TILED_GEMM_MIN_TOKENS` activation rows -- see that
+# const's own doc and `docs/discipline.md` ROW 107. Default-off: this is a
+# second, riskier kernel (`proxima-tensor/docs/discipline.md` ROW 105's own
+# framing) and does not earn the production default until an e2e bench shows
+# the full stack wins with it on. Depends on `metal` (not just `std`): the
+# eligibility gate and kernel body live in `msl.rs`, which is alloc-tier, but
+# the const it reads only has meaning for a Metal dispatch.
+metal-tiled-gemm = ["metal"]
 
 [dependencies]
+proxima-tensor = { path = "../proxima-tensor", default-features = false, features = ["alloc"] }
+thiserror = { workspace = true, default-features = false }
+
+[target.'cfg(target_os = "macos")'.dependencies]
 # objc2: the message-send runtime (Retained<T>, extern_methods!) every Metal
 # call below goes through. Already in the workspace's transitive graph via
 # objc2-core-foundation/objc2-system-configuration — this stays in-family
@@ -38,7 +90,10 @@ objc2 = { version = "0.6.4", optional = true }
 # calls: device + runtime compile (MTLDevice, MTLLibrary), buffers
 # (MTLBuffer, MTLResource, MTLAllocation), and dispatch (MTLCommandQueue,
 # MTLCommandBuffer, MTLCommandEncoder, MTLComputeCommandEncoder,
-# MTLComputePipeline, MTLTypes for MTLSize).
+# MTLComputePipeline, MTLTypes for MTLSize). `objc2-core-foundation` gates
+# `MTLCommandBuffer::GPUStartTime`/`GPUEndTime` (`CFTimeInterval`), which the
+# `instrument`-gated per-op diagnostic timing in `metal.rs` reads back --
+# nothing on the production `execute`/`execute_plan` path calls either.
 objc2-metal = { version = "0.3.2", default-features = false, features = [
     "MTLDevice",
     "MTLLibrary",
@@ -51,6 +106,8 @@ objc2-metal = { version = "0.3.2", default-features = false, features = [
     "MTLComputeCommandEncoder",
     "MTLComputePipeline",
     "MTLTypes",
+    "block2",
+    "objc2-core-foundation",
 ], optional = true }
 # objc2-foundation: NSString (kernel source and entry name go in), NSError
 # (a compile failure's localizedDescription comes out) — the two Foundation
@@ -60,11 +117,58 @@ objc2-foundation = { version = "0.3.2", default-features = false, features = [
     "NSError",
     "NSObject",
 ], optional = true }
-proxima-tensor = { path = "../proxima-tensor", default-features = false, features = ["alloc"] }
-thiserror = { workspace = true, default-features = false }
+# half: real IEEE-754 binary16 <-> f32 conversion (round-to-nearest-even,
+# subnormal-correct) for `upload_block`/`read_back`'s device-buffer
+# marshalling — the arithmetic hand-rolling a bit-twiddled version of this
+# gets wrong at the edges (subnormals, rounding ties) is exactly what a
+# narrow, already-in-the-workspace-transitive-graph (via ciborium) crate is
+# for. `default-features = false`: only the no_std-safe `f16`/`bf16` scalar
+# types, no `std`/`alloc`/serde machinery this driver never touches. Lives in
+# this macOS-only section because `src/metal.rs`, its only caller, is itself
+# `target_os = "macos"`-gated.
+half = { version = "2.7.1", default-features = false, optional = true }
+# proxima-telemetry: the `Counter` instrument `upload_block` increments to
+# report which real calls took the no-copy path vs the copying one — see
+# the module doc's "Host buffer upload" section. Default features (implies
+# `alloc`) are enough for `metric::Counter`/`counter!`; no OTLP/export
+# machinery is needed since this driver only ever reads the counter back
+# in-process (its own test suite).
+proxima-telemetry = { workspace = true, optional = true }
+# libc: `sysconf(_SC_PAGESIZE)` for `page_size` — the alignment unit
+# `newBufferWithBytesNoCopy` requires, queried from the host rather than
+# hard-coded (macOS's `libc` has no `getpagesize()` binding, unlike Linux's).
+libc = { workspace = true, optional = true }
+# block2: `newBufferWithBytesNoCopy_length_options_deallocator`'s
+# `deallocator` parameter is typed `Option<&block2::DynBlock<..>>` by
+# objc2-metal's own binding (gated behind its `block2` feature above) — this
+# driver always passes `None` (Metal never owns the caller's memory), but
+# the parameter's type still has to resolve.
+block2 = { version = "0.6", default-features = false, optional = true }
+
+[build-dependencies]
+# reads `omega-runtime.toml` at build time (`build.rs`'s `emit_sizing_consts`,
+# mirroring `proxima-tensor/build.rs`'s function of the same name) --
+# build-dependency only, never links into the compiled artifact.
+toml.workspace = true
 
 [lints]
 workspace = true
 
 [dev-dependencies]
+conflaguration = { workspace = true, features = ["toml"] }
+criterion.workspace = true
+half = { version = "2.7.1", default-features = false }
+proxima = { workspace = true, features = ["test-support", "test-support-tokio"] }
+proxima-gguf = { path = "../proxima-gguf", features = ["std"] }
+proxima-safetensors = { path = "../proxima-safetensors" }
+# `test-support` pulls in `proxima_tensor::test_support::Lcg`, the same
+# deterministic PRNG proxima-tensor's own examples share — see that crate's
+# Cargo.toml for why this is a feature, not a default.
+proxima-tensor = { path = "../proxima-tensor", features = ["config", "test-support"] }
 tempfile.workspace = true
+toml.workspace = true
+
+[[bench]]
+name = "metal_vs_cpu"
+harness = false
+required-features = ["metal"]

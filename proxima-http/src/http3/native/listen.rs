@@ -255,7 +255,7 @@ where
                 .local_addr()
                 .map_err(|err| ProximaError::Upstream(format!("h3-native local_addr: {err}")))?;
             if let Some(sender) = ready_signal {
-                let _ = sender.send(());
+                let _ = sender.send(Ok(()));
             }
             debug!(?bind, %local, "h3-native listener bound");
 

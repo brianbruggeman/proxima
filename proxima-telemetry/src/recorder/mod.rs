@@ -1164,7 +1164,9 @@ impl ManagedDrainer {
             Err(error) => {
                 // no pump after all — fall back to elastic producer-assist.
                 shared.set_pump_active(false);
-                tracing::error!(error = %error, "telemetry drainer thread spawn failed; falling back to producer-assist");
+                crate::fault::report_fault(&std::format!(
+                    "telemetry drainer thread spawn failed; falling back to producer-assist: {error}"
+                ));
                 None
             }
         }

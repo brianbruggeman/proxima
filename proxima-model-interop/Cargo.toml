@@ -1,0 +1,154 @@
+[package]
+name = "proxima-model-interop"
+description = "Sans-IO GGUF <-> safetensors transform over the format's common denominator (named tensors, dtype, shape, bytes); explicit about what each direction loses."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+
+[features]
+default = []
+# strictly additive over the alloc-tier floor (guiding-principle 3): opens
+# proxima-gguf's `edge::read_file` (whole-file IO) and proxima-tensor's
+# `cpu` interpreter (both std-gated in their own crates) so this crate's
+# gguf-tensor-by-name bind can be driven end to end through evaluation.
+# The bind function itself (`bind::gguf_tensor_as_f32`) needs neither and
+# stays available at the no_std+alloc floor either way.
+# `proxima-tensor/config` is not optional here: `generate.rs` is a LIB module
+# (`#[cfg(feature = "std")] mod generate`) and imports `proxima_tensor::spec`,
+# which is `config`-gated. Until this line, `config` only ever arrived through
+# [dev-dependencies], so `cargo build -p proxima-model-interop --features std`
+# failed while `cargo test` passed — the dev-dep unified the feature in and hid
+# it. A lib that only builds when its own tests are built is a broken lib.
+std = [
+    "proxima-gguf/std",
+    "proxima-tensor/std",
+    "proxima-tensor/config",
+    "interop-bgpool",
+    "dep:proxima-tokenizer",
+]
+# split from `std` the same way proxima-tensor splits `tensor-bgpool`
+# (proxima-tensor/Cargo.toml:45): `dep:prime` pulls in OS threads, so it
+# stays out of the alloc-only floor even though every current `std` build
+# wants it (loader::prefault is the only std-gated consumer today).
+interop-bgpool = ["dep:prime", "dep:proxima-core"]
+# passthrough to `proxima-tensor/instrument` -- opt-in so the acceptance
+# forward-pass test (`bind::real_openchat_file`) can also be built and run
+# WITHOUT the per-chunk/per-node tick counters compiled in at all, to answer
+# whether the instrumentation itself is part of what gets measured.
+# `omega?/instrument` (the `?` skips the passthrough when `omega` itself is
+# not a dependency, i.e. the `metal` feature is off) turns on the split-4019
+# per-token attribution counters in `omega::metal` alongside this crate's own
+# generate.rs-side ones, so a single feature flag lights up both halves of
+# the decode-loop split rather than needing two.
+instrument = ["proxima-tensor/instrument", "omega?/instrument", "dep:proxima-telemetry", "proxima-telemetry/macros"]
+# Metal decode path (macOS + Metal only). `generate.rs`'s decode loop runs
+# the cached forward through `omega::backend::plan_named`/`execute_plan_named`
+# instead of `proxima_tensor::cpu::evaluate_quantized_named_with_scratch`
+# directly, backend selected at runtime via `ServingConfig::gpu_layers`
+# (`serving.rs`). `cpu` is turned on alongside `metal` so `omega::backend`'s
+# `Backend::Cpu` arm is also compiled in this build -- the decode loop routes
+# BOTH backends through the same `omega::backend` entry point rather than
+# keeping a direct `proxima_tensor::cpu` call for one of them. `omega`'s own
+# `metal` feature already confines every objc2/Metal dependency to a
+# `target_os = "macos"` section, so this feature alone never links a Metal
+# framework off Apple hardware; any future call site into `omega::metal`
+# must additionally gate on `target_os = "macos"` directly, matching how
+# `omega` gates its own re-exports.
+metal = ["dep:omega", "std"]
+# passthrough to `omega/metal-tiled-gemm` (default-off there, ROW `eeadc2d`)
+# so this crate's own op-timed profiling tests can compare the row-blocked
+# and tiled-GEMM paths' operand-byte traffic without a second harness.
+metal-tiled-gemm = ["omega?/metal-tiled-gemm"]
+
+[dependencies]
+arrayvec.workspace = true
+fastrand.workspace = true
+omega = { version = "0.1.0", path = "../omega", default-features = false, features = ["metal", "cpu"], optional = true }
+prime = { version = "0.1.0", path = "../prime", features = ["runtime-prime-bgpool"], optional = true }
+proxima-core = { workspace = true, features = ["alloc"], optional = true }
+proxima-gguf = { path = "../proxima-gguf", default-features = false }
+proxima-primitives = { workspace = true, default-features = false }
+proxima-safetensors = { path = "../proxima-safetensors", default-features = false, features = ["alloc"] }
+proxima-telemetry = { workspace = true, optional = true }
+proxima-tensor = { path = "../proxima-tensor", default-features = false, features = ["alloc"] }
+# `gguf` implies its own `std`, which is exactly the tier `generate::LoadedModel`
+# already requires (it evaluates through `proxima_tensor::cpu`, itself std-gated)
+# -- optional, wired on only by this crate's own `std` feature above, so the
+# alloc-only floor never pulls it in.
+proxima-tokenizer = { path = "../proxima-tokenizer", default-features = false, features = ["gguf"], optional = true }
+serde = { workspace = true, features = ["derive", "alloc"] }
+# `hf_config::HfConfig` deserializes a real HF config.json (alloc-tier, no
+# std needed -- `cargo add` rejects this crate's own "alloc" feature entry
+# on a validation quirk unrelated to the actual build; the workspace root
+# already pins the version/features this line inherits, same as
+# `proxima-safetensors`'s identical `serde_json.workspace = true`.
+serde_json.workspace = true
+thiserror.workspace = true
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+half = { version = "2.7.1", default-features = false }
+proxima-tensor = { path = "../proxima-tensor", features = ["config", "std", "test-support"] }
+rustix.workspace = true
+# `#[proxima::test]`/`#[case::desc(..)]` for the capability matrix in
+# `tests/capability_matrix.rs` -- the adaptive default driver (`::proxima::
+# test_support::run`) needs only `test-support`, no tokio/prime: every case
+# body is synchronous CPU work through `LoadedModel`'s own `Pipe`, matching
+# `generate.rs`'s own doc for why that pipe never yields.
+proxima = { workspace = true, features = ["test-support"] }
+proxima-tokenizer = { path = "../proxima-tokenizer", default-features = false, features = ["hf"] }
+
+# Both examples below need `LoadedModel` (`std`-gated in `lib.rs`) and
+# `proxima_telemetry`'s recorder/macros (only pulled in by `instrument`,
+# `dep:proxima-telemetry` above) -- `required-features` keeps a default
+# (no-feature) `cargo build/nextest --workspace` from trying to build them
+# at all, matching `proxima-tensor/Cargo.toml`'s own `q4k_ggml_fidelity`
+# entry for the identical reason.
+[[example]]
+name = "smollm2_logit_oracle_diff"
+required-features = ["std", "instrument"]
+
+[[example]]
+name = "smollm2_layer_oracle_diff"
+required-features = ["std", "instrument"]
+
+# Both examples below reuse the two shapes above, adapted to the real,
+# hybrid `lfm2moe` checkpoint (GGUF bind + `lfm2_forward_values` in place of
+# `LoadedModel`'s dense safetensors path). Same `required-features` reason.
+[[example]]
+name = "lfm2_logit_oracle_diff"
+required-features = ["std", "instrument"]
+
+[[example]]
+name = "lfm2_layer_oracle_diff"
+required-features = ["std", "instrument"]
+
+# Layer-5-only routing diff: which four expert indices `append_moe_ffn`'s own
+# `route` nodes picked per token, ours vs `llama.cpp`'s `ffn_moe_topk-<il>`
+# dump -- no telemetry recorder, so no `instrument` requirement, only `std`
+# for the same GGUF-bind/tokenizer/`cpu` interpreter reason as the two above.
+[[example]]
+name = "lfm2_moe_route_diff"
+required-features = ["std"]
+
+# Layer-0/1-only bisection (the dense-FFN layers before any MoE gate exists):
+# normed / mixer_out / post_mixer / normed2 within one conv-mixer block, ours
+# vs `llama.cpp`'s own per-tensor dumps -- no telemetry recorder needed, same
+# `std`-only reason as `lfm2_moe_route_diff`.
+[[example]]
+name = "lfm2_dense_mixer_diff"
+required-features = ["std"]
+
+# Scratch sizing tool for the real Mixtral checkpoint: prints the derived
+# architecture and whether the native stacked `_exps` tensor is present, so
+# the owned-vs-packed MoE memory shape is known before attempting a forward
+# pass. Same `std`-only reason as `lfm2_moe_route_diff`.
+[[example]]
+name = "mixtral_architecture_dump"
+required-features = ["std"]

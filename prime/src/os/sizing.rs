@@ -58,6 +58,8 @@ mod runtime_config {
     use std::fs;
     use std::path::PathBuf;
 
+    use proxima_telemetry::warn;
+
     use toml::Value;
 
     use super::Sizing;
@@ -73,7 +75,7 @@ mod runtime_config {
         let text = match fs::read_to_string(&path) {
             Ok(text) => text,
             Err(err) => {
-                tracing::warn!(
+                warn!(
                     path = %path.display(),
                     error = %err,
                     "proxima runtime config unreadable; falling back to compiled sizing",
@@ -84,7 +86,7 @@ mod runtime_config {
         let parsed: Value = match text.parse() {
             Ok(value) => value,
             Err(err) => {
-                tracing::warn!(
+                warn!(
                     path = %path.display(),
                     error = %err,
                     "proxima runtime config parse error; falling back to compiled sizing",
@@ -151,9 +153,9 @@ mod runtime_config {
         match usize::try_from(integer) {
             Ok(value) => value,
             Err(_) => {
-                tracing::warn!(
-                    section,
-                    key,
+                warn!(
+                    section = %section,
+                    key = %key,
                     value = integer,
                     "proxima runtime config value not a non-negative integer; using compiled",
                 );

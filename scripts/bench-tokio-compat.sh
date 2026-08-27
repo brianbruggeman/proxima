@@ -30,14 +30,12 @@ printf 'bench-tokio-compat (%s)\n' "$PLATFORM"
 # ---------------------------------------------------------------------------
 
 printf -- '--- bench_compat_libraries (library × runtime matrix) ---\n'
-cargo bench --no-default-features --features "$FEATURES" \
-    --bench bench_compat_libraries \
-    2>&1 | tee "${LOGS_DIR}/bench_compat_libraries.log" || true
+run_bench_logged "bench_compat_libraries" "${LOGS_DIR}/bench_compat_libraries.log" \
+    cargo bench --no-default-features --features "$FEATURES" --bench bench_compat_libraries
 
 printf -- '--- bench_runtime_compat (proxima internal compat cost) ---\n'
-cargo bench --no-default-features --features "$FEATURES" \
-    --bench bench_runtime_compat \
-    2>&1 | tee "${LOGS_DIR}/bench_runtime_compat.log" || true
+run_bench_logged "bench_runtime_compat" "${LOGS_DIR}/bench_runtime_compat.log" \
+    cargo bench --no-default-features --features "$FEATURES" --bench bench_runtime_compat
 
 # ---------------------------------------------------------------------------
 # parse criterion estimates.json via jq
@@ -193,3 +191,5 @@ _Run \`scripts/bench-tokio-compat.sh\` to replace \`pending\` values with measur
 MARKDOWN
 
 printf 'results written to %s\n' "$RESULTS"
+
+report_bench_failures

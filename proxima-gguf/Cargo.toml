@@ -1,0 +1,36 @@
+[package]
+name = "proxima-gguf"
+description = "Sans-IO GGUF metadata parser: a byte-fed state machine over header, typed KV metadata, and the tensor directory, with no IO in the core -- the caller (mmap, std::fs::read, network) owns getting bytes in front of it."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+
+[features]
+default = ["std"]
+alloc = []
+# runtime config surface ([`config::GgufParserConfig`]): conflaguration is
+# std-only (Settings/env/file), so it rides in only here -- the
+# no_std+alloc floor never sees it and always uses `crate::sized` directly.
+std = ["alloc", "thiserror/std", "dep:bon", "dep:conflaguration", "dep:serde"]
+
+[dependencies]
+arrayvec.workspace = true
+half = { version = "2.7.1", default-features = false }
+libm = { version = "0.2.16", default-features = false }
+proxima-primitives = { workspace = true, default-features = false }
+thiserror.workspace = true
+bon = { workspace = true, optional = true }
+conflaguration = { workspace = true, features = ["derive", "toml"], optional = true }
+serde = { workspace = true, features = ["derive"], optional = true }
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+temp-env.workspace = true
+proxima-telemetry = { workspace = true, features = ["emit"] }
