@@ -3931,14 +3931,13 @@ dependencies = [
  "mimalloc",
  "postcard",
  "proxima",
+ "proxima-telemetry",
  "serde_json",
  "tempfile",
  "time",
  "tokio",
  "tokio-util",
  "toml 0.8.23",
- "tracing",
- "tracing-subscriber",
 ]
 
 [[package]]
