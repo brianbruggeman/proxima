@@ -97,7 +97,7 @@ pub fn aes_128_gcm_encrypt(
     let detached_tag = cipher
         .encrypt_in_place_detached(nonce.into(), aad, buffer)
         .map_err(|_| AeadError::PayloadTooLong)?;
-    tag.copy_from_slice(detached_tag.as_slice());
+    tag.copy_from_slice(&detached_tag);
     Ok(())
 }
 
@@ -139,7 +139,7 @@ pub fn aes_256_gcm_encrypt(
     let detached_tag = cipher
         .encrypt_in_place_detached(nonce.into(), aad, buffer)
         .map_err(|_| AeadError::PayloadTooLong)?;
-    tag.copy_from_slice(detached_tag.as_slice());
+    tag.copy_from_slice(&detached_tag);
     Ok(())
 }
 
@@ -179,7 +179,7 @@ pub fn chacha20_poly1305_encrypt(
     let detached_tag = cipher
         .encrypt_in_place_detached(nonce.into(), aad, buffer)
         .map_err(|_| AeadError::PayloadTooLong)?;
-    tag.copy_from_slice(detached_tag.as_slice());
+    tag.copy_from_slice(&detached_tag);
     Ok(())
 }
 

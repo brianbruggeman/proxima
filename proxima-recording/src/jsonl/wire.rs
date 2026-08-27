@@ -338,7 +338,8 @@ fn hex_decode_32(text: &str) -> Result<[u8; 32], ProximaError> {
         )));
     }
     let mut output = [0_u8; 32];
-    for (index, chunk) in text.as_bytes().chunks_exact(2).enumerate() {
+    let (chunks, _remainder) = text.as_bytes().as_chunks::<2>();
+    for (index, chunk) in chunks.iter().enumerate() {
         let raw = std::str::from_utf8(chunk)
             .map_err(|err| ProximaError::Record(format!("spec_hash_hex non-utf8: {err}")))?;
         output[index] = u8::from_str_radix(raw, 16)

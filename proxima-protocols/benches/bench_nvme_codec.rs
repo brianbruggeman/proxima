@@ -107,7 +107,8 @@ fn sqe_encode(criterion: &mut Criterion) {
     group.bench_function("burst1024/builder", |bencher| {
         let mut ring = vec![0u8; SQE_LEN * BURST];
         bencher.iter(|| {
-            for (index, slot) in ring.chunks_exact_mut(SQE_LEN).enumerate() {
+            let (chunks, _remainder) = ring.as_chunks_mut::<SQE_LEN>();
+            for (index, slot) in chunks.iter_mut().enumerate() {
                 build_read_sqe(slot, index as u64);
             }
             black_box(&ring);
@@ -116,7 +117,8 @@ fn sqe_encode(criterion: &mut Criterion) {
     group.bench_function("burst1024/owned_struct", |bencher| {
         let mut ring = vec![0u8; SQE_LEN * BURST];
         bencher.iter(|| {
-            for (index, slot) in ring.chunks_exact_mut(SQE_LEN).enumerate() {
+            let (chunks, _remainder) = ring.as_chunks_mut::<SQE_LEN>();
+            for (index, slot) in chunks.iter_mut().enumerate() {
                 build_read_owned(slot, index as u64);
             }
             black_box(&ring);
@@ -175,7 +177,8 @@ fn cqe_decode(criterion: &mut Criterion) {
 
     // a full completion-queue drain: BURST fresh CQEs reaped in one poll.
     let mut ring = vec![0u8; CQE_LEN * BURST];
-    for (index, slot) in ring.chunks_exact_mut(CQE_LEN).enumerate() {
+    let (ring_chunks, _remainder) = ring.as_chunks_mut::<CQE_LEN>();
+    for (index, slot) in ring_chunks.iter_mut().enumerate() {
         proxima_protocols::nvme::write_completion(
             slot,
             0,
@@ -187,10 +190,11 @@ fn cqe_decode(criterion: &mut Criterion) {
         .expect("16-byte slot");
     }
     group.throughput(Throughput::Elements(BURST as u64));
+    let (ring_chunks, _remainder) = ring.as_chunks::<CQE_LEN>();
     group.bench_function("burst1024/borrowed_view", |bencher| {
         bencher.iter(|| {
             let mut acc = 0u32;
-            for slot in ring.chunks_exact(CQE_LEN) {
+            for slot in ring_chunks {
                 let (phase, cid, ok) = reap_borrowed(slot);
                 acc = acc.wrapping_add(u32::from(phase) + u32::from(cid) + u32::from(ok));
             }
@@ -200,7 +204,7 @@ fn cqe_decode(criterion: &mut Criterion) {
     group.bench_function("burst1024/borrowed_folded", |bencher| {
         bencher.iter(|| {
             let mut acc = 0u32;
-            for slot in ring.chunks_exact(CQE_LEN) {
+            for slot in ring_chunks {
                 let (phase, cid, ok) = reap_borrowed_folded(slot);
                 acc = acc.wrapping_add(u32::from(phase) + u32::from(cid) + u32::from(ok));
             }
@@ -210,7 +214,7 @@ fn cqe_decode(criterion: &mut Criterion) {
     group.bench_function("burst1024/owned_struct", |bencher| {
         bencher.iter(|| {
             let mut acc = 0u32;
-            for slot in ring.chunks_exact(CQE_LEN) {
+            for slot in ring_chunks {
                 let (phase, cid, ok) = reap_owned(slot);
                 acc = acc.wrapping_add(u32::from(phase) + u32::from(cid) + u32::from(ok));
             }
