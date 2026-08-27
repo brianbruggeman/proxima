@@ -1,12 +1,14 @@
 //! Typed envelope for dispatch: [`ChildRequest`] /
 //! [`ChildResponse`].
 //!
-//! Each variant carries the path key that the routing operator
-//! dispatches on. Paths use Linux-style canonical namespaces
+//! `Open` carries the path key the routing operator dispatches on;
+//! every other variant is fd-keyed, carrying the `handle` a prior
+//! `Open` returned. Paths use Linux-style canonical namespaces
 //! (`/proc/sys/kernel/*`, `/proc/self/*`, `/dev/*`, `/etc/*`) even on
 //! macOS — the shim's libc hook is responsible for translating
 //! `uname(2)` / `gethostname(2)` / etc. into the canonical-path form
-//! before sending across the IPC.
+//! before calling `Open`, then addressing the resulting handle for
+//! the actual `Read`/`Write`/`Stat`/`Close`.
 //!
 //! # Parity contract — load-bearing
 //!
@@ -107,16 +109,21 @@ use proxima_core::markers::{AllocFree, Deterministic, IsPure, NoStd};
 
 /// One IPC call from the child, as routed through the IPC fd.
 ///
-/// Path keys identify the resource being touched. The routing
-/// operator matches paths against registered handlers.
+/// `Open` is the sole path-keyed variant — it is the only call that
+/// names a resource that does not exist yet. Every other variant is
+/// **fd-keyed**, matching WASI and Linux convention: a prior `Open`
+/// hands back a `handle`, and `Read` / `Write` / `Close` / `Stat`
+/// address the resource by that handle, not by re-sending the path.
+/// The routing operator dispatches `Open` by path prefix; handle
+/// resolution for the fd-keyed verbs is the dispatcher's job, not
+/// the router's (per `tools/proxima-vm/ROADMAP.md` P0).
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum ChildRequest {
     /// Read N bytes from a resource. The shim translates `uname` /
     /// `gethostname` / `read(fd)` etc. into this variant.
     Read {
-        /// Canonical path being read (e.g.
-        /// `/proc/sys/kernel/hostname`).
-        path: String,
+        /// Handle returned by a prior `Open` of the resource.
+        handle: i32,
         /// Maximum bytes to read (caller's buffer size).
         max_bytes: u32,
         /// Byte offset for sequential reads (cursor position).
@@ -124,8 +131,8 @@ pub enum ChildRequest {
     },
     /// Write bytes to a resource.
     Write {
-        /// Canonical path being written.
-        path: String,
+        /// Handle returned by a prior `Open` of the resource.
+        handle: i32,
         /// Bytes the child is writing.
         bytes: Vec<u8>,
     },
@@ -137,29 +144,42 @@ pub enum ChildRequest {
         /// Open flags (mirrors `open(2)` flags).
         flags: u32,
     },
-    /// Release a handle. The dispatcher reclaims state for the path.
+    /// Release a handle. The dispatcher reclaims state for it.
     Close {
-        /// Path / handle being released.
-        path: String,
+        /// Handle being released.
+        handle: i32,
     },
-    /// Retrieve metadata for a path (`stat(2)`-shaped).
+    /// Retrieve metadata for a resource (`fstat(2)`-shaped).
     Stat {
-        /// Path being stat'd.
-        path: String,
+        /// Handle returned by a prior `Open` of the resource.
+        handle: i32,
     },
 }
 
 impl ChildRequest {
-    /// The canonical path being addressed by this request. Used by
-    /// the routing operator to dispatch.
+    /// The path being addressed by this request. Only `Open` names a
+    /// path — every other variant is fd-keyed. Used by the routing
+    /// operator to dispatch `Open` calls by path prefix.
     #[must_use]
-    pub fn path(&self) -> &str {
+    pub fn path(&self) -> Option<&str> {
         match self {
-            Self::Read { path, .. }
-            | Self::Write { path, .. }
-            | Self::Open { path, .. }
-            | Self::Close { path }
-            | Self::Stat { path } => path.as_str(),
+            Self::Open { path, .. } => Some(path.as_str()),
+            Self::Read { .. } | Self::Write { .. } | Self::Close { .. } | Self::Stat { .. } => {
+                None
+            }
+        }
+    }
+
+    /// The handle being addressed by this request. Every variant
+    /// except `Open` is fd-keyed and carries one.
+    #[must_use]
+    pub fn handle(&self) -> Option<i32> {
+        match self {
+            Self::Read { handle, .. }
+            | Self::Write { handle, .. }
+            | Self::Close { handle }
+            | Self::Stat { handle } => Some(*handle),
+            Self::Open { .. } => None,
         }
     }
 }

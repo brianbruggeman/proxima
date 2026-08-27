@@ -15,10 +15,12 @@
  *      a dispatch chain.
  *
  *   2. DISPATCH ROUND-TRIP (env set): reads PROXIMA_DISPATCH_FD,
- *      encodes a `ChildRequest::Read { path, max_bytes, offset }`
- *      via postcard, frames it with a u32-BE length prefix, writes
- *      to the fd, reads back the framed `ChildResponse`, decodes,
- *      and returns the bytes the dispatch chain provided.
+ *      encodes a `ChildRequest::Read { handle, max_bytes, offset }`
+ *      via postcard (fd-keyed post-P0 — `handle` is a fixed sentinel
+ *      0 here; this shim has no Open/Close lifecycle, one ground per
+ *      chain), frames it with a u32-BE length prefix, writes to the
+ *      fd, reads back the framed `ChildResponse`, decodes, and
+ *      returns the bytes the dispatch chain provided.
  *
  * Wire format (LOCKED 2026-05-23 per
  * `proxima.decision.libc_shim_vm_parity`):
@@ -191,9 +193,19 @@ static int recv_frame(int fd, unsigned char *buf, size_t max_len, size_t *out_le
 
 /* ---- generic dispatch round-trip for ChildRequest::Read ----
  *
- * Encode + send a ChildRequest::Read { path, max_bytes, offset: 0 },
+ * Encode + send a ChildRequest::Read { handle, max_bytes, offset: 0 },
  * read back the framed ChildResponse, decode, and write the bytes
  * the dispatch chain provided into `out`.
+ *
+ * `Read` is fd-keyed post-P0 (`tools/proxima-vm/ROADMAP.md` P0):
+ * only `Open` carries a path. This shim has no persistent per-path
+ * Open/Close lifecycle yet — every intercepted libc call is a
+ * one-shot round trip against whatever single ground the chain
+ * configures (`Canned`/`Empty` in the smoke tests) — so it sends a
+ * fixed sentinel handle (0), matching those grounds' own Open stub
+ * (`proxima-process/src/grounds.rs`, `ChildResponse::Open { handle: 0 }`).
+ * `path` still identifies the intercepted resource for the caller's
+ * own bookkeeping; it no longer reaches the wire.
  *
  * Returns 0 on success (bytes written to `out`, len in *out_len).
  * Returns -1 on any error; caller can fall back to static or fail.
@@ -204,10 +216,10 @@ static int dispatch_read_path(int dispatch_fd,
                                const char *path, size_t path_len,
                                unsigned char *out, size_t max_bytes,
                                size_t *out_len, int *err_errno) {
-    /* Encode ChildRequest::Read { path, max_bytes, offset: 0 }.
-     * Max encoded size: 1 (discriminant) + 10 (path-len varint)
-     * + path_len (path bytes) + 5 (max_bytes varint) + 10 (offset
-     * varint). For our smoke paths (<60 bytes), 128-byte buffer
+    (void)path;
+    /* Encode ChildRequest::Read { handle: 0, max_bytes, offset: 0 }.
+     * Max encoded size: 1 (discriminant) + 5 (handle zigzag varint)
+     * + 5 (max_bytes varint) + 10 (offset varint). 32-byte buffer
      * is ample. */
     unsigned char req[256];
     if (path_len + 32 > sizeof(req)) {
@@ -216,9 +228,7 @@ static int dispatch_read_path(int dispatch_fd,
     }
     size_t pos = 0;
     req[pos++] = CHILD_REQUEST_READ;                          /* discriminant */
-    pos += leb128_encode_u64((uint64_t)path_len, req + pos);  /* path length varint */
-    memcpy(req + pos, path, path_len);                        /* path bytes */
-    pos += path_len;
+    pos += leb128_encode_u64((uint64_t)zigzag_encode_i32(0), req + pos); /* handle: fd-keyed sentinel */
     pos += leb128_encode_u64((uint64_t)max_bytes, req + pos); /* max_bytes */
     pos += leb128_encode_u64(0, req + pos);                   /* offset */
 

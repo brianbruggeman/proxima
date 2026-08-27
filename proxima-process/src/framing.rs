@@ -70,12 +70,11 @@ impl SendPipe for FrameDecoder {
         &self,
         input: Self::In,
     ) -> impl Future<Output = Result<Self::Out, ProximaError>> + Send {
-        let decoded =
-            postcard::from_bytes::<ChildRequest>(&input).unwrap_or_else(|_| ChildRequest::Read {
-                path: alloc::string::String::from("/__invalid_frame__"),
-                max_bytes: 0,
-                offset: 0,
-            });
+        let decoded = postcard::from_bytes::<ChildRequest>(&input).unwrap_or(ChildRequest::Read {
+            handle: -1,
+            max_bytes: 0,
+            offset: 0,
+        });
         async move { Ok(decoded) }
     }
 }
