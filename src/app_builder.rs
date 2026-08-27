@@ -60,6 +60,8 @@ use crate::upstreams::replay::ReplayPipeFactory;
 #[cfg(any(feature = "tcp", feature = "unix"))]
 use crate::upstreams::stream_passthrough::StreamPassthroughPipeFactory;
 use crate::upstreams::synth::SynthPipeFactory;
+#[cfg(feature = "vm")]
+use crate::upstreams::vm::VmPipeFactory;
 use proxima_listen::{ListenProtocol, ListenRegistry};
 
 /// Compose an `App` from built-in and plugin-registered factories.
@@ -207,6 +209,9 @@ impl AppBuilder {
         #[cfg(unix)]
         self.pipe_factory_registry
             .register(Arc::new(ProcessRpcPipeFactory))?;
+        #[cfg(feature = "vm")]
+        self.pipe_factory_registry
+            .register(Arc::new(VmPipeFactory))?;
         self.defaults_replay = true;
         self.defaults_process = true;
         self.defaults_record = true;

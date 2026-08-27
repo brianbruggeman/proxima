@@ -64,6 +64,8 @@ use crate::upstreams::replay::ReplayPipeFactory;
 #[cfg(any(feature = "tcp", feature = "unix"))]
 use crate::upstreams::stream_passthrough::StreamPassthroughPipeFactory;
 use crate::upstreams::synth::SynthPipeFactory;
+#[cfg(feature = "vm")]
+use crate::upstreams::vm::VmPipeFactory;
 use proxima_patterns::kv::KvHandle;
 
 /// Registers an existing factory under a second name. Used to expose the hyper
@@ -341,6 +343,8 @@ fn default_pipe_factory_registry(
     )))?;
     #[cfg(unix)]
     registry.register(Arc::new(ProcessRpcPipeFactory))?;
+    #[cfg(feature = "vm")]
+    registry.register(Arc::new(VmPipeFactory))?;
     registry.register(Arc::new(RetryFactory))?;
     registry.register(Arc::new(RateLimitFactory))?;
     registry.register(Arc::new(TransformFactory))?;
