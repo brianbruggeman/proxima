@@ -1481,6 +1481,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "escape8259"
+version = "0.5.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5692dd7b5a1978a5aeb0ce83b7655c58ca8efdcb79d21036ea249da95afec2c6"
+
+[[package]]
 name = "event-listener"
 version = "5.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2530,6 +2536,18 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c943259e342f1e06ff2da7a83eabdfe7f92ce10262688dbf1895ff0b3e6e4652"
 dependencies = [
  "libc",
+]
+
+[[package]]
+name = "libtest-mimic"
+version = "0.8.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "14e6ba06f0ade6e504aff834d7c34298e5155c6baca353cc6a4aaff2f9fd7f33"
+dependencies = [
+ "anstream",
+ "anstyle",
+ "clap",
+ "escape8259",
 ]
 
 [[package]]
@@ -3743,6 +3761,7 @@ dependencies = [
  "proxima-telemetry",
  "proxima-test",
  "proxima-tls",
+ "proxima-vm",
  "quick-xml",
  "quinn",
  "quinn-proto",
@@ -4693,6 +4712,7 @@ dependencies = [
  "fdt",
  "futures",
  "goblin",
+ "libtest-mimic",
  "object",
  "postcard",
  "proptest",
@@ -4704,6 +4724,7 @@ dependencies = [
  "proxima-protocols",
  "serde",
  "tempfile",
+ "tokio",
  "vm-fdt",
 ]
 

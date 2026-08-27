@@ -41,6 +41,16 @@ vm-fdt = { version = "0.3.0", default-features = false, features = ["alloc"], op
 name = "hello"
 required-features = ["std"]
 
+# self-signing config-only probe (see the file's own doc comment for why this
+# is `harness = false` rather than a `[[bin]]`): `proxima` — the crate that
+# owns the `vm` registry factory under test — can only be a dev-dependency of
+# proxima-vm (a real dependency would cycle back through `proxima`'s own
+# optional `vm` feature), so this target owns `fn main()` and dispatches on
+# argv instead of using the libtest harness.
+[[test]]
+name = "vm_registry"
+harness = false
+
 [[bench]]
 name = "bench_elf"
 harness = false
@@ -55,7 +65,9 @@ cc = "1.2.62"
 [dev-dependencies]
 criterion = { workspace = true, features = ["html_reports"] }
 goblin = "0.10.7"
+libtest-mimic = "0.8.2"
 object = "0.40.0"
 proptest.workspace = true
-proxima = { workspace = true, features = ["test-support"] }
+proxima = { workspace = true, features = ["test-support", "vm"] }
 tempfile.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread"] }

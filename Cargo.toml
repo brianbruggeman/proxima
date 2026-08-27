@@ -345,6 +345,7 @@ crossbeam-utils = { workspace = true }
 prost = { workspace = true, features = ["std", "derive"], optional = true }
 rand.workspace = true
 proxima-recording = { version = "0.1.0", path = "proxima-recording", features = ["pipe", "replay"], optional = true }
+proxima-vm = { version = "0.1.0", path = "tools/proxima-vm", default-features = false, features = ["std"], optional = true }
 
 [dependencies.tracing-subscriber]
 workspace = true
@@ -1070,6 +1071,13 @@ runtime-prime-full    = ["proxima-primitives/runtime-prime-full", "proxima-runti
 # perf knobs (compose with sub-flags)
 simd-hex     = []
 simd-varint  = []
+
+# `vm` registers the `vm` upstream factory so `[upstream.my-fn] type = "vm"`
+# boots a guest ELF under KVM (linux/x86_64) or Hypervisor.framework
+# (macos/aarch64) through `proxima-vm`'s M1 dispatch loop — `tokio` for the
+# same reason `process` needs it (the factory registry only threads
+# `Arc<LogBufferRegistry>`-shaped state through the tokio-gated arms today).
+vm = ["tokio", "dep:proxima-vm"]
 
 [[bench]]
 name = "bench_inbox"

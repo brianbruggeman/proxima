@@ -51,6 +51,11 @@ pub mod process;
 pub mod process_rpc;
 #[cfg(feature = "recording")]
 pub mod record;
+// guest-ELF-as-upstream: `proxima-vm`'s M1 dispatch loop over KVM/
+// Hypervisor.framework — tokio-gated for the same reason `process` is (see
+// that module's comment above).
+#[cfg(feature = "vm")]
+pub mod vm;
 #[cfg(feature = "recording")]
 pub use proxima_recording::replay;
 #[cfg(all(
@@ -138,5 +143,7 @@ pub use synth::{SynthPipeFactory, SynthUpstream};
 pub use tokio_stream::TokioTcpUpstream;
 #[cfg(all(feature = "unix", unix, feature = "tokio"))]
 pub use tokio_stream::TokioUnixUpstream;
+#[cfg(feature = "vm")]
+pub use vm::{VmConfig, VmPipeFactory, VmSpec, VmUpstream};
 #[cfg(feature = "websocket-upstream")]
 pub use websocket::WebSocketUpstream;

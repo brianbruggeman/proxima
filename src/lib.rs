@@ -525,6 +525,8 @@ pub use upstreams::{
 };
 #[cfg(unix)]
 pub use upstreams::{ProcessRpcPipeFactory, ProcessRpcSpec, ProcessRpcUpstream};
+#[cfg(feature = "vm")]
+pub use upstreams::{VmConfig, VmPipeFactory, VmSpec, VmUpstream};
 pub use write_back::{WriteBackConditions, WriteBackRule};
 
 /// The one import for both halves of the builder-sugar surface:
