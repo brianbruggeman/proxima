@@ -525,7 +525,7 @@ pub fn parse_payload(header: &FrameHeader, payload: &Bytes) -> Result<FramePaylo
             // common case (≤6 standard ids; extensions land in a
             // 4-inline SmallVec).
             let mut settings = StandardSettings::default();
-            for chunk in payload_view.chunks_exact(6) {
+            for chunk in payload_view.as_chunks::<6>().0 {
                 let identifier = u16::from_be_bytes([chunk[0], chunk[1]]);
                 let value = u32::from_be_bytes([chunk[2], chunk[3], chunk[4], chunk[5]]);
                 settings.apply(SettingEntry { identifier, value })?;

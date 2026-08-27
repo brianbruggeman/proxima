@@ -167,11 +167,11 @@ fn ipv4_at(bytes: &[u8]) -> [u8; 4] {
 // proxima-inet-codec::checksum; inlined to keep this crate dpdk-only-standalone).
 fn rfc1071(data: &[u8]) -> u16 {
     let mut sum: u32 = 0;
-    let mut words = data.chunks_exact(2);
-    for word in &mut words {
-        sum += u32::from(u16::from_be_bytes([word[0], word[1]]));
+    let (words, remainder) = data.as_chunks::<2>();
+    for word in words {
+        sum += u32::from(u16::from_be_bytes(*word));
     }
-    if let [last] = words.remainder() {
+    if let [last] = remainder {
         sum += u32::from(u16::from_be_bytes([*last, 0]));
     }
     while (sum >> 16) != 0 {

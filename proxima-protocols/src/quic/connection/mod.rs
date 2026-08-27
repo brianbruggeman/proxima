@@ -6421,8 +6421,8 @@ fn handle_inbound_retry<P: TlsProvider>(
 fn make_version_negotiation_error(supported_versions_raw: &[u8]) -> ConnectionError {
     use crate::quic::connection::error::MAX_VN_OFFERED_VERSIONS;
     let mut offered: ArrayVec<u32, MAX_VN_OFFERED_VERSIONS> = ArrayVec::new();
-    for chunk in supported_versions_raw.chunks_exact(4) {
-        let version = u32::from_be_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
+    for chunk in supported_versions_raw.as_chunks::<4>().0 {
+        let version = u32::from_be_bytes(*chunk);
         if offered.try_push(version).is_err() {
             break;
         }

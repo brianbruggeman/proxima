@@ -905,8 +905,10 @@ mod tests {
                 ..
             } => {
                 let versions: alloc::vec::Vec<u32> = supported_versions_raw
-                    .chunks_exact(4)
-                    .map(|chunk| u32::from_be_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
+                    .as_chunks::<4>()
+                    .0
+                    .iter()
+                    .map(|chunk| u32::from_be_bytes(*chunk))
                     .collect();
                 assert_eq!(versions, alloc::vec![1, 0xff00001d]);
             }
