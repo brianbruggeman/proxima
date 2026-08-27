@@ -80,6 +80,8 @@ pub mod quic;
 pub mod redis;
 #[cfg(feature = "tcp")]
 pub mod tcp;
+#[cfg(feature = "virtio")]
+pub mod virtio;
 #[cfg(feature = "websocket_frame")]
 pub mod websocket_frame;
 #[cfg(feature = "websocket_handshake")]

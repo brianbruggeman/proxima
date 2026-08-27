@@ -108,6 +108,12 @@ memcached-codec-trait = ["memcached", "dep:proxima-codec", "codec-pipe", "dep:me
 # extracted from proxima-nvme-codec. Tier-3: no_std + no-alloc, zero deps.
 nvme = []
 
+# Sans-IO split-virtqueue wire codec (device side) for a userspace VMM —
+# proxima-vm's M6. Tier-3: no_std + no-alloc, zero deps. Mirrors `nvme`'s
+# tier gating; lives beside it because `QueueBackend` is the seam both
+# devices share (proxima-vm ROADMAP.md M6).
+virtio = []
+
 # Sans-IO Ethernet/IPv4/TCP wire codec for a userspace network stack —
 # extracted from proxima-inet-codec. Tier-3: no_std + no-alloc, zero deps.
 inet = []
