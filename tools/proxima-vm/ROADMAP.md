@@ -556,3 +556,79 @@ composition expresses does not land.
 and the per-case self-signing harness in `tests/boot.rs` (each case copies the
 binary to a tempdir before codesigning — parallel nextest processes corrupt a
 shared path).
+
+## State update — 2026-08-26, resume checklist executed (uncommitted)
+
+Every step above ran, in order, with asserted counts. Nothing here is a seal —
+the owner reviews the diff and rules. What ran:
+
+1. **Gate first**: the checkpoint did not compile — exit 101, 0 tests (missing
+   dev-deps, unexported `elf`/`loader`, undefined `proxima_vm_map_guest_memory`
+   in both C backends, three mid-refactor symbols). Repaired; suite reached
+   42/42, then 43/43 after the trap loop landed.
+2. **Reuse audit ran adversarially**; the claim was refuted three times and all
+   three were fixed: postcard framing now composes
+   `proxima_process::framing::{FrameDecoder,FrameEncoder}` (the earlier
+   rationale had rebutted only `run_dispatch_loop` — a strawman); the flat RWX
+   guest image was replaced by per-segment W^X mapping through
+   `RawSegment` + a page-window merge (driven by an empirical
+   `hv_vm_map` `HV_BAD_ARGUMENT` on byte-exact mapping; Linux KVM expresses
+   only READONLY — no exec bit without guest paging); the C
+   create/run/teardown skeleton is factored and shared by the scratch and
+   dispatch loops in both backends. `FfiRecordingDispatcher` survived both
+   binary questions: extern "C" cannot be generic, so a concrete pointee is a
+   language constraint, not a relocation.
+3. **`elf.rs` reshaped** to the sans-IO enum FSM
+   (`Cursor{Header, ProgramHeaderTable, EntryPointCheck}`), reusing
+   `proxima_protocols::nvme::raw` byte-read helpers; `elf-bench`-gated
+   compare-bench + `BENCH_LOG.md` landed. Numbers: ours ~29ns vs `object`
+   ~61ns vs `goblin` ~1.0µs on the M1 guest (neutral arm); the
+   design-favors-incumbent arm (real 4.58MB dynamic ELF) is a documented
+   feature gap — ET_EXEC-only, named-error rejection, **no win claimed on the
+   incumbents' turf**. Condition 2's second-design tweak-loop and bench CI
+   wiring remain open rows in `BENCH_LOG.md`.
+4. **Exit criterion exercised through real VM exits** on the HVF lane: the
+   lambda guest issues `Read` then `Close` as genuine `hvc #0` traps, host
+   responses provably change guest-emitted bytes (`00 00` vs `03 03` from the
+   identical binary), request counts asserted, both sad paths named errors.
+   The KVM lane compiles under cross-toolchain but has never executed —
+   `/dev/kvm` absent on this host; RIP auto-advance after `out` is an
+   inherited, unverified assumption.
+5. M2 is next per its section above.
+
+Full gate at close: nextest 43/43, clippy `--all-targets` clean,
+`aarch64-unknown-none` alloc-tier check clean, x86_64-linux cross build clean
+(host needs `CC/AR/LINKER=x86_64-unknown-linux-gnu-gcc` scoped per command),
+all `bench_elf` arms running. Worktree `../proxima-elf-reshape` holds the
+reshape's original (now ported) work — removal is the owner's call.
+
+## State update — 2026-08-26 (later), this worktree: M5b exit criterion met
+
+Nothing here is a seal — the owner reviews and rules. What ran, in this
+worktree (`proxima-m6`), all uncommitted, all gates green at 172/172:
+
+- **M6 device plane complete**: virtio console/net/blk as sans-IO codecs +
+  transports + real-VM-exit proofs; mmio codec; DeviceStatus FSM.
+- **M3** instrument (mac-lane-honest, degenerate control passed exactly),
+  **M4** named guest memory (mach memory entry / memfd; ~15-30% wall cost,
+  the price of forkability), **M7** snapshot (restore 0.67-0.74ms vs
+  5.2-6.0ms cold create; pc-rewind re-trap proof), **M11** page-table
+  walker (all four formats; real QEMU differentials x86-64 4/5-level +
+  aarch64 stage-1 via gva2gpa; S2AP stage-2 decode fixed spec-settled).
+- **M5 slice chain**: FDT via vm-fdt+fdt (incumbent won — no hand-roll;
+  real dtc differential), PSCI handler (HVC conduit, DEN0022 return
+  codes), GICv3 GICD+GICR register blocks + MMIO windows + EC-0x18 ICC
+  sysreg file, vtimer exit arm, pl011 + DTB uart/clock/stdout-path.
+- **M5b criterion MET**: a real Alpine arm64 kernel (EFI-zboot-carved
+  Image, sha256 5d994c69…) boots at RAM base 0x4000_0000 and emits
+  **7231 pl011 bytes** ("Booting Linux on physical CPU 0x0…
+  earlycon… legacy bootconsole [pl11] enabled"), asserted nonzero by
+  `tests/kernel_boot.rs` (UNMEASURED-skip without the kernel asset).
+  Boot stats: mmio traps 22051 (gicd 325 / gicr 33 / pl011 21693),
+  vtimer 1. The phantom zero-bytes was the harness discarding captured
+  bytes on non-clean exits (emitted_length_out gated on result==0) —
+  fixed; bytes+stats now travel on either outcome.
+- Beyond the criterion: next wall is an unmodeled ICC register (error
+  currently discards the (op0,op1,crn,crm,op2) tuple — capture fix
+  queued); deeper boot needs interrupt injection (IAR1 is always
+  spurious today). KVM lane still compile-only — no /dev/kvm here.

@@ -19,7 +19,30 @@
 #[cfg(feature = "alloc")]
 extern crate alloc;
 
+pub mod abi;
+#[cfg(feature = "std")]
+pub mod boot;
 pub mod dispatch;
+#[cfg(feature = "alloc")]
+pub mod dtb;
+pub mod elf;
+pub mod gic;
+pub mod loader;
+#[cfg(feature = "std")]
+pub mod mmio_trampoline;
+#[cfg(feature = "std")]
+pub mod named_memory;
+pub mod page_table;
+pub mod pl011;
+pub mod psci;
+#[cfg(feature = "std")]
+pub mod snapshot;
+#[cfg(feature = "std")]
+pub mod virtio_blk;
+#[cfg(feature = "std")]
+pub mod virtio_console;
+#[cfg(feature = "std")]
+pub mod virtio_net;
 
 #[cfg(feature = "std")]
 use core::future::Future;

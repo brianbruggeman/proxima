@@ -1,45 +1,99 @@
-//! Signed-subprocess probe for `dispatch::run_hypercall_guest`: boots the
-//! synthesized one-hypercall guest against a real hypervisor, dispatches
-//! the pinned `ChildRequest::Read` payload (the same bytes
-//! `dispatch.rs`'s `wire_format_round_trips_for_parity` pins) through a
-//! `RecordingDispatcher`, and writes the postcard-encoded response to
-//! stdout — `tests/dispatch_hypercall.rs` decodes it and asserts against
-//! the configured response.
+//! Signed-subprocess probe for `dispatch::run_dispatch_loop`: reads the
+//! already-built `proxima-vm-guest-lambda` ELF (path supplied as argv[1] by
+//! `tests/dispatch_hypercall.rs`, which builds it for
+//! `aarch64-unknown-none` before signing and running this probe), boots it
+//! against a real hypervisor, and drives its two `ChildRequest` hypercalls
+//! through a real VM exit. Writes the guest's emitted bytes to stdout as
+//! raw bytes — `tests/dispatch_hypercall.rs` asserts on them directly, not
+//! through a postcard decode, since they are the guest's own emitted-byte
+//! proof, not a `ChildResponse`.
+//!
+//! argv[2] selects the dispatcher's `configured_response` variant ("read"
+//! [default] or "close") — `tests/dispatch_hypercall.rs` runs this probe
+//! once per variant against the identical guest and asserts the guest's
+//! emitted bytes differ, proving the host's response (not a guest-compiled
+//! constant) decides what the guest emits.
 
+use std::env;
 use std::error::Error;
+use std::fs;
 use std::io::{self, Write};
 
 use proxima_protocols::process::{ChildResponse, ReadResponse};
-use proxima_vm::dispatch::{self, RecordingDispatcher};
+use proxima_vm::dispatch;
+use proxima_vm::elf;
 
-/// Postcard variant discriminant for `ChildRequest::Read`, reused as the
-/// hypercall verb — matches `dispatch.rs`'s test constant of the same name.
-const CHILD_REQUEST_READ_VERB: u16 = 0x00;
-
-/// `ChildRequest::Read { path: "/etc/hostname", max_bytes: 256, offset: 0 }`,
-/// postcard-encoded, byte-for-byte the buffer `dispatch.rs`'s
-/// `wire_format_round_trips_for_parity` pins as `expected`.
-const CHILD_REQUEST_READ_WIRE_BYTES: [u8; 18] = [
-    0x00, 13, b'/', b'e', b't', b'c', b'/', b'h', b'o', b's', b't', b'n', b'a', b'm', b'e', 0x80,
-    0x02, 0x00,
-];
-
-const RESPONSE_CAPACITY: usize = 256;
+const MAX_SEGMENTS: usize = 4;
+const MAX_HYPERCALLS: usize = 16;
+const EMITTED_CAPACITY: usize = 256;
+const MMIO_EMITTED_CAPACITY: usize = 256;
+const NET_EMITTED_CAPACITY: usize = 256;
+const BLK_EMITTED_CAPACITY: usize = 2048;
+const PL011_EMITTED_CAPACITY: usize = 256;
 
 fn main() -> Result<(), Box<dyn Error>> {
-    let configured = ChildResponse::Read(ReadResponse {
-        bytes: b"vm-side-canned".to_vec(),
-        eof: true,
-    });
-    let dispatcher = RecordingDispatcher::new(configured);
+    let mut arguments = env::args().skip(1);
+    let guest_path = arguments
+        .next()
+        .ok_or("usage: dispatch_probe <path-to-guest-elf> [read|close]")?;
+    let variant = arguments.next().unwrap_or_else(|| "read".to_string());
 
-    let response = dispatch::run_hypercall_guest(
-        &dispatcher,
-        CHILD_REQUEST_READ_VERB,
-        &CHILD_REQUEST_READ_WIRE_BYTES,
-        RESPONSE_CAPACITY,
+    let image = fs::read(&guest_path)?;
+    let (entry, segments) = elf::parse_elf::<MAX_SEGMENTS>(&image)
+        .map_err(|error| format!("failed to parse guest ELF {guest_path}: {error}"))?;
+
+    let configured = match variant.as_str() {
+        "read" => ChildResponse::Read(ReadResponse {
+            bytes: b"vm-side-canned".to_vec(),
+            eof: true,
+        }),
+        "close" => ChildResponse::Close,
+        other => return Err(format!("unknown response variant {other:?}").into()),
+    };
+    let (
+        requests,
+        emitted,
+        mmio_emitted,
+        net_emitted,
+        blk_emitted,
+        pl011_emitted,
+        create_to_first_exit_nanos,
+        touch_all_pages_nanos,
+        mmio_trap_count,
+    ) = dispatch::run_dispatch_loop(
+        entry,
+        &segments,
+        configured,
+        MAX_HYPERCALLS,
+        EMITTED_CAPACITY,
+        MMIO_EMITTED_CAPACITY,
+        NET_EMITTED_CAPACITY,
+        BLK_EMITTED_CAPACITY,
+        PL011_EMITTED_CAPACITY,
+        dispatch::GUEST_MEMORY_SIZE,
     )?;
 
-    io::stdout().write_all(&response)?;
+    eprintln!("guest issued {} request(s): {requests:?}", requests.len());
+    eprintln!(
+        "guest drained {} mmio byte(s): {mmio_emitted:?}",
+        mmio_emitted.len()
+    );
+    eprintln!(
+        "guest drained {} net byte(s): {net_emitted:?}",
+        net_emitted.len()
+    );
+    eprintln!(
+        "guest drained {} blk byte(s): {blk_emitted:?}",
+        blk_emitted.len()
+    );
+    eprintln!(
+        "guest drained {} pl011 byte(s): {pl011_emitted:?}",
+        pl011_emitted.len()
+    );
+    eprintln!(
+        "m3 create_to_first_exit_nanos={create_to_first_exit_nanos} \
+         touch_all_pages_nanos={touch_all_pages_nanos} mmio_trap_count={mmio_trap_count}"
+    );
+    io::stdout().write_all(&emitted)?;
     Ok(())
 }

@@ -14,5 +14,29 @@ publish = false
 name = "proxima-vm-guest-lambda"
 path = "src/main.rs"
 
+# M5b PSCI slice: a deliberately separate guest from `proxima-vm-guest-lambda`
+# above so its `hvc` call sequence never perturbs that binary's own pinned
+# ELF layout (`src/elf.rs::matches_readelf_on_the_real_aarch64_guest`) or its
+# pinned emitted-byte contract (`tests/dispatch_hypercall.rs`).
+[[bin]]
+name = "proxima-vm-guest-lambda-psci"
+path = "src/bin/psci_probe.rs"
+
+# M5b GIC slice 3: another deliberately separate guest, same isolation
+# reason as the psci probe above, so this GICD/GICR register-read sequence
+# never perturbs either sibling binary's pinned ELF layout or emitted-byte
+# contract.
+[[bin]]
+name = "proxima-vm-guest-lambda-gic"
+path = "src/bin/gic_probe.rs"
+
+# M5b pl011 slice: another deliberately separate guest, same isolation
+# reason as the psci/gic probes above, so this UARTDR write sequence never
+# perturbs either sibling binary's pinned ELF layout or emitted-byte
+# contract.
+[[bin]]
+name = "proxima-vm-guest-lambda-pl011"
+path = "src/bin/pl011_probe.rs"
+
 [lints]
 workspace = true

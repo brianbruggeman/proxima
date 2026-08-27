@@ -10,10 +10,10 @@
 //! `out dx, al` widens that to 16 bits, matching the ARM side's `x0`.
 //!
 //! `main.rs`'s `entry` calls the arch-matching trap once, on a buffer holding
-//! the already-pinned `ChildRequest::Read` postcard bytes
-//! (`src/dispatch.rs`'s `wire_format_round_trips_for_parity`). Mapping that
-//! buffer into an actual shared page, and a host that reads the exit and
-//! replies, are later steps — no VM backend calls into this guest yet.
+//! the already-pinned `ChildRequest::Read` postcard bytes (fd-keyed post-P0,
+//! `tools/proxima-vm/ROADMAP.md` P0). Mapping that buffer into an actual
+//! shared page, and a host that reads the exit and replies, are later steps
+//! — no VM backend calls into this guest yet.
 
 #[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
 use core::arch::asm;

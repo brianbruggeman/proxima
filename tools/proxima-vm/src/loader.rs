@@ -105,6 +105,12 @@ impl<const MAX_SEGMENTS: usize> Drop for GuestMemory<MAX_SEGMENTS> {
     all(target_os = "linux", target_arch = "x86_64"),
     all(target_os = "macos", target_arch = "aarch64")
 ))]
+pub(crate) use platform::RawSegment;
+
+#[cfg(any(
+    all(target_os = "linux", target_arch = "x86_64"),
+    all(target_os = "macos", target_arch = "aarch64")
+))]
 mod platform {
     use std::ffi::CStr;
     use std::os::raw::c_char;
@@ -119,8 +125,13 @@ mod platform {
 
     /// FFI mirror of `proxima_vm_segment_t` (`ffi_segment.h`). Field order
     /// and width must match the C struct exactly.
+    ///
+    /// `pub(crate)` beyond this module: `dispatch.rs`'s `run_dispatch_loop`
+    /// reuses this same marshaling to hand real ELF segments AND a
+    /// synthetic stack region (see [`RawSegment::stack`]) to the C-side
+    /// per-segment mapper, instead of hand-rolling a second FFI struct.
     #[repr(C)]
-    struct RawSegment {
+    pub(crate) struct RawSegment {
         guest_address: u64,
         data: *const u8,
         data_length: usize,
@@ -131,7 +142,7 @@ mod platform {
     }
 
     impl RawSegment {
-        fn from_segment(segment: &Segment<'_>) -> Self {
+        pub(crate) fn from_segment(segment: &Segment<'_>) -> Self {
             Self {
                 guest_address: segment.virtual_address(),
                 data: segment.data().as_ptr(),
@@ -140,6 +151,51 @@ mod platform {
                 readable: u8::from(segment.is_readable()),
                 writable: u8::from(segment.is_writable()),
                 executable: u8::from(segment.is_executable()),
+            }
+        }
+
+        /// A synthetic, data-free region: the write-only, non-executable
+        /// stack reservation `guests/lambda/link.ld` carves out beyond the
+        /// guest ELF's own `PT_LOAD` segments (`__stack_top` sits at the end
+        /// of the linker script's 64 MiB `RAM` region; nothing between the
+        /// last segment and there is backed by file content). `data` is a
+        /// dangling-but-non-null empty-slice pointer — never dereferenced,
+        /// since `data_length` is `0` and the C-side mapper guards the copy
+        /// on that length.
+        pub(crate) fn stack(guest_address: u64, memory_size: u64) -> Self {
+            Self {
+                guest_address,
+                data: (&[] as &[u8]).as_ptr(),
+                data_length: 0,
+                memory_size,
+                readable: 1,
+                writable: 1,
+                executable: 0,
+            }
+        }
+
+        /// A raw, non-ELF-backed region at a caller-chosen `guest_address`
+        /// offset and permission set — the shape a real kernel boot needs
+        /// for the Image blob and the DTB blob (`crate::boot`), neither of
+        /// which has an ELF `Segment` to marshal via [`Self::from_segment`].
+        /// `data` must outlive the `proxima_vm_run_dispatch_loop` call this
+        /// segment is passed into.
+        pub(crate) fn raw(
+            guest_address: u64,
+            data: &[u8],
+            memory_size: u64,
+            readable: bool,
+            writable: bool,
+            executable: bool,
+        ) -> Self {
+            Self {
+                guest_address,
+                data: data.as_ptr(),
+                data_length: data.len(),
+                memory_size,
+                readable: u8::from(readable),
+                writable: u8::from(writable),
+                executable: u8::from(executable),
             }
         }
     }
@@ -335,7 +391,12 @@ mod platform {
             })
             .collect();
         unsafe {
-            ffi::proxima_vm_unmap_guest_memory(raw.as_ptr(), raw.len(), handle.kvm_fd, handle.vm_fd);
+            ffi::proxima_vm_unmap_guest_memory(
+                raw.as_ptr(),
+                raw.len(),
+                handle.kvm_fd,
+                handle.vm_fd,
+            );
         }
     }
 }
