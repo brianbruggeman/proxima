@@ -10,7 +10,7 @@
 //! Future<ChildResponse>` — exactly `SendPipe<In = ChildRequest,
 //! Out = ChildResponse>` (`proxima_primitives::pipe::SendPipe`).
 //! This module names no bespoke trait for that shape; every
-//! consumer here (grounds, `AndThen`, `Match`, [`FfiRecordingDispatcher`])
+//! consumer here (grounds, `AndThen`, `Match`, `FfiRecordingDispatcher`)
 //! implements `SendPipe` directly, so a single dispatch-chain config
 //! drives both the libc-shim and proxima-vm without an adapter layer.
 //!
@@ -19,7 +19,7 @@
 //! [`ScratchVm`](super::ScratchVm) doesn't yet have guests that
 //! issue `ChildRequest`s — it's a bare-metal "emit bytes and
 //! halt" guest with no OS layer making syscalls. The wire-format
-//! parity test ([`wire_format_round_trips_for_parity`] below)
+//! parity test (`wire_format_round_trips_for_parity` below)
 //! proves the proxima-process-protocol crate exposes the same
 //! bytes proxima-vm will consume.
 //!
@@ -207,14 +207,14 @@ where
 /// link time, since a bare `extern "C" fn` without it still gets a mangled
 /// Rust symbol name. `dispatcher` is typed `*const c_void` to match the C
 /// header's `const void *dispatcher` exactly; the cast to
-/// [`FfiRecordingDispatcher`] happens on the Rust side only, since
+/// `FfiRecordingDispatcher` happens on the Rust side only, since
 /// `extern "C"` functions cannot be generic over the caller's dispatcher
 /// type.
 ///
 /// # Safety
 ///
 /// `dispatcher` must be a valid, live pointer to an
-/// [`FfiRecordingDispatcher`] for the duration of the call. `guest_memory`
+/// `FfiRecordingDispatcher` for the duration of the call. `guest_memory`
 /// must be valid for `guest_memory_length` bytes. `response_out` must be
 /// valid for `response_capacity` bytes and not alias `guest_memory`.
 #[cfg(feature = "std")]
@@ -253,12 +253,12 @@ pub unsafe extern "C" fn proxima_vm_dispatch_hypercall(
 /// (`src/backend_macos.c`'s / `src/backend_linux.c`'s
 /// `proxima_vm_run_dispatch_loop`, calling back into
 /// [`proxima_vm_dispatch_hypercall`] per capability hypercall) — as opposed
-/// to [`dispatch_hypercall_direct_for_tests`], which never boots a guest at
+/// to `dispatch_hypercall_direct_for_tests`, which never boots a guest at
 /// all.
 ///
 /// `configured_response` is the one [`ChildResponse`] every capability
 /// hypercall this run receives is answered with (the same
-/// canned-per-instance shape [`FfiRecordingDispatcher`] already carries);
+/// canned-per-instance shape `FfiRecordingDispatcher` already carries);
 /// two runs with two different `configured_response` values, driven against
 /// the same guest, are what prove the host's response — not a value the
 /// guest compiled in — decides the bytes the guest emits.
@@ -285,7 +285,7 @@ pub unsafe extern "C" fn proxima_vm_dispatch_hypercall(
 /// layer at all, not the shape a real ELF-loaded guest should run under.
 /// One additional writable, non-executable segment covers the range between
 /// the last ELF segment and `GUEST_MEMORY_SIZE`
-/// ([`crate::loader::RawSegment::stack`]) — the stack reservation
+/// (`crate::loader::RawSegment::stack`) — the stack reservation
 /// `guests/lambda/link.ld`'s `__stack_top` implies but no `PT_LOAD` entry
 /// declares.
 ///

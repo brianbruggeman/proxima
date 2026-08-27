@@ -1,5 +1,5 @@
 //! Minimal VM ground for proving that a guest can emit bytes through a
-//! Proxima [`Pipe`].
+//! Proxima `Pipe`.
 //!
 //! [`ScratchVm`] does not boot an operating system. It synthesizes a tiny
 //! architecture-native guest program whose only effect is emitting its

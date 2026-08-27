@@ -88,7 +88,7 @@ pub struct VmSnapshot {
 
 /// Deterministic byte pattern the warm-restore size sweep uses to seed
 /// [`VmSnapshot::with_padded_memory`]'s padding region and later verify
-/// [`WarmVm::restore`] actually copied it — a lazy no-op restore would still
+/// [`WarmVm::restore_oracle_full_copy`] actually copied it — a lazy no-op restore would still
 /// re-trap correctly (the halting trap never touches padding past the
 /// scratch guest's own tiny code blob), so the correctness gate checks
 /// content, not only the trap.
@@ -196,20 +196,20 @@ fn dirty_probe_guest_code(data_offset: u64, stride: u16, page_count: u16, byte_v
     ]
 }
 
-/// Builds a [`VmSnapshot`] whose `guest_memory` is [`dirty_probe_guest_code`]'s
+/// Builds a [`VmSnapshot`] whose `guest_memory` is `dirty_probe_guest_code`'s
 /// program at offset 0, followed by [`pattern_byte`]-seeded padding from
 /// `data_offset` to `target_size` — the µsec-campaign slice 4 dirty-tracking
-/// measurement's own fixture: [`WarmVm::restore`] establishes this as the
-/// clean baseline, [`WarmVm::arm_dirty_tracking`] + repeated
-/// [`WarmVm::dirty_write_run`] calls dirty exactly `page_count` of its pages,
-/// and [`WarmVm::restore_dirty`] must reproduce it byte-for-byte from only
+/// measurement's own fixture: [`WarmVm::restore_oracle_full_copy`] establishes this as the
+/// clean baseline, then repeated
+/// [`WarmVm::run_dirty_write`] calls dirty exactly `page_count` of its pages,
+/// and [`WarmVm::restore_layered`] must reproduce it byte-for-byte from only
 /// those dirtied pages — the strong oracle a plain sampled-padding check
 /// (`with_padded_memory`'s own doc) cannot catch a missed dirty page with.
 ///
 /// The registers embedded in the returned snapshot are all-zero:
-/// [`WarmVm::dirty_write_run`] resets the vCPU's own register file before
+/// [`WarmVm::run_dirty_write`] resets the vCPU's own register file before
 /// every run, so this snapshot's `registers` field only matters as the
-/// value [`WarmVm::restore`]/[`WarmVm::restore_dirty`] write back — zero is
+/// value [`WarmVm::restore_oracle_full_copy`]/[`WarmVm::restore_layered`] write back — zero is
 /// as good as any other fixed value for that.
 ///
 /// # Panics
@@ -260,7 +260,7 @@ impl VmSnapshot {
     /// `target_size` bytes, every byte beyond the original length filled
     /// with [`pattern_byte`] seeded by `seed` — the µsec-campaign warm-restore
     /// size sweep (`tools/proxima-vm/BENCH_LOG.md` slice 2) needs to scale
-    /// the memcpy term [`WarmVm::restore`] pays independent of the scratch
+    /// the memcpy term [`WarmVm::restore_oracle_full_copy`] pays independent of the scratch
     /// guest's own tiny code blob, since the guest never executes the
     /// padding it resumes past.
     ///
@@ -357,7 +357,7 @@ pub struct RestoreReport {
 /// Per-phase breakdown of one [`restore`] call's own [`RestoreReport::restore_wall_nanos`]
 /// (µsec campaign, restore-path decomposition) plus the resumed re-trap
 /// [`RestoreReport`] already timed separately as `touch_all_pages_nanos`'s
-/// sibling. Every field is a phase of the cold path only — [`WarmVm::restore`]
+/// sibling. Every field is a phase of the cold path only — [`WarmVm::restore_oracle_full_copy`]
 /// reports its own, smaller [`WarmRestorePhases`] with the creation phases
 /// removed, since a warm restore never runs them.
 #[derive(Clone, Copy, Debug, Default)]
@@ -378,7 +378,7 @@ pub struct RestorePhases {
 
 /// The same six-phase breakdown [`RestorePhases`] carries, minus the three
 /// creation phases a warm restore never runs (region/vm/vcpu creation) —
-/// [`WarmVm::restore`]'s own doc explains why they are gone, not zeroed.
+/// [`WarmVm::restore_oracle_full_copy`]'s own doc explains why they are gone, not zeroed.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct WarmRestorePhases {
     /// Writing the captured register file into the reused vCPU.
@@ -573,7 +573,7 @@ pub struct LayeredRestoreReport {
     pub remapped_page_count: u64,
 }
 
-/// Wall time and fault-count evidence one [`WarmVm::restore`] call
+/// Wall time and fault-count evidence one [`WarmVm::restore_oracle_full_copy`] call
 /// measured — [`RestoreReport`]'s warm-path mirror, minus the fields a warm
 /// restore has nothing to report (there is no region/vm/vcpu creation
 /// phase to roll into a `restore_wall_nanos` total the same way).
@@ -603,7 +603,7 @@ pub struct WarmRestoreReport {
 /// "restore again without recreating" — [`restore`] itself cannot be called
 /// twice in one process on the HVF lane at all. `WarmVm` is the type that
 /// capability needs: construct once via [`WarmVm::new`], call
-/// [`WarmVm::restore`] any number of times, drop to tear the context down.
+/// [`WarmVm::restore_oracle_full_copy`] any number of times, drop to tear the context down.
 ///
 /// # Tier
 ///

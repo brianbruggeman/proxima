@@ -109,7 +109,7 @@ impl QemuVirtLayout {
     /// that path's mapped guest memory and every guest access genuinely
     /// traps as a data abort, the same guarantee the GICD/GICR and virtio
     /// windows already get from sitting outside that ceiling. This module's
-    /// own [`tests::uart_window_sits_above_the_mapped_guest_memory_ceiling`]
+    /// own `tests::uart_window_sits_above_the_mapped_guest_memory_ceiling`
     /// asserts it. The M5b boot path (`crate::boot`) instead maps RAM
     /// *above* these windows entirely — see that module's own doc for the
     /// reversed non-aliasing argument its RAM base requires.

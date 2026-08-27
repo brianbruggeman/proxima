@@ -4,7 +4,7 @@
 //! nextest test harness, the same shape `dispatch_probe.rs` already
 //! establishes.
 //!
-//! argv[1]: path to a real arm64 Linux `Image`. argv[2] (optional): path to
+//! `argv[1]`: path to a real arm64 Linux `Image`. `argv[2]` (optional): path to
 //! an initramfs `cpio` archive — `boot::boot_linux_kernel`'s own `initramfs`
 //! parameter, threaded through so a guest with no root filesystem never
 //! reaches userspace on its own (`tests/kernel_boot_userspace.rs`'s own

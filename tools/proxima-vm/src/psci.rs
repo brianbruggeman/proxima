@@ -14,7 +14,7 @@
 //! `src/dispatch_trampoline.h` reserves `0xfffe`/`0xffff` for
 //! `PROXIMA_VM_EMIT_VERB`/`PROXIMA_VM_HALT_VERB`, and the `ChildRequest`
 //! postcard discriminants that flow through
-//! [`crate::dispatch::proxima_vm_dispatch_hypercall`] occupy `0..=4`
+//! `proxima_vm_dispatch_hypercall` occupy `0..=4`
 //! (`proxima-protocols/src/process/protocol.rs:72-77`). Every PSCI function
 //! ID SMCCC defines lives at `0x8400_0000` (32-bit fast call) or
 //! `0xC400_0000` (64-bit fast call) plus a small offset — six orders of
@@ -110,7 +110,7 @@ pub enum PsciResult {
 /// True when `function_id` falls in either SMCCC fast-call range PSCI
 /// occupies (`0x8400_0000..=0x8400_001f` 32-bit, `0xC400_0000..=0xC400_001f`
 /// 64-bit) — the range test the C-side trap loop uses to route a raw `hvc`
-/// exit here instead of [`crate::dispatch::proxima_vm_dispatch_hypercall`].
+/// exit here instead of `proxima_vm_dispatch_hypercall`.
 #[must_use]
 pub fn is_psci_function_id(function_id: u32) -> bool {
     const RANGE_WIDTH: u32 = 0x20;
