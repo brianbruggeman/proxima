@@ -40,10 +40,16 @@ members = [
     "proxima-tls",
     "tools/proxima-cli",
     "tools/proxima-vm",
-    "tools/proxima-vm/guests/lambda",
     "tools/rekt",
 ]
 resolver = "3"
+
+# bare no_std, no_alloc aarch64-unknown-none guest: `cargo build --workspace`
+# on the host panics on "unwinding panics are not supported without std" if
+# this stays a member. Every consumer already builds it via `--manifest-path`
+# (see tools/proxima-vm/tests/*.rs), never `-p`, so excluding it changes
+# nothing for them.
+exclude = ["tools/proxima-vm/guests/lambda"]
 
 [workspace.package]
 version = "0.1.0"

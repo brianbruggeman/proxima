@@ -990,11 +990,15 @@ mod tests {
             .join("proxima-vm-guest-lambda");
 
         if !artifact.exists() {
+            let manifest_path = Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("guests")
+                .join("lambda")
+                .join("Cargo.toml");
             let status = Command::new("cargo")
                 .args([
                     "build",
-                    "-p",
-                    "proxima-vm-guest-lambda",
+                    "--manifest-path",
+                    manifest_path.to_str().expect("utf8 manifest path"),
                     "--target",
                     target_triple,
                 ])
@@ -1019,9 +1023,20 @@ mod tests {
     /// `guests/lambda/src/virtio_net.rs`'s mmio bring-up sequence grew both
     /// segments past the slice-3 pins (1940/920).
     ///
+    /// Re-pinned again 2026-08-27 (host-workspace build fix): moving
+    /// `guests/lambda` out of the host `Cargo.toml`'s `members` into
+    /// `exclude` (so plain `cargo build --workspace` no longer tries to
+    /// compile this no_std, no_alloc aarch64-unknown-none binary for the
+    /// host) makes it its own workspace root. rustc now embeds this crate's
+    /// `file!()`/panic-location strings relative to its OWN manifest dir
+    /// (`src/main.rs`, …) instead of the host workspace root
+    /// (`tools/proxima-vm/guests/lambda/src/main.rs`, …); those shorter
+    /// strings shrink the `.rodata` `PT_LOAD` segment by 92 bytes
+    /// (2984 -> 2892). The code emitting this binary did not change.
+    ///
     /// ```text
-    /// ProgramHeader { Type: PT_LOAD, Offset: 0x10000, VirtualAddress: 0x0,    FileSize: 7276, MemSize: 7276, Flags: PF_R | PF_X }
-    /// ProgramHeader { Type: PT_LOAD, Offset: 0x11C70, VirtualAddress: 0x1C70, FileSize: 1768, MemSize: 1768, Flags: PF_R }
+    /// ProgramHeader { Type: PT_LOAD, Offset: 0x10000, VirtualAddress: 0x0,    FileSize: 10324, MemSize: 10324, Flags: PF_R | PF_X }
+    /// ProgramHeader { Type: PT_LOAD, Offset: 0x12858, VirtualAddress: 0x2858, FileSize: 2892, MemSize: 2892, Flags: PF_R }
     /// ProgramHeader { Type: PT_GNU_STACK, ... }
     /// ```
     ///
@@ -1044,8 +1059,8 @@ mod tests {
         assert!(segments[0].is_executable());
 
         assert_eq!(segments[1].virtual_address(), 0x2858);
-        assert_eq!(segments[1].memory_size(), 2984);
-        assert_eq!(segments[1].data().len(), 2984);
+        assert_eq!(segments[1].memory_size(), 2892);
+        assert_eq!(segments[1].data().len(), 2892);
         assert!(segments[1].is_readable());
         assert!(!segments[1].is_writable());
         assert!(!segments[1].is_executable());
@@ -1063,10 +1078,18 @@ mod tests {
     /// not; this is a real difference in this build's actual program
     /// headers, not a copy-paste of the aarch64 pin.
     ///
+    /// Re-pinned again 2026-08-27, same cause and same 92-byte `.rodata`
+    /// shrink as the aarch64 pin above (see that test's doc comment): moving
+    /// `guests/lambda` to its own workspace root shortens its embedded
+    /// `file!()` panic-location strings. The 92-byte-smaller segment 1
+    /// (1692 -> 1600) shifts segment 2's start address down by the same
+    /// page-aligned delta (0x2700 -> 0x26A0); segment 2's own size (1384) is
+    /// unaffected, since it holds no `file!()`-derived strings.
+    ///
     /// ```text
     /// ProgramHeader { Type: PT_LOAD, Offset: 0x1000, VirtualAddress: 0x0,    FileSize: 8287, MemSize: 8287, Flags: PF_R | PF_X }
-    /// ProgramHeader { Type: PT_LOAD, Offset: 0x3060, VirtualAddress: 0x2060, FileSize: 1692, MemSize: 1692, Flags: PF_R }
-    /// ProgramHeader { Type: PT_LOAD, Offset: 0x3700, VirtualAddress: 0x2700, FileSize: 1384, MemSize: 1384, Flags: PF_R | PF_W }
+    /// ProgramHeader { Type: PT_LOAD, Offset: 0x3060, VirtualAddress: 0x2060, FileSize: 1600, MemSize: 1600, Flags: PF_R }
+    /// ProgramHeader { Type: PT_LOAD, Offset: 0x36A0, VirtualAddress: 0x26A0, FileSize: 1384, MemSize: 1384, Flags: PF_R | PF_W }
     /// ProgramHeader { Type: PT_GNU_RELRO, ... }
     /// ProgramHeader { Type: PT_GNU_STACK, ... }
     /// ```
@@ -1086,13 +1109,13 @@ mod tests {
         assert!(segments[0].is_executable());
 
         assert_eq!(segments[1].virtual_address(), 0x2060);
-        assert_eq!(segments[1].memory_size(), 1692);
-        assert_eq!(segments[1].data().len(), 1692);
+        assert_eq!(segments[1].memory_size(), 1600);
+        assert_eq!(segments[1].data().len(), 1600);
         assert!(segments[1].is_readable());
         assert!(!segments[1].is_writable());
         assert!(!segments[1].is_executable());
 
-        assert_eq!(segments[2].virtual_address(), 0x2700);
+        assert_eq!(segments[2].virtual_address(), 0x26A0);
         assert_eq!(segments[2].memory_size(), 1384);
         assert_eq!(segments[2].data().len(), 1384);
         assert!(segments[2].is_readable());
