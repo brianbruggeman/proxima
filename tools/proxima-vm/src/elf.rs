@@ -6,9 +6,13 @@
 //! Mirrors the borrowed-view codec shape every other proxima wire parser
 //! uses (`proxima_protocols::nvme::command::SubmissionEntry`,
 //! `proxima_protocols::quic::packet::header::Header`,
-//! `proxima_protocols::dns::frame_codec`): free functions and POD views
+//! `proxima_protocols::dns::frame_codec`): a free function and POD views
 //! over `&[u8]`, never a `Pipe` — an ELF image is a byte buffer to decode,
-//! not a stream to transform.
+//! not a stream to transform. [`parse_elf`] itself is a driver loop over
+//! an explicit discriminated-enum state machine ([`Cursor`]/[`Step`]) per
+//! `AGENTS.md` principle 11 — see [`Cursor`]'s doc comment for the stage
+//! shape and why "consumed length" is per-step rather than cumulative for
+//! a whole-buffer format like this one.
 //!
 //! # Tier
 //!
@@ -40,6 +44,11 @@
 //! must, unlike QEMU's usual guests).
 
 use arrayvec::ArrayVec;
+// NVMe queue entries and ELF program headers are both host-DRAM,
+// little-endian structures (the opposite of a network codec's big-endian
+// wire) — reused rather than re-hand-rolling the identical trio
+// (`proxima-protocols/src/nvme/raw.rs`, exposed `pub` for exactly this).
+use proxima_protocols::nvme::raw::{read_u16, read_u32, read_u64};
 
 const ELF_MAGIC: [u8; 4] = [0x7f, b'E', b'L', b'F'];
 const ELF64_HEADER_LEN: usize = 64;
@@ -57,30 +66,6 @@ const PT_LOAD: u32 = 1;
 const PF_EXECUTE: u32 = 1;
 const PF_WRITE: u32 = 2;
 const PF_READ: u32 = 4;
-
-#[inline]
-fn read_u16(bytes: &[u8], at: usize) -> u16 {
-    u16::from_le_bytes([bytes[at], bytes[at + 1]])
-}
-
-#[inline]
-fn read_u32(bytes: &[u8], at: usize) -> u32 {
-    u32::from_le_bytes([bytes[at], bytes[at + 1], bytes[at + 2], bytes[at + 3]])
-}
-
-#[inline]
-fn read_u64(bytes: &[u8], at: usize) -> u64 {
-    u64::from_le_bytes([
-        bytes[at],
-        bytes[at + 1],
-        bytes[at + 2],
-        bytes[at + 3],
-        bytes[at + 4],
-        bytes[at + 5],
-        bytes[at + 6],
-        bytes[at + 7],
-    ])
-}
 
 /// Why [`parse_elf`] rejected an image. Every variant names the exact field
 /// that failed, so a caller can log the diagnosis without re-deriving it.
@@ -306,6 +291,262 @@ impl<'a> Segment<'a> {
     }
 }
 
+/// Explicit parse progress through the gABI's decode stages, one variant per
+/// stage — the house sans-IO shape (principle 11): a discriminated enum
+/// instead of a linear function threading loop-carried state through local
+/// variables. Every legal transition is a match arm in [`Cursor::advance`];
+/// there is no runtime "which stage am I in" flag to get out of sync with
+/// the data.
+///
+/// ELF is a whole-buffer format, not a byte stream — a `PT_LOAD` entry's
+/// file window is an absolute offset anywhere in the image, not the next N
+/// bytes after a read cursor. So unlike a streaming codec's single
+/// monotonic cursor, each [`Step::Advance`] carries the byte span **that
+/// step itself** validated, not a cumulative position; [`Cursor::Header`]
+/// validates the fixed 64-byte ELF64 header, each
+/// [`Cursor::ProgramHeaderTable`] step validates one fixed 56-byte program
+/// header entry (by absolute offset into the table), and
+/// [`Cursor::EntryPointCheck`] validates nothing new — it is a pure
+/// transition consuming zero bytes.
+enum Cursor<'a, const MAX_SEGMENTS: usize> {
+    /// Nothing validated yet; `image` is exactly what the caller handed in.
+    Header,
+    /// The ELF64 header is valid. Walking `header_count` program-header
+    /// entries starting at `next_index`, accumulating every `PT_LOAD` entry
+    /// that passes validation into `accepted`.
+    ProgramHeaderTable {
+        entry: u64,
+        table_offset: usize,
+        header_count: u16,
+        next_index: u16,
+        accepted: ArrayVec<Segment<'a>, MAX_SEGMENTS>,
+    },
+    /// Every program-header entry has been walked; only the "does `entry`
+    /// land inside an accepted executable segment" check remains.
+    EntryPointCheck {
+        entry: u64,
+        accepted: ArrayVec<Segment<'a>, MAX_SEGMENTS>,
+    },
+}
+
+/// One [`Cursor::advance`] transition outcome.
+enum Step<'a, const MAX_SEGMENTS: usize> {
+    /// Move to the next [`Cursor`] state. The `usize` is the byte span this
+    /// step itself validated (see [`Cursor`]'s doc comment) — diagnostic
+    /// only; [`parse_elf`] does not accumulate it into a position, because
+    /// ELF has no single monotonic read position to accumulate into.
+    Advance(Cursor<'a, MAX_SEGMENTS>, usize),
+    /// Terminal: the entry point and every accepted `PT_LOAD` segment, in
+    /// program-header order.
+    Done(u64, ArrayVec<Segment<'a>, MAX_SEGMENTS>),
+}
+
+impl<'a, const MAX_SEGMENTS: usize> Cursor<'a, MAX_SEGMENTS> {
+    /// Validate and consume exactly this state's stage of `image`, then
+    /// name the next state — never touches bytes another stage owns.
+    fn advance(self, image: &'a [u8]) -> Result<Step<'a, MAX_SEGMENTS>, LoaderError> {
+        match self {
+            Self::Header => Self::advance_header(image),
+            Self::ProgramHeaderTable {
+                entry,
+                table_offset,
+                header_count,
+                next_index,
+                accepted,
+            } => Self::advance_program_header_table(
+                image,
+                entry,
+                table_offset,
+                header_count,
+                next_index,
+                accepted,
+            ),
+            Self::EntryPointCheck { entry, accepted } => {
+                let entry_in_range = accepted.iter().any(|segment| {
+                    segment.executable
+                        && entry >= segment.virtual_address
+                        && entry < segment.virtual_address + segment.memory_size
+                });
+                if entry_in_range {
+                    Ok(Step::Done(entry, accepted))
+                } else {
+                    Err(LoaderError::EntryPointOutOfRange { entry })
+                }
+            }
+        }
+    }
+
+    fn advance_header(image: &'a [u8]) -> Result<Step<'a, MAX_SEGMENTS>, LoaderError> {
+        if image.len() < ELF64_HEADER_LEN {
+            return Err(LoaderError::Truncated {
+                need: ELF64_HEADER_LEN,
+                got: image.len(),
+            });
+        }
+        if image[0..4] != ELF_MAGIC {
+            return Err(LoaderError::BadMagic);
+        }
+
+        let class = image[EI_CLASS];
+        if class != ELFCLASS64 {
+            return Err(LoaderError::UnsupportedClass { class });
+        }
+        let data_encoding = image[EI_DATA];
+        if data_encoding != ELFDATA2LSB {
+            return Err(LoaderError::UnsupportedEndianness {
+                data: data_encoding,
+            });
+        }
+
+        let elf_type = read_u16(image, 16);
+        if elf_type != ET_EXEC {
+            return Err(LoaderError::UnsupportedType { elf_type });
+        }
+
+        let entry = read_u64(image, 24);
+        let program_header_offset = read_u64(image, 32);
+        let program_header_entry_size = read_u16(image, 54);
+        let header_count = read_u16(image, 56);
+
+        if program_header_entry_size as usize != PROGRAM_HEADER_LEN {
+            return Err(LoaderError::BadProgramHeaderEntrySize {
+                entry_size: program_header_entry_size,
+            });
+        }
+
+        let table_len = u64::from(header_count) * PROGRAM_HEADER_LEN as u64;
+        let table_end = program_header_offset
+            .checked_add(table_len)
+            .filter(|end| *end <= image.len() as u64)
+            .ok_or(LoaderError::ProgramHeaderTableOutOfRange {
+                offset: program_header_offset,
+                len: table_len as usize,
+                image_len: image.len(),
+            })?;
+        debug_assert!(table_end <= image.len() as u64);
+
+        Ok(Step::Advance(
+            Self::ProgramHeaderTable {
+                entry,
+                table_offset: program_header_offset as usize,
+                header_count,
+                next_index: 0,
+                accepted: ArrayVec::new(),
+            },
+            ELF64_HEADER_LEN,
+        ))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn advance_program_header_table(
+        image: &'a [u8],
+        entry: u64,
+        table_offset: usize,
+        header_count: u16,
+        next_index: u16,
+        mut accepted: ArrayVec<Segment<'a>, MAX_SEGMENTS>,
+    ) -> Result<Step<'a, MAX_SEGMENTS>, LoaderError> {
+        if next_index == header_count {
+            return Ok(Step::Advance(Self::EntryPointCheck { entry, accepted }, 0));
+        }
+
+        let header_index = usize::from(next_index);
+        let phdr_offset = table_offset + header_index * PROGRAM_HEADER_LEN;
+        let phdr = &image[phdr_offset..phdr_offset + PROGRAM_HEADER_LEN];
+
+        if read_u32(phdr, 0) == PT_LOAD {
+            let flags = read_u32(phdr, 4);
+            let file_offset = read_u64(phdr, 8);
+            let virtual_address = read_u64(phdr, 16);
+            let file_size = read_u64(phdr, 32);
+            let memory_size = read_u64(phdr, 40);
+            let align = read_u64(phdr, 48);
+
+            let file_end = file_offset
+                .checked_add(file_size)
+                .filter(|end| *end <= image.len() as u64)
+                .ok_or(LoaderError::SegmentOutOfRange {
+                    header_index,
+                    offset: file_offset,
+                    file_size,
+                    image_len: image.len(),
+                })?;
+
+            if file_size > memory_size {
+                return Err(LoaderError::SegmentSizeInverted {
+                    header_index,
+                    file_size,
+                    memory_size,
+                });
+            }
+
+            let virtual_end = virtual_address.checked_add(memory_size).ok_or(
+                LoaderError::SegmentAddressOverflow {
+                    header_index,
+                    virtual_address,
+                    memory_size,
+                },
+            )?;
+
+            let congruent = align <= 1 || virtual_address % align == file_offset % align;
+            if !congruent || (align != 0 && !align.is_power_of_two()) {
+                return Err(LoaderError::SegmentMisaligned {
+                    header_index,
+                    virtual_address,
+                    offset: file_offset,
+                    align,
+                });
+            }
+
+            let writable = flags & PF_WRITE != 0;
+            let executable = flags & PF_EXECUTE != 0;
+            if writable && executable {
+                return Err(LoaderError::SegmentWriteAndExecute {
+                    header_index,
+                    virtual_address,
+                });
+            }
+
+            if let Some(overlapping) = accepted.iter().enumerate().find(|(_, existing)| {
+                let existing_end = existing.virtual_address + existing.memory_size;
+                virtual_address < existing_end && existing.virtual_address < virtual_end
+            }) {
+                return Err(LoaderError::SegmentOverlap {
+                    header_index,
+                    other_header_index: overlapping.0,
+                });
+            }
+
+            let readable = flags & PF_READ != 0;
+            let data = &image[file_offset as usize..file_end as usize];
+
+            accepted
+                .try_push(Segment {
+                    virtual_address,
+                    memory_size,
+                    readable,
+                    writable,
+                    executable,
+                    data,
+                })
+                .map_err(|_capacity_error| LoaderError::TooManySegments {
+                    capacity: MAX_SEGMENTS,
+                })?;
+        }
+
+        Ok(Step::Advance(
+            Self::ProgramHeaderTable {
+                entry,
+                table_offset,
+                header_count,
+                next_index: next_index + 1,
+                accepted,
+            },
+            PROGRAM_HEADER_LEN,
+        ))
+    }
+}
+
 /// Parse an ELF64 image's `PT_LOAD` segments, validating every segment
 /// before any host memory operation touches it. `MAX_SEGMENTS` is the
 /// caller-chosen capacity for the fixed-cap `ArrayVec` — never a hidden
@@ -314,7 +555,8 @@ impl<'a> Segment<'a> {
 /// sections — `.text`, `.rodata`, `.data` — so `MAX_SEGMENTS = 4` covers it
 /// with headroom).
 ///
-/// # What is validated
+/// Drives [`Cursor::advance`] to completion — see [`Cursor`] for the state
+/// shape. Every check below is one `Cursor` transition:
 ///
 /// - the ELF64 magic, class (`ELFCLASS64`), and endianness (`ELFDATA2LSB`)
 /// - `e_type == ET_EXEC` (see [`LoaderError::UnsupportedType`])
@@ -338,154 +580,13 @@ impl<'a> Segment<'a> {
 pub fn parse_elf<const MAX_SEGMENTS: usize>(
     image: &[u8],
 ) -> Result<(u64, ArrayVec<Segment<'_>, MAX_SEGMENTS>), LoaderError> {
-    if image.len() < ELF64_HEADER_LEN {
-        return Err(LoaderError::Truncated {
-            need: ELF64_HEADER_LEN,
-            got: image.len(),
-        });
-    }
-    if image[0..4] != ELF_MAGIC {
-        return Err(LoaderError::BadMagic);
-    }
-
-    let class = image[EI_CLASS];
-    if class != ELFCLASS64 {
-        return Err(LoaderError::UnsupportedClass { class });
-    }
-    let data_encoding = image[EI_DATA];
-    if data_encoding != ELFDATA2LSB {
-        return Err(LoaderError::UnsupportedEndianness {
-            data: data_encoding,
-        });
-    }
-
-    let elf_type = read_u16(image, 16);
-    if elf_type != ET_EXEC {
-        return Err(LoaderError::UnsupportedType { elf_type });
-    }
-
-    let entry = read_u64(image, 24);
-    let program_header_offset = read_u64(image, 32);
-    let program_header_entry_size = read_u16(image, 54);
-    let program_header_count = read_u16(image, 56);
-
-    if program_header_entry_size as usize != PROGRAM_HEADER_LEN {
-        return Err(LoaderError::BadProgramHeaderEntrySize {
-            entry_size: program_header_entry_size,
-        });
-    }
-
-    let table_len = u64::from(program_header_count) * PROGRAM_HEADER_LEN as u64;
-    let table_end = program_header_offset
-        .checked_add(table_len)
-        .filter(|end| *end <= image.len() as u64)
-        .ok_or(LoaderError::ProgramHeaderTableOutOfRange {
-            offset: program_header_offset,
-            len: table_len as usize,
-            image_len: image.len(),
-        })?;
-    debug_assert!(table_end <= image.len() as u64);
-
-    let mut segments: ArrayVec<Segment<'_>, MAX_SEGMENTS> = ArrayVec::new();
-
-    for header_index in 0..usize::from(program_header_count) {
-        let phdr_offset = program_header_offset as usize + header_index * PROGRAM_HEADER_LEN;
-        let phdr = &image[phdr_offset..phdr_offset + PROGRAM_HEADER_LEN];
-
-        if read_u32(phdr, 0) != PT_LOAD {
-            continue;
+    let mut cursor = Cursor::Header;
+    loop {
+        match cursor.advance(image)? {
+            Step::Advance(next, _step_span) => cursor = next,
+            Step::Done(entry, accepted) => return Ok((entry, accepted)),
         }
-
-        let flags = read_u32(phdr, 4);
-        let file_offset = read_u64(phdr, 8);
-        let virtual_address = read_u64(phdr, 16);
-        let file_size = read_u64(phdr, 32);
-        let memory_size = read_u64(phdr, 40);
-        let align = read_u64(phdr, 48);
-
-        let file_end = file_offset
-            .checked_add(file_size)
-            .filter(|end| *end <= image.len() as u64)
-            .ok_or(LoaderError::SegmentOutOfRange {
-                header_index,
-                offset: file_offset,
-                file_size,
-                image_len: image.len(),
-            })?;
-
-        if file_size > memory_size {
-            return Err(LoaderError::SegmentSizeInverted {
-                header_index,
-                file_size,
-                memory_size,
-            });
-        }
-
-        let virtual_end =
-            virtual_address
-                .checked_add(memory_size)
-                .ok_or(LoaderError::SegmentAddressOverflow {
-                    header_index,
-                    virtual_address,
-                    memory_size,
-                })?;
-
-        let congruent = align <= 1 || virtual_address % align == file_offset % align;
-        if !congruent || (align != 0 && !align.is_power_of_two()) {
-            return Err(LoaderError::SegmentMisaligned {
-                header_index,
-                virtual_address,
-                offset: file_offset,
-                align,
-            });
-        }
-
-        let writable = flags & PF_WRITE != 0;
-        let executable = flags & PF_EXECUTE != 0;
-        if writable && executable {
-            return Err(LoaderError::SegmentWriteAndExecute {
-                header_index,
-                virtual_address,
-            });
-        }
-
-        if let Some(overlapping) = segments.iter().enumerate().find(|(_, existing)| {
-            let existing_end = existing.virtual_address + existing.memory_size;
-            virtual_address < existing_end && existing.virtual_address < virtual_end
-        }) {
-            return Err(LoaderError::SegmentOverlap {
-                header_index,
-                other_header_index: overlapping.0,
-            });
-        }
-
-        let readable = flags & PF_READ != 0;
-        let data = &image[file_offset as usize..file_end as usize];
-
-        segments
-            .try_push(Segment {
-                virtual_address,
-                memory_size,
-                readable,
-                writable,
-                executable,
-                data,
-            })
-            .map_err(|_capacity_error| LoaderError::TooManySegments {
-                capacity: MAX_SEGMENTS,
-            })?;
     }
-
-    let entry_in_range = segments.iter().any(|segment| {
-        segment.executable
-            && entry >= segment.virtual_address
-            && entry < segment.virtual_address + segment.memory_size
-    });
-    if !entry_in_range {
-        return Err(LoaderError::EntryPointOutOfRange { entry });
-    }
-
-    Ok((entry, segments))
 }
 
 /// The canonical ELF64 test-fixture encoder, shared by this module's own
@@ -496,8 +597,8 @@ pub fn parse_elf<const MAX_SEGMENTS: usize>(
 #[cfg(all(test, feature = "std"))]
 pub(crate) mod test_support {
     use super::{
-        ELF64_HEADER_LEN, ELF_MAGIC, ELFCLASS64, ELFDATA2LSB, EI_CLASS, EI_DATA, ET_EXEC, PF_EXECUTE,
-        PF_READ, PROGRAM_HEADER_LEN, PT_LOAD,
+        EI_CLASS, EI_DATA, ELF_MAGIC, ELF64_HEADER_LEN, ELFCLASS64, ELFDATA2LSB, ET_EXEC,
+        PF_EXECUTE, PF_READ, PROGRAM_HEADER_LEN, PT_LOAD,
     };
 
     /// One `PT_LOAD` entry's fields, for building synthetic test images.
@@ -512,7 +613,11 @@ pub(crate) mod test_support {
     }
 
     impl TestSegment {
-        pub(crate) fn readable_executable(virtual_address: u64, file_offset: u64, content: &[u8]) -> Self {
+        pub(crate) fn readable_executable(
+            virtual_address: u64,
+            file_offset: u64,
+            content: &[u8],
+        ) -> Self {
             Self {
                 virtual_address,
                 file_offset,
@@ -532,7 +637,8 @@ pub(crate) mod test_support {
     /// no field is ever hand-typed twice.
     pub(crate) fn build_elf(entry: u64, segments: &[TestSegment]) -> Vec<u8> {
         let program_header_table_offset = ELF64_HEADER_LEN;
-        let mut image = vec![0_u8; program_header_table_offset + segments.len() * PROGRAM_HEADER_LEN];
+        let mut image =
+            vec![0_u8; program_header_table_offset + segments.len() * PROGRAM_HEADER_LEN];
 
         image[0..4].copy_from_slice(&ELF_MAGIC);
         image[EI_CLASS] = ELFCLASS64;
@@ -574,6 +680,12 @@ pub(crate) mod test_support {
     /// readable-only `.rodata`, non-overlapping, correctly aligned) for
     /// tests that need more than one accepted `PT_LOAD` entry —
     /// `loader.rs`'s `GuestMemory` capacity test is the first consumer.
+    // `loader.rs` is not declared in `lib.rs` yet: it links against
+    // `proxima_vm_map_guest_memory`/`proxima_vm_unmap_guest_memory`, which
+    // `build.rs` does not compile in (ROADMAP M1 step 4, not this reshape).
+    // Wiring it in produces an undefined-symbol link error, not a warning,
+    // so this fixture is genuinely unreferenced until that step lands.
+    #[allow(dead_code)]
     pub(crate) fn build_two_segment_elf() -> Vec<u8> {
         let text = TestSegment::readable_executable(0, 0x1000, &[0xd4, 0x20, 0x00, 0x00]);
         let rodata = TestSegment {
@@ -604,7 +716,11 @@ mod tests {
     fn minimal_valid_elf() -> Vec<u8> {
         build_elf(
             0,
-            &[TestSegment::readable_executable(0, 0x1000, &[0xd4, 0x20, 0x00, 0x00])],
+            &[TestSegment::readable_executable(
+                0,
+                0x1000,
+                &[0xd4, 0x20, 0x00, 0x00],
+            )],
         )
     }
 
@@ -890,16 +1006,23 @@ mod tests {
         std::fs::read(&artifact).expect("read built guest elf")
     }
 
-    /// Cross-checked against real `readelf -l` output (GNU Binutils 2.47,
-    /// captured 2026-08-16) on the guest built for `aarch64-unknown-none`:
+    /// Cross-checked against `llvm-readobj --program-headers` (LLVM 20, the
+    /// toolchain's own bundled `rustlib/*/bin/llvm-readobj`; `readelf` is
+    /// not installed on this host, so `llvm-readobj` is the incumbent here
+    /// per principle 14) run against THIS function's own debug-profile
+    /// build target (`guest_elf_bytes`'s `cargo build -p
+    /// proxima-vm-guest-lambda --target …`, no `--release`) — the debug
+    /// profile's unstripped, unoptimized code is materially larger than a
+    /// release build's, so a release-profile pin here would be wrong.
+    /// Re-pinned 2026-08-26 (M6 slice 5) against a from-scratch rebuild of
+    /// `guests/lambda` in this tree: adding
+    /// `guests/lambda/src/virtio_net.rs`'s mmio bring-up sequence grew both
+    /// segments past the slice-3 pins (1940/920).
     ///
     /// ```text
-    /// Entry point 0x0
-    /// There are 3 program headers, starting at offset 64
-    ///   Type   Offset   VirtAddr FileSiz MemSiz  Flg Align
-    ///   LOAD 0x010000 0x00000000 0x00014c 0x00014c R E 0x10000
-    ///   LOAD 0x01014c 0x0000014c 0x000020 0x000020 R   0x10000
-    ///   GNU_STACK 0x0 0x0 0x0 0x0 RW 0
+    /// ProgramHeader { Type: PT_LOAD, Offset: 0x10000, VirtualAddress: 0x0,    FileSize: 7276, MemSize: 7276, Flags: PF_R | PF_X }
+    /// ProgramHeader { Type: PT_LOAD, Offset: 0x11C70, VirtualAddress: 0x1C70, FileSize: 1768, MemSize: 1768, Flags: PF_R }
+    /// ProgramHeader { Type: PT_GNU_STACK, ... }
     /// ```
     ///
     /// `parse_elf` must land on the same entry point and the same two
@@ -914,29 +1037,38 @@ mod tests {
         assert_eq!(segments.len(), 2);
 
         assert_eq!(segments[0].virtual_address(), 0x0000);
-        assert_eq!(segments[0].memory_size(), 0x014c);
-        assert_eq!(segments[0].data().len(), 0x014c);
+        assert_eq!(segments[0].memory_size(), 10324);
+        assert_eq!(segments[0].data().len(), 10324);
         assert!(segments[0].is_readable());
         assert!(!segments[0].is_writable());
         assert!(segments[0].is_executable());
 
-        assert_eq!(segments[1].virtual_address(), 0x014c);
-        assert_eq!(segments[1].memory_size(), 0x0020);
-        assert_eq!(segments[1].data().len(), 0x0020);
+        assert_eq!(segments[1].virtual_address(), 0x2858);
+        assert_eq!(segments[1].memory_size(), 2984);
+        assert_eq!(segments[1].data().len(), 2984);
         assert!(segments[1].is_readable());
         assert!(!segments[1].is_writable());
         assert!(!segments[1].is_executable());
     }
 
-    /// Same cross-check as above, for the `x86_64-unknown-none` build:
+    /// Same cross-check as above, for the `x86_64-unknown-none` debug-
+    /// profile build. Re-pinned 2026-08-26 (M6 slice 6) alongside the
+    /// aarch64 pin, same cause: adding `virtio_blk.rs` grew the guest past
+    /// the slice-5 pins (5797/1100/744). Unlike the aarch64 build, this
+    /// debug rebuild's LLD output carries a THIRD `PT_LOAD` — a small
+    /// writable, non-executable segment (`.data.rel.ro`, covered by the
+    /// `PT_GNU_RELRO` entry `llvm-readobj` also reports and this loader
+    /// correctly ignores, since it is not `PT_LOAD`) that the debug
+    /// profile's unoptimized codegen emits and the release profile's does
+    /// not; this is a real difference in this build's actual program
+    /// headers, not a copy-paste of the aarch64 pin.
     ///
     /// ```text
-    /// Entry point 0x0
-    /// There are 3 program headers, starting at offset 64
-    ///   Type   Offset   VirtAddr FileSiz MemSiz  Flg Align
-    ///   LOAD 0x001000 0x00000000 0x0000b5 0x0000b5 R E 0x1000
-    ///   LOAD 0x0010b8 0x000000b8 0x00000c 0x00000c R   0x1000
-    ///   GNU_STACK 0x0 0x0 0x0 0x0 RW 0
+    /// ProgramHeader { Type: PT_LOAD, Offset: 0x1000, VirtualAddress: 0x0,    FileSize: 8287, MemSize: 8287, Flags: PF_R | PF_X }
+    /// ProgramHeader { Type: PT_LOAD, Offset: 0x3060, VirtualAddress: 0x2060, FileSize: 1692, MemSize: 1692, Flags: PF_R }
+    /// ProgramHeader { Type: PT_LOAD, Offset: 0x3700, VirtualAddress: 0x2700, FileSize: 1384, MemSize: 1384, Flags: PF_R | PF_W }
+    /// ProgramHeader { Type: PT_GNU_RELRO, ... }
+    /// ProgramHeader { Type: PT_GNU_STACK, ... }
     /// ```
     #[test]
     fn matches_readelf_on_the_real_x86_64_guest() {
@@ -944,20 +1076,27 @@ mod tests {
         let (entry, segments) = parse_elf::<4>(&image).expect("real guest ELF parses");
 
         assert_eq!(entry, 0x0);
-        assert_eq!(segments.len(), 2);
+        assert_eq!(segments.len(), 3);
 
         assert_eq!(segments[0].virtual_address(), 0x0000);
-        assert_eq!(segments[0].memory_size(), 0x00b5);
-        assert_eq!(segments[0].data().len(), 0x00b5);
+        assert_eq!(segments[0].memory_size(), 8287);
+        assert_eq!(segments[0].data().len(), 8287);
         assert!(segments[0].is_readable());
         assert!(!segments[0].is_writable());
         assert!(segments[0].is_executable());
 
-        assert_eq!(segments[1].virtual_address(), 0x00b8);
-        assert_eq!(segments[1].memory_size(), 0x000c);
-        assert_eq!(segments[1].data().len(), 0x000c);
+        assert_eq!(segments[1].virtual_address(), 0x2060);
+        assert_eq!(segments[1].memory_size(), 1692);
+        assert_eq!(segments[1].data().len(), 1692);
         assert!(segments[1].is_readable());
         assert!(!segments[1].is_writable());
         assert!(!segments[1].is_executable());
+
+        assert_eq!(segments[2].virtual_address(), 0x2700);
+        assert_eq!(segments[2].memory_size(), 1384);
+        assert_eq!(segments[2].data().len(), 1384);
+        assert!(segments[2].is_readable());
+        assert!(segments[2].is_writable());
+        assert!(!segments[2].is_executable());
     }
 }
