@@ -604,8 +604,6 @@ impl Default for DelimiterFraming {
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
-    use rstest::rstest;
-
     use super::*;
 
     /// Fixed-width 4-byte [`Datagram`] — a trivial POD message, borrowed
@@ -894,11 +892,11 @@ mod tests {
 
     // ── DelimiterCodec (REBUILD 1) ───────────────────────────────────
 
-    #[rstest]
+    #[proxima::test]
     #[case::resp_simple_string(&b"\r\n"[..], &b"+PONG\r\ntrailing"[..], &b"+PONG"[..], 7)]
     #[case::ndjson_line(&b"\n"[..], b"{\"op\":\"ping\"}\n{\"op\":\"pong\"}", b"{\"op\":\"ping\"}", 14)]
     #[case::pgwire_nul_terminated(&b"\0"[..], b"user\0rest", b"user", 5)]
-    fn delimiter_codec_parses_complete_frame_zero_copy(
+    async fn delimiter_codec_parses_complete_frame_zero_copy(
         #[case] delimiter: &'static [u8],
         #[case] wire: &[u8],
         #[case] expected_frame: &[u8],

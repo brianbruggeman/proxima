@@ -35,7 +35,7 @@ cd "$(dirname "$0")/.." || exit 1
 # package's examples. keep in sync with the `required-features` in the
 # manifests -- an example whose features are missing here fails the
 # "never built" check below rather than vanishing.
-ROOT_UNION="http1,http1-native,http2,http3,http-prime-deps,tracing-init,tokio,runtime-tokio,runtime-prime-executor,runtime-prime-inbox-alloc,runtime-prime-reactor,runtime-prime-bgpool,macros,instrument-metrics,histogram,otlp-http,serve-prime,pgwire,redis-listener,memcached-listener,memcached-client,dns-listener,dns-client,kafka-listener,kafka-client,mqtt-listener,mqtt-client,amqp-listener,amqp-client,tls,h3-native-upstream"
+ROOT_UNION="http1,http1-native,http2,http3,http-prime-deps,tracing-init,tokio,runtime-tokio,runtime-prime-executor,runtime-prime-inbox-alloc,runtime-prime-reactor,runtime-prime-bgpool,macros,instrument-metrics,histogram,otlp-http,serve-prime,pgwire,redis-listener,memcached-listener,memcached-client,dns-listener,dns-client,kafka-listener,kafka-client,mqtt-listener,mqtt-client,amqp-listener,amqp-client,tls,h3-native-upstream,sync-wrappers"
 
 feats_for() {
   case "$1" in
@@ -48,9 +48,19 @@ feats_for() {
     proxima-pgwire)     echo "scram" ;;
     proxima-protocols)  echo "dns-codec-trait,pgwire_codec,quic-mock-tls,quic" ;;
     proxima-redis)      echo "client" ;;
+    proxima-tensor)     echo "instrument,config" ;;
     proxima-telemetry)  echo "instrument-metrics,macros,elevation" ;;
     rekt)               echo "scheduler" ;;
     *)                  echo "" ;;
+  esac
+}
+
+# positional argv for examples whose <size> <threads> [iters] have an
+# obvious small default -- runs the real code path instead of skipping.
+argv_for() {
+  case "$1" in
+    busy_per_mac|parallel_breakdown|sweep_gemm) echo "64 2 1" ;;
+    *) echo "" ;;
   esac
 }
 
@@ -91,6 +101,11 @@ while IFS=$'\t' read -r pkg name reqfeats; do
     set -- run -p "$pkg" --example "$name" --features "$feats"
   else
     set -- run -p "$pkg" --example "$name"
+  fi
+
+  argv=$(argv_for "$name")
+  if [ -n "$argv" ]; then
+    set -- "$@" -- $argv
   fi
 
   timeout -s KILL "$TIMEOUT" cargo "$@" < /dev/null > /tmp/examples-gate-$$.log 2>&1

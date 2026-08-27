@@ -307,7 +307,9 @@ async fn export_async(
     match drained {
         Some((count, request)) => {
             if let Err(error) = pipe.call_dyn(request).await {
-                tracing::error!(error = %error, "pipe dispatch error during async drain");
+                crate::fault::report_fault(&std::format!(
+                    "pipe dispatch error during async drain: {error}"
+                ));
             }
             count
         }
@@ -524,7 +526,7 @@ fn call_pipe(pipe: &dyn SendDynPipe<TelemetryRequest, Response<Bytes>>, request:
         Poll::Pending => futures::executor::block_on(future),
     };
     if let Err(error) = result {
-        tracing::error!(error = %error, "pipe dispatch error during drain");
+        crate::fault::report_fault(&std::format!("pipe dispatch error during drain: {error}"));
     }
 }
 

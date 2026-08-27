@@ -1,0 +1,34 @@
+# build-time execution-policy sizing for omega's MSL kernel selection. read by
+# build.rs, emitted as consts into OUT_DIR/omega_sized.rs. mirrors
+# proxima-tensor/proxima-tensor-runtime.toml's shape (that file's own build.rs
+# `emit_sizing_consts` / `resolve_int`). every key below can also be
+# overridden per-build via an `OMEGA_<SECTION>_<KEY>` env var (uppercased);
+# each override consulted emits its own `cargo:rerun-if-env-changed` line so a
+# cached build never ignores it.
+#
+# the full measurement record behind each value lives on the consuming
+# const's doc comment in src/sized.rs, not here — this file carries only the
+# number and a one-line pointer.
+
+[tiled_gemm]
+# below this many activation rows (tokens) in one dispatch, the row-blocked
+# packed-matmul kernel (`push_packed_row_blocked_body`) runs instead of the
+# `simdgroup_matrix`-tiled path (`push_tiled_gemm_body`) — see
+# sized::TILED_GEMM_MIN_TOKENS. `feature = "metal-tiled-gemm"`-only; emitted
+# only when that feature is active.
+min_tokens = 8
+
+# per-threadgroup output tile shape (ROW 109 redesign) — ports
+# `ggml-metal.metal:6487` (`BLOCK_SIZE_M`). Must be a multiple of 16 (2
+# simdgroup row-halves x TILE_DIM(8) x THREAD_MAT_M) — see
+# sized::TILED_GEMM_BLOCK_M.
+block_m = 64
+# ports `ggml-metal.metal:6488` (`BLOCK_SIZE_N`). Must be a multiple of 16 —
+# see sized::TILED_GEMM_BLOCK_N.
+block_n = 32
+# ports `ggml-metal.metal:6489` (`BLOCK_SIZE_K`) — the K-step width one
+# threadgroup barrier pair amortizes over. Must divide 256 (`Q4K_BLOCK_ELEMENTS`)
+# evenly so the reduction loop never reads past a real Q4_K weight's extent,
+# AND must be a multiple of 8 (ROW 113's `q4k_run8`-batched weight-staging
+# loop) — see sized::TILED_GEMM_BLOCK_K.
+block_k = 32

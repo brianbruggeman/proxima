@@ -184,12 +184,18 @@ save_bench_baseline() {
         extra_args+=("--features" "${features}")
     fi
 
+    local bench_status=0
     cargo bench -p "${crate}" --bench "${bench_name}" \
         "${extra_args[@]}" -- \
         --warm-up-time "${BENCH_WARMUP}" \
         --measurement-time "${BENCH_MEASURE}" \
         --save-baseline "${label}" \
-        2>/dev/null | grep -v '^$' || true
+        > /tmp/variant-bench-stdout.log 2>/tmp/variant-bench-stderr.log || bench_status=$?
+    if [[ "${bench_status}" -ne 0 ]]; then
+        printf 'WARN: cargo bench -p %s --bench %s (features=%s) failed (exit %d); see /tmp/variant-bench-stderr.log\n' \
+            "${crate}" "${bench_name}" "${features}" "${bench_status}" >&2
+    fi
+    grep -v '^$' /tmp/variant-bench-stdout.log || true
 }
 
 # ── helper: run bench against saved baseline and capture delta summary ────────
@@ -211,14 +217,21 @@ bench_vs_baseline() {
         extra_args+=("--features" "${features}")
     fi
 
-    local raw
-    raw="$(cargo bench -p "${crate}" --bench "${bench_name}" \
+    local bench_status=0
+    cargo bench -p "${crate}" --bench "${bench_name}" \
         "${extra_args[@]}" -- \
         --warm-up-time "${BENCH_WARMUP}" \
         --measurement-time "${BENCH_MEASURE}" \
         --baseline "${baseline_label}" \
         --save-baseline "${save_label}" \
-        2>/dev/null | grep 'change:' -A 1 | grep 'time:' || printf '')"
+        > /tmp/variant-bench-vs-baseline-stdout.log 2>/tmp/variant-bench-vs-baseline-stderr.log || bench_status=$?
+    if [[ "${bench_status}" -ne 0 ]]; then
+        printf 'WARN: cargo bench -p %s --bench %s (features=%s) failed (exit %d); see /tmp/variant-bench-vs-baseline-stderr.log\n' \
+            "${crate}" "${bench_name}" "${features}" "${bench_status}" >&2
+    fi
+
+    local raw
+    raw="$(grep 'change:' -A 1 /tmp/variant-bench-vs-baseline-stdout.log | grep 'time:' || printf '')"
 
     if [[ -z "${raw}" ]]; then
         printf 'n/a'
@@ -376,9 +389,10 @@ printf '| combo | bench delta vs default |\n'
 printf '|---|---|\n'
 printf '| %-30s | %-30s |\n' "default" "baseline"
 
-# save the default baseline
+# save the default baseline (failures are surfaced by save_bench_baseline
+# itself via its own WARN to stderr; nothing left to discard here)
 save_bench_baseline "prime" "${PRIME_BENCH}" "variant-default" \
-    "no" "${BENCH_REQUIRED_FEATURE}" 2>/dev/null || true
+    "no" "${BENCH_REQUIRED_FEATURE}"
 
 for idx in "${!COMBO_NAMES[@]}"; do
     combo="${COMBO_NAMES[$idx]}"

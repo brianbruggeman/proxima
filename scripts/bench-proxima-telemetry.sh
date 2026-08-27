@@ -60,13 +60,9 @@ run_component() {
 
     printf -- '--- %s / %s ---\n' "$component_tag" "$bench_name"
 
-    cargo bench \
-        -p proxima-telemetry \
-        --no-default-features \
-        --features "$feature" \
-        --bench "$bench_name" \
-        -- --save-baseline "bench-proxima-telemetry-${component_tag}" \
-        2>&1 | tee "${LOGS_DIR}/${bench_name}.log" || true
+    run_bench_logged "$bench_name" "${LOGS_DIR}/${bench_name}.log" \
+        cargo bench -p proxima-telemetry --no-default-features --features "$feature" --bench "$bench_name" \
+        -- --save-baseline "bench-proxima-telemetry-${component_tag}"
 
     local bench_criterion_dir="${CRITERION_DIR}"
     if [[ ! -d "$bench_criterion_dir" ]]; then
@@ -142,3 +138,5 @@ run_component "c12-out-native"   "c12-out-native"   "bench_c12_native"
 
 printf '\n---\nRun completed: %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" >> "$RESULTS"
 printf 'bench-proxima-telemetry complete. results: %s\n' "$RESULTS"
+
+report_bench_failures

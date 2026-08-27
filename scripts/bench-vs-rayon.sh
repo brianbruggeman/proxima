@@ -55,12 +55,9 @@ printf 'bench-vs-rayon: platform=%s\n' "$platform"
 run_group() {
     local group="$1"
     printf -- '--- running %s ---\n' "$group"
-    cargo bench \
-        --no-default-features \
-        --features "$FEATURES" \
-        --bench bench_background_pool \
-        -- "$group" \
-        2>&1 | tee "${LOGS_DIR}/${group}.log" || true
+    run_bench_logged "$group" "${LOGS_DIR}/${group}.log" \
+        cargo bench --no-default-features --features "$FEATURES" --bench bench_background_pool \
+        -- "$group"
 }
 
 # run all three groups sequentially; criterion writes criterion/ output for each
@@ -161,3 +158,5 @@ get_rayon_raw_ns() {
 } > "$results_file"
 
 printf 'wrote %s\n' "$results_file"
+
+report_bench_failures

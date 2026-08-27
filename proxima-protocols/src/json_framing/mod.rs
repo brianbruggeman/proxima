@@ -28,9 +28,9 @@ use proxima_primitives::sync::AsyncMutex as Mutex;
 #[cfg(feature = "json_framing-std")]
 use serde_json::Value;
 #[cfg(feature = "json_framing-std")]
-use thiserror::Error;
+use proxima_telemetry::{debug, warn};
 #[cfg(feature = "json_framing-std")]
-use tracing::{debug, warn};
+use thiserror::Error;
 
 #[cfg(feature = "json_framing-std")]
 use proxima_primitives::stream::{StreamConnection, StreamUpstream, StreamUpstreamExt};

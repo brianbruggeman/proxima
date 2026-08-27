@@ -1,0 +1,84 @@
+# A RoPE-style pairwise rotation: every consecutive pair `(x[2i], x[2i+1])`
+# in the model axis is rotated by a per-position, per-pair angle supplied as
+# precomputed `cos`/`sin` tables (the usual real-world shape — a serving
+# stack computes the frequency table once and feeds it in, it does not
+# recompute trig inside the tensor program, which has no trig `ScalarOp`
+# anyway). `2*i` and `2*i+1` are what this file exists to prove: the operand
+# side of an index map can now be a comma-separated affine expression, not
+# only a bare letter run.
+#
+# Each output half is built directly from `x` rather than through an
+# intermediate "even"/"odd" node, because an axis whose only term has
+# `coeff != 1` is not a pure projection and so does not by itself constrain
+# the iteration axis's extent (see `shape.rs`'s `unify_iteration_space`) — it
+# needs a sibling operand in the *same* node (`cos` or `sin`, both plain
+# `si->si`) to fix `i`'s extent. That is a shape-inference fact, not a
+# grammar limitation.
+
+[[node]]
+op = "input"
+id = "x"
+dtype = "float32"
+shape = [2, 4]
+
+[[node]]
+op = "input"
+id = "cos"
+dtype = "float32"
+shape = [2, 2]
+
+[[node]]
+op = "input"
+id = "sin"
+dtype = "float32"
+shape = [2, 2]
+
+[[node]]
+op = "elementwise"
+id = "even_cos"
+dtype = "float32"
+body = "multiply"
+inputs = ["x", "cos"]
+maps = ["s,2*i->si", "si->si"]
+
+[[node]]
+op = "elementwise"
+id = "odd_sin"
+dtype = "float32"
+body = "multiply"
+inputs = ["x", "sin"]
+maps = ["s,2*i+1->si", "si->si"]
+
+[[node]]
+op = "elementwise"
+id = "rotated_even"
+dtype = "float32"
+body = "subtract"
+inputs = ["even_cos", "odd_sin"]
+maps = ["si->si", "si->si"]
+name = "rope_even"
+
+[[node]]
+op = "elementwise"
+id = "even_sin"
+dtype = "float32"
+body = "multiply"
+inputs = ["x", "sin"]
+maps = ["s,2*i->si", "si->si"]
+
+[[node]]
+op = "elementwise"
+id = "odd_cos"
+dtype = "float32"
+body = "multiply"
+inputs = ["x", "cos"]
+maps = ["s,2*i+1->si", "si->si"]
+
+[[node]]
+op = "elementwise"
+id = "rotated_odd"
+dtype = "float32"
+body = "add"
+inputs = ["even_sin", "odd_cos"]
+maps = ["si->si", "si->si"]
+name = "rope_odd"

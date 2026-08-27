@@ -228,7 +228,6 @@ mod tests {
     use alloc::vec;
     use alloc::vec::Vec;
     use proptest::prelude::*;
-    use rstest::rstest;
 
     fn noop_persist(_bytes: &[u8]) {}
 
@@ -466,10 +465,10 @@ mod tests {
 
     // Crash-B from the worked example: the root flip is in the pending subset.
     // ADR atomicity => root is exactly OLD-index or NEW-index, recover is OLD or NEW.
-    #[rstest]
+    #[proxima::test]
     #[case::root_flip_lost(0u64, &OLD8)]
     #[case::root_flip_survived(1u64, &NEW8)]
-    fn crash_b_root_flip_atomic_recovers_old_or_new(
+    async fn crash_b_root_flip_atomic_recovers_old_or_new(
         #[case] durable_root: u64,
         #[case] expected: &[u8],
     ) {
@@ -484,12 +483,12 @@ mod tests {
     }
 
     // Crash-A: dead slot written (even torn) but root not yet flipped -> OLD.
-    #[rstest]
+    #[proxima::test]
     #[case::nothing_survived([0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00])]
     #[case::first_byte([0xBB, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00])]
     #[case::last_byte([0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xBB])]
     #[case::fully_written([0xBB, 0xBB, 0xBB, 0xBB, 0xBB, 0xBB, 0xBB, 0xBB])]
-    fn crash_a_torn_dead_slot_with_root_unchanged_recovers_old(#[case] torn_slot1: [u8; 8]) {
+    async fn crash_a_torn_dead_slot_with_root_unchanged_recovers_old(#[case] torn_slot1: [u8; 8]) {
         let layout = CowRoot::new(8).unwrap();
         let mut region = fresh_region(&layout, &OLD8);
         let slot1 = ROOT_LEN + 8;
@@ -510,12 +509,12 @@ mod tests {
     // Exhaustively oracle commits across several slot sizes and a ping-pong of
     // updates (so both slot directions are exercised).
 
-    #[rstest]
+    #[proxima::test]
     #[case::one_byte(1)]
     #[case::three_bytes(3)]
     #[case::eight_bytes(8)]
     #[case::twelve_bytes(12)]
-    fn general_payload_oracle_holds_for_each_slot_size(#[case] slot_len: usize) {
+    async fn general_payload_oracle_holds_for_each_slot_size(#[case] slot_len: usize) {
         let layout = CowRoot::new(slot_len).unwrap();
         let old: Vec<u8> = (0..slot_len).map(|index| 0xA0 + index as u8).collect();
         let new: Vec<u8> = (0..slot_len).map(|index| 0xB0 + index as u8).collect();

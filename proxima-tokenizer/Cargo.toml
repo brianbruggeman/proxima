@@ -1,0 +1,63 @@
+[package]
+name = "proxima-tokenizer"
+description = "Sans-IO byte-level BPE tokenizer: encode/decode over a caller-supplied vocab (built directly, or parsed from proxima-gguf metadata), no IO in the core."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+
+[features]
+default = ["std"]
+alloc = []
+# runtime config surface (`config::TokenizerConfig`): conflaguration is
+# std-only, so it rides in only here -- the no_std+alloc floor never sees
+# it and always uses `crate::sized` directly.
+std = ["alloc", "thiserror/std", "dep:bon", "dep:conflaguration", "dep:serde"]
+# builds a `Vocab` directly from a parsed GGUF metadata region -- optional
+# so the tokenizer core has no hard dependency on the gguf reader. Pulls
+# `std` (this crate's own, and proxima-gguf's `edge::read_file`
+# convenience) because the only place this crate exercises the
+# combination end to end is the real-fixture test, which needs a file
+# read.
+gguf = ["std", "dep:proxima-gguf", "proxima-gguf/std"]
+# builds a `Vocab` directly from a real HuggingFace `tokenizer.json` (BPE
+# `model.vocab`/`model.merges`, exactly the shape `Vocab::new` already takes
+# from GGUF's parallel arrays) -- optional for the same reason `gguf` is:
+# the tokenizer core has no hard dependency on any one wire format's parser.
+hf = ["std", "dep:serde_json"]
+
+[dependencies]
+proxima-primitives = { workspace = true, default-features = false }
+thiserror.workspace = true
+bon = { workspace = true, optional = true }
+conflaguration = { workspace = true, features = ["derive", "toml"], optional = true }
+serde = { workspace = true, features = ["derive"], optional = true }
+proxima-gguf = { workspace = true, optional = true }
+# `cargo add serde_json --optional` errors in this workspace right now
+# ("unrecognized feature for crate serde_json: alloc", even though the
+# locked version, 1.0.151, has that feature and the workspace root's own
+# `serde_json` entry already declares it) -- added by hand, copying
+# `proxima-safetensors/Cargo.toml`'s identical `serde_json.workspace = true`
+# line verbatim rather than inventing new syntax, with `optional = true`
+# appended for this crate's own feature gate.
+serde_json = { workspace = true, optional = true }
+# direct, not workspace-inherited: the workspace entry locks default-features
+# on, whose `std` feature pulls std; `sample.rs` is part of this crate's
+# no_std+alloc floor (never gated on the `std` feature), so this mirrors
+# proxima-primitives' own override (`proxima-primitives/Cargo.toml:131`) for
+# the same reason.
+# exp/ln for `sample.rs`'s softmax and min-p threshold: `f32::exp`/`f32::ln`
+# are `std`-only (no `core` equivalent without a libm), and this module is
+# part of the no_std+alloc floor -- same dependency proxima-gguf already
+# carries for the identical reason (`proxima-gguf/Cargo.toml:23`).
+fastrand = { version = "2.4.1", default-features = false }
+libm = { version = "0.2.16", default-features = false }
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+temp-env.workspace = true

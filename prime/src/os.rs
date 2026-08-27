@@ -11,6 +11,9 @@ pub mod background;
 #[cfg(feature = "runtime-prime-bgpool-par")]
 pub mod par;
 
+#[cfg(feature = "runtime-prime-cohort")]
+pub mod cohort;
+
 #[cfg(all(
     feature = "runtime-prime-executor",
     feature = "runtime-prime-reactor",

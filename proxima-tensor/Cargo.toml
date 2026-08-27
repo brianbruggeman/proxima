@@ -10,27 +10,232 @@ homepage.workspace = true
 readme.workspace = true
 
 [features]
-default = ["std"]
-std = ["alloc", "thiserror/std"]
+default = ["std", "config", "q4k-int8-dot", "q5k-int8-dot", "q6k-int8-dot"]
+# `tensor-bgpool`/`tensor-cohort`/`cohort-staged-graph` are implied, not
+# opt-in: each was previously reachable only by naming a feature nothing
+# else turned on, so none of them ever executed in any default build.
+# `std` is the only tier that can hold `prime` (threads, an OS-backed pool
+# and cohort), so it is the natural place for the implication to live --
+# the `alloc`-only floor stays free of `dep:prime`. `cohort-staged-graph`
+# earned the switch at ROW 98 (`docs/discipline.md`): ROW 97 measured
+# decode -4.82% (n=3) with prefill a tie (+1.04%, inside combined noise),
+# bit-exact greedy output; ROW 98 re-measured fresh at n=8 under a noisier
+# host loadout (`uptime` load 4.3-8.3 across the session) and got the same
+# shape -- decode -5.21% (clears combined noise ~7x), prefill +1.93%
+# (~1.03x combined noise, i.e. a tie, not a regression).
+std = ["alloc", "thiserror/std", "tensor-bgpool", "tensor-cohort", "cohort-staged-graph", "dep:libc"]
 alloc = []
 # Std composition boundary for graph specs (guiding-principle 4): bon builder +
 # conflaguration Settings/Validate + serde. The alloc-tier core (Graph/Node/
 # AffineMap/validate) never sees this feature.
-config = ["std", "dep:bon", "dep:conflaguration", "dep:serde"]
+config = ["std", "dep:bon", "dep:conflaguration", "dep:serde", "smallvec/serde"]
+# gates the ggml FFI comparison bench: default-off so a normal build never
+# needs a statically-linked ggml checkout on disk. build.rs is a no-op
+# unless this feature is enabled.
+ggml-bench = ["std"]
+# real execution-witness counters (elements/bytes/gather-vs-affine) plus
+# per-bound-op spans over `proxima-telemetry`'s legacy Metrics/Telemetry
+# surface — default-off, no effect on the default build or the no_std+alloc
+# tier. Counters are incremented in a local accumulator inside the loop and
+# committed ONCE per bound-op call (never per element), so the feature does
+# not perturb the thing it measures at any tier that has it off.
+# ticks come from `proxima-clock::Ticks` (raw hardware counter units) rather
+# than `std::time::Instant`/`Duration` — see `instrument::read_ticks`'s doc
+# for why: a `Duration` costs a multiply/divide per read on Darwin, exactly
+# the conversion `proxima-clock`'s own doc forbids on a hot path.
+instrument = ["std", "dep:proxima-telemetry", "proxima-telemetry/macros", "dep:libc", "dep:proxima-clock", "prime?/cohort-instrument"]
+# routes `cpu::run_chunks_threaded`/`cpu::matmul_rows_threaded` through
+# `prime`'s `ProximaBackgroundPool` (crossbeam-deque work-stealing, built
+# once and reused) instead of spawning fresh `std::thread::scope` threads
+# per nest. Implied by `std` above (see that feature's doc), not a separate
+# opt-in — the per-call `thread::scope` fallbacks that used to sit next to
+# these two functions were removed once `std` made them unreachable in
+# every buildable configuration; the `alloc`-only floor never reaches
+# `cpu.rs` at all (`cpu` is `#[cfg(feature = "std")]` in `lib.rs`), so this
+# feature has no meaningful "off" state left to test.
+tensor-bgpool = ["dep:prime"]
+# routes `cpu::matmul_rows_threaded` through `prime::os::cohort::ThreadCohort`
+# (fixed-cohort spin barrier, `runtime-prime-cohort` on the `prime` dep above)
+# instead of `ProximaBackgroundPool`'s per-call `Mutex`+`Condvar` wake --
+# measured 2492.7 ns/round vs the pool's 19305.5 ns/round
+# (`prime/src/os/cohort.rs`'s own module doc). Implied by `std`, same
+# reasoning as `tensor-bgpool`: `prime` is the only crate that can hold OS
+# threads, so `std` is the natural place for the implication to live. The
+# pool path (`tensor-bgpool`) stays compiled and reachable as the runtime
+# fallback for whenever the shared cohort session is already held by another
+# concurrent forward (`ThreadCohort::enter` returns `Err`).
+tensor-cohort = ["dep:prime"]
+# shared test/example fixtures (`test_support::Lcg`) — default-off so a
+# normal build never carries them; enabled for this crate's own dev targets
+# via the self-referential `dev-dependencies` entry below, and by `omega`'s
+# dev-dependency on this crate the same way.
+test-support = []
+# `cpu::dot_q4k_q8k`/`cpu::matmul_q4k_q8k_f32`: int8 dot on packed Q4_K
+# nibbles against a quantized (Q8_K) activation, `vdotq_s32`-accelerated on
+# aarch64 with `dotprod`, AVX2-accelerated on x86-64 when the target opts in,
+# and portable-scalar everywhere else (`emit_avx2_cfg`/`emit_dotprod_cfg` in
+# build.rs; the portable arm is the only one compiled on an unqualified
+# x86-64 target, so enabling this by default carries no ISA requirement).
+# Default-on since the e2e forward-pass bench this landed under
+# (`proxima-tensor/docs/discipline.md`): the packed kernel measures
+# 0.0334 ns/mac against `dot_q4k_f32`'s 0.2534, and `run_reduce_quantized`
+# routes through it. `dot_q4k_f32`/`matmul_q4k_f32` remain the codec path
+# for non-matmul consumers.
+q4k-int8-dot = []
+# `cpu::dot_q5k_q8k`/`cpu::matmul_q5k_q8k_f32`: `q4k-int8-dot`'s mechanism
+# applied to `Q5_K` (the same super-block/sub-block shape plus a `qh`
+# high-bit plane), against the same shared `Q8_K` activation. Default-ON:
+# the e2e forward-pass bench this gate waited for showed
+# `reduce_matmul_quantized` 513.70 -> 497.80 ms with the greedy token
+# bit-identical over 8 runs. Note the size honestly — that is 15.91 ms of
+# the 134.84 ms those 9 tensors cost, ~11.8% of them, not the near
+# elimination the dequantize framing suggests.
+# `cpu::dot_q5k_f32`/`cpu::matmul_q5k_f32` (dequantize-then-fold, always
+# compiled) remain the codec path when this feature is off.
+q5k-int8-dot = []
+# `cpu::dot_q6k_q8k`/`cpu::matmul_q6k_q8k_f32`: the same mechanism applied to
+# `Q6_K` (16 sub-blocks of 16, one signed 8-bit scale each, no `dmin` term).
+# Default-ON for the same reason as `q5k-int8-dot` above.
+q6k-int8-dot = []
+# `cpu::evaluate_quantized`'s decode/prefill node loop dispatches a run of
+# consecutive independent nodes -- elementwise, dense f32 reduce, scan, iota,
+# constant, AND quantized-matmul-reduce (the ~87% of forward wall time ROW 96
+# left out) -- through ONE `StagedRound` per run instead of leaving the
+# cohort idle between per-node calls and opening a fresh round per matmul
+# node (`docs/discipline.md` ROW 96's own "what remains open": ~225
+# `matmul_rows_threaded` rounds/token, one per quantized-matmul-reduce node,
+# with everything else in between opening zero). A matmul node's own
+# row-chunks become a many-chunk stage in the SAME round (real cross-worker
+# parallelism preserved via `StagedRound`'s variable-width stages); every
+# other eligible node kind stays a one-chunk stage exactly as ROW 96 wired
+# it. Implied by `std` as of ROW 98 (`docs/discipline.md`) -- see that
+# row and the `std` feature's own doc above for the e2e evidence
+# (decode -4.82%/-5.21% across two independent measurement sessions,
+# prefill a tie both times, bit-exact) that earned the switch. Kept as a
+# separately named feature (not folded away entirely) purely so the doc
+# history and re-prove commands that name it explicitly
+# (`--features proxima-tensor/cohort-staged-graph`) keep resolving.
+# Requires all three `*-int8-dot` codecs, not an incidental call-site need:
+# `is_staged_batch_eligible` (`src/cpu.rs`) admits ONLY a quantized-weight
+# matmul fold with a `dot_fn_for` entry -- every other node kind was
+# deliberately excluded at ROW 97 (that function's own doc). With every
+# `*-int8-dot` feature off, `dot_fn_for` always returns `None`, so this
+# feature's staged-round path is permanently unreachable and its own
+# `Q8_K` quantize/transpose helpers have nothing to serve -- a consumer
+# who reaches `std` without this crate's `default` (e.g. via
+# `default-features = false` plus an explicit `features = ["std"]`, the
+# shape `omega`'s `cpu` feature takes) hit an `E0425` at those helpers,
+# not a runtime gap. Declaring the true requirement here, rather than
+# papering over it at the one caller that happened to hit it, keeps every
+# future `std`-without-`default` consumer buildable.
+cohort-staged-graph = ["std", "dep:prime", "q4k-int8-dot", "q5k-int8-dot", "q6k-int8-dot"]
 
 [dependencies]
+arrayvec.workspace = true
 bon = { workspace = true, optional = true }
 conflaguration = { workspace = true, features = ["derive", "toml"], optional = true }
+half = { version = "2.7.1", default-features = false }
+# `instrument`'s `thread_cpu_nanos` needs `clock_gettime`/`CLOCK_THREAD_CPUTIME_ID`
+# — already audited, workspace-standard bindings (see `prime/src/os/reactor.rs`)
+# rather than a hand-rolled `extern "C"` + `#[repr(C)] struct Timespec`.
+libc = { workspace = true, optional = true }
+prime = { version = "0.1.0", path = "../prime", features = ["runtime-prime-bgpool-par", "runtime-prime-cohort"], optional = true }
+proxima-clock = { version = "0.1.0", path = "../proxima-clock", default-features = false, optional = true }
+# Q4_K block layout/dequant primitives for the quantized GEMM row source
+# (`cpu::dot_q4k_f32`/`cpu::matmul_q4k_f32`) — reuse-first: `proxima-gguf`
+# already ships and tests these against real weights, so this crate never
+# re-derives the nibble/scale bit-unpack. `default-features = false` +
+# `alloc` reaches it at this crate's own restricted tier.
+proxima-gguf = { workspace = true, default-features = false, features = ["alloc"] }
 # the Pipe algebra: `Pipe`/`PipeExt`/`AndThen` are core-tier (no cfg gate in
 # proxima-primitives/src/pipe/mod.rs), so `default-features = false` already
 # reaches them at every tier this crate has, alloc included.
 proxima-primitives = { workspace = true }
+proxima-telemetry = { workspace = true, optional = true }
 serde = { workspace = true, features = ["derive"], optional = true }
+smallvec.workspace = true
 thiserror = { workspace = true, default-features = false }
 
 [lints]
 workspace = true
 
 [dev-dependencies]
-rstest.workspace = true
+criterion = { workspace = true }
+libc.workspace = true
+proxima = { workspace = true, features = ["test-support"] }
+# self-reference: pulls in `test_support` (feature-gated, see [features]
+# above) for this crate's own examples/tests/benches without exposing it to
+# a normal build.
+proxima-tensor = { path = ".", features = ["test-support"] }
+temp-env.workspace = true
+tempfile.workspace = true
+toml.workspace = true
+
+[[bench]]
+name = "bench_vs_ggml"
+harness = false
+required-features = ["ggml-bench"]
+
+[[bench]]
+name = "bench_q4k_matmul"
+harness = false
+required-features = ["ggml-bench"]
+
+[[bench]]
+name = "bench_q5k_matmul"
+harness = false
+required-features = ["ggml-bench", "q5k-int8-dot"]
+
+[[bench]]
+name = "bench_q6k_matmul"
+harness = false
+required-features = ["ggml-bench", "q6k-int8-dot"]
+
+[[bench]]
+name = "bench_q4k_cold_cache"
+harness = false
+required-features = ["ggml-bench", "q4k-int8-dot"]
+
+[[bench]]
+name = "bench_q4k_superblock_phases"
+harness = false
+required-features = ["ggml-bench", "q4k-int8-dot"]
+
+[[example]]
+name = "q4k_ggml_fidelity"
+required-features = ["ggml-bench", "instrument"]
+
+[[example]]
+name = "parallel_breakdown"
+required-features = ["instrument"]
+
+[[example]]
+name = "evaluate_report"
+required-features = ["instrument"]
+
+[[example]]
+name = "busy_per_mac"
+required-features = ["instrument"]
+
+[[example]]
+name = "alloc_itemize"
+
+[[example]]
+name = "spec_block"
+required-features = ["config"]
+
+[[example]]
+name = "operand_access_table"
+required-features = ["instrument", "config"]
+
+[target.'cfg(target_vendor = "apple")'.dependencies]
+# `matmul_worker_count`'s P-core-only sizing (`sysctlbyname("hw.perflevel0.logicalcpu")`)
+# needs libc unconditionally at the `std` tier on Apple only. Gated by
+# `dep:libc` (below, via the `std` feature) rather than the `instrument`
+# feature above it shares a name with — a target-specific table entry only
+# ever applies on the matching platform, so the `alloc`-only floor and every
+# non-Apple target never see it.
+libc = { workspace = true, optional = true }
+
+[build-dependencies]
 toml.workspace = true

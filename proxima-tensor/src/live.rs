@@ -8,7 +8,7 @@
 //!
 //! This is computed where the whole program is in hand — the batch driver,
 //! locally, in this crate; a remote producer, before the wire, later, for a
-//! partitioned program. [`nest::Lower`](crate::nest::Lower) and
+//! partitioned program. [`bind::BoundOpBuilder`](crate::bind::BoundOpBuilder) and
 //! [`cpu::evaluate`](crate::cpu::evaluate) are consumers of the result: they
 //! obey the kill flag a retire set carries and never guess whether a value is
 //! still needed. A different retention policy is a different upstream
@@ -19,13 +19,13 @@ use alloc::collections::BTreeSet;
 use alloc::vec;
 use alloc::vec::Vec;
 
-use crate::expr::{Expr, NodeId};
 use crate::map::IndexMap;
+use crate::op::{NodeId, Op};
 
 /// One retire set per program position: `result[p]` is every node whose last
 /// use is `program[p]`.
 #[must_use]
-pub fn annotate(program: &[Expr], outputs: &[NodeId]) -> Vec<Vec<NodeId>> {
+pub fn annotate(program: &[Op], outputs: &[NodeId]) -> Vec<Vec<NodeId>> {
     let outputs: BTreeSet<NodeId> = outputs.iter().copied().collect();
     let mut last_use: Vec<Option<usize>> = vec![None; program.len()];
 
@@ -47,16 +47,16 @@ pub fn annotate(program: &[Expr], outputs: &[NodeId]) -> Vec<Vec<NodeId>> {
     retires
 }
 
-fn uses(expr: &Expr) -> Vec<NodeId> {
+fn uses(expr: &Op) -> Vec<NodeId> {
     match expr {
-        Expr::Block { .. } => Vec::new(),
-        Expr::Zip { operands, .. } => operands
+        Op::Input { .. } | Op::Iota { .. } | Op::Constant { .. } => Vec::new(),
+        Op::Elementwise { operands, .. } => operands
             .iter()
             .flat_map(|(node, map)| map_uses(*node, map))
             .collect(),
-        Expr::Fold(fold) => {
-            let mut used = map_uses(fold.operand, &fold.in_map);
-            if let IndexMap::Computed { indices, .. } = &fold.out_map {
+        Op::Reduce(reduce) => {
+            let mut used = map_uses(reduce.operand, &reduce.in_map);
+            if let IndexMap::Computed { indices, .. } = &reduce.out_map {
                 used.push(*indices);
             }
             used
@@ -77,13 +77,13 @@ fn map_uses(operand: NodeId, map: &IndexMap) -> Vec<NodeId> {
 mod tests {
     use super::*;
     use crate::dtype::DType;
-    use crate::expr::{Extent, Fold, FoldInit, Keep, ScalarOp, append};
     use crate::map;
+    use crate::op::{Extent, Keep, Reduce, ReduceInit, ScalarOp, append};
 
-    fn block(program: &mut Vec<Expr>) -> NodeId {
+    fn leaf(program: &mut Vec<Op>) -> NodeId {
         append(
             program,
-            Expr::Block {
+            Op::Input {
                 dtype: DType::Float32,
                 shape: alloc::vec![Extent::Static(4)],
                 name: None,
@@ -94,11 +94,11 @@ mod tests {
     #[test]
     fn a_single_use_operand_retires_at_its_consumer() {
         let mut program = Vec::new();
-        let source = block(&mut program);
+        let source = leaf(&mut program);
         let map = IndexMap::Affine(map::projection(1, &[0]));
         let consumer = append(
             &mut program,
-            Expr::Zip {
+            Op::Elementwise {
                 dtype: DType::Float32,
                 body: ScalarOp::Negate,
                 operands: alloc::vec![(source, map)],
@@ -113,11 +113,11 @@ mod tests {
     #[test]
     fn a_requested_output_never_retires() {
         let mut program = Vec::new();
-        let source = block(&mut program);
+        let source = leaf(&mut program);
         let map = IndexMap::Affine(map::projection(1, &[0]));
         let consumer = append(
             &mut program,
-            Expr::Zip {
+            Op::Elementwise {
                 dtype: DType::Float32,
                 body: ScalarOp::Negate,
                 operands: alloc::vec![(source, map)],
@@ -133,44 +133,44 @@ mod tests {
     #[test]
     fn dead_code_retires_at_its_own_position() {
         let mut program = Vec::new();
-        let never_used = block(&mut program);
+        let never_used = leaf(&mut program);
 
         let retires = annotate(&program, &[]);
         assert_eq!(retires[never_used.0 as usize], alloc::vec![never_used]);
     }
 
     #[test]
-    fn a_fold_operand_retires_at_the_fold() {
+    fn a_reduce_operand_retires_at_the_reduce() {
         let mut program = Vec::new();
-        let source = block(&mut program);
+        let source = leaf(&mut program);
         let in_map = IndexMap::Affine(map::projection(1, &[0]));
         let out_map = IndexMap::Affine(map::projection(1, &[]));
-        let folded = append(
+        let reduced = append(
             &mut program,
-            Expr::Fold(Fold {
+            Op::Reduce(Reduce {
                 dtype: DType::Float32,
                 body: ScalarOp::Add,
-                init: FoldInit::Zero,
+                init: ReduceInit::Zero,
                 operand: source,
                 in_map,
                 out_map,
-                keep: Keep::Last,
+                keep: Keep::Reduce,
                 name: None,
             }),
         );
 
         let retires = annotate(&program, &[]);
-        assert!(retires[folded.0 as usize].contains(&source));
+        assert!(retires[reduced.0 as usize].contains(&source));
     }
 
     #[test]
     fn a_multiply_used_operand_retires_at_its_last_use_not_its_first() {
         let mut program = Vec::new();
-        let shared = block(&mut program);
+        let shared = leaf(&mut program);
         let map = IndexMap::Affine(map::projection(1, &[0]));
         let first = append(
             &mut program,
-            Expr::Zip {
+            Op::Elementwise {
                 dtype: DType::Float32,
                 body: ScalarOp::Negate,
                 operands: alloc::vec![(shared, map.clone())],
@@ -179,7 +179,7 @@ mod tests {
         );
         let second = append(
             &mut program,
-            Expr::Zip {
+            Op::Elementwise {
                 dtype: DType::Float32,
                 body: ScalarOp::Negate,
                 operands: alloc::vec![(shared, map)],

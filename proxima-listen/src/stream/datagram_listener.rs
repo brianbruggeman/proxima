@@ -122,7 +122,7 @@ impl ListenProtocol for DatagramListenProtocol {
                 ProximaError::Io(io::Error::other(format!("{label} bind {bind}: {err}")))
             })?;
             if let Some(sender) = ready_signal {
-                let _ = sender.send(());
+                let _ = sender.send(Ok(()));
             }
             debug!(label = %label, %bind, "datagram listener bound");
 

@@ -356,7 +356,6 @@ fn check_limits(
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
-    use rstest::rstest;
 
     fn complete(input: &[u8]) -> (RequestHead<'_>, usize) {
         match parse_head(input).expect("parse") {
@@ -417,14 +416,14 @@ mod tests {
         assert_eq!(&input[consumed..], b"BODYBYTES");
     }
 
-    #[rstest]
+    #[proxima::test]
     #[case::bad_version(b"GET / HTTP/2.0\r\n\r\n", ParseError::BadVersion)]
     #[case::invalid_method_byte(b"G\x00ET / HTTP/1.1\r\n\r\n", ParseError::MalformedRequestLine)]
     #[case::header_name_with_control(
         b"GET / HTTP/1.1\r\nBad\x00Name: x\r\n\r\n",
         ParseError::InvalidHeaderName
     )]
-    fn malformed_input_returns_typed_error(#[case] input: &[u8], #[case] expected: ParseError) {
+    async fn malformed_input_returns_typed_error(#[case] input: &[u8], #[case] expected: ParseError) {
         let outcome = parse_head(input);
         assert_eq!(outcome, Err(expected));
     }

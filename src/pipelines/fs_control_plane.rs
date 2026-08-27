@@ -7,10 +7,10 @@ use std::sync::Arc;
 use async_stream::stream;
 use parking_lot::Mutex;
 use proxima_primitives::sync::broadcast;
+use proxima_telemetry::error;
 use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 use tokio::io::AsyncWriteExt;
-use tracing::error;
 
 use crate::error::ProximaError;
 use crate::pipelines::control_plane::{

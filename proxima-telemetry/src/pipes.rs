@@ -17,7 +17,7 @@ use crate::log::LogRecord;
 use crate::log_buffer::ring::LogRing;
 use crate::metric::MetricSample;
 use crate::recorder::SystemClock;
-use crate::tag::{ScalarValue, Tag};
+use crate::tag::{NestedValue, ScalarValue, Tag};
 use crate::trace::{EventRecord, SpanLink, SpanRecord};
 #[cfg(feature = "elevation")]
 use core::sync::atomic::AtomicU64;
@@ -1768,6 +1768,88 @@ fn format_tags(tags: &[Tag]) -> alloc::string::String {
         .join(" ")
 }
 
+// escapes `"`, `\`, and control characters per RFC 8259; every other byte
+// passes through unchanged since the source strings are UTF-8 already.
+fn json_escape(text: &str, out: &mut alloc::string::String) {
+    for ch in text.chars() {
+        match ch {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            control if (control as u32) < 0x20 => {
+                out.push_str(&alloc::format!("\\u{:04x}", control as u32));
+            }
+            other => out.push(other),
+        }
+    }
+}
+
+fn json_string(text: &str) -> alloc::string::String {
+    let mut out = alloc::string::String::with_capacity(text.len() + 2);
+    out.push('"');
+    json_escape(text, &mut out);
+    out.push('"');
+    out
+}
+
+fn json_scalar(value: &ScalarValue) -> alloc::string::String {
+    match value {
+        ScalarValue::I64(raw) => alloc::format!("{raw}"),
+        ScalarValue::U64(raw) => alloc::format!("{raw}"),
+        ScalarValue::F64(raw) => alloc::format!("{raw}"),
+        ScalarValue::Bool(raw) => alloc::format!("{raw}"),
+        ScalarValue::Str(text) => json_string(text),
+        ScalarValue::Bytes(raw) => match core::str::from_utf8(raw) {
+            Ok(text) => json_string(text),
+            Err(_) => json_string(&alloc::format!("<{} bytes>", raw.len())),
+        },
+    }
+}
+
+fn json_nested(value: &NestedValue) -> alloc::string::String {
+    match value {
+        NestedValue::Scalar(scalar) => json_scalar(scalar),
+        NestedValue::Array(items) => {
+            let rendered = items
+                .iter()
+                .map(json_nested)
+                .collect::<alloc::vec::Vec<_>>()
+                .join(",");
+            alloc::format!("[{rendered}]")
+        }
+        NestedValue::Kv(entries) => {
+            let rendered = entries
+                .iter()
+                .map(|(key, value)| alloc::format!("{}:{}", json_string(key), json_nested(value)))
+                .collect::<alloc::vec::Vec<_>>()
+                .join(",");
+            alloc::format!("{{{rendered}}}")
+        }
+    }
+}
+
+// nested under `"tags"` rather than flattened alongside `severity`/`body`/
+// `ts_ns`/`module_path` — a flat layout lets an instrumented field named e.g.
+// `body` or `ts_ns` silently overwrite the envelope key; nesting makes that
+// collision structurally impossible.
+fn json_tags(tags: &[Tag]) -> alloc::string::String {
+    let rendered = tags
+        .iter()
+        .map(|tag| match tag {
+            Tag::Scalar { key, value } => {
+                alloc::format!("{}:{}", json_string(key), json_scalar(value))
+            }
+            Tag::Structured { key, value } => {
+                alloc::format!("{}:{}", json_string(key), json_nested(value))
+            }
+        })
+        .collect::<alloc::vec::Vec<_>>()
+        .join(",");
+    alloc::format!("{{{rendered}}}")
+}
+
 fn format_log(buf: &mut proxima_core::batch::BatchBuffer, record: &LogRecord, format: LogFormat) {
     let line = match format {
         LogFormat::Human => {
@@ -1811,17 +1893,20 @@ fn format_log(buf: &mut proxima_core::batch::BatchBuffer, record: &LogRecord, fo
                     alloc::format!("{val:?}")
                 }
             };
+            let tags = json_tags(&record.attrs);
             alloc::format!(
                 "{{\
-                    \"severity\":\"{}\",\
-                    \"body\":\"{}\",\
+                    \"severity\":{},\
+                    \"body\":{},\
                     \"ts_ns\":{},\
-                    \"module_path\":\"{}\"\
+                    \"module_path\":{},\
+                    \"tags\":{}\
                 }}\n",
-                record.level.name(),
-                body.replace('"', "\\\""),
+                json_string(record.level.name()),
+                json_string(&body),
                 record.ts_ns,
-                record.module_path,
+                json_string(record.module_path),
+                tags,
             )
         }
     };
@@ -4873,5 +4958,92 @@ mod elevation_sink_tests {
                 "each surviving trace's ring settles at exactly its cap under sustained record overflow"
             );
         }
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod format_log_tests {
+    use super::*;
+    use crate::id::TraceFlags;
+    use crate::log::LogBody;
+    use crate::tag::{ScalarValue, Tag};
+
+    fn tagged_log() -> LogRecord {
+        LogRecord {
+            ts_ns: 1_000,
+            observed_ts_ns: 1_000,
+            level: Level::DEBUG,
+            body: LogBody::Text("dequant matches ggml on every block"),
+            attrs: smallvec::smallvec![
+                Tag::Scalar {
+                    key: "tensor",
+                    value: ScalarValue::Str("blk.0.attn_q.weight"),
+                },
+                Tag::Scalar {
+                    key: "blocks",
+                    value: ScalarValue::U64(28_287_040),
+                },
+            ],
+            trace_id: None,
+            span_id: None,
+            trace_flags: TraceFlags(0),
+            module_path: "q4k_ggml_fidelity",
+            file_line: (0, 0),
+        }
+    }
+
+    fn render(record: &LogRecord, format: LogFormat) -> alloc::string::String {
+        let mut buf = proxima_core::batch::BatchBuffer::new();
+        format_log(&mut buf, record, format);
+        alloc::string::String::from_utf8(buf.as_bytes().to_vec()).expect("formatter emits utf8")
+    }
+
+    #[test]
+    fn json_formatter_carries_every_tag_key_and_value() {
+        let line = render(&tagged_log(), LogFormat::Json);
+
+        assert!(
+            line.contains("\"tensor\":\"blk.0.attn_q.weight\""),
+            "line missing string tag: {line}"
+        );
+        assert!(
+            line.contains("\"blocks\":28287040"),
+            "line missing numeric tag: {line}"
+        );
+        assert!(
+            line.contains("\"severity\":\"debug\""),
+            "line missing envelope field: {line}"
+        );
+    }
+
+    #[test]
+    fn human_formatter_carries_every_tag_key_and_value() {
+        let line = render(&tagged_log(), LogFormat::Human);
+
+        assert!(
+            line.contains("tensor=blk.0.attn_q.weight"),
+            "line missing string tag: {line}"
+        );
+        assert!(
+            line.contains("blocks=28287040"),
+            "line missing numeric tag: {line}"
+        );
+    }
+
+    #[test]
+    fn json_formatter_escapes_quotes_and_backslashes_in_tag_values() {
+        let mut record = tagged_log();
+        record.attrs = smallvec::smallvec![Tag::Scalar {
+            key: "path",
+            value: ScalarValue::Str("C:\\models\\\"q4k\".gguf"),
+        }];
+
+        let line = render(&record, LogFormat::Json);
+
+        assert!(
+            line.contains(r#""path":"C:\\models\\\"q4k\".gguf""#),
+            "quotes/backslashes not escaped: {line}"
+        );
     }
 }

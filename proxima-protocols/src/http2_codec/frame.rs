@@ -518,7 +518,7 @@ pub fn parse_payload(header: &FrameHeader, payload: &Bytes) -> Result<FramePaylo
                     got: payload_view.len(),
                 });
             }
-            // chunks_exact gives the compiler proof of 6-byte slices,
+            // as_chunks gives the compiler proof of 6-byte slices,
             // so inner from_be_bytes calls compile to inline loads
             // with no bounds checks. apply() routes each (id, value)
             // into its typed slot — zero heap allocation for the

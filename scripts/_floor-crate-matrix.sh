@@ -143,6 +143,19 @@ declare -a FLOOR_CRATE_CELLS=(
     # `alloc` cell exists because the crate has no `alloc` feature -- std is the
     # only rung above bare.
     "proxima-storage-bare-no-alloc|proxima-storage|"
+    # the model stack. proxima-tensor and the three sans-IO format parsers each
+    # advertise a no_std + alloc floor, and none of them had a cell here, so the
+    # claim had only ever been checked by `--no-default-features --features
+    # alloc` ON THE HOST -- which is the same thing proxima-listen's note below
+    # explains is not proof. Measured 2026-08-19: all four build clean on the
+    # cliff, so this locks in a claim that was true but unproven. No
+    # proxima-model-interop cell: that crate has no `[features]` table at all,
+    # so it never claimed a floor above std.
+    "proxima-tensor|proxima-tensor|alloc"
+    "proxima-gguf|proxima-gguf|alloc"
+    "proxima-safetensors|proxima-safetensors|alloc"
+    "proxima-onnx|proxima-onnx|alloc"
+    "proxima-tokenizer|proxima-tokenizer|alloc"
     # the sibling tier-3 claim (proxima-storage/src/nvme/mod.rs: "the engine is
     # #![no_std] + no-alloc"): the queue-pair engine over the sans-IO
     # proxima-protocols::nvme codec, ring cursors in atomics, Pipe + SendPipe.

@@ -20,9 +20,9 @@ use tokio::process::{Child, ChildStderr, ChildStdout, Command};
 use tokio::sync::Mutex;
 use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
-use tracing::{debug, error, warn};
 
 use proxima_primitives::pipe::SendPipe;
+use proxima_telemetry::{debug, error, warn};
 
 use crate::error::ProximaError;
 use crate::log_buffer::{DEFAULT_LOG_BUFFER_CAPACITY, LogBuffer, LogBufferRegistry};
@@ -271,7 +271,7 @@ async fn launch(
         .stderr
         .take()
         .ok_or_else(|| ProximaError::Upstream(format!("process `{label}` has no stderr pipe")))?;
-    debug!(label, command = %spec.command, "process spawned");
+    debug!(label = %label, command = %spec.command, "process spawned");
     Ok((child, stdout, stderr))
 }
 

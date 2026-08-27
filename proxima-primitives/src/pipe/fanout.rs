@@ -1,9 +1,11 @@
-//! `FanOut` — broadcast one input to N sink [`SendPipe`]s (a 1→N tee).
+//! `FanOut` — broadcast one input to N [`SendPipe`] arms (a 1→N tee).
 //!
 //! Generalises the broadcast shape downstream crates kept re-implementing per
 //! payload (recording fans `RecordingEvent`s to durable logs; telemetry fans
-//! records to exporters). It composes [`SendPipe`] — the sinks are ordinary
-//! pipes, so "a sink" needs no bespoke trait. Generic over the sink type `S` and
+//! records to exporters). It composes [`SendPipe`] — each arm is an ordinary
+//! pipe with no bespoke trait of its own; `S::Out` is unconstrained (an arm
+//! can be any pipe, including one with a real, non-`()` output — `FanOut`
+//! discards whatever each arm produces). Generic over the arm type `S` and
 //! a [`FanPolicy`], both monomorphised: a given instantiation is the same
 //! machine code a hand-rolled concrete fan-out would be, with no `dyn` erasure on
 //! the hot path. That static dispatch is exactly what lets it out-run a
@@ -64,7 +66,9 @@ impl FanPolicy for IgnoreErrors {
     const IGNORE_ERRORS: bool = true;
 }
 
-/// Broadcast composition over N sink [`SendPipe`]s.
+/// Broadcast composition over N [`SendPipe`] arms — each arm any pipe
+/// (`S::Out` unconstrained; `FanOut`'s own `call` discards whatever each
+/// arm produces, matching its own `Out = ()`).
 ///
 /// `Clone` is a refcount bump on the shared `Arc<Vec<S>>`, so a `FanOut` handle
 /// is cheap to hand to each `call` site.

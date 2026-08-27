@@ -331,7 +331,6 @@ mod tests {
     use super::*;
     use core::sync::atomic::AtomicU64 as StdAtomicU64;
     use core::sync::atomic::Ordering::Relaxed;
-    use rstest::rstest;
     use std::sync::Barrier;
 
     // a value type whose eviction metric is a settable atomic, so tests pin the
@@ -366,14 +365,14 @@ mod tests {
         }
     }
 
-    #[rstest]
+    #[proxima::test]
     #[case::one(1)]
     #[case::two(2)]
     #[case::three(3)]
     #[case::seven(7)]
     #[case::hundred(100)]
     #[case::hundred_k(100_000)]
-    fn cap_exceeds_max_keys(#[case] max_keys: usize) {
+    async fn cap_exceeds_max_keys(#[case] max_keys: usize) {
         let table: BucketTable<u8> = BucketTable::with_max_keys(max_keys);
         assert!(
             table.capacity() > max_keys,

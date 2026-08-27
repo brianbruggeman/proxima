@@ -111,7 +111,6 @@ proxima-net = { workspace = true, features = ["tokio", "prime"] }
 tempfile = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread", "net", "io-util", "time"] }
-rstest = { workspace = true }
 temp-env = { workspace = true }
 # `tokio` alongside `test-support`: in-tree tests use
 # `#[proxima::test(runtime = "tokio")]`, whose `run_tokio*` drivers live

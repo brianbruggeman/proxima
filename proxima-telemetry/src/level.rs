@@ -155,20 +155,19 @@ mod tests {
     use alloc::string::ToString;
     use alloc::vec;
     use alloc::vec::Vec;
-    use rstest::rstest;
-
+    
     use super::Level;
     use crate::error::Error;
 
     // 1. built-in consts have expected (severity, name) pairs; ordering holds
-    #[rstest]
+    #[proxima::test]
     #[case::trace(Level::TRACE, 1, "trace")]
     #[case::debug(Level::DEBUG, 5, "debug")]
     #[case::info(Level::INFO, 9, "info")]
     #[case::warn(Level::WARN, 13, "warn")]
     #[case::error(Level::ERROR, 17, "error")]
     #[case::fatal(Level::FATAL, 21, "fatal")]
-    fn builtin_consts_have_expected_fields(
+    async fn builtin_consts_have_expected_fields(
         #[case] level: Level,
         #[case] expected_severity: u8,
         #[case] expected_name: &str,
@@ -211,26 +210,26 @@ mod tests {
     }
 
     // 5. Display prints the name, no extra punctuation
-    #[rstest]
+    #[proxima::test]
     #[case::trace(Level::TRACE, "trace")]
     #[case::debug(Level::DEBUG, "debug")]
     #[case::info(Level::INFO, "info")]
     #[case::warn(Level::WARN, "warn")]
     #[case::error(Level::ERROR, "error")]
     #[case::fatal(Level::FATAL, "fatal")]
-    fn display_prints_lowercase_name(#[case] level: Level, #[case] expected: &str) {
+    async fn display_prints_lowercase_name(#[case] level: Level, #[case] expected: &str) {
         assert_eq!(level.to_string(), expected);
     }
 
     // 6. round-trip: from_str(level.name()) == level for each built-in
-    #[rstest]
+    #[proxima::test]
     #[case::trace(Level::TRACE)]
     #[case::debug(Level::DEBUG)]
     #[case::info(Level::INFO)]
     #[case::warn(Level::WARN)]
     #[case::error(Level::ERROR)]
     #[case::fatal(Level::FATAL)]
-    fn from_str_roundtrip(#[case] level: Level) {
+    async fn from_str_roundtrip(#[case] level: Level) {
         let parsed = level.name().parse::<Level>().unwrap();
         assert_eq!(parsed, level);
     }

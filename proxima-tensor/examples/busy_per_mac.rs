@@ -1,0 +1,169 @@
+#![allow(clippy::expect_used)]
+//! Lever A x lever B interaction measurement: one line of CSV-ish text per
+//! iteration, `size`/`threads` from argv, `iters` (default 9) repeats. Reuses
+//! `matmul_program_rhs_transposed`/`Lcg`/`random_vec` verbatim from
+//! `sweep_gemm.rs` so the checksum lines up with that harness's reference
+//! values (512 -> 135.87619, 1024 -> 260.24106, 2048 -> 513.10425).
+//!
+//! `busy_ns` is time spent inside the compute kernel, summed across every OS
+//! thread that ran a chunk this iteration. It is `Instant`-derived, so it
+//! keeps accruing while a worker is descheduled — it is NOT CPU time, and
+//! this doc claimed it was until 2026-08-18. `cpu_ns` is the same measurement
+//! on the thread CPU clock, which stops when the thread does. Compare across
+//! thread counts using `cpu_per_mac`; read `host_steal` (`busy_ns / cpu_ns`)
+//! first, because anything above ~1.02 means the host was competing for cores
+//! and the wall-derived columns are reporting the box, not the kernel.
+//!
+//! At `threads=1` `BoundOp::split_aligned(1, _)` returns `None` (a single
+//! chunk is not worth wrapping in `thread::scope`), so dispatch takes the
+//! direct sequential arm and there is no per-worker sample to sum; both
+//! `busy_ns` and `cpu_ns` fall back to `serial_sequential_compute_nanos`,
+//! a wall-clock region — so `host_steal` reads exactly 1.000 at one thread
+//! by construction, not by measurement.
+
+use std::env;
+use std::num::NonZeroUsize;
+use std::time::Instant;
+
+use proxima_tensor::instrument;
+use proxima_tensor::test_support::Lcg;
+use proxima_tensor::{Extent, IndexMap, NodeId, Op, ReduceInit, ScalarOp, append, evaluate_parallel, map};
+
+fn random_vec(seed: u64, n: usize, scale: f32) -> Vec<f32> {
+    let mut lcg = Lcg(seed);
+    (0..n).map(|_| lcg.next_unit() * scale).collect()
+}
+
+fn matmul_program_rhs_transposed(m: u32, k: u32, n: u32) -> (Vec<Op>, NodeId) {
+    let mut program = Vec::new();
+    let lhs = append(
+        &mut program,
+        Op::Input {
+            dtype: proxima_tensor::DType::Float32,
+            shape: vec![Extent::Static(m), Extent::Static(k)],
+            name: None,
+        },
+    );
+    let rhs = append(
+        &mut program,
+        Op::Input {
+            dtype: proxima_tensor::DType::Float32,
+            shape: vec![Extent::Static(n), Extent::Static(k)],
+            name: None,
+        },
+    );
+    let product = append(
+        &mut program,
+        Op::Elementwise {
+            dtype: proxima_tensor::DType::Float32,
+            body: ScalarOp::Multiply,
+            operands: vec![
+                (lhs, IndexMap::Affine(map::projection(3, &[0, 2]))),
+                (rhs, IndexMap::Affine(map::projection(3, &[1, 2]))),
+            ],
+            name: None,
+        },
+    );
+    let sum = append(
+        &mut program,
+        Op::Reduce(proxima_tensor::Reduce {
+            dtype: proxima_tensor::DType::Float32,
+            body: ScalarOp::Add,
+            init: ReduceInit::Zero,
+            operand: product,
+            in_map: IndexMap::Affine(map::projection(3, &[0, 1, 2])),
+            out_map: IndexMap::Affine(map::projection(3, &[0, 1])),
+            keep: proxima_tensor::Keep::Reduce,
+            name: Some("matmul_rhs_transposed".into()),
+        }),
+    );
+    (program, sum)
+}
+
+fn mean_and_stddev(values: &[u64]) -> (f64, f64) {
+    if values.is_empty() {
+        return (0.0, 0.0);
+    }
+    let mean = values.iter().sum::<u64>() as f64 / values.len() as f64;
+    let variance =
+        values.iter().map(|value| (*value as f64 - mean).powi(2)).sum::<f64>() / values.len() as f64;
+    (mean, variance.sqrt())
+}
+
+fn main() {
+    let args: Vec<String> = env::args().collect();
+    if args.len() < 3 {
+        eprintln!("usage: {} <size> <threads> [iters]", args[0]);
+        std::process::exit(1);
+    }
+    let size: u32 = args[1].parse().expect("size must be a positive integer");
+    let threads: usize = args[2].parse().expect("threads must be a positive integer");
+    let iters: usize = match args.get(3) {
+        Some(value) => value.parse().expect("iters must be a positive integer"),
+        None => 9,
+    };
+
+    let (m, k, n) = (size, size, size);
+    let (program, _sum) = matmul_program_rhs_transposed(m, k, n);
+    let lhs = random_vec(1, (m * k) as usize, 1.0);
+    let rhs_t = random_vec(2, (n * k) as usize, 1.0);
+    let workers = NonZeroUsize::new(threads).expect("threads must be nonzero");
+
+    let _ = evaluate_parallel(&program, &[], &[&lhs, &rhs_t], &[], workers).expect("warmup gemm evaluates");
+
+    for iter in 0..iters {
+        instrument::reset();
+        instrument::reset_parallel();
+        instrument::reset_serial();
+        instrument::reset_worker_busy();
+        instrument::reset_worker_cpu();
+
+        let wall_start = Instant::now();
+        let evaluated =
+            evaluate_parallel(&program, &[], &[&lhs, &rhs_t], &[], workers).expect("gemm evaluates");
+        let wall_ns = wall_start.elapsed().as_nanos() as u64;
+        let checksum = evaluated.root()[0];
+
+        let totals = instrument::totals();
+        let serial = instrument::serial_totals();
+        let sequential_compute_nanos = instrument::ticks_to_nanos(serial.sequential_compute_ticks);
+        // raw tick deltas (`instrument::read_ticks`'s doc), converted once
+        // here rather than per element.
+        let busy_samples: Vec<u64> =
+            instrument::worker_busy_snapshot().into_iter().map(instrument::ticks_to_nanos).collect();
+
+        let (busy_ns, busy_workers, busy_min, busy_max, busy_mean, busy_stddev) = if busy_samples.is_empty() {
+            let sequential = sequential_compute_nanos;
+            (sequential, 1u64, sequential, sequential, sequential as f64, 0.0)
+        } else {
+            let sum: u64 = busy_samples.iter().sum();
+            let min = *busy_samples.iter().min().expect("nonempty");
+            let max = *busy_samples.iter().max().expect("nonempty");
+            let (mean, stddev) = mean_and_stddev(&busy_samples);
+            (sum, busy_samples.len() as u64, min, max, mean, stddev)
+        };
+        let busy_per_mac = busy_ns as f64 / totals.mac_ops.max(1) as f64;
+
+        // busy_ns is Instant-derived and keeps running while a worker is
+        // descheduled; cpu_ns does not. carry both — busy/cpu is this run's
+        // own report of how much the host stole.
+        let cpu_samples = instrument::worker_cpu_snapshot();
+        let cpu_ns: u64 = if cpu_samples.is_empty() {
+            sequential_compute_nanos
+        } else {
+            cpu_samples.iter().sum()
+        };
+        let cpu_per_mac = cpu_ns as f64 / totals.mac_ops.max(1) as f64;
+        let host_steal = busy_ns as f64 / cpu_ns.max(1) as f64;
+
+        println!(
+            "size={size} threads={threads} iter={iter} checksum={checksum:.5} wall_ns={wall_ns} \
+             mac_ops={} operand_loads={} busy_workers={busy_workers} busy_ns={busy_ns} \
+             busy_min_ns={busy_min} busy_max_ns={busy_max} busy_mean_ns={busy_mean:.1} \
+             busy_stddev_ns={busy_stddev:.1} busy_per_mac={busy_per_mac:.6} \
+             cpu_ns={cpu_ns} cpu_per_mac={cpu_per_mac:.6} host_steal={host_steal:.4} \
+             serial_sequential_compute_ns={}",
+            totals.mac_ops, totals.operand_loads, sequential_compute_nanos,
+        );
+    }
+}

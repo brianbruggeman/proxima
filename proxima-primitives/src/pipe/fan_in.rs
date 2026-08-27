@@ -127,30 +127,81 @@ impl FanInStrategy for Select {
     }
 }
 
+/// How many retirements the merge needs before it resolves [`Exhausted`].
+/// Orthogonal to [`FanInStrategy`]: that trait answers "which source next";
+/// this one answers "how many must complete" — a control question about the
+/// scan's STOPPING point, not its ORDER, so it is its own dial rather than a
+/// second method grafted onto `FanInStrategy` (a caller wanting
+/// "round-robin order, quorum of 2" would otherwise need one combined type
+/// per `(order, count)` pairing instead of composing two independent ones).
+///
+/// Called after every retirement with `retired` (sources that have resolved
+/// [`Exhausted`]) and the merge's total `n`. Once it answers `true`, the
+/// merge resolves `Err(Exhausted)` even if sources remain live — they are
+/// simply never polled again.
+pub trait FanInCompletion {
+    fn satisfied(&self, retired: usize, n: usize) -> bool;
+}
+
+/// End the merge once `self.0` sources have retired, leaving any others
+/// live but unpolled. The capability [`FanInStrategy::index`] cannot express:
+/// picking an index says nothing about how many retirements are enough.
+///
+/// "Every source must retire" is not a second type: it is this one with
+/// `self.0` bound to the merge's own arity. `retired >= n` and `retired ==
+/// n` agree for every `retired` in `0..=n`, because a scan never retires
+/// more than `n` sources — so [`FanIn::new`] builds exactly `Quorum(N)`
+/// (`N` the const-generic arity) as its default completion, rather than a
+/// parallel "all-must-arrive" type expressing the same policy twice.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Quorum(pub usize);
+
+impl FanInCompletion for Quorum {
+    fn satisfied(&self, retired: usize, _n: usize) -> bool {
+        retired >= self.0
+    }
+}
+
 /// Fixed-arity N→1 merge over `[S; N]`, taking only sources that are ready.
-/// Resolves [`Exhausted`] once every source has. No_std + no-alloc. Which
-/// ready source wins is [`Select`], named by the caller. Itself a
-/// [`Pipe`]/[`UnpinPipe`] (source form: `In = ()`), so a `FanIn` nests inside
-/// a bigger `FanIn` with no adapter.
-pub struct FanIn<S, Strategy, const N: usize> {
+/// Resolves [`Exhausted`] once [`FanInCompletion`] is satisfied (every source
+/// retired, by default). No_std + no-alloc. Which ready source wins is
+/// [`Select`], named by the caller. Itself a [`Pipe`]/[`UnpinPipe`] (source
+/// form: `In = ()`), so a `FanIn` nests inside a bigger `FanIn` with no
+/// adapter.
+pub struct FanIn<S, Strategy, const N: usize, Completion = Quorum> {
     sources: [S; N],
     live: [AtomicBool; N],
     remaining: AtomicUsize,
     cursor: AtomicUsize,
     strategy: Strategy,
+    completion: Completion,
 }
 
-impl<S, Strategy, const N: usize> FanIn<S, Strategy, N> {
+impl<S, Strategy, const N: usize> FanIn<S, Strategy, N, Quorum> {
     /// Merge `sources`, choosing among the ready ones by `strategy`. All start
-    /// live; the merge ends when all have drained.
+    /// live; the merge ends when every source has drained — `Quorum(N)`, the
+    /// arity `N` already carries at the type level, so "all must arrive"
+    /// needs no threshold the caller has to repeat. Use
+    /// [`FanIn::with_completion`] to name a lower threshold, such as
+    /// `Quorum(2)` for a 3-source merge.
     #[must_use]
     pub fn new(sources: [S; N], strategy: Strategy) -> Self {
+        Self::with_completion(sources, strategy, Quorum(N))
+    }
+}
+
+impl<S, Strategy, const N: usize, Completion> FanIn<S, Strategy, N, Completion> {
+    /// Merge `sources`, choosing among the ready ones by `strategy`, ending
+    /// once `completion` is satisfied.
+    #[must_use]
+    pub fn with_completion(sources: [S; N], strategy: Strategy, completion: Completion) -> Self {
         Self {
             sources,
             live: core::array::from_fn(|_| AtomicBool::new(true)),
             remaining: AtomicUsize::new(N),
             cursor: AtomicUsize::new(0),
             strategy,
+            completion,
         }
     }
 
@@ -158,6 +209,12 @@ impl<S, Strategy, const N: usize> FanIn<S, Strategy, N> {
     #[must_use]
     pub fn strategy(&self) -> &Strategy {
         &self.strategy
+    }
+
+    /// The completion policy this merge was built with.
+    #[must_use]
+    pub fn completion(&self) -> &Completion {
+        &self.completion
     }
 
     /// Sources not yet drained.
@@ -172,20 +229,22 @@ impl<S, Strategy, const N: usize> FanIn<S, Strategy, N> {
 /// only ever borrows `fan` and holds no self-referential state — the whole
 /// point of the `UnpinPipe` tier (see `primitives.rs`'s module doc): a caller
 /// can `Pin::new(&mut call).poll(cx)` with no `unsafe`, no `Box`.
-struct FanInCall<'fan, S, Strategy, const N: usize> {
-    fan: &'fan FanIn<S, Strategy, N>,
+struct FanInCall<'fan, S, Strategy, const N: usize, Completion = Quorum> {
+    fan: &'fan FanIn<S, Strategy, N, Completion>,
 }
 
-impl<S, Strategy, const N: usize> Future for FanInCall<'_, S, Strategy, N>
+impl<S, Strategy, const N: usize, Completion> Future for FanInCall<'_, S, Strategy, N, Completion>
 where
     S: UnpinPipe<In = (), Err = Exhausted>,
     Strategy: FanInStrategy,
+    Completion: FanInCompletion,
 {
     type Output = Result<S::Out, Exhausted>;
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let fan = self.fan;
-        if fan.remaining.load(Ordering::Relaxed) == 0 {
+        let retired = N - fan.remaining.load(Ordering::Relaxed);
+        if fan.completion.satisfied(retired, N) {
             return Poll::Ready(Err(Exhausted));
         }
         let cursor = fan.cursor.load(Ordering::Relaxed);
@@ -208,7 +267,8 @@ where
                 Poll::Ready(Err(Exhausted)) => {
                     fan.live[index].store(false, Ordering::Relaxed);
                     let remaining = fan.remaining.fetch_sub(1, Ordering::Relaxed) - 1;
-                    if remaining == 0 {
+                    let retired = N - remaining;
+                    if fan.completion.satisfied(retired, N) {
                         return Poll::Ready(Err(Exhausted));
                     }
                 }
@@ -231,20 +291,23 @@ where
 /// the same concrete `FanInCall` overlap (E0119) — coherence needs its own
 /// struct per tier, same as `AndThen`'s and `FanOut`'s separate `Pipe`/
 /// `SendPipe` impl bodies.
-struct FanInSendCall<'fan, S, Strategy, const N: usize> {
-    fan: &'fan FanIn<S, Strategy, N>,
+struct FanInSendCall<'fan, S, Strategy, const N: usize, Completion = Quorum> {
+    fan: &'fan FanIn<S, Strategy, N, Completion>,
 }
 
-impl<S, Strategy, const N: usize> Future for FanInSendCall<'_, S, Strategy, N>
+impl<S, Strategy, const N: usize, Completion> Future
+    for FanInSendCall<'_, S, Strategy, N, Completion>
 where
     S: UnpinSendPipe<In = (), Err = Exhausted>,
     Strategy: FanInStrategy,
+    Completion: FanInCompletion,
 {
     type Output = Result<S::Out, Exhausted>;
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let fan = self.fan;
-        if fan.remaining.load(Ordering::Relaxed) == 0 {
+        let retired = N - fan.remaining.load(Ordering::Relaxed);
+        if fan.completion.satisfied(retired, N) {
             return Poll::Ready(Err(Exhausted));
         }
         let cursor = fan.cursor.load(Ordering::Relaxed);
@@ -262,7 +325,8 @@ where
                 Poll::Ready(Err(Exhausted)) => {
                     fan.live[index].store(false, Ordering::Relaxed);
                     let remaining = fan.remaining.fetch_sub(1, Ordering::Relaxed) - 1;
-                    if remaining == 0 {
+                    let retired = N - remaining;
+                    if fan.completion.satisfied(retired, N) {
                         return Poll::Ready(Err(Exhausted));
                     }
                 }
@@ -273,10 +337,11 @@ where
     }
 }
 
-impl<S, Strategy, const N: usize> Pipe for FanIn<S, Strategy, N>
+impl<S, Strategy, const N: usize, Completion> Pipe for FanIn<S, Strategy, N, Completion>
 where
     S: UnpinPipe<In = (), Err = Exhausted> + DropSafe,
     Strategy: FanInStrategy,
+    Completion: FanInCompletion,
 {
     type In = ();
     type Out = S::Out;
@@ -287,10 +352,11 @@ where
     }
 }
 
-impl<S, Strategy, const N: usize> UnpinPipe for FanIn<S, Strategy, N>
+impl<S, Strategy, const N: usize, Completion> UnpinPipe for FanIn<S, Strategy, N, Completion>
 where
     S: UnpinPipe<In = (), Err = Exhausted> + DropSafe,
     Strategy: FanInStrategy,
+    Completion: FanInCompletion,
 {
     type In = ();
     type Out = S::Out;
@@ -301,10 +367,11 @@ where
     }
 }
 
-impl<S, Strategy, const N: usize> UnpinSendPipe for FanIn<S, Strategy, N>
+impl<S, Strategy, const N: usize, Completion> UnpinSendPipe for FanIn<S, Strategy, N, Completion>
 where
     S: UnpinSendPipe<In = (), Err = Exhausted> + DropSafe,
     Strategy: FanInStrategy + Send + Sync + 'static,
+    Completion: FanInCompletion + Send + Sync + 'static,
 {
     type In = ();
     type Out = S::Out;
@@ -321,7 +388,7 @@ where
 // `DropSafe`) — so a `FanIn` of `DropSafe` sources is itself `DropSafe`,
 // which is what lets one nest inside an outer `FanIn` (the outer's `S` bound
 // demands it).
-impl<S: DropSafe, Strategy, const N: usize> DropSafe for FanIn<S, Strategy, N> {}
+impl<S: DropSafe, Strategy, const N: usize, Completion> DropSafe for FanIn<S, Strategy, N, Completion> {}
 
 /// `FanInVec::new` rejected a source count over `FAN_IN_SOURCE_CAP`. Reported,
 /// never silently truncated — a dropped source would be a silently lost stream.
@@ -634,10 +701,14 @@ mod tests {
     }
 
     // drive a fan-in to completion into a fixed buffer (no-alloc); returns count.
-    fn drain<S, Strategy, const N: usize>(fan: FanIn<S, Strategy, N>, out: &mut [u32]) -> usize
+    fn drain<S, Strategy, const N: usize, Completion>(
+        fan: FanIn<S, Strategy, N, Completion>,
+        out: &mut [u32],
+    ) -> usize
     where
         S: UnpinPipe<In = (), Out = u32, Err = Exhausted> + DropSafe,
         Strategy: FanInStrategy,
+        Completion: FanInCompletion,
     {
         let waker = Waker::noop();
         let mut cx = Context::from_waker(waker);
@@ -820,16 +891,91 @@ mod tests {
         );
     }
 
+    #[test]
+    fn quorum_completion_ends_the_merge_before_every_source_retires() {
+        let fan = FanIn::with_completion(
+            [
+                Script::new([Step::Yield(1), Step::Done]),
+                Script::new([Step::Yield(2), Step::Done]),
+                // "never retires" for the two calls this test actually makes
+                // it before quorum ends the merge — an array element must share
+                // the other sources' concrete type (`[S; N]` is homogeneous, no
+                // trait object), so a perpetual-Pend Script stands in for a
+                // dedicated never-retiring source rather than minting one.
+                Script::new([Step::Pend, Step::Pend]),
+            ],
+            Select::RoundRobin,
+            Quorum(2),
+        );
+        let mut buf = [0u32; 8];
+        let count = drain(fan, &mut buf);
+        assert_eq!(
+            count, 2,
+            "both live sources yield exactly once before quorum ends the merge"
+        );
+    }
+
+    // proves the binding claim behind deleting `AllMustArrive`: the
+    // "all-must-arrive" default `FanIn::new` builds is not a distinct policy,
+    // it is `Quorum` bound to the merge's own arity — an explicit
+    // `Quorum(N)` for an N-source merge must behave identically to `new`'s
+    // default, for every select order.
+    #[test]
+    fn explicit_quorum_at_arity_matches_the_default_for_every_select_order() {
+        fn drain_default(select: Select) -> [u32; 3] {
+            let fan = FanIn::new(
+                [
+                    Script::new([Step::Yield(0), Step::Done]),
+                    Script::new([Step::Yield(10), Step::Done]),
+                    Script::new([Step::Yield(20), Step::Done]),
+                ],
+                select,
+            );
+            let mut buf = [0u32; 8];
+            let count = drain(fan, &mut buf);
+            assert_eq!(count, 3, "every source yields exactly one item");
+            [buf[0], buf[1], buf[2]]
+        }
+
+        fn drain_explicit_quorum_at_arity(select: Select) -> [u32; 3] {
+            let fan = FanIn::with_completion(
+                [
+                    Script::new([Step::Yield(0), Step::Done]),
+                    Script::new([Step::Yield(10), Step::Done]),
+                    Script::new([Step::Yield(20), Step::Done]),
+                ],
+                select,
+                Quorum(3),
+            );
+            let mut buf = [0u32; 8];
+            let count = drain(fan, &mut buf);
+            assert_eq!(count, 3, "every source yields exactly one item");
+            [buf[0], buf[1], buf[2]]
+        }
+
+        for select in [Select::Fifo, Select::Lifo, Select::RoundRobin] {
+            assert_eq!(
+                drain_default(select),
+                drain_explicit_quorum_at_arity(select),
+                "FanIn::new's default completion is Quorum bound to the arity"
+            );
+        }
+    }
+
     // ── UnpinSendPipe tier (Stage 2) ────────────────────────────────────────
 
     // `UnpinSendPipe::call`'s merge loop is `FanInSendCall`, a separate type
     // from `FanInCall` (coherence: `UnpinPipe`/`UnpinSendPipe` are standalone
     // traits, see its doc) — drive it through the `Send` entry point
     // specifically, not `Pipe`/`UnpinPipe`, to prove that path for real.
-    fn drain_send<S, Strategy, const N: usize>(fan: FanIn<S, Strategy, N>, out: &mut [u32]) -> usize
+    fn drain_send<S, Strategy, const N: usize, Completion>(
+        fan: FanIn<S, Strategy, N, Completion>,
+        out: &mut [u32],
+    ) -> usize
     where
         S: UnpinSendPipe<In = (), Out = u32, Err = Exhausted> + DropSafe,
         Strategy: FanInStrategy + Send + Sync + 'static,
+        Completion: FanInCompletion + Send + Sync + 'static,
     {
         let waker = Waker::noop();
         let mut cx = Context::from_waker(waker);

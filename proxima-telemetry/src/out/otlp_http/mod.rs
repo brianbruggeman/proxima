@@ -126,8 +126,7 @@ mod tests {
 
     use bytes::Bytes;
     use prost::Message;
-    use rstest::rstest;
-
+    
     use crate::id::TraceFlags;
     use crate::id::{SpanId, TraceId};
     use crate::level::Level;
@@ -375,7 +374,7 @@ mod tests {
     }
 
     // 6. scalar_to_anyvalue: each ScalarValue variant → AnyValue → back
-    #[rstest]
+    #[proxima::test]
     #[case::i64(ScalarValue::I64(-7), AnyValueVariant::IntValue(-7))]
     #[case::u64(ScalarValue::U64(99), AnyValueVariant::IntValue(99))]
     #[case::f64(ScalarValue::F64(2.5), AnyValueVariant::DoubleValue(2.5))]
@@ -389,7 +388,7 @@ mod tests {
         ScalarValue::Bytes(Bytes::from_static(b"raw")),
         AnyValueVariant::BytesValue(alloc::vec![b'r', b'a', b'w'])
     )]
-    fn scalar_value_to_anyvalue_variants(
+    async fn scalar_value_to_anyvalue_variants(
         #[case] input: ScalarValue,
         #[case] expected: AnyValueVariant,
     ) {

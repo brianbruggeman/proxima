@@ -93,6 +93,14 @@ packages = [
     "proxima-quic",
     # proxima-test-gate.sh runs the macro smoke through the umbrella itself.
     "proxima",
+    # _floor-crate-matrix.sh's model-stack cells (added 2026-08-19). Same reason
+    # as the block above: editing proxima-gguf left `nostd=false`, so the cliff
+    # cell proving its no_std+alloc floor would never have run.
+    "proxima-tensor",
+    "proxima-gguf",
+    "proxima-safetensors",
+    "proxima-onnx",
+    "proxima-tokenizer",
 ]
 paths = [
     "scripts/nostd-gate.sh",
@@ -110,6 +118,29 @@ paths = [
     "scripts/proxima-recording-gate.sh",
     "scripts/_floor-crate-matrix.sh",
     ".github/workflows/no-std.yml",
+]
+
+# The model stack. `packages` are dependency-closure ROOTS, so every crate that
+# owns a cell in proxima-tensor-gate.sh is named directly rather than reached
+# through a sibling — see the note in [area.nostd] about a gate that cannot be
+# triggered. omega is a root because it depends on proxima-tensor and carries
+# the metal_parity cases; the format crates are roots because nothing depends
+# on them yet, so a closure walk would never reach them.
+[area.tensor]
+packages = [
+    "proxima-tensor",
+    "omega",
+    "proxima-gguf",
+    "proxima-safetensors",
+    "proxima-onnx",
+    "proxima-model-interop",
+    "proxima-tokenizer",
+]
+paths = [
+    "scripts/proxima-tensor-gate.sh",
+    "scripts/proxima-tokenizer-gate.sh",
+    ".github/workflows/proxima-tensor.yml",
+    "proxima-tensor/specs/**",
 ]
 
 [area.dpdk_stack]

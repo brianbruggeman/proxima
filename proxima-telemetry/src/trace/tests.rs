@@ -2,7 +2,6 @@ use alloc::rc::Rc;
 use alloc::vec::Vec;
 use core::cell::RefCell;
 
-use rstest::rstest;
 
 use crate::id::{SpanId, TraceId};
 use crate::tag::{ScalarValue, Tag, TagSink};
@@ -309,13 +308,13 @@ fn macro_span_event_with_attrs_pushes_attrs() {
 }
 
 // 13. SpanKind variants are all distinct
-#[rstest]
+#[proxima::test]
 #[case::internal(SpanKind::Internal)]
 #[case::server(SpanKind::Server)]
 #[case::client(SpanKind::Client)]
 #[case::producer(SpanKind::Producer)]
 #[case::consumer(SpanKind::Consumer)]
-fn span_kind_variants_distinct(#[case] kind: SpanKind) {
+async fn span_kind_variants_distinct(#[case] kind: SpanKind) {
     let clock = MonotonicCounter::new(0);
     let (trace_id, span_id) = make_ids();
     let (collected, sink) = make_sink();

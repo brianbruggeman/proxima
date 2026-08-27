@@ -713,8 +713,7 @@ impl Session {
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-    use rstest::rstest;
-
+    
     use super::super::frontend::{FrontendMessage, InitialMessage, parse_frontend, parse_initial};
     use super::super::types::{ProtocolVersion, StatementTarget, TransactionStatus};
     use super::{AuthFlow, Disposition, Session, SessionError, StateName, WirePhase};
@@ -1257,13 +1256,13 @@ mod tests {
         assert!(session.is_closed());
     }
 
-    #[rstest]
+    #[proxima::test]
     #[case::from_idle(StateName::Idle)]
     #[case::from_extended(StateName::Extended)]
     #[case::from_extended_failed(StateName::ExtendedFailed)]
     #[case::from_auth_in_progress(StateName::AuthInProgress)]
     #[case::from_copy_in(StateName::CopyIn)]
-    fn terminate_from_various_states_enters_terminated(#[case] target_state: StateName) {
+    async fn terminate_from_various_states_enters_terminated(#[case] target_state: StateName) {
         let mut session = Session::new();
         startup_to_idle(&mut session);
 
@@ -1334,11 +1333,11 @@ mod tests {
         assert_eq!(status2, TransactionStatus::Idle);
     }
 
-    #[rstest]
+    #[proxima::test]
     #[case::query_during_auth(b'Q')]
     #[case::parse_during_auth(b'P')]
     #[case::sync_during_auth(b'S')]
-    fn illegal_messages_during_auth_in_progress(#[case] tag: u8) {
+    async fn illegal_messages_during_auth_in_progress(#[case] tag: u8) {
         let mut session = Session::new();
         let startup = startup_bytes();
         feed_initial(&mut session, &startup).expect("startup accepted");
@@ -1366,10 +1365,10 @@ mod tests {
         );
     }
 
-    #[rstest]
+    #[proxima::test]
     #[case::auth_data_in_idle(b'p')]
     #[case::copy_data_in_idle(b'd')]
-    fn illegal_messages_in_idle(#[case] tag: u8) {
+    async fn illegal_messages_in_idle(#[case] tag: u8) {
         let mut session = Session::new();
         startup_to_idle(&mut session);
 
@@ -1416,10 +1415,10 @@ mod tests {
         );
     }
 
-    #[rstest]
+    #[proxima::test]
     #[case::query_during_simple_query(false, b'Q')]
     #[case::auth_data_in_copy_out(true, b'p')]
-    fn illegal_messages_in_quiescent_states(#[case] use_copy_out: bool, #[case] tag: u8) {
+    async fn illegal_messages_in_quiescent_states(#[case] use_copy_out: bool, #[case] tag: u8) {
         let mut session = Session::new();
         startup_to_idle(&mut session);
 
@@ -1533,7 +1532,7 @@ mod tests {
         );
     }
 
-    #[rstest]
+    #[proxima::test]
     #[case::ssl_accepted_in_idle("ssl_accepted")]
     #[case::auth_ok_in_idle("auth_ok")]
     #[case::ready_for_query_in_extended("ready_for_query")]
@@ -1542,7 +1541,7 @@ mod tests {
     #[case::copy_finished_in_copy_in("copy_finished")]
     #[case::tls_established_without_ssl_accepted("tls_established")]
     #[case::auth_requested_twice("auth_requested_twice")]
-    fn illegal_server_transitions(#[case] scenario: &str) {
+    async fn illegal_server_transitions(#[case] scenario: &str) {
         let mut session = Session::new();
 
         let err = match scenario {
@@ -1609,7 +1608,7 @@ mod tests {
         );
     }
 
-    #[rstest]
+    #[proxima::test]
     #[case::awaiting_initial(StateName::AwaitingInitial, WirePhase::Initial)]
     #[case::ssl_decision(StateName::SslDecision, WirePhase::Quiescent)]
     #[case::gss_decision(StateName::GssDecision, WirePhase::Quiescent)]
@@ -1629,7 +1628,7 @@ mod tests {
     #[case::cancelling(StateName::Cancelling, WirePhase::Closed)]
     #[case::terminated(StateName::Terminated, WirePhase::Closed)]
     #[case::failed(StateName::Failed, WirePhase::Closed)]
-    fn wire_phase_matches_state(#[case] state_name: StateName, #[case] expected_phase: WirePhase) {
+    async fn wire_phase_matches_state(#[case] state_name: StateName, #[case] expected_phase: WirePhase) {
         let session = reach_state(state_name);
         assert_eq!(
             session.wire_phase(),

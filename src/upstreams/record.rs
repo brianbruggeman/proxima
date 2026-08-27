@@ -12,6 +12,7 @@ use proxima_primitives::pipe::capabilities::Clock;
 use proxima_primitives::pipe::clock::TimeClock;
 use proxima_primitives::sync::mpsc;
 use proxima_primitives::sync::oneshot;
+use proxima_telemetry::error;
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 use serde::{Deserialize, Serialize};
@@ -279,7 +280,7 @@ fn instance_drainer_sender(
             if let Err(error) =
                 runtime.spawn_on_core(CoreId(0), Box::pin(drain_forever(receiver, sink.clone())))
             {
-                tracing::error!(error = ?error, "recording drainer spawn failed");
+                error!(error = ?error, "recording drainer spawn failed");
             }
             sender
         })
@@ -302,11 +303,11 @@ async fn drain_forever(
             drain_message(&sink, message).await;
         }
         if let Err(error) = sink.flush().await {
-            tracing::error!(error = %error, "recording sink flush failed");
+            error!(error = %error, "recording sink flush failed");
         }
     }
     if let Err(error) = sink.flush().await {
-        tracing::error!(error = %error, "recording sink flush failed");
+        error!(error = %error, "recording sink flush failed");
     }
 }
 
@@ -317,13 +318,13 @@ async fn drain_message(sink: &DynRecordingSink, message: DrainerMessage) {
     match message {
         DrainerMessage::Event(event) => {
             if let Err(error) = sink.append(event).await {
-                tracing::error!(error = %error, "recording sink append failed");
+                error!(error = %error, "recording sink append failed");
             }
         }
         DrainerMessage::Barrier(ack) => {
             let result = sink.flush().await;
             if let Err(ref error) = result {
-                tracing::error!(error = %error, "recording sink flush failed");
+                error!(error = %error, "recording sink flush failed");
             }
             let _ = ack.send(result);
         }
@@ -485,7 +486,7 @@ where
                         }
                     }
                     if let Err(error) = sink_for_task.flush().await {
-                        tracing::error!(error = %error, "recording sink flush failed");
+                        error!(error = %error, "recording sink flush failed");
                     }
                 });
             });
@@ -662,7 +663,7 @@ where
                         }
                     }
                     if let Err(error) = sink_for_task.flush().await {
-                        tracing::error!(error = %error, "recording sink flush failed");
+                        error!(error = %error, "recording sink flush failed");
                     }
                 });
             });

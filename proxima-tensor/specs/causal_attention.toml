@@ -1,0 +1,307 @@
+# `attention_block.toml` plus a real causal mask: scores are masked to
+# `-infinity` wherever the key position is later than the query position,
+# before the softmax. `attention_block.toml`'s own header used to say this
+# was unreachable — it needed a tensor derived from iteration indices, and no
+# `Op` produced one. `Op::Iota` is that op; this file is the proof it closes
+# the gap, not just that it parses.
+#
+# The mask itself is five nodes:
+#   - `query_index` / `key_index`: two `Op::Iota` leaves, one per sequence
+#     axis, broadcast into the `st` (query, key) iteration space exactly the
+#     way `score_max` already broadcasts `s` into `st` below.
+#   - `is_future`: `key_index > query_index` — 1.0 at every position the
+#     causal mask must zero out, 0.0 everywhere else (including the
+#     diagonal: a query may attend to its own position).
+#   - `neg_infinity`: one `op = "constant"` leaf — `Op::Constant`, the
+#     algebra's literal. `shape = []` is the rank-0 form, so an empty
+#     operand side (`"->st"`) broadcasts it across the mask's whole
+#     iteration space. It used to be three nodes (`x - x` for exact `+0.0`,
+#     `negate` for `-0.0`, `1.0 / -0.0` for `-infinity`) and a materialized
+#     `[?0]` tensor per call, because the algebra could not say a number.
+#   - `scores_masked`: `select(is_future, neg_infinity, scores)` — routes
+#     the masked positions to `-infinity` and leaves the rest untouched,
+#     before `score_max`/softmax read it instead of the raw `scores`.
+
+# --- inputs -----------------------------------------------------------------
+
+[[node]]
+op = "input"
+id = "x"
+dtype = "float32"
+shape = ["?0", 8]
+
+[[node]]
+op = "input"
+id = "inv_dim"
+dtype = "float32"
+shape = ["?0"]
+
+[[node]]
+op = "input"
+id = "wq"
+dtype = "float32"
+shape = [8, 8]
+
+[[node]]
+op = "input"
+id = "wk"
+dtype = "float32"
+shape = [8, 8]
+
+[[node]]
+op = "input"
+id = "wv"
+dtype = "float32"
+shape = [8, 8]
+
+# --- rmsnorm ----------------------------------------------------------------
+
+[[node]]
+op = "elementwise"
+id = "x_squared"
+dtype = "float32"
+body = "multiply"
+inputs = ["x", "x"]
+maps = ["sd->sd", "sd->sd"]
+
+[[node]]
+op = "reduce"
+id = "sum_squares"
+dtype = "float32"
+body = "add"
+init = "zero"
+input = "x_squared"
+in_map = "sd->sd"
+out_map = "s->sd"
+keep = "reduce"
+
+[[node]]
+op = "elementwise"
+id = "mean_square"
+dtype = "float32"
+body = "multiply"
+inputs = ["sum_squares", "inv_dim"]
+maps = ["s->s", "s->s"]
+
+[[node]]
+op = "elementwise"
+id = "rms"
+dtype = "float32"
+body = "square_root"
+inputs = ["mean_square"]
+maps = ["s->s"]
+
+[[node]]
+op = "elementwise"
+id = "inv_rms"
+dtype = "float32"
+body = "reciprocal"
+inputs = ["rms"]
+maps = ["s->s"]
+
+[[node]]
+op = "elementwise"
+id = "normed"
+dtype = "float32"
+body = "multiply"
+inputs = ["x", "inv_rms"]
+maps = ["sd->sd", "s->sd"]
+
+# --- q / k / v projections --------------------------------------------------
+
+[[node]]
+op = "elementwise"
+id = "q_product"
+dtype = "float32"
+body = "multiply"
+inputs = ["normed", "wq"]
+maps = ["sd->shd", "dh->shd"]
+
+[[node]]
+op = "reduce"
+id = "q"
+dtype = "float32"
+body = "add"
+init = "zero"
+input = "q_product"
+in_map = "shd->shd"
+out_map = "sh->shd"
+keep = "reduce"
+
+[[node]]
+op = "elementwise"
+id = "k_product"
+dtype = "float32"
+body = "multiply"
+inputs = ["normed", "wk"]
+maps = ["sd->shd", "dh->shd"]
+
+[[node]]
+op = "reduce"
+id = "k"
+dtype = "float32"
+body = "add"
+init = "zero"
+input = "k_product"
+in_map = "shd->shd"
+out_map = "sh->shd"
+keep = "reduce"
+
+[[node]]
+op = "elementwise"
+id = "v_product"
+dtype = "float32"
+body = "multiply"
+inputs = ["normed", "wv"]
+maps = ["sd->shd", "dh->shd"]
+
+[[node]]
+op = "reduce"
+id = "v"
+dtype = "float32"
+body = "add"
+init = "zero"
+input = "v_product"
+in_map = "shd->shd"
+out_map = "sh->shd"
+keep = "reduce"
+
+# --- scores -----------------------------------------------------------------
+
+[[node]]
+op = "elementwise"
+id = "score_product"
+dtype = "float32"
+body = "multiply"
+inputs = ["q", "k"]
+maps = ["sh->sth", "th->sth"]
+
+[[node]]
+op = "reduce"
+id = "scores"
+dtype = "float32"
+body = "add"
+init = "zero"
+input = "score_product"
+in_map = "sth->sth"
+out_map = "st->sth"
+keep = "reduce"
+
+# --- causal mask --------------------------------------------------------
+
+[[node]]
+op = "iota"
+id = "query_index"
+dtype = "float32"
+extent = "?0"
+
+[[node]]
+op = "iota"
+id = "key_index"
+dtype = "float32"
+extent = "?0"
+
+[[node]]
+op = "elementwise"
+id = "is_future"
+dtype = "float32"
+body = "greater"
+inputs = ["key_index", "query_index"]
+maps = ["t->st", "s->st"]
+
+# `-inf` used to be three nodes off `query_index` (subtract for 0.0, negate
+# for -0.0, reciprocal for -inf) and a materialized `[?0]` tensor per call.
+# It is one `op = "constant"` leaf — `Op::Constant`, rank-0, broadcast into
+# any consumer through an empty operand side.
+[[node]]
+op = "constant"
+id = "neg_infinity"
+dtype = "float32"
+shape = []
+value = -inf
+
+[[node]]
+op = "elementwise"
+id = "scores_masked"
+dtype = "float32"
+body = "select"
+inputs = ["is_future", "neg_infinity", "scores"]
+maps = ["st->st", "->st", "st->st"]
+
+# --- softmax over the key axis ----------------------------------------------
+
+[[node]]
+op = "reduce"
+id = "score_max"
+dtype = "float32"
+body = "maximum"
+init = "negative_infinity"
+input = "scores_masked"
+in_map = "st->st"
+out_map = "s->st"
+keep = "reduce"
+
+[[node]]
+op = "elementwise"
+id = "shifted"
+dtype = "float32"
+body = "subtract"
+inputs = ["scores_masked", "score_max"]
+maps = ["st->st", "s->st"]
+
+[[node]]
+op = "elementwise"
+id = "weights"
+dtype = "float32"
+body = "exponential"
+inputs = ["shifted"]
+maps = ["st->st"]
+
+[[node]]
+op = "reduce"
+id = "weight_sum"
+dtype = "float32"
+body = "add"
+init = "zero"
+input = "weights"
+in_map = "st->st"
+out_map = "s->st"
+keep = "reduce"
+
+[[node]]
+op = "elementwise"
+id = "inv_weight_sum"
+dtype = "float32"
+body = "reciprocal"
+inputs = ["weight_sum"]
+maps = ["s->s"]
+
+[[node]]
+op = "elementwise"
+id = "probabilities"
+dtype = "float32"
+body = "multiply"
+inputs = ["weights", "inv_weight_sum"]
+maps = ["st->st", "s->st"]
+
+# --- weighted sum of values -------------------------------------------------
+
+[[node]]
+op = "elementwise"
+id = "attended_product"
+dtype = "float32"
+body = "multiply"
+inputs = ["probabilities", "v"]
+maps = ["st->sth", "th->sth"]
+
+[[node]]
+op = "reduce"
+id = "attended"
+dtype = "float32"
+body = "add"
+init = "zero"
+input = "attended_product"
+in_map = "sth->sth"
+out_map = "sh->sth"
+keep = "reduce"
+name = "causal_attention_block"

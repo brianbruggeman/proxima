@@ -72,7 +72,7 @@ impl ListenProtocol for H1ListenProtocol {
         Box::pin(async move {
             let listener = TcpListener::bind(bind).await.map_err(ProximaError::Io)?;
             if let Some(sender) = ready_signal {
-                let _ = sender.send(());
+                let _ = sender.send(Ok(()));
             }
             debug!(?bind, "h1 listener bound");
             let mut shutdown = shutdown;

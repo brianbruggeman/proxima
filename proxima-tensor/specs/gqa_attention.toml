@@ -1,0 +1,287 @@
+# Grouped-query attention: `causal_attention.toml`'s mask plus the one
+# addressing change every real model on this box actually needs. openchat's
+# Mistral-7B is `head_count=32`, `head_count_kv=8` (group 4); Mixtral-8x7B is
+# the same; deepseek-coder-33b is `head_count=56`, `head_count_kv=8` (group
+# 7, not a power of two — see `gqa_attention_group3.toml` for the
+# non-power-of-two case at a hand-checkable size). Every existing spec here
+# is single-head, so GQA — the one architectural feature all three real
+# models share — was untested until this file.
+#
+# The hypothesis: `map.rs`'s `AxisIndex` already sums multiple `coeff*axis`
+# terms in one operand axis for convolution's `stride*out + dilation*k`
+# window (`map.rs:14`, `map.rs:210-221`). Grouped-query attention is the same
+# mechanism read differently — a query head `h` decomposes into a kv-head
+# `u` and a within-group offset `g` as `h = group*u + g`, so `q`'s head axis
+# is addressed by the two-term affine `group*u + g` while `k`/`v` are
+# addressed by `u` alone — fewer operand axes than the iteration space's
+# rank, `map.rs:70-72`'s broadcast, not a new mechanism. No new `Op` or
+# `ScalarOp` was needed to write this file. If that were false, this comment
+# would say so instead.
+#
+# One structural cost the hypothesis did not predict: `shape::infer`'s
+# extent solver only reads a *pure* single-term (`coeff == 1`) axis to pin
+# an iteration axis's extent (`shape.rs`'s `unify_iteration_space`); a
+# two-term axis like `group*u + g` is bounds-checked once every other axis
+# is already resolved, but never resolves one itself. `q`'s composite term
+# alone therefore leaves `g` unconstrained, and `Multiply`'s fixed arity of
+# 2 means `score_product` cannot simply take a third operand to supply it —
+# exactly the gap `conv2d.toml`'s header already names and pays for with its
+# own kernel operand ("kernel's bare `chwyx->chwyx` map is the sibling
+# operand that fixes it"). `q_grouped` below is that same fix at GQA's much
+# smaller scale: `group_ones`, a `[kv_heads, group]` all-`1.0` tensor, is
+# multiplied against `q` so its own bare `u`/`g` axes pin both extents while
+# `q`'s composite term is merely bounds-checked against them — no new `Op`,
+# no data replicated (a `[2, 2]` broadcast multiplier, not `k`/`v`
+# themselves), and the two-term affine still does the addressing work, just
+# relocated to its own node instead of living inside `score_product`.
+#
+# Dimensions: 4 query heads, 2 kv heads (group 2), head_dim 4, sequence 4,
+# input dim 4 — small enough to hand-check, not degenerate: `spec.rs`'s test
+# gives kv head 0 and kv head 1 distinguishable weights and checks query
+# heads 0-1 (group 0) land on kv head 0's arithmetic and heads 2-3 (group 1)
+# land on kv head 1's, computed independently of the graph.
+#
+# RMSNorm is left out on purpose: it is orthogonal to the addressing question
+# this file exists to test and `causal_attention.toml` already covers it.
+
+# --- inputs -------------------------------------------------------------
+
+[[node]]
+op = "input"
+id = "x"
+dtype = "float32"
+shape = ["?0", 4]
+
+[[node]]
+op = "input"
+id = "wq"
+dtype = "float32"
+shape = [4, 4, 4]
+
+[[node]]
+op = "input"
+id = "wk"
+dtype = "float32"
+shape = [4, 2, 4]
+
+[[node]]
+op = "input"
+id = "wv"
+dtype = "float32"
+shape = [4, 2, 4]
+
+[[node]]
+op = "input"
+id = "group_ones"
+dtype = "float32"
+shape = [2, 2]
+
+# --- q / k / v projections, heads kept as their own axis -----------------
+
+[[node]]
+op = "elementwise"
+id = "q_product"
+dtype = "float32"
+body = "multiply"
+inputs = ["x", "wq"]
+maps = ["si->shdi", "ihd->shdi"]
+
+[[node]]
+op = "reduce"
+id = "q"
+dtype = "float32"
+body = "add"
+init = "zero"
+input = "q_product"
+in_map = "shdi->shdi"
+out_map = "shd->shdi"
+keep = "reduce"
+
+# `q`'s flat head axis decomposed into (kv-head, group-offset), pinned by
+# `group_ones`'s own bare axes — see this file's header for why the pin
+# cannot live inside `score_product` itself.
+[[node]]
+op = "elementwise"
+id = "q_grouped"
+dtype = "float32"
+body = "multiply"
+inputs = ["q", "group_ones"]
+maps = ["s,2*u+g,d->sugd", "ug->sugd"]
+
+[[node]]
+op = "elementwise"
+id = "k_product"
+dtype = "float32"
+body = "multiply"
+inputs = ["x", "wk"]
+maps = ["si->sudi", "iud->sudi"]
+
+[[node]]
+op = "reduce"
+id = "k"
+dtype = "float32"
+body = "add"
+init = "zero"
+input = "k_product"
+in_map = "sudi->sudi"
+out_map = "sud->sudi"
+keep = "reduce"
+
+[[node]]
+op = "elementwise"
+id = "v_product"
+dtype = "float32"
+body = "multiply"
+inputs = ["x", "wv"]
+maps = ["si->sudi", "iud->sudi"]
+
+[[node]]
+op = "reduce"
+id = "v"
+dtype = "float32"
+body = "add"
+init = "zero"
+input = "v_product"
+in_map = "sudi->sudi"
+out_map = "sud->sudi"
+keep = "reduce"
+
+# --- scores: q_grouped is already (s,u,g,d), k stays broadcast over g ----
+
+[[node]]
+op = "elementwise"
+id = "score_product"
+dtype = "float32"
+body = "multiply"
+inputs = ["q_grouped", "k"]
+maps = ["sugd->stugd", "tud->stugd"]
+
+[[node]]
+op = "reduce"
+id = "scores"
+dtype = "float32"
+body = "add"
+init = "zero"
+input = "score_product"
+in_map = "stugd->stugd"
+out_map = "stug->stugd"
+keep = "reduce"
+
+# --- causal mask ----------------------------------------------------------
+
+[[node]]
+op = "iota"
+id = "query_index"
+dtype = "float32"
+extent = "?0"
+
+[[node]]
+op = "iota"
+id = "key_index"
+dtype = "float32"
+extent = "?0"
+
+[[node]]
+op = "elementwise"
+id = "is_future"
+dtype = "float32"
+body = "greater"
+inputs = ["key_index", "query_index"]
+maps = ["t->st", "s->st"]
+
+# `-inf` used to be three nodes off `query_index` (subtract for 0.0, negate
+# for -0.0, reciprocal for -inf) and a materialized `[?0]` tensor per call.
+# It is one `op = "constant"` leaf — `Op::Constant`, rank-0, broadcast into
+# any consumer through an empty operand side.
+[[node]]
+op = "constant"
+id = "neg_infinity"
+dtype = "float32"
+shape = []
+value = -inf
+
+[[node]]
+op = "elementwise"
+id = "scores_masked"
+dtype = "float32"
+body = "select"
+inputs = ["is_future", "neg_infinity", "scores"]
+maps = ["st->stug", "->stug", "stug->stug"]
+
+# --- softmax over the key axis --------------------------------------------
+
+[[node]]
+op = "reduce"
+id = "score_max"
+dtype = "float32"
+body = "maximum"
+init = "negative_infinity"
+input = "scores_masked"
+in_map = "stug->stug"
+out_map = "sug->stug"
+keep = "reduce"
+
+[[node]]
+op = "elementwise"
+id = "shifted"
+dtype = "float32"
+body = "subtract"
+inputs = ["scores_masked", "score_max"]
+maps = ["stug->stug", "sug->stug"]
+
+[[node]]
+op = "elementwise"
+id = "weights"
+dtype = "float32"
+body = "exponential"
+inputs = ["shifted"]
+maps = ["stug->stug"]
+
+[[node]]
+op = "reduce"
+id = "weight_sum"
+dtype = "float32"
+body = "add"
+init = "zero"
+input = "weights"
+in_map = "stug->stug"
+out_map = "sug->stug"
+keep = "reduce"
+
+[[node]]
+op = "elementwise"
+id = "inv_weight_sum"
+dtype = "float32"
+body = "reciprocal"
+inputs = ["weight_sum"]
+maps = ["sug->sug"]
+
+[[node]]
+op = "elementwise"
+id = "probabilities"
+dtype = "float32"
+body = "multiply"
+inputs = ["weights", "inv_weight_sum"]
+maps = ["stug->stug", "sug->stug"]
+
+# --- weighted sum of values, v stays broadcast over g like k -------------
+
+[[node]]
+op = "elementwise"
+id = "attended_product"
+dtype = "float32"
+body = "multiply"
+inputs = ["probabilities", "v"]
+maps = ["stug->stugd", "tud->stugd"]
+
+[[node]]
+op = "reduce"
+id = "attended"
+dtype = "float32"
+body = "add"
+init = "zero"
+input = "attended_product"
+in_map = "stugd->stugd"
+out_map = "sugd->stugd"
+keep = "reduce"
+name = "gqa_attention_block"

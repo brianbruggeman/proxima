@@ -10,6 +10,7 @@ use bytes::Bytes;
 use conflaguration::{Settings, Validate, ValidationMessage};
 use dashmap::DashMap;
 use portable_atomic::AtomicU64 as CacheAtomicU64;
+use proxima_telemetry::error;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -349,7 +350,7 @@ impl KvHandle for KvFile {
             self.remove_entry(&key);
         }
         if let Err(err) = self.write_entry(&key, &entry) {
-            tracing::error!(target: "proxima.kv.file", error = %err, key = %key, "kv file write failed");
+            error!(target = "proxima.kv.file", error = %err, key = %key, "kv file write failed");
             return;
         }
         self.bytes_used.fetch_add(size, Ordering::Relaxed);

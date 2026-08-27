@@ -42,7 +42,6 @@ criterion = { workspace = true, features = ["cargo_bench_support"] }
 # proxima-net's own feature graph or production dependency closure.
 proxima = { workspace = true, features = ["test-support-tokio"] }
 proxima-runtime = { workspace = true }
-rstest = { workspace = true }
 socket2 = { workspace = true }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["io-util", "macros", "net", "rt"] }

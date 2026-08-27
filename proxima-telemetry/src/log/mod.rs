@@ -64,8 +64,7 @@ mod tests {
     use core::cell::RefCell;
 
     use bytes::Bytes;
-    use rstest::rstest;
-
+    
     use crate::clock::MonotonicCounter;
     use crate::id::{SpanId, TraceFlags, TraceId};
     use crate::level::Level;
@@ -297,11 +296,11 @@ mod tests {
     }
 
     // 10. custom level: emit with Level::custom("audit", 18) and verify severity round-trips
-    #[rstest]
+    #[proxima::test]
     #[case::audit(Level::custom("audit", 18), 18, "audit")]
     #[case::trace_low(Level::custom("trace2", 2), 2, "trace2")]
     #[case::fatal_high(Level::custom("alert", 25), 25, "alert")]
-    fn custom_level_severity_roundtrips(
+    async fn custom_level_severity_roundtrips(
         #[case] level: Level,
         #[case] expected_severity: u8,
         #[case] expected_name: &str,

@@ -675,8 +675,7 @@ impl<'a> BindWriter<'a> {
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-    use rstest::rstest;
-
+    
     use super::super::error::{EncodeError, ParseError};
     use super::super::types::{FormatCode, ProtocolVersion};
     use super::*;
@@ -797,13 +796,13 @@ mod tests {
         assert!(matches!(result, Err(ParseError::UnknownRequestCode { .. })));
     }
 
-    #[rstest]
+    #[proxima::test]
     #[case::query(b"Q")]
     #[case::flush(b"H")]
     #[case::sync(b"S")]
     #[case::terminate(b"X")]
     #[case::copy_done(b"c")]
-    fn zero_body_messages_round_trip(#[case] tag: &[u8]) {
+    async fn zero_body_messages_round_trip(#[case] tag: &[u8]) {
         let mut bytes = vec![0u8; 5];
         bytes[0] = tag[0];
         bytes[1..5].copy_from_slice(&4i32.to_be_bytes());

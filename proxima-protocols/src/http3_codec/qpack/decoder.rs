@@ -663,8 +663,6 @@ pub fn decode(input: &[u8]) -> Result<Vec<DecodedField>, DecodeError> {
 #[cfg(all(test, feature = "http3_codec-alloc"))]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
-    use rstest::rstest;
-
     use super::*;
     use crate::http3_codec::qpack::encoder;
     use alloc::vec;
@@ -949,10 +947,10 @@ mod tests {
         assert_eq!(err, DecodeError::Truncated);
     }
 
-    #[rstest]
+    #[proxima::test]
     #[case::truncated_mid_indexed_field(&[0x00, 0x00, 0xFF])]
     #[case::truncated_before_field_section_prefix(&[0x00])]
-    fn decode_into_rejects_truncated_input(#[case] wire: &[u8]) {
+    async fn decode_into_rejects_truncated_input(#[case] wire: &[u8]) {
         let mut scratch = [0u8; 16];
         let mut sink = |_: &[u8], _: &[u8]| -> Result<(), DecodeError> { Ok(()) };
         let err = decode_into(wire, u64::MAX, &mut scratch, &mut sink)

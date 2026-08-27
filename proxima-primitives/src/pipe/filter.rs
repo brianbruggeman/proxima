@@ -1,6 +1,8 @@
 use alloc::sync::Arc;
 use bytes::Bytes;
+use core::fmt::Debug;
 use core::future::Future;
+use core::marker::PhantomData;
 use portable_atomic::{AtomicU64, Ordering};
 
 use crate::pipe::SendPipe;
@@ -32,36 +34,122 @@ use std::pin::Pin;
 // short-circuits the inner pipe on a first-stage `Err` (see
 // `primitives.rs`'s `and_then_short_circuits_before_the_second_stage_on_first_stage_error`),
 // so nothing new is needed here.
+//
+// `Predicate`/`FilterConfig` themselves used to hardcode `In = Out =
+// Request<Bytes>`, `Err = ProximaError` in every trait impl — first-pass
+// residue from this crate being HTTP-only at the time, not a design
+// constraint. The pattern (a decision is `In -> Result<In, Err>`) is
+// payload-agnostic, so the types are now generic over `In`/`Err` too, each
+// defaulted to the crate's own HTTP types so every existing caller keeps
+// compiling unparameterized. `Err: From<RejectMode>` is the seam that
+// lets a reject build an `Err` value of a type this module has never
+// heard of -- the same error law `AndThen` already uses for its own
+// `Second::Err: From<First::Err>` bound (`primitives.rs:207`), not a
+// parallel one.
 
-/// The config-expressible predicate set. Implements [`SendPipe`]/[`Pipe`]
-/// directly (`In = Out = Request<Bytes>`): `Ok(request)` on admit,
-/// `Err(ProximaError::Forbidden(..))` on reject — the same 403 payload
+impl From<RejectMode> for ProximaError {
+    fn from(mode: RejectMode) -> Self {
+        match mode {
+            RejectMode::Drop => ProximaError::Forbidden("forbidden".into()),
+            RejectMode::Error => {
+                ProximaError::Config("filter: predicate rejected request".into())
+            }
+        }
+    }
+}
+
+/// The config-expressible predicate set, generic over the payload `In` it
+/// passes through unchanged on admit and the `Err` it rejects with.
+/// Implements [`SendPipe`]/[`Pipe`] directly (`In -> Result<In, Err>`):
+/// `Ok(input)` on admit, `Err::forbidden()` on reject — the same payload
 /// [`FilterConfig`]'s [`RejectMode::Drop`] produces, since drop was always
-/// this crate's default reject mode ([`FilterConfig::default`]).
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
-pub enum Predicate {
-    Always,
-    Never,
+/// this crate's default reject mode ([`FilterConfig::default`]). Defaults to
+/// the crate's own HTTP types (`Request<Bytes>`, [`ProximaError`]) so a
+/// caller instantiates `Predicate::<MyIn, MyErr>` to gate their own payload
+/// without minting a type and without touching this one.
+#[derive(Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", bound = "")]
+pub enum Predicate<In = Request<Bytes>, Err = ProximaError> {
+    Always {
+        #[serde(skip)]
+        _marker: PhantomData<fn(In) -> Err>,
+    },
+    Never {
+        #[serde(skip)]
+        _marker: PhantomData<fn(In) -> Err>,
+    },
     When {
         #[serde(flatten)]
         gate: When,
         #[serde(skip)]
         calls: Arc<AtomicU64>,
+        #[serde(skip)]
+        _marker: PhantomData<fn(In) -> Err>,
     },
     Unless {
         #[serde(flatten)]
         gate: When,
         #[serde(skip)]
         calls: Arc<AtomicU64>,
+        #[serde(skip)]
+        _marker: PhantomData<fn(In) -> Err>,
     },
 }
 
-impl PartialEq for Predicate {
+// hand-rolled instead of `#[derive(Debug, Clone, PartialEq)]`: rustc's
+// built-in derives add an `In: Trait, Err: Trait` bound for every generic
+// parameter that appears anywhere in the definition, including inside
+// `PhantomData` — which would force every instantiation's payload and error
+// type to implement Debug/Clone/PartialEq even though neither is ever
+// stored. Same fix `Race<Sink, Policy>` (`race.rs`) already uses for its own
+// `PhantomData<fn() -> Policy>` marker.
+impl<In, Err> Debug for Predicate<In, Err> {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Predicate::Always { .. } => formatter.debug_struct("Always").finish(),
+            Predicate::Never { .. } => formatter.debug_struct("Never").finish(),
+            Predicate::When { gate, calls, .. } => formatter
+                .debug_struct("When")
+                .field("gate", gate)
+                .field("calls", &calls.load(Ordering::Relaxed))
+                .finish(),
+            Predicate::Unless { gate, calls, .. } => formatter
+                .debug_struct("Unless")
+                .field("gate", gate)
+                .field("calls", &calls.load(Ordering::Relaxed))
+                .finish(),
+        }
+    }
+}
+
+impl<In, Err> Clone for Predicate<In, Err> {
+    fn clone(&self) -> Self {
+        match self {
+            Predicate::Always { .. } => Predicate::Always {
+                _marker: PhantomData,
+            },
+            Predicate::Never { .. } => Predicate::Never {
+                _marker: PhantomData,
+            },
+            Predicate::When { gate, calls, .. } => Predicate::When {
+                gate: *gate,
+                calls: Arc::clone(calls),
+                _marker: PhantomData,
+            },
+            Predicate::Unless { gate, calls, .. } => Predicate::Unless {
+                gate: *gate,
+                calls: Arc::clone(calls),
+                _marker: PhantomData,
+            },
+        }
+    }
+}
+
+impl<In, Err> PartialEq for Predicate<In, Err> {
     fn eq(&self, other: &Self) -> bool {
         match (self, other) {
-            (Predicate::Always, Predicate::Always) => true,
-            (Predicate::Never, Predicate::Never) => true,
+            (Predicate::Always { .. }, Predicate::Always { .. }) => true,
+            (Predicate::Never { .. }, Predicate::Never { .. }) => true,
             (Predicate::When { gate: left, .. }, Predicate::When { gate: right, .. }) => {
                 left == right
             }
@@ -73,12 +161,27 @@ impl PartialEq for Predicate {
     }
 }
 
-impl Predicate {
+impl<In, Err> Predicate<In, Err> {
+    #[must_use]
+    pub fn always() -> Self {
+        Predicate::Always {
+            _marker: PhantomData,
+        }
+    }
+
+    #[must_use]
+    pub fn never() -> Self {
+        Predicate::Never {
+            _marker: PhantomData,
+        }
+    }
+
     #[must_use]
     pub fn when(gate: When) -> Self {
         Predicate::When {
             gate,
             calls: Arc::new(AtomicU64::new(0)),
+            _marker: PhantomData,
         }
     }
 
@@ -87,6 +190,7 @@ impl Predicate {
         Predicate::Unless {
             gate,
             calls: Arc::new(AtomicU64::new(0)),
+            _marker: PhantomData,
         }
     }
 
@@ -94,13 +198,13 @@ impl Predicate {
     /// (every variant here decides from its own state, never the payload).
     fn admits(&self) -> bool {
         match self {
-            Predicate::Always => true,
-            Predicate::Never => false,
-            Predicate::When { gate, calls } => {
+            Predicate::Always { .. } => true,
+            Predicate::Never { .. } => false,
+            Predicate::When { gate, calls, .. } => {
                 let index = calls.fetch_add(1, Ordering::Relaxed);
                 gate.fires(index)
             }
-            Predicate::Unless { gate, calls } => {
+            Predicate::Unless { gate, calls, .. } => {
                 let index = calls.fetch_add(1, Ordering::Relaxed);
                 !gate.fires(index)
             }
@@ -108,36 +212,48 @@ impl Predicate {
     }
 }
 
-impl SendPipe for Predicate {
-    type In = Request<Bytes>;
-    type Out = Request<Bytes>;
-    type Err = ProximaError;
+impl<In, Err> SendPipe for Predicate<In, Err>
+where
+    In: Send + 'static,
+    Err: From<RejectMode> + Debug + Send + 'static,
+{
+    type In = In;
+    type Out = In;
+    type Err = Err;
 
-    fn call(
-        &self,
-        input: Request<Bytes>,
-    ) -> impl Future<Output = Result<Request<Bytes>, ProximaError>> + Send {
+    fn call(&self, input: In) -> impl Future<Output = Result<In, Err>> + Send {
         let admits = self.admits();
         async move {
             if admits {
                 Ok(input)
             } else {
-                Err(ProximaError::Forbidden("forbidden".into()))
+                Err(Err::from(RejectMode::Drop))
             }
         }
     }
 }
 
-impl Pipe for Predicate {
-    type In = Request<Bytes>;
-    type Out = Request<Bytes>;
-    type Err = ProximaError;
+// base tier stands alone rather than delegating to `SendPipe::call`: `Pipe`
+// carries no `Send` bound, so a `Predicate<In, Err>` instantiated at a
+// non-`Send` `In`/`Err` must still get this impl.
+impl<In, Err> Pipe for Predicate<In, Err>
+where
+    In: 'static,
+    Err: From<RejectMode> + Debug + 'static,
+{
+    type In = In;
+    type Out = In;
+    type Err = Err;
 
-    fn call(
-        &self,
-        input: Request<Bytes>,
-    ) -> impl Future<Output = Result<Request<Bytes>, ProximaError>> {
-        SendPipe::call(self, input)
+    fn call(&self, input: In) -> impl Future<Output = Result<In, Err>> {
+        let admits = self.admits();
+        async move {
+            if admits {
+                Ok(input)
+            } else {
+                Err(Err::from(RejectMode::Drop))
+            }
+        }
     }
 }
 
@@ -145,46 +261,49 @@ impl Pipe for Predicate {
 // anywhere in the real body above) — `core::future::ready` is the exact
 // future that describes that, and it's `Unpin` unconditionally, so no
 // hand-written poll struct is needed for a leaf pipe that never suspends.
-impl UnpinPipe for Predicate {
-    type In = Request<Bytes>;
-    type Out = Request<Bytes>;
-    type Err = ProximaError;
+impl<In, Err> UnpinPipe for Predicate<In, Err>
+where
+    In: 'static,
+    Err: From<RejectMode> + Debug + 'static,
+{
+    type In = In;
+    type Out = In;
+    type Err = Err;
 
-    fn call(
-        &self,
-        input: Request<Bytes>,
-    ) -> impl Future<Output = Result<Request<Bytes>, ProximaError>> + Unpin {
+    fn call(&self, input: In) -> impl Future<Output = Result<In, Err>> + Unpin {
         let admits = self.admits();
         core::future::ready(if admits {
             Ok(input)
         } else {
-            Err(ProximaError::Forbidden("forbidden".into()))
+            Err(Err::from(RejectMode::Drop))
         })
     }
 }
 
-impl UnpinSendPipe for Predicate {
-    type In = Request<Bytes>;
-    type Out = Request<Bytes>;
-    type Err = ProximaError;
+impl<In, Err> UnpinSendPipe for Predicate<In, Err>
+where
+    In: Send + 'static,
+    Err: From<RejectMode> + Debug + Send + 'static,
+{
+    type In = In;
+    type Out = In;
+    type Err = Err;
 
-    fn call(
-        &self,
-        input: Request<Bytes>,
-    ) -> impl Future<Output = Result<Request<Bytes>, ProximaError>> + Send + Unpin {
+    fn call(&self, input: In) -> impl Future<Output = Result<In, Err>> + Send + Unpin {
         let admits = self.admits();
         core::future::ready(if admits {
             Ok(input)
         } else {
-            Err(ProximaError::Forbidden("forbidden".into()))
+            Err(Err::from(RejectMode::Drop))
         })
     }
 }
 
 /// What error a rejected call produces — a rename of the former `OnReject`,
-/// same two variants, same JSON strings. It selects WHICH `ProximaError`
-/// [`FilterConfig::call`] builds on reject; it is plain data read once per
-/// call, not a combinator.
+/// same two variants, same JSON strings. [`FilterConfig::call`] converts it
+/// straight into `Err` via `Err::from(self.on_reject)`; it is plain data
+/// read once per call, not a combinator, and carries no `In`/`Err` of its
+/// own.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RejectMode {
@@ -192,111 +311,159 @@ pub enum RejectMode {
     Drop,
 }
 
-fn reject_error(mode: RejectMode) -> ProximaError {
-    match mode {
-        RejectMode::Drop => ProximaError::Forbidden("forbidden".into()),
-        RejectMode::Error => ProximaError::Config("filter: predicate rejected request".into()),
-    }
-}
-
 // ── serde config + factory ───────────────────────────────────────────────────
 
 /// The predicate-gated pass/reject decision, as config and as the pipe
 /// itself: `FilterConfig` is both the 1:1 serialisable mirror AND the
-/// `SendPipe`/`Pipe` implementor (`In = Out = Request<Bytes>`) — its two
-/// fields are exactly what a decision needs (the gate, and which error a
-/// reject produces), so no separate combinator carries them.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct FilterConfig {
-    pub predicate: Predicate,
+/// `SendPipe`/`Pipe` implementor (`In -> Result<In, Err>`, generic over both
+/// like [`Predicate`]) — its two fields are exactly what a decision needs
+/// (the gate, and which error a reject produces), so no separate combinator
+/// carries them, and no separate type is needed to use it at a payload of
+/// the caller's own: `FilterConfig { predicate, on_reject }.and_then(inner)`
+/// composes at any `In`/`Err` the same way `Predicate` does. Only
+/// [`FilterConfig::into_filter`]/[`FilterConfig::from_spec`] stay pinned to
+/// this crate's HTTP [`PipeHandle`], because [`PipeFactory`]'s own signature
+/// is pinned there — not a constraint this module introduces.
+#[derive(Serialize, Deserialize)]
+#[serde(bound = "")]
+pub struct FilterConfig<In = Request<Bytes>, Err = ProximaError> {
+    pub predicate: Predicate<In, Err>,
     pub on_reject: RejectMode,
 }
 
-impl Default for FilterConfig {
+// hand-rolled for the same reason as `Predicate`'s own Debug/Clone/PartialEq
+// (see the comment above those impls): a derive would add a spurious
+// `In: Trait, Err: Trait` bound neither field actually needs.
+impl<In, Err> Debug for FilterConfig<In, Err> {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        formatter
+            .debug_struct("FilterConfig")
+            .field("predicate", &self.predicate)
+            .field("on_reject", &self.on_reject)
+            .finish()
+    }
+}
+
+impl<In, Err> Clone for FilterConfig<In, Err> {
+    fn clone(&self) -> Self {
+        Self {
+            predicate: self.predicate.clone(),
+            on_reject: self.on_reject,
+        }
+    }
+}
+
+impl<In, Err> PartialEq for FilterConfig<In, Err> {
+    fn eq(&self, other: &Self) -> bool {
+        self.predicate == other.predicate && self.on_reject == other.on_reject
+    }
+}
+
+impl<In, Err> Default for FilterConfig<In, Err> {
     fn default() -> Self {
         Self {
-            predicate: Predicate::Always,
+            predicate: Predicate::always(),
             on_reject: RejectMode::Drop,
         }
     }
 }
 
-impl SendPipe for FilterConfig {
-    type In = Request<Bytes>;
-    type Out = Request<Bytes>;
-    type Err = ProximaError;
+impl<In, Err> SendPipe for FilterConfig<In, Err>
+where
+    In: Send + 'static,
+    Err: From<RejectMode> + Debug + Send + 'static,
+{
+    type In = In;
+    type Out = In;
+    type Err = Err;
 
-    fn call(
-        &self,
-        input: Request<Bytes>,
-    ) -> impl Future<Output = Result<Request<Bytes>, ProximaError>> + Send {
+    fn call(&self, input: In) -> impl Future<Output = Result<In, Err>> + Send {
         let admits = self.predicate.admits();
         let on_reject = self.on_reject;
         async move {
             if admits {
                 Ok(input)
             } else {
-                Err(reject_error(on_reject))
+                Err(Err::from(on_reject))
             }
         }
     }
 }
 
-impl Pipe for FilterConfig {
-    type In = Request<Bytes>;
-    type Out = Request<Bytes>;
-    type Err = ProximaError;
+impl<In, Err> Pipe for FilterConfig<In, Err>
+where
+    In: 'static,
+    Err: From<RejectMode> + Debug + 'static,
+{
+    type In = In;
+    type Out = In;
+    type Err = Err;
 
-    fn call(
-        &self,
-        input: Request<Bytes>,
-    ) -> impl Future<Output = Result<Request<Bytes>, ProximaError>> {
-        SendPipe::call(self, input)
+    fn call(&self, input: In) -> impl Future<Output = Result<In, Err>> {
+        let admits = self.predicate.admits();
+        let on_reject = self.on_reject;
+        async move {
+            if admits {
+                Ok(input)
+            } else {
+                Err(Err::from(on_reject))
+            }
+        }
     }
 }
 
 // same rationale as `Predicate`'s `UnpinPipe`/`UnpinSendPipe` impls: the
 // decision is synchronous, so `core::future::ready` is the exact future,
 // unconditionally `Unpin`.
-impl UnpinPipe for FilterConfig {
-    type In = Request<Bytes>;
-    type Out = Request<Bytes>;
-    type Err = ProximaError;
+impl<In, Err> UnpinPipe for FilterConfig<In, Err>
+where
+    In: 'static,
+    Err: From<RejectMode> + Debug + 'static,
+{
+    type In = In;
+    type Out = In;
+    type Err = Err;
 
-    fn call(
-        &self,
-        input: Request<Bytes>,
-    ) -> impl Future<Output = Result<Request<Bytes>, ProximaError>> + Unpin {
+    fn call(&self, input: In) -> impl Future<Output = Result<In, Err>> + Unpin {
         let admits = self.predicate.admits();
         let on_reject = self.on_reject;
         core::future::ready(if admits {
             Ok(input)
         } else {
-            Err(reject_error(on_reject))
+            Err(Err::from(on_reject))
         })
     }
 }
 
-impl UnpinSendPipe for FilterConfig {
-    type In = Request<Bytes>;
-    type Out = Request<Bytes>;
-    type Err = ProximaError;
+impl<In, Err> UnpinSendPipe for FilterConfig<In, Err>
+where
+    In: Send + 'static,
+    Err: From<RejectMode> + Debug + Send + 'static,
+{
+    type In = In;
+    type Out = In;
+    type Err = Err;
 
-    fn call(
-        &self,
-        input: Request<Bytes>,
-    ) -> impl Future<Output = Result<Request<Bytes>, ProximaError>> + Send + Unpin {
+    fn call(&self, input: In) -> impl Future<Output = Result<In, Err>> + Send + Unpin {
         let admits = self.predicate.admits();
         let on_reject = self.on_reject;
         core::future::ready(if admits {
             Ok(input)
         } else {
-            Err(reject_error(on_reject))
+            Err(Err::from(on_reject))
         })
     }
 }
 
-impl FilterConfig {
+// `into_filter`/`from_spec` stay pinned to `Request<Bytes>`/`ProximaError`:
+// they compose with `crate::pipe::handler::PipeHandle`, which IS that fixed
+// alias (`alloc_tier::PipeHandle<Request<Bytes>, Response<Bytes>>`), and
+// `from_spec` backs `FilterFactory`, whose `PipeFactory` trait is dyn-object
+// safe and fixed to the same alias for the same reason every other factory
+// in this module is (`DelayFactory`, `RetryFactory`, ...). That pin is
+// pre-existing workspace architecture (`pipe_factory.rs`, `alloc_tier.rs`),
+// not something `Predicate`/`FilterConfig` themselves impose any more.
+impl FilterConfig<Request<Bytes>, ProximaError> {
     /// Compose the decision in front of `inner` and erase — `predicate.
     /// and_then(inner)` in one call, matching every other `into_*` factory
     /// entry point in this crate (`Delay::into_delay`, `Transform::
@@ -308,8 +475,9 @@ impl FilterConfig {
 
     #[cfg(feature = "std")]
     pub fn from_spec(inner: PipeHandle, value: &Value) -> Result<PipeHandle, ProximaError> {
-        let config: FilterConfig = serde_json::from_value(value.clone())
-            .map_err(|err| ProximaError::Config(format!("filter config: {err}")))?;
+        let config: FilterConfig<Request<Bytes>, ProximaError> =
+            serde_json::from_value(value.clone())
+                .map_err(|err| ProximaError::Config(format!("filter config: {err}")))?;
         Ok(config.into_filter(inner))
     }
 }
@@ -409,7 +577,7 @@ mod tests {
     #[proxima::test]
     async fn passes_through_when_predicate_is_true() {
         let stack = FilterConfig {
-            predicate: Predicate::Always,
+            predicate: Predicate::always(),
             on_reject: RejectMode::Drop,
         }
         .into_filter(echo_pipe());
@@ -426,7 +594,7 @@ mod tests {
     #[proxima::test]
     async fn reject_with_error_returns_err() {
         let stack = FilterConfig {
-            predicate: Predicate::Never,
+            predicate: Predicate::never(),
             on_reject: RejectMode::Error,
         }
         .into_filter(echo_pipe());
@@ -441,7 +609,7 @@ mod tests {
     async fn reject_with_drop_produces_a_forbidden_error() {
         let (inner, calls) = counting_echo_pipe();
         let stack = FilterConfig {
-            predicate: Predicate::Never,
+            predicate: Predicate::never(),
             on_reject: RejectMode::Drop,
         }
         .into_filter(inner);
@@ -465,7 +633,7 @@ mod tests {
     #[test]
     fn config_clone_and_serde_round_trip_are_lossless() {
         let config = FilterConfig {
-            predicate: Predicate::Never,
+            predicate: Predicate::never(),
             on_reject: RejectMode::Error,
         };
 
@@ -630,6 +798,16 @@ mod tests {
         celsius: i32,
     }
 
+    // the reject sentinel a non-HTTP `Err` needs: `Predicate`/`FilterConfig`
+    // pass `In` straight through on admit, so reusing `SensorReading` as
+    // both `Out` and `Err` (as `Threshold` below already does by hand) is
+    // the natural instantiation, not a special case this impl carves out.
+    impl From<RejectMode> for SensorReading {
+        fn from(_mode: RejectMode) -> Self {
+            SensorReading { celsius: i32::MIN }
+        }
+    }
+
     #[derive(Clone)]
     struct Threshold {
         max_celsius: i32,
@@ -717,6 +895,42 @@ mod tests {
         assert_eq!(dropped, Err(SensorReading { celsius: i32::MIN }));
     }
 
+    // the same claim as `filter_is_generic_over_a_non_http_payload`, but for
+    // `Predicate`/`FilterConfig` themselves rather than a hand-rolled
+    // decision pipe: `Predicate::<SensorReading, SensorReading>` and
+    // `FilterConfig::<SensorReading, SensorReading>` are instantiated here
+    // purely by type inference from `.and_then(ReadingSink)` and the
+    // `SendPipe::call` argument below — no turbofish, no new type minted,
+    // and `filter.rs` was never touched to add this payload.
+    #[proxima::test]
+    async fn predicate_and_filter_config_are_generic_over_a_non_http_payload() {
+        let always_admits =
+            Predicate::<SensorReading, SensorReading>::when(When::prob(1.0).seed(1))
+                .and_then(ReadingSink);
+        let admitted = SendPipe::call(&always_admits, SensorReading { celsius: 20 }).await;
+        assert_eq!(admitted, Ok(SensorReading { celsius: 21 }));
+
+        let stack = FilterConfig::<SensorReading, SensorReading> {
+            predicate: Predicate::never(),
+            on_reject: RejectMode::Drop,
+        }
+        .and_then(ReadingSink);
+        let dropped = SendPipe::call(&stack, SensorReading { celsius: 20 }).await;
+        assert_eq!(dropped, Err(SensorReading { celsius: i32::MIN }));
+
+        let error_mode = FilterConfig::<SensorReading, SensorReading> {
+            predicate: Predicate::never(),
+            on_reject: RejectMode::Error,
+        }
+        .and_then(ReadingSink);
+        let errored = SendPipe::call(&error_mode, SensorReading { celsius: 20 }).await;
+        assert_eq!(
+            errored,
+            Err(SensorReading { celsius: i32::MIN }),
+            "RejectMode::Error still routes through From<RejectMode> for a non-HTTP Err"
+        );
+    }
+
     // ── UnpinPipe / UnpinSendPipe tier (Stage 2) ────────────────────────────
 
     fn poll_ready<F: Future + core::marker::Unpin>(mut future: F) -> F::Output {
@@ -732,8 +946,8 @@ mod tests {
 
     #[test]
     fn predicate_unpin_pipe_matches_send_pipe_on_admit_and_reject() {
-        let admits = Predicate::Always;
-        let rejects = Predicate::Never;
+        let admits: Predicate = Predicate::always();
+        let rejects: Predicate = Predicate::never();
 
         assert!(
             poll_ready(UnpinPipe::call(&admits, build_request())).is_ok(),
@@ -751,19 +965,19 @@ mod tests {
     #[test]
     fn predicate_unpin_send_pipe_is_send_and_unpin() {
         fn needs_send_unpin<F: Future + Send + Unpin>(_: &F) {}
-        let predicate = Predicate::Always;
+        let predicate: Predicate = Predicate::always();
         let call = UnpinSendPipe::call(&predicate, build_request());
         needs_send_unpin(&call);
     }
 
     #[test]
     fn filter_config_unpin_pipe_matches_send_pipe_on_admit_and_reject() {
-        let admits = FilterConfig {
-            predicate: Predicate::Always,
+        let admits: FilterConfig = FilterConfig {
+            predicate: Predicate::always(),
             on_reject: RejectMode::Drop,
         };
-        let rejects = FilterConfig {
-            predicate: Predicate::Never,
+        let rejects: FilterConfig = FilterConfig {
+            predicate: Predicate::never(),
             on_reject: RejectMode::Error,
         };
 
@@ -777,7 +991,7 @@ mod tests {
     #[test]
     fn filter_config_unpin_send_pipe_is_send_and_unpin() {
         fn needs_send_unpin<F: Future + Send + Unpin>(_: &F) {}
-        let config = FilterConfig::default();
+        let config: FilterConfig = FilterConfig::default();
         let call = UnpinSendPipe::call(&config, build_request());
         needs_send_unpin(&call);
     }
