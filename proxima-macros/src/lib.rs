@@ -253,8 +253,8 @@ pub fn filter(input: TokenStream) -> TokenStream {
         .into()
 }
 
-/// `fanout!(a, b, ..)` — variadic: build a [`FanOut`](proxima_primitives::pipe::FanOut)
-/// over N arms in one call. Each arm is either a closure literal (leaf-lifted
+/// `fanout!(a, b, ..)` — variadic: build a [`FanOut`] over N arms in one
+/// call. Each arm is either a closure literal (leaf-lifted
 /// the same way `pipe!` does) or an already-built pipe expression,
 /// passed through. Variadic arity is the whole point: N closures are N
 /// distinct, unnameable types, reconciled into `FanOut`'s single homogeneous
@@ -278,6 +278,8 @@ pub fn filter(input: TokenStream) -> TokenStream {
 /// assert_eq!(SEEN.load(Ordering::Relaxed), 42);
 /// # }
 /// ```
+///
+/// [`FanOut`]: https://docs.rs/proxima-primitives/latest/proxima_primitives/pipe/struct.FanOut.html
 #[proc_macro]
 pub fn fanout(input: TokenStream) -> TokenStream {
     fan_bang::expand_fanout(input.into())
@@ -285,9 +287,9 @@ pub fn fanout(input: TokenStream) -> TokenStream {
         .into()
 }
 
-/// `fanin!(a, b, ..)` — variadic: build a [`FanIn`](proxima_primitives::pipe::FanIn)
-/// over N arms in one call, merged with [`Select::RoundRobin`](proxima_primitives::pipe::Select).
-/// Same enum-of-arms mechanism as `fanout!`, with one extra restriction
+/// `fanin!(a, b, ..)` — variadic: build a [`FanIn`] over N arms in one call,
+/// merged with [`Select::RoundRobin`]. Same enum-of-arms mechanism as
+/// `fanout!`, with one extra restriction
 /// `FanIn` itself imposes: each arm must be `UnpinPipe<In = (), Err =
 /// Exhausted> + DropSafe` — a synchronous, never-suspending source — so a
 /// closure-literal arm must be a plain (non-`async`) closure. An async
@@ -309,6 +311,9 @@ pub fn fanout(input: TokenStream) -> TokenStream {
 /// assert_eq!(UnpinPipe::call(&merged, ()).await, Ok(2));
 /// # }
 /// ```
+///
+/// [`FanIn`]: https://docs.rs/proxima-primitives/latest/proxima_primitives/pipe/struct.FanIn.html
+/// [`Select::RoundRobin`]: https://docs.rs/proxima-primitives/latest/proxima_primitives/pipe/enum.Select.html
 #[proc_macro]
 pub fn fanin(input: TokenStream) -> TokenStream {
     fan_bang::expand_fanin(input.into())

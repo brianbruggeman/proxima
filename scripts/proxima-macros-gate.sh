@@ -34,20 +34,19 @@ cargo clippy -p "${crate}" --all-targets -- -D warnings
 printf '\n[4/5] rustdoc resolves\n'
 cargo doc -p "${crate}" --no-deps
 
-# a proc-macro crate cannot itself carry a runnable doctest for its own
-# exported macros (the macro only expands in a DOWNSTREAM crate's token
-# stream); its 28 ``` fences are illustrative usage blocks on the macro
-# definitions. `cargo test --doc` on a `proc-macro = true` crate reports a
-# real, structural zero -- assert that explicitly rather than silently
-# skipping it, and rather than treating it as the same "nonzero required"
+# cargo 1.98's merged-doctest support runs `proc-macro = true` crate
+# doctests against a downstream token stream (each fence expands the macro
+# for real, e.g. via the `proxima` dev-dependency), so this is no longer the
+# structural zero it once was -- assert the nonzero count explicitly, same
 # shape every other crate in this fleet uses.
-printf '\n[5/5] doctests: proc-macro crate, asserting the structural 0 expected, 0 found\n'
+printf '\n[5/5] doctests: proc-macro crate doctests run via merged doctests, count asserted\n'
 doctest_output="$(cargo test --doc -p "${crate}" 2>&1)"
 printf '%s\n' "${doctest_output}"
-if ! printf '%s\n' "${doctest_output}" | grep -qE 'doctests are not supported for crates|^test result: ok\. 0 passed'; then
-    printf 'ERROR: %s doctest run no longer matches the expected proc-macro baseline -- update this gate\n' "${crate}" >&2
+doctest_count="$(printf '%s\n' "${doctest_output}" | grep -oE '^test result: ok\. [0-9]+ passed' | grep -oE '[0-9]+' | awk '{sum+=$1} END{print sum+0}')"
+if [ -z "${doctest_count}" ] || [ "${doctest_count}" -eq 0 ]; then
+    printf 'ERROR: %s doctest run reported zero doctests passed -- an empty run is not a pass\n' "${crate}" >&2
     exit 1
 fi
-printf '   doctests: 0 expected, 0 found (proc-macro crate, structural)\n'
+printf '   doctests: %s passed\n' "${doctest_count}"
 
 printf '\n== %s gate: PASS ==\n' "${crate}"
