@@ -46,7 +46,12 @@ libc = { workspace = true, optional = true }
 rayon = { workspace = true, optional = true }
 proxima-primitives = { workspace = true, features = ["alloc", "async-mutex"] }
 proxima-clock.workspace = true
-proxima-telemetry = { workspace = true, features = ["emit", "std"] }
+# direct path (not `workspace = true`): the workspace-root telemetry
+# dependency has no `default-features = false`, so every other member's
+# inherited entry rides its default `std` feature regardless of what that
+# member requests — bypassed here the same way `proxima-telemetry`'s own
+# `fastrand` dependency bypasses its workspace entry for the same reason.
+proxima-telemetry = { path = "../proxima-telemetry", default-features = false, features = ["emit"] }
 
 [target.'cfg(any(target_os = "macos", target_os = "linux"))'.dependencies]
 # socket2 hard-errors at compile time on targets it does not support (wasm32),
@@ -63,6 +68,7 @@ std = [
     "alloc",
     "proxima-core/std",
     "proxima-runtime/std",
+    "proxima-telemetry/std",
     "dep:parking_lot",
     "dep:num_cpus",
     "dep:socket2",
