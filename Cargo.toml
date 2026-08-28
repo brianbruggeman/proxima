@@ -110,7 +110,7 @@ proxima-quic = { path = "proxima-quic", default-features = false }
 proxima-recording = { path = "proxima-recording" }
 proxima-redis = { path = "proxima-redis" }
 proxima-runtime = { path = "proxima-runtime", default-features = false }
-proxima-telemetry = { path = "proxima-telemetry" }
+proxima-telemetry = { path = "proxima-telemetry", default-features = false }
 proxima-tls = { path = "proxima-tls" }
 
 amq-protocol = "7"
