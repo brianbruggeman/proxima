@@ -156,6 +156,14 @@ declare -a FLOOR_CRATE_CELLS=(
     "proxima-safetensors|proxima-safetensors|alloc"
     "proxima-onnx|proxima-onnx|alloc"
     "proxima-tokenizer|proxima-tokenizer|alloc"
+    # proxima-model-interop's lib.rs carries `extern crate alloc;`
+    # unconditionally (no separate `alloc` feature to name, same shape as
+    # proxima-auth/proxima-codec below) and its own `std` feature comment
+    # calls the bare build "the no_std+alloc floor" -- it had no cell here,
+    # so nothing had ever compiled it for an embedded target. No bare
+    # `--features ""` cell needed beyond this one: empty features already IS
+    # the alloc floor.
+    "proxima-model-interop|proxima-model-interop|"
     # the sibling tier-3 claim (proxima-storage/src/nvme/mod.rs: "the engine is
     # #![no_std] + no-alloc"): the queue-pair engine over the sans-IO
     # proxima-protocols::nvme codec, ring cursors in atomics, Pipe + SendPipe.
@@ -275,6 +283,15 @@ declare -a FLOOR_CRATE_CELLS=(
     # cell a `cargo add` dropping a `default-features = false` pin would land
     # unnoticed. `pipe` deliberately has no cell -- it forwards `std`.
     "proxima-recording-replay|proxima-recording|alloc,replay"
+    # tools/proxima-vm's own Cargo.toml names `alloc` its no_std tier ("the
+    # `dtb::builder` module ... shares the alloc gate") and had a gate script
+    # (scripts/proxima-vm-gate.sh) proving it on the HOST target only -- never
+    # this shared matrix, so no gate had ever compiled the crate's PACKAGE
+    # (not just `--lib`) on the embedded cliff. Every `[[bin]]` in the
+    # manifest carries `required-features = ["std"]`, so the package build
+    # at this feature set compiles only the lib -- proven clean on both
+    # thumbv7m-none-eabi and aarch64-unknown-none 2026-08-28.
+    "proxima-vm|proxima-vm|alloc"
 )
 
 # Cells that are TOKIO-FREE-checkable but NOT thumbv7m-buildable, because they
