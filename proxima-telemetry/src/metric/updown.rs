@@ -1,4 +1,6 @@
-use core::sync::atomic::{AtomicI64, Ordering};
+use core::sync::atomic::Ordering;
+
+use portable_atomic::AtomicI64;
 
 use crate::tag::Tag;
 

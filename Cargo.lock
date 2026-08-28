@@ -4728,6 +4728,7 @@ dependencies = [
  "opentelemetry_sdk",
  "parking_lot",
  "pin-project-lite",
+ "portable-atomic",
  "postcard",
  "prometheus 0.14.0",
  "prost",

@@ -72,11 +72,22 @@ declare -a FLOOR_CRATE_CELLS=(
     "proxima-core-bare-no-alloc|proxima-core|"
     # proxima-telemetry claims a no_std + no-alloc floor in lib.rs:17-19
     # (`sized` + `id` + `error` + `trace::{status,kind}`) and had NO cell here
-    # at all until the 2026-08-04 consistency pass. Only the BARE cell is
-    # honest: `--features alloc` does not reach the cliff, because `fastrand`'s
-    # default `std` feature fails first and proxima-primitives' parking_lot
-    # second. Adding an `alloc` cell would be a red gate, not a proof.
+    # at all until the 2026-08-04 consistency pass.
     "proxima-telemetry-bare-no-alloc|proxima-telemetry|"
+    # the `alloc` tier (clock, sampler, metric::{counter,gauge,updown}) used
+    # `core::sync::atomic::{AtomicU64,AtomicI64}` unconditionally, which do not
+    # exist on thumbv7m-none-eabi/thumbv7em-none-eabihf (no native 64-bit CAS),
+    # so this cell was red until 2026-08-28. Fixed by swapping those five
+    # modules to `portable_atomic::{AtomicU64,AtomicI64}` (`fallback` feature,
+    # same convention proxima-primitives already uses -- see
+    # proxima-primitives/src/pipe/sink_front.rs's module doc): zero-cost native
+    # instruction on every host tier, seqlock-free fallback CAS on the cliff.
+    "proxima-telemetry-alloc|proxima-telemetry|alloc"
+    # `emit`'s `CallsiteGate` (emit/gate.rs) carried the same unconditional
+    # `AtomicU64` and rides `alloc`, not `std` -- a second, genuinely different
+    # compile from the cell above (prime's own dependency line pulls exactly
+    # this feature set, `prime/Cargo.toml:54`).
+    "proxima-telemetry-emit|proxima-telemetry|alloc,emit"
     "proxima-protocols|proxima-protocols|tcp,mqtt,amqp,kafka,memcached,nvme,inet,pgwire_codec,process,jsonrpc,websocket_frame,proxy_protocol,redis,hpack,http1_codec,http2_codec,http3_codec-alloc,json_framing,quic-alloc,dns,grpc_framing,protobuf_wire,websocket_handshake,codec-pipe"
     # the cell above turns on each protocol's BASE feature and `codec-pipe`
     # (the generic adapter), but none of the `-codec-trait` / `-frame-pipe` /

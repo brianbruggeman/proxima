@@ -5,7 +5,9 @@
 // SamplerSpec lives in `config` (std tier); the spec→sampler glue rides with it.
 #[cfg(feature = "std")]
 use crate::config::SamplerSpec;
-use core::sync::atomic::{AtomicU64, Ordering};
+use core::sync::atomic::Ordering;
+
+use portable_atomic::AtomicU64;
 
 use crate::id::TraceId;
 use crate::tag::Tag;
