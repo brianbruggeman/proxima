@@ -47,6 +47,10 @@ required-features = ["std"]
 # --features alloc` tries to build them and fails on items that were
 # correctly configured out.
 [[bin]]
+name = "cow_primitives_probe"
+required-features = ["std"]
+
+[[bin]]
 name = "dispatch_probe"
 required-features = ["std"]
 
