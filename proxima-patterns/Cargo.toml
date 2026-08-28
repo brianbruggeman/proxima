@@ -48,6 +48,7 @@ scheduled-trigger = [
     "dep:proxima-runtime",
     "dep:serde_json",
     "dep:proxima-telemetry",
+    "proxima-telemetry/std",
 ]
 
 # C4: StdoutAlertPipe (terminal sink, formats AlertEvent to stdout).
@@ -87,6 +88,7 @@ middleware = [
     "dep:fastrand",
     "dep:thiserror",
     "dep:proxima-telemetry",
+    "proxima-telemetry/std",
 ]
 runtime-prime-full = ["middleware", "proxima-primitives/runtime-prime-full"]
 

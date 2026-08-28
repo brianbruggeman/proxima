@@ -84,6 +84,7 @@ listen = [
     "dep:proxima-listen",
     "dep:proxima-runtime",
     "dep:proxima-telemetry",
+    "proxima-telemetry/std",
     "dep:serde_json",
     "proxima-listen/framed-any",
     "proxima-protocols/memcached-codec-trait",

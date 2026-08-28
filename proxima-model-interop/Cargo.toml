@@ -45,7 +45,7 @@ interop-bgpool = ["dep:prime", "dep:proxima-core"]
 # per-token attribution counters in `omega::metal` alongside this crate's own
 # generate.rs-side ones, so a single feature flag lights up both halves of
 # the decode-loop split rather than needing two.
-instrument = ["proxima-tensor/instrument", "omega?/instrument", "dep:proxima-telemetry", "proxima-telemetry/macros"]
+instrument = ["proxima-tensor/instrument", "omega?/instrument", "dep:proxima-telemetry", "proxima-telemetry/macros", "proxima-telemetry/std"]
 # Metal decode path (macOS + Metal only). `generate.rs`'s decode loop runs
 # the cached forward through `omega::backend::plan_named`/`execute_plan_named`
 # instead of `proxima_tensor::cpu::evaluate_quantized_named_with_scratch`

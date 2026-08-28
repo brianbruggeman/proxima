@@ -83,6 +83,7 @@ listen = [
     "dep:serde_json",
     "dep:thiserror",
     "dep:proxima-telemetry",
+    "proxima-telemetry/std",
     "dep:proxima-listen",
     "proxima-listen/stream",
     "proxima-listen/framed-any",

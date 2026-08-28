@@ -96,6 +96,7 @@ std = [
     "dep:proxima-primitives",
     "dep:proxima-runtime",
     "dep:proxima-telemetry",
+    "proxima-telemetry/std",
     "proxima-core/std",
     "proxima-primitives/std",
     "proxima-runtime/std",

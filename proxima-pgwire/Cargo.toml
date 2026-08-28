@@ -85,6 +85,7 @@ tokio-compat = [
     "proxima-net/tokio",
     "dep:tokio",
     "dep:proxima-telemetry",
+    "proxima-telemetry/std",
 ]
 # SCRAM-SHA-256 (RFC 7677 / RFC 5802) — PostgreSQL's standard auth. Pulls
 # the RustCrypto PBKDF2 / HMAC / SHA-256 primitives + SASLprep + base64.
