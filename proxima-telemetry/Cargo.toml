@@ -25,7 +25,7 @@ bon = { workspace = true, optional = true }
 bytes = { workspace = true, optional = true }
 conflaguration = { workspace = true, features = ["derive", "toml"], optional = true }
 dashmap = { workspace = true, optional = true }
-fastrand = { workspace = true, optional = true }
+fastrand = { version = "2.4.1", optional = true, default-features = false }
 rustc-hash = { workspace = true, features = ["std"], optional = true }
 futures = { workspace = true, features = ["executor"], optional = true }
 hdrhistogram = { workspace = true, optional = true }
@@ -132,6 +132,7 @@ std = [
     # satellite crate) — arc-swap/dashmap already above; adds Notify +
     # the retained-line ring queue.
     "dep:crossbeam-queue",
+    "fastrand/std",
     # SystemClock's monotonic-to-wall-clock bridge (recorder/mod.rs, the
     # crate's std boundary) — proxima-clock's core tier (Ticks/UnixNanos/
     # AnchorCell/ToUnixNanos) is no_std + no-alloc itself, but SystemClock

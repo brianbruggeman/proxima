@@ -5,6 +5,8 @@
 // SamplerSpec lives in `config` (std tier); the spec→sampler glue rides with it.
 #[cfg(feature = "std")]
 use crate::config::SamplerSpec;
+use core::sync::atomic::{AtomicU64, Ordering};
+
 use crate::id::TraceId;
 use crate::tag::Tag;
 
@@ -101,11 +103,16 @@ impl Sampler for AlwaysOff {
 
 /// Deterministic ratio sampling using trace_id bytes.
 ///
-/// Same trace_id always produces the same decision. Without a trace_id,
-/// falls back to `fastrand::u64(..)`.
+/// Same trace_id always produces the same decision. Without a trace_id, falls
+/// back to a lock-free per-call counter seeding `fastrand::Rng` directly —
+/// the crate's global RNG (`fastrand::u64`) needs the `std` feature (OS
+/// entropy + thread-local state), which this alloc-tier module must not
+/// require.
 pub struct TraceIdRatioBased {
     threshold: u64,
 }
+
+static FALLBACK_SEED: AtomicU64 = AtomicU64::new(0);
 
 impl TraceIdRatioBased {
     pub fn new(ratio: f64) -> Self {
@@ -127,7 +134,10 @@ impl Sampler for TraceIdRatioBased {
                     bytes[15],
                 ])
             }
-            None => fastrand::u64(..),
+            None => {
+                let seed = FALLBACK_SEED.fetch_add(1, Ordering::Relaxed);
+                fastrand::Rng::with_seed(seed).u64(..)
+            }
         };
         if value < self.threshold {
             Decision::Keep
