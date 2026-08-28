@@ -27,7 +27,7 @@ postcard = { workspace = true, features = ["alloc"] }
 toml.workspace = true
 futures.workspace = true
 tokio-util = { workspace = true, features = ["compat"] }
-proxima-telemetry = { workspace = true, features = ["emit"] }
+proxima-telemetry = { workspace = true, features = ["emit", "std"] }
 
 [dev-dependencies]
 proxima = { workspace = true, features = ["test-support-tokio"] }

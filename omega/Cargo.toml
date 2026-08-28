@@ -41,6 +41,7 @@ metal = [
     "dep:objc2-foundation",
     "dep:half",
     "dep:proxima-telemetry",
+    "proxima-telemetry/alloc",
     "dep:libc",
     "dep:block2",
     "proxima-tensor/std",

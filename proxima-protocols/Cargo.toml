@@ -313,6 +313,7 @@ json_framing-std = [
     "dep:serde_json",
     "dep:thiserror",
     "dep:proxima-telemetry",
+    "proxima-telemetry/std",
 ]
 # Sans-IO QUIC + TLS 1.3 protocol implementation per RFC 9000 / 9001 /
 # 9002 / 9221 + multipath draft — extracted from proxima-quic-proto.

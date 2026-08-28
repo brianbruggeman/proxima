@@ -37,7 +37,7 @@ serde = { workspace = true, features = ["derive"], optional = true }
 proxima-http = { workspace = true, optional = true, features = ["http3-native"] }
 zstd.workspace = true
 brotli = "8.0.3"
-proxima-telemetry = { workspace = true, features = ["emit"] }
+proxima-telemetry = { workspace = true, features = ["emit", "std"] }
 
 [dev-dependencies]
 proxima = { path = "..", features = ["http1", "tcp", "test-support", "tokio"] }
