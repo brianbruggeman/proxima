@@ -29,6 +29,7 @@ std = [
     "proxima-tensor/config",
     "interop-bgpool",
     "dep:proxima-tokenizer",
+    "dep:fastrand",
 ]
 # split from `std` the same way proxima-tensor splits `tensor-bgpool`
 # (proxima-tensor/Cargo.toml:45): `dep:prime` pulls in OS threads, so it
@@ -66,7 +67,9 @@ metal-tiled-gemm = ["omega?/metal-tiled-gemm"]
 
 [dependencies]
 arrayvec.workspace = true
-fastrand.workspace = true
+# only used by `generate.rs`, which is `#[cfg(feature = "std")]`-gated —
+# optional so the alloc-only floor never links it.
+fastrand = { workspace = true, optional = true }
 omega = { version = "0.1.0", path = "../omega", default-features = false, features = ["metal", "cpu"], optional = true }
 prime = { version = "0.1.0", path = "../prime", features = ["runtime-prime-bgpool"], optional = true }
 proxima-core = { workspace = true, features = ["alloc"], optional = true }
