@@ -11,9 +11,13 @@
 //! sampler pre-allocation gate). The expensive [`CompiledEmit::decide`] runs once
 //! per callsite per filter generation, not per record.
 //!
-//! Tier T1 (value T0 — `core` atomics, no alloc).
+//! Tier T1 (value T0 — no alloc; `cache` rides `portable_atomic::AtomicU64` so
+//! this gate also builds on targets without native 64-bit CAS, e.g.
+//! thumbv7m-none-eabi).
 
-use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use core::sync::atomic::{AtomicU32, Ordering};
+
+use portable_atomic::AtomicU64;
 
 use crate::emit::Decision;
 

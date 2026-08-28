@@ -1,5 +1,7 @@
 use alloc::sync::Arc;
-use core::sync::atomic::{AtomicU64, Ordering};
+use core::sync::atomic::Ordering;
+
+use portable_atomic::AtomicU64;
 
 #[cfg(feature = "std")]
 use crate::recorder::SystemClock;

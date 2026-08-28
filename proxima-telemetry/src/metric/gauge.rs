@@ -1,4 +1,6 @@
-use core::sync::atomic::{AtomicU8, AtomicU64, Ordering};
+use core::sync::atomic::{AtomicU8, Ordering};
+
+use portable_atomic::AtomicU64;
 
 use crate::tag::{ScalarValue, Tag};
 
