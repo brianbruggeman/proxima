@@ -40,15 +40,16 @@ ROOT_UNION="http1,http1-native,http2,http3,http-prime-deps,tracing-init,tokio,ru
 feats_for() {
   case "$1" in
     proxima)            echo "$ROOT_UNION" ;;
-    prime)              echo "runtime-prime-inbox-alloc,runtime-prime-inbox-dynamic" ;;
+    prime)              echo "runtime-prime-inbox-alloc,runtime-prime-inbox-dynamic,runtime-prime-cohort,runtime-prime-bgpool" ;;
     proxima-centauri)   echo "aead-chacha20poly1305" ;;
     proxima-http)       echo "http3-native" ;;
     proxima-intercept)  echo "intercept-capture,intercept-replay,quic-intercept" ;;
+    proxima-model-interop) echo "std,instrument" ;;
     proxima-patterns)   echo "alert,std,proto,json-shape" ;;
     proxima-pgwire)     echo "scram" ;;
     proxima-protocols)  echo "dns-codec-trait,pgwire_codec,quic-mock-tls,quic" ;;
     proxima-redis)      echo "client" ;;
-    proxima-tensor)     echo "instrument,config" ;;
+    proxima-tensor)     echo "instrument,config,ggml-bench" ;;
     proxima-telemetry)  echo "instrument-metrics,macros,elevation" ;;
     rekt)               echo "scheduler" ;;
     *)                  echo "" ;;
@@ -77,6 +78,11 @@ needs_input() {
     replay-capture) return 0 ;;
     # need a live postgres / redis on a known port
     capture_realpg|capture_realredis) return 0 ;;
+    # takes a required <model.gguf> path (argv[1]) AND links a statically
+    # built ggml (GGML_BUILD_DIR) neither of which this host provides by
+    # default -- same "external artifact this host lacks" class as the
+    # DPDK/XDP/nvme-uio hardware skips above, just not hardware.
+    q4k_ggml_fidelity) return 0 ;;
     *) return 1 ;;
   esac
 }
