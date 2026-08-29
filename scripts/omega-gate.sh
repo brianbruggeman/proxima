@@ -39,7 +39,15 @@ fi
 printf '   tests run: %s\n' "${ran_count}"
 
 printf '\n[4/6] clippy pedantic clean (bare alloc + all-features)\n'
-cargo clippy -p "${crate}" --all-targets --no-default-features --features alloc -- -D warnings
+# --lib only for the bare-alloc arm: the integration tests under omega/tests/
+# exercise the Metal execution driver and assume `metal` is present (it is a
+# default feature -- see the note at the bottom of
+# omega/tests/metal_compile_gate.rs), so they are not part of the alloc-tier
+# claim this crate's own module docs make ("alloc: the whole crate" refers to
+# the emission library, not the Metal-only integration suite). --all-targets
+# here would fail to compile those tests for lacking `metal`, which is a
+# feature-scope mismatch in the gate, not a source defect.
+cargo clippy -p "${crate}" --lib --no-default-features --features alloc -- -D warnings
 cargo clippy -p "${crate}" --all-targets --all-features -- -D warnings
 
 printf '\n[5/6] rustdoc resolves (bare alloc + all-features)\n'
