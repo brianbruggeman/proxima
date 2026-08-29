@@ -2,7 +2,7 @@
 //! definitions now live canonically in `proxima-pipe` (sans-IO, no_std+alloc) and
 //! are re-exported here so existing `proxima_intercept::{Turn, SwapSurface}` paths
 //! keep resolving. This module also holds the IO half: the generic synth pump that
-//! drives any [`StreamFramer`](proxima_primitives::pipe::StreamFramer) onto a writer.
+//! drives any [`StreamFramer`] onto a writer.
 
 pub use proxima_primitives::pipe::{StreamFramer, SwapSurface, Turn};
 
