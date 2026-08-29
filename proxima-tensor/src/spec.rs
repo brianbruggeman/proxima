@@ -922,7 +922,7 @@ fn gathered_expert_product(program: &mut Vec<Op>, stack: NodeId, route: NodeId, 
 /// `Softmax` is llama.cpp's own fallback when that key is absent
 /// (`llama-model.cpp:1237-1240`, "existing models that have no
 /// `expert_gating_func` model parameter set") -- Mixtral carries no such
-/// key, so [`append_mistral_moe_layer`]/[`append_mistral_cached_moe_layer`]
+/// key, so `append_mistral_moe_layer`/`append_mistral_cached_moe_layer`
 /// always pass `Softmax` unconditionally rather than reading a key that
 /// does not exist on that checkpoint. `Sigmoid` is `_TYPE_SIGMOID` (`2`),
 /// LFM2's own value (`transformers/models/lfm2_moe/modeling_lfm2_moe.py:209`'s
@@ -1214,13 +1214,13 @@ fn append_mistral_moe_layer(
 /// `specs/mistral_layer.toml` node for node).
 ///
 /// `expert_count == 0` means dense: every layer binds
-/// [`append_mistral_layer`]'s plain `ffn_{gate,up,down}.weight` triple,
+/// `append_mistral_layer`'s plain `ffn_{gate,up,down}.weight` triple,
 /// node-for-node the same program this function has always built, so a
 /// dense checkpoint's generated program (and therefore its output) is
 /// unaffected by this parameter's existence. `expert_count > 0` routes each
-/// layer through [`append_mistral_moe_layer`] instead, gathering one of
+/// layer through `append_mistral_moe_layer` instead, gathering one of
 /// `expert_count` experts' weight slabs per token per
-/// [`append_moe_ffn`]'s doc.
+/// `append_moe_ffn`'s doc.
 #[allow(clippy::too_many_arguments)]
 pub fn mistral_forward_program(
     vocab: u32,
@@ -2097,21 +2097,21 @@ fn append_attention_mixer(
 }
 
 /// LFM2.5-8B-A1B's hybrid forward pass: `block_count` blocks, each either
-/// [`append_attention_mixer`] or [`append_lfm2_conv_mixer`] per its own
+/// `append_attention_mixer` or `append_lfm2_conv_mixer` per its own
 /// `layer_kinds[layer]` (derived by [`LayerKind::from_tensor_names`] from the
 /// real checkpoint's tensor directory, since `layer_types` is not a metadata
 /// key this architecture writes), then a shared RMSNorm and
-/// [`append_moe_ffn`]/dense-triple FFN exactly like
-/// [`mistral_forward_program_with_experts`]'s own MoE branch --
+/// `append_moe_ffn`/dense-triple FFN exactly like
+/// [`mistral_forward_program`]'s own MoE branch --
 /// `leading_dense_block_count` (LFM2.5-8B-A1B: `2`) is threaded per layer
 /// rather than a single crate-wide dense/MoE switch, since this checkpoint's
 /// first two blocks are dense and the rest are routed.
 ///
 /// Prefill-only: takes the whole prompt as one `[seq, embedding]` pass, the
-/// same scope [`mistral_forward_program_with_experts`] has. A KV-cached and
+/// same scope [`mistral_forward_program`] has. A KV-cached and
 /// conv-state-cached incremental counterpart (mirroring
 /// [`mistral_cached_forward_program_with_experts`]) is a further step this
-/// function's own doc does not claim -- [`causal_conv1d`]'s masked-gather
+/// function's own doc does not claim -- `causal_conv1d`'s masked-gather
 /// composition only needs the whole sequence to be present at once, which a
 /// one-token-at-a-time decode call does not have.
 #[allow(clippy::too_many_arguments)]
@@ -2407,7 +2407,7 @@ pub fn lfm2_forward_program_with_experts(
 /// already define as identity/`-inf`, so the first call degenerates to
 /// plain causal self-attention over the whole prompt with no special case.
 ///
-/// Dense-only: always binds [`append_mistral_cached_layer`]'s plain
+/// Dense-only: always binds `append_mistral_cached_layer`'s plain
 /// `ffn_{gate,up,down}.weight` triple. Delegates to
 /// [`mistral_cached_forward_program_with_experts`] with `expert_count = 0`,
 /// `expert_used_count = 0` -- that function's own doc explains why those two
@@ -2432,13 +2432,13 @@ pub fn mistral_cached_forward_program(
 /// [`mistral_cached_forward_program`]'s mixture-of-experts-capable
 /// counterpart, carrying the same `expert_count`/`expert_used_count`
 /// parameters [`mistral_forward_program`] already takes. `expert_count == 0`
-/// binds every layer through [`append_mistral_cached_layer`]'s plain
+/// binds every layer through `append_mistral_cached_layer`'s plain
 /// `ffn_{gate,up,down}.weight` triple, node-for-node the same program
 /// [`mistral_cached_forward_program`] has always built, so a dense
 /// checkpoint's generated program is unaffected by this function's
 /// existence. `expert_count > 0` routes each layer through
-/// [`append_mistral_cached_moe_layer`] instead, gathering one of
-/// `expert_count` experts' weight slabs per token per [`append_moe_ffn`]'s
+/// `append_mistral_cached_moe_layer` instead, gathering one of
+/// `expert_count` experts' weight slabs per token per `append_moe_ffn`'s
 /// doc -- the same routed FFN [`mistral_forward_program`]'s own MoE branch
 /// already runs, reused rather than reconstructed.
 #[allow(clippy::too_many_arguments)]

@@ -205,7 +205,7 @@ pub enum TensorError {
     #[error("aligned buffer allocation rejected: {reason}")]
     AlignedAllocationRejected { reason: &'static str },
 
-    /// [`crate::spec::causal_conv1d`]'s window width: a zero-tap convolution
+    /// `crate::spec::causal_conv1d`'s window width: a zero-tap convolution
     /// has no weights to sum and no window to derive causality from.
     #[error("short convolution needs l_cache >= 1, got {l_cache}")]
     InvalidConvConfig { l_cache: u32 },

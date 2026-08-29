@@ -6412,11 +6412,11 @@ fn dot_bf16_f32(weight_row: &[u8], activation: &[f32]) -> Result<f32, TensorErro
 }
 
 /// A full `Float16`-weight matrix (`rows` x `k`, row-major raw bytes) times
-/// one `f32` activation vector -- [`dot_f16_f32`]'s per-row kernel driven
-/// through the same [`matmul_quantized_dispatch`] every other codec shares.
+/// one `f32` activation vector -- `dot_f16_f32`'s per-row kernel driven
+/// through the same `matmul_quantized_dispatch` every other codec shares.
 ///
 /// # Errors
-/// Propagates [`dot_f16_f32`]'s [`TensorError::QuantizedShapeMismatch`] for
+/// Propagates `dot_f16_f32`'s [`TensorError::QuantizedShapeMismatch`] for
 /// the first row that fails its shape check, or reports the same error if
 /// `weights.len()` is not a whole multiple of `rows`.
 pub fn matmul_f16_f32(weights: &[u8], rows: usize, activation: &[f32]) -> Result<Vec<f32>, TensorError> {
@@ -7302,7 +7302,7 @@ fn avx2_runtime_available() -> bool {
 /// baseline ISA, so this one is opt-in via `-C target-feature=+avx2` /
 /// `-C target-cpu`, not implied by the target triple alone), to the SAME
 /// `dot_q4k_q8k_block_avx2` chosen at RUNTIME via
-/// [`avx2_runtime_available`] on a plain x86_64 build that did not opt in
+/// `avx2_runtime_available` on a plain x86_64 build that did not opt in
 /// at compile time (so a default `cargo build --release` on a modern
 /// x86_64 host still gets the fast kernel instead of silently falling back
 /// to scalar), and to the portable `dot_q4k_q8k_block_scalar` everywhere
@@ -7326,7 +7326,7 @@ fn avx2_runtime_available() -> bool {
 /// floor that matters (present on essentially every x86_64 CPU since
 /// 2013); the follow-up is a `dpbusd`-based
 /// `dot_q4k_q8k_block_avxvnni`/`_avx512vnni` pair selected ahead of the
-/// AVX2 arm in [`avx2_runtime_available`]'s priority order, verified on
+/// AVX2 arm in `avx2_runtime_available`'s priority order, verified on
 /// real VNNI hardware before it lands.
 ///
 /// # Errors
