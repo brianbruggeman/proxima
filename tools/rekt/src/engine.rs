@@ -651,7 +651,7 @@ where
 /// then drives `connections_per_core` keep-alive clients firing `GET /` back to
 /// back (build-once, clone-per-send) until the deadline. the analog of `wrk
 /// -t<cores> -c<cores*connections_per_core>`. reports COMPLETED requests over the
-/// measured wall-clock, never offered. composes [`drive_replicated`] — see its
+/// measured wall-clock, never offered. composes `drive_replicated` — see its
 /// doc for why this fans via `FuturesUnordered` and not the pipe-algebra
 /// `FanOut`/`ScatterGather` family.
 ///
