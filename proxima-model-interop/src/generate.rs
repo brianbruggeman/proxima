@@ -69,11 +69,11 @@ use proxima_tokenizer::{SamplingConfig, Vocab, sample_next_token};
 
 #[cfg(feature = "metal")]
 use omega::backend::{Backend, Plan, execute_plan_named, mark_resident, plan_named};
-#[cfg(all(feature = "instrument", feature = "metal"))]
+#[cfg(all(feature = "instrument", feature = "metal", target_os = "macos"))]
 use omega::backend::execute_plan_named_metal_op_timed;
-#[cfg(all(feature = "instrument", feature = "metal"))]
+#[cfg(all(feature = "instrument", feature = "metal", target_os = "macos"))]
 use omega::metal::OpGpuTiming;
-#[cfg(all(feature = "instrument", feature = "metal"))]
+#[cfg(all(feature = "instrument", feature = "metal", target_os = "macos"))]
 use omega::metal::metal_stage_totals;
 #[cfg(feature = "instrument")]
 use proxima_tensor::instrument::{elapsed_ticks, read_ticks, ticks_to_nanos};
@@ -92,7 +92,7 @@ const RMS_EPSILON: f32 = 1e-5;
 
 /// How many of [`OpGpuTiming`]'s entries [`report_op_timings`] names
 /// individually -- the discipline log's own "top 20 ops by GPU time" ask.
-#[cfg(all(feature = "instrument", feature = "metal"))]
+#[cfg(all(feature = "instrument", feature = "metal", target_os = "macos"))]
 const OP_PROFILE_TOP_N: usize = 20;
 
 /// Prints the per-op GPU attribution `run_decode_loop`'s
@@ -102,7 +102,7 @@ const OP_PROFILE_TOP_N: usize = 20;
 /// `OpGpuTiming::kind` bucket, and the top [`OP_PROFILE_TOP_N`] ops by GPU
 /// time with their operand bytes and bytes/ns -- exactly what settles
 /// whether GPU time tracks operand bytes or is flat per dispatch.
-#[cfg(all(feature = "instrument", feature = "metal"))]
+#[cfg(all(feature = "instrument", feature = "metal", target_os = "macos"))]
 fn report_op_timings(step: usize, timings: &[OpGpuTiming]) {
     let op_count = timings.len();
     let total_gpu_ns: u64 = timings.iter().map(|timing| timing.gpu_ns).sum();
@@ -225,7 +225,7 @@ fn report_op_timings(step: usize, timings: &[OpGpuTiming]) {
     }
 }
 
-#[cfg(all(feature = "instrument", feature = "metal"))]
+#[cfg(all(feature = "instrument", feature = "metal", target_os = "macos"))]
 fn stats_pass(entry: &mut FamilyGpuStats, gpu_ns: u64, operand_bytes: u64) {
     entry.row_blocked_count += 1;
     entry.passed_gpu_ns += gpu_ns;
@@ -233,7 +233,7 @@ fn stats_pass(entry: &mut FamilyGpuStats, gpu_ns: u64, operand_bytes: u64) {
     entry.packed_row_block_gates.insert("PASS".to_string());
 }
 
-#[cfg(all(feature = "instrument", feature = "metal"))]
+#[cfg(all(feature = "instrument", feature = "metal", target_os = "macos"))]
 fn stats_reject(entry: &mut FamilyGpuStats, rejection: &str, gpu_ns: u64, operand_bytes: u64) {
     entry.rejected_count += 1;
     entry.rejected_gpu_ns += gpu_ns;
@@ -248,7 +248,7 @@ fn stats_reject(entry: &mut FamilyGpuStats, rejection: &str, gpu_ns: u64, operan
 /// `Some("PASS")` alongside a rejection would mean SOME layers took the
 /// fast path and others did not, which the aggregate ns/byte alone cannot
 /// show).
-#[cfg(all(feature = "instrument", feature = "metal"))]
+#[cfg(all(feature = "instrument", feature = "metal", target_os = "macos"))]
 struct FamilyGpuStats {
     op_count: u64,
     gpu_ns: u64,
@@ -276,7 +276,7 @@ struct FamilyGpuStats {
     packed_row_block_gates: BTreeSet<String>,
 }
 
-#[cfg(all(feature = "instrument", feature = "metal"))]
+#[cfg(all(feature = "instrument", feature = "metal", target_os = "macos"))]
 impl Default for FamilyGpuStats {
     fn default() -> Self {
         Self {
@@ -300,7 +300,7 @@ impl Default for FamilyGpuStats {
 /// `.`-delimited numeric segment (the layer index every `blk.N.*` weight
 /// name carries) so [`report_op_timings`] can sum one matmul KIND across
 /// all 32 layers instead of reporting 32 near-identical lines.
-#[cfg(all(feature = "instrument", feature = "metal"))]
+#[cfg(all(feature = "instrument", feature = "metal", target_os = "macos"))]
 fn strip_layer_index(name: &str) -> String {
     name.split('.')
         .filter(|segment| segment.parse::<u32>().is_err())
@@ -617,7 +617,7 @@ impl BackendRuntime {
     /// loop. Reachable only behind the `instrument` feature and only from
     /// this crate's own diagnostic call sites (`run_decode_loop`'s
     /// `PROXIMA_METAL_OP_PROFILE_STEP` branch).
-    #[cfg(feature = "instrument")]
+    #[cfg(all(feature = "instrument", target_os = "macos"))]
     fn evaluate_op_timed(
         &mut self,
         program: &[Op],
@@ -934,7 +934,7 @@ impl<'file> LoadedModel<'file> {
             // crate's own discipline log needed to settle the `gpu_exec`
             // investigation. Every other step, and every run without the env
             // var, is byte-for-byte the pre-existing path.
-            #[cfg(all(feature = "instrument", feature = "metal"))]
+            #[cfg(all(feature = "instrument", feature = "metal", target_os = "macos"))]
             let evaluated = match std::env::var("PROXIMA_METAL_OP_PROFILE_STEP")
                 .ok()
                 .and_then(|value| value.parse::<usize>().ok())
@@ -947,11 +947,11 @@ impl<'file> LoadedModel<'file> {
                 }
                 _ => runtime.evaluate(&self.program, &symbols, &named_blocks, &roots, &resident_names)?,
             };
-            #[cfg(not(all(feature = "instrument", feature = "metal")))]
+            #[cfg(not(all(feature = "instrument", feature = "metal", target_os = "macos")))]
             let evaluated = runtime.evaluate(&self.program, &symbols, &named_blocks, &roots, &resident_names)?;
             #[cfg(feature = "instrument")]
             let evaluate_ticks = elapsed_ticks(evaluate_started);
-            #[cfg(all(feature = "instrument", feature = "metal"))]
+            #[cfg(all(feature = "instrument", feature = "metal", target_os = "macos"))]
             let metal_stage = metal_stage_totals();
 
             // KV-cache DEVICE -> HOST readback + host append: unlike the
@@ -1061,7 +1061,7 @@ impl<'file> LoadedModel<'file> {
                     "token_quantize_calls step={_step} total_calls={quantize_total_calls} distinct_nodes={quantize_distinct_nodes} \
                      cache_hits={quantize_cache_hits}"
                 );
-                #[cfg(feature = "metal")]
+                #[cfg(all(feature = "metal", target_os = "macos"))]
                 std::println!(
                     "token_breakdown_metal step={_step} prepare_calls={} prepare_ms={:.3} \
                      emit_calls={} emit_ms={:.3} pipeline_hits={} pipeline_misses={} pipeline_compile_ms={:.3} \
