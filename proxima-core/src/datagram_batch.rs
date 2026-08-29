@@ -86,7 +86,7 @@ pub enum BatchError {
 /// tier is hard-capped at `INITIAL_CAP` (overflow stays in the kernel buffer
 /// and drains next iteration — bounded, not silently lost).
 ///
-/// Not [`BufferPool`](crate::buffer::BufferPool): that hands out one `BytesMut` per
+/// Not `crate::buffer::BufferPool`: that hands out one `BytesMut` per
 /// call (per-connection reads); `recvmmsg` needs N same-size slots
 /// addressable as `&mut [&mut [u8]]` in ONE syscall, which a per-call pool
 /// can't form without a collecting allocation. `RecvSlab` IS that slab.

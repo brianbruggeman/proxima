@@ -11,8 +11,8 @@
 //! `build` returns it: `FactoryRegistry<dyn PipeFactory>` builds pipes,
 //! `FactoryRegistry<dyn ComponentFactory>` builds UI elements.
 //!
-//! A [`Factory`] (a [`Named`] whose `build` returns an `Output`) closes the
-//! loop: [`FactoryRegistry::build`] walks a whole [`Composition`] tree into
+//! A `Factory` (a [`Named`] whose `build` returns an `Output`) closes the
+//! loop: `FactoryRegistry::build` walks a whole `Composition` tree into
 //! instances in one call — the executable half of config-as-composition that
 //! every consumer would otherwise hand-roll. Because `Factory: Named`, such a
 //! registry needs no `impl Named for dyn ..` bridge.

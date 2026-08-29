@@ -12,10 +12,10 @@
 //!   CI builds both `--features alloc` and bare `--no-default-features` for
 //!   `thumbv7m-none-eabi` (`scripts/thumbv7m-cliff-gate.sh`).
 //! - **`alloc`:** [`arena`], [`batch`]
-//! - **`std`:** [`buffer`], [`signal`], and the [`factory`] registry (`registry`
-//!   / `config`) and [`live`], which ride their own default-off features
-//! - **orthogonal gates:** [`io`] (`io-async`) is no-alloc for the traits and
-//!   `alloc` for `Prepend`; [`park`] (`park`) is no_std but needs an OS futex;
+//! - **`std`:** `buffer`, `signal`, and the [`factory`] registry (`registry`
+//!   / `config`) and `live`, which ride their own default-off features
+//! - **orthogonal gates:** `io` (`io-async`) is no-alloc for the traits and
+//!   `alloc` for `Prepend`; `park` (`park`) is no_std but needs an OS futex;
 //!   [`histogram`] needs 64-bit atomics, so it is absent on cortex-m.
 //!
 //! [`ProximaError`] is the shared error type. It carries two surfaces: the
