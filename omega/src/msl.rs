@@ -48,12 +48,12 @@
 //! `BoundOp` carries its own element type ([`proxima_tensor::BoundOp::dtype`],
 //! read straight from the [`proxima_tensor::Op`] it was built from). Every
 //! buffer/scratch/accumulator declaration this module renders is spelled
-//! from [`type_token`] rather than hardcoding `float`, so a `Float16` node
+//! from `type_token` rather than hardcoding `float`, so a `Float16` node
 //! emits a kernel of `half` declarations while a `Float32` node emits the
 //! same `float` kernel this module always has. The *op logic* — which
 //! `ScalarOp` token, which reduction init, how a body's steps chain — never
-//! consults dtype at all: [`op_token`], [`scalar_op_expr`], [`init_token`],
-//! [`fold_init_tokens`] stay total over their enums exactly as before, and
+//! consults dtype at all: `op_token`, `scalar_op_expr`, `init_token`,
+//! `fold_init_tokens` stay total over their enums exactly as before, and
 //! only the declaration spelling varies. `cpu.rs`'s own evaluator remains
 //! f32-only (`cpu::reject_non_float32`) — it is the reference oracle, not
 //! this crate's dtype ceiling. `omega::execute` runs its own, narrower
@@ -61,7 +61,7 @@
 //! reaches [`emit`].
 
 use alloc::format;
-use alloc::string::String;
+use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 use alloc::collections::BTreeMap;
 
@@ -113,7 +113,7 @@ pub enum Binding {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct GridSpec {
     pub threads: u64,
-    /// `Some(SIMD_WIDTH)` for a cooperative reduce (see [`reduce_is_cooperative`]):
+    /// `Some(SIMD_WIDTH)` for a cooperative reduce (see `reduce_is_cooperative`):
     /// the driver must dispatch threadgroups exactly this wide so every
     /// SIMD-group boundary lands on an output-element boundary (`gid / SIMD_WIDTH`
     /// is only a valid output index under that alignment — see
@@ -123,7 +123,7 @@ pub struct GridSpec {
 }
 
 /// Emits an MSL kernel from a bound [`BoundOp`] — the GPU-emission half of
-/// the same descriptor [`proxima_tensor::cpu`] interprets on CPU. See the
+/// the same descriptor `proxima_tensor::cpu` interprets on CPU. See the
 /// module doc for the runtime-uniforms stance and the per-[`Keep`]
 /// execution model.
 ///
@@ -178,7 +178,7 @@ pub struct GridSpec {
 /// GPU backend is not worth having (`proxima-tensor/docs/discipline.md`
 /// ROW 69).
 ///
-/// Ports [`proxima_gguf::quant::q4_k::dequantize_block`] exactly, including
+/// Ports `proxima_gguf::quant::q4_k::dequantize_block` exactly, including
 /// the two details that are easy to get wrong and silently plausible:
 /// `get_scale_min_k4`'s 6-bit scale/min unpacking (sub-blocks 4..8 take
 /// their high bits from a DIFFERENT byte than their low bits), and the
@@ -299,7 +299,7 @@ pub const Q4K_BLOCK_BYTES: usize = 144;
 pub const Q4K_BLOCK_ELEMENTS: usize = 256;
 
 /// MSL source for unpacking one element of a `Q6_K` super-block. Ports
-/// [`proxima_gguf::quant::q6_k::dequantize_block`]/`unpack_levels` exactly:
+/// `proxima_gguf::quant::q6_k::dequantize_block`/`unpack_levels` exactly:
 /// two 128-element halves, each split into four 32-wide lanes sharing one
 /// `qh` byte per lane position (2 bits each), `ql`'s low/high nibble shared
 /// between lanes 0/2 (`ql[l]`) and 1/3 (`ql[l+32]`), one signed 8-bit
@@ -362,7 +362,7 @@ static inline float q6k_element(device const uchar *block, uint index) {
 pub const Q6K_BLOCK_BYTES: usize = 210;
 
 /// MSL source for unpacking one element of a `Q5_K` super-block. Ports
-/// [`proxima_gguf::quant::q5_k::dequantize_block`]/`get_scale_min_k4`
+/// `proxima_gguf::quant::q5_k::dequantize_block`/`get_scale_min_k4`
 /// exactly: the SAME super-block/sub-block shape and SAME bit-interleaved
 /// `(scale, min)` packing as `Q4_K` (`q5k_scale_min` below is
 /// `q4k_scale_min` unchanged, restated rather than shared -- see this
@@ -454,11 +454,11 @@ pub const Q5K_BLOCK_BYTES: usize = 176;
 /// pair and no bit-packing at all -- genuinely a different SHAPE from the
 /// K-quant family above (no super-block; each level is already a full signed
 /// byte, not a nibble), not a widening or narrowing of one. It slots into
-/// the same PACKED-OPERAND mechanism ([`PackedCodec`], [`operand_read`],
+/// the same PACKED-OPERAND mechanism ([`PackedCodec`], `operand_read`,
 /// this preamble) as a fourth codec precisely because that mechanism is
 /// generic over block byte width and element count; it does NOT take the
-/// row-blocked ([`classify_packed_row_block`]) or tiled-GEMM
-/// ([`classify_tiled_gemm`]) fast paths, both of which hard-code the
+/// row-blocked (`classify_packed_row_block`) or tiled-GEMM
+/// (`classify_tiled_gemm`) fast paths, both of which hard-code the
 /// K-quants' shared 256-element super-block and 8-lane amortization scheme
 /// this codec has no analogue for -- `Q8_0` always renders through the fully
 /// generic per-element accessor below, same as any codec those two paths
@@ -493,10 +493,10 @@ pub const Q8_0_BLOCK_ELEMENTS: usize = 32;
 /// `Q4_0`: llama.cpp's simplest and most widely distributed 4-bit legacy
 /// format -- a flat 32-element block, one `f16` scale, no sub-block
 /// scale/min pair (unlike `Q4_K`) and no second `min` field (unlike
-/// `Q4_1`). Same KIND-difference from the K-quant family that [`Q8_0`]'s
+/// `Q4_1`). Same KIND-difference from the K-quant family that `Q8_0`'s
 /// own doc draws: no super-block, so this codec does not take the
-/// row-blocked ([`classify_packed_row_block`]) or tiled-GEMM
-/// ([`classify_tiled_gemm`]) fast paths either -- it always renders through
+/// row-blocked (`classify_packed_row_block`) or tiled-GEMM
+/// (`classify_tiled_gemm`) fast paths either -- it always renders through
 /// the fully generic per-element accessor below.
 ///
 /// Ports `proxima_gguf::quant::q4_0::dequantize_block` exactly: each packed
@@ -529,13 +529,13 @@ pub const Q4_0_BLOCK_ELEMENTS: usize = 32;
 /// `Float16`: not a quantization at all -- MSL's `half` is IEEE-754 binary16
 /// natively, so a `Float16` weight's bytes ARE a valid `half` buffer with no
 /// unpack function required. It still needs a [`PackedCodec`] slot (rather
-/// than folding into the plain [`operand_read`]'s `None` arm) because the
+/// than folding into the plain `operand_read`'s `None` arm) because the
 /// buffer must bind as `device const half*`, not whatever `float`/`half`
-/// [`type_token`] chose for the KERNEL's own accumulator dtype -- a router
+/// `type_token` chose for the KERNEL's own accumulator dtype -- a router
 /// weight (`Float16`) multiplied against an `f32` activation is exactly the
 /// mixed-dtype case `type_token` never had to handle before this codec.
-/// Same non-K-quant, flat, one-element-per-block shape [`Q8_0`]/[`Q4_0`]
-/// take: never the row-blocked ([`classify_packed_row_block`]) or tiled-GEMM
+/// Same non-K-quant, flat, one-element-per-block shape `Q8_0`/`Q4_0`
+/// take: never the row-blocked (`classify_packed_row_block`) or tiled-GEMM
 /// path, always the generic per-element accessor.
 pub const FLOAT16_BLOCK_BYTES: usize = 2;
 
@@ -543,7 +543,7 @@ pub const FLOAT16_BLOCK_BYTES: usize = 2;
 /// sub-block structure to amortize over, unlike every K-quant codec.
 pub const FLOAT16_BLOCK_ELEMENTS: usize = 1;
 
-/// `BFloat16`: unlike [`Self::Float16`]/[`FLOAT16_BLOCK_BYTES`], MSL has no
+/// `BFloat16`: unlike `Float16`/[`FLOAT16_BLOCK_BYTES`], MSL has no
 /// native `bfloat` storage type on this driver's baseline toolchain, so a
 /// `BFloat16` weight DOES need an unpack function -- [`BF16_UNPACK_MSL`]'s
 /// widen-by-shift, not a bit-packed dequantize. `bfloat16` is the top 16
@@ -560,7 +560,7 @@ pub const BFLOAT16_BLOCK_ELEMENTS: usize = 1;
 /// and reinterpreting -- the exact inverse of truncating an `f32`'s mantissa
 /// to 7 bits, no rounding needed since every bit already present is kept
 /// unchanged. `index` is threaded for the same call shape every other
-/// `*_element` accessor takes ([`operand_read`]'s block-offset arithmetic
+/// `*_element` accessor takes (`operand_read`'s block-offset arithmetic
 /// already folds a `BFloat16` weight's element index into the pointer, so
 /// this function always reads at `index == 0`), even though a flat
 /// one-element block never uses it for addressing.
@@ -1025,20 +1025,20 @@ struct PackedRowBlock {
 }
 
 /// Why a given [`BoundOp`] did NOT take the row-blocked packed kernel —
-/// [`classify_packed_row_block`]'s error arm, one variant per gate in that
+/// `classify_packed_row_block`'s error arm, one variant per gate in that
 /// function's own condition order. `#[non_exhaustive]` so a new gate added
 /// later is a compile error at every match site instead of a silently
 /// unmatched `_`. Always compiled (not feature-gated itself) so
-/// [`classify_packed_row_block`] — called from the unconditional emit path
+/// `classify_packed_row_block` — called from the unconditional emit path
 /// — never needs a second copy of these seven conditions; only the public
-/// accessor [`diagnose_packed_row_block`] is gated behind `instrument`, this
+/// accessor `diagnose_packed_row_block` is gated behind `instrument`, this
 /// crate's diagnostic-only feature (see
-/// [`crate::metal::execute_plan_op_timed`]'s own doc for why diagnostics
+/// `crate::metal::execute_plan_op_timed`'s own doc for why diagnostics
 /// live behind that gate).
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum PackedRowBlockRejection {
-    /// [`reduce_is_cooperative`] is false — not `Add`/`Multiply`/`Maximum`/
+    /// `reduce_is_cooperative` is false — not `Add`/`Multiply`/`Maximum`/
     /// `Minimum`, or the op gathers.
     NotCooperativeReduce,
     /// Not a `Reduce { keep: Keep::Reduce, .. }` at all.
@@ -1063,10 +1063,10 @@ pub enum PackedRowBlockRejection {
     NotKQuantCodec,
     /// The reduce folds ZERO axes into its output — degenerate, never
     /// observed on a real matmul (kept so the match stays exhaustive over
-    /// every way [`reduce_dims`](reduction_dims) can come back empty).
+    /// every way `reduce_dims` (`reduction_dims`) can come back empty).
     NotExactlyOneReduceDim { reduce_dims: Vec<u16> },
     /// More than one reduce dim, but they do NOT nest contiguously for both
-    /// operands (see [`classify_packed_row_block`]'s own doc for the
+    /// operands (see `classify_packed_row_block`'s own doc for the
     /// contiguous-fold check this fails) — cannot be treated as one
     /// flattened reduction, so the generic per-element path runs instead.
     ReduceDimsNotContiguous { reduce_dims: Vec<u16> },
@@ -1195,8 +1195,8 @@ fn packed_row_block(resolved: &BoundOp, quantized: &[Option<PackedCodec>]) -> Op
     classify_packed_row_block(resolved, quantized).ok()
 }
 
-/// Public diagnostic seam for [`classify_tiled_gemm`], same shape as
-/// [`PackedRowBlockRejection`] for [`classify_packed_row_block`]: one variant
+/// Public diagnostic seam for `classify_tiled_gemm`, same shape as
+/// [`PackedRowBlockRejection`] for `classify_packed_row_block`: one variant
 /// per `return`/`None` site in that function, in the order they are checked,
 /// so a caller printing `{rejection:?}` sees exactly which condition gave up
 /// on a real op instead of an inferred guess. `NotPackedRowBlock` wraps the
@@ -1207,19 +1207,19 @@ fn packed_row_block(resolved: &BoundOp, quantized: &[Option<PackedCodec>]) -> Op
 pub enum TiledGemmRejection {
     /// The `metal-tiled-gemm` feature is not compiled in -- the tiled path
     /// does not exist as far as this build can observe (see
-    /// [`classify_tiled_gemm`]'s own doc).
+    /// `classify_tiled_gemm`'s own doc).
     FeatureDisabled,
-    /// [`classify_packed_row_block`] itself rejected first; the tiled path
+    /// `classify_packed_row_block` itself rejected first; the tiled path
     /// can only narrow that gate's `Ok`, never rescue its `Err`.
     NotPackedRowBlock(PackedRowBlockRejection),
     /// The packed operand's codec is not [`PackedCodec::Q4K`] -- Q5_K/Q6_K
     /// have no batched-unpack helper for this path yet (see
-    /// [`classify_tiled_gemm`]'s own comment).
+    /// `classify_tiled_gemm`'s own comment).
     NotQ4K,
     /// `reduce_op`/`init` are not the plain `Add`-from-`Zero` shape
     /// `simdgroup_matrix` accumulation requires.
     NotAddZeroReduce,
-    /// [`is_plain_product_reduce`] is false -- the fused body carries more
+    /// `is_plain_product_reduce` is false -- the fused body carries more
     /// than a bare `weight * activation` product.
     NotPlainProductReduce,
     /// Every output axis partitions into a token group (activation-owned)
@@ -1232,10 +1232,10 @@ pub enum TiledGemmRejection {
     AxisOwnershipAmbiguous,
     /// The token or feature group has more than one axis, but they do NOT
     /// nest contiguously (for the owning operand, or for the op's own
-    /// output layout) — see [`axes_fold_contiguously`].
+    /// output layout) — see `axes_fold_contiguously`.
     AxisGroupNotContiguous,
     /// The token group's flattened extent is below
-    /// [`crate::sized::TILED_GEMM_MIN_TOKENS`] -- tiling overhead is not
+    /// `crate::sized::TILED_GEMM_MIN_TOKENS` -- tiling overhead is not
     /// amortized at this size.
     TokenExtentBelowMinimum { token_extent: u64, min_tokens: u64 },
 }
@@ -1246,7 +1246,7 @@ pub enum TiledGemmRejection {
 /// [`push_cooperative_reduce_body`] must reach IDENTICALLY, same discipline
 /// [`PackedRowBlock`] itself follows (see its own doc): this reads a
 /// CONCRETE extent (the activation/token axis, against
-/// [`crate::sized::TILED_GEMM_MIN_TOKENS`]) on top of `packed_row_block`'s
+/// `crate::sized::TILED_GEMM_MIN_TOKENS`) on top of `packed_row_block`'s
 /// own concrete-stride gate, so [`kernel_cache_key`] re-derives this too
 /// rather than caching by structure alone (`docs/discipline.md` ROW 107).
 struct TiledGemmBlock {

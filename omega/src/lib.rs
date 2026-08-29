@@ -2,7 +2,7 @@
 //! [`BoundOp`](proxima_tensor::BoundOp) descriptor — the GPU half of the
 //! bound-addressing seam.
 //!
-//! `proxima-tensor`'s [`cpu`](proxima_tensor::cpu) module interprets a
+//! `proxima-tensor`'s `cpu` module interprets a
 //! `BoundOp` with nested loops on the CPU; this crate emits Metal Shading
 //! Language source from the *same* descriptor instead. Neither backend's
 //! shape leaks into `proxima-tensor` — `bind::bind` says only what to

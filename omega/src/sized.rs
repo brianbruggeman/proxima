@@ -10,7 +10,7 @@
 //!   no `config.rs` alongside it: a runtime override would let a caller ask
 //!   for a value the hardware does not have, which is not configurability,
 //!   it is a footgun.
-//! - **Execution policy, build-time-configurable**: [`TILED_GEMM_MIN_TOKENS`],
+//! - **Execution policy, build-time-configurable**: `TILED_GEMM_MIN_TOKENS`,
 //!   `TILED_GEMM_BLOCK_M`, `TILED_GEMM_BLOCK_N`, `TILED_GEMM_BLOCK_K`
 //!   (`metal-tiled-gemm`-only, ROW 109's multi-simdgroup redesign — ports
 //!   `ggml-metal.metal:6487-6489`'s `BLOCK_SIZE_M`/`BLOCK_SIZE_N`/
@@ -26,7 +26,7 @@
 //!
 //! `msl` (this module's own crate) is alloc-tier and target-independent --
 //! emission never touches a device -- so [`SIMD_WIDTH`] is visible at every
-//! tier this crate has, matching `msl.rs`'s own gate. [`TILED_GEMM_MIN_TOKENS`]
+//! tier this crate has, matching `msl.rs`'s own gate. `TILED_GEMM_MIN_TOKENS`
 //! is gated to `feature = "metal-tiled-gemm"` alone (no `std` requirement):
 //! the tiled-GEMM eligibility check that reads it lives in `msl.rs` itself,
 //! which stays alloc-tier.
