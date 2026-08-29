@@ -263,7 +263,7 @@ impl Vocab {
     /// Attaches per-token [`TokenType`] tags (`tokenizer.ggml.token_type`),
     /// and indexes every [`TokenType::Control`]/[`TokenType::UserDefined`]
     /// entry's raw bytes into a trie so
-    /// [`Vocab::longest_added_token_match`] can recognize it literally in
+    /// `Vocab::longest_added_token_match` can recognize it literally in
     /// input text -- see [`crate::pipe::encode`]'s added-token pre-pass.
     /// Optional and additive: a [`Vocab`] built without this call behaves
     /// exactly as before (no literal-marker scanning), matching every
