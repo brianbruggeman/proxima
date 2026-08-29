@@ -7,7 +7,7 @@
 //!
 //! [`execute`] mirrors [`proxima_tensor::cpu::evaluate`]'s semantics
 //! exactly, over the same public API that function itself is built from:
-//! [`proxima_tensor::infer`] resolves shapes and symbols, [`proxima_tensor::bind`]
+//! [`proxima_tensor::infer`] resolves shapes and symbols, [`proxima_tensor::bind()`]
 //! produces the flat [`BoundOp`] sequence (with `Reduce(Elementwise)` fusion already
 //! decided), and per-nest buffer retirement is recomputed from that sequence
 //! the same way `cpu::evaluate`'s own `bound_op_retirement` does — a node's
@@ -21,13 +21,13 @@
 //! `msl.rs` never bakes a `BoundOp`'s concrete extents/strides/bases into
 //! source text — they are read at kernel runtime out of a `constant
 //! Uniforms&` buffer whose MSL struct layout is rendered field-by-field in
-//! [`crate::msl::render_elementwise`], [`render_reduce`](crate::msl::render_reduce)
-//! and [`render_scan`](crate::msl::render_scan). Every field in all three is
+//! `crate::msl::render_elementwise`, `render_reduce`
+//! and `render_scan`. Every field in all three is
 //! MSL `long` (an 8-byte, 8-byte-aligned integer) or an array of `long`, so
 //! there is no interior struct padding to reason about: packing is a flat
 //! concatenation of `i64`s in the exact field order those functions emit.
-//! [`pack_elementwise_uniforms`], [`pack_reduce_uniforms`] and
-//! [`pack_scan_uniforms`] each carry a comment pointing at the struct
+//! `pack_elementwise_uniforms`, `pack_reduce_uniforms` and
+//! `pack_scan_uniforms` each carry a comment pointing at the struct
 //! declaration they mirror, byte for byte.
 //!
 //! # Execution model
@@ -38,14 +38,14 @@
 //! and only then is it `commit()`ted and `waitUntilCompleted()` exactly
 //! once, in [`execute`]. Every expression used to pay a full CPU<->GPU
 //! round trip; batching means only the genuine program outputs
-//! ([`finish`]'s `effective_outputs`) ever cross back to the host, and
+//! (`finish`'s `effective_outputs`) ever cross back to the host, and
 //! intermediates never do (they already didn't — `device_buffers` keeps
 //! them GPU-resident between ops; what changes here is that the CPU no
 //! longer blocks between ops either).
 //!
 //! Ordering is guaranteed, not assumed: a later op reading a buffer an
 //! earlier op wrote is correct because every buffer here comes from
-//! `device.newBuffer*` (see [`allocate_buffer`], [`upload_block`]) with
+//! `device.newBuffer*` (see `allocate_buffer`, `upload_block`) with
 //! `MTLResourceOptions::StorageModeShared` only — never
 //! `HazardTrackingModeUntracked` — and a buffer's `hazardTrackingMode` for
 //! any resource created directly from a device (as opposed to a heap)
@@ -57,10 +57,10 @@
 //! encoders in the *same* command buffer whenever the later one reads what
 //! the earlier one wrote. That guarantee composes with [`execute`] encoding
 //! `prepared.resolved` strictly in program order (the same order
-//! [`prepare`]'s `bound_op_retirement` already relies on for liveness), so
+//! `prepare`'s `bound_op_retirement` already relies on for liveness), so
 //! sequential encode order plus default hazard tracking is the mechanism —
 //! not an assumption that the GPU happens to serialize. This holds equally
-//! for the no-copy buffers [`upload_block`] hands out (see "Host buffer
+//! for the no-copy buffers `upload_block` hands out (see "Host buffer
 //! upload" below): `newBufferWithBytesNoCopy_length_options_deallocator`
 //! takes the same `MTLResourceOptions`, so its hazard mode is identical.
 //!
@@ -79,12 +79,12 @@
 //! fetched index falls outside its dim's extent; a GPU kernel cannot
 //! propagate a `Result`, so `msl.rs` clamps for memory safety but also
 //! `atomic_fetch_max`s the offending index into a per-gather-slot `Fault`
-//! buffer (see that module's doc). [`encode_op`] allocates and zero-fills
+//! buffer (see that module's doc). `encode_op` allocates and zero-fills
 //! that buffer before every dispatch that gathers, but a fault buffer is
 //! only CPU-visible once the whole command buffer completes, so — unlike a
 //! per-op wait — [`execute`] cannot check it until after its single
 //! end-of-program `waitUntilCompleted`. It then walks every op that
-//! gathered, in program order, and — via [`check_gather_fault`] — turns the
+//! gathered, in program order, and — via `check_gather_fault` — turns the
 //! first nonzero slot into the identical `TensorError` `cpu.rs` would
 //! report for the same fetched index, wired through [`MetalError`]'s
 //! `#[from]` so [`execute`] and `cpu::evaluate` produce `assert_eq!`-equal
@@ -96,17 +96,17 @@
 //!
 //! # Host buffer upload
 //!
-//! [`upload_block`] is the one call on the copy of a caller-owned `&[f32]`
-//! into device memory ([`upload_uniforms`] copies too, but a *locally
+//! `upload_block` is the one call on the copy of a caller-owned `&[f32]`
+//! into device memory (`upload_uniforms` copies too, but a *locally
 //! packed* `Vec<u8>`, not caller data, so it is out of scope here). On
 //! unified memory that copy is pointless for the `Float32` path — CPU and
-//! GPU already address the same DRAM — so [`upload_block_as_float`] takes
+//! GPU already address the same DRAM — so `upload_block_as_float` takes
 //! the zero-copy `newBufferWithBytesNoCopy` path whenever `data`'s pointer
 //! AND byte length are both a multiple of [`page_size`] (that API's hard
 //! requirement), and otherwise falls back to the copying `newBufferWithBytes`
 //! path used everywhere else in this file. A `Float16` node's buffer is
 //! narrowed into a freshly allocated `Vec<f16>` first (see the dtype
-//! section below); that allocation is local to [`upload_block_as_half`] and
+//! section below); that allocation is local to `upload_block_as_half` and
 //! drops when it returns, so it can never take the no-copy path — doing so
 //! would hand Metal a dangling pointer the instant the function returns,
 //! since no deallocator callback is wired to keep the `Vec` alive for the
@@ -120,7 +120,7 @@
 //!
 //! # Resident blocks — the copying path's own cache
 //!
-//! "Copying uploads are deliberately not cached" (see [`NOCOPY_BUFFERS`]'s own
+//! "Copying uploads are deliberately not cached" (see `NOCOPY_BUFFERS`'s own
 //! doc) is right for a block whose bytes genuinely change every call --
 //! `ids`/`rope_cos`/`rope_sin`/the KV cache's own blocks -- because a stale
 //! copy would silently serve last token's data forever. It is wrong for a
@@ -136,7 +136,7 @@
 //! knowledge back in: a caller-supplied name set, checked once per [`Plan`]
 //! build against the program's own declared [`Op::name`]s, never against raw
 //! bytes -- see that method's own doc for why NAME is safe to classify
-//! against here even though [`NOCOPY_BUFFERS`]-style caching must never be
+//! against here even though `NOCOPY_BUFFERS`-style caching must never be
 //! keyed on name.
 //!
 //! # dtype and device-buffer marshalling
@@ -147,16 +147,16 @@
 //! *underneath* that contract is the device buffer each node's own dtype
 //! ([`Op::dtype`]) gets: a `Float32` node uploads/allocates/reads back
 //! 4-byte-per-element buffers exactly as before, but a `Float16` node's
-//! buffer is 2 bytes per element — [`upload_block`] narrows the caller's
+//! buffer is 2 bytes per element — `upload_block` narrows the caller's
 //! `f32` host data to `half::f16` once, at the host/device boundary, and
-//! [`read_back`] widens it back once, at the same boundary, on the way out.
+//! `read_back` widens it back once, at the same boundary, on the way out.
 //! Every byte a dispatch's kernel actually reads or writes in between —
 //! every input, every intermediate `BoundOp` output, the final result
 //! buffer — is genuinely half-width; the narrowing/widening is a one-time
 //! host-boundary conversion, not a disguise for still moving 4 bytes per
 //! element on the GPU-resident path this feature targets. A gather's
 //! `indices` node is the one exemption, exactly as in
-//! [`reject_unsupported_gpu_dtype`]: an index value stays f32-encoded
+//! `reject_unsupported_gpu_dtype`: an index value stays f32-encoded
 //! regardless of its own declared dtype, matching `cpu.rs`'s own stance.
 
 #[link(name = "CoreGraphics", kind = "framework")]
@@ -317,7 +317,7 @@ impl Plan {
     /// declared [`Op::name`] -- a one-time string compare over the program's
     /// declared inputs, off the per-token upload path -- never against the
     /// block's bytes or pointer. That is the necessary half of the
-    /// invariant this driver's [`NOCOPY_BUFFERS`] cache cannot provide on its
+    /// invariant this driver's `NOCOPY_BUFFERS` cache cannot provide on its
     /// own: an address match alone cannot distinguish a weight buffer that
     /// never moves from a freshly reallocated `ids`/KV-cache buffer that
     /// coincidentally lands at a freed address of the same size. The NAME
@@ -589,7 +589,7 @@ pub struct OpGpuTiming {
     pub weight_name: Option<String>,
     /// `bound.operands().len()` -- surfaced so a diagnostic caller can tell
     /// a two-operand (weight, activation) reduce, the shape
-    /// [`crate::msl::packed_row_block`] requires, from a fused reduce whose
+    /// `crate::msl::packed_row_block` requires, from a fused reduce whose
     /// element body absorbed a third operand (e.g. a gate/up product ahead
     /// of a down-projection), which disqualifies the row-blocked kernel via
     /// that same function's `quantized.len() != 2` check.
@@ -1422,7 +1422,7 @@ pub static OP_SETUP_CALLS: Counter = Counter::new("omega.metal.op_setup_calls");
 #[cfg(feature = "instrument")]
 pub static OP_SETUP_TICKS: Counter = Counter::new("omega.metal.op_setup_ticks");
 /// ROW 93's split of ROW 92's "inside-backend residual": the whole
-/// [`pipeline_for`] call (cache lookup on a hit, lookup+compile on a miss),
+/// `pipeline_for` call (cache lookup on a hit, lookup+compile on a miss),
 /// distinct from `EMIT_TICKS` (now the cheap `kernel_cache_key`/
 /// `kernel_dispatch_shape` pair, no MSL text) and from
 /// `PIPELINE_COMPILE_TICKS` (the compile-only sub-span that fires on a miss).
@@ -1488,7 +1488,7 @@ pub struct MetalStageTotals {
     pub copying_uploads: u64,
     pub nocopy_reuses: u64,
     /// How many of `block_upload_calls` were a caller-declared-static weight
-    /// -- see [`Plan::mark_resident`] and [`upload_resident_copy`]. A resident
+    /// -- see [`Plan::mark_resident`] and `upload_resident_copy`. A resident
     /// upload happens once per distinct weight buffer; a resident reuse
     /// happens every token after that. `resident_reuses` growing while
     /// `resident_uploads` stays flat at the weight count is the direct
@@ -1533,7 +1533,7 @@ pub fn metal_stage_totals() -> MetalStageTotals {
     }
 }
 
-/// How many real [`upload_block`] calls took each host->device path —
+/// How many real `upload_block` calls took each host->device path —
 /// incremented once per call, never per byte, so a caller can read back the
 /// no-copy hit rate after a run without an external profiler. See the
 /// module doc's "Host buffer upload" section.
@@ -1771,9 +1771,9 @@ thread_local! {
 }
 
 /// How many resident (caller-declared-static) blocks took a real copy versus
-/// how many were served from [`RESIDENT_BUFFERS`] instead -- the direct
+/// how many were served from `RESIDENT_BUFFERS` instead -- the direct
 /// witness that the ~5.84 GB/token `proxima-tensor/docs/discipline.md` ROW 82
-/// measured moving through [`upload_block_copy`] on every step now moves
+/// measured moving through `upload_block_copy` on every step now moves
 /// exactly once per distinct weight buffer, never once per token.
 pub static RESIDENT_BUFFER_UPLOADS: Counter = Counter::new("omega.metal.upload_block.resident_upload");
 pub static RESIDENT_BUFFER_REUSES: Counter = Counter::new("omega.metal.upload_block.resident_reuse");
