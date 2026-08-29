@@ -56,7 +56,7 @@
 //!   that genuinely need threads or an allocator are `std`-gated.
 //! - **`std` feature (on by default)**: no extra surface of its own — it
 //!   turns off `no_std` and admits the thread- and `format!`-using tests.
-//! - **`config` feature (std, opt-in)**: [`config`] — the principle-4
+//! - **`config` feature (std, opt-in)**: `config` — the principle-4
 //!   config + fluent-builder surface for [`anchor::AnchorCell`]'s initial
 //!   `(ticks, unix_nanos)` pair. `conflaguration` is std-only, so this
 //!   lives at the std composition boundary; the no-alloc core never
