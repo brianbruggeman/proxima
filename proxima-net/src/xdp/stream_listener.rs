@@ -22,7 +22,6 @@
 
 use super::bpf::XdpProgram;
 use super::error::XdpError;
-use prime::os::readiness::{Readiness, ReadyState};
 use super::sized;
 use super::sys;
 use super::uapi::{self, xdp_desc};
@@ -31,6 +30,7 @@ use crate::stack::{self, Action};
 use crate::tcp_listener::{Endpoint, Inbound, OutSegment};
 use crate::tcp_stack::{ConnId, TcpStack};
 use futures::io::{AsyncRead, AsyncWrite};
+use prime::os::readiness::{Readiness, ReadyState};
 use proxima_primitives::stream::{
     BindAddr, PeerInfo, StreamConnection, StreamListener, StreamUpstream,
 };

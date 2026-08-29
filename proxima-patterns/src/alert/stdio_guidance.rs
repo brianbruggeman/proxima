@@ -18,7 +18,9 @@ use proxima_primitives::pipe::ProximaError;
 use proxima_primitives::pipe::SendPipe;
 use proxima_primitives::pipe::request::Response;
 use proxima_primitives::sync::Mutex;
-use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWrite, AsyncWriteExt, BufReader, Stdin, Stdout};
+use tokio::io::{
+    AsyncBufRead, AsyncBufReadExt, AsyncWrite, AsyncWriteExt, BufReader, Stdin, Stdout,
+};
 use ulid::Ulid;
 
 use crate::alert::event::{AnswerString, GuidanceAnswer, GuidanceRequestId, ResponderString};

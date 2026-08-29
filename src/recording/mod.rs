@@ -13,9 +13,9 @@ pub use proxima_recording::{
     BinSource, BinSourceFactory, CacheOutcome, DynRecordingSource, DynRecordingSourceFactory,
     EventSource, FrameMetadata, HttpEvent, INDEX_RECORD_BYTES, IndexReader, IndexRecord,
     IndexWriter, InteractionId, JsonlSource, JsonlSourceFactory, PipelineEvent, PipelineOutcome,
-    ProcessEvent, ProtocolEvent, RECORDING_FORMAT_VERSION, RecordMeta,
-    RecordingEvent, RecordingEventStream, RecordingSource, RecordingSourceFactory,
-    RecordingSourceRegistry, RequestHeader, SourceBuildFuture, event, factory, source,
+    ProcessEvent, ProtocolEvent, RECORDING_FORMAT_VERSION, RecordMeta, RecordingEvent,
+    RecordingEventStream, RecordingSource, RecordingSourceFactory, RecordingSourceRegistry,
+    RequestHeader, SourceBuildFuture, event, factory, source,
 };
 
 // sink half relocated to the spigot layer.

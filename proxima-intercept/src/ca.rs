@@ -349,8 +349,7 @@ mod tests {
             x509_parser::parse_x509_certificate(der.contents()).expect("parse ca der");
 
         assert!(
-            x509
-                .name_constraints()
+            x509.name_constraints()
                 .expect("name constraints extension parses")
                 .is_none(),
             "unconstrained ca must not carry a name constraints extension"
@@ -359,8 +358,7 @@ mod tests {
 
     #[test]
     fn generate_constrained_ca_carries_critical_permitted_subtree() {
-        let ca =
-            generate_constrained_ca(&["api.anthropic.com"]).expect("generate constrained ca");
+        let ca = generate_constrained_ca(&["api.anthropic.com"]).expect("generate constrained ca");
         let pem = ca_cert_pem(&ca).expect("ca pem");
         let der = pem::parse(&pem).expect("parse ca pem");
         let (_remainder, x509) =
@@ -393,8 +391,7 @@ mod tests {
 
     #[test]
     fn constrained_ca_verifies_conforming_leaf_and_rejects_violating_leaf() {
-        let ca =
-            generate_constrained_ca(&["api.anthropic.com"]).expect("generate constrained ca");
+        let ca = generate_constrained_ca(&["api.anthropic.com"]).expect("generate constrained ca");
 
         let (conforming_chain, _key) =
             generate_domain_cert(&ca, "api.anthropic.com").expect("conforming domain cert");
@@ -425,9 +422,9 @@ mod tests {
             )
             .expect_err("leaf outside the permitted subtree must fail closed");
 
-        let rustls::Error::InvalidCertificate(rustls::CertificateError::Other(
-            rustls::OtherError(inner),
-        )) = error
+        let rustls::Error::InvalidCertificate(rustls::CertificateError::Other(rustls::OtherError(
+            inner,
+        ))) = error
         else {
             panic!("expected an InvalidCertificate(Other) error, got: {error:?}");
         };
@@ -446,24 +443,35 @@ mod tests {
 
         let subject_of = |ca: &CaKeyPair| {
             let pem = ca_cert_pem(ca).expect("render ca pem");
-            let (_, parsed) = x509_parser::pem::parse_x509_pem(pem.as_bytes())
-                .expect("parse pem");
+            let (_, parsed) = x509_parser::pem::parse_x509_pem(pem.as_bytes()).expect("parse pem");
             let cert = parsed.parse_x509().expect("parse x509");
             cert.subject().to_string()
         };
 
-        let subjects = [subject_of(&anthropic), subject_of(&openai), subject_of(&unconstrained)];
+        let subjects = [
+            subject_of(&anthropic),
+            subject_of(&openai),
+            subject_of(&unconstrained),
+        ];
         // a path builder selects trust anchors by subject DN; same-named CAs
         // with different keys chain leaves to the wrong constrained anchor.
-        assert_ne!(subjects[0], subjects[1], "service cas must not share a subject");
-        assert_ne!(subjects[0], subjects[2], "constrained ca must not shadow the legacy name");
-        assert_ne!(subjects[1], subjects[2], "constrained ca must not shadow the legacy name");
+        assert_ne!(
+            subjects[0], subjects[1],
+            "service cas must not share a subject"
+        );
+        assert_ne!(
+            subjects[0], subjects[2],
+            "constrained ca must not shadow the legacy name"
+        );
+        assert_ne!(
+            subjects[1], subjects[2],
+            "constrained ca must not shadow the legacy name"
+        );
     }
 
     #[test]
     fn round_trip_constrained_ca_through_disk_still_signs_and_verifies() {
-        let ca =
-            generate_constrained_ca(&["api.anthropic.com"]).expect("generate constrained ca");
+        let ca = generate_constrained_ca(&["api.anthropic.com"]).expect("generate constrained ca");
         let dir = tempfile::tempdir().expect("tempdir");
         let cert_path = dir.path().join("ca.pem");
         let key_path = dir.path().join("ca-key.pem");

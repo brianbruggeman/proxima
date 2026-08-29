@@ -102,9 +102,13 @@ mod tests {
 
     #[test]
     fn validate_rejects_a_cap_below_the_shortest_complete_command() {
-        let too_small = MemcachedServerConfig::builder().max_message_bytes(4).build();
+        let too_small = MemcachedServerConfig::builder()
+            .max_message_bytes(4)
+            .build();
         assert!(too_small.validate().is_err());
-        let shortest = MemcachedServerConfig::builder().max_message_bytes(5).build();
+        let shortest = MemcachedServerConfig::builder()
+            .max_message_bytes(5)
+            .build();
         assert!(shortest.validate().is_ok());
     }
 
@@ -112,7 +116,9 @@ mod tests {
     /// socket with — it must not be a config the validator rejects.
     #[test]
     fn validate_accepts_the_tight_cap_the_end_to_end_suite_uses() {
-        let config = MemcachedServerConfig::builder().max_message_bytes(8).build();
+        let config = MemcachedServerConfig::builder()
+            .max_message_bytes(8)
+            .build();
         assert!(config.validate().is_ok());
     }
 }

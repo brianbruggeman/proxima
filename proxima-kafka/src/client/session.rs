@@ -217,9 +217,7 @@ impl ClientSession {
         let mut wire_bytes = Vec::new();
         KafkaFrameCodec
             .encode_frame(&payload.as_slice(), &mut wire_bytes)
-            .map_err(|_frame_too_large| ClientError::RequestTooLarge {
-                len: payload.len(),
-            })?;
+            .map_err(|_frame_too_large| ClientError::RequestTooLarge { len: payload.len() })?;
 
         self.next_correlation_id += 1;
         self.outbound.extend_from_slice(&wire_bytes);

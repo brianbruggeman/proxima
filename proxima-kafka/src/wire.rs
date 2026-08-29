@@ -968,7 +968,9 @@ mod tests {
         write_string(&mut encoded, &value);
 
         let mut reader = Reader::new(&encoded);
-        let decoded = reader.read_string().expect("a truncated string is still valid utf-8");
+        let decoded = reader
+            .read_string()
+            .expect("a truncated string is still valid utf-8");
         assert_eq!(decoded.len(), i16::MAX as usize - 1);
         assert!(value.starts_with(&decoded));
     }

@@ -1100,10 +1100,7 @@ mod tests {
         }
     }
 
-    fn local_upstream(
-        label: &str,
-        weight: u32,
-    ) -> (ThreadLocalUpstreamRef, Rc<Cell<usize>>) {
+    fn local_upstream(label: &str, weight: u32) -> (ThreadLocalUpstreamRef, Rc<Cell<usize>>) {
         let calls = Rc::new(Cell::new(0));
         let pipe = CountingLocalPipe {
             label: label.into(),

@@ -16,9 +16,9 @@ use proxima_codec::Datagram;
 use proxima_primitives::pipe::SendPipe;
 #[cfg(feature = "client")]
 use proxima_protocols::dns::RData;
-use proxima_protocols::dns::codec_trait::Message;
 #[cfg(feature = "listen")]
 use proxima_protocols::dns::codec_trait::DnsDatagramCodec;
+use proxima_protocols::dns::codec_trait::Message;
 use proxima_protocols::dns::encode;
 #[cfg(feature = "listen")]
 use proxima_telemetry::warn;
@@ -214,6 +214,12 @@ pub(crate) async fn answer_datagram(
         }
     };
 
+    // 204 is the DNS listener's explicit no-reply sentinel. It lets a
+    // policy pipe implement a true sinkhole/ignore action without inventing
+    // a DNS RCODE (all RCODEs are observable replies to a resolver).
+    if reply.status == 204 {
+        return None;
+    }
     let mut out = Vec::new();
     if let Err(error) = answer_to_wire(&query, &reply.payload, &mut out) {
         warn!(%label, %peer, ?error, "dns answer failed to encode; dropping");

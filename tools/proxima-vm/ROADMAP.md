@@ -601,34 +601,3 @@ Full gate at close: nextest 43/43, clippy `--all-targets` clean,
 (host needs `CC/AR/LINKER=x86_64-unknown-linux-gnu-gcc` scoped per command),
 all `bench_elf` arms running. Worktree `../proxima-elf-reshape` holds the
 reshape's original (now ported) work — removal is the owner's call.
-
-## State update — 2026-08-26 (later), this worktree: M5b exit criterion met
-
-Nothing here is a seal — the owner reviews and rules. What ran, in this
-worktree (`proxima-m6`), all uncommitted, all gates green at 172/172:
-
-- **M6 device plane complete**: virtio console/net/blk as sans-IO codecs +
-  transports + real-VM-exit proofs; mmio codec; DeviceStatus FSM.
-- **M3** instrument (mac-lane-honest, degenerate control passed exactly),
-  **M4** named guest memory (mach memory entry / memfd; ~15-30% wall cost,
-  the price of forkability), **M7** snapshot (restore 0.67-0.74ms vs
-  5.2-6.0ms cold create; pc-rewind re-trap proof), **M11** page-table
-  walker (all four formats; real QEMU differentials x86-64 4/5-level +
-  aarch64 stage-1 via gva2gpa; S2AP stage-2 decode fixed spec-settled).
-- **M5 slice chain**: FDT via vm-fdt+fdt (incumbent won — no hand-roll;
-  real dtc differential), PSCI handler (HVC conduit, DEN0022 return
-  codes), GICv3 GICD+GICR register blocks + MMIO windows + EC-0x18 ICC
-  sysreg file, vtimer exit arm, pl011 + DTB uart/clock/stdout-path.
-- **M5b criterion MET**: a real Alpine arm64 kernel (EFI-zboot-carved
-  Image, sha256 5d994c69…) boots at RAM base 0x4000_0000 and emits
-  **7231 pl011 bytes** ("Booting Linux on physical CPU 0x0…
-  earlycon… legacy bootconsole [pl11] enabled"), asserted nonzero by
-  `tests/kernel_boot.rs` (UNMEASURED-skip without the kernel asset).
-  Boot stats: mmio traps 22051 (gicd 325 / gicr 33 / pl011 21693),
-  vtimer 1. The phantom zero-bytes was the harness discarding captured
-  bytes on non-clean exits (emitted_length_out gated on result==0) —
-  fixed; bytes+stats now travel on either outcome.
-- Beyond the criterion: next wall is an unmodeled ICC register (error
-  currently discards the (op0,op1,crn,crm,op2) tuple — capture fix
-  queued); deeper boot needs interrupt injection (IAR1 is always
-  spurious today). KVM lane still compile-only — no /dev/kvm here.

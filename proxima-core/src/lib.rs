@@ -44,10 +44,10 @@ pub mod arena;
 pub mod ring;
 // per-worker BytesMut reservoir; std-only (thread_local has no no_std
 // analog). folded in from the former proxima-io satellite crate.
-#[cfg(feature = "std")]
-pub mod buffer;
 #[cfg(feature = "alloc")]
 pub mod batch;
+#[cfg(feature = "std")]
+pub mod buffer;
 pub mod datagram_batch;
 pub mod factory;
 // histogram accumulates count/sum/buckets in AtomicU64; targets without

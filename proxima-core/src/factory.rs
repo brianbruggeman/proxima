@@ -94,13 +94,17 @@ mod registry {
 
         /// look up a factory by its registered name.
         pub fn get(&self, name: &str) -> Result<Arc<F>, ProximaError> {
-            self.factories.load_full().get(name).cloned().ok_or_else(|| {
-                RegistryError::NotRegistered {
-                    kind: "factory",
-                    name: name.to_string(),
-                }
-                .into()
-            })
+            self.factories
+                .load_full()
+                .get(name)
+                .cloned()
+                .ok_or_else(|| {
+                    RegistryError::NotRegistered {
+                        kind: "factory",
+                        name: name.to_string(),
+                    }
+                    .into()
+                })
         }
 
         /// the registered factory names, sorted.
@@ -157,10 +161,14 @@ mod registry {
             }));
             assert!(matches!(
                 outcome,
-                Err(ProximaError::RegistryKind(RegistryError::AlreadyRegistered { .. }))
+                Err(ProximaError::RegistryKind(
+                    RegistryError::AlreadyRegistered { .. }
+                ))
             ));
             assert_eq!(
-                outcome.expect_err("duplicate registration must fail").to_string(),
+                outcome
+                    .expect_err("duplicate registration must fail")
+                    .to_string(),
                 "registry: factory 'dup' already registered"
             );
         }
@@ -185,10 +193,15 @@ mod registry {
             let outcome = registry.get("absent");
             assert!(matches!(
                 outcome,
-                Err(ProximaError::RegistryKind(RegistryError::NotRegistered { .. }))
+                Err(ProximaError::RegistryKind(
+                    RegistryError::NotRegistered { .. }
+                ))
             ));
             assert_eq!(
-                outcome.err().expect("lookup of an absent name must fail").to_string(),
+                outcome
+                    .err()
+                    .expect("lookup of an absent name must fail")
+                    .to_string(),
                 "registry: no factory named 'absent'"
             );
         }
@@ -481,7 +494,9 @@ mod config {
                 .build();
             assert!(matches!(
                 registry.build(&composition),
-                Err(ProximaError::RegistryKind(RegistryError::NotRegistered { .. }))
+                Err(ProximaError::RegistryKind(
+                    RegistryError::NotRegistered { .. }
+                ))
             ));
         }
     }

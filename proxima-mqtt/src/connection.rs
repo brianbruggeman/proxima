@@ -174,8 +174,7 @@ fn connect_request(
         return Ok(None);
     }
     let clean_session = connect_flags & 0x02 != 0;
-    let ConnectCredentials { username, password } =
-        parse_connect_credentials(connect_flags, rest)?;
+    let ConnectCredentials { username, password } = parse_connect_credentials(connect_flags, rest)?;
     Ok(Some(build_connect_request(
         client_id,
         clean_session,
@@ -351,8 +350,7 @@ where
                     if !state.connected && !matches!(packet, Packet::Connect { .. }) {
                         return Ok(());
                     }
-                    let outcome =
-                        dispatch_packet(packet, handler, broker, state, admission).await;
+                    let outcome = dispatch_packet(packet, handler, broker, state, admission).await;
                     connection.consume(consumed);
                     match outcome {
                         FrameOutcome::Reply(bytes) => out.extend_from_slice(&bytes),

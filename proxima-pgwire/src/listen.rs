@@ -31,9 +31,9 @@ use futures::channel::oneshot;
 use serde_json::Value;
 
 #[cfg(feature = "tokio-compat")]
-use std::io;
-#[cfg(feature = "tokio-compat")]
 use proxima_telemetry::{debug, warn};
+#[cfg(feature = "tokio-compat")]
+use std::io;
 
 use proxima_core::ProximaError;
 use proxima_listen::{ListenProtocol, ServeContext};

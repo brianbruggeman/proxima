@@ -882,7 +882,11 @@ mod tests {
         for value in [11, 22, 33, 44] {
             RING.push(value).unwrap();
         }
-        assert_eq!(RING.push(55), Err(55), "a const-built ring bounds like any other");
+        assert_eq!(
+            RING.push(55),
+            Err(55),
+            "a const-built ring bounds like any other"
+        );
         assert_eq!(RING.dequeue(), Some(11));
     }
 
