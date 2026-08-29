@@ -73,9 +73,22 @@ declare -a cells=(
     # (`instrument.rs`'s unconditional `OnceLock` import, used only by
     # `timebase()`'s `cfg(target_os = "macos")` body, plus the same class in
     # `bench_q4k_superblock_phases.rs` and `proxima-model-interop`). Guarded
-    # rather than a bare command: a missing target must print a named SKIP
-    # line, never silently exit 0 and read as a pass.
-    "portable clippy cross-check|if rustup target list --installed | grep -qx \"${PORTABLE_TARGET}\"; then env CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER=${PORTABLE_TARGET}-gcc CC_x86_64_unknown_linux_gnu=${PORTABLE_TARGET}-gcc CXX_x86_64_unknown_linux_gnu=${PORTABLE_TARGET}-g++ AR_x86_64_unknown_linux_gnu=${PORTABLE_TARGET}-ar cargo clippy --target ${PORTABLE_TARGET} -p proxima-tensor --all-targets --all-features -- -D warnings; else printf 'SKIP: %s is not installed (rustup target add %s) -- this cell did NOT run and must not read as a pass.\n' \"${PORTABLE_TARGET}\" \"${PORTABLE_TARGET}\"; fi"
+    # rather than a bare command: a missing target or toolchain must print a
+    # named SKIP line, never silently exit 0 and read as a pass.
+    #
+    # the cross-linker env is homebrew's mac-only naming
+    # (`x86_64-unknown-linux-gnu-gcc`) and must NEVER be forced onto a host
+    # where `${PORTABLE_TARGET}` is the NATIVE target -- that is exactly
+    # ubuntu CI, whose own compiler is plain `cc` / `x86_64-linux-gnu-gcc`,
+    # not the brew cross-binary. `rustup target list --installed` is true on
+    # CI too (it's the native target), so that check alone is not enough:
+    # the cell must also confirm it is genuinely CROSS-compiling (host triple
+    # != target triple) before it goes looking for a cross toolchain, and
+    # must probe for that toolchain with `command -v` rather than assume it.
+    # On a native x86_64-linux host this is a clean, named SKIP -- the
+    # `default clippy` cell above already clippies proxima-tensor natively,
+    # so skipping here is redundant coverage, not lost coverage.
+    "portable clippy cross-check|host_triple=\"\$(rustc -vV | awk '/^host:/ {print \$2}')\"; if [ \"\$host_triple\" = \"${PORTABLE_TARGET}\" ]; then printf 'SKIP: host is already %s (native) -- default clippy cell above already covers it natively; this cell only exists to cross-compile.\n' \"${PORTABLE_TARGET}\"; elif ! rustup target list --installed | grep -qx \"${PORTABLE_TARGET}\"; then printf 'SKIP: %s is not installed (rustup target add %s) -- this cell did NOT run and must not read as a pass.\n' \"${PORTABLE_TARGET}\" \"${PORTABLE_TARGET}\"; elif ! command -v \"${PORTABLE_TARGET}-gcc\" >/dev/null 2>&1; then printf 'SKIP: %s-gcc not found on PATH (brew install %s) -- this cell did NOT run and must not read as a pass.\n' \"${PORTABLE_TARGET}\" \"${PORTABLE_TARGET}\"; else env CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER=${PORTABLE_TARGET}-gcc CC_x86_64_unknown_linux_gnu=${PORTABLE_TARGET}-gcc CXX_x86_64_unknown_linux_gnu=${PORTABLE_TARGET}-g++ AR_x86_64_unknown_linux_gnu=${PORTABLE_TARGET}-ar cargo clippy --target ${PORTABLE_TARGET} -p proxima-tensor --all-targets --all-features -- -D warnings; fi"
 
     # tiers. `alloc` alone is the no_std floor this crate claims.
     #
