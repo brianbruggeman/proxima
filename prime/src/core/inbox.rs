@@ -36,7 +36,6 @@ compile_error!(
 );
 
 #[cfg(feature = "runtime-prime-inbox-alloc")]
-#[cfg(feature = "runtime-prime-inbox-alloc")]
 use alloc::boxed::Box;
 #[cfg(feature = "runtime-prime-inbox-alloc")]
 use alloc::sync::Arc;
