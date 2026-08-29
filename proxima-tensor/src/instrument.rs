@@ -96,7 +96,7 @@ fn timebase() -> (u64, u64) {
 
 /// The one-time-per-export conversion [`Ticks`]'s own doc names as the only
 /// place this multiply/divide belongs. Identity on platforms whose raw tick
-/// unit is already nanoseconds (everywhere [`raw_tick`] is not
+/// unit is already nanoseconds (everywhere `raw_tick` is not
 /// `mach_absolute_time`).
 #[must_use]
 pub fn ticks_to_nanos(ticks: u64) -> u64 {
@@ -1304,7 +1304,7 @@ fn reset_quantize_activation_calls() {
 
 /// How many times `cpu::build_matmul_stage_plan`'s own per-step
 /// `staged_quantize_cache` (ROW 140's fix) served an already-quantized
-/// `Arc<[u8]>` instead of paying [`quantize_row_q8k_dispatch`] again for the
+/// `Arc<[u8]>` instead of paying `quantize_row_q8k_dispatch` again for the
 /// same activation node. Zero on a build that never lands the fix; nonzero
 /// is the direct witness that the cache is doing real work, not just
 /// compiling.
