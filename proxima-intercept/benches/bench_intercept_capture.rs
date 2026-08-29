@@ -17,18 +17,18 @@
 //!
 //! groups (and design-favors per workload):
 //!   - capture_typical_post_turn   design-favors: incumbent
-//!       (one ~200B request body + one ~1.8KB response body, end-to-end
-//!        lifecycle. incumbent's home turf — single blob write per
-//!        direction. we expect to lose on raw throughput because we
-//!        parse headers, redact secrets, frame zstd, and write 6 events
-//!        per interaction. acceptance: stay within an order of magnitude.)
+//!     (one ~200B request body + one ~1.8KB response body, end-to-end
+//!     lifecycle. incumbent's home turf — single blob write per
+//!     direction. we expect to lose on raw throughput because we
+//!     parse headers, redact secrets, frame zstd, and write 6 events
+//!     per interaction. acceptance: stay within an order of magnitude.)
 //!   - capture_streaming_chunks    design-favors: neither
-//!       (32 small response chunks, mimicking an SSE/WS turn at modest
-//!        rate. both sides can append per chunk; primitive op shape.)
+//!     (32 small response chunks, mimicking an SSE/WS turn at modest
+//!     rate. both sides can append per chunk; primitive op shape.)
 //!   - parse_request_header_redact design-favors: proxima
-//!       (parse + redact is a feature gap for the incumbent — they can't
-//!        do redaction. proxima-favored arm exists as the noise floor;
-//!        result is what we get for free vs the incumbent's nothing.)
+//!     (parse + redact is a feature gap for the incumbent — they can't
+//!     do redaction. proxima-favored arm exists as the noise floor;
+//!     result is what we get for free vs the incumbent's nothing.)
 
 use std::path::Path;
 use std::time::Duration;
