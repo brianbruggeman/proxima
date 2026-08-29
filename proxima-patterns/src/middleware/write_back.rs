@@ -2,9 +2,9 @@ use std::future::Future;
 use std::sync::Arc;
 
 use crate::kv::cache_key_for_storage;
-use crate::middleware::labels_with;
 use crate::kv::write_back::WriteBackConditions;
 use crate::kv::{CacheEntry, KvHandle};
+use crate::middleware::labels_with;
 use bytes::Bytes;
 use proxima_core::ProximaError;
 use proxima_primitives::pipe::Method;
@@ -262,7 +262,6 @@ impl Pipe for WriteBack<ThreadLocalPipeHandle> {
     }
 }
 
-
 #[cfg(test)]
 // the workspace denies unwrap/expect; tests assert through them.
 #[allow(clippy::unwrap_used, clippy::expect_used)]
@@ -352,11 +351,19 @@ mod tests {
 
         let response = SendPipe::call(&pipe, request("GET")).await.expect("call");
         assert_eq!(response.status, 200);
-        assert_eq!(backend.entries(), 0, "the tap fires only once the body ends");
+        assert_eq!(
+            backend.entries(),
+            0,
+            "the tap fires only once the body ends"
+        );
 
         let body = response.collect_body().await.expect("collect");
         assert_eq!(&body[..], b"hello world");
-        assert_eq!(backend.entries(), 1, "draining the body populates the cache");
+        assert_eq!(
+            backend.entries(),
+            1,
+            "draining the body populates the cache"
+        );
 
         let key = cache_key_for_storage(&request("GET"), None);
         let cached = backend.get(&key).expect("cached entry");

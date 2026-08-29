@@ -17,7 +17,6 @@
 
 use super::bpf::XdpProgram;
 use super::error::XdpError;
-use prime::os::readiness::{Readiness, ReadyState};
 use super::sized;
 use super::sys;
 use super::uapi::{self, xdp_desc};
@@ -25,6 +24,7 @@ use super::xsk::{RingSizes, UmemConfig, XskSocket};
 use crate::packet::{Packet, PacketListener};
 use crate::stack::{self, Action};
 use bytes::Bytes;
+use prime::os::readiness::{Readiness, ReadyState};
 use proxima_protocols::inet::ethernet::{self, EtherType, EthernetFrame};
 use proxima_protocols::inet::ipv4::{self, Ipv4Header, Ipv4Protocol};
 use proxima_protocols::inet::udp::{self, UdpHeader};

@@ -435,7 +435,10 @@ mod alloc_tier_tests {
     fn json_round_trips_value_for_value() {
         let value = synth_value();
         let text = JsonConfigFormat.serialize(&value).expect("json serialize");
-        assert_eq!(JsonConfigFormat.parse(&text).expect("json parse back"), value);
+        assert_eq!(
+            JsonConfigFormat.parse(&text).expect("json parse back"),
+            value
+        );
     }
 
     #[test]

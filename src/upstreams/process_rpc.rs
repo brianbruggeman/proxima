@@ -656,7 +656,11 @@ mod tests {
             let mut buffer = [0_u8; 32];
             // SAFETY: duped_read is a live fd owned by this thread.
             let bytes_read = unsafe {
-                libc::read(duped_read.as_raw_fd(), buffer.as_mut_ptr().cast(), buffer.len())
+                libc::read(
+                    duped_read.as_raw_fd(),
+                    buffer.as_mut_ptr().cast(),
+                    buffer.len(),
+                )
             };
             assert!(bytes_read >= 0, "read: {}", io::Error::last_os_error());
             result_tx

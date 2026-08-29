@@ -35,21 +35,19 @@ const EMIT_VERB: u16 = 0xfffe;
 /// Sentinel verb ending the run loop.
 const HALT_VERB: u16 = 0xffff;
 
-/// `ChildRequest::Read { handle: 0, max_bytes: 256, offset: 0 }`,
-/// postcard-encoded — fd-keyed post-P0 (`tools/proxima-vm/ROADMAP.md`
-/// P0): variant discriminant `0x00`, then `handle` zigzag-LEB128(0) =
-/// `0x00`, then `varint(max_bytes=256)` = `[0x80, 0x02]`, then
-/// `varint(offset=0)` = `0x00`.
-const CHILD_REQUEST_READ_WIRE_BYTES: [u8; 5] = [0x00, 0x00, 0x80, 0x02, 0x00];
+/// `ChildRequest::Read { path: "/etc/hostname", max_bytes: 256, offset: 0 }`,
+/// postcard-encoded, byte-for-byte the buffer `dispatch.rs`'s
+/// `wire_format_round_trips_for_parity` pins as `expected`.
+const CHILD_REQUEST_READ_WIRE_BYTES: [u8; 18] = [
+    0x00, 13, b'/', b'e', b't', b'c', b'/', b'h', b'o', b's', b't', b'n', b'a', b'm', b'e', 0x80,
+    0x02, 0x00,
+];
 
-/// `ChildRequest::Close { handle: 0 }`, postcard-encoded: variant
-/// discriminant `0x03`, then `handle` zigzag-LEB128(0) = `0x00`
-/// (`proxima-protocols/src/process/protocol.rs`'s fd-keyed `Close`).
-const CHILD_REQUEST_CLOSE_WIRE_BYTES: [u8; 2] = [0x03, 0x00];
-
-mod virtio_blk;
-mod virtio_console;
-mod virtio_net;
+/// `ChildRequest::Close { path: "/lambda" }`, postcard-encoded: variant
+/// discriminant `0x03`, then `varint(len=7)`, then the path's UTF-8 bytes
+/// (`proxima-protocols/src/process/protocol.rs:59-67`'s `String` wire rule).
+const CHILD_REQUEST_CLOSE_WIRE_BYTES: [u8; 9] =
+    [0x03, 0x07, b'/', b'l', b'a', b'm', b'b', b'd', b'a'];
 
 #[unsafe(no_mangle)]
 #[unsafe(naked)]
@@ -85,22 +83,6 @@ extern "C" fn entry() -> ! {
     unsafe { hypercall::hypercall(CHILD_REQUEST_CLOSE_VERB, &mut close_request) };
     let mut emit_close = [close_request[0]];
     unsafe { hypercall::hypercall(EMIT_VERB, &mut emit_close) };
-
-    // M6 slice 3: drive virtio-console over the mmio transport through real
-    // data-abort VM exits — separate from the hvc-based ChildRequest
-    // channel above, proving the second, independent exit path.
-    unsafe { virtio_console::bring_up_and_transmit_one_byte() };
-
-    // M6 slice 5: drive virtio-net over its own mmio window through real
-    // data-abort VM exits — a second, independent device sharing the same
-    // exit-routing mechanism the console device above already proved.
-    unsafe { virtio_net::bring_up_and_transmit_one_frame() };
-
-    // M6 slice 6: drive virtio-blk over its own mmio window — the third
-    // device sharing the same exit-routing mechanism, and the first one
-    // whose request round-trips (an `IN` the device writes back into) rather
-    // than only ever being read from by the host.
-    unsafe { virtio_blk::bring_up_and_exercise_one_sector() };
 
     let mut halt = [0_u8; 0];
     unsafe { hypercall::hypercall(HALT_VERB, &mut halt) };

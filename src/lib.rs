@@ -373,8 +373,7 @@ pub use body::{ChunkStream, RequestStream, ResponseStream};
 pub use buffer_pool::{BufferPool, DEFAULT_BUFFER_BYTES, DEFAULT_POOL_PER_WORKER, PooledBuf};
 pub use client::{
     Client, ClientBuilder, ClientProtocol, ClientProtocolExt, ClientSecurityExt,
-    ClientTransportExt, FramedClient, RequestBuilder as ClientRequestBuilder,
-    Response as ClientResponse,
+    ClientTransportExt, RequestBuilder as ClientRequestBuilder, Response as ClientResponse,
 };
 pub use codec::{BytesPassthrough, FrameCodec, JsonCodec, MessageCodec, StatefulCodec, WireCodec};
 pub use codec_factory::{
@@ -447,9 +446,9 @@ pub use recording::{
     DynRecordingSink, DynRecordingSource, DynRecordingSourceFactory, EventSource, EventTap,
     FailMode, FanOut, FormatKind, HttpEvent, INDEX_RECORD_BYTES, IndexReader, IndexRecord,
     IndexWriter, InteractionId, JsonlSource, JsonlSourceFactory, LazyFanOut, PipelineEvent,
-    PipelineOutcome, ProcessEvent, ProtocolEvent, RECORD_DROP_METRIC,
-    RECORDING_FORMAT_VERSION, RecordMeta, RecordingEvent, RecordingEventStream, RecordingSink,
-    RecordingSource, RecordingSourceFactory, RecordingSourceRegistry, ReplayLog,
+    PipelineOutcome, ProcessEvent, ProtocolEvent, RECORD_DROP_METRIC, RECORDING_FORMAT_VERSION,
+    RecordMeta, RecordingEvent, RecordingEventStream, RecordingSink, RecordingSource,
+    RecordingSourceFactory, RecordingSourceRegistry, ReplayLog,
     RequestHeader as RecordingRequestHeader, SinkSpec, SourceBuildFuture, TerminalSignal,
     deferred_runtime,
 };
@@ -517,16 +516,14 @@ pub use upstreams::{
     CallbackFn, CallbackFuture, CallbackPipeFactory, CallbackRegistry, CallbackUpstream,
     DynCallbackFn, KvCache, KvCacheFactory, KvFile, KvFileFactory, SynthPipeFactory, SynthUpstream,
 };
-#[cfg(feature = "recording")]
-pub use upstreams::{RecordPipeFactory, RecordUpstream, ReplayPipeFactory, ReplayUpstream};
 #[cfg(feature = "tokio")]
 pub use upstreams::{
     ProcessPipeFactory, ProcessSpec, ProcessUpstream, ReadyProbe, RestartPolicy, ShutdownSignal,
 };
 #[cfg(unix)]
 pub use upstreams::{ProcessRpcPipeFactory, ProcessRpcSpec, ProcessRpcUpstream};
-#[cfg(feature = "vm")]
-pub use upstreams::{VmConfig, VmPipeFactory, VmSpec, VmUpstream};
+#[cfg(feature = "recording")]
+pub use upstreams::{RecordPipeFactory, RecordUpstream, ReplayPipeFactory, ReplayUpstream};
 pub use write_back::{WriteBackConditions, WriteBackRule};
 
 /// The one import for both halves of the builder-sugar surface:

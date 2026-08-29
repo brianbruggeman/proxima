@@ -9,11 +9,11 @@ use conflaguration::{Settings, Validate, ValidationMessage};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::middleware::labels_with;
 use proxima_core::ProximaError;
 use proxima_primitives::pipe::handler::{Handler, PipeHandle, ThreadLocalPipeHandle, into_handle};
 use proxima_primitives::pipe::pipe_factory::PipeFactory;
 use proxima_primitives::pipe::request::{Request, Response};
-use crate::middleware::labels_with;
 use proxima_primitives::pipe::{Pipe, SendPipe};
 
 const METRIC_REJECTED: &str = "proxima.auth.rejected_total";

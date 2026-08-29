@@ -297,9 +297,10 @@ impl Connection {
                 reason: format!("method frame on channel {channel} while content is in flight"),
             });
         }
-        let method = decode(class_id, method_id, args).map_err(|error| Advanced::ProtocolError {
-            reason: error.to_string(),
-        })?;
+        let method =
+            decode(class_id, method_id, args).map_err(|error| Advanced::ProtocolError {
+                reason: error.to_string(),
+            })?;
         let pending = match &method {
             Method::BasicPublish {
                 exchange,

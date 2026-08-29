@@ -9,8 +9,8 @@
 //! `proxima_protocols::dns::frame_codec`): a free function and POD views
 //! over `&[u8]`, never a `Pipe` — an ELF image is a byte buffer to decode,
 //! not a stream to transform. [`parse_elf`] itself is a driver loop over
-//! an explicit discriminated-enum state machine (`Cursor`/`Step`) per
-//! `AGENTS.md` principle 11 — see `Cursor`'s doc comment for the stage
+//! an explicit discriminated-enum state machine ([`Cursor`]/[`Step`]) per
+//! `AGENTS.md` principle 11 — see [`Cursor`]'s doc comment for the stage
 //! shape and why "consumed length" is per-step rather than cumulative for
 //! a whole-buffer format like this one.
 //!
@@ -555,7 +555,7 @@ impl<'a, const MAX_SEGMENTS: usize> Cursor<'a, MAX_SEGMENTS> {
 /// sections — `.text`, `.rodata`, `.data` — so `MAX_SEGMENTS = 4` covers it
 /// with headroom).
 ///
-/// Drives `Cursor::advance` to completion — see `Cursor` for the state
+/// Drives [`Cursor::advance`] to completion — see [`Cursor`] for the state
 /// shape. Every check below is one `Cursor` transition:
 ///
 /// - the ELF64 magic, class (`ELFCLASS64`), and endianness (`ELFDATA2LSB`)
@@ -990,15 +990,11 @@ mod tests {
             .join("proxima-vm-guest-lambda");
 
         if !artifact.exists() {
-            let manifest_path = Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join("guests")
-                .join("lambda")
-                .join("Cargo.toml");
             let status = Command::new("cargo")
                 .args([
                     "build",
-                    "--manifest-path",
-                    manifest_path.to_str().expect("utf8 manifest path"),
+                    "-p",
+                    "proxima-vm-guest-lambda",
                     "--target",
                     target_triple,
                 ])
@@ -1013,30 +1009,16 @@ mod tests {
     /// Cross-checked against `llvm-readobj --program-headers` (LLVM 20, the
     /// toolchain's own bundled `rustlib/*/bin/llvm-readobj`; `readelf` is
     /// not installed on this host, so `llvm-readobj` is the incumbent here
-    /// per principle 14) run against THIS function's own debug-profile
-    /// build target (`guest_elf_bytes`'s `cargo build -p
-    /// proxima-vm-guest-lambda --target …`, no `--release`) — the debug
-    /// profile's unstripped, unoptimized code is materially larger than a
-    /// release build's, so a release-profile pin here would be wrong.
-    /// Re-pinned 2026-08-26 (M6 slice 5) against a from-scratch rebuild of
-    /// `guests/lambda` in this tree: adding
-    /// `guests/lambda/src/virtio_net.rs`'s mmio bring-up sequence grew both
-    /// segments past the slice-3 pins (1940/920).
-    ///
-    /// Re-pinned again 2026-08-27 (host-workspace build fix): moving
-    /// `guests/lambda` out of the host `Cargo.toml`'s `members` into
-    /// `exclude` (so plain `cargo build --workspace` no longer tries to
-    /// compile this no_std, no_alloc aarch64-unknown-none binary for the
-    /// host) makes it its own workspace root. rustc now embeds this crate's
-    /// `file!()`/panic-location strings relative to its OWN manifest dir
-    /// (`src/main.rs`, …) instead of the host workspace root
-    /// (`tools/proxima-vm/guests/lambda/src/main.rs`, …); those shorter
-    /// strings shrink the `.rodata` `PT_LOAD` segment by 92 bytes
-    /// (2984 -> 2892). The code emitting this binary did not change.
+    /// per principle 14). Re-pinned 2026-08-26 against a from-scratch
+    /// rebuild of `guests/lambda` in the shared tree: the lambda guest has
+    /// grown new hypercalls since the elf-reshape worktree's own pin (332/32,
+    /// against the worktree's older guest source), so a fresh
+    /// `llvm-readobj --program-headers` run against this tree's build is the
+    /// oracle, not the worktree's recorded numbers.
     ///
     /// ```text
-    /// ProgramHeader { Type: PT_LOAD, Offset: 0x10000, VirtualAddress: 0x0,    FileSize: 10324, MemSize: 10324, Flags: PF_R | PF_X }
-    /// ProgramHeader { Type: PT_LOAD, Offset: 0x12858, VirtualAddress: 0x2858, FileSize: 2892, MemSize: 2892, Flags: PF_R }
+    /// ProgramHeader { Type: PT_LOAD, Offset: 0x10000, VirtualAddress: 0x0,   FileSize: 532, MemSize: 532, Flags: PF_R | PF_X }
+    /// ProgramHeader { Type: PT_LOAD, Offset: 0x10214, VirtualAddress: 0x214, FileSize: 40,  MemSize: 40,  Flags: PF_R }
     /// ProgramHeader { Type: PT_GNU_STACK, ... }
     /// ```
     ///
@@ -1052,45 +1034,29 @@ mod tests {
         assert_eq!(segments.len(), 2);
 
         assert_eq!(segments[0].virtual_address(), 0x0000);
-        assert_eq!(segments[0].memory_size(), 10324);
-        assert_eq!(segments[0].data().len(), 10324);
+        assert_eq!(segments[0].memory_size(), 532);
+        assert_eq!(segments[0].data().len(), 532);
         assert!(segments[0].is_readable());
         assert!(!segments[0].is_writable());
         assert!(segments[0].is_executable());
 
-        assert_eq!(segments[1].virtual_address(), 0x2858);
-        assert_eq!(segments[1].memory_size(), 2892);
-        assert_eq!(segments[1].data().len(), 2892);
+        assert_eq!(segments[1].virtual_address(), 0x214);
+        assert_eq!(segments[1].memory_size(), 40);
+        assert_eq!(segments[1].data().len(), 40);
         assert!(segments[1].is_readable());
         assert!(!segments[1].is_writable());
         assert!(!segments[1].is_executable());
     }
 
-    /// Same cross-check as above, for the `x86_64-unknown-none` debug-
-    /// profile build. Re-pinned 2026-08-26 (M6 slice 6) alongside the
-    /// aarch64 pin, same cause: adding `virtio_blk.rs` grew the guest past
-    /// the slice-5 pins (5797/1100/744). Unlike the aarch64 build, this
-    /// debug rebuild's LLD output carries a THIRD `PT_LOAD` — a small
-    /// writable, non-executable segment (`.data.rel.ro`, covered by the
-    /// `PT_GNU_RELRO` entry `llvm-readobj` also reports and this loader
-    /// correctly ignores, since it is not `PT_LOAD`) that the debug
-    /// profile's unoptimized codegen emits and the release profile's does
-    /// not; this is a real difference in this build's actual program
-    /// headers, not a copy-paste of the aarch64 pin.
-    ///
-    /// Re-pinned again 2026-08-27, same cause and same 92-byte `.rodata`
-    /// shrink as the aarch64 pin above (see that test's doc comment): moving
-    /// `guests/lambda` to its own workspace root shortens its embedded
-    /// `file!()` panic-location strings. The 92-byte-smaller segment 1
-    /// (1692 -> 1600) shifts segment 2's start address down by the same
-    /// page-aligned delta (0x2700 -> 0x26A0); segment 2's own size (1384) is
-    /// unaffected, since it holds no `file!()`-derived strings.
+    /// Same cross-check as above, for the `x86_64-unknown-none` build.
+    /// Re-pinned 2026-08-26 alongside the aarch64 pin, same cause: this
+    /// tree's fresh `llvm-readobj` run against a from-scratch guest rebuild
+    /// is the oracle, and it agrees with the pre-reshape shared-tree guest
+    /// numbers (291/12, `VirtualAddress` 0x124 for the second segment).
     ///
     /// ```text
-    /// ProgramHeader { Type: PT_LOAD, Offset: 0x1000, VirtualAddress: 0x0,    FileSize: 8287, MemSize: 8287, Flags: PF_R | PF_X }
-    /// ProgramHeader { Type: PT_LOAD, Offset: 0x3060, VirtualAddress: 0x2060, FileSize: 1600, MemSize: 1600, Flags: PF_R }
-    /// ProgramHeader { Type: PT_LOAD, Offset: 0x36A0, VirtualAddress: 0x26A0, FileSize: 1384, MemSize: 1384, Flags: PF_R | PF_W }
-    /// ProgramHeader { Type: PT_GNU_RELRO, ... }
+    /// ProgramHeader { Type: PT_LOAD, Offset: 0x1000, VirtualAddress: 0x0,   FileSize: 291, MemSize: 291, Flags: PF_R | PF_X }
+    /// ProgramHeader { Type: PT_LOAD, Offset: 0x1124, VirtualAddress: 0x124, FileSize: 12,  MemSize: 12,  Flags: PF_R }
     /// ProgramHeader { Type: PT_GNU_STACK, ... }
     /// ```
     #[test]
@@ -1099,27 +1065,20 @@ mod tests {
         let (entry, segments) = parse_elf::<4>(&image).expect("real guest ELF parses");
 
         assert_eq!(entry, 0x0);
-        assert_eq!(segments.len(), 3);
+        assert_eq!(segments.len(), 2);
 
         assert_eq!(segments[0].virtual_address(), 0x0000);
-        assert_eq!(segments[0].memory_size(), 8287);
-        assert_eq!(segments[0].data().len(), 8287);
+        assert_eq!(segments[0].memory_size(), 291);
+        assert_eq!(segments[0].data().len(), 291);
         assert!(segments[0].is_readable());
         assert!(!segments[0].is_writable());
         assert!(segments[0].is_executable());
 
-        assert_eq!(segments[1].virtual_address(), 0x2060);
-        assert_eq!(segments[1].memory_size(), 1600);
-        assert_eq!(segments[1].data().len(), 1600);
+        assert_eq!(segments[1].virtual_address(), 0x124);
+        assert_eq!(segments[1].memory_size(), 12);
+        assert_eq!(segments[1].data().len(), 12);
         assert!(segments[1].is_readable());
         assert!(!segments[1].is_writable());
         assert!(!segments[1].is_executable());
-
-        assert_eq!(segments[2].virtual_address(), 0x26A0);
-        assert_eq!(segments[2].memory_size(), 1384);
-        assert_eq!(segments[2].data().len(), 1384);
-        assert!(segments[2].is_readable());
-        assert!(segments[2].is_writable());
-        assert!(!segments[2].is_executable());
     }
 }

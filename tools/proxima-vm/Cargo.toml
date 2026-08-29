@@ -14,10 +14,7 @@ default = ["std"]
 # proxima-primitives::pipe alloc tier drags in proxima-primitives::transport
 # -> parking_lot (no no_std path)
 std = ["alloc", "futures/executor", "dep:proxima-primitives", "proxima-primitives/std", "dep:proxima-process"]
-# `dtb::builder` needs `Vec<u8>` (vm-fdt's writer); the parser half
-# (`fdt` crate) is genuinely tier-3 and would build without this, but the
-# module is one file so it shares the alloc gate.
-alloc = ["dep:vm-fdt"]
+alloc = []
 # Gates `benches/bench_elf.rs` (object/goblin compare-bench). Default-off per
 # the disciplined-component gate 1: `object`/`goblin` never build for a plain
 # `cargo build`/`cargo test`, only `cargo bench --features elf-bench`.
@@ -26,71 +23,16 @@ elf-bench = []
 [dependencies]
 arrayvec.workspace = true
 bytes.workspace = true
-fdt = "0.1.5"
 futures.workspace = true
 postcard = { workspace = true, features = ["alloc"] }
 proxima-core = { workspace = true, features = ["alloc"] }
-proxima-net = { version = "0.1.0", path = "../../proxima-net", default-features = false, features = ["alloc"] }
 proxima-primitives = { workspace = true, features = ["alloc"], optional = true }
 proxima-process = { workspace = true, features = ["alloc"], optional = true }
-proxima-protocols = { workspace = true, features = ["process", "nvme", "virtio"] }
-serde = { workspace = true, features = ["derive"] }
-vm-fdt = { version = "0.3.0", default-features = false, features = ["alloc"], optional = true }
+proxima-protocols = { workspace = true, features = ["process", "nvme"] }
 
 [[bin]]
 name = "hello"
 required-features = ["std"]
-
-# every probe below drives std-gated surface (dispatch::run_dispatch_loop,
-# snapshot::*, boot::*) directly, so each needs the same required-features
-# gate `hello` already carries -- otherwise `cargo build --no-default-features
-# --features alloc` tries to build them and fails on items that were
-# correctly configured out.
-[[bin]]
-name = "cow_primitives_probe"
-required-features = ["std"]
-
-[[bin]]
-name = "dispatch_probe"
-required-features = ["std"]
-
-[[bin]]
-name = "edk2_boot_probe"
-required-features = ["std"]
-
-[[bin]]
-name = "kernel_boot_probe"
-required-features = ["std"]
-
-[[bin]]
-name = "proxima-vm"
-required-features = ["std"]
-
-[[bin]]
-name = "snapshot_capture_probe"
-required-features = ["std"]
-
-[[bin]]
-name = "snapshot_layered_probe"
-required-features = ["std"]
-
-[[bin]]
-name = "snapshot_restore_probe"
-required-features = ["std"]
-
-[[bin]]
-name = "snapshot_warm_restore_probe"
-required-features = ["std"]
-
-# self-signing config-only probe (see the file's own doc comment for why this
-# is `harness = false` rather than a `[[bin]]`): `proxima` — the crate that
-# owns the `vm` registry factory under test — can only be a dev-dependency of
-# proxima-vm (a real dependency would cycle back through `proxima`'s own
-# optional `vm` feature), so this target owns `fn main()` and dispatches on
-# argv instead of using the libtest harness.
-[[test]]
-name = "vm_registry"
-harness = false
 
 [[bench]]
 name = "bench_elf"
@@ -106,9 +48,7 @@ cc = "1.2.62"
 [dev-dependencies]
 criterion = { workspace = true, features = ["html_reports"] }
 goblin = "0.10.7"
-libtest-mimic = "0.8.2"
 object = "0.40.0"
 proptest.workspace = true
-proxima = { workspace = true, features = ["test-support", "vm"] }
+proxima = { workspace = true, features = ["test-support"] }
 tempfile.workspace = true
-tokio = { workspace = true, features = ["rt-multi-thread"] }

@@ -392,8 +392,11 @@ mod tests {
         let store = StateStore::open(dir.path()).expect("open");
         store.put_pipe(&pipe("echo", "synth")).expect("put");
         let stray = format!("{TMP_PREFIX}{}.toml", random_suffix());
-        fs::write(store.root().join(PIPES_SUBDIR).join(stray), "garbage = junk")
-            .expect("write stray");
+        fs::write(
+            store.root().join(PIPES_SUBDIR).join(stray),
+            "garbage = junk",
+        )
+        .expect("write stray");
         let listed = store.list_pipes().expect("list");
         assert_eq!(listed.len(), 1, "the real record survives the tmp filter");
         assert_eq!(listed.get("echo").expect("echo").name, "echo");

@@ -14,8 +14,8 @@ use proxima_net::tokio::tokio_stream_listener::TokioTcpListener;
 use proxima_pgwire::codec::Session;
 use proxima_pgwire::{
     ColumnDesc, DescribeReply, ErrorReply, Negotiation, PgAuth, PgPipeHandle, PgReply,
-    PgServerConfig, QueryReply, QueryRequest, SqlValue, StaticCredentials, Verb,
-    into_pg_handle, negotiate, serve_session,
+    PgServerConfig, QueryReply, QueryRequest, SqlValue, StaticCredentials, Verb, into_pg_handle,
+    negotiate, serve_session,
 };
 use proxima_primitives::pipe::SendPipe;
 use proxima_primitives::stream::{StreamConnection, StreamListener, StreamListenerExt};

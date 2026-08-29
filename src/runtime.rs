@@ -826,8 +826,7 @@ where
     F: Future,
 {
     Err(ProximaError::Config(
-        "no runtime backend compiled in: enable the prime bundle (serve-prime) or `tokio`"
-            .into(),
+        "no runtime backend compiled in: enable the prime bundle (serve-prime) or `tokio`".into(),
     ))
 }
 
@@ -913,8 +912,7 @@ where
     F: Future,
 {
     Err(ProximaError::Config(
-        "no runtime backend compiled in: enable the prime bundle (serve-prime) or `tokio`"
-            .into(),
+        "no runtime backend compiled in: enable the prime bundle (serve-prime) or `tokio`".into(),
     ))
 }
 

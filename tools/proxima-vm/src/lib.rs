@@ -1,5 +1,5 @@
 //! Minimal VM ground for proving that a guest can emit bytes through a
-//! Proxima `Pipe`.
+//! Proxima [`Pipe`].
 //!
 //! [`ScratchVm`] does not boot an operating system. It synthesizes a tiny
 //! architecture-native guest program whose only effect is emitting its
@@ -20,29 +20,9 @@
 extern crate alloc;
 
 pub mod abi;
-#[cfg(feature = "std")]
-pub mod boot;
 pub mod dispatch;
-#[cfg(feature = "alloc")]
-pub mod dtb;
 pub mod elf;
-pub mod gic;
 pub mod loader;
-#[cfg(feature = "std")]
-pub mod mmio_trampoline;
-#[cfg(feature = "std")]
-pub mod named_memory;
-pub mod page_table;
-pub mod pl011;
-pub mod psci;
-#[cfg(feature = "std")]
-pub mod snapshot;
-#[cfg(feature = "std")]
-pub mod virtio_blk;
-#[cfg(feature = "std")]
-pub mod virtio_console;
-#[cfg(feature = "std")]
-pub mod virtio_net;
 
 #[cfg(feature = "std")]
 use core::future::Future;
@@ -98,12 +78,9 @@ impl SendPipe for ScratchVm {
     }
 }
 
-#[cfg(all(
-    feature = "std",
-    any(
-        all(target_os = "linux", target_arch = "x86_64"),
-        all(target_os = "macos", target_arch = "aarch64")
-    )
+#[cfg(any(
+    all(target_os = "linux", target_arch = "x86_64"),
+    all(target_os = "macos", target_arch = "aarch64")
 ))]
 mod platform {
     use std::ffi::CStr;
@@ -148,12 +125,9 @@ mod platform {
     }
 }
 
-#[cfg(not(all(
-    feature = "std",
-    any(
-        all(target_os = "linux", target_arch = "x86_64"),
-        all(target_os = "macos", target_arch = "aarch64")
-    )
+#[cfg(not(any(
+    all(target_os = "linux", target_arch = "x86_64"),
+    all(target_os = "macos", target_arch = "aarch64")
 )))]
 mod platform {
     use bytes::Bytes;

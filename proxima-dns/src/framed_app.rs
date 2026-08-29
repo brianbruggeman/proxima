@@ -101,7 +101,12 @@ impl SendPipe for DnsFramedApp {
         let request = build_request(TCP_TRANSPORT, query.clone());
         let outcome = SendPipe::call(&self.handler, request).await;
         let answer = match outcome {
-            Ok(reply) => reply.payload,
+        Ok(reply) => {
+            if reply.status == 204 {
+                return Ok(DnsTcpOutcome::Silent);
+            }
+            reply.payload
+        }
             Err(error) => {
                 warn!(label = %self.label, ?error, "dns-tcp handler pipe failed; skipping");
                 return Ok(DnsTcpOutcome::Silent);

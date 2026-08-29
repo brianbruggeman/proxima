@@ -107,6 +107,14 @@ pub trait DatagramProtocol {
     /// [`on_datagram`](Self::on_datagram).
     fn on_timeout(&mut self, now: Instant) -> impl Future<Output = Result<(), Self::Err>> + Send;
 
+    fn wake(&mut self) -> impl Future<Output = ()> + Send {
+        async {}
+    }
+
+    fn on_wake(&mut self, _now: Instant) -> impl Future<Output = Result<(), Self::Err>> + Send {
+        async { Ok(()) }
+    }
+
     /// Earliest deadline at which [`on_timeout`](Self::on_timeout) must be
     /// called, if any. `None` means the state machine is quiescent — the
     /// serve loop arms no timer and parks on recv + shutdown alone. Stays

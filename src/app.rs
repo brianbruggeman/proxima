@@ -2159,7 +2159,8 @@ mod tests {
         let runtime = app.runtime().expect("default runtime installed");
         let drops_observed = Arc::new(AtomicU64::new(0));
         let cores = runtime.num_cores();
-        let (registered_tx, mut registered_rx) = proxima_primitives::sync::mpsc::channel::<()>(cores.max(1));
+        let (registered_tx, mut registered_rx) =
+            proxima_primitives::sync::mpsc::channel::<()>(cores.max(1));
 
         // Register a per-core cleanup hook on every worker core by
         // dispatching a registration factory to each core. The closure

@@ -90,8 +90,9 @@ impl TlsConfig {
         let cert_bytes = fs::read(&cert).map_err(|err| {
             ProximaError::Config(format!("tls: read cert {}: {err}", cert.display()))
         })?;
-        let key_bytes = fs::read(&key)
-            .map_err(|err| ProximaError::Config(format!("tls: read key {}: {err}", key.display())))?;
+        let key_bytes = fs::read(&key).map_err(|err| {
+            ProximaError::Config(format!("tls: read key {}: {err}", key.display()))
+        })?;
         Ok(Self::pem(cert_bytes, key_bytes))
     }
 
@@ -225,8 +226,7 @@ pub fn build_server_config(config: &TlsConfig) -> Result<ServerConfig, ProximaEr
             // silently would leave an operator believing stapling is on.
             if config.ocsp_response.is_some() {
                 return Err(ProximaError::Config(
-                    "tls: ocsp_response is per-certificate and cannot apply to MultiSni"
-                        .into(),
+                    "tls: ocsp_response is per-certificate and cannot apply to MultiSni".into(),
                 ));
             }
             let resolver = SniResolver::build(hosts)?;
@@ -631,9 +631,7 @@ pub fn config_from_spec_value(
         .and_then(|raw| raw.as_bool())
         .unwrap_or(false);
     let ocsp_response = match table.get("ocsp_response_b64") {
-        Some(serde_json::Value::String(encoded)) => {
-            Some(decode_b64(encoded, "ocsp_response_b64")?)
-        }
+        Some(serde_json::Value::String(encoded)) => Some(decode_b64(encoded, "ocsp_response_b64")?),
         Some(serde_json::Value::Null) | None => None,
         Some(_) => {
             return Err(ProximaError::Config(
@@ -773,7 +771,8 @@ mod tests {
         assert_eq!(key, &key_bytes);
         assert_eq!(parsed.alpn, vec![b"h3".to_vec(), b"h2".to_vec()]);
         // the bytes round-trip AND parse: rustls accepts what came out of the spec.
-        let _ = build_server_config(&parsed).expect("server config builds from spec-round-tripped pem");
+        let _ =
+            build_server_config(&parsed).expect("server config builds from spec-round-tripped pem");
     }
 
     #[test]
@@ -811,7 +810,8 @@ mod tests {
             other => panic!("expected Required, got {other:?}"),
         }
         // anchors survive the round-trip AND parse: WebPkiClientVerifier accepts them.
-        let _ = build_server_config(&parsed).expect("server config builds with round-tripped anchors");
+        let _ =
+            build_server_config(&parsed).expect("server config builds with round-tripped anchors");
     }
 
     #[test]
@@ -875,7 +875,8 @@ mod tests {
         // host's cert + key are real material rustls will load into a SniResolver.
         // requires the crypto provider, install on demand.
         let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
-        let _ = build_server_config(&parsed).expect("server config builds with round-tripped multi-sni");
+        let _ = build_server_config(&parsed)
+            .expect("server config builds with round-tripped multi-sni");
     }
 
     #[test]

@@ -18,8 +18,8 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use crate::tcp_listener::{
-    Endpoint, ISN_STRIDE, Inbound, OUR_WINDOW, OutSegment, Path, SMSS, is_bare_ack,
-    is_initial_syn, synack_segment, to_control,
+    Endpoint, ISN_STRIDE, Inbound, OUR_WINDOW, OutSegment, Path, SMSS, is_bare_ack, is_initial_syn,
+    synack_segment, to_control,
 };
 use proxima_protocols::inet::tcp::TcpFlags;
 use proxima_protocols::tcp::DataPath;

@@ -262,7 +262,9 @@ mod tests {
 
     // the correct CoW commit, as a persistence-event sequence
     fn commit_ops(layout: &CowRoot, region: &[u8], new_value: &[u8]) -> Vec<Op> {
-        let dead = 1 - layout.live_index(region).expect("oracle regions are layout-sized");
+        let dead = 1 - layout
+            .live_index(region)
+            .expect("oracle regions are layout-sized");
         let dead_off = layout.slot_offset(dead);
         vec![
             Op::Write {
@@ -289,7 +291,9 @@ mod tests {
     // a BROKEN commit that flips the root before persisting the dead slot — the
     // missing-B1 bug the oracle must catch.
     fn commit_ops_missing_b1(layout: &CowRoot, region: &[u8], new_value: &[u8]) -> Vec<Op> {
-        let dead = 1 - layout.live_index(region).expect("oracle regions are layout-sized");
+        let dead = 1 - layout
+            .live_index(region)
+            .expect("oracle regions are layout-sized");
         let dead_off = layout.slot_offset(dead);
         vec![
             Op::Write {
@@ -537,13 +541,21 @@ mod tests {
         let ops_ab = commit_ops(&layout, &region, &value_b);
         check_oracle(&layout, &region, &value_b, &ops_ab).expect("a->b consistent");
         layout.commit(&mut region, &value_b, &noop_persist).unwrap();
-        assert_eq!(layout.live_index(&region).unwrap(), 1, "second slot now live");
+        assert_eq!(
+            layout.live_index(&region).unwrap(),
+            1,
+            "second slot now live"
+        );
         assert_eq!(layout.recover(&region).unwrap(), &value_b);
 
         let ops_bc = commit_ops(&layout, &region, &value_c);
         check_oracle(&layout, &region, &value_c, &ops_bc).expect("b->c consistent");
         layout.commit(&mut region, &value_c, &noop_persist).unwrap();
-        assert_eq!(layout.live_index(&region).unwrap(), 0, "back to the first slot");
+        assert_eq!(
+            layout.live_index(&region).unwrap(),
+            0,
+            "back to the first slot"
+        );
         assert_eq!(layout.recover(&region).unwrap(), &value_c);
     }
 
