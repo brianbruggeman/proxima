@@ -4,8 +4,10 @@
 # plus every platform network backend -- prime/tokio/wasm/dpdk/xdp -- as a
 # feature-gated module). No gate script existed for this crate before --
 # `cargo nextest run -p proxima-net` and `cargo test --doc` both exit 0
-# whether they ran real work or nothing, so this asserts the nonzero count
-# explicitly instead of trusting the exit code alone.
+# whether they ran real work or nothing, so this asserts the count
+# explicitly instead of trusting the exit code alone -- nonzero for
+# nextest (real tests exist), and the documented 0-fence baseline for the
+# doctest step (this crate's src/ carries no runnable doc fences).
 #
 # `dpdk` is DELIBERATELY excluded from every feature set below: its build.rs
 # shells out to `pkg-config --silence-errors <flag> libdpdk` and asserts the
@@ -50,16 +52,23 @@ printf '\n[5/6] rustdoc resolves (default + non-dpdk union)\n'
 cargo doc -p "${crate}" --no-deps
 cargo doc -p "${crate}" --no-deps --no-default-features --features "${non_dpdk_features}"
 
-# `cargo test --doc` exits 0 on a vacuous "0 passed" run, so grep for a
-# nonzero count explicitly instead of trusting the exit code alone.
-printf '\n[6/6] doctests (non-dpdk union), count asserted\n'
+# `cargo test --doc` exits 0 on a vacuous "0 passed" run, so this asserts
+# the count explicitly rather than trusting the exit code alone. This
+# crate's src/ carries zero ```rust fences under the non-dpdk union
+# (verified by `git grep -c '```rust' -- proxima-net/src` = 0; the only
+# fences present are the ```text pair in wasm/mod.rs, which rustdoc never
+# runs as a doctest) -- "0 expected, 0 found" is therefore the real,
+# explicit assertion, same as scripts/proxima-vm-gate.sh's own zero-fence
+# step. If a runnable doc fence is ever added, swap this for the standard
+# nonzero-count assertion (see scripts/proxima-clock-gate.sh's last step)
+# or it will silently stop proving the new doctest runs.
+printf '\n[6/6] doctests: 0 rust fences in src/ -- asserting 0 expected, 0 found\n'
 doctest_output="$(cargo test --doc -p "${crate}" --no-default-features --features "${non_dpdk_features}" 2>&1)"
 printf '%s\n' "${doctest_output}"
-passed_count="$(printf '%s\n' "${doctest_output}" | grep -oE '^test result: ok\. [0-9]+ passed' | grep -oE '[0-9]+' | tail -1)"
-if [ -z "${passed_count}" ] || [ "${passed_count}" -eq 0 ]; then
-    printf 'ERROR: %s doctests reported zero passed -- an empty run is not a pass\n' "${crate}" >&2
+if ! printf '%s\n' "${doctest_output}" | grep -qE '^test result: ok\. 0 passed'; then
+    printf 'ERROR: %s doctest run no longer matches the expected 0-fence baseline -- update this gate\n' "${crate}" >&2
     exit 1
 fi
-printf '   doctests passed: %s\n' "${passed_count}"
+printf '   doctests: 0 expected, 0 found (matches src/ fence count)\n'
 
 printf '\n== %s gate: PASS ==\n' "${crate}"
