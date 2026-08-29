@@ -63,6 +63,20 @@ declare -a cells=(
     # above already compile every test, example and bench against it.
     "portable check|cargo check -p proxima-tensor --target ${PORTABLE_TARGET}"
 
+    # `portable check` above is lib-only default-features, so it never builds
+    # this crate's benches/tests against the portable target, and it is
+    # `check`, not `clippy` -- neither catches an item that is unconditionally
+    # imported/defined but only USED behind `#[cfg(target_os = "macos")]` or
+    # `#[cfg(target_arch = "aarch64")]`: dead on this target, invisible on an
+    # arm64-macos dev box because the same code is live there. This is
+    # EXACTLY the shape that shipped broken to CI 2026-08-29
+    # (`instrument.rs`'s unconditional `OnceLock` import, used only by
+    # `timebase()`'s `cfg(target_os = "macos")` body, plus the same class in
+    # `bench_q4k_superblock_phases.rs` and `proxima-model-interop`). Guarded
+    # rather than a bare command: a missing target must print a named SKIP
+    # line, never silently exit 0 and read as a pass.
+    "portable clippy cross-check|if rustup target list --installed | grep -qx \"${PORTABLE_TARGET}\"; then env CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER=${PORTABLE_TARGET}-gcc CC_x86_64_unknown_linux_gnu=${PORTABLE_TARGET}-gcc CXX_x86_64_unknown_linux_gnu=${PORTABLE_TARGET}-g++ AR_x86_64_unknown_linux_gnu=${PORTABLE_TARGET}-ar cargo clippy --target ${PORTABLE_TARGET} -p proxima-tensor --all-targets --all-features -- -D warnings; else printf 'SKIP: %s is not installed (rustup target add %s) -- this cell did NOT run and must not read as a pass.\n' \"${PORTABLE_TARGET}\" \"${PORTABLE_TARGET}\"; fi"
+
     # tiers. `alloc` alone is the no_std floor this crate claims.
     #
     # WHAT THESE TWO CELLS DO NOT COVER: `pub mod cpu` is `#[cfg(feature =
