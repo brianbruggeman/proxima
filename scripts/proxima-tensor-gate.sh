@@ -100,6 +100,12 @@ declare -a cells=(
     # correctness gate, so it is named here and left out on purpose.
     "all-non-bench-features clippy|cargo clippy -p proxima-tensor --all-targets --no-default-features --features alloc,std,config,instrument,tensor-bgpool,test-support,q4k-int8-dot -- -D warnings"
 
+    # rustdoc gets the same unification treatment as clippy above: the default
+    # rustdoc cell never compiles this feature set together, which is how six
+    # private-item intra-doc links (`--all-features` union, cpu.rs/instrument.rs)
+    # sat unseen until a dedicated `cargo doc --all-features` run found them.
+    "all-non-bench-features rustdoc|cargo doc -p proxima-tensor --no-deps --no-default-features --features alloc,std,config,instrument,tensor-bgpool,test-support,q4k-int8-dot"
+
     # the default rustdoc cell above never compiles q4k-int8-dot's items, which
     # is how ~11 doc errors (private-item intra-doc links, one arch-invisible
     # link) sat in cpu.rs unseen until a dedicated `cargo doc` run found them.
