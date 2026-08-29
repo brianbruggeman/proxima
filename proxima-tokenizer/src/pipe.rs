@@ -14,13 +14,13 @@ use crate::vocab::Vocab;
 /// Scans `text` for literal occurrences of an "added token" marker
 /// (`Vocab::with_token_types`'s `Control`/`UserDefined` entries -- e.g.
 /// `<|end_of_turn|>` in a chat template) via
-/// [`Vocab::longest_added_token_match`], emitting each marker's id
-/// directly and running [`encode_ordinary`] only on the plain-text spans
+/// `Vocab::longest_added_token_match`, emitting each marker's id
+/// directly and running `encode_ordinary` only on the plain-text spans
 /// between markers. Longest-match wins when two markers share a prefix
-/// (the trie walk in [`Vocab::longest_added_token_match`] always returns
+/// (the trie walk in `Vocab::longest_added_token_match` always returns
 /// the deepest/longest node with an id, never the first). A vocab that
 /// never called `with_token_types` has an empty trie, so this degenerates
-/// to exactly one call to [`encode_ordinary`] over the whole input --
+/// to exactly one call to `encode_ordinary` over the whole input --
 /// identical to this function's behavior before markers existed.
 ///
 /// Splits `text` into pretokens ([`crate::pretokenize::pretokenize`]) and
