@@ -17,21 +17,17 @@ fn binary_mtime() -> Option<SystemTime> {
 
 // process-wide armed spigot: one 1-core prime runtime backs every capture's
 // off-core blocking I/O (created once; cloning the Arc<OnceLock> is a bump).
-fn armed_spigot() -> proxima_recording::pipe::DeferredRuntime {
+fn armed_spigot() -> Result<proxima_recording::pipe::DeferredRuntime, proxima_core::ProximaError> {
     static SPIGOT: std::sync::OnceLock<proxima_recording::pipe::DeferredRuntime> =
         std::sync::OnceLock::new();
-    SPIGOT
-        .get_or_init(|| {
-            let spigot = proxima_recording::pipe::deferred_runtime();
-            spigot
-                .set(
-                    std::sync::Arc::new(proxima::runtime::PrimeRuntime::new(1).expect("prime"))
-                        as std::sync::Arc<dyn proxima::runtime::Runtime>,
-                )
-                .ok();
-            spigot
-        })
-        .clone()
+    if let Some(spigot) = SPIGOT.get() {
+        return Ok(spigot.clone());
+    }
+    let runtime = std::sync::Arc::new(proxima::runtime::PrimeRuntime::new(1)?)
+        as std::sync::Arc<dyn proxima::runtime::Runtime>;
+    let spigot = proxima_recording::pipe::deferred_runtime();
+    spigot.set(runtime).ok();
+    Ok(SPIGOT.get_or_init(|| spigot).clone())
 }
 
 fn main() -> Result<(), proxima_core::ProximaError> {
@@ -63,7 +59,7 @@ fn main() -> Result<(), proxima_core::ProximaError> {
         .map_err(|err| proxima_core::ProximaError::Config(format!("tokio runtime: {err}")))?;
 
     rt.block_on(async {
-        let capture = Capture::open(&capture_path, armed_spigot())?;
+        let capture = Capture::open(&capture_path, armed_spigot()?)?;
         eprintln!("recording to {}", capture_path.display());
 
         let pipe = InterceptPipe::with_ca_files(&cert_path, &key_path)?.with_capture(capture);
