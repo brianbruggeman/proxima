@@ -146,7 +146,7 @@ impl std::fmt::Debug for UpstreamRef {
 }
 
 /// Per-thread sibling of [`UpstreamRef`] for selection paths driven by
-/// a [`proxima_primitives::pipe::ThreadLocalPipe`].
+/// a [`proxima_primitives::pipe::ThreadLocalPipeHandle`].
 #[derive(Clone)]
 pub struct ThreadLocalUpstreamRef {
     pub pipe: ThreadLocalPipeHandle,

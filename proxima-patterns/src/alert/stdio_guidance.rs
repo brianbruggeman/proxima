@@ -1,8 +1,9 @@
 //! C5 — `StdioGuidancePipe`: duplex sync stdin/stdout for guidance round-trip.
 //!
-//! Receives a [`GuidanceQuestion`] as `request.payload`, writes the prompt
-//! to stdout, reads one line from stdin, and returns a [`GuidanceAnswer`] as
-//! `response.payload`. No serialization; purely in-process typed pipe.
+//! Receives a [`crate::alert::event::GuidanceQuestion`] as `request.payload`,
+//! writes the prompt to stdout, reads one line from stdin, and returns a
+//! [`crate::alert::event::GuidanceAnswer`] as `response.payload`. No
+//! serialization; purely in-process typed pipe.
 //!
 //! Markers:
 //! - NOT `WithoutFilesystem` (stdin/stdout are fs-shaped via the kernel
@@ -161,7 +162,6 @@ fn truncate_to_answer(value: &str) -> AnswerString {
 
 /// Helper: construct a `GuidanceRequestId` from a Ulid for callers that
 /// don't depend on the proto crate directly.
-#[must_use]
 pub fn new_request_id() -> GuidanceRequestId {
     GuidanceRequestId(Ulid::new())
 }

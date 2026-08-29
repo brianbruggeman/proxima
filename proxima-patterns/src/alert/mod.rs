@@ -10,11 +10,11 @@
 //!   GuidanceQuestion + GuidanceAnswer + postcard codec. `#![no_std]`-clean
 //!   when std is off, alloc-free with heapless containers; const-generic
 //!   caps from `proxima-notify.toml` per principle 12.
-//! - [`scheduled_trigger`] (tier-2, behind `scheduled-trigger` feature) —
+//! - `scheduled_trigger` (tier-2, behind `scheduled-trigger` feature) —
 //!   interval-driven producer Pipe.
-//! - [`stdout_alert`] (tier-2, behind `stdout-alert` feature) — terminal
+//! - `stdout_alert` (tier-2, behind `stdout-alert` feature) — terminal
 //!   sink that prints `AlertEvent` to stdout.
-//! - [`stdio_guidance`] (tier-2, behind `stdio-guidance` feature) —
+//! - `stdio_guidance` (tier-2, behind `stdio-guidance` feature) —
 //!   duplex sync stdin/stdout for guidance round-trip.
 //!
 //! # Per-protocol integrations (Telegram, PagerDuty, ntfy, …) are CONFIG
