@@ -5230,7 +5230,7 @@ static WIDTH_TILE_INVOCATIONS: AtomicU64 = AtomicU64::new(0);
 #[cfg(all(target_arch = "aarch64", feature = "instrument"))]
 static WIDTH_TILE_FALLBACK_ELEMENTS: AtomicU64 = AtomicU64::new(0);
 
-/// Snapshot of the three [`WIDTH_TILE_GATE_PASSES`]-family counters:
+/// Snapshot of the three `WIDTH_TILE_GATE_PASSES`-family counters:
 /// (gate passes, tile invocations, fallback elements) — the width tile's
 /// counterpart to [`neon_tile_counters`].
 #[cfg(all(target_arch = "aarch64", feature = "instrument"))]
@@ -5768,7 +5768,7 @@ static NEON_TILE_ROW_REMAINDER_INVOCATIONS: AtomicU64 = AtomicU64::new(0);
 #[cfg(all(target_arch = "aarch64", feature = "instrument"))]
 static NEON_TILE_ROW_REMAINDER_ELEMENTS: AtomicU64 = AtomicU64::new(0);
 
-/// Snapshot of the three [`NEON_TILE_GATE_PASSES`]-family counters for the
+/// Snapshot of the three `NEON_TILE_GATE_PASSES`-family counters for the
 /// main 6x4 tile: (gate passes, tile invocations, fallback elements).
 #[cfg(all(target_arch = "aarch64", feature = "instrument"))]
 pub fn neon_tile_counters() -> (u64, u64, u64) {
@@ -5779,7 +5779,7 @@ pub fn neon_tile_counters() -> (u64, u64, u64) {
     )
 }
 
-/// [`NEON_TILE_ROW_REMAINDER_INVOCATIONS`] snapshot — the row-remainder
+/// `NEON_TILE_ROW_REMAINDER_INVOCATIONS` snapshot — the row-remainder
 /// tiles' own invocation count (any width `1..=5`), separate from the main
 /// 6x4 tile's.
 #[cfg(all(target_arch = "aarch64", feature = "instrument"))]
@@ -5787,7 +5787,7 @@ pub fn neon_tile_row_remainder_invocations() -> u64 {
     NEON_TILE_ROW_REMAINDER_INVOCATIONS.load(Ordering::Relaxed)
 }
 
-/// [`NEON_TILE_ROW_REMAINDER_ELEMENTS`] snapshot — output elements covered
+/// `NEON_TILE_ROW_REMAINDER_ELEMENTS` snapshot — output elements covered
 /// by row-remainder tiles of any width, for the `main*24 + row_remainder +
 /// fallback == m*n` coverage identity.
 #[cfg(all(target_arch = "aarch64", feature = "instrument"))]
