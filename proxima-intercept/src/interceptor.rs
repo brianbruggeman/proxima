@@ -31,7 +31,7 @@ pub enum HostPolicy {
     Refuse,
 }
 
-/// Injected per-request policy + transforms for [`InterceptPipe`]. All methods
+/// Injected per-request policy + transforms for [`crate::pipe::InterceptPipe`]. All methods
 /// have inert defaults, so an interceptor implements only the hooks it needs.
 pub trait Interceptor: Send + Sync + 'static {
     /// Inspect the full outbound request to `host` and decide its fate: forward
