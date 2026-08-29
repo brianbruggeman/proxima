@@ -302,14 +302,6 @@ impl std::future::Future for Connect {
             }
 
             ConnectState::Pending { socket, .. } => {
-                // re-probe completion via a second connect() call — unambiguous
-                // under a spurious poll: EALREADY means still in progress,
-                // EISCONN means established, any other error is the failure.
-                // take_error() alone is ambiguous because Ok(None) is returned
-                // both for "not yet connected" and "connected" before writable.
-                let sock_addr = SockAddr::from(this.addr);
-                let probe = socket.connect(&sock_addr);
-
                 // classify into an owned outcome so the socket borrow is dropped
                 // before the mem::replace that follows.
                 enum Outcome {
@@ -317,16 +309,35 @@ impl std::future::Future for Connect {
                     InProgress,
                     Failed(io::Error),
                 }
-                let outcome = match probe {
-                    Ok(()) => Outcome::Connected,
-                    Err(ref err) if is_already_connected(err) => Outcome::Connected,
-                    Err(ref err) if is_connect_in_progress(err) || is_connect_resuming(err) => {
-                        Outcome::InProgress
-                    }
-                    Err(err) => {
-                        // cross-check with SO_ERROR for the precise failure errno.
-                        let precise = socket.take_error().ok().flatten().unwrap_or(err);
-                        Outcome::Failed(precise)
+
+                // SO_ERROR is checked FIRST and is authoritative when set: on
+                // macOS/BSD, re-probing via a second connect(2) call (see
+                // below) returns EISCONN ("socket is already connected") for
+                // BOTH a genuinely established connection AND a connection
+                // that already failed asynchronously (e.g. a loopback RST
+                // for ECONNREFUSED) -- `is_already_connected` treating EISCONN
+                // as unambiguous proof of success is the exact class of bug
+                // that shape produces: a refused connect reported as Ok.
+                // `take_error()` (getsockopt(SO_ERROR)) is the POSIX-correct
+                // way to read the real outcome after a writable-readiness
+                // wakeup and does not have this ambiguity.
+                let outcome = match socket.take_error() {
+                    Ok(Some(err)) => Outcome::Failed(err),
+                    Ok(None) | Err(_) => {
+                        // no SO_ERROR yet: fall back to the reconnect-probe
+                        // only to distinguish "still pending" from
+                        // "connected", never to detect failure.
+                        let sock_addr = SockAddr::from(this.addr);
+                        match socket.connect(&sock_addr) {
+                            Ok(()) => Outcome::Connected,
+                            Err(ref err) if is_already_connected(err) => Outcome::Connected,
+                            Err(ref err)
+                                if is_connect_in_progress(err) || is_connect_resuming(err) =>
+                            {
+                                Outcome::InProgress
+                            }
+                            Err(err) => Outcome::Failed(err),
+                        }
                     }
                 };
 
