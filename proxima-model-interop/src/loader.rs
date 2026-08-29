@@ -49,14 +49,14 @@ pub const PREFAULT_STRIDE_BYTES: usize = 4096;
 pub const PREFAULT_OVERSUBSCRIBE: usize = 1;
 
 /// Touches one byte per [`PREFAULT_STRIDE_BYTES`] of `bytes`, dispatched
-/// across [`prefault_pool`]'s workers, and blocks until every touch has
+/// across `prefault_pool`'s workers, and blocks until every touch has
 /// completed — so nothing observes a partially-warmed mapping once this
 /// returns `Ok`. A no-op for an empty slice.
 ///
 /// # Errors
 ///
 /// [`InteropError::PrefaultPoolUnavailable`] if the shared background pool
-/// fails to build (see [`prefault_pool`]), or if a worker never reports a
+/// fails to build (see `prefault_pool`), or if a worker never reports a
 /// completed chunk (`ProximaBackgroundPool` catches and discards worker
 /// panics rather than propagating them).
 pub fn prefault(bytes: &[u8]) -> Result<(), InteropError> {

@@ -326,7 +326,7 @@ pub struct LoadedModel<'file> {
 
 impl<'file> LoadedModel<'file> {
     /// Binds every weight the cached forward program needs out of
-    /// `parsed`/`file_bytes` ([`crate::bind::bind_all_weights`]), derives
+    /// `parsed`/`file_bytes` (`crate::bind::bind_all_weights`), derives
     /// [`ModelArchitecture`] from `parsed`'s own metadata
     /// ([`crate::bind::architecture_from_metadata`]), builds the vocab
     /// from the same metadata, and compiles the cached forward program
@@ -371,7 +371,7 @@ impl<'file> LoadedModel<'file> {
 
     /// [`Self::load`]'s HF/safetensors counterpart: binds every weight out
     /// of a single safetensors buffer's [`proxima_safetensors::Manifest`]
-    /// ([`crate::hf_bind::bind_all_weights_from_safetensors`]) instead of a
+    /// (`crate::hf_bind::bind_all_weights_from_safetensors`) instead of a
     /// `ParsedGguf` tensor directory, and takes `architecture`/`vocab`
     /// already built rather than deriving them from the checkpoint itself --
     /// unlike GGUF, safetensors carries neither: `architecture` comes from
@@ -384,7 +384,7 @@ impl<'file> LoadedModel<'file> {
     /// `data_start` (`8 + header_len`) is the byte offset into `file_bytes`
     /// where tensor data begins -- `manifest`'s own `data_offsets` are
     /// relative to that point, never to the start of the file (see
-    /// [`crate::hf_bind::bind_all_weights_from_safetensors`]'s doc); a
+    /// `crate::hf_bind::bind_all_weights_from_safetensors`'s doc); a
     /// caller who just parsed `file_bytes`'s header into `manifest` already
     /// has this value.
     ///
@@ -392,7 +392,7 @@ impl<'file> LoadedModel<'file> {
     ///
     /// [`InteropError::HfMoeWeightsUnsupported`] if `architecture.expert_count`
     /// is nonzero; otherwise whatever
-    /// [`crate::hf_bind::bind_all_weights_from_safetensors`] or
+    /// `crate::hf_bind::bind_all_weights_from_safetensors` or
     /// [`mistral_cached_forward_program_with_experts`] can fail with.
     pub fn load_from_safetensors(
         manifest: &proxima_safetensors::Manifest,
@@ -741,22 +741,22 @@ impl<'file> LoadedModel<'file> {
     }
 
     /// The greedy decode loop itself: `max_tokens` steps, each one call
-    /// into [`BackendRuntime::evaluate`] against `new_positions == 1` after
+    /// into `BackendRuntime::evaluate` against `new_positions == 1` after
     /// the first step (`new_positions == prompt_length` on the first),
-    /// growing [`LayerCache`] by one call's worth of positions every step
+    /// growing `LayerCache` by one call's worth of positions every step
     /// instead of re-running the whole sequence from scratch -- stopping
     /// early the moment the model emits its own end-of-sequence id (see
     /// this module's doc for what that id is on the real checkpoint),
     /// never running past `max_tokens` regardless.
     ///
     /// `serving_config` is a caller-supplied override of
-    /// [`supported_serving_config`]'s default -- the same [`ServingConfig`]
+    /// `supported_serving_config`'s default -- the same [`ServingConfig`]
     /// [`apply_serving_config`] already gates, never a second selection
     /// mechanism. Setting `gpu_layers` to `GPU_LAYERS_ALL` (`-ngl all`) on
     /// a build compiled with this crate's `metal` feature runs this same
     /// loop against the Metal backend instead of the CPU one; every other
     /// field must already satisfy [`apply_serving_config`]'s gate the same
-    /// way [`supported_serving_config`]'s does.
+    /// way `supported_serving_config`'s does.
     pub fn generate_with_serving_config(
         &self,
         prompt: &str,
@@ -1110,7 +1110,7 @@ impl<'file> LoadedModel<'file> {
     }
 
     /// A one-shot forward pass over `prompt` (BOS forced, fresh KV state,
-    /// same input-binding shape as [`Self::run_decode_loop`]'s own first
+    /// same input-binding shape as `Self::run_decode_loop`'s own first
     /// step) that returns the raw values for each requested `NodeId`
     /// instead of sampling a token from the final logits.
     ///
