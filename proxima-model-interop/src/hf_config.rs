@@ -145,7 +145,7 @@ pub fn parse_hf_config(bytes: &[u8]) -> Result<HfConfig, InteropError> {
 ///   `moe_intermediate_size: 768` (the real per-expert FFN width) -- reading
 ///   the wrong one would silently build a program with the wrong `feed_forward`
 ///   dimension for every `ffn_gate`/`ffn_up`/`ffn_down` expert weight.
-///   [`crate::bind::bind_all_weights`]'s GGUF path has no such ambiguity:
+///   `crate::bind::bind_all_weights`'s GGUF path has no such ambiguity:
 ///   llama.cpp's own GGUF writer already folds a MoE checkpoint's per-expert
 ///   width into the one `{architecture}.feed_forward_length` key.
 ///

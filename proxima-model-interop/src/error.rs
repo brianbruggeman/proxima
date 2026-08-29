@@ -92,12 +92,12 @@ pub enum InteropError {
     #[error("gguf metadata key {key:?} has {distinct_values} distinct per-layer values; ModelArchitecture cannot represent per-layer variation")]
     HeterogeneousMetadataArray { key: String, distinct_values: usize },
 
-    /// [`crate::generate`]'s cached forward program failed to build or
+    /// `crate::generate`'s cached forward program failed to build or
     /// evaluate -- propagated from `proxima_tensor` rather than re-derived.
     #[error(transparent)]
     Tensor(#[from] proxima_tensor::TensorError),
 
-    /// [`crate::generate`]'s prompt encode/decode step failed --
+    /// `crate::generate`'s prompt encode/decode step failed --
     /// propagated from `proxima_tokenizer` rather than re-derived.
     #[cfg(feature = "std")]
     #[error(transparent)]
@@ -125,7 +125,7 @@ pub enum InteropError {
     #[error(transparent)]
     Backend(#[from] omega::backend::BackendError),
 
-    /// [`crate::generate::BackendRuntime::evaluate`]/`evaluate_op_timed`'s
+    /// `crate::generate::BackendRuntime::evaluate`/`evaluate_op_timed`'s
     /// plan cache: `shape` was just inserted (on miss) or already present (on
     /// hit) immediately above, so a subsequent lookup missing it means the
     /// map lost an entry with no external mutation possible under `&mut
@@ -148,7 +148,7 @@ pub enum InteropError {
     #[error("unsupported serving config: {0}")]
     UnsupportedServingConfig(String),
 
-    /// [`crate::bind::transpose_expert_stack`]'s decoded element count did
+    /// `crate::bind::transpose_expert_stack`'s decoded element count did
     /// not equal `expert_count * out_dim * in_dim` — the tensor directory's
     /// own declared shape for a stacked MoE weight disagrees with the
     /// `general.expert_count`/architecture hparams a malformed or
@@ -167,7 +167,7 @@ pub enum InteropError {
         expected: usize,
     },
 
-    /// [`crate::bind::transpose_out_in_to_in_out`]'s decoded element count
+    /// `crate::bind::transpose_out_in_to_in_out`'s decoded element count
     /// did not equal `out_dim * in_dim` — same disagreement as
     /// [`Self::MoeExpertShapeMismatch`], but for a plain (non-MoE) matmul
     /// weight: the tensor directory's own declared shape disagrees with
@@ -188,7 +188,7 @@ pub enum InteropError {
     #[error("malformed hf config.json: {reason}")]
     MalformedHfConfig { reason: String },
 
-    /// [`crate::hf_bind`]'s weight binder found a safetensors tensor whose
+    /// `crate::hf_bind`'s weight binder found a safetensors tensor whose
     /// declared [`DType`] this crate has no decoder for -- only
     /// `Float32`/`Float16`/`BFloat16` dense weights are supported (an
     /// unquantized HF checkpoint's own on-disk types); an integer dtype, a
@@ -197,7 +197,7 @@ pub enum InteropError {
     #[error("tensor {tensor:?} has dtype {dtype:?}, which this crate has no dense-weight decoder for")]
     UndecodableSafetensorsDType { tensor: String, dtype: DType },
 
-    /// [`crate::hf_bind::bind_all_weights_from_safetensors`] was asked to
+    /// `crate::hf_bind::bind_all_weights_from_safetensors` was asked to
     /// bind a checkpoint whose [`crate::bind::ModelArchitecture::expert_count`]
     /// is nonzero -- HF's own mixture-of-experts tensor-naming convention
     /// (Mixtral's per-expert `block_sparse_moe.experts.{e}.*` vs. Qwen's
@@ -209,7 +209,7 @@ pub enum InteropError {
     #[error("checkpoint has expert_count={expert_count}, but hf mixture-of-experts weight binding is not implemented (dense hf checkpoints only)")]
     HfMoeWeightsUnsupported { expert_count: u32 },
 
-    /// [`crate::lfm2::split_shortconv_in_proj`]'s fused `blk.{layer}.shortconv.in_proj.weight`
+    /// `crate::lfm2::bind_lfm2_shortconv_in_proj`'s fused `blk.{layer}.shortconv.in_proj.weight`
     /// did not have exactly `3 * embedding * embedding` elements -- the
     /// real checkpoint's own declared shape disagrees with the
     /// `embedding` this call derived from `lfm2moe.embedding_length`.
@@ -223,7 +223,7 @@ pub enum InteropError {
         expected: u64,
     },
 
-    /// [`crate::lfm2::bind_lfm2_shortconv_in_proj`]'s row-split precondition:
+    /// `crate::lfm2::bind_lfm2_shortconv_in_proj`'s row-split precondition:
     /// `embedding` (the row width, GGUF's `in_dim` axis) is not a whole
     /// multiple of the fused tensor's own codec `block_elements` -- never
     /// observed on the real checkpoint (`embedding = 2048 = 8 * 256`), but

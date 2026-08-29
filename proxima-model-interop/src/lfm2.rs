@@ -64,7 +64,7 @@ pub struct Lfm2Architecture {
     /// The real per-attention-layer kv head count -- every convolution
     /// layer's own `0` placeholder entry in the real checkpoint's
     /// `head_count_kv` array is skipped, not averaged in; see
-    /// [`metadata_u32_array_nonzero_uniform`]'s own doc.
+    /// `metadata_u32_array_nonzero_uniform`'s own doc.
     pub kv_heads: u32,
     pub head_dim: u32,
     pub block_count: u32,
@@ -432,7 +432,7 @@ fn build_lfm2_position_inputs(ids: &[u32], head_dim: u32, rope_freq_base: f32, r
 ///
 /// # Errors
 ///
-/// Whatever [`bind_lfm2_weights`], [`lfm2_forward_program_with_experts`],
+/// Whatever `bind_lfm2_weights`, [`lfm2_forward_program_with_experts`],
 /// tokenizing `prompt`, or evaluating the program can fail with.
 #[allow(clippy::too_many_arguments)]
 pub fn run_lfm2_prefill(
@@ -528,7 +528,7 @@ pub fn run_lfm2_prefill(
 ///
 /// # Errors
 ///
-/// Whatever [`bind_lfm2_weights`]/[`lfm2_forward_program_with_experts`]/
+/// Whatever `bind_lfm2_weights`/[`lfm2_forward_program_with_experts`]/
 /// evaluating the program can fail with, plus
 /// [`InteropError::MissingEvaluatedNode`] if the evaluator's output is
 /// missing the logits root or one of `extra_node_ids` -- an

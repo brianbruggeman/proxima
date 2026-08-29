@@ -107,7 +107,7 @@ pub fn gguf_tensor_as_f32(parsed: &ParsedGguf, file_bytes: &[u8], name: &str) ->
 /// unchanged.
 ///
 /// The `F32` arm reinterprets `bytes` as `&[f32]` in place rather than
-/// decoding through [`reinterpret_f32`]. This is sound only if `bytes.as_ptr()`
+/// decoding through `reinterpret_f32`. This is sound only if `bytes.as_ptr()`
 /// is 4-byte aligned: [`proxima_gguf::parser`] validates every tensor's
 /// on-disk `offset` against a running total of `pad_to_alignment` sums (a
 /// mismatch is a parse error, `GgufError::TensorOffsetMismatch`), so the
@@ -115,7 +115,7 @@ pub fn gguf_tensor_as_f32(parsed: &ParsedGguf, file_bytes: &[u8], name: &str) ->
 /// (minimum default 32) -- but that says nothing about whether `file_bytes`'s
 /// own base pointer is aligned. A `Vec<u8>` from `std::fs::read` carries no
 /// pointer-alignment guarantee beyond `align_of::<u8>() == 1`; an `mmap`
-/// (page-aligned by the kernel) does. [`aligned_f32_view`] checks the
+/// (page-aligned by the kernel) does. `aligned_f32_view` checks the
 /// *actual* runtime pointer, not the assumption, and this function returns
 /// [`InteropError::MisalignedFloat32Tensor`] rather than reinterpreting
 /// unaligned bytes -- non-`F32` callers fall back to [`gguf_tensor_as_f32`]'s
@@ -233,7 +233,7 @@ pub struct ModelArchitecture {
     pub query_heads: u32,
     /// `{architecture}.attention.head_count_kv`. Confirmed against a real
     /// checkpoint (LFM2.5-8B-A1B) to sometimes carry a per-layer
-    /// [`MetadataArray`] instead of one scalar `U32` -- a hybrid
+    /// [`proxima_gguf::MetadataArray`] instead of one scalar `U32` -- a hybrid
     /// architecture's convolution layers report `0` kv heads, its attention
     /// layers a real count, and the two differ within the SAME checkpoint.
     /// [`architecture_from_metadata`] reads that array shape without
@@ -285,10 +285,10 @@ pub struct ModelArchitecture {
     /// ([`architecture_from_metadata`]): llama.cpp's own writer always
     /// emits a standalone `output.weight` tensor regardless of whether the
     /// source checkpoint tied its embeddings, so this crate's GGUF loader has
-    /// never needed to distinguish the two. [`crate::hf_bind::bind_all_weights_from_safetensors`]
+    /// never needed to distinguish the two. `crate::hf_bind::bind_all_weights_from_safetensors`
     /// reads this field to decide which on-disk tensor to bind at the
     /// forward program's `output.weight` node -- no new bind path, the same
-    /// [`crate::hf_bind::hf_bind_matmul_weight`] call with a different
+    /// `crate::hf_bind::hf_bind_matmul_weight` call with a different
     /// source tensor name.
     pub tied_embeddings: bool,
 }
@@ -309,7 +309,7 @@ pub struct ModelArchitecture {
 ///
 /// `kv_heads` reads `{architecture}.attention.head_count_kv` as a plain
 /// scalar `U32` in the common case, but also accepts a per-layer
-/// [`MetadataArray`] (confirmed on the same real checkpoint) PROVIDED every
+/// [`proxima_gguf::MetadataArray`] (confirmed on the same real checkpoint) PROVIDED every
 /// entry agrees -- see [`ModelArchitecture::kv_heads`]'s own doc for why a
 /// genuinely heterogeneous array is refused rather than collapsed.
 ///
@@ -318,7 +318,7 @@ pub struct ModelArchitecture {
 /// [`InteropError::MissingMetadataKey`] naming the first key that is
 /// absent, or present with the wrong [`MetadataValue`] variant;
 /// [`InteropError::HeterogeneousMetadataArray`] if `attention.head_count_kv`
-/// is a [`MetadataArray`] whose entries are not all equal;
+/// is a [`proxima_gguf::MetadataArray`] whose entries are not all equal;
 /// [`InteropError::VocabShapeMismatch`] if `token_embd.weight`'s element
 /// count does not divide evenly by `embedding_length`.
 pub fn architecture_from_metadata(parsed: &ParsedGguf) -> Result<ModelArchitecture, InteropError> {
