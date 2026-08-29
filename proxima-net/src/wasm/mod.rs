@@ -1,4 +1,4 @@
-//! Wasm host-backed [`PacketListener`](proxima_net::PacketListener).
+//! Wasm host-backed [`crate::PacketListener`].
 //!
 //! `wasm32-unknown-unknown` has no socket syscalls; the embedder owns
 //! the datagram transport (browser WebTransport datagrams, a wasi UDP
@@ -36,7 +36,7 @@
 //!
 //! `encode_addr`/`decode_addr`/`take_wakers` are pure logic and compile
 //! under `no_std` + `alloc` (`core::net::SocketAddr` has been available
-//! since Rust 1.77). The wasm32-gated [`backend`] module — the one piece
+//! since Rust 1.77). The wasm32-gated `backend` module — the one piece
 //! that actually calls `PacketListener`'s `std::io::Result` surface — is
 //! std-bound by necessity, since it links `crate::PacketListener`. The
 //! crate-level `no_std` + `alloc` gate lives on `proxima-net`'s own crate

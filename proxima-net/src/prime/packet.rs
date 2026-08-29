@@ -97,7 +97,7 @@ impl PacketListener for PrimeUdpListener {
     }
 }
 
-/// prime-backed [`PacketListenerFactory`] — the runtime-selectable entry
+/// prime-backed [`crate::packet::PacketListenerFactory`] — the runtime-selectable entry
 /// point `RuntimeSelection::prime()` bundles. `bind` is synchronous (same
 /// contract as `PrimeUdpListener::bind`): must be called from a proxima
 /// worker thread with `CURRENT_REACTOR` live.
