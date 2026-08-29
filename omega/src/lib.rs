@@ -25,6 +25,13 @@
 
 #![cfg_attr(not(feature = "std"), no_std)]
 
+#[cfg(not(any(feature = "std", feature = "alloc")))]
+compile_error!(
+    "omega currently requires the `alloc` feature (or `std`, which implies \
+     it) -- the whole crate is alloc-tier msl emission over proxima-tensor's \
+     op/map/shape surface"
+);
+
 #[cfg(feature = "alloc")]
 extern crate alloc;
 
