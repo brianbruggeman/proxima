@@ -10,7 +10,9 @@
 use core::future::Future;
 use core::sync::atomic::{AtomicU64, Ordering};
 use std::collections::{BTreeMap, HashSet};
-use std::sync::{Mutex, OnceLock, PoisonError};
+use std::sync::{Mutex, PoisonError};
+#[cfg(target_os = "macos")]
+use std::sync::OnceLock;
 use std::thread::ThreadId;
 
 use proxima_clock::ticks::Ticks;

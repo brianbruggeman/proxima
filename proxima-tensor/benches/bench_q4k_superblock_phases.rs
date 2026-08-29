@@ -33,16 +33,26 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::cast_precision_loss)]
 
+#[cfg(target_arch = "aarch64")]
 use std::fs::File;
+#[cfg(target_arch = "aarch64")]
 use std::hint::black_box;
+#[cfg(target_arch = "aarch64")]
 use std::io::{Read, Seek, SeekFrom};
+#[cfg(target_arch = "aarch64")]
 use std::path::Path;
+#[cfg(target_arch = "aarch64")]
 use std::time::Instant;
 
+#[cfg(target_arch = "aarch64")]
 use proxima_gguf::parser::{GgufEvent, GgufParser};
+#[cfg(target_arch = "aarch64")]
 use proxima_gguf::pipe::ParsedGguf;
+#[cfg(target_arch = "aarch64")]
 use proxima_gguf::tensor::TensorInfo;
+#[cfg(target_arch = "aarch64")]
 use proxima_tensor::cpu::{dot_q4k_q8k, quantize_row_q8k};
+#[cfg(target_arch = "aarch64")]
 use proxima_tensor::test_support::Lcg;
 
 #[cfg(target_arch = "aarch64")]
@@ -56,6 +66,7 @@ use core::arch::aarch64::{
 /// real GGUF checkpoint path, overridable per-operator via
 /// `PROXIMA_BENCH_GGUF_PATH` — the hardcoded default only ever resolved on
 /// one machine, which made this bench unrunnable anywhere else.
+#[cfg(target_arch = "aarch64")]
 fn gguf_path() -> String {
     std::env::var("PROXIMA_BENCH_GGUF_PATH").unwrap_or_else(|_| {
         "/Users/brianbruggeman/.lmstudio/models/TheBloke/openchat-3.5-1210-GGUF/openchat-3.5-1210.Q4_K_S.gguf"
@@ -66,26 +77,42 @@ fn gguf_path() -> String {
 /// `cpu.rs` keeps its `Q4_K`/`Q8_K` layout constants private, so they are
 /// re-derived here from `proxima_gguf::quant::q4_k` -- the same source
 /// `cpu.rs` derives them from -- rather than pasted as magic numbers.
+#[cfg(target_arch = "aarch64")]
 const Q4K_BLOCK_BYTES: usize = proxima_gguf::quant::q4_k::BLOCK_BYTES;
+#[cfg(target_arch = "aarch64")]
 const Q4K_BLOCK_ELEMENTS: usize = proxima_gguf::quant::q4_k::QK_K;
+#[cfg(target_arch = "aarch64")]
 const Q4K_SUB_BLOCKS: usize = Q4K_BLOCK_ELEMENTS / 32;
+#[cfg(target_arch = "aarch64")]
 const Q4K_D_OFFSET: usize = 0;
+#[cfg(target_arch = "aarch64")]
 const Q4K_DMIN_OFFSET: usize = 2;
+#[cfg(target_arch = "aarch64")]
 const Q4K_SCALES_OFFSET: usize = 4;
+#[cfg(target_arch = "aarch64")]
 const Q4K_SCALE_BYTES: usize = 12;
+#[cfg(target_arch = "aarch64")]
 const Q4K_QS_OFFSET: usize = Q4K_SCALES_OFFSET + Q4K_SCALE_BYTES;
+#[cfg(target_arch = "aarch64")]
 const Q8K_BLOCK_BYTES: usize = 4 + Q4K_BLOCK_ELEMENTS + (Q4K_BLOCK_ELEMENTS / 16) * 2;
+#[cfg(target_arch = "aarch64")]
 const Q8K_D_OFFSET: usize = 0;
+#[cfg(target_arch = "aarch64")]
 const Q8K_QS_OFFSET: usize = 4;
+#[cfg(target_arch = "aarch64")]
 const Q8K_BSUMS_OFFSET: usize = Q8K_QS_OFFSET + Q4K_BLOCK_ELEMENTS;
+#[cfg(target_arch = "aarch64")]
 const Q8K_BSUMS_COUNT: usize = Q4K_BLOCK_ELEMENTS / 16;
 
 /// openchat-3.5-1210 (Mistral-7B shape) carries 32 decoder blocks; the
 /// cold arm round-robins `blk.0..31.attn_q.weight` so the working set
 /// (~300 MB) clears every level of this host's cache hierarchy.
+#[cfg(target_arch = "aarch64")]
 const BLOCK_COUNT: usize = 32;
+#[cfg(target_arch = "aarch64")]
 const SAMPLES: usize = 9;
 
+#[cfg(target_arch = "aarch64")]
 fn f16_le_at(bytes: &[u8], offset: usize) -> f32 {
     let mut raw = [0u8; 2];
     raw.copy_from_slice(&bytes[offset..offset + 2]);
@@ -457,6 +484,7 @@ unsafe fn keep_countable_copies(weight_block: &[u8], q8k_block: &[u8]) -> f32 {
 
 // ------------------------------------------------------------- harness
 
+#[cfg(target_arch = "aarch64")]
 struct Stat {
     mean: f64,
     cov: f64,
@@ -464,6 +492,7 @@ struct Stat {
     max: f64,
 }
 
+#[cfg(target_arch = "aarch64")]
 impl Stat {
     fn from(samples: &[f64]) -> Self {
         let mean = samples.iter().sum::<f64>() / samples.len() as f64;
@@ -478,6 +507,7 @@ impl Stat {
     }
 }
 
+#[cfg(target_arch = "aarch64")]
 fn time_pass<F: FnMut() -> f32>(mut body: F, macs_per_pass: u64) -> Stat {
     black_box(body());
     let mut samples = Vec::with_capacity(SAMPLES);
@@ -491,6 +521,7 @@ fn time_pass<F: FnMut() -> f32>(mut body: F, macs_per_pass: u64) -> Stat {
     Stat::from(&samples)
 }
 
+#[cfg(target_arch = "aarch64")]
 fn report(label: &str, stat: &Stat, baseline: Option<&Stat>) {
     let delta = baseline.map_or(String::new(), |full| {
         let delta_ns = full.mean - stat.mean;
@@ -508,6 +539,7 @@ fn report(label: &str, stat: &Stat, baseline: Option<&Stat>) {
     );
 }
 
+#[cfg(target_arch = "aarch64")]
 fn parse_header(path: &Path) -> (ParsedGguf, u64) {
     let mut file = File::open(path).expect("open real gguf file");
     let file_len = file.metadata().expect("stat gguf file").len();
@@ -553,6 +585,7 @@ fn parse_header(path: &Path) -> (ParsedGguf, u64) {
     }
 }
 
+#[cfg(target_arch = "aarch64")]
 fn find_tensor<'a>(parsed: &'a ParsedGguf, name: &str) -> &'a TensorInfo {
     parsed
         .tensors
@@ -561,6 +594,7 @@ fn find_tensor<'a>(parsed: &'a ParsedGguf, name: &str) -> &'a TensorInfo {
         .unwrap_or_else(|| panic!("tensor {name} not found in real gguf file"))
 }
 
+#[cfg(target_arch = "aarch64")]
 fn read_tensor_bytes(file: &mut File, parsed: &ParsedGguf, tensor: &TensorInfo, file_len: u64) -> Vec<u8> {
     let range = parsed
         .tensor_data_range(tensor, file_len)
