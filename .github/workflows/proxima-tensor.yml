@@ -96,7 +96,18 @@ jobs:
       - name: clippy + tests + rustdoc
         run: |
           if [ "${{ matrix.tier }}" = "alloc" ]; then
-            cargo clippy -p ${{ matrix.crate }} --no-default-features --features alloc -- -D warnings
+            # every crate here except proxima-model-interop names its no_std
+            # floor `alloc = []`; proxima-model-interop's own `default = []`
+            # already IS that floor (see its Cargo.toml feature-block doc),
+            # so passing `--features alloc` to it fails with "the package
+            # does not contain this feature" -- measured 2026-08-29 running
+            # this job's exact command locally. `--no-default-features` alone
+            # proves the same floor for this one crate.
+            if [ "${{ matrix.crate }}" = "proxima-model-interop" ]; then
+              cargo clippy -p ${{ matrix.crate }} --no-default-features -- -D warnings
+            else
+              cargo clippy -p ${{ matrix.crate }} --no-default-features --features alloc -- -D warnings
+            fi
           else
             cargo clippy -p ${{ matrix.crate }} --all-targets --all-features -- -D warnings
             cargo nextest run -p ${{ matrix.crate }} --all-features --no-fail-fast
