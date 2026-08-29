@@ -76,9 +76,9 @@ fn parse_target(url: &str) -> Result<(String, u16, String), Error> {
 /// Closed-loop multiplexed h2 drive: `cores` prime cores, each opening
 /// `connections_per_core` persistent h2 connections, each keeping
 /// `streams_per_conn` streams in flight, firing `GET /` until the deadline.
-/// Composes [`crate::engine::drive_replicated`] — see its doc-comment for why
+/// Composes `crate::engine::drive_replicated` — see its doc-comment for why
 /// this fans via `FuturesUnordered` and not
-/// [`proxima_primitives::pipe::FanOut`]/[`proxima_primitives::pipe::ScatterGather`].
+/// [`proxima_primitives::pipe::FanOut`]/`proxima_primitives::pipe::ScatterGather`.
 pub fn drive_h2(url: &str, connections_per_core: usize, streams_per_conn: usize, cores: usize, duration: Duration) -> Result<std::sync::Arc<Metrics>, Error> {
     let (host, port, authority) = parse_target(url)?;
     let streams_per_conn = streams_per_conn.clamp(1, MAX_STREAMS_PER_CONN);

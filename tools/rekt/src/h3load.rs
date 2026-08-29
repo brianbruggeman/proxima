@@ -68,9 +68,9 @@ fn bench_client_config() -> rustls::ClientConfig {
 /// Closed-loop native-h3 drive: `cores` prime cores, each opening
 /// `connections_per_core` persistent native-QUIC connections, each firing `GET /`
 /// request-at-a-time until the deadline. Composes
-/// [`crate::engine::drive_replicated`] — see its doc-comment for why this
+/// `crate::engine::drive_replicated` — see its doc-comment for why this
 /// fans via `FuturesUnordered` and not
-/// [`proxima_primitives::pipe::FanOut`]/[`proxima_primitives::pipe::ScatterGather`].
+/// [`proxima_primitives::pipe::FanOut`]/`proxima_primitives::pipe::ScatterGather`.
 pub fn drive_h3(server_addr: SocketAddr, server_name: &str, connections_per_core: usize, cores: usize, duration: Duration, streams_per_conn: usize) -> Result<Arc<Metrics>, Error> {
     let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
     let streams_per_conn = streams_per_conn.max(1);
