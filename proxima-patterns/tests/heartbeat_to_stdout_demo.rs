@@ -19,6 +19,7 @@ use futures::FutureExt as _;
 use proxima_core::signal::Signal;
 use proxima_primitives::pipe::ProximaError;
 use proxima_primitives::pipe::SendPipe;
+use proxima_primitives::pipe::alloc_tier::into_handle;
 use proxima_primitives::pipe::header_list::HeaderList;
 use proxima_primitives::pipe::request::{Request, RequestContext, Response};
 
