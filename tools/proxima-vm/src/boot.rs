@@ -4,7 +4,7 @@
 //!
 //! Composes the same primitives [`crate::dispatch::run_dispatch_loop`]
 //! already proves against the lambda ELF guest — one call into the C-side
-//! `proxima_vm_run_dispatch_loop` exit loop, the GIC/pl011/virtio device
+//! `proxima_vm_run_device_dispatch_loop` exit loop, the GIC/pl011/virtio device
 //! models, and [`crate::dtb::build_minimal_aarch64_boot_dtb`] — against a
 //! raw (non-ELF) kernel `Image` instead of an ELF binary. This is a second
 //! *caller* of the one C dispatch loop, not a second loop: the exit-handling
@@ -113,7 +113,7 @@ pub struct BootTrapStatistics {
     pub vtimer_activation_count: u64,
     /// Count of EC 0x1 (`WFI`/`WFE`) traps serviced — PID1's own idle park
     /// loop issues these once nothing is left to schedule
-    /// (`backend_macos.c::proxima_vm_run_dispatch_loop`'s own EC-0x1 arm).
+    /// (`backend_macos.c::proxima_vm_run_device_dispatch_loop`'s own EC-0x1 arm).
     /// Nonzero here, paired with a clean (`Ok`) [`BootOutcome`] loop
     /// outcome, is the "reached idle, ended cleanly" evidence this field
     /// exists to distinguish from the "unexpected arm exception class 0x1"
@@ -260,7 +260,7 @@ pub fn boot_linux_kernel(
     }
 
     unsafe extern "C" {
-        fn proxima_vm_run_dispatch_loop(
+        fn proxima_vm_run_device_dispatch_loop(
             segments: *const RawSegment,
             segment_count: usize,
             guest_memory_size: u64,
@@ -353,7 +353,7 @@ pub fn boot_linux_kernel(
     let mut error_buffer = [0_i8; ERROR_CAPACITY];
 
     let status = unsafe {
-        proxima_vm_run_dispatch_loop(
+        proxima_vm_run_device_dispatch_loop(
             raw_segments.as_ptr(),
             raw_segments.len(),
             RAM_SIZE,
@@ -510,7 +510,7 @@ pub const EDK2_WATCHDOG_MILLIS: u64 = 15_000;
 /// one signature would need an enum parameter plus `Option`-wrapping every
 /// field only one caller ever uses, which is a worse read at every call
 /// site than two functions that each say exactly what they need. Both
-/// still drive the one shared C exit loop (`proxima_vm_run_dispatch_loop`'s
+/// still drive the one shared C exit loop (`proxima_vm_run_device_dispatch_loop`'s
 /// own `boot_cpsr` parameter, threaded exactly like `boot_x0` already is)
 /// — this is a second *caller*, not a second loop, the identical relationship this
 /// module's own doc already states between [`boot_linux_kernel`] and
@@ -590,7 +590,7 @@ pub fn boot_edk2_firmware(
     }
 
     unsafe extern "C" {
-        fn proxima_vm_run_dispatch_loop(
+        fn proxima_vm_run_device_dispatch_loop(
             segments: *const RawSegment,
             segment_count: usize,
             guest_memory_size: u64,
@@ -674,7 +674,7 @@ pub fn boot_edk2_firmware(
     let mut error_buffer = [0_i8; ERROR_CAPACITY];
 
     let status = unsafe {
-        proxima_vm_run_dispatch_loop(
+        proxima_vm_run_device_dispatch_loop(
             raw_segments.as_ptr(),
             raw_segments.len(),
             // this loop's C side copies every segment into ONE flat
