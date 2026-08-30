@@ -287,3 +287,131 @@ fn an_out_of_range_gather_index_faults_on_wgpu_the_same_way_it_faults_on_cpu() {
         "expected a GatherIndexOutOfRange fault against extent {vocab}, got {error:?}"
     );
 }
+
+/// `matmul(lhs, rhs)` at `DType::Float16` — mirrors
+/// `omega/tests/metal_parity.rs::matmul_parity_is_within_f16_epsilon_of_the_f32_cpu_oracle`'s
+/// program shape, now exercising [`crate::wgsl`]'s `enable f16;` compute
+/// path (or its named rejection) through the portable wgpu driver.
+fn f16_matmul_program(m: u32, k: u32, n: u32) -> Vec<Op> {
+    let mut program = Vec::new();
+    let lhs = append(
+        &mut program,
+        Op::Input {
+            dtype: DType::Float32,
+            shape: vec![Extent::Static(m), Extent::Static(k)],
+            name: Some("lhs".into()),
+        },
+    );
+    let rhs = append(
+        &mut program,
+        Op::Input {
+            dtype: DType::Float32,
+            shape: vec![Extent::Static(k), Extent::Static(n)],
+            name: Some("rhs".into()),
+        },
+    );
+    let product = append(
+        &mut program,
+        Op::Elementwise {
+            dtype: DType::Float16,
+            body: ScalarOp::Multiply,
+            operands: vec![
+                (lhs, IndexMap::Affine(map::projection(3, &[0, 2]))),
+                (rhs, IndexMap::Affine(map::projection(3, &[2, 1]))),
+            ],
+            name: None,
+        },
+    );
+    append(
+        &mut program,
+        Op::Reduce(Reduce {
+            dtype: DType::Float16,
+            body: ScalarOp::Add,
+            init: ReduceInit::Zero,
+            operand: product,
+            in_map: IndexMap::Affine(map::projection(3, &[0, 1, 2])),
+            out_map: IndexMap::Affine(map::projection(3, &[0, 1])),
+            keep: Keep::Reduce,
+            name: Some("f16_matmul".into()),
+        }),
+    );
+    program
+}
+
+/// `EPSILON` mirrors `metal_parity.rs`'s own 5e-3 f16-rounding convention
+/// (see that test's doc for the measured-error derivation) — the same
+/// order of relative error a 10-bit-mantissa half accumulates over a
+/// handful of terms, independent of which backend computes it.
+#[test]
+fn f16_matmul_runs_on_wgpu_within_the_metal_parity_f16_epsilon_or_names_its_rejection() {
+    const EPSILON: f32 = 5e-3;
+    let (m, k, n) = (17usize, 23usize, 13usize);
+    let f32_program = {
+        let mut program = Vec::new();
+        let lhs = append(
+            &mut program,
+            Op::Input {
+                dtype: DType::Float32,
+                shape: vec![Extent::Static(m as u32), Extent::Static(k as u32)],
+                name: Some("lhs".into()),
+            },
+        );
+        let rhs = append(
+            &mut program,
+            Op::Input {
+                dtype: DType::Float32,
+                shape: vec![Extent::Static(k as u32), Extent::Static(n as u32)],
+                name: Some("rhs".into()),
+            },
+        );
+        append_matmul(&mut program, lhs, rhs, m as u32, k as u32, n as u32);
+        program
+    };
+    let f16_program = f16_matmul_program(m as u32, k as u32, n as u32);
+
+    let lhs = random_vec(11, m * k);
+    let rhs = random_vec(12, k * n);
+    let named: Vec<(&str, QuantizedBlock<'_>)> =
+        vec![("lhs", QuantizedBlock::Float32(&lhs)), ("rhs", QuantizedBlock::Float32(&rhs))];
+
+    let mut cpu_plan =
+        plan_named(Backend::Cpu, &f32_program, &[], &named, &[]).expect("omega::backend plans the f32 oracle on cpu");
+    let cpu = execute_plan_named(&mut cpu_plan, &named).expect("omega::backend runs the f32 oracle on cpu");
+
+    let mut wgpu_plan = plan_named(Backend::Wgpu, &f16_program, &[], &named, &[])
+        .expect("omega::backend plans the f16 matmul on wgpu");
+    match execute_plan_named(&mut wgpu_plan, &named) {
+        Ok(wgpu) => {
+            eprintln!("wgpu f16 parity: adapter offers SHADER_F16, computed in half precision");
+            let expected = cpu.root();
+            let actual = wgpu.root();
+            assert_eq!(actual.len(), expected.len());
+            assert_eq!(actual.len(), m * n);
+            let mut max_diff = 0.0f32;
+            for (&got, &want) in actual.iter().zip(expected.iter()) {
+                assert!(got.is_finite(), "wgpu f16 matmul produced a non-finite value: {got}");
+                max_diff = max_diff.max((got - want).abs() / want.abs().max(f32::MIN_POSITIVE));
+            }
+            eprintln!("wgpu f16 parity: max_relative_diff={max_diff}");
+            assert!(
+                max_diff < EPSILON,
+                "omega::backend's cpu f32 oracle and wgpu f16 compute disagree beyond the f16 epsilon: \
+                 max_relative_diff={max_diff} epsilon={EPSILON}"
+            );
+        }
+        Err(error) => {
+            eprintln!(
+                "wgpu f16 parity: adapter has no SHADER_F16, named rejection instead of a silent f32 fallback: {error}"
+            );
+            assert!(
+                matches!(
+                    error,
+                    omega::backend::BackendError::Wgpu(omega::WgpuError::Emit(
+                        omega::EmitError::UnsupportedDType { .. }
+                    ))
+                ),
+                "an unsupported adapter must reject with UnsupportedDType, not some other failure: {error:?}"
+            );
+        }
+    }
+}
