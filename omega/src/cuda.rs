@@ -29,19 +29,19 @@
 //!
 //! - **Elementwise**, **`Keep::Reduce`** (serial per-output-element fold, plus
 //!   a warp-shuffle cooperative fold for the associative/commutative
-//!   `ScalarOp`s — see [`reduce_is_cooperative`]), and **`Keep::Scan`**
+//!   `ScalarOp`s — see `reduce_is_cooperative`), and **`Keep::Scan`**
 //!   (one thread, serial over every outer line — matching
 //!   `proxima_tensor::cpu::run_scan`'s persistent accumulator, the same shape
 //!   `crate::wgsl::render_scan` takes).
 //! - **Gather.** A fault buffer records an out-of-range fetched index (the
-//!   `atomicOr`-based flag [`push_gather_fetch`] emits) the same way
-//!   [`crate::msl::push_gather_fetch`]'s `atomic_fetch_max` does, so
+//!   `atomicOr`-based flag `push_gather_fetch` emits) the same way
+//!   `crate::msl`'s own gather-fetch renderer's `atomic_fetch_max` does, so
 //!   `omega::execute`'s driver can turn a nonzero slot into the same
 //!   `TensorError::GatherIndexOutOfRange` the CPU oracle reports.
 //! - **Packed operands**: `Q4_K`/`Q5_K`/`Q6_K`/`Q8_0`/`Q4_0` plus
 //!   `Float16`/`BFloat16`, ported from [`crate::msl`]'s own unpack constants
 //!   — see [`Q4K_UNPACK_CUDA`] and its siblings.
-//! - **`f32`/`f16`** ([`type_token`]) — `f16` needs `<cuda_fp16.h>`'s
+//! - **`f32`/`f16`** (`type_token`) — `f16` needs `<cuda_fp16.h>`'s
 //!   `__half`, this module's one CUDA-specific preamble line MSL's `half`
 //!   needed no analogue for.
 //!
@@ -92,7 +92,7 @@ pub struct CudaKernel {
 pub struct CudaGridSpec {
     pub threads: u64,
     /// `Some(WARP_SIZE)` for a warp-shuffle cooperative reduce (see
-    /// [`reduce_is_cooperative`]): the driver must launch blocks exactly
+    /// `reduce_is_cooperative`): the driver must launch blocks exactly
     /// this wide so every warp boundary lands on an output-element
     /// boundary. `None` for every other kernel.
     pub block_width: Option<u64>,
