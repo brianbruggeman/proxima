@@ -41,6 +41,47 @@ vm-fdt = { version = "0.3.0", default-features = false, features = ["alloc"], op
 name = "hello"
 required-features = ["std"]
 
+# every probe below drives std-gated surface (dispatch::run_dispatch_loop,
+# snapshot::*, boot::*) directly, so each needs the same required-features
+# gate `hello` already carries -- otherwise `cargo build --no-default-features
+# --features alloc` tries to build them and fails on items that were
+# correctly configured out.
+[[bin]]
+name = "cow_primitives_probe"
+required-features = ["std"]
+
+[[bin]]
+name = "dispatch_probe"
+required-features = ["std"]
+
+[[bin]]
+name = "edk2_boot_probe"
+required-features = ["std"]
+
+[[bin]]
+name = "kernel_boot_probe"
+required-features = ["std"]
+
+[[bin]]
+name = "proxima-vm"
+required-features = ["std"]
+
+[[bin]]
+name = "snapshot_capture_probe"
+required-features = ["std"]
+
+[[bin]]
+name = "snapshot_layered_probe"
+required-features = ["std"]
+
+[[bin]]
+name = "snapshot_restore_probe"
+required-features = ["std"]
+
+[[bin]]
+name = "snapshot_warm_restore_probe"
+required-features = ["std"]
+
 [[bench]]
 name = "bench_elf"
 harness = false
