@@ -52,6 +52,14 @@ const N_HEADS: usize = 3;
 const HEAD_DIM: usize = 5;
 const FFN_HIDDEN: usize = 20;
 
+/// Skips (does not fail) when the real tokenizer is not present on this
+/// host -- matching `proxima-model-interop/tests/real_lfm2_checkpoint.rs`'s
+/// own posture, which this file's fixture-reading code restates rather
+/// than shares across the integration-test-binary boundary.
+fn checkpoint_present() -> bool {
+    std::path::Path::new(TOKENIZER_PATH).exists()
+}
+
 fn real_vocab() -> proxima_tokenizer::Vocab {
     let bytes = std::fs::read(TOKENIZER_PATH)
         .expect("read the real SmolLM2 tokenizer.json this session's task names");
@@ -507,6 +515,10 @@ fn combine_table_gradient(
 /// the embedding) against central difference over the real loss.
 #[proxima::test]
 async fn whole_model_gradient_check_matches_central_difference_on_every_tensor() {
+    if !checkpoint_present() {
+        eprintln!("skipping: no host-local SmolLM2 tokenizer.json fixture at {TOKENIZER_PATH}");
+        return;
+    }
     let vocab = real_vocab();
     let corpus = tokenize_corpus(&vocab);
     let network = build_language_model(corpus.vocab_size);
@@ -628,6 +640,10 @@ fn append_adam(program: &mut Vec<Op>, config: &AdamConfig, rank: u16, extents: &
 /// decreased".
 #[proxima::test]
 async fn adam_training_overfits_the_real_corpus_toward_near_zero_loss() {
+    if !checkpoint_present() {
+        eprintln!("skipping: no host-local SmolLM2 tokenizer.json fixture at {TOKENIZER_PATH}");
+        return;
+    }
     let vocab = real_vocab();
     let corpus = tokenize_corpus(&vocab);
     let network = build_language_model(corpus.vocab_size);

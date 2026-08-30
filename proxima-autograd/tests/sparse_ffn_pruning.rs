@@ -54,6 +54,14 @@ const FFN_HIDDEN: usize = 20;
 const BAND_COUNT: usize = 4;
 const BAND_WIDTH: usize = FFN_HIDDEN / BAND_COUNT;
 
+/// Skips (does not fail) when the real tokenizer is not present on this
+/// host -- matching `proxima-model-interop/tests/real_lfm2_checkpoint.rs`'s
+/// own posture, which this file's fixture-reading code restates rather
+/// than shares across the integration-test-binary boundary.
+fn checkpoint_present() -> bool {
+    std::path::Path::new(TOKENIZER_PATH).exists()
+}
+
 fn real_vocab() -> proxima_tokenizer::Vocab {
     let bytes = std::fs::read(TOKENIZER_PATH).expect("read the real SmolLM2 tokenizer.json this session's task names");
     proxima_tokenizer::hf::vocab_from_tokenizer_json(&bytes, None, None, None).expect("real tokenizer.json parses")
@@ -547,6 +555,10 @@ fn checked_indices(len: usize) -> impl Iterator<Item = usize> {
 /// check whether greedy sampling still reproduces the corpus.
 #[proxima::test]
 async fn pruned_ffn_bands_degrade_loss_then_recover_with_fine_tuning() {
+    if !checkpoint_present() {
+        eprintln!("skipping: no host-local SmolLM2 tokenizer.json fixture at {TOKENIZER_PATH}");
+        return;
+    }
     let vocab = real_vocab();
     let corpus = tokenize_corpus(&vocab);
     let ids = input_ids_as_f32(&corpus.compact_ids);
