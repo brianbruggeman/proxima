@@ -268,6 +268,117 @@ fn single_term_axis(axis_index: &AxisIndex) -> Option<u16> {
     }
 }
 
+/// A recognized `Reduce(+)`-over-`Elementwise(*)` matmul shape (see this
+/// module's own doc, "pattern-raising"): the two rank-2 operands feeding a
+/// plain-`MatMul`-shaped contraction, and the `Elementwise` node they are
+/// consumed through -- never separately emitted, since [`lift_graph`] folds
+/// it directly into the `MatMul` this shape names.
+struct MatmulShape {
+    elementwise_node: NodeId,
+    lhs: NodeId,
+    rhs: NodeId,
+}
+
+/// Recognizes the exact `Reduce(Add)`-over-`Elementwise(Multiply)` shape
+/// `lower::lower_matmul` (batch-free) and `lower::matmul2d`
+/// (`lower::lower_gemm`, untransposed) both build: an iteration space `(M,
+/// K, N)` in any axis order, `lhs` reading `(M, K)` in that order, `rhs`
+/// reading `(K, N)` in that order, the reduce contracting `K` and outputting
+/// `(M, N)` in that order -- each a pure, unit-coefficient, zero-offset
+/// projection over a rank-2 operand (no batch, no transpose, no broadcast).
+/// Anything else (batched, transposed, broadcast, a non-`Add`/`Multiply`
+/// body) returns `None`, and [`lift_graph`] falls through to the faithful
+/// primitive `Mul` + `ReduceSum` lift this module's doc names as the
+/// default. Raising a transposed or batched contraction to `MatMul`/`Gemm`
+/// is a further, genuinely expressible refinement of this same idea,
+/// deferred here for lack of time, not because the shape resists it.
+fn try_matmul_shape(program: &[Op], reduce: &proxima_tensor::Reduce) -> Option<MatmulShape> {
+    if reduce.body != ScalarOp::Add || reduce.keep != Keep::Reduce {
+        return None;
+    }
+    let IndexMap::Affine(in_pattern) = &reduce.in_map else { return None };
+    let IndexMap::Affine(out_pattern) = &reduce.out_map else { return None };
+    if in_pattern.iter_rank != 3 || in_pattern.axes.len() != 3 {
+        return None;
+    }
+    for (index, axis) in in_pattern.axes.iter().enumerate() {
+        if single_term_axis(axis) != Some(index as u16) {
+            return None;
+        }
+    }
+
+    let elementwise_node = reduce.operand;
+    let Some(Op::Elementwise { body: ScalarOp::Multiply, operands, .. }) = program.get(elementwise_node.0 as usize) else {
+        return None;
+    };
+    let [(lhs, IndexMap::Affine(lhs_pattern)), (rhs, IndexMap::Affine(rhs_pattern))] = operands.as_slice() else {
+        return None;
+    };
+    if lhs_pattern.iter_rank != 3 || lhs_pattern.axes.len() != 2 || rhs_pattern.iter_rank != 3 || rhs_pattern.axes.len() != 2 {
+        return None;
+    }
+    let lhs_m = single_term_axis(&lhs_pattern.axes[0])?;
+    let lhs_k = single_term_axis(&lhs_pattern.axes[1])?;
+    let rhs_k = single_term_axis(&rhs_pattern.axes[0])?;
+    let rhs_n = single_term_axis(&rhs_pattern.axes[1])?;
+    if lhs_k != rhs_k {
+        return None;
+    }
+    let mut axes = [lhs_m, lhs_k, rhs_n];
+    axes.sort_unstable();
+    if axes != [0, 1, 2] {
+        return None;
+    }
+
+    if out_pattern.iter_rank != 3 || out_pattern.axes.len() != 2 {
+        return None;
+    }
+    let out_first = single_term_axis(&out_pattern.axes[0])?;
+    let out_second = single_term_axis(&out_pattern.axes[1])?;
+    if out_first != lhs_m || out_second != rhs_n {
+        return None;
+    }
+
+    Some(MatmulShape { elementwise_node, lhs: *lhs, rhs: *rhs })
+}
+
+/// How many times each [`NodeId`] is read as an operand anywhere in
+/// `program`, or named as a declared graph output -- [`lift_graph`] only
+/// folds a matched [`MatmulShape::elementwise_node`] into its `MatMul`
+/// (skipping that node's own primitive emission) when this count is
+/// exactly one, so a multiply reused by a second consumer (or itself a
+/// declared output) still gets its faithful, independently-referenceable
+/// `Mul` node.
+fn count_consumers(program: &[Op], graph_outputs: &[(String, NodeId)]) -> BTreeMap<u32, u32> {
+    let mut counts: BTreeMap<u32, u32> = BTreeMap::new();
+    let bump = |counts: &mut BTreeMap<u32, u32>, node: NodeId| *counts.entry(node.0).or_insert(0) += 1;
+    let bump_map = |counts: &mut BTreeMap<u32, u32>, map: &IndexMap| {
+        if let IndexMap::Computed { indices, .. } = map {
+            bump(counts, *indices);
+        }
+    };
+    for op in program {
+        match op {
+            Op::Elementwise { operands, .. } => {
+                for (operand, map) in operands {
+                    bump(&mut counts, *operand);
+                    bump_map(&mut counts, map);
+                }
+            }
+            Op::Reduce(reduce) => {
+                bump(&mut counts, reduce.operand);
+                bump_map(&mut counts, &reduce.in_map);
+                bump_map(&mut counts, &reduce.out_map);
+            }
+            Op::Input { .. } | Op::Constant { .. } | Op::Iota { .. } => {}
+        }
+    }
+    for (_, node) in graph_outputs {
+        bump(&mut counts, *node);
+    }
+    counts
+}
+
 /// A source node's statically known shape, when it is a leaf that carries
 /// one directly ([`Op::Input`]/[`Op::Constant`] both hold `Vec<Extent>`) --
 /// the only two node kinds [`known_iter_extents`] can read an extent off of
@@ -463,6 +574,25 @@ pub fn lift_graph(input: LiftInput<'_>) -> Result<Vec<u8>, LiftError> {
         output_names_by_node.entry(node_id.0).or_default().push(output_name.clone());
     }
 
+    // Pattern-raising (this module's own doc): a matched `MatmulShape`'s
+    // `elementwise_node` folds directly into the `MatMul` its consuming
+    // `Reduce` emits, so it is never separately lifted as a primitive `Mul`
+    // -- guarded by `consumer_counts` so a multiply reused by a second
+    // consumer, or itself a declared output, still gets its own faithful
+    // node.
+    let consumer_counts = count_consumers(input.program, input.graph_outputs);
+    let mut matmul_shapes: BTreeMap<u32, MatmulShape> = BTreeMap::new();
+    let mut subsumed_elementwise: alloc::collections::BTreeSet<u32> = alloc::collections::BTreeSet::new();
+    for (index, op) in input.program.iter().enumerate() {
+        let Op::Reduce(reduce) = op else { continue };
+        let Some(shape) = try_matmul_shape(input.program, reduce) else { continue };
+        if consumer_counts.get(&shape.elementwise_node.0).copied().unwrap_or(0) != 1 {
+            continue;
+        }
+        subsumed_elementwise.insert(shape.elementwise_node.0);
+        matmul_shapes.insert(index as u32, shape);
+    }
+
     for (index, op) in input.program.iter().enumerate() {
         let node_id = NodeId(index as u32);
         let primary_name = match output_names_by_node.get(&node_id.0).and_then(|list| list.first()) {
@@ -518,6 +648,13 @@ pub fn lift_graph(input: LiftInput<'_>) -> Result<Vec<u8>, LiftError> {
                 let values: Vec<f32> = (0..*count).map(|value| value as f32).collect();
                 initializers.push(float_tensor_bytes(&[i64::from(*count)], &primary_name, &values));
             }
+            Op::Elementwise { body, operands, .. } if subsumed_elementwise.contains(&node_id.0) => {
+                // Folded directly into the `MatMul` its consuming `Reduce`
+                // emits below (see `try_matmul_shape`) -- `primary_name` is
+                // still pushed to `names` past this match so index
+                // alignment with `program` holds, but nothing references it.
+                let _ = (body, operands);
+            }
             Op::Elementwise { body, operands, .. } => {
                 let known_extents = known_iter_extents(operands, input.program);
                 let mut operand_names: Vec<String> = Vec::with_capacity(operands.len());
@@ -543,6 +680,18 @@ pub fn lift_graph(input: LiftInput<'_>) -> Result<Vec<u8>, LiftError> {
                 }
                 let operand_refs: Vec<&str> = operand_names.iter().map(String::as_str).collect();
                 emit_node(&mut nodes, &operand_refs, &[primary_name.as_str()], &primary_name, scalar_op_type(*body), &[]);
+            }
+            Op::Reduce(reduce) if matmul_shapes.contains_key(&node_id.0) => {
+                // Pattern-raised (this module's own doc): the shape
+                // `try_matmul_shape` matched at `index` is a plain `MatMul`,
+                // not `Mul` + `ReduceSum` -- `lhs`/`rhs` are each read by a
+                // pure, unmodified projection (see that function's own doc),
+                // so their already-emitted names are the faithful `MatMul`
+                // operands directly, no `resolve_affine` transform needed.
+                let shape = &matmul_shapes[&node_id.0];
+                let lhs_name = names[shape.lhs.0 as usize].clone();
+                let rhs_name = names[shape.rhs.0 as usize].clone();
+                emit_node(&mut nodes, &[lhs_name.as_str(), rhs_name.as_str()], &[primary_name.as_str()], &primary_name, "MatMul", &[]);
             }
             Op::Reduce(reduce) => {
                 let in_pattern = match &reduce.in_map {
@@ -1083,5 +1232,44 @@ mod tests {
         };
         let error = lift_model(lift_input).expect_err("Multiply scan body has no faithful ONNX cumulative op");
         assert!(matches!(error, LiftError::UnsupportedScan { .. }));
+    }
+
+    /// Pattern-raising (this module's own doc, "Faithful, primitive-to-
+    /// primitive" and [`try_matmul_shape`]): a lowered `MatMul` lifts back
+    /// to a single ONNX `MatMul` node, never the primitive `Mul` +
+    /// `ReduceSum` this module's default composes -- and the intermediate
+    /// `Elementwise(Multiply)` [`try_matmul_shape`] folds into it is never
+    /// separately emitted either. Round-trip correctness reuses
+    /// [`assert_graph_round_trips_through_lift`]; this test additionally
+    /// inspects the lifted node list directly.
+    #[test]
+    fn matmul_lifts_to_a_matmul_node_not_mul_reducesum() {
+        let lhs = f32_initializer("lhs", &[2, 3], &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
+        let rhs = f32_initializer("rhs", &[3, 2], &[7.0, 8.0, 9.0, 10.0, 11.0, 12.0]);
+        let node = NodeProto { input: vec!["lhs", "rhs"], output: vec!["y"], op_type: "MatMul", name: "matmul", ..NodeProto::default() };
+        let graph = GraphProto {
+            node: vec![node],
+            name: "matmul_graph",
+            initializer: vec![lhs, rhs],
+            output: vec![ValueInfoProto { name: "y", ..ValueInfoProto::default() }],
+            ..GraphProto::default()
+        };
+
+        let lowered = lower_graph(&graph).expect("lower MatMul");
+        let lift_input = LiftInput {
+            program: &lowered.program,
+            initializers: &lowered.initializers,
+            graph_inputs: &lowered.graph_inputs,
+            graph_outputs: &lowered.graph_outputs,
+            graph_name: "matmul_lifted",
+        };
+        let lifted_bytes = lift_model(lift_input).expect("lift MatMul to onnx bytes");
+        let reparsed_model = parse_complete(&lifted_bytes).expect("lifted bytes parse back to a ModelProto");
+        let reparsed_graph = reparsed_model.graph.as_ref().expect("lifted graph present");
+
+        let op_types: Vec<&str> = reparsed_graph.node.iter().map(|node| node.op_type).collect();
+        assert_eq!(op_types, ["MatMul"], "lifted graph is a single named MatMul node, not Mul+ReduceSum");
+
+        assert_graph_round_trips_through_lift(&graph, "matmul_lifted_roundtrip");
     }
 }
