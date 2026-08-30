@@ -563,45 +563,51 @@ fn lower_gemm(program: &mut Vec<Op>, values: &mut BTreeMap<String, Value>, node:
     Ok(())
 }
 
-/// `Softmax` along the last axis of a rank-2 input: max-shift, `exp`,
-/// sum-reduce, divide -- the same four-step composition
-/// `proxima-tensor/src/spec.rs`'s attention blocks build inline (see this
-/// crate's own module doc pointer to `spec.rs`). Any axis but the last, or
-/// any rank but 2, is out of scope -- deferred, not a sufficiency gap (the
-/// same max/exp/sum/div composition works over any reduced axis; only the
-/// `IndexPattern`s generalizing to it were not written in this pass).
+/// `Softmax` along any axis: max-shift, `exp`, sum-reduce, divide -- the
+/// same four-step composition `proxima-tensor/src/spec.rs`'s attention
+/// blocks build inline (see this crate's own module doc pointer to
+/// `spec.rs`). The reduced axis generalizes to any `axis` attribute by
+/// pointing both `Reduce`s' `out_map` (and the broadcast back for the
+/// subtract/divide) at `kept` -- every axis but the reduced one -- via
+/// [`projection`], reused both as the reduce's `out_map` and, unchanged, as
+/// the later elementwise operand pattern reading that reduced result back at
+/// full rank: no transpose round-trip needed, since [`Op::Reduce`]'s own
+/// `in_map`/`out_map` already address an arbitrary-rank iteration space.
 fn lower_softmax(program: &mut Vec<Op>, values: &mut BTreeMap<String, Value>, node: &NodeProto<'_>) -> Result<(), LowerError> {
     let input = lookup(values, node, 0)?.clone();
-    if input.shape.len() != 2 {
+    let rank = input.shape.len();
+    if rank == 0 {
         return Err(LowerError::UnsupportedShape {
             name: node.name.to_string(),
             op_type: node.op_type.to_string(),
-            reason: "Softmax lowering supports rank-2 (batch, class) input only".to_string(),
+            reason: "Softmax requires input of rank >= 1".to_string(),
         });
     }
-    let rank = 2usize;
     let axis = attr_int(node, "axis").unwrap_or(-1);
     let normalized_axis = if axis < 0 { axis + rank as i64 } else { axis };
-    if normalized_axis != 1 {
+    if normalized_axis < 0 || normalized_axis as usize >= rank {
         return Err(LowerError::UnsupportedShape {
             name: node.name.to_string(),
             op_type: node.op_type.to_string(),
-            reason: "Softmax lowering supports reducing the last axis only".to_string(),
+            reason: format!("Softmax axis {axis} is out of range for rank {rank}"),
         });
     }
+    let reduced_axis = normalized_axis as u16;
+    let kept: Vec<u16> = (0..rank as u16).filter(|&candidate| candidate != reduced_axis).collect();
+    let out_map = projection(rank as u16, &kept);
 
-    let row_max = build_reduce(program, ScalarOp::Maximum, ReduceInit::NegativeInfinity, input.node, projection(2, &[0, 1]), projection(2, &[0]), None);
+    let row_max = build_reduce(program, ScalarOp::Maximum, ReduceInit::NegativeInfinity, input.node, identity_pattern(rank), out_map.clone(), None);
     let shifted = build_elementwise(
         program,
         ScalarOp::Subtract,
-        alloc::vec![(input.node, IndexMap::Affine(identity_pattern(rank))), (row_max, IndexMap::Affine(projection(2, &[0])))],
+        alloc::vec![(input.node, IndexMap::Affine(identity_pattern(rank))), (row_max, IndexMap::Affine(out_map.clone()))],
     );
     let exponentiated = build_elementwise(program, ScalarOp::Exponential, alloc::vec![(shifted, IndexMap::Affine(identity_pattern(rank)))]);
-    let row_sum = build_reduce(program, ScalarOp::Add, ReduceInit::Zero, exponentiated, projection(2, &[0, 1]), projection(2, &[0]), None);
+    let row_sum = build_reduce(program, ScalarOp::Add, ReduceInit::Zero, exponentiated, identity_pattern(rank), out_map.clone(), None);
     let id = build_elementwise(
         program,
         ScalarOp::Divide,
-        alloc::vec![(exponentiated, IndexMap::Affine(identity_pattern(rank))), (row_sum, IndexMap::Affine(projection(2, &[0])))],
+        alloc::vec![(exponentiated, IndexMap::Affine(identity_pattern(rank))), (row_sum, IndexMap::Affine(out_map))],
     );
     bind_output(values, node, 0, id, input.shape);
     Ok(())
@@ -640,14 +646,17 @@ fn lower_transpose(program: &mut Vec<Op>, values: &mut BTreeMap<String, Value>, 
     Ok(())
 }
 
-/// `Gather(data, indices, axis=0)`: [`IndexMap::Computed`] over
+/// `Gather(data, indices, axis)`: [`IndexMap::Computed`] over
 /// [`ScalarOp::Identity`], the same "gather (read-side)" row
 /// `proxima-tensor/src/map.rs`'s doc table names and
 /// `proxima-tensor/src/spec.rs`'s `embedding_lookup` builds for the
-/// `axis=0`, rank-2-table case -- generalized here to any `data` rank and
-/// any `indices` rank. `axis != 0` is deferred (the same `Computed`
-/// mechanism reaches it with a permuted `base` pattern; not implemented in
-/// this pass).
+/// `axis=0`, rank-2-table case -- generalized here to any `data` rank, any
+/// `indices` rank, and any gather `axis`: the iteration space orders `data`'s
+/// leading (pre-axis) axes, then `indices`' own axes, then `data`'s trailing
+/// (post-axis) axes -- exactly ONNX's own output shape
+/// `data.shape[:axis] + indices.shape + data.shape[axis+1:]` -- so `base`'s
+/// entries just shift which iteration axis each non-gathered `data` axis
+/// reads from by `indices_rank` once past `axis`.
 fn lower_gather(program: &mut Vec<Op>, values: &mut BTreeMap<String, Value>, node: &NodeProto<'_>) -> Result<(), LowerError> {
     let data = lookup(values, node, 0)?.clone();
     let indices = lookup(values, node, 1)?.clone();
@@ -658,32 +667,40 @@ fn lower_gather(program: &mut Vec<Op>, values: &mut BTreeMap<String, Value>, nod
             reason: "Gather requires data of rank >= 1".to_string(),
         });
     }
+    let data_rank = data.shape.len();
     let axis = attr_int(node, "axis").unwrap_or(0);
-    let normalized_axis = if axis < 0 { axis + data.shape.len() as i64 } else { axis };
-    if normalized_axis != 0 {
+    let normalized_axis = if axis < 0 { axis + data_rank as i64 } else { axis };
+    if normalized_axis < 0 || normalized_axis as usize >= data_rank {
         return Err(LowerError::UnsupportedShape {
             name: node.name.to_string(),
             op_type: node.op_type.to_string(),
-            reason: "Gather lowering supports axis=0 only".to_string(),
+            reason: format!("Gather axis {axis} is out of range for data rank {data_rank}"),
         });
     }
+    let axis = normalized_axis as usize;
 
     let indices_rank = indices.shape.len();
-    let data_rank = data.shape.len();
-    let iter_rank = (indices_rank + data_rank - 1) as u16;
-    let index_map = projection(iter_rank, &(0..indices_rank as u16).collect::<Vec<_>>());
+    let iter_rank = (data_rank - 1 + indices_rank) as u16;
+    let index_map = projection(iter_rank, &(0..indices_rank as u16).map(|offset| axis as u16 + offset).collect::<Vec<_>>());
 
-    let mut base_axes: Vec<AxisIndex> = alloc::vec![AxisIndex::default()];
-    for (position, _) in (1..data_rank).enumerate() {
-        let iter_axis = (indices_rank + position) as u16;
-        base_axes.push(AxisIndex { terms: core::iter::once(AxisTerm::projection(iter_axis)).collect(), offset: 0 });
+    let mut base_axes: Vec<AxisIndex> = Vec::with_capacity(data_rank);
+    for data_axis in 0..data_rank {
+        if data_axis == axis {
+            base_axes.push(AxisIndex::default());
+        } else if data_axis < axis {
+            base_axes.push(AxisIndex { terms: core::iter::once(AxisTerm::projection(data_axis as u16)).collect(), offset: 0 });
+        } else {
+            let iter_axis = (data_axis - 1 + indices_rank) as u16;
+            base_axes.push(AxisIndex { terms: core::iter::once(AxisTerm::projection(iter_axis)).collect(), offset: 0 });
+        }
     }
     let base = IndexPattern { iter_rank, axes: base_axes };
-    let gathered_map = IndexMap::Computed { indices: indices.node, index_map, base, gathered_dim: 0 };
+    let gathered_map = IndexMap::Computed { indices: indices.node, index_map, base, gathered_dim: axis as u16 };
 
     let id = append(program, Op::Elementwise { dtype: DType::Float32, body: ScalarOp::Identity, operands: alloc::vec![(data.node, gathered_map)], name: None });
-    let mut out_shape = indices.shape.clone();
-    out_shape.extend_from_slice(&data.shape[1..]);
+    let mut out_shape = data.shape[..axis].to_vec();
+    out_shape.extend_from_slice(&indices.shape);
+    out_shape.extend_from_slice(&data.shape[axis + 1..]);
     bind_output(values, node, 0, id, out_shape);
     Ok(())
 }
@@ -998,6 +1015,99 @@ mod tests {
 
         let error = lower_graph(&graph).expect_err("Concat has no lowering");
         assert!(matches!(error, LowerError::UnsupportedOp { .. }), "expected UnsupportedOp, got {error:?}");
+    }
+
+    /// `Softmax(axis=0)` on a `[3, 2]` input -- the reduced axis is the
+    /// leading one, not the last, proving [`lower_softmax`]'s generalization
+    /// beyond the previous "last axis only" restriction.
+    #[test]
+    fn softmax_reduces_the_leading_axis() {
+        let x_initializer = f32_initializer("x", &[3, 2], &[0.0, 1.0, 0.0, 1.0, 0.0, 1.0]);
+        let axis_attribute = AttributeProto { name: "axis", i: 0, ..AttributeProto::default() };
+        let node = NodeProto { input: vec!["x"], output: vec!["y"], op_type: "Softmax", name: "softmax", attribute: vec![axis_attribute], ..NodeProto::default() };
+        let graph = GraphProto {
+            node: vec![node],
+            name: "softmax_axis0_graph",
+            initializer: vec![x_initializer],
+            output: vec![ValueInfoProto { name: "y", ..ValueInfoProto::default() }],
+            ..GraphProto::default()
+        };
+
+        let lowered = lower_graph(&graph).expect("lower Softmax axis=0");
+        let named: Vec<(&str, &[f32])> = lowered.initializers.iter().map(|(name, data)| (name.as_str(), data.as_slice())).collect();
+        let output = lowered.graph_outputs[0].1;
+        let evaluated = evaluate_named(&lowered.program, &[], &named, &[output]).expect("evaluate Softmax axis=0");
+        let (data, shape) = evaluated.get(output).expect("y present");
+
+        assert_eq!(shape, &[3, 2]);
+        // every column is identical ([0,0,0] or [1,1,1]), so softmax over the
+        // 3-element column is uniform: 1/3 each.
+        for &value in data {
+            assert!((value - 1.0 / 3.0).abs() < 1e-6, "expected uniform 1/3, got {value}");
+        }
+    }
+
+    /// `Softmax(axis=1)` on a rank-3 `[2, 3, 2]` input -- a middle axis,
+    /// neither leading nor trailing.
+    #[test]
+    fn softmax_reduces_a_middle_axis_of_a_rank_three_input() {
+        let x_initializer = f32_initializer("x", &[2, 3, 2], &[0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
+        let axis_attribute = AttributeProto { name: "axis", i: 1, ..AttributeProto::default() };
+        let node = NodeProto { input: vec!["x"], output: vec!["y"], op_type: "Softmax", name: "softmax", attribute: vec![axis_attribute], ..NodeProto::default() };
+        let graph = GraphProto {
+            node: vec![node],
+            name: "softmax_axis1_graph",
+            initializer: vec![x_initializer],
+            output: vec![ValueInfoProto { name: "y", ..ValueInfoProto::default() }],
+            ..GraphProto::default()
+        };
+
+        let lowered = lower_graph(&graph).expect("lower Softmax axis=1");
+        let named: Vec<(&str, &[f32])> = lowered.initializers.iter().map(|(name, data)| (name.as_str(), data.as_slice())).collect();
+        let output = lowered.graph_outputs[0].1;
+        let evaluated = evaluate_named(&lowered.program, &[], &named, &[output]).expect("evaluate Softmax axis=1");
+        let (data, shape) = evaluated.get(output).expect("y present");
+
+        assert_eq!(shape, &[2, 3, 2]);
+        // batch 0 is all zero along the reduced axis -> uniform 1/3.
+        for &value in &data[0..6] {
+            assert!((value - 1.0 / 3.0).abs() < 1e-6, "expected uniform 1/3, got {value}");
+        }
+        // batch 1, each column sums to 1.
+        let column0_sum = data[6] + data[8] + data[10];
+        let column1_sum = data[7] + data[9] + data[11];
+        assert!((column0_sum - 1.0).abs() < 1e-5);
+        assert!((column1_sum - 1.0).abs() < 1e-5);
+        assert!(data[10] > data[8] && data[8] > data[6], "softmax preserves ordering within the reduced axis");
+    }
+
+    /// `Gather(data, indices, axis=1)` on a `[2, 3]` table with
+    /// `indices = [2, 0]`, proving [`lower_gather`]'s generalization beyond
+    /// `axis=0`.
+    #[test]
+    fn gather_selects_columns_by_index_at_a_general_axis() {
+        let table_initializer = f32_initializer("table", &[2, 3], &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
+        let indices_initializer = TensorProto { dims: vec![2], data_type: 7, int64_data: vec![2, 0], name: "ids", ..TensorProto::default() };
+        let axis_attribute = AttributeProto { name: "axis", i: 1, ..AttributeProto::default() };
+        let node =
+            NodeProto { input: vec!["table", "ids"], output: vec!["y"], op_type: "Gather", name: "gather", attribute: vec![axis_attribute], ..NodeProto::default() };
+        let graph = GraphProto {
+            node: vec![node],
+            name: "gather_axis1_graph",
+            initializer: vec![table_initializer, indices_initializer],
+            output: vec![ValueInfoProto { name: "y", ..ValueInfoProto::default() }],
+            ..GraphProto::default()
+        };
+
+        let lowered = lower_graph(&graph).expect("lower Gather axis=1");
+        let named: Vec<(&str, &[f32])> = lowered.initializers.iter().map(|(name, data)| (name.as_str(), data.as_slice())).collect();
+        let output = lowered.graph_outputs[0].1;
+        let evaluated = evaluate_named(&lowered.program, &[], &named, &[output]).expect("evaluate Gather axis=1");
+        let (data, shape) = evaluated.get(output).expect("y present");
+
+        assert_eq!(shape, &[2, 2]);
+        // row 0: [1,2,3] -> columns [2,0] -> [3,1]; row 1: [4,5,6] -> [6,4]
+        assert_eq!(data, &[3.0, 1.0, 6.0, 4.0]);
     }
 
     /// Sanity check on [`input_value_info`]'s own helper, exercised
