@@ -23,6 +23,7 @@
 //! `proxima-tensor`'s benches read (commit `3a58a51`), so this test is
 //! runnable on another machine.
 
+#![cfg(all(feature = "metal", target_os = "macos"))]
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use std::io::{Read, Seek, SeekFrom};

@@ -13,6 +13,7 @@
 //! file's fixture-reading code restates rather than shares across the
 //! integration-test-binary boundary.
 
+#![cfg(all(feature = "metal", target_os = "macos"))]
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use std::io::{Read, Seek, SeekFrom};

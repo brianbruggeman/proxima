@@ -13,6 +13,7 @@
 //! private to `cpu.rs`'s test module, so it is restated here rather than
 //! reached across a crate boundary).
 
+#![cfg(all(feature = "metal", target_os = "macos"))]
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use std::io::{Read, Seek, SeekFrom};
