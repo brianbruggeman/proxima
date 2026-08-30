@@ -30,14 +30,23 @@
 //!   base spec has no portable narrow float type every wgpu backend
 //!   supports, unlike MSL's native `half`.
 //!
-//! # Not in v1 (see [`EmitError::GatherNotSupported`] /
-//! [`EmitError::UnsupportedOpKind`])
+//! # Gather (elementwise and `Keep::Reduce` only)
 //!
-//! - **Gather.** No indices binding, no fault buffer, no atomic
-//!   out-of-range reporting — `crate::msl::push_gather_fetch`'s whole
-//!   mechanism has no counterpart here yet. A `BoundOp` whose operand
-//!   carries a [`proxima_tensor::Lookup`] is rejected at [`emit_wgsl`]
-//!   rather than silently reading out of bounds.
+//! An operand carrying a [`proxima_tensor::Lookup`] fetches an index out of
+//! an `Indices` binding (a `storage, read` `array<f32>`, the same "an index
+//! is an exact-integer float" convention `crate::msl::push_gather_fetch`
+//! uses), clamps it into range, and records an out-of-range fetch into a
+//! `Fault` binding (`storage, read_write` `array<atomic<u32>>`) via
+//! `atomicMax` — the WGSL counterpart of `crate::msl::push_gather_fetch`'s
+//! `atomic_fetch_max_explicit`. `crate::wgpu_driver` reads the fault buffer
+//! back after every dispatch that gathers and turns a nonzero slot into
+//! [`proxima_tensor::TensorError::GatherIndexOutOfRange`], exactly the error
+//! `cpu::evaluate` reports for the same fetch. `Keep::Scan` does not take
+//! this path yet (see [`EmitError::GatherNotSupported`]) — nothing in this
+//! crate's v1 test surface needs a scanned gather.
+//!
+//! # Not in v1 (see [`EmitError::UnsupportedOpKind`])
+//!
 //! - **`Iota`/`Constant`.** Rejected the same way; nothing in this crate's
 //!   v1 test surface needs a position-only or literal-only kernel.
 //! - **Quantized/packed operands.** [`emit_wgsl`] assumes every operand is a
@@ -70,7 +79,7 @@ use alloc::vec::Vec;
 use proxima_tensor::{BoundOp, BoundOpKind, ComposedBody, DType, Keep, NodeId, ScalarOp, StepArg};
 
 use crate::error::EmitError;
-use crate::msl::Binding;
+use crate::msl::{Binding, gather_count, gather_slots};
 
 /// Threads per workgroup every v1 WGSL kernel dispatches with. A build-time
 /// policy knob the way `crate::sized::SIMD_WIDTH` is a hardware fact — this
@@ -165,11 +174,6 @@ fn validate_body(node: NodeId, body: &ComposedBody) -> Result<(), EmitError> {
 
 fn validate(resolved: &BoundOp) -> Result<(), EmitError> {
     validate_body(resolved.node, resolved.element_body())?;
-    for (_, _, gather) in resolved.operands() {
-        if gather.is_some() {
-            return Err(EmitError::GatherNotSupported { node: resolved.node });
-        }
-    }
     if let BoundOpKind::Reduce {
         reduce_op, keep, ..
     } = &resolved.kind
@@ -177,8 +181,19 @@ fn validate(resolved: &BoundOp) -> Result<(), EmitError> {
         if matches!(reduce_op, ScalarOp::Select) {
             return Err(EmitError::ReductionBodyIsSelect { node: resolved.node });
         }
-        if *keep == Keep::Scan && resolved.extents.is_empty() {
-            return Err(EmitError::EmptyScan { node: resolved.node });
+        if *keep == Keep::Scan {
+            if resolved.extents.is_empty() {
+                return Err(EmitError::EmptyScan { node: resolved.node });
+            }
+            // scan's accumulator persists across every outer line (see
+            // `render_scan`'s own doc) -- gather support there needs its own
+            // running-offset tracking `crate::msl::render_scan` carries and
+            // this module's v1 has not ported yet, see the module doc.
+            for (_, _, gather) in resolved.operands() {
+                if gather.is_some() {
+                    return Err(EmitError::GatherNotSupported { node: resolved.node });
+                }
+            }
         }
     }
     Ok(())
@@ -190,8 +205,16 @@ fn bindings(resolved: &BoundOp) -> Vec<Binding> {
         .iter()
         .map(|(node, _, _)| Binding::Input(*node))
         .collect();
+    for (_, _, gather) in resolved.operands() {
+        if let Some(lookup) = gather {
+            bindings.push(Binding::Indices(lookup.indices));
+        }
+    }
     bindings.push(Binding::Output(resolved.node));
     bindings.push(Binding::Uniforms);
+    if gather_count(resolved) > 0 {
+        bindings.push(Binding::Fault);
+    }
     bindings
 }
 
@@ -397,7 +420,7 @@ fn push_body_steps(source: &mut String, body: &ComposedBody, indent: &str, eleme
     format!("step{}", body.steps.len().saturating_sub(1))
 }
 
-fn preamble(source: &mut String, operand_count: usize, output_len: usize, uniforms_struct: &str) {
+fn preamble(source: &mut String, operand_count: usize, gather_count: usize, uniforms_struct: &str) {
     source.push_str(PROXIMA_ERF_FN_WGSL);
     source.push('\n');
     source.push_str(uniforms_struct);
@@ -407,13 +430,91 @@ fn preamble(source: &mut String, operand_count: usize, output_len: usize, unifor
             "@group(0) @binding({index}) var<storage, read> in{index}: array<f32>;\n"
         ));
     }
+    for slot in 0..gather_count {
+        source.push_str(&format!(
+            "@group(0) @binding({}) var<storage, read> gather_idx{slot}: array<f32>;\n",
+            operand_count + slot
+        ));
+    }
+    let output_binding = operand_count + gather_count;
     source.push_str(&format!(
-        "@group(0) @binding({operand_count}) var<storage, read_write> out: array<f32>;\n"
+        "@group(0) @binding({output_binding}) var<storage, read_write> out: array<f32>;\n"
     ));
-    let _ = output_len;
+    let uniforms_binding = output_binding + 1;
     source.push_str(&format!(
-        "@group(0) @binding({}) var<storage, read> u: Uniforms;\n\n",
-        operand_count + 1
+        "@group(0) @binding({uniforms_binding}) var<storage, read> u: Uniforms;\n"
+    ));
+    if gather_count > 0 {
+        let fault_binding = uniforms_binding + 1;
+        source.push_str(&format!(
+            "@group(0) @binding({fault_binding}) var<storage, read_write> fault: array<atomic<u32>>;\n"
+        ));
+    }
+    source.push('\n');
+}
+
+/// Declares the `Uniforms` fields a gather needs — the WGSL counterpart of
+/// `crate::msl::push_gather_uniform_fields`. Declared only when
+/// `gather_count > 0`, so a gather-free kernel's `Uniforms` struct is
+/// byte-for-byte what it was before gather existed.
+fn push_gather_uniform_fields(source: &mut String, gather_count: usize, rank_len: usize) {
+    if gather_count == 0 {
+        return;
+    }
+    source.push_str(&format!("    gather_index_base: array<i32, {gather_count}>,\n"));
+    source.push_str(&format!(
+        "    gather_index_strides: array<array<i32, {rank_len}>, {gather_count}>,\n"
+    ));
+    source.push_str(&format!(
+        "    gather_element_stride: array<i32, {gather_count}>,\n"
+    ));
+    source.push_str(&format!("    gather_extent: array<i32, {gather_count}>,\n"));
+}
+
+/// Records an out-of-range fetched index into `fault[gather_slot]` — the
+/// WGSL counterpart of `crate::msl::push_gather_fault_check`. `atomicMax`
+/// plays the same role `atomic_fetch_max_explicit` does on the Metal side:
+/// whichever value wins under concurrent invocations is still a genuine
+/// fault, and the driver only needs to know one occurred and at what value.
+fn push_gather_fault_check(source: &mut String, operand_index: usize, gather_slot: usize, indent: &str) {
+    source.push_str(&format!(
+        "{indent}if (fetched{operand_index} < 0 || fetched{operand_index} >= u.gather_extent[{gather_slot}]) {{\n"
+    ));
+    source.push_str(&format!(
+        "{indent}    atomicMax(&fault[{gather_slot}], u32(max(fetched{operand_index}, 0)) + 1u);\n"
+    ));
+    source.push_str(&format!("{indent}}}\n"));
+}
+
+/// Emits the fetch for one gathered operand — the WGSL counterpart of
+/// `crate::msl::push_gather_fetch`: reads the index, checks and records a
+/// fault, clamps into range regardless (so the read this drives always
+/// lands in bounds), and adds the resulting offset into `offset_var`.
+fn push_gather_fetch(
+    source: &mut String,
+    operand_index: usize,
+    gather_slot: usize,
+    rank: usize,
+    coord_var: &str,
+    offset_var: &str,
+) {
+    source.push_str(&format!(
+        "    var gather_off{operand_index}: i32 = u.gather_index_base[{gather_slot}];\n"
+    ));
+    for dim in 0..rank {
+        source.push_str(&format!(
+            "    gather_off{operand_index} += {coord_var}[{dim}] * u.gather_index_strides[{gather_slot}][{dim}];\n"
+        ));
+    }
+    source.push_str(&format!(
+        "    var fetched{operand_index}: i32 = i32(gather_idx{gather_slot}[gather_off{operand_index}]);\n"
+    ));
+    push_gather_fault_check(source, operand_index, gather_slot, "    ");
+    source.push_str(&format!(
+        "    fetched{operand_index} = max(0, min(fetched{operand_index}, u.gather_extent[{gather_slot}] - 1));\n"
+    ));
+    source.push_str(&format!(
+        "    {offset_var} += fetched{operand_index} * u.gather_element_stride[{gather_slot}];\n"
     ));
 }
 
@@ -429,6 +530,8 @@ fn render_elementwise(resolved: &BoundOp, entry: &str, element_type: &str) -> St
     let rank = resolved.extents.len();
     let rank_len = rank.max(1);
     let operand_count = resolved.operands().len();
+    let gather_total = gather_count(resolved);
+    let slots = gather_slots(resolved);
 
     let mut uniforms = String::new();
     uniforms.push_str("struct Uniforms {\n");
@@ -438,10 +541,11 @@ fn render_elementwise(resolved: &BoundOp, entry: &str, element_type: &str) -> St
     uniforms.push_str(&format!(
         "    operand_strides: array<array<i32, {rank_len}>, {operand_count}>,\n"
     ));
+    push_gather_uniform_fields(&mut uniforms, gather_total, rank_len);
     uniforms.push_str("};\n");
 
     let mut source = String::new();
-    preamble(&mut source, operand_count, 0, &uniforms);
+    preamble(&mut source, operand_count, gather_total, &uniforms);
     kernel_signature(&mut source, entry);
     source.push_str("    if (gid >= u.total_elements) { return; }\n");
 
@@ -455,12 +559,15 @@ fn render_elementwise(resolved: &BoundOp, entry: &str, element_type: &str) -> St
         }
     }
 
-    for index in 0..operand_count {
+    for (index, gather_slot) in slots.iter().enumerate() {
         source.push_str(&format!("    var off{index}: i32 = u.operand_base[{index}];\n"));
         for dim in 0..rank {
             source.push_str(&format!(
                 "    off{index} += coord[{dim}] * u.operand_strides[{index}][{dim}];\n"
             ));
+        }
+        if let Some(slot) = gather_slot {
+            push_gather_fetch(&mut source, index, *slot, rank, "coord", &format!("off{index}"));
         }
     }
 
@@ -496,6 +603,8 @@ fn render_reduce(resolved: &BoundOp, entry: &str, element_type: &str) -> String 
     let reduce_dims = reduction_dims(resolved, output_axes);
     let reduce_rank = reduce_dims.len();
     let reduce_rank_len = reduce_rank.max(1);
+    let gather_total = gather_count(resolved);
+    let slots = gather_slots(resolved);
 
     let mut uniforms = String::new();
     uniforms.push_str("struct Uniforms {\n");
@@ -511,10 +620,11 @@ fn render_reduce(resolved: &BoundOp, entry: &str, element_type: &str) -> String 
     ));
     uniforms.push_str("    out_base: i32,\n");
     uniforms.push_str(&format!("    out_strides: array<i32, {rank_len}>,\n"));
+    push_gather_uniform_fields(&mut uniforms, gather_total, rank_len);
     uniforms.push_str("};\n");
 
     let mut source = String::new();
-    preamble(&mut source, operand_count, 0, &uniforms);
+    preamble(&mut source, operand_count, gather_total, &uniforms);
     kernel_signature(&mut source, entry);
     source.push_str("    if (gid >= u.output_total) { return; }\n");
 
@@ -556,12 +666,22 @@ fn render_reduce(resolved: &BoundOp, entry: &str, element_type: &str) -> String 
         }
     }
 
-    for index in 0..operand_count {
+    for (index, gather_slot) in slots.iter().enumerate() {
         source.push_str(&format!("        var off{index}: i32 = u.operand_base[{index}];\n"));
         for dim in 0..rank {
             source.push_str(&format!(
                 "        off{index} += full_coord[{dim}] * u.operand_strides[{index}][{dim}];\n"
             ));
+        }
+        if let Some(slot) = gather_slot {
+            push_gather_fetch(
+                &mut source,
+                index,
+                *slot,
+                rank,
+                "full_coord",
+                &format!("off{index}"),
+            );
         }
     }
     source.push_str(&format!(

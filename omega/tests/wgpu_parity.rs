@@ -28,8 +28,8 @@
 use omega::backend::{Backend, execute_plan_named, plan_named};
 use proxima_tensor::test_support::Lcg;
 use proxima_tensor::{
-    DType, Extent, IndexMap, Keep, NodeId, Op, QuantizedBlock, Reduce, ReduceInit, ScalarOp,
-    append, map,
+    AxisIndex, AxisTerm, DType, Extent, IndexMap, IndexPattern, Keep, NodeId, Op, QuantizedBlock, Reduce,
+    ReduceInit, ScalarOp, TensorError, append, map, projection,
 };
 
 const BATCH: u32 = 4;
@@ -178,5 +178,112 @@ fn the_two_layer_mlp_runs_on_wgpu_at_cpu_parity() {
     assert!(
         relative < 1e-4,
         "omega::backend's cpu and wgpu arms disagree on the mlp: relative={relative} max_diff={max_diff}"
+    );
+}
+
+/// `table[ids[s], d]` over iteration space `(s, d)` — the same program shape
+/// `omega/tests/metal_parity.rs::embedding_lookup_program` runs against
+/// Metal, now exercising [`crate::wgsl`]'s gather bindings (`Indices`/
+/// `Fault`) through the portable wgpu driver.
+fn embedding_lookup_program(vocab: u32, dim: u32, seq: u32) -> Vec<Op> {
+    let mut program = Vec::new();
+    let table = append(
+        &mut program,
+        Op::Input {
+            dtype: DType::Float32,
+            shape: vec![Extent::Static(vocab), Extent::Static(dim)],
+            name: Some("table".into()),
+        },
+    );
+    let ids = append(
+        &mut program,
+        Op::Input {
+            dtype: DType::Int32,
+            shape: vec![Extent::Static(seq)],
+            name: Some("ids".into()),
+        },
+    );
+    let gathered_map = IndexMap::Computed {
+        indices: ids,
+        index_map: projection(2, &[0]),
+        base: IndexPattern {
+            iter_rank: 2,
+            axes: vec![
+                AxisIndex::default(),
+                AxisIndex {
+                    terms: vec![AxisTerm::projection(1)].into(),
+                    offset: 0,
+                },
+            ],
+        },
+        gathered_dim: 0,
+    };
+    append(
+        &mut program,
+        Op::Elementwise {
+            dtype: DType::Float32,
+            body: ScalarOp::Identity,
+            operands: vec![(table, gathered_map)],
+            name: None,
+        },
+    );
+    program
+}
+
+#[test]
+fn embedding_lookup_runs_on_wgpu_at_cpu_parity_for_integer_valued_inputs() {
+    let (vocab, dim, seq) = (256usize, 8usize, 4usize);
+    let program = embedding_lookup_program(vocab as u32, dim as u32, seq as u32);
+    let table_data: Vec<f32> = (0..vocab * dim).map(|value| (value % 97) as f32).collect();
+    let ids_data = [3.0f32, 255.0, 12.0, 0.0];
+    let named: Vec<(&str, QuantizedBlock<'_>)> = vec![
+        ("table", QuantizedBlock::Float32(&table_data)),
+        ("ids", QuantizedBlock::Float32(&ids_data)),
+    ];
+
+    let mut cpu_plan =
+        plan_named(Backend::Cpu, &program, &[], &named, &[]).expect("omega::backend plans the gather on cpu");
+    let cpu = execute_plan_named(&mut cpu_plan, &named).expect("omega::backend runs the gather on cpu");
+
+    let mut wgpu_plan =
+        plan_named(Backend::Wgpu, &program, &[], &named, &[]).expect("omega::backend plans the gather on wgpu");
+    let wgpu =
+        execute_plan_named(&mut wgpu_plan, &named).expect("omega::backend runs the gather on a real device");
+
+    let expected = cpu.root();
+    let actual = wgpu.root();
+    assert_eq!(actual.len(), expected.len());
+    let max_diff = actual
+        .iter()
+        .zip(expected.iter())
+        .map(|(&got, &want)| (got - want).abs())
+        .fold(0.0f32, f32::max);
+    eprintln!("wgpu gather parity: max_diff={max_diff}");
+    assert_eq!(
+        max_diff, 0.0,
+        "gathering integer-valued table rows must round-trip exactly (max abs diff was {max_diff})"
+    );
+}
+
+#[test]
+fn an_out_of_range_gather_index_faults_on_wgpu_the_same_way_it_faults_on_cpu() {
+    let (vocab, dim, seq) = (16usize, 4usize, 2usize);
+    let program = embedding_lookup_program(vocab as u32, dim as u32, seq as u32);
+    let table_data: Vec<f32> = (0..vocab * dim).map(|value| value as f32).collect();
+    let ids_data = [0.0f32, 999.0];
+    let named: Vec<(&str, QuantizedBlock<'_>)> = vec![
+        ("table", QuantizedBlock::Float32(&table_data)),
+        ("ids", QuantizedBlock::Float32(&ids_data)),
+    ];
+
+    let mut wgpu_plan =
+        plan_named(Backend::Wgpu, &program, &[], &named, &[]).expect("omega::backend plans the gather on wgpu");
+    let error =
+        execute_plan_named(&mut wgpu_plan, &named).expect_err("an out-of-range gather index must fault, not clamp silently");
+    assert!(
+        matches!(error, omega::backend::BackendError::Wgpu(omega::WgpuError::Tensor(
+            TensorError::GatherIndexOutOfRange { extent, .. }
+        )) if extent == vocab as u64),
+        "expected a GatherIndexOutOfRange fault against extent {vocab}, got {error:?}"
     );
 }
