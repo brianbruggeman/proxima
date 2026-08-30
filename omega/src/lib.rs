@@ -37,6 +37,8 @@ extern crate alloc;
 
 #[cfg(feature = "std")]
 pub mod backend;
+#[cfg(feature = "cuda")]
+pub mod cuda;
 pub mod error;
 #[cfg(all(feature = "metal", target_os = "macos"))]
 pub mod metal;
@@ -63,3 +65,5 @@ pub use msl::{
 pub use wgpu_driver::{WgpuError, WgpuPlan, execute_plan as execute_plan_wgpu, execute_plan_named as execute_plan_named_wgpu, plan as plan_wgpu, plan_named as plan_named_wgpu};
 #[cfg(feature = "wgpu-backend")]
 pub use wgsl::{WORKGROUP_SIZE, WgslKernel, emit_wgsl};
+#[cfg(feature = "cuda")]
+pub use cuda::{CudaGridSpec, CudaKernel, WARP_SIZE, emit_cuda};

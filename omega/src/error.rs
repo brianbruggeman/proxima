@@ -59,4 +59,11 @@ pub enum EmitError {
     #[cfg(feature = "wgpu-backend")]
     #[error("node {node} is a {kind} op, which the wgsl v1 emitter does not support yet")]
     UnsupportedOpKind { node: NodeId, kind: &'static str },
+
+    /// `cuda::emit_cuda`'s op set is elementwise, `Keep::Reduce`, and
+    /// `Keep::Scan` only — `Iota`/`Constant` have no renderer yet, the same
+    /// v1 boundary [`Self::UnsupportedOpKind`] draws for the wgsl emitter.
+    #[cfg(feature = "cuda")]
+    #[error("node {node} is a {kind} op, which the cuda emitter does not support yet")]
+    CudaUnsupportedOpKind { node: NodeId, kind: &'static str },
 }
