@@ -660,6 +660,22 @@ fn matmul_runs_on_wgpu_at_cpu_parity_whichever_reduce_path_the_adapter_takes() {
 /// produced the same cache key, so `crate::wgpu_driver::pipeline_for`
 /// reused the first reduce's compiled pipeline — with the WRONG axis
 /// mapping baked into its source — against the second reduce's uniforms.
+/// The byte size of the single largest named block this fixture uploads —
+/// a lower bound on the largest buffer [`omega::wgpu_driver::execute_plan`]
+/// will need to allocate for this program (its intermediate/output buffers
+/// never exceed the largest operand by more than a small constant factor at
+/// this fixture's shape). Compared against the acquired adapter's own
+/// [`omega::WgpuPlan::limits`] below so a genuinely undersized adapter (a
+/// paravirtualized CI runner reporting a low `max_storage_buffer_binding_size`)
+/// is named-skipped instead of failing mid-dispatch as a device-lost error.
+fn largest_named_block_bytes(owned: &[(String, Vec<f32>)]) -> u64 {
+    owned
+        .iter()
+        .map(|(_, data)| (data.len() * core::mem::size_of::<f32>()) as u64)
+        .max()
+        .unwrap_or(0)
+}
+
 #[test]
 fn the_full_mistral_cached_forward_runs_on_wgpu_at_cpu_parity() {
     const VOCAB: usize = 64;
@@ -673,6 +689,19 @@ fn the_full_mistral_cached_forward_runs_on_wgpu_at_cpu_parity() {
 
     let mut wgpu_plan = plan_named(Backend::Wgpu, &program, &symbols, &named, &roots)
         .expect("omega::backend plans the real forward on wgpu");
+    let omega::backend::Plan::Wgpu(inner) = &wgpu_plan else {
+        unreachable!("plan_named(Backend::Wgpu, ..) always returns Plan::Wgpu");
+    };
+    let limits = inner.limits();
+    let needed = largest_named_block_bytes(&owned);
+    if needed > limits.max_storage_buffer_binding_size || needed > limits.max_buffer_size {
+        eprintln!(
+            "wgpu real forward parity: adapter's buffer limits (storage={} buffer={}) are under this fixture's \
+             largest block ({needed} bytes); test skipped",
+            limits.max_storage_buffer_binding_size, limits.max_buffer_size
+        );
+        return;
+    }
     let wgpu = execute_plan_named(&mut wgpu_plan, &named)
         .expect("omega::backend runs the real forward on a real device");
 
