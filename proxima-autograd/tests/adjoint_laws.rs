@@ -753,3 +753,39 @@ async fn reduce_max_and_min_route_only_to_the_argmax_or_argmin_mask(
         "{body:?} must route the full seed to every tied extreme position and zero elsewhere, got {grad_x:?}"
     );
 }
+
+/// **Law 4, `Multiply`.** `x` is `[3, 5]` (no zero, so the divide-form rule
+/// is well-defined everywhere), weighted by a real non-trivial seed so this
+/// law -- like law 2 -- would catch a dropped `gradient` factor, not just a
+/// wrong shape. `prod(x) = 15`, so `d(prod x)/dx = [prod(x)/x_0,
+/// prod(x)/x_1] = [5, 3]`, weighted by `weight = 2.0`: `grad_x = [10, 6]`
+/// exactly.
+///
+/// Before this crate implemented `Reduce(Multiply)`'s adjoint,
+/// `differentiate` returned `Err(UnsupportedReduceBody)` for this program --
+/// `ScalarOp::Multiply.is_associative()` is `true`
+/// (`proxima-tensor/src/op.rs:112-117`), so this reduce body was always a
+/// legal REDUCE to build, just one this crate's adjoint transform could not
+/// yet differentiate.
+#[proxima::test]
+async fn reduce_multiply_divides_the_seed_by_each_input_exactly() {
+    let x_values = [3.0_f32, 5.0];
+    let weight_value = 2.0_f32;
+
+    let mut program = Vec::new();
+    let x = leaf(&mut program, "x", x_values.len());
+    let weight = leaf_shaped(&mut program, "weight", vec![]);
+    let product = reduce_node(&mut program, ScalarOp::Multiply, ReduceInit::One, x, ident_map(1), broadcast(1));
+    let loss = elementwise(&mut program, ScalarOp::Multiply, vec![(product, ident_map(0)), (weight, ident_map(0))]);
+
+    let differentiated = differentiate(&program, loss).expect("Reduce(Multiply) differentiates");
+    let grad_x_node = differentiated.gradient_of_named("x").expect("x feeds the loss");
+    let grad_x = get(
+        &evaluate_named(&differentiated.program, &[], &[("x", &x_values), ("weight", &[weight_value])], &[grad_x_node])
+            .expect("adjoint program evaluates"),
+        grad_x_node,
+    );
+
+    assert_close(grad_x[0], 10.0, 1e-4, format!("Reduce(Multiply) d/dx_0, got {grad_x:?}"));
+    assert_close(grad_x[1], 6.0, 1e-4, format!("Reduce(Multiply) d/dx_1, got {grad_x:?}"));
+}
