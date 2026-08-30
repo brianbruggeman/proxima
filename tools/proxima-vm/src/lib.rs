@@ -23,6 +23,10 @@ pub mod abi;
 pub mod dispatch;
 pub mod elf;
 pub mod loader;
+#[cfg(feature = "std")]
+pub mod named_memory;
+#[cfg(feature = "std")]
+pub mod snapshot;
 
 #[cfg(feature = "std")]
 use core::future::Future;

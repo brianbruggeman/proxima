@@ -14,7 +14,10 @@ default = ["std"]
 # proxima-primitives::pipe alloc tier drags in proxima-primitives::transport
 # -> parking_lot (no no_std path)
 std = ["alloc", "futures/executor", "dep:proxima-primitives", "proxima-primitives/std", "dep:proxima-process"]
-alloc = []
+# `dtb::builder` needs `Vec<u8>` (vm-fdt's writer); the parser half
+# (`fdt` crate) is genuinely tier-3 and would build without this, but the
+# module is one file so it shares the alloc gate.
+alloc = ["dep:vm-fdt"]
 # Gates `benches/bench_elf.rs` (object/goblin compare-bench). Default-off per
 # the disciplined-component gate 1: `object`/`goblin` never build for a plain
 # `cargo build`/`cargo test`, only `cargo bench --features elf-bench`.
@@ -23,12 +26,16 @@ elf-bench = []
 [dependencies]
 arrayvec.workspace = true
 bytes.workspace = true
+fdt = "0.1.5"
 futures.workspace = true
 postcard = { workspace = true, features = ["alloc"] }
 proxima-core = { workspace = true, features = ["alloc"] }
+proxima-net = { version = "0.1.0", path = "../../proxima-net", default-features = false, features = ["alloc"] }
 proxima-primitives = { workspace = true, features = ["alloc"], optional = true }
 proxima-process = { workspace = true, features = ["alloc"], optional = true }
-proxima-protocols = { workspace = true, features = ["process", "nvme"] }
+proxima-protocols = { workspace = true, features = ["process", "nvme", "virtio"] }
+serde = { workspace = true, features = ["derive"] }
+vm-fdt = { version = "0.3.0", default-features = false, features = ["alloc"], optional = true }
 
 [[bin]]
 name = "hello"
