@@ -618,7 +618,7 @@ impl PackedCodec {
     /// blocks. Element count per block is shared ([`Q4K_BLOCK_ELEMENTS`])
     /// across the K-quant family (`Q4K`/`Q5K`/`Q6K`) but NOT by `Q8_0`,
     /// which uses its own, much smaller [`Q8_0_BLOCK_ELEMENTS`].
-    const fn block_bytes(self) -> usize {
+    pub(crate) const fn block_bytes(self) -> usize {
         match self {
             PackedCodec::Q4K => Q4K_BLOCK_BYTES,
             PackedCodec::Q5K => Q5K_BLOCK_BYTES,
@@ -627,6 +627,20 @@ impl PackedCodec {
             PackedCodec::Q4_0 => Q4_0_BLOCK_BYTES,
             PackedCodec::Float16 => FLOAT16_BLOCK_BYTES,
             PackedCodec::BFloat16 => BFLOAT16_BLOCK_BYTES,
+        }
+    }
+
+    /// Elements one block of this codec carries — [`crate::wgsl`]'s WGSL
+    /// codec table needs this alongside [`Self::block_bytes`] the same way
+    /// `operand_read`'s own `{offset} / N_ELEMENTS` / `{offset} % N_ELEMENTS`
+    /// split does here.
+    pub(crate) const fn block_elements(self) -> usize {
+        match self {
+            PackedCodec::Q4K | PackedCodec::Q5K | PackedCodec::Q6K => Q4K_BLOCK_ELEMENTS,
+            PackedCodec::Q8_0 => Q8_0_BLOCK_ELEMENTS,
+            PackedCodec::Q4_0 => Q4_0_BLOCK_ELEMENTS,
+            PackedCodec::Float16 => FLOAT16_BLOCK_ELEMENTS,
+            PackedCodec::BFloat16 => BFLOAT16_BLOCK_ELEMENTS,
         }
     }
 }

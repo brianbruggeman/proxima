@@ -415,3 +415,163 @@ fn f16_matmul_runs_on_wgpu_within_the_metal_parity_f16_epsilon_or_names_its_reje
         }
     }
 }
+
+/// `weight[rows, k] * activation[k, 1]` summed over `k` — the same program
+/// shape `omega/tests/metal_parity.rs::q4k_matmul_program` runs against a
+/// packed Metal weight, now exercising [`crate::wgsl`]'s packed-operand
+/// codec table through the portable wgpu driver. `weight_dtype` is
+/// `DType::UInt8` for the packed arm (an opaque byte stream `crate::wgsl`
+/// never itself interprets as a float) and `DType::Float32` for the
+/// dequantized CPU oracle.
+fn packed_matmul_program(rows: u32, k: u32, weight_dtype: DType) -> (Vec<Op>, NodeId) {
+    let mut program = Vec::new();
+    let weight = append(
+        &mut program,
+        Op::Input {
+            dtype: weight_dtype,
+            shape: vec![Extent::Static(rows), Extent::Static(k)],
+            name: Some("weight".into()),
+        },
+    );
+    let activation = append(
+        &mut program,
+        Op::Input {
+            dtype: DType::Float32,
+            shape: vec![Extent::Static(k), Extent::Static(1)],
+            name: Some("activation".into()),
+        },
+    );
+    let product = append(
+        &mut program,
+        Op::Elementwise {
+            dtype: DType::Float32,
+            body: ScalarOp::Multiply,
+            operands: vec![
+                (weight, IndexMap::Affine(projection(3, &[0, 2]))),
+                (activation, IndexMap::Affine(projection(3, &[2, 1]))),
+            ],
+            name: None,
+        },
+    );
+    let sum = append(
+        &mut program,
+        Op::Reduce(Reduce {
+            dtype: DType::Float32,
+            body: ScalarOp::Add,
+            init: ReduceInit::Zero,
+            operand: product,
+            in_map: IndexMap::Affine(projection(3, &[0, 1, 2])),
+            out_map: IndexMap::Affine(projection(3, &[0, 1])),
+            keep: Keep::Reduce,
+            name: Some("packed_matmul".into()),
+        }),
+    );
+    (program, sum)
+}
+
+/// Runs `weight (packed as `block_of`) x activation` on wgpu and against a
+/// dequantized-`f32` CPU oracle, asserting relative parity within
+/// `tolerance` — one gate shape shared by every `#[test]` below so the five
+/// codecs cannot drift on how the claim is checked. `quantize`/`dequantize`
+/// are `proxima_gguf::quant::<codec>::{quantize, dequantize}`, the same real
+/// codec `crate::wgpu_driver`'s upload path and `crate::wgsl`'s unpack
+/// functions are checked against.
+#[allow(clippy::too_many_arguments)]
+fn assert_packed_codec_parity(
+    codec_name: &str,
+    block_bytes: usize,
+    block_elements: usize,
+    quantize: fn(&[f32], &mut [u8]) -> Result<(), proxima_gguf::quant::QuantError>,
+    dequantize: fn(&[u8], &mut [f32]) -> Result<(), proxima_gguf::quant::QuantError>,
+    to_block: fn(&[u8]) -> QuantizedBlock<'_>,
+    tolerance: f32,
+) {
+    let rows: u32 = 3;
+    let blocks_per_row = 2usize;
+    let k = (block_elements * blocks_per_row) as u32;
+
+    let activation: Vec<f32> = random_vec(31, k as usize).into_iter().map(|value| value * 4.0 - 2.0).collect();
+    let weight_f32: Vec<f32> = random_vec(37, rows as usize * k as usize)
+        .into_iter()
+        .map(|value| value * 4.0 - 2.0)
+        .collect();
+
+    let mut weight_blocks = vec![0u8; rows as usize * blocks_per_row * block_bytes];
+    for (row_f32, row_blocks) in weight_f32
+        .chunks_exact(k as usize)
+        .zip(weight_blocks.chunks_exact_mut(blocks_per_row * block_bytes))
+    {
+        quantize(row_f32, row_blocks).expect("row length is a whole multiple of the codec's block width");
+    }
+    let mut dequantized: Vec<f32> = vec![0.0; rows as usize * k as usize];
+    for (row_blocks, row_f32) in weight_blocks
+        .chunks_exact(blocks_per_row * block_bytes)
+        .zip(dequantized.chunks_exact_mut(k as usize))
+    {
+        dequantize(row_blocks, row_f32).expect("a whole number of packed blocks");
+    }
+
+    let (packed_program, packed_sum) = packed_matmul_program(rows, k, DType::UInt8);
+    let named: Vec<(&str, QuantizedBlock<'_>)> =
+        vec![("weight", to_block(&weight_blocks)), ("activation", QuantizedBlock::Float32(&activation))];
+    let mut wgpu_plan = plan_named(Backend::Wgpu, &packed_program, &[], &named, &[packed_sum])
+        .expect("omega::backend plans the packed matmul on wgpu");
+    let wgpu =
+        execute_plan_named(&mut wgpu_plan, &named).expect("omega::backend runs the packed matmul on a real device");
+
+    let (f32_program, f32_sum) = packed_matmul_program(rows, k, DType::Float32);
+    let f32_named: Vec<(&str, QuantizedBlock<'_>)> =
+        vec![("weight", QuantizedBlock::Float32(&dequantized)), ("activation", QuantizedBlock::Float32(&activation))];
+    let mut cpu_plan = plan_named(Backend::Cpu, &f32_program, &[], &f32_named, &[f32_sum])
+        .expect("omega::backend plans the dequantized oracle on cpu");
+    let cpu =
+        execute_plan_named(&mut cpu_plan, &f32_named).expect("omega::backend runs the dequantized oracle on cpu");
+
+    let actual = wgpu.root();
+    let expected = cpu.root();
+    assert_eq!(actual.len(), rows as usize, "degenerate gate: no outputs compared");
+    assert_eq!(actual.len(), expected.len());
+
+    let mut max_diff = 0.0f32;
+    for (&got, &want) in actual.iter().zip(expected.iter()) {
+        assert!(got.is_finite(), "wgpu {codec_name} matmul produced a non-finite value: {got}");
+        max_diff = max_diff.max((got - want).abs());
+    }
+    let max_magnitude = expected.iter().map(|value| value.abs()).fold(0.0f32, f32::max);
+    let relative = max_diff / max_magnitude.max(f32::MIN_POSITIVE);
+    eprintln!("wgpu packed-{codec_name} parity: rows={rows} k={k} max_diff={max_diff} relative={relative}");
+    assert!(
+        relative < tolerance,
+        "wgpu packed-{codec_name} unpack disagrees with the dequantized reference: relative={relative} max_diff={max_diff}"
+    );
+}
+
+#[test]
+fn packed_q4k_matmul_matches_the_dequantized_f32_cpu_path_on_wgpu() {
+    use proxima_gguf::quant::q4_k::{BLOCK_BYTES, QK_K, dequantize, quantize};
+    assert_packed_codec_parity("q4_k", BLOCK_BYTES, QK_K, quantize, dequantize, |bytes| QuantizedBlock::Q4K(bytes), 1e-5);
+}
+
+#[test]
+fn packed_q5k_matmul_matches_the_dequantized_f32_cpu_path_on_wgpu() {
+    use proxima_gguf::quant::q5_k::{BLOCK_BYTES, QK_K, dequantize, quantize};
+    assert_packed_codec_parity("q5_k", BLOCK_BYTES, QK_K, quantize, dequantize, |bytes| QuantizedBlock::Q5K(bytes), 1e-5);
+}
+
+#[test]
+fn packed_q6k_matmul_matches_the_dequantized_f32_cpu_path_on_wgpu() {
+    use proxima_gguf::quant::q6_k::{BLOCK_BYTES, QK_K, dequantize, quantize};
+    assert_packed_codec_parity("q6_k", BLOCK_BYTES, QK_K, quantize, dequantize, |bytes| QuantizedBlock::Q6K(bytes), 1e-5);
+}
+
+#[test]
+fn packed_q8_0_matmul_matches_the_dequantized_f32_cpu_path_on_wgpu() {
+    use proxima_gguf::quant::q8_0::{BLOCK_BYTES, QK8_0, dequantize, quantize};
+    assert_packed_codec_parity("q8_0", BLOCK_BYTES, QK8_0, quantize, dequantize, |bytes| QuantizedBlock::Q8_0(bytes), 1e-5);
+}
+
+#[test]
+fn packed_q4_0_matmul_matches_the_dequantized_f32_cpu_path_on_wgpu() {
+    use proxima_gguf::quant::q4_0::{BLOCK_BYTES, QK4_0, dequantize, quantize};
+    assert_packed_codec_parity("q4_0", BLOCK_BYTES, QK4_0, quantize, dequantize, |bytes| QuantizedBlock::Q4_0(bytes), 1e-5);
+}

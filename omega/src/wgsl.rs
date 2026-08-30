@@ -58,16 +58,24 @@
 //! this path yet (see [`EmitError::GatherNotSupported`]) — nothing in this
 //! crate's v1 test surface needs a scanned gather.
 //!
+//! # Packed operands (elementwise and `Keep::Reduce` only)
+//!
+//! An operand named in the caller's [`crate::msl::PackedOperands`] table
+//! binds as raw bytes (`array<u32>`, word-addressed — WGSL storage has no
+//! byte-addressable type) instead of `array<f32>`, and every read goes
+//! through the matching [`crate::msl::PackedCodec`] unpack function
+//! [`packed_codec_functions_wgsl`] generates for that operand — a word-based
+//! port of `crate::msl`'s own five packed-codec unpack functions plus
+//! `BFloat16`/`Float16`, specialized per operand index because WGSL rejects a
+//! storage-address-space function parameter (see that function's own doc).
+//! `crate::wgpu_driver`'s upload path uploads the codec's raw packed bytes
+//! unchanged rather than dequantizing on the host. `Keep::Scan` does not take
+//! this path (same boundary as gather, see [`EmitError::UnsupportedOpKind`]).
+//!
 //! # Not in v1 (see [`EmitError::UnsupportedOpKind`])
 //!
 //! - **`Iota`/`Constant`.** Rejected the same way; nothing in this crate's
 //!   v1 test surface needs a position-only or literal-only kernel.
-//! - **Quantized/packed operands.** [`emit_wgsl`] assumes every operand is a
-//!   plain `f32` array — there is no [`crate::msl::PackedCodec`] table here.
-//!   `crate::wgpu_driver`'s upload path is what actually enforces this: it
-//!   accepts `QuantizedBlock::Float32` alone and rejects every packed codec
-//!   with a named error rather than attempting a CPU-side dequantize (see
-//!   that module's own doc).
 //!
 //! # Runtime uniforms, not baked constants
 //!
@@ -92,7 +100,7 @@ use alloc::vec::Vec;
 use proxima_tensor::{BoundOp, BoundOpKind, ComposedBody, DType, Keep, NodeId, ScalarOp, StepArg};
 
 use crate::error::EmitError;
-use crate::msl::{Binding, gather_count, gather_slots};
+use crate::msl::{Binding, PackedCodec, PackedOperands, gather_count, gather_slots};
 
 /// Threads per workgroup every v1 WGSL kernel dispatches with. A build-time
 /// policy knob the way `crate::sized::SIMD_WIDTH` is a hardware fact — this
@@ -146,15 +154,16 @@ pub struct WgslCaps {
 /// [`EmitError::ArityMismatch`]/[`EmitError::ReductionBodyIsSelect`]/
 /// [`EmitError::EmptyScan`] for the same structural failures
 /// [`crate::msl::emit`] rejects.
-pub fn emit_wgsl(resolved: &BoundOp, caps: WgslCaps) -> Result<WgslKernel, EmitError> {
-    validate(resolved)?;
+pub fn emit_wgsl(resolved: &BoundOp, caps: WgslCaps, packed_operands: &PackedOperands) -> Result<WgslKernel, EmitError> {
+    validate(resolved, packed_operands)?;
     let entry = entry_name(resolved);
     let element_type = type_token(resolved.node, resolved.dtype, caps)?;
+    let quantized = operand_codecs(resolved, packed_operands);
     let source = match &resolved.kind {
-        BoundOpKind::Elementwise { .. } => render_elementwise(resolved, &entry, element_type),
+        BoundOpKind::Elementwise { .. } => render_elementwise(resolved, &entry, element_type, &quantized),
         BoundOpKind::Reduce {
             keep: Keep::Reduce, ..
-        } => render_reduce(resolved, &entry, element_type),
+        } => render_reduce(resolved, &entry, element_type, &quantized),
         BoundOpKind::Reduce {
             keep: Keep::Scan, ..
         } => render_scan(resolved, &entry, element_type),
@@ -226,7 +235,7 @@ fn validate_body(node: NodeId, body: &ComposedBody) -> Result<(), EmitError> {
     Ok(())
 }
 
-fn validate(resolved: &BoundOp) -> Result<(), EmitError> {
+fn validate(resolved: &BoundOp, packed_operands: &PackedOperands) -> Result<(), EmitError> {
     validate_body(resolved.node, resolved.element_body())?;
     if let BoundOpKind::Reduce {
         reduce_op, keep, ..
@@ -240,17 +249,35 @@ fn validate(resolved: &BoundOp) -> Result<(), EmitError> {
                 return Err(EmitError::EmptyScan { node: resolved.node });
             }
             // scan's accumulator persists across every outer line (see
-            // `render_scan`'s own doc) -- gather support there needs its own
-            // running-offset tracking `crate::msl::render_scan` carries and
-            // this module's v1 has not ported yet, see the module doc.
-            for (_, _, gather) in resolved.operands() {
+            // `render_scan`'s own doc) -- gather and packed-operand support
+            // there both need their own running-offset tracking
+            // `crate::msl::render_scan` carries and this module's v1 has not
+            // ported yet, see the module doc.
+            for (node, _, gather) in resolved.operands() {
                 if gather.is_some() {
                     return Err(EmitError::GatherNotSupported { node: resolved.node });
+                }
+                if packed_operands.contains_key(node) {
+                    return Err(EmitError::UnsupportedOpKind {
+                        node: resolved.node,
+                        kind: "scan over a packed operand",
+                    });
                 }
             }
         }
     }
     Ok(())
+}
+
+/// One codec slot per operand — the WGSL counterpart of
+/// `crate::msl::operand_codecs`, restated here since that helper is private
+/// to `crate::msl`.
+fn operand_codecs(resolved: &BoundOp, packed_operands: &PackedOperands) -> Vec<Option<PackedCodec>> {
+    resolved
+        .operands()
+        .iter()
+        .map(|(node, _, _)| packed_operands.get(node).copied())
+        .collect()
 }
 
 fn bindings(resolved: &BoundOp) -> Vec<Binding> {
@@ -419,6 +446,142 @@ fn proxima_erf(x: f32) -> f32 {
 }
 ";
 
+/// `f16_bits_to_f32`, shared by every packed operand: WGSL's core
+/// `unpack2x16float` built-in decodes an f16 scale directly from its raw
+/// bits, no `enable f16;` extension needed (unlike [`WgslCaps::shader_f16`]'s
+/// compute path) since `unpack2x16float` is baseline WGSL.
+const F16_BITS_TO_F32_WGSL: &str = "\
+fn f16_bits_to_f32(bits: u32) -> f32 {
+    return unpack2x16float(bits).x;
+}
+";
+
+/// Word-based ports of `crate::msl`'s five packed-codec unpack functions
+/// (`Q4K_UNPACK_MSL`/`Q5K_UNPACK_MSL`/`Q6K_UNPACK_MSL`/`Q8_0_UNPACK_MSL`/
+/// `Q4_0_UNPACK_MSL`) plus `BF16_UNPACK_MSL` and a `Float16` reader,
+/// specialized to operand index `op` (`in{op}` is the only storage buffer
+/// this generated text touches) — WGSL rejects a `ptr<storage, ...>`
+/// function PARAMETER outright (naga: "pointer ... can't be passed into
+/// functions", confirmed against this crate's own wgpu 30 dependency), so
+/// unlike `crate::msl`'s one `device const uchar*`-parameterized function per
+/// codec, each packed operand gets its own specialized copy that indexes
+/// `in{op}` directly. Bytes: every read goes through `read_u8_{op}`
+/// (`word = byte_offset / 4`, `shift = (byte_offset % 4) * 8`) since WGSL
+/// storage has no byte-addressable type.
+///
+/// Bit-for-bit the same arithmetic as the MSL source; see each MSL
+/// constant's own doc for the GGUF layout each codec ports.
+fn packed_codec_functions_wgsl(op: usize) -> String {
+    format!(
+        "\
+fn read_u8_{op}(byte_offset: i32) -> u32 {{
+    let word = in{op}[byte_offset / 4];
+    let shift = u32(byte_offset % 4) * 8u;
+    return (word >> shift) & 0xFFu;
+}}
+
+fn read_u16le_{op}(byte_offset: i32) -> u32 {{
+    return read_u8_{op}(byte_offset) | (read_u8_{op}(byte_offset + 1) << 8u);
+}}
+
+fn q4k_scale_min_{op}(scales_offset: i32, sub_block: i32) -> vec2<u32> {{
+    if (sub_block < 4) {{
+        let scale = read_u8_{op}(scales_offset + sub_block) & 63u;
+        let minimum = read_u8_{op}(scales_offset + sub_block + 4) & 63u;
+        return vec2<u32>(scale, minimum);
+    }}
+    let scale = (read_u8_{op}(scales_offset + sub_block + 4) & 0x0Fu) \
+        | ((read_u8_{op}(scales_offset + sub_block - 4) >> 6u) << 4u);
+    let minimum = (read_u8_{op}(scales_offset + sub_block + 4) >> 4u) \
+        | ((read_u8_{op}(scales_offset + sub_block) >> 6u) << 4u);
+    return vec2<u32>(scale, minimum);
+}}
+
+fn q4k_element_{op}(block_offset: i32, index: i32) -> f32 {{
+    let d = f16_bits_to_f32(read_u16le_{op}(block_offset));
+    let dmin = f16_bits_to_f32(read_u16le_{op}(block_offset + 2));
+    let scales_offset = block_offset + 4;
+    let qs_offset = block_offset + 16;
+    let group = index / 64;
+    let within = index % 64;
+    let low_nibble = within < 32;
+    let sub_block = 2 * group + select(1, 0, low_nibble);
+    let byte_index = group * 32 + (within % 32);
+    let scale_min = q4k_scale_min_{op}(scales_offset, sub_block);
+    let scale = d * f32(scale_min.x);
+    let minimum = dmin * f32(scale_min.y);
+    let byte = read_u8_{op}(qs_offset + byte_index);
+    let nibble = select(byte >> 4u, byte & 0x0Fu, low_nibble);
+    return scale * f32(nibble) - minimum;
+}}
+
+fn q5k_element_{op}(block_offset: i32, index: i32) -> f32 {{
+    let d = f16_bits_to_f32(read_u16le_{op}(block_offset));
+    let dmin = f16_bits_to_f32(read_u16le_{op}(block_offset + 2));
+    let scales_offset = block_offset + 4;
+    let qh_offset = block_offset + 16;
+    let qs_offset = block_offset + 48;
+    let chunk = index / 64;
+    let within = index % 64;
+    let low = within < 32;
+    let sub_block = 2 * chunk + select(1, 0, low);
+    let offset = within % 32;
+    let scale_min = q4k_scale_min_{op}(scales_offset, sub_block);
+    let scale = d * f32(scale_min.x);
+    let minimum = dmin * f32(scale_min.y);
+    let mask = select(2u << u32(2 * chunk), 1u << u32(2 * chunk), low);
+    let qs_byte = read_u8_{op}(qs_offset + chunk * 32 + offset);
+    let nibble = select(qs_byte >> 4u, qs_byte & 0x0Fu, low);
+    let qh_byte = read_u8_{op}(qh_offset + offset);
+    let high = select(0.0, 16.0, (qh_byte & mask) != 0u);
+    return scale * (f32(nibble) + high) - minimum;
+}}
+
+fn q6k_element_{op}(block_offset: i32, index: i32) -> f32 {{
+    let d = f16_bits_to_f32(read_u16le_{op}(block_offset + 208));
+    let half_index = index / 128;
+    let local = index % 128;
+    let l = local % 32;
+    let lane = local / 32;
+    let sub_block_in_half = l / 16;
+    let ql_offset = block_offset + half_index * 64;
+    let qh_offset = block_offset + 128 + half_index * 32;
+    let scales_offset = block_offset + 192;
+    let ql_byte = select(read_u8_{op}(ql_offset + l + 32), read_u8_{op}(ql_offset + l), lane % 2 == 0);
+    let nibble = select(ql_byte >> 4u, ql_byte & 0x0Fu, lane < 2);
+    let high2 = (read_u8_{op}(qh_offset + l) >> u32(lane * 2)) & 0x03u;
+    let level = nibble | (high2 << 4u);
+    let scale_byte = read_u8_{op}(scales_offset + half_index * 8 + sub_block_in_half + lane * 2);
+    let scale = f32(bitcast<i32>(scale_byte << 24u) >> 24);
+    let quant = f32(level) - 32.0;
+    return d * scale * quant;
+}}
+
+fn q8_0_element_{op}(block_offset: i32, index: i32) -> f32 {{
+    let d = f16_bits_to_f32(read_u16le_{op}(block_offset));
+    let byte = read_u8_{op}(block_offset + 2 + index);
+    let level = bitcast<i32>(byte << 24u) >> 24;
+    return f32(level) * d;
+}}
+
+fn q4_0_element_{op}(block_offset: i32, index: i32) -> f32 {{
+    let d = f16_bits_to_f32(read_u16le_{op}(block_offset));
+    let byte = read_u8_{op}(block_offset + 2 + (index % 16));
+    let nibble = select(i32(byte >> 4u), i32(byte & 0x0Fu), index < 16);
+    return f32(nibble - 8) * d;
+}}
+
+fn f16_element_{op}(block_offset: i32, index: i32) -> f32 {{
+    return f16_bits_to_f32(read_u16le_{op}(block_offset));
+}}
+
+fn bf16_element_{op}(block_offset: i32, index: i32) -> f32 {{
+    return bitcast<f32>(read_u16le_{op}(block_offset) << 16u);
+}}
+"
+    )
+}
+
 fn scalar_op_expr(op: ScalarOp, args: &[&str]) -> String {
     match op {
         ScalarOp::Identity => (*args.first().unwrap_or(&"0.0")).into(),
@@ -474,7 +637,14 @@ fn push_body_steps(source: &mut String, body: &ComposedBody, indent: &str, eleme
     format!("step{}", body.steps.len().saturating_sub(1))
 }
 
-fn preamble(source: &mut String, operand_count: usize, gather_count: usize, element_type: &str, uniforms_struct: &str) {
+fn preamble(
+    source: &mut String,
+    operand_count: usize,
+    gather_count: usize,
+    quantized: &[Option<PackedCodec>],
+    element_type: &str,
+    uniforms_struct: &str,
+) {
     // `enable` directives are WGSL module-scope items that MUST precede
     // every other declaration -- see the module doc's "f16 compute" section.
     if element_type == "f16" {
@@ -482,11 +652,33 @@ fn preamble(source: &mut String, operand_count: usize, gather_count: usize, elem
     }
     source.push_str(PROXIMA_ERF_FN_WGSL);
     source.push('\n');
+    if quantized.iter().any(Option::is_some) {
+        source.push_str(F16_BITS_TO_F32_WGSL);
+        source.push('\n');
+    }
+    // one specialized copy of the codec-unpack functions per packed operand
+    // index -- see [`packed_codec_functions_wgsl`]'s own doc for why WGSL
+    // cannot take one function parameterized over which `in{n}` to read.
+    for (index, codec) in quantized.iter().enumerate() {
+        if codec.is_some() {
+            source.push_str(&packed_codec_functions_wgsl(index));
+            source.push('\n');
+        }
+    }
     source.push_str(uniforms_struct);
     source.push('\n');
     for index in 0..operand_count {
+        // a packed operand's buffer is raw BYTES reinterpreted as `u32`
+        // words (`read_u8_{n}`/`read_u16le_{n}` split a byte/word offset
+        // back out at the read) -- see [`packed_codec_functions_wgsl`]'s
+        // own doc.
+        let binding_type = if quantized.get(index).copied().flatten().is_some() {
+            "array<u32>"
+        } else {
+            "array<f32>"
+        };
         source.push_str(&format!(
-            "@group(0) @binding({index}) var<storage, read> in{index}: array<f32>;\n"
+            "@group(0) @binding({index}) var<storage, read> in{index}: {binding_type};\n"
         ));
     }
     for slot in 0..gather_count {
@@ -585,7 +777,38 @@ fn kernel_signature(source: &mut String, entry: &str) {
     source.push_str("    let gid: i32 = i32(global_id.x);\n");
 }
 
-fn render_elementwise(resolved: &BoundOp, entry: &str, element_type: &str) -> String {
+fn codec_function_name(codec: PackedCodec) -> &'static str {
+    match codec {
+        PackedCodec::Q4K => "q4k_element",
+        PackedCodec::Q5K => "q5k_element",
+        PackedCodec::Q6K => "q6k_element",
+        PackedCodec::Q8_0 => "q8_0_element",
+        PackedCodec::Q4_0 => "q4_0_element",
+        PackedCodec::Float16 => "f16_element",
+        PackedCodec::BFloat16 => "bf16_element",
+    }
+}
+
+/// How operand `index` is READ, given the element-offset expression the
+/// caller already computed — the WGSL counterpart of `crate::msl::operand_read`.
+/// A plain operand is a direct index; a packed operand's element offset
+/// splits into a super-block (`offset / block_elements`, scaled to a byte
+/// offset by `block_bytes`) and a position inside it (`offset % block_elements`),
+/// the same split the `_{index}`-suffixed `*_element` function
+/// [`packed_codec_functions_wgsl`] generated for this operand expects.
+fn wgsl_operand_read(index: usize, offset_expr: &str, codec: Option<PackedCodec>) -> String {
+    match codec {
+        None => format!("in{index}[{offset_expr}]"),
+        Some(codec) => {
+            let elements = codec.block_elements();
+            let bytes = codec.block_bytes();
+            let function = codec_function_name(codec);
+            format!("{function}_{index}(({offset_expr} / {elements}) * {bytes}, {offset_expr} % {elements})")
+        }
+    }
+}
+
+fn render_elementwise(resolved: &BoundOp, entry: &str, element_type: &str, quantized: &[Option<PackedCodec>]) -> String {
     let rank = resolved.extents.len();
     let rank_len = rank.max(1);
     let operand_count = resolved.operands().len();
@@ -604,7 +827,7 @@ fn render_elementwise(resolved: &BoundOp, entry: &str, element_type: &str) -> St
     uniforms.push_str("};\n");
 
     let mut source = String::new();
-    preamble(&mut source, operand_count, gather_total, element_type, &uniforms);
+    preamble(&mut source, operand_count, gather_total, quantized, element_type, &uniforms);
     kernel_signature(&mut source, entry);
     source.push_str("    if (gid >= u.total_elements) { return; }\n");
 
@@ -635,7 +858,9 @@ fn render_elementwise(resolved: &BoundOp, entry: &str, element_type: &str) -> St
         operand_count.max(1)
     ));
     for index in 0..operand_count {
-        let read = read_cast(element_type, &format!("in{index}[off{index}]"));
+        let codec = quantized.get(index).copied().flatten();
+        let expr = wgsl_operand_read(index, &format!("off{index}"), codec);
+        let read = read_cast(element_type, &expr);
         source.push_str(&format!("    scratch[{index}] = {read};\n"));
     }
 
@@ -646,7 +871,7 @@ fn render_elementwise(resolved: &BoundOp, entry: &str, element_type: &str) -> St
     source
 }
 
-fn render_reduce(resolved: &BoundOp, entry: &str, element_type: &str) -> String {
+fn render_reduce(resolved: &BoundOp, entry: &str, element_type: &str, quantized: &[Option<PackedCodec>]) -> String {
     let BoundOpKind::Reduce {
         reduce_op,
         init,
@@ -685,7 +910,7 @@ fn render_reduce(resolved: &BoundOp, entry: &str, element_type: &str) -> String 
     uniforms.push_str("};\n");
 
     let mut source = String::new();
-    preamble(&mut source, operand_count, gather_total, element_type, &uniforms);
+    preamble(&mut source, operand_count, gather_total, quantized, element_type, &uniforms);
     kernel_signature(&mut source, entry);
     source.push_str("    if (gid >= u.output_total) { return; }\n");
 
@@ -750,7 +975,9 @@ fn render_reduce(resolved: &BoundOp, entry: &str, element_type: &str) -> String 
         operand_count.max(1)
     ));
     for index in 0..operand_count {
-        let read = read_cast(element_type, &format!("in{index}[off{index}]"));
+        let codec = quantized.get(index).copied().flatten();
+        let expr = wgsl_operand_read(index, &format!("off{index}"), codec);
+        let read = read_cast(element_type, &expr);
         source.push_str(&format!("        scratch[{index}] = {read};\n"));
     }
     let value_expr = push_body_steps(&mut source, resolved.element_body(), "        ", element_type);
@@ -798,7 +1025,7 @@ fn render_scan(resolved: &BoundOp, entry: &str, element_type: &str) -> String {
     uniforms.push_str("};\n");
 
     let mut source = String::new();
-    preamble(&mut source, operand_count, 0, element_type, &uniforms);
+    preamble(&mut source, operand_count, 0, &alloc::vec![None; operand_count], element_type, &uniforms);
     kernel_signature(&mut source, entry);
     // `crate::msl`'s own `push_serial_reduce_body`/`run_scan` (the CPU
     // oracle) carry ONE accumulator across every outer line, not one per
@@ -904,7 +1131,7 @@ mod tests {
     #[test]
     fn elementwise_tanh_emits_wgsl_with_the_expected_shape() {
         let bound = elementwise_tanh_op(8);
-        let kernel = emit_wgsl(&bound, WgslCaps::default()).expect("emit succeeds");
+        let kernel = emit_wgsl(&bound, WgslCaps::default(), &PackedOperands::new()).expect("emit succeeds");
         assert!(kernel.source.contains("@compute"));
         assert!(kernel.source.contains("tanh("));
         assert_eq!(kernel.bindings.len(), 3);
@@ -913,8 +1140,8 @@ mod tests {
 
     #[test]
     fn same_structure_different_extents_yield_identical_source() {
-        let small = emit_wgsl(&elementwise_tanh_op(4), WgslCaps::default()).expect("emit succeeds");
-        let large = emit_wgsl(&elementwise_tanh_op(4096), WgslCaps::default()).expect("emit succeeds");
+        let small = emit_wgsl(&elementwise_tanh_op(4), WgslCaps::default(), &PackedOperands::new()).expect("emit succeeds");
+        let large = emit_wgsl(&elementwise_tanh_op(4096), WgslCaps::default(), &PackedOperands::new()).expect("emit succeeds");
         assert_eq!(small.source, large.source);
         assert_ne!(small.threads, large.threads);
     }
@@ -942,7 +1169,7 @@ mod tests {
         let shapes = infer(&program, &[]).expect("infer succeeds");
         let bound = bind(&program, &shapes, &[]).expect("bind succeeds");
         let bound = bound.into_iter().next().expect("one bound op");
-        let kernel = emit_wgsl(&bound, WgslCaps::default()).expect("emit succeeds");
+        let kernel = emit_wgsl(&bound, WgslCaps::default(), &PackedOperands::new()).expect("emit succeeds");
         assert!(kernel.source.contains("fn proxima_erf"));
         assert!(kernel.source.contains("proxima_erf(scratch[0])"));
     }
@@ -970,7 +1197,7 @@ mod tests {
         let shapes = infer(&program, &[]).expect("infer succeeds");
         let bound = bind(&program, &shapes, &[]).expect("bind succeeds");
         let bound = bound.into_iter().next().expect("one bound op");
-        let error = emit_wgsl(&bound, WgslCaps::default()).expect_err("f16 is rejected without shader_f16");
+        let error = emit_wgsl(&bound, WgslCaps::default(), &PackedOperands::new()).expect_err("f16 is rejected without shader_f16");
         assert!(matches!(error, EmitError::UnsupportedDType { .. }));
     }
 
@@ -997,7 +1224,7 @@ mod tests {
         let shapes = infer(&program, &[]).expect("infer succeeds");
         let bound = bind(&program, &shapes, &[]).expect("bind succeeds");
         let bound = bound.into_iter().next().expect("one bound op");
-        let kernel = emit_wgsl(&bound, WgslCaps { shader_f16: true }).expect("f16 emits when shader_f16 is set");
+        let kernel = emit_wgsl(&bound, WgslCaps { shader_f16: true }, &PackedOperands::new()).expect("f16 emits when shader_f16 is set");
         assert!(kernel.source.starts_with("enable f16;\n"));
         assert!(kernel.source.contains("tanh("));
         assert!(kernel.source.contains("f16(in0[off0])"), "operand read must cast f32 down to f16");
@@ -1027,7 +1254,7 @@ mod tests {
         let shapes = infer(&program, &[]).expect("infer succeeds");
         let bound = bind(&program, &shapes, &[]).expect("bind succeeds");
         let bound = bound.into_iter().next().expect("one bound op");
-        let kernel = emit_wgsl(&bound, WgslCaps::default()).expect("bf16 collapses to f32 unconditionally");
+        let kernel = emit_wgsl(&bound, WgslCaps::default(), &PackedOperands::new()).expect("bf16 collapses to f32 unconditionally");
         assert!(!kernel.source.contains("enable f16"));
         assert!(kernel.source.contains("var scratch: array<f32, 1>"));
     }
