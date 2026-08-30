@@ -74,10 +74,28 @@ instrument = ["metal", "proxima-tensor/instrument"]
 # eligibility gate and kernel body live in `msl.rs`, which is alloc-tier, but
 # the const it reads only has meaning for a Metal dispatch.
 metal-tiled-gemm = ["metal"]
+# Portable GPU execution driver (src/wgsl.rs, src/wgpu_driver.rs) — the
+# wgpu/WGSL counterpart of `metal` above, one abstraction layer over: same
+# `BoundOp` descriptor, same emit-then-drive split, different target ISA
+# (WGSL instead of MSL) and different device API (wgpu instead of objc2-metal).
+# Non-default and std-only: `wgpu`'s `Instance`/`Device`/`Queue` are platform
+# objects, not something an alloc-tier build can construct.
+wgpu-backend = ["std", "dep:wgpu", "dep:pollster", "dep:bytemuck", "proxima-tensor/std"]
 
 [dependencies]
+bytemuck = { version = "1.25.2", optional = true }
+pollster = { version = "1.0.1", optional = true }
 proxima-tensor = { path = "../proxima-tensor", default-features = false, features = ["alloc"] }
 thiserror = { workspace = true, default-features = false }
+# `wgsl`: this crate emits WGSL, never SPIR-V/HLSL text, so no other shader
+# frontend is needed. `metal`: the backend this box actually dispatches
+# through (arm64 macOS); `vulkan`/`gles`/`dx12` are NOT enabled here because
+# nothing in this crate targets those platforms yet — a future cross-platform
+# landing adds them as their own log row, not silently here.
+wgpu = { version = "30.0.1", default-features = false, features = [
+    "wgsl",
+    "metal",
+], optional = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 # objc2: the message-send runtime (Retained<T>, extern_methods!) every Metal
