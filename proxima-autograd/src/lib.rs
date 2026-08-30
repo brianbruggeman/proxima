@@ -9,9 +9,13 @@
 //! - [`adjoint::differentiate`] — the adjoint transform, `&[Op] -> Differentiated`,
 //!   a pure synchronous function, not a [`proxima_primitives::pipe::Pipe`]
 //!   (see that module's own doc for why forcing one would be wrong).
-//! - [`activation::relu`] / [`activation::softmax`] — graph-building
-//!   functions composing existing [`proxima_tensor::op::ScalarOp`]s, never
-//!   a new variant.
+//! - [`activation::relu`] / [`activation::softmax`] / [`activation::sigmoid`]
+//!   / [`activation::silu`] / [`activation::gelu`] — graph-building functions
+//!   composing existing [`proxima_tensor::op::ScalarOp`]s, never a new
+//!   variant.
+//! - [`loss::mse`] / [`loss::cross_entropy`] / [`loss::softmax_cross_entropy`]
+//!   — the same graph-building shape, for the scalar objective a training
+//!   loop differentiates.
 //! - [`optimizer::adam_step`] — the Adam update as an elementwise
 //!   expression over `(param, grad, m, v, step)`.
 //! - [`sparse::dedupe_and_sum_rows`] — the host-side scatter-add a gathered
@@ -57,6 +61,7 @@ pub mod activation;
 pub mod adjoint;
 pub mod error;
 pub(crate) mod expr;
+pub mod loss;
 pub mod optimizer;
 pub mod sparse;
 
