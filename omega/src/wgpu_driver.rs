@@ -43,7 +43,7 @@ use proxima_tensor::{
 };
 
 use crate::error::EmitError;
-use crate::msl::{Binding, gather_count};
+use crate::msl::{Binding, PackedCodec, PackedOperands, gather_count};
 use crate::wgsl::{WORKGROUP_SIZE, WgslCaps, WgslKernel, emit_wgsl};
 
 /// Everything the wgpu driver can fail with.
@@ -91,6 +91,35 @@ pub struct WgpuPlan {
     /// `crate::wgsl`'s own "f16 compute" doc for why this is never a silent
     /// `f32` fallback).
     caps: WgslCaps,
+    /// Which packed codec each block-bound node's bytes are — derived once,
+    /// at plan time, from the concrete [`QuantizedBlock`] variant the caller
+    /// planned against (see [`packed_operands_of`]), the same "codec is a
+    /// property of the weight, decided once" stance `crate::metal::plan`
+    /// takes for its own `Plan::packed_operands` field. Threaded into every
+    /// [`emit_wgsl`] call so the pipeline cache (keyed by [`WgslKernel::entry`],
+    /// which does not itself encode a codec choice) can never reuse a kernel
+    /// compiled for one codec against a node now holding another.
+    packed_operands: PackedOperands,
+}
+
+/// Which packed codec each of `block_nodes`' [`QuantizedBlock`] carries —
+/// the WGSL driver's counterpart of `crate::metal::packed_operands_of`.
+/// `Float32` maps to `None` (no codec, a plain `array<f32>` operand).
+fn packed_operands_of(block_nodes: &[NodeId], blocks: &[QuantizedBlock<'_>]) -> PackedOperands {
+    block_nodes
+        .iter()
+        .zip(blocks.iter())
+        .filter_map(|(node, block)| match block {
+            QuantizedBlock::Q4K(_) => Some((*node, PackedCodec::Q4K)),
+            QuantizedBlock::Q5K(_) => Some((*node, PackedCodec::Q5K)),
+            QuantizedBlock::Q6K(_) => Some((*node, PackedCodec::Q6K)),
+            QuantizedBlock::Q8_0(_) => Some((*node, PackedCodec::Q8_0)),
+            QuantizedBlock::Q4_0(_) => Some((*node, PackedCodec::Q4_0)),
+            QuantizedBlock::Float16(_) => Some((*node, PackedCodec::Float16)),
+            QuantizedBlock::BFloat16(_) => Some((*node, PackedCodec::BFloat16)),
+            QuantizedBlock::Float32(_) => None,
+        })
+        .collect()
 }
 
 fn block_node_ids(program: &[Op]) -> Vec<NodeId> {
@@ -104,6 +133,36 @@ fn block_node_ids(program: &[Op]) -> Vec<NodeId> {
 
 fn element_count(shape: &[u64]) -> usize {
     shape.iter().product::<u64>() as usize
+}
+
+/// The raw packed bytes underneath any non-`Float32` [`QuantizedBlock`]
+/// variant — every one of them wraps a `&[u8]` (see that type's own doc), so
+/// this is a match, not a computation.
+///
+/// # Panics
+/// If `block` is [`QuantizedBlock::Float32`] — every caller here already
+/// branched on that case first.
+fn packed_block_bytes_slice<'a>(block: &QuantizedBlock<'a>) -> &'a [u8] {
+    match block {
+        QuantizedBlock::Q4K(bytes)
+        | QuantizedBlock::Q5K(bytes)
+        | QuantizedBlock::Q6K(bytes)
+        | QuantizedBlock::Q8_0(bytes)
+        | QuantizedBlock::Q4_0(bytes)
+        | QuantizedBlock::Float16(bytes)
+        | QuantizedBlock::BFloat16(bytes) => bytes,
+        QuantizedBlock::Float32(_) => unreachable!("packed_block_bytes_slice is never called for a Float32 block"),
+    }
+}
+
+/// The exact packed byte length `elements` elements of `codec` occupy —
+/// `crate::msl::PackedCodec::block_bytes`/`block_elements`'s own product,
+/// rounded up to a whole block: a partial trailing block is never legal
+/// GGUF, so `div_ceil` (not plain division) is what makes an off-by-one
+/// undersized upload a hard [`TensorError::InputSizeMismatch`] instead of a
+/// kernel silently reading past the buffer's end.
+fn packed_expected_bytes(codec: PackedCodec, elements: usize) -> usize {
+    elements.div_ceil(codec.block_elements()) * codec.block_bytes()
 }
 
 fn block_codec_name(block: &QuantizedBlock<'_>) -> &'static str {
@@ -150,10 +209,13 @@ fn acquire_device() -> Result<(wgpu::Device, wgpu::Queue, WgslCaps), WgpuError> 
 }
 
 /// Resolves a program into a reusable [`WgpuPlan`], acquiring a device.
+/// `blocks` decides each block-bound node's packed codec (see
+/// [`packed_operands_of`]) — the same positional shape `crate::metal::plan`
+/// takes, not just a shape-inference input.
 ///
 /// # Errors
 /// Propagates inference/binding failures and device acquisition failures.
-pub fn plan(program: &[Op], symbols: &[u64], outputs: &[NodeId]) -> Result<WgpuPlan, WgpuError> {
+pub fn plan(program: &[Op], symbols: &[u64], blocks: &[QuantizedBlock<'_>], outputs: &[NodeId]) -> Result<WgpuPlan, WgpuError> {
     let shapes = infer(program, symbols)?;
     let root = program
         .len()
@@ -167,6 +229,7 @@ pub fn plan(program: &[Op], symbols: &[u64], outputs: &[NodeId]) -> Result<WgpuP
     };
     let resolved = bind(program, &shapes, &effective_outputs)?;
     let block_nodes = block_node_ids(program);
+    let packed_operands = packed_operands_of(&block_nodes, blocks);
     let (device, queue, caps) = acquire_device()?;
     Ok(WgpuPlan {
         device,
@@ -178,6 +241,7 @@ pub fn plan(program: &[Op], symbols: &[u64], outputs: &[NodeId]) -> Result<WgpuP
         block_nodes,
         pipelines: BTreeMap::new(),
         caps,
+        packed_operands,
     })
 }
 
@@ -191,8 +255,8 @@ pub fn plan_named(
     named: &[(&str, QuantizedBlock<'_>)],
     outputs: &[NodeId],
 ) -> Result<WgpuPlan, WgpuError> {
-    resolve_named_blocks(program, named)?;
-    plan(program, symbols, outputs)
+    let blocks = resolve_named_blocks(program, named)?;
+    plan(program, symbols, &blocks, outputs)
 }
 
 fn shader_module(device: &wgpu::Device, kernel: &WgslKernel) -> wgpu::ShaderModule {
@@ -378,10 +442,15 @@ fn bound_output_len(bound: &BoundOp) -> usize {
     }
 }
 
+/// WebGPU requires every buffer's size to be a multiple of 4 bytes — most
+/// callers already satisfy this for free (`size_of::<f32>() * n` is always a
+/// multiple of 4), but a packed codec's own block width need not be (`Q6_K`'s
+/// 210-byte super-block is not), so this rounds up rather than trusting the
+/// caller.
 fn storage_buffer(device: &wgpu::Device, label: &str, len_bytes: usize, extra: wgpu::BufferUsages) -> wgpu::Buffer {
     device.create_buffer(&wgpu::BufferDescriptor {
         label: Some(label),
-        size: len_bytes.max(4) as u64,
+        size: len_bytes.max(4).div_ceil(4) as u64 * 4,
         usage: wgpu::BufferUsages::STORAGE | extra,
         mapped_at_creation: false,
     })
@@ -433,14 +502,17 @@ pub fn execute_plan(plan: &mut WgpuPlan, blocks: &[QuantizedBlock<'_>]) -> Resul
         .into());
     }
     for (node, block) in plan.block_nodes.iter().zip(blocks.iter()) {
-        let expected = element_count(plan.shapes.of(*node));
-        let found = match block {
-            QuantizedBlock::Float32(data) => data.len(),
+        let elements = element_count(plan.shapes.of(*node));
+        let (found, expected) = match block {
+            QuantizedBlock::Float32(data) => (data.len(), elements),
             _ => {
-                return Err(WgpuError::UnsupportedBlock {
-                    node: *node,
-                    codec: block_codec_name(block),
-                });
+                let Some(codec) = plan.packed_operands.get(node).copied() else {
+                    return Err(WgpuError::UnsupportedBlock {
+                        node: *node,
+                        codec: block_codec_name(block),
+                    });
+                };
+                (packed_block_bytes_slice(block).len(), packed_expected_bytes(codec, elements))
             }
         };
         if found != expected {
@@ -455,16 +527,24 @@ pub fn execute_plan(plan: &mut WgpuPlan, blocks: &[QuantizedBlock<'_>]) -> Resul
 
     let mut device_buffers: BTreeMap<NodeId, wgpu::Buffer> = BTreeMap::new();
     for (node, block) in plan.block_nodes.iter().zip(blocks.iter()) {
-        let QuantizedBlock::Float32(data) = block else {
-            unreachable!("non-float32 blocks already rejected above")
+        let buffer = match block {
+            QuantizedBlock::Float32(data) => {
+                let buffer = storage_buffer(
+                    &plan.device,
+                    "omega-wgpu-input",
+                    size_of::<f32>() * data.len().max(1),
+                    wgpu::BufferUsages::COPY_DST,
+                );
+                plan.queue.write_buffer(&buffer, 0, bytemuck::cast_slice(data));
+                buffer
+            }
+            _ => {
+                let bytes = packed_block_bytes_slice(block);
+                let buffer = storage_buffer(&plan.device, "omega-wgpu-packed-input", bytes.len(), wgpu::BufferUsages::COPY_DST);
+                plan.queue.write_buffer(&buffer, 0, bytes);
+                buffer
+            }
         };
-        let buffer = storage_buffer(
-            &plan.device,
-            "omega-wgpu-input",
-            size_of::<f32>() * data.len().max(1),
-            wgpu::BufferUsages::COPY_DST,
-        );
-        plan.queue.write_buffer(&buffer, 0, bytemuck::cast_slice(data));
         device_buffers.insert(*node, buffer);
     }
 
@@ -497,7 +577,7 @@ pub fn execute_plan(plan: &mut WgpuPlan, blocks: &[QuantizedBlock<'_>]) -> Resul
     // `crate::metal::encode_op`'s own `pending_faults` accumulator.
     let mut pending_faults: Vec<(NodeId, wgpu::Buffer, Vec<u64>)> = Vec::new();
     for bound in &plan.resolved {
-        let kernel = emit_wgsl(bound, plan.caps)?;
+        let kernel = emit_wgsl(bound, plan.caps, &plan.packed_operands)?;
         let uniform_bytes = pack_uniforms(bound);
         let uniform_buffer = plan.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("omega-wgpu-uniforms"),
