@@ -3224,45 +3224,141 @@ fn plan_pool(program: &mut Vec<Op>, node: &NodeProto<'_>, image: &Value, fill: f
     Ok(PoolPlan { padded, kernel_h, kernel_w, stride_h, stride_w, dilation_h, dilation_w, out_shape, pads: (pad_top as u64, pad_left as u64, pad_bottom, pad_right) })
 }
 
+/// A `[n, c, h, w]`-shaped, spatial-axis-broadcast coordinate field: every
+/// position `(n, c, h, w)` holds `h` (`axis == 2`) or `w` (`axis == 3`) as a
+/// plain `f32` value -- an [`Op::Iota`] over just that one spatial extent,
+/// multiplied against a full-rank all-`1.0` [`Op::Constant`] so every other
+/// axis is also pinned ([`window_materialize`]'s own doc explains why a
+/// partial-rank operand alone leaves `shape::infer` unable to resolve the
+/// other axes). [`window_materialize`]d with the same [`WindowSpec`] a
+/// `MaxPool` data pass used, this becomes "the real padded-space row (or
+/// column) of every window cell" -- [`lower_maxpool`]'s `Indices` machinery
+/// reads it straight off, no new `Op`/`ScalarOp`/`IndexMap`.
+fn coordinate_image(program: &mut Vec<Op>, shape: &[u64], axis: u16) -> Value {
+    let extent = shape[axis as usize];
+    let ones = append(program, Op::Constant { dtype: DType::Float32, shape: shape.iter().map(|&value| Extent::Static(value as u32)).collect(), value: 1.0 });
+    let iota = append(program, Op::Iota { dtype: DType::Float32, extent: Extent::Static(extent as u32) });
+    let id = build_elementwise(program, ScalarOp::Multiply, alloc::vec![(iota, IndexMap::Affine(projection(4, &[axis]))), (ones, IndexMap::Affine(identity_pattern(4)))]);
+    Value { node: id, shape: shape.to_vec(), view: None, flatten_source: None }
+}
+
+/// `MaxPool`'s optional second (`Indices`) output: the position, in the
+/// *flattened original* (unpadded) input, of the window's winning cell --
+/// ONNX's own contract, `storage_order=0` row-major
+/// (`idx = ((n*C + c)*H + h)*W + w`) or `=1` column-major
+/// (`idx = ((n*C + c)*W + w)*H + h`).
+///
+/// No new gather/argmax primitive: [`coordinate_image`] + [`window_materialize`]
+/// give every window cell's real `(h, w)`; `n`/`c` come the same way, off
+/// [`Op::Iota`]s pinned against the same full-rank stamp; the flat index is
+/// plain elementwise arithmetic (multiply-add, matching ONNX's own
+/// row-major/column-major formula). Which cell WON the max is
+/// `ScalarOp::Equal` against the already-computed max, broadcast back into
+/// the window; ties are broken toward the smallest flat index --
+/// [`ScalarOp::Select`] routes every non-winning cell to a sentinel larger
+/// than any real index, and `Reduce(Minimum)` over the window then picks it,
+/// which is exactly "first" in whichever order `storage_order` names, since
+/// that order is what the flat-index formula itself encodes.
+// mirrors `window_materialize3d`'s own precedent: one field group per
+// caller (padding/plan/spec), not a bespoke struct for a single call site.
+#[allow(clippy::too_many_arguments)]
+fn maxpool_indices(
+    program: &mut Vec<Op>,
+    windowed: &Value,
+    row_max: NodeId,
+    padded_shape: &[u64],
+    original_h: u64,
+    original_w: u64,
+    pad_top: u64,
+    pad_left: u64,
+    spec: WindowSpec,
+    storage_order: i64,
+) -> NodeId {
+    let (n, channels) = (padded_shape[0], padded_shape[1]);
+
+    let row_image = coordinate_image(program, padded_shape, 2);
+    let col_image = coordinate_image(program, padded_shape, 3);
+    let row_windowed = window_materialize(program, &row_image, spec);
+    let col_windowed = window_materialize(program, &col_image, spec);
+    let pad_top_c = constant_scalar(program, pad_top as f32);
+    let pad_left_c = constant_scalar(program, pad_left as f32);
+    let row_original =
+        build_elementwise(program, ScalarOp::Subtract, alloc::vec![(row_windowed.node, IndexMap::Affine(identity_pattern(6))), (pad_top_c, IndexMap::Affine(scalar_broadcast_pattern(6)))]);
+    let col_original =
+        build_elementwise(program, ScalarOp::Subtract, alloc::vec![(col_windowed.node, IndexMap::Affine(identity_pattern(6))), (pad_left_c, IndexMap::Affine(scalar_broadcast_pattern(6)))]);
+
+    let full_stamp = append(
+        program,
+        Op::Constant {
+            dtype: DType::Float32,
+            shape: alloc::vec![n, channels, spec.out_h, spec.out_w, spec.kernel_h, spec.kernel_w].iter().map(|&value| Extent::Static(value as u32)).collect(),
+            value: 1.0,
+        },
+    );
+    let n_iota = append(program, Op::Iota { dtype: DType::Float32, extent: Extent::Static(n as u32) });
+    let n_value = build_elementwise(program, ScalarOp::Multiply, alloc::vec![(n_iota, IndexMap::Affine(projection(6, &[0]))), (full_stamp, IndexMap::Affine(identity_pattern(6)))]);
+    let c_iota = append(program, Op::Iota { dtype: DType::Float32, extent: Extent::Static(channels as u32) });
+    let c_value = build_elementwise(program, ScalarOp::Multiply, alloc::vec![(c_iota, IndexMap::Affine(projection(6, &[1]))), (full_stamp, IndexMap::Affine(identity_pattern(6)))]);
+    let channels_c = constant_scalar(program, channels as f32);
+    let n_scaled = build_elementwise(program, ScalarOp::Multiply, alloc::vec![(n_value, IndexMap::Affine(identity_pattern(6))), (channels_c, IndexMap::Affine(scalar_broadcast_pattern(6)))]);
+    let nc = build_elementwise(program, ScalarOp::Add, alloc::vec![(n_scaled, IndexMap::Affine(identity_pattern(6))), (c_value, IndexMap::Affine(identity_pattern(6)))]);
+
+    let (major_extent, major_term, minor_term) =
+        if storage_order == 0 { (original_h, row_original, col_original) } else { (original_w, col_original, row_original) };
+    let major_extent_c = constant_scalar(program, major_extent as f32);
+    let step1 = build_elementwise(program, ScalarOp::Multiply, alloc::vec![(nc, IndexMap::Affine(identity_pattern(6))), (major_extent_c, IndexMap::Affine(scalar_broadcast_pattern(6)))]);
+    let step2 = build_elementwise(program, ScalarOp::Add, alloc::vec![(step1, IndexMap::Affine(identity_pattern(6))), (major_term, IndexMap::Affine(identity_pattern(6)))]);
+    let minor_extent = if storage_order == 0 { original_w } else { original_h };
+    let minor_extent_c = constant_scalar(program, minor_extent as f32);
+    let step3 = build_elementwise(program, ScalarOp::Multiply, alloc::vec![(step2, IndexMap::Affine(identity_pattern(6))), (minor_extent_c, IndexMap::Affine(scalar_broadcast_pattern(6)))]);
+    let flat_index = build_elementwise(program, ScalarOp::Add, alloc::vec![(step3, IndexMap::Affine(identity_pattern(6))), (minor_term, IndexMap::Affine(identity_pattern(6)))]);
+
+    let is_winner =
+        build_elementwise(program, ScalarOp::Equal, alloc::vec![(windowed.node, IndexMap::Affine(identity_pattern(6))), (row_max, IndexMap::Affine(projection(6, &[0, 1, 2, 3])))]);
+    let sentinel = constant_scalar(program, f32::MAX);
+    let candidate = build_elementwise(
+        program,
+        ScalarOp::Select,
+        alloc::vec![(is_winner, IndexMap::Affine(identity_pattern(6))), (flat_index, IndexMap::Affine(identity_pattern(6))), (sentinel, IndexMap::Affine(scalar_broadcast_pattern(6)))],
+    );
+    build_reduce(program, ScalarOp::Minimum, ReduceInit::PositiveInfinity, candidate, identity_pattern(6), projection(6, &[0, 1, 2, 3]), Some("maxpool2d_indices".to_string()))
+}
+
 /// `MaxPool`: [`window_materialize`] (padded with `-inf` so a padded cell
 /// never wins the max), then `Reduce(Maximum)` over the window's trailing
 /// `kh`/`kw` axes -- the same sliding-window shape as [`lower_conv`], with no
 /// weight operand and no channel reduction (`ScalarOp::Maximum` is not
 /// `ScalarOp::Add`, so `-inf * 1.0` from the stamp multiply staying `-inf`,
 /// never `NaN`, is what makes the padding value safe to carry through
-/// [`window_materialize`]'s multiply).
+/// [`window_materialize`]'s multiply). The optional second (`Indices`)
+/// output, when the node names one, is [`maxpool_indices`].
 ///
-/// Deferred: rank other than 4 or 5 (1D `MaxPool`), `storage_order`,
-/// `ceil_mode`, indices output (`Y` only, never the optional `Indices`).
+/// Deferred: rank other than 4 or 5 (1D `MaxPool`), `Indices` for the rank-5
+/// (`MaxPool3d`) path.
 fn lower_maxpool(program: &mut Vec<Op>, values: &mut BTreeMap<String, Value>, node: &NodeProto<'_>) -> Result<(), LowerError> {
     let image = lookup(values, node, 0)?.clone();
     if image.shape.len() == 5 {
         return lower_maxpool3d(program, values, node);
     }
     let plan = plan_pool(program, node, &image, f32::NEG_INFINITY)?;
-    let windowed = window_materialize(
-        program,
-        &plan.padded,
-        WindowSpec {
-            out_h: plan.out_shape[2],
-            out_w: plan.out_shape[3],
-            kernel_h: plan.kernel_h,
-            kernel_w: plan.kernel_w,
-            stride_h: plan.stride_h,
-            stride_w: plan.stride_w,
-            dilation_h: plan.dilation_h,
-            dilation_w: plan.dilation_w,
-        },
-    );
-    let result = build_reduce(
-        program,
-        ScalarOp::Maximum,
-        ReduceInit::NegativeInfinity,
-        windowed.node,
-        identity_pattern(6),
-        projection(6, &[0, 1, 2, 3]),
-        Some("maxpool2d".to_string()),
-    );
+    let spec = WindowSpec {
+        out_h: plan.out_shape[2],
+        out_w: plan.out_shape[3],
+        kernel_h: plan.kernel_h,
+        kernel_w: plan.kernel_w,
+        stride_h: plan.stride_h,
+        stride_w: plan.stride_w,
+        dilation_h: plan.dilation_h,
+        dilation_w: plan.dilation_w,
+    };
+    let windowed = window_materialize(program, &plan.padded, spec);
+    let result = build_reduce(program, ScalarOp::Maximum, ReduceInit::NegativeInfinity, windowed.node, identity_pattern(6), projection(6, &[0, 1, 2, 3]), Some("maxpool2d".to_string()));
+    if node.output.get(1).is_some() {
+        let (pad_top, pad_left, _, _) = plan.pads;
+        let storage_order = attr_int(node, "storage_order").unwrap_or(0);
+        let indices = maxpool_indices(program, &windowed, result, &plan.padded.shape, image.shape[2], image.shape[3], pad_top, pad_left, spec, storage_order);
+        bind_output(values, node, 1, indices, plan.out_shape.clone());
+    }
     bind_output(values, node, 0, result, plan.out_shape);
     Ok(())
 }
@@ -4439,6 +4535,107 @@ mod tests {
 
         assert_eq!(shape, &[1, 1, 2, 2]);
         assert_eq!(data, &[6.0, 8.0, 14.0, 16.0], "max of each 2x2 block of the 4x4 image");
+    }
+
+    /// `MaxPool`'s optional `Indices` output, `storage_order=0` (row-major,
+    /// ONNX's default): a hand-derived `4x4` grid, 2x2 kernel and stride,
+    /// with a genuine three-way tie in the top-left window (`(0,1)`,
+    /// `(1,0)`, `(1,1)` all read `5`) -- [`maxpool_indices`]'s
+    /// `Reduce(Minimum)`-over-flat-index tie-break must land on `(0,1)`
+    /// (flat index `1`), the first cell in raster (row-major) scan order,
+    /// not merely *a* tied cell.
+    #[test]
+    fn maxpool_indices_row_major_breaks_ties_toward_the_first_raster_cell() {
+        #[rustfmt::skip]
+        let image = f32_initializer(
+            "image",
+            &[1, 1, 4, 4],
+            &[
+                1.0, 5.0, 2.0, 6.0,
+                5.0, 5.0, 8.0, 3.0,
+                0.0, 0.0, 0.0, 0.0,
+                9.0, 0.0, 0.0, 4.0,
+            ],
+        );
+        let node = NodeProto {
+            input: vec!["image"],
+            output: vec!["y", "indices"],
+            op_type: "MaxPool",
+            name: "maxpool",
+            attribute: vec![ints_attribute("kernel_shape", vec![2, 2]), ints_attribute("strides", vec![2, 2])],
+            ..NodeProto::default()
+        };
+        let graph = GraphProto {
+            node: vec![node],
+            name: "maxpool_indices_graph",
+            initializer: vec![image],
+            output: vec![ValueInfoProto { name: "y", ..ValueInfoProto::default() }, ValueInfoProto { name: "indices", ..ValueInfoProto::default() }],
+            ..GraphProto::default()
+        };
+
+        let lowered = lower_graph(&graph).expect("lower MaxPool with Indices");
+        let named: Vec<(&str, &[f32])> = lowered.initializers.iter().map(|(name, data)| (name.as_str(), data.as_slice())).collect();
+        let y_output = lowered.graph_outputs[0].1;
+        let indices_output = lowered.graph_outputs[1].1;
+        let evaluated = evaluate_named(&lowered.program, &[], &named, &[y_output, indices_output]).expect("evaluate MaxPool with Indices");
+        let (y_data, y_shape) = evaluated.get(y_output).expect("y present");
+        let (indices_data, indices_shape) = evaluated.get(indices_output).expect("indices present");
+
+        assert_eq!(y_shape, &[1, 1, 2, 2]);
+        assert_eq!(y_data, &[5.0, 8.0, 9.0, 4.0], "the four per-window maxima, including the tied window's shared value");
+        assert_eq!(indices_shape, &[1, 1, 2, 2]);
+        assert_eq!(
+            indices_data,
+            &[1.0, 6.0, 12.0, 15.0],
+            "flat row-major indices into the original 4x4 input; window 0's tie breaks toward (0,1) = index 1, not (1,0) or (1,1)"
+        );
+    }
+
+    /// The same grid, `storage_order=1` (column-major): the flat-index
+    /// formula swaps which spatial axis is major, so window 0's three-way
+    /// tie breaks toward `(1,0)` (flat index `1` under column-major
+    /// numbering) instead of row-major's `(0,1)` -- proving the tie-break is
+    /// reading `storage_order`, not hardcoding row-major order.
+    #[test]
+    fn maxpool_indices_column_major_breaks_ties_toward_the_first_column_scan_cell() {
+        #[rustfmt::skip]
+        let image = f32_initializer(
+            "image",
+            &[1, 1, 4, 4],
+            &[
+                1.0, 5.0, 2.0, 6.0,
+                5.0, 5.0, 8.0, 3.0,
+                0.0, 0.0, 0.0, 0.0,
+                9.0, 0.0, 0.0, 4.0,
+            ],
+        );
+        let node = NodeProto {
+            input: vec!["image"],
+            output: vec!["y", "indices"],
+            op_type: "MaxPool",
+            name: "maxpool",
+            attribute: vec![
+                ints_attribute("kernel_shape", vec![2, 2]),
+                ints_attribute("strides", vec![2, 2]),
+                AttributeProto { name: "storage_order", i: 1, ..AttributeProto::default() },
+            ],
+            ..NodeProto::default()
+        };
+        let graph = GraphProto {
+            node: vec![node],
+            name: "maxpool_indices_column_major_graph",
+            initializer: vec![image],
+            output: vec![ValueInfoProto { name: "y", ..ValueInfoProto::default() }, ValueInfoProto { name: "indices", ..ValueInfoProto::default() }],
+            ..GraphProto::default()
+        };
+
+        let lowered = lower_graph(&graph).expect("lower MaxPool with column-major Indices");
+        let named: Vec<(&str, &[f32])> = lowered.initializers.iter().map(|(name, data)| (name.as_str(), data.as_slice())).collect();
+        let indices_output = lowered.graph_outputs[1].1;
+        let evaluated = evaluate_named(&lowered.program, &[], &named, &[indices_output]).expect("evaluate MaxPool with column-major Indices");
+        let (indices_data, _) = evaluated.get(indices_output).expect("indices present");
+
+        assert_eq!(indices_data, &[1.0, 9.0, 3.0, 15.0], "column-major flat indices; window 0's tie now breaks toward (1,0) = index 1 under column-major numbering");
     }
 
     /// `AveragePool`, 2x2 kernel and stride: [`window_materialize`] padded
