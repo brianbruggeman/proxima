@@ -19,6 +19,10 @@
 //! - [`optimizer::adam_step`] / [`optimizer::sgd_step`] /
 //!   [`optimizer::rmsprop_step`] / [`optimizer::adamw_step`] — parameter
 //!   updates as elementwise expressions over `(param, grad, ...)`.
+//! - [`train::train_step`] / [`train::fit`] — the host-buffer bookkeeping a
+//!   training loop repeats every step ([`proxima_tensor::cpu::evaluate_named`]
+//!   plus rebinding every updated buffer by name), as two free functions,
+//!   `std`-only (see this module's own `# Tiers` section).
 //! - [`sparse::dedupe_and_sum_rows`] — the host-side scatter-add a gathered
 //!   operand's adjoint (`adjoint::GatheredContribution`) needs applied back
 //!   onto its full shape, `O(touched x row_len)` rather than the dense
@@ -65,5 +69,11 @@ pub(crate) mod expr;
 pub mod loss;
 pub mod optimizer;
 pub mod sparse;
+// `evaluate_named` (proxima-tensor's own std-gated `cpu` module) is what
+// `train_step` actually runs a compiled step through -- see this crate's own
+// `std` feature doc for the same gate on `optimizer::AdamConfig`'s config
+// derive stack.
+#[cfg(feature = "std")]
+pub mod train;
 
 pub use error::AutogradError;
