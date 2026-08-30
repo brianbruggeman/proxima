@@ -63,7 +63,11 @@ impl ThreadIdentity for SingleThreadIdentity {
 mod tests {
     use super::*;
 
+    // Id = () by design (single-thread stub); the assertions exist to prove
+    // the trait contract compiles and holds for a unit identity, not to
+    // compare distinct values.
     #[test]
+    #[allow(clippy::let_unit_value, clippy::unit_cmp)]
     fn single_thread_stub_returns_unit_identity() {
         let id_a = SingleThreadIdentity::current();
         let id_b = SingleThreadIdentity::current();
@@ -71,6 +75,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::let_unit_value)]
     fn single_thread_stub_is_owning_always_true() {
         let captured = SingleThreadIdentity::current();
         assert!(SingleThreadIdentity::is_owning(captured));
