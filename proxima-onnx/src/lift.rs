@@ -38,15 +38,43 @@
 //! [`scalar_op_type`]). [`Reduce`] bodies restricted to the associative set
 //! ONNX ships a primitive reducer for (`Add`/`Multiply`/`Maximum`/
 //! `Minimum`); anything else, and any `Keep::Scan` body but `Add`
-//! (`CumSum`), is a documented [`LiftError`], never a fabricated op.
-//! [`IndexMap::Affine`] axes restricted to unit-coefficient, zero-offset
-//! projections (transpose/broadcast/identity -- everything
-//! [`crate::lower`]'s own compositions produce); a convolution-shaped axis
-//! (nonunit coefficient, the one case [`crate::map`]'s own doc table names
-//! that this crate's `lower` module never emits) is a documented gap, not a
-//! silent truncation. [`IndexMap::Computed`] is supported only in the exact
-//! axis-0 gather shape [`crate::lower::lower_gather`] itself produces.
+//! (`CumSum`), is a documented [`LiftError`], never a fabricated op -- ONNX
+//! has no `CumProd`/`CumMax`/`CumMin` primitive, so those stay a genuine,
+//! named gap rather than a fabricated composition.
+//!
+//! [`IndexMap::Affine`] axes: a plain unit-coefficient, zero-offset
+//! projection (transpose/broadcast/identity) resolves directly.
+//! A **two-term** axis (`coeff_a * iter[a] + coeff_b * iter[b] + offset`,
+//! the convolution/pooling window shape [`crate::map`]'s own doc table
+//! names) resolves via [`resolve_affine`]'s window case: a `Constant`
+//! integer index table plus a `Gather`, reading off the two iteration
+//! axes' extents from a *sibling* operand of the same node that exposes
+//! them as a plain projection against a leaf ([`Op::Input`]/
+//! [`Op::Constant`]) with a statically known shape -- exactly the
+//! `unify_iteration_space` technique `crate::lower`'s `window_materialize`
+//! doc describes for shape inference, reused here in reverse. A
+//! **degenerate** (zero-term) axis -- a size-1 operand dimension ONNX's own
+//! numpy-broadcast rule already handles -- resolves by keeping that
+//! dimension in place (no `Gather` needed) at the right-aligned iteration
+//! axis `crate::lower`'s `broadcast_pattern` would have assigned it.
+//! Anything wider (three or more terms, or a two-term axis whose iteration
+//! extents cannot be recovered from a sibling operand) is
+//! [`LiftError::NonAffineAxis`], a genuine residual: no single ONNX op
+//! expresses an arbitrary affine combination without more context than the
+//! node carries.
+//!
+//! A [`Reduce`]'s `out_map` need not be axis-ascending: [`reduced_axes`]
+//! reads off the surviving axes' order and, when it differs from the
+//! `ReduceSum`/... op's own ascending output order, lifts a trailing
+//! `Transpose` to restore it -- the inverse of the identity `reduced_axes`
+//! already relied on shape inference to prove sound on the read side.
+//!
+//! [`IndexMap::Computed`] is supported only in the exact axis-0 gather shape
+//! [`crate::lower::lower_gather`] itself produces; other data-dependent
+//! addressing (scatter, gather at other axes) is deferred pattern-raising,
+//! not attempted here.
 
+use alloc::collections::BTreeMap;
 use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
@@ -64,11 +92,9 @@ use crate::writer::{push_i32, push_i64, push_len, push_packed_f32, push_packed_i
 pub enum LiftError {
     #[error("node {node}: symbolic extent has no faithful ONNX concrete shape")]
     SymbolicExtent { node: NodeId },
-    #[error("node {node}: index pattern axis has a non-unit coefficient or nonzero offset (convolution-shaped) -- no single faithful ONNX op expresses this")]
+    #[error("node {node}: index pattern axis has three or more terms, or a two-term (window) axis whose iteration extents no sibling operand exposes -- no single faithful ONNX op expresses this")]
     NonAffineAxis { node: NodeId },
-    #[error("node {node}: index pattern has a broadcast (zero-term) axis on a nonzero-rank operand -- deferred, not attempted by this pass")]
-    DegenerateBroadcastAxis { node: NodeId },
-    #[error("node {node}: reduce/scan out_map is not order-preserving -- deferred, not attempted by this pass")]
+    #[error("node {node}: reduce/scan out_map axis is not a plain projection, or repeats an iteration axis -- no single faithful ONNX op expresses this")]
     PermutedOutMap { node: NodeId },
     #[error("node {node}: reduce body {body:?} has no faithful primitive ONNX reduce op")]
     UnsupportedReduceBody { node: NodeId, body: ScalarOp },
@@ -177,6 +203,19 @@ fn float_tensor_bytes(dims: &[i64], name: &str, values: &[f32]) -> Vec<u8> {
     buf
 }
 
+/// `TensorProto` bytes for an int64 tensor materialized in full (`dims`,
+/// `data_type = 7`, `int64_data`, `name`) -- the shape a [`resolve_affine`]
+/// window axis's `Gather` index table takes (same layout the `CumSum` axis
+/// initializer already uses further down this file).
+fn int64_tensor_bytes(dims: &[i64], name: &str, values: &[i64]) -> Vec<u8> {
+    let mut buf = Vec::new();
+    push_packed_i64(1, dims, &mut buf);
+    push_i32(2, 7, &mut buf);
+    push_packed_i64(7, values, &mut buf);
+    push_str(8, name, &mut buf);
+    buf
+}
+
 /// `ValueInfoProto` bytes for a float32 tensor of concrete rank -- the
 /// shape every graph input this pass emits takes.
 fn value_info_bytes(name: &str, dims: &[i64]) -> Vec<u8> {
@@ -224,37 +263,122 @@ fn single_term_axis(axis_index: &AxisIndex) -> Option<u16> {
     }
 }
 
-/// Resolves one elementwise/reduce operand's [`IndexPattern`] against a
-/// source value already bound to `source_name`, inserting whatever
-/// `Transpose`/`Unsqueeze` prelude nodes are needed and returning the name
-/// the consuming node should read.
-///
-/// Every operand axis must carry exactly one unit-coefficient, zero-offset
-/// term (a plain projection) -- see [`single_term_axis`] -- covering
-/// `pattern.axes.len()` of the `pattern.iter_rank` iteration axes. Sorting
-/// those covered axes ascending gives the operand-axis order a `Transpose`
-/// must first produce (identity if already ascending); the iteration axes
-/// left uncovered are exactly where `Unsqueeze` inserts a size-1 dimension,
-/// which is sound because ONNX's own numpy-broadcast rule then fills every
-/// remaining axis the way [`proxima_tensor`]'s own `broadcast_pattern`
-/// (`lower.rs`) already assumes.
-fn resolve_affine(node: NodeId, buf: &mut Vec<u8>, fresh: &mut u32, source_name: &str, pattern: &IndexPattern) -> Result<String, LiftError> {
-    let mut covered: Vec<(u16, u16)> = Vec::with_capacity(pattern.axes.len());
-    for (operand_axis, axis_index) in pattern.axes.iter().enumerate() {
-        match single_term_axis(axis_index) {
-            Some(iter_axis) => covered.push((iter_axis, operand_axis as u16)),
-            None if axis_index.terms.is_empty() => {
-                return Err(LiftError::DegenerateBroadcastAxis { node });
+/// A source node's statically known shape, when it is a leaf that carries
+/// one directly ([`Op::Input`]/[`Op::Constant`] both hold `Vec<Extent>`) --
+/// the only two node kinds [`known_iter_extents`] can read an extent off of
+/// without running full shape inference.
+fn leaf_shape(program: &[Op], node: NodeId) -> Option<&[Extent]> {
+    match program.get(node.0 as usize)? {
+        Op::Input { shape, .. } | Op::Constant { shape, .. } => Some(shape),
+        _ => None,
+    }
+}
+/// For every iteration axis a *sibling* operand exposes as a plain
+/// projection against a leaf of known shape, its extent -- exactly the
+/// technique `crate::lower`'s `window_materialize` doc names
+/// (`unify_iteration_space` resolving an axis's extent only from a pure
+/// projection), reused here so a two-term window axis on another operand of
+/// the same node can size its `Gather` index table.
+fn known_iter_extents(operands: &[(NodeId, IndexMap)], program: &[Op]) -> BTreeMap<u16, u64> {
+    let mut extents = BTreeMap::new();
+    for (operand_id, map) in operands {
+        let IndexMap::Affine(pattern) = map else { continue };
+        let Some(shape) = leaf_shape(program, *operand_id) else { continue };
+        for (operand_axis, axis_index) in pattern.axes.iter().enumerate() {
+            let Some(iter_axis) = single_term_axis(axis_index) else { continue };
+            if let Some(Extent::Static(extent)) = shape.get(operand_axis) {
+                extents.entry(iter_axis).or_insert(u64::from(*extent));
             }
-            None => return Err(LiftError::NonAffineAxis { node }),
         }
     }
+    extents
+}
+
+/// Resolves one elementwise/reduce operand's [`IndexPattern`] against a
+/// source value already bound to `source_name`, inserting whatever
+/// `Gather`/`Transpose`/`Unsqueeze` prelude nodes (plus, for a window axis,
+/// one fresh graph-level initializer) are needed and returning the name the
+/// consuming node should read.
+///
+/// Three operand-axis shapes are handled, matched left to right against
+/// `pattern.axes` (see this module's doc for the coverage table):
+///
+/// - a plain unit-coefficient, zero-offset term ([`single_term_axis`]) --
+///   contributes one real axis, read directly;
+/// - a zero-term (degenerate broadcast) axis -- contributes one real axis at
+///   ONNX's own right-aligned broadcast position, read directly (its extent
+///   is 1, so no `Gather` is needed; the axis is left in place for the
+///   consuming op's numpy-broadcast rule to fill);
+/// - a two-term window axis (`coeff_a * iter[a] + coeff_b * iter[b] +
+///   offset`) -- resolved via a fresh int64 index-table initializer plus a
+///   `Gather` along that axis, sized from [`known_iter_extents`]; a
+///   [`LiftError::NonAffineAxis`] if either iteration axis's extent cannot
+///   be recovered from a sibling operand.
+///
+/// Once every operand axis has a known real position and target iteration
+/// axis, the same tail as before applies: sort by iteration axis ascending
+/// to find the `Transpose` perm (identity if already ascending), then
+/// `Unsqueeze` in whichever iteration axes no operand axis touched at all.
+fn resolve_affine(
+    node: NodeId,
+    buf: &mut Vec<u8>,
+    initializers: &mut Vec<Vec<u8>>,
+    fresh: &mut u32,
+    source_name: &str,
+    pattern: &IndexPattern,
+    known_extents: &BTreeMap<u16, u64>,
+) -> Result<String, LiftError> {
+    let mut current = source_name.to_string();
+    let mut covered: Vec<(u16, u16)> = Vec::with_capacity(pattern.axes.len());
+    let mut shift: i64 = 0;
+
+    for (operand_axis, axis_index) in pattern.axes.iter().enumerate() {
+        let real_axis = (operand_axis as i64 + shift) as u16;
+        match axis_index.terms.as_slice() {
+            [term] if term.coeff == 1 && axis_index.offset == 0 => {
+                covered.push((term.axis, real_axis));
+            }
+            [] => {
+                // right-aligned broadcast position `crate::lower`'s `broadcast_pattern` assigns.
+                let leading = pattern.iter_rank as i64 - pattern.axes.len() as i64;
+                let virtual_axis = (leading + operand_axis as i64) as u16;
+                covered.push((virtual_axis, real_axis));
+            }
+            [term_a, term_b] => {
+                let extent_a = *known_extents.get(&term_a.axis).ok_or(LiftError::NonAffineAxis { node })?;
+                let extent_b = *known_extents.get(&term_b.axis).ok_or(LiftError::NonAffineAxis { node })?;
+                let mut indices = Vec::with_capacity((extent_a * extent_b) as usize);
+                for value_a in 0..extent_a as i64 {
+                    for value_b in 0..extent_b as i64 {
+                        indices.push(value_a * i64::from(term_a.coeff) + value_b * i64::from(term_b.coeff) + i64::from(axis_index.offset));
+                    }
+                }
+                // a graph-level initializer, not a `Constant` node -- `crate::lower`'s
+                // `Constant` lowering only reads back a *uniform* value (`Op::Constant`
+                // carries one `f32`, never an array), so a real index table must arrive
+                // the same way the `CumSum` axis initializer further down this file does.
+                *fresh += 1;
+                let indices_name = format!("lift_window_indices_{}", *fresh);
+                initializers.push(int64_tensor_bytes(&[extent_a as i64, extent_b as i64], &indices_name, &indices));
+
+                *fresh += 1;
+                let gathered = format!("lift_window_gather_{}", *fresh);
+                emit_node(buf, &[current.as_str(), indices_name.as_str()], &[gathered.as_str()], &gathered, "Gather", &[attr_int("axis", i64::from(real_axis))]);
+                current = gathered;
+
+                covered.push((term_a.axis, real_axis));
+                covered.push((term_b.axis, real_axis + 1));
+                shift += 1;
+            }
+            _ => return Err(LiftError::NonAffineAxis { node }),
+        }
+    }
+
     covered.sort_by_key(|&(iter_axis, _)| iter_axis);
-    let order: Vec<u16> = covered.iter().map(|&(_, operand_axis)| operand_axis).collect();
+    let order: Vec<u16> = covered.iter().map(|&(_, real_axis)| real_axis).collect();
     let missing: Vec<i64> = (0..pattern.iter_rank).filter(|iter_axis| !covered.iter().any(|&(candidate, _)| candidate == *iter_axis)).map(i64::from).collect();
 
     let is_identity_order = order.iter().enumerate().all(|(index, &axis)| axis as usize == index);
-    let mut current = source_name.to_string();
 
     if !is_identity_order {
         *fresh += 1;
@@ -274,7 +398,18 @@ fn resolve_affine(node: NodeId, buf: &mut Vec<u8>, fresh: &mut u32, source_name:
     Ok(current)
 }
 
-fn reduced_axes(node: NodeId, in_map: &IndexPattern, out_map: &IndexPattern) -> Result<Vec<i64>, LiftError> {
+/// The reduced axes and, when the surviving axes are not already
+/// ascending, the `Transpose` perm needed to restore [`Reduce::out_map`]'s
+/// actual order -- `ReduceSum`/... always emit their surviving axes in
+/// ascending order with `keepdims=0`, so a permuted `out_map` (a genuine
+/// axis reorder, not a malformed one) is a faithful `Transpose` away rather
+/// than a [`LiftError`].
+struct ReducedAxes {
+    axes: Vec<i64>,
+    perm: Option<Vec<i64>>,
+}
+
+fn reduced_axes(node: NodeId, in_map: &IndexPattern, out_map: &IndexPattern) -> Result<ReducedAxes, LiftError> {
     let mut out_covered: Vec<u16> = Vec::with_capacity(out_map.axes.len());
     for axis_index in &out_map.axes {
         match single_term_axis(axis_index) {
@@ -282,11 +417,24 @@ fn reduced_axes(node: NodeId, in_map: &IndexPattern, out_map: &IndexPattern) -> 
             None => return Err(LiftError::PermutedOutMap { node }),
         }
     }
-    let ascending = out_covered.windows(2).all(|pair| pair[0] < pair[1]);
-    if !ascending {
+    let mut ascending_order = out_covered.clone();
+    ascending_order.sort_unstable();
+    if ascending_order.windows(2).any(|pair| pair[0] == pair[1]) {
         return Err(LiftError::PermutedOutMap { node });
     }
-    Ok((0..in_map.iter_rank).filter(|axis| !out_covered.contains(axis)).map(i64::from).collect())
+    let axes = (0..in_map.iter_rank).filter(|axis| !out_covered.contains(axis)).map(i64::from).collect();
+    let is_ascending = out_covered.windows(2).all(|pair| pair[0] < pair[1]);
+    let perm = if is_ascending {
+        None
+    } else {
+        let mapped: Vec<i64> = out_covered
+            .iter()
+            .map(|axis| ascending_order.iter().position(|candidate| candidate == axis).map(|position| position as i64))
+            .collect::<Option<Vec<i64>>>()
+            .ok_or(LiftError::PermutedOutMap { node })?;
+        Some(mapped)
+    };
+    Ok(ReducedAxes { axes, perm })
 }
 
 /// Serialize an [`Op`] program back into ONNX `GraphProto` wire bytes (the
@@ -347,11 +495,12 @@ pub fn lift_graph(input: LiftInput<'_>) -> Result<Vec<u8>, LiftError> {
                 initializers.push(float_tensor_bytes(&[i64::from(*count)], &primary_name, &values));
             }
             Op::Elementwise { body, operands, .. } => {
+                let known_extents = known_iter_extents(operands, input.program);
                 let mut operand_names: Vec<String> = Vec::with_capacity(operands.len());
                 for (operand_id, map) in operands {
                     let source_name = names[operand_id.0 as usize].clone();
                     let resolved = match map {
-                        IndexMap::Affine(pattern) => resolve_affine(node_id, &mut nodes, &mut fresh, &source_name, pattern)?,
+                        IndexMap::Affine(pattern) => resolve_affine(node_id, &mut nodes, &mut initializers, &mut fresh, &source_name, pattern, &known_extents)?,
                         IndexMap::Computed { indices, index_map, base, gathered_dim } => {
                             resolve_gather(node_id, &mut nodes, &mut fresh, &names, &source_name, *indices, index_map, base, *gathered_dim)?
                         }
@@ -371,16 +520,23 @@ pub fn lift_graph(input: LiftInput<'_>) -> Result<Vec<u8>, LiftError> {
                     IndexMap::Computed { .. } => return Err(LiftError::UnsupportedComputedMap { node: node_id }),
                 };
                 let source_name = names[reduce.operand.0 as usize].clone();
-                let resolved = resolve_affine(node_id, &mut nodes, &mut fresh, &source_name, in_pattern)?;
-                let axes = reduced_axes(node_id, in_pattern, out_pattern)?;
+                let resolved = resolve_affine(node_id, &mut nodes, &mut initializers, &mut fresh, &source_name, in_pattern, &BTreeMap::new())?;
+                let reduce_axes = reduced_axes(node_id, in_pattern, out_pattern)?;
+                let final_name = primary_name.clone();
+                let staged_name = if reduce_axes.perm.is_some() {
+                    fresh += 1;
+                    format!("lift_reduce_staged_{fresh}")
+                } else {
+                    final_name.clone()
+                };
 
                 match reduce.keep {
                     Keep::Reduce => {
                         let op_type = reduce_op_type(reduce.body).ok_or(LiftError::UnsupportedReduceBody { node: node_id, body: reduce.body })?;
-                        emit_node(&mut nodes, &[resolved.as_str()], &[primary_name.as_str()], &primary_name, op_type, &[attr_ints("axes", &axes), attr_int("keepdims", 0)]);
+                        emit_node(&mut nodes, &[resolved.as_str()], &[staged_name.as_str()], &staged_name, op_type, &[attr_ints("axes", &reduce_axes.axes), attr_int("keepdims", 0)]);
                     }
                     Keep::Scan => {
-                        if reduce.body != ScalarOp::Add || axes.len() != 1 {
+                        if reduce.body != ScalarOp::Add || reduce_axes.axes.len() != 1 {
                             return Err(LiftError::UnsupportedScan { node: node_id, body: reduce.body });
                         }
                         fresh += 1;
@@ -389,12 +545,16 @@ pub fn lift_graph(input: LiftInput<'_>) -> Result<Vec<u8>, LiftError> {
                             let mut buf = Vec::new();
                             push_packed_i64(1, &[], &mut buf);
                             push_i32(2, 7, &mut buf);
-                            push_packed_i64(7, &axes, &mut buf);
+                            push_packed_i64(7, &reduce_axes.axes, &mut buf);
                             push_str(8, &axis_name, &mut buf);
                             buf
                         });
-                        emit_node(&mut nodes, &[resolved.as_str(), axis_name.as_str()], &[primary_name.as_str()], &primary_name, "CumSum", &[]);
+                        emit_node(&mut nodes, &[resolved.as_str(), axis_name.as_str()], &[staged_name.as_str()], &staged_name, "CumSum", &[]);
                     }
+                }
+
+                if let Some(perm) = &reduce_axes.perm {
+                    emit_node(&mut nodes, &[staged_name.as_str()], &[final_name.as_str()], &final_name, "Transpose", &[attr_ints("perm", perm)]);
                 }
             }
         }
@@ -471,4 +631,266 @@ pub fn lift_model(input: LiftInput<'_>) -> Result<Vec<u8>, LiftError> {
     push_i64(1, 8, &mut model);
     push_len(7, &graph, &mut model);
     Ok(model)
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod tests {
+    use alloc::vec;
+
+    use proxima_tensor::{ReduceInit, append, cpu::evaluate_named};
+
+    use super::*;
+    use crate::lower::lower_graph;
+    use crate::messages::{AttributeProto, GraphProto, NodeProto, TensorProto, ValueInfoProto};
+    use crate::pipe::parse_complete;
+
+    fn f32_initializer(name: &'static str, dims: &[i64], data: &[f32]) -> TensorProto<'static> {
+        TensorProto { dims: dims.to_vec(), data_type: 1, float_data: data.to_vec(), name, ..TensorProto::default() }
+    }
+
+    fn ints_attribute(name: &'static str, ints: Vec<i64>) -> AttributeProto<'static> {
+        AttributeProto { name, ints, ..AttributeProto::default() }
+    }
+
+    /// Drives the full write-side loop this crate's ONNX support closes,
+    /// mirroring `crate::tests`'s own `op_program_lifts_to_onnx_bytes_and_lowers_back_to_an_equivalent_program`:
+    /// `onnx graph -> lower -> Op` (baseline evaluation), then
+    /// `Op -> lift -> onnx bytes -> lower -> Op` (round-tripped evaluation),
+    /// asserting the two agree to `1e-4`.
+    fn assert_graph_round_trips_through_lift(graph: &GraphProto<'_>, lifted_name: &'static str) {
+        let original = lower_graph(graph).expect("lower the fixture graph");
+        let original_named: Vec<(&str, &[f32])> = original.initializers.iter().map(|(name, data)| (name.as_str(), data.as_slice())).collect();
+        let original_output = original.graph_outputs[0].1;
+        let baseline = evaluate_named(&original.program, &[], &original_named, &[original_output]).expect("evaluate the original program");
+        let (baseline_data, baseline_shape) = baseline.get(original_output).expect("baseline output present");
+
+        let lift_input = LiftInput {
+            program: &original.program,
+            initializers: &original.initializers,
+            graph_inputs: &original.graph_inputs,
+            graph_outputs: &original.graph_outputs,
+            graph_name: lifted_name,
+        };
+        let lifted_bytes = lift_model(lift_input).expect("lift the program to onnx bytes");
+
+        let reparsed_model = parse_complete(&lifted_bytes).expect("lifted bytes parse back to a ModelProto");
+        let reparsed_graph = reparsed_model.graph.as_ref().expect("lifted graph present");
+        assert!(!reparsed_graph.node.is_empty(), "lifted graph carries its primitive-op nodes");
+
+        let reloaded = lower_graph(reparsed_graph).expect("lower the lifted graph back to Op");
+        let reloaded_named: Vec<(&str, &[f32])> = reloaded.initializers.iter().map(|(name, data)| (name.as_str(), data.as_slice())).collect();
+        let reloaded_output = reloaded.graph_outputs[0].1;
+        let evaluated = evaluate_named(&reloaded.program, &[], &reloaded_named, &[reloaded_output]).expect("evaluate the round-tripped program");
+        let (data, shape) = evaluated.get(reloaded_output).expect("round-tripped output present");
+
+        assert_eq!(shape, baseline_shape, "lift round trip changed the output shape");
+        for (actual, expected) in data.iter().zip(baseline_data.iter()) {
+            assert!((actual - expected).abs() < 1e-4, "round-tripped {actual} does not match baseline {expected}");
+        }
+    }
+
+    /// The convolution-shaped gap this module's doc names: `Conv`'s
+    /// `window_materialize`d `Elementwise` operand carries a two-term
+    /// `stride*out + dilation*kernel` axis on `image` -- [`resolve_affine`]'s
+    /// `Constant` index table plus `Gather` is the only new machinery this
+    /// closes, so a bare stride-1, no-padding `Conv` (no `pad_axis` gather
+    /// in the way -- see this test's own doc for why padding stays out of
+    /// scope) is the direct proof it lifts and lowers back to the same
+    /// 3x3-window sums `crate::lower`'s own `conv_stride1_no_pad_sums_each_3x3_window`
+    /// hand-verifies.
+    #[test]
+    fn conv_stride1_window_axis_round_trips_through_lift() {
+        let image = f32_initializer("image", &[1, 1, 4, 4], &(1..=16).map(|value| value as f32).collect::<Vec<_>>());
+        let weight = f32_initializer("weight", &[1, 1, 3, 3], &[1.0; 9]);
+        let node = NodeProto { input: vec!["image", "weight"], output: vec!["y"], op_type: "Conv", name: "conv", ..NodeProto::default() };
+        let graph = GraphProto {
+            node: vec![node],
+            name: "conv_stride1_graph",
+            initializer: vec![image, weight],
+            output: vec![ValueInfoProto { name: "y", ..ValueInfoProto::default() }],
+            ..GraphProto::default()
+        };
+
+        assert_graph_round_trips_through_lift(&graph, "conv_stride1_lifted");
+    }
+
+    /// `MaxPool`, 2x2 kernel and stride: the same window-axis machinery as
+    /// `Conv`, but feeding a `Keep::Reduce` `Maximum` body instead of `Add`
+    /// -- proves [`resolve_affine`]'s window case is shared, not
+    /// `Conv`-specific.
+    #[test]
+    fn maxpool_2x2_window_axis_round_trips_through_lift() {
+        let image = f32_initializer("image", &[1, 1, 4, 4], &[1.0, 3.0, 2.0, 4.0, 5.0, 7.0, 6.0, 8.0, 9.0, 11.0, 10.0, 12.0, 13.0, 15.0, 14.0, 16.0]);
+        let node = NodeProto {
+            input: vec!["image"],
+            output: vec!["y"],
+            op_type: "MaxPool",
+            name: "maxpool",
+            attribute: vec![ints_attribute("kernel_shape", vec![2, 2]), ints_attribute("strides", vec![2, 2])],
+            ..NodeProto::default()
+        };
+        let graph = GraphProto {
+            node: vec![node],
+            name: "maxpool_graph",
+            initializer: vec![image],
+            output: vec![ValueInfoProto { name: "y", ..ValueInfoProto::default() }],
+            ..GraphProto::default()
+        };
+
+        assert_graph_round_trips_through_lift(&graph, "maxpool_lifted");
+    }
+
+    /// The degenerate-broadcast gap: `Add`'s `lower_binary` builds a
+    /// zero-term axis for any operand dimension that is `1` where the
+    /// broadcast output is wider (`crate::lower`'s `broadcast_pattern`) --
+    /// here the right-hand `[1, 3]` operand against a `[2, 3]` left-hand
+    /// one. [`resolve_affine`]'s degenerate case keeps that dimension in
+    /// place rather than erroring, letting ONNX's own numpy-broadcast rule
+    /// on the emitted `Add` fill it back in.
+    #[test]
+    fn degenerate_broadcast_axis_round_trips_through_lift() {
+        let lhs = f32_initializer("lhs", &[2, 3], &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
+        let rhs = f32_initializer("rhs", &[1, 3], &[10.0, 20.0, 30.0]);
+        let node = NodeProto { input: vec!["lhs", "rhs"], output: vec!["y"], op_type: "Add", name: "add", ..NodeProto::default() };
+        let graph = GraphProto {
+            node: vec![node],
+            name: "broadcast_add_graph",
+            initializer: vec![lhs, rhs],
+            output: vec![ValueInfoProto { name: "y", ..ValueInfoProto::default() }],
+            ..GraphProto::default()
+        };
+
+        assert_graph_round_trips_through_lift(&graph, "broadcast_add_lifted");
+    }
+
+    /// The permuted-`out_map` gap: a hand-built [`proxima_tensor::Op`]
+    /// program (no ONNX op composition `crate::lower` builds ever produces
+    /// this shape, so it is constructed directly rather than through
+    /// `lower_graph`) whose `Reduce` keeps iteration axes `{0, 2}` of a
+    /// rank-3 input but lists them `out_map`-order `[2, 0]` -- the surviving
+    /// axes transposed relative to `ReduceSum`'s own ascending output order.
+    /// [`reduced_axes`]'s `perm` plus a trailing `Transpose` is the only new
+    /// machinery this closes.
+    #[test]
+    fn permuted_reduce_out_map_round_trips_through_lift() {
+        let mut program = Vec::new();
+        let x = append(
+            &mut program,
+            Op::Input { dtype: proxima_tensor::DType::Float32, shape: vec![Extent::Static(2), Extent::Static(3), Extent::Static(4)], name: Some("x".to_string()) },
+        );
+        let in_map = IndexMap::Affine(IndexPattern {
+            iter_rank: 3,
+            axes: vec![
+                AxisIndex { terms: core::iter::once(proxima_tensor::AxisTerm::projection(0)).collect(), offset: 0 },
+                AxisIndex { terms: core::iter::once(proxima_tensor::AxisTerm::projection(1)).collect(), offset: 0 },
+                AxisIndex { terms: core::iter::once(proxima_tensor::AxisTerm::projection(2)).collect(), offset: 0 },
+            ],
+        });
+        let out_map = IndexMap::Affine(IndexPattern {
+            iter_rank: 3,
+            axes: vec![
+                AxisIndex { terms: core::iter::once(proxima_tensor::AxisTerm::projection(2)).collect(), offset: 0 },
+                AxisIndex { terms: core::iter::once(proxima_tensor::AxisTerm::projection(0)).collect(), offset: 0 },
+            ],
+        });
+        let reduced = append(
+            &mut program,
+            Op::Reduce(proxima_tensor::Reduce {
+                dtype: proxima_tensor::DType::Float32,
+                body: ScalarOp::Add,
+                init: ReduceInit::Zero,
+                operand: x,
+                in_map,
+                out_map,
+                keep: Keep::Reduce,
+                name: None,
+            }),
+        );
+
+        let x_data: [f32; 24] = core::array::from_fn(|index| index as f32);
+        let named: [(&str, &[f32]); 1] = [("x", &x_data)];
+        let baseline = evaluate_named(&program, &[], &named, &[reduced]).expect("evaluate the permuted-out_map fixture");
+        let (baseline_data, baseline_shape) = baseline.get(reduced).expect("baseline output present");
+        assert_eq!(baseline_shape, &[4, 2], "out_map [2, 0] transposes the naturally-ascending [2, 4] reduce shape");
+
+        let lift_input = LiftInput {
+            program: &program,
+            initializers: &[],
+            graph_inputs: &["x".to_string()],
+            graph_outputs: &[("y".to_string(), reduced)],
+            graph_name: "permuted_reduce_lifted",
+        };
+        let lifted_bytes = lift_model(lift_input).expect("lift the permuted-out_map program to onnx bytes");
+
+        let reparsed_model = parse_complete(&lifted_bytes).expect("lifted bytes parse back to a ModelProto");
+        let reparsed_graph = reparsed_model.graph.as_ref().expect("lifted graph present");
+        let reloaded = lower_graph(reparsed_graph).expect("lower the lifted permuted-reduce graph back to Op");
+        let reloaded_named: [(&str, &[f32]); 1] = [("x", &x_data)];
+        let reloaded_output = reloaded.graph_outputs[0].1;
+        let evaluated = evaluate_named(&reloaded.program, &[], &reloaded_named, &[reloaded_output]).expect("evaluate the round-tripped permuted-reduce program");
+        let (data, shape) = evaluated.get(reloaded_output).expect("round-tripped output present");
+
+        assert_eq!(shape, baseline_shape);
+        for (actual, expected) in data.iter().zip(baseline_data.iter()) {
+            assert!((actual - expected).abs() < 1e-4, "round-tripped {actual} does not match baseline {expected}");
+        }
+    }
+
+    /// A three-term axis has no faithful ONNX composition
+    /// [`resolve_affine`] attempts -- this stays [`LiftError::NonAffineAxis`],
+    /// never a silent truncation to the first two terms.
+    #[test]
+    fn three_term_axis_is_a_named_lift_error_not_a_silent_truncation() {
+        let x = append(
+            &mut Vec::new(),
+            Op::Input { dtype: proxima_tensor::DType::Float32, shape: vec![], name: None },
+        );
+        let three_terms = AxisIndex {
+            terms: vec![proxima_tensor::AxisTerm::scaled(0, 1), proxima_tensor::AxisTerm::scaled(1, 1), proxima_tensor::AxisTerm::scaled(2, 1)].into_iter().collect(),
+            offset: 0,
+        };
+        let pattern = IndexPattern { iter_rank: 3, axes: vec![three_terms] };
+        let mut buf = Vec::new();
+        let mut fresh = 0u32;
+        let mut initializers = Vec::new();
+        let error = resolve_affine(x, &mut buf, &mut initializers, &mut fresh, "source", &pattern, &BTreeMap::new()).expect_err("three-term axis is unsupported");
+        assert!(matches!(error, LiftError::NonAffineAxis { .. }));
+    }
+
+    /// `Keep::Scan` with a `Multiply` body has no ONNX cumulative-product
+    /// primitive (`CumSum` is the only one ONNX ships) -- stays a named
+    /// [`LiftError::UnsupportedScan`], never fabricated as `CumSum`.
+    #[test]
+    fn non_add_scan_body_is_a_named_lift_error() {
+        let mut program = Vec::new();
+        let x = append(&mut program, Op::Input { dtype: proxima_tensor::DType::Float32, shape: vec![Extent::Static(4)], name: Some("x".to_string()) });
+        let identity = IndexMap::Affine(IndexPattern {
+            iter_rank: 1,
+            axes: vec![AxisIndex { terms: core::iter::once(proxima_tensor::AxisTerm::projection(0)).collect(), offset: 0 }],
+        });
+        let scanned = append(
+            &mut program,
+            Op::Reduce(proxima_tensor::Reduce {
+                dtype: proxima_tensor::DType::Float32,
+                body: ScalarOp::Multiply,
+                init: ReduceInit::One,
+                operand: x,
+                in_map: identity.clone(),
+                out_map: identity,
+                keep: Keep::Scan,
+                name: None,
+            }),
+        );
+
+        let lift_input = LiftInput {
+            program: &program,
+            initializers: &[],
+            graph_inputs: &["x".to_string()],
+            graph_outputs: &[("y".to_string(), scanned)],
+            graph_name: "non_add_scan",
+        };
+        let error = lift_model(lift_input).expect_err("Multiply scan body has no faithful ONNX cumulative op");
+        assert!(matches!(error, LiftError::UnsupportedScan { .. }));
+    }
 }
