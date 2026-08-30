@@ -3,27 +3,27 @@
 //! `backend_parity.rs` reaches Metal), run through the SAME
 //! `plan_named`/`execute_plan_named` wrapper.
 //!
-//! # Why this is not `backend_parity.rs`'s own `real_forward_fixture`
+//! # `two_layer_mlp_fixture` vs `support::real_forward_fixture`
 //!
-//! That fixture (`support::real_forward_fixture`) is a full cached-attention
-//! transformer forward: it needs `Op::Elementwise`'s gather form
-//! (`embedding_lookup`'s `IndexMap::Computed`) to bind the token embedding
-//! table, RoPE, and a causal mask. `omega::wgsl`'s v1 scope is explicitly
-//! elementwise + `Keep::Reduce` + `Keep::Scan` with **no gather** (see that
-//! module's own doc) — running the real fixture through the wgpu backend
-//! would fail on the embedding lookup before ever reaching a matmul.
-//!
-//! This test instead builds a standalone two-layer MLP
-//! (`matmul -> erf -> matmul -> tanh -> cumsum`) that stays entirely inside
-//! v1's op set while still exercising every kernel shape that set covers:
-//! `Keep::Reduce` (both matmuls, `Add`-reduce over a `Multiply` body — the
-//! same shape a real matmul takes), an elementwise `Erf` (the ported
-//! polynomial) and `Tanh`, and `Keep::Scan` (a per-row cumulative sum).
+//! The standalone two-layer MLP below (`matmul -> erf -> matmul -> tanh ->
+//! cumsum`) predates gather landing in `crate::wgsl` — it was written to
+//! stay entirely inside the op set v1 covered at the time (elementwise +
+//! `Keep::Reduce` + `Keep::Scan`, no gather), while still exercising every
+//! kernel shape that set covers. It stays as a smaller, focused fixture for
+//! exactly those shapes. `the_full_mistral_cached_forward_runs_on_wgpu_at_cpu_parity`
+//! below now also runs `support::real_forward_fixture` — the same full
+//! cached-attention transformer forward `backend_parity.rs` runs against
+//! Metal — since `crate::wgsl` gained the gather bindings
+//! (`embedding_lookup_runs_on_wgpu_at_cpu_parity_for_integer_valued_inputs`
+//! below proves that landed).
 
 #![cfg(all(feature = "cpu", feature = "wgpu-backend"))]
 // every expect below runs against data this test just built or a real
 // device call; a failure there IS the test failing, not a case to recover.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
+
+mod support;
+use support::{as_named_blocks, real_forward_fixture};
 
 use omega::backend::{Backend, execute_plan_named, plan_named};
 use proxima_tensor::test_support::Lcg;
@@ -643,5 +643,60 @@ fn matmul_runs_on_wgpu_at_cpu_parity_whichever_reduce_path_the_adapter_takes() {
     assert!(
         relative < 1e-4,
         "wgpu matmul ({path}) disagrees with the cpu oracle: relative={relative} max_diff={max_diff}"
+    );
+}
+
+/// `support::real_forward_fixture` — the same full cached-attention
+/// transformer forward `backend_parity.rs::the_wrapper_agrees_with_itself_across_cpu_and_metal`
+/// runs against Metal — now run against the portable wgpu backend through
+/// the same `omega::backend` wrapper. Previously failed with every logit
+/// NaN: `Op::Constant`/`Op::Iota` uploaded an empty uniform buffer
+/// (`crate::wgpu_driver::pack_uniforms` returned `Vec::new()` for both,
+/// while their kernels read `u.total_elements`), so every leaf thread saw
+/// `total_elements == 0` and returned before writing; and separately, two
+/// `Keep::Reduce` folds sharing every field `crate::wgsl::entry_name` fed
+/// into its cache key EXCEPT which axis positions they kept
+/// (`[0, 1, 2]` folding the last axis vs `[0, 2, 3]` folding axis 1) still
+/// produced the same cache key, so `crate::wgpu_driver::pipeline_for`
+/// reused the first reduce's compiled pipeline — with the WRONG axis
+/// mapping baked into its source — against the second reduce's uniforms.
+#[test]
+fn the_full_mistral_cached_forward_runs_on_wgpu_at_cpu_parity() {
+    const VOCAB: usize = 64;
+
+    let (program, symbols, roots, owned) = real_forward_fixture();
+    let named = as_named_blocks(&owned);
+
+    let mut cpu_plan = plan_named(Backend::Cpu, &program, &symbols, &named, &roots)
+        .expect("omega::backend plans the real forward on cpu");
+    let cpu = execute_plan_named(&mut cpu_plan, &named).expect("omega::backend runs the real forward on cpu");
+
+    let mut wgpu_plan = plan_named(Backend::Wgpu, &program, &symbols, &named, &roots)
+        .expect("omega::backend plans the real forward on wgpu");
+    let wgpu = execute_plan_named(&mut wgpu_plan, &named)
+        .expect("omega::backend runs the real forward on a real device");
+
+    let expected = cpu.root();
+    let actual = wgpu.root();
+    assert_eq!(
+        actual.len(),
+        VOCAB,
+        "degenerate gate: logits must be one row of the vocabulary"
+    );
+    assert_eq!(actual.len(), expected.len());
+
+    let mut max_diff = 0.0f32;
+    for (&got, &want) in actual.iter().zip(expected.iter()) {
+        assert!(got.is_finite(), "wgpu, via the wrapper, produced a non-finite logit: {got}");
+        max_diff = max_diff.max((got - want).abs());
+    }
+    let max_magnitude = expected.iter().map(|value| value.abs()).fold(0.0f32, f32::max);
+    let relative = max_diff / max_magnitude.max(f32::MIN_POSITIVE);
+    eprintln!(
+        "wgpu real forward parity: max_diff={max_diff} max_magnitude={max_magnitude} relative={relative}"
+    );
+    assert!(
+        relative < 1e-4,
+        "omega::backend's cpu and wgpu arms disagree on the real forward: relative={relative} max_diff={max_diff}"
     );
 }
