@@ -24,6 +24,24 @@ use crate::expr;
 /// One [`ScalarOp::Maximum`] against a broadcasting rank-0
 /// [`Op::Constant`] — see this module's own doc for why that is the whole
 /// function and no `Op::Relu` variant exists.
+///
+/// ```
+/// use proxima_autograd::activation::relu;
+/// use proxima_tensor::dtype::DType;
+/// use proxima_tensor::op::{self, Extent, Op};
+///
+/// let mut program = Vec::new();
+/// let x = op::append(
+///     &mut program,
+///     Op::Input { dtype: DType::Float32, shape: vec![Extent::Static(4)], name: Some("x".into()) },
+/// );
+/// let out = relu(&mut program, DType::Float32, x, 1);
+///
+/// let values = [-2.0f32, -0.0, 0.5, 3.0];
+/// let evaluated = proxima_tensor::cpu::evaluate(&program, &[], &[&values], &[out])
+///     .expect("relu program lowers and evaluates");
+/// assert_eq!(evaluated.root(), &[0.0, 0.0, 0.5, 3.0]);
+/// ```
 #[must_use]
 pub fn relu(program: &mut Vec<Op>, dtype: DType, x: NodeId, rank: u16) -> NodeId {
     let zero = expr::constant(program, dtype, 0.0);
