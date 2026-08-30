@@ -12,7 +12,7 @@
 //!   `Reciprocal`, `Exponential`, `Logarithm`, `SquareRoot`, `Tanh`,
 //!   `Greater`, `Equal`, `Select`), plus `Erf` via the same
 //!   Abramowitz & Stegun 7.1.26 polynomial `crate::msl::PROXIMA_ERF_FN` ports
-//!   — see [`PROXIMA_ERF_FN_WGSL`]'s own doc.
+//!   — see `PROXIMA_ERF_FN_WGSL`'s own doc.
 //! - **`Keep::Reduce`** (matmul-shaped fold): one thread per OUTPUT element,
 //!   a serial loop over the reduction dims inside the kernel — the same
 //!   shape `crate::msl::push_serial_reduce_body` renders, with no SIMD-group
@@ -23,9 +23,9 @@
 //!   line and along the folded (innermost) dim within each — matching
 //!   `proxima_tensor::cpu::run_scan`'s own accumulator, which persists
 //!   across outer lines rather than resetting per line (see
-//!   [`render_scan`]'s own doc). Not embarrassingly parallel the way a
+//!   `render_scan`'s own doc). Not embarrassingly parallel the way a
 //!   reduce is; v1 does not attempt a parallel prefix-sum reformulation.
-//! - **`f32` only.** `Float16`/`BFloat16` (and everything [`type_token`]
+//! - **`f32` only.** `Float16`/`BFloat16` (and everything `type_token`
 //!   otherwise rejects) fail with [`EmitError::UnsupportedDType`] — WGSL's
 //!   base spec has no portable narrow float type every wgpu backend
 //!   supports, unlike MSL's native `half`.
