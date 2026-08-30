@@ -42,11 +42,18 @@ doctests_ran_and_passed() {
 # exits 0. `proxima_test_smoke.rs` is `#![cfg(feature = "test-support")]` and
 # every cassette case carries a runtime cfg on top, so "0 tests run" is a very
 # reachable false green here. Assert a nonzero count.
+#
+# `--color never`: CI sets `CARGO_TERM_COLOR: always`, which makes nextest
+# wrap the digits in its "N tests run: N passed" summary line in ANSI escape
+# codes even though the output is captured to a file, not a terminal. That
+# breaks the contiguous-text grep below silently (exit 1, read as "0 tests
+# ran"), which is exactly the false-negative this cell exists to catch —
+# reproduced on a real ubuntu host with CARGO_TERM_COLOR=always set.
 macro_smoke_ran_and_passed() {
     local output
     if ! output="$(cargo nextest run -p proxima --test e2e \
         --features test-prime,http-hyper,http3-quinn-compat \
-        -E 'test(proxima_test_smoke)' --no-fail-fast 2>&1)"; then
+        -E 'test(proxima_test_smoke)' --no-fail-fast --color never 2>&1)"; then
         printf '%s\n' "$output"
         return 1
     fi
