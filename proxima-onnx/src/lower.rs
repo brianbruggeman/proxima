@@ -447,31 +447,70 @@ fn lower_sigmoid(program: &mut Vec<Op>, values: &mut BTreeMap<String, Value>, no
     Ok(())
 }
 
-/// `MatMul` for rank-2 operands: `Reduce(+)` over `Elementwise(*)`,
-/// node-for-node the composition `proxima-tensor/src/lib.rs`'s own module
-/// doc builds and evaluates. Batched (rank > 2) `MatMul` is out of scope --
-/// see this crate's own doc for why (deferred, not a sufficiency gap).
+/// `MatMul` for rank-2 or batched (rank >= 2) operands: the contracted
+/// axis (`K`) is carried as one more non-projected axis in the shared
+/// iteration space alongside `M`/`N`, and leading batch axes ride the same
+/// way -- `Reduce(+)` over `Elementwise(*)` generalizes without a new `Op`
+/// form because [`Reduce::in_map`]/`out_map` are already addressed against
+/// an arbitrary-rank iteration space (see `proxima-tensor/src/op.rs`'s own
+/// `Reduce` doc). Batch dims broadcast numpy-style via [`broadcast_shapes`]/
+/// [`broadcast_pattern`] -- the same machinery [`lower_binary`] already
+/// uses -- so `[B, M, K] x [K, N]` (rhs has no batch dims at all) is just the
+/// degenerate case where `extent_from_right` treats the missing leading axes
+/// as broadcastable.
 fn lower_matmul(program: &mut Vec<Op>, values: &mut BTreeMap<String, Value>, node: &NodeProto<'_>) -> Result<(), LowerError> {
     let lhs = lookup(values, node, 0)?.clone();
     let rhs = lookup(values, node, 1)?.clone();
-    if lhs.shape.len() != 2 || rhs.shape.len() != 2 {
+    if lhs.shape.len() < 2 || rhs.shape.len() < 2 {
         return Err(LowerError::UnsupportedShape {
             name: node.name.to_string(),
             op_type: node.op_type.to_string(),
-            reason: "MatMul lowering supports rank-2 operands only (no batch dimensions)".to_string(),
+            reason: "MatMul lowering requires both operands to be at least rank 2".to_string(),
         });
     }
-    if lhs.shape[1] != rhs.shape[0] {
+    let lhs_batch = &lhs.shape[..lhs.shape.len() - 2];
+    let rhs_batch = &rhs.shape[..rhs.shape.len() - 2];
+    let out_batch = broadcast_shapes(node, lhs_batch, rhs_batch)?;
+    let batch_rank = out_batch.len();
+
+    let m = lhs.shape[lhs.shape.len() - 2];
+    let k = lhs.shape[lhs.shape.len() - 1];
+    let k_rhs = rhs.shape[rhs.shape.len() - 2];
+    let n = rhs.shape[rhs.shape.len() - 1];
+    if k != k_rhs {
         return Err(LowerError::UnsupportedShape {
             name: node.name.to_string(),
             op_type: node.op_type.to_string(),
-            reason: format!("contracted dim mismatch: lhs is [{}, {}], rhs is [{}, {}]", lhs.shape[0], lhs.shape[1], rhs.shape[0], rhs.shape[1]),
+            reason: format!("contracted dim mismatch: lhs contributes {k}, rhs contributes {k_rhs}"),
         });
     }
-    let out_shape = alloc::vec![lhs.shape[0], rhs.shape[1]];
-    let id = matmul2d(program, lhs.node, projection(3, &[0, 2]), rhs.node, projection(3, &[2, 1]), Some("matmul".to_string()));
+
+    let iter_rank = (batch_rank + 3) as u16;
+    let m_axis = batch_rank as u16;
+    let k_axis = batch_rank as u16 + 1;
+    let n_axis = batch_rank as u16 + 2;
+
+    let lhs_pattern = batched_operand_pattern(lhs_batch, &out_batch, iter_rank, &[m_axis, k_axis]);
+    let rhs_pattern = batched_operand_pattern(rhs_batch, &out_batch, iter_rank, &[k_axis, n_axis]);
+
+    let out_shape: Vec<u64> = out_batch.iter().copied().chain([m, n]).collect();
+    let out_kept: Vec<u16> = (0..batch_rank as u16).chain([m_axis, n_axis]).collect();
+
+    let product = build_elementwise(program, ScalarOp::Multiply, alloc::vec![(lhs.node, IndexMap::Affine(lhs_pattern)), (rhs.node, IndexMap::Affine(rhs_pattern))]);
+    let id = build_reduce(program, ScalarOp::Add, ReduceInit::Zero, product, identity_pattern(iter_rank as usize), projection(iter_rank, &out_kept), Some("matmul".to_string()));
     bind_output(values, node, 0, id, out_shape);
     Ok(())
+}
+
+/// An operand's pattern into a matmul's shared `(batch..., trailing_axes)`
+/// iteration space: the operand's own batch dims broadcast against
+/// `out_batch` exactly like [`broadcast_pattern`] (missing leading batch
+/// axes included -- the `[B, M, K] x [K, N]` case), then `trailing_axes`
+/// (its own `M`/`K` or `K`/`N` pair) are appended as plain projections.
+fn batched_operand_pattern(operand_batch: &[u64], out_batch: &[u64], iter_rank: u16, trailing_axes: &[u16]) -> IndexPattern {
+    let mut axes = broadcast_pattern(operand_batch, out_batch).axes;
+    axes.extend(trailing_axes.iter().map(|&axis| AxisIndex { terms: core::iter::once(AxisTerm::projection(axis)).collect(), offset: 0 }));
+    IndexPattern { iter_rank, axes }
 }
 
 /// The shared matmul core [`lower_matmul`] and [`lower_gemm`] both build:
@@ -1015,6 +1054,62 @@ mod tests {
 
         let error = lower_graph(&graph).expect_err("Concat has no lowering");
         assert!(matches!(error, LowerError::UnsupportedOp { .. }), "expected UnsupportedOp, got {error:?}");
+    }
+
+    /// Batched `MatMul`: `[2, 2, 3] x [2, 3, 2]`, independently computed per
+    /// batch.
+    #[test]
+    fn matmul_contracts_a_batch_of_matrices() {
+        let a_initializer = f32_initializer("a", &[2, 2, 3], &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0]);
+        let b_initializer = f32_initializer("b", &[2, 3, 2], &[1.0, 0.0, 0.0, 1.0, 1.0, 1.0, 2.0, 0.0, 0.0, 2.0, 1.0, 1.0]);
+        let node = NodeProto { input: vec!["a", "b"], output: vec!["y"], op_type: "MatMul", name: "matmul", ..NodeProto::default() };
+        let graph = GraphProto {
+            node: vec![node],
+            name: "batched_matmul_graph",
+            initializer: vec![a_initializer, b_initializer],
+            output: vec![ValueInfoProto { name: "y", ..ValueInfoProto::default() }],
+            ..GraphProto::default()
+        };
+
+        let lowered = lower_graph(&graph).expect("lower batched MatMul");
+        let named: Vec<(&str, &[f32])> = lowered.initializers.iter().map(|(name, data)| (name.as_str(), data.as_slice())).collect();
+        let output = lowered.graph_outputs[0].1;
+        let evaluated = evaluate_named(&lowered.program, &[], &named, &[output]).expect("evaluate batched MatMul");
+        let (data, shape) = evaluated.get(output).expect("y present");
+
+        assert_eq!(shape, &[2, 2, 2]);
+        // batch 0: [[1,2,3],[4,5,6]] @ [[1,0],[0,1],[1,1]] = [[4,5],[10,11]]
+        // batch 1: [[1,0,0],[0,1,0]] @ [[2,0],[0,2],[1,1]] = [[2,0],[0,2]]
+        assert_eq!(data, &[4.0, 5.0, 10.0, 11.0, 2.0, 0.0, 0.0, 2.0]);
+    }
+
+    /// Batched `MatMul` where the right-hand operand carries no batch
+    /// dimension at all -- `[2, 2, 3] x [3, 2]` -- and broadcasts across the
+    /// batch the way [`broadcast_shapes`] already treats a missing leading
+    /// axis as extent 1.
+    #[test]
+    fn matmul_broadcasts_a_shared_right_hand_matrix_across_the_batch() {
+        let a_initializer = f32_initializer("a", &[2, 2, 3], &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0]);
+        let b_initializer = f32_initializer("b", &[3, 2], &[1.0, 0.0, 0.0, 1.0, 1.0, 1.0]);
+        let node = NodeProto { input: vec!["a", "b"], output: vec!["y"], op_type: "MatMul", name: "matmul", ..NodeProto::default() };
+        let graph = GraphProto {
+            node: vec![node],
+            name: "broadcast_matmul_graph",
+            initializer: vec![a_initializer, b_initializer],
+            output: vec![ValueInfoProto { name: "y", ..ValueInfoProto::default() }],
+            ..GraphProto::default()
+        };
+
+        let lowered = lower_graph(&graph).expect("lower broadcast MatMul");
+        let named: Vec<(&str, &[f32])> = lowered.initializers.iter().map(|(name, data)| (name.as_str(), data.as_slice())).collect();
+        let output = lowered.graph_outputs[0].1;
+        let evaluated = evaluate_named(&lowered.program, &[], &named, &[output]).expect("evaluate broadcast MatMul");
+        let (data, shape) = evaluated.get(output).expect("y present");
+
+        assert_eq!(shape, &[2, 2, 2]);
+        // batch 0: [[1,2,3],[4,5,6]] @ [[1,0],[0,1],[1,1]] = [[4,5],[10,11]]
+        // batch 1: [[1,0,0],[0,1,0]] @ same b = [[1,0],[0,1]]
+        assert_eq!(data, &[4.0, 5.0, 10.0, 11.0, 1.0, 0.0, 0.0, 1.0]);
     }
 
     /// `Softmax(axis=0)` on a `[3, 2]` input -- the reduced axis is the
