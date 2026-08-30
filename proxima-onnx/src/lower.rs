@@ -2022,6 +2022,43 @@ fn conv_output_extent(padded_extent: u64, kernel_extent: u64, stride: i64, dilat
     Some((padded_extent - span) / stride as u64 + 1)
 }
 
+/// [`conv_output_extent`]'s `ceil_mode=1` sibling for `MaxPool`/`AveragePool`
+/// (ONNX's pooling ops are the only ones this attribute exists on -- `Conv`
+/// has no `ceil_mode`). ONNX's rule: `out = ceil((in + pad_before +
+/// pad_after - span) / stride) + 1`, EXCEPT a last window whose start
+/// position falls entirely inside the *right*-padding-only region (at or
+/// past `in + pad_before`, i.e. it reads no real input at all) is dropped --
+/// "sliding windows that would start in the right padded region are
+/// ignored" is the spec's own wording. Returns both the output extent and
+/// how much *extra* trailing padding (beyond `pad_after`) the last window
+/// needs so it stays a fully in-bounds [`Op::Elementwise`] read: ceil
+/// rounds up, so the final window can overhang the already-padded extent,
+/// and [`plan_pool`]'s only knob for that is widening the same
+/// [`pad_axis`] call it already makes (the `-inf`/`0.0` fill value that
+/// call already carries is exactly the right value to overhang into, for
+/// `MaxPool`/`AveragePool` respectively) -- never a new `Op`/`IndexMap`.
+fn conv_output_extent_ceil(input_extent: u64, pad_before: u64, pad_after: u64, kernel_extent: u64, stride: i64, dilation: i64) -> Option<(u64, u64)> {
+    let span = (dilation as u64).checked_mul(kernel_extent.checked_sub(1)?)?.checked_add(1)?;
+    let padded_extent = input_extent + pad_before + pad_after;
+    if span > padded_extent {
+        return None;
+    }
+    let stride_u = stride as u64;
+    let mut out = (padded_extent - span).div_ceil(stride_u) + 1;
+
+    let right_pad_start = input_extent + pad_before;
+    if (out - 1) * stride_u >= right_pad_start {
+        out -= 1;
+    }
+    if out == 0 {
+        return None;
+    }
+
+    let required_padded_extent = (out - 1) * stride_u + span;
+    let extra_pad_after = required_padded_extent.saturating_sub(padded_extent);
+    Some((out, pad_after + extra_pad_after))
+}
+
 /// The stride/dilation/output-extent parameters [`window_materialize`] and
 /// [`conv_output_extent`] share -- one field group traveling together
 /// (`Reduce`'s own doc names this idiom), not ten positional arguments.
@@ -2862,6 +2899,12 @@ struct PoolPlan {
     dilation_h: i64,
     dilation_w: i64,
     out_shape: Vec<u64>,
+    /// The actual `(top, left, bottom, right)` padding this plan applied --
+    /// post `auto_pad`/`ceil_mode` resolution, so a caller needing a
+    /// *parallel* pad (e.g. [`lower_averagepool`]'s valid-count divisor,
+    /// padded with `0.0` the same way the data was) reproduces the exact
+    /// same padding without re-deriving `auto_pad`/`ceil_mode` itself.
+    pads: (u64, u64, u64, u64),
 }
 
 fn plan_pool(program: &mut Vec<Op>, node: &NodeProto<'_>, image: &Value, fill: f32) -> Result<PoolPlan, LowerError> {
@@ -2920,22 +2963,38 @@ fn plan_pool(program: &mut Vec<Op>, node: &NodeProto<'_>, image: &Value, fill: f
         }
     };
 
-    let padded_w = pad_axis(program, image, 3, pad_left as u64, pad_right as u64, fill);
-    let padded = pad_axis(program, &padded_w, 2, pad_top as u64, pad_bottom as u64, fill);
+    let ceil_mode = attr_int(node, "ceil_mode").unwrap_or(0) != 0;
+    let (pad_bottom, pad_right, out_h, out_w) = if ceil_mode {
+        let (out_h, pad_bottom) = conv_output_extent_ceil(image.shape[2], pad_top as u64, pad_bottom as u64, kernel_h, stride_h, dilation_h)
+            .ok_or_else(|| LowerError::UnsupportedShape { name: name.clone(), op_type: op_type.clone(), reason: format!("{} kernel does not fit the padded input height", node.op_type) })?;
+        let (out_w, pad_right) = conv_output_extent_ceil(image.shape[3], pad_left as u64, pad_right as u64, kernel_w, stride_w, dilation_w)
+            .ok_or_else(|| LowerError::UnsupportedShape { name: name.clone(), op_type: op_type.clone(), reason: format!("{} kernel does not fit the padded input width", node.op_type) })?;
+        (pad_bottom, pad_right, out_h, out_w)
+    } else {
+        (pad_bottom as u64, pad_right as u64, 0, 0)
+    };
 
-    let out_h = conv_output_extent(padded.shape[2], kernel_h, stride_h, dilation_h).ok_or_else(|| LowerError::UnsupportedShape {
-        name: node.name.to_string(),
-        op_type: node.op_type.to_string(),
-        reason: format!("{} kernel does not fit the padded input height", node.op_type),
-    })?;
-    let out_w = conv_output_extent(padded.shape[3], kernel_w, stride_w, dilation_w).ok_or_else(|| LowerError::UnsupportedShape {
-        name: node.name.to_string(),
-        op_type: node.op_type.to_string(),
-        reason: format!("{} kernel does not fit the padded input width", node.op_type),
-    })?;
+    let padded_w = pad_axis(program, image, 3, pad_left as u64, pad_right, fill);
+    let padded = pad_axis(program, &padded_w, 2, pad_top as u64, pad_bottom, fill);
+
+    let (out_h, out_w) = if ceil_mode {
+        (out_h, out_w)
+    } else {
+        let out_h = conv_output_extent(padded.shape[2], kernel_h, stride_h, dilation_h).ok_or_else(|| LowerError::UnsupportedShape {
+            name: node.name.to_string(),
+            op_type: node.op_type.to_string(),
+            reason: format!("{} kernel does not fit the padded input height", node.op_type),
+        })?;
+        let out_w = conv_output_extent(padded.shape[3], kernel_w, stride_w, dilation_w).ok_or_else(|| LowerError::UnsupportedShape {
+            name: node.name.to_string(),
+            op_type: node.op_type.to_string(),
+            reason: format!("{} kernel does not fit the padded input width", node.op_type),
+        })?;
+        (out_h, out_w)
+    };
 
     let out_shape = alloc::vec![image.shape[0], image.shape[1], out_h, out_w];
-    Ok(PoolPlan { padded, kernel_h, kernel_w, stride_h, stride_w, dilation_h, dilation_w, out_shape })
+    Ok(PoolPlan { padded, kernel_h, kernel_w, stride_h, stride_w, dilation_h, dilation_w, out_shape, pads: (pad_top as u64, pad_left as u64, pad_bottom, pad_right) })
 }
 
 /// `MaxPool`: [`window_materialize`] (padded with `-inf` so a padded cell
@@ -2981,43 +3040,52 @@ fn lower_maxpool(program: &mut Vec<Op>, values: &mut BTreeMap<String, Value>, no
     Ok(())
 }
 
+/// A same-shape all-`1.0` [`Value`], zero-padded by the identical
+/// `(top, left, bottom, right)` a data pool already applied
+/// ([`plan_pool`]'s own `pads` field), windowed, and `Reduce(Add)`'d: the
+/// count of *actually-present* input cells at every output position, never
+/// the fixed `kh*kw` a `count_include_pad=0` average must exclude padding
+/// from. [`lower_averagepool`]'s own doc explains why the divisor must
+/// switch on `count_include_pad`; this is the composed "denominator" half
+/// -- an `Op::Constant` ones tensor, [`pad_axis`], [`window_materialize`],
+/// `Reduce(Add)`, all four already used by the numerator path, no new `Op`/
+/// `ScalarOp`/`IndexMap`.
+fn valid_window_count(program: &mut Vec<Op>, image_shape: &[u64], pads: (u64, u64, u64, u64), spec: WindowSpec) -> NodeId {
+    let (pad_top, pad_left, pad_bottom, pad_right) = pads;
+    let ones = append(program, Op::Constant { dtype: DType::Float32, shape: image_shape.iter().map(|&extent| Extent::Static(extent as u32)).collect(), value: 1.0 });
+    let ones_value = Value { node: ones, shape: image_shape.to_vec(), view: None };
+    let padded_w = pad_axis(program, &ones_value, 3, pad_left, pad_right, 0.0);
+    let padded = pad_axis(program, &padded_w, 2, pad_top, pad_bottom, 0.0);
+    let windowed = window_materialize(program, &padded, spec);
+    build_reduce(program, ScalarOp::Add, ReduceInit::Zero, windowed.node, identity_pattern(6), projection(6, &[0, 1, 2, 3]), Some("averagepool2d_count".to_string()))
+}
+
 /// `AveragePool`: [`window_materialize`] (zero-padded), `Reduce(Add)` over
-/// `kh`/`kw`, then `Multiply` by the constant `1/(kh*kw)` -- correct for
-/// `count_include_pad=1` and for any window with no padding, where the fixed
-/// divisor and ONNX's own default (`count_include_pad=0`, a per-position
-/// valid-cell divisor) agree. A padded window with the default
-/// `count_include_pad=0` is a named, deferred gap: it needs a per-output-
-/// position valid-count divisor this composition does not yet build, not a
-/// silently wrong average.
+/// `kh`/`kw`, then divided by the correct per-`count_include_pad` divisor.
+/// `count_include_pad=1` (and the common no-padding case, where the two
+/// divisors agree) uses the fixed constant `1/(kh*kw)`; `count_include_pad=0`
+/// (ONNX's default) with any padding present -- explicit `pads`, a resolved
+/// `auto_pad`, or [`plan_pool`]'s own `ceil_mode` overhang -- instead divides
+/// by [`valid_window_count`]'s per-position valid-cell count, so a padded
+/// window never dilutes its average with the padding value.
 fn lower_averagepool(program: &mut Vec<Op>, values: &mut BTreeMap<String, Value>, node: &NodeProto<'_>) -> Result<(), LowerError> {
     let image = lookup(values, node, 0)?.clone();
     if image.shape.len() == 5 {
         return lower_averagepool3d(program, values, node);
     }
     let count_include_pad = attr_int(node, "count_include_pad").unwrap_or(0);
-    let has_nonzero_pad = attr_ints(node, "pads").is_some_and(|pads| pads.iter().any(|&value| value != 0));
-    if has_nonzero_pad && count_include_pad == 0 {
-        return Err(LowerError::UnsupportedShape {
-            name: node.name.to_string(),
-            op_type: node.op_type.to_string(),
-            reason: "AveragePool lowering supports nonzero pads only with count_include_pad=1 (the ONNX default excludes padding from the divisor, which needs a per-position valid-count divisor not yet composed)".to_string(),
-        });
-    }
     let plan = plan_pool(program, node, &image, 0.0)?;
-    let windowed = window_materialize(
-        program,
-        &plan.padded,
-        WindowSpec {
-            out_h: plan.out_shape[2],
-            out_w: plan.out_shape[3],
-            kernel_h: plan.kernel_h,
-            kernel_w: plan.kernel_w,
-            stride_h: plan.stride_h,
-            stride_w: plan.stride_w,
-            dilation_h: plan.dilation_h,
-            dilation_w: plan.dilation_w,
-        },
-    );
+    let spec = WindowSpec {
+        out_h: plan.out_shape[2],
+        out_w: plan.out_shape[3],
+        kernel_h: plan.kernel_h,
+        kernel_w: plan.kernel_w,
+        stride_h: plan.stride_h,
+        stride_w: plan.stride_w,
+        dilation_h: plan.dilation_h,
+        dilation_w: plan.dilation_w,
+    };
+    let windowed = window_materialize(program, &plan.padded, spec);
     let summed = build_reduce(
         program,
         ScalarOp::Add,
@@ -3027,13 +3095,16 @@ fn lower_averagepool(program: &mut Vec<Op>, values: &mut BTreeMap<String, Value>
         projection(6, &[0, 1, 2, 3]),
         Some("averagepool2d".to_string()),
     );
-    let window_size = (plan.kernel_h * plan.kernel_w) as f32;
-    let inverse = constant_scalar(program, 1.0 / window_size);
-    let result = build_elementwise(
-        program,
-        ScalarOp::Multiply,
-        alloc::vec![(summed, IndexMap::Affine(identity_pattern(4))), (inverse, IndexMap::Affine(scalar_broadcast_pattern(4)))],
-    );
+    let (pad_top, pad_left, pad_bottom, pad_right) = plan.pads;
+    let has_padding = pad_top != 0 || pad_left != 0 || pad_bottom != 0 || pad_right != 0;
+    let result = if count_include_pad == 0 && has_padding {
+        let count = valid_window_count(program, &image.shape, plan.pads, spec);
+        build_elementwise(program, ScalarOp::Divide, alloc::vec![(summed, IndexMap::Affine(identity_pattern(4))), (count, IndexMap::Affine(identity_pattern(4)))])
+    } else {
+        let window_size = (plan.kernel_h * plan.kernel_w) as f32;
+        let inverse = constant_scalar(program, 1.0 / window_size);
+        build_elementwise(program, ScalarOp::Multiply, alloc::vec![(summed, IndexMap::Affine(identity_pattern(4))), (inverse, IndexMap::Affine(scalar_broadcast_pattern(4)))])
+    };
     bind_output(values, node, 0, result, plan.out_shape);
     Ok(())
 }
@@ -3051,6 +3122,9 @@ struct PoolPlan3d {
     dilation_h: i64,
     dilation_w: i64,
     out_shape: Vec<u64>,
+    /// The actual `(d0, h0, w0, d1, h1, w1)` padding applied -- see
+    /// [`PoolPlan::pads`]'s own doc for why a caller needs this.
+    pads: (u64, u64, u64, u64, u64, u64),
 }
 
 /// [`plan_pool`]'s rank-5 mirror: same `kernel_shape`/`strides`/
@@ -3072,26 +3146,46 @@ fn plan_pool3d(program: &mut Vec<Op>, node: &NodeProto<'_>, image: &Value, fill:
     let (kernel_d, kernel_h, kernel_w) = (kernel_shape[0] as u64, kernel_shape[1] as u64, kernel_shape[2] as u64);
 
     let attrs = parse_conv3d_attrs(node, image.shape[2], image.shape[3], image.shape[4], kernel_d, kernel_h, kernel_w)?;
+    let name = node.name.to_string();
+    let op_type = node.op_type.to_string();
 
-    let padded_w = pad_axis(program, image, 4, attrs.pad_w0 as u64, attrs.pad_w1 as u64, fill);
-    let padded_h = pad_axis(program, &padded_w, 3, attrs.pad_h0 as u64, attrs.pad_h1 as u64, fill);
-    let padded = pad_axis(program, &padded_h, 2, attrs.pad_d0 as u64, attrs.pad_d1 as u64, fill);
+    let ceil_mode = attr_int(node, "ceil_mode").unwrap_or(0) != 0;
+    let (pad_d1, pad_h1, pad_w1, out_d, out_h, out_w) = if ceil_mode {
+        let (out_d, pad_d1) = conv_output_extent_ceil(image.shape[2], attrs.pad_d0 as u64, attrs.pad_d1 as u64, kernel_d, attrs.stride_d, attrs.dilation_d)
+            .ok_or_else(|| LowerError::UnsupportedShape { name: name.clone(), op_type: op_type.clone(), reason: format!("{} kernel does not fit the padded input depth", node.op_type) })?;
+        let (out_h, pad_h1) = conv_output_extent_ceil(image.shape[3], attrs.pad_h0 as u64, attrs.pad_h1 as u64, kernel_h, attrs.stride_h, attrs.dilation_h)
+            .ok_or_else(|| LowerError::UnsupportedShape { name: name.clone(), op_type: op_type.clone(), reason: format!("{} kernel does not fit the padded input height", node.op_type) })?;
+        let (out_w, pad_w1) = conv_output_extent_ceil(image.shape[4], attrs.pad_w0 as u64, attrs.pad_w1 as u64, kernel_w, attrs.stride_w, attrs.dilation_w)
+            .ok_or_else(|| LowerError::UnsupportedShape { name: name.clone(), op_type: op_type.clone(), reason: format!("{} kernel does not fit the padded input width", node.op_type) })?;
+        (pad_d1, pad_h1, pad_w1, out_d, out_h, out_w)
+    } else {
+        (attrs.pad_d1 as u64, attrs.pad_h1 as u64, attrs.pad_w1 as u64, 0, 0, 0)
+    };
 
-    let out_d = conv_output_extent(padded.shape[2], kernel_d, attrs.stride_d, attrs.dilation_d).ok_or_else(|| LowerError::UnsupportedShape {
-        name: node.name.to_string(),
-        op_type: node.op_type.to_string(),
-        reason: format!("{} kernel does not fit the padded input depth", node.op_type),
-    })?;
-    let out_h = conv_output_extent(padded.shape[3], kernel_h, attrs.stride_h, attrs.dilation_h).ok_or_else(|| LowerError::UnsupportedShape {
-        name: node.name.to_string(),
-        op_type: node.op_type.to_string(),
-        reason: format!("{} kernel does not fit the padded input height", node.op_type),
-    })?;
-    let out_w = conv_output_extent(padded.shape[4], kernel_w, attrs.stride_w, attrs.dilation_w).ok_or_else(|| LowerError::UnsupportedShape {
-        name: node.name.to_string(),
-        op_type: node.op_type.to_string(),
-        reason: format!("{} kernel does not fit the padded input width", node.op_type),
-    })?;
+    let padded_w = pad_axis(program, image, 4, attrs.pad_w0 as u64, pad_w1, fill);
+    let padded_h = pad_axis(program, &padded_w, 3, attrs.pad_h0 as u64, pad_h1, fill);
+    let padded = pad_axis(program, &padded_h, 2, attrs.pad_d0 as u64, pad_d1, fill);
+
+    let (out_d, out_h, out_w) = if ceil_mode {
+        (out_d, out_h, out_w)
+    } else {
+        let out_d = conv_output_extent(padded.shape[2], kernel_d, attrs.stride_d, attrs.dilation_d).ok_or_else(|| LowerError::UnsupportedShape {
+            name: node.name.to_string(),
+            op_type: node.op_type.to_string(),
+            reason: format!("{} kernel does not fit the padded input depth", node.op_type),
+        })?;
+        let out_h = conv_output_extent(padded.shape[3], kernel_h, attrs.stride_h, attrs.dilation_h).ok_or_else(|| LowerError::UnsupportedShape {
+            name: node.name.to_string(),
+            op_type: node.op_type.to_string(),
+            reason: format!("{} kernel does not fit the padded input height", node.op_type),
+        })?;
+        let out_w = conv_output_extent(padded.shape[4], kernel_w, attrs.stride_w, attrs.dilation_w).ok_or_else(|| LowerError::UnsupportedShape {
+            name: node.name.to_string(),
+            op_type: node.op_type.to_string(),
+            reason: format!("{} kernel does not fit the padded input width", node.op_type),
+        })?;
+        (out_d, out_h, out_w)
+    };
 
     let out_shape = alloc::vec![image.shape[0], image.shape[1], out_d, out_h, out_w];
     Ok(PoolPlan3d {
@@ -3106,6 +3200,7 @@ fn plan_pool3d(program: &mut Vec<Op>, node: &NodeProto<'_>, image: &Value, fill:
         dilation_h: attrs.dilation_h,
         dilation_w: attrs.dilation_w,
         out_shape,
+        pads: (attrs.pad_d0 as u64, attrs.pad_h0 as u64, attrs.pad_w0 as u64, pad_d1, pad_h1, pad_w1),
     })
 }
 
@@ -3143,19 +3238,42 @@ fn lower_maxpool3d(program: &mut Vec<Op>, values: &mut BTreeMap<String, Value>, 
     Ok(())
 }
 
+/// [`valid_window_count`]'s rank-5 mirror -- three spatial axes instead of
+/// two, otherwise the identical ones-tensor-through-the-same-padding
+/// composition.
+#[allow(clippy::too_many_arguments)]
+fn valid_window_count3d(
+    program: &mut Vec<Op>,
+    image_shape: &[u64],
+    pads: (u64, u64, u64, u64, u64, u64),
+    out_d: u64,
+    out_h: u64,
+    out_w: u64,
+    kernel_d: u64,
+    kernel_h: u64,
+    kernel_w: u64,
+    stride_d: i64,
+    stride_h: i64,
+    stride_w: i64,
+    dilation_d: i64,
+    dilation_h: i64,
+    dilation_w: i64,
+) -> NodeId {
+    let (pad_d0, pad_h0, pad_w0, pad_d1, pad_h1, pad_w1) = pads;
+    let ones = append(program, Op::Constant { dtype: DType::Float32, shape: image_shape.iter().map(|&extent| Extent::Static(extent as u32)).collect(), value: 1.0 });
+    let ones_value = Value { node: ones, shape: image_shape.to_vec(), view: None };
+    let padded_w = pad_axis(program, &ones_value, 4, pad_w0, pad_w1, 0.0);
+    let padded_h = pad_axis(program, &padded_w, 3, pad_h0, pad_h1, 0.0);
+    let padded = pad_axis(program, &padded_h, 2, pad_d0, pad_d1, 0.0);
+    let windowed = window_materialize3d(program, &padded, out_d, out_h, out_w, kernel_d, kernel_h, kernel_w, stride_d, stride_h, stride_w, dilation_d, dilation_h, dilation_w);
+    build_reduce(program, ScalarOp::Add, ReduceInit::Zero, windowed.node, identity_pattern(8), projection(8, &[0, 1, 2, 3, 4]), Some("averagepool3d_count".to_string()))
+}
+
 /// `AveragePool`, rank-5 (3D): [`lower_averagepool`]'s rank-5 mirror, called
-/// from its rank dispatch. Same `count_include_pad`/nonzero-`pads`
-/// restriction as the 2D path -- see [`lower_averagepool`]'s own doc.
+/// from its rank dispatch. Same `count_include_pad`-driven divisor switch
+/// as the 2D path -- see [`lower_averagepool`]'s own doc.
 fn lower_averagepool3d(program: &mut Vec<Op>, values: &mut BTreeMap<String, Value>, node: &NodeProto<'_>) -> Result<(), LowerError> {
     let count_include_pad = attr_int(node, "count_include_pad").unwrap_or(0);
-    let has_nonzero_pad = attr_ints(node, "pads").is_some_and(|pads| pads.iter().any(|&value| value != 0));
-    if has_nonzero_pad && count_include_pad == 0 {
-        return Err(LowerError::UnsupportedShape {
-            name: node.name.to_string(),
-            op_type: node.op_type.to_string(),
-            reason: "AveragePool lowering supports nonzero pads only with count_include_pad=1 (the ONNX default excludes padding from the divisor, which needs a per-position valid-count divisor not yet composed)".to_string(),
-        });
-    }
     let image = lookup(values, node, 0)?.clone();
     let plan = plan_pool3d(program, node, &image, 0.0)?;
     let windowed = window_materialize3d(
@@ -3183,13 +3301,32 @@ fn lower_averagepool3d(program: &mut Vec<Op>, values: &mut BTreeMap<String, Valu
         projection(8, &[0, 1, 2, 3, 4]),
         Some("averagepool3d".to_string()),
     );
-    let window_size = (plan.kernel_d * plan.kernel_h * plan.kernel_w) as f32;
-    let inverse = constant_scalar(program, 1.0 / window_size);
-    let result = build_elementwise(
-        program,
-        ScalarOp::Multiply,
-        alloc::vec![(summed, IndexMap::Affine(identity_pattern(5))), (inverse, IndexMap::Affine(scalar_broadcast_pattern(5)))],
-    );
+    let (pad_d0, pad_h0, pad_w0, pad_d1, pad_h1, pad_w1) = plan.pads;
+    let has_padding = pad_d0 != 0 || pad_h0 != 0 || pad_w0 != 0 || pad_d1 != 0 || pad_h1 != 0 || pad_w1 != 0;
+    let result = if count_include_pad == 0 && has_padding {
+        let count = valid_window_count3d(
+            program,
+            &image.shape,
+            plan.pads,
+            plan.out_shape[2],
+            plan.out_shape[3],
+            plan.out_shape[4],
+            plan.kernel_d,
+            plan.kernel_h,
+            plan.kernel_w,
+            plan.stride_d,
+            plan.stride_h,
+            plan.stride_w,
+            plan.dilation_d,
+            plan.dilation_h,
+            plan.dilation_w,
+        );
+        build_elementwise(program, ScalarOp::Divide, alloc::vec![(summed, IndexMap::Affine(identity_pattern(5))), (count, IndexMap::Affine(identity_pattern(5)))])
+    } else {
+        let window_size = (plan.kernel_d * plan.kernel_h * plan.kernel_w) as f32;
+        let inverse = constant_scalar(program, 1.0 / window_size);
+        build_elementwise(program, ScalarOp::Multiply, alloc::vec![(summed, IndexMap::Affine(identity_pattern(5))), (inverse, IndexMap::Affine(scalar_broadcast_pattern(5)))])
+    };
     bind_output(values, node, 0, result, plan.out_shape);
     Ok(())
 }
@@ -3790,6 +3927,10 @@ mod tests {
         AttributeProto { name, ints, ..AttributeProto::default() }
     }
 
+    fn int_attribute(name: &'static str, value: i64) -> AttributeProto<'static> {
+        AttributeProto { name, i: value, ..AttributeProto::default() }
+    }
+
     /// `Conv`, stride 1, no padding: a 3x3 all-ones kernel over a `4x4`
     /// image is a 3x3 sliding-window sum -- `Reduce(Add)` over
     /// `Elementwise(Multiply)` against the [`window_materialize`]d input,
@@ -3978,13 +4119,15 @@ mod tests {
         assert_eq!(data, &[3.5, 5.5, 11.5, 13.5], "mean of each 2x2 block of the 4x4 image");
     }
 
-    /// `AveragePool` with nonzero `pads` and ONNX's default `count_include_pad=0`:
-    /// a deferred, named gap -- the fixed `1/(kh*kw)` divisor this
-    /// composition builds is only correct when padding is excluded from the
-    /// count (`count_include_pad=1`) or absent entirely, never silently
-    /// applied to a boundary-diluted average.
+    /// `AveragePool` with nonzero `pads` and ONNX's default
+    /// `count_include_pad=0`: [`valid_window_count`] divides by the
+    /// per-position count of *real* (non-padding) cells instead of the
+    /// fixed `kh*kw`, so a boundary window's average is never diluted by the
+    /// zero padding value -- hand-derived per output cell directly from the
+    /// zero-padded `6x6` grid (`pads=[1,1,1,1]` on a `4x4` image), not a
+    /// re-derivation through the code under test.
     #[test]
-    fn averagepool_padded_default_count_is_a_named_unsupported_shape_not_a_silent_average() {
+    fn averagepool_padded_count_include_pad_zero_excludes_padding_from_the_divisor() {
         let image = f32_initializer("image", &[1, 1, 4, 4], &(1..=16).map(|value| value as f32).collect::<Vec<_>>());
         let node = NodeProto {
             input: vec!["image"],
@@ -4002,8 +4145,94 @@ mod tests {
             ..GraphProto::default()
         };
 
-        let error = lower_graph(&graph).expect_err("padded AveragePool with count_include_pad=0 is a deferred gap");
-        assert!(matches!(error, LowerError::UnsupportedShape { .. }), "expected UnsupportedShape, got {error:?}");
+        let lowered = lower_graph(&graph).expect("lower padded AveragePool with count_include_pad=0");
+        let named: Vec<(&str, &[f32])> = lowered.initializers.iter().map(|(name, data)| (name.as_str(), data.as_slice())).collect();
+        let output = lowered.graph_outputs[0].1;
+        let evaluated = evaluate_named(&lowered.program, &[], &named, &[output]).expect("evaluate padded AveragePool");
+        let (data, shape) = evaluated.get(output).expect("y present");
+
+        assert_eq!(shape, &[1, 1, 5, 5]);
+        #[rustfmt::skip]
+        let expected = [
+            1.0, 1.5, 2.5, 3.5, 4.0,
+            3.0, 3.5, 4.5, 5.5, 6.0,
+            7.0, 7.5, 8.5, 9.5, 10.0,
+            11.0, 11.5, 12.5, 13.5, 14.0,
+            13.0, 13.5, 14.5, 15.5, 16.0,
+        ];
+        assert_eq!(data, expected.as_slice(), "hand-derived valid-cell-count averages over the zero-padded 6x6 grid");
+    }
+
+    /// `AveragePool` with nonzero `pads` and `count_include_pad=1`: the
+    /// fixed `1/(kh*kw)` divisor this composition uses whenever padding is
+    /// requested *in* the count -- the zero-padding value literally
+    /// contributes `0.0` to the sum, and every window divides by the full
+    /// `kernel_h*kernel_w` regardless of how many cells were real.
+    #[test]
+    fn averagepool_padded_count_include_pad_one_uses_the_fixed_divisor() {
+        let image = f32_initializer("image", &[1, 1, 4, 4], &(1..=16).map(|value| value as f32).collect::<Vec<_>>());
+        let node = NodeProto {
+            input: vec!["image"],
+            output: vec!["y"],
+            op_type: "AveragePool",
+            name: "averagepool",
+            attribute: vec![ints_attribute("kernel_shape", vec![2, 2]), ints_attribute("pads", vec![1, 1, 1, 1]), int_attribute("count_include_pad", 1)],
+            ..NodeProto::default()
+        };
+        let graph = GraphProto {
+            node: vec![node],
+            name: "averagepool_padded_include_graph",
+            initializer: vec![image],
+            output: vec![ValueInfoProto { name: "y", ..ValueInfoProto::default() }],
+            ..GraphProto::default()
+        };
+
+        let lowered = lower_graph(&graph).expect("lower padded AveragePool with count_include_pad=1");
+        let named: Vec<(&str, &[f32])> = lowered.initializers.iter().map(|(name, data)| (name.as_str(), data.as_slice())).collect();
+        let output = lowered.graph_outputs[0].1;
+        let evaluated = evaluate_named(&lowered.program, &[], &named, &[output]).expect("evaluate padded AveragePool count_include_pad=1");
+        let (data, shape) = evaluated.get(output).expect("y present");
+
+        assert_eq!(shape, &[1, 1, 5, 5]);
+        // top-left window sums only the single real cell (1.0) but still divides by kh*kw=4.
+        assert!((data[0] - 0.25).abs() < 1e-6, "top-left window is 1.0 / 4 with padding counted, got {}", data[0]);
+        // the fully-interior window (oy=1, ox=1) has no padding, so both divisors already agree.
+        assert!((data[6] - 3.5).abs() < 1e-6, "interior window unaffected by count_include_pad, got {}", data[6]);
+    }
+
+    /// `MaxPool` with `ceil_mode=1`: [`conv_output_extent_ceil`]'s rounding
+    /// widens the output by one and overhangs the padded input by one cell,
+    /// which [`plan_pool`] fills with the SAME `-inf` [`pad_axis`] identity
+    /// the rest of the padding already uses -- so the final window's max
+    /// still ignores the overhang entirely, hand-verified per window.
+    #[test]
+    fn maxpool_ceil_mode_widens_the_output_and_pads_the_overhang_with_negative_infinity() {
+        let image = f32_initializer("image", &[1, 1, 1, 5], &[1.0, 3.0, 2.0, 5.0, 4.0]);
+        let node = NodeProto {
+            input: vec!["image"],
+            output: vec!["y"],
+            op_type: "MaxPool",
+            name: "maxpool_ceil",
+            attribute: vec![ints_attribute("kernel_shape", vec![1, 2]), ints_attribute("strides", vec![1, 2]), int_attribute("ceil_mode", 1)],
+            ..NodeProto::default()
+        };
+        let graph = GraphProto {
+            node: vec![node],
+            name: "maxpool_ceil_graph",
+            initializer: vec![image],
+            output: vec![ValueInfoProto { name: "y", ..ValueInfoProto::default() }],
+            ..GraphProto::default()
+        };
+
+        let lowered = lower_graph(&graph).expect("lower MaxPool ceil_mode=1");
+        let named: Vec<(&str, &[f32])> = lowered.initializers.iter().map(|(name, data)| (name.as_str(), data.as_slice())).collect();
+        let output = lowered.graph_outputs[0].1;
+        let evaluated = evaluate_named(&lowered.program, &[], &named, &[output]).expect("evaluate MaxPool ceil_mode=1");
+        let (data, shape) = evaluated.get(output).expect("y present");
+
+        // floor((5-2)/2)+1 = 2 windows without ceil_mode; ceil_mode=1 widens to 3.
+        assert_eq!(shape, &[1, 1, 1, 3]);
+        assert_eq!(data, &[3.0, 5.0, 4.0], "windows [1,3]=3, [2,5]=5, [4,-inf]=4 -- the overhang never wins the max");
     }
 
     fn graph_attribute(name: &'static str, subgraph: GraphProto<'static>) -> AttributeProto<'static> {
