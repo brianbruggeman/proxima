@@ -10821,36 +10821,66 @@ enum TypedPlan {
 /// Validates a program is executable by [`evaluate_typed`] and returns its
 /// [`TypedPlan`].
 ///
-/// Two shapes pass, everything else is [`TensorError::NotLowerable`]:
+/// A THIRD role sits alongside the operand/accumulator pair below: a
+/// gather's `indices` node ([`index_node_ids`], the same structural
+/// detection [`reject_non_float32`]'s f32 pipeline already uses to exempt
+/// gather indices from its own uniform-dtype rule). An index node is
+/// exempt from the uniform/widened dtype check entirely — it may carry any
+/// [`DType::is_integer`] dtype regardless of what the rest of the program
+/// runs at — but a non-integer index dtype (a float, or `Bool`) is an
+/// honest `NotLowerable`, never silently coerced. This plan-level
+/// recognition is scoped to what it says: [`run_typed_program`] and
+/// [`run_widened_program`] still reject an actual gather node outright (see
+/// either function's own "does not support gather yet" doc) — regeneralizing
+/// their execution loops to read a third, index-typed buffer table is a
+/// materially bigger change than fits alongside teaching the plan to stop
+/// rejecting the shape at the door.
 ///
-/// - **uniform** — every node (bar a gather's `indices`, still carried as
-///   f32 — see [`reject_non_float32`]'s doc) shares one dtype. This is the
+/// Two shapes pass beyond that, everything else is
+/// [`TensorError::NotLowerable`]:
+///
+/// - **uniform** — every non-index node shares one dtype. This is the
 ///   whole-program restriction this function always enforced; it is
 ///   unchanged for any program that never mixes dtypes, which is what keeps
 ///   the existing f32 NEON fast path (`run_reduce_typed`/`run_scan_typed`'s
 ///   `T = f32` specialization) reachable exactly as before.
-/// - **widened** — every node up to some position shares one dtype
-///   (`operand`), the node at that position is an [`Op::Reduce`] whose own
-///   dtype differs (`accumulator`), and every node from there on shares
-///   `accumulator`. A `Reduce`'s `operand: NodeId` field only ever points
-///   backwards (this crate's own SSA invariant — see [`Op::append`]'s doc),
-///   so the dtype that changed at that node is provably the fold's operand
-///   dtype widening into its accumulator, not an unrelated node happening to
-///   differ. [`evaluate_typed`] dispatches this shape to
+/// - **widened** — every non-index node up to some position shares one
+///   dtype (`operand`), the node at that position is an [`Op::Reduce`]
+///   whose own dtype differs (`accumulator`), and every node from there on
+///   shares `accumulator`. A `Reduce`'s `operand: NodeId` field only ever
+///   points backwards (this crate's own SSA invariant — see [`Op::append`]'s
+///   doc), so the dtype that changed at that node is provably the fold's
+///   operand dtype widening into its accumulator, not an unrelated node
+///   happening to differ. [`evaluate_typed`] dispatches this shape to
 ///   [`run_widened_program`], scoped to the pairs it ships a [`Convert`]
 ///   [`Pipe`] for — see that function's own doc.
 ///
-/// Any dtype change outside those two shapes (a third distinct dtype, or a
-/// change at a non-`Reduce` node) is rejected with an honest
+/// Any dtype change outside those shapes (a third distinct non-index dtype,
+/// or a change at a non-`Reduce` node) is rejected with an honest
 /// `NotLowerable` rather than silently picked apart. `Bool` is out at any
-/// position — see [`TypedBuffer`]'s doc; `BFloat16`/`Float16` are typed
-/// elements like any other (see `Element`'s half-float impl).
+/// non-index position — see [`TypedBuffer`]'s doc; `BFloat16`/`Float16` are
+/// typed elements like any other (see `Element`'s half-float impl).
 fn typed_program_plan(program: &[Op]) -> Result<TypedPlan, TensorError> {
-    let base_dtype = program.first().ok_or(TensorError::Empty)?.dtype();
+    let index_nodes = index_node_ids(program);
+    let base_dtype = program
+        .iter()
+        .enumerate()
+        .find(|(position, _)| !index_nodes.contains(&NodeId(*position as u32)))
+        .map(|(_, expr)| expr.dtype())
+        .ok_or(TensorError::Empty)?;
     let mut widen_at: Option<(usize, DType)> = None;
     for (position, expr) in program.iter().enumerate() {
         let node = NodeId(position as u32);
         let dtype = expr.dtype();
+        if index_nodes.contains(&node) {
+            if !dtype.is_integer() {
+                return Err(TensorError::NotLowerable {
+                    node,
+                    reason: "a gather index node must carry an integer dtype",
+                });
+            }
+            continue;
+        }
         if dtype == DType::Bool {
             return Err(TensorError::NotLowerable {
                 node,
@@ -14963,6 +14993,78 @@ mod tests {
         );
         let error = evaluate_typed(&bool_program, &[], &[], &[])
             .expect_err("Bool must still be rejected -- no TypedBuffer variant backs it");
+        assert!(matches!(error, TensorError::NotLowerable { .. }), "{error}");
+    }
+
+    /// `table[ids[s], d]`, `table` at `compute_dtype` and `ids` at
+    /// `index_dtype` -- the same [`IndexMap::Computed`] wiring
+    /// `embedding_lookup_program` uses, parameterized over both dtypes so
+    /// [`typed_program_plan`]'s third, index role can be exercised at any
+    /// compute width against any integer index width.
+    fn typed_gather_program(compute_dtype: DType, index_dtype: DType) -> Vec<Op> {
+        let mut program = Vec::new();
+        let table = block(&mut program, compute_dtype, &[Extent::Static(4), Extent::Static(2)]);
+        let ids = block(&mut program, index_dtype, &[Extent::Static(3)]);
+        let gathered_map = IndexMap::Computed {
+            indices: ids,
+            index_map: map::projection(2, &[0]),
+            base: map::IndexPattern {
+                iter_rank: 2,
+                axes: alloc::vec![
+                    map::AxisIndex::default(),
+                    map::AxisIndex {
+                        terms: core::iter::once(AxisTerm::projection(1)).collect(),
+                        offset: 0,
+                    },
+                ],
+            },
+            gathered_dim: 0,
+        };
+        append(
+            &mut program,
+            Op::Elementwise {
+                dtype: compute_dtype,
+                body: ScalarOp::Identity,
+                operands: alloc::vec![(table, gathered_map)],
+                name: None,
+            },
+        );
+        program
+    }
+
+    /// [`typed_program_plan`]'s third role: a gather index node carries its
+    /// own integer dtype, distinct from the program's compute dtype,
+    /// without failing the plan -- proven directly against the plan
+    /// function (not `evaluate_typed`, which still honestly rejects the
+    /// gather node itself at execution time; see `typed_program_plan`'s own
+    /// doc for the exact scope this covers).
+    #[proxima::test]
+    #[case::i32_index_over_f32_compute(DType::Float32, DType::Int32)]
+    #[case::u32_index_over_f32_compute(DType::Float32, DType::UInt32)]
+    #[case::i32_index_over_f16_compute(DType::Float16, DType::Int32)]
+    #[case::u32_index_over_f16_compute(DType::Float16, DType::UInt32)]
+    async fn typed_program_plan_permits_an_integer_gather_index_distinct_from_compute_dtype(
+        #[case] compute_dtype: DType,
+        #[case] index_dtype: DType,
+    ) {
+        let program = typed_gather_program(compute_dtype, index_dtype);
+        let plan = typed_program_plan(&program).expect("an integer gather index must not fail the plan");
+        assert_eq!(
+            plan,
+            TypedPlan::Uniform(compute_dtype),
+            "the index node's own dtype must not be folded into the program's compute dtype"
+        );
+    }
+
+    /// The sad path this role's own gate exists for: a FLOAT gather index
+    /// dtype is not a legal index type ([`DType::is_integer`]) and must
+    /// still fail the plan, named, rather than being silently accepted
+    /// alongside the new integer exemption.
+    #[test]
+    fn typed_program_plan_rejects_a_float_gather_index_dtype() {
+        let program = typed_gather_program(DType::Float32, DType::Float64);
+        let error = typed_program_plan(&program)
+            .expect_err("a float-dtype gather index must be rejected, never silently accepted");
         assert!(matches!(error, TensorError::NotLowerable { .. }), "{error}");
     }
 
