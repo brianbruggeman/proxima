@@ -1742,9 +1742,10 @@ fn lower_convtranspose(program: &mut Vec<Op>, values: &mut BTreeMap<String, Valu
         return Err(LowerError::UnsupportedShape { name, op_type, reason: "ConvTranspose lowering supports auto_pad=NOTSET only".to_string() });
     }
     let group = attr_int(node, "group").unwrap_or(1);
-    if group != 1 {
-        return Err(LowerError::UnsupportedShape { name, op_type, reason: "ConvTranspose lowering supports group=1 only".to_string() });
+    if group < 1 {
+        return Err(LowerError::UnsupportedShape { name, op_type, reason: "ConvTranspose group attribute must be >= 1".to_string() });
     }
+    let group = group as u64;
     if attr_ints(node, "output_padding").is_some_and(|values| values.iter().any(|&value| value != 0)) {
         return Err(LowerError::UnsupportedShape { name, op_type, reason: "ConvTranspose lowering does not support a nonzero output_padding".to_string() });
     }
@@ -1758,11 +1759,22 @@ fn lower_convtranspose(program: &mut Vec<Op>, values: &mut BTreeMap<String, Valu
     let (dilation_h, dilation_w) = (dilations[0], dilations[1]);
     let (pad_top, pad_left, pad_bottom, pad_right) = (pads[0], pads[1], pads[2], pads[3]);
 
+    // ONNX ConvTranspose weight layout is `[C, M/group, kH, kW]` -- unlike
+    // ordinary `Conv`'s `[M, C/group, kH, kW]`, axis 0 is already the FULL
+    // input-channel count `C` (never divided by `group`, per the ONNX
+    // ConvTranspose spec and mirrored by every reference implementation's
+    // weight-shape doc), while axis 1 is *already* the per-group output
+    // count `M/group`. So the grouped loop slices the image's own channel
+    // axis and the weight's axis-0 by the SAME `in_channels_per_group`
+    // (both walk the same group ordering), and uses weight's axis-1 extent
+    // directly as this group's output-channel count -- no further division.
     let in_channels = image.shape[1];
     let weight_in_channels = weight.shape[0];
-    let out_channels = weight.shape[1];
+    let out_channels_per_group = weight.shape[1];
+    let total_out_channels = out_channels_per_group * group;
     let kernel_h = weight.shape[2];
     let kernel_w = weight.shape[3];
+
     if weight_in_channels != in_channels {
         return Err(LowerError::UnsupportedShape {
             name: node.name.to_string(),
@@ -1776,15 +1788,76 @@ fn lower_convtranspose(program: &mut Vec<Op>, values: &mut BTreeMap<String, Valu
         None => None,
     };
     if let Some(bias) = &bias
-        && bias.shape != alloc::vec![out_channels]
+        && bias.shape != alloc::vec![total_out_channels]
     {
         return Err(LowerError::UnsupportedShape {
             name: node.name.to_string(),
             op_type: node.op_type.to_string(),
-            reason: "ConvTranspose bias must be a rank-1 tensor sized to out_channels".to_string(),
+            reason: "ConvTranspose bias must be a rank-1 tensor sized to the total (grouped) output channels".to_string(),
         });
     }
 
+    if group == 1 {
+        let result = convtranspose2d_single_group(
+            program, node, &image, &weight, bias.as_ref(), kernel_h, kernel_w, stride_h, stride_w, dilation_h, dilation_w, pad_top, pad_left, pad_bottom, pad_right,
+        )?;
+        bind_output(values, node, 0, result.node, result.shape);
+        return Ok(());
+    }
+
+    if in_channels % group != 0 {
+        return Err(LowerError::UnsupportedShape {
+            name: node.name.to_string(),
+            op_type: node.op_type.to_string(),
+            reason: format!("ConvTranspose image channels {in_channels} must be evenly divisible by group {group}"),
+        });
+    }
+    let in_channels_per_group = in_channels / group;
+
+    let mut accumulator: Option<Value> = None;
+    for group_index in 0..group {
+        let image_slice = slice_axis_range(program, &image, 1, group_index * in_channels_per_group, in_channels_per_group);
+        let weight_slice = slice_axis_range(program, &weight, 0, group_index * in_channels_per_group, in_channels_per_group);
+        let bias_slice = bias.as_ref().map(|bias| slice_axis_range(program, bias, 0, group_index * out_channels_per_group, out_channels_per_group));
+        let group_result = convtranspose2d_single_group(
+            program, node, &image_slice, &weight_slice, bias_slice.as_ref(), kernel_h, kernel_w, stride_h, stride_w, dilation_h, dilation_w, pad_top, pad_left, pad_bottom, pad_right,
+        )?;
+        accumulator = Some(match accumulator {
+            None => group_result,
+            Some(previous) => concat_pair(program, node, &previous, &group_result, 1)?,
+        });
+    }
+    let Some(result) = accumulator else {
+        return Err(LowerError::UnsupportedShape { name: node.name.to_string(), op_type: node.op_type.to_string(), reason: "ConvTranspose group must be >= 1".to_string() });
+    };
+    bind_output(values, node, 0, result.node, result.shape);
+    Ok(())
+}
+
+/// One `ConvTranspose` group's worth of compute -- [`lower_convtranspose`]'s
+/// stride-1/general dispatch, factored out so the grouped path can call it
+/// once per static channel slice (weight's `[ci, co, kh, kw]` layout puts
+/// this group's own `ci`/`co` already sliced to size by the caller) and
+/// [`concat_pair`] the results, the identical shape [`lower_conv`]'s
+/// `conv2d_core` grouped loop uses for ordinary `Conv`.
+#[allow(clippy::too_many_arguments)]
+fn convtranspose2d_single_group(
+    program: &mut Vec<Op>,
+    node: &NodeProto<'_>,
+    image: &Value,
+    weight: &Value,
+    bias: Option<&Value>,
+    kernel_h: u64,
+    kernel_w: u64,
+    stride_h: i64,
+    stride_w: i64,
+    dilation_h: i64,
+    dilation_w: i64,
+    pad_top: i64,
+    pad_left: i64,
+    pad_bottom: i64,
+    pad_right: i64,
+) -> Result<Value, LowerError> {
     if stride_h == 1 && stride_w == 1 && dilation_h == 1 && dilation_w == 1 {
         let new_pad_top = kernel_h as i64 - 1 - pad_top;
         let new_pad_bottom = kernel_h as i64 - 1 - pad_bottom;
@@ -1798,7 +1871,7 @@ fn lower_convtranspose(program: &mut Vec<Op>, values: &mut BTreeMap<String, Valu
             });
         }
 
-        let transposed_weight = permute_value(program, &weight, &[1, 0, 2, 3]);
+        let transposed_weight = permute_value(program, weight, &[1, 0, 2, 3]);
         let flipped_h = reverse_axis(program, &transposed_weight, 2);
         let flipped_weight = reverse_axis(program, &flipped_h, 3);
 
@@ -1812,14 +1885,10 @@ fn lower_convtranspose(program: &mut Vec<Op>, values: &mut BTreeMap<String, Valu
             pad_bottom: new_pad_bottom,
             pad_right: new_pad_right,
         };
-        let result = conv2d_core(program, node, &image, &flipped_weight, bias.as_ref(), attrs, Some("convtranspose2d".to_string()))?;
-        bind_output(values, node, 0, result.node, result.shape);
-        return Ok(());
+        return conv2d_core(program, node, image, &flipped_weight, bias, attrs, Some("convtranspose2d".to_string()));
     }
 
-    let result = convtranspose2d_scatter(program, &image, &weight, bias.as_ref(), kernel_h, kernel_w, stride_h, stride_w, dilation_h, dilation_w, pad_top, pad_left, pad_bottom, pad_right)?;
-    bind_output(values, node, 0, result.node, result.shape);
-    Ok(())
+    convtranspose2d_scatter(program, image, weight, bias, kernel_h, kernel_w, stride_h, stride_w, dilation_h, dilation_w, pad_top, pad_left, pad_bottom, pad_right)
 }
 
 /// One position axis of the general `ConvTranspose` scatter relation
@@ -2527,9 +2596,14 @@ fn conv3d_core(program: &mut Vec<Op>, node: &NodeProto<'_>, image: &Value, weigh
     Ok(Value { node: result, shape: out_shape, view: None })
 }
 
-/// `Conv`, rank-5 (`group=1` only): parses attrs, validates channels, and
-/// calls [`conv3d_core`] -- [`lower_conv1d`]'s rank-5 sibling, called from
-/// [`lower_conv`]'s rank dispatch.
+/// `Conv`, rank-5, `group >= 1`: `group=1` calls [`conv3d_core`] directly;
+/// `group > 1` decomposes exactly [`lower_conv`]'s rank-4 grouped path does
+/// -- `group` static channel slices ([`slice_axis_range`]) of the image
+/// (input channels), weight, and bias (output channels), each run through
+/// [`conv3d_core`] independently and [`concat_pair`]'d back along the
+/// output-channel axis. Weight layout is `[co, ci, kd, kh, kw]`, the same
+/// channel-axis positions ([`lower_conv`]'s own doc explains why this loop,
+/// not a fused `IndexMap`, is the RISC-correct resolution).
 fn lower_conv3d(program: &mut Vec<Op>, values: &mut BTreeMap<String, Value>, node: &NodeProto<'_>) -> Result<(), LowerError> {
     let image = lookup(values, node, 0)?.clone();
     let weight = lookup(values, node, 1)?.clone();
@@ -2537,25 +2611,73 @@ fn lower_conv3d(program: &mut Vec<Op>, values: &mut BTreeMap<String, Value>, nod
     let op_type = node.op_type.to_string();
 
     let group = attr_int(node, "group").unwrap_or(1);
-    if group != 1 {
-        return Err(LowerError::UnsupportedShape { name, op_type, reason: "Conv3d lowering supports group=1 only (grouped Conv3d deferred)".to_string() });
+    if group < 1 {
+        return Err(LowerError::UnsupportedShape { name, op_type, reason: "Conv3d group attribute must be >= 1".to_string() });
     }
+    let group = group as u64;
 
     let in_channels = image.shape[1];
-    if weight.shape[1] != in_channels {
-        return Err(LowerError::UnsupportedShape {
-            name: node.name.to_string(),
-            op_type: node.op_type.to_string(),
-            reason: format!("Conv3d weight in-channels {} does not match image channels {in_channels}", weight.shape[1]),
-        });
-    }
-
+    let total_out_channels = weight.shape[0];
+    let weight_in_channels = weight.shape[1];
     let attrs = parse_conv3d_attrs(node, image.shape[2], image.shape[3], image.shape[4], weight.shape[2], weight.shape[3], weight.shape[4])?;
     let bias = match node.input.get(2) {
         Some(bias_name) => Some(lookup_by_name(values, bias_name, node.op_type, node.name)?.clone()),
         None => None,
     };
-    let result = conv3d_core(program, node, &image, &weight, bias.as_ref(), attrs)?;
+
+    if group == 1 {
+        if weight_in_channels != in_channels {
+            return Err(LowerError::UnsupportedShape {
+                name: node.name.to_string(),
+                op_type: node.op_type.to_string(),
+                reason: format!("Conv3d weight in-channels {weight_in_channels} does not match image channels {in_channels}"),
+            });
+        }
+        let result = conv3d_core(program, node, &image, &weight, bias.as_ref(), attrs)?;
+        bind_output(values, node, 0, result.node, result.shape);
+        return Ok(());
+    }
+
+    if in_channels % group != 0 || total_out_channels % group != 0 {
+        return Err(LowerError::UnsupportedShape {
+            name: node.name.to_string(),
+            op_type: node.op_type.to_string(),
+            reason: format!("Conv3d image channels {in_channels} and weight output channels {total_out_channels} must both be evenly divisible by group {group}"),
+        });
+    }
+    let in_channels_per_group = in_channels / group;
+    let out_channels_per_group = total_out_channels / group;
+    if weight_in_channels != in_channels_per_group {
+        return Err(LowerError::UnsupportedShape {
+            name: node.name.to_string(),
+            op_type: node.op_type.to_string(),
+            reason: format!("Conv3d weight in-channels {weight_in_channels} does not match image channels {in_channels} / group {group}"),
+        });
+    }
+    if let Some(bias) = &bias
+        && bias.shape != alloc::vec![total_out_channels]
+    {
+        return Err(LowerError::UnsupportedShape {
+            name: node.name.to_string(),
+            op_type: node.op_type.to_string(),
+            reason: "Conv3d bias must be a rank-1 tensor sized to the total (grouped) output channels".to_string(),
+        });
+    }
+
+    let mut accumulator: Option<Value> = None;
+    for group_index in 0..group {
+        let image_slice = slice_axis_range(program, &image, 1, group_index * in_channels_per_group, in_channels_per_group);
+        let weight_slice = slice_axis_range(program, &weight, 0, group_index * out_channels_per_group, out_channels_per_group);
+        let bias_slice = bias.as_ref().map(|bias| slice_axis_range(program, bias, 0, group_index * out_channels_per_group, out_channels_per_group));
+        let group_result = conv3d_core(program, node, &image_slice, &weight_slice, bias_slice.as_ref(), attrs)?;
+        accumulator = Some(match accumulator {
+            None => group_result,
+            Some(previous) => concat_pair(program, node, &previous, &group_result, 1)?,
+        });
+    }
+    let Some(result) = accumulator else {
+        return Err(LowerError::UnsupportedShape { name: node.name.to_string(), op_type: node.op_type.to_string(), reason: "Conv3d group must be >= 1".to_string() });
+    };
     bind_output(values, node, 0, result.node, result.shape);
     Ok(())
 }
@@ -4291,6 +4413,52 @@ mod tests {
         assert_eq!(data, &[1.0, 4.0, 4.0, 6.0, 20.0, 16.0, 9.0, 24.0, 16.0], "hand-derived full-output overlap-add");
     }
 
+    /// Grouped `ConvTranspose`, `group = in_channels = 2`: [`lower_convtranspose`]'s
+    /// grouped path slices the image's channel axis and the weight's `C`
+    /// axis (the *full* input-channel axis, per the ONNX `[C, M/group, kH,
+    /// kW]` weight layout -- see that function's own doc for why this is
+    /// axis 0, not axis 1) by the same `in_channels_per_group`, running
+    /// [`convtranspose2d_single_group`] once per group and [`concat_pair`]ing
+    /// the results along the output-channel axis. Channel 0 reproduces
+    /// [`convtranspose_stride1_no_pad_produces_the_full_output`]'s hand-derived
+    /// `3x3`; channel 1 is the same image doubled through the same weight,
+    /// so ConvTranspose's linearity makes its output exactly double
+    /// channel 0's -- an independent numeric check that group 1 does not
+    /// leak into group 0's compute.
+    #[test]
+    fn grouped_convtranspose_slices_channels_independently() {
+        let image = f32_initializer("image", &[1, 2, 2, 2], &[1.0, 2.0, 3.0, 4.0, 2.0, 4.0, 6.0, 8.0]);
+        let weight = f32_initializer("weight", &[2, 1, 2, 2], &[1.0, 2.0, 3.0, 4.0, 1.0, 2.0, 3.0, 4.0]);
+        let group_attribute = AttributeProto { name: "group", i: 2, ..AttributeProto::default() };
+        let node = NodeProto {
+            input: vec!["image", "weight"],
+            output: vec!["y"],
+            op_type: "ConvTranspose",
+            name: "convtranspose",
+            attribute: vec![group_attribute],
+            ..NodeProto::default()
+        };
+        let graph = GraphProto {
+            node: vec![node],
+            name: "grouped_convtranspose_graph",
+            initializer: vec![image, weight],
+            output: vec![ValueInfoProto { name: "y", ..ValueInfoProto::default() }],
+            ..GraphProto::default()
+        };
+
+        let lowered = lower_graph(&graph).expect("lower grouped ConvTranspose");
+        let named: Vec<(&str, &[f32])> = lowered.initializers.iter().map(|(name, data)| (name.as_str(), data.as_slice())).collect();
+        let output = lowered.graph_outputs[0].1;
+        let evaluated = evaluate_named(&lowered.program, &[], &named, &[output]).expect("evaluate grouped ConvTranspose");
+        let (data, shape) = evaluated.get(output).expect("y present");
+
+        assert_eq!(shape, &[1, 2, 3, 3]);
+        let group0 = &[1.0, 4.0, 4.0, 6.0, 20.0, 16.0, 9.0, 24.0, 16.0];
+        let group1: Vec<f32> = group0.iter().map(|&value| value * 2.0).collect();
+        assert_eq!(&data[0..9], group0, "group 0 matches the un-grouped single-channel ConvTranspose");
+        assert_eq!(&data[9..18], group1.as_slice(), "group 1 sees only its own (doubled) channel");
+    }
+
     /// `ConvTranspose` with `strides = [2, 2]`: the general masked-reduce
     /// scatter [`convtranspose2d_scatter`] composes -- a `2x2` image against
     /// a `2x2` kernel produces the "spread apart, overlap-add" `4x4` output
@@ -4425,6 +4593,45 @@ mod tests {
 
         assert_eq!(shape, &[1, 1, 2, 1, 1]);
         assert_eq!(data, &[3.0, 5.0], "hand-summed 2-deep windows over the depth axis [1,2,3]");
+    }
+
+    /// Grouped `Conv3d`, `group = in_channels = 2`: [`lower_conv3d`]'s
+    /// grouped path -- the rank-5 mirror of [`grouped_conv_depthwise_slices_channels_independently`],
+    /// same static channel-slice-plus-[`concat_pair`] shape, one more
+    /// spatial axis. Channel 0 reproduces
+    /// [`conv3d_stride1_no_pad_sums_each_2_deep_window`]'s hand-summed
+    /// depth windows; channel 1 is the same signal doubled, so its windows
+    /// double too.
+    #[test]
+    fn grouped_conv3d_slices_channels_independently() {
+        let image = f32_initializer("image", &[1, 2, 3, 1, 1], &[1.0, 2.0, 3.0, 2.0, 4.0, 6.0]);
+        let weight = f32_initializer("weight", &[2, 1, 2, 1, 1], &[1.0, 1.0, 1.0, 1.0]);
+        let group_attribute = AttributeProto { name: "group", i: 2, ..AttributeProto::default() };
+        let node = NodeProto {
+            input: vec!["image", "weight"],
+            output: vec!["y"],
+            op_type: "Conv",
+            name: "conv3d",
+            attribute: vec![group_attribute],
+            ..NodeProto::default()
+        };
+        let graph = GraphProto {
+            node: vec![node],
+            name: "grouped_conv3d_graph",
+            initializer: vec![image, weight],
+            output: vec![ValueInfoProto { name: "y", ..ValueInfoProto::default() }],
+            ..GraphProto::default()
+        };
+
+        let lowered = lower_graph(&graph).expect("lower grouped Conv3d");
+        let named: Vec<(&str, &[f32])> = lowered.initializers.iter().map(|(name, data)| (name.as_str(), data.as_slice())).collect();
+        let output = lowered.graph_outputs[0].1;
+        let evaluated = evaluate_named(&lowered.program, &[], &named, &[output]).expect("evaluate grouped Conv3d");
+        let (data, shape) = evaluated.get(output).expect("y present");
+
+        assert_eq!(shape, &[1, 2, 2, 1, 1]);
+        assert_eq!(&data[0..2], &[3.0, 5.0], "group 0 matches the un-grouped single-channel depth-window sums");
+        assert_eq!(&data[2..4], &[6.0, 10.0], "group 1 sees only its own (doubled) channel");
     }
 
     /// `MaxPool`, rank-5 (3D): [`lower_maxpool3d`]'s rank-5 mirror of
