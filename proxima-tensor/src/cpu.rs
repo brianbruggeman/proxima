@@ -10536,15 +10536,62 @@ impl Element for f64 {
     }
 }
 
+/// Shared body for [`f16`] and [`bf16`]'s [`Element`] impl: neither type has
+/// stable-Rust arithmetic operators (`convert.rs`'s own doc), so every op
+/// round-trips through `f32` — widen both operands, run the existing f32
+/// scalar table ([`apply_scalar_op`]), narrow the result back. This is a
+/// real semantic (one rounding step per op, not the fused half-precision
+/// arithmetic a hardware FPU would give), documented here rather than
+/// silently assumed by a caller.
+macro_rules! impl_element_half_float {
+    ($ty:ty, $dtype:expr, $variant:ident) => {
+        impl Element for $ty {
+            const DTYPE: DType = $dtype;
+
+            fn unwrap_block(buffer: &TypedBuffer) -> Option<&[Self]> {
+                match buffer {
+                    TypedBuffer::$variant(data) => Some(data.as_slice()),
+                    _ => None,
+                }
+            }
+
+            fn apply(_node: NodeId, op: ScalarOp, args: &[Self]) -> Result<Self, TensorError> {
+                let mut widened = [0.0f32; 3];
+                for (slot, value) in widened.iter_mut().zip(args) {
+                    *slot = value.to_f32();
+                }
+                let result = apply_scalar_op(op, &widened[..args.len()]);
+                Ok(Self::from_f32(result))
+            }
+
+            fn reduce_seed(init: ReduceInit) -> Option<Self> {
+                initial_value(init).map(Self::from_f32)
+            }
+
+            fn from_index(index: usize) -> Self {
+                Self::from_f32(index as f32)
+            }
+
+            fn from_literal(value: f32) -> Self {
+                Self::from_f32(value)
+            }
+        }
+    };
+}
+
+impl_element_half_float!(f16, DType::Float16, Float16);
+impl_element_half_float!(bf16, DType::BFloat16, BFloat16);
+
 /// One contiguous typed buffer, tagged by which native type backs it — the
 /// storage half of [`evaluate_typed`]'s runtime dispatch. Every variant is a
 /// plain `Vec<T>`: a whole buffer is tagged, never a scalar, which is what
 /// keeps every operand a contiguous, SIMD-ready slice once a kernel is
-/// written for it (see this module's typed-evaluator doc). `Bool`,
-/// `BFloat16`, and `Float16` have no variant yet — `Bool`'s storage
-/// convention (packed bits vs. one byte per element) is undecided, and the
-/// two half-precision floats have no arithmetic on stable Rust; see
-/// `typed_program_plan` for the boundary this actually enforces today.
+/// written for it (see this module's typed-evaluator doc). `Bool` has no
+/// variant yet — its storage convention (packed bits vs. one byte per
+/// element) is undecided; see `typed_program_plan` for the boundary this
+/// actually enforces today. `Float16`/`BFloat16` route every arithmetic op
+/// through an `f32` round-trip (`Element`'s half-float impl, above) since
+/// neither has stable-Rust arithmetic operators of its own.
 #[derive(Debug, Clone, PartialEq)]
 pub enum TypedBuffer {
     Int8(Vec<i8>),
@@ -10557,6 +10604,8 @@ pub enum TypedBuffer {
     UInt64(Vec<u64>),
     Int128(Vec<i128>),
     UInt128(Vec<u128>),
+    Float16(Vec<f16>),
+    BFloat16(Vec<bf16>),
     Float32(Vec<f32>),
     Float64(Vec<f64>),
 }
@@ -10575,6 +10624,8 @@ impl TypedBuffer {
             Self::UInt64(_) => DType::UInt64,
             Self::Int128(_) => DType::Int128,
             Self::UInt128(_) => DType::UInt128,
+            Self::Float16(_) => DType::Float16,
+            Self::BFloat16(_) => DType::BFloat16,
             Self::Float32(_) => DType::Float32,
             Self::Float64(_) => DType::Float64,
         }
@@ -10593,6 +10644,8 @@ impl TypedBuffer {
             Self::UInt64(data) => data.len(),
             Self::Int128(data) => data.len(),
             Self::UInt128(data) => data.len(),
+            Self::Float16(data) => data.len(),
+            Self::BFloat16(data) => data.len(),
             Self::Float32(data) => data.len(),
             Self::Float64(data) => data.len(),
         }
@@ -10641,18 +10694,19 @@ enum TypedPlan {
 ///
 /// Any dtype change outside those two shapes (a third distinct dtype, or a
 /// change at a non-`Reduce` node) is rejected with an honest
-/// `NotLowerable` rather than silently picked apart. `Bool`/`BFloat16`/
-/// `Float16` are out at any position — see [`TypedBuffer`]'s doc.
+/// `NotLowerable` rather than silently picked apart. `Bool` is out at any
+/// position — see [`TypedBuffer`]'s doc; `BFloat16`/`Float16` are typed
+/// elements like any other (see `Element`'s half-float impl).
 fn typed_program_plan(program: &[Op]) -> Result<TypedPlan, TensorError> {
     let base_dtype = program.first().ok_or(TensorError::Empty)?.dtype();
     let mut widen_at: Option<(usize, DType)> = None;
     for (position, expr) in program.iter().enumerate() {
         let node = NodeId(position as u32);
         let dtype = expr.dtype();
-        if matches!(dtype, DType::Bool | DType::BFloat16 | DType::Float16) {
+        if dtype == DType::Bool {
             return Err(TensorError::NotLowerable {
                 node,
-                reason: "the typed evaluator does not support Bool, BFloat16, or Float16 yet",
+                reason: "the typed evaluator does not support Bool yet",
             });
         }
         if dtype == base_dtype {
@@ -10743,20 +10797,23 @@ fn evaluate_uniform_typed(
         DType::UInt64 => dispatch!(u64, UInt64),
         DType::Int128 => dispatch!(i128, Int128),
         DType::UInt128 => dispatch!(u128, UInt128),
+        DType::Float16 => dispatch!(f16, Float16),
+        DType::BFloat16 => dispatch!(bf16, BFloat16),
         DType::Float32 => dispatch!(f32, Float32),
         DType::Float64 => dispatch!(f64, Float64),
-        DType::Bool | DType::BFloat16 | DType::Float16 => {
-            unreachable!("typed_program_plan already rejected this dtype")
-        }
+        DType::Bool => unreachable!("typed_program_plan already rejected this dtype"),
     })
 }
 
 /// [`evaluate_typed`]'s [`TypedPlan::Widened`] arm — the `(operand,
 /// accumulator)` dispatch table. Scoped to the pairs actually shipped, not
-/// the full `DType x DType` cross product: today that is `(Int8, Int32)`,
-/// the quantized-accumulate case `typed_program_plan`'s doc names. Any other
-/// pair is an honest [`TensorError::NotLowerable`] — never a silent wrong
-/// result from picking the nearer-available width.
+/// the full `DType x DType` cross product: `(Int8, Int32)` (the
+/// quantized-accumulate case `typed_program_plan`'s doc names), and
+/// `(Float16, Float32)`/`(BFloat16, Float32)` (a half-precision reduce
+/// folded into an f32 accumulator, the same widen-before-fold shape at
+/// floating-point widths). Any other pair is an honest
+/// [`TensorError::NotLowerable`] — never a silent wrong result from picking
+/// the nearer-available width.
 fn evaluate_widened_typed(
     operand: DType,
     accumulator: DType,
@@ -10770,9 +10827,22 @@ fn evaluate_widened_typed(
             .into_iter()
             .map(|(node, shape, data)| (node, shape, TypedBuffer::Int32(data)))
             .collect()),
+        (DType::Float16, DType::Float32) => {
+            Ok(run_widened_program::<f16, f32>(program, symbols, blocks, outputs)?
+                .into_iter()
+                .map(|(node, shape, data)| (node, shape, TypedBuffer::Float32(data)))
+                .collect())
+        }
+        (DType::BFloat16, DType::Float32) => {
+            Ok(run_widened_program::<bf16, f32>(program, symbols, blocks, outputs)?
+                .into_iter()
+                .map(|(node, shape, data)| (node, shape, TypedBuffer::Float32(data)))
+                .collect())
+        }
         _ => Err(TensorError::NotLowerable {
             node: NodeId(0),
-            reason: "the typed evaluator only ships the (i8, i32) mixed-precision reduce pair today",
+            reason: "the typed evaluator does not ship a mixed-precision reduce pair for this \
+                     operand/accumulator combination",
         }),
     }
 }
@@ -14594,6 +14664,149 @@ mod tests {
             matches!(error, TensorError::NotLowerable { .. }),
             "an unshipped pair must fail honestly, never fall back to a wrong result: {error}"
         );
+    }
+
+    /// A widened reduce program: `operand_dtype` operand folded by `Add`
+    /// into an `accumulator_dtype` accumulator — the shape
+    /// [`an_i8_operand_i32_accumulator_reduce_evaluates`] built by hand,
+    /// generalized over the dtype pair so every widened-pair test below
+    /// shares one builder.
+    fn typed_widened_reduce_program(
+        operand_dtype: DType,
+        accumulator_dtype: DType,
+        len: u32,
+    ) -> (Vec<Op>, NodeId) {
+        let mut program = Vec::new();
+        let operand = block(&mut program, operand_dtype, &[Extent::Static(len)]);
+        let sum = append(
+            &mut program,
+            Op::Reduce(Reduce {
+                dtype: accumulator_dtype,
+                body: ScalarOp::Add,
+                init: ReduceInit::Zero,
+                operand,
+                in_map: IndexMap::Affine(map::projection(1, &[0])),
+                out_map: IndexMap::Affine(map::projection(1, &[])),
+                keep: Keep::Reduce,
+                name: None,
+            }),
+        );
+        (program, sum)
+    }
+
+    #[proxima::test]
+    #[case::f16_add(DType::Float16, TypedBuffer::Float16(alloc::vec![f16::from_f32(1.5), f16::from_f32(2.25), f16::from_f32(-3.0)]), TypedBuffer::Float16(alloc::vec![f16::from_f32(10.0), f16::from_f32(20.0), f16::from_f32(30.0)]))]
+    #[case::bf16_add(DType::BFloat16, TypedBuffer::BFloat16(alloc::vec![bf16::from_f32(1.5), bf16::from_f32(2.25), bf16::from_f32(-3.0)]), TypedBuffer::BFloat16(alloc::vec![bf16::from_f32(10.0), bf16::from_f32(20.0), bf16::from_f32(30.0)]))]
+    async fn half_precision_uniform_elementwise_matches_f32_reference(
+        #[case] dtype: DType,
+        #[case] lhs: TypedBuffer,
+        #[case] rhs: TypedBuffer,
+    ) {
+        let (program, _, _, _) = typed_add_program(dtype, 3);
+        let results = evaluate_typed(&program, &[], &[lhs.clone(), rhs.clone()], &[])
+            .expect("half-precision add evaluates through the typed path");
+        let (got, reference): (Vec<f32>, Vec<f32>) = match (&results[0].2, &lhs, &rhs) {
+            (TypedBuffer::Float16(sum), TypedBuffer::Float16(lhs), TypedBuffer::Float16(rhs)) => (
+                sum.iter().map(|value| value.to_f32()).collect(),
+                lhs.iter().zip(rhs).map(|(left, right)| left.to_f32() + right.to_f32()).collect(),
+            ),
+            (TypedBuffer::BFloat16(sum), TypedBuffer::BFloat16(lhs), TypedBuffer::BFloat16(rhs)) => (
+                sum.iter().map(|value| value.to_f32()).collect(),
+                lhs.iter().zip(rhs).map(|(left, right)| left.to_f32() + right.to_f32()).collect(),
+            ),
+            other => panic!("unexpected buffer shape: {other:?}"),
+        };
+        for (value, expected) in got.iter().zip(&reference) {
+            // one rounding step from the f32 reference (the operands are
+            // already half-precision, so the reference itself is exact at
+            // this magnitude) -- a loose bound catching a wrong op, not
+            // tuned to a measured residual.
+            assert!(
+                (value - expected).abs() < 1e-2,
+                "half-precision add {value} vs f32 reference {expected}"
+            );
+        }
+    }
+
+    #[proxima::test]
+    #[case::f16_sum(DType::Float16)]
+    #[case::bf16_sum(DType::BFloat16)]
+    async fn half_precision_uniform_reduce_matches_f32_reference(#[case] dtype: DType) {
+        let values = [1.5f32, 2.5, -0.5, 4.0];
+        let (program, _) = typed_reduce_vector_to_scalar_program(dtype, values.len() as u32);
+        let expected_f32: f32 = values.iter().sum();
+        let operand = match dtype {
+            DType::Float16 => TypedBuffer::Float16(values.iter().map(|value| f16::from_f32(*value)).collect()),
+            DType::BFloat16 => TypedBuffer::BFloat16(values.iter().map(|value| bf16::from_f32(*value)).collect()),
+            other => panic!("unexpected dtype in case table: {other:?}"),
+        };
+        let results = evaluate_typed(&program, &[], &[operand], &[])
+            .expect("half-precision reduce evaluates through the typed path");
+        let got = match &results[0].2 {
+            TypedBuffer::Float16(data) => data[0].to_f32(),
+            TypedBuffer::BFloat16(data) => data[0].to_f32(),
+            other => panic!("unexpected result buffer: {other:?}"),
+        };
+        assert!(
+            (got - expected_f32).abs() < 1e-2,
+            "half-precision reduce {got} vs f32 reference {expected_f32}"
+        );
+    }
+
+    #[test]
+    fn f16_reduce_widens_into_an_f32_accumulator_where_f16_alone_overflows() {
+        // two f16 values whose sum overflows f16 range (max ~65504) and
+        // would round to infinity if accumulated in f16, but the true sum
+        // fits an f32 accumulator exactly -- the same "widening changes the
+        // observable result" shape as the i8/i32 test above, at floating
+        // widths instead of integer ones.
+        let (program, _) = typed_widened_reduce_program(DType::Float16, DType::Float32, 2);
+        let operand = TypedBuffer::Float16(alloc::vec![f16::from_f32(40000.0), f16::from_f32(40000.0)]);
+        let results = evaluate_typed(&program, &[], &[operand], &[])
+            .expect("an f16-operand, f32-accumulator reduce evaluates");
+        let TypedBuffer::Float32(sum) = &results[0].2 else {
+            panic!("widened f16 reduce must produce an f32 accumulator buffer");
+        };
+        assert_eq!(sum[0], 80000.0, "the f32 accumulator must carry the true sum, not an f16-saturated infinity");
+    }
+
+    #[test]
+    fn bf16_reduce_widens_into_an_f32_accumulator_exactly() {
+        let (program, _) = typed_widened_reduce_program(DType::BFloat16, DType::Float32, 3);
+        let operand = TypedBuffer::BFloat16(alloc::vec![
+            bf16::from_f32(1.0),
+            bf16::from_f32(2.0),
+            bf16::from_f32(3.0),
+        ]);
+        let results = evaluate_typed(&program, &[], &[operand], &[])
+            .expect("a bf16-operand, f32-accumulator reduce evaluates");
+        assert_eq!(results[0].2, TypedBuffer::Float32(alloc::vec![6.0]));
+    }
+
+    #[test]
+    fn typed_program_plan_no_longer_rejects_float16_or_bfloat16_but_still_rejects_bool() {
+        let (float16_program, _, _, _) = typed_add_program(DType::Float16, 2);
+        let float16_blocks = [
+            TypedBuffer::Float16(alloc::vec![f16::from_f32(1.0), f16::from_f32(2.0)]),
+            TypedBuffer::Float16(alloc::vec![f16::from_f32(10.0), f16::from_f32(20.0)]),
+        ];
+        evaluate_typed(&float16_program, &[], &float16_blocks, &[])
+            .expect("Float16 must no longer be rejected by typed_program_plan");
+
+        let mut bool_program = Vec::new();
+        let bool_operand = block(&mut bool_program, DType::Bool, &[Extent::Static(2)]);
+        append(
+            &mut bool_program,
+            Op::Elementwise {
+                dtype: DType::Bool,
+                body: ScalarOp::Identity,
+                operands: alloc::vec![(bool_operand, typed_identity())],
+                name: None,
+            },
+        );
+        let error = evaluate_typed(&bool_program, &[], &[], &[])
+            .expect_err("Bool must still be rejected -- no TypedBuffer variant backs it");
+        assert!(matches!(error, TensorError::NotLowerable { .. }), "{error}");
     }
 
     fn typed_reduce_vector_to_scalar_program(dtype: DType, len: u32) -> (Vec<Op>, NodeId) {
