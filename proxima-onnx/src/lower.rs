@@ -250,6 +250,7 @@ fn lower_node(
         "ReduceProd" => lower_reduce(program, values, node, ScalarOp::Multiply, ReduceInit::One),
         "Reshape" => lower_reshape(values, initializer_data, node),
         "Flatten" => lower_flatten(values, node),
+        "Concat" => lower_concat(program, values, node),
         other => Err(LowerError::UnsupportedOp { name: node.name.to_string(), op_type: other.to_string() }),
     }
 }
@@ -953,6 +954,139 @@ fn lower_flatten(values: &mut BTreeMap<String, Value>, node: &NodeProto<'_>) -> 
     Ok(())
 }
 
+/// `Concat(inputs..., axis)`: folded pairwise (`concat(a, b, c) =
+/// concat(concat(a, b), c)`), each pairwise step a "clamped select" -- the
+/// deferred doc's own sketch. Neither operand can be addressed by a plain
+/// affine pattern along the concat axis (`lhs`'s valid range ends before
+/// `rhs`'s begins), so each side reads through [`IndexMap::Computed`] with a
+/// *clamped* index (`Minimum`/`Maximum` composing the position [`Op::Iota`]
+/// down into that operand's own valid range -- never out of bounds), and
+/// [`ScalarOp::Select`] picks the correct side by comparing the raw
+/// (unclamped) position against `lhs`'s extent. This is the same `Computed`
+/// mechanism [`lower_gather`] uses, generalized from an externally supplied
+/// index to a locally computed one.
+fn lower_concat(program: &mut Vec<Op>, values: &mut BTreeMap<String, Value>, node: &NodeProto<'_>) -> Result<(), LowerError> {
+    if node.input.len() < 2 {
+        return Err(LowerError::MissingInput { name: node.name.to_string(), op_type: node.op_type.to_string(), index: 1 });
+    }
+    let first = lookup(values, node, 0)?.clone();
+    let rank = first.shape.len();
+    let axis = attr_int(node, "axis").ok_or_else(|| LowerError::UnsupportedShape {
+        name: node.name.to_string(),
+        op_type: node.op_type.to_string(),
+        reason: "Concat requires an axis attribute".to_string(),
+    })?;
+    let normalized_axis = if axis < 0 { axis + rank as i64 } else { axis };
+    if normalized_axis < 0 || normalized_axis as usize >= rank {
+        return Err(LowerError::UnsupportedShape { name: node.name.to_string(), op_type: node.op_type.to_string(), reason: format!("Concat axis {axis} is out of range for rank {rank}") });
+    }
+    let axis = normalized_axis as usize;
+
+    let mut accumulator = first;
+    for index in 1..node.input.len() {
+        let next = lookup(values, node, index)?.clone();
+        accumulator = concat_pair(program, node, &accumulator, &next, axis)?;
+    }
+    bind_output(values, node, 0, accumulator.node, accumulator.shape);
+    Ok(())
+}
+
+fn build_elementwise_dtype(program: &mut Vec<Op>, dtype: DType, body: ScalarOp, operands: Vec<(NodeId, IndexMap)>) -> NodeId {
+    append(program, Op::Elementwise { dtype, body, operands, name: None })
+}
+
+fn concat_pair(program: &mut Vec<Op>, node: &NodeProto<'_>, lhs: &Value, rhs: &Value, axis: usize) -> Result<Value, LowerError> {
+    let rank = lhs.shape.len();
+    if rhs.shape.len() != rank {
+        return Err(LowerError::UnsupportedShape { name: node.name.to_string(), op_type: node.op_type.to_string(), reason: "Concat inputs must share rank".to_string() });
+    }
+    let axis_u16 = axis as u16;
+    let out_rank = rank as u16;
+    let lhs_extent = lhs.shape[axis];
+    let rhs_extent = rhs.shape[axis];
+    let out_extent = lhs_extent + rhs_extent;
+    let mut out_shape = lhs.shape.clone();
+    out_shape[axis] = out_extent;
+
+    // Only the two nodes bound directly as a `Computed::indices` reference
+    // below (`lhs_index`/`rhs_index`) need an integer `DType` tag --
+    // `cpu::reject_non_float32` only exempts nodes reachable that way, so
+    // every node feeding *into* them (still exact-integer-valued f32
+    // arithmetic under the hood, per this crate's own "every buffer is f32"
+    // convention) stays tagged `Float32`.
+    let position = append(program, Op::Iota { dtype: DType::Float32, extent: Extent::Static(out_extent as u32) });
+    let lhs_extent_const = constant_scalar(program, lhs_extent as f32);
+    let zero_const = constant_scalar(program, 0.0);
+    let lhs_extent_minus1_const = constant_scalar(program, lhs_extent as f32 - 1.0);
+    let rhs_extent_minus1_const = constant_scalar(program, rhs_extent as f32 - 1.0);
+
+    let lhs_index = build_elementwise_dtype(
+        program,
+        DType::Int32,
+        ScalarOp::Minimum,
+        alloc::vec![(position, IndexMap::Affine(identity_pattern(1))), (lhs_extent_minus1_const, IndexMap::Affine(scalar_broadcast_pattern(1)))],
+    );
+    let position_minus_lhs = build_elementwise(
+        program,
+        ScalarOp::Subtract,
+        alloc::vec![(position, IndexMap::Affine(identity_pattern(1))), (lhs_extent_const, IndexMap::Affine(scalar_broadcast_pattern(1)))],
+    );
+    let position_minus_lhs_floored = build_elementwise(
+        program,
+        ScalarOp::Maximum,
+        alloc::vec![(position_minus_lhs, IndexMap::Affine(identity_pattern(1))), (zero_const, IndexMap::Affine(scalar_broadcast_pattern(1)))],
+    );
+    let rhs_index = build_elementwise_dtype(
+        program,
+        DType::Int32,
+        ScalarOp::Minimum,
+        alloc::vec![(position_minus_lhs_floored, IndexMap::Affine(identity_pattern(1))), (rhs_extent_minus1_const, IndexMap::Affine(scalar_broadcast_pattern(1)))],
+    );
+    let cond = build_elementwise(
+        program,
+        ScalarOp::Greater,
+        alloc::vec![(lhs_extent_const, IndexMap::Affine(scalar_broadcast_pattern(1))), (position, IndexMap::Affine(identity_pattern(1)))],
+    );
+
+    let index_map_pattern = projection(out_rank, &[axis_u16]);
+    let base = concat_base_pattern(out_rank, rank, axis);
+
+    let lhs_gathered_map = IndexMap::Computed { indices: lhs_index, index_map: index_map_pattern.clone(), base: base.clone(), gathered_dim: axis_u16 };
+    let lhs_gathered = append(program, Op::Elementwise { dtype: DType::Float32, body: ScalarOp::Identity, operands: alloc::vec![(lhs.node, lhs_gathered_map)], name: None });
+
+    let rhs_gathered_map = IndexMap::Computed { indices: rhs_index, index_map: index_map_pattern, base, gathered_dim: axis_u16 };
+    let rhs_gathered = append(program, Op::Elementwise { dtype: DType::Float32, body: ScalarOp::Identity, operands: alloc::vec![(rhs.node, rhs_gathered_map)], name: None });
+
+    let id = build_elementwise(
+        program,
+        ScalarOp::Select,
+        alloc::vec![
+            (cond, IndexMap::Affine(projection(out_rank, &[axis_u16]))),
+            (lhs_gathered, IndexMap::Affine(identity_pattern(rank))),
+            (rhs_gathered, IndexMap::Affine(identity_pattern(rank))),
+        ],
+    );
+    Ok(Value { node: id, shape: out_shape, view: None })
+}
+
+/// A `Computed` gather's `base` pattern for a concat operand: every axis but
+/// `axis` reads its own iteration axis directly (the two concat operands
+/// share every non-concat extent), `axis` itself is unused (the fetched,
+/// clamped index supplies it instead) -- the same shape [`lower_gather`]'s
+/// own `base_axes` construction builds.
+fn concat_base_pattern(iter_rank: u16, rank: usize, skip_axis: usize) -> IndexPattern {
+    let axes = (0..rank)
+        .map(|data_axis| {
+            if data_axis == skip_axis {
+                AxisIndex::default()
+            } else {
+                AxisIndex { terms: core::iter::once(AxisTerm::projection(data_axis as u16)).collect(), offset: 0 }
+            }
+        })
+        .collect();
+    IndexPattern { iter_rank, axes }
+}
+
 fn tensor_shape(tensor: &TensorProto<'_>) -> Vec<u64> {
     tensor.dims.iter().map(|&value| value as u64).collect()
 }
@@ -1164,7 +1298,7 @@ mod tests {
     #[test]
     fn unsupported_op_type_is_a_typed_error_not_a_panic() {
         let x_initializer = f32_initializer("x", &[2], &[1.0, 2.0]);
-        let node = NodeProto { input: vec!["x"], output: vec!["y"], op_type: "Concat", name: "concat", ..NodeProto::default() };
+        let node = NodeProto { input: vec!["x"], output: vec!["y"], op_type: "LSTM", name: "lstm", ..NodeProto::default() };
         let graph = GraphProto {
             node: vec![node],
             name: "unsupported_graph",
@@ -1173,7 +1307,7 @@ mod tests {
             ..GraphProto::default()
         };
 
-        let error = lower_graph(&graph).expect_err("Concat has no lowering");
+        let error = lower_graph(&graph).expect_err("LSTM has no lowering");
         assert!(matches!(error, LowerError::UnsupportedOp { .. }), "expected UnsupportedOp, got {error:?}");
     }
 
@@ -1255,6 +1389,66 @@ mod tests {
         let (data, _) = evaluated.get(output).expect("y present");
         let expected: Vec<f32> = (0..24).map(|value| value as f32).collect();
         assert_eq!(data, expected.as_slice(), "split preserves element order (still flattened)");
+    }
+
+    /// `Concat` along `axis=0` of two `[2, 2]` matrices.
+    #[test]
+    fn concat_joins_two_matrices_along_axis_zero() {
+        let a_initializer = f32_initializer("a", &[2, 2], &[1.0, 2.0, 3.0, 4.0]);
+        let b_initializer = f32_initializer("b", &[2, 2], &[5.0, 6.0, 7.0, 8.0]);
+        let axis_attribute = AttributeProto { name: "axis", i: 0, ..AttributeProto::default() };
+        let node =
+            NodeProto { input: vec!["a", "b"], output: vec!["y"], op_type: "Concat", name: "concat", attribute: vec![axis_attribute], ..NodeProto::default() };
+        let graph = GraphProto {
+            node: vec![node],
+            name: "concat_axis0_graph",
+            initializer: vec![a_initializer, b_initializer],
+            output: vec![ValueInfoProto { name: "y", ..ValueInfoProto::default() }],
+            ..GraphProto::default()
+        };
+
+        let lowered = lower_graph(&graph).expect("lower Concat axis=0");
+        let named: Vec<(&str, &[f32])> = lowered.initializers.iter().map(|(name, data)| (name.as_str(), data.as_slice())).collect();
+        let output = lowered.graph_outputs[0].1;
+        let evaluated = evaluate_named(&lowered.program, &[], &named, &[output]).expect("evaluate Concat axis=0");
+        let (data, shape) = evaluated.get(output).expect("y present");
+
+        assert_eq!(shape, &[4, 2]);
+        assert_eq!(data, &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0]);
+    }
+
+    /// `Concat` along a general (`axis=1`) axis, three inputs folded
+    /// pairwise.
+    #[test]
+    fn concat_joins_three_matrices_along_a_general_axis() {
+        let a_initializer = f32_initializer("a", &[2, 1], &[1.0, 4.0]);
+        let b_initializer = f32_initializer("b", &[2, 2], &[2.0, 3.0, 5.0, 6.0]);
+        let c_initializer = f32_initializer("c", &[2, 1], &[7.0, 8.0]);
+        let axis_attribute = AttributeProto { name: "axis", i: 1, ..AttributeProto::default() };
+        let node = NodeProto {
+            input: vec!["a", "b", "c"],
+            output: vec!["y"],
+            op_type: "Concat",
+            name: "concat",
+            attribute: vec![axis_attribute],
+            ..NodeProto::default()
+        };
+        let graph = GraphProto {
+            node: vec![node],
+            name: "concat_axis1_graph",
+            initializer: vec![a_initializer, b_initializer, c_initializer],
+            output: vec![ValueInfoProto { name: "y", ..ValueInfoProto::default() }],
+            ..GraphProto::default()
+        };
+
+        let lowered = lower_graph(&graph).expect("lower Concat axis=1");
+        let named: Vec<(&str, &[f32])> = lowered.initializers.iter().map(|(name, data)| (name.as_str(), data.as_slice())).collect();
+        let output = lowered.graph_outputs[0].1;
+        let evaluated = evaluate_named(&lowered.program, &[], &named, &[output]).expect("evaluate Concat axis=1");
+        let (data, shape) = evaluated.get(output).expect("y present");
+
+        assert_eq!(shape, &[2, 4]);
+        assert_eq!(data, &[1.0, 2.0, 3.0, 7.0, 4.0, 5.0, 6.0, 8.0]);
     }
 
     /// Batched `MatMul`: `[2, 2, 3] x [2, 3, 2]`, independently computed per
