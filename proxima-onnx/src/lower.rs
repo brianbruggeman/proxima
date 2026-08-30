@@ -119,6 +119,22 @@ struct Value {
     node: NodeId,
     shape: Vec<u64>,
     view: Option<Vec<Option<u16>>>,
+    /// Set by [`lower_flatten`] when `shape` merges REAL, non-1 axes of
+    /// `node` that `view` (a 1:1 real-axis correspondence, see [`Value`]'s
+    /// own doc above) cannot express -- the plain `Flatten`-into-`Gemm` case
+    /// a LeNet-style export produces (`[N, C, H, W] -> [N, C*H*W]`).
+    /// `(real_shape, split)`: `node`'s REAL physical shape, and the boundary
+    /// between `shape`'s two logical axes (`shape[0]` covers real axes
+    /// `[0, split)`, `shape[1]` covers `[split, real_shape.len())`).
+    /// [`lower_gemm`] is the one consumer that reads this: rather than
+    /// materializing a new physically-reshaped node (which the *read* side
+    /// of this algebra has no primitive for -- `IndexMap::Computed` gathers
+    /// one axis at a time, never merges several), it widens the matmul's own
+    /// iteration space with one axis per real trailing (`K`) axis and
+    /// addresses `node` directly at its real rank, exactly the way
+    /// convolution's own `h*stride + r*dilation` already sums multiple
+    /// [`AxisTerm`]s into one operand axis -- see [`gemm_operand_pattern`].
+    flatten_source: Option<(Vec<u64>, usize)>,
 }
 
 /// The result of [`lower_graph`]: a self-contained `Op` program, the
@@ -191,7 +207,7 @@ pub fn lower_graph(graph: &GraphProto<'_>) -> Result<Lowered, LowerError> {
                 name: Some(tensor.name.to_string()),
             },
         );
-        values.insert(tensor.name.to_string(), Value { node, shape, view: None });
+        values.insert(tensor.name.to_string(), Value { node, shape, view: None, flatten_source: None });
         initializers.push((tensor.name.to_string(), data));
     }
 
@@ -209,7 +225,7 @@ pub fn lower_graph(graph: &GraphProto<'_>) -> Result<Lowered, LowerError> {
                 name: Some(input.name.to_string()),
             },
         );
-        values.insert(input.name.to_string(), Value { node, shape, view: None });
+        values.insert(input.name.to_string(), Value { node, shape, view: None, flatten_source: None });
         graph_inputs.push(input.name.to_string());
     }
 
@@ -313,7 +329,7 @@ fn lookup_by_name<'value>(
 
 fn bind_output(values: &mut BTreeMap<String, Value>, node: &NodeProto<'_>, index: usize, id: NodeId, shape: Vec<u64>) {
     if let Some(name) = node.output.get(index) {
-        values.insert((*name).to_string(), Value { node: id, shape, view: None });
+        values.insert((*name).to_string(), Value { node: id, shape, view: None, flatten_source: None });
     }
 }
 
@@ -648,6 +664,45 @@ fn matmul2d(program: &mut Vec<Op>, lhs: NodeId, lhs_pattern: IndexPattern, rhs: 
     build_reduce(program, ScalarOp::Add, ReduceInit::Zero, product, projection(3, &[0, 1, 2]), projection(3, &[0, 1]), name)
 }
 
+/// One `Gemm` operand's real-axis [`AxisIndex`] for a logical axis the
+/// shared iteration space addresses through `iter_axes`: a single projection
+/// when this operand owns exactly one real axis here (every ordinary,
+/// unflattened operand), or -- when [`Value::flatten_source`] widened this
+/// logical axis into several real axes on the *other* operand -- the
+/// row-major flat-index sum [`AxisTerm`]s already generalize for
+/// convolution's own `h*stride + r*dilation` (`map.rs`'s own doc table:
+/// "convolution | two terms in one axis"). `own_extents.len() == 1` is the
+/// "I'm the plain side" case; `iter_axes.len() > 1` there means the flat
+/// index into my one real axis is `sum(iter[axis] * stride)`, `stride`
+/// being the product of every extent to this term's right in the merged
+/// group -- pure multiply-add, no division, so [`IndexMap::Affine`]'s
+/// no-div/mod boundary is untouched.
+fn flat_axis_index(extents: &[u64], iter_axes: &[u16]) -> AxisIndex {
+    if iter_axes.len() == 1 {
+        return AxisIndex { terms: core::iter::once(AxisTerm::projection(iter_axes[0])).collect(), offset: 0 };
+    }
+    let terms = (0..extents.len())
+        .map(|index| {
+            let stride: u64 = extents[index + 1..].iter().product();
+            AxisTerm::scaled(iter_axes[index], stride as i32)
+        })
+        .collect();
+    AxisIndex { terms, offset: 0 }
+}
+
+/// The *owning* side of a [`Value::flatten_source`]-widened `Gemm` operand:
+/// one plain single-term [`AxisIndex`] per real axis, since this operand's
+/// physical tensor already has a separate real axis for each -- the mirror
+/// of [`flat_axis_index`]'s "plain side" case, which instead sums several
+/// iteration axes into the *other* operand's one real axis.
+fn owned_axis_indices(iter_axes: &[u16]) -> Vec<AxisIndex> {
+    iter_axes.iter().map(|&axis| AxisIndex { terms: core::iter::once(AxisTerm::projection(axis)).collect(), offset: 0 }).collect()
+}
+
+fn single_term_axis(axis: u16) -> AxisIndex {
+    AxisIndex { terms: core::iter::once(AxisTerm::projection(axis)).collect(), offset: 0 }
+}
+
 /// `Gemm(A, B, C) = alpha * (A' @ B') + beta * C`, `A'`/`B'` optionally
 /// transposed by swapping which iteration axis each operand's pattern
 /// projects (transpose is a permuted [`IndexMap`], never a copy -- see
@@ -655,6 +710,15 @@ fn matmul2d(program: &mut Vec<Op>, lhs: NodeId, lhs_pattern: IndexPattern, rhs: 
 /// emitted as elementwise multiplies against a rank-0 [`Op::Constant`],
 /// even at their 1.0 defaults -- one fewer special case than skipping the
 /// no-op multiply, and no different a numeric result.
+///
+/// When `A` (or `B`) is a [`lower_flatten`] output that merged real
+/// (non-1) axes -- `Value::flatten_source`'s own doc names the LeNet
+/// `Conv -> Flatten -> Gemm` shape this closes -- the contracted `K` axis
+/// widens from one iteration axis to one per real axis the merge covers,
+/// addressed at `node`'s real rank directly ([`flat_axis_index`]); every
+/// other axis (and the `alpha`/`beta`/bias composition below) is untouched,
+/// since the widened axes are reduced away before this function's own
+/// logical `[m, n]` output shape is ever seen downstream.
 fn lower_gemm(program: &mut Vec<Op>, values: &mut BTreeMap<String, Value>, node: &NodeProto<'_>) -> Result<(), LowerError> {
     let a = lookup(values, node, 0)?.clone();
     let b = lookup(values, node, 1)?.clone();
@@ -670,9 +734,9 @@ fn lower_gemm(program: &mut Vec<Op>, values: &mut BTreeMap<String, Value>, node:
     let alpha = attr_float(node, "alpha").unwrap_or(1.0);
     let beta = attr_float(node, "beta").unwrap_or(1.0);
 
-    let (m, k, a_pattern) =
+    let (m, k, a_pattern_plain) =
         if trans_a { (a.shape[1], a.shape[0], projection(3, &[2, 0])) } else { (a.shape[0], a.shape[1], projection(3, &[0, 2])) };
-    let (k2, n, b_pattern) =
+    let (k2, n, b_pattern_plain) =
         if trans_b { (b.shape[1], b.shape[0], projection(3, &[1, 2])) } else { (b.shape[0], b.shape[1], projection(3, &[2, 1])) };
     if k != k2 {
         return Err(LowerError::UnsupportedShape {
@@ -683,7 +747,64 @@ fn lower_gemm(program: &mut Vec<Op>, values: &mut BTreeMap<String, Value>, node:
     }
     let out_shape = alloc::vec![m, n];
 
-    let matmul = matmul2d(program, a.node, a_pattern, b.node, b_pattern, Some("gemm_matmul".to_string()));
+    let matmul = match (&a.flatten_source, &b.flatten_source) {
+        (None, None) => matmul2d(program, a.node, a_pattern_plain, b.node, b_pattern_plain, Some("gemm_matmul".to_string())),
+        (Some(_), Some(_)) => {
+            return Err(LowerError::UnsupportedShape {
+                name: node.name.to_string(),
+                op_type: node.op_type.to_string(),
+                reason: "Gemm with both A and B produced by a real-axis-merging Flatten is not supported".to_string(),
+            });
+        }
+        (a_flatten, b_flatten) => {
+            let a_owns = a_flatten.is_some();
+            let (real_shape, split) = a_flatten.as_ref().or(b_flatten.as_ref()).ok_or_else(|| LowerError::UnsupportedShape {
+                name: node.name.to_string(),
+                op_type: node.op_type.to_string(),
+                reason: "Gemm flatten-widening reached with neither operand flattened".to_string(),
+            })?;
+            if (a_owns && trans_a) || (!a_owns && trans_b) {
+                return Err(LowerError::UnsupportedShape {
+                    name: node.name.to_string(),
+                    op_type: node.op_type.to_string(),
+                    reason: "Gemm transA/transB on a Flatten-merged operand is not supported".to_string(),
+                });
+            }
+            let k_extents: Vec<u64> = if a_owns { real_shape[*split..].to_vec() } else { real_shape[..*split].to_vec() };
+            let own_extent = if a_owns { &real_shape[..*split] } else { &real_shape[*split..] };
+            if own_extent.len() != 1 {
+                return Err(LowerError::UnsupportedShape {
+                    name: node.name.to_string(),
+                    op_type: node.op_type.to_string(),
+                    reason: "Gemm's Flatten-merged operand must keep its non-contracted logical axis as a single real axis".to_string(),
+                });
+            }
+            let k_subaxes: Vec<u16> = (2..2 + k_extents.len() as u16).collect();
+            let iter_rank = k_subaxes.len() as u16 + 2;
+
+            let a_pattern = if a_owns {
+                let mut axes = alloc::vec![single_term_axis(0)];
+                axes.extend(owned_axis_indices(&k_subaxes));
+                IndexPattern { iter_rank, axes }
+            } else if trans_a {
+                IndexPattern { iter_rank, axes: alloc::vec![flat_axis_index(&k_extents, &k_subaxes), single_term_axis(0)] }
+            } else {
+                IndexPattern { iter_rank, axes: alloc::vec![single_term_axis(0), flat_axis_index(&k_extents, &k_subaxes)] }
+            };
+            let b_pattern = if !a_owns {
+                let mut axes = owned_axis_indices(&k_subaxes);
+                axes.push(single_term_axis(1));
+                IndexPattern { iter_rank, axes }
+            } else if trans_b {
+                IndexPattern { iter_rank, axes: alloc::vec![single_term_axis(1), flat_axis_index(&k_extents, &k_subaxes)] }
+            } else {
+                IndexPattern { iter_rank, axes: alloc::vec![flat_axis_index(&k_extents, &k_subaxes), single_term_axis(1)] }
+            };
+
+            let product = build_elementwise(program, ScalarOp::Multiply, alloc::vec![(a.node, IndexMap::Affine(a_pattern)), (b.node, IndexMap::Affine(b_pattern))]);
+            build_reduce(program, ScalarOp::Add, ReduceInit::Zero, product, identity_pattern(iter_rank as usize), projection(iter_rank, &[0, 1]), Some("gemm_matmul".to_string()))
+        }
+    };
     let alpha_node = constant_scalar(program, alpha);
     let scaled = build_elementwise(
         program,
@@ -941,7 +1062,7 @@ fn lower_unsqueeze(_program: &mut Vec<Op>, values: &mut BTreeMap<String, Value>,
         }
     }
     if let Some(output_name) = node.output.first() {
-        values.insert((*output_name).to_string(), Value { node: input.node, shape: out_shape, view: Some(view) });
+        values.insert((*output_name).to_string(), Value { node: input.node, shape: out_shape, view: Some(view), flatten_source: None });
     }
     Ok(())
 }
@@ -1166,7 +1287,7 @@ fn slice_axis0(program: &mut Vec<Op>, value: &Value, index: u64) -> Value {
     }
     let pattern = IndexPattern { iter_rank: (rank - 1) as u16, axes };
     let id = build_elementwise(program, ScalarOp::Identity, alloc::vec![(value.node, IndexMap::Affine(pattern))]);
-    Value { node: id, shape: value.shape[1..].to_vec(), view: None }
+    Value { node: id, shape: value.shape[1..].to_vec(), view: None, flatten_source: None }
 }
 
 /// `Scan(initial_state..., scan_input...)`: `Scan`'s own trip count is
@@ -1299,7 +1420,7 @@ fn lower_loop(
 
     for iteration in 0..trip_count {
         let iter_node = constant_scalar(program, iteration as f32);
-        values.insert(body.input[0].name.to_string(), Value { node: iter_node, shape: Vec::new(), view: None });
+        values.insert(body.input[0].name.to_string(), Value { node: iter_node, shape: Vec::new(), view: None, flatten_source: None });
         for (state_index, state_value) in state.iter().enumerate() {
             values.insert(body.input[state_index + 2].name.to_string(), state_value.clone());
         }
@@ -1397,7 +1518,7 @@ fn lower_reshape(values: &mut BTreeMap<String, Value>, initializer_data: &BTreeM
             op_type: node.op_type.to_string(),
             reason: "Reshape of a value carrying a virtual (Unsqueeze-inserted) axis view must not merge or split any of its real axes -- only inserting/dropping size-1 axes composes with the existing view".to_string(),
         })?;
-        values.insert((*output_name).to_string(), Value { node: input.node, shape: out_shape, view });
+        values.insert((*output_name).to_string(), Value { node: input.node, shape: out_shape, view, flatten_source: None });
     }
     Ok(())
 }
@@ -1481,7 +1602,14 @@ fn lower_flatten(values: &mut BTreeMap<String, Value>, node: &NodeProto<'_>) -> 
             op_type: node.op_type.to_string(),
             reason: "Flatten of a value carrying a virtual (Unsqueeze-inserted) axis view must not merge or split any of its real axes -- only inserting/dropping size-1 axes composes with the existing view".to_string(),
         })?;
-        values.insert((*output_name).to_string(), Value { node: input.node, shape: out_shape, view });
+        // `view.is_none()` and a genuine shape change means this Flatten
+        // merges `input.node`'s REAL (non-1) axes -- record which ones, so
+        // the one consumer that needs the real rank back
+        // ([`lower_gemm`]/[`gemm_operand_pattern`]) can address `node`
+        // directly instead of the (wrong, rank-mismatched) logical shape.
+        // See [`Value::flatten_source`]'s own doc.
+        let flatten_source = if input.view.is_none() && input.shape != out_shape { Some((input.shape.clone(), split)) } else { None };
+        values.insert((*output_name).to_string(), Value { node: input.node, shape: out_shape, view, flatten_source });
     }
     Ok(())
 }
@@ -1598,7 +1726,7 @@ fn concat_pair(program: &mut Vec<Op>, node: &NodeProto<'_>, lhs: &Value, rhs: &V
             (rhs_gathered, IndexMap::Affine(identity_pattern(rank))),
         ],
     );
-    Ok(Value { node: id, shape: out_shape, view: None })
+    Ok(Value { node: id, shape: out_shape, view: None, flatten_source: None })
 }
 
 /// A `Computed` gather's `base` pattern for a concat operand: every axis but
@@ -1705,7 +1833,7 @@ fn pad_axis(program: &mut Vec<Op>, value: &Value, axis: usize, before: u64, afte
             (fill_const, IndexMap::Affine(scalar_broadcast_pattern(rank))),
         ],
     );
-    Value { node: output, shape: out_shape, view: None }
+    Value { node: output, shape: out_shape, view: None, flatten_source: None }
 }
 
 /// A static, in-bounds contiguous slice of `value` along `axis`:
@@ -1745,7 +1873,7 @@ fn slice_axis_range(program: &mut Vec<Op>, value: &Value, axis: usize, start: u6
     let base = concat_base_pattern(rank_u16, rank, axis);
     let gathered_map = IndexMap::Computed { indices: index, index_map: index_map_pattern, base, gathered_dim: axis as u16 };
     let id = build_elementwise(program, ScalarOp::Identity, alloc::vec![(value.node, gathered_map)]);
-    Value { node: id, shape: out_shape, view: None }
+    Value { node: id, shape: out_shape, view: None, flatten_source: None }
 }
 
 /// A `Value`-level permutation, the same composition [`lower_transpose`]
@@ -1761,7 +1889,7 @@ fn permute_value(program: &mut Vec<Op>, value: &Value, perm: &[u16]) -> Value {
     }
     let pattern = projection(rank as u16, &inverse);
     let id = build_elementwise(program, ScalarOp::Identity, alloc::vec![(value.node, IndexMap::Affine(pattern))]);
-    Value { node: id, shape: out_shape, view: None }
+    Value { node: id, shape: out_shape, view: None, flatten_source: None }
 }
 
 /// Reverses `value` along `axis`: index `i` reads source index `extent - 1 -
@@ -1789,7 +1917,7 @@ fn reverse_axis(program: &mut Vec<Op>, value: &Value, axis: usize) -> Value {
     let base = concat_base_pattern(rank_u16, rank, axis);
     let gathered_map = IndexMap::Computed { indices: index, index_map: index_map_pattern, base, gathered_dim: axis as u16 };
     let id = build_elementwise(program, ScalarOp::Identity, alloc::vec![(value.node, gathered_map)]);
-    Value { node: id, shape: out_shape, view: None }
+    Value { node: id, shape: out_shape, view: None, flatten_source: None }
 }
 
 /// `ConvTranspose`, rank-4, `group = 1`, any `stride`/`dilation`.
@@ -2097,7 +2225,7 @@ fn convtranspose2d_scatter(
         ),
         None => reduced,
     };
-    Ok(Value { node: result, shape: out_shape, view: None })
+    Ok(Value { node: result, shape: out_shape, view: None, flatten_source: None })
 }
 
 /// One `stride*out + dilation*kernel` window term -- `map.rs`'s
@@ -2214,7 +2342,7 @@ fn window_materialize(program: &mut Vec<Op>, image: &Value, spec: WindowSpec) ->
         alloc::vec![(image.node, IndexMap::Affine(image_pattern)), (stamp, IndexMap::Affine(stamp_pattern))],
     );
     let shape = alloc::vec![image.shape[0], image.shape[1], spec.out_h, spec.out_w, spec.kernel_h, spec.kernel_w];
-    Value { node: windowed, shape, view: None }
+    Value { node: windowed, shape, view: None, flatten_source: None }
 }
 
 /// Rank-3 (`[n, c, w]`) analogue of [`window_materialize`]: one spatial axis
@@ -2246,7 +2374,7 @@ fn window_materialize1d(program: &mut Vec<Op>, image: &Value, out_w: u64, kernel
         alloc::vec![(image.node, IndexMap::Affine(image_pattern)), (stamp, IndexMap::Affine(stamp_pattern))],
     );
     let shape = alloc::vec![image.shape[0], image.shape[1], out_w, kernel_w];
-    Value { node: windowed, shape, view: None }
+    Value { node: windowed, shape, view: None, flatten_source: None }
 }
 
 /// Rank-5 (`[n, c, d, h, w]`) analogue of [`window_materialize`]: three
@@ -2298,7 +2426,7 @@ fn window_materialize3d(
         alloc::vec![(image.node, IndexMap::Affine(image_pattern)), (stamp, IndexMap::Affine(stamp_pattern))],
     );
     let shape = alloc::vec![image.shape[0], image.shape[1], out_d, out_h, out_w, kernel_d, kernel_h, kernel_w];
-    Value { node: windowed, shape, view: None }
+    Value { node: windowed, shape, view: None, flatten_source: None }
 }
 
 /// `Conv`, rank-3 `[n, ci, w]` image and rank-3 `[co, ci, kw]` weight
@@ -2347,7 +2475,7 @@ fn conv1d_core(program: &mut Vec<Op>, node: &NodeProto<'_>, image: &Value, weigh
         }
         None => reduced,
     };
-    Ok(Value { node: result, shape: out_shape, view: None })
+    Ok(Value { node: result, shape: out_shape, view: None, flatten_source: None })
 }
 
 /// The `strides`/`dilations`/`pads` 2D `Conv` attribute triple, parsed once
@@ -2661,7 +2789,7 @@ fn conv2d_core(
         }
         None => reduced,
     };
-    Ok(Value { node: result, shape: out_shape, view: None })
+    Ok(Value { node: result, shape: out_shape, view: None, flatten_source: None })
 }
 
 /// The `strides`/`dilations`/`pads` 3D `Conv`/pooling attribute sextuple --
@@ -2787,7 +2915,7 @@ fn conv3d_core(program: &mut Vec<Op>, node: &NodeProto<'_>, image: &Value, weigh
         }
         None => reduced,
     };
-    Ok(Value { node: result, shape: out_shape, view: None })
+    Ok(Value { node: result, shape: out_shape, view: None, flatten_source: None })
 }
 
 /// `Conv`, rank-5, `group >= 1`: `group=1` calls [`conv3d_core`] directly;
@@ -3152,7 +3280,7 @@ fn lower_maxpool(program: &mut Vec<Op>, values: &mut BTreeMap<String, Value>, no
 fn valid_window_count(program: &mut Vec<Op>, image_shape: &[u64], pads: (u64, u64, u64, u64), spec: WindowSpec) -> NodeId {
     let (pad_top, pad_left, pad_bottom, pad_right) = pads;
     let ones = append(program, Op::Constant { dtype: DType::Float32, shape: image_shape.iter().map(|&extent| Extent::Static(extent as u32)).collect(), value: 1.0 });
-    let ones_value = Value { node: ones, shape: image_shape.to_vec(), view: None };
+    let ones_value = Value { node: ones, shape: image_shape.to_vec(), view: None, flatten_source: None };
     let padded_w = pad_axis(program, &ones_value, 3, pad_left, pad_right, 0.0);
     let padded = pad_axis(program, &padded_w, 2, pad_top, pad_bottom, 0.0);
     let windowed = window_materialize(program, &padded, spec);
@@ -3360,7 +3488,7 @@ fn valid_window_count3d(
 ) -> NodeId {
     let (pad_d0, pad_h0, pad_w0, pad_d1, pad_h1, pad_w1) = pads;
     let ones = append(program, Op::Constant { dtype: DType::Float32, shape: image_shape.iter().map(|&extent| Extent::Static(extent as u32)).collect(), value: 1.0 });
-    let ones_value = Value { node: ones, shape: image_shape.to_vec(), view: None };
+    let ones_value = Value { node: ones, shape: image_shape.to_vec(), view: None, flatten_source: None };
     let padded_w = pad_axis(program, &ones_value, 4, pad_w0, pad_w1, 0.0);
     let padded_h = pad_axis(program, &padded_w, 3, pad_h0, pad_h1, 0.0);
     let padded = pad_axis(program, &padded_h, 2, pad_d0, pad_d1, 0.0);
@@ -3980,6 +4108,65 @@ mod tests {
         // batch 0: [[1,2,3],[4,5,6]] @ [[1,0],[0,1],[1,1]] = [[4,5],[10,11]]
         // batch 1: [[1,0,0],[0,1,0]] @ same b = [[1,0],[0,1]]
         assert_eq!(data, &[4.0, 5.0, 10.0, 11.0, 1.0, 0.0, 0.0, 1.0]);
+    }
+
+    /// `Flatten(axis=1)` feeding `Gemm` as the contraction LHS -- the
+    /// LeNet-style `Conv -> Flatten -> Gemm` shape `real_mnist_checkpoint.rs`
+    /// exercises against a real checkpoint. `x`'s real physical shape is
+    /// `[1, 2, 2, 2]`; `Flatten` merges the trailing `(C, H, W)` axes into
+    /// one logical `K = 8` axis `Value::flatten_source` records but never
+    /// materializes, so [`lower_gemm`] must widen its own matmul iteration
+    /// space to read `x` at its real rank-4 shape directly. `b`'s columns
+    /// are one-hot-ish probes (`sum(x)`, `x`'s `(c=0,h=0,w=0)` element,
+    /// `x`'s `(c=1,h=1,w=1)` element) chosen so a wrong axis order inside
+    /// the widened `K` decomposition -- reading `(h, c, w)` instead of `(c,
+    /// h, w)`, say -- would select the wrong flat position and fail the
+    /// assertion, not just produce a differently-scaled right answer.
+    #[test]
+    fn gemm_contracts_a_flattened_real_rank_four_operand() {
+        let x_initializer = f32_initializer("x", &[1, 2, 2, 2], &[10.0, 20.0, 30.0, 40.0, 50.0, 60.0, 70.0, 80.0]);
+        let flatten_node = NodeProto {
+            input: vec!["x"],
+            output: vec!["x_flat"],
+            op_type: "Flatten",
+            name: "flatten",
+            attribute: vec![AttributeProto { name: "axis", i: 1, ..AttributeProto::default() }],
+            ..NodeProto::default()
+        };
+        #[rustfmt::skip]
+        let b_initializer = f32_initializer(
+            "b",
+            &[8, 3],
+            &[
+                1.0, 1.0, 0.0,
+                1.0, 0.0, 0.0,
+                1.0, 0.0, 0.0,
+                1.0, 0.0, 0.0,
+                1.0, 0.0, 0.0,
+                1.0, 0.0, 0.0,
+                1.0, 0.0, 0.0,
+                1.0, 0.0, 1.0,
+            ],
+        );
+        let gemm_node = NodeProto { input: vec!["x_flat", "b"], output: vec!["y"], op_type: "Gemm", name: "gemm", ..NodeProto::default() };
+        let graph = GraphProto {
+            node: vec![flatten_node, gemm_node],
+            name: "flatten_gemm_graph",
+            initializer: vec![x_initializer, b_initializer],
+            output: vec![ValueInfoProto { name: "y", ..ValueInfoProto::default() }],
+            ..GraphProto::default()
+        };
+
+        let lowered = lower_graph(&graph).expect("lower Flatten -> Gemm");
+        let named: Vec<(&str, &[f32])> = lowered.initializers.iter().map(|(name, data)| (name.as_str(), data.as_slice())).collect();
+        let output = lowered.graph_outputs[0].1;
+        let evaluated = evaluate_named(&lowered.program, &[], &named, &[output]).expect("evaluate Flatten -> Gemm");
+        let (data, shape) = evaluated.get(output).expect("y present");
+
+        assert_eq!(shape, &[1, 3]);
+        // column 0 sums every element (360), column 1 picks (c=0,h=0,w=0)=10,
+        // column 2 picks (c=1,h=1,w=1)=80.
+        assert_eq!(data, &[360.0, 10.0, 80.0]);
     }
 
     /// `Softmax(axis=0)` on a `[3, 2]` input -- the reduced axis is the

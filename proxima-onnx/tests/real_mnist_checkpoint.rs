@@ -18,29 +18,32 @@ fn checkpoint_present() -> bool {
     std::path::Path::new(MODEL_PATH).exists()
 }
 
-/// Parses and lowers the real checkpoint, then attempts evaluation against
-/// an all-zero `28x28` input. This real file surfaced two op types this
-/// crate never lowered before (`BatchNormalization`, `LogSoftmax`, both
-/// closed alongside this test); parse and lower both now succeed end to
-/// end over the real byte stream (76 `Op`s from 12 `NodeProto`s).
+/// Parses, lowers, AND evaluates the real checkpoint end to end against an
+/// all-zero `28x28` input. This real file surfaced two op types this crate
+/// never lowered before (`BatchNormalization`, `LogSoftmax`, closed
+/// alongside this test's own first landing) and, at evaluation time, a
+/// third: `Flatten` aliases its output onto the producing
+/// `Conv`/`BatchNormalization` node via [`crate::lower::Value`]'s view
+/// mechanism rather than materializing a real reshape `Op`, sound only
+/// while the aliased value's logical rank still matches the real node's
+/// rank -- broken here, where it feeds `Gemm` as the contraction LHS with
+/// logical rank 2 against a real producing rank of 4.
 ///
-/// Evaluation exposes a third, separate, NOT closed here gap: `Flatten`
-/// aliases its output onto the producing `Conv`/`BatchNormalization` node
-/// via [`crate::lower::Value`]'s view mechanism rather than materializing a
-/// real reshape `Op` (`lower.rs`'s own `Value` doc), sound only while the
-/// aliased value is a terminal graph output or feeds an operand whose
-/// logical rank still matches the real node's rank. Here it feeds `Gemm`
-/// as the contraction LHS, whose logical rank (2) no longer matches the
-/// real producing node's rank (4) -- `shape::infer` correctly rejects the
-/// mismatch as `ExtentMismatch` rather than silently misreading memory
-/// (caught, not silent), but closing it for real needs either a genuine
-/// per-element gather addressed by lower-time-precomputed flat-index
-/// constants, or lifting `IndexMap::Affine`'s "no div/mod" restriction --
-/// neither attempted in this pass. This test reports exactly that boundary
-/// rather than asserting a false success.
+/// Closed not by materializing a new reshaped node (the *read*-side
+/// algebra has no primitive that merges several real axes into one --
+/// `IndexMap::Computed` gathers exactly one axis per operand reference, see
+/// `proxima-tensor/src/map.rs`'s own doc), but by widening `Gemm`'s own
+/// matmul iteration space: `Value::flatten_source` records which real axes
+/// `Flatten` merged, and `lower_gemm` gives the contracted `K` axis one
+/// iteration axis per real axis the merge covers, addressing the real
+/// `Conv`/`BatchNormalization` node directly and reproducing the flat
+/// index on the OTHER (plain, single-real-axis) operand as a genuine
+/// [`proxima_tensor::AxisTerm`] sum -- the same multi-term-axis machinery
+/// convolution's own `h*stride + r*dilation` already uses, so
+/// `IndexMap::Affine`'s no-div/mod restriction is never touched.
 #[test]
 #[ignore = "depends on a real .onnx checkout outside this repo"]
-fn real_mnist_onnx_parses_and_lowers_end_to_end() {
+fn real_mnist_onnx_parses_lowers_and_evaluates_end_to_end() {
     if !checkpoint_present() {
         eprintln!("skipping: no host-local mnist.onnx checkout at {MODEL_PATH}");
         return;
@@ -66,13 +69,14 @@ fn real_mnist_onnx_parses_and_lowers_end_to_end() {
     named.push((graph_input_name.as_str(), zero_input.as_slice()));
 
     let output_node = lowered.graph_outputs.first().expect("real mnist model declares at least one output").1;
-    match proxima_tensor::cpu::evaluate_named(&lowered.program, &[], &named, &[output_node]) {
-        Ok(evaluated) => {
-            let (data, shape) = evaluated.get(output_node).expect("real mnist output present");
-            std::println!("real_mnist evaluation SUCCEEDED: output shape={shape:?} values={data:?}");
-        }
-        Err(error) => {
-            std::println!("real_mnist evaluation hit the named, still-open Flatten-view-into-Gemm gap this test's own doc describes: {error:?}");
-        }
-    }
+    let evaluated = proxima_tensor::cpu::evaluate_named(&lowered.program, &[], &named, &[output_node])
+        .expect("real mnist evaluation succeeds now that Flatten-into-Gemm addresses the real producing node directly");
+    let (data, shape) = evaluated.get(output_node).expect("real mnist output present");
+    std::println!("real_mnist evaluation SUCCEEDED: output shape={shape:?} values={data:?}");
+
+    assert_eq!(shape, &std::vec![1_u64, 10], "LogSoftmax over 10 MNIST classes");
+    assert_eq!(data.len(), 10, "one log-probability per class");
+    assert!(data.iter().all(|value| value.is_finite()), "every log-probability is finite, got {data:?}");
+    let probability_mass: f32 = data.iter().map(|log_probability| log_probability.exp()).sum();
+    assert!((probability_mass - 1.0).abs() < 1e-3, "exp(log-softmax) sums to 1 (a valid probability distribution), got {probability_mass}");
 }
