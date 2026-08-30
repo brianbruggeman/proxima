@@ -7361,6 +7361,154 @@ fn quantize_q8k_block(chunk: &[f32], out_block: &mut [u8]) {
     }
 }
 
+/// [`quantize_q8k_block`]'s inverse: one packed `Q8_K` super-block back to
+/// its `f32` levels (`scale * level`), the same `d`/`qs` fields
+/// [`dot_q4k_q8k_block_scalar`] already reads (`bsums` is a fused-path-only
+/// correction term, unused by a plain dequantize-then-fold). Exists for
+/// [`QuantDot::Unfused`]'s own `In`/`Out` shape to match [`QuantDot::Fused`]
+/// exactly: both take the SAME packed `Q8_K` activation bytes, so an
+/// unfused reference needs a way back to `f32` for those bytes, not just
+/// for the weight row (`proxima_gguf`'s codec `dequantize` already covers
+/// the weight side).
+///
+/// # Panics
+/// If `block.len() != Q8K_BLOCK_BYTES` or `output.len() != Q4K_BLOCK_ELEMENTS`.
+#[cfg(any(feature = "q4k-int8-dot", feature = "q5k-int8-dot", feature = "q6k-int8-dot"))]
+fn dequantize_q8k_block(block: &[u8], output: &mut [f32]) {
+    let mut d_bytes = [0u8; 4];
+    d_bytes.copy_from_slice(&block[Q8K_D_OFFSET..Q8K_D_OFFSET + 4]);
+    let scale = f32::from_le_bytes(d_bytes);
+    let qs = &block[Q8K_QS_OFFSET..Q8K_QS_OFFSET + Q4K_BLOCK_ELEMENTS];
+    for (level, out) in qs.iter().zip(output.iter_mut()) {
+        *out = scale * f32::from(level.cast_signed());
+    }
+}
+
+/// A `Q4_K`/`Q5_K`/`Q6_K` weight row's dot product against a packed `Q8_K`
+/// activation row, as a [`Pipe`]: `In` = the activation row's packed bytes
+/// ([`quantize_row_q8k`]'s own output shape), `Out` = the row's dot
+/// product, `Err` = the same [`TensorError`] the underlying kernel already
+/// raises on a malformed shape. The weight row travels with the pipe value
+/// itself as a [`QuantizedBlock`] -- the codec (`Q4K`/`Q5K`/`Q6K`) is the
+/// variant `QuantizedBlock` already carries, not a second marker type
+/// minted to say the same thing again.
+///
+/// [`Self::Fused`] calls straight into the codec's own int8 kernel
+/// ([`dot_q4k_q8k`]/[`dot_q5k_q8k`]/[`dot_q6k_q8k`]) -- packed nibbles in,
+/// one integer accumulate, no `f32` intermediate. [`Self::Unfused`]
+/// dequantizes both operands to `f32` first (the weight row via
+/// `proxima_gguf`'s own codec `dequantize`, the activation row via this
+/// module's private `dequantize_q8k_block`) and folds with a plain `f32`
+/// multiply-add -- the incumbent shape this crate's own parity tests
+/// already hold as ground truth (see
+/// `matmul_q4k_f32_matches_dequantize_then_f32_matmul`).
+///
+/// Selecting between the two at a call site with no branch on the caller's
+/// part is the reason this is one enum with one [`Pipe`] impl rather than
+/// two free functions: `QuantDot::Fused(block).call(q8k_row)` and
+/// `QuantDot::Unfused(block).call(q8k_row)` are the same shape, so a caller
+/// choosing fused-vs-unfused per matmul row (a build-time feature gate or a
+/// measured per-target decision) holds either behind one type, matched once
+/// inside `call` rather than at every call site.
+#[cfg(any(feature = "q4k-int8-dot", feature = "q5k-int8-dot", feature = "q6k-int8-dot"))]
+pub enum QuantDot<'a> {
+    Fused(QuantizedBlock<'a>),
+    Unfused(QuantizedBlock<'a>),
+}
+
+#[cfg(any(feature = "q4k-int8-dot", feature = "q5k-int8-dot", feature = "q6k-int8-dot"))]
+impl<'a> Pipe for QuantDot<'a> {
+    type In = &'a [u8];
+    type Out = f32;
+    type Err = TensorError;
+
+    fn call(&self, activation_q8k: &'a [u8]) -> impl Future<Output = Result<f32, TensorError>> {
+        let result = match self {
+            Self::Fused(block) => fused_quant_dot(*block, activation_q8k),
+            Self::Unfused(block) => unfused_quant_dot(*block, activation_q8k),
+        };
+        async move { result }
+    }
+}
+
+/// [`QuantDot::Fused`]'s own body: select the codec's int8 kernel by
+/// matching [`QuantizedBlock`]'s variant, the same table
+/// [`dot_fn_for`] already builds for the `cohort-staged-graph` batching
+/// path -- this is the non-batched, single-row counterpart. A codec whose
+/// int8-dot feature is not compiled in (or a non-K-quant variant like
+/// `Q8_0`/`Float16`) is an honest [`TensorError::NotLowerable`], never a
+/// silent fallback to a different codec's kernel.
+#[cfg(any(feature = "q4k-int8-dot", feature = "q5k-int8-dot", feature = "q6k-int8-dot"))]
+fn fused_quant_dot(block: QuantizedBlock<'_>, activation_q8k: &[u8]) -> Result<f32, TensorError> {
+    match block {
+        #[cfg(feature = "q4k-int8-dot")]
+        QuantizedBlock::Q4K(bytes) => dot_q4k_q8k(bytes, activation_q8k),
+        #[cfg(feature = "q5k-int8-dot")]
+        QuantizedBlock::Q5K(bytes) => dot_q5k_q8k(bytes, activation_q8k),
+        #[cfg(feature = "q6k-int8-dot")]
+        QuantizedBlock::Q6K(bytes) => dot_q6k_q8k(bytes, activation_q8k),
+        _ => Err(TensorError::NotLowerable {
+            node: NodeId(0),
+            reason: "QuantDot::Fused only supports a K-quant codec whose int8-dot feature is enabled",
+        }),
+    }
+}
+
+/// [`QuantDot::Unfused`]'s own body: dequantize both operands to `f32`
+/// (weight row via `proxima_gguf`'s codec `dequantize`, activation row via
+/// [`dequantize_q8k_block`]) and fold with a plain multiply-add. Every
+/// length check mirrors [`dot_q4k_q8k`]'s own -- this path takes the
+/// identical `In` shape, so it must reject the identical malformed shapes.
+#[cfg(any(feature = "q4k-int8-dot", feature = "q5k-int8-dot", feature = "q6k-int8-dot"))]
+fn unfused_quant_dot(block: QuantizedBlock<'_>, activation_q8k: &[u8]) -> Result<f32, TensorError> {
+    let (weight_bytes, block_bytes, qk_k): (&[u8], usize, usize) = match block {
+        QuantizedBlock::Q4K(bytes) => (bytes, proxima_gguf::quant::q4_k::BLOCK_BYTES, proxima_gguf::quant::q4_k::QK_K),
+        QuantizedBlock::Q5K(bytes) => (bytes, proxima_gguf::quant::q5_k::BLOCK_BYTES, proxima_gguf::quant::q5_k::QK_K),
+        QuantizedBlock::Q6K(bytes) => (bytes, proxima_gguf::quant::q6_k::BLOCK_BYTES, proxima_gguf::quant::q6_k::QK_K),
+        _ => {
+            return Err(TensorError::NotLowerable {
+                node: NodeId(0),
+                reason: "QuantDot::Unfused only supports a K-quant codec (Q4_K/Q5_K/Q6_K)",
+            });
+        }
+    };
+    if !weight_bytes.len().is_multiple_of(block_bytes) {
+        return Err(TensorError::QuantizedShapeMismatch {
+            reason: "weight row length is not a whole multiple of its codec's block size",
+        });
+    }
+    let block_count = weight_bytes.len() / block_bytes;
+    if activation_q8k.len() != block_count * Q8K_BLOCK_BYTES {
+        return Err(TensorError::QuantizedShapeMismatch {
+            reason: "q8_k activation length does not match the weight row's block count",
+        });
+    }
+
+    let elements = block_count * qk_k;
+    let mut weight_f32 = vec![0.0f32; elements];
+    let dequantize_result = match block {
+        QuantizedBlock::Q4K(bytes) => proxima_gguf::quant::q4_k::dequantize(bytes, &mut weight_f32),
+        QuantizedBlock::Q5K(bytes) => proxima_gguf::quant::q5_k::dequantize(bytes, &mut weight_f32),
+        QuantizedBlock::Q6K(bytes) => proxima_gguf::quant::q6_k::dequantize(bytes, &mut weight_f32),
+        _ => unreachable!("codec already matched above"),
+    };
+    dequantize_result.map_err(|_| TensorError::QuantizedShapeMismatch {
+        reason: "weight row failed to dequantize despite passing its own shape check",
+    })?;
+
+    let mut activation_f32 = vec![0.0f32; elements];
+    for (block_bytes, block_f32) in activation_q8k
+        .as_chunks::<Q8K_BLOCK_BYTES>()
+        .0
+        .iter()
+        .zip(activation_f32.as_chunks_mut::<Q4K_BLOCK_ELEMENTS>().0)
+    {
+        dequantize_q8k_block(block_bytes, block_f32);
+    }
+
+    Ok(weight_f32.iter().zip(&activation_f32).map(|(weight, value)| weight * value).sum())
+}
+
 /// One `Q4_K`-weight-row x `Q8_K`-activation int8 dot product --
 /// `dot_q4k_f32`'s packed-arithmetic sibling: same `weight_row` shape
 /// (raw `Q4_K` bytes, a whole number of `Q4K_BLOCK_BYTES` super-blocks),
@@ -15712,6 +15860,137 @@ mod tests {
         let q8k = vec![0u8; Q8K_BLOCK_BYTES];
         let error = dot_q4k_q8k_portable(&weight_row, &q8k).unwrap_err();
         assert!(matches!(error, TensorError::QuantizedShapeMismatch { .. }), "got {error:?}");
+    }
+
+    /// [`QuantDot::Fused`] vs [`QuantDot::Unfused`] on identical random
+    /// `Q4_K` blocks: both consume the exact same already-quantized bytes
+    /// (weight and activation), so the only remaining disagreement is
+    /// floating-point accumulation order (an integer-factored int8 fold vs
+    /// a linear `f32` sum) -- a MUCH tighter bound than
+    /// `matmul_q4k_q8k_f32_agrees_with_dequantize_then_matmul_within_a_measured_tolerance`,
+    /// which compares against the ORIGINAL unquantized activation and so
+    /// also absorbs the activation's own Q8_K quantization error. Also
+    /// checks `Fused` against [`dot_q4k_q8k`] directly (bit-exact): the
+    /// pipe wrapper introduces no deviation from the kernel it delegates to.
+    #[cfg(feature = "q4k-int8-dot")]
+    #[test]
+    fn quant_dot_fused_and_unfused_agree_for_q4k_within_int8_quantization_tolerance() {
+        use proxima_gguf::quant::q4_k::{BLOCK_BYTES, QK_K, quantize};
+
+        let blocks_per_row = 3;
+        let k = QK_K * blocks_per_row;
+        let weight_f32 = random_vec(21, k);
+        let activation_f32: Vec<f32> = random_vec(22, k).into_iter().map(|value| value * 4.0 - 2.0).collect();
+
+        let mut weight_bytes = vec![0u8; blocks_per_row * BLOCK_BYTES];
+        quantize(&weight_f32, &mut weight_bytes).expect("k is a whole number of q4_k super-blocks");
+        let mut activation_q8k = vec![0u8; blocks_per_row * Q8K_BLOCK_BYTES];
+        quantize_row_q8k(&activation_f32, &mut activation_q8k).expect("k is a whole number of q8_k super-blocks");
+
+        let fused = block_on(QuantDot::Fused(QuantizedBlock::Q4K(&weight_bytes)).call(&activation_q8k))
+            .expect("fused int8 dot evaluates");
+        let unfused = block_on(QuantDot::Unfused(QuantizedBlock::Q4K(&weight_bytes)).call(&activation_q8k))
+            .expect("unfused dequantize-then-fold evaluates");
+        let kernel_ground_truth =
+            dot_q4k_q8k(&weight_bytes, &activation_q8k).expect("the underlying kernel evaluates directly");
+
+        assert_eq!(fused, kernel_ground_truth, "QuantDot::Fused must be a bit-exact wrapper over dot_q4k_q8k");
+        let relative_error = (fused - unfused).abs() / fused.abs().max(1.0);
+        eprintln!("q4_k QuantDot fused={fused} unfused={unfused} relative_error={relative_error}");
+        assert!(relative_error < 1e-3, "relative_error={relative_error} exceeds parity tolerance");
+    }
+
+    #[cfg(feature = "q5k-int8-dot")]
+    #[test]
+    fn quant_dot_fused_and_unfused_agree_for_q5k_within_int8_quantization_tolerance() {
+        use proxima_gguf::quant::q5_k::{BLOCK_BYTES, QK_K, quantize};
+
+        let blocks_per_row = 3;
+        let k = QK_K * blocks_per_row;
+        let weight_f32 = random_vec(23, k);
+        let activation_f32: Vec<f32> = random_vec(24, k).into_iter().map(|value| value * 4.0 - 2.0).collect();
+
+        let mut weight_bytes = vec![0u8; blocks_per_row * BLOCK_BYTES];
+        quantize(&weight_f32, &mut weight_bytes).expect("k is a whole number of q5_k super-blocks");
+        let mut activation_q8k = vec![0u8; blocks_per_row * Q8K_BLOCK_BYTES];
+        quantize_row_q8k(&activation_f32, &mut activation_q8k).expect("k is a whole number of q8_k super-blocks");
+
+        let fused = block_on(QuantDot::Fused(QuantizedBlock::Q5K(&weight_bytes)).call(&activation_q8k))
+            .expect("fused int8 dot evaluates");
+        let unfused = block_on(QuantDot::Unfused(QuantizedBlock::Q5K(&weight_bytes)).call(&activation_q8k))
+            .expect("unfused dequantize-then-fold evaluates");
+        let kernel_ground_truth =
+            dot_q5k_q8k(&weight_bytes, &activation_q8k).expect("the underlying kernel evaluates directly");
+
+        assert_eq!(fused, kernel_ground_truth, "QuantDot::Fused must be a bit-exact wrapper over dot_q5k_q8k");
+        let relative_error = (fused - unfused).abs() / fused.abs().max(1.0);
+        eprintln!("q5_k QuantDot fused={fused} unfused={unfused} relative_error={relative_error}");
+        assert!(relative_error < 1e-3, "relative_error={relative_error} exceeds parity tolerance");
+    }
+
+    #[cfg(feature = "q6k-int8-dot")]
+    #[test]
+    fn quant_dot_fused_and_unfused_agree_for_q6k_within_int8_quantization_tolerance() {
+        use proxima_gguf::quant::q6_k::{BLOCK_BYTES, QK_K, quantize};
+
+        let blocks_per_row = 3;
+        let k = QK_K * blocks_per_row;
+        let weight_f32 = random_vec(25, k);
+        let activation_f32: Vec<f32> = random_vec(26, k).into_iter().map(|value| value * 4.0 - 2.0).collect();
+
+        let mut weight_bytes = vec![0u8; blocks_per_row * BLOCK_BYTES];
+        quantize(&weight_f32, &mut weight_bytes).expect("k is a whole number of q6_k super-blocks");
+        let mut activation_q8k = vec![0u8; blocks_per_row * Q8K_BLOCK_BYTES];
+        quantize_row_q8k(&activation_f32, &mut activation_q8k).expect("k is a whole number of q8_k super-blocks");
+
+        let fused = block_on(QuantDot::Fused(QuantizedBlock::Q6K(&weight_bytes)).call(&activation_q8k))
+            .expect("fused int8 dot evaluates");
+        let unfused = block_on(QuantDot::Unfused(QuantizedBlock::Q6K(&weight_bytes)).call(&activation_q8k))
+            .expect("unfused dequantize-then-fold evaluates");
+        let kernel_ground_truth =
+            dot_q6k_q8k(&weight_bytes, &activation_q8k).expect("the underlying kernel evaluates directly");
+
+        assert_eq!(fused, kernel_ground_truth, "QuantDot::Fused must be a bit-exact wrapper over dot_q6k_q8k");
+        let relative_error = (fused - unfused).abs() / fused.abs().max(1.0);
+        eprintln!("q6_k QuantDot fused={fused} unfused={unfused} relative_error={relative_error}");
+        assert!(relative_error < 1e-3, "relative_error={relative_error} exceeds parity tolerance");
+    }
+
+    /// Both arms of [`QuantDot`] take the identical `In` shape
+    /// (`dot_q4k_q8k`'s own malformed-shape guards), so both must reject the
+    /// identical malformed shapes rather than only one of them.
+    #[cfg(feature = "q4k-int8-dot")]
+    #[test]
+    fn quant_dot_rejects_a_malformed_weight_row_on_both_fused_and_unfused() {
+        let weight_row = vec![0u8; Q4K_BLOCK_BYTES - 1];
+        let activation_q8k = vec![0u8; Q8K_BLOCK_BYTES];
+
+        let fused_error =
+            block_on(QuantDot::Fused(QuantizedBlock::Q4K(&weight_row)).call(&activation_q8k)).unwrap_err();
+        assert!(matches!(fused_error, TensorError::QuantizedShapeMismatch { .. }), "got {fused_error:?}");
+
+        let unfused_error =
+            block_on(QuantDot::Unfused(QuantizedBlock::Q4K(&weight_row)).call(&activation_q8k)).unwrap_err();
+        assert!(matches!(unfused_error, TensorError::QuantizedShapeMismatch { .. }), "got {unfused_error:?}");
+    }
+
+    /// A codec `QuantDot` does not support (`Q8_0` has no `Q8_K`-activation
+    /// int8-dot path -- [`dot_fn_for`]'s own doc names this) is an honest
+    /// `NotLowerable`, never a silent misroute to a different codec's
+    /// kernel.
+    #[cfg(feature = "q4k-int8-dot")]
+    #[test]
+    fn quant_dot_rejects_a_codec_with_no_int8_dot_kernel() {
+        let weight_row = vec![0u8; 34]; // one Q8_0 block: 2-byte f16 scale + 32 nibble-packed bytes
+        let activation_q8k = vec![0u8; Q8K_BLOCK_BYTES];
+
+        let fused_error =
+            block_on(QuantDot::Fused(QuantizedBlock::Q8_0(&weight_row)).call(&activation_q8k)).unwrap_err();
+        assert!(matches!(fused_error, TensorError::NotLowerable { .. }), "got {fused_error:?}");
+
+        let unfused_error =
+            block_on(QuantDot::Unfused(QuantizedBlock::Q8_0(&weight_row)).call(&activation_q8k)).unwrap_err();
+        assert!(matches!(unfused_error, TensorError::NotLowerable { .. }), "got {unfused_error:?}");
     }
 
     /// [`mins_correction_neon`] (the explicit NEON mins-correction path

@@ -249,6 +249,8 @@ pub use cpu::{
     Evaluated, Interpreter, QuantizedBlock, TypedBuffer, evaluate, evaluate_parallel,
     evaluate_typed, evaluate_with_scratch, resolve_named_blocks,
 };
+#[cfg(any(feature = "q4k-int8-dot", feature = "q5k-int8-dot", feature = "q6k-int8-dot"))]
+pub use cpu::QuantDot;
 pub use dtype::DType;
 #[cfg(any(feature = "std", feature = "alloc"))]
 pub use error::TensorError;
