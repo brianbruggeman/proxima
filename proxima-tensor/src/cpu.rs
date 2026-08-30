@@ -142,6 +142,7 @@ use std::sync::atomic::AtomicUsize;
 use std::sync::mpsc::{sync_channel, SyncSender};
 use std::sync::{Arc, OnceLock};
 
+use proxima_primitives::block_on;
 use proxima_primitives::pipe::Pipe;
 use proxima_primitives::pipe::fan_in::Quorum;
 #[cfg(feature = "instrument")]
@@ -522,12 +523,13 @@ pub enum QuantizedBlock<'a> {
 /// runs the exact same f32 path [`evaluate`] does, unchanged.
 ///
 /// `evaluate_typed`'s `TypedBuffer` seam was considered and rejected for
-/// this: `typed_program_dtype` requires one uniform dtype across the
-/// *whole* program, but a quantized matmul is deliberately mixed —
-/// `UInt8`-packed weight times `Float32` activation into a `Float32`
-/// output — which is exactly the shape `reject_non_float32`'s
-/// quantized-weight exemption carves out, not a program `evaluate_typed`
-/// would ever accept.
+/// this: even `typed_program_plan`'s `Widened` shape only crosses dtypes
+/// once, at a `Reduce` node's own accumulator boundary, but a quantized
+/// matmul is mixed *within* one fused reduce body — `UInt8`-packed weight
+/// times `Float32` activation into a `Float32` output — which is exactly
+/// the shape `reject_non_float32`'s quantized-weight exemption carves out,
+/// not a program `evaluate_typed` would ever accept. See that function's
+/// [`TypedPlan`] doc for the two shapes it does accept.
 ///
 /// Every call starts and ends with an empty node-output pool and an
 /// unvalidated structure cache — see [`evaluate_quantized_with_scratch`]
@@ -10541,7 +10543,7 @@ impl Element for f64 {
 /// `BFloat16`, and `Float16` have no variant yet — `Bool`'s storage
 /// convention (packed bits vs. one byte per element) is undecided, and the
 /// two half-precision floats have no arithmetic on stable Rust; see
-/// `typed_program_dtype` for the boundary this actually enforces today.
+/// [`typed_program_plan`] for the boundary this actually enforces today.
 #[derive(Debug, Clone, PartialEq)]
 pub enum TypedBuffer {
     Int8(Vec<i8>),
@@ -10601,39 +10603,86 @@ impl TypedBuffer {
     }
 }
 
+/// [`typed_program_plan`]'s answer: either every node in the program shares
+/// one dtype (the only shape this evaluator supported before mixed
+/// precision), or exactly one dtype change occurs, and only at a
+/// [`Op::Reduce`] node's own accumulator — the quantized-accumulate shape
+/// (`i8` operand folded into an `i32` accumulator) that a single uniform
+/// dtype cannot express. See [`typed_program_plan`]'s own doc for the
+/// structural check that produces this.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TypedPlan {
+    Uniform(DType),
+    Widened { operand: DType, accumulator: DType },
+}
+
 /// Validates a program is executable by [`evaluate_typed`] and returns its
-/// single uniform dtype.
+/// [`TypedPlan`].
 ///
-/// One restriction narrows this evaluator below the full `Op` vocabulary,
-/// because of what genuinely is not built yet rather than a semantic limit:
-/// every node (bar a gather's `indices`, still carried as f32 — see
-/// [`reject_non_float32`]'s doc) must share one dtype, since a mixed-dtype
-/// fused body (quantized matmul's `i8 x i8 -> i32`) would need per-operand
-/// element types this evaluator's single `T::apply` cannot express yet.
-/// [`Op::Reduce`] (`Keep::Reduce` and `Keep::Scan` both) is supported at
-/// every width this function accepts — see [`run_reduce_typed`]/
-/// [`run_scan_typed`]. Gather is still rejected, in [`run_typed_program`]
-/// rather than here, since it is a per-operand property of a bound node, not
-/// a program-wide one. `Bool`/`BFloat16`/`Float16` are also out — see
-/// [`TypedBuffer`]'s doc.
-fn typed_program_dtype(program: &[Op]) -> Result<DType, TensorError> {
-    let dtype = program.first().ok_or(TensorError::Empty)?.dtype();
-    if matches!(dtype, DType::Bool | DType::BFloat16 | DType::Float16) {
-        return Err(TensorError::NotLowerable {
-            node: NodeId(0),
-            reason: "the typed evaluator does not support Bool, BFloat16, or Float16 yet",
-        });
-    }
+/// Two shapes pass, everything else is [`TensorError::NotLowerable`]:
+///
+/// - **uniform** — every node (bar a gather's `indices`, still carried as
+///   f32 — see [`reject_non_float32`]'s doc) shares one dtype. This is the
+///   whole-program restriction this function always enforced; it is
+///   unchanged for any program that never mixes dtypes, which is what keeps
+///   the existing f32 NEON fast path (`run_reduce_typed`/`run_scan_typed`'s
+///   `T = f32` specialization) reachable exactly as before.
+/// - **widened** — every node up to some position shares one dtype
+///   (`operand`), the node at that position is an [`Op::Reduce`] whose own
+///   dtype differs (`accumulator`), and every node from there on shares
+///   `accumulator`. A `Reduce`'s `operand: NodeId` field only ever points
+///   backwards (this crate's own SSA invariant — see [`Op::append`]'s doc),
+///   so the dtype that changed at that node is provably the fold's operand
+///   dtype widening into its accumulator, not an unrelated node happening to
+///   differ. [`evaluate_typed`] dispatches this shape to
+///   [`run_widened_program`], scoped to the pairs it ships a [`Convert`]
+///   [`Pipe`] for — see that function's own doc.
+///
+/// Any dtype change outside those two shapes (a third distinct dtype, or a
+/// change at a non-`Reduce` node) is rejected with an honest
+/// `NotLowerable` rather than silently picked apart. `Bool`/`BFloat16`/
+/// `Float16` are out at any position — see [`TypedBuffer`]'s doc.
+fn typed_program_plan(program: &[Op]) -> Result<TypedPlan, TensorError> {
+    let base_dtype = program.first().ok_or(TensorError::Empty)?.dtype();
+    let mut widen_at: Option<(usize, DType)> = None;
     for (position, expr) in program.iter().enumerate() {
         let node = NodeId(position as u32);
-        if expr.dtype() != dtype {
+        let dtype = expr.dtype();
+        if matches!(dtype, DType::Bool | DType::BFloat16 | DType::Float16) {
             return Err(TensorError::NotLowerable {
                 node,
-                reason: "the typed evaluator requires one uniform dtype across the whole program",
+                reason: "the typed evaluator does not support Bool, BFloat16, or Float16 yet",
             });
         }
+        if dtype == base_dtype {
+            continue;
+        }
+        match widen_at {
+            None => widen_at = Some((position, dtype)),
+            Some((_, accumulator)) if accumulator == dtype => {}
+            Some(_) => {
+                return Err(TensorError::NotLowerable {
+                    node,
+                    reason: "the typed evaluator supports at most one dtype change per program",
+                });
+            }
+        }
     }
-    Ok(dtype)
+    match widen_at {
+        None => Ok(TypedPlan::Uniform(base_dtype)),
+        Some((position, accumulator)) => {
+            if !matches!(program[position], Op::Reduce(_)) {
+                return Err(TensorError::NotLowerable {
+                    node: NodeId(position as u32),
+                    reason: "a dtype change may only occur at a Reduce node's own accumulator",
+                });
+            }
+            Ok(TypedPlan::Widened {
+                operand: base_dtype,
+                accumulator,
+            })
+        }
+    }
 }
 
 /// One requested output's node, shape, and data — [`evaluate_typed`]'s
@@ -10644,18 +10693,36 @@ type TypedRow<Data> = (NodeId, Vec<u64>, Data);
 /// Run an elementwise-or-reduce tensor program against a caller-chosen
 /// non-f32 (or f64) dtype — the full-width counterpart of [`evaluate`] for
 /// the programs `reject_non_float32` used to reject outright. See
-/// `typed_program_dtype` for exactly which programs qualify. `DType::Float32`
-/// dispatches `run_typed_program` the same as every other width, but that
-/// function's own [`Op::Reduce`] handling specializes straight back to the
-/// existing NEON `run_reduce`/`run_scan` for `T = f32` — see
-/// `run_reduce_typed`'s doc.
+/// [`typed_program_plan`] for exactly which programs qualify, and for the
+/// uniform case, `DType::Float32` dispatches `run_typed_program` the same as
+/// every other width, but that function's own [`Op::Reduce`] handling
+/// specializes straight back to the existing NEON `run_reduce`/`run_scan`
+/// for `T = f32` — see `run_reduce_typed`'s doc. A [`TypedPlan::Widened`]
+/// program dispatches to [`run_widened_program`] instead, over the
+/// `(operand, accumulator)` pairs that section ships a [`Convert`] for.
 pub fn evaluate_typed(
     program: &[Op],
     symbols: &[u64],
     blocks: &[TypedBuffer],
     outputs: &[NodeId],
 ) -> Result<Vec<TypedRow<TypedBuffer>>, TensorError> {
-    let dtype = typed_program_dtype(program)?;
+    match typed_program_plan(program)? {
+        TypedPlan::Uniform(dtype) => evaluate_uniform_typed(dtype, program, symbols, blocks, outputs),
+        TypedPlan::Widened { operand, accumulator } => {
+            evaluate_widened_typed(operand, accumulator, program, symbols, blocks, outputs)
+        }
+    }
+}
+
+/// [`evaluate_typed`]'s [`TypedPlan::Uniform`] arm: the whole-program,
+/// single-dtype dispatch this evaluator always had, unmodified.
+fn evaluate_uniform_typed(
+    dtype: DType,
+    program: &[Op],
+    symbols: &[u64],
+    blocks: &[TypedBuffer],
+    outputs: &[NodeId],
+) -> Result<Vec<TypedRow<TypedBuffer>>, TensorError> {
     macro_rules! dispatch {
         ($ty:ty, $variant:ident) => {{
             run_typed_program::<$ty>(program, symbols, blocks, outputs)?
@@ -10678,9 +10745,35 @@ pub fn evaluate_typed(
         DType::Float32 => dispatch!(f32, Float32),
         DType::Float64 => dispatch!(f64, Float64),
         DType::Bool | DType::BFloat16 | DType::Float16 => {
-            unreachable!("typed_program_dtype already rejected this dtype")
+            unreachable!("typed_program_plan already rejected this dtype")
         }
     })
+}
+
+/// [`evaluate_typed`]'s [`TypedPlan::Widened`] arm — the `(operand,
+/// accumulator)` dispatch table. Scoped to the pairs actually shipped, not
+/// the full `DType x DType` cross product: today that is `(Int8, Int32)`,
+/// the quantized-accumulate case `typed_program_plan`'s doc names. Any other
+/// pair is an honest [`TensorError::NotLowerable`] — never a silent wrong
+/// result from picking the nearer-available width.
+fn evaluate_widened_typed(
+    operand: DType,
+    accumulator: DType,
+    program: &[Op],
+    symbols: &[u64],
+    blocks: &[TypedBuffer],
+    outputs: &[NodeId],
+) -> Result<Vec<TypedRow<TypedBuffer>>, TensorError> {
+    match (operand, accumulator) {
+        (DType::Int8, DType::Int32) => Ok(run_widened_program::<i8, i32>(program, symbols, blocks, outputs)?
+            .into_iter()
+            .map(|(node, shape, data)| (node, shape, TypedBuffer::Int32(data)))
+            .collect()),
+        _ => Err(TensorError::NotLowerable {
+            node: NodeId(0),
+            reason: "the typed evaluator only ships the (i8, i32) mixed-precision reduce pair today",
+        }),
+    }
 }
 
 /// The monomorphic body [`evaluate_typed`] dispatches into per dtype: shape
@@ -10783,6 +10876,167 @@ fn run_typed_program<T: Element>(
         .map(|node| {
             let shape = shapes.of(*node).to_vec();
             let data = buffers[node.0 as usize]
+                .clone()
+                .map(Cow::into_owned)
+                .unwrap_or_default();
+            (*node, shape, data)
+        })
+        .collect())
+}
+
+/// [`run_typed_program`]'s two-dtype sibling: every node up to a
+/// [`Op::Reduce`] runs in `TIn` (the operand width), the `Reduce` node
+/// itself and everything downstream of it runs in `TAcc` (the accumulator
+/// width) — [`typed_program_plan`]'s `Widened` shape, executed. This is the
+/// case a single generic parameter structurally could not express: an `i8`
+/// operand folded into an `i32` accumulator needs the accumulator to
+/// actually be `i32`-wide in memory, not `i8` wrapped on overflow.
+///
+/// Two buffer tables instead of one (`buffers_in: [TIn]`, `buffers_out:
+/// [TAcc]`), each indexed by [`NodeId`] exactly like [`run_typed_program`]'s
+/// single table. A node's own dtype (`BoundOp::dtype`, mirroring
+/// [`Op::dtype`]) decides which table it writes into. The one new step is
+/// the crossing itself: immediately before running the `Reduce` node (or any
+/// node reading a `TIn`-dtype operand from `TAcc` context), that operand's
+/// buffer is widened once, elementwise, through [`Convert`]`<TIn,
+/// TAcc>`::`call` (the same [`Pipe`] [`crate::convert`] ships for every
+/// other conversion in this crate — no bespoke fold, the algebra already had
+/// this piece) and the converted copy is stashed into `buffers_out` at that
+/// same node id, so every downstream reader (including the `Reduce` itself)
+/// sees an ordinary same-type `TAcc` operand from then on.
+fn run_widened_program<TIn, TAcc>(
+    program: &[Op],
+    symbols: &[u64],
+    blocks: &[TypedBuffer],
+    outputs: &[NodeId],
+) -> Result<Vec<TypedRow<Vec<TAcc>>>, TensorError>
+where
+    TIn: Element,
+    TAcc: Element,
+    Convert<TIn, TAcc>: Pipe<In = TIn, Out = TAcc, Err = core::convert::Infallible>,
+{
+    let shapes = shape::infer(program, symbols)?;
+
+    let root = program
+        .len()
+        .checked_sub(1)
+        .map(|last| NodeId(last as u32))
+        .ok_or(TensorError::Empty)?;
+    for output in outputs {
+        if output.0 as usize >= program.len() {
+            return Err(TensorError::UnknownOutput(*output));
+        }
+    }
+    let effective_outputs: Vec<NodeId> = if outputs.is_empty() {
+        vec![root]
+    } else {
+        outputs.to_vec()
+    };
+
+    let block_nodes = block_node_ids(program);
+    if blocks.len() != block_nodes.len() {
+        return Err(TensorError::InputCountMismatch {
+            expected: block_nodes.len(),
+            found: blocks.len(),
+        });
+    }
+
+    let mut buffers_in: Vec<Option<Cow<'_, [TIn]>>> = vec![None; program.len()];
+    let mut buffers_out: Vec<Option<Cow<'_, [TAcc]>>> = vec![None; program.len()];
+    for (node, buffer) in block_nodes.iter().zip(blocks.iter()) {
+        let expected = element_count(shapes.of(*node));
+        if program[node.0 as usize].dtype() == TIn::DTYPE {
+            let data = TIn::unwrap_block(buffer).ok_or(TensorError::NotLowerable {
+                node: *node,
+                reason: "typed evaluator input dtype does not match its node's own dtype",
+            })?;
+            if data.len() != expected {
+                return Err(TensorError::InputSizeMismatch {
+                    node: *node,
+                    expected,
+                    found: data.len(),
+                });
+            }
+            buffers_in[node.0 as usize] = Some(Cow::Borrowed(data));
+        } else {
+            let data = TAcc::unwrap_block(buffer).ok_or(TensorError::NotLowerable {
+                node: *node,
+                reason: "typed evaluator input dtype does not match its node's own dtype",
+            })?;
+            if data.len() != expected {
+                return Err(TensorError::InputSizeMismatch {
+                    node: *node,
+                    expected,
+                    found: data.len(),
+                });
+            }
+            buffers_out[node.0 as usize] = Some(Cow::Borrowed(data));
+        }
+    }
+
+    let resolved = bind::bind(program, &shapes, &effective_outputs)?;
+    for node in &resolved {
+        if node.operands().iter().any(|(_, _, lookup)| lookup.is_some()) {
+            return Err(TensorError::NotLowerable {
+                node: node.node,
+                reason: "the typed evaluator does not support gather yet (indices stay f32-only)",
+            });
+        }
+    }
+
+    let retires = node_retirement(&resolved, &effective_outputs);
+    let mut free_in: Vec<Vec<TIn>> = Vec::new();
+    let mut free_out: Vec<Vec<TAcc>> = Vec::new();
+    let converter = Convert::<TIn, TAcc>::new();
+
+    for (position, node) in resolved.iter().enumerate() {
+        if node.dtype == TIn::DTYPE {
+            let mut output = typed_take_or_allocate(&mut free_in, node_output_len(node));
+            match &node.kind {
+                BoundOpKind::Elementwise { .. } => run_elementwise_typed(node, &buffers_in, &mut output)?,
+                BoundOpKind::Reduce { keep: Keep::Reduce, .. } => run_reduce_typed(node, &buffers_in, &mut output)?,
+                BoundOpKind::Reduce { keep: Keep::Scan, .. } => run_scan_typed(node, &buffers_in, &mut output)?,
+                BoundOpKind::Iota => run_iota_typed(&mut output),
+                BoundOpKind::Constant { value } => run_constant_typed(*value, &mut output),
+            }
+            buffers_in[node.node.0 as usize] = Some(Cow::Owned(output));
+        } else {
+            for (source, _, _) in node.operands() {
+                let needs_widening =
+                    buffers_out[source.0 as usize].is_none() && buffers_in[source.0 as usize].is_some();
+                if needs_widening {
+                    let narrow = buffers_in[source.0 as usize].as_deref().unwrap_or_default();
+                    let mut widened: Vec<TAcc> = Vec::with_capacity(narrow.len());
+                    for value in narrow {
+                        widened.push(match block_on(converter.call(*value)) {
+                            Ok(value) => value,
+                            Err(never) => match never {},
+                        });
+                    }
+                    buffers_out[source.0 as usize] = Some(Cow::Owned(widened));
+                }
+            }
+            let mut output = typed_take_or_allocate(&mut free_out, node_output_len(node));
+            match &node.kind {
+                BoundOpKind::Elementwise { .. } => run_elementwise_typed(node, &buffers_out, &mut output)?,
+                BoundOpKind::Reduce { keep: Keep::Reduce, .. } => run_reduce_typed(node, &buffers_out, &mut output)?,
+                BoundOpKind::Reduce { keep: Keep::Scan, .. } => run_scan_typed(node, &buffers_out, &mut output)?,
+                BoundOpKind::Iota => run_iota_typed(&mut output),
+                BoundOpKind::Constant { value } => run_constant_typed(*value, &mut output),
+            }
+            buffers_out[node.node.0 as usize] = Some(Cow::Owned(output));
+        }
+        for retired in &retires[position] {
+            typed_retire_into(&mut buffers_in, *retired, &mut free_in);
+            typed_retire_into(&mut buffers_out, *retired, &mut free_out);
+        }
+    }
+
+    Ok(effective_outputs
+        .iter()
+        .map(|node| {
+            let shape = shapes.of(*node).to_vec();
+            let data = buffers_out[node.0 as usize]
                 .clone()
                 .map(Cow::into_owned)
                 .unwrap_or_default();
@@ -14274,6 +14528,71 @@ mod tests {
         let error = evaluate_typed(&program, &[], &blocks, &[])
             .expect_err("a mixed-dtype fused body is not yet supported");
         assert!(matches!(error, TensorError::NotLowerable { .. }), "{error}");
+    }
+
+    #[test]
+    fn an_i8_operand_i32_accumulator_reduce_evaluates() {
+        // five i8 elements of 30 each: the true sum is 150, which does not
+        // fit in i8 (max 127) -- wrapping i8 arithmetic would land on -106
+        // (150 - 256). an i32 accumulator is the only way to observe 150.
+        let mut program = Vec::new();
+        let operand = block(&mut program, DType::Int8, &[Extent::Static(5)]);
+        append(
+            &mut program,
+            Op::Reduce(Reduce {
+                dtype: DType::Int32,
+                body: ScalarOp::Add,
+                init: ReduceInit::Zero,
+                operand,
+                in_map: IndexMap::Affine(map::projection(1, &[0])),
+                out_map: IndexMap::Affine(map::projection(1, &[])),
+                keep: Keep::Reduce,
+                name: None,
+            }),
+        );
+        let blocks = [TypedBuffer::Int8(alloc::vec![30, 30, 30, 30, 30])];
+        let results = evaluate_typed(&program, &[], &blocks, &[])
+            .expect("an i8-operand, i32-accumulator reduce evaluates");
+        assert_eq!(
+            results[0].2,
+            TypedBuffer::Int32(alloc::vec![150]),
+            "the i32 accumulator must carry the true sum, not the i8-wrapped one (-106)"
+        );
+    }
+
+    #[test]
+    fn f32_typed_path_is_unchanged() {
+        let (program, _) = typed_reduce_vector_to_scalar_program(DType::Float32, 4);
+        let operand = TypedBuffer::Float32(alloc::vec![1.5, 2.5, 3.0, 4.0]);
+        let results = evaluate_typed(&program, &[], &[operand], &[])
+            .expect("a uniform f32 typed program still evaluates via the unchanged NEON-backed path");
+        assert_eq!(results[0].2, TypedBuffer::Float32(alloc::vec![11.0]));
+    }
+
+    #[test]
+    fn an_unshipped_widened_pair_is_rejected_not_silently_wrong() {
+        let mut program = Vec::new();
+        let operand = block(&mut program, DType::Int16, &[Extent::Static(3)]);
+        append(
+            &mut program,
+            Op::Reduce(Reduce {
+                dtype: DType::Int64,
+                body: ScalarOp::Add,
+                init: ReduceInit::Zero,
+                operand,
+                in_map: IndexMap::Affine(map::projection(1, &[0])),
+                out_map: IndexMap::Affine(map::projection(1, &[])),
+                keep: Keep::Reduce,
+                name: None,
+            }),
+        );
+        let blocks = [TypedBuffer::Int16(alloc::vec![1, 2, 3])];
+        let error = evaluate_typed(&program, &[], &blocks, &[])
+            .expect_err("(Int16, Int64) is not a shipped widened pair");
+        assert!(
+            matches!(error, TensorError::NotLowerable { .. }),
+            "an unshipped pair must fail honestly, never fall back to a wrong result: {error}"
+        );
     }
 
     fn typed_reduce_vector_to_scalar_program(dtype: DType, len: u32) -> (Vec<Op>, NodeId) {
