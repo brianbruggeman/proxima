@@ -18,7 +18,7 @@
 //! - **`Elementwise` is elementwise.** Each operand gets the local partial
 //!   derivative of `body` times the incoming gradient, still at the node's
 //!   own iteration space, then routed back into that operand's native
-//!   shape through its own [`IndexMap`] — see [`route_contribution`].
+//!   shape through its own [`IndexMap`] — see `route_contribution` (private).
 //! - **`Reduce(Add)` broadcasts** the incoming gradient back across every
 //!   iteration point.
 //! - **`Reduce(Maximum)`/`Reduce(Minimum)` mask-route** the incoming
@@ -41,7 +41,7 @@
 //!   contribution is already produced at the *consuming* iteration space —
 //!   `table[ids[s], d]`'s own `(s, d)` shape — which is exactly the compact
 //!   `[len(ids), row_len]` gradient a caller needs, not the operand's full
-//!   `[vocab, row_len]` shape. [`route_contribution`] hands that
+//!   `[vocab, row_len]` shape. `route_contribution` (private) hands that
 //!   contribution back as a [`GatheredContribution`] (paired with the same
 //!   `indices` node the forward gather read from) instead of forcing it
 //!   through `proxima-tensor/src/cpu.rs:16062`'s dense mask-composition
@@ -88,7 +88,7 @@ use crate::expr;
 /// back onto the operand's full shape.
 ///
 /// `values` is already the correct, compact gradient — computing it needed
-/// no scatter at all, since [`route_contribution`] hands back the
+/// no scatter at all, since `route_contribution` (private) hands back the
 /// contribution exactly as produced at the *consuming* iteration space
 /// (`table[ids[s], d]`'s own `(s, d)` shape), not the operand's own
 /// `[vocab, row_len]` shape. `indices` is the same [`NodeId`] the forward

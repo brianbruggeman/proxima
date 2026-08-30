@@ -29,7 +29,7 @@
 //!
 //! # Tiers
 //!
-//! [`adjoint`], [`activation`], [`expr`], and [`sparse`] touch nothing but
+//! [`adjoint`], [`activation`], `expr` (private), and [`sparse`] touch nothing but
 //! `proxima-tensor`'s alloc-tier surface (`op`/`map`/`shape`/`error`) and
 //! build under `--no-default-features --features alloc`: pure graph
 //! construction and host-side buffer reduction, no evaluation. `sparse`

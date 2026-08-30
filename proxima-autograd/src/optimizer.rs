@@ -207,8 +207,8 @@ fn bias_correction(program: &mut Vec<Op>, step: NodeId, ln_beta: f32) -> NodeId 
 }
 
 /// [`adam_step`] wearing this workspace's uniform `Pipe` shape — see this
-/// module's own doc for why it needs a `RefCell` and [`Differentiate`]
-/// (crate::adjoint) does not.
+/// module's own doc for why it needs a `RefCell` and
+/// [`crate::adjoint::Differentiate`] does not.
 ///
 /// `In = AdamOperands`, `Out = (new_param, new_m, new_v)`. Construct once
 /// per `(config, rank, step)` combination and `.call(operands)` once per
