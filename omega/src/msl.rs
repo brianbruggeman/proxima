@@ -784,7 +784,10 @@ pub(crate) fn kernel_cache_key(resolved: &BoundOp, packed_operands: &PackedOpera
 /// # Errors
 /// Propagates [`validate`]'s structural rejection — the same gate [`emit`]
 /// enforces before ever building a kernel.
-#[cfg(any(test, all(feature = "metal", target_os = "macos")))]
+// unlike `kernel_cache_key` above, this has no `mod tests` call site of its
+// own, so a bare `cfg(test)` disjunct leaves it genuinely dead-code on a
+// non-macOS `cargo test`/`nextest` build -- gate on the one real caller.
+#[cfg(all(feature = "metal", target_os = "macos"))]
 pub(crate) fn kernel_dispatch_shape(
     resolved: &BoundOp,
     packed_operands: &PackedOperands,
