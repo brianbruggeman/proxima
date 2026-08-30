@@ -93,7 +93,7 @@ pub struct WgpuPlan {
     caps: WgslCaps,
     /// Which packed codec each block-bound node's bytes are — derived once,
     /// at plan time, from the concrete [`QuantizedBlock`] variant the caller
-    /// planned against (see [`packed_operands_of`]), the same "codec is a
+    /// planned against (see `packed_operands_of`), the same "codec is a
     /// property of the weight, decided once" stance `crate::metal::plan`
     /// takes for its own `Plan::packed_operands` field. Threaded into every
     /// [`emit_wgsl`] call so the pipeline cache (keyed by [`WgslKernel::entry`],
@@ -219,7 +219,7 @@ fn acquire_device() -> Result<(wgpu::Device, wgpu::Queue, WgslCaps), WgpuError> 
 
 /// Resolves a program into a reusable [`WgpuPlan`], acquiring a device.
 /// `blocks` decides each block-bound node's packed codec (see
-/// [`packed_operands_of`]) — the same positional shape `crate::metal::plan`
+/// `packed_operands_of`) — the same positional shape `crate::metal::plan`
 /// takes, not just a shape-inference input.
 ///
 /// # Errors
@@ -272,7 +272,7 @@ impl WgpuPlan {
     /// The capabilities [`plan`] found this plan's acquired device actually
     /// supports — a diagnostic accessor for a caller (or a parity test) that
     /// wants to know, before or after a run, whether a `Keep::Reduce` fold
-    /// took [`crate::wgsl::reduce_is_cooperative`]'s subgroup path or the
+    /// took `crate::wgsl::reduce_is_cooperative`'s subgroup path or the
     /// portable serial fold.
     #[must_use]
     pub fn caps(&self) -> WgslCaps {

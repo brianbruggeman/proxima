@@ -633,7 +633,10 @@ impl PackedCodec {
     /// Elements one block of this codec carries — [`crate::wgsl`]'s WGSL
     /// codec table needs this alongside [`Self::block_bytes`] the same way
     /// `operand_read`'s own `{offset} / N_ELEMENTS` / `{offset} % N_ELEMENTS`
-    /// split does here.
+    /// split does here. `crate::wgsl`/`crate::wgpu_driver` are the only
+    /// callers, both gated behind `wgpu-backend` — so is this, to keep the
+    /// bare-alloc tier free of a method nothing there calls.
+    #[cfg(feature = "wgpu-backend")]
     pub(crate) const fn block_elements(self) -> usize {
         match self {
             PackedCodec::Q4K | PackedCodec::Q5K | PackedCodec::Q6K => Q4K_BLOCK_ELEMENTS,
