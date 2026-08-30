@@ -2954,6 +2954,7 @@ dependencies = [
  "objc2-metal",
  "proxima",
  "proxima-gguf",
+ "proxima-onnx",
  "proxima-safetensors",
  "proxima-telemetry",
  "proxima-tensor",
