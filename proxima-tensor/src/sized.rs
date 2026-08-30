@@ -12,8 +12,10 @@
 //! Two families:
 //!
 //! - **Const-generic-shaped, build-time-only forever**: [`MAX_INLINE_RANK`],
-//!   [`READY_BATCH_CAPACITY`], [`MAX_INLINE_TERMS`], [`TILE_ROWS`],
-//!   [`TILE_COLS`], [`WIDTH_TILE_ROWS`], [`WIDTH_TILE_VECS`], [`DOT_LANES`]
+//!   [`READY_BATCH_CAPACITY`], [`MAX_INLINE_TERMS`], `TILE_ROWS`,
+//!   `TILE_COLS`, `WIDTH_TILE_ROWS`, `WIDTH_TILE_VECS` (all four
+//!   `target_arch = "aarch64"`-only, so an intra-doc link to them fails to
+//!   resolve on other targets), [`DOT_LANES`]
 //!   size a `SmallVec`/`ArrayVec` inline capacity or a fixed-size array /
 //!   `const ROWS: usize` kernel parameter directly -- there is no runtime
 //!   type to hold an override at any tier, exactly like
@@ -30,7 +32,7 @@
 //!   [`OVERSUBSCRIBE`], [`ROW_OVERSUBSCRIBE`], [`SPLIT_ALIGNMENT`],
 //!   [`MIN_MACS_PER_CHUNK`], [`MIN_QUANTIZE_BLOCKS_FOR_DISPATCH`],
 //!   [`MIN_TRANSPOSE_ELEMENTS_FOR_DISPATCH`], (aarch64-only)
-//!   [`NEON_COLUMN_PANEL_BUDGET_BYTES`], and (`cohort-staged-graph`-only)
+//!   `NEON_COLUMN_PANEL_BUDGET_BYTES`, and (`cohort-staged-graph`-only)
 //!   [`STAGED_BATCH_MIN_LEN`] are plain runtime values (not const
 //!   generics) read inside `cpu.rs`'s hot-path functions
 //!   (`evaluate_node_parallel`, `run_chunks_threaded`,
