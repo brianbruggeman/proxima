@@ -1,13 +1,15 @@
 //! A sans-IO reader for the ONNX model file format: the protobuf-encoded
 //! `ModelProto` message, parsed into faithful Rust structs.
 //!
-//! # Scope: parsing only
+//! # Scope: parsing, plus lowering to `proxima_tensor::Op`
 //!
 //! This crate reads the graph -- ops, in order, with their attributes,
-//! which initializers they read, what outputs they produce -- and stops
-//! there. It never translates a `NodeProto` into a `proxima_tensor::Op`;
-//! that is a separate, already-surveyed job, and mixing it in here would
-//! produce a half-done version of both.
+//! which initializers they read, what outputs they produce -- and, in
+//! [`lower`], composes each supported `NodeProto` into the closed
+//! [`proxima_tensor::Op`] algebra (three op forms, 17 `ScalarOp` bodies,
+//! `IndexMap` addressing -- see [`lower`]'s module doc). No new `Op` form
+//! or `ScalarOp` is ever added to serve an ONNX operator: an operator this
+//! module cannot compose is a recorded gap, not a reason to widen the ISA.
 //!
 //! # Tier split
 //!
@@ -60,6 +62,7 @@ extern crate alloc;
 pub mod config;
 pub mod decode;
 pub mod error;
+pub mod lower;
 pub mod messages;
 pub mod parser;
 pub mod pipe;
@@ -68,6 +71,7 @@ pub mod types;
 
 pub use decode::{ModelField, decode_model_field, decode_model_proto};
 pub use error::OnnxError;
+pub use lower::{Lowered, LowerError, lower_graph};
 pub use messages::{
     AttributeProto, Dimension, DimensionValue, GraphProto, ModelProto, NodeProto,
     OperatorSetIdProto, TensorProto, TensorShapeProto, TypeProto, TypeProtoMap, TypeProtoTensor,
