@@ -82,10 +82,25 @@ pub enum LowerError {
 
 /// One ONNX value's lowering state: which [`NodeId`] produces it and its
 /// concrete shape.
+///
+/// `view` is `None` for every physically produced value (an `Op` whose own
+/// iteration space equals `shape`). [`lower_unsqueeze`] is the one producer
+/// that sets it: `Unsqueeze` only inserts size-1 axes, so binding its output
+/// to a *new* `Op::Elementwise` would leave that inserted axis with no
+/// operand pinning its extent -- `shape::infer` requires every iteration
+/// axis be covered by at least one operand, which a single-operand reshape
+/// can never satisfy for a genuinely new axis. Instead `view` aliases
+/// straight to the pre-Unsqueeze `node`, recording which of *its* real axes
+/// (`Some`) or which are purely virtual padding (`None`) each logical axis
+/// of `shape` is, so [`operand_pattern`] can build the consuming op's
+/// `IndexPattern` directly against the real node -- exactly the
+/// `projection(3, &[0, 2])`-shaped pattern `lower::matmul2d` already builds
+/// by hand for this same broadcast shape.
 #[derive(Debug, Clone)]
 struct Value {
     node: NodeId,
     shape: Vec<u64>,
+    view: Option<Vec<Option<u16>>>,
 }
 
 /// The result of [`lower_graph`]: a self-contained `Op` program, the
@@ -129,7 +144,7 @@ pub fn lower_graph(graph: &GraphProto<'_>) -> Result<Lowered, LowerError> {
                 name: Some(tensor.name.to_string()),
             },
         );
-        values.insert(tensor.name.to_string(), Value { node, shape });
+        values.insert(tensor.name.to_string(), Value { node, shape, view: None });
         initializers.push((tensor.name.to_string(), data));
     }
 
@@ -147,7 +162,7 @@ pub fn lower_graph(graph: &GraphProto<'_>) -> Result<Lowered, LowerError> {
                 name: Some(input.name.to_string()),
             },
         );
-        values.insert(input.name.to_string(), Value { node, shape });
+        values.insert(input.name.to_string(), Value { node, shape, view: None });
         graph_inputs.push(input.name.to_string());
     }
 
@@ -182,11 +197,23 @@ fn lower_node(program: &mut Vec<Op>, values: &mut BTreeMap<String, Value>, node:
         "Sqrt" => lower_unary(program, values, node, ScalarOp::SquareRoot),
         "Neg" => lower_unary(program, values, node, ScalarOp::Negate),
         "Reciprocal" => lower_unary(program, values, node, ScalarOp::Reciprocal),
+        "Identity" => lower_unary(program, values, node, ScalarOp::Identity),
+        "Erf" => lower_unary(program, values, node, ScalarOp::Erf),
+        "Max" => lower_binary(program, values, node, ScalarOp::Maximum),
+        "Min" => lower_binary(program, values, node, ScalarOp::Minimum),
+        "Greater" => lower_binary(program, values, node, ScalarOp::Greater),
+        "Equal" => lower_binary(program, values, node, ScalarOp::Equal),
         "MatMul" => lower_matmul(program, values, node),
         "Gemm" => lower_gemm(program, values, node),
         "Softmax" => lower_softmax(program, values, node),
         "Transpose" => lower_transpose(program, values, node),
         "Gather" => lower_gather(program, values, node),
+        "Unsqueeze" => lower_unsqueeze(program, values, node),
+        "Constant" => lower_constant(program, values, node),
+        "ReduceSum" => lower_reduce(program, values, node, ScalarOp::Add, ReduceInit::Zero),
+        "ReduceMax" => lower_reduce(program, values, node, ScalarOp::Maximum, ReduceInit::NegativeInfinity),
+        "ReduceMin" => lower_reduce(program, values, node, ScalarOp::Minimum, ReduceInit::PositiveInfinity),
+        "ReduceProd" => lower_reduce(program, values, node, ScalarOp::Multiply, ReduceInit::One),
         other => Err(LowerError::UnsupportedOp { name: node.name.to_string(), op_type: other.to_string() }),
     }
 }
@@ -219,7 +246,7 @@ fn lookup_by_name<'value>(
 
 fn bind_output(values: &mut BTreeMap<String, Value>, node: &NodeProto<'_>, index: usize, id: NodeId, shape: Vec<u64>) {
     if let Some(name) = node.output.get(index) {
-        values.insert((*name).to_string(), Value { node: id, shape });
+        values.insert((*name).to_string(), Value { node: id, shape, view: None });
     }
 }
 
@@ -233,6 +260,10 @@ fn attr_int(node: &NodeProto<'_>, name: &str) -> Option<i64> {
 
 fn attr_float(node: &NodeProto<'_>, name: &str) -> Option<f32> {
     find_attr(node, name).map(|attribute| attribute.f)
+}
+
+fn attr_ints<'node>(node: &'node NodeProto<'_>, name: &str) -> Option<&'node [i64]> {
+    find_attr(node, name).map(|attribute| attribute.ints.as_slice())
 }
 
 fn identity_pattern(rank: usize) -> IndexPattern {
@@ -333,13 +364,36 @@ fn broadcast_pattern(operand_shape: &[u64], out_shape: &[u64]) -> IndexPattern {
     IndexPattern { iter_rank: out_rank, axes }
 }
 
+/// [`broadcast_pattern`] against `value`'s *logical* shape, then composed
+/// with `value.view` (see [`Value`]'s own doc) so the resulting
+/// [`IndexPattern`] addresses `value.node` at its real rank -- the general
+/// form of the by-hand `projection(3, &[0, 2])` [`matmul2d`] already builds
+/// for this exact broadcast shape.
+fn operand_pattern(value: &Value, out_shape: &[u64]) -> IndexPattern {
+    let out_rank = out_shape.len() as u16;
+    let logical = broadcast_pattern(&value.shape, out_shape);
+    let Some(view) = &value.view else { return logical };
+
+    let mut by_real_axis: alloc::collections::BTreeMap<u16, u16> = alloc::collections::BTreeMap::new();
+    for (logical_axis, axis_index) in logical.axes.iter().enumerate() {
+        let Some(real_axis) = view[logical_axis] else { continue };
+        if let [term] = axis_index.terms.as_slice() {
+            by_real_axis.insert(real_axis, term.axis);
+        }
+    }
+    let axes = (0..by_real_axis.len() as u16)
+        .map(|real_axis| AxisIndex { terms: core::iter::once(AxisTerm::projection(by_real_axis[&real_axis])).collect(), offset: 0 })
+        .collect();
+    IndexPattern { iter_rank: out_rank, axes }
+}
+
 fn lower_binary(program: &mut Vec<Op>, values: &mut BTreeMap<String, Value>, node: &NodeProto<'_>, body: ScalarOp) -> Result<(), LowerError> {
     let lhs = lookup(values, node, 0)?.clone();
     let rhs = lookup(values, node, 1)?.clone();
     let out_shape = broadcast_shapes(node, &lhs.shape, &rhs.shape)?;
     let operands = alloc::vec![
-        (lhs.node, IndexMap::Affine(broadcast_pattern(&lhs.shape, &out_shape))),
-        (rhs.node, IndexMap::Affine(broadcast_pattern(&rhs.shape, &out_shape))),
+        (lhs.node, IndexMap::Affine(operand_pattern(&lhs, &out_shape))),
+        (rhs.node, IndexMap::Affine(operand_pattern(&rhs, &out_shape))),
     ];
     let id = build_elementwise(program, body, operands);
     bind_output(values, node, 0, id, out_shape);
@@ -630,6 +684,94 @@ fn lower_gather(program: &mut Vec<Op>, values: &mut BTreeMap<String, Value>, nod
     let id = append(program, Op::Elementwise { dtype: DType::Float32, body: ScalarOp::Identity, operands: alloc::vec![(data.node, gathered_map)], name: None });
     let mut out_shape = indices.shape.clone();
     out_shape.extend_from_slice(&data.shape[1..]);
+    bind_output(values, node, 0, id, out_shape);
+    Ok(())
+}
+
+/// `Unsqueeze(axes)`: inserts a size-1 dimension at each position in `axes`
+/// (sorted ascending, matching this crate's own [`crate::lift`] emission).
+///
+/// Binds a [`Value`] view straight onto the pre-Unsqueeze `node` rather than
+/// appending a new `Op` -- see [`Value`]'s own doc for why a standalone
+/// single-operand reshape that introduces a genuinely new axis cannot be an
+/// `Op::Elementwise` of its own (`shape::infer` requires every iteration
+/// axis be pinned by some operand, and a fresh axis has none). This is the
+/// inverse of [`crate::lift::lift_graph`]'s `Unsqueeze` prelude for a
+/// broadcast operand.
+fn lower_unsqueeze(_program: &mut Vec<Op>, values: &mut BTreeMap<String, Value>, node: &NodeProto<'_>) -> Result<(), LowerError> {
+    let input = lookup(values, node, 0)?.clone();
+    let mut axes: Vec<u16> = attr_ints(node, "axes").unwrap_or(&[]).iter().map(|&value| value as u16).collect();
+    axes.sort_unstable();
+    let out_rank = input.shape.len() + axes.len();
+    let mut out_shape = Vec::with_capacity(out_rank);
+    let mut view: Vec<Option<u16>> = Vec::with_capacity(out_rank);
+    let mut input_axis = 0usize;
+    for position in 0..out_rank as u16 {
+        if axes.contains(&position) {
+            out_shape.push(1u64);
+            view.push(None);
+        } else {
+            out_shape.push(input.shape[input_axis]);
+            let real_axis = match &input.view {
+                Some(existing) => existing[input_axis],
+                None => Some(input_axis as u16),
+            };
+            view.push(real_axis);
+            input_axis += 1;
+        }
+    }
+    if let Some(output_name) = node.output.first() {
+        values.insert((*output_name).to_string(), Value { node: input.node, shape: out_shape, view: Some(view) });
+    }
+    Ok(())
+}
+
+/// `Constant(value: TensorProto)`: this pass only supports a *uniform*
+/// tensor value (every element equal), which is exactly the shape
+/// [`crate::lift::lift_graph`]'s own `Op::Constant` -> `Constant` node
+/// emission produces -- [`Op::Constant`] itself carries a single scalar
+/// broadcast across its declared shape, never per-element data.
+fn lower_constant(program: &mut Vec<Op>, values: &mut BTreeMap<String, Value>, node: &NodeProto<'_>) -> Result<(), LowerError> {
+    let tensor = find_attr(node, "value").and_then(|attribute| attribute.t.as_ref()).ok_or_else(|| LowerError::UnsupportedShape {
+        name: node.name.to_string(),
+        op_type: node.op_type.to_string(),
+        reason: "Constant node has no \"value\" tensor attribute".to_string(),
+    })?;
+    let shape = tensor_shape(tensor);
+    let decoded = decode_numeric_tensor(tensor).map_err(|_| LowerError::UndecodableInitializer { name: node.name.to_string(), data_type: tensor.data_type })?;
+    let value = decoded.first().copied().unwrap_or(0.0);
+    if decoded.iter().any(|&element| element != value) {
+        return Err(LowerError::UnsupportedShape {
+            name: node.name.to_string(),
+            op_type: node.op_type.to_string(),
+            reason: "Constant lowering supports a uniform tensor value only".to_string(),
+        });
+    }
+    let id = append(program, Op::Constant { dtype: DType::Float32, shape: shape.iter().map(|&extent| Extent::Static(extent as u32)).collect(), value });
+    bind_output(values, node, 0, id, shape);
+    Ok(())
+}
+
+/// `ReduceSum`/`ReduceMax`/`ReduceMin`/`ReduceProd` with an `axes` attribute
+/// (opset<13 attribute form, matching [`crate::lift::lift_graph`]'s own
+/// emission) and `keepdims == 0` -- the only form [`Op::Reduce`] can
+/// express, since it drops the reduced axes rather than keeping a size-1
+/// placeholder.
+fn lower_reduce(program: &mut Vec<Op>, values: &mut BTreeMap<String, Value>, node: &NodeProto<'_>, body: ScalarOp, init: ReduceInit) -> Result<(), LowerError> {
+    let input = lookup(values, node, 0)?.clone();
+    let rank = input.shape.len();
+    let keepdims = attr_int(node, "keepdims").unwrap_or(0);
+    if keepdims != 0 {
+        return Err(LowerError::UnsupportedShape {
+            name: node.name.to_string(),
+            op_type: node.op_type.to_string(),
+            reason: "reduce lowering supports keepdims=0 only".to_string(),
+        });
+    }
+    let axes: Vec<usize> = attr_ints(node, "axes").unwrap_or(&[]).iter().map(|&value| if value < 0 { value + rank as i64 } else { value } as usize).collect();
+    let kept: Vec<u16> = (0..rank as u16).filter(|axis| !axes.contains(&(*axis as usize))).collect();
+    let out_shape: Vec<u64> = kept.iter().map(|&axis| input.shape[axis as usize]).collect();
+    let id = build_reduce(program, body, init, input.node, identity_pattern(rank), projection(rank as u16, &kept), None);
     bind_output(values, node, 0, id, out_shape);
     Ok(())
 }
