@@ -120,6 +120,39 @@ impl_convert_pipe_as!(u32 => i32);
 impl_convert_pipe_as!(f32 => f64);
 impl_convert_pipe_as!(f64 => f32);
 
+// reflexive pairs -- `Convert<T, T>` for every machine scalar type `cpu.rs`'s
+// mixed-precision reduce dispatch needs to treat "no widening required" as
+// the same `Convert` call as a real widen, rather than a special case: the
+// (f32, f32) shipped pair goes through this identity instead of skipping the
+// conversion step entirely.
+macro_rules! impl_convert_pipe_reflexive {
+    ($ty:ty) => {
+        impl Pipe for Convert<$ty, $ty> {
+            type In = $ty;
+            type Out = $ty;
+            type Err = Infallible;
+
+            #[inline(always)]
+            fn call(&self, input: $ty) -> impl Future<Output = Result<$ty, Infallible>> {
+                async move { Ok(input) }
+            }
+        }
+    };
+}
+
+impl_convert_pipe_reflexive!(i8);
+impl_convert_pipe_reflexive!(u8);
+impl_convert_pipe_reflexive!(i16);
+impl_convert_pipe_reflexive!(u16);
+impl_convert_pipe_reflexive!(i32);
+impl_convert_pipe_reflexive!(u32);
+impl_convert_pipe_reflexive!(i64);
+impl_convert_pipe_reflexive!(u64);
+impl_convert_pipe_reflexive!(i128);
+impl_convert_pipe_reflexive!(u128);
+impl_convert_pipe_reflexive!(f32);
+impl_convert_pipe_reflexive!(f64);
+
 impl Pipe for Convert<bool, u8> {
     type In = bool;
     type Out = u8;
