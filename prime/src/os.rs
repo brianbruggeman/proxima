@@ -2,6 +2,9 @@
 
 pub mod sizing;
 
+#[cfg(feature = "runtime-prime-thread-identity")]
+pub mod thread_identity;
+
 #[cfg(feature = "runtime-prime-reactor")]
 pub mod reactor;
 

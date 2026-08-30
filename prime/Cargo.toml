@@ -81,6 +81,12 @@ runtime-prime             = []
 # runtime feature that survives that test, which is what makes it the floor.
 runtime-prime-inbox-alloc = ["runtime-prime", "alloc"]
 runtime-prime-inbox-const = ["runtime-prime"]
+# gate-row C1 of the no_std + alloc cliff plan (core/thread_identity.rs,
+# os/thread_identity.rs): a portable per-thread identity trait so the
+# TLS-reaching sites in inbox.rs / local_executor.rs can eventually drop
+# `std::thread_local!` directly. std-only impl today (StdThreadIdentity),
+# not yet wired into any consumer site (that is C2/C3).
+runtime-prime-thread-identity = ["runtime-prime", "std"]
 # dynamic inbox: lane registry grows on demand (no NoLanes/exhaustion = no task
 # loss) and each lane ring allocates lazily on first claim (memory tracks active
 # producers, not num_lanes). N-lane floor allocated eagerly. default-off until
@@ -187,6 +193,11 @@ required-features = [
     "runtime-prime-inbox-alloc",
     "runtime-prime-reactor",
 ]
+
+[[bench]]
+name = "bench_thread_identity"
+harness = false
+required-features = ["runtime-prime-thread-identity"]
 
 [[bench]]
 name = "bench_reactor_wakeup"
