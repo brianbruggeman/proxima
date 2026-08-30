@@ -41,6 +41,17 @@
 //! something `plan_named`/`execute_plan_named` consult on their own — so one
 //! process can plan one program on [`Backend::Cpu`] and the next on
 //! [`Backend::Metal`] without touching an environment variable in between.
+//!
+//! # Why plan/execute is not a `Pipe`
+//!
+//! Adjudicated 2026-08-30 with both call sites written out: wrapping the pair
+//! as a pipe passes the pipe question (it is the `AdamStep` shape — interior-
+//! mutable state, `call` delegating to the free function) but fails the
+//! relocation question. The call sites are line-for-line equivalent, every
+//! resilience combinator requires `SendPipe` while an interior-mutable `Plan`
+//! is `!Sync`, and nothing downstream consumes `Evaluated` as a pipe input —
+//! so a wrapper would relocate the impl without enabling any composition. The
+//! free-function pair stays.
 
 use std::sync::OnceLock;
 
