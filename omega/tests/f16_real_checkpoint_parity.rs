@@ -18,6 +18,7 @@
 //! matching every other `*_real_checkpoint_parity.rs` test in this
 //! workspace's posture.
 
+#![cfg(all(feature = "metal", target_os = "macos"))]
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use std::io::{Read, Seek, SeekFrom};
