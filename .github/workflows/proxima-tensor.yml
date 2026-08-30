@@ -49,6 +49,27 @@ jobs:
         uses: taiki-e/install-action@nextest
       - run: bash scripts/proxima-tensor-gate.sh
 
+  # proxima-autograd's own gate: reverse-mode autodiff over a proxima-tensor
+  # program. Measured 2026-08-30: the crate appeared in ZERO workflows and
+  # ZERO gate scripts, the same gap this file's own header documents for
+  # proxima-tensor before 6266aba. See scripts/proxima-autograd-gate.sh for
+  # the full cell list and the nonzero-count doctest assertion.
+  proxima-autograd-gate:
+    name: proxima-autograd-gate.sh
+    needs: changes
+    if: needs.changes.outputs.tensor == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+          targets: x86_64-unknown-linux-gnu
+      - uses: Swatinem/rust-cache@v2
+      - name: install nextest
+        uses: taiki-e/install-action@nextest
+      - run: bash scripts/proxima-autograd-gate.sh
+
   # proxima-tokenizer's own gate: `default = ["std"]` does not pull in
   # `gguf`, so the crate's own documented `cargo test -p proxima-tokenizer`
   # compiles none of gguf.rs's tests and reports GREEN having run zero of

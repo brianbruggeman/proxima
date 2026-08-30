@@ -135,10 +135,12 @@ packages = [
     "proxima-onnx",
     "proxima-model-interop",
     "proxima-tokenizer",
+    "proxima-autograd",
 ]
 paths = [
     "scripts/proxima-tensor-gate.sh",
     "scripts/proxima-tokenizer-gate.sh",
+    "scripts/proxima-autograd-gate.sh",
     ".github/workflows/proxima-tensor.yml",
     "proxima-tensor/specs/**",
 ]
