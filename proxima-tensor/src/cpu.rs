@@ -1998,7 +1998,7 @@ fn push_indices_node(map: &IndexMap, nodes: &mut BTreeSet<NodeId>) {
     }
 }
 
-fn buffer_of<B: Deref<Target = [f32]>>(buffers: &[Option<B>], node: NodeId) -> Result<&[f32], TensorError> {
+fn buffer_of<T, B: Deref<Target = [T]>>(buffers: &[Option<B>], node: NodeId) -> Result<&[T], TensorError> {
     buffers[node.0 as usize]
         .as_deref()
         .ok_or(TensorError::NotLowerable {
@@ -2339,19 +2339,47 @@ fn operand_buffers<'a, B: Deref<Target = [f32]>>(
         .collect()
 }
 
+/// A raw gather-index buffer element: whatever width the source buffer
+/// stores a fetched row index at, reduced to the one signed 64-bit value
+/// [`GatherCursor::fetch_and_advance`] bounds-checks and scales by
+/// `element_stride`. `f32` is the f32 pipeline's own index width (every
+/// buffer that pipeline carries, including `indices`, is f32 — see
+/// [`crate::map::IndexMap`]'s own doc); `i64` is the typed evaluator's
+/// canonical index width ([`canonical_index_buffers`]'s own doc). No other
+/// width ever backs a [`GatherCursor`] directly.
+trait GatherIndexElement: Copy {
+    fn as_gather_index(self) -> i64;
+}
+
+impl GatherIndexElement for f32 {
+    fn as_gather_index(self) -> i64 {
+        self as i64
+    }
+}
+
+impl GatherIndexElement for i64 {
+    fn as_gather_index(self) -> i64 {
+        self
+    }
+}
+
 /// Per-step gather state for one operand: an incrementally-advanced offset
 /// into the `indices` buffer (mirroring how a normal operand's own running
 /// offset advances by a precomputed stride each step), plus what to do with
-/// a fetched value once read.
-struct GatherCursor<'a> {
-    buffer: &'a [f32],
+/// a fetched value once read. `E` is the index buffer's own element width
+/// ([`GatherIndexElement`]); it defaults to `f32`, the f32 pipeline's only
+/// width, so every existing call site naming `GatherCursor<'a>` keeps
+/// compiling unchanged. [`fill_gather_cursors_typed`] is the only source of
+/// `GatherCursor<'a, i64>`.
+struct GatherCursor<'a, E = f32> {
+    buffer: &'a [E],
     offset: i64,
     stride: i64,
     element_stride: i64,
     extent: u64,
 }
 
-impl GatherCursor<'_> {
+impl<E: GatherIndexElement> GatherCursor<'_, E> {
     /// Reads the next index, advances the cursor, and returns the offset
     /// contribution that index adds to the operand's own running offset — a
     /// real error, not a clamp or a wraparound, when the fetched index falls
@@ -2359,7 +2387,7 @@ impl GatherCursor<'_> {
     fn fetch_and_advance(&mut self, node: NodeId) -> Result<i64, TensorError> {
         let raw = self.buffer[self.offset as usize];
         self.offset += self.stride;
-        let index = raw as i64;
+        let index = raw.as_gather_index();
         if index < 0 || index as u64 >= self.extent {
             return Err(TensorError::GatherIndexOutOfRange {
                 node,
@@ -2407,6 +2435,53 @@ fn fill_gather_cursors<'a, B: Deref<Target = [f32]>>(
                 #[cfg(feature = "instrument")]
                 {
                     let row_index = buffer[offset as usize] as i64;
+                    if row_index >= 0 {
+                        instrument::record_gather_row(*source, row_index as u64);
+                    }
+                }
+                Ok(GatherCursor {
+                    buffer,
+                    offset,
+                    stride: stride_dim.map_or(0, |dim| gather_access.index_layout.stride(dim)),
+                    element_stride: gather_access.element_stride,
+                    extent: gather_access.extent,
+                })
+            })
+            .transpose()?;
+    }
+    Ok(())
+}
+
+/// [`fill_gather_cursors`]'s typed counterpart: sources each cursor's raw
+/// index values from `index_buffers` — the canonical `i64` table
+/// [`canonical_index_buffers`] builds once at execution start — rather than
+/// the operand buffer table `fill_gather_cursors` reads from. The typed
+/// evaluator's index nodes carry their own integer dtype, never the
+/// program's compute dtype, so they cannot live in the same `buffers: &[T]`
+/// table a gathered operand's own values do.
+fn fill_gather_cursors_typed<'a>(
+    resolved: &BoundOp,
+    index_buffers: &'a [Option<Vec<i64>>],
+    coordinate: &[u64],
+    stride_dim: Option<u16>,
+    cursors: &mut [Option<GatherCursor<'a, i64>>],
+) -> Result<(), TensorError> {
+    for (slot, (source, _, gather)) in cursors.iter_mut().zip(resolved.operands()) {
+        #[cfg(not(feature = "instrument"))]
+        let _ = source;
+        *slot = gather
+            .as_ref()
+            .map(|gather_access| {
+                let buffer = index_buffers[gather_access.indices.0 as usize]
+                    .as_deref()
+                    .ok_or(TensorError::NotLowerable {
+                        node: gather_access.indices,
+                        reason: "gather index buffer missing at evaluation time",
+                    })?;
+                let offset = gather_access.index_layout.offset_of(coordinate);
+                #[cfg(feature = "instrument")]
+                {
+                    let row_index = buffer[offset as usize];
                     if row_index >= 0 {
                         instrument::record_gather_row(*source, row_index as u64);
                     }
@@ -10828,13 +10903,13 @@ enum TypedPlan {
 /// exempt from the uniform/widened dtype check entirely — it may carry any
 /// [`DType::is_integer`] dtype regardless of what the rest of the program
 /// runs at — but a non-integer index dtype (a float, or `Bool`) is an
-/// honest `NotLowerable`, never silently coerced. This plan-level
-/// recognition is scoped to what it says: [`run_typed_program`] and
-/// [`run_widened_program`] still reject an actual gather node outright (see
-/// either function's own "does not support gather yet" doc) — regeneralizing
-/// their execution loops to read a third, index-typed buffer table is a
-/// materially bigger change than fits alongside teaching the plan to stop
-/// rejecting the shape at the door.
+/// honest `NotLowerable`, never silently coerced. [`run_typed_program`] and
+/// [`run_widened_program`] execute this role for real: [`canonical_index_buffers`]
+/// widens every index node's caller-supplied buffer into one canonical
+/// `i64` table once, up front, and [`fill_gather_cursors_typed`] reads a
+/// gathered operand's fetched index from that table instead of the
+/// compute-dtype operand table — the plan only had to stop rejecting the
+/// shape at the door once that table existed to back it.
 ///
 /// Two shapes pass beyond that, everything else is
 /// [`TensorError::NotLowerable`]:
@@ -11034,6 +11109,83 @@ fn evaluate_widened_typed(
     }
 }
 
+/// Widens one caller-supplied index block into [`GatherCursor`]'s canonical
+/// `i64` width, matching the same lossy `raw as i64` truncation
+/// [`GatherCursor::fetch_and_advance`]'s f32 sibling already performs at
+/// every element read (`i128`/`u128`/`u64` values past `i64::MAX` truncate
+/// exactly as they would there) — paid once per index buffer here instead
+/// of once per gathered element. A non-integer `TypedBuffer` variant is an
+/// honest `NotLowerable`: [`typed_program_plan`] already rejected a
+/// non-integer index node's *declared* dtype, this rejects the buffer the
+/// caller actually handed over disagreeing with that at the same gate.
+fn typed_buffer_to_index(node: NodeId, buffer: &TypedBuffer) -> Result<Vec<i64>, TensorError> {
+    match buffer {
+        TypedBuffer::Int8(data) => Ok(data.iter().map(|&value| i64::from(value)).collect()),
+        TypedBuffer::UInt8(data) => Ok(data.iter().map(|&value| i64::from(value)).collect()),
+        TypedBuffer::Int16(data) => Ok(data.iter().map(|&value| i64::from(value)).collect()),
+        TypedBuffer::UInt16(data) => Ok(data.iter().map(|&value| i64::from(value)).collect()),
+        TypedBuffer::Int32(data) => Ok(data.iter().map(|&value| i64::from(value)).collect()),
+        TypedBuffer::UInt32(data) => Ok(data.iter().map(|&value| i64::from(value)).collect()),
+        TypedBuffer::Int64(data) => Ok(data.clone()),
+        TypedBuffer::UInt64(data) => Ok(data.iter().map(|&value| value as i64).collect()),
+        TypedBuffer::Int128(data) => Ok(data.iter().map(|&value| value as i64).collect()),
+        TypedBuffer::UInt128(data) => Ok(data.iter().map(|&value| value as i64).collect()),
+        TypedBuffer::Float16(_) | TypedBuffer::BFloat16(_) | TypedBuffer::Float32(_) | TypedBuffer::Float64(_) => {
+            Err(TensorError::NotLowerable {
+                node,
+                reason: "a gather index buffer must carry an integer dtype",
+            })
+        }
+    }
+}
+
+/// Builds [`fill_gather_cursors_typed`]'s canonical `i64` index-buffer
+/// table, one entry per [`index_node_ids`] member, from the same
+/// caller-supplied `blocks` [`run_typed_program`]/[`run_widened_program`]
+/// bind their own compute-dtype operand table from — every index node this
+/// evaluator supports is a caller-supplied [`Op::Input`] leaf, the shape
+/// [`crate::spec`]'s `Gather` table construction and every differential
+/// gather test in this module actually produce. A computed index node
+/// (derived through `Elementwise`/`Reduce`/`Iota`/`Constant` instead of
+/// supplied as a block) is an honest `NotLowerable` rather than a second,
+/// unexercised execution nest guessed at without a test to prove it right —
+/// see [`TensorError::NotLowerable`]'s own doc on preferring a named gap
+/// over a silently wrong result.
+fn canonical_index_buffers(
+    program: &[Op],
+    shapes: &shape::Shapes,
+    block_nodes: &[NodeId],
+    blocks: &[TypedBuffer],
+) -> Result<Vec<Option<Vec<i64>>>, TensorError> {
+    let index_nodes = index_node_ids(program);
+    let mut index_buffers: Vec<Option<Vec<i64>>> = vec![None; program.len()];
+    for (node, buffer) in block_nodes.iter().zip(blocks.iter()) {
+        if !index_nodes.contains(node) {
+            continue;
+        }
+        let data = typed_buffer_to_index(*node, buffer)?;
+        let expected = element_count(shapes.of(*node));
+        if data.len() != expected {
+            return Err(TensorError::InputSizeMismatch {
+                node: *node,
+                expected,
+                found: data.len(),
+            });
+        }
+        index_buffers[node.0 as usize] = Some(data);
+    }
+    for node in &index_nodes {
+        if index_buffers[node.0 as usize].is_none() {
+            return Err(TensorError::NotLowerable {
+                node: *node,
+                reason: "a gather index node must be a caller-supplied input; a computed index \
+                         node is not supported yet",
+            });
+        }
+    }
+    Ok(index_buffers)
+}
+
 /// The monomorphic body [`evaluate_typed`] dispatches into per dtype: shape
 /// inference, block binding, and a scalar-or-`T=f32`-specialized walk of
 /// every resolved node — the same three stages [`prepare`]/[`evaluate_pooled`]
@@ -11081,8 +11233,14 @@ fn run_typed_program<T: Element>(
         });
     }
 
+    let index_nodes = index_node_ids(program);
+    let index_buffers = canonical_index_buffers(program, &shapes, &block_nodes, blocks)?;
+
     let mut buffers: Vec<Option<Cow<'_, [T]>>> = vec![None; program.len()];
     for (node, buffer) in block_nodes.iter().zip(blocks.iter()) {
+        if index_nodes.contains(node) {
+            continue;
+        }
         let data = T::unwrap_block(buffer).ok_or(TensorError::NotLowerable {
             node: *node,
             reason: "typed evaluator input dtype does not match the program's uniform dtype",
@@ -11099,26 +11257,18 @@ fn run_typed_program<T: Element>(
     }
 
     let resolved = bind::bind(program, &shapes, &effective_outputs)?;
-    for node in &resolved {
-        if node.operands().iter().any(|(_, _, lookup)| lookup.is_some()) {
-            return Err(TensorError::NotLowerable {
-                node: node.node,
-                reason: "the typed evaluator does not support gather yet (indices stay f32-only)",
-            });
-        }
-    }
 
     let retires = node_retirement(&resolved, &effective_outputs);
     let mut free_buffers: Vec<Vec<T>> = Vec::new();
     for (position, node) in resolved.iter().enumerate() {
         let mut output = typed_take_or_allocate(&mut free_buffers, node_output_len(node));
         match &node.kind {
-            BoundOpKind::Elementwise { .. } => run_elementwise_typed(node, &buffers, &mut output)?,
+            BoundOpKind::Elementwise { .. } => run_elementwise_typed(node, &buffers, &index_buffers, &mut output)?,
             BoundOpKind::Reduce { keep: Keep::Reduce, .. } => {
-                run_reduce_typed(node, &buffers, &mut output)?;
+                run_reduce_typed(node, &buffers, &index_buffers, &mut output)?;
             }
             BoundOpKind::Reduce { keep: Keep::Scan, .. } => {
-                run_scan_typed(node, &buffers, &mut output)?;
+                run_scan_typed(node, &buffers, &index_buffers, &mut output)?;
             }
             BoundOpKind::Iota => run_iota_typed(&mut output),
             BoundOpKind::Constant { value } => run_constant_typed(*value, &mut output),
@@ -11199,9 +11349,15 @@ where
         });
     }
 
+    let index_nodes = index_node_ids(program);
+    let index_buffers = canonical_index_buffers(program, &shapes, &block_nodes, blocks)?;
+
     let mut buffers_in: Vec<Option<Cow<'_, [TIn]>>> = vec![None; program.len()];
     let mut buffers_out: Vec<Option<Cow<'_, [TAcc]>>> = vec![None; program.len()];
     for (node, buffer) in block_nodes.iter().zip(blocks.iter()) {
+        if index_nodes.contains(node) {
+            continue;
+        }
         let expected = element_count(shapes.of(*node));
         if program[node.0 as usize].dtype() == TIn::DTYPE {
             let data = TIn::unwrap_block(buffer).ok_or(TensorError::NotLowerable {
@@ -11233,14 +11389,6 @@ where
     }
 
     let resolved = bind::bind(program, &shapes, &effective_outputs)?;
-    for node in &resolved {
-        if node.operands().iter().any(|(_, _, lookup)| lookup.is_some()) {
-            return Err(TensorError::NotLowerable {
-                node: node.node,
-                reason: "the typed evaluator does not support gather yet (indices stay f32-only)",
-            });
-        }
-    }
 
     let retires = node_retirement(&resolved, &effective_outputs);
     let mut free_in: Vec<Vec<TIn>> = Vec::new();
@@ -11251,9 +11399,15 @@ where
         if node.dtype == TIn::DTYPE {
             let mut output = typed_take_or_allocate(&mut free_in, node_output_len(node));
             match &node.kind {
-                BoundOpKind::Elementwise { .. } => run_elementwise_typed(node, &buffers_in, &mut output)?,
-                BoundOpKind::Reduce { keep: Keep::Reduce, .. } => run_reduce_typed(node, &buffers_in, &mut output)?,
-                BoundOpKind::Reduce { keep: Keep::Scan, .. } => run_scan_typed(node, &buffers_in, &mut output)?,
+                BoundOpKind::Elementwise { .. } => {
+                    run_elementwise_typed(node, &buffers_in, &index_buffers, &mut output)?;
+                }
+                BoundOpKind::Reduce { keep: Keep::Reduce, .. } => {
+                    run_reduce_typed(node, &buffers_in, &index_buffers, &mut output)?;
+                }
+                BoundOpKind::Reduce { keep: Keep::Scan, .. } => {
+                    run_scan_typed(node, &buffers_in, &index_buffers, &mut output)?;
+                }
                 BoundOpKind::Iota => run_iota_typed(&mut output),
                 BoundOpKind::Constant { value } => run_constant_typed(*value, &mut output),
             }
@@ -11276,9 +11430,15 @@ where
             }
             let mut output = typed_take_or_allocate(&mut free_out, node_output_len(node));
             match &node.kind {
-                BoundOpKind::Elementwise { .. } => run_elementwise_typed(node, &buffers_out, &mut output)?,
-                BoundOpKind::Reduce { keep: Keep::Reduce, .. } => run_reduce_typed(node, &buffers_out, &mut output)?,
-                BoundOpKind::Reduce { keep: Keep::Scan, .. } => run_scan_typed(node, &buffers_out, &mut output)?,
+                BoundOpKind::Elementwise { .. } => {
+                    run_elementwise_typed(node, &buffers_out, &index_buffers, &mut output)?;
+                }
+                BoundOpKind::Reduce { keep: Keep::Reduce, .. } => {
+                    run_reduce_typed(node, &buffers_out, &index_buffers, &mut output)?;
+                }
+                BoundOpKind::Reduce { keep: Keep::Scan, .. } => {
+                    run_scan_typed(node, &buffers_out, &index_buffers, &mut output)?;
+                }
                 BoundOpKind::Iota => run_iota_typed(&mut output),
                 BoundOpKind::Constant { value } => run_constant_typed(*value, &mut output),
             }
@@ -11369,12 +11529,14 @@ fn run_constant_typed<T: Element>(value: f32, output: &mut [T]) {
 /// The typed counterpart of [`run_elementwise`]: same coordinate walk
 /// (`fill_running_offsets`/`unflatten_into`/`split_innermost` are pure
 /// geometry over `&[u64]`/[`bind::Layout`], with no f32 dependence, so they
-/// are shared verbatim), but no width-tile SIMD fast path and no gather
-/// cursor — see [`run_typed_program`]'s doc for why both are still only on
-/// the f32 side.
+/// are shared verbatim) and the same [`GatherCursor`]/[`fill_gather_cursors_typed`]
+/// gather step [`run_elementwise`]'s own generic loop uses, sourced from
+/// `index_buffers` instead of `buffers` — no width-tile SIMD fast path,
+/// which is still f32-only (see [`run_typed_program`]'s doc).
 fn run_elementwise_typed<T: Element>(
     resolved: &BoundOp,
     buffers: &[Option<Cow<'_, [T]>>],
+    index_buffers: &[Option<Vec<i64>>],
     output: &mut [T],
 ) -> Result<(), TensorError> {
     let (outer_extents, inner_len) = split_innermost(&resolved.extents);
@@ -11389,16 +11551,28 @@ fn run_elementwise_typed<T: Element>(
         .map(|(_, view, _)| view.stride(innermost_dim))
         .collect();
     let mut running: Vec<i64> = vec![0; raw.len()];
+    let mut gather_cursors: Vec<Option<GatherCursor<'_, i64>>> = (0..raw.len()).map(|_| None).collect();
     let mut outer_coordinate = vec![0u64; outer_extents.len()];
 
     for outer_position in 0..odometer_len(outer_extents) as usize {
         unflatten_into(outer_position as u64, outer_extents, &mut outer_coordinate);
         fill_running_offsets(resolved, &outer_coordinate, &mut running);
+        fill_gather_cursors_typed(
+            resolved,
+            index_buffers,
+            &outer_coordinate,
+            Some(innermost_dim),
+            &mut gather_cursors,
+        )?;
         let out_base = outer_position * inner_len;
 
         for step in 0..inner_len {
             for (index, data) in raw.iter().enumerate() {
-                operand_values[index] = data[running[index] as usize];
+                let mut offset = running[index];
+                if let Some(cursor) = gather_cursors[index].as_mut() {
+                    offset += cursor.fetch_and_advance(resolved.node)?;
+                }
+                operand_values[index] = data[offset as usize];
                 running[index] += strides[index];
             }
             output[out_base + step] =
@@ -11452,20 +11626,28 @@ unsafe fn reinterpret_slice_mut<T: 'static>(slice: &mut [T]) -> &mut [f32] {
 /// [`Op::Reduce`] with `Keep::Reduce`, at any width [`Element`] covers.
 ///
 /// This is the specialization point the module doc promises: for `T = f32`
-/// it does not run a second reduction nest at all — it reinterprets the
-/// typed evaluator's own `Vec<f32>` buffers as the `&[f32]` the existing
-/// NEON-tiled [`run_reduce`] already takes (sound because [`Element`]'s
-/// `'static` bound lets [`TypeId`] prove `T` really is `f32` first) and
-/// calls that function directly, so the GEMM tiling, dot-fold, and
-/// width-fast paths all still fire exactly as they do for [`evaluate`]. Only
-/// every other width falls through to [`run_reduce_generic`], the one new
-/// implementation this evaluator adds.
+/// with no gathered operand, it does not run a second reduction nest at all
+/// — it reinterprets the typed evaluator's own `Vec<f32>` buffers as the
+/// `&[f32]` the existing NEON-tiled [`run_reduce`] already takes (sound
+/// because [`Element`]'s `'static` bound lets [`TypeId`] prove `T` really is
+/// `f32` first) and calls that function directly, so the GEMM tiling,
+/// dot-fold, and width-fast paths all still fire exactly as they do for
+/// [`evaluate`]. A gathered operand skips this specialization even at `T =
+/// f32`: [`run_reduce`]'s own [`fill_gather_cursors`] reads an index node's
+/// value out of the *same* `&[f32]` buffer table its operands live in, but
+/// the typed evaluator's index nodes live in the separate `index_buffers`
+/// table [`canonical_index_buffers`] builds — reinterpreting `buffers` alone
+/// would leave `run_reduce` unable to see them. Every other width, and every
+/// gathered node regardless of width, falls through to
+/// [`run_reduce_generic`].
 fn run_reduce_typed<T: Element>(
     resolved: &BoundOp,
     buffers: &[Option<Cow<'_, [T]>>],
+    index_buffers: &[Option<Vec<i64>>],
     output: &mut [T],
 ) -> Result<(), TensorError> {
-    if TypeId::of::<T>() == TypeId::of::<f32>() {
+    let has_gather = resolved.operands().iter().any(|(_, _, lookup)| lookup.is_some());
+    if !has_gather && TypeId::of::<T>() == TypeId::of::<f32>() {
         let buffers_f32: Vec<Option<&[f32]>> = buffers
             .iter()
             .map(|slot| {
@@ -11479,7 +11661,7 @@ fn run_reduce_typed<T: Element>(
         let output_f32 = unsafe { reinterpret_slice_mut(output) };
         return run_reduce(resolved, &buffers_f32, output_f32);
     }
-    run_reduce_generic(resolved, buffers, output)
+    run_reduce_generic(resolved, buffers, index_buffers, output)
 }
 
 /// The scalar reduction nest generic over every [`Element`] width — the
@@ -11489,12 +11671,13 @@ fn run_reduce_typed<T: Element>(
 /// [`Element::apply`]/[`eval_body_typed`] instead of `apply_scalar_op`/
 /// `eval_body_shape` so it type-checks for every width, and fallible where
 /// [`Element::apply`] is (an unsupported op, or an integer division that has
-/// no representable result). Gather is never reached here — the typed
-/// evaluator already rejects any node with a gathered operand before this
-/// runs, in [`run_typed_program`].
+/// no representable result). Same [`GatherCursor`]/[`fill_gather_cursors_typed`]
+/// step [`run_reduce`]'s own generic fallback uses, sourced from
+/// `index_buffers`.
 fn run_reduce_generic<T: Element>(
     resolved: &BoundOp,
     buffers: &[Option<Cow<'_, [T]>>],
+    index_buffers: &[Option<Vec<i64>>],
     output: &mut [T],
 ) -> Result<(), TensorError> {
     let BoundOpKind::Reduce {
@@ -11532,6 +11715,7 @@ fn run_reduce_generic<T: Element>(
         .map(|(_, view, _)| last_output_dim.map_or(0, |dim| view.stride(dim)))
         .collect();
     let mut running: Vec<i64> = vec![0; raw.len()];
+    let mut gather_cursors: Vec<Option<GatherCursor<'_, i64>>> = (0..raw.len()).map(|_| None).collect();
     let mut leading_coordinate = vec![0u64; leading_extents.len()];
     let mut reduction_coordinate = vec![0u64; reduction_extents.len()];
     let mut full_coordinate = vec![0u64; resolved.extents.len()];
@@ -11556,10 +11740,21 @@ fn run_reduce_generic<T: Element>(
                 &mut full_coordinate,
             );
             fill_running_offsets(resolved, &full_coordinate, &mut running);
+            fill_gather_cursors_typed(
+                resolved,
+                index_buffers,
+                &full_coordinate,
+                last_output_dim,
+                &mut gather_cursors,
+            )?;
 
             for slot in &mut accumulator {
                 for (index, data) in raw.iter().enumerate() {
-                    operand_values[index] = data[running[index] as usize];
+                    let mut offset = running[index];
+                    if let Some(cursor) = gather_cursors[index].as_mut() {
+                        offset += cursor.fetch_and_advance(resolved.node)?;
+                    }
+                    operand_values[index] = data[offset as usize];
                     running[index] += strides[index];
                 }
                 let value = eval_body_typed(resolved.node, body, &operand_values, &mut step_values)?;
@@ -11583,14 +11778,17 @@ fn run_reduce_generic<T: Element>(
 }
 
 /// [`Op::Reduce`] with `Keep::Scan`, at any width [`Element`] covers — the
-/// scan counterpart of [`run_reduce_typed`], same `T = f32` specialization
-/// down to the existing NEON-aware [`run_scan`].
+/// scan counterpart of [`run_reduce_typed`], same `T = f32`, gather-free
+/// specialization down to the existing NEON-aware [`run_scan`] (see
+/// [`run_reduce_typed`]'s own doc for why a gathered operand skips it).
 fn run_scan_typed<T: Element>(
     resolved: &BoundOp,
     buffers: &[Option<Cow<'_, [T]>>],
+    index_buffers: &[Option<Vec<i64>>],
     output: &mut [T],
 ) -> Result<(), TensorError> {
-    if TypeId::of::<T>() == TypeId::of::<f32>() {
+    let has_gather = resolved.operands().iter().any(|(_, _, lookup)| lookup.is_some());
+    if !has_gather && TypeId::of::<T>() == TypeId::of::<f32>() {
         let buffers_f32: Vec<Option<&[f32]>> = buffers
             .iter()
             .map(|slot| {
@@ -11604,16 +11802,18 @@ fn run_scan_typed<T: Element>(
         let output_f32 = unsafe { reinterpret_slice_mut(output) };
         return run_scan(resolved, &buffers_f32, output_f32);
     }
-    run_scan_generic(resolved, buffers, output)
+    run_scan_generic(resolved, buffers, index_buffers, output)
 }
 
 /// The scalar scan nest generic over every [`Element`] width — [`run_scan`]'s
 /// generic fallback (its width-fast SIMD path stays f32-only), rewritten
 /// against [`Element::apply`]/[`eval_body_typed`] the same way
-/// [`run_reduce_generic`] rewrites [`run_reduce`]'s.
+/// [`run_reduce_generic`] rewrites [`run_reduce`]'s, including the same
+/// [`GatherCursor`]/[`fill_gather_cursors_typed`] step.
 fn run_scan_generic<T: Element>(
     resolved: &BoundOp,
     buffers: &[Option<Cow<'_, [T]>>],
+    index_buffers: &[Option<Vec<i64>>],
     output: &mut [T],
 ) -> Result<(), TensorError> {
     let BoundOpKind::Reduce {
@@ -11637,6 +11837,7 @@ fn run_scan_generic<T: Element>(
         .map(|(_, view, _)| view.stride(innermost_dim))
         .collect();
     let mut running: Vec<i64> = vec![0; raw.len()];
+    let mut gather_cursors: Vec<Option<GatherCursor<'_, i64>>> = (0..raw.len()).map(|_| None).collect();
     let mut outer_coordinate = vec![0u64; outer_extents.len()];
 
     let mut accumulator = T::reduce_seed(*init).unwrap_or_default();
@@ -11645,12 +11846,23 @@ fn run_scan_generic<T: Element>(
     for outer_flat in 0..odometer_len(outer_extents) {
         unflatten_into(outer_flat, outer_extents, &mut outer_coordinate);
         fill_running_offsets(resolved, &outer_coordinate, &mut running);
+        fill_gather_cursors_typed(
+            resolved,
+            index_buffers,
+            &outer_coordinate,
+            Some(innermost_dim),
+            &mut gather_cursors,
+        )?;
         let mut out_running = out_layout.offset_of(&outer_coordinate);
         let out_stride = out_layout.stride(innermost_dim);
 
         for _ in 0..inner_len {
             for (index, data) in raw.iter().enumerate() {
-                operand_values[index] = data[running[index] as usize];
+                let mut offset = running[index];
+                if let Some(cursor) = gather_cursors[index].as_mut() {
+                    offset += cursor.fetch_and_advance(resolved.node)?;
+                }
+                operand_values[index] = data[offset as usize];
                 running[index] += strides[index];
             }
             let value = eval_body_typed(resolved.node, body, &operand_values, &mut step_values)?;
@@ -15035,9 +15247,9 @@ mod tests {
     /// [`typed_program_plan`]'s third role: a gather index node carries its
     /// own integer dtype, distinct from the program's compute dtype,
     /// without failing the plan -- proven directly against the plan
-    /// function (not `evaluate_typed`, which still honestly rejects the
-    /// gather node itself at execution time; see `typed_program_plan`'s own
-    /// doc for the exact scope this covers).
+    /// function. See the `typed_gather_*` tests below for the same shape
+    /// proven all the way through `evaluate_typed` against the f32 pipeline
+    /// as oracle.
     #[proxima::test]
     #[case::i32_index_over_f32_compute(DType::Float32, DType::Int32)]
     #[case::u32_index_over_f32_compute(DType::Float32, DType::UInt32)]
@@ -15065,6 +15277,360 @@ mod tests {
         let program = typed_gather_program(DType::Float32, DType::Float64);
         let error = typed_program_plan(&program)
             .expect_err("a float-dtype gather index must be rejected, never silently accepted");
+        assert!(matches!(error, TensorError::NotLowerable { .. }), "{error}");
+    }
+
+    /// `table[ids[s], d]` at a chosen compute/index dtype pair, `dim`
+    /// always the kept axis (`gathered_dim: 0`) -- the typed counterpart of
+    /// [`embedding_lookup_program`], parameterized the same way
+    /// [`typed_gather_program`] is, but at real `vocab`/`dim`/`seq` sizes so
+    /// its output can be diffed against the f32 oracle element-for-element
+    /// rather than only checked through [`typed_program_plan`].
+    fn typed_embedding_lookup_program(
+        compute_dtype: DType,
+        index_dtype: DType,
+        vocab: u32,
+        dim: u32,
+        seq: u32,
+    ) -> (Vec<Op>, NodeId) {
+        let mut program = Vec::new();
+        let table = block(&mut program, compute_dtype, &[Extent::Static(vocab), Extent::Static(dim)]);
+        let ids = block(&mut program, index_dtype, &[Extent::Static(seq)]);
+        let gathered_map = IndexMap::Computed {
+            indices: ids,
+            index_map: map::projection(2, &[0]),
+            base: map::IndexPattern {
+                iter_rank: 2,
+                axes: alloc::vec![
+                    map::AxisIndex::default(),
+                    map::AxisIndex {
+                        terms: core::iter::once(AxisTerm::projection(1)).collect(),
+                        offset: 0,
+                    },
+                ],
+            },
+            gathered_dim: 0,
+        };
+        let gathered = append(
+            &mut program,
+            Op::Elementwise {
+                dtype: compute_dtype,
+                body: ScalarOp::Identity,
+                operands: alloc::vec![(table, gathered_map)],
+                name: None,
+            },
+        );
+        (program, gathered)
+    }
+
+    /// [`typed_embedding_lookup_program`]'s sibling with the gathered table
+    /// axis chosen by `gathered_dim` instead of hardcoded to `0` --
+    /// `gathered_dim: 1` exercises a table laid out `[kept, gathered]`
+    /// instead of `[gathered, kept]`, proving the typed cursor's
+    /// `element_stride`/`extent` derivation (from [`bind::bind`], unmodified
+    /// by this change) is honoured regardless of which axis is gathered.
+    fn typed_gather_dim_program(
+        compute_dtype: DType,
+        index_dtype: DType,
+        table_shape: [u32; 2],
+        seq: u32,
+        gathered_dim: u16,
+    ) -> (Vec<Op>, NodeId) {
+        let mut program = Vec::new();
+        let table = block(
+            &mut program,
+            compute_dtype,
+            &[Extent::Static(table_shape[0]), Extent::Static(table_shape[1])],
+        );
+        let ids = block(&mut program, index_dtype, &[Extent::Static(seq)]);
+        let kept_dim = 1 - gathered_dim;
+        let mut axes = alloc::vec![map::AxisIndex::default(); 2];
+        axes[kept_dim as usize] = map::AxisIndex {
+            terms: core::iter::once(AxisTerm::projection(1)).collect(),
+            offset: 0,
+        };
+        let gathered_map = IndexMap::Computed {
+            indices: ids,
+            index_map: map::projection(2, &[0]),
+            base: map::IndexPattern { iter_rank: 2, axes },
+            gathered_dim,
+        };
+        let gathered = append(
+            &mut program,
+            Op::Elementwise {
+                dtype: compute_dtype,
+                body: ScalarOp::Identity,
+                operands: alloc::vec![(table, gathered_map)],
+                name: None,
+            },
+        );
+        (program, gathered)
+    }
+
+    /// A row-sum reduce, accumulated at `accumulator_dtype`, over a table
+    /// gathered at `operand_dtype` -- [`typed_widened_reduce_program`]'s
+    /// shape composed with a real gather instead of a plain block operand,
+    /// proving `TypedPlan::Widened` executes correctly when its own operand
+    /// is data-dependent.
+    fn typed_widened_gather_reduce_program(
+        operand_dtype: DType,
+        accumulator_dtype: DType,
+        index_dtype: DType,
+        vocab: u32,
+        dim: u32,
+        seq: u32,
+    ) -> (Vec<Op>, NodeId) {
+        let (mut program, gathered) = typed_embedding_lookup_program(operand_dtype, index_dtype, vocab, dim, seq);
+        let sum = append(
+            &mut program,
+            Op::Reduce(Reduce {
+                dtype: accumulator_dtype,
+                body: ScalarOp::Add,
+                init: ReduceInit::Zero,
+                operand: gathered,
+                in_map: IndexMap::Affine(map::projection(2, &[0, 1])),
+                out_map: IndexMap::Affine(map::projection(2, &[0])),
+                keep: Keep::Reduce,
+                name: None,
+            }),
+        );
+        (program, sum)
+    }
+
+    /// [`typed_program_plan`]'s third role, executed: an `i32`- or
+    /// `u32`-index gather over an `f32` compute table must produce exactly
+    /// the same bytes [`embedding_lookup_program`]'s f32 pipeline does for
+    /// the same table and the same row selection -- the incumbent-parity
+    /// bar (guiding-principles §14): the f32 evaluator is the oracle, and
+    /// any divergence is this evaluator's bug until proven otherwise.
+    /// Covers a repeated index (row 3 selected twice) and both boundary
+    /// indices (`0` and `vocab - 1`).
+    #[proxima::test]
+    #[case::i32_index(DType::Int32)]
+    #[case::u32_index(DType::UInt32)]
+    async fn typed_gather_matches_f32_oracle_element_for_element(#[case] index_dtype: DType) {
+        let (vocab, dim, seq) = (50usize, 6usize, 5usize);
+        let (f32_program, _) = embedding_lookup_program(vocab as u32, dim as u32, seq as u32);
+        let table_data: Vec<f32> = (0..vocab * dim).map(|value| (value % 37) as f32 - 10.0).collect();
+        // row 3 repeated, plus both boundary rows (0 and vocab - 1).
+        let ids_f32 = [3.0f32, (vocab - 1) as f32, 0.0, 3.0, 25.0];
+        let oracle = evaluate(&f32_program, &[], &[&table_data, &ids_f32], &[]).expect("f32 oracle evaluates");
+
+        let (typed_program, _) =
+            typed_embedding_lookup_program(DType::Float32, index_dtype, vocab as u32, dim as u32, seq as u32);
+        let ids_block = match index_dtype {
+            DType::Int32 => TypedBuffer::Int32(ids_f32.iter().map(|&value| value as i32).collect()),
+            DType::UInt32 => TypedBuffer::UInt32(ids_f32.iter().map(|&value| value as u32).collect()),
+            other => panic!("unexpected index dtype in case table: {other:?}"),
+        };
+        let blocks = [TypedBuffer::Float32(table_data.clone()), ids_block];
+        let results =
+            evaluate_typed(&typed_program, &[], &blocks, &[]).expect("typed gather evaluates against real data");
+        let TypedBuffer::Float32(got) = &results[0].2 else {
+            panic!("expected an f32 result buffer");
+        };
+        assert_eq!(
+            got.as_slice(),
+            oracle.root(),
+            "typed {index_dtype:?}-index gather must match the f32 oracle element-for-element"
+        );
+    }
+
+    /// The same oracle-parity bar as
+    /// [`typed_gather_matches_f32_oracle_element_for_element`], with the
+    /// compute dtype narrowed to `f16` -- exact equality no longer holds
+    /// (the table itself round-trips through half precision before the
+    /// gather ever runs), so the bound is half a step at the table's own
+    /// magnitude instead.
+    #[test]
+    fn typed_gather_f16_compute_matches_f32_oracle_within_half_precision() {
+        let (vocab, dim, seq) = (32usize, 4usize, 6usize);
+        let (f32_program, _) = embedding_lookup_program(vocab as u32, dim as u32, seq as u32);
+        let table_f32: Vec<f32> = (0..vocab * dim).map(|value| (value % 23) as f32 - 5.0).collect();
+        let ids_f32 = [0.0f32, (vocab - 1) as f32, 7.0, 7.0, 15.0, 31.0];
+        let oracle = evaluate(&f32_program, &[], &[&table_f32, &ids_f32], &[]).expect("f32 oracle evaluates");
+
+        let (typed_program, _) =
+            typed_embedding_lookup_program(DType::Float16, DType::Int32, vocab as u32, dim as u32, seq as u32);
+        let table_f16: Vec<f16> = table_f32.iter().map(|&value| f16::from_f32(value)).collect();
+        let ids_i32: Vec<i32> = ids_f32.iter().map(|&value| value as i32).collect();
+        let blocks = [TypedBuffer::Float16(table_f16), TypedBuffer::Int32(ids_i32)];
+        let results = evaluate_typed(&typed_program, &[], &blocks, &[]).expect("f16 typed gather evaluates");
+        let TypedBuffer::Float16(got) = &results[0].2 else {
+            panic!("expected an f16 result buffer");
+        };
+        for (value, expected) in got.iter().zip(oracle.root()) {
+            assert!(
+                (value.to_f32() - expected).abs() < 5e-2,
+                "f16 gather {} vs f32 oracle {expected}",
+                value.to_f32()
+            );
+        }
+    }
+
+    /// [`typed_gather_dim_program`]'s `gathered_dim: 1` shape against the
+    /// same f32 oracle: the table is laid out `[dim, vocab]` (transposed
+    /// relative to the `gathered_dim: 0` tests above) so the gather selects
+    /// a *column*, not a row, proving the typed cursor does not assume the
+    /// gathered axis is the table's leading one.
+    #[test]
+    fn typed_gather_dim1_matches_f32_oracle() {
+        let (dim, vocab, seq) = (5usize, 20usize, 4usize);
+        let (f32_program, _) = typed_gather_dim_program(DType::Float32, DType::Int32, [dim as u32, vocab as u32], seq as u32, 1);
+        let table_data: Vec<f32> = (0..dim * vocab).map(|value| (value % 17) as f32 + 1.0).collect();
+        let ids_f32 = [0.0f32, (vocab - 1) as f32, 9.0, 9.0];
+        let oracle = evaluate(&f32_program, &[], &[&table_data, &ids_f32], &[]).expect("f32 oracle evaluates");
+
+        let (typed_program, _) = typed_gather_dim_program(
+            DType::Float32,
+            DType::UInt32,
+            [dim as u32, vocab as u32],
+            seq as u32,
+            1,
+        );
+        let ids_u32: Vec<u32> = ids_f32.iter().map(|&value| value as u32).collect();
+        let blocks = [TypedBuffer::Float32(table_data.clone()), TypedBuffer::UInt32(ids_u32)];
+        let results = evaluate_typed(&typed_program, &[], &blocks, &[]).expect("gathered_dim: 1 typed gather evaluates");
+        let TypedBuffer::Float32(got) = &results[0].2 else {
+            panic!("expected an f32 result buffer");
+        };
+        assert_eq!(
+            got.as_slice(),
+            oracle.root(),
+            "a gathered_dim: 1 typed gather must match the f32 oracle element-for-element"
+        );
+    }
+
+    /// A widened reduce ([`TypedPlan::Widened`]) whose own operand is a
+    /// gathered `f16` table folded into an `f32` accumulator -- proves the
+    /// two features compose: [`run_widened_program`]'s `TIn`/`TAcc` table
+    /// split and [`canonical_index_buffers`]'s separate `i64` index table
+    /// both apply to the same node without interfering.
+    #[test]
+    fn widened_reduce_over_a_gathered_f16_operand_matches_a_hand_written_reference() {
+        let (vocab, dim, seq) = (10usize, 4usize, 3usize);
+        let table_f32: Vec<f32> = (0..vocab * dim).map(|value| (value % 13) as f32 - 6.0).collect();
+        let ids = [2u32, 9, 0];
+
+        let mut reference = alloc::vec![0.0f32; seq];
+        for (row, &id) in ids.iter().enumerate() {
+            let row_start = id as usize * dim;
+            reference[row] = table_f32[row_start..row_start + dim]
+                .iter()
+                .map(|&value| f16::from_f32(value).to_f32())
+                .sum();
+        }
+
+        let (program, _) = typed_widened_gather_reduce_program(
+            DType::Float16,
+            DType::Float32,
+            DType::UInt32,
+            vocab as u32,
+            dim as u32,
+            seq as u32,
+        );
+        let table_f16: Vec<f16> = table_f32.iter().map(|&value| f16::from_f32(value)).collect();
+        let blocks = [TypedBuffer::Float16(table_f16), TypedBuffer::UInt32(ids.to_vec())];
+        let results = evaluate_typed(&program, &[], &blocks, &[]).expect("widened reduce over a gather evaluates");
+        let TypedBuffer::Float32(got) = &results[0].2 else {
+            panic!("expected an f32 accumulator buffer");
+        };
+        for (value, expected) in got.iter().zip(&reference) {
+            assert!(
+                (value - expected).abs() < 5e-2,
+                "widened gathered reduce {value} vs reference {expected}"
+            );
+        }
+    }
+
+    /// The sad path a real gather program (not just [`typed_program_plan`])
+    /// still honours: a float-dtype index node is rejected before any
+    /// buffer is touched, the same gate
+    /// [`typed_program_plan_rejects_a_float_gather_index_dtype`] proves at
+    /// the plan level alone.
+    #[test]
+    fn evaluate_typed_rejects_a_float_gather_index_dtype_at_execution() {
+        let program = typed_gather_program(DType::Float32, DType::Float64);
+        let error = evaluate_typed(&program, &[], &[], &[])
+            .expect_err("a float-dtype gather index must be rejected at execution, never silently accepted");
+        assert!(matches!(error, TensorError::NotLowerable { .. }), "{error}");
+    }
+
+    /// The f32 oracle's own out-of-range behaviour
+    /// ([`a_fetched_index_past_the_extent_is_a_real_error_not_ub`]): a
+    /// fetched index `>= extent` is `TensorError::GatherIndexOutOfRange`,
+    /// never a clamp, a wraparound, or UB. The typed evaluator must answer
+    /// the identical class of index for the identical class of input,
+    /// proven for both the positive-overflow and the negative-index cases
+    /// [`GatherCursor::fetch_and_advance`] (`proxima-tensor/src/cpu.rs`)
+    /// checks in one `index < 0 || index as u64 >= self.extent` guard.
+    #[proxima::test]
+    #[case::index_past_the_extent(4)]
+    #[case::negative_index(-1)]
+    async fn typed_gather_out_of_range_index_matches_f32_oracle_error_shape(#[case] bad_index: i32) {
+        let (vocab, dim, seq) = (4usize, 2usize, 1usize);
+        let (f32_program, _) = embedding_lookup_program(vocab as u32, dim as u32, seq as u32);
+        let table_data: Vec<f32> = (0..vocab * dim).map(|value| value as f32).collect();
+        let ids_f32 = [bad_index as f32];
+        let oracle_error = evaluate(&f32_program, &[], &[&table_data, &ids_f32], &[])
+            .expect_err("the f32 oracle rejects the out-of-range index");
+        let TensorError::GatherIndexOutOfRange { extent: oracle_extent, .. } = oracle_error else {
+            panic!("expected the f32 oracle's own GatherIndexOutOfRange, got {oracle_error}");
+        };
+
+        let (typed_program, _) =
+            typed_embedding_lookup_program(DType::Float32, DType::Int32, vocab as u32, dim as u32, seq as u32);
+        let blocks = [TypedBuffer::Float32(table_data), TypedBuffer::Int32(alloc::vec![bad_index])];
+        let typed_error =
+            evaluate_typed(&typed_program, &[], &blocks, &[]).expect_err("the typed evaluator rejects it too");
+        let TensorError::GatherIndexOutOfRange {
+            index: typed_index,
+            extent: typed_extent,
+            ..
+        } = typed_error
+        else {
+            panic!("expected GatherIndexOutOfRange, got {typed_error}");
+        };
+        assert_eq!(typed_index, i64::from(bad_index));
+        assert_eq!(typed_extent, oracle_extent, "the typed evaluator must bounds-check against the same extent");
+    }
+
+    /// The honest boundary [`canonical_index_buffers`] draws rather than
+    /// guessing: a gather index node computed in-program (an [`Op::Iota`]
+    /// here, not a caller-supplied block) is a named `NotLowerable`, not a
+    /// silently wrong execution — see [`canonical_index_buffers`]'s own doc.
+    #[test]
+    fn evaluate_typed_names_a_computed_gather_index_node_as_not_yet_supported() {
+        let mut program = Vec::new();
+        let table = block(&mut program, DType::Float32, &[Extent::Static(4), Extent::Static(2)]);
+        let ids = append(&mut program, Op::Iota { dtype: DType::Int32, extent: Extent::Static(3) });
+        let gathered_map = IndexMap::Computed {
+            indices: ids,
+            index_map: map::projection(2, &[0]),
+            base: map::IndexPattern {
+                iter_rank: 2,
+                axes: alloc::vec![
+                    map::AxisIndex::default(),
+                    map::AxisIndex {
+                        terms: core::iter::once(AxisTerm::projection(1)).collect(),
+                        offset: 0,
+                    },
+                ],
+            },
+            gathered_dim: 0,
+        };
+        append(
+            &mut program,
+            Op::Elementwise {
+                dtype: DType::Float32,
+                body: ScalarOp::Identity,
+                operands: alloc::vec![(table, gathered_map)],
+                name: None,
+            },
+        );
+        let table_data = TypedBuffer::Float32(alloc::vec![0.0; 8]);
+        let error = evaluate_typed(&program, &[], &[table_data], &[])
+            .expect_err("a computed gather index node must be a named gap, not a silent guess");
         assert!(matches!(error, TensorError::NotLowerable { .. }), "{error}");
     }
 
