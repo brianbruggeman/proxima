@@ -252,6 +252,7 @@ fn lower_node(
         "Flatten" => lower_flatten(values, node),
         "Concat" => lower_concat(program, values, node),
         "Conv" => lower_conv(program, values, node),
+        "MaxPool" => lower_maxpool(program, values, node),
         other => Err(LowerError::UnsupportedOp { name: node.name.to_string(), op_type: other.to_string() }),
     }
 }
@@ -1366,6 +1367,117 @@ fn lower_conv(program: &mut Vec<Op>, values: &mut BTreeMap<String, Value>, node:
     Ok(())
 }
 
+/// The `Conv`/`MaxPool`/`AveragePool`-shared plan: parse `kernel_shape`/
+/// `strides`/`dilations`/`pads`, pad the input, and derive the pooled output
+/// shape -- the same [`pad_axis`]/[`conv_output_extent`] steps [`lower_conv`]
+/// runs, minus the weight operand pooling has none of.
+struct PoolPlan {
+    padded: Value,
+    kernel_h: u64,
+    kernel_w: u64,
+    stride_h: i64,
+    stride_w: i64,
+    dilation_h: i64,
+    dilation_w: i64,
+    out_shape: Vec<u64>,
+}
+
+fn plan_pool(program: &mut Vec<Op>, node: &NodeProto<'_>, image: &Value, fill: f32) -> Result<PoolPlan, LowerError> {
+    let name = node.name.to_string();
+    let op_type = node.op_type.to_string();
+    if image.shape.len() != 4 {
+        return Err(LowerError::UnsupportedShape { name, op_type, reason: format!("{} lowering supports rank-4 NCHW input only", node.op_type) });
+    }
+    if let Some(auto_pad) = attr_str(node, "auto_pad")
+        && auto_pad != b"NOTSET"
+    {
+        return Err(LowerError::UnsupportedShape { name, op_type, reason: format!("{} lowering supports auto_pad=NOTSET only", node.op_type) });
+    }
+    let kernel_shape = attr_ints(node, "kernel_shape").ok_or_else(|| LowerError::UnsupportedShape {
+        name: node.name.to_string(),
+        op_type: node.op_type.to_string(),
+        reason: format!("{} requires a kernel_shape attribute", node.op_type),
+    })?;
+    if kernel_shape.len() != 2 {
+        return Err(LowerError::UnsupportedShape {
+            name: node.name.to_string(),
+            op_type: node.op_type.to_string(),
+            reason: format!("{} lowering supports 2D pooling only", node.op_type),
+        });
+    }
+    let (kernel_h, kernel_w) = (kernel_shape[0] as u64, kernel_shape[1] as u64);
+    let strides = attr_ints_or(node, "strides", &[1, 1]);
+    let dilations = attr_ints_or(node, "dilations", &[1, 1]);
+    let pads = attr_ints_or(node, "pads", &[0, 0, 0, 0]);
+    if strides.len() != 2 || dilations.len() != 2 || pads.len() != 4 {
+        return Err(LowerError::UnsupportedShape {
+            name: node.name.to_string(),
+            op_type: node.op_type.to_string(),
+            reason: format!("{} lowering supports 2D strides/dilations/pads only", node.op_type),
+        });
+    }
+    let (stride_h, stride_w) = (strides[0], strides[1]);
+    let (dilation_h, dilation_w) = (dilations[0], dilations[1]);
+    let (pad_top, pad_left, pad_bottom, pad_right) = (pads[0], pads[1], pads[2], pads[3]);
+
+    let padded_w = pad_axis(program, image, 3, pad_left as u64, pad_right as u64, fill);
+    let padded = pad_axis(program, &padded_w, 2, pad_top as u64, pad_bottom as u64, fill);
+
+    let out_h = conv_output_extent(padded.shape[2], kernel_h, stride_h, dilation_h).ok_or_else(|| LowerError::UnsupportedShape {
+        name: node.name.to_string(),
+        op_type: node.op_type.to_string(),
+        reason: format!("{} kernel does not fit the padded input height", node.op_type),
+    })?;
+    let out_w = conv_output_extent(padded.shape[3], kernel_w, stride_w, dilation_w).ok_or_else(|| LowerError::UnsupportedShape {
+        name: node.name.to_string(),
+        op_type: node.op_type.to_string(),
+        reason: format!("{} kernel does not fit the padded input width", node.op_type),
+    })?;
+
+    let out_shape = alloc::vec![image.shape[0], image.shape[1], out_h, out_w];
+    Ok(PoolPlan { padded, kernel_h, kernel_w, stride_h, stride_w, dilation_h, dilation_w, out_shape })
+}
+
+/// `MaxPool`: [`window_materialize`] (padded with `-inf` so a padded cell
+/// never wins the max), then `Reduce(Maximum)` over the window's trailing
+/// `kh`/`kw` axes -- the same sliding-window shape as [`lower_conv`], with no
+/// weight operand and no channel reduction (`ScalarOp::Maximum` is not
+/// `ScalarOp::Add`, so `-inf * 1.0` from the stamp multiply staying `-inf`,
+/// never `NaN`, is what makes the padding value safe to carry through
+/// [`window_materialize`]'s multiply).
+///
+/// Deferred: rank other than 4 (1D/3D `MaxPool`), `storage_order`,
+/// `ceil_mode`, indices output (`Y` only, never the optional `Indices`).
+fn lower_maxpool(program: &mut Vec<Op>, values: &mut BTreeMap<String, Value>, node: &NodeProto<'_>) -> Result<(), LowerError> {
+    let image = lookup(values, node, 0)?.clone();
+    let plan = plan_pool(program, node, &image, f32::NEG_INFINITY)?;
+    let windowed = window_materialize(
+        program,
+        &plan.padded,
+        WindowSpec {
+            out_h: plan.out_shape[2],
+            out_w: plan.out_shape[3],
+            kernel_h: plan.kernel_h,
+            kernel_w: plan.kernel_w,
+            stride_h: plan.stride_h,
+            stride_w: plan.stride_w,
+            dilation_h: plan.dilation_h,
+            dilation_w: plan.dilation_w,
+        },
+    );
+    let result = build_reduce(
+        program,
+        ScalarOp::Maximum,
+        ReduceInit::NegativeInfinity,
+        windowed.node,
+        identity_pattern(6),
+        projection(6, &[0, 1, 2, 3]),
+        Some("maxpool2d".to_string()),
+    );
+    bind_output(values, node, 0, result, plan.out_shape);
+    Ok(())
+}
+
 fn tensor_shape(tensor: &TensorProto<'_>) -> Vec<u64> {
     tensor.dims.iter().map(|&value| value as u64).collect()
 }
@@ -2011,5 +2123,37 @@ mod tests {
 
         let error = lower_graph(&graph).expect_err("grouped Conv is a deferred gap");
         assert!(matches!(error, LowerError::UnsupportedShape { .. }), "expected UnsupportedShape, got {error:?}");
+    }
+
+    /// `MaxPool`, 2x2 kernel and stride: [`window_materialize`] padded with
+    /// `-inf` (never contending for the max), `Reduce(Maximum)` over the
+    /// window -- hand-verified against the per-block max of a 4x4 image.
+    #[test]
+    fn maxpool_2x2_takes_the_max_of_each_block() {
+        let image = f32_initializer("image", &[1, 1, 4, 4], &(1..=16).map(|value| value as f32).collect::<Vec<_>>());
+        let node = NodeProto {
+            input: vec!["image"],
+            output: vec!["y"],
+            op_type: "MaxPool",
+            name: "maxpool",
+            attribute: vec![ints_attribute("kernel_shape", vec![2, 2]), ints_attribute("strides", vec![2, 2])],
+            ..NodeProto::default()
+        };
+        let graph = GraphProto {
+            node: vec![node],
+            name: "maxpool_graph",
+            initializer: vec![image],
+            output: vec![ValueInfoProto { name: "y", ..ValueInfoProto::default() }],
+            ..GraphProto::default()
+        };
+
+        let lowered = lower_graph(&graph).expect("lower MaxPool");
+        let named: Vec<(&str, &[f32])> = lowered.initializers.iter().map(|(name, data)| (name.as_str(), data.as_slice())).collect();
+        let output = lowered.graph_outputs[0].1;
+        let evaluated = evaluate_named(&lowered.program, &[], &named, &[output]).expect("evaluate MaxPool");
+        let (data, shape) = evaluated.get(output).expect("y present");
+
+        assert_eq!(shape, &[1, 1, 2, 2]);
+        assert_eq!(data, &[6.0, 8.0, 14.0, 16.0], "max of each 2x2 block of the 4x4 image");
     }
 }
