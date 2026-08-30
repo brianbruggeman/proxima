@@ -1293,9 +1293,66 @@ fn lower_reshape(values: &mut BTreeMap<String, Value>, initializer_data: &BTreeM
     }
 
     if let Some(output_name) = node.output.first() {
-        values.insert((*output_name).to_string(), Value { node: input.node, shape: out_shape, view: None });
+        let view = compose_reshape_view(&input, &out_shape).ok_or_else(|| LowerError::UnsupportedShape {
+            name: node.name.to_string(),
+            op_type: node.op_type.to_string(),
+            reason: "Reshape of a value carrying a virtual (Unsqueeze-inserted) axis view must not merge or split any of its real axes -- only inserting/dropping size-1 axes composes with the existing view".to_string(),
+        })?;
+        values.insert((*output_name).to_string(), Value { node: input.node, shape: out_shape, view });
     }
     Ok(())
+}
+
+/// Recomposes `value.view` (see [`Value`]'s own doc) across a reshape to
+/// `out_shape`, so a `Reshape`/`Flatten` chained after an `Unsqueeze` keeps
+/// addressing the real producing node correctly instead of silently
+/// treating the post-Unsqueeze logical shape as if it were the node's real
+/// physical shape (the miscompile this closes).
+///
+/// `view` is `None`-per-axis for every *virtual*, Unsqueeze-inserted size-1
+/// axis; `Some(real_axis)` axes are 1:1 with `value.node`'s own real shape,
+/// in the same order (Unsqueeze only ever inserts, never reorders). Because
+/// a virtual axis has extent 1, dropping it from -- or inserting it into --
+/// the logical shape can never change row-major element order, so the
+/// output's view can be rebuilt with a two-pointer walk over `value`'s real
+/// (view-stripped) shape and `out_shape`: matching extents advance both
+/// pointers and copy the real axis across, an output extent of `1` is a
+/// fresh virtual axis, and a real extent of `1` with no matching output
+/// axis is a dropped virtual-equivalent axis. Any other divergence means the
+/// reshape merges or splits a *real* (non-1) axis, which this single-axis
+/// view representation cannot express -- the caller raises
+/// [`LowerError::UnsupportedShape`] for that case rather than binding a
+/// silently wrong view.
+fn compose_reshape_view(value: &Value, out_shape: &[u64]) -> Option<Option<Vec<Option<u16>>>> {
+    let Some(view) = &value.view else { return Some(None) };
+
+    let real_shape: Vec<u64> = value.shape.iter().zip(view.iter()).filter_map(|(&extent, axis)| axis.map(|_| extent)).collect();
+    let real_axes: Vec<u16> = view.iter().filter_map(|axis| *axis).collect();
+
+    let mut new_view: Vec<Option<u16>> = Vec::with_capacity(out_shape.len());
+    let mut real_index = 0usize;
+    let mut out_index = 0usize;
+    while out_index < out_shape.len() {
+        if real_index < real_shape.len() && real_shape[real_index] == out_shape[out_index] {
+            new_view.push(Some(real_axes[real_index]));
+            real_index += 1;
+            out_index += 1;
+        } else if out_shape[out_index] == 1 {
+            new_view.push(None);
+            out_index += 1;
+        } else if real_index < real_shape.len() && real_shape[real_index] == 1 {
+            real_index += 1;
+        } else {
+            return None;
+        }
+    }
+    while real_index < real_shape.len() && real_shape[real_index] == 1 {
+        real_index += 1;
+    }
+    if real_index != real_shape.len() {
+        return None;
+    }
+    Some(Some(new_view))
 }
 
 /// `Flatten(axis)`: the two-axis special case of a contiguous reshape --
@@ -1320,7 +1377,12 @@ fn lower_flatten(values: &mut BTreeMap<String, Value>, node: &NodeProto<'_>) -> 
     let out_shape = alloc::vec![leading, trailing];
 
     if let Some(output_name) = node.output.first() {
-        values.insert((*output_name).to_string(), Value { node: input.node, shape: out_shape, view: None });
+        let view = compose_reshape_view(&input, &out_shape).ok_or_else(|| LowerError::UnsupportedShape {
+            name: node.name.to_string(),
+            op_type: node.op_type.to_string(),
+            reason: "Flatten of a value carrying a virtual (Unsqueeze-inserted) axis view must not merge or split any of its real axes -- only inserting/dropping size-1 axes composes with the existing view".to_string(),
+        })?;
+        values.insert((*output_name).to_string(), Value { node: input.node, shape: out_shape, view });
     }
     Ok(())
 }
@@ -3254,6 +3316,70 @@ mod tests {
         let (data, _) = evaluated.get(output).expect("y present");
         let expected: Vec<f32> = (0..24).map(|value| value as f32).collect();
         assert_eq!(data, expected.as_slice(), "split preserves element order (still flattened)");
+    }
+
+    /// `Unsqueeze(axes=[1])` on `[2, 3]` (giving `x` a [`Value::view`]
+    /// aliased onto its own real node, per [`lower_unsqueeze`]'s own doc)
+    /// immediately followed by `Reshape` back down to `[2, 3]` (squeezing
+    /// the inserted axis away again), then `Add`ed against a `[2, 3]` bias.
+    /// Regression for the miscompile [`compose_reshape_view`] closes:
+    /// before that fix, `lower_reshape` discarded `input.view` and rebound
+    /// straight onto `x`'s real node with `view: None`, so the *consuming*
+    /// `Add` addressed `x`'s real axes as if `Reshape`'s `out_shape` were
+    /// already `x`'s physical shape -- correct only by coincidence here
+    /// (rank happens to match); the assertion is on the actual elementwise
+    /// values, not merely on shape, so a wrong axis mapping would show up as
+    /// wrong sums even where it would not show up as a wrong shape.
+    #[test]
+    fn reshape_after_unsqueeze_composes_the_view_instead_of_discarding_it() {
+        let x_initializer = f32_initializer("x", &[2, 3], &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
+        let bias_initializer = f32_initializer("bias", &[2, 3], &[10.0, 20.0, 30.0, 40.0, 50.0, 60.0]);
+        let unsqueeze_axes = AttributeProto { name: "axes", ints: vec![1], ..AttributeProto::default() };
+        let unsqueeze =
+            NodeProto { input: vec!["x"], output: vec!["u"], op_type: "Unsqueeze", name: "unsqueeze", attribute: vec![unsqueeze_axes], ..NodeProto::default() };
+        let shape_initializer = TensorProto { dims: vec![2], data_type: 7, int64_data: vec![2, 3], name: "shape", ..TensorProto::default() };
+        let reshape = NodeProto { input: vec!["u", "shape"], output: vec!["r"], op_type: "Reshape", name: "reshape", ..NodeProto::default() };
+        let add = NodeProto { input: vec!["r", "bias"], output: vec!["y"], op_type: "Add", name: "add", ..NodeProto::default() };
+        let graph = GraphProto {
+            node: vec![unsqueeze, reshape, add],
+            name: "unsqueeze_reshape_graph",
+            initializer: vec![x_initializer, bias_initializer, shape_initializer],
+            output: vec![ValueInfoProto { name: "y", ..ValueInfoProto::default() }],
+            ..GraphProto::default()
+        };
+
+        let lowered = lower_graph(&graph).expect("lower Unsqueeze -> Reshape -> Add");
+        let named: Vec<(&str, &[f32])> = lowered.initializers.iter().map(|(name, data)| (name.as_str(), data.as_slice())).collect();
+        let output = lowered.graph_outputs[0].1;
+        let evaluated = evaluate_named(&lowered.program, &[], &named, &[output]).expect("evaluate Unsqueeze -> Reshape -> Add");
+        let (data, shape) = evaluated.get(output).expect("y present");
+
+        assert_eq!(shape, &[2, 3]);
+        assert_eq!(data, &[11.0, 22.0, 33.0, 44.0, 55.0, 66.0], "reshape must recover x's real axes, not treat the squeezed shape as x's physical layout");
+    }
+
+    /// A `Reshape` chained after `Unsqueeze` that genuinely merges a real,
+    /// non-1 axis (`[2, 1, 3]` down to a flat `[6]`) cannot be represented by
+    /// the single-axis [`Value::view`] this module carries -- it must raise
+    /// [`LowerError::UnsupportedShape`], never silently bind a wrong view.
+    #[test]
+    fn reshape_after_unsqueeze_that_merges_a_real_axis_is_a_named_error() {
+        let x_initializer = f32_initializer("x", &[2, 3], &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
+        let unsqueeze_axes = AttributeProto { name: "axes", ints: vec![1], ..AttributeProto::default() };
+        let unsqueeze =
+            NodeProto { input: vec!["x"], output: vec!["u"], op_type: "Unsqueeze", name: "unsqueeze", attribute: vec![unsqueeze_axes], ..NodeProto::default() };
+        let shape_initializer = TensorProto { dims: vec![1], data_type: 7, int64_data: vec![6], name: "shape", ..TensorProto::default() };
+        let reshape = NodeProto { input: vec!["u", "shape"], output: vec!["y"], op_type: "Reshape", name: "reshape", ..NodeProto::default() };
+        let graph = GraphProto {
+            node: vec![unsqueeze, reshape],
+            name: "unsqueeze_reshape_merge_graph",
+            initializer: vec![x_initializer, shape_initializer],
+            output: vec![ValueInfoProto { name: "y", ..ValueInfoProto::default() }],
+            ..GraphProto::default()
+        };
+
+        let error = lower_graph(&graph).expect_err("merging real axes across a view cannot compose");
+        assert!(matches!(error, LowerError::UnsupportedShape { .. }), "expected UnsupportedShape, got {error:?}");
     }
 
     /// `Concat` along `axis=0` of two `[2, 2]` matrices.
