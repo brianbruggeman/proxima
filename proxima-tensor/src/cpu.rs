@@ -10808,12 +10808,13 @@ fn evaluate_uniform_typed(
 /// [`evaluate_typed`]'s [`TypedPlan::Widened`] arm — the `(operand,
 /// accumulator)` dispatch table. Scoped to the pairs actually shipped, not
 /// the full `DType x DType` cross product: `(Int8, Int32)` (the
-/// quantized-accumulate case `typed_program_plan`'s doc names), and
-/// `(Float16, Float32)`/`(BFloat16, Float32)` (a half-precision reduce
-/// folded into an f32 accumulator, the same widen-before-fold shape at
-/// floating-point widths). Any other pair is an honest
-/// [`TensorError::NotLowerable`] — never a silent wrong result from picking
-/// the nearer-available width.
+/// quantized-accumulate case `typed_program_plan`'s doc names), `(Int16,
+/// Int64)` and `(UInt8, UInt32)` (the same accumulation-overflow shape at
+/// other integer widths), and `(Float16, Float32)`/`(BFloat16, Float32)`
+/// (a half-precision reduce folded into an f32 accumulator, the same
+/// widen-before-fold shape at floating-point widths). Any other pair is an
+/// honest [`TensorError::NotLowerable`] — never a silent wrong result from
+/// picking the nearer-available width.
 fn evaluate_widened_typed(
     operand: DType,
     accumulator: DType,
@@ -10826,6 +10827,14 @@ fn evaluate_widened_typed(
         (DType::Int8, DType::Int32) => Ok(run_widened_program::<i8, i32>(program, symbols, blocks, outputs)?
             .into_iter()
             .map(|(node, shape, data)| (node, shape, TypedBuffer::Int32(data)))
+            .collect()),
+        (DType::Int16, DType::Int64) => Ok(run_widened_program::<i16, i64>(program, symbols, blocks, outputs)?
+            .into_iter()
+            .map(|(node, shape, data)| (node, shape, TypedBuffer::Int64(data)))
+            .collect()),
+        (DType::UInt8, DType::UInt32) => Ok(run_widened_program::<u8, u32>(program, symbols, blocks, outputs)?
+            .into_iter()
+            .map(|(node, shape, data)| (node, shape, TypedBuffer::UInt32(data)))
             .collect()),
         (DType::Float16, DType::Float32) => {
             Ok(run_widened_program::<f16, f32>(program, symbols, blocks, outputs)?
@@ -14643,11 +14652,11 @@ mod tests {
     #[test]
     fn an_unshipped_widened_pair_is_rejected_not_silently_wrong() {
         let mut program = Vec::new();
-        let operand = block(&mut program, DType::Int16, &[Extent::Static(3)]);
+        let operand = block(&mut program, DType::UInt16, &[Extent::Static(3)]);
         append(
             &mut program,
             Op::Reduce(Reduce {
-                dtype: DType::Int64,
+                dtype: DType::UInt64,
                 body: ScalarOp::Add,
                 init: ReduceInit::Zero,
                 operand,
@@ -14657,9 +14666,9 @@ mod tests {
                 name: None,
             }),
         );
-        let blocks = [TypedBuffer::Int16(alloc::vec![1, 2, 3])];
+        let blocks = [TypedBuffer::UInt16(alloc::vec![1, 2, 3])];
         let error = evaluate_typed(&program, &[], &blocks, &[])
-            .expect_err("(Int16, Int64) is not a shipped widened pair");
+            .expect_err("(UInt16, UInt64) is not a shipped widened pair");
         assert!(
             matches!(error, TensorError::NotLowerable { .. }),
             "an unshipped pair must fail honestly, never fall back to a wrong result: {error}"
@@ -14807,6 +14816,39 @@ mod tests {
         let error = evaluate_typed(&bool_program, &[], &[], &[])
             .expect_err("Bool must still be rejected -- no TypedBuffer variant backs it");
         assert!(matches!(error, TensorError::NotLowerable { .. }), "{error}");
+    }
+
+    #[test]
+    fn i16_operand_i64_accumulator_reduce_survives_i16_overflow() {
+        // three i16 elements of 20000 each: the true sum is 60000, which
+        // does not fit in i16 (max 32767) -- wrapping i16 arithmetic would
+        // land on -5536 (60000 - 65536). an i64 accumulator is the only way
+        // to observe 60000.
+        let (program, _) = typed_widened_reduce_program(DType::Int16, DType::Int64, 3);
+        let operand = TypedBuffer::Int16(alloc::vec![20000, 20000, 20000]);
+        let results = evaluate_typed(&program, &[], &[operand], &[])
+            .expect("an i16-operand, i64-accumulator reduce evaluates");
+        assert_eq!(
+            results[0].2,
+            TypedBuffer::Int64(alloc::vec![60000]),
+            "the i64 accumulator must carry the true sum, not the i16-wrapped one (-5536)"
+        );
+    }
+
+    #[test]
+    fn u8_operand_u32_accumulator_reduce_survives_u8_overflow() {
+        // three u8 elements of 200 each: the true sum is 600, which does
+        // not fit in u8 (max 255) -- wrapping u8 arithmetic would land on
+        // 88 (600 - 512). a u32 accumulator is the only way to observe 600.
+        let (program, _) = typed_widened_reduce_program(DType::UInt8, DType::UInt32, 3);
+        let operand = TypedBuffer::UInt8(alloc::vec![200, 200, 200]);
+        let results = evaluate_typed(&program, &[], &[operand], &[])
+            .expect("a u8-operand, u32-accumulator reduce evaluates");
+        assert_eq!(
+            results[0].2,
+            TypedBuffer::UInt32(alloc::vec![600]),
+            "the u32 accumulator must carry the true sum, not the u8-wrapped one (88)"
+        );
     }
 
     fn typed_reduce_vector_to_scalar_program(dtype: DType, len: u32) -> (Vec<Op>, NodeId) {
