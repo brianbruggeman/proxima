@@ -2048,79 +2048,172 @@ struct Conv2dAttrs {
     pad_right: i64,
 }
 
-fn parse_conv2d_attrs(node: &NodeProto<'_>) -> Result<Conv2dAttrs, LowerError> {
+/// The `SAME_UPPER`/`SAME_LOWER` pad split for one spatial axis, ONNX's own
+/// formula: enough total padding that `out = ceil(in / stride)`, split so
+/// the larger half lands after the axis for `SAME_UPPER` and before it for
+/// `SAME_LOWER`. Feeds straight into the same `pad_axis`/`conv_output_extent`
+/// pair the explicit `pads` attribute already drives -- no new padding
+/// machinery, only where the two numbers come from.
+fn same_pad_axis(input_extent: u64, kernel_extent: u64, stride: i64, dilation: i64, lower: bool) -> (i64, i64) {
+    let stride = stride as u64;
+    let output_extent = input_extent.div_ceil(stride).max(1);
+    let span = (dilation as u64) * kernel_extent.saturating_sub(1) + 1;
+    let needed = ((output_extent - 1) * stride + span).saturating_sub(input_extent);
+    let small = needed / 2;
+    let large = needed - small;
+    if lower { (large as i64, small as i64) } else { (small as i64, large as i64) }
+}
+
+/// Resolves `strides`/`dilations`/`pads` for a 2D `Conv`/`ConvTranspose`
+/// window, honoring `auto_pad` (`NOTSET` reads the explicit `pads`
+/// attribute unchanged; `VALID` means zero padding; `SAME_UPPER`/
+/// `SAME_LOWER` compute it via [`same_pad_axis`] from the image and kernel
+/// spatial extents) -- the one place every 2D window op resolves padding, so
+/// `auto_pad` support lands once for `Conv`, `MaxPool`, and `AveragePool`.
+fn parse_conv2d_attrs(node: &NodeProto<'_>, image_h: u64, image_w: u64, kernel_h: u64, kernel_w: u64) -> Result<Conv2dAttrs, LowerError> {
     let name = node.name.to_string();
     let op_type = node.op_type.to_string();
     let strides = attr_ints_or(node, "strides", &[1, 1]);
     let dilations = attr_ints_or(node, "dilations", &[1, 1]);
-    let pads = attr_ints_or(node, "pads", &[0, 0, 0, 0]);
-    if strides.len() != 2 || dilations.len() != 2 || pads.len() != 4 {
-        return Err(LowerError::UnsupportedShape { name, op_type, reason: "Conv lowering supports 2D strides/dilations/pads only".to_string() });
+    if strides.len() != 2 || dilations.len() != 2 {
+        return Err(LowerError::UnsupportedShape { name, op_type, reason: "Conv lowering supports 2D strides/dilations only".to_string() });
     }
-    Ok(Conv2dAttrs {
-        stride_h: strides[0],
-        stride_w: strides[1],
-        dilation_h: dilations[0],
-        dilation_w: dilations[1],
-        pad_top: pads[0],
-        pad_left: pads[1],
-        pad_bottom: pads[2],
-        pad_right: pads[3],
-    })
+    let (stride_h, stride_w) = (strides[0], strides[1]);
+    let (dilation_h, dilation_w) = (dilations[0], dilations[1]);
+
+    let auto_pad = attr_str(node, "auto_pad").unwrap_or(b"NOTSET");
+    let (pad_top, pad_bottom, pad_left, pad_right) = match auto_pad {
+        b"NOTSET" => {
+            let pads = attr_ints_or(node, "pads", &[0, 0, 0, 0]);
+            if pads.len() != 4 {
+                return Err(LowerError::UnsupportedShape { name, op_type, reason: "Conv lowering supports 2D pads only".to_string() });
+            }
+            (pads[0], pads[2], pads[1], pads[3])
+        }
+        b"VALID" => (0, 0, 0, 0),
+        b"SAME_UPPER" | b"SAME_LOWER" => {
+            let lower = auto_pad == b"SAME_LOWER";
+            let (top, bottom) = same_pad_axis(image_h, kernel_h, stride_h, dilation_h, lower);
+            let (left, right) = same_pad_axis(image_w, kernel_w, stride_w, dilation_w, lower);
+            (top, bottom, left, right)
+        }
+        _ => return Err(LowerError::UnsupportedShape { name, op_type, reason: "Conv lowering supports auto_pad NOTSET/VALID/SAME_UPPER/SAME_LOWER only".to_string() }),
+    };
+    Ok(Conv2dAttrs { stride_h, stride_w, dilation_h, dilation_w, pad_top, pad_left, pad_bottom, pad_right })
 }
 
 /// [`Conv1dAttrs::stride_w`]/etc. parsed from a `Conv1d` node's
 /// `strides`/`dilations`/`pads`, reusing [`Conv2dAttrs`]'s field names so
 /// [`conv1d_core`] shares its parameter shape with [`conv2d_core`] -- the
 /// unused `_h` fields are never read on the rank-3 path.
-fn parse_conv1d_attrs(node: &NodeProto<'_>) -> Result<Conv2dAttrs, LowerError> {
+fn parse_conv1d_attrs(node: &NodeProto<'_>, image_w: u64, kernel_w: u64) -> Result<Conv2dAttrs, LowerError> {
     let name = node.name.to_string();
     let op_type = node.op_type.to_string();
     let strides = attr_ints_or(node, "strides", &[1]);
     let dilations = attr_ints_or(node, "dilations", &[1]);
-    let pads = attr_ints_or(node, "pads", &[0, 0]);
-    if strides.len() != 1 || dilations.len() != 1 || pads.len() != 2 {
-        return Err(LowerError::UnsupportedShape { name, op_type, reason: "Conv1d lowering supports 1D strides/dilations/pads only".to_string() });
+    if strides.len() != 1 || dilations.len() != 1 {
+        return Err(LowerError::UnsupportedShape { name, op_type, reason: "Conv1d lowering supports 1D strides/dilations only".to_string() });
     }
-    Ok(Conv2dAttrs { stride_h: 1, stride_w: strides[0], dilation_h: 1, dilation_w: dilations[0], pad_top: 0, pad_left: pads[0], pad_bottom: 0, pad_right: pads[1] })
+    let (stride_w, dilation_w) = (strides[0], dilations[0]);
+
+    let auto_pad = attr_str(node, "auto_pad").unwrap_or(b"NOTSET");
+    let (pad_left, pad_right) = match auto_pad {
+        b"NOTSET" => {
+            let pads = attr_ints_or(node, "pads", &[0, 0]);
+            if pads.len() != 2 {
+                return Err(LowerError::UnsupportedShape { name, op_type, reason: "Conv1d lowering supports 1D pads only".to_string() });
+            }
+            (pads[0], pads[1])
+        }
+        b"VALID" => (0, 0),
+        b"SAME_UPPER" | b"SAME_LOWER" => same_pad_axis(image_w, kernel_w, stride_w, dilation_w, auto_pad == b"SAME_LOWER"),
+        _ => return Err(LowerError::UnsupportedShape { name, op_type, reason: "Conv1d lowering supports auto_pad NOTSET/VALID/SAME_UPPER/SAME_LOWER only".to_string() }),
+    };
+    Ok(Conv2dAttrs { stride_h: 1, stride_w, dilation_h: 1, dilation_w, pad_top: 0, pad_left, pad_bottom: 0, pad_right })
 }
 
-/// `Conv`, rank-3 (`group=1` only): parses attrs, validates channels, and
-/// calls [`conv1d_core`] -- the rank-3 mirror of [`lower_conv`]'s `group=1`
-/// branch. Grouped `Conv1d` is deferred (the same static channel-slice +
-/// [`concat_pair`] decomposition [`lower_conv`] uses for 2D applies here
-/// unchanged; simply not yet wired), never a boundary.
+/// `Conv`, rank-3 (`group >= 1`): parses attrs, validates channels, and
+/// calls [`conv1d_core`] directly for `group=1`, or once per group over a
+/// static channel slice ([`slice_axis_range`]) for `group > 1`, concatenating
+/// the per-group outputs back along the output-channel axis
+/// ([`concat_pair`]) -- the exact rank-3 mirror of [`lower_conv`]'s
+/// `group != 1` decomposition (see that function's own doc for why this is
+/// the RISC-correct resolution rather than a fused `IndexMap`).
 fn lower_conv1d(program: &mut Vec<Op>, values: &mut BTreeMap<String, Value>, node: &NodeProto<'_>) -> Result<(), LowerError> {
     let image = lookup(values, node, 0)?.clone();
     let weight = lookup(values, node, 1)?.clone();
     let name = node.name.to_string();
     let op_type = node.op_type.to_string();
 
-    if let Some(auto_pad) = attr_str(node, "auto_pad")
-        && auto_pad != b"NOTSET"
-    {
-        return Err(LowerError::UnsupportedShape { name, op_type, reason: "Conv1d lowering supports auto_pad=NOTSET only".to_string() });
-    }
     let group = attr_int(node, "group").unwrap_or(1);
-    if group != 1 {
-        return Err(LowerError::UnsupportedShape { name, op_type, reason: "Conv1d lowering supports group=1 only (grouped Conv1d deferred)".to_string() });
+    if group < 1 {
+        return Err(LowerError::UnsupportedShape { name, op_type, reason: "Conv1d group attribute must be >= 1".to_string() });
     }
+    let group = group as u64;
 
-    let in_channels = image.shape[1];
-    if weight.shape[1] != in_channels {
-        return Err(LowerError::UnsupportedShape {
-            name: node.name.to_string(),
-            op_type: node.op_type.to_string(),
-            reason: format!("Conv1d weight in-channels {} does not match image channels {in_channels}", weight.shape[1]),
-        });
-    }
-
-    let attrs = parse_conv1d_attrs(node)?;
+    let attrs = parse_conv1d_attrs(node, image.shape[2], weight.shape[2])?;
     let bias = match node.input.get(2) {
         Some(bias_name) => Some(lookup_by_name(values, bias_name, node.op_type, node.name)?.clone()),
         None => None,
     };
-    let result = conv1d_core(program, node, &image, &weight, bias.as_ref(), attrs)?;
+
+    if group == 1 {
+        let in_channels = image.shape[1];
+        if weight.shape[1] != in_channels {
+            return Err(LowerError::UnsupportedShape {
+                name: node.name.to_string(),
+                op_type: node.op_type.to_string(),
+                reason: format!("Conv1d weight in-channels {} does not match image channels {in_channels}", weight.shape[1]),
+            });
+        }
+        let result = conv1d_core(program, node, &image, &weight, bias.as_ref(), attrs)?;
+        bind_output(values, node, 0, result.node, result.shape);
+        return Ok(());
+    }
+
+    let in_channels = image.shape[1];
+    let total_out_channels = weight.shape[0];
+    let weight_in_channels = weight.shape[1];
+    if in_channels % group != 0 || total_out_channels % group != 0 {
+        return Err(LowerError::UnsupportedShape {
+            name: node.name.to_string(),
+            op_type: node.op_type.to_string(),
+            reason: format!("Conv1d image channels {in_channels} and weight output channels {total_out_channels} must both be evenly divisible by group {group}"),
+        });
+    }
+    let in_channels_per_group = in_channels / group;
+    let out_channels_per_group = total_out_channels / group;
+    if weight_in_channels != in_channels_per_group {
+        return Err(LowerError::UnsupportedShape {
+            name: node.name.to_string(),
+            op_type: node.op_type.to_string(),
+            reason: format!("Conv1d weight in-channels {weight_in_channels} does not match image channels {in_channels} / group {group}"),
+        });
+    }
+    if let Some(bias) = &bias
+        && bias.shape != alloc::vec![total_out_channels]
+    {
+        return Err(LowerError::UnsupportedShape {
+            name: node.name.to_string(),
+            op_type: node.op_type.to_string(),
+            reason: "Conv1d bias must be a rank-1 tensor sized to the total (grouped) output channels".to_string(),
+        });
+    }
+
+    let mut accumulator: Option<Value> = None;
+    for group_index in 0..group {
+        let image_slice = slice_axis_range(program, &image, 1, group_index * in_channels_per_group, in_channels_per_group);
+        let weight_slice = slice_axis_range(program, &weight, 0, group_index * out_channels_per_group, out_channels_per_group);
+        let bias_slice = bias.as_ref().map(|bias| slice_axis_range(program, bias, 0, group_index * out_channels_per_group, out_channels_per_group));
+        let group_result = conv1d_core(program, node, &image_slice, &weight_slice, bias_slice.as_ref(), attrs)?;
+        accumulator = Some(match accumulator {
+            None => group_result,
+            Some(previous) => concat_pair(program, node, &previous, &group_result, 1)?,
+        });
+    }
+    let Some(result) = accumulator else {
+        return Err(LowerError::UnsupportedShape { name: node.name.to_string(), op_type: node.op_type.to_string(), reason: "Conv1d group must be >= 1".to_string() });
+    };
     bind_output(values, node, 0, result.node, result.shape);
     Ok(())
 }
@@ -2223,18 +2316,13 @@ fn lower_conv(program: &mut Vec<Op>, values: &mut BTreeMap<String, Value>, node:
             reason: "Conv lowering supports 1D convolution (rank-3 NCW image/CoCiKw weight) or 2D convolution (rank-4 NCHW image, rank-4 CoCiKhKw weight) only".to_string(),
         });
     }
-    if let Some(auto_pad) = attr_str(node, "auto_pad")
-        && auto_pad != b"NOTSET"
-    {
-        return Err(LowerError::UnsupportedShape { name, op_type, reason: "Conv lowering supports auto_pad=NOTSET only".to_string() });
-    }
     let group = attr_int(node, "group").unwrap_or(1);
     if group < 1 {
         return Err(LowerError::UnsupportedShape { name, op_type, reason: "Conv group attribute must be >= 1".to_string() });
     }
     let group = group as u64;
 
-    let attrs = parse_conv2d_attrs(node)?;
+    let attrs = parse_conv2d_attrs(node, image.shape[2], image.shape[3], weight.shape[2], weight.shape[3])?;
     let batch = image.shape[0];
     let in_channels = image.shape[1];
     let total_out_channels = weight.shape[0];
@@ -2323,11 +2411,6 @@ fn plan_pool(program: &mut Vec<Op>, node: &NodeProto<'_>, image: &Value, fill: f
     if image.shape.len() != 4 {
         return Err(LowerError::UnsupportedShape { name, op_type, reason: format!("{} lowering supports rank-4 NCHW input only", node.op_type) });
     }
-    if let Some(auto_pad) = attr_str(node, "auto_pad")
-        && auto_pad != b"NOTSET"
-    {
-        return Err(LowerError::UnsupportedShape { name, op_type, reason: format!("{} lowering supports auto_pad=NOTSET only", node.op_type) });
-    }
     let kernel_shape = attr_ints(node, "kernel_shape").ok_or_else(|| LowerError::UnsupportedShape {
         name: node.name.to_string(),
         op_type: node.op_type.to_string(),
@@ -2343,17 +2426,40 @@ fn plan_pool(program: &mut Vec<Op>, node: &NodeProto<'_>, image: &Value, fill: f
     let (kernel_h, kernel_w) = (kernel_shape[0] as u64, kernel_shape[1] as u64);
     let strides = attr_ints_or(node, "strides", &[1, 1]);
     let dilations = attr_ints_or(node, "dilations", &[1, 1]);
-    let pads = attr_ints_or(node, "pads", &[0, 0, 0, 0]);
-    if strides.len() != 2 || dilations.len() != 2 || pads.len() != 4 {
+    if strides.len() != 2 || dilations.len() != 2 {
         return Err(LowerError::UnsupportedShape {
             name: node.name.to_string(),
             op_type: node.op_type.to_string(),
-            reason: format!("{} lowering supports 2D strides/dilations/pads only", node.op_type),
+            reason: format!("{} lowering supports 2D strides/dilations only", node.op_type),
         });
     }
     let (stride_h, stride_w) = (strides[0], strides[1]);
     let (dilation_h, dilation_w) = (dilations[0], dilations[1]);
-    let (pad_top, pad_left, pad_bottom, pad_right) = (pads[0], pads[1], pads[2], pads[3]);
+
+    let auto_pad = attr_str(node, "auto_pad").unwrap_or(b"NOTSET");
+    let (pad_top, pad_bottom, pad_left, pad_right) = match auto_pad {
+        b"NOTSET" => {
+            let pads = attr_ints_or(node, "pads", &[0, 0, 0, 0]);
+            if pads.len() != 4 {
+                return Err(LowerError::UnsupportedShape { name, op_type, reason: format!("{} lowering supports 2D pads only", node.op_type) });
+            }
+            (pads[0], pads[2], pads[1], pads[3])
+        }
+        b"VALID" => (0, 0, 0, 0),
+        b"SAME_UPPER" | b"SAME_LOWER" => {
+            let lower = auto_pad == b"SAME_LOWER";
+            let (top, bottom) = same_pad_axis(image.shape[2], kernel_h, stride_h, dilation_h, lower);
+            let (left, right) = same_pad_axis(image.shape[3], kernel_w, stride_w, dilation_w, lower);
+            (top, bottom, left, right)
+        }
+        _ => {
+            return Err(LowerError::UnsupportedShape {
+                name,
+                op_type,
+                reason: format!("{} lowering supports auto_pad NOTSET/VALID/SAME_UPPER/SAME_LOWER only", node.op_type),
+            });
+        }
+    };
 
     let padded_w = pad_axis(program, image, 3, pad_left as u64, pad_right as u64, fill);
     let padded = pad_axis(program, &padded_w, 2, pad_top as u64, pad_bottom as u64, fill);
@@ -3717,5 +3823,75 @@ mod tests {
             &[1.0, 2.0, 2.0, 4.0, 3.0, 4.0, 6.0, 8.0, 3.0, 6.0, 4.0, 8.0, 9.0, 12.0, 12.0, 16.0],
             "each input cell scattered into its own non-overlapping 2x2 kernel block"
         );
+    }
+
+    /// `Conv` with `auto_pad = SAME_UPPER`: [`same_pad_axis`]'s formula
+    /// computes `pads = [1, 1]` for a length-4 signal, 3-wide kernel,
+    /// stride 1 (`needed = 2`, split evenly `1/1`) -- the output stays
+    /// length-4, hand-verified against the zero-padded length-6 reference.
+    #[test]
+    fn conv1d_auto_pad_same_upper_keeps_the_input_length() {
+        let image = f32_initializer("image", &[1, 1, 4], &[1.0, 2.0, 3.0, 4.0]);
+        let weight = f32_initializer("weight", &[1, 1, 3], &[1.0; 3]);
+        let node = NodeProto {
+            input: vec!["image", "weight"],
+            output: vec!["y"],
+            op_type: "Conv",
+            name: "conv1d_same",
+            attribute: vec![AttributeProto { name: "auto_pad", s: b"SAME_UPPER", ..AttributeProto::default() }],
+            ..NodeProto::default()
+        };
+        let graph = GraphProto {
+            node: vec![node],
+            name: "conv1d_same_upper_graph",
+            initializer: vec![image, weight],
+            output: vec![ValueInfoProto { name: "y", ..ValueInfoProto::default() }],
+            ..GraphProto::default()
+        };
+
+        let lowered = lower_graph(&graph).expect("lower Conv1d SAME_UPPER");
+        let named: Vec<(&str, &[f32])> = lowered.initializers.iter().map(|(name, data)| (name.as_str(), data.as_slice())).collect();
+        let output = lowered.graph_outputs[0].1;
+        let evaluated = evaluate_named(&lowered.program, &[], &named, &[output]).expect("evaluate Conv1d SAME_UPPER");
+        let (data, shape) = evaluated.get(output).expect("y present");
+
+        // padded (pad=[1,1]): [0,1,2,3,4,0] -- windows: [0,1,2]=3 [1,2,3]=6 [2,3,4]=9 [3,4,0]=7
+        assert_eq!(shape, &[1, 1, 4]);
+        assert_eq!(data, &[3.0, 6.0, 9.0, 7.0], "SAME_UPPER's even split pads both edges by one");
+    }
+
+    /// `Conv1d`, `group = 2` (depthwise): each of 2 input channels convolves
+    /// against its own single-channel kernel, output channels concatenated
+    /// -- the rank-3 mirror of the grouped `Conv2d` test above, hand-verified
+    /// per channel.
+    #[test]
+    fn conv1d_grouped_convolves_each_channel_independently() {
+        let image = f32_initializer("image", &[1, 2, 4], &[1.0, 2.0, 3.0, 4.0, 10.0, 20.0, 30.0, 40.0]);
+        let weight = f32_initializer("weight", &[2, 1, 2], &[1.0, 1.0, 2.0, 2.0]);
+        let node = NodeProto {
+            input: vec!["image", "weight"],
+            output: vec!["y"],
+            op_type: "Conv",
+            name: "conv1d_grouped",
+            attribute: vec![AttributeProto { name: "group", i: 2, ..AttributeProto::default() }],
+            ..NodeProto::default()
+        };
+        let graph = GraphProto {
+            node: vec![node],
+            name: "conv1d_grouped_graph",
+            initializer: vec![image, weight],
+            output: vec![ValueInfoProto { name: "y", ..ValueInfoProto::default() }],
+            ..GraphProto::default()
+        };
+
+        let lowered = lower_graph(&graph).expect("lower grouped Conv1d");
+        let named: Vec<(&str, &[f32])> = lowered.initializers.iter().map(|(name, data)| (name.as_str(), data.as_slice())).collect();
+        let output = lowered.graph_outputs[0].1;
+        let evaluated = evaluate_named(&lowered.program, &[], &named, &[output]).expect("evaluate grouped Conv1d");
+        let (data, shape) = evaluated.get(output).expect("y present");
+
+        // channel 0: [1,2,3,4] * kernel [1,1] -> [3,5,7]; channel 1: [10,20,30,40] * kernel [2,2] -> [60,100,140]
+        assert_eq!(shape, &[1, 2, 3]);
+        assert_eq!(data, &[3.0, 5.0, 7.0, 60.0, 100.0, 140.0], "each group convolves its own channel with its own kernel");
     }
 }
