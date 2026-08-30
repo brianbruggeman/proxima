@@ -575,3 +575,73 @@ fn packed_q4_0_matmul_matches_the_dequantized_f32_cpu_path_on_wgpu() {
     use proxima_gguf::quant::q4_0::{BLOCK_BYTES, QK4_0, dequantize, quantize};
     assert_packed_codec_parity("q4_0", BLOCK_BYTES, QK4_0, quantize, dequantize, |bytes| QuantizedBlock::Q4_0(bytes), 1e-5);
 }
+
+/// `weight[m, k] * activation[k, n]` summed over `k`, `Add`-reduce over a
+/// `Multiply` body — the exact shape [`crate::wgsl::reduce_is_cooperative`]
+/// selects for whichever path the local adapter supports (subgroup or
+/// serial), run directly through [`omega::wgpu_driver::plan_named`] (not
+/// [`omega::backend`]'s wrapper) so this test can read
+/// [`omega::wgpu_driver::WgpuPlan::caps`] and report which path actually
+/// ran — a silent divergence between the two paths must show up as a
+/// numeric disagreement here, not just as an unread code path.
+#[test]
+fn matmul_runs_on_wgpu_at_cpu_parity_whichever_reduce_path_the_adapter_takes() {
+    let (m, k, n) = (11usize, 37usize, 5usize);
+    let (program, _root) = {
+        let mut program = Vec::new();
+        let lhs = append(
+            &mut program,
+            Op::Input {
+                dtype: DType::Float32,
+                shape: vec![Extent::Static(m as u32), Extent::Static(k as u32)],
+                name: Some("lhs".into()),
+            },
+        );
+        let rhs = append(
+            &mut program,
+            Op::Input {
+                dtype: DType::Float32,
+                shape: vec![Extent::Static(k as u32), Extent::Static(n as u32)],
+                name: Some("rhs".into()),
+            },
+        );
+        let root = append_matmul(&mut program, lhs, rhs, m as u32, k as u32, n as u32);
+        (program, root)
+    };
+
+    let lhs = random_vec(41, m * k);
+    let rhs = random_vec(43, k * n);
+    let named: Vec<(&str, QuantizedBlock<'_>)> =
+        vec![("lhs", QuantizedBlock::Float32(&lhs)), ("rhs", QuantizedBlock::Float32(&rhs))];
+
+    let mut cpu_plan = plan_named(Backend::Cpu, &program, &[], &named, &[]).expect("cpu plans the matmul");
+    let cpu = execute_plan_named(&mut cpu_plan, &named).expect("cpu runs the matmul");
+
+    let mut wgpu_plan = omega::wgpu_driver::plan_named(&program, &[], &named, &[])
+        .expect("omega::wgpu_driver plans the matmul directly");
+    let path = match wgpu_plan.caps().subgroup_size {
+        Some(width) => format!("cooperative (subgroup width {width})"),
+        None => "serial (no fixed-width subgroup reported)".to_string(),
+    };
+    eprintln!("wgpu reduce path taken: {path}");
+    let wgpu = omega::wgpu_driver::execute_plan_named(&mut wgpu_plan, &named)
+        .expect("omega::wgpu_driver runs the matmul on a real device");
+
+    let expected = cpu.root();
+    let actual = wgpu.root();
+    assert_eq!(actual.len(), m * n);
+    assert_eq!(actual.len(), expected.len());
+
+    let mut max_diff = 0.0f32;
+    for (&got, &want) in actual.iter().zip(expected.iter()) {
+        assert!(got.is_finite(), "wgpu matmul ({path}) produced a non-finite value: {got}");
+        max_diff = max_diff.max((got - want).abs());
+    }
+    let max_magnitude = expected.iter().map(|value| value.abs()).fold(0.0f32, f32::max);
+    let relative = max_diff / max_magnitude.max(f32::MIN_POSITIVE);
+    eprintln!("wgpu matmul parity ({path}): max_diff={max_diff} relative={relative}");
+    assert!(
+        relative < 1e-4,
+        "wgpu matmul ({path}) disagrees with the cpu oracle: relative={relative} max_diff={max_diff}"
+    );
+}
