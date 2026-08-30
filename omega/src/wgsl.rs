@@ -72,10 +72,12 @@
 //! unchanged rather than dequantizing on the host. `Keep::Scan` does not take
 //! this path (same boundary as gather, see [`EmitError::UnsupportedOpKind`]).
 //!
-//! # Not in v1 (see [`EmitError::UnsupportedOpKind`])
+//! # `Iota` and `Constant`
 //!
-//! - **`Iota`/`Constant`.** Rejected the same way; nothing in this crate's
-//!   v1 test surface needs a position-only or literal-only kernel.
+//! Both render (position-only, [`render_iota`]; literal-fill,
+//! [`render_constant`]) — the real forward fixture's RoPE positions and
+//! causal mask need them, and neither takes an operand, so there is no
+//! gather/packed-operand interaction to scope out.
 //!
 //! # Runtime uniforms, not baked constants
 //!
@@ -166,7 +168,7 @@ pub struct WgslCaps {
 /// # Errors
 /// [`EmitError::UnsupportedDType`] for anything but `Float32` (or `Float16`
 /// when `caps.shader_f16`), [`EmitError::GatherNotSupported`] for a gathered
-/// operand, [`EmitError::UnsupportedOpKind`] for `Iota`/`Constant`,
+/// operand, [`EmitError::UnsupportedOpKind`] for `Keep::Scan` over a packed operand,
 /// [`EmitError::ArityMismatch`]/[`EmitError::ReductionBodyIsSelect`]/
 /// [`EmitError::EmptyScan`] for the same structural failures
 /// [`crate::msl::emit`] rejects.
@@ -194,18 +196,8 @@ pub fn emit_wgsl(resolved: &BoundOp, caps: WgslCaps, packed_operands: &PackedOpe
         BoundOpKind::Reduce {
             keep: Keep::Scan, ..
         } => render_scan(resolved, &entry, element_type),
-        BoundOpKind::Iota => {
-            return Err(EmitError::UnsupportedOpKind {
-                node: resolved.node,
-                kind: "iota",
-            });
-        }
-        BoundOpKind::Constant { .. } => {
-            return Err(EmitError::UnsupportedOpKind {
-                node: resolved.node,
-                kind: "constant",
-            });
-        }
+        BoundOpKind::Iota => render_iota(resolved, &entry),
+        BoundOpKind::Constant { value } => render_constant(resolved, &entry, *value),
     };
     let (threads, workgroup_size) = match cooperative_width {
         Some(width) => (grid_threads(resolved) * u64::from(width), width),
@@ -1270,6 +1262,66 @@ fn render_reduce_cooperative(
     source
 }
 
+/// WGSL spelling for a literal `f32` — the counterpart of
+/// `crate::msl::msl_literal`. NaN/infinity have no portable WGSL literal
+/// spelling (WGSL float literals must be finite), so they are bitcast from
+/// their exact IEEE-754 bit pattern, the same trick [`fold_init_tokens`]
+/// already uses for `ReduceInit::NegativeInfinity`/`PositiveInfinity`.
+fn wgsl_literal(value: f32) -> String {
+    if value.is_nan() {
+        return "bitcast<f32>(0x7fc00000u)".to_string();
+    }
+    if value.is_infinite() {
+        return if value.is_sign_negative() {
+            "bitcast<f32>(0xff800000u)".to_string()
+        } else {
+            "bitcast<f32>(0x7f800000u)".to_string()
+        };
+    }
+    format!("{value:?}")
+}
+
+/// [`BoundOpKind::Iota`]'s kernel: the output value at each position is the
+/// thread's own grid coordinate — the WGSL counterpart of
+/// `crate::msl::render_iota`. No operand buffers, no body; every kernel
+/// already computes `gid`, so there is nothing to derive beyond widening it
+/// to the output buffer's `f32`.
+fn render_iota(resolved: &BoundOp, entry: &str) -> String {
+    let mut uniforms = String::new();
+    uniforms.push_str("struct Uniforms {\n    total_elements: i32,\n};\n");
+
+    let mut source = String::new();
+    preamble(&mut source, 0, 0, &[], "f32", &uniforms);
+    kernel_signature(&mut source, entry);
+    source.push_str("    if (gid >= u.total_elements) { return; }\n");
+    source.push_str("    out[gid] = f32(gid);\n");
+    source.push_str("}\n");
+    let _ = resolved;
+    source
+}
+
+/// [`BoundOpKind::Constant`]'s kernel: every output element is the same
+/// literal `value`, no operand buffers and no per-element compute at all —
+/// the WGSL counterpart of `crate::msl::render_iota`'s sibling for a
+/// constant-fill node. The output buffer is always `array<f32>` regardless
+/// of the node's own dtype (see the module doc's "f16 here is COMPUTE only"
+/// note), so this writes the literal directly with no `element_type` cast to
+/// thread through.
+fn render_constant(resolved: &BoundOp, entry: &str, value: f32) -> String {
+    let mut uniforms = String::new();
+    uniforms.push_str("struct Uniforms {\n    total_elements: i32,\n};\n");
+
+    let mut source = String::new();
+    preamble(&mut source, 0, 0, &[], "f32", &uniforms);
+    kernel_signature(&mut source, entry);
+    source.push_str("    if (gid >= u.total_elements) { return; }\n");
+    let literal = wgsl_literal(value);
+    source.push_str(&format!("    out[gid] = {literal};\n"));
+    source.push_str("}\n");
+    let _ = resolved;
+    source
+}
+
 fn render_scan(resolved: &BoundOp, entry: &str, element_type: &str) -> String {
     let BoundOpKind::Reduce {
         reduce_op, init, ..
@@ -1613,5 +1665,51 @@ mod tests {
         assert!(kernel.source.contains("@workgroup_size(64)"));
         assert_eq!(kernel.workgroup_size, WORKGROUP_SIZE);
         assert_eq!(kernel.threads, 12);
+    }
+
+    #[test]
+    fn iota_emits_the_thread_coordinate_with_no_operand_bindings() {
+        let mut program = Vec::new();
+        append(
+            &mut program,
+            Op::Iota {
+                dtype: DType::Float32,
+                extent: Extent::Static(6),
+            },
+        );
+        let shapes = infer(&program, &[]).expect("infer succeeds");
+        let bound = bind(&program, &shapes, &[]).expect("bind succeeds");
+        let bound = bound.into_iter().next().expect("one bound op");
+        let kernel = emit_wgsl(&bound, WgslCaps::default(), &PackedOperands::new()).expect("iota emits");
+        assert!(kernel.source.contains("out[gid] = f32(gid);"));
+        assert_eq!(kernel.bindings.len(), 2, "output + uniforms, no operand bindings");
+        assert_eq!(kernel.threads, 6);
+    }
+
+    #[test]
+    fn constant_emits_the_literal_with_no_operand_bindings() {
+        let mut program = Vec::new();
+        append(
+            &mut program,
+            Op::Constant {
+                dtype: DType::Float32,
+                shape: vec![Extent::Static(4)],
+                value: -1.0e9,
+            },
+        );
+        let shapes = infer(&program, &[]).expect("infer succeeds");
+        let bound = bind(&program, &shapes, &[]).expect("bind succeeds");
+        let bound = bound.into_iter().next().expect("one bound op");
+        let kernel = emit_wgsl(&bound, WgslCaps::default(), &PackedOperands::new()).expect("constant emits");
+        assert!(kernel.source.contains("out[gid] = -1000000000.0;"));
+        assert_eq!(kernel.bindings.len(), 2, "output + uniforms, no operand bindings");
+        assert_eq!(kernel.threads, 4);
+    }
+
+    #[test]
+    fn a_nan_constant_emits_a_bitcast_not_a_bare_literal() {
+        assert_eq!(wgsl_literal(f32::NAN), "bitcast<f32>(0x7fc00000u)");
+        assert_eq!(wgsl_literal(f32::NEG_INFINITY), "bitcast<f32>(0xff800000u)");
+        assert_eq!(wgsl_literal(f32::INFINITY), "bitcast<f32>(0x7f800000u)");
     }
 }
