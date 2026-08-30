@@ -133,9 +133,38 @@ pub fn lower_graph(graph: &GraphProto<'_>) -> Result<Lowered, LowerError> {
     let mut values: BTreeMap<String, Value> = BTreeMap::new();
     let mut initializers: Vec<(String, Vec<f32>)> = Vec::new();
 
+    // `Reshape`'s `shape` operand is consumed only as *values* this pass
+    // reads directly (see `lower_reshape`) -- its `NodeId` is never named by
+    // any `Op` in the program. A shape-only initializer that appears
+    // *nowhere else* therefore does not need a live `Op::Input` leaf: one
+    // would sit dead in `program` forever, and a non-`Float32` dead leaf
+    // (real ONNX `Reshape` shape tensors are `int64`) trips
+    // `cpu::reject_non_float32`'s whole-program scan, which does not prune
+    // unreachable nodes. Skipping the leaf for names used ONLY this way
+    // keeps every genuinely consumed initializer (weights, `Gather`
+    // indices, ...) on the same live-leaf path as before.
+    let shape_only_names: alloc::collections::BTreeSet<&str> = graph
+        .node
+        .iter()
+        .filter(|node| node.op_type == "Reshape")
+        .filter_map(|node| node.input.get(1).copied())
+        .filter(|&name| {
+            let used_elsewhere = graph.node.iter().any(|node| {
+                node.input.iter().enumerate().any(|(index, &input_name)| input_name == name && !(node.op_type == "Reshape" && index == 1))
+            });
+            let is_graph_output = graph.output.iter().any(|output| output.name == name);
+            !used_elsewhere && !is_graph_output
+        })
+        .collect();
+
+    let mut initializer_data: BTreeMap<String, Vec<f32>> = BTreeMap::new();
     for tensor in &graph.initializer {
         let shape = tensor_shape(tensor);
         let data = decode_numeric_tensor(tensor)?;
+        initializer_data.insert(tensor.name.to_string(), data.clone());
+        if shape_only_names.contains(tensor.name) {
+            continue;
+        }
         let node = append(
             &mut program,
             Op::Input {
@@ -171,7 +200,7 @@ pub fn lower_graph(graph: &GraphProto<'_>) -> Result<Lowered, LowerError> {
     }
 
     for node in &graph.node {
-        lower_node(&mut program, &mut values, node)?;
+        lower_node(&mut program, &mut values, &initializer_data, node)?;
     }
 
     let mut graph_outputs = Vec::new();
@@ -183,7 +212,12 @@ pub fn lower_graph(graph: &GraphProto<'_>) -> Result<Lowered, LowerError> {
     Ok(Lowered { program, initializers, graph_inputs, graph_outputs })
 }
 
-fn lower_node(program: &mut Vec<Op>, values: &mut BTreeMap<String, Value>, node: &NodeProto<'_>) -> Result<(), LowerError> {
+fn lower_node(
+    program: &mut Vec<Op>,
+    values: &mut BTreeMap<String, Value>,
+    initializer_data: &BTreeMap<String, Vec<f32>>,
+    node: &NodeProto<'_>,
+) -> Result<(), LowerError> {
     match node.op_type {
         "Add" => lower_binary(program, values, node, ScalarOp::Add),
         "Sub" => lower_binary(program, values, node, ScalarOp::Subtract),
@@ -214,6 +248,8 @@ fn lower_node(program: &mut Vec<Op>, values: &mut BTreeMap<String, Value>, node:
         "ReduceMax" => lower_reduce(program, values, node, ScalarOp::Maximum, ReduceInit::NegativeInfinity),
         "ReduceMin" => lower_reduce(program, values, node, ScalarOp::Minimum, ReduceInit::PositiveInfinity),
         "ReduceProd" => lower_reduce(program, values, node, ScalarOp::Multiply, ReduceInit::One),
+        "Reshape" => lower_reshape(values, initializer_data, node),
+        "Flatten" => lower_flatten(values, node),
         other => Err(LowerError::UnsupportedOp { name: node.name.to_string(), op_type: other.to_string() }),
     }
 }
@@ -832,6 +868,91 @@ fn lower_reduce(program: &mut Vec<Op>, values: &mut BTreeMap<String, Value>, nod
     Ok(())
 }
 
+/// `Reshape(data, shape)`: a contiguous reshape -- merge or split of axes --
+/// is pure layout, never compute (same element order, reinterpreted
+/// extents), so this binds a [`Value`] view straight onto `data`'s node,
+/// exactly [`lower_unsqueeze`]'s alias pattern (see [`Value`]'s own doc),
+/// rather than an `Op` that would need floor-div/mod to express the
+/// merge direction affinely. `shape` must be a decoded initializer (ONNX's
+/// own convention for a constant-folded target shape); `0` copies the
+/// source extent (unless `allowzero`) and at most one `-1` is inferred from
+/// the total element count, both per the ONNX `Reshape` spec.
+fn lower_reshape(values: &mut BTreeMap<String, Value>, initializer_data: &BTreeMap<String, Vec<f32>>, node: &NodeProto<'_>) -> Result<(), LowerError> {
+    let input = lookup(values, node, 0)?.clone();
+    let shape_name = node.input.get(1).ok_or_else(|| LowerError::MissingInput { name: node.name.to_string(), op_type: node.op_type.to_string(), index: 1 })?;
+    let shape_data = initializer_data.get(*shape_name).ok_or_else(|| LowerError::UnsupportedShape {
+        name: node.name.to_string(),
+        op_type: node.op_type.to_string(),
+        reason: "Reshape lowering requires the shape input to be a decoded initializer".to_string(),
+    })?;
+
+    let allowzero = attr_int(node, "allowzero").unwrap_or(0) != 0;
+    let mut target: Vec<i64> = shape_data.iter().map(|&value| value as i64).collect();
+    for (axis, value) in target.iter_mut().enumerate() {
+        if *value == 0 && !allowzero {
+            *value = *input.shape.get(axis).ok_or_else(|| LowerError::UnsupportedShape {
+                name: node.name.to_string(),
+                op_type: node.op_type.to_string(),
+                reason: format!("shape entry 0 at axis {axis} has no matching source axis to copy"),
+            })? as i64;
+        }
+    }
+    let negative_slots = target.iter().filter(|&&value| value == -1).count();
+    if negative_slots > 1 {
+        return Err(LowerError::UnsupportedShape { name: node.name.to_string(), op_type: node.op_type.to_string(), reason: "Reshape shape has more than one -1 entry".to_string() });
+    }
+    let total: i64 = input.shape.iter().product::<u64>() as i64;
+    if negative_slots == 1 {
+        let known_product: i64 = target.iter().filter(|&&value| value != -1).product();
+        let inferred = if known_product == 0 { 0 } else { total / known_product };
+        for value in &mut target {
+            if *value == -1 {
+                *value = inferred;
+            }
+        }
+    }
+    let out_shape: Vec<u64> = target.iter().map(|&value| value as u64).collect();
+    if out_shape.iter().product::<u64>() as i64 != total {
+        return Err(LowerError::UnsupportedShape {
+            name: node.name.to_string(),
+            op_type: node.op_type.to_string(),
+            reason: format!("Reshape target element count does not match source ({total} elements)"),
+        });
+    }
+
+    if let Some(output_name) = node.output.first() {
+        values.insert((*output_name).to_string(), Value { node: input.node, shape: out_shape, view: None });
+    }
+    Ok(())
+}
+
+/// `Flatten(axis)`: the two-axis special case of a contiguous reshape --
+/// `[prod(dims[:axis]), prod(dims[axis:])]` -- computed straight from the
+/// already-known source shape, no `shape` input to decode. Same view-alias
+/// treatment as [`lower_reshape`]: layout, not compute.
+fn lower_flatten(values: &mut BTreeMap<String, Value>, node: &NodeProto<'_>) -> Result<(), LowerError> {
+    let input = lookup(values, node, 0)?.clone();
+    let rank = input.shape.len();
+    let axis = attr_int(node, "axis").unwrap_or(1);
+    let normalized_axis = if axis < 0 { axis + rank as i64 } else { axis };
+    if normalized_axis < 0 || normalized_axis as usize > rank {
+        return Err(LowerError::UnsupportedShape {
+            name: node.name.to_string(),
+            op_type: node.op_type.to_string(),
+            reason: format!("Flatten axis {axis} is out of range for rank {rank}"),
+        });
+    }
+    let split = normalized_axis as usize;
+    let leading: u64 = input.shape[..split].iter().product();
+    let trailing: u64 = input.shape[split..].iter().product();
+    let out_shape = alloc::vec![leading, trailing];
+
+    if let Some(output_name) = node.output.first() {
+        values.insert((*output_name).to_string(), Value { node: input.node, shape: out_shape, view: None });
+    }
+    Ok(())
+}
+
 fn tensor_shape(tensor: &TensorProto<'_>) -> Vec<u64> {
     tensor.dims.iter().map(|&value| value as u64).collect()
 }
@@ -1054,6 +1175,86 @@ mod tests {
 
         let error = lower_graph(&graph).expect_err("Concat has no lowering");
         assert!(matches!(error, LowerError::UnsupportedOp { .. }), "expected UnsupportedOp, got {error:?}");
+    }
+
+    /// `Reshape` merging `[2, 3, 4]` into `[6, 4]`: pure layout, no `Op`
+    /// appended -- the program is exactly as long after lowering as before
+    /// the `Reshape` node, proving this is a [`Value`] view alias
+    /// ([`lower_unsqueeze`]'s own pattern), never a new compute `Op`.
+    #[test]
+    fn reshape_merges_axes_without_appending_an_op() {
+        let x_initializer = f32_initializer("x", &[2, 3, 4], &(0..24).map(|value| value as f32).collect::<Vec<_>>());
+        let shape_initializer = TensorProto { dims: vec![2], data_type: 7, int64_data: vec![6, 4], name: "shape", ..TensorProto::default() };
+        let node = NodeProto { input: vec!["x", "shape"], output: vec!["y"], op_type: "Reshape", name: "reshape", ..NodeProto::default() };
+        let graph = GraphProto {
+            node: vec![node],
+            name: "reshape_merge_graph",
+            initializer: vec![x_initializer, shape_initializer],
+            output: vec![ValueInfoProto { name: "y", ..ValueInfoProto::default() }],
+            ..GraphProto::default()
+        };
+
+        let lowered = lower_graph(&graph).expect("lower Reshape merge");
+        assert_eq!(lowered.program.len(), 1, "a contiguous reshape appends no new Op (the shape tensor is value-only, never a live leaf)");
+
+        let named: Vec<(&str, &[f32])> = lowered.initializers.iter().map(|(name, data)| (name.as_str(), data.as_slice())).collect();
+        let output = lowered.graph_outputs[0].1;
+        let evaluated = evaluate_named(&lowered.program, &[], &named, &[output]).expect("evaluate Reshape merge");
+        let (data, _) = evaluated.get(output).expect("y present");
+        let expected: Vec<f32> = (0..24).map(|value| value as f32).collect();
+        assert_eq!(data, expected.as_slice(), "merge preserves element order (flattened)");
+    }
+
+    /// `Reshape` merging all the way down to a flat `[24]` -- the same
+    /// view-alias mechanism, one more axis collapsed.
+    #[test]
+    fn reshape_flattens_to_rank_one_without_appending_an_op() {
+        let x_initializer = f32_initializer("x", &[2, 3, 4], &(0..24).map(|value| value as f32).collect::<Vec<_>>());
+        let shape_initializer = TensorProto { dims: vec![1], data_type: 7, int64_data: vec![24], name: "shape", ..TensorProto::default() };
+        let node = NodeProto { input: vec!["x", "shape"], output: vec!["y"], op_type: "Reshape", name: "reshape", ..NodeProto::default() };
+        let graph = GraphProto {
+            node: vec![node],
+            name: "reshape_flatten_graph",
+            initializer: vec![x_initializer, shape_initializer],
+            output: vec![ValueInfoProto { name: "y", ..ValueInfoProto::default() }],
+            ..GraphProto::default()
+        };
+
+        let lowered = lower_graph(&graph).expect("lower Reshape flatten");
+        assert_eq!(lowered.program.len(), 1, "a contiguous reshape appends no new Op (the shape tensor is value-only, never a live leaf)");
+
+        let named: Vec<(&str, &[f32])> = lowered.initializers.iter().map(|(name, data)| (name.as_str(), data.as_slice())).collect();
+        let output = lowered.graph_outputs[0].1;
+        let evaluated = evaluate_named(&lowered.program, &[], &named, &[output]).expect("evaluate Reshape flatten");
+        let (data, _) = evaluated.get(output).expect("y present");
+        let expected: Vec<f32> = (0..24).map(|value| value as f32).collect();
+        assert_eq!(data, expected.as_slice());
+    }
+
+    /// `Reshape` splitting `[24]` into `[2, 3, 4]`: the reverse direction,
+    /// also a pure view alias with no new `Op`.
+    #[test]
+    fn reshape_splits_a_flat_axis_without_appending_an_op() {
+        let x_initializer = f32_initializer("x", &[24], &(0..24).map(|value| value as f32).collect::<Vec<_>>());
+        let shape_initializer = TensorProto { dims: vec![3], data_type: 7, int64_data: vec![2, 3, 4], name: "shape", ..TensorProto::default() };
+        let node = NodeProto { input: vec!["x", "shape"], output: vec!["y"], op_type: "Reshape", name: "reshape", ..NodeProto::default() };
+        let graph = GraphProto {
+            node: vec![node],
+            name: "reshape_split_graph",
+            initializer: vec![x_initializer, shape_initializer],
+            output: vec![ValueInfoProto { name: "y", ..ValueInfoProto::default() }],
+            ..GraphProto::default()
+        };
+
+        let lowered = lower_graph(&graph).expect("lower Reshape split");
+        assert_eq!(lowered.program.len(), 1, "a contiguous reshape appends no new Op (the shape tensor is value-only, never a live leaf)");
+
+        let named: Vec<(&str, &[f32])> = lowered.initializers.iter().map(|(name, data)| (name.as_str(), data.as_slice())).collect();
+        let output = lowered.graph_outputs[0].1;
+        let evaluated = evaluate_named(&lowered.program, &[], &named, &[output]).expect("evaluate Reshape split");
+        let (data, _) = evaluated.get(output).expect("y present");
+        let expected: Vec<f32> = (0..24).map(|value| value as f32).collect();
+        assert_eq!(data, expected.as_slice(), "split preserves element order (still flattened)");
     }
 
     /// Batched `MatMul`: `[2, 2, 3] x [2, 3, 2]`, independently computed per
