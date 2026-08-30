@@ -434,6 +434,19 @@ fn pack_scan_uniforms(bound: &BoundOp) -> Vec<u8> {
     bytes
 }
 
+/// Mirrors `crate::metal::pack_leaf_uniforms`, narrowed to `i32` the same
+/// way [`pack_elementwise_uniforms`] is: `render_iota`/`render_constant`
+/// both declare `struct Uniforms { total_elements: i32 }` and gate every
+/// thread on `gid >= u.total_elements` — an empty uniform buffer reads as
+/// zero (wgpu zero-fills unwritten buffer contents), so every thread would
+/// see `total_elements == 0` and return before writing anything.
+fn pack_leaf_uniforms(bound: &BoundOp) -> Vec<u8> {
+    let total: i64 = bound.extents.iter().map(|extent| *extent as i64).product();
+    let mut bytes = Vec::new();
+    push_i32(&mut bytes, total as i32);
+    bytes
+}
+
 fn pack_uniforms(bound: &BoundOp) -> Vec<u8> {
     match &bound.kind {
         BoundOpKind::Elementwise { .. } => pack_elementwise_uniforms(bound),
@@ -443,7 +456,7 @@ fn pack_uniforms(bound: &BoundOp) -> Vec<u8> {
         BoundOpKind::Reduce {
             keep: Keep::Scan, ..
         } => pack_scan_uniforms(bound),
-        BoundOpKind::Iota | BoundOpKind::Constant { .. } => Vec::new(),
+        BoundOpKind::Iota | BoundOpKind::Constant { .. } => pack_leaf_uniforms(bound),
     }
 }
 
