@@ -91,6 +91,7 @@ macro_rules! impl_convert_pipe_as {
 
 impl_convert_pipe_as!(i8 => i16);
 impl_convert_pipe_as!(i16 => i32);
+impl_convert_pipe_as!(i16 => i64);
 impl_convert_pipe_as!(i32 => i64);
 impl_convert_pipe_as!(i64 => i128);
 impl_convert_pipe_as!(u8 => u16);
