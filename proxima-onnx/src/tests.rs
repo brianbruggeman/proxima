@@ -763,3 +763,139 @@ fn op_program_lifts_to_onnx_bytes_and_lowers_back_to_an_equivalent_program() {
         assert!((actual - expected).abs() < 1e-4, "round-tripped output {actual} does not match original-program baseline {expected}");
     }
 }
+
+/// `Gemm(transA=1)`: `lower_gemm` reads `A`'s real `[K, M]` shape through a
+/// *permuted* pattern (`lift::try_matmul_shape`'s own doc: `lhs_axis0 == k`
+/// names `trans_a`). Round-trips through [`crate::lift::lift_model`] as a
+/// NAMED `Gemm` node carrying `transA=1` -- never `MatMul` (which has no
+/// transpose attribute in ONNX) and never a primitive `Mul`/`ReduceSum`
+/// spray -- then lowers back and evaluates identically to the original.
+#[test]
+fn gemm_transposed_a_round_trips_through_lift_as_a_named_gemm() {
+    let a_data: [f32; 6] = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0];
+    let b_data: [f32; 12] = [0.1, 0.2, -0.1, 0.05, 0.3, -0.2, 0.4, 0.1, -0.5, 0.1, 0.2, -0.3];
+
+    let a_shape = build_tensor_shape(&[build_dimension_value(3), build_dimension_value(2)]);
+    let a_type = build_type_proto(&build_type_proto_tensor(1, &a_shape));
+    let a_input = build_value_info("a", &a_type, "");
+    let y_output = build_value_info("y", &[], "");
+
+    let b_tensor = build_tensor(&TensorFixture { dims: &[3, 4], data_type: 1, name: "b", doc_string: "", raw_data: &f32_bytes(&b_data) });
+    let gemm = build_node(&NodeFixture { input: &["a", "b"], output: &["y"], name: "gemm", op_type: "Gemm", doc_string: "", attributes: &[build_attribute_int("transA", 1)] });
+
+    let graph = build_graph(&[gemm], "transposed_gemm", &[b_tensor], "", &[a_input], &[y_output]);
+    let mut bytes = Vec::new();
+    push_varint(1, 8, &mut bytes);
+    push_len(7, &graph, &mut bytes);
+
+    let original_model = parse_complete(&bytes).expect("parse the transposed-Gemm model bytes");
+    let original_graph = original_model.graph.as_ref().expect("transposed-Gemm graph present");
+    let original = crate::lower::lower_graph(original_graph).expect("lower the original transposed-Gemm graph");
+    let mut original_named: Vec<(&str, &[f32])> = original.initializers.iter().map(|(name, data)| (name.as_str(), data.as_slice())).collect();
+    original_named.push(("a", &a_data));
+    let original_output = original.graph_outputs.iter().find(|(name, _)| name.as_str() == "y").expect("y is declared").1;
+    let baseline = proxima_tensor::cpu::evaluate_named(&original.program, &[], &original_named, &[original_output]).expect("evaluate the original transposed-Gemm program");
+    let (baseline_data, baseline_shape) = baseline.get(original_output).expect("baseline y present");
+
+    let lift_input = crate::lift::LiftInput {
+        program: &original.program,
+        initializers: &original.initializers,
+        graph_inputs: &original.graph_inputs,
+        graph_outputs: &original.graph_outputs,
+        graph_name: "transposed_gemm_lifted",
+    };
+    let lifted_bytes = crate::lift::lift_model(lift_input).expect("lift the lowered transposed-Gemm program to onnx bytes");
+
+    let reparsed_model = parse_complete(&lifted_bytes).expect("lifted transposed-Gemm bytes parse back to a ModelProto");
+    let reparsed_graph = reparsed_model.graph.as_ref().expect("lifted transposed-Gemm graph present");
+    // `Gemm` always applies its `alpha` scale (even at the 1.0 default,
+    // this crate's own `lower_gemm` doc), so the contraction itself is an
+    // intermediate node -- the graph's declared output `"y"` names that
+    // scale's `Mul`, not the `Gemm` node underneath it.
+    let gemm_node = reparsed_graph.node.iter().find(|node| node.op_type == "Gemm").expect("the lifted graph carries a NAMED Gemm node, not a primitive Mul/ReduceSum spray");
+    let trans_a_attribute = gemm_node.attribute.iter().find(|attribute| attribute.name == "transA").expect("the lifted Gemm node carries transA");
+    assert_eq!(trans_a_attribute.i, 1, "the lifted Gemm node's transA matches the original graph's");
+    assert!(!reparsed_graph.node.iter().any(|node| node.op_type == "ReduceSum"), "a raised Gemm never leaves behind a primitive ReduceSum");
+
+    let reloaded = crate::lower::lower_graph(reparsed_graph).expect("lower the lifted transposed-Gemm graph back to Op");
+    let mut reloaded_named: Vec<(&str, &[f32])> = reloaded.initializers.iter().map(|(name, data)| (name.as_str(), data.as_slice())).collect();
+    reloaded_named.push(("a", &a_data));
+    let reloaded_output = reloaded.graph_outputs.iter().find(|(name, _)| name.as_str() == "y").expect("y is declared on the lifted graph").1;
+    let evaluated = proxima_tensor::cpu::evaluate_named(&reloaded.program, &[], &reloaded_named, &[reloaded_output]).expect("evaluate the round-tripped transposed-Gemm program");
+    let (data, shape) = evaluated.get(reloaded_output).expect("round-tripped y present");
+
+    assert_eq!(shape, baseline_shape, "round trip preserves y's shape");
+    for (actual, expected) in data.iter().zip(baseline_data.iter()) {
+        assert!((actual - expected).abs() < 1e-4, "round-tripped output {actual} does not match original-program baseline {expected}");
+    }
+}
+
+/// `Conv` (unpadded, stride 1, single channel/group): `lower::conv2d_core`'s
+/// two-level materialized-window shape round-trips through
+/// [`crate::lift::lift_model`] as a NAMED `Conv` node -- never a primitive
+/// `Mul`/`ReduceSum` spray, and never the intermediate `Elementwise` levels
+/// [`crate::lift::try_conv_shape`]'s own doc says it folds -- then lowers
+/// back and evaluates identically to the original.
+#[test]
+fn conv_round_trips_through_lift_as_a_named_conv() {
+    let x_data: [f32; 9] = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0];
+    let w_data: [f32; 4] = [1.0, 0.0, 0.0, -1.0];
+
+    let x_shape = build_tensor_shape(&[build_dimension_value(1), build_dimension_value(1), build_dimension_value(3), build_dimension_value(3)]);
+    let x_type = build_type_proto(&build_type_proto_tensor(1, &x_shape));
+    let x_input = build_value_info("x", &x_type, "");
+    let y_output = build_value_info("y", &[], "");
+
+    let w_tensor = build_tensor(&TensorFixture { dims: &[1, 1, 2, 2], data_type: 1, name: "w", doc_string: "", raw_data: &f32_bytes(&w_data) });
+    let conv = build_node(&NodeFixture {
+        input: &["x", "w"],
+        output: &["y"],
+        name: "conv",
+        op_type: "Conv",
+        doc_string: "",
+        attributes: &[build_attribute_ints("kernel_shape", &[2, 2])],
+    });
+
+    let graph = build_graph(&[conv], "conv_graph", &[w_tensor], "", &[x_input], &[y_output]);
+    let mut bytes = Vec::new();
+    push_varint(1, 8, &mut bytes);
+    push_len(7, &graph, &mut bytes);
+
+    let original_model = parse_complete(&bytes).expect("parse the Conv model bytes");
+    let original_graph = original_model.graph.as_ref().expect("Conv graph present");
+    let original = crate::lower::lower_graph(original_graph).expect("lower the original Conv graph");
+    let mut original_named: Vec<(&str, &[f32])> = original.initializers.iter().map(|(name, data)| (name.as_str(), data.as_slice())).collect();
+    original_named.push(("x", &x_data));
+    let original_output = original.graph_outputs.iter().find(|(name, _)| name.as_str() == "y").expect("y is declared").1;
+    let baseline = proxima_tensor::cpu::evaluate_named(&original.program, &[], &original_named, &[original_output]).expect("evaluate the original Conv program");
+    let (baseline_data, baseline_shape) = baseline.get(original_output).expect("baseline y present");
+
+    let lift_input = crate::lift::LiftInput {
+        program: &original.program,
+        initializers: &original.initializers,
+        graph_inputs: &original.graph_inputs,
+        graph_outputs: &original.graph_outputs,
+        graph_name: "conv_lifted",
+    };
+    let lifted_bytes = crate::lift::lift_model(lift_input).expect("lift the lowered Conv program to onnx bytes");
+
+    let reparsed_model = parse_complete(&lifted_bytes).expect("lifted Conv bytes parse back to a ModelProto");
+    let reparsed_graph = reparsed_model.graph.as_ref().expect("lifted Conv graph present");
+    let conv_node = reparsed_graph.node.iter().find(|node| node.op_type == "Conv").expect("the lifted graph carries a NAMED Conv node, not a primitive Mul/ReduceSum spray");
+    let kernel_shape = conv_node.attribute.iter().find(|attribute| attribute.name == "kernel_shape").expect("the lifted Conv node carries kernel_shape");
+    assert_eq!(kernel_shape.ints, alloc::vec![2, 2], "recovered kernel_shape matches the original 2x2 kernel");
+    assert!(!reparsed_graph.node.iter().any(|node| node.op_type == "ReduceSum"), "a raised Conv never leaves behind a primitive ReduceSum");
+    assert!(!reparsed_graph.node.iter().any(|node| node.op_type == "Gather"), "a raised Conv never leaves behind the primitive window-axis Gather");
+
+    let reloaded = crate::lower::lower_graph(reparsed_graph).expect("lower the lifted Conv graph back to Op");
+    let mut reloaded_named: Vec<(&str, &[f32])> = reloaded.initializers.iter().map(|(name, data)| (name.as_str(), data.as_slice())).collect();
+    reloaded_named.push(("x", &x_data));
+    let reloaded_output = reloaded.graph_outputs.iter().find(|(name, _)| name.as_str() == "y").expect("y is declared on the lifted graph").1;
+    let evaluated = proxima_tensor::cpu::evaluate_named(&reloaded.program, &[], &reloaded_named, &[reloaded_output]).expect("evaluate the round-tripped Conv program");
+    let (data, shape) = evaluated.get(reloaded_output).expect("round-tripped y present");
+
+    assert_eq!(shape, baseline_shape, "round trip preserves y's shape");
+    for (actual, expected) in data.iter().zip(baseline_data.iter()) {
+        assert!((actual - expected).abs() < 1e-4, "round-tripped output {actual} does not match original-program baseline {expected}");
+    }
+}
