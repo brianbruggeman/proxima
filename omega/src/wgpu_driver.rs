@@ -203,12 +203,18 @@ fn acquire_device() -> Result<(wgpu::Device, wgpu::Queue, WgslCaps), WgpuError> 
         ..Default::default()
     }))
     .map_err(|error| WgpuError::NoDevice(error.to_string()))?;
-    // a fixed subgroup width is required to bake `@workgroup_size` to it
-    // (see `crate::wgsl::WgslCaps::subgroup_size`'s own doc) -- a
+    // a fixed, NONZERO subgroup width is required to bake `@workgroup_size`
+    // to it (see `crate::wgsl::WgslCaps::subgroup_size`'s own doc) -- a
     // heterogeneous adapter (min != max) never takes the cooperative path,
-    // it stays on the portable serial fold.
+    // it stays on the portable serial fold. `0` is also rejected even when
+    // reported as "fixed" (min == max == 0): a paravirtualized adapter that
+    // does not populate subgroup sizing at all would otherwise bake
+    // `@workgroup_size(0)`, which every backend's shader validator rejects
+    // outright -- that is a hard compile failure, not a named skip, so it is
+    // caught here instead of being handed to the emitter.
     let subgroup_size = (device.features().contains(wgpu::Features::SUBGROUP)
-        && adapter_info.subgroup_min_size == adapter_info.subgroup_max_size)
+        && adapter_info.subgroup_min_size == adapter_info.subgroup_max_size
+        && adapter_info.subgroup_min_size > 0)
         .then_some(adapter_info.subgroup_min_size);
     let caps = WgslCaps {
         shader_f16: device.features().contains(wgpu::Features::SHADER_F16),
@@ -277,6 +283,17 @@ impl WgpuPlan {
     #[must_use]
     pub fn caps(&self) -> WgslCaps {
         self.caps
+    }
+
+    /// The acquired device's actual resource limits — a diagnostic accessor
+    /// for a caller (or a parity test) that wants to know, BEFORE
+    /// dispatching, whether a program's largest buffer fits this adapter's
+    /// `max_buffer_size`/`max_storage_buffer_binding_size` rather than
+    /// discovering a paravirtualized/constrained adapter's ceiling only as a
+    /// device-lost failure mid-run.
+    #[must_use]
+    pub fn limits(&self) -> wgpu::Limits {
+        self.device.limits()
     }
 }
 
