@@ -69,17 +69,22 @@
 //! `Transpose` to restore it -- the inverse of the identity `reduced_axes`
 //! already relied on shape inference to prove sound on the read side.
 //!
-//! [`IndexMap::Computed`] is supported only in the exact axis-0 gather shape
-//! [`crate::lower::lower_gather`] itself produces; other data-dependent
-//! addressing (scatter, gather at other axes) is deferred pattern-raising,
-//! not attempted here.
+//! [`IndexMap::Computed`] is supported for the order-preserving gather shape
+//! [`crate::lower::lower_gather`] produces at any axis (see [`resolve_gather`])
+//! -- output order `data.shape[:axis] + indices.shape + data.shape[axis+1:]`,
+//! lifted as a single `Gather(data, indices, axis)`. This shape also covers
+//! [`crate::lower::pad_axis`]'s zero-padded reads and [`crate::lower::concat_pair`]'s
+//! per-leg reads (both a rank-1-indices specialization of the same pattern),
+//! so a padded `Conv`/`Pool`/`Concat` round-trips as `Gather` + `Where`. Scatter
+//! (a data-dependent *output* map) is unsupported upstream in
+//! `proxima_tensor` itself and so never reaches this module.
 
 use alloc::collections::BTreeMap;
 use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
-use proxima_tensor::{AxisIndex, Extent, IndexMap, IndexPattern, Keep, NodeId, Op, ScalarOp};
+use proxima_tensor::{AxisIndex, DType, Extent, IndexMap, IndexPattern, Keep, NodeId, Op, ScalarOp};
 use thiserror::Error;
 
 use crate::writer::{push_i32, push_i64, push_len, push_packed_f32, push_packed_i64, push_str};
@@ -469,13 +474,32 @@ pub fn lift_graph(input: LiftInput<'_>) -> Result<Vec<u8>, LiftError> {
         };
 
         match op {
-            Op::Input { shape, name, .. } => {
+            Op::Input { dtype, shape, name } => {
                 let bound_name = name.clone().ok_or_else(|| LiftError::UnboundInput { node: node_id, name: primary_name.clone() })?;
                 let dims = extents_to_dims(node_id, shape)?;
                 if input.graph_inputs.iter().any(|candidate| candidate == &bound_name) {
                     graph_inputs.push(value_info_bytes(&bound_name, &dims));
                 } else if let Some((_, data)) = input.initializers.iter().find(|(candidate, _)| candidate == &bound_name) {
-                    initializers.push(float_tensor_bytes(&dims, &bound_name, data));
+                    // an `Op::Input` tagged `Int32` is a `Computed`-gather
+                    // `indices` leaf (see `onnx_dtype_to_op_dtype`'s own doc);
+                    // this crate stores every buffer as f32 regardless, so
+                    // round-tripping it through `float_tensor_bytes` here
+                    // would re-parse back to `DType::Float32` and trip
+                    // `shape::infer`'s `check_indices_dtype` -- an int64
+                    // tensor is the faithful ONNX encoding that survives.
+                    if *dtype == DType::Float32 {
+                        initializers.push(float_tensor_bytes(&dims, &bound_name, data));
+                    } else {
+                        // an integer-tagged `Op::Input` carries an exact-integer
+                        // f32 value by construction (this module's own doc,
+                        // `fold_constant_indices`'s doc) -- a direct cast, not
+                        // `round()`, both keeps this tier-1-clean (`round()`
+                        // needs `libm`/`std`, neither available here) and
+                        // matches that invariant rather than papering over a
+                        // violation of it.
+                        let exact: Vec<i64> = data.iter().map(|&value| value as i64).collect();
+                        initializers.push(int64_tensor_bytes(&dims, &bound_name, &exact));
+                    }
                 } else {
                     return Err(LiftError::MissingInitializerData { name: bound_name });
                 }
@@ -501,9 +525,19 @@ pub fn lift_graph(input: LiftInput<'_>) -> Result<Vec<u8>, LiftError> {
                     let source_name = names[operand_id.0 as usize].clone();
                     let resolved = match map {
                         IndexMap::Affine(pattern) => resolve_affine(node_id, &mut nodes, &mut initializers, &mut fresh, &source_name, pattern, &known_extents)?,
-                        IndexMap::Computed { indices, index_map, base, gathered_dim } => {
-                            resolve_gather(node_id, &mut nodes, &mut fresh, &names, &source_name, *indices, index_map, base, *gathered_dim)?
-                        }
+                        IndexMap::Computed { indices, index_map, base, gathered_dim } => resolve_gather(
+                            node_id,
+                            &mut nodes,
+                            &mut initializers,
+                            &mut fresh,
+                            input.program,
+                            &names,
+                            &source_name,
+                            *indices,
+                            index_map,
+                            base,
+                            *gathered_dim,
+                        )?,
                     };
                     operand_names.push(resolved);
                 }
@@ -585,15 +619,94 @@ pub fn lift_graph(input: LiftInput<'_>) -> Result<Vec<u8>, LiftError> {
     Ok(graph)
 }
 
-/// The axis-0 gather shape [`crate::lower::lower_gather`] produces: `base`'s
-/// entry at `gathered_dim` is empty by construction (see [`IndexMap`]'s own
-/// doc), so only `gathered_dim == 0` with an otherwise order-preserving
-/// `base` is attempted; anything else is [`LiftError::UnsupportedComputedMap`].
+/// One scalar step of [`fold_constant_indices`]'s tiny lift-time
+/// interpreter -- only the bodies [`crate::lower::pad_axis`]'s and
+/// [`crate::lower::concat_pair`]'s own clamp-index chains actually build
+/// (`Subtract`/`Maximum`/`Minimum`, plus `Identity`/`Add`/`Multiply` for
+/// generality); anything else falls through to `None`, propagating a real,
+/// data-dependent operand out of the fold rather than fabricating a value.
+fn eval_scalar_op(body: ScalarOp, operands: &[f32]) -> Option<f32> {
+    match (body, operands) {
+        (ScalarOp::Identity, [value]) => Some(*value),
+        (ScalarOp::Add, [left, right]) => Some(left + right),
+        (ScalarOp::Subtract, [left, right]) => Some(left - right),
+        (ScalarOp::Multiply, [left, right]) => Some(left * right),
+        (ScalarOp::Maximum, [left, right]) => Some(left.max(*right)),
+        (ScalarOp::Minimum, [left, right]) => Some(left.min(*right)),
+        _ => None,
+    }
+}
+
+/// Evaluates `node`'s value at lift time when its whole upstream subgraph is
+/// provably input-free -- `Op::Constant`/`Op::Iota` leaves and rank-<=1
+/// `Op::Elementwise` arithmetic over them, exactly the shape
+/// [`crate::lower::pad_axis`]'s clamped-index chain (`Iota` position,
+/// `Subtract`/`Maximum`/`Minimum` against `Constant` scalars) and
+/// [`crate::lower::concat_pair`]'s `lhs_index`/`rhs_index` chains build. This
+/// crate stores every buffer as f32 regardless of logical dtype (this
+/// module's own doc), so re-lowering the *unfolded* chain (plain ONNX
+/// `Sub`/`Max`/`Min` nodes) would lose the `DType::Int32` tag
+/// `shape::infer`'s `check_indices_dtype` requires on a `Computed`'s
+/// `indices` -- folding to a concrete int64 initializer at lift time sides
+/// that requirement rather than needing a `Cast` op this crate does not lift.
+/// `None` propagates a genuine data-dependent `indices` operand (a real
+/// embedding-lookup `Op::Input`) straight through to [`resolve_gather`]'s
+/// ordinary named-reference path.
+fn fold_constant_indices(program: &[Op], node: NodeId) -> Option<Vec<f32>> {
+    match program.get(node.0 as usize)? {
+        Op::Constant { shape, value, .. } => {
+            let mut element_count: u64 = 1;
+            for extent in shape {
+                let Extent::Static(count) = extent else { return None };
+                element_count = element_count.checked_mul(u64::from(*count))?;
+            }
+            Some(alloc::vec![*value; element_count as usize])
+        }
+        Op::Iota { extent: Extent::Static(count), .. } => Some((0..*count).map(|value| value as f32).collect()),
+        Op::Elementwise { body, operands, .. } => {
+            let mut folded_operands: Vec<Vec<f32>> = Vec::with_capacity(operands.len());
+            for (operand_id, map) in operands {
+                let IndexMap::Affine(pattern) = map else { return None };
+                if pattern.iter_rank > 1 || pattern.axes.len() > 1 {
+                    return None;
+                }
+                folded_operands.push(fold_constant_indices(program, *operand_id)?);
+            }
+            let length = folded_operands.iter().map(Vec::len).max()?;
+            let mut result = Vec::with_capacity(length);
+            for position in 0..length {
+                let values: Vec<f32> = folded_operands.iter().map(|values| if values.len() == 1 { values[0] } else { values[position] }).collect();
+                result.push(eval_scalar_op(*body, &values)?);
+            }
+            Some(result)
+        }
+        Op::Iota { .. } | Op::Input { .. } | Op::Reduce(_) => None,
+    }
+}
+
+/// The exact shape [`crate::lower::lower_gather`] produces at any axis --
+/// output order `data.shape[:axis] + indices.shape + data.shape[axis+1:]` --
+/// which is also the shape [`crate::lower::pad_axis`]'s and
+/// [`crate::lower::concat_pair`]'s own `Computed` gathers collapse to for a
+/// rank-1 `indices` (their `base` is [`crate::lower::concat_base_pattern`],
+/// identity everywhere but `gathered_dim`, which is exactly what this
+/// function's `base` check reduces to when `indices_rank == 1`). So a single
+/// faithful ONNX `Gather(data, indices, axis=gathered_dim)` covers a real
+/// embedding-style lookup, a padded `Conv`/`Pool` read, and a `Concat` leg
+/// alike -- the validity `Select`/`Where` (`pad_axis`'s clamp-fill, `Concat`'s
+/// side-pick) that wraps the gather is a *separate* `Op::Elementwise`, lifted
+/// by the ordinary `ScalarOp::Select -> "Where"` path already in
+/// [`scalar_op_type`]. Any other `index_map`/`base` shape --
+/// non-order-preserving indices axes, a `base` that reads a data axis out of
+/// order -- has no single faithful ONNX op and stays
+/// [`LiftError::UnsupportedComputedMap`].
 #[allow(clippy::too_many_arguments)]
 fn resolve_gather(
     node: NodeId,
     buf: &mut Vec<u8>,
+    initializers: &mut Vec<Vec<u8>>,
     fresh: &mut u32,
+    program: &[Op],
     names: &[String],
     data_name: &str,
     indices: NodeId,
@@ -601,20 +714,45 @@ fn resolve_gather(
     base: &IndexPattern,
     gathered_dim: u16,
 ) -> Result<String, LiftError> {
-    if gathered_dim != 0 {
-        return Err(LiftError::UnsupportedComputedMap { node });
-    }
-    let indices_rank = index_map.iter_rank;
-    for (position, axis_index) in base.axes.iter().enumerate().skip(1) {
-        let expected = indices_rank + (position as u16 - 1);
+    let indices_rank = index_map.axes.len() as u16;
+    for (position, axis_index) in index_map.axes.iter().enumerate() {
+        let expected = gathered_dim + position as u16;
         if single_term_axis(axis_index) != Some(expected) {
             return Err(LiftError::UnsupportedComputedMap { node });
         }
     }
-    let indices_name = names[indices.0 as usize].clone();
+    for (data_axis, axis_index) in base.axes.iter().enumerate() {
+        let data_axis = data_axis as u16;
+        if data_axis == gathered_dim {
+            continue;
+        }
+        let expected = if data_axis < gathered_dim { data_axis } else { data_axis - 1 + indices_rank };
+        if single_term_axis(axis_index) != Some(expected) {
+            return Err(LiftError::UnsupportedComputedMap { node });
+        }
+    }
+
+    let indices_name = if indices_rank == 1 {
+        match fold_constant_indices(program, indices) {
+            Some(values) => {
+                // exact-integer-valued by construction (`fold_constant_indices`'s
+                // own doc) -- a direct cast, not `round()`, keeps this tier-1
+                // clean (`round()` needs `libm`/`std`, neither available here).
+                let exact: Vec<i64> = values.iter().map(|&value| value as i64).collect();
+                *fresh += 1;
+                let folded_name = format!("lift_gather_indices_{}", *fresh);
+                initializers.push(int64_tensor_bytes(&[exact.len() as i64], &folded_name, &exact));
+                folded_name
+            }
+            None => names[indices.0 as usize].clone(),
+        }
+    } else {
+        names[indices.0 as usize].clone()
+    };
+
     *fresh += 1;
     let output_name = format!("lift_gather_{}", *fresh);
-    emit_node(buf, &[data_name, indices_name.as_str()], &[output_name.as_str()], &output_name, "Gather", &[attr_int("axis", 0)]);
+    emit_node(buf, &[data_name, indices_name.as_str()], &[output_name.as_str()], &output_name, "Gather", &[attr_int("axis", i64::from(gathered_dim))]);
     Ok(output_name)
 }
 
@@ -856,6 +994,59 @@ mod tests {
         let mut initializers = Vec::new();
         let error = resolve_affine(x, &mut buf, &mut initializers, &mut fresh, "source", &pattern, &BTreeMap::new()).expect_err("three-term axis is unsupported");
         assert!(matches!(error, LiftError::NonAffineAxis { .. }));
+    }
+
+    /// `Gather(data, indices, axis=1)` on a `[2, 3]` table -- the mirror of
+    /// `crate::lower`'s own `gather_selects_columns_by_index_at_a_general_axis`
+    /// fixture, proving [`resolve_gather`]'s generalization beyond
+    /// `gathered_dim == 0` closes the write side too.
+    #[test]
+    fn gather_at_a_general_axis_round_trips_through_lift() {
+        let table = f32_initializer("table", &[2, 3], &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
+        let indices = TensorProto { dims: vec![2], data_type: 7, int64_data: vec![2, 0], name: "ids", ..TensorProto::default() };
+        let axis_attribute = AttributeProto { name: "axis", i: 1, ..AttributeProto::default() };
+        let node =
+            NodeProto { input: vec!["table", "ids"], output: vec!["y"], op_type: "Gather", name: "gather", attribute: vec![axis_attribute], ..NodeProto::default() };
+        let graph = GraphProto {
+            node: vec![node],
+            name: "gather_axis1_graph",
+            initializer: vec![table, indices],
+            output: vec![ValueInfoProto { name: "y", ..ValueInfoProto::default() }],
+            ..GraphProto::default()
+        };
+
+        assert_graph_round_trips_through_lift(&graph, "gather_axis1_lifted");
+    }
+
+    /// A padded `Conv` -- `pads = [1, 1, 1, 1]`, stride 2 -- exercises
+    /// [`crate::lower::pad_axis`]'s zero-fill `Computed` gather (rank-1
+    /// indices, `gathered_dim` at each spatial axis) wrapped in a validity
+    /// `Select`, on top of `resolve_affine`'s window-axis `Gather` this
+    /// module already closed. This is the closed write-side residual: before
+    /// [`resolve_gather`]'s generalization, `pad_axis`'s non-zero-axis
+    /// `Computed` gather was [`LiftError::UnsupportedComputedMap`], so a
+    /// padded `Conv`/`Pool` could not be lifted back to ONNX at all.
+    #[test]
+    fn padded_conv_round_trips_through_lift() {
+        let image = f32_initializer("image", &[1, 1, 4, 4], &(1..=16).map(|value| value as f32).collect::<Vec<_>>());
+        let weight = f32_initializer("weight", &[1, 1, 3, 3], &[1.0; 9]);
+        let node = NodeProto {
+            input: vec!["image", "weight"],
+            output: vec!["y"],
+            op_type: "Conv",
+            name: "conv",
+            attribute: vec![ints_attribute("pads", vec![1, 1, 1, 1]), ints_attribute("strides", vec![2, 2])],
+            ..NodeProto::default()
+        };
+        let graph = GraphProto {
+            node: vec![node],
+            name: "padded_conv_graph",
+            initializer: vec![image, weight],
+            output: vec![ValueInfoProto { name: "y", ..ValueInfoProto::default() }],
+            ..GraphProto::default()
+        };
+
+        assert_graph_round_trips_through_lift(&graph, "padded_conv_lifted");
     }
 
     /// `Keep::Scan` with a `Multiply` body has no ONNX cumulative-product
