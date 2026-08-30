@@ -25,13 +25,16 @@
 //!
 //! # Value environment
 //!
-//! [`Value`] tracks, per ONNX value name, the [`NodeId`] that produces it
+//! `Value` tracks, per ONNX value name, the [`NodeId`] that produces it
 //! and its shape (concrete `u64` extents -- symbolic/dynamic ONNX
 //! dimensions are out of scope for this pass, see [`LowerError::UnsupportedShape`]).
 //! Initializers become named [`Op::Input`] leaves up front (matching
 //! `proxima-tensor`'s own convention -- see `spec.rs`'s `symbolic_leaf`/
 //! `input_leaf` -- of binding weights by name via
-//! [`proxima_tensor::evaluate_named`] rather than folding literal tensor
+//! `proxima_tensor::cpu::evaluate_named` (a `std`-gated evaluator this
+//! crate's `alloc`-only dependency on `proxima-tensor` does not compile in,
+//! so this doc names it in prose rather than an intra-doc link) rather than
+//! folding literal tensor
 //! data into the program); [`Op::Constant`] is reserved for the
 //! rank-0 broadcast scalars this module's own compositions need (Relu's
 //! `0`, Sigmoid's `1`, Gemm's `alpha`/`beta`), exactly the role its own doc
@@ -120,14 +123,14 @@ struct Value {
 
 /// The result of [`lower_graph`]: a self-contained `Op` program, the
 /// initializer data it expects bound by name (via
-/// [`proxima_tensor::evaluate_named`]), the graph's own declared inputs
+/// `proxima_tensor::cpu::evaluate_named`), the graph's own declared inputs
 /// (also bound by name), and its declared outputs as `(name, NodeId)` pairs
-/// -- exactly [`proxima_tensor::evaluate_named`]'s `outputs` argument shape.
+/// -- exactly `proxima_tensor::cpu::evaluate_named`'s `outputs` argument shape.
 #[derive(Debug)]
 pub struct Lowered {
     pub program: Vec<Op>,
     /// `(name, data)` for every initializer this graph declared, decoded to
-    /// f32 -- see [`decode_f32_tensor`] for the two payload shapes
+    /// f32 -- see `decode_numeric_tensor` for the two payload shapes
     /// (`float_data` or little-endian `raw_data`) this pass understands.
     pub initializers: Vec<(String, Vec<f32>)>,
     pub graph_inputs: Vec<String>,
@@ -140,7 +143,7 @@ pub struct Lowered {
 /// `Op::Reduce`/`Op::Constant` composition over what
 /// `proxima-tensor/src/spec.rs` already establishes as this ISA's
 /// vocabulary (`matmul` is `Reduce(+)` over `Elementwise(*)`; `softmax` is
-/// two reduces and three elementwise ops -- this module's [`lower_softmax`]
+/// two reduces and three elementwise ops -- this module's `lower_softmax`
 /// is that same shape). See this module's own doc for the value-tracking
 /// discipline and the crate doc for the coverage table.
 pub fn lower_graph(graph: &GraphProto<'_>) -> Result<Lowered, LowerError> {
