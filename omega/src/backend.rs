@@ -53,8 +53,6 @@ use proxima_tensor::resolve_named_blocks;
 
 #[cfg(all(feature = "metal", target_os = "macos"))]
 use crate::metal::{self, MetalError};
-#[cfg(feature = "wgpu-backend")]
-use crate::wgpu_driver::{self, WgpuError};
 
 /// Every backend `omega` expects to support, whether or not this build was
 /// compiled with the feature behind it. Both fields of a call
@@ -67,12 +65,6 @@ use crate::wgpu_driver::{self, WgpuError};
 pub enum Backend {
     Cpu,
     Metal,
-    /// The portable `wgpu`/WGSL driver (`crate::wgpu_driver`) — one
-    /// abstraction layer over [`Backend::Metal`]: same `BoundOp` descriptor,
-    /// same emit-then-drive split, a WGSL emitter and a `wgpu::Device`
-    /// instead of an MSL emitter and an `objc2-metal` device. See
-    /// `crate::wgsl`'s own doc for what its v1 op set covers.
-    Wgpu,
     Vulkan,
     Cuda,
     Npu,
@@ -88,7 +80,6 @@ impl Backend {
         match self {
             Backend::Cpu => "cpu",
             Backend::Metal => "metal",
-            Backend::Wgpu => "wgpu",
             Backend::Vulkan => "vulkan",
             Backend::Cuda => "cuda",
             Backend::Npu => "npu",
@@ -140,7 +131,6 @@ impl core::str::FromStr for Backend {
         match value {
             "cpu" => Ok(Backend::Cpu),
             "metal" => Ok(Backend::Metal),
-            "wgpu" => Ok(Backend::Wgpu),
             "vulkan" => Ok(Backend::Vulkan),
             "cuda" => Ok(Backend::Cuda),
             "npu" => Ok(Backend::Npu),
@@ -158,7 +148,7 @@ impl core::str::FromStr for Backend {
 /// (CPU or Metal) produced.
 #[derive(Debug, thiserror::Error)]
 pub enum BackendError {
-    #[error("unknown backend name `{name}`; known backends: cpu, metal, wgpu, vulkan, cuda, npu, ane")]
+    #[error("unknown backend name `{name}`; known backends: cpu, metal, vulkan, cuda, npu, ane")]
     UnknownName { name: String },
 
     /// The named backend's cargo feature is off, so nothing behind it was
@@ -182,10 +172,6 @@ pub enum BackendError {
     #[cfg(all(feature = "metal", target_os = "macos"))]
     #[error(transparent)]
     Metal(#[from] MetalError),
-
-    #[cfg(feature = "wgpu-backend")]
-    #[error(transparent)]
-    Wgpu(#[from] WgpuError),
 }
 
 /// A resolved, reusable program for exactly one [`Backend`] — never a
@@ -198,8 +184,6 @@ pub enum Plan {
     Cpu(CpuPlan),
     #[cfg(all(feature = "metal", target_os = "macos"))]
     Metal(metal::Plan),
-    #[cfg(feature = "wgpu-backend")]
-    Wgpu(wgpu_driver::WgpuPlan),
 }
 
 /// The CPU arm's plan state. `proxima_tensor::cpu` has no persistent
@@ -261,19 +245,6 @@ pub fn plan_named(
                 Err(BackendError::NotCompiled {
                     backend: "metal",
                     feature: "metal",
-                })
-            }
-        }
-        Backend::Wgpu => {
-            #[cfg(feature = "wgpu-backend")]
-            {
-                plan_named_wgpu(program, symbols, named, outputs)
-            }
-            #[cfg(not(feature = "wgpu-backend"))]
-            {
-                Err(BackendError::NotCompiled {
-                    backend: "wgpu",
-                    feature: "wgpu-backend",
                 })
             }
         }
@@ -349,8 +320,6 @@ pub fn execute_plan_named(
         Plan::Cpu(cpu_plan) => execute_plan_named_cpu(cpu_plan, named),
         #[cfg(all(feature = "metal", target_os = "macos"))]
         Plan::Metal(metal_plan) => execute_plan_named_metal(metal_plan, named),
-        #[cfg(feature = "wgpu-backend")]
-        Plan::Wgpu(wgpu_plan) => execute_plan_named_wgpu(wgpu_plan, named),
     }
 }
 
@@ -370,11 +339,6 @@ pub fn mark_resident(plan: &mut Plan, _resident_names: &std::collections::BTreeS
         Plan::Cpu(_) => {}
         #[cfg(all(feature = "metal", target_os = "macos"))]
         Plan::Metal(metal_plan) => metal_plan.mark_resident(_resident_names),
-        // v1's `wgpu_driver::WgpuPlan` re-uploads every block on every
-        // `execute_plan` call -- see that module's own doc for why residency
-        // caching is out of v1 scope.
-        #[cfg(feature = "wgpu-backend")]
-        Plan::Wgpu(_) => {}
     }
 }
 
@@ -435,26 +399,6 @@ fn execute_plan_named_metal(
     Ok(evaluated)
 }
 
-#[cfg(feature = "wgpu-backend")]
-fn plan_named_wgpu(
-    program: &[Op],
-    symbols: &[u64],
-    named: &[(&str, QuantizedBlock<'_>)],
-    outputs: &[NodeId],
-) -> Result<Plan, BackendError> {
-    let plan = wgpu_driver::plan_named(program, symbols, named, outputs)?;
-    Ok(Plan::Wgpu(plan))
-}
-
-#[cfg(feature = "wgpu-backend")]
-fn execute_plan_named_wgpu(
-    plan: &mut wgpu_driver::WgpuPlan,
-    named: &[(&str, QuantizedBlock<'_>)],
-) -> Result<Evaluated, BackendError> {
-    let evaluated = wgpu_driver::execute_plan_named(plan, named)?;
-    Ok(evaluated)
-}
-
 /// Diagnostic counterpart of [`execute_plan_named`], reachable only when a
 /// caller already holds a [`Plan::Metal`] -- see [`metal::execute_plan_op_timed`]'s
 /// own doc for why this must never replace [`execute_plan_named`] on the
@@ -489,7 +433,6 @@ mod tests {
         for backend in [
             Backend::Cpu,
             Backend::Metal,
-            Backend::Wgpu,
             Backend::Vulkan,
             Backend::Cuda,
             Backend::Npu,
@@ -505,7 +448,7 @@ mod tests {
         let error = "quantum".parse::<Backend>().expect_err("quantum names no backend");
         let message = error.to_string();
         assert!(message.contains("quantum"));
-        for known in ["cpu", "metal", "wgpu", "vulkan", "cuda", "npu", "ane"] {
+        for known in ["cpu", "metal", "vulkan", "cuda", "npu", "ane"] {
             assert!(message.contains(known), "error should name {known}: {message}");
         }
     }
