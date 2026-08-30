@@ -173,6 +173,31 @@ mod platform {
                 executable: 0,
             }
         }
+
+        /// A raw, non-ELF-backed region at a caller-chosen `guest_address`
+        /// offset and permission set — the shape a real kernel boot needs
+        /// for the Image blob and the DTB blob (`crate::boot`), neither of
+        /// which has an ELF `Segment` to marshal via [`Self::from_segment`].
+        /// `data` must outlive the `proxima_vm_run_dispatch_loop` call this
+        /// segment is passed into.
+        pub(crate) fn raw(
+            guest_address: u64,
+            data: &[u8],
+            memory_size: u64,
+            readable: bool,
+            writable: bool,
+            executable: bool,
+        ) -> Self {
+            Self {
+                guest_address,
+                data: data.as_ptr(),
+                data_length: data.len(),
+                memory_size,
+                readable: u8::from(readable),
+                writable: u8::from(writable),
+                executable: u8::from(executable),
+            }
+        }
     }
 
     /// FFI mirror of `proxima_vm_mapped_segment_t` (`ffi_segment.h`).

@@ -6,6 +6,7 @@
 #include <mach/mach.h>
 #include <mach/mach_vm.h>
 #include <os/object.h>
+#include <pthread.h>
 #include <stdbool.h>
 #include <stdlib.h>
 #include <time.h>
@@ -40,17 +41,29 @@ static uint32_t mov_x0_imm(uint16_t value) {
     return 0xd2800000u | ((uint32_t)value << 5u);
 }
 
-/* Shared vm-create step of the skeleton `proxima_vm_scratch_run` and
- * `proxima_vm_run_dispatch_loop` both otherwise repeated verbatim. Guest
- * memory mapping sits BETWEEN this and `create_and_start_vcpu` below (each
- * caller's own mapping shape — one RWX blob for the scratch guest, real
- * per-segment permissions for the dispatch-loop guest — so it cannot be
- * folded into either helper without losing that difference). */
+/* Shared vm-create step of the skeleton `proxima_vm_scratch_run`,
+ * `proxima_vm_run_dispatch_loop`, the snapshot/warm-restore family, and
+ * `proxima_vm_layered_vcpu_create` — otherwise repeated verbatim across all
+ * of them. Guest memory mapping sits BETWEEN this and `create_and_start_vcpu`
+ * below (each caller's own mapping shape — one RWX blob for the scratch
+ * guest, real per-segment permissions for the dispatch-loop guest — so it
+ * cannot be folded into either helper without losing that difference). */
+/* Idempotent: `hv_vm_create` hangs (not errors) on a second call in a
+ * process that already created one (`src/snapshot.rs`'s own module doc) --
+ * the layered sharing proof (`proxima_vm_layered_vcpu_create`'s own doc)
+ * constructs a second context in the SAME process, over the same
+ * process-wide `hv_vm`, so this call must be safe to make twice. */
+static int g_vm_created = 0;
+
 static int create_vm(char *error_buffer, size_t error_capacity) {
+    if (g_vm_created) {
+        return 0;
+    }
     hv_return_t status = hv_vm_create(NULL);
     if (status != HV_SUCCESS) {
         return set_hv_error(error_buffer, error_capacity, "hv_vm_create", status);
     }
+    g_vm_created = 1;
     return 0;
 }
 
@@ -98,6 +111,160 @@ static void destroy_vm(int vm_created) {
     if (vm_created) {
         hv_vm_destroy();
     }
+}
+
+/* Device-model counterparts of `create_vm`/`create_and_start_vcpu` above,
+ * used only by `proxima_vm_run_device_dispatch_loop`. A distinct pair, not
+ * an extra parameter bolted onto the shared ones: `hv_vm_create` hangs
+ * (rather than erroring) on a second call in a process that already created
+ * one hv_vm (`src/snapshot.rs`'s own module doc), so this loop's own
+ * `enable_el2` and per-process idempotence tracking (`g_device_vm_created`)
+ * must never be entangled with `create_vm`'s callers (`proxima_vm_scratch_run`,
+ * `proxima_vm_run_dispatch_loop`), which run in their own dedicated
+ * processes and know nothing about EL2. */
+static int g_device_vm_created = 0;
+
+/* `enable_el2` is `edk2`-boot-only (`boot::boot_edk2_firmware`'s own doc):
+ * every kernel-boot caller passes 0. `hv_vm_config_set_el2_enabled`'s own
+ * SDK doc (read directly off this host's `hv_vm_config.h`, macOS 15.8)
+ * scopes EL2-enabled status to ONE concrete effect -- how PMU register
+ * accesses are trapped -- not to "which EL the vcpu boots at"; there is no
+ * separate SDK knob for that (`device_create_and_start_vcpu`'s own `cpsr`
+ * parameter is the only lever). `hv_vm_config_t` is a once-per-process
+ * input to `hv_vm_create`, so this can only ever take effect on this
+ * process's FIRST call -- a caller wanting EL2 enabled must be the first
+ * device-loop caller in its process, which the edk2 probe binary's own
+ * single-purpose shape guarantees.
+ *
+ * Return shape: 0 = created with `enable_el2` honored exactly as asked
+ * (including `enable_el2 == 0`); 1 = `enable_el2` was requested but this
+ * host's own HVF reported `HV_UNSUPPORTED` for
+ * `hv_vm_config_set_el2_enabled` (MEASURED on this repo's own M1 Max /
+ * macOS 15.8 host, `hv_vm_config_get_el2_supported` independently confirms
+ * `supported=false` there) -- the VM was still created, but with EL2
+ * disabled, so a caller that asked for EL2 entry must fall back to EL1h
+ * before starting its vCPU; -1 = a real failure, message in
+ * `error_buffer`. */
+static int device_create_vm(int enable_el2, char *error_buffer, size_t error_capacity) {
+    if (g_device_vm_created) {
+        return 0;
+    }
+    hv_return_t status;
+    if (enable_el2) {
+        hv_vm_config_t config = hv_vm_config_create();
+        if (config == NULL) {
+            return set_error(error_buffer, error_capacity, "hv_vm_config_create returned NULL");
+        }
+        status = hv_vm_config_set_el2_enabled(config, true);
+        if (status == HV_UNSUPPORTED) {
+            os_release(config);
+            status = hv_vm_create(NULL);
+            if (status != HV_SUCCESS) {
+                return set_hv_error(error_buffer, error_capacity, "hv_vm_create (el2 fallback)", status);
+            }
+            g_device_vm_created = 1;
+            return 1;
+        }
+        if (status != HV_SUCCESS) {
+            os_release(config);
+            return set_hv_error(error_buffer, error_capacity, "hv_vm_config_set_el2_enabled", status);
+        }
+        status = hv_vm_create(config);
+        os_release(config);
+    } else {
+        status = hv_vm_create(NULL);
+    }
+    if (status != HV_SUCCESS) {
+        return set_hv_error(error_buffer, error_capacity, "hv_vm_create", status);
+    }
+    g_device_vm_created = 1;
+    return 0;
+}
+
+/* `device_create_and_start_vcpu`'s own `cpsr` parameter: `create_and_start_vcpu`
+ * above hard-codes `0x3c5u` (EL1h) for every ELF-guest caller; the device
+ * loop's edk2 path (`boot::boot_edk2_firmware`'s own doc on why EL2h is
+ * tried first, and why it may fall back to EL1h) is the one caller that
+ * needs something else. */
+static int device_create_and_start_vcpu(
+    uint64_t entry,
+    uint64_t cpsr,
+    hv_vcpu_t *vcpu_out,
+    hv_vcpu_exit_t **exit_data_out,
+    int *vcpu_created_out,
+    char *error_buffer,
+    size_t error_capacity
+) {
+    hv_return_t status = hv_vcpu_create(vcpu_out, exit_data_out, NULL);
+    if (status != HV_SUCCESS) {
+        return set_hv_error(error_buffer, error_capacity, "hv_vcpu_create", status);
+    }
+    *vcpu_created_out = 1;
+
+    status = hv_vcpu_set_reg(*vcpu_out, HV_REG_PC, entry);
+    if (status != HV_SUCCESS) {
+        return set_hv_error(error_buffer, error_capacity, "set guest pc", status);
+    }
+    status = hv_vcpu_set_reg(*vcpu_out, HV_REG_CPSR, cpsr);
+    if (status != HV_SUCCESS) {
+        return set_hv_error(error_buffer, error_capacity, "set guest cpsr", status);
+    }
+    return 0;
+}
+
+/* Diagnostic-only, opt-in wall-clock forced exit: `proxima_vm_run_device_dispatch_loop`'s
+ * own blocking `hv_vcpu_run` call cannot otherwise be interrupted, so a guest
+ * that genuinely never traps (real execution, no VM exit at all -- this
+ * crate's own edk2-boot investigation MEASURED exactly this shape via
+ * `sample(1)`: every one of 1540 samples over a 2-second window sits inside
+ * `Hv::Vcpu::run()`, never once returning to this file's own exit-handling
+ * code) would otherwise hang the caller forever with zero diagnostic value.
+ * `hv_vcpus_exit`'s own SDK doc names this exact cross-thread use: forces
+ * `hv_vcpu_run` to return even while another thread is inside it. Every
+ * kernel-boot caller passes `watchdog_millis == 0` (disabled); the edk2 path
+ * opts in (`boot::boot_edk2_firmware`'s own doc names why). */
+struct watchdog_context {
+    hv_vcpu_t vcpu;
+    uint64_t millis;
+};
+
+static void *watchdog_thread_main(void *argument) {
+    struct watchdog_context *context = (struct watchdog_context *)argument;
+    const struct timespec sleep_duration = {
+        .tv_sec = (time_t)(context->millis / 1000u),
+        .tv_nsec = (long)((context->millis % 1000u) * 1000000ull),
+    };
+    nanosleep(&sleep_duration, NULL);
+    hv_vcpu_t vcpus[1] = {context->vcpu};
+    // best-effort: if the loop already returned and destroyed its own vcpu
+    // before this fires, `hv_vcpus_exit` targets a vcpu id that may no
+    // longer be valid -- this thread is detached and its return value is
+    // never observed, exactly the fire-and-forget shape a diagnostic-only
+    // watchdog needs.
+    (void)hv_vcpus_exit(vcpus, 1);
+    free(context);
+    return NULL;
+}
+
+/* Returns nonzero on failure (watchdog not armed; the caller proceeds
+ * without one rather than treating this as fatal). */
+static int arm_watchdog(hv_vcpu_t vcpu, uint64_t watchdog_millis) {
+    if (watchdog_millis == 0) {
+        return 0;
+    }
+    struct watchdog_context *context = malloc(sizeof(struct watchdog_context));
+    if (context == NULL) {
+        return -1;
+    }
+    context->vcpu = vcpu;
+    context->millis = watchdog_millis;
+    pthread_t thread;
+    if (pthread_create(&thread, NULL, watchdog_thread_main, context) != 0) {
+        free(context);
+        return -1;
+    }
+    pthread_detach(thread);
+    return 0;
 }
 
 int proxima_vm_scratch_run(
@@ -1576,6 +1743,1085 @@ int proxima_vm_layered_restore(
 
 void proxima_vm_layered_vcpu_destroy(proxima_vm_layered_context_t *context) {
     hv_vcpu_destroy((hv_vcpu_t)context->vcpu);
+}
+
+/* Bound on every exit shape that keeps returning control to
+ * proxima_vm_run_device_dispatch_loop (an mmio/exception storm, a psci
+ * call that never halts) -- max_hypercalls alone only counts EC 0x16
+ * exits, so a storm on any other exception class would otherwise be
+ * unbounded. Sized generously above the deepest real boot this crate has
+ * observed (mmio_trap_count=13540 at the vtimer wall, M5b's own measured
+ * evidence) so a real boot never trips it. */
+#define MAX_TOTAL_EXITS 5000000ull
+
+/* ISS decode for EC 0x18 (trapped `MSR`/`MRS`/system instruction), ARM DDI
+ * 0487 ISS-encoding-for-trapped-sysreg layout: `Op0`\[21:20\], `Op2`\[19:17\],
+ * `Op1`\[16:14\], `CRn`\[13:10\], `Rt`\[9:5\], `CRm`\[4:1\], `Direction`\[0\]
+ * (1 = read/MRS, 0 = write/MSR) -- the exact fields this VM's own first
+ * decoded wall (syndrome `0x6230102d`) named: `op0=3 op1=0 crn=4 crm=6
+ * op2=0` is `S3_0_C4_C6_0` == `ICC_PMR_EL1`, `rt=1`, direction=read. Mirrors
+ * `decode_data_abort_iss` immediately below it in spirit (one syndrome-in,
+ * one typed decode-out), but this trap's ISS carries no `ISV`-style
+ * validity bit -- the architecture always populates every field for a
+ * trapped `MSR`/`MRS`, unlike a data abort's instruction-decode-may-be-
+ * absent case. */
+typedef struct {
+    uint8_t op0;
+    uint8_t op1;
+    uint8_t crn;
+    uint8_t crm;
+    uint8_t op2;
+    uint8_t rt;
+    uint8_t is_read;
+} icc_sysreg_iss_t;
+
+static icc_sysreg_iss_t decode_icc_sysreg_iss(uint64_t syndrome) {
+    const uint32_t iss = (uint32_t)(syndrome & 0x1ffffffull);
+    icc_sysreg_iss_t decoded;
+    decoded.op0 = (uint8_t)((iss >> 20) & 0x3u);
+    decoded.op2 = (uint8_t)((iss >> 17) & 0x7u);
+    decoded.op1 = (uint8_t)((iss >> 14) & 0x7u);
+    decoded.crn = (uint8_t)((iss >> 10) & 0xfu);
+    decoded.rt = (uint8_t)((iss >> 5) & 0x1fu);
+    decoded.crm = (uint8_t)((iss >> 1) & 0xfu);
+    decoded.is_read = (uint8_t)(iss & 0x1u);
+    return decoded;
+}
+
+/* Handles one EC 0x18 (trapped `MSR`/`MRS`) exit whose decoded
+ * `(op0, op1, crn, crm, op2)` names a GICv3 CPU-interface system register:
+ * decodes the ISS, reads `Rt` for a write (`Rt == 31` is `xzr`, this
+ * kernel's own probe path uses it -- see `apply_sre`'s doc for why `SRE`
+ * must accept that write unconditionally), calls
+ * `proxima_vm_dispatch_sysreg_icc`, writes `Rt` back for a read (`xzr`
+ * discards the value, matching the architected "writes to xzr are
+ * discarded" rule), and advances `PC` past the fixed-width trapping
+ * instruction. Returns 0 on success, -1 on any decode, dispatch, or
+ * hypervisor-register failure (message in `error_buffer`), including an
+ * encoding this ICC model does not implement -- that rejection's message
+ * names the full `S<op0>_<op1>_C<crn>_C<crm>_<op2>` encoding, the read/write
+ * direction, and the trampoline's own reason code
+ * (`ICC_DISPATCH_UNKNOWN_REGISTER`/`_READ_ONLY_REGISTER`/
+ * `_WRITE_ONLY_REGISTER`, `dispatch_trampoline.h`), so the next wall this
+ * model cannot yet decode names itself instead of falling back to the
+ * caller's generic unknown-EC path. */
+static int handle_icc_sysreg_trap(
+    hv_vcpu_t vcpu,
+    hv_vcpu_exit_t *exit_data,
+    void *icc_transport,
+    char *error_buffer,
+    size_t error_capacity
+) {
+    const icc_sysreg_iss_t iss = decode_icc_sysreg_iss(exit_data->exception.syndrome);
+
+    uint64_t source_value = 0;
+    hv_return_t status;
+    if (!iss.is_read && iss.rt != 31u) {
+        status = hv_vcpu_get_reg(vcpu, (hv_reg_t)(HV_REG_X0 + iss.rt), &source_value);
+        if (status != HV_SUCCESS) {
+            return set_hv_error(error_buffer, error_capacity, "read icc source register", status);
+        }
+    }
+
+    uint64_t read_value = 0;
+    uint8_t deactivated = 0;
+    uint32_t deactivated_intid = 0;
+    const int32_t dispatch_status = proxima_vm_dispatch_sysreg_icc(
+        icc_transport,
+        iss.op0,
+        iss.op1,
+        iss.crn,
+        iss.crm,
+        iss.op2,
+        iss.is_read ? 0u : 1u,
+        source_value,
+        &read_value,
+        &deactivated,
+        &deactivated_intid
+    );
+    if (dispatch_status != 0) {
+        const char *reason = "rejected for an unrecognized reason";
+        if (dispatch_status == ICC_DISPATCH_UNKNOWN_REGISTER) {
+            reason = "no icc register modeled at this encoding";
+        } else if (dispatch_status == ICC_DISPATCH_READ_ONLY_REGISTER) {
+            reason = "register is read-only";
+        } else if (dispatch_status == ICC_DISPATCH_WRITE_ONLY_REGISTER) {
+            reason = "register is write-only";
+        }
+        if (error_capacity > 0) {
+            snprintf(
+                error_buffer,
+                error_capacity,
+                "icc sysreg access rejected: S%u_%u_C%u_C%u_%u %s (%s)",
+                iss.op0,
+                iss.op1,
+                iss.crn,
+                iss.crm,
+                iss.op2,
+                iss.is_read ? "read" : "write",
+                reason
+            );
+        }
+        return -1;
+    }
+
+    if (iss.is_read && iss.rt != 31u) {
+        status = hv_vcpu_set_reg(vcpu, (hv_reg_t)(HV_REG_X0 + iss.rt), read_value);
+        if (status != HV_SUCCESS) {
+            return set_hv_error(error_buffer, error_capacity, "write icc destination register", status);
+        }
+    }
+
+    uint64_t program_counter = 0;
+    status = hv_vcpu_get_reg(vcpu, HV_REG_PC, &program_counter);
+    if (status != HV_SUCCESS) {
+        return set_hv_error(error_buffer, error_capacity, "read icc faulting pc", status);
+    }
+    status = hv_vcpu_set_reg(vcpu, HV_REG_PC, program_counter + 4u);
+    if (status != HV_SUCCESS) {
+        return set_hv_error(error_buffer, error_capacity, "advance icc faulting pc", status);
+    }
+
+    /* M5b-beyond re-arm: `deactivated` names an `ICC_EOIR1_EL1` write that
+     * just retired the ICC model's one active interrupt
+     * (`IccEffect::InterruptDeactivated`, `gic.rs`). When it is the
+     * vtimer's own INTID, complete the architected "servicing this
+     * interrupt is done" contract `hv_vcpu_set_vtimer_mask`'s own SDK doc
+     * names: clear the IRQ line HVF is asserting into the guest, then clear
+     * the mask so a future timeout can raise `HV_EXIT_REASON_VTIMER_
+     * ACTIVATED` again. */
+    if (deactivated != 0 && deactivated_intid == PROXIMA_VM_VTIMER_INTID) {
+        status = hv_vcpu_set_pending_interrupt(vcpu, HV_INTERRUPT_TYPE_IRQ, false);
+        if (status != HV_SUCCESS) {
+            return set_hv_error(error_buffer, error_capacity, "clear vtimer pending interrupt", status);
+        }
+        status = hv_vcpu_set_vtimer_mask(vcpu, false);
+        if (status != HV_SUCCESS) {
+            return set_hv_error(error_buffer, error_capacity, "clear vtimer mask on eoi", status);
+        }
+    }
+    return 0;
+}
+
+/* One 32-bit register-lane access, routed to whichever device's window the
+ * caller already resolved `fault_address` into. Factored out so a real
+ * 64-bit access (GICv3 exposes several 64-bit registers, e.g. `GICR_TYPER` —
+ * already modeled here as two adjacent 32-bit halves,
+ * `src/gic.rs`'s `REG_GICR_TYPER_LOW`/`REG_GICR_TYPER_HIGH`) can be serviced
+ * as two lane calls at `offset` and `offset + 4` without duplicating this
+ * device-selection chain. */
+static int32_t dispatch_one_register_lane(
+    int is_console,
+    int is_net,
+    int is_blk,
+    int is_gicd,
+    int is_gicr,
+    void *console_transport,
+    void *net_transport,
+    void *blk_transport,
+    void *gicd_transport,
+    void *gicr_transport,
+    void *pl011_transport,
+    uint64_t lane_offset,
+    uint8_t is_write,
+    uint32_t value,
+    uint32_t *read_value_out,
+    uint16_t *notified_queue_out,
+    uint8_t *pl011_tx_byte_out,
+    uint8_t *pl011_tx_emitted_out
+) {
+    *notified_queue_out = PROXIMA_VM_MMIO_NO_QUEUE_NOTIFIED;
+    *pl011_tx_emitted_out = 0;
+    if (is_console) {
+        return proxima_vm_dispatch_mmio(
+            console_transport, lane_offset, is_write, value, read_value_out, notified_queue_out
+        );
+    }
+    if (is_net) {
+        return proxima_vm_dispatch_mmio_net(
+            net_transport, lane_offset, is_write, value, read_value_out, notified_queue_out
+        );
+    }
+    if (is_blk) {
+        return proxima_vm_dispatch_mmio_blk(
+            blk_transport, lane_offset, is_write, value, read_value_out, notified_queue_out
+        );
+    }
+    if (is_gicd) {
+        return proxima_vm_dispatch_mmio_gicd(gicd_transport, lane_offset, is_write, value, read_value_out);
+    }
+    if (is_gicr) {
+        return proxima_vm_dispatch_mmio_gicr(gicr_transport, lane_offset, is_write, value, read_value_out);
+    }
+    return proxima_vm_dispatch_mmio_pl011(
+        pl011_transport, lane_offset, is_write, value, read_value_out, pl011_tx_byte_out, pl011_tx_emitted_out
+    );
+}
+
+/* Handles one data-abort exit whose fault address falls inside either
+ * reserved virtio-mmio window (console or net, `dispatch_trampoline.h`):
+ * decodes the ISS, reads the source register for a write (or computes the
+ * value to write back for a read) via `hv_vcpu_get_reg`/`hv_vcpu_set_reg`,
+ * picks the window (and therefore which transport and which drain/emit
+ * channel) the fault address falls in, applies the access through that
+ * transport's `proxima_vm_dispatch_mmio*`, drains the notified queue (if
+ * any) via the matching `proxima_vm_mmio_drain_tx*` into that window's own
+ * emitted buffer, and advances `PC` past the fixed-width A64 instruction.
+ * Returns 0 on success, -1 on any decode, dispatch, or hypervisor-register
+ * failure (message in `error_buffer`), including a fault address outside
+ * both windows. */
+static int handle_mmio_data_abort(
+    hv_vcpu_t vcpu,
+    hv_vcpu_exit_t *exit_data,
+    void *console_transport,
+    void *net_transport,
+    void *blk_transport,
+    void *gicd_transport,
+    void *gicr_transport,
+    void *pl011_transport,
+    uint8_t *guest_memory,
+    size_t mapped_size,
+    uint8_t *mmio_emitted_out,
+    size_t mmio_emitted_capacity,
+    size_t *mmio_emitted_length,
+    uint8_t *net_emitted_out,
+    size_t net_emitted_capacity,
+    size_t *net_emitted_length,
+    uint8_t *blk_emitted_out,
+    size_t blk_emitted_capacity,
+    size_t *blk_emitted_length,
+    uint8_t *pl011_emitted_out,
+    size_t pl011_emitted_capacity,
+    size_t *pl011_emitted_length,
+    uint64_t *gicd_trap_count,
+    uint64_t *gicr_trap_count,
+    uint64_t *pl011_trap_count,
+    uint64_t *virtio_trap_count,
+    char *error_buffer,
+    size_t error_capacity
+) {
+    const data_abort_iss_t iss = decode_data_abort_iss(exit_data->exception.syndrome);
+    if (!iss.instruction_syndrome_valid) {
+        return set_error(
+            error_buffer,
+            error_capacity,
+            "mmio data abort carries no single-register instruction decode"
+        );
+    }
+    const uint64_t fault_address = exit_data->exception.physical_address;
+    const int is_console = fault_address >= PROXIMA_VM_MMIO_WINDOW_BASE
+        && fault_address - PROXIMA_VM_MMIO_WINDOW_BASE < PROXIMA_VM_MMIO_WINDOW_SIZE;
+    const int is_net = fault_address >= PROXIMA_VM_NET_MMIO_WINDOW_BASE
+        && fault_address - PROXIMA_VM_NET_MMIO_WINDOW_BASE < PROXIMA_VM_NET_MMIO_WINDOW_SIZE;
+    const int is_blk = fault_address >= PROXIMA_VM_BLK_MMIO_WINDOW_BASE
+        && fault_address - PROXIMA_VM_BLK_MMIO_WINDOW_BASE < PROXIMA_VM_BLK_MMIO_WINDOW_SIZE;
+    const int is_gicd = fault_address >= PROXIMA_VM_GICD_MMIO_WINDOW_BASE
+        && fault_address - PROXIMA_VM_GICD_MMIO_WINDOW_BASE < PROXIMA_VM_GICD_MMIO_WINDOW_SIZE;
+    const int is_gicr = fault_address >= PROXIMA_VM_GICR_MMIO_WINDOW_BASE
+        && fault_address - PROXIMA_VM_GICR_MMIO_WINDOW_BASE < PROXIMA_VM_GICR_MMIO_WINDOW_SIZE;
+    const int is_pl011 = fault_address >= PROXIMA_VM_PL011_MMIO_WINDOW_BASE
+        && fault_address - PROXIMA_VM_PL011_MMIO_WINDOW_BASE < PROXIMA_VM_PL011_MMIO_WINDOW_SIZE;
+    if (!is_console && !is_net && !is_blk && !is_gicd && !is_gicr && !is_pl011) {
+        return set_error(error_buffer, error_capacity, "data abort outside any mmio window");
+    }
+    /* M5b per-window trap counters -- attributed by the SAME window
+     * resolution the dispatch below already computed, before any dispatch
+     * can fail, so a failed access still counts against the window that
+     * caused it (matches `mmio_trap_count`'s own "counted before dispatch"
+     * placement at the call site). */
+    if (is_gicd) {
+        ++*gicd_trap_count;
+    } else if (is_gicr) {
+        ++*gicr_trap_count;
+    } else if (is_pl011) {
+        ++*pl011_trap_count;
+    } else {
+        ++*virtio_trap_count;
+    }
+    const uint64_t window_base = is_console ? PROXIMA_VM_MMIO_WINDOW_BASE
+        : is_net             ? PROXIMA_VM_NET_MMIO_WINDOW_BASE
+        : is_blk             ? PROXIMA_VM_BLK_MMIO_WINDOW_BASE
+        : is_gicd            ? PROXIMA_VM_GICD_MMIO_WINDOW_BASE
+        : is_gicr            ? PROXIMA_VM_GICR_MMIO_WINDOW_BASE
+                              : PROXIMA_VM_PL011_MMIO_WINDOW_BASE;
+    const uint64_t offset = fault_address - window_base;
+
+    uint64_t register_value = 0;
+    hv_return_t status;
+    if (iss.is_write && iss.transfer_register != 31u) {
+        status = hv_vcpu_get_reg(vcpu, (hv_reg_t)(HV_REG_X0 + iss.transfer_register), &register_value);
+        if (status != HV_SUCCESS) {
+            return set_hv_error(error_buffer, error_capacity, "read mmio source register", status);
+        }
+    }
+
+    /* A narrower-than-4-byte access (`ldrb`/`strb`/`ldrh`/`strh`) still
+     * targets this register's declared byte-0 lane -- every device model
+     * here is a plain register file, not a byte-addressable memory region,
+     * so a narrow write carries its value in the low bytes and a narrow
+     * read is answered from the low bytes of the full register value,
+     * zero-extended (`hv_vcpu_set_reg` below always writes a full 64-bit
+     * destination). An 8-byte access instead walks two real 32-bit register
+     * lanes at `offset` and `offset + 4` -- this model's own convention for
+     * every 64-bit architected register it exposes (`GICR_TYPER`'s
+     * low/high split, `src/gic.rs`'s own doc). */
+    const int lane_count = iss.access_size_bytes == 8 ? 2 : 1;
+    const int is_narrow = iss.access_size_bytes < 4;
+    uint64_t combined_read_value = 0;
+    uint16_t notified_queue = PROXIMA_VM_MMIO_NO_QUEUE_NOTIFIED;
+    uint8_t pl011_tx_byte = 0;
+    uint8_t pl011_tx_emitted = 0;
+    int32_t dispatch_status = 0;
+
+    for (int lane = 0; lane < lane_count; ++lane) {
+        const uint64_t lane_offset = offset + (uint64_t)lane * 4u;
+        const uint32_t lane_write_value = (uint32_t)(register_value >> (lane * 32));
+        uint32_t lane_read_value = 0;
+        uint16_t lane_notified_queue = PROXIMA_VM_MMIO_NO_QUEUE_NOTIFIED;
+        uint8_t lane_pl011_tx_byte = 0;
+        uint8_t lane_pl011_tx_emitted = 0;
+
+        dispatch_status = dispatch_one_register_lane(
+            is_console, is_net, is_blk, is_gicd, is_gicr,
+            console_transport, net_transport, blk_transport, gicd_transport, gicr_transport, pl011_transport,
+            lane_offset,
+            iss.is_write ? 1u : 0u,
+            lane_write_value,
+            &lane_read_value,
+            &lane_notified_queue,
+            &lane_pl011_tx_byte,
+            &lane_pl011_tx_emitted
+        );
+        if (dispatch_status != 0) {
+            break;
+        }
+        combined_read_value |= (uint64_t)lane_read_value << (lane * 32);
+        if (lane_notified_queue != PROXIMA_VM_MMIO_NO_QUEUE_NOTIFIED) {
+            notified_queue = lane_notified_queue;
+        }
+        if (lane_pl011_tx_emitted) {
+            pl011_tx_byte = lane_pl011_tx_byte;
+            pl011_tx_emitted = 1;
+        }
+    }
+    if (dispatch_status != 0) {
+        const char *window_name = is_console ? "console"
+            : is_net                          ? "net"
+            : is_blk                          ? "blk"
+            : is_gicd                         ? "gicd"
+            : is_gicr                         ? "gicr"
+                                               : "pl011";
+        if (error_capacity > 0) {
+            snprintf(
+                error_buffer,
+                error_capacity,
+                "mmio register access rejected: window=%s offset=0x%llx is_write=%u",
+                window_name,
+                (unsigned long long)offset,
+                (unsigned)iss.is_write
+            );
+        }
+        return -1;
+    }
+    if (is_narrow) {
+        const uint64_t narrow_mask = (1ull << (iss.access_size_bytes * 8u)) - 1u;
+        combined_read_value &= narrow_mask;
+    }
+    if (pl011_tx_emitted) {
+        if (*pl011_emitted_length >= pl011_emitted_capacity) {
+            return set_error(error_buffer, error_capacity, "pl011 emitted-byte channel is full");
+        }
+        pl011_emitted_out[*pl011_emitted_length] = pl011_tx_byte;
+        *pl011_emitted_length += 1;
+    }
+
+    if (!iss.is_write && iss.transfer_register != 31u) {
+        status = hv_vcpu_set_reg(vcpu, (hv_reg_t)(HV_REG_X0 + iss.transfer_register), combined_read_value);
+        if (status != HV_SUCCESS) {
+            return set_hv_error(error_buffer, error_capacity, "write mmio destination register", status);
+        }
+    }
+
+    if (notified_queue != PROXIMA_VM_MMIO_NO_QUEUE_NOTIFIED) {
+        size_t drained_length = 0;
+        int32_t drain_status;
+        if (is_console) {
+            drain_status = proxima_vm_mmio_drain_tx(
+                console_transport,
+                notified_queue,
+                guest_memory,
+                mapped_size,
+                mmio_emitted_out + *mmio_emitted_length,
+                mmio_emitted_capacity - *mmio_emitted_length,
+                &drained_length
+            );
+        } else if (is_net) {
+            drain_status = proxima_vm_mmio_drain_tx_net(
+                net_transport,
+                notified_queue,
+                guest_memory,
+                mapped_size,
+                net_emitted_out + *net_emitted_length,
+                net_emitted_capacity - *net_emitted_length,
+                &drained_length
+            );
+        } else {
+            drain_status = proxima_vm_mmio_service_blk(
+                blk_transport,
+                notified_queue,
+                guest_memory,
+                mapped_size,
+                blk_emitted_out + *blk_emitted_length,
+                blk_emitted_capacity - *blk_emitted_length,
+                &drained_length
+            );
+        }
+        if (drain_status != 0) {
+            return set_error(error_buffer, error_capacity, "mmio queue drain failed");
+        }
+        if (is_console) {
+            *mmio_emitted_length += drained_length;
+        } else if (is_net) {
+            *net_emitted_length += drained_length;
+        } else {
+            *blk_emitted_length += drained_length;
+        }
+    }
+
+    uint64_t program_counter = 0;
+    status = hv_vcpu_get_reg(vcpu, HV_REG_PC, &program_counter);
+    if (status != HV_SUCCESS) {
+        return set_hv_error(error_buffer, error_capacity, "read mmio faulting pc", status);
+    }
+    status = hv_vcpu_set_reg(vcpu, HV_REG_PC, program_counter + 4u);
+    if (status != HV_SUCCESS) {
+        return set_hv_error(error_buffer, error_capacity, "advance mmio faulting pc", status);
+    }
+    return 0;
+}
+
+int proxima_vm_run_device_dispatch_loop(
+    const proxima_vm_segment_t *segments,
+    size_t segment_count,
+    uint64_t guest_memory_size,
+    uint64_t guest_memory_base,
+    uint64_t entry,
+    uint64_t boot_x0,
+    /* 0 is a sentinel meaning "use this loop's own established default"
+     * (`0x3c5u`, EL1h — every existing Linux-kernel/lambda-ELF caller's
+     * unchanged behavior), not a literal CPSR value any real boot wants:
+     * `0x3c5u`'s own low nibble (`0b0101`) is never 0, so no real caller
+     * ever needs to pass literal 0 here. A nonzero value is written
+     * verbatim (`device_create_and_start_vcpu`'s own `cpsr` parameter) and
+     * this loop enables the HVF EL2 VM-config knob (`device_create_vm`'s
+     * own `enable_el2` doc) whenever its low nibble names EL2h/EL2t — the
+     * Rust-side `boot::boot_edk2_firmware`'s own module doc names why edk2
+     * needs this and the existing kernel/lambda callers never pass it. */
+    uint64_t boot_cpsr,
+    const void *dispatcher,
+    void *console_transport,
+    void *net_transport,
+    void *blk_transport,
+    void *gicd_transport,
+    void *gicr_transport,
+    void *pl011_transport,
+    void *icc_transport,
+    size_t max_hypercalls,
+    /* 0 = disabled (every existing caller). `arm_watchdog`'s own doc names
+     * the diagnostic this exists for: a guest that genuinely never traps
+     * (real, unbroken execution -- MAX_TOTAL_EXITS below only bounds exit
+     * STORMS, not a guest that never exits at all) would otherwise hang
+     * `hv_vcpu_run` forever with zero positional evidence. */
+    uint64_t watchdog_millis,
+    uint8_t *emitted_out,
+    size_t emitted_capacity,
+    size_t *emitted_length_out,
+    uint8_t *mmio_emitted_out,
+    size_t mmio_emitted_capacity,
+    size_t *mmio_emitted_length_out,
+    uint8_t *net_emitted_out,
+    size_t net_emitted_capacity,
+    size_t *net_emitted_length_out,
+    uint8_t *blk_emitted_out,
+    size_t blk_emitted_capacity,
+    size_t *blk_emitted_length_out,
+    uint8_t *pl011_emitted_out,
+    size_t pl011_emitted_capacity,
+    size_t *pl011_emitted_length_out,
+    uint64_t *create_to_first_exit_nanos_out,
+    uint64_t *touch_all_pages_nanos_out,
+    uint64_t *mmio_trap_count_out,
+    uint64_t *gicd_trap_count_out,
+    uint64_t *gicr_trap_count_out,
+    uint64_t *pl011_trap_count_out,
+    uint64_t *virtio_trap_count_out,
+    uint64_t *vtimer_activation_count_out,
+    uint64_t *wfi_wfe_trap_count_out,
+    uint64_t *entered_el2_out,
+    char *error_buffer,
+    size_t error_capacity
+) {
+    const uint64_t run_start_nanos = now_nanos();
+    const size_t page_size = (size_t)getpagesize();
+    const size_t mapped_size = round_up_to_page(
+        guest_memory_size > 0 ? guest_memory_size : 1,
+        page_size
+    );
+    int result = -1;
+    int vm_created = 0;
+    int vcpu_created = 0;
+    int first_exit_seen = 0;
+    /* `entered_el2_out`'s own doc: 0 by default (every existing caller's
+     * `boot_cpsr == 0` sentinel never requests EL2, so this stays 0 for
+     * them unchanged); set to 1 only when this run's `enable_el2` request
+     * was actually honored (`device_create_vm`'s own return-shape doc), 0
+     * again on the HV_UNSUPPORTED fallback. */
+    int entered_el2 = 0;
+    size_t windows_mapped = 0;
+    mapped_window_t windows[MAX_MAPPED_WINDOWS];
+    hv_vcpu_t vcpu = 0;
+    hv_vcpu_exit_t *exit_data = NULL;
+    proxima_vm_named_region_t guest_memory_region = {0, NULL, 0};
+    int guest_memory_region_created = 0;
+    void *guest_memory = MAP_FAILED;
+    size_t emitted_length = 0;
+    size_t mmio_emitted_length = 0;
+    size_t net_emitted_length = 0;
+    size_t blk_emitted_length = 0;
+    size_t pl011_emitted_length = 0;
+    size_t hypercall_count = 0;
+    uint64_t mmio_trap_count = 0;
+    /* M5b per-window breakdown of `mmio_trap_count` (task's own ask: "gicd/
+     * gicr/pl011/virtio each") -- the console/net/blk virtio-mmio windows
+     * share one bucket since M5b's own boot never drives any of them (this
+     * guest speaks no virtqueue protocol), so a three-way split there would
+     * only ever show zeros in two of three counters. */
+    uint64_t gicd_trap_count = 0;
+    uint64_t gicr_trap_count = 0;
+    uint64_t pl011_trap_count = 0;
+    uint64_t virtio_trap_count = 0;
+    uint64_t vtimer_activation_count = 0;
+    /* EC 0x1 (trapped `WFI`/`WFE`, ARM DDI 0487 D13.2.37): PID1's own idle
+     * park loop (`kernel_boot_userspace.rs`'s own wall, "unexpected arm
+     * exception class 0x1") issues this once it has nothing left to
+     * schedule. HVF traps it rather than actually parking the host thread
+     * because this loop never told HVF interrupts are pending -- the guest
+     * re-issues the same `wfi` the instant it is resumed, so counting these
+     * (rather than silently swallowing them) is the only way a caller can
+     * tell "idle-spinning as expected" apart from a real hang. */
+    uint64_t wfi_wfe_trap_count = 0;
+    uint64_t total_exit_count = 0;
+    uint64_t create_to_first_exit_nanos = 0;
+    uint64_t touch_all_pages_nanos = 0;
+    uint8_t response_scratch[DISPATCH_RESPONSE_SCRATCH_CAPACITY];
+
+    for (size_t index = 0; index < segment_count; ++index) {
+        const proxima_vm_segment_t *segment = &segments[index];
+        if (segment->guest_address > guest_memory_size
+            || segment->memory_size > guest_memory_size - segment->guest_address) {
+            return set_error(error_buffer, error_capacity, "guest segment exceeds guest memory reservation");
+        }
+    }
+
+    /* M4: guest memory is a named mach memory object, not `mmap(MAP_ANON)` --
+     * a second caller holding `guest_memory_region.handle` can map its own
+     * view of the same backing object and observe writes made through this
+     * one (`proxima_vm_map_named_region`), which an anonymous mapping could
+     * never offer a snapshot/fork consumer. */
+    if (proxima_vm_create_named_region(mapped_size, &guest_memory_region, error_buffer, error_capacity) != 0) {
+        return -1;
+    }
+    guest_memory_region_created = 1;
+    guest_memory = guest_memory_region.primary_address;
+
+    /* M3's "wall to touch every mapped page": a first-touch write per
+     * `page_size` stride of the named region's primary view, timed BEFORE
+     * `hv_vm_map` so the number reflects only the host-side first-touch
+     * cost of this mapping (post-M4: a `mach_vm_map`'d named-entry view
+     * rather than an anonymous mapping), not any hypervisor-side mapping
+     * work measured elsewhere. This is the HVF lane's whole deliverable on
+     * this axis — see the header doc on why HVF has no per-page stage-2
+     * fault index. */
+    {
+        const uint64_t touch_start_nanos = now_nanos();
+        for (size_t offset = 0; offset < mapped_size; offset += page_size) {
+            ((volatile uint8_t *)guest_memory)[offset] = 0u;
+        }
+        touch_all_pages_nanos = now_nanos() - touch_start_nanos;
+    }
+
+    /* `boot_cpsr`'s own parameter doc names the sentinel: 0 means "this
+     * loop's established default", anything else is the literal CPSR to
+     * enter at. EL2h is `M[3:0] == 0b1001` (`0x9u`), EL2t is `0b1000`
+     * (`0x8u`) — ARM DDI 0487's own `PSTATE.M` encoding, the same field
+     * `0x3c5u`'s own low nibble (`0b0101`, EL1h) already commits this loop
+     * to for every other caller. */
+    uint64_t resolved_cpsr = boot_cpsr != 0 ? boot_cpsr : 0x3c5u;
+    const uint64_t cpsr_el_mode = resolved_cpsr & 0xfu;
+    const int enable_el2 = (cpsr_el_mode == 0x9u || cpsr_el_mode == 0x8u) ? 1 : 0;
+
+    const int create_vm_status = device_create_vm(enable_el2, error_buffer, error_capacity);
+    if (create_vm_status < 0) {
+        goto cleanup;
+    }
+    vm_created = 1;
+    if (create_vm_status == 1) {
+        /* `device_create_vm`'s own doc on this return value: this host's
+         * HVF reported EL2 unsupported, so the vm this loop just created
+         * has EL2 disabled -- the vcpu MUST enter at EL1h regardless of
+         * what `boot_cpsr` asked for, or `device_create_and_start_vcpu`'s
+         * own `hv_vcpu_set_reg(..., HV_REG_CPSR, ...)` would try to put the
+         * vcpu in a mode the vm was never configured to support. */
+        resolved_cpsr = 0x3c5u;
+        entered_el2 = 0;
+    } else if (enable_el2) {
+        entered_el2 = 1;
+    }
+
+    hv_return_t status;
+
+    /* Copy every segment's file-backed bytes into its own `guest_address`
+     * offset of the one flat `guest_memory` host allocation first (segments
+     * never overlap — `elf::parse_elf` already proved that, so this never
+     * double-writes a byte), THEN map real, page-merged permissions
+     * (`build_mapped_windows`) instead of one `HV_MEMORY_READ |
+     * HV_MEMORY_WRITE | HV_MEMORY_EXEC` blob covering the whole reservation.
+     * Every `hv_vm_map` call below targets a disjoint sub-range of the same
+     * flat `guest_memory` allocation, so pointer arithmetic elsewhere in
+     * this loop (the emit verb, `proxima_vm_dispatch_hypercall`'s
+     * guest-memory view) stays valid without a guest-address-to-host-pointer
+     * translation table. */
+    for (size_t index = 0; index < segment_count; ++index) {
+        const proxima_vm_segment_t *segment = &segments[index];
+        if (segment->data_length > 0) {
+            memcpy((uint8_t *)guest_memory + segment->guest_address, segment->data, segment->data_length);
+        }
+    }
+
+    /* `guest_memory_base` shifts the guest-physical address each window maps
+     * at (a real boot's RAM sits at 0x4000_0000, `dtb.rs`'s own
+     * `QemuVirtLayout` doc) without touching the host-side `guest_memory`
+     * buffer, which always starts its own flat allocation at offset 0 — the
+     * base only ever appears on the `hv_vm_map`/`hv_vm_unmap` side of this
+     * split. Existing ELF-guest callers pass 0, so `window->start` alone is
+     * still the mapped IPA for them, unchanged from before this parameter
+     * existed. */
+    windows_mapped = build_mapped_windows(segments, segment_count, page_size, windows, MAX_MAPPED_WINDOWS);
+    for (size_t index = 0; index < windows_mapped; ++index) {
+        const mapped_window_t *window = &windows[index];
+        status = hv_vm_map(
+            (uint8_t *)guest_memory + window->start,
+            guest_memory_base + window->start,
+            (size_t)(window->end - window->start),
+            window->flags
+        );
+        if (status != HV_SUCCESS) {
+            windows_mapped = index;
+            set_hv_error(error_buffer, error_capacity, "hv_vm_map", status);
+            goto cleanup;
+        }
+    }
+
+    if (device_create_and_start_vcpu(
+            entry, resolved_cpsr, &vcpu, &exit_data, &vcpu_created, error_buffer, error_capacity
+        )
+        != 0) {
+        goto cleanup;
+    }
+    // best-effort: `arm_watchdog`'s own doc on why a failure to arm is
+    // never fatal here -- the loop still runs correctly without one, just
+    // without the forced-exit diagnostic if this host cannot spawn the
+    // thread.
+    (void)arm_watchdog(vcpu, watchdog_millis);
+    /* arm64 boot protocol (Documentation/arm64/booting): x0 carries the DTB
+     * physical address, x1-x3 are reserved and must be zero. Existing
+     * ELF-guest callers pass `boot_x0 == 0`, which is inert for them (the
+     * lambda guest's raw asm entry reads no incoming register). */
+    status = hv_vcpu_set_reg(vcpu, HV_REG_X0, boot_x0);
+    if (status == HV_SUCCESS) {
+        status = hv_vcpu_set_reg(vcpu, HV_REG_X1, 0);
+    }
+    if (status == HV_SUCCESS) {
+        status = hv_vcpu_set_reg(vcpu, HV_REG_X2, 0);
+    }
+    if (status == HV_SUCCESS) {
+        status = hv_vcpu_set_reg(vcpu, HV_REG_X3, 0);
+    }
+    if (status != HV_SUCCESS) {
+        set_hv_error(error_buffer, error_capacity, "set boot argument registers", status);
+        goto cleanup;
+    }
+
+    for (;;) {
+        status = hv_vcpu_run(vcpu);
+        if (status != HV_SUCCESS) {
+            set_hv_error(error_buffer, error_capacity, "hv_vcpu_run", status);
+            goto cleanup;
+        }
+        if (!first_exit_seen) {
+            first_exit_seen = 1;
+            create_to_first_exit_nanos = now_nanos() - run_start_nanos;
+        }
+        /* M5b-beyond: `HV_EXIT_REASON_VTIMER_ACTIVATED` is exit reason 2, not
+         * an EC-0x24/0x18/0x16 exception (`hv_vcpu_types.h`'s own doc, read
+         * directly off this host's SDK) -- it fires once, HVF auto-masks the
+         * vtimer for us before this exit is even delivered, and the vCPU
+         * will not exit with this reason again until
+         * `hv_vcpu_set_vtimer_mask(vcpu, false)` is called, which the SDK's
+         * own documented contract ties to servicing the guest's EOI of the
+         * vtimer's GIC interrupt (the virtual timer PPI, `dtb.rs`'s
+         * `write_timer` triple `1 11 4` -- PPI 11 -> INTID 27,
+         * `PROXIMA_VM_VTIMER_INTID`). The explicit
+         * `hv_vcpu_set_vtimer_mask(vcpu, true)` below is redundant with
+         * HVF's own auto-mask -- kept for readability of the contract, not
+         * because it changes behavior. The injection this comment used to
+         * say never happens now does: record INTID 27 pending in the ICC
+         * model's one-deep slot (`proxima_vm_icc_set_vtimer_pending`,
+         * `gic.rs`'s `IccCpuInterface::set_pending`) and tell HVF the
+         * guest's IRQ line is asserted (`hv_vcpu_set_pending_interrupt`), so
+         * the guest takes the IRQ exception once its `PSTATE.I` unmasks --
+         * the re-arm half (mask/pending both cleared again) lives in
+         * `handle_icc_sysreg_trap`'s own EOIR1 handling below, the
+         * documented contract's other end. A guest that never unmasks IRQs
+         * or never reads `ICC_IAR1_EL1` still leaves this exit's own wait
+         * bounded only by `total_exit_count` below and whichever outer
+         * wall-clock bound the caller wraps this call in
+         * (`tests/kernel_boot.rs`'s subprocess) -- a genuine parked `wfi`
+         * inside `hv_vcpu_run` itself is not preemptable by any counter
+         * here. */
+        if (exit_data->reason == HV_EXIT_REASON_VTIMER_ACTIVATED) {
+            ++vtimer_activation_count;
+            status = hv_vcpu_set_vtimer_mask(vcpu, true);
+            if (status != HV_SUCCESS) {
+                set_hv_error(error_buffer, error_capacity, "hv_vcpu_set_vtimer_mask", status);
+                goto cleanup;
+            }
+            proxima_vm_icc_set_vtimer_pending(icc_transport, PROXIMA_VM_VTIMER_INTID);
+            status = hv_vcpu_set_pending_interrupt(vcpu, HV_INTERRUPT_TYPE_IRQ, true);
+            if (status != HV_SUCCESS) {
+                set_hv_error(error_buffer, error_capacity, "hv_vcpu_set_pending_interrupt", status);
+                goto cleanup;
+            }
+            continue;
+        }
+        if (exit_data->reason == HV_EXIT_REASON_CANCELED) {
+            /* `arm_watchdog`'s own doc: this is that forced exit firing --
+             * the guest never trapped on its own for `watchdog_millis`, so
+             * report exactly where it was still executing (`PC`/`CPSR`)
+             * instead of the bare "unexpected Hypervisor exit reason"
+             * message every other unmodeled reason gets, since that message
+             * carries no positional evidence at all for this one. */
+            uint64_t stuck_pc = 0;
+            uint64_t stuck_cpsr = 0;
+            hv_vcpu_get_reg(vcpu, HV_REG_PC, &stuck_pc);
+            hv_vcpu_get_reg(vcpu, HV_REG_CPSR, &stuck_cpsr);
+            if (error_capacity > 0) {
+                snprintf(
+                    error_buffer,
+                    error_capacity,
+                    "watchdog forced exit: guest never trapped within the watchdog window, still \
+                     executing at pc=0x%llx cpsr=0x%llx",
+                    (unsigned long long)stuck_pc,
+                    (unsigned long long)stuck_cpsr
+                );
+            }
+            goto cleanup;
+        }
+        if (exit_data->reason != HV_EXIT_REASON_EXCEPTION) {
+            if (error_capacity > 0) {
+                snprintf(error_buffer, error_capacity, "unexpected Hypervisor exit reason %u", exit_data->reason);
+            }
+            goto cleanup;
+        }
+        /* Bounds every exit shape that DOES keep returning control to this
+         * loop (an mmio/exception storm, a psci call that never halts) --
+         * the existing `max_hypercalls` check below only counts EC 0x16
+         * exits, so a storm on any other exception class was previously
+         * unbounded. Sized generously above the deepest real boot this
+         * slice has observed (`mmio_trap_count=13540` at the vtimer wall,
+         * M5b's own measured evidence) so a real boot never trips it. */
+        if (++total_exit_count > MAX_TOTAL_EXITS) {
+            if (error_capacity > 0) {
+                snprintf(
+                    error_buffer,
+                    error_capacity,
+                    "exceeded total exit budget (%llu) without halting",
+                    (unsigned long long)MAX_TOTAL_EXITS
+                );
+            }
+            goto cleanup;
+        }
+        const uint64_t exception_class = (exit_data->exception.syndrome >> 26u) & 0x3fu;
+        if (exception_class == 0x24u) {
+            ++mmio_trap_count;
+            if (handle_mmio_data_abort(
+                    vcpu,
+                    exit_data,
+                    console_transport,
+                    net_transport,
+                    blk_transport,
+                    gicd_transport,
+                    gicr_transport,
+                    pl011_transport,
+                    (uint8_t *)guest_memory,
+                    mapped_size,
+                    mmio_emitted_out,
+                    mmio_emitted_capacity,
+                    &mmio_emitted_length,
+                    net_emitted_out,
+                    net_emitted_capacity,
+                    &net_emitted_length,
+                    blk_emitted_out,
+                    blk_emitted_capacity,
+                    &blk_emitted_length,
+                    pl011_emitted_out,
+                    pl011_emitted_capacity,
+                    &pl011_emitted_length,
+                    &gicd_trap_count,
+                    &gicr_trap_count,
+                    &pl011_trap_count,
+                    &virtio_trap_count,
+                    error_buffer,
+                    error_capacity
+                )
+                != 0) {
+                goto cleanup;
+            }
+            continue;
+        }
+        if (exception_class == 0x18u) {
+            if (handle_icc_sysreg_trap(vcpu, exit_data, icc_transport, error_buffer, error_capacity) != 0) {
+                goto cleanup;
+            }
+            continue;
+        }
+        if (exception_class == 0x1u) {
+            /* `WFI`/`WFE` is a scheduling hint, not a fault (ARM DDI 0487
+             * D13.2.37) -- the correct host action is to treat the trap as
+             * a yield and resume the guest, exactly the "advance past the
+             * faulting instruction" shape `handle_icc_sysreg_trap` and
+             * `handle_mmio_data_abort` already use for their own traps.
+             * HVF offers no "block this vCPU until an interrupt is pending"
+             * primitive for a WFI-class exit the way it does for
+             * `HV_EXIT_REASON_VTIMER_ACTIVATED` above (that path already
+             * injects a real IRQ and lets `hv_vcpu_run` itself block); here
+             * the guest re-issues the same `wfi` the instant it resumes,
+             * which is the expected idle spin, not a bug. `total_exit_count`
+             * above already bounds how many times this loop will do that
+             * before reporting the budget exceeded, so no separate idle cap
+             * is needed. */
+            ++wfi_wfe_trap_count;
+            uint64_t program_counter = 0;
+            status = hv_vcpu_get_reg(vcpu, HV_REG_PC, &program_counter);
+            if (status != HV_SUCCESS) {
+                set_hv_error(error_buffer, error_capacity, "read wfi/wfe faulting pc", status);
+                goto cleanup;
+            }
+            status = hv_vcpu_set_reg(vcpu, HV_REG_PC, program_counter + 4u);
+            if (status != HV_SUCCESS) {
+                set_hv_error(error_buffer, error_capacity, "advance wfi/wfe faulting pc", status);
+                goto cleanup;
+            }
+            continue;
+        }
+        if (exception_class != 0x16u) {
+            /* `pc`/`syndrome` ride in the error message itself (not a
+             * separate stderr print) so a caller driving a real kernel
+             * boot -- which can legitimately trap an unmodeled exception
+             * class -- gets the exact faulting address and syndrome back
+             * through `ProximaError::Upstream` rather than only the bare
+             * exception-class number: the same "next wall must decode
+             * itself" evidence this crate's own EC 0x18 handler above was
+             * built from. */
+            uint64_t faulting_pc = 0;
+            hv_vcpu_get_reg(vcpu, HV_REG_PC, &faulting_pc);
+            if (error_capacity > 0) {
+                snprintf(
+                    error_buffer,
+                    error_capacity,
+                    "unexpected arm exception class 0x%llx at pc=0x%llx syndrome=0x%llx",
+                    (unsigned long long)exception_class,
+                    (unsigned long long)faulting_pc,
+                    (unsigned long long)exit_data->exception.syndrome
+                );
+            }
+            goto cleanup;
+        }
+
+        if (++hypercall_count > max_hypercalls) {
+            set_error(error_buffer, error_capacity, "guest exceeded hypercall budget without halting");
+            goto cleanup;
+        }
+
+        uint64_t verb = 0;
+        uint64_t pointer = 0;
+        uint64_t length = 0;
+        status = hv_vcpu_get_reg(vcpu, HV_REG_X0, &verb);
+        if (status == HV_SUCCESS) {
+            status = hv_vcpu_get_reg(vcpu, HV_REG_X1, &pointer);
+        }
+        if (status == HV_SUCCESS) {
+            status = hv_vcpu_get_reg(vcpu, HV_REG_X2, &length);
+        }
+        if (status != HV_SUCCESS) {
+            set_hv_error(error_buffer, error_capacity, "read hypercall registers", status);
+            goto cleanup;
+        }
+
+        if (verb == PROXIMA_VM_HALT_VERB) {
+            result = 0;
+            goto cleanup;
+        }
+
+        if (verb == PROXIMA_VM_EMIT_VERB) {
+            if (pointer >= mapped_size || emitted_length >= emitted_capacity) {
+                set_error(error_buffer, error_capacity, "emit hypercall pointer or output capacity out of range");
+                goto cleanup;
+            }
+            emitted_out[emitted_length++] = ((const uint8_t *)guest_memory)[pointer];
+            continue;
+        }
+
+        /* M5b PSCI (`src/psci.rs`): a raw `hvc` with the SMCCC function ID
+         * in x0, args in x1/x2/x3. Disjoint by value from every existing
+         * verb (see `dispatch_trampoline.h`'s own doc on this check), so
+         * this test runs before the guest's request ever reaches
+         * `proxima_vm_dispatch_hypercall`. */
+        const int is_psci_32 = verb >= PROXIMA_VM_PSCI_FAST_CALL_32_BASE
+            && verb < PROXIMA_VM_PSCI_FAST_CALL_32_BASE + PROXIMA_VM_PSCI_FAST_CALL_RANGE_WIDTH;
+        const int is_psci_64 = verb >= PROXIMA_VM_PSCI_FAST_CALL_64_BASE
+            && verb < PROXIMA_VM_PSCI_FAST_CALL_64_BASE + PROXIMA_VM_PSCI_FAST_CALL_RANGE_WIDTH;
+        if (is_psci_32 || is_psci_64) {
+            uint64_t arg3 = 0;
+            status = hv_vcpu_get_reg(vcpu, HV_REG_X3, &arg3);
+            if (status != HV_SUCCESS) {
+                set_hv_error(error_buffer, error_capacity, "read psci arg register", status);
+                goto cleanup;
+            }
+            int64_t psci_return_value = 0;
+            uint8_t psci_action = 0;
+            (void)proxima_vm_dispatch_psci(
+                (uint32_t)verb,
+                pointer,
+                length,
+                arg3,
+                &psci_return_value,
+                &psci_action
+            );
+            if (psci_action == 1 || psci_action == 2) {
+                result = 0;
+                goto cleanup;
+            }
+            status = hv_vcpu_set_reg(vcpu, HV_REG_X0, (uint64_t)psci_return_value);
+            if (status != HV_SUCCESS) {
+                set_hv_error(error_buffer, error_capacity, "write psci result register", status);
+                goto cleanup;
+            }
+            continue;
+        }
+
+        const int64_t dispatched = proxima_vm_dispatch_hypercall(
+            dispatcher,
+            (const uint8_t *)guest_memory,
+            mapped_size,
+            (uint16_t)verb,
+            pointer,
+            length,
+            response_scratch,
+            sizeof(response_scratch)
+        );
+        if (dispatched < 0) {
+            if (error_capacity > 0) {
+                snprintf(error_buffer, error_capacity, "hypercall dispatch failed with sentinel %lld", (long long)dispatched);
+            }
+            goto cleanup;
+        }
+
+        const size_t response_length = (size_t)dispatched;
+        // the guest's own request buffer is the only response destination
+        // the ABI names (`abi.rs`'s `pointer`/`length` describe the request,
+        // not a separate reply region); write back only what the guest's
+        // buffer can hold and let `x0` carry the true encoded length so a
+        // truncated write is visible to the guest, not silent.
+        const size_t writable = response_length < length ? response_length : (size_t)length;
+        if (pointer + writable > mapped_size) {
+            set_error(error_buffer, error_capacity, "dispatch response write-back would overrun guest memory");
+            goto cleanup;
+        }
+        memcpy((uint8_t *)guest_memory + pointer, response_scratch, writable);
+
+        status = hv_vcpu_set_reg(vcpu, HV_REG_X0, (uint64_t)response_length);
+        if (status != HV_SUCCESS) {
+            set_hv_error(error_buffer, error_capacity, "write hypercall result register", status);
+            goto cleanup;
+        }
+    }
+
+cleanup:
+    destroy_vcpu(vcpu, vcpu_created);
+    for (size_t index = 0; index < windows_mapped; ++index) {
+        hv_vm_unmap(guest_memory_base + windows[index].start, (size_t)(windows[index].end - windows[index].start));
+    }
+    destroy_vm(vm_created);
+    if (guest_memory_region_created) {
+        proxima_vm_destroy_named_region(&guest_memory_region);
+    }
+    /* M5b: these five length out-params used to be gated on `result == 0`,
+     * which threw away real evidence -- every byte already landed in its
+     * `*_emitted_out` buffer regardless of how the loop ended (each channel
+     * is filled incrementally as traps are serviced, not staged and
+     * committed at a clean halt), so a boot that fails mid-flight still
+     * carries whatever bytes it emitted before the failure. Suppressing the
+     * length was exactly the gap that made "did earlycon write anything
+     * before this boot hit its next wall" unanswerable from the Rust side.
+     * The buffer itself was always safe to read up to its true length; only
+     * the caller's ability to KNOW that length was gated. */
+    if (emitted_length_out != NULL) {
+        *emitted_length_out = emitted_length;
+    }
+    if (mmio_emitted_length_out != NULL) {
+        *mmio_emitted_length_out = mmio_emitted_length;
+    }
+    if (net_emitted_length_out != NULL) {
+        *net_emitted_length_out = net_emitted_length;
+    }
+    if (blk_emitted_length_out != NULL) {
+        *blk_emitted_length_out = blk_emitted_length;
+    }
+    if (pl011_emitted_length_out != NULL) {
+        *pl011_emitted_length_out = pl011_emitted_length;
+    }
+    if (create_to_first_exit_nanos_out != NULL) {
+        *create_to_first_exit_nanos_out = create_to_first_exit_nanos;
+    }
+    if (touch_all_pages_nanos_out != NULL) {
+        *touch_all_pages_nanos_out = touch_all_pages_nanos;
+    }
+    if (mmio_trap_count_out != NULL) {
+        *mmio_trap_count_out = mmio_trap_count;
+    }
+    if (gicd_trap_count_out != NULL) {
+        *gicd_trap_count_out = gicd_trap_count;
+    }
+    if (gicr_trap_count_out != NULL) {
+        *gicr_trap_count_out = gicr_trap_count;
+    }
+    if (pl011_trap_count_out != NULL) {
+        *pl011_trap_count_out = pl011_trap_count;
+    }
+    if (virtio_trap_count_out != NULL) {
+        *virtio_trap_count_out = virtio_trap_count;
+    }
+    if (vtimer_activation_count_out != NULL) {
+        *vtimer_activation_count_out = vtimer_activation_count;
+    }
+    if (wfi_wfe_trap_count_out != NULL) {
+        *wfi_wfe_trap_count_out = wfi_wfe_trap_count;
+    }
+    if (entered_el2_out != NULL) {
+        *entered_el2_out = (uint64_t)entered_el2;
+    }
+    return result;
 }
 
 /* ---------------------------------------------------------------------

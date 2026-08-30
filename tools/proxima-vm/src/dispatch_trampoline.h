@@ -70,6 +70,402 @@ int proxima_vm_run_dispatch_loop(
     size_t error_capacity
 );
 
+/* virtio-mmio device window (VIRTIO 1.2 spec §4.2.2): reserved guest-
+ * physical range, deliberately left unmapped by both `hv_vm_map` windows
+ * (`backend_macos.c`) and `KVM_SET_USER_MEMORY_REGION` slots
+ * (`backend_linux.c`) so any guest load/store into it traps to the host as
+ * a data-abort exit instead of touching real memory. Chosen well above the
+ * 64 MiB guest-memory ceiling either dispatch loop maps so it can never
+ * overlap a real ELF segment or the stack reservation. Window size covers
+ * every register through `ConfigGeneration` (0x0fc) plus headroom for
+ * device-specific config space (0x100+), never itself dereferenced by this
+ * transport slice. */
+#define PROXIMA_VM_MMIO_WINDOW_BASE 0x1000000000ull
+#define PROXIMA_VM_MMIO_WINDOW_SIZE 0x1000ull
+
+/* Second, non-overlapping virtio-mmio device window for the net device
+ * (M6 slice 5, mirroring the console window immediately above): placed
+ * directly after the console window's reserved range so the two windows
+ * are adjacent but never overlap, and — same as the console window — well
+ * above real guest RAM so it can never alias it. Sized identically for the
+ * same headroom reason (register block through `ConfigGeneration` plus the
+ * net device's own config-space fields,
+ * `proxima_protocols::virtio::net::CONFIG_SPACE_BASE` onward, both fit
+ * comfortably inside one 4 KiB window). */
+#define PROXIMA_VM_NET_MMIO_WINDOW_BASE 0x1000001000ull
+#define PROXIMA_VM_NET_MMIO_WINDOW_SIZE 0x1000ull
+
+/* Third, non-overlapping virtio-mmio device window for the block device
+ * (M6 slice 6, mirroring the net window immediately above): placed directly
+ * after the net window's reserved range for the same non-aliasing reason.
+ * Sized identically for the same headroom reason (register block through
+ * `ConfigGeneration` plus the blk device's own config-space fields,
+ * `proxima_protocols::virtio::blk::CONFIG_SPACE_BASE` onward, both fit
+ * comfortably inside one 4 KiB window). */
+#define PROXIMA_VM_BLK_MMIO_WINDOW_BASE 0x1000002000ull
+#define PROXIMA_VM_BLK_MMIO_WINDOW_SIZE 0x1000ull
+
+/* GICv3 Distributor and Redistributor windows (M5b GIC slice 3): the real
+ * guest-physical addresses `src/dtb.rs`'s `QemuVirtLayout::CANONICAL` (GICD)
+ * and `QemuVirtLayout::single_vcpu` (GICR) advertise to the guest in the DTB
+ * this VM builds, not invented addresses — the guest reads its GIC location
+ * from the same tree the DTB writes, and this exit loop must trap the exact
+ * range the guest was told to expect. Both sit far above the 64 MiB guest
+ * RAM region a device-model boot maps (`0x0400_0000`): `0x0800_0000` (GICD)
+ * and `0x080a_0000` (GICR) both exceed that ceiling, so neither window is
+ * ever backed by `hv_vm_map`'d guest memory and every guest access
+ * genuinely traps as a data abort, the same non-aliasing guarantee the
+ * virtio windows get from sitting at `0x1000000000+` instead. */
+#define PROXIMA_VM_GICD_MMIO_WINDOW_BASE 0x08000000ull
+#define PROXIMA_VM_GICD_MMIO_WINDOW_SIZE 0x00010000ull
+#define PROXIMA_VM_GICR_MMIO_WINDOW_BASE 0x080a0000ull
+#define PROXIMA_VM_GICR_MMIO_WINDOW_SIZE 0x00020000ull
+
+/* PL011 UART window (M5b pl011 slice): the real guest-physical address
+ * `src/dtb.rs`'s `QemuVirtLayout::CANONICAL.uart_base` advertises to the
+ * guest in this VM's own DTB (QEMU virt's `VIRT_UART`, `hw/arm/virt.c`), not
+ * an invented address, the same "the guest reads its device location from
+ * the tree this VM built" argument the GICD/GICR windows above make.
+ * `0x0900_0000` exceeds the 64 MiB / `0x0400_0000` guest-RAM ceiling, so
+ * this window is never backed by `hv_vm_map`'d guest memory either, and
+ * every guest access genuinely traps as a data abort. */
+#define PROXIMA_VM_PL011_MMIO_WINDOW_BASE 0x09000000ull
+#define PROXIMA_VM_PL011_MMIO_WINDOW_SIZE 0x00001000ull
+
+/* Rust-side mmio register-access dispatcher (`src/mmio_trampoline.rs`):
+ * applies one decoded `(offset, is_write, value)` access to a
+ * `ConsoleTransport`'s `MmioDevice` FSM. `*read_value_out` carries the
+ * value a read access must write back into the guest's destination
+ * register (undefined for a write). `*notified_queue_out` carries the
+ * notified queue index when the access was a `QueueNotify` write, or
+ * `PROXIMA_VM_MMIO_NO_QUEUE_NOTIFIED` otherwise. Returns 0 on success, -1
+ * if the register-block FSM rejected the access. */
+#define PROXIMA_VM_MMIO_NO_QUEUE_NOTIFIED 0xffffu
+
+int32_t proxima_vm_dispatch_mmio(
+    void *console_transport,
+    uint64_t offset,
+    uint8_t is_write,
+    uint32_t value,
+    uint32_t *read_value_out,
+    uint16_t *notified_queue_out
+);
+
+/* M5b PSCI (ARM DEN0022) call handler (`src/psci.rs`): a pure decision over
+ * `(function_id, args)`, no transport state, so this entry takes no `void *`
+ * — the stateless counterpart to `proxima_vm_dispatch_mmio` above. The hvc
+ * trap loop (`proxima_vm_run_device_dispatch_loop` below) range-tests `x0`
+ * against `PROXIMA_VM_PSCI_FAST_CALL_32_BASE`/`_64_BASE` (each a 0x20-wide
+ * SMCCC fast-call range) BEFORE its `PROXIMA_VM_HALT_VERB`/
+ * `PROXIMA_VM_EMIT_VERB` checks, since a compliant PSCI function ID is six
+ * orders of magnitude above either sentinel and never collides with them
+ * (`src/psci.rs`'s own module doc walks the disjointness argument).
+ * `*return_value_out` carries the signed 32-bit value (sign-extended to 64
+ * bits) to write into the guest's `x0` before resuming, valid only when
+ * `*action_out == 0`. `*action_out`: `0` resume the guest with
+ * `*return_value_out` in `x0`, `1` `SYSTEM_OFF` — end the dispatch loop
+ * exactly like `PROXIMA_VM_HALT_VERB` (never a second exit channel), `2`
+ * `SYSTEM_RESET` — this handler has no reset capability, so it ends the
+ * loop identically to `SYSTEM_OFF` rather than returning success into a
+ * guest that would then run past it. Returns 0 always; failure is not a
+ * concept `src/psci.rs`'s pure match produces. */
+#define PROXIMA_VM_PSCI_FAST_CALL_32_BASE 0x84000000u
+#define PROXIMA_VM_PSCI_FAST_CALL_64_BASE 0xc4000000u
+#define PROXIMA_VM_PSCI_FAST_CALL_RANGE_WIDTH 0x20u
+
+int32_t proxima_vm_dispatch_psci(
+    uint32_t function_id,
+    uint64_t arg0,
+    uint64_t arg1,
+    uint64_t arg2,
+    int64_t *return_value_out,
+    uint8_t *action_out
+);
+
+/* Rust-side ring-codec drain (`src/mmio_trampoline.rs`): walks every
+ * avail-ring entry `queue` has published since the last drain against real
+ * `guest_memory`, copies the concatenated device-readable bytes into
+ * `emitted_out`, and publishes one used-ring completion per chain. Returns
+ * 0 on success (`*emitted_length_out` set), -1 on decode/bounds failure,
+ * -2 if `emitted_out` was too small. */
+int32_t proxima_vm_mmio_drain_tx(
+    void *console_transport,
+    uint16_t queue,
+    uint8_t *guest_memory,
+    size_t guest_memory_length,
+    uint8_t *emitted_out,
+    size_t emitted_capacity,
+    size_t *emitted_length_out
+);
+
+/* Net-device mirrors of `proxima_vm_dispatch_mmio` / `proxima_vm_mmio_drain_tx`
+ * above, monomorphized to `crate::virtio_net::NetTransport`
+ * (`src/mmio_trampoline.rs`) for the same `extern "C"`-cannot-be-generic
+ * reason the console pair is monomorphized to `ConsoleTransport`. Drained
+ * bytes are the concatenated Ethernet frame bytes with each chain's
+ * `virtio_net_hdr` already stripped (`NetTransport::drain_tx`'s own
+ * `FrameSink` contract). */
+int32_t proxima_vm_dispatch_mmio_net(
+    void *net_transport,
+    uint64_t offset,
+    uint8_t is_write,
+    uint32_t value,
+    uint32_t *read_value_out,
+    uint16_t *notified_queue_out
+);
+
+int32_t proxima_vm_mmio_drain_tx_net(
+    void *net_transport,
+    uint16_t queue,
+    uint8_t *guest_memory,
+    size_t guest_memory_length,
+    uint8_t *emitted_out,
+    size_t emitted_capacity,
+    size_t *emitted_length_out
+);
+
+/* Blk-device mirrors of `proxima_vm_dispatch_mmio` /
+ * `proxima_vm_mmio_drain_tx`, monomorphized to
+ * `crate::virtio_blk::BlkTransport` (`src/mmio_trampoline.rs`). Unlike the
+ * console/net pair, the "drain" (`proxima_vm_mmio_service_blk`) both reads
+ * AND writes real guest memory (an `IN` request's data descriptor is
+ * device-writable, spec §5.2.6), and `emitted_out` carries, per serviced
+ * request, an 8-byte little-endian sector, a 1-byte status, then the data
+ * bytes actually moved (empty for `FLUSH`/unsupported) — the proof a caller
+ * one layer up needs that the bytes crossing the ring matched what the
+ * local store held, without keeping the transport alive past this call. */
+int32_t proxima_vm_dispatch_mmio_blk(
+    void *blk_transport,
+    uint64_t offset,
+    uint8_t is_write,
+    uint32_t value,
+    uint32_t *read_value_out,
+    uint16_t *notified_queue_out
+);
+
+int32_t proxima_vm_mmio_service_blk(
+    void *blk_transport,
+    uint16_t queue,
+    uint8_t *guest_memory,
+    size_t guest_memory_length,
+    uint8_t *emitted_out,
+    size_t emitted_capacity,
+    size_t *emitted_length_out
+);
+
+/* GICD/GICR register-access trampolines (`src/mmio_trampoline.rs`), each
+ * monomorphized to its own state struct in `src/gic.rs`
+ * (`GicDistributor`/`GicRedistributor`) for the same `extern "C"`-cannot-be-
+ * generic reason the console/net/blk pair are monomorphized to their own
+ * transports -- one struct per window here, mirroring that precedent, rather
+ * than a wrapper spanning both blocks, since `GicDistributor` and
+ * `GicRedistributor` are already the two independently-addressed state
+ * machines `src/gic.rs`'s own module doc describes. Neither GIC register
+ * block owns a virtqueue, so there is no drain/service counterpart to
+ * `proxima_vm_mmio_drain_tx` here -- a read's value reaches the guest through
+ * `*read_value_out` exactly like every other window, and a write is applied
+ * with no further host-visible effect to report. Returns 0 on success, -1 if
+ * the register-block FSM rejected the access. */
+int32_t proxima_vm_dispatch_mmio_gicd(
+    void *gicd_transport,
+    uint64_t offset,
+    uint8_t is_write,
+    uint32_t value,
+    uint32_t *read_value_out
+);
+
+int32_t proxima_vm_dispatch_mmio_gicr(
+    void *gicr_transport,
+    uint64_t offset,
+    uint8_t is_write,
+    uint32_t value,
+    uint32_t *read_value_out
+);
+
+/* GICv3 CPU-interface system-register trampoline (`src/mmio_trampoline.rs`),
+ * monomorphized to `crate::gic::IccCpuInterface` for the same reason the
+ * GICD/GICR pair above are monomorphized to their own state structs. Unlike
+ * every MMIO trampoline in this header, this access is not offset-keyed --
+ * `op0`/`op1`/`crn`/`crm`/`op2` name the trapped `MRS`/`MSR` system register
+ * directly, the same tuple ARM's ISS-for-trapped-sysreg encoding recovers
+ * from EC 0x18 (`decode_icc_sysreg_iss` in `backend_macos.c`). Returns 0 on
+ * success (`*read_value_out` set for a read, ignored for a write), or one of
+ * `ICC_DISPATCH_UNKNOWN_REGISTER` (1, no register modeled at this
+ * encoding), `ICC_DISPATCH_READ_ONLY_REGISTER` (2, a write against a
+ * read-only register), `ICC_DISPATCH_WRITE_ONLY_REGISTER` (3, a read of a
+ * write-only register) -- the caller already holds `op0`/`op1`/`crn`/`crm`/
+ * `op2` from its own ISS decode, so a distinct code per rejection reason is
+ * enough to build a self-documenting error string without this trampoline
+ * reaching back through the FFI boundary to format one. */
+#define ICC_DISPATCH_UNKNOWN_REGISTER 1
+#define ICC_DISPATCH_READ_ONLY_REGISTER 2
+#define ICC_DISPATCH_WRITE_ONLY_REGISTER 3
+
+/* M5b-beyond: the virtual timer's INTID (`dtb.rs`'s `write_timer` PPI
+ * triple `1 11 4` -- PPI number 11, GICv3's PPI encoding is INTID = 16 +
+ * PPI number, so 16 + 11 = 27). The one interrupt source this VM's ICC
+ * model's one-deep pending slot (`IccCpuInterface`, `gic.rs`) ever holds. */
+#define PROXIMA_VM_VTIMER_INTID 27u
+
+/* `*deactivated_out` is nonzero, with `*deactivated_intid_out` set, exactly
+ * when this access was an `ICC_EOIR1_EL1` write that matched the ICC
+ * model's one active interrupt (`IccEffect::InterruptDeactivated`,
+ * `gic.rs`) -- the caller's cue to service the architected re-arm contract
+ * (`hv_vcpu_set_pending_interrupt` false, then `hv_vcpu_set_vtimer_mask`
+ * false) when the deactivated INTID is `PROXIMA_VM_VTIMER_INTID`. */
+int32_t proxima_vm_dispatch_sysreg_icc(
+    void *icc_transport,
+    uint8_t op0,
+    uint8_t op1,
+    uint8_t crn,
+    uint8_t crm,
+    uint8_t op2,
+    uint8_t is_write,
+    uint64_t value,
+    uint64_t *read_value_out,
+    uint8_t *deactivated_out,
+    uint32_t *deactivated_intid_out
+);
+
+/* Records `intid` pending in `icc_transport`'s one-deep slot
+ * (`IccCpuInterface::set_pending`, `gic.rs`). The HVF exit loop calls this
+ * the instant `HV_EXIT_REASON_VTIMER_ACTIVATED` fires, before telling HVF
+ * the guest's IRQ line is asserted. */
+void proxima_vm_icc_set_vtimer_pending(void *icc_transport, uint32_t intid);
+
+/* PL011 register-access trampoline (`src/mmio_trampoline.rs`), monomorphized
+ * to `crate::pl011::Pl011Uart` for the same `extern "C"`-cannot-be-generic
+ * reason every other device trampoline above is monomorphized to its own
+ * state struct. The pl011 owns no virtqueue, so there is no drain/service
+ * counterpart here either -- but unlike the GICD/GICR pair, a `UARTDR` write
+ * IS a host-visible effect (the guest emitting one console byte), so this
+ * trampoline reports it directly through `*tx_byte_out`/`*tx_emitted_out`
+ * rather than routing it through a queue-notify drain: `*tx_emitted_out` is
+ * nonzero iff this access was a `UARTDR` write, in which case `*tx_byte_out`
+ * carries the emitted byte. Returns 0 on success, -1 if the register-block
+ * FSM rejected the access. */
+int32_t proxima_vm_dispatch_mmio_pl011(
+    void *pl011_transport,
+    uint64_t offset,
+    uint8_t is_write,
+    uint32_t value,
+    uint32_t *read_value_out,
+    uint8_t *tx_byte_out,
+    uint8_t *tx_emitted_out
+);
+
+/* Second, device-model exit loop (`src/boot.rs`'s two callers,
+ * `boot_linux_kernel`/`boot_edk2_firmware`): a distinct C symbol from
+ * `proxima_vm_run_dispatch_loop` above, not an overload of it -- the two
+ * loops' own signatures never converged (this one threads a
+ * `guest_memory_base`/`boot_x0`/`boot_cpsr` triple no ELF-guest caller of
+ * `dispatch::run_dispatch_loop` needs, plus the whole console/net/blk/
+ * gicd/gicr/pl011/icc device-model transport set and their five extra
+ * emitted-byte channels), and C has no overloading to fold them under one
+ * name safely. Maps every entry in `segments` into a single flat
+ * `guest_memory_size`-byte guest address space, whose guest-physical base is
+ * `guest_memory_base` (`dtb.rs`'s RAM base for a real kernel boot) — each at
+ * its own `guest_address` relative to that base, its own real
+ * `readable`/`writable`/`executable` permissions (never one RWX blob; W^X
+ * per `proxima_vm_segment_t`'s own doc in `ffi_segment.h`), copying
+ * `data[0..data_length)` in at that offset first (a zero-`data_length`
+ * segment, e.g. a stack reservation, copies nothing) — then runs a real
+ * vCPU: sets `PC = entry`, traps every `hvc #0` / `out dx, al`, MMIO data
+ * aborts against the console/net/blk/gicd/gicr/pl011 windows above, EC 0x18
+ * ICC system-register traps, EC 0x1 `WFI`/`WFE`, and PSCI fast calls, and
+ * either emits one byte from `guest_memory[pointer]` (`verb ==
+ * PROXIMA_VM_EMIT_VERB`), ends the loop (`verb == PROXIMA_VM_HALT_VERB`, or
+ * an SMCCC `SYSTEM_OFF`/`SYSTEM_RESET`), or forwards the exit to
+ * `proxima_vm_dispatch_hypercall` and copies its response back into
+ * `guest_memory[pointer..]` before resuming.
+ *
+ * `console_transport`/`net_transport`/`blk_transport`/`gicd_transport`/
+ * `gicr_transport`/`pl011_transport`/`icc_transport` are each a live
+ * instance of their matching Rust-side transport; a `QueueNotify` effect
+ * immediately drains/services the named queue via that transport's own
+ * function, appending the bytes into `mmio_emitted_out` (console),
+ * `net_emitted_out` (net), or `blk_emitted_out` (blk) — kept deliberately
+ * separate from each other and from `emitted_out` (the
+ * `PROXIMA_VM_EMIT_VERB` hypercall path) and from `pl011_emitted_out` (the
+ * pl011 `UARTDR` byte channel M5's exit criterion names) so a guest
+ * exercising every path in one run never has its observable byte streams
+ * silently interleaved into one buffer a test would then have to
+ * disentangle.
+ *
+ * `create_to_first_exit_nanos_out`/`touch_all_pages_nanos_out`/
+ * `mmio_trap_count_out`/`gicd_trap_count_out`/`gicr_trap_count_out`/
+ * `pl011_trap_count_out`/`virtio_trap_count_out`/
+ * `vtimer_activation_count_out`/`wfi_wfe_trap_count_out`/`entered_el2_out`
+ * are the M3/M5b diagnostic instrument: unconditional out-params, populated
+ * in `cleanup` regardless of `result`, so a run that does NOT reach a clean
+ * halt still reports exactly how far it got.
+ *
+ * Returns 0 on a clean halt, -1 on any mapping, hypervisor, dispatch, or
+ * budget-exceeded failure (message in `error_buffer`). Caps the exit count
+ * at `max_hypercalls` (hypercall exits) and an internal total-exit budget
+ * (every exit reason) so a guest that never halts cannot loop the host
+ * forever. */
+int proxima_vm_run_device_dispatch_loop(
+    const proxima_vm_segment_t *segments,
+    size_t segment_count,
+    uint64_t guest_memory_size,
+    uint64_t guest_memory_base,
+    uint64_t entry,
+    uint64_t boot_x0,
+    /* 0 sentinel = this loop's default (`0x3c5u`, EL1h); nonzero = literal
+     * CPSR (`backend_macos.c::proxima_vm_run_device_dispatch_loop`'s own doc
+     * on this parameter, and `boot::boot_edk2_firmware`'s doc on why edk2
+     * needs EL2h instead). */
+    uint64_t boot_cpsr,
+    const void *dispatcher,
+    void *console_transport,
+    void *net_transport,
+    void *blk_transport,
+    void *gicd_transport,
+    void *gicr_transport,
+    void *pl011_transport,
+    void *icc_transport,
+    size_t max_hypercalls,
+    /* 0 sentinel = no watchdog (every kernel/lambda caller); nonzero =
+     * milliseconds before a forced `hv_vcpus_exit` diagnostic fires
+     * (`backend_macos.c::arm_watchdog`'s own doc, `boot::boot_edk2_firmware`'s
+     * doc on why it opts in). */
+    uint64_t watchdog_millis,
+    uint8_t *emitted_out,
+    size_t emitted_capacity,
+    size_t *emitted_length_out,
+    uint8_t *mmio_emitted_out,
+    size_t mmio_emitted_capacity,
+    size_t *mmio_emitted_length_out,
+    uint8_t *net_emitted_out,
+    size_t net_emitted_capacity,
+    size_t *net_emitted_length_out,
+    uint8_t *blk_emitted_out,
+    size_t blk_emitted_capacity,
+    size_t *blk_emitted_length_out,
+    uint8_t *pl011_emitted_out,
+    size_t pl011_emitted_capacity,
+    size_t *pl011_emitted_length_out,
+    uint64_t *create_to_first_exit_nanos_out,
+    uint64_t *touch_all_pages_nanos_out,
+    uint64_t *mmio_trap_count_out,
+    uint64_t *gicd_trap_count_out,
+    uint64_t *gicr_trap_count_out,
+    uint64_t *pl011_trap_count_out,
+    uint64_t *virtio_trap_count_out,
+    uint64_t *vtimer_activation_count_out,
+    uint64_t *wfi_wfe_trap_count_out,
+    /* Written 1 only when `boot_cpsr` asked for EL2 entry AND this host's
+     * own HVF actually honored it; 0 otherwise (never requested, or
+     * requested and this host fell back to EL1h -- `device_create_vm`'s own
+     * doc in `backend_macos.c` on why HV_UNSUPPORTED triggers a same-call
+     * fallback rather than a hard error). Always 0 on the KVM/x86_64 lane
+     * (`backend_linux.c`'s own doc: no ARM exception-level model there). */
+    uint64_t *entered_el2_out,
+    char *error_buffer,
+    size_t error_capacity
+);
+
 int proxima_vm_create_named_region(
     size_t size,
     proxima_vm_named_region_t *region_out,
