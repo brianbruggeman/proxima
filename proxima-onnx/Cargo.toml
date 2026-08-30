@@ -1,6 +1,6 @@
 [package]
 name = "proxima-onnx"
-description = "Sans-IO ONNX model parser: hand-rolled protobuf message decode over proxima-protocols' schema-agnostic wire walker, faithful to onnx.proto -- graph structure, node attributes, and initializer tensors as borrowed byte ranges, never translated into proxima_tensor::Op."
+description = "Sans-IO ONNX model parser and Op lowering: hand-rolled protobuf message decode over proxima-protocols' schema-agnostic wire walker, faithful to onnx.proto, plus a NodeProto -> proxima_tensor::Op lowering that composes the existing closed op algebra."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -24,6 +24,7 @@ thiserror.workspace = true
 bon = { workspace = true, optional = true }
 conflaguration = { workspace = true, features = ["derive", "toml"], optional = true }
 serde = { workspace = true, features = ["derive"], optional = true }
+proxima-tensor = { workspace = true, default-features = false, features = ["alloc"] }
 
 [lints]
 workspace = true
@@ -31,3 +32,4 @@ workspace = true
 [dev-dependencies]
 tempfile.workspace = true
 temp-env.workspace = true
+proxima-tensor = { workspace = true, features = ["std", "test-support"] }
