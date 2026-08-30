@@ -253,6 +253,7 @@ fn lower_node(
         "Concat" => lower_concat(program, values, node),
         "Conv" => lower_conv(program, values, node),
         "MaxPool" => lower_maxpool(program, values, node),
+        "AveragePool" => lower_averagepool(program, values, node),
         other => Err(LowerError::UnsupportedOp { name: node.name.to_string(), op_type: other.to_string() }),
     }
 }
@@ -1478,6 +1479,60 @@ fn lower_maxpool(program: &mut Vec<Op>, values: &mut BTreeMap<String, Value>, no
     Ok(())
 }
 
+/// `AveragePool`: [`window_materialize`] (zero-padded), `Reduce(Add)` over
+/// `kh`/`kw`, then `Multiply` by the constant `1/(kh*kw)` -- correct for
+/// `count_include_pad=1` and for any window with no padding, where the fixed
+/// divisor and ONNX's own default (`count_include_pad=0`, a per-position
+/// valid-cell divisor) agree. A padded window with the default
+/// `count_include_pad=0` is a named, deferred gap: it needs a per-output-
+/// position valid-count divisor this composition does not yet build, not a
+/// silently wrong average.
+fn lower_averagepool(program: &mut Vec<Op>, values: &mut BTreeMap<String, Value>, node: &NodeProto<'_>) -> Result<(), LowerError> {
+    let count_include_pad = attr_int(node, "count_include_pad").unwrap_or(0);
+    let has_nonzero_pad = attr_ints(node, "pads").is_some_and(|pads| pads.iter().any(|&value| value != 0));
+    if has_nonzero_pad && count_include_pad == 0 {
+        return Err(LowerError::UnsupportedShape {
+            name: node.name.to_string(),
+            op_type: node.op_type.to_string(),
+            reason: "AveragePool lowering supports nonzero pads only with count_include_pad=1 (the ONNX default excludes padding from the divisor, which needs a per-position valid-count divisor not yet composed)".to_string(),
+        });
+    }
+    let image = lookup(values, node, 0)?.clone();
+    let plan = plan_pool(program, node, &image, 0.0)?;
+    let windowed = window_materialize(
+        program,
+        &plan.padded,
+        WindowSpec {
+            out_h: plan.out_shape[2],
+            out_w: plan.out_shape[3],
+            kernel_h: plan.kernel_h,
+            kernel_w: plan.kernel_w,
+            stride_h: plan.stride_h,
+            stride_w: plan.stride_w,
+            dilation_h: plan.dilation_h,
+            dilation_w: plan.dilation_w,
+        },
+    );
+    let summed = build_reduce(
+        program,
+        ScalarOp::Add,
+        ReduceInit::Zero,
+        windowed.node,
+        identity_pattern(6),
+        projection(6, &[0, 1, 2, 3]),
+        Some("averagepool2d".to_string()),
+    );
+    let window_size = (plan.kernel_h * plan.kernel_w) as f32;
+    let inverse = constant_scalar(program, 1.0 / window_size);
+    let result = build_elementwise(
+        program,
+        ScalarOp::Multiply,
+        alloc::vec![(summed, IndexMap::Affine(identity_pattern(4))), (inverse, IndexMap::Affine(scalar_broadcast_pattern(4)))],
+    );
+    bind_output(values, node, 0, result, plan.out_shape);
+    Ok(())
+}
+
 fn tensor_shape(tensor: &TensorProto<'_>) -> Vec<u64> {
     tensor.dims.iter().map(|&value| value as u64).collect()
 }
@@ -2155,5 +2210,65 @@ mod tests {
 
         assert_eq!(shape, &[1, 1, 2, 2]);
         assert_eq!(data, &[6.0, 8.0, 14.0, 16.0], "max of each 2x2 block of the 4x4 image");
+    }
+
+    /// `AveragePool`, 2x2 kernel and stride: [`window_materialize`] padded
+    /// with zero (unused here, no padding attribute), `Reduce(Add)` then a
+    /// `1/4` scale -- hand-verified against the per-block mean.
+    #[test]
+    fn averagepool_2x2_takes_the_mean_of_each_block() {
+        let image = f32_initializer("image", &[1, 1, 4, 4], &(1..=16).map(|value| value as f32).collect::<Vec<_>>());
+        let node = NodeProto {
+            input: vec!["image"],
+            output: vec!["y"],
+            op_type: "AveragePool",
+            name: "averagepool",
+            attribute: vec![ints_attribute("kernel_shape", vec![2, 2]), ints_attribute("strides", vec![2, 2])],
+            ..NodeProto::default()
+        };
+        let graph = GraphProto {
+            node: vec![node],
+            name: "averagepool_graph",
+            initializer: vec![image],
+            output: vec![ValueInfoProto { name: "y", ..ValueInfoProto::default() }],
+            ..GraphProto::default()
+        };
+
+        let lowered = lower_graph(&graph).expect("lower AveragePool");
+        let named: Vec<(&str, &[f32])> = lowered.initializers.iter().map(|(name, data)| (name.as_str(), data.as_slice())).collect();
+        let output = lowered.graph_outputs[0].1;
+        let evaluated = evaluate_named(&lowered.program, &[], &named, &[output]).expect("evaluate AveragePool");
+        let (data, shape) = evaluated.get(output).expect("y present");
+
+        assert_eq!(shape, &[1, 1, 2, 2]);
+        assert_eq!(data, &[3.5, 5.5, 11.5, 13.5], "mean of each 2x2 block of the 4x4 image");
+    }
+
+    /// `AveragePool` with nonzero `pads` and ONNX's default `count_include_pad=0`:
+    /// a deferred, named gap -- the fixed `1/(kh*kw)` divisor this
+    /// composition builds is only correct when padding is excluded from the
+    /// count (`count_include_pad=1`) or absent entirely, never silently
+    /// applied to a boundary-diluted average.
+    #[test]
+    fn averagepool_padded_default_count_is_a_named_unsupported_shape_not_a_silent_average() {
+        let image = f32_initializer("image", &[1, 1, 4, 4], &(1..=16).map(|value| value as f32).collect::<Vec<_>>());
+        let node = NodeProto {
+            input: vec!["image"],
+            output: vec!["y"],
+            op_type: "AveragePool",
+            name: "averagepool",
+            attribute: vec![ints_attribute("kernel_shape", vec![2, 2]), ints_attribute("pads", vec![1, 1, 1, 1])],
+            ..NodeProto::default()
+        };
+        let graph = GraphProto {
+            node: vec![node],
+            name: "averagepool_padded_graph",
+            initializer: vec![image],
+            output: vec![ValueInfoProto { name: "y", ..ValueInfoProto::default() }],
+            ..GraphProto::default()
+        };
+
+        let error = lower_graph(&graph).expect_err("padded AveragePool with count_include_pad=0 is a deferred gap");
+        assert!(matches!(error, LowerError::UnsupportedShape { .. }), "expected UnsupportedShape, got {error:?}");
     }
 }
