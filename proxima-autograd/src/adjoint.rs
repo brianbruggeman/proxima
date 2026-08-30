@@ -21,6 +21,12 @@
 //!   shape through its own [`IndexMap`] — see `route_contribution` (private).
 //! - **`Reduce(Add)` broadcasts** the incoming gradient back across every
 //!   iteration point.
+//! - **`Reduce(Multiply)` divides.** `d(prod x)/dx_i = (prod x)/x_i`, so the
+//!   contribution at each position is `gradient * output / x_i` -- the
+//!   reduce's own already-computed output broadcast back the same way
+//!   `Add`'s rule broadcasts `gradient`, then divided by that position's own
+//!   input. Undefined (produces `inf`/`NaN`) where `x_i` is exactly zero;
+//!   see the private `differentiate_reduce`'s own comment on that arm.
 //! - **`Reduce(Maximum)`/`Reduce(Minimum)` mask-route** the incoming
 //!   gradient to the argmax/argmin position only — the reduce's own
 //!   already-computed output is broadcast back and compared against the
@@ -535,6 +541,40 @@ fn differentiate_reduce(
             );
             expr::binary(program, reduce.dtype, ScalarOp::Multiply, (mask, full.clone()), (gradient_broadcast, full.clone()))
         }
+        // The standard divide-form product-reduction adjoint:
+        // `d(prod x)/dx_i = (prod x) / x_i`, so `grad_i = gradient *
+        // output / x_i`. `output` (this `Reduce` node's own already-computed
+        // result) is broadcast back across the iteration space the same way
+        // `Add`/`Maximum`/`Minimum` above broadcast `gradient` -- reusing
+        // the forward pass's own product instead of recomputing "product of
+        // every OTHER element" per position, which would need an extra
+        // reduction this crate's algebra has no cheaper way to express.
+        // Caveat: this divides by each input element, so it is undefined
+        // (produces `inf`/`NaN`, not silently wrong) at any position where
+        // that element is exactly zero -- the same caveat every
+        // divide-form product-rule adjoint carries, documented here rather
+        // than guarded, since guarding would silently change the value at
+        // a legitimate zero input instead of surfacing the singularity.
+        ScalarOp::Multiply => {
+            let output_broadcast = expr::binary(
+                program,
+                reduce.dtype,
+                ScalarOp::Add,
+                (node, out_map_as_operand.clone()),
+                (anchor, full.clone()),
+            );
+            let gradient_broadcast = expr::binary(
+                program,
+                reduce.dtype,
+                ScalarOp::Add,
+                (gradient, out_map_as_operand),
+                (anchor, full.clone()),
+            );
+            let numerator =
+                expr::binary(program, reduce.dtype, ScalarOp::Multiply, (gradient_broadcast, full.clone()), (output_broadcast, full.clone()));
+            let recip_operand = expr::unary(program, reduce.dtype, ScalarOp::Reciprocal, (reduce.operand, reduce.in_map.clone()));
+            expr::binary(program, reduce.dtype, ScalarOp::Multiply, (numerator, full.clone()), (recip_operand, full.clone()))
+        }
         other => return Err(AutogradError::UnsupportedReduceBody { node, body: other }),
     };
 
@@ -759,5 +799,111 @@ mod select_broadcast_condition_tests {
             }
         }
         assert!(worst.0 < 5e-3, "select adjoint disagreed with central difference: {worst:?}");
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod reduce_multiply_tests {
+    use alloc::vec;
+
+    use proxima_tensor::op::Extent;
+
+    use super::*;
+
+    fn leaf(program: &mut Vec<Op>, name: &str, extent: usize) -> NodeId {
+        proxima_tensor::op::append(
+            program,
+            Op::Input { dtype: DType::Float32, shape: vec![Extent::Static(extent as u32)], name: Some(name.into()) },
+        )
+    }
+
+    /// `loss = prod(x)` for `x = [2, 3, -1, 4]`, no zero anywhere in `x`, so
+    /// the divide-form rule (`differentiate_reduce`'s `ScalarOp::Multiply`
+    /// arm) is well-defined everywhere it is evaluated. Central difference
+    /// against the real forward program is the oracle -- it has no notion
+    /// of "divide-form adjoint", it simply differentiates the actual
+    /// product function.
+    #[proxima::test]
+    async fn reduce_multiply_gradient_matches_central_difference() {
+        let x_values = [2.0f32, 3.0, -1.0, 4.0];
+        let mut program = Vec::new();
+        let x = leaf(&mut program, "x", x_values.len());
+        let loss = proxima_tensor::op::append(
+            &mut program,
+            Op::Reduce(Reduce {
+                dtype: DType::Float32,
+                body: ScalarOp::Multiply,
+                init: ReduceInit::One,
+                operand: x,
+                in_map: expr::identity(1),
+                out_map: expr::broadcast(1),
+                keep: Keep::Reduce,
+                name: None,
+            }),
+        );
+
+        let differentiated = differentiate(&program, loss).expect("Reduce(Multiply) differentiates");
+        let grad_x = differentiated.gradient_of_named("x").expect("x feeds the loss");
+        let evaluated = proxima_tensor::cpu::evaluate_named(&differentiated.program, &[], &[("x", &x_values)], &[grad_x])
+            .expect("adjoint program lowers and evaluates");
+        let analytic = evaluated.get(grad_x).expect("grad_x requested").0;
+
+        let loss_at = |perturbed: &[f32]| {
+            proxima_tensor::cpu::evaluate_named(&program, &[], &[("x", perturbed)], &[loss])
+                .expect("forward program lowers and evaluates")
+                .get(loss)
+                .expect("loss requested")
+                .0[0]
+        };
+
+        let step = 1e-3f32;
+        let mut perturbed = x_values.to_vec();
+        for index in 0..x_values.len() {
+            let original = perturbed[index];
+            perturbed[index] = original + step;
+            let plus = loss_at(&perturbed);
+            perturbed[index] = original - step;
+            let minus = loss_at(&perturbed);
+            perturbed[index] = original;
+
+            let numeric = (plus - minus) / (2.0 * step);
+            let relative = (analytic[index] - numeric).abs() / (analytic[index].abs().max(numeric.abs()) + 1e-6);
+            assert!(relative < 5e-3, "index {index}: analytic={} numeric={numeric}", analytic[index]);
+        }
+    }
+
+    /// Closed-form check independent of central difference: `x = [2, 5]`,
+    /// `prod(x) = 10`, so `grad = [10/2, 10/5] = [5, 2]` exactly -- the
+    /// same "known, hand-computable adjoint" shape
+    /// `training_loop.rs`'s `maximum_reduce_adjoint_routes_the_full_gradient_to_the_unique_argmax_only`
+    /// uses for `Reduce(Maximum)`.
+    #[proxima::test]
+    async fn reduce_multiply_gradient_matches_the_exact_divide_form() {
+        let x_values = [2.0f32, 5.0];
+        let mut program = Vec::new();
+        let x = leaf(&mut program, "x", x_values.len());
+        let loss = proxima_tensor::op::append(
+            &mut program,
+            Op::Reduce(Reduce {
+                dtype: DType::Float32,
+                body: ScalarOp::Multiply,
+                init: ReduceInit::One,
+                operand: x,
+                in_map: expr::identity(1),
+                out_map: expr::broadcast(1),
+                keep: Keep::Reduce,
+                name: None,
+            }),
+        );
+
+        let differentiated = differentiate(&program, loss).expect("Reduce(Multiply) differentiates");
+        let grad_x = differentiated.gradient_of_named("x").expect("x feeds the loss");
+        let evaluated = proxima_tensor::cpu::evaluate_named(&differentiated.program, &[], &[("x", &x_values)], &[grad_x])
+            .expect("adjoint program lowers and evaluates");
+        let analytic = evaluated.get(grad_x).expect("grad_x requested").0;
+
+        assert!((analytic[0] - 5.0).abs() < 1e-5, "got {analytic:?}");
+        assert!((analytic[1] - 2.0).abs() < 1e-5, "got {analytic:?}");
     }
 }

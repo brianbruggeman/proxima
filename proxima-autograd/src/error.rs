@@ -28,8 +28,11 @@ pub enum AutogradError {
 
     #[error(
         "node {node} reduces with {body:?}, which has no adjoint rule here -- only \
-         Add (broadcast) and Maximum/Minimum (masked routing to the argmax/argmin) \
-         are implemented, matching this crate's is_associative bodies"
+         Add (broadcast), Multiply (divide-form: gradient * output / operand), and \
+         Maximum/Minimum (masked routing to the argmax/argmin) are implemented; those \
+         four are exactly this crate's is_associative reduce bodies, and a \
+         non-associative body like Subtract or Divide has no well-defined reduce \
+         adjoint here"
     )]
     UnsupportedReduceBody { node: NodeId, body: ScalarOp },
 
