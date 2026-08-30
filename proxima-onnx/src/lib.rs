@@ -62,6 +62,7 @@ extern crate alloc;
 pub mod config;
 pub mod decode;
 pub mod error;
+pub mod lift;
 pub mod lower;
 pub mod messages;
 pub mod parser;
@@ -72,6 +73,7 @@ pub mod writer;
 
 pub use decode::{ModelField, decode_model_field, decode_model_proto};
 pub use error::OnnxError;
+pub use lift::{LiftError, LiftInput, lift_graph, lift_model};
 pub use lower::{Lowered, LowerError, lower_graph};
 pub use messages::{
     AttributeProto, Dimension, DimensionValue, GraphProto, ModelProto, NodeProto,
