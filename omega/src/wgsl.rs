@@ -497,7 +497,7 @@ fn body_token(body: &ComposedBody) -> String {
 }
 
 /// A structural fingerprint over rank/operand-count/body/(for a reduce)
-/// reduce-op/init/output-rank — the WGSL counterpart of `crate::msl::entry_name`,
+/// reduce-op/init/output-AXES — the WGSL counterpart of `crate::msl::entry_name`,
 /// narrower because v1 never fuses a gather bit-pattern suffix into the name
 /// (gather is rejected before this is ever called).
 fn entry_name(resolved: &BoundOp) -> String {
@@ -519,10 +519,20 @@ fn entry_name(resolved: &BoundOp) -> String {
             let kind = keep_token(*keep);
             let reduce_body = op_token(*reduce_op);
             let init = init_token(*init);
-            let output_rank = output_axes.len();
-            format!(
-                "omega_wgsl_{kind}_r{rank}_o{output_rank}_n{operand_count}_{body}_{reduce_body}_{init}"
-            )
+            // the axis COUNT alone is not enough: two reduces over the same
+            // total rank and the same number of kept axes can still keep
+            // DIFFERENT axis positions (e.g. `[0, 1, 2]` folding the last
+            // axis vs `[0, 2, 3]` folding axis 1) -- `render_reduce`/
+            // `render_reduce_cooperative` bake `output_axes` directly into
+            // the generated source (`full_coord[{dim}] = output_coord[{index}]`
+            // for each `dim` in `output_axes`), so two such ops emit
+            // DIFFERENT WGSL under an identical name if only the count is
+            // here. `pipeline_for` (`crate::wgpu_driver`) caches by this
+            // string alone and never re-diffs source on a cache hit, so a
+            // collision silently reuses the wrong axis mapping's compiled
+            // pipeline against the second op's uniforms.
+            let axes = output_axes.iter().map(u16::to_string).collect::<Vec<_>>().join("_");
+            format!("omega_wgsl_{kind}_r{rank}_ax{axes}_n{operand_count}_{body}_{reduce_body}_{init}")
         }
         BoundOpKind::Iota => format!("omega_wgsl_iota_r{rank}"),
         BoundOpKind::Constant { value } => {
