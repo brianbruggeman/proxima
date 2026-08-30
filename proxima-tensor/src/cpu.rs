@@ -528,8 +528,9 @@ pub enum QuantizedBlock<'a> {
 /// matmul is mixed *within* one fused reduce body — `UInt8`-packed weight
 /// times `Float32` activation into a `Float32` output — which is exactly
 /// the shape `reject_non_float32`'s quantized-weight exemption carves out,
-/// not a program `evaluate_typed` would ever accept. See that function's
-/// [`TypedPlan`] doc for the two shapes it does accept.
+/// not a program `evaluate_typed` would ever accept. See that function's own
+/// doc (`typed_program_plan`'s `TypedPlan`) for the two shapes it does
+/// accept.
 ///
 /// Every call starts and ends with an empty node-output pool and an
 /// unvalidated structure cache — see [`evaluate_quantized_with_scratch`]
@@ -10543,7 +10544,7 @@ impl Element for f64 {
 /// `BFloat16`, and `Float16` have no variant yet — `Bool`'s storage
 /// convention (packed bits vs. one byte per element) is undecided, and the
 /// two half-precision floats have no arithmetic on stable Rust; see
-/// [`typed_program_plan`] for the boundary this actually enforces today.
+/// `typed_program_plan` for the boundary this actually enforces today.
 #[derive(Debug, Clone, PartialEq)]
 pub enum TypedBuffer {
     Int8(Vec<i8>),
@@ -10693,12 +10694,12 @@ type TypedRow<Data> = (NodeId, Vec<u64>, Data);
 /// Run an elementwise-or-reduce tensor program against a caller-chosen
 /// non-f32 (or f64) dtype — the full-width counterpart of [`evaluate`] for
 /// the programs `reject_non_float32` used to reject outright. See
-/// [`typed_program_plan`] for exactly which programs qualify, and for the
+/// `typed_program_plan` for exactly which programs qualify, and for the
 /// uniform case, `DType::Float32` dispatches `run_typed_program` the same as
 /// every other width, but that function's own [`Op::Reduce`] handling
 /// specializes straight back to the existing NEON `run_reduce`/`run_scan`
-/// for `T = f32` — see `run_reduce_typed`'s doc. A [`TypedPlan::Widened`]
-/// program dispatches to [`run_widened_program`] instead, over the
+/// for `T = f32` — see `run_reduce_typed`'s doc. A `TypedPlan::Widened`
+/// program dispatches to `run_widened_program` instead, over the
 /// `(operand, accumulator)` pairs that section ships a [`Convert`] for.
 pub fn evaluate_typed(
     program: &[Op],
