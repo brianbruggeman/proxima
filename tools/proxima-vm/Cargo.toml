@@ -55,7 +55,9 @@ cc = "1.2.62"
 [dev-dependencies]
 criterion = { workspace = true, features = ["html_reports"] }
 goblin = "0.10.7"
+libtest-mimic = "0.8.2"
 object = "0.40.0"
 proptest.workspace = true
 proxima = { workspace = true, features = ["test-support"] }
 tempfile.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread"] }

@@ -50,6 +50,14 @@ use proxima_primitives::pipe::SendPipe;
 use proxima_process::framing::{FrameDecoder, FrameEncoder};
 use proxima_protocols::process::{ChildRequest, ChildResponse};
 
+/// The lambda guest's linker script (`guests/lambda/link.ld`) reserves the
+/// entire 64 MiB `RAM` region for `__stack_top`; [`run_dispatch_loop`] must
+/// map at least that much guest memory or the guest's own stack pointer
+/// lands outside the mapped region. Module-level (not local to
+/// `run_dispatch_loop`) so [`crate::dtb`]'s own RAM-ceiling test can assert
+/// the uart window sits above it without duplicating the literal.
+pub const GUEST_MEMORY_SIZE: u64 = 64 * 1024 * 1024;
+
 /// VM-side parity handler — the proxima-vm equivalent of the
 /// dispatch chain the libc-shim talks to. Implementations
 /// receive `ChildRequest`s from inside the VM's guest and
@@ -284,11 +292,17 @@ pub unsafe extern "C" fn proxima_vm_dispatch_hypercall(
 /// the same guest, are what prove the host's response — not a value the
 /// guest compiled in — decides the bytes the guest emits.
 ///
-/// Returns every [`ChildRequest`] the guest issued, in call order, and
-/// every byte the guest emitted via its dedicated emit verb — the M1 exit
-/// proof's two observables (`tools/proxima-vm/ROADMAP.md`'s M1 section: "the
-/// guest issues ≥2 distinct `ChildRequest` verbs, and the host's responses
-/// change the bytes the guest emits").
+/// Returns every [`ChildRequest`] the guest issued, in call order; every
+/// byte the guest emitted via its dedicated emit verb — the M1 exit proof's
+/// two observables (`tools/proxima-vm/ROADMAP.md`'s M1 section: "the guest
+/// issues ≥2 distinct `ChildRequest` verbs, and the host's responses change
+/// the bytes the guest emits"); every byte a virtio-console/net/blk queue
+/// notify drained from real guest memory (M6's exit criterion); every byte
+/// the guest wrote to the pl011 `UARTDR` window (M5b's exit criterion); and
+/// the M3 fault-count instrument's wall-clock/trap-count triple
+/// (`create_to_first_exit_nanos`, `touch_all_pages_nanos`,
+/// `mmio_trap_count` — see [`DispatchLoopOutput`]'s own doc for the field
+/// order).
 ///
 /// `max_hypercalls` bounds the exit loop so a guest that never issues the
 /// halt verb cannot hang the host.
@@ -300,10 +314,17 @@ pub unsafe extern "C" fn proxima_vm_dispatch_hypercall(
 /// blob is a deliberately minimal proof surface for a guest with no OS
 /// layer at all, not the shape a real ELF-loaded guest should run under.
 /// One additional writable, non-executable segment covers the range between
-/// the last ELF segment and `GUEST_MEMORY_SIZE`
+/// the last ELF segment and `guest_memory_size`
 /// ([`crate::loader::RawSegment::stack`]) — the stack reservation
 /// `guests/lambda/link.ld`'s `__stack_top` implies but no `PT_LOAD` entry
 /// declares.
+///
+/// This ELF-guest path drives the same device-model C exit loop
+/// [`crate::boot`] drives (`proxima_vm_run_device_dispatch_loop`,
+/// `backend_macos.c`/`backend_linux.c`), always at guest-physical base 0,
+/// boot register `x0 == 0`, and this loop's own default CPSR (EL1h) — never
+/// `crate::boot`'s `guest_memory_base`/`boot_x0`/`boot_cpsr` triple, which
+/// only a real kernel/firmware boot needs.
 ///
 /// # Errors
 ///
@@ -316,36 +337,103 @@ pub unsafe extern "C" fn proxima_vm_dispatch_hypercall(
         all(target_os = "macos", target_arch = "aarch64")
     )
 ))]
+/// The M1 four `Vec` fields plus the pl011 slice's fifth (unchanged, see
+/// this function's own doc) plus the M3 fault-count instrument's three
+/// numbers, in the order `tools/proxima-vm/ROADMAP.md`'s M3 section names
+/// them: wall nanoseconds from this call's own entry to the first vCPU exit
+/// (`create_to_first_exit_nanos`), wall nanoseconds to first-touch every
+/// `page_size` stride of the freshly mapped guest memory
+/// (`touch_all_pages_nanos`), and the count of MMIO-trap exits serviced
+/// during the run (`mmio_trap_count` — an auxiliary number, NOT a stage-2
+/// RAM-fault count; see `backend_macos.c`'s `dispatch_trampoline.h` doc for
+/// why HVF has no per-page stage-2 fault index to report instead).
+pub type DispatchLoopOutput = (Vec<ChildRequest>, Vec<u8>, Vec<u8>, Vec<u8>, Vec<u8>, Vec<u8>, u64, u64, u64);
+
+#[cfg(all(
+    feature = "std",
+    any(
+        all(target_os = "linux", target_arch = "x86_64"),
+        all(target_os = "macos", target_arch = "aarch64")
+    )
+))]
+#[allow(
+    clippy::too_many_arguments,
+    reason = "each argument is a distinct device's own emitted-byte capacity (console/net/blk/pl011); \
+              bundling them into a config struct would be a relocation, not a capability, for this \
+              still-growing per-device parameter list"
+)]
 pub fn run_dispatch_loop(
     entry: u64,
     segments: &[crate::elf::Segment<'_>],
     configured_response: ChildResponse,
     max_hypercalls: usize,
     emitted_capacity: usize,
-) -> Result<(Vec<ChildRequest>, Vec<u8>), ProximaError> {
+    mmio_emitted_capacity: usize,
+    net_emitted_capacity: usize,
+    blk_emitted_capacity: usize,
+    pl011_emitted_capacity: usize,
+    guest_memory_size: u64,
+) -> Result<DispatchLoopOutput, ProximaError> {
     use std::ffi::CStr;
     use std::os::raw::c_char;
 
     use crate::loader::RawSegment;
+    use crate::virtio_blk::BlkTransport;
+    use crate::virtio_console::ConsoleTransport;
+    use crate::virtio_net::NetTransport;
 
     const ERROR_CAPACITY: usize = 512;
-    /// The lambda guest's linker script (`guests/lambda/link.ld`) reserves
-    /// the entire 64 MiB `RAM` region for `__stack_top`; the run loop must
-    /// map at least that much guest memory or the guest's own stack pointer
-    /// lands outside the mapped region.
-    const GUEST_MEMORY_SIZE: u64 = 64 * 1024 * 1024;
+    if guest_memory_size < GUEST_MEMORY_SIZE {
+        return Err(ProximaError::Upstream(alloc::format!(
+            "guest_memory_size must cover the lambda guest's full stack reservation \
+             ({GUEST_MEMORY_SIZE} bytes); got {guest_memory_size}"
+        )));
+    }
 
     unsafe extern "C" {
-        fn proxima_vm_run_dispatch_loop(
+        fn proxima_vm_run_device_dispatch_loop(
             segments: *const RawSegment,
             segment_count: usize,
             guest_memory_size: u64,
+            guest_memory_base: u64,
             entry: u64,
+            boot_x0: u64,
+            boot_cpsr: u64,
             dispatcher: *const core::ffi::c_void,
+            console_transport: *mut core::ffi::c_void,
+            net_transport: *mut core::ffi::c_void,
+            blk_transport: *mut core::ffi::c_void,
+            gicd_transport: *mut core::ffi::c_void,
+            gicr_transport: *mut core::ffi::c_void,
+            pl011_transport: *mut core::ffi::c_void,
+            icc_transport: *mut core::ffi::c_void,
             max_hypercalls: usize,
+            watchdog_millis: u64,
             emitted_out: *mut u8,
             emitted_capacity: usize,
             emitted_length_out: *mut usize,
+            mmio_emitted_out: *mut u8,
+            mmio_emitted_capacity: usize,
+            mmio_emitted_length_out: *mut usize,
+            net_emitted_out: *mut u8,
+            net_emitted_capacity: usize,
+            net_emitted_length_out: *mut usize,
+            blk_emitted_out: *mut u8,
+            blk_emitted_capacity: usize,
+            blk_emitted_length_out: *mut usize,
+            pl011_emitted_out: *mut u8,
+            pl011_emitted_capacity: usize,
+            pl011_emitted_length_out: *mut usize,
+            create_to_first_exit_nanos_out: *mut u64,
+            touch_all_pages_nanos_out: *mut u64,
+            mmio_trap_count_out: *mut u64,
+            gicd_trap_count_out: *mut u64,
+            gicr_trap_count_out: *mut u64,
+            pl011_trap_count_out: *mut u64,
+            virtio_trap_count_out: *mut u64,
+            vtimer_activation_count_out: *mut u64,
+            wfi_wfe_trap_count_out: *mut u64,
+            entered_el2_out: *mut u64,
             error_buffer: *mut c_char,
             error_capacity: usize,
         ) -> i32;
@@ -368,27 +456,131 @@ pub fn run_dispatch_loop(
         .unwrap_or(0);
     let stack_start = extent.div_ceil(GUEST_PAGE_SIZE) * GUEST_PAGE_SIZE;
     let mut raw_segments: Vec<RawSegment> = segments.iter().map(RawSegment::from_segment).collect();
-    let stack_size = GUEST_MEMORY_SIZE.saturating_sub(stack_start);
+    let stack_size = guest_memory_size.saturating_sub(stack_start);
     if stack_size > 0 {
         raw_segments.push(RawSegment::stack(stack_start, stack_size));
     }
 
     let dispatcher = FfiRecordingDispatcher::new(configured_response);
+    // offers only VIRTIO_F_VERSION_1: the M1 guest never touches the mmio
+    // window, so this transport sits idle whenever a guest issues only
+    // `ChildRequest` hypercalls; the lambda guest's mmio bring-up sequence
+    // (`guests/lambda/src/main.rs`) is the one caller that drives it.
+    let mut console_transport = ConsoleTransport::new(proxima_protocols::virtio::FEATURE_VERSION_1);
+    // `NetConfigSpace::new` fixes its own offered set (VIRTIO_F_VERSION_1 |
+    // FEATURE_NET_MAC, `proxima-protocols/src/virtio/net.rs`), so — unlike
+    // `ConsoleTransport::new` above — this constructor takes no
+    // offered-features argument; only the device's advertised MAC is this
+    // host's to choose.
+    const HOST_NET_MAC: [u8; 6] = [0x02, 0x00, 0x00, 0x00, 0x00, 0x01];
+    let mut net_transport = NetTransport::new(HOST_NET_MAC);
+    // 16 sectors (8 KiB) is enough for M6's exit criterion (one IN, one OUT);
+    // sector 0 is seeded with a fixed, reproducible pattern — the "host-
+    // seeded pattern" a guest IN request reads back and a caller-side test
+    // asserts against, the same host-owns-the-fixture shape `HOST_NET_MAC`
+    // above already uses for the net device's advertised address.
+    const HOST_BLK_CAPACITY_SECTORS: u64 = 16;
+    let mut blk_transport = BlkTransport::new(HOST_BLK_CAPACITY_SECTORS);
+    let seed_pattern: alloc::vec::Vec<u8> = (0..crate::virtio_blk::SECTOR_LEN)
+        .map(|index| (index % 256) as u8)
+        .collect();
+    blk_transport.seed_sector(0, &seed_pattern);
+    // M5b GIC slice 3: distributor and redistributor state, one per real
+    // hardware register block (`crate::gic`'s own module doc on the ID
+    // banking split), created fresh per run exactly like the three virtio
+    // transports above — no guest here relies on GIC state surviving across
+    // `run_dispatch_loop` calls.
+    let mut gicd_transport = crate::gic::GicDistributor::new();
+    let mut gicr_transport = crate::gic::GicRedistributor::new();
+    // M5b pl011 slice: the console's own register-block state, created fresh
+    // per run exactly like the GIC pair above -- no guest here relies on
+    // pl011 state surviving across `run_dispatch_loop` calls.
+    let mut pl011_transport = crate::pl011::Pl011Uart::new();
+    // M5b ICC slice (the GIC's CPU-interface block, trapped via EC 0x18
+    // MSR/MRS rather than MMIO): created fresh per run for the same reason
+    // the GICD/GICR/pl011 state above is.
+    let mut icc_transport = crate::gic::IccCpuInterface::new();
     let mut emitted = alloc::vec![0_u8; emitted_capacity];
     let mut emitted_length: usize = 0;
+    let mut mmio_emitted = alloc::vec![0_u8; mmio_emitted_capacity];
+    let mut mmio_emitted_length: usize = 0;
+    let mut net_emitted = alloc::vec![0_u8; net_emitted_capacity];
+    let mut net_emitted_length: usize = 0;
+    let mut blk_emitted = alloc::vec![0_u8; blk_emitted_capacity];
+    let mut blk_emitted_length: usize = 0;
+    let mut pl011_emitted = alloc::vec![0_u8; pl011_emitted_capacity];
+    let mut pl011_emitted_length: usize = 0;
+    let mut create_to_first_exit_nanos: u64 = 0;
+    let mut touch_all_pages_nanos: u64 = 0;
+    let mut mmio_trap_count: u64 = 0;
+    // this ELF-guest path has no per-window/vtimer caller today (only
+    // `boot::boot_linux_kernel`'s M5b investigation reads these) --
+    // discarded locals so the C signature can stay one function for both
+    // callers instead of forking a second dispatch loop.
+    let mut gicd_trap_count: u64 = 0;
+    let mut gicr_trap_count: u64 = 0;
+    let mut pl011_trap_count: u64 = 0;
+    let mut virtio_trap_count: u64 = 0;
+    let mut vtimer_activation_count: u64 = 0;
+    // same "no caller reads this on the ELF-guest path" shape as the four
+    // counters above -- the lambda guest never issues `wfi`/`wfe`, so this
+    // stays a discarded local rather than growing `DispatchLoopOutput`.
+    let mut wfi_wfe_trap_count: u64 = 0;
+    let mut entered_el2: u64 = 0;
     let mut error_buffer = [0_i8; ERROR_CAPACITY];
 
     let status = unsafe {
-        proxima_vm_run_dispatch_loop(
+        proxima_vm_run_device_dispatch_loop(
             raw_segments.as_ptr(),
             raw_segments.len(),
-            GUEST_MEMORY_SIZE,
+            guest_memory_size,
+            // this ELF-guest path always links at 0 and reads no incoming
+            // boot register; only `boot::boot_linux_kernel` (a real kernel
+            // boot) supplies a nonzero base/x0 through this same C loop.
+            0,
             entry,
+            0,
+            // sentinel: this ELF-guest path always enters at this loop's
+            // own EL1h default; only `boot::boot_edk2_firmware` passes a
+            // real CPSR through this same C loop.
+            0,
             (&raw const dispatcher).cast(),
+            (&raw mut console_transport).cast(),
+            (&raw mut net_transport).cast(),
+            (&raw mut blk_transport).cast(),
+            (&raw mut gicd_transport).cast(),
+            (&raw mut gicr_transport).cast(),
+            (&raw mut pl011_transport).cast(),
+            (&raw mut icc_transport).cast(),
             max_hypercalls,
+            // no watchdog on this ELF-guest path -- only
+            // `boot::boot_edk2_firmware` opts in.
+            0,
             emitted.as_mut_ptr(),
             emitted.len(),
             &raw mut emitted_length,
+            mmio_emitted.as_mut_ptr(),
+            mmio_emitted.len(),
+            &raw mut mmio_emitted_length,
+            net_emitted.as_mut_ptr(),
+            net_emitted.len(),
+            &raw mut net_emitted_length,
+            blk_emitted.as_mut_ptr(),
+            blk_emitted.len(),
+            &raw mut blk_emitted_length,
+            pl011_emitted.as_mut_ptr(),
+            pl011_emitted.len(),
+            &raw mut pl011_emitted_length,
+            &raw mut create_to_first_exit_nanos,
+            &raw mut touch_all_pages_nanos,
+            &raw mut mmio_trap_count,
+            &raw mut gicd_trap_count,
+            &raw mut gicr_trap_count,
+            &raw mut pl011_trap_count,
+            &raw mut virtio_trap_count,
+            &raw mut vtimer_activation_count,
+            &raw mut wfi_wfe_trap_count,
+            &raw mut entered_el2,
             error_buffer.as_mut_ptr(),
             error_buffer.len(),
         )
@@ -400,7 +592,21 @@ pub fn run_dispatch_loop(
         return Err(ProximaError::Upstream(message));
     }
     emitted.truncate(emitted_length);
-    Ok((dispatcher.requests(), emitted))
+    mmio_emitted.truncate(mmio_emitted_length);
+    net_emitted.truncate(net_emitted_length);
+    blk_emitted.truncate(blk_emitted_length);
+    pl011_emitted.truncate(pl011_emitted_length);
+    Ok((
+        dispatcher.requests(),
+        emitted,
+        mmio_emitted,
+        net_emitted,
+        blk_emitted,
+        pl011_emitted,
+        create_to_first_exit_nanos,
+        touch_all_pages_nanos,
+        mmio_trap_count,
+    ))
 }
 
 #[cfg(test)]

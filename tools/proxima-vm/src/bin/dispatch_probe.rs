@@ -26,6 +26,10 @@ use proxima_vm::elf;
 const MAX_SEGMENTS: usize = 4;
 const MAX_HYPERCALLS: usize = 16;
 const EMITTED_CAPACITY: usize = 256;
+const MMIO_EMITTED_CAPACITY: usize = 256;
+const NET_EMITTED_CAPACITY: usize = 256;
+const BLK_EMITTED_CAPACITY: usize = 2048;
+const PL011_EMITTED_CAPACITY: usize = 256;
 
 fn main() -> Result<(), Box<dyn Error>> {
     let mut arguments = env::args().skip(1);
@@ -46,15 +50,50 @@ fn main() -> Result<(), Box<dyn Error>> {
         "close" => ChildResponse::Close,
         other => return Err(format!("unknown response variant {other:?}").into()),
     };
-    let (requests, emitted) = dispatch::run_dispatch_loop(
+    let (
+        requests,
+        emitted,
+        mmio_emitted,
+        net_emitted,
+        blk_emitted,
+        pl011_emitted,
+        create_to_first_exit_nanos,
+        touch_all_pages_nanos,
+        mmio_trap_count,
+    ) = dispatch::run_dispatch_loop(
         entry,
         &segments,
         configured,
         MAX_HYPERCALLS,
         EMITTED_CAPACITY,
+        MMIO_EMITTED_CAPACITY,
+        NET_EMITTED_CAPACITY,
+        BLK_EMITTED_CAPACITY,
+        PL011_EMITTED_CAPACITY,
+        dispatch::GUEST_MEMORY_SIZE,
     )?;
 
     eprintln!("guest issued {} request(s): {requests:?}", requests.len());
+    eprintln!(
+        "guest drained {} mmio byte(s): {mmio_emitted:?}",
+        mmio_emitted.len()
+    );
+    eprintln!(
+        "guest drained {} net byte(s): {net_emitted:?}",
+        net_emitted.len()
+    );
+    eprintln!(
+        "guest drained {} blk byte(s): {blk_emitted:?}",
+        blk_emitted.len()
+    );
+    eprintln!(
+        "guest drained {} pl011 byte(s): {pl011_emitted:?}",
+        pl011_emitted.len()
+    );
+    eprintln!(
+        "m3 create_to_first_exit_nanos={create_to_first_exit_nanos} \
+         touch_all_pages_nanos={touch_all_pages_nanos} mmio_trap_count={mmio_trap_count}"
+    );
     io::stdout().write_all(&emitted)?;
     Ok(())
 }
