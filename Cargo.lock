@@ -4330,6 +4330,7 @@ dependencies = [
  "conflaguration",
  "proxima-primitives",
  "proxima-protocols",
+ "proxima-tensor",
  "serde",
  "temp-env",
  "tempfile",
