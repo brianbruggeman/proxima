@@ -1985,6 +1985,58 @@ fn window_materialize1d(program: &mut Vec<Op>, image: &Value, out_w: u64, kernel
     Value { node: windowed, shape, view: None }
 }
 
+/// Rank-5 (`[n, c, d, h, w]`) analogue of [`window_materialize`]: three
+/// spatial axes instead of two, materializing a rank-8 `[n, c, od, oh, ow,
+/// kd, kh, kw]` tensor via the same two-term `window_axis` + all-ones stamp
+/// technique -- the window machinery is axis-generic, this is the third
+/// (and, past rank 5, the pattern this crate's own convention would repeat
+/// again) fixed-spatial-rank instantiation alongside [`window_materialize1d`]
+/// and [`window_materialize`].
+#[allow(clippy::too_many_arguments)]
+fn window_materialize3d(
+    program: &mut Vec<Op>,
+    image: &Value,
+    out_d: u64,
+    out_h: u64,
+    out_w: u64,
+    kernel_d: u64,
+    kernel_h: u64,
+    kernel_w: u64,
+    stride_d: i64,
+    stride_h: i64,
+    stride_w: i64,
+    dilation_d: i64,
+    dilation_h: i64,
+    dilation_w: i64,
+) -> Value {
+    let image_pattern = IndexPattern {
+        iter_rank: 8,
+        axes: alloc::vec![
+            AxisIndex { terms: core::iter::once(AxisTerm::projection(0)).collect(), offset: 0 },
+            AxisIndex { terms: core::iter::once(AxisTerm::projection(1)).collect(), offset: 0 },
+            window_axis(2, 5, stride_d, dilation_d),
+            window_axis(3, 6, stride_h, dilation_h),
+            window_axis(4, 7, stride_w, dilation_w),
+        ],
+    };
+    let stamp = append(
+        program,
+        Op::Constant {
+            dtype: DType::Float32,
+            shape: alloc::vec![out_d, out_h, out_w, kernel_d, kernel_h, kernel_w].iter().map(|&extent| Extent::Static(extent as u32)).collect(),
+            value: 1.0,
+        },
+    );
+    let stamp_pattern = projection(8, &[2, 3, 4, 5, 6, 7]);
+    let windowed = build_elementwise(
+        program,
+        ScalarOp::Multiply,
+        alloc::vec![(image.node, IndexMap::Affine(image_pattern)), (stamp, IndexMap::Affine(stamp_pattern))],
+    );
+    let shape = alloc::vec![image.shape[0], image.shape[1], out_d, out_h, out_w, kernel_d, kernel_h, kernel_w];
+    Value { node: windowed, shape, view: None }
+}
+
 /// `Conv`, rank-3 `[n, ci, w]` image and rank-3 `[co, ci, kw]` weight
 /// (`group=1` only -- see [`lower_conv`]'s own doc for why the 2D path
 /// supports `group`; the same static channel-slice + [`concat_pair`]
@@ -2284,6 +2336,165 @@ fn conv2d_core(
     Ok(Value { node: result, shape: out_shape, view: None })
 }
 
+/// The `strides`/`dilations`/`pads` 3D `Conv`/pooling attribute sextuple --
+/// [`Conv2dAttrs`]'s three-spatial-axis mirror.
+#[derive(Debug, Clone, Copy)]
+struct Conv3dAttrs {
+    stride_d: i64,
+    stride_h: i64,
+    stride_w: i64,
+    dilation_d: i64,
+    dilation_h: i64,
+    dilation_w: i64,
+    pad_d0: i64,
+    pad_h0: i64,
+    pad_w0: i64,
+    pad_d1: i64,
+    pad_h1: i64,
+    pad_w1: i64,
+}
+
+/// [`parse_conv2d_attrs`]'s rank-5 mirror: same `auto_pad`
+/// (`NOTSET`/`VALID`/`SAME_UPPER`/`SAME_LOWER`) resolution via
+/// [`same_pad_axis`], three spatial axes instead of two. ONNX's `pads`
+/// attribute for a 3D op is `[d0, h0, w0, d1, h1, w1]` (all "begin" axes,
+/// then all "end" axes).
+fn parse_conv3d_attrs(node: &NodeProto<'_>, image_d: u64, image_h: u64, image_w: u64, kernel_d: u64, kernel_h: u64, kernel_w: u64) -> Result<Conv3dAttrs, LowerError> {
+    let name = node.name.to_string();
+    let op_type = node.op_type.to_string();
+    let strides = attr_ints_or(node, "strides", &[1, 1, 1]);
+    let dilations = attr_ints_or(node, "dilations", &[1, 1, 1]);
+    if strides.len() != 3 || dilations.len() != 3 {
+        return Err(LowerError::UnsupportedShape { name, op_type, reason: "Conv lowering supports 3D strides/dilations only".to_string() });
+    }
+    let (stride_d, stride_h, stride_w) = (strides[0], strides[1], strides[2]);
+    let (dilation_d, dilation_h, dilation_w) = (dilations[0], dilations[1], dilations[2]);
+
+    let auto_pad = attr_str(node, "auto_pad").unwrap_or(b"NOTSET");
+    let (pad_d0, pad_d1, pad_h0, pad_h1, pad_w0, pad_w1) = match auto_pad {
+        b"NOTSET" => {
+            let pads = attr_ints_or(node, "pads", &[0, 0, 0, 0, 0, 0]);
+            if pads.len() != 6 {
+                return Err(LowerError::UnsupportedShape { name, op_type, reason: "Conv lowering supports 3D pads only".to_string() });
+            }
+            (pads[0], pads[3], pads[1], pads[4], pads[2], pads[5])
+        }
+        b"VALID" => (0, 0, 0, 0, 0, 0),
+        b"SAME_UPPER" | b"SAME_LOWER" => {
+            let lower = auto_pad == b"SAME_LOWER";
+            let (d0, d1) = same_pad_axis(image_d, kernel_d, stride_d, dilation_d, lower);
+            let (h0, h1) = same_pad_axis(image_h, kernel_h, stride_h, dilation_h, lower);
+            let (w0, w1) = same_pad_axis(image_w, kernel_w, stride_w, dilation_w, lower);
+            (d0, d1, h0, h1, w0, w1)
+        }
+        _ => return Err(LowerError::UnsupportedShape { name, op_type, reason: "Conv lowering supports auto_pad NOTSET/VALID/SAME_UPPER/SAME_LOWER only".to_string() }),
+    };
+    Ok(Conv3dAttrs { stride_d, stride_h, stride_w, dilation_d, dilation_h, dilation_w, pad_d0, pad_h0, pad_w0, pad_d1, pad_h1, pad_w1 })
+}
+
+/// `Conv`, rank-5 `[n, ci, d, h, w]` image and rank-5 `[co, ci, kd, kh, kw]`
+/// weight (`group=1` only -- the same static channel-slice + [`concat_pair`]
+/// decomposition [`lower_conv`] uses for 2D applies here unchanged and is
+/// deferred only for lack of time, not a boundary). The exact rank-5 mirror
+/// of [`conv2d_core`]: [`pad_axis`] on each of the three spatial axes,
+/// [`window_materialize3d`], `Elementwise(Multiply)` against the weight,
+/// `Reduce(Add)` over `(ci, kd, kh, kw)`.
+fn conv3d_core(program: &mut Vec<Op>, node: &NodeProto<'_>, image: &Value, weight: &Value, bias: Option<&Value>, attrs: Conv3dAttrs) -> Result<Value, LowerError> {
+    let name = node.name.to_string();
+    let op_type = node.op_type.to_string();
+    let batch = image.shape[0];
+    let out_channels = weight.shape[0];
+    let (kernel_d, kernel_h, kernel_w) = (weight.shape[2], weight.shape[3], weight.shape[4]);
+
+    let padded_w = pad_axis(program, image, 4, attrs.pad_w0 as u64, attrs.pad_w1 as u64, 0.0);
+    let padded_h = pad_axis(program, &padded_w, 3, attrs.pad_h0 as u64, attrs.pad_h1 as u64, 0.0);
+    let padded = pad_axis(program, &padded_h, 2, attrs.pad_d0 as u64, attrs.pad_d1 as u64, 0.0);
+
+    let out_d = conv_output_extent(padded.shape[2], kernel_d, attrs.stride_d, attrs.dilation_d)
+        .ok_or_else(|| LowerError::UnsupportedShape { name: name.clone(), op_type: op_type.clone(), reason: "Conv kernel does not fit the padded image depth".to_string() })?;
+    let out_h = conv_output_extent(padded.shape[3], kernel_h, attrs.stride_h, attrs.dilation_h)
+        .ok_or_else(|| LowerError::UnsupportedShape { name: name.clone(), op_type: op_type.clone(), reason: "Conv kernel does not fit the padded image height".to_string() })?;
+    let out_w = conv_output_extent(padded.shape[4], kernel_w, attrs.stride_w, attrs.dilation_w)
+        .ok_or_else(|| LowerError::UnsupportedShape { name: name.clone(), op_type: op_type.clone(), reason: "Conv kernel does not fit the padded image width".to_string() })?;
+
+    let windowed = window_materialize3d(
+        program,
+        &padded,
+        out_d,
+        out_h,
+        out_w,
+        kernel_d,
+        kernel_h,
+        kernel_w,
+        attrs.stride_d,
+        attrs.stride_h,
+        attrs.stride_w,
+        attrs.dilation_d,
+        attrs.dilation_h,
+        attrs.dilation_w,
+    );
+
+    // shared iteration space: 0=n 1=co 2=od 3=oh 4=ow 5=ci 6=kd 7=kh 8=kw
+    let windowed_pattern = projection(9, &[0, 5, 2, 3, 4, 6, 7, 8]);
+    let weight_pattern = projection(9, &[1, 5, 6, 7, 8]);
+    let product = build_elementwise(
+        program,
+        ScalarOp::Multiply,
+        alloc::vec![(windowed.node, IndexMap::Affine(windowed_pattern)), (weight.node, IndexMap::Affine(weight_pattern))],
+    );
+
+    let out_shape = alloc::vec![batch, out_channels, out_d, out_h, out_w];
+    let reduced = build_reduce(program, ScalarOp::Add, ReduceInit::Zero, product, identity_pattern(9), projection(9, &[0, 1, 2, 3, 4]), Some("conv3d".to_string()));
+
+    let result = match bias {
+        Some(bias) => {
+            if bias.shape != alloc::vec![out_channels] {
+                return Err(LowerError::UnsupportedShape { name, op_type, reason: "Conv bias must be a rank-1 tensor sized to out_channels".to_string() });
+            }
+            build_elementwise(
+                program,
+                ScalarOp::Add,
+                alloc::vec![(reduced, IndexMap::Affine(identity_pattern(5))), (bias.node, IndexMap::Affine(projection(5, &[1])))],
+            )
+        }
+        None => reduced,
+    };
+    Ok(Value { node: result, shape: out_shape, view: None })
+}
+
+/// `Conv`, rank-5 (`group=1` only): parses attrs, validates channels, and
+/// calls [`conv3d_core`] -- [`lower_conv1d`]'s rank-5 sibling, called from
+/// [`lower_conv`]'s rank dispatch.
+fn lower_conv3d(program: &mut Vec<Op>, values: &mut BTreeMap<String, Value>, node: &NodeProto<'_>) -> Result<(), LowerError> {
+    let image = lookup(values, node, 0)?.clone();
+    let weight = lookup(values, node, 1)?.clone();
+    let name = node.name.to_string();
+    let op_type = node.op_type.to_string();
+
+    let group = attr_int(node, "group").unwrap_or(1);
+    if group != 1 {
+        return Err(LowerError::UnsupportedShape { name, op_type, reason: "Conv3d lowering supports group=1 only (grouped Conv3d deferred)".to_string() });
+    }
+
+    let in_channels = image.shape[1];
+    if weight.shape[1] != in_channels {
+        return Err(LowerError::UnsupportedShape {
+            name: node.name.to_string(),
+            op_type: node.op_type.to_string(),
+            reason: format!("Conv3d weight in-channels {} does not match image channels {in_channels}", weight.shape[1]),
+        });
+    }
+
+    let attrs = parse_conv3d_attrs(node, image.shape[2], image.shape[3], image.shape[4], weight.shape[2], weight.shape[3], weight.shape[4])?;
+    let bias = match node.input.get(2) {
+        Some(bias_name) => Some(lookup_by_name(values, bias_name, node.op_type, node.name)?.clone()),
+        None => None,
+    };
+    let result = conv3d_core(program, node, &image, &weight, bias.as_ref(), attrs)?;
+    bind_output(values, node, 0, result.node, result.shape);
+    Ok(())
+}
+
 /// `Conv`, `group >= 1`: `group=1` calls [`conv2d_core`] directly; `group > 1`
 /// decomposes into `group` independent [`conv2d_core`] calls, each over a
 /// static, in-bounds channel *slice* ([`slice_axis_range`]) of the image
@@ -2308,12 +2519,15 @@ fn lower_conv(program: &mut Vec<Op>, values: &mut BTreeMap<String, Value>, node:
     if image.shape.len() == 3 && weight.shape.len() == 3 {
         return lower_conv1d(program, values, node);
     }
+    if image.shape.len() == 5 && weight.shape.len() == 5 {
+        return lower_conv3d(program, values, node);
+    }
 
     if image.shape.len() != 4 || weight.shape.len() != 4 {
         return Err(LowerError::UnsupportedShape {
             name,
             op_type,
-            reason: "Conv lowering supports 1D convolution (rank-3 NCW image/CoCiKw weight) or 2D convolution (rank-4 NCHW image, rank-4 CoCiKhKw weight) only".to_string(),
+            reason: "Conv lowering supports 1D convolution (rank-3 NCW image/CoCiKw weight), 2D convolution (rank-4 NCHW image, rank-4 CoCiKhKw weight), or 3D convolution (rank-5 NCDHW image, rank-5 CoCiKdKhKw weight) only".to_string(),
         });
     }
     let group = attr_int(node, "group").unwrap_or(1);
@@ -2487,10 +2701,13 @@ fn plan_pool(program: &mut Vec<Op>, node: &NodeProto<'_>, image: &Value, fill: f
 /// never `NaN`, is what makes the padding value safe to carry through
 /// [`window_materialize`]'s multiply).
 ///
-/// Deferred: rank other than 4 (1D/3D `MaxPool`), `storage_order`,
+/// Deferred: rank other than 4 or 5 (1D `MaxPool`), `storage_order`,
 /// `ceil_mode`, indices output (`Y` only, never the optional `Indices`).
 fn lower_maxpool(program: &mut Vec<Op>, values: &mut BTreeMap<String, Value>, node: &NodeProto<'_>) -> Result<(), LowerError> {
     let image = lookup(values, node, 0)?.clone();
+    if image.shape.len() == 5 {
+        return lower_maxpool3d(program, values, node);
+    }
     let plan = plan_pool(program, node, &image, f32::NEG_INFINITY)?;
     let windowed = window_materialize(
         program,
@@ -2528,6 +2745,10 @@ fn lower_maxpool(program: &mut Vec<Op>, values: &mut BTreeMap<String, Value>, no
 /// position valid-count divisor this composition does not yet build, not a
 /// silently wrong average.
 fn lower_averagepool(program: &mut Vec<Op>, values: &mut BTreeMap<String, Value>, node: &NodeProto<'_>) -> Result<(), LowerError> {
+    let image = lookup(values, node, 0)?.clone();
+    if image.shape.len() == 5 {
+        return lower_averagepool3d(program, values, node);
+    }
     let count_include_pad = attr_int(node, "count_include_pad").unwrap_or(0);
     let has_nonzero_pad = attr_ints(node, "pads").is_some_and(|pads| pads.iter().any(|&value| value != 0));
     if has_nonzero_pad && count_include_pad == 0 {
@@ -2537,7 +2758,6 @@ fn lower_averagepool(program: &mut Vec<Op>, values: &mut BTreeMap<String, Value>
             reason: "AveragePool lowering supports nonzero pads only with count_include_pad=1 (the ONNX default excludes padding from the divisor, which needs a per-position valid-count divisor not yet composed)".to_string(),
         });
     }
-    let image = lookup(values, node, 0)?.clone();
     let plan = plan_pool(program, node, &image, 0.0)?;
     let windowed = window_materialize(
         program,
@@ -2568,6 +2788,162 @@ fn lower_averagepool(program: &mut Vec<Op>, values: &mut BTreeMap<String, Value>
         program,
         ScalarOp::Multiply,
         alloc::vec![(summed, IndexMap::Affine(identity_pattern(4))), (inverse, IndexMap::Affine(scalar_broadcast_pattern(4)))],
+    );
+    bind_output(values, node, 0, result, plan.out_shape);
+    Ok(())
+}
+
+/// [`PoolPlan`]'s rank-5 mirror -- three spatial axes instead of two.
+struct PoolPlan3d {
+    padded: Value,
+    kernel_d: u64,
+    kernel_h: u64,
+    kernel_w: u64,
+    stride_d: i64,
+    stride_h: i64,
+    stride_w: i64,
+    dilation_d: i64,
+    dilation_h: i64,
+    dilation_w: i64,
+    out_shape: Vec<u64>,
+}
+
+/// [`plan_pool`]'s rank-5 mirror: same `kernel_shape`/`strides`/
+/// `dilations`/`pads`/`auto_pad` resolution (via [`parse_conv3d_attrs`]'s
+/// `pads`-ordering convention), three spatial axes instead of two.
+fn plan_pool3d(program: &mut Vec<Op>, node: &NodeProto<'_>, image: &Value, fill: f32) -> Result<PoolPlan3d, LowerError> {
+    let kernel_shape = attr_ints(node, "kernel_shape").ok_or_else(|| LowerError::UnsupportedShape {
+        name: node.name.to_string(),
+        op_type: node.op_type.to_string(),
+        reason: format!("{} requires a kernel_shape attribute", node.op_type),
+    })?;
+    if kernel_shape.len() != 3 {
+        return Err(LowerError::UnsupportedShape {
+            name: node.name.to_string(),
+            op_type: node.op_type.to_string(),
+            reason: format!("{} lowering supports 2D or 3D pooling only", node.op_type),
+        });
+    }
+    let (kernel_d, kernel_h, kernel_w) = (kernel_shape[0] as u64, kernel_shape[1] as u64, kernel_shape[2] as u64);
+
+    let attrs = parse_conv3d_attrs(node, image.shape[2], image.shape[3], image.shape[4], kernel_d, kernel_h, kernel_w)?;
+
+    let padded_w = pad_axis(program, image, 4, attrs.pad_w0 as u64, attrs.pad_w1 as u64, fill);
+    let padded_h = pad_axis(program, &padded_w, 3, attrs.pad_h0 as u64, attrs.pad_h1 as u64, fill);
+    let padded = pad_axis(program, &padded_h, 2, attrs.pad_d0 as u64, attrs.pad_d1 as u64, fill);
+
+    let out_d = conv_output_extent(padded.shape[2], kernel_d, attrs.stride_d, attrs.dilation_d).ok_or_else(|| LowerError::UnsupportedShape {
+        name: node.name.to_string(),
+        op_type: node.op_type.to_string(),
+        reason: format!("{} kernel does not fit the padded input depth", node.op_type),
+    })?;
+    let out_h = conv_output_extent(padded.shape[3], kernel_h, attrs.stride_h, attrs.dilation_h).ok_or_else(|| LowerError::UnsupportedShape {
+        name: node.name.to_string(),
+        op_type: node.op_type.to_string(),
+        reason: format!("{} kernel does not fit the padded input height", node.op_type),
+    })?;
+    let out_w = conv_output_extent(padded.shape[4], kernel_w, attrs.stride_w, attrs.dilation_w).ok_or_else(|| LowerError::UnsupportedShape {
+        name: node.name.to_string(),
+        op_type: node.op_type.to_string(),
+        reason: format!("{} kernel does not fit the padded input width", node.op_type),
+    })?;
+
+    let out_shape = alloc::vec![image.shape[0], image.shape[1], out_d, out_h, out_w];
+    Ok(PoolPlan3d {
+        padded,
+        kernel_d,
+        kernel_h,
+        kernel_w,
+        stride_d: attrs.stride_d,
+        stride_h: attrs.stride_h,
+        stride_w: attrs.stride_w,
+        dilation_d: attrs.dilation_d,
+        dilation_h: attrs.dilation_h,
+        dilation_w: attrs.dilation_w,
+        out_shape,
+    })
+}
+
+/// `MaxPool`, rank-5 (3D): [`lower_maxpool`]'s rank-5 mirror, called from
+/// its rank dispatch.
+fn lower_maxpool3d(program: &mut Vec<Op>, values: &mut BTreeMap<String, Value>, node: &NodeProto<'_>) -> Result<(), LowerError> {
+    let image = lookup(values, node, 0)?.clone();
+    let plan = plan_pool3d(program, node, &image, f32::NEG_INFINITY)?;
+    let windowed = window_materialize3d(
+        program,
+        &plan.padded,
+        plan.out_shape[2],
+        plan.out_shape[3],
+        plan.out_shape[4],
+        plan.kernel_d,
+        plan.kernel_h,
+        plan.kernel_w,
+        plan.stride_d,
+        plan.stride_h,
+        plan.stride_w,
+        plan.dilation_d,
+        plan.dilation_h,
+        plan.dilation_w,
+    );
+    let result = build_reduce(
+        program,
+        ScalarOp::Maximum,
+        ReduceInit::NegativeInfinity,
+        windowed.node,
+        identity_pattern(8),
+        projection(8, &[0, 1, 2, 3, 4]),
+        Some("maxpool3d".to_string()),
+    );
+    bind_output(values, node, 0, result, plan.out_shape);
+    Ok(())
+}
+
+/// `AveragePool`, rank-5 (3D): [`lower_averagepool`]'s rank-5 mirror, called
+/// from its rank dispatch. Same `count_include_pad`/nonzero-`pads`
+/// restriction as the 2D path -- see [`lower_averagepool`]'s own doc.
+fn lower_averagepool3d(program: &mut Vec<Op>, values: &mut BTreeMap<String, Value>, node: &NodeProto<'_>) -> Result<(), LowerError> {
+    let count_include_pad = attr_int(node, "count_include_pad").unwrap_or(0);
+    let has_nonzero_pad = attr_ints(node, "pads").is_some_and(|pads| pads.iter().any(|&value| value != 0));
+    if has_nonzero_pad && count_include_pad == 0 {
+        return Err(LowerError::UnsupportedShape {
+            name: node.name.to_string(),
+            op_type: node.op_type.to_string(),
+            reason: "AveragePool lowering supports nonzero pads only with count_include_pad=1 (the ONNX default excludes padding from the divisor, which needs a per-position valid-count divisor not yet composed)".to_string(),
+        });
+    }
+    let image = lookup(values, node, 0)?.clone();
+    let plan = plan_pool3d(program, node, &image, 0.0)?;
+    let windowed = window_materialize3d(
+        program,
+        &plan.padded,
+        plan.out_shape[2],
+        plan.out_shape[3],
+        plan.out_shape[4],
+        plan.kernel_d,
+        plan.kernel_h,
+        plan.kernel_w,
+        plan.stride_d,
+        plan.stride_h,
+        plan.stride_w,
+        plan.dilation_d,
+        plan.dilation_h,
+        plan.dilation_w,
+    );
+    let summed = build_reduce(
+        program,
+        ScalarOp::Add,
+        ReduceInit::Zero,
+        windowed.node,
+        identity_pattern(8),
+        projection(8, &[0, 1, 2, 3, 4]),
+        Some("averagepool3d".to_string()),
+    );
+    let window_size = (plan.kernel_d * plan.kernel_h * plan.kernel_w) as f32;
+    let inverse = constant_scalar(program, 1.0 / window_size);
+    let result = build_elementwise(
+        program,
+        ScalarOp::Multiply,
+        alloc::vec![(summed, IndexMap::Affine(identity_pattern(5))), (inverse, IndexMap::Affine(scalar_broadcast_pattern(5)))],
     );
     bind_output(values, node, 0, result, plan.out_shape);
     Ok(())
@@ -3893,5 +4269,96 @@ mod tests {
         // channel 0: [1,2,3,4] * kernel [1,1] -> [3,5,7]; channel 1: [10,20,30,40] * kernel [2,2] -> [60,100,140]
         assert_eq!(shape, &[1, 2, 3]);
         assert_eq!(data, &[3.0, 5.0, 7.0, 60.0, 100.0, 140.0], "each group convolves its own channel with its own kernel");
+    }
+
+    /// `Conv`, rank-5 (3D), stride 1, no padding: [`lower_conv3d`]'s rank-5
+    /// mirror of [`conv2d_core`] -- a `2`-deep all-ones kernel sliding over a
+    /// `3`-deep, otherwise unit, signal is a 2-wide sliding-window sum along
+    /// the depth axis, hand-verified.
+    #[test]
+    fn conv3d_stride1_no_pad_sums_each_2_deep_window() {
+        let image = f32_initializer("image", &[1, 1, 3, 1, 1], &[1.0, 2.0, 3.0]);
+        let weight = f32_initializer("weight", &[1, 1, 2, 1, 1], &[1.0, 1.0]);
+        let node = NodeProto { input: vec!["image", "weight"], output: vec!["y"], op_type: "Conv", name: "conv3d", ..NodeProto::default() };
+        let graph = GraphProto {
+            node: vec![node],
+            name: "conv3d_stride1_graph",
+            initializer: vec![image, weight],
+            output: vec![ValueInfoProto { name: "y", ..ValueInfoProto::default() }],
+            ..GraphProto::default()
+        };
+
+        let lowered = lower_graph(&graph).expect("lower Conv3d");
+        let named: Vec<(&str, &[f32])> = lowered.initializers.iter().map(|(name, data)| (name.as_str(), data.as_slice())).collect();
+        let output = lowered.graph_outputs[0].1;
+        let evaluated = evaluate_named(&lowered.program, &[], &named, &[output]).expect("evaluate Conv3d");
+        let (data, shape) = evaluated.get(output).expect("y present");
+
+        assert_eq!(shape, &[1, 1, 2, 1, 1]);
+        assert_eq!(data, &[3.0, 5.0], "hand-summed 2-deep windows over the depth axis [1,2,3]");
+    }
+
+    /// `MaxPool`, rank-5 (3D): [`lower_maxpool3d`]'s rank-5 mirror of
+    /// [`lower_maxpool`] -- a 2-deep window sliding over a 3-deep signal
+    /// takes the max of each adjacent pair, hand-verified.
+    #[test]
+    fn maxpool3d_takes_the_max_of_each_2_deep_window() {
+        let image = f32_initializer("image", &[1, 1, 3, 1, 1], &[1.0, 3.0, 2.0]);
+        let node = NodeProto {
+            input: vec!["image"],
+            output: vec!["y"],
+            op_type: "MaxPool",
+            name: "maxpool3d",
+            attribute: vec![ints_attribute("kernel_shape", vec![2, 1, 1])],
+            ..NodeProto::default()
+        };
+        let graph = GraphProto {
+            node: vec![node],
+            name: "maxpool3d_graph",
+            initializer: vec![image],
+            output: vec![ValueInfoProto { name: "y", ..ValueInfoProto::default() }],
+            ..GraphProto::default()
+        };
+
+        let lowered = lower_graph(&graph).expect("lower MaxPool3d");
+        let named: Vec<(&str, &[f32])> = lowered.initializers.iter().map(|(name, data)| (name.as_str(), data.as_slice())).collect();
+        let output = lowered.graph_outputs[0].1;
+        let evaluated = evaluate_named(&lowered.program, &[], &named, &[output]).expect("evaluate MaxPool3d");
+        let (data, shape) = evaluated.get(output).expect("y present");
+
+        assert_eq!(shape, &[1, 1, 2, 1, 1]);
+        assert_eq!(data, &[3.0, 3.0], "max of each 2-deep window over [1,3,2]: max(1,3)=3, max(3,2)=3");
+    }
+
+    /// `AveragePool`, rank-5 (3D): [`lower_averagepool3d`]'s rank-5 mirror
+    /// of [`lower_averagepool`] -- a 2-deep window sliding over a 3-deep
+    /// signal takes the mean of each adjacent pair, hand-verified.
+    #[test]
+    fn averagepool3d_takes_the_mean_of_each_2_deep_window() {
+        let image = f32_initializer("image", &[1, 1, 3, 1, 1], &[1.0, 3.0, 5.0]);
+        let node = NodeProto {
+            input: vec!["image"],
+            output: vec!["y"],
+            op_type: "AveragePool",
+            name: "averagepool3d",
+            attribute: vec![ints_attribute("kernel_shape", vec![2, 1, 1])],
+            ..NodeProto::default()
+        };
+        let graph = GraphProto {
+            node: vec![node],
+            name: "averagepool3d_graph",
+            initializer: vec![image],
+            output: vec![ValueInfoProto { name: "y", ..ValueInfoProto::default() }],
+            ..GraphProto::default()
+        };
+
+        let lowered = lower_graph(&graph).expect("lower AveragePool3d");
+        let named: Vec<(&str, &[f32])> = lowered.initializers.iter().map(|(name, data)| (name.as_str(), data.as_slice())).collect();
+        let output = lowered.graph_outputs[0].1;
+        let evaluated = evaluate_named(&lowered.program, &[], &named, &[output]).expect("evaluate AveragePool3d");
+        let (data, shape) = evaluated.get(output).expect("y present");
+
+        assert_eq!(shape, &[1, 1, 2, 1, 1]);
+        assert_eq!(data, &[2.0, 4.0], "mean of each 2-deep window over [1,3,5]: (1+3)/2=2, (3+5)/2=4");
     }
 }
