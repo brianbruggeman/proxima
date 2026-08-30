@@ -307,6 +307,12 @@ fn prepare<'block>(
     } else {
         outputs.to_vec()
     };
+    // a node the structural pass above exempted as an unreferenced dead leaf
+    // can still be exactly what THIS call asked to get back — see
+    // `reject_non_float32_outputs`'s own doc for why that stays a separate,
+    // always-run, per-call check rather than folding `outputs` into the
+    // cached pass above.
+    reject_non_float32_outputs(program, &BTreeSet::new(), &effective_outputs)?;
 
     let block_nodes = block_node_ids(program);
     if blocks.len() != block_nodes.len() {
@@ -625,12 +631,6 @@ pub fn evaluate_quantized_with_scratch(
         }
     }
 
-    let quantized_weight_nodes: BTreeSet<NodeId> = quantized_weights.keys().copied().collect();
-    if validated_weight_nodes.as_ref() != Some(&quantized_weight_nodes) {
-        reject_non_float32(program, &quantized_weight_nodes)?;
-        *validated_weight_nodes = Some(quantized_weight_nodes);
-    }
-
     let root = program
         .len()
         .checked_sub(1)
@@ -646,6 +646,16 @@ pub fn evaluate_quantized_with_scratch(
     } else {
         outputs.to_vec()
     };
+
+    let quantized_weight_nodes: BTreeSet<NodeId> = quantized_weights.keys().copied().collect();
+    if validated_weight_nodes.as_ref() != Some(&quantized_weight_nodes) {
+        reject_non_float32(program, &quantized_weight_nodes)?;
+        // cloned, not moved: the outputs-only check right below still needs
+        // its own copy of this same set — see `reject_non_float32_outputs`'s
+        // own doc for why that check cannot ride this cache.
+        *validated_weight_nodes = Some(quantized_weight_nodes.clone());
+    }
+    reject_non_float32_outputs(program, &quantized_weight_nodes, &effective_outputs)?;
 
     let resolved = bind::bind(program, &shapes, &effective_outputs)?;
     let retires = node_retirement(&resolved, &effective_outputs);
@@ -1816,8 +1826,63 @@ fn block_node_ids(program: &[Op]) -> Vec<NodeId> {
 // tile is the remaining integration work this does not yet do.
 fn reject_non_float32(program: &[Op], quantized_weights: &BTreeSet<NodeId>) -> Result<(), TensorError> {
     let index_nodes = index_node_ids(program);
+    let referenced_nodes = referenced_node_ids(program);
     for (position, expr) in program.iter().enumerate() {
         let node = NodeId(position as u32);
+        let is_quantized_weight = quantized_weights.contains(&node) && is_quantized_matmul_operand(program, node);
+        // an `Op::Input` `bind::BoundOpBuilder::push` never materializes into
+        // a `BoundOp` (see that match arm's own `Op::Input { .. } => {}`) —
+        // it is a pure buffer handle, read directly by whichever node
+        // references it, never itself run through `run_node_into`. So an
+        // `Input` nothing in `program` references (an ONNX initializer for a
+        // shape/index tensor no lowered op still reads, e.g.) can never
+        // reach this f32-only interpreter's kernels regardless of its dtype
+        // — unlike every other `Op` variant, which `push`/`finish` always
+        // materialize into `resolved` and the evaluator's node loop always
+        // runs, dead code or not (see `BoundOpBuilder::finish`'s own doc:
+        // "either a requested output or dead code, and either way it
+        // materializes"). A *referenced* non-float32 `Input` still feeds a
+        // node that IS unconditionally evaluated, so it stays rejected.
+        let is_unreferenced_input = matches!(expr, Op::Input { .. }) && !referenced_nodes.contains(&node);
+        if expr.dtype() != DType::Float32
+            && !index_nodes.contains(&node)
+            && !is_quantized_weight
+            && !is_unreferenced_input
+        {
+            return Err(TensorError::NotLowerable {
+                node,
+                reason: "this pipeline's buffers and SIMD kernels are f32-only; route a \
+                         non-float32 elementwise program through evaluate_typed instead",
+            });
+        }
+    }
+    Ok(())
+}
+
+/// [`reject_non_float32`]'s dead-leaf exemption is deliberately
+/// output-independent — a node's own connectivity to the rest of `program`,
+/// nothing about which nodes a given call happens to request — so its
+/// result stays valid for [`evaluate_quantized_with_scratch`]'s
+/// `validated_weight_nodes` cache across calls whose `outputs` differ, not
+/// only calls whose `quantized_weights` differ. But a caller CAN request an
+/// otherwise-dead non-`Float32` `Input` directly as an output (this f32-only
+/// pipeline still cannot honor that: its own `blocks`/`named` parameters
+/// carry no non-`Float32` view for `evaluate`/`evaluate_named` to hand back
+/// out, and `evaluate_quantized`'s `QuantizedBlock` non-`Float32` variants
+/// are reserved for the matmul-weight shape [`is_quantized_matmul_operand`]
+/// recognizes, not a passthrough return value), so this cheap,
+/// always-run-per-call, `O(outputs.len())`-plus-one-scan check closes that
+/// gap without folding `outputs` into the cached structural pass above.
+fn reject_non_float32_outputs(
+    program: &[Op],
+    quantized_weights: &BTreeSet<NodeId>,
+    outputs: &[NodeId],
+) -> Result<(), TensorError> {
+    let index_nodes = index_node_ids(program);
+    for &node in outputs {
+        let Some(expr) = program.get(node.0 as usize) else {
+            continue;
+        };
         let is_quantized_weight = quantized_weights.contains(&node) && is_quantized_matmul_operand(program, node);
         if expr.dtype() != DType::Float32 && !index_nodes.contains(&node) && !is_quantized_weight {
             return Err(TensorError::NotLowerable {
@@ -1828,6 +1893,34 @@ fn reject_non_float32(program: &[Op], quantized_weights: &BTreeSet<NodeId>) -> R
         }
     }
     Ok(())
+}
+
+/// Every node referenced anywhere in `program` as an `Elementwise` operand, a
+/// `Reduce`'s own operand, or either map's computed `indices` — the
+/// complement of the set an `Op::Input` must fall outside of for
+/// [`reject_non_float32`]'s dead-leaf exemption: a node in this set feeds
+/// some other node that [`bind::BoundOpBuilder`] always materializes into a
+/// [`BoundOp`](crate::bind::BoundOp), so its dtype still matters even when
+/// that consumer is itself unreachable from any requested output.
+fn referenced_node_ids(program: &[Op]) -> BTreeSet<NodeId> {
+    let mut nodes = BTreeSet::new();
+    for expr in program {
+        match expr {
+            Op::Input { .. } | Op::Iota { .. } | Op::Constant { .. } => {}
+            Op::Elementwise { operands, .. } => {
+                for (operand, map) in operands {
+                    nodes.insert(*operand);
+                    push_indices_node(map, &mut nodes);
+                }
+            }
+            Op::Reduce(fold) => {
+                nodes.insert(fold.operand);
+                push_indices_node(&fold.in_map, &mut nodes);
+                push_indices_node(&fold.out_map, &mut nodes);
+            }
+        }
+    }
+    nodes
 }
 
 /// Whether `node` appears, anywhere in `program`, ONLY as one operand of a
@@ -12170,6 +12263,86 @@ mod tests {
         assert!(
             reject_non_float32(&program, &exempt).is_err(),
             "a quantized node reduced directly (no Multiply) is not the matmul shape and must stay rejected"
+        );
+    }
+
+    /// The dead-leaf exemption's whole point: an ONNX-shaped program where an
+    /// `Int64` `Op::Input` (standing in for a `Reshape`'s shape initializer)
+    /// is never read by anything else in `program` must still evaluate its
+    /// all-`Float32` output cone — reproduces the onnx-model failure this
+    /// exemption exists for, first as `reject_non_float32` directly (the
+    /// root cause), then through the real `evaluate_named` entry point (the
+    /// user-visible symptom).
+    #[test]
+    fn reject_non_float32_exempts_an_unreferenced_non_float32_input() {
+        let mut program = Vec::new();
+        let _dead_shape_leaf = append(
+            &mut program,
+            Op::Input {
+                dtype: DType::Int64,
+                shape: vec![Extent::Static(2)],
+                name: Some(String::from("reshape_shape")),
+            },
+        );
+        let activation = append(
+            &mut program,
+            Op::Input {
+                dtype: DType::Float32,
+                shape: vec![Extent::Static(4)],
+                name: Some(String::from("activation")),
+            },
+        );
+
+        assert!(
+            reject_non_float32(&program, &BTreeSet::new()).is_ok(),
+            "an Int64 Input that nothing in the program reads can never reach the f32-only \
+             kernels, so it must not fail the gate"
+        );
+
+        // `reshape_shape`'s two Int64 elements are never read as f32 data —
+        // `evaluate_named` only needs *a* binding for every `Op::Input`, not
+        // one whose bit pattern is meaningful, since the dead leaf's buffer
+        // is never handed to a kernel.
+        let evaluated = evaluate_named(
+            &program,
+            &[],
+            &[("reshape_shape", &[0.0, 0.0]), ("activation", &[1.0, 2.0, 3.0, 4.0])],
+            &[activation],
+        )
+        .expect("an all-f32 output cone must evaluate even with a dead non-f32 leaf present");
+        let (data, _shape) = evaluated.get(activation).expect("activation must be a resolved output");
+        assert_eq!(data, [1.0, 2.0, 3.0, 4.0].as_slice());
+    }
+
+    /// The other half of the same contract: a non-`Float32` `Op::Input` that
+    /// IS referenced (here, added into an otherwise-`Float32` elementwise
+    /// chain) still reaches `run_node_into`'s f32-only kernels regardless of
+    /// output reachability — `BoundOpBuilder::finish`'s own doc is explicit
+    /// that a held elementwise op materializes "either [as] a requested
+    /// output or dead code" — so it must still be rejected, proving the
+    /// dead-leaf exemption did not widen into "any Input is exempt."
+    #[test]
+    fn reject_non_float32_still_rejects_a_referenced_non_float32_input() {
+        let mut program = Vec::new();
+        let stray_int_leaf = block(&mut program, DType::Int64, &[Extent::Static(4)]);
+        let activation = f32_block(&mut program, &[Extent::Static(4)]);
+        append(
+            &mut program,
+            Op::Elementwise {
+                dtype: DType::Float32,
+                body: ScalarOp::Add,
+                operands: vec![
+                    (stray_int_leaf, IndexMap::Affine(map::projection(1, &[0]))),
+                    (activation, IndexMap::Affine(map::projection(1, &[0]))),
+                ],
+                name: None,
+            },
+        );
+
+        assert!(
+            reject_non_float32(&program, &BTreeSet::new()).is_err(),
+            "an Int64 Input consumed by a live Elementwise operand still reaches the \
+             f32-only kernels and must stay rejected"
         );
     }
 
