@@ -1736,11 +1736,6 @@ fn lower_convtranspose(program: &mut Vec<Op>, values: &mut BTreeMap<String, Valu
     if image.shape.len() != 4 || weight.shape.len() != 4 {
         return Err(LowerError::UnsupportedShape { name, op_type, reason: "ConvTranspose lowering supports 2D (rank-4 NCHW image, rank-4 CiCoKhKw weight) only".to_string() });
     }
-    if let Some(auto_pad) = attr_str(node, "auto_pad")
-        && auto_pad != b"NOTSET"
-    {
-        return Err(LowerError::UnsupportedShape { name, op_type, reason: "ConvTranspose lowering supports auto_pad=NOTSET only".to_string() });
-    }
     let group = attr_int(node, "group").unwrap_or(1);
     if group < 1 {
         return Err(LowerError::UnsupportedShape { name, op_type, reason: "ConvTranspose group attribute must be >= 1".to_string() });
@@ -1751,13 +1746,11 @@ fn lower_convtranspose(program: &mut Vec<Op>, values: &mut BTreeMap<String, Valu
     }
     let strides = attr_ints_or(node, "strides", &[1, 1]);
     let dilations = attr_ints_or(node, "dilations", &[1, 1]);
-    let pads = attr_ints_or(node, "pads", &[0, 0, 0, 0]);
-    if strides.len() != 2 || dilations.len() != 2 || pads.len() != 4 {
-        return Err(LowerError::UnsupportedShape { name, op_type, reason: "ConvTranspose lowering supports 2D strides/dilations/pads only".to_string() });
+    if strides.len() != 2 || dilations.len() != 2 {
+        return Err(LowerError::UnsupportedShape { name, op_type, reason: "ConvTranspose lowering supports 2D strides/dilations only".to_string() });
     }
     let (stride_h, stride_w) = (strides[0], strides[1]);
     let (dilation_h, dilation_w) = (dilations[0], dilations[1]);
-    let (pad_top, pad_left, pad_bottom, pad_right) = (pads[0], pads[1], pads[2], pads[3]);
 
     // ONNX ConvTranspose weight layout is `[C, M/group, kH, kW]` -- unlike
     // ordinary `Conv`'s `[M, C/group, kH, kW]`, axis 0 is already the FULL
@@ -1774,6 +1767,7 @@ fn lower_convtranspose(program: &mut Vec<Op>, values: &mut BTreeMap<String, Valu
     let total_out_channels = out_channels_per_group * group;
     let kernel_h = weight.shape[2];
     let kernel_w = weight.shape[3];
+    let (pad_top, pad_left, pad_bottom, pad_right) = parse_convtranspose2d_pads(node, kernel_h, kernel_w, stride_h, stride_w, dilation_h, dilation_w)?;
 
     if weight_in_channels != in_channels {
         return Err(LowerError::UnsupportedShape {
@@ -2248,6 +2242,70 @@ fn same_pad_axis(input_extent: u64, kernel_extent: u64, stride: i64, dilation: i
     let small = needed / 2;
     let large = needed - small;
     if lower { (large as i64, small as i64) } else { (small as i64, large as i64) }
+}
+
+/// [`same_pad_axis`]'s `ConvTranspose` sibling: the ONNX `ConvTranspose`
+/// `auto_pad` rule is `total_padding[i] = stride[i]*(in[i]-1) +
+/// output_padding[i] + ((kernel[i]-1)*dilation[i]+1) - output[i]`, with
+/// `output[i] = in[i]*stride[i]` when no explicit `output_shape` is given
+/// (this module never lowers one -- see [`lower_convtranspose`]'s own
+/// `output_padding` rejection). Substituting collapses the `in[i]` term
+/// entirely: `total_padding[i] = ((kernel[i]-1)*dilation[i]+1) -
+/// stride[i]`, independent of the input extent -- still the same
+/// even/odd-split-by-`lower` composition [`same_pad_axis`] already builds,
+/// just a different total. A negative total (kernel span smaller than
+/// stride) is a crop [`pad_axis`]'s `u64` before/after cannot express, so
+/// the caller turns that into a named [`LowerError::UnsupportedShape`]
+/// rather than wrapping to a huge padding.
+fn same_pad_axis_convtranspose(kernel_extent: u64, stride: i64, dilation: i64, lower: bool) -> Option<(i64, i64)> {
+    let span = (dilation as u64) * kernel_extent.saturating_sub(1) + 1;
+    let total = span as i64 - stride;
+    if total < 0 {
+        return None;
+    }
+    let small = total / 2;
+    let large = total - small;
+    Some(if lower { (large, small) } else { (small, large) })
+}
+
+/// `ConvTranspose`'s `strides`/`dilations`/`auto_pad` resolution --
+/// [`parse_conv2d_attrs`]'s sibling, sharing its `NOTSET`/`VALID`
+/// explicit-`pads` handling verbatim and swapping in
+/// [`same_pad_axis_convtranspose`] for `SAME_UPPER`/`SAME_LOWER` (ordinary
+/// `Conv`'s forward `same_pad_axis` computes the wrong total for the
+/// transposed relation -- see that function's own doc).
+#[allow(clippy::too_many_arguments)]
+fn parse_convtranspose2d_pads(
+    node: &NodeProto<'_>,
+    kernel_h: u64,
+    kernel_w: u64,
+    stride_h: i64,
+    stride_w: i64,
+    dilation_h: i64,
+    dilation_w: i64,
+) -> Result<(i64, i64, i64, i64), LowerError> {
+    let name = node.name.to_string();
+    let op_type = node.op_type.to_string();
+    let auto_pad = attr_str(node, "auto_pad").unwrap_or(b"NOTSET");
+    match auto_pad {
+        b"NOTSET" => {
+            let pads = attr_ints_or(node, "pads", &[0, 0, 0, 0]);
+            if pads.len() != 4 {
+                return Err(LowerError::UnsupportedShape { name, op_type, reason: "ConvTranspose lowering supports 2D pads only".to_string() });
+            }
+            Ok((pads[0], pads[1], pads[2], pads[3]))
+        }
+        b"VALID" => Ok((0, 0, 0, 0)),
+        b"SAME_UPPER" | b"SAME_LOWER" => {
+            let lower = auto_pad == b"SAME_LOWER";
+            let (top, bottom) = same_pad_axis_convtranspose(kernel_h, stride_h, dilation_h, lower)
+                .ok_or_else(|| LowerError::UnsupportedShape { name: name.clone(), op_type: op_type.clone(), reason: "ConvTranspose SAME auto_pad requires stride <= the kernel's dilated span on the height axis".to_string() })?;
+            let (left, right) = same_pad_axis_convtranspose(kernel_w, stride_w, dilation_w, lower)
+                .ok_or_else(|| LowerError::UnsupportedShape { name: name.clone(), op_type: op_type.clone(), reason: "ConvTranspose SAME auto_pad requires stride <= the kernel's dilated span on the width axis".to_string() })?;
+            Ok((top, left, bottom, right))
+        }
+        _ => Err(LowerError::UnsupportedShape { name, op_type, reason: "ConvTranspose lowering supports auto_pad NOTSET/VALID/SAME_UPPER/SAME_LOWER only".to_string() }),
+    }
 }
 
 /// Resolves `strides`/`dilations`/`pads` for a 2D `Conv`/`ConvTranspose`
@@ -4457,6 +4515,54 @@ mod tests {
         let group1: Vec<f32> = group0.iter().map(|&value| value * 2.0).collect();
         assert_eq!(&data[0..9], group0, "group 0 matches the un-grouped single-channel ConvTranspose");
         assert_eq!(&data[9..18], group1.as_slice(), "group 1 sees only its own (doubled) channel");
+    }
+
+    /// `ConvTranspose` with `auto_pad = SAME_UPPER`, `strides = [2, 2]`,
+    /// a `3x3` kernel: [`same_pad_axis_convtranspose`]'s `total_padding =
+    /// span - stride = ((3-1)*1+1) - 2 = 1` splits to `pad_top = 0,
+    /// pad_bottom = 1` (the smaller half first, ONNX's `SAME_UPPER`
+    /// convention), sizing the output to exactly `in * stride = 4` per the
+    /// ONNX `auto_pad` rule -- [`same_pad_axis_convtranspose`]'s own doc.
+    /// All-ones weights make each output cell a plain count-weighted sum of
+    /// the `iy in row_set(oy)`, `ix in col_set(ox)` input cells, hand-derived
+    /// from the `oy = iy*stride + ky - pad_top` relation directly (not a
+    /// re-derivation through the code under test).
+    #[test]
+    fn convtranspose_same_upper_derives_pads_from_the_output_shape_rule() {
+        let image = f32_initializer("image", &[1, 1, 2, 2], &[1.0, 2.0, 3.0, 4.0]);
+        let weight = f32_initializer("weight", &[1, 1, 3, 3], &[1.0; 9]);
+        let node = NodeProto {
+            input: vec!["image", "weight"],
+            output: vec!["y"],
+            op_type: "ConvTranspose",
+            name: "convtranspose_same",
+            attribute: vec![ints_attribute("strides", vec![2, 2]), AttributeProto { name: "auto_pad", s: b"SAME_UPPER", ..AttributeProto::default() }],
+            ..NodeProto::default()
+        };
+        let graph = GraphProto {
+            node: vec![node],
+            name: "convtranspose_same_upper_graph",
+            initializer: vec![image, weight],
+            output: vec![ValueInfoProto { name: "y", ..ValueInfoProto::default() }],
+            ..GraphProto::default()
+        };
+
+        let lowered = lower_graph(&graph).expect("lower ConvTranspose SAME_UPPER");
+        let named: Vec<(&str, &[f32])> = lowered.initializers.iter().map(|(name, data)| (name.as_str(), data.as_slice())).collect();
+        let output = lowered.graph_outputs[0].1;
+        let evaluated = evaluate_named(&lowered.program, &[], &named, &[output]).expect("evaluate ConvTranspose SAME_UPPER");
+        let (data, shape) = evaluated.get(output).expect("y present");
+
+        // in * stride = 2 * 2 = 4, per ONNX's auto_pad output-shape rule.
+        assert_eq!(shape, &[1, 1, 4, 4]);
+        #[rustfmt::skip]
+        let expected = [
+            1.0, 1.0, 3.0, 2.0,
+            1.0, 1.0, 3.0, 2.0,
+            4.0, 4.0, 10.0, 6.0,
+            3.0, 3.0, 7.0, 4.0,
+        ];
+        assert_eq!(data, expected.as_slice(), "hand-derived row/col overlap counts through the SAME-resolved pads");
     }
 
     /// `ConvTranspose` with `strides = [2, 2]`: the general masked-reduce
