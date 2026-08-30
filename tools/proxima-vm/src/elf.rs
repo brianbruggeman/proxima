@@ -986,18 +986,35 @@ mod tests {
         );
         let artifact = target_dir
             .join(target_triple)
-            .join("debug")
+            .join("release")
             .join("proxima-vm-guest-lambda");
 
         if !artifact.exists() {
+            let manifest_path = Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("guests")
+                .join("lambda")
+                .join("Cargo.toml");
+            // `guests/lambda` is its own excluded workspace (root
+            // `Cargo.toml`'s `workspace.exclude`), so `-p` cannot find it —
+            // build it through its own manifest, same discipline as
+            // `tests/dispatch_hypercall.rs`'s `build_guest_elf`. `--release`
+            // matches that same sibling helper: this crate's own `dev`
+            // profile (no workspace `[profile.dev]` to inherit now that it
+            // is excluded) emits a third RW `PT_LOAD` plus `PT_GNU_RELRO`,
+            // which the two-segment assertions below never expected. The
+            // subprocess's `CARGO_TARGET_DIR` is set explicitly (not
+            // inherited) so the artifact always lands at the path this
+            // function predicts, regardless of the ambient env.
             let status = Command::new("cargo")
                 .args([
                     "build",
-                    "-p",
-                    "proxima-vm-guest-lambda",
+                    "--manifest-path",
+                    manifest_path.to_str().expect("manifest path is utf-8"),
                     "--target",
                     target_triple,
+                    "--release",
                 ])
+                .env("CARGO_TARGET_DIR", &target_dir)
                 .status()
                 .expect("run cargo build for the guest crate");
             assert!(status.success(), "cargo build for {target_triple} failed");
@@ -1009,16 +1026,17 @@ mod tests {
     /// Cross-checked against `llvm-readobj --program-headers` (LLVM 20, the
     /// toolchain's own bundled `rustlib/*/bin/llvm-readobj`; `readelf` is
     /// not installed on this host, so `llvm-readobj` is the incumbent here
-    /// per principle 14). Re-pinned 2026-08-26 against a from-scratch
-    /// rebuild of `guests/lambda` in the shared tree: the lambda guest has
-    /// grown new hypercalls since the elf-reshape worktree's own pin (332/32,
-    /// against the worktree's older guest source), so a fresh
-    /// `llvm-readobj --program-headers` run against this tree's build is the
-    /// oracle, not the worktree's recorded numbers.
+    /// per principle 14). Re-pinned 2026-08-30 against a `--release` build
+    /// through `guests/lambda`'s own manifest (see `guest_elf_bytes`): the
+    /// crate's `dev` profile no longer matches these numbers now that
+    /// `guests/lambda` is its own excluded workspace with no
+    /// `[profile.dev]` to inherit, so `--release` is the build this test
+    /// actually pins against, and a fresh `llvm-readobj --program-headers`
+    /// run against that release build is the oracle.
     ///
     /// ```text
-    /// ProgramHeader { Type: PT_LOAD, Offset: 0x10000, VirtualAddress: 0x0,   FileSize: 532, MemSize: 532, Flags: PF_R | PF_X }
-    /// ProgramHeader { Type: PT_LOAD, Offset: 0x10214, VirtualAddress: 0x214, FileSize: 40,  MemSize: 40,  Flags: PF_R }
+    /// ProgramHeader { Type: PT_LOAD, Offset: 0x10000, VirtualAddress: 0x0,   FileSize: 1260, MemSize: 1260, Flags: PF_R | PF_X }
+    /// ProgramHeader { Type: PT_LOAD, Offset: 0x104ec, VirtualAddress: 0x4ec, FileSize: 524,  MemSize: 524,  Flags: PF_R }
     /// ProgramHeader { Type: PT_GNU_STACK, ... }
     /// ```
     ///
@@ -1034,29 +1052,28 @@ mod tests {
         assert_eq!(segments.len(), 2);
 
         assert_eq!(segments[0].virtual_address(), 0x0000);
-        assert_eq!(segments[0].memory_size(), 532);
-        assert_eq!(segments[0].data().len(), 532);
+        assert_eq!(segments[0].memory_size(), 1260);
+        assert_eq!(segments[0].data().len(), 1260);
         assert!(segments[0].is_readable());
         assert!(!segments[0].is_writable());
         assert!(segments[0].is_executable());
 
-        assert_eq!(segments[1].virtual_address(), 0x214);
-        assert_eq!(segments[1].memory_size(), 40);
-        assert_eq!(segments[1].data().len(), 40);
+        assert_eq!(segments[1].virtual_address(), 0x4ec);
+        assert_eq!(segments[1].memory_size(), 524);
+        assert_eq!(segments[1].data().len(), 524);
         assert!(segments[1].is_readable());
         assert!(!segments[1].is_writable());
         assert!(!segments[1].is_executable());
     }
 
     /// Same cross-check as above, for the `x86_64-unknown-none` build.
-    /// Re-pinned 2026-08-26 alongside the aarch64 pin, same cause: this
-    /// tree's fresh `llvm-readobj` run against a from-scratch guest rebuild
-    /// is the oracle, and it agrees with the pre-reshape shared-tree guest
-    /// numbers (291/12, `VirtualAddress` 0x124 for the second segment).
+    /// Re-pinned 2026-08-30 alongside the aarch64 pin, same cause: the
+    /// `--release` build through `guests/lambda`'s own manifest is the
+    /// oracle now that the crate is its own excluded workspace.
     ///
     /// ```text
-    /// ProgramHeader { Type: PT_LOAD, Offset: 0x1000, VirtualAddress: 0x0,   FileSize: 291, MemSize: 291, Flags: PF_R | PF_X }
-    /// ProgramHeader { Type: PT_LOAD, Offset: 0x1124, VirtualAddress: 0x124, FileSize: 12,  MemSize: 12,  Flags: PF_R }
+    /// ProgramHeader { Type: PT_LOAD, Offset: 0x1000, VirtualAddress: 0x0,   FileSize: 1956, MemSize: 1956, Flags: PF_R | PF_X }
+    /// ProgramHeader { Type: PT_LOAD, Offset: 0x17a4, VirtualAddress: 0x7a4, FileSize: 524,  MemSize: 524,  Flags: PF_R }
     /// ProgramHeader { Type: PT_GNU_STACK, ... }
     /// ```
     #[test]
@@ -1068,15 +1085,15 @@ mod tests {
         assert_eq!(segments.len(), 2);
 
         assert_eq!(segments[0].virtual_address(), 0x0000);
-        assert_eq!(segments[0].memory_size(), 291);
-        assert_eq!(segments[0].data().len(), 291);
+        assert_eq!(segments[0].memory_size(), 1956);
+        assert_eq!(segments[0].data().len(), 1956);
         assert!(segments[0].is_readable());
         assert!(!segments[0].is_writable());
         assert!(segments[0].is_executable());
 
-        assert_eq!(segments[1].virtual_address(), 0x124);
-        assert_eq!(segments[1].memory_size(), 12);
-        assert_eq!(segments[1].data().len(), 12);
+        assert_eq!(segments[1].virtual_address(), 0x7a4);
+        assert_eq!(segments[1].memory_size(), 524);
+        assert_eq!(segments[1].data().len(), 524);
         assert!(segments[1].is_readable());
         assert!(!segments[1].is_writable());
         assert!(!segments[1].is_executable());
