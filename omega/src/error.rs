@@ -45,14 +45,18 @@ pub enum EmitError {
     #[error("node {node} declares dtype {dtype:?}, which this metal backend does not emit")]
     UnsupportedDType { node: NodeId, dtype: DType },
 
-    /// [`crate::wgsl::emit_wgsl`]'s v1 scope has no gather kernel (no fault
-    /// buffer, no indices binding) — see that module's own doc for why this
-    /// is a deliberate v1 boundary rather than an oversight.
+    /// `wgsl::emit_wgsl`'s v1 scope has no gather kernel (no fault buffer, no
+    /// indices binding) — see that module's own doc for why this is a
+    /// deliberate v1 boundary rather than an oversight. Gated with the module
+    /// itself: `wgsl` only exists behind `wgpu-backend`, so an intra-doc link
+    /// to it is only resolvable in that same build.
+    #[cfg(feature = "wgpu-backend")]
     #[error("node {node} gathers an operand, which the wgsl v1 emitter does not support yet")]
     GatherNotSupported { node: NodeId },
 
-    /// [`crate::wgsl::emit_wgsl`]'s v1 op set is elementwise, `Keep::Reduce`,
-    /// and `Keep::Scan` only — `Iota`/`Constant` have no renderer yet.
+    /// `wgsl::emit_wgsl`'s v1 op set is elementwise, `Keep::Reduce`, and
+    /// `Keep::Scan` only — `Iota`/`Constant` have no renderer yet.
+    #[cfg(feature = "wgpu-backend")]
     #[error("node {node} is a {kind} op, which the wgsl v1 emitter does not support yet")]
     UnsupportedOpKind { node: NodeId, kind: &'static str },
 }

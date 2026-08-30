@@ -474,6 +474,8 @@ pub fn execute_plan_named_metal_op_timed(
         Plan::Metal(metal_plan) => Ok(metal::execute_plan_named_op_timed(metal_plan, named)?),
         #[cfg(feature = "cpu")]
         Plan::Cpu(_) => Err(BackendError::NotImplemented { backend: "cpu" }),
+        #[cfg(feature = "wgpu-backend")]
+        Plan::Wgpu(_) => Err(BackendError::NotImplemented { backend: "wgpu" }),
     }
 }
 

@@ -131,8 +131,22 @@ jobs:
   # `ggml-bench` in proxima-tensor-gate.sh, this feature needs no external
   # asset (no vendored checkout, no multi-GB model file), so it belongs in
   # CI rather than a local-only runner.
+  #
+  # `scripts/omega-gate.sh` existed but was never wired to a workflow (same
+  # class of gap this file's own header documents for proxima-tensor before
+  # 6266aba) -- this job ran three ad hoc commands instead, none of which
+  # passed `--all-features`. That let a real defect ship and stay green here:
+  # `wgpu-backend`'s `Plan::Wgpu` variant (landed c9dfb9b/0ba9ae4) made
+  # `backend::execute_plan_named_metal_op_timed`'s match non-exhaustive, and
+  # `wgsl`'s module doc linked three private items -- both errors only under
+  # the `--all-features` union the ad hoc commands never exercised. `metal`'s
+  # objc2 deps and `wgpu-backend`'s `wgpu` (built here with only its `metal`
+  # feature, no vulkan/gles) both resolve on this macOS runner, so the gate's
+  # own all-features build needs no separate lane the way proxima-net's
+  # `dpdk` (a real Linux-only system dependency) needs one excluded from its
+  # gate.
   omega-gate:
-    name: omega (macos-latest)
+    name: omega-gate.sh (macos-latest)
     needs: changes
     if: needs.changes.outputs.tensor == 'true'
     runs-on: macos-latest
@@ -144,9 +158,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: install nextest
         uses: taiki-e/install-action@nextest
-      - run: cargo clippy -p omega --all-targets -- -D warnings
-      - run: cargo nextest run -p omega --no-fail-fast
-      - run: cargo doc -p omega --no-deps
+      - run: bash scripts/omega-gate.sh
 
   # Compare-bench (Metal vs CPU, same evaluator). Smoke-runs the incumbent
   # bench so it can never again sit registered-but-unexecuted; `--quick`
