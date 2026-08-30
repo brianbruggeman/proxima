@@ -44,7 +44,7 @@ use proxima_tensor::{
 
 use crate::error::EmitError;
 use crate::msl::{Binding, gather_count};
-use crate::wgsl::{WORKGROUP_SIZE, WgslKernel, emit_wgsl};
+use crate::wgsl::{WORKGROUP_SIZE, WgslCaps, WgslKernel, emit_wgsl};
 
 /// Everything the wgpu driver can fail with.
 #[derive(Debug, thiserror::Error)]
@@ -84,6 +84,13 @@ pub struct WgpuPlan {
     /// on first dispatch of each distinct kernel shape, reused across every
     /// later [`execute_plan`] call on this plan.
     pipelines: BTreeMap<String, wgpu::ComputePipeline>,
+    /// What [`acquire_device`] found this adapter/device pair actually
+    /// supports — threaded into every [`emit_wgsl`] call so a `Float16` node
+    /// renders through `enable f16;` exactly when the device can run it, and
+    /// fails with a named [`EmitError::UnsupportedDType`] otherwise (see
+    /// `crate::wgsl`'s own "f16 compute" doc for why this is never a silent
+    /// `f32` fallback).
+    caps: WgslCaps,
 }
 
 fn block_node_ids(program: &[Op]) -> Vec<NodeId> {
@@ -117,19 +124,29 @@ fn block_codec_name(block: &QuantizedBlock<'_>) -> &'static str {
 /// high-performance (discrete GPU) adapter, matching what a compute-bound
 /// caller wants; on this box (arm64 macOS) that resolves to `wgpu`'s Metal
 /// backend, same physical device `crate::metal` drives directly.
-fn acquire_device() -> Result<(wgpu::Device, wgpu::Queue), WgpuError> {
+fn acquire_device() -> Result<(wgpu::Device, wgpu::Queue, WgslCaps), WgpuError> {
     let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
     let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
         power_preference: wgpu::PowerPreference::HighPerformance,
         ..Default::default()
     }))
     .map_err(|_| WgpuError::NoAdapter)?;
+    // request every capability the adapter actually offers that `emit_wgsl`
+    // knows how to use — requesting an unsupported feature is a hard error
+    // at `request_device`, so this is gated on `adapter.features()` first,
+    // never requested blind.
+    let adapter_features = adapter.features();
+    let requested_features = adapter_features & wgpu::Features::SHADER_F16;
     let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
         label: Some("omega-wgpu-plan"),
+        required_features: requested_features,
         ..Default::default()
     }))
     .map_err(|error| WgpuError::NoDevice(error.to_string()))?;
-    Ok((device, queue))
+    let caps = WgslCaps {
+        shader_f16: device.features().contains(wgpu::Features::SHADER_F16),
+    };
+    Ok((device, queue, caps))
 }
 
 /// Resolves a program into a reusable [`WgpuPlan`], acquiring a device.
@@ -150,7 +167,7 @@ pub fn plan(program: &[Op], symbols: &[u64], outputs: &[NodeId]) -> Result<WgpuP
     };
     let resolved = bind(program, &shapes, &effective_outputs)?;
     let block_nodes = block_node_ids(program);
-    let (device, queue) = acquire_device()?;
+    let (device, queue, caps) = acquire_device()?;
     Ok(WgpuPlan {
         device,
         queue,
@@ -160,6 +177,7 @@ pub fn plan(program: &[Op], symbols: &[u64], outputs: &[NodeId]) -> Result<WgpuP
         effective_outputs,
         block_nodes,
         pipelines: BTreeMap::new(),
+        caps,
     })
 }
 
@@ -479,7 +497,7 @@ pub fn execute_plan(plan: &mut WgpuPlan, blocks: &[QuantizedBlock<'_>]) -> Resul
     // `crate::metal::encode_op`'s own `pending_faults` accumulator.
     let mut pending_faults: Vec<(NodeId, wgpu::Buffer, Vec<u64>)> = Vec::new();
     for bound in &plan.resolved {
-        let kernel = emit_wgsl(bound)?;
+        let kernel = emit_wgsl(bound, plan.caps)?;
         let uniform_bytes = pack_uniforms(bound);
         let uniform_buffer = plan.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("omega-wgpu-uniforms"),

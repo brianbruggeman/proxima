@@ -25,10 +25,23 @@
 //!   across outer lines rather than resetting per line (see
 //!   `render_scan`'s own doc). Not embarrassingly parallel the way a
 //!   reduce is; v1 does not attempt a parallel prefix-sum reformulation.
-//! - **`f32` only.** `Float16`/`BFloat16` (and everything `type_token`
-//!   otherwise rejects) fail with [`EmitError::UnsupportedDType`] — WGSL's
-//!   base spec has no portable narrow float type every wgpu backend
-//!   supports, unlike MSL's native `half`.
+//! - **`f32`, plus `f16` compute when the adapter offers it.** `Float16`
+//!   renders through WGSL's `enable f16;` extension when [`WgslCaps::shader_f16`]
+//!   is set (`crate::wgpu_driver::plan` sets it exactly when the acquired
+//!   device requested `wgpu::Features::SHADER_F16`); otherwise it fails with
+//!   [`EmitError::UnsupportedDType`], never silently falling back to `f32`
+//!   compute. `BFloat16` collapses to `f32` unconditionally, the same
+//!   `type_token` choice `crate::msl::type_token` makes (`bfloat` has no
+//!   native WGSL type either way).
+//!
+//! `f16` here is COMPUTE only, not storage: every operand/output buffer
+//! stays `array<f32>` (the wire format `crate::wgpu_driver`'s upload/readback
+//! already speaks) — a `Float16`-dtype kernel casts `f32` down to `f16` at
+//! the read and back up to `f32` at the write, so intermediate arithmetic
+//! rounds the way half-precision compute does without widening the driver's
+//! upload/readback byte format to native half storage the way
+//! `crate::metal::upload_block`/`read_back` do. See `omega/tests/wgpu_parity.rs`
+//! for the parity tolerance this rounding costs.
 //!
 //! # Gather (elementwise and `Keep::Reduce` only)
 //!
@@ -107,20 +120,36 @@ pub struct WgslKernel {
     pub threads: u64,
 }
 
+/// Device capabilities [`emit_wgsl`] renders against — the WGSL counterpart
+/// of what an adapter's `wgpu::Features` bitset already told
+/// `crate::wgpu_driver::plan` at device-acquisition time. A capability the
+/// device lacks is a NAMED rejection ([`EmitError::UnsupportedDType`]),
+/// never a silent fallback to a lower-precision or serial path — see the
+/// module doc's "f16 compute" section and [`crate::wgsl::WgslCaps::shader_f16`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct WgslCaps {
+    /// Whether the acquired `wgpu::Device` requested `wgpu::Features::SHADER_F16`
+    /// — gates `DType::Float16` rendering through WGSL's `enable f16;`
+    /// extension. `false` (the [`Default`]) rejects every `Float16` node with
+    /// [`EmitError::UnsupportedDType`], the same posture v1 already took
+    /// before this capability existed.
+    pub shader_f16: bool,
+}
+
 /// Emits a WGSL kernel from a bound [`BoundOp`] — see the module doc for
 /// exactly which op shapes this covers in v1.
 ///
 /// # Errors
-/// [`EmitError::UnsupportedDType`] for anything but `Float32`,
-/// [`EmitError::GatherNotSupported`] for a gathered operand,
-/// [`EmitError::UnsupportedOpKind`] for `Iota`/`Constant`,
+/// [`EmitError::UnsupportedDType`] for anything but `Float32` (or `Float16`
+/// when `caps.shader_f16`), [`EmitError::GatherNotSupported`] for a gathered
+/// operand, [`EmitError::UnsupportedOpKind`] for `Iota`/`Constant`,
 /// [`EmitError::ArityMismatch`]/[`EmitError::ReductionBodyIsSelect`]/
 /// [`EmitError::EmptyScan`] for the same structural failures
 /// [`crate::msl::emit`] rejects.
-pub fn emit_wgsl(resolved: &BoundOp) -> Result<WgslKernel, EmitError> {
+pub fn emit_wgsl(resolved: &BoundOp, caps: WgslCaps) -> Result<WgslKernel, EmitError> {
     validate(resolved)?;
     let entry = entry_name(resolved);
-    let element_type = type_token(resolved.node, resolved.dtype)?;
+    let element_type = type_token(resolved.node, resolved.dtype, caps)?;
     let source = match &resolved.kind {
         BoundOpKind::Elementwise { .. } => render_elementwise(resolved, &entry, element_type),
         BoundOpKind::Reduce {
@@ -150,10 +179,35 @@ pub fn emit_wgsl(resolved: &BoundOp) -> Result<WgslKernel, EmitError> {
     })
 }
 
-fn type_token(node: NodeId, dtype: DType) -> Result<&'static str, EmitError> {
+fn type_token(node: NodeId, dtype: DType, caps: WgslCaps) -> Result<&'static str, EmitError> {
     match dtype {
-        DType::Float32 => Ok("f32"),
+        DType::Float32 | DType::BFloat16 => Ok("f32"),
+        DType::Float16 if caps.shader_f16 => Ok("f16"),
         other => Err(EmitError::UnsupportedDType { node, dtype: other }),
+    }
+}
+
+/// Whether operand reads/output writes for `element_type` need a cast — true
+/// for every element type but `f32`, since [`crate::wgpu_driver`]'s
+/// operand/output buffers always speak `array<f32>` (see the module doc's
+/// "f16 here is COMPUTE only" note).
+fn needs_f32_cast(element_type: &str) -> bool {
+    element_type != "f32"
+}
+
+fn read_cast(element_type: &str, expr: &str) -> String {
+    if needs_f32_cast(element_type) {
+        format!("{element_type}({expr})")
+    } else {
+        expr.to_string()
+    }
+}
+
+fn write_cast(element_type: &str, expr: &str) -> String {
+    if needs_f32_cast(element_type) {
+        format!("f32({expr})")
+    } else {
+        expr.to_string()
     }
 }
 
@@ -420,7 +474,12 @@ fn push_body_steps(source: &mut String, body: &ComposedBody, indent: &str, eleme
     format!("step{}", body.steps.len().saturating_sub(1))
 }
 
-fn preamble(source: &mut String, operand_count: usize, gather_count: usize, uniforms_struct: &str) {
+fn preamble(source: &mut String, operand_count: usize, gather_count: usize, element_type: &str, uniforms_struct: &str) {
+    // `enable` directives are WGSL module-scope items that MUST precede
+    // every other declaration -- see the module doc's "f16 compute" section.
+    if element_type == "f16" {
+        source.push_str("enable f16;\n");
+    }
     source.push_str(PROXIMA_ERF_FN_WGSL);
     source.push('\n');
     source.push_str(uniforms_struct);
@@ -545,7 +604,7 @@ fn render_elementwise(resolved: &BoundOp, entry: &str, element_type: &str) -> St
     uniforms.push_str("};\n");
 
     let mut source = String::new();
-    preamble(&mut source, operand_count, gather_total, &uniforms);
+    preamble(&mut source, operand_count, gather_total, element_type, &uniforms);
     kernel_signature(&mut source, entry);
     source.push_str("    if (gid >= u.total_elements) { return; }\n");
 
@@ -576,11 +635,13 @@ fn render_elementwise(resolved: &BoundOp, entry: &str, element_type: &str) -> St
         operand_count.max(1)
     ));
     for index in 0..operand_count {
-        source.push_str(&format!("    scratch[{index}] = in{index}[off{index}];\n"));
+        let read = read_cast(element_type, &format!("in{index}[off{index}]"));
+        source.push_str(&format!("    scratch[{index}] = {read};\n"));
     }
 
     let result = push_body_steps(&mut source, resolved.element_body(), "    ", element_type);
-    source.push_str(&format!("    out[gid] = {result};\n"));
+    let stored = write_cast(element_type, &result);
+    source.push_str(&format!("    out[gid] = {stored};\n"));
     source.push_str("}\n");
     source
 }
@@ -624,7 +685,7 @@ fn render_reduce(resolved: &BoundOp, entry: &str, element_type: &str) -> String 
     uniforms.push_str("};\n");
 
     let mut source = String::new();
-    preamble(&mut source, operand_count, gather_total, &uniforms);
+    preamble(&mut source, operand_count, gather_total, element_type, &uniforms);
     kernel_signature(&mut source, entry);
     source.push_str("    if (gid >= u.output_total) { return; }\n");
 
@@ -689,7 +750,8 @@ fn render_reduce(resolved: &BoundOp, entry: &str, element_type: &str) -> String 
         operand_count.max(1)
     ));
     for index in 0..operand_count {
-        source.push_str(&format!("        scratch[{index}] = in{index}[off{index}];\n"));
+        let read = read_cast(element_type, &format!("in{index}[off{index}]"));
+        source.push_str(&format!("        scratch[{index}] = {read};\n"));
     }
     let value_expr = push_body_steps(&mut source, resolved.element_body(), "        ", element_type);
     source.push_str(&format!("        let value: {element_type} = {value_expr};\n"));
@@ -702,7 +764,8 @@ fn render_reduce(resolved: &BoundOp, entry: &str, element_type: &str) -> String 
     for dim in 0..rank {
         source.push_str(&format!("    out_offset += full_coord[{dim}] * u.out_strides[{dim}];\n"));
     }
-    source.push_str("    out[out_offset] = accumulator;\n");
+    let stored = write_cast(element_type, "accumulator");
+    source.push_str(&format!("    out[out_offset] = {stored};\n"));
     source.push_str("}\n");
     source
 }
@@ -735,7 +798,7 @@ fn render_scan(resolved: &BoundOp, entry: &str, element_type: &str) -> String {
     uniforms.push_str("};\n");
 
     let mut source = String::new();
-    preamble(&mut source, operand_count, 0, &uniforms);
+    preamble(&mut source, operand_count, 0, element_type, &uniforms);
     kernel_signature(&mut source, entry);
     // `crate::msl`'s own `push_serial_reduce_body`/`run_scan` (the CPU
     // oracle) carry ONE accumulator across every outer line, not one per
@@ -782,7 +845,8 @@ fn render_scan(resolved: &BoundOp, entry: &str, element_type: &str) -> String {
         operand_count.max(1)
     ));
     for index in 0..operand_count {
-        source.push_str(&format!("            scratch[{index}] = in{index}[running{index}];\n"));
+        let read = read_cast(element_type, &format!("in{index}[running{index}]"));
+        source.push_str(&format!("            scratch[{index}] = {read};\n"));
         source.push_str(&format!(
             "            running{index} += u.operand_strides[{index}][{last_dim}];\n"
         ));
@@ -794,7 +858,8 @@ fn render_scan(resolved: &BoundOp, entry: &str, element_type: &str) -> String {
         "            accumulator = select(value, {combine_expr}, seeded);\n"
     ));
     source.push_str("            seeded = true;\n");
-    source.push_str("            out[out_running] = accumulator;\n");
+    let stored = write_cast(element_type, "accumulator");
+    source.push_str(&format!("            out[out_running] = {stored};\n"));
     source.push_str(&format!("            out_running += u.out_strides[{last_dim}];\n"));
     source.push_str("        }\n");
     source.push_str("    }\n");
@@ -839,7 +904,7 @@ mod tests {
     #[test]
     fn elementwise_tanh_emits_wgsl_with_the_expected_shape() {
         let bound = elementwise_tanh_op(8);
-        let kernel = emit_wgsl(&bound).expect("emit succeeds");
+        let kernel = emit_wgsl(&bound, WgslCaps::default()).expect("emit succeeds");
         assert!(kernel.source.contains("@compute"));
         assert!(kernel.source.contains("tanh("));
         assert_eq!(kernel.bindings.len(), 3);
@@ -848,8 +913,8 @@ mod tests {
 
     #[test]
     fn same_structure_different_extents_yield_identical_source() {
-        let small = emit_wgsl(&elementwise_tanh_op(4)).expect("emit succeeds");
-        let large = emit_wgsl(&elementwise_tanh_op(4096)).expect("emit succeeds");
+        let small = emit_wgsl(&elementwise_tanh_op(4), WgslCaps::default()).expect("emit succeeds");
+        let large = emit_wgsl(&elementwise_tanh_op(4096), WgslCaps::default()).expect("emit succeeds");
         assert_eq!(small.source, large.source);
         assert_ne!(small.threads, large.threads);
     }
@@ -877,7 +942,7 @@ mod tests {
         let shapes = infer(&program, &[]).expect("infer succeeds");
         let bound = bind(&program, &shapes, &[]).expect("bind succeeds");
         let bound = bound.into_iter().next().expect("one bound op");
-        let kernel = emit_wgsl(&bound).expect("emit succeeds");
+        let kernel = emit_wgsl(&bound, WgslCaps::default()).expect("emit succeeds");
         assert!(kernel.source.contains("fn proxima_erf"));
         assert!(kernel.source.contains("proxima_erf(scratch[0])"));
     }
@@ -905,7 +970,65 @@ mod tests {
         let shapes = infer(&program, &[]).expect("infer succeeds");
         let bound = bind(&program, &shapes, &[]).expect("bind succeeds");
         let bound = bound.into_iter().next().expect("one bound op");
-        let error = emit_wgsl(&bound).expect_err("f16 is rejected in v1");
+        let error = emit_wgsl(&bound, WgslCaps::default()).expect_err("f16 is rejected without shader_f16");
         assert!(matches!(error, EmitError::UnsupportedDType { .. }));
+    }
+
+    #[test]
+    fn a_float16_node_renders_through_enable_f16_when_the_capability_is_set() {
+        let mut program = Vec::new();
+        let source = append(
+            &mut program,
+            Op::Input {
+                dtype: DType::Float16,
+                shape: vec![Extent::Static(4)],
+                name: None,
+            },
+        );
+        append(
+            &mut program,
+            Op::Elementwise {
+                dtype: DType::Float16,
+                body: ScalarOp::Tanh,
+                operands: vec![(source, IndexMap::Affine(map::projection(1, &[0])))],
+                name: None,
+            },
+        );
+        let shapes = infer(&program, &[]).expect("infer succeeds");
+        let bound = bind(&program, &shapes, &[]).expect("bind succeeds");
+        let bound = bound.into_iter().next().expect("one bound op");
+        let kernel = emit_wgsl(&bound, WgslCaps { shader_f16: true }).expect("f16 emits when shader_f16 is set");
+        assert!(kernel.source.starts_with("enable f16;\n"));
+        assert!(kernel.source.contains("tanh("));
+        assert!(kernel.source.contains("f16(in0[off0])"), "operand read must cast f32 down to f16");
+        assert!(kernel.source.contains("out[gid] = f32("), "output write must cast f16 back up to f32");
+    }
+
+    #[test]
+    fn a_bfloat16_node_collapses_to_f32_compute() {
+        let mut program = Vec::new();
+        let source = append(
+            &mut program,
+            Op::Input {
+                dtype: DType::BFloat16,
+                shape: vec![Extent::Static(4)],
+                name: None,
+            },
+        );
+        append(
+            &mut program,
+            Op::Elementwise {
+                dtype: DType::BFloat16,
+                body: ScalarOp::Tanh,
+                operands: vec![(source, IndexMap::Affine(map::projection(1, &[0])))],
+                name: None,
+            },
+        );
+        let shapes = infer(&program, &[]).expect("infer succeeds");
+        let bound = bind(&program, &shapes, &[]).expect("bind succeeds");
+        let bound = bound.into_iter().next().expect("one bound op");
+        let kernel = emit_wgsl(&bound, WgslCaps::default()).expect("bf16 collapses to f32 unconditionally");
+        assert!(!kernel.source.contains("enable f16"));
+        assert!(kernel.source.contains("var scratch: array<f32, 1>"));
     }
 }
