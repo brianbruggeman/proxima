@@ -444,7 +444,7 @@ mod tests {
             bytes: alloc::vec::Vec::from(b"vm-side-canned" as &[u8]),
         };
         let request = ChildRequest::Read {
-            path: alloc::string::String::from("/proc/sys/kernel/hostname"),
+            handle: 0,
             max_bytes: 256,
             offset: 0,
         };
@@ -528,13 +528,11 @@ mod tests {
         let dispatcher = FfiRecordingDispatcher::new(configured.clone());
 
         let read_request = ChildRequest::Read {
-            path: "/etc/hostname".to_string(),
+            handle: 0,
             max_bytes: 256,
             offset: 0,
         };
-        let close_request = ChildRequest::Close {
-            path: "/tmp/lambda-guest".to_string(),
-        };
+        let close_request = ChildRequest::Close { handle: 0 };
         let read_wire_bytes =
             postcard::to_allocvec(&read_request).expect("postcard encode read request");
         let close_wire_bytes =
@@ -558,7 +556,7 @@ mod tests {
     #[test]
     fn two_differently_canned_responses_produce_different_emitted_bytes_for_the_same_request() {
         let read_request = ChildRequest::Read {
-            path: "/etc/hostname".to_string(),
+            handle: 0,
             max_bytes: 256,
             offset: 0,
         };

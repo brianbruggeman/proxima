@@ -1553,6 +1553,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "fdt"
+version = "0.1.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "784a4df722dc6267a04af36895398f59d21d07dce47232adf31ec0ff2fa45e67"
+
+[[package]]
 name = "fiat-crypto"
 version = "0.2.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1924,6 +1930,10 @@ name = "hashbrown"
 version = "0.14.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e5274423e17b7c9fc20b6e7e208532f9b19825d82dfd615708b70edd83df41f1"
+dependencies = [
+ "ahash",
+ "allocator-api2",
+]
 
 [[package]]
 name = "hashbrown"
@@ -4823,6 +4833,7 @@ dependencies = [
  "bytes",
  "cc",
  "criterion",
+ "fdt",
  "futures",
  "goblin",
  "object",
@@ -4830,10 +4841,13 @@ dependencies = [
  "proptest",
  "proxima",
  "proxima-core",
+ "proxima-net",
  "proxima-primitives",
  "proxima-process",
  "proxima-protocols",
+ "serde",
  "tempfile",
+ "vm-fdt",
 ]
 
 [[package]]
@@ -6569,6 +6583,15 @@ name = "version_check"
 version = "0.9.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
+
+[[package]]
+name = "vm-fdt"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7e21282841a059bb62627ce8441c491f09603622cd5a21c43bfedc85a2952f23"
+dependencies = [
+ "hashbrown 0.14.5",
+]
 
 [[package]]
 name = "wait-timeout"
