@@ -72,9 +72,14 @@ done
 # cell above ever runs them. this is the exact defect closed here -- count
 # the passes and fail the cell if it processed zero tests, the same shape as
 # proxima-tensor-gate.sh's doctest cell.
+# `--color never`: CI sets `CARGO_TERM_COLOR: always` (proxima-tensor.yml),
+# which wraps nextest's summary digits in ANSI escape codes even though this
+# output is captured to a file, not a terminal. That silently breaks the
+# `grep -oE '[0-9]+ passed'` below (no match, count defaults to 0, RED) —
+# reproduced on a real ubuntu host with CARGO_TERM_COLOR=always set.
 printf '\n== gguf oracle fixtures, --ignored (count asserted nonzero) ==\n'
 ignored_log="$(mktemp)"
-if cargo nextest run -p proxima-tokenizer --no-default-features --features gguf --run-ignored ignored-only --no-fail-fast \
+if cargo nextest run -p proxima-tokenizer --no-default-features --features gguf --run-ignored ignored-only --no-fail-fast --color never \
     > "$ignored_log" 2>&1; then
     cat "$ignored_log"
     ignored_count="$(grep -oE '[0-9]+ passed' "$ignored_log" | tail -1 | awk '{ print $1 }')"
