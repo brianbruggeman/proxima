@@ -44,7 +44,7 @@ use proxima_tensor::{
 
 use crate::error::EmitError;
 use crate::msl::{Binding, PackedCodec, PackedOperands, gather_count};
-use crate::wgsl::{WORKGROUP_SIZE, WgslCaps, WgslKernel, emit_wgsl};
+use crate::wgsl::{WgslCaps, WgslKernel, emit_wgsl};
 
 /// Everything the wgpu driver can fail with.
 #[derive(Debug, thiserror::Error)]
@@ -195,15 +195,24 @@ fn acquire_device() -> Result<(wgpu::Device, wgpu::Queue, WgslCaps), WgpuError> 
     // at `request_device`, so this is gated on `adapter.features()` first,
     // never requested blind.
     let adapter_features = adapter.features();
-    let requested_features = adapter_features & wgpu::Features::SHADER_F16;
+    let requested_features = adapter_features & (wgpu::Features::SHADER_F16 | wgpu::Features::SUBGROUP);
+    let adapter_info = adapter.get_info();
     let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
         label: Some("omega-wgpu-plan"),
         required_features: requested_features,
         ..Default::default()
     }))
     .map_err(|error| WgpuError::NoDevice(error.to_string()))?;
+    // a fixed subgroup width is required to bake `@workgroup_size` to it
+    // (see `crate::wgsl::WgslCaps::subgroup_size`'s own doc) -- a
+    // heterogeneous adapter (min != max) never takes the cooperative path,
+    // it stays on the portable serial fold.
+    let subgroup_size = (device.features().contains(wgpu::Features::SUBGROUP)
+        && adapter_info.subgroup_min_size == adapter_info.subgroup_max_size)
+        .then_some(adapter_info.subgroup_min_size);
     let caps = WgslCaps {
         shader_f16: device.features().contains(wgpu::Features::SHADER_F16),
+        subgroup_size,
     };
     Ok((device, queue, caps))
 }
@@ -257,6 +266,18 @@ pub fn plan_named(
 ) -> Result<WgpuPlan, WgpuError> {
     let blocks = resolve_named_blocks(program, named)?;
     plan(program, symbols, &blocks, outputs)
+}
+
+impl WgpuPlan {
+    /// The capabilities [`plan`] found this plan's acquired device actually
+    /// supports — a diagnostic accessor for a caller (or a parity test) that
+    /// wants to know, before or after a run, whether a `Keep::Reduce` fold
+    /// took [`crate::wgsl::reduce_is_cooperative`]'s subgroup path or the
+    /// portable serial fold.
+    #[must_use]
+    pub fn caps(&self) -> WgslCaps {
+        self.caps
+    }
 }
 
 fn shader_module(device: &wgpu::Device, kernel: &WgslKernel) -> wgpu::ShaderModule {
@@ -625,7 +646,7 @@ pub fn execute_plan(plan: &mut WgpuPlan, blocks: &[QuantizedBlock<'_>]) -> Resul
             entries: &entries,
         });
 
-        let workgroups = kernel.threads.div_ceil(u64::from(WORKGROUP_SIZE)).max(1) as u32;
+        let workgroups = kernel.threads.div_ceil(u64::from(kernel.workgroup_size)).max(1) as u32;
         let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
             label: Some(kernel.entry.as_str()),
             timestamp_writes: None,

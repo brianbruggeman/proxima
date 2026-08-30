@@ -64,6 +64,6 @@ pub use msl::{
 #[cfg(feature = "wgpu-backend")]
 pub use wgpu_driver::{WgpuError, WgpuPlan, execute_plan as execute_plan_wgpu, execute_plan_named as execute_plan_named_wgpu, plan as plan_wgpu, plan_named as plan_named_wgpu};
 #[cfg(feature = "wgpu-backend")]
-pub use wgsl::{WORKGROUP_SIZE, WgslKernel, emit_wgsl};
+pub use wgsl::{WORKGROUP_SIZE, WgslCaps, WgslKernel, emit_wgsl};
 #[cfg(feature = "cuda")]
 pub use cuda::{CudaGridSpec, CudaKernel, WARP_SIZE, emit_cuda};

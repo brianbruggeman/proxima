@@ -126,6 +126,14 @@ pub struct WgslKernel {
     pub entry: String,
     pub bindings: Vec<Binding>,
     pub threads: u64,
+    /// Threads per workgroup this dispatch actually needs — [`WORKGROUP_SIZE`]
+    /// for every non-cooperative kernel, or the adapter's own subgroup width
+    /// for a cooperative reduce (see [`WgslCaps::subgroup_size`]'s own doc):
+    /// that kernel's `@compute @workgroup_size` is baked to exactly this
+    /// value so one dispatched workgroup is exactly one subgroup, the same
+    /// alignment `crate::msl::GridSpec::threadgroup_width` enforces for its
+    /// own SIMD-group cooperative path.
+    pub workgroup_size: u32,
 }
 
 /// Device capabilities [`emit_wgsl`] renders against — the WGSL counterpart
@@ -142,6 +150,14 @@ pub struct WgslCaps {
     /// [`EmitError::UnsupportedDType`], the same posture v1 already took
     /// before this capability existed.
     pub shader_f16: bool,
+    /// `Some(width)` when the acquired device requested `wgpu::Features::SUBGROUP`
+    /// AND the adapter reports a FIXED subgroup width (`subgroup_min_size ==
+    /// subgroup_max_size` — heterogeneous adapters report a range, which
+    /// this module cannot pin a `@workgroup_size` to at emit time). Gates
+    /// [`reduce_is_cooperative`]: `None` (the [`Default`]) keeps every
+    /// `Keep::Reduce` fold on the portable one-thread-per-output serial
+    /// path — never a silent guess at a width the device did not confirm.
+    pub subgroup_size: Option<u32>,
 }
 
 /// Emits a WGSL kernel from a bound [`BoundOp`] — see the module doc for
@@ -159,11 +175,22 @@ pub fn emit_wgsl(resolved: &BoundOp, caps: WgslCaps, packed_operands: &PackedOpe
     let entry = entry_name(resolved);
     let element_type = type_token(resolved.node, resolved.dtype, caps)?;
     let quantized = operand_codecs(resolved, packed_operands);
+    // `reduce_is_cooperative` is true only when `caps.subgroup_size` is
+    // `Some`, but re-deriving that rather than `.expect()`-ing it keeps this
+    // call site panic-free.
+    let cooperative_width = if reduce_is_cooperative(resolved, caps) {
+        caps.subgroup_size
+    } else {
+        None
+    };
     let source = match &resolved.kind {
         BoundOpKind::Elementwise { .. } => render_elementwise(resolved, &entry, element_type, &quantized),
         BoundOpKind::Reduce {
             keep: Keep::Reduce, ..
-        } => render_reduce(resolved, &entry, element_type, &quantized),
+        } => match cooperative_width {
+            Some(width) => render_reduce_cooperative(resolved, &entry, element_type, &quantized, width),
+            None => render_reduce(resolved, &entry, element_type, &quantized),
+        },
         BoundOpKind::Reduce {
             keep: Keep::Scan, ..
         } => render_scan(resolved, &entry, element_type),
@@ -180,12 +207,94 @@ pub fn emit_wgsl(resolved: &BoundOp, caps: WgslCaps, packed_operands: &PackedOpe
             });
         }
     };
+    let (threads, workgroup_size) = match cooperative_width {
+        Some(width) => (grid_threads(resolved) * u64::from(width), width),
+        None => (grid_threads(resolved), WORKGROUP_SIZE),
+    };
     Ok(WgslKernel {
         source,
         entry,
         bindings: bindings(resolved),
-        threads: grid_threads(resolved),
+        threads,
+        workgroup_size,
     })
+}
+
+fn is_cooperative_reduce_op(op: ScalarOp) -> bool {
+    matches!(op, ScalarOp::Add | ScalarOp::Multiply | ScalarOp::Maximum | ScalarOp::Minimum)
+}
+
+/// Whether `resolved` takes the SIMD-group-cooperative reduce path instead
+/// of the one-thread-per-output serial fold — the WGSL counterpart of
+/// `crate::msl::reduce_is_cooperative`: a `Keep::Reduce` fold, associative
+/// reduce op ([`is_cooperative_reduce_op`]), no gathered operand (a
+/// cooperative lane striding through the reduction would need its own
+/// fault-slot contribution, which this pass does not implement — default to
+/// serial when unsure), AND the device confirmed a fixed subgroup width
+/// (`caps.subgroup_size`).
+fn reduce_is_cooperative(resolved: &BoundOp, caps: WgslCaps) -> bool {
+    caps.subgroup_size.is_some()
+        && match &resolved.kind {
+            BoundOpKind::Reduce {
+                keep: Keep::Reduce,
+                reduce_op,
+                ..
+            } => gather_count(resolved) == 0 && is_cooperative_reduce_op(*reduce_op),
+            _ => false,
+        }
+}
+
+/// The WGSL subgroup builtin that combines one lane's private accumulator
+/// across the whole subgroup — the counterpart of `crate::msl::simd_combine_fn`.
+/// Only called for an [`is_cooperative_reduce_op`] body.
+fn subgroup_combine_fn(op: ScalarOp) -> &'static str {
+    match op {
+        ScalarOp::Add => "subgroupAdd",
+        ScalarOp::Multiply => "subgroupMul",
+        ScalarOp::Maximum => "subgroupMax",
+        ScalarOp::Minimum => "subgroupMin",
+        ScalarOp::Identity
+        | ScalarOp::Subtract
+        | ScalarOp::Divide
+        | ScalarOp::Negate
+        | ScalarOp::Reciprocal
+        | ScalarOp::Exponential
+        | ScalarOp::Logarithm
+        | ScalarOp::SquareRoot
+        | ScalarOp::Tanh
+        | ScalarOp::Erf
+        | ScalarOp::Greater
+        | ScalarOp::Equal
+        | ScalarOp::Select => unreachable!("subgroup_combine_fn is only called for a cooperative reduce_op"),
+    }
+}
+
+/// The algebraic identity `op` folds against without changing a value — the
+/// WGSL counterpart of `crate::msl::cooperative_identity_token`. Every lane
+/// but lane 0 seeds its private accumulator with this (never the `BoundOp`'s
+/// own `ReduceInit`, which may be `FirstElement` or otherwise mismatched
+/// with `op`), so folding it into the final subgroup combine can never
+/// perturb the result.
+fn cooperative_identity_token(op: ScalarOp) -> &'static str {
+    match op {
+        ScalarOp::Add => "0.0",
+        ScalarOp::Multiply => "1.0",
+        ScalarOp::Maximum => "bitcast<f32>(0xff800000u)",
+        ScalarOp::Minimum => "bitcast<f32>(0x7f800000u)",
+        ScalarOp::Identity
+        | ScalarOp::Subtract
+        | ScalarOp::Divide
+        | ScalarOp::Negate
+        | ScalarOp::Reciprocal
+        | ScalarOp::Exponential
+        | ScalarOp::Logarithm
+        | ScalarOp::SquareRoot
+        | ScalarOp::Tanh
+        | ScalarOp::Erf
+        | ScalarOp::Greater
+        | ScalarOp::Equal
+        | ScalarOp::Select => unreachable!("cooperative_identity_token is only called for a cooperative reduce_op"),
+    }
 }
 
 fn type_token(node: NodeId, dtype: DType, caps: WgslCaps) -> Result<&'static str, EmitError> {
@@ -777,6 +886,20 @@ fn kernel_signature(source: &mut String, entry: &str) {
     source.push_str("    let gid: i32 = i32(global_id.x);\n");
 }
 
+/// [`kernel_signature`]'s cooperative-reduce counterpart: dispatched at
+/// exactly `width` threads per workgroup (baked into `@workgroup_size` so
+/// one workgroup is exactly one subgroup) and carries the extra
+/// `subgroup_invocation_id` builtin every lane needs to know its own
+/// position within that subgroup.
+fn cooperative_kernel_signature(source: &mut String, entry: &str, width: u32) {
+    source.push_str(&format!("@compute @workgroup_size({width})\n"));
+    source.push_str(&format!(
+        "fn {entry}(@builtin(global_invocation_id) global_id: vec3<u32>, \
+         @builtin(subgroup_invocation_id) lane: u32) {{\n"
+    ));
+    source.push_str("    let gid: i32 = i32(global_id.x);\n");
+}
+
 fn codec_function_name(codec: PackedCodec) -> &'static str {
     match codec {
         PackedCodec::Q4K => "q4k_element",
@@ -993,6 +1116,156 @@ fn render_reduce(resolved: &BoundOp, entry: &str, element_type: &str, quantized:
     }
     let stored = write_cast(element_type, "accumulator");
     source.push_str(&format!("    out[out_offset] = {stored};\n"));
+    source.push_str("}\n");
+    source
+}
+
+/// The SIMD-group-cooperative fold: `width` lanes (one whole workgroup, see
+/// [`cooperative_kernel_signature`]) split one output element's reduction
+/// axis, each striding through `reduction_total` by `width` so every
+/// element is visited by exactly one lane, then combine via
+/// [`subgroup_combine_fn`] — the WGSL counterpart of
+/// `crate::msl::push_cooperative_reduce_body`'s general (non-packed,
+/// non-tiled) path. Only lane 0 writes the result, and only lane 0 seeds
+/// from the `BoundOp`'s real `ReduceInit`; every other lane seeds from
+/// [`cooperative_identity_token`] so the true seed folds into the group
+/// exactly once. Never called with a gathered operand (see
+/// [`reduce_is_cooperative`]'s own doc), so no fault/indices plumbing here.
+fn render_reduce_cooperative(
+    resolved: &BoundOp,
+    entry: &str,
+    element_type: &str,
+    quantized: &[Option<PackedCodec>],
+    width: u32,
+) -> String {
+    let BoundOpKind::Reduce {
+        reduce_op,
+        init,
+        output_axes,
+        ..
+    } = &resolved.kind
+    else {
+        unreachable!("render_reduce_cooperative is only called for a Keep::Reduce fold")
+    };
+    let rank = resolved.extents.len();
+    let rank_len = rank.max(1);
+    let operand_count = resolved.operands().len();
+    let output_rank = output_axes.len();
+    let output_rank_len = output_rank.max(1);
+    let reduce_dims = reduction_dims(resolved, output_axes);
+    let reduce_rank = reduce_dims.len();
+    let reduce_rank_len = reduce_rank.max(1);
+
+    let mut uniforms = String::new();
+    uniforms.push_str("struct Uniforms {\n");
+    uniforms.push_str("    output_total: i32,\n");
+    uniforms.push_str("    reduction_total: i32,\n");
+    uniforms.push_str(&format!("    output_extents: array<i32, {output_rank_len}>,\n"));
+    uniforms.push_str(&format!(
+        "    reduction_extents: array<i32, {reduce_rank_len}>,\n"
+    ));
+    uniforms.push_str(&format!("    operand_base: array<i32, {operand_count}>,\n"));
+    uniforms.push_str(&format!(
+        "    operand_strides: array<array<i32, {rank_len}>, {operand_count}>,\n"
+    ));
+    uniforms.push_str("    out_base: i32,\n");
+    uniforms.push_str(&format!("    out_strides: array<i32, {rank_len}>,\n"));
+    uniforms.push_str("};\n");
+
+    let mut source = String::new();
+    // no gather ever reaches here (see this function's own doc), so `quantized`
+    // is the only per-operand table `preamble` needs and `gather_count` is 0.
+    preamble(&mut source, operand_count, 0, quantized, element_type, &uniforms);
+    cooperative_kernel_signature(&mut source, entry, width);
+
+    source.push_str(&format!("    let output_index: i32 = gid / {width};\n"));
+    source.push_str("    if (output_index >= u.output_total) { return; }\n");
+
+    source.push_str(&format!("    var full_coord: array<i32, {rank_len}>;\n"));
+    for dim in 0..rank {
+        source.push_str(&format!("    full_coord[{dim}] = 0;\n"));
+    }
+
+    if output_rank > 0 {
+        source.push_str(&format!("    var output_coord: array<i32, {output_rank_len}>;\n"));
+        source.push_str("    var remaining: i32 = output_index;\n");
+        for index in (0..output_rank).rev() {
+            source.push_str(&format!(
+                "    output_coord[{index}] = remaining % u.output_extents[{index}]; \
+                 remaining = remaining / u.output_extents[{index}];\n"
+            ));
+        }
+        for (index, dim) in output_axes.iter().enumerate() {
+            source.push_str(&format!("    full_coord[{dim}] = output_coord[{index}];\n"));
+        }
+    }
+
+    let (init_expr, seeded_init) = fold_init_tokens(*init);
+    let identity = cooperative_identity_token(*reduce_op);
+    source.push_str(&format!("    var accumulator: {element_type};\n"));
+    source.push_str("    var seeded: bool;\n");
+    source.push_str("    if (lane == 0u) {\n");
+    source.push_str(&format!("        accumulator = {init_expr};\n"));
+    source.push_str(&format!("        seeded = {seeded_init};\n"));
+    source.push_str("    } else {\n");
+    source.push_str(&format!("        accumulator = {identity};\n"));
+    source.push_str("        seeded = true;\n");
+    source.push_str("    }\n");
+
+    source.push_str(&format!(
+        "    for (var r: i32 = i32(lane); r < u.reduction_total; r = r + {width}) {{\n"
+    ));
+    if reduce_rank > 0 {
+        source.push_str(&format!("        var reduction_coord: array<i32, {reduce_rank_len}>;\n"));
+        source.push_str("        var remaining_r: i32 = r;\n");
+        for index in (0..reduce_rank).rev() {
+            source.push_str(&format!(
+                "        reduction_coord[{index}] = remaining_r % u.reduction_extents[{index}]; \
+                 remaining_r = remaining_r / u.reduction_extents[{index}];\n"
+            ));
+        }
+        for (index, dim) in reduce_dims.iter().enumerate() {
+            source.push_str(&format!("        full_coord[{dim}] = reduction_coord[{index}];\n"));
+        }
+    }
+
+    for index in 0..operand_count {
+        source.push_str(&format!("        var off{index}: i32 = u.operand_base[{index}];\n"));
+        for dim in 0..rank {
+            source.push_str(&format!(
+                "        off{index} += full_coord[{dim}] * u.operand_strides[{index}][{dim}];\n"
+            ));
+        }
+    }
+    source.push_str(&format!(
+        "        var scratch: array<{element_type}, {}>;\n",
+        operand_count.max(1)
+    ));
+    for index in 0..operand_count {
+        let codec = quantized.get(index).copied().flatten();
+        let expr = wgsl_operand_read(index, &format!("off{index}"), codec);
+        let read = read_cast(element_type, &expr);
+        source.push_str(&format!("        scratch[{index}] = {read};\n"));
+    }
+    let value_expr = push_body_steps(&mut source, resolved.element_body(), "        ", element_type);
+    source.push_str(&format!("        let value: {element_type} = {value_expr};\n"));
+    let combine_expr = scalar_op_expr(*reduce_op, &["accumulator", "value"]);
+    source.push_str(&format!("        accumulator = select(value, {combine_expr}, seeded);\n"));
+    source.push_str("        seeded = true;\n");
+    source.push_str("    }\n");
+
+    let combine_fn = subgroup_combine_fn(*reduce_op);
+    source.push_str(&format!("    let reduced: {element_type} = {combine_fn}(accumulator);\n"));
+    source.push_str("    if (lane == 0u) {\n");
+    source.push_str("        var out_offset: i32 = u.out_base;\n");
+    for dim in 0..rank {
+        source.push_str(&format!(
+            "        out_offset += full_coord[{dim}] * u.out_strides[{dim}];\n"
+        ));
+    }
+    let stored = write_cast(element_type, "reduced");
+    source.push_str(&format!("        out[out_offset] = {stored};\n"));
+    source.push_str("    }\n");
     source.push_str("}\n");
     source
 }
@@ -1224,7 +1497,11 @@ mod tests {
         let shapes = infer(&program, &[]).expect("infer succeeds");
         let bound = bind(&program, &shapes, &[]).expect("bind succeeds");
         let bound = bound.into_iter().next().expect("one bound op");
-        let kernel = emit_wgsl(&bound, WgslCaps { shader_f16: true }, &PackedOperands::new()).expect("f16 emits when shader_f16 is set");
+        let caps = WgslCaps {
+            shader_f16: true,
+            ..WgslCaps::default()
+        };
+        let kernel = emit_wgsl(&bound, caps, &PackedOperands::new()).expect("f16 emits when shader_f16 is set");
         assert!(kernel.source.starts_with("enable f16;\n"));
         assert!(kernel.source.contains("tanh("));
         assert!(kernel.source.contains("f16(in0[off0])"), "operand read must cast f32 down to f16");
@@ -1257,5 +1534,84 @@ mod tests {
         let kernel = emit_wgsl(&bound, WgslCaps::default(), &PackedOperands::new()).expect("bf16 collapses to f32 unconditionally");
         assert!(!kernel.source.contains("enable f16"));
         assert!(kernel.source.contains("var scratch: array<f32, 1>"));
+    }
+
+    /// `sum_k lhs[m, k] * rhs[k, n]` — the matmul shape [`reduce_is_cooperative`]
+    /// selects for.
+    fn matmul_reduce_op(m: u32, k: u32, n: u32) -> BoundOp {
+        use proxima_tensor::{Reduce, ReduceInit};
+
+        let mut program = Vec::new();
+        let lhs = append(
+            &mut program,
+            Op::Input {
+                dtype: DType::Float32,
+                shape: vec![Extent::Static(m), Extent::Static(k)],
+                name: None,
+            },
+        );
+        let rhs = append(
+            &mut program,
+            Op::Input {
+                dtype: DType::Float32,
+                shape: vec![Extent::Static(k), Extent::Static(n)],
+                name: None,
+            },
+        );
+        let product = append(
+            &mut program,
+            Op::Elementwise {
+                dtype: DType::Float32,
+                body: ScalarOp::Multiply,
+                operands: vec![
+                    (lhs, IndexMap::Affine(map::projection(3, &[0, 2]))),
+                    (rhs, IndexMap::Affine(map::projection(3, &[2, 1]))),
+                ],
+                name: None,
+            },
+        );
+        append(
+            &mut program,
+            Op::Reduce(Reduce {
+                dtype: DType::Float32,
+                body: ScalarOp::Add,
+                init: ReduceInit::Zero,
+                operand: product,
+                in_map: IndexMap::Affine(map::projection(3, &[0, 1, 2])),
+                out_map: IndexMap::Affine(map::projection(3, &[0, 1])),
+                keep: Keep::Reduce,
+                name: Some("matmul".into()),
+            }),
+        );
+        let shapes = infer(&program, &[]).expect("infer succeeds");
+        let bound = bind(&program, &shapes, &[]).expect("bind succeeds");
+        bound.into_iter().next_back().expect("one bound op (the reduce)")
+    }
+
+    #[test]
+    fn a_cooperative_reduce_renders_subgroup_builtins_and_a_matching_workgroup_size() {
+        let bound = matmul_reduce_op(4, 37, 3);
+        let caps = WgslCaps {
+            subgroup_size: Some(32),
+            ..WgslCaps::default()
+        };
+        let kernel = emit_wgsl(&bound, caps, &PackedOperands::new()).expect("cooperative reduce emits");
+        assert!(kernel.source.contains("@workgroup_size(32)"));
+        assert!(kernel.source.contains("@builtin(subgroup_invocation_id) lane: u32"));
+        assert!(kernel.source.contains("subgroupAdd(accumulator)"));
+        assert_eq!(kernel.workgroup_size, 32);
+        // one whole subgroup dispatched per output element (m * n = 12).
+        assert_eq!(kernel.threads, 12 * 32);
+    }
+
+    #[test]
+    fn without_a_confirmed_subgroup_width_the_same_reduce_stays_serial() {
+        let bound = matmul_reduce_op(4, 37, 3);
+        let kernel =
+            emit_wgsl(&bound, WgslCaps::default(), &PackedOperands::new()).expect("serial reduce emits");
+        assert!(!kernel.source.contains("subgroupAdd"));
+        assert!(kernel.source.contains("@workgroup_size(64)"));
+        assert_eq!(kernel.workgroup_size, WORKGROUP_SIZE);
+        assert_eq!(kernel.threads, 12);
     }
 }
