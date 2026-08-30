@@ -16,8 +16,9 @@
 //! - [`loss::mse`] / [`loss::cross_entropy`] / [`loss::softmax_cross_entropy`]
 //!   — the same graph-building shape, for the scalar objective a training
 //!   loop differentiates.
-//! - [`optimizer::adam_step`] — the Adam update as an elementwise
-//!   expression over `(param, grad, m, v, step)`.
+//! - [`optimizer::adam_step`] / [`optimizer::sgd_step`] /
+//!   [`optimizer::rmsprop_step`] / [`optimizer::adamw_step`] — parameter
+//!   updates as elementwise expressions over `(param, grad, ...)`.
 //! - [`sparse::dedupe_and_sum_rows`] — the host-side scatter-add a gathered
 //!   operand's adjoint (`adjoint::GatheredContribution`) needs applied back
 //!   onto its full shape, `O(touched x row_len)` rather than the dense
