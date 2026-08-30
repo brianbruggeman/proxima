@@ -21,16 +21,24 @@
 //! that `graph` field) -- together they are "lift, then serialize" fused
 //! into the only shape this crate's types make sound.
 //!
-//! # Faithful, primitive-to-primitive
+//! # Faithful, primitive-to-primitive -- with one named pattern raised back
 //!
 //! Every [`Op`] form lowers to the same primitive ONNX operators
 //! [`crate::lower`] already reads back (`Add`/`Mul`/`Max`/... for
 //! [`ScalarOp`], `ReduceSum`/`ReduceMax`/`ReduceMin`/`ReduceProd` for
 //! [`Reduce`], `Transpose`/`Unsqueeze`/`Gather` for [`IndexMap`]
-//! addressing). A contracted `IndexMap` (the shape `lower::matmul2d`
-//! builds) lifts as `Mul` + `ReduceSum`, never `MatMul` -- raising
-//! primitives back into a fused op is deferred pattern-raising, out of
-//! scope here (see this crate's own crate-level doc).
+//! addressing). This is the default and the fallback for everything this
+//! module does not specifically recognize.
+//!
+//! [`try_matmul_shape`] is the one exception: a `Reduce(Add)`-over-
+//! `Elementwise(Multiply)` in the exact rank-2, untransposed, unbatched
+//! shape `lower::lower_matmul` and `lower::matmul2d` (via
+//! `lower::lower_gemm`, untransposed) both build lifts as a single ONNX
+//! `MatMul` node, not `Mul` + `ReduceSum`. Batched or transposed
+//! contractions, and the materialized-window `Reduce` [`crate::lower::conv2d_core`]
+//! builds (which would raise to a named `Conv`), still fall through to the
+//! faithful primitive lift -- further, genuinely expressible pattern-raising
+//! deferred here for lack of time, not because the shape resists it.
 //!
 //! # Coverage and gaps
 //!
