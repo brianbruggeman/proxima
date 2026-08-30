@@ -98,12 +98,18 @@ proxima-tensor = { path = "../proxima-tensor", default-features = false, feature
 thiserror = { workspace = true, default-features = false }
 # `wgsl`: this crate emits WGSL, never SPIR-V/HLSL text, so no other shader
 # frontend is needed. `metal`: the backend this box actually dispatches
-# through (arm64 macOS); `vulkan`/`gles`/`dx12` are NOT enabled here because
-# nothing in this crate targets those platforms yet — a future cross-platform
-# landing adds them as their own log row, not silently here.
+# through on arm64 macOS. `vulkan`: the backend every non-mac target (Linux
+# CI, the versailles RTX 2070) actually dispatches through — without it
+# `wgpu::Instance::request_adapter` finds zero backends on those hosts and
+# every `wgpu_parity` test panics before it can run. Proven sufficient on
+# versailles (Arch, x86_64, RTX 2070): 11/11 `wgpu_parity` tests pass,
+# including the Mistral forward and the cooperative subgroup-width-32 path.
+# `dx12`/`gles` stay off: nothing in this crate targets Windows or WebGL yet
+# — a future landing adds them as their own log row, not silently here.
 wgpu = { version = "30.0.1", default-features = false, features = [
     "wgsl",
     "metal",
+    "vulkan",
 ], optional = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]
