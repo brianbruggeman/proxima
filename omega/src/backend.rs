@@ -291,6 +291,14 @@ pub fn plan_named(
             }
         }
         Backend::Cuda => {
+            // `crate::cuda::emit_cuda` exists and is tested (structural
+            // golden tests over emitted CUDA C source — see that module's
+            // own doc for why numeric execution parity is not provable on a
+            // host with no NVIDIA GPU/toolchain). What is still missing is
+            // the DRIVER half: no `cudarc`/`cust` dependency, no
+            // `cuModuleLoad`/`cuLaunchKernel`, so a caller cannot actually
+            // run a program on this backend yet — same shape
+            // `Backend::Vulkan`'s stub takes.
             #[cfg(feature = "cuda")]
             {
                 Err(BackendError::NotImplemented { backend: "cuda" })

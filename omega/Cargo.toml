@@ -53,6 +53,15 @@ metal = [
 # there is no driver behind any of these four yet, only the name and the
 # feature-gated branch in `backend::plan_named` that reports so.
 vulkan = []
+# `src/cuda.rs`: a real, tested CUDA C kernel emitter over the same BoundOp
+# descriptor `msl`/`wgsl` emit from (elementwise/reduce/scan, gather with an
+# atomicOr fault buffer, all five packed codecs, a warp-shuffle cooperative
+# reduce) — dependency-free, pure string generation, so it builds and its
+# tests run on any host including this crate's macOS CI gate with no NVIDIA
+# GPU present. `Backend::Cuda` stays `NotImplemented` in `backend.rs`: this
+# feature has no DRIVER yet (no `cudarc`/`cust`, no `cuModuleLoad`/
+# `cuLaunchKernel`), so nothing here can actually dispatch a kernel to a
+# device — only emit the source a future driver would compile and launch.
 cuda = []
 npu = []
 ane = []
