@@ -251,6 +251,7 @@ fn lower_node(
         "Reshape" => lower_reshape(values, initializer_data, node),
         "Flatten" => lower_flatten(values, node),
         "Concat" => lower_concat(program, values, node),
+        "Conv" => lower_conv(program, values, node),
         other => Err(LowerError::UnsupportedOp { name: node.name.to_string(), op_type: other.to_string() }),
     }
 }
@@ -1087,6 +1088,284 @@ fn concat_base_pattern(iter_rank: u16, rank: usize, skip_axis: usize) -> IndexPa
     IndexPattern { iter_rank, axes }
 }
 
+fn attr_str<'node>(node: &'node NodeProto<'_>, name: &str) -> Option<&'node [u8]> {
+    find_attr(node, name).map(|attribute| attribute.s)
+}
+
+fn attr_ints_or(node: &NodeProto<'_>, name: &str, default: &[i64]) -> Vec<i64> {
+    attr_ints(node, name).map(<[i64]>::to_vec).unwrap_or_else(|| default.to_vec())
+}
+
+/// Zero- (or `fill`-) pads one axis of `value` by `(before, after)` --
+/// `Conv`/`MaxPool`/`AveragePool`'s `pads` attribute. This is
+/// [`concat_pair`]'s clamp-and-select shape with one real operand instead of
+/// two: an [`Op::Iota`] position, shifted and clamped into the source's
+/// valid range for an [`IndexMap::Computed`] gather, and a `Greater`-built
+/// validity mask that [`ScalarOp::Select`] routes between the gathered value
+/// and `fill`.
+///
+/// A negative-offset [`AxisIndex`] cannot spell this directly:
+/// `shape::infer`'s `unify_iteration_space` rejects an out-of-bounds read at
+/// the iteration space's own zero origin (`specs/conv2d.toml`'s header
+/// documents this empirically), so the padded region must be a real,
+/// zero-origined operand before any window reads it.
+fn pad_axis(program: &mut Vec<Op>, value: &Value, axis: usize, before: u64, after: u64, fill: f32) -> Value {
+    if before == 0 && after == 0 {
+        return value.clone();
+    }
+    let rank = value.shape.len();
+    let rank_u16 = rank as u16;
+    let extent = value.shape[axis];
+    let out_extent = extent + before + after;
+    let mut out_shape = value.shape.clone();
+    out_shape[axis] = out_extent;
+
+    let position = append(program, Op::Iota { dtype: DType::Float32, extent: Extent::Static(out_extent as u32) });
+    let before_const = constant_scalar(program, before as f32);
+    let zero_const = constant_scalar(program, 0.0);
+    let minus_one_const = constant_scalar(program, -1.0);
+    let extent_const = constant_scalar(program, extent as f32);
+    let extent_minus1_const = constant_scalar(program, extent as f32 - 1.0);
+
+    let shifted = build_elementwise(
+        program,
+        ScalarOp::Subtract,
+        alloc::vec![(position, IndexMap::Affine(identity_pattern(1))), (before_const, IndexMap::Affine(scalar_broadcast_pattern(1)))],
+    );
+    let clamped_low = build_elementwise(
+        program,
+        ScalarOp::Maximum,
+        alloc::vec![(shifted, IndexMap::Affine(identity_pattern(1))), (zero_const, IndexMap::Affine(scalar_broadcast_pattern(1)))],
+    );
+    let clamped_index = build_elementwise_dtype(
+        program,
+        DType::Int32,
+        ScalarOp::Minimum,
+        alloc::vec![(clamped_low, IndexMap::Affine(identity_pattern(1))), (extent_minus1_const, IndexMap::Affine(scalar_broadcast_pattern(1)))],
+    );
+    let valid_low = build_elementwise(
+        program,
+        ScalarOp::Greater,
+        alloc::vec![(shifted, IndexMap::Affine(identity_pattern(1))), (minus_one_const, IndexMap::Affine(scalar_broadcast_pattern(1)))],
+    );
+    let valid_high = build_elementwise(
+        program,
+        ScalarOp::Greater,
+        alloc::vec![(extent_const, IndexMap::Affine(scalar_broadcast_pattern(1))), (shifted, IndexMap::Affine(identity_pattern(1)))],
+    );
+    let mask = build_elementwise(
+        program,
+        ScalarOp::Multiply,
+        alloc::vec![(valid_low, IndexMap::Affine(identity_pattern(1))), (valid_high, IndexMap::Affine(identity_pattern(1)))],
+    );
+
+    let index_map_pattern = projection(rank_u16, &[axis as u16]);
+    let base = concat_base_pattern(rank_u16, rank, axis);
+    let gathered_map = IndexMap::Computed { indices: clamped_index, index_map: index_map_pattern, base, gathered_dim: axis as u16 };
+    let gathered = build_elementwise(program, ScalarOp::Identity, alloc::vec![(value.node, gathered_map)]);
+
+    let fill_const = constant_scalar(program, fill);
+    let output = build_elementwise(
+        program,
+        ScalarOp::Select,
+        alloc::vec![
+            (mask, IndexMap::Affine(projection(rank_u16, &[axis as u16]))),
+            (gathered, IndexMap::Affine(identity_pattern(rank))),
+            (fill_const, IndexMap::Affine(scalar_broadcast_pattern(rank))),
+        ],
+    );
+    Value { node: output, shape: out_shape, view: None }
+}
+
+/// One `stride*out + dilation*kernel` window term -- `map.rs`'s
+/// `a_convolution_axis_is_two_terms` unit test is the whole reason
+/// [`AxisIndex`] sums terms instead of holding one.
+fn window_axis(out_axis: u16, kernel_axis: u16, stride: i64, dilation: i64) -> AxisIndex {
+    AxisIndex {
+        terms: alloc::vec![AxisTerm::scaled(out_axis, stride as i32), AxisTerm::scaled(kernel_axis, dilation as i32)].into_iter().collect(),
+        offset: 0,
+    }
+}
+
+/// `Conv`'s output spatial extent for one axis, ONNX's own formula:
+/// `floor((padded - dilation*(kernel-1) - 1) / stride) + 1`. `None` when the
+/// kernel's dilated span does not fit the padded axis at all.
+fn conv_output_extent(padded_extent: u64, kernel_extent: u64, stride: i64, dilation: i64) -> Option<u64> {
+    let span = (dilation as u64).checked_mul(kernel_extent.checked_sub(1)?)?.checked_add(1)?;
+    if span > padded_extent {
+        return None;
+    }
+    Some((padded_extent - span) / stride as u64 + 1)
+}
+
+/// The stride/dilation/output-extent parameters [`window_materialize`] and
+/// [`conv_output_extent`] share -- one field group traveling together
+/// (`Reduce`'s own doc names this idiom), not ten positional arguments.
+#[derive(Debug, Clone, Copy)]
+struct WindowSpec {
+    out_h: u64,
+    out_w: u64,
+    kernel_h: u64,
+    kernel_w: u64,
+    stride_h: i64,
+    stride_w: i64,
+    dilation_h: i64,
+    dilation_w: i64,
+}
+
+/// Materializes `image`'s (already-padded, rank-4 `[n, c, h, w]`) sliding
+/// window as a concrete rank-6 `[n, c, out_h, out_w, kh, kw]` tensor: the
+/// two-term window axis multiplied against an all-ones [`Op::Constant`]
+/// stamp shaped `[out_h, out_w, kh, kw]`.
+///
+/// The stamp is not decoration -- [`shape::infer`](proxima_tensor::shape)'s
+/// `unify_iteration_space` (`proxima-tensor/src/shape.rs:195-213`) resolves
+/// an iteration axis's extent only from a *pure* single-term, zero-offset
+/// projection, never from a windowed axis, and [`Op::Reduce`] unifies over
+/// its one operand alone. Nothing else in this op purely projects
+/// `oy`/`ox`/`ky`/`kx`, so without the stamp those four axes stay
+/// unconstrained and inference fails. This is `specs/conv2d.toml`'s own
+/// kernel-replication trick (its header explains the same requirement),
+/// spelled with a cheap all-ones marker instead of duplicated real weight
+/// data -- both pay im2col's inherent `O(out_h*out_w*kh*kw)` materialization
+/// cost; neither is a new ISA primitive.
+fn window_materialize(program: &mut Vec<Op>, image: &Value, spec: WindowSpec) -> Value {
+    let image_pattern = IndexPattern {
+        iter_rank: 6,
+        axes: alloc::vec![
+            AxisIndex { terms: core::iter::once(AxisTerm::projection(0)).collect(), offset: 0 },
+            AxisIndex { terms: core::iter::once(AxisTerm::projection(1)).collect(), offset: 0 },
+            window_axis(2, 4, spec.stride_h, spec.dilation_h),
+            window_axis(3, 5, spec.stride_w, spec.dilation_w),
+        ],
+    };
+    let stamp = append(
+        program,
+        Op::Constant {
+            dtype: DType::Float32,
+            shape: alloc::vec![spec.out_h, spec.out_w, spec.kernel_h, spec.kernel_w].iter().map(|&extent| Extent::Static(extent as u32)).collect(),
+            value: 1.0,
+        },
+    );
+    let stamp_pattern = projection(6, &[2, 3, 4, 5]);
+    let windowed = build_elementwise(
+        program,
+        ScalarOp::Multiply,
+        alloc::vec![(image.node, IndexMap::Affine(image_pattern)), (stamp, IndexMap::Affine(stamp_pattern))],
+    );
+    let shape = alloc::vec![image.shape[0], image.shape[1], spec.out_h, spec.out_w, spec.kernel_h, spec.kernel_w];
+    Value { node: windowed, shape, view: None }
+}
+
+/// `Conv`: `Reduce(Add)` over `Elementwise(Multiply)` of the materialized
+/// window against the kernel weights -- `specs/conv2d.toml`'s composition
+/// (see that file's own doc), with the weight tensor left at its natural
+/// ONNX `[co, ci, kh, kw]` shape (a pure per-axis projection, no
+/// broadcast-to-every-output-position replication) since [`window_materialize`]
+/// already supplies the pure `oy`/`ox` projections `shape::infer` needs.
+///
+/// Deferred, named gaps (never silently wrong): `group != 1` (grouped
+/// convolution needs a channel-group axis this composition does not carry),
+/// any rank other than 4 (1D/3D `Conv`), `auto_pad` other than `NOTSET`
+/// (`ConvTranspose` is a separate, unimplemented op entirely).
+fn lower_conv(program: &mut Vec<Op>, values: &mut BTreeMap<String, Value>, node: &NodeProto<'_>) -> Result<(), LowerError> {
+    let image = lookup(values, node, 0)?.clone();
+    let weight = lookup(values, node, 1)?.clone();
+    let name = node.name.to_string();
+    let op_type = node.op_type.to_string();
+
+    if image.shape.len() != 4 || weight.shape.len() != 4 {
+        return Err(LowerError::UnsupportedShape {
+            name,
+            op_type,
+            reason: "Conv lowering supports 2D convolution (rank-4 NCHW image, rank-4 CoCiKhKw weight) only".to_string(),
+        });
+    }
+    if let Some(auto_pad) = attr_str(node, "auto_pad")
+        && auto_pad != b"NOTSET"
+    {
+        return Err(LowerError::UnsupportedShape { name, op_type, reason: "Conv lowering supports auto_pad=NOTSET only".to_string() });
+    }
+    let group = attr_int(node, "group").unwrap_or(1);
+    if group != 1 {
+        return Err(LowerError::UnsupportedShape { name, op_type, reason: "Conv lowering supports group=1 only (grouped convolution deferred)".to_string() });
+    }
+
+    let strides = attr_ints_or(node, "strides", &[1, 1]);
+    let dilations = attr_ints_or(node, "dilations", &[1, 1]);
+    let pads = attr_ints_or(node, "pads", &[0, 0, 0, 0]);
+    if strides.len() != 2 || dilations.len() != 2 || pads.len() != 4 {
+        return Err(LowerError::UnsupportedShape { name, op_type, reason: "Conv lowering supports 2D strides/dilations/pads only".to_string() });
+    }
+    let (stride_h, stride_w) = (strides[0], strides[1]);
+    let (dilation_h, dilation_w) = (dilations[0], dilations[1]);
+    let (pad_top, pad_left, pad_bottom, pad_right) = (pads[0], pads[1], pads[2], pads[3]);
+
+    let batch = image.shape[0];
+    let in_channels = image.shape[1];
+    let out_channels = weight.shape[0];
+    let kernel_h = weight.shape[2];
+    let kernel_w = weight.shape[3];
+    if weight.shape[1] != in_channels {
+        return Err(LowerError::UnsupportedShape {
+            name: node.name.to_string(),
+            op_type: node.op_type.to_string(),
+            reason: format!("Conv weight in-channels {} does not match image channels {in_channels}", weight.shape[1]),
+        });
+    }
+
+    let padded_w = pad_axis(program, &image, 3, pad_left as u64, pad_right as u64, 0.0);
+    let padded = pad_axis(program, &padded_w, 2, pad_top as u64, pad_bottom as u64, 0.0);
+
+    let out_h = conv_output_extent(padded.shape[2], kernel_h, stride_h, dilation_h).ok_or_else(|| LowerError::UnsupportedShape {
+        name: node.name.to_string(),
+        op_type: node.op_type.to_string(),
+        reason: "Conv kernel does not fit the padded image height".to_string(),
+    })?;
+    let out_w = conv_output_extent(padded.shape[3], kernel_w, stride_w, dilation_w).ok_or_else(|| LowerError::UnsupportedShape {
+        name: node.name.to_string(),
+        op_type: node.op_type.to_string(),
+        reason: "Conv kernel does not fit the padded image width".to_string(),
+    })?;
+
+    let windowed =
+        window_materialize(program, &padded, WindowSpec { out_h, out_w, kernel_h, kernel_w, stride_h, stride_w, dilation_h, dilation_w });
+
+    // shared iteration space: 0=n 1=co 2=oy 3=ox 4=ci 5=ky 6=kx
+    let windowed_pattern = projection(7, &[0, 4, 2, 3, 5, 6]);
+    let weight_pattern = projection(7, &[1, 4, 5, 6]);
+    let product = build_elementwise(
+        program,
+        ScalarOp::Multiply,
+        alloc::vec![(windowed.node, IndexMap::Affine(windowed_pattern)), (weight.node, IndexMap::Affine(weight_pattern))],
+    );
+
+    let out_shape = alloc::vec![batch, out_channels, out_h, out_w];
+    let reduced = build_reduce(program, ScalarOp::Add, ReduceInit::Zero, product, identity_pattern(7), projection(7, &[0, 1, 2, 3]), Some("conv2d".to_string()));
+
+    let result = match node.input.get(2) {
+        Some(bias_name) => {
+            let bias = lookup_by_name(values, bias_name, node.op_type, node.name)?.clone();
+            if bias.shape != alloc::vec![out_channels] {
+                return Err(LowerError::UnsupportedShape {
+                    name: node.name.to_string(),
+                    op_type: node.op_type.to_string(),
+                    reason: "Conv bias must be a rank-1 tensor sized to out_channels".to_string(),
+                });
+            }
+            build_elementwise(
+                program,
+                ScalarOp::Add,
+                alloc::vec![(reduced, IndexMap::Affine(identity_pattern(4))), (bias.node, IndexMap::Affine(projection(4, &[1])))],
+            )
+        }
+        None => reduced,
+    };
+
+    bind_output(values, node, 0, result, out_shape);
+    Ok(())
+}
+
 fn tensor_shape(tensor: &TensorProto<'_>) -> Vec<u64> {
     tensor.dims.iter().map(|&value| value as u64).collect()
 }
@@ -1613,5 +1892,124 @@ mod tests {
         }
         let error = value_info_shape(&value_info).expect_err("symbolic dim rejected");
         assert!(matches!(error, LowerError::UnsupportedShape { .. }));
+    }
+
+    fn ints_attribute(name: &'static str, ints: Vec<i64>) -> AttributeProto<'static> {
+        AttributeProto { name, ints, ..AttributeProto::default() }
+    }
+
+    /// `Conv`, stride 1, no padding: a 3x3 all-ones kernel over a `4x4`
+    /// image is a 3x3 sliding-window sum -- `Reduce(Add)` over
+    /// `Elementwise(Multiply)` against the [`window_materialize`]d input,
+    /// [`lower_conv`]'s whole composition, hand-verified against an
+    /// independently summed reference.
+    #[test]
+    fn conv_stride1_no_pad_sums_each_3x3_window() {
+        let image = f32_initializer("image", &[1, 1, 4, 4], &(1..=16).map(|value| value as f32).collect::<Vec<_>>());
+        let weight = f32_initializer("weight", &[1, 1, 3, 3], &[1.0; 9]);
+        let node = NodeProto { input: vec!["image", "weight"], output: vec!["y"], op_type: "Conv", name: "conv", ..NodeProto::default() };
+        let graph = GraphProto {
+            node: vec![node],
+            name: "conv_stride1_graph",
+            initializer: vec![image, weight],
+            output: vec![ValueInfoProto { name: "y", ..ValueInfoProto::default() }],
+            ..GraphProto::default()
+        };
+
+        let lowered = lower_graph(&graph).expect("lower Conv");
+        let named: Vec<(&str, &[f32])> = lowered.initializers.iter().map(|(name, data)| (name.as_str(), data.as_slice())).collect();
+        let output = lowered.graph_outputs[0].1;
+        let evaluated = evaluate_named(&lowered.program, &[], &named, &[output]).expect("evaluate Conv");
+        let (data, shape) = evaluated.get(output).expect("y present");
+
+        assert_eq!(shape, &[1, 1, 2, 2]);
+        assert_eq!(data, &[54.0, 63.0, 90.0, 99.0], "hand-summed 3x3 windows over the 4x4 image");
+    }
+
+    /// `Conv`, stride 2 and `pads = [1, 1, 1, 1]`: exercises [`pad_axis`]'s
+    /// clamp-and-select zero padding together with the two-term
+    /// `stride*out + dilation*kernel` window axis in the same op, hand-
+    /// verified against a manually zero-padded 6x6 reference.
+    #[test]
+    fn conv_stride2_with_padding_sums_each_padded_window() {
+        let image = f32_initializer("image", &[1, 1, 4, 4], &(1..=16).map(|value| value as f32).collect::<Vec<_>>());
+        let weight = f32_initializer("weight", &[1, 1, 3, 3], &[1.0; 9]);
+        let node = NodeProto {
+            input: vec!["image", "weight"],
+            output: vec!["y"],
+            op_type: "Conv",
+            name: "conv",
+            attribute: vec![ints_attribute("strides", vec![2, 2]), ints_attribute("pads", vec![1, 1, 1, 1])],
+            ..NodeProto::default()
+        };
+        let graph = GraphProto {
+            node: vec![node],
+            name: "conv_stride2_pad1_graph",
+            initializer: vec![image, weight],
+            output: vec![ValueInfoProto { name: "y", ..ValueInfoProto::default() }],
+            ..GraphProto::default()
+        };
+
+        let lowered = lower_graph(&graph).expect("lower Conv stride2 pad1");
+        let named: Vec<(&str, &[f32])> = lowered.initializers.iter().map(|(name, data)| (name.as_str(), data.as_slice())).collect();
+        let output = lowered.graph_outputs[0].1;
+        let evaluated = evaluate_named(&lowered.program, &[], &named, &[output]).expect("evaluate Conv stride2 pad1");
+        let (data, shape) = evaluated.get(output).expect("y present");
+
+        assert_eq!(shape, &[1, 1, 2, 2]);
+        assert_eq!(data, &[14.0, 30.0, 57.0, 99.0], "hand-summed windows over the zero-padded 6x6 image");
+    }
+
+    /// `Conv` with a bias operand: the trailing broadcast `Add` [`lower_conv`]
+    /// appends over the `co` axis, on top of the stride-1 no-pad case above.
+    #[test]
+    fn conv_adds_a_per_output_channel_bias() {
+        let image = f32_initializer("image", &[1, 1, 4, 4], &(1..=16).map(|value| value as f32).collect::<Vec<_>>());
+        let weight = f32_initializer("weight", &[1, 1, 3, 3], &[1.0; 9]);
+        let bias = f32_initializer("bias", &[1], &[100.0]);
+        let node = NodeProto { input: vec!["image", "weight", "bias"], output: vec!["y"], op_type: "Conv", name: "conv", ..NodeProto::default() };
+        let graph = GraphProto {
+            node: vec![node],
+            name: "conv_bias_graph",
+            initializer: vec![image, weight, bias],
+            output: vec![ValueInfoProto { name: "y", ..ValueInfoProto::default() }],
+            ..GraphProto::default()
+        };
+
+        let lowered = lower_graph(&graph).expect("lower Conv with bias");
+        let named: Vec<(&str, &[f32])> = lowered.initializers.iter().map(|(name, data)| (name.as_str(), data.as_slice())).collect();
+        let output = lowered.graph_outputs[0].1;
+        let evaluated = evaluate_named(&lowered.program, &[], &named, &[output]).expect("evaluate Conv with bias");
+        let (data, shape) = evaluated.get(output).expect("y present");
+
+        assert_eq!(shape, &[1, 1, 2, 2]);
+        assert_eq!(data, &[154.0, 163.0, 190.0, 199.0], "bias 100 added to every windowed sum");
+    }
+
+    /// `Conv` with `group=2`: a deferred, named gap ([`LowerError::UnsupportedShape`]),
+    /// never a silently wrong lowering -- the affine window map has no
+    /// channel-group axis, and this composition does not fabricate one.
+    #[test]
+    fn conv_grouped_convolution_is_a_named_unsupported_shape_not_a_panic() {
+        let image = f32_initializer("image", &[1, 2, 4, 4], &[0.0; 32]);
+        let weight = f32_initializer("weight", &[2, 1, 3, 3], &[1.0; 18]);
+        let node = NodeProto {
+            input: vec!["image", "weight"],
+            output: vec!["y"],
+            op_type: "Conv",
+            name: "conv",
+            attribute: vec![AttributeProto { name: "group", i: 2, ..AttributeProto::default() }],
+            ..NodeProto::default()
+        };
+        let graph = GraphProto {
+            node: vec![node],
+            name: "conv_grouped_graph",
+            initializer: vec![image, weight],
+            output: vec![ValueInfoProto { name: "y", ..ValueInfoProto::default() }],
+            ..GraphProto::default()
+        };
+
+        let error = lower_graph(&graph).expect_err("grouped Conv is a deferred gap");
+        assert!(matches!(error, LowerError::UnsupportedShape { .. }), "expected UnsupportedShape, got {error:?}");
     }
 }
