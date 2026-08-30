@@ -675,3 +675,91 @@ fn onnx_bytes_lower_to_op_and_evaluate_a_two_layer_mlp() {
     assert!((row0_sum - 1.0).abs() < 1e-5, "softmax row 0 sums to {row0_sum}, not 1.0");
     assert!((row1_sum - 1.0).abs() < 1e-5, "softmax row 1 sums to {row1_sum}, not 1.0");
 }
+
+// -- the writable round trip: Op program -> ONNX wire bytes -> Op program.
+
+/// The full write-side loop this crate's ONNX support now closes:
+/// `onnx bytes -> lower -> Op` (the read half, already proven above by
+/// [`onnx_bytes_lower_to_op_and_evaluate_a_two_layer_mlp`]) followed by
+/// `Op -> lift -> onnx bytes -> lower -> Op` (the write half). Both `Op`
+/// programs are evaluated via [`proxima_tensor::cpu::evaluate_named`] and
+/// must agree to `1e-4`, proving [`crate::lift::lift_model`] plus
+/// [`crate::lower::lower_graph`] round-trip the same 2-layer MLP
+/// (`Gemm -> Relu -> Gemm -> Softmax`, already decomposed by the first
+/// lowering into the primitive `Op` vocabulary [`crate::lift`]'s own doc
+/// says it lifts faithfully -- `Mul`/`Add`/`Max`/`Sub`/`Exp`/`Div`
+/// elementwise nodes and `ReduceSum`/`ReduceMax` reduce nodes, never
+/// `Gemm`/`Softmax` themselves) without drifting numerically.
+#[test]
+fn op_program_lifts_to_onnx_bytes_and_lowers_back_to_an_equivalent_program() {
+    let x_data: [f32; 6] = [1.0, 0.5, -1.0, 0.0, 2.0, 1.0];
+    let w1_data: [f32; 12] = [0.1, 0.2, -0.1, 0.05, 0.3, -0.2, 0.4, 0.1, -0.5, 0.1, 0.2, -0.3];
+    let b1_data: [f32; 4] = [0.1, -0.1, 0.05, 0.0];
+    let w2_data: [f32; 8] = [0.2, -0.3, 0.1, 0.4, -0.2, 0.05, 0.3, 0.1];
+    let b2_data: [f32; 2] = [0.0, 0.1];
+
+    let x_shape = build_tensor_shape(&[build_dimension_value(2), build_dimension_value(3)]);
+    let x_type = build_type_proto(&build_type_proto_tensor(1, &x_shape));
+    let x_input = build_value_info("x", &x_type, "");
+    let y_output = build_value_info("y", &[], "");
+
+    let w1_tensor = build_tensor(&TensorFixture { dims: &[3, 4], data_type: 1, name: "W1", doc_string: "", raw_data: &f32_bytes(&w1_data) });
+    let b1_tensor = build_tensor(&TensorFixture { dims: &[4], data_type: 1, name: "b1", doc_string: "", raw_data: &f32_bytes(&b1_data) });
+    let w2_tensor = build_tensor(&TensorFixture { dims: &[4, 2], data_type: 1, name: "W2", doc_string: "", raw_data: &f32_bytes(&w2_data) });
+    let b2_tensor = build_tensor(&TensorFixture { dims: &[2], data_type: 1, name: "b2", doc_string: "", raw_data: &f32_bytes(&b2_data) });
+
+    let gemm1 = build_node(&NodeFixture { input: &["x", "W1", "b1"], output: &["h"], name: "gemm1", op_type: "Gemm", doc_string: "", attributes: &[] });
+    let relu = build_node(&NodeFixture { input: &["h"], output: &["hr"], name: "relu", op_type: "Relu", doc_string: "", attributes: &[] });
+    let gemm2 = build_node(&NodeFixture { input: &["hr", "W2", "b2"], output: &["logits"], name: "gemm2", op_type: "Gemm", doc_string: "", attributes: &[] });
+    let softmax = build_node(&NodeFixture {
+        input: &["logits"],
+        output: &["y"],
+        name: "softmax",
+        op_type: "Softmax",
+        doc_string: "",
+        attributes: &[build_attribute_int("axis", 1)],
+    });
+
+    let graph = build_graph(&[gemm1, relu, gemm2, softmax], "mlp", &[w1_tensor, b1_tensor, w2_tensor, b2_tensor], "", &[x_input], &[y_output]);
+    let mut bytes = Vec::new();
+    push_varint(1, 8, &mut bytes);
+    push_len(7, &graph, &mut bytes);
+
+    // -- read half: onnx bytes -> Op, and a baseline evaluation.
+    let original_model = parse_complete(&bytes).expect("parse the mlp model bytes");
+    let original_graph = original_model.graph.as_ref().expect("mlp graph present");
+    let original = crate::lower::lower_graph(original_graph).expect("lower the original mlp graph");
+    let mut original_named: Vec<(&str, &[f32])> = original.initializers.iter().map(|(name, data)| (name.as_str(), data.as_slice())).collect();
+    original_named.push(("x", &x_data));
+    let original_output = original.graph_outputs.iter().find(|(name, _)| name.as_str() == "y").expect("y is declared").1;
+    let baseline = proxima_tensor::cpu::evaluate_named(&original.program, &[], &original_named, &[original_output]).expect("evaluate the original program");
+    let (baseline_data, baseline_shape) = baseline.get(original_output).expect("baseline y present");
+
+    // -- write half: Op -> lift -> onnx bytes.
+    let lift_input = crate::lift::LiftInput {
+        program: &original.program,
+        initializers: &original.initializers,
+        graph_inputs: &original.graph_inputs,
+        graph_outputs: &original.graph_outputs,
+        graph_name: "mlp_lifted",
+    };
+    let lifted_bytes = crate::lift::lift_model(lift_input).expect("lift the lowered mlp program to onnx bytes");
+
+    // -- re-parse: the lifted bytes are a structurally valid ModelProto.
+    let reparsed_model = parse_complete(&lifted_bytes).expect("lifted bytes parse back to a ModelProto");
+    let reparsed_graph = reparsed_model.graph.as_ref().expect("lifted graph present");
+    assert!(!reparsed_graph.node.is_empty(), "lifted graph carries its primitive-op nodes");
+
+    // -- read half again: onnx bytes -> Op, over the LIFTED graph this time.
+    let reloaded = crate::lower::lower_graph(reparsed_graph).expect("lower the lifted mlp graph back to Op");
+    let mut reloaded_named: Vec<(&str, &[f32])> = reloaded.initializers.iter().map(|(name, data)| (name.as_str(), data.as_slice())).collect();
+    reloaded_named.push(("x", &x_data));
+    let reloaded_output = reloaded.graph_outputs.iter().find(|(name, _)| name.as_str() == "y").expect("y is declared on the lifted graph").1;
+    let evaluated = proxima_tensor::cpu::evaluate_named(&reloaded.program, &[], &reloaded_named, &[reloaded_output]).expect("evaluate the round-tripped program");
+    let (data, shape) = evaluated.get(reloaded_output).expect("round-tripped y present");
+
+    assert_eq!(shape, baseline_shape, "round trip preserves y's shape");
+    for (actual, expected) in data.iter().zip(baseline_data.iter()) {
+        assert!((actual - expected).abs() < 1e-4, "round-tripped output {actual} does not match original-program baseline {expected}");
+    }
+}
