@@ -34,6 +34,15 @@ use proxima::telemetry::NoopTelemetry;
 use proxima_http::http3::native::H3NativeUpstream;
 use proxima_primitives::pipe::SendPipe;
 
+/// `ServeContext::new` leaves `datagram_factory: None`, and
+/// `H3NativeListenProtocol::serve` requires one unconditionally (no
+/// ambient-tokio fallback despite the field's own doc comment) — every
+/// server thread below errors out in under a millisecond without this.
+fn tokio_serve_context() -> ServeContext {
+    ServeContext::new(Arc::new(NoopTelemetry))
+        .with_datagram_factory(Arc::new(proxima_net::tokio::TokioDatagramFactory))
+}
+
 /// Shared slot the client task publishes its `(status, body)` result (or a
 /// stringified error) into, for the driving thread to read back after the
 /// runtime shuts down.
@@ -143,7 +152,7 @@ fn native_h3_upstream_round_trips_against_native_listener() {
             .expect("server runtime");
         runtime.block_on(async move {
             let protocol = H3NativeListenProtocol::new();
-            let context = ServeContext::new(Arc::new(NoopTelemetry));
+            let context = tokio_serve_context();
             let spec = serde_json::json!({
                 "dev_self_signed": true,
                 "dev_sans": ["localhost"],
@@ -237,7 +246,7 @@ fn native_h3_upstream_round_trips_with_part_source_on_both_halves() {
             .expect("server runtime");
         runtime.block_on(async move {
             let protocol = H3NativeListenProtocol::new();
-            let context = ServeContext::new(Arc::new(NoopTelemetry));
+            let context = tokio_serve_context();
             let spec = serde_json::json!({
                 "dev_self_signed": true,
                 "dev_sans": ["localhost"],
@@ -329,7 +338,7 @@ fn spawn_dev_listener() -> (
             .expect("server runtime");
         runtime.block_on(async move {
             let protocol = H3NativeListenProtocol::new();
-            let context = ServeContext::new(Arc::new(NoopTelemetry));
+            let context = tokio_serve_context();
             let spec = serde_json::json!({ "dev_self_signed": true, "dev_sans": ["localhost"] });
             let _ = protocol
                 .serve(bound, into_handle(ConstantOk), &spec, context, shutdown_rx)

@@ -79,11 +79,24 @@ fn main() {
             .unwrap();
         runtime.block_on(async move {
             let protocol = H3NativeListenProtocol::new();
-            let context = ServeContext::new(Arc::new(NoopTelemetry));
+            // `ServeContext::new` leaves `datagram_factory: None`, and
+            // `H3NativeListenProtocol::serve` (proxima-http/src/http3/native/
+            // listen.rs) requires one unconditionally — no ambient-tokio
+            // fallback despite the field's own doc comment. Without this the
+            // `.await` below resolves to `Err(Config(..))` in under a
+            // millisecond, the `let _ =` swallows it, and every client
+            // request in this bench times out against a socket nothing is
+            // listening on. Root-caused on real Linux hardware via strace:
+            // the server thread's tokio workers exit ~35ms after start.
+            let context = ServeContext::new(Arc::new(NoopTelemetry))
+                .with_datagram_factory(Arc::new(proxima_net::tokio::TokioDatagramFactory));
             let spec = serde_json::json!({ "dev_self_signed": true, "dev_sans": ["localhost"] });
-            let _ = protocol
+            let result = protocol
                 .serve(bound, into_handle(ConstantOk), &spec, context, shutdown_rx)
                 .await;
+            if let Err(err) = result {
+                eprintln!("h3-native server exited early: {err}");
+            }
         });
     });
     std::thread::sleep(Duration::from_millis(300));
