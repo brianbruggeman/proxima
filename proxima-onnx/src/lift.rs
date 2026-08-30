@@ -21,7 +21,7 @@
 //! that `graph` field) -- together they are "lift, then serialize" fused
 //! into the only shape this crate's types make sound.
 //!
-//! # Faithful, primitive-to-primitive -- with one named pattern raised back
+//! # Faithful, primitive-to-primitive -- with two named patterns raised back
 //!
 //! Every [`Op`] form lowers to the same primitive ONNX operators
 //! [`crate::lower`] already reads back (`Add`/`Mul`/`Max`/... for
@@ -30,15 +30,19 @@
 //! [`IndexMap`] addressing). This is the default and the fallback for
 //! everything this module does not specifically recognize.
 //!
-//! `try_matmul_shape` is the one exception: a `Reduce(Add)`-over-
-//! `Elementwise(Multiply)` in the exact rank-2, untransposed, unbatched
-//! shape `lower::lower_matmul` and `lower::matmul2d` (via
-//! `lower::lower_gemm`, untransposed) both build lifts as a single ONNX
-//! `MatMul` node, not `Mul` + `ReduceSum`. Batched or transposed
-//! contractions, and the materialized-window `Reduce` `lower::conv2d_core`
-//! builds (which would raise to a named `Conv`), still fall through to the
-//! faithful primitive lift -- further, genuinely expressible pattern-raising
-//! deferred here for lack of time, not because the shape resists it.
+//! `try_matmul_shape` and `try_conv_shape` are the two exceptions.
+//! `try_matmul_shape` recognizes a `Reduce(Add)`-over-`Elementwise(Multiply)`
+//! in the rank-2, unbatched shape `lower::lower_matmul`, `lower::matmul2d`,
+//! and `lower::lower_gemm` (including its `transA`/`transB` cases) all
+//! build, and lifts it as a single `MatMul` (untransposed) or `Gemm`
+//! (either operand transposed) node, not `Mul` + `ReduceSum`. Batched
+//! contractions still fall through to the faithful primitive lift --
+//! further, genuinely expressible pattern-raising deferred for lack of
+//! time, not because the shape resists it. `try_conv_shape` recognizes the
+//! two-level materialized-window shape `lower::conv2d_core` builds and
+//! lifts it as a single `Conv` node, scoped to the unpadded (`pads = [0, 0,
+//! 0, 0]`) case -- see that function's own doc for exactly why padding is
+//! the deferred boundary rather than a silently wrong `pads` attribute.
 //!
 //! # Coverage and gaps
 //!
@@ -93,7 +97,7 @@ use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
-use proxima_tensor::{AxisIndex, DType, Extent, IndexMap, IndexPattern, Keep, NodeId, Op, ScalarOp};
+use proxima_tensor::{AxisIndex, DType, Extent, IndexMap, IndexPattern, Keep, NodeId, Op, ScalarOp, projection};
 use thiserror::Error;
 
 use crate::writer::{push_i32, push_i64, push_len, push_packed_f32, push_packed_i64, push_str};
@@ -279,28 +283,37 @@ fn single_term_axis(axis_index: &AxisIndex) -> Option<u16> {
 
 /// A recognized `Reduce(+)`-over-`Elementwise(*)` matmul shape (see this
 /// module's own doc, "pattern-raising"): the two rank-2 operands feeding a
-/// plain-`MatMul`-shaped contraction, and the `Elementwise` node they are
+/// `MatMul`/`Gemm`-shaped contraction, and the `Elementwise` node they are
 /// consumed through -- never separately emitted, since [`lift_graph`] folds
-/// it directly into the `MatMul` this shape names.
+/// it directly into the node this shape names. `trans_a`/`trans_b` name
+/// which operand [`lower::lower_gemm`]'s own `transA`/`transB` swapped which
+/// of its two real axes reads `K` -- `false, false` is the untransposed
+/// shape [`lower::lower_matmul`]/[`lower::matmul2d`] also build, raised to
+/// `MatMul`; anything else raises to `Gemm` (`MatMul` has no transpose
+/// attribute in ONNX) with the matching `transA`/`transB` int attributes.
 struct MatmulShape {
     elementwise_node: NodeId,
     lhs: NodeId,
     rhs: NodeId,
+    trans_a: bool,
+    trans_b: bool,
 }
 
-/// Recognizes the exact `Reduce(Add)`-over-`Elementwise(Multiply)` shape
-/// `lower::lower_matmul` (batch-free) and `lower::matmul2d`
-/// (`lower::lower_gemm`, untransposed) both build: an iteration space `(M,
-/// K, N)` in any axis order, `lhs` reading `(M, K)` in that order, `rhs`
-/// reading `(K, N)` in that order, the reduce contracting `K` and outputting
-/// `(M, N)` in that order -- each a pure, unit-coefficient, zero-offset
-/// projection over a rank-2 operand (no batch, no transpose, no broadcast).
-/// Anything else (batched, transposed, broadcast, a non-`Add`/`Multiply`
-/// body) returns `None`, and [`lift_graph`] falls through to the faithful
-/// primitive `Mul` + `ReduceSum` lift this module's doc names as the
-/// default. Raising a transposed or batched contraction to `MatMul`/`Gemm`
-/// is a further, genuinely expressible refinement of this same idea,
-/// deferred here for lack of time, not because the shape resists it.
+/// Recognizes the `Reduce(Add)`-over-`Elementwise(Multiply)` shape
+/// `lower::lower_matmul` (batch-free), `lower::matmul2d`, and
+/// `lower::lower_gemm` (including its `transA`/`transB` cases) all build: an
+/// iteration space `(M, K, N)` in any axis order, `lhs` reading its own two
+/// real axes as `(M, K)` OR `(K, M)`, `rhs` reading `(K, N)` OR `(N, K)`, the
+/// reduce contracting `K` and outputting `(M, N)` in that order (`Gemm`'s
+/// own output is never transposed, whatever `transA`/`transB` say about the
+/// *inputs*) -- each a pure, unit-coefficient, zero-offset projection over a
+/// rank-2 operand (no batch, no broadcast). `K` is identified as whichever
+/// iteration axis appears in BOTH `lhs`'s and `rhs`'s two real axes; which
+/// of `lhs`'s two positions it occupies sets `trans_a` (same for `rhs` and
+/// `trans_b`). Anything else (batched, broadcast, `K` not shared, a
+/// non-`Add`/`Multiply` body, a permuted output) returns `None`, and
+/// [`lift_graph`] falls through to the faithful primitive `Mul` +
+/// `ReduceSum` lift this module's doc names as the default.
 fn try_matmul_shape(program: &[Op], reduce: &proxima_tensor::Reduce) -> Option<MatmulShape> {
     if reduce.body != ScalarOp::Add || reduce.keep != Keep::Reduce {
         return None;
@@ -326,14 +339,28 @@ fn try_matmul_shape(program: &[Op], reduce: &proxima_tensor::Reduce) -> Option<M
     if lhs_pattern.iter_rank != 3 || lhs_pattern.axes.len() != 2 || rhs_pattern.iter_rank != 3 || rhs_pattern.axes.len() != 2 {
         return None;
     }
-    let lhs_m = single_term_axis(&lhs_pattern.axes[0])?;
-    let lhs_k = single_term_axis(&lhs_pattern.axes[1])?;
-    let rhs_k = single_term_axis(&rhs_pattern.axes[0])?;
-    let rhs_n = single_term_axis(&rhs_pattern.axes[1])?;
-    if lhs_k != rhs_k {
+    let lhs_axis0 = single_term_axis(&lhs_pattern.axes[0])?;
+    let lhs_axis1 = single_term_axis(&lhs_pattern.axes[1])?;
+    let rhs_axis0 = single_term_axis(&rhs_pattern.axes[0])?;
+    let rhs_axis1 = single_term_axis(&rhs_pattern.axes[1])?;
+
+    // `K` is whichever iteration axis both operands read; `lhs`'s other
+    // axis is `M`, `rhs`'s other axis is `N`.
+    let (k, m, trans_a) = if lhs_axis1 == rhs_axis0 || lhs_axis1 == rhs_axis1 {
+        (lhs_axis1, lhs_axis0, false)
+    } else if lhs_axis0 == rhs_axis0 || lhs_axis0 == rhs_axis1 {
+        (lhs_axis0, lhs_axis1, true)
+    } else {
         return None;
-    }
-    let mut axes = [lhs_m, lhs_k, rhs_n];
+    };
+    let (n, trans_b) = if rhs_axis0 == k {
+        (rhs_axis1, false)
+    } else if rhs_axis1 == k {
+        (rhs_axis0, true)
+    } else {
+        return None;
+    };
+    let mut axes = [m, k, n];
     axes.sort_unstable();
     if axes != [0, 1, 2] {
         return None;
@@ -344,11 +371,128 @@ fn try_matmul_shape(program: &[Op], reduce: &proxima_tensor::Reduce) -> Option<M
     }
     let out_first = single_term_axis(&out_pattern.axes[0])?;
     let out_second = single_term_axis(&out_pattern.axes[1])?;
-    if out_first != lhs_m || out_second != rhs_n {
+    if out_first != m || out_second != n {
         return None;
     }
 
-    Some(MatmulShape { elementwise_node, lhs: *lhs, rhs: *rhs })
+    Some(MatmulShape { elementwise_node, lhs: *lhs, rhs: *rhs, trans_a, trans_b })
+}
+
+/// A recognized `Reduce(Add)`-over-`Elementwise(Multiply)`-over-
+/// `Elementwise(Multiply)` `Conv` shape (see this module's own doc): the
+/// two-level materialized-window composition `lower::conv2d_core` builds,
+/// both `Elementwise` levels folded directly into the `Conv` node this shape
+/// names (like [`MatmulShape`], never separately lifted).
+struct ConvShape {
+    product_node: NodeId,
+    windowed_node: NodeId,
+    image: NodeId,
+    weight: NodeId,
+    kernel_h: u64,
+    kernel_w: u64,
+    stride_h: i64,
+    stride_w: i64,
+    dilation_h: i64,
+    dilation_w: i64,
+}
+
+/// One `stride * iter[out_axis] + dilation * iter[kernel_axis]` window axis,
+/// decomposed -- the read-side mirror of `lower::window_axis`, which this
+/// crate's own `map.rs` doc names as convolution's whole reason for summing
+/// two terms in one axis.
+fn window_axis_terms(axis_index: &AxisIndex) -> Option<(u16, i32, u16, i32)> {
+    match axis_index.terms.as_slice() {
+        [out_term, kernel_term] if axis_index.offset == 0 => Some((out_term.axis, out_term.coeff, kernel_term.axis, kernel_term.coeff)),
+        _ => None,
+    }
+}
+
+/// Recognizes `lower::conv2d_core`'s exact `[n, co, oy, ox, ci, ky, kx]`
+/// (iteration axes `0..7` in that fixed order, unlike [`try_matmul_shape`]'s
+/// any-order search -- `conv2d_core` never varies it) two-level shape:
+/// `Reduce(Add)` over `Elementwise(Multiply)` of a *materialized window*
+/// (itself `Elementwise(Multiply)` of the image, addressed through two
+/// `window_axis_terms` axes, against an all-`1.0` stamp `Op::Constant`
+/// pinning the window's shape -- `lower::window_materialize`'s own doc names
+/// why the stamp exists) and the weight. Scoped to `pads = [0, 0, 0, 0]`:
+/// `lower::pad_axis` returns its input node UNCHANGED (no new `Op`) when
+/// both pad amounts are zero, so a real (nonzero) pad would instead show up
+/// as the image operand being an `Op::Elementwise` with `body ==
+/// ScalarOp::Select` (`pad_axis`'s own clamp-and-select composition) --
+/// recovering pads from THAT shape is deferred (this comment's own honest
+/// accounting, not a silent wrong answer): matched here only when the image
+/// operand is anything else, which is exactly "no padding was applied".
+/// `group` other than 1 (a `lower_conv`-level `slice`/[`concat_pair`]
+/// decomposition, invisible to a single `conv2d_core` call) is out of this
+/// function's reach entirely and simply never matches. Anything else
+/// (batched image not rank-4, grouped, padded, transposed axes) returns
+/// `None`, and [`lift_graph`] falls through to the faithful primitive
+/// `Mul` + `ReduceSum` lift.
+fn try_conv_shape(program: &[Op], reduce: &proxima_tensor::Reduce) -> Option<ConvShape> {
+    if reduce.body != ScalarOp::Add || reduce.keep != Keep::Reduce {
+        return None;
+    }
+    let IndexMap::Affine(in_pattern) = &reduce.in_map else { return None };
+    let IndexMap::Affine(out_pattern) = &reduce.out_map else { return None };
+    if in_pattern.iter_rank != 7 || in_pattern.axes.len() != 7 {
+        return None;
+    }
+    for (index, axis) in in_pattern.axes.iter().enumerate() {
+        if single_term_axis(axis) != Some(index as u16) {
+            return None;
+        }
+    }
+    if out_pattern.iter_rank != 7 || out_pattern.axes.len() != 4 {
+        return None;
+    }
+    for (index, axis) in out_pattern.axes.iter().enumerate() {
+        if single_term_axis(axis) != Some(index as u16) {
+            return None;
+        }
+    }
+
+    let product_node = reduce.operand;
+    let Some(Op::Elementwise { body: ScalarOp::Multiply, operands: product_operands, .. }) = program.get(product_node.0 as usize) else { return None };
+    let [(windowed_node, IndexMap::Affine(windowed_pattern)), (weight, IndexMap::Affine(weight_pattern))] = product_operands.as_slice() else { return None };
+    let expected_windowed_pattern = projection(7, &[0, 4, 2, 3, 5, 6]);
+    let expected_weight_pattern = projection(7, &[1, 4, 5, 6]);
+    if windowed_pattern != &expected_windowed_pattern || weight_pattern != &expected_weight_pattern {
+        return None;
+    }
+
+    let Some(Op::Elementwise { body: ScalarOp::Multiply, operands: window_operands, .. }) = program.get(windowed_node.0 as usize) else { return None };
+    let [(image, IndexMap::Affine(image_pattern)), (stamp, IndexMap::Affine(stamp_pattern))] = window_operands.as_slice() else { return None };
+    if image_pattern.iter_rank != 6 || image_pattern.axes.len() != 4 || stamp_pattern != &projection(6, &[2, 3, 4, 5]) {
+        return None;
+    }
+    if single_term_axis(&image_pattern.axes[0]) != Some(0) || single_term_axis(&image_pattern.axes[1]) != Some(1) {
+        return None;
+    }
+    let (out_h_axis, stride_h, kernel_h_axis, dilation_h) = window_axis_terms(&image_pattern.axes[2])?;
+    let (out_w_axis, stride_w, kernel_w_axis, dilation_w) = window_axis_terms(&image_pattern.axes[3])?;
+    if (out_h_axis, kernel_h_axis, out_w_axis, kernel_w_axis) != (2, 4, 3, 5) {
+        return None;
+    }
+    // a real (nonzero) pad shows up as a `pad_axis`-built `Select`; scoped
+    // to the unpadded case (this function's own doc).
+    if matches!(program.get(image.0 as usize), Some(Op::Elementwise { body: ScalarOp::Select, .. })) {
+        return None;
+    }
+    let stamp_shape = leaf_shape(program, *stamp)?;
+    let (Some(Extent::Static(kernel_h)), Some(Extent::Static(kernel_w))) = (stamp_shape.get(2), stamp_shape.get(3)) else { return None };
+
+    Some(ConvShape {
+        product_node,
+        windowed_node: *windowed_node,
+        image: *image,
+        weight: *weight,
+        kernel_h: u64::from(*kernel_h),
+        kernel_w: u64::from(*kernel_w),
+        stride_h: i64::from(stride_h),
+        stride_w: i64::from(stride_w),
+        dilation_h: i64::from(dilation_h),
+        dilation_w: i64::from(dilation_w),
+    })
 }
 
 /// How many times each [`NodeId`] is read as an operand anywhere in
@@ -602,6 +746,26 @@ pub fn lift_graph(input: LiftInput<'_>) -> Result<Vec<u8>, LiftError> {
         matmul_shapes.insert(index as u32, shape);
     }
 
+    // Same pattern-raising, two `Elementwise` levels deep (this module's own
+    // `try_conv_shape` doc): both the outer `windowed * weight` product and
+    // the inner window materialization fold into the `Conv` node the
+    // consuming `Reduce` emits, guarded the same way -- each subsumed node
+    // must have exactly one consumer, or it keeps its own faithful lift.
+    let mut conv_shapes: BTreeMap<u32, ConvShape> = BTreeMap::new();
+    for (index, op) in input.program.iter().enumerate() {
+        let Op::Reduce(reduce) = op else { continue };
+        if matmul_shapes.contains_key(&(index as u32)) {
+            continue;
+        }
+        let Some(shape) = try_conv_shape(input.program, reduce) else { continue };
+        if consumer_counts.get(&shape.product_node.0).copied().unwrap_or(0) != 1 || consumer_counts.get(&shape.windowed_node.0).copied().unwrap_or(0) != 1 {
+            continue;
+        }
+        subsumed_elementwise.insert(shape.product_node.0);
+        subsumed_elementwise.insert(shape.windowed_node.0);
+        conv_shapes.insert(index as u32, shape);
+    }
+
     for (index, op) in input.program.iter().enumerate() {
         let node_id = NodeId(index as u32);
         let primary_name = match output_names_by_node.get(&node_id.0).and_then(|list| list.first()) {
@@ -700,7 +864,36 @@ pub fn lift_graph(input: LiftInput<'_>) -> Result<Vec<u8>, LiftError> {
                 let shape = &matmul_shapes[&node_id.0];
                 let lhs_name = names[shape.lhs.0 as usize].clone();
                 let rhs_name = names[shape.rhs.0 as usize].clone();
-                emit_node(&mut nodes, &[lhs_name.as_str(), rhs_name.as_str()], &[primary_name.as_str()], &primary_name, "MatMul", &[]);
+                if shape.trans_a || shape.trans_b {
+                    let mut attributes = Vec::new();
+                    if shape.trans_a {
+                        attributes.push(attr_int("transA", 1));
+                    }
+                    if shape.trans_b {
+                        attributes.push(attr_int("transB", 1));
+                    }
+                    emit_node(&mut nodes, &[lhs_name.as_str(), rhs_name.as_str()], &[primary_name.as_str()], &primary_name, "Gemm", &attributes);
+                } else {
+                    emit_node(&mut nodes, &[lhs_name.as_str(), rhs_name.as_str()], &[primary_name.as_str()], &primary_name, "MatMul", &[]);
+                }
+            }
+            Op::Reduce(reduce) if conv_shapes.contains_key(&node_id.0) => {
+                // Pattern-raised, two `Elementwise` levels folded at once
+                // (`try_conv_shape`'s own doc): `image`/`weight` are each
+                // read by a pure, unmodified projection once the window
+                // materialization is unwound, so their already-emitted
+                // names are the faithful `Conv` operands directly.
+                let _ = reduce;
+                let shape = &conv_shapes[&node_id.0];
+                let image_name = names[shape.image.0 as usize].clone();
+                let weight_name = names[shape.weight.0 as usize].clone();
+                let attributes = alloc::vec![
+                    attr_ints("kernel_shape", &[shape.kernel_h as i64, shape.kernel_w as i64]),
+                    attr_ints("strides", &[shape.stride_h, shape.stride_w]),
+                    attr_ints("dilations", &[shape.dilation_h, shape.dilation_w]),
+                    attr_ints("pads", &[0, 0, 0, 0]),
+                ];
+                emit_node(&mut nodes, &[image_name.as_str(), weight_name.as_str()], &[primary_name.as_str()], &primary_name, "Conv", &attributes);
             }
             Op::Reduce(reduce) => {
                 let in_pattern = match &reduce.in_map {
