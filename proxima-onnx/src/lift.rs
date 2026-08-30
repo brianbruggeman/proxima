@@ -26,16 +26,16 @@
 //! Every [`Op`] form lowers to the same primitive ONNX operators
 //! [`crate::lower`] already reads back (`Add`/`Mul`/`Max`/... for
 //! [`ScalarOp`], `ReduceSum`/`ReduceMax`/`ReduceMin`/`ReduceProd` for
-//! [`Reduce`], `Transpose`/`Unsqueeze`/`Gather` for [`IndexMap`]
-//! addressing). This is the default and the fallback for everything this
-//! module does not specifically recognize.
+//! [`proxima_tensor::Reduce`], `Transpose`/`Unsqueeze`/`Gather` for
+//! [`IndexMap`] addressing). This is the default and the fallback for
+//! everything this module does not specifically recognize.
 //!
-//! [`try_matmul_shape`] is the one exception: a `Reduce(Add)`-over-
+//! `try_matmul_shape` is the one exception: a `Reduce(Add)`-over-
 //! `Elementwise(Multiply)` in the exact rank-2, untransposed, unbatched
 //! shape `lower::lower_matmul` and `lower::matmul2d` (via
 //! `lower::lower_gemm`, untransposed) both build lifts as a single ONNX
 //! `MatMul` node, not `Mul` + `ReduceSum`. Batched or transposed
-//! contractions, and the materialized-window `Reduce` [`crate::lower::conv2d_core`]
+//! contractions, and the materialized-window `Reduce` `lower::conv2d_core`
 //! builds (which would raise to a named `Conv`), still fall through to the
 //! faithful primitive lift -- further, genuinely expressible pattern-raising
 //! deferred here for lack of time, not because the shape resists it.
@@ -43,9 +43,9 @@
 //! # Coverage and gaps
 //!
 //! All 17 [`ScalarOp`] bodies map to a primitive ONNX op (see
-//! [`scalar_op_type`]). [`Reduce`] bodies restricted to the associative set
-//! ONNX ships a primitive reducer for (`Add`/`Multiply`/`Maximum`/
-//! `Minimum`); anything else, and any `Keep::Scan` body but `Add`
+//! `scalar_op_type`). [`proxima_tensor::Reduce`] bodies restricted to the
+//! associative set ONNX ships a primitive reducer for (`Add`/`Multiply`/
+//! `Maximum`/`Minimum`); anything else, and any `Keep::Scan` body but `Add`
 //! (`CumSum`), is a documented [`LiftError`], never a fabricated op -- ONNX
 //! has no `CumProd`/`CumMax`/`CumMin` primitive, so those stay a genuine,
 //! named gap rather than a fabricated composition.
@@ -53,8 +53,8 @@
 //! [`IndexMap::Affine`] axes: a plain unit-coefficient, zero-offset
 //! projection (transpose/broadcast/identity) resolves directly.
 //! A **two-term** axis (`coeff_a * iter[a] + coeff_b * iter[b] + offset`,
-//! the convolution/pooling window shape [`crate::map`]'s own doc table
-//! names) resolves via [`resolve_affine`]'s window case: a `Constant`
+//! the convolution/pooling window shape [`proxima_tensor::map`]'s own doc
+//! table names) resolves via `resolve_affine`'s window case: a `Constant`
 //! integer index table plus a `Gather`, reading off the two iteration
 //! axes' extents from a *sibling* operand of the same node that exposes
 //! them as a plain projection against a leaf ([`Op::Input`]/
@@ -71,17 +71,18 @@
 //! expresses an arbitrary affine combination without more context than the
 //! node carries.
 //!
-//! A [`Reduce`]'s `out_map` need not be axis-ascending: [`reduced_axes`]
-//! reads off the surviving axes' order and, when it differs from the
-//! `ReduceSum`/... op's own ascending output order, lifts a trailing
-//! `Transpose` to restore it -- the inverse of the identity `reduced_axes`
-//! already relied on shape inference to prove sound on the read side.
+//! A [`proxima_tensor::Reduce`]'s `out_map` need not be axis-ascending:
+//! `reduced_axes` reads off the surviving axes' order and, when it differs
+//! from the `ReduceSum`/... op's own ascending output order, lifts a
+//! trailing `Transpose` to restore it -- the inverse of the identity
+//! `reduced_axes` already relied on shape inference to prove sound on the
+//! read side.
 //!
 //! [`IndexMap::Computed`] is supported for the order-preserving gather shape
-//! [`crate::lower::lower_gather`] produces at any axis (see [`resolve_gather`])
+//! `lower::lower_gather` produces at any axis (see `resolve_gather`)
 //! -- output order `data.shape[:axis] + indices.shape + data.shape[axis+1:]`,
 //! lifted as a single `Gather(data, indices, axis)`. This shape also covers
-//! [`crate::lower::pad_axis`]'s zero-padded reads and [`crate::lower::concat_pair`]'s
+//! `lower::pad_axis`'s zero-padded reads and `lower::concat_pair`'s
 //! per-leg reads (both a rank-1-indices specialization of the same pattern),
 //! so a padded `Conv`/`Pool`/`Concat` round-trips as `Gather` + `Where`. Scatter
 //! (a data-dependent *output* map) is unsupported upstream in
@@ -100,7 +101,7 @@ use crate::writer::{push_i32, push_i64, push_len, push_packed_f32, push_packed_i
 /// Everything a faithful, primitive-to-primitive lift cannot express for a
 /// given [`Op`] program -- see this module's doc for the scope each variant
 /// marks as deferred versus a genuine ONNX expressiveness gap (there are
-/// none of the latter for the 17 [`ScalarOp`] bodies; see [`scalar_op_type`]).
+/// none of the latter for the 17 [`ScalarOp`] bodies; see `scalar_op_type`).
 #[derive(Debug, Error)]
 pub enum LiftError {
     #[error("node {node}: symbolic extent has no faithful ONNX concrete shape")]
@@ -915,7 +916,7 @@ fn resolve_gather(
 
 /// Wraps [`lift_graph`]'s output in a minimal `ModelProto` (`ir_version = 8`,
 /// no opset/producer metadata) -- the full "lift, then serialize" round trip
-/// [`crate::tests`]'s writable round-trip test drives end to end.
+/// this crate's own `tests` module's writable round-trip test drives end to end.
 ///
 /// # Errors
 ///
