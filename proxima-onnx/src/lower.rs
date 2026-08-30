@@ -78,6 +78,21 @@ pub enum LowerError {
 
     #[error("graph {name:?} has no nodes")]
     EmptyGraph { name: String },
+
+    /// The RISC-sufficiency boundary this module's control-flow lowering
+    /// hits and does not cross: a pure-dataflow `Vec<Op>` with
+    /// backwards-only references (`op.rs:9-11`) has no runtime branch and
+    /// no back-edge, so an iteration count (`Loop`'s trip count or its
+    /// per-iteration `cond`) that is only known from *computed data* has no
+    /// representation in this ISA. Distinct from [`Self::UnsupportedShape`]:
+    /// that variant names a gap this pass could close by composing more of
+    /// the existing algebra; this one names a gap the algebra itself cannot
+    /// close without becoming a different kind of machine (a VM with jumps),
+    /// which is out of scope for a dataflow program. See this module's own
+    /// doc for the `If`/`Scan`/`Loop` classification this error is raised
+    /// from.
+    #[error("node {name:?} (op_type {op_type:?}) needs control flow this dataflow ISA cannot express: {reason}")]
+    DataDependentControlFlow { name: String, op_type: String, reason: String },
 }
 
 /// One ONNX value's lowering state: which [`NodeId`] produces it and its
@@ -199,8 +214,9 @@ pub fn lower_graph(graph: &GraphProto<'_>) -> Result<Lowered, LowerError> {
         return Err(LowerError::EmptyGraph { name: graph.name.to_string() });
     }
 
+    let mut constant_values: BTreeMap<String, f32> = BTreeMap::new();
     for node in &graph.node {
-        lower_node(&mut program, &mut values, &initializer_data, node)?;
+        lower_node(&mut program, &mut values, &initializer_data, &mut constant_values, node)?;
     }
 
     let mut graph_outputs = Vec::new();
@@ -216,6 +232,7 @@ fn lower_node(
     program: &mut Vec<Op>,
     values: &mut BTreeMap<String, Value>,
     initializer_data: &BTreeMap<String, Vec<f32>>,
+    constant_values: &mut BTreeMap<String, f32>,
     node: &NodeProto<'_>,
 ) -> Result<(), LowerError> {
     match node.op_type {
@@ -243,7 +260,11 @@ fn lower_node(
         "Transpose" => lower_transpose(program, values, node),
         "Gather" => lower_gather(program, values, node),
         "Unsqueeze" => lower_unsqueeze(program, values, node),
-        "Constant" => lower_constant(program, values, node),
+        "Constant" => lower_constant(program, values, constant_values, node),
+        "Where" => lower_where(program, values, node),
+        "If" => lower_if(program, values, initializer_data, constant_values, node),
+        "Scan" => lower_scan(program, values, initializer_data, constant_values, node),
+        "Loop" => lower_loop(program, values, initializer_data, constant_values, node),
         "ReduceSum" => lower_reduce(program, values, node, ScalarOp::Add, ReduceInit::Zero),
         "ReduceMax" => lower_reduce(program, values, node, ScalarOp::Maximum, ReduceInit::NegativeInfinity),
         "ReduceMin" => lower_reduce(program, values, node, ScalarOp::Minimum, ReduceInit::PositiveInfinity),
@@ -827,7 +848,12 @@ fn lower_unsqueeze(_program: &mut Vec<Op>, values: &mut BTreeMap<String, Value>,
 /// [`crate::lift::lift_graph`]'s own `Op::Constant` -> `Constant` node
 /// emission produces -- [`Op::Constant`] itself carries a single scalar
 /// broadcast across its declared shape, never per-element data.
-fn lower_constant(program: &mut Vec<Op>, values: &mut BTreeMap<String, Value>, node: &NodeProto<'_>) -> Result<(), LowerError> {
+fn lower_constant(
+    program: &mut Vec<Op>,
+    values: &mut BTreeMap<String, Value>,
+    constant_values: &mut BTreeMap<String, f32>,
+    node: &NodeProto<'_>,
+) -> Result<(), LowerError> {
     let tensor = find_attr(node, "value").and_then(|attribute| attribute.t.as_ref()).ok_or_else(|| LowerError::UnsupportedShape {
         name: node.name.to_string(),
         op_type: node.op_type.to_string(),
@@ -844,7 +870,345 @@ fn lower_constant(program: &mut Vec<Op>, values: &mut BTreeMap<String, Value>, n
         });
     }
     let id = append(program, Op::Constant { dtype: DType::Float32, shape: shape.iter().map(|&extent| Extent::Static(extent as u32)).collect(), value });
+    if let Some(output_name) = node.output.first() {
+        // recorded unconditionally (uniform value, whatever the shape) so a
+        // downstream `If`/`Loop` condition or trip count sourced from a
+        // `Constant` node -- not only a graph initializer -- is still
+        // foldable at lower time; see `constant_scalar_value`.
+        constant_values.insert((*output_name).to_string(), value);
+    }
     bind_output(values, node, 0, id, shape);
+    Ok(())
+}
+
+/// `Where(condition, X, Y)`: elementwise select, numpy-broadcast across all
+/// three operands -- the reverse of [`crate::lift::scalar_op_type`]'s own
+/// `ScalarOp::Select -> "Where"` emission. Pure dataflow, no subgraph: the
+/// same [`ScalarOp::Select`] three-operand composition [`concat_pair`] and
+/// [`pad_axis`] already build for their own clamp-and-select shapes.
+fn lower_where(program: &mut Vec<Op>, values: &mut BTreeMap<String, Value>, node: &NodeProto<'_>) -> Result<(), LowerError> {
+    let cond = lookup(values, node, 0)?.clone();
+    let lhs = lookup(values, node, 1)?.clone();
+    let rhs = lookup(values, node, 2)?.clone();
+    let out_shape = broadcast_shapes(node, &broadcast_shapes(node, &cond.shape, &lhs.shape)?, &rhs.shape)?;
+    let operands = alloc::vec![
+        (cond.node, IndexMap::Affine(operand_pattern(&cond, &out_shape))),
+        (lhs.node, IndexMap::Affine(operand_pattern(&lhs, &out_shape))),
+        (rhs.node, IndexMap::Affine(operand_pattern(&rhs, &out_shape))),
+    ];
+    let id = build_elementwise(program, ScalarOp::Select, operands);
+    bind_output(values, node, 0, id, out_shape);
+    Ok(())
+}
+
+/// An ONNX optional input: `node.input[index]` is either absent (the list
+/// is shorter) or present as an empty string -- both spellings mean "not
+/// provided" per the spec (`Loop`'s `M`/`cond` are the running example).
+fn optional_input<'node>(node: &'node NodeProto<'_>, index: usize) -> Option<&'node str> {
+    match node.input.get(index) {
+        Some(&name) if !name.is_empty() => Some(name),
+        _ => None,
+    }
+}
+
+/// A build-time-constant scalar for `name`, if this pass can fold one --
+/// either a `Constant` node's recorded uniform value ([`lower_constant`]) or
+/// a decoded initializer whose every element agrees (the same "uniform
+/// tensor" test [`lower_constant`] itself applies). This is the single test
+/// [`lower_if`]/[`lower_loop`] use to decide whether a condition or trip
+/// count is a lower-time constant (unrollable) or only known from computed
+/// data (the RISC-sufficiency boundary, [`LowerError::DataDependentControlFlow`]).
+fn constant_scalar_value(name: &str, initializer_data: &BTreeMap<String, Vec<f32>>, constant_values: &BTreeMap<String, f32>) -> Option<f32> {
+    if let Some(&value) = constant_values.get(name) {
+        return Some(value);
+    }
+    let data = initializer_data.get(name)?;
+    let first = *data.first()?;
+    data.iter().all(|&element| element == first).then_some(first)
+}
+
+/// Lowers `subgraph`'s own node list directly into the caller's shared
+/// `program`/`values` -- `If`'s `then_branch`/`else_branch` and `Scan`'s/
+/// `Loop`'s `body` all carry an ordinary [`GraphProto`] with no outer
+/// framing of its own, so recursively driving [`lower_node`] over it is the
+/// whole mechanism: every subgraph node that reads an outer-scope value
+/// (ONNX's own implicit-capture rule for `If`/`Loop`/`Scan` bodies) finds it
+/// already bound in `values`, exactly as if it were one more node in the
+/// parent graph. Subgraph-local `initializer`s are out of scope (deferred:
+/// a name a subgraph declares as its own initializer, never referenced by
+/// an outer node, surfaces as an ordinary [`LowerError::UnknownValue`] the
+/// first subgraph node that reads it -- If/Loop/Scan bodies in practice
+/// only ever capture outer names or compute fresh ones via `Constant`).
+fn lower_subgraph_nodes(
+    program: &mut Vec<Op>,
+    values: &mut BTreeMap<String, Value>,
+    initializer_data: &BTreeMap<String, Vec<f32>>,
+    constant_values: &mut BTreeMap<String, f32>,
+    subgraph: &GraphProto<'_>,
+) -> Result<(), LowerError> {
+    for node in &subgraph.node {
+        lower_node(program, values, initializer_data, constant_values, node)?;
+    }
+    Ok(())
+}
+
+fn required_graph_attr<'node>(node: &'node NodeProto<'_>, name: &str) -> Result<&'node GraphProto<'node>, LowerError> {
+    find_attr(node, name).and_then(|attribute| attribute.g.as_ref()).ok_or_else(|| LowerError::UnsupportedShape {
+        name: node.name.to_string(),
+        op_type: node.op_type.to_string(),
+        reason: format!("{} requires a {name:?} graph attribute", node.op_type),
+    })
+}
+
+/// `If(cond, then_branch, else_branch)`.
+///
+/// A build-time-constant `cond` (a graph initializer or a folded
+/// `Constant`) picks the branch AT LOWER TIME: only the chosen subgraph is
+/// recursively lowered ([`lower_subgraph_nodes`]) and appended to `program`
+/// -- the other branch contributes nothing, exactly a compile-time `if`.
+///
+/// A data-dependent `cond` cannot pick a branch at lower time, but *can*
+/// still lower to pure dataflow (Option A from this module's doc): both
+/// subgraphs are lowered unconditionally (ONNX subgraphs are pure and
+/// side-effect-free, so evaluating both wastes compute, never correctness),
+/// and each output position becomes one [`ScalarOp::Select`] over the two
+/// branch results. This only works when each output pair is shape-
+/// conformable -- if `then_branch` and `else_branch` produce a differently-
+/// shaped tensor at the same output position, [`ScalarOp::Select`] has no
+/// broadcast that reconciles them, and that is named as
+/// [`LowerError::UnsupportedShape`] rather than silently picking one side.
+fn lower_if(
+    program: &mut Vec<Op>,
+    values: &mut BTreeMap<String, Value>,
+    initializer_data: &BTreeMap<String, Vec<f32>>,
+    constant_values: &mut BTreeMap<String, f32>,
+    node: &NodeProto<'_>,
+) -> Result<(), LowerError> {
+    let cond_name = node.input.first().ok_or_else(|| LowerError::MissingInput { name: node.name.to_string(), op_type: node.op_type.to_string(), index: 0 })?;
+    let then_branch = required_graph_attr(node, "then_branch")?;
+    let else_branch = required_graph_attr(node, "else_branch")?;
+
+    if let Some(cond_value) = constant_scalar_value(cond_name, initializer_data, constant_values) {
+        let chosen = if cond_value != 0.0 { then_branch } else { else_branch };
+        lower_subgraph_nodes(program, values, initializer_data, constant_values, chosen)?;
+        for (index, output_name) in node.output.iter().enumerate() {
+            let branch_output = chosen.output.get(index).ok_or_else(|| LowerError::UnsupportedShape {
+                name: node.name.to_string(),
+                op_type: node.op_type.to_string(),
+                reason: format!("chosen If branch declares fewer outputs than the If node at position {index}"),
+            })?;
+            let value = lookup_by_name(values, branch_output.name, node.op_type, node.name)?.clone();
+            values.insert((*output_name).to_string(), value);
+        }
+        return Ok(());
+    }
+
+    let cond_value = lookup_by_name(values, cond_name, node.op_type, node.name)?.clone();
+    lower_subgraph_nodes(program, values, initializer_data, constant_values, then_branch)?;
+    lower_subgraph_nodes(program, values, initializer_data, constant_values, else_branch)?;
+    for index in 0..node.output.len() {
+        let then_output = then_branch.output.get(index).ok_or_else(|| LowerError::UnsupportedShape {
+            name: node.name.to_string(),
+            op_type: node.op_type.to_string(),
+            reason: format!("then_branch declares fewer outputs than the If node at position {index}"),
+        })?;
+        let else_output = else_branch.output.get(index).ok_or_else(|| LowerError::UnsupportedShape {
+            name: node.name.to_string(),
+            op_type: node.op_type.to_string(),
+            reason: format!("else_branch declares fewer outputs than the If node at position {index}"),
+        })?;
+        let then_value = lookup_by_name(values, then_output.name, node.op_type, node.name)?.clone();
+        let else_value = lookup_by_name(values, else_output.name, node.op_type, node.name)?.clone();
+        if then_value.shape != else_value.shape {
+            return Err(LowerError::UnsupportedShape {
+                name: node.name.to_string(),
+                op_type: node.op_type.to_string(),
+                reason: format!(
+                    "data-dependent If cannot Select between differently-shaped branch outputs at position {index}: then={:?} else={:?}",
+                    then_value.shape, else_value.shape
+                ),
+            });
+        }
+        let out_shape = then_value.shape.clone();
+        let rank = out_shape.len();
+        let operands = alloc::vec![
+            (cond_value.node, IndexMap::Affine(operand_pattern(&cond_value, &out_shape))),
+            (then_value.node, IndexMap::Affine(identity_pattern(rank))),
+            (else_value.node, IndexMap::Affine(identity_pattern(rank))),
+        ];
+        let id = build_elementwise(program, ScalarOp::Select, operands);
+        bind_output(values, node, index, id, out_shape);
+    }
+    Ok(())
+}
+
+/// A fixed (lower-time-known) slice of `value`'s leading axis at `index`:
+/// operand axis 0 reads a plain constant `offset` -- no `terms`, so it is
+/// not the iteration space's "pure projection" case
+/// (`shape::infer::unify_iteration_space`, `proxima-tensor/src/shape.rs:195`)
+/// and instead goes through `bounds_check`
+/// (`proxima-tensor/src/shape.rs:411`), which validates `0 <= index <
+/// value.shape[0]` directly against `value`'s own already-resolved extent.
+/// Every trailing axis is a plain projection onto the one-narrower iteration
+/// space. This is [`Scan`](lower_scan)'s per-iteration `scan_input` slice --
+/// deliberately not [`IndexMap::Computed`] (that machinery is for a
+/// data-dependent index; `index` here is a lower-time constant, the loop
+/// counter of an unrolled `for`).
+fn slice_axis0(program: &mut Vec<Op>, value: &Value, index: u64) -> Value {
+    let rank = value.shape.len();
+    let mut axes = Vec::with_capacity(rank);
+    axes.push(AxisIndex { terms: Default::default(), offset: index as i32 });
+    for axis in 1..rank {
+        axes.push(AxisIndex { terms: core::iter::once(AxisTerm::projection((axis - 1) as u16)).collect(), offset: 0 });
+    }
+    let pattern = IndexPattern { iter_rank: (rank - 1) as u16, axes };
+    let id = build_elementwise(program, ScalarOp::Identity, alloc::vec![(value.node, IndexMap::Affine(pattern))]);
+    Value { node: id, shape: value.shape[1..].to_vec(), view: None }
+}
+
+/// `Scan(initial_state..., scan_input...)`: `Scan`'s own trip count is
+/// never data-dependent in this crate's model -- it is the leading extent of
+/// its `scan_input` tensors (`axis=0`, the only case this lowering
+/// supports), and every extent this pass tracks is already
+/// [`proxima_tensor::Extent::Static`] (see this module's own doc on
+/// [`Value`]). So unlike `Loop`, `Scan` needs no constant-folding test at
+/// all: it is unconditionally unrollable here, `body` appended once per
+/// iteration with each `scan_input` read through [`slice_axis0`] and each
+/// state variable rebound to the previous iteration's body output --
+/// ordinary backwards-referencing dataflow, no new `Op` form.
+///
+/// Deferred, named gaps: `scan_output` (per-iteration outputs stacked back
+/// into a leading axis needs a concat-shaped composition this pass does not
+/// yet build), more than one `scan_input`/state variable, and any
+/// `scan_input_axes`/`scan_output_axes`/`scan_input_directions` attribute
+/// other than the all-default case.
+fn lower_scan(
+    program: &mut Vec<Op>,
+    values: &mut BTreeMap<String, Value>,
+    initializer_data: &BTreeMap<String, Vec<f32>>,
+    constant_values: &mut BTreeMap<String, f32>,
+    node: &NodeProto<'_>,
+) -> Result<(), LowerError> {
+    let name = node.name.to_string();
+    let op_type = node.op_type.to_string();
+    let num_scan_inputs = attr_int(node, "num_scan_inputs").ok_or_else(|| LowerError::UnsupportedShape {
+        name: name.clone(),
+        op_type: op_type.clone(),
+        reason: "Scan requires a num_scan_inputs attribute".to_string(),
+    })?;
+    if num_scan_inputs != 1 || node.input.len() != 2 {
+        return Err(LowerError::UnsupportedShape {
+            name,
+            op_type,
+            reason: "Scan lowering supports exactly one state variable and one scan_input".to_string(),
+        });
+    }
+    let body = required_graph_attr(node, "body")?;
+    if body.input.len() != 2 || body.output.len() != 1 {
+        return Err(LowerError::UnsupportedShape {
+            name,
+            op_type,
+            reason: "Scan lowering requires a body with exactly one state input/output and one scan_input slice (no scan_output)".to_string(),
+        });
+    }
+
+    let mut state = lookup(values, node, 0)?.clone();
+    let scan_input = lookup(values, node, 1)?.clone();
+    if scan_input.shape.is_empty() {
+        return Err(LowerError::UnsupportedShape { name, op_type, reason: "Scan scan_input must be rank >= 1".to_string() });
+    }
+    let trip_count = scan_input.shape[0];
+
+    let state_name = body.input[0].name;
+    let slice_name = body.input[1].name;
+    for iteration in 0..trip_count {
+        let slice = slice_axis0(program, &scan_input, iteration);
+        values.insert(state_name.to_string(), state.clone());
+        values.insert(slice_name.to_string(), slice);
+        lower_subgraph_nodes(program, values, initializer_data, constant_values, body)?;
+        state = lookup_by_name(values, body.output[0].name, "Scan", node.name)?.clone();
+    }
+    bind_output(values, node, 0, state.node, state.shape);
+    Ok(())
+}
+
+/// `Loop(M, cond, v_initial...)`: unrolls exactly `M` iterations when `M` is
+/// a lower-time constant ([`constant_scalar_value`]) -- the static-trip-count
+/// case, appending `body` once per iteration exactly like [`lower_scan`],
+/// each loop-carried dependency rebound to the previous iteration's body
+/// output. `body`'s own `cond_out` (its first declared output) is read but
+/// never gated on: this lowering's documented, narrow assumption is that a
+/// caller supplying a constant `M` intends exactly `M` iterations (ONNX's
+/// own spec allows discarding every `cond_out` reference once `max_trip_count`
+/// alone determines the loop, the case this lowering restricts to by
+/// additionally requiring `cond` be absent or a lower-time-constant `true`).
+///
+/// # The RISC-sufficiency boundary
+///
+/// When `M` is absent, or present but not a lower-time constant, or `cond`
+/// is present and not a lower-time-constant `true`, the number of iterations
+/// depends on values only known once the program *runs* -- there is no
+/// unroll-at-lower-time answer, honest or otherwise. A pure-dataflow
+/// `Vec<Op>` with backwards-only references (`proxima-tensor/src/op.rs:9-11`)
+/// has no runtime branch and no back-edge to fall back to either: every
+/// `NodeId` a node reads must already be fully computed earlier in the same
+/// fixed-length program, so "run this subprogram again, conditioned on data
+/// this subprogram itself produced" has no expression in the algebra. This
+/// is named [`LowerError::DataDependentControlFlow`], never a fabricated
+/// primitive and never a silently-truncated unroll.
+fn lower_loop(
+    program: &mut Vec<Op>,
+    values: &mut BTreeMap<String, Value>,
+    initializer_data: &BTreeMap<String, Vec<f32>>,
+    constant_values: &mut BTreeMap<String, f32>,
+    node: &NodeProto<'_>,
+) -> Result<(), LowerError> {
+    let name = node.name.to_string();
+    let op_type = node.op_type.to_string();
+    let boundary = |reason: &str| LowerError::DataDependentControlFlow { name: name.clone(), op_type: op_type.clone(), reason: reason.to_string() };
+
+    let trip_count = match optional_input(node, 0) {
+        Some(trip_name) => match constant_scalar_value(trip_name, initializer_data, constant_values) {
+            Some(value) => value as u64,
+            None => return Err(boundary("trip count M is only known from computed data, not a lower-time constant")),
+        },
+        None => return Err(boundary("no trip count M was given, so iteration count depends only on a runtime cond")),
+    };
+    if let Some(cond_name) = optional_input(node, 1) {
+        match constant_scalar_value(cond_name, initializer_data, constant_values) {
+            Some(value) if value != 0.0 => {}
+            Some(_) => return Err(boundary("initial cond is a lower-time-constant false, zero iterations is not modeled")),
+            None => return Err(boundary("cond is only known from computed data, so iterations may terminate early at runtime")),
+        }
+    }
+
+    let body = required_graph_attr(node, "body")?;
+    let num_state = node.input.len().saturating_sub(2);
+    if body.input.len() != num_state + 2 || body.output.len() != num_state + 1 {
+        return Err(LowerError::UnsupportedShape {
+            name,
+            op_type,
+            reason: "Loop lowering requires body inputs [iter_num, cond, state...] and outputs [cond_out, state...] with matching state counts".to_string(),
+        });
+    }
+
+    let mut state: Vec<Value> = (0..num_state).map(|index| lookup(values, node, index + 2).cloned()).collect::<Result<_, _>>()?;
+
+    for iteration in 0..trip_count {
+        let iter_node = constant_scalar(program, iteration as f32);
+        values.insert(body.input[0].name.to_string(), Value { node: iter_node, shape: Vec::new(), view: None });
+        for (state_index, state_value) in state.iter().enumerate() {
+            values.insert(body.input[state_index + 2].name.to_string(), state_value.clone());
+        }
+        lower_subgraph_nodes(program, values, initializer_data, constant_values, body)?;
+        state = (0..num_state)
+            .map(|index| lookup_by_name(values, body.output[index + 1].name, "Loop", node.name).cloned())
+            .collect::<Result<_, _>>()?;
+    }
+
+    for (index, state_value) in state.iter().enumerate() {
+        bind_output(values, node, index, state_value.node, state_value.shape.clone());
+    }
     Ok(())
 }
 
@@ -2270,5 +2634,306 @@ mod tests {
 
         let error = lower_graph(&graph).expect_err("padded AveragePool with count_include_pad=0 is a deferred gap");
         assert!(matches!(error, LowerError::UnsupportedShape { .. }), "expected UnsupportedShape, got {error:?}");
+    }
+
+    fn graph_attribute(name: &'static str, subgraph: GraphProto<'static>) -> AttributeProto<'static> {
+        AttributeProto { name, g: Some(subgraph), ..AttributeProto::default() }
+    }
+
+    /// `Where(cond, x, y)`: pure dataflow, [`ScalarOp::Select`] over the
+    /// three operands, no subgraph -- the reverse of `Select -> "Where"`
+    /// lift emission.
+    #[test]
+    fn where_selects_elementwise_between_two_tensors() {
+        let cond_initializer = f32_initializer("cond", &[2], &[1.0, 0.0]);
+        let x_initializer = f32_initializer("x", &[2], &[10.0, 20.0]);
+        let y_initializer = f32_initializer("y", &[2], &[30.0, 40.0]);
+        let node = NodeProto { input: vec!["cond", "x", "y"], output: vec!["z"], op_type: "Where", name: "where", ..NodeProto::default() };
+        let graph = GraphProto {
+            node: vec![node],
+            name: "where_graph",
+            initializer: vec![cond_initializer, x_initializer, y_initializer],
+            output: vec![ValueInfoProto { name: "z", ..ValueInfoProto::default() }],
+            ..GraphProto::default()
+        };
+
+        let lowered = lower_graph(&graph).expect("lower Where");
+        let named: Vec<(&str, &[f32])> = lowered.initializers.iter().map(|(name, data)| (name.as_str(), data.as_slice())).collect();
+        let output = lowered.graph_outputs[0].1;
+        let evaluated = evaluate_named(&lowered.program, &[], &named, &[output]).expect("evaluate Where");
+        let (data, shape) = evaluated.get(output).expect("z present");
+
+        assert_eq!(shape, &[2]);
+        assert_eq!(data, &[10.0, 40.0], "cond[0]=1 picks x[0]=10, cond[1]=0 picks y[1]=40");
+    }
+
+    /// `If` whose `cond` is a graph initializer (a lower-time constant):
+    /// only `then_branch` is lowered and inlined, `else_branch` contributes
+    /// nothing to the program.
+    #[test]
+    fn if_with_constant_true_condition_inlines_only_then_branch() {
+        let x_initializer = f32_initializer("x", &[1], &[5.0]);
+        let cond_initializer = f32_initializer("cond", &[], &[1.0]);
+        let then_branch = GraphProto {
+            node: vec![NodeProto { input: vec!["x"], output: vec!["then_out"], op_type: "Identity", name: "then_identity", ..NodeProto::default() }],
+            name: "then",
+            output: vec![ValueInfoProto { name: "then_out", ..ValueInfoProto::default() }],
+            ..GraphProto::default()
+        };
+        let else_branch = GraphProto {
+            node: vec![NodeProto { input: vec!["x"], output: vec!["else_out"], op_type: "Neg", name: "else_neg", ..NodeProto::default() }],
+            name: "else",
+            output: vec![ValueInfoProto { name: "else_out", ..ValueInfoProto::default() }],
+            ..GraphProto::default()
+        };
+        let node = NodeProto {
+            input: vec!["cond"],
+            output: vec!["y"],
+            op_type: "If",
+            name: "if",
+            attribute: vec![graph_attribute("then_branch", then_branch), graph_attribute("else_branch", else_branch)],
+            ..NodeProto::default()
+        };
+        let graph = GraphProto {
+            node: vec![node],
+            name: "if_const_graph",
+            initializer: vec![x_initializer, cond_initializer],
+            output: vec![ValueInfoProto { name: "y", ..ValueInfoProto::default() }],
+            ..GraphProto::default()
+        };
+
+        let lowered = lower_graph(&graph).expect("lower If with constant true cond");
+        assert_eq!(
+            lowered.program.len(),
+            3,
+            "x's and cond's Input leaves plus then_branch's Identity are appended -- else_branch is never lowered"
+        );
+
+        let named: Vec<(&str, &[f32])> = lowered.initializers.iter().map(|(name, data)| (name.as_str(), data.as_slice())).collect();
+        let output = lowered.graph_outputs[0].1;
+        let evaluated = evaluate_named(&lowered.program, &[], &named, &[output]).expect("evaluate If constant true");
+        let (data, _) = evaluated.get(output).expect("y present");
+        assert_eq!(data, &[5.0], "constant-true cond picks then_branch (Identity(x))");
+    }
+
+    /// `If` whose `cond` is only known from computed data (`Greater`, not an
+    /// initializer or folded `Constant`): both branches are lowered
+    /// unconditionally and the output is a per-position `Select` (Option A
+    /// from this module's own doc), valid here because both branches
+    /// produce the same `[1]` shape.
+    #[test]
+    fn if_with_data_dependent_condition_selects_between_both_lowered_branches() {
+        let x_initializer = f32_initializer("x", &[1], &[3.0]);
+        let zero_initializer = f32_initializer("zero", &[1], &[0.0]);
+        let cond_node = NodeProto { input: vec!["x", "zero"], output: vec!["cond"], op_type: "Greater", name: "greater", ..NodeProto::default() };
+        let then_branch = GraphProto {
+            node: vec![NodeProto { input: vec!["x"], output: vec!["then_out"], op_type: "Identity", name: "then_identity", ..NodeProto::default() }],
+            name: "then",
+            output: vec![ValueInfoProto { name: "then_out", ..ValueInfoProto::default() }],
+            ..GraphProto::default()
+        };
+        let else_branch = GraphProto {
+            node: vec![NodeProto { input: vec!["x"], output: vec!["else_out"], op_type: "Neg", name: "else_neg", ..NodeProto::default() }],
+            name: "else",
+            output: vec![ValueInfoProto { name: "else_out", ..ValueInfoProto::default() }],
+            ..GraphProto::default()
+        };
+        let if_node = NodeProto {
+            input: vec!["cond"],
+            output: vec!["y"],
+            op_type: "If",
+            name: "if",
+            attribute: vec![graph_attribute("then_branch", then_branch), graph_attribute("else_branch", else_branch)],
+            ..NodeProto::default()
+        };
+        let graph = GraphProto {
+            node: vec![cond_node, if_node],
+            name: "if_data_dependent_graph",
+            initializer: vec![x_initializer, zero_initializer],
+            output: vec![ValueInfoProto { name: "y", ..ValueInfoProto::default() }],
+            ..GraphProto::default()
+        };
+
+        let lowered = lower_graph(&graph).expect("lower If with data-dependent cond");
+        let named: Vec<(&str, &[f32])> = lowered.initializers.iter().map(|(name, data)| (name.as_str(), data.as_slice())).collect();
+        let output = lowered.graph_outputs[0].1;
+        let evaluated = evaluate_named(&lowered.program, &[], &named, &[output]).expect("evaluate If data-dependent");
+        let (data, _) = evaluated.get(output).expect("y present");
+        assert_eq!(data, &[3.0], "x=3 > 0, cond true, Select picks then_branch's Identity(x)=3");
+    }
+
+    /// The boundary Option A itself names: a data-dependent `If` whose two
+    /// branches produce differently-shaped outputs has no `Select` that
+    /// reconciles them -- [`LowerError::UnsupportedShape`], never a silent
+    /// pick of one side.
+    #[test]
+    fn if_data_dependent_with_shape_mismatched_branches_is_a_named_unsupported_shape() {
+        let x_initializer = f32_initializer("x", &[1], &[3.0]);
+        let zero_initializer = f32_initializer("zero", &[1], &[0.0]);
+        let cond_node = NodeProto { input: vec!["x", "zero"], output: vec!["cond"], op_type: "Greater", name: "greater", ..NodeProto::default() };
+        let then_branch = GraphProto {
+            node: vec![NodeProto { input: vec!["x"], output: vec!["then_out"], op_type: "Identity", name: "then_identity", ..NodeProto::default() }],
+            name: "then",
+            output: vec![ValueInfoProto { name: "then_out", ..ValueInfoProto::default() }],
+            ..GraphProto::default()
+        };
+        let else_branch = GraphProto {
+            node: vec![NodeProto {
+                input: vec!["x", "x"],
+                output: vec!["else_out"],
+                op_type: "Concat",
+                name: "else_concat",
+                attribute: vec![AttributeProto { name: "axis", i: 0, ..AttributeProto::default() }],
+                ..NodeProto::default()
+            }],
+            name: "else",
+            output: vec![ValueInfoProto { name: "else_out", ..ValueInfoProto::default() }],
+            ..GraphProto::default()
+        };
+        let if_node = NodeProto {
+            input: vec!["cond"],
+            output: vec!["y"],
+            op_type: "If",
+            name: "if",
+            attribute: vec![graph_attribute("then_branch", then_branch), graph_attribute("else_branch", else_branch)],
+            ..NodeProto::default()
+        };
+        let graph = GraphProto {
+            node: vec![cond_node, if_node],
+            name: "if_shape_mismatch_graph",
+            initializer: vec![x_initializer, zero_initializer],
+            output: vec![ValueInfoProto { name: "y", ..ValueInfoProto::default() }],
+            ..GraphProto::default()
+        };
+
+        let error = lower_graph(&graph).expect_err("differently-shaped branches cannot Select");
+        assert!(matches!(error, LowerError::UnsupportedShape { .. }), "expected UnsupportedShape, got {error:?}");
+    }
+
+    /// `Scan` with one state variable and one `scan_input`: unrolled `trip
+    /// count = scan_input.shape[0]` times, each iteration reading its slice
+    /// via [`slice_axis0`] and folding into the running state -- a plain sum
+    /// over `[1, 2, 3, 4]`.
+    #[test]
+    fn scan_sums_a_sequence_by_unrolling_the_body() {
+        let state_initializer = f32_initializer("state0", &[], &[0.0]);
+        let sequence_initializer = f32_initializer("seq", &[4], &[1.0, 2.0, 3.0, 4.0]);
+        let body = GraphProto {
+            node: vec![NodeProto { input: vec!["state_in", "slice"], output: vec!["state_out"], op_type: "Add", name: "body_add", ..NodeProto::default() }],
+            name: "scan_body",
+            input: vec![ValueInfoProto { name: "state_in", ..ValueInfoProto::default() }, ValueInfoProto { name: "slice", ..ValueInfoProto::default() }],
+            output: vec![ValueInfoProto { name: "state_out", ..ValueInfoProto::default() }],
+            ..GraphProto::default()
+        };
+        let node = NodeProto {
+            input: vec!["state0", "seq"],
+            output: vec!["y"],
+            op_type: "Scan",
+            name: "scan",
+            attribute: vec![AttributeProto { name: "num_scan_inputs", i: 1, ..AttributeProto::default() }, graph_attribute("body", body)],
+            ..NodeProto::default()
+        };
+        let graph = GraphProto {
+            node: vec![node],
+            name: "scan_sum_graph",
+            initializer: vec![state_initializer, sequence_initializer],
+            output: vec![ValueInfoProto { name: "y", ..ValueInfoProto::default() }],
+            ..GraphProto::default()
+        };
+
+        let lowered = lower_graph(&graph).expect("lower Scan");
+        let named: Vec<(&str, &[f32])> = lowered.initializers.iter().map(|(name, data)| (name.as_str(), data.as_slice())).collect();
+        let output = lowered.graph_outputs[0].1;
+        let evaluated = evaluate_named(&lowered.program, &[], &named, &[output]).expect("evaluate Scan");
+        let (data, _) = evaluated.get(output).expect("y present");
+        assert_eq!(data, &[10.0], "1 + 2 + 3 + 4 unrolled across four appended body copies");
+    }
+
+    /// `Loop` with a lower-time-constant `M` (no `cond` input): unrolled
+    /// exactly `M` times, each iteration's `state_out` feeding the next
+    /// iteration's `state_in` -- three `+1` steps starting from `0`.
+    #[test]
+    fn loop_with_static_trip_count_unrolls_the_body_exactly_m_times() {
+        let trip_initializer = f32_initializer("trip", &[], &[3.0]);
+        let state_initializer = f32_initializer("state0", &[], &[0.0]);
+        let one_initializer = f32_initializer("one", &[], &[1.0]);
+        let body = GraphProto {
+            node: vec![NodeProto { input: vec!["state_in", "one"], output: vec!["state_out"], op_type: "Add", name: "body_add", ..NodeProto::default() }],
+            name: "loop_body",
+            input: vec![
+                ValueInfoProto { name: "iter_num", ..ValueInfoProto::default() },
+                ValueInfoProto { name: "cond_in", ..ValueInfoProto::default() },
+                ValueInfoProto { name: "state_in", ..ValueInfoProto::default() },
+            ],
+            output: vec![ValueInfoProto { name: "cond_out_unused", ..ValueInfoProto::default() }, ValueInfoProto { name: "state_out", ..ValueInfoProto::default() }],
+            ..GraphProto::default()
+        };
+        let node = NodeProto {
+            input: vec!["trip", "", "state0"],
+            output: vec!["y"],
+            op_type: "Loop",
+            name: "loop",
+            attribute: vec![graph_attribute("body", body)],
+            ..NodeProto::default()
+        };
+        let graph = GraphProto {
+            node: vec![node],
+            name: "loop_static_graph",
+            initializer: vec![trip_initializer, state_initializer, one_initializer],
+            output: vec![ValueInfoProto { name: "y", ..ValueInfoProto::default() }],
+            ..GraphProto::default()
+        };
+
+        let lowered = lower_graph(&graph).expect("lower Loop with static trip count");
+        let named: Vec<(&str, &[f32])> = lowered.initializers.iter().map(|(name, data)| (name.as_str(), data.as_slice())).collect();
+        let output = lowered.graph_outputs[0].1;
+        let evaluated = evaluate_named(&lowered.program, &[], &named, &[output]).expect("evaluate Loop static");
+        let (data, _) = evaluated.get(output).expect("y present");
+        assert_eq!(data, &[3.0], "0 + 1 + 1 + 1 across three unrolled body copies");
+    }
+
+    /// The RISC-sufficiency boundary this crate's control-flow lowering
+    /// does not cross: `Loop`'s trip count `M` is only known from computed
+    /// data (a graph input, never a constant), so there is no lower-time
+    /// answer to "how many times does the body append" --
+    /// [`LowerError::DataDependentControlFlow`], never a fabricated
+    /// primitive and never a silently truncated unroll.
+    #[test]
+    fn loop_with_runtime_trip_count_is_a_named_data_dependent_control_flow_boundary() {
+        let state_initializer = f32_initializer("state0", &[], &[0.0]);
+        let one_initializer = f32_initializer("one", &[], &[1.0]);
+        let body = GraphProto {
+            node: vec![NodeProto { input: vec!["state_in", "one"], output: vec!["state_out"], op_type: "Add", name: "body_add", ..NodeProto::default() }],
+            name: "loop_body",
+            input: vec![
+                ValueInfoProto { name: "iter_num", ..ValueInfoProto::default() },
+                ValueInfoProto { name: "cond_in", ..ValueInfoProto::default() },
+                ValueInfoProto { name: "state_in", ..ValueInfoProto::default() },
+            ],
+            output: vec![ValueInfoProto { name: "cond_out_unused", ..ValueInfoProto::default() }, ValueInfoProto { name: "state_out", ..ValueInfoProto::default() }],
+            ..GraphProto::default()
+        };
+        let node = NodeProto {
+            input: vec!["trip", "", "state0"],
+            output: vec!["y"],
+            op_type: "Loop",
+            name: "loop",
+            attribute: vec![graph_attribute("body", body)],
+            ..NodeProto::default()
+        };
+        let graph = GraphProto {
+            node: vec![node],
+            name: "loop_runtime_trip_graph",
+            input: vec![input_value_info("trip", &[])],
+            initializer: vec![state_initializer, one_initializer],
+            output: vec![ValueInfoProto { name: "y", ..ValueInfoProto::default() }],
+            ..GraphProto::default()
+        };
+
+        let error = lower_graph(&graph).expect_err("a graph-input trip count is not a lower-time constant");
+        assert!(
+            matches!(error, LowerError::DataDependentControlFlow { .. }),
+            "expected DataDependentControlFlow, got {error:?}"
+        );
     }
 }
