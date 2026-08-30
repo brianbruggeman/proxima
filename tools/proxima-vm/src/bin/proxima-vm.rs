@@ -28,6 +28,10 @@ const MAX_SEGMENTS: usize = 4;
 const MAX_HYPERCALLS: usize = 16;
 
 const EMITTED_CAPACITY: usize = 256;
+const MMIO_EMITTED_CAPACITY: usize = 256;
+const NET_EMITTED_CAPACITY: usize = 256;
+const BLK_EMITTED_CAPACITY: usize = 2048;
+const PL011_EMITTED_CAPACITY: usize = 256;
 
 fn main() -> Result<(), Box<dyn Error>> {
     let mut arguments = env::args().skip(1);
@@ -51,12 +55,17 @@ fn run(path: &str) -> Result<(), Box<dyn Error>> {
         bytes: b"vm-side-canned".to_vec(),
         eof: true,
     });
-    let (requests, emitted) = dispatch::run_dispatch_loop(
+    let (requests, emitted, ..) = dispatch::run_dispatch_loop(
         entry,
         &segments,
         configured,
         MAX_HYPERCALLS,
         EMITTED_CAPACITY,
+        MMIO_EMITTED_CAPACITY,
+        NET_EMITTED_CAPACITY,
+        BLK_EMITTED_CAPACITY,
+        PL011_EMITTED_CAPACITY,
+        dispatch::GUEST_MEMORY_SIZE,
     )?;
 
     eprintln!("guest issued {} request(s): {requests:?}", requests.len());
