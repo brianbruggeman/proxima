@@ -64,7 +64,7 @@
 //! binds as raw bytes (`array<u32>`, word-addressed — WGSL storage has no
 //! byte-addressable type) instead of `array<f32>`, and every read goes
 //! through the matching [`crate::msl::PackedCodec`] unpack function
-//! [`packed_codec_functions_wgsl`] generates for that operand — a word-based
+//! `packed_codec_functions_wgsl` generates for that operand — a word-based
 //! port of `crate::msl`'s own five packed-codec unpack functions plus
 //! `BFloat16`/`Float16`, specialized per operand index because WGSL rejects a
 //! storage-address-space function parameter (see that function's own doc).
@@ -74,8 +74,8 @@
 //!
 //! # `Iota` and `Constant`
 //!
-//! Both render (position-only, [`render_iota`]; literal-fill,
-//! [`render_constant`]) — the real forward fixture's RoPE positions and
+//! Both render (position-only, `render_iota`; literal-fill,
+//! `render_constant`) — the real forward fixture's RoPE positions and
 //! causal mask need them, and neither takes an operand, so there is no
 //! gather/packed-operand interaction to scope out.
 //!
@@ -156,7 +156,7 @@ pub struct WgslCaps {
     /// AND the adapter reports a FIXED subgroup width (`subgroup_min_size ==
     /// subgroup_max_size` — heterogeneous adapters report a range, which
     /// this module cannot pin a `@workgroup_size` to at emit time). Gates
-    /// [`reduce_is_cooperative`]: `None` (the [`Default`]) keeps every
+    /// `reduce_is_cooperative`: `None` (the [`Default`]) keeps every
     /// `Keep::Reduce` fold on the portable one-thread-per-output serial
     /// path — never a silent guess at a width the device did not confirm.
     pub subgroup_size: Option<u32>,
@@ -758,7 +758,7 @@ fn preamble(
         source.push('\n');
     }
     // one specialized copy of the codec-unpack functions per packed operand
-    // index -- see [`packed_codec_functions_wgsl`]'s own doc for why WGSL
+    // index -- see `packed_codec_functions_wgsl`'s own doc for why WGSL
     // cannot take one function parameterized over which `in{n}` to read.
     for (index, codec) in quantized.iter().enumerate() {
         if codec.is_some() {
@@ -771,7 +771,7 @@ fn preamble(
     for index in 0..operand_count {
         // a packed operand's buffer is raw BYTES reinterpreted as `u32`
         // words (`read_u8_{n}`/`read_u16le_{n}` split a byte/word offset
-        // back out at the read) -- see [`packed_codec_functions_wgsl`]'s
+        // back out at the read) -- see `packed_codec_functions_wgsl`'s
         // own doc.
         let binding_type = if quantized.get(index).copied().flatten().is_some() {
             "array<u32>"
@@ -910,7 +910,7 @@ fn codec_function_name(codec: PackedCodec) -> &'static str {
 /// splits into a super-block (`offset / block_elements`, scaled to a byte
 /// offset by `block_bytes`) and a position inside it (`offset % block_elements`),
 /// the same split the `_{index}`-suffixed `*_element` function
-/// [`packed_codec_functions_wgsl`] generated for this operand expects.
+/// `packed_codec_functions_wgsl` generated for this operand expects.
 fn wgsl_operand_read(index: usize, offset_expr: &str, codec: Option<PackedCodec>) -> String {
     match codec {
         None => format!("in{index}[{offset_expr}]"),
@@ -1122,7 +1122,7 @@ fn render_reduce(resolved: &BoundOp, entry: &str, element_type: &str, quantized:
 /// from the `BoundOp`'s real `ReduceInit`; every other lane seeds from
 /// [`cooperative_identity_token`] so the true seed folds into the group
 /// exactly once. Never called with a gathered operand (see
-/// [`reduce_is_cooperative`]'s own doc), so no fault/indices plumbing here.
+/// `reduce_is_cooperative`'s own doc), so no fault/indices plumbing here.
 fn render_reduce_cooperative(
     resolved: &BoundOp,
     entry: &str,
@@ -1588,7 +1588,7 @@ mod tests {
         assert!(kernel.source.contains("var scratch: array<f32, 1>"));
     }
 
-    /// `sum_k lhs[m, k] * rhs[k, n]` — the matmul shape [`reduce_is_cooperative`]
+    /// `sum_k lhs[m, k] * rhs[k, n]` — the matmul shape `reduce_is_cooperative`
     /// selects for.
     fn matmul_reduce_op(m: u32, k: u32, n: u32) -> BoundOp {
         use proxima_tensor::{Reduce, ReduceInit};
