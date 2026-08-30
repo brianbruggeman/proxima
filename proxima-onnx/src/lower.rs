@@ -1628,9 +1628,9 @@ fn reverse_axis(program: &mut Vec<Op>, value: &Value, axis: usize) -> Value {
     Value { node: id, shape: out_shape, view: None }
 }
 
-/// `ConvTranspose`, rank-4, `group = 1`, `stride = 1` only.
+/// `ConvTranspose`, rank-4, `group = 1`, any `stride`/`dilation`.
 ///
-/// # Why `stride = 1` only, and what a general stride needs
+/// # Two compositions, chosen by `stride`/`dilation`
 ///
 /// `ConvTranspose`'s forward relation is `out_pos = in_pos*stride +
 /// ky*dilation - pad` -- the exact two-term shape [`window_axis`] already
@@ -1642,27 +1642,26 @@ fn reverse_axis(program: &mut Vec<Op>, value: &Value, axis: usize) -> Value {
 /// pure projections in v1"`), so this two-term combination cannot be
 /// `out_map` directly.
 ///
-/// This is genuinely expressible anyway, at `stride > 1`, via the
-/// scatter-add-as-masked-reduce idiom `proxima-tensor/src/cpu.rs:16801-16860`
-/// (`scatter_add_into_a_known_destination_via_mask_composition`) already
-/// proves: keep `oy` as its own free (pure-projection) iteration axis, add
-/// `iy`/`ky` as reduced axes, and replace the affine `out_map` with an
-/// `Equal` mask (`oy == iy*stride + ky*dilation - pad`, itself ordinary
-/// `Multiply`/`Subtract`/`Equal` `ScalarOp`s over `Iota`-sourced positions)
-/// multiplied into the reduced operand -- no div/mod, no new `Op`/`ScalarOp`/
-/// `IndexMap`, only a materialization cost of `O(out_h * in_h * kh)` per
-/// spatial axis instead of the `O(in_h * kh)` a fused scatter would pay.
-/// Deferred here for lack of time, not because the ISA cannot express it --
-/// a real, named, honest gap, not a boundary.
-///
-/// At `stride = 1` (this function's scope), the scatter direction collapses
-/// to an *ordinary* convolution: `ConvTranspose(x, w, stride=1, pad=p) ==
+/// At `stride = 1, dilation = 1` the scatter direction collapses to an
+/// *ordinary* convolution: `ConvTranspose(x, w, stride=1, pad=p) ==
 /// Conv(pad(x, k-1-p), flip_spatial(transpose_channels(w)))` -- weight
 /// channels swapped `[ci, co, kh, kw] -> [co, ci, kh, kw]` ([`permute_value`],
 /// the same composition [`lower_transpose`] itself builds) and the kernel
 /// spatially reversed ([`reverse_axis`], twice), then handed straight to
 /// [`conv2d_core`] with adjusted padding `k - 1 - p` per side -- exactly
 /// [`lower_conv`]'s `group = 1` composition, no new machinery at all.
+///
+/// At any other `stride`/`dilation`, [`convtranspose2d_scatter`] composes
+/// the general relation directly via the scatter-add-as-masked-reduce idiom
+/// `proxima-tensor/src/cpu.rs:16801-16860`
+/// (`scatter_add_into_a_known_destination_via_mask_composition`) proves: keep
+/// `oy`/`ox` as their own free (pure-projection) iteration axes, add
+/// `ci`/`iy`/`ix`/`ky`/`kx` as reduced axes, and replace the affine `out_map`
+/// with two `Equal` masks (`oy == iy*stride_h + ky*dilation_h - pad_top`,
+/// `ox` likewise, each itself ordinary `Multiply`/`Subtract`/`Equal`
+/// `ScalarOp`s over `Iota`-sourced positions -- see [`scatter_mask_axis`])
+/// multiplied into the reduced operand -- no div/mod, no new `Op`/
+/// `ScalarOp`/`IndexMap`.
 fn lower_convtranspose(program: &mut Vec<Op>, values: &mut BTreeMap<String, Value>, node: &NodeProto<'_>) -> Result<(), LowerError> {
     let image = lookup(values, node, 0)?.clone();
     let weight = lookup(values, node, 1)?.clone();
@@ -1690,13 +1689,8 @@ fn lower_convtranspose(program: &mut Vec<Op>, values: &mut BTreeMap<String, Valu
     if strides.len() != 2 || dilations.len() != 2 || pads.len() != 4 {
         return Err(LowerError::UnsupportedShape { name, op_type, reason: "ConvTranspose lowering supports 2D strides/dilations/pads only".to_string() });
     }
-    if strides != [1, 1] || dilations != [1, 1] {
-        return Err(LowerError::UnsupportedShape {
-            name,
-            op_type,
-            reason: "ConvTranspose lowering supports stride=1, dilation=1 only -- stride > 1 is affine-expressible via a masked-reduce scatter (see this function's own doc) but not yet composed".to_string(),
-        });
-    }
+    let (stride_h, stride_w) = (strides[0], strides[1]);
+    let (dilation_h, dilation_w) = (dilations[0], dilations[1]);
     let (pad_top, pad_left, pad_bottom, pad_right) = (pads[0], pads[1], pads[2], pads[3]);
 
     let in_channels = image.shape[1];
@@ -1712,22 +1706,6 @@ fn lower_convtranspose(program: &mut Vec<Op>, values: &mut BTreeMap<String, Valu
         });
     }
 
-    let new_pad_top = kernel_h as i64 - 1 - pad_top;
-    let new_pad_bottom = kernel_h as i64 - 1 - pad_bottom;
-    let new_pad_left = kernel_w as i64 - 1 - pad_left;
-    let new_pad_right = kernel_w as i64 - 1 - pad_right;
-    if new_pad_top < 0 || new_pad_bottom < 0 || new_pad_left < 0 || new_pad_right < 0 {
-        return Err(LowerError::UnsupportedShape {
-            name: node.name.to_string(),
-            op_type: node.op_type.to_string(),
-            reason: "ConvTranspose lowering requires pads <= kernel_size - 1 on every side".to_string(),
-        });
-    }
-
-    let transposed_weight = permute_value(program, &weight, &[1, 0, 2, 3]);
-    let flipped_h = reverse_axis(program, &transposed_weight, 2);
-    let flipped_weight = reverse_axis(program, &flipped_h, 3);
-
     let bias = match node.input.get(2) {
         Some(bias_name) => Some(lookup_by_name(values, bias_name, node.op_type, node.name)?.clone()),
         None => None,
@@ -1742,19 +1720,157 @@ fn lower_convtranspose(program: &mut Vec<Op>, values: &mut BTreeMap<String, Valu
         });
     }
 
-    let attrs = Conv2dAttrs {
-        stride_h: 1,
-        stride_w: 1,
-        dilation_h: 1,
-        dilation_w: 1,
-        pad_top: new_pad_top,
-        pad_left: new_pad_left,
-        pad_bottom: new_pad_bottom,
-        pad_right: new_pad_right,
-    };
-    let result = conv2d_core(program, node, &image, &flipped_weight, bias.as_ref(), attrs, Some("convtranspose2d".to_string()))?;
+    if stride_h == 1 && stride_w == 1 && dilation_h == 1 && dilation_w == 1 {
+        let new_pad_top = kernel_h as i64 - 1 - pad_top;
+        let new_pad_bottom = kernel_h as i64 - 1 - pad_bottom;
+        let new_pad_left = kernel_w as i64 - 1 - pad_left;
+        let new_pad_right = kernel_w as i64 - 1 - pad_right;
+        if new_pad_top < 0 || new_pad_bottom < 0 || new_pad_left < 0 || new_pad_right < 0 {
+            return Err(LowerError::UnsupportedShape {
+                name: node.name.to_string(),
+                op_type: node.op_type.to_string(),
+                reason: "ConvTranspose lowering requires pads <= kernel_size - 1 on every side at stride=1".to_string(),
+            });
+        }
+
+        let transposed_weight = permute_value(program, &weight, &[1, 0, 2, 3]);
+        let flipped_h = reverse_axis(program, &transposed_weight, 2);
+        let flipped_weight = reverse_axis(program, &flipped_h, 3);
+
+        let attrs = Conv2dAttrs {
+            stride_h: 1,
+            stride_w: 1,
+            dilation_h: 1,
+            dilation_w: 1,
+            pad_top: new_pad_top,
+            pad_left: new_pad_left,
+            pad_bottom: new_pad_bottom,
+            pad_right: new_pad_right,
+        };
+        let result = conv2d_core(program, node, &image, &flipped_weight, bias.as_ref(), attrs, Some("convtranspose2d".to_string()))?;
+        bind_output(values, node, 0, result.node, result.shape);
+        return Ok(());
+    }
+
+    let result = convtranspose2d_scatter(program, &image, &weight, bias.as_ref(), kernel_h, kernel_w, stride_h, stride_w, dilation_h, dilation_w, pad_top, pad_left, pad_bottom, pad_right)?;
     bind_output(values, node, 0, result.node, result.shape);
     Ok(())
+}
+
+/// One position axis of the general `ConvTranspose` scatter relation
+/// `oy == iy*stride + ky*dilation - pad`, materialized as a rank-3
+/// `[out_extent, in_extent, kernel_extent]` `0.0`/`1.0` mask -- the affine
+/// combination [`window_axis`] builds for ordinary `Conv` (reading *from* an
+/// operand at a computed position), read instead as a *destination* equality
+/// test, exactly the `Iota` + `Equal` scatter idiom
+/// `proxima-tensor/src/cpu.rs:16801` (`scatter_add_into_a_known_destination_via_mask_composition`)
+/// proves generalizes past a single Iota: two scaled `Iota`s summed and
+/// shifted give the many-body affine combination that idiom's single
+/// `indices` operand does not need. No div/mod, no new `Op`/`ScalarOp`/
+/// `IndexMap`.
+fn scatter_mask_axis(program: &mut Vec<Op>, out_extent: u64, in_extent: u64, kernel_extent: u64, stride: i64, dilation: i64, pad: i64) -> NodeId {
+    let out_pos = append(program, Op::Iota { dtype: DType::Float32, extent: Extent::Static(out_extent as u32) });
+    let in_pos = append(program, Op::Iota { dtype: DType::Float32, extent: Extent::Static(in_extent as u32) });
+    let kernel_pos = append(program, Op::Iota { dtype: DType::Float32, extent: Extent::Static(kernel_extent as u32) });
+
+    let stride_c = constant_scalar(program, stride as f32);
+    let dilation_c = constant_scalar(program, dilation as f32);
+    let pad_c = constant_scalar(program, pad as f32);
+
+    let scaled_in = build_elementwise(program, ScalarOp::Multiply, alloc::vec![(in_pos, IndexMap::Affine(identity_pattern(1))), (stride_c, IndexMap::Affine(scalar_broadcast_pattern(1)))]);
+    let scaled_kernel = build_elementwise(
+        program,
+        ScalarOp::Multiply,
+        alloc::vec![(kernel_pos, IndexMap::Affine(identity_pattern(1))), (dilation_c, IndexMap::Affine(scalar_broadcast_pattern(1)))],
+    );
+    let summed = build_elementwise(
+        program,
+        ScalarOp::Add,
+        alloc::vec![(scaled_in, IndexMap::Affine(projection(2, &[0]))), (scaled_kernel, IndexMap::Affine(projection(2, &[1])))],
+    );
+    let source_pos = build_elementwise(program, ScalarOp::Subtract, alloc::vec![(summed, IndexMap::Affine(identity_pattern(2))), (pad_c, IndexMap::Affine(scalar_broadcast_pattern(2)))]);
+
+    build_elementwise(
+        program,
+        ScalarOp::Equal,
+        alloc::vec![(out_pos, IndexMap::Affine(projection(3, &[0]))), (source_pos, IndexMap::Affine(projection(3, &[1, 2])))],
+    )
+}
+
+/// The general (any `stride`/`dilation`) `ConvTranspose`, `group = 1`: a
+/// masked-reduce scatter that widens its iteration space one axis at a time
+/// -- `n`/`ci`/`iy`/`ix` (image) times `ci`/`co`/`ky`/`kx` (weight) first
+/// (rank 7, `ci` reduced immediately by being shared), then the `oy` mask
+/// folds in (rank 8), then the `ox` mask (rank 9), each step's own two
+/// operands covering that step's whole iteration space -- `shape::infer`
+/// resolves an axis's extent from a single node's operands, never across a
+/// chain, which is why this cannot be one 9-operand product. `n`/`co`/`oy`/
+/// `ox` stay free (pure projections) into the final [`build_reduce`];
+/// `ci`/`iy`/`ix`/`ky`/`kx` reduce away. The two spatial `Equal` masks from
+/// [`scatter_mask_axis`] gate which `(iy, ky)`/`(ix, kx)` pairs actually
+/// contribute to each `(oy, ox)`. See [`lower_convtranspose`]'s own doc for
+/// why `Op::Reduce`'s pure-projection `out_map` rules out a fused `IndexMap`
+/// here, and this function's cost is `O(out_h*out_w*in_h*in_w*kh*kw)` per
+/// the same doc's `O(out_h*in_h*kh)`-per-axis accounting.
+#[allow(clippy::too_many_arguments)]
+fn convtranspose2d_scatter(
+    program: &mut Vec<Op>,
+    image: &Value,
+    weight: &Value,
+    bias: Option<&Value>,
+    kernel_h: u64,
+    kernel_w: u64,
+    stride_h: i64,
+    stride_w: i64,
+    dilation_h: i64,
+    dilation_w: i64,
+    pad_top: i64,
+    pad_left: i64,
+    pad_bottom: i64,
+    pad_right: i64,
+) -> Result<Value, LowerError> {
+    let batch = image.shape[0];
+    let in_h = image.shape[2];
+    let in_w = image.shape[3];
+    let out_channels = weight.shape[1];
+
+    let out_h = ((in_h as i64 - 1) * stride_h - pad_top - pad_bottom + dilation_h * (kernel_h as i64 - 1) + 1).max(0) as u64;
+    let out_w = ((in_w as i64 - 1) * stride_w - pad_left - pad_right + dilation_w * (kernel_w as i64 - 1) + 1).max(0) as u64;
+
+    let mask_h = scatter_mask_axis(program, out_h, in_h, kernel_h, stride_h, dilation_h, pad_top);
+    let mask_w = scatter_mask_axis(program, out_w, in_w, kernel_w, stride_w, dilation_w, pad_left);
+
+    // Each of the three products below must, on its own, cover every axis
+    // of its own iteration space from its two operands (`shape::infer`
+    // resolves an iteration axis's extent from a single node's operands,
+    // never across the chain) -- so `oy`/`ox` are folded in one at a time,
+    // widening the iteration space only once a mask supplies that axis's
+    // pure projection. Final axis order: 0=n 1=co 2=ci 3=iy 4=ix 5=ky 6=kx
+    // 7=oy 8=ox.
+    let reduce_space = projection(7, &[0, 2, 3, 4]); // image: n, ci, iy, ix
+    let weight_pattern = projection(7, &[2, 1, 5, 6]); // weight: ci, co, kh, kw
+    let image_times_weight = build_elementwise(program, ScalarOp::Multiply, alloc::vec![(image.node, IndexMap::Affine(reduce_space)), (weight.node, IndexMap::Affine(weight_pattern))]);
+
+    let step1_pattern = projection(8, &[0, 1, 2, 3, 4, 5, 6]);
+    let mask_h_pattern = projection(8, &[7, 3, 5]); // mask_h: oy, iy, ky
+    let masked_h = build_elementwise(program, ScalarOp::Multiply, alloc::vec![(image_times_weight, IndexMap::Affine(step1_pattern)), (mask_h, IndexMap::Affine(mask_h_pattern))]);
+
+    let step2_pattern = projection(9, &[0, 1, 2, 3, 4, 5, 6, 7]);
+    let mask_w_pattern = projection(9, &[8, 4, 6]); // mask_w: ox, ix, kx
+    let masked = build_elementwise(program, ScalarOp::Multiply, alloc::vec![(masked_h, IndexMap::Affine(step2_pattern)), (mask_w, IndexMap::Affine(mask_w_pattern))]);
+
+    let out_shape = alloc::vec![batch, out_channels, out_h, out_w];
+    let reduced = build_reduce(program, ScalarOp::Add, ReduceInit::Zero, masked, identity_pattern(9), projection(9, &[0, 1, 7, 8]), Some("convtranspose2d_scatter".to_string()));
+
+    let result = match bias {
+        Some(bias) => build_elementwise(
+            program,
+            ScalarOp::Add,
+            alloc::vec![(reduced, IndexMap::Affine(identity_pattern(4))), (bias.node, IndexMap::Affine(projection(4, &[1])))],
+        ),
+        None => reduced,
+    };
+    Ok(Value { node: result, shape: out_shape, view: None })
 }
 
 /// One `stride*out + dilation*kernel` window term -- `map.rs`'s
@@ -3564,13 +3680,13 @@ mod tests {
         assert_eq!(data, &[1.0, 4.0, 4.0, 6.0, 20.0, 16.0, 9.0, 24.0, 16.0], "hand-derived full-output overlap-add");
     }
 
-    /// `ConvTranspose` with `strides = [2, 2]`: affine-expressible (see
-    /// [`lower_convtranspose`]'s own doc for the masked-reduce-scatter
-    /// composition), but not yet composed -- a named, honest
-    /// [`LowerError::UnsupportedShape`], never a silently wrong stride-1
-    /// result.
+    /// `ConvTranspose` with `strides = [2, 2]`: the general masked-reduce
+    /// scatter [`convtranspose2d_scatter`] composes -- a `2x2` image against
+    /// a `2x2` kernel produces the "spread apart, overlap-add" `4x4` output
+    /// the direct `out[iy*stride+ky, ix*stride+kx] += x[iy,ix]*w[ky,kx]`
+    /// scatter definition gives, hand-verified per output cell.
     #[test]
-    fn convtranspose_stride_two_is_a_named_unsupported_shape_not_a_silent_stride1() {
+    fn convtranspose_stride_two_scatters_each_input_into_a_spread_output() {
         let image = f32_initializer("image", &[1, 1, 2, 2], &[1.0, 2.0, 3.0, 4.0]);
         let weight = f32_initializer("weight", &[1, 1, 2, 2], &[1.0, 2.0, 3.0, 4.0]);
         let node = NodeProto {
@@ -3589,7 +3705,17 @@ mod tests {
             ..GraphProto::default()
         };
 
-        let error = lower_graph(&graph).expect_err("stride=2 ConvTranspose is deferred");
-        assert!(matches!(error, LowerError::UnsupportedShape { .. }));
+        let lowered = lower_graph(&graph).expect("lower ConvTranspose stride=2");
+        let named: Vec<(&str, &[f32])> = lowered.initializers.iter().map(|(name, data)| (name.as_str(), data.as_slice())).collect();
+        let output = lowered.graph_outputs[0].1;
+        let evaluated = evaluate_named(&lowered.program, &[], &named, &[output]).expect("evaluate ConvTranspose stride=2");
+        let (data, shape) = evaluated.get(output).expect("y present");
+
+        assert_eq!(shape, &[1, 1, 4, 4]);
+        assert_eq!(
+            data,
+            &[1.0, 2.0, 2.0, 4.0, 3.0, 4.0, 6.0, 8.0, 3.0, 6.0, 4.0, 8.0, 9.0, 12.0, 12.0, 16.0],
+            "each input cell scattered into its own non-overlapping 2x2 kernel block"
+        );
     }
 }
