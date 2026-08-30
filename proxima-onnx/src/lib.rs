@@ -68,6 +68,7 @@ pub mod parser;
 pub mod pipe;
 pub mod sized;
 pub mod types;
+pub mod writer;
 
 pub use decode::{ModelField, decode_model_field, decode_model_proto};
 pub use error::OnnxError;
@@ -80,6 +81,7 @@ pub use messages::{
 pub use parser::OnnxParser;
 pub use pipe::parse_complete;
 pub use types::{AttributeType, DataType};
+pub use writer::write_model_proto;
 
 #[cfg(test)]
 mod tests;
