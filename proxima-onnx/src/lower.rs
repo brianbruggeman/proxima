@@ -260,6 +260,7 @@ fn lower_node(
         "MatMul" => lower_matmul(program, values, node),
         "Gemm" => lower_gemm(program, values, node),
         "Softmax" => lower_softmax(program, values, node),
+        "LogSoftmax" => lower_logsoftmax(program, values, node),
         "Transpose" => lower_transpose(program, values, node),
         "Gather" => lower_gather(program, values, node),
         "Unsqueeze" => lower_unsqueeze(program, values, node),
@@ -279,6 +280,7 @@ fn lower_node(
         "ConvTranspose" => lower_convtranspose(program, values, node),
         "MaxPool" => lower_maxpool(program, values, node),
         "AveragePool" => lower_averagepool(program, values, node),
+        "BatchNormalization" => lower_batchnorm(program, values, node),
         other => Err(LowerError::UnsupportedOp { name: node.name.to_string(), op_type: other.to_string() }),
     }
 }
@@ -486,6 +488,62 @@ fn lower_relu(program: &mut Vec<Op>, values: &mut BTreeMap<String, Value>, node:
     ];
     let id = build_elementwise(program, ScalarOp::Maximum, operands);
     bind_output(values, node, 0, id, input.shape);
+    Ok(())
+}
+
+/// `BatchNormalization` (inference mode, `training_mode=0` -- the only mode
+/// ONNX gives a single `Y` output for): `(x - mean) / sqrt(var + epsilon) *
+/// scale + bias`, six [`ScalarOp`]s the existing vocabulary already has
+/// (`Subtract`/`Add`/`SquareRoot`/`Divide`/`Multiply`), never a dedicated
+/// normalization primitive -- the same "composite ops desugar" convention
+/// [`lower_sigmoid`]'s own doc states. `scale`/`bias`/`mean`/`var` are each
+/// rank-1 `[C]`, broadcast against `x`'s channel axis (axis 1, ONNX's `NCHW`
+/// convention) via `projection(rank, &[1])` -- the identical per-channel
+/// broadcast pattern [`conv2d_core`]'s own bias add already builds, not
+/// [`operand_pattern`]'s trailing-axis numpy broadcast (which would align
+/// `[C]` against `x`'s *last* axis, wrong for `NCHW`).
+fn lower_batchnorm(program: &mut Vec<Op>, values: &mut BTreeMap<String, Value>, node: &NodeProto<'_>) -> Result<(), LowerError> {
+    let name = node.name.to_string();
+    let op_type = node.op_type.to_string();
+    if attr_int(node, "training_mode").unwrap_or(0) != 0 {
+        return Err(LowerError::UnsupportedShape { name, op_type, reason: "BatchNormalization lowering supports training_mode=0 (inference) only".to_string() });
+    }
+    let input = lookup(values, node, 0)?.clone();
+    let scale = lookup(values, node, 1)?.clone();
+    let bias = lookup(values, node, 2)?.clone();
+    let mean = lookup(values, node, 3)?.clone();
+    let var = lookup(values, node, 4)?.clone();
+    let rank = input.shape.len();
+    if rank < 2 {
+        return Err(LowerError::UnsupportedShape { name, op_type, reason: "BatchNormalization lowering requires a rank >= 2 input (channel axis 1)".to_string() });
+    }
+    let channels = input.shape[1];
+    for (operand_name, operand) in [("scale", &scale), ("bias", &bias), ("mean", &mean), ("var", &var)] {
+        if operand.shape != alloc::vec![channels] {
+            return Err(LowerError::UnsupportedShape { name, op_type, reason: format!("BatchNormalization {operand_name} must be a rank-1 tensor sized to the input's channel axis") });
+        }
+    }
+    let epsilon = attr_float(node, "epsilon").unwrap_or(1e-5);
+
+    let channel_pattern = projection(rank as u16, &[1]);
+    let centered = build_elementwise(
+        program,
+        ScalarOp::Subtract,
+        alloc::vec![(input.node, IndexMap::Affine(identity_pattern(rank))), (mean.node, IndexMap::Affine(channel_pattern.clone()))],
+    );
+    let epsilon_const = constant_scalar(program, epsilon);
+    let variance_eps = build_elementwise(
+        program,
+        ScalarOp::Add,
+        alloc::vec![(var.node, IndexMap::Affine(identity_pattern(1))), (epsilon_const, IndexMap::Affine(scalar_broadcast_pattern(1)))],
+    );
+    let std_dev = build_elementwise(program, ScalarOp::SquareRoot, alloc::vec![(variance_eps, IndexMap::Affine(identity_pattern(1)))]);
+    let normalized =
+        build_elementwise(program, ScalarOp::Divide, alloc::vec![(centered, IndexMap::Affine(identity_pattern(rank))), (std_dev, IndexMap::Affine(channel_pattern.clone()))]);
+    let scaled =
+        build_elementwise(program, ScalarOp::Multiply, alloc::vec![(normalized, IndexMap::Affine(identity_pattern(rank))), (scale.node, IndexMap::Affine(channel_pattern.clone()))]);
+    let result = build_elementwise(program, ScalarOp::Add, alloc::vec![(scaled, IndexMap::Affine(identity_pattern(rank))), (bias.node, IndexMap::Affine(channel_pattern))]);
+    bind_output(values, node, 0, result, input.shape);
     Ok(())
 }
 
@@ -712,6 +770,47 @@ fn lower_softmax(program: &mut Vec<Op>, values: &mut BTreeMap<String, Value>, no
         program,
         ScalarOp::Divide,
         alloc::vec![(exponentiated, IndexMap::Affine(identity_pattern(rank))), (row_sum, IndexMap::Affine(out_map))],
+    );
+    bind_output(values, node, 0, id, input.shape);
+    Ok(())
+}
+
+/// `LogSoftmax`: [`lower_softmax`]'s own shifted-max composition carried one
+/// step further -- `log(softmax(x)) = (x - row_max) - log(sum(exp(x -
+/// row_max)))`, the numerically-stable identity (never `Log(Softmax(x))`,
+/// which would re-exponentiate then re-log the same values and lose the
+/// max-shift's cancellation of the overflow it exists to prevent). Same
+/// `Reduce(Maximum)`/`Subtract`/`Exponential`/`Reduce(Add)` prefix as
+/// [`lower_softmax`], substituting one `Logarithm` + `Subtract` for its
+/// final `Divide`.
+fn lower_logsoftmax(program: &mut Vec<Op>, values: &mut BTreeMap<String, Value>, node: &NodeProto<'_>) -> Result<(), LowerError> {
+    let input = lookup(values, node, 0)?.clone();
+    let rank = input.shape.len();
+    if rank == 0 {
+        return Err(LowerError::UnsupportedShape { name: node.name.to_string(), op_type: node.op_type.to_string(), reason: "LogSoftmax requires input of rank >= 1".to_string() });
+    }
+    let axis = attr_int(node, "axis").unwrap_or(-1);
+    let normalized_axis = if axis < 0 { axis + rank as i64 } else { axis };
+    if normalized_axis < 0 || normalized_axis as usize >= rank {
+        return Err(LowerError::UnsupportedShape { name: node.name.to_string(), op_type: node.op_type.to_string(), reason: format!("LogSoftmax axis {axis} is out of range for rank {rank}") });
+    }
+    let reduced_axis = normalized_axis as u16;
+    let kept: Vec<u16> = (0..rank as u16).filter(|&candidate| candidate != reduced_axis).collect();
+    let out_map = projection(rank as u16, &kept);
+
+    let row_max = build_reduce(program, ScalarOp::Maximum, ReduceInit::NegativeInfinity, input.node, identity_pattern(rank), out_map.clone(), None);
+    let shifted = build_elementwise(
+        program,
+        ScalarOp::Subtract,
+        alloc::vec![(input.node, IndexMap::Affine(identity_pattern(rank))), (row_max, IndexMap::Affine(out_map.clone()))],
+    );
+    let exponentiated = build_elementwise(program, ScalarOp::Exponential, alloc::vec![(shifted, IndexMap::Affine(identity_pattern(rank)))]);
+    let row_sum = build_reduce(program, ScalarOp::Add, ReduceInit::Zero, exponentiated, identity_pattern(rank), out_map.clone(), None);
+    let log_sum = build_elementwise(program, ScalarOp::Logarithm, alloc::vec![(row_sum, IndexMap::Affine(identity_pattern(kept.len())))]);
+    let id = build_elementwise(
+        program,
+        ScalarOp::Subtract,
+        alloc::vec![(shifted, IndexMap::Affine(identity_pattern(rank))), (log_sum, IndexMap::Affine(out_map))],
     );
     bind_output(values, node, 0, id, input.shape);
     Ok(())
@@ -3697,6 +3796,74 @@ mod tests {
 
         let error = lower_graph(&graph).expect_err("merging real axes across a view cannot compose");
         assert!(matches!(error, LowerError::UnsupportedShape { .. }), "expected UnsupportedShape, got {error:?}");
+    }
+
+    /// `BatchNormalization` (inference), `NCHW` input `[1, 2, 1, 2]`:
+    /// [`lower_batchnorm`]'s composed `(x-mean)/sqrt(var+eps)*scale+bias`,
+    /// hand-computed per channel (`eps` negligible at these magnitudes).
+    #[test]
+    fn batchnorm_normalizes_each_channel_independently() {
+        let x_initializer = f32_initializer("x", &[1, 2, 1, 2], &[1.0, 3.0, 2.0, 4.0]);
+        let scale_initializer = f32_initializer("scale", &[2], &[2.0, 1.0]);
+        let bias_initializer = f32_initializer("bias", &[2], &[0.0, 1.0]);
+        let mean_initializer = f32_initializer("mean", &[2], &[2.0, 3.0]);
+        let var_initializer = f32_initializer("var", &[2], &[1.0, 4.0]);
+        let node = NodeProto {
+            input: vec!["x", "scale", "bias", "mean", "var"],
+            output: vec!["y"],
+            op_type: "BatchNormalization",
+            name: "batchnorm",
+            ..NodeProto::default()
+        };
+        let graph = GraphProto {
+            node: vec![node],
+            name: "batchnorm_graph",
+            initializer: vec![x_initializer, scale_initializer, bias_initializer, mean_initializer, var_initializer],
+            output: vec![ValueInfoProto { name: "y", ..ValueInfoProto::default() }],
+            ..GraphProto::default()
+        };
+
+        let lowered = lower_graph(&graph).expect("lower BatchNormalization");
+        let named: Vec<(&str, &[f32])> = lowered.initializers.iter().map(|(name, data)| (name.as_str(), data.as_slice())).collect();
+        let output = lowered.graph_outputs[0].1;
+        let evaluated = evaluate_named(&lowered.program, &[], &named, &[output]).expect("evaluate BatchNormalization");
+        let (data, shape) = evaluated.get(output).expect("y present");
+
+        assert_eq!(shape, &[1, 2, 1, 2]);
+        let expected = [-2.0, 2.0, 0.5, 1.5];
+        for (actual, expected) in data.iter().zip(expected.iter()) {
+            assert!((actual - expected).abs() < 1e-3, "batchnorm output {actual} does not match hand-computed {expected}");
+        }
+    }
+
+    /// `LogSoftmax`: `exp(LogSoftmax(x))` must reproduce a genuine
+    /// probability distribution (sums to `1.0`, matches
+    /// [`softmax_reduces_the_leading_axis`]'s own ordering guarantee) --
+    /// the numerically-stable identity [`lower_logsoftmax`]'s own doc
+    /// states, checked against its defining property rather than a
+    /// re-derivation through the code under test.
+    #[test]
+    fn logsoftmax_exponentiates_back_to_a_probability_distribution() {
+        let x_initializer = f32_initializer("x", &[3], &[0.0, 1.0, 2.0]);
+        let node = NodeProto { input: vec!["x"], output: vec!["y"], op_type: "LogSoftmax", name: "logsoftmax", ..NodeProto::default() };
+        let graph = GraphProto {
+            node: vec![node],
+            name: "logsoftmax_graph",
+            initializer: vec![x_initializer],
+            output: vec![ValueInfoProto { name: "y", ..ValueInfoProto::default() }],
+            ..GraphProto::default()
+        };
+
+        let lowered = lower_graph(&graph).expect("lower LogSoftmax");
+        let named: Vec<(&str, &[f32])> = lowered.initializers.iter().map(|(name, data)| (name.as_str(), data.as_slice())).collect();
+        let output = lowered.graph_outputs[0].1;
+        let evaluated = evaluate_named(&lowered.program, &[], &named, &[output]).expect("evaluate LogSoftmax");
+        let (data, shape) = evaluated.get(output).expect("y present");
+
+        assert_eq!(shape, &[3]);
+        let total: f32 = data.iter().map(|&value| value.exp()).sum();
+        assert!((total - 1.0).abs() < 1e-5, "exp(LogSoftmax(x)) must sum to 1.0, got {total}");
+        assert!(data[2] > data[1] && data[1] > data[0], "LogSoftmax preserves x's ordering");
     }
 
     /// `Concat` along `axis=0` of two `[2, 2]` matrices.
