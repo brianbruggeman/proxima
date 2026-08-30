@@ -38,12 +38,12 @@ use core::mem::size_of;
 use std::sync::mpsc;
 
 use proxima_tensor::{
-    BoundOp, BoundOpKind, DType, Evaluated, Keep, NodeId, Op, QuantizedBlock, Shapes, TensorError,
+    BoundOp, BoundOpKind, DType, Evaluated, Keep, Lookup, NodeId, Op, QuantizedBlock, Shapes, TensorError,
     bind, infer, resolve_named_blocks,
 };
 
 use crate::error::EmitError;
-use crate::msl::Binding;
+use crate::msl::{Binding, gather_count};
 use crate::wgsl::{WORKGROUP_SIZE, WgslKernel, emit_wgsl};
 
 /// Everything the wgpu driver can fail with.
@@ -218,6 +218,30 @@ fn reduction_dims(bound: &BoundOp, output_axes: &[u16]) -> Vec<u16> {
         .collect()
 }
 
+/// Appends the four gather arrays [`crate::wgsl`]'s `push_gather_uniform_fields`
+/// declares last, in the same operand order [`crate::msl::gather_slots`]
+/// numbers — mirrors `crate::metal::push_gather_uniforms`, narrowed to `i32`.
+/// A no-op when `bound` gathers nothing, matching that field-emission's own
+/// empty-array early exit.
+fn push_gather_uniforms(bytes: &mut Vec<u8>, bound: &BoundOp, rank_len: usize) {
+    let ordered: Vec<&Lookup> = bound.operands().iter().filter_map(|(_, _, gather)| gather.as_ref()).collect();
+    if ordered.is_empty() {
+        return;
+    }
+    for gather in &ordered {
+        push_i32(bytes, gather.index_layout.base as i32);
+    }
+    for gather in &ordered {
+        push_i32_row(bytes, &gather.index_layout.strides, rank_len);
+    }
+    for gather in &ordered {
+        push_i32(bytes, gather.element_stride as i32);
+    }
+    for gather in &ordered {
+        push_i32(bytes, gather.extent as i32);
+    }
+}
+
 /// Mirrors `crate::metal::pack_elementwise_uniforms`, narrowed to `i32` (see
 /// `crate::wgsl`'s own doc on why WGSL fields are `i32` rather than `long`)
 /// and with no gather fields (v1 has no gather).
@@ -233,6 +257,7 @@ fn pack_elementwise_uniforms(bound: &BoundOp) -> Vec<u8> {
     for (_, layout, _) in bound.operands() {
         push_i32_row(&mut bytes, &layout.strides, rank_len);
     }
+    push_gather_uniforms(&mut bytes, bound, rank_len);
     bytes
 }
 
@@ -272,6 +297,7 @@ fn pack_reduce_uniforms(bound: &BoundOp) -> Vec<u8> {
     }
     push_i32(&mut bytes, out_layout.base as i32);
     push_i32_row(&mut bytes, &out_layout.strides, rank_len);
+    push_gather_uniforms(&mut bytes, bound, rank_len);
     bytes
 }
 
@@ -341,6 +367,32 @@ fn storage_buffer(device: &wgpu::Device, label: &str, len_bytes: usize, extra: w
         usage: wgpu::BufferUsages::STORAGE | extra,
         mapped_at_creation: false,
     })
+}
+
+/// Maps `buffer` for CPU read and copies its bytes out, blocking on exactly
+/// one `poll`/`recv` pair — the shared tail [`execute_plan`]'s output and
+/// fault readbacks both need, factored out so the two cannot drift on the
+/// map/poll/unmap sequence.
+fn map_read(device: &wgpu::Device, buffer: &wgpu::Buffer) -> Result<Vec<u8>, WgpuError> {
+    let slice = buffer.slice(..);
+    let (sender, receiver) = mpsc::channel();
+    slice.map_async(wgpu::MapMode::Read, move |result| {
+        let _ = sender.send(result);
+    });
+    device
+        .poll(wgpu::PollType::wait_indefinitely())
+        .map_err(|error| WgpuError::Driver(error.to_string()))?;
+    receiver
+        .recv()
+        .map_err(|error| WgpuError::Driver(error.to_string()))?
+        .map_err(|error| WgpuError::Driver(error.to_string()))?;
+    let view = slice
+        .get_mapped_range()
+        .map_err(|error| WgpuError::Driver(error.to_string()))?;
+    let bytes = view.to_vec();
+    drop(view);
+    buffer.unmap();
+    Ok(bytes)
 }
 
 fn gpu_dtype(program: &[Op], node: NodeId) -> DType {
@@ -421,6 +473,11 @@ pub fn execute_plan(plan: &mut WgpuPlan, blocks: &[QuantizedBlock<'_>]) -> Resul
     // buffer alive until `submit`, matching `wgpu`'s "buffer must outlive
     // the encoded pass that references it" contract.
     let mut uniform_buffers: Vec<wgpu::Buffer> = Vec::with_capacity(plan.resolved.len());
+    // one fault buffer per dispatch that gathers -- (node, buffer, per-slot
+    // extent, ordered the same way `push_gather_uniforms` numbers slots) so
+    // a post-submit fault reports the right `Lookup`'s extent. Mirrors
+    // `crate::metal::encode_op`'s own `pending_faults` accumulator.
+    let mut pending_faults: Vec<(NodeId, wgpu::Buffer, Vec<u64>)> = Vec::new();
     for bound in &plan.resolved {
         let kernel = emit_wgsl(bound)?;
         let uniform_bytes = pack_uniforms(bound);
@@ -432,21 +489,32 @@ pub fn execute_plan(plan: &mut WgpuPlan, blocks: &[QuantizedBlock<'_>]) -> Resul
         });
         plan.queue.write_buffer(&uniform_buffer, 0, &uniform_bytes);
 
+        let gathers = gather_count(bound);
+        let fault_buffer = (gathers > 0).then(|| {
+            let buffer = storage_buffer(
+                &plan.device,
+                "omega-wgpu-fault",
+                size_of::<u32>() * gathers,
+                wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::COPY_SRC,
+            );
+            plan.queue.write_buffer(&buffer, 0, &alloc::vec![0u8; size_of::<u32>() * gathers]);
+            buffer
+        });
+
         let pipeline = pipeline_for(&plan.device, &mut plan.pipelines, &kernel);
         let layout = pipeline.get_bind_group_layout(0);
         let mut entries: Vec<wgpu::BindGroupEntry<'_>> = Vec::with_capacity(kernel.bindings.len());
         for (index, binding) in kernel.bindings.iter().enumerate() {
             let resource = match binding {
-                Binding::Input(node) | Binding::Output(node) => device_buffers
+                Binding::Input(node) | Binding::Output(node) | Binding::Indices(node) => device_buffers
                     .get(node)
                     .ok_or_else(|| WgpuError::Driver(alloc::format!("no device buffer for node {node}")))?
                     .as_entire_binding(),
                 Binding::Uniforms => uniform_buffer.as_entire_binding(),
-                Binding::Indices(_) | Binding::Fault => {
-                    return Err(WgpuError::Driver(
-                        "gather bindings are not emitted in wgsl v1".into(),
-                    ));
-                }
+                Binding::Fault => fault_buffer
+                    .as_ref()
+                    .ok_or_else(|| WgpuError::Driver("gather kernel requested but no fault buffer allocated".into()))?
+                    .as_entire_binding(),
             };
             entries.push(wgpu::BindGroupEntry {
                 binding: index as u32,
@@ -469,6 +537,14 @@ pub fn execute_plan(plan: &mut WgpuPlan, blocks: &[QuantizedBlock<'_>]) -> Resul
         pass.dispatch_workgroups(workgroups, 1, 1);
         drop(pass);
         uniform_buffers.push(uniform_buffer);
+        if let Some(buffer) = fault_buffer {
+            let extents: Vec<u64> = bound
+                .operands()
+                .iter()
+                .filter_map(|(_, _, gather)| gather.as_ref().map(|lookup| lookup.extent))
+                .collect();
+            pending_faults.push((bound.node, buffer, extents));
+        }
     }
 
     // readback staging buffers for every requested output, mapped after the
@@ -490,32 +566,47 @@ pub fn execute_plan(plan: &mut WgpuPlan, blocks: &[QuantizedBlock<'_>]) -> Resul
         staging.push((*node, staged));
     }
 
+    let mut fault_staging: Vec<(NodeId, wgpu::Buffer, Vec<u64>)> = Vec::with_capacity(pending_faults.len());
+    for (node, source, extents) in &pending_faults {
+        let byte_len = source.size();
+        let staged = plan.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("omega-wgpu-fault-readback"),
+            size: byte_len,
+            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        encoder.copy_buffer_to_buffer(source, 0, &staged, 0, byte_len);
+        fault_staging.push((*node, staged, extents.clone()));
+    }
+
     plan.queue.submit(core::iter::once(encoder.finish()));
 
     let mut results = Vec::with_capacity(staging.len());
     for (node, buffer) in &staging {
-        let slice = buffer.slice(..);
-        let (sender, receiver) = mpsc::channel();
-        slice.map_async(wgpu::MapMode::Read, move |result| {
-            let _ = sender.send(result);
-        });
-        plan.device
-            .poll(wgpu::PollType::wait_indefinitely())
-            .map_err(|error| WgpuError::Driver(error.to_string()))?;
-        receiver
-            .recv()
-            .map_err(|error| WgpuError::Driver(error.to_string()))?
-            .map_err(|error| WgpuError::Driver(error.to_string()))?;
-        let view = slice
-            .get_mapped_range()
-            .map_err(|error| WgpuError::Driver(error.to_string()))?;
-        let data: Vec<f32> = bytemuck::cast_slice(&view).to_vec();
-        drop(view);
-        buffer.unmap();
+        let bytes = map_read(&plan.device, buffer)?;
+        let data: Vec<f32> = bytemuck::cast_slice(&bytes).to_vec();
         let shape = plan.shapes.of(*node).to_vec();
         results.push((*node, shape, data));
     }
     let _ = gpu_dtype; // reserved for a future non-f32 readback path
+
+    // one fault check per gathering dispatch, in program order -- the first
+    // recorded fault anywhere wins, matching `crate::metal::check_gather_fault`'s
+    // own "return on first faulted slot" posture.
+    for (node, buffer, extents) in &fault_staging {
+        let bytes = map_read(&plan.device, buffer)?;
+        let slots: &[u32] = bytemuck::cast_slice(&bytes);
+        for (slot, recorded) in slots.iter().enumerate() {
+            if *recorded != 0 {
+                return Err(TensorError::GatherIndexOutOfRange {
+                    node: *node,
+                    index: i64::from(*recorded - 1),
+                    extent: extents[slot],
+                }
+                .into());
+            }
+        }
+    }
 
     let root = plan
         .program
