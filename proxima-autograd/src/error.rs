@@ -72,18 +72,28 @@ pub enum AutogradError {
     )]
     ReduceOverGatherUnsupported { node: NodeId, operand: NodeId },
 
+    /// Forward scatter's adjoint IS a gather of the output gradient at the
+    /// same destination indices the forward pass wrote to
+    /// (`proxima-autograd/src/adjoint.rs`'s `differentiate_reduce` scatter
+    /// arm derives and tests this for `body: Add`, the only body a colliding
+    /// write reduces with unambiguously here). Any other body raised this:
+    /// `Maximum`/`Minimum` would need to know, per destination, WHICH
+    /// colliding source position actually won (this crate's own
+    /// `Reduce(Maximum)` adjoint above needs the reduce's already-computed
+    /// output for exactly that reason, and a scatter's output at a given
+    /// destination is not a function this crate can invert to one source
+    /// position without extra state the forward op does not carry);
+    /// `Multiply`'s divide-form rule divides by the *other* colliding
+    /// contributions' product, not a single input, so it does not reduce to
+    /// the same "gather the numerator back" shape either. Named and rejected
+    /// rather than silently misderived.
     #[error(
-        "node {node}'s Reduce::out_map is data-dependent (a scatter); this arm is defensive, \
-         unreachable dead code through differentiate/differentiate_wanted today -- forward \
-         scatter itself has no lowering anywhere in this workspace yet \
-         (proxima-tensor/src/shape.rs:166-171 rejects it at shape-inference time before an \
-         adjoint program is ever built, proxima-tensor/src/map.rs:109-112 documents it as an \
-         out-of-scope feature needing atomics for colliding writes, and \
-         proxima-tensor/src/cpu.rs:15433-15462's own test asserts evaluate() rejects it too); \
-         the gather-of-output-gradient adjoint this crate would give a real scatter cannot be \
-         written or tested until proxima-tensor ships that forward capability"
+        "node {node}'s Reduce::out_map is data-dependent (a scatter) with body {body:?}; only \
+         Add has a derived adjoint (a gather of the output gradient at the same destination \
+         indices) -- see AutogradError::ScatterOutputUnsupported's own doc for why the other \
+         reduce bodies do not reduce to that same shape"
     )]
-    ScatterOutputUnsupported { node: NodeId },
+    ScatterOutputUnsupported { node: NodeId, body: ScalarOp },
 
     #[error(
         "sparse row buffers disagree: {found} values for {row_len} elements per row \
