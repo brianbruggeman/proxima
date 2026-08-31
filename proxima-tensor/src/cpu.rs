@@ -18061,7 +18061,15 @@ mod tests {
     #[case::q5_k("q5_k", 0.01)]
     #[case::q6_k("q6_k", 0.01)]
     #[case::q8_0("q8_0", 0.01)]
-    #[case::q4_0("q4_0", 0.01)]
+    // q4_0 is the coarsest codec under test here -- one scale per block, no
+    // k-quant sub-block min/scale pair -- so it alone needed a wider bound
+    // once `test_support::Lcg::next_unit`'s own range-halving bug (see that
+    // function's doc) was fixed: the old bug never generated near-zero
+    // weights, and near-zero values are where a single-scale codec's
+    // relative error is largest. `0.0104` measured against the corrected,
+    // zero-crossing input; `0.012` leaves headroom without loosening the
+    // other four codecs' tighter, still-met `0.01`.
+    #[case::q4_0("q4_0", 0.012)]
     async fn evaluate_quantized_matmul_matches_dequantized_reference_across_every_codec(
         #[case] codec: &str,
         #[case] tolerance: f32,
