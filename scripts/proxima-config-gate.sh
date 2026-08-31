@@ -31,6 +31,12 @@
 
 set -euo pipefail
 
+# CI sets CARGO_TERM_COLOR=always; ANSI escapes wrapped around digits break
+# any grep/awk that counts cargo/nextest summary output (the class
+# proxima-tokenizer-gate.sh and proxima-test-gate.sh hit) -- force it off
+# for every invocation in this script, present and future.
+export CARGO_TERM_COLOR=never
+
 # `cargo test --doc` exits 0 when it matched NOTHING, so the exit code alone
 # cannot tell "all passed" from "there were none" — and proxima-config's only
 # doctest lives in the default-OFF `sugar` module, so the default-feature run
