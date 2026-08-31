@@ -361,6 +361,8 @@ prost = { workspace = true, features = ["std", "derive"], optional = true }
 rand.workspace = true
 proxima-recording = { version = "0.1.0", path = "proxima-recording", features = ["pipe", "replay"], optional = true }
 proxima-vm = { version = "0.1.0", path = "tools/proxima-vm", default-features = false, features = ["std"], optional = true }
+proxima-onnx = { workspace = true, features = ["std"], optional = true }
+proxima-tensor = { workspace = true, features = ["std"], optional = true }
 
 [dependencies.tracing-subscriber]
 workspace = true
@@ -1098,6 +1100,22 @@ simd-varint  = []
 # same reason `process` needs it (the factory registry only threads
 # `Arc<LogBufferRegistry>`-shaped state through the tokio-gated arms today).
 vm = ["tokio", "dep:proxima-vm"]
+proxima-onnx = ["dep:proxima-onnx"]
+proxima-tensor = ["dep:proxima-tensor"]
+
+# the wire-to-weights combo demo (`examples/wire_to_weights.rs`,
+# `examples/support/wire_to_weights_pipeline.rs`,
+# `tests/wire_to_weights_smoke.rs`): request-in -> real mnist.onnx forward
+# -> response-out as one `AndThen` pipe chain over `serve_http`. Default-off
+# for the same reason `proxima-onnx/mnist-diag` is: pulls proxima-onnx +
+# proxima-tensor into this crate's dependency graph, which a normal
+# `cargo build`/`test` of the HTTP substrate never needs.
+wire-to-weights-demo = [
+    "dep:proxima-onnx",
+    "dep:proxima-tensor",
+    "http1-native",
+    "serve-prime",
+]
 
 [[bench]]
 name = "bench_inbox"
@@ -1465,6 +1483,21 @@ required-features = [
     "runtime-prime-reactor",
     "runtime-prime-bgpool",
     "macros",
+]
+
+# The wire-to-weights combo demo: HTTP request in -> real mnist.onnx forward
+# -> response out, composed end to end as `Pipe`s (see
+# examples/support/wire_to_weights_pipeline.rs for the composition). Mirrors
+# `h1_native_prime_round_trip` above for the serve side.
+[[example]]
+name = "wire_to_weights"
+path = "examples/wire_to_weights.rs"
+required-features = [
+    "wire-to-weights-demo",
+    "runtime-prime-executor",
+    "runtime-prime-inbox-alloc",
+    "runtime-prime-reactor",
+    "runtime-prime-bgpool",
 ]
 
 # logging is fan-out + filter + gate applied to log events: real macros +
