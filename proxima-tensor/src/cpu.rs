@@ -455,6 +455,149 @@ pub fn evaluate_with_scratch(
     evaluate_pooled(program, symbols, blocks, outputs, scratch)
 }
 
+/// A [`bind::bind`]-shaped execution plan whose per-node output storage is
+/// allocated exactly once and reused, unchanged in size, across every call
+/// to [`evaluate_named_with_arena`] against the SAME `program` — the
+/// static-arena counterpart to [`evaluate_named`], for a caller (a training
+/// loop, per `docs/discipline.md` ROW 164) that runs an identically-shaped
+/// program hundreds of times in a row and today pays `evaluate_named`'s own
+/// `shape::infer` + `bind::bind` + a fresh `vec![0.0; n]` per node on every
+/// single call even though every one of those calls resolves to the
+/// identical shapes.
+///
+/// What a caller can do with this that [`evaluate_named`] alone cannot:
+/// amortize bind + per-node allocation across every step of a loop instead
+/// of repeating both on every call — the ONLY thing this type exists to
+/// buy, per this crate's own binary-question gate (`AGENTS.md`,
+/// guiding-principles §1: "what can a caller do that they could not
+/// before").
+pub struct StaticArena {
+    resolved: Vec<BoundOp>,
+    shapes: shape::Shapes,
+    effective_outputs: Vec<NodeId>,
+    root: NodeId,
+    input_names: Vec<(NodeId, String)>,
+    buffers: Vec<Option<Vec<f32>>>,
+}
+
+/// Builds a [`StaticArena`] for `program`: runs shape inference and
+/// [`bind::bind`] once, then pre-sizes every node's output buffer (both
+/// [`Op::Input`] slots and every computed [`BoundOp`]) at its final,
+/// call-invariant length. Every subsequent [`evaluate_named_with_arena`]
+/// call against this arena reuses these SAME allocations — no per-step
+/// `shape::infer`, no per-step `bind::bind`, no per-step `Vec` allocation,
+/// and no [`evaluate_with_scratch`]-style runtime best-fit search over a
+/// shared pool (`docs/discipline.md` ROW 159 measured that search losing)
+/// — each node's buffer lives at a fixed index for the arena's whole
+/// lifetime.
+///
+/// # Errors
+/// The same shape/dtype/output errors [`evaluate_named`] itself raises,
+/// since this runs the identical `prepare`-shaped validation once up front
+/// instead of on every call.
+pub fn build_static_arena(program: &[Op], symbols: &[u64], outputs: &[NodeId]) -> Result<StaticArena, TensorError> {
+    let shapes = shape::infer(program, symbols)?;
+    reject_non_float32(program, &BTreeSet::new())?;
+
+    let root = program
+        .len()
+        .checked_sub(1)
+        .map(|last| NodeId(last as u32))
+        .ok_or(TensorError::Empty)?;
+    for output in outputs {
+        if output.0 as usize >= program.len() {
+            return Err(TensorError::UnknownOutput(*output));
+        }
+    }
+    let effective_outputs: Vec<NodeId> = if outputs.is_empty() {
+        vec![root]
+    } else {
+        outputs.to_vec()
+    };
+    reject_non_float32_outputs(program, &BTreeSet::new(), &effective_outputs)?;
+
+    let block_nodes = block_node_ids(program);
+    let mut input_names = Vec::with_capacity(block_nodes.len());
+    let mut buffers: Vec<Option<Vec<f32>>> = vec![None; program.len()];
+    for node in &block_nodes {
+        let name = program[node.0 as usize].name().ok_or(TensorError::UnnamedInput(*node))?;
+        input_names.push((*node, String::from(name)));
+        buffers[node.0 as usize] = Some(vec![0.0f32; element_count(shapes.of(*node))]);
+    }
+
+    let resolved = bind::bind(program, &shapes, &effective_outputs)?;
+    for computed in &resolved {
+        buffers[computed.node.0 as usize] = Some(vec![0.0f32; node_output_len(computed)]);
+    }
+
+    Ok(StaticArena {
+        resolved,
+        shapes,
+        effective_outputs,
+        root,
+        input_names,
+        buffers,
+    })
+}
+
+/// Runs `arena`'s already-[`bind::bind`]-resolved program once against this
+/// step's `named` host buffers, writing every input and every computed
+/// node's output into the SAME per-node storage [`build_static_arena`]
+/// sized once. The only allocation on this call's own path is the small,
+/// output-count-sized clone [`Evaluated`] needs to hand results back to a
+/// caller that runs another step against the same arena immediately after
+/// — the arena's own buffers must survive this call, so results are copied
+/// out, never moved out (unlike [`evaluate_pooled`]'s one-shot table).
+///
+/// # Errors
+/// [`TensorError::UnboundInputName`] if `named` has no entry for one of
+/// the program's [`Op::Input`] names; [`TensorError::InputSizeMismatch`] if
+/// a bound buffer's length no longer matches the size [`build_static_arena`]
+/// fixed for it (a genuinely different-shaped call, not a training step).
+pub fn evaluate_named_with_arena(arena: &mut StaticArena, named: &[(&str, &[f32])]) -> Result<Evaluated, TensorError> {
+    for (node, name) in &arena.input_names {
+        let data = named
+            .iter()
+            .find(|(candidate, _)| candidate == name)
+            .map(|(_, data)| *data)
+            .ok_or_else(|| TensorError::UnboundInputName(name.clone()))?;
+        let slot = arena.buffers[node.0 as usize].as_mut().ok_or(TensorError::NotLowerable {
+            node: *node,
+            reason: "static arena has no pre-sized slot for this input node -- build_static_arena did not size it",
+        })?;
+        if slot.len() != data.len() {
+            return Err(TensorError::InputSizeMismatch {
+                node: *node,
+                expected: slot.len(),
+                found: data.len(),
+            });
+        }
+        slot.copy_from_slice(data);
+    }
+
+    for computed in &arena.resolved {
+        let node_index = computed.node.0 as usize;
+        let mut output = arena.buffers[node_index].take().ok_or(TensorError::NotLowerable {
+            node: computed.node,
+            reason: "static arena has no pre-sized slot for this resolved node -- build_static_arena did not size it",
+        })?;
+        run_node_into(computed, &arena.buffers, None, None, &mut output)?;
+        arena.buffers[node_index] = Some(output);
+    }
+
+    let results = arena
+        .effective_outputs
+        .iter()
+        .map(|node| {
+            let shape = arena.shapes.of(*node).to_vec();
+            let data = arena.buffers[node.0 as usize].as_deref().unwrap_or(&[]).to_vec();
+            (*node, shape, data)
+        })
+        .collect();
+
+    Ok(Evaluated::from_parts(arena.root, results, None))
+}
+
 /// One [`evaluate_quantized`]-bound block: either a plain `f32`
 /// [`Op::Input`] buffer, exactly what [`evaluate`]'s own `blocks: &[&[f32]]`
 /// carries, or the raw packed bytes of a `Q4_K`-quantized weight matrix.
