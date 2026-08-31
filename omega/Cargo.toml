@@ -193,6 +193,7 @@ conflaguration = { workspace = true, features = ["toml"] }
 criterion.workspace = true
 half = { version = "2.7.1", default-features = false }
 proxima = { workspace = true, features = ["test-support", "test-support-tokio"] }
+proxima-autograd = { path = "../proxima-autograd" }
 proxima-gguf = { path = "../proxima-gguf", features = ["std"] }
 proxima-onnx = { path = "../proxima-onnx" }
 proxima-safetensors = { path = "../proxima-safetensors" }
