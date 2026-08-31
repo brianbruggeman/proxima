@@ -15193,3 +15193,117 @@ The pre-registered `1.36x behind` framing this row's own task brief carried forw
 - Parity: `cargo nextest run -p proxima-tensor --features q4k-int8-dot,test-support -E 'test(q4k)'` -- expect 16/16, 0 failed.
 - Source diff for the staleness finding: `git diff 9b9413d c5e983c -- proxima-tensor/src/cpu.rs` (shows the `get_scale_min_k4`-per-sub-block -> `mins_correction_neon` rewrite).
 - `CARGO_TARGET_DIR=<scratch> cargo bench -p proxima-autograd --bench train_step_lane --features train-step-bench` (dataset must exist under `~/.cache/burn-dataset/mnist`) -- expect the `train_step_arena` manual-sweep line to print `bit-identical` and a p50 near 2.0-2.2ms on a similarly-loaded host, ~2.8ms on a genuinely quiet one (per ROW166's own host-noise finding, reconfirmed here, not re-litigated).
+
+## ROW 169 -- ROW 158's own named-remaining-mechanism list ("conv scheduling: register blocking beyond the current tile shape, epilogue fusion; dispatch floor") gets a per-stage profile FIRST, then ONE of the two conv-scheduling candidates lands as a real, measured, disassembly-confirmed win (band_kh mean **528.68-536.12us across 8 quiet-to-loaded-host runs, CoV 0.65-1.24%**, vs this session's own 598.01us pre-lever baseline: **-10.4% to -11.6%, 1.11-1.13x**), a SECOND candidate (forcing the new kernel to inline) is built, measured, and ROLLED BACK as a real regression, and the third (band bookkeeping) is ruled OUT by the profile itself, not attempted -- the pre-registered <=0.45ms success bar is **NOT MET** (0.536ms, 19% over), dispatch floor is untouched and named as the real next step
+
+Repo: `/Users/brianbruggeman/repos/slot-0/proxima-wt-convsched`, branch `perf/conv-schedule`, off `main` `a33a24f`. Host: Apple M1 Max, macOS, arm64. Build profile: `release` for every timed number and every disassembly excerpt below, `dev` only for clippy; never mixed with a correctness run (`cargo test --release` for the differential/full-split accuracy tests). **Host loadout: VARIABLE all session** -- `uptime` load average ranged 7.89-31.49 across the run windows below, and a pre-declared build-only sibling worktree (`proxima-wt-scan`, confirmed via `pgrep -fl "cargo|rustc"` at 17:29 and again at 17:35 compiling/testing `proxima-tensor`) was ACTIVELY BUILDING during several of this row's own timed windows -- every table below states per-run loadout and flags the runs it hit; the **in-process stage profiler (200 forward passes, averaged) is used as this row's primary evidence specifically because it stayed low-CoV (0.65-1.24%) even through those contended windows**, while criterion's own p50 visibly absorbed the contention on 2 of 8 runs (flagged below), consistent with this task's own "still a build-only sibling runs" framing.
+
+### Allocation budget, stated first (per guiding-principles' hot-path defaults)
+
+Unchanged from ROW 156/158: **341/229/197 allocations** (band1/band_kh/band_2kh, one full forward pass, single image) -- re-confirmed this session via the SAME counting `#[global_allocator]` wrapper (`benches/tile_pipeline.rs`), printed identically on every one of this row's own 11 timed runs. The register-blocking lever below touches only arithmetic and a stack-allocated `[&[f32]; TILE_COLS]` array of borrowed slices -- zero new heap allocation anywhere.
+
+### Step 1: per-stage profile, MEASURED (`benches/tile_pipeline.rs::run_pipeline_forward_profiled`, new bench-only instrumentation, `std::time::Instant` around each stage's own `Pipe::call`, driven manually instead of through `AndThen` so each stage's window is independently readable -- verified against `AndThen::call`'s own body, `proxima-primitives/src/pipe/primitives.rs:213-220`, to be the exact same sequential-call order, no behavior change)
+
+**Before this row's own change (band_kh, this session's own quiet-ish-host baseline run, 200-forward-pass average; corroborates ROW 158's own prior-session sealed number, 601.98us CoV 0.14%, within 0.5%):**
+
+| stage | us (200-pass avg) | % of wall | MACs (DERIVED from shape) | ns/MAC (DERIVED) |
+|---|---|---|---|---|
+| band_bookkeeping | 0.774 | 0.13% | -- | -- |
+| conv1 (1->8ch, 26x26 out, 3x3) | 26.687 | 4.46% | 48,672 | 0.5483 |
+| conv2 (8->16ch, 24x24 out, 3x3) | 156.938 | 26.24% | 663,552 | 0.2365 |
+| **conv3 (16->24ch, 22x22 out, 3x3, +BN)** | **351.455** | **58.77%** | 1,672,704 | 0.2101 |
+| fc1 (11616->32) | 61.941 | 10.36% | 371,712 | 0.1666 |
+| fc2 (32->10) | 0.158 | 0.03% | 320 | 0.4938 |
+| softmax (bn2+log_softmax) | 0.057 | 0.01% | -- | -- |
+| **total** | **598.010** | 100% | 2,756,960 | 0.2169 avg |
+
+**conv3 dominates at 58.77% of wall time** -- the task's own framing ("which stage dominates") is answered directly: conv3, by a wide margin, with conv2 a distant second (26.24%); together conv2+conv3 are 85.0% of the whole forward. Roofline-implied ns/MAC (DERIVED: 0.057ms / 2,756,960 total MACs) is **0.02067 ns/MAC** -- this row's own MAC count and division, NOT the task brief's own cited "~0.0035 ns/MAC" figure, which this row could not reproduce from the shapes above under any MAC-counting convention tried (FLOPs=2xMACs gives 0.0103, still 2x off) and is flagged as a DERIVED-not-reconciled discrepancy rather than silently substituted. Under this row's own consistent counting, every stage sits 8-26x over roofline per MAC, worst at conv1 (26.5x) despite conv1 carrying only 1.8% of total MAC volume -- conv1's overhead is per-call fixed cost (tiny reduction_width=9) amortized over very few MACs, not a scheduling problem worth chasing at 4.46% of wall time.
+
+### Step 2: levers, triaged by the profile, ONE landed, ONE rolled back, ONE ruled out by evidence
+
+**(b) epilogue fusion -- ruled OUT by reading the code, not attempted.** `ConvReluStage::compute_output_row` already fuses bias-add + ReLU + optional BatchNorm inline in the SAME loop iteration as the dot product (`benches/support/tile_pipeline.rs`, `let mut value = (dot + self.bias[channel]).max(0.0); if let Some(batch_norm) = ... value = batch_norm.apply(...)`) -- there is no separate epilogue pass to fuse. FC1's ReLU is correctly deferred to `finalize()` (mathematically required: ReLU must apply to the FULL accumulated sum, not per-partial-row), not an unfused epilogue. Nothing to do here; the profile's own fc2/softmax tail (0.03%+0.01%) confirms the epilogue math costs nothing measurable regardless.
+
+**(c) band bookkeeping -- ruled OUT by the profile itself, not attempted.** 0.774us of 598.010us = **0.13% of wall time**, unambiguously immaterial per this task's own conditional ("reduce ... if the profile says it's material" -- it does not).
+
+**(a) register blocking -- LANDED, the only viable lever.** `compute_output_row`'s inner loop (ROW 158's own shape) called a single-row dot product once per `TILE_COLS`=4 output-channel lane, each call independently re-reading the shared `window` activation span from its own top -- a real, avoidable redundant load, not amortized across lanes. New `dot_chunked_k4_tile(window, weight_rows: [&[f32]; TILE_COLS]) -> [f32; TILE_COLS]` (`benches/support/tile_pipeline.rs`) interleaves the `k`-loop: one `window` chunk load per `k`-step, immediately reused across all `TILE_COLS` lanes' independent FMA accumulator chains, before advancing -- reused identically at FC1's own call site (`FcAccumulateStage::call`, previously 32 independent single-row calls per channel, now 8 groups of 4). `dot_chunked_k4` (the old single-row function) is now dead and DELETED, not left `#[allow(dead_code)]`.
+
+**Gate 10 evidence, this row's own `objdump -d --demangle` on the built bench binary** (`tile_pipeline::tile_pipeline::dot_chunked_k4_tile`, `0x10001d7b8`): confirms the mechanism directly -- ONE `ldr q4, [x1, x7]` (the shared `window` chunk) feeds FOUR independent `fmla.4s` against four separately-loaded weight-row chunks (`v0`/`v1`/`v2`/`v3` accumulators, one per lane) before the loop advances `x8` and repeats, vs ROW 158's own cited disassembly of the pre-this-row shape (4 SEPARATE `fmla.4s` loops, each with its OWN `window` chunk load). Re-prove: `objdump -d --demangle <bin> | grep -n 'dot_chunked_k4_tile>:'`, then read the ~50 lines following that address.
+
+**Correctness, re-run on the final (register-blocked) tree:** `cargo test --release -p proxima-onnx --test tile_pipeline_differential --features tile-pipeline-bench -- --nocapture` -- `pipeline_logits_match_sealed_executor_within_reassociation_bound` **60/60** (unchanged bound), full `t10k` split **990/1000 = 0.9900 exactly**, bit-for-bit identical to ROW 156/157/158's own count. `cargo nextest run -p proxima-onnx --all-features`: **84 passed, 3 skipped**, unchanged from ROW 158.
+
+**Measured, after (register-blocked, non-inlined -- the function did NOT auto-inline at either call site, confirmed via `objdump | grep -c 'bl.*dot_chunked_k4_tile'` = 2 non-zero occurrences pre-rollback-experiment):** 8 runs total across two measurement passes (n=5 then n=3, one session, varying host contention), 200-forward-pass in-process profiler average per run:
+
+| run | loadout (uptime @ start) | band_kh profiler total (us) | criterion p50 (us) | note |
+|---|---|---|---|---|
+| 1 | 8.15 | 522.653 | 521.97 | quiet |
+| 2 | 9.48 | 529.237 | 528.71 | quiet |
+| 3 | 9.36 | 521.472 | **1160.5** | **CONTENDED** -- sibling build compiling `proxima-tensor` mid-run (`pgrep` confirmed), criterion's own multi-second collection window absorbed it, the fast in-process profiler (finishes before criterion starts) did not |
+| 4 | 30.01 (declining) | 522.324 | 522.66 | loadout logged high but criterion tight (521.68-523.97) -- contention had cleared by the time this run's criterion phase executed |
+| 5 | 17.60 | 525.385 | 558.50 | mild residual contention (wide CI 522.78-609.88) |
+| final1 | 31.12 | 534.159 | **680.69** | **CONTENDED** -- same sibling, wide CI 566.76-837.11 |
+| final2 | 31.02 | 533.205 | 533.01 | contention present at run start per loadout but criterion tight |
+| final3 | 19.61 | 541.010 | 528.01 | quieting |
+
+**Profiler mean (all 8, robust to contention by construction): 528.681us, stdev 6.542us, CoV 1.24%.** Criterion p50 mean excluding the 2 flagged-contended runs (3, final1): 532.14us across the remaining 6 -- corroborates the profiler within 0.7%, the two measurement methods agree once contention is accounted for.
+
+**Per-stage delta (before 598.010us total vs after 528.681us mean), and the mechanism for why it is NOT uniform:**
+
+| stage | before (us) | after mean (us, n=8) | delta | mechanism |
+|---|---|---|---|---|
+| band_bookkeeping | 0.774 | 0.554 | -28.4% | noise-scale, immaterial either way |
+| **conv1** | 26.687 | 31.849 | **+19.3% REGRESSION** | small `reduction_width`=9: `dot_chunked_k4_tile`'s larger signature (`[&[f32]; TILE_COLS]`, 4 slice ptr/len pairs) did NOT auto-inline at this call site (confirmed: `bl` call present in disassembly, vs ROW 158's inlined single-row form) -- call overhead now dominates a tiny per-call workload |
+| conv2 | 156.938 | 144.93 | -7.65% win | reduction_width=72: shared-load amortization outweighs the new call overhead |
+| **conv3** | 351.455 | 277.38 | **-21.08% win** | reduction_width=144 (largest): amortization wins by the widest margin, and this stage carries 58.77% of total wall time -- it alone accounts for most of the row's net win |
+| **fc1** | 61.941 | 73.75 | **+19.07% REGRESSION** | same small-per-call-workload mechanism as conv1: `channel_row.len()<=22`, call overhead dominates |
+| fc2 | 0.158 | 0.161 | noise | -- |
+| softmax | 0.057 | 0.060 | noise | -- |
+| **total** | **598.010** | **528.681** | **-11.60%, 1.131x** | net win: conv3's -21% at 58.8% share and conv2's -7.65% at 26.2% share outweigh conv1's +19% at 4.5% share and fc1's +19% at 10.4% share |
+
+**This is the honest read, not the headline: the lever wins on the two layers that dominate wall time and LOSES on the two it doesn't** -- reported here in full rather than only citing the net.
+
+**Lever 2, `#[inline(always)]` on `dot_chunked_k4_tile` to recover the conv1/fc1 regression -- built, measured, ROLLED BACK.** Hypothesis: forcing inlining should let conv1/fc1 recover ROW 158's per-call-free performance while conv2/conv3 keep the register-blocking win. Built (`objdump | grep -c 'bl.*dot_chunked_k4_tile'` = 0 confirmed, fully inlined at both call sites), differential test re-run (60/60 + 990/1000, unchanged), then 3 timed runs, quiet-to-moderate host (loadout 17.76/13.64/13.15):
+
+| run | profiler total (us) | criterion p50 (us) |
+|---|---|---|
+| inl1 | 567.231 | 555.40 |
+| inl2 | 552.377 | 553.44 |
+| inl3 | 564.823 | 917.64 (contended) |
+
+**Profiler mean 561.477us -- WORSE than the non-inlined form's 528.681us mean, a real 6.2% regression, not noise (both means sit outside the other's own CoV band).** Per-stage read: conv1 partially recovered (31.849 -> ~27.4 avg) as hypothesized, but conv2/conv3 got WORSE (conv3: 277.38 -> ~305, conv2: 144.93 -> ~153.6) -- inlining the register-blocked body 1:1 at conv2/conv3's own hot call sites (many iterations) apparently bloats code size or disturbs register allocation enough to cost more than the small-K sites save. **ROLLED BACK IN FULL**: `#[inline(always)]` removed, one-line diff, zero net source change from the register-blocking lever's own landed state. Recorded here because a tweak that loses is the value, per this task's own instruction.
+
+### Vs the pre-registered bars (this row's own final 3-run number, `final1`/`final2`/`final3`, the exact source now committed)
+
+Per this task's own instruction ("ONE final 3-run pipeline number"): profiler mean of the 3 `final*` runs = **536.12us** (534.159, 533.205, 541.010; stdev 3.48, **CoV 0.65%**), criterion p50s 680.69(CONTENDED, excluded)/533.01/528.01.
+
+| milestone | ms/image | this row (band_kh, final-3 profiler mean) | met? |
+|---|---|---|---|
+| success (<=0.45ms) | 0.450 | 0.53612 | **NOT MET**, 19.1% over |
+| strong (<=0.30ms) | 0.300 | 0.53612 | NOT MET, 1.79x over |
+| vs pytorch/Accelerate incumbent (0.1193ms) | -- | 0.53612 | **4.50x slower** (ROW 158 was 5.06x -- improved) |
+| vs NEON roofline (0.057ms) | -- | 0.53612 | **9.41x over roofline** (ROW 158 was 10.56x -- improved) |
+| vs ROW 158's own sealed prior (0.60198ms, different session) | -- | 0.53612 | **-10.94%, 1.123x faster** |
+| vs THIS session's own pre-lever baseline (0.59801ms) | -- | 0.53612 | **-10.35%, 1.115x faster** |
+
+**Honest read: the register-blocking lever is a real, disassembly-confirmed, reproducible win (-10.4% to -11.6% depending on which baseline pairing), and it still misses the <=0.45ms success bar by 19%.** It is NOT a uniform win -- it trades a small loss on the two low-K layers (conv1, fc1) for a larger win on the two high-K, high-volume layers (conv2, conv3), and the net is positive only because conv3 alone carries 58.8% of the wall clock. The inlining follow-up lever, which looked like the obvious fix for the conv1/fc1 regression, measured WORSE overall and was rolled back -- the compiler's own non-inlined choice for this function was already the faster one on the layers that matter most.
+
+### Named, NOT attempted (out of this row's own scope, per the task's own framing)
+
+**Dispatch floor** -- the task's own second named remaining mechanism from ROW 158, alongside conv scheduling -- was NOT touched this row. Candidate location (not measured): the `AndThen`/`Pipe::call` async `Future` machinery each stage pays once per pipe invocation (`block_on_ready`'s own poll-to-ready loop, `proxima-primitives/src/pipe/primitives.rs:213-220`'s `.await?` chain) -- plausible but UNMEASURED; this row's own per-stage `Instant` windows wrap each `.call()` including its own dispatch, so dispatch cost is already folded into each stage's reported number above, not separable without a finer-grained instrument this row did not build. Named as the real next step, not attempted.
+
+### `docs/discipline.md` opt-sweep note (§11 sans-IO, updating ROW 156/158's own table)
+
+SIMD: unchanged, **DONE for conv/fc1 (register-blocked form still compiles to `fmla.4s`, re-confirmed this row's own objdump)**, PARTIAL-by-exception for FC2 (unchanged, still out of scope, 0.03% of wall). Register-blocking is an orthogonal axis (operand-reuse / ILP, not SIMD width) layered on the same SIMD-DONE kernel -- not a new opt-sweep row, a refinement of the existing SIMD row's own implementation. Every other axis (state machine, bytes-first/borrowed, zero-copy, copy-over-clone, stack-over-heap, branchless, no dynamic dispatch, O(1) extra memory per row) unchanged from ROW 158, not re-audited (no source outside the two dot-product call sites and their shared helper changed).
+
+### Gate 15 (no magic numbers)
+
+No new literal introduced: `TILE_COLS` (the SAME `proxima_tensor::sized::TILE_COLS = 4` constant ROW 155/158 already flagged as architecture-derived, not a fresh per-system tunable) is reused unchanged as the tile width for `dot_chunked_k4_tile`'s `[&[f32]; TILE_COLS]` parameter. Same already-named debt item, not a new one.
+
+### Re-prove commands
+
+- `CARGO_TARGET_DIR=<scratch> cargo nextest run -p proxima-onnx --all-features` -- 84 passed, 3 skipped (unchanged count from ROW 158)
+- `CARGO_TARGET_DIR=<scratch> cargo clippy -p proxima-onnx --all-targets --all-features -- -D warnings` -- clean, exit 0
+- `CARGO_TARGET_DIR=<scratch> cargo test --release -p proxima-onnx --test tile_pipeline_differential --features tile-pipeline-bench -- --nocapture` -- reproduces 60/60 + the 990/1000 (0.9900) full-split accuracy line
+- `CARGO_TARGET_DIR=<scratch> cargo build --release -p proxima-onnx --bench tile_pipeline --features tile-pipeline-bench` then run the produced `deps/tile_pipeline-*` binary directly (NOT `cargo bench`, which can select a stale/debug binary -- verify via the binary's own mtime) -- reproduces both the per-stage profile printout (`tile_pipeline stage profile [band_kh], 200 forward passes: ...`) and the criterion `mnist_forward_per_image/tile_pipeline_band_kh` arm; run 3-5x and take the profiler line's own mean, per this row's own host-noise finding
+- `objdump -d --demangle <tile_pipeline bench binary> | grep -n 'dot_chunked_k4_tile>:'`, then read ~50 lines from that address -- reproduces the shared-`window`-load-then-4x-`fmla.4s` excerpt above
+- `objdump -d --demangle <tile_pipeline bench binary> | grep -c 'bl.*dot_chunked_k4_tile'` -- expect a non-zero count (2, one call site each in `ConvReluStage`/`FcAccumulateStage`) on the LANDED (non-inlined) tree; expect 0 if `#[inline(always)]` is re-added (the rolled-back lever)
+- `git diff a33a24f HEAD -- proxima-onnx/benches/support/tile_pipeline.rs proxima-onnx/benches/tile_pipeline.rs` -- the entire source change for this row (register-blocked kernel + profiling instrumentation); zero lines touched outside these two bench-support files, zero lines in any library crate
