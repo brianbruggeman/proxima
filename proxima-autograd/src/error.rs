@@ -20,9 +20,11 @@ pub enum AutogradError {
     LossNotScalar { node: NodeId, rank: usize },
 
     #[error(
-        "node {node} is a Keep::Scan reduce; its adjoint is a distinct derivation \
-         (reversed prefix-sum for Add, no known closed form for Maximum/Minimum) \
-         and is not implemented"
+        "node {node} is a Keep::Scan reduce outside the covered shape -- only ScalarOp::Add \
+         over a rank-1 identity in_map/out_map (a plain cumulative sum, the reversed-suffix-sum \
+         derivation in crate::adjoint::differentiate_scan) has an adjoint here; a non-Add scan \
+         body (no known closed form for Maximum/Minimum), a non-identity map (strided/windowed \
+         scan), or a rank > 1 iteration space is not implemented"
     )]
     ScanAdjointUnsupported { node: NodeId },
 

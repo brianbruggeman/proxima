@@ -549,7 +549,7 @@ fn differentiate_reduce(
     wanted: Option<&BTreeSet<NodeId>>,
 ) -> Result<(), AutogradError> {
     if matches!(reduce.keep, Keep::Scan) {
-        return Err(AutogradError::ScanAdjointUnsupported { node });
+        return differentiate_scan(program, grad_of, original_program, shapes, node, reduce, gradient, wanted);
     }
     if reduce.out_map.is_data_dependent() {
         return Err(AutogradError::ScatterOutputUnsupported { node });
@@ -663,6 +663,72 @@ fn differentiate_reduce(
             reduce.in_map.clone(),
         )
     };
+    let operand_rank = shapes.of(reduce.operand).len() as u16;
+    accumulate(program, grad_of, operand_dtype, operand_rank, reduce.operand.0 as usize, routed);
+    Ok(())
+}
+
+/// The adjoint of a `Keep::Scan` reduce.
+///
+/// Only `ScalarOp::Add` (cumulative sum) over a plain rank-1 identity
+/// `in_map`/`out_map` — exactly the shape every `Keep::Scan` construction
+/// site in this workspace uses today (`proxima-tensor/src/cpu.rs:15056-15086`'s
+/// `cumsum_matches_a_running_sum_reference`) — is covered; anything wider
+/// (a non-`Add` body, a non-identity or higher-rank map) is named-rejected
+/// via [`AutogradError::ScanAdjointUnsupported`] rather than attempted.
+///
+/// The derivation: `y_i = sum_{j<=i} x_j`, so `dy_i/dx_j = 1` for `j <= i`
+/// and `0` otherwise, giving `grad_x_j = sum_{i>=j} grad_y_i` — a REVERSED
+/// prefix sum, i.e. a suffix sum. Composed from existing primitives only
+/// (no new `Op`/`ScalarOp`/`IndexMap`):
+///
+/// 1. [`expr::reverse_1d`] reads `gradient` back-to-front, anchored to its
+///    real extent via the same `broadcast_anchor` + `full` idiom
+///    `differentiate_reduce`'s own `Maximum`/`Multiply` arms already use to
+///    fix an otherwise-unconstrained axis.
+/// 2. [`expr::scan`] cumsums that reversed read — `suffix_reversed_i =
+///    sum_{k<=i} gradient_{N-1-k}`.
+/// 3. Reading `suffix_reversed` back-to-front again lands exactly on the
+///    suffix sum: `routed_j = suffix_reversed_{N-1-j} = sum_{k<=N-1-j}
+///    gradient_{N-1-k} = sum_{m>=j} gradient_m` (substituting `m = N-1-k`).
+///
+/// See `differentiate_scan_add_matches_the_hand_derived_suffix_sum` and
+/// `differentiate_scan_add_matches_central_difference` (this module's own
+/// tests) for the worked numeric example and the numeric oracle.
+#[allow(clippy::too_many_arguments)]
+fn differentiate_scan(
+    program: &mut Vec<Op>,
+    grad_of: &mut [Option<NodeId>],
+    original_program: &[Op],
+    shapes: &Shapes,
+    node: NodeId,
+    reduce: &Reduce,
+    gradient: NodeId,
+    wanted: Option<&BTreeSet<NodeId>>,
+) -> Result<(), AutogradError> {
+    if reduce.body != ScalarOp::Add {
+        return Err(AutogradError::ScanAdjointUnsupported { node });
+    }
+    let full = expr::identity(1);
+    if reduce.in_map != full || reduce.out_map != full {
+        return Err(AutogradError::ScanAdjointUnsupported { node });
+    }
+    if is_unwanted_input(original_program, wanted, reduce.operand) {
+        return Ok(());
+    }
+
+    let extent = shapes.of(node)[0];
+    if extent == 0 {
+        return Ok(());
+    }
+    let reversed = expr::reverse_1d(extent).ok_or(AutogradError::ScanAdjointUnsupported { node })?;
+    let anchor = expr::broadcast_anchor(program, reduce.dtype, &[extent], 0.0);
+
+    let reversed_gradient = expr::binary(program, reduce.dtype, ScalarOp::Add, (gradient, reversed.clone()), (anchor, full.clone()));
+    let suffix_reversed = expr::scan(program, reduce.dtype, ScalarOp::Add, ReduceInit::Zero, reversed_gradient, full.clone(), full.clone());
+    let routed = expr::binary(program, reduce.dtype, ScalarOp::Add, (suffix_reversed, reversed), (anchor, full));
+
+    let operand_dtype = original_program[reduce.operand.0 as usize].dtype();
     let operand_rank = shapes.of(reduce.operand).len() as u16;
     accumulate(program, grad_of, operand_dtype, operand_rank, reduce.operand.0 as usize, routed);
     Ok(())
@@ -1080,5 +1146,163 @@ mod reduce_multiply_tests {
 
         assert!((analytic[0] - 5.0).abs() < 1e-5, "got {analytic:?}");
         assert!((analytic[1] - 2.0).abs() < 1e-5, "got {analytic:?}");
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod scan_add_tests {
+    use alloc::vec;
+
+    use proxima_tensor::op::Extent;
+
+    use super::*;
+
+    fn leaf(program: &mut Vec<Op>, name: &str, extent: usize) -> NodeId {
+        proxima_tensor::op::append(
+            program,
+            Op::Input { dtype: DType::Float32, shape: vec![Extent::Static(extent as u32)], name: Some(name.into()) },
+        )
+    }
+
+    /// `loss = sum(cumsum(x) * w)`: `x = [1, 2, 3, 4]`, so `cumsum(x) = [1,
+    /// 3, 6, 10]`. `w = [5, -2, 3, 0.5]` stands in for an arbitrary
+    /// upstream gradient -- `differentiate_elementwise`'s own `Multiply`
+    /// rule (`grad_a = gradient * b`) means the `Reduce(Add, Keep::Scan)`
+    /// node's own incoming gradient is exactly `gradient_of_product * w =
+    /// 1 * w = w`, so `w`'s chosen values ARE the hand-picked upstream
+    /// gradient `differentiate_scan`'s own doc calls `grad_y`.
+    ///
+    /// By hand: `loss = sum_i cumsum(x)_i * w_i = sum_i w_i * sum_{j<=i}
+    /// x_j`. Swapping the sum order, `loss = sum_j x_j * sum_{i>=j} w_i`,
+    /// so `dLoss/dx_j = suffix_w[j] = sum_{i>=j} w_i`:
+    ///
+    /// ```text
+    /// suffix_w[0] = 5 + (-2) + 3 + 0.5 = 6.5
+    /// suffix_w[1] =      -2  + 3 + 0.5 = 1.5
+    /// suffix_w[2] =            3 + 0.5 = 3.5
+    /// suffix_w[3] =                0.5 = 0.5
+    /// ```
+    ///
+    /// so `grad_x = [6.5, 1.5, 3.5, 0.5]` exactly -- verified in
+    /// [`scan_add_gradient_matches_the_hand_derived_suffix_sum`]. `loss`
+    /// itself is `1*5 + 3*(-2) + 6*3 + 10*0.5 = 5 - 6 + 18 + 5 = 22` (not
+    /// asserted directly, but the arithmetic anyone re-deriving this by
+    /// hand would check first).
+    fn build_scan_add_loss() -> (Vec<Op>, NodeId, NodeId, NodeId) {
+        let mut program = Vec::new();
+        let x = leaf(&mut program, "x", 4);
+        let w = leaf(&mut program, "w", 4);
+        let cumsum = proxima_tensor::op::append(
+            &mut program,
+            Op::Reduce(Reduce {
+                dtype: DType::Float32,
+                body: ScalarOp::Add,
+                init: ReduceInit::Zero,
+                operand: x,
+                in_map: expr::identity(1),
+                out_map: expr::identity(1),
+                keep: Keep::Scan,
+                name: None,
+            }),
+        );
+        let product = proxima_tensor::op::append(
+            &mut program,
+            Op::Elementwise {
+                dtype: DType::Float32,
+                body: ScalarOp::Multiply,
+                operands: vec![(cumsum, expr::identity(1)), (w, expr::identity(1))],
+                name: None,
+            },
+        );
+        let loss = expr::reduce(&mut program, DType::Float32, ScalarOp::Add, ReduceInit::Zero, product, expr::identity(1), expr::broadcast(1));
+        (program, x, w, loss)
+    }
+
+    #[proxima::test]
+    async fn scan_add_gradient_matches_the_hand_derived_suffix_sum() {
+        let (program, x, _w, loss) = build_scan_add_loss();
+        let x_values = [1.0f32, 2.0, 3.0, 4.0];
+        let w_values = [5.0f32, -2.0, 3.0, 0.5];
+
+        let differentiated = differentiate(&program, loss).expect("Keep::Scan(Add) differentiates");
+        let grad_x = differentiated.gradient_of(x).expect("x feeds the loss through the scan");
+        let evaluated =
+            proxima_tensor::cpu::evaluate_named(&differentiated.program, &[], &[("x", &x_values), ("w", &w_values)], &[grad_x])
+                .expect("scan adjoint program lowers and evaluates");
+        let analytic = evaluated.get(grad_x).expect("grad_x requested").0;
+
+        let expected = [6.5f32, 1.5, 3.5, 0.5];
+        for (index, (&found, &wanted)) in analytic.iter().zip(expected.iter()).enumerate() {
+            assert!((found - wanted).abs() < 1e-5, "index {index}: got {found}, hand-derived {wanted}");
+        }
+    }
+
+    /// The numeric oracle: `loss` is linear in `x` (cumsum is linear, and
+    /// `w` never multiplies against another function of `x`), so central
+    /// difference has no curvature to blur -- a tight tolerance is a real
+    /// check, not luck.
+    #[proxima::test]
+    async fn scan_add_gradient_matches_central_difference() {
+        let (program, _x, _w, loss) = build_scan_add_loss();
+        let x_values = [1.0f32, 2.0, 3.0, 4.0];
+        let w_values = [5.0f32, -2.0, 3.0, 0.5];
+
+        let differentiated = differentiate(&program, loss).expect("Keep::Scan(Add) differentiates");
+        let grad_x = differentiated.gradient_of_named("x").expect("x feeds the loss");
+        let evaluated =
+            proxima_tensor::cpu::evaluate_named(&differentiated.program, &[], &[("x", &x_values), ("w", &w_values)], &[grad_x])
+                .expect("scan adjoint program lowers and evaluates");
+        let analytic = evaluated.get(grad_x).expect("grad_x requested").0;
+
+        let loss_at = |perturbed: &[f32]| {
+            proxima_tensor::cpu::evaluate_named(&program, &[], &[("x", perturbed), ("w", &w_values)], &[loss])
+                .expect("forward program lowers and evaluates")
+                .get(loss)
+                .expect("loss requested")
+                .0[0]
+        };
+
+        let step = 1e-3f32;
+        let mut perturbed = x_values.to_vec();
+        for index in 0..x_values.len() {
+            let original = perturbed[index];
+            perturbed[index] = original + step;
+            let plus = loss_at(&perturbed);
+            perturbed[index] = original - step;
+            let minus = loss_at(&perturbed);
+            perturbed[index] = original;
+
+            let numeric = (plus - minus) / (2.0 * step);
+            let relative = (analytic[index] - numeric).abs() / (analytic[index].abs().max(numeric.abs()) + 1e-6);
+            assert!(relative < 5e-3, "index {index}: analytic={} numeric={numeric}", analytic[index]);
+        }
+    }
+
+    /// A `Reduce(Maximum, Keep::Scan)` (running max) has no adjoint here --
+    /// [`AutogradError::ScanAdjointUnsupported`] is named, not silently
+    /// mishandled.
+    #[proxima::test]
+    async fn scan_maximum_stays_named_rejected() {
+        let mut program = Vec::new();
+        let x = leaf(&mut program, "x", 4);
+        let running_max = proxima_tensor::op::append(
+            &mut program,
+            Op::Reduce(Reduce {
+                dtype: DType::Float32,
+                body: ScalarOp::Maximum,
+                init: ReduceInit::NegativeInfinity,
+                operand: x,
+                in_map: expr::identity(1),
+                out_map: expr::identity(1),
+                keep: Keep::Scan,
+                name: None,
+            }),
+        );
+        let loss =
+            expr::reduce(&mut program, DType::Float32, ScalarOp::Add, ReduceInit::Zero, running_max, expr::identity(1), expr::broadcast(1));
+
+        let error = differentiate(&program, loss).err().expect("running-max scan has no adjoint rule here");
+        assert!(matches!(error, AutogradError::ScanAdjointUnsupported { .. }), "{error:?}");
     }
 }
