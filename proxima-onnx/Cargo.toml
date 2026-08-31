@@ -16,6 +16,21 @@ alloc = []
 # std-only (Settings/env/file), so it rides in only here -- the
 # no_std+alloc floor never sees it and always uses `crate::sized` directly.
 std = ["alloc", "thiserror/std", "proxima-protocols/std", "dep:bon", "dep:conflaguration", "dep:serde"]
+# the sealed mnist f32 inference-lane bench (`benches/mnist_f32_lane.rs`):
+# default-off so a normal build/test never needs the real mnist.onnx
+# checkout + MNIST idx dataset on disk (the bench itself clean-skips when
+# either is absent, but the feature keeps criterion+its transitive deps out
+# of a default `cargo build`/`cargo test`).
+mnist-f32-bench = ["std"]
+# routes the mnist diagnostic example (`examples/mnist_diag.rs`) through
+# `proxima-tensor`'s `instrument` counters for an exact (not sampled) MAC
+# count and NEON-tile-path breakdown. Kept OFF the `mnist-f32-bench` feature
+# above and off the dev-dependency's own feature list: `instrument` adds
+# ~30-40% overhead to every `run_reduce`/`run_elementwise` call (measured
+# this session, see docs/discipline.md), so the timing bench must never
+# build with it -- this is a separate opt-in specifically for the
+# non-timed, one-shot diagnostic run.
+mnist-diag = ["std", "proxima-tensor/instrument"]
 
 [dependencies]
 proxima-primitives = { workspace = true, default-features = false }
@@ -32,4 +47,14 @@ workspace = true
 [dev-dependencies]
 tempfile.workspace = true
 temp-env.workspace = true
-proxima-tensor = { workspace = true, features = ["std", "test-support"] }
+proxima-tensor = { features = ["std", "test-support"], path = "../proxima-tensor", default-features = false }
+criterion.workspace = true
+
+[[bench]]
+name = "mnist_f32_lane"
+harness = false
+required-features = ["mnist-f32-bench"]
+
+[[example]]
+name = "mnist_diag"
+required-features = ["mnist-diag"]

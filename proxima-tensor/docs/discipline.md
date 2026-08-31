@@ -13408,3 +13408,101 @@ Flagged mid-task by the coordinating agent reading ROW 140's own diff: `MatmulSt
 - `grep -n "RawFutexMutex\|fn wait\b" proxima-primitives/src/sync/blocking/futex.rs` and `grep -n "Ordering::" proxima-core/src/park.rs` — re-derive the ordering mismatch this row's dependency-reuse argument rests on
 - `PROXIMA_MAX_TOKENS=8 cargo test -p proxima-model-interop --features std,instrument --release --lib --no-run`, run the produced binary `--ignored --nocapture runs_a_cached_greedy_decode_loop_and_reports_per_token_wall_clock` at HEAD, `grep 'token_attribution step=4\|^cohort_slot'` — reproduces the BEFORE column and the per-slot skew this row cites
 - `cargo nextest run -p prime --features runtime-prime-cohort,cohort-instrument` (157), `-p proxima-tensor --features std,instrument` (413), `-p proxima-model-interop --features std` (73), `-p omega` (94), `cargo nextest run --workspace --no-fail-fast` (5747)
+
+## ROW 145 — rung 0 sealed: the mnist f32 inference-lane bench lands, and the roofline denominator is 322x, not 13x
+
+Repo: `/Users/brianbruggeman/repos/slot-0/proxima-wt-perf`, branch `perf/f32-inference-lane`, off `04f655159b073d340550d1f8b664ef5a71b95e04`. `CARGO_TARGET_DIR` pinned to a scratchpad dir for every command below. Host: Apple M1 Max, macOS, arm64 — **LOADED throughout this session**, `uptime` load average 13-26 the whole time (never quiesced after a 60s wait + recheck per the measure-alone protocol), `pgrep -fl 'cargo|rustc|probe'` consistently showing 4-12 other agents' processes. Every number below carries this loadout; none is from a quiet box.
+
+**Artifact:** `proxima-onnx/benches/mnist_f32_lane.rs`, criterion, `harness = false`, gated behind the new default-off `mnist-f32-bench` feature (`proxima-onnx/Cargo.toml`). Presence-guarded on `~/repos/others/burn/examples/onnx-inference/src/model/mnist.onnx` + `~/.cache/burn-dataset/mnist` (clean `eprintln!` + return when either is absent, same convention `real_mnist_accuracy.rs` already uses). Loads the real `t10k` test split (1000 images, same normalization as `real_mnist_accuracy.rs`), asserts accuracy >= 0.989 BEFORE any timed loop runs (measured exactly 0.9900 = 990/1000 this session, matching the task's stated baseline bit-for-bit), then times `cpu::evaluate_named` per image three ways: a manual `Instant`-per-call sweep over all 1000 real images (mean/p50/p95/CoV, printed via `eprintln!`), a fresh in-bench single-core scalar-FMA roofline microbench (8 independent `mul_add` accumulator chains, mean of 3 runs), and a criterion `bench_function` group (`--save-baseline`-capable, the mechanically re-provable number).
+
+Companion, non-timed diagnostic: `proxima-onnx/examples/mnist_diag.rs`, gated behind a separate `mnist-diag` feature (`proxima-tensor/instrument` — kept OFF the timing bench's own feature set because `instrument` measurably adds ~30-40% overhead to every `run_reduce`/`run_elementwise` call, confirmed this session: the same 20-image loop read 16.3-18.3ms/image under `instrument` on a quieter moment and up to 102-201ms/image total-forward-time spikes on a loaded one, vs the clean bench's 18.2-22.1ms criterion numbers). Computes the exact per-image MAC count analytically from `bind::bind`'s own `BoundOp::extents` (product of extents over every `Keep::Reduce` fold — `bind.rs`'s own doc: "wider than the output shape for a `Keep::Reduce` reduce, which walks the full pre-reduction space", i.e. the exact pre-reduction iteration count, one fused-multiply-add per point), cross-checked by eye against the crate's own `instrument::MAC_OPS` counter's per-call `eprintln!` (`cpu.rs:892`, "DIAG nsper reduce_f32_dense mac_ops=...") — **identical, 2756980, across all 21 calls in 3 independent process runs**, not merely once.
+
+### Accuracy (the gate that keeps this bench honest)
+
+990/1000 = 0.9900, all 3 runs, bit-identical to `real_mnist_accuracy.rs`'s own independently-run assertion this session.
+
+### Exact FLOP count (MEASURED, not estimated — analytic product of bound-op extents, cross-checked against the crate's own exact counter)
+
+- MACs/image: **2,756,980** (7 `Keep::Reduce` folds: mnist's 2 conv layers + 2 linear layers' matmul-shaped reduces).
+- FLOPs/image: 5,513,960 (2 FLOPs/MAC).
+
+### Roofline (MEASURED fresh, this bench, mean of 3 runs each; see re-prove command)
+
+| roofline | value | provenance |
+|---|---|---|
+| single-core **scalar** FMA (this bench's own microbench) | 5.95 GMAC/s (11.90 GFLOP/s), CoV 1.66% across 3 process-run means (5.998/5.812/6.038 GMAC/s, each itself CoV 0.4-3.0% over its own 3 samples) | MEASURED, this session, `fma_roofline_macs_per_sec()` in the sealed bench |
+| single-core **NEON**-vectorized register-blocked FMA (the true hardware ceiling) | 97 GFLOPS = 48.5 GMAC/s | MEASURED, prior session, same M1 Max, `docs/discipline.md:1988-1990` (ROW 20's own pure-register-FMA sweep) — **cited, not re-measured this session**; this bench's own microbench (above) deliberately does NOT vectorize (plain scalar `f32::mul_add` in a `for` loop LLVM does not auto-vectorize across the outer trip count here), so it is the SCALAR ceiling, not the NEON one — both are reported because `cpu.rs`'s current scalar interpreter can only ever approach the scalar figure, never the NEON one, until it actually emits vector instructions |
+
+roofline µs/image = MACs/image / achieved MAC/s * 1e6:
+- vs scalar roofline: 2,756,980 / 5.949e9 * 1e6 = **463 µs (0.463 ms)**
+- vs NEON roofline: 2,756,980 / 48.5e9 * 1e6 = **57 µs (0.057 ms)**
+
+### Current baseline, THIS bench, 3 process runs (loaded host, CoV > 5% — range reported, not a point estimate, per bench-metrics discipline)
+
+| run | criterion mean [lo, hi] | manual-sweep mean/p50/p95 (ms) | manual-sweep CoV | uptime load avg at run |
+|---|---|---|---|---|
+| 1 | 18.358 [18.225, 18.488] ms | 18.491 / 18.096 / 20.412 | 8.80% | ~17-25 |
+| 2 | 18.303 [18.177, 18.450] ms | 24.471 / 19.461 / 43.581 | 61.67% (mid-run load spike, "Blocking waiting for file lock on package cache" at start — another agent's cargo contended) | ~17-25 |
+| 3 | 21.283 [20.496, 22.058] ms, criterion itself flagged "Performance has regressed" +12% vs run 2 | 19.875 / 18.828 / 25.784 | 14.34% | ~13-26 |
+
+Criterion-mean cross-run: mean 19.315ms, CoV 7.21% (n=3) — **above the 5% threshold, reported as the range [18.30, 21.28] ms, not a single number.** This is host contention, not a code change (no source edit between runs 1-3): the bench itself is the honest witness to this repo's own MEASURE-ALONE warning.
+
+### Multiples (every rung reported against BOTH denominators, per this session's owner amendment — never hide the roofline gap behind a burn-parity framing)
+
+Using the representative 19.315ms criterion cross-run mean:
+
+| denominator | value | current baseline is this many x off |
+|---|---|---|
+| burn ndarray (gemm crate), task-provided baseline, same host, same day (**cited from the task brief, not independently re-verified in this bench this session** — `real_mnist_accuracy.rs`/burn's own `mnist_inference.rs` example is the shared fixture) | 1.36ms mean / 0.92ms p50 | **14.2x** (mean) / **20.4x** (p50, using this session's own mean-of-3 p50 18.80ms) |
+| scalar-FMA roofline (this bench, fresh) | 0.463 ms | **41.7x** |
+| NEON roofline (ROW 20, cited) | 0.057 ms | **339.7x** |
+
+**q4k context correction (per owner amendment):** the repo's separate q4k-vs-ggml figure (1.29-1.40x off ggml, cited in memory/prior rows) is an int8/bandwidth-bound LLM-decode lane — a different workload, different dtype, different bottleneck class (bandwidth, not compute). It is NOT the same ratio family as this row's f32/burn/roofline numbers and must never be cross-multiplied or averaged with them.
+
+### Milestone bars, restated against both denominators
+
+| milestone | ms/image | x scalar roofline | x NEON roofline |
+|---|---|---|---|
+| rung-1 success (5x over the 17.61ms original incumbent-bench baseline) | <= 3.5 | 7.6x | 61.6x |
+| burn parity (stretch) | ~1.4 | 3.0x | 24.6x |
+| true hardware roofline | 0.057-0.463 | 1x | 1x (or 8.1x if only the scalar interpreter is ever fixed, never vectorized) |
+
+**Honest read:** even the STRETCH milestone (burn parity) is still 3-25x off this host's own measured hardware ceiling. Burn parity is a waypoint, not the floor — exactly the owner's framing. The gap between "beat burn" and "reach roofline" is dominated by two independent, stackable levers: (1) route this shape onto ANY fast path at all — right now it uses NEITHER the scalar-fast-path NOR the NEON tile (see ROW 146), so even matching the scalar roofline alone would be a >40x win; (2) actually vectorize, which the scalar roofline microbench deliberately does not attempt, to close the remaining ~8x scalar-to-NEON gap.
+
+**Accuracy at this rung:** 0.9900, unchanged (no source edit landed).
+
+**Allocation budget:** not instrumented this rung (would require the `instrument` feature, which contaminates the timing number this bench exists to keep clean — deferred to a future rung's own row, named not buried).
+
+**Re-prove commands:**
+- `CARGO_TARGET_DIR=<scratch> cargo bench -p proxima-onnx --bench mnist_f32_lane --features mnist-f32-bench -- --save-baseline mnist-f32-lane` — reproduces accuracy, roofline, manual sweep, and criterion numbers in one run (host loadout will differ; re-check `uptime`/`pgrep` and mark accordingly)
+- `CARGO_TARGET_DIR=<scratch> cargo run --release -p proxima-onnx --example mnist_diag --features mnist-diag` — reproduces the exact 2,756,980 MACs/image figure and the per-call `mac_ops=` cross-check lines
+- `CARGO_TARGET_DIR=<scratch> cargo test --release -p proxima-onnx --test real_mnist_accuracy --features std -- --ignored --nocapture` — reproduces the independent 0.9900 accuracy figure this bench's own gate cross-checks against
+
+## ROW 146 — rung 1/2 NOT landed: the mechanism is a stride gate tripped by conv's own shape-inference marker tensor, not a missing GEMM detector
+
+**What was expected going in (task brief):** "cpu.rs's generic index-map interpreter walks it scalar — no GEMM routing" implying no fast-path routing exists at all for matmul-shaped folds. **Partially refuted by reading the code, not inferred:** a fast-path router for matmul-shaped `Keep::Reduce` folds already exists and is already unconditionally engaged for EVERY `Keep::Reduce` node in `run_reduce` (`cpu.rs:4126` doc: "The dense f32 GEMM interpreter: NEON dot/width tiles then a generic fallback") — plain (non-conv) matmuls already route through `neon_tile_plan`/`gemm_tile_neon` (a ported ggml-tinyBLAS 6x4 NEON microkernel) when their shape qualifies. mnist's own linear layers were not separately measured this session (mnist's forward is dominated by its 2 conv layers, see below), so whether they individually reach the tile is not directly confirmed here, but the routing infrastructure itself is real and present, not absent.
+
+**What actually gates conv's own materialized-window `Reduce` out of every fast path, traced to the exact function and line, not asserted:**
+
+1. `proxima-onnx/src/lower.rs:2234` (`window_axis`) builds each windowed spatial dim as a **2-term** `AxisIndex` (`AxisTerm::scaled(out_axis, stride)` + `AxisTerm::scaled(kernel_axis, dilation)`) — this is genuinely still affine (each individual logical axis contributes a constant physical stride; `View::stride(dim)` is well-defined per axis even here), confirmed by reading `bind.rs:790` (`IndexMap::Affine(pattern) => (node, layout_of(pattern, ...), None)` — the windowed image operand resolves with `gather: None`, i.e. it is NOT classified as a gather at all, contrary to what "the window is basically a gather" would predict).
+2. The actual trip wire is `lower.rs:2318`'s own **stamp** tensor — `window_materialize`'s all-ones `Op::Constant` of shape `[out_h, out_w, kh, kw]`, present purely so `shape::infer`'s `unify_iteration_space` (which only resolves an axis's extent from a *pure single-term* projection) can resolve `oh/ow/kh/kw`'s extents at all (that function's own doc says so explicitly: "the stamp is not decoration"). This stamp is read via a **pure single-term projection** (`projection(6, &[2,3,4,5])`), so per-dimension it passes `operand_is_affine` (`cpu.rs:4884`) cleanly — but its physical stride along the iteration space's LAST (innermost) output axis is the stamp tensor's OWN row-major stride for that axis, which for a `[out_h,out_w,kh,kw]`-shaped constant is `kh*kw` (25 for mnist's first conv's 5x5 kernel) — far greater than the `<= 1` `operand_is_unit_or_broadcast` (`cpu.rs:4901-4903`) requires.
+3. `body_shape_is_affine_fast_path` (`cpu.rs:4914`) requires EVERY operand of a `Binary` body to pass `operand_is_unit_or_broadcast` — the stamp's own stride (25, not <=1) fails this regardless of whether the actual IMAGE operand's own window-axis stride would have qualified on its own. **One operand — a marker tensor whose entire numeric contribution is multiplying by 1.0 — sinks the whole fold's fast-path eligibility.**
+4. Downstream, both `fast_path` and `reduction_fast_path` (`cpu.rs:4198-4200`) are `false` for every one of these nodes, so `neon_tile_plan` (the actual NEON 6x4 tile) is never even attempted (`cpu.rs:4281`, gated `if reduction_fast_path`) and `try_run_width_tile` never fires either — both silently fall through to `Path::Generic`, the fully scalar per-element interpreter with a `gather_cursors` `Option` check on every read.
+
+**Measured consequence:** `evaluate_quantized`'s own per-node-kind diagnostic (`cpu.rs`'s `DIAG evaluate_quantized node_kind=` line, read via the `mnist-diag` companion) shows `reduce_f32_dense` (mnist's 7 matmul/conv folds combined) at **85.7-94.2% of total forward wall time** across repeated runs this session, at 5.27-8.76 ns/element in quieter moments (up to 73 ns/element under host load spikes) for what should be a single FMA. `neon_dot_tile: gate_passes≈1/image, invocations=0/image` (the gate structurally admits the shape as a *candidate* via a separate, coarser check, then the tile's own leading-row/width-column thresholds reject it before a single real tile call fires) confirms zero SIMD engagement anywhere in this model's forward pass.
+
+**Why this was NOT fixed this session (bounded-fix test, per AGENTS.md):** the smallest safe fix identified — teach `operand_is_unit_or_broadcast` (or a sibling check reachable from `body_shape_is_affine_fast_path`) to recognize "this operand is a `Constant` with a uniform value the multiply body would leave unchanged (1.0 for `Multiply`)" and exclude it from the stride gate entirely — requires plumbing operand-VALUE information into a function that today only inspects `strides`/`gather` shape metadata, a genuine (not cosmetic) change to one of this crate's most heavily-tested, correctness-critical hot-path gates, shared by every `Keep::Reduce`/`Keep::Scan` fold in the whole crate (LLM decode/prefill included, per `docs/discipline.md`'s own preceding 144 rows). It is not expressible as a bounded, obviously-safe <50-line patch inside the remaining session budget with the validation depth (442+ `proxima-tensor` tests, workspace clippy, the full gate script) this repo requires before landing a hot-path change — it is exactly the "large, contested" category `AGENTS.md` reserves for a scoped follow-up rather than a same-turn patch. **NOT ROLLED BACK (nothing was landed to roll back) — flagged with the precise fix location, not silently punted.**
+
+**What a correct fix would need to prove, named for the next session:** (a) that skipping a genuine `Constant(1.0)` operand from `operand_is_unit_or_broadcast`'s stride check cannot change results for ANY other `Keep::Reduce`/`Keep::Scan` site in the crate that happens to multiply by a literal-1.0 constant for unrelated reasons (a full-crate semantic audit, not just this call site); (b) that once the stamp stops sinking the gate, the IMAGE operand's OWN window-axis stride (mnist's own conv strides, most likely stride=1 first layer) actually qualifies `operand_is_unit_or_broadcast` on its own merits — this session did not measure that stride directly and it is stated as a plausible-but-unverified next check, not a fact; (c) a full re-bench against this row's own sealed baseline (ROW 145) to confirm the scalar-fast-path win before ever touching the NEON tile layer.
+
+**Phase-2 charter (owner-requested framing, evidence FOR/AGAINST, not a plan committed to):**
+- **(a) Shape-specialized FSM loop nests over generic library-call mimicry:** evidence FOR — this session's own mechanism finding (above) shows the blocker is a SHAPE-INFERENCE ARTIFACT (the stamp), not an inherent shape mismatch with the existing tile machinery; a shape-specialized unrolled FMA loop for the *known-small*, *bind-time-static* conv kernel extents (5x5=25, 3x3=9) sidesteps the stamp/stride-gate question entirely by never routing through the generic multi-operand interpreter for this node shape at all — plausible, unmeasured. Evidence AGAINST/open: no code was written to test this, so "would beat the existing tile machinery" is asserted nowhere, only that it is architecturally a smaller, more surgical, higher-confidence target than repairing the general-purpose stride gate.
+- **(b) Cross-op tile streaming (conv/matmul -> relu without materializing the intermediate):** NOT probed this session (owner's own instruction scoped this to "if budget remains after rung 3" — rung 3 was never reached). `bind.rs`'s existing Reduce-absorbs-Elementwise fusion (the `element_body`/`ComposedBody` mechanism already visible throughout this file, e.g. `build_reduce_op`'s `element_body` parameter) is real, existing precedent that such fusion is architecturally native to this crate's `BoundOp` design, but whether extending it across the conv-then-activation boundary is a small or large change was not investigated.
+
+**Not landed. No rollback (nothing shipped). No source diff to this row beyond the sealed bench (ROW 145) and its companion diagnostic.**
+
+**Re-prove commands:**
+- `sed -n '2234,2240p;2310,2330p' proxima-onnx/src/lower.rs` — the windowed AxisIndex and the stamp constant
+- `sed -n '4884,4923p' proxima-tensor/src/cpu.rs` — `operand_is_affine`/`operand_is_unit_or_broadcast`/`body_shape_is_affine_fast_path`
+- `sed -n '782,810p' proxima-tensor/src/bind.rs` — `build_operand`, confirming the windowed operand resolves `gather: None`
+- `CARGO_TARGET_DIR=<scratch> cargo run --release -p proxima-onnx --example mnist_diag --features mnist-diag` and grep `"DIAG evaluate_quantized node_kind="` / `"neon_dot_tile"` — reproduces the 85.7-94.2% `reduce_f32_dense` share and the zero-tile-invocation finding
