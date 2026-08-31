@@ -341,10 +341,20 @@ fn f16_matmul_program(m: u32, k: u32, n: u32) -> Vec<Op> {
 /// `EPSILON` mirrors `metal_parity.rs`'s own 5e-3 f16-rounding convention
 /// (see that test's doc for the measured-error derivation) — the same
 /// order of relative error a 10-bit-mantissa half accumulates over a
-/// handful of terms, independent of which backend computes it.
+/// handful of terms, independent of which backend computes it. The bound
+/// applied below is `ABSOLUTE_EPSILON + EPSILON * |reference|`, the same
+/// combined atol+rtol shape `metal_parity.rs` uses for exactly the same
+/// reason: `lhs`/`rhs` share seeds 11/12 with that test's fixture, so some
+/// of these 221 dot products land near a zero crossing under
+/// `test_support::Lcg::next_unit`'s corrected [-1,1) range, and a
+/// pure-relative bound is unsound there (tiny denominator, ordinary
+/// rounding-sized numerator). `ABSOLUTE_EPSILON` is set from this test's
+/// own measured run against the real wgpu f16 path, `3.9744377e-3` worst
+/// absolute diff across all 221 elements, with ~20% headroom.
 #[test]
 fn f16_matmul_runs_on_wgpu_within_the_metal_parity_f16_epsilon_or_names_its_rejection() {
     const EPSILON: f32 = 5e-3;
+    const ABSOLUTE_EPSILON: f32 = 4.8e-3;
     let (m, k, n) = (17usize, 23usize, 13usize);
     let f32_program = {
         let mut program = Vec::new();
@@ -388,16 +398,24 @@ fn f16_matmul_runs_on_wgpu_within_the_metal_parity_f16_epsilon_or_names_its_reje
             assert_eq!(actual.len(), expected.len());
             assert_eq!(actual.len(), m * n);
             let mut max_diff = 0.0f32;
+            let mut max_absolute = 0.0f32;
             for (&got, &want) in actual.iter().zip(expected.iter()) {
                 assert!(got.is_finite(), "wgpu f16 matmul produced a non-finite value: {got}");
-                max_diff = max_diff.max((got - want).abs() / want.abs().max(f32::MIN_POSITIVE));
+                let absolute = (got - want).abs();
+                max_diff = max_diff.max(absolute / want.abs().max(f32::MIN_POSITIVE));
+                max_absolute = max_absolute.max(absolute);
             }
-            eprintln!("wgpu f16 parity: max_relative_diff={max_diff}");
-            assert!(
-                max_diff < EPSILON,
-                "omega::backend's cpu f32 oracle and wgpu f16 compute disagree beyond the f16 epsilon: \
-                 max_relative_diff={max_diff} epsilon={EPSILON}"
-            );
+            eprintln!("wgpu f16 parity: max_relative_diff={max_diff} max_absolute_diff={max_absolute}");
+            for (&got, &want) in actual.iter().zip(expected.iter()) {
+                let absolute = (got - want).abs();
+                let bound = ABSOLUTE_EPSILON + EPSILON * want.abs();
+                assert!(
+                    absolute <= bound,
+                    "omega::backend's cpu f32 oracle and wgpu f16 compute disagree beyond the \
+                     combined tolerance: reference={want} observed={got} abs_diff={absolute} \
+                     bound={bound} (atol={ABSOLUTE_EPSILON}, rtol={EPSILON})"
+                );
+            }
         }
         Err(error) => {
             eprintln!(
