@@ -26,6 +26,12 @@
 
 set -euo pipefail
 
+# CI sets CARGO_TERM_COLOR=always; ANSI escapes wrapped around digits break
+# any grep/awk that counts cargo/nextest summary output (the class
+# proxima-tokenizer-gate.sh and proxima-test-gate.sh hit) -- force it off
+# for every invocation in this script, present and future.
+export CARGO_TERM_COLOR=never
+
 declare -a cells=(
     # formatting and lints across every target, including benches and the example
     "fmt|cargo fmt -p proxima-centauri -- --check"
