@@ -17,6 +17,34 @@
 //! `checkpoint_present()` convention `tests/language_model.rs` uses for its
 //! own host-local tokenizer fixture, so this test runs wherever the data
 //! exists instead of requiring `--ignored`.
+//!
+//! This test's own `0.918` accuracy sits well under the ~0.97-0.98 ceiling
+//! a `784-128-10` MLP reaches on MNIST -- deliberately: 8000 of 60000
+//! training images, 4 epochs, is a fast CI-shaped subset, not a claim about
+//! this training stack's quality ceiling. A release-mode scaling ladder
+//! over the exact same graph/optimizer/normalization confirmed the gap is
+//! architecture/data/epochs, not the stack, with one caveat the ladder
+//! itself surfaced and [`proxima_autograd::loss::cross_entropy`] now fixes:
+//!
+//! | rung | train images | epochs | batch | test accuracy (full 10k) | wall clock |
+//! |------|-------------:|-------:|------:|--------------------------:|-----------:|
+//! | A (this test's config) | 8000  | 4  | 32 | 0.9274 | 6.7s   |
+//! | B                      | 60000 | 10 | 64 | 0.9741 | 116.4s |
+//! | C (28 epochs, pre-fix) | 60000 | 28 | 64 | 0.1009 (NaN loss, diverged) | 506s |
+//! | C (28 epochs, fixed)   | 60000 | 28 | 64 | 0.9786 | 373.8s |
+//!
+//! Rung C first diverged to `NaN`: [`proxima_autograd::adjoint::differentiate`]
+//! differentiates the literal `softmax -> log -> weighted -> sum -> negate`
+//! graph, not a hand-fused closed form, so `Logarithm`'s adjoint
+//! (`gradient * (1/x)`) can hit `0.0 * (1/0.0) = NaN` once a confidently
+//! wrong softmax underflows a non-target class's probability to exactly
+//! `0.0f32` -- which a long enough run over the full dataset eventually
+//! does. `cross_entropy` now floors its log input at `1e-7`
+//! (`src/loss.rs`'s `PROBABILITY_FLOOR`, the same eps-clamped-log fix every
+//! incumbent softmax-cross-entropy carries), and rung C reruns clean at
+//! 0.9786 -- above the falsification threshold, so the "architecture, not
+//! the stack" hypothesis holds, with this one real defect found and fixed
+//! along the way.
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::too_many_arguments)]
 
