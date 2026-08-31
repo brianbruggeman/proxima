@@ -157,3 +157,46 @@ pub(crate) fn reduce(
         }),
     )
 }
+
+/// [`reduce`], with `keep: Keep::Scan` instead of `Keep::Reduce` — every
+/// prefix survives rather than only the final accumulator
+/// (`proxima-tensor/src/op.rs:142-147`'s own doc on the two `Keep`
+/// variants). `crate::adjoint`'s scan-add adjoint is the only caller today:
+/// the reversed-suffix-sum derivation scans a reversed copy of the upstream
+/// gradient, so it needs `Keep::Scan` with the same `Add`/`Zero` shape
+/// [`reduce`] already builds for a plain reduction.
+pub(crate) fn scan(
+    program: &mut Vec<Op>,
+    dtype: DType,
+    body: ScalarOp,
+    init: ReduceInit,
+    operand: NodeId,
+    in_map: IndexMap,
+    out_map: IndexMap,
+) -> NodeId {
+    op::append(
+        program,
+        Op::Reduce(Reduce {
+            dtype,
+            body,
+            init,
+            operand,
+            in_map,
+            out_map,
+            keep: Keep::Scan,
+            name: None,
+        }),
+    )
+}
+
+/// A rank-1 axis-reversal read: `reversed[i] = operand[extent - 1 - i]`.
+/// Expressed as a plain [`IndexMap::Affine`] with a negative-coefficient
+/// [`AxisTerm`] — `proxima-tensor/src/bind.rs:1401-1409`'s `layout_of`
+/// already folds any signed `coeff` into a signed stride, so this needs no
+/// new expression form; a slice with a negative stride is exactly what
+/// convolution's own two-term axis already proved this grammar carries
+/// (this module's own doc table, "stride / dilation").
+pub(crate) fn reverse_1d(extent: u64) -> Option<IndexMap> {
+    let offset = i32::try_from(extent.saturating_sub(1)).ok()?;
+    Some(IndexMap::Affine(map::affine(1, &[(&[map::AxisTerm::scaled(0, -1)], offset)])))
+}
