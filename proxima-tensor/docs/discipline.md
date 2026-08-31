@@ -15036,3 +15036,62 @@ Executor-internal graph-construction/adjoint code, not sans-IO -- principle §11
 | 3 | ~8.5 | 7 | train_step_arena | 41.5371ms | 41.4607ms | 42.2348ms | 0.90% |
 
 Mean-of-p50 = **41.378ms**, cross-run CoV = **0.22%** -- tight cross-run agreement, but at a magnitude ~14.6x ROW165's own sealed 2.824ms, entirely attributable to the SAME unrelated-process CPU contention this row's "Host-noise confound" section root-caused via a controlled A/B (a same-tree quiet-window reading taken minutes before this table, mean=2.8574ms p50=2.8560ms CoV=0.30%, matches ROW165's sealed number within noise). **This is not a regression** -- `git diff main` is empty; the tree is byte-identical to ROW165's landed HEAD. It is named here, in full, rather than silently substituting the quieter n=1 reading, because principle 16 requires the scoreboard cell to be what this session's own re-prove command actually reproduces on THIS host right now, and principle 18 forbids picking the flattering number. A future session re-running the same command on a quiet host should expect ~2.8ms, matching ROW165; re-running it while these specific `snapshot-probe`/`psci-dispatch-probe` processes are resident will reproduce ~41ms, and that is host state, not code.
+
+## ROW 167 -- execution-level elision lands where ROW166's graph-level removal regressed: skip running a zero-consumer `BoundOp` in `StaticArena` without touching `bind::bind`'s own construction, `-26%` on the sealed step
+
+Repo: `/Users/brianbruggeman/repos/slot-0/proxima-wt-fuse`, branch `perf/dead-node-elision`, off `main` `4dfd8b5` (ROW166's own landed HEAD, zero source diff). Host: Apple M1 Max, macOS, arm64. Build: `release` for every timed number (`cargo bench -p proxima-autograd --bench train_step_lane --features train-step-bench`, binary invoked directly, no args); `dev`/`test` profile for the nextest oracles. **Host loadout, named per principle 16/18**: `uptime` at session start read `15.13 13.39 11.32` with the SAME resident `snapshot-probe`/`psci-dispatch-probe` processes ROW165/ROW166 already named (not this worktree's, not killed, per this session's own isolation contract); by the time of the sealed 3-run below it had settled to `7.91 9.89 10.84`. Budget: 30-minute owner cadence, micro-vet n=1 marked.
+
+### The lever
+
+ROW166's own graph-level removal of node 89 (the dead `Multiply` operand contribution) was CORRECT but regressed the step ~14.5x, because deleting the node from the PROGRAM changed its live sibling's consumer count, which flipped `bind.rs`'s `compose_operand` fusion eligibility on the downstream reduce. This row keeps the graph and every `BoundOp` `bind::bind` emits **byte-identical** -- every fusion/eligibility decision sees the exact same input it always did -- and instead skips EXECUTING a `BoundOp` whose node is provably dead, at the one place that already owns a once-per-arena precomputation: [`StaticArena`](../src/cpu.rs) (`cpu.rs:474`).
+
+`build_static_arena` (`cpu.rs:498`) now also computes `StaticArena::dead: BTreeSet<NodeId>` (`cpu.rs:474`, a new PRIVATE field, no new public type) via two small internal functions:
+- `consumed_by_resolved_nodes` (`cpu.rs:510`) -- unions every `BoundOp::operands()` NodeId across the WHOLE resolved list, plus each gathered operand's own `Lookup::indices` (`bind.rs:127`), which is a SEPARATE `NodeId` reference `operands()`'s own tuple does not fold into its leading field -- missing it would silently mark a live index-table node dead.
+- `dead_resolved_nodes` (`cpu.rs:526`) -- every resolved node neither in that consumed set nor in `effective_outputs`.
+
+`run_resolved_nodes_in_arena` (`cpu.rs:606`) gained one line: `if arena.dead.contains(&computed.node) { continue; }`, immediately after the loop variable binds, before the existing buffer-take/run/put-back sequence. `dead` is consulted, never mutated, after `build_static_arena` returns -- the same "computed once, cheap to consult" shape `StaticArena`'s own doc already states for `resolved`/`shapes`/`effective_outputs`.
+
+`BoundOp::operands()` already carries every source a fused/composed body absorbed (`bind.rs`'s own module doc: fusion moves a source node into the fusing op's own physical operand list rather than leaving a separate graph edge behind) -- so the scan is against `BoundOp` structure, never the pre-bind graph, satisfying the task's own correctness requirement without a second traversal of `Op`.
+
+### The elided set -- SIX dead nodes, not one
+
+ROW166's own "direct program scan" named node 89 as THE dead node. This row's mechanical scan, run against the identical real 784-128-10 MLP MNIST training-lane program (`train_step_lane.rs`'s own `build_network`), against a `StaticArena` built with the SAME `outputs = [loss, ...12 rebind targets]` `sweep_arena`/`assert_arena_bit_identical_to_baseline` use, found **six**: `dead = {28, 30, 36, 46, 82, 89}` (temporary diagnostic accessor + bench-local print, both reverted before commit -- `git diff` against `dc932f4` is empty for both `cpu.rs` and `train_step_lane.rs`, reproducible by re-adding the same two lines: a `#[cfg(any(test, feature = "test-support"))] pub fn` returning `arena.dead` cloned to `Vec<u32>`, and a one-line `eprintln!` in `train_step_lane.rs::main` before `assert_arena_bit_identical_to_baseline`). ROW166 characterized only node 89 by hand because its own per-node probe covered the THREE most expensive nodes (89/87/86, 56.6% of the step) rather than exhaustively classifying every one of 230 resolved nodes -- five smaller unwanted-leaf contributions (matching the SAME `differentiate_elementwise`/`route_contribution` shape ROW166 root-caused for node 89, plausibly one per parameter's own `Multiply` backward whose "other operand" is unwanted) went unnoticed at that resolution. This row's scan is exhaustive over `resolved` by construction (`dead_resolved_nodes` iterates every entry), not sampled, so no further undiscovered dead node can exist within THIS composition without also being caught by the same pass on a different program.
+
+### Correctness
+
+1. **Bit-identical, real fixture, 3 consecutive steps.** `assert_arena_bit_identical_to_baseline` (`train_step_lane.rs:453`, unmodified, already asserts loss `to_bits()` + all 12 rebind outputs `to_bits()` per step between `train_step` (fresh-alloc, never elided) and `train_step_arena` (now elided)) printed `arena vs baseline bit-identical over 3 consecutive real steps (loss + all 12 rebind outputs)` on every one of the 5 bench invocations run this session (2 correctness-focused + 3 sealed).
+2. **Synthetic unit tests**, `proxima-tensor/src/cpu.rs` `mod tests` (no MNIST dependency, matching this file's own convention for library-unit fixtures): `dead_node_program()` builds `a`,`b` inputs, `dead = a * b` (zero consumers), `live = a + b` (requested output).
+   - `build_static_arena_elides_a_node_with_zero_consumers` -- `arena.dead` contains `dead`, not `live`; `live`'s evaluated value matches `evaluate_named`'s own non-eliding baseline bit-identically; `dead`'s buffer stays `[0.0, 0.0, 0.0, 0.0]` (`build_static_arena`'s own zero-init), proving the skip is real, not a coincidence of shared body shape.
+   - `build_static_arena_does_not_elide_a_dead_node_that_is_also_a_requested_output` -- rebuilding the SAME program with `outputs = [dead, live]` un-elides `dead`; its evaluated value (`[10, 40, 90, 160]`) matches the non-eliding baseline.
+3. **Targeted suites**, `cargo nextest run -p proxima-tensor -p proxima-autograd -E 'test(central_difference) or test(differentiate_wanted) or test(evaluate_named_with_arena) or test(build_static_arena_elides) or test(build_static_arena_does_not_elide)'` -- **21/21 passed, N=21** (the task's own named filter matched 0 in `proxima-tensor` alone; `central_difference`/`differentiate_wanted` tests live in `proxima-autograd`, confirmed by `grep`). Full-crate sweep beyond the named filter, for a change touching a shared executor loop: `cargo nextest run -p proxima-tensor --lib` -- **438/438 passed, N=438, 0 failed**; `cargo nextest run -p proxima-autograd --lib` -- **53/53 passed, N=53, 0 failed**.
+
+### Micro-vet (n=1, marked) -- elision on vs off, same binary build, same real fixture
+
+Toggled by temporarily forcing `dead = BTreeSet::new()` in `build_static_arena` (reverted before commit; `git diff` against `dc932f4` empty) and rebuilding the release bench:
+
+| arm | `train_step_arena` manual-sweep p50 (100 real MNIST steps) | CoV |
+|---|---:|---:|
+| elision OFF (`dead` forced empty) | 2.8512ms | 1.72% |
+| elision ON (this row's landed code) | 2.0814ms | 2.79% |
+
+**-27.0%**, n=1 each, matching ROW165's own sealed 2.824ms baseline within noise on the OFF arm (confirms the toggle isolates ONLY this row's change, nothing else drifted) and landing inside the task's own expected ~25% band.
+
+### Final sealed number -- 3 consecutive runs, same release binary, `train_step_arena` arm
+
+| run | `uptime` 1-min load at run start | p50 | mean | CoV |
+|---|---:|---:|---:|---:|
+| 1 | ~9 (settling from 15.13 at session start) | 2.0620ms | 2.0699ms | 2.08% |
+| 2 | ~9 | 2.0637ms | 2.0653ms | 0.49% |
+| 3 | ~9 | 2.1549ms | 2.1795ms | 2.91% |
+
+Mean-of-p50 = **2.0935ms**, cross-run std-of-p50 = 0.0434ms, **cross-run CoV = 2.07%** -- inside the 5% trust threshold. Delta vs ROW165's own sealed 2.824ms mean-of-p50: **-25.85%** (2.824ms -> 2.0935ms), matching the task's own ~25% expectation (six small dead nodes plus node 89 summing to slightly MORE than node 89's own lone 25.06% share of ROW166's per-node table, consistent with the wider elided set found above). All 3 runs' own bit-identical assertion PASSED. Host loadout: the SAME 5-7 resident `snapshot-probe`/`psci-dispatch-probe` processes ROW165/166 named stayed resident throughout (not killed, not this worktree's, per this session's own isolation contract) -- `uptime` settled from 15.13 (session start) to ~8-10 (sealed-run window), still elevated relative to a genuinely idle host but the SAME loadout class ROW165's own 2.824ms baseline was itself sealed under, so the two numbers are commensurable.
+
+### Allocation budget, tier, scope
+
+Zero new allocations on the hot path: `dead: BTreeSet<NodeId>` is built ONCE inside `build_static_arena` (already a once-per-arena, not once-per-step, construction site, matching `resolved`/`shapes`/`buffers` above it in the same function) and only ever `.contains()`-read afterward, an O(log n) lookup with no allocation. No new `Op`/`ScalarOp`/`IndexMap` variant, no new public type -- `dead` is a private `StaticArena` field; `consumed_by_resolved_nodes`/`dead_resolved_nodes` are private free functions in `cpu.rs`. `bind::bind`'s own construction, and every `Op`/program byte, are untouched -- `git diff dc932f4~1 dc932f4 -- proxima-tensor/src/bind.rs` is empty, confirming the ROW166 regression mechanism (fusion eligibility keyed off program shape) cannot recur, because the program shape this row hands `bind::bind` never changes.
+
+### Re-prove
+
+- `cargo nextest run -p proxima-tensor -p proxima-autograd -E 'test(central_difference) or test(differentiate_wanted) or test(evaluate_named_with_arena) or test(build_static_arena_elides) or test(build_static_arena_does_not_elide)'` -- expect 21/21.
+- `cargo nextest run -p proxima-tensor --lib` -- expect 438/438; `cargo nextest run -p proxima-autograd --lib` -- expect 53/53.
+- `CARGO_TARGET_DIR=<scratch> cargo bench -p proxima-autograd --bench train_step_lane --features train-step-bench` (dataset must exist under `~/.cache/burn-dataset/mnist`) -- expect the `train_step_arena` manual-sweep line to print `bit-identical` and a p50 near 2.0-2.2ms on a similarly-loaded host, ~2.8ms on a genuinely quiet one (per ROW166's own host-noise finding, reconfirmed here, not re-litigated).
