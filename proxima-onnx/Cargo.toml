@@ -31,6 +31,15 @@ mnist-f32-bench = ["std"]
 # build with it -- this is a separate opt-in specifically for the
 # non-timed, one-shot diagnostic run.
 mnist-diag = ["std", "proxima-tensor/instrument"]
+# the tile-pipeline experiment (`benches/tile_pipeline.rs`,
+# `benches/support/tile_pipeline.rs`, `tests/tile_pipeline_differential.rs`):
+# a line-buffer row-band streaming forward for the real mnist checkpoint,
+# built entirely in bench/test space per the disciplined-component
+# placement rule (no new type in any library crate). Default-off for the
+# same reason `mnist-f32-bench` is: real on-disk fixtures, criterion in the
+# dep graph, and this is a measured experiment against the sealed baseline,
+# not a production default.
+tile-pipeline-bench = ["std"]
 
 [dependencies]
 proxima-primitives = { workspace = true, default-features = false }
@@ -54,6 +63,11 @@ criterion.workspace = true
 name = "mnist_f32_lane"
 harness = false
 required-features = ["mnist-f32-bench"]
+
+[[bench]]
+name = "tile_pipeline"
+harness = false
+required-features = ["tile-pipeline-bench"]
 
 [[example]]
 name = "mnist_diag"
