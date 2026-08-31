@@ -1075,20 +1075,32 @@ fn matmul_program_with_dtype(m: u32, k: u32, n: u32, dtype: DType) -> (Vec<Op>, 
 /// accidentally produce the right element count at the right shape.
 ///
 /// f16 carries 10 explicit mantissa bits (11 with the implicit leading
-/// one) versus f32's 23, so relative error is the only fair comparison —
-/// an absolute epsilon that works for one magnitude of input is meaningless
-/// at another. `EPSILON` below is set from a measured run, not a round
-/// number: with `Lcg` seeds 11/12 over `m=17, k=23, n=13` (221 output
-/// elements, each a 23-term dot product), the worst observed relative
-/// error printed by this test was `1.6379411e-3`, consistent with f16's
-/// ~2^-11 (4.9e-4) per-rounding unit compounding over a 23-deep
-/// accumulation chain. `EPSILON` is set to 5e-3, roughly 3x that measured
-/// worst case, to absorb run-to-run rounding-mode variance (a different
-/// `Lcg` seed shifts which dot products land near a rounding boundary)
-/// without the gate flaking on a re-run.
+/// one) versus f32's 23, so relative error is the only fair comparison
+/// across magnitudes -- with one exception, below. `RELATIVE_EPSILON` is
+/// set from a measured run, not a round number: with `Lcg` seeds 11/12 over
+/// `m=17, k=23, n=13` (221 output elements, each a 23-term dot product), the
+/// worst observed relative error at a non-degenerate reference magnitude
+/// was `1.6379411e-3`, consistent with f16's ~2^-11 (4.9e-4) per-rounding
+/// unit compounding over a 23-deep accumulation chain. `RELATIVE_EPSILON`
+/// is set to 5e-3, roughly 3x that measured worst case, to absorb
+/// run-to-run rounding-mode variance (a different `Lcg` seed shifts which
+/// dot products land near a rounding boundary) without the gate flaking on
+/// a re-run.
+///
+/// A pure-relative bound is unsound at a zero crossing: `test_support::
+/// Lcg::next_unit`'s corrected [-1,1) range (see that function's doc) means
+/// some of these 23-term dot products now sum near zero by cancellation.
+/// One measured case: reference=-3.4488782e-3, f16 observed=-5.126953e-3,
+/// an absolute diff of 1.678075e-3 -- ordinary f16 rounding noise -- but a
+/// relative error of 0.4865, because the denominator is tiny, not because
+/// the compute is wrong. The bound below is `atol + rtol * |reference|`,
+/// the standard combined tolerance for exactly this shape of problem.
+/// `ABSOLUTE_EPSILON` is set from the same measured run's largest absolute
+/// diff across all 221 elements, `3.3743382e-3`, with ~20% headroom.
 #[test]
 fn matmul_parity_is_within_f16_epsilon_of_the_f32_cpu_oracle() {
-    const EPSILON: f32 = 5e-3;
+    const RELATIVE_EPSILON: f32 = 5e-3;
+    const ABSOLUTE_EPSILON: f32 = 4e-3;
 
     let (m, k, n) = (17usize, 23usize, 13usize);
     let (f32_program, _) = matmul_program_with_dtype(m as u32, k as u32, n as u32, DType::Float32);
@@ -1120,19 +1132,26 @@ fn matmul_parity_is_within_f16_epsilon_of_the_f32_cpu_oracle() {
     );
 
     let mut worst_relative = 0.0f32;
+    let mut worst_absolute = 0.0f32;
     for (reference, observed) in cpu.root().iter().zip(metal.root().iter()) {
         let denominator = reference.abs().max(1e-6);
-        let relative = (reference - observed).abs() / denominator;
+        let absolute = (reference - observed).abs();
+        let relative = absolute / denominator;
+        let bound = ABSOLUTE_EPSILON + RELATIVE_EPSILON * reference.abs();
+        assert!(
+            absolute <= bound,
+            "f16 matmul disagrees beyond the combined tolerance: reference={reference} \
+             observed={observed} abs_diff={absolute} bound={bound} \
+             (atol={ABSOLUTE_EPSILON}, rtol={RELATIVE_EPSILON})"
+        );
         worst_relative = worst_relative.max(relative);
+        worst_absolute = worst_absolute.max(absolute);
     }
     println!(
-        "matmul_f16: {} elements compared, worst relative error = {worst_relative:e} \
-         (epsilon = {EPSILON:e})",
+        "matmul_f16: {} elements compared, worst relative error = {worst_relative:e}, \
+         worst absolute diff = {worst_absolute:e} (atol = {ABSOLUTE_EPSILON:e}, \
+         rtol = {RELATIVE_EPSILON:e})",
         cpu.root().len()
-    );
-    assert!(
-        worst_relative <= EPSILON,
-        "f16 matmul worst relative error {worst_relative} exceeds the f16 epsilon {EPSILON}"
     );
 }
 
