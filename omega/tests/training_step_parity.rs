@@ -230,32 +230,82 @@ fn a_training_step_runs_on_metal_at_cpu_parity() {
     assert_parity("metal", &cpu, &metal, 1e-4);
 }
 
-/// NAMED FINDING, not papered over. On the wgpu/WGSL backend, `differentiate`
-/// together with `adam_step` fuse the whole backward-plus-optimizer update
-/// into ONE `Op::Elementwise` per parameter with 13 storage-buffer operands
-/// (see the kernel label in the panic message this test asserts). The
-/// function `wgpu_driver::acquire_device` (`omega/src/wgpu_driver.rs:200-204`)
-/// requests `wgpu::DeviceDescriptor { required_limits: ..Default::default(), .. }`,
-/// that is `wgpu::Limits::default()`, which caps
-/// `max_storage_buffers_per_shader_stage` at 8: the PORTABLE-safe default,
-/// not this adapter's actual hardware limit. Metal itself, driven directly
-/// by `omega::metal`, has no such cap (`a_training_step_runs_on_metal_at_cpu_parity`
-/// above passes the identical graph). `wgpu-core` has no error-scope wrapped
-/// around `create_compute_pipeline` (`wgpu_driver.rs:314`), so the rejection
-/// surfaces as an uncaught validation panic, not a `Result::Err`. The
-/// assertion below is `#[should_panic]` because that IS this backend's
-/// failure mode for this graph, not a stand-in for a cleaner one.
-///
-/// The fix (requesting `adapter.limits()` instead of the default) is a
-/// production driver change to `wgpu_driver::acquire_device`, out of this
-/// test's scope; CPU and Metal complete the GPU-training proof.
+/// Proves the same fused-backward+Adam graph
+/// `a_training_step_runs_on_metal_at_cpu_parity` proves on Metal also runs on
+/// the portable wgpu/WGSL backend, at the same CPU-oracle parity tolerance.
+/// `differentiate` + `adam_step` fuse the whole backward-plus-optimizer
+/// update into ONE `Op::Elementwise` per parameter with 13 storage-buffer
+/// operands; that used to exceed `wgpu::Limits::default()`'s
+/// `max_storage_buffers_per_shader_stage` (8) and surface as an uncaught
+/// validation panic (see `wgpu_driver::acquire_device`'s doc, and the git
+/// history of this test for the prior `#[should_panic]` shape). Fixed by
+/// requesting `adapter.limits()` at device-acquisition time rather than the
+/// portable-safe default.
 #[cfg(feature = "wgpu-backend")]
 #[test]
-#[should_panic(expected = "Too many bindings of type StorageBuffers")]
-fn a_training_step_is_rejected_on_wgpu_by_the_default_storage_buffer_limit() {
+fn a_training_step_runs_on_wgpu_at_cpu_parity() {
     let step = build_training_step();
     let batch = one_step_batch();
-    let _ = run_one_step(Backend::Wgpu, &step, &batch);
+    let cpu = run_one_step(Backend::Cpu, &step, &batch);
+    let wgpu = run_one_step(Backend::Wgpu, &step, &batch);
+    assert_parity("wgpu", &cpu, &wgpu, 1e-4);
+}
+
+/// Constructs a graph that exceeds even the (now-requested) adapter's real
+/// `max_storage_buffers_per_shader_stage` -- a chain of pairwise
+/// `ScalarOp::Add` nodes (`ScalarOp::Add` is fixed-arity 2, so N leaf inputs
+/// takes a chain, not one N-ary node), each intermediate consumed exactly
+/// once so `proxima_tensor::bind` fuses the whole chain into ONE
+/// `BoundOpKind::Elementwise` (see that field's `ComposedBody` doc) carrying
+/// every leaf as a distinct storage-buffer operand -- and asserts
+/// the driver returns [`omega::wgpu_driver::WgpuError::TooManyStorageBuffers`]
+/// as a named `Result::Err`, never a panic (see that variant's own doc: the
+/// binding count is pre-validated before `create_compute_pipeline`, which has
+/// no error scope around it).
+#[cfg(feature = "wgpu-backend")]
+#[test]
+fn a_graph_past_the_adapter_storage_buffer_limit_is_a_named_error_on_wgpu() {
+    use omega::wgpu_driver::WgpuError;
+
+    let device_limit = {
+        let probe_program = vec![Op::Input {
+            dtype: DType::Float32,
+            shape: vec![Extent::Static(1)],
+            name: Some("probe".into()),
+        }];
+        let probe_data = vec![0.0f32];
+        let probe_named: Vec<(&str, QuantizedBlock<'_>)> = vec![("probe", QuantizedBlock::Float32(&probe_data))];
+        let probe_plan = omega::wgpu_driver::plan_named(&probe_program, &[], &probe_named, &[NodeId(0)])
+            .expect("a single-input identity program plans on wgpu");
+        probe_plan.limits().max_storage_buffers_per_shader_stage
+    };
+    // 1 output + 1 uniforms binding are always present, so this many leaf
+    // inputs pushes the fused elementwise node's binding count one past the
+    // limit.
+    let addend_count = device_limit as usize;
+
+    let mut program = Vec::new();
+    let identity = IndexMap::Affine(map::projection(1, &[0]));
+    let addends: Vec<NodeId> = (0..addend_count)
+        .map(|index| leaf(&mut program, &format!("addend{index}"), vec![Extent::Static(1)]))
+        .collect();
+    let sum = addends
+        .iter()
+        .skip(1)
+        .fold(addends[0], |accumulator, addend| elementwise(&mut program, ScalarOp::Add, vec![(accumulator, identity.clone()), (*addend, identity.clone())]));
+
+    let owned: Vec<(String, Vec<f32>)> = addends.iter().enumerate().map(|(index, _)| (format!("addend{index}"), vec![1.0f32])).collect();
+    let named_blocks = as_named_blocks(&owned);
+
+    let mut plan = plan_named(Backend::Wgpu, &program, &[], &named_blocks, &[sum]).expect("this program plans (limit is checked at dispatch, not plan)");
+    let error = execute_plan_named(&mut plan, &named_blocks).expect_err("a graph past the adapter's storage-buffer limit is a named error, not a panic");
+    match error {
+        omega::backend::BackendError::Wgpu(WgpuError::TooManyStorageBuffers { needed, limit, .. }) => {
+            assert_eq!(limit, device_limit, "the named error reports this device's actual limit");
+            assert!(needed > limit, "needed ({needed}) must exceed limit ({limit}) for this to be the right error");
+        }
+        other => panic!("expected WgpuError::TooManyStorageBuffers, got {other:?}"),
+    }
 }
 
 /// Proves state REBINDING across steps works on-device, not just one kernel
@@ -315,12 +365,18 @@ fn ten_training_steps_rebind_state_and_the_loss_drops_on_metal() {
     );
 }
 
-/// Same named finding as `a_training_step_is_rejected_on_wgpu_by_the_default_storage_buffer_limit`
-/// -- the multi-step loop hits the identical 13-storage-buffer pipeline on
-/// its very first iteration, before any rebinding is exercised.
+/// The wgpu counterpart of `ten_training_steps_rebind_state_and_the_loss_drops_on_metal`
+/// -- the multi-step loop hits the identical 13-storage-buffer fused pipeline
+/// on its very first iteration, now within `adapter.limits()`'s real ceiling
+/// (see `wgpu_driver::acquire_device`'s doc) rather than rejected by it.
 #[cfg(feature = "wgpu-backend")]
 #[test]
-#[should_panic(expected = "Too many bindings of type StorageBuffers")]
-fn ten_training_steps_are_rejected_on_wgpu_by_the_default_storage_buffer_limit() {
-    let _ = run_multi_step_on(Backend::Wgpu);
+fn ten_training_steps_rebind_state_and_the_loss_drops_on_wgpu() {
+    let loss_curve = run_multi_step_on(Backend::Wgpu);
+    eprintln!("wgpu multi-step loss curve: {loss_curve:?}");
+    assert!(loss_curve.iter().all(|value| value.is_finite()), "loss went non-finite on wgpu: {loss_curve:?}");
+    assert!(
+        loss_curve.last().expect("at least one step ran") < &loss_curve[0],
+        "expected the loss to drop across 10 rebound steps on wgpu, got {loss_curve:?}"
+    );
 }
