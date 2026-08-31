@@ -552,7 +552,7 @@ fn differentiate_reduce(
         return differentiate_scan(program, grad_of, original_program, shapes, node, reduce, gradient, wanted);
     }
     if reduce.out_map.is_data_dependent() {
-        return Err(AutogradError::ScatterOutputUnsupported { node });
+        return differentiate_scatter(program, grad_of, original_program, shapes, node, reduce, gradient, wanted);
     }
     if reduce.in_map.is_data_dependent() {
         return Err(AutogradError::ReduceOverGatherUnsupported { node, operand: reduce.operand });
@@ -650,6 +650,95 @@ fn differentiate_reduce(
     // `Elementwise` nodes are ever held, `Reduce` nodes always retire
     // unconditionally) can then fuse straight into whichever consumer reads
     // it next, instead of a forced intermediate materialize.
+    let routed = if reduce.in_map == full {
+        contribution
+    } else {
+        expr::reduce(
+            program,
+            operand_dtype,
+            ScalarOp::Add,
+            ReduceInit::Zero,
+            contribution,
+            full,
+            reduce.in_map.clone(),
+        )
+    };
+    let operand_rank = shapes.of(reduce.operand).len() as u16;
+    accumulate(program, grad_of, operand_dtype, operand_rank, reduce.operand.0 as usize, routed);
+    Ok(())
+}
+
+/// The adjoint of a forward scatter (`Reduce::out_map` data-dependent),
+/// `body: Add` only.
+///
+/// Hand-worked example, the collision case
+/// `proxima_tensor::cpu`'s own `scatter_add_matches_the_hand_worked_example`
+/// test proves forward: `src=[10,20,30,40]`, `idx=[2,0,2,1]`, destination
+/// extent 3, forward `out=[20,40,40]` (`out[2]` folds `src[0]` and `src[2]`).
+/// Given an upstream gradient `grad_out=[g0,g1,g2]` (one value per
+/// destination), the adjoint is:
+/// - `grad_src[0] = grad_out[idx[0]] = grad_out[2] = g2`
+/// - `grad_src[1] = grad_out[idx[1]] = grad_out[0] = g0`
+/// - `grad_src[2] = grad_out[idx[2]] = grad_out[2] = g2` (both colliding
+///   sources receive the SAME destination's gradient — `d(out[2])/d(src[0])
+///   = d(out[2])/d(src[2]) = 1` for an `Add` fold, so the chain rule hands
+///   both `dL/d(out[2])` verbatim)
+/// - `grad_src[3] = grad_out[idx[3]] = grad_out[1] = g1`
+///
+/// So `grad_src = grad_out` GATHERED at `idx` — no scatter needed to
+/// *compute* the adjoint, symmetric to how this module's own doc already
+/// explains a *forward* gather's adjoint needs no scatter to compute either.
+/// [`IndexMap::as_gather_from_output`] builds exactly that gather map by
+/// reusing `out_map`'s own `indices`/`index_map`/`gathered_dim` and every
+/// non-scattered `base` axis, with `gathered_dim`'s own axis reset from "the
+/// destination extent" (the write convention) back to the ordinary read
+/// convention (`map.rs`'s own doc has the full accounting of that reuse).
+///
+/// Only `Add` is covered: see [`AutogradError::ScatterOutputUnsupported`]'s
+/// own doc for why `Maximum`/`Minimum`/`Multiply` do not reduce to this same
+/// "gather the upstream gradient back" shape.
+#[allow(clippy::too_many_arguments)]
+fn differentiate_scatter(
+    program: &mut Vec<Op>,
+    grad_of: &mut [Option<NodeId>],
+    original_program: &[Op],
+    shapes: &Shapes,
+    node: NodeId,
+    reduce: &Reduce,
+    gradient: NodeId,
+    wanted: Option<&BTreeSet<NodeId>>,
+) -> Result<(), AutogradError> {
+    if reduce.body != ScalarOp::Add {
+        return Err(AutogradError::ScatterOutputUnsupported {
+            node,
+            body: reduce.body,
+        });
+    }
+    if reduce.in_map.is_data_dependent() {
+        return Err(AutogradError::ReduceOverGatherUnsupported { node, operand: reduce.operand });
+    }
+    if is_unwanted_input(original_program, wanted, reduce.operand) {
+        return Ok(());
+    }
+    let in_pattern = reduce.in_map.affine();
+    if !expr::is_pure_projection(in_pattern) {
+        return Err(AutogradError::NonProjectionOperandMap { node, operand: reduce.operand });
+    }
+    let full = expr::identity(in_pattern.iter_rank);
+    let gather_map = reduce
+        .out_map
+        .as_gather_from_output()
+        .ok_or(AutogradError::ScatterOutputUnsupported {
+            node,
+            body: reduce.body,
+        })?;
+    let contribution = expr::unary(program, reduce.dtype, ScalarOp::Identity, (gradient, gather_map));
+
+    let operand_dtype = original_program[reduce.operand.0 as usize].dtype();
+    // Same "skip the reduce wrapper for a one-to-one map" shortcut
+    // `differentiate_reduce`'s own tail already documents: `in_map == full`
+    // means no source position ever shares an iteration point with another,
+    // so `contribution` is already `grad_of[operand]` verbatim.
     let routed = if reduce.in_map == full {
         contribution
     } else {
@@ -1146,6 +1235,193 @@ mod reduce_multiply_tests {
 
         assert!((analytic[0] - 5.0).abs() < 1e-5, "got {analytic:?}");
         assert!((analytic[1] - 2.0).abs() < 1e-5, "got {analytic:?}");
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod scatter_tests {
+    use alloc::vec;
+
+    use proxima_tensor::map;
+    use proxima_tensor::op::Extent;
+
+    use super::*;
+
+    fn f32_leaf(program: &mut Vec<Op>, name: &str, extent: usize) -> NodeId {
+        proxima_tensor::op::append(
+            program,
+            Op::Input { dtype: DType::Float32, shape: vec![Extent::Static(extent as u32)], name: Some(name.into()) },
+        )
+    }
+
+    fn int_leaf(program: &mut Vec<Op>, name: &str, extent: usize) -> NodeId {
+        proxima_tensor::op::append(
+            program,
+            Op::Input { dtype: DType::Int32, shape: vec![Extent::Static(extent as u32)], name: Some(name.into()) },
+        )
+    }
+
+    /// `x -> scatter_add(x, idx) -> y (extent 3) -> loss = sum(y)`, `idx =
+    /// [2, 0, 2, 1]` — the exact hand-worked example
+    /// `proxima_tensor::cpu`'s `scatter_add_matches_the_hand_worked_example`
+    /// test proves forward, differentiated end to end.
+    fn scatter_sum_program(idx_values: [f32; 4]) -> (Vec<Op>, NodeId, NodeId, NodeId, [f32; 4]) {
+        let mut program = Vec::new();
+        let x = f32_leaf(&mut program, "x", 4);
+        let idx = int_leaf(&mut program, "idx", 4);
+        let out_map = IndexMap::scatter(idx, map::projection(1, &[0]), 1, &[], 0, 3);
+        let scattered = proxima_tensor::op::append(
+            &mut program,
+            Op::Reduce(Reduce {
+                dtype: DType::Float32,
+                body: ScalarOp::Add,
+                init: ReduceInit::Zero,
+                operand: x,
+                in_map: expr::identity(1),
+                out_map,
+                keep: Keep::Reduce,
+                name: Some("scatter_add".into()),
+            }),
+        );
+        let loss = proxima_tensor::op::append(
+            &mut program,
+            Op::Reduce(Reduce {
+                dtype: DType::Float32,
+                body: ScalarOp::Add,
+                init: ReduceInit::Zero,
+                operand: scattered,
+                in_map: expr::identity(1),
+                out_map: expr::broadcast(1),
+                keep: Keep::Reduce,
+                name: None,
+            }),
+        );
+        (program, x, idx, loss, idx_values)
+    }
+
+    /// The hand-worked collision case: `idx = [2, 0, 2, 1]` sends source
+    /// positions 0 and 2 to the SAME destination (2), so
+    /// `differentiate_scatter`'s doc claim -- both colliding sources receive
+    /// `grad_out[2]` verbatim -- is exercised, not just asserted. `loss =
+    /// sum(scattered)` makes `grad_out` the all-ones vector, so the closed
+    /// form is exact: `grad_x[s] = grad_out[idx[s]] = 1` for every `s`,
+    /// collision or not.
+    #[proxima::test]
+    async fn scatter_add_gradient_routes_grad_out_at_idx_to_every_colliding_source() {
+        let (program, _x, _idx, loss, idx_values) = scatter_sum_program([2.0, 0.0, 2.0, 1.0]);
+        let x_values = [10.0f32, 20.0, 30.0, 40.0];
+
+        let differentiated = differentiate(&program, loss).expect("scatter-add (Add body) differentiates");
+        let grad_x = differentiated.gradient_of_named("x").expect("x feeds the loss");
+        let evaluated = proxima_tensor::cpu::evaluate_named(
+            &differentiated.program,
+            &[],
+            &[("x", &x_values), ("idx", &idx_values)],
+            &[grad_x],
+        )
+        .expect("scatter adjoint program lowers and evaluates");
+        let analytic = evaluated.get(grad_x).expect("grad_x requested").0;
+
+        assert_eq!(
+            analytic,
+            &[1.0, 1.0, 1.0, 1.0],
+            "loss = sum(scattered) makes grad_out all-ones, so every source position (collision \
+             or not) receives grad_out[idx[s]] = 1"
+        );
+    }
+
+    /// Same forward program, checked against the model-agnostic oracle:
+    /// central difference on the real forward `sum(scatter_add(x, idx))`
+    /// function, which has no notion of "gather the upstream gradient at
+    /// idx" -- it simply differentiates the actual composed program.
+    #[proxima::test]
+    async fn scatter_add_gradient_matches_central_difference() {
+        let (program, _x, _idx, loss, idx_values) = scatter_sum_program([2.0, 0.0, 2.0, 1.0]);
+        let x_values = [10.0f32, 20.0, 30.0, 40.0];
+
+        let differentiated = differentiate(&program, loss).expect("scatter-add differentiates");
+        let grad_x = differentiated.gradient_of_named("x").expect("x feeds the loss");
+        let evaluated = proxima_tensor::cpu::evaluate_named(
+            &differentiated.program,
+            &[],
+            &[("x", &x_values), ("idx", &idx_values)],
+            &[grad_x],
+        )
+        .expect("scatter adjoint program lowers and evaluates");
+        let analytic = evaluated.get(grad_x).expect("grad_x requested").0;
+
+        let loss_at = |perturbed: &[f32]| {
+            proxima_tensor::cpu::evaluate_named(&program, &[], &[("x", perturbed), ("idx", &idx_values)], &[loss])
+                .expect("forward program lowers and evaluates")
+                .get(loss)
+                .expect("loss requested")
+                .0[0]
+        };
+
+        let step = 1e-3f32;
+        let mut perturbed = x_values.to_vec();
+        for index in 0..x_values.len() {
+            let original = perturbed[index];
+            perturbed[index] = original + step;
+            let plus = loss_at(&perturbed);
+            perturbed[index] = original - step;
+            let minus = loss_at(&perturbed);
+            perturbed[index] = original;
+
+            let numeric = (plus - minus) / (2.0 * step);
+            let relative = (analytic[index] - numeric).abs() / (analytic[index].abs().max(numeric.abs()) + 1e-6);
+            assert!(relative < 5e-3, "index {index}: analytic={} numeric={numeric}", analytic[index]);
+        }
+    }
+
+    /// `body: Maximum` has no derived scatter adjoint (this module's own
+    /// `differentiate_scatter` doc, and `AutogradError::ScatterOutputUnsupported`'s):
+    /// named-rejected, not silently misderived.
+    #[proxima::test]
+    async fn scatter_maximum_stays_named_rejected() {
+        let (mut program, x, idx, _loss, _idx_values) = scatter_sum_program([2.0, 0.0, 2.0, 1.0]);
+        // drop the `sum` wrapper `scatter_sum_program` appended and rebuild
+        // the scatter node itself with `body: Maximum`.
+        program.pop();
+        let scattered_maximum_out_map = IndexMap::scatter(idx, map::projection(1, &[0]), 1, &[], 0, 3);
+        let scattered_maximum = proxima_tensor::op::append(
+            &mut program,
+            Op::Reduce(Reduce {
+                dtype: DType::Float32,
+                body: ScalarOp::Maximum,
+                init: ReduceInit::NegativeInfinity,
+                operand: x,
+                in_map: expr::identity(1),
+                out_map: scattered_maximum_out_map,
+                keep: Keep::Reduce,
+                name: None,
+            }),
+        );
+        let loss = proxima_tensor::op::append(
+            &mut program,
+            Op::Reduce(Reduce {
+                dtype: DType::Float32,
+                body: ScalarOp::Add,
+                init: ReduceInit::Zero,
+                operand: scattered_maximum,
+                in_map: expr::identity(1),
+                out_map: expr::broadcast(1),
+                keep: Keep::Reduce,
+                name: None,
+            }),
+        );
+
+        let error = differentiate(&program, loss)
+            .err()
+            .expect("Reduce(Maximum) with a scatter out_map has no derived adjoint");
+        assert!(
+            matches!(
+                error,
+                AutogradError::ScatterOutputUnsupported { body: ScalarOp::Maximum, .. }
+            ),
+            "{error:?}"
+        );
     }
 }
 
