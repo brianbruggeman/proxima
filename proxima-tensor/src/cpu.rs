@@ -478,6 +478,58 @@ pub struct StaticArena {
     root: NodeId,
     input_names: Vec<(NodeId, String)>,
     buffers: Vec<Option<Vec<f32>>>,
+    /// Nodes in `resolved` with zero consumers among every other resolved
+    /// node's own operands and no membership in `effective_outputs` —
+    /// `docs/discipline.md` ROW 166's own dead node (`bind`'s
+    /// `differentiate_elementwise` builds both a `Multiply`'s operand
+    /// contributions before `route_contribution`'s `is_unwanted_input` gate
+    /// ever runs, so the unwanted one is bound but never read). Computed
+    /// once here, against `BoundOp::operands()` — which already carries
+    /// every source a fused/composed body absorbed, since fusion moves a
+    /// source node into the fusing op's own physical operand list rather
+    /// than leaving a separate reference behind — so a node consumed only
+    /// inside a composed body is correctly counted live. `run_resolved_nodes_in_arena`
+    /// skips these; every other field above (`resolved`, `shapes`,
+    /// `effective_outputs`, `bind::bind`'s own fusion decisions) is
+    /// untouched, which is what keeps every fusion/eligibility decision
+    /// exactly as ROW 166's graph-level attempt found it, before either the
+    /// node it deleted or the sibling that regressed once it was gone
+    /// existed as candidates to remove.
+    dead: BTreeSet<NodeId>,
+}
+
+/// Every node `resolved` physically reads, straight off [`BoundOp::operands()`]
+/// plus each gathered operand's own [`bind::Lookup::indices`] (a second,
+/// separate `NodeId` reference `operands()`'s own `(NodeId, Layout,
+/// Option<Lookup>)` tuple does not fold into its leading field — missing it
+/// would silently mark a live index-table node dead). `operands()` already
+/// carries every source a fused/composed body absorbed (`bind.rs`'s own doc:
+/// fusion moves a source node into the fusing op's physical operand list
+/// rather than leaving a separate graph edge behind), so this is a scan over
+/// `BoundOp` structure, never the pre-bind graph.
+fn consumed_by_resolved_nodes(resolved: &[BoundOp]) -> BTreeSet<NodeId> {
+    let mut consumed = BTreeSet::new();
+    for computed in resolved {
+        for (operand, _layout, lookup) in computed.operands() {
+            consumed.insert(*operand);
+            if let Some(lookup) = lookup {
+                consumed.insert(lookup.indices);
+            }
+        }
+    }
+    consumed
+}
+
+/// The dead-set `StaticArena::dead` documents: every `resolved` node neither
+/// consumed by another resolved node nor named in `effective_outputs`. See
+/// `docs/discipline.md` ROW 166/167.
+fn dead_resolved_nodes(resolved: &[BoundOp], effective_outputs: &[NodeId]) -> BTreeSet<NodeId> {
+    let consumed = consumed_by_resolved_nodes(resolved);
+    resolved
+        .iter()
+        .map(|computed| computed.node)
+        .filter(|node| !consumed.contains(node) && !effective_outputs.contains(node))
+        .collect()
 }
 
 /// Builds a [`StaticArena`] for `program`: runs shape inference and
@@ -529,6 +581,7 @@ pub fn build_static_arena(program: &[Op], symbols: &[u64], outputs: &[NodeId]) -
     for computed in &resolved {
         buffers[computed.node.0 as usize] = Some(vec![0.0f32; node_output_len(computed)]);
     }
+    let dead = dead_resolved_nodes(&resolved, &effective_outputs);
 
     Ok(StaticArena {
         resolved,
@@ -537,6 +590,7 @@ pub fn build_static_arena(program: &[Op], symbols: &[u64], outputs: &[NodeId]) -
         root,
         input_names,
         buffers,
+        dead,
     })
 }
 
@@ -605,6 +659,9 @@ fn bind_named_inputs_into_arena(arena: &mut StaticArena, named: &[(&str, &[f32])
 /// identical execution path rather than a second copy of it.
 fn run_resolved_nodes_in_arena(arena: &mut StaticArena) -> Result<(), TensorError> {
     for computed in &arena.resolved {
+        if arena.dead.contains(&computed.node) {
+            continue;
+        }
         let node_index = computed.node.0 as usize;
         let mut output = arena.buffers[node_index].take().ok_or(TensorError::NotLowerable {
             node: computed.node,
@@ -14029,6 +14086,97 @@ mod tests {
             "second call (same arena, reused buffers): arena and fresh-alloc paths must still agree bit for bit"
         );
         assert_eq!(arena_second.get(sum).map(|(data, _)| data.to_vec()), Some(vec![101.0, 202.0, 303.0, 404.0]));
+    }
+
+    /// A two-input program with a genuinely dead node -- `dead = a * b`,
+    /// consumed by nothing, never a requested output -- alongside the
+    /// requested `live = a + b`. The smallest fixture for `docs/discipline.md`
+    /// ROW 167's execution-level elision: `dead` still gets `bind::bind`'s
+    /// own `BoundOp` (bind-time construction is untouched by design), it
+    /// just never runs.
+    fn dead_node_program() -> (Vec<Op>, NodeId, NodeId) {
+        let mut program = Vec::new();
+        let a = append(
+            &mut program,
+            Op::Input { dtype: DType::Float32, shape: vec![Extent::Static(4)], name: Some(String::from("a")) },
+        );
+        let b = append(
+            &mut program,
+            Op::Input { dtype: DType::Float32, shape: vec![Extent::Static(4)], name: Some(String::from("b")) },
+        );
+        let dead = append(
+            &mut program,
+            Op::Elementwise {
+                dtype: DType::Float32,
+                body: ScalarOp::Multiply,
+                operands: vec![
+                    (a, IndexMap::Affine(map::projection(1, &[0]))),
+                    (b, IndexMap::Affine(map::projection(1, &[0]))),
+                ],
+                name: None,
+            },
+        );
+        let live = append(
+            &mut program,
+            Op::Elementwise {
+                dtype: DType::Float32,
+                body: ScalarOp::Add,
+                operands: vec![
+                    (a, IndexMap::Affine(map::projection(1, &[0]))),
+                    (b, IndexMap::Affine(map::projection(1, &[0]))),
+                ],
+                name: None,
+            },
+        );
+        (program, dead, live)
+    }
+
+    /// [`build_static_arena`] finds `dead` (zero consumers, not requested)
+    /// dead and elides it -- `run_resolved_nodes_in_arena` never runs it --
+    /// while `live` still evaluates bit-identically to
+    /// [`evaluate_named`]'s own fresh-alloc, non-eliding path. `dead`'s
+    /// pre-sized buffer stays whatever [`build_static_arena`] initialized
+    /// it to (zeros), proving the skip is real rather than a coincidence of
+    /// the two ops sharing a body shape.
+    #[test]
+    fn build_static_arena_elides_a_node_with_zero_consumers() {
+        let (program, dead, live) = dead_node_program();
+        let mut arena = build_static_arena(&program, &[], &[live]).expect("dead-node program builds a static arena");
+        assert!(arena.dead.contains(&dead), "the zero-consumer, non-output node must be marked dead");
+        assert!(!arena.dead.contains(&live), "the requested output must never be marked dead");
+
+        let a = [1.0f32, 2.0, 3.0, 4.0];
+        let b = [10.0f32, 20.0, 30.0, 40.0];
+        let elided = evaluate_named_with_arena(&mut arena, &[("a", &a), ("b", &b)]).expect("elided arena call evaluates");
+        let baseline = evaluate_named(&program, &[], &[("a", &a), ("b", &b)], &[live]).expect("baseline call evaluates");
+        assert_eq!(
+            elided.get(live).map(|(data, _)| data.to_vec()),
+            baseline.get(live).map(|(data, _)| data.to_vec()),
+            "the live output must be bit-identical whether or not the dead sibling actually executed"
+        );
+        assert_eq!(arena_output(&arena, dead), Some([0.0f32, 0.0, 0.0, 0.0].as_slice()), "the elided node's buffer must stay untouched -- run_resolved_nodes_in_arena skipped writing it");
+    }
+
+    /// The other half of the same contract: naming `dead` itself as a
+    /// requested output un-elides it -- `effective_outputs` membership is
+    /// what `dead_resolved_nodes` checks, so a caller who genuinely wants
+    /// that value back still gets it computed.
+    #[test]
+    fn build_static_arena_does_not_elide_a_dead_node_that_is_also_a_requested_output() {
+        let (program, dead, live) = dead_node_program();
+        let mut arena = build_static_arena(&program, &[], &[dead, live]).expect("dead-node program builds a static arena with dead requested");
+        assert!(!arena.dead.contains(&dead), "requesting the otherwise-dead node as an output must un-elide it");
+
+        let a = [1.0f32, 2.0, 3.0, 4.0];
+        let b = [10.0f32, 20.0, 30.0, 40.0];
+        let evaluated = evaluate_named_with_arena(&mut arena, &[("a", &a), ("b", &b)]).expect("arena call evaluates");
+        let baseline = evaluate_named(&program, &[], &[("a", &a), ("b", &b)], &[dead, live]).expect("baseline call evaluates");
+        assert_eq!(
+            evaluated.get(dead).map(|(data, _)| data.to_vec()),
+            baseline.get(dead).map(|(data, _)| data.to_vec()),
+            "the now-requested node must actually compute, bit-identical to the non-eliding baseline"
+        );
+        assert_eq!(evaluated.get(dead).map(|(data, _)| data.to_vec()), Some(vec![10.0, 40.0, 90.0, 160.0]));
     }
 
     /// A `named` binding whose length no longer matches the shape
