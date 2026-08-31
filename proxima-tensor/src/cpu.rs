@@ -4123,6 +4123,31 @@ fn resolve_reduce_axis_shape<'op>(resolved: &BoundOp, output_axes: &'op [u16]) -
     }
 }
 
+/// True when `operand_index`'s physical layout walks the WHOLE
+/// `reduction_dims` range as one contiguous, stride-1 span once every
+/// element of it is visited in `reduction_dims`'s own (outer-to-inner)
+/// order — the row-major contiguity chain: the innermost dim's stride is
+/// exactly 1, and each dim outward is exactly the product of every
+/// extent nested inside it. `reduction_dims.len() == 1` degenerates to
+/// today's original single-dim check (`stride(dims[0]) == 1`) unchanged.
+/// `docs/discipline.md` ROW 148 measured this true for mnist's own first
+/// FC layer (both operands: a rank-3 `[c,h,w]` activation and a
+/// matching-shaped weight, neither ever reshaped through an explicit
+/// flatten) and false for `Conv`'s materialized `windowed` operand, whose
+/// `ci` axis sits outside the window's `oh`/`ow` axes in memory — the
+/// exact mechanism `run_reduce`'s own `reduction_strides` doc cites.
+fn reduction_is_fully_flat(resolved: &BoundOp, reduction_dims: &[u16], operand_index: usize) -> bool {
+    let view = &resolved.operands()[operand_index].1;
+    let mut expected: i64 = 1;
+    for &dim in reduction_dims.iter().rev() {
+        if view.stride(dim) != expected {
+            return false;
+        }
+        expected = expected.saturating_mul(resolved.extents[dim as usize] as i64);
+    }
+    true
+}
+
 /// The dense f32 GEMM interpreter: NEON dot/width tiles then a generic
 /// fallback. Never sees a quantized weight — [`run_node_into`] routes any
 /// call with `quantized_weights: Some(_)` through
@@ -4178,18 +4203,23 @@ fn run_reduce<B: Deref<Target = [f32]>>(
     // A matmul with a transposed right-hand operand (ggml's own `mul_mat`
     // layout) has a bad width-dim stride on one operand but a GOOD stride on
     // the contraction dim `k` — both operands read `k` contiguously.
-    // `reduction_strides` is `strides`'s sibling table for the single
-    // contraction dim, computed once per bound op the same way;
+    // `reduction_strides` is `strides`'s sibling table for the whole
+    // contraction range, computed once per bound op the same way;
     // `body_shape_is_affine_fast_path` is reused verbatim, just handed a
     // different dim's stride table (`proxima-tensor/docs/discipline.md`
-    // ROW 10). Scoped to exactly one contraction dim — a multi-dim
-    // contraction falls back to the generic loop below unchanged.
-    let reduction_strides: Vec<i64> = if reduction_dims.len() == 1 {
-        let dim = reduction_dims[0];
-        resolved.operands().iter().map(|(_, view, _)| view.stride(dim)).collect()
-    } else {
-        Vec::new()
-    };
+    // ROW 10). A multi-dim contraction (`reduction_dims.len() > 1`, e.g. a
+    // matmul-shaped fold whose weight operand was never reshaped through an
+    // explicit flatten — mnist's own first FC layer reduces directly over
+    // its rank-3 `[c,h,w]` activation) qualifies too, via
+    // [`reduction_is_fully_flat`], PROVIDED every dim composes as one
+    // contiguous row-major span for that operand: `docs/discipline.md` ROW
+    // 148 measured this true for such an FC layer but false for `Conv`'s
+    // own materialized `windowed` operand (its `ci` axis sits outside the
+    // window's `oh`/`ow` axes in memory — see ROW 148's own row-major
+    // layout trace), so `Conv` correctly stays ineligible here, unchanged.
+    let reduction_strides: Vec<i64> = (0..resolved.operands().len())
+        .map(|index| if reduction_is_fully_flat(resolved, &reduction_dims, index) { 1 } else { i64::MAX })
+        .collect();
 
     // Resolved ONCE per bound op, never per element: whether every physical
     // operand the body shape actually reads is gather-free with a width-dim
@@ -4202,7 +4232,7 @@ fn run_reduce<B: Deref<Target = [f32]>>(
     // the ordering every ROW 3/10 measurement was taken under.
     let fast_path = body_shape_is_affine_fast_path(resolved, &shape, &strides);
     let reduction_fast_path =
-        !fast_path && reduction_dims.len() == 1 && body_shape_is_affine_fast_path(resolved, &shape, &reduction_strides);
+        !fast_path && !reduction_dims.is_empty() && body_shape_is_affine_fast_path(resolved, &shape, &reduction_strides);
 
     #[cfg(feature = "instrument")]
     let mut counters = KernelCounters::default();
