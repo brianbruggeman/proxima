@@ -123,9 +123,12 @@ impl StageTimings {
 /// that module's visibility for a bench-only profiling pass.
 fn run_pipeline_forward_profiled(image: &[f32], weights: &MnistWeights<'_>, band: BandRows) -> ([f32; 10], StageTimings) {
     let batch_norm1 = BatchNormAffine::new(weights.norm1_weight, weights.norm1_bias, weights.norm1_running_mean, weights.norm1_running_var, 1e-5);
-    let stage1 = ConvReluStage::new(1, 8, 3, 3, 28, weights.conv1_weight, weights.conv1_bias, None);
-    let stage2 = ConvReluStage::new(8, 16, 3, 3, 26, weights.conv2_weight, weights.conv2_bias, None);
-    let stage3 = ConvReluStage::new(16, 24, 3, 3, 24, weights.conv3_weight, weights.conv3_bias, Some(batch_norm1));
+    // ROW 170: per-call-site dot form selection, same as
+    // `support::tile_pipeline::run_pipeline_forward` -- conv1 unblocked,
+    // conv2/conv3 blocked, fc1 always unblocked.
+    let stage1 = ConvReluStage::<false>::new(1, 8, 3, 3, 28, weights.conv1_weight, weights.conv1_bias, None);
+    let stage2 = ConvReluStage::<true>::new(8, 16, 3, 3, 26, weights.conv2_weight, weights.conv2_bias, None);
+    let stage3 = ConvReluStage::<true>::new(16, 24, 3, 3, 24, weights.conv3_weight, weights.conv3_bias, Some(batch_norm1));
     let fc_stage = FcAccumulateStage::new(24, 22, 22, 32, weights.fc1_weight, weights.fc1_bias);
 
     let mut timings = StageTimings::default();
@@ -332,7 +335,7 @@ fn bench_single_layer_neutral_arm(group: &mut criterion::BenchmarkGroup<'_, crit
     group.bench_function("layer1_banded_kh_rows", |bencher| {
         bencher.iter(|| {
             for image in images {
-                let stage = ConvReluStage::new(1, 8, 3, 3, 28, weights.conv1_weight, weights.conv1_bias, None);
+                let stage = ConvReluStage::<false>::new(1, 8, 3, 3, 28, weights.conv1_weight, weights.conv1_bias, None);
                 let mut row = 0;
                 while row < 28 {
                     let take = 3.min(28 - row);
@@ -349,7 +352,7 @@ fn bench_single_layer_neutral_arm(group: &mut criterion::BenchmarkGroup<'_, crit
     group.bench_function("layer1_single_whole_layer_call", |bencher| {
         bencher.iter(|| {
             for image in images {
-                let stage = ConvReluStage::new(1, 8, 3, 3, 28, weights.conv1_weight, weights.conv1_bias, None);
+                let stage = ConvReluStage::<false>::new(1, 8, 3, 3, 28, weights.conv1_weight, weights.conv1_bias, None);
                 let band = tile_pipeline::RowBand { channels: 1, width: 28, rows: 28, data: image.clone() };
                 let out = block_on_ready(stage.call(band)).expect("infallible");
                 std::hint::black_box(out);
