@@ -495,6 +495,15 @@ pub struct BoundOpBuilder {
     held: RefCell<BTreeMap<NodeId, HeldElementwise>>,
     retires: Vec<Vec<NodeId>>,
     position: Cell<u32>,
+    /// `ones[node.0]` is `true` when `node` was pushed as an
+    /// [`Op::Constant`] whose `value` is exactly `1.0` — grown one entry per
+    /// [`push`](Self::push) call, never read ahead of the position that
+    /// produced it. This is what lets [`compose_operand`] recognize (and
+    /// drop) a `Multiply` operand that is algebraically a no-op without
+    /// requiring the whole program in hand, honoring this module's own
+    /// sans-IO streaming contract (see module doc) rather than threading a
+    /// full `&[Op]` slice through every fusion call.
+    ones: RefCell<Vec<bool>>,
 }
 
 impl BoundOpBuilder {
@@ -505,6 +514,7 @@ impl BoundOpBuilder {
             held: RefCell::new(BTreeMap::new()),
             retires,
             position: Cell::new(0),
+            ones: RefCell::new(Vec::new()),
         }
     }
 
@@ -523,6 +533,7 @@ impl BoundOpBuilder {
         self.position.set(self.position.get() + 1);
         let empty = Vec::new();
         let retires = self.retires.get(node.0 as usize).unwrap_or(&empty);
+        self.ones.borrow_mut().push(matches!(expr, Op::Constant { value, .. } if *value == 1.0));
 
         let mut emitted = ReadyBatch::new();
 
@@ -592,7 +603,7 @@ impl BoundOpBuilder {
                         shapes,
                         &mut emitted,
                     )?;
-                    compose_fused_operands(shapes, &self.held, reduce.operand, &reduce.in_map)
+                    compose_fused_operands(shapes, &self.held, reduce.operand, &reduce.in_map, &self.ones.borrow())
                 } else {
                     self.materialize_if_held(reduce.operand, shapes, &mut emitted)?;
                     self.materialize_computed_indices(&reduce.in_map, shapes, &mut emitted)?;
@@ -639,6 +650,7 @@ impl BoundOpBuilder {
                     held.dtype,
                     held.body,
                     &held.operands,
+                    &self.ones.borrow(),
                 ));
             }
         }
@@ -685,6 +697,7 @@ impl BoundOpBuilder {
                 held.dtype,
                 held.body,
                 &held.operands,
+                &self.ones.borrow(),
             );
             push_ready(emitted, node, materialized)?;
         }
@@ -765,9 +778,10 @@ fn build_elementwise_op(
     dtype: DType,
     body: ScalarOp,
     operands: &[(NodeId, IndexMap)],
+    ones: &[bool],
 ) -> BoundOp {
     let extents = shapes.of(node).to_vec();
-    let (composed_body, built_operands) = compose(shapes, held, body, operands);
+    let (composed_body, built_operands) = compose(shapes, held, body, operands, ones);
     BoundOp {
         node,
         dtype,
@@ -861,30 +875,51 @@ fn is_identity_projection(map: &IndexMap) -> bool {
         .all(|axis| axis.offset == 0 && matches!(axis.terms.as_slice(), [term] if term.coeff == 1))
 }
 
+/// The three accumulators every `compose_*` call threads through its
+/// recursion — a step list, the flat operand list an executor reads from,
+/// and which held nodes this pass consumed — bundled for the same reason
+/// [`WindowSpec`] bundles a parameter group: one field group traveling
+/// together, not `clippy::too_many_arguments` positional soup.
+struct ComposeState<'a> {
+    steps: &'a mut Vec<BodyStep>,
+    operands: &'a mut BoundOperands,
+    absorbed: &'a mut Vec<NodeId>,
+}
+
 /// Composes the single still-held node `node` — reached from its consumer
 /// through `map` — into a [`ComposedBody`] plus the flat, fully-addressed
 /// operand list an executor reads from: the reduce-fusion entry point.
 /// `node` is guaranteed present in `held` by every caller's own `fuses`
 /// check, so this always absorbs at least one op; [`compose_operand`]
 /// recurses through however many more are held beneath it.
+///
+/// [`compose_operand`]'s own ×1.0 elimination can, at THIS call depth only,
+/// return a bare [`StepArg::Operand`] with nothing pushed to `steps` —
+/// `node` resolved directly to `Multiply(real, Constant(1.0))` with no
+/// further absorbing consumer above it (`MaxPool`/`AveragePool`'s own
+/// `windowed` node passed straight to `build_reduce`, unlike `Conv`'s
+/// `product = windowed * weight`, which always contributes its own step).
+/// [`apply_body`](crate::cpu)'s `step_values[body.steps.len() - 1]` requires
+/// at least one step, the same invariant the no-fusion branch already
+/// guarantees via `ComposedBody::leaf(ScalarOp::Identity)` — so an empty
+/// `steps` here gets exactly that: one trailing `Identity` step wrapping
+/// the collapsed arg, restoring the invariant without re-introducing the
+/// eliminated multiply.
 fn compose_fused_operands(
     shapes: &Shapes,
     held: &RefCell<BTreeMap<NodeId, HeldElementwise>>,
     node: NodeId,
     map: &IndexMap,
+    ones: &[bool],
 ) -> (ComposedBody, BoundOperands) {
     let mut steps = Vec::new();
     let mut operands = Vec::new();
     let mut absorbed = Vec::new();
-    compose_operand(
-        shapes,
-        held,
-        &mut steps,
-        &mut operands,
-        &mut absorbed,
-        node,
-        map,
-    );
+    let mut state = ComposeState { steps: &mut steps, operands: &mut operands, absorbed: &mut absorbed };
+    let arg = compose_operand(shapes, held, &mut state, node, map, ones);
+    if steps.is_empty() {
+        steps.push(BodyStep { op: ScalarOp::Identity, args: alloc::vec![arg] });
+    }
     drop_absorbed(held, absorbed);
     (ComposedBody { steps }, operands)
 }
@@ -893,24 +928,37 @@ fn compose_fused_operands(
 /// materialize-a-chain entry point [`build_elementwise_op`] uses, where the
 /// top body and its immediate operand list are already in hand (the node
 /// itself has already been removed from `held` by its caller).
+///
+/// Reached not only for a genuinely unfused node but also for one
+/// [`quarantine_broadcast_operands`] forced standalone — a held node whose
+/// own extent is smaller than its consumer's reduce extent gets materialized
+/// here specifically so its body is computed once rather than re-read per
+/// broadcast repetition. `window_materialize`'s `windowed` (`image * stamp`)
+/// is exactly this shape for `Conv` (its `[n,c,oh,ow,kh,kw]` extent excludes
+/// the `co` broadcast axis `product`'s own reduce walks), so this entry
+/// point needs the same ×1.0 elimination [`compose_operand`] applies —
+/// without it, `windowed` would still materialize with the stamp multiply
+/// baked in, `compose_operand`'s own elimination never getting a chance to
+/// run because [`held`] no longer holds `windowed` by the time the reduce
+/// tries to fuse it (`proxima-tensor/docs/discipline.md` ROW 147).
 fn compose(
     shapes: &Shapes,
     held: &RefCell<BTreeMap<NodeId, HeldElementwise>>,
     body: ScalarOp,
     operands: &[(NodeId, IndexMap)],
+    ones: &[bool],
 ) -> (ComposedBody, BoundOperands) {
     let mut steps = Vec::new();
     let mut resolved_operands = Vec::new();
     let mut absorbed = Vec::new();
-    compose_body(
-        shapes,
-        held,
-        &mut steps,
-        &mut resolved_operands,
-        &mut absorbed,
-        body,
-        operands,
-    );
+    let mut state = ComposeState { steps: &mut steps, operands: &mut resolved_operands, absorbed: &mut absorbed };
+    let arg = match eliminate_identity_multiply(body, operands, ones) {
+        Some((survivor_node, survivor_map)) => compose_operand(shapes, held, &mut state, survivor_node, survivor_map, ones),
+        None => StepArg::Step(compose_body(shapes, held, &mut state, body, operands, ones)),
+    };
+    if steps.is_empty() {
+        steps.push(BodyStep { op: ScalarOp::Identity, args: alloc::vec![arg] });
+    }
     drop_absorbed(held, absorbed);
     (ComposedBody { steps }, resolved_operands)
 }
@@ -922,6 +970,42 @@ fn drop_absorbed(held: &RefCell<BTreeMap<NodeId, HeldElementwise>>, absorbed: Ve
     }
 }
 
+/// A held `Multiply` whose two operands are one real operand and one
+/// [`Op::Constant`] of value exactly `1.0` is algebraically a no-op —
+/// `x * 1.0 == x` for every finite/inf/nan `f32` bar signaling-NaN quieting
+/// (irrelevant to any real weight/activation this crate binds). Returns the
+/// surviving operand when this pattern applies, `None` otherwise — the one
+/// check both [`compose`] (a node materializing standalone, e.g. under
+/// [`quarantine_broadcast_operands`]) and [`compose_operand`] (a node still
+/// fusing into its consumer) run before ever pushing a [`BodyStep`], so the
+/// constant is dropped from the body regardless of which path reaches it.
+/// `window_materialize`'s all-ones shape-inference stamp
+/// (`proxima-onnx/src/lower.rs`) is the motivating case, but this is
+/// unconditional on which lowering produced the constant, so any future ×1
+/// marker gets the same treatment (`proxima-tensor/docs/discipline.md`
+/// ROW 147).
+fn eliminate_identity_multiply<'a>(
+    body: ScalarOp,
+    operands: &'a [(NodeId, IndexMap)],
+    ones: &[bool],
+) -> Option<(NodeId, &'a IndexMap)> {
+    if body != ScalarOp::Multiply {
+        return None;
+    }
+    let [(left_node, left_map), (right_node, right_map)] = operands else {
+        return None;
+    };
+    let left_is_one = ones.get(left_node.0 as usize).copied().unwrap_or(false);
+    let right_is_one = ones.get(right_node.0 as usize).copied().unwrap_or(false);
+    if left_is_one && !right_is_one {
+        return Some((*right_node, right_map));
+    }
+    if right_is_one {
+        return Some((*left_node, left_map));
+    }
+    None
+}
+
 /// Appends one [`BodyStep`] for `body` applied over `body_operands`
 /// (expressed in the caller's own iteration space), recursively composing
 /// each operand through [`compose_operand`] first. Returns the new step's
@@ -929,18 +1013,17 @@ fn drop_absorbed(held: &RefCell<BTreeMap<NodeId, HeldElementwise>>, absorbed: Ve
 fn compose_body(
     shapes: &Shapes,
     held: &RefCell<BTreeMap<NodeId, HeldElementwise>>,
-    steps: &mut Vec<BodyStep>,
-    operands: &mut BoundOperands,
-    absorbed: &mut Vec<NodeId>,
+    state: &mut ComposeState<'_>,
     body: ScalarOp,
     body_operands: &[(NodeId, IndexMap)],
+    ones: &[bool],
 ) -> u16 {
     let args = body_operands
         .iter()
-        .map(|(node, map)| compose_operand(shapes, held, steps, operands, absorbed, *node, map))
+        .map(|(node, map)| compose_operand(shapes, held, state, *node, map, ones))
         .collect();
-    steps.push(BodyStep { op: body, args });
-    (steps.len() - 1) as u16
+    state.steps.push(BodyStep { op: body, args });
+    (state.steps.len() - 1) as u16
 }
 
 /// Composes one operand reference `(node, map)` into `steps`/`operands`:
@@ -951,15 +1034,15 @@ fn compose_body(
 /// however many further levels are held beneath it. `map`'s axes are
 /// remapped through [`remap_sub_operands`] before recursing, since a held
 /// node's own operand maps are expressed in *its* iteration space, not the
-/// caller's.
+/// caller's. [`eliminate_identity_multiply`] is checked before ever pushing
+/// a step — see that function's own doc.
 fn compose_operand(
     shapes: &Shapes,
     held: &RefCell<BTreeMap<NodeId, HeldElementwise>>,
-    steps: &mut Vec<BodyStep>,
-    operands: &mut BoundOperands,
-    absorbed: &mut Vec<NodeId>,
+    state: &mut ComposeState<'_>,
     node: NodeId,
     map: &IndexMap,
+    ones: &[bool],
 ) -> StepArg {
     let entry = held
         .borrow()
@@ -967,15 +1050,18 @@ fn compose_operand(
         .map(|held_elementwise| (held_elementwise.body, held_elementwise.operands.clone()));
 
     let Some((body, sub_operands)) = entry else {
-        operands.push(build_operand(node, map, shapes));
-        return StepArg::Operand((operands.len() - 1) as u16);
+        state.operands.push(build_operand(node, map, shapes));
+        return StepArg::Operand((state.operands.len() - 1) as u16);
     };
 
-    absorbed.push(node);
+    state.absorbed.push(node);
     let remapped = remap_sub_operands(&sub_operands, map);
-    StepArg::Step(compose_body(
-        shapes, held, steps, operands, absorbed, body, &remapped,
-    ))
+
+    if let Some((survivor_node, survivor_map)) = eliminate_identity_multiply(body, &remapped, ones) {
+        return compose_operand(shapes, held, state, survivor_node, survivor_map, ones);
+    }
+
+    StepArg::Step(compose_body(shapes, held, state, body, &remapped, ones))
 }
 
 /// The outer iteration axis each of `map`'s own axes corresponds to — sound
