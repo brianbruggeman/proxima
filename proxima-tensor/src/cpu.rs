@@ -547,7 +547,7 @@ pub fn build_static_arena(program: &[Op], symbols: &[u64], outputs: &[NodeId]) -
 /// output-count-sized clone [`Evaluated`] needs to hand results back to a
 /// caller that runs another step against the same arena immediately after
 /// — the arena's own buffers must survive this call, so results are copied
-/// out, never moved out (unlike [`evaluate_pooled`]'s one-shot table).
+/// out, never moved out (unlike `evaluate_pooled`'s one-shot table).
 ///
 /// # Errors
 /// [`TensorError::UnboundInputName`] if `named` has no entry for one of
@@ -638,13 +638,13 @@ pub fn arena_output(arena: &StaticArena, node: NodeId) -> Option<&[f32]> {
 /// caller supplied once up front).
 ///
 /// After running `program`, every `(computed, input_name)` pair in
-/// `rebind` is spliced directly into place with [`Vec::swap`]: the
+/// `rebind` is spliced directly into place with `Vec::swap`: the
 /// computed node's freshly written buffer BECOMES the `input_name` node's
 /// buffer, and the stale old input buffer moves to the computed node's own
-/// slot, where [`run_resolved_nodes_in_arena`] fully overwrites it again on
-/// the very next call (matching [`evaluate_pooled`]'s own "every write
-/// position gets overwritten before any read" contract) -- zero
-/// allocation, zero `f32` copied, only two `Vec<f32>` headers exchanged.
+/// slot, where the next call's resolved-node pass fully overwrites it
+/// again (matching `evaluate_pooled`'s own "every write position gets
+/// overwritten before any read" contract) -- zero allocation, zero `f32`
+/// copied, only two `Vec<f32>` headers exchanged.
 ///
 /// What a caller can do with this that [`evaluate_named_with_arena`] alone
 /// cannot: run N steps of a `rebind`-shaped loop with the state-carrying
