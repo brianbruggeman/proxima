@@ -13,6 +13,14 @@
 //!   / [`activation::silu`] / [`activation::gelu`] — graph-building functions
 //!   composing existing [`proxima_tensor::op::ScalarOp`]s, never a new
 //!   variant.
+//! - [`conv::conv2d`] — the same graph-building shape, `Conv2d` as a
+//!   mask-composed sliding window (`Iota`/`Equal`/`Multiply`/`Reduce(Add)`,
+//!   never a window-shaped `IndexMap`) feeding an ordinary
+//!   `Elementwise(Multiply)` + `Reduce(Add)` matmul against the reshaped
+//!   kernel — both already-differentiable primitives, so no new adjoint rule
+//!   and, unlike a gather-built window, gradient keeps flowing through the
+//!   image operand into whatever built it (see that module's own doc for why
+//!   that matters for a stacked conv net).
 //! - [`loss::mse`] / [`loss::cross_entropy`] / [`loss::softmax_cross_entropy`]
 //!   — the same graph-building shape, for the scalar objective a training
 //!   loop differentiates.
@@ -38,7 +46,7 @@
 //!
 //! # Tiers
 //!
-//! [`adjoint`], [`activation`], `expr` (private), and [`sparse`] touch nothing but
+//! [`adjoint`], [`activation`], [`conv`], `expr` (private), and [`sparse`] touch nothing but
 //! `proxima-tensor`'s alloc-tier surface (`op`/`map`/`shape`/`error`) and
 //! build under `--no-default-features --features alloc`: pure graph
 //! construction and host-side buffer reduction, no evaluation. `sparse`
@@ -64,6 +72,7 @@ extern crate alloc;
 
 pub mod activation;
 pub mod adjoint;
+pub mod conv;
 pub mod error;
 pub(crate) mod expr;
 pub mod loss;
