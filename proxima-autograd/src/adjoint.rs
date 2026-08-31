@@ -77,6 +77,7 @@
 //!   any such `out_map` — so it is rejected here too, named precisely
 //!   rather than attempted.
 
+use alloc::collections::BTreeSet;
 use alloc::vec;
 use alloc::vec::Vec;
 use core::future::Future;
@@ -190,6 +191,45 @@ impl Differentiated {
 
 /// See this module's own doc for the rule per [`Op`] form.
 pub fn differentiate(program: &[Op], loss: NodeId) -> Result<Differentiated, AutogradError> {
+    differentiate_core(program, loss, None)
+}
+
+/// [`differentiate`], scoped to the [`Op::Input`] nodes named in `wanted`.
+///
+/// Every gradient `differentiate` would compute is still computed here — the
+/// backward walk still visits every reachable node, and every wanted input's
+/// gradient is bit-identical to what `differentiate` would produce for it
+/// (same nodes, same order, same values). The only thing this function omits
+/// is the *final* routing step into an [`Op::Input`] that is not in `wanted`:
+/// the small `expr::reduce`/[`accumulate`] call that would otherwise
+/// materialize that input's own gradient buffer and then have it go unread.
+/// A shared intermediate node feeding both a wanted and an unwanted input
+/// (e.g. a matmul's product feeding both a weight's gradient and the layer's
+/// data gradient) is untouched — inputs are always leaves in this reverse
+/// walk (`Op::Input`'s own match arm never recurses further), so gating only
+/// at the leaf-routing sites (`route_contribution`'s two arms and
+/// [`differentiate_reduce`]'s own direct accumulate) is exactly "skip the
+/// final routing into unwanted inputs and nothing upstream of it" — no
+/// separate liveness pass is needed because inputs never have downstream
+/// adjoint work to prune in the first place.
+///
+/// See `proxima-tensor/docs/discipline.md` ROW 161/162: `differentiate`
+/// unconditionally backprops through every reachable [`Op::Input`], including
+/// training data the caller's own `rebind` list never reads back
+/// (`train::train_step`'s own `grad_x` case) — this is the scoped surface
+/// `train_step`/`fit` reach for instead, requesting gradients only for the
+/// parameter+state inputs they actually rebind.
+///
+/// # Errors
+///
+/// Same as [`differentiate`].
+#[must_use = "Result must be checked"]
+pub fn differentiate_wanted(program: &[Op], loss: NodeId, wanted: &[NodeId]) -> Result<Differentiated, AutogradError> {
+    let wanted: BTreeSet<NodeId> = wanted.iter().copied().collect();
+    differentiate_core(program, loss, Some(&wanted))
+}
+
+fn differentiate_core(program: &[Op], loss: NodeId, wanted: Option<&BTreeSet<NodeId>>) -> Result<Differentiated, AutogradError> {
     let loss_index = loss.0 as usize;
     if loss_index >= program.len() {
         return Err(AutogradError::UnknownLoss(loss));
@@ -222,6 +262,7 @@ pub fn differentiate(program: &[Op], loss: NodeId) -> Result<Differentiated, Aut
                 *body,
                 operands,
                 gradient,
+                wanted,
             )?,
             Op::Reduce(reduce) => differentiate_reduce(
                 &mut new_program,
@@ -231,6 +272,7 @@ pub fn differentiate(program: &[Op], loss: NodeId) -> Result<Differentiated, Aut
                 node,
                 reduce,
                 gradient,
+                wanted,
             )?,
         }
     }
@@ -291,6 +333,7 @@ fn differentiate_elementwise(
     body: ScalarOp,
     operands: &[(NodeId, IndexMap)],
     gradient: NodeId,
+    wanted: Option<&BTreeSet<NodeId>>,
 ) -> Result<(), AutogradError> {
     let iter_rank = shapes.of(node).len() as u16;
     let full = expr::identity(iter_rank);
@@ -388,9 +431,18 @@ fn differentiate_elementwise(
 
     for (operand, contribution) in operands.iter().zip(contributions) {
         let Some(contribution) = contribution else { continue };
-        route_contribution(program, grad_of, gathered_of, original_program, shapes, node, operand, contribution, iter_rank)?;
+        route_contribution(program, grad_of, gathered_of, original_program, shapes, node, operand, contribution, iter_rank, wanted)?;
     }
     Ok(())
+}
+
+/// `true` when `node` is an [`Op::Input`] `differentiate_wanted` was NOT
+/// asked for — the only case a leaf-routing site may skip. `wanted == None`
+/// (plain [`differentiate`]) never skips anything, matching its documented
+/// "backprop through every reachable `Op::Input`" contract.
+fn is_unwanted_input(original_program: &[Op], wanted: Option<&BTreeSet<NodeId>>, node: NodeId) -> bool {
+    let Some(wanted) = wanted else { return false };
+    matches!(original_program[node.0 as usize], Op::Input { .. }) && !wanted.contains(&node)
 }
 
 /// `Maximum`/`Minimum` route the incoming gradient entirely to the operand
@@ -442,9 +494,13 @@ fn route_contribution(
     operand: &(NodeId, IndexMap),
     contribution: NodeId,
     iter_rank: u16,
+    wanted: Option<&BTreeSet<NodeId>>,
 ) -> Result<(), AutogradError> {
     let (operand_node, operand_map) = operand;
     if matches!(original_program[operand_node.0 as usize], Op::Constant { .. } | Op::Iota { .. }) {
+        return Ok(());
+    }
+    if is_unwanted_input(original_program, wanted, *operand_node) {
         return Ok(());
     }
 
@@ -481,6 +537,7 @@ fn route_contribution(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn differentiate_reduce(
     program: &mut Vec<Op>,
     grad_of: &mut [Option<NodeId>],
@@ -489,6 +546,7 @@ fn differentiate_reduce(
     node: NodeId,
     reduce: &Reduce,
     gradient: NodeId,
+    wanted: Option<&BTreeSet<NodeId>>,
 ) -> Result<(), AutogradError> {
     if matches!(reduce.keep, Keep::Scan) {
         return Err(AutogradError::ScanAdjointUnsupported { node });
@@ -498,6 +556,9 @@ fn differentiate_reduce(
     }
     if reduce.in_map.is_data_dependent() {
         return Err(AutogradError::ReduceOverGatherUnsupported { node, operand: reduce.operand });
+    }
+    if is_unwanted_input(original_program, wanted, reduce.operand) {
+        return Ok(());
     }
     let in_pattern = reduce.in_map.affine();
     if !expr::is_pure_projection(in_pattern) {
@@ -677,6 +738,106 @@ mod pipe_tests {
             via_function.gradient_of_named("x"),
             "the Pipe wrapper must delegate to the exact same transform"
         );
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod differentiate_wanted_tests {
+    use alloc::vec;
+
+    use proxima_tensor::op::Extent;
+
+    use super::*;
+
+    fn leaf(program: &mut Vec<Op>, name: &str, shape: Vec<Extent>) -> NodeId {
+        proxima_tensor::op::append(program, Op::Input { dtype: DType::Float32, shape, name: Some(name.into()) })
+    }
+
+    fn identity(rank: u16) -> IndexMap {
+        IndexMap::Affine(proxima_tensor::map::projection(rank, &(0..rank).collect::<Vec<u16>>()))
+    }
+
+    fn axes(rank: u16, selected: &[u16]) -> IndexMap {
+        IndexMap::Affine(proxima_tensor::map::projection(rank, selected))
+    }
+
+    /// `matmul[i,k] = sum_j x[i,j] * w[j,k]`, `loss = sum(matmul)` -- the
+    /// same `Elementwise(Multiply)` -> `Reduce(Add)` shape
+    /// `train_step_lane.rs`'s `batched_dense` builds for each MLP layer, so
+    /// the same `differentiate_reduce`/`differentiate_elementwise`/
+    /// `route_contribution` path ROW 161/162 characterized is what this
+    /// fixture exercises, not a simplified stand-in. `x` and `w` share the
+    /// same `product` intermediate node (the un-reduce/broadcast materialize
+    /// ROW 161 found expensive), so this is exactly the "shared upstream
+    /// node feeding both a wanted and an unwanted input" case the design
+    /// constraint calls out.
+    fn build_matmul_loss() -> (Vec<Op>, NodeId, NodeId, NodeId) {
+        let mut program = Vec::new();
+        let x = leaf(&mut program, "x", vec![Extent::Static(2), Extent::Static(3)]);
+        let w = leaf(&mut program, "w", vec![Extent::Static(3), Extent::Static(4)]);
+        let product = proxima_tensor::op::append(
+            &mut program,
+            Op::Elementwise {
+                dtype: DType::Float32,
+                body: ScalarOp::Multiply,
+                operands: vec![(w, axes(3, &[1, 2])), (x, axes(3, &[0, 1]))],
+                name: None,
+            },
+        );
+        let matmul = expr::reduce(&mut program, DType::Float32, ScalarOp::Add, ReduceInit::Zero, product, identity(3), axes(3, &[0, 2]));
+        let loss = expr::reduce(&mut program, DType::Float32, ScalarOp::Add, ReduceInit::Zero, matmul, identity(2), axes(2, &[]));
+        (program, x, w, loss)
+    }
+
+    /// The load-bearing correctness proof: `differentiate_wanted`'s own
+    /// `grad_w` is bit-identical to plain `differentiate`'s `grad_w` on the
+    /// exact same fixture — the pruning this function does for `x` (not in
+    /// `wanted`) must not perturb `w`'s own gradient by even one ULP, since
+    /// both reach `w` through the same shared `product` node's un-reduce.
+    #[proxima::test]
+    async fn wanted_scoped_gradient_is_bit_identical_to_the_full_differentiate() {
+        let (program, _x, w, loss) = build_matmul_loss();
+        let x_values = [1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0];
+        let w_values = [0.5f32, -1.0, 2.0, 0.25, 1.5, -0.75, 3.0, 0.1, -2.0, 4.0, 0.0, 1.0];
+
+        let full = differentiate(&program, loss).expect("full differentiate");
+        let grad_w_full = full.gradient_of_named("w").expect("w feeds the loss");
+        let full_evaluated =
+            proxima_tensor::cpu::evaluate_named(&full.program, &[], &[("x", &x_values), ("w", &w_values)], &[grad_w_full])
+                .expect("full adjoint program evaluates");
+        let full_grad_w = full_evaluated.get(grad_w_full).expect("requested").0;
+
+        let wanted = differentiate_wanted(&program, loss, &[w]).expect("wanted-scoped differentiate");
+        let grad_w_wanted = wanted.gradient_of_named("w").expect("w feeds the loss");
+        let wanted_evaluated =
+            proxima_tensor::cpu::evaluate_named(&wanted.program, &[], &[("x", &x_values), ("w", &w_values)], &[grad_w_wanted])
+                .expect("wanted-scoped adjoint program evaluates");
+        let wanted_grad_w = wanted_evaluated.get(grad_w_wanted).expect("requested").0;
+
+        assert_eq!(full_grad_w, wanted_grad_w, "wanted-scoped grad_w must be bit-identical to the full differentiate's own grad_w");
+
+        assert!(wanted.gradient_of_named("x").is_none(), "x was not in `wanted`, so its gradient must not be routed at all");
+        assert!(full.gradient_of_named("x").is_some(), "sanity: plain differentiate still computes grad_x, unaffected by the wanted-scoped path");
+        assert!(
+            wanted.program.len() < full.program.len(),
+            "the wanted-scoped program must be strictly smaller: it never emits x's own final routing/un-reduce node ({} vs {})",
+            wanted.program.len(),
+            full.program.len()
+        );
+    }
+
+    /// A caller-side documented consequence of the pruning, not merely
+    /// asserted internally: with `x` unrequested, no plausible
+    /// evaluation of the wanted-scoped program can hand back a gradient for
+    /// it — `gathered_gradients_of_named`/`gradient_of_named` both agree
+    /// there is nothing there to ask for.
+    #[proxima::test]
+    async fn unwanted_gradient_of_named_is_none_on_the_wanted_scoped_path() {
+        let (program, _x, w, loss) = build_matmul_loss();
+        let wanted = differentiate_wanted(&program, loss, &[w]).expect("wanted-scoped differentiate");
+        assert!(wanted.gradient_of_named("x").is_none());
+        assert!(wanted.gradient_of_named("w").is_some());
     }
 }
 

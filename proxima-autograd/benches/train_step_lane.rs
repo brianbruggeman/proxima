@@ -45,7 +45,7 @@ use std::time::Instant;
 
 use criterion::Criterion;
 use proxima_autograd::activation::relu;
-use proxima_autograd::adjoint::differentiate;
+use proxima_autograd::adjoint::differentiate_wanted;
 use proxima_autograd::loss::softmax_cross_entropy;
 use proxima_autograd::optimizer::{AdamConfig, AdamOperands, adam_step, step_input};
 use proxima_autograd::train::{State, train_step};
@@ -243,7 +243,11 @@ struct TrainingLane {
 
 fn build_training_lane() -> TrainingLane {
     let network = build_network();
-    let differentiated = differentiate(&network.program, network.loss).expect("scalar loss differentiates");
+    // ROW 162: scoped to exactly the params `rebind` below threads forward --
+    // `differentiate`'s own `x`/`y` gradients would be computed and then
+    // never read, matching ROW 161's `grad_x`=8.58%-of-step finding.
+    let wanted = [network.w1, network.b1, network.w2, network.b2];
+    let differentiated = differentiate_wanted(&network.program, network.loss, &wanted).expect("scalar loss differentiates");
     let grad_w1 = differentiated.gradient_of_named("w1").expect("w1 feeds the loss");
     let grad_b1 = differentiated.gradient_of_named("b1").expect("b1 feeds the loss");
     let grad_w2 = differentiated.gradient_of_named("w2").expect("w2 feeds the loss");
