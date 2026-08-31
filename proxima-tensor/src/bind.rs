@@ -235,9 +235,20 @@ pub enum BoundOpKind {
         operands: BoundOperands,
         /// Iteration axes that survive to the output, in the reduce's
         /// `out_map` operand-axis order. The last entry (if any) is the
-        /// innermost loop.
+        /// innermost loop. For a scatter this naturally excludes the
+        /// scattered axis (its position is data-dependent, so it can never
+        /// be a pure projection — see [`pure_projection_axes`]).
         output_axes: SmallVec<[u16; MAX_INLINE_RANK]>,
         out_layout: Layout,
+        /// `Some` exactly when `out_map` was [`IndexMap::Computed`] — a
+        /// scatter. Reuses [`Lookup`] itself (the read-side gather's own
+        /// addressing record): the destination axis is fetched from
+        /// `indices` at `index_layout`, bounds-checked against `extent`,
+        /// then scaled by `element_stride` and added to `out_layout`'s own
+        /// offset — the exact mirror of how a gathered *operand*'s `Lookup`
+        /// already contributes to a *read* offset in [`cpu::run_reduce`]'s
+        /// generic path. `None` for an ordinary (affine) reduce/scan.
+        out_scatter: Option<Lookup>,
     },
     /// The resolved counterpart of [`Op::Iota`]: no operands, no body — an
     /// executor derives every output value straight from its own position
@@ -361,8 +372,30 @@ impl BoundOp {
     fn split_axis(&self) -> Option<u16> {
         match &self.kind {
             BoundOpKind::Elementwise { .. } => (!self.extents.is_empty()).then_some(0),
+            // `out_scatter: Some(_)` is a scatter: conservatively
+            // ineligible for splitting. A chunked run would need
+            // `out_scatter`'s own `index_layout`/`extent` rebased per chunk
+            // (the same treatment `rebase_operands` already gives every
+            // gathered operand's `Lookup`), and every destination touched
+            // by more than one chunk would need its fold synchronized across
+            // chunk boundaries — real work this task's own scope named out
+            // (parallel scatter stays sequential-only, named, not silently
+            // wrong). `None` here just routes a scatter through the same
+            // one-chunk path `Keep::Scan` already takes.
             BoundOpKind::Reduce {
-                keep, output_axes, ..
+                keep,
+                output_axes,
+                out_scatter: Some(_),
+                ..
+            } => {
+                let _ = (keep, output_axes);
+                None
+            }
+            BoundOpKind::Reduce {
+                keep,
+                output_axes,
+                out_scatter: None,
+                ..
             } => match keep {
                 Keep::Scan => None,
                 Keep::Reduce => output_axes.first().copied(),
@@ -392,6 +425,7 @@ impl BoundOp {
                 operands,
                 output_axes,
                 out_layout,
+                out_scatter,
             } => BoundOpKind::Reduce {
                 element_body: element_body.clone(),
                 reduce_op: *reduce_op,
@@ -403,6 +437,11 @@ impl BoundOp {
                 // an unshifted out_layout already yields 0-based write
                 // offsets.
                 out_layout: out_layout.clone(),
+                // `split_axis` never returns `Some` for a scatter (see its
+                // own doc), so this arm only ever runs with `out_scatter ==
+                // None` in practice; cloned rather than asserted so a future
+                // relaxation of that gate does not silently drop it.
+                out_scatter: out_scatter.clone(),
             },
             // unreachable in practice: `split_axis` returns `None` for
             // `Iota`, so `split`/`split_aligned` never call this for one —
@@ -666,6 +705,15 @@ impl BoundOpBuilder {
                     (ComposedBody::leaf(ScalarOp::Identity), vec![operand])
                 };
 
+                // A scatter's `out_map` names an `indices` node exactly the
+                // way `in_map` can, and it is never covered by the
+                // `in_map`-only walk above (`fuses`/the `else` branch both
+                // only ever touch `reduce.operand`/`reduce.in_map`) — see
+                // this method's own doc for why `materialize_computed_indices`
+                // is unconditional for `in_map`; the same reasoning applies
+                // here, independent of whether the operand fused.
+                self.materialize_computed_indices(&reduce.out_map, shapes, &mut emitted)?;
+
                 push_ready(
                     &mut emitted,
                     node,
@@ -888,8 +936,29 @@ fn build_reduce_op(
     operands: BoundOperands,
 ) -> BoundOp {
     let out_pattern = reduce.out_map.affine();
-    let out_layout = layout_of(out_pattern, shapes.of(node));
     let output_axes = pure_projection_axes(out_pattern);
+    let (out_layout, out_scatter) = match &reduce.out_map {
+        IndexMap::Affine(pattern) => (layout_of(pattern, shapes.of(node)), None),
+        IndexMap::Computed {
+            indices,
+            index_map,
+            base,
+            gathered_dim,
+        } => {
+            let output_shape = shapes.of(node);
+            let out_layout = build_scatter_out_layout(base, *gathered_dim, output_shape);
+            let index_layout = layout_of(index_map, shapes.of(*indices));
+            let element_stride = row_major_strides(output_shape)[*gathered_dim as usize];
+            let extent = output_shape[*gathered_dim as usize];
+            let lookup = Lookup {
+                indices: *indices,
+                index_layout,
+                element_stride,
+                extent,
+            };
+            (out_layout, Some(lookup))
+        }
+    };
     BoundOp {
         node,
         dtype: reduce.dtype,
@@ -902,7 +971,39 @@ fn build_reduce_op(
             operands,
             output_axes,
             out_layout,
+            out_scatter,
         },
+    }
+}
+
+/// [`layout_of`]'s counterpart for a scatter `out_map`'s `base` pattern:
+/// identical walk, except `gathered_dim`'s own axis is skipped rather than
+/// folded in. `layout_of` reads every axis's `offset` as a real address
+/// contribution (`base += offset * element_stride`), which is exactly right
+/// for a gather's `base` (that entry is `terms: [], offset: 0` there by
+/// convention, so it contributes nothing) but would be wrong here: a
+/// scatter's `base` repurposes that same slot's `offset` to carry the
+/// destination's static extent (`map.rs`'s `IndexMap::Computed` doc), not an
+/// address. Skipping the axis entirely is correct either way, since the
+/// scattered axis's real address only ever comes from the fetched index at
+/// evaluation time — see [`BoundOpKind::Reduce::out_scatter`]'s own doc.
+fn build_scatter_out_layout(base: &IndexPattern, gathered_dim: u16, output_shape: &[u64]) -> Layout {
+    let element_strides = row_major_strides(output_shape);
+    let mut strides = SmallVec::<[i64; MAX_INLINE_RANK]>::from_elem(0, base.iter_rank as usize);
+    let mut layout_base = 0i64;
+    for (axis_index, axis) in base.axes.iter().enumerate() {
+        if axis_index as u16 == gathered_dim {
+            continue;
+        }
+        let stride = element_strides[axis_index];
+        layout_base += i64::from(axis.offset) * stride;
+        for term in &axis.terms {
+            strides[term.axis as usize] += i64::from(term.coeff) * stride;
+        }
+    }
+    Layout {
+        base: layout_base,
+        strides,
     }
 }
 
