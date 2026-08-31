@@ -14407,3 +14407,110 @@ The literal `4` in `window.as_chunks::<4>()` / `weight_row.as_chunks::<4>()` is 
 - `objdump -d --demangle <tile_pipeline bench binary> | grep -A40 '<<tile_pipeline::tile_pipeline::ConvReluStage as proxima_primitives::pipe::primitives::Pipe>::call::{closure#0}>:'` -- reproduces conv's own `fmla.4s` excerpt above
 - `objdump -d --demangle <tile_pipeline bench binary> | grep -B40 -A5 'run_pipeline_forward>:' ` then locate the `fmla.4s v0, v2, v1` occurrence inside it -- reproduces fc1's own excerpt above (address differs run-to-run with codegen, opcode does not)
 - `git diff a1e0437 HEAD -- proxima-onnx/benches/support/tile_pipeline.rs` -- the entire source change for this row; zero lines touched outside this one bench-support file, zero lines in any library crate
+
+## ROW 159 — the train-step lane gets a SEALED baseline for the first time (COARSE 6.5ms superseded by a real, quiet-host, real-MNIST measurement: 5.75-7.03ms p50 across 10 runs, mean 6.19ms, CoV 8.1%), profiled by node-kind, and TWO attack levers measured and BOTH ROLLED BACK as negative/no-signal -- rung success (<=2ms) NOT MET, real gap to pytorch is 15-17x (not the nominal ~19x), and the row says exactly which two hypotheses this refutes so the next session does not re-try them
+
+Repo: `/Users/brianbruggeman/repos/slot-0/proxima-wt-trainperf`, branch `perf/train-step-lane`, off `main` `2286778`. Host: Apple M1 Max, macOS, arm64. Build profile: `release` for every timed number below (both the sealed bench and the torch reference), `dev` only for clippy; never mixed with a timed run. **Host loadout: QUIET at session start** (`uptime` load average 11-18, `pgrep -fl "cargo|rustc"` showing only this session's own `cdb-daemon`/`sccache` background services on every check before every timed run, verified per-row below) -- the coarse 6.5ms baseline this row supersedes was explicitly marked LOADED/COARSE by the task brief; this session's own numbers are the first quiet-host, CoV-reported measurement of this exact shape.
+
+### Allocation budget, stated first (per guiding-principles' hot-path defaults)
+
+`train_step` is not sans-IO (it drives `proxima_tensor::cpu::evaluate_named`, a std-tier evaluator), so the zero-alloc hot-path bar does not bind directly -- but the profile below shows allocation-adjacent cost (`take_or_allocate`'s per-node output buffer, freshly allocated every single call since `evaluate_named` seeds `free_buffers: Vec::new()` on every invocation) is real and measurable: `loop_overhead_ms=1.815` of the instrumented single-call total, ~23% of it. Lever 1 below attacked exactly this and LOST -- recorded as a mechanism-level finding, not assumed.
+
+### Rung 0 -- sealed baseline, both sides, same session
+
+**proxima** (`proxima-autograd/benches/train_step_lane.rs`, `train-step-bench` feature, real MNIST `~/.cache/burn-dataset/mnist`, MLP 784-128-10, batch 32, Adam lr=0.001, program_len=239): a real training run, 20 warm-up + 100 measured steps, real batches (not one batch replayed), state threaded forward, convergence gate asserted on the benched run itself (`first-quarter-avg-loss=0.6827` -> `last-quarter-avg-loss=0.3410` every single run, 10/10 runs, exact bit-for-bit repeat since He-init/data/lr are all fixed-seed).
+
+| run | p50 (ms) | mean (ms) | p95 (ms) | CoV | host (pgrep before run) |
+|---|---|---|---|---|---|
+| 1 | 5.8299 | 6.0710 | 7.3217 | 9.14% | quiet |
+| 2 | 5.7596 | 5.9759 | 7.2015 | 8.99% | quiet |
+| 3 | 5.7758 | 5.9848 | 7.1448 | 13.24% | quiet |
+| 4 | 6.8694 | 6.8793 | 9.8160 | 21.18% | quiet |
+| 5 | 5.7544 | 5.8012 | 6.0459 | 4.75% | quiet |
+| 6 | 7.0267 | 6.8840 | 8.1152 | 11.90% | quiet |
+| 7 | 5.8755 | 6.0893 | 7.0687 | 10.09% | quiet |
+| 8 | 6.8727 | 6.8835 | 8.6135 | 14.21% | quiet |
+| 9 | 6.2600 | 6.4728 | 7.3993 | 12.14% | quiet |
+| 10 | 5.9104 | 6.2778 | 7.4576 | 11.91% | quiet |
+
+Across-run p50: **5.75-7.03ms, mean 6.19ms, CoV 8.05%** (>5%, range reported per bench-metrics discipline, not a point estimate). Across-run mean-of-means: 6.33ms. This REFINES, not merely confirms, the coarse 6.5ms cited in the task brief -- close in magnitude but now CoV-bounded and quiet-host-attributed instead of "an earlier incumbent bench, never properly measured".
+
+**pytorch** (`proxima-onnx/scripts/torch_reference/train_bench.py --threads 1 --warmup 20 --steps 100`, same MLP shape, same batch, fresh venv this session, `torch==2.13.0`):
+
+| run | p50 (ms) | mean (ms) | CoV |
+|---|---|---|---|
+| 1 | 0.4710 | 0.3875 | 0.2506 |
+| 2 | 0.3167 | 0.3170 | 0.0108 |
+| 3 | 0.3353 | 0.3198 | 0.1141 |
+| 4 | 0.3941 | 0.3932 | 0.2455 |
+| 5 | 0.3828 | 0.4148 | 0.2254 |
+
+Across-run p50: **0.317-0.471ms, mean 0.380ms, CoV 14.2%** -- same order of magnitude as ROW 157's cited `0.3406ms` and its own `0.3485ms` smoke-run, confirming this session's fresh install reproduces the earlier one, not a fluke of a different torch build.
+
+**Multiple of torch, this session's own quiet-host pair:** p50-median/p50-median = 5.893/0.3828 = **15.4x**; mean-of-means/mean-of-means (the "manual sweep mean" column, not the p50 column, on both sides) = 6.332/0.3665 = **17.3x**. Both close to, and one side of, the nominal ~19x cited in the task brief (the coarse 6.5ms baseline was itself roughly accurate, just unsealed) and both far above the pre-registered rung-success bar of <=2ms (3x+) -- **rung success NOT MET** at baseline.
+
+### Rung 1 -- profile by node-kind (`proxima-tensor/instrument`, one warm + one measured call, single-call instrument overhead per `mnist_f32_lane.rs`'s own documented 30-40% -- percentages trusted more than absolute ms; temporary `#[test]` in `proxima-autograd/tests/`, reverted before commit, same discipline ROW 150/156 use)
+
+Full train_step (forward + backward + Adam, program_len=239, 110 resolved nodes):
+
+| node_kind | count | total_ms | pct_of_forward |
+|---|---|---|---|
+| reduce_f32_dense | 31 | 3.878 | 67.18% |
+| elementwise | 28 | 1.710 | 29.62% |
+| constant | 51 | 0.185 | 3.20% |
+
+Outside the node-kind loop: `setup_ms=0.148` (shape::infer + `reject_non_float32` + bind + retirement scheduling), `loop_overhead_ms=1.815` (per-node output-buffer allocation via `take_or_allocate` + retirement bookkeeping, summed over all 110 nodes). Instrumented single-call total ~7.74ms, matching the uninstrumented sweep's own order of magnitude (5.8-7.0ms) -- instrument overhead on THIS op mix is much smaller than the 30-40% cited for LLM decode's larger, more `run_reduce`-call-count-dominated programs.
+
+`reduce_f32_dense`'s own internal path split (`reduce_path_ticks`): `dot_fast_ms=0.586`, **`width_fast_ms=3.180`** (82% of reduce time), `conv_tile_ms=0.000` (no `Conv` op in this MLP, expected), `generic_ms=0.092`.
+
+**Forward-only isolation** (fresh undifferentiated program, `[loss]` only, ROW 150's own method, program_len=28, 13 resolved nodes): `reduce_f32_dense` count=5, `total_ms=0.175`, `mac_ops=3,253,184`, `ns_per_element=0.0539`. `reduce_path_ticks`: `dot_fast_ms=0.001`, `width_fast_ms=0.154` (88%), `generic_ms=0.019` -- **forward is width_fast-dominated too**, refuting the working assumption ("forward already routes onto dot/conv tiles") the task brief's candidate (b) was framed around.
+
+**Backward, by subtraction** (full-step reduce minus forward-only reduce, exact node/mac-op counters, not independently profiled in isolation -- DERIVED, tagged per principle 18): mac_ops = 13,026,658 - 3,253,184 = 9,773,474; time ~ 3.878 - 0.175 = 3.703ms; **ns_per_element ~0.379, ~7x worse per-MAC than forward's own 0.0539**. This is the real, measured shape behind the task brief's candidate (b) framing, even though the mechanism (below) is not what "route backward onto the dot tile" implies.
+
+### Rung 2 -- two levers attacked, BOTH rolled back
+
+**Lever 1 (candidate (a), plan-once/execute-many via existing scratch API) -- ROLLED BACK, measured NEGATIVE (+9-14% SLOWER), NOT landed to any library file.**
+
+`proxima_tensor::cpu::evaluate_quantized_named_with_scratch` already exists (no new type, no new Op) and lets a caller carry `free_buffers`/`validated_weight_nodes` across repeated same-shaped calls -- exactly `train_step`'s own call shape (same program, same shapes, every step, only bound values change). Implemented `train_step_with_scratch` in `proxima-autograd/src/train.rs` (a new free function over existing types, mirroring `evaluate`/`evaluate_with_scratch`'s own established pattern -- passes both binary questions: an existing primitive (`evaluate_named`) could NOT express caller-carried scratch, and the call site gains a genuinely new capability, extra params threading state forward), wired `fit` to thread the pool across its whole run, benched both arms head-to-head in the SAME harness (`sweep_baseline` vs `sweep_scratch`, same real batches, same initial state):
+
+| arm | p50 range (10 runs total) | mean-of-means | vs baseline |
+|---|---|---|---|
+| baseline (`train_step`, fresh alloc/call) | 5.75-7.03ms | 6.19-6.52ms | -- |
+| scratch (`train_step_with_scratch`, pool threaded) | 6.35-8.49ms | 7.06-7.45ms | **+9.1% (median p50), +14.2% (mean), every single run, 10/10** |
+
+**Mechanism, read from source, not independently instrumented (tagged per principle 18):** `take_or_allocate` (`proxima-tensor/src/cpu.rs:1240`) does an **O(pool size) linear scan** (`pool.iter().enumerate().filter(cap >= required).min_by_key(cap)`) on every node, 110 times/step; this program's buffer-size distribution is WIDE (1 to 100,352 elements across 12 parameter tensors plus ~15 distinct elementwise/reduce intermediate sizes), so the greedy best-fit strategy plausibly hands large-capacity buffers to small requests (shrinking `len` via `resize` but never reclaiming `capacity`), starving later large requests back into the `None => vec![0.0f32; required]` fresh-alloc fallback anyway -- paying BOTH the scan cost AND a fresh allocation on the request that mattered. This differs from `evaluate_quantized_named_with_scratch`'s own documented target shape (an LLM decode loop with a far more homogeneous per-token buffer-size population), and the MLP's own wide size diversity is the plausible reason the same lever that helps there hurts here. **Not independently profiled to confirm this specific mechanism** -- the measured delta (+9-14%, 10/10 runs, well above CoV) is the load-bearing fact; the scan/fragmentation explanation is a read-from-source hypothesis, named as such.
+
+**Rollback discipline:** `git diff main -- proxima-autograd/src/train.rs` is EMPTY (`git checkout -- proxima-autograd/src/train.rs` before commit). The negative arm stays mechanically re-provable WITHOUT carrying dead library surface: `train_step_scratch` is bench-local (`proxima-autograd/benches/train_step_lane.rs`), composing `evaluate_quantized_named_with_scratch` directly -- so the -9-14% number re-proves from the sealed bench alone, satisfying principle 16, without an unused `pub fn` sitting in `train.rs` with no beneficial caller (principle 1: a proven-negative lever earns bench evidence, not permanent library surface).
+
+**Lever 2 (candidate (b), route backward matmul-shaped folds onto dot/conv tiles) -- OBSERVED, NOT landed, NO SIGNAL.**
+
+`run_reduce`'s own tie-break (`cpu.rs:4407-4409`) tries `fast_path` (width) first and only falls to `reduction_fast_path` (dot) `!fast_path`-gated -- a documented, deliberate ordering ("the width path wins the tie... the ordering every ROW 3/10 measurement was taken under"). Temporarily flipped the priority (dot tried first) directly in `proxima-tensor/src/cpu.rs`, rebuilt, re-ran the sealed bench (3 runs, quiet host) and the instrumented single-call profile:
+
+| | un-flipped (rung 0/1) | flipped (experiment) |
+|---|---|---|
+| baseline arm p50 range (n=3 flipped vs n=10 baseline) | 5.75-7.03ms | 6.27-7.12ms |
+| `reduce_path_ticks` dot_fast_ms / width_fast_ms | 0.586 / 3.180 | 0.571 / 3.103 |
+
+**No signal**: flipping the tie-break barely moved `dot_fast_ms`/`width_fast_ms` at all (both within noise of the un-flipped run), and the bench's own p50 range shows no improvement (6.27-7.12ms flipped vs 5.75-7.03ms un-flipped -- overlapping, not better). **Mechanism, confirmed by the ticks themselves**: `reduction_fast_path`'s own eligibility gate (`body_shape_is_affine_fast_path` against the REDUCTION-axis strides) is false for most of these nodes regardless of tie-break order -- the backward pass's gradient-matmul operands are not affine-contiguous on their contraction axis (a structural property of the adjoint transform's transposed/broadcast index maps, not a routing bug), so `dot_fast` is genuinely UNAVAILABLE for them, not merely losing a tie. This REFUTES the task brief's candidate (b) at the "cheap routing fix" scope: the real fix (relayout the backward operand to a contiguous contraction axis, or teach `body_shape_is_affine_fast_path` a broader window) is structural work on a hot path shared by every `proxima-tensor` consumer (450+ tests, omega's 138, every LLM decode path ROWs 145-158 tuned), correctly out of scope for a single-session attack -- named as the finding, not attempted further, per the task's own instruction for exactly this case.
+
+**Rollback discipline:** `git diff main -- proxima-tensor/src/cpu.rs` is EMPTY (`git checkout -- proxima-tensor/src/cpu.rs` before commit; temporary diagnostic test file removed, never committed).
+
+### Final result
+
+**Rung success (<=2ms) NOT MET.** Sealed baseline stands at 5.75-7.03ms p50 (mean 6.19ms, CoV 8.1%), **15.4-17.3x behind pytorch** (this session's own fresh, quiet-host, same-shape measurement on both sides) -- refining, not overturning, the coarse ~19x nominal gap the task brief opened with. Both attack levers this session's 150-minute budget could safely reach are now measured and closed: buffer-pool threading (existing-API, no new type) LOSES on this program's own wide buffer-size distribution; backward-matmul dot-tile routing is not a tie-break bug, it is an eligibility gap requiring structural work outside this session's blast-radius budget. Neither is re-tried by the next session without new evidence -- that is this row's whole point.
+
+### Opt-sweep note (`train_step`/`fit` are not sans-IO; principle §11's mandatory axes are N/A by domain -- stated, not blank)
+
+state machine: N/A, `train_step` is one `evaluate_named` call, no multi-step FSM of its own. bytes-first/borrowed/zero-copy: N/A, this crate's own `State = Vec<(String, Vec<f32>)>` is deliberately the plain owned shape (`train.rs`'s own doc: "nothing a caller does with this shape it could not already do with the bare `Vec`"). SIMD: N/A at this layer, lives inside `cpu.rs`'s own kernels (rung 1's profile is exactly this session's read of that layer). stack-over-heap: N/A, host-buffer training loop, not a hot inner loop. branchless/no-dyn-dispatch: N/A, no dynamic dispatch anywhere in `train.rs`. O(1) per token: N/A, no token-shaped iteration in a training step.
+
+### Re-prove commands
+
+- `CARGO_TARGET_DIR=<scratch> cargo bench -p proxima-autograd --bench train_step_lane --features train-step-bench` -- reproduces both arms' manual sweep (p50/p95/mean/CoV) and both criterion groups; requires `~/.cache/burn-dataset/mnist`, clean-skips otherwise
+- `cd proxima-onnx/scripts/torch_reference && python3 -m venv venv && ./venv/bin/pip install -r requirements.txt && ./venv/bin/python train_bench.py --threads 1 --warmup 20 --steps 100` -- reproduces the pytorch side
+- `CARGO_TARGET_DIR=<scratch> cargo nextest run -p proxima-autograd --all-features --release` -- 137 passed, 0 skipped
+- `CARGO_TARGET_DIR=<scratch> cargo nextest run -p proxima-tensor --features std,instrument` -- 450 passed, 4 skipped (unaffected, `git diff main -- proxima-tensor/src` is empty)
+- `CARGO_TARGET_DIR=<scratch> cargo clippy -p proxima-autograd --all-features --all-targets -- -D warnings` -- clean, exit 0
+- `bash scripts/proxima-autograd-gate.sh` -- full feature/target matrix, run this session: **15 passed, 0 failed, doctests=2** (nonzero, per gate 3's own N==0 check)
+- `git diff main -- proxima-autograd/src/train.rs` -- empty (lever 1 rolled back)
+- `git diff main -- proxima-tensor/src/cpu.rs` -- empty (lever 2 rolled back)
+- `git diff main -- proxima-autograd/Cargo.toml proxima-autograd/benches/train_step_lane.rs` -- the entire landed surface: one default-off feature, one bench file

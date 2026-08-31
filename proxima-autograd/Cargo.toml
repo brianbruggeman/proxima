@@ -33,6 +33,12 @@ instrument = ["std", "dep:proxima-telemetry", "proxima-telemetry/macros"]
 # dependency entry below) -- this crate's own `write_complete`/`parse`
 # usage needs nothing from that crate's std-only `config` module.
 safetensors = ["std", "dep:proxima-safetensors"]
+# the sealed train-step baseline bench (`benches/train_step_lane.rs`),
+# same placement discipline as `proxima-onnx`'s `mnist-f32-bench`:
+# default-off so a normal build/test never needs criterion or the real
+# host-local MNIST idx dataset (the bench clean-skips when it's absent, but
+# the feature keeps criterion out of a default `cargo build`/`cargo test`).
+train-step-bench = ["std"]
 
 [dependencies]
 bon = { workspace = true, optional = true }
@@ -55,8 +61,14 @@ thiserror = { workspace = true, default-features = false }
 workspace = true
 
 [dev-dependencies]
+criterion.workspace = true
 proxima = { workspace = true, features = ["test-support"] }
 proxima-tensor = { path = "../proxima-tensor", features = ["std", "config", "test-support"] }
 proxima-tokenizer = { path = "../proxima-tokenizer", features = ["hf"] }
 tempfile.workspace = true
 toml.workspace = true
+
+[[bench]]
+name = "train_step_lane"
+harness = false
+required-features = ["train-step-bench"]

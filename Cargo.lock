@@ -4098,6 +4098,7 @@ version = "0.1.0"
 dependencies = [
  "bon",
  "conflaguration",
+ "criterion",
  "libm",
  "proxima",
  "proxima-primitives",
