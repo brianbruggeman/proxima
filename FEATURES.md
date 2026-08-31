@@ -2,7 +2,7 @@
 
 What proxima does today. Reference for evaluating adoption.
 
-For the pitch + audience-specific framing see the marketing doc; this file is the structural inventory.
+This file is the structural inventory.
 
 ---
 

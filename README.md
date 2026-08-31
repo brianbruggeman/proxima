@@ -226,7 +226,7 @@ codec.
 | `prime` | the from-scratch per-core runtime: one thread per core, no work-stealing, bounded SPSC inbox, reactor + executor + timer + background pool. |
 | `proxima-net` | UDP `PacketListener` and addressing, plus every platform backend — `prime`, `tokio`, `wasm`, `dpdk`, `xdp` — as a feature-gated module. |
 
-**substrates** — where bytes land, where processes run.
+**storage & process** — where bytes land, where processes run.
 
 | crate | what it is |
 |---|---|

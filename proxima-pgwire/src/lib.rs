@@ -36,7 +36,7 @@
 //! `proxima::Client` speak pgwire as a registered protocol.
 //!
 //! `scripts/proxima-pgwire-gate.sh` (run by `.github/workflows/proxima-pgwire.yml`)
-//! is the proof substrate: the bare-metal codec build, the feature-matrix
+//! is the proof mechanism: the bare-metal codec build, the feature-matrix
 //! clippy sweep, the real-PostgreSQL differential, and the invariant that
 //! `--no-default-features` carries zero tokio.
 

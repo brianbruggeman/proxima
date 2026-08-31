@@ -92,8 +92,8 @@ regime before flipping anything there.**
    incumbents' ~60 MB (h1 rekt is fine at 6.5 MB). Suspect: prime
    runtime lane-pool eager allocation at 4 cores × deep lanes (the
    720 MB eager-alloc shape fixed once before in the dynamic-inbox
-   work). UNDIAGNOSED — needs its own pass; the bill-mover here is
-   "client library" positioning, not the bench.
+   work). UNDIAGNOSED — needs its own diagnostic pass targeted at the
+   client library's allocation behavior; this bench does not explain it.
 2. **Priority order by cell value**: h1 server (0.46x, biggest volume
    claim), h3 server (0.35x at 4c), h3 client (0.76x at headroom).
    h2 is the strongest cell block (6.6-7.4x) — publishable number.

@@ -56,7 +56,7 @@ The native stack shipped with measured wins on real-shaped workloads:
 - With proxima's per-core runtime layered on:
   - conn=1 single-stream: **+58% RPS vs hyper, +59% vs pingora**
   - conn=64 multi-connection: **+52% vs hyper, +64% vs pingora**, with
-    coefficient of variation 2.0% (2-3× tighter than competitors)
+    coefficient of variation 2.0% (2-3× tighter than hyper/pingora)
 
 Full data: `rust/benches/RESULTS_linux.md`.
 

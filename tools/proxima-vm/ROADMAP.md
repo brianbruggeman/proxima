@@ -1,6 +1,6 @@
 # proxima-vm roadmap — scratch guest to firecracker-style lambda, and to a simulated machine
 
-Two tracks off one substrate.
+Two tracks off one core.
 
 - **Track A — the boundary.** A proxima `Pipe` whose `call` forks a pre-booted
   snapshot, runs a tenant payload, and drops it. The µsec guarantee is on the

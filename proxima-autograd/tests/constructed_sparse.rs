@@ -1,4 +1,4 @@
-//! Does the substrate support CONSTRUCTING a sparse graph directly -- fixed
+//! Does the autograd core support CONSTRUCTING a sparse graph directly -- fixed
 //! topology known at build time, never a dense graph pruned down after the
 //! fact -- and does the resulting program stay differentiable and correct?
 //!
