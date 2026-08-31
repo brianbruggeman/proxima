@@ -201,6 +201,10 @@ name = "bench_q4k_superblock_phases"
 harness = false
 required-features = ["ggml-bench", "q4k-int8-dot"]
 
+[[bench]]
+name = "bench_conv_gemm_tile"
+harness = false
+
 [[example]]
 name = "q4k_ggml_fidelity"
 required-features = ["ggml-bench", "instrument"]

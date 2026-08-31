@@ -4137,15 +4137,30 @@ fn resolve_reduce_axis_shape<'op>(resolved: &BoundOp, output_axes: &'op [u16]) -
 /// `ci` axis sits outside the window's `oh`/`ow` axes in memory — the
 /// exact mechanism `run_reduce`'s own `reduction_strides` doc cites.
 fn reduction_is_fully_flat(resolved: &BoundOp, reduction_dims: &[u16], operand_index: usize) -> bool {
+    max_flat_reduction_suffix_len(resolved, reduction_dims, operand_index) == reduction_dims.len()
+}
+
+/// [`reduction_is_fully_flat`]'s own row-major contiguity chain, generalized
+/// from a bool to a count: how many of `reduction_dims`'s TRAILING entries
+/// (innermost-first, matching that function's own `.iter().rev()` walk) this
+/// operand reads as one contiguous stride-1 span before the chain first
+/// breaks. `reduction_dims.len()` degenerates to today's original
+/// whole-range check unchanged. `docs/discipline.md` ROW 149 uses this to
+/// find `Conv`'s own inner-contiguous-block boundary (`ky,kx`, length 2)
+/// once the outer `ci` axis breaks the chain `Conv`'s materialized
+/// `windowed` operand never satisfies as a whole.
+fn max_flat_reduction_suffix_len(resolved: &BoundOp, reduction_dims: &[u16], operand_index: usize) -> usize {
     let view = &resolved.operands()[operand_index].1;
     let mut expected: i64 = 1;
+    let mut len = 0usize;
     for &dim in reduction_dims.iter().rev() {
         if view.stride(dim) != expected {
-            return false;
+            break;
         }
         expected = expected.saturating_mul(resolved.extents[dim as usize] as i64);
+        len += 1;
     }
-    true
+    len
 }
 
 /// The dense f32 GEMM interpreter: NEON dot/width tiles then a generic
@@ -4296,6 +4311,50 @@ fn run_reduce<B: Deref<Target = [f32]>>(
                 counters.output_writes += leading_total * width as u64;
                 let distinct_operand_elements: u64 = raw.iter().map(|buffer| buffer.len() as u64).sum();
                 counters.commit(path, distinct_operand_elements);
+            }
+            return Ok(());
+        }
+    }
+
+    // `Conv`'s own reduce shape (`docs/discipline.md` ROW 148/149): the
+    // reduction body's two operands own DISJOINT subsets of
+    // `leading_output_axes` (weight varies only with `co`, the materialized
+    // `windowed` operand only with `n,oy` plus the width dim `ox`), so
+    // neither `width_tile_plan` nor `neon_tile_plan` below can ever engage —
+    // both require `leading_output_axes.len() == 1`, a single axis BOTH
+    // operands share. Tried only when both of those already declined
+    // (`fast_path`/`reduction_fast_path` both false), so this can never
+    // steal a node either existing tile already claims.
+    #[cfg(target_arch = "aarch64")]
+    if !fast_path && !reduction_fast_path {
+        let conv_context = ConvGemmContext {
+            resolved,
+            shape: &shape,
+            reduce_op: *reduce_op,
+            init: *init,
+            leading_output_axes,
+            reduction_dims: &reduction_dims,
+            last_output_dim,
+            out_layout,
+        };
+        if let Some(plan) = conv_gemm_tile_plan(&conv_context) {
+            run_conv_gemm_tile(&plan, &raw, output);
+            #[cfg(feature = "instrument")]
+            {
+                // `PATH_CONV_TILE` (via `counters.commit` below) is this
+                // path's own unambiguous gate-pass signal — deliberately NOT
+                // `NEON_TILE_GATE_PASSES`, which `neon_tile_plan`'s own dot
+                // tile already owns and a shared assertion in this file's
+                // tests reads as "the dot tile fired".
+                counters.kernel_calls += (plan.m_total as u64).div_ceil(TILE_ROWS as u64)
+                    * (plan.n_total as u64).div_ceil(TILE_COLS as u64)
+                    * plan.outer_extent;
+                counters.mac_ops += plan.m_total as u64 * plan.n_total as u64 * reduction_total;
+                counters.operand_loads += (plan.m_total as u64 + plan.n_total as u64) * reduction_total;
+                counters.leading_iters += plan.m_total as u64;
+                counters.output_writes += plan.m_total as u64 * plan.n_total as u64;
+                let distinct_operand_elements: u64 = raw.iter().map(|buffer| buffer.len() as u64).sum();
+                counters.commit(Path::ConvTile, distinct_operand_elements);
             }
             return Ok(());
         }
@@ -6040,6 +6099,326 @@ fn neon_tile_plan(
         row_stride_a: row_stride_a as usize,
         col_stride_b: strides[index_b] as usize,
     })
+}
+
+/// Everything [`conv_gemm_tile_plan`] needs to decide whether `Conv`'s own
+/// disjoint-leading-axis reduce shape (`docs/discipline.md` ROW 148/149)
+/// qualifies for the blocked 2D GEMM tile — the same field set
+/// [`WidthPathContext`] bundles for its own gate, one context type per tile
+/// kind rather than a single context threading fields only some tiles read.
+#[cfg(target_arch = "aarch64")]
+struct ConvGemmContext<'a> {
+    resolved: &'a BoundOp,
+    shape: &'a BodyShape<'a>,
+    reduce_op: ScalarOp,
+    init: ReduceInit,
+    leading_output_axes: &'a [u16],
+    reduction_dims: &'a [u16],
+    last_output_dim: Option<u16>,
+    out_layout: &'a bind::Layout,
+}
+
+/// Everything [`run_conv_gemm_tile`]'s loop nest needs to walk, resolved
+/// once per bound op. `index_m`/`index_n` name the two operands by their
+/// role (`M` = the weight-shaped operand that owns exactly one leading axis
+/// and nothing else; `N` = the windowed-shaped operand that owns every
+/// other leading axis plus the width axis), not by which body-step slot
+/// they started in — `conv_gemm_tile_plan` tries both assignments and picks
+/// whichever satisfies the shape.
+#[cfg(target_arch = "aarch64")]
+struct ConvGemmTilePlan {
+    index_m: usize,
+    index_n: usize,
+    base_m: i64,
+    row_stride_m: i64,
+    outer_stride_m: i64,
+    base_n: i64,
+    col_stride_n: i64,
+    outer_stride_n: i64,
+    outer_extent: u64,
+    inner_span: usize,
+    out_base: i64,
+    out_row_stride: i64,
+    m_total: usize,
+    n_total: usize,
+    seed: f32,
+}
+
+/// Row-major contiguity chain over `axes` (given outer-to-inner, walked
+/// innermost-first via `.rev()`, the same convention
+/// [`max_flat_reduction_suffix_len`] uses) — `Some(total_elements)` when
+/// `view` addresses the WHOLE combined axis space as one contiguous
+/// stride-`unit` span, `None` at the first break. An axis whose own extent
+/// is `<= 1` is skipped rather than checked: its coordinate is always 0, so
+/// its physical stride can never affect an address and is not informative
+/// about contiguity — `Conv`'s own `n` axis (always extent 1 for every
+/// shape this initiative measured) would otherwise spuriously break the
+/// chain purely because `windowed`'s declared `[n,c,oh,ow,kh,kw]` layout
+/// (`docs/discipline.md` ROW 148) puts a real, un-skipped `c` between `n`
+/// and `oh`/`ow` — a genuine break for `n>1`, which this skip rule
+/// correctly still catches (a real, nonzero-extent axis out of chain order
+/// fails the `stride(dim) != expected` check exactly as before).
+#[cfg(target_arch = "aarch64")]
+fn axes_flat_chain(resolved: &BoundOp, axes: &[u16], view: &bind::Layout, unit: i64) -> Option<u64> {
+    let mut expected = unit;
+    let mut count: u64 = 1;
+    for &axis in axes.iter().rev() {
+        let extent = resolved.extents[axis as usize];
+        if extent <= 1 {
+            continue;
+        }
+        if view.stride(axis) != expected {
+            return None;
+        }
+        expected = expected.saturating_mul(extent as i64);
+        count = count.saturating_mul(extent);
+    }
+    Some(count)
+}
+
+/// Resolves [`ConvGemmTilePlan`] once per bound op, or `None` when this node
+/// does not match the shape the tile is built for. `Conv`'s own shape
+/// (`docs/discipline.md` ROW 148/149): `leading_output_axes` splits into one
+/// axis the `M` operand (weight) alone varies over and everything else the
+/// `N` operand (`windowed`) alone varies over, and `reduction_dims` splits
+/// into exactly one outer axis (`ci`) neither operand can flatten away and a
+/// trailing inner span (`ky,kx`) both operands read contiguously — the
+/// "blocked (2-level: outer x contiguous-inner)" shape ROW 148 named as the
+/// real next step and left unattempted pending this generalization.
+#[cfg(target_arch = "aarch64")]
+fn conv_gemm_tile_plan(context: &ConvGemmContext) -> Option<ConvGemmTilePlan> {
+    if !FUSED_MULTIPLY_ADD || context.reduce_op != ScalarOp::Add || matches!(context.init, ReduceInit::FirstElement) {
+        return None;
+    }
+    let BodyShape::Binary(op, operand_a, operand_b) = *context.shape else {
+        return None;
+    };
+    if op != ScalarOp::Multiply {
+        return None;
+    }
+    // `leading_output_axes.len() == 1` is exactly the shape `neon_tile_plan`
+    // already claims (both operands share one row axis); this tile exists
+    // for the case that gate can never reach.
+    if context.leading_output_axes.len() < 2 || context.reduction_dims.len() < 2 {
+        return None;
+    }
+    let resolved = context.resolved;
+    let operands = resolved.operands();
+    let index_a = operand_a as usize;
+    let index_b = operand_b as usize;
+    let (_, view_a, gather_a) = &operands[index_a];
+    let (_, view_b, gather_b) = &operands[index_b];
+    if gather_a.is_some() || gather_b.is_some() {
+        return None;
+    }
+
+    let suffix_a = max_flat_reduction_suffix_len(resolved, context.reduction_dims, index_a);
+    let suffix_b = max_flat_reduction_suffix_len(resolved, context.reduction_dims, index_b);
+    let inner_len = suffix_a.min(suffix_b);
+    // `inner_len == reduction_dims.len()` is `reduction_is_fully_flat` for
+    // BOTH operands at once — already `reduction_fast_path`'s own case, and
+    // this function is only ever tried when that gate declined.
+    if inner_len == 0 || inner_len >= context.reduction_dims.len() {
+        return None;
+    }
+    let split = context.reduction_dims.len() - inner_len;
+    let outer_dims = &context.reduction_dims[..split];
+    // exactly one outer axis (`ci`) is the provably-safe case ROW 148/149
+    // measured against every one of `Conv`'s 3 real folds; a wider outer
+    // block is a genuinely different, larger piece of surgery (a nested
+    // odometer instead of one flat `for outer_idx in 0..outer_extent` loop)
+    // left for a future row rather than guessed at here.
+    if outer_dims.len() != 1 {
+        return None;
+    }
+    let outer_dim = outer_dims[0];
+    let inner_dims = &context.reduction_dims[split..];
+    let inner_span: u64 = inner_dims.iter().map(|&dim| resolved.extents[dim as usize]).product();
+    let inner_span_i64 = i64::try_from(inner_span).ok()?;
+
+    try_conv_gemm_assignment(context, index_a, view_a, index_b, view_b, outer_dim, inner_span_i64)
+        .or_else(|| try_conv_gemm_assignment(context, index_b, view_b, index_a, view_a, outer_dim, inner_span_i64))
+}
+
+/// One candidate `(M operand, N operand)` assignment for
+/// [`conv_gemm_tile_plan`] — tried once per operand ordering, since the
+/// fused body's own step order (`windowed * weight` vs `weight * windowed`)
+/// is not guaranteed and this tile cares about roles, not slot positions.
+#[cfg(target_arch = "aarch64")]
+fn try_conv_gemm_assignment(
+    context: &ConvGemmContext,
+    index_m: usize,
+    view_m: &bind::Layout,
+    index_n: usize,
+    view_n: &bind::Layout,
+    outer_dim: u16,
+    inner_span: i64,
+) -> Option<ConvGemmTilePlan> {
+    let resolved = context.resolved;
+    let mut m_axis = None;
+    for &axis in context.leading_output_axes {
+        if resolved.extents[axis as usize] <= 1 {
+            continue;
+        }
+        match (view_m.stride(axis), view_n.stride(axis)) {
+            (stride_m, 0) if stride_m != 0 => {
+                if m_axis.is_some() {
+                    // more than one axis the M operand alone owns: outside
+                    // this tile's single-row-axis scope.
+                    return None;
+                }
+                m_axis = Some(axis);
+            }
+            (0, _) => {}
+            _ => return None, // shared or N-owned axis the M operand also varies over
+        }
+    }
+    let m_axis = m_axis?;
+    let row_stride_m = view_m.stride(m_axis);
+    if row_stride_m < 0 {
+        return None;
+    }
+    if let Some(width_dim) = context.last_output_dim
+        && resolved.extents[width_dim as usize] > 1
+        && view_m.stride(width_dim) != 0
+    {
+        return None;
+    }
+
+    // built once per bound op (this function runs once per `Keep::Reduce`
+    // fold, never per element), the same setup-path cost `reduction_strides`
+    // already pays in `run_reduce`.
+    let n_axes: Vec<u16> = context
+        .leading_output_axes
+        .iter()
+        .copied()
+        .filter(|&axis| axis != m_axis)
+        .chain(context.last_output_dim)
+        .collect();
+    if n_axes.is_empty() {
+        return None;
+    }
+    let n_total_n = axes_flat_chain(resolved, &n_axes, view_n, inner_span)?;
+    let n_total_out = axes_flat_chain(resolved, &n_axes, context.out_layout, 1)?;
+    if n_total_n != n_total_out {
+        return None;
+    }
+
+    let outer_stride_m = view_m.stride(outer_dim);
+    let outer_stride_n = view_n.stride(outer_dim);
+    if outer_stride_m < 0 || outer_stride_n < 0 {
+        return None;
+    }
+
+    Some(ConvGemmTilePlan {
+        index_m,
+        index_n,
+        base_m: view_m.base,
+        row_stride_m,
+        outer_stride_m,
+        base_n: view_n.base,
+        col_stride_n: inner_span,
+        outer_stride_n,
+        outer_extent: resolved.extents[outer_dim as usize],
+        inner_span: inner_span as usize,
+        out_base: context.out_layout.base,
+        out_row_stride: context.out_layout.stride(m_axis),
+        m_total: resolved.extents[m_axis as usize] as usize,
+        n_total: n_total_n as usize,
+        seed: initial_value(context.init).unwrap_or(0.0),
+    })
+}
+
+/// Runs the whole bound op `plan` describes: an `M x N` output tile, each
+/// cell folded over `outer_extent` blocks of `inner_span` contiguous
+/// elements — `Conv`'s own `sum over ci of (weight[co,ci,:,:] . windowed[n,
+/// ci, oy, ox, :, :])`. Reuses [`gemm_tile_neon`] entirely unchanged, called
+/// once per `(M tile, N tile, outer step)` into the SAME `tile_out`
+/// register array: that kernel already reads its `out` parameter's existing
+/// value and adds to it (`gemm_tile_neon`'s own doc), so accumulating across
+/// `outer_extent` ci-blocks needs no new kernel body, only a caller that
+/// seeds `tile_out` once before the outer loop and writes it to `output`
+/// once after — the exact reuse ROW 148's own "blocked" rejected-alternative
+/// named as mechanically sound but blocked on this function's own gate.
+#[cfg(target_arch = "aarch64")]
+fn run_conv_gemm_tile(plan: &ConvGemmTilePlan, raw: &[&[f32]], output: &mut [f32]) {
+    let tiled_rows = plan.m_total - plan.m_total % TILE_ROWS;
+    let mut row = 0usize;
+    while row < tiled_rows {
+        conv_gemm_row_block::<TILE_ROWS>(plan, raw, output, row);
+        row += TILE_ROWS;
+    }
+    match plan.m_total - tiled_rows {
+        0 => {}
+        1 => conv_gemm_row_block::<1>(plan, raw, output, tiled_rows),
+        2 => conv_gemm_row_block::<2>(plan, raw, output, tiled_rows),
+        3 => conv_gemm_row_block::<3>(plan, raw, output, tiled_rows),
+        4 => conv_gemm_row_block::<4>(plan, raw, output, tiled_rows),
+        5 => conv_gemm_row_block::<5>(plan, raw, output, tiled_rows),
+        _ => unreachable!("m_total - tiled_rows must be < TILE_ROWS (6) after the main tiled pass"),
+    }
+}
+
+/// One `ROWS`-tall strip of [`run_conv_gemm_tile`]'s own `M x N` output,
+/// generic over `ROWS` the same way [`gemm_tile_neon`] itself is: the main
+/// pass monomorphises at [`TILE_ROWS`], the row-remainder pass (any leftover
+/// `1..=5`) at exactly the width it needs, identical body either way. The
+/// column loop mirrors `run_reduce`'s own main tile pass — a `TILE_COLS`-wide
+/// NEON tile per step, then a scalar remainder for whatever `n_total %
+/// TILE_COLS` leaves over (never fired for any of `Conv`'s 3 real mnist
+/// folds, all `n_total` multiples of 4, but not assumed so here).
+#[cfg(target_arch = "aarch64")]
+fn conv_gemm_row_block<const ROWS: usize>(plan: &ConvGemmTilePlan, raw: &[&[f32]], output: &mut [f32], row_start: usize) {
+    let out_row_base = plan.out_base + plan.out_row_stride * row_start as i64;
+    let a_row_base = plan.base_m + plan.row_stride_m * row_start as i64;
+    let tiled_cols = plan.n_total - plan.n_total % TILE_COLS;
+
+    let mut col = 0usize;
+    while col < tiled_cols {
+        let mut tile_out = [[plan.seed; TILE_COLS]; ROWS];
+        let mut a_base = a_row_base;
+        let mut b_base = plan.base_n + plan.col_stride_n * col as i64;
+        for _ in 0..plan.outer_extent {
+            // `conv_gemm_tile_plan`'s own gate already proved: no gathers,
+            // `inner_span` contiguous elements at `a_base`/`b_base` for
+            // every row and column this tile visits, `m_total`/`n_total`
+            // bound every offset formed below within the source slices.
+            unsafe {
+                gemm_tile_neon::<ROWS>(
+                    KStridedTile { data: raw[plan.index_m], base: a_base, k_stride: plan.row_stride_m },
+                    KStridedTile { data: raw[plan.index_n], base: b_base, k_stride: plan.col_stride_n },
+                    plan.inner_span,
+                    &mut tile_out,
+                );
+            }
+            a_base += plan.outer_stride_m;
+            b_base += plan.outer_stride_n;
+        }
+        for (row, tile_row) in tile_out.iter().enumerate() {
+            let out_row = out_row_base + plan.out_row_stride * row as i64;
+            for (column, &value) in tile_row.iter().enumerate() {
+                output[(out_row + (col + column) as i64) as usize] = value;
+            }
+        }
+        col += TILE_COLS;
+    }
+
+    for n in tiled_cols..plan.n_total {
+        for row in 0..ROWS {
+            let mut a_base = a_row_base + plan.row_stride_m * row as i64;
+            let mut b_base = plan.base_n + plan.col_stride_n * n as i64;
+            let mut total = plan.seed;
+            for _ in 0..plan.outer_extent {
+                for step in 0..plan.inner_span as i64 {
+                    total = raw[plan.index_m][(a_base + step) as usize].mul_add(raw[plan.index_n][(b_base + step) as usize], total);
+                }
+                a_base += plan.outer_stride_m;
+                b_base += plan.outer_stride_n;
+            }
+            let out_row = out_row_base + plan.out_row_stride * row as i64;
+            output[(out_row + n as i64) as usize] = total;
+        }
+    }
 }
 
 /// Packed bytes per `Q4_K` super-block — re-exported at this crate's own

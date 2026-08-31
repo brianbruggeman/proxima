@@ -90,8 +90,8 @@ fn main() {
 
     let totals = instrument::totals();
     println!(
-        "path kinds (accumulated since last per-call finish-reset only, see NOTE above): dot_fast={} width_fast={} generic={}",
-        totals.path_dot_fast, totals.path_width_fast, totals.path_generic
+        "path kinds (accumulated since last per-call finish-reset only, see NOTE above): dot_fast={} width_fast={} conv_tile={} generic={}",
+        totals.path_dot_fast, totals.path_width_fast, totals.path_conv_tile, totals.path_generic
     );
 
     let mut op_kind_counts: BTreeMap<&'static str, usize> = BTreeMap::new();
