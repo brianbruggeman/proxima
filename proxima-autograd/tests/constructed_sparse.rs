@@ -332,18 +332,28 @@ fn checked_indices(len: usize) -> impl Iterator<Item = usize> {
 /// and checks two things: the adjoint appends a BOUNDED number of extra
 /// multiply-adds, never one that scales toward the DENSE `dim^2` a bug
 /// reintroducing a dense-shaped backward pass would produce. Reading the
-/// measured ratio (about 3.0-3.1x forward here) traces to three full-cost
-/// routing reduces, not two: `differentiate` walks every node from the
-/// loss down, so the forward layer's OWN `Reduce` (routing gradient from
-/// `output` back to the `Multiply` node) gets an adjoint reduce exactly
-/// as expensive as the forward reduce, on top of the `Multiply`'s own two
-/// operand routings (`x` and `w`) -- three full-cost reduces plus one tiny
-/// pass-through for the scalar loss's own reduce (`batch * block_count *
-/// block_size`, a few percent of the total). Central difference over the
-/// real scalar loss then confirms the adjoint is not just bounded but
-/// CORRECT, under PyTorch's combined `atol + rtol * |numeric|` criterion
-/// (`language_model.rs`'s own documented reason a bare relative error is
-/// not enough for near-zero gradients).
+/// measured ratio (exactly 2.0x forward here) traces to two full-cost
+/// routing reduces, not three: `differentiate` walks every node from the
+/// loss down, and the forward layer's own `Reduce` (routing gradient from
+/// `output` back to the `Multiply` node) has an identity `in_map` -- ROW
+/// 163 (`proxima-autograd/src/adjoint.rs`'s `differentiate_reduce`) skips
+/// materializing an un-reduce wrapper whenever `reduce.in_map == full`,
+/// since that case can only ever be a one-to-one copy of `contribution`,
+/// never an accumulation, so the routed gradient becomes the `Elementwise`
+/// contribution directly with zero extra reduce cost. What remains
+/// full-cost is the `Multiply`'s own two operand routings (`x` and `w`)
+/// plus one tiny pass-through for the scalar loss's own reduce (`batch *
+/// block_count * block_size`, a few percent of the total, still counted
+/// in `adjoint_appended_macs` but negligible against the 2x floor).
+/// Central difference over the real scalar loss then confirms the adjoint
+/// is not just bounded but CORRECT, under PyTorch's combined `atol + rtol
+/// * |numeric|` criterion (`language_model.rs`'s own documented reason a
+/// bare relative error is not enough for near-zero gradients) --
+/// re-verified directly against this eliminated-reduce shape by
+/// temporarily running the gradient check ahead of the mac-floor
+/// assertion (bea561b's adjudication): gradients agreed with central
+/// difference at both `(block_count, block_size)` cases, so the floor
+/// below tracks the new structural truth, not a regression.
 #[proxima::test]
 async fn adjoint_of_a_constructed_sparse_layer_stays_small_and_gradient_checks() {
     for &(block_count, block_size) in &[(2usize, 25usize), (10usize, 10usize)] {
@@ -369,15 +379,16 @@ async fn adjoint_of_a_constructed_sparse_layer_stays_small_and_gradient_checks()
             adjoint_appended_macs as f64 / forward_macs as f64
         );
         assert!(
-            adjoint_appended_macs >= forward_macs * 3,
-            "adjoint must route three full-cost reduces (output->product, product->x, product->w): {adjoint_appended_macs} < {}",
-            forward_macs * 3
+            adjoint_appended_macs >= forward_macs * 2,
+            "adjoint must route two full-cost reduces (product->x, product->w); output->product is a pure identity-mapped \
+             copy that ROW 163 routes without a materializing reduce: {adjoint_appended_macs} < {}",
+            forward_macs * 2
         );
         assert!(
-            adjoint_appended_macs < forward_macs * 4,
+            adjoint_appended_macs < forward_macs * 3,
             "adjoint cost must stay a small bounded multiple of the forward cost, not scale toward the dense shape: \
              {adjoint_appended_macs} >= {}",
-            forward_macs * 4
+            forward_macs * 3
         );
 
         let x_values = counter_pattern(19, batch * block_count * block_size);
