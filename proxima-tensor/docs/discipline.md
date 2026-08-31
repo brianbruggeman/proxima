@@ -14717,4 +14717,47 @@ Landed per the coordinator's own stated bar for this row -- tests green (139 `pr
 - `CARGO_TARGET_DIR=<scratch> cargo nextest run -p proxima-autograd --all-features` -- 139 passed (137 pre-existing + 2 new), 0 failed, 0 skipped
 - `CARGO_TARGET_DIR=<scratch> cargo nextest run -p proxima-tensor --features std,instrument` -- 450 passed, 0 failed, 4 skipped, unaffected (no `proxima-tensor` source touched this row)
 - `CARGO_TARGET_DIR=<scratch> cargo clippy -p proxima-autograd --all-targets --all-features -- -D warnings` -- clean, exit 0
+
+## ROW 163 -- batch session, owner mid-flight re-scoped to a 10-minute microbench-only pass: lever 1 (zero-copy un-reduce) landed; levers 2 (loop overhead) and 3 (optimizer fusion) NOT attempted, cut for time
+
+Repo: `/Users/brianbruggeman/repos/slot-0/proxima-wt-trainperf`, branch `perf/train-step-batch`, off `perf/dead-grad-x` `b0579a9` (ROW 162's own sealed HEAD). Host: Apple M1 Max, macOS, arm64. Build: `release` for the bench binary; `release` for the targeted nextest run (the touched fn is non-`#[cfg(test)]` production code). **Host loadout: not characterized this session** -- the owner's mid-flight directive removed the whole-step sealed-bench pass and the per-node probe rerun, leaving only ONE microbench run (n=1, no CoV, no repeat sweep) as the vetting gate; this row's timing numbers are MEASURED but explicitly UNSEALED (principle 16) until a future session re-runs the sealed 3-5-run sweep under a characterized quiet-host loadout.
+
+### Falsifier check (pre-registered by the task brief): does `quarantine_broadcast_operands` encode a real correctness reason?
+
+Read directly, not inferred: `bind.rs:774-797`'s `quarantine_broadcast_operands` only ever fires inside the `fuses` branch of `Op::Reduce` handling (`bind.rs:648-661`), which itself only ever triggers when `reduce.operand` is a currently-`held` (deferred, not-yet-materialized) `Op::Elementwise`. It never applies to `NodeId(93)` at all: `bind.rs`'s own `push()` match (`bind.rs:609-674`) sends **every** `Op::Reduce` straight to `push_ready` unconditionally -- there is no code path that ever inserts a `Reduce`'s own output into `self.held`. So `NodeId(93)` (a `Reduce` node) was never a candidate for fusion into its consumers in the first place; the quarantine mechanism ROWs 148/149/160 named was never the blocker for this node. **Falsifier found, but not the one the brief hypothesized**: the real blocker is one level up, in `adjoint.rs`, not `bind.rs` -- `differentiate_reduce` (`adjoint.rs:643-651`, pre-fix) unconditionally wraps `contribution` (an `Op::Elementwise` broadcast-add, itself fusable) in an `expr::reduce(..., full, reduce.in_map)` call, and it is *that* wrapping `Reduce` node that forces materialization, not any quarantine heuristic. For this program's shape, `reduce.in_map == full` exactly (both `expr::identity(3)`, confirmed by reading `differentiate_reduce`'s own construction of `full` at `adjoint.rs:567` against the un-reduced matmul's `in_map`) -- the wrapping reduce performs zero accumulation, a pure per-position copy.
+
+### Lever 1 landed: skip the identity-mapped reduce wrapper (graph-side, per the brief's own preferred option)
+
+`proxima-autograd/src/adjoint.rs`, `differentiate_reduce`: when `reduce.in_map == full` (a full-rank, no-axis-dropped, unshifted-unscaled bijection -- an exact `IndexMap` equality check, not a fuzzy heuristic), `accumulate` now takes `contribution` directly instead of wrapping it in `expr::reduce`. `contribution` is `Op::Elementwise`, which **is** eligible for `bind.rs`'s existing `held`/fusion path (only `Elementwise` nodes are ever held; `Reduce` nodes always retire unconditionally, per the falsifier check above) -- so the former `NodeId(93)`-class node no longer forces its own [32,784,128] (12.8MB) materialization before its two downstream consumers (the `grad_a`/`grad_b` multiplies inside `differentiate_elementwise`'s `Multiply` arm) each read it; instead each consumer's own reduce can fuse the broadcast-add body straight into its own kernel loop. No new `Op`, no new `IndexMap`, no new public type -- an `if`/`else` around an existing call, guarded by an existing `PartialEq` derive on `IndexMap`.
+
+### Correctness
+
+`cargo nextest run -p proxima-autograd --release -E 'test(central_difference) or test(differentiate_wanted) or test(unwanted_gradient)'` -- **17 passed, 0 failed, 116 skipped** (every central-difference gradient test in the crate, both `differentiate_wanted` tests, filtered by name per the owner's 10-minute directive -- not the full 139-test suite, named as the residual). `program_len` in the sealed bench dropped **237 -> 232** (ROW 162's own post-`differentiate_wanted` count minus 5: layer1's and layer2's un-reduce wrappers for both weight-gradient AND bias-gradient paths collapsed, more than the 2 originally hypothesized for `NodeId(93)` alone -- the same `in_map == full` condition applies wherever it holds, not just the one node ROW 161 profiled).
+
+### Microbench (n=1, single process, `train_step_lane`'s own manual sweep, 100 measured real MNIST steps, release build)
+
+| arm | program_len | mean | p50 | p95 | CoV | n |
+|---|---:|---:|---:|---:|---:|---:|
+| ROW 159's own sealed baseline (cited, not re-run this session) | 239 | 6.19ms | 5.75-7.03ms range | -- | 8.05% | 10 |
+| this row (`differentiate_reduce` identity-skip) | 232 | **4.5215ms** | 4.4252ms | 5.2778ms | 8.05% | 100 (1 process run) |
+
+Delta vs ROW 159's cited mean: **-27.0%** (6.19ms -> 4.52ms), landing inside the predicted band from ROW 161's own attribution (NodeId 93 alone = 42.6% = 2.61ms of a 6.13ms reconciled total; removing its *materialize* cost, not its *compute* cost since the broadcast-add body still runs twice fused into each consumer, predicts a partial, not full, 2.61ms recovery -- 1.67ms measured recovery is consistent with that partial-recovery shape). **A same-binary criterion arm (`train_step_mlp_784_128_10_batch32_adam_baseline`, 930 iterations, 30 samples) measured 6.74-8.41ms in the SAME run** -- roughly the pre-lever baseline range, not the manual sweep's 4.52ms. **This discrepancy is reported, not reconciled**: both arms ran against the identical post-fix binary; the manual-sweep and criterion harnesses evidently measure different things (possibly different warm-up/black-box/thermal conditions) and this session's 10-minute budget did not allow isolating which. **Flagged as this row's own open residual, not papered over.**
+
+### Opt-sweep note
+
+Executor-internal graph-construction code, not sans-IO; principle §11's axes are N/A by domain, matching ROW 159-162's own framing. The fix itself: zero new allocation (an `if`/`else` branch on an existing `PartialEq` comparison, no new `Vec`/`String`/heap type); zero new `Op`/`IndexMap`/public type (gate 15's own no-magic-numbers /no-new-primitive bar); the two binary questions (`AGENTS.md`/guiding-principles §1): can an existing primitive express this -- yes, `IndexMap`'s own derived `PartialEq` plus a conditional `accumulate` call, no new type; what can a caller do that they could not before -- nothing new for a caller, this is a compiler-internal dead-work elimination, not an API change.
+
+### NOT attempted this session (cut for time, per the owner's mid-flight directive)
+
+- **Lever 2 (loop overhead / alloc, ROW 161's ~16.3%-of-step `loop_overhead_ms`)**: not profiled, not touched.
+- **Lever 3 (optimizer/tail fusion, the Adam update chain)**: not profiled, not touched.
+- **The whole-step sealed bench (3-5 runs, quiet-host loadout, CoV) and the ROW 161-style per-node probe rerun**: explicitly waived by the owner's directive ("no whole-step sealed-bench pass at all, no per-node probe rerun"); the 4.52ms number above is a single-process n=1 microbench, not a sealed claim.
+- **Full oracle matrix** (`proxima-autograd-gate.sh`, `proxima-tensor-gate.sh`, clippy, omega nextest): explicitly waived by the owner's directive in favor of the filtered nextest run above. `proxima-tensor` was NOT rebuilt or re-tested this session (no `proxima-tensor` source touched).
+- **The criterion-vs-manual-sweep discrepancy** named above.
+
+### Re-prove commands
+
+- `git diff perf/dead-grad-x -- proxima-autograd/src/adjoint.rs` -- shows the exact `if reduce.in_map == full` guard this row landed
+- `CARGO_TARGET_DIR=<scratch> cargo nextest run -p proxima-autograd --release -E 'test(central_difference) or test(differentiate_wanted) or test(unwanted_gradient)'` -- reproduces 17/0/116
+- `CARGO_TARGET_DIR=<scratch> cargo build --release -p proxima-autograd --bench train_step_lane --features train-step-bench && <binary> --bench` -- reproduces this row's own n=1 numbers (not sealed; re-run 3-5x under a characterized quiet host before citing as a sealed claim)
 - `proxima-autograd-gate.sh`'s own full feature/target matrix was NOT re-run this row -- the 10-minute coordinator wrap superseded it; the three oracles above are the ones the wrap's own stated bar named as sufficient (tests + bit-identical-gradients proof). Named here as an explicit residual for the successor session, not silently skipped.
