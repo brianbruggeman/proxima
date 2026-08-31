@@ -24,6 +24,9 @@
 //! - [`loss::mse`] / [`loss::cross_entropy`] / [`loss::softmax_cross_entropy`]
 //!   — the same graph-building shape, for the scalar objective a training
 //!   loop differentiates.
+//! - [`norm::dropout`] — the same graph-building shape again: inverted
+//!   dropout over a caller-supplied 0/1 mask `Op::Input`, never a graph-level
+//!   random source.
 //! - [`optimizer::adam_step`] / [`optimizer::sgd_step`] /
 //!   [`optimizer::rmsprop_step`] / [`optimizer::adamw_step`] — parameter
 //!   updates as elementwise expressions over `(param, grad, ...)`.
@@ -76,6 +79,7 @@ pub mod conv;
 pub mod error;
 pub(crate) mod expr;
 pub mod loss;
+pub mod norm;
 pub mod optimizer;
 pub mod sparse;
 // `evaluate_named` (proxima-tensor's own std-gated `cpu` module) is what
