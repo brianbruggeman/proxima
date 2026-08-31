@@ -142,6 +142,11 @@ pub static OUTPUT_WRITES: Counter = Counter::new("proxima_tensor.output_writes")
 pub static PATH_DOT_FAST: Counter = Counter::new("proxima_tensor.path.dot_fast");
 pub static PATH_WIDTH_FAST: Counter = Counter::new("proxima_tensor.path.width_fast");
 pub static PATH_GENERIC: Counter = Counter::new("proxima_tensor.path.generic");
+/// `docs/discipline.md` ROW 149: the blocked (outer ci x contiguous inner
+/// ky,kx) 2D GEMM tile for `Conv`'s own disjoint-leading-axis reduce shape —
+/// distinct from [`PATH_DOT_FAST`], whose `neon_tile_plan` gate requires a
+/// single shared leading axis `Conv` never has.
+pub static PATH_CONV_TILE: Counter = Counter::new("proxima_tensor.path.conv_tile");
 pub static LEADING_ITERS: Counter = Counter::new("proxima_tensor.leading_iters");
 pub static KERNEL_CALLS: Counter = Counter::new("proxima_tensor.kernel_calls");
 
@@ -981,6 +986,7 @@ pub fn reset_alloc_sites() {
 pub enum Path {
     DotFast,
     WidthFast,
+    ConvTile,
     Generic,
 }
 
@@ -1009,6 +1015,7 @@ impl KernelCounters {
         match path {
             Path::DotFast => counter!(PATH_DOT_FAST, 1),
             Path::WidthFast => counter!(PATH_WIDTH_FAST, 1),
+            Path::ConvTile => counter!(PATH_CONV_TILE, 1),
             Path::Generic => counter!(PATH_GENERIC, 1),
         }
     }
@@ -1026,6 +1033,7 @@ pub struct Totals {
     pub output_writes: u64,
     pub path_dot_fast: u64,
     pub path_width_fast: u64,
+    pub path_conv_tile: u64,
     pub path_generic: u64,
     pub leading_iters: u64,
     pub kernel_calls: u64,
@@ -1041,6 +1049,7 @@ pub fn totals() -> Totals {
         output_writes: OUTPUT_WRITES.get(),
         path_dot_fast: PATH_DOT_FAST.get(),
         path_width_fast: PATH_WIDTH_FAST.get(),
+        path_conv_tile: PATH_CONV_TILE.get(),
         path_generic: PATH_GENERIC.get(),
         leading_iters: LEADING_ITERS.get(),
         kernel_calls: KERNEL_CALLS.get(),
@@ -1057,6 +1066,7 @@ pub fn reset() {
     let _ = OUTPUT_WRITES.snapshot_and_reset();
     let _ = PATH_DOT_FAST.snapshot_and_reset();
     let _ = PATH_WIDTH_FAST.snapshot_and_reset();
+    let _ = PATH_CONV_TILE.snapshot_and_reset();
     let _ = PATH_GENERIC.snapshot_and_reset();
     let _ = LEADING_ITERS.snapshot_and_reset();
     let _ = KERNEL_CALLS.snapshot_and_reset();
