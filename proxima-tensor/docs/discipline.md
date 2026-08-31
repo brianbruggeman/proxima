@@ -13982,3 +13982,93 @@ The task brief frames this as "the ConvTile (ROW 149) does NOT catch its fold sh
 **Re-prove commands:**
 - `git status --short` — empty, confirms no rung-2 source exists on this tree
 - Re-read ROW 150's own "Levers evaluated, not attacked" §(a) (`docs/discipline.md`, this file, ROW 150) — the unattempted charter, verbatim, that rung 2 still needs to execute
+
+## ROW 154 — rung 2 lands: a window-materialize-shaped identity copy (post-ROW-147's collapsed `Unary(Identity, _)` body) gets a specialized row-segment copy in place of ROW 150's own per-row block loop; mechanism-level -31.5%, whole-model -22.9% vs ROW 150's sealed baseline, NEITHER pre-registered bar (<=1.6ms / <=1.36ms) MET on the cross-run mean; a hand-unrolled `kw==3` variant was tried and ROLLED BACK as no-signal-to-negative
+
+Repo: `/Users/brianbruggeman/repos/slot-0/proxima-wt-neon`, branch `perf/window-copy-kernel`, off `0556efa` (ROW 153's own sealed HEAD, a clean no-op session). `CARGO_TARGET_DIR` pinned to a scratchpad dir for every command below. Host: Apple M1 Max, macOS, arm64. Build profile: `dev` for tests/clippy/mnist_diag, `release`/`bench` for the sealed bench and micro-bench — never mixed with correctness runs. **Host loadout: LOADED for a real portion of this session, named precisely.** `pgrep -fl 'cargo|rustc|nextest'` showed no build process at the session's start and through the first correctness/mnist_diag/micro-bench-run1 passes (only `cdb-daemon`/`sccache`, load average 12-26). Partway through the session a SEPARATE agent's own `cargo nextest run -p proxima-autograd` (first the whole package, later `--test real_mnist_conv_training`) started in the sibling worktree `proxima-wt-anchor` and stayed resident through the rest of the micro-bench and sealed-bench runs (confirmed via `pgrep`, load average spiking to 43.65 at its start); waited ~4 minutes for it to clear per the MEASURE-ALONE protocol, it did not, proceeded and **every timed number taken after that point is MARKED LOADED**, reported as a range, never a point estimate.
+
+### Detected body, MEASURED not assumed (task's own first ask)
+
+`proxima-onnx/src/lower.rs:2320`'s `window_materialize` still builds `Op::Elementwise{ body: ScalarOp::Multiply, operands: [(image, window_axis_pattern), (stamp, projection_pattern)] }` verbatim — unchanged since ROW 147. Reading `bind.rs`'s `compose`/`compose_operand`/`eliminate_identity_multiply` (ROW 147's own landing) confirms, and this session's own `mnist_diag` run confirms by COUNT (`DIAG nsper elementwise_monomorphic elements=117262` matching ROW 149/150's own cited figure exactly), that post-bind the body is `BodyShape::Unary(ScalarOp::Identity, image_operand)` — a bare copy, exactly the task's own "likely Identity" prediction, not a hypothesis. `image_operand`'s composed `IndexMap` carries `window_materialize`'s own two-term `window_axis` pattern (`h = oy*stride + ky*dilation`, `w = ox*stride + kx*dilation`); for every one of mnist's 3 real `Conv` folds (`stride=1, dilation=1`) this makes the `kw` (innermost, `inner_len`) axis read at source stride 1 — genuinely contiguous — and the `kh` axis (`block_dim`, ROW 150's own blocking dim) read at a regular, non-unit stride (the padded image's row width). This is exactly the shape the task named.
+
+### Design: `window_copy_operand` (detector) + `window_copy_block` (kernel), both `cpu.rs`-internal
+
+`window_copy_operand(shape, fast_path, block_extent, strides) -> Option<u16>` fires only for `BodyShape::Unary(ScalarOp::Identity, operand)` with `fast_path` (ROW 3's own gate) true, `block_extent > 1` (ROW 150's own block engaged), AND `strides[operand] == 1` — computed once per `run_elementwise_range` call, the same per-call-constant discipline `fast_path`/`block_strides` already use. Wired into the SAME block-eligible branch ROW 150 added (`outer_coordinate.last()==Some(&0)`, a full `block_extent`-long run fits): when `Some`, `window_copy_block` runs instead of the `for step in 0..block_extent { elementwise_width_fast(...) }` loop, doing `block_extent` `copy_from_slice` row copies directly against `raw[operand]`/`running[operand]`/`block_strides[operand]`, bypassing `elementwise_width_fast`'s per-row `BodyShape`/`ScalarOp` match, `OperandSpan` construction, and `elementwise_width_unary_monomorphic`'s own per-element closure-applied loop entirely. Falls straight through to the unchanged ROW 150 block loop for every other shape (`Binary`, `Generic`, or `strides[operand] != 1`) — zero behavior change there.
+
+**The gate stays deliberately narrow on SHAPE, not axis names**, per the task's own charter and `Layout::offset_of`'s exact linearity (ROW 150's own proof, unchanged): correct for ANY operand whose body happens to match `Unary(Identity, _)` with a live, stride-1-inner block, window-materialize or not.
+
+### A real bug found and fixed BEFORE landing: `fast_path` admits stride 0, not only 1
+
+First implementation gated only on `fast_path` (which `body_shape_is_affine_fast_path`'s own `operand_is_unit_or_broadcast` admits stride 0 OR 1 — a genuine broadcast). `cargo nextest run -p proxima-onnx` caught it immediately: `maxpool_indices_row_major_...`/`maxpool_indices_column_major_...` (2 tests, previously green on `0556efa`, confirmed via `git stash`) panicked `range end index 5 out of range for slice of length 4` inside `window_copy_block`. Root-caused by reading `proxima-onnx/src/lower.rs`'s `coordinate_image`/`maxpool_indices`: `MaxPool`'s `Indices` output builds a `row_image`/`col_image` (an iota broadcast along ONE spatial axis only) and window-materializes THAT — composing to `Unary(Identity, iota_operand)` where the iota's own `kw`-axis stride is 0 (the value never varies along the width axis), not 1. My `window_copy_block` assumed contiguity unconditionally and read `source[start..start+inner_len]` past the iota buffer's own 4-element bound. Fixed by threading `strides` into `window_copy_operand` and requiring `strides[operand] == 1` explicitly, not inferring it from `fast_path`. **Re-run after the fix: both tests green, full oracle set clean (below).** This is exactly principle 6/gate 3's own point — the fix landed because the gate ran BEFORE the commit, not after.
+
+### Correctness reasoning
+
+`window_copy_block`'s row loop computes the IDENTICAL sequence of source addresses the block loop it replaces would have computed (`Layout::offset_of`'s linearity, ROW 150's own proof, re-applied here to a single operand instead of all operands) — `copy_from_slice` on that address is bit-identical to `elementwise_width_unary_monomorphic`'s own `op(raw_value)` loop with `op = |a| a`. Verified: 446/446 `proxima-tensor` tests green (identical N to ROW 150/153), 82/82 `proxima-onnx` (identical N to ROW 149, INCLUDING the 2 `MaxPool` `Indices` tests the bug above broke and this fix re-greened), 138/138 `omega` (identical N). MNIST accuracy bit-identical at 0.9900 (990/1000), confirmed twice this session (mid-session and on the final shipped tree).
+
+**No new `Op`/`ScalarOp`/`IndexMap`, no new public type.** `window_copy_operand`/`window_copy_block` are `cpu.rs`-internal `fn`s; `ELEMENTWISE_LOOP_TICKS_WINDOW_COPY`/`ELEMENTWISE_ELEMENTS_WINDOW_COPY` are `instrument`-gated diagnostic counters mirroring ROW 150's own `MONOMORPHIC_FAST`/`SLOW` pattern exactly, same module, same visibility.
+
+**Allocation budget.** Hot path (`window_copy_block`): **zero** — code-read-verified, no `Vec`/`Box`/`.collect()`, every argument a caller-owned slice or `i64`/`usize`/`u64` scalar. Setup path: unchanged from ROW 150 (one `Vec<i64>` `block_strides` per call, already paid before this row). Not measured via a tracking-allocator harness this session — same caveat ROW 149/150 both flagged, code-inspection-verified not instrumented-counted.
+
+### Negative result: hand-unrolled `kw==3` scalar copy — ROLLED BACK
+
+The task's own charter asked to measure unrolled-3-scalar vs `copy_from_slice` at mnist's real `kw=3`. Implemented `window_copy_block_kw3` (3 scalar assigns per row) dispatched via `if inner_len == 3`, saved a criterion baseline (`row154-micro-run1`, kw3 ENABLED), then disabled it (`if false && inner_len==3`) and re-ran the SAME `window_copy` arm on the SAME 4 shapes (`row154-genericslice`, kw3 DISABLED, criterion `--baseline` diff against run1): layer1 **-24.6%** (p=0.00, i.e. plain `copy_from_slice` FASTER), layer2 -1.4% (p=0.58, no signal), layer3 -2.2% (p=0.00 but small), larger -1.8% (p=0.12, no signal). Only layer1 showed a large, "significant" delta, and that shape's own `run1` sample had already flagged "2 outliers among 20 measurements (10.00%)" — consistent with the swing being a noisy `run1` sample, not a genuine kw3-unroll win, especially since 3 of 4 shapes show NO reliable difference either way. **Kept the simpler single `copy_from_slice`-only form; `window_copy_block_kw3` deleted, zero dead code shipped.** This is the log entry that stops the next session re-trying it (skill's own honesty rule).
+
+### Micro-bench (`proxima-tensor/benches/bench_window_copy.rs`, new, `harness = false`, no `required-features` — always built)
+
+Arms: `window_copy` (`design-favors: ours`) vs `block_loop_incumbent` (`design-favors: incumbent` — the SAME `window_materialize` shape/strides/element-count with one further, genuinely non-eliminable `+ 0.0` step chained ahead, which flips `body_shape` from `Unary(Identity,_)` to `Binary(Add,_,_)` and so falls straight through `window_copy_operand`'s own gate to ROW 150's own pre-existing per-row block loop — the REAL, shipped mechanism this rung supersedes, not a strawman; both arms cross-checked bit-within-1e-5-relative-tolerance before every timed run, `assert!` inside the bench itself). 4 shapes: mnist's 3 real `Conv` window-materialize shapes (source `h`/`w` derived as `oh+kh-1` at stride 1, ROW 149's own measured `extents`) plus one larger square shape. `sample_size(20)`.
+
+**Run 1 (quiet host, no competing build, load average 12-26; the numbers this row's verdict rests on):**
+
+| shape | window_copy mean [range] | block_loop_incumbent mean [range] | speedup |
+|---|---|---|---|
+| mnist_layer1 c1 26x26 k3 | 75.57 µs [73.25,80.08] (2 outliers/20) | 86.51 µs [85.997,87.053] | **1.13x** |
+| mnist_layer2 c8 24x24 k3 | 498.45 µs [484.93,521.05] | 578.73 µs [573.38,584.77] | **1.16x** |
+| mnist_layer3 c16 22x22 k3 | 796.42 µs [786.71,806.03] | 971.73 µs [962.74,980.59] | **1.22x** |
+| larger square c32 32x32 k3 | 3370.8 µs [3316.5,3439.3] | 4194.8 µs [4165.7,4223.2] | **1.24x** |
+
+**Run 2 (LOADED — a separate agent's `cargo nextest` process resident throughout, marked not hidden):** layer1 70.06 vs 120.26 µs (incumbent arm itself swung 91.9-161.1 µs, CoV far past 5%), layer2 466.70 vs 697.17 µs, layer3 801.39 vs 977.37 µs (the ONE shape where both runs agree almost exactly: 18.0% both times), larger 3697.0 vs 5078.3 µs. **Honest read: both runs agree on DIRECTION at every shape (specialized always faster) and the win widens with total copy volume (1.13x at the smallest shape to 1.22-1.24x at the two largest in the quiet run); the loaded run's magnitudes are not trustworthy as point estimates (CoV far past 5%, an incumbent-arm sample spanning 91.9-161.1 µs) but do not reverse direction on any shape.** Frequency-weighted note: all 3 real mnist shapes fire once each per image (same as ROW 149's own note), so the whole-model number below is the correct per-image-weighted read, not an average of these 4 arms.
+
+### Mechanism-level (`mnist_diag`, `elementwise_monomorphic`/`elementwise_window_copy` ns/element, n=20-21 calls/run, 3 independent process runs each side — MEASURED)
+
+| | BEFORE (`git stash`, `0556efa` unmodified, this session) | AFTER (this row, `elementwise_window_copy` counter) |
+|---|---|---|
+| run means | 7.10, 5.49, 6.16 | 3.73, 5.39, 3.71 |
+| mean of run means | 6.25 ns/element | **4.28 ns/element** |
+| range | [5.49, 7.10] | [3.71, 5.39] |
+| elements/call (all 3 runs, both sides) | 117262 (`elementwise_monomorphic`) | 117252 (`elementwise_window_copy` — the 10-element gap is the same non-block-aligned residual ROW 150 also carried, unrelated to this row) |
+
+**Delta: -1.97 ns/element, -31.5% on the mean-of-means (6.25 -> 4.28), and BEFORE's own minimum run-mean (5.49) exceeds AFTER's own maximum run-mean (5.39)** — outside the run-to-run noise band despite the loaded host, same separation criterion ROW 150 used for its own mechanism-level claim.
+
+### Whole-model sealed bench (`mnist_f32_lane`, `--features mnist-f32-bench`, `--save-baseline row154-after-run{1,2,3}`, 3 runs)
+
+| | BEFORE — ROW 150 sealed (cited, HEAD `0556efa`'s own ancestor, not re-run this session) | AFTER — this row, 3 runs |
+|---|---|---|
+| criterion mean | 2.2991 ms (mean of 3 run-means) | **1.7725 ms** (mean of 3 run-means: 1.8573, 1.6179, 1.8423) |
+| criterion 3-run ranges (raw `[low,est,high]`) | `[2.120,2.5185,2.354]`-shaped (ROW 150, cited) | run1 `[1.748,1.857,2.010]`, run2 `[1.442,1.618,1.821]`, run3 `[1.530,1.842,2.182]` ms |
+| cross-run CoV (this row) | 7.23% (ROW 150) | **7.57%** — reported as the range, per the >5% honesty rule; the live competing `nextest` process during run3 is the named suspect, not hidden |
+| accuracy (all runs, both mid-session and final tree) | 0.9900 (990/1000) | **0.9900 (990/1000)** — bit-identical, every run |
+| scalar-FMA roofline (this row's 3 runs) | 6.03-6.04 GMAC/s (ROW 150, cited) | **6.05-6.07 GMAC/s**, CoV <=0.45% each run — denominator did not drift |
+| vs scalar-FMA roofline (0.463 ms) | 4.97x (ROW 150) | **3.83x** |
+| vs burn ndarray (1.36 ms) | 1.69x (ROW 150) | **1.303x** |
+| vs NEON roofline (0.057 ms) | 40.33x (ROW 150) | **31.10x** |
+
+**Delta vs ROW 150: -0.5266 ms, -22.9% on the criterion cross-run mean (2.2991 -> 1.7725 ms).** Honest read: the mean moved in the predicted direction by roughly the magnitude the mechanism-level number implies (elementwise is ~58-73% of the forward across sessions, `window_materialize` is essentially all of `elementwise_monomorphic`, and a ~31.5% cut to that sub-path predicts a whole-model cut on a similar order to the measured 22.9%) — consistent with ROW 150's own cross-check methodology, not independently re-derived.
+
+### Milestone check, per the task's own pre-registration
+
+"<=1.6ms sealed bench = success": **NOT MET on the cross-run mean** (1.7725 ms is 1.108x over 1.6 ms) — but run2 alone (`1.6179 ms` estimate, `1.4422 ms` low bound) clears it, and the gap from ROW 150's own 2.2991 ms closed by 65% of the distance to the 1.6 ms bar. "<=1.36ms burn parity = stretch": **NOT MET** — 1.7725 ms is 1.303x over 1.36 ms, down from ROW 150's 1.69x (a 0.39x reduction in the gap, the largest single-row reduction in this gap since ROW 149). "Accuracy exactly 0.9900": **MET**, exactly, every run. "Roofline-first reporting (NEON 0.057ms)": **31.10x** (range 29.7-34.9x across the 3 runs' own `[low,high]` bounds), down from ROW 150's 40.33x.
+
+### `docs/discipline.md` opt-sweep note (§11, applied where it binds — executor-internal hot-path code, not sans-IO)
+
+State machine: N/A (a straight-line row-copy loop, not a protocol state machine). Bytes-first/borrowed views: DONE — `source`/`out` stay borrowed `&[f32]`/`&mut [f32]`, no owned intermediate. Zero-copy: N/A-by-nature — this op's OWN job is a copy (im2col materialization); "zero-copy" here means zero EXTRA copies beyond the one `window_materialize` itself requires, satisfied (one `copy_from_slice` per row, nothing staged through an intermediate buffer). Copy-over-clone: DONE — `copy_from_slice`, no `.clone()`/`.to_vec()` inside the hot loop. SIMD: PUNTED, not attempted — `copy_from_slice`'s own codegen (LLVM's `memcpy`/`memmove` lowering) is the SIMD path for a 3-9-element contiguous copy at this size; a hand-rolled NEON load/store was in the task's own candidate list for `kw>=4` but mnist's real shapes are all `kw=3`, and the kw3-specific hand-unroll attempt (measured no-signal-to-negative, above) suggests the compiler's own `copy_from_slice` lowering is already at or near the achievable floor for this width — not verified via disassembly this session, named as the honest gap. Stack-over-heap: DONE for the hot path (see allocation budget). Branchless inner loop: DONE — `window_copy_block`'s own row loop has no data-dependent branch (the `inner_len`-length `copy_from_slice` bound is loop-invariant, resolved once per call by `window_copy_operand`'s own gate, not per row). No dynamic dispatch: DONE. O(1) per token: N/A framing (compute kernel) — domain-correct axis is O(1) per output row, satisfied by construction (fixed `inner_len`-wide copy per iteration, no growth).
+
+### Re-prove commands
+
+- `git show <this row's commit> -- proxima-tensor/src/cpu.rs proxima-tensor/src/instrument.rs proxima-tensor/benches/bench_window_copy.rs proxima-tensor/Cargo.toml` — the entire diff
+- `CARGO_TARGET_DIR=<scratch> cargo nextest run -p proxima-tensor --features std,instrument` (446), `-p proxima-onnx --all-features` (82, including the 2 `MaxPool` `Indices` tests this row's own bugfix re-greened), `-p omega --all-features --no-fail-fast` (138/0-failed/1-skipped)
+- `CARGO_TARGET_DIR=<scratch> cargo clippy -p proxima-tensor -p proxima-onnx --all-targets --all-features -- -D warnings`
+- `CARGO_TARGET_DIR=<scratch> cargo test --release -p proxima-onnx --test real_mnist_accuracy --features std -- --ignored --nocapture` — reproduces 0.9900
+- `CARGO_TARGET_DIR=<scratch> cargo run --release -p proxima-onnx --example mnist_diag --features mnist-diag`, grep `"DIAG nsper elementwise_window_copy"` — reproduces the mechanism-level ns/element delta
+- `CARGO_TARGET_DIR=<scratch> cargo bench -p proxima-tensor --bench bench_window_copy -- --save-baseline <name>` — reproduces the 4-shape `window_copy`-vs-`block_loop_incumbent` micro table, including the in-bench correctness self-check (panics on divergence); this row's own runs saved under `row154-micro-run1`/`row154-genericslice`/`row154-micro-final`
+- `CARGO_TARGET_DIR=<scratch> cargo bench -p proxima-onnx --bench mnist_f32_lane --features mnist-f32-bench -- --save-baseline <name>` — reproduces accuracy, roofline, criterion numbers; this row's own 3 runs saved under `row154-after-run1/2/3`
+- `bash scripts/proxima-tensor-gate.sh` — the matrix gate, green this session (21 cells, 21 passed)
