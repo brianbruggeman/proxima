@@ -15094,4 +15094,102 @@ Zero new allocations on the hot path: `dead: BTreeSet<NodeId>` is built ONCE ins
 
 - `cargo nextest run -p proxima-tensor -p proxima-autograd -E 'test(central_difference) or test(differentiate_wanted) or test(evaluate_named_with_arena) or test(build_static_arena_elides) or test(build_static_arena_does_not_elide)'` -- expect 21/21.
 - `cargo nextest run -p proxima-tensor --lib` -- expect 438/438; `cargo nextest run -p proxima-autograd --lib` -- expect 53/53.
+
+## ROW 168 -- q4_k int8 dot re-seal: ROW61's `1.29-1.40x behind ggml` is STALE, current gap already closed to near-parity by un-cross-referenced intervening commits; one new lever (paired accumulators) tried, NO measurable win under host noise, ROLLED BACK
+
+Repo: `/Users/brianbruggeman/repos/slot-0/proxima-wt-fuse`, branch `perf/q4k-ggml-gap`, off `main` `f0f173d`. Host: Apple Silicon (aarch64-apple-darwin), macOS. Build: `release` for all timed numbers (`cargo build --release -p proxima-tensor --bench bench_q4k_matmul --features ggml-bench,q4k-int8-dot`, binary invoked directly with `--bench attn_q_4096x4096`); `test` profile for nextest. `GGML_BUILD_DIR=/Users/brianbruggeman/repos/others/llama.cpp/ggml` (pre-built static `libggml.a`, read-only host asset per this session's brief, not vendored in-repo), `PROXIMA_BENCH_GGUF_PATH=/Users/brianbruggeman/.lmstudio/models/TheBloke/openchat-3.5-1210-GGUF/openchat-3.5-1210.Q4_K_S.gguf` (real 4.1GiB checkpoint, same fixture ROW61 used). **Host loadout: HEAVILY multi-tenant throughout this session** -- `uptime` load average 37.78/32.81/25.51 at session start, settling to 25.47/31.04/26.51 during the quiet baseline window, rising back to 34.26/31.10/27.73 during the post-lever window; `ps -eo pcpu,comm -r` topped by 5-6 resident `snapshot-probe`/`psci-dispatch-probe` processes at 60-100% CPU each (not this worktree's, not killed, per this session's isolation contract). Budget: 45-minute hard ceiling, micro-vetted.
+
+### Fresh re-seal (both sides, same session, `attn_q_4096x4096`, macs/call = 16,777,216)
+
+3 runs each, release binary, `sample_size(30)`/`measurement_time(5s)` criterion defaults, `PROXIMA_MATMUL_WORKERS=1` (bench's own pin):
+
+| arm | run1 | run2 | run3 | mean | CoV |
+|---|---:|---:|---:|---:|---:|
+| ggml `mulmat_t1` (µs) | 434.44 | 436.20 | 433.10 | 434.58 | 0.29% |
+| ours `matmul_q4k_q8k_dispatched_t1` (`sdot`) (µs) | 423.50 | 427.43 | 423.27 | 424.73 | 0.45% |
+
+ns/mac: ggml **0.02590**, ours **0.02532**. **Ratio ours/ggml = 0.977 -- ours is ~2.3% FASTER than ggml t1 on this run**, not `1.36x behind` (ROW61's own number, quoted verbatim in this row's own task brief). Both arms' CoV under the 5% trust bar despite the loaded host. Correctness unchanged from ROW61: `max_abs_diff` (ours packed-int8 vs `ggml_mul_mat`, same packed bytes) = `1.1920929e-7` this run, same order ROW61 reported (`8.643e-7`..`2.459e-7` across shapes). This ALREADY clears both this row's own pre-registered thresholds (success `<=0.0300`, stretch/parity-adjacent `<=0.0260`) without any new lever.
+
+**ROW61's own `0.03378 ns/mac, CoV 0.28%` dispatched number cannot be reproduced on the current tree.** Root cause, found by diffing source at ROW61's landing commit (`9b9413d`) against `HEAD`: `dot_q4k_q8k_block_neon_dotprod` at ROW61's landing called `proxima_gguf::quant::q4_k::get_scale_min_k4(sub_block, &scales)` **16 times per 256-element super-block** (once per sub-block in the mins loop, again per sub-block for `scale_lo`/`scale_hi` inside the `sdot` loop) -- a scalar bit-trick function invoked redundantly instead of decoded once. Commit `c5e983c` (`perf(tensor): paired nibble loads, scales stay in registers`, 2026-08-20, landed AFTER ROW61 was written, never cross-referenced against ROW61's own ns/mac table) replaced that with `mins_correction_neon` (`cpu.rs:8911`), which unpacks the whole 12-byte scale/min field **once** via the identical `kmask1`/`kmask2`/`kmask3` word-level bit-trick ggml's own C kernel uses, then extracts each sub-block's scale byte with a register-resident `scale_byte` shift instead of a function call. This is precisely the missing-technique closure this row's brief asked to find -- it already landed, under a different row, and the `ns/mac`-vs-ggml comparison was never re-run afterward. **Principle-16 finding: ROW61's claim went stale the moment `c5e983c` landed; nothing caught it until this session's re-seal.**
+
+### Technique diff -- both inner loops, now essentially IDENTICAL (quoted verbatim)
+
+ggml, `ggml-cpu/arch/arm/quants.c:2408-2427` (`__ARM_NEON`, `nrc==1`, the arm `attn_q`'s batch-1 decode actually calls):
+
+```c
+for (int j = 0; j < QK_K/64; ++j) {
+    const ggml_uint8x16x2_t q4bits = ggml_vld1q_u8_x2(q4); q4 += 32;
+
+    q8bytes = ggml_vld1q_s8_x2(q8); q8 += 32;
+    q4bytes.val[0] = vreinterpretq_s8_u8(vandq_u8  (q4bits.val[0], m4b));
+    q4bytes.val[1] = vreinterpretq_s8_u8(vandq_u8  (q4bits.val[1], m4b));
+
+    const int32x4_t p1 = ggml_vdotq_s32(ggml_vdotq_s32(mzero, q4bytes.val[0], q8bytes.val[0]), q4bytes.val[1], q8bytes.val[1]);
+    sumi1 += vaddvq_s32(p1) * scales[2*j+0];
+
+    q8bytes = ggml_vld1q_s8_x2(q8); q8 += 32;
+    q4bytes.val[0] = vreinterpretq_s8_u8(vshrq_n_u8(q4bits.val[0], 4));
+    q4bytes.val[1] = vreinterpretq_s8_u8(vshrq_n_u8(q4bits.val[1], 4));
+
+    const int32x4_t p2 = ggml_vdotq_s32(ggml_vdotq_s32(mzero, q4bytes.val[0], q8bytes.val[0]), q4bytes.val[1], q8bytes.val[1]);
+    sumi2 += vaddvq_s32(p2) * scales[2*j+1];
+}
+sumf += d * (sumi1 + sumi2);
+```
+
+ours, `proxima-tensor/src/cpu.rs:8853-8872` (`dot_q4k_q8k_block_neon_dotprod`, CURRENT tree, hand-unrolled 4x instead of `for j in 0..4` so every scale index is a compile-time literal):
+
+```rust
+macro_rules! sub_block_pair {
+    ($q4_offset:expr, $q8_offset:expr, $scale_word:expr) => {{
+        let q4bits = vld1q_u8_x2(q4_base.add($q4_offset));
+        let lo0 = vreinterpretq_s8_u8(vandq_u8(q4bits.0, m4b));
+        let lo1 = vreinterpretq_s8_u8(vandq_u8(q4bits.1, m4b));
+        let q8_lo = vld1q_s8_x2(q8_base.add($q8_offset));
+        let partial_lo = sdot_s32(sdot_s32(mzero, lo0, q8_lo.0), lo1, q8_lo.1);
+        sumi1 += vaddvq_s32(partial_lo) * scale_byte($scale_word, 0);
+
+        let hi0 = vreinterpretq_s8_u8(vshrq_n_u8(q4bits.0, 4));
+        let hi1 = vreinterpretq_s8_u8(vshrq_n_u8(q4bits.1, 4));
+        let q8_hi = vld1q_s8_x2(q8_base.add($q8_offset + 32));
+        let partial_hi = sdot_s32(sdot_s32(mzero, hi0, q8_hi.0), hi1, q8_hi.1);
+        sumi2 += vaddvq_s32(partial_hi) * scale_byte($scale_word, 1);
+    }};
+}
+sub_block_pair!(0, 0, scale_lo);
+sub_block_pair!(32, 64, scale_lo >> 16);
+sub_block_pair!(64, 128, scale_hi);
+sub_block_pair!(96, 192, scale_hi >> 16);
+```
+
+Same paired `vld1q_u8_x2`/`vld1q_s8_x2` loads, same `and`/`shr` nibble split, same `sdot`-then-`sdot`-then-`vaddvq` reduction, same per-sub-block-pair scalar scale multiply into two running `i32` accumulators, same `d * (sumi1 + sumi2)` (ours: `d.mul_add(...)`) close. The only remaining textual difference is ours extracting `scales[2*j]` from a register (`scale_byte`, a `ubfx`-style shift on a word already unpacked by `mins_correction_neon`) versus ggml indexing a `scales` byte array that itself came from an on-stack `utmp`/`memcpy` -- a compiler-codegen-level difference this session did not further instrument (no disassembly diff taken; flagged as unmeasured, not claimed).
+
+### Lever attempted: two independent accumulators (even/odd block parity) in `dot_q4k_q8k`'s per-row loop, mirrored into `dot_q4k_q8k_portable` to preserve bit-exactness
+
+Rationale: `acc += block_sum` (`cpu.rs:8624-8654`, pre-existing) is a single serial `f32` dependency chain across a row's 16 blocks (4096-wide shapes) -- the exact shape ROW60 measured a 5.7x win from splitting, on the unrelated f32-dequant path. Applied the same split here: `acc_even`/`acc_odd` by `block_index % 2`, summed once at the end. Mirrored into `dot_q4k_q8k_portable` (same split) because `matmul_q4k_q8k_f32_agrees_bit_exact_with_the_portable_arm` compares the dispatched and portable arms byte-for-byte and `f32` addition is not associative -- a lone serial accumulator in one arm only would have diverged the two.
+
+**Result: no measurable win, host noise dominated.** Rebuilt (`cargo build --release`, exit 0, 44s), re-ran `attn_q_4096x4096` 3x under a NOISIER window (`uptime` 34.26/31.10/27.73, same resident probe processes now at higher CPU%):
+
+| arm | run1 | run2 | run3 | mean | CoV |
+|---|---:|---:|---:|---:|---:|
+| ggml `mulmat_t1` (µs) | 524.24 | 439.07 | 430.73 | 464.68 | **9.09%** |
+| ours dispatched, dual-accumulator (µs) | 450.93 | 487.46 | 451.89 | 463.43 | 3.67% |
+
+ggml's own arm CoV (9.09%) EXCEEDS this skill's 5% trust bar this run -- per bench-metrics discipline, this is "no signal, kept simpler form" territory, reported as the range, not a point estimate. ns/mac ratio ours/ggml = 0.997 (statistically indistinguishable from the pre-lever 0.977 given the noise band). **Rolled back** (`git checkout -- proxima-tensor/src/cpu.rs`, confirmed `git status --short` empty, `git diff HEAD` empty) -- the lever added a second mirrored accumulator-split code path (duplication + bit-exactness coupling risk between `dot_q4k_q8k` and `dot_q4k_q8k_portable`) for zero measured benefit; keeping the simpler single-accumulator form per this skill's own "vibes don't replace baselines... roll back when worse" rule. Negative result recorded, not buried.
+
+### Honest read
+
+The pre-registered `1.36x behind` framing this row's own task brief carried forward from ROW61 was stale before this session started -- six intervening perf commits (`c5e983c` paired nibble loads/register-resident scales, `69ffcb6` fold position loop into matmul, `d9776fb` hand-write mins correction in neon, `4c94570` dispatch to performance cores, `fe92385` cache worker count, `388d93a` chunk count scales with work) touched this exact kernel and its call path between ROW61's landing and now, and none re-ran the `bench_q4k_matmul` ns/mac-vs-ggml table afterward. This session's re-seal is the first re-proof since ROW61 itself. Current state: **near-parity, ours slightly ahead on this host** (0.977x of ggml's time = ~1.02x faster), both inner loops now mechanically identical at the block level (quoted above), and the one lever attempted this session (independent accumulators) produced no signal distinguishable from host noise. **Implication: the q4_k int8 dot kernel does not need further work at the block-kernel level; if a future gap reappears it is more likely in outer scheduling (thread dispatch, chunking) than in this loop, and any future row MUST re-seal fresh numbers before trusting a prior row's ns/mac claim, exactly per this task's own instruction.**
+
+### Correctness (parity tests, unchanged code, this session)
+
+`cargo nextest run -p proxima-tensor --features q4k-int8-dot,test-support -E 'test(q4k)'` -- **16/16 passed, 0 failed, 438 skipped** (filter-scoped; skipped count is every test outside the `q4k` name match, not a silent-zero). Includes `matmul_q4k_f32_matches_dequantize_then_f32_matmul::seed_1/seed_7/seed_1000`, `matmul_q4k_q8k_f32_agrees_bit_exact_with_the_portable_arm`, `matmul_q4k_q8k_f32_agrees_with_dequantize_then_matmul_within_a_measured_tolerance`, `matmul_q4k_q8k_f32_wide_matches_leading_total_separate_narrow_calls_on_real_gguf_bytes`, `matmul_q4k_f32_threaded_pool_dispatch_matches_the_sequential_per_row_kernel`, `quant_dot_fused_and_unfused_agree_for_q4k_within_int8_quantization_tolerance`, plus 3 shape-mismatch guards -- same N ROW61 reported for its own `q4k-int8-dot,test-support` gate cell (293 default + 6 new against the crate's fuller 438-skipped baseline here, consistent count).
+
+**Types minted: none. `Op`/`ScalarOp`/`IndexMap`: untouched.** This row is kernel-internal only (the attempted-then-reverted lever touched `dot_q4k_q8k`/`dot_q4k_q8k_portable` bodies alone); no new public surface, no feature-gate change.
+
+### Re-prove
+
+- Both-sides re-seal: `CARGO_TARGET_DIR=<scratch> GGML_BUILD_DIR=<built ggml>/ PROXIMA_BENCH_GGUF_PATH=<gguf> cargo build --release -p proxima-tensor --bench bench_q4k_matmul --features ggml-bench,q4k-int8-dot`, then run the produced binary with `--bench attn_q_4096x4096` 3-5x; ns/mac = reported time / 16,777,216, `attn_q_4096x4096_ggml_q4k_mulmat_t1` vs `attn_q_4096x4096_proxima_matmul_q4k_q8k_dispatched_t1`.
+- Parity: `cargo nextest run -p proxima-tensor --features q4k-int8-dot,test-support -E 'test(q4k)'` -- expect 16/16, 0 failed.
+- Source diff for the staleness finding: `git diff 9b9413d c5e983c -- proxima-tensor/src/cpu.rs` (shows the `get_scale_min_k4`-per-sub-block -> `mins_correction_neon` rewrite).
 - `CARGO_TARGET_DIR=<scratch> cargo bench -p proxima-autograd --bench train_step_lane --features train-step-bench` (dataset must exist under `~/.cache/burn-dataset/mnist`) -- expect the `train_step_arena` manual-sweep line to print `bit-identical` and a p50 near 2.0-2.2ms on a similarly-loaded host, ~2.8ms on a genuinely quiet one (per ROW166's own host-noise finding, reconfirmed here, not re-litigated).
