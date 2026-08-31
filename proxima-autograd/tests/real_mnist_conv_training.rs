@@ -41,22 +41,47 @@
 //!
 //! | rung | train images | epochs | batch | lr | test images | train-loss (first -> last epoch avg) | test accuracy | wall clock |
 //! |------|-------------:|-------:|------:|-----:|-------------:|------------------------------------:|---------------:|-----------:|
-//! | A | 4000 | 3 | 32 | 0.001 | 10000 (full) | 1.0682 -> 0.3094 | 0.8940 (8940/10000) | 97.0s |
+//! | A  | 4000  | 3 | 32 | 0.001 | 10000 (full) | 1.0682 -> 0.3094 | 0.8940 (8940/10000) | 97.0s |
+//! | R1 | 20000 | 6 | 32 | 0.001 | 10000 (full) | (log lost, see below) | 0.9525 (9525/10000) | ~1134s (~18.9min) |
+//! | R2 | 60000 (full) | 9 | 32 | 0.001 | 10000 (full) | 0.4012 -> 0.0462 | 0.9782 (9782/10000) | 4252.3s (~70.9min) |
+//! | R3 | 60000 (full), continuing R2's weights | +5 (14 effective) | 32 | 0.001 | 10000 (full) | 0.0475 -> 0.0332 | 0.9809 (9809/10000) | 2183.1s (~36.4min) |
 //!
-//! Rung A is below both pre-registered targets (`>= 0.985` beats the MLP's
-//! `0.9786` ceiling, `>= 0.99` matches the checkpoint) -- not a claim about
-//! this stack's ceiling: at the SAME `8000`-images/`4`-epochs data budget
-//! `real_mnist_training.rs`'s own table gets `0.9274`, and rung A here (a
-//! smaller `4000`/`3` budget) already reaches `0.8940`, so the conv net is
-//! competitive per image-forward despite far higher per-step cost (`~0.22s`/
-//! batch-of-32 measured here in `--release`, vs the MLP's own `~0.06s`/
-//! batch-of-32 implied by its `6.7s`/`8000`-images/`4`-epochs/`32`-batch
-//! rung). Scaling further (more images, more epochs) toward the pre-registered
-//! targets needs proportionally more wall clock than this session's own
-//! remaining time budget allowed to measure and land in the same turn -- see
-//! this crate's own report for the exact accounting and the bug this ladder
-//! surfaced along the way (the `m`/`v` Adam-state shape mismatch fixed in
-//! this same commit).
+//! Rungs R1-R3 ran on the SAME `8->16` stride-2 architecture this file's own
+//! `build_network` compiles (`CONV_ARCH` never varied -- a LeNet-class
+//! `16->32` capacity was costed at `~1.92x` this arch's per-batch cost in the
+//! same session but never run to a full rung: R2 alone already needed
+//! `~71min` wall clock at this cheaper arch, and the session's `180min`
+//! budget went almost entirely to R1+R2+R3's own training wall-clock).
+//! R1/R2 are reproducible exactly from this test's own env knobs:
+//! `CONV_TRAIN_EXAMPLES=20000 CONV_EPOCHS=6 ... ` (R1) and
+//! `CONV_TRAIN_EXAMPLES=60000 CONV_EPOCHS=9 ...` (R2, cold-start `he_init`).
+//! R3 continued R2's own trained weights (and Adam `m`/`v`/step state) for 5
+//! more epochs rather than restarting -- this test's own knobs have no
+//! resume mechanism, so R3 is not reproducible from `CONV_*` env vars alone;
+//! it was run from a throwaway `examples/conv_chase.rs` (deleted before
+//! landing -- see git history for `exp/conv-99-chase` if the exact resume
+//! mechanism is needed again) that generalized this test's fixed two-layer
+//! network into an arbitrary conv-layer-spec list plus a plain-text
+//! save/load of every param and its Adam `m`/`v`/step counter.
+//!
+//! R1's own per-epoch loss curve was lost mid-session (written to a
+//! standalone scratchpad log file a filesystem sweep reclaimed once the
+//! training process exited); its final test accuracy was still recoverable
+//! because the trained weights (a separate, actively-written file) survived,
+//! and a forward-only replay against them reproduced the accuracy number.
+//! R2 and R3 avoided the same loss by writing directly into the running log
+//! file instead of a side file that goes cold the moment the process exits.
+//!
+//! Both rungs above `0.9782` (R2, R3) sit at or just past the MLP's own
+//! `0.9786` ceiling (`real_mnist_training.rs` rung C) but still short of
+//! BOTH pre-registered targets (`>= 0.985` beats the MLP, `>= 0.99` matches
+//! the checkpoint). Train loss was still falling every single epoch across
+//! all 14 effective epochs (R2's `0.4012 -> 0.0462` then R3's own
+//! `0.0475 -> 0.0332`, `~30%` relative drop in R3 alone) with no
+//! plateau-with-train/test-gap signal and no per-class accuracy collapse at
+//! any rung -- the mission's own defined bug signal never appeared, so this
+//! is a compute-budget stop (more epochs would plausibly keep closing the
+//! gap), not a capacity or correctness ceiling.
 //!
 //! Extend this table from a real run's stderr rather than editing the
 //! numbers by hand -- `std::eprintln!` below prints every field the table
