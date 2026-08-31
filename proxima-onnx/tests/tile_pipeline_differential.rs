@@ -22,7 +22,7 @@ use std::path::{Path, PathBuf};
 #[path = "../benches/support/tile_pipeline.rs"]
 mod tile_pipeline;
 
-use tile_pipeline::{BandRows, MnistWeights, run_pipeline_forward};
+use tile_pipeline::{BandRows, MnistWeights, run_pipeline_forward, run_pipeline_forward_direct};
 
 const MODEL_PATH: &str = "/Users/brianbruggeman/repos/others/burn/examples/onnx-inference/src/model/mnist.onnx";
 const DATASET_DIR: &str = "/Users/brianbruggeman/.cache/burn-dataset/mnist";
@@ -141,6 +141,31 @@ fn pipeline_logits_match_sealed_executor_within_reassociation_bound() {
                 );
             }
             assert_eq!(argmax(&incumbent), argmax(&pipeline), "{band_label}, image {index}: argmax disagreement");
+        }
+    }
+}
+
+/// ROW 172's dispatch-floor arm (`run_pipeline_forward_direct`, each stage
+/// called via `compute_direct` instead of composed `AndThen` +
+/// `block_on_ready`) produces BIT-IDENTICAL logits to the production
+/// `AndThen`-composed pipeline -- same `process_band` body either way, so
+/// this is the correctness precondition for treating the two arms' timing
+/// delta as pure dispatch overhead rather than a divergent computation.
+#[test]
+fn direct_call_arm_is_bit_identical_to_andthen_composed_pipeline() {
+    if !checkpoint_present() || !dataset_present() {
+        eprintln!("skipping: no host-local mnist.onnx checkout or MNIST idx dataset");
+        return;
+    }
+    let model = load_model();
+    let weights = MnistWeights::from_initializers(&model.initializers.iter().map(|(name, data)| (name.as_str(), data.as_slice())).collect::<Vec<_>>());
+    let images = load_normalized_images(&test_images_path(), 20);
+
+    for (band_label, band_rows) in [("1-row band", 1), ("kh-row band", 3), ("2kh-row band", 6)] {
+        for (index, image) in images.iter().enumerate() {
+            let composed = run_pipeline_forward(image, &weights, BandRows(band_rows));
+            let direct = run_pipeline_forward_direct(image, &weights, BandRows(band_rows));
+            assert_eq!(composed, direct, "{band_label}, image {index}: AndThen-composed and direct-call arms diverged");
         }
     }
 }

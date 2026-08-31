@@ -382,33 +382,49 @@ fn dot_chunked_k4(window: &[f32], weight_row: &[f32]) -> f32 {
     total
 }
 
+impl<const BLOCKED: bool, const ROWS: usize> ConvReluStage<'_, BLOCKED, ROWS> {
+    /// The stage's own compute, synchronous -- the SAME body `Pipe::call`
+    /// wraps in an immediately-ready `Future`, extracted so ROW 172's
+    /// dispatch-floor measurement can invoke it directly (bypassing
+    /// `Future`/`AndThen`/`block_on_ready`) without forking the arithmetic:
+    /// one body, two call surfaces, byte-identical output either way.
+    fn process_band(&self, input: RowBand) -> RowBand {
+        let mut ring = self.ring.borrow_mut();
+        let mut emitted_rows: Vec<Vec<f32>> = Vec::with_capacity(input.rows);
+        debug_assert_eq!(input.channels, self.channels_in);
+        debug_assert_eq!(input.width, self.input_width);
+        for row_index in 0..input.rows {
+            ring.push_back(input.row(row_index).to_vec());
+            if ring.len() > self.kernel_height {
+                ring.pop_front();
+            }
+            if ring.len() == self.kernel_height {
+                emitted_rows.push(self.compute_output_row(&ring));
+            }
+        }
+        let rows = emitted_rows.len();
+        let mut data = Vec::with_capacity(rows * self.channels_out * self.output_width);
+        for row in emitted_rows {
+            data.extend(row);
+        }
+        RowBand { channels: self.channels_out, width: self.output_width, rows, data }
+    }
+
+    /// ROW 172's direct-call surface: identical output to `Pipe::call`,
+    /// zero `Future`/`Waker`/`Context` machinery. Bench-only, feeds the
+    /// dispatch-floor arm.
+    pub fn compute_direct(&self, input: RowBand) -> RowBand {
+        self.process_band(input)
+    }
+}
+
 impl<const BLOCKED: bool, const ROWS: usize> Pipe for ConvReluStage<'_, BLOCKED, ROWS> {
     type In = RowBand;
     type Out = RowBand;
     type Err = Infallible;
 
     fn call(&self, input: Self::In) -> impl std::future::Future<Output = Result<Self::Out, Self::Err>> {
-        async move {
-            let mut ring = self.ring.borrow_mut();
-            let mut emitted_rows: Vec<Vec<f32>> = Vec::with_capacity(input.rows);
-            debug_assert_eq!(input.channels, self.channels_in);
-            debug_assert_eq!(input.width, self.input_width);
-            for row_index in 0..input.rows {
-                ring.push_back(input.row(row_index).to_vec());
-                if ring.len() > self.kernel_height {
-                    ring.pop_front();
-                }
-                if ring.len() == self.kernel_height {
-                    emitted_rows.push(self.compute_output_row(&ring));
-                }
-            }
-            let rows = emitted_rows.len();
-            let mut data = Vec::with_capacity(rows * self.channels_out * self.output_width);
-            for row in emitted_rows {
-                data.extend(row);
-            }
-            Ok(RowBand { channels: self.channels_out, width: self.output_width, rows, data })
-        }
+        async move { Ok(self.process_band(input)) }
     }
 }
 
@@ -464,11 +480,11 @@ impl<'weights> FcAccumulateStage<'weights> {
     }
 }
 
-impl Pipe for FcAccumulateStage<'_> {
-    type In = RowBand;
-    type Out = ();
-    type Err = Infallible;
-
+impl FcAccumulateStage<'_> {
+    /// The stage's own accumulation, synchronous -- the SAME body
+    /// `Pipe::call` wraps in an immediately-ready `Future`, extracted for
+    /// ROW 172's dispatch-floor measurement (see `ConvReluStage`'s own
+    /// `process_band`/`compute_direct` pair for the identical rationale).
     /// FC1's own accumulation loop calls [`dot_chunked_k4`] directly,
     /// unconditionally (ROW 170: fc1 is `dot_chunked_k4_tile`'s own other
     /// small-`reduction_width` regression site, ROW 169's own measured
@@ -476,24 +492,40 @@ impl Pipe for FcAccumulateStage<'_> {
     /// dominates, same mechanism as conv1). No `BLOCKED` parameter here:
     /// `FcAccumulateStage` has exactly one instantiation (fc1), so there is
     /// only ever one function this call site could call.
+    fn process_band(&self, input: RowBand) {
+        let mut state = self.state.borrow_mut();
+        let plane = self.height * self.width;
+        let in_features = self.channels * plane;
+        for row_index in 0..input.rows {
+            let absolute_row = state.rows_seen;
+            for channel in 0..self.channels {
+                let channel_row = input.channel_row(row_index, channel);
+                let base = channel * plane + absolute_row * self.width;
+                for (output_index, accumulator_value) in state.accumulator.iter_mut().enumerate() {
+                    let weight_start = output_index * in_features + base;
+                    let weight_row = &self.weight[weight_start..weight_start + channel_row.len()];
+                    *accumulator_value += dot_chunked_k4(channel_row, weight_row);
+                }
+            }
+            state.rows_seen += 1;
+        }
+    }
+
+    /// ROW 172's direct-call surface: identical accumulation to
+    /// `Pipe::call`, zero `Future`/`Waker`/`Context` machinery.
+    pub fn compute_direct(&self, input: RowBand) {
+        self.process_band(input);
+    }
+}
+
+impl Pipe for FcAccumulateStage<'_> {
+    type In = RowBand;
+    type Out = ();
+    type Err = Infallible;
+
     fn call(&self, input: Self::In) -> impl std::future::Future<Output = Result<Self::Out, Self::Err>> {
         async move {
-            let mut state = self.state.borrow_mut();
-            let plane = self.height * self.width;
-            let in_features = self.channels * plane;
-            for row_index in 0..input.rows {
-                let absolute_row = state.rows_seen;
-                for channel in 0..self.channels {
-                    let channel_row = input.channel_row(row_index, channel);
-                    let base = channel * plane + absolute_row * self.width;
-                    for (output_index, accumulator_value) in state.accumulator.iter_mut().enumerate() {
-                        let weight_start = output_index * in_features + base;
-                        let weight_row = &self.weight[weight_start..weight_start + channel_row.len()];
-                        *accumulator_value += dot_chunked_k4(channel_row, weight_row);
-                    }
-                }
-                state.rows_seen += 1;
-            }
+            self.process_band(input);
             Ok(())
         }
     }
@@ -637,6 +669,40 @@ pub fn run_pipeline_forward(image: &[f32], weights: &MnistWeights<'_>, band: Ban
     }
 
     let fc1_out = fc_stage_for_finalize.finalize();
+    let fc2_out = matvec_bias(weights.fc2_weight, weights.fc2_bias, &fc1_out, 10, 32);
+    let bn2_out = apply_batch_norm(&fc2_out, weights.norm2_weight, weights.norm2_bias, weights.norm2_running_mean, weights.norm2_running_var);
+    log_softmax(&bn2_out)
+}
+
+/// ROW 172's dispatch-floor arm: the SAME 4-stage sequence
+/// `run_pipeline_forward` runs, calling each stage's own `compute_direct`
+/// (plain synchronous function, same `process_band` body) instead of
+/// composing `AndThen` and driving one `Future` through `block_on_ready`.
+/// Isolates what `Pipe::call`+`AndThen`+`block_on_ready` cost on top of the
+/// identical arithmetic -- never the production surface (that stays
+/// `run_pipeline_forward`, `AndThen`-composed, per this module's own sans-IO
+/// state-machine design); a measurement-only twin, bench-gated.
+pub fn run_pipeline_forward_direct(image: &[f32], weights: &MnistWeights<'_>, band: BandRows) -> [f32; 10] {
+    let batch_norm1 = BatchNormAffine::new(weights.norm1_weight, weights.norm1_bias, weights.norm1_running_mean, weights.norm1_running_var, EPSILON);
+
+    let stage1 = ConvReluStage::<false>::new(1, 8, 3, 3, 28, weights.conv1_weight, weights.conv1_bias, None);
+    let stage2 = ConvReluStage::<true, 4>::new(8, 16, 3, 3, 26, weights.conv2_weight, weights.conv2_bias, None);
+    let stage3 = ConvReluStage::<true, 4>::new(16, 24, 3, 3, 24, weights.conv3_weight, weights.conv3_bias, Some(batch_norm1));
+    let fc_stage = FcAccumulateStage::new(24, 22, 22, 32, weights.fc1_weight, weights.fc1_bias);
+
+    let mut row = 0;
+    while row < 28 {
+        let take = band.0.min(28 - row);
+        let data = image[row * 28..(row + take) * 28].to_vec();
+        let input_band = RowBand { channels: 1, width: 28, rows: take, data };
+        let out1 = stage1.compute_direct(input_band);
+        let out2 = stage2.compute_direct(out1);
+        let out3 = stage3.compute_direct(out2);
+        fc_stage.compute_direct(out3);
+        row += take;
+    }
+
+    let fc1_out = fc_stage.finalize();
     let fc2_out = matvec_bias(weights.fc2_weight, weights.fc2_bias, &fc1_out, 10, 32);
     let bn2_out = apply_batch_norm(&fc2_out, weights.norm2_weight, weights.norm2_bias, weights.norm2_running_mean, weights.norm2_running_var);
     log_softmax(&bn2_out)

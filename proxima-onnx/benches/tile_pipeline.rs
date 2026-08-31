@@ -317,6 +317,23 @@ fn bench_whole_forward(criterion: &mut Criterion) {
         });
     }
 
+    // ROW 172: dispatch-floor arm -- the SAME band_kh forward, calling each
+    // stage's own `compute_direct` instead of composing `AndThen` +
+    // `block_on_ready`. Isolates `Pipe::call`/`AndThen`/`Future` overhead
+    // from the identical conv/fc arithmetic `tile_pipeline_band_kh` above
+    // runs; never a production surface, measurement-only.
+    {
+        let direct_index = std::cell::Cell::new(0usize);
+        group.bench_function("tile_pipeline_band_kh_direct", |bencher| {
+            bencher.iter(|| {
+                let current = direct_index.get();
+                direct_index.set((current + 1) % images.len());
+                let logits = tile_pipeline::run_pipeline_forward_direct(&images[current], &weights, BandRows(3));
+                std::hint::black_box(logits);
+            });
+        });
+    }
+
     group.finish();
 
     let mut neutral_group = criterion.benchmark_group("single_conv_layer_band_vs_materialized");
