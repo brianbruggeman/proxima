@@ -2,17 +2,23 @@ use proxima_tensor::{DType, NodeId};
 
 /// Everything [`crate::msl::emit`] can reject.
 ///
-/// A [`proxima_tensor::BoundOp`] node cannot itself encode a gather or
-/// scatter — its operand and output addressing
-/// ([`proxima_tensor::Layout`]) is pure affine base+stride arithmetic
-/// with no indices field at all, and `proxima_tensor::shape::infer` already
-/// rejects every data-dependent index map before a `BoundOp` node is ever
-/// built (see `infer_reduce`'s `out_map.is_data_dependent()` check and
-/// `unify_iteration_space`'s same check over every elementwise/reduce
-/// operand). So nothing here re-checks that: every variant below guards
-/// against a malformed `BoundOp` node built directly through its public,
-/// all-`pub`-field struct literal — never against something `bind::bind`
-/// itself would produce.
+/// A [`proxima_tensor::BoundOp`] node cannot itself encode a *gather*
+/// operand's addressing outside its own `Lookup` field, and
+/// `proxima_tensor::shape::infer` already rejects a non-integer or
+/// out-of-range gather index before a `BoundOp` node is ever built (see
+/// `unify_iteration_space`'s checks over every elementwise/reduce operand).
+/// So nothing here re-checks *that* — most variants below guard against a
+/// malformed `BoundOp` node built directly through its public, all-`pub`-field
+/// struct literal, never against something `bind::bind` itself would produce.
+///
+/// A forward *scatter* (`BoundOpKind::Reduce::out_scatter: Some(_)`) is the
+/// one exception: `bind::bind` builds a real one whenever a program's
+/// `Reduce::out_map` is data-dependent (`proxima-tensor`'s own forward-scatter
+/// support), so [`Self::ScatterNotSupported`] is a genuine, reachable gate —
+/// none of this crate's emitters render the sequential accumulate-in-order
+/// fold `proxima_tensor::cpu::run_reduce_scatter` runs on the CPU, so a
+/// scatter `BoundOp` is rejected here, named, rather than silently emitting a
+/// kernel that ignores `out_scatter` and writes to the wrong address.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum EmitError {
     #[error("node {node} elementwise body takes {expected} operands but the op carries {found}")]
@@ -36,6 +42,15 @@ pub enum EmitError {
         "node {node} is a keep::scan scan over zero iteration axes, which has no reduced axis to scan along"
     )]
     EmptyScan { node: NodeId },
+
+    /// See this type's own doc for why this is a real, reachable gate rather
+    /// than defensive dead code: nothing in `msl`/`wgsl`/`cuda` renders the
+    /// sequential accumulate-in-order fold a scatter's colliding writes need.
+    #[error(
+        "node {node} is a forward scatter (Reduce::out_map is data-dependent), which no GPU \
+         emitter in this crate supports yet -- proxima_tensor::cpu::run_reduce_scatter is CPU-only"
+    )]
+    ScatterNotSupported { node: NodeId },
 
     /// `omega::execute`'s own upstream gate (`reject_unsupported_gpu_dtype`)
     /// never lets anything but `Float32`/`Float16` reach [`crate::msl::emit`]
