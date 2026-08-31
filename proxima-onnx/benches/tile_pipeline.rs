@@ -123,12 +123,13 @@ impl StageTimings {
 /// that module's visibility for a bench-only profiling pass.
 fn run_pipeline_forward_profiled(image: &[f32], weights: &MnistWeights<'_>, band: BandRows) -> ([f32; 10], StageTimings) {
     let batch_norm1 = BatchNormAffine::new(weights.norm1_weight, weights.norm1_bias, weights.norm1_running_mean, weights.norm1_running_var, 1e-5);
-    // ROW 170: per-call-site dot form selection, same as
+    // ROW 170/171: per-call-site dot form selection, same as
     // `support::tile_pipeline::run_pipeline_forward` -- conv1 unblocked,
-    // conv2/conv3 blocked, fc1 always unblocked.
+    // conv2/conv3 blocked at ROWS=4 (ROW 171's own micro-vetted winner),
+    // fc1 always unblocked.
     let stage1 = ConvReluStage::<false>::new(1, 8, 3, 3, 28, weights.conv1_weight, weights.conv1_bias, None);
-    let stage2 = ConvReluStage::<true>::new(8, 16, 3, 3, 26, weights.conv2_weight, weights.conv2_bias, None);
-    let stage3 = ConvReluStage::<true>::new(16, 24, 3, 3, 24, weights.conv3_weight, weights.conv3_bias, Some(batch_norm1));
+    let stage2 = ConvReluStage::<true, 4>::new(8, 16, 3, 3, 26, weights.conv2_weight, weights.conv2_bias, None);
+    let stage3 = ConvReluStage::<true, 4>::new(16, 24, 3, 3, 24, weights.conv3_weight, weights.conv3_bias, Some(batch_norm1));
     let fc_stage = FcAccumulateStage::new(24, 22, 22, 32, weights.fc1_weight, weights.fc1_bias);
 
     let mut timings = StageTimings::default();
