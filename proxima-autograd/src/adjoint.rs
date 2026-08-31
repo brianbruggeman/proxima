@@ -640,15 +640,29 @@ fn differentiate_reduce(
     };
 
     let operand_dtype = original_program[reduce.operand.0 as usize].dtype();
-    let routed = expr::reduce(
-        program,
-        operand_dtype,
-        ScalarOp::Add,
-        ReduceInit::Zero,
-        contribution,
-        full,
-        reduce.in_map.clone(),
-    );
+    // `reduce.in_map` reads every one of `full`'s iteration positions
+    // one-to-one (same rank, no axis dropped, no scaling) exactly when it
+    // equals `full` itself -- no position ever accumulates with another, so
+    // wrapping `contribution` in an `expr::reduce` here would materialize a
+    // full [iter_rank] buffer to compute a pure copy. Skipping the wrapper
+    // makes `contribution` (an `Op::Elementwise`) `grad_of[operand]`
+    // directly, which `bind.rs`'s existing `held`/fusion path (only
+    // `Elementwise` nodes are ever held, `Reduce` nodes always retire
+    // unconditionally) can then fuse straight into whichever consumer reads
+    // it next, instead of a forced intermediate materialize.
+    let routed = if reduce.in_map == full {
+        contribution
+    } else {
+        expr::reduce(
+            program,
+            operand_dtype,
+            ScalarOp::Add,
+            ReduceInit::Zero,
+            contribution,
+            full,
+            reduce.in_map.clone(),
+        )
+    };
     let operand_rank = shapes.of(reduce.operand).len() as u16;
     accumulate(program, grad_of, operand_dtype, operand_rank, reduce.operand.0 as usize, routed);
     Ok(())
