@@ -970,6 +970,19 @@ pub fn evaluate_quantized_with_scratch(
                 instrument::ticks_to_nanos(monomorphic_slow_ticks) as f64 / monomorphic_slow_elements as f64,
             );
         }
+        // window-materialize-shaped copy split within `monomorphic_fast_path`
+        // (rung 2, `docs/discipline.md` ROW 154): `window_copy_operand`'s own
+        // specialized row-segment copy vs the remaining `elementwise_width_fast`
+        // per-row dispatch, both members of `monomorphic_fast_path` above.
+        let window_copy_ticks = instrument::ELEMENTWISE_LOOP_TICKS_WINDOW_COPY.snapshot_and_reset();
+        let window_copy_elements = instrument::ELEMENTWISE_ELEMENTS_WINDOW_COPY.snapshot_and_reset();
+        if window_copy_elements > 0 {
+            std::eprintln!(
+                "DIAG nsper elementwise_window_copy elements={window_copy_elements} total_ms={:.3} ns_per_element={:.4}",
+                instrument::ticks_to_nanos(window_copy_ticks) as f64 / 1_000_000.0,
+                instrument::ticks_to_nanos(window_copy_ticks) as f64 / window_copy_elements as f64,
+            );
+        }
         // fast_path-vs-slow-path split within `Generic` (A-vs-B task,
         // 2026-08-21): answers whether `Generic`'s 14.9x-slower-than-
         // monomorphic figure is (A) almost all elements falling to the
@@ -2864,6 +2877,13 @@ fn run_elementwise_range<B: Deref<Target = [f32]>>(
         BodyShape::Generic(generic_body) => generic_body_is_affine_fast_path(resolved, generic_body, &strides),
         _ => body_shape_is_affine_fast_path(resolved, &shape, &strides),
     };
+    // rung 2 (`docs/discipline.md` ROW 153's own charter): when the block
+    // above is engaged AND the body is a bare identity copy (`window_materialize`'s
+    // post-ROW-147 collapsed form), every row the block loop would otherwise
+    // walk through `elementwise_width_fast`'s per-row shape/op dispatch is a
+    // plain contiguous `inner_len`-wide read at a fixed row stride — computed
+    // once per call, same discipline as `fast_path`/`block_strides` above.
+    let window_copy_operand = window_copy_operand(&shape, fast_path, block_extent, &strides);
     #[cfg(feature = "instrument")]
     {
         counter!(
@@ -2921,22 +2941,43 @@ fn run_elementwise_range<B: Deref<Target = [f32]>>(
             && outer_coordinate.last() == Some(&0)
             && outer_position + block_extent as usize <= outer_end
         {
-            for step in 0..block_extent {
-                let out_base = (outer_position + step as usize - outer_start) * inner_len;
-                let out_slice = &mut output[out_base..out_base + inner_len];
-                elementwise_width_fast(&shape, &raw, &running, &strides, out_slice, &mut step_values);
+            let out_base = (outer_position - outer_start) * inner_len;
+            let out_slice = &mut output[out_base..out_base + block_extent as usize * inner_len];
+            if let Some(operand) = window_copy_operand {
+                let operand = operand as usize;
+                window_copy_block(raw[operand], running[operand], block_strides[operand], block_extent, inner_len, out_slice);
                 #[cfg(feature = "instrument")]
                 {
-                    counters.leading_iters += 1;
-                    counters.kernel_calls += 1;
-                    counters.output_writes += inner_len as u64;
-                    for &stride in &strides {
-                        counters.operand_loads += if stride == 0 { 1 } else { inner_len as u64 };
-                    }
+                    let elements = block_extent * inner_len as u64;
+                    counters.leading_iters += block_extent;
+                    counters.kernel_calls += block_extent;
+                    counters.output_writes += elements;
+                    counters.operand_loads += elements;
                 }
-                if step + 1 < block_extent {
-                    for (slot, block_stride) in running.iter_mut().zip(&block_strides) {
-                        *slot += block_stride;
+            } else {
+                for step in 0..block_extent {
+                    let step_base = step as usize * inner_len;
+                    elementwise_width_fast(
+                        &shape,
+                        &raw,
+                        &running,
+                        &strides,
+                        &mut out_slice[step_base..step_base + inner_len],
+                        &mut step_values,
+                    );
+                    #[cfg(feature = "instrument")]
+                    {
+                        counters.leading_iters += 1;
+                        counters.kernel_calls += 1;
+                        counters.output_writes += inner_len as u64;
+                        for &stride in &strides {
+                            counters.operand_loads += if stride == 0 { 1 } else { inner_len as u64 };
+                        }
+                    }
+                    if step + 1 < block_extent {
+                        for (slot, block_stride) in running.iter_mut().zip(&block_strides) {
+                            *slot += block_stride;
+                        }
                     }
                 }
             }
@@ -3019,6 +3060,14 @@ fn run_elementwise_range<B: Deref<Target = [f32]>>(
             BodyShape::Unary(..) | BodyShape::Binary(..) => {
                 counter!(instrument::ELEMENTWISE_LOOP_TICKS_MONOMORPHIC, diag_loop_ticks);
                 counter!(instrument::ELEMENTWISE_ELEMENTS_MONOMORPHIC, counters.output_writes);
+                if window_copy_operand.is_some() {
+                    // rung 2 (ROW 153/154): same per-call constant `fast_path`
+                    // already splits on, one level narrower — this call's
+                    // block-aligned rows took the specialized row-segment copy,
+                    // not `elementwise_width_fast`'s per-row dispatch.
+                    counter!(instrument::ELEMENTWISE_LOOP_TICKS_WINDOW_COPY, diag_loop_ticks);
+                    counter!(instrument::ELEMENTWISE_ELEMENTS_WINDOW_COPY, counters.output_writes);
+                }
                 if fast_path {
                     counter!(instrument::ELEMENTWISE_LOOP_TICKS_MONOMORPHIC_FAST, diag_loop_ticks);
                     counter!(instrument::ELEMENTWISE_ELEMENTS_MONOMORPHIC_FAST, counters.output_writes);
@@ -5129,6 +5178,68 @@ fn body_shape_is_affine_fast_path(resolved: &BoundOp, shape: &BodyShape, strides
             operand_is_unit_or_broadcast(resolved, strides, a) && operand_is_unit_or_broadcast(resolved, strides, b)
         }
         BodyShape::Generic(_) => false,
+    }
+}
+
+/// The physical operand index of a window-materialize-shaped identity copy,
+/// when `run_elementwise_range`'s own block sweep (`block_dim`/`block_extent`,
+/// ROW 150) is engaged — `None` otherwise. `window_materialize`
+/// (`proxima-onnx/src/lower.rs`) shapes its output `[n,c,oh,ow,kh,kw]`; once
+/// ROW 147's identity-multiply elimination collapses the all-ones stamp
+/// away, this op's body is exactly `BodyShape::Unary(ScalarOp::Identity, _)`
+/// — a bare copy from a source read whose `kw` axis is already guaranteed
+/// contiguous — checked explicitly here via `strides[operand] == 1`, NOT
+/// inferred from `fast_path` alone: `fast_path`'s own gate
+/// (`operand_is_unit_or_broadcast`) admits stride 0 (a genuine broadcast)
+/// as well as stride 1, and `MaxPool`'s `Indices` machinery
+/// (`proxima-onnx/src/lower.rs`'s `coordinate_image`) hits exactly that —
+/// a `window_materialize` over a value that varies only along `kh`, not
+/// `kw`, composing to `Unary(Identity, _)` with the operand's OWN `kw`
+/// stride at 0, not 1 (found live by `maxpool_indices_row_major_...`
+/// panicking `out of range for slice of length 4` before this check was
+/// added, `docs/discipline.md` ROW 154). The `kh` axis (`block_dim`)
+/// sits at a regular, arbitrary-sign stride, unconstrained here. The gate
+/// stays deliberately narrow on SHAPE (`Unary(Identity, _)` plus a live
+/// block plus a genuinely contiguous inner read), not on axis names or a
+/// `window_materialize`-specific tag: `Layout::offset_of`'s exact linearity
+/// (ROW 150's own proof) makes [`window_copy_block`] correct for ANY
+/// operand whose body happens to match this shape, window-materialize or
+/// not (`docs/discipline.md` ROW 153's own rung-2 charter).
+fn window_copy_operand(shape: &BodyShape, fast_path: bool, block_extent: u64, strides: &[i64]) -> Option<u16> {
+    match *shape {
+        BodyShape::Unary(ScalarOp::Identity, operand)
+            if fast_path && block_extent > 1 && strides[operand as usize] == 1 =>
+        {
+            Some(operand)
+        }
+        _ => None,
+    }
+}
+
+/// [`window_copy_operand`]'s block: `block_extent` `inner_len`-wide rows,
+/// contiguous within each row, each row offset from the previous by
+/// `row_stride` (any sign/magnitude — matches the per-step block loop this
+/// replaces, which places no non-negativity requirement on `block_strides`
+/// unlike the inner-width `strides` array). Bypasses
+/// [`elementwise_width_fast`]'s per-row `BodyShape`/`ScalarOp` dispatch and
+/// [`OperandSpan`] construction entirely: the shape is already known
+/// constant for the whole block, so nothing is left to branch on per row —
+/// each row is a plain slice-to-slice copy. An `inner_len == 3` (mnist's
+/// own `kw`) hand-unrolled scalar variant was tried and measured
+/// indistinguishable-to-worse than this `copy_from_slice` loop on 3 of 4
+/// benched shapes (one shape's apparent win did not survive a second
+/// sample — outlier noise, not signal); kept this simpler single form
+/// rather than carry a second, unproven-faster code path
+/// (`docs/discipline.md` ROW 154).
+#[inline(always)]
+fn window_copy_block(source: &[f32], src_base: i64, row_stride: i64, block_extent: u64, inner_len: usize, out: &mut [f32]) {
+    let mut base = src_base;
+    let mut out_offset = 0usize;
+    for _ in 0..block_extent {
+        let start = base as usize;
+        out[out_offset..out_offset + inner_len].copy_from_slice(&source[start..start + inner_len]);
+        out_offset += inner_len;
+        base += row_stride;
     }
 }
 
