@@ -34,6 +34,7 @@ use std::alloc::{GlobalAlloc, Layout, System};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::{Duration, Instant};
 
 use criterion::Criterion;
 
@@ -78,8 +79,142 @@ fn report_allocation_counts(image: &[f32], weights: &tile_pipeline::MnistWeights
     }
 }
 
-use tile_pipeline::{BandRows, ConvReluStage, MnistWeights, block_on_ready, run_pipeline_forward};
+use tile_pipeline::{BandRows, BatchNormAffine, ConvReluStage, FcAccumulateStage, MnistWeights, RowBand, block_on_ready, run_pipeline_forward};
 use proxima_primitives::pipe::Pipe;
+
+/// Wall-clock share per named forward-pass stage -- gate 18 (a perf claim
+/// needs a measurement artifact in the same breath): `run_pipeline_forward`
+/// composes its stages through `AndThen`, which hides per-stage cost behind
+/// one opaque `Future`. This driver reimplements the SAME sequential call
+/// order `AndThen` performs (verified against `primitives.rs`'s own
+/// `AndThen::call`: `first.call(input).await?; second.call(intermediate)`)
+/// by hand, so each stage's own `Instant` window can be read independently.
+/// Bench-only duplication (never library code), local to this file.
+#[derive(Default, Clone, Copy)]
+struct StageTimings {
+    band_bookkeeping: Duration,
+    conv1: Duration,
+    conv2: Duration,
+    conv3: Duration,
+    fc1: Duration,
+    fc2: Duration,
+    softmax: Duration,
+}
+
+impl StageTimings {
+    fn add(&mut self, other: &StageTimings) {
+        self.band_bookkeeping += other.band_bookkeeping;
+        self.conv1 += other.conv1;
+        self.conv2 += other.conv2;
+        self.conv3 += other.conv3;
+        self.fc1 += other.fc1;
+        self.fc2 += other.fc2;
+        self.softmax += other.softmax;
+    }
+
+    fn total(&self) -> Duration {
+        self.band_bookkeeping + self.conv1 + self.conv2 + self.conv3 + self.fc1 + self.fc2 + self.softmax
+    }
+}
+
+/// One forward pass, timed stage-by-stage. Duplicates `matvec_bias` /
+/// `apply_batch_norm` / `log_softmax` inline (all three are private to
+/// `support/tile_pipeline.rs` and under 5 lines each) rather than widening
+/// that module's visibility for a bench-only profiling pass.
+fn run_pipeline_forward_profiled(image: &[f32], weights: &MnistWeights<'_>, band: BandRows) -> ([f32; 10], StageTimings) {
+    let batch_norm1 = BatchNormAffine::new(weights.norm1_weight, weights.norm1_bias, weights.norm1_running_mean, weights.norm1_running_var, 1e-5);
+    let stage1 = ConvReluStage::new(1, 8, 3, 3, 28, weights.conv1_weight, weights.conv1_bias, None);
+    let stage2 = ConvReluStage::new(8, 16, 3, 3, 26, weights.conv2_weight, weights.conv2_bias, None);
+    let stage3 = ConvReluStage::new(16, 24, 3, 3, 24, weights.conv3_weight, weights.conv3_bias, Some(batch_norm1));
+    let fc_stage = FcAccumulateStage::new(24, 22, 22, 32, weights.fc1_weight, weights.fc1_bias);
+
+    let mut timings = StageTimings::default();
+    let mut row = 0;
+    while row < 28 {
+        let take = band.0.min(28 - row);
+
+        let start = Instant::now();
+        let data = image[row * 28..(row + take) * 28].to_vec();
+        let input_band = RowBand { channels: 1, width: 28, rows: take, data };
+        timings.band_bookkeeping += start.elapsed();
+
+        let start = Instant::now();
+        let out1 = block_on_ready(stage1.call(input_band)).expect("stage1 infallible");
+        timings.conv1 += start.elapsed();
+
+        let start = Instant::now();
+        let out2 = block_on_ready(stage2.call(out1)).expect("stage2 infallible");
+        timings.conv2 += start.elapsed();
+
+        let start = Instant::now();
+        let out3 = block_on_ready(stage3.call(out2)).expect("stage3 infallible");
+        timings.conv3 += start.elapsed();
+
+        let start = Instant::now();
+        block_on_ready(fc_stage.call(out3)).expect("fc1 infallible");
+        timings.fc1 += start.elapsed();
+
+        row += take;
+    }
+
+    let start = Instant::now();
+    let fc1_out = fc_stage.finalize();
+    timings.fc1 += start.elapsed();
+
+    let start = Instant::now();
+    let fc2_out: Vec<f32> = (0..10)
+        .map(|output_index| {
+            let row = &weights.fc2_weight[output_index * 32..(output_index + 1) * 32];
+            let dot: f32 = row.iter().zip(&fc1_out).fold(0.0_f32, |accumulator, (&weight_value, &input_value)| input_value.mul_add(weight_value, accumulator));
+            dot + weights.fc2_bias[output_index]
+        })
+        .collect();
+    timings.fc2 += start.elapsed();
+
+    let start = Instant::now();
+    let bn2_out: Vec<f32> = fc2_out
+        .iter()
+        .enumerate()
+        .map(|(index, &value)| (value - weights.norm2_running_mean[index]) / (weights.norm2_running_var[index] + 1e-5_f32).sqrt() * weights.norm2_weight[index] + weights.norm2_bias[index])
+        .collect();
+    let max = bn2_out.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+    let sum: f32 = bn2_out.iter().map(|&value| (value - max).exp()).sum();
+    let log_sum = sum.ln();
+    let mut logits = [0.0_f32; 10];
+    for (destination, &value) in logits.iter_mut().zip(&bn2_out) {
+        *destination = value - max - log_sum;
+    }
+    timings.softmax += start.elapsed();
+
+    (logits, timings)
+}
+
+/// Per-stage µs, averaged over `iterations` real forward passes (rotating
+/// through the real `t10k` images, not one image repeated) -- printed once,
+/// non-timed relative to the criterion arms below (the SAME "diagnostic
+/// pass, then clean timed arms" split `report_allocation_counts` uses).
+fn report_stage_profile(images: &[Vec<f32>], weights: &MnistWeights<'_>, band: BandRows, label: &str, iterations: usize) {
+    let mut total = StageTimings::default();
+    for index in 0..iterations {
+        let (logits, timings) = run_pipeline_forward_profiled(&images[index % images.len()], weights, band);
+        std::hint::black_box(logits);
+        total.add(&timings);
+    }
+    let scale = iterations as f64;
+    let stage_us = |duration: Duration| duration.as_secs_f64() * 1_000_000.0 / scale;
+    println!(
+        "tile_pipeline stage profile [{label}], {iterations} forward passes: \
+band_bookkeeping={:.3}us conv1={:.3}us conv2={:.3}us conv3={:.3}us fc1={:.3}us fc2={:.3}us softmax={:.3}us total={:.3}us",
+        stage_us(total.band_bookkeeping),
+        stage_us(total.conv1),
+        stage_us(total.conv2),
+        stage_us(total.conv3),
+        stage_us(total.fc1),
+        stage_us(total.fc2),
+        stage_us(total.softmax),
+        stage_us(total.total()),
+    );
+}
 
 const MODEL_PATH: &str = "/Users/brianbruggeman/repos/others/burn/examples/onnx-inference/src/model/mnist.onnx";
 const DATASET_DIR: &str = "/Users/brianbruggeman/.cache/burn-dataset/mnist";
@@ -141,6 +276,9 @@ fn bench_whole_forward(criterion: &mut Criterion) {
     let images = load_normalized_images(&test_images_path(), BENCH_IMAGES);
 
     report_allocation_counts(&images[0], &weights);
+    for (label, band_rows) in [("band1", 1), ("band_kh", 3), ("band_2kh", 6)] {
+        report_stage_profile(&images, &weights, BandRows(band_rows), label, 200);
+    }
 
     let mut group = criterion.benchmark_group("mnist_forward_per_image");
     group.sample_size(20);
