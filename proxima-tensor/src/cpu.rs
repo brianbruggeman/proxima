@@ -13965,6 +13965,94 @@ mod tests {
         );
     }
 
+    /// A two-named-input, one-`Elementwise`-node program (`c = a + b`), the
+    /// smallest fixture that exercises both an [`Op::Input`] rebinding slot
+    /// AND a resolved-node buffer -- no MNIST dependency, per this row's
+    /// own task instruction (`docs/discipline.md` ROW 165: `build_static_arena`/
+    /// `evaluate_named_with_arena` unit-tested on a small synthetic
+    /// program).
+    fn named_add_program() -> (Vec<Op>, NodeId) {
+        let mut program = Vec::new();
+        let a = append(
+            &mut program,
+            Op::Input { dtype: DType::Float32, shape: vec![Extent::Static(4)], name: Some(String::from("a")) },
+        );
+        let b = append(
+            &mut program,
+            Op::Input { dtype: DType::Float32, shape: vec![Extent::Static(4)], name: Some(String::from("b")) },
+        );
+        let sum = append(
+            &mut program,
+            Op::Elementwise {
+                dtype: DType::Float32,
+                body: ScalarOp::Add,
+                operands: vec![
+                    (a, IndexMap::Affine(map::projection(1, &[0]))),
+                    (b, IndexMap::Affine(map::projection(1, &[0]))),
+                ],
+                name: None,
+            },
+        );
+        (program, sum)
+    }
+
+    /// [`build_static_arena`] + [`evaluate_named_with_arena`] run TWICE
+    /// against the same arena, on two different `named` bindings, and must
+    /// each match [`evaluate_named`]'s own fresh-alloc result bit for bit --
+    /// the same correctness bar `train_step_lane.rs`'s own bench-level
+    /// `assert_arena_bit_identical_to_baseline` holds the arena to, proved
+    /// here at the library-unit level instead.
+    #[test]
+    fn evaluate_named_with_arena_matches_evaluate_named_over_two_calls() {
+        let (program, sum) = named_add_program();
+        let mut arena = build_static_arena(&program, &[], &[sum]).expect("small program builds a static arena");
+
+        let first_a = [1.0f32, 2.0, 3.0, 4.0];
+        let first_b = [10.0f32, 20.0, 30.0, 40.0];
+        let arena_first = evaluate_named_with_arena(&mut arena, &[("a", &first_a), ("b", &first_b)]).expect("first arena call evaluates");
+        let baseline_first =
+            evaluate_named(&program, &[], &[("a", &first_a), ("b", &first_b)], &[sum]).expect("first baseline call evaluates");
+        assert_eq!(
+            arena_first.get(sum).map(|(data, _)| data.to_vec()),
+            baseline_first.get(sum).map(|(data, _)| data.to_vec()),
+            "first call: arena and fresh-alloc paths must agree bit for bit"
+        );
+
+        let second_a = [100.0f32, 200.0, 300.0, 400.0];
+        let second_b = [1.0f32, 2.0, 3.0, 4.0];
+        let arena_second = evaluate_named_with_arena(&mut arena, &[("a", &second_a), ("b", &second_b)]).expect("second arena call evaluates");
+        let baseline_second =
+            evaluate_named(&program, &[], &[("a", &second_a), ("b", &second_b)], &[sum]).expect("second baseline call evaluates");
+        assert_eq!(
+            arena_second.get(sum).map(|(data, _)| data.to_vec()),
+            baseline_second.get(sum).map(|(data, _)| data.to_vec()),
+            "second call (same arena, reused buffers): arena and fresh-alloc paths must still agree bit for bit"
+        );
+        assert_eq!(arena_second.get(sum).map(|(data, _)| data.to_vec()), Some(vec![101.0, 202.0, 303.0, 404.0]));
+    }
+
+    /// A `named` binding whose length no longer matches the shape
+    /// [`build_static_arena`] fixed for that input must return a named
+    /// [`TensorError::InputSizeMismatch`], not a silent truncation, a
+    /// panic, or a wrong-shaped result.
+    #[test]
+    fn evaluate_named_with_arena_reports_a_shape_mismatched_rebind_by_name() {
+        let (program, sum) = named_add_program();
+        let mut arena = build_static_arena(&program, &[], &[sum]).expect("small program builds a static arena");
+
+        let wrong_length_a = [1.0f32, 2.0, 3.0];
+        let full_length_b = [10.0f32, 20.0, 30.0, 40.0];
+        let error = evaluate_named_with_arena(&mut arena, &[("a", &wrong_length_a), ("b", &full_length_b)])
+            .expect_err("a 3-element rebind against a 4-element input slot must be rejected");
+        match error {
+            TensorError::InputSizeMismatch { expected, found, .. } => {
+                assert_eq!(expected, 4, "the arena's own fixed slot size for `a`");
+                assert_eq!(found, 3, "the mismatched rebind's own length");
+            }
+            other => panic!("expected TensorError::InputSizeMismatch, got {other:?}"),
+        }
+    }
+
     /// `is_quantized_matmul_operand` is called once per candidate node, not
     /// once per program — proving the exemption holds for many quantized
     /// weights at once (a real checkpoint's 217 `Q4_K` tensors, not the
