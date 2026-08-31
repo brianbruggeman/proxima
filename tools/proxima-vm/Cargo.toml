@@ -22,6 +22,14 @@ alloc = ["dep:vm-fdt"]
 # the disciplined-component gate 1: `object`/`goblin` never build for a plain
 # `cargo build`/`cargo test`, only `cargo bench --features elf-bench`.
 elf-bench = []
+proxima-onnx = ["dep:proxima-onnx"]
+proxima-tensor = ["dep:proxima-tensor"]
+# Gates `restore_to_inference_probe` (mapped-weights-restore-to-first-logit
+# demo) -- pulls proxima-onnx + proxima-tensor into this crate's dependency
+# graph, which a normal `cargo build`/`cargo test` on this VM-only crate
+# should never pay for, the same reasoning `wire-to-weights-demo`
+# (root `Cargo.toml`) already applies to the same two crates.
+restore-probe-demo = ["std", "proxima-onnx", "proxima-tensor"]
 
 [dependencies]
 arrayvec.workspace = true
@@ -31,9 +39,11 @@ futures.workspace = true
 postcard = { workspace = true, features = ["alloc"] }
 proxima-core = { workspace = true, features = ["alloc"] }
 proxima-net = { version = "0.1.0", path = "../../proxima-net", default-features = false, features = ["alloc"] }
+proxima-onnx = { version = "0.1.0", path = "../../proxima-onnx", default-features = false, features = ["std"], optional = true }
 proxima-primitives = { workspace = true, features = ["alloc"], optional = true }
 proxima-process = { workspace = true, features = ["alloc"], optional = true }
 proxima-protocols = { workspace = true, features = ["process", "nvme", "virtio"] }
+proxima-tensor = { version = "0.1.0", path = "../../proxima-tensor", default-features = false, features = ["std"], optional = true }
 serde = { workspace = true, features = ["derive"] }
 vm-fdt = { version = "0.3.0", default-features = false, features = ["alloc"], optional = true }
 
@@ -81,6 +91,10 @@ required-features = ["std"]
 [[bin]]
 name = "snapshot_warm_restore_probe"
 required-features = ["std"]
+
+[[bin]]
+name = "restore_to_inference_probe"
+required-features = ["restore-probe-demo"]
 
 [[bench]]
 name = "bench_elf"
