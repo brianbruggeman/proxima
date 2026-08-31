@@ -270,6 +270,369 @@ mod tests {
         }
     }
 
+    /// Forward-only (no `differentiate`, so nothing keeps the window mask
+    /// chain's operands alive past the fold) at stride 2 -- isolates whether
+    /// `bind.rs`'s masked-window elimination, which only ever fires on a
+    /// pure-forward graph (a differentiated graph's own backward reads the
+    /// mask's value, keeping it `held` past the point the elimination would
+    /// need it gone), agrees with a hand-computed stride-2 window.
+    /// `image` is `0..24` row-major over a `1x1x5x5` tensor:
+    /// ```text
+    ///  0  1  2  3  4
+    ///  5  6  7  8  9
+    /// 10 11 12 13 14
+    /// 15 16 17 18 19
+    /// 20 21 22 23 24
+    /// ```
+    /// `weight = [[1, 0], [0, -1]]`, no bias, stride 2 -> `out_h = out_w = 2`,
+    /// windows anchored at `(0, 0)`, `(0, 2)`, `(2, 0)`, `(2, 2)`.
+    /// `out[oy, ox] = image[2oy, 2ox] - image[2oy+1, 2ox+1]`.
+    #[proxima::test]
+    async fn forward_only_stride_two_matches_hand_computed_values() {
+        let image_values: [f32; 25] = core::array::from_fn(|index| index as f32);
+        let weight_values: [f32; 4] = [1.0, 0.0, 0.0, -1.0];
+
+        let mut program = Vec::new();
+        let image = leaf(&mut program, "image", vec![Extent::Static(1), Extent::Static(1), Extent::Static(5), Extent::Static(5)]);
+        let weight = leaf(&mut program, "weight", vec![Extent::Static(1), Extent::Static(1), Extent::Static(2), Extent::Static(2)]);
+        let out = conv2d(&mut program, DType::Float32, image, (1, 1, 5, 5), weight, (1, 1, 2, 2), None, 2, 2).expect("2x2 kernel fits a 5x5 image at stride 2");
+
+        let evaluated = proxima_tensor::cpu::evaluate_named(&program, &[], &[("image", &image_values), ("weight", &weight_values)], &[out])
+            .expect("conv2d program lowers and evaluates");
+        let (result, shape) = evaluated.get(out).expect("conv output requested");
+        assert_eq!(shape, &vec![1, 1, 2, 2], "a 2x2 kernel over a 5x5 image at stride 2 produces a 2x2 output");
+
+        // out[0,0]=image[0,0]-image[1,1]=0-6=-6; out[0,1]=image[0,2]-image[1,3]=2-8=-6;
+        // out[1,0]=image[2,0]-image[3,1]=10-16=-6; out[1,1]=image[2,2]-image[3,3]=12-18=-6.
+        let expected = [-6.0f32, -6.0, -6.0, -6.0];
+        for (position, (&got, &want)) in result.iter().zip(expected.iter()).enumerate() {
+            assert!((got - want).abs() < 1e-6, "position {position}: got {got}, want {want}, full result {result:?}");
+        }
+    }
+
+    /// Plain nested-loop reference convolution -- `[n, ci, h, w]` image,
+    /// `[co, ci, kh, kw]` weight, valid (no padding) -- used only to check
+    /// `conv2d`'s own output against an implementation that shares none of
+    /// its machinery (no mask, no `Iota`, no `IndexMap`).
+    #[allow(clippy::too_many_arguments)]
+    fn brute_force_conv2d(
+        image: &[f32],
+        batch: usize,
+        in_channels: usize,
+        height: usize,
+        width: usize,
+        weight: &[f32],
+        out_channels: usize,
+        kernel: usize,
+        stride: usize,
+    ) -> (Vec<f32>, usize, usize) {
+        let out_h = (height - kernel) / stride + 1;
+        let out_w = (width - kernel) / stride + 1;
+        let mut out = vec![0.0f32; batch * out_channels * out_h * out_w];
+        for n in 0..batch {
+            for co in 0..out_channels {
+                for oy in 0..out_h {
+                    for ox in 0..out_w {
+                        let mut accumulator = 0.0f32;
+                        for ci in 0..in_channels {
+                            for ky in 0..kernel {
+                                for kx in 0..kernel {
+                                    let iy = oy * stride + ky;
+                                    let ix = ox * stride + kx;
+                                    let image_index = ((n * in_channels + ci) * height + iy) * width + ix;
+                                    let weight_index = ((co * in_channels + ci) * kernel + ky) * kernel + kx;
+                                    accumulator += image[image_index] * weight[weight_index];
+                                }
+                            }
+                        }
+                        out[((n * out_channels + co) * out_h + oy) * out_w + ox] = accumulator;
+                    }
+                }
+            }
+        }
+        (out, out_h, out_w)
+    }
+
+    /// Two stacked `conv2d` layers, forward-only (no `differentiate`, so the
+    /// window mask chain is genuinely eliminated rather than kept alive by a
+    /// backward read of its value -- see `forward_only_stride_two_matches_hand_computed_values`'s
+    /// own doc), multi-channel, stride 2 on both layers, against
+    /// `brute_force_conv2d` chained twice by hand -- the exact shape
+    /// `real_mnist_conv_training.rs`'s own `build_eval_network` uses.
+    #[proxima::test]
+    async fn stacked_forward_only_multichannel_stride_two_matches_a_brute_force_reference() {
+        let (batch, in_channels, height, width) = (2usize, 1usize, 9usize, 9usize);
+        let (mid_channels, kernel, stride) = (3usize, 3usize, 2usize);
+        let out_channels = 2usize;
+
+        let image_values = pseudo_random(0x51EE_D0A5, batch * in_channels * height * width);
+        let weight1_values = pseudo_random(0xACE1_5EED, mid_channels * in_channels * kernel * kernel);
+        let weight2_values = pseudo_random(0xC0FF_EE11, out_channels * mid_channels * kernel * kernel);
+
+        let mut program = Vec::new();
+        let image = leaf(&mut program, "image", vec![Extent::Static(batch as u32), Extent::Static(in_channels as u32), Extent::Static(height as u32), Extent::Static(width as u32)]);
+        let weight1 = leaf(&mut program, "weight1", vec![Extent::Static(mid_channels as u32), Extent::Static(in_channels as u32), Extent::Static(kernel as u32), Extent::Static(kernel as u32)]);
+        let weight2 = leaf(&mut program, "weight2", vec![Extent::Static(out_channels as u32), Extent::Static(mid_channels as u32), Extent::Static(kernel as u32), Extent::Static(kernel as u32)]);
+
+        let hidden = conv2d(
+            &mut program,
+            DType::Float32,
+            image,
+            (batch as u64, in_channels as u64, height as u64, width as u64),
+            weight1,
+            (mid_channels as u64, in_channels as u64, kernel as u64, kernel as u64),
+            None,
+            stride as u64,
+            stride as u64,
+        )
+        .expect("3x3 kernel fits a 9x9 image at stride 2");
+        let (_, _, mid_h, mid_w) = conv2d_output_shape((batch as u64, in_channels as u64, height as u64, width as u64), (mid_channels as u64, in_channels as u64, kernel as u64, kernel as u64), stride as u64, stride as u64).expect("mid shape");
+        let out = conv2d(
+            &mut program,
+            DType::Float32,
+            hidden,
+            (batch as u64, mid_channels as u64, mid_h, mid_w),
+            weight2,
+            (out_channels as u64, mid_channels as u64, kernel as u64, kernel as u64),
+            None,
+            stride as u64,
+            stride as u64,
+        )
+        .expect("3x3 kernel fits the first layer's output at stride 2");
+
+        let evaluated = proxima_tensor::cpu::evaluate_named(
+            &program,
+            &[],
+            &[("image", &image_values), ("weight1", &weight1_values), ("weight2", &weight2_values)],
+            &[out],
+        )
+        .expect("stacked conv2d program lowers and evaluates");
+        let (result, _shape) = evaluated.get(out).expect("stacked conv2d output requested");
+
+        let (hidden_reference, hidden_h, hidden_w) = brute_force_conv2d(&image_values, batch, in_channels, height, width, &weight1_values, mid_channels, kernel, stride);
+        let (expected, _out_h, _out_w) = brute_force_conv2d(&hidden_reference, batch, mid_channels, hidden_h, hidden_w, &weight2_values, out_channels, kernel, stride);
+
+        for (position, (&got, &want)) in result.iter().zip(expected.iter()).enumerate() {
+            assert!((got - want).abs() < 1e-4, "position {position}: got {got}, want {want}");
+        }
+    }
+
+    /// Bisection step: same small shape as the no-bias stacked test above,
+    /// but with bias on the FIRST layer only -- isolates whether "stacked +
+    /// bias" disagrees regardless of scale, or only at real MNIST dimensions.
+    #[proxima::test]
+    async fn stacked_forward_only_small_with_bias_on_first_layer_matches_a_brute_force_reference() {
+        let (batch, in_channels, height, width) = (2usize, 1usize, 9usize, 9usize);
+        let (mid_channels, kernel, stride) = (3usize, 3usize, 2usize);
+        let out_channels = 2usize;
+
+        let image_values = pseudo_random(0x51EE_D0A5, batch * in_channels * height * width);
+        let weight1_values = pseudo_random(0xACE1_5EED, mid_channels * in_channels * kernel * kernel);
+        let bias1_values = pseudo_random(0xB1A5_0001, mid_channels);
+        let weight2_values = pseudo_random(0xC0FF_EE11, out_channels * mid_channels * kernel * kernel);
+
+        let mut program = Vec::new();
+        let image = leaf(&mut program, "image", vec![Extent::Static(batch as u32), Extent::Static(in_channels as u32), Extent::Static(height as u32), Extent::Static(width as u32)]);
+        let weight1 = leaf(&mut program, "weight1", vec![Extent::Static(mid_channels as u32), Extent::Static(in_channels as u32), Extent::Static(kernel as u32), Extent::Static(kernel as u32)]);
+        let bias1 = leaf(&mut program, "bias1", vec![Extent::Static(mid_channels as u32)]);
+        let weight2 = leaf(&mut program, "weight2", vec![Extent::Static(out_channels as u32), Extent::Static(mid_channels as u32), Extent::Static(kernel as u32), Extent::Static(kernel as u32)]);
+
+        let hidden = conv2d(
+            &mut program,
+            DType::Float32,
+            image,
+            (batch as u64, in_channels as u64, height as u64, width as u64),
+            weight1,
+            (mid_channels as u64, in_channels as u64, kernel as u64, kernel as u64),
+            Some(bias1),
+            stride as u64,
+            stride as u64,
+        )
+        .expect("3x3 kernel fits a 9x9 image at stride 2");
+        let (_, _, mid_h, mid_w) = conv2d_output_shape((batch as u64, in_channels as u64, height as u64, width as u64), (mid_channels as u64, in_channels as u64, kernel as u64, kernel as u64), stride as u64, stride as u64).expect("mid shape");
+        let out = conv2d(
+            &mut program,
+            DType::Float32,
+            hidden,
+            (batch as u64, mid_channels as u64, mid_h, mid_w),
+            weight2,
+            (out_channels as u64, mid_channels as u64, kernel as u64, kernel as u64),
+            None,
+            stride as u64,
+            stride as u64,
+        )
+        .expect("3x3 kernel fits the first layer's output at stride 2");
+
+        let evaluated = proxima_tensor::cpu::evaluate_named(
+            &program,
+            &[],
+            &[("image", &image_values), ("weight1", &weight1_values), ("bias1", &bias1_values), ("weight2", &weight2_values)],
+            &[out],
+        )
+        .expect("stacked conv2d program lowers and evaluates");
+        let (result, _shape) = evaluated.get(out).expect("stacked conv2d output requested");
+
+        let (mut hidden_reference, hidden_h, hidden_w) = brute_force_conv2d(&image_values, batch, in_channels, height, width, &weight1_values, mid_channels, kernel, stride);
+        add_bias(&mut hidden_reference, batch, mid_channels, hidden_h, hidden_w, &bias1_values);
+        let (expected, _out_h, _out_w) = brute_force_conv2d(&hidden_reference, batch, mid_channels, hidden_h, hidden_w, &weight2_values, out_channels, kernel, stride);
+
+        let mut worst = 0.0f32;
+        for (position, (&got, &want)) in result.iter().zip(expected.iter()).enumerate() {
+            let difference = (got - want).abs();
+            if difference > worst {
+                worst = difference;
+            }
+            assert!(difference < 1e-3, "position {position}: got {got}, want {want}, worst-so-far {worst}");
+        }
+    }
+
+    /// Same shape as `stacked_forward_only_multichannel_stride_two_matches_a_brute_force_reference`,
+    /// but at `real_mnist_conv_training.rs`'s own real dimensions (28x28
+    /// image, 1->8->16 channels, 3x3 kernel, stride 2, bias on both layers,
+    /// `relu` between them) -- isolates whether the bug (if any) is
+    /// dimension-dependent rather than shape-dependent.
+    #[proxima::test]
+    async fn stacked_forward_only_at_real_mnist_dimensions_matches_a_brute_force_reference() {
+        let (batch, in_channels, height, width) = (2usize, 1usize, 28usize, 28usize);
+        let (mid_channels, kernel, stride) = (8usize, 3usize, 2usize);
+        let out_channels = 16usize;
+
+        let image_values = pseudo_random(0x51EE_D0A5, batch * in_channels * height * width);
+        let weight1_values = pseudo_random(0xACE1_5EED, mid_channels * in_channels * kernel * kernel);
+        let bias1_values = pseudo_random(0xB1A5_0001, mid_channels);
+        let weight2_values = pseudo_random(0xC0FF_EE11, out_channels * mid_channels * kernel * kernel);
+        let bias2_values = pseudo_random(0xB1A5_0002, out_channels);
+
+        let mut program = Vec::new();
+        let image = leaf(&mut program, "image", vec![Extent::Static(batch as u32), Extent::Static(in_channels as u32), Extent::Static(height as u32), Extent::Static(width as u32)]);
+        let weight1 = leaf(&mut program, "weight1", vec![Extent::Static(mid_channels as u32), Extent::Static(in_channels as u32), Extent::Static(kernel as u32), Extent::Static(kernel as u32)]);
+        let bias1 = leaf(&mut program, "bias1", vec![Extent::Static(mid_channels as u32)]);
+        let weight2 = leaf(&mut program, "weight2", vec![Extent::Static(out_channels as u32), Extent::Static(mid_channels as u32), Extent::Static(kernel as u32), Extent::Static(kernel as u32)]);
+        let bias2 = leaf(&mut program, "bias2", vec![Extent::Static(out_channels as u32)]);
+
+        let hidden_pre = conv2d(
+            &mut program,
+            DType::Float32,
+            image,
+            (batch as u64, in_channels as u64, height as u64, width as u64),
+            weight1,
+            (mid_channels as u64, in_channels as u64, kernel as u64, kernel as u64),
+            Some(bias1),
+            stride as u64,
+            stride as u64,
+        )
+        .expect("3x3 kernel fits a 28x28 image at stride 2");
+        let hidden = crate::activation::relu(&mut program, DType::Float32, hidden_pre, 4);
+        let (_, _, mid_h, mid_w) = conv2d_output_shape((batch as u64, in_channels as u64, height as u64, width as u64), (mid_channels as u64, in_channels as u64, kernel as u64, kernel as u64), stride as u64, stride as u64).expect("mid shape");
+        let out_pre = conv2d(
+            &mut program,
+            DType::Float32,
+            hidden,
+            (batch as u64, mid_channels as u64, mid_h, mid_w),
+            weight2,
+            (out_channels as u64, mid_channels as u64, kernel as u64, kernel as u64),
+            Some(bias2),
+            stride as u64,
+            stride as u64,
+        )
+        .expect("3x3 kernel fits the first layer's output at stride 2");
+        let out = crate::activation::relu(&mut program, DType::Float32, out_pre, 4);
+
+        let evaluated = proxima_tensor::cpu::evaluate_named(
+            &program,
+            &[],
+            &[
+                ("image", &image_values),
+                ("weight1", &weight1_values),
+                ("bias1", &bias1_values),
+                ("weight2", &weight2_values),
+                ("bias2", &bias2_values),
+            ],
+            &[out],
+        )
+        .expect("stacked conv2d program lowers and evaluates");
+        let (result, _shape) = evaluated.get(out).expect("stacked conv2d output requested");
+
+        let (mut hidden_reference, hidden_h, hidden_w) = brute_force_conv2d(&image_values, batch, in_channels, height, width, &weight1_values, mid_channels, kernel, stride);
+        add_bias_and_relu(&mut hidden_reference, batch, mid_channels, hidden_h, hidden_w, &bias1_values);
+        let (mut expected, out_h, out_w) = brute_force_conv2d(&hidden_reference, batch, mid_channels, hidden_h, hidden_w, &weight2_values, out_channels, kernel, stride);
+        add_bias_and_relu(&mut expected, batch, out_channels, out_h, out_w, &bias2_values);
+
+        let mut worst = 0.0f32;
+        for (position, (&got, &want)) in result.iter().zip(expected.iter()).enumerate() {
+            let difference = (got - want).abs();
+            if difference > worst {
+                worst = difference;
+            }
+            assert!(difference < 1e-3, "position {position}: got {got}, want {want}, worst-so-far {worst}");
+        }
+    }
+
+    fn add_bias(values: &mut [f32], batch: usize, channels: usize, height: usize, width: usize, bias: &[f32]) {
+        for n in 0..batch {
+            for (channel, &channel_bias) in bias.iter().enumerate().take(channels) {
+                for position in 0..height * width {
+                    let index = (n * channels + channel) * height * width + position;
+                    values[index] += channel_bias;
+                }
+            }
+        }
+    }
+
+    fn add_bias_and_relu(values: &mut [f32], batch: usize, channels: usize, height: usize, width: usize, bias: &[f32]) {
+        add_bias(values, batch, channels, height, width, bias);
+        for value in values.iter_mut() {
+            *value = value.max(0.0);
+        }
+    }
+
+    /// Bisection step: single conv2d layer (no stacking), forward-only,
+    /// with bias, at real MNIST layer-1 dimensions -- isolates whether bias
+    /// alone at this scale disagrees, independent of any second layer.
+    #[proxima::test]
+    async fn single_layer_forward_only_with_bias_at_real_mnist_dimensions_matches_a_brute_force_reference() {
+        let (batch, in_channels, height, width) = (2usize, 1usize, 28usize, 28usize);
+        let (mid_channels, kernel, stride) = (8usize, 3usize, 2usize);
+
+        let image_values = pseudo_random(0x51EE_D0A5, batch * in_channels * height * width);
+        let weight1_values = pseudo_random(0xACE1_5EED, mid_channels * in_channels * kernel * kernel);
+        let bias1_values = pseudo_random(0xB1A5_0001, mid_channels);
+
+        let mut program = Vec::new();
+        let image = leaf(&mut program, "image", vec![Extent::Static(batch as u32), Extent::Static(in_channels as u32), Extent::Static(height as u32), Extent::Static(width as u32)]);
+        let weight1 = leaf(&mut program, "weight1", vec![Extent::Static(mid_channels as u32), Extent::Static(in_channels as u32), Extent::Static(kernel as u32), Extent::Static(kernel as u32)]);
+        let bias1 = leaf(&mut program, "bias1", vec![Extent::Static(mid_channels as u32)]);
+
+        let out = conv2d(
+            &mut program,
+            DType::Float32,
+            image,
+            (batch as u64, in_channels as u64, height as u64, width as u64),
+            weight1,
+            (mid_channels as u64, in_channels as u64, kernel as u64, kernel as u64),
+            Some(bias1),
+            stride as u64,
+            stride as u64,
+        )
+        .expect("3x3 kernel fits a 28x28 image at stride 2");
+
+        let evaluated = proxima_tensor::cpu::evaluate_named(&program, &[], &[("image", &image_values), ("weight1", &weight1_values), ("bias1", &bias1_values)], &[out])
+            .expect("conv2d program lowers and evaluates");
+        let (result, _shape) = evaluated.get(out).expect("conv2d output requested");
+
+        let (mut expected, _out_h, _out_w) = brute_force_conv2d(&image_values, batch, in_channels, height, width, &weight1_values, mid_channels, kernel, stride);
+        add_bias(&mut expected, batch, mid_channels, _out_h, _out_w, &bias1_values);
+
+        let mut worst = 0.0f32;
+        for (position, (&got, &want)) in result.iter().zip(expected.iter()).enumerate() {
+            let difference = (got - want).abs();
+            if difference > worst {
+                worst = difference;
+            }
+            assert!(difference < 1e-3, "position {position}: got {got}, want {want}, worst-so-far {worst}");
+        }
+    }
+
     fn relative_error(analytic: f32, numeric: f32) -> f32 {
         (analytic - numeric).abs() / (analytic.abs().max(numeric.abs()) + 1e-6)
     }
@@ -462,6 +825,68 @@ mod tests {
 
         std::eprintln!("stacked conv2d weight1 max relative gradient-check error: {} at index {}", worst.0, worst.1);
         assert!(worst.0 < 5e-3, "stacked conv2d's first-layer weight gradient disagreed with central difference: {worst:?}");
+    }
+
+    /// Isolates whether a stride greater than 1 on BOTH stacked layers
+    /// disagrees with central difference -- `stacked_conv2d_gradient_reaches_the_first_layers_weight`
+    /// above only exercises stride 1, and `conv2d_gradient_matches_central_difference_on_every_parameter`
+    /// only exercises stride 2 on a single (unstacked) layer, so neither
+    /// alone would catch a bug specific to the stride-2-through-two-layers
+    /// composition.
+    #[proxima::test]
+    async fn stacked_conv2d_with_stride_two_on_both_layers_matches_central_difference() {
+        let mut program = Vec::new();
+        let image = leaf(&mut program, "image", vec![Extent::Static(1), Extent::Static(1), Extent::Static(9), Extent::Static(9)]);
+        let weight1 = leaf(&mut program, "weight1", vec![Extent::Static(2), Extent::Static(1), Extent::Static(3), Extent::Static(3)]);
+        let weight2 = leaf(&mut program, "weight2", vec![Extent::Static(1), Extent::Static(2), Extent::Static(2), Extent::Static(2)]);
+
+        let hidden = conv2d(&mut program, DType::Float32, image, (1, 1, 9, 9), weight1, (2, 1, 3, 3), None, 2, 2).expect("3x3 kernel fits a 9x9 image at stride 2");
+        let out = conv2d(&mut program, DType::Float32, hidden, (1, 2, 4, 4), weight2, (1, 2, 2, 2), None, 2, 2).expect("2x2 kernel fits a 4x4 image at stride 2");
+        let loss = crate::expr::reduce(&mut program, DType::Float32, ScalarOp::Add, ReduceInit::Zero, out, crate::expr::identity(4), crate::expr::broadcast(4));
+
+        let differentiated = crate::adjoint::differentiate(&program, loss).expect("stacked conv2d program differentiates");
+        let grad_weight1 = differentiated.gradient_of_named("weight1").expect("weight1 must receive a gradient through the second layer's own image operand");
+
+        let image_values = pseudo_random(0x1234_5678, 81);
+        let weight1_values = pseudo_random(0x9ABC_DEF0, 18);
+        let weight2_values = pseudo_random(0x0F0F_0F0F, 8);
+
+        let evaluated = proxima_tensor::cpu::evaluate_named(
+            &differentiated.program,
+            &[],
+            &[("image", &image_values), ("weight1", &weight1_values), ("weight2", &weight2_values)],
+            &[grad_weight1],
+        )
+        .expect("adjoint program lowers and evaluates");
+        let analytic_weight1 = evaluated.get(grad_weight1).expect("grad_weight1 requested").0.to_vec();
+
+        let loss_at = |weight1: &[f32]| {
+            proxima_tensor::cpu::evaluate_named(&program, &[], &[("image", &image_values), ("weight1", weight1), ("weight2", &weight2_values)], &[loss])
+                .expect("forward program lowers and evaluates")
+                .get(loss)
+                .expect("loss requested")
+                .0[0]
+        };
+
+        let step = 1e-3f32;
+        let mut worst = (0.0f32, 0usize);
+        let mut perturbed = weight1_values.clone();
+        for index in 0..perturbed.len() {
+            let original = perturbed[index];
+            perturbed[index] = original + step;
+            let plus = loss_at(&perturbed);
+            perturbed[index] = original - step;
+            let minus = loss_at(&perturbed);
+            perturbed[index] = original;
+            let numeric = (plus - minus) / (2.0 * step);
+            let relative = relative_error(analytic_weight1[index], numeric);
+            if relative > worst.0 {
+                worst = (relative, index);
+            }
+        }
+
+        std::eprintln!("stacked stride-2 conv2d weight1 max relative gradient-check error: {} at index {}", worst.0, worst.1);
+        assert!(worst.0 < 5e-3, "stacked stride-2 conv2d's first-layer weight gradient disagreed with central difference: {worst:?}");
     }
 
     #[test]
