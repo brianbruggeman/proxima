@@ -140,7 +140,7 @@ fn batch_statistics(program: &mut Vec<Op>, dtype: DType, x: NodeId, rank: u16, e
 /// followed by `Multiply`, never `Divide(centered, std_dev)` directly:
 /// `Divide`'s adjoint (`adjoint.rs:316-327`) builds a standalone unary
 /// `Reciprocal` against the divisor's OWN operand map, and this divisor is
-/// read through [`channel_map`] (rank-1 broadcasting into the rank-`rank`
+/// read through `channel_map` (rank-1 broadcasting into the rank-`rank`
 /// iteration space via one term on axis 1) -- a unary node whose only
 /// operand constrains a single axis leaves every other axis of that wider
 /// iteration space with no operand to anchor its extent, and shape
@@ -154,6 +154,11 @@ fn batch_statistics(program: &mut Vec<Op>, dtype: DType, x: NodeId, rank: u16, e
 /// operand map, it only reads one via `route_contribution`'s `Reduce(Add)`,
 /// which is well-defined regardless of which axes that operand's map
 /// constrains.
+// every argument is a distinct real quantity batchnorm math needs; no
+// group of them travels together the way `AdamOperands` groups four -- see
+// `crate::optimizer::AdamOperands`'s own doc for the convention this
+// function does not qualify for.
+#[allow(clippy::too_many_arguments)]
 fn normalize_scale_shift(program: &mut Vec<Op>, dtype: DType, centered: NodeId, variance: NodeId, gamma: NodeId, beta: NodeId, rank: u16, eps: f32) -> NodeId {
     let full = expr::identity(rank);
     let channels = channel_map(rank);
@@ -169,8 +174,8 @@ fn normalize_scale_shift(program: &mut Vec<Op>, dtype: DType, centered: NodeId, 
 
 /// Train-mode batchnorm over a rank-`rank` input whose channel axis is `1`
 /// (`NCHW` for `rank = 4`, `NC` for `rank = 2`): computes batch mean/variance
-/// from `x` itself ([`batch_statistics`]), normalizes/scales/shifts
-/// ([`normalize_scale_shift`]), and returns `(output, batch_mean,
+/// from `x` itself (`batch_statistics`), normalizes/scales/shifts
+/// (`normalize_scale_shift`), and returns `(output, batch_mean,
 /// batch_variance)` -- the batch statistics travel back to the caller as
 /// graph outputs rather than being consumed internally, because updating
 /// the *running* mean/variance that eval mode will read is the caller's
@@ -192,6 +197,7 @@ fn normalize_scale_shift(program: &mut Vec<Op>, dtype: DType, centered: NodeId, 
 /// automatically (`adjoint.rs:265-280`); no batchnorm-specific adjoint rule
 /// exists anywhere in this crate.
 #[must_use]
+#[allow(clippy::too_many_arguments)]
 pub fn batchnorm2d_train(program: &mut Vec<Op>, dtype: DType, x: NodeId, gamma: NodeId, beta: NodeId, rank: u16, elements_per_channel: u64, eps: f32) -> (NodeId, NodeId, NodeId) {
     let (centered, batch_mean, batch_variance) = batch_statistics(program, dtype, x, rank, elements_per_channel);
     let output = normalize_scale_shift(program, dtype, centered, batch_variance, gamma, beta, rank, eps);
@@ -208,6 +214,7 @@ pub fn batchnorm2d_train(program: &mut Vec<Op>, dtype: DType, x: NodeId, gamma: 
 /// than [`batchnorm2d_train`], not merely a different code path through the
 /// same one.
 #[must_use]
+#[allow(clippy::too_many_arguments)]
 pub fn batchnorm2d_eval(program: &mut Vec<Op>, dtype: DType, x: NodeId, gamma: NodeId, beta: NodeId, running_mean: NodeId, running_variance: NodeId, rank: u16, eps: f32) -> NodeId {
     let full = expr::identity(rank);
     let channels = channel_map(rank);
