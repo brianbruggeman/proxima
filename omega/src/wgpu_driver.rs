@@ -62,6 +62,16 @@ pub enum WgpuError {
     Tensor(#[from] TensorError),
     #[error(transparent)]
     Emit(#[from] EmitError),
+    /// A fused kernel's `var<storage, ...>` binding count exceeds what this
+    /// device actually supports (`wgpu::Limits::max_storage_buffers_per_shader_stage`,
+    /// now requested at the adapter's real ceiling in `acquire_device` --
+    /// see that function's doc). Caught here, before `pipeline_for` calls
+    /// `create_compute_pipeline`, because `wgpu-core` validates that call
+    /// with no error scope around it: an unchecked over-limit pipeline is an
+    /// uncaught panic, not a `Result::Err` (the finding
+    /// `training_step_parity.rs` named against the pre-fix driver).
+    #[error("node {node} needs {needed} storage buffer bindings but this device supports at most {limit} per shader stage")]
+    TooManyStorageBuffers { node: NodeId, needed: u32, limit: u32 },
 }
 
 /// A resolved, reusable program bound to one live `wgpu` device — the
@@ -197,9 +207,22 @@ fn acquire_device() -> Result<(wgpu::Device, wgpu::Queue, WgslCaps), WgpuError> 
     let adapter_features = adapter.features();
     let requested_features = adapter_features & (wgpu::Features::SHADER_F16 | wgpu::Features::SUBGROUP);
     let adapter_info = adapter.get_info();
+    // this driver owns its device exclusively (see the struct doc's "no
+    // thread-local cache" stance) and never shares it with a swapchain, so
+    // there is no competing consumer to protect from an over-large request --
+    // `wgpu::Limits::default()` is the cross-vendor PORTABLE floor (caps
+    // `max_storage_buffers_per_shader_stage` at 8), not this adapter's real
+    // ceiling, and asking for less than the adapter offers is what turned a
+    // 13-storage-buffer fused backward+Adam kernel into an uncaught
+    // validation panic. Requesting `adapter.limits()` outright (wgpu 30's
+    // documented way to ask for "everything this adapter supports") is
+    // strictly `using_resolution`-equivalent-or-better here: that helper only
+    // widens the three texture-dimension fields, never storage/buffer caps.
+    let adapter_limits = adapter.limits();
     let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
         label: Some("omega-wgpu-plan"),
         required_features: requested_features,
+        required_limits: adapter_limits.clone(),
         ..Default::default()
     }))
     .map_err(|error| WgpuError::NoDevice(error.to_string()))?;
@@ -627,8 +650,24 @@ pub fn execute_plan(plan: &mut WgpuPlan, blocks: &[QuantizedBlock<'_>]) -> Resul
     // a post-submit fault reports the right `Lookup`'s extent. Mirrors
     // `crate::metal::encode_op`'s own `pending_faults` accumulator.
     let mut pending_faults: Vec<(NodeId, wgpu::Buffer, Vec<u64>)> = Vec::new();
+    let storage_buffer_limit = plan.device.limits().max_storage_buffers_per_shader_stage;
     for bound in &plan.resolved {
         let kernel = emit_wgsl(bound, plan.caps, &plan.packed_operands)?;
+        // pre-validate against the device's real limit BEFORE
+        // `pipeline_for` reaches `create_compute_pipeline` -- the binding
+        // count is fully known here (every `Binding` is a `var<storage,
+        // ...>`, see `crate::wgsl`'s own binding-emission doc), so this is
+        // the sans-IO-shaped alternative to wrapping the pipeline call in an
+        // async `push_error_scope`/`pop_error_scope` pair (see
+        // [`WgpuError::TooManyStorageBuffers`]'s own doc).
+        let needed_bindings = kernel.bindings.len() as u32;
+        if needed_bindings > storage_buffer_limit {
+            return Err(WgpuError::TooManyStorageBuffers {
+                node: bound.node,
+                needed: needed_bindings,
+                limit: storage_buffer_limit,
+            });
+        }
         let uniform_bytes = pack_uniforms(bound);
         let uniform_buffer = plan.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("omega-wgpu-uniforms"),
