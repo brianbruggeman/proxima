@@ -1494,6 +1494,20 @@ pub static ELEMENTWISE_LOOP_TICKS_MONOMORPHIC_SLOW: Counter =
 pub static ELEMENTWISE_ELEMENTS_MONOMORPHIC_SLOW: Counter =
     Counter::new("proxima_tensor.elementwise_elements_monomorphic_slow");
 
+// window-materialize-shaped copy split within `Monomorphic`/`fast_path`
+// (rung 2, `docs/discipline.md` ROW 154): a narrower slice of
+// `ELEMENTWISE_LOOP_TICKS_MONOMORPHIC_FAST` above — this call's body was a
+// bare identity copy AND `run_elementwise_range`'s own block sweep
+// (`block_dim`/`block_extent`, ROW 150) was engaged, so every block-aligned
+// row took `window_copy_block`'s row-segment copy instead of
+// `elementwise_width_fast`'s per-row dispatch. Same commit site, same
+// per-call constant (`window_copy_operand`) already in scope — never
+// re-derived, never sampled per element.
+pub static ELEMENTWISE_LOOP_TICKS_WINDOW_COPY: Counter =
+    Counter::new("proxima_tensor.elementwise_loop_ticks_window_copy");
+pub static ELEMENTWISE_ELEMENTS_WINDOW_COPY: Counter =
+    Counter::new("proxima_tensor.elementwise_elements_window_copy");
+
 // call-size distribution: how many `run_elementwise_range` calls processed
 // how many elements, this process run. A `Counter` can only sum, so the
 // histogram itself needs a map -- kept as a plain `size -> call_count` table
