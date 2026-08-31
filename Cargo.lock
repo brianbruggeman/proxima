@@ -3155,6 +3155,7 @@ dependencies = [
  "objc2-metal",
  "pollster",
  "proxima",
+ "proxima-autograd",
  "proxima-gguf",
  "proxima-onnx",
  "proxima-safetensors",
