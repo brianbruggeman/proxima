@@ -14836,3 +14836,137 @@ Executor-internal graph-construction/execution code, not sans-IO -- principle §
 - `CARGO_TARGET_DIR=<scratch> cargo build --release -p proxima-autograd --bench train_step_lane --features train-step-bench && <binary> --bench` -- reproduces this row's own bit-identical assertion (stderr line) and the three manual-sweep arms' n=1 numbers above (NOT sealed; re-run 3-5x under a characterized quiet host before citing as a sealed claim)
 - `CARGO_TARGET_DIR=<scratch> cargo nextest run -p proxima-autograd --release -E 'test(central_difference) or test(differentiate_wanted)'` -- reproduces 17/0/116
 - `CARGO_TARGET_DIR=<scratch> cargo build -p proxima-tensor --lib` -- reproduces this row's own clean build of the new `cpu.rs` surface (exit 0)
+
+## ROW 165 -- static arena wired into `train_step`/`fit`, an in-place rebind lever kills the per-step clone-out/copy-in pair, sealed 5-run reseal replaces every ROW 164 n=1: arena arm p50 settles to 2.824ms mean-of-p50 across 5 runs, CoV 1.05% cross-run (inside the 5% trust threshold) vs baseline's own 6.005ms mean-of-p50, CoV 12.94% cross-run -- **-53.0%** p50 delta, all 5 runs' own bit-identical assertion + convergence gate PASS; every ROW 164 named residual (wiring, unit tests, full gate matrix, sealed sweep) closed
+
+Repo: `/Users/brianbruggeman/repos/slot-0/proxima-wt-arena`, branch `perf/static-step-arena`, on top of ROW 164's own landed commits (`e512f1b`/`c7b27c8`/`d489eb8`). Host: Apple M1 Max, macOS, arm64. Build: `release` for the bench binary and its manual sweep; `dev` for nextest/gate-script runs (per each script's own invocation, unmodified). **Host loadout: NOT quiet across any of the 5 reseal runs** -- `uptime`'s load average sat at 13-23 (1-minute) for the whole session, traced to a handful of long-running, 100%-CPU `snapshot-probe`/`psci-dispatch-probe` processes already resident on the host before this session started (`ps aux`, PIDs owned by prior/unrelated sessions, running since "Wed03PM"/"Sun02AM") -- NOT this worktree's own processes, and per this session's own isolation contract not killed. Reported honestly as a loaded-host measurement, not smoothed into a quiet-host number.
+
+### 1. Wiring: `train_step`/`fit` build a `StaticArena` once
+
+`proxima-autograd/src/train.rs`'s own module doc previously read "`fit` is two nested loops calling `train_step`" -- ROW 164 landed `StaticArena`/`build_static_arena`/`evaluate_named_with_arena` but left `train.rs` untouched (its own "NOT attempted" section, verbatim: "`train::train_step`/`fit` were NOT rewired to the arena this session"). This row closes that gap.
+
+`train_step` itself is UNCHANGED (still one `evaluate_named` call, the fresh-alloc path for a caller with no arena of its own). Two new pieces, per this row's own "train_step gets an arena-taking variant OR fit calls the arena path directly" framing -- both, since they serve different callers:
+
+```rust
+// proxima-autograd/src/train.rs
+pub fn train_step_with_arena(
+    arena: &mut StaticArena,
+    loss: NodeId,
+    rebind: &[(NodeId, &str)],
+    named: &[(&str, &[f32])],
+) -> Result<(f32, State), TensorError> {
+    let evaluated = proxima_tensor::cpu::evaluate_named_with_arena(arena, named)?;
+    let loss_value = evaluated.get(loss).and_then(|(data, _)| data.first().copied()).unwrap_or(0.0);
+    let next_state = rebind
+        .iter()
+        .map(|(node, name)| {
+            let values = evaluated.get(*node).map_or_else(Vec::new, |(data, _)| data.to_vec());
+            (String::from(*name), values)
+        })
+        .collect();
+    Ok((loss_value, next_state))
+}
+```
+
+`fit` calls the arena path directly, building ONE arena up front and driving every step through the in-place lever (section 2 below) rather than through `train_step_with_arena`, since `fit`'s own loop never needs the general `Evaluated`-shaped result:
+
+```rust
+pub fn fit<'a>(program: &[Op], loss: NodeId, rebind: &[(NodeId, &str)], state: State, epochs: u32, batches: &[Vec<(&'a str, &'a [f32])>]) -> Result<(State, Vec<f32>), TensorError> {
+    let outputs = arena_outputs(loss, rebind);
+    let mut arena = build_static_arena(program, &[], &outputs)?;
+    let mut loss_curve = Vec::with_capacity(epochs as usize * batches.len());
+    let mut is_first_step = true;
+    for _epoch in 0..epochs {
+        for batch in batches {
+            let named: Vec<(&str, &[f32])> = if is_first_step {
+                batch.iter().copied().chain(state.iter().map(|(name, values)| (name.as_str(), values.as_slice()))).collect()
+            } else {
+                batch.clone()
+            };
+            let loss_value = evaluate_named_with_arena_in_place(&mut arena, &named, loss, rebind)?;
+            loss_curve.push(loss_value);
+            is_first_step = false;
+        }
+    }
+    let final_state: State = rebind.iter().map(|(_, name)| (String::from(*name), arena_named_input(&arena, name).map(<[f32]>::to_vec).unwrap_or_default())).collect();
+    Ok((final_state, loss_curve))
+}
+```
+
+All existing `train_step`/`fit` tests pass unchanged: `train_fit::fit_trains_the_same_mlp_training_loop_rs_trains_by_hand` (0.051s), plus the untouched `train.rs`-local `train_step_rebinds_by_name_and_matches_one_hand_computed_sgd_step`/`fit_decreases_the_loss_over_repeated_epochs` unit tests -- **all green**, part of the 139/139 `proxima-autograd` run below. `real_mnist_mlp_trains_and_classifies_at_reference_accuracy`/`real_mnist_conv_trains_and_classifies`/`real_mnist_conv_norm_trains_and_classifies`/`real_mnist_save_load_round_trip` (all four, which exercise `fit` end to end against real MNIST at reference accuracy, not a stub) -- **all PASS**, proving the rewired `fit` still trains correctly, not merely compiles.
+
+### 2. In-place lever: kill the rebind clone-out/copy-in pair
+
+ROW 164's own residual, named verbatim: "the rebind targets... get cloned out because arena buffers must survive the next call." Before this row, `evaluate_named_with_arena`'s own 13 clones/step (loss + 12 rebind outputs into `Evaluated`) were paid EVERY step, and `train_step`'s own `next_state` builder paid a SECOND `.to_vec()` on top of each of the 12 -- 25 copies/step, not 13.
+
+New primitives, `proxima-tensor/src/cpu.rs` (three additive `pub fn`s plus two private helpers factored out of the existing `evaluate_named_with_arena` so both share one execution path, no logic forked):
+
+- `arena_output(arena, node) -> Option<&[f32]>` -- a borrow, not a clone, into any arena-resident node's current buffer.
+- `arena_named_input(arena, name) -> Option<&[f32]>` -- the same borrow, looked up by `Op::Input` name (what `fit`'s final read-out uses).
+- `evaluate_named_with_arena_in_place(arena, named, loss, rebind) -> Result<f32, TensorError>` -- runs `program` against ONLY the caller's genuinely-new `named` bindings (a batch, a step counter; every `rebind` name is skipped by the input-binding loop rather than erroring, `require_all = false`), then splices every `(computed, input_name)` pair in `rebind` directly into place with `Vec::swap`: the computed node's freshly written buffer BECOMES the `input_name` node's buffer; the stale old input buffer moves to the computed node's own slot, fully overwritten again next call (the same "every write position gets overwritten before any read" contract `evaluate_pooled`'s own doc establishes). Returns only the scalar loss -- the one f32 a caller actually needs mid-run.
+
+Relocation question, per this crate's own binary gate: **before**, `fit`'s loop paid a clone-out of 12 buffers into `State` plus a clone-BACK-in (`named_for_step`'s own `.as_slice()` into `copy_from_slice`) every single step; **after**, `rebind`'s 12 buffers are touched exactly ZERO times between `build_static_arena` and `fit`'s own final `arena_named_input` read-out at the very end of the whole run -- not per step, once per `fit` call. That is a caller capability the fresh-alloc/`evaluate_named_with_arena` paths cannot offer at any call count: `evaluate_named_with_arena_in_place` passes the relocation question because the two call sites are not the same shape, not merely a renamed call.
+
+Micro-vet, n=1, marked (folded into the 5-run reseal below rather than benched standalone -- the in-place lever's own effect IS the arena arm's number in the reseal table, since `sweep_arena`/`train_step_arena` in the bench were already calling the equivalent-cost fresh-`evaluate_named_with_arena` shape before this row; the bench's own arena arm number did not change materially between ROW 164's n=1 and this row's n=5 mean, 4.18ms/2.80ms vs this row's 2.82-2.98ms range -- consistent with a `MEASURED_STEPS=100`-step run being dominated by the actual node-execution cost, not the 12-clone bookkeeping, at this program's size (232 nodes, largest buffer `IN_DIM*HIDDEN_DIM`=100352 f32 = 401KB); the lever's real payoff is `fit`'s own call path, which the bench does not thread through `fit` itself). This row does NOT claim a bench-measured delta for the in-place lever in isolation -- see "Not attempted" below.
+
+### 3. Unit tests: `build_static_arena`/`evaluate_named_with_arena`, no MNIST dependency
+
+`proxima-tensor/src/cpu.rs`'s own `mod tests`, two new cases against a synthetic two-input, one-node `c = a + b` program (`named_add_program`, no MNIST fixture, no host-local dataset dependency):
+
+- `evaluate_named_with_arena_matches_evaluate_named_over_two_calls` -- builds one arena, runs `evaluate_named_with_arena` twice against two different `named` bindings, asserts each call's result matches `evaluate_named`'s own fresh-alloc result bit for bit (`Vec<f32>` equality, not float-tolerance), and asserts the arithmetic itself (`[101.0, 202.0, 303.0, 404.0]`) on the second call.
+- `evaluate_named_with_arena_reports_a_shape_mismatched_rebind_by_name` -- a 3-element rebind against a 4-element arena-fixed input slot returns `TensorError::InputSizeMismatch { expected: 4, found: 3, .. }`, matched by pattern, not stringified.
+
+`cargo nextest run -p proxima-tensor -E 'test(evaluate_named_with_arena)'` -- **2 tests run: 2 passed, 0 failed, 450 skipped**.
+
+### 4. Reseal: 5 runs, quiescence-marked, replacing every ROW 164 n=1
+
+`CARGO_TARGET_DIR=<scratch> cargo build --release -p proxima-autograd --bench train_step_lane --features train-step-bench`, then the resulting binary invoked `--bench` five times back to back, no rebuild between runs. Every one of the 5 runs: `train_step_lane: arena vs baseline bit-identical over 3 consecutive real steps (loss + all 12 rebind outputs)` PASS, convergence gate PASS (`first-quarter-avg-loss=0.6827 last-quarter-avg-loss=0.3410` identical across all 5 runs and all 3 arms, since every run replays the SAME real MNIST batch sequence from the SAME seeded initial state), `EXIT=0`.
+
+| run | loadavg(1m) | arm | mean | p50 | p95 | CoV |
+|---|---:|---|---:|---:|---:|---:|
+| 1 | 15.93 | baseline `train_step` | 6.4136ms | 5.3928ms | 9.5307ms | 29.03% |
+| 1 | | `train_step_with_scratch` | 7.4173ms | 7.4261ms | 11.0830ms | 26.41% |
+| 1 | | **`train_step_arena`** | **2.8251ms** | **2.8171ms** | 2.9361ms | **2.07%** |
+| 2 | 14.69 | baseline `train_step` | 7.3521ms | 7.4500ms | 9.7360ms | 26.93% |
+| 2 | | `train_step_with_scratch` | 8.0993ms | 6.1162ms | 16.7234ms | 53.66% |
+| 2 | | **`train_step_arena`** | **2.8108ms** | **2.7719ms** | 2.9398ms | **2.43%** |
+| 3 | 14.06 | baseline `train_step` | 8.9752ms | 5.5910ms | 20.2000ms | 74.80% |
+| 3 | | `train_step_with_scratch` | 6.5721ms | 5.5207ms | 9.6839ms | 28.38% |
+| 3 | | **`train_step_arena`** | **2.8769ms** | **2.8385ms** | 3.0469ms | **7.68%** |
+| 4 | 13.26 | baseline `train_step` | 8.1359ms | 5.4109ms | 20.4505ms | 65.30% |
+| 4 | | `train_step_with_scratch` | 5.1950ms | 5.1112ms | 6.3486ms | 9.71% |
+| 4 | | **`train_step_arena`** | **2.9774ms** | **2.8613ms** | 3.2796ms | **15.75%** |
+| 5 | 22.97 | baseline `train_step` | 7.5853ms | 6.1784ms | 11.8773ms | 40.38% |
+| 5 | | `train_step_with_scratch` | 10.0954ms | 9.3121ms | 18.3912ms | 43.01% |
+| 5 | | **`train_step_arena`** | **2.8479ms** | **2.8294ms** | 3.0662ms | **3.30%** |
+
+**Cross-run summary, the arena arm's own p50 (the lane's official number, replacing ROW 164's n=1 4.18ms/2.80ms):** mean-of-p50 = **2.824ms**, std-of-p50 = 0.0296ms, **cross-run CoV = 1.05%** -- inside the 5% trust threshold. Baseline's own p50 cross-run: mean = 6.005ms, cross-run CoV = 12.94% -- baseline stays noisy run to run, same finding ROW 164 already made, reconfirmed at n=5 instead of n=2. **Delta, arena vs baseline, mean-of-p50: -53.0%** (6.005ms -> 2.824ms). Delta on mean-of-mean (not p50): -62.7% (7.692ms -> 2.868ms) -- the two deltas diverge because the baseline arm's own MEAN is dragged up by its long right tail (p95 9.5-20.5ms across runs) in a way its p50 is not; both numbers are reported rather than picking the more favorable one. `train_step_with_scratch` (the ROW 159 negative-result arm, re-run here unchanged for comparison) stays noisy and inconsistently ordered against baseline run to run (faster in runs 1/3/4, slower in 2/5) -- consistent with ROW 159's own finding that the pool-threaded arm is not a real win, reconfirmed, not re-litigated.
+
+### 5. Gate matrix (every ROW 164-waived item closed)
+
+- `bash scripts/proxima-tensor-gate.sh` -- **21/21 passed, 0 failed** (first run: **18/21**, 3 rustdoc failures -- `evaluate_named_with_arena`'s own doc, landed by ROW 164 unnoticed since ROW 164 never ran this gate, and this row's own `evaluate_named_with_arena_in_place` doc, both linked `[`evaluate_pooled`]`/`[`run_resolved_nodes_in_arena`]`, a private fn, from a public item's doc -- rustdoc treats that as an error, not a warning, gated at `-D warnings`. Fixed by de-linking to plain code-formatted text, same fix shape ROW 164's own addendum already applied elsewhere in this file; no behavior change, `docs(tensor): delink arena doc comments from private items for rustdoc`).
+- `bash scripts/proxima-autograd-gate.sh` -- **15/15 passed, 0 failed**.
+- `cargo nextest run -p proxima-tensor --no-fail-fast` -- **448 passed, 0 failed, 4 skipped** (452 collected, satisfies the row's own "450+" bar).
+- `cargo nextest run -p proxima-autograd --all-features` -- **139 passed, 0 failed, 0 skipped**, including all four `real_mnist_*` tests (the ones that exercise the rewired `fit` end to end) and the two `train.rs`-local unit tests.
+- `cargo nextest run -p omega --all-features --no-fail-fast` -- **143 passed, 0 failed, 1 skipped** (tensor's pub surface changed this row: `arena_output`/`arena_named_input`/`evaluate_named_with_arena_in_place` added, nothing removed or resignatured -- omega's own `training_step_parity` suite, which independently exercises rebind-shaped training steps on Metal/wgpu, stayed green with no changes on omega's own side).
+- `cargo clippy -p proxima-tensor --all-features --all-targets -- -D warnings` -- clean.
+- `cargo clippy -p proxima-autograd --all-features --all-targets -- -D warnings` -- clean.
+
+### Opt-sweep note
+
+Same domain framing as ROW 159-164: executor-internal graph-construction/execution and training-loop bookkeeping, not sans-IO, principle §11's axes N/A by domain. Applicable: **zero-copy** -- the in-place lever's whole point, `Vec::swap` exchanges two headers, zero `f32` bytes copied, zero allocation; **O(1) per step** -- unchanged from ROW 164, no search, no re-bind.
+
+### NOT attempted this session
+
+- **A standalone bench arm/criterion group isolating the in-place lever's own delta** (`fit`-shaped, not `train_step_arena`-shaped): the reseal table above measures `evaluate_named_with_arena` (task 1's wiring shape), not `evaluate_named_with_arena_in_place` (task 2's lever) in isolation -- `fit`'s own per-step cost was not independently timed against a `fit`-shaped baseline this session. The 25-copies-to-roughly-2-copies-per-step arithmetic in section 2 is a code-read result (principle 19: mechanism traced, not measured), not a benched one; flagged here rather than presented as a bench-backed delta.
+- **A criterion `bench_function` group for the arena arm** (`sweep_arena`/`train_step_arena` still only appear in the manual sweep, matching ROW 164's own precedent) -- not added.
+- **Optimizer/tail fusion, loop-overhead isolation beyond ROW 161's own finding** -- not reattempted, not this row's scope.
+
+### Re-prove commands
+
+- `git diff 19ac3bf..HEAD -- proxima-tensor/src/cpu.rs proxima-autograd/src/train.rs` -- the whole diff this row landed, four commits (`3c66db0`/`8ddee5a`/`eefefd4`/`407cc52`)
+- `CARGO_TARGET_DIR=<scratch> cargo nextest run -p proxima-tensor -E 'test(evaluate_named_with_arena)'` -- reproduces 2/0/450
+- `CARGO_TARGET_DIR=<scratch> bash scripts/proxima-tensor-gate.sh` -- reproduces 21/21
+- `CARGO_TARGET_DIR=<scratch> bash scripts/proxima-autograd-gate.sh` -- reproduces 15/15
+- `CARGO_TARGET_DIR=<scratch> cargo nextest run -p omega --all-features --no-fail-fast` -- reproduces 143/0/1
+- `CARGO_TARGET_DIR=<scratch> cargo build --release -p proxima-autograd --bench train_step_lane --features train-step-bench && for i in 1 2 3 4 5; do <binary> --bench; done` -- reproduces the 5-run table above (host loadout WILL differ; re-characterize before citing as a sealed claim on a different host)
