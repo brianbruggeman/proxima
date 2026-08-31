@@ -54,7 +54,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use proxima_autograd::activation::relu;
-use proxima_autograd::adjoint::differentiate;
+use proxima_autograd::adjoint::differentiate_wanted;
 use proxima_autograd::loss::softmax_cross_entropy;
 use proxima_autograd::optimizer::{AdamConfig, AdamOperands, adam_step, step_input};
 use proxima_autograd::train::fit;
@@ -239,7 +239,8 @@ fn real_mnist_mlp_trains_and_classifies_at_reference_accuracy() {
     }
 
     let network = build_network();
-    let differentiated = differentiate(&network.program, network.loss).expect("scalar loss differentiates");
+    let wanted = [network.w1, network.b1, network.w2, network.b2];
+    let differentiated = differentiate_wanted(&network.program, network.loss, &wanted).expect("scalar loss differentiates");
     let grad_w1 = differentiated.gradient_of_named("w1").expect("w1 feeds the loss");
     let grad_b1 = differentiated.gradient_of_named("b1").expect("b1 feeds the loss");
     let grad_w2 = differentiated.gradient_of_named("w2").expect("w2 feeds the loss");
