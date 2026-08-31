@@ -73,9 +73,15 @@ pub enum AutogradError {
     ReduceOverGatherUnsupported { node: NodeId, operand: NodeId },
 
     #[error(
-        "node {node}'s Reduce::out_map is data-dependent (a scatter); \
-         proxima-tensor/src/shape.rs:166-171 already rejects this program at \
-         shape-inference time, so it never reaches an adjoint"
+        "node {node}'s Reduce::out_map is data-dependent (a scatter); this arm is defensive, \
+         unreachable dead code through differentiate/differentiate_wanted today -- forward \
+         scatter itself has no lowering anywhere in this workspace yet \
+         (proxima-tensor/src/shape.rs:166-171 rejects it at shape-inference time before an \
+         adjoint program is ever built, proxima-tensor/src/map.rs:109-112 documents it as an \
+         out-of-scope feature needing atomics for colliding writes, and \
+         proxima-tensor/src/cpu.rs:15433-15462's own test asserts evaluate() rejects it too); \
+         the gather-of-output-gradient adjoint this crate would give a real scatter cannot be \
+         written or tested until proxima-tensor ships that forward capability"
     )]
     ScatterOutputUnsupported { node: NodeId },
 
