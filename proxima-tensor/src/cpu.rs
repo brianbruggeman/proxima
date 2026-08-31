@@ -904,6 +904,24 @@ pub fn evaluate_quantized_with_scratch(
                 ns_per_element,
             );
         }
+        // per-path-kind wall time within `reduce_f32_dense` (residual-profile
+        // task, 2026-08-30): `instrument::record_reduce_path_ticks`'s own doc
+        // explains why this is a separate, `run_reduce`-only timer. The sum
+        // of these four should equal `reduce_dense_entry`'s own ticks above
+        // (same node population, same `run_node_into` call boundary) --
+        // reported separately, not reconciled here, so a divergence stays
+        // visible rather than silently averaged away.
+        let reduce_dot_fast_ticks = instrument::REDUCE_PATH_DOT_FAST_TICKS.snapshot_and_reset();
+        let reduce_width_fast_ticks = instrument::REDUCE_PATH_WIDTH_FAST_TICKS.snapshot_and_reset();
+        let reduce_conv_tile_ticks = instrument::REDUCE_PATH_CONV_TILE_TICKS.snapshot_and_reset();
+        let reduce_generic_ticks = instrument::REDUCE_PATH_GENERIC_TICKS.snapshot_and_reset();
+        std::eprintln!(
+            "DIAG reduce_path_ticks dot_fast_ms={:.3} width_fast_ms={:.3} conv_tile_ms={:.3} generic_ms={:.3}",
+            instrument::ticks_to_nanos(reduce_dot_fast_ticks) as f64 / 1_000_000.0,
+            instrument::ticks_to_nanos(reduce_width_fast_ticks) as f64 / 1_000_000.0,
+            instrument::ticks_to_nanos(reduce_conv_tile_ticks) as f64 / 1_000_000.0,
+            instrument::ticks_to_nanos(reduce_generic_ticks) as f64 / 1_000_000.0,
+        );
         // achieved ns/element split by `BodyShape` (nsper task, 2026-08-21):
         // `Unary`/`Binary` (monomorphic) versus `Generic` (fused multi-step)
         // -- a DIFFERENT axis from `Path::WidthFast`/`Path::Generic` (the
@@ -926,6 +944,30 @@ pub fn evaluate_quantized_with_scratch(
                 "DIAG nsper elementwise_generic elements={generic_elements} total_ms={:.3} ns_per_element={:.4}",
                 instrument::ticks_to_nanos(generic_ticks) as f64 / 1_000_000.0,
                 instrument::ticks_to_nanos(generic_ticks) as f64 / generic_elements as f64,
+            );
+        }
+        // fast_path-vs-slow-path split within `Unary`/`Binary` (`Monomorphic`)
+        // (residual-profile task, 2026-08-30): mirrors the `Generic` split
+        // immediately below -- answers whether `window_materialize`'s own
+        // `Binary` multiply (Conv's im2col copy, `proxima-onnx/src/lower.rs`)
+        // takes the affine width-copy fast path or falls to the per-element
+        // gather loop despite being classified `Monomorphic`.
+        let monomorphic_fast_ticks = instrument::ELEMENTWISE_LOOP_TICKS_MONOMORPHIC_FAST.snapshot_and_reset();
+        let monomorphic_fast_elements = instrument::ELEMENTWISE_ELEMENTS_MONOMORPHIC_FAST.snapshot_and_reset();
+        let monomorphic_slow_ticks = instrument::ELEMENTWISE_LOOP_TICKS_MONOMORPHIC_SLOW.snapshot_and_reset();
+        let monomorphic_slow_elements = instrument::ELEMENTWISE_ELEMENTS_MONOMORPHIC_SLOW.snapshot_and_reset();
+        if monomorphic_fast_elements > 0 {
+            std::eprintln!(
+                "DIAG nsper elementwise_monomorphic_fast_path elements={monomorphic_fast_elements} total_ms={:.3} ns_per_element={:.4}",
+                instrument::ticks_to_nanos(monomorphic_fast_ticks) as f64 / 1_000_000.0,
+                instrument::ticks_to_nanos(monomorphic_fast_ticks) as f64 / monomorphic_fast_elements as f64,
+            );
+        }
+        if monomorphic_slow_elements > 0 {
+            std::eprintln!(
+                "DIAG nsper elementwise_monomorphic_slow_path elements={monomorphic_slow_elements} total_ms={:.3} ns_per_element={:.4}",
+                instrument::ticks_to_nanos(monomorphic_slow_ticks) as f64 / 1_000_000.0,
+                instrument::ticks_to_nanos(monomorphic_slow_ticks) as f64 / monomorphic_slow_elements as f64,
             );
         }
         // fast_path-vs-slow-path split within `Generic` (A-vs-B task,
@@ -2793,6 +2835,26 @@ fn run_elementwise_range<B: Deref<Target = [f32]>>(
     let mut gather_cursors: Vec<Option<GatherCursor>> = (0..raw.len()).map(|_| None).collect();
     let mut outer_coordinate = vec![0u64; outer_extents.len()];
 
+    // The dim immediately outside the vectorized `inner_len` width — Conv's
+    // own `window_materialize` multiply (`proxima-onnx/src/lower.rs`) shapes
+    // its output `[n,c,oh,ow,kh,kw]`, so `kw` alone lands in `inner_len`
+    // (3 elements) and `kh` (also 3) is this dim, otherwise walked one
+    // `unflatten_into`+`fill_running_offsets` call at a time same as every
+    // other outer dim (`docs/discipline.md` residual-profile session,
+    // 2026-08-30: measured 12.9 ns/element on this op, ~34x this crate's own
+    // 0.38 ns/element monomorphic figure, entirely fixed per-call overhead
+    // amortized over only 3 elements — MAC_OPS/OUTPUT_WRITES showed no slow
+    // gather path engaged at all). `block_strides` stays empty (never
+    // indexed) whenever `block_extent <= 1`, the common case for every
+    // rank-1-outer-extents or `kh == 1` shape.
+    let block_dim = if outer_extents.is_empty() { None } else { Some((outer_extents.len() - 1) as u16) };
+    let block_extent = outer_extents.last().copied().unwrap_or(1);
+    let block_strides: Vec<i64> = if block_extent > 1 {
+        resolved.operands().iter().map(|(_, view, _)| block_dim.map_or(0, |dim| view.stride(dim))).collect()
+    } else {
+        Vec::new()
+    };
+
     // `Unary`/`Binary` share `run_reduce`'s own gate (ROW 3); `Generic`
     // (a fused multi-step chain) gets its own, narrower gate that only
     // `run_elementwise` acts on — every operand the body shape reads is
@@ -2840,9 +2902,48 @@ fn run_elementwise_range<B: Deref<Target = [f32]>>(
     #[cfg(feature = "instrument")]
     let path = if fast_path { Path::WidthFast } else { Path::Generic };
 
-    for outer_position in outer_start..outer_end {
+    let mut outer_position = outer_start;
+    while outer_position < outer_end {
         unflatten_into(outer_position as u64, outer_extents, &mut outer_coordinate);
         fill_running_offsets(resolved, &outer_coordinate, &mut running);
+
+        // Blocked sweep of `block_dim` (see its own doc above): only when the
+        // fast width path is already engaged (so every operand here is
+        // gather-free — `Layout::offset_of` is exactly linear in the
+        // coordinate, `bind.rs`, so `offset_of(coord + h*e_dim) ==
+        // offset_of(coord) + h*stride(dim)` is exact, not approximate), this
+        // position starts a fresh sweep (`block_dim`'s own coordinate is 0),
+        // and a full `block_extent`-long run still fits before `outer_end`
+        // (a parallel chunk boundary mid-sweep falls through to the
+        // per-position path below, same as an unaligned `outer_start`).
+        if fast_path
+            && block_extent > 1
+            && outer_coordinate.last() == Some(&0)
+            && outer_position + block_extent as usize <= outer_end
+        {
+            for step in 0..block_extent {
+                let out_base = (outer_position + step as usize - outer_start) * inner_len;
+                let out_slice = &mut output[out_base..out_base + inner_len];
+                elementwise_width_fast(&shape, &raw, &running, &strides, out_slice, &mut step_values);
+                #[cfg(feature = "instrument")]
+                {
+                    counters.leading_iters += 1;
+                    counters.kernel_calls += 1;
+                    counters.output_writes += inner_len as u64;
+                    for &stride in &strides {
+                        counters.operand_loads += if stride == 0 { 1 } else { inner_len as u64 };
+                    }
+                }
+                if step + 1 < block_extent {
+                    for (slot, block_stride) in running.iter_mut().zip(&block_strides) {
+                        *slot += block_stride;
+                    }
+                }
+            }
+            outer_position += block_extent as usize;
+            continue;
+        }
+
         let out_base = (outer_position - outer_start) * inner_len;
         #[cfg(feature = "instrument")]
         {
@@ -2860,6 +2961,7 @@ fn run_elementwise_range<B: Deref<Target = [f32]>>(
                     counters.operand_loads += if stride == 0 { 1 } else { inner_len as u64 };
                 }
             }
+            outer_position += 1;
             continue;
         }
 
@@ -2888,6 +2990,7 @@ fn run_elementwise_range<B: Deref<Target = [f32]>>(
                 counters.operand_loads += raw.len() as u64;
             }
         }
+        outer_position += 1;
     }
     #[cfg(feature = "instrument")]
     {
@@ -2916,6 +3019,13 @@ fn run_elementwise_range<B: Deref<Target = [f32]>>(
             BodyShape::Unary(..) | BodyShape::Binary(..) => {
                 counter!(instrument::ELEMENTWISE_LOOP_TICKS_MONOMORPHIC, diag_loop_ticks);
                 counter!(instrument::ELEMENTWISE_ELEMENTS_MONOMORPHIC, counters.output_writes);
+                if fast_path {
+                    counter!(instrument::ELEMENTWISE_LOOP_TICKS_MONOMORPHIC_FAST, diag_loop_ticks);
+                    counter!(instrument::ELEMENTWISE_ELEMENTS_MONOMORPHIC_FAST, counters.output_writes);
+                } else {
+                    counter!(instrument::ELEMENTWISE_LOOP_TICKS_MONOMORPHIC_SLOW, diag_loop_ticks);
+                    counter!(instrument::ELEMENTWISE_ELEMENTS_MONOMORPHIC_SLOW, counters.output_writes);
+                }
             }
         }
         instrument::record_elementwise_call_size(counters.output_writes);
@@ -4259,6 +4369,15 @@ fn run_reduce<B: Deref<Target = [f32]>>(
     } else {
         Path::Generic
     };
+    // per-path-kind wall time (residual-profile task, 2026-08-30): started
+    // once `path` is known, committed at whichever of this function's three
+    // early returns (or its own tail) actually fires — see
+    // `instrument::record_reduce_path_ticks`'s own doc for why this is a
+    // NEW, `run_reduce`-only timer rather than a reuse of `PATH_WIDTH_FAST`/
+    // `PATH_GENERIC` (those are invocation counts shared with
+    // `run_elementwise_range`'s own, unrelated `Path` usage).
+    #[cfg(feature = "instrument")]
+    let commit_started = instrument::read_ticks();
 
     let seed = initial_value(*init).unwrap_or(0.0);
     let leading_total = odometer_len(&leading_extents);
@@ -4311,6 +4430,7 @@ fn run_reduce<B: Deref<Target = [f32]>>(
                 counters.output_writes += leading_total * width as u64;
                 let distinct_operand_elements: u64 = raw.iter().map(|buffer| buffer.len() as u64).sum();
                 counters.commit(path, distinct_operand_elements);
+                instrument::record_reduce_path_ticks(path, instrument::elapsed_ticks(commit_started));
             }
             return Ok(());
         }
@@ -4355,6 +4475,7 @@ fn run_reduce<B: Deref<Target = [f32]>>(
                 counters.output_writes += plan.m_total as u64 * plan.n_total as u64;
                 let distinct_operand_elements: u64 = raw.iter().map(|buffer| buffer.len() as u64).sum();
                 counters.commit(Path::ConvTile, distinct_operand_elements);
+                instrument::record_reduce_path_ticks(Path::ConvTile, instrument::elapsed_ticks(commit_started));
             }
             return Ok(());
         }
@@ -4802,6 +4923,7 @@ fn run_reduce<B: Deref<Target = [f32]>>(
     {
         let distinct_operand_elements: u64 = raw.iter().map(|buffer| buffer.len() as u64).sum();
         counters.commit(path, distinct_operand_elements);
+        instrument::record_reduce_path_ticks(path, instrument::elapsed_ticks(commit_started));
     }
     #[cfg(all(target_arch = "aarch64", feature = "instrument"))]
     {

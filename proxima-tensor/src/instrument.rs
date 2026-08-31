@@ -150,6 +150,35 @@ pub static PATH_CONV_TILE: Counter = Counter::new("proxima_tensor.path.conv_tile
 pub static LEADING_ITERS: Counter = Counter::new("proxima_tensor.leading_iters");
 pub static KERNEL_CALLS: Counter = Counter::new("proxima_tensor.kernel_calls");
 
+// per-path-kind wall-clock split for `run_reduce` alone (residual-profile
+// task, 2026-08-30): `PATH_DOT_FAST`/`PATH_WIDTH_FAST`/`PATH_CONV_TILE`/
+// `PATH_GENERIC` above are pure invocation counts shared with
+// `run_elementwise_range`'s OWN, unrelated `Path::WidthFast`/`Path::Generic`
+// usage (its affine-fast-path-vs-gather-loop split, a different question).
+// These four are `run_reduce`-only, timed from a single `read_ticks()` call
+// placed once `path` is decided (before any of `run_reduce`'s three early
+// returns), committed at whichever of those returns actually fires — never
+// re-derived from `PATH_*`'s counts, and never mixed with elementwise's own
+// timing (`ELEMENTWISE_LOOP_TICKS*`). Answers `docs/discipline.md`'s own
+// standing question — ROW 149's residual attribution to `width_fast`/
+// `dot_fast` was "by elimination", never measured directly.
+pub static REDUCE_PATH_DOT_FAST_TICKS: Counter = Counter::new("proxima_tensor.reduce_path.dot_fast_ticks");
+pub static REDUCE_PATH_WIDTH_FAST_TICKS: Counter = Counter::new("proxima_tensor.reduce_path.width_fast_ticks");
+pub static REDUCE_PATH_CONV_TILE_TICKS: Counter = Counter::new("proxima_tensor.reduce_path.conv_tile_ticks");
+pub static REDUCE_PATH_GENERIC_TICKS: Counter = Counter::new("proxima_tensor.reduce_path.generic_ticks");
+
+/// Records one `run_reduce` call's elapsed ticks against the path it
+/// actually took — called once per call, from whichever of the three early
+/// returns (or the final tail) fires, never per element.
+pub fn record_reduce_path_ticks(path: Path, ticks: u64) {
+    match path {
+        Path::DotFast => counter!(REDUCE_PATH_DOT_FAST_TICKS, ticks),
+        Path::WidthFast => counter!(REDUCE_PATH_WIDTH_FAST_TICKS, ticks),
+        Path::ConvTile => counter!(REDUCE_PATH_CONV_TILE_TICKS, ticks),
+        Path::Generic => counter!(REDUCE_PATH_GENERIC_TICKS, ticks),
+    }
+}
+
 // per-parallel-node wall-clock breakdown for `cpu::run_chunks_threaded` /
 // `cpu::evaluate_node_parallel`: where does thread::scope time actually go.
 pub static PARALLEL_NODES: Counter = Counter::new("proxima_tensor.parallel_nodes");
@@ -1444,6 +1473,26 @@ pub static ELEMENTWISE_LOOP_TICKS_GENERIC_SLOW: Counter =
     Counter::new("proxima_tensor.elementwise_loop_ticks_generic_slow");
 pub static ELEMENTWISE_ELEMENTS_GENERIC_SLOW: Counter =
     Counter::new("proxima_tensor.elementwise_elements_generic_slow");
+
+// fast_path-vs-slow-path split within `Unary`/`Binary` (`Monomorphic`)
+// (residual-profile task, 2026-08-30): `ELEMENTWISE_LOOP_TICKS_MONOMORPHIC`
+// above mixes two different code paths exactly the way the pre-existing
+// `Generic` split (above) already separates for the fused-body case — a
+// `Binary` body (e.g. Conv's own `window_materialize` multiply, whose image
+// operand reads through a strided/dilated `window_axis` pattern) can still
+// fail `body_shape_is_affine_fast_path` and fall to the per-element
+// gather loop (`elementwise_width_fast`'s `false` arm in
+// `run_elementwise_range`) despite being classified `Monomorphic` by
+// `BodyShape`. Same split, same commit site, same `fast_path` bool already
+// in scope — never re-derived, never sampled per element.
+pub static ELEMENTWISE_LOOP_TICKS_MONOMORPHIC_FAST: Counter =
+    Counter::new("proxima_tensor.elementwise_loop_ticks_monomorphic_fast");
+pub static ELEMENTWISE_ELEMENTS_MONOMORPHIC_FAST: Counter =
+    Counter::new("proxima_tensor.elementwise_elements_monomorphic_fast");
+pub static ELEMENTWISE_LOOP_TICKS_MONOMORPHIC_SLOW: Counter =
+    Counter::new("proxima_tensor.elementwise_loop_ticks_monomorphic_slow");
+pub static ELEMENTWISE_ELEMENTS_MONOMORPHIC_SLOW: Counter =
+    Counter::new("proxima_tensor.elementwise_elements_monomorphic_slow");
 
 // call-size distribution: how many `run_elementwise_range` calls processed
 // how many elements, this process run. A `Counter` can only sum, so the
