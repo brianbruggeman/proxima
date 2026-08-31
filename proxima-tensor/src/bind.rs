@@ -504,6 +504,17 @@ pub struct BoundOpBuilder {
     /// sans-IO streaming contract (see module doc) rather than threading a
     /// full `&[Op]` slice through every fusion call.
     ones: RefCell<Vec<bool>>,
+    /// `is_iota[node.0]` is `true` when `node` was pushed as an [`Op::Iota`]
+    /// — the same one-entry-per-push discipline as `ones`, read by
+    /// [`eliminate_masked_window_reduce`] to confirm a candidate operand is
+    /// really one of `window_mask`'s three position markers rather than some
+    /// other node that merely shares its `NodeId` shape.
+    is_iota: RefCell<Vec<bool>>,
+    /// `constant_value[node.0]` is `Some(value)` when `node` was pushed as an
+    /// [`Op::Constant`] carrying `value` — a generalization of `ones` that
+    /// keeps the actual stride literal (not just whether it is `1.0`), which
+    /// [`eliminate_masked_window_reduce`]'s in-bounds proof needs.
+    constant_value: RefCell<Vec<Option<f32>>>,
 }
 
 impl BoundOpBuilder {
@@ -515,6 +526,8 @@ impl BoundOpBuilder {
             retires,
             position: Cell::new(0),
             ones: RefCell::new(Vec::new()),
+            is_iota: RefCell::new(Vec::new()),
+            constant_value: RefCell::new(Vec::new()),
         }
     }
 
@@ -534,6 +547,10 @@ impl BoundOpBuilder {
         let empty = Vec::new();
         let retires = self.retires.get(node.0 as usize).unwrap_or(&empty);
         self.ones.borrow_mut().push(matches!(expr, Op::Constant { value, .. } if *value == 1.0));
+        self.is_iota.borrow_mut().push(matches!(expr, Op::Iota { .. }));
+        self.constant_value
+            .borrow_mut()
+            .push(if let Op::Constant { value, .. } = expr { Some(*value) } else { None });
 
         let mut emitted = ReadyBatch::new();
 
@@ -590,6 +607,44 @@ impl BoundOpBuilder {
                 );
             }
             Op::Reduce(reduce) => {
+                if let Some((source_node, source_map)) = eliminate_masked_window_reduce(
+                    reduce,
+                    &self.held,
+                    &self.is_iota.borrow(),
+                    &self.constant_value.borrow(),
+                    shapes,
+                ) {
+                    // `source_map`'s windowed axis is a genuine two-term
+                    // affine index (`stride*out + kernel`), not the plain
+                    // single-term projection `compose_operand`'s own fusion
+                    // contract requires of a map connecting to a still-held
+                    // node (`is_identity_projection`'s own doc: "a window...
+                    // materializes its operand instead of composing through
+                    // it"). `source` may still be `held` here — e.g. a prior
+                    // layer's bias-add fusing into this window on the
+                    // ordinary identity-projection path it was pushed under
+                    // — so it must be forced to materialize as a real buffer
+                    // before this non-identity map ever reads it, or
+                    // `compose_operand`'s recursive remap silently
+                    // mis-addresses whatever was held beneath it.
+                    self.materialize_if_held(source_node, shapes, &mut emitted)?;
+                    let identity_operand = vec![(source_node, source_map)];
+                    push_ready(
+                        &mut emitted,
+                        node,
+                        build_elementwise_op(
+                            node,
+                            shapes,
+                            &self.held,
+                            reduce.dtype,
+                            ScalarOp::Identity,
+                            &identity_operand,
+                            &self.ones.borrow(),
+                        ),
+                    )?;
+                    return Ok(emitted);
+                }
+
                 let fuses = retires.contains(&reduce.operand)
                     && is_identity_projection(&reduce.in_map)
                     && self.held.borrow().contains_key(&reduce.operand);
@@ -1004,6 +1059,215 @@ fn eliminate_identity_multiply<'a>(
         return Some((*left_node, left_map));
     }
     None
+}
+
+/// Reads one held node's `(body, operands)` by value — the same
+/// clone-out-of-the-`RefCell` shape [`compose_operand`]'s own `entry` uses,
+/// needed here because [`eliminate_masked_window_reduce`] walks three levels
+/// of `held` chain while [`held`] itself may need a `borrow_mut` later (to
+/// drop the matched nodes), and an outstanding `Ref` would collide with that.
+fn held_snapshot(held: &RefCell<BTreeMap<NodeId, HeldElementwise>>, node: NodeId) -> Option<(ScalarOp, Vec<(NodeId, IndexMap)>)> {
+    held.borrow().get(&node).map(|entry| (entry.body, entry.operands.clone()))
+}
+
+/// One axis is a plain, unshifted single-term projection — the per-axis
+/// version of [`is_identity_projection`], needed here because
+/// [`eliminate_masked_window_reduce`] inspects individual [`AxisIndex`]
+/// entries (a mask's own three selected axes, a source axis) rather than a
+/// whole [`IndexMap`] at once.
+fn is_pure_axis(axis: &AxisIndex) -> bool {
+    axis.offset == 0 && matches!(axis.terms.as_slice(), [term] if term.coeff == 1)
+}
+
+/// The stride literal and the three extents [`window_mask`]
+/// (`proxima-autograd/src/conv.rs:201`) needs to have built `node`, read back
+/// out of the [`BoundOpBuilder`]'s own side channels rather than the source
+/// program (this module never holds the whole program, only what is still
+/// `held`).
+struct WindowMatch {
+    stride: u64,
+    out_extent: u64,
+    kernel_extent: u64,
+    source_extent: u64,
+    combined_node: NodeId,
+    scaled_out_node: NodeId,
+}
+
+/// Confirms `node` is exactly `window_mask`'s `Equal(Iota, Add(Multiply(Iota,
+/// Constant), Iota))` chain (`proxima-autograd/src/conv.rs:201-223`) and, if
+/// so, extracts the stride and the three axis extents the in-bounds proof
+/// needs. Any structural mismatch — a different `ScalarOp`, a non-`Iota`
+/// operand where one is required, a non-pure-projection edge map, a missing
+/// constant — returns `None`, leaving `held` untouched (the caller's own
+/// contract).
+fn window_mask_match(
+    held: &RefCell<BTreeMap<NodeId, HeldElementwise>>,
+    node: NodeId,
+    is_iota: &[bool],
+    constant_value: &[Option<f32>],
+    shapes: &Shapes,
+) -> Option<WindowMatch> {
+    let is_iota_node = |candidate: NodeId| is_iota.get(candidate.0 as usize).copied().unwrap_or(false);
+
+    let (equal_body, equal_operands) = held_snapshot(held, node)?;
+    if equal_body != ScalarOp::Equal {
+        return None;
+    }
+    let [(source_iota, source_map), (combined_node, combined_map)] = equal_operands.as_slice() else {
+        return None;
+    };
+    if !is_iota_node(*source_iota) || !is_identity_projection(source_map) || !is_identity_projection(combined_map) {
+        return None;
+    }
+
+    let (add_body, add_operands) = held_snapshot(held, *combined_node)?;
+    if add_body != ScalarOp::Add {
+        return None;
+    }
+    let [(scaled_out_node, scaled_map), (kernel_iota, kernel_map)] = add_operands.as_slice() else {
+        return None;
+    };
+    if !is_iota_node(*kernel_iota) || !is_identity_projection(scaled_map) || !is_identity_projection(kernel_map) {
+        return None;
+    }
+
+    let (mul_body, mul_operands) = held_snapshot(held, *scaled_out_node)?;
+    if mul_body != ScalarOp::Multiply {
+        return None;
+    }
+    let [(out_iota, out_map), (stride_node, stride_map)] = mul_operands.as_slice() else {
+        return None;
+    };
+    if !is_iota_node(*out_iota) || !is_identity_projection(out_map) || !is_identity_projection(stride_map) {
+        return None;
+    }
+    // `f32::fract`/`round` need `std`'s libm; this crate's alloc tier does
+    // not carry a libm dependency, so an exact round-trip through the
+    // integer this node's own `stride as f32` construction produced is the
+    // no_std-clean way to confirm `stride_value` is a nonnegative integer.
+    let stride_value = constant_value.get(stride_node.0 as usize).copied().flatten()?;
+    if stride_value < 0.0 {
+        return None;
+    }
+    let stride_u64 = stride_value as u64;
+    if stride_u64 as f32 != stride_value {
+        return None;
+    }
+
+    Some(WindowMatch {
+        stride: stride_u64,
+        out_extent: *shapes.of(*out_iota).first()?,
+        kernel_extent: *shapes.of(*kernel_iota).first()?,
+        source_extent: *shapes.of(*source_iota).first()?,
+        combined_node: *combined_node,
+        scaled_out_node: *scaled_out_node,
+    })
+}
+
+/// The class fix (`proxima-tensor/docs/discipline.md` ROW 147's ×1.0
+/// precedent, generalized from a scalar marker to a shaped one): a
+/// `Reduce(Add)` whose held operand is `Multiply(source, mask)`, where `mask`
+/// is exactly [`window_mask_match`]'s `Equal`/`Iota` chain, is algebraically a
+/// plain window read of `source` — for every `(out_position, kernel_position)`
+/// pair, at most one `source_position` ever satisfies `source_position ==
+/// out_position*stride + kernel_position`, so summing `source *
+/// (source_position == that)` over `source_position` is just `source` indexed
+/// at that position, proved in-bounds so the read never needs a fallback
+/// branch. On a match, the whole `Multiply`/`Equal`/`Add`/`Multiply` subtree
+/// is dropped from `held` (it would otherwise still flush as dead work at
+/// [`BoundOpBuilder::finish`]) and the caller substitutes a single [`Op::Reduce`]
+/// step, computed once per element instead of once per window position, for
+/// the [`Op::Reduce`] it never fuses.
+///
+/// Any mismatch, or a failed in-bounds proof, returns `None` — the caller's
+/// existing fuse-or-materialize path runs unchanged, exactly as if this
+/// function did not exist.
+fn eliminate_masked_window_reduce(
+    reduce: &Reduce,
+    held: &RefCell<BTreeMap<NodeId, HeldElementwise>>,
+    is_iota: &[bool],
+    constant_value: &[Option<f32>],
+    shapes: &Shapes,
+) -> Option<(NodeId, IndexMap)> {
+    if reduce.body != ScalarOp::Add || reduce.init != ReduceInit::Zero || reduce.keep != Keep::Reduce {
+        return None;
+    }
+    if !is_identity_projection(&reduce.in_map) {
+        return None;
+    }
+
+    let (masked_body, masked_operands) = held_snapshot(held, reduce.operand)?;
+    if masked_body != ScalarOp::Multiply {
+        return None;
+    }
+    let [(first_node, first_map), (second_node, second_map)] = masked_operands.as_slice() else {
+        return None;
+    };
+
+    let (source_node, source_map, mask_node, mask_map, window) =
+        if let Some(window) = window_mask_match(held, *second_node, is_iota, constant_value, shapes) {
+            (*first_node, first_map.clone(), *second_node, second_map.clone(), window)
+        } else {
+            let window = window_mask_match(held, *first_node, is_iota, constant_value, shapes)?;
+            (*second_node, second_map.clone(), *first_node, first_map.clone(), window)
+        };
+
+    if !is_identity_projection(&source_map) {
+        return None;
+    }
+    let mask_pattern = mask_map.affine();
+    let [windowed_axis, out_axis, kernel_axis] = mask_pattern.axes.as_slice() else {
+        return None;
+    };
+    if !is_pure_axis(windowed_axis) || !is_pure_axis(out_axis) || !is_pure_axis(kernel_axis) {
+        return None;
+    }
+    let windowed_axis = windowed_axis.terms[0].axis;
+    let out_axis = out_axis.terms[0].axis;
+    let kernel_axis = kernel_axis.terms[0].axis;
+
+    let last_out = window.out_extent.checked_sub(1)?;
+    let last_kernel = window.kernel_extent.checked_sub(1)?;
+    let last_read = window.stride.checked_mul(last_out)?.checked_add(last_kernel)?;
+    if last_read >= window.source_extent {
+        return None;
+    }
+    let stride_coeff = i32::try_from(window.stride).ok()?;
+
+    let out_pattern = reduce.out_map.affine();
+    let keep_axes = pure_projection_axes(out_pattern);
+    if keep_axes.len() != out_pattern.axes.len() || keep_axes.contains(&windowed_axis) {
+        return None;
+    }
+    let new_out_position = keep_axes.iter().position(|&axis| axis == out_axis)? as u16;
+    let new_kernel_position = keep_axes.iter().position(|&axis| axis == kernel_axis)? as u16;
+
+    let mut new_axes: Vec<AxisIndex> = Vec::with_capacity(source_map.affine().axes.len());
+    for axis in &source_map.affine().axes {
+        if !is_pure_axis(axis) {
+            return None;
+        }
+        let widened = axis.terms[0].axis;
+        let new_axis = if widened == windowed_axis {
+            AxisIndex {
+                terms: [AxisTerm::scaled(new_out_position, stride_coeff), AxisTerm::scaled(new_kernel_position, 1)]
+                    .into_iter()
+                    .collect(),
+                offset: 0,
+            }
+        } else {
+            let position = keep_axes.iter().position(|&kept| kept == widened)? as u16;
+            AxisIndex { terms: core::iter::once(AxisTerm::projection(position)).collect(), offset: 0 }
+        };
+        new_axes.push(new_axis);
+    }
+
+    held.borrow_mut().remove(&reduce.operand);
+    held.borrow_mut().remove(&mask_node);
+    held.borrow_mut().remove(&window.combined_node);
+    held.borrow_mut().remove(&window.scaled_out_node);
+
+    Some((source_node, IndexMap::Affine(IndexPattern { iter_rank: keep_axes.len() as u16, axes: new_axes })))
 }
 
 /// Appends one [`BodyStep`] for `body` applied over `body_operands`
@@ -2359,6 +2623,208 @@ mod tests {
         assert!(
             evaluated.is_ok(),
             "the gather's indices buffer must be ready by the time the gather runs: {evaluated:?}"
+        );
+    }
+
+    /// Hand-builds `proxima-autograd/src/conv.rs`'s `masked_window_axis`
+    /// shape directly (that function is private to a different crate): one
+    /// source axis widened by `(out_position, kernel_position)`, masked by
+    /// `Equal(Iota, Add(Multiply(Iota, Constant), Iota))`, and reduced away —
+    /// `proxima-tensor/docs/discipline.md` ROW 154's own fixture.
+    /// `mask_body` lets a decline test swap `Equal` for something else
+    /// without duplicating the rest of the shape.
+    #[allow(clippy::too_many_arguments)]
+    fn masked_window_reduce_program(
+        source_rank: u16,
+        windowed_axis: u16,
+        source_extent: u64,
+        out_extent: u64,
+        kernel_extent: u64,
+        stride: u64,
+        mask_body: ScalarOp,
+    ) -> (Vec<Op>, NodeId, NodeId) {
+        let mut program = Vec::new();
+        let widened_rank = source_rank + 2;
+        let out_position_axis = source_rank;
+        let kernel_position_axis = source_rank + 1;
+
+        let source_shape: Vec<Extent> = (0..source_rank)
+            .map(|axis| {
+                Extent::Static(if u64::from(axis) == windowed_axis as u64 { source_extent as u32 } else { 4 })
+            })
+            .collect();
+        let source = append(
+            &mut program,
+            Op::Input { dtype: DType::Float32, shape: source_shape, name: None },
+        );
+
+        let source_position = append(&mut program, Op::Iota { dtype: DType::Float32, extent: Extent::Static(source_extent as u32) });
+        let out_position = append(&mut program, Op::Iota { dtype: DType::Float32, extent: Extent::Static(out_extent as u32) });
+        let kernel_position = append(&mut program, Op::Iota { dtype: DType::Float32, extent: Extent::Static(kernel_extent as u32) });
+        let stride_const = append(&mut program, Op::Constant { dtype: DType::Float32, shape: Vec::new(), value: stride as f32 });
+
+        let identity1 = IndexMap::Affine(map::projection(1, &[0]));
+        let broadcast1 = IndexMap::Affine(map::projection(1, &[]));
+        let scaled_out = append(
+            &mut program,
+            Op::Elementwise {
+                dtype: DType::Float32,
+                body: ScalarOp::Multiply,
+                operands: alloc::vec![(out_position, identity1), (stride_const, broadcast1)],
+                name: None,
+            },
+        );
+
+        let combined = append(
+            &mut program,
+            Op::Elementwise {
+                dtype: DType::Float32,
+                body: ScalarOp::Add,
+                operands: alloc::vec![
+                    (scaled_out, IndexMap::Affine(map::projection(2, &[0]))),
+                    (kernel_position, IndexMap::Affine(map::projection(2, &[1]))),
+                ],
+                name: None,
+            },
+        );
+
+        let mask = append(
+            &mut program,
+            Op::Elementwise {
+                dtype: DType::Float32,
+                body: mask_body,
+                operands: alloc::vec![
+                    (source_position, IndexMap::Affine(map::projection(3, &[0]))),
+                    (combined, IndexMap::Affine(map::projection(3, &[1, 2]))),
+                ],
+                name: None,
+            },
+        );
+
+        let source_axes: Vec<u16> = (0..source_rank).collect();
+        let source_pattern = IndexMap::Affine(map::projection(widened_rank, &source_axes));
+        let mask_pattern = IndexMap::Affine(map::projection(widened_rank, &[windowed_axis, out_position_axis, kernel_position_axis]));
+
+        let masked = append(
+            &mut program,
+            Op::Elementwise {
+                dtype: DType::Float32,
+                body: ScalarOp::Multiply,
+                operands: alloc::vec![(source, source_pattern), (mask, mask_pattern)],
+                name: None,
+            },
+        );
+
+        let keep_axes: Vec<u16> = (0..widened_rank).filter(|&axis| axis != windowed_axis).collect();
+        let out_map = IndexMap::Affine(map::projection(widened_rank, &keep_axes));
+        let identity_widened = IndexMap::Affine(map::projection(widened_rank, &(0..widened_rank).collect::<Vec<u16>>()));
+        let reduced = append(
+            &mut program,
+            Op::Reduce(Reduce {
+                dtype: DType::Float32,
+                body: ScalarOp::Add,
+                init: crate::op::ReduceInit::Zero,
+                operand: masked,
+                in_map: identity_widened,
+                out_map,
+                keep: Keep::Reduce,
+                name: None,
+            }),
+        );
+
+        (program, source, reduced)
+    }
+
+    #[test]
+    fn a_masked_window_reduce_folds_to_a_single_operand_identity_read_of_source() {
+        let (program, source, reduced) =
+            masked_window_reduce_program(1, 0, 5, 3, 3, 1, ScalarOp::Equal);
+        let shapes = shape::infer(&program, &[]).expect("masked-window program infers");
+        let built = bind(&program, &shapes, &[]).expect("masked-window program builds ops");
+
+        let folded = built
+            .iter()
+            .find(|op| op.node == reduced)
+            .expect("the reduce node's own BoundOp is still present, just re-shaped");
+        assert!(
+            matches!(folded.kind, BoundOpKind::Elementwise { .. }),
+            "a proven in-bounds window read becomes a plain elementwise gather, not a Reduce, got {:?}",
+            folded.kind
+        );
+        assert_eq!(folded.operands().len(), 1, "the fold reads only source, the mask chain is gone");
+        assert_eq!(folded.operands()[0].0, source);
+        assert_eq!(
+            folded.operands()[0].1.strides.len(),
+            2,
+            "the source's one windowed axis now derives from two output axes"
+        );
+        assert!(
+            folded.operands()[0].1.strides.iter().all(|&stride| stride != 0),
+            "both the out_position and kernel_position axes must contribute to the source address"
+        );
+        assert_eq!(folded.element_body().steps.len(), 1);
+        assert_eq!(folded.element_body().steps[0].op, ScalarOp::Identity);
+    }
+
+    #[test]
+    fn a_masked_window_reduce_that_fails_the_in_bounds_proof_declines_and_binds_as_a_reduce() {
+        // stride*(out_extent-1) + (kernel_extent-1) = 2*2 + 2 = 6 >= source_extent(5): out of bounds.
+        let (program, _source, reduced) =
+            masked_window_reduce_program(1, 0, 5, 3, 3, 2, ScalarOp::Equal);
+        let shapes = shape::infer(&program, &[]).expect("masked-window program infers");
+        let built = bind(&program, &shapes, &[]).expect("masked-window program builds ops");
+
+        let folded = built
+            .iter()
+            .find(|op| op.node == reduced)
+            .expect("the reduce node's own BoundOp is still present");
+        assert!(
+            matches!(folded.kind, BoundOpKind::Reduce { .. }),
+            "a failed in-bounds proof must decline the fold and bind the ordinary Reduce, got {:?}",
+            folded.kind
+        );
+    }
+
+    #[test]
+    fn a_masked_window_reduce_with_a_non_windowed_axis_matches_a_direct_window_read() {
+        // source: [channel=4 (helper's own non-windowed default extent), position=5],
+        // windowed_axis=1, stride=1, kernel=3 -> out=3.
+        let (program, _source, reduced) =
+            masked_window_reduce_program(2, 1, 5, 3, 3, 1, ScalarOp::Equal);
+        let source_data: Vec<f32> = (0..4 * 5).map(|index| index as f32 + 1.0).collect();
+        let evaluated = crate::cpu::evaluate(&program, &[], &[&source_data], &[reduced])
+            .expect("masked-window program evaluates");
+        let (windowed, _shape) = evaluated.get(reduced).expect("reduce node's output buffer is present");
+
+        // expected[channel, out_position, kernel_position] = source[channel, out_position + kernel_position]
+        let mut expected = alloc::vec![0.0f32; 4 * 3 * 3];
+        for channel in 0..4usize {
+            for out_position in 0..3usize {
+                for kernel_position in 0..3usize {
+                    let source_position = out_position + kernel_position;
+                    expected[channel * 9 + out_position * 3 + kernel_position] =
+                        source_data[channel * 5 + source_position];
+                }
+            }
+        }
+        assert_eq!(windowed, expected.as_slice(), "the folded read must match the direct window gather exactly");
+    }
+
+    #[test]
+    fn a_non_equal_mask_chain_declines_and_binds_as_a_reduce() {
+        let (program, _source, reduced) =
+            masked_window_reduce_program(1, 0, 5, 3, 3, 1, ScalarOp::Greater);
+        let shapes = shape::infer(&program, &[]).expect("masked-window program infers");
+        let built = bind(&program, &shapes, &[]).expect("masked-window program builds ops");
+
+        let folded = built
+            .iter()
+            .find(|op| op.node == reduced)
+            .expect("the reduce node's own BoundOp is still present");
+        assert!(
+            matches!(folded.kind, BoundOpKind::Reduce { .. }),
+            "a mask chain that is not the exact Equal/Iota shape must decline the fold, got {:?}",
+            folded.kind
         );
     }
 }
