@@ -237,7 +237,8 @@ pub enum BoundOpKind {
         /// `out_map` operand-axis order. The last entry (if any) is the
         /// innermost loop. For a scatter this naturally excludes the
         /// scattered axis (its position is data-dependent, so it can never
-        /// be a pure projection — see [`pure_projection_axes`]).
+        /// be a pure projection — see `pure_projection_axes` (private to
+        /// this module)).
         output_axes: SmallVec<[u16; MAX_INLINE_RANK]>,
         out_layout: Layout,
         /// `Some` exactly when `out_map` was [`IndexMap::Computed`] — a
@@ -246,8 +247,9 @@ pub enum BoundOpKind {
         /// `indices` at `index_layout`, bounds-checked against `extent`,
         /// then scaled by `element_stride` and added to `out_layout`'s own
         /// offset — the exact mirror of how a gathered *operand*'s `Lookup`
-        /// already contributes to a *read* offset in [`cpu::run_reduce`]'s
-        /// generic path. `None` for an ordinary (affine) reduce/scan.
+        /// already contributes to a *read* offset in the CPU interpreter's
+        /// generic reduce path (`crate::cpu`'s own `run_reduce`). `None` for
+        /// an ordinary (affine) reduce/scan.
         out_scatter: Option<Lookup>,
     },
     /// The resolved counterpart of [`Op::Iota`]: no operands, no body — an
@@ -986,7 +988,7 @@ fn build_reduce_op(
 /// destination's static extent (`map.rs`'s `IndexMap::Computed` doc), not an
 /// address. Skipping the axis entirely is correct either way, since the
 /// scattered axis's real address only ever comes from the fetched index at
-/// evaluation time — see [`BoundOpKind::Reduce::out_scatter`]'s own doc.
+/// evaluation time — see [`BoundOpKind::Reduce`]'s `out_scatter` field doc.
 fn build_scatter_out_layout(base: &IndexPattern, gathered_dim: u16, output_shape: &[u64]) -> Layout {
     let element_strides = row_major_strides(output_shape);
     let mut strides = SmallVec::<[i64; MAX_INLINE_RANK]>::from_elem(0, base.iter_rank as usize);

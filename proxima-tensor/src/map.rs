@@ -170,7 +170,7 @@ impl IndexMap {
     /// `non_scattered` axes don't otherwise fill in. `non_scattered` is one
     /// [`AxisIndex`] per output axis other than `gathered_dim`, in output
     /// axis order with `gathered_dim`'s own slot omitted — mirroring how
-    /// [`crate::bind`]'s `pure_projection_axes` reads the result back out.
+    /// `crate::bind`'s `pure_projection_axes` (private) reads the result back out.
     #[must_use]
     pub fn scatter(
         indices: NodeId,
