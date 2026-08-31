@@ -49,7 +49,7 @@ use proxima_autograd::adjoint::differentiate_wanted;
 use proxima_autograd::loss::softmax_cross_entropy;
 use proxima_autograd::optimizer::{AdamConfig, AdamOperands, adam_step, step_input};
 use proxima_autograd::train::{State, train_step};
-use proxima_tensor::cpu::{QuantizedBlock, evaluate_quantized_named_with_scratch};
+use proxima_tensor::cpu::{QuantizedBlock, StaticArena, build_static_arena, evaluate_named_with_arena, evaluate_quantized_named_with_scratch};
 use proxima_tensor::dtype::DType;
 use proxima_tensor::map::{self, IndexMap};
 use proxima_tensor::op::{self, Extent, NodeId, Op, ReduceInit, ScalarOp};
@@ -78,6 +78,25 @@ fn train_step_scratch(
     let wrapped: Vec<(&str, QuantizedBlock)> = named.iter().map(|(name, data)| (*name, QuantizedBlock::Float32(data))).collect();
     let evaluated = evaluate_quantized_named_with_scratch(program, &[], &wrapped, &outputs, free_buffers, validated_weight_nodes)
         .expect("train_step_scratch evaluates");
+    let loss_value = evaluated.get(loss).and_then(|(data, _)| data.first().copied()).unwrap_or(0.0);
+    let next_state = rebind
+        .iter()
+        .map(|(node, name)| {
+            let values = evaluated.get(*node).map_or_else(Vec::new, |(data, _)| data.to_vec());
+            (String::from(*name), values)
+        })
+        .collect();
+    (loss_value, next_state)
+}
+
+/// Bench-local twin of [`train_step`], composing [`build_static_arena`] +
+/// [`evaluate_named_with_arena`] instead of `train::train_step`'s own
+/// `evaluate_named` -- ROW 164's static-arena lever: `arena` is built ONCE
+/// outside the sweep loop, so every call here reuses the SAME per-node
+/// buffers `build_static_arena` sized once, with no `shape::infer`, no
+/// `bind::bind`, and no per-node `Vec` allocation on this call's own path.
+fn train_step_arena(arena: &mut StaticArena, named: &[(&str, &[f32])], loss: NodeId, rebind: &[(NodeId, &str)]) -> (f32, State) {
+    let evaluated = evaluate_named_with_arena(arena, named).expect("train_step_arena evaluates");
     let loss_value = evaluated.get(loss).and_then(|(data, _)| data.first().copied()).unwrap_or(0.0);
     let next_state = rebind
         .iter()
@@ -395,6 +414,74 @@ fn sweep_scratch(lane: &TrainingLane) -> SweepResult {
     SweepResult { per_step_ns, loss_curve, final_state: state }
 }
 
+/// Same real training run as [`sweep_baseline`], same batches, same initial
+/// state, but the graph is bound and every node's output buffer sized ONCE
+/// (`build_static_arena`, before the loop) and reused unchanged in size for
+/// every step -- ROW 164's static-arena lever.
+fn sweep_arena(lane: &TrainingLane) -> SweepResult {
+    let mut outputs = Vec::with_capacity(lane.rebind.len() + 1);
+    outputs.push(lane.loss);
+    outputs.extend(lane.rebind.iter().map(|(node, _)| *node));
+    let mut arena = build_static_arena(&lane.program, &[], &outputs).expect("build_static_arena builds the training lane");
+
+    let mut state = lane.initial_state.clone();
+    for batch in &lane.batches[..WARMUP_STEPS] {
+        let named = named_for_step(batch, &state);
+        let (_loss, next_state) = train_step_arena(&mut arena, &named, lane.loss, &lane.rebind);
+        state = next_state;
+    }
+
+    let mut per_step_ns: Vec<u64> = Vec::with_capacity(MEASURED_STEPS);
+    let mut loss_curve: Vec<f32> = Vec::with_capacity(MEASURED_STEPS);
+    for batch in &lane.batches[WARMUP_STEPS..WARMUP_STEPS + MEASURED_STEPS] {
+        let named = named_for_step(batch, &state);
+        let start = Instant::now();
+        let (loss_value, next_state) = train_step_arena(&mut arena, &named, lane.loss, &lane.rebind);
+        per_step_ns.push(start.elapsed().as_nanos() as u64);
+        loss_curve.push(loss_value);
+        state = next_state;
+    }
+    SweepResult { per_step_ns, loss_curve, final_state: state }
+}
+
+/// Correctness gate for ROW 164: runs [`train_step`] (fresh-alloc baseline)
+/// and [`train_step_arena`] (static-arena) side by side, from the SAME
+/// initial state, over 3 consecutive real steps, and asserts every one of
+/// the 12 `rebind` outputs plus the loss is bit-identical between the two
+/// paths at every step -- not just at the end, so a divergence introduced
+/// at step 1 and silently corrected by step 3 (or vice versa) cannot hide.
+fn assert_arena_bit_identical_to_baseline(lane: &TrainingLane) {
+    let mut outputs = Vec::with_capacity(lane.rebind.len() + 1);
+    outputs.push(lane.loss);
+    outputs.extend(lane.rebind.iter().map(|(node, _)| *node));
+    let mut arena = build_static_arena(&lane.program, &[], &outputs).expect("build_static_arena builds the training lane");
+
+    let mut baseline_state = lane.initial_state.clone();
+    let mut arena_state = lane.initial_state.clone();
+    for (step_index, batch) in lane.batches[..3].iter().enumerate() {
+        let baseline_named = named_for_step(batch, &baseline_state);
+        let (baseline_loss, next_baseline_state) = train_step(&lane.program, lane.loss, &lane.rebind, &baseline_named).expect("baseline train_step evaluates");
+
+        let arena_named = named_for_step(batch, &arena_state);
+        let (arena_loss, next_arena_state) = train_step_arena(&mut arena, &arena_named, lane.loss, &lane.rebind);
+
+        assert_eq!(baseline_loss.to_bits(), arena_loss.to_bits(), "step {step_index}: loss diverged between baseline and arena paths");
+        assert_eq!(next_baseline_state.len(), 12, "step {step_index}: expected exactly 12 rebind outputs");
+        assert_eq!(next_arena_state.len(), 12, "step {step_index}: expected exactly 12 rebind outputs");
+        for ((baseline_name, baseline_values), (arena_name, arena_values)) in next_baseline_state.iter().zip(next_arena_state.iter()) {
+            assert_eq!(baseline_name, arena_name, "step {step_index}: rebind name ordering diverged");
+            assert_eq!(
+                baseline_values.iter().map(|value| value.to_bits()).collect::<Vec<_>>(),
+                arena_values.iter().map(|value| value.to_bits()).collect::<Vec<_>>(),
+                "step {step_index}: rebind output {baseline_name} diverged between baseline and arena paths"
+            );
+        }
+        baseline_state = next_baseline_state;
+        arena_state = next_arena_state;
+    }
+    eprintln!("train_step_lane: arena vs baseline bit-identical over 3 consecutive real steps (loss + all 12 rebind outputs)");
+}
+
 fn report_sweep(label: &str, result: &SweepResult) {
     assert!(
         result.loss_curve.iter().all(|value| value.is_finite()),
@@ -438,11 +525,16 @@ fn main() {
         lane.program.len()
     );
 
+    assert_arena_bit_identical_to_baseline(&lane);
+
     let baseline = sweep_baseline(&lane);
     report_sweep("baseline train_step (fresh alloc every call)", &baseline);
 
     let scratch = sweep_scratch(&lane);
     report_sweep("train_step_with_scratch (pool threaded across the run)", &scratch);
+
+    let arena = sweep_arena(&lane);
+    report_sweep("train_step_arena (static arena, bind+size once)", &arena);
 
     // criterion groups: repeated calls against each arm's own post-warm-up
     // state, fixed (not threaded forward per-iteration -- criterion's own
