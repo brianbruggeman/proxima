@@ -14596,3 +14596,81 @@ N/A for this row: nothing landed. For the record, the attempted design's own opt
 - The attempted lever's own diff (both bug fixes included) and the temporary diagnostic probe test are preserved at `/private/tmp/claude-501/-Users-brianbruggeman-repos-slot-0/7f296db5-2f93-416b-8be0-1e516900b72c/scratchpad/` for this session only (scratchpad, not durable; `build*.log`/`probe*.log`/`bench_after_*.log`, plus this row's own description, are what a future session would re-create the design from)
 - `CARGO_TARGET_DIR=<scratch> cargo nextest run -p proxima-tensor --features std,instrument` (450/0/4) and `-p proxima-autograd --all-features --release` (137/0/0) -- reproduces the post-rollback oracle set (ROW 159's own citations, unaffected since `git diff main` is empty)
 - `CARGO_TARGET_DIR=<scratch> cargo bench -p proxima-autograd --bench train_step_lane --features train-step-bench` -- reproduces ROW 159's own sealed baseline (this row landed no bench change)
+
+## ROW 161 -- ROW 160's own open question answered DIRECTLY (not by shape-matching alone): a per-NODE wall-clock table for the real train_step, keyed by `NodeId` + extents, finds the step is NOT dominated by `dW1`/`dW2` themselves (`grad_w1`=NodeId(96)=2.32%, `grad_w2`=NodeId(81)=1.29% -- CHEAP) but by a single upstream node, NodeId(93), the adjoint's own un-reduce/broadcast materialize step for layer1's gradient, at **42.6% of the step alone**; a second finding, code-confirmed not inferred: `differentiate()` (`adjoint.rs:209-236`) unconditionally backprops through every reachable `Op::Input` including `x` (the data, never a trained parameter), and `grad_x`=NodeId(97) costs 8.58% of the step for a gradient `train_step`'s own `rebind` list never reads -- ROW160's Route A lever (targeting `dW1`/`dW2`) was aimed at nodes carrying <4% of the step combined, which is WHY it measured no signal regardless of its own kernel quality; the real >=30%-of-step target is NodeId(93), a `differentiate_reduce`-emitted `Reduce`, not a GEMM-shaped node at all
+
+Repo: `/Users/brianbruggeman/repos/slot-0/proxima-wt-trainperf`, branch `perf/train-step-node-isolation`, off `main` `128d7d2` (ROW 160's own sealed HEAD). Host: Apple M1 Max, macOS, arm64. Build profile: `release` for every timed number below (`cargo test --release`; the workspace's `[profile.bench]` -- confirmed via `grep -n 'profile.bench' -A2 Cargo.toml` -- reads `inherits = "release"` plus `debug = true`, so `cargo bench`'s optimization is IDENTICAL to `cargo test --release`'s, differing only in debug-symbol generation, not runtime codegen), `dev` only for the nextest/clippy oracles, never mixed with a timed run. **Host loadout, named precisely**: `pgrep -fl "cargo|rustc"` showed only this session's own `cdb-daemon`/`sccache` on every check, no competing build process, ever. `uptime` load average ranged 7.1-21.8 across the session (9.9-14.2 at session start, rising to 21.8-16.6 during the three timed runs, back to 7.1-13.9 by the final oracle) -- QUIET-TO-MODERATE throughout, the same "loaded but uncontended" category ROW 151/160 already name. **Budget note**: this session's own hard budget was 45 minutes; the work below closed inside it.
+
+### Allocation budget, stated first
+
+This row lands ZERO source changes (pure measurement, reverted before commit -- see Rollback below). The temporary per-node diagnostic itself allocates only once per distinct `NodeId` on its first hit per process (`BTreeMap::entry().or_insert_with()`, one `alloc::format!` call for the shape tag), then is a plain `u64` increment on every subsequent hit -- O(1) steady-state, no allocation inside the measured loop after warm-up, matching the zero-alloc-after-warm-up bar the rest of this crate's `#[cfg(feature = "instrument")]` diagnostics already hold themselves to (`diag_kind_ticks` above is the same shape).
+
+### Method
+
+Extended ROW 160's own env-gated diagnostic approach, but keyed by `NodeId` + shape instead of coarse node-kind: `proxima-tensor/src/cpu.rs`'s existing per-node dispatch loop (the same site `diag_kind_ticks`/`diag_node_label` already instrument, wrapping every `run_node_into` call -- which is what actually reaches `run_reduce`/`run_elementwise`, so timing at this call boundary captures exactly their wall time without duplicating shape-extraction logic inside each function) gained a `PROXIMA_DEBUG_PER_NODE=1`-gated accumulator: `PER_NODE_TICKS: OnceLock<Mutex<BTreeMap<u32, (count, ticks, kind, shape_string)>>>`, `diag_record_per_node`/`diag_reset_per_node`/`diag_dump_per_node` (all `#[cfg(feature = "instrument")]`, `pub` only so the temporary out-of-crate driver could call them). A temporary test, `proxima-autograd/tests/temp_per_node_probe.rs` (deleted before commit, network-construction code duplicated verbatim from `benches/train_step_lane.rs`'s own `build_network`/`build_training_lane`, per that file's own doc on why a bench and a test can't share helpers across the crate boundary), drove the REAL `proxima_autograd::train::train_step` production function -- the same one `benches/train_step_lane.rs` benches -- through 20 warm-up + 60 measured real MNIST steps (`>= 50`, per this task's own floor), called `diag_reset_per_node()` after warm-up so the dumped table reflects only the measured window, then `diag_dump_per_node(60)` once at the end. Run 3 times (`release`), each its own process so the accumulator starts empty; per-node `us_per_step`/CoV computed across the 3 runs' own `mean` column. Node semantics were NOT guessed from shape alone: `differentiate_elementwise`/`differentiate_reduce`'s live `NodeId`s were resolved directly via `Differentiated::gradient_of_named("w1"/"b1"/"w2"/"b2"/"x"/"y")` (public API, exact) printed once from the same driver, and `forward layer1 GEMM` was confirmed by program-position arithmetic (`build_network`'s own `op::append` order: 6 leaf inputs at positions 0-5, `batched_dense(x,w1,b1)`'s own product/matmul/bias-add append at positions 6/7/8 -- `NodeId(7)` is the layer1 matmul reduce by construction, not inference).
+
+### The per-node table (>=1% of the reconciled step; 3 runs, CoV where feasible)
+
+Convergence gate (bit-identical every run, deterministic fixed-seed He-init/data/lr): `first-quarter-avg-loss=0.7187 -> last-quarter-avg-loss=0.3421`, all 3 runs.
+
+| node id | op kind | shape (extents) | identity | µs/step (mean of 3) | CoV | % of step |
+|---|---|---|---|---:|---:|---:|
+| 93 | reduce | [32,784,128] | **`differentiate_reduce`'s un-reduce/broadcast materialize of layer1's matmul gradient** (INFERRED: position-clustered between `grad_b1`=90 and `grad_w1`=96, upstream of both -- not independently stride-confirmed this session) | 2611.232 | 0.66% | 42.616% |
+| 97 | reduce | [32,784,128] | **`grad_x`** = `Differentiated::gradient_of_named("x")` = `NodeId(97)`, CONFIRMED -- computed but NEVER read (`train_step`'s own `rebind` has no `x` entry) | 525.866 | 0.05% | 8.582% |
+| 139 | elementwise | [784,128] | Adam update triple for w1 (with 117, 113) -- weight-shaped, no batch axis, INFERRED by shape | 373.585 | 9.56% | 6.097% |
+| 91 | constant | [32,784,128] | zero/seed constant sited immediately before node 93 -- exact role not identified this session | 170.211 | 0.72% | 2.778% |
+| 78 | reduce | [32,128,10] | layer2's analogue of node 93 (position offset -3 from `grad_w2`=81, mirroring 93's offset -3 from `grad_w1`=96) -- INFERRED | 133.701 | 0.08% | 2.182% |
+| 117 | elementwise | [784,128] | Adam update triple for w1 (with 139, 113) | 127.112 | 1.93% | 2.075% |
+| 113 | elementwise | [784,128] | Adam update triple for w1 (with 139, 117) | 118.616 | 1.91% | 1.936% |
+| 96 | reduce | [32,784,128] | **`grad_w1`** = `Differentiated::gradient_of_named("w1")`, CONFIRMED | 116.043 | 0.33% | 1.894% |
+| 10 | elementwise | [32,128] | forward/backward elementwise (relu fwd/bwd or grad-accum), not individually disambiguated | 104.885 | 8.33% | 1.712% |
+| 7 | reduce | [32,784,128] | **forward layer1 GEMM**, CONFIRMED by program-position arithmetic | 94.939 | 0.20% | 1.549% |
+| 87 | elementwise | [32,128] | forward/backward elementwise, not individually disambiguated | 92.276 | 6.44% | 1.506% |
+| 8 | elementwise | [32,128] | forward/backward elementwise, not individually disambiguated | 84.382 | 0.60% | 1.377% |
+| 84 | elementwise | [32,128] | forward/backward elementwise, not individually disambiguated | 81.964 | 3.00% | 1.338% |
+| 12 | reduce | [32,128,10] | very likely forward layer2 GEMM (shape/position-cluster analogy to node 7), not independently confirmed | 79.491 | 0.23% | 1.297% |
+| 81 | reduce | [32,128,10] | **`grad_w2`** = `Differentiated::gradient_of_named("w2")`, CONFIRMED | 79.186 | 0.44% | 1.292% |
+| (95 more nodes, each <1%) | mixed | mixed | `grad_b1`=90 (1.191us, 0.019%), `grad_b2`=75 (0.758us, 0.012%), `grad_y`=39 (1.185us, 0.019%) among them | 203.820 (sum) | -- | 3.326% (sum) |
+
+### Phase rows
+
+| phase | µs/step (mean of 3) | % of step |
+|---|---:|---:|
+| reduce (all 31 nodes, `node_kind=reduce_f32_dense` population) | 3789.484 | 61.85% |
+| elementwise -- **optimizer (Adam) update, 12 nodes** (w1/w2/b1/b2 triples, weight-shaped, no batch axis) | 661.027 | 10.79% |
+| elementwise -- forward/backward (bias-add, relu fwd+bwd, grad accumulation, 16 nodes) | 372.936 | 6.09% |
+| constant (51 nodes, incl. node 91's 170.2us) | 173.866 | 2.838% |
+| setup (shape::infer + `reject_non_float32` + bind + retirement scheduling -- the closest separable "bind/plan" phase) | 129.57 | 2.115% |
+| loop overhead (`take_or_allocate` per-node output buffer + retirement bookkeeping, summed over all 110 nodes/step -- ROW 159's own `loop_overhead_ms`, re-measured here) | 1000.40 | 16.33% |
+| **sum** | **6127.28** | **99.99%** |
+
+### Sum-check against ROW 159's sealed, uninstrumented baseline
+
+Reconciled total (node table + setup + loop overhead), mean of 3 runs: **6.127ms**, CoV **2.72%** across the 3 runs' own totals (6.357/6.057/5.968ms). Against ROW 159's own sealed baseline (mean 6.19ms, p50 range 5.75-7.03ms, CoV 8.05%): **residual = -1.0%** (this row's reconstruction lands 0.063ms BELOW ROW 159's mean) -- inside ROW 159's own CoV band, not a discrepancy. The table accounts for the whole step; nothing is unexplained beyond ordinary run-to-run noise.
+
+### Decision
+
+**The top single node carries 42.6% of the step -- above the >=30% threshold -- so the lever is named, not deferred.** But the target is NOT `dW1`/`dW2`: this row directly falsifies ROW 160's own working assumption. `grad_w1`(96)+`grad_w2`(81)+`grad_b1`(90)+`grad_b2`(75) sum to **3.94%** of the step combined -- ROW 160's Route A lever (a register-blocked `gemm_tile_neon` path gated on exactly these two nodes) was correctly implemented, correctly fired on exactly `dW1`/`dW2`, and correctly measured NO SIGNAL, because those two nodes were never more than ~4% of the step to begin with. This answers ROW 160's own residual #2 directly: **the aggregate was NOT dominated by `dW1`/`dW2`; the lever was targeted at the wrong two nodes, independent of its own kernel quality.**
+
+The real >=30% target is **NodeId(93)**, the un-reduce/broadcast materialize step `differentiate_reduce` emits when distributing layer1's matmul gradient back up to the pre-reduction `[batch,in,hidden]` shape, BEFORE `grad_w1`/`grad_x` ever run -- a `Reduce` node in the IR (per ROW 160's own cited `differentiate_reduce`/`route_contribution` source: `routed = expr::reduce(program, dtype, Add, Zero, contribution, identity(iter_rank), pattern)`), not a GEMM. **Next session's lever, named with its mechanism**: profile `NodeId(93)`'s own `run_reduce` path split (dot/width/generic ticks, the same `reduce_path_ticks` instrumentation already in this file) to confirm whether it is width_fast-routed like `dW1`/`dW2` were assumed to be, or whether it is a cheap-but-huge affine broadcast currently paying `run_reduce`'s generic per-element loop over all 3.2M elements for what is, structurally, just a strided copy -- the mechanism evidence line is `node93`'s own 2611us for touching every one of `32*784*128=3,211,264` elements once (0.81ns/element), close to a memory-bandwidth-bound copy, not a compute-bound reduce, which would point at a completely different fix (a SIMD broadcast/replicate kernel, not a register-blocked GEMM tile).
+
+**A second, independent, structurally CONFIRMED lever, cheaper to land and orthogonal to the above**: `differentiate()` (`proxima-autograd/src/adjoint.rs:209-236`) backprops through every `Op::Input` reachable from the loss, including `x` (real per-batch data, never a trained parameter, never in `train_step`'s own `rebind` list) -- `grad_x`=`NodeId(97)` costs **8.58% of the step, computed and then discarded on every single call**. A `needs_grad`/requested-inputs-only differentiation mode (skip building the gradient subgraph for any `Op::Input` not named in the caller's own request set) would remove this node entirely, for free, with no kernel work at all -- a smaller, safer, immediately actionable win alongside the harder `NodeId(93)` investigation.
+
+**ROW 160's own ROWS=1 register-blocking question**: given `dW1`/`dW2` are collectively under 4% of the step, a `TILE_ROWS=6` register-blocked kernel for THOSE two nodes specifically would matter far less than ROW 160 assumed -- even a 2x speedup on `grad_w1`+`grad_w2` combined would save under 2% of the step. **Register-blocking is not where this program's ceiling is.** The `>=30%`-of-step opportunity is `NodeId(93)`'s own mechanism, not GEMM microkernel tuning.
+
+**No signal on the flat-cost hypothesis**: the cost is NOT flat/undominated -- one node alone is 42.6%, the top 15 nodes above 1% sum to 79.8% of the step. This is a concentrated-target lane, not a fusion/overhead lane; loop overhead (alloc/zeroing/bookkeeping) is real (16.3%) but secondary to `NodeId(93)`.
+
+### Rollback -- cleanly, completely, nothing landed on the sealed tree
+
+`git checkout -- proxima-tensor/src/cpu.rs proxima-autograd/Cargo.toml && rm -f proxima-autograd/tests/temp_per_node_probe.rs` -- `git status --short` and `git diff --stat main` both empty, confirmed this session. `git diff main` (whole tree, before this row's own `docs/discipline.md` edit): empty.
+
+### Opt-sweep note (measurement-only row; `cpu.rs`'s per-node dispatch loop is executor-internal hot-path code, not sans-IO -- principle §11's mandatory axes are N/A by domain, matching ROW 159/160's own framing)
+
+N/A for this row: nothing landed on the sealed tree. The reverted diagnostic itself: state machine N/A (an accumulator + two accessor functions, not an FSM). bytes-first/borrowed views: N/A, a `BTreeMap<u32,(u64,u64,&str,String)>` keyed by node id -- the one `alloc::format!` per distinct node is a genuine, intentional allocation (diagnostic-only, one-time per node per process, never in a hot loop after warm-up). SIMD: N/A, no kernel code touched. stack-over-heap: NOT DONE for the diagnostic's own shape string (heap `String`, bounded to 110 entries/process, diagnostic-only, matches `diag_kind_ticks`'s own existing `&'static str` keys' looser cousin). branchless: N/A. no dynamic dispatch: DONE (no trait objects). O(1) per output element: N/A-framing, matches ROW 159/160's own answer.
+
+### Re-prove commands
+
+- `git diff main -- proxima-tensor/src proxima-autograd/src proxima-autograd/tests proxima-autograd/benches proxima-autograd/Cargo.toml` -- empty, proves the rollback is complete
+- `CARGO_TARGET_DIR=<scratch> cargo nextest run -p proxima-tensor --features std,instrument` -- 450 passed, 0 failed, 4 skipped, unaffected (this session's own re-run, post-rollback)
+- `CARGO_TARGET_DIR=<scratch> cargo clippy -p proxima-tensor --all-targets --all-features -- -D warnings` -- clean, exit 0
+- The per-node instrumentation, the temporary driver test, and the 3 raw run logs (`run1.log`/`run2.log`/`run3.log`, plus `aggregated.tsv`) this row's table was computed from are preserved at `/private/tmp/claude-501/-Users-brianbruggeman-repos-slot-0/7f296db5-2f93-416b-8be0-1e516900b72c/scratchpad/` for this session only (scratchpad, not durable) -- a future session re-creates the exact diagnostic from this row's own Method section, which describes every line of the reverted diff
