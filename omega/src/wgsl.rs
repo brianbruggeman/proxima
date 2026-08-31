@@ -339,9 +339,15 @@ fn validate_body(node: NodeId, body: &ComposedBody) -> Result<(), EmitError> {
 fn validate(resolved: &BoundOp, packed_operands: &PackedOperands) -> Result<(), EmitError> {
     validate_body(resolved.node, resolved.element_body())?;
     if let BoundOpKind::Reduce {
-        reduce_op, keep, ..
+        reduce_op,
+        keep,
+        out_scatter,
+        ..
     } = &resolved.kind
     {
+        if out_scatter.is_some() {
+            return Err(EmitError::ScatterNotSupported { node: resolved.node });
+        }
         if matches!(reduce_op, ScalarOp::Select) {
             return Err(EmitError::ReductionBodyIsSelect { node: resolved.node });
         }
