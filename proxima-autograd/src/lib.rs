@@ -38,6 +38,13 @@
 //!   training loop repeats every step ([`proxima_tensor::cpu::evaluate_named`]
 //!   plus rebinding every updated buffer by name), as two free functions,
 //!   `std`-only (see this module's own `# Tiers` section).
+//! - `persist::save_state` / `persist::load_state` — [`train::State`]
+//!   through `proxima_safetensors::write_complete`/`SafetensorsParser`,
+//!   closing train -> checkpoint -> serve; `safetensors`-feature-gated (not
+//!   an intra-doc link here on purpose -- the module does not exist in a
+//!   default `cargo doc` build; see its own doc, built under the
+//!   `safetensors` feature, for the real links and why `program: &[Op]` is
+//!   the shape source).
 //! - [`sparse::dedupe_and_sum_rows`] — the host-side scatter-add a gathered
 //!   operand's adjoint (`adjoint::GatheredContribution`) needs applied back
 //!   onto its full shape, `O(touched x row_len)` rather than the dense
@@ -85,6 +92,11 @@ pub(crate) mod expr;
 pub mod loss;
 pub mod norm;
 pub mod optimizer;
+// `save_state`/`load_state`: `train::State` through `proxima-safetensors`'s
+// writer/parser -- see this module's own doc for why `State` stays
+// shapeless and `program: &[Op]` is the shape source instead.
+#[cfg(feature = "safetensors")]
+pub mod persist;
 pub mod sparse;
 // `evaluate_named` (proxima-tensor's own std-gated `cpu` module) is what
 // `train_step` actually runs a compiled step through -- see this crate's own

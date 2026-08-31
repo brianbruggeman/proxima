@@ -27,6 +27,12 @@ config = ["std", "dep:bon", "dep:conflaguration", "dep:serde", "proxima-tensor/c
 # structured loss/gradient-norm telemetry via `proxima::telemetry` macros
 # and a file-sink `Exporter`, never a hand-rolled `println!`.
 instrument = ["std", "dep:proxima-telemetry", "proxima-telemetry/macros"]
+# `persist::save_state`/`persist::load_state`: `train::State` through
+# `proxima-safetensors`'s writer/parser. `std` for `std::fs`/`std::path`;
+# `proxima-safetensors` itself stays pinned to its own alloc tier (see the
+# dependency entry below) -- this crate's own `write_complete`/`parse`
+# usage needs nothing from that crate's std-only `config` module.
+safetensors = ["std", "dep:proxima-safetensors"]
 
 [dependencies]
 bon = { workspace = true, optional = true }
@@ -39,6 +45,7 @@ conflaguration = { workspace = true, features = ["derive", "toml"], optional = t
 # transitively today; declared directly here since this crate calls it).
 libm = "0.2"
 proxima-primitives = { workspace = true, default-features = false }
+proxima-safetensors = { path = "../proxima-safetensors", default-features = false, features = ["alloc"], optional = true }
 proxima-telemetry = { workspace = true, optional = true }
 proxima-tensor = { path = "../proxima-tensor", default-features = false, features = ["alloc"] }
 serde = { workspace = true, features = ["derive"], optional = true }
@@ -51,4 +58,5 @@ workspace = true
 proxima = { workspace = true, features = ["test-support"] }
 proxima-tensor = { path = "../proxima-tensor", features = ["std", "config", "test-support"] }
 proxima-tokenizer = { path = "../proxima-tokenizer", features = ["hf"] }
+tempfile.workspace = true
 toml.workspace = true
