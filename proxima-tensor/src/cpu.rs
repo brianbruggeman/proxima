@@ -555,12 +555,35 @@ pub fn build_static_arena(program: &[Op], symbols: &[u64], outputs: &[NodeId]) -
 /// a bound buffer's length no longer matches the size [`build_static_arena`]
 /// fixed for it (a genuinely different-shaped call, not a training step).
 pub fn evaluate_named_with_arena(arena: &mut StaticArena, named: &[(&str, &[f32])]) -> Result<Evaluated, TensorError> {
+    bind_named_inputs_into_arena(arena, named, true)?;
+    run_resolved_nodes_in_arena(arena)?;
+
+    let results = arena
+        .effective_outputs
+        .iter()
+        .map(|node| {
+            let shape = arena.shapes.of(*node).to_vec();
+            let data = arena.buffers[node.0 as usize].as_deref().unwrap_or(&[]).to_vec();
+            (*node, shape, data)
+        })
+        .collect();
+
+    Ok(Evaluated::from_parts(arena.root, results, None))
+}
+
+/// [`evaluate_named_with_arena`]'s own input-binding loop, factored out so
+/// [`evaluate_named_with_arena_in_place`] can reuse it with `require_all =
+/// false`: a name absent from `named` is treated as "already correct in
+/// the arena" (the in-place rebind lever put it there) rather than an
+/// error, instead of duplicating the loop body.
+fn bind_named_inputs_into_arena(arena: &mut StaticArena, named: &[(&str, &[f32])], require_all: bool) -> Result<(), TensorError> {
     for (node, name) in &arena.input_names {
-        let data = named
-            .iter()
-            .find(|(candidate, _)| candidate == name)
-            .map(|(_, data)| *data)
-            .ok_or_else(|| TensorError::UnboundInputName(name.clone()))?;
+        let found = named.iter().find(|(candidate, _)| candidate == name).map(|(_, data)| *data);
+        let data = match found {
+            Some(data) => data,
+            None if require_all => return Err(TensorError::UnboundInputName(name.clone())),
+            None => continue,
+        };
         let slot = arena.buffers[node.0 as usize].as_mut().ok_or(TensorError::NotLowerable {
             node: *node,
             reason: "static arena has no pre-sized slot for this input node -- build_static_arena did not size it",
@@ -574,7 +597,13 @@ pub fn evaluate_named_with_arena(arena: &mut StaticArena, named: &[(&str, &[f32]
         }
         slot.copy_from_slice(data);
     }
+    Ok(())
+}
 
+/// [`evaluate_named_with_arena`]'s own resolved-node execution loop,
+/// factored out so [`evaluate_named_with_arena_in_place`] shares the
+/// identical execution path rather than a second copy of it.
+fn run_resolved_nodes_in_arena(arena: &mut StaticArena) -> Result<(), TensorError> {
     for computed in &arena.resolved {
         let node_index = computed.node.0 as usize;
         let mut output = arena.buffers[node_index].take().ok_or(TensorError::NotLowerable {
@@ -584,18 +613,99 @@ pub fn evaluate_named_with_arena(arena: &mut StaticArena, named: &[(&str, &[f32]
         run_node_into(computed, &arena.buffers, None, None, &mut output)?;
         arena.buffers[node_index] = Some(output);
     }
+    Ok(())
+}
 
-    let results = arena
-        .effective_outputs
-        .iter()
-        .map(|node| {
-            let shape = arena.shapes.of(*node).to_vec();
-            let data = arena.buffers[node.0 as usize].as_deref().unwrap_or(&[]).to_vec();
-            (*node, shape, data)
-        })
-        .collect();
+/// Reads `node`'s current buffer straight out of `arena` -- a borrow, not a
+/// clone. Valid for any node [`build_static_arena`] pre-sized: an
+/// [`Op::Input`] slot or a resolved node's output, in whichever state the
+/// arena is in right now (freshly computed, or holding a value
+/// [`evaluate_named_with_arena_in_place`]'s rebind aliasing swapped in).
+#[must_use]
+pub fn arena_output(arena: &StaticArena, node: NodeId) -> Option<&[f32]> {
+    arena.buffers.get(node.0 as usize).and_then(Option::as_deref)
+}
 
-    Ok(Evaluated::from_parts(arena.root, results, None))
+/// The in-place counterpart to [`evaluate_named_with_arena`]: a caller
+/// whose `rebind` targets stay resident IN the arena across steps (a
+/// training loop's own parameters and optimizer state, per
+/// `docs/discipline.md` ROW 164's own named residual -- "the rebind
+/// targets... get cloned out because arena buffers must survive the next
+/// call") never pays that clone at all. `named` here carries ONLY this
+/// step's genuinely-new bindings (a batch, a step counter) -- every
+/// `rebind` name is expected to already be resident from the PRIOR call's
+/// own aliasing swap (or, on the very first call, from a `named` entry the
+/// caller supplied once up front).
+///
+/// After running `program`, every `(computed, input_name)` pair in
+/// `rebind` is spliced directly into place with [`Vec::swap`]: the
+/// computed node's freshly written buffer BECOMES the `input_name` node's
+/// buffer, and the stale old input buffer moves to the computed node's own
+/// slot, where [`run_resolved_nodes_in_arena`] fully overwrites it again on
+/// the very next call (matching [`evaluate_pooled`]'s own "every write
+/// position gets overwritten before any read" contract) -- zero
+/// allocation, zero `f32` copied, only two `Vec<f32>` headers exchanged.
+///
+/// What a caller can do with this that [`evaluate_named_with_arena`] alone
+/// cannot: run N steps of a `rebind`-shaped loop with the state-carrying
+/// buffers touched exactly zero times between [`build_static_arena`] and
+/// the caller's own final read-out, instead of a clone-out-then-copy-in
+/// pair on every single step.
+///
+/// # Errors
+/// The same errors [`evaluate_named_with_arena`] raises for the `named`
+/// bindings it IS given, plus [`TensorError::UnboundInputName`] if a
+/// `rebind` pair names an [`Op::Input`] `build_static_arena` never bound,
+/// and [`TensorError::InputSizeMismatch`] if a `rebind` pair's computed
+/// and input buffers are not the same length (a genuinely different-shaped
+/// rebind, not the same-program repeated-step case this exists for).
+pub fn evaluate_named_with_arena_in_place(
+    arena: &mut StaticArena,
+    named: &[(&str, &[f32])],
+    loss: NodeId,
+    rebind: &[(NodeId, &str)],
+) -> Result<f32, TensorError> {
+    bind_named_inputs_into_arena(arena, named, false)?;
+    run_resolved_nodes_in_arena(arena)?;
+
+    let loss_value = arena_output(arena, loss).and_then(|data| data.first().copied()).unwrap_or(0.0);
+
+    for (computed, name) in rebind {
+        let input_node = arena
+            .input_names
+            .iter()
+            .find(|(_, candidate)| candidate == name)
+            .map(|(node, _)| *node)
+            .ok_or_else(|| TensorError::UnboundInputName(String::from(*name)))?;
+        let computed_index = computed.0 as usize;
+        let input_index = input_node.0 as usize;
+        let computed_len = arena.buffers[computed_index].as_ref().map_or(0, Vec::len);
+        let input_len = arena.buffers[input_index].as_ref().map_or(0, Vec::len);
+        if computed_len != input_len {
+            return Err(TensorError::InputSizeMismatch {
+                node: input_node,
+                expected: input_len,
+                found: computed_len,
+            });
+        }
+        arena.buffers.swap(computed_index, input_index);
+    }
+
+    Ok(loss_value)
+}
+
+/// Reads `name`'s current resident buffer straight out of `arena` -- a
+/// borrow, not a clone. `name` is any [`Op::Input`] [`build_static_arena`]
+/// bound; the value returned reflects whatever the arena currently holds
+/// for it, whether bound by the last [`evaluate_named_with_arena`]/
+/// [`evaluate_named_with_arena_in_place`] call's own `named` or spliced in
+/// by [`evaluate_named_with_arena_in_place`]'s rebind aliasing -- the
+/// read-out a caller uses once, at the end of a run, to pull a `rebind`
+/// loop's final state back into its own owned buffers.
+#[must_use]
+pub fn arena_named_input<'arena>(arena: &'arena StaticArena, name: &str) -> Option<&'arena [f32]> {
+    let node = arena.input_names.iter().find(|(_, candidate)| candidate == name).map(|(node, _)| *node)?;
+    arena_output(arena, node)
 }
 
 /// One [`evaluate_quantized`]-bound block: either a plain `f32`
