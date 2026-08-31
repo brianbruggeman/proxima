@@ -24,9 +24,13 @@
 //! - [`loss::mse`] / [`loss::cross_entropy`] / [`loss::softmax_cross_entropy`]
 //!   — the same graph-building shape, for the scalar objective a training
 //!   loop differentiates.
-//! - [`norm::dropout`] — the same graph-building shape again: inverted
-//!   dropout over a caller-supplied 0/1 mask `Op::Input`, never a graph-level
-//!   random source.
+//! - [`norm::dropout`] / [`norm::batchnorm2d_train`] /
+//!   [`norm::batchnorm2d_eval`] / [`norm::update_running_stats`] — the same
+//!   graph-building shape again: an inverted-dropout composition over a
+//!   caller-supplied 0/1 mask `Op::Input`, and train/eval batchnorm built
+//!   from existing `Reduce`/elementwise nodes, batch statistics returned as
+//!   graph outputs for the caller to persist across steps exactly like
+//!   [`optimizer::adam_step`]'s `m`/`v`.
 //! - [`optimizer::adam_step`] / [`optimizer::sgd_step`] /
 //!   [`optimizer::rmsprop_step`] / [`optimizer::adamw_step`] — parameter
 //!   updates as elementwise expressions over `(param, grad, ...)`.
