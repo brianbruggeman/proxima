@@ -201,14 +201,14 @@ pub fn differentiate(program: &[Op], loss: NodeId) -> Result<Differentiated, Aut
 /// gradient is bit-identical to what `differentiate` would produce for it
 /// (same nodes, same order, same values). The only thing this function omits
 /// is the *final* routing step into an [`Op::Input`] that is not in `wanted`:
-/// the small `expr::reduce`/[`accumulate`] call that would otherwise
+/// the small `expr::reduce`/`accumulate` call that would otherwise
 /// materialize that input's own gradient buffer and then have it go unread.
 /// A shared intermediate node feeding both a wanted and an unwanted input
 /// (e.g. a matmul's product feeding both a weight's gradient and the layer's
 /// data gradient) is untouched — inputs are always leaves in this reverse
 /// walk (`Op::Input`'s own match arm never recurses further), so gating only
 /// at the leaf-routing sites (`route_contribution`'s two arms and
-/// [`differentiate_reduce`]'s own direct accumulate) is exactly "skip the
+/// `differentiate_reduce`'s own direct accumulate) is exactly "skip the
 /// final routing into unwanted inputs and nothing upstream of it" — no
 /// separate liveness pass is needed because inputs never have downstream
 /// adjoint work to prune in the first place.
