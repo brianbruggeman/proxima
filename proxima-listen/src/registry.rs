@@ -49,7 +49,11 @@ pub struct ServeContext {
     pub acceptor_factory: Option<Arc<dyn proxima_primitives::stream::AcceptorFactory>>,
     /// UDP sibling of `acceptor_factory`: the runtime-agnostic datagram socket
     /// source a QUIC/h3 listener binds through (so it names neither prime nor
-    /// tokio). `None` when no runtime is installed (the tokio-default path).
+    /// tokio). There is no ambient fallback: `None` makes
+    /// `H3NativeListenProtocol::serve` return `ProximaError::Config` at bind
+    /// time (see `proxima-http/src/http3/native/listen.rs`). Callers running
+    /// h3-native on tokio must wire one explicitly, e.g.
+    /// `proxima_net::tokio::TokioDatagramFactory`.
     pub datagram_factory: Option<Arc<dyn proxima_primitives::stream::DatagramFactory>>,
     pub handler_dispatch: HandlerDispatch,
     /// fired once this lane's listening socket has completed its real
