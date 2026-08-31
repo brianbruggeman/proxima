@@ -43,19 +43,39 @@ pub fn mse(program: &mut Vec<Op>, dtype: DType, pred: NodeId, target: NodeId, ra
 
 /// Cross-entropy between predicted probabilities `probs` and a one-hot (or
 /// soft) target distribution `one_hot`, reduced to a scalar over every one
-/// of `rank` axes: `-sum(one_hot * log(probs))`.
+/// of `rank` axes: `-sum(one_hot * log(max(probs, EPSILON)))`.
 ///
 /// Unnormalized (a sum, not a mean) — the same convention
 /// `training_loop.rs:149-152`'s inline shape uses for one example at a
 /// time; a caller batching examples divides by the batch size itself, the
 /// same way [`mse`] takes `element_count` explicitly rather than assuming
 /// what "the batch" means for its caller's iteration space.
+///
+/// The `max(probs, EPSILON)` floor (one existing [`ScalarOp::Maximum`], the
+/// same composed primitive [`crate::activation::relu`] uses) exists because
+/// [`crate::adjoint::differentiate`] differentiates this literal graph, not
+/// a hand-fused closed-form gradient: `Logarithm`'s adjoint is `gradient *
+/// (1/x)` (`adjoint.rs:338-341`), and the `Multiply` feeding it puts an
+/// exact `0.0` upstream gradient on every non-target class
+/// (`one_hot` is `0` there). A confidently-wrong softmax can underflow a
+/// non-target class's probability to exactly `0.0f32` deep into training
+/// (unbounded steps, e.g. the scaling-ladder run past
+/// `tests/real_mnist_training.rs`'s own 4-epoch/8000-example config) —
+/// `1/0.0` is `+inf`, and `0.0 * inf` is `NaN` in IEEE754, permanently
+/// poisoning every downstream Adam moment. Flooring `probs` away from `0`
+/// keeps `1/x` finite so `0 * finite` stays exactly `0`, the same
+/// eps-clamped-log fix every incumbent softmax-cross-entropy implementation
+/// carries for the identical reason.
 #[must_use]
 pub fn cross_entropy(program: &mut Vec<Op>, dtype: DType, probs: NodeId, one_hot: NodeId, rank: u16) -> NodeId {
+    const PROBABILITY_FLOOR: f32 = 1e-7;
+
     let full = expr::identity(rank);
     let scalar = expr::broadcast(rank);
 
-    let log_probs = expr::unary(program, dtype, ScalarOp::Logarithm, (probs, full.clone()));
+    let floor = expr::constant(program, dtype, PROBABILITY_FLOOR);
+    let floored_probs = expr::binary(program, dtype, ScalarOp::Maximum, (probs, full.clone()), (floor, scalar.clone()));
+    let log_probs = expr::unary(program, dtype, ScalarOp::Logarithm, (floored_probs, full.clone()));
     let weighted = expr::binary(program, dtype, ScalarOp::Multiply, (one_hot, full.clone()), (log_probs, full));
     let sum = expr::reduce(program, dtype, ScalarOp::Add, ReduceInit::Zero, weighted, expr::identity(rank), scalar);
     expr::unary(program, dtype, ScalarOp::Negate, (sum, expr::identity(0)))
@@ -263,5 +283,45 @@ mod tests {
             let relative = (analytic[index] - numeric).abs() / (analytic[index].abs().max(numeric.abs()) + 1e-6);
             assert!(relative < 5e-3, "index {index}: analytic={} numeric={numeric}", analytic[index]);
         }
+    }
+
+    /// Reproduces the scaling-ladder failure: a softmax so confidently wrong
+    /// on one class that its probability underflows to exactly `0.0f32`
+    /// (the `-60.0` logit here does that -- `exp(-60)` underflows f32 well
+    /// before it reaches the softmax denominator). Before the
+    /// `max(probs, PROBABILITY_FLOOR)` floor in [`cross_entropy`], this
+    /// produced `0.0 * (1/0.0) = NaN` through [`crate::adjoint`]'s literal
+    /// `Logarithm` adjoint (`gradient * (1/x)`, `adjoint.rs:338-341`) for
+    /// every non-target class -- the mechanism the scaling ladder in
+    /// `tests/real_mnist_training.rs`'s own doc comment surfaced past its
+    /// shipped 4-epoch/8000-example config.
+    #[proxima::test]
+    async fn softmax_cross_entropy_gradient_stays_finite_when_a_class_probability_underflows_to_zero() {
+        let logits_values = [-60.0f32, 0.0, 1.0];
+        let one_hot_values = [0.0f32, 0.0, 1.0];
+
+        let mut program = Vec::new();
+        let logits = leaf(&mut program, "logits", 3);
+        let one_hot = leaf(&mut program, "one_hot", 3);
+        let loss = softmax_cross_entropy(&mut program, DType::Float32, logits, one_hot, 1, 0);
+
+        let differentiated = crate::adjoint::differentiate(&program, loss).expect("scalar loss differentiates");
+        let grad_logits = differentiated.gradient_of_named("logits").expect("logits feeds the loss");
+        let evaluated = proxima_tensor::cpu::evaluate_named(
+            &differentiated.program,
+            &[],
+            &[("logits", &logits_values), ("one_hot", &one_hot_values)],
+            &[loss, grad_logits],
+        )
+        .expect("adjoint program lowers and evaluates");
+
+        let loss_value = evaluated.get(loss).expect("loss requested").0[0];
+        assert!(loss_value.is_finite(), "loss went non-finite: {loss_value}");
+
+        let gradient = evaluated.get(grad_logits).expect("grad_logits requested").0;
+        assert!(
+            gradient.iter().all(|value| value.is_finite()),
+            "expected every logit gradient finite with an underflowed class probability, got {gradient:?}"
+        );
     }
 }
