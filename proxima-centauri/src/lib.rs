@@ -1,4 +1,4 @@
-//! Sans-IO, no-alloc cryptographic substrate — Centauri.
+//! Sans-IO, no-alloc cryptographic layer — Centauri.
 //!
 //! **One crate, not a family.** Each secure protocol lands here as a
 //! compile-time feature-gated module rather than a `proxima-centauri-*`

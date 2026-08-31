@@ -87,7 +87,7 @@ A backend is a feature flag, never a second API.
 | `prime` | the per-core runtime: one thread per core, no work-stealing, bounded SPSC inbox, reactor + executor + timer + background pool | clock, core, primitives, runtime |
 | `proxima-net` | UDP `PacketListener`, addressing, and the platform backends `prime` / `tokio` / `wasm` / `dpdk` / `xdp` as feature-gated modules | prime, core, primitives, protocols |
 
-## substrates
+## storage & process
 
 Where bytes land, where processes run.
 
