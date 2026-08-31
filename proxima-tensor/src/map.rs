@@ -107,9 +107,27 @@ pub struct IndexPattern {
 /// the ceiling means adding real integer buffers, not raising a constant.
 ///
 /// Scatter — a data-dependent *output* map on a [`crate::op::Reduce`] — is
-/// a different, still-unsupported feature: it needs atomics for colliding
-/// writes and stays out of scope here (see
-/// [`TensorError::NotLowerable`](crate::error::TensorError::NotLowerable)).
+/// the write-side twin of gather, using this exact same variant: `Reduce`'s
+/// own `body`/`init` are the fold a colliding write reduces with (this crate
+/// runs the CPU interpreter's reduce loop strictly sequentially, so a
+/// scatter never needs atomics — see `cpu.rs`'s `run_reduce_scatter`), and
+/// `indices`/`index_map` name where each iteration step's destination
+/// address comes from, exactly as they do for a read.
+///
+/// One convention is specific to the write direction: `base`'s entry at
+/// `gathered_dim` is unaddressable either way (its `terms` stay empty by
+/// construction, same as a gather), but a gather has nothing else to say
+/// about that axis while a scatter must state its output extent somewhere —
+/// the destination's *shape* is static even though its *addressing* is not,
+/// and nothing else in this program can supply that extent (it is not any
+/// existing node's shape; see `shape.rs`'s `infer_reduce` doc for why a
+/// `Reduce`-wide field was rejected on blast-radius grounds). So for a
+/// scatter specifically, that otherwise-always-`0` `offset` carries the
+/// destination axis's static extent instead — the one place in this type an
+/// unused field's bit pattern is deliberately repurposed by context. See
+/// [`IndexMap::scatter_extent`]/[`IndexMap::scatter`] for the one pair of
+/// accessors that own this convention, so nothing outside `map.rs` reads or
+/// writes `base`'s `gathered_dim` offset directly.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "config", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "config", serde(rename_all = "snake_case"))]
@@ -122,7 +140,11 @@ pub enum IndexMap {
         /// How the iteration space addresses the `indices` tensor.
         index_map: IndexPattern,
         /// How the iteration space addresses the operand's non-gathered
-        /// axes; the entry at `gathered_dim` is unused.
+        /// axes; the entry at `gathered_dim` is unused for a *read*
+        /// (`terms` empty, `offset` `0`). For a `Reduce`'s `out_map` (a
+        /// scatter), that same entry's `offset` instead carries the
+        /// destination axis's static extent — see
+        /// [`IndexMap::scatter_extent`].
         base: IndexPattern,
         /// Which operand axis the fetched index selects.
         gathered_dim: u16,
@@ -140,6 +162,99 @@ impl IndexMap {
     #[must_use]
     pub const fn is_data_dependent(&self) -> bool {
         matches!(self, Self::Computed { .. })
+    }
+
+    /// Builds a scatter `out_map`: a [`Self::Computed`] whose `base` carries
+    /// `destination_extent` at `gathered_dim` via the convention this type's
+    /// own doc names, and empty terms/offset `0` everywhere the caller's
+    /// `non_scattered` axes don't otherwise fill in. `non_scattered` is one
+    /// [`AxisIndex`] per output axis other than `gathered_dim`, in output
+    /// axis order with `gathered_dim`'s own slot omitted — mirroring how
+    /// [`crate::bind`]'s `pure_projection_axes` reads the result back out.
+    #[must_use]
+    pub fn scatter(
+        indices: NodeId,
+        index_map: IndexPattern,
+        iter_rank: u16,
+        non_scattered: &[(u16, AxisIndex)],
+        gathered_dim: u16,
+        destination_extent: u32,
+    ) -> Self {
+        let rank = non_scattered.len() + 1;
+        let mut axes = alloc::vec![AxisIndex::default(); rank];
+        for (axis_index, axis) in non_scattered {
+            axes[*axis_index as usize] = axis.clone();
+        }
+        axes[gathered_dim as usize] = AxisIndex {
+            terms: SmallVec::new(),
+            offset: destination_extent as i32,
+        };
+        Self::Computed {
+            indices,
+            index_map,
+            base: IndexPattern { iter_rank, axes },
+            gathered_dim,
+        }
+    }
+
+    /// The static destination extent a scatter `out_map` carries at
+    /// `gathered_dim` — `None` for an `Affine` map or a `Computed` map used
+    /// as a *read* (a gather), where that slot is always `0` and means
+    /// nothing. Negative is malformed (a caller error, not a runtime one);
+    /// callers needing a validated `u64` go through
+    /// [`crate::shape::ShapeTable`] instead, which is where that check
+    /// actually lives (see `infer_reduce`'s own doc for why: the ceiling is
+    /// the same `2^24` exact-float bound a gather's extent already needs).
+    #[must_use]
+    pub fn scatter_extent(&self) -> Option<i32> {
+        match self {
+            Self::Affine(_) => None,
+            Self::Computed { base, gathered_dim, .. } => {
+                if (*gathered_dim as usize) < base.axes.len() {
+                    Some(base.axes[*gathered_dim as usize].offset)
+                } else {
+                    None
+                }
+            }
+        }
+    }
+
+    /// The read-side counterpart of a scatter `out_map`: same `indices`,
+    /// `index_map`, `gathered_dim`, and every non-scattered `base` axis, but
+    /// `gathered_dim`'s own entry reset to the ordinary gather convention
+    /// (`terms` empty, `offset` `0`) instead of carrying the destination
+    /// extent — a scatter's `base` cannot be read with directly, since
+    /// `layout_of` would fold that extent in as a real address contribution
+    /// (`bind::build_scatter_out_layout`'s own doc has the full reasoning).
+    ///
+    /// This is exactly what a scatter's adjoint needs: `grad_out` gathered
+    /// at the same destination each forward source position wrote to (a
+    /// `Reduce(Add)` scatter's own gradient rule — see
+    /// `proxima_autograd::adjoint`'s `differentiate_reduce`). `None` for an
+    /// `Affine` map, where there is no `base`/`gathered_dim` to reuse.
+    #[must_use]
+    pub fn as_gather_from_output(&self) -> Option<Self> {
+        match self {
+            Self::Affine(_) => None,
+            Self::Computed {
+                indices,
+                index_map,
+                base,
+                gathered_dim,
+            } => {
+                if *gathered_dim as usize >= base.axes.len() {
+                    return None;
+                }
+                let mut base = base.clone();
+                base.axes[*gathered_dim as usize] = AxisIndex::default();
+                Some(Self::Computed {
+                    indices: *indices,
+                    index_map: index_map.clone(),
+                    base,
+                    gathered_dim: *gathered_dim,
+                })
+            }
+        }
     }
 }
 

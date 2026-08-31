@@ -2464,7 +2464,18 @@ fn run_node_into<B: Deref<Target = [f32]> + Sync>(
             run_elementwise_dispatch(resolved, buffers, session, output)
         }
         BoundOpKind::Reduce {
-            keep: Keep::Reduce, ..
+            keep: Keep::Reduce,
+            out_scatter: Some(_),
+            ..
+        } => {
+            #[cfg(feature = "instrument")]
+            instrument::record_op_kind(instrument::OpKind::Reduce);
+            run_reduce_scatter(resolved, buffers, output)
+        }
+        BoundOpKind::Reduce {
+            keep: Keep::Reduce,
+            out_scatter: None,
+            ..
         } => {
             #[cfg(feature = "instrument")]
             instrument::record_op_kind(instrument::OpKind::Reduce);
@@ -2512,9 +2523,28 @@ fn run_iota(output: &mut [f32]) -> Result<(), TensorError> {
 /// `Keep::Reduce` fold.
 fn node_output_len(resolved: &BoundOp) -> usize {
     match &resolved.kind {
+        // `output_axes` excludes the scattered axis entirely (its position
+        // is data-dependent, never a pure projection — see
+        // `bind::pure_projection_axes`), so the ordinary leading/width
+        // product below would silently drop that axis from the length.
+        // `out_scatter.extent` is the one place that axis's static width
+        // survives past shape inference (`bind::build_reduce_op`'s doc).
         BoundOpKind::Reduce {
             keep: Keep::Reduce,
             output_axes,
+            out_scatter: Some(target),
+            ..
+        } => {
+            let non_scattered_product: u64 = output_axes
+                .iter()
+                .map(|dim| resolved.extents[*dim as usize])
+                .product();
+            non_scattered_product as usize * target.extent as usize
+        }
+        BoundOpKind::Reduce {
+            keep: Keep::Reduce,
+            output_axes,
+            out_scatter: None,
             ..
         } => {
             let (leading_output_axes, last_output_dim) = output_axes_split(output_axes.as_slice());
@@ -4075,6 +4105,89 @@ fn run_staged_batch(
                 *live_now -= 1;
             }
         }
+    }
+    Ok(())
+}
+
+/// [`Op::Reduce`] with a data-dependent (scatter) `out_map`, `f32` only —
+/// the dedicated sequential path every fast path in [`run_reduce`] stays
+/// ineligible for (`bind::BoundOp::split`'s own doc has the reason: no chunk
+/// rebase story for `out_scatter`, so a scatter never reaches the NEON/dot/
+/// width tiles above, which all assume a `Keep::Reduce` fold owns its own
+/// disjoint output range).
+///
+/// No atomics: the CPU interpreter already walks its reduce loop strictly
+/// in iteration order, one coordinate at a time, so a colliding write is
+/// just another `reduce_op` fold applied to `output[dest]` in place —
+/// nothing else can observe or mutate `output` mid-walk. This is the
+/// forward half of the worked example `map.rs`'s `IndexMap::Computed` doc
+/// and this function's own tests name: `src=[10,20,30,40]`,
+/// `idx=[2,0,2,1]`, destination extent 3, body `Add`, `init` `Zero` ->
+/// `out=[20,40,40]` (`out[2]` folds `10` then `30`, in iteration order).
+///
+/// `output` is filled with `init`'s identity *before* the walk (`init ==
+/// ReduceInit::FirstElement` is rejected at shape-inference time — see
+/// `shape.rs`'s `infer_reduce` — because which source element is "first" at
+/// a colliding destination is not well-defined), since which cells a
+/// data-dependent write ever touches is unknown until the fetched indices
+/// are read.
+fn run_reduce_scatter<B: Deref<Target = [f32]>>(
+    resolved: &BoundOp,
+    buffers: &[Option<B>],
+    output: &mut [f32],
+) -> Result<(), TensorError> {
+    let BoundOpKind::Reduce {
+        reduce_op,
+        init,
+        out_layout,
+        out_scatter,
+        ..
+    } = &resolved.kind
+    else {
+        unreachable!("run_reduce_scatter is only called for a Keep::Reduce fold")
+    };
+    let Some(target) = out_scatter else {
+        unreachable!("run_reduce_scatter is only dispatched when out_scatter is Some")
+    };
+
+    output.fill(initial_value(*init).unwrap_or(0.0));
+
+    let raw = operand_buffers(resolved, buffers)?;
+    let body = resolved.element_body();
+    let shape = body_shape(body);
+    let mut operand_values = vec![0.0f32; raw.len()];
+    let mut step_values = vec![0.0f32; body.steps.len()];
+
+    let index_buffer = buffer_of(buffers, target.indices)?;
+    let mut running: Vec<i64> = vec![0; raw.len()];
+    let mut gather_cursors: Vec<Option<GatherCursor>> = (0..raw.len()).map(|_| None).collect();
+    let mut coordinate = vec![0u64; resolved.extents.len()];
+    let iteration_total = odometer_len(&resolved.extents);
+
+    for flat in 0..iteration_total {
+        unflatten_into(flat, &resolved.extents, &mut coordinate);
+        fill_running_offsets(resolved, &coordinate, &mut running);
+        fill_gather_cursors(resolved, buffers, &coordinate, None, &mut gather_cursors)?;
+
+        for (index, data) in raw.iter().enumerate() {
+            let mut offset = running[index];
+            if let Some(cursor) = gather_cursors[index].as_mut() {
+                offset += cursor.fetch_and_advance(resolved.node)?;
+            }
+            operand_values[index] = data[offset as usize];
+        }
+        let value = eval_body_shape(&shape, &operand_values, &mut step_values);
+
+        let mut destination = GatherCursor {
+            buffer: index_buffer,
+            offset: target.index_layout.offset_of(&coordinate),
+            stride: 0,
+            element_stride: target.element_stride,
+            extent: target.extent,
+        };
+        let dest_offset = out_layout.offset_of(&coordinate) + destination.fetch_and_advance(resolved.node)?;
+        let slot = &mut output[dest_offset as usize];
+        *slot = apply_scalar_op(*reduce_op, &[*slot, value]);
     }
     Ok(())
 }
@@ -12598,6 +12711,21 @@ fn run_reduce_typed<T: Element>(
     index_buffers: &[Option<Vec<i64>>],
     output: &mut [T],
 ) -> Result<(), TensorError> {
+    // Scatter is `f32`-only for now: `run_reduce_scatter` (the only
+    // execution path this crate ships for a data-dependent `out_map`) reads
+    // straight out of the `evaluate`/`evaluate_parallel` `&[f32]` buffer
+    // table, not `evaluate_typed`'s per-width `Cow<'_, [T]>` one. Named,
+    // never a silent fallback to a wrong (non-scatter) reduction.
+    if let BoundOpKind::Reduce {
+        out_scatter: Some(_),
+        ..
+    } = &resolved.kind
+    {
+        return Err(TensorError::NotLowerable {
+            node: resolved.node,
+            reason: "scatter is not yet supported by the typed (non-f32) evaluator",
+        });
+    }
     let has_gather = resolved.operands().iter().any(|(_, _, lookup)| lookup.is_some());
     if !has_gather && TypeId::of::<T>() == TypeId::of::<f32>() {
         let buffers_f32: Vec<Option<&[f32]>> = buffers
@@ -13269,6 +13397,7 @@ mod tests {
                     base: 0,
                     strides: smallvec::smallvec![1],
                 },
+                out_scatter: None,
             },
         };
 
@@ -15430,21 +15559,18 @@ mod tests {
         assert!(matches!(error, TensorError::NotLowerable { .. }), "{error}");
     }
 
-    #[test]
-    fn a_scatter_data_dependent_fold_output_is_still_rejected_by_evaluate() {
+    /// Builds `s in 0..idx.len() -> out[idx[s]] += src[s]` (`body: Add`,
+    /// `init: Zero`), `src`/`idx` bound at evaluation time, destination
+    /// extent `dest_extent`. `idx`'s values ride in the same `f32` buffer
+    /// convention every other gather/scatter test in this file uses
+    /// (`map.rs`'s own `IndexMap::Computed` doc: an index value is an exact
+    /// integer carried as `f32`).
+    fn scatter_add_program(dest_extent: u32) -> (Vec<Op>, NodeId, NodeId, NodeId) {
         let mut program = Vec::new();
         let source = f32_block(&mut program, &[Extent::Static(4)]);
         let ids = block(&mut program, DType::Int32, &[Extent::Static(4)]);
-        let out_map = IndexMap::Computed {
-            indices: ids,
-            index_map: map::projection(1, &[0]),
-            base: map::IndexPattern {
-                iter_rank: 1,
-                axes: alloc::vec![map::AxisIndex::default()],
-            },
-            gathered_dim: 0,
-        };
-        append(
+        let out_map = IndexMap::scatter(ids, map::projection(1, &[0]), 1, &[], 0, dest_extent);
+        let scattered = append(
             &mut program,
             Op::Reduce(Reduce {
                 dtype: DType::Float32,
@@ -15454,12 +15580,106 @@ mod tests {
                 in_map: IndexMap::Affine(map::projection(1, &[0])),
                 out_map,
                 keep: Keep::Reduce,
-                name: None,
+                name: Some("scatter_add".into()),
             }),
         );
+        (program, source, ids, scattered)
+    }
 
-        let error = evaluate(&program, &[], &[], &[]).expect_err("scatter is not lowerable in v1");
-        assert!(matches!(error, TensorError::NotLowerable { .. }), "{error}");
+    /// The hand-worked example this task's algorithm-development discipline
+    /// requires, walked exactly: `src=[10,20,30,40]`, `idx=[2,0,2,1]`,
+    /// destination extent 3, `body: Add`, `init: Zero`.
+    ///
+    /// Step by step, in iteration order (the order `run_reduce_scatter`
+    /// actually walks, and the order that makes the collision below
+    /// deterministic rather than merely "some fold"):
+    /// - `s=0`: `src[0]=10` -> `idx[0]=2` -> `out[2] = 0 (init) + 10 = 10`
+    /// - `s=1`: `src[1]=20` -> `idx[1]=0` -> `out[0] = 0 (init) + 20 = 20`
+    /// - `s=2`: `src[2]=30` -> `idx[2]=2` -> `out[2] = 10 + 30 = 40` (collision)
+    /// - `s=3`: `src[3]=40` -> `idx[3]=1` -> `out[1] = 0 (init) + 40 = 40`
+    ///
+    /// Final: `out = [20, 40, 40]`.
+    #[test]
+    fn scatter_add_matches_the_hand_worked_example() {
+        let (program, _source, _ids, scattered) = scatter_add_program(3);
+        let index_values = [2.0f32, 0.0, 2.0, 1.0];
+        let source_values = [10.0f32, 20.0, 30.0, 40.0];
+        let evaluated = evaluate(&program, &[], &[&source_values, &index_values], &[scattered])
+            .expect("the hand-worked scatter example evaluates");
+
+        assert_eq!(
+            evaluated.root(),
+            &[20.0, 40.0, 40.0],
+            "out[2] folds src[0] then src[2]; out[0] and out[1] each see one source element"
+        );
+    }
+
+    /// A destination wider than the source with no two source elements ever
+    /// sharing a destination: every cell is either `init`'s identity (`0`,
+    /// untouched) or exactly one source value, no fold ever runs twice.
+    #[test]
+    fn scatter_add_with_no_collisions_places_each_source_element_once() {
+        let (program, _source, _ids, scattered) = scatter_add_program(5);
+        let index_values = [4.0f32, 1.0, 3.0, 0.0];
+        let source_values = [10.0f32, 20.0, 30.0, 40.0];
+        let evaluated = evaluate(&program, &[], &[&source_values, &index_values], &[scattered])
+            .expect("a collision-free scatter evaluates");
+
+        assert_eq!(
+            evaluated.root(),
+            &[40.0, 20.0, 0.0, 30.0, 10.0],
+            "cell 2 is untouched (init's identity, Zero); every other cell sees exactly one source value"
+        );
+    }
+
+    /// A fetched destination index outside `[0, dest_extent)` is a real,
+    /// named error at evaluation time -- the same
+    /// [`TensorError::GatherIndexOutOfRange`] class an out-of-range *read*
+    /// (gather) index already raises, reused rather than a second variant
+    /// for the write side (`map.rs`'s own doc: scatter is the write-side
+    /// twin of gather via the same [`IndexMap::Computed`] machinery).
+    #[test]
+    fn scatter_add_with_an_out_of_range_destination_index_is_rejected() {
+        let (program, _source, _ids, scattered) = scatter_add_program(3);
+        let index_values = [0.0f32, 1.0, 3.0, 2.0]; // 3 is out of range for extent 3
+        let source_values = [10.0f32, 20.0, 30.0, 40.0];
+        let error = evaluate(&program, &[], &[&source_values, &index_values], &[scattered])
+            .expect_err("index 3 is out of range for destination extent 3");
+        assert!(
+            matches!(
+                error,
+                TensorError::GatherIndexOutOfRange { index: 3, extent: 3, .. }
+            ),
+            "{error}"
+        );
+    }
+
+    /// The composition oracle: [`scatter_add_into_a_known_destination_via_mask_composition`]
+    /// builds the identical `src`/`idx`/destination-extent-3 scatter-add out
+    /// of `Iota`+`Equal`+`Multiply`+`Reduce`, with no `IndexMap::Computed`
+    /// anywhere. Running the SAME fixture through this crate's native
+    /// forward-scatter (`IndexMap::Computed` as a `Reduce`'s `out_map`) must
+    /// land on the exact same numbers -- the composition, not a hand
+    /// computation, is what proves the native path correct.
+    #[test]
+    fn native_scatter_matches_the_mask_composition_oracle_on_the_same_fixture() {
+        let (native_program, _source, _ids, native_scattered) = scatter_add_program(3);
+        let index_values = [0.0f32, 2.0, 0.0, 1.0];
+        let source_values = [10.0f32, 20.0, 30.0, 40.0];
+        let native = evaluate(
+            &native_program,
+            &[],
+            &[&source_values, &index_values],
+            &[native_scattered],
+        )
+        .expect("the native scatter evaluates");
+
+        let oracle = [40.0f32, 40.0, 20.0];
+        assert_eq!(
+            native.root(),
+            &oracle,
+            "native IndexMap::Computed scatter must match the Iota+Equal+Multiply+Reduce oracle"
+        );
     }
 
     // -- BoundOp::split proof: chunks executed by hand, one buffer, equal
@@ -15847,20 +16067,17 @@ mod tests {
             .expect_err("int32 is not f32");
         assert_eq!(sequential_error, parallel_error);
 
-        let mut scatter_program = Vec::new();
-        let source = f32_block(&mut scatter_program, &[Extent::Static(4)]);
-        let ids = block(&mut scatter_program, DType::Int32, &[Extent::Static(4)]);
-        let out_map = IndexMap::Computed {
-            indices: ids,
-            index_map: map::projection(1, &[0]),
-            base: map::IndexPattern {
-                iter_rank: 1,
-                axes: alloc::vec![map::AxisIndex::default()],
-            },
-            gathered_dim: 0,
-        };
+        // A `Keep::Scan` scatter stays rejected (shape.rs's own doc: a scan
+        // step would need to read the destination its own write just
+        // touched, which the sequential interpreter does not order that
+        // way) -- unlike a `Keep::Reduce` scatter, which this row's own
+        // `scatter_add_matches_the_hand_worked_example` etc. now accept.
+        let mut scatter_scan_program = Vec::new();
+        let source = f32_block(&mut scatter_scan_program, &[Extent::Static(4)]);
+        let ids = block(&mut scatter_scan_program, DType::Int32, &[Extent::Static(4)]);
+        let out_map = IndexMap::scatter(ids, map::projection(1, &[0]), 1, &[], 0, 3);
         append(
-            &mut scatter_program,
+            &mut scatter_scan_program,
             Op::Reduce(Reduce {
                 dtype: DType::Float32,
                 body: ScalarOp::Add,
@@ -15868,15 +16085,41 @@ mod tests {
                 operand: source,
                 in_map: IndexMap::Affine(map::projection(1, &[0])),
                 out_map,
-                keep: Keep::Reduce,
+                keep: Keep::Scan,
                 name: None,
             }),
         );
-        let sequential_error =
-            evaluate(&scatter_program, &[], &[], &[]).expect_err("scatter is not lowerable in v1");
-        let parallel_error = evaluate_parallel(&scatter_program, &[], &[], &[], workers)
-            .expect_err("scatter is not lowerable in v1");
+        let sequential_error = evaluate(&scatter_scan_program, &[], &[], &[])
+            .expect_err("a scatter scan has no defined step order");
+        let parallel_error = evaluate_parallel(&scatter_scan_program, &[], &[], &[], workers)
+            .expect_err("a scatter scan has no defined step order");
         assert_eq!(sequential_error, parallel_error);
+    }
+
+    /// `evaluate_parallel`'s own chunking never touches a scatter node
+    /// (`bind::BoundOp::split` refuses to split one -- see its own doc), so
+    /// running the hand-worked scatter example through the parallel driver
+    /// must land on the exact same numbers `evaluate` does.
+    #[test]
+    fn evaluate_parallel_matches_evaluate_on_the_hand_worked_scatter_example() {
+        let workers = NonZeroUsize::new(4).expect("4 is nonzero");
+        let (program, _source, _ids, scattered) = scatter_add_program(3);
+        let index_values = [2.0f32, 0.0, 2.0, 1.0];
+        let source_values = [10.0f32, 20.0, 30.0, 40.0];
+
+        let sequential = evaluate(&program, &[], &[&source_values, &index_values], &[scattered])
+            .expect("sequential scatter evaluates");
+        let parallel = evaluate_parallel(
+            &program,
+            &[],
+            &[&source_values, &index_values],
+            &[scattered],
+            workers,
+        )
+        .expect("parallel scatter evaluates");
+
+        assert_eq!(sequential.root(), &[20.0, 40.0, 40.0]);
+        assert_eq!(sequential.root(), parallel.root());
     }
 
     #[test]

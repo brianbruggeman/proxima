@@ -32,7 +32,7 @@ use proxima_primitives::pipe::Pipe;
 use crate::dtype::DType;
 use crate::error::TensorError;
 use crate::map::{AxisIndex, IndexMap, IndexPattern};
-use crate::op::{Keep, NodeId, Op, Reduce, ScalarOp};
+use crate::op::{Keep, NodeId, Op, Reduce, ReduceInit, ScalarOp};
 
 /// The largest integer an f32 can represent exactly — its 24-bit mantissa's
 /// width. Gather indices ride in f32 buffers (see
@@ -149,6 +149,7 @@ impl ShapeTable {
         check_map(here, &reduce.in_map)?;
         check_map(here, &reduce.out_map)?;
         self.check_indices_dtype(here, &reduce.in_map)?;
+        self.check_indices_dtype(here, &reduce.out_map)?;
         self.check_gather_extent(here, reduce.operand, &reduce.in_map)?;
 
         if reduce.body.is_associative() && !reduce.dtype.accumulates_in_place() {
@@ -163,11 +164,40 @@ impl ShapeTable {
         let iter_extents =
             self.unify_iteration_space(here, iter_rank, &[(reduce.operand, &reduce.in_map)])?;
 
+        // A scatter's output *shape* is static even though its *addressing*
+        // is not: `scatter_output_shape` reads the destination extent
+        // [`IndexMap::scatter_extent`] carries, never anything from `here`'s
+        // own (not-yet-resolved) shape. Everything below this is the reason
+        // a `Reduce`-wide field for that extent was rejected in favor of
+        // reusing `IndexMap::Computed`'s existing (otherwise dead, for a
+        // write) `base`-at-`gathered_dim` slot: a `Reduce { .. }` struct
+        // literal is built at ~150 call sites across this workspace (`grep
+        // -rn 'Reduce {'`, checked against this row's own worktree), every
+        // one of which a new required field breaks; `IndexMap::Computed`'s
+        // own construction sites number ~56, still real but a third the
+        // size, and every one of *those* is already about gather/scatter
+        // addressing rather than an unrelated majority paying for a feature
+        // they never use — the same blast-radius judgment this file's
+        // fused-QKV row (below) already applied to `AxisIndex::len`.
         if reduce.out_map.is_data_dependent() {
-            return Err(TensorError::NotLowerable {
-                node: here,
-                reason: "scatter (a data-dependent reduce output) is not shape-inferable in v1",
-            });
+            if reduce.keep == Keep::Scan {
+                return Err(TensorError::NotLowerable {
+                    node: here,
+                    reason: "a scatter (data-dependent reduce output) cannot be a Keep::Scan: \
+                             each scan step would need the destination it just wrote to read \
+                             its own predecessor, which the sequential CPU interpreter does not \
+                             order that way",
+                });
+            }
+            if reduce.init == ReduceInit::FirstElement {
+                return Err(TensorError::NotLowerable {
+                    node: here,
+                    reason: "a scatter cannot use ReduceInit::FirstElement: which source element \
+                             is \"first\" at a colliding destination depends on iteration order, \
+                             not a well-defined identity",
+                });
+            }
+            return scatter_output_shape(here, &reduce.out_map, &iter_extents);
         }
 
         match reduce.keep {
@@ -451,6 +481,60 @@ fn project_output_shape(
                 node: here,
                 reason: "reduce output maps must be pure projections in v1",
             }),
+        })
+        .collect()
+}
+
+/// A scatter's output shape: every axis but `gathered_dim` is a pure
+/// projection onto an already-resolved iteration axis, exactly like
+/// [`project_output_shape`]'s ordinary (affine) case; `gathered_dim` itself
+/// reads [`IndexMap::scatter_extent`] instead of `iter_extents`, since that
+/// axis's *position* is data-dependent while its *width* is a static number
+/// the caller supplied — the whole reason this is shape-inferable at all
+/// (`map.rs`'s `IndexMap::Computed` doc has the full convention).
+fn scatter_output_shape(
+    here: NodeId,
+    out_map: &IndexMap,
+    iter_extents: &[u64],
+) -> Result<Vec<u64>, TensorError> {
+    let IndexMap::Computed {
+        base, gathered_dim, ..
+    } = out_map
+    else {
+        return Err(TensorError::NotLowerable {
+            node: here,
+            reason: "scatter_output_shape called on a non-data-dependent out_map",
+        });
+    };
+    let extent = out_map.scatter_extent().ok_or(TensorError::NotLowerable {
+        node: here,
+        reason: "a scatter out_map's gathered_dim is out of range for its own base pattern",
+    })?;
+    if extent < 0 {
+        return Err(TensorError::NotLowerable {
+            node: here,
+            reason: "a scatter's destination extent must be non-negative",
+        });
+    }
+    let extent = extent as u64;
+    if extent > GATHER_EXTENT_EXACT_FLOAT_LIMIT {
+        return Err(TensorError::GatherExtentExceedsExactFloat { node: here, extent });
+    }
+
+    base.axes
+        .iter()
+        .enumerate()
+        .map(|(axis_index, axis)| {
+            if axis_index as u16 == *gathered_dim {
+                return Ok(extent);
+            }
+            match axis.terms.as_slice() {
+                [term] if term.coeff == 1 && axis.offset == 0 => Ok(iter_extents[term.axis as usize]),
+                _ => Err(TensorError::NotLowerable {
+                    node: here,
+                    reason: "a scatter output map's non-scattered axes must be pure projections",
+                }),
+            }
         })
         .collect()
 }
@@ -1076,8 +1160,12 @@ mod tests {
         );
     }
 
-    #[test]
-    fn a_scatter_data_dependent_fold_output_is_still_rejected_in_v1() {
+    /// Builds a rank-1 `s in 0..4 -> out[ids[s]]` scatter program: `source`
+    /// and `ids` both extent 4, `ids` dtype `Int32`, destination extent
+    /// `dest_extent`. The shared fixture behind the worked example in
+    /// [`a_scatter_out_map_infers_the_hand_worked_destination_shape`] and
+    /// every other scatter shape test below.
+    fn scatter_program(dest_extent: u32) -> (Vec<Op>, NodeId) {
         let mut program = Vec::new();
         let source = leaf(&mut program, &[Extent::Static(4)]);
         let ids = append(
@@ -1088,7 +1176,8 @@ mod tests {
                 name: None,
             },
         );
-        append(
+        let out_map = IndexMap::scatter(ids, map::projection(1, &[0]), 1, &[], 0, dest_extent);
+        let scattered = append(
             &mut program,
             Op::Reduce(Reduce {
                 dtype: DType::Float32,
@@ -1096,14 +1185,68 @@ mod tests {
                 init: ReduceInit::Zero,
                 operand: source,
                 in_map: IndexMap::Affine(map::projection(1, &[0])),
-                out_map: fully_gathered_map(ids),
+                out_map,
                 keep: Keep::Reduce,
-                name: None,
+                name: Some("scatter_add".into()),
             }),
         );
+        (program, scattered)
+    }
 
-        let error = infer(&program, &[]).expect_err("scatter is not shape-inferable in v1");
+    /// The hand-worked example this task's own algorithm-development
+    /// discipline requires: `src=[10,20,30,40]`, `idx=[2,0,2,1]`, a
+    /// destination narrower than the source (extent 3, not 4) -- proof the
+    /// destination shape is genuinely independent of the source's, not
+    /// silently reusing it. Values are checked in `cpu.rs`'s own worked-
+    /// example test; this one is shape alone.
+    #[test]
+    fn a_scatter_out_map_infers_the_hand_worked_destination_shape() {
+        let (program, scattered) = scatter_program(3);
+        let shapes = infer(&program, &[]).expect("a well-formed scatter infers");
+        assert_eq!(shapes.of(scattered), &[3]);
+    }
+
+    #[test]
+    fn a_scatter_as_a_keep_scan_is_rejected() {
+        let (mut program, _) = scatter_program(3);
+        let last = program.pop().expect("scatter_program pushes at least one reduce");
+        let Op::Reduce(mut reduce) = last else {
+            panic!("scatter_program's last op is a Reduce");
+        };
+        reduce.keep = Keep::Scan;
+        append(&mut program, Op::Reduce(reduce));
+
+        let error = infer(&program, &[]).expect_err("a scatter scan has no defined step order");
         assert!(matches!(error, TensorError::NotLowerable { .. }), "{error}");
+    }
+
+    #[test]
+    fn a_scatter_with_first_element_init_is_rejected() {
+        let (mut program, _) = scatter_program(3);
+        let last = program.pop().expect("scatter_program pushes at least one reduce");
+        let Op::Reduce(mut reduce) = last else {
+            panic!("scatter_program's last op is a Reduce");
+        };
+        reduce.init = ReduceInit::FirstElement;
+        append(&mut program, Op::Reduce(reduce));
+
+        let error =
+            infer(&program, &[]).expect_err("which source is \"first\" at a collision is undefined");
+        assert!(matches!(error, TensorError::NotLowerable { .. }), "{error}");
+    }
+
+    #[test]
+    fn a_scatter_destination_extent_past_two_to_the_24_is_rejected() {
+        let (program, _) = scatter_program((1 << 24) + 1);
+        let error = infer(&program, &[]).expect_err("extent past 2^24 is rejected");
+        assert!(
+            matches!(
+                error,
+                TensorError::GatherExtentExceedsExactFloat { extent, .. }
+                    if extent == (1 << 24) + 1
+            ),
+            "{error}"
+        );
     }
 
     #[test]
