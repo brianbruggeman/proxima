@@ -10,12 +10,21 @@
 //! [`proxima_tensor::cpu::evaluate_named`] call (the sole existing
 //! primitive this whole module composes) plus the zip between `rebind`'s
 //! `NodeId`s and their bound-buffer names that the hand-written loop
-//! otherwise repeats once per parameter; [`fit`] is two nested loops
-//! calling [`train_step`]. Neither answer changed the shape of anything
-//! `proxima-tensor`/`proxima-autograd` already export — see this crate's
-//! own report for the "what can a caller do that they could not before"
-//! check this module was held to, with both the free-function and a
-//! hypothetical `Pipe`-form call site written out.
+//! otherwise repeats once per parameter. Neither answer changed the shape
+//! of anything `proxima-tensor`/`proxima-autograd` already export — see
+//! this crate's own report for the "what can a caller do that they could
+//! not before" check this module was held to, with both the free-function
+//! and a hypothetical `Pipe`-form call site written out.
+//!
+//! [`fit`] (`docs/discipline.md` ROW 165) builds ONE
+//! [`proxima_tensor::cpu::StaticArena`] up front instead of two nested
+//! loops calling [`train_step`], and drives every step through
+//! [`proxima_tensor::cpu::evaluate_named_with_arena_in_place`] -- the same
+//! primitive composition, still no new type, just the arena-shaped
+//! entry points ROW 164 landed in place of `evaluate_named`'s own
+//! per-step `shape::infer` + `bind::bind` + fresh allocation.
+//! [`train_step_with_arena`] is the one-step-at-a-time twin for a caller
+//! that owns its own arena outside a [`fit`]-shaped loop.
 //!
 //! A "batch" is `Vec<(&str, &[f32])>` — named host buffers, exactly what
 //! [`proxima_tensor::cpu::evaluate_named`] already takes as its own `named`
@@ -27,7 +36,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use proxima_tensor::TensorError;
-use proxima_tensor::cpu::evaluate_named;
+use proxima_tensor::cpu::{StaticArena, arena_named_input, build_static_arena, evaluate_named, evaluate_named_with_arena_in_place};
 use proxima_tensor::op::{NodeId, Op};
 
 /// Every `rebind` name's freshly evaluated buffer -- a type alias, not a
@@ -77,6 +86,49 @@ pub fn train_step(
     Ok((loss_value, next_state))
 }
 
+/// [`train_step`]'s arena-taking twin (`docs/discipline.md` ROW 165): the
+/// same contract, evaluated against an ALREADY-[`build_static_arena`]-built
+/// `arena` instead of paying `evaluate_named`'s own `shape::infer` +
+/// `bind::bind` + fresh per-node allocation on this call. A caller running
+/// one step at a time against a `StaticArena` it owns reaches this instead
+/// of [`train_step`]; [`fit`] below builds its own arena once and drives
+/// steps through it directly rather than through this function, so its own
+/// `rebind` buffers never leave the arena between steps (see [`fit`]'s own
+/// doc for why that is a further step, not this function's job).
+///
+/// # Errors
+/// Propagates [`TensorError`] from
+/// [`proxima_tensor::cpu::evaluate_named_with_arena`] unchanged.
+pub fn train_step_with_arena(
+    arena: &mut StaticArena,
+    loss: NodeId,
+    rebind: &[(NodeId, &str)],
+    named: &[(&str, &[f32])],
+) -> Result<(f32, State), TensorError> {
+    let evaluated = proxima_tensor::cpu::evaluate_named_with_arena(arena, named)?;
+    let loss_value = evaluated.get(loss).and_then(|(data, _)| data.first().copied()).unwrap_or(0.0);
+    let next_state = rebind
+        .iter()
+        .map(|(node, name)| {
+            let values = evaluated.get(*node).map_or_else(Vec::new, |(data, _)| data.to_vec());
+            (String::from(*name), values)
+        })
+        .collect();
+
+    Ok((loss_value, next_state))
+}
+
+/// `rebind` plus `loss`, in the order [`build_static_arena`]'s own
+/// `outputs` argument expects it -- shared by [`fit`] and any other
+/// caller building a [`StaticArena`] over a `rebind`-shaped training
+/// program, so the ordering lives in exactly one place.
+fn arena_outputs(loss: NodeId, rebind: &[(NodeId, &str)]) -> Vec<NodeId> {
+    let mut outputs = Vec::with_capacity(rebind.len() + 1);
+    outputs.push(loss);
+    outputs.extend(rebind.iter().map(|(node, _)| *node));
+    outputs
+}
+
 /// `epochs` repetitions of one pass over `batches`, threading `state` (the
 /// `rebind` names' bound buffers -- parameters and optimizer state) forward
 /// through [`train_step`] one batch at a time, across every epoch boundary.
@@ -85,33 +137,55 @@ pub fn train_step(
 /// shape `training_loop.rs`'s own `adam_training_decreases_the_loss_over_the_dataset`
 /// prints and asserts against.
 ///
+/// Builds ONE [`StaticArena`] up front (`docs/discipline.md` ROW 165: `fit`
+/// calls the arena path directly, per ROW 164's own "train_step gets an
+/// arena-taking variant OR fit calls the arena path directly" framing) and
+/// drives every step through [`evaluate_named_with_arena_in_place`] rather
+/// than [`train_step`]: `state`'s initial values seed the arena once, on
+/// the very first step's own `named`; every step after that hands the
+/// in-place path ONLY this batch's own new bindings, because every
+/// `rebind` buffer already lives in the arena from the PRIOR step's own
+/// aliasing swap (`evaluate_named_with_arena_in_place`'s own doc) --
+/// `state` itself is read back out of the arena exactly ONCE, after the
+/// whole run, via [`arena_named_input`], instead of a clone-out/copy-in
+/// pair on every step [`train_step`]'s own `evaluate_named` path pays.
+///
 /// # Errors
 ///
-/// Propagates the first [`TensorError`] any [`train_step`] call raises;
-/// stops immediately rather than continuing to train on a program that has
-/// already failed to evaluate once.
+/// Propagates the first [`TensorError`] [`build_static_arena`] or any step
+/// raises; stops immediately rather than continuing to train on a program
+/// that has already failed to evaluate once.
 pub fn fit<'a>(
     program: &[Op],
     loss: NodeId,
     rebind: &[(NodeId, &str)],
-    mut state: State,
+    state: State,
     epochs: u32,
     batches: &[Vec<(&'a str, &'a [f32])>],
 ) -> Result<(State, Vec<f32>), TensorError> {
+    let outputs = arena_outputs(loss, rebind);
+    let mut arena = build_static_arena(program, &[], &outputs)?;
+
     let mut loss_curve = Vec::with_capacity(epochs as usize * batches.len());
+    let mut is_first_step = true;
     for _epoch in 0..epochs {
         for batch in batches {
-            let named: Vec<(&str, &[f32])> = batch
-                .iter()
-                .copied()
-                .chain(state.iter().map(|(name, values)| (name.as_str(), values.as_slice())))
-                .collect();
-            let (loss_value, next_state) = train_step(program, loss, rebind, &named)?;
+            let named: Vec<(&str, &[f32])> = if is_first_step {
+                batch.iter().copied().chain(state.iter().map(|(name, values)| (name.as_str(), values.as_slice()))).collect()
+            } else {
+                batch.clone()
+            };
+            let loss_value = evaluate_named_with_arena_in_place(&mut arena, &named, loss, rebind)?;
             loss_curve.push(loss_value);
-            state = next_state;
+            is_first_step = false;
         }
     }
-    Ok((state, loss_curve))
+
+    let final_state: State = rebind
+        .iter()
+        .map(|(_, name)| (String::from(*name), arena_named_input(&arena, name).map(<[f32]>::to_vec).unwrap_or_default()))
+        .collect();
+    Ok((final_state, loss_curve))
 }
 
 #[cfg(test)]
