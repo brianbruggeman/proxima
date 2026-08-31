@@ -3,16 +3,20 @@
 //! is a sans-IO FSM implementing `proxima_primitives::pipe::Pipe`
 //! (`In`/`Out` = one row-band), composed with the crate's own `AndThen`
 //! combinator, streaming row-bands between layers instead of materializing
-//! a whole-layer activation buffer. Conv arithmetic reuses the SAME
-//! register-tile idiom `proxima-tensor::cpu::gemm_tile_neon` documents
-//! (`av` loaded once per `k`-step, reused across `TILE_COLS` output
-//! channels) -- reimplemented here, in scalar `f32::mul_add` form, because
-//! the real kernel is `cpu.rs`-module-private and the placement discipline
-//! forbids adding anything to the library crates for this experiment. FC1
-//! (the largest layer, 11616 elements) is likewise never materialized: its
-//! 32 outputs are accumulated incrementally as conv3's row-bands stream
-//! past, a direct consequence of FC being a linear functional of the
-//! flattened activation.
+//! a whole-layer activation buffer. Conv arithmetic dot-products the
+//! gathered activation window against one weight row at a time, K-lane
+//! vectorized (`dot_chunked_k4`, below) -- the SAME register-tile FMA idiom
+//! `proxima-tensor::cpu::gemm_tile_neon` documents, reimplemented here
+//! (not called: the real kernel is `cpu.rs`-module-private and the
+//! placement discipline forbids adding anything to the library crates for
+//! this experiment). This module's ORIGINAL shape vectorized across
+//! `TILE_COLS` output channels instead of across `k` and measured scalar
+//! on disassembly (this initiative's own discipline-log row); the K-lane
+//! restructure below measures packed `fmla.4s` in its place. FC1 (the
+//! largest layer, 11616 elements) is likewise never materialized: its 32
+//! outputs are accumulated incrementally as conv3's row-bands stream past,
+//! a direct consequence of FC being a linear functional of the flattened
+//! activation.
 //!
 //! Bench/test support module only -- not part of any library crate's
 //! public surface (`#[path]`-included from `benches/tile_pipeline.rs` and
@@ -153,11 +157,11 @@ impl<'weights> ConvReluStage<'weights> {
     }
 
     /// One output row from a full `kh`-deep ring: for every output column,
-    /// gather the window then run the SAME register-tile idiom
-    /// `gemm_tile_neon` documents -- `av` (the gathered window) loaded once
-    /// per `k`-step, reused across `TILE_COLS` output-channel lanes (`bv`)
-    /// -- reassociated over `k` relative to the sealed executor's own SIMD
-    /// dot fold, the same bounded-reassociation category ROW 151's own
+    /// gather the window once, then dot it against each of `TILE_COLS`
+    /// weight rows in turn via [`dot_chunked_k4`] -- K-lane vectorized per
+    /// channel, not across channels (see that function's own doc for why),
+    /// reassociated over `k` relative to the sealed executor's own SIMD dot
+    /// fold, the same bounded-reassociation category ROW 151's own
     /// differential test already documents for this initiative.
     fn compute_output_row(&self, ring: &VecDeque<Vec<f32>>) -> Vec<f32> {
         let reduction_width = self.channels_in * self.kernel_height * self.kernel_width;
@@ -165,22 +169,15 @@ impl<'weights> ConvReluStage<'weights> {
         let mut gather = [0.0_f32; MAX_K];
         for output_column in 0..self.output_width {
             self.gather_window(ring, output_column, &mut gather);
+            let window = &gather[..reduction_width];
             let mut channel_out = 0;
             while channel_out < self.channels_out {
-                let weight_rows: [&[f32]; TILE_COLS] = std::array::from_fn(|lane| {
-                    let row_start = (channel_out + lane) * reduction_width;
-                    &self.weight[row_start..row_start + reduction_width]
-                });
-                let mut accumulator = [0.0_f32; TILE_COLS];
-                for step in 0..reduction_width {
-                    let window_value = gather[step];
-                    for (lane, accumulator_lane) in accumulator.iter_mut().enumerate() {
-                        *accumulator_lane = window_value.mul_add(weight_rows[lane][step], *accumulator_lane);
-                    }
-                }
-                for (lane, &accumulator_lane) in accumulator.iter().enumerate() {
+                for lane in 0..TILE_COLS {
                     let channel = channel_out + lane;
-                    let mut value = (accumulator_lane + self.bias[channel]).max(0.0);
+                    let row_start = channel * reduction_width;
+                    let weight_row = &self.weight[row_start..row_start + reduction_width];
+                    let dot = dot_chunked_k4(window, weight_row);
+                    let mut value = (dot + self.bias[channel]).max(0.0);
                     if let Some(batch_norm) = &self.batch_norm {
                         value = batch_norm.apply(channel, value);
                     }
@@ -191,6 +188,45 @@ impl<'weights> ConvReluStage<'weights> {
         }
         output_row
     }
+}
+
+/// Dot product over a shared `window` (the gathered `ci*kh*kw` activation
+/// span, contiguous) and one weight row (also contiguous, `weight[co]`'s
+/// own span), reduced 4 elements of `k` at a time -- the SIMD-amenable
+/// axis, per `gemm_tile_neon`'s own kernel: within one weight row the `k`
+/// dimension IS contiguous, unlike the ORIGINAL (already-scalarized, see
+/// this initiative's own discipline-log row) attempt to vectorize ACROSS
+/// `TILE_COLS` output channels, whose weight rows sit `reduction_width`
+/// floats apart and can never share one contiguous SIMD load. `k4` folds
+/// `k` in 4-wide groups into 4 independent lane accumulators before a
+/// single horizontal sum, the same shape `dot_fold_multi_accumulator_binary`
+/// (`proxima_tensor::cpu`, private) already uses -- reimplemented here for
+/// the same placement-discipline reason this module's own header comment
+/// states.
+///
+/// Portable safe Rust, no `target_arch` split and no `unsafe`: measured
+/// (this session's own `objdump`, see the discipline log) to compile to a
+/// packed `fmla.4s` loop on aarch64 -- LLVM auto-vectorizes this shape even
+/// though it did NOT auto-vectorize the TILE_COLS-lanes-in-one-array shape
+/// this replaced. A hand-written `core::arch::aarch64` intrinsics form was
+/// also built and benched (same log row): ~1.5% faster at p50, inside the
+/// ~1% CoV noise band of both arms, not worth the `unsafe` surface it would
+/// add -- named as a real, measured, deliberately-not-adopted alternative,
+/// not hidden.
+fn dot_chunked_k4(window: &[f32], weight_row: &[f32]) -> f32 {
+    let (window_chunks, window_remainder) = window.as_chunks::<4>();
+    let (weight_chunks, weight_remainder) = weight_row.as_chunks::<4>();
+    let mut lanes = [0.0_f32; 4];
+    for (window_chunk, weight_chunk) in window_chunks.iter().zip(weight_chunks) {
+        for ((lane, &window_value), &weight_value) in lanes.iter_mut().zip(window_chunk).zip(weight_chunk) {
+            *lane = window_value.mul_add(weight_value, *lane);
+        }
+    }
+    let mut total = lanes[0] + lanes[1] + lanes[2] + lanes[3];
+    for (&window_value, &weight_value) in window_remainder.iter().zip(weight_remainder) {
+        total = window_value.mul_add(weight_value, total);
+    }
+    total
 }
 
 impl Pipe for ConvReluStage<'_> {
@@ -284,16 +320,16 @@ impl Pipe for FcAccumulateStage<'_> {
         async move {
             let mut state = self.state.borrow_mut();
             let plane = self.height * self.width;
+            let in_features = self.channels * plane;
             for row_index in 0..input.rows {
                 let absolute_row = state.rows_seen;
                 for channel in 0..self.channels {
                     let channel_row = input.channel_row(row_index, channel);
                     let base = channel * plane + absolute_row * self.width;
-                    for (column, &value) in channel_row.iter().enumerate() {
-                        let flat_index = base + column;
-                        for (output_index, accumulator_value) in state.accumulator.iter_mut().enumerate() {
-                            *accumulator_value = value.mul_add(self.weight[output_index * self.channels * plane + flat_index], *accumulator_value);
-                        }
+                    for (output_index, accumulator_value) in state.accumulator.iter_mut().enumerate() {
+                        let weight_start = output_index * in_features + base;
+                        let weight_row = &self.weight[weight_start..weight_start + channel_row.len()];
+                        *accumulator_value += dot_chunked_k4(channel_row, weight_row);
                     }
                 }
                 state.rows_seen += 1;

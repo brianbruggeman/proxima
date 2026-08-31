@@ -14271,3 +14271,139 @@ Real venv (`torch==2.13.0`, `onnx==1.22.0`, both pinned versions confirmed avail
 - `./venv/bin/python train_bench.py --threads 1`
 - `cargo test -p proxima-onnx --release --test real_mnist_checkpoint --features std -- --ignored --nocapture` -- regenerates the zero-input logit oracle `accuracy_check.py`'s `REFERENCE_ZERO_INPUT_LOGITS` is pinned against, if the checkpoint or the lowering path ever changes
 - `bash scripts/algebra-lint.sh` -- confirmed green this session; the lint scans `proxima-primitives/src/pipe` and `examples/`, so the new python scripts under `proxima-onnx/scripts/` are correctly untouched by it, not accidentally exempted
+## ROW 158 — ROW 156's own SIMD gap CLOSED: the tile-pipeline's conv AND fc1 inner loops now compile to packed NEON (`fmla.4s`), landed as a portable, `unsafe`-free K-lane restructure (not the `TILE_COLS`-lanes shape ROW 156 measured scalar); whole-forward p50 1.9-2.0x faster on THIS session's own quiet-host re-measurement of the unmodified baseline (band1 1186.9us -> 608.27us, band_kh 1180.1us -> 601.98us), landing at 5.06-5.11x behind the pytorch/Accelerate bar (0.119ms) and 10.56-10.67x over NEON roofline (0.057ms); the <=0.6ms success bar is missed by a thin, reproducible margin (band_kh 601.98us vs 600us, 0.33% over, CoV 0.14%) -- NOT rounded up to "met"
+
+**Numbering note (per this session's own task instruction):** this is the next free row number on this tree (`proxima-wt-simd`, branch `perf/pipeline-neon-pack`, off main `a1e0437`); a parallel branch may land its own ROW 158 (a pytorch/Accelerate parallel-forward row) first, in which case the coordinator renumbers this row at integration time. Nothing below depends on the number.
+
+Repo: `/Users/brianbruggeman/repos/slot-0/proxima-wt-simd`, branch `perf/pipeline-neon-pack`, off `a1e0437` (unchanged this session -- this worktree's own branch base). Host: Apple M1 Max, macOS, arm64. Build profile: `dev` for clippy, `release`/`bench` for every timed number and every disassembly excerpt below, never mixed with correctness runs (`cargo test --release` for the differential/accuracy tests). **Host loadout: LOADED and VARIABLE at session start (`uptime` load average 88.93/57.55/48.47 at 10:07, other worktrees' own `cargo-nextest` runs for `proxima-autograd` visible via `pgrep` throughout the first ~25 minutes), QUIET from roughly 10:37 onward (load average falling to 8-33) -- every timed table below states which regime it was captured in, and the load-bearing before/after comparison uses ONLY the quiet-host runs (both arms measured back-to-back on the same quiet box, not cross-referenced against a different session's numbers).**
+
+### Allocation budget, stated first (per guiding-principles' hot-path defaults)
+
+Unchanged from ROW 156: **341/229/197 allocations** (band1/band_kh/band_2kh, one full forward pass, single image), verified this session via the SAME counting `#[global_allocator]` wrapper (`benches/tile_pipeline.rs`) -- bit-identical to ROW 156's own count, confirming this row's change touched only arithmetic (the inner reduction), never memory management. No new allocation introduced anywhere in either the conv or fc1 restructure.
+
+### Scalarization cause, found by disassembly (gate 10 evidence, THIS session's own `objdump`, not cited from ROW 156)
+
+`ConvReluStage::compute_output_row`'s original loop nested `for step in 0..reduction_width { for lane in 0..TILE_COLS { accumulator[lane] = window_value.mul_add(weight_rows[lane][step], accumulator[lane]) } }` -- structurally the "`av` loaded once, reused across `TILE_COLS` lanes" idiom `gemm_tile_neon` documents, but applied on the WRONG axis: `weight_rows[lane]` are `TILE_COLS`=4 SEPARATE, non-contiguous slices (each output channel's own `reduction_width`-float span, `reduction_width` floats apart from its neighbours in `self.weight`), so no single SIMD load can ever gather one `k`-step's value from all 4 lanes at once -- there is no contiguous 4-float span to `vld1q_f32`. `gemm_tile_neon` itself does NOT vectorize this axis either (read its own body, `cpu.rs:9710-9754`): `av[row]`/`bv[column]` are each a 4-wide chunk of a SINGLE row's own `k` dimension (which IS contiguous, `KStridedTile`'s own `k_stride`), never a chunk spanning multiple output rows/columns. This module's own header comment, before this row, mis-stated the idiom as "vectorize across `TILE_COLS`" -- corrected in the same edit that fixes the code (see below).
+
+**Before, this session's own `objdump -d --demangle` on the pre-edit bench binary** (`<<tile_pipeline::tile_pipeline::ConvReluStage as proxima_primitives::pipe::primitives::Pipe>::call::{closure#0}>`, captured before any source edit landed):
+```
+100011834: f102405f    cmp    x2, #0x90
+100011838: 540038a0    b.eq   0x100011f4c
+10001183c: bc627864    ldr    s4, [x3, x2, lsl #2]   ; window_value (av), scalar load
+100011840: bc627905    ldr    s5, [x8, x2, lsl #2]    ; weight_rows[0][step]
+100011844: bc627a06    ldr    s6, [x16, x2, lsl #2]   ; weight_rows[1][step]
+100011848: bc627a27    ldr    s7, [x17, x2, lsl #2]   ; weight_rows[2][step]
+10001184c: bc627830    ldr    s16, [x1, x2, lsl #2]   ; weight_rows[3][step]
+100011850: 91000442    add    x2, x2, #0x1
+100011854: 1f050c83    fmadd  s3, s4, s5, s3           ; 4 INDEPENDENT scalar
+100011858: 1f060882    fmadd  s2, s4, s6, s2           ; fmadd, sharing s4
+10001185c: 1f070481    fmadd  s1, s4, s7, s1           ; (the av reuse DID
+100011860: 1f100080    fmadd  s0, s4, s16, s0          ;  happen -- just never
+100011864: eb0202ff    cmp    x23, x2                  ;  packed into a
+100011868: 54fffe61    b.ne   0x100011834              ;  float32x4_t)
+```
+Exactly 4 independent `fmadd` (not `fmla.4s`) per `k`-step -- matches ROW 156's own citation of this pattern precisely, now re-derived from a fresh disassembly rather than carried forward.
+
+### Route chosen: restructure for auto-vectorization (b), NOT explicit intrinsics (c) -- decided by measurement, both built and benched
+
+Task's own option (a), reuse `gemm_tile_neon`/its dot-fold sibling directly, was audited first and is structurally unavailable without a library-promotion decision the task explicitly scopes out: `unsafe fn gemm_tile_neon` (`proxima-tensor/src/cpu.rs:9710`) and `fn dot_fold_multi_accumulator_binary` (`cpu.rs:9799`) are BOTH module-private (no `pub`, verified via `grep -n "fn gemm_tile_neon\|fn dot_fold_multi_accumulator_binary" proxima-tensor/src/cpu.rs` returning zero `pub` hits), and `gemm_tile_neon`'s own `KStridedTile` parameter type (`cpu.rs:5853`) is private too -- not callable from `proxima-onnx`'s own bench-support module at all. Named as the loser it structurally is, not attempted.
+
+**Restructure: swap the loop nest so `k` is the vectorized axis, per weight row, instead of `TILE_COLS` output channels.** For a fixed output channel, `self.weight[channel*reduction_width .. +reduction_width]` IS contiguous -- the same fact `gemm_tile_neon`'s own `av`/`bv` rely on, just applied to the axis that is actually contiguous here. New `dot_chunked_k4(window, weight_row)` reduces `k` in 4-wide chunks via `as_chunks::<4>()` into 4 lane accumulators, portable safe Rust, no `unsafe`, no `target_arch` split -- the same shape `dot_fold_multi_accumulator_binary` already uses privately in `cpu.rs`.
+
+**Measured, this session, both variants built and benched (conv-only change, before the fc1 restructure below landed, to isolate the SIMD-technique choice):**
+- **Safe portable** (`as_chunks::<4>()` + `[f32;4]` lane array, zero `unsafe`): `objdump` on the resulting binary shows `fmla.4s v0, v2, v1` in a real loop (`ldr q1`/`ldr q2` 128-bit vector loads, `subs`/`b.ne`), followed by a `dup.4s`+`fadd.4s` x3 horizontal-sum tree -- LLVM auto-vectorized this shape even though (per the "before" excerpt above) it did NOT auto-vectorize the TILE_COLS-lanes shape. 5 runs, quiet host (load 8-19): band1 p50 **857.45us**, CoV 1.2% (853.37-875.88us).
+- **Hand-written `core::arch::aarch64` intrinsics** (`vld1q_f32`/`vfmaq_f32`/`vaddvq_f32`, `unsafe`, cfg-gated `target_arch = "aarch64"`, mirroring `gemm_tile_neon`'s own compiled shape exactly): 5 runs, quiet-ish host (load 11-52, declining): band1 p50 **844.82us**, CoV 0.96% (840.44-863.16us).
+- **Delta: intrinsics ~1.5% faster at p50** (844.82 vs 857.45us), inside the ~1% CoV noise band of both arms -- plausibly real (the intrinsics form uses `vaddvq_f32`, likely one `faddp`-class instruction, versus the auto-vec form's 3-step `dup.4s`+`fadd.4s` horizontal-reduction tree) but small. **Decision: ship the safe portable form.** Per guiding-principles §20 (box-free by default, prefer the safe alternative unless there is genuinely no alternative), a ~1.5%, noise-adjacent delta does not justify the `unsafe` surface, the `target_arch` split, or the SAFETY-comment burden the intrinsics form would add to a bench-support module. The intrinsics variant was built, benched, and then REMOVED from the source tree (not left as dead `#[cfg]`-disabled code) -- this paragraph and the numbers above are its only remaining trace, which is the point of logging a rolled-back loser rather than silently discarding it.
+
+**After, this session's own `objdump` on the FINAL (safe-portable) bench binary, same symbol:**
+```
+1000118b0: 6f00e400    movi.2d  v0, #0            ; accumulator zeroed
+1000118bc: 3cc105e1    ldr      q1, [x15], #0x10  ; window chunk, 128-bit
+1000118c0: 3cc105c2    ldr      q2, [x14], #0x10  ; weight chunk, 128-bit
+1000118c4: 4e21cc40    fmla.4s  v0, v2, v1         ; PACKED, one instruction
+1000118c8: f1000610    subs     x16, x16, #0x1
+1000118cc: 54ffff81    b.ne     0x1000118bc
+1000118d0: 4e0c0401    dup.4s   v1, v0[1]
+1000118d4: 4e21d401    fadd.4s  v1, v0, v1
+1000118d8: 4e140402    dup.4s   v2, v0[2]
+1000118dc: 4e22d421    fadd.4s  v1, v1, v2
+1000118e0: 4e1c0400    dup.4s   v0, v0[3]
+1000118e4: 4e20d420    fadd.4s  v0, v1, v0          ; horizontal sum
+```
+One `fmla.4s` per `k`-chunk of 4 (4 static occurrences total in the compiled `ConvReluStage::call` body, one per remainder-count code path LLVM split for `k % 4 in {0,1,2,3}`), replacing the 4 scalar `fmadd` the "before" excerpt shows. Re-prove: `objdump -d --demangle <bench binary> | grep -A40 '<<tile_pipeline::tile_pipeline::ConvReluStage as proxima_primitives::pipe::primitives::Pipe>::call::{closure#0}>:'`.
+
+### FC1 also fixed -- the task named "conv/fc", not "conv" alone, and FC1's own loop was the SAME failure class
+
+`FcAccumulateStage::call`'s original inner loop, for one activation value (`value`, fixed per iteration), looped `output_index in 0..32` doing `accumulator[output_index] = value.mul_add(weight[output_index*channels*plane + flat_index], accumulator[output_index])` -- `weight`'s natural layout is `[out_features][in_features]`, so consecutive `output_index` values sit `channels*plane`=11616 floats apart: the SAME non-contiguous-across-the-loop-variable shape as conv's original bug, at a WORSE stride (11616 floats vs `reduction_width`<=144). Confirmed scalar by this session's own disassembly (`run_pipeline_forward`, which inlines `FcAccumulateStage::call` directly): a single `fmadd s1, s0, s1, s2` per iteration of a real 32-iteration loop, `ldr s1`/`ldr s2` scalar loads, `subs x5, x5, #0x4` (byte-stride bookkeeping) / `b.ne`.
+
+**Fix: swap which axis is vectorized, reusing `dot_chunked_k4` unchanged (gate 1, reuse-first -- zero new code for FC1's own fix).** For a FIXED `output_index`, `self.weight[output_index*in_features + base .. +channel_row.len()]` IS contiguous (this is `weight[output_index]`'s own natural row) -- so instead of folding one activation value into 32 accumulators per iteration, the restructured loop folds one whole `channel_row` (up to 22 contiguous floats) into ONE accumulator per `output_index`, vectorized over the row's own length via the same `dot_chunked_k4` the conv fix introduced:
+```rust
+for (output_index, accumulator_value) in state.accumulator.iter_mut().enumerate() {
+    let weight_start = output_index * in_features + base;
+    let weight_row = &self.weight[weight_start..weight_start + channel_row.len()];
+    *accumulator_value += dot_chunked_k4(channel_row, weight_row);
+}
+```
+Total MAC count is unchanged (still `rows(22) x channels(24) x output_index(32) x ~22` per image); only the reduction's memory-access shape changed. **After, this session's own `objdump` on `run_pipeline_forward`** (FC1's call site, inlined, distinct address from conv's own copy above but the identical instruction sequence): `fmla.4s v0, v2, v1` inside a real `ldr q1`/`ldr q2`/`subs`/`b.ne` loop at `0x10001c110-0x10001c120`, followed by the same `dup.4s`+`fadd.4s` horizontal-sum tree, followed by scalar `fmadd` remainder handling for `channel_row.len() % 4` = 2 leftover columns (22 = 5*4 + 2). Re-prove: `objdump -d --demangle <bench binary> | grep -B10 -A20 '4e21cc40.*fmla.4s.*v0, v2, v1' | head -60` (two occurrences: conv's copy inside the `ConvReluStage::call` symbol, fc1's copy inlined into `run_pipeline_forward`).
+
+**FC2 (32 -> 10, `matvec_bias`) explicitly OUT of scope, not touched:** 10 dot products of 32 elements each = 320 total MACs per image, ROW 156's own framing already establishes this tail as "genuinely small, not part of the between-op-traffic thesis" -- 320 MACs is 0.09% of FC1's 371,712, not worth a restructure or the risk of touching the one part of this pipeline that was never streaming in the first place.
+
+### Correctness: differential test AND full-1000 accuracy, unchanged pass criteria, BOTH re-run this session on the final (conv+fc1) tree
+
+`cargo test --release -p proxima-onnx --test tile_pipeline_differential --features tile-pipeline-bench -- --nocapture`, this session, final tree:
+```
+running 2 tests
+test pipeline_logits_match_sealed_executor_within_reassociation_bound ... ok
+tile pipeline accuracy: 0.9900 (990/1000)
+test pipeline_full_test_split_accuracy_is_exactly_0_9900 ... ok
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+```
+`pipeline_logits_match_sealed_executor_within_reassociation_bound` is the SAME 20 images x 3 band granularities = 60 forward-pass comparisons ROW 156 established, every one of the 10 logits within `1e-3` absolute of `cpu::evaluate_named`'s own output, argmax agreement asserted separately on all 60 -- **60/60, unchanged pass bound**, reassociation from the new `k`-chunked reduction order falls inside the SAME bounded-reassociation category ROW 151's own differential test already documents (a different summation order than either the executor's own SIMD dot-fold or ROW 156's own scalar TILE_COLS order, not a new category of imprecision). Full 1000-image `t10k` split: **990/1000 = 0.9900 exactly**, bit-for-bit the same count as ROW 154/155/156 and this session's own pre-change baseline.
+
+### Bench (`proxima-onnx/benches/tile_pipeline.rs`, unchanged file, same arms/labels ROW 156 registered)
+
+**Before vs after, BOTH measured THIS session, back-to-back, on the SAME quiet host (load average 8-33 across the full comparison window, `uptime` logged immediately before every run) -- 5 runs each, p50 reported per this task's own instruction that p50-over->=5-runs is the trustworthy stat under load, CoV also reported and is tight enough on the quiet host that p50 and mean agree to within the CoV band on every arm:**
+
+| arm | before (5 runs, us) | before p50 | before CoV | after (5 runs, us) | after p50 | after CoV | speedup (p50) |
+|---|---|---|---|---|---|---|---|
+| tile_pipeline_band1 | 1186.9, 1179.1, 1190.2, 1213.6, 1180.7 | 1186.9us | 1.04% | 608.27, 606.50, 609.53, 606.78, 608.89 | **608.27us** | 0.19% | **1.951x** |
+| tile_pipeline_band_kh | 1170.2, 1178.5, 1180.4, 1281.1*, 1180.1 | 1180.1us | -- (run4 contended) | 601.99, 600.73, 601.22, 603.19, 601.98 | **601.98us** | 0.14% | **1.961x** |
+| tile_pipeline_band_2kh | 1173.2, 1183.7, 1199.4, 1175.9, 1171.1 | 1175.9us | -- | 603.09, 603.47, 614.77*, 603.27, 604.12 | **603.47us** | 0.75% (run3 contended) | **1.949x** |
+
+`*` = that run's `uptime` showed transient contention from another worktree's own build (see host-loadout note above); p50 (not mean) absorbs it, per this task's own guidance -- no run was discarded.
+
+**Band-size sweep verdict: STILL no signal**, consistent with ROW 156 -- all 3 granularities land within ~1% of each other after the SIMD fix, same as before it. The restructure changed the arithmetic, not the conclusion about band size.
+
+**Vs the incumbent (`incumbent_executor`, `cpu::evaluate_named`, `design-favors: incumbent`):** measured 1.48-1.60ms p50-ish across quiet-host runs this session (high CoV, 15-20%, this arm was NOT the focus of this row's change and its own variance is a pre-existing, already-logged property of the sealed executor under this host's allocator/threading behavior, not re-litigated here) -- the tile pipeline remains 2.4-2.6x faster than the incumbent on its own home-turf arm (`design-favors: incumbent`, one image per iteration, matching `mnist_f32_lane.rs`'s own convention exactly, unchanged from ROW 156).
+
+### Vs the pre-registered bars (this session's own task, band_kh = best arm)
+
+| milestone | ms/image | this row (band_kh p50) | met? |
+|---|---|---|---|
+| success (<=0.6ms, "halves the torch gap") | 0.600 | 0.60198 | **NOT MET** -- 0.33% over, CoV 0.14%, a real reproducible miss, not noise |
+| stretch (<=0.35ms) | 0.350 | 0.60198 | NOT MET, 1.72x over |
+| vs pytorch/Accelerate incumbent (0.1193ms, single-threaded p50, ROW 158-pending-elsewhere) | -- | 0.60198 | **5.06x slower** (band1: 5.11x) |
+| vs NEON roofline (0.057ms) | -- | 0.60198 | **10.56x over roofline** (band1: 10.67x) |
+| vs this session's own pre-change baseline | -- | 0.60198 vs 1.1801 | **1.961x faster**, the SIMD fix alone closed roughly half the remaining gap to the success bar (1180 -> 602us against a 600us target starting point ~1180us out) |
+
+**Honest read: the biggest named lever moved the number by ~1.95-1.96x and STILL misses the success bar, by a hair.** The conv+fc1 SIMD fix was real, measured, disassembly-verified, and the single largest-magnitude change available under this task's own scope (reuse blocked structurally, restructure chosen over intrinsics on a measured, noise-adjacent 1.5% margin) -- and it lands 0.33% short of `<=0.6ms`. The residual gap to torch (5.06x) and to roofline (10.56x) is now dominated by cost this row did NOT touch: `RowBand` allocation (341/229/197 allocations per image, unchanged, ROW 156's own acknowledged sans-IO gap), the `gather_window` per-pixel copy (a real memory-bound cost independent of the FMA packing), and FC2/BatchNorm/LogSoftmax's own small-but-nonzero tail. None of those were in scope for "make the conv/fc inner loops emit packed NEON" -- named as the next lever, not attempted this session.
+
+### `docs/discipline.md` opt-sweep note (§11 sans-IO, updating ROW 156's own table -- SIMD row only, every other axis unchanged and re-verified still true this session)
+
+SIMD: **UPGRADED from `MEASURED, PARTIAL` to `MEASURED, DONE` for conv and fc1** -- both inner reduction loops now compile to `fmla.4s` (128-bit packed NEON FMA), verified by this session's own `objdump`, not assumed from the idiom's intent. FC2's tiny 32-in/10-out tail (`matvec_bias`) remains scalar, explicitly out of scope (see above) -- **PARTIAL, by explicit, named exception**, not blank. Every other axis (state machine, bytes-first/borrowed, zero-copy-by-design, copy-over-clone, stack-over-heap, branchless, no dynamic dispatch, O(1) extra memory per row) is unchanged from ROW 156's own table and was not re-audited from scratch this session since no source outside the two reduction loops changed.
+
+### Gate 15 (no magic numbers) -- inherits ROW 156's own already-flagged debt, not a new item
+
+The literal `4` in `window.as_chunks::<4>()` / `weight_row.as_chunks::<4>()` is the SAME category of debt ROW 156's own audit note (b) already flagged for `TILE_COLS`/`TILE_ROWS`/`DOT_LANES`-class constants: an architecture-derived SIMD lane width (NEON's native 128-bit / 4x`f32` register), not a per-system tunable, and (per guiding-principles' own §12/§11 interaction note) a value that "must be a compile-time constant for the optimiser to act on it... can only come from this mechanism, never from runtime config" if it were EVER routed through sizing config -- consistent with `proxima_tensor::sized::DOT_LANES` (`sized.rs:267`, `= 8`, explicitly documented "cannot be runtime config at any tier") being a bare `pub const` today, not plumbed through a generated-constants module either. No new debt introduced; the existing, already-named debt item covers this literal too.
+
+### Re-prove commands
+
+- `CARGO_TARGET_DIR=<scratch> cargo nextest run -p proxima-onnx --all-features` -- 84 passed, 3 skipped (unchanged count from ROW 156, includes both tile-pipeline differential tests)
+- `CARGO_TARGET_DIR=<scratch> cargo nextest run -p proxima-tensor --features std,instrument` -- 450 passed, 4 skipped this session (unaffected by this row, `proxima-tensor/src` untouched -- diff `git diff a1e0437 HEAD -- proxima-tensor/src` is empty)
+- `CARGO_TARGET_DIR=<scratch> cargo nextest run -p omega --all-features --no-fail-fast` -- 143 passed, 1 skipped this session (unaffected, same reason)
+- `CARGO_TARGET_DIR=<scratch> cargo clippy -p proxima-tensor -p proxima-onnx --all-targets --all-features -- -D warnings` -- clean, exit 0
+- `CARGO_TARGET_DIR=<scratch> cargo test --release -p proxima-onnx --test tile_pipeline_differential --features tile-pipeline-bench -- --nocapture` -- reproduces both differential tests, including the 0.9900 full-split accuracy line and the 990/1000 count
+- `CARGO_TARGET_DIR=<scratch> cargo bench -p proxima-onnx --bench tile_pipeline --features tile-pipeline-bench -- --save-baseline <name>` -- reproduces the whole-forward table and the allocation-count printout (341/229/197); host loadout will differ, re-check `uptime`/`pgrep` and mark accordingly, p50-over->=5-runs per this row's own convention
+- `objdump -d --demangle <tile_pipeline bench binary> | grep -A40 '<<tile_pipeline::tile_pipeline::ConvReluStage as proxima_primitives::pipe::primitives::Pipe>::call::{closure#0}>:'` -- reproduces conv's own `fmla.4s` excerpt above
+- `objdump -d --demangle <tile_pipeline bench binary> | grep -B40 -A5 'run_pipeline_forward>:' ` then locate the `fmla.4s v0, v2, v1` occurrence inside it -- reproduces fc1's own excerpt above (address differs run-to-run with codegen, opcode does not)
+- `git diff a1e0437 HEAD -- proxima-onnx/benches/support/tile_pipeline.rs` -- the entire source change for this row; zero lines touched outside this one bench-support file, zero lines in any library crate
