@@ -4,20 +4,31 @@
 //! (`In`/`Out` = one row-band), composed with the crate's own `AndThen`
 //! combinator, streaming row-bands between layers instead of materializing
 //! a whole-layer activation buffer. Conv arithmetic dot-products the
-//! gathered activation window against a `TILE_COLS`-wide group of weight
-//! rows at once, K-lane vectorized and register-blocked across the group
-//! (`dot_chunked_k4_tile`, below) -- the SAME register-tile FMA idiom
-//! `proxima-tensor::cpu::gemm_tile_neon` documents, reimplemented here
-//! (not called: the real kernel is `cpu.rs`-module-private and the
-//! placement discipline forbids adding anything to the library crates for
-//! this experiment). This module's ORIGINAL shape vectorized across
-//! `TILE_COLS` output channels instead of across `k` and measured scalar
-//! on disassembly (this initiative's own discipline-log row); a K-lane
-//! restructure (ROW 158) measured packed `fmla.4s` calling one row at a
-//! time, then ROW 169's register-blocking pass folded the `TILE_COLS` rows
-//! of one group into a single shared-`window`-load pass. FC1 (the largest
-//! layer, 11616 elements) is likewise never materialized: its 32 outputs
-//! are accumulated incrementally as conv3's row-bands stream past, a direct
+//! gathered activation window against weight rows -- via ONE of two forms,
+//! selected PER CALL SITE at compile time (ROW 170): `dot_chunked_k4_tile`
+//! (register-blocked across a `TILE_COLS` group, one shared `window` load
+//! reused by all `TILE_COLS` lanes' FMA chains) or `dot_chunked_k4` (one
+//! row at a time, ROW 158's pre-register-blocking form) -- both the SAME
+//! register-tile FMA idiom `proxima-tensor::cpu::gemm_tile_neon` documents,
+//! reimplemented here (not called: the real kernel is `cpu.rs`-module-
+//! private and the placement discipline forbids adding anything to the
+//! library crates for this experiment). ROW 169 measured the blocked form
+//! winning at conv2/conv3's large `reduction_width` (amortizing the shared
+//! load) but LOSING at conv1/fc1's small `reduction_width`, where
+//! `dot_chunked_k4_tile`'s larger signature did not auto-inline (confirmed
+//! `bl` in disassembly) and call overhead dominated a tiny per-call
+//! workload -- `dot_chunked_k4`'s smaller signature auto-inlines at those
+//! same sites (ROW 158's own disassembly finding, re-confirmed ROW 170).
+//! `ConvReluStage<'weights, const BLOCKED: bool>` selects the form as a
+//! const generic, monomorphized per stage at its own `new::<..>` call site
+//! -- conv1 instantiates `BLOCKED = false`, conv2/conv3 instantiate
+//! `BLOCKED = true`; `FcAccumulateStage` (fc1's only instantiation) always
+//! calls `dot_chunked_k4` directly, unconditionally. No runtime branch, no
+//! config: which function a stage's own compiled code calls is fixed at
+//! that stage's own type, forever, the same way its shape (`channels_in`,
+//! `kernel_height`, ...) already is. FC1 (the largest layer, 11616
+//! elements) is likewise never materialized: its 32 outputs are
+//! accumulated incrementally as conv3's row-bands stream past, a direct
 //! consequence of FC being a linear functional of the flattened activation.
 //!
 //! Bench/test support module only -- not part of any library crate's
@@ -100,7 +111,15 @@ impl BatchNormAffine {
 /// never shared across a `Send` boundary (`Pipe`'s own doc: no `Send`
 /// bound), the same interior-mutability shape a per-core `!Send` worker
 /// already uses elsewhere in this algebra.
-pub struct ConvReluStage<'weights> {
+///
+/// `BLOCKED` selects the dot-product form this stage's own
+/// `compute_output_row` calls (ROW 170, see module doc): `true` for the
+/// register-blocked `dot_chunked_k4_tile`, `false` for the single-row
+/// `dot_chunked_k4`. Fixed per stage at construction's own type parameter,
+/// not a runtime field -- the branch below on `BLOCKED` is on a
+/// monomorphized compile-time constant, eliminated by the optimizer per
+/// instantiation (verified via objdump, see the discipline log).
+pub struct ConvReluStage<'weights, const BLOCKED: bool> {
     channels_in: usize,
     channels_out: usize,
     kernel_height: usize,
@@ -113,7 +132,7 @@ pub struct ConvReluStage<'weights> {
     ring: RefCell<VecDeque<Vec<f32>>>,
 }
 
-impl<'weights> ConvReluStage<'weights> {
+impl<'weights, const BLOCKED: bool> ConvReluStage<'weights, BLOCKED> {
     pub fn new(
         channels_in: usize,
         channels_out: usize,
@@ -160,16 +179,16 @@ impl<'weights> ConvReluStage<'weights> {
 
     /// One output row from a full `kh`-deep ring: for every output column,
     /// gather the window once, then dot it against all `TILE_COLS` weight
-    /// rows of a channel group TOGETHER via [`dot_chunked_k4_tile`] -- the
-    /// register-blocking lever (ROW 169): the prior shape called a
-    /// single-row dot product once per lane, each call independently
-    /// re-reading `window` from the top; `dot_chunked_k4_tile` reads each `window`
-    /// chunk ONCE per `k`-step and reuses it across all `TILE_COLS` lanes'
-    /// FMA chains before advancing, amortizing the shared operand load the
-    /// same way `gemm_tile_neon`'s own `av`-reuse-across-`bv` idiom does.
-    /// Reassociated over `k` relative to the sealed executor's own SIMD dot
-    /// fold, the same bounded-reassociation category ROW 151's own
-    /// differential test already documents for this initiative.
+    /// rows of a channel group -- via [`dot_chunked_k4_tile`] (`BLOCKED =
+    /// true`, one shared `window` load reused across all `TILE_COLS`
+    /// lanes' FMA chains, ROW 169's register-blocking win) or
+    /// [`dot_chunked_k4`] per lane (`BLOCKED = false`, ROW 158's own
+    /// pre-register-blocking form, which auto-inlines at small-K call
+    /// sites where the blocked form's larger signature does not -- ROW
+    /// 170). `BLOCKED` is fixed per stage instantiation, not read at
+    /// runtime. Reassociated over `k` relative to the sealed executor's
+    /// own SIMD dot fold, the same bounded-reassociation category ROW
+    /// 151's own differential test already documents for this initiative.
     fn compute_output_row(&self, ring: &VecDeque<Vec<f32>>) -> Vec<f32> {
         let reduction_width = self.channels_in * self.kernel_height * self.kernel_width;
         let mut output_row = vec![0.0_f32; self.channels_out * self.output_width];
@@ -179,11 +198,19 @@ impl<'weights> ConvReluStage<'weights> {
             let window = &gather[..reduction_width];
             let mut channel_out = 0;
             while channel_out < self.channels_out {
-                let weight_rows: [&[f32]; TILE_COLS] = std::array::from_fn(|lane| {
-                    let row_start = (channel_out + lane) * reduction_width;
-                    &self.weight[row_start..row_start + reduction_width]
-                });
-                let dots = dot_chunked_k4_tile(window, weight_rows);
+                let dots: [f32; TILE_COLS] = if BLOCKED {
+                    let weight_rows: [&[f32]; TILE_COLS] = std::array::from_fn(|lane| {
+                        let row_start = (channel_out + lane) * reduction_width;
+                        &self.weight[row_start..row_start + reduction_width]
+                    });
+                    dot_chunked_k4_tile(window, weight_rows)
+                } else {
+                    std::array::from_fn(|lane| {
+                        let row_start = (channel_out + lane) * reduction_width;
+                        let weight_row = &self.weight[row_start..row_start + reduction_width];
+                        dot_chunked_k4(window, weight_row)
+                    })
+                };
                 for (lane, &dot) in dots.iter().enumerate() {
                     let channel = channel_out + lane;
                     let mut value = (dot + self.bias[channel]).max(0.0);
@@ -217,11 +244,21 @@ impl<'weights> ConvReluStage<'weights> {
 /// Portable safe Rust, no `target_arch` split and no `unsafe`: ROW 158
 /// measured (this session's own `objdump`) the single-row form to compile
 /// to a packed `fmla.4s` loop on aarch64; ROW 169 re-verifies the same for
-/// this tiled form (see the discipline log). Not `#[inline(always)]`: ROW
-/// 169 measured that forcing inlining REGRESSES the whole-forward mean
-/// (~561us vs ~529us, see the discipline log) -- the compiler's own choice
-/// to keep this as a real call is the faster one, despite the smaller
-/// conv1/fc1 sites individually preferring the inlined form.
+/// this tiled form (see the discipline log), AND separately measured that
+/// forcing `#[inline(always)]` REGRESSES the whole-forward mean (~561us vs
+/// ~529us) -- the non-inlined call was the faster shape for conv2/conv3.
+/// `#[inline(never)]` (ROW 170): splitting `ConvReluStage` per BLOCKED
+/// value (below) dropped this function to ONE call site
+/// (`ConvReluStage<true>::compute_output_row`, conv2/conv3 only, since
+/// `FcAccumulateStage` now calls `dot_chunked_k4` directly) -- LLVM's
+/// inliner treats a single-call-site function as free to inline and DID,
+/// silently re-creating ROW 169's own measured-worse inlined shape
+/// (measured, ROW 170: total 593.874us vs the `#[inline(never)]` form's
+/// own number below -- see the discipline log). `#[inline(never)]` pins
+/// ROW 169's own measured-faster non-inlined choice explicitly rather than
+/// leaving it to an inliner heuristic that is no longer stable under this
+/// call-site count.
+#[inline(never)]
 fn dot_chunked_k4_tile(window: &[f32], weight_rows: [&[f32]; TILE_COLS]) -> [f32; TILE_COLS] {
     let (window_chunks, window_remainder) = window.as_chunks::<4>();
     let weight_chunks: [&[[f32; 4]]; TILE_COLS] = std::array::from_fn(|lane| weight_rows[lane].as_chunks::<4>().0);
@@ -245,7 +282,33 @@ fn dot_chunked_k4_tile(window: &[f32], weight_rows: [&[f32]; TILE_COLS]) -> [f32
     })
 }
 
-impl Pipe for ConvReluStage<'_> {
+/// Dot product over a shared `window` (the gathered `ci*kh*kw` activation
+/// span, contiguous) and ONE weight row (also contiguous, `weight[co]`'s
+/// own span), reduced 4 elements of `k` at a time -- ROW 158's own form,
+/// restored ROW 170 for conv1/fc1's own call sites: its smaller signature
+/// (two slices, not `[&[f32]; TILE_COLS]`) auto-inlines where
+/// [`dot_chunked_k4_tile`] does not, which matters most at small
+/// `reduction_width` where per-call overhead is the whole cost, not the
+/// arithmetic. Portable safe Rust, no `target_arch` split and no `unsafe`:
+/// ROW 158 measured (objdump) this shape to compile to a packed `fmla.4s`
+/// loop on aarch64 (re-confirmed ROW 170, see the discipline log).
+fn dot_chunked_k4(window: &[f32], weight_row: &[f32]) -> f32 {
+    let (window_chunks, window_remainder) = window.as_chunks::<4>();
+    let (weight_chunks, weight_remainder) = weight_row.as_chunks::<4>();
+    let mut lanes = [0.0_f32; 4];
+    for (window_chunk, weight_chunk) in window_chunks.iter().zip(weight_chunks) {
+        for ((lane, &window_value), &weight_value) in lanes.iter_mut().zip(window_chunk).zip(weight_chunk) {
+            *lane = window_value.mul_add(weight_value, *lane);
+        }
+    }
+    let mut total = lanes[0] + lanes[1] + lanes[2] + lanes[3];
+    for (&window_value, &weight_value) in window_remainder.iter().zip(weight_remainder) {
+        total = window_value.mul_add(weight_value, total);
+    }
+    total
+}
+
+impl<const BLOCKED: bool> Pipe for ConvReluStage<'_, BLOCKED> {
     type In = RowBand;
     type Out = RowBand;
     type Err = Infallible;
@@ -305,7 +368,6 @@ impl<'weights> FcAccumulateStage<'weights> {
     pub fn new(channels: usize, height: usize, width: usize, out_features: usize, weight: &'weights [f32], bias: &'weights [f32]) -> Self {
         assert_eq!(weight.len(), out_features * channels * height * width, "fc1 weight shape mismatch");
         assert_eq!(bias.len(), out_features, "fc1 bias shape mismatch");
-        assert!(out_features.is_multiple_of(TILE_COLS), "fc1 output features must tile evenly by TILE_COLS");
         Self {
             channels,
             height,
@@ -333,6 +395,13 @@ impl Pipe for FcAccumulateStage<'_> {
     type Out = ();
     type Err = Infallible;
 
+    /// FC1's own accumulation loop calls [`dot_chunked_k4`] directly,
+    /// unconditionally (ROW 170: fc1 is `dot_chunked_k4_tile`'s own other
+    /// small-`reduction_width` regression site, ROW 169's own measured
+    /// +19.07% -- `channel_row.len() <= 22` means per-call overhead
+    /// dominates, same mechanism as conv1). No `BLOCKED` parameter here:
+    /// `FcAccumulateStage` has exactly one instantiation (fc1), so there is
+    /// only ever one function this call site could call.
     fn call(&self, input: Self::In) -> impl std::future::Future<Output = Result<Self::Out, Self::Err>> {
         async move {
             let mut state = self.state.borrow_mut();
@@ -343,17 +412,10 @@ impl Pipe for FcAccumulateStage<'_> {
                 for channel in 0..self.channels {
                     let channel_row = input.channel_row(row_index, channel);
                     let base = channel * plane + absolute_row * self.width;
-                    let mut output_index = 0;
-                    while output_index < state.accumulator.len() {
-                        let weight_rows: [&[f32]; TILE_COLS] = std::array::from_fn(|lane| {
-                            let weight_start = (output_index + lane) * in_features + base;
-                            &self.weight[weight_start..weight_start + channel_row.len()]
-                        });
-                        let dots = dot_chunked_k4_tile(channel_row, weight_rows);
-                        for (lane, &dot) in dots.iter().enumerate() {
-                            state.accumulator[output_index + lane] += dot;
-                        }
-                        output_index += TILE_COLS;
+                    for (output_index, accumulator_value) in state.accumulator.iter_mut().enumerate() {
+                        let weight_start = output_index * in_features + base;
+                        let weight_row = &self.weight[weight_start..weight_start + channel_row.len()];
+                        *accumulator_value += dot_chunked_k4(channel_row, weight_row);
                     }
                 }
                 state.rows_seen += 1;
@@ -475,9 +537,15 @@ pub struct BandRows(pub usize);
 pub fn run_pipeline_forward(image: &[f32], weights: &MnistWeights<'_>, band: BandRows) -> [f32; 10] {
     let batch_norm1 = BatchNormAffine::new(weights.norm1_weight, weights.norm1_bias, weights.norm1_running_mean, weights.norm1_running_var, EPSILON);
 
-    let stage1 = ConvReluStage::new(1, 8, 3, 3, 28, weights.conv1_weight, weights.conv1_bias, None);
-    let stage2 = ConvReluStage::new(8, 16, 3, 3, 26, weights.conv2_weight, weights.conv2_bias, None);
-    let stage3 = ConvReluStage::new(16, 24, 3, 3, 24, weights.conv3_weight, weights.conv3_bias, Some(batch_norm1));
+    // ROW 170: conv1 (`reduction_width` = 9) calls the unblocked,
+    // auto-inlining `dot_chunked_k4` form (`BLOCKED = false`); conv2/conv3
+    // (`reduction_width` = 72/144) call the register-blocked
+    // `dot_chunked_k4_tile` form (`BLOCKED = true`), which amortizes its
+    // own non-inlined call overhead at their larger K. fc1 always calls
+    // `dot_chunked_k4` directly (see `FcAccumulateStage::call`'s own doc).
+    let stage1 = ConvReluStage::<false>::new(1, 8, 3, 3, 28, weights.conv1_weight, weights.conv1_bias, None);
+    let stage2 = ConvReluStage::<true>::new(8, 16, 3, 3, 26, weights.conv2_weight, weights.conv2_bias, None);
+    let stage3 = ConvReluStage::<true>::new(16, 24, 3, 3, 24, weights.conv3_weight, weights.conv3_bias, Some(batch_norm1));
     let fc_stage = FcAccumulateStage::new(24, 22, 22, 32, weights.fc1_weight, weights.fc1_bias);
     let fc_stage_for_finalize = fc_stage.clone();
 
