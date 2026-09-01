@@ -222,7 +222,8 @@ pub use live_filter::{
 #[cfg(feature = "alloc")]
 pub use resilience::Fallback;
 pub use resilience::{
-    Backoff, CircuitBreaker, CircuitState, Deadline, Jitter, RetryAction, RetryController,
+    AtomicCircuitBreaker, Backoff, CircuitBreaker, CircuitState, Deadline, Jitter, RetryAction,
+    RetryController,
 };
 pub use retry_rules::RetryRules;
 #[cfg(feature = "std")]
