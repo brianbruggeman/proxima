@@ -14,13 +14,17 @@
 use std::io;
 use std::net::SocketAddr;
 use std::pin::Pin;
+use std::sync::Arc;
 use std::sync::Mutex;
 use std::task::{Context, Poll};
 
+use quinn::ClientConfig;
 use quinn::{Endpoint, RecvStream, SendStream, ServerConfig};
 use tokio_util::compat::{Compat, TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 
-use proxima_primitives::stream::{BindAddr, PeerInfo, StreamConnection, StreamListener};
+use proxima_primitives::stream::{
+    BindAddr, PeerInfo, StreamConnection, StreamListener, StreamUpstream,
+};
 
 pub struct QuicStreamConnection {
     send: Compat<SendStream>,
@@ -69,6 +73,92 @@ impl futures::io::AsyncWrite for QuicStreamConnection {
 impl StreamConnection for QuicStreamConnection {
     fn peer(&self) -> Option<PeerInfo> {
         self.peer.map(PeerInfo::Tcp)
+    }
+}
+
+// boxed because `poll_connect` takes `&self`, so the asynchronous QUIC
+// connect/open-bi sequence must live across polls in the same way as the
+// listener's accept sequence below.
+type QuicConnectFut =
+    Pin<Box<dyn std::future::Future<Output = io::Result<QuicStreamConnection>> + Send>>;
+
+/// QUIC client adapter for stream protocols such as DNS-over-QUIC.
+///
+/// Each `poll_connect` establishes one authenticated QUIC connection and
+/// opens one bidirectional application stream. The caller supplies a TLS
+/// config whose ALPN is appropriate for its protocol (DoQ uses `doq`). The
+/// returned stream uses the existing bounded protocol framing; this adapter
+/// owns only endpoint, handshake, and stream setup.
+pub struct QuicUpstream {
+    endpoint: Endpoint,
+    server_addr: SocketAddr,
+    server_name: String,
+    in_flight: Mutex<Option<QuicConnectFut>>,
+}
+
+impl QuicUpstream {
+    /// Build a QUIC client endpoint using the caller's rustls-backed QUIC
+    /// configuration. No network activity occurs until `poll_connect`.
+    pub fn with_client_config(
+        server_addr: SocketAddr,
+        server_name: impl Into<String>,
+        tls_config: rustls::ClientConfig,
+    ) -> io::Result<Self> {
+        let local = if server_addr.is_ipv4() {
+            SocketAddr::from(([0u8; 4], 0))
+        } else {
+            SocketAddr::from(([0u16; 8], 0))
+        };
+        let mut endpoint = Endpoint::client(local)?;
+        let quic_tls = quinn::crypto::rustls::QuicClientConfig::try_from(tls_config)
+            .map_err(|error| io::Error::other(format!("quic tls config: {error}")))?;
+        endpoint.set_default_client_config(ClientConfig::new(Arc::new(quic_tls)));
+        Ok(Self {
+            endpoint,
+            server_addr,
+            server_name: server_name.into(),
+            in_flight: Mutex::new(None),
+        })
+    }
+}
+
+impl StreamUpstream for QuicUpstream {
+    type Conn = Box<dyn StreamConnection>;
+
+    fn poll_connect(&self, cx: &mut Context<'_>) -> Poll<io::Result<Self::Conn>> {
+        let Ok(mut slot) = self.in_flight.lock() else {
+            return Poll::Ready(Err(io::Error::other("quic in-flight lock poisoned")));
+        };
+        let endpoint = self.endpoint.clone();
+        let server_addr = self.server_addr;
+        let server_name = self.server_name.clone();
+        let future = slot.get_or_insert_with(|| {
+            Box::pin(async move {
+                let connecting = endpoint
+                    .connect(server_addr, &server_name)
+                    .map_err(|error| io::Error::other(format!("quic connect: {error}")))?;
+                let connection = connecting
+                    .await
+                    .map_err(|error| io::Error::other(format!("quic handshake: {error}")))?;
+                let peer = connection.remote_address();
+                let (send, recv) = connection
+                    .open_bi()
+                    .await
+                    .map_err(|error| io::Error::other(format!("quic open stream: {error}")))?;
+                Ok::<QuicStreamConnection, io::Error>(QuicStreamConnection::new(
+                    send,
+                    recv,
+                    Some(peer),
+                ))
+            })
+        });
+        match future.as_mut().poll(cx) {
+            Poll::Pending => Poll::Pending,
+            Poll::Ready(result) => {
+                slot.take();
+                Poll::Ready(result.map(|connection| Box::new(connection) as Self::Conn))
+            }
+        }
     }
 }
 

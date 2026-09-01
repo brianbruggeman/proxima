@@ -36,4 +36,4 @@ pub mod stream_listener;
 #[cfg(feature = "quinn-compat")]
 pub use endpoint::{Endpoint, dev_server_config};
 #[cfg(feature = "quinn-compat")]
-pub use stream_listener::{QuicListener, QuicStreamConnection};
+pub use stream_listener::{QuicListener, QuicStreamConnection, QuicUpstream};
