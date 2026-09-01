@@ -81,6 +81,20 @@ use rand::{RngExt, TryRng};
 /// of an outbound Version Negotiation packet.
 const QUIC_V1_VERSION: [u8; 4] = [0x00, 0x00, 0x00, 0x01];
 
+/// Default bound on the accept-notification channel (`Listener::accept_tx`)
+/// for [`Listener::listen_protocol`] callers that don't have a more specific
+/// figure. One message per newly accepted connection; sized generously above
+/// a single handshake burst so `OverflowPolicy::Drop` (see `ingest_datagram`)
+/// engages only when a caller stops draining `accept_rx` entirely, not under
+/// routine load.
+pub const DEFAULT_ACCEPT_CHANNEL_CAPACITY: usize = 1024;
+
+/// Counts every `NewInitial` accept notification dropped because
+/// `accept_tx` was full — the pressure observable for `Listener`'s
+/// accept-channel `OverflowPolicy::Drop`.
+pub static ACCEPT_CHANNEL_DROPPED: proxima_telemetry::metric::Counter =
+    proxima_telemetry::metric::Counter::new("proxima_quic.native.accept_channel_dropped");
+
 /// Listener-level errors. No `Io` variant, deliberately: this listener
 /// never touches a socket (see the module header), so every failure it
 /// can report is either the caller's `accept_fn` refusing a new
@@ -171,7 +185,10 @@ pub struct Listener<P: TlsProvider> {
     /// awaits to learn of new connections (replaces a pull-style
     /// `take_accepted` queue — the caller no longer needs to poll the
     /// listener itself to observe accepts).
-    accept_tx: mpsc::UnboundedSender<ConnectionHandle>,
+    /// Bounded (`OverflowPolicy::Drop`, see `ingest_datagram`'s send site):
+    /// this listener is a sans-IO state machine driven from a synchronous
+    /// call path, so it cannot await capacity.
+    accept_tx: mpsc::Sender<ConnectionHandle>,
     /// Queued Version Negotiation replies (RFC 9000 §6/§17.2.1) — a
     /// peer offering a version we don't speak gets a connectionless VN
     /// packet, staged here by `on_datagram` (which cannot itself emit
@@ -232,9 +249,10 @@ pub enum DatagramIngest {
 impl<P: TlsProvider> Listener<P> {
     /// Construct an I/O-free listener. `accept_tx` is the push side of
     /// the accept-notification channel; a `NewInitial` classification
-    /// sends the freshly accepted handle into it.
+    /// sends the freshly accepted handle into it. Bounded — see the
+    /// `accept_tx` field doc for the overflow policy.
     #[must_use]
-    pub fn new(accept_fn: AcceptFn<P>, accept_tx: mpsc::UnboundedSender<ConnectionHandle>) -> Self {
+    pub fn new(accept_fn: AcceptFn<P>, accept_tx: mpsc::Sender<ConnectionHandle>) -> Self {
         Self {
             // Fixed 8-byte local SCIDs (see generate_local_scid below)
             // → EndpointDemux short-header dispatch goes through the
@@ -268,12 +286,29 @@ impl<P: TlsProvider> Listener<P> {
         accept_fn: AcceptFn<P>,
     ) -> (
         DatagramProtocolListenProtocol<impl Fn() -> Self + Send + Sync + 'static, Self>,
-        mpsc::UnboundedReceiver<ConnectionHandle>,
+        mpsc::Receiver<ConnectionHandle>,
     )
     where
         P: Send + 'static,
     {
-        let (accept_tx, accept_rx) = mpsc::unbounded();
+        Self::listen_protocol_with_capacity(label, accept_fn, DEFAULT_ACCEPT_CHANNEL_CAPACITY)
+    }
+
+    /// [`Self::listen_protocol`] with an explicit accept-channel bound
+    /// instead of [`DEFAULT_ACCEPT_CHANNEL_CAPACITY`].
+    #[must_use]
+    pub fn listen_protocol_with_capacity(
+        label: impl Into<String>,
+        accept_fn: AcceptFn<P>,
+        accept_channel_capacity: usize,
+    ) -> (
+        DatagramProtocolListenProtocol<impl Fn() -> Self + Send + Sync + 'static, Self>,
+        mpsc::Receiver<ConnectionHandle>,
+    )
+    where
+        P: Send + 'static,
+    {
+        let (accept_tx, accept_rx) = mpsc::channel(accept_channel_capacity);
         let build = move || Self::new(Arc::clone(&accept_fn), accept_tx.clone());
         (DatagramProtocolListenProtocol::new(label, build), accept_rx)
     }
@@ -414,7 +449,14 @@ impl<P: TlsProvider> Listener<P> {
                 };
                 self.connections.insert(handle.0, entry);
                 self.handle_order.push(handle.0);
-                let _ = self.accept_tx.unbounded_send(handle);
+                // Synchronous, sans-IO call path — cannot await capacity.
+                // Drop-and-count on full: the connection is already
+                // registered above regardless, so a dropped notification
+                // never loses the connection itself, only this listener's
+                // fast-path nudge to whatever is watching `accept_rx`.
+                if self.accept_tx.try_send(handle).is_err() {
+                    ACCEPT_CHANNEL_DROPPED.add(1, &[]);
+                }
                 Ok(DatagramIngest::Accepted { handle, error })
             }
             DatagramClassification::UnsupportedVersion {

@@ -55,6 +55,35 @@ pub struct ServerConfig {
     /// for high-churn servers; raise for high-RTT peers.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub handshake_completion_micros: Option<u64>,
+    /// Bound on the accept-notification channel from the QUIC transport
+    /// (`proxima-quic`'s `Listener`) to this H3 driver's `accept_rx` — one
+    /// message per newly accepted connection. Overflow drops the
+    /// notification and counts it (`OverflowPolicy::Drop`): the QUIC layer
+    /// is `ingest_datagram`'s sans-IO, synchronous call path, so it cannot
+    /// await capacity, and the H3 driver self-heals a dropped notification
+    /// the next time that connection's handle is otherwise driven (see
+    /// `drive_dirty_connections`), so a drop only costs one tick of
+    /// latency, never correctness.
+    #[serde(default = "default_accept_channel_capacity")]
+    pub accept_channel_capacity: usize,
+    /// Bound on the per-request dispatch-result channel (`response_tx`) that
+    /// carries a completed `Pipe::call` response back to the connection
+    /// driver. The in-flight-handler path (async, cooperatively polled)
+    /// blocks on a full channel (`OverflowPolicy::Block`) — the driver loop
+    /// drains it every tick, so this only pends the handler briefly. The
+    /// header-decode-failure path runs synchronously inside `ingest`-driven
+    /// H3 event processing and cannot await, so it drops-and-counts on full
+    /// instead (documented at its call site).
+    #[serde(default = "default_response_channel_capacity")]
+    pub response_channel_capacity: usize,
+}
+
+pub(crate) fn default_accept_channel_capacity() -> usize {
+    1024
+}
+
+pub(crate) fn default_response_channel_capacity() -> usize {
+    1024
 }
 
 impl Default for ServerConfig {
@@ -75,6 +104,8 @@ impl Default for ServerConfig {
             handshake_early_data_max_datagrams: None,
             handshake_early_data_hold_micros: None,
             handshake_completion_micros: None,
+            accept_channel_capacity: default_accept_channel_capacity(),
+            response_channel_capacity: default_response_channel_capacity(),
         }
     }
 }
