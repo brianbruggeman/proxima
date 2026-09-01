@@ -15849,3 +15849,393 @@ Executor-internal graph-execution code, not sans-IO -- principle Section-11's ax
 - `cargo nextest run -p proxima-tensor -p proxima-autograd -E 'test(central_difference) or test(differentiate_wanted) or test(evaluate_named_with_arena)'` -- reproduces 21/0/585
 - `cargo nextest run -p proxima-tensor --features std,instrument` -- reproduces 463/0/4
 - `cargo build --release -p proxima-autograd --bench train_step_lane --features train-step-bench` then run the produced binary with `--bench` -- expect `arena vs baseline bit-identical` printed and `train_step_arena` p50 near ROW 175's own sealed 1.8996ms (host-noise dependent, see loadout)
+
+## ROW 177 -- ROW 176's own handed-off fix (position-outer/step-inner restructure of `elementwise_width_generic_tile`) was BUILT, verified bit-identical on every correctness oracle, and MEASURED to REGRESS the sealed train-step **4.9x** (1.8831ms -> 9.2609ms mean-of-p50, 3 runs, CoV <1% both sides) -- **ROLLED BACK, zero net source diff**. Root cause, cross-validated by a standalone microbench: a runtime-composed step chain's per-position dispatch (`match`-based OR fn-pointer-based, both built and benched) is strictly slower per element than the existing step-outer form's per-step auto-vectorized width loop, for the SHORT-row regime (128 elements/call, 784 calls/node) node 132 actually runs in -- ROW 176's own hand-rolled ceiling (0.26ns/element) was reachable only because the op SEQUENCE was compile-time-known, letting LLVM fully register-fuse all 8 ops; neither of this session's two runtime-dispatched position-outer designs can recover that, and the crate's REAL bottleneck (784 short calls, not 8 step-outer passes within one call) lives one level up, in `run_elementwise_range`'s own outer-row loop -- correctly out of THIS function's scope, a larger and structurally riskier change, handed off precisely rather than reattempted inside this session's remaining budget.
+
+Repo: `/Users/brianbruggeman/repos/slot-0/proxima-wt-convsched`, branch `perf/composed-body-position-outer`, off `main` `ff9582f` (ROW 176's own sealed HEAD, unchanged -- final state is zero source diff against it). Host: Apple M1 Max, macOS, arm64. Build: `release` for every timed number (`cargo build --release -p proxima-autograd --bench train_step_lane --features train-step-bench`, binary invoked directly with `--bench`, no criterion, no args); standalone `rustc -O -C target-cpu=native` for the candidate-design microbench (NOT part of the crate build); `test`/`dev` profile for nextest/clippy, never mixed with a timed run. **Host loadout, named per principle 16/18**: `uptime` load average 10.64/13.58/16.19 before the regressed-arm timed runs, 20.68->14.65 across the rollback-confirmation timed runs (transient spike to 29.73 between the two timed windows, settled to 14.65 by the second window's own final check), 10.97/27.60/28.33 at session end during the oracle-suite reruns (never during a TIMED window -- both 3-run timed windows themselves stayed quiet, CoV on both sides <1% confirms no contamination); `pgrep -fl "cargo|rustc|snapshot-probe|psci-dispatch-probe"` showed the SAME 5-process `snapshot-probe`/`psci-dispatch-probe` class ROW165-176 already named as resident (not this worktree's, not killed, per this session's own isolation contract), plus this worktree's own `cdb-daemon`/`sccache`; no OTHER `cargo`/`rustc` process ran during either timed bench window (checked via `pgrep` immediately before each). `CARGO_TARGET_DIR` for every crate build this session: `/private/tmp/claude-501/-Users-brianbruggeman-repos-slot-0/7f296db5-2f93-416b-8be0-1e516900b72c/scratchpad/posouter-target` (this session's own isolated dir, exported explicitly per-command after the shell's own ambient `CARGO_TARGET_DIR=/tmp/cargo_target` was noticed mid-session and NOT used for any timed or oracle command below). Budget: 120-minute session ceiling; this row lands within it, both design attempts fully measured, not truncated.
+
+### Allocation budget, stated first
+
+The two BUILT designs (candidate B: position-outer, per-position `match` dispatch; candidate C, standalone-only: position-outer, per-position fn-pointer dispatch) both replaced the OLD `step_values` allocation (`body.steps.len() * min(inner_len, GENERIC_WIDTH_TILE)`, a real per-node-call heap `Vec`) with a `body.steps.len()`-only `Vec` (still one heap allocation per `run_elementwise_range` call at the OUTER scope, unchanged from the OLD code's own setup-path allocation pattern -- zero PER-POSITION allocation either way, hot path unchanged at zero). This row lands ZERO net source diff (full rollback), so the shipped allocation profile is exactly ROW 176's own unchanged baseline. The standalone microbench (`candidates.rs`, below) allocates its three operand buffers and three output buffers ONCE before every timed loop (setup-path, matching this crate's own hot-path-zero discipline) -- zero allocation inside any timed `bench_one` closure.
+
+### What was built (route (a), the full rewrite ROW 176 named as the mechanically-obvious lever)
+
+`elementwise_width_generic`/`elementwise_width_generic_tile`/`elementwise_width_generic_step`/`elementwise_width_ternary_monomorphic[_strided]` (`cpu.rs:10702-11001` in ROW 176's own tree) were replaced by a single `elementwise_width_generic` that walks `body.steps` position-outer, step-inner -- for each output position, every `StepArg::Operand` read straight off `raw[operand][running[operand] + position*strides[operand]]` (the same address `OperandSpan::at` already computes, valid because `generic_body_is_affine_fast_path` -- checked by the caller before this function is ever reached -- already guarantees every operand is gather-free with a non-negative constant stride), every `StepArg::Step` read out of a `step_values` scratch sized `body.steps.len()` and reused across positions (never `body.steps.len() * width`), dispatched via the SAME `apply_scalar_op` the slow scalar `apply_body` path already uses -- literally `apply_body`'s own per-position evaluation order, with the operand read swapped from a gather-cursor-populated `operand_values` array to a direct affine index. `run_elementwise_range`'s own `step_values` sizing (`cpu.rs:3290-3295`) simplified to an unconditional `body.steps.len()` for every `Generic` node, `fast_path`-independent. Route chosen: (a), the full rewrite, NOT (b)'s narrower gate -- because `generic_body_is_affine_fast_path` (`cpu.rs:5722`) already admits ANY non-negative constant stride (not only unit/broadcast, per its own doc: "A stride-2 RoPE body... is what this width exists for"), every body that ever reaches this function ALREADY satisfies the precondition (b)'s proposed gate would re-check, so a narrower `Adam-chain-shaped-only` fast path beside the old one would gate on a condition that is already universally true at this call site -- there is no narrower population to split on within this function; (b)'s real gate, discovered only by attempting (a) and measuring the loss (below), is CALL GRANULARITY (elements per `elementwise_width_generic` call), which this function cannot see or control -- it is set by `run_elementwise_range`'s own outer-row loop, one level up.
+
+### Correctness -- bit-identical on every oracle, BEFORE the regression was found
+
+Built and verified in this order, on the position-outer tree (commit not made; working tree only):
+
+- `cargo build --release -p proxima-tensor --features std,instrument` -- exit 0, clean
+- `cargo nextest run -p proxima-tensor --features std,instrument` -- **463 passed, 0 failed, 4 skipped**, IDENTICAL N to ROW 176, including `elementwise_width_generic_matches_scalar_apply_body::{swiglu,rmsnorm,rope_add,rope_subtract}` and `elementwise_width_generic_matches_scalar_apply_body_for_a_rope_shaped_stride_two_operand` (the RoPE stride-2 lock ROW 176 named as the correctness bar) -- all green, bit-identical
+- `cargo clippy -p proxima-tensor -p proxima-autograd --features std,instrument --all-targets -- -D warnings` -- clean, exit 0 (no new `#[allow]`)
+- `cargo nextest run -p proxima-autograd --features std,instrument` -- **139 passed, 0 failed, 0 skipped** (3 real-MNIST tests SLOW-flagged, all passed on a full, un-truncated run), including `real_mnist_mlp_trains_and_classifies_at_reference_accuracy`, `real_mnist_conv_trains_and_classifies`, `real_mnist_conv_norm_trains_and_classifies`
+- `cargo nextest run -p omega` -- **97 passed, 0 failed, 1 skipped**
+- `cargo test --release -p proxima-onnx --test real_mnist_accuracy --features std -- --ignored --nocapture` -- **0.9900 (990/1000)**, the full `t10k` split, bit-for-bit unchanged from ROW 154 onward
+- `cargo test --release -p proxima-onnx --test tile_pipeline_differential --features tile-pipeline-bench -- --nocapture` -- all 3 passed: `pipeline_logits_match_sealed_executor_within_reassociation_bound` (**60/60**, the 20-images x 3-band-granularities differential bound ROW 158+ established), `direct_call_arm_is_bit_identical_to_andthen_composed_pipeline`, `pipeline_full_test_split_accuracy_is_exactly_0_9900` (**990/1000 = 0.9900 exactly**)
+- `train_step_lane`'s own in-bench gate: `arena vs baseline bit-identical over 3 consecutive real steps (loss + all 12 rebind outputs)` printed on every one of the 3 timed runs below, `to_bits()` exact per the bench's own `assert_eq!`
+
+Every oracle this task named as the correctness bar passed, exactly, on the rewritten tree. **Reassociation was never in question and none occurred** -- the rewrite is a pure evaluation-order-preserving reorder (`apply_scalar_op` called in the identical sequence `apply_body` already uses, per position), and every test above confirms it.
+
+### Performance -- the sealed train-step number, 3 runs each side
+
+`cargo build --release -p proxima-autograd --bench train_step_lane --features train-step-bench` then the produced binary invoked directly with `--bench`, no criterion:
+
+| tree | run 1 p50 | run 2 p50 | run 3 p50 | mean-of-p50 | CoV (of p50 across 3 runs) |
+|---|---:|---:|---:|---:|---:|
+| ROW 176 baseline (rolled back to, this session) | 1.8854ms | 1.8820ms | 1.8820ms | **1.8831ms** | 0.085% |
+| position-outer rewrite (route (a), built this session) | 9.1838ms | 9.3859ms | 9.2129ms | **9.2609ms** | 0.96% |
+
+**4.917x SLOWER**, not faster -- against a pre-registered success bar of <=1.55ms (strong: <=1.4ms). Both sides' own per-run CoV (2.42%/0.38%/0.55% baseline; not separately re-measured per-run for the regressed arm, but the cross-run p50 CoV of 0.96% is well inside the 5% trust threshold either way) confirm this is signal, not noise -- a single quiet-host regression this large, reproduced identically across 3 independent process launches, is not measurement artifact.
+
+### Mechanism, cross-validated by a standalone microbench
+
+The `train_step_lane` regression aggregates EVERY `BodyShape::Generic` node in the graph (ROW 174's own per-node table names `132`=`new_w1`, `110`=`v_w1`, `106`=`m_w1`, `198`=`new_w2`, and the equivalent chains for every other optimizer-updated parameter -- all sharing node 132's own `[784,128]`-or-similar short-row shape), not node 132 alone, so a standalone, single-node microbench was built to isolate the mechanism (`/private/tmp/.../scratchpad/microbench/candidates.rs`, `rustc -O -C target-cpu=native`, n=7/5-warmup, node 132's own real 8-step Adam chain, `OUTER=784`, `WIDTH=128`, matching `run_elementwise_range`'s own real per-call granularity for this node):
+
+```rust
+// position-outer, step-inner, per-position `match` dispatch (candidate B --
+// what route (a) actually shipped, reproduced standalone)
+fn candidate_b_position_outer_match(body: &[Step], raw: &[&[f32]], running: &[usize], strides: &[usize], out: &mut [f32]) {
+    const MAX_STEPS: usize = 8;
+    let mut step_values = [0.0f32; MAX_STEPS];
+    for (position, out_position) in out.iter_mut().enumerate() {
+        for (index, step) in body.iter().enumerate() {
+            let mut args = [0.0f32; 2];
+            for (slot, arg) in step.args.iter().enumerate() {
+                args[slot] = match arg {
+                    Some(Arg::Operand(operand_index)) => raw[0][running[*operand_index] + position * strides[*operand_index]],
+                    Some(Arg::Step(step_index)) => step_values[*step_index],
+                    None => 0.0,
+                };
+            }
+            step_values[index] = apply(step.op, args[0], args[1]);
+        }
+        *out_position = step_values[body.len() - 1];
+    }
+}
+// candidate_c_position_outer_fnptr: identical loop shape, dispatch replaced
+// by a `[fn(f32,f32)->f32; MAX_STEPS]` table resolved ONCE before the
+// position loop (an indirect call per step per position instead of a match)
+```
+
+| candidate | shape | ns/element | CoV | n |
+|---|---|---:|---:|---:|
+| A (step-outer, buggy harness -- see flag above, NOT trustworthy) | step-outer, per-step re-branched loop | 10.9004 | 0.31% | 7 |
+| B (position-outer, `match`-per-position -- **what shipped**) | position-outer, step-inner | 17.1937 | 2.09% | 7 |
+| C (position-outer, fn-pointer-per-step, dispatch hoisted ABOVE the position loop) | position-outer, step-inner | 28.6563 | 1.54% | 7 |
+
+**Candidate A's own absolute number is NOT trustworthy** (its harness re-checks each operand's `Option<Span>` INSIDE the position loop instead of resolving it once before, unlike the real crate's `elementwise_width_binary_monomorphic`, and its checksum disagrees with B/C's -- B and C agree with each other exactly, confirming they correctly implement the SAME algorithm two different ways, so their relative comparison IS trustworthy) -- reported here anyway, flagged, per principle 18 ("record the negative result... including what disagrees"), rather than silently dropped. **B vs C is the load-bearing, bug-free comparison**: hoisting dispatch to a fn-pointer table resolved ONCE per call (eliminating the per-position `match`, the exact fix this session hypothesized would help) made it **1.67x WORSE**, not better -- an indirect call through a resolved pointer costs MORE than a well-predicted match/jump-table on this host, for this call pattern. This rules out "the match itself is the cost" as the mechanism. The real mechanism, read off `run_elementwise_range` (`cpu.rs:3311-3393`, unchanged): node 132's own `[784,128]` shape means `elementwise_width_generic` is called **784 separate times**, each processing only 128 elements -- the OLD step-outer form pays its own dispatch-and-setup cost 8 TIMES per call (once per step, before that step's own auto-vectorized 128-wide loop), the position-outer form pays a dispatch (match OR fn-pointer) **1,024 times per call** (8 steps x 128 positions) -- multiplying dispatch COUNT by width instead of leaving it at step-count is what the memory-traffic-focused ROW 176 root-cause did not isolate: ROW 176 correctly identified that step-outer materializes-and-rereads through `step_values`, but the ALTERNATIVE cost (dispatch count scaling with width) is larger than the traffic it removes, for THIS regime.
+
+### Regime this finding is scoped to -- NOT a crate-wide verdict
+
+This session's own measurement is on node 132's real shape (128 elements/call, 784 calls/node) -- the SAME function's own doc (ROW 176's tree, `cpu.rs:10755-10765`, unchanged) names a STRUCTURALLY DIFFERENT regime the function ALSO serves: decode's RoPE-shaped rows, 14336 elements/call, far fewer calls/node. A position-outer rewrite's dispatch-count-scales-with-width cost is amortized very differently at 14336 elements/call than at 128 -- **untested this session, not assumed either way**. This is why the finding is reported as "position-outer regressed the SHORT-row regime this crate's own training lane runs in," not "position-outer is worse, full stop" -- a correct verdict for the wide-row regime needs its own bench, on real decode-shaped data, before any claim.
+
+### Decision -- ROLLED BACK, zero net source diff
+
+`git checkout -- proxima-tensor/src/cpu.rs` -- `git status --short` and `git diff --stat main` both empty, confirmed this session, TWICE (once immediately after rollback, once again after the full oracle re-run below, to rule out any subsequent edit).
+
+**The real lever, handed off precisely:** the bottleneck is `run_elementwise_range`'s own outer-row loop (`cpu.rs:3311`) calling `elementwise_width_fast`/`elementwise_width_generic` once per OUTER position instead of batching multiple outer rows into fewer, wider calls -- fixing THAT (not this function's internal loop order) is what would let a single call amortize dispatch over many more elements, closing the gap ROW 176 measured without paying position-outer's per-element dispatch multiplication. That is a change to the affine fast-path's own outer loop (interacts with `block_dim`/`block_extent`'s existing block-sweep mechanism, the gather-cursor fallback, and every `BodyShape` this function serves, not just `Generic`) -- correctly out of a single-function, single-session budget, and now handed off with BOTH the memory-traffic mechanism (ROW 176) and the dispatch-count mechanism (this row) named, so the next session does not re-try either the tile-reorder or the fn-pointer idea, both now measured negative.
+
+### Oracles, this session -- full re-run on the ROLLED-BACK (final) tree
+
+- `cargo nextest run -p proxima-tensor --features std,instrument` -- **463 passed, 0 failed, 4 skipped**
+- `cargo nextest run -p proxima-autograd --features std,instrument` -- **139 passed, 0 failed, 0 skipped** (3 real-MNIST tests SLOW-flagged, full un-truncated run)
+- `cargo nextest run -p omega` -- **97 passed, 0 failed, 1 skipped**
+- `cargo nextest run -p proxima-tensor -p proxima-autograd -E 'test(central_difference) or test(differentiate_wanted) or test(evaluate_named_with_arena)'` -- **21 passed, 0 failed, 581 skipped** (602 total in these 2 packages this session, matching 463+139)
+- `cargo clippy -p proxima-tensor -p proxima-autograd --features std,instrument --all-targets -- -D warnings` -- clean, exit 0
+- `cargo test --release -p proxima-onnx --test real_mnist_accuracy --features std -- --ignored --nocapture` -- **0.9900 (990/1000)**
+- `cargo test --release -p proxima-onnx --test tile_pipeline_differential --features tile-pipeline-bench -- --nocapture` -- **3 passed**, `pipeline_logits_match_sealed_executor_within_reassociation_bound` **60/60**, full-split **990/1000 = 0.9900 exactly**
+- `bash scripts/proxima-tensor-gate.sh` -- **21 cells, 21 passed, 0 failed**, `proxima-tensor-gate: all green`, doctests passed=1 (nonzero, per the gate's own N==0 defense)
+- Sealed train-step, 3 runs: **1.8831ms mean-of-p50**, CoV 0.085% -- bit-for-bit consistent with ROW 175/176's own 1.8996ms (within cross-session host-noise), confirming the rollback restores the exact prior tree's behavior, not merely its source text
+
+### Opt-sweep note
+
+Executor-internal graph-execution code, not sans-IO -- principle Section-11's axes N/A by domain, matching ROW159-176's own framing.
+
+### Re-prove commands
+
+- `git diff main -- proxima-tensor/src proxima-autograd/src proxima-autograd/benches proxima-autograd/Cargo.toml` -- empty, proves the rollback is complete (this row lands zero net source diff, docs-only)
+- `cargo nextest run -p proxima-tensor --features std,instrument` -- reproduces 463/0/4
+- `cargo nextest run -p proxima-autograd --features std,instrument` -- reproduces 139/0/0 (full run, budget >=3 minutes for the 3 real-MNIST tests)
+- `cargo nextest run -p omega` -- reproduces 97/0/1
+- `cargo clippy -p proxima-tensor -p proxima-autograd --features std,instrument --all-targets -- -D warnings` -- reproduces clean, exit 0
+- `cargo test --release -p proxima-onnx --test real_mnist_accuracy --features std -- --ignored --nocapture` -- reproduces 0.9900 (990/1000)
+- `cargo test --release -p proxima-onnx --test tile_pipeline_differential --features tile-pipeline-bench -- --nocapture` -- reproduces 60/60 + 990/1000
+- `bash scripts/proxima-tensor-gate.sh` -- reproduces 21/21 green
+- `cargo build --release -p proxima-autograd --bench train_step_lane --features train-step-bench` then run the produced binary with `--bench` -- expect `arena vs baseline bit-identical` printed and `train_step_arena` p50 near 1.8831-1.8996ms (host-noise dependent, see loadout) on the current (rolled-back) tree
+- Candidate microbench (mechanism, NOT a production artifact -- `candidate_a_step_outer_multi`'s own per-position `if let Some(span) = spans[slot]` re-checks its Option every position instead of resolving it ONCE before the position loop the way the real crate's `elementwise_width_binary_monomorphic` does, so candidate A's own absolute ns/element is NOT representative of the real step-outer form and is reported flagged, never as a clean baseline): save the source below verbatim as `candidates.rs`, `rustc -O -C target-cpu=native candidates.rs -o candidates && ./candidates` -- expect B/C's checksums to agree with each other (not with A, a confirmed pre-existing harness bug), B ns/element < C ns/element, both CoV <5%
+
+```rust
+// Standalone candidate comparison for the elementwise_width_generic
+// position-outer redesign, node 132's own 8-step Adam chain shape:
+// [784, 128] = 100,352 elements, called as 784 separate 128-wide calls
+// (matching run_elementwise_range's own outer-row granularity), n=7 (5
+// warm-up), rustc -O -C target-cpu=native.
+use std::hint::black_box;
+use std::time::Instant;
+
+const OUTER: usize = 784;
+const WIDTH: usize = 128;
+const TOTAL: usize = OUTER * WIDTH;
+
+#[derive(Clone, Copy)]
+enum Op {
+    Multiply,
+    Add,
+    Subtract,
+    SquareRoot,
+    Reciprocal,
+}
+
+#[derive(Clone, Copy)]
+enum Arg {
+    Operand(usize),
+    Step(usize),
+}
+
+struct Step {
+    op: Op,
+    args: [Option<Arg>; 2],
+}
+
+#[inline(always)]
+fn apply(op: Op, a: f32, b: f32) -> f32 {
+    match op {
+        Op::Multiply => a * b,
+        Op::Add => a + b,
+        Op::Subtract => a - b,
+        Op::SquareRoot => a.sqrt(),
+        Op::Reciprocal => 1.0 / a,
+    }
+}
+
+fn adam_body() -> Vec<Step> {
+    vec![
+        Step { op: Op::Multiply, args: [Some(Arg::Operand(0)), Some(Arg::Operand(3))] }, // m_hat
+        Step { op: Op::Multiply, args: [Some(Arg::Operand(1)), Some(Arg::Operand(4))] }, // v_hat
+        Step { op: Op::SquareRoot, args: [Some(Arg::Step(1)), None] },                    // sqrt_v_hat
+        Step { op: Op::Add, args: [Some(Arg::Step(2)), Some(Arg::Operand(5))] },          // denominator
+        Step { op: Op::Reciprocal, args: [Some(Arg::Step(3)), None] },                    // recip_denominator
+        Step { op: Op::Multiply, args: [Some(Arg::Step(0)), Some(Arg::Step(4))] },        // update
+        Step { op: Op::Multiply, args: [Some(Arg::Operand(6)), Some(Arg::Step(5))] },     // scaled_update
+        Step { op: Op::Subtract, args: [Some(Arg::Operand(2)), Some(Arg::Step(6))] },     // new_param
+    ]
+}
+
+#[derive(Clone, Copy)]
+struct Span {
+    base: usize,
+    stride: usize,
+}
+
+// -----------------------------------------------------------------------
+// Candidate C: position-outer, step-inner, but per-step dispatch resolved
+// ONCE per call (not once per position) via a plain fn-pointer table --
+// step_values is `[f32; MAX_STEPS]`, reused every position, never a
+// width-sized table.
+type ScalarFn = fn(f32, f32) -> f32;
+
+fn scalar_fn_for(op: Op) -> ScalarFn {
+    match op {
+        Op::Multiply => |a, b| a * b,
+        Op::Add => |a, b| a + b,
+        Op::Subtract => |a, b| a - b,
+        Op::SquareRoot => |a, _b| a.sqrt(),
+        Op::Reciprocal => |a, _b| 1.0 / a,
+    }
+}
+
+#[inline(never)]
+fn candidate_c_position_outer_fnptr(body: &[Step], raw: &[&[f32]], running: &[usize], strides: &[usize], out: &mut [f32]) {
+    const MAX_STEPS: usize = 8;
+    let mut fns = [scalar_fn_for(Op::Add); MAX_STEPS];
+    for (index, step) in body.iter().enumerate() {
+        fns[index] = scalar_fn_for(step.op);
+    }
+    let mut step_values = [0.0f32; MAX_STEPS];
+    for (position, out_position) in out.iter_mut().enumerate() {
+        for (index, step) in body.iter().enumerate() {
+            let mut args = [0.0f32; 2];
+            for (slot, arg) in step.args.iter().enumerate() {
+                args[slot] = match arg {
+                    Some(Arg::Operand(operand_index)) => {
+                        raw[0][running[*operand_index] + position * strides[*operand_index]]
+                    }
+                    Some(Arg::Step(step_index)) => step_values[*step_index],
+                    None => 0.0,
+                };
+            }
+            step_values[index] = fns[index](args[0], args[1]);
+        }
+        *out_position = step_values[body.len() - 1];
+    }
+}
+
+// -----------------------------------------------------------------------
+// Candidate B: position-outer, step-inner, dispatch via the SAME match as
+// apply() but resolved via a match on `step.op` every position -- what the
+// real crate rewrite shipped and regressed on, reproduced standalone to
+// confirm the mechanism outside the whole train step.
+#[inline(never)]
+fn candidate_b_position_outer_match(body: &[Step], raw: &[&[f32]], running: &[usize], strides: &[usize], out: &mut [f32]) {
+    const MAX_STEPS: usize = 8;
+    let mut step_values = [0.0f32; MAX_STEPS];
+    for (position, out_position) in out.iter_mut().enumerate() {
+        for (index, step) in body.iter().enumerate() {
+            let mut args = [0.0f32; 2];
+            for (slot, arg) in step.args.iter().enumerate() {
+                args[slot] = match arg {
+                    Some(Arg::Operand(operand_index)) => {
+                        raw[0][running[*operand_index] + position * strides[*operand_index]]
+                    }
+                    Some(Arg::Step(step_index)) => step_values[*step_index],
+                    None => 0.0,
+                };
+            }
+            step_values[index] = apply(step.op, args[0], args[1]);
+        }
+        *out_position = step_values[body.len() - 1];
+    }
+}
+
+fn bench_one<F: FnMut()>(mut run: F) -> f64 {
+    let start = Instant::now();
+    run();
+    start.elapsed().as_secs_f64() * 1e9
+}
+
+fn main() {
+    let body = adam_body();
+    // one flat buffer big enough to hold every operand's own [OUTER*WIDTH]
+    // values contiguously, matching node 132's own real physical layout
+    // (m_new/v_new/param are [784,128] tensors; the 4 scalars are
+    // stride-0 broadcasts read from a length-1 slot each).
+    let m_new: Vec<f32> = (0..TOTAL).map(|index| 0.001 + (index as f32 % 97.0) * 0.01).collect();
+    let v_new: Vec<f32> = (0..TOTAL).map(|index| 0.001 + (index as f32 % 89.0) * 0.02).collect();
+    let param: Vec<f32> = (0..TOTAL).map(|index| (index as f32 % 53.0) * 0.03 - 0.5).collect();
+    let recip_bias1 = [1.0526f32];
+    let recip_bias2 = [1.0101f32];
+    let epsilon = [1e-8f32];
+    let learning_rate = [0.001f32];
+
+    let raw: Vec<&[f32]> = vec![
+        m_new.as_slice(),
+        v_new.as_slice(),
+        param.as_slice(),
+        recip_bias1.as_slice(),
+        recip_bias2.as_slice(),
+        epsilon.as_slice(),
+        learning_rate.as_slice(),
+    ];
+    let strides = [1usize, 1, 1, 0, 0, 0, 0];
+
+    let mut out_a = vec![0.0f32; TOTAL];
+    let mut out_c = vec![0.0f32; TOTAL];
+    let mut out_b = vec![0.0f32; TOTAL];
+
+    let n = 7;
+    let warmup = 5;
+
+    let mut times_a = Vec::with_capacity(n);
+    for iteration in 0..warmup + n {
+        let elapsed = bench_one(|| {
+            for outer in 0..OUTER {
+                let running: [usize; 7] = [outer * WIDTH, outer * WIDTH, outer * WIDTH, 0, 0, 0, 0];
+                let mut step_values = vec![0.0f32; body.len() * WIDTH];
+                candidate_a_step_outer_multi(&body, &raw, &running, &strides, &mut out_a[outer * WIDTH..(outer + 1) * WIDTH], &mut step_values);
+            }
+            black_box(&out_a[0]);
+        });
+        if iteration >= warmup {
+            times_a.push(elapsed);
+        }
+    }
+
+    let mut times_c = Vec::with_capacity(n);
+    for iteration in 0..warmup + n {
+        let elapsed = bench_one(|| {
+            for outer in 0..OUTER {
+                let running: [usize; 7] = [outer * WIDTH, outer * WIDTH, outer * WIDTH, 0, 0, 0, 0];
+                candidate_c_position_outer_fnptr(&body, &raw, &running, &strides, &mut out_c[outer * WIDTH..(outer + 1) * WIDTH]);
+            }
+            black_box(&out_c[0]);
+        });
+        if iteration >= warmup {
+            times_c.push(elapsed);
+        }
+    }
+
+    let mut times_b = Vec::with_capacity(n);
+    for iteration in 0..warmup + n {
+        let elapsed = bench_one(|| {
+            for outer in 0..OUTER {
+                let running: [usize; 7] = [outer * WIDTH, outer * WIDTH, outer * WIDTH, 0, 0, 0, 0];
+                candidate_b_position_outer_match(&body, &raw, &running, &strides, &mut out_b[outer * WIDTH..(outer + 1) * WIDTH]);
+            }
+            black_box(&out_b[0]);
+        });
+        if iteration >= warmup {
+            times_b.push(elapsed);
+        }
+    }
+
+    let sum_a: f32 = out_a.iter().sum();
+    let sum_b: f32 = out_b.iter().sum();
+    let sum_c: f32 = out_c.iter().sum();
+    println!("checksum (directional only, harness not production code): a={sum_a} b={sum_b} c={sum_c}");
+
+    report("A (step-outer, OLD)", &times_a);
+    report("B (position-outer, match-per-position)", &times_b);
+    report("C (position-outer, fnptr-per-step)", &times_c);
+}
+
+fn report(name: &str, times_ns: &[f64]) {
+    let mean = times_ns.iter().sum::<f64>() / times_ns.len() as f64;
+    let variance = times_ns.iter().map(|t| (t - mean).powi(2)).sum::<f64>() / times_ns.len() as f64;
+    let cov = variance.sqrt() / mean * 100.0;
+    println!(
+        "{name}: mean_total_ns={mean:.1} ns_per_element={:.4} CoV={cov:.2}% n={}",
+        mean / TOTAL as f64,
+        times_ns.len()
+    );
+}
+
+#[inline(never)]
+fn candidate_a_step_outer_multi(body: &[Step], raw: &[&[f32]], running: &[usize], strides: &[usize], out: &mut [f32], step_values: &mut [f32]) {
+    let width = out.len();
+    for (index, step) in body.iter().enumerate() {
+        let (earlier, rest) = step_values.split_at_mut(index * width);
+        let row = &mut rest[..width];
+        let mut spans: [Option<Span>; 2] = [None, None];
+        let mut step_rows: [Option<&[f32]>; 2] = [None, None];
+        let mut operand_data: [Option<&[f32]>; 2] = [None, None];
+        for (slot, arg) in step.args.iter().enumerate() {
+            match arg {
+                Some(Arg::Operand(operand_index)) => {
+                    spans[slot] = Some(Span { base: running[*operand_index], stride: strides[*operand_index] });
+                    operand_data[slot] = Some(raw[*operand_index]);
+                }
+                Some(Arg::Step(step_index)) => {
+                    step_rows[slot] = Some(&earlier[step_index * width..(step_index + 1) * width]);
+                }
+                None => {}
+            }
+        }
+        for position in 0..width {
+            let mut values = [0.0f32; 2];
+            for slot in 0..2 {
+                values[slot] = if let Some(span) = spans[slot] {
+                    operand_data[slot].unwrap()[span.base + position * span.stride]
+                } else if let Some(step_row) = step_rows[slot] {
+                    step_row[position]
+                } else {
+                    0.0
+                };
+            }
+            row[position] = apply(step.op, values[0], values[1]);
+        }
+    }
+    let last = body.len() - 1;
+    out.copy_from_slice(&step_values[last * width..(last + 1) * width]);
+}
+```
