@@ -138,8 +138,10 @@ use core::sync::atomic::AtomicU64;
 use core::sync::atomic::Ordering;
 #[cfg(feature = "epilogue-profile-probe")]
 use core::sync::atomic::{AtomicU64 as EpilogueProfileAtomicU64, Ordering as EpilogueProfileOrdering};
-#[cfg(feature = "epilogue-fuse-probe")]
-use core::sync::atomic::{AtomicU64 as EpilogueFuseAtomicU64, Ordering as EpilogueFuseOrdering};
+// default-on since the ROW 186 promotion (`docs/discipline.md`) -- the
+// counters and the `AtomicBool` bench/test escape valve both need this
+// import unconditionally now, not only under a probe feature.
+use core::sync::atomic::{AtomicBool as EpilogueFuseAtomicBool, AtomicU64 as EpilogueFuseAtomicU64, Ordering as EpilogueFuseOrdering};
 use std::borrow::Cow;
 use std::thread;
 use std::sync::atomic::AtomicUsize;
@@ -734,7 +736,6 @@ fn run_resolved_nodes_in_arena(arena: &mut StaticArena) -> Result<(), TensorErro
 /// -- built once per [`run_resolved_nodes_in_arena`] call from
 /// `arena.resolved`, execution-level only (reads what `bind::bind` already
 /// produced, never calls it). Feeds [`is_post_reduce_epilogue`]'s lookup.
-#[cfg(any(feature = "epilogue-profile-probe", feature = "epilogue-fuse-probe"))]
 fn epilogue_profile_reduce_flags(resolved: &[BoundOp], node_count: usize) -> Vec<bool> {
     let mut flags = vec![false; node_count];
     for computed in resolved {
@@ -766,7 +767,6 @@ fn epilogue_profile_reduce_flags(resolved: &[BoundOp], node_count: usize) -> Vec
 /// varies over fewer axes than the reduce operand it accompanies, while
 /// still rejecting a second full-shape tensor (a residual add) whose
 /// strides are nonzero on every axis the reduce operand's are.
-#[cfg(any(feature = "epilogue-profile-probe", feature = "epilogue-fuse-probe"))]
 fn is_post_reduce_epilogue(computed: &BoundOp, reduce_nodes: &[bool]) -> bool {
     let BoundOpKind::Elementwise { operands, .. } = &computed.kind else {
         return false;
@@ -801,7 +801,6 @@ fn is_post_reduce_epilogue(computed: &BoundOp, reduce_nodes: &[bool]) -> bool {
 /// not fuse this node at all" -- the UNFUSED two-pass path runs instead,
 /// never ROW 183's own interpreted `apply_body`-per-element evaluator
 /// (measured +17.4% e2e slower).
-#[cfg(feature = "epilogue-fuse-probe")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum EpilogueKind {
     /// `max(reduce + bias, zero)`.
@@ -812,12 +811,10 @@ enum EpilogueKind {
     Norm,
 }
 
-#[cfg(feature = "epilogue-fuse-probe")]
 fn epilogue_step_is(step: &bind::BodyStep, op: ScalarOp, args: &[StepArg]) -> bool {
     step.op == op && step.args.as_slice() == args
 }
 
-#[cfg(feature = "epilogue-fuse-probe")]
 fn detect_epilogue_kind(body: &ComposedBody) -> Option<EpilogueKind> {
     use StepArg::{Operand, Step};
     let steps = body.steps.as_slice();
@@ -858,7 +855,6 @@ fn detect_epilogue_kind(body: &ComposedBody) -> Option<EpilogueKind> {
 /// monotonically-incrementing slice instead of re-deriving
 /// [`bind::Layout::offset_of`] every element. `false` sends the candidate
 /// back to the unfused path (never the interpreted one).
-#[cfg(feature = "epilogue-fuse-probe")]
 fn epilogue_is_contiguous_row_major(layout: &bind::Layout, extents: &[u64]) -> bool {
     if layout.base != 0 || layout.strides.len() != extents.len() {
         return false;
@@ -882,7 +878,6 @@ fn epilogue_is_contiguous_row_major(layout: &bind::Layout, extents: &[u64]) -> b
 /// once per outer-loop column instead of once per element. `Err(())` means
 /// two operands disagree on which axis they vary over -- an unsupported shape,
 /// sent back to the unfused path.
-#[cfg(feature = "epilogue-fuse-probe")]
 fn epilogue_hoist_axis(operands: &[(NodeId, bind::Layout, Option<bind::Lookup>)], reduce_slot: usize) -> Result<Option<usize>, ()> {
     let mut axis: Option<usize> = None;
     for (slot, (_, layout, _)) in operands.iter().enumerate() {
@@ -942,13 +937,15 @@ fn epilogue_hoist_axis(operands: &[(NodeId, bind::Layout, Option<bind::Lookup>)]
 ///   position this row chooses to fire at. Firing at `fire_position`
 ///   instead of the producer's own position is what makes both facts true
 ///   at once.
-#[cfg(feature = "epilogue-fuse-probe")]
 fn epilogue_fuse_plan(
     resolved: &[BoundOp],
     node_count: usize,
     effective_outputs: &[NodeId],
     quantized_weights: &BTreeMap<NodeId, QuantizedBlock>,
 ) -> BTreeMap<NodeId, (usize, usize, EpilogueKind, Option<usize>)> {
+    if !EPILOGUE_FUSE_ENABLED.load(EpilogueFuseOrdering::Relaxed) {
+        return BTreeMap::new();
+    }
     let reduce_nodes = epilogue_profile_reduce_flags(resolved, node_count);
     let mut consumer_counts: BTreeMap<NodeId, u32> = BTreeMap::new();
     let mut node_position: BTreeMap<NodeId, usize> = BTreeMap::new();
@@ -1044,14 +1041,33 @@ fn epilogue_fuse_plan(
 /// re-prove command can assert N > 0 rather than trust that the plan built
 /// above actually fired (principle "evidence": a gate that cannot report
 /// its N is not a gate).
-#[cfg(feature = "epilogue-fuse-probe")]
 static EPILOGUE_FUSE_HITS: EpilogueFuseAtomicU64 = EpilogueFuseAtomicU64::new(0);
-#[cfg(feature = "epilogue-fuse-probe")]
 static EPILOGUE_FUSE_ELEMENTS: EpilogueFuseAtomicU64 = EpilogueFuseAtomicU64::new(0);
-#[cfg(feature = "epilogue-fuse-probe")]
 static EPILOGUE_FUSE_NANOS: EpilogueFuseAtomicU64 = EpilogueFuseAtomicU64::new(0);
 
-#[cfg(feature = "epilogue-fuse-probe")]
+/// `docs/discipline.md` ROW 186's own paired-bench escape: a process-wide
+/// switch [`epilogue_fuse_plan`] consults once per `evaluate_quantized_with_scratch`
+/// call (never per element -- this is a plan-build-time gate, not a hot-path
+/// branch), defaulting to `true` now that the fusion this crate's default
+/// build runs is `EpilogueKind`'s monomorphized kernel. A future paired
+/// bench/test needing the pre-ROW-184 unfused two-pass arm for comparison
+/// calls [`set_epilogue_fuse_enabled`] rather than rebuilding the crate under
+/// a separate cargo feature -- the same in-process toggle
+/// `real_mnist_accuracy.rs`/`epilogue_fuse_alloc.rs` already reset counters
+/// through ([`epilogue_fuse_reset`]), extended to also gate the plan itself.
+static EPILOGUE_FUSE_ENABLED: EpilogueFuseAtomicBool = EpilogueFuseAtomicBool::new(true);
+
+/// Bench/test-only escape valve (see [`EPILOGUE_FUSE_ENABLED`]'s own doc):
+/// flips whether [`epilogue_fuse_plan`] fires at all, process-wide, for
+/// every `evaluate_named`/`evaluate_quantized_with_scratch` call from this
+/// point forward. Not part of this crate's taught public surface -- a
+/// caller composing tensor programs never needs this; a paired bench
+/// comparing the fused default against the unfused arm does.
+#[doc(hidden)]
+pub fn set_epilogue_fuse_enabled(enabled: bool) {
+    EPILOGUE_FUSE_ENABLED.store(enabled, EpilogueFuseOrdering::Relaxed);
+}
+
 #[must_use]
 pub fn epilogue_fuse_totals() -> (u64, u64, u64) {
     (
@@ -1061,7 +1077,6 @@ pub fn epilogue_fuse_totals() -> (u64, u64, u64) {
     )
 }
 
-#[cfg(feature = "epilogue-fuse-probe")]
 pub fn epilogue_fuse_reset() {
     EPILOGUE_FUSE_HITS.store(0, EpilogueFuseOrdering::Relaxed);
     EPILOGUE_FUSE_ELEMENTS.store(0, EpilogueFuseOrdering::Relaxed);
@@ -1091,7 +1106,6 @@ pub fn epilogue_fuse_reset() {
 /// `coordinate` is a fixed `[u64; MAX_INLINE_RANK]` array, and every hoisted
 /// scalar is a plain `f32` local — closing ROW 183's own named residual (that
 /// row's interpreter allocated 3 small `Vec`s per fusion hit).
-#[cfg(feature = "epilogue-fuse-probe")]
 fn apply_epilogue_fused_monomorphic(kind: EpilogueKind, consumer: &BoundOp, reduce_node: NodeId, hoist_axis: Option<usize>, reduce_values: &[f32], buffers: &[Option<Cow<'_, [f32]>>], output: &mut [f32]) {
     let BoundOpKind::Elementwise { operands, .. } = &consumer.kind else {
         return;
@@ -1601,11 +1615,8 @@ pub fn evaluate_quantized_with_scratch(
     // SAME plan by its own `fire_position` value, so the main loop can ask
     // "does anything fire here" in O(1) per position instead of scanning
     // the whole plan every iteration.
-    #[cfg(feature = "epilogue-fuse-probe")]
     let epilogue_fuse_plan = epilogue_fuse_plan(&resolved, program.len(), &effective_outputs, &quantized_weights);
-    #[cfg(feature = "epilogue-fuse-probe")]
     let epilogue_fuse_skip: BTreeSet<NodeId> = epilogue_fuse_plan.values().map(|(index, ..)| resolved[*index].node).collect();
-    #[cfg(feature = "epilogue-fuse-probe")]
     let epilogue_fuse_fire_at: BTreeMap<usize, Vec<NodeId>> = {
         let mut grouped: BTreeMap<usize, Vec<NodeId>> = BTreeMap::new();
         for (reduce_node, (_, fire_position, ..)) in &epilogue_fuse_plan {
@@ -1735,10 +1746,7 @@ pub fn evaluate_quantized_with_scratch(
         // matching ROW 167's "computed once, cheap to consult" skip shape
         // (never touches `bind::bind`, never touches `node_retirement`'s own
         // schedule).
-        #[cfg(feature = "epilogue-fuse-probe")]
         let epilogue_fused_away = epilogue_fuse_skip.contains(&computed.node);
-        #[cfg(not(feature = "epilogue-fuse-probe"))]
-        let epilogue_fused_away = false;
         if !epilogue_fused_away {
             #[cfg(feature = "instrument")]
             let diag_alloc_started = instrument::read_ticks();
@@ -1794,7 +1802,6 @@ pub fn evaluate_quantized_with_scratch(
         // still needs cannot have been freed first (`node_retirement`'s own
         // schedule only retires a node at ITS real last consumer's original
         // position, always >= `fire_position` by construction).
-        #[cfg(feature = "epilogue-fuse-probe")]
         if let Some(reduce_nodes) = epilogue_fuse_fire_at.get(&position) {
             for reduce_node in reduce_nodes {
                 let Some(&(consumer_index, _, kind, hoist_axis)) = epilogue_fuse_plan.get(reduce_node) else {
