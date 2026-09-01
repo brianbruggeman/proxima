@@ -6959,6 +6959,34 @@ fn run_reduce<B: Deref<Target = [f32]>>(
             width,
             out_layout,
         };
+        // ROW 209: Accelerate/AMX route for the width tile, behind the SAME
+        // `ACCELERATE_GEMM_ENABLED` toggle ROW 188/189 already gate -- see
+        // `try_run_accelerate_width_gemm`'s own doc for why this is the
+        // route that actually intercepts BGE's GEMMs (`try_run_width_tile`
+        // below never runs when this arm already returned). Declines fall
+        // straight into the existing `try_run_width_tile` call unchanged,
+        // same "try, then fall back" shape as the dot/conv routes.
+        #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+        if ACCELERATE_GEMM_ENABLED.load(EpilogueFuseOrdering::Relaxed)
+            && let Some(plan) = width_tile_plan(&width_path_context)
+        {
+            if try_run_accelerate_width_gemm(&plan, &raw, output) {
+                ACCELERATE_GEMM_HITS.fetch_add(1, EpilogueFuseOrdering::Relaxed);
+                #[cfg(feature = "instrument")]
+                {
+                    let distinct_operand_elements: u64 = raw.iter().map(|buffer| buffer.len() as u64).sum();
+                    counters.kernel_calls += 1;
+                    counters.mac_ops += leading_total * width as u64 * reduction_total;
+                    counters.operand_loads += (leading_total + width as u64) * reduction_total;
+                    counters.leading_iters += leading_total;
+                    counters.output_writes += leading_total * width as u64;
+                    counters.commit(path, distinct_operand_elements);
+                    instrument::record_reduce_path_ticks(path, instrument::elapsed_ticks(commit_started));
+                }
+                return Ok(());
+            }
+            ACCELERATE_GEMM_DECLINED.fetch_add(1, EpilogueFuseOrdering::Relaxed);
+        }
         #[cfg(feature = "instrument")]
         let width_tile_counters_before = width_tile_counters();
         #[cfg(feature = "instrument")]
@@ -7139,6 +7167,7 @@ fn run_reduce<B: Deref<Target = [f32]>>(
                     reduction_total as usize,
                     out_col_stride,
                     0.0,
+                    true,
                 )
             };
         if accelerated {
@@ -9756,6 +9785,15 @@ const CBLAS_TRANS: i32 = 112;
 /// `reduction_fast_path` caller below always passes `0.0`, unchanged from
 /// this function's behavior before `beta` existed.
 ///
+/// `transpose_b` is threaded through the same way, so
+/// [`try_run_accelerate_width_gemm`] can share this call rather than
+/// duplicating it: the dot-path/conv routes' own `b` is stored `[n, k]`
+/// (ggml `mul_mat`'s transposed-RHS convention, `CBLAS_TRANS`), while the
+/// width-tile route's `b` is already `[k, n]` (`width_tile_plan`'s own doc:
+/// "the `[k,n]`-layout twin of the dot-path tile"), so it passes `false` for
+/// `CBLAS_NO_TRANS` instead -- both callers below pass `true`, unchanged
+/// from this function's behavior before `transpose_b` existed.
+///
 /// # Safety
 /// Caller guarantees `a`/`b` each have at least `base + (rows-1)*row_stride
 /// + (k-1)` in-bounds elements for their respective row/col strides, and
@@ -9779,6 +9817,7 @@ unsafe fn try_run_accelerate_sgemm(
     k: usize,
     out_col_stride: i64,
     beta: f32,
+    transpose_b: bool,
 ) -> bool {
     if out_col_stride != 1 || m == 0 || n == 0 || k == 0 {
         return false;
@@ -9789,6 +9828,7 @@ unsafe fn try_run_accelerate_sgemm(
     let Ok(lda_i32) = i32::try_from(lda) else { return false };
     let Ok(ldb_i32) = i32::try_from(ldb) else { return false };
     let Ok(ldc_i32) = i32::try_from(ldc) else { return false };
+    let trans_b = if transpose_b { CBLAS_TRANS } else { CBLAS_NO_TRANS };
     // SAFETY: caller upholds this function's own `# Safety` bound; the four
     // slice-to-pointer conversions below stay in-bounds of `a`/`b`/`c` by
     // that same contract, and `cblas_sgemm` treats `a`/`b` as read-only and
@@ -9797,7 +9837,7 @@ unsafe fn try_run_accelerate_sgemm(
         cblas_sgemm(
             CBLAS_ROW_MAJOR,
             CBLAS_NO_TRANS,
-            CBLAS_TRANS,
+            trans_b,
             m_i32,
             n_i32,
             k_i32,
@@ -9812,6 +9852,90 @@ unsafe fn try_run_accelerate_sgemm(
         );
     }
     true
+}
+
+/// Routes [`WidthTilePlan`] through `cblas_sgemm` instead of
+/// [`run_width_tile_neon`], behind the SAME `ACCELERATE_GEMM_ENABLED` toggle
+/// ROW 188/189 already gate -- this crate's ROW 209 own pre-flight
+/// (`accelerate_gemm_totals()` on a real BGE forward pass, valve ON) proved
+/// `(hits, declined) == (0, 0)`: BGE's 96 MatMuls all route through
+/// `try_run_width_tile` (`fast_path`), which returns before `run_reduce`
+/// ever reaches the dot-tile/conv gates the valve was previously wired to
+/// -- so this is the route that actually intercepts them.
+///
+/// `b` here is already stored `[k, n]` row-major (`width_tile_plan`'s own
+/// doc: "the `[k,n]`-layout twin of the dot-path tile"), unlike the dot/conv
+/// routes' `[n, k]` -- so this calls [`try_run_accelerate_sgemm`] with
+/// `transpose_b = false`, reading `b` as-is.
+///
+/// `packed_width` (`PackedWidthPanels`) is deliberately never read here: its
+/// panel-major layout exists only for `run_width_tile_neon`'s own
+/// sequential-read NEON kernel and is not a valid `cblas_sgemm` operand --
+/// feeding it in would silently reinterpret packed panel bytes as a `[k,n]`
+/// matrix and corrupt the result. This route always reads the ORIGINAL
+/// unpacked `raw[plan.b_operand]` buffer, the exact same buffer
+/// `run_width_tile_neon` itself falls back to whenever `packed` is `None`
+/// or a column tail is hit (`cpu.rs`'s own `pack_width_tile_panels` doc).
+/// `cblas_sgemm` does its own internal blocking/packing, so no packing is
+/// needed -- or valid -- on this route regardless.
+///
+/// Declines (returns `false`, `output` untouched) whenever any of:
+/// `plan.seed != 0.0` (a non-zero seed needs a `beta = 1.0` pre-fill this
+/// route does not pay for, the same residual ROW 188's own flat route
+/// carries); `plan.k_stride_a != 1` (`cblas_sgemm`'s `lda` describes only a
+/// ROW stride -- it has no way to express a non-unit stride WITHIN a row,
+/// so `a`'s own contraction axis must already be contiguous; unlike the
+/// dot path, `width_tile_plan`'s own gate never proves this -- its
+/// `fast_path` premise is the WIDTH dim's stride, not the reduction dim's
+/// -- so it is checked here explicitly); or any base/stride does not fit
+/// `usize` (`width_tile_plan`'s own doc: its offsets can run negative,
+/// unlike `neon_tile_plan`'s, so every one is validated rather than cast).
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+fn try_run_accelerate_width_gemm(plan: &WidthTilePlan, raw: &[&[f32]], output: &mut [f32]) -> bool {
+    if plan.seed != 0.0 || plan.k_stride_a != 1 {
+        return false;
+    }
+    let (Ok(base_a), Ok(row_stride_a), Ok(base_b), Ok(k_stride_b), Ok(out_base), Ok(out_row_stride)) = (
+        usize::try_from(plan.base_a),
+        usize::try_from(plan.row_stride_a),
+        usize::try_from(plan.base_b),
+        usize::try_from(plan.k_stride_b),
+        usize::try_from(plan.out_base),
+        usize::try_from(plan.out_row_stride),
+    ) else {
+        return false;
+    };
+    // SAFETY: `width_tile_plan`'s own gate already proves `a`/`b`
+    // gather-free, `b`'s width-dim stride 0 or 1 (this route reads the
+    // unpacked buffer, the same one the width-dim-1 branch of
+    // `run_width_tile_neon`'s own column-tail loop reads), and `a`'s
+    // contraction-dim stride 1 is checked above -- so `a`'s own
+    // `leading_total x reduction_total` block is contiguous per row from
+    // `base_a`, and `b`'s own `reduction_total x width` block is contiguous
+    // per row from `base_b`. `output` is this function's own `&mut [f32]`
+    // parameter, sized by the caller to `out_layout`'s extents, so
+    // `out_base + (leading_total-1)*out_row_stride + (width-1)` stays
+    // in-bounds given `plan.out_col_stride == 1` (checked inside
+    // `try_run_accelerate_sgemm` itself).
+    unsafe {
+        try_run_accelerate_sgemm(
+            raw[plan.a_operand],
+            base_a,
+            row_stride_a,
+            raw[plan.b_operand],
+            base_b,
+            k_stride_b,
+            output,
+            out_base,
+            out_row_stride,
+            plan.leading_total,
+            plan.width,
+            plan.reduction_total,
+            plan.out_col_stride,
+            0.0,
+            false,
+        )
+    }
 }
 
 /// Routes [`ConvGemmTilePlan`] through `cblas_sgemm` instead of
@@ -9878,6 +10002,7 @@ fn try_run_accelerate_conv_gemm(plan: &ConvGemmTilePlan, raw: &[&[f32]], output:
                 plan.inner_span,
                 1,
                 if step == 0 { 0.0 } else { 1.0 },
+                true,
             )
         };
         if !accelerated {
