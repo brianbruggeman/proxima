@@ -596,6 +596,79 @@ pub fn reset_q4k_shape_buckets() {
     buckets.clear();
 }
 
+// width-gate-decline task (2026-09-01): `width_tile_plan` (`cpu.rs`) has
+// eight `return None` points, and the `Path::WidthFast` label
+// (`record_reduce_gemm_path_ticks`) commits identically whether a node's
+// `None` sent it through the untiled per-element scalar loop at
+// `run_reduce`'s tail or whether it never got that far at all -- the label
+// alone cannot name which of the 96 BGE `MatMul` folds declined, or why.
+// Keyed by `(NodeId, reason)` the same shape `Q4K_SHAPE_TICKS` above uses
+// for `(rows, k)`: one node structurally hits the same condition on every
+// call (the gate is a function of the node's fixed shape/layout, not of
+// per-call data), so `calls` is a witness the decline is not a one-off, and
+// the shape/stride fields are the first-observed values, not an average.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum WidthDeclineReason {
+    /// `!FUSED_MULTIPLY_ADD || reduce_op != ScalarOp::Add`.
+    NoFusedMultiplyAdd,
+    /// The fused body is not `BodyShape::Binary(ScalarOp::Multiply, ..)`.
+    NotMultiplyAddBody,
+    /// `init` is `ReduceInit::FirstElement` (unseeded).
+    FirstElementInit,
+    /// `leading_output_axes.len() != 1 || reduction_dims.len() != 1`.
+    AxesShape,
+    /// `width < WIDTH_TILE_VECS * 4`.
+    NarrowWidth,
+    /// `last_output_dim` is `None`.
+    NoOutputDim,
+    /// Either operand carries a gather (`IndexMap` with a computed index).
+    Gathered,
+    /// Neither operand pairs `(width-stride 0, width-stride 1)` — the tile
+    /// needs exactly one operand row-broadcast and the other column-major
+    /// over the width dim; any other stride pairing declines here.
+    StrideLayout,
+}
+
+/// `calls`, then the first-observed `(m, k, n, stride_a, stride_b)` at the
+/// point of decline — `-1` for any field not yet resolvable when that
+/// particular condition fires (e.g. `AxesShape` fires before `m`/`k` can be
+/// read off `leading_output_axes[0]`/`reduction_dims[0]`, since those are
+/// exactly the indices that condition rejects).
+pub type WidthDeclineTotals = (u64, i64, i64, i64, i64, i64);
+
+/// One [`width_tile_decline_snapshot`] row: `(node, reason, calls, m, k, n,
+/// stride_a, stride_b)` — factored out purely to clear clippy's
+/// `type_complexity` lint on the `Vec` return type, not a new domain concept.
+pub type WidthDeclineRow = (u32, WidthDeclineReason, u64, i64, i64, i64, i64, i64);
+
+static WIDTH_TILE_DECLINE: Mutex<BTreeMap<(u32, WidthDeclineReason), WidthDeclineTotals>> = Mutex::new(BTreeMap::new());
+
+/// Records one `width_tile_plan` decline for `node`, first-observed shape
+/// `(m, k, n)` and operand strides `(stride_a, stride_b)` (`-1` where not
+/// resolvable at that decline point, see [`WidthDeclineTotals`]).
+pub fn record_width_tile_decline(node: NodeId, reason: WidthDeclineReason, m: i64, k: i64, n: i64, stride_a: i64, stride_b: i64) {
+    let mut buckets = WIDTH_TILE_DECLINE.lock().unwrap_or_else(PoisonError::into_inner);
+    let entry = buckets.entry((node.0, reason)).or_insert((0, m, k, n, stride_a, stride_b));
+    entry.0 += 1;
+}
+
+/// Every distinct `(NodeId, reason)` decline recorded since the last
+/// [`reset_width_tile_decline`], as `(node, reason, calls, m, k, n,
+/// stride_a, stride_b)` — sorted by key (`BTreeMap` iteration order).
+#[must_use]
+pub fn width_tile_decline_snapshot() -> Vec<WidthDeclineRow> {
+    let buckets = WIDTH_TILE_DECLINE.lock().unwrap_or_else(PoisonError::into_inner);
+    buckets
+        .iter()
+        .map(|(&(node, reason), &(calls, m, k, n, stride_a, stride_b))| (node, reason, calls, m, k, n, stride_a, stride_b))
+        .collect()
+}
+
+pub fn reset_width_tile_decline() {
+    let mut buckets = WIDTH_TILE_DECLINE.lock().unwrap_or_else(PoisonError::into_inner);
+    buckets.clear();
+}
+
 /// One process run's worth of [`matmul_rows_threaded`](crate::cpu)'s own
 /// dispatch-overhead breakdown, read back the same way [`parallel_totals`]
 /// is.

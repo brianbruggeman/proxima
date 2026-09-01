@@ -134,6 +134,7 @@ fn main() {
 
         cpu::epilogue_profile_reset();
         proxima_tensor::instrument::reset_reduce_gemm_path();
+        proxima_tensor::instrument::reset_width_tile_decline();
         #[cfg(target_arch = "aarch64")]
         let (width_gate_before, width_invocations_before, _) = cpu::width_tile_counters();
         #[cfg(target_arch = "aarch64")]
@@ -202,6 +203,24 @@ fn main() {
                 "  neon_tile_plan gate : {neon_gate_delta} of {dot_fast_calls} DotFast-classified calls actually resolved Some ({neon_invocations_delta} tile invocations) -- {} the finer per-shape gate never declines a DotFast node",
                 if neon_gate_delta == dot_fast_calls { "confirms" } else { "REFUTES" }
             );
+        }
+
+        // Step 1 (width-gate-decline task, 2026-09-01): every `width_tile_plan`
+        // `None` for a gemm-shaped node, named back to its ONNX `MatMul`
+        // output tensor via `lowered.matmul_names` -- the `Path::WidthFast`
+        // label alone cannot distinguish "the NEON tile ran" from "the node
+        // fell through to the untiled scalar loop", both commit the same
+        // label (see `instrument::WidthDeclineReason`'s own doc).
+        let declines = proxima_tensor::instrument::width_tile_decline_snapshot();
+        println!("\n  width_tile_plan declines ({} distinct node/reason pairs):", declines.len());
+        println!("  node | onnx matmul name | reason | calls | m | k | n | stride_a | stride_b");
+        for (node_id, reason, calls, matmul_m, matmul_k, matmul_n, stride_a, stride_b) in &declines {
+            let onnx_name = lowered
+                .matmul_names
+                .iter()
+                .find(|(node, _)| node.0 == *node_id)
+                .map_or("<not-a-matmul-output>", |(_, name)| name.as_str());
+            println!("    %{node_id:<4} | {onnx_name:<55} | {reason:?} | {calls:>3} | {matmul_m:>4} | {matmul_k:>4} | {matmul_n:>4} | {stride_a:>2} | {stride_b:>2}");
         }
 
         combined_dot_fast.0 += dot_fast_calls;
