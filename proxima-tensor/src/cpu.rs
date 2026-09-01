@@ -8734,7 +8734,7 @@ fn width_tile_plan(context: &WidthPathContext) -> Option<WidthTilePlan> {
 /// steps rows independently, and a field would make every other caller supply
 /// a value its kernel does not read.
 ///
-/// Bundled for the same argument-count-lint reason [`OperandSpan`]/[`DotFold`]
+/// Bundled for the same argument-count-lint reason `OperandSpan`/`DotFold`
 /// already document.
 #[cfg(target_arch = "aarch64")]
 pub struct KStridedTile<'a> {
@@ -8756,8 +8756,8 @@ pub struct KStridedTile<'a> {
 /// `WIDTH_TILE_VECS`, so the same body serves the main tile (`ROWS =
 /// WIDTH_TILE_ROWS, VECS = WIDTH_TILE_VECS` in every production call site)
 /// and the row-remainder variants (`ROWS = 2`, `ROWS = 1`,
-/// [`run_width_tile_neon`]'s own greedy 2-then-1 dispatch) — the identical
-/// precedent [`gemm_tile_neon`]'s own `const ROWS: usize` already sets for
+/// `run_width_tile_neon`'s own greedy 2-then-1 dispatch) — the identical
+/// precedent `gemm_tile_neon`'s own `const ROWS: usize` already sets for
 /// the dot-path tile's row remainder. `VECS` is generic for the same reason
 /// ROW 20's accumulator sweep needs it: the live register count is
 /// `ROWS * VECS` accumulators + `VECS` b-vectors + 1 broadcast a-value,
