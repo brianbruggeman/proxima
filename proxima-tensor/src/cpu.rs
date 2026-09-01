@@ -1442,6 +1442,412 @@ fn apply_epilogue_fused_monomorphic(kind: EpilogueKind, consumer: &BoundOp, redu
     }
 }
 
+/// `docs/discipline.md` ROW 204: one row of a `LayerNorm` cluster's own
+/// mean/variance reduction, as a sans-IO FSM (phase + running accumulators)
+/// rather than a flat function — mirrors `ConvReluStage`'s own ring+step
+/// idiom (`proxima-onnx/benches/support/tile_pipeline.rs`), not the other
+/// three [`EpilogueKind`] arms' per-element loop shape. [`advance`] is
+/// driven to completion in one tight loop by
+/// [`apply_layer_norm_cluster_fused`] below (no yielding/resumability wired
+/// this row); the phase+accumulator shape is what a future band-streaming
+/// driver would advance incrementally without a rewrite of this type.
+/// Four independent accumulators per lane (`docs/discipline.md` ROW 200's
+/// own lesson: a single-accumulator serial FMA chain is the landmine),
+/// summed once per phase rather than once per element.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum LayerNormRowPhase {
+    Sum,
+    Variance,
+    Affine,
+    Done,
+}
+
+const LAYER_NORM_ROW_LANES: usize = 4;
+
+#[derive(Debug, Clone, Copy)]
+struct LayerNormRowFsm {
+    phase: LayerNormRowPhase,
+    accumulators: [f32; LAYER_NORM_ROW_LANES],
+    mean: f32,
+    denominator: f32,
+}
+
+impl LayerNormRowFsm {
+    fn new() -> Self {
+        Self {
+            phase: LayerNormRowPhase::Sum,
+            accumulators: [0.0; LAYER_NORM_ROW_LANES],
+            mean: 0.0,
+            denominator: 0.0,
+        }
+    }
+
+    /// One state transition. `row` is this row's own `hidden`-wide slice --
+    /// `Sum`/`Variance` each walk it once; `Affine` does not re-walk it at
+    /// all (the per-column affine write happens in the caller, after
+    /// `finish`, since it also needs `gamma`/`beta`/`output` this FSM does
+    /// not own). Returns `true` once the FSM reaches `Done`.
+    fn advance(&mut self, row: &[f32], reciprocal_n: f32, epsilon: f32) -> bool {
+        match self.phase {
+            LayerNormRowPhase::Sum => {
+                self.accumulators = [0.0; LAYER_NORM_ROW_LANES];
+                for chunk in row.chunks(LAYER_NORM_ROW_LANES) {
+                    for (lane, &value) in chunk.iter().enumerate() {
+                        self.accumulators[lane] += value;
+                    }
+                }
+                let sum: f32 = self.accumulators.iter().sum();
+                self.mean = sum * reciprocal_n;
+                self.phase = LayerNormRowPhase::Variance;
+                false
+            }
+            LayerNormRowPhase::Variance => {
+                self.accumulators = [0.0; LAYER_NORM_ROW_LANES];
+                for chunk in row.chunks(LAYER_NORM_ROW_LANES) {
+                    for (lane, &value) in chunk.iter().enumerate() {
+                        let deviation = value - self.mean;
+                        self.accumulators[lane] += deviation * deviation;
+                    }
+                }
+                let sum_squared_deviation: f32 = self.accumulators.iter().sum();
+                let variance = sum_squared_deviation * reciprocal_n;
+                self.denominator = (variance + epsilon).sqrt();
+                self.phase = LayerNormRowPhase::Affine;
+                false
+            }
+            LayerNormRowPhase::Affine => {
+                self.phase = LayerNormRowPhase::Done;
+                true
+            }
+            LayerNormRowPhase::Done => true,
+        }
+    }
+
+    /// `(mean, denominator)` — valid once `advance` has reached at least
+    /// `Affine` (two real transitions run).
+    fn finish(&self) -> (f32, f32) {
+        (self.mean, self.denominator)
+    }
+}
+
+/// `docs/discipline.md` ROW 204's own plan-build-time record: everything
+/// [`apply_layer_norm_cluster_fused`] needs to compute a `LayerNorm` site's
+/// mean/variance directly from `x`, bypassing the four upstream dispatches
+/// (`R1` sum, `E1` mean, `E2` centered, `R2` sum-of-squares) [`epilogue_fuse_plan`]'s
+/// single-hop `LayerNorm` admission (ROW 190/191) already fuses only the
+/// LAST of. Keyed by the same `R2` `NodeId` the single-hop plan uses, so a
+/// caller upgrading one to the other never double-keys.
+struct LayerNormClusterPlan {
+    tail_index: usize,
+    /// `[R1, E2, R2]` — every node this cluster's own fusion makes dead
+    /// weight, added to the executor's skip set alongside the tail itself
+    /// (which the single-hop plan already skips). No standalone `E1` node
+    /// exists in `resolved` at all -- `bind`'s own elementwise fusion
+    /// already absorbed `mean = R1 * (1/N)` into `E2`'s own composed body
+    /// (see `layer_norm_cluster_plan`'s own doc on `E2`'s admission).
+    skip: [NodeId; 3],
+    x_node: NodeId,
+    row_axis: usize,
+    fire_position: usize,
+}
+
+/// `docs/discipline.md` ROW 204: widens ROW 190/191's single-hop `LayerNorm`
+/// epilogue fusion (reduce-of-squares -> affine tail only) to the FULL
+/// five-dispatch cluster the map found `bind` collapses a BERT-style
+/// `LayerNormalization` into. Walks EVERY `EpilogueKind::LayerNorm`
+/// admission `single_hop` already found back UP `resolved`'s own `NodeId`
+/// back-references (execution-level only, exactly ROW 190/191's own
+/// constraint — never touches `bind::bind`) to confirm the exact
+/// `R1(sum x) -> E1(mean=R1/N) -> E2(centered=x-mean) -> R2(sum
+/// centered^2) -> tail` wiring a real BERT export produces. Anything not
+/// matching this EXACT shape (wrong op, wrong operand count, a shared
+/// operand read by anything other than the next node in the chain) is left
+/// untouched — `single_hop`'s own tail-only fusion still applies to it.
+fn layer_norm_cluster_plan(resolved: &[BoundOp], effective_outputs: &[NodeId], single_hop: &BTreeMap<NodeId, (usize, usize, EpilogueKind, Option<usize>)>) -> BTreeMap<NodeId, LayerNormClusterPlan> {
+    if single_hop.is_empty() {
+        return BTreeMap::new();
+    }
+    let mut node_position: BTreeMap<NodeId, usize> = BTreeMap::new();
+    let mut consumer_counts: BTreeMap<NodeId, u32> = BTreeMap::new();
+    for (index, computed) in resolved.iter().enumerate() {
+        node_position.insert(computed.node, index);
+        for (operand, _layout, gather) in computed.operands() {
+            if gather.is_none() {
+                *consumer_counts.entry(*operand).or_insert(0) += 1;
+            }
+        }
+    }
+    let ready_position = |node: NodeId| node_position.get(&node).copied().unwrap_or(0);
+    let sole_consumer = |node: NodeId| consumer_counts.get(&node).copied().unwrap_or(0) == 1;
+
+    let mut clusters = BTreeMap::new();
+    for (&r2_node, &(tail_index, _fire_position, kind, hoist_axis)) in single_hop {
+        if kind != EpilogueKind::LayerNorm {
+            continue;
+        }
+        let Some(row_axis) = hoist_axis else { continue };
+        if effective_outputs.contains(&r2_node) {
+            continue;
+        }
+        let tail = &resolved[tail_index];
+        let BoundOpKind::Elementwise { operands: tail_operands, .. } = &tail.kind else { continue };
+        let Some((e2_node, ..)) = tail_operands.first() else { continue };
+        let e2_node = *e2_node;
+
+        // R2: sum of squared E2 -- one operand (E2), element_body squares it.
+        let Some(&r2_index) = node_position.get(&r2_node) else { continue };
+        let r2 = &resolved[r2_index];
+        let BoundOpKind::Reduce {
+            element_body: r2_body,
+            reduce_op: r2_op,
+            init: r2_init,
+            operands: r2_operands,
+            ..
+        } = &r2.kind
+        else {
+            continue;
+        };
+        if *r2_op != ScalarOp::Add || *r2_init != ReduceInit::Zero {
+            continue;
+        }
+        // Bind does not deduplicate a repeated operand: squaring `E2`
+        // lowers to TWO operand slots, both physically `e2_node`, combined
+        // by `Multiply(Operand(0), Operand(1))` -- confirmed against the
+        // real BGE graph via a temporary `LN_CLUSTER_DIAG`-gated eprintln
+        // (added and removed this session, never landed): every one of the
+        // 25 sites showed `operands=[e2_node, e2_node]`,
+        // `args=[Operand(0), Operand(1)]`, never the naive
+        // single-slot-read-twice shape this check first assumed.
+        let is_square_body = r2_body.steps.len() == 1 && r2_body.steps[0].op == ScalarOp::Multiply && r2_body.steps[0].args == [StepArg::Operand(0), StepArg::Operand(1)];
+        let square_operands_ok = r2_operands.len() == 2 && r2_operands[0].0 == e2_node && r2_operands[1].0 == e2_node;
+        if !is_square_body || !square_operands_ok {
+            continue;
+        }
+        // E2 must feed exactly R2 (which reads it TWICE, per operand slot
+        // -- see the squaring note above) and the tail (once, its primary
+        // slot, matched below) -- `consumer_counts` counts each OPERAND
+        // SLOT reference, not each distinct consumer node, so the real
+        // gate is a total of 3 (2 from R2's own doubled read + 1 from the
+        // tail), not 2.
+        if consumer_counts.get(&e2_node).copied().unwrap_or(0) != 3 {
+            continue;
+        }
+
+        // E2: centered = x - mean, where `bind`'s own elementwise fusion
+        // has ALREADY absorbed `E1` (`mean = R1 * (1/N)`) into E2's own
+        // composed body -- there is no standalone `E1` node in `resolved`
+        // at all (confirmed against the real BGE graph via a temporary
+        // `LN_CLUSTER_DIAG`-gated eprintln, added and removed this
+        // session, never landed: every site showed a 2-step body,
+        // `Multiply(Operand(1), Operand(2)) -> Subtract(Operand(0),
+        // Step(0))`, operands `[x, R1 (broadcast), 1/N (scalar)]`, not the
+        // 1-step `Subtract(x, e1_node)` shape this check first assumed).
+        let Some(&e2_index) = node_position.get(&e2_node) else { continue };
+        let e2 = &resolved[e2_index];
+        let BoundOpKind::Elementwise { body: e2_body, operands: e2_operands } = &e2.kind else { continue };
+        let is_centered_body = e2_body.steps.len() == 2
+            && e2_body.steps[0].op == ScalarOp::Multiply
+            && e2_body.steps[0].args == [StepArg::Operand(1), StepArg::Operand(2)]
+            && e2_body.steps[1].op == ScalarOp::Subtract
+            && e2_body.steps[1].args == [StepArg::Operand(0), StepArg::Step(0)];
+        if !is_centered_body {
+            continue;
+        }
+        let [(x_node, x_layout, x_gather), (r1_node, r1_layout_in_e2, r1_gather), (reciprocal_n_node, reciprocal_n_layout, reciprocal_n_gather)] = e2_operands.as_slice() else {
+            continue;
+        };
+        if x_gather.is_some() || r1_gather.is_some() || reciprocal_n_gather.is_some() {
+            continue;
+        }
+        if !epilogue_is_contiguous_row_major(x_layout, &e2.extents) {
+            continue;
+        }
+        if !epilogue_reduce_operand_matches_leading_axes(r1_layout_in_e2, &e2.extents) {
+            continue;
+        }
+        if !epilogue_is_scalar_broadcast(reciprocal_n_layout) {
+            continue;
+        }
+        // A real BGE export folds `1/N` into TWO independent `Constant`
+        // nodes -- one feeding `E2`'s own mean sub-expression, one feeding
+        // the tail's own variance-scale step -- never the same `NodeId`
+        // (confirmed against the real BGE graph via a temporary
+        // `LN_CLUSTER_DIAG`-gated eprintln, added and removed this
+        // session, never landed: every site showed two DISTINCT `NodeId`s,
+        // e.g. `217` vs `223`). The kernel below reads `1/N` once, from
+        // the tail's own operand slot, for both the mean and variance
+        // passes, so this admission requires the two constants carry the
+        // SAME VALUE (read directly from `BoundOpKind::Constant`, not
+        // inferred from `NodeId` identity) rather than being the same node.
+        let Some(&reciprocal_n_index) = node_position.get(reciprocal_n_node) else { continue };
+        let Some(&tail_reciprocal_n_index) = node_position.get(&tail_operands[2].0) else { continue };
+        let (BoundOpKind::Constant { value: reciprocal_n_e2_value }, BoundOpKind::Constant { value: reciprocal_n_tail_value }) = (&resolved[reciprocal_n_index].kind, &resolved[tail_reciprocal_n_index].kind) else {
+            continue;
+        };
+        if (reciprocal_n_e2_value - reciprocal_n_tail_value).abs() > 1e-9 {
+            continue;
+        }
+        if !sole_consumer(*r1_node) {
+            continue;
+        }
+
+        // R1: sum of x, plain (Identity element body).
+        let Some(&r1_index) = node_position.get(r1_node) else { continue };
+        let r1 = &resolved[r1_index];
+        let BoundOpKind::Reduce {
+            element_body: r1_body,
+            reduce_op: r1_op,
+            init: r1_init,
+            operands: r1_operands,
+            ..
+        } = &r1.kind
+        else {
+            continue;
+        };
+        if *r1_op != ScalarOp::Add || *r1_init != ReduceInit::Zero {
+            continue;
+        }
+        let is_identity_body = r1_body.steps.len() == 1 && r1_body.steps[0].op == ScalarOp::Identity && r1_body.steps[0].args == [StepArg::Operand(0)];
+        if !is_identity_body || r1_operands.len() != 1 {
+            continue;
+        }
+        let (r1_x_node, r1_x_layout, r1_x_gather) = &r1_operands[0];
+        if r1_x_gather.is_some() || *r1_x_node != *x_node {
+            continue;
+        }
+        if !epilogue_is_contiguous_row_major(r1_x_layout, &r1.extents) {
+            continue;
+        }
+        if r1.extents != r2.extents {
+            continue;
+        }
+
+        // No quantized weight ever occupies a `buffers` slot -- see
+        // `epilogue_fuse_plan`'s own identical guard.
+        if r1.extents.is_empty() {
+            continue;
+        }
+
+        let fire_position = [
+            ready_position(*x_node),
+            ready_position(*reciprocal_n_node),
+            ready_position(tail_operands[2].0),
+            ready_position(tail_operands[3].0),
+            ready_position(tail_operands[4].0),
+            ready_position(tail_operands[5].0),
+        ]
+        .into_iter()
+        .max()
+        .unwrap_or(0);
+        // A real BGE export lowers `gamma`/`beta` right next to the
+        // `LayerNorm` site itself -- measured AFTER `E2` in program order
+        // at every one of the 25 sites, so `fire_position` (the max above)
+        // regularly lands past `E2`'s own original position. `x` is
+        // otherwise scheduled to be freed there by `node_retirement`'s own
+        // schedule (built BEFORE this plan, from the unmodified graph,
+        // where `E2` is `x`'s real last consumer) -- the caller's own
+        // `layer_norm_cluster_keepalive` set (built from this plan, see
+        // its own doc at the call site) defers that ONE retirement event
+        // to `fire_position` instead of dropping it, so `x` survives
+        // regardless of which side of `E2` this fusion ends up firing on.
+        if fire_position >= tail_index {
+            continue;
+        }
+
+        clusters.insert(
+            r2_node,
+            LayerNormClusterPlan {
+                tail_index,
+                skip: [*r1_node, e2_node, r2_node],
+                x_node: *x_node,
+                row_axis,
+                fire_position,
+            },
+        );
+    }
+    clusters
+}
+
+static LAYER_NORM_CLUSTER_HITS: EpilogueFuseAtomicU64 = EpilogueFuseAtomicU64::new(0);
+static LAYER_NORM_CLUSTER_ELEMENTS: EpilogueFuseAtomicU64 = EpilogueFuseAtomicU64::new(0);
+static LAYER_NORM_CLUSTER_NANOS: EpilogueFuseAtomicU64 = EpilogueFuseAtomicU64::new(0);
+
+/// `docs/discipline.md` ROW 204's own re-provable hit counter, same shape as
+/// [`epilogue_fuse_totals`] -- `(hits, elements, nanos)`, snapshot-and-reset
+/// per call.
+#[must_use]
+pub fn layer_norm_cluster_totals() -> (u64, u64, u64) {
+    (
+        LAYER_NORM_CLUSTER_HITS.load(EpilogueFuseOrdering::Relaxed),
+        LAYER_NORM_CLUSTER_ELEMENTS.load(EpilogueFuseOrdering::Relaxed),
+        LAYER_NORM_CLUSTER_NANOS.load(EpilogueFuseOrdering::Relaxed),
+    )
+}
+
+pub fn layer_norm_cluster_reset() {
+    LAYER_NORM_CLUSTER_HITS.store(0, EpilogueFuseOrdering::Relaxed);
+    LAYER_NORM_CLUSTER_ELEMENTS.store(0, EpilogueFuseOrdering::Relaxed);
+    LAYER_NORM_CLUSTER_NANOS.store(0, EpilogueFuseOrdering::Relaxed);
+}
+
+/// One kernel call per `LayerNorm` site instead of `R1`/`E1`/`E2`/`R2`'s own
+/// four dispatches plus the tail -- reads `x` directly, drives
+/// [`LayerNormRowFsm`] to completion per row (mean, then the STABLE
+/// two-pass variance -- sum of squared DEVIATIONS from the mean this row's
+/// own FSM just computed, never the mean-of-squares identity `norm.rs`'s
+/// own doc bans), then writes the normalize+affine step reusing
+/// [`EpilogueKind::LayerNorm`]'s own arithmetic. Writes ONLY `tail`'s own
+/// buffer -- `x` is read, never mutated.
+fn apply_layer_norm_cluster_fused(tail: &BoundOp, x_node: NodeId, row_axis: usize, buffers: &[Option<Cow<'_, [f32]>>], output: &mut [f32]) {
+    let BoundOpKind::Elementwise { operands, .. } = &tail.kind else {
+        return;
+    };
+    let extents = &tail.extents;
+    let rank = extents.len();
+    let axis = row_axis.min(rank);
+    let before: u64 = extents.get(..axis).map_or(1, |prefix| prefix.iter().product::<u64>().max(1));
+    let at: u64 = extents.get(axis).copied().unwrap_or(1);
+    let hidden: u64 = extents.get(axis.saturating_add(1)..).map_or(1, |suffix| suffix.iter().product::<u64>().max(1));
+
+    let x = buffers[x_node.0 as usize].as_deref().unwrap_or(&[]);
+    let inner_axis = rank.saturating_sub(1);
+    let read_inner = |slot: usize, inner: u64| -> f32 {
+        let (node, layout, _gather) = &operands[slot];
+        let mut coordinate = [0u64; bind::MAX_INLINE_RANK];
+        if inner_axis < rank && inner_axis < bind::MAX_INLINE_RANK {
+            coordinate[inner_axis] = inner;
+        }
+        let offset = layout.offset_of(&coordinate[..rank.min(bind::MAX_INLINE_RANK)]);
+        let source: &[f32] = buffers[node.0 as usize].as_deref().unwrap_or(&[]);
+        usize::try_from(offset).ok().and_then(|index| source.get(index)).copied().unwrap_or(0.0)
+    };
+    let read_scalar = |slot: usize| -> f32 { read_inner(slot, 0) };
+
+    let reciprocal_n = read_scalar(2);
+    let epsilon = read_scalar(3);
+    let hidden_usize = hidden as usize;
+    let mut row_index = 0usize;
+    let mut out_index = 0usize;
+    for _ in 0..before {
+        for _ in 0..at {
+            let row_start = row_index * hidden_usize;
+            let row = x.get(row_start..row_start + hidden_usize).unwrap_or(&[]);
+            let mut fsm = LayerNormRowFsm::new();
+            while !fsm.advance(row, reciprocal_n, epsilon) {}
+            let (mean, denominator) = fsm.finish();
+            for inner in 0..hidden {
+                let value = row.get(inner as usize).copied().unwrap_or(0.0);
+                let gamma = read_inner(4, inner);
+                let beta = read_inner(5, inner);
+                let normalized = (value - mean) / denominator;
+                output[out_index] = normalized * gamma + beta;
+                out_index += 1;
+            }
+            row_index += 1;
+        }
+    }
+}
+
 /// ROW 181's three profile buckets: (a) every `Keep::Reduce` fold --
 /// tile-routed and generic combined, since splitting those per-node would
 /// duplicate `neon_tile_plan`'s own six-condition gate rather than reuse
@@ -1920,11 +2326,60 @@ pub fn evaluate_quantized_with_scratch(
     // "does anything fire here" in O(1) per position instead of scanning
     // the whole plan every iteration.
     let epilogue_fuse_plan = epilogue_fuse_plan(&resolved, program.len(), &effective_outputs, &quantized_weights);
-    let epilogue_fuse_skip: BTreeSet<NodeId> = epilogue_fuse_plan.values().map(|(index, ..)| resolved[*index].node).collect();
+    // `docs/discipline.md` ROW 204: widens the single-hop `LayerNorm`
+    // admission above (reduce-of-squares -> affine tail only) to the FULL
+    // five-dispatch cluster where the exact upstream wiring matches --
+    // see `layer_norm_cluster_plan`'s own doc. A `LayerNorm` entry NOT
+    // upgraded here still fires via `epilogue_fuse_fire_at` below,
+    // unchanged from ROW 191.
+    let layer_norm_cluster_plan = layer_norm_cluster_plan(&resolved, &effective_outputs, &epilogue_fuse_plan);
+    let epilogue_fuse_skip: BTreeSet<NodeId> = epilogue_fuse_plan
+        .values()
+        .map(|(index, ..)| resolved[*index].node)
+        .chain(layer_norm_cluster_plan.values().flat_map(|cluster| cluster.skip))
+        .collect();
     let epilogue_fuse_fire_at: BTreeMap<usize, Vec<NodeId>> = {
         let mut grouped: BTreeMap<usize, Vec<NodeId>> = BTreeMap::new();
         for (reduce_node, (_, fire_position, ..)) in &epilogue_fuse_plan {
+            // superseded by a cluster upgrade -- that fires via
+            // `layer_norm_cluster_fire_at` instead, never both.
+            if layer_norm_cluster_plan.contains_key(reduce_node) {
+                continue;
+            }
             grouped.entry(*fire_position).or_default().push(*reduce_node);
+        }
+        grouped
+    };
+    let layer_norm_cluster_fire_at: BTreeMap<usize, Vec<NodeId>> = {
+        let mut grouped: BTreeMap<usize, Vec<NodeId>> = BTreeMap::new();
+        for (reduce_node, cluster) in &layer_norm_cluster_plan {
+            grouped.entry(cluster.fire_position).or_default().push(*reduce_node);
+        }
+        grouped
+    };
+    // `docs/discipline.md` ROW 204: `node_retirement`'s own schedule (built
+    // above, before this plan existed) frees `x` at `E2`'s real original
+    // position -- often EARLIER than a cluster's own `fire_position`, since
+    // `gamma`/`beta` are commonly lowered right next to the `LayerNorm`
+    // site itself, AFTER `E2` in program order (confirmed against the real
+    // BGE graph: every one of the 25 sites' own `fire_position` measured
+    // 2-3 positions past `E2`'s). `layer_norm_cluster_keepalive` names
+    // every such node and the position it must survive to;
+    // `layer_norm_cluster_retire_at` is that SAME information regrouped by
+    // where the deferred retirement actually fires -- two views of one
+    // fact, not two sources of truth (built from each other, one line
+    // down).
+    let layer_norm_cluster_keepalive: BTreeMap<NodeId, usize> = {
+        let mut keepalive: BTreeMap<NodeId, usize> = BTreeMap::new();
+        for cluster in layer_norm_cluster_plan.values() {
+            keepalive.entry(cluster.x_node).and_modify(|existing| *existing = (*existing).max(cluster.fire_position)).or_insert(cluster.fire_position);
+        }
+        keepalive
+    };
+    let layer_norm_cluster_retire_at: BTreeMap<usize, Vec<NodeId>> = {
+        let mut grouped: BTreeMap<usize, Vec<NodeId>> = BTreeMap::new();
+        for (&node, &keep_until) in &layer_norm_cluster_keepalive {
+            grouped.entry(keep_until).or_default().push(node);
         }
         grouped
     };
@@ -2124,6 +2579,27 @@ pub fn evaluate_quantized_with_scratch(
                 peak_live_buffers = peak_live_buffers.max(live_now);
             }
         }
+        // `docs/discipline.md` ROW 204: same shape as the block above, one
+        // level wider -- fires the full `R1..R2 -> tail` cluster kernel
+        // instead of a single-hop epilogue, reading `x` directly rather
+        // than a materialized reduce buffer.
+        if let Some(reduce_nodes) = layer_norm_cluster_fire_at.get(&position) {
+            for reduce_node in reduce_nodes {
+                let Some(cluster) = layer_norm_cluster_plan.get(reduce_node) else {
+                    continue;
+                };
+                let tail = &resolved[cluster.tail_index];
+                let mut fused_output = take_or_allocate(free_buffers, node_output_len(tail));
+                let fuse_started = std::time::Instant::now();
+                apply_layer_norm_cluster_fused(tail, cluster.x_node, cluster.row_axis, &buffers, &mut fused_output);
+                LAYER_NORM_CLUSTER_NANOS.fetch_add(fuse_started.elapsed().as_nanos() as u64, EpilogueFuseOrdering::Relaxed);
+                LAYER_NORM_CLUSTER_HITS.fetch_add(1, EpilogueFuseOrdering::Relaxed);
+                LAYER_NORM_CLUSTER_ELEMENTS.fetch_add(fused_output.len() as u64, EpilogueFuseOrdering::Relaxed);
+                buffers[tail.node.0 as usize] = Some(Cow::Owned(fused_output));
+                live_now += 1;
+                peak_live_buffers = peak_live_buffers.max(live_now);
+            }
+        }
         for retired in &retires[position] {
             // NOT always a `Some` -> `None` transition, unlike
             // `evaluate_pooled`/`evaluate_parallel`'s identical loop: a
@@ -2135,8 +2611,32 @@ pub fn evaluate_quantized_with_scratch(
             // `quantized_weights` instead (see the `QuantizedBlock` match
             // above). `retire_into` reports whether the slot was actually
             // live so `live_now` only counts a real retirement.
+            //
+            // `docs/discipline.md` ROW 204: `node_retirement`'s own
+            // schedule was built BEFORE this call's `layer_norm_cluster_plan`
+            // existed, from the UNMODIFIED graph -- it still frees `x` at
+            // `E2`'s real original position, `E2` being a genuine consumer
+            // there regardless of whether this session's fusion later
+            // replaces what runs at that position. Any node this session's
+            // cluster fusion still needs alive PAST its natural retirement
+            // point (`layer_norm_cluster_keepalive`) has that ONE
+            // retirement event deferred to the cluster's own
+            // `fire_position` instead of dropped -- see
+            // `layer_norm_cluster_retire_at` below, which re-fires it there.
+            if let Some(&keep_until) = layer_norm_cluster_keepalive.get(retired)
+                && position < keep_until
+            {
+                continue;
+            }
             if retire_into(&mut buffers, *retired, free_buffers) {
                 live_now -= 1;
+            }
+        }
+        if let Some(deferred) = layer_norm_cluster_retire_at.get(&position) {
+            for node in deferred {
+                if retire_into(&mut buffers, *node, free_buffers) {
+                    live_now -= 1;
+                }
             }
         }
         position += 1;

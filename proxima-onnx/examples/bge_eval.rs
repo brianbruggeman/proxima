@@ -77,10 +77,15 @@ fn cosine(a: &[f32], b: &[f32]) -> f32 {
 /// (`epilogue_fuse_totals`, reset first so this call's own count is
 /// isolated), and the resulting embeddings for a bit-identity/cosine
 /// comparison between the fused and unfused arms.
-type RunPassResult = (Vec<std::time::Duration>, Vec<Vec<f32>>, (u64, u64, u64));
+/// `docs/discipline.md` ROW 204 adds the cluster-fusion counters
+/// (`layer_norm_cluster_totals`) alongside ROW 190's own single-hop
+/// counters -- both reset first, so this call's own count is isolated from
+/// any earlier pass.
+type RunPassResult = (Vec<std::time::Duration>, Vec<Vec<f32>>, (u64, u64, u64), (u64, u64, u64));
 
 fn run_pass(graph: &proxima_onnx::messages::GraphProto<'_>, items: &[(&str, Vec<i64>)]) -> RunPassResult {
     proxima_tensor::cpu::epilogue_fuse_reset();
+    proxima_tensor::cpu::layer_norm_cluster_reset();
     let mut durations = Vec::new();
     let mut embeddings = Vec::new();
     for (_, tokens) in items {
@@ -94,7 +99,7 @@ fn run_pass(graph: &proxima_onnx::messages::GraphProto<'_>, items: &[(&str, Vec<
         durations.push(eval_start.elapsed());
         embeddings.push(embedding);
     }
-    (durations, embeddings, proxima_tensor::cpu::epilogue_fuse_totals())
+    (durations, embeddings, proxima_tensor::cpu::epilogue_fuse_totals(), proxima_tensor::cpu::layer_norm_cluster_totals())
 }
 
 fn main() {
@@ -118,20 +123,28 @@ fn main() {
     let mut fused_embeddings_last = Vec::new();
     let mut unfused_embeddings_last = Vec::new();
     let mut fused_totals = (0u64, 0u64, 0u64);
+    let mut cluster_totals = (0u64, 0u64, 0u64);
 
     for run in 0..runs {
         proxima_tensor::cpu::set_epilogue_fuse_enabled(true);
-        let (durations, embeddings, totals) = run_pass(graph, &items);
+        let (durations, embeddings, totals, cluster) = run_pass(graph, &items);
         let mean: std::time::Duration = durations.iter().sum::<std::time::Duration>() / durations.len() as u32;
-        println!("run {run} fused: per-sentence={durations:?} mean={mean:?} fuse_hits={} fuse_elements={} fuse_nanos={}", totals.0, totals.1, totals.2);
+        println!(
+            "run {run} fused: per-sentence={durations:?} mean={mean:?} fuse_hits={} fuse_elements={} fuse_nanos={} ln_cluster_hits={} ln_cluster_elements={} ln_cluster_nanos={}",
+            totals.0, totals.1, totals.2, cluster.0, cluster.1, cluster.2
+        );
         fused_run_means.push(mean.as_secs_f64() * 1000.0);
         fused_embeddings_last = embeddings;
         fused_totals = totals;
+        cluster_totals = cluster;
 
         proxima_tensor::cpu::set_epilogue_fuse_enabled(false);
-        let (durations, embeddings, totals) = run_pass(graph, &items);
+        let (durations, embeddings, totals, cluster) = run_pass(graph, &items);
         let mean: std::time::Duration = durations.iter().sum::<std::time::Duration>() / durations.len() as u32;
-        println!("run {run} unfused: per-sentence={durations:?} mean={mean:?} fuse_hits={} fuse_elements={} fuse_nanos={}", totals.0, totals.1, totals.2);
+        println!(
+            "run {run} unfused: per-sentence={durations:?} mean={mean:?} fuse_hits={} fuse_elements={} fuse_nanos={} ln_cluster_hits={} ln_cluster_elements={} ln_cluster_nanos={}",
+            totals.0, totals.1, totals.2, cluster.0, cluster.1, cluster.2
+        );
         unfused_run_means.push(mean.as_secs_f64() * 1000.0);
         unfused_embeddings_last = embeddings;
         proxima_tensor::cpu::set_epilogue_fuse_enabled(true);
@@ -148,6 +161,7 @@ fn main() {
     println!("=== ROW 190 summary ===");
     println!("runs={runs}");
     println!("fused engagement (last run): hits={} elements={} nanos={}", fused_totals.0, fused_totals.1, fused_totals.2);
+    println!("ln_cluster engagement (last run): hits={} elements={} nanos={}", cluster_totals.0, cluster_totals.1, cluster_totals.2);
     println!("fused mean per-sentence ms across runs: {fused_run_means:?} mean={fused_mean:.4} CoV={fused_cov:.4}");
     println!("unfused mean per-sentence ms across runs: {unfused_run_means:?} mean={unfused_mean:.4} CoV={unfused_cov:.4}");
     println!("bit_identical(fused vs unfused, last run's embeddings)={bit_identical}");
