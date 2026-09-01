@@ -142,6 +142,14 @@ fn real_mnist_onnx_classifies_real_test_images_at_reference_accuracy() {
     let accuracy = correct as f64 / images.len() as f64;
 
     eprintln!("real_mnist accuracy: {accuracy:.4} ({correct}/{} images) in {elapsed:?}", images.len());
+    #[cfg(feature = "epilogue-fuse-diag")]
+    {
+        let (hits, elements, nanos) = proxima_tensor::cpu::epilogue_fuse_totals();
+        eprintln!(
+            "real_mnist epilogue_fuse: hits={hits} elements={elements} nanos={nanos} ns_per_element={:.4}",
+            nanos as f64 / elements as f64
+        );
+    }
     for (index, predicted, label) in &sample_rows {
         eprintln!("real_mnist sample[{index}]: predicted={predicted} label={label}");
     }

@@ -138,6 +138,8 @@ use core::sync::atomic::AtomicU64;
 use core::sync::atomic::Ordering;
 #[cfg(feature = "epilogue-profile-probe")]
 use core::sync::atomic::{AtomicU64 as EpilogueProfileAtomicU64, Ordering as EpilogueProfileOrdering};
+#[cfg(feature = "epilogue-fuse-probe")]
+use core::sync::atomic::{AtomicU64 as EpilogueFuseAtomicU64, Ordering as EpilogueFuseOrdering};
 use std::borrow::Cow;
 use std::thread;
 use std::sync::atomic::AtomicUsize;
@@ -732,7 +734,7 @@ fn run_resolved_nodes_in_arena(arena: &mut StaticArena) -> Result<(), TensorErro
 /// -- built once per [`run_resolved_nodes_in_arena`] call from
 /// `arena.resolved`, execution-level only (reads what `bind::bind` already
 /// produced, never calls it). Feeds [`is_post_reduce_epilogue`]'s lookup.
-#[cfg(feature = "epilogue-profile-probe")]
+#[cfg(any(feature = "epilogue-profile-probe", feature = "epilogue-fuse-probe"))]
 fn epilogue_profile_reduce_flags(resolved: &[BoundOp], node_count: usize) -> Vec<bool> {
     let mut flags = vec![false; node_count];
     for computed in resolved {
@@ -764,7 +766,7 @@ fn epilogue_profile_reduce_flags(resolved: &[BoundOp], node_count: usize) -> Vec
 /// varies over fewer axes than the reduce operand it accompanies, while
 /// still rejecting a second full-shape tensor (a residual add) whose
 /// strides are nonzero on every axis the reduce operand's are.
-#[cfg(feature = "epilogue-profile-probe")]
+#[cfg(any(feature = "epilogue-profile-probe", feature = "epilogue-fuse-probe"))]
 fn is_post_reduce_epilogue(computed: &BoundOp, reduce_nodes: &[bool]) -> bool {
     let BoundOpKind::Elementwise { operands, .. } = &computed.kind else {
         return false;
@@ -783,6 +785,207 @@ fn is_post_reduce_epilogue(computed: &BoundOp, reduce_nodes: &[bool]) -> bool {
         }
     }
     reduce_operand_count == 1
+}
+
+/// `docs/discipline.md` ROW 183 Phase 2: which `Keep::Reduce` producers can
+/// have their sole [`is_post_reduce_epilogue`]-matched consumer's own body
+/// evaluated early, keyed by the reduce's own [`NodeId`] to `(consumer's
+/// `resolved` index, the position at which every input the fused write
+/// needs is finally available)`. Eligibility, each a real correctness
+/// requirement, not a style choice:
+/// - the reduce has EXACTLY one real (non-gather) consumer among every
+///   `resolved` node's own operands — otherwise fusing would still leave a
+///   second reader needing the reduce's own unfused value, so both the raw
+///   store and the fused write are required regardless, buying nothing.
+/// - the reduce is not itself a requested output — an un-fused caller still
+///   needs to read its own buffer.
+/// - the producer is a plain (`out_scatter: None`) `Keep::Reduce` fold, and
+///   no operand the fused write reads is a `quantized_weights` entry — a
+///   quantized weight node never occupies a `buffers` slot at all (it lives
+///   in the caller's own `quantized_weights` map instead, per
+///   `evaluate_quantized_with_scratch`'s own `QuantizedBlock` match), and a
+///   scatter reduce's output is not a plain row-major walk of `output_axes`,
+///   so [`apply_epilogue_fused`]'s coordinate odometer does not apply to
+///   either shape.
+/// - `fire_position`, the max over the producer's own `resolved` position
+///   and every OTHER operand's own `resolved` position (a `NodeId` absent
+///   from `resolved` — a `block_node`/`Op::Input` — is always ready, so it
+///   contributes nothing to the max). **This is NOT simply the producer's
+///   own position.** A first build of this row fired eagerly at the
+///   producer's own position and required every broadcast operand's
+///   `resolved` position to be strictly earlier — real mnist measured
+///   ZERO fusion hits under that rule (`epilogue_fuse_totals() ==
+///   (0, 0)`, an N==0 tripwire per the "evidence" section: a probe that
+///   never fires is not evidence of anything), because a bias/scale
+///   `Constant` is commonly lowered by ONNX one program position AFTER the
+///   reduce it feeds, not before — the SAME reordering-vs-`NodeId` gap the
+///   MoE FFN fixture's own NaN already caught for `NodeId` MAGNITUDE
+///   (`docs/discipline.md`'s note above this one), reproduced here as a
+///   second, distinct instance for `resolved` POSITION ORDER itself: `NodeId`
+///   backward-reference order guarantees an operand is ready by its
+///   CONSUMER's own original position, never by an arbitrary EARLIER
+///   position this row chooses to fire at. Firing at `fire_position`
+///   instead of the producer's own position is what makes both facts true
+///   at once.
+#[cfg(feature = "epilogue-fuse-probe")]
+fn epilogue_fuse_plan(
+    resolved: &[BoundOp],
+    node_count: usize,
+    effective_outputs: &[NodeId],
+    quantized_weights: &BTreeMap<NodeId, QuantizedBlock>,
+) -> BTreeMap<NodeId, (usize, usize)> {
+    let reduce_nodes = epilogue_profile_reduce_flags(resolved, node_count);
+    let mut consumer_counts: BTreeMap<NodeId, u32> = BTreeMap::new();
+    let mut node_position: BTreeMap<NodeId, usize> = BTreeMap::new();
+    for (index, computed) in resolved.iter().enumerate() {
+        node_position.insert(computed.node, index);
+        for (operand, _layout, gather) in computed.operands() {
+            if gather.is_none() {
+                *consumer_counts.entry(*operand).or_insert(0) += 1;
+            }
+        }
+    }
+    let mut plan = BTreeMap::new();
+    for (index, computed) in resolved.iter().enumerate() {
+        if !is_post_reduce_epilogue(computed, &reduce_nodes) {
+            continue;
+        }
+        let BoundOpKind::Elementwise { operands, .. } = &computed.kind else {
+            continue;
+        };
+        let Some((reduce_node, ..)) = operands.iter().find(|(node, layout, gather)| {
+            gather.is_none() && !layout.strides.contains(&0) && reduce_nodes.get(node.0 as usize).copied().unwrap_or(false)
+        }) else {
+            continue;
+        };
+        if consumer_counts.get(reduce_node).copied().unwrap_or(0) != 1 {
+            continue;
+        }
+        if effective_outputs.contains(reduce_node) {
+            continue;
+        }
+        let Some(&producer_position) = node_position.get(reduce_node) else {
+            continue;
+        };
+        let producer = &resolved[producer_position];
+        let is_plain_reduce = matches!(
+            &producer.kind,
+            BoundOpKind::Reduce {
+                keep: Keep::Reduce,
+                out_scatter: None,
+                ..
+            }
+        );
+        if !is_plain_reduce {
+            continue;
+        }
+        if operands.iter().any(|(node, ..)| node != reduce_node && quantized_weights.contains_key(node)) {
+            continue;
+        }
+        let fire_position = operands
+            .iter()
+            .filter(|(node, ..)| node != reduce_node)
+            .map(|(node, ..)| node_position.get(node).copied().unwrap_or(producer_position))
+            .chain(core::iter::once(producer_position))
+            .max()
+            .unwrap_or(producer_position);
+        // defensive: a valid topological program always has every operand
+        // ready strictly before its consumer's own original position, so
+        // this should never actually trip -- kept as a real guard rather
+        // than an assumption, per this row's own two already-caught
+        // ordering surprises above.
+        if fire_position >= index {
+            continue;
+        }
+        plan.insert(*reduce_node, (index, fire_position));
+    }
+    plan
+}
+
+/// `docs/discipline.md` ROW 183's own re-provable hit counter — how many
+/// times [`apply_epilogue_fused`] actually ran, over how many elements,
+/// snapshot-and-reset per call so a caller running several forward passes
+/// back to back gets one pass's own count, not a running total. Exists so a
+/// re-prove command can assert N > 0 rather than trust that the plan built
+/// above actually fired (principle "evidence": a gate that cannot report
+/// its N is not a gate).
+#[cfg(feature = "epilogue-fuse-probe")]
+static EPILOGUE_FUSE_HITS: EpilogueFuseAtomicU64 = EpilogueFuseAtomicU64::new(0);
+#[cfg(feature = "epilogue-fuse-probe")]
+static EPILOGUE_FUSE_ELEMENTS: EpilogueFuseAtomicU64 = EpilogueFuseAtomicU64::new(0);
+#[cfg(feature = "epilogue-fuse-probe")]
+static EPILOGUE_FUSE_NANOS: EpilogueFuseAtomicU64 = EpilogueFuseAtomicU64::new(0);
+
+#[cfg(feature = "epilogue-fuse-probe")]
+#[must_use]
+pub fn epilogue_fuse_totals() -> (u64, u64, u64) {
+    (
+        EPILOGUE_FUSE_HITS.load(EpilogueFuseOrdering::Relaxed),
+        EPILOGUE_FUSE_ELEMENTS.load(EpilogueFuseOrdering::Relaxed),
+        EPILOGUE_FUSE_NANOS.load(EpilogueFuseOrdering::Relaxed),
+    )
+}
+
+#[cfg(feature = "epilogue-fuse-probe")]
+pub fn epilogue_fuse_reset() {
+    EPILOGUE_FUSE_HITS.store(0, EpilogueFuseOrdering::Relaxed);
+    EPILOGUE_FUSE_ELEMENTS.store(0, EpilogueFuseOrdering::Relaxed);
+    EPILOGUE_FUSE_NANOS.store(0, EpilogueFuseOrdering::Relaxed);
+}
+
+/// `docs/discipline.md` ROW 183 Phase 2: evaluates `consumer`'s own
+/// [`ComposedBody`] directly against `reduce_values` (the reduce's own
+/// just-computed accumulator, still a local slice, never re-read from
+/// `buffers`) plus every other operand read straight out of `buffers` at
+/// `consumer.extents`'s own row-major coordinate — the SAME
+/// [`apply_body`]/[`Layout::offset_of`] machinery every other `BodyShape::Generic`
+/// node already evaluates through, not a new interpreter. The coordinate is
+/// an odometer incremented once per element (wrap-on-overflow per axis)
+/// rather than divided/modulo'd from the flat index fresh every element —
+/// the per-task "hoist aggressively" instruction, applied to broadcast
+/// operand addressing since the actual bias/batchnorm-parameter values
+/// themselves are already a single indexed read via `Layout::offset_of`
+/// (stride 0 on every axis the operand doesn't vary over collapses that
+/// axis's own contribution to zero without a branch).
+#[cfg(feature = "epilogue-fuse-probe")]
+fn apply_epilogue_fused(consumer: &BoundOp, reduce_node: NodeId, reduce_values: &[f32], buffers: &[Option<Cow<'_, [f32]>>], output: &mut [f32]) {
+    let BoundOpKind::Elementwise { body, operands } = &consumer.kind else {
+        return;
+    };
+    let extents = &consumer.extents;
+    let rank = extents.len();
+    let mut coordinate = vec![0u64; rank];
+    let mut step_values = vec![0.0f32; body.steps.len().max(1)];
+    let mut operand_values = vec![0.0f32; operands.len()];
+    for slot in output.iter_mut() {
+        for (operand_slot, (node, layout, _gather)) in operands.iter().enumerate() {
+            // `layout` is THIS consumer's own addressing of `node`'s buffer,
+            // which is not always the identity mapping even for the reduce
+            // operand itself -- a first build of this row read
+            // `reduce_values[flat_index]` directly for that one operand,
+            // assuming flat consumer position always equals the reduce's own
+            // flat position. `permuted_reduce_out_map_round_trips_through_lift`
+            // (a Reduce round-tripped through ONNX lift/lower, which
+            // represents a permuted `out_map` as `Reduce` + a Transpose-shaped
+            // `Elementwise` immediately after it) broke that assumption: the
+            // transpose reads the reduce's buffer via genuinely permuted,
+            // still non-broadcast strides, and the shortcut silently read the
+            // wrong element. `layout.offset_of` is the SAME addressing
+            // function every other operand already goes through here, so the
+            // reduce operand gets no special case at all now.
+            let source = if *node == reduce_node { reduce_values } else { buffers[node.0 as usize].as_deref().unwrap_or(&[]) };
+            let offset = layout.offset_of(&coordinate);
+            operand_values[operand_slot] = usize::try_from(offset).ok().and_then(|index| source.get(index)).copied().unwrap_or(0.0);
+        }
+        *slot = apply_body(body, &operand_values, &mut step_values);
+        for axis in (0..rank).rev() {
+            coordinate[axis] += 1;
+            if coordinate[axis] < extents[axis] {
+                break;
+            }
+            coordinate[axis] = 0;
+        }
+    }
 }
 
 /// ROW 181's three profile buckets: (a) every `Keep::Reduce` fold --
@@ -1206,6 +1409,27 @@ pub fn evaluate_quantized_with_scratch(
     // but is not what `benches/mnist_f32_lane.rs` exercises.
     #[cfg(feature = "epilogue-profile-probe")]
     let epilogue_profile_reduce_nodes = epilogue_profile_reduce_flags(&resolved, program.len());
+    // `docs/discipline.md` ROW 183 Phase 2: reduce `NodeId` -> (consumer's
+    // `resolved` index, fire position), computed once per call from
+    // `resolved`'s own already-bound structure (never `bind::bind` itself).
+    // `epilogue_fuse_skip` is the plan's own value set, re-derived rather
+    // than stored twice, so there is exactly one source of truth for "which
+    // consumer position gets skipped". `epilogue_fuse_fire_at` groups the
+    // SAME plan by its own `fire_position` value, so the main loop can ask
+    // "does anything fire here" in O(1) per position instead of scanning
+    // the whole plan every iteration.
+    #[cfg(feature = "epilogue-fuse-probe")]
+    let epilogue_fuse_plan = epilogue_fuse_plan(&resolved, program.len(), &effective_outputs, &quantized_weights);
+    #[cfg(feature = "epilogue-fuse-probe")]
+    let epilogue_fuse_skip: BTreeSet<NodeId> = epilogue_fuse_plan.values().map(|(index, _)| resolved[*index].node).collect();
+    #[cfg(feature = "epilogue-fuse-probe")]
+    let epilogue_fuse_fire_at: BTreeMap<usize, Vec<NodeId>> = {
+        let mut grouped: BTreeMap<usize, Vec<NodeId>> = BTreeMap::new();
+        for (reduce_node, (_, fire_position)) in &epilogue_fuse_plan {
+            grouped.entry(*fire_position).or_default().push(*reduce_node);
+        }
+        grouped
+    };
 
     // DIAGNOSTIC (proxima-debugger, instrument-only): peak_live_buffers
     // counts occupied slots, not bytes -- a live buffer set of 12 entries
@@ -1320,42 +1544,90 @@ pub fn evaluate_quantized_with_scratch(
             }
         }
         let computed = &resolved[position];
-        #[cfg(feature = "instrument")]
-        let diag_alloc_started = instrument::read_ticks();
-        let mut output = take_or_allocate(free_buffers, node_output_len(computed));
-        #[cfg(feature = "instrument")]
-        {
-            diag_loop_overhead_ticks += instrument::elapsed_ticks(diag_alloc_started);
+        // `docs/discipline.md` ROW 183 Phase 2: this position's own node is a
+        // matched epilogue consumer whose value the PRODUCER's own position
+        // already wrote into `buffers[computed.node]` (see the
+        // `epilogue_fuse_plan` write below) -- nothing left to compute here,
+        // but `retires[position]` still runs unconditionally below, exactly
+        // matching ROW 167's "computed once, cheap to consult" skip shape
+        // (never touches `bind::bind`, never touches `node_retirement`'s own
+        // schedule).
+        #[cfg(feature = "epilogue-fuse-probe")]
+        let epilogue_fused_away = epilogue_fuse_skip.contains(&computed.node);
+        #[cfg(not(feature = "epilogue-fuse-probe"))]
+        let epilogue_fused_away = false;
+        if !epilogue_fused_away {
+            #[cfg(feature = "instrument")]
+            let diag_alloc_started = instrument::read_ticks();
+            let mut output = take_or_allocate(free_buffers, node_output_len(computed));
+            #[cfg(feature = "instrument")]
+            {
+                diag_loop_overhead_ticks += instrument::elapsed_ticks(diag_alloc_started);
+            }
+            #[cfg(feature = "instrument")]
+            let diag_node_label = diag_node_kind_label(computed, &quantized_weights);
+            #[cfg(feature = "instrument")]
+            let diag_node_started = instrument::read_ticks();
+            #[cfg(feature = "epilogue-profile-probe")]
+            let epilogue_profile_started = std::time::Instant::now();
+            run_node_into(computed, &buffers, Some(&quantized_weights), session.as_ref(), &mut output)?;
+            #[cfg(feature = "epilogue-profile-probe")]
+            epilogue_profile_record(computed, &epilogue_profile_reduce_nodes, epilogue_profile_started.elapsed().as_nanos() as u64);
+            #[cfg(feature = "instrument")]
+            {
+                let entry = diag_kind_ticks.entry(diag_node_label).or_insert((0, 0));
+                entry.0 += 1;
+                entry.1 += instrument::elapsed_ticks(diag_node_started);
+            }
+            #[cfg(feature = "instrument")]
+            let diag_bookkeeping_started = instrument::read_ticks();
+            buffers[computed.node.0 as usize] = Some(Cow::Owned(output));
+            // `computed.node` is written exactly once (this position, in
+            // program order), so this is always a `None` -> `Some` transition --
+            // `live_now += 1` is the O(1) replacement for rescanning `buffers`.
+            live_now += 1;
+            peak_live_buffers = peak_live_buffers.max(live_now);
+            #[cfg(feature = "instrument")]
+            {
+                let current_bytes = diag_live_bytes(&buffers);
+                if current_bytes > diag_peak_live_bytes {
+                    diag_peak_live_bytes = current_bytes;
+                    diag_peak_position = position;
+                }
+            }
+            #[cfg(feature = "instrument")]
+            {
+                diag_loop_overhead_ticks += instrument::elapsed_ticks(diag_bookkeeping_started);
+            }
         }
-        #[cfg(feature = "instrument")]
-        let diag_node_label = diag_node_kind_label(computed, &quantized_weights);
-        #[cfg(feature = "instrument")]
-        let diag_node_started = instrument::read_ticks();
-        #[cfg(feature = "epilogue-profile-probe")]
-        let epilogue_profile_started = std::time::Instant::now();
-        run_node_into(computed, &buffers, Some(&quantized_weights), session.as_ref(), &mut output)?;
-        #[cfg(feature = "epilogue-profile-probe")]
-        epilogue_profile_record(computed, &epilogue_profile_reduce_nodes, epilogue_profile_started.elapsed().as_nanos() as u64);
-        #[cfg(feature = "instrument")]
-        {
-            let entry = diag_kind_ticks.entry(diag_node_label).or_insert((0, 0));
-            entry.0 += 1;
-            entry.1 += instrument::elapsed_ticks(diag_node_started);
-        }
-        #[cfg(feature = "instrument")]
-        let diag_bookkeeping_started = instrument::read_ticks();
-        buffers[computed.node.0 as usize] = Some(Cow::Owned(output));
-        // `computed.node` is written exactly once (this position, in
-        // program order), so this is always a `None` -> `Some` transition --
-        // `live_now += 1` is the O(1) replacement for rescanning `buffers`.
-        live_now += 1;
-        peak_live_buffers = peak_live_buffers.max(live_now);
-        #[cfg(feature = "instrument")]
-        {
-            let current_bytes = diag_live_bytes(&buffers);
-            if current_bytes > diag_peak_live_bytes {
-                diag_peak_live_bytes = current_bytes;
-                diag_peak_position = position;
+        // `docs/discipline.md` ROW 183 Phase 2: fire every fusion whose
+        // `fire_position` is THIS position, regardless of whether this
+        // position's own node was a normal compute above or itself a
+        // fused-away consumer skip -- the reduce's raw values live in
+        // `buffers[reduce_node]` (written either earlier, by that node's own
+        // `computed.node.0` store above, or in an EARLIER loop iteration),
+        // never re-read via a stale local `output`. Runs BEFORE this
+        // position's own `retires` below so a broadcast operand this fusion
+        // still needs cannot have been freed first (`node_retirement`'s own
+        // schedule only retires a node at ITS real last consumer's original
+        // position, always >= `fire_position` by construction).
+        #[cfg(feature = "epilogue-fuse-probe")]
+        if let Some(reduce_nodes) = epilogue_fuse_fire_at.get(&position) {
+            for reduce_node in reduce_nodes {
+                let Some(&(consumer_index, _)) = epilogue_fuse_plan.get(reduce_node) else {
+                    continue;
+                };
+                let consumer = &resolved[consumer_index];
+                let reduce_values = buffers[reduce_node.0 as usize].as_deref().unwrap_or(&[]);
+                let mut fused_output = take_or_allocate(free_buffers, node_output_len(consumer));
+                let fuse_started = std::time::Instant::now();
+                apply_epilogue_fused(consumer, *reduce_node, reduce_values, &buffers, &mut fused_output);
+                EPILOGUE_FUSE_NANOS.fetch_add(fuse_started.elapsed().as_nanos() as u64, EpilogueFuseOrdering::Relaxed);
+                EPILOGUE_FUSE_HITS.fetch_add(1, EpilogueFuseOrdering::Relaxed);
+                EPILOGUE_FUSE_ELEMENTS.fetch_add(fused_output.len() as u64, EpilogueFuseOrdering::Relaxed);
+                buffers[consumer.node.0 as usize] = Some(Cow::Owned(fused_output));
+                live_now += 1;
+                peak_live_buffers = peak_live_buffers.max(live_now);
             }
         }
         for retired in &retires[position] {
@@ -1372,10 +1644,6 @@ pub fn evaluate_quantized_with_scratch(
             if retire_into(&mut buffers, *retired, free_buffers) {
                 live_now -= 1;
             }
-        }
-        #[cfg(feature = "instrument")]
-        {
-            diag_loop_overhead_ticks += instrument::elapsed_ticks(diag_bookkeeping_started);
         }
         position += 1;
     }
