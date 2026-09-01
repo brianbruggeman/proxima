@@ -1068,6 +1068,48 @@ pub fn set_epilogue_fuse_enabled(enabled: bool) {
     EPILOGUE_FUSE_ENABLED.store(enabled, EpilogueFuseOrdering::Relaxed);
 }
 
+/// `docs/discipline.md` ROW 188's own paired-bench escape, same shape as
+/// [`EPILOGUE_FUSE_ENABLED`]: a process-wide switch [`run_reduce`] consults
+/// once per bound op (never per element) before routing a
+/// [`neon_tile_plan`]-shaped GEMM to Accelerate's `cblas_sgemm` instead of
+/// the explicit NEON 6x4 microkernel. Defaults to DISABLED, unlike
+/// `EPILOGUE_FUSE_ENABLED` -- ROW 188's own gate run found this route
+/// (default-on) intercepting `neon_tile_full_output`'s own NEON-targeted
+/// tolerance tests (sizes 257/260: sgemm's different summation order pushed
+/// RMS error past the naive-f32 comparison those tests assert), so the
+/// route stays opt-in via this toggle (or the paired bench's own process)
+/// until either those tests are re-scoped to the active route or the
+/// e2e/accuracy gate earns the production default -- gate 1's own "default
+/// off until the full stack wins" discipline, applied to a platform-cfg
+/// route rather than a Cargo feature.
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+static ACCELERATE_GEMM_ENABLED: EpilogueFuseAtomicBool = EpilogueFuseAtomicBool::new(false);
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+static ACCELERATE_GEMM_HITS: EpilogueFuseAtomicU64 = EpilogueFuseAtomicU64::new(0);
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+static ACCELERATE_GEMM_DECLINED: EpilogueFuseAtomicU64 = EpilogueFuseAtomicU64::new(0);
+
+/// Bench/test-only escape valve (see `ACCELERATE_GEMM_ENABLED`'s own doc).
+#[doc(hidden)]
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+pub fn set_accelerate_gemm_enabled(enabled: bool) {
+    ACCELERATE_GEMM_ENABLED.store(enabled, EpilogueFuseOrdering::Relaxed);
+}
+
+/// Runtime evidence the Accelerate route actually fired, not just compiled:
+/// `(hits, declined)` where `declined` counts a `neon_tile_plan` gate pass
+/// that fell through to NEON anyway (non-contiguous output row or a
+/// non-zero reduce seed). Snapshot-only; a re-prove command resets via
+/// process restart, same as [`neon_tile_counters`].
+#[must_use]
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+pub fn accelerate_gemm_totals() -> (u64, u64) {
+    (
+        ACCELERATE_GEMM_HITS.load(EpilogueFuseOrdering::Relaxed),
+        ACCELERATE_GEMM_DECLINED.load(EpilogueFuseOrdering::Relaxed),
+    )
+}
+
 #[must_use]
 pub fn epilogue_fuse_totals() -> (u64, u64, u64) {
     (
@@ -5736,6 +5778,82 @@ fn run_reduce<B: Deref<Target = [f32]>>(
         }
     }
 
+    // ROW 188: Accelerate/AMX route, tried before the NEON tile below on
+    // the SAME `reduction_fast_path` gate `neon_tile_plan` already proves
+    // gather-free and contraction-contiguous. `full_coordinate`/`running`
+    // are still all-zero here -- neither `try_run_width_tile` nor
+    // `conv_gemm_tile_plan` above ever receive them (both take only their
+    // own context struct plus `raw`/`output`) -- so this is the same
+    // "leading=0, reduction=0" base offset the NEON row-strip loop below
+    // recomputes per `TILE_ROWS`-row strip, taken ONCE for the whole `m x n`
+    // block instead: the entire point of routing to a BLAS call is that no
+    // caller-side tiling is needed. Only `seed == 0.0` (the reduce's
+    // additive identity) routes here -- a non-zero seed would need a
+    // `beta=1.0` pre-fill this route does not yet pay for, so it falls
+    // through to the NEON tile unchanged (documented residual, ROW 188).
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    if reduction_fast_path
+        && seed == 0.0
+        && ACCELERATE_GEMM_ENABLED.load(EpilogueFuseOrdering::Relaxed)
+        && let Some(plan) = neon_tile_plan(
+            resolved,
+            &shape,
+            *reduce_op,
+            !matches!(init, ReduceInit::FirstElement),
+            &reduction_strides,
+            &strides,
+            leading_output_axes,
+        )
+    {
+        let out_row_stride = out_layout.stride(leading_output_axes[0]);
+        let out_col_stride = last_output_dim.map_or(0, |dim| out_layout.stride(dim));
+        fill_running_offsets(resolved, &full_coordinate, &mut running);
+        let base_a = running[plan.index_a] as usize;
+        let base_b = running[plan.index_b] as usize;
+        let base_c = out_layout.offset_of(&full_coordinate) as usize;
+        // SAFETY: `neon_tile_plan`'s gate proves both operands gather-free
+        // with contraction stride 1 across `reduction_total` elements from
+        // `base_a`/`base_b`, the same bound the NEON tile below relies on
+        // for its own `raw[plan.index_a]`/`raw[plan.index_b]` reads;
+        // `output` is this function's own `&mut [f32]` parameter, sized by
+        // the caller to `out_layout`'s extents, so `base_c + (m-1)*ldc +
+        // (n-1)` stays in-bounds whenever `out_row_stride >= 0`.
+        let accelerated = out_row_stride >= 0
+            && unsafe {
+                try_run_accelerate_sgemm(
+                    raw[plan.index_a],
+                    base_a,
+                    plan.row_stride_a,
+                    raw[plan.index_b],
+                    base_b,
+                    plan.col_stride_b,
+                    output,
+                    base_c,
+                    out_row_stride as usize,
+                    leading_total as usize,
+                    width,
+                    reduction_total as usize,
+                    out_col_stride,
+                )
+            };
+        if accelerated {
+            ACCELERATE_GEMM_HITS.fetch_add(1, EpilogueFuseOrdering::Relaxed);
+            #[cfg(feature = "instrument")]
+            {
+                let distinct_operand_elements: u64 = raw.iter().map(|buffer| buffer.len() as u64).sum();
+                counters.kernel_calls += 1;
+                counters.mac_ops += leading_total * width as u64 * reduction_total;
+                counters.operand_loads += (leading_total + width as u64) * reduction_total;
+                counters.leading_iters += leading_total;
+                counters.output_writes += leading_total * width as u64;
+                counters.commit(path, distinct_operand_elements);
+                instrument::record_reduce_path_ticks(path, instrument::elapsed_ticks(commit_started));
+            }
+            return Ok(());
+        }
+        ACCELERATE_GEMM_DECLINED.fetch_add(1, EpilogueFuseOrdering::Relaxed);
+    }
+
     // Resolved ONCE per bound op: an explicit-NEON 6x4 microkernel for the
     // exact GEMM shape `reduction_fast_path` already isolates. Ported from
     // ggml tinyBLAS's `gemm_bloc` — see `neon_tile_plan` and
@@ -7721,6 +7839,119 @@ fn neon_tile_plan(
         row_stride_a: row_stride_a as usize,
         col_stride_b: strides[index_b] as usize,
     })
+}
+
+// docs/discipline.md ROW 188: Apple's Accelerate `cblas_sgemm` -- an AMX
+// coprocessor route for exactly the GEMM shape `neon_tile_plan`'s own gate
+// already isolates. Wired as a local `extern` block (no new crate
+// dependency, per this workspace's `cargo add` rule) rather than a
+// `blas`/`cblas-sys` crate: the only symbol this file calls is
+// `cblas_sgemm` itself, and Accelerate ships in every macOS SDK, so a full
+// BLAS binding crate would add surface this file never touches. Platform
+// cfg, not a Cargo feature -- the same category as NEON's own
+// `target_arch = "aarch64"` gates elsewhere in this file: a build-time
+// execution resource, not an opt-in capability.
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+#[link(name = "Accelerate", kind = "framework")]
+unsafe extern "C" {
+    fn cblas_sgemm(
+        order: i32,
+        trans_a: i32,
+        trans_b: i32,
+        m: i32,
+        n: i32,
+        k: i32,
+        alpha: f32,
+        a: *const f32,
+        lda: i32,
+        b: *const f32,
+        ldb: i32,
+        beta: f32,
+        c: *mut f32,
+        ldc: i32,
+    );
+}
+
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+const CBLAS_ROW_MAJOR: i32 = 101;
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+const CBLAS_NO_TRANS: i32 = 111;
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+const CBLAS_TRANS: i32 = 112;
+
+/// Calls Accelerate's `cblas_sgemm` for the WHOLE `(m, n, k)` block
+/// [`neon_tile_plan`]'s gate already proved gather-free and contraction-
+/// contiguous on both operands, replacing the NEON 6x4 microkernel's own
+/// per-tile loop below with ONE call -- the AMX coprocessor amortizes
+/// tiling internally, so no analogue of `TILE_ROWS`/`TILE_COLS`/the
+/// column-panel budget is needed on this route.
+///
+/// Both operand layouts match `neon_tile_plan`'s doc verbatim: `a` is `m x
+/// k` row-major (`lda = row_stride_a`, contraction-dim stride 1 already
+/// proved by the caller), `b` is stored `n x k` row-major -- the ggml
+/// `mul_mat` transposed-RHS layout `run_reduce`'s own doc names -- so
+/// `trans_b = CBLAS_TRANS` reads it as the conceptual `k x n` operand
+/// without a repack. Returns `false` (does nothing) when the output block
+/// is not a single contiguous-row-major span (`out_col_stride != 1`) or any
+/// dimension overflows `i32`: a non-unit column stride would need a
+/// scatter this route does not pay for yet, so the caller falls through to
+/// the NEON tile unchanged.
+///
+/// # Safety
+/// Caller guarantees `a`/`b` each have at least `base + (rows-1)*row_stride
+/// + (k-1)` in-bounds elements for their respective row/col strides, and
+/// `c` has at least `base + (m-1)*ldc + (n-1)` in-bounds elements -- the
+/// same bound `neon_tile_plan`'s own gate already established for the NEON
+/// path's `raw`/`output` slices.
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+#[allow(clippy::too_many_arguments)] // mirrors cblas_sgemm's own C signature one-for-one
+unsafe fn try_run_accelerate_sgemm(
+    a: &[f32],
+    base_a: usize,
+    lda: usize,
+    b: &[f32],
+    base_b: usize,
+    ldb: usize,
+    c: &mut [f32],
+    base_c: usize,
+    ldc: usize,
+    m: usize,
+    n: usize,
+    k: usize,
+    out_col_stride: i64,
+) -> bool {
+    if out_col_stride != 1 || m == 0 || n == 0 || k == 0 {
+        return false;
+    }
+    let Ok(m_i32) = i32::try_from(m) else { return false };
+    let Ok(n_i32) = i32::try_from(n) else { return false };
+    let Ok(k_i32) = i32::try_from(k) else { return false };
+    let Ok(lda_i32) = i32::try_from(lda) else { return false };
+    let Ok(ldb_i32) = i32::try_from(ldb) else { return false };
+    let Ok(ldc_i32) = i32::try_from(ldc) else { return false };
+    // SAFETY: caller upholds this function's own `# Safety` bound; the four
+    // slice-to-pointer conversions below stay in-bounds of `a`/`b`/`c` by
+    // that same contract, and `cblas_sgemm` treats `a`/`b` as read-only and
+    // writes only the `m x n` block of `c` starting at `base_c`.
+    unsafe {
+        cblas_sgemm(
+            CBLAS_ROW_MAJOR,
+            CBLAS_NO_TRANS,
+            CBLAS_TRANS,
+            m_i32,
+            n_i32,
+            k_i32,
+            1.0,
+            a[base_a..].as_ptr(),
+            lda_i32,
+            b[base_b..].as_ptr(),
+            ldb_i32,
+            0.0,
+            c[base_c..].as_mut_ptr(),
+            ldc_i32,
+        );
+    }
+    true
 }
 
 /// Everything [`conv_gemm_tile_plan`] needs to decide whether `Conv`'s own
