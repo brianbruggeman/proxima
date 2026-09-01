@@ -6773,6 +6773,14 @@ fn run_reduce<B: Deref<Target = [f32]>>(
     } else {
         Path::Generic
     };
+    // route-census task (2026-09-01): computed once here, alongside `path`,
+    // so every one of this function's four `record_reduce_path_ticks` call
+    // sites can also feed `instrument::record_reduce_gemm_path_ticks` --
+    // see that function's own doc for why the all-reduce `path` counters
+    // alone cannot isolate the 96 `MatMul` folds from BGE's 74 small
+    // single-operand reduces.
+    #[cfg(feature = "instrument")]
+    let is_gemm = reduce_is_gemm_shaped(resolved);
     // per-path-kind wall time (residual-profile task, 2026-08-30): started
     // once `path` is known, committed at whichever of this function's three
     // early returns (or its own tail) actually fires — see
@@ -6855,7 +6863,11 @@ fn run_reduce<B: Deref<Target = [f32]>>(
                 counters.output_writes += leading_total * width as u64;
                 let distinct_operand_elements: u64 = raw.iter().map(|buffer| buffer.len() as u64).sum();
                 counters.commit(path, distinct_operand_elements);
-                instrument::record_reduce_path_ticks(path, instrument::elapsed_ticks(commit_started));
+                let elapsed = instrument::elapsed_ticks(commit_started);
+                instrument::record_reduce_path_ticks(path, elapsed);
+                if is_gemm {
+                    instrument::record_reduce_gemm_path_ticks(path, elapsed);
+                }
             }
             return Ok(());
         }
@@ -6919,7 +6931,11 @@ fn run_reduce<B: Deref<Target = [f32]>>(
                 counters.output_writes += plan.m_total as u64 * plan.n_total as u64;
                 let distinct_operand_elements: u64 = raw.iter().map(|buffer| buffer.len() as u64).sum();
                 counters.commit(Path::ConvTile, distinct_operand_elements);
-                instrument::record_reduce_path_ticks(Path::ConvTile, instrument::elapsed_ticks(commit_started));
+                let elapsed = instrument::elapsed_ticks(commit_started);
+                instrument::record_reduce_path_ticks(Path::ConvTile, elapsed);
+                if is_gemm {
+                    instrument::record_reduce_gemm_path_ticks(Path::ConvTile, elapsed);
+                }
             }
             return Ok(());
         }
@@ -6995,7 +7011,11 @@ fn run_reduce<B: Deref<Target = [f32]>>(
                 counters.leading_iters += leading_total;
                 counters.output_writes += leading_total * width as u64;
                 counters.commit(path, distinct_operand_elements);
-                instrument::record_reduce_path_ticks(path, instrument::elapsed_ticks(commit_started));
+                let elapsed = instrument::elapsed_ticks(commit_started);
+                instrument::record_reduce_path_ticks(path, elapsed);
+                if is_gemm {
+                    instrument::record_reduce_gemm_path_ticks(path, elapsed);
+                }
             }
             return Ok(());
         }
@@ -7444,7 +7464,11 @@ fn run_reduce<B: Deref<Target = [f32]>>(
     {
         let distinct_operand_elements: u64 = raw.iter().map(|buffer| buffer.len() as u64).sum();
         counters.commit(path, distinct_operand_elements);
-        instrument::record_reduce_path_ticks(path, instrument::elapsed_ticks(commit_started));
+        let elapsed = instrument::elapsed_ticks(commit_started);
+        instrument::record_reduce_path_ticks(path, elapsed);
+        if is_gemm {
+            instrument::record_reduce_gemm_path_ticks(path, elapsed);
+        }
     }
     #[cfg(all(target_arch = "aarch64", feature = "instrument"))]
     {
