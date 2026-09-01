@@ -8541,10 +8541,10 @@ fn width_tile_plan(context: &WidthPathContext) -> Option<WidthTilePlan> {
 /// Bundled for the same argument-count-lint reason [`OperandSpan`]/[`DotFold`]
 /// already document.
 #[cfg(target_arch = "aarch64")]
-struct KStridedTile<'a> {
-    data: &'a [f32],
-    base: i64,
-    k_stride: i64,
+pub struct KStridedTile<'a> {
+    pub data: &'a [f32],
+    pub base: i64,
+    pub k_stride: i64,
 }
 
 /// The register-tile microkernel: `ROWS` output rows x `WIDTH_TILE_VECS`
@@ -8556,33 +8556,44 @@ struct KStridedTile<'a> {
 /// overwriting), so a caller may reuse this for a running total if that
 /// shape is ever needed.
 ///
-/// `ROWS` is a const generic, not fixed at `WIDTH_TILE_ROWS`, so the same
-/// body serves the main tile (`ROWS = WIDTH_TILE_ROWS`) and the row-remainder
-/// variants (`ROWS = 2`, `ROWS = 1`, [`run_width_tile_neon`]'s own greedy
-/// 2-then-1 dispatch) — the identical precedent [`gemm_tile_neon`]'s own
-/// `const ROWS: usize` already sets for the dot-path tile's row remainder.
-/// Fewer row accumulators at smaller `ROWS` is the only change; the
-/// per-`step` load/FMA structure is untouched.
+/// `ROWS` and `VECS` are const generics, not fixed at `WIDTH_TILE_ROWS`/
+/// `WIDTH_TILE_VECS`, so the same body serves the main tile (`ROWS =
+/// WIDTH_TILE_ROWS, VECS = WIDTH_TILE_VECS` in every production call site)
+/// and the row-remainder variants (`ROWS = 2`, `ROWS = 1`,
+/// [`run_width_tile_neon`]'s own greedy 2-then-1 dispatch) — the identical
+/// precedent [`gemm_tile_neon`]'s own `const ROWS: usize` already sets for
+/// the dot-path tile's row remainder. `VECS` is generic for the same reason
+/// ROW 20's accumulator sweep needs it: the live register count is
+/// `ROWS * VECS` accumulators + `VECS` b-vectors + 1 broadcast a-value,
+/// and only a compile-time `VECS` lets a caller monomorphise that count
+/// without spilling. `out` is nested (`[[f32; 4]; VECS]`, not a flat
+/// `[f32; VECS * 4]`) purely so the array length depends on `VECS` alone,
+/// never `VECS * 4` — a generic const parameter cannot appear in an
+/// arithmetic array-length expression on stable Rust without
+/// `generic_const_exprs`, so the nesting is a stable-Rust workaround, not a
+/// layout change: `[[f32; 4]; VECS]` and `[f32; VECS * 4]` are bit-identical.
+/// Fewer row/vec accumulators at smaller `ROWS`/`VECS` is the only
+/// behavioural change; the per-`step` load/FMA structure is untouched.
 ///
 /// # Safety
 /// Caller guarantees every offset `a.base + i*a_row_stride + step*a.k_stride`
 /// for `i in 0..ROWS, step in 0..k` lies within `a.data`, and every offset
-/// `b.base + step*b.k_stride + v*4 + lane` for `v in 0..WIDTH_TILE_VECS,
+/// `b.base + step*b.k_stride + v*4 + lane` for `v in 0..VECS,
 /// lane in 0..4` lies within `b.data`.
 #[cfg(target_arch = "aarch64")]
-unsafe fn gemm_width_tile_neon<const ROWS: usize>(
+pub unsafe fn gemm_width_tile_neon<const ROWS: usize, const VECS: usize>(
     a: KStridedTile,
     a_row_stride: i64,
     b: KStridedTile,
     k: usize,
-    out: &mut [[f32; WIDTH_TILE_VECS * 4]; ROWS],
+    out: &mut [[[f32; 4]; VECS]; ROWS],
 ) {
     // caller-checked: every (row, step, vec) offset below is in bounds.
     unsafe {
-        let mut acc = [[vdupq_n_f32(0.0); WIDTH_TILE_VECS]; ROWS];
+        let mut acc = [[vdupq_n_f32(0.0); VECS]; ROWS];
         for step in 0..k {
             let step = step as i64;
-            let mut bv = [vdupq_n_f32(0.0); WIDTH_TILE_VECS];
+            let mut bv = [vdupq_n_f32(0.0); VECS];
             for (v, lane) in bv.iter_mut().enumerate() {
                 let offset = b.base + step * b.k_stride + v as i64 * 4;
                 *lane = vld1q_f32(b.data.as_ptr().add(offset as usize));
@@ -8597,8 +8608,8 @@ unsafe fn gemm_width_tile_neon<const ROWS: usize>(
         }
         for (i, row_acc) in acc.iter().enumerate() {
             for (v, &value) in row_acc.iter().enumerate() {
-                let combined = vaddq_f32(vld1q_f32(out[i].as_ptr().add(v * 4)), value);
-                vst1q_f32(out[i].as_mut_ptr().add(v * 4), combined);
+                let combined = vaddq_f32(vld1q_f32(out[i][v].as_ptr()), value);
+                vst1q_f32(out[i][v].as_mut_ptr(), combined);
             }
         }
     }
@@ -8804,7 +8815,7 @@ fn width_tile_scalar_cell(a: KStridedTile, b: KStridedTile, k: usize, seed: f32)
 }
 
 /// Walks the full leading x width space in `WIDTH_TILE_ROWS x
-/// (WIDTH_TILE_VECS * 4)` blocks via [`gemm_width_tile_neon`]`::<WIDTH_TILE_ROWS>`,
+/// (WIDTH_TILE_VECS * 4)` blocks via [`gemm_width_tile_neon`]`::<WIDTH_TILE_ROWS, WIDTH_TILE_VECS>`,
 /// then covers whatever leading rows are left (`leading_total %
 /// WIDTH_TILE_ROWS`, always `0..WIDTH_TILE_ROWS`) with the SAME kernel
 /// monomorphised narrower — a 2-row tile, then a 1-row tile, consumed
@@ -8875,7 +8886,7 @@ fn run_width_tile_neon(plan: &WidthTilePlan, raw: &[&[f32]], packed: Option<&Pac
                 ),
                 None => (data_b_unpacked, plan.base_b + col_start as i64, plan.k_stride_b),
             };
-            let mut tile_out = [[plan.seed; WIDTH_TILE_VECS * 4]; WIDTH_TILE_ROWS];
+            let mut tile_out = [[[plan.seed; 4]; WIDTH_TILE_VECS]; WIDTH_TILE_ROWS];
 
             // caller-checked: `base_a`/`base_b` plus every stride-scaled
             // offset the kernel touches stay inside `data_a`/`b_data`,
@@ -8883,7 +8894,7 @@ fn run_width_tile_neon(plan: &WidthTilePlan, raw: &[&[f32]], packed: Option<&Pac
             // tiles carved out of `plan.leading_total`/`plan.width` (packed:
             // `full_col_tiles`/`k_total` sized exactly to match).
             unsafe {
-                gemm_width_tile_neon::<WIDTH_TILE_ROWS>(
+                gemm_width_tile_neon::<WIDTH_TILE_ROWS, WIDTH_TILE_VECS>(
                     KStridedTile { data: data_a, base: base_a, k_stride: plan.k_stride_a },
                     plan.row_stride_a,
                     KStridedTile { data: b_data, base: base_b, k_stride: k_stride_b },
@@ -8898,9 +8909,11 @@ fn run_width_tile_neon(plan: &WidthTilePlan, raw: &[&[f32]], packed: Option<&Pac
 
             for (i, row) in tile_out.iter().enumerate() {
                 let row_prefix = out_row_prefix + i as i64 * plan.out_row_stride;
-                for (v, &value) in row.iter().enumerate() {
-                    let position = row_prefix + (col_start + v) as i64 * plan.out_col_stride;
-                    output[position as usize] = value;
+                for (v, quad) in row.iter().enumerate() {
+                    for (lane, &value) in quad.iter().enumerate() {
+                        let position = row_prefix + (col_start + v * 4 + lane) as i64 * plan.out_col_stride;
+                        output[position as usize] = value;
+                    }
                 }
             }
         }
@@ -8935,7 +8948,7 @@ fn run_width_tile_neon(plan: &WidthTilePlan, raw: &[&[f32]], packed: Option<&Pac
     // never the scalar path. `row_remainder_tile!` is a macro (not a
     // generic helper fn) for the identical reason `cpu.rs`'s dot-path
     // `row_remainder_tile!` is: `$rows` must be a literal so `tile_out`'s
-    // array length and `gemm_width_tile_neon::<$rows>`'s monomorphisation
+    // array length and `gemm_width_tile_neon::<$rows, WIDTH_TILE_VECS>`'s monomorphisation
     // are both resolved at compile time, and a runtime `usize` parameter
     // could not do either.
     let mut row_start = row_tiles * WIDTH_TILE_ROWS;
@@ -8955,7 +8968,7 @@ fn run_width_tile_neon(plan: &WidthTilePlan, raw: &[&[f32]], packed: Option<&Pac
                     ),
                     None => (data_b_unpacked, plan.base_b + col_start as i64, plan.k_stride_b),
                 };
-                let mut tile_out = [[plan.seed; WIDTH_TILE_VECS * 4]; $rows];
+                let mut tile_out = [[[plan.seed; 4]; WIDTH_TILE_VECS]; $rows];
 
                 // caller-checked: same argument `run_width_tile_neon`'s main
                 // loop above already proves for `WIDTH_TILE_ROWS` rows, just
@@ -8964,7 +8977,7 @@ fn run_width_tile_neon(plan: &WidthTilePlan, raw: &[&[f32]], packed: Option<&Pac
                 // exactly the greedy 2-then-1 dispatch below never
                 // overshooting `plan.leading_total`.
                 unsafe {
-                    gemm_width_tile_neon::<$rows>(
+                    gemm_width_tile_neon::<$rows, WIDTH_TILE_VECS>(
                         KStridedTile { data: data_a, base: base_a, k_stride: plan.k_stride_a },
                         plan.row_stride_a,
                         KStridedTile { data: b_data, base: base_b, k_stride: k_stride_b },
@@ -8980,9 +8993,11 @@ fn run_width_tile_neon(plan: &WidthTilePlan, raw: &[&[f32]], packed: Option<&Pac
 
                 for (i, row) in tile_out.iter().enumerate() {
                     let row_prefix = out_row_prefix + i as i64 * plan.out_row_stride;
-                    for (v, &value) in row.iter().enumerate() {
-                        let position = row_prefix + (col_start + v) as i64 * plan.out_col_stride;
-                        output[position as usize] = value;
+                    for (v, quad) in row.iter().enumerate() {
+                        for (lane, &value) in quad.iter().enumerate() {
+                            let position = row_prefix + (col_start + v * 4 + lane) as i64 * plan.out_col_stride;
+                            output[position as usize] = value;
+                        }
                     }
                 }
             }
