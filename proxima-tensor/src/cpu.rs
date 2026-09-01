@@ -8377,7 +8377,17 @@ struct WidthPathContext<'a> {
 }
 
 /// Everything the tiled loop needs to walk, resolved once per bound op.
+/// `outer_extent`/`outer_stride_*` (attention-tile task, 2026-09-01): a
+/// second, OUTER leading axis both operands step through together (`heads`,
+/// for BGE's `Q@K^T`/`softmax@V` folds) -- `1`/`0`/`0`/`0` for every
+/// single-leading-axis node (every node this tile already served), which
+/// makes the outer loop [`run_width_tile_neon`] wraps its walk in run
+/// exactly once at zero offset: bit-identical to the pre-existing address
+/// sequence for those nodes. Mirrors [`ConvGemmTilePlan`]'s own
+/// `outer_extent`/`outer_stride_m`/`outer_stride_n` shape, applied to the
+/// leading axes instead of the reduction axes.
 #[cfg(target_arch = "aarch64")]
+#[derive(Clone, Copy)]
 struct WidthTilePlan {
     a_operand: usize,
     b_operand: usize,
@@ -8393,6 +8403,10 @@ struct WidthTilePlan {
     reduction_total: usize,
     width: usize,
     seed: f32,
+    outer_extent: usize,
+    outer_stride_a: i64,
+    outer_stride_b: i64,
+    outer_stride_out: i64,
 }
 
 /// Whether `dims` (`resolve_reduce_axis_shape`'s own outer-to-inner order)
@@ -8486,21 +8500,34 @@ fn width_tile_plan(context: &WidthPathContext) -> Option<WidthTilePlan> {
         record_decline(instrument::WidthDeclineReason::AxesShape, -1, -1, width_i64, stride_a_early, stride_b_early);
         return None;
     }
-    let mut leading_dim = context.leading_output_axes[0];
-    let mut non_degenerate_leading_axes = 0u32;
-    for &axis in context.leading_output_axes {
-        if context.resolved.extents[axis as usize] != 1 {
-            non_degenerate_leading_axes += 1;
-            leading_dim = axis;
-        }
-    }
-    if non_degenerate_leading_axes > 1 {
+    // attention-tile task (2026-09-01): up to TWO non-degenerate leading
+    // axes now reach this point -- `attn_qk`/`attn_v` (BGE's Q@K^T and
+    // softmax@V folds) carry `[heads, seq_q]`, neither extent 1. Which of
+    // the two is the tile's own "row" axis (only the `a` operand varies
+    // over it, `b` constant -- the shape every single-axis node already
+    // proves) versus the "outer" axis (both operands step by it, e.g.
+    // per-head K/V) is a physical-stride question, answered below once
+    // `layout_a`/`layout_b` are resolved -- not an extent question, so only
+    // bound and collect candidates here. More than 2 non-degenerate leading
+    // axes has no proven shape and declines now rather than being guessed
+    // at further down.
+    let non_degenerate_leading: Vec<u16> = context
+        .leading_output_axes
+        .iter()
+        .copied()
+        .filter(|&axis| context.resolved.extents[axis as usize] != 1)
+        .collect();
+    if non_degenerate_leading.len() > 2 {
         #[cfg(feature = "instrument")]
         record_decline(instrument::WidthDeclineReason::AxesShape, -1, -1, width_i64, stride_a_early, stride_b_early);
         return None;
     }
     #[cfg(feature = "instrument")]
-    let leading_total_early = context.resolved.extents[leading_dim as usize] as i64;
+    let leading_total_early: i64 = if non_degenerate_leading.is_empty() {
+        1
+    } else {
+        non_degenerate_leading.iter().map(|&axis| context.resolved.extents[axis as usize] as i64).product()
+    };
     #[cfg(feature = "instrument")]
     let reduction_total_early: i64 = context.reduction_dims.iter().map(|&dim| context.resolved.extents[dim as usize] as i64).product();
     if context.width < WIDTH_TILE_VECS * 4 {
@@ -8560,6 +8587,62 @@ fn width_tile_plan(context: &WidthPathContext) -> Option<WidthTilePlan> {
                 return None;
             }
         };
+
+    // final leading-axis resolution: needs `layout_a`/`layout_b`'s physical
+    // strides, unavailable until the stride-layout match just above settles
+    // which operand is `a` (row-varying, contiguous over `k`) vs `b`
+    // (weight-like, constant per row). Zero non-degenerate axes: `leading_dim`
+    // stays whatever `leading_output_axes[0]` is (extent 1, a single
+    // degenerate row) -- the pre-existing behavior. One: unchanged, that
+    // axis is the row axis, no outer loop. Two (`attn_qk`/`attn_v`): the
+    // axis where `layout_b`'s stride is 0 is the row axis (the SAME shape
+    // every other node already proves); the other must be a genuine outer
+    // axis both operands step by -- `layout_b`'s stride nonzero there by
+    // construction (the complement), and `layout_a`'s stride ALSO nonzero
+    // (else `a` never changes across it, a shape this tile has not proven
+    // and declines rather than guesses).
+    let (leading_dim, outer_dim) = match non_degenerate_leading.as_slice() {
+        [] => (context.leading_output_axes[0], None),
+        &[only] => (only, None),
+        &[first, second] => match (layout_b.stride(first), layout_b.stride(second)) {
+            (0, other) if other != 0 => (first, Some(second)),
+            (other, 0) if other != 0 => (second, Some(first)),
+            _ => {
+                #[cfg(feature = "instrument")]
+                record_decline(
+                    instrument::WidthDeclineReason::AxesShape,
+                    leading_total_early,
+                    reduction_total_early,
+                    width_i64,
+                    stride_a_early,
+                    stride_b_early,
+                );
+                return None;
+            }
+        },
+        _ => unreachable!("non_degenerate_leading.len() > 2 already declined above"),
+    };
+    let outer_info = match outer_dim {
+        Some(axis) if layout_a.stride(axis) != 0 => Some((
+            context.resolved.extents[axis as usize] as usize,
+            layout_a.stride(axis),
+            layout_b.stride(axis),
+            context.out_layout.stride(axis),
+        )),
+        Some(_) => {
+            #[cfg(feature = "instrument")]
+            record_decline(
+                instrument::WidthDeclineReason::AxesShape,
+                leading_total_early,
+                reduction_total_early,
+                width_i64,
+                stride_a_early,
+                stride_b_early,
+            );
+            return None;
+        }
+        None => None,
+    };
 
     // single reduction axis: unchanged, direct `layout.stride`/`extents`
     // read. Multi-axis (`attn_o`'s `[heads, head_dim]`): both operands must
@@ -8627,6 +8710,10 @@ fn width_tile_plan(context: &WidthPathContext) -> Option<WidthTilePlan> {
         reduction_total,
         width: context.width,
         seed: initial_value(context.init).unwrap_or(0.0),
+        outer_extent: outer_info.map_or(1, |(extent, ..)| extent),
+        outer_stride_a: outer_info.map_or(0, |(_, stride_a, ..)| stride_a),
+        outer_stride_b: outer_info.map_or(0, |(_, _, stride_b, _)| stride_b),
+        outer_stride_out: outer_info.map_or(0, |(_, _, _, stride_out)| stride_out),
     })
 }
 
@@ -8977,98 +9064,34 @@ fn run_width_tile_neon(plan: &WidthTilePlan, raw: &[&[f32]], packed: Option<&Pac
     // buffer from a differently-shaped node, never expected to reject here.
     let packed = packed.filter(|panels| panels.full_col_tiles >= col_tiles);
 
-    for row_tile in 0..row_tiles {
-        let row_start = row_tile * WIDTH_TILE_ROWS;
-        let base_a = plan.base_a + row_start as i64 * plan.row_stride_a;
-        let out_row_prefix = plan.out_base + row_start as i64 * plan.out_row_stride;
+    // attention-tile task (2026-09-01): `outer_extent` walks a SECOND
+    // leading axis both operands step through together (`heads`, for
+    // `attn_qk`/`attn_v`) -- `1` for every node this tile already served,
+    // which runs this loop exactly once at zero offset: bit-identical to
+    // the pre-existing address sequence for those nodes. `local_plan`
+    // shadows the parameter with `base_a`/`base_b`/`out_base` advanced by
+    // the current outer step; every other field is untouched, so the walk
+    // below is the SAME code, just re-based per outer step.
+    for outer_step in 0..plan.outer_extent {
+        let step = outer_step as i64;
+        let local_plan = WidthTilePlan {
+            base_a: plan.base_a + step * plan.outer_stride_a,
+            base_b: plan.base_b + step * plan.outer_stride_b,
+            out_base: plan.out_base + step * plan.outer_stride_out,
+            ..*plan
+        };
+        let plan = &local_plan;
 
-        for col_tile in 0..col_tiles {
-            let col_start = col_tile * tile_cols;
-            // packed: panel `col_tile`'s block, `k_stride == tile_cols`
-            // (sequential); unpacked: the original strided read,
-            // `k_stride == plan.k_stride_b` (one weight row apart).
-            let (b_data, base_b, k_stride_b) = match packed {
-                Some(panels) => (
-                    panels.data.as_slice(),
-                    (col_tile * panels.k_total * panels.tile_cols) as i64,
-                    panels.tile_cols as i64,
-                ),
-                None => (data_b_unpacked, plan.base_b + col_start as i64, plan.k_stride_b),
-            };
-            let mut tile_out = [[[plan.seed; 4]; WIDTH_TILE_VECS]; WIDTH_TILE_ROWS];
-
-            // caller-checked: `base_a`/`base_b` plus every stride-scaled
-            // offset the kernel touches stay inside `data_a`/`b_data`,
-            // guaranteed by `row_tiles`/`col_tiles` only covering whole
-            // tiles carved out of `plan.leading_total`/`plan.width` (packed:
-            // `full_col_tiles`/`k_total` sized exactly to match).
-            unsafe {
-                gemm_width_tile_neon::<WIDTH_TILE_ROWS, WIDTH_TILE_VECS>(
-                    KStridedTile { data: data_a, base: base_a, k_stride: plan.k_stride_a },
-                    plan.row_stride_a,
-                    KStridedTile { data: b_data, base: base_b, k_stride: k_stride_b },
-                    plan.reduction_total,
-                    &mut tile_out,
-                );
-            }
-            #[cfg(feature = "instrument")]
-            {
-                width_tile_invocations += 1;
-            }
-
-            for (i, row) in tile_out.iter().enumerate() {
-                let row_prefix = out_row_prefix + i as i64 * plan.out_row_stride;
-                for (v, quad) in row.iter().enumerate() {
-                    for (lane, &value) in quad.iter().enumerate() {
-                        let position = row_prefix + (col_start + v * 4 + lane) as i64 * plan.out_col_stride;
-                        output[position as usize] = value;
-                    }
-                }
-            }
-        }
-
-        // column tail for these `WIDTH_TILE_ROWS` rows: columns past the
-        // last full tile, still inside a tiled row-block.
-        for col in col_tiles * tile_cols..plan.width {
-            for i in 0..WIDTH_TILE_ROWS {
-                let row = row_start + i;
-                let value = width_tile_scalar_cell(
-                    KStridedTile {
-                        data: data_a,
-                        base: plan.base_a + row as i64 * plan.row_stride_a,
-                        k_stride: plan.k_stride_a,
-                    },
-                    KStridedTile { data: data_b_unpacked, base: plan.base_b + col as i64, k_stride: plan.k_stride_b },
-                    plan.reduction_total,
-                    plan.seed,
-                );
-                let position = plan.out_base + row as i64 * plan.out_row_stride + col as i64 * plan.out_col_stride;
-                output[position as usize] = value;
-                #[cfg(feature = "instrument")]
-                {
-                    width_tile_fallback_elements += 1;
-                }
-            }
-        }
-    }
-
-    // row tail: leading rows past the last full row-tile — covered by the
-    // SAME NEON kernel monomorphised at `ROWS = 2` then `ROWS = 1`, greedily,
-    // never the scalar path. `row_remainder_tile!` is a macro (not a
-    // generic helper fn) for the identical reason `cpu.rs`'s dot-path
-    // `row_remainder_tile!` is: `$rows` must be a literal so `tile_out`'s
-    // array length and `gemm_width_tile_neon::<$rows, WIDTH_TILE_VECS>`'s monomorphisation
-    // are both resolved at compile time, and a runtime `usize` parameter
-    // could not do either.
-    let mut row_start = row_tiles * WIDTH_TILE_ROWS;
-    macro_rules! width_row_remainder_tile {
-        ($rows:literal) => {{
+        for row_tile in 0..row_tiles {
+            let row_start = row_tile * WIDTH_TILE_ROWS;
             let base_a = plan.base_a + row_start as i64 * plan.row_stride_a;
             let out_row_prefix = plan.out_base + row_start as i64 * plan.out_row_stride;
 
             for col_tile in 0..col_tiles {
                 let col_start = col_tile * tile_cols;
-                // same packed/unpacked selection the main tile above uses.
+                // packed: panel `col_tile`'s block, `k_stride == tile_cols`
+                // (sequential); unpacked: the original strided read,
+                // `k_stride == plan.k_stride_b` (one weight row apart).
                 let (b_data, base_b, k_stride_b) = match packed {
                     Some(panels) => (
                         panels.data.as_slice(),
@@ -9077,16 +9100,15 @@ fn run_width_tile_neon(plan: &WidthTilePlan, raw: &[&[f32]], packed: Option<&Pac
                     ),
                     None => (data_b_unpacked, plan.base_b + col_start as i64, plan.k_stride_b),
                 };
-                let mut tile_out = [[[plan.seed; 4]; WIDTH_TILE_VECS]; $rows];
+                let mut tile_out = [[[plan.seed; 4]; WIDTH_TILE_VECS]; WIDTH_TILE_ROWS];
 
-                // caller-checked: same argument `run_width_tile_neon`'s main
-                // loop above already proves for `WIDTH_TILE_ROWS` rows, just
-                // `$rows` of them starting at `row_start` — still fully
-                // inside `plan.leading_total`, since `row_start + $rows` is
-                // exactly the greedy 2-then-1 dispatch below never
-                // overshooting `plan.leading_total`.
+                // caller-checked: `base_a`/`base_b` plus every stride-scaled
+                // offset the kernel touches stay inside `data_a`/`b_data`,
+                // guaranteed by `row_tiles`/`col_tiles` only covering whole
+                // tiles carved out of `plan.leading_total`/`plan.width` (packed:
+                // `full_col_tiles`/`k_total` sized exactly to match).
                 unsafe {
-                    gemm_width_tile_neon::<$rows, WIDTH_TILE_VECS>(
+                    gemm_width_tile_neon::<WIDTH_TILE_ROWS, WIDTH_TILE_VECS>(
                         KStridedTile { data: data_a, base: base_a, k_stride: plan.k_stride_a },
                         plan.row_stride_a,
                         KStridedTile { data: b_data, base: base_b, k_stride: k_stride_b },
@@ -9096,8 +9118,7 @@ fn run_width_tile_neon(plan: &WidthTilePlan, raw: &[&[f32]], packed: Option<&Pac
                 }
                 #[cfg(feature = "instrument")]
                 {
-                    width_tile_row_remainder_invocations += 1;
-                    width_tile_row_remainder_elements += ($rows * tile_cols) as u64;
+                    width_tile_invocations += 1;
                 }
 
                 for (i, row) in tile_out.iter().enumerate() {
@@ -9111,12 +9132,10 @@ fn run_width_tile_neon(plan: &WidthTilePlan, raw: &[&[f32]], packed: Option<&Pac
                 }
             }
 
-            // column tail for these `$rows` rows — same shape as the main
-            // tile's own column tail above, still genuinely scalar: no
-            // row-count NEON variant covers a column count short of a full
-            // `WIDTH_TILE_VECS`-wide block.
+            // column tail for these `WIDTH_TILE_ROWS` rows: columns past the
+            // last full tile, still inside a tiled row-block.
             for col in col_tiles * tile_cols..plan.width {
-                for i in 0..$rows {
+                for i in 0..WIDTH_TILE_ROWS {
                     let row = row_start + i;
                     let value = width_tile_scalar_cell(
                         KStridedTile {
@@ -9128,8 +9147,7 @@ fn run_width_tile_neon(plan: &WidthTilePlan, raw: &[&[f32]], packed: Option<&Pac
                         plan.reduction_total,
                         plan.seed,
                     );
-                    let position =
-                        plan.out_base + row as i64 * plan.out_row_stride + col as i64 * plan.out_col_stride;
+                    let position = plan.out_base + row as i64 * plan.out_row_stride + col as i64 * plan.out_col_stride;
                     output[position as usize] = value;
                     #[cfg(feature = "instrument")]
                     {
@@ -9137,33 +9155,123 @@ fn run_width_tile_neon(plan: &WidthTilePlan, raw: &[&[f32]], packed: Option<&Pac
                     }
                 }
             }
+        }
 
-            row_start += $rows;
-        }};
-    }
+        // row tail: leading rows past the last full row-tile — covered by the
+        // SAME NEON kernel monomorphised at `ROWS = 2` then `ROWS = 1`, greedily,
+        // never the scalar path. `row_remainder_tile!` is a macro (not a
+        // generic helper fn) for the identical reason `cpu.rs`'s dot-path
+        // `row_remainder_tile!` is: `$rows` must be a literal so `tile_out`'s
+        // array length and `gemm_width_tile_neon::<$rows, WIDTH_TILE_VECS>`'s monomorphisation
+        // are both resolved at compile time, and a runtime `usize` parameter
+        // could not do either. Reset per outer step (`heads`, attention-tile
+        // task 2026-09-01): each step's own remainder is independent of every
+        // other step's.
+        let mut row_start = row_tiles * WIDTH_TILE_ROWS;
+        macro_rules! width_row_remainder_tile {
+            ($rows:literal) => {{
+                let base_a = plan.base_a + row_start as i64 * plan.row_stride_a;
+                let out_row_prefix = plan.out_base + row_start as i64 * plan.out_row_stride;
 
-    // `leading_total - row_tiles * WIDTH_TILE_ROWS` is always `0..
-    // WIDTH_TILE_ROWS` by construction (`row_tiles` is the floor division);
-    // 2s-then-1 covers every value in that range (and, generally, any
-    // non-negative remainder, not only `< WIDTH_TILE_ROWS`), so the loop
-    // below always terminates with zero rows left over.
-    let mut rows_remaining = plan.leading_total - row_start;
-    while rows_remaining >= 2 {
-        width_row_remainder_tile!(2);
-        rows_remaining -= 2;
+                for col_tile in 0..col_tiles {
+                    let col_start = col_tile * tile_cols;
+                    // same packed/unpacked selection the main tile above uses.
+                    let (b_data, base_b, k_stride_b) = match packed {
+                        Some(panels) => (
+                            panels.data.as_slice(),
+                            (col_tile * panels.k_total * panels.tile_cols) as i64,
+                            panels.tile_cols as i64,
+                        ),
+                        None => (data_b_unpacked, plan.base_b + col_start as i64, plan.k_stride_b),
+                    };
+                    let mut tile_out = [[[plan.seed; 4]; WIDTH_TILE_VECS]; $rows];
+
+                    // caller-checked: same argument `run_width_tile_neon`'s main
+                    // loop above already proves for `WIDTH_TILE_ROWS` rows, just
+                    // `$rows` of them starting at `row_start` — still fully
+                    // inside `plan.leading_total`, since `row_start + $rows` is
+                    // exactly the greedy 2-then-1 dispatch below never
+                    // overshooting `plan.leading_total`.
+                    unsafe {
+                        gemm_width_tile_neon::<$rows, WIDTH_TILE_VECS>(
+                            KStridedTile { data: data_a, base: base_a, k_stride: plan.k_stride_a },
+                            plan.row_stride_a,
+                            KStridedTile { data: b_data, base: base_b, k_stride: k_stride_b },
+                            plan.reduction_total,
+                            &mut tile_out,
+                        );
+                    }
+                    #[cfg(feature = "instrument")]
+                    {
+                        width_tile_row_remainder_invocations += 1;
+                        width_tile_row_remainder_elements += ($rows * tile_cols) as u64;
+                    }
+
+                    for (i, row) in tile_out.iter().enumerate() {
+                        let row_prefix = out_row_prefix + i as i64 * plan.out_row_stride;
+                        for (v, quad) in row.iter().enumerate() {
+                            for (lane, &value) in quad.iter().enumerate() {
+                                let position = row_prefix + (col_start + v * 4 + lane) as i64 * plan.out_col_stride;
+                                output[position as usize] = value;
+                            }
+                        }
+                    }
+                }
+
+                // column tail for these `$rows` rows — same shape as the main
+                // tile's own column tail above, still genuinely scalar: no
+                // row-count NEON variant covers a column count short of a full
+                // `WIDTH_TILE_VECS`-wide block.
+                for col in col_tiles * tile_cols..plan.width {
+                    for i in 0..$rows {
+                        let row = row_start + i;
+                        let value = width_tile_scalar_cell(
+                            KStridedTile {
+                                data: data_a,
+                                base: plan.base_a + row as i64 * plan.row_stride_a,
+                                k_stride: plan.k_stride_a,
+                            },
+                            KStridedTile { data: data_b_unpacked, base: plan.base_b + col as i64, k_stride: plan.k_stride_b },
+                            plan.reduction_total,
+                            plan.seed,
+                        );
+                        let position =
+                            plan.out_base + row as i64 * plan.out_row_stride + col as i64 * plan.out_col_stride;
+                        output[position as usize] = value;
+                        #[cfg(feature = "instrument")]
+                        {
+                            width_tile_fallback_elements += 1;
+                        }
+                    }
+                }
+
+                row_start += $rows;
+            }};
+        }
+
+        // `leading_total - row_tiles * WIDTH_TILE_ROWS` is always `0..
+        // WIDTH_TILE_ROWS` by construction (`row_tiles` is the floor division);
+        // 2s-then-1 covers every value in that range (and, generally, any
+        // non-negative remainder, not only `< WIDTH_TILE_ROWS`), so the loop
+        // below always terminates with zero rows left over.
+        let mut rows_remaining = plan.leading_total - row_start;
+        while rows_remaining >= 2 {
+            width_row_remainder_tile!(2);
+            rows_remaining -= 2;
+        }
+        if rows_remaining == 1 {
+            width_row_remainder_tile!(1);
+            rows_remaining -= 1;
+        }
+        debug_assert_eq!(
+            rows_remaining, 0,
+            "width-tile row-remainder dispatch: 2s-then-1 must fully consume the remainder"
+        );
+        debug_assert_eq!(
+            row_start, plan.leading_total,
+            "width-tile row-remainder dispatch: row_start must reach leading_total exactly"
+        );
     }
-    if rows_remaining == 1 {
-        width_row_remainder_tile!(1);
-        rows_remaining -= 1;
-    }
-    debug_assert_eq!(
-        rows_remaining, 0,
-        "width-tile row-remainder dispatch: 2s-then-1 must fully consume the remainder"
-    );
-    debug_assert_eq!(
-        row_start, plan.leading_total,
-        "width-tile row-remainder dispatch: row_start must reach leading_total exactly"
-    );
 
     #[cfg(feature = "instrument")]
     {
@@ -16748,6 +16856,177 @@ mod tests {
             eprintln!(
                 "oversubscribe={oversubscribe} mean_us={mean:.1} cov={coefficient_of_variation:.4} samples={samples_micros:?}"
             );
+        }
+    }
+
+    /// KILL-EARLY nano (attention-tile task, 2026-09-01, binding on ROW
+    /// 198/199): the untiled scalar path vs the NEON width tile widened by
+    /// this task's `outer_extent` field, vs one `cblas_sgemm` call per head
+    /// (`try_run_accelerate_sgemm`), at BGE's own real deployed attention
+    /// shapes -- `Q@K^T` (`K=32`, `N=seq_len`) and `softmax@V`
+    /// (`K=seq_len`, `N=32`), `seq_len` in `{7, 8, 9}`, `heads=12`. `Q@K^T`'s
+    /// own `N` is always `< WIDTH_TILE_VECS * 4 == 16` for every `seq_len`
+    /// in this set, so `width_tile_plan` declines it with `NarrowWidth`
+    /// regardless of this task's own fix (verified separately by the
+    /// `bge_route_census` example) -- its NEON number here is `N/A`, never
+    /// routed. `#[ignore]`: manual, not part of the CI gate -- run with
+    /// `cargo test -p proxima-tensor --release attention_tile_shapes_nano
+    /// -- --ignored --nocapture`.
+    #[cfg(target_arch = "aarch64")]
+    #[test]
+    #[ignore = "manual nano bench, not a CI gate; see this test's own doc"]
+    fn attention_tile_shapes_nano() {
+        const HEADS: usize = 12;
+        const REPEATS: usize = 7;
+
+        fn scalar_reference(a: &[f32], b_kn: &[f32], heads: usize, m: usize, k: usize, n: usize) -> Vec<f32> {
+            let mut out = vec![0.0f32; heads * m * n];
+            for head in 0..heads {
+                let a_head = &a[head * m * k..(head + 1) * m * k];
+                let b_head = &b_kn[head * k * n..(head + 1) * k * n];
+                let out_head = &mut out[head * m * n..(head + 1) * m * n];
+                for row in 0..m {
+                    for col in 0..n {
+                        let value = width_tile_scalar_cell(
+                            KStridedTile { data: a_head, base: (row * k) as i64, k_stride: 1 },
+                            KStridedTile { data: b_head, base: col as i64, k_stride: n as i64 },
+                            k,
+                            0.0,
+                        );
+                        out_head[row * n + col] = value;
+                    }
+                }
+            }
+            out
+        }
+
+        fn neon_route(a: &[f32], b_kn: &[f32], heads: usize, m: usize, k: usize, n: usize) -> Vec<f32> {
+            let mut out = vec![0.0f32; heads * m * n];
+            let raw: [&[f32]; 2] = [a, b_kn];
+            let plan = WidthTilePlan {
+                a_operand: 0,
+                b_operand: 1,
+                row_stride_a: k as i64,
+                base_a: 0,
+                k_stride_a: 1,
+                base_b: 0,
+                k_stride_b: n as i64,
+                out_base: 0,
+                out_row_stride: n as i64,
+                out_col_stride: 1,
+                leading_total: m,
+                reduction_total: k,
+                width: n,
+                seed: 0.0,
+                outer_extent: heads,
+                outer_stride_a: (m * k) as i64,
+                outer_stride_b: (k * n) as i64,
+                outer_stride_out: (m * n) as i64,
+            };
+            run_width_tile_neon(&plan, &raw, None, &mut out);
+            out
+        }
+
+        #[cfg(target_os = "macos")]
+        fn accelerate_route(a: &[f32], b_nk: &[f32], heads: usize, m: usize, k: usize, n: usize) -> Vec<f32> {
+            let mut out = vec![0.0f32; heads * m * n];
+            for head in 0..heads {
+                let a_head = &a[head * m * k..(head + 1) * m * k];
+                let b_head = &b_nk[head * n * k..(head + 1) * n * k];
+                let out_head = &mut out[head * m * n..(head + 1) * m * n];
+                // SAFETY: `a_head`/`b_head` are exactly `m*k`/`n*k` elements
+                // (`m x k` and `n x k` row-major, this function's own doc),
+                // `out_head` exactly `m*n` -- every bound `try_run_accelerate_sgemm`'s
+                // own `# Safety` requires.
+                let accelerated = unsafe { try_run_accelerate_sgemm(a_head, 0, k, b_head, 0, k, out_head, 0, n, m, n, k, 1, 0.0) };
+                assert!(accelerated, "try_run_accelerate_sgemm declined a shape this nano expects to run: m={m} n={n} k={k}");
+            }
+            out
+        }
+
+        fn mean_cov(samples: &[f64]) -> (f64, f64) {
+            let mean = samples.iter().sum::<f64>() / samples.len() as f64;
+            let variance = samples.iter().map(|sample| (sample - mean).powi(2)).sum::<f64>() / samples.len() as f64;
+            (mean, variance.sqrt() / mean)
+        }
+
+        let load = std::process::Command::new("uptime")
+            .output()
+            .map(|out| String::from_utf8_lossy(&out.stdout).trim().to_string())
+            .unwrap_or_else(|_| "uptime unavailable".to_string());
+        eprintln!("attention_tile_shapes_nano: heads={HEADS} repeats={REPEATS} ambient_load={load}");
+
+        for seq_len in [7usize, 8, 9] {
+            for (name, k, n) in [("Q@K^T", 32usize, seq_len), ("softmax@V", seq_len, 32usize)] {
+                let m = seq_len;
+                let mut rng = Lcg(0x9E37_79B9 ^ (m as u64) ^ ((k as u64) << 8) ^ ((n as u64) << 16));
+                let a: Vec<f32> = (0..HEADS * m * k).map(|_| rng.next_unit()).collect();
+                let b_kn: Vec<f32> = (0..HEADS * k * n).map(|_| rng.next_unit()).collect();
+                // `n x k` row-major transpose of `b_kn`, per-head -- the
+                // layout `try_run_accelerate_sgemm`'s own doc requires.
+                let mut b_nk = vec![0.0f32; HEADS * n * k];
+                for head in 0..HEADS {
+                    for row in 0..k {
+                        for col in 0..n {
+                            b_nk[head * n * k + col * k + row] = b_kn[head * k * n + row * n + col];
+                        }
+                    }
+                }
+
+                let reference = scalar_reference(&a, &b_kn, HEADS, m, k, n);
+
+                let mut scalar_samples = Vec::with_capacity(REPEATS);
+                for _ in 0..REPEATS {
+                    let started = Instant::now();
+                    let out = scalar_reference(&a, &b_kn, HEADS, m, k, n);
+                    scalar_samples.push(started.elapsed().as_nanos() as f64);
+                    std::hint::black_box(&out);
+                }
+                let (scalar_mean, scalar_cov) = mean_cov(&scalar_samples);
+
+                let width_eligible = n >= WIDTH_TILE_VECS * 4;
+                let neon_report = if width_eligible {
+                    let mut neon_out = Vec::new();
+                    let mut neon_samples = Vec::with_capacity(REPEATS);
+                    for _ in 0..REPEATS {
+                        let started = Instant::now();
+                        neon_out = neon_route(&a, &b_kn, HEADS, m, k, n);
+                        neon_samples.push(started.elapsed().as_nanos() as f64);
+                    }
+                    for (got, want) in neon_out.iter().zip(&reference) {
+                        assert!((got - want).abs() < 1e-4, "neon width tile diverged from scalar reference: got={got} want={want}");
+                    }
+                    let (neon_mean, neon_cov) = mean_cov(&neon_samples);
+                    format!("neon_ns={neon_mean:>9.1} (cov={neon_cov:.3}) neon_speedup={:.3}x", scalar_mean / neon_mean)
+                } else {
+                    "neon_ns=N/A (NarrowWidth-declined, N < WIDTH_TILE_VECS*4, never routed)".to_string()
+                };
+
+                #[cfg(target_os = "macos")]
+                let accelerate_report = {
+                    let mut accelerate_out = Vec::new();
+                    let mut accelerate_samples = Vec::with_capacity(REPEATS);
+                    for _ in 0..REPEATS {
+                        let started = Instant::now();
+                        accelerate_out = accelerate_route(&a, &b_nk, HEADS, m, k, n);
+                        accelerate_samples.push(started.elapsed().as_nanos() as f64);
+                    }
+                    for (got, want) in accelerate_out.iter().zip(&reference) {
+                        assert!((got - want).abs() < 1e-3, "accelerate diverged from scalar reference: got={got} want={want}");
+                    }
+                    let (accelerate_mean, accelerate_cov) = mean_cov(&accelerate_samples);
+                    format!(
+                        "accelerate_ns={accelerate_mean:>9.1} (cov={accelerate_cov:.3}) accelerate_speedup={:.3}x",
+                        scalar_mean / accelerate_mean
+                    )
+                };
+                #[cfg(not(target_os = "macos"))]
+                let accelerate_report = "accelerate_ns=N/A (non-macos)".to_string();
+
+                eprintln!(
+                    "{name:<10} M={m:<2} K={k:<2} N={n:<2} width_eligible={width_eligible:<5} scalar_ns={scalar_mean:>9.1} (cov={scalar_cov:.3}) {neon_report} {accelerate_report}"
+                );
+            }
         }
     }
 
