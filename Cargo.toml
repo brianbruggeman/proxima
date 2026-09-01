@@ -61,7 +61,12 @@ resolver = "3"
 # Its own `[workspace]` table already makes it root of its own workspace, so
 # this exclude is belt-and-suspenders against `cargo build --workspace`
 # trying to resolve a foreign dependency tree.
-exclude = ["tools/proxima-vm/guests/lambda", "scripts/burn_reference"]
+#
+# fuzz/: malformed-input smoke harness (fallback path, no cargo-fuzz/nightly
+# on this box -- see fuzz/README.md). Own `[workspace]` table, same
+# precedent as scripts/burn_reference; excluded so `cargo check --workspace`
+# never builds it and its dev-only deps never enter the main lockfile.
+exclude = ["tools/proxima-vm/guests/lambda", "scripts/burn_reference", "fuzz"]
 
 [workspace.package]
 version = "0.1.0"
