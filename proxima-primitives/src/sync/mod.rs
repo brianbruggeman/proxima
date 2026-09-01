@@ -28,6 +28,8 @@
 // Full no_std + alloc landing for those is deferred per DC-SYNC.
 #[cfg(feature = "async-mutex")]
 mod async_mutex;
+#[cfg(feature = "atomic-permits")]
+pub mod atomic_permits;
 pub mod blocking;
 #[cfg(feature = "std")]
 pub mod broadcast;
@@ -78,6 +80,8 @@ pub use async_lock::Barrier;
 
 #[cfg(feature = "async-mutex")]
 pub use async_mutex::{AsyncMutex, AsyncMutexGuard};
+#[cfg(feature = "atomic-permits")]
+pub use atomic_permits::{AtomicPermit, AtomicPermitPool};
 #[cfg(feature = "std")]
 pub use mutex::{Mutex, MutexGuard, MutexLockFuture, TryLockError};
 #[cfg(feature = "alloc")]

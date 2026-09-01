@@ -115,6 +115,9 @@ io-bridge = ["std", "dep:tokio-util"]
 # `proxima-core`'s `time-driver-mock` convention. `MockClock` wraps
 # `proxima-core`'s `MockDriver`, hence the same underlying feature.
 test-support = ["std", "proxima-core/time-driver-mock"]
+# Synchronous fixed-capacity CAS permits; default-off because it deliberately
+# does not provide Semaphore's async wait/close contract.
+atomic-permits = []
 
 [dependencies]
 proxima-core    = { workspace = true, default-features = false }
@@ -210,6 +213,10 @@ harness = false
 
 [[bench]]
 name = "pipe_bench_bucket_table"
+harness = false
+
+[[bench]]
+name = "atomic_permits"
 harness = false
 
 [[bench]]
