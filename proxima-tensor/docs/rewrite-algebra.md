@@ -73,6 +73,13 @@ in the same monomorphized kernel.
   this same admission mechanism to a fourth shape that does **not** fit
   law 1's own admission test, which is exactly why it needed a second law.
 
+**Equivalence obligation.** Policy: bit-identical — the reduce still
+executes and materializes its own buffer exactly as before; only the
+consumer's interpreted walk becomes one more match arm in the same
+monomorphized kernel, so no arithmetic reordering is introduced. Test:
+`law1_clip_epilogue_fused_matches_unfused_bit_identical`
+(`proxima-tensor/tests/rewrite_law_equivalence.rs`).
+
 ## 2. Law 2 — row-statistic absorption
 
 **E(x, ρ(x)) → RowEpilogue(E, ρ)**, where ρ is a last-axis reduction of the
@@ -130,6 +137,32 @@ second reduction over a row this same kernel just finished producing."
 BGE's graph shape. §5 below derives what a softmax instance of this law
 does to the attention block.
 
+**Since this section was written, `layer_norm_cluster_plan` (`cpu.rs:1566`)
+landed and widens the LayerNorm instantiation above from a single-hop tail
+fusion to the FULL five-dispatch `R1→E1→E2→R2→tail` cluster
+(`discipline.md` ROW 204) — a second, two-pass reduction reassociation on
+top of the same admission this section already describes.**
+
+**Equivalence obligation.** Policy: documented rtol, NOT bit-identical —
+measured, not assumed: `docs/discipline.md` ROW 204 found
+`bit_identical(fused-cluster vs unfused)=false` on the real BGE model,
+"expected and explicitly permitted... the two-pass reduction reassociates
+relative to the graph's own reduce order." The cluster kernel's own 4-lane
+accumulator sum (`LayerNormRowFsm`, `cpu.rs:1468`) does not walk the same
+pairing order as the unfused `R1`/`R2` reduce kernels, so the two arms agree
+to within a few ULPs per accumulation step, not bit-for-bit. Test:
+`law2_layer_norm_cluster_fused_matches_unfused_within_rtol`
+(`proxima-tensor/tests/rewrite_law_equivalence.rs`, `atol=3e-4`,
+`rtol=1e-3` on the combined `atol + rtol*|unfused|` bound). Residual named
+by the test itself: at `hidden=1`, `reciprocal_n == 1.0` exactly trips
+`bind.rs`'s own `eliminate_identity_multiply` (law 3's scale-fold special
+case) on the `mean` node, removing the two-step composed body
+`layer_norm_cluster_plan`'s own structural admission requires — the cluster
+legitimately never fires at that one shape (`rewrite-algebra.md` §8's own
+"unmatched structure falls through unchanged" contract), a genuine
+confluence gap between law 3 and law 2 the test excludes rather than papers
+over.
+
 ## 3. Law 3 — prologue absorption
 
 **Reduce ∘ E → Reduceᴱ.** A single-consumer elementwise producer sitting
@@ -162,6 +195,16 @@ makes law 3 a strict node-count reduction (§7).
 special case where `c == 1.0` and the multiply itself disappears rather
 than folding. No separate mechanism; same `compose_operand` path.
 
+**Equivalence obligation.** Policy: bit-identical — a strict node-count
+reduction (§7's own termination argument): the producer's body runs per
+element inside the reduce's own inner loop instead of being read from a
+separately materialized buffer, same per-element arithmetic and
+accumulation order, one fewer buffer round trip. Test:
+`law3_prologue_absorption_fuses_and_matches_hand_reference`
+(`proxima-tensor/tests/rewrite_law_equivalence.rs`), which also asserts
+`resolved.len() == 1` as the engagement proof (a candidate this admission
+rejected would bind as separate `BoundOp`s).
+
 ## 4. Law 4 — same-input widening
 
 **k reduces sharing operand A, with independent constants B₁..Bₖ → one
@@ -180,6 +223,13 @@ splitting it back into three logical reads at *shape-inference* time) —
 the opposite direction from this law, and not a plan-level rewrite at all.
 No mechanism widens k independent reduces into one. This law has never
 fired.
+
+**Equivalence obligation.** PROPOSED — no landed instance, so no
+fused/unfused pair exists to compare. Test:
+`law4_same_input_widening_is_proposed_not_landed`
+(`proxima-tensor/tests/rewrite_law_equivalence.rs`), `#[ignore]`, named and
+documented as PROPOSED so the obligation is visible without fabricating
+coverage for a mechanism that does not exist.
 
 ## 5. Law 5 — layout commutation
 
@@ -234,6 +284,15 @@ back, sound at any position because a size-1 axis's coordinate is always
 `0` regardless of which index names it. This is layout commutation at the
 addressing level, not the node level — it keeps a degenerate axis
 addressable without materializing anything extra for it.
+
+**Equivalence obligation.** Policy: bit-identical — a size-1 axis's
+coordinate is always `0` regardless of which index names it, so eliding it
+before the tile gates changes only which index list the address computation
+walks, never the fold order or the operand values read. Test:
+`law5_leading_unit_axis_elision_matches_unbatched_bit_identical`
+(`proxima-tensor/tests/rewrite_law_equivalence.rs`), generalizing
+`leading_unit_axis_tile_engagement.rs`'s fixed-shape seed property-style
+over random `M`/`K`/`N` including remainder (non-tile-multiple) extents.
 
 ## 6. Law 6 — constant staging
 
@@ -300,6 +359,22 @@ did not attempt it — "priced instead," `discipline.md:17937`) —
 **PROPOSED — needs owner ratification**, both on the law-composition
 argument and on whether the packing target layout should be chosen
 per-kernel (law 5's own job) or fixed globally.
+
+**Equivalence obligation (plan-time hoist, execute-once instance).**
+Policy: bit-identical — `run_resolved_nodes_in_arena` skipping a
+`static_nodes` member on every call after the first changes only how many
+times a value is recomputed, never the bytes a downstream consumer reads.
+Test: `law6_constant_staging_hoisted_matches_per_step_evaluation_bit_identical`
+(`proxima-tensor/tests/rewrite_law_equivalence.rs`) proves the hoisted arena
+path matches a fresh per-step `evaluate_named` call across multiple steps
+with different non-constant inputs, for a multi-node all-`Constant`
+subgraph. The "executed exactly once" engagement proof itself needs
+`StaticArena`'s private fields, which this integration test's own external
+surface cannot reach — that proof is `build_static_arena_runs_a_live_constant_once_and_never_again`
+(`proxima-tensor/src/cpu.rs`, `#[cfg(test)] mod tests`, the ROW 174/175
+corrupted-buffer test already in-tree). Weight packing (the PROPOSED
+law 6∘law 5 instance above) has no equivalence test — nothing landed to
+test.
 
 ## Membership, decided (PROPOSED — needs owner ratification)
 

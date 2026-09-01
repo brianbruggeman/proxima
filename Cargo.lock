@@ -4997,6 +4997,7 @@ dependencies = [
  "half",
  "libc",
  "prime",
+ "proptest",
  "proxima",
  "proxima-clock",
  "proxima-gguf",
