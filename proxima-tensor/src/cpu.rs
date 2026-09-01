@@ -720,7 +720,7 @@ fn run_resolved_nodes_in_arena(arena: &mut StaticArena) -> Result<(), TensorErro
 }
 
 /// `docs/discipline.md` ROW 180's dynamic-elision probe: the SAME skip
-/// check [`run_resolved_nodes_in_arena`] already runs (`dead`/`static_nodes`,
+/// check `run_resolved_nodes_in_arena` already runs (`dead`/`static_nodes`,
 /// both fixed forever at [`build_static_arena`] time), unioned with a THIRD
 /// set the caller derives fresh every call from a per-step mask -- a block
 /// live one step and skipped the next, which `dead`/`static_nodes` cannot
