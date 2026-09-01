@@ -109,12 +109,26 @@ fn shape_block(name: &str, m: usize, k: usize, n: usize) {
     }
 }
 
+/// ROW 200: sweeps BGE's own real per-sentence `M` values (7, 8, 9 --
+/// `docs/discipline.md` ROW 199) plus `M=1` (the mnist-fc shape ROW 199
+/// flagged) through both dominant matmul shapes, now that
+/// `run_width_tile_neon`'s row remainder is covered by 2-row/1-row NEON
+/// tile variants instead of the scalar `width_tile_scalar_cell` loop ROW
+/// 199 measured at 0.805 GMAC/s. `M=8` is the clean-multiple-of-4 ceiling
+/// reference (ROW 199: 12.98 GMAC/s aggregate, including the small
+/// attention family); `M=1` never reaches either NEON tile gate at all
+/// (`resolve_reduce_axis_shape` squeezes its own extent-1 leading axis away
+/// — see `neon_tile_full_output.rs`'s `check_width_tile_small_m`'s `m == 1`
+/// branch for the mechanism), so `M=1`'s number here is the "unbatched"
+/// arm's rate through whichever path DOES run, not through a 1-row tile.
 fn main() {
-    println!("bge_matmul_micro: pre-registered predictions (mechanism: cpu.rs neon_tile_plan/width_tile_plan both require leading_output_axes.len() == 1)");
-    println!("  batched arm: expect near the crate's own scalar-FMA roofline (~6 GMAC/s, ROW 145/150/154/156), since neither AArch64 tile gate fires");
-    println!("  unbatched arm: expect a large multiple of the batched arm (tile gate fires; N=384/N=1536 are both multiples of WIDTH_TILE_VECS*4=16)");
-    println!("  accelerate arm: expect NO CHANGE vs the batched default — Accelerate's own gate sits behind the same leading_axes==1 precondition (cpu.rs:6032, 6044)");
+    println!("bge_matmul_micro: ROW 200 sweep -- M in {{1, 7, 8, 9}} (BGE's own real sentence lengths, plus M=1 the mnist-fc shape), unbatched [M,K] arm only (batched-vs-unbatched already answered by ROW 198)");
+    println!("  M=8 (clean multiple of WIDTH_TILE_ROWS=4): the row-remainder-free ceiling reference");
+    println!("  M=7, M=9: exercise the greedy 2-then-1 (M=7) / 1-row-only (M=9) row-remainder NEON variants this row adds");
+    println!("  M=1: PRE-REGISTERED to also reach the width tile via the unbatched [M,K] shape -- if it does NOT, that is itself the reported finding (see doc comment above)");
 
-    shape_block("QKVO", 8, 384, 384);
-    shape_block("FFN-down", 8, 1536, 384);
+    for &m in &[1usize, 7, 8, 9] {
+        shape_block("QKVO", m, 384, 384);
+        shape_block("FFN-down", m, 1536, 384);
+    }
 }
