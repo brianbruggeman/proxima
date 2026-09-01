@@ -43,6 +43,7 @@ const MAX_TCP_REPLY_BYTES: usize = u16::MAX as usize;
 pub struct DnsClientUpstream {
     factory: Arc<dyn DatagramFactory>,
     tcp_upstream: Option<Arc<dyn StreamUpstream<Conn = Box<dyn StreamConnection>>>>,
+    tcp_only: bool,
     config: DnsResolverConfig,
     /// Advances once per SEND — every query and every retransmission gets its
     /// own id. It lives here rather than per-call because `SendPipe::call`
@@ -69,6 +70,7 @@ impl DnsClientUpstream {
         Self {
             factory,
             tcp_upstream: None,
+            tcp_only: false,
             config,
             // id 0 is legal (RFC 1035 places no restriction on it); starting
             // at 1 only keeps a fresh client's first query from reading like
@@ -87,6 +89,16 @@ impl DnsClientUpstream {
         tcp_upstream: Arc<dyn StreamUpstream<Conn = Box<dyn StreamConnection>>>,
     ) -> Self {
         self.tcp_upstream = Some(tcp_upstream);
+        self
+    }
+
+    /// Use the attached stream transport for every exchange instead of
+    /// sending a UDP probe first. This is the transport mode required by
+    /// DNS-over-TLS and other stream-only resolver endpoints; the same
+    /// bounded DNS-over-TCP framing and exchange deadline are retained.
+    #[must_use]
+    pub fn with_tcp_only(mut self) -> Self {
+        self.tcp_only = true;
         self
     }
 
@@ -125,6 +137,23 @@ impl DnsClientUpstream {
     ) -> Result<DnsAnswerWithMetadata, DnsClientError> {
         let mut last_error = DnsClientError::Timeout(self.config.query_timeout_ms);
         for _ in 0..self.config.max_attempts.max(1) {
+            if self.tcp_only {
+                let id = self.next_id();
+                let Some(tcp_upstream) = self.tcp_upstream.as_ref() else {
+                    return Err(DnsClientError::Io(io::Error::new(
+                        io::ErrorKind::NotConnected,
+                        "stream-only DNS client has no stream upstream",
+                    )));
+                };
+                match self
+                    .try_tcp_query(tcp_upstream, id, name, qtype, qclass)
+                    .await
+                {
+                    Ok(response) => return Ok(response),
+                    Err(error) => last_error = error,
+                }
+                continue;
+            }
             match self.try_query(name, qtype, qclass).await {
                 Ok(response) if response.metadata.truncated => {
                     let Some(tcp_upstream) = self.tcp_upstream.as_ref() else {
@@ -593,6 +622,57 @@ mod tests {
         let request = writes.lock().unwrap();
         let frame_len = usize::from(u16::from_be_bytes([request[0], request[1]]));
         assert_eq!(frame_len, request.len() - 2);
+        assert_eq!(parse_message(&request[2..]).unwrap().header.id, 1);
+    }
+
+    #[proxima::test]
+    async fn tcp_only_mode_uses_framed_stream_without_udp_probe() {
+        let socket = FakeResolverSocket::new(
+            SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0),
+            resolver_addr(),
+        );
+        let factory = Arc::new(FakeResolverFactory {
+            socket: socket.clone(),
+        });
+        let mut message = Vec::new();
+        let flags = proxima_protocols::dns::Flags::for_response(true, false, true, 0);
+        encode::encode_response(
+            1,
+            flags,
+            encode::EncodeQuestion {
+                name: "example.com.",
+                qtype: 1,
+                qclass: 1,
+            },
+            &[],
+            &mut message,
+        )
+        .unwrap();
+        let mut framed = Vec::new();
+        framed.extend_from_slice(&(message.len() as u16).to_be_bytes());
+        framed.extend_from_slice(&message);
+        let writes = Arc::new(Mutex::new(Vec::new()));
+        let tcp = Arc::new(FakeTcpUpstream {
+            response: framed,
+            writes: Arc::clone(&writes),
+        });
+        let config = DnsResolverConfig::builder()
+            .resolver_ip(resolver_addr().ip().to_string())
+            .port(resolver_addr().port())
+            .query_timeout_ms(200)
+            .max_attempts(1)
+            .build();
+        let client = DnsClientUpstream::new(factory, config)
+            .with_tcp_upstream(tcp)
+            .with_tcp_only();
+
+        let response = client
+            .query_with_metadata("example.com.", 1, 1)
+            .await
+            .unwrap();
+        assert_eq!(response.answer.rcode, 0);
+        assert!(socket.state.lock().unwrap().sent.is_empty());
+        let request = writes.lock().unwrap();
         assert_eq!(parse_message(&request[2..]).unwrap().header.id, 1);
     }
 
