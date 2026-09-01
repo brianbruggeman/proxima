@@ -469,6 +469,16 @@ fn width_tile_full_output_1025_row_and_column_remainder() {
 /// column tail) is asserted `== 0` here — isolating this test to the row
 /// remainder alone, since the column tail is already covered by
 /// `width_tile_full_output_1023/1025_row_and_column_remainder` above.
+///
+/// `docs/discipline.md` ROW 201 lands the fix ROW 200 named but left
+/// upstream (`resolve_reduce_axis_shape`, `cpu.rs`): a lone size-1 leading
+/// axis (M=1, no other leading axis to survive the elide) now restores one
+/// axis instead of squeezing to an empty list, so `width_tile_plan`'s gate
+/// sees `leading_output_axes.len() == 1` again. `m=1` no longer needs its
+/// own special case below — `m % WIDTH_TILE_ROWS == 1` for `m=1` exactly as
+/// it does for `m=5,9`, so `m=1` now falls straight through the SAME
+/// general assertions those arms already exercise (main tile does not fire,
+/// a single `ROWS=1` NEON row-remainder tile does, column tail does not).
 fn check_width_tile_small_m(m: usize) {
     let (k, n) = (64usize, 384usize);
     let a: Vec<f32> = (0..m * k).map(|index| (index as f32 * 0.0137).sin()).collect();
@@ -548,30 +558,6 @@ fn check_width_tile_small_m(m: usize) {
             expected_total = m * n
         );
 
-        if m == 1 {
-            // GENUINE, MEASURED FINDING (not this row's fix, upstream of it):
-            // `resolve_reduce_axis_shape` (`cpu.rs:5748-5752`, ROW 198's own
-            // ANY-size-1-leading-axis squeeze) filters M=1's own leading
-            // (row) axis out entirely — its extent is 1, indistinguishable
-            // to that filter from a squeezed batch axis — leaving
-            // `leading_output_axes = []`. Both `width_tile_plan` (this row's
-            // target) and `neon_tile_plan` (the dot tile) require
-            // `leading_output_axes.len() == 1` and reject `0` identically,
-            // so `try_run_width_tile` returns `false` before
-            // `run_width_tile_neon` — and this row's 2-row/1-row NEON
-            // variants — are ever reached. `gate_delta == 0` proves it: the
-            // width tile did not run AT ALL for M=1, not "ran and fell to
-            // the scalar remainder." M=1 (the mnist-fc shape) is answered by
-            // this row as OUT OF THIS FIX'S REACH, a distinct, upstream gate
-            // question for `resolve_reduce_axis_shape` itself, not a
-            // row-remainder-kernel question.
-            assert_eq!(gate_delta, 0, "width_tile small_m=1: expected the width tile to never even be attempted");
-            assert_eq!(invocations_delta, 0, "width_tile small_m=1: main tile must not fire");
-            assert_eq!(row_remainder_invocations_delta, 0, "width_tile small_m=1: remainder variants must not fire");
-            assert_eq!(fallback_delta, 0, "width_tile small_m=1: scalar fallback must not fire either");
-            return;
-        }
-
         let main_tiles_expected = m / proxima_tensor::sized::WIDTH_TILE_ROWS;
         if main_tiles_expected > 0 {
             assert!(
@@ -620,14 +606,16 @@ fn check_width_tile_small_m(m: usize) {
     }
 }
 
-/// M=1 does NOT reach the 1-row remainder variant -- its own leading axis
-/// (extent 1) is squeezed to zero leading axes upstream, in
-/// `resolve_reduce_axis_shape`, before `width_tile_plan`'s gate ever sees
-/// it (see the `m == 1` branch inside `check_width_tile_small_m` for the
-/// full mechanism). Named for the finding, not the variant, since the name
-/// this test started with (`..._pure_one_row_remainder`) would be wrong.
+/// ROW 200 found M=1 never even reached `width_tile_plan`'s gate -- its own
+/// leading axis (extent 1) squeezed to an empty `leading_output_axes` list
+/// upstream, in `resolve_reduce_axis_shape`, indistinguishable there from a
+/// genuine batch axis. ROW 201 fixes the upstream squeeze (`cpu.rs`:
+/// restore one axis when filtering would otherwise empty the list), so M=1
+/// now reaches the SAME general row-remainder assertions `m=5,9` already
+/// exercise (`m % WIDTH_TILE_ROWS == 1` for all three) -- a single `ROWS=1`
+/// NEON tile, not the scalar `width_tile_scalar_cell` path.
 #[test]
-fn width_tile_small_m_1_never_reaches_the_width_tile_gate() {
+fn width_tile_small_m_1_fires_the_one_row_neon_remainder() {
     check_width_tile_small_m(1);
 }
 

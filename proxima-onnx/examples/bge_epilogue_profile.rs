@@ -21,7 +21,14 @@ use std::path::Path;
 use proxima_tensor::cpu;
 
 const MODEL_PATH_ENV: &str = "BGE_MODEL_PATH";
-const PROFILE_ITERATIONS: usize = 20;
+/// ROW 201's own per-sentence variant of this file's earlier
+/// `PROFILE_ITERATIONS=20`/combined-across-sentences method (ROW 195/199):
+/// per-sentence isolation, 3-call warm-up excluded from the reset window,
+/// 60 measured calls per sentence — so composition effects across BGE's
+/// three real `M` shapes are visible individually rather than averaged
+/// into one combined number.
+const WARMUP_CALLS: usize = 3;
+const MEASURED_CALLS: usize = 60;
 
 fn sentences() -> [(&'static str, Vec<i64>); 3] {
     [
@@ -79,25 +86,7 @@ fn main() {
         })
         .collect();
 
-    // warm-up: outside the profile's own reset window so first-call effects
-    // (allocator warm-up, page faults) never pollute the attributed breakdown.
-    for ((lowered, output), (_, tokens)) in lowered_per_sentence.iter().zip(items.iter()) {
-        run_one(lowered, *output, tokens);
-    }
-
-    cpu::epilogue_profile_reset();
-    let overall_start = std::time::Instant::now();
-    for _ in 0..PROFILE_ITERATIONS {
-        for ((lowered, output), (_, tokens)) in lowered_per_sentence.iter().zip(items.iter()) {
-            run_one(lowered, *output, tokens);
-        }
-    }
-    let overall_elapsed = overall_start.elapsed();
-
-    let (reduce_nanos, reduce_calls, epilogue_nanos, epilogue_calls, other_nanos, other_calls) = cpu::epilogue_profile_totals();
-    let total_nanos = reduce_nanos + epilogue_nanos + other_nanos;
-    let total_calls = reduce_calls + epilogue_calls + other_calls;
-    let percent = |nanos: u64| -> f64 {
+    let percent = |nanos: u64, total_nanos: u64| -> f64 {
         if total_nanos == 0 {
             0.0
         } else {
@@ -105,32 +94,79 @@ fn main() {
         }
     };
 
-    let sentences_run = PROFILE_ITERATIONS * items.len();
-    println!("bge_epilogue_profile: {PROFILE_ITERATIONS} iterations x {} sentences = {sentences_run} evaluate_named calls", items.len());
     println!(
-        "  (a) reduce-fold (MatMul/attention matmuls) : {:>10} calls, {:>12} ns total, {:6.2}% of step time, {:.1} ns/call",
-        reduce_calls,
-        reduce_nanos,
-        percent(reduce_nanos),
-        reduce_nanos as f64 / reduce_calls.max(1) as f64
+        "bge_epilogue_profile: per-sentence, {WARMUP_CALLS}-call warm-up excluded, {MEASURED_CALLS} measured calls/sentence"
+    );
+
+    let mut combined_total_nanos = 0u64;
+    let mut combined_calls = 0u64;
+    let mut combined_wall_nanos = 0u64;
+
+    for ((lowered, output), (name, tokens)) in lowered_per_sentence.iter().zip(items.iter()) {
+        let sequence_length = tokens.len();
+
+        // warm-up: outside the reset window so first-call effects (allocator
+        // warm-up, page faults, per-lowering JIT-adjacent setup) never
+        // pollute this sentence's own attributed breakdown.
+        for _ in 0..WARMUP_CALLS {
+            run_one(lowered, *output, tokens);
+        }
+
+        cpu::epilogue_profile_reset();
+        let start = std::time::Instant::now();
+        for _ in 0..MEASURED_CALLS {
+            run_one(lowered, *output, tokens);
+        }
+        let elapsed = start.elapsed();
+
+        let (reduce_nanos, reduce_calls, epilogue_nanos, epilogue_calls, other_nanos, other_calls) = cpu::epilogue_profile_totals();
+        let total_nanos = reduce_nanos + epilogue_nanos + other_nanos;
+        let total_calls = reduce_calls + epilogue_calls + other_calls;
+
+        println!("--- {name:?} (M={sequence_length}) ---");
+        println!(
+            "  (a) reduce-fold (MatMul/attention matmuls) : {:>10} calls, {:>12} ns total, {:6.2}% of step time, {:.1} ns/call",
+            reduce_calls,
+            reduce_nanos,
+            percent(reduce_nanos, total_nanos),
+            reduce_nanos as f64 / reduce_calls.max(1) as f64
+        );
+        println!(
+            "  (b) post-reduce epilogue (LayerNorm/bias)   : {:>10} calls, {:>12} ns total, {:6.2}% of step time, {:.1} ns/call",
+            epilogue_calls,
+            epilogue_nanos,
+            percent(epilogue_nanos, total_nanos),
+            epilogue_nanos as f64 / epilogue_calls.max(1) as f64
+        );
+        println!(
+            "  (c) everything else (softmax/glue/gather)   : {:>10} calls, {:>12} ns total, {:6.2}% of step time, {:.1} ns/call",
+            other_calls,
+            other_nanos,
+            percent(other_nanos, total_nanos),
+            other_nanos as f64 / other_calls.max(1) as f64
+        );
+        println!(
+            "  total attributed                            : {total_calls:>10} calls, {total_nanos:>12} ns total over {MEASURED_CALLS} calls ({:.4} ms/sentence attributed)",
+            total_nanos as f64 / MEASURED_CALLS as f64 / 1e6
+        );
+        println!(
+            "  wall-clock: {elapsed:?} over {MEASURED_CALLS} calls ({:.4} ms/sentence e2e, includes lowering-adjacent glue outside the profiled loop)",
+            elapsed.as_secs_f64() * 1000.0 / MEASURED_CALLS as f64
+        );
+
+        combined_total_nanos += total_nanos;
+        combined_calls += total_calls;
+        combined_wall_nanos += elapsed.as_nanos() as u64;
+    }
+
+    let sentences_run = MEASURED_CALLS * items.len();
+    println!("=== combined across {} sentences, {sentences_run} total calls ===", items.len());
+    println!(
+        "  total attributed: {combined_calls} calls, {combined_total_nanos} ns ({:.4} ms/sentence attributed mean)",
+        combined_total_nanos as f64 / sentences_run as f64 / 1e6
     );
     println!(
-        "  (b) post-reduce epilogue (LayerNorm/bias)   : {:>10} calls, {:>12} ns total, {:6.2}% of step time, {:.1} ns/call",
-        epilogue_calls,
-        epilogue_nanos,
-        percent(epilogue_nanos),
-        epilogue_nanos as f64 / epilogue_calls.max(1) as f64
+        "  wall-clock: {combined_wall_nanos} ns ({:.4} ms/sentence e2e mean)",
+        combined_wall_nanos as f64 / sentences_run as f64 / 1e6
     );
-    println!(
-        "  (c) everything else (softmax/glue/gather)   : {:>10} calls, {:>12} ns total, {:6.2}% of step time, {:.1} ns/call",
-        other_calls,
-        other_nanos,
-        percent(other_nanos),
-        other_nanos as f64 / other_calls.max(1) as f64
-    );
-    println!(
-        "  total                                        : {total_calls:>10} calls, {total_nanos:>12} ns total over {sentences_run} sentence-evals ({:.4} ms/sentence attributed)",
-        total_nanos as f64 / sentences_run as f64 / 1e6
-    );
-    println!("  wall-clock: {overall_elapsed:?} over {sentences_run} sentence-evals ({:.4} ms/sentence e2e, includes lowering-adjacent glue outside the profiled loop)", overall_elapsed.as_secs_f64() * 1000.0 / sentences_run as f64);
 }

@@ -5742,14 +5742,35 @@ struct ReduceAxisShape {
 /// (`leading_product` unaffected -- multiplying by 1 is a no-op) and each
 /// axis's `full_coordinate` slot is touched only through this same
 /// leading-axis list, so dropping one changes no other axis's addressing.
+///
+/// If EVERY raw leading axis has extent 1 (BGE's own `M=1` sentence — a
+/// single-token batch: `MatMul([1,1,384],[384,N])`), the filter above would
+/// empty the list entirely, and both tile gates' `leading_output_axes.len()
+/// == 1` check rejects `len() == 0` exactly as it rejects `len() == 2` —
+/// `docs/discipline.md` ROW 200: M=1 shapes reached no tile at all, worse
+/// than the M=7 row-remainder regression (ROW 199) since they fell all the
+/// way to the fully-generic scalar loop. `leading_output_axes_raw[0]` is put
+/// back in that one case: both tile-plan builders (`neon_tile_plan`,
+/// `width_tile_plan`) and `run_reduce`'s own row-remainder macro all index
+/// `leading_output_axes[0]` downstream to read that axis's real stride, so
+/// an axis index must exist even though its extent is 1 and every legal
+/// coordinate on it is `0`. Which raw axis is restored is immaterial when
+/// more than one had extent 1 — each of those axes' `full_coordinate` slot
+/// stays at its zero-init value regardless of which one is kept in the
+/// list, per this function's own "sound at any position" note above — so
+/// `leading_extents` for the kept axis is `[1]`, `leading_total` (product)
+/// is `1`, and the tile plans address exactly the single row this shape has.
 fn resolve_reduce_axis_shape(resolved: &BoundOp, output_axes: &[u16]) -> ReduceAxisShape {
     let reduction_dims: Vec<u16> = (0..resolved.extents.len() as u16).filter(|dim| !output_axes.contains(dim)).collect();
     let (leading_output_axes_raw, last_output_dim) = output_axes_split(output_axes);
-    let leading_output_axes: Vec<u16> = leading_output_axes_raw
+    let mut leading_output_axes: Vec<u16> = leading_output_axes_raw
         .iter()
         .copied()
         .filter(|&dim| resolved.extents[dim as usize] != 1)
         .collect();
+    if leading_output_axes.is_empty() && let Some(&first_axis) = leading_output_axes_raw.first() {
+        leading_output_axes.push(first_axis);
+    }
 
     let leading_extents: Vec<u64> = leading_output_axes.iter().map(|dim| resolved.extents[*dim as usize]).collect();
     let reduction_extents: Vec<u64> = reduction_dims.iter().map(|dim| resolved.extents[*dim as usize]).collect();
