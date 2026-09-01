@@ -10,9 +10,11 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 use futures::FutureExt;
+use futures::SinkExt;
 use futures::channel::mpsc;
 use futures::channel::oneshot;
 use futures::stream::StreamExt;
+use proxima_telemetry::metric::Counter;
 use proxima_telemetry::{debug, warn};
 use serde_json::Value;
 
@@ -25,6 +27,13 @@ use proxima_core::ProximaError;
 use proxima_primitives::pipe::handler::PipeHandle;
 use proxima_primitives::stream::StreamConnection;
 use proxima_runtime::Runtime;
+
+/// Counts every finishing connection that found the release channel
+/// (`serve_via_factory`'s `release_tx`) full and had to pend on the bounded
+/// `send` — the pressure observable for the `OverflowPolicy::Block` release
+/// channel (see `spawn_handler`).
+pub static RELEASE_CHANNEL_PRESSURE: Counter =
+    Counter::new("proxima_listen.stream.release_channel_pressure");
 
 pub struct StreamListenProtocol {
     label: String,
@@ -72,6 +81,11 @@ impl ListenProtocol for StreamListenProtocol {
             .and_then(Value::as_u64)
             .map(|raw| raw.max(1) as usize)
             .unwrap_or(super::sized::LISTENER_CHUNK_BYTES_DEFAULT);
+        let release_channel_capacity = spec
+            .get("release_channel_capacity")
+            .and_then(Value::as_u64)
+            .map(|raw| raw.max(1) as usize)
+            .unwrap_or(super::sized::LISTENER_RELEASE_CHANNEL_CAPACITY_DEFAULT);
         let label = self.label.clone();
         // futures-io serve path: an injected acceptor factory binds + accepts
         // boxed StreamConnections, runtime- and backend-agnostic.
@@ -90,6 +104,7 @@ impl ListenProtocol for StreamListenProtocol {
                 method,
                 path,
                 chunk_bytes,
+                release_channel_capacity,
                 label,
                 shutdown,
                 ready_signal,
@@ -107,6 +122,7 @@ impl ListenProtocol for StreamListenProtocol {
             method,
             path,
             chunk_bytes,
+            release_channel_capacity,
             ready_signal,
             shutdown,
             runtime,
@@ -136,6 +152,7 @@ async fn serve_via_factory(
     method: String,
     path: String,
     chunk_bytes: usize,
+    release_channel_capacity: usize,
     label: String,
     mut shutdown: oneshot::Receiver<()>,
     ready_signal: Option<crate::ReadySignal>,
@@ -148,7 +165,12 @@ async fn serve_via_factory(
     }
     debug!(label = %label, %bind, "stream listener bound (factory)");
     let mut core = ListenerCore::new(DispatchPolicy::Inline);
-    let (release_tx, mut release_rx) = mpsc::unbounded::<ConnectionHandle>();
+    // Bounded (OverflowPolicy::Block): one message per finishing connection.
+    // The accept loop below is the sole consumer and always makes progress
+    // (it never itself awaits this channel), so a full channel only pends
+    // the finishing connection's own task briefly — never a deadlock —
+    // while capping worst-case queue memory under a release burst.
+    let (release_tx, mut release_rx) = mpsc::channel::<ConnectionHandle>(release_channel_capacity);
     loop {
         futures::select_biased! {
             _ = (&mut shutdown).fuse() => match core.begin_drain() {
@@ -182,7 +204,7 @@ async fn serve_via_factory(
 /// their admission slots until the core reports closed.
 async fn drain_connections(
     core: &mut ListenerCore,
-    release_rx: &mut mpsc::UnboundedReceiver<ConnectionHandle>,
+    release_rx: &mut mpsc::Receiver<ConnectionHandle>,
 ) {
     while !core.is_closed() {
         match release_rx.next().await {
@@ -200,7 +222,7 @@ async fn drain_connections(
 fn spawn_handler<C: StreamConnection>(
     conn: C,
     handle: ConnectionHandle,
-    release_tx: mpsc::UnboundedSender<ConnectionHandle>,
+    mut release_tx: mpsc::Sender<ConnectionHandle>,
     dispatch: PipeHandle,
     method: String,
     path: String,
@@ -214,8 +236,17 @@ fn spawn_handler<C: StreamConnection>(
         if let Err(error) = handle_connection(conn, dispatch, method, path, chunk_bytes).await {
             warn!(?error, label = %label, "stream connection error");
         }
-        // release the admission slot so the listener can drain / re-admit.
-        let _ = release_tx.unbounded_send(handle);
+        // Release the admission slot so the listener can drain / re-admit.
+        // Bounded + Block: `try_send` first (the common case, capacity
+        // available); on `Full` record the pressure observable, then fall
+        // to the awaiting `send` — pends this connection's own task until
+        // the accept loop drains a slot. Never a silent drop of a release.
+        if let Err(err) = release_tx.try_send(handle)
+            && err.is_full()
+        {
+            RELEASE_CHANNEL_PRESSURE.add(1, &[]);
+            let _ = release_tx.send(handle).await;
+        }
     });
     // dispatch through the installed Runtime (Prime's CoreShard or tokio's
     // per-core LocalSet) when one is set; a Prime worker never enters a

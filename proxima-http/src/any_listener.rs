@@ -45,6 +45,7 @@ use std::task::{Context, Poll};
 
 use bytes::Bytes;
 use futures::FutureExt;
+use futures::SinkExt;
 use futures::channel::mpsc;
 use futures::channel::oneshot;
 use futures::io::{AsyncRead, AsyncReadExt, AsyncWrite};
@@ -668,6 +669,44 @@ fn peer_is_banned(blacklist: &Option<BlacklistTable>, peer_ip: std::net::IpAddr)
 /// truncates a datagram larger than the buffer it is given.
 const DATAGRAM_RECV_SCRATCH_BYTES: usize = 65536;
 
+/// Ceiling on the release-notification channel bound derived from
+/// `max_in_flight_requests` (see `serve_via_factory`'s `release_tx`).
+/// `max_in_flight_requests` defaults to `usize::MAX` (no operator-set
+/// concurrency cap) which `futures::channel::mpsc::channel` rejects outright
+/// (`buffer < MAX_BUFFER`); this is the fallback bound for that unset case,
+/// generously above any real deployment's concurrent-connection count.
+const RELEASE_CHANNEL_CAPACITY_CEILING: usize = 1 << 20;
+
+/// Bound the release-notification channel to `max_in_flight_requests` when
+/// an operator set one (the channel then structurally cannot overflow — see
+/// the call site), else fall back to [`RELEASE_CHANNEL_CAPACITY_CEILING`].
+fn release_channel_capacity(max_in_flight_requests: usize) -> usize {
+    max_in_flight_requests.min(RELEASE_CHANNEL_CAPACITY_CEILING)
+}
+
+/// Counts every finishing connection that found the release channel
+/// (`serve_via_factory`'s `release_tx`) full and had to pend on the bounded
+/// `send` — the pressure observable for `OverflowPolicy::Block`.
+static RELEASE_CHANNEL_PRESSURE: proxima_telemetry::metric::Counter =
+    proxima_telemetry::metric::Counter::new("proxima_http.any_listener.release_channel_pressure");
+
+/// Release a finished connection's admission slot. `try_send` first (the
+/// common case); on `Full`, record the pressure observable and fall to the
+/// awaiting `send` — safe because `release_tx`'s only consumer is the
+/// accept loop's own `select_biased!`, running in a different task from
+/// every `conn_future` this is called from, and always making progress.
+async fn release_connection(
+    release_tx: &mut mpsc::Sender<ConnectionHandle>,
+    handle: ConnectionHandle,
+) {
+    if let Err(err) = release_tx.try_send(handle)
+        && err.is_full()
+    {
+        RELEASE_CHANNEL_PRESSURE.add(1, &[]);
+        let _ = release_tx.send(err.into_inner()).await;
+    }
+}
+
 /// `parking_lot::Mutex` never poisons — plain passthrough, named so every
 /// call site here reads `lock(mutex)` uniformly. Mirrors
 /// `proxima_redis::wait_sources`'s identical helper.
@@ -994,7 +1033,17 @@ async fn serve_via_factory(
     let read_chunk_len = global_cap.clamp(64, 4096);
     let mut core = ListenerCore::new(policy);
     let admission = ConnAdmission::new(max_in_flight_requests);
-    let (release_tx, mut release_rx) = mpsc::unbounded::<ConnectionHandle>();
+    // Bounded (OverflowPolicy::Block): one release per finishing connection,
+    // and at most `max_in_flight_requests` connections are ever admitted
+    // concurrently (the SAME existing config surface as `admission` above),
+    // so this can never legitimately need to hold more outstanding releases
+    // than that — reusing it costs no new knob. Each `conn_future` is a
+    // genuinely separate spawned task (`proxima_listen::dispatch_handler`),
+    // and this loop is the sole consumer, always making progress, so a full
+    // channel only pends the finishing connection's own task, never a
+    // deadlock.
+    let (release_tx, mut release_rx) =
+        mpsc::channel::<ConnectionHandle>(release_channel_capacity(max_in_flight_requests));
     let listener_labels = proxima_primitives::pipe::telemetry_surface::Labels::from_pairs(&[(
         "listener",
         label.as_str(),
@@ -1025,7 +1074,7 @@ async fn serve_via_factory(
                         let on_reject_for_conn = on_reject.clone();
                         let spec_for_conn = spec.clone();
                         let admission_for_conn = admission.clone();
-                        let release_tx_for_conn = release_tx.clone();
+                        let mut release_tx_for_conn = release_tx.clone();
                         #[cfg(feature = "tls")]
                         let tls_for_conn = tls_acceptor.clone();
                         let conn_future = async move {
@@ -1042,7 +1091,7 @@ async fn serve_via_factory(
                                 tls_for_conn,
                             )
                             .await;
-                            let _ = release_tx_for_conn.unbounded_send(handle);
+                            release_connection(&mut release_tx_for_conn, handle).await;
                         };
                         proxima_listen::dispatch_handler(runtime.as_ref(), route, Box::pin(conn_future));
                     }
@@ -1087,7 +1136,7 @@ async fn serve_via_factory(
                             let on_reject_for_conn = on_reject.clone();
                             let spec_for_conn = spec.clone();
                             let admission_for_conn = admission.clone();
-                            let release_tx_for_conn = release_tx.clone();
+                            let mut release_tx_for_conn = release_tx.clone();
                             #[cfg(feature = "tls")]
                             let tls_for_conn = tls_acceptor.clone();
                                 let conn_future = async move {
@@ -1104,7 +1153,7 @@ async fn serve_via_factory(
                                     tls_for_conn,
                                 )
                                 .await;
-                                let _ = release_tx_for_conn.unbounded_send(handle);
+                                release_connection(&mut release_tx_for_conn, handle).await;
                             };
                             proxima_listen::dispatch_handler(runtime.as_ref(), route, Box::pin(conn_future));
                         }
@@ -1150,7 +1199,7 @@ async fn serve_via_factory(
 async fn drain_both(
     core: &mut ListenerCore,
     admission: &ConnAdmission,
-    release_rx: &mut mpsc::UnboundedReceiver<ConnectionHandle>,
+    release_rx: &mut mpsc::Receiver<ConnectionHandle>,
     timeout: std::time::Duration,
 ) {
     let started = std::time::Instant::now();
