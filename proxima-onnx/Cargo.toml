@@ -89,6 +89,9 @@ harness = false
 required-features = ["stage-parallel-bench"]
 
 [[example]]
+name = "generate_op_coverage_doc"
+
+[[example]]
 name = "mnist_diag"
 required-features = ["mnist-diag"]
 
