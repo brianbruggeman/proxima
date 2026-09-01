@@ -136,6 +136,8 @@ use core::sync::atomic::AtomicU64;
     feature = "cohort-staged-graph"
 ))]
 use core::sync::atomic::Ordering;
+#[cfg(feature = "epilogue-profile-probe")]
+use core::sync::atomic::{AtomicU64 as EpilogueProfileAtomicU64, Ordering as EpilogueProfileOrdering};
 use std::borrow::Cow;
 use std::thread;
 use std::sync::atomic::AtomicUsize;
@@ -704,6 +706,8 @@ fn bind_named_inputs_into_arena(arena: &mut StaticArena, named: &[(&str, &[f32])
 /// factored out so [`evaluate_named_with_arena_in_place`] shares the
 /// identical execution path rather than a second copy of it.
 fn run_resolved_nodes_in_arena(arena: &mut StaticArena) -> Result<(), TensorError> {
+    #[cfg(feature = "epilogue-profile-probe")]
+    let reduce_nodes = epilogue_profile_reduce_flags(&arena.resolved, arena.buffers.len());
     for computed in &arena.resolved {
         if arena.dead.contains(&computed.node) || arena.static_nodes.contains(&computed.node) {
             continue;
@@ -713,10 +717,134 @@ fn run_resolved_nodes_in_arena(arena: &mut StaticArena) -> Result<(), TensorErro
             node: computed.node,
             reason: "static arena has no pre-sized slot for this resolved node -- build_static_arena did not size it",
         })?;
+        #[cfg(feature = "epilogue-profile-probe")]
+        let profile_start = std::time::Instant::now();
         run_node_into(computed, &arena.buffers, None, None, &mut output)?;
+        #[cfg(feature = "epilogue-profile-probe")]
+        epilogue_profile_record(computed, &reduce_nodes, profile_start.elapsed().as_nanos() as u64);
         arena.buffers[node_index] = Some(output);
     }
     Ok(())
+}
+
+/// `docs/discipline.md` ROW 181's profile-gate probe: a flat bitmap over
+/// `arena.buffers`' own node-index space marking every `Keep::Reduce` fold
+/// -- built once per [`run_resolved_nodes_in_arena`] call from
+/// `arena.resolved`, execution-level only (reads what `bind::bind` already
+/// produced, never calls it). Feeds [`is_post_reduce_epilogue`]'s lookup.
+#[cfg(feature = "epilogue-profile-probe")]
+fn epilogue_profile_reduce_flags(resolved: &[BoundOp], node_count: usize) -> Vec<bool> {
+    let mut flags = vec![false; node_count];
+    for computed in resolved {
+        if matches!(computed.kind, BoundOpKind::Reduce { keep: Keep::Reduce, .. }) {
+            flags[computed.node.0 as usize] = true;
+        }
+    }
+    flags
+}
+
+/// ROW 181's own structural detector: an `Elementwise` node is a
+/// post-reduce epilogue when exactly one operand is a non-broadcast,
+/// non-gathered reference to a `Keep::Reduce` fold's output and every
+/// other operand is rank-0/broadcast (ANY stride zero, per real mnist
+/// evidence below -- not ALL strides zero) -- the shape a bias-add,
+/// batchnorm-scale-shift, or clip-after-matmul epilogue always takes. A
+/// non-broadcast operand that is NOT a reduce output (a residual add
+/// between two full tensors, say) rules the node out immediately.
+///
+/// The broadcast test was first written as "every stride is zero" (true
+/// rank-0 only) and measured ZERO epilogue hits on the real mnist graph --
+/// `examples/epilogue_dump_shapes.rs`'s dump showed the real per-channel
+/// bias operand feeding node 25 carries `strides=[0, 1, 0, 0]` (zero on
+/// batch/H/W, nonzero on the channel axis it varies over), which the
+/// all-zero test rejected as "some other elementwise shape" -- a detection
+/// bug, not an absence of epilogues. "ANY stride zero" is the correct
+/// broadcast test: it accepts both a true rank-0 scalar (every stride
+/// zero) and a per-axis broadcast operand (bias, batchnorm params) that
+/// varies over fewer axes than the reduce operand it accompanies, while
+/// still rejecting a second full-shape tensor (a residual add) whose
+/// strides are nonzero on every axis the reduce operand's are.
+#[cfg(feature = "epilogue-profile-probe")]
+fn is_post_reduce_epilogue(computed: &BoundOp, reduce_nodes: &[bool]) -> bool {
+    let BoundOpKind::Elementwise { operands, .. } = &computed.kind else {
+        return false;
+    };
+    let mut reduce_operand_count = 0usize;
+    for (node, layout, gather) in operands {
+        let is_broadcast = layout.strides.contains(&0);
+        if is_broadcast {
+            continue;
+        }
+        let is_reduce_output = reduce_nodes.get(node.0 as usize).copied().unwrap_or(false);
+        if is_reduce_output && gather.is_none() {
+            reduce_operand_count += 1;
+        } else {
+            return false;
+        }
+    }
+    reduce_operand_count == 1
+}
+
+/// ROW 181's three profile buckets: (a) every `Keep::Reduce` fold --
+/// tile-routed and generic combined, since splitting those per-node would
+/// duplicate `neon_tile_plan`'s own six-condition gate rather than reuse
+/// it (the tile/generic split is corroborated separately via
+/// `instrument::totals()`'s existing `path_*` counters in the same
+/// profiling run); (b) [`is_post_reduce_epilogue`] matches; (c) everything
+/// else (non-epilogue elementwise, iota, constant, scan).
+#[cfg(feature = "epilogue-profile-probe")]
+static EPILOGUE_PROFILE_REDUCE_NANOS: EpilogueProfileAtomicU64 = EpilogueProfileAtomicU64::new(0);
+#[cfg(feature = "epilogue-profile-probe")]
+static EPILOGUE_PROFILE_REDUCE_CALLS: EpilogueProfileAtomicU64 = EpilogueProfileAtomicU64::new(0);
+#[cfg(feature = "epilogue-profile-probe")]
+static EPILOGUE_PROFILE_EPILOGUE_NANOS: EpilogueProfileAtomicU64 = EpilogueProfileAtomicU64::new(0);
+#[cfg(feature = "epilogue-profile-probe")]
+static EPILOGUE_PROFILE_EPILOGUE_CALLS: EpilogueProfileAtomicU64 = EpilogueProfileAtomicU64::new(0);
+#[cfg(feature = "epilogue-profile-probe")]
+static EPILOGUE_PROFILE_OTHER_NANOS: EpilogueProfileAtomicU64 = EpilogueProfileAtomicU64::new(0);
+#[cfg(feature = "epilogue-profile-probe")]
+static EPILOGUE_PROFILE_OTHER_CALLS: EpilogueProfileAtomicU64 = EpilogueProfileAtomicU64::new(0);
+
+#[cfg(feature = "epilogue-profile-probe")]
+fn epilogue_profile_record(computed: &BoundOp, reduce_nodes: &[bool], elapsed_nanos: u64) {
+    if matches!(computed.kind, BoundOpKind::Reduce { keep: Keep::Reduce, .. }) {
+        EPILOGUE_PROFILE_REDUCE_NANOS.fetch_add(elapsed_nanos, EpilogueProfileOrdering::Relaxed);
+        EPILOGUE_PROFILE_REDUCE_CALLS.fetch_add(1, EpilogueProfileOrdering::Relaxed);
+    } else if is_post_reduce_epilogue(computed, reduce_nodes) {
+        EPILOGUE_PROFILE_EPILOGUE_NANOS.fetch_add(elapsed_nanos, EpilogueProfileOrdering::Relaxed);
+        EPILOGUE_PROFILE_EPILOGUE_CALLS.fetch_add(1, EpilogueProfileOrdering::Relaxed);
+    } else {
+        EPILOGUE_PROFILE_OTHER_NANOS.fetch_add(elapsed_nanos, EpilogueProfileOrdering::Relaxed);
+        EPILOGUE_PROFILE_OTHER_CALLS.fetch_add(1, EpilogueProfileOrdering::Relaxed);
+    }
+}
+
+/// Snapshot of ROW 181's three profile buckets:
+/// `(reduce_nanos, reduce_calls, epilogue_nanos, epilogue_calls, other_nanos, other_calls)`.
+#[cfg(feature = "epilogue-profile-probe")]
+#[must_use]
+pub fn epilogue_profile_totals() -> (u64, u64, u64, u64, u64, u64) {
+    (
+        EPILOGUE_PROFILE_REDUCE_NANOS.load(EpilogueProfileOrdering::Relaxed),
+        EPILOGUE_PROFILE_REDUCE_CALLS.load(EpilogueProfileOrdering::Relaxed),
+        EPILOGUE_PROFILE_EPILOGUE_NANOS.load(EpilogueProfileOrdering::Relaxed),
+        EPILOGUE_PROFILE_EPILOGUE_CALLS.load(EpilogueProfileOrdering::Relaxed),
+        EPILOGUE_PROFILE_OTHER_NANOS.load(EpilogueProfileOrdering::Relaxed),
+        EPILOGUE_PROFILE_OTHER_CALLS.load(EpilogueProfileOrdering::Relaxed),
+    )
+}
+
+/// Resets ROW 181's three profile buckets to zero -- called between the
+/// warm-up pass and the timed sweep so warm-up compilation/caching effects
+/// never pollute the attributed breakdown.
+#[cfg(feature = "epilogue-profile-probe")]
+pub fn epilogue_profile_reset() {
+    EPILOGUE_PROFILE_REDUCE_NANOS.store(0, EpilogueProfileOrdering::Relaxed);
+    EPILOGUE_PROFILE_REDUCE_CALLS.store(0, EpilogueProfileOrdering::Relaxed);
+    EPILOGUE_PROFILE_EPILOGUE_NANOS.store(0, EpilogueProfileOrdering::Relaxed);
+    EPILOGUE_PROFILE_EPILOGUE_CALLS.store(0, EpilogueProfileOrdering::Relaxed);
+    EPILOGUE_PROFILE_OTHER_NANOS.store(0, EpilogueProfileOrdering::Relaxed);
+    EPILOGUE_PROFILE_OTHER_CALLS.store(0, EpilogueProfileOrdering::Relaxed);
 }
 
 /// `docs/discipline.md` ROW 180's dynamic-elision probe: the SAME skip
@@ -1070,6 +1198,14 @@ pub fn evaluate_quantized_with_scratch(
 
     let resolved = bind::bind(program, &shapes, &effective_outputs)?;
     let retires = node_retirement(&resolved, &effective_outputs);
+    // ROW 181 profile-gate probe: this loop, not `run_resolved_nodes_in_arena`,
+    // is what `evaluate_named`/`evaluate_quantized_named` actually walks
+    // (`evaluate_named` wraps every operand as `QuantizedBlock::Float32` and
+    // calls straight into `evaluate_quantized_named` -> here) -- the arena
+    // API's own loop is a separate entry point this probe also instruments,
+    // but is not what `benches/mnist_f32_lane.rs` exercises.
+    #[cfg(feature = "epilogue-profile-probe")]
+    let epilogue_profile_reduce_nodes = epilogue_profile_reduce_flags(&resolved, program.len());
 
     // DIAGNOSTIC (proxima-debugger, instrument-only): peak_live_buffers
     // counts occupied slots, not bytes -- a live buffer set of 12 entries
@@ -1195,7 +1331,11 @@ pub fn evaluate_quantized_with_scratch(
         let diag_node_label = diag_node_kind_label(computed, &quantized_weights);
         #[cfg(feature = "instrument")]
         let diag_node_started = instrument::read_ticks();
+        #[cfg(feature = "epilogue-profile-probe")]
+        let epilogue_profile_started = std::time::Instant::now();
         run_node_into(computed, &buffers, Some(&quantized_weights), session.as_ref(), &mut output)?;
+        #[cfg(feature = "epilogue-profile-probe")]
+        epilogue_profile_record(computed, &epilogue_profile_reduce_nodes, epilogue_profile_started.elapsed().as_nanos() as u64);
         #[cfg(feature = "instrument")]
         {
             let entry = diag_kind_ticks.entry(diag_node_label).or_insert((0, 0));

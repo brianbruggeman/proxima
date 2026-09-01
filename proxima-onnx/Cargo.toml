@@ -31,6 +31,13 @@ mnist-f32-bench = ["std"]
 # build with it -- this is a separate opt-in specifically for the
 # non-timed, one-shot diagnostic run.
 mnist-diag = ["std", "proxima-tensor/instrument"]
+# ROW 181's own profile-gate probe (`examples/epilogue_profile.rs`):
+# per-node-class wall time inside `run_resolved_nodes_in_arena`, bucketed
+# by reduce-fold / post-reduce elementwise epilogue / everything else.
+# `proxima-tensor/instrument` rides along ONLY for the corroborating
+# `path_*` tile-vs-generic counters, same non-timed-diagnostic placement as
+# `mnist-diag` above -- never in `mnist-f32-bench`'s feature set.
+epilogue-profile-diag = ["std", "proxima-tensor/epilogue-profile-probe", "proxima-tensor/instrument"]
 # the tile-pipeline experiment (`benches/tile_pipeline.rs`,
 # `benches/support/tile_pipeline.rs`, `tests/tile_pipeline_differential.rs`):
 # a line-buffer row-band streaming forward for the real mnist checkpoint,
@@ -84,3 +91,7 @@ required-features = ["stage-parallel-bench"]
 [[example]]
 name = "mnist_diag"
 required-features = ["mnist-diag"]
+
+[[example]]
+name = "epilogue_profile"
+required-features = ["epilogue-profile-diag"]
