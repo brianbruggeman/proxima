@@ -17252,3 +17252,86 @@ git diff a4bdabf HEAD -- proxima-tensor/src/cpu.rs   # empty -- confirms this ro
 - **A literal sub-6 `uptime` reading** -- never reached this session; the host's own structural floor (six pegged processes) sits at ~9-11 even at its quietest. Every "clean" designation in this row means "pre-check empty AND at or near this host's own achievable floor," not the task's own literal <6 bar.
 - **Reconciling ROW 187's own "five" pegged-process count against this session's own "six"** -- not investigated; presence recorded, count discrepancy named, cause not determined, nothing killed.
 - **CELL 2's own per-round bimodality (two rounds near-parity, three rounds ~1.5x)** -- observed, not explained; no profiler or `perf` instrumentation was attached to isolate which of the ten runs' own host conditions produced the split.
+
+---
+
+## ROW 193 -- first same-day interleaved ggml-Metal vs proxima-Metal quantized-decode paired cell with per-shape GPU attribution; llama.cpp Metal wins full decode 4.09x, and the per-shape data resolves WHY: Q6_K bump on `output.weight` confirmed by measured bytes/weight, not by re-deriving the gap that ROW 100 already found
+
+**Correction to task framing, stated first:** this is NOT the first-ever ggml-Metal-vs-proxima-Metal decode paired cell -- ROW 100 (`discipline.md:8944`) already ran all four arms (ours-cpu, ours-metal, llama-cpu, llama-metal) in one interleaved window and found "we do not beat llama.cpp on any arm, on either metric." This row's actual new contribution: (a) a fresh same-day re-measurement on TODAY's (2026-09-01) host, since ROW 100's own number is now a different-day citation the moment it is quoted without re-proof (principle 16); (b) the first **per-shape** GPU cell -- `profiles_one_real_decode_step_by_per_op_gpu_time` had never been run and logged before, and its `op_profile_family` output reveals exactly which real weight tensors are Q4_K (0.5625 B/weight, exact) vs Q6_K (0.8203 B/weight, exact match) by DERIVING bytes/weight from measured `operand_bytes` against known tensor dims, rather than trusting the file's own metadata; (c) the missing `rooflines.md` GPU-quant lane (CPU-only lane existed, ROW 116's own citation, `rooflines.md:190-265`).
+
+**Allocation budget (stated first, principle 18):** this row runs existing instrumented tests/examples unmodified -- zero source lines changed, zero new allocation surface. Not applicable as a landing-gate item; no component landed.
+
+**60-minute hard budget. Execution gate wait: ~7 minutes** (08:48-08:55) polling `pgrep -fl 'cargo|rustc|criterion|nextest|python|llama'` (filtered of own process) and `uptime`. The reseal agent's own `tile_pipeline-*` criterion binary (`.../proxima-wt-reseal/.../reseal-target/release/deps/`, confirmed via `ps aux`, matched the tripwire's own warning) was seen running at 99.3% CPU at 08:48, exited on its own within 1 minute, and did not recur across two follow-up checks 6 minutes apart -- proceeded. Residual load (1-min avg 9.9-31.5 across the session, never near the ~6 target) is NOT bench/build contention: `ps aux` identifies six long-running orphaned probe processes (`snapshot-probe` x4, `psci-dispatch-probe` x2, none started or killed by this task) pinned near 100% CPU continuously since last Wed/Sun, plus two idle (0.2-0.3% CPU) Ollama `llama-server` daemons resident at 44+41 GB RSS (a literal `llama` pgrep match that is not build/bench tooling -- noted as a possible Metal-GPU co-tenant, not excluded from the gate check since the literal filter matched it and its CPU share was verified negligible). This box was loaded, not quiet, for the entire session -- every number below carries that loadout, not a quiet-box claim.
+
+**Repo:** worktree `proxima-wt-gpuq`, branch `bench/gpu-quant-cell`, off `origin/main` @ `1f03ab51e12596f1ad19fac0736d7aa10b714a4f` (unchanged at fetch). `CARGO_TARGET_DIR` isolated at this session's own scratch path, deleted after this row per the task's cleanup instruction.
+**Host:** Apple M1 Max, 64 GiB, macOS. `uptime` samples ranged 9.9/13.9/15.4/18.3/19.5/20.4/24.3/24.6/24.9/31.5 (1-min) across the session -- a genuinely loaded host, logged per this skill's own host-loadout discipline rather than treated as disqualifying.
+**Incumbent:** `/Users/brianbruggeman/repos/others/llama.cpp/build/bin/llama-bench`, build `b2534622`, read-only per this task's own tripwire (not rebuilt). `libggml-metal.dylib` beside it confirmed Mach-O arm64; `llama-bench`'s own output row names backend `Metal,BLAS`.
+**Model:** `/Users/brianbruggeman/.lmstudio/models/TheBloke/openchat-3.5-1210-GGUF/openchat-3.5-1210.Q4_K_S.gguf` (7.24B params, 3.86 GiB / 4,140,385,376 bytes on disk, Mistral architecture, 32 layers) -- the SAME file `proxima-tensor/benches/bench_q4k_matmul.rs`'s own `gguf_path()` default already points at (confirmed present via `find`; no download performed), and the SAME file ROW 100/116's own citations used. One model for llama-bench, our full-decode loop, and the per-shape GPU profile -- identical bytes on every arm.
+
+### Pre-registration (before running the fresh measurement this session)
+
+The only pre-existing GPU-side bandwidth citation on this box, read before running anything new: `omega/examples/q4k_matvec_probe.rs`'s own docstring bar, **214.7 GB/s** (llama.cpp Metal, 3.784 GB / 17.62 ms/token, an older-day citation). Predicted ns/mac from that bar at Q4_K's 0.5625 B/MAC: 0.5625 / 214.7 = **2.62e-3 ns/mac**. No pre-existing GPU-**kernel-only** ceiling citation existed for OUR arm before this session (the gap this row's `rooflines.md` addition closes) -- the CPU lane's own kernel figure (147.72-150.60 GMAC/s, ROW 116) was the only anchor, with no stated basis to predict whether Metal would sit above or below it.
+
+**GPU streaming bandwidth ceiling, attempted:** `cargo run --release --example membw_probe -p omega` (built + run this session, `EXIT=0`). Its Metal arm uses a reduce-to-scalar (`Add`) pattern, not a trivial streaming copy, and returned **0.3-0.4 GB/s** -- three orders of magnitude below any plausible M1 Max figure. This is a MEASURED number, tagged **not a bandwidth ceiling**: the reduce-to-scalar shape is almost certainly dispatch/serialization-bound (single accumulator across the whole grid), not a memory-bandwidth probe, and this row's own host was never near the "two consecutive `uptime` readings <=~4" precondition the prior row (`discipline.md:12512`) named for a trustworthy run. **GPU streaming bandwidth ceiling remains DEBT** -- reported honestly rather than substituted with the ASSUMED ~400 GB/s chip-wide spec figure as a measurement.
+
+### Full-decode paired cell (fresh, today)
+
+| arm | measured | n | CoV | derived ms/token (decode-only) | ns/mac | eff. GB/s |
+|---|---|---|---|---|---|---|
+| llama.cpp Metal (`llama-bench -m <model> -n 32 -r 5 -t 8`, default `-ngl 99`, `-b 2048 -ub 512`) | **58.53 +/- 0.15 t/s** | 5 reps (harness-internal) | ~0.26% | **17.086** | 2.403e-3 | **234.1** |
+| proxima Metal, full decode loop (`bind::real_openchat_file::runs_the_cached_decode_loop_on_the_metal_backend_and_reports_the_plan_cache`, `PROXIMA_MAX_TOKENS=8/1`, `PROXIMA_PREFAULT=1`) | prefill 2158.6/2174.9/2007.4 ms (n=3); 8-token total 2618.1/2587.1 ms (n=2, excl. 4311.0 ms first-run pipeline-compile outlier) | see note | prefill CoV 3.99%; 8-token pair 0.60% | **69.86** (subtraction: (2602.6-2113.6)/7) | 9.65e-3 | **59.3** |
+
+MACs/token used for both arms: **7,110,402,048** (ROW 116's own summed decode-step shape-set figure, `discipline.md:11985` vicinity, reused for consistency with the existing CPU lane rather than re-derived). **We do not beat llama.cpp on the full-decode metric: 69.86 / 17.086 = 4.09x slower**, consistent with ROW 100's own 3.7-3.9x range on a different-day quiet-er host -- today's loaded box pushed the ratio slightly worse, not better, which is the honest direction given principle 18 (a loaded box should never be expected to flatter the measurement).
+
+**Note on the first-run 4311.0 ms 8-token sample:** excluded from the reported pair as a pipeline-compile-dominated outlier (matches ROW 100's own "prefill 1.8x slower... one-time pipeline-compile + block-upload cost"), not discarded silently -- named here, kept in the raw log (`metal_decode_run1.log`).
+
+### Per-shape GPU attribution (NEW this row -- never logged before)
+
+`bind::real_openchat_file::profiles_one_real_decode_step_by_per_op_gpu_time`, `PROXIMA_METAL_OP_PROFILE_STEP=3` (a real, steady-state decode step: `new_count=1`, `cached_len_before=34`, past the first token). **Caveat, load-bearing:** this diagnostic mode issues ONE command buffer PER op (`gpu_exec_calls=1` but only because the harness fires it once per timed op -- actually 1196 individual `encode_dispatch_calls`/ops each timed separately), so its totals (`total_gpu_ms=99.055` for the whole step) are inflated by per-command-buffer submission/wait overhead against the production BATCHED mode (steps 1/2/4, ONE command buffer for all 1196 ops, `gpu_exec_ms` 57.017/57.032/59.795 -- median **57.032 ms** for the whole step). The per-shape numbers below are therefore read as **relative** cost/quant-type attribution, not as production-representative absolute kernel bandwidth; the production-representative aggregate uses the batched 57.032 ms figure instead (table below).
+
+| weight family | gpu_ms (op-isolated, 32 calls unless noted) | measured bytes/weight (derived from `operand_bytes` minus activation bytes, over known MACs) | ns/mac (op-isolated) | eff. GB/s (op-isolated) | quant type implied |
+|---|---|---|---|---|---|
+| `blk.ffn_gate.weight` (4096x14336) | 18.448 | **0.5625** (exact) | 0.00982 | 57.32 | Q4_K |
+| `blk.ffn_up.weight` (4096x14336) | 18.179 | **0.5625** (exact) | 0.00967 | 58.17 | Q4_K |
+| `blk.ffn_down.weight` (14336x4096) | 17.285 | 0.5781 (+2.8% over Q4_K nominal, mechanism unresolved -- DEBT) | 0.00920 | 62.95 | Q4_K-ish |
+| `blk.attn_q.weight` (4096x4096) | 7.026 | **0.5625** (exact) | 0.01309 | 43.06 | Q4_K |
+| `blk.attn_output.weight` (4096x4096) | 6.175 | **0.5625** (exact) | 0.01150 | 48.99 | Q4_K |
+| `blk.attn_v.weight` (4096x1024) | 2.382 | 0.5781 (+2.8%, same unresolved residual as ffn_down) | 0.01775 | 32.80 | Q4_K-ish |
+| `blk.attn_k.weight` (4096x1024) | 2.289 | **0.5625** (exact) | 0.01705 | 33.21 | Q4_K |
+| `output.weight` (lm_head, 4096x32002, 1 call) | 2.345 | **0.8203** (exact match to Q6_K's 210 B / 256 elem = 0.8203125) | 0.01789 | 45.86 | **Q6_K** (confirms `bench_q4k_matmul.rs`'s own comment that Q4_K_S bumps precision-sensitive tensors) |
+
+**Production-representative aggregate (batched, steady-state):** 57.032 ms / 7,110,402,048 MACs = **8.02e-3 ns/mac = 124.7 GMAC/s**, effective GB/s = 3.9996 GB (ROW 116's own weight-sweep figure) / 57.032 ms = **70.14 GB/s**. Against llama.cpp Metal's aggregate (234.1 GB/s, 416.1 GMAC/s, table above): **our Metal kernel-only figure is 3.34x slower**, narrower than the 4.09x full-wall-clock gap -- the difference (69.86 ms full loop vs 57.032 ms GPU-exec-only) is ~12.8 ms/token of CPU-side orchestration (`prepare`/`emit`/`pipeline_lookup`/`op_setup`/`block_upload` from `token_breakdown_metal`, steps 1/2/4 summed: ~2+0.8+0.04+4+1-3 ms range), the same orchestration-overhead shape ROW 100 and ROW 116 already named for the CPU arm, now confirmed present on Metal too.
+
+### Orchestration gap, named (not built this session)
+
+No GPU-side per-shape bench harness exists as a standalone criterion bench (`benches/bench_q4k_matmul.rs`'s GPU-arm equivalent does not exist) -- the per-shape numbers above come from an `instrument`-gated diagnostic test inside `proxima-model-interop`, not a benchmarkable, criterion-tracked artifact with saved baselines. Building that (a `bench_q4k_matmul_metal.rs` mirroring the CPU bench's real-weight-bytes-in, `omega::execute_plan`-out shape, across the SAME 8 tensor shapes) is the concrete next step this row does not attempt, per the task's own scope ("name the orchestration gap rather than building it").
+
+### Gates
+
+| gate | result |
+|---|---|
+| `cargo nextest run -p proxima-tensor` | **459 passed, 4 skipped**, exit 0 |
+| `cargo clippy -p omega --features std,cpu,metal --all-targets -- -D warnings` (this row touched zero source lines; run as a repo-health check on the crate this row exercised) | exit 0, clean |
+| `cargo doc -p proxima-tensor --no-deps --all-features` | exit 0, generated `proxima_tensor/index.html`; one pre-existing unrelated warning (`ggml-bench` / `GGML_BUILD_DIR` unset, not this row's concern) |
+
+### Rollback rows
+
+None -- zero source changed this row. Two doc files touched: this row (`discipline.md`) and a new `rooflines.md` GPU-quant lane section.
+
+### Re-prove
+
+```sh
+cd <this worktree, bench/gpu-quant-cell>
+CARGO_TARGET_DIR=<scratch> cargo build --release --example membw_probe --example q4k_matvec_probe -p omega --features std,cpu,metal
+CARGO_TARGET_DIR=<scratch> cargo run --release --example membw_probe -p omega  # GPU arm: expect a NON-ceiling number, see caveat above
+/Users/brianbruggeman/repos/others/llama.cpp/build/bin/llama-bench \
+  -m /Users/brianbruggeman/.lmstudio/models/TheBloke/openchat-3.5-1210-GGUF/openchat-3.5-1210.Q4_K_S.gguf \
+  -p 0 -n 32 -r 5 -b 2048 -ub 512 -t 8 -o md
+CARGO_TARGET_DIR=<scratch> PROXIMA_PREFAULT=1 PROXIMA_MAX_TOKENS=8 \
+  cargo test -p proxima-model-interop --release --features metal --lib -- --exact --nocapture --ignored \
+  bind::real_openchat_file::runs_the_cached_decode_loop_on_the_metal_backend_and_reports_the_plan_cache
+CARGO_TARGET_DIR=<scratch> PROXIMA_PREFAULT=1 PROXIMA_METAL_OP_PROFILE_STEP=3 PROXIMA_MAX_TOKENS=8 \
+  cargo test -p proxima-model-interop --release --features metal,instrument --lib -- --exact --nocapture --ignored \
+  bind::real_openchat_file::profiles_one_real_decode_step_by_per_op_gpu_time
+```
+Every number in this row's tables is grep-able out of the raw `.log` files these commands produce; none require dev memory.
