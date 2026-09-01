@@ -414,6 +414,53 @@ mod tests {
             .await;
     }
 
+    // `spawn_handler` clones `release_tx` ONCE per accepted connection
+    // (`serve_via_factory`'s `release_tx.clone()` above) and that clone
+    // sends AT MOST once, at connection end. `futures::channel::mpsc`
+    // grants a brand-new `Sender` clone its own guaranteed slot regardless
+    // of how full the channel already is (each clone starts with its own
+    // `maybe_parked = false`, checked purely locally by `try_send` — never
+    // consulting the shared queue depth on that clone's first attempt).
+    // Reproduces exactly `spawn_handler`'s release snippet (line ~244) for
+    // three concurrently-finishing connections against a zero-capacity
+    // channel with nothing ever draining it: this proves the actual
+    // contract — every release still lands via `try_send`'s fast path, and
+    // `RELEASE_CHANNEL_PRESSURE` never increments, because the guarantee
+    // is per-clone, not per-channel-capacity.
+    #[test]
+    fn release_channel_pressure_never_engages_because_each_connection_clones_a_fresh_sender() {
+        let before = RELEASE_CHANNEL_PRESSURE.get();
+        let (release_tx, mut release_rx) = mpsc::channel::<ConnectionHandle>(0);
+
+        for slot in 0..3_u32 {
+            let mut this_connections_clone = release_tx.clone();
+            let handle = ConnectionHandle(slot);
+            // The exact snippet `spawn_handler` runs when a connection ends.
+            if let Err(err) = this_connections_clone.try_send(handle)
+                && err.is_full()
+            {
+                RELEASE_CHANNEL_PRESSURE.add(1, &[]);
+            }
+        }
+        drop(release_tx);
+
+        assert_eq!(
+            RELEASE_CHANNEL_PRESSURE.get(),
+            before,
+            "try_send on a freshly-cloned Sender never observes Full, so the pressure \
+             counter this call site claims to maintain never actually increments"
+        );
+
+        let released: Vec<ConnectionHandle> =
+            std::iter::from_fn(|| release_rx.try_recv().ok()).collect();
+        assert_eq!(
+            released.len(),
+            3,
+            "all three releases land despite the channel's configured capacity of 0 — \
+             the 'bounded' release_tx enforces no bound against a clone-per-connection producer"
+        );
+    }
+
     // with nothing in flight, firing shutdown drains immediately through the
     // ListenerCore and serve returns Ok — proves the admission core is wired
     // into the accept loop's drain path.

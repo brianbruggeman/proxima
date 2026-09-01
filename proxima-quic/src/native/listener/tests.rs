@@ -256,6 +256,92 @@ fn accept_channel_pushes_exactly_one_handle_per_new_initial() {
     assert_eq!(listener.connection_handles(), notified);
 }
 
+// The correctness half of the accept channel's `OverflowPolicy::Drop`
+// (see `ACCEPT_CHANNEL_DROPPED`'s own doc): a dropped notification must
+// never orphan the connection itself. `accept_tx` is a single persistent
+// `Sender` field on `Listener` (never cloned per-notification, unlike
+// `proxima-http`'s `response_tx` — see the sibling finding there), so its
+// own park state accumulates correctly across repeated `try_send` calls
+// from THIS instance, making capacity 0 genuinely fill after one accept.
+#[test]
+fn accept_channel_overflow_drops_and_counts_but_keeps_the_connection_tracked() {
+    run_on_big_stack(accept_channel_overflow_drops_and_counts_but_keeps_the_connection_tracked_body);
+}
+
+fn accept_channel_overflow_drops_and_counts_but_keeps_the_connection_tracked_body() {
+    let before = super::ACCEPT_CHANNEL_DROPPED.get();
+
+    let first_hello = b"HELLO-DROP-FIRST".to_vec();
+    let second_hello = b"HELLO-DROP-SECOND".to_vec();
+    let server_hello = b"HELLO-DROP-REPLY".to_vec();
+    let origin = QuicInstant::from_micros(900_000);
+
+    let mut first_client =
+        build_client(&[0x31_u8; 8], &[0x41_u8; 8], &first_hello, origin);
+    let mut first_buf = [0u8; 1500];
+    let first_datagram = first_client
+        .poll_transmit(origin, &mut first_buf)
+        .expect("poll")
+        .expect("emit");
+
+    let mut second_client =
+        build_client(&[0x51_u8; 8], &[0x61_u8; 8], &second_hello, origin);
+    let mut second_buf = [0u8; 1500];
+    let second_datagram = second_client
+        .poll_transmit(origin, &mut second_buf)
+        .expect("poll")
+        .expect("emit");
+
+    // Zero buffer + this listener's one persistent sender = exactly one
+    // guaranteed `try_send` slot before the channel is genuinely full.
+    let (accept_tx, mut accept_rx) = mpsc::channel(0);
+    let mut listener = Listener::<MockTlsProvider>::new(
+        accept_fn_for(first_hello.clone(), server_hello.clone()),
+        accept_tx,
+    );
+
+    let core_now = core_instant(origin);
+    block_on(listener.on_datagram(
+        core_now,
+        peer_addr(21),
+        &first_buf[..first_datagram.len],
+    ))
+    .expect("first NewInitial accepted");
+    assert_eq!(
+        super::ACCEPT_CHANNEL_DROPPED.get(),
+        before,
+        "the first accept fits the channel's one guaranteed slot — no drop yet"
+    );
+
+    block_on(listener.on_datagram(
+        core_now,
+        peer_addr(22),
+        &second_buf[..second_datagram.len],
+    ))
+    .expect("second NewInitial still accepts the CONNECTION even though its notification drops");
+    assert_eq!(
+        super::ACCEPT_CHANNEL_DROPPED.get(),
+        before + 1,
+        "the second accept notification finds the channel full and is dropped-and-counted"
+    );
+
+    assert_eq!(
+        listener.connection_handles().len(),
+        2,
+        "both connections are tracked by the listener regardless of whether their accept \
+         notification made it onto accept_rx — the drop only loses the fast-path nudge"
+    );
+
+    let notified: Vec<ConnectionHandle> =
+        std::iter::from_fn(|| accept_rx.try_recv().ok()).collect();
+    assert_eq!(
+        notified.len(),
+        1,
+        "only the first handle's notification actually reached accept_rx"
+    );
+    assert_eq!(notified[0], listener.connection_handles()[0]);
+}
+
 #[test]
 fn next_deadline_is_the_minimum_across_connections() {
     run_on_big_stack(next_deadline_is_the_minimum_across_connections_body);

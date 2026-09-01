@@ -1732,6 +1732,41 @@ mod tests {
         }
     }
 
+    // `release_channel_capacity`'s whole reason to exist: an unset
+    // `max_in_flight_requests` (the real-world default an operator who
+    // never touched the concurrency knob ships with) is `usize::MAX`, and
+    // `futures::channel::mpsc::channel` asserts `buffer < MAX_BUFFER` —
+    // passing `usize::MAX` straight through would panic on the very first
+    // `serve_via_factory` call. This is the ceiling guard that stops it.
+    #[test]
+    fn release_channel_capacity_clamps_an_unset_usize_max_limit_to_the_ceiling() {
+        let capacity = release_channel_capacity(usize::MAX);
+        assert_eq!(
+            capacity, RELEASE_CHANNEL_CAPACITY_CEILING,
+            "an unset (usize::MAX) concurrency limit must clamp to the ceiling, never pass \
+             through raw — mpsc::channel(usize::MAX) panics on construction"
+        );
+        assert!(
+            !mpsc::channel::<ConnectionHandle>(capacity).0.is_closed(),
+            "the clamped capacity must actually construct a live channel, not just avoid panicking"
+        );
+    }
+
+    // The structurally-necessary complement: an operator-set limit BELOW
+    // the ceiling passes through unchanged — the channel really does bound
+    // concurrency to what was configured, not silently widen it to the
+    // ceiling in every case.
+    #[test]
+    fn release_channel_capacity_passes_an_operator_set_limit_through_unchanged() {
+        assert_eq!(release_channel_capacity(64), 64);
+        assert_eq!(release_channel_capacity(0), 0);
+        assert_eq!(
+            release_channel_capacity(RELEASE_CHANNEL_CAPACITY_CEILING),
+            RELEASE_CHANNEL_CAPACITY_CEILING,
+            "a limit exactly at the ceiling is left alone, not treated as unset"
+        );
+    }
+
     struct ConstantOk;
 
     impl SendPipe for ConstantOk {

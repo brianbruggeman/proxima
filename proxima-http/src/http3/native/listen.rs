@@ -1266,6 +1266,167 @@ mod tests {
     // starting near zero would not have caught this) is the case that
     // actually exposes the two-epoch mismatch — `RecordingClock::at` starts
     // wherever asked, so it can reproduce the large-epoch shape directly.
+    struct ConstantOkDispatch;
+
+    impl proxima_primitives::pipe::SendPipe for ConstantOkDispatch {
+        type In = Request<Bytes>;
+        type Out = proxima_primitives::pipe::request::Response<Bytes>;
+        type Err = ProximaError;
+
+        fn call(
+            &self,
+            _request: Request<Bytes>,
+        ) -> impl Future<Output = Result<Self::Out, ProximaError>> + Send {
+            async move { Ok(proxima_primitives::pipe::request::Response::ok("ok")) }
+        }
+    }
+
+    fn finished_pending_request(headers: Vec<(Vec<u8>, Vec<u8>)>) -> PendingRequest {
+        PendingRequest {
+            headers: Some(headers),
+            #[cfg(feature = "http3-part-source")]
+            request_head: None,
+            body: Vec::new(),
+            finished: true,
+            dispatched: false,
+            response: None,
+            response_emitted: false,
+        }
+    }
+
+    // `process_h3_events`'s async dispatch path clones `response_tx` fresh
+    // for every dispatched request (see the `let mut response_tx =
+    // response_tx.clone();` above `in_flight.push`). `futures::channel::mpsc`
+    // grants a brand-new `Sender` clone its own guaranteed slot regardless of
+    // how full the channel already is (verified directly against
+    // `futures-channel` 0.3.34: ten sequential fresh clones against a
+    // zero-buffer channel all `try_send` `Ok` with nothing ever drained) — so
+    // `try_send` on THIS call site can never observe `Full`, and
+    // `RESPONSE_CHANNEL_PRESSURE` can never increment through this path as
+    // currently written. This test proves the actual (not the documented)
+    // contract: three concurrent dispatches against a zero-capacity channel
+    // ALL succeed and the pressure counter stays at zero — the
+    // `OverflowPolicy::Block` comment on `response_tx`'s construction
+    // (listen.rs:329) does not hold for a clone-per-dispatch producer.
+    #[proxima::test]
+    async fn response_tx_pressure_counter_never_engages_because_each_dispatch_clones_a_fresh_sender()
+    {
+        let handle = ConnectionHandle(1);
+        let mut driver = PerConnection::new(false);
+        for stream_id in [0_u64, 4, 8] {
+            driver.pending.insert(
+                stream_id,
+                finished_pending_request(vec![
+                    (b":method".to_vec(), b"GET".to_vec()),
+                    (b":path".to_vec(), b"/".to_vec()),
+                ]),
+            );
+        }
+
+        let dispatch = proxima_primitives::pipe::handler::into_handle(ConstantOkDispatch);
+        let (response_tx, mut response_rx) =
+            futures::channel::mpsc::channel::<DispatchResult>(0);
+        let mut in_flight: FuturesUnordered<Pin<Box<dyn Future<Output = ()> + Send>>> =
+            FuturesUnordered::new();
+
+        process_h3_events(handle, &mut driver, &dispatch, &response_tx, &mut in_flight)
+            .expect("three GET / requests with headers+FIN dispatch cleanly");
+        drop(response_tx);
+
+        let mut delivered = 0;
+        while in_flight.next().await.is_some() {
+            delivered += 1;
+        }
+        assert_eq!(
+            delivered, 3,
+            "every dispatched request's response-send future must run to completion, \
+             none left permanently pending"
+        );
+        assert_eq!(
+            RESPONSE_CHANNEL_PRESSURE.get(),
+            0,
+            "try_send on a freshly-cloned Sender never observes Full, so the pressure \
+             counter this call site claims to maintain never actually increments"
+        );
+
+        let mut received = 0;
+        while response_rx.next().await.is_some() {
+            received += 1;
+        }
+        assert_eq!(
+            received, 3,
+            "all three responses land in the channel despite its configured capacity of 0 — \
+             the 'bounded' response_tx enforces no bound against a clone-per-dispatch producer"
+        );
+    }
+
+    // `drive_dirty_connections`'s self-heal (see its own doc comment above
+    // `h3_state.entry(handle_id).or_insert_with(...)`): a handle whose
+    // accept notification was dropped (site 2's `ACCEPT_CHANNEL_DROPPED`)
+    // never gets an `h3_state` entry seeded off `accept_rx`. This proves
+    // the SAME `BTreeMap::entry().or_insert_with(PerConnection::new)` idiom
+    // that call site uses seeds a missing entry from scratch and the
+    // connection still dispatches its request normally on that first
+    // encounter — no second chance needed, no request lost.
+    #[test]
+    fn missing_h3_state_entry_self_heals_on_first_dirty_encounter_and_still_dispatches() {
+        let handle_id = 7_u32;
+        let mut h3_state: BTreeMap<u32, PerConnection> = BTreeMap::new();
+        assert!(
+            !h3_state.contains_key(&handle_id),
+            "simulates an accept notification that never reached this listener's accept_rx"
+        );
+
+        // The exact self-heal idiom `drive_dirty_connections` runs.
+        let driver = h3_state
+            .entry(handle_id)
+            .or_insert_with(|| PerConnection::new(false));
+        driver.pending.insert(
+            0,
+            finished_pending_request(vec![
+                (b":method".to_vec(), b"GET".to_vec()),
+                (b":path".to_vec(), b"/".to_vec()),
+            ]),
+        );
+
+        assert!(
+            h3_state.contains_key(&handle_id),
+            "the missing entry is seeded on this same encounter, not deferred"
+        );
+
+        let driver = h3_state.get_mut(&handle_id).expect("just seeded above");
+        let dispatch = proxima_primitives::pipe::handler::into_handle(ConstantOkDispatch);
+        let (response_tx, mut response_rx) =
+            futures::channel::mpsc::channel::<DispatchResult>(1);
+        let mut in_flight: FuturesUnordered<Pin<Box<dyn Future<Output = ()> + Send>>> =
+            FuturesUnordered::new();
+
+        process_h3_events(
+            ConnectionHandle(handle_id),
+            driver,
+            &dispatch,
+            &response_tx,
+            &mut in_flight,
+        )
+        .expect("self-healed connection still dispatches its pending request");
+        drop(response_tx);
+
+        futures::executor::block_on(async {
+            while in_flight.next().await.is_some() {}
+        });
+        let result = futures::executor::block_on(response_rx.next())
+            .expect("the request served on the self-heal tick delivers a response, not silence");
+        assert_eq!(
+            result.stream_id, 0,
+            "the response is for the exact stream the self-healed connection dispatched"
+        );
+        assert!(
+            result.response.is_ok(),
+            "the self-healed connection's request completes successfully, same as a \
+             normally-seeded one"
+        );
+    }
+
     #[test]
     fn to_proto_instant_matches_the_absolute_epoch_core_instant_now_reads() {
         use proxima_primitives::pipe::clock::testing::RecordingClock;
