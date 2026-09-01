@@ -768,6 +768,13 @@ pub static ELEMENTWISE_STEP_VALUES_TICKS: Counter =
     Counter::new("proxima_tensor.elementwise_step_values_ticks");
 pub static ELEMENTWISE_LOOP_TICKS: Counter = Counter::new("proxima_tensor.elementwise_loop_ticks");
 pub static ELEMENTWISE_RANGE_CALLS: Counter = Counter::new("proxima_tensor.elementwise_range_calls");
+// ROW 178 row-flattening mechanism check: how many `run_elementwise_range`
+// calls collapsed their whole outer-row odometer into one
+// `elementwise_width_fast` call, and the total row count those calls
+// covered -- `hits / ELEMENTWISE_RANGE_CALLS` and `rows / hits` (mean rows
+// collapsed per hit) are the two numbers that confirm or refute engagement.
+pub static ELEMENTWISE_FLAT_RANGE_HITS: Counter = Counter::new("proxima_tensor.elementwise_flat_range_hits");
+pub static ELEMENTWISE_FLAT_RANGE_ROWS: Counter = Counter::new("proxima_tensor.elementwise_flat_range_rows");
 // `run_elementwise_dispatch`'s own cohort-round count -- how many of a
 // forward pass's elementwise nodes actually open a `CohortSession::run`
 // round (as opposed to falling straight through to the sequential

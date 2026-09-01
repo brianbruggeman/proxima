@@ -3270,6 +3270,31 @@ fn run_elementwise_range<B: Deref<Target = [f32]>>(
     // plain contiguous `inner_len`-wide read at a fixed row stride — computed
     // once per call, same discipline as `fast_path`/`block_strides` above.
     let window_copy_operand = window_copy_operand(&shape, fast_path, block_extent, &strides);
+    // Row-flattening (`docs/discipline.md` ROW 178): `window_copy_operand`
+    // already collapses ITS narrower shape (a bare identity copy, one block
+    // dim) to one memcpy-shaped call per block; this is the same collapse
+    // for the GENERAL case — every operand's address across the WHOLE
+    // `outer_extents` odometer (every outer dim, not just the last one)
+    // composing as a single contiguous stride-`strides[operand]` span,
+    // reusing [`axes_flat_chain`] (ROW 148's own reduce-side helper,
+    // de-gated from `aarch64`-only below since this call site is
+    // architecture-generic) with `unit = strides[operand] * inner_len`: the
+    // address one outer step away must land exactly one row past where the
+    // current row's own width span ends, at the SAME per-element stride. A
+    // stride-0 (broadcast) operand collapses `unit` to 0, which
+    // `axes_flat_chain` already treats as "every nonzero-extent axis in the
+    // chain must ALSO be stride 0" — a genuinely global scalar (Adam's
+    // `beta1`/`beta2`/`eps`/`lr` constants, stride 0 in every dim) passes
+    // this for free; a per-row-only broadcast (stride 0 in the width dim,
+    // nonzero across an outer dim) correctly FAILS it, since that address
+    // is a step function of the flattened index, not affine in it, and
+    // cannot be expressed as one [`elementwise_width_fast`] call. Deferred
+    // to `window_copy_operand`'s own narrower, already-proven-optimal path
+    // (ROW 153/154) when both apply.
+    let full_range_flat = fast_path && window_copy_operand.is_none() && {
+        let outer_axes: Vec<u16> = (0..innermost_dim).collect();
+        elementwise_rows_are_flat(resolved, &outer_axes, &strides, inner_len)
+    };
     #[cfg(feature = "instrument")]
     {
         counter!(
@@ -3286,10 +3311,16 @@ fn run_elementwise_range<B: Deref<Target = [f32]>>(
     // shape at `body.steps.len() * inner_len` paid a real
     // `inner_len`-element (4096/14336 `f32`) heap allocation per node even
     // when nothing ever read it back; only `Generic` needs the fused
-    // per-step row table at all.
+    // per-step row table at all. `full_range_flat` widens the row this call
+    // covers to the WHOLE `[outer_start, outer_end)` span, so the table must
+    // be sized against that wider width, not `inner_len` alone — otherwise
+    // `elementwise_width_generic`'s own internal `GENERIC_WIDTH_TILE`
+    // chunking (ROW 175) would index past a table sized for one narrow row.
+    let flat_width = (outer_end - outer_start) * inner_len;
     let mut step_values = match shape {
         BodyShape::Generic(_) => {
-            vec![0.0f32; body.steps.len() * if fast_path { inner_len.min(GENERIC_WIDTH_TILE) } else { 1 }]
+            let effective_width = if full_range_flat { flat_width } else { inner_len };
+            vec![0.0f32; body.steps.len() * if fast_path { effective_width.min(GENERIC_WIDTH_TILE) } else { 1 }]
         }
         BodyShape::Unary(..) | BodyShape::Binary(..) => Vec::new(),
     };
@@ -3312,6 +3343,36 @@ fn run_elementwise_range<B: Deref<Target = [f32]>>(
     while outer_position < outer_end {
         unflatten_into(outer_position as u64, outer_extents, &mut outer_coordinate);
         fill_running_offsets(resolved, &outer_coordinate, &mut running);
+
+        // The whole `[outer_start, outer_end)` range collapsed to one flat
+        // span (`full_range_flat`, computed once above): a SINGLE
+        // `elementwise_width_fast` call over `flat_width` elements replaces
+        // what would otherwise be `outer_end - outer_start` separate
+        // per-row calls — node 132's own `[784,128]` shape turns 784 calls
+        // into 1 (`docs/discipline.md` ROW 178). `running` is already
+        // correct for `outer_position == outer_start` (just computed
+        // above); every subsequent row's own address is exactly
+        // `strides[operand]` past the previous element by construction of
+        // the flatten precondition, so `elementwise_width_fast` walking the
+        // combined width at that SAME stride reads every row without a
+        // second odometer step.
+        if full_range_flat {
+            elementwise_width_fast(&shape, &raw, &running, &strides, output, &mut step_values);
+            #[cfg(feature = "instrument")]
+            {
+                let elements = output.len() as u64;
+                counter!(instrument::ELEMENTWISE_FLAT_RANGE_HITS, 1);
+                counter!(instrument::ELEMENTWISE_FLAT_RANGE_ROWS, (outer_end - outer_start) as u64);
+                counters.leading_iters += (outer_end - outer_start) as u64;
+                counters.kernel_calls += 1;
+                counters.output_writes += elements;
+                for &stride in &strides {
+                    counters.operand_loads += if stride == 0 { 1 } else { elements };
+                }
+            }
+            outer_position = outer_end;
+            continue;
+        }
 
         // Blocked sweep of `block_dim` (see its own doc above): only when the
         // fast width path is already engaged (so every operand here is
@@ -6859,8 +6920,12 @@ struct ConvGemmTilePlan {
 /// (`docs/discipline.md` ROW 148) puts a real, un-skipped `c` between `n`
 /// and `oh`/`ow` — a genuine break for `n>1`, which this skip rule
 /// correctly still catches (a real, nonzero-extent axis out of chain order
-/// fails the `stride(dim) != expected` check exactly as before).
-#[cfg(target_arch = "aarch64")]
+/// fails the `stride(dim) != expected` check exactly as before). Pure
+/// stride/extent arithmetic over already-resolved [`bind::Layout`] data, no
+/// NEON intrinsics — genuinely architecture-generic despite living beside
+/// the `aarch64`-only [`conv_gemm_tile_plan`] that introduced it; NOT
+/// `#[cfg(target_arch = "aarch64")]` because [`elementwise_rows_are_flat`]
+/// (`docs/discipline.md` ROW 178) reuses it verbatim on every target.
 fn axes_flat_chain(resolved: &BoundOp, axes: &[u16], view: &bind::Layout, unit: i64) -> Option<u64> {
     let mut expected = unit;
     let mut count: u64 = 1;
@@ -6876,6 +6941,28 @@ fn axes_flat_chain(resolved: &BoundOp, axes: &[u16], view: &bind::Layout, unit: 
         count = count.saturating_mul(extent);
     }
     Some(count)
+}
+
+/// [`run_elementwise_range`]'s own row-flattening precondition (ROW 178):
+/// true when EVERY physical operand's width-dim address, walked across the
+/// WHOLE `outer_axes` odometer, composes as one contiguous
+/// stride-`strides[operand]` span — [`axes_flat_chain`] reused verbatim per
+/// operand with `unit = strides[operand] * inner_len`, the address one
+/// outer step away landing exactly one row (`inner_len` elements, at that
+/// SAME per-element stride) past the current row's own span. A stride-0
+/// operand collapses `unit` to 0, which `axes_flat_chain` already treats as
+/// "every nonzero-extent axis in the chain must ALSO be stride 0" — the
+/// identical predicate covers a genuinely global broadcast scalar with no
+/// special case. `resolved.operands()` (every physical operand, not only
+/// the ones a `Generic` body's steps actually reference) is checked for
+/// simplicity: an operand the body never reads cannot make this call
+/// INCORRECT by being conservatively included, only cost this one
+/// optimization opportunity on a pathological unread-but-non-flat operand.
+fn elementwise_rows_are_flat(resolved: &BoundOp, outer_axes: &[u16], strides: &[i64], inner_len: usize) -> bool {
+    resolved.operands().iter().enumerate().all(|(index, (_, view, _))| {
+        let unit = strides[index].saturating_mul(inner_len as i64);
+        axes_flat_chain(resolved, outer_axes, view, unit).is_some()
+    })
 }
 
 /// Resolves [`ConvGemmTilePlan`] once per bound op, or `None` when this node
