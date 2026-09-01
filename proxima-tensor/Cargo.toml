@@ -47,16 +47,6 @@ dynamic-elision-probe = ["std"]
 # `bind::bind`. Default-off; exists to answer the profile gate before any
 # fusion mechanism is built, not to ship.
 epilogue-profile-probe = ["std"]
-# law 6 (constant staging) composed with law 5 (layout commutation) --
-# `docs/rewrite-algebra.md` section 6, PROPOSED weight-packing lever ROW 203
-# priced but did not attempt. `StaticArena::build_static_arena_with_constants`
-# relays a constant 2-D weight operand once, at plan-build time, into the
-# panel layout `gemm_width_tile_neon` (`cpu.rs`) already reads sequentially --
-# aarch64-only (the width-tile kernel itself is aarch64-gated), default-off
-# per the accelerate-toggle precedent (this file's own `ggml-bench`/
-# `dynamic-elision-probe` siblings) until the nano/micro/milli ladder in
-# `docs/discipline.md` earns the switch.
-pack-at-plan-time = ["std"]
 # real execution-witness counters (elements/bytes/gather-vs-affine) plus
 # per-bound-op spans over `proxima-telemetry`'s legacy Metrics/Telemetry
 # surface — default-off, no effect on the default build or the no_std+alloc

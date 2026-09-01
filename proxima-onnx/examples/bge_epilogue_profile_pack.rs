@@ -188,5 +188,30 @@ fn main() {
         if unpacked_cov > 5.0 || packed_cov > 5.0 {
             println!("  -> CoV above 5% trust line on at least one arm -- report the RANGE, not the point estimate, for this sentence.");
         }
+
+        // `docs/discipline.md` ROW 207 promotion confirmation: the valve is
+        // a PLAN-BUILD-TIME gate (`build_packed_width_panels` checks it
+        // once, inside `build_static_arena_with_constants`), never a
+        // hot-path branch -- so proving it gates anything means building a
+        // FRESH arena after flipping it off, not reusing `packed_arena`
+        // (already packed at its own build time, permanently). A fresh
+        // valve-off arena should collapse back to ~unpacked, since
+        // `build_packed_width_panels` returns empty and every width-tile
+        // reduce falls back to `run_node_into`'s ordinary dispatch, exactly
+        // like `build_static_arena`. The valve is `aarch64`-only (same gate
+        // as the packing mechanism itself), so this whole confirmation is a
+        // no-op off `aarch64`.
+        #[cfg(target_arch = "aarch64")]
+        {
+            cpu::set_pack_at_plan_time_enabled(false);
+            let mut valve_off_arena = build_static_arena_with_constants(&lowered.program, &[], &[output], &weights).expect("build valve-off arena");
+            let (valve_off_ms, valve_off_totals) = timed_arm(&mut valve_off_arena, &weights, &input_ids, &attention_mask, &token_type_ids, &input_names);
+            cpu::set_pack_at_plan_time_enabled(true);
+            let valve_off_ratio = valve_off_ms / unpacked_mean;
+            println!(
+                "  valve-off (fresh arena built with packing disabled): {valve_off_ms:.4}ms (gemm-calls={}) vs unpacked mean {unpacked_mean:.4}ms -> ratio {valve_off_ratio:.4}x",
+                valve_off_totals.reduce_gemm_calls
+            );
+        }
     }
 }

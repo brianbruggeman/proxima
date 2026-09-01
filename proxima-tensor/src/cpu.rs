@@ -525,9 +525,10 @@ pub struct StaticArena {
     /// by the REDUCE node's [`NodeId`] (not the weight's), since
     /// [`run_resolved_nodes_in_arena`] looks this map up per resolved node
     /// on its way to deciding whether to route through
-    /// [`run_reduce`]'s packed arm. Always empty off `aarch64` or without
-    /// `pack-at-plan-time` -- [`build_packed_width_panels`] is the only
-    /// populator and it is gated to both.
+    /// [`run_reduce`]'s packed arm. Always empty off `aarch64` or with the
+    /// bench/test escape valve [`set_pack_at_plan_time_enabled`] flipped off
+    /// -- [`build_packed_width_panels`] is the only populator and it checks
+    /// the valve before scanning.
     packed_width_panels: BTreeMap<NodeId, PackedWidthPanels>,
 }
 
@@ -613,9 +614,11 @@ pub fn build_static_arena(program: &[Op], symbols: &[u64], outputs: &[NodeId]) -
 /// sentences), so the packed panel built here stays valid for the arena's
 /// whole lifetime without needing to be rebuilt.
 ///
-/// Behind `pack-at-plan-time` (default-off) and `aarch64` only — off
-/// either axis this is byte-for-byte [`build_static_arena`] plus binding
-/// `constant_inputs` into the arena's input buffers, no packing performed.
+/// Default-on since `docs/discipline.md` ROW 207's promotion, `aarch64`
+/// only — off aarch64, or with the bench/test escape valve
+/// [`set_pack_at_plan_time_enabled`] flipped off, this is byte-for-byte
+/// [`build_static_arena`] plus binding `constant_inputs` into the arena's
+/// input buffers, no packing performed.
 ///
 /// # Errors
 /// The same errors [`build_static_arena`] raises, plus
@@ -697,9 +700,9 @@ pub fn build_static_arena_with_constants(
         buffers[node_index] = Some(output);
     }
 
-    #[cfg(all(target_arch = "aarch64", feature = "pack-at-plan-time"))]
+    #[cfg(target_arch = "aarch64")]
     let packed_width_panels = build_packed_width_panels(&resolved, &shapes, &buffers, &input_names, constant_inputs);
-    #[cfg(not(all(target_arch = "aarch64", feature = "pack-at-plan-time")))]
+    #[cfg(not(target_arch = "aarch64"))]
     let packed_width_panels = BTreeMap::new();
 
     Ok(StaticArena {
@@ -798,9 +801,9 @@ fn run_resolved_nodes_in_arena(arena: &mut StaticArena) -> Result<(), TensorErro
         // signature stays untouched (13 other call sites, `docs/
         // rewrite-algebra.md` admission rule scopes this lever to the
         // arena's own execution loop, not a crate-wide dispatch change).
-        // Always `None`/never-taken off `aarch64` or without
-        // `pack-at-plan-time`, since `packed_width_panels` is always empty
-        // there.
+        // Always `None`/never-taken off `aarch64` or with the bench/test
+        // escape valve `set_pack_at_plan_time_enabled(false)`, since
+        // `packed_width_panels` is always empty there.
         match arena.packed_width_panels.get(&computed.node) {
             Some(packed) => run_reduce(computed, &arena.buffers, &mut output, Some(packed))?,
             None => run_node_into(computed, &arena.buffers, None, None, &mut output)?,
@@ -8477,15 +8480,39 @@ unsafe fn gemm_width_tile_neon<const ROWS: usize>(
 /// list — every other target's value is always `None`, unused, and this
 /// struct is never populated there ([`pack_width_tile_panels`] and its
 /// scan stay `aarch64`-gated).
-// off-aarch64 or without `pack-at-plan-time`, nothing in the crate ever
-// constructs this type -- only ever passed as `None`, so its fields would
-// otherwise trip `dead_code` under `-D warnings`.
-#[cfg_attr(not(all(target_arch = "aarch64", feature = "pack-at-plan-time")), allow(dead_code))]
+// off-aarch64, nothing in the crate ever constructs this type -- only ever
+// passed as `None`, so its fields would otherwise trip `dead_code` under
+// `-D warnings`.
+#[cfg_attr(not(target_arch = "aarch64"), allow(dead_code))]
 struct PackedWidthPanels {
     data: Vec<f32>,
     tile_cols: usize,
     k_total: usize,
     full_col_tiles: usize,
+}
+
+/// `docs/discipline.md` ROW 207's own paired-bench escape, same shape as
+/// [`EPILOGUE_FUSE_ENABLED`]/`set_epilogue_fuse_enabled` (ROW 186): a
+/// process-wide switch [`build_packed_width_panels`] consults once per
+/// [`build_static_arena_with_constants`] call (plan-build time, never a
+/// hot-path branch), defaulting to `true` now that plan-time weight packing
+/// is this crate's default `aarch64` build behavior. A paired bench/test
+/// needing the pre-ROW-207 unpacked arm for comparison calls
+/// [`set_pack_at_plan_time_enabled`] rather than rebuilding the crate under
+/// a separate cargo feature.
+#[cfg(target_arch = "aarch64")]
+static PACK_AT_PLAN_TIME_ENABLED: EpilogueFuseAtomicBool = EpilogueFuseAtomicBool::new(true);
+
+/// Bench/test-only escape valve (see [`PACK_AT_PLAN_TIME_ENABLED`]'s own
+/// doc): flips whether [`build_packed_width_panels`] packs anything,
+/// process-wide, for every [`build_static_arena_with_constants`] call from
+/// this point forward. Not part of this crate's taught public surface -- a
+/// caller composing tensor programs never needs this; a paired bench
+/// comparing the packed default against the unpacked arm does.
+#[doc(hidden)]
+#[cfg(target_arch = "aarch64")]
+pub fn set_pack_at_plan_time_enabled(enabled: bool) {
+    PACK_AT_PLAN_TIME_ENABLED.store(enabled, EpilogueFuseOrdering::Relaxed);
 }
 
 /// Packs `b_data` (the full, unpacked underlying buffer a `WidthTilePlan`'s
@@ -8495,7 +8522,7 @@ struct PackedWidthPanels {
 /// and unpacked arms are provably reading the same source elements, just
 /// writing them out in a different order — the property the bit-identity
 /// test in `cpu.rs`'s own test module checks.
-#[cfg(all(target_arch = "aarch64", feature = "pack-at-plan-time"))]
+#[cfg(target_arch = "aarch64")]
 fn pack_width_tile_panels(b_data: &[f32], base_b: i64, k_stride_b: i64, k_total: usize, width: usize) -> PackedWidthPanels {
     let tile_cols = WIDTH_TILE_VECS * 4;
     let full_col_tiles = width / tile_cols;
@@ -8519,7 +8546,7 @@ fn pack_width_tile_panels(b_data: &[f32], base_b: i64, k_stride_b: i64, k_total:
 /// exists) eligibility detection possible at all: the SAME gate
 /// [`width_tile_plan`] runs per invocation, run once here instead, against
 /// the identical [`BoundOp`] the arena will run every step after.
-#[cfg(all(target_arch = "aarch64", feature = "pack-at-plan-time"))]
+#[cfg(target_arch = "aarch64")]
 fn width_tile_pack_candidate(resolved: &BoundOp) -> Option<WidthTilePlan> {
     let BoundOpKind::Reduce {
         reduce_op,
@@ -8571,8 +8598,13 @@ fn width_tile_pack_candidate(resolved: &BoundOp) -> Option<WidthTilePlan> {
 /// [`build_static_arena_with_constants`] after `constant_inputs`' data is
 /// already bound into `buffers`, so `buffers[b_node]` holds the real weight
 /// values, not the zero-filled placeholder [`build_static_arena`] sizes
-/// every input to.
-#[cfg(all(target_arch = "aarch64", feature = "pack-at-plan-time"))]
+/// every input to. Training never reaches this: `proxima-autograd::train`
+/// calls plain [`build_static_arena`], which always passes an empty
+/// `constant_inputs` slice, so `constant_nodes` below is empty and no
+/// trainable weight is ever a packing candidate -- the eligibility gate is
+/// membership in the caller-named `constant_inputs` set, not a graph-shape
+/// heuristic, so there is no path a mutable parameter can slip through.
+#[cfg(target_arch = "aarch64")]
 fn build_packed_width_panels(
     resolved: &[BoundOp],
     shapes: &shape::Shapes,
@@ -8580,6 +8612,9 @@ fn build_packed_width_panels(
     input_names: &[(NodeId, String)],
     constant_inputs: &[(&str, &[f32])],
 ) -> BTreeMap<NodeId, PackedWidthPanels> {
+    if !PACK_AT_PLAN_TIME_ENABLED.load(EpilogueFuseOrdering::Relaxed) {
+        return BTreeMap::new();
+    }
     let constant_nodes: BTreeSet<NodeId> = constant_inputs
         .iter()
         .filter_map(|(name, _)| input_names.iter().find(|(_, candidate)| candidate == name).map(|(node, _)| *node))
