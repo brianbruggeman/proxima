@@ -787,6 +787,121 @@ fn is_post_reduce_epilogue(computed: &BoundOp, reduce_nodes: &[bool]) -> bool {
     reduce_operand_count == 1
 }
 
+/// `docs/discipline.md` ROW 184 Phase 3: the three exact op-sequence +
+/// operand-wiring shapes a real diagnostic dump (`epilogue_fuse_plan`'s own
+/// insertion site, temporarily instrumented, reverted before commit) found
+/// among the real mnist model's 5 [`is_post_reduce_epilogue`]-matched
+/// consumers -- `NodeId(25)`/`(32)`/`(55)` (bias-add then relu-clip,
+/// 2-step), `NodeId(46)` (bias-add + relu-clip + batchnorm, 8-step),
+/// `NodeId(69)` (bias-add + batchnorm, no relu, 7-step). A structural
+/// match, never a `NodeId`/name lookup -- the same discipline
+/// `detect_adam_update_roles` (this module) already established for a
+/// differently-shaped fused chain. Anything NOT matching one of these three
+/// exact shapes returns `None`, which [`epilogue_fuse_plan`] treats as "do
+/// not fuse this node at all" -- the UNFUSED two-pass path runs instead,
+/// never ROW 183's own interpreted `apply_body`-per-element evaluator
+/// (measured +17.4% e2e slower).
+#[cfg(feature = "epilogue-fuse-probe")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EpilogueKind {
+    /// `max(reduce + bias, zero)`.
+    Clip,
+    /// `((max(reduce + bias, zero) - mean) / sqrt(var + eps)) * gamma + beta`.
+    ClipNorm,
+    /// `((reduce + bias - mean) / sqrt(var + eps)) * gamma + beta`, no relu.
+    Norm,
+}
+
+#[cfg(feature = "epilogue-fuse-probe")]
+fn epilogue_step_is(step: &bind::BodyStep, op: ScalarOp, args: &[StepArg]) -> bool {
+    step.op == op && step.args.as_slice() == args
+}
+
+#[cfg(feature = "epilogue-fuse-probe")]
+fn detect_epilogue_kind(body: &ComposedBody) -> Option<EpilogueKind> {
+    use StepArg::{Operand, Step};
+    let steps = body.steps.as_slice();
+    let is_clip = steps.len() == 2 && epilogue_step_is(&steps[0], ScalarOp::Add, &[Operand(0), Operand(1)]) && epilogue_step_is(&steps[1], ScalarOp::Maximum, &[Step(0), Operand(2)]);
+    if is_clip {
+        return Some(EpilogueKind::Clip);
+    }
+    let is_clip_norm = steps.len() == 8
+        && epilogue_step_is(&steps[0], ScalarOp::Add, &[Operand(0), Operand(1)])
+        && epilogue_step_is(&steps[1], ScalarOp::Maximum, &[Step(0), Operand(2)])
+        && epilogue_step_is(&steps[2], ScalarOp::Subtract, &[Step(1), Operand(3)])
+        && epilogue_step_is(&steps[3], ScalarOp::Add, &[Operand(4), Operand(5)])
+        && epilogue_step_is(&steps[4], ScalarOp::SquareRoot, &[Step(3)])
+        && epilogue_step_is(&steps[5], ScalarOp::Divide, &[Step(2), Step(4)])
+        && epilogue_step_is(&steps[6], ScalarOp::Multiply, &[Step(5), Operand(6)])
+        && epilogue_step_is(&steps[7], ScalarOp::Add, &[Step(6), Operand(7)]);
+    if is_clip_norm {
+        return Some(EpilogueKind::ClipNorm);
+    }
+    let is_norm = steps.len() == 7
+        && epilogue_step_is(&steps[0], ScalarOp::Add, &[Operand(0), Operand(1)])
+        && epilogue_step_is(&steps[1], ScalarOp::Subtract, &[Step(0), Operand(2)])
+        && epilogue_step_is(&steps[2], ScalarOp::Add, &[Operand(3), Operand(4)])
+        && epilogue_step_is(&steps[3], ScalarOp::SquareRoot, &[Step(2)])
+        && epilogue_step_is(&steps[4], ScalarOp::Divide, &[Step(1), Step(3)])
+        && epilogue_step_is(&steps[5], ScalarOp::Multiply, &[Step(4), Operand(5)])
+        && epilogue_step_is(&steps[6], ScalarOp::Add, &[Step(5), Operand(6)]);
+    if is_norm {
+        return Some(EpilogueKind::Norm);
+    }
+    None
+}
+
+/// Is `layout` the reduce operand's own contiguous row-major addressing of
+/// `extents` -- `strides[axis] == extents[axis+1..].product()`, the standard
+/// row-major stride formula -- confirmed structurally before the monomorphized
+/// kernel is allowed to walk the reduce's own buffer as a flat,
+/// monotonically-incrementing slice instead of re-deriving
+/// [`bind::Layout::offset_of`] every element. `false` sends the candidate
+/// back to the unfused path (never the interpreted one).
+#[cfg(feature = "epilogue-fuse-probe")]
+fn epilogue_is_contiguous_row_major(layout: &bind::Layout, extents: &[u64]) -> bool {
+    if layout.base != 0 || layout.strides.len() != extents.len() {
+        return false;
+    }
+    let mut expected = 1i64;
+    for (axis, &extent) in extents.iter().enumerate().rev() {
+        if layout.strides.get(axis).copied().unwrap_or(0) != expected {
+            return false;
+        }
+        expected *= extent as i64;
+    }
+    true
+}
+
+/// The single axis every non-reduce operand's own broadcast varies over, or
+/// `None` when every one is a true rank-0 scalar -- [`is_post_reduce_epilogue`]
+/// already established every non-reduce operand carries at least one zero
+/// stride; this asks the stronger, kernel-specific question the monomorphized
+/// loop below needs: is there EXACTLY one such varying axis, shared by every
+/// operand that varies at all, so hoisting can read each broadcast operand
+/// once per outer-loop column instead of once per element. `Err(())` means
+/// two operands disagree on which axis they vary over -- an unsupported shape,
+/// sent back to the unfused path.
+#[cfg(feature = "epilogue-fuse-probe")]
+fn epilogue_hoist_axis(operands: &[(NodeId, bind::Layout, Option<bind::Lookup>)], reduce_slot: usize) -> Result<Option<usize>, ()> {
+    let mut axis: Option<usize> = None;
+    for (slot, (_, layout, _)) in operands.iter().enumerate() {
+        if slot == reduce_slot {
+            continue;
+        }
+        for (candidate, stride) in layout.strides.iter().enumerate() {
+            if *stride != 0 {
+                match axis {
+                    None => axis = Some(candidate),
+                    Some(existing) if existing != candidate => return Err(()),
+                    Some(_) => {}
+                }
+            }
+        }
+    }
+    Ok(axis)
+}
+
 /// `docs/discipline.md` ROW 183 Phase 2: which `Keep::Reduce` producers can
 /// have their sole [`is_post_reduce_epilogue`]-matched consumer's own body
 /// evaluated early, keyed by the reduce's own [`NodeId`] to `(consumer's
@@ -805,8 +920,8 @@ fn is_post_reduce_epilogue(computed: &BoundOp, reduce_nodes: &[bool]) -> bool {
 ///   in the caller's own `quantized_weights` map instead, per
 ///   `evaluate_quantized_with_scratch`'s own `QuantizedBlock` match), and a
 ///   scatter reduce's output is not a plain row-major walk of `output_axes`,
-///   so [`apply_epilogue_fused`]'s coordinate odometer does not apply to
-///   either shape.
+///   so [`apply_epilogue_fused_monomorphic`]'s hoisted-column addressing does
+///   not apply to either shape.
 /// - `fire_position`, the max over the producer's own `resolved` position
 ///   and every OTHER operand's own `resolved` position (a `NodeId` absent
 ///   from `resolved` — a `block_node`/`Op::Input` — is always ready, so it
@@ -833,7 +948,7 @@ fn epilogue_fuse_plan(
     node_count: usize,
     effective_outputs: &[NodeId],
     quantized_weights: &BTreeMap<NodeId, QuantizedBlock>,
-) -> BTreeMap<NodeId, (usize, usize)> {
+) -> BTreeMap<NodeId, (usize, usize, EpilogueKind, Option<usize>)> {
     let reduce_nodes = epilogue_profile_reduce_flags(resolved, node_count);
     let mut consumer_counts: BTreeMap<NodeId, u32> = BTreeMap::new();
     let mut node_position: BTreeMap<NodeId, usize> = BTreeMap::new();
@@ -850,21 +965,32 @@ fn epilogue_fuse_plan(
         if !is_post_reduce_epilogue(computed, &reduce_nodes) {
             continue;
         }
-        let BoundOpKind::Elementwise { operands, .. } = &computed.kind else {
+        let BoundOpKind::Elementwise { operands, body } = &computed.kind else {
             continue;
         };
-        let Some((reduce_node, ..)) = operands.iter().find(|(node, layout, gather)| {
+        let Some(reduce_slot) = operands.iter().position(|(node, layout, gather)| {
             gather.is_none() && !layout.strides.contains(&0) && reduce_nodes.get(node.0 as usize).copied().unwrap_or(false)
         }) else {
             continue;
         };
-        if consumer_counts.get(reduce_node).copied().unwrap_or(0) != 1 {
+        // the monomorphized kernels below encode "operand 0 is the reduce"
+        // as part of each detected shape's own fixed wiring (verified
+        // against the real diagnostic dump) — a candidate that structurally
+        // matches `is_post_reduce_epilogue` but wires the reduce into a
+        // DIFFERENT operand slot is real, just not one of the three shapes
+        // this row builds a kernel for, so it falls back to unfused rather
+        // than risk misreading the wrong slot as the reduce.
+        if reduce_slot != 0 {
             continue;
         }
-        if effective_outputs.contains(reduce_node) {
+        let reduce_node = operands[reduce_slot].0;
+        if consumer_counts.get(&reduce_node).copied().unwrap_or(0) != 1 {
             continue;
         }
-        let Some(&producer_position) = node_position.get(reduce_node) else {
+        if effective_outputs.contains(&reduce_node) {
+            continue;
+        }
+        let Some(&producer_position) = node_position.get(&reduce_node) else {
             continue;
         };
         let producer = &resolved[producer_position];
@@ -879,12 +1005,21 @@ fn epilogue_fuse_plan(
         if !is_plain_reduce {
             continue;
         }
-        if operands.iter().any(|(node, ..)| node != reduce_node && quantized_weights.contains_key(node)) {
+        if operands.iter().any(|(node, ..)| *node != reduce_node && quantized_weights.contains_key(node)) {
             continue;
         }
+        let Some(kind) = detect_epilogue_kind(body) else {
+            continue;
+        };
+        if !epilogue_is_contiguous_row_major(&operands[reduce_slot].1, &computed.extents) {
+            continue;
+        }
+        let Ok(hoist_axis) = epilogue_hoist_axis(operands, reduce_slot) else {
+            continue;
+        };
         let fire_position = operands
             .iter()
-            .filter(|(node, ..)| node != reduce_node)
+            .filter(|(node, ..)| *node != reduce_node)
             .map(|(node, ..)| node_position.get(node).copied().unwrap_or(producer_position))
             .chain(core::iter::once(producer_position))
             .max()
@@ -897,13 +1032,13 @@ fn epilogue_fuse_plan(
         if fire_position >= index {
             continue;
         }
-        plan.insert(*reduce_node, (index, fire_position));
+        plan.insert(reduce_node, (index, fire_position, kind, hoist_axis));
     }
     plan
 }
 
 /// `docs/discipline.md` ROW 183's own re-provable hit counter — how many
-/// times [`apply_epilogue_fused`] actually ran, over how many elements,
+/// times [`apply_epilogue_fused_monomorphic`] actually ran, over how many elements,
 /// snapshot-and-reset per call so a caller running several forward passes
 /// back to back gets one pass's own count, not a running total. Exists so a
 /// re-prove command can assert N > 0 rather than trust that the plan built
@@ -933,57 +1068,105 @@ pub fn epilogue_fuse_reset() {
     EPILOGUE_FUSE_NANOS.store(0, EpilogueFuseOrdering::Relaxed);
 }
 
-/// `docs/discipline.md` ROW 183 Phase 2: evaluates `consumer`'s own
-/// [`ComposedBody`] directly against `reduce_values` (the reduce's own
-/// just-computed accumulator, still a local slice, never re-read from
-/// `buffers`) plus every other operand read straight out of `buffers` at
-/// `consumer.extents`'s own row-major coordinate — the SAME
-/// [`apply_body`]/[`Layout::offset_of`] machinery every other `BodyShape::Generic`
-/// node already evaluates through, not a new interpreter. The coordinate is
-/// an odometer incremented once per element (wrap-on-overflow per axis)
-/// rather than divided/modulo'd from the flat index fresh every element —
-/// the per-task "hoist aggressively" instruction, applied to broadcast
-/// operand addressing since the actual bias/batchnorm-parameter values
-/// themselves are already a single indexed read via `Layout::offset_of`
-/// (stride 0 on every axis the operand doesn't vary over collapses that
-/// axis's own contribution to zero without a branch).
+/// `docs/discipline.md` ROW 184 Phase 3: `epilogue_fuse_plan`'s own
+/// [`EpilogueKind`] classification, walked by a monomorphized loop instead of
+/// ROW 183's per-element [`apply_body`] interpreter (measured 32.90 ns/element,
+/// +17.4% e2e SLOWER than the unfused two-pass path it was meant to replace).
+/// Every broadcast/scalar operand this body reads is hoisted to ONCE PER
+/// OUTER-LOOP COLUMN (`hoist_axis`) rather than re-derived from
+/// [`bind::Layout::offset_of`] on every element — including the invariant
+/// `sqrt(var + eps)` sub-expression inside the two batchnorm shapes, which
+/// depends on none of the per-element reduce value, so hoisting it out of the
+/// inner loop is bit-identical to recomputing it at every position (the SAME
+/// argument ROW 179's own rank-0 hoist already established, generalized here
+/// from "invariant across the whole call" to "invariant across the inner
+/// loop"). The per-element body itself is fixed Rust source per `kind` — a
+/// `match` on a 3-variant enum, never a runtime step loop — so each op
+/// executes in the SAME left-to-right, non-fused-multiply-add order
+/// `apply_body` would have produced (`a * b + c` as two separate f32 rounding
+/// steps, never `a.mul_add(b, c)`), which is what keeps this bit-identical to
+/// the two-pass unfused path rather than merely close to it.
+///
+/// Zero heap allocation: `read` below closes over stack-resident state only,
+/// `coordinate` is a fixed `[u64; MAX_INLINE_RANK]` array, and every hoisted
+/// scalar is a plain `f32` local — closing ROW 183's own named residual (that
+/// row's interpreter allocated 3 small `Vec`s per fusion hit).
 #[cfg(feature = "epilogue-fuse-probe")]
-fn apply_epilogue_fused(consumer: &BoundOp, reduce_node: NodeId, reduce_values: &[f32], buffers: &[Option<Cow<'_, [f32]>>], output: &mut [f32]) {
-    let BoundOpKind::Elementwise { body, operands } = &consumer.kind else {
+fn apply_epilogue_fused_monomorphic(kind: EpilogueKind, consumer: &BoundOp, reduce_node: NodeId, hoist_axis: Option<usize>, reduce_values: &[f32], buffers: &[Option<Cow<'_, [f32]>>], output: &mut [f32]) {
+    let BoundOpKind::Elementwise { operands, .. } = &consumer.kind else {
         return;
     };
     let extents = &consumer.extents;
     let rank = extents.len();
-    let mut coordinate = vec![0u64; rank];
-    let mut step_values = vec![0.0f32; body.steps.len().max(1)];
-    let mut operand_values = vec![0.0f32; operands.len()];
-    for slot in output.iter_mut() {
-        for (operand_slot, (node, layout, _gather)) in operands.iter().enumerate() {
-            // `layout` is THIS consumer's own addressing of `node`'s buffer,
-            // which is not always the identity mapping even for the reduce
-            // operand itself -- a first build of this row read
-            // `reduce_values[flat_index]` directly for that one operand,
-            // assuming flat consumer position always equals the reduce's own
-            // flat position. `permuted_reduce_out_map_round_trips_through_lift`
-            // (a Reduce round-tripped through ONNX lift/lower, which
-            // represents a permuted `out_map` as `Reduce` + a Transpose-shaped
-            // `Elementwise` immediately after it) broke that assumption: the
-            // transpose reads the reduce's buffer via genuinely permuted,
-            // still non-broadcast strides, and the shortcut silently read the
-            // wrong element. `layout.offset_of` is the SAME addressing
-            // function every other operand already goes through here, so the
-            // reduce operand gets no special case at all now.
-            let source = if *node == reduce_node { reduce_values } else { buffers[node.0 as usize].as_deref().unwrap_or(&[]) };
-            let offset = layout.offset_of(&coordinate);
-            operand_values[operand_slot] = usize::try_from(offset).ok().and_then(|index| source.get(index)).copied().unwrap_or(0.0);
+    let axis = hoist_axis.unwrap_or(rank);
+    let before: u64 = extents.get(..axis.min(rank)).map_or(1, |prefix| prefix.iter().product::<u64>().max(1));
+    let at: u64 = if axis < rank { extents[axis] } else { 1 };
+    let after: u64 = extents.get(axis.saturating_add(1)..).map_or(1, |suffix| suffix.iter().product::<u64>().max(1));
+
+    let read = |slot: usize, column: u64| -> f32 {
+        let (node, layout, _gather) = &operands[slot];
+        let mut coordinate = [0u64; bind::MAX_INLINE_RANK];
+        if axis < rank {
+            coordinate[axis] = column;
         }
-        *slot = apply_body(body, &operand_values, &mut step_values);
-        for axis in (0..rank).rev() {
-            coordinate[axis] += 1;
-            if coordinate[axis] < extents[axis] {
-                break;
+        let offset = layout.offset_of(&coordinate[..rank.min(bind::MAX_INLINE_RANK)]);
+        let source: &[f32] = if *node == reduce_node { reduce_values } else { buffers[node.0 as usize].as_deref().unwrap_or(&[]) };
+        usize::try_from(offset).ok().and_then(|index| source.get(index)).copied().unwrap_or(0.0)
+    };
+
+    let mut reduce_index = 0usize;
+    let mut out_index = 0usize;
+    for _outer in 0..before {
+        for column in 0..at {
+            match kind {
+                EpilogueKind::Clip => {
+                    let bias = read(1, column);
+                    let zero = read(2, 0);
+                    for _ in 0..after {
+                        let value = reduce_values[reduce_index];
+                        reduce_index += 1;
+                        output[out_index] = (value + bias).max(zero);
+                        out_index += 1;
+                    }
+                }
+                EpilogueKind::ClipNorm => {
+                    let bias = read(1, column);
+                    let zero = read(2, 0);
+                    let mean = read(3, column);
+                    let variance = read(4, column);
+                    let epsilon = read(5, 0);
+                    let gamma = read(6, column);
+                    let beta = read(7, column);
+                    let denominator = (variance + epsilon).sqrt();
+                    for _ in 0..after {
+                        let value = reduce_values[reduce_index];
+                        reduce_index += 1;
+                        let biased = (value + bias).max(zero);
+                        let centered = biased - mean;
+                        let normalized = centered / denominator;
+                        output[out_index] = normalized * gamma + beta;
+                        out_index += 1;
+                    }
+                }
+                EpilogueKind::Norm => {
+                    let bias = read(1, column);
+                    let mean = read(2, column);
+                    let variance = read(3, column);
+                    let epsilon = read(4, 0);
+                    let gamma = read(5, column);
+                    let beta = read(6, column);
+                    let denominator = (variance + epsilon).sqrt();
+                    for _ in 0..after {
+                        let value = reduce_values[reduce_index];
+                        reduce_index += 1;
+                        let biased = value + bias;
+                        let centered = biased - mean;
+                        let normalized = centered / denominator;
+                        output[out_index] = normalized * gamma + beta;
+                        out_index += 1;
+                    }
+                }
             }
-            coordinate[axis] = 0;
         }
     }
 }
@@ -1421,11 +1604,11 @@ pub fn evaluate_quantized_with_scratch(
     #[cfg(feature = "epilogue-fuse-probe")]
     let epilogue_fuse_plan = epilogue_fuse_plan(&resolved, program.len(), &effective_outputs, &quantized_weights);
     #[cfg(feature = "epilogue-fuse-probe")]
-    let epilogue_fuse_skip: BTreeSet<NodeId> = epilogue_fuse_plan.values().map(|(index, _)| resolved[*index].node).collect();
+    let epilogue_fuse_skip: BTreeSet<NodeId> = epilogue_fuse_plan.values().map(|(index, ..)| resolved[*index].node).collect();
     #[cfg(feature = "epilogue-fuse-probe")]
     let epilogue_fuse_fire_at: BTreeMap<usize, Vec<NodeId>> = {
         let mut grouped: BTreeMap<usize, Vec<NodeId>> = BTreeMap::new();
-        for (reduce_node, (_, fire_position)) in &epilogue_fuse_plan {
+        for (reduce_node, (_, fire_position, ..)) in &epilogue_fuse_plan {
             grouped.entry(*fire_position).or_default().push(*reduce_node);
         }
         grouped
@@ -1614,14 +1797,14 @@ pub fn evaluate_quantized_with_scratch(
         #[cfg(feature = "epilogue-fuse-probe")]
         if let Some(reduce_nodes) = epilogue_fuse_fire_at.get(&position) {
             for reduce_node in reduce_nodes {
-                let Some(&(consumer_index, _)) = epilogue_fuse_plan.get(reduce_node) else {
+                let Some(&(consumer_index, _, kind, hoist_axis)) = epilogue_fuse_plan.get(reduce_node) else {
                     continue;
                 };
                 let consumer = &resolved[consumer_index];
                 let reduce_values = buffers[reduce_node.0 as usize].as_deref().unwrap_or(&[]);
                 let mut fused_output = take_or_allocate(free_buffers, node_output_len(consumer));
                 let fuse_started = std::time::Instant::now();
-                apply_epilogue_fused(consumer, *reduce_node, reduce_values, &buffers, &mut fused_output);
+                apply_epilogue_fused_monomorphic(kind, consumer, *reduce_node, hoist_axis, reduce_values, &buffers, &mut fused_output);
                 EPILOGUE_FUSE_NANOS.fetch_add(fuse_started.elapsed().as_nanos() as u64, EpilogueFuseOrdering::Relaxed);
                 EPILOGUE_FUSE_HITS.fetch_add(1, EpilogueFuseOrdering::Relaxed);
                 EPILOGUE_FUSE_ELEMENTS.fetch_add(fused_output.len() as u64, EpilogueFuseOrdering::Relaxed);
