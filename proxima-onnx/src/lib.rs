@@ -65,6 +65,7 @@ pub mod error;
 pub mod lift;
 pub mod lower;
 pub mod messages;
+pub mod op_coverage;
 pub mod parser;
 pub mod pipe;
 pub mod sized;
