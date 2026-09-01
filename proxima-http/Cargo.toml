@@ -166,7 +166,11 @@ http2 = ["http2-native", "dep:tokio", "dep:tokio-util"]
 
 http3 = ["http3-native", "http3-quinn-compat"]
 # tokio-free: the sans-IO codec + native listener (listen.rs) drive over
-# `proxima-quic/native`, which is itself tokio-free (prime-driven).
+# `proxima-quic/native`, which is itself tokio-free (prime-driven). `listen.rs`
+# shares its bounded `response_tx` across the sync header-decode-failure
+# producer and the async in-flight-handler producer through
+# `proxima_primitives::sync::AsyncMutex` (same waker-based async gate as
+# `http3-native-upstream`'s client facade), so this feature needs it too.
 http3-native = [
     "proxima-protocols/http3_codec-alloc",
     "proxima-protocols/quic-tls-rustls",
@@ -174,6 +178,7 @@ http3-native = [
     "proxima-quic/native",
     "dep:rustls",
     "dep:rcgen",
+    "proxima-primitives/async-mutex",
     # the only modules in this crate that define an error enum are
     # `http3/native/{client,server}.rs`, so thiserror rides their feature
     # rather than the whole crate.
