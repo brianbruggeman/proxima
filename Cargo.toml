@@ -55,7 +55,13 @@ resolver = "3"
 # this stays a member. Every consumer already builds it via `--manifest-path`
 # (see tools/proxima-vm/tests/*.rs), never `-p`, so excluding it changes
 # nothing for them.
-exclude = ["tools/proxima-vm/guests/lambda"]
+#
+# scripts/burn_reference: standalone harness with path deps on an external,
+# un-vendored burn checkout (ROW 187, proxima-tensor/docs/discipline.md).
+# Its own `[workspace]` table already makes it root of its own workspace, so
+# this exclude is belt-and-suspenders against `cargo build --workspace`
+# trying to resolve a foreign dependency tree.
+exclude = ["tools/proxima-vm/guests/lambda", "scripts/burn_reference"]
 
 [workspace.package]
 version = "0.1.0"

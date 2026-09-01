@@ -1,0 +1,28 @@
+[workspace]
+
+[package]
+name = "burn-reference"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "standalone harness running burn's own onnx-inference mnist example against the same mnist.onnx / t10k fixtures proxima-onnx's real_mnist_accuracy test uses -- ROW 187 (see proxima-tensor/docs/discipline.md)"
+
+[features]
+default = ["embedded-model"]
+embedded-model = []
+
+[dependencies]
+# machine-local path dep: requires a checkout of tracel-ai/burn at
+# ~/repos/others/burn (same precedent as scripts/torch_reference's external
+# checkout). Not vendored, not fetched by this build -- clone it yourself
+# first (see discipline.md ROW 187 for the SHA this row measured against).
+burn = { path = "/Users/brianbruggeman/repos/others/burn/crates/burn", default-features = false, features = ["std", "ndarray", "dataset", "vision"] }
+
+[build-dependencies]
+# default-features off: burn-import's default set includes "safetensors",
+# which pulls candle-core (unpinned in this standalone workspace -- burn's
+# own Cargo.lock pins 0.9.1, we resolved 0.9.2, whose added DType variants
+# break burn-import's own non-exhaustive match; see discipline.md ROW 187
+# notes). "onnx" alone is sufficient for ModelGen and does not depend on
+# candle-core at all.
+burn-import = { path = "/Users/brianbruggeman/repos/others/burn/crates/burn-import", default-features = false, features = ["onnx"] }
