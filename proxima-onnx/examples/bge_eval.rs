@@ -77,7 +77,9 @@ fn cosine(a: &[f32], b: &[f32]) -> f32 {
 /// (`epilogue_fuse_totals`, reset first so this call's own count is
 /// isolated), and the resulting embeddings for a bit-identity/cosine
 /// comparison between the fused and unfused arms.
-fn run_pass(graph: &proxima_onnx::messages::GraphProto<'_>, items: &[(&str, Vec<i64>)]) -> (Vec<std::time::Duration>, Vec<Vec<f32>>, (u64, u64, u64)) {
+type RunPassResult = (Vec<std::time::Duration>, Vec<Vec<f32>>, (u64, u64, u64));
+
+fn run_pass(graph: &proxima_onnx::messages::GraphProto<'_>, items: &[(&str, Vec<i64>)]) -> RunPassResult {
     proxima_tensor::cpu::epilogue_fuse_reset();
     let mut durations = Vec::new();
     let mut embeddings = Vec::new();
