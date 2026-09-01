@@ -31,6 +31,6 @@ pub mod upstream;
 #[cfg(feature = "http3-quinn-compat")]
 pub use listener::H3ListenProtocol;
 #[cfg(feature = "http3-quinn-compat")]
-pub use server::serve_h3_connection;
+pub use server::{DEFAULT_REQUEST_BODY_CHANNEL_CAPACITY, serve_h3_connection};
 #[cfg(feature = "http3-quinn-compat")]
 pub use upstream::Http3Upstream;

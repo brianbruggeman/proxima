@@ -102,7 +102,12 @@ fn start_proxima_default_tokio() -> SocketAddr {
                         let in_flight = Arc::new(AtomicU64::new(0));
                         tokio::spawn(async move {
                             let _ =
-                                proxima::h3::serve_h3_connection(connection, dispatch, in_flight)
+                                proxima::h3::serve_h3_connection(
+                                    connection,
+                                    dispatch,
+                                    in_flight,
+                                    proxima::h3::DEFAULT_REQUEST_BODY_CHANNEL_CAPACITY,
+                                )
                                     .await;
                         });
                     }
@@ -155,7 +160,10 @@ fn start_proxima_per_core() -> SocketAddr {
                             // for the connection's lifetime.
                             tokio::task::spawn_local(async move {
                                 let _ = proxima::h3::serve_h3_connection(
-                                    connection, dispatch, in_flight,
+                                    connection,
+                                    dispatch,
+                                    in_flight,
+                                    proxima::h3::DEFAULT_REQUEST_BODY_CHANNEL_CAPACITY,
                                 )
                                 .await;
                             });
