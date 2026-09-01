@@ -264,6 +264,91 @@ ROW 116, `discipline.md:11992`), not in the kernel or the hardware ceiling.
 
 ---
 
+## Lane: q4_K GPU decode (Metal, LLM decode, real weight-matrix shapes)
+
+Derived from ROW 193 (`discipline.md`, ROW 193 heading), a same-day interleaved
+paired cell against llama.cpp Metal on the identical `openchat-3.5-1210.Q4_K_S.gguf`
+checkpoint (7.24B params, Mistral architecture, 32 layers) both arms read.
+
+**MAC-per-token constant (reused from the CPU lane above for consistency):**
+7,110,402,048 MACs/token (ROW 116's own summed decode-step shape-set figure);
+weight-byte sweep 3.9996 GB/token at Q4_K's 0.5625 B/MAC (same figure the CPU
+lane's Binding Constraint section already cites).
+
+### Candidate ceilings
+
+| ceiling | value | cite |
+|---|---|---|
+| GPU streaming bandwidth (trivial-copy or read-only probe) | **DEBT -- not measured**. `membw_probe`'s Metal arm uses a reduce-to-scalar (`Add`) pattern, not a streaming copy, and returned 0.3-0.4 GB/s on a loaded host -- tagged not-a-ceiling, not substituted with a spec-sheet figure. | ROW 193 |
+| llama.cpp Metal, achieved (incumbent's own kernel+driver, today) | **234.1 GB/s** (17.086 ms/token, 2.403e-3 ns/mac, 416.1 GMAC/s) | ROW 193, fresh; corroborates the older 214.7-230.99 GB/s citations (`q4k_matvec_probe.rs` docstring; `discipline.md:7882`) within the same order |
+| proxima Metal, achieved, kernel-only (batched, steady-state `gpu_exec`) | **70.14 GB/s** (57.032 ms/token GPU-exec, 8.02e-3 ns/mac, 124.7 GMAC/s) | ROW 193 |
+| proxima Metal, achieved, full decode loop (incl. CPU-side orchestration) | **57.24 GB/s** (69.86 ms/token, 9.65e-3 ns/mac, 103.6 GMAC/s) | ROW 193 |
+| proxima CPU, achieved, kernel-only (for reference, same MAC constant) | 147.72-150.60 GMAC/s | ROW 116, cited in the CPU lane above |
+
+### Binding constraint
+
+**GPU-side, unresolved this session (DEBT):** no independent GPU streaming-bandwidth
+ceiling exists to compute a fraction-of-ceiling against, the same gap the
+`membw_probe` landing row (`discipline.md:12461` vicinity) named and deferred.
+Read at face value against the incumbent's OWN achieved rate rather than a
+hardware ceiling: proxima's Metal kernel (124.7 GMAC/s) sits at **30.0%** of
+llama.cpp Metal's achieved rate (416.1 GMAC/s) -- notably BELOW proxima's own
+CPU kernel (147.72-150.60 GMAC/s, ROW 116), i.e. **this GPU port does not yet
+beat this crate's own CPU kernel**, let alone the incumbent. The full-decode
+wall-clock gap (4.09x) is wider than the kernel-only gap (3.34x); the
+difference (~12.8 ms/token) is CPU-side dispatch/orchestration around the GPU
+kernel (`prepare`/`emit`/`pipeline_lookup`/`op_setup`/`block_upload`,
+`token_breakdown_metal` fields, ROW 193), the same shape ROW 100/116 already
+named for the CPU arm's own w=1 orchestration tax.
+
+### Per-shape attribution (new this row, diagnostic-only -- see caveat)
+
+`profiles_one_real_decode_step_by_per_op_gpu_time`'s op-isolated timing (one
+command buffer per op, ~1.7x inflated vs the batched production figure above,
+`total_gpu_ms=99.055` op-isolated vs `gpu_exec_ms=57.032` batched at the same
+step) is not production-representative in absolute terms, but its measured
+`operand_bytes` correctly DERIVES each tensor's real bytes/weight and
+therefore its quant type without trusting file metadata: `ffn_gate`/`ffn_up`/
+`attn_q`/`attn_output`/`attn_k` measure exactly 0.5625 B/weight (Q4_K);
+`output.weight` measures exactly 0.8203125 B/weight (Q6_K's 210B/256elem,
+exact match) -- confirming `bench_q4k_matmul.rs`'s own comment that Q4_K_S
+bumps precision-sensitive tensors; `ffn_down`/`attn_v` measure 0.5781 B/weight,
++2.8% over Q4_K nominal, mechanism unresolved (DEBT, named not guessed).
+
+### Roofline vs current best
+
+| milestone | GMAC/s | vs llama.cpp Metal achieved (416.1 GMAC/s) | cite |
+|---|---|---|---|
+| llama.cpp Metal (incumbent, achieved) | 416.1 | 1x | ROW 193 |
+| proxima CPU kernel (for reference) | 147.72-150.60 | 2.76-2.82x under | ROW 116 |
+| **proxima Metal kernel-only (batched, steady-state)** | **124.7** | **3.34x under** | ROW 193 |
+| proxima Metal full decode loop | 103.6 | 4.02x under (4.09x on ms/token, same ratio within rounding) | ROW 193 |
+
+No GPU streaming-bandwidth ceiling exists to state a roofline-vs-hardware gap
+the way the CPU lane does (124.4-144.4 GMAC/s bandwidth ceiling, effectively
+closed) -- this lane's only honest ratio is against the incumbent's own
+achieved rate, not against this box's hardware limit.
+
+### Debts
+
+- **GPU streaming bandwidth ceiling never cleanly measured** -- `membw_probe`'s
+  Metal arm is the wrong probe shape (reduce-to-scalar, not streaming copy)
+  and this session's host was never quiet enough to trust even that shape.
+  Re-prove command in ROW 193; needs both a corrected probe shape AND a quiet
+  host.
+- **`ffn_down`/`attn_v`'s 0.5781 B/weight (+2.8% over Q4_K's 0.5625) is
+  measured, not explained** -- named, not guessed at, per principle 6.
+- **No standalone criterion bench exists for the GPU per-shape arm** (the
+  orchestration gap ROW 193 names) -- today's per-shape numbers come from an
+  `instrument`-gated diagnostic test, not a criterion-tracked, baseline-saved
+  artifact.
+- Per-shape numbers are op-isolated (command-buffer-per-op), not batched --
+  the ~1.7x inflation factor between op-isolated and batched totals at the
+  same step is itself only a two-point comparison, not independently
+  verified per-shape.
+
+---
+
 ## Lane: BGE-small embedding (per sentence, 7-9 tokens)
 
 **Shape, as measured (not assumed):** 3 real sentences, 8/9/7 tokens,
@@ -334,6 +419,7 @@ grounded ratio available: **26.68 ms measured / roofline unknown**.
 | mnist f32 inference | NEON per-core compute (0.057 ms/image) | 0.057 ms/image | 0.393907 ms/image (ROW 190) | **6.91x** | full-net AMX roofline unmeasured |
 | train-step (MLP 784-128-10, b32, Adam) | this crate's own interpreted per-element dispatch floor (0.26-0.29 ns/element) | ~0.768-0.778 ms/step (composed, DERIVED) | 1.3699 ms/step (ROW 179) | **~1.77x** (DERIVED band) | whole-step MAC count is formula-derived, not counter-measured |
 | q4_K int8 dot (decode GEMV) | co-bound: kernel is at/just-over the DRAM streaming ceiling | 124.4-144.4 GMAC/s (bandwidth) | 147.72-150.60 GMAC/s (kernel, ROW 116) | **effectively closed, ~1.0x** (kernel already at ceiling; gap lives in production orchestration, 3.74-3.81x on w=1) | read-only bandwidth ceiling never independently measured |
+| q4_K GPU decode (Metal, same MAC constant) | no GPU bandwidth ceiling measured; read against incumbent's achieved rate | 416.1 GMAC/s (llama.cpp Metal achieved, ROW 193) | 124.7 GMAC/s (kernel-only, batched, ROW 193) | **3.34x under incumbent** (4.02x on full decode loop, orchestration adds ~0.7x) | GPU streaming ceiling unmeasured; per-shape numbers op-isolated, not batched |
 | BGE-small embedding (7-9 tok, LayerNorm epilogue) | unknown for the whole net; LayerNorm epilogue op itself is dispatch-floor-shaped (5.25 ns/element fused vs 32.90 ns/element interpreted) | not computable (no whole-net MAC/byte count) | 26.68 ms/sentence e2e (ROW 191) | **not computable** | architecture (layers/intermediate size), full-net MAC count, full-net bytes-moved all unrecorded |
 
 All citations above point at `proxima-tensor/docs/discipline.md`; re-derive
