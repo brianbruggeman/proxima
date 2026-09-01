@@ -33,6 +33,12 @@ config = ["std", "dep:bon", "dep:conflaguration", "dep:serde", "smallvec/serde"]
 # needs a statically-linked ggml checkout on disk. build.rs is a no-op
 # unless this feature is enabled.
 ggml-bench = ["std"]
+# `docs/discipline.md` ROW 180 dynamic-elision probe: a per-step mask-driven
+# skip-set consulted at `StaticArena` execution time, generalizing ROW 167's
+# fixed-at-bind-time dead-node skip to a set that can change every call.
+# Execution-level only -- never touches `bind::bind`'s fusion decisions.
+# Default-off until the probe's own bench proves it earns the switch.
+dynamic-elision-probe = ["std"]
 # real execution-witness counters (elements/bytes/gather-vs-affine) plus
 # per-bound-op spans over `proxima-telemetry`'s legacy Metrics/Telemetry
 # surface — default-off, no effect on the default build or the no_std+alloc
@@ -208,6 +214,11 @@ harness = false
 [[bench]]
 name = "bench_window_copy"
 harness = false
+
+[[bench]]
+name = "bench_dynamic_elision"
+harness = false
+required-features = ["dynamic-elision-probe"]
 
 [[example]]
 name = "q4k_ggml_fidelity"
