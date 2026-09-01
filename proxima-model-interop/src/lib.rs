@@ -25,6 +25,7 @@
 extern crate alloc;
 
 mod bind;
+pub mod capability;
 mod dtype;
 mod error;
 #[cfg(feature = "std")]
