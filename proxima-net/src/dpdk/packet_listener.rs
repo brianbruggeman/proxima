@@ -34,12 +34,22 @@ const BURST: usize = 32;
 const ETH: usize = 14;
 const IP: usize = 20;
 const UDP: usize = 8;
+/// Bound on the parsed-UDP-datagram queue between `poll_rx` (drains the PMD
+/// RX burst every tick) and the application's `poll_recv`. Past the mbuf
+/// boundary — a datagram here has already been copied out of its mbuf and
+/// freed back to the pool — so this is the userspace socket-receive-buffer
+/// analog, not PMD ring depth. Overflow drops the newest datagram (UDP has
+/// no flow control; a full receive buffer dropping mirrors kernel
+/// `SO_RCVBUF` overflow, not a defect) rather than growing without bound
+/// while the app falls behind.
+const RX_QUEUE_CAP: usize = 4096;
 
 struct Inner {
     _eal: Eal,
     pool: Mempool,
     port: Port,
     rx_queue: VecDeque<Packet>,
+    rx_queue_dropped: u64,
     arp: HashMap<[u8; 4], [u8; 6]>,
 }
 
@@ -86,6 +96,7 @@ impl DpdkPacketListener {
                 pool,
                 port,
                 rx_queue: VecDeque::new(),
+                rx_queue_dropped: 0,
                 arp: HashMap::new(),
             }),
             our_mac,
@@ -101,6 +112,14 @@ impl DpdkPacketListener {
     fn poll_lock(&self, cx: &mut Context<'_>) -> Poll<AsyncMutexGuard<'_, Inner>> {
         let lock_future = pin!(self.inner.lock());
         lock_future.poll(cx)
+    }
+
+    /// Count of datagrams dropped because `rx_queue` was at [`RX_QUEUE_CAP`]
+    /// — the pressure observable for that queue's `OverflowPolicy::Drop`.
+    /// Manually polls the same async gate `poll_lock` does; never blocks a
+    /// thread.
+    pub fn poll_rx_queue_dropped(&self, cx: &mut Context<'_>) -> Poll<u64> {
+        self.poll_lock(cx).map(|inner| inner.rx_queue_dropped)
     }
 }
 
@@ -123,11 +142,15 @@ impl Inner {
                         self.arp.insert(src.ip().octets(), src_mac);
                         let dst =
                             SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::from(our_ip), our_port));
-                        self.rx_queue.push_back(Packet {
-                            src: SocketAddr::V4(src),
-                            dst,
-                            data,
-                        });
+                        if self.rx_queue.len() < RX_QUEUE_CAP {
+                            self.rx_queue.push_back(Packet {
+                                src: SocketAddr::V4(src),
+                                dst,
+                                data,
+                            });
+                        } else {
+                            self.rx_queue_dropped += 1;
+                        }
                     }
                     unsafe { port::free(mbuf) };
                 }

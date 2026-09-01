@@ -32,3 +32,14 @@ headroom = 0
 # over more packets (higher throughput) but adds on-stack scratch and a little
 # latency to the first packet of a burst; must not exceed the rx ring size.
 rx_drain = 64
+
+[app]
+# Bound on the parsed-UDP-datagram queue between `poll_rx` (kernel-facing,
+# drains the XDP RX ring every tick) and the application's `poll_recv` (reads
+# one datagram at a time). This is past the UMEM frame boundary — a datagram
+# landing here has already been copied out of its frame and freed back to the
+# pool, so it is the userspace socket-receive-buffer analog, not ring depth.
+# Overflow drops the newest datagram (UDP has no flow control; a full
+# receive buffer dropping is standard `SO_RCVBUF`-overflow behavior, not a
+# defect) rather than growing without bound while the app falls behind.
+rx_queue_cap = 4096

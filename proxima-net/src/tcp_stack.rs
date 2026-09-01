@@ -58,6 +58,12 @@ struct Conn {
     iss_plus_one: u32,
     sent: u32,
     send_buf: Vec<u8>,
+    // Bounded to `OUR_WINDOW` (OverflowPolicy::Drop, RFC 793 §3.3 — a
+    // receiver is never obligated to buffer bytes beyond its own advertised
+    // window; the sender already sees that window in every segment we
+    // emit, so a delivered byte landing here at capacity means the peer
+    // sent outside the window we told it, a protocol violation on ITS
+    // side). See `recv_window_drops` for the pressure observable.
     recv: VecDeque<u8>,
     pending: BTreeMap<u32, u8>,
     deliver_seq: u32,
@@ -67,7 +73,19 @@ struct Conn {
     // the connection is reaped only once the peer's ack covers this.
     our_fin_seq: Option<u32>,
     reset: bool,
+    // pressure observable for `recv`'s OverflowPolicy::Drop.
+    recv_window_drops: u32,
 }
+
+/// Default bound on `TcpStack::accepted`/`TcpStack::connected` — one entry
+/// per connection whose handshake just completed, pending `poll_accept`/
+/// `poll_connected`. This is a sans-IO, no_std/alloc-only crate with no
+/// config-loading machinery (the backend driver owns that layer), so this
+/// is the same documented-const-as-tunable shape `proxima-quic`'s
+/// `DEFAULT_ACCEPT_CHANNEL_CAPACITY` uses. Generously above one poll cycle's
+/// worth of handshake completions; override via
+/// [`TcpStack::with_lifecycle_event_cap`].
+pub const DEFAULT_LIFECYCLE_EVENT_CAP: usize = 1024;
 
 /// A sans-IO TCP stack bound to one local `(ip, port)`.
 pub struct TcpStack {
@@ -75,13 +93,34 @@ pub struct TcpStack {
     our_port: u16,
     next_isn: u32,
     conns: BTreeMap<ConnId, Entry>,
+    // Bounded (OverflowPolicy::Drop — see `lifecycle_event_cap`'s doc): a
+    // synchronous sans-IO state machine has no async surface to block on,
+    // so the RFC 793 accept-backlog-overflow precedent applies (a listen
+    // backlog that stops draining sheds new completions rather than
+    // growing without bound). See `dropped_accepted`/`dropped_connected`
+    // for the pressure observable.
     accepted: VecDeque<ConnId>,
     connected: VecDeque<ConnId>,
+    lifecycle_event_cap: usize,
+    dropped_accepted: u32,
+    dropped_connected: u32,
 }
 
 impl TcpStack {
     #[must_use]
     pub fn new(our_ip: [u8; 4], our_port: u16, our_isn: u32) -> Self {
+        Self::with_lifecycle_event_cap(our_ip, our_port, our_isn, DEFAULT_LIFECYCLE_EVENT_CAP)
+    }
+
+    /// [`Self::new`] with an explicit bound on `accepted`/`connected`
+    /// instead of [`DEFAULT_LIFECYCLE_EVENT_CAP`].
+    #[must_use]
+    pub fn with_lifecycle_event_cap(
+        our_ip: [u8; 4],
+        our_port: u16,
+        our_isn: u32,
+        lifecycle_event_cap: usize,
+    ) -> Self {
         Self {
             our_ip,
             our_port,
@@ -89,6 +128,9 @@ impl TcpStack {
             conns: BTreeMap::new(),
             accepted: VecDeque::new(),
             connected: VecDeque::new(),
+            lifecycle_event_cap,
+            dropped_accepted: 0,
+            dropped_connected: 0,
         }
     }
 
@@ -138,6 +180,34 @@ impl TcpStack {
         match self.conns.get(&id)? {
             Entry::Handshake { peer, .. } | Entry::SynSent { peer, .. } => Some(*peer),
             Entry::Open(conn) => Some(conn.peer),
+        }
+    }
+
+    /// Count of accept notifications dropped because `accepted` was at
+    /// [`Self::with_lifecycle_event_cap`]'s bound — the pressure observable
+    /// for that queue's `OverflowPolicy::Drop`.
+    #[must_use]
+    pub fn dropped_accepted(&self) -> u32 {
+        self.dropped_accepted
+    }
+
+    /// Count of connect notifications dropped because `connected` was at
+    /// [`Self::with_lifecycle_event_cap`]'s bound — the pressure observable
+    /// for that queue's `OverflowPolicy::Drop`.
+    #[must_use]
+    pub fn dropped_connected(&self) -> u32 {
+        self.dropped_connected
+    }
+
+    /// Count of delivered bytes dropped for connection `id` because `recv`
+    /// was at the advertised window — the pressure observable for that
+    /// connection's `OverflowPolicy::Drop` (see `Conn::recv`'s doc). `None`
+    /// if `id` names no open connection.
+    #[must_use]
+    pub fn recv_window_drops(&self, id: ConnId) -> Option<u32> {
+        match self.conns.get(&id)? {
+            Entry::Open(conn) => Some(conn.recv_window_drops),
+            Entry::Handshake { .. } | Entry::SynSent { .. } => None,
         }
     }
 
@@ -216,8 +286,20 @@ impl TcpStack {
         if let Some(entry) = self.conns.get_mut(&id) {
             let (segments, lifecycle) = advance(entry, inbound, now);
             match lifecycle {
-                Lifecycle::Accepted => self.accepted.push_back(id),
-                Lifecycle::Connected => self.connected.push_back(id),
+                Lifecycle::Accepted => {
+                    if self.accepted.len() < self.lifecycle_event_cap {
+                        self.accepted.push_back(id);
+                    } else {
+                        self.dropped_accepted += 1;
+                    }
+                }
+                Lifecycle::Connected => {
+                    if self.connected.len() < self.lifecycle_event_cap {
+                        self.connected.push_back(id);
+                    } else {
+                        self.dropped_connected += 1;
+                    }
+                }
                 Lifecycle::Drop => {
                     self.conns.remove(&id);
                 }
@@ -316,6 +398,7 @@ impl Conn {
             we_finished: false,
             our_fin_seq: None,
             reset: false,
+            recv_window_drops: 0,
         }
     }
 
@@ -356,7 +439,15 @@ impl Conn {
         }
         for _ in 0..output.delivered {
             if let Some(byte) = self.pending.remove(&self.deliver_seq) {
-                self.recv.push_back(byte);
+                if self.recv.len() < usize::from(OUR_WINDOW) {
+                    self.recv.push_back(byte);
+                } else {
+                    // RFC 793 §3.3: a peer sending beyond the window WE
+                    // advertised (in every segment we emit) is the
+                    // violation, not us — drop-and-count rather than grow
+                    // `recv` unbounded.
+                    self.recv_window_drops += 1;
+                }
             }
             self.deliver_seq = self.deliver_seq.wrapping_add(1);
         }
@@ -529,6 +620,70 @@ mod tests {
         let n = stack.read(ID, &mut buf);
         assert_eq!(&buf[..n], b"GET /\n");
         assert_eq!(stack.read(ID, &mut buf), 0, "drained");
+    }
+
+    #[test]
+    fn recv_buffer_at_window_capacity_drops_and_counts_further_delivered_bytes() {
+        // arrange: an established connection whose `recv` is pre-filled to
+        // exactly `OUR_WINDOW` bytes (bypassing DataPath's own accounting by
+        // writing the private field directly — this test exercises the
+        // capacity BACKSTOP `on_segment` enforces on `recv` itself, not
+        // DataPath's window tracking).
+        let mut stack = established();
+        let _ = stack.poll_accept();
+        {
+            let Some(Entry::Open(conn)) = stack.conns.get_mut(&ID) else {
+                panic!("established connection must be Entry::Open");
+            };
+            conn.recv.resize(usize::from(OUR_WINDOW), 0);
+        }
+        assert_eq!(stack.recv_window_drops(ID), Some(0), "no drops yet");
+
+        // act: one more in-order byte arrives while `recv` is already at cap.
+        stack.on_inbound(
+            &seg(ack(), CLIENT_ISN + 1, OUR_ISN + 1, b"X"),
+            Instant::from_micros(1),
+        );
+
+        // assert: dropped and counted, not silently grown past the window.
+        assert_eq!(
+            stack.recv_window_drops(ID),
+            Some(1),
+            "byte beyond OUR_WINDOW is dropped and counted, not buffered"
+        );
+        let Some(Entry::Open(conn)) = stack.conns.get(&ID) else {
+            panic!("established connection must be Entry::Open");
+        };
+        assert_eq!(
+            conn.recv.len(),
+            usize::from(OUR_WINDOW),
+            "the queue never grew past the window it was pre-filled to"
+        );
+    }
+
+    #[test]
+    fn lifecycle_events_drop_and_count_past_the_configured_cap() {
+        // arrange: a cap of 0 means the very first accept must drop.
+        let mut stack = TcpStack::with_lifecycle_event_cap(OUR_IP, OUR_PORT, OUR_ISN, 0);
+        assert_eq!(stack.dropped_accepted(), 0);
+
+        // act: drive a full handshake to completion.
+        let out = stack.on_inbound(&seg(syn(), CLIENT_ISN, 0, &[]), Instant::ZERO);
+        assert!(out[0].1.flags.syn && out[0].1.flags.ack);
+        stack.on_inbound(&seg(ack(), CLIENT_ISN + 1, OUR_ISN + 1, &[]), Instant::ZERO);
+
+        // assert: the accept notification was dropped and counted, never
+        // silently grown past the configured cap.
+        assert_eq!(
+            stack.dropped_accepted(),
+            1,
+            "accept event beyond the cap is dropped and counted"
+        );
+        assert_eq!(
+            stack.poll_accept(),
+            None,
+            "the dropped notification never reaches poll_accept"
+        );
     }
 
     #[test]

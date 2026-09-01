@@ -114,6 +114,10 @@ fn build_xdp_sized() {
         "batch.rx_drain",
         xdp_require_nonzero("batch.rx_drain", xdp_resolve(&table, "batch", "rx_drain")),
     );
+    let rx_queue_cap = xdp_require_usize(
+        "app.rx_queue_cap",
+        xdp_require_nonzero("app.rx_queue_cap", xdp_resolve(&table, "app", "rx_queue_cap")),
+    );
 
     let out_dir =
         PathBuf::from(env::var_os("OUT_DIR").unwrap_or_else(|| panic!("OUT_DIR set by cargo")));
@@ -138,7 +142,10 @@ fn build_xdp_sized() {
          /// Extra per-frame headroom in bytes (on top of XDP_PACKET_HEADROOM).\n\
          pub const UMEM_HEADROOM: u32 = {headroom};\n\
          /// Descriptors moved per batched RX-drain ring op.\n\
-         pub const BATCH_RX_DRAIN: usize = {rx_drain};\n",
+         pub const BATCH_RX_DRAIN: usize = {rx_drain};\n\
+         /// Bound on the parsed-datagram queue between `poll_rx` and the\n\
+         /// application's `poll_recv`.\n\
+         pub const APP_RX_QUEUE_CAP: usize = {rx_queue_cap};\n",
     );
     fs::write(&out_path, generated).unwrap_or_else(|err| panic!("write sized.rs: {err}"));
 }
