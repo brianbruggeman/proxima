@@ -164,7 +164,7 @@ fn headline_pto_retransmits_handshake_flight_with_no_inbound_ever_fed_again() {
         .expect("client poll_transmit")
         .expect("client emits its Initial flight");
 
-    let (accept_tx, mut accept_rx) = mpsc::unbounded();
+    let (accept_tx, mut accept_rx) = mpsc::channel(super::DEFAULT_ACCEPT_CHANNEL_CAPACITY);
     let mut listener =
         Listener::<MockTlsProvider>::new(accept_fn_for(client_hello, server_hello), accept_tx);
 
@@ -239,7 +239,7 @@ fn accept_channel_pushes_exactly_one_handle_per_new_initial() {
         .expect("poll")
         .expect("emit");
 
-    let (accept_tx, mut accept_rx) = mpsc::unbounded();
+    let (accept_tx, mut accept_rx) = mpsc::channel(super::DEFAULT_ACCEPT_CHANNEL_CAPACITY);
     let mut listener =
         Listener::<MockTlsProvider>::new(accept_fn_for(client_hello, server_hello), accept_tx);
 
@@ -290,7 +290,7 @@ fn next_deadline_is_the_minimum_across_connections_body() {
         .expect("poll b")
         .expect("emit b");
 
-    let (accept_tx, _accept_rx) = mpsc::unbounded();
+    let (accept_tx, _accept_rx) = mpsc::channel(super::DEFAULT_ACCEPT_CHANNEL_CAPACITY);
     let mut listener =
         Listener::<MockTlsProvider>::new(accept_fn_for(hello_a, reply_a), accept_tx.clone());
 
@@ -305,7 +305,7 @@ fn next_deadline_is_the_minimum_across_connections_body() {
 
     // connection B accepted (and sent) later, at t=5_000_000 — its PTO
     // deadline is therefore strictly later than A's.
-    let (accept_tx_b, _accept_rx_b) = mpsc::unbounded();
+    let (accept_tx_b, _accept_rx_b) = mpsc::channel(super::DEFAULT_ACCEPT_CHANNEL_CAPACITY);
     let mut listener_b_only =
         Listener::<MockTlsProvider>::new(accept_fn_for(hello_b, reply_b), accept_tx_b);
     block_on(listener_b_only.on_datagram(
@@ -393,7 +393,7 @@ fn poll_transmit_drains_pending_egress_across_multiple_connections_before_none_b
         }
     });
 
-    let (accept_tx, mut accept_rx) = mpsc::unbounded();
+    let (accept_tx, mut accept_rx) = mpsc::channel(super::DEFAULT_ACCEPT_CHANNEL_CAPACITY);
     let mut listener = Listener::<MockTlsProvider>::new(accept_fn, accept_tx);
     let core_now = core_instant(origin);
     let peer_a = peer_addr(20);
@@ -452,7 +452,7 @@ fn second_client_datagram_routes_to_the_existing_connection_not_a_new_one_body()
         .expect("poll")
         .expect("emit");
 
-    let (accept_tx, mut accept_rx) = mpsc::unbounded();
+    let (accept_tx, mut accept_rx) = mpsc::channel(super::DEFAULT_ACCEPT_CHANNEL_CAPACITY);
     let mut listener =
         Listener::<MockTlsProvider>::new(accept_fn_for(client_hello, server_hello), accept_tx);
     let core_now = core_instant(origin);
@@ -771,7 +771,7 @@ fn second_initial_still_addressed_to_the_clients_own_dcid_routes_to_the_existing
         .expect("poll")
         .expect("emit");
 
-    let (accept_tx, mut accept_rx) = mpsc::unbounded();
+    let (accept_tx, mut accept_rx) = mpsc::channel(super::DEFAULT_ACCEPT_CHANNEL_CAPACITY);
     let mut listener =
         Listener::<MockTlsProvider>::new(accept_fn_for(client_hello, server_hello), accept_tx);
     let core_now = core_instant(origin);
@@ -863,7 +863,7 @@ fn unsupported_version_datagram_queues_a_vn_reply_drained_first_by_transmit() {
     datagram[scid_len_offset + 1..scid_len_offset + 1 + peer_scid.len()]
         .copy_from_slice(&peer_scid);
 
-    let (accept_tx, _accept_rx) = mpsc::unbounded();
+    let (accept_tx, _accept_rx) = mpsc::channel(super::DEFAULT_ACCEPT_CHANNEL_CAPACITY);
     let accept_fn: AcceptFn<MockTlsProvider> =
         accept_fn_for(b"unused".to_vec(), b"unused".to_vec());
     let mut listener = Listener::<MockTlsProvider>::new(accept_fn, accept_tx);
@@ -942,7 +942,7 @@ fn ingest_datagram_return_names_the_accepted_then_the_existing_handle_body() {
         .expect("poll")
         .expect("emit");
 
-    let (accept_tx, mut accept_rx) = mpsc::unbounded();
+    let (accept_tx, mut accept_rx) = mpsc::channel(super::DEFAULT_ACCEPT_CHANNEL_CAPACITY);
     let mut listener =
         Listener::<MockTlsProvider>::new(accept_fn_for(client_hello, server_hello), accept_tx);
     let core_now = core_instant(origin);
@@ -1078,7 +1078,7 @@ fn connection_level_protocol_error_closes_that_connection_surfaces_telemetry_and
         Connection::<MockTlsProvider>::new_server(config, b"", dcid, scid, local_scid, now)
     });
 
-    let (accept_tx, mut accept_rx) = mpsc::unbounded();
+    let (accept_tx, mut accept_rx) = mpsc::channel(super::DEFAULT_ACCEPT_CHANNEL_CAPACITY);
     let mut listener = Listener::<MockTlsProvider>::new(accept_fn, accept_tx);
 
     let handle_a = match listener

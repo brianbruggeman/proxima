@@ -72,9 +72,11 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use futures::FutureExt;
+use futures::SinkExt;
 use futures::channel::oneshot;
 use futures::future::Either;
 use futures::stream::{FuturesUnordered, StreamExt};
+use proxima_telemetry::metric::Counter;
 use proxima_telemetry::{debug, warn};
 use serde_json::Value;
 use std::future::poll_fn;
@@ -114,6 +116,17 @@ const H3_CLOSED_CRITICAL_STREAM: u64 = 0x0104;
 /// RFC 9204 §8.3 — decoder failed to interpret an encoded field section.
 #[cfg(feature = "http3-part-source")]
 const QPACK_DECOMPRESSION_FAILED: u64 = 0x0200;
+
+/// Counts every async in-flight-handler response that found `response_tx`
+/// full and had to pend on the bounded `send` — the pressure observable for
+/// that producer's `OverflowPolicy::Block` (see `process_h3_events`).
+static RESPONSE_CHANNEL_PRESSURE: Counter =
+    Counter::new("proxima_http.h3_native.response_channel_pressure");
+/// Counts every synchronous header-decode-failure result dropped because
+/// `response_tx` was full — the pressure observable for that producer's
+/// `OverflowPolicy::Drop` (see `process_h3_events`; that path cannot await).
+static RESPONSE_CHANNEL_DROPPED: Counter =
+    Counter::new("proxima_http.h3_native.response_channel_dropped");
 
 /// Short, structured close reason for the wire — keeps the close
 /// frame small (RFC 9000 §19.19 caps reason at ~1200 bytes; we
@@ -234,6 +247,20 @@ where
             .get("part_source")
             .and_then(Value::as_bool)
             .unwrap_or(false);
+        // Bound on the accept-notification channel (see its construction
+        // below for the OverflowPolicy::Drop rationale). Matches this
+        // module's own `crate::http3::native::config::ServerConfig` default.
+        let accept_channel_capacity = spec
+            .get("accept_channel_capacity")
+            .and_then(Value::as_u64)
+            .map(|raw| raw.max(1) as usize)
+            .unwrap_or(super::config::default_accept_channel_capacity());
+        // Bound on the dispatch-result channel (see its construction below).
+        let response_channel_capacity = spec
+            .get("response_channel_capacity")
+            .and_then(Value::as_u64)
+            .map(|raw| raw.max(1) as usize)
+            .unwrap_or(super::config::default_response_channel_capacity());
         // Runtime-agnostic IO: the UDP socket comes from the runtime's datagram
         // factory (the UDP sibling of the TCP AcceptorFactory path) and the 1 ms
         // tick from `proxima_core::time::sleep` — the listener names neither prime nor
@@ -284,16 +311,28 @@ where
                     },
                 )
             };
+            // Bounded (OverflowPolicy::Drop): `Listener::ingest_datagram` is
+            // sans-IO/synchronous, so it cannot await capacity. A dropped
+            // notification does not orphan the connection — this loop's
+            // `drive_dirty_connections` self-heals `h3_state` off the SAME
+            // `dirty` set `ingest_datagram` already populates (see its own
+            // doc), so the accept channel is a latency optimization, never a
+            // correctness dependency; a drop costs at most one extra tick.
             let (accept_tx, mut accept_rx) =
-                futures::channel::mpsc::unbounded::<ConnectionHandle>();
+                futures::channel::mpsc::channel::<ConnectionHandle>(accept_channel_capacity);
             let mut listener = Listener::<RustlsServerProvider>::new(accept_fn, accept_tx);
             // H3-level bookkeeping, keyed by the SAME `ConnectionHandle.0`
             // the listener hands out — the shared-key join between the
             // QUIC-only transport and this module's H3-only state.
             let mut h3_state: BTreeMap<u32, PerConnection> = BTreeMap::new();
 
+            // Bounded (OverflowPolicy::Block for the async in-flight-handler
+            // producer at `process_h3_events`'s `in_flight.push`; Drop for
+            // the synchronous header-decode-failure producer in the same
+            // function — see their own doc comments for why the two
+            // producers of this one channel need different policies).
             let (response_tx, mut response_rx) =
-                futures::channel::mpsc::unbounded::<DispatchResult>();
+                futures::channel::mpsc::channel::<DispatchResult>(response_channel_capacity);
             // handler futures driven cooperatively in the serve loop — no
             // tokio::spawn, no runtime coupling. Send so the serve future
             // (which must be Send) stays Send; dispatch.call_dyn is Send.
@@ -472,6 +511,7 @@ where
                     &dispatch,
                     &response_tx,
                     &mut in_flight,
+                    part_source_mode,
                 );
 
                 // 2b) Drive ready response handlers to completion NOW so their
@@ -611,8 +651,9 @@ fn drive_dirty_connections(
     h3_state: &mut BTreeMap<u32, PerConnection>,
     dirty: &std::collections::BTreeSet<u32>,
     dispatch: &PipeHandle,
-    response_tx: &futures::channel::mpsc::UnboundedSender<DispatchResult>,
+    response_tx: &futures::channel::mpsc::Sender<DispatchResult>,
     in_flight: &mut FuturesUnordered<Pin<Box<dyn Future<Output = ()> + Send>>>,
+    part_source_mode: bool,
 ) {
     for &handle_id in dirty {
         let Some(connection) = listener.connection_mut(ConnectionHandle(handle_id)) else {
@@ -621,9 +662,17 @@ fn drive_dirty_connections(
         if !matches!(connection.state(), ConnectionState::Established(_)) {
             continue;
         }
-        let Some(driver) = h3_state.get_mut(&handle_id) else {
-            continue;
-        };
+        // `h3_state` is normally seeded off `accept_rx` (see the recv arm
+        // above); the accept channel is now bounded (`OverflowPolicy::Drop`
+        // — see its own doc) so a dropped notification must not orphan an
+        // already-established connection. Self-heal here: `dirty` already
+        // named this handle off the SAME `ingest_datagram` return the accept
+        // notification would have carried, so seeding it here on a miss
+        // makes the accept channel a pure latency optimization, never a
+        // correctness dependency.
+        let driver = h3_state
+            .entry(handle_id)
+            .or_insert_with(|| PerConnection::new(part_source_mode));
         if let Err(err) = drive_server_step(connection, &mut driver.h3, &mut driver.driver_state) {
             // RFC 9114 requires connection-level errors to surface as
             // CONNECTION_CLOSE on the wire. close() transitions to
@@ -765,7 +814,7 @@ fn process_h3_events(
     handle: ConnectionHandle,
     driver: &mut PerConnection,
     dispatch: &PipeHandle,
-    response_tx: &futures::channel::mpsc::UnboundedSender<DispatchResult>,
+    response_tx: &futures::channel::mpsc::Sender<DispatchResult>,
     in_flight: &mut FuturesUnordered<Pin<Box<dyn Future<Output = ()> + Send>>>,
 ) -> Result<(), ProximaError> {
     #[cfg(feature = "http3-part-source")]
@@ -835,17 +884,32 @@ fn process_h3_events(
             match build_request_from_h3(&headers, body) {
                 Ok(req) => req,
                 Err(err) => {
-                    let _ = response_tx.unbounded_send(DispatchResult {
-                        connection_handle: handle.0,
-                        stream_id,
-                        response: Err(err),
-                    });
+                    // Synchronous context (`process_h3_events` is called
+                    // directly from the main serve loop, not from a
+                    // separately-polled future): the only consumer of
+                    // `response_tx` is THIS SAME loop, later in the same
+                    // iteration, so an awaiting `send` here would deadlock
+                    // (nothing else would ever drain it). Drop-and-count
+                    // instead — the stream still reaps on connection
+                    // close/idle-timeout rather than stalling the whole
+                    // multiplexed connection.
+                    if response_tx
+                        .clone()
+                        .try_send(DispatchResult {
+                            connection_handle: handle.0,
+                            stream_id,
+                            response: Err(err),
+                        })
+                        .is_err()
+                    {
+                        RESPONSE_CHANNEL_DROPPED.add(1, &[]);
+                    }
                     continue;
                 }
             }
         };
         let dispatch = dispatch.clone();
-        let response_tx = response_tx.clone();
+        let mut response_tx = response_tx.clone();
         let connection_handle = handle.0;
         in_flight.push(Box::pin(async move {
             let response = match dispatch.call_dyn(request).await {
@@ -880,11 +944,23 @@ fn process_h3_events(
                 }
                 Err(err) => Err(err),
             };
-            let _ = response_tx.unbounded_send(DispatchResult {
+            // Async context, cooperatively polled by `in_flight` in the
+            // SAME serve loop that drains `response_rx` every tick: a
+            // pending `send` here just yields back to the executor, which
+            // resumes this loop and drains a slot. Never a deadlock —
+            // `try_send` first (the common case), `send().await` (recording
+            // the pressure observable) only on `Full`.
+            let result = DispatchResult {
                 connection_handle,
                 stream_id,
                 response,
-            });
+            };
+            if let Err(err) = response_tx.try_send(result)
+                && err.is_full()
+            {
+                RESPONSE_CHANNEL_PRESSURE.add(1, &[]);
+                let _ = response_tx.send(err.into_inner()).await;
+            }
         }));
     }
     Ok(())
