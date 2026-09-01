@@ -176,6 +176,7 @@ workspace = true
 [dev-dependencies]
 criterion = { workspace = true }
 libc.workspace = true
+proptest.workspace = true
 proxima = { workspace = true, features = ["test-support"] }
 # self-reference: pulls in `test_support` (feature-gated, see [features]
 # above) for this crate's own examples/tests/benches without exposing it to
