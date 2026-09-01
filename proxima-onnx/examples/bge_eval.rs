@@ -70,6 +70,31 @@ fn cosine(a: &[f32], b: &[f32]) -> f32 {
     a.iter().zip(b.iter()).map(|(&x, &y)| x * y).sum()
 }
 
+/// `docs/discipline.md` ROW 190's own measurement harness: runs the full
+/// sentence set once with the `LayerNorm` epilogue fusion at whatever state
+/// `proxima_tensor::cpu::set_epilogue_fuse_enabled` last left it, returning
+/// per-sentence eval durations, the fusion engagement counters
+/// (`epilogue_fuse_totals`, reset first so this call's own count is
+/// isolated), and the resulting embeddings for a bit-identity/cosine
+/// comparison between the fused and unfused arms.
+fn run_pass(graph: &proxima_onnx::messages::GraphProto<'_>, items: &[(&str, Vec<i64>)]) -> (Vec<std::time::Duration>, Vec<Vec<f32>>, (u64, u64, u64)) {
+    proxima_tensor::cpu::epilogue_fuse_reset();
+    let mut durations = Vec::new();
+    let mut embeddings = Vec::new();
+    for (_, tokens) in items {
+        let mut pins = std::collections::BTreeMap::new();
+        pins.insert("batch_size", 1u64);
+        pins.insert("sequence_length", tokens.len() as u64);
+        let lowered = proxima_onnx::lower::lower_graph_pinned(graph, &pins).expect("lower BGE-small with pinned symbolic axes");
+        let output = lowered.graph_outputs.first().expect("last_hidden_state output").1;
+        let eval_start = Instant::now();
+        let embedding = embed(&lowered.program, &lowered.graph_inputs, &lowered.initializers, output, tokens);
+        durations.push(eval_start.elapsed());
+        embeddings.push(embedding);
+    }
+    (durations, embeddings, proxima_tensor::cpu::epilogue_fuse_totals())
+}
+
 fn main() {
     let Ok(model_path) = env::var(MODEL_PATH_ENV) else {
         eprintln!("skipping: set {MODEL_PATH_ENV} to a local BGE-small-en-v1.5 model.onnx checkout");
@@ -84,37 +109,62 @@ fn main() {
     let graph = model.graph.as_ref().expect("graph");
 
     let items = sentences();
-    let mut embeddings: Vec<Vec<f32>> = Vec::new();
-    let mut total_elapsed = std::time::Duration::ZERO;
+    let runs: usize = env::var("BGE_EVAL_RUNS").ok().and_then(|value| value.parse().ok()).unwrap_or(5);
 
-    for (text, tokens) in &items {
-        let mut pins = std::collections::BTreeMap::new();
-        pins.insert("batch_size", 1u64);
-        pins.insert("sequence_length", tokens.len() as u64);
+    let mut fused_run_means = Vec::new();
+    let mut unfused_run_means = Vec::new();
+    let mut fused_embeddings_last = Vec::new();
+    let mut unfused_embeddings_last = Vec::new();
+    let mut fused_totals = (0u64, 0u64, 0u64);
 
-        let lower_start = Instant::now();
-        let lowered = proxima_onnx::lower::lower_graph_pinned(graph, &pins).expect("lower BGE-small with pinned symbolic axes");
-        let lower_elapsed = lower_start.elapsed();
+    for run in 0..runs {
+        proxima_tensor::cpu::set_epilogue_fuse_enabled(true);
+        let (durations, embeddings, totals) = run_pass(graph, &items);
+        let mean: std::time::Duration = durations.iter().sum::<std::time::Duration>() / durations.len() as u32;
+        println!("run {run} fused: per-sentence={durations:?} mean={mean:?} fuse_hits={} fuse_elements={} fuse_nanos={}", totals.0, totals.1, totals.2);
+        fused_run_means.push(mean.as_secs_f64() * 1000.0);
+        fused_embeddings_last = embeddings;
+        fused_totals = totals;
 
-        let output = lowered.graph_outputs.first().expect("last_hidden_state output").1;
-
-        let eval_start = Instant::now();
-        let embedding = embed(&lowered.program, &lowered.graph_inputs, &lowered.initializers, output, tokens);
-        let eval_elapsed = eval_start.elapsed();
-        total_elapsed += eval_elapsed;
-
-        println!("{text:?}: tokens={} lower={:?} eval={:?} dims={} finite={}", tokens.len(), lower_elapsed, eval_elapsed, embedding.len(), embedding.iter().all(|value| value.is_finite()));
-        embeddings.push(embedding);
+        proxima_tensor::cpu::set_epilogue_fuse_enabled(false);
+        let (durations, embeddings, totals) = run_pass(graph, &items);
+        let mean: std::time::Duration = durations.iter().sum::<std::time::Duration>() / durations.len() as u32;
+        println!("run {run} unfused: per-sentence={durations:?} mean={mean:?} fuse_hits={} fuse_elements={} fuse_nanos={}", totals.0, totals.1, totals.2);
+        unfused_run_means.push(mean.as_secs_f64() * 1000.0);
+        unfused_embeddings_last = embeddings;
+        proxima_tensor::cpu::set_epilogue_fuse_enabled(true);
     }
 
-    let similar = cosine(&embeddings[0], &embeddings[1]);
-    let dissimilar_a = cosine(&embeddings[0], &embeddings[2]);
-    let dissimilar_b = cosine(&embeddings[1], &embeddings[2]);
+    let bit_identical = fused_embeddings_last.len() == unfused_embeddings_last.len()
+        && fused_embeddings_last.iter().zip(unfused_embeddings_last.iter()).all(|(fused, unfused)| fused.len() == unfused.len() && fused.iter().zip(unfused.iter()).all(|(&left, &right)| left.to_bits() == right.to_bits()));
+
+    let fused_mean = fused_run_means.iter().sum::<f64>() / fused_run_means.len() as f64;
+    let fused_cov = coefficient_of_variation(&fused_run_means, fused_mean);
+    let unfused_mean = unfused_run_means.iter().sum::<f64>() / unfused_run_means.len() as f64;
+    let unfused_cov = coefficient_of_variation(&unfused_run_means, unfused_mean);
+
+    println!("=== ROW 190 summary ===");
+    println!("runs={runs}");
+    println!("fused engagement (last run): hits={} elements={} nanos={}", fused_totals.0, fused_totals.1, fused_totals.2);
+    println!("fused mean per-sentence ms across runs: {fused_run_means:?} mean={fused_mean:.4} CoV={fused_cov:.4}");
+    println!("unfused mean per-sentence ms across runs: {unfused_run_means:?} mean={unfused_mean:.4} CoV={unfused_cov:.4}");
+    println!("bit_identical(fused vs unfused, last run's embeddings)={bit_identical}");
+
+    let similar = cosine(&fused_embeddings_last[0], &fused_embeddings_last[1]);
+    let dissimilar_a = cosine(&fused_embeddings_last[0], &fused_embeddings_last[2]);
+    let dissimilar_b = cosine(&fused_embeddings_last[1], &fused_embeddings_last[2]);
     println!("cosine(A,B similar)={similar:.6}");
     println!("cosine(A,C dissimilar)={dissimilar_a:.6}");
     println!("cosine(B,C dissimilar)={dissimilar_b:.6}");
-    println!("mean wall-clock per inference (eval only, 3 runs): {:?}", total_elapsed / 3);
     assert!(similar > dissimilar_a, "similar pair should score higher than dissimilar pair A");
     assert!(similar > dissimilar_b, "similar pair should score higher than dissimilar pair B");
     println!("sanity check passed: similar sentence pair scores higher than dissimilar pairs");
+}
+
+fn coefficient_of_variation(samples: &[f64], mean: f64) -> f64 {
+    if samples.len() < 2 || mean == 0.0 {
+        return 0.0;
+    }
+    let variance = samples.iter().map(|&value| (value - mean).powi(2)).sum::<f64>() / samples.len() as f64;
+    variance.sqrt() / mean
 }
