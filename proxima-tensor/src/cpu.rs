@@ -496,6 +496,23 @@ pub struct StaticArena {
     /// node it deleted or the sibling that regressed once it was gone
     /// existed as candidates to remove.
     dead: BTreeSet<NodeId>,
+    /// `resolved` nodes whose [`BoundOpKind`] is `Constant` or `Iota` —
+    /// `docs/discipline.md` ROW 174's own found lever: a `Constant`'s value
+    /// is a literal baked into the `BoundOp` at `bind::bind` time
+    /// (`run_constant`'s whole body is `output.fill(value)`, no operand
+    /// read) and an `Iota`'s output is derived purely from its own position
+    /// in `BoundOp::extents` (`run_iota`, also no operand read) — both are
+    /// call-invariant by construction, since neither `BoundOpKind::operands()`
+    /// entry exists for either variant (`bind.rs`'s own `operands()` match
+    /// returns `&[]` for `Iota | Constant`). Run once inside
+    /// `build_static_arena`, then skipped forever by
+    /// `run_resolved_nodes_in_arena`, the same "computed once, cheap to
+    /// consult" shape `dead` above already uses. Never overlaps `dead`: a
+    /// node here is either a requested output (kept, still run once) or
+    /// consumed by a live sibling (kept, still run once) — `dead_resolved_nodes`
+    /// only drops nodes with zero consumers and no output membership, which
+    /// this field does not gate on.
+    static_nodes: BTreeSet<NodeId>,
 }
 
 /// Every node `resolved` physically reads, straight off [`BoundOp::operands()`]
@@ -529,6 +546,20 @@ fn dead_resolved_nodes(resolved: &[BoundOp], effective_outputs: &[NodeId]) -> BT
         .iter()
         .map(|computed| computed.node)
         .filter(|node| !consumed.contains(node) && !effective_outputs.contains(node))
+        .collect()
+}
+
+/// `StaticArena::static_nodes` documents: every LIVE `resolved` node whose
+/// [`BoundOpKind`] is `Constant` or `Iota` — excludes anything already in
+/// `dead` (no reason to run a dead constant even once) since callers pass
+/// `dead` alongside this set to build the union `run_resolved_nodes_in_arena`
+/// skips. See `docs/discipline.md` ROW 174.
+fn static_resolved_nodes(resolved: &[BoundOp], dead: &BTreeSet<NodeId>) -> BTreeSet<NodeId> {
+    resolved
+        .iter()
+        .filter(|computed| matches!(computed.kind, BoundOpKind::Constant { .. } | BoundOpKind::Iota))
+        .map(|computed| computed.node)
+        .filter(|node| !dead.contains(node))
         .collect()
 }
 
@@ -582,6 +613,20 @@ pub fn build_static_arena(program: &[Op], symbols: &[u64], outputs: &[NodeId]) -
         buffers[computed.node.0 as usize] = Some(vec![0.0f32; node_output_len(computed)]);
     }
     let dead = dead_resolved_nodes(&resolved, &effective_outputs);
+    let static_nodes = static_resolved_nodes(&resolved, &dead);
+
+    for computed in &resolved {
+        if !static_nodes.contains(&computed.node) {
+            continue;
+        }
+        let node_index = computed.node.0 as usize;
+        let mut output = buffers[node_index].take().ok_or(TensorError::NotLowerable {
+            node: computed.node,
+            reason: "static arena has no pre-sized slot for this resolved node -- build_static_arena did not size it",
+        })?;
+        run_node_into(computed, &buffers, None, None, &mut output)?;
+        buffers[node_index] = Some(output);
+    }
 
     Ok(StaticArena {
         resolved,
@@ -591,6 +636,7 @@ pub fn build_static_arena(program: &[Op], symbols: &[u64], outputs: &[NodeId]) -
         input_names,
         buffers,
         dead,
+        static_nodes,
     })
 }
 
@@ -659,7 +705,7 @@ fn bind_named_inputs_into_arena(arena: &mut StaticArena, named: &[(&str, &[f32])
 /// identical execution path rather than a second copy of it.
 fn run_resolved_nodes_in_arena(arena: &mut StaticArena) -> Result<(), TensorError> {
     for computed in &arena.resolved {
-        if arena.dead.contains(&computed.node) {
+        if arena.dead.contains(&computed.node) || arena.static_nodes.contains(&computed.node) {
             continue;
         }
         let node_index = computed.node.0 as usize;
@@ -14306,6 +14352,94 @@ mod tests {
             "the now-requested node must actually compute, bit-identical to the non-eliding baseline"
         );
         assert_eq!(evaluated.get(dead).map(|(data, _)| data.to_vec()), Some(vec![10.0, 40.0, 90.0, 160.0]));
+    }
+
+    /// A one-input program with a `Constant` feeding a live `Add` --
+    /// `docs/discipline.md` ROW 174's own found lever: `c`'s value is baked
+    /// into its `BoundOp` at `bind::bind` time and never depends on `a`.
+    fn constant_feeds_live_program() -> (Vec<Op>, NodeId, NodeId, NodeId) {
+        let mut program = Vec::new();
+        let a = append(
+            &mut program,
+            Op::Input { dtype: DType::Float32, shape: vec![Extent::Static(4)], name: Some(String::from("a")) },
+        );
+        let constant = append(
+            &mut program,
+            Op::Constant { dtype: DType::Float32, shape: vec![Extent::Static(4)], value: 5.0 },
+        );
+        let live = append(
+            &mut program,
+            Op::Elementwise {
+                dtype: DType::Float32,
+                body: ScalarOp::Add,
+                operands: vec![
+                    (a, IndexMap::Affine(map::projection(1, &[0]))),
+                    (constant, IndexMap::Affine(map::projection(1, &[0]))),
+                ],
+                name: None,
+            },
+        );
+        (program, a, constant, live)
+    }
+
+    /// [`build_static_arena`] marks a live `Constant` (`bind::bind`'s own
+    /// `BoundOpKind::Constant` -- no operands, no dependence on `named` at
+    /// all) as one of its `static_nodes` and runs it exactly once, at build
+    /// time -- never again on any subsequent [`evaluate_named_with_arena`]
+    /// call, proven here by corrupting the constant's own resident buffer
+    /// between steps: if `run_resolved_nodes_in_arena` still executed it,
+    /// `run_constant`'s `output.fill(value)` would overwrite the corruption
+    /// back to the literal on the very next step. It does not.
+    #[test]
+    fn build_static_arena_runs_a_live_constant_once_and_never_again() {
+        let (program, _a, constant, live) = constant_feeds_live_program();
+        let mut arena = build_static_arena(&program, &[], &[live]).expect("constant-feeds-live program builds a static arena");
+        assert!(arena.static_nodes.contains(&constant), "a live Constant-kind node must be marked static");
+        assert!(!arena.dead.contains(&constant), "a consumed Constant must never also be marked dead");
+
+        let step_one = [1.0f32, 2.0, 3.0, 4.0];
+        let evaluated = evaluate_named_with_arena(&mut arena, &[("a", &step_one)]).expect("step one evaluates");
+        assert_eq!(evaluated.get(live).map(|(data, _)| data.to_vec()), Some(vec![6.0, 7.0, 8.0, 9.0]), "a + the constant's own literal 5.0, computed once at build time");
+        assert_eq!(arena_output(&arena, constant), Some([5.0f32; 4].as_slice()), "the constant's own buffer holds its literal after step one");
+
+        arena.buffers[constant.0 as usize] = Some(alloc::vec![999.0f32; 4]);
+
+        let step_two = [10.0f32, 20.0, 30.0, 40.0];
+        let evaluated = evaluate_named_with_arena(&mut arena, &[("a", &step_two)]).expect("step two evaluates");
+        assert_eq!(
+            evaluated.get(live).map(|(data, _)| data.to_vec()),
+            Some(vec![1009.0, 1019.0, 1029.0, 1039.0]),
+            "step two must fold the CORRUPTED buffer, not the literal -- proving run_resolved_nodes_in_arena truly never re-executed the constant"
+        );
+        assert_eq!(arena_output(&arena, constant), Some([999.0f32; 4].as_slice()), "the corruption survives step two untouched");
+
+        let step_three = [0.0f32, 0.0, 0.0, 0.0];
+        let evaluated = evaluate_named_with_arena(&mut arena, &[("a", &step_three)]).expect("step three evaluates");
+        assert_eq!(
+            evaluated.get(live).map(|(data, _)| data.to_vec()),
+            Some(vec![999.0, 999.0, 999.0, 999.0]),
+            "a third arena step, still folding the same corrupted, never-recomputed buffer"
+        );
+    }
+
+    /// The other half of ROW 174's same contract, mirroring
+    /// [`build_static_arena_does_not_elide_a_dead_node_that_is_also_a_requested_output`]:
+    /// a `Constant` with zero consumers lands in `dead`, not `static_nodes`
+    /// -- `static_resolved_nodes` excludes anything `dead_resolved_nodes`
+    /// already marked, so a dead constant is never even run the one time
+    /// `static_nodes` would otherwise cost.
+    #[test]
+    fn a_dead_constant_is_marked_dead_not_static() {
+        let (mut program, _a, constant, live) = constant_feeds_live_program();
+        let dead_constant = append(
+            &mut program,
+            Op::Constant { dtype: DType::Float32, shape: vec![Extent::Static(4)], value: 42.0 },
+        );
+
+        let arena = build_static_arena(&program, &[], &[live]).expect("program with an unused constant builds a static arena");
+        assert!(arena.dead.contains(&dead_constant), "a zero-consumer Constant must be marked dead");
+        assert!(!arena.static_nodes.contains(&dead_constant), "a dead Constant must not also be marked static -- dead already skips it");
+        assert!(arena.static_nodes.contains(&constant), "the live constant is unaffected by its dead sibling");
     }
 
     /// A `named` binding whose length no longer matches the shape
