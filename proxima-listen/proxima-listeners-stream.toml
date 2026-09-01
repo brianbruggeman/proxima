@@ -27,3 +27,10 @@ method = "STREAM"
 path = "/"
 # Read-buffer chunk size (bytes) used to stream a connection's body.
 chunk_bytes = 65536
+# Bound on in-flight "connection finished, awaiting release" notifications on
+# the admission-release channel (one per connection, sent once at handler
+# exit). Overflow blocks the finishing connection's task until the accept
+# loop drains a slot (OverflowPolicy::Block) — the accept loop is the only
+# consumer and always makes progress, so this never deadlocks; it only caps
+# worst-case queue memory under a release burst.
+release_channel_capacity = 4096

@@ -42,6 +42,10 @@ fn default_chunk_bytes() -> usize {
     super::sized::LISTENER_CHUNK_BYTES_DEFAULT
 }
 
+fn default_release_channel_capacity() -> usize {
+    super::sized::LISTENER_RELEASE_CHANNEL_CAPACITY_DEFAULT
+}
+
 /// Runtime configuration for [`super::StreamListenerProtocol`] /
 /// [`super::StreamListenProtocol`]. One built `ListenerStreamConfig` == one
 /// serialisable config == one stream-listener default policy.
@@ -72,6 +76,18 @@ pub struct ListenerStreamConfig {
     #[serde(default = "default_chunk_bytes")]
     #[builder(default = default_chunk_bytes())]
     pub chunk_bytes: usize,
+
+    /// Bound on in-flight "connection finished, awaiting release" notifications
+    /// on the admission-release channel: one message per connection, sent once
+    /// at handler exit. Overflow blocks the finishing connection's task until
+    /// the accept loop (the sole consumer, always making progress) drains a
+    /// slot — never a silent drop. Defaults from
+    /// `proxima-listeners-stream.toml`'s `[listener] release_channel_capacity`
+    /// (the `sized` floor).
+    #[setting(default = 4096)]
+    #[serde(default = "default_release_channel_capacity")]
+    #[builder(default = default_release_channel_capacity())]
+    pub release_channel_capacity: usize,
 }
 
 impl Default for ListenerStreamConfig {
@@ -92,6 +108,12 @@ impl Validate for ListenerStreamConfig {
         if self.chunk_bytes == 0 {
             errors.push(ValidationMessage::new("chunk_bytes", "must be > 0"));
         }
+        if self.release_channel_capacity == 0 {
+            errors.push(ValidationMessage::new(
+                "release_channel_capacity",
+                "must be > 0",
+            ));
+        }
         if errors.is_empty() {
             Ok(())
         } else {
@@ -109,6 +131,7 @@ impl ListenerStreamConfig {
             method_set: false,
             path_set: false,
             chunk_bytes_set: false,
+            release_channel_capacity_set: false,
         }
     }
 }
@@ -121,6 +144,7 @@ struct ListenerStreamConfigPartial {
     method: Option<String>,
     path: Option<String>,
     chunk_bytes: Option<usize>,
+    release_channel_capacity: Option<usize>,
 }
 
 /// Fluent builder for [`ListenerStreamConfig`]. Every source (`.from_path`,
@@ -135,6 +159,7 @@ pub struct ListenerStreamLayerBuilder {
     method_set: bool,
     path_set: bool,
     chunk_bytes_set: bool,
+    release_channel_capacity_set: bool,
 }
 
 impl ListenerStreamLayerBuilder {
@@ -153,6 +178,10 @@ impl ListenerStreamLayerBuilder {
         if let Some(chunk_bytes) = partial.chunk_bytes {
             self.inner.chunk_bytes = chunk_bytes;
             self.chunk_bytes_set = true;
+        }
+        if let Some(release_channel_capacity) = partial.release_channel_capacity {
+            self.inner.release_channel_capacity = release_channel_capacity;
+            self.release_channel_capacity_set = true;
         }
         Ok(self)
     }
@@ -179,6 +208,12 @@ impl ListenerStreamLayerBuilder {
             self.inner.chunk_bytes = chunk_bytes;
             self.chunk_bytes_set = true;
         }
+        if !self.release_channel_capacity_set
+            && let Some(release_channel_capacity) = partial.release_channel_capacity
+        {
+            self.inner.release_channel_capacity = release_channel_capacity;
+            self.release_channel_capacity_set = true;
+        }
         Ok(self)
     }
 
@@ -199,6 +234,10 @@ impl ListenerStreamLayerBuilder {
             self.inner.chunk_bytes = resolved.chunk_bytes;
             self.chunk_bytes_set = true;
         }
+        if env_is_set("STREAM_LISTENER_RELEASE_CHANNEL_CAPACITY") {
+            self.inner.release_channel_capacity = resolved.release_channel_capacity;
+            self.release_channel_capacity_set = true;
+        }
         Ok(self)
     }
 
@@ -218,6 +257,12 @@ impl ListenerStreamLayerBuilder {
         if !self.chunk_bytes_set && env_is_set("STREAM_LISTENER_CHUNK_BYTES") {
             self.inner.chunk_bytes = resolved.chunk_bytes;
             self.chunk_bytes_set = true;
+        }
+        if !self.release_channel_capacity_set
+            && env_is_set("STREAM_LISTENER_RELEASE_CHANNEL_CAPACITY")
+        {
+            self.inner.release_channel_capacity = resolved.release_channel_capacity;
+            self.release_channel_capacity_set = true;
         }
         Ok(self)
     }
@@ -245,6 +290,14 @@ impl ListenerStreamLayerBuilder {
     pub fn with_chunk_bytes(mut self, chunk_bytes: usize) -> Self {
         self.inner.chunk_bytes = chunk_bytes.max(1);
         self.chunk_bytes_set = true;
+        self
+    }
+
+    /// Set the bound on in-flight connection-release notifications.
+    #[must_use]
+    pub fn with_release_channel_capacity(mut self, release_channel_capacity: usize) -> Self {
+        self.inner.release_channel_capacity = release_channel_capacity.max(1);
+        self.release_channel_capacity_set = true;
         self
     }
 
