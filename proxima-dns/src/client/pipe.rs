@@ -19,9 +19,9 @@ use proxima_primitives::pipe::SendPipe;
 use proxima_primitives::stream::DatagramFactory;
 
 use crate::client::config::DnsResolverConfig;
-use crate::client::session::{decode_response, encode_query};
+use crate::client::session::{decode_response_with_metadata, encode_query};
 use crate::error::DnsClientError;
-use crate::pipes::{DnsAnswer, DnsPipeReply, DnsPipeRequest, DnsQuery};
+use crate::pipes::{DnsAnswer, DnsAnswerWithMetadata, DnsPipeReply, DnsPipeRequest, DnsQuery};
 
 /// Receive-buffer size for one UDP reply. 4096 bytes covers every
 /// EDNS0-negotiated response a stub resolver client advertises in
@@ -91,6 +91,18 @@ impl DnsClientUpstream {
         qtype: u16,
         qclass: u16,
     ) -> Result<DnsAnswer, DnsClientError> {
+        Ok(self.query_with_metadata(name, qtype, qclass).await?.answer)
+    }
+
+    /// Send one query and retain the response-envelope metadata needed for
+    /// question validation and TCP fallback. The existing [`Self::query`]
+    /// method remains the answer-only compatibility facade.
+    pub async fn query_with_metadata(
+        &self,
+        name: &str,
+        qtype: u16,
+        qclass: u16,
+    ) -> Result<DnsAnswerWithMetadata, DnsClientError> {
         let mut last_error = DnsClientError::Timeout(self.config.query_timeout_ms);
         for _ in 0..self.config.max_attempts.max(1) {
             match self.try_query(name, qtype, qclass).await {
@@ -106,7 +118,7 @@ impl DnsClientUpstream {
         name: &str,
         qtype: u16,
         qclass: u16,
-    ) -> Result<DnsAnswer, DnsClientError> {
+    ) -> Result<DnsAnswerWithMetadata, DnsClientError> {
         let id = self.next_id();
         let query_bytes = encode_query(id, name, qtype, qclass, true)?;
 
@@ -136,7 +148,7 @@ impl DnsClientUpstream {
                 // waiting against the same deadline.
                 continue;
             }
-            return decode_response(id, &buf[..len]);
+            return decode_response_with_metadata(id, &buf[..len]);
         }
     }
 }

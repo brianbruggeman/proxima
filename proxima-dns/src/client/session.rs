@@ -12,8 +12,8 @@ use proxima_protocols::dns::codec_trait::parse_message;
 use proxima_protocols::dns::encode::{self, EncodeQuestion};
 
 use crate::error::DnsClientError;
-use crate::pipes::DnsAnswer;
-use crate::wire::message_to_answer;
+use crate::pipes::{DnsAnswer, DnsAnswerWithMetadata};
+use crate::wire::message_to_answer_with_metadata;
 
 /// Build query wire bytes for one question under the caller-supplied id (the
 /// value RFC 1035 §4.1.1 requires the reply to echo).
@@ -50,6 +50,14 @@ pub fn encode_query(
 /// [`DnsClientError::Wire`] when the message or one of its answer records
 /// fails to parse.
 pub fn decode_response(expected_id: u16, bytes: &[u8]) -> Result<DnsAnswer, DnsClientError> {
+    Ok(decode_response_with_metadata(expected_id, bytes)?.answer)
+}
+
+/// Decode a reply while retaining the echoed question and DNS TC bit.
+pub fn decode_response_with_metadata(
+    expected_id: u16,
+    bytes: &[u8],
+) -> Result<DnsAnswerWithMetadata, DnsClientError> {
     let message = parse_message(bytes).map_err(|error| DnsClientError::Wire(error.to_string()))?;
     if message.header.id != expected_id {
         return Err(DnsClientError::IdMismatch {
@@ -57,8 +65,9 @@ pub fn decode_response(expected_id: u16, bytes: &[u8]) -> Result<DnsAnswer, DnsC
             reply: message.header.id,
         });
     }
-    message_to_answer(&message)
-        .ok_or_else(|| DnsClientError::Wire("response answer record failed to decode".to_string()))
+    message_to_answer_with_metadata(&message).ok_or_else(|| {
+        DnsClientError::Wire("response question or answer record failed to decode".to_string())
+    })
 }
 
 #[cfg(test)]
@@ -113,10 +122,49 @@ mod tests {
         )
         .unwrap();
 
-        let answer = decode_response(id, &response).unwrap();
-        assert_eq!(answer.rcode, 0);
-        assert_eq!(answer.records.len(), 1);
-        assert_eq!(answer.records[0].name, "example.com.");
+        let detailed = decode_response_with_metadata(id, &response).unwrap();
+        assert_eq!(detailed.answer.rcode, 0);
+        assert_eq!(detailed.answer.records.len(), 1);
+        assert_eq!(detailed.answer.records[0].name, "example.com.");
+        assert_eq!(
+            detailed.metadata.question,
+            Some(crate::pipes::DnsQuery {
+                id,
+                recursion_desired: true,
+                name: "example.com.".to_string(),
+                qtype: 1,
+                qclass: 1,
+            })
+        );
+        assert!(!detailed.metadata.truncated);
+
+        // The answer-only facade remains byte/API compatible with callers
+        // that do not need envelope metadata.
+        assert_eq!(decode_response(id, &response).unwrap(), detailed.answer);
+    }
+
+    #[test]
+    fn decode_response_with_metadata_preserves_the_tc_bit() {
+        let id = 8;
+        let mut response = Vec::new();
+        let base = proxima_protocols::dns::Flags::for_response(true, false, true, 0);
+        let flags = proxima_protocols::dns::Flags(base.0 | 0x0200);
+        encode::encode_response(
+            id,
+            flags,
+            EncodeQuestion {
+                name: "example.com.",
+                qtype: 28,
+                qclass: 1,
+            },
+            &[],
+            &mut response,
+        )
+        .unwrap();
+
+        let detailed = decode_response_with_metadata(id, &response).unwrap();
+        assert!(detailed.metadata.truncated);
+        assert_eq!(detailed.metadata.question.unwrap().qtype, 28);
     }
 
     #[test]

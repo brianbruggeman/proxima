@@ -67,6 +67,24 @@ pub struct DnsAnswer {
     pub records: Vec<DnsAnswerRecord>,
 }
 
+/// Metadata from the DNS response envelope needed for upstream validation.
+/// The answer payload remains separate so existing handlers do not carry
+/// transport-level response state.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DnsAnswerMetadata {
+    /// The single question echoed by the responder, when present and valid.
+    pub question: Option<DnsQuery>,
+    /// Whether the responder set the DNS truncation bit.
+    pub truncated: bool,
+}
+
+/// An upstream answer together with response-envelope validation metadata.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DnsAnswerWithMetadata {
+    pub answer: DnsAnswer,
+    pub metadata: DnsAnswerMetadata,
+}
+
 impl DnsAnswer {
     /// A `NOERROR` reply carrying `records` — the common case.
     #[must_use]
