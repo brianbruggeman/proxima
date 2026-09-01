@@ -325,6 +325,41 @@ pub fn lower_graph_pinned(graph: &GraphProto<'_>, pins: &BTreeMap<&str, u64>) ->
     Ok(Lowered { program, initializers: fold.initializers, graph_inputs, graph_outputs })
 }
 
+/// [`lower_graph_pinned`], plus one capability it does not have on its own:
+/// a caller evaluating the same graph repeatedly at only a handful of
+/// distinct pinned shapes (a bucketed-sequence-length inference workload,
+/// e.g. BGE-small's own real corpus, `pins["sequence_length"]` taking only
+/// 3 distinct values across the whole workload) pays [`lower_graph_pinned`]'s
+/// own per-initializer decode-then-clone cost (the dominant cost measured
+/// directly against the real BGE-small-en-v1.5 graph this session:
+/// `~26-30ms/call`, roughly 1.5x `evaluate_named`'s own per-call cost,
+/// because every call re-decodes AND re-clones every weight tensor's raw
+/// bytes into a fresh `Vec<f32>` — see `lower_node`'s initializer loop,
+/// `fold.initializer_data.insert(name, data.clone())` immediately followed
+/// by `fold.initializers.push((name, data))`) exactly ONCE per distinct
+/// shape instead of once per call, keyed by a caller-supplied `cache_key`
+/// (BGE's own case: the pinned `sequence_length` itself — no new key type
+/// needed since the caller already knows which pin varies).
+///
+/// Returns `(&Lowered, hit)`, `hit` true when `cache_key` was already
+/// present — the caller's own engagement proof that repeated calls at the
+/// same shape are actually served from cache rather than silently
+/// re-lowering every time.
+pub fn lower_graph_pinned_cached<'cache>(
+    cache: &'cache mut BTreeMap<u64, Lowered>,
+    graph: &GraphProto<'_>,
+    pins: &BTreeMap<&str, u64>,
+    cache_key: u64,
+) -> Result<(&'cache Lowered, bool), LowerError> {
+    match cache.entry(cache_key) {
+        alloc::collections::btree_map::Entry::Occupied(occupied) => Ok((occupied.into_mut(), true)),
+        alloc::collections::btree_map::Entry::Vacant(vacant) => {
+            let lowered = lower_graph_pinned(graph, pins)?;
+            Ok((vacant.insert(lowered), false))
+        }
+    }
+}
+
 fn lower_node(program: &mut Vec<Op>, values: &mut BTreeMap<String, Value>, fold: &mut FoldState, node: &NodeProto<'_>) -> Result<(), LowerError> {
     match node.op_type {
         "Add" => lower_binary(program, values, node, ScalarOp::Add),
@@ -6735,5 +6770,63 @@ mod tests {
 
         let error = lower_graph(&graph).expect_err("Dropout with training_mode=1 is unsupported");
         assert!(matches!(error, LowerError::UnsupportedShape { .. }), "expected UnsupportedShape, got {error:?}");
+    }
+
+    /// [`lower_graph_pinned_cached`]'s own contract: a graph with a
+    /// symbolic (`Param`) leading dimension, pinned via `pins`, lowered
+    /// through the cache twice at the SAME `cache_key` — the second call
+    /// must report `hit=true` and must not grow the cache, and the cached
+    /// [`Lowered`] must be bit-identical (program AND initializers) to
+    /// calling [`lower_graph_pinned`] directly with the same `pins`, since
+    /// caching only ever reuses an earlier call's own output, never
+    /// recomputes it differently.
+    #[test]
+    fn lower_graph_pinned_cached_hits_on_repeat_and_matches_uncached() {
+        let mut activation = input_value_info("activation", &[2]);
+        if let Some(TypeProto { value: Some(TypeValue::Tensor(tensor)), .. }) = activation.r#type.as_mut() {
+            tensor.shape = Some(TensorShapeProto {
+                dim: vec![
+                    Dimension { value: Some(DimensionValue::Param("m")), denotation: "" },
+                    Dimension { value: Some(DimensionValue::Value(4)), denotation: "" },
+                ],
+            });
+        }
+        let weight = f32_initializer("weight", &[4, 3], &[0.5, -1.0, 2.0, 0.25, 1.5, -0.5, 3.0, 0.0, -2.0, 1.0, 0.75, -1.25]);
+        let node = NodeProto { input: vec!["activation", "weight"], output: vec!["y"], op_type: "MatMul", name: "matmul", ..NodeProto::default() };
+        let graph = GraphProto {
+            node: vec![node],
+            name: "pinned_cache_graph",
+            initializer: vec![weight],
+            input: vec![activation],
+            output: vec![ValueInfoProto { name: "y", ..ValueInfoProto::default() }],
+            ..GraphProto::default()
+        };
+
+        let mut pins: BTreeMap<&str, u64> = BTreeMap::new();
+        pins.insert("m", 5);
+
+        let mut cache: BTreeMap<u64, Lowered> = BTreeMap::new();
+        let (first, first_hit) = lower_graph_pinned_cached(&mut cache, &graph, &pins, 5).expect("first lowering populates the cache");
+        assert!(!first_hit, "cache must be empty on the first call for a fresh shape");
+        let first_program_len = first.program.len();
+        let first_initializers = first.initializers.clone();
+
+        let (second, second_hit) = lower_graph_pinned_cached(&mut cache, &graph, &pins, 5).expect("second lowering reuses the cache");
+        assert!(second_hit, "repeat call at the same cache_key must report a cache hit");
+        assert_eq!(second.program.len(), first_program_len, "cached program must be the SAME lowering, not a fresh one");
+        assert_eq!(second.initializers, first_initializers, "cached initializers must be bit-identical to the first lowering");
+        let second_program_len = second.program.len();
+        let second_initializers = second.initializers.clone();
+        assert_eq!(cache.len(), 1, "a second call at the SAME shape must not grow the cache");
+
+        let uncached = lower_graph_pinned(&graph, &pins).expect("uncached lowering for the bit-identity oracle");
+        assert_eq!(second_initializers, uncached.initializers, "cached lowering must be bit-identical to an independently, freshly lowered call at the same pins");
+        assert_eq!(second_program_len, uncached.program.len(), "cached program length must match a fresh lowering's own program length");
+
+        let mut other_pins: BTreeMap<&str, u64> = BTreeMap::new();
+        other_pins.insert("m", 7);
+        let (_third, third_hit) = lower_graph_pinned_cached(&mut cache, &graph, &other_pins, 7).expect("a genuinely different shape misses the cache");
+        assert!(!third_hit, "a different cache_key must miss even though the graph and other pins are unchanged");
+        assert_eq!(cache.len(), 2, "a genuinely new shape grows the cache by exactly one entry");
     }
 }
