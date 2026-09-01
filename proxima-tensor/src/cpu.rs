@@ -1874,6 +1874,159 @@ pub fn layer_norm_cluster_reset() {
     LAYER_NORM_CLUSTER_NANOS.store(0, EpilogueFuseOrdering::Relaxed);
 }
 
+/// One entry in [`run_rewrite_worklist`]'s applied-substitution log --
+/// `docs/rewrite-algebra.md` §8's own "depth as an observable, not a hidden
+/// implementation detail". Recorded once per admitted node, never per
+/// element, so this is plan-build-time bookkeeping, not a hot-path cost.
+struct RewriteFire {
+    depth: usize,
+    law: &'static str,
+    node: NodeId,
+}
+
+/// `docs/rewrite-algebra.md` §8's worklist engine: explicit state (a
+/// candidate set per depth, an applied-substitution log, a depth counter),
+/// **no call recursion** -- two loop-free passes, each popping its own
+/// worklist once. It orchestrates the two LANDED laws
+/// ([`epilogue_fuse_plan`] = law 1/2 epilogue + row-statistic absorption,
+/// [`layer_norm_cluster_plan`] = law 2's full five-dispatch cluster upgrade)
+/// as law instances, never reimplementing either detector's own admission
+/// logic.
+///
+/// **Depth 1** fires law 1/2 directly against the raw, bound graph -- the
+/// shapes `epilogue_fuse_plan` already detects in one pass over all of
+/// `resolved`, unaware of any prior substitution.
+///
+/// **Depth 2 re-enqueues ONLY the neighborhood depth 1 changed.**
+/// [`layer_norm_cluster_plan`] already takes `single_hop` (depth 1's own
+/// output map) as its sole per-node candidate set -- it never rescans
+/// `resolved` for new candidates outside that set. That parameter IS the
+/// worklist re-enqueue this engine performs; the debug assertion below
+/// proves it holds rather than assuming it.
+///
+/// **Depth bound.** Per §7's own termination argument, node count is a
+/// non-negative integer every law strictly decreases, so `resolved.len()`
+/// is a hard ceiling on total applications, not a magic constant -- data
+/// derived from the call's own input, asserted per depth, never consulted
+/// to loop further (a correctly implemented law cannot exceed it; hitting
+/// it is a bug in a law's own progress reporting, not a legitimately deep
+/// fixpoint).
+///
+/// **Residual, named honestly**: laws 3/5/6 are not engine laws here. Law 3
+/// (prologue absorption) runs inside `bind::bind` before this function ever
+/// sees `resolved` -- §8's own "`bind.rs` is untouched" boundary, restated:
+/// widening this engine to re-open what `bind.rs` already fused is exactly
+/// the landmine ROW 166 (`docs/discipline.md:14974`) describes. Law 6∘5
+/// (weight packing, [`build_packed_width_panels`]) runs even earlier, over
+/// the pre-bind `Op` program at `evaluate_quantized_with_scratch`'s own
+/// call site, gated behind [`PACK_AT_PLAN_TIME_ENABLED`] -- folding it into
+/// this worklist is future work, not attempted in this landing. Law 4
+/// (same-input widening) and law 2's softmax instantiation are PROPOSED,
+/// not landed anywhere in this tree, so they have no detector to
+/// orchestrate. **The hidden=1 confluence gap stands as documented**: law 3
+/// runs at bind time, before this engine's own depth 1 candidate set is
+/// even formed, so a `mean` node law 3 already folded via
+/// `eliminate_identity_multiply` at `hidden=1` is invisible to depth 1's
+/// admission test -- this engine does not close that gap and does not make
+/// it worse, since it fires the exact same two detectors, in the exact same
+/// order, over the exact same `resolved` list `epilogue_fuse_plan` always
+/// received.
+/// Law 1/2's own single-hop admission map: reduce node -> (consumer's
+/// `resolved` index, fire position, kind, hoist axis). Named here only to
+/// keep [`run_rewrite_worklist`]'s signature legible -- the shape itself is
+/// [`epilogue_fuse_plan`]'s, unchanged.
+type SingleHopEpiloguePlan = BTreeMap<NodeId, (usize, usize, EpilogueKind, Option<usize>)>;
+
+fn run_rewrite_worklist(
+    resolved: &[BoundOp],
+    node_count: usize,
+    effective_outputs: &[NodeId],
+    quantized_weights: &BTreeMap<NodeId, QuantizedBlock>,
+) -> (SingleHopEpiloguePlan, BTreeMap<NodeId, LayerNormClusterPlan>, Vec<RewriteFire>) {
+    let depth_bound = resolved.len();
+    let mut fires = Vec::new();
+
+    let single_hop = epilogue_fuse_plan(resolved, node_count, effective_outputs, quantized_weights);
+    debug_assert!(
+        single_hop.len() <= depth_bound,
+        "law 1/2 admitted more nodes than exist in the resolved graph -- termination argument violated"
+    );
+    fires.extend(single_hop.keys().map(|node| RewriteFire {
+        depth: 1,
+        law: "law1_2_epilogue_absorption",
+        node: *node,
+    }));
+
+    let depth1_candidates: BTreeSet<NodeId> = single_hop.keys().copied().collect();
+    let cluster = layer_norm_cluster_plan(resolved, effective_outputs, &single_hop);
+    debug_assert!(
+        cluster.keys().all(|node| depth1_candidates.contains(node)),
+        "law 2's cluster upgrade fired on a node outside depth 1's own worklist -- re-enqueue scoping violated"
+    );
+    debug_assert!(
+        cluster.len() <= depth_bound,
+        "law 2 admitted more nodes than exist in the resolved graph -- termination argument violated"
+    );
+    fires.extend(cluster.keys().map(|node| RewriteFire {
+        depth: 2,
+        law: "law2_layer_norm_cluster_upgrade",
+        node: *node,
+    }));
+
+    (single_hop, cluster, fires)
+}
+
+static REWRITE_DEPTH1_FIRES: EpilogueFuseAtomicU64 = EpilogueFuseAtomicU64::new(0);
+static REWRITE_DEPTH2_FIRES: EpilogueFuseAtomicU64 = EpilogueFuseAtomicU64::new(0);
+
+fn record_rewrite_engine_fires(fires: &[RewriteFire]) {
+    let mut depth1 = 0u64;
+    let mut depth2 = 0u64;
+    let mut seen: BTreeSet<(usize, NodeId)> = BTreeSet::new();
+    for fire in fires {
+        debug_assert!(
+            seen.insert((fire.depth, fire.node)),
+            "a node fired twice at the same depth -- worklist re-enqueue bug"
+        );
+        match fire.depth {
+            1 => {
+                debug_assert_eq!(fire.law, "law1_2_epilogue_absorption");
+                depth1 += 1;
+            }
+            2 => {
+                debug_assert_eq!(fire.law, "law2_layer_norm_cluster_upgrade");
+                depth2 += 1;
+            }
+            other => debug_assert!(false, "rewrite engine fired at unexpected depth {other}"),
+        }
+    }
+    if depth1 > 0 {
+        REWRITE_DEPTH1_FIRES.fetch_add(depth1, EpilogueFuseOrdering::Relaxed);
+    }
+    if depth2 > 0 {
+        REWRITE_DEPTH2_FIRES.fetch_add(depth2, EpilogueFuseOrdering::Relaxed);
+    }
+}
+
+/// `docs/rewrite-algebra.md` §8's own re-provable per-depth trace -- how
+/// many nodes fired at depth 1 (raw-graph law 1/2 admission) vs depth 2
+/// (law 2's re-enqueued cluster upgrade), snapshot-and-reset per call, same
+/// shape as [`epilogue_fuse_totals`]/[`layer_norm_cluster_totals`]. Exists
+/// so a re-prove command can assert per-depth `N > 0` on a real graph
+/// rather than trust the worklist fired at the depths its own doc claims.
+#[must_use]
+pub fn rewrite_engine_depth_fires() -> (u64, u64) {
+    (
+        REWRITE_DEPTH1_FIRES.load(EpilogueFuseOrdering::Relaxed),
+        REWRITE_DEPTH2_FIRES.load(EpilogueFuseOrdering::Relaxed),
+    )
+}
+
+pub fn rewrite_engine_reset() {
+    REWRITE_DEPTH1_FIRES.store(0, EpilogueFuseOrdering::Relaxed);
+    REWRITE_DEPTH2_FIRES.store(0, EpilogueFuseOrdering::Relaxed);
+}
+
 /// One kernel call per `LayerNorm` site instead of `R1`/`E1`/`E2`/`R2`'s own
 /// four dispatches plus the tail -- reads `x` directly, drives
 /// [`LayerNormRowFsm`] to completion per row (mean, then the STABLE
@@ -2400,23 +2553,19 @@ pub fn evaluate_quantized_with_scratch(
     // but is not what `benches/mnist_f32_lane.rs` exercises.
     #[cfg(feature = "epilogue-profile-probe")]
     let epilogue_profile_reduce_nodes = epilogue_profile_reduce_flags(&resolved, program.len());
-    // `docs/discipline.md` ROW 183 Phase 2: reduce `NodeId` -> (consumer's
-    // `resolved` index, fire position), computed once per call from
-    // `resolved`'s own already-bound structure (never `bind::bind` itself).
-    // `epilogue_fuse_skip` is the plan's own value set, re-derived rather
-    // than stored twice, so there is exactly one source of truth for "which
-    // consumer position gets skipped". `epilogue_fuse_fire_at` groups the
-    // SAME plan by its own `fire_position` value, so the main loop can ask
-    // "does anything fire here" in O(1) per position instead of scanning
-    // the whole plan every iteration.
-    let epilogue_fuse_plan = epilogue_fuse_plan(&resolved, program.len(), &effective_outputs, &quantized_weights);
-    // `docs/discipline.md` ROW 204: widens the single-hop `LayerNorm`
-    // admission above (reduce-of-squares -> affine tail only) to the FULL
-    // five-dispatch cluster where the exact upstream wiring matches --
-    // see `layer_norm_cluster_plan`'s own doc. A `LayerNorm` entry NOT
-    // upgraded here still fires via `epilogue_fuse_fire_at` below,
-    // unchanged from ROW 191.
-    let layer_norm_cluster_plan = layer_norm_cluster_plan(&resolved, &effective_outputs, &epilogue_fuse_plan);
+    // `docs/discipline.md` ROW 183 Phase 2 / ROW 204, now driven through
+    // `run_rewrite_worklist` (`docs/rewrite-algebra.md` §8): reduce `NodeId`
+    // -> (consumer's `resolved` index, fire position), computed once per
+    // call from `resolved`'s own already-bound structure (never `bind::bind`
+    // itself). `epilogue_fuse_skip` is the plan's own value set, re-derived
+    // rather than stored twice, so there is exactly one source of truth for
+    // "which consumer position gets skipped". `epilogue_fuse_fire_at` groups
+    // the SAME plan by its own `fire_position` value, so the main loop can
+    // ask "does anything fire here" in O(1) per position instead of
+    // scanning the whole plan every iteration.
+    let (epilogue_fuse_plan, layer_norm_cluster_plan, rewrite_fires) =
+        run_rewrite_worklist(&resolved, program.len(), &effective_outputs, &quantized_weights);
+    record_rewrite_engine_fires(&rewrite_fires);
     let epilogue_fuse_skip: BTreeSet<NodeId> = epilogue_fuse_plan
         .values()
         .map(|(index, ..)| resolved[*index].node)
