@@ -23,9 +23,22 @@
 //! incumbent` is `dense`, ROW 167/175's own always-run-everything static
 //! arena shape; the `sparse_*` arms are `ours`.
 //!
+//! `docs/discipline.md` ROW 181 extends this file with two residuals ROW 180
+//! named but did not close: (1) a `control_zero_skip` arm per shape --
+//! `evaluate_named_with_arena_masked` with a full-live mask (nothing
+//! skipped), isolating the mask-consult + `BTreeSet` derivation cost from
+//! ROW 180's dense arm; (2) a `streaming_640sq` shape whose per-instance
+//! dense working set (~31.35 MiB, 20 blocks of a 640x640 weight each) is
+//! cycled round-robin across `STREAM_INSTANCES` independent data sets so no
+//! two consecutive timed calls touch the same bytes -- the rotation
+//! distance between reuses of one instance (`(STREAM_INSTANCES-1) *
+//! ~31.35 MiB`) is chosen to exceed this host's documented L2
+//! (`hw.perflevel0.l2cachesize=12 MiB` on the M1 Max this row measured on)
+//! by more than an order of magnitude, per the task's own engagement bar.
+//!
 //! Re-prove (host must be quiet -- `pgrep -f "cargo check"` / `cargo build`
 //! empty before trusting a number):
-//! `CARGO_TARGET_DIR=<scratch> cargo bench -p proxima-tensor --features dynamic-elision-probe --bench bench_dynamic_elision -- --save-baseline row180-micro`
+//! `CARGO_TARGET_DIR=<scratch> cargo bench -p proxima-tensor --features dynamic-elision-probe --bench bench_dynamic_elision -- --save-baseline row181-cold`
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
@@ -172,6 +185,23 @@ fn main() {
             bencher.iter(|| evaluate_named_with_arena(&mut dense_arena, &dense_named).expect("dense step"));
         });
 
+        // ROW 181 residual (1): derivation-cost control. Full mask present,
+        // ALL blocks live (skip is empty every call), routed through the
+        // SAME `evaluate_named_with_arena_masked` entry point the sparse
+        // arms use, with the identical fresh-BTreeSet-plus-filter pattern
+        // paid inside the timed closure. Isolates mask-consult overhead from
+        // ROW 180's dense arm, which never calls the masked function at all.
+        let mut control_arena = build_static_arena(&built.program, &[], &built.reduce_nodes).expect("control arena builds");
+        group.bench_function(format!("{}/control_zero_skip", shape.label), |bencher| {
+            bencher.iter(|| {
+                let live_named: Vec<(&str, &[f32])> = (0..shape.num_blocks as usize)
+                    .flat_map(|index| [(built.x_names[index].as_str(), x_data[index].as_slice()), (built.w_names[index].as_str(), w_data[index].as_slice())])
+                    .collect();
+                let skip: BTreeSet<NodeId> = BTreeSet::new();
+                evaluate_named_with_arena_masked(&mut control_arena, &live_named, &skip).expect("control step")
+            });
+        });
+
         for &(sparsity_pct, skip_count) in &[(50u32, shape.num_blocks / 2), (75, shape.num_blocks * 3 / 4), (90, shape.num_blocks * 9 / 10)] {
             let live_count = shape.num_blocks - skip_count;
             let sparse_bytes = bytes_touched(shape, live_count);
@@ -236,6 +266,174 @@ fn main() {
         }
     }
 
+    run_streaming_arm(&mut group);
+
     group.finish();
     criterion.final_summary();
+}
+
+/// ROW 181 residual (2): a per-instance dense working set (~31.35 MiB) far
+/// too small to trust as memory-bound on its own, cycled round-robin across
+/// `STREAM_INSTANCES` independent data sets so consecutive timed calls never
+/// touch the same bytes -- the rotation distance
+/// (`(STREAM_INSTANCES - 1) * per_instance_bytes`) is what defeats caching,
+/// not the per-instance size alone. Same block topology `Op` shape as
+/// `block_sparse_program`; only the block dimensions and instance count
+/// differ from the two `SHAPES` entries above.
+const STREAM_SHAPE: BlockShape = BlockShape { label: "streaming_640sq", num_blocks: 20, block_in: 640, block_out: 640 };
+
+/// Round-robin instance count. Rotation distance =
+/// `(STREAM_INSTANCES - 1) * bytes_touched(STREAM_SHAPE, num_blocks)` =
+/// 15 * 32,870,400 B ~= 493 MiB, chosen to clear this host's documented
+/// `hw.perflevel0.l2cachesize` (12 MiB) by ~41x and any plausible
+/// whole-chip system-level cache (Apple does not publish the M1 Max figure;
+/// treating 12 MiB as the tightest documented bound, 493 MiB clears the
+/// task's 10x bar with room to spare even against a much larger guess).
+const STREAM_INSTANCES: usize = 16;
+
+/// `docs/discipline.md` ROW 180's own derived compute-floor constant
+/// (ns/element, from the two-shape linear fit over `small`/`large`) -- NOT
+/// measured this session, cited here only as the rival prediction to the
+/// bandwidth-wall number for this row's pre-registration.
+const ROW180_COMPUTE_FLOOR_NS_PER_ELEMENT: f64 = 0.277;
+
+struct StreamInstance {
+    x_data: Vec<Vec<f32>>,
+    w_data: Vec<Vec<f32>>,
+}
+
+fn streaming_instances(shape: &BlockShape) -> Vec<StreamInstance> {
+    (0..STREAM_INSTANCES)
+        .map(|instance| {
+            let phase_base = 0.0091 + instance as f32 * 0.0173;
+            let x_data: Vec<Vec<f32>> =
+                (0..shape.num_blocks).map(|index| deterministic_data(shape.block_in as usize, phase_base + index as f32 * 0.001)).collect();
+            let w_data: Vec<Vec<f32>> = (0..shape.num_blocks)
+                .map(|index| deterministic_data((shape.block_in * shape.block_out) as usize, phase_base + 0.0271 + index as f32 * 0.001))
+                .collect();
+            StreamInstance { x_data, w_data }
+        })
+        .collect()
+}
+
+fn named_for_instance<'data>(built: &'data BlockProgram, shape: &BlockShape, instance: &'data StreamInstance) -> Vec<(&'data str, &'data [f32])> {
+    (0..shape.num_blocks as usize)
+        .flat_map(|index| [(built.x_names[index].as_str(), instance.x_data[index].as_slice()), (built.w_names[index].as_str(), instance.w_data[index].as_slice())])
+        .collect()
+}
+
+fn live_named_for_instance<'data>(
+    built: &'data BlockProgram,
+    shape: &BlockShape,
+    instance: &'data StreamInstance,
+    mask: &[bool],
+) -> Vec<(&'data str, &'data [f32])> {
+    (0..shape.num_blocks as usize)
+        .filter(|&index| !mask[index])
+        .flat_map(|index| [(built.x_names[index].as_str(), instance.x_data[index].as_slice()), (built.w_names[index].as_str(), instance.w_data[index].as_slice())])
+        .collect()
+}
+
+fn run_streaming_arm(group: &mut criterion::BenchmarkGroup<'_, criterion::measurement::WallTime>) {
+    let shape = &STREAM_SHAPE;
+    let built = block_sparse_program(shape);
+    let instances = streaming_instances(shape);
+
+    let dense_bytes = bytes_touched(shape, shape.num_blocks);
+    let dense_elements = (shape.block_in * shape.block_out * shape.num_blocks) as f64;
+    println!(
+        "{}: dense_bytes={dense_bytes} predicted_dense_ns_bandwidth={:.1} predicted_dense_ns_compute_floor={:.1} (ROW180 rival prediction, {STREAM_INSTANCES} round-robin instances, rotation_distance_bytes={})",
+        shape.label,
+        predicted_ns(dense_bytes),
+        dense_elements * ROW180_COMPUTE_FLOOR_NS_PER_ELEMENT,
+        (STREAM_INSTANCES - 1) * dense_bytes
+    );
+
+    // PRE-REGISTRATION for sparse_{50,75,90}, written before any measurement
+    // on this shape: both the task's bandwidth-wall prediction and ROW 180's
+    // own rival compute-floor prediction, so the miss/hit can be read against
+    // either hypothesis once measured.
+    for &(sparsity_pct, skip_count) in &[(50u32, shape.num_blocks / 2), (75, shape.num_blocks * 3 / 4), (90, shape.num_blocks * 9 / 10)] {
+        let live_count = shape.num_blocks - skip_count;
+        let sparse_bytes = bytes_touched(shape, live_count);
+        let live_elements = (shape.block_in * shape.block_out * live_count) as f64;
+        println!(
+            "{}/sparse_{sparsity_pct}: skip={skip_count}/{} sparse_bytes={sparse_bytes} predicted_sparse_ns_bandwidth={:.1} predicted_saving_ns_bandwidth={:.1} predicted_sparse_ns_compute_floor={:.1} predicted_saving_ns_compute_floor={:.1}",
+            shape.label,
+            shape.num_blocks,
+            predicted_ns(sparse_bytes),
+            predicted_ns(dense_bytes) - predicted_ns(sparse_bytes),
+            live_elements * ROW180_COMPUTE_FLOOR_NS_PER_ELEMENT,
+            dense_elements * ROW180_COMPUTE_FLOOR_NS_PER_ELEMENT - live_elements * ROW180_COMPUTE_FLOOR_NS_PER_ELEMENT,
+        );
+    }
+
+    // correctness self-check, instance 0 only (time-budget scoped): the
+    // masked execution path itself is already validated 8/8 combinations in
+    // ROW 180 on different data -- this instance-0 check confirms the SAME
+    // path holds on the streaming shape/data, not a re-validation of the
+    // mechanism from scratch.
+    let mut dense_arena_zero = build_static_arena(&built.program, &[], &built.reduce_nodes).expect("dense arena builds");
+    let dense_reference_zero = evaluate_named_with_arena(&mut dense_arena_zero, &named_for_instance(&built, shape, &instances[0])).expect("dense step");
+
+    let mut dense_arenas: Vec<_> =
+        (0..STREAM_INSTANCES).map(|_| build_static_arena(&built.program, &[], &built.reduce_nodes).expect("dense arena builds")).collect();
+    dense_arenas[0] = dense_arena_zero;
+
+    let mut dense_cursor = 0usize;
+    group.bench_function(format!("{}/dense", shape.label), |bencher| {
+        bencher.iter(|| {
+            let instance = &instances[dense_cursor];
+            let arena = &mut dense_arenas[dense_cursor];
+            dense_cursor = (dense_cursor + 1) % STREAM_INSTANCES;
+            evaluate_named_with_arena(arena, &named_for_instance(&built, shape, instance)).expect("dense step")
+        });
+    });
+
+    for &(sparsity_pct, skip_count) in &[(50u32, shape.num_blocks / 2), (75, shape.num_blocks * 3 / 4), (90, shape.num_blocks * 9 / 10)] {
+        let mask: Vec<bool> = (0..shape.num_blocks).map(|index| index >= shape.num_blocks - skip_count).collect();
+
+        let mut sparse_arena_zero = build_static_arena(&built.program, &[], &built.reduce_nodes).expect("sparse arena builds");
+        let mut skip_zero = BTreeSet::new();
+        for (index, &masked) in mask.iter().enumerate() {
+            if masked {
+                skip_zero.insert(built.product_nodes[index]);
+                skip_zero.insert(built.reduce_nodes[index]);
+            }
+        }
+        let sparse_reference_zero =
+            evaluate_named_with_arena_masked(&mut sparse_arena_zero, &live_named_for_instance(&built, shape, &instances[0], &mask), &skip_zero)
+                .expect("sparse step evaluates");
+        for (index, &masked) in mask.iter().enumerate() {
+            if masked {
+                continue;
+            }
+            let node = built.reduce_nodes[index];
+            let (dense_values, _) = dense_reference_zero.get(node).expect("dense output present");
+            let (sparse_values, _) = sparse_reference_zero.get(node).expect("sparse output present");
+            assert_eq!(dense_values, sparse_values, "{}/sparse_{sparsity_pct}: block {index} diverged (instance 0)", shape.label);
+        }
+
+        let mut sparse_arenas: Vec<_> =
+            (0..STREAM_INSTANCES).map(|_| build_static_arena(&built.program, &[], &built.reduce_nodes).expect("sparse arena builds")).collect();
+        sparse_arenas[0] = sparse_arena_zero;
+
+        let mut sparse_cursor = 0usize;
+        group.bench_function(format!("{}/sparse_{sparsity_pct}", shape.label), |bencher| {
+            bencher.iter(|| {
+                let instance = &instances[sparse_cursor];
+                let arena = &mut sparse_arenas[sparse_cursor];
+                sparse_cursor = (sparse_cursor + 1) % STREAM_INSTANCES;
+                let live_named = live_named_for_instance(&built, shape, instance, &mask);
+                let mut skip = BTreeSet::new();
+                for (index, &masked) in mask.iter().enumerate() {
+                    if masked {
+                        skip.insert(built.product_nodes[index]);
+                        skip.insert(built.reduce_nodes[index]);
+                    }
+                }
+                evaluate_named_with_arena_masked(arena, &live_named, &skip).expect("sparse step")
+            });
+        });
+    }
 }
