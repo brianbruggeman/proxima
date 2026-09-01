@@ -519,6 +519,16 @@ pub struct StaticArena {
     /// only drops nodes with zero consumers and no output membership, which
     /// this field does not gate on.
     static_nodes: BTreeSet<NodeId>,
+    /// Law 6∘5 weight packing (`docs/rewrite-algebra.md` section 6): every
+    /// width-tile [`Keep::Reduce`] node whose `b` operand was named in
+    /// [`build_static_arena_with_constants`]'s own `constant_inputs`, keyed
+    /// by the REDUCE node's [`NodeId`] (not the weight's), since
+    /// [`run_resolved_nodes_in_arena`] looks this map up per resolved node
+    /// on its way to deciding whether to route through
+    /// [`run_reduce`]'s packed arm. Always empty off `aarch64` or without
+    /// `pack-at-plan-time` -- [`build_packed_width_panels`] is the only
+    /// populator and it is gated to both.
+    packed_width_panels: BTreeMap<NodeId, PackedWidthPanels>,
 }
 
 /// Every node `resolved` physically reads, straight off [`BoundOp::operands()`]
@@ -585,6 +595,39 @@ fn static_resolved_nodes(resolved: &[BoundOp], dead: &BTreeSet<NodeId>) -> BTree
 /// since this runs the identical `prepare`-shaped validation once up front
 /// instead of on every call.
 pub fn build_static_arena(program: &[Op], symbols: &[u64], outputs: &[NodeId]) -> Result<StaticArena, TensorError> {
+    build_static_arena_with_constants(program, symbols, outputs, &[])
+}
+
+/// [`build_static_arena`], plus one capability it does not have: `constant_inputs`
+/// binds a set of [`Op::Input`] names with their real, call-invariant data
+/// (a weight tensor loaded once from a checkpoint, never re-derived per
+/// step) BEFORE the static pass runs, and every width-tile [`Keep::Reduce`]
+/// node reading one of them as its 2-D `b` operand gets that operand
+/// packed once, right here, into a panel layout the width-tile kernel reads
+/// sequentially (law 6∘5, `docs/rewrite-algebra.md` section 6, private
+/// `PackedWidthPanels`/`build_packed_width_panels` within this module).
+/// `constant_inputs` entries are bound exactly like an initial
+/// [`evaluate_named_with_arena`] call's `named` would bind them; a caller
+/// that later re-sends the SAME name via `evaluate_named_with_arena`
+/// overwrites the identical bytes (weights do not change across BGE
+/// sentences), so the packed panel built here stays valid for the arena's
+/// whole lifetime without needing to be rebuilt.
+///
+/// Behind `pack-at-plan-time` (default-off) and `aarch64` only — off
+/// either axis this is byte-for-byte [`build_static_arena`] plus binding
+/// `constant_inputs` into the arena's input buffers, no packing performed.
+///
+/// # Errors
+/// The same errors [`build_static_arena`] raises, plus
+/// [`TensorError::UnboundInputName`] if a `constant_inputs` name is not one
+/// of `program`'s [`Op::Input`] names, and [`TensorError::InputSizeMismatch`]
+/// if its data does not match that input's inferred shape.
+pub fn build_static_arena_with_constants(
+    program: &[Op],
+    symbols: &[u64],
+    outputs: &[NodeId],
+    constant_inputs: &[(&str, &[f32])],
+) -> Result<StaticArena, TensorError> {
     let shapes = shape::infer(program, symbols)?;
     reject_non_float32(program, &BTreeSet::new())?;
 
@@ -621,6 +664,26 @@ pub fn build_static_arena(program: &[Op], symbols: &[u64], outputs: &[NodeId]) -
     let dead = dead_resolved_nodes(&resolved, &effective_outputs);
     let static_nodes = static_resolved_nodes(&resolved, &dead);
 
+    // bound before the static pass so a `Constant`/`Iota` node consuming one
+    // of these (unlikely for a weight but not disallowed) sees the real
+    // value too — matches `bind_named_inputs_into_arena`'s own per-slot
+    // copy, just against the zero-initialized buffer this function itself
+    // just built above.
+    for (name, data) in constant_inputs {
+        let (node, _) = input_names
+            .iter()
+            .find(|(_, candidate)| candidate == name)
+            .ok_or_else(|| TensorError::UnboundInputName(String::from(*name)))?;
+        let slot = buffers[node.0 as usize].as_mut().ok_or(TensorError::NotLowerable {
+            node: *node,
+            reason: "static arena has no pre-sized slot for this constant input -- build_static_arena did not size it",
+        })?;
+        if slot.len() != data.len() {
+            return Err(TensorError::InputSizeMismatch { node: *node, expected: slot.len(), found: data.len() });
+        }
+        slot.copy_from_slice(data);
+    }
+
     for computed in &resolved {
         if !static_nodes.contains(&computed.node) {
             continue;
@@ -634,6 +697,11 @@ pub fn build_static_arena(program: &[Op], symbols: &[u64], outputs: &[NodeId]) -
         buffers[node_index] = Some(output);
     }
 
+    #[cfg(all(target_arch = "aarch64", feature = "pack-at-plan-time"))]
+    let packed_width_panels = build_packed_width_panels(&resolved, &shapes, &buffers, &input_names, constant_inputs);
+    #[cfg(not(all(target_arch = "aarch64", feature = "pack-at-plan-time")))]
+    let packed_width_panels = BTreeMap::new();
+
     Ok(StaticArena {
         resolved,
         shapes,
@@ -643,6 +711,7 @@ pub fn build_static_arena(program: &[Op], symbols: &[u64], outputs: &[NodeId]) -
         buffers,
         dead,
         static_nodes,
+        packed_width_panels,
     })
 }
 
@@ -723,7 +792,19 @@ fn run_resolved_nodes_in_arena(arena: &mut StaticArena) -> Result<(), TensorErro
         })?;
         #[cfg(feature = "epilogue-profile-probe")]
         let profile_start = std::time::Instant::now();
-        run_node_into(computed, &arena.buffers, None, None, &mut output)?;
+        // law 6∘5: a node with a plan-time-packed `b` operand skips
+        // `run_node_into`'s dispatch entirely and calls `run_reduce`
+        // directly with the packed panel -- `run_node_into`'s own
+        // signature stays untouched (13 other call sites, `docs/
+        // rewrite-algebra.md` admission rule scopes this lever to the
+        // arena's own execution loop, not a crate-wide dispatch change).
+        // Always `None`/never-taken off `aarch64` or without
+        // `pack-at-plan-time`, since `packed_width_panels` is always empty
+        // there.
+        match arena.packed_width_panels.get(&computed.node) {
+            Some(packed) => run_reduce(computed, &arena.buffers, &mut output, Some(packed))?,
+            None => run_node_into(computed, &arena.buffers, None, None, &mut output)?,
+        }
         #[cfg(feature = "epilogue-profile-probe")]
         epilogue_profile_record(computed, &reduce_nodes, profile_start.elapsed().as_nanos() as u64);
         arena.buffers[node_index] = Some(output);
@@ -4003,7 +4084,7 @@ fn run_node_into<B: Deref<Target = [f32]> + Sync>(
                 Some(quantized_weights) => {
                     run_reduce_with_quantized_weights(resolved, buffers, quantized_weights, session, output)
                 }
-                None => run_reduce(resolved, buffers, output),
+                None => run_reduce(resolved, buffers, output, None),
             }
         }
         BoundOpKind::Reduce {
@@ -6313,7 +6394,7 @@ fn run_reduce_with_quantized_weights<B: Deref<Target = [f32]>>(
         })?;
         return run_reduce_quantized(resolved, buffers, weight_block, weight_node, session, output);
     }
-    run_reduce(resolved, buffers, output)
+    run_reduce(resolved, buffers, output, None)
 }
 
 /// The axis structure one `Keep::Reduce` fold's own binding already carries:
@@ -6444,7 +6525,13 @@ fn run_reduce<B: Deref<Target = [f32]>>(
     resolved: &BoundOp,
     buffers: &[Option<B>],
     output: &mut [f32],
+    packed_width: Option<&PackedWidthPanels>,
 ) -> Result<(), TensorError> {
+    // only the `aarch64` width-tile block below reads this; every other
+    // target's caller always passes `None`, so name it used here rather
+    // than at every non-aarch64 call site.
+    #[cfg(not(target_arch = "aarch64"))]
+    let _ = packed_width;
     let BoundOpKind::Reduce {
         reduce_op,
         init,
@@ -6576,7 +6663,7 @@ fn run_reduce<B: Deref<Target = [f32]>>(
         #[cfg(feature = "instrument")]
         let width_tile_row_remainder_before =
             (width_tile_row_remainder_invocations(), width_tile_row_remainder_elements());
-        if try_run_width_tile(&width_path_context, &raw, output) {
+        if try_run_width_tile(&width_path_context, &raw, packed_width, output) {
             // the tile's own early return skips the rest of this function
             // (including the `counters.commit` call every other path reaches),
             // so this is instrument's only chance to record the node — read
@@ -8365,6 +8452,154 @@ unsafe fn gemm_width_tile_neon<const ROWS: usize>(
     }
 }
 
+/// Law 6 (constant staging) composed with law 5 (layout commutation),
+/// `docs/rewrite-algebra.md` section 6: a constant 2-D weight operand's
+/// panel-packed relay, built once at [`build_static_arena_with_constants`]
+/// time and read every step after. The panel width is fixed at
+/// [`WIDTH_TILE_VECS`] `* 4` (not a free parameter) because that is the
+/// exact stride [`gemm_width_tile_neon`]'s own `b.base + step*b.k_stride +
+/// v*4` read (`cpu.rs:7848`) already walks — packing chooses `k_stride ==
+/// tile_cols` so that read becomes sequential instead of the unpacked
+/// layout's `k_stride == width` (one full weight row away, ROW 203's
+/// first-touch-latency mechanism, `docs/discipline.md:17862`).
+///
+/// `data` is panel-major: panel `p`'s `k_total * tile_cols` block starts at
+/// `p * k_total * tile_cols`; row `k` inside panel `p` sits at
+/// `p*k_total*tile_cols + k*tile_cols`, `tile_cols` floats wide and
+/// contiguous. Only `full_col_tiles = width / tile_cols` panels exist — the
+/// column tail (`width % tile_cols` leftover columns) is never packed and
+/// [`run_width_tile_neon`] still reads it from the unpacked buffer, exactly
+/// as it does today.
+///
+/// Declared without an `aarch64` gate (unlike every other width-tile type)
+/// purely so [`run_reduce`]'s new `packed_width` parameter can have ONE
+/// signature on every target instead of a `#[cfg]`-conditional parameter
+/// list — every other target's value is always `None`, unused, and this
+/// struct is never populated there ([`pack_width_tile_panels`] and its
+/// scan stay `aarch64`-gated).
+// off-aarch64 or without `pack-at-plan-time`, nothing in the crate ever
+// constructs this type -- only ever passed as `None`, so its fields would
+// otherwise trip `dead_code` under `-D warnings`.
+#[cfg_attr(not(all(target_arch = "aarch64", feature = "pack-at-plan-time")), allow(dead_code))]
+struct PackedWidthPanels {
+    data: Vec<f32>,
+    tile_cols: usize,
+    k_total: usize,
+    full_col_tiles: usize,
+}
+
+/// Packs `b_data` (the full, unpacked underlying buffer a `WidthTilePlan`'s
+/// `b_operand` addresses) into [`PackedWidthPanels`], reading it with the
+/// EXACT same addressing [`run_width_tile_neon`]'s unpacked column-tile loop
+/// already uses (`base_b + col_tile*tile_cols + k*k_stride_b`) so the packed
+/// and unpacked arms are provably reading the same source elements, just
+/// writing them out in a different order — the property the bit-identity
+/// test in `cpu.rs`'s own test module checks.
+#[cfg(all(target_arch = "aarch64", feature = "pack-at-plan-time"))]
+fn pack_width_tile_panels(b_data: &[f32], base_b: i64, k_stride_b: i64, k_total: usize, width: usize) -> PackedWidthPanels {
+    let tile_cols = WIDTH_TILE_VECS * 4;
+    let full_col_tiles = width / tile_cols;
+    let mut data = vec![0.0f32; full_col_tiles * k_total * tile_cols];
+    for panel in 0..full_col_tiles {
+        let col_start = base_b + (panel * tile_cols) as i64;
+        for k in 0..k_total {
+            let row_base = col_start + k as i64 * k_stride_b;
+            let dst_base = panel * k_total * tile_cols + k * tile_cols;
+            data[dst_base..dst_base + tile_cols].copy_from_slice(&b_data[row_base as usize..row_base as usize + tile_cols]);
+        }
+    }
+    PackedWidthPanels { data, tile_cols, k_total, full_col_tiles }
+}
+
+/// Re-derives [`WidthTilePlan`] eligibility purely from `resolved` — no
+/// runtime `raw`/`output` needed, since every field [`WidthPathContext`]
+/// bundles ([`resolve_reduce_axis_shape`], [`body_shape`], each operand's
+/// stride) is a structural property of the bound op, not its data. This is
+/// what makes plan-time (bind-time, before any sentence's activation data
+/// exists) eligibility detection possible at all: the SAME gate
+/// [`width_tile_plan`] runs per invocation, run once here instead, against
+/// the identical [`BoundOp`] the arena will run every step after.
+#[cfg(all(target_arch = "aarch64", feature = "pack-at-plan-time"))]
+fn width_tile_pack_candidate(resolved: &BoundOp) -> Option<WidthTilePlan> {
+    let BoundOpKind::Reduce {
+        reduce_op,
+        init,
+        keep: Keep::Reduce,
+        out_scatter: None,
+        output_axes,
+        out_layout,
+        ..
+    } = &resolved.kind
+    else {
+        return None;
+    };
+    let body = resolved.element_body();
+    let shape = body_shape(body);
+    let ReduceAxisShape {
+        reduction_dims,
+        leading_output_axes,
+        last_output_dim,
+        width,
+        ..
+    } = resolve_reduce_axis_shape(resolved, output_axes.as_slice());
+    let leading_output_axes: &[u16] = &leading_output_axes;
+    let strides: Vec<i64> = resolved
+        .operands()
+        .iter()
+        .map(|(_, view, _)| last_output_dim.map_or(0, |dim| view.stride(dim)))
+        .collect();
+    let context = WidthPathContext {
+        resolved,
+        shape: &shape,
+        strides: &strides,
+        reduce_op: *reduce_op,
+        init: *init,
+        leading_output_axes,
+        reduction_dims: &reduction_dims,
+        last_output_dim,
+        width,
+        out_layout,
+    };
+    width_tile_plan(&context)
+}
+
+/// Scans every resolved node for a width-tile reduce whose `b` operand is
+/// one of `constant_inputs`' bound [`Op::Input`] nodes with rank exactly 2
+/// (the MLAS gate, `docs/rewrite-algebra.md`'s admission rule: packing
+/// targets a constant 2-D weight operand, never a non-constant or
+/// higher-rank one), and packs it once. Called from
+/// [`build_static_arena_with_constants`] after `constant_inputs`' data is
+/// already bound into `buffers`, so `buffers[b_node]` holds the real weight
+/// values, not the zero-filled placeholder [`build_static_arena`] sizes
+/// every input to.
+#[cfg(all(target_arch = "aarch64", feature = "pack-at-plan-time"))]
+fn build_packed_width_panels(
+    resolved: &[BoundOp],
+    shapes: &shape::Shapes,
+    buffers: &[Option<Vec<f32>>],
+    input_names: &[(NodeId, String)],
+    constant_inputs: &[(&str, &[f32])],
+) -> BTreeMap<NodeId, PackedWidthPanels> {
+    let constant_nodes: BTreeSet<NodeId> = constant_inputs
+        .iter()
+        .filter_map(|(name, _)| input_names.iter().find(|(_, candidate)| candidate == name).map(|(node, _)| *node))
+        .collect();
+    let mut packed = BTreeMap::new();
+    for computed in resolved {
+        let Some(plan) = width_tile_pack_candidate(computed) else { continue };
+        let (b_node, _, _) = computed.operands()[plan.b_operand];
+        if !constant_nodes.contains(&b_node) || shapes.of(b_node).len() != 2 {
+            continue;
+        }
+        let Some(b_data) = buffers[b_node.0 as usize].as_deref() else { continue };
+        packed.insert(
+            computed.node,
+            pack_width_tile_panels(b_data, plan.base_b, plan.k_stride_b, plan.reduction_total, plan.width),
+        );
+    }
+    packed
+}
+
 /// A single (row, column) partial sum computed the scalar way — the
 /// remainder path for a leading count or width not divisible by the tile
 /// shape. Correctness-only: `profile_hot`'s 1024^3 GEMM divides evenly by
@@ -8408,7 +8643,7 @@ fn width_tile_scalar_cell(a: KStridedTile, b: KStridedTile, k: usize, seed: f32)
 /// [`NEON_TILE_ROW_REMAINDER_ELEMENTS`]'s own coverage identity for the
 /// dot-path tile).
 #[cfg(target_arch = "aarch64")]
-fn run_width_tile_neon(plan: &WidthTilePlan, raw: &[&[f32]], output: &mut [f32]) {
+fn run_width_tile_neon(plan: &WidthTilePlan, raw: &[&[f32]], packed: Option<&PackedWidthPanels>, output: &mut [f32]) {
     #[cfg(feature = "instrument")]
     WIDTH_TILE_GATE_PASSES.fetch_add(1, Ordering::Relaxed);
 
@@ -8427,10 +8662,16 @@ fn run_width_tile_neon(plan: &WidthTilePlan, raw: &[&[f32]], output: &mut [f32])
     let mut width_tile_row_remainder_elements = 0u64;
 
     let data_a = raw[plan.a_operand];
-    let data_b = raw[plan.b_operand];
+    let data_b_unpacked = raw[plan.b_operand];
     let tile_cols = WIDTH_TILE_VECS * 4;
     let row_tiles = plan.leading_total / WIDTH_TILE_ROWS;
     let col_tiles = plan.width / tile_cols;
+    // law 6∘5: only trusted when the packed panel buffer covers every full
+    // column tile this call will walk — built once, at plan time, against
+    // this exact node's `plan.width`, so `full_col_tiles >= col_tiles`
+    // always holds when `Some`; the `filter` is defense against a stale
+    // buffer from a differently-shaped node, never expected to reject here.
+    let packed = packed.filter(|panels| panels.full_col_tiles >= col_tiles);
 
     for row_tile in 0..row_tiles {
         let row_start = row_tile * WIDTH_TILE_ROWS;
@@ -8439,18 +8680,29 @@ fn run_width_tile_neon(plan: &WidthTilePlan, raw: &[&[f32]], output: &mut [f32])
 
         for col_tile in 0..col_tiles {
             let col_start = col_tile * tile_cols;
-            let base_b = plan.base_b + col_start as i64;
+            // packed: panel `col_tile`'s block, `k_stride == tile_cols`
+            // (sequential); unpacked: the original strided read,
+            // `k_stride == plan.k_stride_b` (one weight row apart).
+            let (b_data, base_b, k_stride_b) = match packed {
+                Some(panels) => (
+                    panels.data.as_slice(),
+                    (col_tile * panels.k_total * panels.tile_cols) as i64,
+                    panels.tile_cols as i64,
+                ),
+                None => (data_b_unpacked, plan.base_b + col_start as i64, plan.k_stride_b),
+            };
             let mut tile_out = [[plan.seed; WIDTH_TILE_VECS * 4]; WIDTH_TILE_ROWS];
 
             // caller-checked: `base_a`/`base_b` plus every stride-scaled
-            // offset the kernel touches stay inside `data_a`/`data_b`,
+            // offset the kernel touches stay inside `data_a`/`b_data`,
             // guaranteed by `row_tiles`/`col_tiles` only covering whole
-            // tiles carved out of `plan.leading_total`/`plan.width`.
+            // tiles carved out of `plan.leading_total`/`plan.width` (packed:
+            // `full_col_tiles`/`k_total` sized exactly to match).
             unsafe {
                 gemm_width_tile_neon::<WIDTH_TILE_ROWS>(
                     KStridedTile { data: data_a, base: base_a, k_stride: plan.k_stride_a },
                     plan.row_stride_a,
-                    KStridedTile { data: data_b, base: base_b, k_stride: plan.k_stride_b },
+                    KStridedTile { data: b_data, base: base_b, k_stride: k_stride_b },
                     plan.reduction_total,
                     &mut tile_out,
                 );
@@ -8480,7 +8732,7 @@ fn run_width_tile_neon(plan: &WidthTilePlan, raw: &[&[f32]], output: &mut [f32])
                         base: plan.base_a + row as i64 * plan.row_stride_a,
                         k_stride: plan.k_stride_a,
                     },
-                    KStridedTile { data: data_b, base: plan.base_b + col as i64, k_stride: plan.k_stride_b },
+                    KStridedTile { data: data_b_unpacked, base: plan.base_b + col as i64, k_stride: plan.k_stride_b },
                     plan.reduction_total,
                     plan.seed,
                 );
@@ -8510,7 +8762,15 @@ fn run_width_tile_neon(plan: &WidthTilePlan, raw: &[&[f32]], output: &mut [f32])
 
             for col_tile in 0..col_tiles {
                 let col_start = col_tile * tile_cols;
-                let base_b = plan.base_b + col_start as i64;
+                // same packed/unpacked selection the main tile above uses.
+                let (b_data, base_b, k_stride_b) = match packed {
+                    Some(panels) => (
+                        panels.data.as_slice(),
+                        (col_tile * panels.k_total * panels.tile_cols) as i64,
+                        panels.tile_cols as i64,
+                    ),
+                    None => (data_b_unpacked, plan.base_b + col_start as i64, plan.k_stride_b),
+                };
                 let mut tile_out = [[plan.seed; WIDTH_TILE_VECS * 4]; $rows];
 
                 // caller-checked: same argument `run_width_tile_neon`'s main
@@ -8523,7 +8783,7 @@ fn run_width_tile_neon(plan: &WidthTilePlan, raw: &[&[f32]], output: &mut [f32])
                     gemm_width_tile_neon::<$rows>(
                         KStridedTile { data: data_a, base: base_a, k_stride: plan.k_stride_a },
                         plan.row_stride_a,
-                        KStridedTile { data: data_b, base: base_b, k_stride: plan.k_stride_b },
+                        KStridedTile { data: b_data, base: base_b, k_stride: k_stride_b },
                         plan.reduction_total,
                         &mut tile_out,
                     );
@@ -8556,7 +8816,7 @@ fn run_width_tile_neon(plan: &WidthTilePlan, raw: &[&[f32]], output: &mut [f32])
                             base: plan.base_a + row as i64 * plan.row_stride_a,
                             k_stride: plan.k_stride_a,
                         },
-                        KStridedTile { data: data_b, base: plan.base_b + col as i64, k_stride: plan.k_stride_b },
+                        KStridedTile { data: data_b_unpacked, base: plan.base_b + col as i64, k_stride: plan.k_stride_b },
                         plan.reduction_total,
                         plan.seed,
                     );
@@ -8619,10 +8879,10 @@ fn run_width_tile_neon(plan: &WidthTilePlan, raw: &[&[f32]], output: &mut [f32])
 /// target keeps the per-element width path only, this function never exists
 /// there.
 #[cfg(target_arch = "aarch64")]
-fn try_run_width_tile(context: &WidthPathContext, raw: &[&[f32]], output: &mut [f32]) -> bool {
+fn try_run_width_tile(context: &WidthPathContext, raw: &[&[f32]], packed: Option<&PackedWidthPanels>, output: &mut [f32]) -> bool {
     match width_tile_plan(context) {
         Some(plan) => {
-            run_width_tile_neon(&plan, raw, output);
+            run_width_tile_neon(&plan, raw, packed, output);
             true
         }
         None => false,
@@ -15161,7 +15421,7 @@ fn run_reduce_typed<T: Element>(
             .collect();
         // SAFETY: the `TypeId` check above proves `T == f32`.
         let output_f32 = unsafe { reinterpret_slice_mut(output) };
-        return run_reduce(resolved, &buffers_f32, output_f32);
+        return run_reduce(resolved, &buffers_f32, output_f32, None);
     }
     run_reduce_generic(resolved, buffers, index_buffers, output)
 }
