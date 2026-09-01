@@ -15679,3 +15679,74 @@ Executor-internal graph-construction/execution code, not sans-IO -- principle §
 - `CARGO_TARGET_DIR=<scratch> cargo nextest run -p proxima-tensor --features std,instrument` -- reproduces 461/0/4
 - `CARGO_TARGET_DIR=<scratch> cargo nextest run -p proxima-autograd --all-features` -- reproduces 145/0/0
 - The reverted diagnostic (`ARENA_PER_NODE_TICKS`/`diag_reset_arena_per_node`/`diag_dump_arena_per_node` in `cpu.rs`, the `arena-diag` Cargo feature, and the `main`/`sweep_arena` driver additions in `train_step_lane.rs`) is described in full above -- a future session re-creates it from this row's own Method section; the 3 raw run logs (`row174_run1.log`/`row174_run2.log`/`row174_run3.log`) and the aggregated per-node table (`row174_aggregated.tsv`) this row's table was computed from are preserved at `/private/tmp/claude-501/-Users-brianbruggeman-repos-slot-0/7f296db5-2f93-416b-8be0-1e516900b72c/scratchpad/` for this session only (scratchpad, not durable)
+
+## ROW 175 -- constant-hoist lands the exact lever ROW 174 named: `StaticArena::static_nodes`, a `Constant`/`Iota` execution-once skip mirroring ROW 167's own `dead` field, `-9.3%` on the sealed step, lands at 1.8996ms against the pre-registered <=1.95ms bar
+
+Repo: `/Users/brianbruggeman/repos/slot-0/proxima-wt-convsched`, branch `perf/constant-hoist`, off `main` `28d2a5e` (ROW 174's own sealed HEAD, measurement-only, zero source diff). Host: Apple M1 Max, macOS, arm64. Build: `release` for every timed number (`cargo build --release -p proxima-autograd --bench train_step_lane --features train-step-bench`, binary invoked directly with `--bench`, no criterion, no args); `test` profile for nextest. **Host loadout, named per principle 16/18**: `uptime` load average 20.68/20.70/18.06 at session start, settling to 9.75/14.28/15.88 by the sealed-run window; `pgrep -fl "cargo|rustc|snapshot-probe|psci-dispatch-probe"` showed the SAME 5-process `snapshot-probe`/`psci-dispatch-probe` class ROW165/166/167/174 already named as resident (not this worktree's, not killed, per this session's own isolation contract), plus this worktree's own `sccache`/`cdb-daemon`. Budget: 30-minute hard ceiling, micro-vetted, one sealed 3-run number.
+
+### The lever
+
+ROW 174 found 50 `Constant`-kind resolved nodes costing 191.909us/step (9.17% of the then-sealed 2.0935ms step), dominated by node 86 (`[32,784,128]` broadcast fill, 185.904us alone), unconditionally re-executed every step by `run_resolved_nodes_in_arena` even though a `Constant`'s value is baked into its `BoundOp` at `bind::bind` time and depends on nothing runtime. This row lands exactly the fix shape ROW 174 named as the next session's lever: `StaticArena` (`proxima-tensor/src/cpu.rs:474`) gains a new private field `static_nodes: BTreeSet<NodeId>` alongside the existing `dead: BTreeSet<NodeId>` (ROW 167's own field, untouched), computed by a new free function `static_resolved_nodes` -- every LIVE `resolved` node (not already in `dead`) whose `BoundOpKind` is `Constant` or `Iota`. `build_static_arena` runs every `static_nodes` member's `BoundOp` exactly ONCE, right after computing `dead`/`static_nodes` and before returning the built `StaticArena` -- the identical `take`/`run_node_into`/`put-back` sequence `run_resolved_nodes_in_arena` already uses for a live step, just hoisted to build time. `run_resolved_nodes_in_arena` (`cpu.rs:660`) gained one clause: `arena.dead.contains(&computed.node) || arena.static_nodes.contains(&computed.node)`, so a static node's buffer is written once at build time and never touched again by any subsequent step.
+
+**Iota verified runtime-independent before inclusion, per this task's own instruction**: `bind.rs`'s own `operands()` match returns `&[]` for `Iota | Constant` alike (`bind.rs:277`-`281`) -- neither variant carries any operand reference at all -- and `run_iota` (`output[i] = i` from the slot's own position) reads nothing but the output buffer's own length, which `build_static_arena`'s shape inference already fixes once, call-invariantly, for the arena's whole lifetime. Both `Constant` (`run_constant`, `output.fill(value)`) and `Iota` are call-invariant by construction; both are included in `static_nodes`.
+
+### Correctness -- the aliasing guarantee, read not assumed
+
+**Claim**: a `static_nodes` member's buffer is never written by anything other than `build_static_arena`'s one-time run. The one other place `StaticArena` buffers move without a fresh compute is `evaluate_named_with_arena_in_place`'s rebind swap (`cpu.rs:719`-`751`, ROW 165's own lever): `arena.buffers.swap(computed_index, input_index)` for each `(computed, name)` pair in the caller-supplied `rebind` slice. Two guarantees, both read from source, not inferred:
+
+1. **`input_index` is never a static node's index.** `input_index` is resolved via `arena.input_names` (`cpu.rs:733`-`735`), which `build_static_arena` populates ONLY from `block_node_ids(program)` -- every `Op::Input` leaf. `Op::Constant`/`Op::Iota` nodes are never `Op::Input` (disjoint `Op` variants), so no static node's buffer index can ever appear as `input_index`.
+2. **`computed_index` is never a static node's index, by the caller's own documented contract**, not merely by convention observed once: `proxima-autograd/src/train.rs:56`-`57` states `rebind` "pairs a node this step just computed (e.g. `adam_step`'s `new_param`)" -- every `rebind` pair's `computed` field is one of `adam_step`'s own output nodes, `BoundOpKind::Elementwise` (the Adam update chain ROW 166 already characterized as an 8-op fused body), never `BoundOpKind::Constant`/`Iota`. `train.rs:74`/`128` (`arena_outputs`) also folds every `rebind` node into `effective_outputs`, so even in the hypothetical case a caller passed a `Constant` node as a rebind target, `dead_resolved_nodes`/`static_resolved_nodes`'s own output-membership check is irrelevant here (a `Constant` CAN still be a `static_nodes` member while also being a requested output -- `static_resolved_nodes` only excludes `dead`, not outputs) -- but this codebase's one production caller (`train.rs`) never constructs such a pair, and no test in this row's own suite does either. The mechanism that actually matters: the swap exchanges `Vec<f32>` **headers** (`Vec::swap`), not element contents, so even if a future caller mis-paired a `Constant` node into `rebind`, the buffer at the constant's OWN NodeId index would still hold ITS OWN literal on the swap -- the corruption such a misuse would cause is identical in shape to what ROW 165's own doc already flags for any misused rebind pair (a node whose buffer content stops matching what a later read expects), not a NEW failure mode this row introduces.
+
+Bit-identical, real fixture, 3 consecutive steps: `assert_arena_bit_identical_to_baseline` (`train_step_lane.rs:453`, unmodified) printed `arena vs baseline bit-identical over 3 consecutive real steps (loss + all 12 rebind outputs)` on every one of the 7 bench invocations run this session (1 correctness-plus-ON micro-vet, 3 OFF micro-vet, 3 sealed).
+
+### Constant-executes-once evidence -- synthetic unit tests, `proxima-tensor/src/cpu.rs` `mod tests`
+
+- `build_static_arena_runs_a_live_constant_once_and_never_again` -- a one-input program (`a`) with a live `Constant` (`c=5.0`) feeding `live = a + c`. Step one evaluates `live` bit-correctly (`a + 5.0`). The test then directly corrupts `arena.buffers[constant]` to `999.0` (a same-module private-field write, not a public API), then runs TWO more arena steps: both fold the CORRUPTED `999.0`, not the literal `5.0` -- proof `run_resolved_nodes_in_arena` never re-executed the constant a second time, not merely that outputs stayed bit-identical (a coincidence a same-shape re-run of `run_constant` would also produce, since `run_constant` is idempotent on its own literal -- corruption is the only test shape that actually distinguishes "ran once" from "ran every step and always produced the same answer").
+- `a_dead_constant_is_marked_dead_not_static` -- a `Constant` with zero consumers lands in `dead`, never also in `static_nodes` (`static_resolved_nodes` explicitly excludes anything `dead_resolved_nodes` already marked), so a dead constant costs nothing, not even the one-time run `static_nodes` would otherwise pay.
+
+Both pass: `cargo nextest run -p proxima-tensor --features std,instrument -E 'test(build_static_arena_runs_a_live_constant_once) or test(a_dead_constant_is_marked_dead_not_static) or test(build_static_arena_elides) or test(build_static_arena_does_not_elide)'` -- **4/4 passed, N=4**.
+
+### Targeted suites
+
+`cargo nextest run -p proxima-tensor -p proxima-autograd -E 'test(evaluate_named_with_arena) or test(central_difference) or test(differentiate_wanted)'` -- **21/21 passed, N=21** (same filter shape ROW 167 used; `central_difference`/`differentiate_wanted` live in `proxima-autograd`, `evaluate_named_with_arena` in `proxima-tensor`).
+
+### Micro-vet -- elision on vs off, same binary hash, same real fixture (n=3 each, per-run `pgrep`/`uptime` marked)
+
+Toggled by temporarily forcing `static_nodes = BTreeSet::new()` in `build_static_arena` (reverted before commit; `git diff main -- proxima-tensor/src proxima-autograd` empty afterward, confirmed):
+
+| arm | run1 p50 | run2 p50 | run3 p50 | mean-of-p50 | cross-run CoV |
+|---|---:|---:|---:|---:|---:|
+| static-node skip OFF (forced empty, `dead`-elision from ROW167 still active) | 2.0580ms | 2.0696ms | 2.0617ms | 2.0631ms | 0.29% |
+| static-node skip ON (this row's landed code) | 1.8823ms | 1.8773ms | 1.8781ms | 1.8792ms | 0.15% |
+
+**-8.91%**, both arms' own bit-identical assertion PASSED every run, OFF arm matching ROW 174's own sealed 2.0935ms mean-of-p50 within noise (confirms the toggle isolates ONLY this row's change).
+
+### Final sealed number -- 3 consecutive runs, landed release binary, `train_step_arena` arm
+
+| run | p50 | mean | CoV |
+|---|---:|---:|---:|
+| 1 | 1.8881ms | 1.9162ms | 2.32% |
+| 2 | 1.8738ms | 1.8958ms | 2.73% |
+| 3 | 1.9368ms | 1.9398ms | 1.96% |
+
+Mean-of-p50 = **1.8996ms**, cross-run std-of-p50 = 0.0270ms, **cross-run CoV = 1.42%** -- inside the 5% trust threshold. Delta vs ROW 174's own sealed 2.0935ms mean-of-p50 (this row's reprofiled baseline, ROW167's own HEAD, unchanged by ROW 174's measurement-only session): **-9.26%** (2.0935ms -> 1.8996ms), exceeding the task's own pre-registered success bar **<=1.95ms** (conservative -7% target) and landing slightly beyond the 9.17%-of-step ceiling ROW 174 measured (within cross-session host-noise: node 86's own 185.904us was ROW 174's single largest constant, but 49 smaller scalar constants also stop re-running, and ROW174's own instrumentation-tax finding -- +2.03%/42.4us -- was itself uninstrumented in this row's numbers, so a small additional margin above the named 191.9us ceiling is expected, not anomalous). All 3 runs' own bit-identical assertion PASSED.
+
+### Allocation budget, tier, scope
+
+Zero new allocations on the hot (per-step) path: `static_nodes: BTreeSet<NodeId>` is built ONCE inside `build_static_arena` (same site as `dead`, `resolved`, `shapes`, `buffers`), consulted only via `.contains()` (O(log n), no allocation) inside `run_resolved_nodes_in_arena`. The one-time run of each `static_nodes` member inside `build_static_arena` reuses the SAME pre-sized `buffers[node_index]` slot every other resolved node already gets -- no new `Vec` allocated beyond what `build_static_arena` already allocates for every node's output buffer regardless of this row. No new `Op`/`ScalarOp`/public type; `static_nodes` is a private `StaticArena` field, `static_resolved_nodes` a private free function. `bind::bind`'s own construction is untouched: `git diff main -- proxima-tensor/src/bind.rs` is empty, and `git diff --stat main` touches only `proxima-tensor/src/cpu.rs`.
+
+### Opt-sweep note
+
+Executor-internal graph-execution code, not sans-IO -- principle Section-11's axes N/A by domain, matching ROW159-174's own framing.
+
+### Oracles, this session
+
+- `cargo nextest run -p proxima-tensor --features std,instrument` -- **463 passed, 0 failed, 4 skipped** (461 ROW174 baseline + 2 net-new tests this row adds)
+- `cargo clippy -p proxima-tensor --features std,instrument --all-targets -- -D warnings` -- clean, exit 0
+
+### Re-prove commands
+
+- `git diff main -- proxima-tensor/src/cpu.rs` -- the whole landed diff (one file)
+- `cargo nextest run -p proxima-tensor --features std,instrument` -- expect 463/0/4
+- `cargo nextest run -p proxima-tensor -p proxima-autograd -E 'test(evaluate_named_with_arena) or test(central_difference) or test(differentiate_wanted)'` -- expect 21/21
+- `cargo build --release -p proxima-autograd --bench train_step_lane --features train-step-bench` then run the produced binary with `--bench` -- expect `arena vs baseline bit-identical` printed and `train_step_arena` p50 near 1.90ms
