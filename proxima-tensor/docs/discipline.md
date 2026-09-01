@@ -17416,3 +17416,100 @@ cd proxima-wt-convpromo && CARGO_TARGET_DIR=<scratch> cargo clippy -p proxima-on
 cd proxima-wt-convpromo && CARGO_TARGET_DIR=<scratch> cargo nextest run -p proxima-onnx --all-features
 git diff --stat HEAD origin/main -- proxima-tensor/src/cpu.rs   # empty -- confirms this row's own measurements are unaffected by ROW 192's mid-session landing to main
 ```
+
+## ROW 195 -- BGE-small lane's three named debts paid in one session: incumbent arms (onnxruntime CPU EP + torch/transformers, same real weights, same three real sentences), the machine-roofline derivation `rooflines.md` flagged "not computable," and a per-node-class profile of the 26.68 ms/sentence e2e number, via the landed `epilogue-profile-probe` feature (60-minute hard budget, `bench/bge-debts` branch, `proxima-wt-bge` worktree, off `main` `a7e8605` unchanged at fetch and at land time -- ROW 194 is the prior row, next-free numbering confirmed by `grep -c '^## ROW' discipline.md` = 186 plus ROW 192/193/194 already present).
+
+Model: the local BGE checkout's real `model.onnx` (133,093,490 bytes on disk), passed via `BGE_MODEL_PATH` only, never written into a tracked file. Cached HF snapshot (`BAAI/bge-small-en-v1.5`) already present at `~/.cache/huggingface/hub` -- no download performed, `HF_HUB_OFFLINE=1` set for the torch arm.
+
+### CELL 1 -- paired incumbent arms, same three sentences and token-id arrays `bge_eval.rs::sentences()` hardcodes
+
+All three arms embed the SAME token-id arrays (`[101, 1996, 4937, 2938, 2006, 1996, 13523, 102]` / `[101, 1037, 4937, 2003, 3564, 2006, 1037, 13523, 102]` / `[101, 8559, 5584, 7607, 9593, 2943, 102]`), CLS-pool, L2-normalize, 5 runs each, single-thread where the incumbent exposes the knob:
+
+| arm | mean ms/sentence | CoV | runs | design-favors |
+|---|---|---|---|---|
+| **onnxruntime CPU EP** (`intra_op_num_threads=1`, `inter_op_num_threads=1`, sequential) -- SAME `model.onnx`, SAME graph | **5.6296** | **0.42%** | 5 | **incumbent** |
+| torch/transformers eager (`AutoModel.from_pretrained`, `torch.set_num_threads(1)`, cached weights, offline) | **10.0360** | **2.87%** (after 3-pass warm-up; 1-pass warm-up gave 16.14% CoV, first-call torch allocator/kernel-selection warm-up bleeding into the timed window -- named, not hidden) | 5 | incumbent |
+| ours (`cargo run --release -p proxima-onnx --example bge_eval`, `BGE_EVAL_RUNS=5`, fused epilogue) -- sweep A | **24.5667** | **4.26%** | 5 | ours |
+| ours -- sweep B (independent re-run, embedding-preview print added) | **26.3525** | **3.99%** | 5 | ours |
+
+**Honest read: ours is 4.37-4.68x SLOWER than onnxruntime on the identical graph/weights (100% frequency -- this is the only workload, there is no colder path to defer to), and 2.45-2.62x slower than torch's eager, unoptimized, un-graph-compiled execution.** This is a real loss on the incumbent's own design point (onnxruntime IS a graph-compiled CPU inference engine; single-thread was chosen specifically to match this crate's own single-thread evaluator, not to handicap it), not a niche-vs-hot mismatch -- both sides ran the identical op graph.
+
+**Correctness parity (principle 14 -- the incumbent's output is the oracle absent proof otherwise):**
+
+| pair | cosine(A,B similar) | cosine(A,C dissimilar) | cosine(B,C dissimilar) |
+|---|---|---|---|
+| ours | 0.936311 | 0.378776 | 0.334176 |
+| onnxruntime | 0.936311 | 0.378777 | 0.334176 |
+| torch | 0.936311 | 0.378777 | 0.334176 |
+
+Per-element embedding deltas (first 8 of 384 dims, sentence A, `L2`-normalized `f32`): ours vs onnxruntime max abs delta **6.5e-8**; torch vs onnxruntime max abs delta **6.7e-8** -- both inside `f32` machine epsilon (1.19e-7), i.e. bit-level parity modulo reduction-order noise. No correctness gap; the loss is pure throughput.
+
+Re-prove: `cd proxima-wt-bge && CARGO_TARGET_DIR=<scratch> BGE_MODEL_PATH=<local BGE checkout>/model.onnx BGE_EVAL_RUNS=5 cargo run --release -p proxima-onnx --example bge_eval` for ours; the onnxruntime/torch arms are throwaway venv scripts (`ort_bench.py`, `torch_bench.py`), not committed -- their token-id arrays, thread settings, and timing methodology are transcribed above and independently re-derivable against the same `BGE_MODEL_PATH` / cached HF snapshot.
+
+### CELL 2 -- machine roofline, derived from the graph's own facts (closes the "not computable" DEBT)
+
+Full derivation lives in `proxima-tensor/docs/rooflines.md`'s BGE lane (replacing the ROW 191 "not computable" text, debt history line kept). Summary:
+
+- Architecture facts read off the real, cached `config.json` (hidden=384, layers=12, heads=12, intermediate=1536, vocab=30522) and cross-checked against the ONNX graph's own op histogram (96 `MatMul`s: 48x `(384,384)` QKVO + 12x `(384,1536)` + 12x `(1536,384)` FFN + 24 no-initializer attention matmuls = 96, matching the task brief's own citation exactly) and initializer byte sum (132,848,640 bytes f32, closing the 133 MB weight-stream DEBT against the 133,093,490-byte on-disk file).
+- MAC count per sentence (formula, 12-layer BERT encoder): mean **170,465,280 MACs** across the 3 real sentences (149.1M/191.8M/170.5M at 7/9/8 tokens) -- cross-checked against `instrument`'s own `mac_ops` counter (170,631,168 averaged over the CELL 3 profile run's 60 `evaluate_named` calls), **0.1% agreement** between the hand-derived formula and a measured counter.
+- Arithmetic intensity = 170,465,280 MACs / 132,848,640 bytes = **1.283 MACs/byte**, above the ridge point (48.5 GMAC/s NEON / 75.58 GB/s midpoint bandwidth = 0.642 MACs/byte) at all three real sentence lengths -- **compute binds, not bandwidth.**
+- **Machine roofline: 3.515 ms/sentence** (mean; 3.074-3.955 ms range across 7/8/9 tokens).
+- **Gap to machine roofline: 26.68 ms / 3.515 ms = 7.59x** (ROW 191's own cited e2e number; 6.75x-8.68x across the individual sentence lengths' own roofline).
+- AMX candidate (ROW 189) explicitly named as unmeasured at this GEMM shape (ROW 189 flagged it at conv shapes only) -- not applied, not guessed.
+
+### CELL 3 -- per-node-class profile of the 26.68 ms/sentence number
+
+New example `proxima-onnx/examples/bge_epilogue_profile.rs`, gated on the EXISTING `epilogue-profile-diag` feature (no new feature minted -- reuses `epilogue_profile.rs`'s own `epilogue-profile-probe`/`instrument` wiring unchanged, per gate 14's internal-primitive-audit). 20 iterations x 3 sentences = 60 `evaluate_named` calls, 3-call warm-up excluded:
+
+| node class | calls | ns total | % of attributed step time | ns/call |
+|---|---|---|---|---|
+| (a) reduce-fold (96 `MatMul`s + reduce-shaped attention ops) | 10,200 | 1,228,430,665 | **88.65%** | 120,434.4 |
+| (b) post-reduce epilogue (fused `LayerNorm`/bias) | 4,320 | 43,645,297 | 3.15% | 10,103.1 |
+| (c) everything else (softmax/transpose/reshape/gather glue) | 36,120 | 113,584,993 | 8.20% | 3,144.7 |
+| total attributed | 50,640 | 1,385,660,955 | 100% | 23.09 ms/sentence attributed vs 25.62 ms/sentence wall-clock (the ~2.5 ms/sentence delta is per-sentence `lower_graph_pinned` glue outside the profiled loop) |
+
+**Named next lever:** class (a)'s reduce/matmul mass, measured via `instrument`'s own `mac_ops` counter over the same calls, runs at **8.31 GMAC/s effective throughput** (10,750,162,752 MACs / 1,293.2 ms across 63 calls incl. warm-up) against the 48.5 GMAC/s NEON compute ceiling -- **5.84x gap inside the reduce/matmul path alone**, the dominant contributor to the 7.59x e2e gap. The fused `LayerNorm` epilogue (class b, 3.15% of time) is already near its own measured floor (ROW 191, 5.25 ns/element) and is NOT where the remaining time lives -- the 96 interpreted-dispatch `MatMul`s are.
+
+### Gates run this session
+
+- `cargo build --release -p proxima-onnx --example bge_eval`: exit 0.
+- `cargo build --release -p proxima-onnx --example bge_epilogue_profile --features epilogue-profile-diag`: exit 0.
+- `cargo nextest run -p proxima-tensor`: **459 passed, 0 failed, 4 skipped**, exit 0.
+- `cargo nextest run -p proxima-onnx --all-features`: **98 passed, 0 failed, 4 skipped**, exit 0 -- matches ROW 194's own count exactly, no regression from the new example.
+- `cargo clippy -p proxima-onnx --all-targets --all-features -- -D warnings`: clean, exit 0 (covers the new `bge_epilogue_profile.rs` example and the two added lines in `bge_eval.rs`).
+- `cargo doc -p proxima-tensor --no-deps --all-features`: clean, exit 0, `Generated .../doc/proxima_tensor/index.html`.
+
+### Allocation budget
+
+N/A to this row per the same convention ROW 192 used for a measurement-only session -- no hot-path source changed in `proxima-tensor`/`proxima-onnx` libraries; the new example is diagnostic-only (behind `epilogue-profile-diag`, never a production default) and `bge_eval.rs`'s own two added `println!` lines are cold-path (post-computation reporting), not hot-path.
+
+### Host loadout
+
+Both cargo builds and all `cargo nextest`/`clippy`/`doc` gates ran with no other `cargo`/`rustc`/`nextest`/`criterion` process observed active (single-agent session, box otherwise idle for this run); the onnxruntime/torch venv benches ran on the same host, python process only, no other agents active in this worktree per the task's own box-clear guarantee.
+
+### Named, NOT attempted this session (out of the 60-minute budget)
+
+- Splitting class (a)'s reduce-fold mass by MatMul *shape* (QKVO `(384,384)` vs FFN `(384,1536)`/`(1536,384)` vs the 24 no-initializer attention matmuls) -- the probe attributes by node kind, not shape; the FFN matmuls carry ~4x the MACs/call of the QKVO matmuls and would sharpen the lever further.
+- Activation-bytes-moved (~3.7 MB/sentence, DERIVED from hidden-state tensor sizes) is not counter-measured -- does not change the binding-constraint conclusion (weight bytes dominate ~36x) but is named as an estimate, not a measured figure.
+- AMX-measured rate at BGE's own GEMM shapes -- named as unmeasured, not applied to the roofline.
+- A multi-thread onnxruntime arm (this row deliberately pinned `intra_op_num_threads=1` to match this crate's own single-thread evaluator; a multi-thread onnxruntime number would widen the gap further and was out of this row's own scope).
+
+### Re-prove commands (principle 16)
+
+```
+# ours, paired sweep (CELL 1 + wall-clock cross-check for CELL 3)
+cd proxima-wt-bge && CARGO_TARGET_DIR=<scratch> BGE_MODEL_PATH=<local BGE checkout>/model.onnx BGE_EVAL_RUNS=5 cargo run --release -p proxima-onnx --example bge_eval
+
+# per-node-class profile (CELL 3)
+cd proxima-wt-bge && CARGO_TARGET_DIR=<scratch> BGE_MODEL_PATH=<local BGE checkout>/model.onnx cargo run --release -p proxima-onnx --example bge_epilogue_profile --features epilogue-profile-diag
+
+# gates
+cd proxima-wt-bge && CARGO_TARGET_DIR=<scratch> cargo nextest run -p proxima-tensor
+cd proxima-wt-bge && CARGO_TARGET_DIR=<scratch> cargo nextest run -p proxima-onnx --all-features
+cd proxima-wt-bge && CARGO_TARGET_DIR=<scratch> cargo clippy -p proxima-onnx --all-targets --all-features -- -D warnings
+cd proxima-wt-bge && CARGO_TARGET_DIR=<scratch> cargo doc -p proxima-tensor --no-deps --all-features
+
+# architecture facts (CELL 2) -- onnxruntime/torch venv scripts are throwaway, not committed;
+# the ONNX-graph facts they printed are independently re-derivable via proxima_onnx::pipe::parse_complete
+# against the same on-disk model.onnx, or via the cached HF config.json directly.
+```

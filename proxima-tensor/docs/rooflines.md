@@ -462,62 +462,154 @@ achieved rate, not against this box's hardware limit.
 
 **Shape, as measured (not assumed):** 3 real sentences, 8/9/7 tokens,
 hidden=384, 25 LayerNorm sites/sentence (ROW 191, `discipline.md:17121`).
-**33M params** and full layer/head/intermediate-size architecture are **not
-recorded anywhere in `discipline.md`** — the log measures per-op costs
-(epilogue kernel, LayerNorm) and e2e sentence latency, never a full op
-histogram with total MAC count. A standard-formula MAC estimate (MACs/token
-~= param count, the usual transformer approximation) would require assuming
-architecture facts (layer count, intermediate size, attention head count)
-this repo's own log does not cite — **flagged as DEBT below, not computed**,
-per this session's own instruction that unmeasured constants are named, not
-guessed.
 
-### What IS measured, and grounds a partial roofline
+**Debt history:** ROW 191 flagged full architecture (layer count,
+intermediate size, head count), the 133 MB weight-stream-vs-cache framing,
+and a per-op profiler breakdown as three DEBTs — "not computable" pending
+those facts. ROW 195 closes all three: architecture facts read directly off
+the real model's own `config.json` (cached on-host,
+`BAAI/bge-small-en-v1.5`, not assumed) and cross-checked against the ONNX
+graph's own op histogram (`onnx.load` on the real `model.onnx`, 96 `MatMul`
+nodes counted directly — matches the task brief's own citation); MAC/byte
+counts derived from those facts; and a per-node-class profile run via the
+landed `epilogue-profile-probe` feature (`proxima-onnx/examples/
+bge_epilogue_profile.rs`).
 
-| quantity | value | cite |
+### Architecture facts (MEASURED, not assumed)
+
+| quantity | value | source |
 |---|---|---|
-| interpreted `apply_body` evaluator, LayerNorm tail (pre-fusion) | **32.90 ns/element** | ROW 183, cited at ROW 191 `discipline.md:17123` |
-| fused LayerNorm epilogue kernel | **5.25 ns/element** (1,208,877 ns / 230,400 elements) | ROW 191, `discipline.md:17123` |
-| LayerNorm-tail speedup (fused vs interpreted) | **6.3x** | ROW 191, `discipline.md:17123` |
-| engagement | 75 hits/run (25/sentence x 3), 230,400 elements/run | ROW 191, `discipline.md:17121` |
-| e2e per-sentence, fused (5 paired runs) | **26.68 ms** (CoV 4.68%) | ROW 191, `discipline.md:17123` |
-| e2e per-sentence, unfused | **27.49 ms** (CoV 12.63%, one run to 34.26ms) | ROW 191, `discipline.md:17123` |
-| e2e delta | **-0.81 ms (~2.9%)**, inside the unfused arm's own noise band | ROW 191, `discipline.md:17123` |
-| LayerNorm epilogue's own share of sentence time | ~1.2 ms of ~26 ms, **~4.5%** | ROW 191, `discipline.md:17123` |
+| hidden size | 384 | `config.json` (cached HF snapshot) + ONNX graph output shape |
+| encoder layers | 12 | `config.json`; cross-checked via `encoder.layer.{0..11}` node-name prefixes in the ONNX graph, 12 distinct indices found |
+| attention heads | 12 (head_dim=32) | `config.json` |
+| intermediate (FFN) size | 1536 | `config.json`; cross-checked via ONNX initializer shapes `(384,1536)`/`(1536,384)`, 12 of each |
+| vocab size | 30522 | `config.json`; cross-checked via ONNX initializer shape `(30522,384)` |
+| MatMul node count | **96** | direct ONNX graph node count (`onnx.load`, `op_type == "MatMul"`) -- matches the task brief's own citation |
+| MatMul shape breakdown | 48x `(384,384)` (Q/K/V/O per 12 layers), 12x `(384,1536)` + 12x `(1536,384)` (FFN per 12 layers), 24x no-initializer (`Q@K^T`, `softmax@V`, 2/layer x 12) | direct node/initializer inspection; 48+12+12+24=96 |
+| total initializer elements | 33,212,160 | direct ONNX initializer sum (`sum(prod(dims))`) |
+| total initializer bytes (f32) | **132,848,640 bytes (126.7 MiB)** | 33,212,160 x 4; closes the 133 MB weight-stream DEBT -- the on-disk `model.onnx` is 133,093,490 bytes total (protobuf node/string overhead accounts for the ~245 KB difference from the tensor-payload-only figure) |
+
+Re-prove command (no tracked path to the model — pass via `BGE_MODEL_PATH`,
+same convention as `bge_eval.rs`):
+```
+cd <worktree> && BGE_MODEL_PATH=<local BGE checkout>/model.onnx python3 inspect_graph.py
+```
+(`inspect_graph.py` is a throwaway `onnx`-package inspection script, not
+committed -- the MatMul-count/shape/initializer-byte facts it printed are
+transcribed above and independently re-derivable from
+`proxima_onnx::pipe::parse_complete` + `GraphProto` against the same
+on-disk file, or from the cached HF `config.json` directly.)
+
+### MAC count per sentence (DERIVED from the architecture facts above)
+
+Per encoder layer, sequence length S, hidden H=384, intermediate I=1536,
+12 heads (head_dim H/12=32):
+
+- QKVO linear projections: `4 x S x H^2`
+- `Q@K^T` + `softmax@V`: `2 x S^2 x H`
+- FFN up + down: `2 x S x H x I`
+
+| sentence | tokens (S) | MACs/sentence (12 layers) |
+|---|---|---|
+| "the cat sat on the mat" | 7 | 149,087,232 |
+| "a cat is sitting on a mat" | 9 | 191,849,472 |
+| "quantum physics explains atomic energy" | 8 | 170,459,136 |
+| **mean across the 3 real sentences** | 8 (avg) | **170,465,280 (~0.1705 GMAC)** |
+
+Cross-checked against a MEASURED counter (not just the formula above):
+`proxima-tensor`'s own `instrument` feature reports `mac_ops=170,631,168`
+averaged over 60 `evaluate_named` calls in the ROW 195 profile run (`DIAG
+nsper reduce_f32_dense`, `bge_epilogue_profile.rs` run log) — **0.1% off**
+the hand-derived 170,465,280, i.e. the formula and the counter agree.
+
+Activation bytes/sentence (hidden-state read/write across 12 layers,
+S~8, H=384, I=1536) are ~3.7 MB — DERIVED, not counter-measured, and
+**not** the bottleneck below; weight bytes (132.85 MB, read once per
+sentence at batch=1) dominate total bytes moved by ~36x.
 
 ### Binding constraint
 
-Cannot be stated with a whole-net roofline number — no total-MAC-per-sentence
-figure exists to divide by a compute ceiling, and no full-forward
-bytes-moved figure exists to divide by a bandwidth ceiling. What IS
-established: the fused LayerNorm kernel (5.25 ns/element) sits between the
-crate's own general-purpose interpreted-dispatch floor family (0.26-0.29
-ns/element, train-step lane) and the pre-fusion interpreted evaluator (32.90
-ns/element) — i.e. LayerNorm's fused kernel is real and large (6.3x) at the
-op level but the op itself is a small fraction (~4.5%) of sentence time, so
-the e2e win is real but modest (~2.9%, inside noise). The dominant ~95.5%
-of sentence time (matmul/attention/dispatch mass) has no per-element rate
-cited in the log at all.
+Arithmetic intensity = 170,465,280 MACs / 132,848,640 bytes = **1.283
+MACs/byte**. Ridge point at the two named candidate ceilings (NEON compute
+48.5 GMAC/s, ROW 20; DRAM bandwidth 69.95-81.21 GB/s, ROW 176, midpoint
+75.58 GB/s) = 48.5 / 75.58 = **0.642 MACs/byte**. The workload's AI (1.283)
+sits **above** the ridge point, so **compute binds, not bandwidth** — the
+same conclusion holds at all three real sentence lengths (weight bytes are
+S-independent; compute time scales with S):
+
+| sentence (S) | compute time (MACs / 48.5 GMAC/s) | bandwidth time (132.85 MB / 75.58 GB/s) | binding |
+|---|---|---|---|
+| 7 | 3.074 ms | 1.758 ms | compute |
+| 8 (avg) | 3.515 ms | 1.758 ms | compute |
+| 9 | 3.955 ms | 1.758 ms | compute |
+
+The AMX-measured band (ROW 189) is explicitly flagged at conv shapes and
+was never measured for BERT-style batch=1 GEMM shapes (`Sx384 @ 384x384`,
+`Sx384 @ 384x1536`) — **named as an unmeasured candidate, not applied
+here**, per this lane's own no-guessing constraint.
 
 ### Roofline vs current best
 
-Not computable as a single number this session — see debts. The only
-grounded ratio available: **26.68 ms measured / roofline unknown**.
+**Machine roofline (compute-bound, NEON 48.5 GMAC/s ceiling): 3.515
+ms/sentence** (mean across the 3 real sentences' MAC counts; range
+3.074-3.955 ms across the individual 7/8/9-token sentences).
 
-### Debts
+**Current best: 26.68 ms/sentence** (ROW 191, fused arm, 5 paired runs, CoV
+4.68%) — corroborated by ROW 195's own fresh 5-run sweep, 24.57-26.35
+ms/sentence (CoV 3.99-4.26% per sweep, two independent sweeps), and by
+ROW 195's profile-run wall-clock, 25.62 ms/sentence over 20 iterations x 3
+sentences (60 calls).
 
-- **Full architecture (layer count, intermediate size, head count) is not
-  recorded in discipline.md — MAC/token cannot be derived without assuming
-  facts outside the cited material. Named as DEBT, not guessed, per this
-  session's own constraint.**
-- 133 MB f32 weight-stream-vs-cache framing (from the task brief) has no
-  corresponding measurement in the log — no bytes-moved figure for BGE's
-  full forward pass exists to check against the 69.95/81.21 GB/s ceilings.
-  DEBT.
-- The ~95.5% of sentence time outside the LayerNorm epilogue (attention,
-  matmul, dispatch/glue) has no per-op profiler breakdown in the log the way
-  mnist's forward pass has (ROW 189 Phase A, torch per-op attribution) — no
-  BGE-side equivalent of that table exists. DEBT.
+**Gap to machine roofline: 26.68 / 3.515 = 7.59x** (using ROW 191's cited
+number against the mean-shape roofline; 6.75x-8.68x across the individual
+sentence lengths' own roofline).
+
+### Per-node-class profile (closes the "no BGE-side profiler breakdown" DEBT)
+
+`proxima-onnx/examples/bge_epilogue_profile.rs`, `epilogue-profile-diag`
+feature (reuses the landed `epilogue-profile-probe` probe unchanged — no
+new instrumentation), 20 iterations x 3 sentences = 60 `evaluate_named`
+calls, 3-call warm-up excluded from the counters:
+
+| node class | calls | ns total | % of attributed step time | ns/call |
+|---|---|---|---|---|
+| (a) reduce-fold (96 `MatMul`s + reduce-shaped ops) | 10,200 | 1,228,430,665 | **88.65%** | 120,434.4 |
+| (b) post-reduce epilogue (fused `LayerNorm`/bias) | 4,320 | 43,645,297 | 3.15% | 10,103.1 |
+| (c) everything else (softmax/transpose/reshape/gather glue) | 36,120 | 113,584,993 | 8.20% | 3,144.7 |
+| **total attributed** | 50,640 | 1,385,660,955 | 100% | — 23.09 ms/sentence attributed vs 25.62 ms/sentence wall-clock (the ~2.5 ms/sentence gap is lowering-adjacent glue outside the profiled loop, e.g. per-sentence `lower_graph_pinned`) |
+
+**The next lever, named:** the 88.65% reduce-fold mass is exactly the 96
+`MatMul`s (+ reduce-shaped attention ops). `instrument`'s own `mac_ops`
+counter over that same mass measures **8.31 GMAC/s effective throughput**
+(`DIAG nsper reduce_f32_dense`, averaged over 63 calls incl. warm-up:
+10,750,162,752 MACs / 1,293.2 ms). Against the 48.5 GMAC/s NEON compute
+ceiling this is a **5.84x gap inside the reduce/matmul path alone**
+(48.5 / 8.31) — smaller than, but the dominant contributor to, the 7.59x
+e2e gap above. The interpreted/generic dispatch path (not a tiled NEON
+kernel) is the next lever the chase map should point at; the fused
+`LayerNorm` epilogue (class b, 3.15%) is already near its own floor per
+ROW 191 and is not where the remaining time lives.
+
+Re-prove command:
+```
+cd <worktree> && CARGO_TARGET_DIR=<scratch> BGE_MODEL_PATH=<local BGE checkout>/model.onnx \
+  cargo run --release -p proxima-onnx --example bge_epilogue_profile --features epilogue-profile-diag
+```
+
+### Debts (remaining)
+
+- The reduce-fold class (a) is not further split between the 48 `(384,384)`
+  QKVO matmuls, the 24 `(384,1536)`/`(1536,384)` FFN matmuls, and the 24
+  no-initializer `Q@K^T`/`softmax@V` matmuls — the probe attributes by node
+  *kind* (`Keep::Reduce`), not by shape. A per-shape split (the FFN matmuls
+  carry 4x the MACs/call of the QKVO matmuls) would sharpen the lever
+  further; not built this session.
+- Activation-bytes-moved (~3.7 MB/sentence) is a DERIVED estimate from
+  hidden-state tensor sizes, not a counter-measured figure — it does not
+  change the binding-constraint conclusion (weight bytes dominate by ~36x)
+  but is flagged as unmeasured, not guessed-and-hidden.
+- AMX candidate rate remains unmeasured at BGE's own GEMM shapes (named
+  above, not applied).
 
 ---
 
@@ -538,7 +630,7 @@ such — never silently promoted to a machine-roofline gap.
 | train-step (MLP 784-128-10, b32, Adam) | NEON per-core compute (6,545,408 MACs @ 48.5 GMAC/s; bandwidth candidate 41.8-48.6us is non-binding, AMX candidate unmeasured at this shape) | **~135 us/step** | ~0.768-0.778 ms/step, composed from this crate's own 0.26-0.29 ns/element interpreted-dispatch rate (DERIVED) | 1.3699 ms/step (ROW 179) | **~10.1x** (pytorch itself is 2.8x off this ceiling, ROW 159) | whole-step MAC count and byte-traffic enumeration are both formula-derived, not counter-measured; AMX candidate unmeasured at M=32 |
 | q4_K int8 dot (decode GEMV) | co-bound: kernel is at/just-over the DRAM streaming ceiling | 124.4-144.4 GMAC/s (bandwidth) | N/A (kernel already at the physics ceiling — no distinct self-limit below it) | 147.72-150.60 GMAC/s (kernel, ROW 116) | **effectively closed, ~1.0x** (kernel already at ceiling; gap lives in production orchestration, 3.74-3.81x on w=1) | read-only bandwidth ceiling never independently measured |
 | q4_K GPU decode (Metal, same MAC constant) | **GPU-BW DEBT** — no independent GPU streaming-bandwidth ceiling measured (`membw_probe`'s Metal arm is the wrong probe shape, reduce-to-scalar not streaming copy) | **DEBT — not measured** (GPU-BW DEBT; not substituted with a spec-sheet figure) | N/A (no composed self-limit derived this lane; kernel-only 124.7 GMAC/s, 57.032 ms/token, ROW 193, is a measured point, not a derived floor) | **69.9 ms/token** full decode loop (103.6 GMAC/s, ROW 193) | **not computable to machine** (roofline unmeasured); reference-only vs incumbent llama.cpp Metal achieved **17.1 ms/token** (416.1 GMAC/s, ROW 193) — **4.02x under incumbent** (3.34x on kernel-only) | GPU streaming bandwidth ceiling never cleanly measured; per-shape numbers op-isolated, not batched |
-| BGE-small embedding (7-9 tok, LayerNorm epilogue) | unknown for the whole net — no MAC/byte count exists to compute one | not computable (no whole-net MAC/byte count) | LayerNorm epilogue op itself is dispatch-floor-shaped (5.25 ns/element fused vs 32.90 ns/element interpreted), but is only ~4.5% of sentence time | 26.68 ms/sentence e2e (ROW 191) | **not computable** | architecture (layers/intermediate size), full-net MAC count, full-net bytes-moved all unrecorded |
+| BGE-small embedding (7-9 tok, 96 MatMuls, hidden=384/12 layers/12 heads/intermediate=1536) | NEON per-core compute (170,465,280 MACs/sentence avg @ 48.5 GMAC/s; AI=1.283 MACs/byte is above the 0.642 MACs/byte ridge point vs the 69.95-81.21 GB/s bandwidth candidate, so bandwidth is non-binding; AMX candidate unmeasured at this GEMM shape) | **3.515 ms/sentence** (mean; 3.074-3.955 ms range across the 7/8/9-token sentences) | N/A (no composed self-limit derived this lane) | 26.68 ms/sentence e2e (ROW 191); reduce/matmul path alone measures 8.31 GMAC/s effective (ROW 195) | **7.59x** (5.84x inside the reduce/matmul path alone, 48.5/8.31 GMAC/s) | activation-bytes DERIVED not counter-measured; reduce class not split by MatMul shape (QKVO vs FFN vs QK^T/softmax@V); AMX unmeasured at this GEMM shape |
 
 **The chase number is the machine roofline gap, not the self-limit gap, and
 never a bare incumbent-reference ratio.** Train-step's self-limit gap alone

@@ -158,6 +158,9 @@ fn main() {
     println!("cosine(A,B similar)={similar:.6}");
     println!("cosine(A,C dissimilar)={dissimilar_a:.6}");
     println!("cosine(B,C dissimilar)={dissimilar_b:.6}");
+    for (name, embedding) in ["A", "B", "C"].iter().zip(fused_embeddings_last.iter()) {
+        println!("embedding[{name}][:8]={:?}", &embedding[0..8]);
+    }
     assert!(similar > dissimilar_a, "similar pair should score higher than dissimilar pair A");
     assert!(similar > dissimilar_b, "similar pair should score higher than dissimilar pair B");
     println!("sanity check passed: similar sentence pair scores higher than dissimilar pairs");
