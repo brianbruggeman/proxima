@@ -330,9 +330,16 @@ rewrite; it is what a plan-level law 6 rewrite (fold N constant nodes into
 like a training loop.
 
 **PROPOSED, needs owner ratification: weight packing = law 6 ∘ law 5.**
-Not landed anywhere in this tree — grepped `pack.*weight|panel|column.major`
-in `proxima-tensor/src/`, no hits describing a packing pass. The argument
-for it: ROW 203 (`discipline.md:17862`) measured why BGE's 96 in-graph GEMM
+Landed behind `pack-at-plan-time` (default-off, ROW 205,
+`discipline.md:17864`) as `StaticArena::build_static_arena_with_constants` /
+`PackedWidthPanels` in `proxima-tensor/src/cpu.rs` — bit-identical
+correctness and a zero-allocation hot loop are both proven
+(`proxima-onnx/tests/pack_at_plan_time.rs`), and the nano rung measured a
+1.33x-1.72x isolated speedup on the cold weight-read path against an
+arena-only control. Still **PROPOSED** here: no e2e bench and no owner
+ratification of the law-composition argument itself, so the feature stays
+default-off pending that. The argument for it: ROW 203 (`discipline.md:17862`)
+measured why BGE's 96 in-graph GEMM
 reduces run slower than the same shapes isolated-and-warm — cache regime
 (H1) explains **~70.9% average** (66.3%–77.1% across the three real
 sentence lengths, `discipline.md:17887-17895`) of the gap, and the
@@ -353,12 +360,12 @@ constant 2-D weight operands once, at session-init time, into fixed-width
 contiguous column panels sized to its own microkernel's register-blocking
 factor — the general shape being described is "restride a constant once,
 to the shape the hot kernel wants to stream," which is exactly what ROW
-203's own first-touch-latency finding motivates here. This is **not**
-independently bench-verified in this repo as a lever (ROW 203 explicitly
-did not attempt it — "priced instead," `discipline.md:17937`) —
-**PROPOSED — needs owner ratification**, both on the law-composition
-argument and on whether the packing target layout should be chosen
-per-kernel (law 5's own job) or fixed globally.
+203's own first-touch-latency finding motivates here. ROW 203 explicitly priced the lever but did not attempt it
+(`discipline.md:17937`); ROW 205 landed and nano-benched it in isolation
+(above) but has **not** run the e2e bench — **PROPOSED — needs owner
+ratification**, both on the law-composition argument and on whether the
+packing target layout should be chosen per-kernel (law 5's own job) or
+fixed globally.
 
 **Equivalence obligation (plan-time hoist, execute-once instance).**
 Policy: bit-identical — `run_resolved_nodes_in_arena` skipping a
@@ -373,8 +380,11 @@ subgraph. The "executed exactly once" engagement proof itself needs
 surface cannot reach — that proof is `build_static_arena_runs_a_live_constant_once_and_never_again`
 (`proxima-tensor/src/cpu.rs`, `#[cfg(test)] mod tests`, the ROW 174/175
 corrupted-buffer test already in-tree). Weight packing (the PROPOSED
-law 6∘law 5 instance above) has no equivalence test — nothing landed to
-test.
+law 6∘law 5 instance above) has its own bit-identity and allocation tests,
+`proxima-onnx/tests/pack_at_plan_time.rs` (ROW 205, `discipline.md:17864`),
+separate from this file's law 6 equivalence test since packing is gated
+behind `pack-at-plan-time` and `aarch64`, outside `rewrite_law_equivalence.rs`'s
+own default-feature scope.
 
 ## Membership, decided (PROPOSED — needs owner ratification)
 
@@ -388,7 +398,7 @@ plainly per member:
 | 3 prologue absorption | IN | landed and general (not `dot`-specific), the mechanism law 1/2 both compose with going the other direction |
 | 4 same-input widening | IN, PROPOSED | no landed instance, but the admission test (shared operand, independent second operand) is a clean structural mirror of law 1's "shared reduce, independent epilogue" — same shape, opposite side of the reduce |
 | 5 layout commutation | IN | landed twice at different layers (ONNX-frontend `Value` fields, plan-level `resolve_reduce_axis_shape`), never generalized into one rule — the gap this engine closes |
-| 6 constant staging | IN | landed twice (lower-time fold, plan-time execute-once), and law 6∘law 5 (packing) is the highest-measured-mass unlanded lever (ROW 203, ~71%) |
+| 6 constant staging | IN | landed twice (lower-time fold, plan-time execute-once), and law 6∘law 5 (packing) is the highest-measured-mass lever (ROW 203, ~71%), landed default-off nano-only in ROW 205 |
 
 **Excluded, and why**: any law that changes numeric semantics (algebraic
 reassociation of a non-associative body, e.g. `Subtract`/`Divide`
@@ -659,11 +669,14 @@ measured, not assumed.
    requires the band-streaming FSM capability §8 names as "later" — that
    capability does not exist today and is out of scope for a first landing
    of laws 1/2/3/5/6 alone.
-3. **Weight packing (law 6∘law 5, §6) has no bench of its own.** ROW 203
-   priced it as roughly one more 75-minute session
-   (`discipline.md:17937`) and explicitly did not attempt it. Do not treat
-   the ~71% figure as a packing-specific win estimate — it is the size of
-   the gap packing is *aimed at*, not a measured packing result.
+3. **Weight packing (law 6∘law 5, §6) has a nano-rung bench, not an e2e
+   one.** ROW 203 priced it as roughly one more 75-minute session
+   (`discipline.md:17937`) and explicitly did not attempt it; ROW 205
+   landed it and measured a 1.33x-1.72x isolated cold-path speedup
+   (`discipline.md:17864`), but the micro/milli rungs and the e2e bench are
+   still not reached. Do not treat the ~71% figure as a packing-specific
+   win estimate — it is the size of the gap packing is *aimed at*, not the
+   e2e measured packing result.
 4. **The §10 kernel-count table is a derivation, not a discovery.** No
    file in this tree states "5 kernels/layer" or "63 dispatches" before
    this document. Ratify or correct it before treating it as a target the
