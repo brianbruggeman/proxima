@@ -92,8 +92,8 @@ pub use client::{DnsClientUpstream, DnsConfigError, DnsResolverConfig};
 pub use error::DnsClientError;
 #[cfg(any(feature = "client", feature = "listen"))]
 pub use pipes::{
-    DnsAnswer, DnsAnswerRecord, DnsPipeHandle, DnsPipeReply, DnsPipeRequest, DnsQuery,
-    into_dns_handle,
+    DnsAnswer, DnsAnswerMetadata, DnsAnswerRecord, DnsAnswerWithMetadata, DnsPipeHandle,
+    DnsPipeReply, DnsPipeRequest, DnsQuery, into_dns_handle,
 };
 
 #[cfg(feature = "listen")]

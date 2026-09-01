@@ -25,7 +25,7 @@ use proxima_telemetry::warn;
 
 use crate::pipes::DnsAnswer;
 #[cfg(feature = "client")]
-use crate::pipes::DnsAnswerRecord;
+use crate::pipes::{DnsAnswerMetadata, DnsAnswerRecord, DnsAnswerWithMetadata, DnsQuery};
 #[cfg(feature = "listen")]
 use crate::pipes::{DnsPipeHandle, DnsQuery, UDP_TRANSPORT, build_request};
 
@@ -78,6 +78,33 @@ pub(crate) fn message_to_answer(message: &Message<'_>) -> Option<DnsAnswer> {
         authoritative: flags.aa(),
         recursion_available: flags.ra(),
         records,
+    })
+}
+
+/// Decode the answer and the response-envelope fields needed by an upstream
+/// to validate that it answered the requested question. A response must echo
+/// exactly one question; malformed or multi-question responses are rejected.
+#[cfg(feature = "client")]
+pub(crate) fn message_to_answer_with_metadata(
+    message: &Message<'_>,
+) -> Option<DnsAnswerWithMetadata> {
+    if message.header.qdcount != 1 {
+        return None;
+    }
+    let question = message.questions().next()?.ok()?;
+    let query = DnsQuery {
+        id: message.header.id,
+        recursion_desired: message.header.flags.rd(),
+        name: question.name.to_dotted(),
+        qtype: question.qtype,
+        qclass: question.qclass,
+    };
+    Some(DnsAnswerWithMetadata {
+        answer: message_to_answer(message)?,
+        metadata: DnsAnswerMetadata {
+            question: Some(query),
+            truncated: message.header.flags.tc(),
+        },
     })
 }
 
