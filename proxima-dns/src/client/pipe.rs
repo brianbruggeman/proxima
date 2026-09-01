@@ -17,6 +17,8 @@ use futures::io::{AsyncReadExt, AsyncWriteExt};
 use proxima_core::ProximaError;
 use proxima_core::time::{now, timeout_at};
 use proxima_primitives::pipe::SendPipe;
+#[cfg(feature = "doh")]
+use proxima_primitives::pipe::handler::PipeHandle;
 use proxima_primitives::stream::{
     DatagramFactory, StreamConnection, StreamUpstream, StreamUpstreamExt,
 };
@@ -44,6 +46,8 @@ pub struct DnsClientUpstream {
     factory: Arc<dyn DatagramFactory>,
     tcp_upstream: Option<Arc<dyn StreamUpstream<Conn = Box<dyn StreamConnection>>>>,
     tcp_only: bool,
+    #[cfg(feature = "doh")]
+    doh_upstream: Option<PipeHandle>,
     config: DnsResolverConfig,
     /// Advances once per SEND — every query and every retransmission gets its
     /// own id. It lives here rather than per-call because `SendPipe::call`
@@ -71,6 +75,8 @@ impl DnsClientUpstream {
             factory,
             tcp_upstream: None,
             tcp_only: false,
+            #[cfg(feature = "doh")]
+            doh_upstream: None,
             config,
             // id 0 is legal (RFC 1035 places no restriction on it); starting
             // at 1 only keeps a fresh client's first query from reading like
@@ -99,6 +105,16 @@ impl DnsClientUpstream {
     #[must_use]
     pub fn with_tcp_only(mut self) -> Self {
         self.tcp_only = true;
+        self
+    }
+
+    /// Attach an existing Proxima HTTP pipe for DNS-over-HTTPS. The HTTP
+    /// pipe owns endpoint/TLS configuration; this DNS client owns the
+    /// bounded DNS request encoding and response-envelope validation.
+    #[cfg(feature = "doh")]
+    #[must_use]
+    pub fn with_doh_upstream(mut self, doh_upstream: PipeHandle) -> Self {
+        self.doh_upstream = Some(doh_upstream);
         self
     }
 
@@ -137,6 +153,18 @@ impl DnsClientUpstream {
     ) -> Result<DnsAnswerWithMetadata, DnsClientError> {
         let mut last_error = DnsClientError::Timeout(self.config.query_timeout_ms);
         for _ in 0..self.config.max_attempts.max(1) {
+            #[cfg(feature = "doh")]
+            if let Some(doh_upstream) = self.doh_upstream.as_ref() {
+                let id = self.next_id();
+                match self
+                    .try_doh_query(doh_upstream, id, name, qtype, qclass)
+                    .await
+                {
+                    Ok(response) => return Ok(response),
+                    Err(error) => last_error = error,
+                }
+                continue;
+            }
             if self.tcp_only {
                 let id = self.next_id();
                 let Some(tcp_upstream) = self.tcp_upstream.as_ref() else {
@@ -177,6 +205,46 @@ impl DnsClientUpstream {
             }
         }
         Err(last_error)
+    }
+
+    #[cfg(feature = "doh")]
+    async fn try_doh_query(
+        &self,
+        doh_upstream: &PipeHandle,
+        id: u16,
+        name: &str,
+        qtype: u16,
+        qclass: u16,
+    ) -> Result<DnsAnswerWithMetadata, DnsClientError> {
+        let query = encode_query(id, name, qtype, qclass, true)?;
+        let request = proxima_primitives::pipe::request::Request::builder()
+            .method("POST")
+            .path("/dns-query")
+            .header("accept", "application/dns-message")
+            .header("content-type", "application/dns-message")
+            .payload(bytes::Bytes::from(query))
+            .build()
+            .map_err(|error| DnsClientError::Wire(error.to_string()))?;
+        let response = doh_upstream
+            .call(request)
+            .await
+            .map_err(|error| DnsClientError::Io(io::Error::other(error.to_string())))?;
+        if response.status != 200 {
+            return Err(DnsClientError::Io(io::Error::other(format!(
+                "DoH endpoint returned HTTP status {}",
+                response.status
+            ))));
+        }
+        let body = response
+            .collect_body()
+            .await
+            .map_err(|error| DnsClientError::Io(io::Error::other(error.to_string())))?;
+        if body.len() > MAX_UDP_REPLY_BYTES {
+            return Err(DnsClientError::Wire(
+                "DoH response exceeds the bounded DNS response size".into(),
+            ));
+        }
+        decode_response_with_metadata(id, &body)
     }
 
     async fn try_query(
@@ -290,6 +358,7 @@ impl SendPipe for DnsClientUpstream {
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
+    use bytes::Bytes;
     use std::collections::VecDeque;
     use std::future::Future;
     use std::io;
@@ -297,6 +366,8 @@ mod tests {
     use std::task::{Context, Waker};
 
     use futures::io::{AsyncRead, AsyncWrite, Cursor};
+    use proxima_primitives::pipe::handler::into_handle;
+    use proxima_primitives::pipe::request::{Request, Response};
     use proxima_primitives::stream::{DatagramSocket, PeerInfo, StreamConnection, StreamUpstream};
     use proxima_protocols::dns::codec_trait::parse_message;
     use proxima_protocols::dns::encode;
@@ -487,11 +558,17 @@ mod tests {
             Poll::Ready(Ok(buf.len()))
         }
 
-        fn poll_flush(self: std::pin::Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        fn poll_flush(
+            self: std::pin::Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+        ) -> Poll<io::Result<()>> {
             Poll::Ready(Ok(()))
         }
 
-        fn poll_close(self: std::pin::Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        fn poll_close(
+            self: std::pin::Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+        ) -> Poll<io::Result<()>> {
             Poll::Ready(Ok(()))
         }
     }
@@ -510,10 +587,7 @@ mod tests {
     impl StreamUpstream for FakeTcpUpstream {
         type Conn = Box<dyn StreamConnection>;
 
-        fn poll_connect(
-            &self,
-            _cx: &mut Context<'_>,
-        ) -> Poll<io::Result<Self::Conn>> {
+        fn poll_connect(&self, _cx: &mut Context<'_>) -> Poll<io::Result<Self::Conn>> {
             Poll::Ready(Ok(Box::new(FakeTcpConnection {
                 response: Cursor::new(self.response.clone()),
                 writes: Arc::clone(&self.writes),
@@ -674,6 +748,85 @@ mod tests {
         assert!(socket.state.lock().unwrap().sent.is_empty());
         let request = writes.lock().unwrap();
         assert_eq!(parse_message(&request[2..]).unwrap().header.id, 1);
+    }
+
+    #[cfg(feature = "doh")]
+    struct FakeDohPipe {
+        response: Bytes,
+        status: u16,
+        requests: Arc<Mutex<Vec<Request<Bytes>>>>,
+    }
+
+    #[cfg(feature = "doh")]
+    impl SendPipe for FakeDohPipe {
+        type In = Request<Bytes>;
+        type Out = Response<Bytes>;
+        type Err = ProximaError;
+
+        fn call(
+            &self,
+            request: Self::In,
+        ) -> impl Future<Output = Result<Self::Out, Self::Err>> + Send {
+            self.requests.lock().unwrap().push(request);
+            let response = self.response.clone();
+            let status = self.status;
+            async move { Ok(Response::typed(status, response)) }
+        }
+    }
+
+    #[cfg(feature = "doh")]
+    #[proxima::test]
+    async fn doh_mode_uses_the_existing_http_pipe_without_udp() {
+        let socket = FakeResolverSocket::new(
+            SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0),
+            resolver_addr(),
+        );
+        let factory = Arc::new(FakeResolverFactory {
+            socket: socket.clone(),
+        });
+        let mut message = Vec::new();
+        let flags = proxima_protocols::dns::Flags::for_response(true, false, true, 0);
+        encode::encode_response(
+            1,
+            flags,
+            encode::EncodeQuestion {
+                name: "example.com.",
+                qtype: 1,
+                qclass: 1,
+            },
+            &[],
+            &mut message,
+        )
+        .unwrap();
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let doh = into_handle(FakeDohPipe {
+            response: Bytes::from(message),
+            status: 200,
+            requests: Arc::clone(&requests),
+        });
+        let config = DnsResolverConfig::builder()
+            .resolver_ip(resolver_addr().ip().to_string())
+            .port(resolver_addr().port())
+            .query_timeout_ms(200)
+            .max_attempts(1)
+            .build();
+        let client = DnsClientUpstream::new(factory, config).with_doh_upstream(doh);
+
+        let response = client
+            .query_with_metadata("example.com.", 1, 1)
+            .await
+            .unwrap();
+        assert_eq!(response.answer.rcode, 0);
+        assert!(socket.state.lock().unwrap().sent.is_empty());
+        let requests = requests.lock().unwrap();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].method.as_bytes(), b"POST");
+        assert_eq!(requests[0].path.as_ref(), b"/dns-query");
+        assert_eq!(requests[0].payload.len(), 29);
+        assert_eq!(
+            requests[0].metadata.get_str("content-type"),
+            Some("application/dns-message")
+        );
     }
 
     #[proxima::test]

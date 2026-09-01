@@ -40,6 +40,7 @@ proxima-telemetry = { workspace = true, optional = true }
 # into `proxima-listen`'s AnyListenProtocol open universal listener.
 proxima-listen = { workspace = true, optional = true }
 proxima-runtime = { workspace = true, features = ["std"], optional = true }
+proxima-http = { workspace = true, default-features = false, optional = true }
 
 [features]
 default = ["std"]
@@ -62,6 +63,14 @@ client = [
     "dep:futures",
     "dep:serde",
     "dep:thiserror",
+]
+# DNS-over-HTTPS is the existing HTTP/1.1 PipeHandle paired with the DNS
+# client's bounded request/response validation; no second upstream trait.
+doh = [
+    "client",
+    "dep:bytes",
+    "dep:proxima-http",
+    "proxima-http/http1-stream-client",
 ]
 # the tokio-free native (sans-IO) DNS UDP/TCP LISTENER: `DnsDatagramProtocol`
 # (UDP, a `DatagramProtocol` state machine) + `DnsAnyProtocol` (TCP, an
