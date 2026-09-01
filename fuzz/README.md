@@ -86,3 +86,19 @@ None as of the run recorded in this README's companion commit: 0 panics
 across 7 bins / 16 sweeps / >=150,000 iterations each (2 bins additionally
 run bounded truncation sweeps over a fixed-length well-formed message,
 correctly reporting fewer iterations for those).
+
+## Depth limitation: this tier is shallow by construction
+
+`fuzz_gguf`, `fuzz_safetensors`, and `fuzz_h2`'s payload sweep report
+`accepted=0` across all 150,000 draws, random and magic/length-prefixed
+alike. These are structural formats: a magic byte, a declared length field,
+a JSON header -- and this generator's random tail almost never lands on a
+value the header-level check accepts, so every draw dies at the same
+shallow rejection and the interior decode logic (tensor-info table walk,
+JSON key parse, frame-type dispatch) never gets exercised. The un-built
+second tier is corpus mutation over a small set of valid, hand-built
+messages (bit-flip / byte-splice / length-perturb a real GGUF/safetensors
+file or H2 frame), which is what would push draws past the header and into
+the state this harness exists to stress. Not built here -- no seed corpus
+of real files was available on this box and coverage-guided mutation is
+squarely `cargo-fuzz`'s job, not this fallback's.
