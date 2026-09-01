@@ -1,5 +1,5 @@
-use core::sync::atomic::{AtomicU64, Ordering};
 use core::time::Duration;
+use portable_atomic::{AtomicU64, Ordering};
 
 const STATE_MASK: u64 = 0b11;
 const CLOSED: u64 = 0;
