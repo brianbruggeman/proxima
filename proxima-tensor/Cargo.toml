@@ -47,6 +47,13 @@ dynamic-elision-probe = ["std"]
 # `bind::bind`. Default-off; exists to answer the profile gate before any
 # fusion mechanism is built, not to ship.
 epilogue-profile-probe = ["std"]
+# `docs/discipline.md` ROW 183 Phase 2: execution-level post-reduce-epilogue
+# fusion. Reuses ROW 182's `is_post_reduce_epilogue` detector; skips running
+# a matched epilogue `Elementwise` node's own `resolved` position and
+# instead evaluates its `ComposedBody` directly against the reduce's
+# just-computed accumulator values, right after the reduce runs. No
+# `bind.rs` changes, no new `Op`/`ScalarOp`/`IndexMap` variant. Default-off.
+epilogue-fuse-probe = ["std"]
 # real execution-witness counters (elements/bytes/gather-vs-affine) plus
 # per-bound-op spans over `proxima-telemetry`'s legacy Metrics/Telemetry
 # surface — default-off, no effect on the default build or the no_std+alloc
