@@ -4260,6 +4260,7 @@ dependencies = [
  "proxima",
  "proxima-codec",
  "proxima-core",
+ "proxima-http",
  "proxima-listen",
  "proxima-net",
  "proxima-primitives",
