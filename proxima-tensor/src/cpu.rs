@@ -3259,8 +3259,14 @@ fn run_elementwise_range<B: Deref<Target = [f32]>>(
     // `run_elementwise` acts on — every operand the body shape reads is
     // gather-free and affine with a width-dim stride of 0 or 1
     // (`proxima-tensor/docs/discipline.md` ROW 5).
+    // `FusedAdamUpdate` (`docs/discipline.md` ROW 179) gets its own gate,
+    // narrower than `Generic`'s: `fused_adam_update_is_affine_fast_path`
+    // requires exact unit/zero strides, not `Generic`'s wider "any
+    // non-negative constant stride" admission, because the dedicated kernel
+    // slices `m`/`v`/`param` directly rather than walking `OperandSpan`.
     let fast_path = match shape {
         BodyShape::Generic(generic_body) => generic_body_is_affine_fast_path(resolved, generic_body, &strides),
+        BodyShape::FusedAdamUpdate(roles, _) => fused_adam_update_is_affine_fast_path(resolved, roles, &strides),
         _ => body_shape_is_affine_fast_path(resolved, &shape, &strides),
     };
     // rung 2 (`docs/discipline.md` ROW 153's own charter): when the block
@@ -3322,6 +3328,12 @@ fn run_elementwise_range<B: Deref<Target = [f32]>>(
             let effective_width = if full_range_flat { flat_width } else { inner_len };
             vec![0.0f32; body.steps.len() * if fast_path { effective_width.min(GENERIC_WIDTH_TILE) } else { 1 }]
         }
+        // The dedicated kernel (`elementwise_width_fused_adam_update`) never
+        // reads `step_values` -- only the slow per-element gather fallback
+        // (`eval_body_shape` -> `apply_body`, reached when `fast_path` is
+        // false) needs one scalar row per step, the same shape `Generic`'s
+        // own `else { 1 }` branch already sizes for.
+        BodyShape::FusedAdamUpdate(..) => vec![0.0f32; if fast_path { 0 } else { body.steps.len() }],
         BodyShape::Unary(..) | BodyShape::Binary(..) => Vec::new(),
     };
     #[cfg(feature = "instrument")]
@@ -3499,6 +3511,20 @@ fn run_elementwise_range<B: Deref<Target = [f32]>>(
                 if fast_path {
                     counter!(instrument::ELEMENTWISE_LOOP_TICKS_GENERIC_FAST, diag_loop_ticks);
                     counter!(instrument::ELEMENTWISE_ELEMENTS_GENERIC_FAST, counters.output_writes);
+                } else {
+                    counter!(instrument::ELEMENTWISE_LOOP_TICKS_GENERIC_SLOW, diag_loop_ticks);
+                    counter!(instrument::ELEMENTWISE_ELEMENTS_GENERIC_SLOW, counters.output_writes);
+                }
+            }
+            BodyShape::FusedAdamUpdate(..) => {
+                counter!(instrument::ELEMENTWISE_LOOP_TICKS_GENERIC, diag_loop_ticks);
+                counter!(instrument::ELEMENTWISE_ELEMENTS_GENERIC, counters.output_writes);
+                if fast_path {
+                    counter!(instrument::ELEMENTWISE_LOOP_TICKS_GENERIC_FAST, diag_loop_ticks);
+                    counter!(instrument::ELEMENTWISE_ELEMENTS_GENERIC_FAST, counters.output_writes);
+                    counter!(instrument::ELEMENTWISE_LOOP_TICKS_FUSED_ADAM, diag_loop_ticks);
+                    counter!(instrument::ELEMENTWISE_ELEMENTS_FUSED_ADAM, counters.output_writes);
+                    counter!(instrument::ELEMENTWISE_FUSED_ADAM_HITS, 1);
                 } else {
                     counter!(instrument::ELEMENTWISE_LOOP_TICKS_GENERIC_SLOW, diag_loop_ticks);
                     counter!(instrument::ELEMENTWISE_ELEMENTS_GENERIC_SLOW, counters.output_writes);
@@ -5634,7 +5660,144 @@ fn run_scan<B: Deref<Target = [f32]>>(
 enum BodyShape<'a> {
     Unary(ScalarOp, u16),
     Binary(ScalarOp, u16, u16),
+    /// The bias-corrected Adam update chain (`docs/discipline.md` ROW 179),
+    /// bias correction absorbed in-line for BOTH `m` and `v` (the actual
+    /// fused shape `optimizer::adam_step` builds — `recip_bias1`/
+    /// `recip_bias2` are each a live, single-consumer 4-step sub-chain
+    /// (`step*ln(beta) -> exp -> 1-that -> reciprocal`), not pre-materialized
+    /// scalar inputs the way an EARLIER version of this detector, and
+    /// ROW 176's own simplified microbench, both assumed): 16 `BodyStep`s
+    /// total, detected structurally by [`detect_adam_update_roles`] on op
+    /// sequence + `StepArg` wiring — never on a node's own identity or name.
+    /// Carries the source [`ComposedBody`] too, purely so
+    /// [`eval_body_shape`]'s slow gather fallback can still walk it through
+    /// [`apply_body`] exactly like [`Generic`](Self::Generic) does; the fast
+    /// dedicated kernel ([`elementwise_width_fused_adam_update`]) never
+    /// touches that field.
+    FusedAdamUpdate(AdamUpdateRoles, &'a ComposedBody),
     Generic(&'a ComposedBody),
+}
+
+/// The eleven physical operand slots [`BodyShape::FusedAdamUpdate`] reads,
+/// named by the role each plays in the Adam update math — `m`/`v`/`param`
+/// are the three full-shape, unit-stride tensors; every other field is a
+/// rank-0 broadcast scalar (`step_for_bias1`/`step_for_bias2` are the SAME
+/// logical training-step value, read at two separate operand slots because
+/// `bind::compose_operand` freshly resolves each occurrence rather than
+/// deduplicating by `NodeId` — same for `one_for_bias1`/`one_for_bias2`,
+/// both the literal `1.0`). Every field is a `StepArg::Operand` index into
+/// the SAME `BoundOp::operands()` slice every other `BodyShape` variant
+/// already indexes into (`Unary`/`Binary`'s own `u16` fields), not a new
+/// addressing scheme.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct AdamUpdateRoles {
+    param: u16,
+    learning_rate: u16,
+    m: u16,
+    one_for_bias1: u16,
+    step_for_bias1: u16,
+    ln_beta1: u16,
+    v: u16,
+    one_for_bias2: u16,
+    step_for_bias2: u16,
+    ln_beta2: u16,
+    epsilon: u16,
+}
+
+/// Structural detector for [`BodyShape::FusedAdamUpdate`] (`docs/discipline.md`
+/// ROW 179): matches `body`'s own 16 [`BodyStep`]s against the exact op
+/// sequence and `StepArg` wiring [`optimizer::adam_step`]'s fusion produces
+/// — every check is on `step.op`/`step.args` shape alone, never on a
+/// `NodeId`, a name, or which physical buffer a caller happens to bind to
+/// an operand slot. `None` on any mismatch (wrong step count, wrong op at
+/// any position, or a `StepArg` referencing the wrong earlier step/operand
+/// role) falls through to [`BodyShape::Generic`] untouched — the same
+/// conservative-precondition shape `window_copy_operand` (ROW 153/154) and
+/// `StaticArena::static_nodes` (ROW 174/175) already use for a dedicated
+/// fast path beside the general one.
+fn detect_adam_update_roles(body: &ComposedBody) -> Option<AdamUpdateRoles> {
+    let [step0, step1, step2, step3, step4, step5, step6, step7, step8, step9, step10, step11, step12, step13, step14, step15] =
+        body.steps.as_slice()
+    else {
+        return None;
+    };
+    let (step_for_bias1, ln_beta1) = match (step0.op, step0.args.as_slice()) {
+        (ScalarOp::Multiply, [StepArg::Operand(step_for_bias1), StepArg::Operand(ln_beta1)]) => {
+            (*step_for_bias1, *ln_beta1)
+        }
+        _ => return None,
+    };
+    if !matches!((step1.op, step1.args.as_slice()), (ScalarOp::Exponential, [StepArg::Step(0)])) {
+        return None;
+    }
+    let one_for_bias1 = match (step2.op, step2.args.as_slice()) {
+        (ScalarOp::Subtract, [StepArg::Operand(one_for_bias1), StepArg::Step(1)]) => *one_for_bias1,
+        _ => return None,
+    };
+    if !matches!((step3.op, step3.args.as_slice()), (ScalarOp::Reciprocal, [StepArg::Step(2)])) {
+        return None;
+    }
+    let m = match (step4.op, step4.args.as_slice()) {
+        (ScalarOp::Multiply, [StepArg::Operand(m), StepArg::Step(3)]) => *m,
+        _ => return None,
+    };
+    let (step_for_bias2, ln_beta2) = match (step5.op, step5.args.as_slice()) {
+        (ScalarOp::Multiply, [StepArg::Operand(step_for_bias2), StepArg::Operand(ln_beta2)]) => {
+            (*step_for_bias2, *ln_beta2)
+        }
+        _ => return None,
+    };
+    if !matches!((step6.op, step6.args.as_slice()), (ScalarOp::Exponential, [StepArg::Step(5)])) {
+        return None;
+    }
+    let one_for_bias2 = match (step7.op, step7.args.as_slice()) {
+        (ScalarOp::Subtract, [StepArg::Operand(one_for_bias2), StepArg::Step(6)]) => *one_for_bias2,
+        _ => return None,
+    };
+    if !matches!((step8.op, step8.args.as_slice()), (ScalarOp::Reciprocal, [StepArg::Step(7)])) {
+        return None;
+    }
+    let v = match (step9.op, step9.args.as_slice()) {
+        (ScalarOp::Multiply, [StepArg::Operand(v), StepArg::Step(8)]) => *v,
+        _ => return None,
+    };
+    if !matches!((step10.op, step10.args.as_slice()), (ScalarOp::SquareRoot, [StepArg::Step(9)])) {
+        return None;
+    }
+    let epsilon = match (step11.op, step11.args.as_slice()) {
+        (ScalarOp::Add, [StepArg::Step(10), StepArg::Operand(epsilon)]) => *epsilon,
+        _ => return None,
+    };
+    if !matches!((step12.op, step12.args.as_slice()), (ScalarOp::Reciprocal, [StepArg::Step(11)])) {
+        return None;
+    }
+    if !matches!(
+        (step13.op, step13.args.as_slice()),
+        (ScalarOp::Multiply, [StepArg::Step(4), StepArg::Step(12)])
+    ) {
+        return None;
+    }
+    let learning_rate = match (step14.op, step14.args.as_slice()) {
+        (ScalarOp::Multiply, [StepArg::Operand(learning_rate), StepArg::Step(13)]) => *learning_rate,
+        _ => return None,
+    };
+    let param = match (step15.op, step15.args.as_slice()) {
+        (ScalarOp::Subtract, [StepArg::Operand(param), StepArg::Step(14)]) => *param,
+        _ => return None,
+    };
+    Some(AdamUpdateRoles {
+        param,
+        learning_rate,
+        m,
+        one_for_bias1,
+        step_for_bias1,
+        ln_beta1,
+        v,
+        one_for_bias2,
+        step_for_bias2,
+        ln_beta2,
+        epsilon,
+    })
 }
 
 fn body_shape(body: &ComposedBody) -> BodyShape<'_> {
@@ -5646,6 +5809,9 @@ fn body_shape(body: &ComposedBody) -> BodyShape<'_> {
             }
             _ => {}
         }
+    }
+    if let Some(roles) = detect_adam_update_roles(body) {
+        return BodyShape::FusedAdamUpdate(roles, body);
     }
     BodyShape::Generic(body)
 }
@@ -5663,7 +5829,11 @@ fn eval_body_shape(shape: &BodyShape, operand_values: &[f32], step_values: &mut 
         BodyShape::Binary(op, a, b) => {
             apply_scalar_op(op, &[operand_values[a as usize], operand_values[b as usize]])
         }
-        BodyShape::Generic(body) => apply_body(body, operand_values, step_values),
+        // The gather-fallback loop never reaches the dedicated kernel (that
+        // requires the affine fast path -- `fused_adam_update_is_affine_fast_path`)
+        // so a `FusedAdamUpdate` here just walks its own carried `ComposedBody`
+        // exactly like `Generic`, bit-identical either way.
+        BodyShape::FusedAdamUpdate(_, body) | BodyShape::Generic(body) => apply_body(body, operand_values, step_values),
     }
 }
 
@@ -5707,7 +5877,12 @@ fn body_shape_is_affine_fast_path(resolved: &BoundOp, shape: &BodyShape, strides
         BodyShape::Binary(_, a, b) => {
             operand_is_unit_or_broadcast(resolved, strides, a) && operand_is_unit_or_broadcast(resolved, strides, b)
         }
-        BodyShape::Generic(_) => false,
+        // A reduce/scan body is never fused with the Adam-chain shape in
+        // this crate (it is a straight-line elementwise chain, not a
+        // reduce's own per-step combine) -- treated exactly like `Generic`,
+        // conservatively false, so `reduce_dot_fast`/`scan_width_fast` never
+        // see this variant either.
+        BodyShape::FusedAdamUpdate(..) | BodyShape::Generic(_) => false,
     }
 }
 
@@ -5787,6 +5962,38 @@ fn generic_body_is_affine_fast_path(resolved: &BoundOp, body: &ComposedBody, str
     })
 }
 
+/// [`run_elementwise`]'s eligibility gate for [`BodyShape::FusedAdamUpdate`]'s
+/// dedicated kernel (`docs/discipline.md` ROW 179) — strictly NARROWER than
+/// [`generic_body_is_affine_fast_path`] above (which admits any non-negative
+/// constant stride): [`elementwise_width_fused_adam_update`] slices `m`/`v`/
+/// `param` directly (`&raw[idx][base..base+width]`), so those three roles
+/// must be exactly unit-stride (`strides[idx] == 1`), and reads every other
+/// role as one hoisted scalar each, so those eight roles must be exactly
+/// stride-0 (a genuine call-invariant broadcast, never a per-row-only
+/// broadcast — the same distinction `axes_flat_chain`'s own doc, ROW 178,
+/// already draws). Any role failing its own required stride (a caller
+/// somehow binding a strided/gathered buffer to one of these eleven slots)
+/// falls through to `BodyShape::Generic`'s existing tiled path untouched —
+/// this gate, not [`detect_adam_update_roles`]'s structural match, is what
+/// makes that fall-through safe.
+fn fused_adam_update_is_affine_fast_path(resolved: &BoundOp, roles: AdamUpdateRoles, strides: &[i64]) -> bool {
+    let is_unit_stride =
+        |index: u16| operand_is_affine(resolved, strides, index) && strides[index as usize] == 1;
+    let is_broadcast_scalar =
+        |index: u16| operand_is_affine(resolved, strides, index) && strides[index as usize] == 0;
+    is_unit_stride(roles.m)
+        && is_unit_stride(roles.v)
+        && is_unit_stride(roles.param)
+        && is_broadcast_scalar(roles.learning_rate)
+        && is_broadcast_scalar(roles.one_for_bias1)
+        && is_broadcast_scalar(roles.step_for_bias1)
+        && is_broadcast_scalar(roles.ln_beta1)
+        && is_broadcast_scalar(roles.one_for_bias2)
+        && is_broadcast_scalar(roles.step_for_bias2)
+        && is_broadcast_scalar(roles.ln_beta2)
+        && is_broadcast_scalar(roles.epsilon)
+}
+
 /// The width loop's straight-line fast path: reads each physical operand's
 /// value for the whole width span at once (a contiguous `&[f32]` subslice
 /// when its stride is 1, a single hoisted scalar read when its stride is 0),
@@ -5859,7 +6066,9 @@ fn reduce_width_fast(
         BodyShape::Binary(op, a, b) => {
             reduce_width_binary(op, reduce_op, span_of(a), span_of(b), accumulator, seeded);
         }
-        BodyShape::Generic(_) => unreachable!("fast path is never entered for a Generic body shape"),
+        BodyShape::FusedAdamUpdate(..) | BodyShape::Generic(_) => {
+            unreachable!("fast path is never entered for a Generic or FusedAdamUpdate body shape")
+        }
     }
 }
 
@@ -10476,7 +10685,9 @@ fn reduce_dot_fast(
     match *shape {
         BodyShape::Unary(op, a) => reduce_dot_unary(op, reduce_op, span_of(a), fold),
         BodyShape::Binary(op, a, b) => reduce_dot_binary(op, reduce_op, span_of(a), span_of(b), fold),
-        BodyShape::Generic(_) => unreachable!("fast path is never entered for a Generic body shape"),
+        BodyShape::FusedAdamUpdate(..) | BodyShape::Generic(_) => {
+            unreachable!("fast path is never entered for a Generic or FusedAdamUpdate body shape")
+        }
     }
 }
 
@@ -10782,7 +10993,71 @@ fn elementwise_width_fast(
     match *shape {
         BodyShape::Unary(op, a) => elementwise_width_unary(op, span_of(a), out),
         BodyShape::Binary(op, a, b) => elementwise_width_binary(op, span_of(a), span_of(b), out),
+        BodyShape::FusedAdamUpdate(roles, _) => elementwise_width_fused_adam_update(roles, raw, running, out),
         BodyShape::Generic(body) => elementwise_width_generic(body, raw, running, strides, out, step_values),
+    }
+}
+
+/// The dedicated, register-resident kernel for [`BodyShape::FusedAdamUpdate`]
+/// (`docs/discipline.md` ROW 179) — the eight bias-correction scalar steps
+/// (`step*ln(beta) -> exp -> 1-that -> reciprocal`, once each for `m` and
+/// `v`) are pure rank-0 arithmetic on values that never vary across the
+/// element loop, so they are hoisted and computed ONCE, exactly like
+/// `run_elementwise_range`'s own loop-invariant-stride doc already
+/// establishes for a genuine broadcast operand — reducing the per-element
+/// body to the same 8-op chain ROW 176's own standalone `adam_update`
+/// microbench measured at 0.2612 ns/element (`m_hat = m*recip_bias1`
+/// through `out = param-scaled_update`). `m`/`v`/`param` are read as plain
+/// contiguous slices (never through [`OperandSpan`]'s stride-generalized
+/// `at` accessor) because [`fused_adam_update_is_affine_fast_path`] already
+/// guarantees stride 1 — this is what lets LLVM auto-vectorize the whole
+/// per-element chain the same way it already does for that microbench,
+/// instead of branching or calling out per step the way a
+/// runtime-dispatched interpreter over an arbitrary op sequence must (ROW
+/// 177's own `candidate_b`/`candidate_c`, both measured WORSE than the
+/// shipped tiled path they were meant to replace). Every arithmetic step
+/// and its operand order matches [`apply_scalar_op`] exactly (`Multiply`/
+/// `Add` are commutative so operand order is moot there; `Subtract`/
+/// `Reciprocal` are not, and every subtraction/reciprocal here matches its
+/// own `BodyStep`'s `apply_scalar_op` argument order bit-for-bit, per
+/// [`detect_adam_update_roles`]'s own step-by-step doc) — a pure reorder of
+/// the SAME expression tree (scalar hoisting included: a rank-0 value
+/// computed once outside the loop is bit-identical to the same value
+/// recomputed, unchanged, at every position inside it), not a
+/// reassociation, so output is bit-identical to `elementwise_width_generic`'s
+/// own tiled walk of the identical [`ComposedBody`].
+#[inline(always)]
+fn elementwise_width_fused_adam_update(roles: AdamUpdateRoles, raw: &[&[f32]], running: &[i64], out: &mut [f32]) {
+    let width = out.len();
+    let slice_of = |index: u16| {
+        let index = index as usize;
+        let base = running[index] as usize;
+        &raw[index][base..base + width]
+    };
+    let scalar_of = |index: u16| {
+        let index = index as usize;
+        raw[index][running[index] as usize]
+    };
+    let m = slice_of(roles.m);
+    let v = slice_of(roles.v);
+    let param = slice_of(roles.param);
+    let learning_rate = scalar_of(roles.learning_rate);
+    let epsilon = scalar_of(roles.epsilon);
+
+    let bias1_power = (scalar_of(roles.step_for_bias1) * scalar_of(roles.ln_beta1)).exp();
+    let recip_bias1 = 1.0 / (scalar_of(roles.one_for_bias1) - bias1_power);
+    let bias2_power = (scalar_of(roles.step_for_bias2) * scalar_of(roles.ln_beta2)).exp();
+    let recip_bias2 = 1.0 / (scalar_of(roles.one_for_bias2) - bias2_power);
+
+    for index in 0..width {
+        let m_hat = m[index] * recip_bias1;
+        let v_hat = v[index] * recip_bias2;
+        let sqrt_v_hat = v_hat.sqrt();
+        let denominator = sqrt_v_hat + epsilon;
+        let recip_denominator = 1.0 / denominator;
+        let update = m_hat * recip_denominator;
+        let scaled_update = learning_rate * update;
+        out[index] = param[index] - scaled_update;
     }
 }
 
@@ -11268,7 +11543,9 @@ fn scan_width_fast(
         BodyShape::Binary(op, a, b) => {
             scan_width_binary(op, reduce_op, span_of(a), span_of(b), out, seeded, accumulator)
         }
-        BodyShape::Generic(_) => unreachable!("fast path is never entered for a Generic body shape"),
+        BodyShape::FusedAdamUpdate(..) | BodyShape::Generic(_) => {
+            unreachable!("fast path is never entered for a Generic or FusedAdamUpdate body shape")
+        }
     }
 }
 
