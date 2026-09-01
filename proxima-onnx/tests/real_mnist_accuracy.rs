@@ -170,5 +170,18 @@ fn real_mnist_onnx_classifies_real_test_images_at_reference_accuracy() {
         eprintln!("real_mnist sample[{index}]: predicted={predicted} label={label}");
     }
 
+    // `docs/discipline.md` ROW 204: mnist's own reduce epilogues are
+    // batchnorm-shaped (`EpilogueKind::ClipNorm`/`Norm`), never `LayerNorm`
+    // -- the cluster matcher's own admission is keyed off
+    // `EpilogueKind::LayerNorm` at the very first gate
+    // (`layer_norm_cluster_plan`, `cpu.rs`), so an N==0 assertion here is
+    // the reverse-direction proof the matcher does not false-fire on a
+    // structurally different reduce-epilogue population sharing the same
+    // `Keep::Reduce`-fold shape (per principle "evidence": a gate that
+    // cannot report its N is not a gate).
+    let (ln_cluster_hits, ..) = proxima_tensor::cpu::layer_norm_cluster_totals();
+    eprintln!("real_mnist ln_cluster: hits={ln_cluster_hits}");
+    assert_eq!(ln_cluster_hits, 0, "the LayerNorm cluster matcher must never fire on mnist's own batchnorm-shaped epilogues");
+
     assert!(accuracy >= 0.95, "expected real mnist.onnx to classify at least 95% of {} real test images, got {accuracy:.4}", images.len());
 }
