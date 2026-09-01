@@ -13,10 +13,13 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU16, Ordering};
 use std::task::Poll;
 
+use futures::io::{AsyncReadExt, AsyncWriteExt};
 use proxima_core::ProximaError;
 use proxima_core::time::{now, timeout_at};
 use proxima_primitives::pipe::SendPipe;
-use proxima_primitives::stream::DatagramFactory;
+use proxima_primitives::stream::{
+    DatagramFactory, StreamConnection, StreamUpstream, StreamUpstreamExt,
+};
 
 use crate::client::config::DnsResolverConfig;
 use crate::client::session::{decode_response_with_metadata, encode_query};
@@ -30,6 +33,8 @@ use crate::pipes::{DnsAnswer, DnsAnswerWithMetadata, DnsPipeReply, DnsPipeReques
 /// buffer, and [`decode_response`] reports it as a wire error rather than
 /// silently misinterpreting a partial message.
 const MAX_UDP_REPLY_BYTES: usize = 4096;
+/// DNS-over-TCP carries a two-byte length prefix (RFC 1035 §4.2.2).
+const MAX_TCP_REPLY_BYTES: usize = u16::MAX as usize;
 
 /// Async resolver client: send a query, await the matching response.
 /// Construct via [`Self::new`] with an injected [`DatagramFactory`] (the
@@ -37,6 +42,7 @@ const MAX_UDP_REPLY_BYTES: usize = 4096;
 /// and a [`DnsResolverConfig`].
 pub struct DnsClientUpstream {
     factory: Arc<dyn DatagramFactory>,
+    tcp_upstream: Option<Arc<dyn StreamUpstream<Conn = Box<dyn StreamConnection>>>>,
     config: DnsResolverConfig,
     /// Advances once per SEND — every query and every retransmission gets its
     /// own id. It lives here rather than per-call because `SendPipe::call`
@@ -62,12 +68,26 @@ impl DnsClientUpstream {
     pub fn new(factory: Arc<dyn DatagramFactory>, config: DnsResolverConfig) -> Self {
         Self {
             factory,
+            tcp_upstream: None,
             config,
             // id 0 is legal (RFC 1035 places no restriction on it); starting
             // at 1 only keeps a fresh client's first query from reading like
             // an uninitialized field in a packet capture.
             next_id: AtomicU16::new(1),
         }
+    }
+
+    /// Attach an optional DNS-over-TCP dialer. When UDP returns a response
+    /// with `TC=1`, [`Self::query`] retries the same exchange over this
+    /// stream using DNS-over-TCP framing. The dialer is runtime-provided and
+    /// may be backed by Prime, Tokio, or a deterministic test connection.
+    #[must_use]
+    pub fn with_tcp_upstream(
+        mut self,
+        tcp_upstream: Arc<dyn StreamUpstream<Conn = Box<dyn StreamConnection>>>,
+    ) -> Self {
+        self.tcp_upstream = Some(tcp_upstream);
+        self
     }
 
     fn next_id(&self) -> u16 {
@@ -106,6 +126,23 @@ impl DnsClientUpstream {
         let mut last_error = DnsClientError::Timeout(self.config.query_timeout_ms);
         for _ in 0..self.config.max_attempts.max(1) {
             match self.try_query(name, qtype, qclass).await {
+                Ok(response) if response.metadata.truncated => {
+                    let Some(tcp_upstream) = self.tcp_upstream.as_ref() else {
+                        return Ok(response);
+                    };
+                    let id = response
+                        .metadata
+                        .question
+                        .as_ref()
+                        .map_or(0, |question| question.id);
+                    match self
+                        .try_tcp_query(tcp_upstream, id, name, qtype, qclass)
+                        .await
+                    {
+                        Ok(response) => return Ok(response),
+                        Err(error) => last_error = error,
+                    }
+                }
                 Ok(answer) => return Ok(answer),
                 Err(error) => last_error = error,
             }
@@ -150,6 +187,50 @@ impl DnsClientUpstream {
             }
             return decode_response_with_metadata(id, &buf[..len]);
         }
+    }
+
+    async fn try_tcp_query(
+        &self,
+        tcp_upstream: &Arc<dyn StreamUpstream<Conn = Box<dyn StreamConnection>>>,
+        id: u16,
+        name: &str,
+        qtype: u16,
+        qclass: u16,
+    ) -> Result<DnsAnswerWithMetadata, DnsClientError> {
+        let query = encode_query(id, name, qtype, qclass, true)?;
+        let frame_len = u16::try_from(query.len())
+            .map_err(|_| DnsClientError::Wire("DNS-over-TCP query exceeds 65535 bytes".into()))?;
+        let mut frame = Vec::with_capacity(query.len() + 2);
+        frame.extend_from_slice(&frame_len.to_be_bytes());
+        frame.extend_from_slice(&query);
+
+        let mut connection = tcp_upstream
+            .connect()
+            .await
+            .map_err(DnsClientError::Io)?;
+        connection
+            .write_all(&frame)
+            .await
+            .map_err(DnsClientError::Io)?;
+        connection.flush().await.map_err(DnsClientError::Io)?;
+
+        let mut length = [0u8; 2];
+        connection
+            .read_exact(&mut length)
+            .await
+            .map_err(DnsClientError::Io)?;
+        let response_len = usize::from(u16::from_be_bytes(length));
+        if response_len == 0 || response_len > MAX_TCP_REPLY_BYTES {
+            return Err(DnsClientError::Wire(
+                "DNS-over-TCP response length is invalid".into(),
+            ));
+        }
+        let mut response = vec![0u8; response_len];
+        connection
+            .read_exact(&mut response)
+            .await
+            .map_err(DnsClientError::Io)?;
+        decode_response_with_metadata(id, &response)
     }
 }
 

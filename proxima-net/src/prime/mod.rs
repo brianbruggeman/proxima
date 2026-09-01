@@ -259,6 +259,26 @@ impl PrimeTcpUpstream {
             in_flight: Mutex::new(None),
         }
     }
+
+    /// Type-erased TCP dialer for consumers whose transport boundary uses
+    /// the shared `Box<dyn StreamConnection>` shape.
+    pub fn boxed(addr: SocketAddr) -> std::sync::Arc<dyn StreamUpstream<Conn = Box<dyn StreamConnection>>> {
+        std::sync::Arc::new(BoxedPrimeTcpUpstream(Self::new(addr)))
+    }
+}
+
+struct BoxedPrimeTcpUpstream(PrimeTcpUpstream);
+
+impl StreamUpstream for BoxedPrimeTcpUpstream {
+    type Conn = Box<dyn StreamConnection>;
+
+    fn poll_connect(&self, cx: &mut Context<'_>) -> Poll<io::Result<Self::Conn>> {
+        match self.0.poll_connect(cx) {
+            Poll::Ready(Ok(conn)) => Poll::Ready(Ok(Box::new(conn))),
+            Poll::Ready(Err(err)) => Poll::Ready(Err(err)),
+            Poll::Pending => Poll::Pending,
+        }
+    }
 }
 
 /// Resolve host + port to the first `SocketAddr` via the system resolver.
