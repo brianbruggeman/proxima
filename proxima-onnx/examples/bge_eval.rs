@@ -83,7 +83,21 @@ fn cosine(a: &[f32], b: &[f32]) -> f32 {
 /// any earlier pass.
 type RunPassResult = (Vec<std::time::Duration>, Vec<Vec<f32>>, (u64, u64, u64), (u64, u64, u64));
 
-fn run_pass(graph: &proxima_onnx::messages::GraphProto<'_>, items: &[(&str, Vec<i64>)]) -> RunPassResult {
+/// `docs/discipline.md` (this session): `lower_graph_pinned` re-decodes AND
+/// re-clones every one of BGE-small's real weight initializers on every
+/// call (measured directly against the real model: ~26-30ms/call, the
+/// dominant per-sentence cost, larger than `evaluate_named` itself) even
+/// though the whole corpus pins `sequence_length` to only 3 distinct
+/// values. `lower_cache` amortizes that cost to once per distinct pinned
+/// shape across this file's own 5-run x 2-arm x 3-sentence loop (30 calls,
+/// 3 real shapes) via [`proxima_onnx::lower::lower_graph_pinned_cached`] --
+/// the plan-cache this session's task named, applied to the ACTUAL
+/// dominant cost this session measured rather than the ~2.5ms/sentence ROW
+/// 195 originally attributed to it (see this session's own report for the
+/// direct measurement that superseded ROW 195's derived number).
+type LowerCache = std::collections::BTreeMap<u64, proxima_onnx::lower::Lowered>;
+
+fn run_pass(graph: &proxima_onnx::messages::GraphProto<'_>, items: &[(&str, Vec<i64>)], lower_cache: &mut LowerCache) -> RunPassResult {
     proxima_tensor::cpu::epilogue_fuse_reset();
     proxima_tensor::cpu::layer_norm_cluster_reset();
     proxima_tensor::cpu::rewrite_engine_reset();
@@ -93,7 +107,10 @@ fn run_pass(graph: &proxima_onnx::messages::GraphProto<'_>, items: &[(&str, Vec<
         let mut pins = std::collections::BTreeMap::new();
         pins.insert("batch_size", 1u64);
         pins.insert("sequence_length", tokens.len() as u64);
-        let lowered = proxima_onnx::lower::lower_graph_pinned(graph, &pins).expect("lower BGE-small with pinned symbolic axes");
+        let cache_key = tokens.len() as u64;
+        let (lowered, cache_hit) =
+            proxima_onnx::lower::lower_graph_pinned_cached(lower_cache, graph, &pins, cache_key).expect("lower BGE-small with pinned symbolic axes (cached)");
+        let _ = cache_hit;
         let output = lowered.graph_outputs.first().expect("last_hidden_state output").1;
         let eval_start = Instant::now();
         let embedding = embed(&lowered.program, &lowered.graph_inputs, &lowered.initializers, output, tokens);
@@ -126,10 +143,11 @@ fn main() {
     let mut fused_totals = (0u64, 0u64, 0u64);
     let mut cluster_totals = (0u64, 0u64, 0u64);
     let mut engine_depth_fires = (0u64, 0u64);
+    let mut lower_cache: LowerCache = LowerCache::new();
 
     for run in 0..runs {
         proxima_tensor::cpu::set_epilogue_fuse_enabled(true);
-        let (durations, embeddings, totals, cluster) = run_pass(graph, &items);
+        let (durations, embeddings, totals, cluster) = run_pass(graph, &items, &mut lower_cache);
         let mean: std::time::Duration = durations.iter().sum::<std::time::Duration>() / durations.len() as u32;
         println!(
             "run {run} fused: per-sentence={durations:?} mean={mean:?} fuse_hits={} fuse_elements={} fuse_nanos={} ln_cluster_hits={} ln_cluster_elements={} ln_cluster_nanos={}",
@@ -142,7 +160,7 @@ fn main() {
         engine_depth_fires = proxima_tensor::cpu::rewrite_engine_depth_fires();
 
         proxima_tensor::cpu::set_epilogue_fuse_enabled(false);
-        let (durations, embeddings, totals, cluster) = run_pass(graph, &items);
+        let (durations, embeddings, totals, cluster) = run_pass(graph, &items, &mut lower_cache);
         let mean: std::time::Duration = durations.iter().sum::<std::time::Duration>() / durations.len() as u32;
         println!(
             "run {run} unfused: per-sentence={durations:?} mean={mean:?} fuse_hits={} fuse_elements={} fuse_nanos={} ln_cluster_hits={} ln_cluster_elements={} ln_cluster_nanos={}",
@@ -163,6 +181,11 @@ fn main() {
 
     println!("=== ROW 190 summary ===");
     println!("runs={runs}");
+    println!(
+        "lower_graph_pinned_cached: distinct pinned shapes cached={} total run_pass calls to embed()={} (expect cache_len == distinct sentence lengths, not one per call)",
+        lower_cache.len(),
+        runs * 2 * items.len()
+    );
     println!("fused engagement (last run): hits={} elements={} nanos={}", fused_totals.0, fused_totals.1, fused_totals.2);
     println!("ln_cluster engagement (last run): hits={} elements={} nanos={}", cluster_totals.0, cluster_totals.1, cluster_totals.2);
     println!(
