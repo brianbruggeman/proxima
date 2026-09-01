@@ -530,6 +530,37 @@ pub struct StaticArena {
     /// -- [`build_packed_width_panels`] is the only populator and it checks
     /// the valve before scanning.
     packed_width_panels: BTreeMap<NodeId, PackedWidthPanels>,
+    /// `run_rewrite_worklist`'s law 1/2 admission (`docs/rewrite-algebra.md`
+    /// §8), computed exactly once here rather than per
+    /// [`evaluate_named_with_arena`] call -- the entire point of an arena is
+    /// amortizing work that would otherwise repeat every step, and a
+    /// fusion plan is call-invariant for exactly the same reason
+    /// `resolved`/`shapes` are: it is derived purely from `resolved`'s own
+    /// structure, which never changes across calls against this arena.
+    /// Reduce `NodeId` -> (consumer's `resolved` index, fire position,
+    /// kind, hoist axis), identical shape to
+    /// [`evaluate_quantized_with_scratch`]'s own local of the same name.
+    epilogue_fuse_plan: SingleHopEpiloguePlan,
+    /// `run_rewrite_worklist`'s law 2 cluster upgrade, same call-invariance
+    /// argument as `epilogue_fuse_plan` above.
+    layer_norm_cluster_plan: BTreeMap<NodeId, LayerNormClusterPlan>,
+    /// Union of every node `epilogue_fuse_plan`/`layer_norm_cluster_plan`
+    /// makes dead weight -- `run_resolved_nodes_in_arena` skips these
+    /// exactly like `dead`/`static_nodes`, except the skip is a fusion
+    /// decision rather than a liveness one: the node IS a real,
+    /// non-dead operand elsewhere in `resolved` (so it stays out of
+    /// `dead`), its buffer is simply filled by a fused kernel at
+    /// `epilogue_fuse_fire_at`/`layer_norm_cluster_fire_at`'s own
+    /// position instead of by `run_node_into` at its own natural position.
+    epilogue_fuse_skip: BTreeSet<NodeId>,
+    /// `epilogue_fuse_plan` grouped by `fire_position`, same shape and
+    /// same reasoning as `evaluate_quantized_with_scratch`'s own local:
+    /// lets the arena's per-position loop ask "does anything fire here"
+    /// in O(1) instead of scanning the whole plan every position.
+    epilogue_fuse_fire_at: BTreeMap<usize, Vec<NodeId>>,
+    /// `layer_norm_cluster_plan` grouped by `fire_position`, sibling to
+    /// `epilogue_fuse_fire_at` above.
+    layer_norm_cluster_fire_at: BTreeMap<usize, Vec<NodeId>>,
 }
 
 /// Every node `resolved` physically reads, straight off [`BoundOp::operands()`]
@@ -667,6 +698,39 @@ pub fn build_static_arena_with_constants(
     let dead = dead_resolved_nodes(&resolved, &effective_outputs);
     let static_nodes = static_resolved_nodes(&resolved, &dead);
 
+    // Computed exactly once, here, never inside `run_resolved_nodes_in_arena`
+    // -- fusion is call-invariant over `resolved`'s own structure, the same
+    // amortization argument this arena already applies to `shapes`/`resolved`
+    // themselves. `quantized_weights` is always empty: a `StaticArena` is
+    // f32-only (`reject_non_float32` above), so `epilogue_fuse_plan`'s own
+    // quantized-weight exclusion guard is a no-op here, matching
+    // `evaluate_named`'s own all-`Float32` call into this same machinery.
+    let (epilogue_fuse_plan, layer_norm_cluster_plan, rewrite_fires) =
+        run_rewrite_worklist(&resolved, program.len(), &effective_outputs, &BTreeMap::new());
+    record_rewrite_engine_fires(&rewrite_fires);
+    let epilogue_fuse_skip: BTreeSet<NodeId> = epilogue_fuse_plan
+        .values()
+        .map(|(index, ..)| resolved[*index].node)
+        .chain(layer_norm_cluster_plan.values().flat_map(|cluster| cluster.skip))
+        .collect();
+    let epilogue_fuse_fire_at: BTreeMap<usize, Vec<NodeId>> = {
+        let mut grouped: BTreeMap<usize, Vec<NodeId>> = BTreeMap::new();
+        for (reduce_node, (_, fire_position, ..)) in &epilogue_fuse_plan {
+            if layer_norm_cluster_plan.contains_key(reduce_node) {
+                continue;
+            }
+            grouped.entry(*fire_position).or_default().push(*reduce_node);
+        }
+        grouped
+    };
+    let layer_norm_cluster_fire_at: BTreeMap<usize, Vec<NodeId>> = {
+        let mut grouped: BTreeMap<usize, Vec<NodeId>> = BTreeMap::new();
+        for (reduce_node, cluster) in &layer_norm_cluster_plan {
+            grouped.entry(cluster.fire_position).or_default().push(*reduce_node);
+        }
+        grouped
+    };
+
     // bound before the static pass so a `Constant`/`Iota` node consuming one
     // of these (unlikely for a weight but not disallowed) sees the real
     // value too — matches `bind_named_inputs_into_arena`'s own per-slot
@@ -715,6 +779,11 @@ pub fn build_static_arena_with_constants(
         dead,
         static_nodes,
         packed_width_panels,
+        epilogue_fuse_plan,
+        layer_norm_cluster_plan,
+        epilogue_fuse_skip,
+        epilogue_fuse_fire_at,
+        layer_norm_cluster_fire_at,
     })
 }
 
@@ -784,33 +853,86 @@ fn bind_named_inputs_into_arena(arena: &mut StaticArena, named: &[(&str, &[f32])
 fn run_resolved_nodes_in_arena(arena: &mut StaticArena) -> Result<(), TensorError> {
     #[cfg(feature = "epilogue-profile-probe")]
     let reduce_nodes = epilogue_profile_reduce_flags(&arena.resolved, arena.buffers.len());
-    for computed in &arena.resolved {
-        if arena.dead.contains(&computed.node) || arena.static_nodes.contains(&computed.node) {
-            continue;
+    for position in 0..arena.resolved.len() {
+        let computed = &arena.resolved[position];
+        let node = computed.node;
+        // `arena.epilogue_fuse_skip` sits alongside `dead`/`static_nodes` as
+        // a third reason this position's own `run_node_into` never runs --
+        // unlike the other two, the skipped node is neither dead nor
+        // call-invariant: its buffer is filled below, by a fused kernel, at
+        // this SAME plan's own `fire_position` (which may be this position
+        // or an earlier one, never later -- `epilogue_fuse_plan`/
+        // `layer_norm_cluster_plan`'s own `fire_position >= index` guard).
+        let skip_compute = arena.dead.contains(&node) || arena.static_nodes.contains(&node) || arena.epilogue_fuse_skip.contains(&node);
+        if !skip_compute {
+            let node_index = node.0 as usize;
+            let mut output = arena.buffers[node_index].take().ok_or(TensorError::NotLowerable {
+                node,
+                reason: "static arena has no pre-sized slot for this resolved node -- build_static_arena did not size it",
+            })?;
+            #[cfg(feature = "epilogue-profile-probe")]
+            let profile_start = std::time::Instant::now();
+            // law 6∘5: a node with a plan-time-packed `b` operand skips
+            // `run_node_into`'s dispatch entirely and calls `run_reduce`
+            // directly with the packed panel -- `run_node_into`'s own
+            // signature stays untouched (13 other call sites, `docs/
+            // rewrite-algebra.md` admission rule scopes this lever to the
+            // arena's own execution loop, not a crate-wide dispatch change).
+            // Always `None`/never-taken off `aarch64` or with the bench/test
+            // escape valve `set_pack_at_plan_time_enabled(false)`, since
+            // `packed_width_panels` is always empty there.
+            match arena.packed_width_panels.get(&node) {
+                Some(packed) => run_reduce(computed, &arena.buffers, &mut output, Some(packed))?,
+                None => run_node_into(computed, &arena.buffers, None, None, &mut output)?,
+            }
+            #[cfg(feature = "epilogue-profile-probe")]
+            epilogue_profile_record(computed, &reduce_nodes, profile_start.elapsed().as_nanos() as u64);
+            arena.buffers[node_index] = Some(output);
         }
-        let node_index = computed.node.0 as usize;
-        let mut output = arena.buffers[node_index].take().ok_or(TensorError::NotLowerable {
-            node: computed.node,
-            reason: "static arena has no pre-sized slot for this resolved node -- build_static_arena did not size it",
-        })?;
-        #[cfg(feature = "epilogue-profile-probe")]
-        let profile_start = std::time::Instant::now();
-        // law 6∘5: a node with a plan-time-packed `b` operand skips
-        // `run_node_into`'s dispatch entirely and calls `run_reduce`
-        // directly with the packed panel -- `run_node_into`'s own
-        // signature stays untouched (13 other call sites, `docs/
-        // rewrite-algebra.md` admission rule scopes this lever to the
-        // arena's own execution loop, not a crate-wide dispatch change).
-        // Always `None`/never-taken off `aarch64` or with the bench/test
-        // escape valve `set_pack_at_plan_time_enabled(false)`, since
-        // `packed_width_panels` is always empty there.
-        match arena.packed_width_panels.get(&computed.node) {
-            Some(packed) => run_reduce(computed, &arena.buffers, &mut output, Some(packed))?,
-            None => run_node_into(computed, &arena.buffers, None, None, &mut output)?,
+        // `evaluate_quantized_with_scratch`'s own identical fire blocks,
+        // ported verbatim onto arena buffers: same maps, same admission,
+        // same monomorphic kernels, only the buffer type (`Vec<f32>`
+        // in-place instead of `take_or_allocate`'s pooled `Cow::Owned`)
+        // differs, since an arena's own consumer slot is already pre-sized
+        // and never freed -- `take()` it, write into it, put it back, no
+        // allocation on this call's own path.
+        if let Some(reduce_nodes) = arena.epilogue_fuse_fire_at.get(&position) {
+            for reduce_node in reduce_nodes.clone() {
+                let Some(&(consumer_index, _, kind, hoist_axis)) = arena.epilogue_fuse_plan.get(&reduce_node) else {
+                    continue;
+                };
+                let consumer_node = arena.resolved[consumer_index].node;
+                let mut output = arena.buffers[consumer_node.0 as usize].take().ok_or(TensorError::NotLowerable {
+                    node: consumer_node,
+                    reason: "static arena has no pre-sized slot for this epilogue-fused node -- build_static_arena did not size it",
+                })?;
+                let reduce_values = arena.buffers[reduce_node.0 as usize].as_deref().unwrap_or(&[]);
+                let fuse_started = std::time::Instant::now();
+                apply_epilogue_fused_monomorphic(kind, &arena.resolved[consumer_index], reduce_node, hoist_axis, reduce_values, &arena.buffers, &mut output);
+                EPILOGUE_FUSE_NANOS.fetch_add(fuse_started.elapsed().as_nanos() as u64, EpilogueFuseOrdering::Relaxed);
+                EPILOGUE_FUSE_HITS.fetch_add(1, EpilogueFuseOrdering::Relaxed);
+                EPILOGUE_FUSE_ELEMENTS.fetch_add(output.len() as u64, EpilogueFuseOrdering::Relaxed);
+                arena.buffers[consumer_node.0 as usize] = Some(output);
+            }
         }
-        #[cfg(feature = "epilogue-profile-probe")]
-        epilogue_profile_record(computed, &reduce_nodes, profile_start.elapsed().as_nanos() as u64);
-        arena.buffers[node_index] = Some(output);
+        if let Some(reduce_nodes) = arena.layer_norm_cluster_fire_at.get(&position) {
+            for reduce_node in reduce_nodes.clone() {
+                let Some(cluster) = arena.layer_norm_cluster_plan.get(&reduce_node) else {
+                    continue;
+                };
+                let tail_node = arena.resolved[cluster.tail_index].node;
+                let mut output = arena.buffers[tail_node.0 as usize].take().ok_or(TensorError::NotLowerable {
+                    node: tail_node,
+                    reason: "static arena has no pre-sized slot for this layer-norm-cluster node -- build_static_arena did not size it",
+                })?;
+                let fuse_started = std::time::Instant::now();
+                apply_layer_norm_cluster_fused(&arena.resolved[cluster.tail_index], cluster.x_node, cluster.row_axis, &arena.buffers, &mut output);
+                LAYER_NORM_CLUSTER_NANOS.fetch_add(fuse_started.elapsed().as_nanos() as u64, EpilogueFuseOrdering::Relaxed);
+                LAYER_NORM_CLUSTER_HITS.fetch_add(1, EpilogueFuseOrdering::Relaxed);
+                LAYER_NORM_CLUSTER_ELEMENTS.fetch_add(output.len() as u64, EpilogueFuseOrdering::Relaxed);
+                arena.buffers[tail_node.0 as usize] = Some(output);
+            }
+        }
     }
     Ok(())
 }
@@ -1405,7 +1527,15 @@ pub fn epilogue_fuse_reset() {
 /// `coordinate` is a fixed `[u64; MAX_INLINE_RANK]` array, and every hoisted
 /// scalar is a plain `f32` local — closing ROW 183's own named residual (that
 /// row's interpreter allocated 3 small `Vec`s per fusion hit).
-fn apply_epilogue_fused_monomorphic(kind: EpilogueKind, consumer: &BoundOp, reduce_node: NodeId, hoist_axis: Option<usize>, reduce_values: &[f32], buffers: &[Option<Cow<'_, [f32]>>], output: &mut [f32]) {
+fn apply_epilogue_fused_monomorphic<B: Deref<Target = [f32]>>(
+    kind: EpilogueKind,
+    consumer: &BoundOp,
+    reduce_node: NodeId,
+    hoist_axis: Option<usize>,
+    reduce_values: &[f32],
+    buffers: &[Option<B>],
+    output: &mut [f32],
+) {
     let BoundOpKind::Elementwise { operands, .. } = &consumer.kind else {
         return;
     };
@@ -2035,7 +2165,7 @@ pub fn rewrite_engine_reset() {
 /// own doc bans), then writes the normalize+affine step reusing
 /// [`EpilogueKind::LayerNorm`]'s own arithmetic. Writes ONLY `tail`'s own
 /// buffer -- `x` is read, never mutated.
-fn apply_layer_norm_cluster_fused(tail: &BoundOp, x_node: NodeId, row_axis: usize, buffers: &[Option<Cow<'_, [f32]>>], output: &mut [f32]) {
+fn apply_layer_norm_cluster_fused<B: Deref<Target = [f32]>>(tail: &BoundOp, x_node: NodeId, row_axis: usize, buffers: &[Option<B>], output: &mut [f32]) {
     let BoundOpKind::Elementwise { operands, .. } = &tail.kind else {
         return;
     };
@@ -2254,6 +2384,17 @@ pub fn evaluate_named_with_arena_masked(
 #[must_use]
 pub fn arena_output(arena: &StaticArena, node: NodeId) -> Option<&[f32]> {
     arena.buffers.get(node.0 as usize).and_then(Option::as_deref)
+}
+
+/// Engagement evidence for law 6∘5 (weight packing): how many `resolved`
+/// nodes `build_static_arena_with_constants` packed a `b` operand for, so a
+/// re-prove command can assert `N > 0` on a real graph instead of trusting
+/// packing ran — same "a gate that cannot report its N is not a gate" shape
+/// [`epilogue_fuse_totals`]/[`rewrite_engine_depth_fires`] already serve for
+/// the two fusion laws.
+#[must_use]
+pub fn arena_packed_node_count(arena: &StaticArena) -> usize {
+    arena.packed_width_panels.len()
 }
 
 /// The in-place counterpart to [`evaluate_named_with_arena`]: a caller
