@@ -232,3 +232,99 @@ impl StreamListener for QuicListener {
         self.local_addr.map(BindAddr::Tcp)
     }
 }
+
+#[cfg(all(test, feature = "tokio-compat"))]
+mod tests {
+    use super::*;
+    use futures::io::{AsyncReadExt, AsyncWriteExt};
+    use proxima_primitives::stream::{StreamListener, StreamUpstream};
+    use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
+    use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
+    use rustls::{DigitallySignedStruct, SignatureScheme};
+
+    #[derive(Debug)]
+    struct AcceptAnyCertificate;
+
+    impl ServerCertVerifier for AcceptAnyCertificate {
+        fn verify_server_cert(
+            &self,
+            _end_entity: &CertificateDer<'_>,
+            _intermediates: &[CertificateDer<'_>],
+            _server_name: &ServerName<'_>,
+            _ocsp_response: &[u8],
+            _now: UnixTime,
+        ) -> Result<ServerCertVerified, rustls::Error> {
+            Ok(ServerCertVerified::assertion())
+        }
+
+        fn verify_tls12_signature(
+            &self,
+            _message: &[u8],
+            _cert: &CertificateDer<'_>,
+            _dss: &DigitallySignedStruct,
+        ) -> Result<HandshakeSignatureValid, rustls::Error> {
+            Ok(HandshakeSignatureValid::assertion())
+        }
+
+        fn verify_tls13_signature(
+            &self,
+            _message: &[u8],
+            _cert: &CertificateDer<'_>,
+            _dss: &DigitallySignedStruct,
+        ) -> Result<HandshakeSignatureValid, rustls::Error> {
+            Ok(HandshakeSignatureValid::assertion())
+        }
+
+        fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
+            vec![
+                SignatureScheme::ECDSA_NISTP256_SHA256,
+                SignatureScheme::ECDSA_NISTP384_SHA384,
+                SignatureScheme::RSA_PKCS1_SHA256,
+                SignatureScheme::RSA_PSS_SHA256,
+                SignatureScheme::ED25519,
+            ]
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn quic_upstream_and_listener_exchange_one_stream() {
+        let server_config =
+            crate::dev_server_config(vec!["localhost".into()], &[b"doq"]).expect("server config");
+        let listener =
+            QuicListener::bind("127.0.0.1:0".parse().expect("bind address"), server_config)
+                .expect("quic listener");
+        let BindAddr::Tcp(server_addr) = listener.local_addr().expect("local address") else {
+            panic!("quic listener returned a non-stream address")
+        };
+
+        let provider = Arc::new(rustls::crypto::aws_lc_rs::default_provider());
+        let mut tls = rustls::ClientConfig::builder_with_provider(provider)
+            .with_safe_default_protocol_versions()
+            .expect("TLS versions")
+            .dangerous()
+            .with_custom_certificate_verifier(Arc::new(AcceptAnyCertificate))
+            .with_no_client_auth();
+        tls.alpn_protocols = vec![b"doq".to_vec()];
+        let upstream =
+            QuicUpstream::with_client_config(server_addr, "localhost", tls).expect("quic upstream");
+
+        let client_task = tokio::spawn(async move {
+            let mut client = std::future::poll_fn(|cx| upstream.poll_connect(cx))
+                .await
+                .expect("connect stream");
+            client.write_all(b"doq-frame").await.expect("client write");
+            client
+        });
+        let mut server = std::future::poll_fn(|cx| listener.poll_accept(cx))
+            .await
+            .expect("accept stream");
+        let mut client = client_task.await.expect("client task");
+        let mut request = [0u8; 9];
+        server.read_exact(&mut request).await.expect("server read");
+        assert_eq!(&request, b"doq-frame");
+        server.write_all(b"doq-reply").await.expect("server write");
+        let mut response = [0u8; 9];
+        client.read_exact(&mut response).await.expect("client read");
+        assert_eq!(&response, b"doq-reply");
+    }
+}
