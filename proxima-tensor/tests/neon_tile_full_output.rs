@@ -203,6 +203,8 @@ fn check_width_size(size: usize) {
 
     #[cfg(all(target_arch = "aarch64", feature = "instrument"))]
     let (gate_before, invocations_before, fallback_before) = proxima_tensor::cpu::width_tile_counters();
+    #[cfg(all(target_arch = "aarch64", feature = "instrument"))]
+    let row_remainder_elements_before = proxima_tensor::cpu::width_tile_row_remainder_elements();
 
     let (program, _sum) = matmul_program(m as u32, k as u32, n as u32);
     let evaluated = match evaluate(&program, &[], &[&a, &b], &[]) {
@@ -257,15 +259,22 @@ fn check_width_size(size: usize) {
     #[cfg(all(target_arch = "aarch64", feature = "instrument"))]
     {
         let (gate_after, invocations_after, fallback_after) = proxima_tensor::cpu::width_tile_counters();
+        let row_remainder_elements_after = proxima_tensor::cpu::width_tile_row_remainder_elements();
         let gate_delta = gate_after - gate_before;
         let invocations_delta = invocations_after - invocations_before;
+        let row_remainder_elements_delta = row_remainder_elements_after - row_remainder_elements_before;
         let fallback_delta = fallback_after - fallback_before;
         // WIDTH_TILE_ROWS(4) * WIDTH_TILE_VECS(4) * 4 lanes/vec = 64
-        // outputs/call (`cpu.rs::gemm_width_tile_neon` doc).
-        let covered = invocations_delta * 64 + fallback_delta;
+        // outputs/call (`cpu.rs::gemm_width_tile_neon` doc). Leading-row
+        // remainders (`leading_total % WIDTH_TILE_ROWS`) no longer fall
+        // through to the scalar path (`row_remainder_elements`, the 2-row/
+        // 1-row NEON variants) -- only a column tail still reaches
+        // `fallback_elements` (ROW 200's fix, `cpu.rs::run_width_tile_neon`).
+        let covered = invocations_delta * 64 + row_remainder_elements_delta + fallback_delta;
         println!(
             "width_tile size={size}: gate_passes={gate_delta} invocations={invocations_delta} \
-             fallback_elements={fallback_delta} covered={covered} m*n={expected_total}",
+             row_remainder_elements={row_remainder_elements_delta} fallback_elements={fallback_delta} \
+             covered={covered} m*n={expected_total}",
             expected_total = m * n
         );
         assert!(
@@ -276,7 +285,8 @@ fn check_width_size(size: usize) {
         assert_eq!(
             covered,
             (m * n) as u64,
-            "width_tile size={size}: invocations*64 + fallback_elements ({covered}) != m*n ({expected})",
+            "width_tile size={size}: invocations*64 + row_remainder_elements + fallback_elements ({covered}) != \
+             m*n ({expected})",
             expected = m * n
         );
         assert_eq!(gate_delta, 1, "width_tile size={size}: expected exactly one gate pass for one bound op");
@@ -445,4 +455,210 @@ fn width_tile_full_output_1023_row_and_column_remainder() {
 #[test]
 fn width_tile_full_output_1025_row_and_column_remainder() {
     check_width_size(1025);
+}
+
+/// ROW 200's own correctness check: real BGE-shaped `M` values (7, 8, 9 are
+/// BGE's own real per-sentence token counts, `docs/discipline.md` ROW 199;
+/// 1, 2, 3, 5, 6 fill in every arm the greedy 2-then-1 row-remainder
+/// dispatch (`cpu.rs::run_width_tile_neon`) can take: `m % WIDTH_TILE_ROWS
+/// (4)` of 0 (m=8, main tile only), 1 (m=1,5,9 -- a single `ROWS=1` tile),
+/// 2 (m=2,6 -- a single `ROWS=2` tile), 3 (m=3,7 -- `ROWS=2` THEN `ROWS=1`,
+/// the only two-variant-in-one-call case)). `k=64, n=384` mirrors BGE's own
+/// hidden size (`bge_epilogue_profile.rs`, ROW 195) and is a clean multiple
+/// of `WIDTH_TILE_VECS*4=16`, so `fallback_delta` (the genuinely-scalar
+/// column tail) is asserted `== 0` here — isolating this test to the row
+/// remainder alone, since the column tail is already covered by
+/// `width_tile_full_output_1023/1025_row_and_column_remainder` above.
+fn check_width_tile_small_m(m: usize) {
+    let (k, n) = (64usize, 384usize);
+    let a: Vec<f32> = (0..m * k).map(|index| (index as f32 * 0.0137).sin()).collect();
+    let b: Vec<f32> = (0..k * n).map(|index| (index as f32 * 0.0271).cos()).collect();
+
+    #[cfg(all(target_arch = "aarch64", feature = "instrument"))]
+    let (gate_before, invocations_before, fallback_before) = proxima_tensor::cpu::width_tile_counters();
+    #[cfg(all(target_arch = "aarch64", feature = "instrument"))]
+    let row_remainder_invocations_before = proxima_tensor::cpu::width_tile_row_remainder_invocations();
+    #[cfg(all(target_arch = "aarch64", feature = "instrument"))]
+    let row_remainder_elements_before = proxima_tensor::cpu::width_tile_row_remainder_elements();
+
+    let (program, _sum) = matmul_program(m as u32, k as u32, n as u32);
+    let evaluated = match evaluate(&program, &[], &[&a, &b], &[]) {
+        Ok(evaluated) => evaluated,
+        Err(error) => panic!("width_tile small_m={m}: plain-rhs gemm evaluates: {error}"),
+    };
+    let actual = evaluated.root();
+
+    let expected = naive_reference_plain_rhs(&a, &b, m, k, n);
+    let ground_truth = high_precision_reference_plain_rhs(&a, &b, m, k, n);
+
+    assert_eq!(actual.len(), expected.len(), "width_tile small_m={m}: output length mismatch");
+
+    let mut tile_error_vs_truth = 0.0f64;
+    let mut naive_error_vs_truth = 0.0f64;
+    let mut max_absolute_error_vs_truth = 0.0f64;
+    let mut worst_absolute_index = 0usize;
+    for index in 0..actual.len() {
+        let truth = ground_truth[index];
+        let tile_absolute_error = ((actual[index] as f64) - truth).abs();
+        tile_error_vs_truth += tile_absolute_error.powi(2);
+        naive_error_vs_truth += ((expected[index] as f64) - truth).powi(2);
+        if tile_absolute_error > max_absolute_error_vs_truth {
+            max_absolute_error_vs_truth = tile_absolute_error;
+            worst_absolute_index = index;
+        }
+    }
+    let tile_rms_vs_truth = (tile_error_vs_truth / actual.len() as f64).sqrt();
+    let naive_rms_vs_truth = (naive_error_vs_truth / actual.len() as f64).sqrt();
+    println!(
+        "width_tile small_m={m}: tile_rms_vs_f64_truth={tile_rms_vs_truth:e} \
+         naive_f32_rms_vs_f64_truth={naive_rms_vs_truth:e} ratio={:.3} \
+         max_absolute_error_vs_f64_truth={max_absolute_error_vs_truth:e} worst_absolute_index={worst_absolute_index}",
+        tile_rms_vs_truth / naive_rms_vs_truth.max(1e-30)
+    );
+
+    assert!(
+        tile_rms_vs_truth <= naive_rms_vs_truth,
+        "width_tile small_m={m}: tile kernel RMS error vs f64 truth ({tile_rms_vs_truth:e}) exceeded the naive f32 \
+         loop's own RMS error vs f64 truth ({naive_rms_vs_truth:e})"
+    );
+
+    let max_absolute_error_bound = 1e-6 * (k as f64).max(1.0);
+    assert!(
+        max_absolute_error_vs_truth <= max_absolute_error_bound,
+        "width_tile small_m={m}: max absolute error vs f64 truth ({max_absolute_error_vs_truth:e}) exceeded bound \
+         ({max_absolute_error_bound:e}) at worst_absolute_index={worst_absolute_index}"
+    );
+
+    #[cfg(all(target_arch = "aarch64", feature = "instrument"))]
+    {
+        let (gate_after, invocations_after, fallback_after) = proxima_tensor::cpu::width_tile_counters();
+        let row_remainder_invocations_after = proxima_tensor::cpu::width_tile_row_remainder_invocations();
+        let row_remainder_elements_after = proxima_tensor::cpu::width_tile_row_remainder_elements();
+        let gate_delta = gate_after - gate_before;
+        let invocations_delta = invocations_after - invocations_before;
+        let row_remainder_invocations_delta = row_remainder_invocations_after - row_remainder_invocations_before;
+        let row_remainder_elements_delta = row_remainder_elements_after - row_remainder_elements_before;
+        let fallback_delta = fallback_after - fallback_before;
+        let covered = invocations_delta * 64 + row_remainder_elements_delta + fallback_delta;
+        println!(
+            "width_tile small_m={m}: gate_passes={gate_delta} invocations={invocations_delta} \
+             row_remainder_invocations={row_remainder_invocations_delta} \
+             row_remainder_elements={row_remainder_elements_delta} fallback_elements={fallback_delta} \
+             covered={covered} m*n={expected_total}",
+            expected_total = m * n
+        );
+
+        if m == 1 {
+            // GENUINE, MEASURED FINDING (not this row's fix, upstream of it):
+            // `resolve_reduce_axis_shape` (`cpu.rs:5748-5752`, ROW 198's own
+            // ANY-size-1-leading-axis squeeze) filters M=1's own leading
+            // (row) axis out entirely — its extent is 1, indistinguishable
+            // to that filter from a squeezed batch axis — leaving
+            // `leading_output_axes = []`. Both `width_tile_plan` (this row's
+            // target) and `neon_tile_plan` (the dot tile) require
+            // `leading_output_axes.len() == 1` and reject `0` identically,
+            // so `try_run_width_tile` returns `false` before
+            // `run_width_tile_neon` — and this row's 2-row/1-row NEON
+            // variants — are ever reached. `gate_delta == 0` proves it: the
+            // width tile did not run AT ALL for M=1, not "ran and fell to
+            // the scalar remainder." M=1 (the mnist-fc shape) is answered by
+            // this row as OUT OF THIS FIX'S REACH, a distinct, upstream gate
+            // question for `resolve_reduce_axis_shape` itself, not a
+            // row-remainder-kernel question.
+            assert_eq!(gate_delta, 0, "width_tile small_m=1: expected the width tile to never even be attempted");
+            assert_eq!(invocations_delta, 0, "width_tile small_m=1: main tile must not fire");
+            assert_eq!(row_remainder_invocations_delta, 0, "width_tile small_m=1: remainder variants must not fire");
+            assert_eq!(fallback_delta, 0, "width_tile small_m=1: scalar fallback must not fire either");
+            return;
+        }
+
+        let main_tiles_expected = m / proxima_tensor::sized::WIDTH_TILE_ROWS;
+        if main_tiles_expected > 0 {
+            assert!(
+                invocations_delta > 0,
+                "width_tile small_m={m}: expected the main {rows}-row tile to fire ({main_tiles_expected} whole \
+                 tile(s) of rows), got zero invocations",
+                rows = proxima_tensor::sized::WIDTH_TILE_ROWS
+            );
+        } else {
+            assert_eq!(
+                invocations_delta, 0,
+                "width_tile small_m={m}: m < WIDTH_TILE_ROWS, the main tile must never fire"
+            );
+        }
+
+        let remainder_rows = m % proxima_tensor::sized::WIDTH_TILE_ROWS;
+        if remainder_rows == 0 {
+            assert_eq!(
+                row_remainder_invocations_delta, 0,
+                "width_tile small_m={m}: m is a clean multiple of WIDTH_TILE_ROWS, no remainder variant should fire"
+            );
+        } else {
+            assert!(
+                row_remainder_invocations_delta > 0,
+                "width_tile small_m={m}: remainder_rows={remainder_rows} > 0 but zero row-remainder tile \
+                 invocations — N==0 would mean the 2-row/1-row NEON variants never fired and the scalar path \
+                 silently absorbed the remainder instead"
+            );
+        }
+
+        assert_eq!(
+            fallback_delta, 0,
+            "width_tile small_m={m}: n=384 is a clean multiple of WIDTH_TILE_VECS*4=16, so the column tail (the \
+             only path still allowed to reach width_tile_scalar_cell) must never fire — a nonzero fallback here \
+             means some leading-row remainder silently fell through to the scalar row-tail again"
+        );
+
+        assert_eq!(
+            covered,
+            (m * n) as u64,
+            "width_tile small_m={m}: invocations*64 + row_remainder_elements + fallback_elements ({covered}) != \
+             m*n ({expected})",
+            expected = m * n
+        );
+        assert_eq!(gate_delta, 1, "width_tile small_m={m}: expected exactly one gate pass for one bound op");
+    }
+}
+
+/// M=1 does NOT reach the 1-row remainder variant -- its own leading axis
+/// (extent 1) is squeezed to zero leading axes upstream, in
+/// `resolve_reduce_axis_shape`, before `width_tile_plan`'s gate ever sees
+/// it (see the `m == 1` branch inside `check_width_tile_small_m` for the
+/// full mechanism). Named for the finding, not the variant, since the name
+/// this test started with (`..._pure_one_row_remainder`) would be wrong.
+#[test]
+fn width_tile_small_m_1_never_reaches_the_width_tile_gate() {
+    check_width_tile_small_m(1);
+}
+
+#[test]
+fn width_tile_small_m_2_pure_two_row_remainder() {
+    check_width_tile_small_m(2);
+}
+
+#[test]
+fn width_tile_small_m_3_two_then_one_row_remainder() {
+    check_width_tile_small_m(3);
+}
+
+#[test]
+fn width_tile_small_m_5_main_tile_plus_one_row_remainder() {
+    check_width_tile_small_m(5);
+}
+
+#[test]
+fn width_tile_small_m_6_main_tile_plus_two_row_remainder() {
+    check_width_tile_small_m(6);
+}
+
+/// BGE's own real "quantum physics..." sentence, `M=7` (ROW 199).
+#[test]
+fn width_tile_small_m_7_bge_real_sentence_two_then_one_remainder() {
+    check_width_tile_small_m(7);
+}
+
+/// BGE's own real "a cat is sitting..." sentence, `M=9` (ROW 199).
+#[test]
+fn width_tile_small_m_9_bge_real_sentence_one_row_remainder() {
+    check_width_tile_small_m(9);
 }

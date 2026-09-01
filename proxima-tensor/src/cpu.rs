@@ -5944,6 +5944,9 @@ fn run_reduce<B: Deref<Target = [f32]>>(
         };
         #[cfg(feature = "instrument")]
         let width_tile_counters_before = width_tile_counters();
+        #[cfg(feature = "instrument")]
+        let width_tile_row_remainder_before =
+            (width_tile_row_remainder_invocations(), width_tile_row_remainder_elements());
         if try_run_width_tile(&width_path_context, &raw, output) {
             // the tile's own early return skips the rest of this function
             // (including the `counters.commit` call every other path reaches),
@@ -5956,10 +5959,28 @@ fn run_reduce<B: Deref<Target = [f32]>>(
                 let (_, invocations_before, fallback_before) = width_tile_counters_before;
                 let invocations_delta = invocations_after - invocations_before;
                 let fallback_delta = fallback_after - fallback_before;
-                let tile_elements = (WIDTH_TILE_ROWS * WIDTH_TILE_VECS * 4) as u64;
-                counters.kernel_calls += invocations_delta + fallback_delta;
+                let (row_remainder_invocations_after, row_remainder_elements_after) =
+                    (width_tile_row_remainder_invocations(), width_tile_row_remainder_elements());
+                let (row_remainder_invocations_before, row_remainder_elements_before) = width_tile_row_remainder_before;
+                let row_remainder_invocations_delta = row_remainder_invocations_after - row_remainder_invocations_before;
+                let row_remainder_elements_delta = row_remainder_elements_after - row_remainder_elements_before;
+                let tile_cols = (WIDTH_TILE_VECS * 4) as u64;
+                let tile_elements = WIDTH_TILE_ROWS as u64 * tile_cols;
+                counters.kernel_calls += invocations_delta + row_remainder_invocations_delta + fallback_delta;
                 counters.mac_ops += invocations_delta * tile_elements * reduction_total;
                 counters.operand_loads += invocations_delta * (WIDTH_TILE_ROWS + WIDTH_TILE_VECS) as u64 * reduction_total;
+                // row-remainder tiles (`ROWS` = 2 or 1, ROW 200) contribute the
+                // SAME per-call shape as the main tile, `(ROWS + WIDTH_TILE_VECS)
+                // * reduction_total` operand loads, just at a narrower `ROWS` —
+                // `row_remainder_elements_delta / tile_cols` recovers the EXACT
+                // sum of `ROWS` across every remainder call (not an average: each
+                // call's own `elements = ROWS * tile_cols`, so the division is
+                // exact before the sum), letting this stay a precise identity
+                // rather than an approximation from the aggregate counters alone.
+                let row_remainder_rows_sum = row_remainder_elements_delta / tile_cols;
+                counters.mac_ops += row_remainder_elements_delta * reduction_total;
+                counters.operand_loads +=
+                    (row_remainder_rows_sum + row_remainder_invocations_delta * WIDTH_TILE_VECS as u64) * reduction_total;
                 counters.mac_ops += fallback_delta * reduction_total;
                 counters.operand_loads += fallback_delta * 2 * reduction_total;
                 counters.leading_iters += leading_total;
@@ -7477,17 +7498,35 @@ use crate::sized::WIDTH_TILE_VECS;
 /// verification, not a runtime feature: a caller (`profile_hot`) reads
 /// these after a run to prove the tile actually fired, since a silently-zero
 /// invocation count would make any timing number meaningless. Mirrors
-/// [`NEON_TILE_GATE_PASSES`]'s family exactly, including the row-tail and
-/// column-tail coverage the two loops in [`run_width_tile_neon`] below both
-/// account for: `invocations * (WIDTH_TILE_ROWS * WIDTH_TILE_VECS * 4) +
-/// fallback_elements == leading_total * width` for any shape, not only
-/// multiples of the tile.
+/// [`NEON_TILE_GATE_PASSES`]'s family exactly, including the column-tail
+/// coverage [`run_width_tile_neon`] below accounts for: `invocations *
+/// (WIDTH_TILE_ROWS * WIDTH_TILE_VECS * 4) + row_remainder_elements
+/// (`WIDTH_TILE_ROW_REMAINDER_ELEMENTS`, below) + fallback_elements ==
+/// leading_total * width` for any shape, not only multiples of the tile.
+/// `fallback_elements` alone no longer covers the leading-row remainder —
+/// that is now [`gemm_width_tile_neon`] at `ROWS = 2`/`ROWS = 1`, counted
+/// separately below — only the column tail still reaches the scalar path.
 #[cfg(all(target_arch = "aarch64", feature = "instrument"))]
 static WIDTH_TILE_GATE_PASSES: AtomicU64 = AtomicU64::new(0);
 #[cfg(all(target_arch = "aarch64", feature = "instrument"))]
 static WIDTH_TILE_INVOCATIONS: AtomicU64 = AtomicU64::new(0);
 #[cfg(all(target_arch = "aarch64", feature = "instrument"))]
 static WIDTH_TILE_FALLBACK_ELEMENTS: AtomicU64 = AtomicU64::new(0);
+/// Row-remainder tile invocations (`ROWS = 2` or `ROWS = 1`,
+/// `run_width_tile_neon`'s own greedy 2-then-1 dispatch), tracked apart
+/// from [`WIDTH_TILE_INVOCATIONS`] since remainder tiles compute a
+/// different, `ROWS`-dependent number of outputs per call than the fixed
+/// `WIDTH_TILE_ROWS`-row main tile — exactly why
+/// [`NEON_TILE_ROW_REMAINDER_INVOCATIONS`] exists apart from
+/// [`NEON_TILE_INVOCATIONS`] for the dot-path tile.
+#[cfg(all(target_arch = "aarch64", feature = "instrument"))]
+static WIDTH_TILE_ROW_REMAINDER_INVOCATIONS: AtomicU64 = AtomicU64::new(0);
+/// Output elements actually covered by row-remainder tiles (`ROWS * (4 *
+/// WIDTH_TILE_VECS)` added per invocation) — the width-tile counterpart to
+/// [`NEON_TILE_ROW_REMAINDER_ELEMENTS`], usable directly in the coverage
+/// identity without knowing which of `ROWS = 2`/`ROWS = 1` fired.
+#[cfg(all(target_arch = "aarch64", feature = "instrument"))]
+static WIDTH_TILE_ROW_REMAINDER_ELEMENTS: AtomicU64 = AtomicU64::new(0);
 
 /// Snapshot of the three `WIDTH_TILE_GATE_PASSES`-family counters:
 /// (gate passes, tile invocations, fallback elements) — the width tile's
@@ -7499,6 +7538,24 @@ pub fn width_tile_counters() -> (u64, u64, u64) {
         WIDTH_TILE_INVOCATIONS.load(Ordering::Relaxed),
         WIDTH_TILE_FALLBACK_ELEMENTS.load(Ordering::Relaxed),
     )
+}
+
+/// `WIDTH_TILE_ROW_REMAINDER_INVOCATIONS` snapshot — the row-remainder
+/// tiles' own invocation count (`ROWS = 2` or `ROWS = 1`), separate from
+/// the main `WIDTH_TILE_ROWS`-row tile's, the width-tile counterpart to
+/// [`neon_tile_row_remainder_invocations`].
+#[cfg(all(target_arch = "aarch64", feature = "instrument"))]
+pub fn width_tile_row_remainder_invocations() -> u64 {
+    WIDTH_TILE_ROW_REMAINDER_INVOCATIONS.load(Ordering::Relaxed)
+}
+
+/// `WIDTH_TILE_ROW_REMAINDER_ELEMENTS` snapshot — output elements covered
+/// by row-remainder tiles of either width, for the `main*64 +
+/// row_remainder + fallback == m*n` coverage identity, the width-tile
+/// counterpart to [`neon_tile_row_remainder_elements`].
+#[cfg(all(target_arch = "aarch64", feature = "instrument"))]
+pub fn width_tile_row_remainder_elements() -> u64 {
+    WIDTH_TILE_ROW_REMAINDER_ELEMENTS.load(Ordering::Relaxed)
 }
 
 /// Everything [`try_run_width_tile`] needs, bundled the same way
@@ -7622,31 +7679,39 @@ struct KStridedTile<'a> {
     k_stride: i64,
 }
 
-/// The register-tile microkernel: `WIDTH_TILE_ROWS` output rows x
-/// `WIDTH_TILE_VECS` `float32x4_t` vectors of output columns, folded over
-/// the whole `k` reduction with `acc` living in registers throughout — the
-/// vector *type*, not a plain `[f32; 4]` array, is the entire trick: a
-/// plain array forces LLVM to put it in memory and spill. `out` already
-/// holds the seed value on entry (`vaddq_f32` below folds `acc` into it,
-/// rather than overwriting), so a caller may reuse this for a running total
-/// if that shape is ever needed.
+/// The register-tile microkernel: `ROWS` output rows x `WIDTH_TILE_VECS`
+/// `float32x4_t` vectors of output columns, folded over the whole `k`
+/// reduction with `acc` living in registers throughout — the vector
+/// *type*, not a plain `[f32; 4]` array, is the entire trick: a plain array
+/// forces LLVM to put it in memory and spill. `out` already holds the seed
+/// value on entry (`vaddq_f32` below folds `acc` into it, rather than
+/// overwriting), so a caller may reuse this for a running total if that
+/// shape is ever needed.
+///
+/// `ROWS` is a const generic, not fixed at `WIDTH_TILE_ROWS`, so the same
+/// body serves the main tile (`ROWS = WIDTH_TILE_ROWS`) and the row-remainder
+/// variants (`ROWS = 2`, `ROWS = 1`, [`run_width_tile_neon`]'s own greedy
+/// 2-then-1 dispatch) — the identical precedent [`gemm_tile_neon`]'s own
+/// `const ROWS: usize` already sets for the dot-path tile's row remainder.
+/// Fewer row accumulators at smaller `ROWS` is the only change; the
+/// per-`step` load/FMA structure is untouched.
 ///
 /// # Safety
 /// Caller guarantees every offset `a.base + i*a_row_stride + step*a.k_stride`
-/// for `i in 0..WIDTH_TILE_ROWS, step in 0..k` lies within `a.data`, and
-/// every offset `b.base + step*b.k_stride + v*4 + lane` for `v in
-/// 0..WIDTH_TILE_VECS, lane in 0..4` lies within `b.data`.
+/// for `i in 0..ROWS, step in 0..k` lies within `a.data`, and every offset
+/// `b.base + step*b.k_stride + v*4 + lane` for `v in 0..WIDTH_TILE_VECS,
+/// lane in 0..4` lies within `b.data`.
 #[cfg(target_arch = "aarch64")]
-unsafe fn gemm_width_tile_neon(
+unsafe fn gemm_width_tile_neon<const ROWS: usize>(
     a: KStridedTile,
     a_row_stride: i64,
     b: KStridedTile,
     k: usize,
-    out: &mut [[f32; WIDTH_TILE_VECS * 4]; WIDTH_TILE_ROWS],
+    out: &mut [[f32; WIDTH_TILE_VECS * 4]; ROWS],
 ) {
     // caller-checked: every (row, step, vec) offset below is in bounds.
     unsafe {
-        let mut acc = [[vdupq_n_f32(0.0); WIDTH_TILE_VECS]; WIDTH_TILE_ROWS];
+        let mut acc = [[vdupq_n_f32(0.0); WIDTH_TILE_VECS]; ROWS];
         for step in 0..k {
             let step = step as i64;
             let mut bv = [vdupq_n_f32(0.0); WIDTH_TILE_VECS];
@@ -7691,15 +7756,28 @@ fn width_tile_scalar_cell(a: KStridedTile, b: KStridedTile, k: usize, seed: f32)
 }
 
 /// Walks the full leading x width space in `WIDTH_TILE_ROWS x
-/// (WIDTH_TILE_VECS * 4)` blocks via [`gemm_width_tile_neon`], falling back
-/// to [`width_tile_scalar_cell`] for any leftover rows or columns that do
-/// not fill a whole tile. Both remainder loops below increment
-/// [`WIDTH_TILE_FALLBACK_ELEMENTS`] once per scalar element they compute —
-/// the column tail inside the row-tile loop, and the row tail below it —
-/// so `invocations * tile_cols * WIDTH_TILE_ROWS + fallback_elements` always
-/// equals `leading_total * width`, for any shape, not only multiples of
-/// the tile (mirrors [`NEON_TILE_FALLBACK_ELEMENTS`]'s own row+column
-/// accounting for the dot-path tile).
+/// (WIDTH_TILE_VECS * 4)` blocks via [`gemm_width_tile_neon`]`::<WIDTH_TILE_ROWS>`,
+/// then covers whatever leading rows are left (`leading_total %
+/// WIDTH_TILE_ROWS`, always `0..WIDTH_TILE_ROWS`) with the SAME kernel
+/// monomorphised narrower — a 2-row tile, then a 1-row tile, consumed
+/// greedily (`row_remainder_tile!(2)` while `>= 2` rows remain, then
+/// `row_remainder_tile!(1)` for a last odd row) — mirroring the dot-path
+/// tile's own `gemm_tile_neon::<const ROWS: usize>` row-remainder dispatch
+/// (`cpu.rs`'s `row_remainder_tile!` macro next to `neon_tile_plan`), which
+/// already proved this shape for `TILE_ROWS = 6`. Since `2` and `1` sum to
+/// every non-negative integer, no leading-row count ever reaches
+/// [`width_tile_scalar_cell`] any more — the true scalar fallback below
+/// this function only fires for the COLUMN tail (`width % (WIDTH_TILE_VECS *
+/// 4)` leftover columns inside an otherwise-tiled row-block), which no
+/// row-count NEON variant can express since [`gemm_width_tile_neon`]'s own
+/// output type is a fixed `WIDTH_TILE_VECS`-wide column block. Every
+/// remainder loop below increments either [`WIDTH_TILE_FALLBACK_ELEMENTS`]
+/// (scalar column-tail cells) or [`WIDTH_TILE_ROW_REMAINDER_ELEMENTS`]
+/// (2-row/1-row NEON tile cells), so `invocations * tile_cols *
+/// WIDTH_TILE_ROWS + row_remainder_elements + fallback_elements` always
+/// equals `leading_total * width`, for any shape (mirrors
+/// [`NEON_TILE_ROW_REMAINDER_ELEMENTS`]'s own coverage identity for the
+/// dot-path tile).
 #[cfg(target_arch = "aarch64")]
 fn run_width_tile_neon(plan: &WidthTilePlan, raw: &[&[f32]], output: &mut [f32]) {
     #[cfg(feature = "instrument")]
@@ -7714,6 +7792,10 @@ fn run_width_tile_neon(plan: &WidthTilePlan, raw: &[&[f32]], output: &mut [f32])
     // per-tile atomic) — tallied locally and committed once instead.
     #[cfg(feature = "instrument")]
     let mut width_tile_invocations = 0u64;
+    #[cfg(feature = "instrument")]
+    let mut width_tile_row_remainder_invocations = 0u64;
+    #[cfg(feature = "instrument")]
+    let mut width_tile_row_remainder_elements = 0u64;
 
     let data_a = raw[plan.a_operand];
     let data_b = raw[plan.b_operand];
@@ -7736,7 +7818,7 @@ fn run_width_tile_neon(plan: &WidthTilePlan, raw: &[&[f32]], output: &mut [f32])
             // guaranteed by `row_tiles`/`col_tiles` only covering whole
             // tiles carved out of `plan.leading_total`/`plan.width`.
             unsafe {
-                gemm_width_tile_neon(
+                gemm_width_tile_neon::<WIDTH_TILE_ROWS>(
                     KStridedTile { data: data_a, base: base_a, k_stride: plan.k_stride_a },
                     plan.row_stride_a,
                     KStridedTile { data: data_b, base: base_b, k_stride: plan.k_stride_b },
@@ -7783,34 +7865,115 @@ fn run_width_tile_neon(plan: &WidthTilePlan, raw: &[&[f32]], output: &mut [f32])
         }
     }
 
-    // row tail: leading rows past the last full row-tile, every column —
-    // these never touch the tiled loop above at all, so every element here
-    // (including what would otherwise be a "tiled" column) is fallback.
-    for row in row_tiles * WIDTH_TILE_ROWS..plan.leading_total {
-        for col in 0..plan.width {
-            let value = width_tile_scalar_cell(
-                KStridedTile {
-                    data: data_a,
-                    base: plan.base_a + row as i64 * plan.row_stride_a,
-                    k_stride: plan.k_stride_a,
-                },
-                KStridedTile { data: data_b, base: plan.base_b + col as i64, k_stride: plan.k_stride_b },
-                plan.reduction_total,
-                plan.seed,
-            );
-            let position = plan.out_base + row as i64 * plan.out_row_stride + col as i64 * plan.out_col_stride;
-            output[position as usize] = value;
-            #[cfg(feature = "instrument")]
-            {
-                width_tile_fallback_elements += 1;
+    // row tail: leading rows past the last full row-tile — covered by the
+    // SAME NEON kernel monomorphised at `ROWS = 2` then `ROWS = 1`, greedily,
+    // never the scalar path. `row_remainder_tile!` is a macro (not a
+    // generic helper fn) for the identical reason `cpu.rs`'s dot-path
+    // `row_remainder_tile!` is: `$rows` must be a literal so `tile_out`'s
+    // array length and `gemm_width_tile_neon::<$rows>`'s monomorphisation
+    // are both resolved at compile time, and a runtime `usize` parameter
+    // could not do either.
+    let mut row_start = row_tiles * WIDTH_TILE_ROWS;
+    macro_rules! width_row_remainder_tile {
+        ($rows:literal) => {{
+            let base_a = plan.base_a + row_start as i64 * plan.row_stride_a;
+            let out_row_prefix = plan.out_base + row_start as i64 * plan.out_row_stride;
+
+            for col_tile in 0..col_tiles {
+                let col_start = col_tile * tile_cols;
+                let base_b = plan.base_b + col_start as i64;
+                let mut tile_out = [[plan.seed; WIDTH_TILE_VECS * 4]; $rows];
+
+                // caller-checked: same argument `run_width_tile_neon`'s main
+                // loop above already proves for `WIDTH_TILE_ROWS` rows, just
+                // `$rows` of them starting at `row_start` — still fully
+                // inside `plan.leading_total`, since `row_start + $rows` is
+                // exactly the greedy 2-then-1 dispatch below never
+                // overshooting `plan.leading_total`.
+                unsafe {
+                    gemm_width_tile_neon::<$rows>(
+                        KStridedTile { data: data_a, base: base_a, k_stride: plan.k_stride_a },
+                        plan.row_stride_a,
+                        KStridedTile { data: data_b, base: base_b, k_stride: plan.k_stride_b },
+                        plan.reduction_total,
+                        &mut tile_out,
+                    );
+                }
+                #[cfg(feature = "instrument")]
+                {
+                    width_tile_row_remainder_invocations += 1;
+                    width_tile_row_remainder_elements += ($rows * tile_cols) as u64;
+                }
+
+                for (i, row) in tile_out.iter().enumerate() {
+                    let row_prefix = out_row_prefix + i as i64 * plan.out_row_stride;
+                    for (v, &value) in row.iter().enumerate() {
+                        let position = row_prefix + (col_start + v) as i64 * plan.out_col_stride;
+                        output[position as usize] = value;
+                    }
+                }
             }
-        }
+
+            // column tail for these `$rows` rows — same shape as the main
+            // tile's own column tail above, still genuinely scalar: no
+            // row-count NEON variant covers a column count short of a full
+            // `WIDTH_TILE_VECS`-wide block.
+            for col in col_tiles * tile_cols..plan.width {
+                for i in 0..$rows {
+                    let row = row_start + i;
+                    let value = width_tile_scalar_cell(
+                        KStridedTile {
+                            data: data_a,
+                            base: plan.base_a + row as i64 * plan.row_stride_a,
+                            k_stride: plan.k_stride_a,
+                        },
+                        KStridedTile { data: data_b, base: plan.base_b + col as i64, k_stride: plan.k_stride_b },
+                        plan.reduction_total,
+                        plan.seed,
+                    );
+                    let position =
+                        plan.out_base + row as i64 * plan.out_row_stride + col as i64 * plan.out_col_stride;
+                    output[position as usize] = value;
+                    #[cfg(feature = "instrument")]
+                    {
+                        width_tile_fallback_elements += 1;
+                    }
+                }
+            }
+
+            row_start += $rows;
+        }};
     }
+
+    // `leading_total - row_tiles * WIDTH_TILE_ROWS` is always `0..
+    // WIDTH_TILE_ROWS` by construction (`row_tiles` is the floor division);
+    // 2s-then-1 covers every value in that range (and, generally, any
+    // non-negative remainder, not only `< WIDTH_TILE_ROWS`), so the loop
+    // below always terminates with zero rows left over.
+    let mut rows_remaining = plan.leading_total - row_start;
+    while rows_remaining >= 2 {
+        width_row_remainder_tile!(2);
+        rows_remaining -= 2;
+    }
+    if rows_remaining == 1 {
+        width_row_remainder_tile!(1);
+        rows_remaining -= 1;
+    }
+    debug_assert_eq!(
+        rows_remaining, 0,
+        "width-tile row-remainder dispatch: 2s-then-1 must fully consume the remainder"
+    );
+    debug_assert_eq!(
+        row_start, plan.leading_total,
+        "width-tile row-remainder dispatch: row_start must reach leading_total exactly"
+    );
 
     #[cfg(feature = "instrument")]
     {
         WIDTH_TILE_FALLBACK_ELEMENTS.fetch_add(width_tile_fallback_elements, Ordering::Relaxed);
         WIDTH_TILE_INVOCATIONS.fetch_add(width_tile_invocations, Ordering::Relaxed);
+        WIDTH_TILE_ROW_REMAINDER_INVOCATIONS.fetch_add(width_tile_row_remainder_invocations, Ordering::Relaxed);
+        WIDTH_TILE_ROW_REMAINDER_ELEMENTS.fetch_add(width_tile_row_remainder_elements, Ordering::Relaxed);
         // computed once from `plan.width`/`tile_cols`, both already in
         // scope — never re-checked per iteration.
         if col_tiles * tile_cols < plan.width {
