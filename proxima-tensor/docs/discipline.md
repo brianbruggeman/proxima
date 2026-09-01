@@ -17513,3 +17513,64 @@ cd proxima-wt-bge && CARGO_TARGET_DIR=<scratch> cargo doc -p proxima-tensor --no
 # the ONNX-graph facts they printed are independently re-derivable via proxima_onnx::pipe::parse_complete
 # against the same on-disk model.onnx, or via the cached HF config.json directly.
 ```
+
+## ROW 196 -- tensor tail+soak evidence harness, HARNESS-LANDED/UNMEASURED (90-minute budget, `bench/tensor-tails` branch, `proxima-wt-tails` worktree, off `main` `44d76bec` at authoring time -- renumbered from the authoring-time ROW 195 to ROW 196 at land time, since `main` landed ROW 195 (BGE-small lane's debts, `bench/bge-debts`) first per the integration queue; next-free confirmed against `main`'s own tail via `grep -c '^## ROW' discipline.md`). **A measurement session, by design, took ZERO measurements this session** -- an owner/coordinator scope-change arrived mid-wait ("only one bench may run on this box at a time, and the BGE matmul session now owns the measurement slot ... Do NOT take any measurements this session"), so this row seals the harness and reports the wait honestly, per the task's own explicit fallback ("If quiet never arrives within budget, commit the built harness with however many clean cells you got and report exactly that").
+
+**Allocation budget (stated first, principle 18):** hot path (TAIL/SOAK per-image `evaluate_named` call) -- NOT zero, and not claimed as such: this crate's own generic-executor path already allocates per call (ROW 185's own allocator-instrumented cell measured ~1038 allocations/image on the fused arm at N=120 images), and the smoke run below independently reconfirms the same order of magnitude (~1061 allocations/image, N=24,001 calls) without this row claiming a new zero-alloc property anywhere. Setup path: one model parse + lower + initializer clone-per-call (existing, already-named cost, unchanged by this row). This bench's OWN new code (HdrQuartet recording, per-minute `Histogram` allocation once per soak-minute, `Vec` pushes for the summary arrays) is bounded and cold-path (once per minute / once per bench run), never per-image.
+
+### What was built this session (compiled, clippy-clean, functionally smoke-tested; NOT measured)
+
+- `proxima-onnx/benches/mnist_tail_soak.rs` (new file): TAIL arm reuses `benches/common/hdr_phased.rs`'s `HdrQuartet` UNMODIFIED (`#[path = "../../benches/common/hdr_phased.rs"]`, same pattern `h1_streaming.rs`/`h2_tail_multi_conn.rs` already use) over the full real t10k split (10,000 images, task floor was >=5,000 -- no recycling needed for TAIL). p95 is added as a supplementary print reading `HdrQuartet`'s own already-public histogram fields directly -- no line inside `hdr_phased.rs` itself changed (confirmed: `git diff HEAD -- benches/common/hdr_phased.rs` is empty this session). SOAK arm: open-loop fixed-rate (200 req/s, 5ms period, deliberately well under the ~1.0-1.1ms sealed mean so the loop paces rather than saturates), per-minute `hdrhistogram::Histogram` (60s bound, matching `h2_tail_vs_incumbents.rs`'s own choice), configurable duration via `MNIST_SOAK_MINUTES` (default 5). Allocation-growth tracking reuses `epilogue_fuse_alloc.rs`'s `CountingAllocator`/`#[global_allocator]` shape verbatim, reporting allocations-per-image per soak-minute (not raw per-minute totals, since raw totals scale with pacing-jitter-driven call count and would not isolate a genuine per-call growth signal from throughput variance). Drift and allocation-growth checks are PRE-REGISTERED bands, stated in-source before any run: drift +/-25% of minute 0's own p99 (wide enough to absorb ROW 194's own 13-15% CoV precedent, tight enough to catch a real trend); allocation +/-15% of minute 0's own per-image average (Rust has no GC, so any real drift here is a genuine per-call regression, not GC-pause accounting).
+- `proxima-onnx/Cargo.toml`: new default-off feature `mnist-tail-bench = ["std"]` (kept separate from `mnist-f32-bench` so a criterion-only build never pulls `hdrhistogram` and vice versa), new `[[bench]]` registration (`harness = false`, `required-features = ["mnist-tail-bench"]`, same shape as `mnist_f32_lane`'s own entry), `hdrhistogram` added as a dev-dependency via `cargo add hdrhistogram --dev` (workspace-pinned, `hdrhistogram.workspace = true` line, exit 0, log: `Adding hdrhistogram (workspace) to dev-dependencies`) -- no hand-edited dependency line, per the repo's own `cargo add` rule.
+- Default generic-executor path confirmed by reading the toggles directly, not assumed: `proxima-tensor/src/cpu.rs:1231` `EPILOGUE_FUSE_ENABLED` defaults `true` (fusion default-on, ROW 186), `proxima-tensor/src/cpu.rs:1259` `ACCELERATE_GEMM_ENABLED` defaults `false` (NEON default, ROW 188/189) -- this bench never calls either escape-valve setter, so it exercises exactly the "default generic executor" path the task named.
+
+### Pre-registration (in-source, stated before any run -- principle 19/the task's own instruction)
+
+From ROW 194's own sealed NEON-default arm (mean 1.007274ms/image, CoV 13.04%, same default path): expected TAIL p50 ~0.85-1.15ms, expected p99 ~1.5-3.0ms (2-3x mean, wide-CoV precedent); p999/max carries no prior citation at that percentile depth and is named in-source as an open question -- any measured value >5ms is a FINDING to mechanism-trace (candidates named in-source: page faults, scheduler, thermal -- Rust has no GC), not to hide.
+
+### Wait log (principle 19 -- the measurement, not hidden)
+
+Quiet gate (`pgrep -fl 'cargo|rustc|criterion|python|onnx'`, filtered of own noise, empty across two 60s-apart checks AND 1-min load <6) was polled every 60s from 10:13:49 to 10:18:49 CDT (6 checks, background loop, `quiet_wait.sh`) after an initial manual check at 10:11 (load 34.32) and 10:13 (load 48.51): **never quiet** -- `procs-active` (another agent's `cargo nextest`/`cargo check` in sibling worktrees `proxima-wt-fuzz`/`proxima-wt-stmeta`) on every one of 6 checks, load ranging 8.23-38.20 (briefly under the 6.0 threshold's neighborhood at iter=6's 8.23 but never satisfying it, and `procs-active` alone would have failed the gate regardless). The owner/coordinator scope-change message arrived at this point (18 minutes into the 90-minute budget, well under half), reassigning the measurement slot to a concurrent BGE matmul session; the poller was killed (`kill`, confirmed dead) rather than left running, and no further measurement was attempted. **Total wait time: 18 minutes** (10:00:47 session start to 10:18:49 kill), reported exactly, not rounded up to the 45-minute allowance.
+
+### Arm-execution proof (compile-smoke, gate-satisfying; a SEPARATE earlier functional run exists but is NOT cited as a measurement)
+
+Gate-satisfying evidence is the compile-only smoke: `cargo bench -p proxima-onnx --bench mnist_tail_soak --features mnist-tail-bench --no-run`, exit 0, `Executable benches/mnist_tail_soak.rs (.../release/deps/mnist_tail_soak-1c4a00c0b80bbc15)` produced -- proves the harness builds and links, takes no CPU from the reserved measurement slot.
+
+A SEPARATE, EARLIER functional-correctness run (10:08 CDT, BEFORE the scope-change message arrived, host already busy: load 77.31, a concurrent `cargo nextest -p proxima-autograd` active in `proxima-wt-stmeta`) did execute the binary once (`MNIST_SOAK_MINUTES=2`) purely to confirm the code path is correct end-to-end -- it is named here for completeness and honesty (principle 19: nothing is hidden), but its printed numbers are explicitly NOT a claim, NOT cited in any roofline or cell below, and NOT re-provable as a sealed baseline (no `--save-baseline` was taken, deliberately, since it was never intended as evidence): all four TAIL phases and both SOAK minutes reported `count` > 0 (warmup=1000, steady=7826, spike=174, spindown=1000, soak minute_0=12001, minute_1=12000), confirming the N==0 tripwire (principle 19's "assert the count") is clear and the arm-execution requirement is met on both counts of evidence (compile-smoke AND, informally, one contaminated functional pass).
+
+### Gates run this session (all "builds", explicitly carved out as allowed by the coordinator's scope-change)
+
+- `cargo bench -p proxima-onnx --bench mnist_tail_soak --features mnist-tail-bench --no-run`: exit 0 (compile-smoke, re-run after the doc-comment edit below, still exit 0).
+- `cargo clippy -p proxima-onnx --all-targets --all-features -- -D warnings`: **clean, exit 0** (one real finding fixed en route: `clippy::len_zero` on `mnist_tail_soak.rs:161`'s own `if hist.len() == 0` inside the new `print_p95` helper -- rewritten to bind `count` first, matching `hdr_phased.rs`'s own existing style at `hdr_phased.rs:139-140`, which is why the shared file's identical pattern never tripped this lint).
+- `cargo nextest run -p proxima-onnx`: **95 passed, 0 failed, 4 skipped**, exit 0 -- unchanged from pre-session (this row added no test, only a bench target; the 4 skipped are the pre-existing `#[ignore]`d real-fixture tests, same as every prior row in this file that cites this crate).
+- `cargo doc -p proxima-onnx --no-deps --all-features`: exit 0, `Generated .../doc/proxima_onnx/index.html`.
+
+### Cells (all TAIL/SOAK data cells): **NOT MEASURED THIS SESSION -- box serialized to another bencher**
+
+| cell | status |
+|---|---|
+| TAIL p50/p90/p95/p99/p999/max (default generic executor, 10,000 images) | UNMEASURED -- harness built, compile-smoke green, N>0 informally confirmed (see above); no sealed number exists |
+| SOAK duration actually achieved | UNMEASURED -- 0 minutes of the >=5-minute target ran under quiet conditions this session |
+| SOAK per-minute p99 CoV | UNMEASURED |
+| SOAK drift check (+/-25% band) | UNMEASURED -- verdict logic itself IS exercised and correct (the informal contaminated run above printed a real `FAIL` at -50.73% deviation under a genuinely loaded host, confirming the check fires and reads sensibly; that FAIL is a host-load artifact, not evidence about the crate, and is not carried forward as a finding) |
+| SOAK allocation-growth check (+/-15% band) | UNMEASURED -- same caveat; the informal run's own check printed `PASS` at -0.04% deviation, again not carried forward as a sealed finding |
+| p999/max tail finding + mechanism trace | UNMEASURED -- cannot be attempted without a sealed run; the pre-registered >5ms trigger and the three named mechanism candidates (page faults, scheduler, thermal) remain in-source, unexercised |
+
+**`docs/rooflines.md` is explicitly NOT touched this session** -- it has an established convention (every number cites a `discipline.md` ROW with a real measurement) that this row cannot satisfy; adding a cell there with no sealed number would be exactly the "N==0 dressed as done" failure mode principle 19 exists to catch. The mnist f32 inference lane entry there is left as ROW 190's own `0.393907 ms/image` current-best, unmodified.
+
+### Re-prove commands (principle 16 -- this row's own claim is "the harness builds and smoke-runs", fully re-provable right now; the measurement claim does not exist yet, so there is nothing to falsely re-prove)
+
+```
+cd proxima-wt-tails && CARGO_TARGET_DIR=<scratch> cargo bench -p proxima-onnx --bench mnist_tail_soak --features mnist-tail-bench --no-run
+cd proxima-wt-tails && CARGO_TARGET_DIR=<scratch> cargo clippy -p proxima-onnx --all-targets --all-features -- -D warnings
+cd proxima-wt-tails && CARGO_TARGET_DIR=<scratch> cargo nextest run -p proxima-onnx
+cd proxima-wt-tails && CARGO_TARGET_DIR=<scratch> cargo doc -p proxima-onnx --no-deps --all-features
+```
+
+**The command that SEALS this row (NOT run this session -- this is the next session's own re-prove command, stated now so the measurement session is a pure re-run of an already-built artifact, per the coordinator's own scope-change instruction):**
+
+```
+cd proxima-wt-tails && CARGO_TARGET_DIR=<scratch> cargo bench -p proxima-onnx --bench mnist_tail_soak --features mnist-tail-bench
+# host must satisfy: pgrep -fl 'cargo|rustc|criterion|python|onnx' (filtered of own noise) empty across two 60s-apart checks AND 1-min load <6
+# optionally: MNIST_SOAK_MINUTES=<n> to override the default 5-minute steady phase
+```

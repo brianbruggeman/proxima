@@ -22,6 +22,13 @@ std = ["alloc", "thiserror/std", "proxima-protocols/std", "dep:bon", "dep:confla
 # either is absent, but the feature keeps criterion+its transitive deps out
 # of a default `cargo build`/`cargo test`).
 mnist-f32-bench = ["std"]
+# tail-latency + soak bench (`benches/mnist_tail_soak.rs`): same real-fixture
+# presence-gating as `mnist-f32-bench` above, kept as its own feature (not
+# folded into `mnist-f32-bench`) so a `--features mnist-f32-bench` build
+# never pulls in `hdrhistogram` for a plain criterion mean/CI run, and a
+# `--features mnist-tail-bench` build never pulls in criterion for the
+# phased-tail/soak run.
+mnist-tail-bench = ["std"]
 # routes the mnist diagnostic example (`examples/mnist_diag.rs`) through
 # `proxima-tensor`'s `instrument` counters for an exact (not sampled) MAC
 # count and NEON-tile-path breakdown. Kept OFF the `mnist-f32-bench` feature
@@ -72,11 +79,17 @@ temp-env.workspace = true
 proxima-tensor = { features = ["std", "test-support"], path = "../proxima-tensor", default-features = false }
 criterion.workspace = true
 proxima-core = { path = "../proxima-core", default-features = false, features = ["alloc"] }
+hdrhistogram.workspace = true
 
 [[bench]]
 name = "mnist_f32_lane"
 harness = false
 required-features = ["mnist-f32-bench"]
+
+[[bench]]
+name = "mnist_tail_soak"
+harness = false
+required-features = ["mnist-tail-bench"]
 
 [[bench]]
 name = "tile_pipeline"

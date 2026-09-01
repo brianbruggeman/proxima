@@ -4576,6 +4576,7 @@ dependencies = [
  "bon",
  "conflaguration",
  "criterion",
+ "hdrhistogram",
  "proxima-core",
  "proxima-primitives",
  "proxima-protocols",
