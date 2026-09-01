@@ -23,7 +23,7 @@
 use proxima_onnx::lower::{Lowered, lower_graph};
 use proxima_onnx::messages::{GraphProto, NodeProto, TensorProto, ValueInfoProto};
 use proxima_tensor::NodeId;
-use proxima_tensor::cpu::evaluate_named;
+use proxima_tensor::cpu::{StaticArena, build_static_arena_with_constants, evaluate_named, evaluate_named_with_arena};
 
 const ROTATION: usize = 64;
 const CALLS_PER_REPEAT: usize = 300;
@@ -139,6 +139,83 @@ fn cold_arm(m: usize, k: usize, n: usize) -> Timed {
     })
 }
 
+/// Law 6∘5 nano cell: the SAME ROW 181 round-robin `cold_arm` uses (`rhs`
+/// never touched twice within a `ROTATION`-call window), except each
+/// instance's `rhs` (the weight, `[k,n]`) is packed once at
+/// `build_static_arena_with_constants` time, off the timed loop, into the
+/// width-tile kernel's own panel layout (`docs/rewrite-algebra.md` section
+/// 6). Pre-registration (recorded before this arm was ever run): if H1
+/// (cache regime / first-touch latency) is the mechanism ROW 203 measured,
+/// packed-cold's effective GB/s should sit closer to `warm_arm`'s than to
+/// `cold_arm`'s 6.6-10.3 GB/s, since a packed read is sequential instead of
+/// one page-fault-costed touch per weight row.
+fn packed_cold_arm(m: usize, k: usize, n: usize) -> Timed {
+    let instances: Vec<Lowered> = (0..ROTATION)
+        .map(|index| build_instance(m, k, n, 0x3000_0000u32.wrapping_add((index as u32).wrapping_mul(0x9e37_79b9))))
+        .collect();
+    let mut arenas: Vec<StaticArena> = instances
+        .iter()
+        .map(|lowered| {
+            let rhs_data = lowered.initializers.iter().find(|(name, _)| name == "rhs").map(|(_, data)| data.as_slice()).expect("rhs initializer present");
+            let output = lowered.graph_outputs[0].1;
+            build_static_arena_with_constants(&lowered.program, &[], &[output], &[("rhs", rhs_data)]).expect("build packed arena")
+        })
+        .collect();
+    let named_per_instance: Vec<NamedInputs<'_>> = instances
+        .iter()
+        .map(|lowered| lowered.initializers.iter().map(|(name, data)| (name.as_str(), data.as_slice())).collect())
+        .collect();
+
+    // untimed single warm-up pass over the WHOLE rotation set, same shape
+    // `cold_arm`'s own warm-up has -- forces any first-call-only setup
+    // without leaving any single buffer resident.
+    for index in 0..ROTATION {
+        let evaluated = evaluate_named_with_arena(&mut arenas[index], &named_per_instance[index]).expect("warm-up eval");
+        std::hint::black_box(&evaluated);
+    }
+
+    time_calls(|index| {
+        let rotation_index = index % ROTATION;
+        let evaluated = evaluate_named_with_arena(&mut arenas[rotation_index], &named_per_instance[rotation_index]).expect("timed eval");
+        std::hint::black_box(&evaluated);
+    })
+}
+
+/// Isolates law 6∘5's OWN contribution from `StaticArena`'s already-landed
+/// bind+alloc amortization (ROW 164/175): identical rotation and identical
+/// `evaluate_named_with_arena` call path as [`packed_cold_arm`], but built
+/// via plain `build_static_arena` (no `constant_inputs`), so `rhs` is never
+/// packed. Without this arm, `packed_cold_arm` vs `cold_arm` conflates two
+/// effects (arena reuse skips per-call `shape::infer`/`bind::bind`, packing
+/// fixes the weight's read stride) into one number.
+fn arena_cold_arm(m: usize, k: usize, n: usize) -> Timed {
+    let instances: Vec<Lowered> = (0..ROTATION)
+        .map(|index| build_instance(m, k, n, 0x4000_0000u32.wrapping_add((index as u32).wrapping_mul(0x9e37_79b9))))
+        .collect();
+    let mut arenas: Vec<StaticArena> = instances
+        .iter()
+        .map(|lowered| {
+            let output = lowered.graph_outputs[0].1;
+            proxima_tensor::cpu::build_static_arena(&lowered.program, &[], &[output]).expect("build unpacked arena")
+        })
+        .collect();
+    let named_per_instance: Vec<NamedInputs<'_>> = instances
+        .iter()
+        .map(|lowered| lowered.initializers.iter().map(|(name, data)| (name.as_str(), data.as_slice())).collect())
+        .collect();
+
+    for index in 0..ROTATION {
+        let evaluated = evaluate_named_with_arena(&mut arenas[index], &named_per_instance[index]).expect("warm-up eval");
+        std::hint::black_box(&evaluated);
+    }
+
+    time_calls(|index| {
+        let rotation_index = index % ROTATION;
+        let evaluated = evaluate_named_with_arena(&mut arenas[rotation_index], &named_per_instance[rotation_index]).expect("timed eval");
+        std::hint::black_box(&evaluated);
+    })
+}
+
 fn shape_block(name: &str, m: usize, k: usize, n: usize) {
     let macs = (m * k * n) as f64 / 1e9;
     let rotated_mib = (k * n * 4 * ROTATION) as f64 / (1024.0 * 1024.0);
@@ -149,6 +226,16 @@ fn shape_block(name: &str, m: usize, k: usize, n: usize) {
     report("cold (ROW 181 round-robin, 64 distinct weights)", m, k, n, &cold);
     let slowdown = cold.mean_ns / warm.mean_ns;
     println!("    -> cold/warm slowdown: {slowdown:.3}x");
+    let arena_cold = arena_cold_arm(m, k, n);
+    report("arena-cold (StaticArena, rhs unpacked, isolates arena reuse)", m, k, n, &arena_cold);
+    let packed_cold = packed_cold_arm(m, k, n);
+    report("packed-cold (law 6∘5, rhs packed at plan time)", m, k, n, &packed_cold);
+    let packed_vs_cold = packed_cold.mean_ns / cold.mean_ns;
+    let packed_vs_arena_cold = packed_cold.mean_ns / arena_cold.mean_ns;
+    let packed_vs_warm = packed_cold.mean_ns / warm.mean_ns;
+    println!(
+        "    -> packed-cold/cold: {packed_vs_cold:.3}x   packed-cold/arena-cold (law 6∘5's OWN delta): {packed_vs_arena_cold:.3}x   packed-cold/warm: {packed_vs_warm:.3}x"
+    );
 }
 
 /// H1 pre-registration (per the task brief, recorded here so the printed
