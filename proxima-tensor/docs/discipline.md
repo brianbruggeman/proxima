@@ -17335,3 +17335,84 @@ CARGO_TARGET_DIR=<scratch> PROXIMA_PREFAULT=1 PROXIMA_METAL_OP_PROFILE_STEP=3 PR
   bind::real_openchat_file::profiles_one_real_decode_step_by_per_op_gpu_time
 ```
 Every number in this row's tables is grep-able out of the raw `.log` files these commands produce; none require dev memory.
+
+## ROW 194 -- ROW 192's own bimodal per-round ratios are root-caused as NOT an engagement defect (60-minute hard budget, `feat/conv-accelerate-default` branch, `proxima-wt-convpromo` worktree, off `main` `1f03ab5` at fetch -- `origin/main` advanced to `ad5ef6f` (ROW 192's own landing) mid-session, discipline.md diverged by 116 lines, `proxima-tensor/src/cpu.rs` confirmed byte-identical between this branch's base and the post-landing `origin/main` via `git diff HEAD origin/main -- proxima-tensor/src/cpu.rs`, so this row's measurements are unaffected by the race; numbered ROW 193 at authoring time, renumbered to ROW 194 at land-time -- ROW 193 was independently claimed same-day by `bench/gpu-quant-cell`'s own GPU-quant decode cell, landed to main first per the integration queue). **Promotion (Phase 2) did NOT happen this session -- Phase 1's own evidence does not clear the task's own promotion gate.**
+
+**Execution gate:** `pgrep -fl 'cargo|rustc|criterion|nextest|llama'` (filtered of this row's own shell noise) checked clear of `cargo`/`rustc`/`nextest`/`criterion` before every build and every timed batch this session; one wait was logged (09:05:32-09:06:15 CDT) while `proxima-wt-gpuq`'s own release LTO build of `proxima-protocols`/`proxima-primitives`/`cel_interpreter` was still compiling, confirmed via full `ps`-style process inspection, not killed.
+
+**Instrumentation added, kept (follows the existing counter-report precedent, not reverted):** `proxima-onnx/tests/real_mnist_accuracy.rs` gained one `eprintln!` block printing `proxima_tensor::cpu::accelerate_gemm_totals()` (`hits`, `declined`) immediately after the existing, unmodified `epilogue_fuse_totals()` print -- same shape, same cfg-gating the function itself already carries (`target_os = "macos", target_arch = "aarch64"`). No new counter was minted: `ACCELERATE_GEMM_HITS`/`ACCELERATE_GEMM_DECLINED` and the public `accelerate_gemm_totals()` reader already existed (ROW 188/189, `cpu.rs:1259-1283`) and were simply never read by this test binary before this row.
+
+**Mechanism finding: both routes (the flat `try_run_accelerate_sgemm` dot-path and `try_run_accelerate_conv_gemm`) share the SAME pair of counters** (`cpu.rs:5980-5989` conv route, `cpu.rs:6031-6089` flat route) -- for `real_mnist.onnx`'s own graph the flat route's own gate (`reduction_fast_path && seed == 0.0`) and the conv route's own gate (`!fast_path && !reduction_fast_path`) are mutually exclusive per call, and this row's own hit counts (below) are consistent with 5 conv-shaped GEMM nodes per image (5 x 1000 = 5000), not a flat-route contribution -- read as "conv route observed," not re-derived per-route separately (residual, named below).
+
+### Phase 1 -- 5-round paired interleaved re-run of ROW 192's own Cell 2 form, engagement counter asserted per round
+
+Re-prove command: `cd proxima-wt-convpromo && CARGO_TARGET_DIR=<scratch> cargo test --release -p proxima-onnx --test real_mnist_accuracy --no-run`, then the produced `deps/real_mnist_accuracy-*` binary run directly (`real_mnist_onnx_classifies_real_test_images_at_reference_accuracy --ignored --nocapture`), interleaved NEON / `PROXIMA_ACCELERATE_GEMM=1`-Accelerate, 5 rounds, reading the `real_mnist accuracy: ...` and (new this row) `real_mnist accelerate_gemm: hits=... declined=...` lines each run. All ten runs' own pre-check (`pgrep`, same filter as the execution gate) was empty; `uptime` and a direct `ps -eo pid,pcpu,comm -r` both taken mid-batch (below).
+
+| round | arm | wall time (ms) | accuracy | accelerate_gemm hits | accelerate_gemm declined |
+|---|---|---|---|---|---|
+| 1 | NEON | 937.416 | 0.9900 (990/1000) | 0 | 0 |
+| 1 | Accelerate | 844.720 | 0.9900 (990/1000) | 5000 | 0 |
+| 2 | NEON | 836.040 | 0.9900 (990/1000) | 0 | 0 |
+| 2 | Accelerate | 859.066 | 0.9900 (990/1000) | 5000 | 0 |
+| 3 | NEON | 1122.181 | 0.9900 (990/1000) | 0 | 0 |
+| 3 | Accelerate | 898.961 | 0.9900 (990/1000) | 5000 | 0 |
+| 4 | NEON | 1152.933 | 0.9900 (990/1000) | 0 | 0 |
+| 4 | Accelerate | 589.351 | 0.9900 (990/1000) | 5000 | 0 |
+| 5 | NEON | 987.801 | 0.9900 (990/1000) | 0 | 0 |
+| 5 | Accelerate | 827.639 | 0.9900 (990/1000) | 5000 | 0 |
+
+**Engagement is deterministic and saturated, in both directions, in every round: `hits=5000, declined=0` in all 5 Accelerate rounds; `hits=0, declined=0` in all 5 NEON rounds (trivially, by construction -- the toggle is process-global and never set in the NEON arm's own environment).** No accelerate round shows `hits == 0`. **This directly answers the task's own pre-registered question: the bimodality is NOT an engagement-path defect (env read timing, atomic init order) -- the route fires the same fixed number of times, every round, with zero declines, regardless of whether that round lands near-parity or ahead.**
+
+| arm | mean | sample stdev | CoV | range |
+|---|---|---|---|---|
+| NEON (default) | 1007.274ms (1.0073ms/image) | 131.340ms | **13.04%** | [836.040, 1152.933]ms |
+| Accelerate (`PROXIMA_ACCELERATE_GEMM=1`) | 803.947ms (0.8039ms/image) | 122.822ms | **15.28%** | [589.351, 898.961]ms |
+
+Per-round ratios (NEON/Accelerate): round 1 = 1.110x, round 2 = 0.973x, round 3 = 1.248x, round 4 = 1.956x, round 5 = 1.194x. Grand mean ratio (arm-mean / arm-mean, ROW 192's own convention) = **1.253x (-20.19%)**.
+
+**Does ROW 192's own clean two-cluster bimodal pattern (0.988-1.009x / 1.529-1.560x) replicate this session? No -- this session's own ratios are a continuous, wider scatter (0.973x-1.956x), not a clean two-mode split, and both arms' own CoV (13.04%/15.28%) exceeds both ROW 192's own (12.34%/11.62%) and the 5% trust threshold this task's own convention sets.** Reading it plainly: this session did not reproduce the SAME distribution shape ROW 192 saw; it reproduced high round-to-round variance on both arms, on a measurably noisier host (below), with the engagement counter ruling out the one mechanism (route not firing) that would mechanically explain a clean two-mode split.
+
+**Host loadout, read plainly:** `uptime` during the batch read 42.23/39.70/31.49 at round 1, settling to 37.66/38.80/31.27 by round 5's own start -- well above ROW 192's own quieter ~9-11 floor. `ps -eo pid,pcpu,comm -r` taken mid-batch and again after confirms the SAME six pegged processes ROW 192 named (four `snapshot-probe` PIDs 20780/20816/20984/20969, two `psci-dispatch-probe` PIDs 13288/13546, each 97.6-100.0% CPU), still present, still not reconciled against ROW 187's own "five," still not killed by this session (per the task's own "never kill anything" instruction). One additional, NEW-since-ROW-192 CPU consumer was observed: `/usr/libexec/signpost_reporter` at 85.9% CPU, and this session's own local memory-daemon process plus the agent process running this session (69.7% and 38.1%) add further load the earlier rows did not carry, because this session is itself running inside an active agent session on the same host -- named plainly, not excluded from the read.
+
+**Honest read (mechanism, not a verdict): engagement is ruled out with certainty (deterministic 5000/0 vs 0/0 every round). The remaining candidate is host scheduling/thermal contention from the six pegged floor processes plus this session's own additional load, which is CORRELATIONAL, not proven causal -- no controlled quiet-vs-loaded A/B was run this session (the floor processes cannot be killed under this task's own rule, and no quieter window was reached in the 60-minute budget), so "mechanism elsewhere: thermal, scheduling" is the best-supported explanation, not a closed one.** Per the task's own explicit branch ("if hits > 0 in all accelerate rounds yet bimodality persists, record that honestly ... and do NOT promote on an unexplained distribution -- commit the row as the finding and stop"): **hits was > 0 in all 5 Accelerate rounds, and an unexplained-in-detail wide-variance distribution persists. Promotion (Phase 2) is NOT attempted this session.**
+
+### Gates run this session (sanity gate for the commit, not the Phase 2 promotion gate list -- Phase 2 did not execute)
+
+- `cargo test --release -p proxima-onnx --test real_mnist_accuracy --no-run`: exit 0 (build).
+- `cargo clippy -p proxima-onnx --tests --all-features -- -D warnings` (scoped to the target actually touched): clean, exit 0.
+- `cargo clippy -p proxima-onnx --all-targets --all-features -- -D warnings` (broader scope, NOT this row's own gate): **FAILS**, pre-existing, unrelated -- `examples/bge_eval.rs:80` `clippy::type_complexity` on a function signature this row never touched (`git diff --stat main -- proxima-onnx/examples/bge_eval.rs` is empty this session). Named as a real, separate finding per the ownership directive -- not fixed this session (out of this row's own scope and 60-minute budget), not silently dropped either.
+- `cargo nextest run -p proxima-onnx --all-features`: **98 passed, 0 failed, 4 skipped**, exit 0 -- matches ROW 192's own count exactly, no regression from the added `eprintln!`.
+- Phase 2's own mandated gates (`nextest -p proxima-tensor` default, `nextest -p proxima-autograd`, `clippy -p proxima-tensor --all-targets --all-features`, `check -p proxima-tensor --no-default-features --features alloc`, `cargo doc -p proxima-tensor --no-deps --all-features`, both-arms `real_mnist_accuracy` release with the disable valve) were **NOT run this session** -- they are conditioned on Phase 1 explaining the distribution and the win standing, which did not happen.
+
+### Decision evidence (assembled, not decided -- principle 19: the promotion decision belongs to the owner, and this session does not reach it)
+
+| input | value | source |
+|---|---|---|
+| engagement counter, Accelerate arm | `hits=5000, declined=0`, all 5 rounds, zero variance | this row, Phase 1 table |
+| engagement counter, NEON arm | `hits=0, declined=0`, all 5 rounds (trivial) | this row, Phase 1 table |
+| e2e ratio this session | 1.253x, ranges overlap-adjacent (NEON min 836.040 vs Accelerate max 898.961 -- overlapping) | this row, Phase 1 table |
+| e2e ratio ROW 192 | 1.299x, ranges overlapped | ROW 192 |
+| e2e ratio ROW 189 | 1.329x, ranges did NOT overlap | ROW 189 |
+| CoV trend across sessions | ROW 189 8.51% (NEON) -> ROW 192 11.62-12.34% -> this row 13.04-15.28% -- monotonically widening across three independent sessions on the same host | ROW 189, ROW 192, this row |
+| host load trend | ROW 192 ~9-11 -> this row 31-42 (1-minute `uptime`) | ROW 192, this row |
+| what would close this residual | a controlled low-load rerun (impossible this session -- floor processes cannot be killed) OR a `perf`/`ktrace`-level scheduling trace correlating per-round core assignment with per-round ratio (not attempted, out of the 60-minute budget) | this row |
+
+### Named, NOT attempted this session (out of the 60-minute budget)
+
+- **Whether the flat `try_run_accelerate_sgemm` route ever contributes to the shared `ACCELERATE_GEMM_HITS` counter for THIS model** -- read as "consistent with conv-only" from the fixed 5000 count, not independently confirmed by adding a second, route-specific counter (would require a source change to `cpu.rs`, out of this row's own measurement-only Phase 1 scope).
+- **A `perf`/`ktrace` scheduling trace isolating per-round core assignment (P-core vs E-core) or thermal state** -- named as the natural next instrument for the "mechanism elsewhere" residual, not attempted.
+- **Phase 2 promotion in full** -- explicitly gated OFF by this row's own Phase 1 finding; not attempted, not scoped further this session.
+- **Reconciling ROW 187's "five" vs ROW 192's "six" vs this row's own reconfirmed "six" pegged floor processes** -- presence and count reconfirmed identical to ROW 192, cause still not investigated, nothing killed.
+
+### Re-prove commands (principle 16)
+
+```
+cd proxima-wt-convpromo && CARGO_TARGET_DIR=<scratch> cargo test --release -p proxima-onnx --test real_mnist_accuracy --no-run
+# then run the produced deps/real_mnist_accuracy-* binary directly with
+# real_mnist_onnx_classifies_real_test_images_at_reference_accuracy --ignored --nocapture,
+# interleaved with the same invocation prefixed by PROXIMA_ACCELERATE_GEMM=1, 5 rounds each,
+# reading the printed "real_mnist accuracy: ..." and "real_mnist accelerate_gemm: hits=... declined=..." lines
+cd proxima-wt-convpromo && CARGO_TARGET_DIR=<scratch> cargo clippy -p proxima-onnx --tests --all-features -- -D warnings
+cd proxima-wt-convpromo && CARGO_TARGET_DIR=<scratch> cargo nextest run -p proxima-onnx --all-features
+git diff --stat HEAD origin/main -- proxima-tensor/src/cpu.rs   # empty -- confirms this row's own measurements are unaffected by ROW 192's mid-session landing to main
+```

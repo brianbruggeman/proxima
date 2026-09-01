@@ -157,6 +157,15 @@ fn real_mnist_onnx_classifies_real_test_images_at_reference_accuracy() {
         "real_mnist epilogue_fuse: hits={hits} elements={elements} nanos={nanos} ns_per_element={:.4}",
         nanos as f64 / elements as f64
     );
+    // ROW 193 engagement-counter print: same shape as epilogue_fuse above,
+    // reads ROW 188/189's own accelerate_gemm_totals() so a paired NEON vs
+    // Accelerate round can assert the route actually fired, not just
+    // compiled (see discipline.md ROW 192's own unresolved bimodality).
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    {
+        let (accelerate_hits, accelerate_declined) = proxima_tensor::cpu::accelerate_gemm_totals();
+        eprintln!("real_mnist accelerate_gemm: hits={accelerate_hits} declined={accelerate_declined}");
+    }
     for (index, predicted, label) in &sample_rows {
         eprintln!("real_mnist sample[{index}]: predicted={predicted} label={label}");
     }
