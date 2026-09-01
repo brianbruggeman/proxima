@@ -153,6 +153,36 @@ pub struct Lowered {
     pub graph_outputs: Vec<(String, NodeId)>,
 }
 
+/// Every lower-time-constant side table [`lower_node`] and its callees
+/// thread through the whole pass, bundled into one struct purely to keep
+/// each function's own argument count within `clippy::too_many_arguments`
+/// -- four independently-evolving pieces of state (decoded initializer
+/// data, `Constant`-node-folded scalars/arrays/shapes) that happen to
+/// always travel together, never a new domain concept.
+struct FoldState {
+    /// Decoded `TensorProto` payloads for every graph initializer, keyed by
+    /// name -- read-only after [`lower_graph_pinned`]'s own initializer
+    /// loop populates it.
+    initializer_data: BTreeMap<String, Vec<f32>>,
+    /// A uniform `Constant` node's own scalar value (see [`lower_constant`]),
+    /// the fast path [`constant_scalar_value`] checks first.
+    constant_values: BTreeMap<String, f32>,
+    /// Every per-element `Constant`/`Shape`/`Gather`/`Unsqueeze`/`Concat`
+    /// fold this pass can name without a live `Op` -- see [`lower_shape`]'s
+    /// own doc for the chain this exists to carry.
+    constant_arrays: BTreeMap<String, Vec<f32>>,
+    /// The ORIGINAL (pre-flattening) shape behind a [`FoldState::constant_arrays`]
+    /// entry -- only [`lower_constant`] populates it and only
+    /// [`lower_slice`]'s constant-tensor fallback reads it (see that
+    /// function's own doc for why a flat array alone is not enough there).
+    constant_tensor_shapes: BTreeMap<String, Vec<u64>>,
+    /// `(name, data)` pairs this pass materializes for [`Lowered::initializers`]
+    /// -- every graph initializer up front, plus any constant-tensor leaf
+    /// [`lower_slice`]'s own materializing fallback or the graph-output
+    /// fallback below appends later.
+    initializers: Vec<(String, Vec<f32>)>,
+}
+
 /// Lower a parsed ONNX [`GraphProto`] into a [`proxima_tensor::Op`] program.
 ///
 /// Composes, never invents: every branch below builds an `Op::Elementwise`/
@@ -163,9 +193,24 @@ pub struct Lowered {
 /// is that same shape). See this module's own doc for the value-tracking
 /// discipline and the crate doc for the coverage table.
 pub fn lower_graph(graph: &GraphProto<'_>) -> Result<Lowered, LowerError> {
+    lower_graph_pinned(graph, &BTreeMap::new())
+}
+
+/// [`lower_graph`], plus a lower-time binding for every symbolic
+/// (`DimensionValue::Param`) graph-input dimension named in `pins` --
+/// ONNX's own convention for a batch/sequence axis a model exports
+/// unresolved (`"batch_size"`/`"sequence_length"` are BERT-family
+/// exporters' usual names). `pins` keys are the dimension's `Param` name,
+/// values the concrete extent this lowering should bind it to; a symbolic
+/// dimension whose name is absent from `pins` still raises
+/// [`LowerError::UnsupportedShape`] exactly as [`lower_graph`] does today.
+/// This is the one place pinning happens -- `value_info_shape` reads
+/// `pins` directly rather than the caller mutating the parsed
+/// [`GraphProto`] beforehand (which would require an owned, mutable copy
+/// of borrowed proto data the parser never produces).
+pub fn lower_graph_pinned(graph: &GraphProto<'_>, pins: &BTreeMap<&str, u64>) -> Result<Lowered, LowerError> {
     let mut program: Vec<Op> = Vec::new();
     let mut values: BTreeMap<String, Value> = BTreeMap::new();
-    let mut initializers: Vec<(String, Vec<f32>)> = Vec::new();
 
     // `Reshape`'s `shape` operand is consumed only as *values* this pass
     // reads directly (see `lower_reshape`) -- its `NodeId` is never named by
@@ -191,11 +236,17 @@ pub fn lower_graph(graph: &GraphProto<'_>) -> Result<Lowered, LowerError> {
         })
         .collect();
 
-    let mut initializer_data: BTreeMap<String, Vec<f32>> = BTreeMap::new();
+    let mut fold = FoldState {
+        initializer_data: BTreeMap::new(),
+        constant_values: BTreeMap::new(),
+        constant_arrays: BTreeMap::new(),
+        constant_tensor_shapes: BTreeMap::new(),
+        initializers: Vec::new(),
+    };
     for tensor in &graph.initializer {
         let shape = tensor_shape(tensor);
         let data = decode_numeric_tensor(tensor)?;
-        initializer_data.insert(tensor.name.to_string(), data.clone());
+        fold.initializer_data.insert(tensor.name.to_string(), data.clone());
         if shape_only_names.contains(tensor.name) {
             continue;
         }
@@ -208,7 +259,7 @@ pub fn lower_graph(graph: &GraphProto<'_>) -> Result<Lowered, LowerError> {
             },
         );
         values.insert(tensor.name.to_string(), Value { node, shape, view: None, flatten_source: None });
-        initializers.push((tensor.name.to_string(), data));
+        fold.initializers.push((tensor.name.to_string(), data));
     }
 
     let mut graph_inputs = Vec::new();
@@ -216,11 +267,22 @@ pub fn lower_graph(graph: &GraphProto<'_>) -> Result<Lowered, LowerError> {
         if values.contains_key(input.name) {
             continue;
         }
-        let shape = value_info_shape(input)?;
+        let shape = value_info_shape(input, pins)?;
+        // `graph_input_feeds_gather_indices` (not `value_info_dtype` alone)
+        // picks the dtype: `cpu::reject_non_float32`'s whole-program scan
+        // (see `concat_pair`'s own doc) exempts an `Int32` node only when it
+        // is reachable specifically as a `Computed.indices` reference, never
+        // as an ordinary elementwise operand. A BERT-style `attention_mask`
+        // input declares the same ONNX `int64` type as `input_ids` but is
+        // consumed purely as elementwise mask arithmetic (`Cast`/`Sub`/
+        // `Mul`), never as a `Gather` index -- tagging it `Int32` from its
+        // ONNX declaration alone would trip that scan for no reason this
+        // pass's own f32-storage convention needs.
+        let dtype = if graph_input_feeds_gather_indices(graph, input.name) { value_info_dtype(input) } else { DType::Float32 };
         let node = append(
             &mut program,
             Op::Input {
-                dtype: value_info_dtype(input),
+                dtype,
                 shape: shape.iter().map(|&extent| Extent::Static(extent as u32)).collect(),
                 name: Some(input.name.to_string()),
             },
@@ -233,27 +295,37 @@ pub fn lower_graph(graph: &GraphProto<'_>) -> Result<Lowered, LowerError> {
         return Err(LowerError::EmptyGraph { name: graph.name.to_string() });
     }
 
-    let mut constant_values: BTreeMap<String, f32> = BTreeMap::new();
     for node in &graph.node {
-        lower_node(&mut program, &mut values, &initializer_data, &mut constant_values, node)?;
+        lower_node(&mut program, &mut values, &mut fold, node)?;
     }
 
     let mut graph_outputs = Vec::new();
     for output in &graph.output {
-        let value = lookup_by_name(&values, output.name, "graph_output", graph.name)?;
-        graph_outputs.push((output.name.to_string(), value.node));
+        let node = match lookup_by_name(&values, output.name, "graph_output", graph.name) {
+            Ok(value) => value.node,
+            // A graph output that is ITSELF a lower-time constant (a
+            // `Shape`/`Gather`/`Concat` fold chain, this module's own doc)
+            // never gets a live `Op` internally -- materialize one here,
+            // the same named `Op::Input` + `initializers` entry
+            // [`lower_slice`]'s own constant-data fallback already builds,
+            // so a caller always gets a real `NodeId` for every declared
+            // graph output.
+            Err(_) => {
+                let flat = resolve_constant_array(output.name, &fold.initializer_data, &fold.constant_values, &fold.constant_arrays)
+                    .ok_or_else(|| LowerError::UnknownValue { name: graph.name.to_string(), op_type: "graph_output".to_string(), value: output.name.to_string() })?;
+                let shape = fold.constant_tensor_shapes.get(output.name).cloned().unwrap_or_else(|| alloc::vec![flat.len() as u64]);
+                let id = append(&mut program, Op::Input { dtype: DType::Float32, shape: shape.iter().map(|&extent| Extent::Static(extent as u32)).collect(), name: Some(output.name.to_string()) });
+                fold.initializers.push((output.name.to_string(), flat));
+                id
+            }
+        };
+        graph_outputs.push((output.name.to_string(), node));
     }
 
-    Ok(Lowered { program, initializers, graph_inputs, graph_outputs })
+    Ok(Lowered { program, initializers: fold.initializers, graph_inputs, graph_outputs })
 }
 
-fn lower_node(
-    program: &mut Vec<Op>,
-    values: &mut BTreeMap<String, Value>,
-    initializer_data: &BTreeMap<String, Vec<f32>>,
-    constant_values: &mut BTreeMap<String, f32>,
-    node: &NodeProto<'_>,
-) -> Result<(), LowerError> {
+fn lower_node(program: &mut Vec<Op>, values: &mut BTreeMap<String, Value>, fold: &mut FoldState, node: &NodeProto<'_>) -> Result<(), LowerError> {
     match node.op_type {
         "Add" => lower_binary(program, values, node, ScalarOp::Add),
         "Sub" => lower_binary(program, values, node, ScalarOp::Subtract),
@@ -278,25 +350,31 @@ fn lower_node(
         "Softmax" => lower_softmax(program, values, node),
         "LogSoftmax" => lower_logsoftmax(program, values, node),
         "Transpose" => lower_transpose(program, values, node),
-        "Gather" => lower_gather(program, values, node),
-        "Unsqueeze" => lower_unsqueeze(program, values, node),
-        "Constant" => lower_constant(program, values, constant_values, node),
+        "Gather" => lower_gather(program, values, fold, node),
+        "Unsqueeze" => lower_unsqueeze(program, values, &mut fold.constant_arrays, node),
+        "Constant" => lower_constant(program, values, fold, node),
         "Where" => lower_where(program, values, node),
-        "If" => lower_if(program, values, initializer_data, constant_values, node),
-        "Scan" => lower_scan(program, values, initializer_data, constant_values, node),
-        "Loop" => lower_loop(program, values, initializer_data, constant_values, node),
+        "If" => lower_if(program, values, fold, node),
+        "Scan" => lower_scan(program, values, fold, node),
+        "Loop" => lower_loop(program, values, fold, node),
         "ReduceSum" => lower_reduce(program, values, node, ScalarOp::Add, ReduceInit::Zero),
         "ReduceMax" => lower_reduce(program, values, node, ScalarOp::Maximum, ReduceInit::NegativeInfinity),
         "ReduceMin" => lower_reduce(program, values, node, ScalarOp::Minimum, ReduceInit::PositiveInfinity),
         "ReduceProd" => lower_reduce(program, values, node, ScalarOp::Multiply, ReduceInit::One),
-        "Reshape" => lower_reshape(values, initializer_data, node),
+        "ReduceMean" => lower_reduce_mean(program, values, node),
+        "Reshape" => lower_reshape(program, values, fold, node),
         "Flatten" => lower_flatten(values, node),
-        "Concat" => lower_concat(program, values, node),
+        "Concat" => lower_concat(program, values, fold, node),
         "Conv" => lower_conv(program, values, node),
         "ConvTranspose" => lower_convtranspose(program, values, node),
         "MaxPool" => lower_maxpool(program, values, node),
         "AveragePool" => lower_averagepool(program, values, node),
         "BatchNormalization" => lower_batchnorm(program, values, node),
+        "Cast" => lower_cast(program, values, node),
+        "Shape" => lower_shape(values, &mut fold.constant_arrays, node),
+        "Pow" => lower_pow(program, values, fold, node),
+        "Slice" => lower_slice(program, values, fold, node),
+        "Dropout" => lower_dropout(program, values, fold, node),
         other => Err(LowerError::UnsupportedOp { name: node.name.to_string(), op_type: other.to_string() }),
     }
 }
@@ -473,6 +551,37 @@ fn operand_pattern(value: &Value, out_shape: &[u64]) -> IndexPattern {
 fn lower_binary(program: &mut Vec<Op>, values: &mut BTreeMap<String, Value>, node: &NodeProto<'_>, body: ScalarOp) -> Result<(), LowerError> {
     let lhs = lookup(values, node, 0)?.clone();
     let rhs = lookup(values, node, 1)?.clone();
+
+    // A genuine scalar (rank-0) sibling never contributes real axis data,
+    // so when the OTHER operand carries a `Value::view` with a virtual
+    // (Unsqueeze-inserted) axis and nothing else in this expression pins
+    // it, the ordinary broadcast/`operand_pattern` composition below leaves
+    // that axis unresolved (`shape::infer` names it
+    // `TensorError::UnconstrainedDim`) -- BERT's own extended-attention-mask
+    // `Sub(1, mask)` / `Mul(mask, -10000)` steps are exactly this shape
+    // (the mask does not rejoin a full-rank sibling until the later
+    // `Add(scores, extended_mask)`, where `operand_pattern`'s ordinary path
+    // works exactly like [`lower_batchnorm`]'s channel broadcast). Operating
+    // at the viewed operand's REAL rank and passing its view straight
+    // through (see [`lower_cast`]'s own doc for the same single-operand
+    // constraint) sidesteps the unresolved axis entirely -- a scalar
+    // broadcasts identically regardless of rank, so this is exact, not an
+    // approximation.
+    if rhs.shape.is_empty() && lhs.view.is_some() {
+        let value = lower_binary_scalar_preserving_view(program, body, &lhs, rhs.node, false);
+        if let Some(output_name) = node.output.first() {
+            values.insert((*output_name).to_string(), value);
+        }
+        return Ok(());
+    }
+    if lhs.shape.is_empty() && rhs.view.is_some() {
+        let value = lower_binary_scalar_preserving_view(program, body, &rhs, lhs.node, true);
+        if let Some(output_name) = node.output.first() {
+            values.insert((*output_name).to_string(), value);
+        }
+        return Ok(());
+    }
+
     let out_shape = broadcast_shapes(node, &lhs.shape, &rhs.shape)?;
     let operands = alloc::vec![
         (lhs.node, IndexMap::Affine(operand_pattern(&lhs, &out_shape))),
@@ -483,11 +592,45 @@ fn lower_binary(program: &mut Vec<Op>, values: &mut BTreeMap<String, Value>, nod
     Ok(())
 }
 
+/// The scalar-sibling, view-preserving path [`lower_binary`]'s own doc
+/// names: `viewed` is read at its REAL rank only (never the wider logical
+/// rank its `Value::view` presents), `scalar_node` broadcasts against that
+/// same real rank via [`scalar_broadcast_pattern`], and the result carries
+/// `viewed`'s exact `shape`/`view` forward onto the new physical node --
+/// whatever reads this output downstream still sees the identical virtual
+/// axes, just over freshly computed data.
+fn lower_binary_scalar_preserving_view(program: &mut Vec<Op>, body: ScalarOp, viewed: &Value, scalar_node: NodeId, scalar_is_lhs: bool) -> Value {
+    let real_rank = match &viewed.view {
+        Some(view) => view.iter().filter(|axis| axis.is_some()).count(),
+        None => viewed.shape.len(),
+    };
+    let pattern = identity_pattern(real_rank);
+    let operands = if scalar_is_lhs {
+        alloc::vec![(scalar_node, IndexMap::Affine(scalar_broadcast_pattern(real_rank))), (viewed.node, IndexMap::Affine(pattern))]
+    } else {
+        alloc::vec![(viewed.node, IndexMap::Affine(pattern)), (scalar_node, IndexMap::Affine(scalar_broadcast_pattern(real_rank)))]
+    };
+    let id = build_elementwise(program, body, operands);
+    Value { node: id, shape: viewed.shape.clone(), view: viewed.view.clone(), flatten_source: None }
+}
+
+/// Every plain single-operand `ScalarOp` (`Tanh`/`Exp`/`Log`/`Sqrt`/`Neg`/
+/// `Reciprocal`/`Identity`/`Erf`). A single-operand `Elementwise` has no
+/// sibling to pin a *virtual* (`Value::view`) axis's extent (see
+/// [`lower_cast`]'s own doc, the same constraint), so this reads `input` at
+/// its REAL rank and passes `shape`/`view` straight through onto the new
+/// output rather than `identity_pattern` against the full logical rank.
 fn lower_unary(program: &mut Vec<Op>, values: &mut BTreeMap<String, Value>, node: &NodeProto<'_>, body: ScalarOp) -> Result<(), LowerError> {
     let input = lookup(values, node, 0)?.clone();
-    let pattern = identity_pattern(input.shape.len());
+    let real_rank = match &input.view {
+        Some(view) => view.iter().filter(|axis| axis.is_some()).count(),
+        None => input.shape.len(),
+    };
+    let pattern = identity_pattern(real_rank);
     let id = build_elementwise(program, body, alloc::vec![(input.node, IndexMap::Affine(pattern))]);
-    bind_output(values, node, 0, id, input.shape);
+    if let Some(output_name) = node.output.first() {
+        values.insert((*output_name).to_string(), Value { node: id, shape: input.shape, view: input.view, flatten_source: None });
+    }
     Ok(())
 }
 
@@ -624,13 +767,55 @@ fn lower_matmul(program: &mut Vec<Op>, values: &mut BTreeMap<String, Value>, nod
         });
     }
 
-    let iter_rank = (batch_rank + 3) as u16;
-    let m_axis = batch_rank as u16;
-    let k_axis = batch_rank as u16 + 1;
-    let n_axis = batch_rank as u16 + 2;
+    if lhs.flatten_source.is_some() && rhs.flatten_source.is_some() {
+        return Err(LowerError::UnsupportedShape {
+            name: node.name.to_string(),
+            op_type: node.op_type.to_string(),
+            reason: "MatMul with both operands produced by a real-axis-merging Reshape is not supported".to_string(),
+        });
+    }
 
-    let lhs_pattern = batched_operand_pattern(lhs_batch, &out_batch, iter_rank, &[m_axis, k_axis]);
-    let rhs_pattern = batched_operand_pattern(rhs_batch, &out_batch, iter_rank, &[k_axis, n_axis]);
+    // `K` widens from one iteration axis to one per real axis a
+    // [`Value::flatten_source`]-merged operand's contracted group covers --
+    // the multi-head-attention "concat heads back to hidden, MatMul into
+    // the output dense layer" shape [`reshape_merge_boundary`]'s own doc
+    // names, generalizing [`lower_gemm`]'s identical flatten-widening
+    // (`flat_axis_index`/`k_subaxes`) from its fixed rank-2 case to
+    // `MatMul`'s batched one.
+    let m_axis = batch_rank as u16;
+    let k_extents: Vec<u64> = match (&lhs.flatten_source, &rhs.flatten_source) {
+        (Some((real_shape, split)), None) | (None, Some((real_shape, split))) => real_shape[*split..].to_vec(),
+        _ => alloc::vec![k],
+    };
+    let flattened = lhs.flatten_source.is_some() || rhs.flatten_source.is_some();
+    let k_subaxes: Vec<u16> = (m_axis + 1..m_axis + 1 + k_extents.len() as u16).collect();
+    let n_axis = m_axis + 1 + k_extents.len() as u16;
+    let iter_rank = n_axis + 1;
+
+    let lhs_pattern = {
+        let mut axes = broadcast_pattern(lhs_batch, &out_batch).axes;
+        axes.push(single_term_axis(m_axis));
+        if lhs.flatten_source.is_some() {
+            axes.extend(owned_axis_indices(&k_subaxes));
+        } else if flattened {
+            axes.push(flat_axis_index(&k_extents, &k_subaxes));
+        } else {
+            axes.push(single_term_axis(k_subaxes[0]));
+        }
+        IndexPattern { iter_rank, axes }
+    };
+    let rhs_pattern = {
+        let mut axes = broadcast_pattern(rhs_batch, &out_batch).axes;
+        if rhs.flatten_source.is_some() {
+            axes.extend(owned_axis_indices(&k_subaxes));
+        } else if flattened {
+            axes.push(flat_axis_index(&k_extents, &k_subaxes));
+        } else {
+            axes.push(single_term_axis(k_subaxes[0]));
+        }
+        axes.push(single_term_axis(n_axis));
+        IndexPattern { iter_rank, axes }
+    };
 
     let out_shape: Vec<u64> = out_batch.iter().copied().chain([m, n]).collect();
     let out_kept: Vec<u16> = (0..batch_rank as u16).chain([m_axis, n_axis]).collect();
@@ -639,17 +824,6 @@ fn lower_matmul(program: &mut Vec<Op>, values: &mut BTreeMap<String, Value>, nod
     let id = build_reduce(program, ScalarOp::Add, ReduceInit::Zero, product, identity_pattern(iter_rank as usize), projection(iter_rank, &out_kept), Some("matmul".to_string()));
     bind_output(values, node, 0, id, out_shape);
     Ok(())
-}
-
-/// An operand's pattern into a matmul's shared `(batch..., trailing_axes)`
-/// iteration space: the operand's own batch dims broadcast against
-/// `out_batch` exactly like [`broadcast_pattern`] (missing leading batch
-/// axes included -- the `[B, M, K] x [K, N]` case), then `trailing_axes`
-/// (its own `M`/`K` or `K`/`N` pair) are appended as plain projections.
-fn batched_operand_pattern(operand_batch: &[u64], out_batch: &[u64], iter_rank: u16, trailing_axes: &[u16]) -> IndexPattern {
-    let mut axes = broadcast_pattern(operand_batch, out_batch).axes;
-    axes.extend(trailing_axes.iter().map(|&axis| AxisIndex { terms: core::iter::once(AxisTerm::projection(axis)).collect(), offset: 0 }));
-    IndexPattern { iter_rank, axes }
 }
 
 /// The shared matmul core [`lower_matmul`] and [`lower_gemm`] both build:
@@ -697,6 +871,119 @@ fn flat_axis_index(extents: &[u64], iter_axes: &[u16]) -> AxisIndex {
 /// iteration axes into the *other* operand's one real axis.
 fn owned_axis_indices(iter_axes: &[u16]) -> Vec<AxisIndex> {
     iter_axes.iter().map(|&axis| AxisIndex { terms: core::iter::once(AxisTerm::projection(axis)).collect(), offset: 0 }).collect()
+}
+
+/// [`lower_reshape`]'s materializing SPLIT path: `input`'s trailing real
+/// axis, and only its trailing real axis, expands into `out_shape`'s own
+/// trailing run (BERT's own `[batch, seq, hidden] -> [batch, seq, heads,
+/// head_dim]` multi-head split). `unify_iteration_space`
+/// (`proxima-tensor/src/shape.rs`) resolves each NEW axis's extent only
+/// from a *pure* single-term projection somewhere in the expression -- a
+/// single real (narrower) operand genuinely cannot supply that separately
+/// for two or more brand-new axes at once (unlike [`lower_gemm`]'s
+/// flatten-widening, which always has a *second*, unflattened operand to
+/// supply `owned_axis_indices` for exactly this). So this builds the split
+/// exactly [`slice_axis_range`] builds a static slice: a small
+/// [`Op::Iota`] per new axis (a real leaf whose OWN declared shape *is*
+/// that axis's extent, satisfying `unify_iteration_space` on its own),
+/// combined via `position * stride` sums into one flat-index tensor shaped
+/// `tail` (BERT's `head * head_dim + dim`), then one
+/// [`IndexMap::Computed`] gather reads `input.node`'s single real trailing
+/// axis through that computed index -- the same primitive
+/// [`slice_axis_range`] already uses, generalized from a 1-D index to an
+/// N-D one.
+fn materialize_reshape_split(program: &mut Vec<Op>, input: &Value, out_shape: &[u64]) -> Option<Value> {
+    let real_rank = input.shape.len();
+    if real_rank == 0 || out_shape.len() <= real_rank {
+        return None;
+    }
+    let prefix = real_rank - 1;
+    if input.shape[..prefix] != out_shape[..prefix] {
+        return None;
+    }
+    let tail = &out_shape[prefix..];
+    if tail.iter().product::<u64>() != input.shape[prefix] {
+        return None;
+    }
+    if tail.len() < 2 {
+        return None;
+    }
+
+    // Every scaled position stays at its OWN rank-1 real shape until the
+    // moment it joins the shared `sub_rank` space -- `unify_iteration_space`
+    // resolves an axis's extent only from a *pure* projection somewhere in
+    // the SAME op, so a lone rank-1 operand broadcast into a wider pattern
+    // ahead of time (nothing else in that op to resolve the other axes)
+    // is exactly the unconstrained-axis bug this function exists to avoid.
+    // Folding pairwise instead, each step combines the REAL accumulated
+    // rank (`identity_pattern`, already resolved from the accumulator's own
+    // inferred shape) with exactly one new rank-1 operand (`single_term_axis`
+    // at the next axis) -- two operands, two axes worth of pure
+    // projections, every step self-resolving.
+    let sub_rank = tail.len() as u16;
+    let mut scaled_positions = Vec::with_capacity(tail.len());
+    for (sub_index, &extent) in tail.iter().enumerate() {
+        let position = append(program, Op::Iota { dtype: DType::Float32, extent: Extent::Static(extent as u32) });
+        let stride: u64 = tail[sub_index + 1..].iter().product();
+        let scaled = if stride == 1 {
+            position
+        } else {
+            let stride_const = constant_scalar(program, stride as f32);
+            build_elementwise(
+                program,
+                ScalarOp::Multiply,
+                alloc::vec![(position, IndexMap::Affine(identity_pattern(1))), (stride_const, IndexMap::Affine(scalar_broadcast_pattern(1)))],
+            )
+        };
+        scaled_positions.push(scaled);
+    }
+    let mut combined = scaled_positions[0];
+    let mut accumulated_rank: u16 = 1;
+    for &next in &scaled_positions[1..] {
+        let widened_rank = accumulated_rank + 1;
+        let accumulator_pattern = identity_pattern(accumulated_rank as usize);
+        let next_pattern = IndexPattern { iter_rank: widened_rank, axes: alloc::vec![single_term_axis(accumulated_rank)] };
+        combined = build_elementwise(
+            program,
+            ScalarOp::Add,
+            alloc::vec![
+                (combined, IndexMap::Affine(IndexPattern { iter_rank: widened_rank, axes: accumulator_pattern.axes })),
+                (next, IndexMap::Affine(next_pattern)),
+            ],
+        );
+        accumulated_rank = widened_rank;
+    }
+    let combined = build_elementwise_dtype(program, DType::Int32, ScalarOp::Identity, alloc::vec![(combined, IndexMap::Affine(identity_pattern(sub_rank as usize)))]);
+
+    let out_rank = out_shape.len() as u16;
+    let sub_iter_axes: Vec<u16> = (prefix as u16..out_rank).collect();
+    let index_map = IndexPattern { iter_rank: out_rank, axes: sub_iter_axes.iter().map(|&axis| single_term_axis(axis)).collect() };
+    let base = concat_base_pattern(out_rank, real_rank, prefix);
+    let gathered_map = IndexMap::Computed { indices: combined, index_map, base, gathered_dim: prefix as u16 };
+    let id = build_elementwise(program, ScalarOp::Identity, alloc::vec![(input.node, gathered_map)]);
+    Some(Value { node: id, shape: out_shape.to_vec(), view: None, flatten_source: None })
+}
+
+/// [`lower_reshape`]'s deferred MERGE path: `real_shape`'s trailing run of
+/// two or more real axes collapses into `out_shape`'s own trailing axis,
+/// every leading axis unchanged -- exactly [`lower_flatten`]'s own
+/// `flatten_source` shape (`(real_shape, split)`, `real_shape[..split]`
+/// covering the unchanged prefix, `real_shape[split..]` the merged group),
+/// generalized from `Flatten`'s fixed two-output-axis case to any
+/// `out_shape` rank whose LAST axis is the merge target. `None` when
+/// `out_shape` does not fit this exact shape.
+fn reshape_merge_boundary(real_shape: &[u64], out_shape: &[u64]) -> Option<(Vec<u64>, usize)> {
+    if out_shape.is_empty() || real_shape.len() <= out_shape.len() {
+        return None;
+    }
+    let prefix = out_shape.len() - 1;
+    if real_shape[..prefix] != out_shape[..prefix] {
+        return None;
+    }
+    if real_shape[prefix..].iter().product::<u64>() != out_shape[prefix] {
+        return None;
+    }
+    Some((real_shape.to_vec(), prefix))
 }
 
 fn single_term_axis(axis: u16) -> AxisIndex {
@@ -981,7 +1268,33 @@ fn lower_transpose(program: &mut Vec<Op>, values: &mut BTreeMap<String, Value>, 
 /// `data.shape[:axis] + indices.shape + data.shape[axis+1:]` -- so `base`'s
 /// entries just shift which iteration axis each non-gathered `data` axis
 /// reads from by `indices_rank` once past `axis`.
-fn lower_gather(program: &mut Vec<Op>, values: &mut BTreeMap<String, Value>, node: &NodeProto<'_>) -> Result<(), LowerError> {
+fn lower_gather(program: &mut Vec<Op>, values: &mut BTreeMap<String, Value>, fold: &mut FoldState, node: &NodeProto<'_>) -> Result<(), LowerError> {
+    let data_name = node.input.first().copied().ok_or_else(|| LowerError::MissingInput { name: node.name.to_string(), op_type: node.op_type.to_string(), index: 0 })?;
+    if !values.contains_key(data_name) {
+        // `data` is a lower-time-only array (see `lower_shape`'s doc) -- no
+        // `IndexMap::Computed` op is needed, the gather is just an index into
+        // the already-known flat element list, done here at lower time.
+        let data = resolve_constant_array(data_name, &fold.initializer_data, &fold.constant_values, &fold.constant_arrays)
+            .ok_or_else(|| LowerError::UnknownValue { name: node.name.to_string(), op_type: node.op_type.to_string(), value: data_name.to_string() })?;
+        let indices_name = node.input.get(1).copied().ok_or_else(|| LowerError::MissingInput { name: node.name.to_string(), op_type: node.op_type.to_string(), index: 1 })?;
+        let indices = resolve_constant_array(indices_name, &fold.initializer_data, &fold.constant_values, &fold.constant_arrays).ok_or_else(|| LowerError::UnsupportedShape {
+            name: node.name.to_string(),
+            op_type: node.op_type.to_string(),
+            reason: "Gather over a lower-time constant array requires lower-time-constant indices too".to_string(),
+        })?;
+        let gathered: Vec<f32> = indices
+            .iter()
+            .map(|&raw_index| {
+                let index = if raw_index < 0.0 { raw_index + data.len() as f32 } else { raw_index };
+                data[index as usize]
+            })
+            .collect();
+        if let Some(output_name) = node.output.first() {
+            fold.constant_arrays.insert((*output_name).to_string(), gathered);
+        }
+        return Ok(());
+    }
+
     let data = lookup(values, node, 0)?.clone();
     let indices = lookup(values, node, 1)?.clone();
     if data.shape.is_empty() {
@@ -1019,7 +1332,28 @@ fn lower_gather(program: &mut Vec<Op>, values: &mut BTreeMap<String, Value>, nod
         }
     }
     let base = IndexPattern { iter_rank, axes: base_axes };
-    let gathered_map = IndexMap::Computed { indices: indices.node, index_map, base, gathered_dim: axis as u16 };
+    // `IndexMap::Computed`'s own doc requires an integer `indices` `DType`.
+    // Most producers (a graph input feeding `Gather` directly, or
+    // [`slice_axis_range`]'s own index construction) already tag their
+    // output `Int32` -- reusing `indices.node` directly there keeps it
+    // exempt from `cpu::reject_non_float32`'s scan (only a node reachable
+    // AS a `Computed.indices` reference is exempt, `concat_pair`'s own
+    // doc). Wrapping it in a re-tagging identity UNCONDITIONALLY would
+    // strip that exemption from the ORIGINAL node (now an ordinary
+    // elementwise operand of the wrapper, not itself a `Computed.indices`
+    // reference) -- the miscompile a lift/lower round trip through an
+    // already-`Int32` indices producer exposed. So this only wraps a
+    // producer that is NOT already `Int32` -- [`lower_slice`]'s
+    // constant-data fallback (materialized `Float32` since its consumer is
+    // not knowable there, that function's own doc) is the one case that
+    // needs it.
+    let indices_dtype = program.get(indices.node.0 as usize).map(proxima_tensor::Op::dtype).unwrap_or(DType::Float32);
+    let indices_node = if indices_dtype == DType::Int32 {
+        indices.node
+    } else {
+        build_elementwise_dtype(program, DType::Int32, ScalarOp::Identity, alloc::vec![(indices.node, IndexMap::Affine(identity_pattern(indices_rank)))])
+    };
+    let gathered_map = IndexMap::Computed { indices: indices_node, index_map, base, gathered_dim: axis as u16 };
 
     let id = append(program, Op::Elementwise { dtype: DType::Float32, body: ScalarOp::Identity, operands: alloc::vec![(data.node, gathered_map)], name: None });
     let mut out_shape = data.shape[..axis].to_vec();
@@ -1039,7 +1373,24 @@ fn lower_gather(program: &mut Vec<Op>, values: &mut BTreeMap<String, Value>, nod
 /// axis be pinned by some operand, and a fresh axis has none). This is the
 /// inverse of [`crate::lift::lift_graph`]'s `Unsqueeze` prelude for a
 /// broadcast operand.
-fn lower_unsqueeze(_program: &mut Vec<Op>, values: &mut BTreeMap<String, Value>, node: &NodeProto<'_>) -> Result<(), LowerError> {
+fn lower_unsqueeze(_program: &mut Vec<Op>, values: &mut BTreeMap<String, Value>, constant_arrays: &mut BTreeMap<String, Vec<f32>>, node: &NodeProto<'_>) -> Result<(), LowerError> {
+    let input_name = node.input.first().copied().ok_or_else(|| LowerError::MissingInput { name: node.name.to_string(), op_type: node.op_type.to_string(), index: 0 })?;
+    if !values.contains_key(input_name) {
+        // `Shape`'s output (and anything gathered/unsqueezed from it) never
+        // gets a live `Op` -- see `lower_shape`'s own doc -- so an `Unsqueeze`
+        // over one just carries the same lower-time array forward under the
+        // new output name, unchanged: inserting a logical size-1 axis has no
+        // effect on the flat element list this fold-only path tracks.
+        let array = constant_arrays.get(input_name).cloned().ok_or_else(|| LowerError::UnknownValue {
+            name: node.name.to_string(),
+            op_type: node.op_type.to_string(),
+            value: input_name.to_string(),
+        })?;
+        if let Some(output_name) = node.output.first() {
+            constant_arrays.insert((*output_name).to_string(), array);
+        }
+        return Ok(());
+    }
     let input = lookup(values, node, 0)?.clone();
     let mut axes: Vec<u16> = attr_ints(node, "axes").unwrap_or(&[]).iter().map(|&value| value as u16).collect();
     axes.sort_unstable();
@@ -1072,12 +1423,7 @@ fn lower_unsqueeze(_program: &mut Vec<Op>, values: &mut BTreeMap<String, Value>,
 /// [`crate::lift::lift_graph`]'s own `Op::Constant` -> `Constant` node
 /// emission produces -- [`Op::Constant`] itself carries a single scalar
 /// broadcast across its declared shape, never per-element data.
-fn lower_constant(
-    program: &mut Vec<Op>,
-    values: &mut BTreeMap<String, Value>,
-    constant_values: &mut BTreeMap<String, f32>,
-    node: &NodeProto<'_>,
-) -> Result<(), LowerError> {
+fn lower_constant(program: &mut Vec<Op>, values: &mut BTreeMap<String, Value>, fold: &mut FoldState, node: &NodeProto<'_>) -> Result<(), LowerError> {
     let tensor = find_attr(node, "value").and_then(|attribute| attribute.t.as_ref()).ok_or_else(|| LowerError::UnsupportedShape {
         name: node.name.to_string(),
         op_type: node.op_type.to_string(),
@@ -1085,13 +1431,33 @@ fn lower_constant(
     })?;
     let shape = tensor_shape(tensor);
     let decoded = decode_numeric_tensor(tensor).map_err(|_| LowerError::UndecodableInitializer { name: node.name.to_string(), data_type: tensor.data_type })?;
+    if let Some(output_name) = node.output.first() {
+        // recorded unconditionally, whatever the shape, so a `Slice`
+        // starts/ends/axes/steps operand (or a `Gather`/`Unsqueeze` chain
+        // reading a `Shape` output, see `lower_shape`'s doc) sourced from a
+        // per-element `Constant` node is still foldable at lower time even
+        // when it is not uniform. `constant_tensor_shapes` carries the
+        // ORIGINAL (pre-flattening) rank alongside it -- [`lower_slice`]'s
+        // own constant-data fallback is the one reader that needs a real
+        // multi-axis shape rather than treating every folded array as flat.
+        fold.constant_arrays.insert((*output_name).to_string(), decoded.clone());
+        fold.constant_tensor_shapes.insert((*output_name).to_string(), shape.clone());
+    }
     let value = decoded.first().copied().unwrap_or(0.0);
     if decoded.iter().any(|&element| element != value) {
-        return Err(LowerError::UnsupportedShape {
-            name: node.name.to_string(),
-            op_type: node.op_type.to_string(),
-            reason: "Constant lowering supports a uniform tensor value only".to_string(),
-        });
+        // A non-uniform tensor has no [`Op::Constant`] representation (it
+        // carries a single scalar broadcast, never per-element data -- this
+        // function's own doc). It is still fully usable, though: it already
+        // sits in `constant_arrays` above, exactly the shape a `Slice`'s
+        // static index table (`onnx::Slice`-prefixed `arange`-style position
+        // buffers a BERT export folds into a `Constant` node, not a graph
+        // initializer) needs. No live `Op` is bound for this output, so a
+        // node that actually needs it as a *live tensor* operand (not a
+        // lower-time constant) surfaces a precise
+        // [`LowerError::UnknownValue`] at its own use site instead of this
+        // node erroring pre-emptively for every non-uniform `Constant`,
+        // whether or not anything downstream needs it as one.
+        return Ok(());
     }
     let id = append(program, Op::Constant { dtype: DType::Float32, shape: shape.iter().map(|&extent| Extent::Static(extent as u32)).collect(), value });
     if let Some(output_name) = node.output.first() {
@@ -1099,7 +1465,7 @@ fn lower_constant(
         // downstream `If`/`Loop` condition or trip count sourced from a
         // `Constant` node -- not only a graph initializer -- is still
         // foldable at lower time; see `constant_scalar_value`.
-        constant_values.insert((*output_name).to_string(), value);
+        fold.constant_values.insert((*output_name).to_string(), value);
     }
     bind_output(values, node, 0, id, shape);
     Ok(())
@@ -1151,6 +1517,78 @@ fn constant_scalar_value(name: &str, initializer_data: &BTreeMap<String, Vec<f32
     data.iter().all(|&element| element == first).then_some(first)
 }
 
+/// The full-array generalization of [`constant_scalar_value`]: every
+/// per-element (not just uniform) lower-time-known value list this pass can
+/// name for `name`, checked in the same "most recently folded wins" order
+/// [`lower_shape`]'s `Shape -> Gather -> Unsqueeze -> Slice` chain relies
+/// on -- a `Shape`/`Gather`/`Unsqueeze` fold result in `constant_arrays`
+/// first, then a `Constant` node's own decoded payload (recorded
+/// unconditionally by [`lower_constant`], uniform or not), then a decoded
+/// graph initializer.
+fn resolve_constant_array(
+    name: &str,
+    initializer_data: &BTreeMap<String, Vec<f32>>,
+    constant_values: &BTreeMap<String, f32>,
+    constant_arrays: &BTreeMap<String, Vec<f32>>,
+) -> Option<Vec<f32>> {
+    if let Some(array) = constant_arrays.get(name) {
+        return Some(array.clone());
+    }
+    if let Some(&value) = constant_values.get(name) {
+        return Some(alloc::vec![value]);
+    }
+    initializer_data.get(name).cloned()
+}
+
+/// [`resolve_constant_array`] for one of `node`'s own input slots, with
+/// [`lower_slice`]'s own [`LowerError::UnsupportedShape`] shape on failure --
+/// factored out so both [`lower_slice`]'s constant-tensor and live-tensor
+/// branches name the same error for "this Slice operand is not a lower-time
+/// constant".
+fn resolve_index_operand(
+    node: &NodeProto<'_>,
+    index: usize,
+    initializer_data: &BTreeMap<String, Vec<f32>>,
+    constant_values: &BTreeMap<String, f32>,
+    constant_arrays: &BTreeMap<String, Vec<f32>>,
+    unsupported: &dyn Fn(String) -> LowerError,
+) -> Result<Vec<f32>, LowerError> {
+    let name = node.input.get(index).copied().ok_or_else(|| LowerError::MissingInput { name: node.name.to_string(), op_type: node.op_type.to_string(), index })?;
+    resolve_constant_array(name, initializer_data, constant_values, constant_arrays).ok_or_else(|| unsupported(format!("Slice operand at input {index} must be a lower-time constant")))
+}
+
+/// A row-major sub-block of `data` (declared shape `shape`): `ranges[axis]`
+/// is `(start, length)` into that axis, so `ranges == shape.iter().map(|&e|
+/// (0, e))` is the identity slice. [`lower_slice`]'s own constant-data
+/// fallback calls this once, having already resolved every axis's window
+/// (unmentioned axes default to the identity range) -- see that function's
+/// doc for why a genuinely multi-dimensional lower-time-constant tensor
+/// (a literal `Constant`-node position-id buffer, not a graph initializer)
+/// needs this rather than [`slice_axis_range`], which only narrows one axis
+/// of an already-live [`Value`].
+fn slice_constant_tensor(data: &[f32], shape: &[u64], ranges: &[(u64, u64)]) -> Vec<f32> {
+    let rank = shape.len();
+    let mut strides = alloc::vec![1u64; rank];
+    for axis in (0..rank.saturating_sub(1)).rev() {
+        strides[axis] = strides[axis + 1] * shape[axis + 1];
+    }
+    let out_shape: Vec<u64> = ranges.iter().map(|&(_, length)| length).collect();
+    let total: u64 = out_shape.iter().product();
+    let mut result = Vec::with_capacity(total as usize);
+    for linear in 0..total {
+        let mut remaining = linear;
+        let mut flat = 0u64;
+        for axis in 0..rank {
+            let out_stride: u64 = out_shape[axis + 1..].iter().product();
+            let coordinate = remaining.checked_div(out_stride).unwrap_or(0);
+            remaining = remaining.checked_rem(out_stride).unwrap_or(0);
+            flat += (ranges[axis].0 + coordinate) * strides[axis];
+        }
+        result.push(data[flat as usize]);
+    }
+    result
+}
+
 /// Lowers `subgraph`'s own node list directly into the caller's shared
 /// `program`/`values` -- `If`'s `then_branch`/`else_branch` and `Scan`'s/
 /// `Loop`'s `body` all carry an ordinary [`GraphProto`] with no outer
@@ -1163,15 +1601,9 @@ fn constant_scalar_value(name: &str, initializer_data: &BTreeMap<String, Vec<f32
 /// an outer node, surfaces as an ordinary [`LowerError::UnknownValue`] the
 /// first subgraph node that reads it -- If/Loop/Scan bodies in practice
 /// only ever capture outer names or compute fresh ones via `Constant`).
-fn lower_subgraph_nodes(
-    program: &mut Vec<Op>,
-    values: &mut BTreeMap<String, Value>,
-    initializer_data: &BTreeMap<String, Vec<f32>>,
-    constant_values: &mut BTreeMap<String, f32>,
-    subgraph: &GraphProto<'_>,
-) -> Result<(), LowerError> {
+fn lower_subgraph_nodes(program: &mut Vec<Op>, values: &mut BTreeMap<String, Value>, fold: &mut FoldState, subgraph: &GraphProto<'_>) -> Result<(), LowerError> {
     for node in &subgraph.node {
-        lower_node(program, values, initializer_data, constant_values, node)?;
+        lower_node(program, values, fold, node)?;
     }
     Ok(())
 }
@@ -1201,20 +1633,14 @@ fn required_graph_attr<'node>(node: &'node NodeProto<'_>, name: &str) -> Result<
 /// shaped tensor at the same output position, [`ScalarOp::Select`] has no
 /// broadcast that reconciles them, and that is named as
 /// [`LowerError::UnsupportedShape`] rather than silently picking one side.
-fn lower_if(
-    program: &mut Vec<Op>,
-    values: &mut BTreeMap<String, Value>,
-    initializer_data: &BTreeMap<String, Vec<f32>>,
-    constant_values: &mut BTreeMap<String, f32>,
-    node: &NodeProto<'_>,
-) -> Result<(), LowerError> {
+fn lower_if(program: &mut Vec<Op>, values: &mut BTreeMap<String, Value>, fold: &mut FoldState, node: &NodeProto<'_>) -> Result<(), LowerError> {
     let cond_name = node.input.first().ok_or_else(|| LowerError::MissingInput { name: node.name.to_string(), op_type: node.op_type.to_string(), index: 0 })?;
     let then_branch = required_graph_attr(node, "then_branch")?;
     let else_branch = required_graph_attr(node, "else_branch")?;
 
-    if let Some(cond_value) = constant_scalar_value(cond_name, initializer_data, constant_values) {
+    if let Some(cond_value) = constant_scalar_value(cond_name, &fold.initializer_data, &fold.constant_values) {
         let chosen = if cond_value != 0.0 { then_branch } else { else_branch };
-        lower_subgraph_nodes(program, values, initializer_data, constant_values, chosen)?;
+        lower_subgraph_nodes(program, values, fold, chosen)?;
         for (index, output_name) in node.output.iter().enumerate() {
             let branch_output = chosen.output.get(index).ok_or_else(|| LowerError::UnsupportedShape {
                 name: node.name.to_string(),
@@ -1228,8 +1654,8 @@ fn lower_if(
     }
 
     let cond_value = lookup_by_name(values, cond_name, node.op_type, node.name)?.clone();
-    lower_subgraph_nodes(program, values, initializer_data, constant_values, then_branch)?;
-    lower_subgraph_nodes(program, values, initializer_data, constant_values, else_branch)?;
+    lower_subgraph_nodes(program, values, fold, then_branch)?;
+    lower_subgraph_nodes(program, values, fold, else_branch)?;
     for index in 0..node.output.len() {
         let then_output = then_branch.output.get(index).ok_or_else(|| LowerError::UnsupportedShape {
             name: node.name.to_string(),
@@ -1306,13 +1732,7 @@ fn slice_axis0(program: &mut Vec<Op>, value: &Value, index: u64) -> Value {
 /// yet build), more than one `scan_input`/state variable, and any
 /// `scan_input_axes`/`scan_output_axes`/`scan_input_directions` attribute
 /// other than the all-default case.
-fn lower_scan(
-    program: &mut Vec<Op>,
-    values: &mut BTreeMap<String, Value>,
-    initializer_data: &BTreeMap<String, Vec<f32>>,
-    constant_values: &mut BTreeMap<String, f32>,
-    node: &NodeProto<'_>,
-) -> Result<(), LowerError> {
+fn lower_scan(program: &mut Vec<Op>, values: &mut BTreeMap<String, Value>, fold: &mut FoldState, node: &NodeProto<'_>) -> Result<(), LowerError> {
     let name = node.name.to_string();
     let op_type = node.op_type.to_string();
     let num_scan_inputs = attr_int(node, "num_scan_inputs").ok_or_else(|| LowerError::UnsupportedShape {
@@ -1349,7 +1769,7 @@ fn lower_scan(
         let slice = slice_axis0(program, &scan_input, iteration);
         values.insert(state_name.to_string(), state.clone());
         values.insert(slice_name.to_string(), slice);
-        lower_subgraph_nodes(program, values, initializer_data, constant_values, body)?;
+        lower_subgraph_nodes(program, values, fold, body)?;
         state = lookup_by_name(values, body.output[0].name, "Scan", node.name)?.clone();
     }
     bind_output(values, node, 0, state.node, state.shape);
@@ -1380,26 +1800,20 @@ fn lower_scan(
 /// this subprogram itself produced" has no expression in the algebra. This
 /// is named [`LowerError::DataDependentControlFlow`], never a fabricated
 /// primitive and never a silently-truncated unroll.
-fn lower_loop(
-    program: &mut Vec<Op>,
-    values: &mut BTreeMap<String, Value>,
-    initializer_data: &BTreeMap<String, Vec<f32>>,
-    constant_values: &mut BTreeMap<String, f32>,
-    node: &NodeProto<'_>,
-) -> Result<(), LowerError> {
+fn lower_loop(program: &mut Vec<Op>, values: &mut BTreeMap<String, Value>, fold: &mut FoldState, node: &NodeProto<'_>) -> Result<(), LowerError> {
     let name = node.name.to_string();
     let op_type = node.op_type.to_string();
     let boundary = |reason: &str| LowerError::DataDependentControlFlow { name: name.clone(), op_type: op_type.clone(), reason: reason.to_string() };
 
     let trip_count = match optional_input(node, 0) {
-        Some(trip_name) => match constant_scalar_value(trip_name, initializer_data, constant_values) {
+        Some(trip_name) => match constant_scalar_value(trip_name, &fold.initializer_data, &fold.constant_values) {
             Some(value) => value as u64,
             None => return Err(boundary("trip count M is only known from computed data, not a lower-time constant")),
         },
         None => return Err(boundary("no trip count M was given, so iteration count depends only on a runtime cond")),
     };
     if let Some(cond_name) = optional_input(node, 1) {
-        match constant_scalar_value(cond_name, initializer_data, constant_values) {
+        match constant_scalar_value(cond_name, &fold.initializer_data, &fold.constant_values) {
             Some(value) if value != 0.0 => {}
             Some(_) => return Err(boundary("initial cond is a lower-time-constant false, zero iterations is not modeled")),
             None => return Err(boundary("cond is only known from computed data, so iterations may terminate early at runtime")),
@@ -1424,7 +1838,7 @@ fn lower_loop(
         for (state_index, state_value) in state.iter().enumerate() {
             values.insert(body.input[state_index + 2].name.to_string(), state_value.clone());
         }
-        lower_subgraph_nodes(program, values, initializer_data, constant_values, body)?;
+        lower_subgraph_nodes(program, values, fold, body)?;
         state = (0..num_state)
             .map(|index| lookup_by_name(values, body.output[index + 1].name, "Loop", node.name).cloned())
             .collect::<Result<_, _>>()?;
@@ -1460,6 +1874,362 @@ fn lower_reduce(program: &mut Vec<Op>, values: &mut BTreeMap<String, Value>, nod
     Ok(())
 }
 
+/// `ReduceMean(axes, keepdims)`: `Reduce(+)` (the same `build_reduce`
+/// [`lower_reduce`] composes) times a rank-0 `1/N` [`Op::Constant`] -- no
+/// division `ScalarOp` is needed since `N` (the product of the reduced
+/// axes' extents) is always a lower-time-known integer once every operand
+/// shape is [`Extent::Static`] (this module's own doc on [`Value`]).
+/// Distinct from [`lower_reduce`] in supporting `keepdims=1` (ONNX's own
+/// default for `ReduceMean`, and the form a BERT-style `LayerNorm` export
+/// needs so the mean/variance broadcast back against the un-reduced input):
+/// when set, the reduced axes are reinserted as *virtual* size-1 axes via
+/// [`Value::view`], exactly [`lower_unsqueeze`]'s own aliasing trick (see
+/// that function's doc) -- the physical [`Op::Reduce`] still drops them
+/// (`Keep::Reduce` always does, `proxima-tensor/src/shape.rs:205`), only the
+/// logical [`Value`] presented to consumers regains them.
+fn lower_reduce_mean(program: &mut Vec<Op>, values: &mut BTreeMap<String, Value>, node: &NodeProto<'_>) -> Result<(), LowerError> {
+    let input = lookup(values, node, 0)?.clone();
+    let rank = input.shape.len();
+    let keepdims = attr_int(node, "keepdims").unwrap_or(1);
+    let mut axes: Vec<usize> = attr_ints(node, "axes").unwrap_or(&[]).iter().map(|&value| if value < 0 { value + rank as i64 } else { value } as usize).collect();
+    if axes.is_empty() {
+        axes = (0..rank).collect();
+    }
+    let kept: Vec<u16> = (0..rank as u16).filter(|axis| !axes.contains(&(*axis as usize))).collect();
+    let count: u64 = axes.iter().map(|&axis| input.shape[axis]).product();
+    if count == 0 {
+        return Err(LowerError::UnsupportedShape { name: node.name.to_string(), op_type: node.op_type.to_string(), reason: "ReduceMean over a zero-extent axis has no defined mean".to_string() });
+    }
+    let sum_shape: Vec<u64> = kept.iter().map(|&axis| input.shape[axis as usize]).collect();
+    let sum_id = build_reduce(program, ScalarOp::Add, ReduceInit::Zero, input.node, identity_pattern(rank), projection(rank as u16, &kept), None);
+    let reciprocal_count = constant_scalar(program, 1.0 / count as f32);
+    let mean_id = build_elementwise(
+        program,
+        ScalarOp::Multiply,
+        alloc::vec![
+            (sum_id, IndexMap::Affine(identity_pattern(kept.len()))),
+            (reciprocal_count, IndexMap::Affine(scalar_broadcast_pattern(kept.len()))),
+        ],
+    );
+    if keepdims == 0 {
+        bind_output(values, node, 0, mean_id, sum_shape);
+        return Ok(());
+    }
+    let mut out_shape = Vec::with_capacity(rank);
+    let mut view: Vec<Option<u16>> = Vec::with_capacity(rank);
+    let mut kept_index = 0u16;
+    for axis in 0..rank {
+        if axes.contains(&axis) {
+            out_shape.push(1u64);
+            view.push(None);
+        } else {
+            out_shape.push(input.shape[axis]);
+            view.push(Some(kept_index));
+            kept_index += 1;
+        }
+    }
+    if let Some(output_name) = node.output.first() {
+        values.insert((*output_name).to_string(), Value { node: mean_id, shape: out_shape, view: Some(view), flatten_source: None });
+    }
+    Ok(())
+}
+
+/// `Pow(base, exponent)` with a lower-time-constant `exponent`: a
+/// non-negative integer exponent desugars to repeated [`ScalarOp::Multiply`]
+/// (`x^2 = x * x`, the `LayerNorm` variance shape this lowering exists
+/// for); `0.5` is [`ScalarOp::SquareRoot`] directly (more accurate than the
+/// general path below, and the common case ONNX exporters emit for a
+/// standard-deviation `Sqrt`-of-`Pow(x, 0.5)` fusion); every other constant
+/// `c` (negative or fractional) is `exp(c * ln(x))`, valid only for a
+/// strictly positive `base` -- a domain caveat this lowering documents but
+/// cannot check at lower time, since `base` is data, not a constant.
+/// [`LowerError::UnsupportedShape`] for a non-constant exponent: ONNX's
+/// general `Pow` has no fixed arity this ISA could give a variable exponent
+/// per-element without a dedicated `ScalarOp`, so this pass only closes the
+/// lower-time-constant case (the same restriction [`lower_reshape`]'s
+/// `shape` operand and [`lower_slice`]'s `starts`/`ends` already carry).
+fn lower_pow(program: &mut Vec<Op>, values: &mut BTreeMap<String, Value>, fold: &FoldState, node: &NodeProto<'_>) -> Result<(), LowerError> {
+    let base = lookup(values, node, 0)?.clone();
+    let exponent_name = node.input.get(1).copied().ok_or_else(|| LowerError::MissingInput { name: node.name.to_string(), op_type: node.op_type.to_string(), index: 1 })?;
+    let exponent = constant_scalar_value(exponent_name, &fold.initializer_data, &fold.constant_values).ok_or_else(|| LowerError::UnsupportedShape {
+        name: node.name.to_string(),
+        op_type: node.op_type.to_string(),
+        reason: "Pow lowering requires a lower-time-constant exponent".to_string(),
+    })?;
+    let rank = base.shape.len();
+    let pattern = identity_pattern(rank);
+
+    let id = if exponent == 0.5 {
+        build_elementwise(program, ScalarOp::SquareRoot, alloc::vec![(base.node, IndexMap::Affine(pattern))])
+    } else if exponent == (exponent as i64) as f32 && (0.0..=64.0).contains(&exponent) {
+        // `exponent == (exponent as i64) as f32` (not `f32::fract`, a
+        // `std`-only intrinsic this `no_std + alloc` tier does not have)
+        // -- an `as i64` truncation round-trips exactly for every f32
+        // value this bound (`0..=64`) can hold.
+        let count = exponent as u32;
+        if count == 0 {
+            append(program, Op::Constant { dtype: DType::Float32, shape: base.shape.iter().map(|&extent| Extent::Static(extent as u32)).collect(), value: 1.0 })
+        } else {
+            let mut accumulator = base.node;
+            for _ in 1..count {
+                accumulator = build_elementwise(program, ScalarOp::Multiply, alloc::vec![(accumulator, IndexMap::Affine(pattern.clone())), (base.node, IndexMap::Affine(pattern.clone()))]);
+            }
+            accumulator
+        }
+    } else {
+        let logarithm = build_elementwise(program, ScalarOp::Logarithm, alloc::vec![(base.node, IndexMap::Affine(pattern.clone()))]);
+        let exponent_node = constant_scalar(program, exponent);
+        let scaled = build_elementwise(
+            program,
+            ScalarOp::Multiply,
+            alloc::vec![(logarithm, IndexMap::Affine(pattern.clone())), (exponent_node, IndexMap::Affine(scalar_broadcast_pattern(rank)))],
+        );
+        build_elementwise(program, ScalarOp::Exponential, alloc::vec![(scaled, IndexMap::Affine(pattern))])
+    };
+    bind_output(values, node, 0, id, base.shape);
+    Ok(())
+}
+
+/// `Cast(to)`: every backend this crate's evaluator ships carries every
+/// buffer as f32 regardless of logical dtype (see
+/// [`onnx_dtype_to_op_dtype`]'s own doc), so a `Cast` never moves or
+/// reinterprets a single bit -- it is [`ScalarOp::Identity`] tagged with the
+/// target [`DType`], the same shape-inference-time-only distinction
+/// `Op::Input::dtype` already carries for an integer initializer. Only the
+/// two dtypes this crate's shape/index machinery ever asks for are
+/// supported: `Float32` (`to=1`, an int64 attention mask cast back to float
+/// for elementwise mask arithmetic, the case BERT-family exports use this
+/// for) and `Int32`/`Int64` (`to=6`/`to=7`, [`IndexMap::Computed`]'s own
+/// required indices dtype). Any other target is a named
+/// [`LowerError::UnsupportedShape`] rather than a silent wrong-dtype
+/// identity.
+fn lower_cast(program: &mut Vec<Op>, values: &mut BTreeMap<String, Value>, node: &NodeProto<'_>) -> Result<(), LowerError> {
+    let input = lookup(values, node, 0)?.clone();
+    let to = attr_int(node, "to").ok_or_else(|| LowerError::UnsupportedShape {
+        name: node.name.to_string(),
+        op_type: node.op_type.to_string(),
+        reason: "Cast node has no \"to\" attribute".to_string(),
+    })?;
+    let dtype = match to {
+        1 => DType::Float32,
+        6 | 7 => DType::Int32,
+        other => {
+            return Err(LowerError::UnsupportedShape {
+                name: node.name.to_string(),
+                op_type: node.op_type.to_string(),
+                reason: format!("Cast to dtype {other} is not supported (only Float32/Int32/Int64 targets are)"),
+            });
+        }
+    };
+    // A single-operand `Elementwise` (unlike `lower_binary`'s two-operand
+    // shape) has no sibling operand to pin a *virtual* (Unsqueeze-inserted,
+    // `Value::view`'s own doc) axis's extent, so `shape::infer` rejects a
+    // pattern that carries one (`TensorError::UnconstrainedDim`) -- a double
+    // `Unsqueeze`d attention mask feeding straight into `Cast`, the exact
+    // shape BERT's extended-attention-mask construction takes, is exactly
+    // this case. The cast itself only touches the REAL data, never a purely
+    // virtual size-1 axis, so this reads `input.node` at its own real rank
+    // (stripping the view, the same real-shape recovery
+    // [`compose_reshape_view`] already does) and passes the identical
+    // `view`/logical `shape` straight through onto the new output --
+    // whatever consumer reads it downstream still sees the same virtual
+    // axes, now over the freshly re-dtyped node.
+    let real_shape: Vec<u64> = match &input.view {
+        Some(view) => input.shape.iter().zip(view.iter()).filter_map(|(&extent, axis)| axis.map(|_| extent)).collect(),
+        None => input.shape.clone(),
+    };
+    let id = build_elementwise_dtype(program, dtype, ScalarOp::Identity, alloc::vec![(input.node, IndexMap::Affine(identity_pattern(real_shape.len())))]);
+    if let Some(output_name) = node.output.first() {
+        values.insert((*output_name).to_string(), Value { node: id, shape: input.shape, view: input.view, flatten_source: None });
+    }
+    Ok(())
+}
+
+/// `Shape(start, end)`: emits `data`'s own already-concrete
+/// (post-[`lower_graph_pinned`]-pinning) shape as a lower-time-known value
+/// list -- never a live [`Op`], since every extent this pass tracks is
+/// already [`Extent::Static`] (this module's own doc on [`Value`]) and so
+/// the whole node is a constant fold, not a computation. Recorded into
+/// `constant_arrays` rather than bound in `values`: [`lower_gather`]/
+/// [`lower_unsqueeze`]/[`lower_slice`] all check that side table first
+/// (their own docs), the mechanism a `Shape -> Gather -> Unsqueeze -> Slice`
+/// chain -- the exact shape a `Slice`d BERT position-embedding table export
+/// produces -- rides through this pass without ever materializing an
+/// `Op::Input` leaf for a value only ever consumed as lower-time-constant
+/// integers.
+fn lower_shape(values: &BTreeMap<String, Value>, constant_arrays: &mut BTreeMap<String, Vec<f32>>, node: &NodeProto<'_>) -> Result<(), LowerError> {
+    let data = lookup(values, node, 0)?;
+    let rank = data.shape.len() as i64;
+    let start = attr_int(node, "start").unwrap_or(0);
+    let end = attr_int(node, "end").unwrap_or(rank);
+    let normalize = |value: i64| -> i64 { if value < 0 { (value + rank).max(0) } else { value.min(rank) } };
+    let (start, end) = (normalize(start) as usize, normalize(end) as usize);
+    if start > end {
+        return Err(LowerError::UnsupportedShape {
+            name: node.name.to_string(),
+            op_type: node.op_type.to_string(),
+            reason: format!("Shape start {start} is past end {end}"),
+        });
+    }
+    let shape_values: Vec<f32> = data.shape[start..end].iter().map(|&extent| extent as f32).collect();
+    if let Some(output_name) = node.output.first() {
+        constant_arrays.insert((*output_name).to_string(), shape_values);
+    }
+    Ok(())
+}
+
+/// `Slice(data, starts, ends, axes=None, steps=None)` with every index
+/// operand a lower-time constant ([`resolve_constant_array`]) and every
+/// `steps` entry `1` -- repeated [`slice_axis_range`] (this module's own
+/// per-axis static-window primitive, already used by every grouped
+/// convolution's channel split) narrows `data` one axis at a time. `starts`/
+/// `ends` are normalized and clamped exactly per the ONNX spec: negative
+/// indices count from the end, and an out-of-range `ends` entry (ONNX's own
+/// "pass `INT64_MAX` for open-ended" convention -- the `Shape -> Gather ->
+/// Unsqueeze` chain [`lower_shape`]'s own doc names typically supplies a
+/// concrete `sequence_length` here instead, but the clamp covers both)
+/// clamps to the axis's own extent rather than erroring. A non-constant
+/// `steps` entry other than `1`, or a non-constant `starts`/`ends`/`axes`,
+/// is a named [`LowerError::UnsupportedShape`] -- see [`lower_pow`]'s own
+/// doc for why this pass restricts to the lower-time-constant case rather
+/// than inventing a data-dependent slice primitive.
+fn lower_slice(program: &mut Vec<Op>, values: &mut BTreeMap<String, Value>, fold: &mut FoldState, node: &NodeProto<'_>) -> Result<(), LowerError> {
+    let unsupported = |reason: String| LowerError::UnsupportedShape { name: node.name.to_string(), op_type: node.op_type.to_string(), reason };
+    let data_name = node.input.first().copied().ok_or_else(|| LowerError::MissingInput { name: node.name.to_string(), op_type: node.op_type.to_string(), index: 0 })?;
+
+    if !values.contains_key(data_name) {
+        // `data` is a per-element `Constant` node's own payload (never
+        // materialized as a live `Op` -- see `lower_constant`'s doc), the
+        // shape a `Slice` over an `arange`-style position-id buffer a BERT
+        // export folds into a `Constant` rather than a graph initializer.
+        // The slice is done here, on the flat array, then materialized as an
+        // ordinary named `Op::Input` leaf (exactly the shape every graph
+        // initializer already takes at the top of `lower_graph_pinned`) so
+        // downstream ops that need this as a LIVE operand (a `Gather`'s
+        // `indices`, the one consumer this pass has seen) get a real
+        // `NodeId`, its data riding in `Lowered.initializers` for
+        // `evaluate_named` to bind exactly like any other constant weight.
+        let flat = resolve_constant_array(data_name, &fold.initializer_data, &fold.constant_values, &fold.constant_arrays)
+            .ok_or_else(|| LowerError::UnknownValue { name: node.name.to_string(), op_type: node.op_type.to_string(), value: data_name.to_string() })?;
+        let shape = fold.constant_tensor_shapes.get(data_name).cloned().unwrap_or_else(|| alloc::vec![flat.len() as u64]);
+        let starts = resolve_index_operand(node, 1, &fold.initializer_data, &fold.constant_values, &fold.constant_arrays, &unsupported)?;
+        let ends = resolve_index_operand(node, 2, &fold.initializer_data, &fold.constant_values, &fold.constant_arrays, &unsupported)?;
+        let axes: Vec<i64> = match node.input.get(3).copied().filter(|name| !name.is_empty()) {
+            Some(name) => resolve_constant_array(name, &fold.initializer_data, &fold.constant_values, &fold.constant_arrays)
+                .ok_or_else(|| unsupported("Slice axes must be a lower-time constant".to_string()))?
+                .iter()
+                .map(|&value| value as i64)
+                .collect(),
+            None => (0..starts.len() as i64).collect(),
+        };
+        if starts.len() != ends.len() || starts.len() != axes.len() {
+            return Err(unsupported("Slice starts/ends/axes must all have the same length".to_string()));
+        }
+        let mut ranges: Vec<(u64, u64)> = shape.iter().map(|&extent| (0u64, extent)).collect();
+        for index in 0..starts.len() {
+            let raw_axis = axes[index];
+            let axis = if raw_axis < 0 { (raw_axis + shape.len() as i64) as usize } else { raw_axis as usize };
+            let extent = shape[axis] as i64;
+            let normalize = |value: f32| -> i64 {
+                let value = value as i64;
+                let value = if value < 0 { value + extent } else { value };
+                value.clamp(0, extent)
+            };
+            let start = normalize(starts[index]);
+            let end = normalize(ends[index]);
+            ranges[axis] = (start as u64, (end - start).max(0) as u64);
+        }
+        let sliced = slice_constant_tensor(&flat, &shape, &ranges);
+        let out_shape: Vec<u64> = ranges.iter().map(|&(_, length)| length).collect();
+        let output_name = node.output.first().ok_or_else(|| unsupported("Slice node declares no output".to_string()))?;
+        // `Float32`, not `Int32`: [`cpu::reject_non_float32`] rejects any
+        // `Int32`-tagged node reachable outside a `Computed.indices`
+        // reference, and this materialized leaf's own consumers are not
+        // knowable here -- [`lower_gather`] now re-tags its own `indices`
+        // operand to `Int32` at the point of need (that function's own
+        // doc), so this leaf staying `Float32` is exactly as usable there
+        // as it is for a caller that reads it directly.
+        let id = append(program, Op::Input { dtype: DType::Float32, shape: out_shape.iter().map(|&extent| Extent::Static(extent as u32)).collect(), name: Some((*output_name).to_string()) });
+        values.insert((*output_name).to_string(), Value { node: id, shape: out_shape, view: None, flatten_source: None });
+        fold.initializers.push(((*output_name).to_string(), sliced));
+        return Ok(());
+    }
+
+    let data = lookup(values, node, 0)?.clone();
+    let rank = data.shape.len();
+
+    let resolve = |index: usize, what: &str| -> Result<Vec<f32>, LowerError> {
+        let name = node.input.get(index).copied().ok_or_else(|| LowerError::MissingInput { name: node.name.to_string(), op_type: node.op_type.to_string(), index })?;
+        resolve_constant_array(name, &fold.initializer_data, &fold.constant_values, &fold.constant_arrays).ok_or_else(|| unsupported(format!("Slice {what} must be a lower-time constant")))
+    };
+    let starts = resolve(1, "starts")?;
+    let ends = resolve(2, "ends")?;
+    let axes: Vec<i64> = match node.input.get(3).copied().filter(|name| !name.is_empty()) {
+        Some(name) => resolve_constant_array(name, &fold.initializer_data, &fold.constant_values, &fold.constant_arrays)
+            .ok_or_else(|| unsupported("Slice axes must be a lower-time constant".to_string()))?
+            .iter()
+            .map(|&value| value as i64)
+            .collect(),
+        None => (0..starts.len() as i64).collect(),
+    };
+    let steps: Vec<f32> = match node.input.get(4).copied().filter(|name| !name.is_empty()) {
+        Some(name) => resolve_constant_array(name, &fold.initializer_data, &fold.constant_values, &fold.constant_arrays).ok_or_else(|| unsupported("Slice steps must be a lower-time constant".to_string()))?,
+        None => alloc::vec![1.0; starts.len()],
+    };
+    if starts.len() != ends.len() || starts.len() != axes.len() || starts.len() != steps.len() {
+        return Err(unsupported("Slice starts/ends/axes/steps must all have the same length".to_string()));
+    }
+
+    let mut current = data;
+    for index in 0..starts.len() {
+        if steps[index] != 1.0 {
+            return Err(unsupported("Slice lowering supports step=1 only".to_string()));
+        }
+        let raw_axis = axes[index];
+        let axis = if raw_axis < 0 { (raw_axis + rank as i64) as usize } else { raw_axis as usize };
+        if axis >= current.shape.len() {
+            return Err(unsupported(format!("Slice axis {raw_axis} is out of range for rank {rank}")));
+        }
+        let extent = current.shape[axis] as i64;
+        let normalize = |value: f32| -> i64 {
+            let value = value as i64;
+            let value = if value < 0 { value + extent } else { value };
+            value.clamp(0, extent)
+        };
+        let start = normalize(starts[index]);
+        let end = normalize(ends[index]);
+        let length = (end - start).max(0);
+        current = slice_axis_range(program, &current, axis, start as u64, length as u64);
+    }
+    if let Some(output_name) = node.output.first() {
+        values.insert((*output_name).to_string(), current);
+    }
+    Ok(())
+}
+
+/// `Dropout` at inference: identity on `data`, discarding the optional
+/// `mask` output this pass never produces. `training_mode` (an optional
+/// third *input*, opset 12+ -- ONNX's own inference/training discriminator)
+/// absent, or present and a lower-time-constant `0`, is the only case this
+/// lowering accepts; anything else (present and nonzero, or present but not
+/// a lower-time constant) is a named [`LowerError::UnsupportedShape`] rather
+/// than silently dropping training-time stochastic behavior this pass
+/// cannot express as pure dataflow.
+fn lower_dropout(program: &mut Vec<Op>, values: &mut BTreeMap<String, Value>, fold: &FoldState, node: &NodeProto<'_>) -> Result<(), LowerError> {
+    let training_mode_active = match optional_input(node, 2) {
+        None => false,
+        Some(name) => constant_scalar_value(name, &fold.initializer_data, &fold.constant_values).map(|value| value != 0.0).unwrap_or(true),
+    };
+    if training_mode_active {
+        return Err(LowerError::UnsupportedShape {
+            name: node.name.to_string(),
+            op_type: node.op_type.to_string(),
+            reason: "Dropout lowering supports inference (training_mode absent or 0) only".to_string(),
+        });
+    }
+    lower_unary(program, values, node, ScalarOp::Identity)
+}
+
 /// `Reshape(data, shape)`: a contiguous reshape -- merge or split of axes --
 /// is pure layout, never compute (same element order, reinterpreted
 /// extents), so this binds a [`Value`] view straight onto `data`'s node,
@@ -1469,13 +2239,18 @@ fn lower_reduce(program: &mut Vec<Op>, values: &mut BTreeMap<String, Value>, nod
 /// own convention for a constant-folded target shape); `0` copies the
 /// source extent (unless `allowzero`) and at most one `-1` is inferred from
 /// the total element count, both per the ONNX `Reshape` spec.
-fn lower_reshape(values: &mut BTreeMap<String, Value>, initializer_data: &BTreeMap<String, Vec<f32>>, node: &NodeProto<'_>) -> Result<(), LowerError> {
+fn lower_reshape(program: &mut Vec<Op>, values: &mut BTreeMap<String, Value>, fold: &FoldState, node: &NodeProto<'_>) -> Result<(), LowerError> {
     let input = lookup(values, node, 0)?.clone();
     let shape_name = node.input.get(1).ok_or_else(|| LowerError::MissingInput { name: node.name.to_string(), op_type: node.op_type.to_string(), index: 1 })?;
-    let shape_data = initializer_data.get(*shape_name).ok_or_else(|| LowerError::UnsupportedShape {
+    // `resolve_constant_array` (not `initializer_data` alone) so a `shape`
+    // operand assembled at lower time -- the `Shape -> Gather -> Unsqueeze ->
+    // Concat` chain [`lower_shape`]'s own doc names, the shape a BERT
+    // multi-head reshape's target dims take -- resolves exactly like a plain
+    // graph-initializer shape tensor always has.
+    let shape_data = resolve_constant_array(shape_name, &fold.initializer_data, &fold.constant_values, &fold.constant_arrays).ok_or_else(|| LowerError::UnsupportedShape {
         name: node.name.to_string(),
         op_type: node.op_type.to_string(),
-        reason: "Reshape lowering requires the shape input to be a decoded initializer".to_string(),
+        reason: "Reshape lowering requires the shape input to be a lower-time constant".to_string(),
     })?;
 
     let allowzero = attr_int(node, "allowzero").unwrap_or(0) != 0;
@@ -1513,12 +2288,37 @@ fn lower_reshape(values: &mut BTreeMap<String, Value>, initializer_data: &BTreeM
     }
 
     if let Some(output_name) = node.output.first() {
-        let view = compose_reshape_view(&input, &out_shape).ok_or_else(|| LowerError::UnsupportedShape {
-            name: node.name.to_string(),
-            op_type: node.op_type.to_string(),
-            reason: "Reshape of a value carrying a virtual (Unsqueeze-inserted) axis view must not merge or split any of its real axes -- only inserting/dropping size-1 axes composes with the existing view".to_string(),
-        })?;
-        values.insert((*output_name).to_string(), Value { node: input.node, shape: out_shape, view, flatten_source: None });
+        let value = if input.view.is_some() {
+            let view = compose_reshape_view(&input, &out_shape).ok_or_else(|| LowerError::UnsupportedShape {
+                name: node.name.to_string(),
+                op_type: node.op_type.to_string(),
+                reason: "Reshape of a value carrying a virtual (Unsqueeze-inserted) axis view must not merge or split any of its real axes -- only inserting/dropping size-1 axes composes with the existing view".to_string(),
+            })?;
+            Value { node: input.node, shape: out_shape, view, flatten_source: None }
+        } else if input.shape == out_shape {
+            Value { node: input.node, shape: out_shape, view: None, flatten_source: None }
+        } else if let Some(split) = materialize_reshape_split(program, &input, &out_shape) {
+            split
+        } else if let Some(flatten_source) = reshape_merge_boundary(&input.shape, &out_shape) {
+            // A real-axis MERGE (several trailing real axes into one logical
+            // axis) has no [`IndexMap::Affine`] representation to
+            // materialize with (the read side would need floor-div/mod,
+            // which this ISA's 17 [`ScalarOp`] bodies do not have -- see
+            // [`flat_axis_index`]'s own doc for the affine SPLIT direction
+            // this function's `materialize_reshape_split` sibling uses
+            // instead). Deferred exactly like [`lower_flatten`]'s own
+            // `flatten_source`: [`lower_matmul`]'s flatten-aware branch
+            // widens ITS OWN iteration space to read the pre-merge real axes
+            // directly, never materializing the merge at all.
+            Value { node: input.node, shape: out_shape, view: None, flatten_source: Some(flatten_source) }
+        } else {
+            return Err(LowerError::UnsupportedShape {
+                name: node.name.to_string(),
+                op_type: node.op_type.to_string(),
+                reason: "Reshape lowering supports a trailing real-axis split (materialized) or a single trailing real-axis merge (deferred to MatMul/Gemm) when the input carries no existing view".to_string(),
+            });
+        };
+        values.insert((*output_name).to_string(), value);
     }
     Ok(())
 }
@@ -1625,9 +2425,30 @@ fn lower_flatten(values: &mut BTreeMap<String, Value>, node: &NodeProto<'_>) -> 
 /// (unclamped) position against `lhs`'s extent. This is the same `Computed`
 /// mechanism [`lower_gather`] uses, generalized from an externally supplied
 /// index to a locally computed one.
-fn lower_concat(program: &mut Vec<Op>, values: &mut BTreeMap<String, Value>, node: &NodeProto<'_>) -> Result<(), LowerError> {
+fn lower_concat(program: &mut Vec<Op>, values: &mut BTreeMap<String, Value>, fold: &mut FoldState, node: &NodeProto<'_>) -> Result<(), LowerError> {
     if node.input.len() < 2 {
         return Err(LowerError::MissingInput { name: node.name.to_string(), op_type: node.op_type.to_string(), index: 1 });
+    }
+    let first_name = node.input[0];
+    if !values.contains_key(first_name) {
+        // Every operand a lower-time-constant array (the `Unsqueeze`d
+        // `Shape`/`Gather` results a BERT reshape's target-dims `Concat`
+        // assembles, [`lower_shape`]'s own doc names the chain) -- flatten
+        // them in operand order, never a live `Op`, exactly [`lower_shape`]/
+        // [`lower_gather`]'s own fold-only path.
+        let mut flat: Vec<f32> = Vec::new();
+        for &input_name in &node.input {
+            let part = resolve_constant_array(input_name, &fold.initializer_data, &fold.constant_values, &fold.constant_arrays).ok_or_else(|| LowerError::UnsupportedShape {
+                name: node.name.to_string(),
+                op_type: node.op_type.to_string(),
+                reason: format!("Concat operand {input_name:?} is a lower-time constant fold but is not itself a lower-time constant"),
+            })?;
+            flat.extend(part);
+        }
+        if let Some(output_name) = node.output.first() {
+            fold.constant_arrays.insert((*output_name).to_string(), flat);
+        }
+        return Ok(());
     }
     let first = lookup(values, node, 0)?.clone();
     let rank = first.shape.len();
@@ -3723,10 +4544,22 @@ fn value_info_dtype(value_info: &ValueInfoProto<'_>) -> DType {
     onnx_dtype_to_op_dtype(tensor_type.elem_type)
 }
 
-/// A graph input's declared shape, rejecting symbolic (named, not valued)
-/// dimensions -- this pass lowers to concrete [`Extent::Static`] leaves
-/// only, matching the concrete test fixture this crate ships.
-fn value_info_shape(value_info: &ValueInfoProto<'_>) -> Result<Vec<u64>, LowerError> {
+/// Whether `name` is ever read as a `Gather` node's `indices` operand
+/// (input position 1) anywhere in `graph` -- the one usage
+/// [`value_info_dtype`]'s `Int32` tag is actually for, per this module's own
+/// doc on [`onnx_dtype_to_op_dtype`]. See the graph-input dtype-selection
+/// call site's own doc for why this, not the ONNX-declared dtype alone,
+/// decides.
+fn graph_input_feeds_gather_indices(graph: &GraphProto<'_>, name: &str) -> bool {
+    graph.node.iter().any(|node| node.op_type == "Gather" && node.input.get(1) == Some(&name))
+}
+
+/// A graph input's declared shape -- this pass lowers to concrete
+/// [`Extent::Static`] leaves only, so a symbolic (named, not valued)
+/// dimension is only accepted when [`lower_graph_pinned`]'s own `pins` map
+/// names a concrete extent for it; otherwise it is rejected exactly as
+/// [`lower_graph`] (an empty `pins`) always has.
+fn value_info_shape(value_info: &ValueInfoProto<'_>, pins: &BTreeMap<&str, u64>) -> Result<Vec<u64>, LowerError> {
     let unsupported = |reason: &str| LowerError::UnsupportedShape {
         name: value_info.name.to_string(),
         op_type: "graph_input".to_string(),
@@ -3742,7 +4575,11 @@ fn value_info_shape(value_info: &ValueInfoProto<'_>) -> Result<Vec<u64>, LowerEr
         .iter()
         .map(|dimension| match &dimension.value {
             Some(DimensionValue::Value(value)) => Ok(*value as u64),
-            _ => Err(unsupported("symbolic dimensions are not supported by this lowering")),
+            Some(DimensionValue::Param(name)) => pins
+                .get(name)
+                .copied()
+                .ok_or_else(|| unsupported(&format!("symbolic dimension {name:?} has no pinned extent"))),
+            None => Err(unsupported("symbolic dimensions are not supported by this lowering")),
         })
         .collect()
 }
@@ -3878,14 +4715,19 @@ mod tests {
         assert!(matches!(error, LowerError::UnsupportedOp { .. }), "expected UnsupportedOp, got {error:?}");
     }
 
-    /// `Reshape` merging `[2, 3, 4]` into `[6, 4]`: pure layout, no `Op`
-    /// appended -- the program is exactly as long after lowering as before
-    /// the `Reshape` node, proving this is a [`Value`] view alias
-    /// ([`lower_unsqueeze`]'s own pattern), never a new compute `Op`.
+    /// `Reshape` merging `[2, 3, 4]`'s TRAILING two axes into `[2, 12]`:
+    /// pure layout, no `Op` appended -- the program is exactly as long
+    /// after lowering as before the `Reshape` node, [`Value::flatten_source`]
+    /// (not a [`Value::view`] alias, [`reshape_merge_boundary`]'s own doc)
+    /// carrying the deferred merge for whatever real consumer needs it.
+    /// Merging a LEADING run (`[2,3,4] -> [6,4]`) is a real
+    /// [`LowerError::UnsupportedShape`] gap this pass does not close: see
+    /// [`reshape_merge_boundary`]'s own doc for the "prefix unchanged, one
+    /// TRAILING merged axis" restriction.
     #[test]
-    fn reshape_merges_axes_without_appending_an_op() {
+    fn reshape_merges_a_trailing_axis_run_without_appending_an_op() {
         let x_initializer = f32_initializer("x", &[2, 3, 4], &(0..24).map(|value| value as f32).collect::<Vec<_>>());
-        let shape_initializer = TensorProto { dims: vec![2], data_type: 7, int64_data: vec![6, 4], name: "shape", ..TensorProto::default() };
+        let shape_initializer = TensorProto { dims: vec![2], data_type: 7, int64_data: vec![2, 12], name: "shape", ..TensorProto::default() };
         let node = NodeProto { input: vec!["x", "shape"], output: vec!["y"], op_type: "Reshape", name: "reshape", ..NodeProto::default() };
         let graph = GraphProto {
             node: vec![node],
@@ -3896,7 +4738,7 @@ mod tests {
         };
 
         let lowered = lower_graph(&graph).expect("lower Reshape merge");
-        assert_eq!(lowered.program.len(), 1, "a contiguous reshape appends no new Op (the shape tensor is value-only, never a live leaf)");
+        assert_eq!(lowered.program.len(), 1, "a deferred (flatten_source) merge appends no new Op (the shape tensor is value-only, never a live leaf)");
 
         let named: Vec<(&str, &[f32])> = lowered.initializers.iter().map(|(name, data)| (name.as_str(), data.as_slice())).collect();
         let output = lowered.graph_outputs[0].1;
@@ -3932,10 +4774,17 @@ mod tests {
         assert_eq!(data, expected.as_slice());
     }
 
-    /// `Reshape` splitting `[24]` into `[2, 3, 4]`: the reverse direction,
-    /// also a pure view alias with no new `Op`.
+    /// `Reshape` splitting `[24]` into `[2, 3, 4]`: the reverse direction of
+    /// [`reshape_merges_a_trailing_axis_run_without_appending_an_op`].
+    /// Unlike a merge, a split DOES append real `Op`s
+    /// ([`materialize_reshape_split`]'s own doc: `unify_iteration_space`
+    /// cannot resolve two brand-new axes' extents from one narrower real
+    /// operand without them, so this is a real
+    /// [`IndexMap::Computed`] gather, not a bare alias) -- the assertion
+    /// here is on the *evaluated* values, which a materializing gather
+    /// reproduces exactly, not on program length.
     #[test]
-    fn reshape_splits_a_flat_axis_without_appending_an_op() {
+    fn reshape_splits_a_flat_axis_via_a_materializing_gather() {
         let x_initializer = f32_initializer("x", &[24], &(0..24).map(|value| value as f32).collect::<Vec<_>>());
         let shape_initializer = TensorProto { dims: vec![3], data_type: 7, int64_data: vec![2, 3, 4], name: "shape", ..TensorProto::default() };
         let node = NodeProto { input: vec!["x", "shape"], output: vec!["y"], op_type: "Reshape", name: "reshape", ..NodeProto::default() };
@@ -3948,12 +4797,12 @@ mod tests {
         };
 
         let lowered = lower_graph(&graph).expect("lower Reshape split");
-        assert_eq!(lowered.program.len(), 1, "a contiguous reshape appends no new Op (the shape tensor is value-only, never a live leaf)");
 
         let named: Vec<(&str, &[f32])> = lowered.initializers.iter().map(|(name, data)| (name.as_str(), data.as_slice())).collect();
         let output = lowered.graph_outputs[0].1;
         let evaluated = evaluate_named(&lowered.program, &[], &named, &[output]).expect("evaluate Reshape split");
-        let (data, _) = evaluated.get(output).expect("y present");
+        let (data, shape) = evaluated.get(output).expect("y present");
+        assert_eq!(shape, &[2, 3, 4], "split reports the real, materialized [2, 3, 4] shape");
         let expected: Vec<f32> = (0..24).map(|value| value as f32).collect();
         assert_eq!(data, expected.as_slice(), "split preserves element order (still flattened)");
     }
@@ -4369,8 +5218,23 @@ mod tests {
         if let Some(TypeProto { value: Some(TypeValue::Tensor(tensor)), .. }) = value_info.r#type.as_mut() {
             tensor.shape = Some(TensorShapeProto { dim: vec![Dimension { value: Some(DimensionValue::Param("batch")), denotation: "" }] });
         }
-        let error = value_info_shape(&value_info).expect_err("symbolic dim rejected");
+        let error = value_info_shape(&value_info, &BTreeMap::new()).expect_err("symbolic dim rejected");
         assert!(matches!(error, LowerError::UnsupportedShape { .. }));
+    }
+
+    /// A symbolic dimension pinned via [`lower_graph_pinned`]'s `pins`
+    /// resolves to the pinned extent instead of erroring -- the counterpart
+    /// to [`symbolic_graph_input_dimension_is_rejected`] above.
+    #[test]
+    fn symbolic_graph_input_dimension_resolves_when_pinned() {
+        let mut value_info = input_value_info("x", &[2]);
+        if let Some(TypeProto { value: Some(TypeValue::Tensor(tensor)), .. }) = value_info.r#type.as_mut() {
+            tensor.shape = Some(TensorShapeProto { dim: vec![Dimension { value: Some(DimensionValue::Param("batch")), denotation: "" }] });
+        }
+        let mut pins: BTreeMap<&str, u64> = BTreeMap::new();
+        pins.insert("batch", 4);
+        let shape = value_info_shape(&value_info, &pins).expect("pinned symbolic dim resolves");
+        assert_eq!(shape, alloc::vec![4]);
     }
 
     fn ints_attribute(name: &'static str, ints: Vec<i64>) -> AttributeProto<'static> {
@@ -5582,5 +6446,294 @@ mod tests {
 
         assert_eq!(shape, &[1, 1, 2, 1, 1]);
         assert_eq!(data, &[2.0, 4.0], "mean of each 2-deep window over [1,3,5]: (1+3)/2=2, (3+5)/2=4");
+    }
+
+    fn constant_tensor_node(output: &'static str, name: &'static str, dims: Vec<i64>, data: Vec<f32>) -> NodeProto<'static> {
+        let tensor = TensorProto { dims, data_type: 1, float_data: data, name: "value", ..TensorProto::default() };
+        NodeProto { input: Vec::new(), output: alloc::vec![output], op_type: "Constant", name, attribute: alloc::vec![AttributeProto { name: "value", t: Some(tensor), ..AttributeProto::default() }], ..NodeProto::default() }
+    }
+
+    /// `Cast(to=Float32)`: this pass's own f32-storage convention (every
+    /// buffer is f32 regardless of logical dtype) makes it a pure identity
+    /// on the values -- `[1.0, 2.0, 3.0]` in, `[1.0, 2.0, 3.0]` out.
+    #[test]
+    fn cast_to_float32_is_identity_on_the_values() {
+        let x = f32_initializer("x", &[3], &[1.0, 2.0, 3.0]);
+        let node = NodeProto { input: alloc::vec!["x"], output: alloc::vec!["y"], op_type: "Cast", name: "cast", attribute: alloc::vec![int_attribute("to", 1)], ..NodeProto::default() };
+        let graph = GraphProto { node: alloc::vec![node], name: "cast_graph", initializer: alloc::vec![x], output: alloc::vec![ValueInfoProto { name: "y", ..ValueInfoProto::default() }], ..GraphProto::default() };
+
+        let lowered = lower_graph(&graph).expect("lower Cast");
+        let named: Vec<(&str, &[f32])> = lowered.initializers.iter().map(|(name, data)| (name.as_str(), data.as_slice())).collect();
+        let output = lowered.graph_outputs[0].1;
+        let evaluated = evaluate_named(&lowered.program, &[], &named, &[output]).expect("evaluate Cast");
+        let (data, shape) = evaluated.get(output).expect("y present");
+        assert_eq!(shape, &[3]);
+        assert_eq!(data, &[1.0, 2.0, 3.0]);
+    }
+
+    /// `Cast` on an `Unsqueeze`d (virtual-axis) operand -- the extended
+    /// attention-mask shape [`lower_cast`]'s own doc names: `[2]` unsqueezed
+    /// twice to `[1, 1, 2]`, then cast. Regression for the miscompile that
+    /// doc closes (`identity_pattern` against the full logical rank reading
+    /// past the real rank-1 node).
+    #[test]
+    fn cast_on_a_double_unsqueezed_operand_preserves_the_virtual_axes() {
+        let x = f32_initializer("x", &[2], &[5.0, 6.0]);
+        let unsqueeze0 = NodeProto { input: alloc::vec!["x"], output: alloc::vec!["u0"], op_type: "Unsqueeze", name: "unsqueeze0", attribute: alloc::vec![ints_attribute("axes", alloc::vec![0])], ..NodeProto::default() };
+        let unsqueeze1 = NodeProto { input: alloc::vec!["u0"], output: alloc::vec!["u1"], op_type: "Unsqueeze", name: "unsqueeze1", attribute: alloc::vec![ints_attribute("axes", alloc::vec![0])], ..NodeProto::default() };
+        let cast = NodeProto { input: alloc::vec!["u1"], output: alloc::vec!["y"], op_type: "Cast", name: "cast", attribute: alloc::vec![int_attribute("to", 1)], ..NodeProto::default() };
+        let graph = GraphProto {
+            node: alloc::vec![unsqueeze0, unsqueeze1, cast],
+            name: "cast_view_graph",
+            initializer: alloc::vec![x],
+            output: alloc::vec![ValueInfoProto { name: "y", ..ValueInfoProto::default() }],
+            ..GraphProto::default()
+        };
+
+        let lowered = lower_graph(&graph).expect("lower Cast over a double-unsqueezed operand");
+        let named: Vec<(&str, &[f32])> = lowered.initializers.iter().map(|(name, data)| (name.as_str(), data.as_slice())).collect();
+        let output = lowered.graph_outputs[0].1;
+        let evaluated = evaluate_named(&lowered.program, &[], &named, &[output]).expect("evaluate Cast over a view");
+        let (data, shape) = evaluated.get(output).expect("y present");
+        // `shape::infer` reports the REAL (rank-1) physical shape here --
+        // the two virtual axes only exist in this pass's own `Value`
+        // bookkeeping (`Value::view`'s own doc), invisible outside a
+        // consumer that composes through it (e.g. a broadcast `Add`, the
+        // shape [`lower_binary_scalar_preserving_view`]'s own doc covers).
+        // The regression this test is for is the VALUES, not the reported
+        // shape: `identity_pattern` against the full logical rank used to
+        // read past this node's real rank entirely.
+        assert_eq!(shape, &[2]);
+        assert_eq!(data, &[5.0, 6.0]);
+    }
+
+    /// `Shape` on a `[2, 3]` input: the fully lower-time-known extents
+    /// `[2, 3]`, folded (never a live `Op`) into a `Gather` that picks out
+    /// axis 1 alone -- exactly the `Shape -> Gather` prefix
+    /// [`lower_shape`]'s own doc names for a BERT `sequence_length` read.
+    #[test]
+    fn shape_folds_into_a_gather_picking_one_axis() {
+        let x = f32_initializer("x", &[2, 3], &[0.0, 0.0, 0.0, 0.0, 0.0, 0.0]);
+        let shape_node = NodeProto { input: alloc::vec!["x"], output: alloc::vec!["shape"], op_type: "Shape", name: "shape", ..NodeProto::default() };
+        let index = constant_tensor_node("index", "index_const", alloc::vec![], alloc::vec![1.0]);
+        let gather = NodeProto { input: alloc::vec!["shape", "index"], output: alloc::vec!["y"], op_type: "Gather", name: "gather", attribute: alloc::vec![int_attribute("axis", 0)], ..NodeProto::default() };
+        let graph = GraphProto {
+            node: alloc::vec![shape_node, index, gather],
+            name: "shape_gather_graph",
+            initializer: alloc::vec![x],
+            output: alloc::vec![ValueInfoProto { name: "y", ..ValueInfoProto::default() }],
+            ..GraphProto::default()
+        };
+
+        // `Shape` and the constant-index `Gather` themselves fold entirely
+        // at lower time, appending no `Op` of their own (this module's own
+        // doc); the graph OUTPUT being one of those folds is the one case
+        // that still needs a live leaf -- `lower_graph_pinned`'s own
+        // graph-output fallback materializes it.
+        let lowered = lower_graph(&graph).expect("lower Shape -> Gather");
+        let named: Vec<(&str, &[f32])> = lowered.initializers.iter().map(|(name, data)| (name.as_str(), data.as_slice())).collect();
+        let output = lowered.graph_outputs[0].1;
+        let evaluated = evaluate_named(&lowered.program, &[], &named, &[output]).expect("evaluate Shape -> Gather");
+        let (data, _) = evaluated.get(output).expect("y present");
+        assert_eq!(data, &[3.0], "axis 1 of [2, 3] is 3");
+    }
+
+    /// `Pow(x, 2)`: repeated multiply -- `[2, 3, 4] -> [4, 9, 16]`.
+    #[test]
+    fn pow_with_integer_exponent_is_repeated_multiply() {
+        let x = f32_initializer("x", &[3], &[2.0, 3.0, 4.0]);
+        let exponent = constant_tensor_node("exponent", "exponent_const", alloc::vec![], alloc::vec![2.0]);
+        let node = NodeProto { input: alloc::vec!["x", "exponent"], output: alloc::vec!["y"], op_type: "Pow", name: "pow", ..NodeProto::default() };
+        let graph = GraphProto { node: alloc::vec![exponent, node], name: "pow_graph", initializer: alloc::vec![x], output: alloc::vec![ValueInfoProto { name: "y", ..ValueInfoProto::default() }], ..GraphProto::default() };
+
+        let lowered = lower_graph(&graph).expect("lower Pow(x, 2)");
+        let named: Vec<(&str, &[f32])> = lowered.initializers.iter().map(|(name, data)| (name.as_str(), data.as_slice())).collect();
+        let output = lowered.graph_outputs[0].1;
+        let evaluated = evaluate_named(&lowered.program, &[], &named, &[output]).expect("evaluate Pow(x, 2)");
+        let (data, _) = evaluated.get(output).expect("y present");
+        assert_eq!(data, &[4.0, 9.0, 16.0]);
+    }
+
+    /// `Pow(x, 0.5)`: [`ScalarOp::SquareRoot`] directly -- `[4, 9, 16] ->
+    /// [2, 3, 4]`.
+    #[test]
+    fn pow_with_one_half_exponent_is_square_root() {
+        let x = f32_initializer("x", &[3], &[4.0, 9.0, 16.0]);
+        let exponent = constant_tensor_node("exponent", "exponent_const", alloc::vec![], alloc::vec![0.5]);
+        let node = NodeProto { input: alloc::vec!["x", "exponent"], output: alloc::vec!["y"], op_type: "Pow", name: "pow", ..NodeProto::default() };
+        let graph = GraphProto { node: alloc::vec![exponent, node], name: "pow_sqrt_graph", initializer: alloc::vec![x], output: alloc::vec![ValueInfoProto { name: "y", ..ValueInfoProto::default() }], ..GraphProto::default() };
+
+        let lowered = lower_graph(&graph).expect("lower Pow(x, 0.5)");
+        let named: Vec<(&str, &[f32])> = lowered.initializers.iter().map(|(name, data)| (name.as_str(), data.as_slice())).collect();
+        let output = lowered.graph_outputs[0].1;
+        let evaluated = evaluate_named(&lowered.program, &[], &named, &[output]).expect("evaluate Pow(x, 0.5)");
+        let (data, _) = evaluated.get(output).expect("y present");
+        for (actual, expected) in data.iter().zip([2.0f32, 3.0, 4.0]) {
+            assert!((actual - expected).abs() < 1e-5, "got {actual}, expected {expected}");
+        }
+    }
+
+    /// `Pow(x, 3)` via the general `exp(c * ln x)` path is reached only for
+    /// non-half, non-small-integer exponents -- `Pow(x, -1)` (never an
+    /// integer `Multiply` chain since it is negative) checked against the
+    /// closed form `1/x`.
+    #[test]
+    fn pow_with_negative_exponent_uses_the_log_domain_path() {
+        let x = f32_initializer("x", &[2], &[2.0, 4.0]);
+        let exponent = constant_tensor_node("exponent", "exponent_const", alloc::vec![], alloc::vec![-1.0]);
+        let node = NodeProto { input: alloc::vec!["x", "exponent"], output: alloc::vec!["y"], op_type: "Pow", name: "pow", ..NodeProto::default() };
+        let graph = GraphProto { node: alloc::vec![exponent, node], name: "pow_neg_graph", initializer: alloc::vec![x], output: alloc::vec![ValueInfoProto { name: "y", ..ValueInfoProto::default() }], ..GraphProto::default() };
+
+        let lowered = lower_graph(&graph).expect("lower Pow(x, -1)");
+        let named: Vec<(&str, &[f32])> = lowered.initializers.iter().map(|(name, data)| (name.as_str(), data.as_slice())).collect();
+        let output = lowered.graph_outputs[0].1;
+        let evaluated = evaluate_named(&lowered.program, &[], &named, &[output]).expect("evaluate Pow(x, -1)");
+        let (data, _) = evaluated.get(output).expect("y present");
+        for (actual, expected) in data.iter().zip([0.5f32, 0.25]) {
+            assert!((actual - expected).abs() < 1e-4, "got {actual}, expected {expected}");
+        }
+    }
+
+    /// `ReduceMean(axes=[-1], keepdims=1)`: BERT `LayerNorm`'s own shape --
+    /// `[[1, 2, 3], [4, 5, 6]]` (`[2, 3]`) reduces to `[[2], [5]]` (`[2,
+    /// 1]`), broadcasting back against the original rows via
+    /// [`Value::view`] in a following `Sub`.
+    #[test]
+    fn reduce_mean_keepdims_broadcasts_back_against_the_input() {
+        let x = f32_initializer("x", &[2, 3], &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
+        let mean = NodeProto { input: alloc::vec!["x"], output: alloc::vec!["mean"], op_type: "ReduceMean", name: "reduce_mean", attribute: alloc::vec![ints_attribute("axes", alloc::vec![-1])], ..NodeProto::default() };
+        let centered = NodeProto { input: alloc::vec!["x", "mean"], output: alloc::vec!["y"], op_type: "Sub", name: "sub", ..NodeProto::default() };
+        let graph = GraphProto {
+            node: alloc::vec![mean, centered],
+            name: "reduce_mean_graph",
+            initializer: alloc::vec![x],
+            output: alloc::vec![ValueInfoProto { name: "y", ..ValueInfoProto::default() }],
+            ..GraphProto::default()
+        };
+
+        let lowered = lower_graph(&graph).expect("lower ReduceMean(keepdims=1) -> Sub");
+        let named: Vec<(&str, &[f32])> = lowered.initializers.iter().map(|(name, data)| (name.as_str(), data.as_slice())).collect();
+        let output = lowered.graph_outputs[0].1;
+        let evaluated = evaluate_named(&lowered.program, &[], &named, &[output]).expect("evaluate ReduceMean -> Sub");
+        let (data, shape) = evaluated.get(output).expect("y present");
+        assert_eq!(shape, &[2, 3]);
+        assert_eq!(data, &[-1.0, 0.0, 1.0, -1.0, 0.0, 1.0], "row means are 2 and 5; each row centers around its own mean");
+    }
+
+    /// `ReduceMean(axes=[-1], keepdims=0)`: the plain (non-keepdims) shape
+    /// [`lower_reduce`] already covers for `Sum`/`Max`/`Min`/`Prod` --
+    /// `[[1, 2, 3], [4, 5, 6]]` reduces to `[2, 5]`.
+    #[test]
+    fn reduce_mean_without_keepdims_drops_the_reduced_axis() {
+        let x = f32_initializer("x", &[2, 3], &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
+        let node = NodeProto {
+            input: alloc::vec!["x"],
+            output: alloc::vec!["y"],
+            op_type: "ReduceMean",
+            name: "reduce_mean",
+            attribute: alloc::vec![ints_attribute("axes", alloc::vec![-1]), int_attribute("keepdims", 0)],
+            ..NodeProto::default()
+        };
+        let graph = GraphProto { node: alloc::vec![node], name: "reduce_mean_no_keepdims_graph", initializer: alloc::vec![x], output: alloc::vec![ValueInfoProto { name: "y", ..ValueInfoProto::default() }], ..GraphProto::default() };
+
+        let lowered = lower_graph(&graph).expect("lower ReduceMean(keepdims=0)");
+        let named: Vec<(&str, &[f32])> = lowered.initializers.iter().map(|(name, data)| (name.as_str(), data.as_slice())).collect();
+        let output = lowered.graph_outputs[0].1;
+        let evaluated = evaluate_named(&lowered.program, &[], &named, &[output]).expect("evaluate ReduceMean(keepdims=0)");
+        let (data, shape) = evaluated.get(output).expect("y present");
+        assert_eq!(shape, &[2]);
+        assert_eq!(data, &[2.0, 5.0]);
+    }
+
+    /// `Slice(data, starts=[1], ends=[3], axes=[0])` on `[10, 20, 30, 40]`:
+    /// the static-index case [`slice_axis_range`] already builds for every
+    /// grouped convolution's channel split, reused here for the ONNX op
+    /// directly -- picks out `[20, 30]`.
+    #[test]
+    fn slice_picks_a_static_range_of_one_axis() {
+        let x = f32_initializer("x", &[4], &[10.0, 20.0, 30.0, 40.0]);
+        let starts = constant_tensor_node("starts", "starts_const", alloc::vec![1], alloc::vec![1.0]);
+        let ends = constant_tensor_node("ends", "ends_const", alloc::vec![1], alloc::vec![3.0]);
+        let axes = constant_tensor_node("axes", "axes_const", alloc::vec![1], alloc::vec![0.0]);
+        let node = NodeProto { input: alloc::vec!["x", "starts", "ends", "axes"], output: alloc::vec!["y"], op_type: "Slice", name: "slice", ..NodeProto::default() };
+        let graph = GraphProto {
+            node: alloc::vec![starts, ends, axes, node],
+            name: "slice_graph",
+            initializer: alloc::vec![x],
+            output: alloc::vec![ValueInfoProto { name: "y", ..ValueInfoProto::default() }],
+            ..GraphProto::default()
+        };
+
+        let lowered = lower_graph(&graph).expect("lower Slice");
+        let named: Vec<(&str, &[f32])> = lowered.initializers.iter().map(|(name, data)| (name.as_str(), data.as_slice())).collect();
+        let output = lowered.graph_outputs[0].1;
+        let evaluated = evaluate_named(&lowered.program, &[], &named, &[output]).expect("evaluate Slice");
+        let (data, shape) = evaluated.get(output).expect("y present");
+        assert_eq!(shape, &[2]);
+        assert_eq!(data, &[20.0, 30.0]);
+    }
+
+    /// `Slice` over a per-element `Constant` node's own payload (never a
+    /// live `Op`, see [`lower_constant`]'s doc) -- the exact
+    /// `arange`-folded-into-`Constant` `position_ids` buffer shape a BERT
+    /// export takes, sliced `[0:2]` out of a declared `[1, 4]` table, then
+    /// read back directly (not through a further `Gather`) to check the
+    /// materialized values.
+    #[test]
+    fn slice_over_a_constant_node_payload_materializes_a_live_leaf() {
+        let table = constant_tensor_node("table", "table_const", alloc::vec![1, 4], alloc::vec![10.0, 11.0, 12.0, 13.0]);
+        let starts = constant_tensor_node("starts", "starts_const", alloc::vec![1], alloc::vec![0.0]);
+        let ends = constant_tensor_node("ends", "ends_const", alloc::vec![1], alloc::vec![2.0]);
+        let axes = constant_tensor_node("axes", "axes_const", alloc::vec![1], alloc::vec![1.0]);
+        let node = NodeProto { input: alloc::vec!["table", "starts", "ends", "axes"], output: alloc::vec!["y"], op_type: "Slice", name: "slice", ..NodeProto::default() };
+        let graph = GraphProto {
+            node: alloc::vec![table, starts, ends, axes, node],
+            name: "slice_constant_graph",
+            output: alloc::vec![ValueInfoProto { name: "y", ..ValueInfoProto::default() }],
+            ..GraphProto::default()
+        };
+
+        let lowered = lower_graph(&graph).expect("lower Slice over a Constant node payload");
+        let named: Vec<(&str, &[f32])> = lowered.initializers.iter().map(|(name, data)| (name.as_str(), data.as_slice())).collect();
+        let output = lowered.graph_outputs[0].1;
+        let evaluated = evaluate_named(&lowered.program, &[], &named, &[output]).expect("evaluate Slice over a Constant node payload");
+        let (data, shape) = evaluated.get(output).expect("y present");
+        assert_eq!(shape, &[1, 2]);
+        assert_eq!(data, &[10.0, 11.0]);
+    }
+
+    /// `Dropout` at inference (`training_mode` absent): identity.
+    #[test]
+    fn dropout_without_training_mode_is_identity() {
+        let x = f32_initializer("x", &[3], &[1.0, 2.0, 3.0]);
+        let node = NodeProto { input: alloc::vec!["x"], output: alloc::vec!["y"], op_type: "Dropout", name: "dropout", ..NodeProto::default() };
+        let graph = GraphProto { node: alloc::vec![node], name: "dropout_graph", initializer: alloc::vec![x], output: alloc::vec![ValueInfoProto { name: "y", ..ValueInfoProto::default() }], ..GraphProto::default() };
+
+        let lowered = lower_graph(&graph).expect("lower Dropout");
+        let named: Vec<(&str, &[f32])> = lowered.initializers.iter().map(|(name, data)| (name.as_str(), data.as_slice())).collect();
+        let output = lowered.graph_outputs[0].1;
+        let evaluated = evaluate_named(&lowered.program, &[], &named, &[output]).expect("evaluate Dropout");
+        let (data, _) = evaluated.get(output).expect("y present");
+        assert_eq!(data, &[1.0, 2.0, 3.0]);
+    }
+
+    /// `Dropout` with a lower-time-constant, nonzero `training_mode` --
+    /// this pass supports inference only, so this is a named
+    /// [`LowerError::UnsupportedShape`], never a silently-wrong identity.
+    #[test]
+    fn dropout_with_training_mode_true_is_a_named_unsupported_shape() {
+        let x = f32_initializer("x", &[3], &[1.0, 2.0, 3.0]);
+        let training_mode = constant_tensor_node("training_mode", "training_mode_const", alloc::vec![], alloc::vec![1.0]);
+        let node = NodeProto { input: alloc::vec!["x", "", "training_mode"], output: alloc::vec!["y"], op_type: "Dropout", name: "dropout", ..NodeProto::default() };
+        let graph = GraphProto {
+            node: alloc::vec![training_mode, node],
+            name: "dropout_training_graph",
+            initializer: alloc::vec![x],
+            output: alloc::vec![ValueInfoProto { name: "y", ..ValueInfoProto::default() }],
+            ..GraphProto::default()
+        };
+
+        let error = lower_graph(&graph).expect_err("Dropout with training_mode=1 is unsupported");
+        assert!(matches!(error, LowerError::UnsupportedShape { .. }), "expected UnsupportedShape, got {error:?}");
     }
 }
