@@ -38,10 +38,6 @@ mnist-diag = ["std", "proxima-tensor/instrument"]
 # `path_*` tile-vs-generic counters, same non-timed-diagnostic placement as
 # `mnist-diag` above -- never in `mnist-f32-bench`'s feature set.
 epilogue-profile-diag = ["std", "proxima-tensor/epilogue-profile-probe", "proxima-tensor/instrument"]
-# `docs/discipline.md` ROW 183 Phase 2: forwards `proxima-tensor/epilogue-fuse-probe`
-# so `real_mnist_accuracy`/`mnist_f32_lane` can build the fused arm without a
-# second copy of either fixture.
-epilogue-fuse-diag = ["std", "proxima-tensor/epilogue-fuse-probe"]
 # the tile-pipeline experiment (`benches/tile_pipeline.rs`,
 # `benches/support/tile_pipeline.rs`, `tests/tile_pipeline_differential.rs`):
 # a line-buffer row-band streaming forward for the real mnist checkpoint,

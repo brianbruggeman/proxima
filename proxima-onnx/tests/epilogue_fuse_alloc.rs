@@ -16,10 +16,14 @@
 //! setup-path cost), so a bare "assert zero total allocations" on the fused
 //! arm would be false and would misattribute a real, already-documented cost
 //! to the wrong function. Instead this test measures the SAME real mnist
-//! loop, same host, same N images, under both feature states via the
-//! thread-local counting allocator precedent
-//! (`proxima-protocols/tests/pgwire_codec_integration/alloc_counter.rs`), and
-//! reports the per-image delta. `apply_epilogue_fused_monomorphic` fires 5
+//! loop, same host, same N images, via the thread-local counting allocator
+//! precedent
+//! (`proxima-protocols/tests/pgwire_codec_integration/alloc_counter.rs`). ROW
+//! 186 promoted the fusion path to default-on, so this run reports the
+//! fused arm's own numbers directly (no separate feature build); a paired
+//! unfused comparison uses `proxima_tensor::cpu::set_epilogue_fuse_enabled`,
+//! the ROW 186 bench/test escape valve, rather than a second cargo feature
+//! build. `apply_epilogue_fused_monomorphic` fires 5
 //! times per image over 26,282 elements/image (`epilogue_fuse_totals()`,
 //! confirmed below) — if it allocated per-hit or per-element, the fused arm's
 //! per-image count would visibly exceed the unfused arm's by a multiple of
@@ -113,8 +117,9 @@ fn load_normalized_images(path: &Path, limit: usize) -> Vec<Vec<f32>> {
 /// Runs the real mnist eval loop over [`IMAGE_COUNT`] real images, one
 /// warm-up call first (uncounted, so any lazy first-call setup e.g. program
 /// pool growth doesn't pollute the measured window), then reports total and
-/// per-image allocation counts plus (when built with `epilogue-fuse-diag`)
-/// the fusion hit/element totals for the SAME window.
+/// per-image allocation counts plus (ROW 186: unconditional now that
+/// epilogue fusion is default-on) the fusion hit/element totals for the
+/// SAME window.
 #[test]
 #[ignore = "depends on a real .onnx checkout and the real MNIST idx dataset outside this repo"]
 fn fused_eval_loop_allocation_count_over_100_plus_images() {
@@ -148,7 +153,6 @@ fn fused_eval_loop_allocation_count_over_100_plus_images() {
     // warm-up: uncounted, primes any first-call-only setup.
     let _ = evaluate(&images[0]);
 
-    #[cfg(feature = "epilogue-fuse-diag")]
     proxima_tensor::cpu::epilogue_fuse_reset();
 
     let count_before = ALLOCATIONS.with(Cell::get);
@@ -162,14 +166,11 @@ fn fused_eval_loop_allocation_count_over_100_plus_images() {
 
     eprintln!("epilogue_fuse_alloc: images={} total_allocations={total_allocations} per_image={per_image:.4}", images.len());
 
-    #[cfg(feature = "epilogue-fuse-diag")]
-    {
-        let (hits, elements, nanos) = proxima_tensor::cpu::epilogue_fuse_totals();
-        eprintln!(
-            "epilogue_fuse_alloc: hits={hits} elements={elements} nanos={nanos} hits_per_image={:.4} elements_per_image={:.4}",
-            hits as f64 / images.len() as f64,
-            elements as f64 / images.len() as f64
-        );
-        assert!(hits > 0, "epilogue fusion must actually fire on the real mnist model (N==0 tripwire)");
-    }
+    let (hits, elements, nanos) = proxima_tensor::cpu::epilogue_fuse_totals();
+    eprintln!(
+        "epilogue_fuse_alloc: hits={hits} elements={elements} nanos={nanos} hits_per_image={:.4} elements_per_image={:.4}",
+        hits as f64 / images.len() as f64,
+        elements as f64 / images.len() as f64
+    );
+    assert!(hits > 0, "epilogue fusion must actually fire on the real mnist model (N==0 tripwire)");
 }
