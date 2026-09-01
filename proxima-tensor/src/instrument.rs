@@ -1515,6 +1515,26 @@ pub static ELEMENTWISE_LOOP_TICKS_WINDOW_COPY: Counter =
 pub static ELEMENTWISE_ELEMENTS_WINDOW_COPY: Counter =
     Counter::new("proxima_tensor.elementwise_elements_window_copy");
 
+// the Adam-chain dedicated kernel split within `Generic` (`docs/discipline.md`
+// ROW 179): `cpu.rs`'s `BodyShape::FusedAdamUpdate` is a structurally
+// detected sub-case of what used to be classified `Generic` — the same
+// 8-`BodyStep` bias-corrected update chain `optimizer::adam_step` fuses for
+// every Adam-updated parameter, now walked by a dedicated register-resident
+// kernel (`elementwise_width_fused_adam_update`) instead of
+// `elementwise_width_generic`'s step-outer tile loop when
+// `fused_adam_update_is_affine_fast_path` holds. `HITS` counts calls (one
+// per `run_elementwise_range` invocation that matched AND took the fast
+// path — a cohort-parallel node contributes one hit per worker chunk, same
+// granularity `ELEMENTWISE_FLAT_RANGE_HITS` already uses), not nodes, so a
+// caller reporting "N nodes matched" divides by the per-step call count
+// separately. Same commit site, same per-call constants already in scope —
+// never re-derived, never sampled per element.
+pub static ELEMENTWISE_LOOP_TICKS_FUSED_ADAM: Counter =
+    Counter::new("proxima_tensor.elementwise_loop_ticks_fused_adam");
+pub static ELEMENTWISE_ELEMENTS_FUSED_ADAM: Counter =
+    Counter::new("proxima_tensor.elementwise_elements_fused_adam");
+pub static ELEMENTWISE_FUSED_ADAM_HITS: Counter = Counter::new("proxima_tensor.elementwise_fused_adam_hits");
+
 // call-size distribution: how many `run_elementwise_range` calls processed
 // how many elements, this process run. A `Counter` can only sum, so the
 // histogram itself needs a map -- kept as a plain `size -> call_count` table
