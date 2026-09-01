@@ -308,6 +308,21 @@ impl<V> BucketTable<V> {
         }
     }
 
+    /// Tombstone every currently published entry.
+    ///
+    /// This is a best-effort concurrent clear: entries racing with a clear
+    /// may survive if they are installed after their slot is scanned. Reads
+    /// remain lock-free, and each successful removal uses the same CAS as
+    /// eviction so a racing insert is never deleted accidentally.
+    pub fn clear(&self) {
+        for index in 0..self.capacity() {
+            let guard = self.slots[index].0.load();
+            if matches!(&**guard, SlotState::Full { .. }) {
+                self.tombstone(index, &arc_swap::Guard::into_inner(guard));
+            }
+        }
+    }
+
     /// Tombstone every `Full` slot whose `metric` is strictly less than
     /// `now - ttl`. A value exactly equal to the cutoff survives.
     pub fn sweep_idle(&self, now: u64, ttl: u64, metric: impl Fn(&V) -> u64) {
@@ -586,6 +601,20 @@ mod tests {
         let first = table.get_or_insert(b"K", || Timed::at(9));
         let second = table.get_or_insert(b"K", || Timed::at(9));
         assert!(Arc::ptr_eq(&first, &second));
+    }
+
+    #[test]
+    fn clear_tombstones_every_published_entry() {
+        let table = BucketTable::with_max_keys(8);
+        for key in [b"one".as_slice(), b"two", b"three"] {
+            table.get_or_insert(key, || Timed::at(1));
+        }
+        assert_eq!(table.len(), 3);
+        table.clear();
+        assert!(table.is_empty());
+        for key in [b"one".as_slice(), b"two", b"three"] {
+            assert!(table.get(key, fxhash(key)).is_none());
+        }
     }
 
     #[test]
