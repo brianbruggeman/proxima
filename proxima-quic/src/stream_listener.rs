@@ -148,6 +148,7 @@ impl QuicUpstream {
     }
 
     #[cfg(test)]
+    #[allow(clippy::expect_used)]
     fn pooled_connection_count(&self) -> usize {
         self.connections.lock().expect("quic pool lock").len()
     }
@@ -209,10 +210,10 @@ impl StreamUpstream for QuicUpstream {
             Poll::Ready(result) => {
                 slot.take();
                 Poll::Ready(result.map(|(connection, pooled)| {
-                    if let Ok(mut connections) = self.connections.lock() {
-                        if connections.len() < self.max_connections {
-                            connections.push(pooled);
-                        }
+                    if let Ok(mut connections) = self.connections.lock()
+                        && connections.len() < self.max_connections
+                    {
+                        connections.push(pooled);
                     }
                     Box::new(connection) as Self::Conn
                 }))
@@ -293,6 +294,7 @@ impl StreamListener for QuicListener {
 }
 
 #[cfg(all(test, feature = "tokio-compat"))]
+#[allow(clippy::expect_used, clippy::unwrap_used)]
 mod tests {
     use super::*;
     use futures::io::{AsyncReadExt, AsyncWriteExt};
