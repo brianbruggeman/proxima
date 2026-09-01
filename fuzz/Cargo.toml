@@ -1,0 +1,52 @@
+[workspace]
+
+[package]
+name = "proxima-fuzz-harness"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.96"
+publish = false
+description = "seed-driven, deterministic malformed-input smoke harness for wire parsers, protocol FSMs, lowering, and persistence-boundary readers -- fallback path (no cargo-fuzz/nightly on this box), same xorshift64* generator precedent as examples/fuzz"
+
+[dependencies]
+bytes = { version = "1.7", default-features = false }
+proxima-protocols = { path = "../proxima-protocols", default-features = false, features = [
+    "inet",
+    "http1_codec-alloc",
+    "http2_codec-alloc",
+    "quic",
+] }
+proxima-gguf = { path = "../proxima-gguf" }
+proxima-onnx = { path = "../proxima-onnx" }
+proxima-safetensors = { path = "../proxima-safetensors" }
+
+[lints.rust]
+warnings = "deny"
+
+[[bin]]
+name = "fuzz_inet"
+path = "src/bin/fuzz_inet.rs"
+
+[[bin]]
+name = "fuzz_h1"
+path = "src/bin/fuzz_h1.rs"
+
+[[bin]]
+name = "fuzz_h2"
+path = "src/bin/fuzz_h2.rs"
+
+[[bin]]
+name = "fuzz_quic"
+path = "src/bin/fuzz_quic.rs"
+
+[[bin]]
+name = "fuzz_gguf"
+path = "src/bin/fuzz_gguf.rs"
+
+[[bin]]
+name = "fuzz_onnx"
+path = "src/bin/fuzz_onnx.rs"
+
+[[bin]]
+name = "fuzz_safetensors"
+path = "src/bin/fuzz_safetensors.rs"
