@@ -15750,3 +15750,102 @@ Executor-internal graph-execution code, not sans-IO -- principle Section-11's ax
 - `cargo nextest run -p proxima-tensor --features std,instrument` -- expect 463/0/4
 - `cargo nextest run -p proxima-tensor -p proxima-autograd -E 'test(evaluate_named_with_arena) or test(central_difference) or test(differentiate_wanted)'` -- expect 21/21
 - `cargo build --release -p proxima-autograd --bench train_step_lane --features train-step-bench` then run the produced binary with `--bench` -- expect `arena vs baseline bit-identical` printed and `train_step_arena` p50 near 1.90ms
+
+## ROW 176 -- measurement-only session on node 87 (elementwise Add, 35.1% of the ROW 175 sealed step) and node 132 (w1's 8-op fused Adam chain, 26.8%): node 87 is AT the single-core streaming-bandwidth wall (82.6% of a MEASURED, same-shape ceiling), volume-lever design handed off per the DANGER ZONE; node 132's composed-body `Generic` dispatch is confirmed, by direct instrumentation of the crate's OWN existing counters plus an independent hand-rolled microbench, **19.4x slower per element than a hand-rolled loop computing the identical 8-op math**, root-caused to a step-outer/position-inner tiling shape in `elementwise_width_generic_tile` -- fix NOT attempted (shared by every `Generic`-shaped node in the crate, correctness-sensitive, out of a single <60-minute-remaining budget), design handed off with mechanism fully traced. Zero source changes landed.
+
+Repo: `/Users/brianbruggeman/repos/slot-0/proxima-wt-convsched`, branch `perf/materialize-pair`, off `main` `5315bbe` (ROW 175's own sealed HEAD, unchanged). Host: Apple M1 Max, macOS, arm64. Build: `release` for every proxima-side timed number (`cargo build --release -p proxima-autograd --bench train_step_lane --features arena-diag`, a TEMPORARY Cargo feature forwarding to `proxima-tensor/instrument`, reverted before commit -- binary invoked directly with `--bench`); standalone `rustc -O -C target-cpu=native` (matching release codegen, no cargo/criterion overhead) for the two hardware-ceiling/hand-rolled microbenches, which are NOT part of the crate build. `test` profile for nextest. **Host loadout, named per principle 16/18**: `uptime` load average 10.31/15.26/16.45 at session start, 18.20/19.30/17.07 at session end; `pgrep -fl "cargo|rustc|snapshot-probe|psci-dispatch-probe"` showed the SAME 5-process `snapshot-probe`/`psci-dispatch-probe` class ROW165-175 already named as resident (not this worktree's, not killed, per this session's own isolation contract), plus this worktree's own `cdb-daemon`/`sccache`; no OTHER `cargo`/`rustc` process ran during either standalone microbench (checked via `pgrep` immediately before each `rustc` invocation). Budget: 60-minute hard ceiling, micro-vetted, ONE final sealed number requested -- this row's own final number is ROW 175's own unchanged 1.8996ms, because neither investigated lever landed (see Decision).
+
+### Allocation budget, stated first
+
+This row lands ZERO source changes. The two standalone microbenches (bandwidth-ceiling triad, hand-rolled Adam chain) each allocate their input/output `Vec<f32>` buffers ONCE before the timed loop (setup-path, not hot-path) -- zero allocation inside the timed `bench_one` call, matching this crate's own hot-path budget. The temporary `arena-diag` instrumentation (Cargo feature + bench-local `eprintln!` reading `proxima_tensor::instrument`'s own EXISTING public `Counter`s, `snapshot_and_reset`) allocates nothing beyond what those counters already allocate on ROW161/166/174's own precedent (O(1) atomic increments) -- reverted before commit regardless.
+
+### Step 1 -- bandwidth ceiling, measured
+
+Node 87's own read/write mix (`out[i] = a[i] + b[i]`, f32, 2 reads + 1 write/element = 12 bytes/element) was benched standalone, single-core, at node 87's own extent product (`32*784*128` = 3,211,264 elements) and at a genuinely-DRAM-bound size (16,777,216 elements, 192 MiB total traffic, far past this core's L2/system-level cache), n=5 each, `black_box`-guarded, 3 warm-up iterations before the 5 measured:
+
+```rust
+// /private/tmp/.../scratchpad/bw_ceiling.rs -- rustc -O -C target-cpu=native
+fn triad_add(a: &[f32], b: &[f32], out: &mut [f32]) {
+    for i in 0..a.len() { out[i] = a[i] + b[i]; }
+}
+// bench_one: Instant::now() around black_box(triad_add(black_box(a), black_box(b), out)); black_box(&out[0])
+```
+
+| shape | elements | total traffic | mean GB/s | min | max | CoV | n |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| node-87-matched | 3,211,264 | 36.75 MiB | **69.95** | 69.85 | 70.03 | 0.09% | 5 |
+| DRAM-bound (large) | 16,777,216 | 192.00 MiB | **81.21** | 81.02 | 81.30 | 0.12% | 5 |
+
+Both CoV well inside the 5% trust threshold; `elapsed_us` for the node-87-matched arm: `[550.42, 550.29, 551.00, 551.25, 551.67]`.
+
+**Node 87 verdict: AT THE WALL.** Node 87's own MEASURED cost (ROW 174, unchanged this session -- untouched by ROW 175's constant-hoist, cross-validated below by this session's own independent instrumentation) is 666.661us/step for 38,535,168 bytes of traffic = **57.80 GB/s effective** -- **82.6%** of the same-shape ceiling (69.95 GB/s) and **71.2%** of the DRAM-bound ceiling (81.21 GB/s). This lands inside the pre-registered "~60-70GB/s ceiling -> AT the wall" branch (the measured ceiling, 70-81 GB/s, sits at the top of and just above that band). A secondary, smaller-magnitude finding: node 87's own ns/element (0.2077ns, ROW 174's own figure) is 21.1% higher than the hand-rolled loop's measured 0.1715ns/element (mean of the 5 `elapsed_us` above / 3,211,264) -- a real but modest dispatch-overhead margin, not the multiplier-scale headroom the task's own `>100GB/s` branch would have implied. **Cross-validated by a SECOND, independent measurement this session** (Step 2's own `arena-diag` instrumentation, below): the crate's own aggregate `monomorphic_fast` rate (391,975,920 elements across the WHOLE 100-step run, node 87's Add among them) is 0.2209 ns/element -- within 6% of node 87's own ROW 174 figure and close to this session's hand-rolled 0.1715 ns/element, confirming node 87 already runs on the crate's fast width-dispatch path, not a slow gather fallback.
+
+**Consumer analysis and volume-lever design (handoff, NOT attempted -- DANGER ZONE):** node 87 has TWO consumers in `bind.rs`'s own graph view (88=`grad_a`, the wanted contribution feeding node 90's `grad_w1` reduce; 89=the dead-but-still-graph-present contribution ROW 166 found and ROW 167 elided only at EXECUTION level, never removing it from the GRAPH `bind.rs` sees). Because the graph-level consumer count is still 2, `bind.rs`'s own retirement-gated `fuses` check cannot fold node 87's Add into node 90's downstream reduce -- ROW 166 already measured that forcing this (by removing node 89 from the GRAPH, dropping the consumer count to 1) triggers the OWN 14.5x regression this task's DANGER ZONE names, via an unrelated fusion-dispatch-eligibility interaction on the reduce, not the Add itself. The volume-lever design for a dedicated session, precisely: teach `bind.rs`'s composed-body fusion (or a narrower, execution-level accumulate-then-reduce kernel bypassing general composition for this one shape pattern) to fuse node 87's Add directly into node 90's `grad_w1` reduce WITHOUT losing the reduce's own fast dispatch path -- eliminating node 87's own WRITE of its [32,784,128] output (12.8 MB) and node 90's corresponding READ of that same buffer, up to ~25.6 MB of node 87's current 38.5 MB traffic (roughly two of its three "passes"). At the measured 58-70 GB/s effective rate, that is a DERIVED (not measured) estimate of ~350-450us off the current 666.661us, i.e. potentially another ~18-24% off the whole 1.8996ms step -- sized for scoping, not a promise, per principle 18/19. Two named starting points for that session, both from ROW 166's own "Real next lever" section, still unexplored: (a) instrument `run_reduce`'s own dispatch-arm selection (dot/width/generic split) to find exactly which fast path the reduce loses when its operand gains a second fused level, so the fusion mechanism can be taught to preserve it; or (b) a dedicated, narrowly-scoped accumulate+reduce kernel for this exact shape pattern (a reduce whose sole full-size operand is a still-multi-consumer accumulate-Add), sidestepping `bind.rs`'s general fusion-eligibility gate entirely.
+
+### Step 2 -- node 132's fused chain, hand-rolled vs proxima's own dispatch
+
+Node 132 (`new_w1`, `proxima-autograd/src/optimizer.rs::adam_step`'s own `m_hat`->`v_hat`->`sqrt_v_hat`->`denominator`->`recip_denominator`->`update`->`scaled_update`->`new_param` chain, 8 `ScalarOp`s, [784,128]=100,352 elements, ROW 166's own already-confirmed-optimal-at-the-GRAPH-level single fused `BoundOp`) was hand-rolled as one straight-line per-element Rust function computing the identical math (read from `optimizer.rs` lines 171-184, not guessed), same shape, n=7 (5 warm-up), `#[inline(never)]` to stop the whole call from being folded away:
+
+```rust
+// /private/tmp/.../scratchpad/adam_chain.rs -- rustc -O -C target-cpu=native
+fn adam_update(m_new: &[f32], v_new: &[f32], param: &[f32], recip_bias1: f32, recip_bias2: f32, epsilon: f32, learning_rate: f32, out: &mut [f32]) {
+    for i in 0..m_new.len() {
+        let m_hat = m_new[i] * recip_bias1;
+        let v_hat = v_new[i] * recip_bias2;
+        let sqrt_v_hat = v_hat.sqrt();
+        let denominator = sqrt_v_hat + epsilon;
+        let recip_denominator = 1.0 / denominator;
+        let update = m_hat * recip_denominator;
+        let scaled_update = learning_rate * update;
+        out[i] = param[i] - scaled_update;
+    }
+}
+```
+
+| arm | ns/element | total (100,352 elements) | CoV | n |
+|---|---:|---:|---:|---:|
+| hand-rolled (this session, standalone) | **0.2612** | 26.208us | 0.21-0.37% | 7 |
+| proxima `BoundOp` dispatch (ROW 174, cross-session cost-match confirmed unchanged) | **5.077** | 509.401us | -- | (ROW 174's own 3-run mean) |
+
+**19.4x slower**, proxima's own fused dispatch vs a hand-rolled loop computing the identical math on the identical shape.
+
+**Mechanism, root-caused by direct code read (`proxima-tensor/src/cpu.rs:10774-10819`, `elementwise_width_generic_tile`) AND confirmed by a fresh, non-invasive instrumentation reading this session** (a TEMPORARY `arena-diag` Cargo feature on `proxima-autograd` forwarding to `proxima-tensor/instrument`, plus 8 lines in `train_step_lane.rs`'s own `main` reading the crate's OWN EXISTING PUBLIC counters -- `instrument::ELEMENTWISE_LOOP_TICKS_GENERIC_FAST`/`_SLOW`, `_MONOMORPHIC_FAST`/`_SLOW`, and their paired `_ELEMENTS_*` counters, `cpu.rs:1451-1494`, already incremented inside `run_elementwise_range` at `cpu.rs:3439-3462` for EVERY dispatch path including the arena one -- only `evaluate_quantized`'s own end-of-run print (the ONE existing consumer) never covers the arena path, exactly generalizing ROW 174's own "`diag_kind_ticks` never covers [the arena path]" finding to this second counter family; both files reverted before commit, `git diff main` empty, confirmed): over the FULL 100-step sealed run,
+
+```
+ROW176 DIAG generic_fast: elements=36714000 total_ms=78.9528 ns_per_element=2.1505
+ROW176 DIAG generic_slow: elements=0 total_ms=0.0000 ns_per_element=0.0000
+ROW176 DIAG monomorphic_fast: elements=391975920 total_ms=86.5773 ns_per_element=0.2209
+ROW176 DIAG monomorphic_slow: elements=0 total_ms=0.0000 ns_per_element=0.0000
+```
+
+Every `Generic`-shaped (fused multi-step, node 132 among them) and every `Unary`/`Binary`-shaped (single-op, node 87's Add among them) element in the whole program takes the FAST (affine, gather-free) branch -- both `*_slow` counters are exactly zero. The entire 9.73x aggregate gap (2.1505 / 0.2209) between `Generic` and monomorphic elements, and the larger 19.4x node-132-specific gap against a hand-rolled loop, lives ENTIRELY inside the crate's own fast-path classification -- this is NOT a fast/slow misclassification bug (the kind ROW 174's own "Generic's 14.9x-slower-than-monomorphic" comment, `cpu.rs:1342-1349`, already asked A-vs-B about for a different workload and answered "B" for). It is `elementwise_width_generic_tile`'s own STEP-OUTER / POSITION-INNER loop shape: for a `body.steps.len()`-step chain, the tile loop makes `body.steps.len()` SEPARATE full-width passes (each its own `elementwise_width_(unary|binary)_monomorphic` dispatch call, operand-span setup, and `step_values` scratch-row write, `cpu.rs:10785-10816`), materializing every intermediate through a tile-local buffer and reading it back for the NEXT step, instead of ONE fused per-element pass keeping every intermediate in a register the way the hand-rolled loop above does. Node 132 specifically runs even worse than the 9.73x aggregate because its own innermost extent (128) is well under `GENERIC_WIDTH_TILE` (512, `cpu.rs:10766`) -- its own tile loop pays the 8-step overhead once per OUTER row (784 of them) rather than once per full 512-wide tile, i.e. **6,272 short (128-element) step-passes per training step**, not the single fused 100,352-element pass a true per-element-fused kernel would need.
+
+**Fix NOT attempted this session.** The mechanically-obvious lever -- restructure `elementwise_width_generic_tile`/`elementwise_width_generic_step` from step-outer/position-inner to position-outer/step-inner (evaluate all `body.steps` for one element, or a small width-blocked group, before advancing, matching `run_elementwise_range`'s own slow-path `eval_body_shape` evaluation ORDER but keeping the width-blocked dispatch) -- is genuinely execution-level (touches nothing `bind::bind` constructs) but is shared by EVERY `BodyShape::Generic` node in the whole crate, not just node 132: the SAME function's own doc-comment (`cpu.rs:10755-10765`) cites a DIFFERENT shape entirely (decode's 14336-wide RoPE-shaped rows) as the reason `GENERIC_WIDTH_TILE` exists at its current value, and an existing test (`elementwise_width_generic_matches_scalar_apply_body_for_a_rope_shaped_stride_two_operand`, `cpu.rs:13331`) locks in that shape's own bit-identical correctness. A safe rewrite needs bit-identical validation across every `BodyShape::Generic` call site this crate composes (this training lane's 8-op Adam chains, decode's RoPE/window shapes, and whatever else `bind.rs`'s fusion produces), which is a genuine kernel-level redesign requiring its own correctness pass and its own bench sweep -- correctly out of scope for the remaining time in a 60-minute, one-lever-per-node budget, per this task's own "fix ONLY if execution-level and <60min-safe, else report the design" instruction. **Estimated ceiling if landed** (DERIVED, not measured, per principle 18/19): closing even half the gap on node 132 alone (509.4us toward something nearer the hand-rolled 26.2us plus genuine per-call dispatch overhead, perhaps 100-150us) would remove roughly 350-400us from the step (~18-21% of 1.8996ms); the SAME mechanism plausibly touches every other `Generic`-shaped node in ROW 174's own per-node table (110=`v_w1`, 106=`m_w1`, 198=`new_w2`, and any other multi-step fused chain not individually re-classified this session), so the aggregate win across the whole step, if the redesign lands crate-wide, could exceed node 132's own share alone -- named as the next session's primary lever, mechanism fully traced.
+
+### Decision
+
+**Measurement-only, zero source changes -- the pre-registered legitimate outcome.** Node 87 is AT the measured single-core bandwidth wall (82.6% of a same-shape ceiling measured this session); the only remaining lever is volume (fuse into the consumer), which collides with ROW 166's own already-documented DANGER ZONE and is handed off as a scoped design, not attempted. Node 132's composed-body dispatch is confirmed, by two independent measurements, to run 19.4x slower than a hand-rolled loop computing identical math, root-caused to a step-outer tiling shape shared crate-wide -- a genuine, execution-level, but crate-wide-blast-radius kernel redesign, correctly deferred rather than rushed inside the remaining budget. **Final number is ROW 175's own unchanged 1.8996ms** (no lever landed to move it) -- re-sealed below for the record, not re-benched from scratch (ROW 175's own 3-run scoreboard is the sealed artifact; re-running it is this row's own re-prove command, not a new number).
+
+### Oracles, this session (zero source diff, reproduces ROW 175's own tree exactly)
+
+- `cargo nextest run -p proxima-tensor -p proxima-autograd -E 'test(central_difference) or test(differentiate_wanted) or test(evaluate_named_with_arena)'` -- **21 passed, 0 failed, 585 skipped**
+- `cargo nextest run -p proxima-tensor --features std,instrument` -- **463 passed, 0 failed, 4 skipped** (unchanged from ROW 175 -- zero source diff)
+- `cargo clippy -p proxima-tensor -p proxima-autograd --features std,instrument --all-targets -- -D warnings` -- clean, exit 0
+
+### Opt-sweep note
+
+Executor-internal graph-execution code, not sans-IO -- principle Section-11's axes N/A by domain, matching ROW159-175's own framing. This row lands zero source changes; the two standalone microbenches (bandwidth-ceiling triad, hand-rolled Adam chain) are diagnostic-only, never part of the crate build, verbatim above for re-proof.
+
+### Rollback -- cleanly, completely, nothing landed on the sealed tree
+
+`git checkout -- proxima-autograd/Cargo.toml proxima-autograd/benches/train_step_lane.rs` -- `git status --short` and `git diff --stat main` both empty, confirmed this session.
+
+### Re-prove commands
+
+- `git diff main -- proxima-tensor/src proxima-autograd/src proxima-autograd/benches proxima-autograd/Cargo.toml` -- empty, proves the rollback is complete
+- Bandwidth ceiling: save the `bw_ceiling.rs` source verbatim above, `rustc -O -C target-cpu=native bw_ceiling.rs -o bw_ceiling && ./bw_ceiling` -- expect ~70 GB/s at 3,211,264 elements, ~80 GB/s at 16,777,216 elements, CoV <1% both
+- Hand-rolled Adam chain: save the `adam_chain.rs` source verbatim above, `rustc -O -C target-cpu=native adam_chain.rs -o adam_chain && ./adam_chain` -- expect ~0.26 ns/element, CoV <1%
+- `arena-diag` counter reading: re-add the `arena-diag` feature (`train-step-bench` + `proxima-tensor/instrument`) to `proxima-autograd/Cargo.toml` and the 8-counter read-and-print block (full source above) around `sweep_arena`'s own call in `train_step_lane.rs::main`, then `cargo build --release -p proxima-autograd --bench train_step_lane --features arena-diag` and run the produced binary with `--bench` -- expect the four `ROW176 DIAG` lines above, generic_slow/monomorphic_slow both `elements=0`
+- `cargo nextest run -p proxima-tensor -p proxima-autograd -E 'test(central_difference) or test(differentiate_wanted) or test(evaluate_named_with_arena)'` -- reproduces 21/0/585
+- `cargo nextest run -p proxima-tensor --features std,instrument` -- reproduces 463/0/4
+- `cargo build --release -p proxima-autograd --bench train_step_lane --features train-step-bench` then run the produced binary with `--bench` -- expect `arena vs baseline bit-identical` printed and `train_step_arena` p50 near ROW 175's own sealed 1.8996ms (host-noise dependent, see loadout)
