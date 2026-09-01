@@ -263,7 +263,8 @@ mod tests {
     use std::sync::Mutex;
     use std::task::{Context, Waker};
 
-    use proxima_primitives::stream::DatagramSocket;
+    use futures::io::{AsyncRead, AsyncWrite, Cursor};
+    use proxima_primitives::stream::{DatagramSocket, PeerInfo, StreamConnection, StreamUpstream};
     use proxima_protocols::dns::codec_trait::parse_message;
     use proxima_protocols::dns::encode;
 
@@ -349,6 +350,38 @@ mod tests {
                 waker.wake();
             }
         }
+
+        fn queue_truncated_reply_to_last_query(&self) {
+            let (query_bytes, reply_from) = {
+                let state = self.state.lock().unwrap();
+                let Some((query_bytes, _)) = state.sent.last().cloned() else {
+                    return;
+                };
+                (query_bytes, state.reply_from)
+            };
+            let query_message = parse_message(&query_bytes).unwrap();
+            let question = query_message.questions().next().unwrap().unwrap();
+            let mut response = Vec::new();
+            let base = proxima_protocols::dns::Flags::for_response(true, false, true, 0);
+            let flags = proxima_protocols::dns::Flags(base.0 | 0x0200);
+            encode::encode_response(
+                query_message.header.id,
+                flags,
+                encode::EncodeQuestion {
+                    name: &question.name.to_dotted(),
+                    qtype: question.qtype,
+                    qclass: question.qclass,
+                },
+                &[],
+                &mut response,
+            )
+            .unwrap();
+            let mut state = self.state.lock().unwrap();
+            state.inbound.push_back((response, reply_from));
+            if let Some(waker) = state.waker.take() {
+                waker.wake();
+            }
+        }
     }
 
     impl DatagramSocket for FakeResolverSocket {
@@ -396,6 +429,65 @@ mod tests {
         }
     }
 
+    struct FakeTcpConnection {
+        response: Cursor<Vec<u8>>,
+        writes: Arc<Mutex<Vec<u8>>>,
+    }
+
+    impl AsyncRead for FakeTcpConnection {
+        fn poll_read(
+            self: std::pin::Pin<&mut Self>,
+            cx: &mut Context<'_>,
+            buf: &mut [u8],
+        ) -> Poll<io::Result<usize>> {
+            std::pin::Pin::new(&mut self.get_mut().response).poll_read(cx, buf)
+        }
+    }
+
+    impl AsyncWrite for FakeTcpConnection {
+        fn poll_write(
+            self: std::pin::Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            buf: &[u8],
+        ) -> Poll<io::Result<usize>> {
+            self.get_mut().writes.lock().unwrap().extend_from_slice(buf);
+            Poll::Ready(Ok(buf.len()))
+        }
+
+        fn poll_flush(self: std::pin::Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn poll_close(self: std::pin::Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    impl StreamConnection for FakeTcpConnection {
+        fn peer(&self) -> Option<PeerInfo> {
+            None
+        }
+    }
+
+    struct FakeTcpUpstream {
+        response: Vec<u8>,
+        writes: Arc<Mutex<Vec<u8>>>,
+    }
+
+    impl StreamUpstream for FakeTcpUpstream {
+        type Conn = Box<dyn StreamConnection>;
+
+        fn poll_connect(
+            &self,
+            _cx: &mut Context<'_>,
+        ) -> Poll<io::Result<Self::Conn>> {
+            Poll::Ready(Ok(Box::new(FakeTcpConnection {
+                response: Cursor::new(self.response.clone()),
+                writes: Arc::clone(&self.writes),
+            })))
+        }
+    }
+
     fn resolver_addr() -> SocketAddr {
         SocketAddr::new(IpAddr::V4(Ipv4Addr::new(198, 51, 100, 53)), 53)
     }
@@ -435,6 +527,69 @@ mod tests {
         assert_eq!(answer.rcode, 0);
         assert_eq!(answer.records.len(), 1);
         assert_eq!(answer.records[0].name, "example.com.");
+    }
+
+    #[proxima::test]
+    async fn truncated_udp_reply_falls_back_to_framed_tcp() {
+        let socket = FakeResolverSocket::new(
+            SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0),
+            resolver_addr(),
+        );
+        let factory = Arc::new(FakeResolverFactory {
+            socket: socket.clone(),
+        });
+        let tcp_response = {
+            let mut message = Vec::new();
+            let flags = proxima_protocols::dns::Flags::for_response(true, false, true, 0);
+            encode::encode_response(
+                1,
+                flags,
+                encode::EncodeQuestion {
+                    name: "example.com.",
+                    qtype: 1,
+                    qclass: 1,
+                },
+                &[],
+                &mut message,
+            )
+            .unwrap();
+            let mut framed = Vec::new();
+            framed.extend_from_slice(&(message.len() as u16).to_be_bytes());
+            framed.extend_from_slice(&message);
+            framed
+        };
+        let writes = Arc::new(Mutex::new(Vec::new()));
+        let tcp = Arc::new(FakeTcpUpstream {
+            response: tcp_response,
+            writes: Arc::clone(&writes),
+        });
+        let config = DnsResolverConfig::builder()
+            .resolver_ip(resolver_addr().ip().to_string())
+            .port(resolver_addr().port())
+            .query_timeout_ms(200)
+            .max_attempts(1)
+            .build();
+        let client = DnsClientUpstream::new(factory, config).with_tcp_upstream(tcp);
+
+        let query_future = client.query_with_metadata("example.com.", 1, 1);
+        futures::pin_mut!(query_future);
+        let waker = futures::task::noop_waker();
+        let mut cx = Context::from_waker(&waker);
+        assert!(query_future.as_mut().poll(&mut cx).is_pending());
+        socket.queue_truncated_reply_to_last_query();
+        let response = loop {
+            match query_future.as_mut().poll(&mut cx) {
+                Poll::Ready(result) => break result.unwrap(),
+                Poll::Pending => continue,
+            }
+        };
+
+        assert_eq!(response.answer.rcode, 0);
+        assert!(!response.metadata.truncated);
+        let request = writes.lock().unwrap();
+        let frame_len = usize::from(u16::from_be_bytes([request[0], request[1]]));
+        assert_eq!(frame_len, request.len() - 2);
+        assert_eq!(parse_message(&request[2..]).unwrap().header.id, 1);
     }
 
     #[proxima::test]
