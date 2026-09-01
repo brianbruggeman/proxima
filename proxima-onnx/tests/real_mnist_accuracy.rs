@@ -105,6 +105,16 @@ fn real_mnist_onnx_classifies_real_test_images_at_reference_accuracy() {
         eprintln!("skipping: no host-local MNIST idx dataset under {DATASET_DIR}");
         return;
     }
+    // ROW 188 accelerate-gemm oracle gate (temporary -- reverted before
+    // commit, see discipline.md ROW 188): `PROXIMA_ACCELERATE_GEMM=1`
+    // forces the Accelerate/AMX route on for this run so accuracy/timing is
+    // measured with `cblas_sgemm` actually driving the model's
+    // matmul-shaped reduces, not just compiled. Unset leaves the crate's
+    // own default (off) unchanged.
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    if std::env::var("PROXIMA_ACCELERATE_GEMM").as_deref() == Ok("1") {
+        proxima_tensor::cpu::set_accelerate_gemm_enabled(true);
+    }
 
     let bytes = fs::read(MODEL_PATH).expect("read the real mnist.onnx checkpoint");
     let model = proxima_onnx::pipe::parse_complete(&bytes).expect("parse the real mnist.onnx checkpoint");
