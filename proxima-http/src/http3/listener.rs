@@ -84,6 +84,15 @@ impl ListenProtocol for H3ListenProtocol {
             let _ = sender.send(Ok(()));
         }
         let runtime_for_conns = context.runtime.clone();
+        // Bound on each request's body-chunk channel (`server::build_request`'s
+        // `mpsc::channel`) — one connection-scoped knob read off the same
+        // per-listener `spec` as `allow_0rtt`/`allow_migration` above, per this
+        // crate's own convention for `ListenProtocol::serve` tunables.
+        let request_body_channel_capacity = spec
+            .get("request_body_channel_capacity")
+            .and_then(Value::as_u64)
+            .map(|raw| raw.max(1) as usize)
+            .unwrap_or(crate::http3::server::DEFAULT_REQUEST_BODY_CHANNEL_CAPACITY);
 
         Box::pin(async move {
             let in_flight = Arc::new(AtomicU64::new(0));
@@ -106,6 +115,7 @@ impl ListenProtocol for H3ListenProtocol {
                                         connection,
                                         dispatch,
                                         in_flight,
+                                        request_body_channel_capacity,
                                     )
                                     .await
                                     {

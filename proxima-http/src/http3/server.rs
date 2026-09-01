@@ -6,6 +6,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use bytes::{Buf, Bytes, BytesMut};
+use futures::SinkExt;
 use futures::StreamExt;
 use futures::channel::mpsc;
 use futures::stream::FuturesUnordered;
@@ -29,10 +30,25 @@ type HandlerFuture = std::pin::Pin<Box<dyn Future<Output = HandlerOutcome> + Sen
 type BuiltRequest = Result<
     (
         Request<Bytes>,
-        futures::channel::mpsc::UnboundedSender<Result<Bytes, ProximaError>>,
+        futures::channel::mpsc::Sender<Result<Bytes, ProximaError>>,
     ),
     ProximaError,
 >;
+
+/// Default bound on a request's body-chunk channel (`build_request`'s
+/// `mpsc::channel`) when the per-listener `spec` doesn't override it via
+/// `request_body_channel_capacity` (see `listener.rs`). Sized generously
+/// above typical QUIC flow-control windows (a chunk per `recv_data` poll,
+/// usually far below this before the pipe handler drains one) so `Block`
+/// backpressure (see `pump_request_body`) engages only under genuine
+/// handler stall, not routine jitter.
+pub const DEFAULT_REQUEST_BODY_CHANNEL_CAPACITY: usize = 1024;
+
+/// Counts every body chunk that found the request-body channel
+/// (`build_request`'s `tx`) full and had to pend on the bounded `send` — the
+/// pressure observable for `OverflowPolicy::Block` (see `send_body_chunk`).
+static REQUEST_BODY_CHANNEL_PRESSURE: proxima_telemetry::metric::Counter =
+    proxima_telemetry::metric::Counter::new("proxima_http.h3.request_body_channel_pressure");
 
 /// Drive a single QUIC connection through HTTP/3 to completion.
 /// Each accepted request runs concurrently inside a FuturesUnordered
@@ -41,6 +57,7 @@ pub async fn serve_h3_connection(
     quic: quinn::Connection,
     dispatch: PipeHandle,
     in_flight: Arc<AtomicU64>,
+    request_body_channel_capacity: usize,
 ) -> Result<(), ProximaError> {
     let peer = Some(PeerInfo::Tcp(quic.remote_address()));
     let h3_quinn_conn = h3_quinn::Connection::new(quic);
@@ -75,7 +92,15 @@ pub async fn serve_h3_connection(
                                     )));
                                 }
                             };
-                            serve_h3_request(request, stream, dispatch, in_flight, peer).await
+                            serve_h3_request(
+                                request,
+                                stream,
+                                dispatch,
+                                in_flight,
+                                peer,
+                                request_body_channel_capacity,
+                            )
+                            .await
                         }));
                     }
                     Ok(None) => {
@@ -112,9 +137,17 @@ async fn serve_h3_request(
     dispatch: PipeHandle,
     in_flight: Arc<AtomicU64>,
     peer: Option<PeerInfo>,
+    request_body_channel_capacity: usize,
 ) -> Result<(), ProximaError> {
     in_flight.fetch_add(1, Ordering::Relaxed);
-    let result = drive_h3_request(request, &mut stream, &dispatch, peer).await;
+    let result = drive_h3_request(
+        request,
+        &mut stream,
+        &dispatch,
+        peer,
+        request_body_channel_capacity,
+    )
+    .await;
     in_flight.fetch_sub(1, Ordering::Relaxed);
     result
 }
@@ -124,8 +157,10 @@ async fn drive_h3_request(
     stream: &mut H3RequestStream,
     dispatch: &PipeHandle,
     peer: Option<PeerInfo>,
+    request_body_channel_capacity: usize,
 ) -> Result<(), ProximaError> {
-    let (proxima_request, request_body_tx) = build_request(&request, peer)?;
+    let (proxima_request, request_body_tx) =
+        build_request(&request, peer, request_body_channel_capacity)?;
 
     // Body bytes arrive after the headers — kick a pump that
     // forwards `recv_data` chunks into the body channel. The
@@ -188,7 +223,11 @@ async fn dispatch_request(
     SendPipe::call(dispatch, request).await
 }
 
-fn build_request(request: &http::Request<()>, peer: Option<PeerInfo>) -> BuiltRequest {
+fn build_request(
+    request: &http::Request<()>,
+    peer: Option<PeerInfo>,
+    request_body_channel_capacity: usize,
+) -> BuiltRequest {
     let mut headers = HeaderList::new();
     for (name, value) in request.headers() {
         headers.insert(name.as_str().as_bytes(), value.as_bytes());
@@ -197,7 +236,13 @@ fn build_request(request: &http::Request<()>, peer: Option<PeerInfo>) -> BuiltRe
     let (path_bytes, query) = split_path_query(request.uri().path_and_query());
     let method_bytes: Bytes = Bytes::copy_from_slice(request.method().as_str().as_bytes());
 
-    let (tx, rx) = mpsc::unbounded::<Result<Bytes, ProximaError>>();
+    // Bounded (OverflowPolicy::Block): `pump_request_body` and the pipe
+    // handler consuming `RequestStream` run concurrently under the SAME
+    // `try_join!` in `drive_h3_request`, which polls both — a pending
+    // `send` here just yields back to `try_join!`, which advances the
+    // handler side and drains a slot. Never a deadlock; caps worst-case
+    // buffered body memory when the handler is slower than QUIC delivery.
+    let (tx, rx) = mpsc::channel::<Result<Bytes, ProximaError>>(request_body_channel_capacity);
     let body = RequestStream::new(rx);
 
     let mut context = RequestContext {
@@ -237,7 +282,7 @@ fn split_path_query(pq: Option<&http::uri::PathAndQuery>) -> (Bytes, HeaderList)
 
 async fn pump_request_body(
     stream: &mut H3RequestStream,
-    tx: mpsc::UnboundedSender<Result<Bytes, ProximaError>>,
+    mut tx: mpsc::Sender<Result<Bytes, ProximaError>>,
 ) -> Result<(), ProximaError> {
     loop {
         match stream.recv_data().await {
@@ -253,17 +298,38 @@ async fn pump_request_body(
                     let advance = chunk.len();
                     buf.advance(advance);
                 }
-                if tx.unbounded_send(Ok(bytes.freeze())).is_err() {
+                if send_body_chunk(&mut tx, Ok(bytes.freeze())).await.is_err() {
                     return Ok(());
                 }
             }
             Ok(None) => return Ok(()),
             Err(err) => {
-                let _ =
-                    tx.unbounded_send(Err(ProximaError::Upstream(format!("h3 recv_data: {err}"))));
+                let _ = send_body_chunk(
+                    &mut tx,
+                    Err(ProximaError::Upstream(format!("h3 recv_data: {err}"))),
+                )
+                .await;
                 return Err(ProximaError::Upstream(format!("h3 recv_data: {err}")));
             }
         }
+    }
+}
+
+/// `try_send` first (the common case); on `Full`, record the pressure
+/// observable and fall to the awaiting `send` — see the `Block` rationale
+/// on `build_request`'s channel construction. `Err` means the pipe handler
+/// dropped its `RequestStream` receiver (already-terminated request).
+async fn send_body_chunk(
+    tx: &mut mpsc::Sender<Result<Bytes, ProximaError>>,
+    item: Result<Bytes, ProximaError>,
+) -> Result<(), futures::channel::mpsc::SendError> {
+    match tx.try_send(item) {
+        Ok(()) => Ok(()),
+        Err(err) if err.is_full() => {
+            REQUEST_BODY_CHANNEL_PRESSURE.add(1, &[]);
+            tx.send(err.into_inner()).await
+        }
+        Err(err) => Err(err.into_send_error()),
     }
 }
 
