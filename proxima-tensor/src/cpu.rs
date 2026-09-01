@@ -1461,12 +1461,36 @@ static EPILOGUE_PROFILE_EPILOGUE_CALLS: EpilogueProfileAtomicU64 = EpilogueProfi
 static EPILOGUE_PROFILE_OTHER_NANOS: EpilogueProfileAtomicU64 = EpilogueProfileAtomicU64::new(0);
 #[cfg(feature = "epilogue-profile-probe")]
 static EPILOGUE_PROFILE_OTHER_CALLS: EpilogueProfileAtomicU64 = EpilogueProfileAtomicU64::new(0);
+/// `docs/discipline.md` ROW 201/202: bucket (a) above merges the 96
+/// GEMM-shaped `MatMul` folds with 74 small non-GEMM reduces (LayerNorm
+/// mean/variance, final mean-pooling) that share `Keep::Reduce` but pay a
+/// very different per-node cost. These two counters are ADDITIVE detail
+/// recorded alongside (never instead of) `EPILOGUE_PROFILE_REDUCE_*` above
+/// -- every reduce call increments both its bucket-(a) aggregate and
+/// exactly one of these two, via the same [`reduce_is_gemm_shaped`]
+/// classifier `diag_node_kind_label` uses, so `EPILOGUE_PROFILE_REDUCE_*`
+/// stays byte-identical to what it measured before this split existed.
+#[cfg(feature = "epilogue-profile-probe")]
+static EPILOGUE_PROFILE_REDUCE_GEMM_NANOS: EpilogueProfileAtomicU64 = EpilogueProfileAtomicU64::new(0);
+#[cfg(feature = "epilogue-profile-probe")]
+static EPILOGUE_PROFILE_REDUCE_GEMM_CALLS: EpilogueProfileAtomicU64 = EpilogueProfileAtomicU64::new(0);
+#[cfg(feature = "epilogue-profile-probe")]
+static EPILOGUE_PROFILE_REDUCE_SMALL_NANOS: EpilogueProfileAtomicU64 = EpilogueProfileAtomicU64::new(0);
+#[cfg(feature = "epilogue-profile-probe")]
+static EPILOGUE_PROFILE_REDUCE_SMALL_CALLS: EpilogueProfileAtomicU64 = EpilogueProfileAtomicU64::new(0);
 
 #[cfg(feature = "epilogue-profile-probe")]
 fn epilogue_profile_record(computed: &BoundOp, reduce_nodes: &[bool], elapsed_nanos: u64) {
     if matches!(computed.kind, BoundOpKind::Reduce { keep: Keep::Reduce, .. }) {
         EPILOGUE_PROFILE_REDUCE_NANOS.fetch_add(elapsed_nanos, EpilogueProfileOrdering::Relaxed);
         EPILOGUE_PROFILE_REDUCE_CALLS.fetch_add(1, EpilogueProfileOrdering::Relaxed);
+        if reduce_is_gemm_shaped(computed) {
+            EPILOGUE_PROFILE_REDUCE_GEMM_NANOS.fetch_add(elapsed_nanos, EpilogueProfileOrdering::Relaxed);
+            EPILOGUE_PROFILE_REDUCE_GEMM_CALLS.fetch_add(1, EpilogueProfileOrdering::Relaxed);
+        } else {
+            EPILOGUE_PROFILE_REDUCE_SMALL_NANOS.fetch_add(elapsed_nanos, EpilogueProfileOrdering::Relaxed);
+            EPILOGUE_PROFILE_REDUCE_SMALL_CALLS.fetch_add(1, EpilogueProfileOrdering::Relaxed);
+        }
     } else if is_post_reduce_epilogue(computed, reduce_nodes) {
         EPILOGUE_PROFILE_EPILOGUE_NANOS.fetch_add(elapsed_nanos, EpilogueProfileOrdering::Relaxed);
         EPILOGUE_PROFILE_EPILOGUE_CALLS.fetch_add(1, EpilogueProfileOrdering::Relaxed);
@@ -1491,9 +1515,28 @@ pub fn epilogue_profile_totals() -> (u64, u64, u64, u64, u64, u64) {
     )
 }
 
+/// ROW 202's own split of bucket (a): `(gemm_nanos, gemm_calls,
+/// small_nanos, small_calls)`. `gemm_nanos + small_nanos ==
+/// EPILOGUE_PROFILE_REDUCE_NANOS` and likewise for calls, by construction
+/// in `epilogue_profile_record` above (both counters increment on the
+/// same call, from the same classifier).
+#[cfg(feature = "epilogue-profile-probe")]
+#[must_use]
+pub fn epilogue_profile_reduce_split_totals() -> (u64, u64, u64, u64) {
+    (
+        EPILOGUE_PROFILE_REDUCE_GEMM_NANOS.load(EpilogueProfileOrdering::Relaxed),
+        EPILOGUE_PROFILE_REDUCE_GEMM_CALLS.load(EpilogueProfileOrdering::Relaxed),
+        EPILOGUE_PROFILE_REDUCE_SMALL_NANOS.load(EpilogueProfileOrdering::Relaxed),
+        EPILOGUE_PROFILE_REDUCE_SMALL_CALLS.load(EpilogueProfileOrdering::Relaxed),
+    )
+}
+
 /// Resets ROW 181's three profile buckets to zero -- called between the
 /// warm-up pass and the timed sweep so warm-up compilation/caching effects
-/// never pollute the attributed breakdown.
+/// never pollute the attributed breakdown. Also resets ROW 202's gemm/small
+/// split counters, in lockstep -- both sides of the split must reset on the
+/// same call or a later `epilogue_profile_reduce_split_totals()` read could
+/// straddle two different measurement windows.
 #[cfg(feature = "epilogue-profile-probe")]
 pub fn epilogue_profile_reset() {
     EPILOGUE_PROFILE_REDUCE_NANOS.store(0, EpilogueProfileOrdering::Relaxed);
@@ -1502,6 +1545,10 @@ pub fn epilogue_profile_reset() {
     EPILOGUE_PROFILE_EPILOGUE_CALLS.store(0, EpilogueProfileOrdering::Relaxed);
     EPILOGUE_PROFILE_OTHER_NANOS.store(0, EpilogueProfileOrdering::Relaxed);
     EPILOGUE_PROFILE_OTHER_CALLS.store(0, EpilogueProfileOrdering::Relaxed);
+    EPILOGUE_PROFILE_REDUCE_GEMM_NANOS.store(0, EpilogueProfileOrdering::Relaxed);
+    EPILOGUE_PROFILE_REDUCE_GEMM_CALLS.store(0, EpilogueProfileOrdering::Relaxed);
+    EPILOGUE_PROFILE_REDUCE_SMALL_NANOS.store(0, EpilogueProfileOrdering::Relaxed);
+    EPILOGUE_PROFILE_REDUCE_SMALL_CALLS.store(0, EpilogueProfileOrdering::Relaxed);
 }
 
 /// `docs/discipline.md` ROW 180's dynamic-elision probe: the SAME skip
@@ -2107,9 +2154,19 @@ pub fn evaluate_quantized_with_scratch(
         // map -- `nsper` task (2026-08-21): pairs with `MAC_OPS` (only
         // `run_reduce`'s dense f32 path increments it; `run_reduce_quantized`
         // uses its own `MATMUL_Q4K_MACS`/etc counters and `run_elementwise`
-        // never touches it, so this map's "reduce_f32_dense" ticks and
-        // `MAC_OPS`'s snapshot are the SAME node population).
-        let reduce_dense_entry = diag_kind_ticks.get("reduce_f32_dense").copied();
+        // never touches it, so this map's combined "reduce_f32_dense_gemm" +
+        // "reduce_f32_dense_small" ticks (ROW 201/202's own split of what
+        // used to be one "reduce_f32_dense" bucket) and `MAC_OPS`'s snapshot
+        // are the SAME node population).
+        let reduce_dense_gemm_entry = diag_kind_ticks.get("reduce_f32_dense_gemm").copied();
+        let reduce_dense_small_entry = diag_kind_ticks.get("reduce_f32_dense_small").copied();
+        let reduce_dense_entry = match (reduce_dense_gemm_entry, reduce_dense_small_entry) {
+            (Some((gemm_count, gemm_ticks)), Some((small_count, small_ticks))) => {
+                Some((gemm_count + small_count, gemm_ticks + small_ticks))
+            }
+            (Some(entry), None) | (None, Some(entry)) => Some(entry),
+            (None, None) => None,
+        };
         let total_ticks: u64 = diag_kind_ticks.values().map(|(_, ticks)| *ticks).sum();
         let mut ranked: Vec<(&str, u64, u64)> =
             diag_kind_ticks.into_iter().map(|(label, (count, ticks))| (label, count, ticks)).collect();
@@ -2119,6 +2176,16 @@ pub fn evaluate_quantized_with_scratch(
                 "DIAG evaluate_quantized node_kind={label} count={count} total_ms={:.3} pct_of_forward={:.2}",
                 instrument::ticks_to_nanos(ticks) as f64 / 1_000_000.0,
                 100.0 * ticks as f64 / total_ticks as f64,
+            );
+        }
+        // ROW 202's own per-node dispatch-floor probe: mean ns/node for the
+        // small-reduce bucket alone, printed unconditionally (not folded
+        // into the ranked loop above) so it survives a grep even when the
+        // small bucket is not the top-ranked row.
+        if let Some((small_count, small_ticks)) = reduce_dense_small_entry {
+            std::eprintln!(
+                "DIAG reduce_f32_dense_small per_node_ns={:.1} count={small_count}",
+                instrument::ticks_to_nanos(small_ticks) as f64 / small_count.max(1) as f64,
             );
         }
         std::eprintln!(
@@ -4477,12 +4544,51 @@ fn quantized_operand(resolved: &BoundOp, quantized_weights: &BTreeMap<NodeId, Qu
     resolved.operands().iter().map(|(node, _, _)| *node).find(|node| quantized_weights.contains_key(node))
 }
 
+/// `docs/discipline.md` ROW 202's own named residual, split by node
+/// identity rather than output shape -- an earlier attempt at this
+/// classifier used `output_axes`'s own trailing-axis extent (`width`,
+/// [`resolve_reduce_axis_shape`]'s own field) and MEASURED wrong: BGE's
+/// LayerNorm mean/variance reduce keeps `[batch, seq]` as its own
+/// `output_axes` (the hidden axis is what gets reduced away), so its
+/// trailing axis is `seq` -- extent 7/8/9, NOT 1 -- and the width-based
+/// check misclassified every one of the 74 small reduces as GEMM-shaped
+/// whenever `M > 1` (a `PROXIMA_DIAG_REDUCE_SHAPE_DUMP=1` dump against the
+/// real BGE graph, `bge_epilogue_profile`, caught this before it landed).
+/// The mechanism that actually separates the two populations is operand
+/// count: a real matmul reads TWO distinct tensors (activation and
+/// weight, or query and key, or attention-weights and value -- every one
+/// of the 96 GEMM-shaped reduces in the dump carried two distinct
+/// `NodeId`s), while LayerNorm's mean (`sum(X)`) reads ONE, and its
+/// variance (`sum(X*X)`) reads the SAME node twice (`operand_count=2`,
+/// `distinct_operands=1`) -- confirmed on all 74 small reduces in the same
+/// dump (50 LayerNorm mean/variance pairs across BGE's 25 LayerNorms, plus
+/// 24 softmax max/sum-over-key-dim reduces, all single-operand). Zero
+/// allocation: walks `operands()`'s own slice (already resolved by
+/// `bind::bind`) rather than paying [`resolve_reduce_axis_shape`]'s `Vec`s
+/// -- diagnostic-only, called once per node from a `#[cfg]`-gated counter
+/// site, never from the hot compute path `run_reduce` itself takes.
+#[cfg(any(feature = "instrument", feature = "epilogue-profile-probe"))]
+fn reduce_is_gemm_shaped(resolved: &BoundOp) -> bool {
+    let operands = resolved.operands();
+    let Some((first_node, _, _)) = operands.first() else {
+        return false;
+    };
+    operands.iter().any(|(node, _, _)| node != first_node)
+}
+
 /// proxima-debugger diagnostic (`evaluate_quantized`'s per-node-kind timing
 /// table): buckets a bound op the same way [`run_node_into`]'s own match
 /// dispatches it, splitting `Keep::Reduce` into the quantized-matmul arm
 /// ([`run_reduce_quantized`], parallel-dispatched) versus the dense f32 arm
 /// ([`run_reduce`], serial) via the same [`quantized_operand`] check
-/// [`run_reduce_with_quantized_weights`] itself gates on.
+/// [`run_reduce_with_quantized_weights`] itself gates on. `docs/discipline.md`
+/// ROW 201 found the dense f32 arm's own `reduce_f32_dense` bucket merges
+/// two populations that pay very different per-node costs (170 nodes vs the
+/// 96 `MatMul`s `bge_matmul_micro`'s isolated bench actually measures) --
+/// [`reduce_is_gemm_shaped`] splits it by operand identity (see that
+/// function's own doc for why an output-shape-based split measured wrong),
+/// so the split costs one small slice walk beyond work already done for
+/// every other purpose in this module.
 #[cfg(feature = "instrument")]
 fn diag_node_kind_label(resolved: &BoundOp, quantized_weights: &BTreeMap<NodeId, QuantizedBlock>) -> &'static str {
     match &resolved.kind {
@@ -4492,8 +4598,10 @@ fn diag_node_kind_label(resolved: &BoundOp, quantized_weights: &BTreeMap<NodeId,
         } => {
             if quantized_operand(resolved, quantized_weights).is_some() {
                 "reduce_matmul_quantized"
+            } else if reduce_is_gemm_shaped(resolved) {
+                "reduce_f32_dense_gemm"
             } else {
-                "reduce_f32_dense"
+                "reduce_f32_dense_small"
             }
         }
         BoundOpKind::Reduce { keep: Keep::Scan, .. } => "scan",

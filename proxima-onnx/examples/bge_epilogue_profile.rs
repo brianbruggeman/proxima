@@ -120,6 +120,7 @@ fn main() {
         let elapsed = start.elapsed();
 
         let (reduce_nanos, reduce_calls, epilogue_nanos, epilogue_calls, other_nanos, other_calls) = cpu::epilogue_profile_totals();
+        let (reduce_gemm_nanos, reduce_gemm_calls, reduce_small_nanos, reduce_small_calls) = cpu::epilogue_profile_reduce_split_totals();
         let total_nanos = reduce_nanos + epilogue_nanos + other_nanos;
         let total_calls = reduce_calls + epilogue_calls + other_calls;
 
@@ -130,6 +131,20 @@ fn main() {
             reduce_nanos,
             percent(reduce_nanos, total_nanos),
             reduce_nanos as f64 / reduce_calls.max(1) as f64
+        );
+        println!(
+            "      (a.1) gemm-shaped (96 MatMuls)         : {:>10} calls, {:>12} ns total, {:6.2}% of step time, {:.1} ns/call",
+            reduce_gemm_calls,
+            reduce_gemm_nanos,
+            percent(reduce_gemm_nanos, total_nanos),
+            reduce_gemm_nanos as f64 / reduce_gemm_calls.max(1) as f64
+        );
+        println!(
+            "      (a.2) small non-gemm (LayerNorm/pool)  : {:>10} calls, {:>12} ns total, {:6.2}% of step time, {:.1} ns/call",
+            reduce_small_calls,
+            reduce_small_nanos,
+            percent(reduce_small_nanos, total_nanos),
+            reduce_small_nanos as f64 / reduce_small_calls.max(1) as f64
         );
         println!(
             "  (b) post-reduce epilogue (LayerNorm/bias)   : {:>10} calls, {:>12} ns total, {:6.2}% of step time, {:.1} ns/call",
