@@ -147,6 +147,14 @@ fn run(program: &[Op], windowed: NodeId, weight: NodeId, output: NodeId, windowe
 }
 
 fn main() {
+    // ROW 189: same env-var hook `real_mnist_accuracy.rs` (ROW 188) uses --
+    // toggles the Accelerate/AMX route for `conv_tile`'s own arm below,
+    // independently re-provable without a permanent bench-default change.
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    if std::env::var("PROXIMA_ACCELERATE_GEMM").as_deref() == Ok("1") {
+        proxima_tensor::cpu::set_accelerate_gemm_enabled(true);
+    }
+
     let mut criterion = Criterion::default();
     let mut group = criterion.benchmark_group("bench_conv_gemm_tile");
     group.sample_size(20);

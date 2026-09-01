@@ -5755,7 +5755,26 @@ fn run_reduce<B: Deref<Target = [f32]>>(
             out_layout,
         };
         if let Some(plan) = conv_gemm_tile_plan(&conv_context) {
-            run_conv_gemm_tile(&plan, &raw, output);
+            // ROW 189: Accelerate/AMX route for `Conv`'s own two-level-blocked
+            // GEMM, behind the SAME `ACCELERATE_GEMM_ENABLED` toggle ROW 188
+            // gated the flat route with -- see `try_run_accelerate_conv_gemm`'s
+            // own doc for why no packing is needed. Falls through to the NEON
+            // tile below on any decline (overflow, negative stride, non-zero
+            // seed), same "try, then fall back" shape as the flat route above.
+            #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+            let conv_accelerated = ACCELERATE_GEMM_ENABLED.load(EpilogueFuseOrdering::Relaxed) && try_run_accelerate_conv_gemm(&plan, &raw, output);
+            #[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
+            let conv_accelerated = false;
+            if conv_accelerated {
+                #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+                ACCELERATE_GEMM_HITS.fetch_add(1, EpilogueFuseOrdering::Relaxed);
+            } else {
+                #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+                if ACCELERATE_GEMM_ENABLED.load(EpilogueFuseOrdering::Relaxed) {
+                    ACCELERATE_GEMM_DECLINED.fetch_add(1, EpilogueFuseOrdering::Relaxed);
+                }
+                run_conv_gemm_tile(&plan, &raw, output);
+            }
             #[cfg(feature = "instrument")]
             {
                 // `PATH_CONV_TILE` (via `counters.commit` below) is this
@@ -5834,6 +5853,7 @@ fn run_reduce<B: Deref<Target = [f32]>>(
                     width,
                     reduction_total as usize,
                     out_col_stride,
+                    0.0,
                 )
             };
         if accelerated {
@@ -7897,6 +7917,12 @@ const CBLAS_TRANS: i32 = 112;
 /// scatter this route does not pay for yet, so the caller falls through to
 /// the NEON tile unchanged.
 ///
+/// `beta` is threaded through (not hardcoded) so [`try_run_accelerate_conv_gemm`]
+/// can accumulate `outer_extent` partial products into the same `c` block --
+/// `beta = 0.0` on the first step, `1.0` on every step after. The flat
+/// `reduction_fast_path` caller below always passes `0.0`, unchanged from
+/// this function's behavior before `beta` existed.
+///
 /// # Safety
 /// Caller guarantees `a`/`b` each have at least `base + (rows-1)*row_stride
 /// + (k-1)` in-bounds elements for their respective row/col strides, and
@@ -7919,6 +7945,7 @@ unsafe fn try_run_accelerate_sgemm(
     n: usize,
     k: usize,
     out_col_stride: i64,
+    beta: f32,
 ) -> bool {
     if out_col_stride != 1 || m == 0 || n == 0 || k == 0 {
         return false;
@@ -7946,10 +7973,83 @@ unsafe fn try_run_accelerate_sgemm(
             lda_i32,
             b[base_b..].as_ptr(),
             ldb_i32,
-            0.0,
+            beta,
             c[base_c..].as_mut_ptr(),
             ldc_i32,
         );
+    }
+    true
+}
+
+/// Routes [`ConvGemmTilePlan`] through `cblas_sgemm` instead of
+/// [`run_conv_gemm_tile`]'s NEON tile, behind the SAME `ACCELERATE_GEMM_ENABLED`
+/// toggle ROW 188 landed. Unlike the flat `reduction_fast_path` route, neither
+/// conv operand is a single contiguous `outer_extent * inner_span` span --
+/// `conv_gemm_tile_plan`'s own doc: the windowed operand's `[n,c,oh,ow,kh,kw]`
+/// layout puts `oh,ow` between `c` and `kh,kw`. Rather than materializing a
+/// NEW packed im2col buffer (ROW 151 found materializing beats streaming, but
+/// `windowed` is ALREADY the materialized buffer that finding refers to --
+/// packing it a second time would duplicate that copy for no reason), this
+/// calls `cblas_sgemm` once per `outer_extent` (`ci`) step directly against
+/// `windowed`'s own natural strides -- each step's `K = inner_span` slice is
+/// exactly `plan.col_stride_n`-contiguous per `conv_gemm_tile_plan`'s own
+/// gate, the identical bound [`conv_gemm_row_block`]'s NEON loop relies on --
+/// accumulating with `beta = 1.0` after the first call, mirroring that NEON
+/// loop's own `tile_out` accumulation across the same `outer_extent` steps.
+/// Zero heap allocation: no scratch buffer, no packing, only stack-resident
+/// loop state and pointer arithmetic into the caller's existing buffers.
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+fn try_run_accelerate_conv_gemm(plan: &ConvGemmTilePlan, raw: &[&[f32]], output: &mut [f32]) -> bool {
+    if plan.seed != 0.0 || plan.out_row_stride < 0 || plan.out_base < 0 || plan.outer_stride_m < 0 || plan.outer_stride_n < 0 {
+        return false;
+    }
+    let (Ok(out_base), Ok(out_row_stride), Ok(col_stride_n), Ok(row_stride_m)) = (
+        usize::try_from(plan.out_base),
+        usize::try_from(plan.out_row_stride),
+        usize::try_from(plan.col_stride_n),
+        usize::try_from(plan.row_stride_m),
+    ) else {
+        return false;
+    };
+    for step in 0..plan.outer_extent {
+        let step = step as i64;
+        let (Some(offset_m), Some(offset_n)) = (plan.outer_stride_m.checked_mul(step), plan.outer_stride_n.checked_mul(step)) else {
+            return false;
+        };
+        let (Some(base_m), Some(base_n)) = (plan.base_m.checked_add(offset_m), plan.base_n.checked_add(offset_n)) else {
+            return false;
+        };
+        let (Ok(base_m), Ok(base_n)) = (usize::try_from(base_m), usize::try_from(base_n)) else {
+            return false;
+        };
+        // SAFETY: `conv_gemm_tile_plan`'s own gate already proves `inner_span`
+        // contiguous elements at every `base_m + row*row_stride_m` and
+        // `base_n + row*col_stride_n` this loop forms, for `m_total`/`n_total`
+        // rows -- the identical bound `conv_gemm_row_block`'s NEON tile relies
+        // on for the SAME `raw[plan.index_m]`/`raw[plan.index_n]` reads;
+        // `output` is sized by the caller to `out_layout`'s extents, matching
+        // `run_conv_gemm_tile`'s own contract for the SAME `plan`.
+        let accelerated = unsafe {
+            try_run_accelerate_sgemm(
+                raw[plan.index_m],
+                base_m,
+                row_stride_m,
+                raw[plan.index_n],
+                base_n,
+                col_stride_n,
+                output,
+                out_base,
+                out_row_stride,
+                plan.m_total,
+                plan.n_total,
+                plan.inner_span,
+                1,
+                if step == 0 { 0.0 } else { 1.0 },
+            )
+        };
+        if !accelerated {
+            return false;
+        }
     }
     true
 }
