@@ -135,6 +135,15 @@ impl RecordingSink for BoundedRecordingSink {
             inner.backend.flush().await
         })
     }
+
+    fn sync<'lifetime>(&'lifetime self) -> AppendFuture<'lifetime> {
+        let inner = self.inner.clone();
+        let drain_fut = self.drain();
+        Box::pin(async move {
+            drain_fut.await;
+            inner.backend.sync().await
+        })
+    }
 }
 
 async fn enqueue(inner: Arc<BoundedInner>, event: RecordingEvent) -> Result<(), ProximaError> {

@@ -42,6 +42,12 @@ pub trait RecordingSink: Send + Sync {
     fn append<'lifetime>(&'lifetime self, event: RecordingEvent) -> AppendFuture<'lifetime>;
 
     fn flush<'lifetime>(&'lifetime self) -> AppendFuture<'lifetime>;
+
+    /// Flush pending events and sync the durable terminal when supported.
+    /// Implementations without a durable terminal may treat this as `flush`.
+    fn sync<'lifetime>(&'lifetime self) -> AppendFuture<'lifetime> {
+        self.flush()
+    }
 }
 
 /// Shared, object-safe per-event sink handle.
@@ -54,6 +60,10 @@ impl RecordingSink for AccumulatingSink {
 
     fn flush<'lifetime>(&'lifetime self) -> AppendFuture<'lifetime> {
         Box::pin(AccumulatingSink::flush(self))
+    }
+
+    fn sync<'lifetime>(&'lifetime self) -> AppendFuture<'lifetime> {
+        Box::pin(AccumulatingSink::sync(self))
     }
 }
 
@@ -93,6 +103,10 @@ impl RecordingSink for EventTap {
 
     fn flush<'lifetime>(&'lifetime self) -> AppendFuture<'lifetime> {
         self.inner.flush()
+    }
+
+    fn sync<'lifetime>(&'lifetime self) -> AppendFuture<'lifetime> {
+        self.inner.sync()
     }
 }
 
