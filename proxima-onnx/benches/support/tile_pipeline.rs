@@ -326,6 +326,77 @@ impl<'weights, const BLOCKED: bool, const ROWS: usize> ConvReluStage<'weights, B
 /// weight load specifically, since the window load cannot be shared
 /// across positions without a sliding-window rewrite of `gather_window`
 /// this row did not attempt).
+///
+/// **aarch64: explicit intrinsics, not autovec (discipline-log ROW,
+/// "conv-tile-blocking").** Disassembly on the safe-portable nested-loop
+/// form (kept below, `#[cfg(not(target_arch = "aarch64"))]`) showed LLVM's
+/// auto-vectorizer picks a DIFFERENT, worse shape once both a `row` axis
+/// AND a `lane` axis are present: it TRANSPOSES the 4 per-lane weight
+/// vectors into 4 per-k-position cross-lane vectors (`zip1`/`trn2`/`zip2`/
+/// `uzp2`x2 + 8x `mov.s` lane-inserts, 13 shuffle instructions per K-chunk)
+/// and loads each row's window chunk as 4 SEPARATE SCALAR floats (8x `ldp`
+/// pair-loads) so it can broadcast-multiply against the transposed weight
+/// -- 21 overhead instructions surrounding the 16 useful `fmla.4s` per
+/// iteration, none of which the single-row `dot_chunked_k4` shape (ROW
+/// 158) pays, because that shape has no lane axis for the vectorizer to
+/// transpose across. This is a DIFFERENT root cause from ROW 158's
+/// original TILE_COLS-axis scalarization bug (that was 4 independent
+/// scalar `fmadd`, zero SIMD; this is packed `fmla.4s` throughout, just
+/// carrying an expensive data-reshuffle tax) -- re-derived by this
+/// session's own `objdump`, not cited. Explicit `vld1q_f32`/`vfmaq_f32`
+/// intrinsics force the intended shape (one vector load per row, one per
+/// lane, one `fmla` per `(row, lane)` pair, zero shuffles) by construction
+/// rather than by vectorizer heuristic -- the alternative ROW 158 tried
+/// and rejected for the SINGLE-lane case (no transpose possible there, so
+/// intrinsics only won by a noise-adjacent ~1.5%) does not apply here: the
+/// portable form is not merely slightly slower, it compiles to a
+/// structurally different, disassembly-confirmed-worse instruction stream.
+#[cfg(target_arch = "aarch64")]
+#[inline(never)]
+fn dot_chunked_k4_tile_multirow<const ROWS: usize>(windows: [&[f32]; ROWS], weight_rows: [&[f32]; TILE_COLS]) -> [[f32; TILE_COLS]; ROWS] {
+    use core::arch::aarch64::{float32x4_t, vaddvq_f32, vdupq_n_f32, vfmaq_f32, vld1q_f32};
+
+    let reduction_width = weight_rows[0].len();
+    let chunk_count = reduction_width / 4;
+    let remainder_start = chunk_count * 4;
+
+    // SAFETY: every load reads exactly 4 contiguous `f32` starting at
+    // `chunk_index * 4`. `chunk_index < chunk_count == reduction_width / 4`
+    // guarantees `chunk_index * 4 + 4 <= reduction_width`, and every
+    // `windows[row]`/`weight_rows[lane]` slice has length exactly
+    // `reduction_width` (both operands of one dot product, enforced by
+    // every call site's own shape invariants -- `compute_output_row`'s
+    // `gather_window` output and `self.weight`'s own row slicing) -- no
+    // load ever reads past either slice's own bounds.
+    unsafe {
+        let mut accumulators: [[float32x4_t; TILE_COLS]; ROWS] = [[vdupq_n_f32(0.0); TILE_COLS]; ROWS];
+        for chunk_index in 0..chunk_count {
+            let offset = chunk_index * 4;
+            let weight_vectors: [float32x4_t; TILE_COLS] = std::array::from_fn(|lane| vld1q_f32(weight_rows[lane].as_ptr().add(offset)));
+            for row in 0..ROWS {
+                let window_vector = vld1q_f32(windows[row].as_ptr().add(offset));
+                for lane in 0..TILE_COLS {
+                    accumulators[row][lane] = vfmaq_f32(accumulators[row][lane], window_vector, weight_vectors[lane]);
+                }
+            }
+        }
+        std::array::from_fn(|row| {
+            std::array::from_fn(|lane| {
+                let mut total = vaddvq_f32(accumulators[row][lane]);
+                for element in remainder_start..reduction_width {
+                    total = windows[row][element].mul_add(weight_rows[lane][element], total);
+                }
+                total
+            })
+        })
+    }
+}
+
+/// Portable fallback for non-aarch64 targets: the original safe nested-loop
+/// form (kept correct and dependency-free; not the fast path this session
+/// measures -- see the aarch64 variant's own doc for why it was replaced
+/// there).
+#[cfg(not(target_arch = "aarch64"))]
 #[inline(never)]
 fn dot_chunked_k4_tile_multirow<const ROWS: usize>(windows: [&[f32]; ROWS], weight_rows: [&[f32]; TILE_COLS]) -> [[f32; TILE_COLS]; ROWS] {
     let weight_chunks: [&[[f32; 4]]; TILE_COLS] = std::array::from_fn(|lane| weight_rows[lane].as_chunks::<4>().0);
