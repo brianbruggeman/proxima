@@ -91,6 +91,7 @@ use proxima_primitives::pipe::handler::PipeHandle;
 use proxima_primitives::pipe::header_list::HeaderList;
 use proxima_primitives::pipe::request::{Request, RequestContext};
 use proxima_primitives::stream::DatagramSocketBatchExt;
+use proxima_primitives::sync::AsyncMutex;
 use proxima_protocols::http3_codec::server::{
     H3ServerEvent, ServerConnection, StreamId as H3StreamId,
 };
@@ -331,8 +332,24 @@ where
             // the synchronous header-decode-failure producer in the same
             // function — see their own doc comments for why the two
             // producers of this one channel need different policies).
+            //
+            // `futures::channel::mpsc` grants every `Sender` clone its own
+            // guaranteed slot on top of the buffer, regardless of how full
+            // the channel already is — so a fresh `.clone()` per dispatch
+            // (the shape this used to be) defeats the bound entirely. There
+            // is exactly ONE live `Sender` for this channel's whole life;
+            // both producers borrow it through `AsyncMutex` (the same
+            // waker-based async gate `http3/native/upstream.rs` already
+            // serializes its shared connection with) instead of minting a
+            // new clone per call. The mutex is never genuinely contended by
+            // more than one accessor at a time — this module drives every
+            // in-flight future and every sync tick cooperatively on one
+            // task — so `try_lock`/`lock().await` exist purely to share the
+            // one `Sender` across `'static` futures, not to arbitrate real
+            // concurrency.
             let (response_tx, mut response_rx) =
                 futures::channel::mpsc::channel::<DispatchResult>(response_channel_capacity);
+            let response_tx = Arc::new(AsyncMutex::new(response_tx));
             // handler futures driven cooperatively in the serve loop — no
             // tokio::spawn, no runtime coupling. Send so the serve future
             // (which must be Send) stays Send; dispatch.call_dyn is Send.
@@ -651,7 +668,7 @@ fn drive_dirty_connections(
     h3_state: &mut BTreeMap<u32, PerConnection>,
     dirty: &std::collections::BTreeSet<u32>,
     dispatch: &PipeHandle,
-    response_tx: &futures::channel::mpsc::Sender<DispatchResult>,
+    response_tx: &Arc<AsyncMutex<futures::channel::mpsc::Sender<DispatchResult>>>,
     in_flight: &mut FuturesUnordered<Pin<Box<dyn Future<Output = ()> + Send>>>,
     part_source_mode: bool,
 ) {
@@ -814,7 +831,7 @@ fn process_h3_events(
     handle: ConnectionHandle,
     driver: &mut PerConnection,
     dispatch: &PipeHandle,
-    response_tx: &futures::channel::mpsc::Sender<DispatchResult>,
+    response_tx: &Arc<AsyncMutex<futures::channel::mpsc::Sender<DispatchResult>>>,
     in_flight: &mut FuturesUnordered<Pin<Box<dyn Future<Output = ()> + Send>>>,
 ) -> Result<(), ProximaError> {
     #[cfg(feature = "http3-part-source")]
@@ -893,15 +910,24 @@ fn process_h3_events(
                     // instead — the stream still reaps on connection
                     // close/idle-timeout rather than stalling the whole
                     // multiplexed connection.
-                    if response_tx
-                        .clone()
-                        .try_send(DispatchResult {
-                            connection_handle: handle.0,
-                            stream_id,
-                            response: Err(err),
-                        })
-                        .is_err()
-                    {
+                    //
+                    // `try_lock` (never `.lock().await`): if an in-flight
+                    // future is mid-suspend holding the guard while it
+                    // pends on `send().await` for capacity (the Block
+                    // producer below), that IS genuine pressure on this
+                    // same bounded channel — count it as dropped rather
+                    // than wait, same as an observed `Full`.
+                    let dropped = match response_tx.try_lock() {
+                        Some(mut sender) => sender
+                            .try_send(DispatchResult {
+                                connection_handle: handle.0,
+                                stream_id,
+                                response: Err(err),
+                            })
+                            .is_err(),
+                        None => true,
+                    };
+                    if dropped {
                         RESPONSE_CHANNEL_DROPPED.add(1, &[]);
                     }
                     continue;
@@ -909,7 +935,7 @@ fn process_h3_events(
             }
         };
         let dispatch = dispatch.clone();
-        let mut response_tx = response_tx.clone();
+        let response_tx = Arc::clone(response_tx);
         let connection_handle = handle.0;
         in_flight.push(Box::pin(async move {
             let response = match dispatch.call_dyn(request).await {
@@ -950,16 +976,28 @@ fn process_h3_events(
             // resumes this loop and drains a slot. Never a deadlock —
             // `try_send` first (the common case), `send().await` (recording
             // the pressure observable) only on `Full`.
+            //
+            // `lock().await` acquires the ONE live `Sender` shared by every
+            // producer of this channel (see its construction) instead of
+            // minting a fresh clone — a fresh clone here is exactly the
+            // defect this pends: `futures::channel::mpsc` gives every
+            // clone its own guaranteed slot, so a clone-per-dispatch
+            // producer could never actually observe `Full` and this
+            // pressure counter could never engage. The guard is held
+            // across the `send().await` below so the channel's real
+            // configured capacity — not a phantom per-clone slot — is what
+            // gates admission.
             let result = DispatchResult {
                 connection_handle,
                 stream_id,
                 response,
             };
-            if let Err(err) = response_tx.try_send(result)
+            let mut sender = response_tx.lock().await;
+            if let Err(err) = sender.try_send(result)
                 && err.is_full()
             {
                 RESPONSE_CHANNEL_PRESSURE.add(1, &[]);
-                let _ = response_tx.send(err.into_inner()).await;
+                let _ = sender.send(err.into_inner()).await;
             }
         }));
     }
@@ -1240,6 +1278,183 @@ fn build_rustls_server_config(spec: &Value) -> Result<Arc<rustls::ServerConfig>,
 #[allow(clippy::expect_used)]
 mod tests {
     use super::*;
+
+    struct ConstantOkDispatch;
+
+    impl proxima_primitives::pipe::SendPipe for ConstantOkDispatch {
+        type In = Request<Bytes>;
+        type Out = proxima_primitives::pipe::request::Response<Bytes>;
+        type Err = ProximaError;
+
+        fn call(
+            &self,
+            _request: Request<Bytes>,
+        ) -> impl Future<Output = Result<Self::Out, ProximaError>> + Send {
+            async move { Ok(proxima_primitives::pipe::request::Response::ok("ok")) }
+        }
+    }
+
+    fn finished_pending_request(headers: Vec<(Vec<u8>, Vec<u8>)>) -> PendingRequest {
+        PendingRequest {
+            headers: Some(headers),
+            #[cfg(feature = "http3-part-source")]
+            request_head: None,
+            body: Vec::new(),
+            finished: true,
+            dispatched: false,
+            response: None,
+            response_emitted: false,
+        }
+    }
+
+    // `process_h3_events`'s async dispatch path used to clone `response_tx`
+    // fresh for every dispatched request. `futures::channel::mpsc` grants a
+    // brand-new `Sender` clone its own guaranteed slot regardless of how
+    // full the channel already is (verified directly against
+    // `futures-channel` 0.3.34: ten sequential fresh clones against a
+    // zero-buffer channel all `try_send` `Ok` with nothing ever drained) —
+    // so a clone-per-dispatch producer could never actually observe `Full`
+    // and `RESPONSE_CHANNEL_PRESSURE` could never engage.
+    //
+    // The fix: every producer of this channel now shares the SAME live
+    // `Sender`, serialized through `AsyncMutex` (see its construction
+    // above `response_tx`'s doc comment). This test proves the FIXED
+    // contract: three concurrent dispatches against a channel with a
+    // single reserved slot (capacity 0) genuinely contend — at least one
+    // of them observes `Full` and pends — while still delivering every
+    // response losslessly, and the pressure counter records the real
+    // contention instead of staying permanently at zero.
+    #[proxima::test]
+    async fn response_tx_pressure_counter_engages_because_producers_now_share_one_sender() {
+        let handle = ConnectionHandle(1);
+        let mut driver = PerConnection::new(false);
+        for stream_id in [0_u64, 4, 8] {
+            driver.pending.insert(
+                stream_id,
+                finished_pending_request(vec![
+                    (b":method".to_vec(), b"GET".to_vec()),
+                    (b":path".to_vec(), b"/".to_vec()),
+                ]),
+            );
+        }
+
+        let before = RESPONSE_CHANNEL_PRESSURE.get();
+        let dispatch = proxima_primitives::pipe::handler::into_handle(ConstantOkDispatch);
+        let (response_tx, mut response_rx) =
+            futures::channel::mpsc::channel::<DispatchResult>(0);
+        let response_tx = Arc::new(AsyncMutex::new(response_tx));
+        let mut in_flight: FuturesUnordered<Pin<Box<dyn Future<Output = ()> + Send>>> =
+            FuturesUnordered::new();
+
+        process_h3_events(handle, &mut driver, &dispatch, &response_tx, &mut in_flight)
+            .expect("three GET / requests with headers+FIN dispatch cleanly");
+
+        // Drive both sides concurrently: `in_flight` needs `response_rx`
+        // draining a slot to unpend a `Full` producer, exactly as the
+        // production serve loop does (see `serve`'s own two-arm select).
+        let drain_in_flight = async {
+            let mut delivered = 0;
+            while in_flight.next().await.is_some() {
+                delivered += 1;
+            }
+            delivered
+        };
+        let drain_responses = async {
+            let mut received = 0;
+            while received < 3 {
+                match response_rx.next().await {
+                    Some(_) => received += 1,
+                    None => break,
+                }
+            }
+            received
+        };
+        let (delivered, received) = futures::join!(drain_in_flight, drain_responses);
+
+        assert_eq!(
+            delivered, 3,
+            "every dispatched request's response-send future must run to completion, \
+             none left permanently pending"
+        );
+        assert_eq!(
+            received, 3,
+            "all three responses land losslessly despite the channel's configured \
+             capacity of 0 — the shared sender pends instead of dropping work"
+        );
+        assert!(
+            RESPONSE_CHANNEL_PRESSURE.get() > before,
+            "with only one reserved slot shared by three concurrent producers, at \
+             least one try_send must observe Full and increment the pressure \
+             counter — the bound now actually engages"
+        );
+    }
+
+    // `drive_dirty_connections`'s self-heal (see its own doc comment above
+    // `h3_state.entry(handle_id).or_insert_with(...)`): a handle whose
+    // accept notification was dropped (site 2's `ACCEPT_CHANNEL_DROPPED`)
+    // never gets an `h3_state` entry seeded off `accept_rx`. This proves
+    // the SAME `BTreeMap::entry().or_insert_with(PerConnection::new)` idiom
+    // that call site uses seeds a missing entry from scratch and the
+    // connection still dispatches its request normally on that first
+    // encounter — no second chance needed, no request lost.
+    #[test]
+    fn missing_h3_state_entry_self_heals_on_first_dirty_encounter_and_still_dispatches() {
+        let handle_id = 7_u32;
+        let mut h3_state: BTreeMap<u32, PerConnection> = BTreeMap::new();
+        assert!(
+            !h3_state.contains_key(&handle_id),
+            "simulates an accept notification that never reached this listener's accept_rx"
+        );
+
+        // The exact self-heal idiom `drive_dirty_connections` runs.
+        let driver = h3_state
+            .entry(handle_id)
+            .or_insert_with(|| PerConnection::new(false));
+        driver.pending.insert(
+            0,
+            finished_pending_request(vec![
+                (b":method".to_vec(), b"GET".to_vec()),
+                (b":path".to_vec(), b"/".to_vec()),
+            ]),
+        );
+
+        assert!(
+            h3_state.contains_key(&handle_id),
+            "the missing entry is seeded on this same encounter, not deferred"
+        );
+
+        let driver = h3_state.get_mut(&handle_id).expect("just seeded above");
+        let dispatch = proxima_primitives::pipe::handler::into_handle(ConstantOkDispatch);
+        let (response_tx, mut response_rx) =
+            futures::channel::mpsc::channel::<DispatchResult>(1);
+        let response_tx = Arc::new(AsyncMutex::new(response_tx));
+        let mut in_flight: FuturesUnordered<Pin<Box<dyn Future<Output = ()> + Send>>> =
+            FuturesUnordered::new();
+
+        process_h3_events(
+            ConnectionHandle(handle_id),
+            driver,
+            &dispatch,
+            &response_tx,
+            &mut in_flight,
+        )
+        .expect("self-healed connection still dispatches its pending request");
+
+        futures::executor::block_on(async {
+            while in_flight.next().await.is_some() {}
+        });
+        let result = futures::executor::block_on(response_rx.next())
+            .expect("the request served on the self-heal tick delivers a response, not silence");
+        assert_eq!(
+            result.stream_id, 0,
+            "the response is for the exact stream the self-healed connection dispatched"
+        );
+        assert!(
+            result.response.is_ok(),
+            "the self-healed connection's request completes successfully, same as a \
+             normally-seeded one"
+        );
+    }
 
     // The CID-length + Version-Negotiation regression guards that used to
     // live here now target `proxima_quic::native::listener::Listener<P>`
