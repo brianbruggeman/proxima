@@ -86,6 +86,7 @@ type RunPassResult = (Vec<std::time::Duration>, Vec<Vec<f32>>, (u64, u64, u64), 
 fn run_pass(graph: &proxima_onnx::messages::GraphProto<'_>, items: &[(&str, Vec<i64>)]) -> RunPassResult {
     proxima_tensor::cpu::epilogue_fuse_reset();
     proxima_tensor::cpu::layer_norm_cluster_reset();
+    proxima_tensor::cpu::rewrite_engine_reset();
     let mut durations = Vec::new();
     let mut embeddings = Vec::new();
     for (_, tokens) in items {
@@ -124,6 +125,7 @@ fn main() {
     let mut unfused_embeddings_last = Vec::new();
     let mut fused_totals = (0u64, 0u64, 0u64);
     let mut cluster_totals = (0u64, 0u64, 0u64);
+    let mut engine_depth_fires = (0u64, 0u64);
 
     for run in 0..runs {
         proxima_tensor::cpu::set_epilogue_fuse_enabled(true);
@@ -137,6 +139,7 @@ fn main() {
         fused_embeddings_last = embeddings;
         fused_totals = totals;
         cluster_totals = cluster;
+        engine_depth_fires = proxima_tensor::cpu::rewrite_engine_depth_fires();
 
         proxima_tensor::cpu::set_epilogue_fuse_enabled(false);
         let (durations, embeddings, totals, cluster) = run_pass(graph, &items);
@@ -162,6 +165,10 @@ fn main() {
     println!("runs={runs}");
     println!("fused engagement (last run): hits={} elements={} nanos={}", fused_totals.0, fused_totals.1, fused_totals.2);
     println!("ln_cluster engagement (last run): hits={} elements={} nanos={}", cluster_totals.0, cluster_totals.1, cluster_totals.2);
+    println!(
+        "rewrite engine depth fires (last FUSED run, reset-per-call snapshot): depth1(law1_2_epilogue_absorption)={} depth2(law2_layer_norm_cluster_upgrade)={}",
+        engine_depth_fires.0, engine_depth_fires.1
+    );
     println!("fused mean per-sentence ms across runs: {fused_run_means:?} mean={fused_mean:.4} CoV={fused_cov:.4}");
     println!("unfused mean per-sentence ms across runs: {unfused_run_means:?} mean={unfused_mean:.4} CoV={unfused_cov:.4}");
     println!("bit_identical(fused vs unfused, last run's embeddings)={bit_identical}");
