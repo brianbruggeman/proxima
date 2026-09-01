@@ -719,6 +719,58 @@ fn run_resolved_nodes_in_arena(arena: &mut StaticArena) -> Result<(), TensorErro
     Ok(())
 }
 
+/// `docs/discipline.md` ROW 180's dynamic-elision probe: the SAME skip
+/// check [`run_resolved_nodes_in_arena`] already runs (`dead`/`static_nodes`,
+/// both fixed forever at [`build_static_arena`] time), unioned with a THIRD
+/// set the caller derives fresh every call from a per-step mask -- a block
+/// live one step and skipped the next, which `dead`/`static_nodes` cannot
+/// express since both are computed once and never revisited. `named` is
+/// expected to carry ONLY this step's live blocks (`bind_named_inputs_into_arena`'s
+/// `require_all = false`, the same relaxation
+/// [`evaluate_named_with_arena_in_place`] already uses) -- a masked-off
+/// block's caller-side buffer is never even copied into the arena, not just
+/// never computed, so the traffic this probe measures is the SAME traffic a
+/// caller genuinely elides (no read of the skipped block's data at all).
+/// Execution-level only: `resolved`/`shapes`/`effective_outputs` (every
+/// `bind::bind` fusion decision) are untouched, exactly as ROW 167 found for
+/// the fixed dead-set -- graph-level removal (ROW 166) is not this
+/// mechanism and is not attempted here. A node this step's `skip` names that
+/// is NOT also live in `arena.buffers` keeps its stale prior-step value,
+/// same as `evaluate_named_with_arena_in_place`'s own rebind aliasing
+/// already relies on for untouched nodes.
+#[cfg(feature = "dynamic-elision-probe")]
+pub fn evaluate_named_with_arena_masked(
+    arena: &mut StaticArena,
+    named: &[(&str, &[f32])],
+    skip: &BTreeSet<NodeId>,
+) -> Result<Evaluated, TensorError> {
+    bind_named_inputs_into_arena(arena, named, false)?;
+    for computed in &arena.resolved {
+        if arena.dead.contains(&computed.node) || arena.static_nodes.contains(&computed.node) || skip.contains(&computed.node) {
+            continue;
+        }
+        let node_index = computed.node.0 as usize;
+        let mut output = arena.buffers[node_index].take().ok_or(TensorError::NotLowerable {
+            node: computed.node,
+            reason: "static arena has no pre-sized slot for this resolved node -- build_static_arena did not size it",
+        })?;
+        run_node_into(computed, &arena.buffers, None, None, &mut output)?;
+        arena.buffers[node_index] = Some(output);
+    }
+
+    let results = arena
+        .effective_outputs
+        .iter()
+        .map(|node| {
+            let shape = arena.shapes.of(*node).to_vec();
+            let data = arena.buffers[node.0 as usize].as_deref().unwrap_or(&[]).to_vec();
+            (*node, shape, data)
+        })
+        .collect();
+
+    Ok(Evaluated::from_parts(arena.root, results, None))
+}
+
 /// Reads `node`'s current buffer straight out of `arena` -- a borrow, not a
 /// clone. Valid for any node [`build_static_arena`] pre-sized: an
 /// [`Op::Input`] slot or a resolved node's output, in whichever state the
