@@ -377,3 +377,90 @@ async fn write_response(
         .map_err(|err| ProximaError::Upstream(format!("h3 finish: {err}")))?;
     Ok(())
 }
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod tests {
+    use super::*;
+
+    // Real production shape: a chunk exactly as `pump_request_body` builds
+    // it from `stream.recv_data()` — a `Bytes::freeze()`'d body slice, not
+    // a placeholder like `b"AAAA"`.
+    fn body_chunk(payload: &'static [u8]) -> Result<Bytes, ProximaError> {
+        Ok(Bytes::from_static(payload))
+    }
+
+    #[proxima::test]
+    async fn send_body_chunk_pends_the_producer_once_the_channel_reaches_its_configured_capacity()
+    {
+        // `futures::channel::mpsc::channel(buffer)` guarantees `buffer +
+        // num_senders` try_send slots (see the crate's own doc on
+        // `channel`) — with the single sender this test holds, capacity 1
+        // means exactly 2 chunks fit via the fast `try_send` path before a
+        // third must pend.
+        let capacity = 1;
+        let (mut tx, mut rx) = mpsc::channel::<Result<Bytes, ProximaError>>(capacity);
+
+        send_body_chunk(&mut tx, body_chunk(b"chunk-one"))
+            .await
+            .expect("first chunk fits under capacity");
+        send_body_chunk(&mut tx, body_chunk(b"chunk-two"))
+            .await
+            .expect("second chunk fills the channel exactly to its guaranteed capacity");
+        assert_eq!(
+            REQUEST_BODY_CHANNEL_PRESSURE.get(),
+            0,
+            "no pressure recorded while every send fit inside capacity"
+        );
+
+        // The channel is now full: a third `send_body_chunk` must PEND on
+        // the bounded `send`, not error and not silently drop the chunk.
+        let mut third = Box::pin(send_body_chunk(&mut tx, body_chunk(b"chunk-three")));
+        let pending = futures::poll!(third.as_mut());
+        assert!(
+            pending.is_pending(),
+            "producer must pend against a full channel under OverflowPolicy::Block, not fail"
+        );
+        assert_eq!(
+            REQUEST_BODY_CHANNEL_PRESSURE.get(),
+            1,
+            "the pressure counter records the moment try_send hit Full, before the fallback await"
+        );
+
+        // `mpsc::Sender::send` completes only once the sink can accept a
+        // FOLLOWING item too (its `poll_flush` re-checks readiness) — so
+        // resuming the pended send takes draining two queued chunks, not
+        // one; the second drain runs concurrently with the still-pending
+        // `third` via `join!` (no sleeps, no polling loop).
+        let drain_first_two = async {
+            let first = rx.next().await.expect("first chunk still queued");
+            let second = rx.next().await.expect("second chunk still queued");
+            (first, second)
+        };
+        let ((first, second), third_outcome) = futures::join!(drain_first_two, third);
+        assert_eq!(first.expect("ok chunk"), Bytes::from_static(b"chunk-one"));
+        assert_eq!(second.expect("ok chunk"), Bytes::from_static(b"chunk-two"));
+        third_outcome.expect("pended send completes once a slot frees up");
+
+        // All three chunks arrive, in order, none lost.
+        let third_chunk = rx.next().await.expect("third chunk delivered losslessly");
+        assert_eq!(
+            third_chunk.expect("ok chunk"),
+            Bytes::from_static(b"chunk-three")
+        );
+    }
+
+    #[proxima::test]
+    async fn send_body_chunk_returns_err_once_the_receiver_is_dropped() {
+        let (mut tx, rx) = mpsc::channel::<Result<Bytes, ProximaError>>(1);
+        drop(rx);
+
+        let outcome = send_body_chunk(&mut tx, body_chunk(b"orphaned-chunk")).await;
+
+        assert!(
+            outcome.is_err(),
+            "a request whose pipe handler already dropped RequestStream's receiver \
+             must surface as an error, never panic or hang"
+        );
+    }
+}
