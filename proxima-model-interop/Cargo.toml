@@ -113,6 +113,13 @@ proxima-tokenizer = { path = "../proxima-tokenizer", default-features = false, f
 # (no-feature) `cargo build/nextest --workspace` from trying to build them
 # at all, matching `proxima-tensor/Cargo.toml`'s own `q4k_ggml_fidelity`
 # entry for the identical reason.
+## No `required-features`: the GGML-matrix section builds and runs at the
+## crate's default feature set; only the quantized-packed-format section
+## (gated `#[cfg(feature = "metal")]` inside the example itself) needs
+## `--features metal`, matching `src/capability.rs::quant_format`'s own gate.
+[[example]]
+name = "generate_compatibility_doc"
+
 [[example]]
 name = "smollm2_logit_oracle_diff"
 required-features = ["std", "instrument"]
