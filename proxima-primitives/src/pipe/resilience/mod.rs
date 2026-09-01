@@ -14,7 +14,7 @@ pub mod retry_exec;
 pub mod fallback;
 
 pub use backoff::{Backoff, Jitter};
-pub use circuit_breaker::{CircuitBreaker, CircuitState};
+pub use circuit_breaker::{AtomicCircuitBreaker, CircuitBreaker, CircuitState};
 pub use deadline::Deadline;
 pub use retry::{RetryAction, RetryController};
 pub use retry_exec::Retry;
