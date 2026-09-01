@@ -179,6 +179,87 @@ pub fn record_reduce_path_ticks(path: Path, ticks: u64) {
     }
 }
 
+// route-census task (2026-09-01): `REDUCE_PATH_*_TICKS` above sums BOTH
+// populations `cpu::reduce_is_gemm_shaped` distinguishes -- the 96
+// GEMM-shaped `MatMul` folds AND the 74 small single-operand reduces
+// (LayerNorm mean/variance, softmax max/sum), which structurally can
+// still land in `Path::WidthFast`/`Path::DotFast` (a `Unary` body can
+// pass `body_shape_is_affine_fast_path` too) even though neither
+// `width_tile_plan` nor `neon_tile_plan` ever accepts a non-`Binary`
+// body -- so the all-reduce split alone cannot answer "of the 96
+// MatMuls, how many actually took each route". These four pairs are the
+// SAME four `run_reduce` return points as `record_reduce_path_ticks`,
+// gated additionally on `cpu::reduce_is_gemm_shaped(resolved)`, so they
+// are a pure ADDITIVE detail (never a replacement) the same way
+// `EPILOGUE_PROFILE_REDUCE_GEMM_*` sits beside `EPILOGUE_PROFILE_REDUCE_*`
+// in `cpu.rs`.
+pub static REDUCE_GEMM_PATH_DOT_FAST_CALLS: Counter = Counter::new("proxima_tensor.reduce_gemm_path.dot_fast_calls");
+pub static REDUCE_GEMM_PATH_DOT_FAST_TICKS: Counter = Counter::new("proxima_tensor.reduce_gemm_path.dot_fast_ticks");
+pub static REDUCE_GEMM_PATH_WIDTH_FAST_CALLS: Counter =
+    Counter::new("proxima_tensor.reduce_gemm_path.width_fast_calls");
+pub static REDUCE_GEMM_PATH_WIDTH_FAST_TICKS: Counter =
+    Counter::new("proxima_tensor.reduce_gemm_path.width_fast_ticks");
+pub static REDUCE_GEMM_PATH_CONV_TILE_CALLS: Counter =
+    Counter::new("proxima_tensor.reduce_gemm_path.conv_tile_calls");
+pub static REDUCE_GEMM_PATH_CONV_TILE_TICKS: Counter =
+    Counter::new("proxima_tensor.reduce_gemm_path.conv_tile_ticks");
+pub static REDUCE_GEMM_PATH_GENERIC_CALLS: Counter = Counter::new("proxima_tensor.reduce_gemm_path.generic_calls");
+pub static REDUCE_GEMM_PATH_GENERIC_TICKS: Counter = Counter::new("proxima_tensor.reduce_gemm_path.generic_ticks");
+
+/// Records one `run_reduce` call's elapsed ticks against the path it took,
+/// restricted to gemm-shaped (two-distinct-operand) reduce folds -- called
+/// once per call, alongside [`record_reduce_path_ticks`], only when the
+/// caller has already established `cpu::reduce_is_gemm_shaped(resolved)`.
+pub fn record_reduce_gemm_path_ticks(path: Path, ticks: u64) {
+    match path {
+        Path::DotFast => {
+            counter!(REDUCE_GEMM_PATH_DOT_FAST_CALLS, 1);
+            counter!(REDUCE_GEMM_PATH_DOT_FAST_TICKS, ticks);
+        }
+        Path::WidthFast => {
+            counter!(REDUCE_GEMM_PATH_WIDTH_FAST_CALLS, 1);
+            counter!(REDUCE_GEMM_PATH_WIDTH_FAST_TICKS, ticks);
+        }
+        Path::ConvTile => {
+            counter!(REDUCE_GEMM_PATH_CONV_TILE_CALLS, 1);
+            counter!(REDUCE_GEMM_PATH_CONV_TILE_TICKS, ticks);
+        }
+        Path::Generic => {
+            counter!(REDUCE_GEMM_PATH_GENERIC_CALLS, 1);
+            counter!(REDUCE_GEMM_PATH_GENERIC_TICKS, ticks);
+        }
+    }
+}
+
+/// Snapshot of the eight gemm-restricted route-census counters:
+/// `(dot_fast_calls, dot_fast_ticks, width_fast_calls, width_fast_ticks,
+/// conv_tile_calls, conv_tile_ticks, generic_calls, generic_ticks)`.
+#[must_use]
+pub fn reduce_gemm_path_totals() -> (u64, u64, u64, u64, u64, u64, u64, u64) {
+    (
+        REDUCE_GEMM_PATH_DOT_FAST_CALLS.get(),
+        REDUCE_GEMM_PATH_DOT_FAST_TICKS.get(),
+        REDUCE_GEMM_PATH_WIDTH_FAST_CALLS.get(),
+        REDUCE_GEMM_PATH_WIDTH_FAST_TICKS.get(),
+        REDUCE_GEMM_PATH_CONV_TILE_CALLS.get(),
+        REDUCE_GEMM_PATH_CONV_TILE_TICKS.get(),
+        REDUCE_GEMM_PATH_GENERIC_CALLS.get(),
+        REDUCE_GEMM_PATH_GENERIC_TICKS.get(),
+    )
+}
+
+/// Resets the eight gemm-restricted route-census counters to zero.
+pub fn reset_reduce_gemm_path() {
+    let _ = REDUCE_GEMM_PATH_DOT_FAST_CALLS.snapshot_and_reset();
+    let _ = REDUCE_GEMM_PATH_DOT_FAST_TICKS.snapshot_and_reset();
+    let _ = REDUCE_GEMM_PATH_WIDTH_FAST_CALLS.snapshot_and_reset();
+    let _ = REDUCE_GEMM_PATH_WIDTH_FAST_TICKS.snapshot_and_reset();
+    let _ = REDUCE_GEMM_PATH_CONV_TILE_CALLS.snapshot_and_reset();
+    let _ = REDUCE_GEMM_PATH_CONV_TILE_TICKS.snapshot_and_reset();
+    let _ = REDUCE_GEMM_PATH_GENERIC_CALLS.snapshot_and_reset();
+    let _ = REDUCE_GEMM_PATH_GENERIC_TICKS.snapshot_and_reset();
+}
+
 // per-parallel-node wall-clock breakdown for `cpu::run_chunks_threaded` /
 // `cpu::evaluate_node_parallel`: where does thread::scope time actually go.
 pub static PARALLEL_NODES: Counter = Counter::new("proxima_tensor.parallel_nodes");
@@ -512,6 +593,79 @@ pub fn q4k_shape_snapshot() -> Vec<(u64, u64, u64, u64, u64)> {
 
 pub fn reset_q4k_shape_buckets() {
     let mut buckets = Q4K_SHAPE_TICKS.lock().unwrap_or_else(PoisonError::into_inner);
+    buckets.clear();
+}
+
+// width-gate-decline task (2026-09-01): `width_tile_plan` (`cpu.rs`) has
+// eight `return None` points, and the `Path::WidthFast` label
+// (`record_reduce_gemm_path_ticks`) commits identically whether a node's
+// `None` sent it through the untiled per-element scalar loop at
+// `run_reduce`'s tail or whether it never got that far at all -- the label
+// alone cannot name which of the 96 BGE `MatMul` folds declined, or why.
+// Keyed by `(NodeId, reason)` the same shape `Q4K_SHAPE_TICKS` above uses
+// for `(rows, k)`: one node structurally hits the same condition on every
+// call (the gate is a function of the node's fixed shape/layout, not of
+// per-call data), so `calls` is a witness the decline is not a one-off, and
+// the shape/stride fields are the first-observed values, not an average.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum WidthDeclineReason {
+    /// `!FUSED_MULTIPLY_ADD || reduce_op != ScalarOp::Add`.
+    NoFusedMultiplyAdd,
+    /// The fused body is not `BodyShape::Binary(ScalarOp::Multiply, ..)`.
+    NotMultiplyAddBody,
+    /// `init` is `ReduceInit::FirstElement` (unseeded).
+    FirstElementInit,
+    /// `leading_output_axes.len() != 1 || reduction_dims.len() != 1`.
+    AxesShape,
+    /// `width < WIDTH_TILE_VECS * 4`.
+    NarrowWidth,
+    /// `last_output_dim` is `None`.
+    NoOutputDim,
+    /// Either operand carries a gather (`IndexMap` with a computed index).
+    Gathered,
+    /// Neither operand pairs `(width-stride 0, width-stride 1)` — the tile
+    /// needs exactly one operand row-broadcast and the other column-major
+    /// over the width dim; any other stride pairing declines here.
+    StrideLayout,
+}
+
+/// `calls`, then the first-observed `(m, k, n, stride_a, stride_b)` at the
+/// point of decline — `-1` for any field not yet resolvable when that
+/// particular condition fires (e.g. `AxesShape` fires before `m`/`k` can be
+/// read off `leading_output_axes[0]`/`reduction_dims[0]`, since those are
+/// exactly the indices that condition rejects).
+pub type WidthDeclineTotals = (u64, i64, i64, i64, i64, i64);
+
+/// One [`width_tile_decline_snapshot`] row: `(node, reason, calls, m, k, n,
+/// stride_a, stride_b)` — factored out purely to clear clippy's
+/// `type_complexity` lint on the `Vec` return type, not a new domain concept.
+pub type WidthDeclineRow = (u32, WidthDeclineReason, u64, i64, i64, i64, i64, i64);
+
+static WIDTH_TILE_DECLINE: Mutex<BTreeMap<(u32, WidthDeclineReason), WidthDeclineTotals>> = Mutex::new(BTreeMap::new());
+
+/// Records one `width_tile_plan` decline for `node`, first-observed shape
+/// `(m, k, n)` and operand strides `(stride_a, stride_b)` (`-1` where not
+/// resolvable at that decline point, see [`WidthDeclineTotals`]).
+pub fn record_width_tile_decline(node: NodeId, reason: WidthDeclineReason, m: i64, k: i64, n: i64, stride_a: i64, stride_b: i64) {
+    let mut buckets = WIDTH_TILE_DECLINE.lock().unwrap_or_else(PoisonError::into_inner);
+    let entry = buckets.entry((node.0, reason)).or_insert((0, m, k, n, stride_a, stride_b));
+    entry.0 += 1;
+}
+
+/// Every distinct `(NodeId, reason)` decline recorded since the last
+/// [`reset_width_tile_decline`], as `(node, reason, calls, m, k, n,
+/// stride_a, stride_b)` — sorted by key (`BTreeMap` iteration order).
+#[must_use]
+pub fn width_tile_decline_snapshot() -> Vec<WidthDeclineRow> {
+    let buckets = WIDTH_TILE_DECLINE.lock().unwrap_or_else(PoisonError::into_inner);
+    buckets
+        .iter()
+        .map(|(&(node, reason), &(calls, m, k, n, stride_a, stride_b))| (node, reason, calls, m, k, n, stride_a, stride_b))
+        .collect()
+}
+
+pub fn reset_width_tile_decline() {
+    let mut buckets = WIDTH_TILE_DECLINE.lock().unwrap_or_else(PoisonError::into_inner);
     buckets.clear();
 }
 

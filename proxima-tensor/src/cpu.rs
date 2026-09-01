@@ -6773,6 +6773,14 @@ fn run_reduce<B: Deref<Target = [f32]>>(
     } else {
         Path::Generic
     };
+    // route-census task (2026-09-01): computed once here, alongside `path`,
+    // so every one of this function's four `record_reduce_path_ticks` call
+    // sites can also feed `instrument::record_reduce_gemm_path_ticks` --
+    // see that function's own doc for why the all-reduce `path` counters
+    // alone cannot isolate the 96 `MatMul` folds from BGE's 74 small
+    // single-operand reduces.
+    #[cfg(feature = "instrument")]
+    let is_gemm = reduce_is_gemm_shaped(resolved);
     // per-path-kind wall time (residual-profile task, 2026-08-30): started
     // once `path` is known, committed at whichever of this function's three
     // early returns (or its own tail) actually fires — see
@@ -6855,7 +6863,11 @@ fn run_reduce<B: Deref<Target = [f32]>>(
                 counters.output_writes += leading_total * width as u64;
                 let distinct_operand_elements: u64 = raw.iter().map(|buffer| buffer.len() as u64).sum();
                 counters.commit(path, distinct_operand_elements);
-                instrument::record_reduce_path_ticks(path, instrument::elapsed_ticks(commit_started));
+                let elapsed = instrument::elapsed_ticks(commit_started);
+                instrument::record_reduce_path_ticks(path, elapsed);
+                if is_gemm {
+                    instrument::record_reduce_gemm_path_ticks(path, elapsed);
+                }
             }
             return Ok(());
         }
@@ -6919,7 +6931,11 @@ fn run_reduce<B: Deref<Target = [f32]>>(
                 counters.output_writes += plan.m_total as u64 * plan.n_total as u64;
                 let distinct_operand_elements: u64 = raw.iter().map(|buffer| buffer.len() as u64).sum();
                 counters.commit(Path::ConvTile, distinct_operand_elements);
-                instrument::record_reduce_path_ticks(Path::ConvTile, instrument::elapsed_ticks(commit_started));
+                let elapsed = instrument::elapsed_ticks(commit_started);
+                instrument::record_reduce_path_ticks(Path::ConvTile, elapsed);
+                if is_gemm {
+                    instrument::record_reduce_gemm_path_ticks(Path::ConvTile, elapsed);
+                }
             }
             return Ok(());
         }
@@ -6995,7 +7011,11 @@ fn run_reduce<B: Deref<Target = [f32]>>(
                 counters.leading_iters += leading_total;
                 counters.output_writes += leading_total * width as u64;
                 counters.commit(path, distinct_operand_elements);
-                instrument::record_reduce_path_ticks(path, instrument::elapsed_ticks(commit_started));
+                let elapsed = instrument::elapsed_ticks(commit_started);
+                instrument::record_reduce_path_ticks(path, elapsed);
+                if is_gemm {
+                    instrument::record_reduce_gemm_path_ticks(path, elapsed);
+                }
             }
             return Ok(());
         }
@@ -7444,7 +7464,11 @@ fn run_reduce<B: Deref<Target = [f32]>>(
     {
         let distinct_operand_elements: u64 = raw.iter().map(|buffer| buffer.len() as u64).sum();
         counters.commit(path, distinct_operand_elements);
-        instrument::record_reduce_path_ticks(path, instrument::elapsed_ticks(commit_started));
+        let elapsed = instrument::elapsed_ticks(commit_started);
+        instrument::record_reduce_path_ticks(path, elapsed);
+        if is_gemm {
+            instrument::record_reduce_gemm_path_ticks(path, elapsed);
+        }
     }
     #[cfg(all(target_arch = "aarch64", feature = "instrument"))]
     {
@@ -8464,58 +8488,236 @@ struct WidthTilePlan {
     seed: f32,
 }
 
+/// Whether `dims` (`resolve_reduce_axis_shape`'s own outer-to-inner order)
+/// compose into ONE virtual axis this operand's `layout` can be walked with
+/// a single constant stride — `Some((combined_extent, stride))`, `None` the
+/// first time the chain breaks. Weaker than [`reduction_is_fully_flat`]:
+/// that function additionally demands the innermost stride equal `1` (a
+/// literal contiguous span); this only demands each outer dim's stride equal
+/// the product of every extent nested inside it, relative to whatever the
+/// innermost stride actually is — the general row-major-VIEW condition, not
+/// the stronger row-major-STORAGE one. `attn_o`'s weight operand (`[heads,
+/// head_dim]` reducing into a `[384,384]` matrix laid out `[in=384,
+/// out=384]`) composes with stride `384` (its own `out`-axis width), never
+/// `1` — `reduction_is_fully_flat` would wrongly decline it.
+#[cfg(target_arch = "aarch64")]
+fn composed_reduction_stride(resolved: &BoundOp, dims: &[u16], layout: &bind::Layout) -> Option<(i64, i64)> {
+    let (&innermost, outer_dims) = dims.split_last()?;
+    let stride = layout.stride(innermost);
+    let mut extent_total = resolved.extents[innermost as usize] as i64;
+    for &dim in outer_dims.iter().rev() {
+        if layout.stride(dim) != stride.saturating_mul(extent_total) {
+            return None;
+        }
+        extent_total = extent_total.saturating_mul(resolved.extents[dim as usize] as i64);
+    }
+    Some((extent_total, stride))
+}
+
 /// Resolves [`WidthTilePlan`] once per bound op, or `None` when this node
 /// does not match the shape the tile is built for. Every condition here is
 /// checked once, never per element.
 #[cfg(target_arch = "aarch64")]
 fn width_tile_plan(context: &WidthPathContext) -> Option<WidthTilePlan> {
+    // width-gate-decline task (2026-09-01): every `return None` below also
+    // records WHICH condition rejected the node, restricted to the 96
+    // gemm-shaped `MatMul` folds (`reduce_is_gemm_shaped`) so the table
+    // does not also collect the 74 small LayerNorm/softmax reduces that
+    // structurally reach this function too. `-1` marks a shape/stride
+    // field not yet resolvable at that decline point -- see
+    // `instrument::WidthDeclineTotals`'s own doc for which fields that is,
+    // per reason.
+    #[cfg(feature = "instrument")]
+    let record_decline = |reason: instrument::WidthDeclineReason, m: i64, k: i64, n: i64, stride_a: i64, stride_b: i64| {
+        if reduce_is_gemm_shaped(context.resolved) {
+            instrument::record_width_tile_decline(context.resolved.node, reason, m, k, n, stride_a, stride_b);
+        }
+    };
+    #[cfg(feature = "instrument")]
+    let width_i64 = context.width as i64;
+
     if !FUSED_MULTIPLY_ADD || context.reduce_op != ScalarOp::Add {
+        #[cfg(feature = "instrument")]
+        record_decline(instrument::WidthDeclineReason::NoFusedMultiplyAdd, -1, -1, width_i64, -1, -1);
         return None;
     }
     let (operand_a, operand_b) = match *context.shape {
         BodyShape::Binary(ScalarOp::Multiply, operand_a, operand_b) => (operand_a, operand_b),
-        _ => return None,
+        _ => {
+            #[cfg(feature = "instrument")]
+            record_decline(instrument::WidthDeclineReason::NotMultiplyAddBody, -1, -1, width_i64, -1, -1);
+            return None;
+        }
     };
+    #[cfg(feature = "instrument")]
+    let stride_a_early = context.strides[operand_a as usize];
+    #[cfg(feature = "instrument")]
+    let stride_b_early = context.strides[operand_b as usize];
     if matches!(context.init, ReduceInit::FirstElement) {
+        #[cfg(feature = "instrument")]
+        record_decline(instrument::WidthDeclineReason::FirstElementInit, -1, -1, width_i64, stride_a_early, stride_b_early);
         return None;
     }
-    if context.leading_output_axes.len() != 1 || context.reduction_dims.len() != 1 {
+    // ROW 210 (width-gate-decline task, 2026-09-01): the per-`NodeId` census
+    // (`instrument::width_tile_decline_snapshot`) named all 36 of BGE's
+    // declined `MatMul` folds as `AxesShape` and split them into two real
+    // classes, neither the originally-suspected stride-layout condition:
+    // 24 (`Q@K^T`/`softmax@V`) carry a genuine 2-axis LEADING walk
+    // (`[heads, seq_q]`, heads never extent 1 -- still declined below,
+    // unchanged), and 12 (`attention/output/dense`, `attn_o`) carry a
+    // 2-axis REDUCTION (`[heads, head_dim]`, `12 x 32 == 384`) that measured
+    // fully row-major-composable for BOTH operands at every one of BGE's 12
+    // layers (`stride(heads) == stride(head_dim) * extent(head_dim)`,
+    // `docs/discipline.md` ROW 210's own trace) -- `attn_o`'s weight was
+    // never algebraically reshaped back to a flat `[384,384]`, but its
+    // physical layout already IS that matrix. `composed_reduction_stride`
+    // below proves this per-call rather than assuming it: any node whose
+    // operands do NOT compose (a non-contiguous view) still declines,
+    // unchanged.
+    if context.leading_output_axes.is_empty() || context.reduction_dims.is_empty() {
+        #[cfg(feature = "instrument")]
+        record_decline(instrument::WidthDeclineReason::AxesShape, -1, -1, width_i64, stride_a_early, stride_b_early);
         return None;
     }
+    let mut leading_dim = context.leading_output_axes[0];
+    let mut non_degenerate_leading_axes = 0u32;
+    for &axis in context.leading_output_axes {
+        if context.resolved.extents[axis as usize] != 1 {
+            non_degenerate_leading_axes += 1;
+            leading_dim = axis;
+        }
+    }
+    if non_degenerate_leading_axes > 1 {
+        #[cfg(feature = "instrument")]
+        record_decline(instrument::WidthDeclineReason::AxesShape, -1, -1, width_i64, stride_a_early, stride_b_early);
+        return None;
+    }
+    #[cfg(feature = "instrument")]
+    let leading_total_early = context.resolved.extents[leading_dim as usize] as i64;
+    #[cfg(feature = "instrument")]
+    let reduction_total_early: i64 = context.reduction_dims.iter().map(|&dim| context.resolved.extents[dim as usize] as i64).product();
     if context.width < WIDTH_TILE_VECS * 4 {
+        #[cfg(feature = "instrument")]
+        record_decline(
+            instrument::WidthDeclineReason::NarrowWidth,
+            leading_total_early,
+            reduction_total_early,
+            width_i64,
+            stride_a_early,
+            stride_b_early,
+        );
         return None;
     }
-    let last_output_dim = context.last_output_dim?;
+    let Some(last_output_dim) = context.last_output_dim else {
+        #[cfg(feature = "instrument")]
+        record_decline(
+            instrument::WidthDeclineReason::NoOutputDim,
+            leading_total_early,
+            reduction_total_early,
+            width_i64,
+            stride_a_early,
+            stride_b_early,
+        );
+        return None;
+    };
 
     let operands = context.resolved.operands();
     let (_, layout_a_raw, gather_a) = &operands[operand_a as usize];
     let (_, layout_b_raw, gather_b) = &operands[operand_b as usize];
     if gather_a.is_some() || gather_b.is_some() {
+        #[cfg(feature = "instrument")]
+        record_decline(
+            instrument::WidthDeclineReason::Gathered,
+            leading_total_early,
+            reduction_total_early,
+            width_i64,
+            stride_a_early,
+            stride_b_early,
+        );
         return None;
     }
     let (a_operand, layout_a, b_operand, layout_b) =
         match (context.strides[operand_a as usize], context.strides[operand_b as usize]) {
             (0, 1) => (operand_a as usize, layout_a_raw, operand_b as usize, layout_b_raw),
             (1, 0) => (operand_b as usize, layout_b_raw, operand_a as usize, layout_a_raw),
-            _ => return None,
+            _ => {
+                #[cfg(feature = "instrument")]
+                record_decline(
+                    instrument::WidthDeclineReason::StrideLayout,
+                    leading_total_early,
+                    reduction_total_early,
+                    width_i64,
+                    stride_a_early,
+                    stride_b_early,
+                );
+                return None;
+            }
         };
 
-    let leading_dim = context.leading_output_axes[0];
-    let reduction_dim = context.reduction_dims[0];
+    // single reduction axis: unchanged, direct `layout.stride`/`extents`
+    // read. Multi-axis (`attn_o`'s `[heads, head_dim]`): both operands must
+    // independently compose to one constant-stride virtual axis --
+    // `composed_reduction_stride`'s own doc has the proof. Declines
+    // (`AxesShape`, late) rather than panicking when either operand's
+    // combined extent disagrees with the other or either fails to compose,
+    // which every OTHER width-fast node with `reduction_dims.len() == 1`
+    // structurally cannot reach (this branch is unique to the multi-axis
+    // case, gated on the same length check either arm shares).
+    let (k_stride_a, k_stride_b, reduction_total) = if let [reduction_dim] = *context.reduction_dims {
+        (layout_a.stride(reduction_dim), layout_b.stride(reduction_dim), context.resolved.extents[reduction_dim as usize] as usize)
+    } else {
+        let Some((extent_a, stride_a)) = composed_reduction_stride(context.resolved, context.reduction_dims, layout_a) else {
+            #[cfg(feature = "instrument")]
+            record_decline(
+                instrument::WidthDeclineReason::AxesShape,
+                leading_total_early,
+                reduction_total_early,
+                width_i64,
+                stride_a_early,
+                stride_b_early,
+            );
+            return None;
+        };
+        let Some((extent_b, stride_b)) = composed_reduction_stride(context.resolved, context.reduction_dims, layout_b) else {
+            #[cfg(feature = "instrument")]
+            record_decline(
+                instrument::WidthDeclineReason::AxesShape,
+                leading_total_early,
+                reduction_total_early,
+                width_i64,
+                stride_a_early,
+                stride_b_early,
+            );
+            return None;
+        };
+        if extent_a != extent_b {
+            #[cfg(feature = "instrument")]
+            record_decline(
+                instrument::WidthDeclineReason::AxesShape,
+                leading_total_early,
+                reduction_total_early,
+                width_i64,
+                stride_a_early,
+                stride_b_early,
+            );
+            return None;
+        }
+        (stride_a, stride_b, extent_a as usize)
+    };
 
     Some(WidthTilePlan {
         a_operand,
         b_operand,
         row_stride_a: layout_a.stride(leading_dim),
         base_a: layout_a.base,
-        k_stride_a: layout_a.stride(reduction_dim),
+        k_stride_a,
         base_b: layout_b.base,
-        k_stride_b: layout_b.stride(reduction_dim),
+        k_stride_b,
         out_base: context.out_layout.base,
         out_row_stride: context.out_layout.stride(leading_dim),
         out_col_stride: context.out_layout.stride(last_output_dim),
         leading_total: context.resolved.extents[leading_dim as usize] as usize,
-        reduction_total: context.resolved.extents[reduction_dim as usize] as usize,
+        reduction_total,
         width: context.width,
         seed: initial_value(context.init).unwrap_or(0.0),
     })

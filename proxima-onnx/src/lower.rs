@@ -151,6 +151,16 @@ pub struct Lowered {
     pub initializers: Vec<(String, Vec<f32>)>,
     pub graph_inputs: Vec<String>,
     pub graph_outputs: Vec<(String, NodeId)>,
+    /// `(NodeId, onnx output tensor name)` for every ONNX `MatMul` node this
+    /// graph declared, in `graph.node` order -- width-gate-decline task
+    /// (2026-09-01): a `NodeId` alone (`op::NodeId`'s own doc: "index of an
+    /// `Op` in the program slice") carries no ONNX semantics, and
+    /// `proxima_tensor::op::Op::Reduce` never stores one either, so a
+    /// per-`NodeId` decline table (`instrument::width_tile_decline_snapshot`)
+    /// has no way to say "this NodeId is `encoder.layer.3.attention.self.key`"
+    /// without this side table. Restricted to `MatMul` (not every node) since
+    /// that is the only op family the decline census names.
+    pub matmul_names: Vec<(NodeId, String)>,
 }
 
 /// Every lower-time-constant side table [`lower_node`] and its callees
@@ -295,8 +305,15 @@ pub fn lower_graph_pinned(graph: &GraphProto<'_>, pins: &BTreeMap<&str, u64>) ->
         return Err(LowerError::EmptyGraph { name: graph.name.to_string() });
     }
 
+    let mut matmul_names = Vec::new();
     for node in &graph.node {
         lower_node(&mut program, &mut values, &mut fold, node)?;
+        if node.op_type == "MatMul"
+            && let Some(output_name) = node.output.first()
+            && let Some(value) = values.get(*output_name)
+        {
+            matmul_names.push((value.node, (*output_name).to_string()));
+        }
     }
 
     let mut graph_outputs = Vec::new();
@@ -322,7 +339,7 @@ pub fn lower_graph_pinned(graph: &GraphProto<'_>, pins: &BTreeMap<&str, u64>) ->
         graph_outputs.push((output.name.to_string(), node));
     }
 
-    Ok(Lowered { program, initializers: fold.initializers, graph_inputs, graph_outputs })
+    Ok(Lowered { program, initializers: fold.initializers, graph_inputs, graph_outputs, matmul_names })
 }
 
 fn lower_node(program: &mut Vec<Op>, values: &mut BTreeMap<String, Value>, fold: &mut FoldState, node: &NodeProto<'_>) -> Result<(), LowerError> {
