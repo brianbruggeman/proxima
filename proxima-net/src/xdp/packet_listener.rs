@@ -41,7 +41,14 @@ const UDP: usize = 8;
 struct Inner {
     socket: XskSocket,
     readiness: Readiness,
+    // Bounded to `sized::APP_RX_QUEUE_CAP` (OverflowPolicy::Drop — a
+    // datagram here already left the UMEM frame pool, so this is the
+    // userspace socket-receive-buffer analog; UDP has no flow control, so
+    // dropping the newest datagram on a full receive buffer mirrors kernel
+    // `SO_RCVBUF` overflow, not a defect). See `rx_queue_dropped` for the
+    // pressure observable.
     rx_queue: VecDeque<Packet>,
+    rx_queue_dropped: u64,
     arp: HashMap<[u8; 4], [u8; 6]>,
 }
 
@@ -115,6 +122,7 @@ impl XdpPacketListener {
                 socket,
                 readiness,
                 rx_queue: VecDeque::new(),
+                rx_queue_dropped: 0,
                 arp: HashMap::new(),
             }),
             our_mac,
@@ -123,6 +131,18 @@ impl XdpPacketListener {
             local_addr: SocketAddr::V4(bind),
             _program: program,
         })
+    }
+
+    /// Count of datagrams dropped because `rx_queue` was at
+    /// `sized::APP_RX_QUEUE_CAP` — the pressure observable for that
+    /// queue's `OverflowPolicy::Drop` (see `Inner::rx_queue`'s doc).
+    #[must_use]
+    pub fn rx_queue_dropped(&self) -> u64 {
+        let inner = match self.inner.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        inner.rx_queue_dropped
     }
 }
 
@@ -166,11 +186,15 @@ impl Inner {
                             self.arp.insert(src.ip().octets(), src_mac);
                             let dst =
                                 SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::from(our_ip), our_port));
-                            self.rx_queue.push_back(Packet {
-                                src: SocketAddr::V4(src),
-                                dst,
-                                data,
-                            });
+                            if self.rx_queue.len() < sized::APP_RX_QUEUE_CAP {
+                                self.rx_queue.push_back(Packet {
+                                    src: SocketAddr::V4(src),
+                                    dst,
+                                    data,
+                                });
+                            } else {
+                                self.rx_queue_dropped += 1;
+                            }
                         }
                         self.socket.umem_mut().free_frame(desc.addr);
                     }
