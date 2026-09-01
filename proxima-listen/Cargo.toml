@@ -114,7 +114,17 @@ tls = ["std", "dep:proxima-tls"]
 # tokio fallback restored by this feature.
 tokio = ["std", "dep:tokio", "proxima-net?/tokio"]
 # Generic byte-stream `ListenProtocol` adapters over a `StreamListener`.
-stream = ["std", "dep:proxima-net", "dep:async-stream", "dep:proxima-codec"]
+# `default_listener.rs`'s `spawn_handler` shares its bounded `release_tx`
+# across every finishing connection through `proxima_primitives::sync::
+# AsyncMutex` (waker-based async gate, tokio-free) instead of minting a
+# fresh `Sender` clone per connection — needs `async-mutex`.
+stream = [
+    "std",
+    "dep:proxima-net",
+    "dep:async-stream",
+    "dep:proxima-codec",
+    "proxima-primitives/async-mutex",
+]
 # `FramedAny<C>` — the generic stateless `AnyProtocol` driver over any
 # `proxima_codec::FrameCodec` (memcached/dns-tcp/stateless-kafka-lite
 # shape). Needs `proxima-codec` for the codec trait itself and
