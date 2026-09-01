@@ -16963,3 +16963,143 @@ Phase A's own `profile_inference.py` IS checked into this branch's `proxima-onnx
 **Opt-sweep (mandatory axes, this row's own `try_run_accelerate_conv_gemm`):** state machine -- N/A, a leaf routing decision inside an existing `if let Some(plan)` branch, no new state; bytes-first -- N/A, f32 throughout, matches the NEON path it replaces; borrowed views -- DONE, reads `raw[plan.index_m]`/`raw[plan.index_n]` directly, no copy; zero-copy -- DONE, no packing, pointer arithmetic only (the specific improvement over the task's own suggested im2col fallback); copy-over-clone -- N/A; SIMD -- N/A directly (delegates to Accelerate's own AMX/NEON codegen); stack-over-heap -- DONE, zero heap allocation (stated budget above); branchless -- N/A, `outer_extent` (`ci`, at most 16 for these shapes) BLAS calls, not a per-element branch; no dynamic dispatch -- DONE, direct `extern "C"` FFI, no trait object; O(1) -- N/A, O(outer_extent) BLAS calls per node, same complexity class as the NEON tile's own O(outer_extent) accumulation loop.
 
 **Decision: NOT promoted, default-off** (unchanged toggle default, same gate-1 discipline as ROW 188). **This row's own data is a real, not tied, win** -- unlike ROW 188, there is a positive case for landing this default-on for `aarch64`+macOS `Conv` nodes specifically, but the promotion decision itself belongs to the owner (principle 19: this is a conclusion, not a decision), and this session's own residuals (CoV-across-runs not captured for the micro cell, logit deviation not captured, allocator-instrumented test not added, `larger_square`'s NEON arm not captured) are real gaps a promotion decision should close first. Residuals carried forward, named not hidden: (1) micro-cell CoV across repeat process-runs, unmeasured (1 run/arm this session, time-boxed); (2) direct max-abs/max-rel logit deviation between routes, unmeasured; (3) allocator-instrumented test for the stated zero-allocation budget, unmeasured (code-inspection only); (4) `larger_square` shape's NEON arm, unmeasured (Accelerate-only data point, not paired).
+
+## ROW 190 -- the tile pipeline's register-blocked conv kernel (`dot_chunked_k4_tile_multirow::<4>`, conv2/conv3's own hot path, ROW 171's sealed form) is disassembly-diagnosed: its 16 independent accumulators (ROW 171's own headline lever) are real, but LLVM's auto-vectorizer wraps them in a TRANSPOSE-based cross-lane shape (5 shuffle ops + 8 scalar window loads + 8 lane-inserts = 21 overhead instructions per K-chunk, none of which the single-lane `dot_chunked_k4` shape pays) instead of the intended load-vector-per-operand shape -- explicit aarch64 intrinsics force the intended shape by construction, landing conv3 **-19.9%**, conv2 **-13.9%**, whole band_kh **-14.9% (1.175x)**, closing the roofline gap from 7.03x to 5.63x on conv3 -- REFUTES the task's own pre-registered diagnosis (a) (single-accumulator FMA latency) as the dominant remaining cause, since ROWS=4's own 16-accumulator shape was ALREADY landed (ROW 171) and only bought 1.3-1.4x, not the 4-8x an accumulator-count theory predicts; the real cause was a vectorizer-shape defect this session's own `objdump` found, not accumulator count
+
+**Numbering note:** originally reserved as ROW 189 at this session's own fetch time (`git fetch origin` against `main` `62c1757`, ROW 188's own commit). A parallel branch (`probe/conv-sgemm`, off the same `62c1757`) landed its own ROW 189 first; the landing integrator renumbered this row to 190 on collision, per this task's own instruction.
+
+Repo: `/Users/brianbruggeman/repos/slot-0/proxima-wt-convk`, branch `perf/conv-tile-blocking`, off `main` `62c1757`. Host: Apple M1 Max, macOS, arm64 (Darwin 24.6.0). Build profile: `release` for every timed number and every disassembly excerpt below (`cargo build --release -p proxima-onnx --bench tile_pipeline --features tile-pipeline-bench`, binary run directly, never `cargo bench`, per ROW 169's own established convention); `dev` for clippy/doc, never mixed with a timed run. **Host loadout: a sibling worktree's own nextest run (`proxima-wt-convamx`, a DIFFERENT session, confirmed via `pgrep` command-line, its own separate `CARGO_TARGET_DIR`) started partway through this session's own measurement window and stayed resident (`uptime` load average 12-20 at session start, spiking to 30-95 once it started) -- every timed table below states per-run loadout and flags the runs it hit, and the load-bearing before/after comparison uses ONLY the runs whose own in-process profiler reading (see below) came back internally consistent with its own sibling runs, exactly ROW 169's own "profiler survives contention, criterion's collection window does not" finding, re-confirmed this session.**
+
+### Allocation budget, stated first (per guiding-principles' hot-path defaults)
+
+Unchanged from ROW 158/169/171: **341/229/197 allocations** (band1/band_kh/band_2kh, one full forward pass, single image) -- re-confirmed this session via the same counting `#[global_allocator]` wrapper (`benches/tile_pipeline.rs`), printed identically on every run before and after this row's own change. The intrinsics restructure touches only the `dot_chunked_k4_tile_multirow` kernel body (register/stack arithmetic, one small on-stack `[[float32x4_t; TILE_COLS]; ROWS]` accumulator array, never heap) -- zero new heap allocation anywhere, hot or setup path.
+
+### Diagnosis (gate 10 evidence, this session's own `objdump -d --demangle`, not cited)
+
+Built the sealed ROW 171 bench binary (`cargo build --release -p proxima-onnx --bench tile_pipeline --features tile-pipeline-bench`) and pulled the hot loop of `dot_chunked_k4_tile_multirow::<4>` (the conv2/conv3 call site) via `nm -C <bin> | grep dot_chunked_k4_tile_multirow` to locate both monomorphizations, then `objdump -d --demangle <bin>`. The loop body (the block between the `chunk_index` compare and its own `b.ne` back-edge) tallies to:
+
+| instruction class | count | purpose |
+|---|---|---|
+| `ldr q` (weight, one per lane) | 4 | load `weight_rows[lane][chunk_index]` |
+| `ldp s,s` (window, scalar pairs) | 8 | load `windows[row][chunk_index]` as 4 SEPARATE scalar floats per row (not one vector load) |
+| `zip1.4s` / `trn2.4s` / `zip2.4s` / `uzp2.4s`x2 | 5 | TRANSPOSE the 4 per-lane weight vectors into 4 per-k-position cross-lane vectors |
+| `mov.s` (lane insert) | 8 | complete the transpose (insert the 3rd/4th lane per transposed vector) |
+| `fmla.4s` | **16** | the useful work: 4 rows x 4 lanes, broadcast-multiplying one transposed-weight vector against one window scalar |
+| **total loop-body instructions** | **41** | for 16 useful `fmla.4s` |
+
+**Mechanism:** LLVM's auto-vectorizer, given BOTH a `row` axis and a `lane` axis to vectorize across (the accumulator is `[[f32; 4]; TILE_COLS]; ROWS]`, and `window_chunk[element]` is invariant across `lane` while `weight_chunk_values[lane][element]` is invariant across `row`), chose to TRANSPOSE the weight operand into per-k-position cross-lane vectors and broadcast-multiply the window scalar against it -- economically defensible in isolation (one scalar broadcast serves 4 lanes) but paying 21 shuffle/scalar-load/lane-insert instructions per K-chunk to do it, on top of the 16 `fmla.4s` that are the only useful work. ROW 158's single-lane `dot_chunked_k4` has no `lane` axis to transpose across and never hits this shape (confirmed: its own hot loop is 1 weight `ldr q` + 1 window `ldr q` + 1 `fmla.4s` + branch, unchanged this session). This is a DIFFERENT root cause from ROW 158's original bug (4 independent SCALAR `fmadd`, zero SIMD) -- this shape is packed `fmla.4s` throughout, correctly vectorized, just carrying an expensive data-reshuffle tax the source code's own intent (`gemm_tile_neon`'s documented "one shared load feeds independent lane accumulators" idiom) never asked for.
+
+**Refutation of the task's own pre-registered diagnosis (a).** The task's candidate (a) predicted the dominant cost was FMA-latency from too few independent accumulator chains, with an N-accumulator lever worth "~min(N,8)x". ROW 171 (already landed, this tree's own sealed state at fetch time) already runs 16 independent accumulators (`ROWS=4 x TILE_COLS=4`) -- yet ROW 169->170->171's own cumulative gain on conv3 was only 351.455us -> 244.94us, **1.435x**, far short of an 8x (or even 4x) accumulator-count prediction. That data, re-read from the existing log rather than re-measured, already refutes (a) as the dominant remaining cause before this session built anything; this session's own disassembly names what the real cost is instead (the transpose tax above), and the fix targets that, not accumulator count (accumulator count is UNCHANGED by this row -- still exactly 16, same `[[float32x4_t; TILE_COLS]; ROWS]` shape, now held in registers without a transpose).
+
+Diagnosis candidates (b) (`gather_window` copy) and (c) (blocking too narrow) were NOT re-investigated this session -- ROW 172 already measured and ruled out (b) (gather is amortized to 2.1-3.1% of stage time, sub-10%-bar) and (a)'s own refutation (above) subsumes (c) (ROW 171 already found ROWS=4 the sweep winner over ROWS=1/2, so "too narrow" is not the open question; the winning width's own COMPILED SHAPE was the problem).
+
+### The lever: explicit aarch64 intrinsics, forcing the intended shape by construction
+
+`dot_chunked_k4_tile_multirow` is split `#[cfg(target_arch = "aarch64")]` (the fast path, `vld1q_f32`/`vfmaq_f32`/`vaddvq_f32`, one `unsafe` block, SAFETY comment citing the bound invariant every call site already enforces) vs `#[cfg(not(target_arch = "aarch64"))]` (the original safe portable nested-loop form, kept verbatim as the correctness-preserving fallback for any other target). Per guiding-principles §20 (box-free/no-`unsafe`-by-default, prefer the safe form "unless there is genuinely no alternative"): ROW 158 already tried this exact trade for the SINGLE-lane case and correctly rejected `unsafe` (the safe form matched intrinsics within a noise-adjacent ~1.5%, no structural defect to fix). This row's own disassembly shows that decision does NOT transfer to the multi-row/multi-lane case -- the safe form is not marginally slower here, it compiles to a DIFFERENT, disassembly-confirmed-worse instruction stream (the transpose tax above), which is exactly the "genuinely no alternative" bar §20 sets: the auto-vectorizer heuristic cannot be steered to the intended shape by restructuring the safe Rust alone within this session's budget, and the intrinsics form removes the ambiguity by construction.
+
+**After, this session's own `objdump` on the rebuilt bench binary**, same function, same call site:
+
+```
+10000bb08: ldr q24, [x9], #0x10      ; weight lane0 chunk
+10000bb0c: ldr q25, [x11], #0x10     ; weight lane1 chunk
+10000bb10: ldr q26, [x14], #0x10     ; weight lane2 chunk
+10000bb14: ldr q27, [x15], #0x10     ; weight lane3 chunk
+10000bb18: ldr q28, [x16], #0x10     ; window row0 chunk
+10000bb1c: fmla.4s v23, v24, v28     ; row0 x lane0
+10000bb20: fmla.4s v22, v25, v28     ; row0 x lane1
+10000bb24: fmla.4s v21, v26, v28     ; row0 x lane2
+10000bb28: ldr q29, [x17], #0x10     ; window row1 chunk
+10000bb2c: fmla.4s v20, v27, v28     ; row0 x lane3
+10000bb30: fmla.4s v19, v24, v29     ; row1 x lane0
+...                                   ; (16 fmla.4s total, 4 rows x 4 lanes)
+10000bb68: subs x13, x13, #0x1
+10000bb6c: b.ne 0x10000bb08
+```
+8 vector loads (4 weight + 4 window, one each, post-increment addressing) + 16 `fmla.4s` + `subs`/`b.ne` = **26 loop-body instructions for the same 16 useful `fmla.4s`**, zero shuffles, zero scalar loads, zero lane-inserts -- exactly the predicted shape. Re-prove: `nm -C <bin> | grep dot_chunked_k4_tile_multirow` (locate both `::<1>`/`::<4>` addresses), then `objdump -d --demangle <bin> | grep -A120 '<tile_pipeline::tile_pipeline::dot_chunked_k4_tile_multirow::<4>>:'`.
+
+Stack-spill check (gate 10/11, mirroring ROW 171's own check): the 16 accumulators stay in `v0-v7`/`v16-v23` for the FULL duration of the K-chunk loop (confirmed by reading the loop body -- no `str`/`stp` inside it); a one-time `stp q,q,[sp,...]` spill of the 16 accumulators to the stack happens ONLY in the epilogue (after the loop, before the horizontal-sum/remainder code), amortized over `chunk_count` (9/18/36 for conv1/conv2/conv3) iterations -- not a per-iteration cost, unlike ROW 171's own concern about spills inside the loop, which this row does not have either.
+
+### Pre-registered prediction (before measuring)
+
+Removing 21 of 41 loop-body instructions (the shuffle/scalar-load/lane-insert overhead), keeping the same 16 `fmla.4s`, predicted a substantial reduction on conv2/conv3 specifically if the M1's permute/lane-insert ports (narrower than its 4 FMA-capable NEON pipes) were the binding constraint -- stated as a wide band (1.3-2.5x on conv2/conv3) rather than a point estimate, since the M1's exact port width for `zip`/`trn`/`uzp`/`mov.s` was not independently measured this session (ASSUMED from general Apple-core microarchitecture characteristics, not a spec sheet cited). No point prediction was made for the whole-pipeline e2e number pending the per-stage measurement.
+
+### Correctness: differential test AND full-1000 accuracy, both re-run on the final tree
+
+`cargo test --release -p proxima-onnx --test tile_pipeline_differential --features tile-pipeline-bench -- --nocapture`, this session, final (intrinsics) tree: 3 tests, all `ok` -- `direct_call_arm_is_bit_identical_to_andthen_composed_pipeline`, `pipeline_logits_match_sealed_executor_within_reassociation_bound` (the 60/60 reassociation-bound comparisons, unchanged bound), and `pipeline_full_test_split_accuracy_is_exactly_0_9900` (990/1000 = 0.9900 exact). Same count as ROW 158/169/170/171/172 -- the `vfmaq_f32` reduction order is a bounded reassociation relative to the portable form's own tree-reduction, the same category ROW 151's own differential test already documents for this initiative, not a new correctness category.
+
+### Bench (paired before/after, git-diff/checkout swap -- NOT `git stash`, per this session's own worktree-isolation note: `git stash` is repo-global and shares `refs/stash` across sibling worktrees of the same repo, and `proxima-wt-convamx` was active concurrently; used `git diff > patch`, `git checkout --`, rebuild, measure, `git apply patch`, rebuild, measure instead)
+
+**BEFORE (ROW 171 sealed state, this session's own re-measurement), `benches/support/tile_pipeline.rs` reverted via `git checkout --`, rebuilt, binary run directly 3x:**
+
+| run | `uptime` at start | band_kh profiler (200-pass avg, us) | conv2 (us) | conv3 (us) | note |
+|---|---|---|---|---|---|
+| 1 | 12.27 | 463.167 | 129.310 | 244.998 | quiet |
+| 2 | 16.04 | 462.726 | 129.325 | 244.744 | quiet, agrees with run 1 to 0.09% |
+| 3 | (spiked mid-run, `proxima-wt-convamx` nextest started) | 530.803 | 145.420 | 277.441 | **CONTENDED**, flagged, excluded from the paired mean |
+
+**Before mean (2 clean runs): band_kh = 462.947us (CoV 0.07%), conv2 = 129.318us, conv3 = 244.871us.** Corroborates ROW 171's own cross-session sealed number (465.35us) within 0.5%.
+
+**AFTER (this row's intrinsics tree), `git apply` restored, rebuilt, binary run directly 3x, plus one earlier ad-hoc run captured immediately after the first build (4 runs total, host loaded by the same sibling `proxima-wt-convamx` nextest throughout):**
+
+| run | band_kh profiler (200-pass avg, us) | conv2 (us) | conv3 (us) | note |
+|---|---|---|---|---|
+| ad-hoc (first build, before the paired protocol) | 393.086 | 111.756 | 196.093 | quiet at the start, sibling nextest not yet started |
+| 1 | 1087.448 | 119.647 | 530.561 | **CONTENDED**, `proxima-wt-convamx` nextest actively compiling during this specific profiler pass -- excluded |
+| 2 | 394.065 | 111.166 | 196.406 | clean despite `uptime` showing background load (profiler's own low-CoV robustness, per ROW 169's finding) |
+| 3 | 394.569 | 111.076 | 195.949 | clean, agrees with run 2 to 0.13% |
+
+**After mean (3 clean runs): band_kh = 393.907us (CoV 0.19%), conv2 = 111.333us, conv3 = 196.149us.**
+
+### Delta, measured
+
+| stage | before (us) | after (us) | delta | ratio |
+|---|---|---|---|---|
+| conv2 | 129.318 | 111.333 | **-13.91%** | 1.162x |
+| **conv3** | 244.871 | 196.149 | **-19.90%** | 1.249x |
+| **band_kh (whole pipeline)** | 462.947 | 393.907 | **-14.92%** | **1.175x** |
+
+Within the pre-registered 1.3-2.5x band for conv2/conv3 individually: conv3's 1.249x sits just below the low end (1.3x), conv2's 1.162x sits below it too -- **the prediction's lower bound was optimistic; the measured win is real but smaller than hypothesized**, reported honestly rather than rounded up. The likely reason (not independently instrumented this session, named as residual): removing the shuffle/scalar-load overhead also removes some of the LOAD-latency-hiding the transpose's extra instructions incidentally provided by keeping more independent operations in flight; the net win is the DIFFERENCE of two effects, not the full removed-instruction-count's worth.
+
+### GMAC/s and roofline gap (DERIVED from the measured times above and each stage's own MAC count, per ROW 169's own counting convention -- not the task brief's uncited "~0.0035 ns/MAC" figure, which ROW 169 already could not reproduce)
+
+| | before | after |
+|---|---|---|
+| conv3 GMAC/s (1,672,704 MACs / stage time) | 6.831 | 8.527 |
+| conv3 vs 48 GMAC/s roofline | 7.03x over | **5.63x over** |
+| whole-net GMAC/s (2,756,960 MACs / band_kh) | 5.956 | 6.998 |
+| whole-net vs 48 GMAC/s roofline | 8.06x over | **6.86x over** |
+| whole-net vs torch/Accelerate incumbent (0.119ms) | 3.891x slower | **3.31x slower** |
+
+### Vs the pre-registered bars (this task's own framing)
+
+| milestone | this row (band_kh) | met? |
+|---|---|---|
+| torch parity needs ~4x on the conv mass (0.460ms -> ~0.119ms) | 0.4629ms (before) -> 0.3939ms (after) | **NOT MET** -- 1.175x achieved of the ~4x needed; real gap is now 3.31x, down from 3.89x |
+| this session's own e2e pipeline lane (0.460ms cited in the task) | matches this row's own before-measurement (0.4629ms) closely, corroborating the task's own citation | after: 0.3939ms, a real, reproducible, disassembly-explained step, not the whole gap |
+
+**Honest read: this closes roughly a quarter of the remaining gap to torch parity (3.89x -> 3.31x slower), not the "close the ~8x gap" framing the task opened with.** The task's own diagnosis (a) is refuted by this session's own reading of the ALREADY-LANDED ROW 171 data (16 accumulators, only 1.3-1.4x gained) before any new code was written; this row's own new finding (an auto-vectorizer transpose tax, disassembly-confirmed, present only once a `lane` axis joins the `row` axis) is a different, real, and now-fixed cost, worth 1.175x on the whole pipeline and up to 1.249x on the single largest stage -- and the remaining ~5.6-6.9x gap to roofline is dominated by something this session did not touch: the transpose fix's own residual instruction count (26 instructions for 16 useful FMA, still not the theoretical 9-instruction minimum of 4 weight loads + 4 window loads + 16 issue-parallel `fmla.4s` if M1 can retire >1 FMA/cycle across its 4 pipes), the horizontal-sum epilogue's own stack round-trip (named above, not measured for cost), and whatever ROW 172 already found negligible (dispatch floor) or amortized (gather_window) remains negligible/amortized, unchanged.
+
+### `docs/discipline.md` opt-sweep note (§11 sans-IO, updating ROW 158/169/171's own table -- SIMD row only)
+
+SIMD: **UPGRADED from "DONE, autovec" to "DONE, explicit intrinsics (aarch64), autovec fallback (other targets)" for `dot_chunked_k4_tile_multirow` only** -- the single-lane `dot_chunked_k4` (conv1/fc1's own call site) is UNCHANGED, still safe portable autovec, still `fmla.4s`, not touched this row (it has no `lane` axis and was never subject to the transpose defect). Every other axis (state machine N/A, bytes-first/borrowed DONE, zero-copy DONE, copy-over-clone N/A, stack-over-heap DONE -- the accumulator array is register/stack-resident, unchanged from ROW 171's own claim, branchless PARTIAL -- same shape as ROW 158/169's own table, no dynamic dispatch DONE, O(1) extra memory per row N/A-framing) unchanged from ROW 158/169/171's own table, not re-audited (no source outside this one function's body and its `#[cfg]` split changed).
+
+### Gate 15 (no magic numbers)
+
+No new literal introduced: `TILE_COLS` (the same `proxima_tensor::sized::TILE_COLS = 4`, already flagged ROW 155/158/169 as architecture-derived, not a fresh tunable) is reused unchanged. The `4` inside `vld1q_f32`/`float32x4_t`'s own fixed 128-bit width is the SAME architecture-derived NEON lane width the portable form's own `as_chunks::<4>()` already encoded -- not a new debt item, the aarch64-native expression of the identical constant.
+
+### Named, NOT attempted this session (out of the 60-minute budget)
+
+- **Whether M1's permute/lane-insert ports are genuinely narrower than its FMA ports** -- ASSUMED as the mechanism for why the transpose shape was slow, not independently confirmed via `perf`/instruments port-occupancy counters (not available in this sandboxed environment within budget). The instruction-count reduction (41 -> 26 per iteration) and the measured win are both real; the PRECISE microarchitectural reason the transpose shape cost as much as it did is a plausible, evidence-consistent inference, not a directly measured port-contention number -- flagged as a residual, not silently upgraded to a proven mechanism.
+- **conv1/fc1's own `dot_chunked_k4` intrinsics equivalent** -- not attempted; ROW 158 already measured this shape's safe/intrinsics gap at a noise-adjacent ~1.5% (no lane-axis transpose defect exists there), so the same lever is not expected to repeat this row's win, named rather than re-tried inside budget.
+- **The horizontal-sum epilogue's own stack round-trip** (the one-time `stp`/`ldp` spill of the 16 accumulators after the loop) -- named as a candidate for a future row, not measured or optimized this session; amortized over `chunk_count` iterations, plausibly small, not instrumented.
+- **A 5-run (not 3-run) sealed reseal** -- this session's own paired 2-clean/3-clean measurement is reported as-is, with the contended runs named and excluded rather than silently dropped; a future session re-running 5 clean-host repetitions each side would tighten the CoV bound further.
+
+### Re-prove commands
+
+- `cd proxima-wt-convk && CARGO_TARGET_DIR=<scratch> cargo test --release -p proxima-onnx --test tile_pipeline_differential --features tile-pipeline-bench -- --nocapture` -- reproduces 3/3 passed, the 60/60 reassociation-bound line, and the 990/1000 (0.9900) full-split accuracy line
+- `cd proxima-wt-convk && CARGO_TARGET_DIR=<scratch> cargo nextest run -p proxima-onnx --all-features` -- 98 passed, 4 skipped
+- `cd proxima-wt-convk && CARGO_TARGET_DIR=<scratch> cargo clippy -p proxima-onnx --all-targets --all-features -- -D warnings` -- clean, exit 0
+- `cd proxima-wt-convk && CARGO_TARGET_DIR=<scratch> cargo doc -p proxima-onnx --no-deps --all-features` -- clean, exit 0
+- `cd proxima-wt-convk && CARGO_TARGET_DIR=<scratch> cargo build --release -p proxima-onnx --bench tile_pipeline --features tile-pipeline-bench`, then run the produced `deps/tile_pipeline-*` binary directly with `"^tile_pipeline_band_kh$"` as its own first argument (criterion's own filter, NOT `cargo bench`) -- reproduces both the per-stage profiler printout and the `tile_pipeline_band_kh` criterion arm; run 3-5x, check `uptime`/`pgrep 'cargo|rustc'` immediately before each run, and take the profiler line's own mean over the runs that agree with each other to <1% (per this row's own contention-flagging convention)
+- `nm -C <tile_pipeline bench binary> | grep dot_chunked_k4_tile_multirow` then `objdump -d --demangle <bin> | grep -A120 '<tile_pipeline::tile_pipeline::dot_chunked_k4_tile_multirow::<4>>:'` -- reproduces the clean 8-load/16-fmla loop-body excerpt above
+- `git diff 62c1757 HEAD -- proxima-onnx/benches/support/tile_pipeline.rs` -- the entire source change for this row (the `#[cfg(target_arch = "aarch64")]` intrinsics variant plus the unchanged portable fallback); zero lines touched outside this one bench-support file, zero lines in any library crate
