@@ -27,7 +27,7 @@ use crate::pipes::DnsAnswer;
 #[cfg(feature = "client")]
 use crate::pipes::{DnsAnswerMetadata, DnsAnswerRecord, DnsAnswerWithMetadata, DnsQuery};
 #[cfg(feature = "listen")]
-use crate::pipes::{DnsPipeHandle, DnsQuery, UDP_TRANSPORT, build_request};
+use crate::pipes::{DnsPipeHandle, UDP_TRANSPORT, build_request};
 
 /// Decode a query out of an already-parsed [`Message`]. `None` for anything
 /// other than exactly one question (RFC 1035 §4.1.2 permits more; no
