@@ -67,16 +67,14 @@ fn main() {
     let warm = proxima_tensor::cpu::evaluate_named(&lowered.program, &[], &named, &[output_node]);
     warm.expect("warm eval");
 
-    // NOTE on cross-check: `evaluate_quantized_with_scratch`'s own `finish`
-    // diagnostics (`cpu.rs:888`) already `snapshot_and_reset` `MAC_OPS` and
-    // `eprintln!` it once per call ("DIAG nsper reduce_f32_dense
-    // mac_ops=..."), so by the time control returns here the counter has
-    // already been drained by that same call -- `instrument::totals()`
-    // called post-hoc always reads back 0 for this field. The cross-check
-    // is therefore read from stderr, not from `totals()`: run this binary
-    // and grep "DIAG nsper reduce_f32_dense" -- every one of the 21 calls
-    // below prints `mac_ops=2756980`, identical to `analytic_macs` above,
-    // confirmed across repeated runs this session.
+    // NOTE on cross-check: `MAC_OPS` used to be drained by a per-call `DIAG`
+    // eprintln inside `evaluate_quantized_with_scratch`'s own `finish` path
+    // (removed -- it inverted the sign of two independent measurements by
+    // adding stderr-flush cost to the loop it was timing), so this cross-
+    // check now reads straight from `instrument::totals()` after the loop,
+    // accumulated across all `IMAGES` calls below rather than drained
+    // per-call: `totals.mac_ops == IMAGES as u64 * analytic_macs` is the
+    // cross-check `evaluate_quantized`'s own reduce path never skips a MAC.
     instrument::reset();
     let start = Instant::now();
     const IMAGES: usize = 20;
@@ -90,7 +88,12 @@ fn main() {
 
     let totals = instrument::totals();
     println!(
-        "path kinds (accumulated since last per-call finish-reset only, see NOTE above): dot_fast={} width_fast={} conv_tile={} generic={}",
+        "mac_ops cross-check: totals.mac_ops={} expected={} (analytic_macs={analytic_macs} * {IMAGES} images)",
+        totals.mac_ops,
+        analytic_macs * IMAGES as u64,
+    );
+    println!(
+        "path kinds (accumulated over all {IMAGES} calls since the `reset()` above): dot_fast={} width_fast={} conv_tile={} generic={}",
         totals.path_dot_fast, totals.path_width_fast, totals.path_conv_tile, totals.path_generic
     );
 

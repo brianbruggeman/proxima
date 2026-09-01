@@ -179,6 +179,30 @@ pub fn record_reduce_path_ticks(path: Path, ticks: u64) {
     }
 }
 
+/// Snapshot of the four reduce-path (ALL reduces, not just gemm-shaped —
+/// see [`reduce_gemm_path_totals`] for the gemm-restricted split) ticks
+/// totals — `(dot_fast_ticks, width_fast_ticks, conv_tile_ticks,
+/// generic_ticks)`. Same `.get()`-not-reset shape [`path_totals`] uses;
+/// pair with [`reset_reduce_path`] for a per-run delta the way
+/// [`reduce_gemm_path_totals`]'s own callers do.
+#[must_use]
+pub fn reduce_path_totals() -> (u64, u64, u64, u64) {
+    (
+        REDUCE_PATH_DOT_FAST_TICKS.get(),
+        REDUCE_PATH_WIDTH_FAST_TICKS.get(),
+        REDUCE_PATH_CONV_TILE_TICKS.get(),
+        REDUCE_PATH_GENERIC_TICKS.get(),
+    )
+}
+
+/// Resets the four reduce-path ticks counters to zero.
+pub fn reset_reduce_path() {
+    let _ = REDUCE_PATH_DOT_FAST_TICKS.snapshot_and_reset();
+    let _ = REDUCE_PATH_WIDTH_FAST_TICKS.snapshot_and_reset();
+    let _ = REDUCE_PATH_CONV_TILE_TICKS.snapshot_and_reset();
+    let _ = REDUCE_PATH_GENERIC_TICKS.snapshot_and_reset();
+}
+
 // route-census task (2026-09-01): `REDUCE_PATH_*_TICKS` above sums BOTH
 // populations `cpu::reduce_is_gemm_shaped` distinguishes -- the 96
 // GEMM-shaped `MatMul` folds AND the 74 small single-operand reduces
@@ -936,6 +960,30 @@ pub static ELEMENTWISE_FLAT_RANGE_ROWS: Counter = Counter::new("proxima_tensor.e
 // below `PARALLEL_THRESHOLD`).
 pub static ELEMENTWISE_COHORT_ROUNDS: Counter = Counter::new("proxima_tensor.elementwise_cohort_rounds");
 
+/// Snapshot of `run_elementwise_range`'s own fixed-per-call breakdown --
+/// `(calls, setup_ticks, step_values_ticks, loop_ticks, cohort_rounds)`.
+/// `.get()`-not-reset, same shape [`path_totals`] uses; pair with
+/// [`reset_elementwise_phase`] for a per-run delta.
+#[must_use]
+pub fn elementwise_phase_totals() -> (u64, u64, u64, u64, u64) {
+    (
+        ELEMENTWISE_RANGE_CALLS.get(),
+        ELEMENTWISE_SETUP_TICKS.get(),
+        ELEMENTWISE_STEP_VALUES_TICKS.get(),
+        ELEMENTWISE_LOOP_TICKS.get(),
+        ELEMENTWISE_COHORT_ROUNDS.get(),
+    )
+}
+
+/// Resets `run_elementwise_range`'s own phase-breakdown counters to zero.
+pub fn reset_elementwise_phase() {
+    let _ = ELEMENTWISE_RANGE_CALLS.snapshot_and_reset();
+    let _ = ELEMENTWISE_SETUP_TICKS.snapshot_and_reset();
+    let _ = ELEMENTWISE_STEP_VALUES_TICKS.snapshot_and_reset();
+    let _ = ELEMENTWISE_LOOP_TICKS.snapshot_and_reset();
+    let _ = ELEMENTWISE_COHORT_ROUNDS.snapshot_and_reset();
+}
+
 /// One process run's worth of `evaluate_parallel`'s serial-remainder
 /// breakdown, read back the same way [`parallel_totals`] is.
 #[derive(Debug, Clone, Copy, Default)]
@@ -1669,6 +1717,56 @@ pub static ELEMENTWISE_LOOP_TICKS_WINDOW_COPY: Counter =
 pub static ELEMENTWISE_ELEMENTS_WINDOW_COPY: Counter =
     Counter::new("proxima_tensor.elementwise_elements_window_copy");
 
+/// Snapshot of `BodyShape`/fast-vs-slow-path split ns/element figures'
+/// underlying ticks+elements pairs, `.get()`-not-reset: `(monomorphic,
+/// generic, monomorphic_fast, monomorphic_slow, generic_fast, generic_slow,
+/// window_copy)`, each a `(ticks, elements)` pair. Pair with
+/// [`reset_elementwise_bodyshape`] for a per-run delta.
+#[must_use]
+pub fn elementwise_bodyshape_totals() -> ElementwiseBodyShapeTotals {
+    ElementwiseBodyShapeTotals {
+        monomorphic: (ELEMENTWISE_LOOP_TICKS_MONOMORPHIC.get(), ELEMENTWISE_ELEMENTS_MONOMORPHIC.get()),
+        generic: (ELEMENTWISE_LOOP_TICKS_GENERIC.get(), ELEMENTWISE_ELEMENTS_GENERIC.get()),
+        monomorphic_fast: (ELEMENTWISE_LOOP_TICKS_MONOMORPHIC_FAST.get(), ELEMENTWISE_ELEMENTS_MONOMORPHIC_FAST.get()),
+        monomorphic_slow: (ELEMENTWISE_LOOP_TICKS_MONOMORPHIC_SLOW.get(), ELEMENTWISE_ELEMENTS_MONOMORPHIC_SLOW.get()),
+        generic_fast: (ELEMENTWISE_LOOP_TICKS_GENERIC_FAST.get(), ELEMENTWISE_ELEMENTS_GENERIC_FAST.get()),
+        generic_slow: (ELEMENTWISE_LOOP_TICKS_GENERIC_SLOW.get(), ELEMENTWISE_ELEMENTS_GENERIC_SLOW.get()),
+        window_copy: (ELEMENTWISE_LOOP_TICKS_WINDOW_COPY.get(), ELEMENTWISE_ELEMENTS_WINDOW_COPY.get()),
+    }
+}
+
+/// [`elementwise_bodyshape_totals`]'s own return shape — named fields over a
+/// seven-tuple-of-pairs so a caller's field access reads as English rather
+/// than a positional index.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ElementwiseBodyShapeTotals {
+    pub monomorphic: (u64, u64),
+    pub generic: (u64, u64),
+    pub monomorphic_fast: (u64, u64),
+    pub monomorphic_slow: (u64, u64),
+    pub generic_fast: (u64, u64),
+    pub generic_slow: (u64, u64),
+    pub window_copy: (u64, u64),
+}
+
+/// Resets every `BodyShape`/fast-vs-slow-path ticks+elements counter to zero.
+pub fn reset_elementwise_bodyshape() {
+    let _ = ELEMENTWISE_LOOP_TICKS_MONOMORPHIC.snapshot_and_reset();
+    let _ = ELEMENTWISE_ELEMENTS_MONOMORPHIC.snapshot_and_reset();
+    let _ = ELEMENTWISE_LOOP_TICKS_GENERIC.snapshot_and_reset();
+    let _ = ELEMENTWISE_ELEMENTS_GENERIC.snapshot_and_reset();
+    let _ = ELEMENTWISE_LOOP_TICKS_MONOMORPHIC_FAST.snapshot_and_reset();
+    let _ = ELEMENTWISE_ELEMENTS_MONOMORPHIC_FAST.snapshot_and_reset();
+    let _ = ELEMENTWISE_LOOP_TICKS_MONOMORPHIC_SLOW.snapshot_and_reset();
+    let _ = ELEMENTWISE_ELEMENTS_MONOMORPHIC_SLOW.snapshot_and_reset();
+    let _ = ELEMENTWISE_LOOP_TICKS_GENERIC_FAST.snapshot_and_reset();
+    let _ = ELEMENTWISE_ELEMENTS_GENERIC_FAST.snapshot_and_reset();
+    let _ = ELEMENTWISE_LOOP_TICKS_GENERIC_SLOW.snapshot_and_reset();
+    let _ = ELEMENTWISE_ELEMENTS_GENERIC_SLOW.snapshot_and_reset();
+    let _ = ELEMENTWISE_LOOP_TICKS_WINDOW_COPY.snapshot_and_reset();
+    let _ = ELEMENTWISE_ELEMENTS_WINDOW_COPY.snapshot_and_reset();
+}
+
 // the Adam-chain dedicated kernel split within `Generic` (`docs/discipline.md`
 // ROW 179): `cpu.rs`'s `BodyShape::FusedAdamUpdate` is a structurally
 // detected sub-case of what used to be classified `Generic` — the same
@@ -1716,4 +1814,74 @@ pub fn elementwise_call_size_snapshot_and_reset() -> Vec<(u64, u64)> {
     let sizes: Vec<(u64, u64)> = table.iter().map(|(size, count)| (*size, *count)).collect();
     table.clear();
     sizes
+}
+
+// `evaluate_quantized_with_scratch`/`evaluate_quantized_named_with_scratch`'s
+// own per-call phase breakdown -- previously a `DIAG` eprintln fired on
+// every call (17-30 lines/call under `instrument`, since removed: it
+// inverted the sign of two independent measurements this session by adding
+// stderr-flush cost to the very loop it was timing). Same shape as
+// `reduce_gemm_path_totals` above: plain `Counter`s, read back via
+// `evaluate_quantized_phase_totals`, reset via `reset_evaluate_quantized_phase`.
+pub static EVALUATE_QUANTIZED_CALLS: Counter = Counter::new("proxima_tensor.evaluate_quantized_calls");
+pub static EVALUATE_QUANTIZED_RESOLVE_TICKS: Counter =
+    Counter::new("proxima_tensor.evaluate_quantized_resolve_ticks");
+pub static EVALUATE_QUANTIZED_SETUP_TICKS: Counter =
+    Counter::new("proxima_tensor.evaluate_quantized_setup_ticks");
+pub static EVALUATE_QUANTIZED_LOOP_OVERHEAD_TICKS: Counter =
+    Counter::new("proxima_tensor.evaluate_quantized_loop_overhead_ticks");
+pub static EVALUATE_QUANTIZED_FINISH_TICKS: Counter =
+    Counter::new("proxima_tensor.evaluate_quantized_finish_ticks");
+// buffer occupancy has no running sum that means anything (a peak, not a
+// total), so it uses the same fetch_max discipline as
+// `PARALLEL_CHUNK_TICKS_MAX` above rather than a `Counter`.
+pub static EVALUATE_QUANTIZED_PEAK_LIVE_BYTES: AtomicU64 = AtomicU64::new(0);
+
+/// Records one `evaluate_quantized_with_scratch` call's phase ticks and peak
+/// live-buffer byte count. Called once per call, at the same three points the
+/// removed `DIAG` prints read from (`setup_ms`, `loop_overhead_ms`,
+/// `finish_ms`, `peak_live_bytes`). `evaluate_quantized_named_with_scratch`'s
+/// own name-resolution step is a separate call boundary entirely (it runs
+/// BEFORE this function is ever entered), so its ticks commit through
+/// [`record_evaluate_quantized_resolve`] instead of here.
+pub fn record_evaluate_quantized_phase(setup_ticks: u64, loop_overhead_ticks: u64, finish_ticks: u64, peak_live_bytes: u64) {
+    counter!(EVALUATE_QUANTIZED_CALLS, 1);
+    counter!(EVALUATE_QUANTIZED_SETUP_TICKS, setup_ticks);
+    counter!(EVALUATE_QUANTIZED_LOOP_OVERHEAD_TICKS, loop_overhead_ticks);
+    counter!(EVALUATE_QUANTIZED_FINISH_TICKS, finish_ticks);
+    EVALUATE_QUANTIZED_PEAK_LIVE_BYTES.fetch_max(peak_live_bytes, Ordering::Relaxed);
+}
+
+/// Records one `evaluate_quantized_named_with_scratch` call's name-to-position
+/// resolution ticks — a linear `find` over `named` per weight tensor, O(block
+/// count * named count) string compares, invisible to every counter
+/// [`record_evaluate_quantized_phase`] commits (that timer starts only after
+/// this resolution step already returned).
+pub fn record_evaluate_quantized_resolve(ticks: u64) {
+    counter!(EVALUATE_QUANTIZED_RESOLVE_TICKS, ticks);
+}
+
+/// One process run's worth of `evaluate_quantized`'s phase breakdown --
+/// `(calls, resolve_ticks, setup_ticks, loop_overhead_ticks, finish_ticks,
+/// peak_live_bytes)`.
+#[must_use]
+pub fn evaluate_quantized_phase_totals() -> (u64, u64, u64, u64, u64, u64) {
+    (
+        EVALUATE_QUANTIZED_CALLS.get(),
+        EVALUATE_QUANTIZED_RESOLVE_TICKS.get(),
+        EVALUATE_QUANTIZED_SETUP_TICKS.get(),
+        EVALUATE_QUANTIZED_LOOP_OVERHEAD_TICKS.get(),
+        EVALUATE_QUANTIZED_FINISH_TICKS.get(),
+        EVALUATE_QUANTIZED_PEAK_LIVE_BYTES.load(Ordering::Relaxed),
+    )
+}
+
+/// Resets the `evaluate_quantized` phase-breakdown counters to zero.
+pub fn reset_evaluate_quantized_phase() {
+    let _ = EVALUATE_QUANTIZED_CALLS.snapshot_and_reset();
+    let _ = EVALUATE_QUANTIZED_RESOLVE_TICKS.snapshot_and_reset();
+    let _ = EVALUATE_QUANTIZED_SETUP_TICKS.snapshot_and_reset();
+    let _ = EVALUATE_QUANTIZED_LOOP_OVERHEAD_TICKS.snapshot_and_reset();
+    let _ = EVALUATE_QUANTIZED_FINISH_TICKS.snapshot_and_reset();
+    EVALUATE_QUANTIZED_PEAK_LIVE_BYTES.store(0, Ordering::Relaxed);
 }

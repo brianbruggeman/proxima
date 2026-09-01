@@ -2241,8 +2241,8 @@ static EPILOGUE_PROFILE_OTHER_CALLS: EpilogueProfileAtomicU64 = EpilogueProfileA
 /// recorded alongside (never instead of) `EPILOGUE_PROFILE_REDUCE_*` above
 /// -- every reduce call increments both its bucket-(a) aggregate and
 /// exactly one of these two, via the same [`reduce_is_gemm_shaped`]
-/// classifier `diag_node_kind_label` uses, so `EPILOGUE_PROFILE_REDUCE_*`
-/// stays byte-identical to what it measured before this split existed.
+/// classifier, so `EPILOGUE_PROFILE_REDUCE_*` stays byte-identical to what
+/// it measured before this split existed.
 #[cfg(feature = "epilogue-profile-probe")]
 static EPILOGUE_PROFILE_REDUCE_GEMM_NANOS: EpilogueProfileAtomicU64 = EpilogueProfileAtomicU64::new(0);
 #[cfg(feature = "epilogue-profile-probe")]
@@ -2615,13 +2615,14 @@ pub fn evaluate_quantized_with_scratch(
     free_buffers: &mut Vec<Vec<f32>>,
     validated_weight_nodes: &mut Option<BTreeSet<NodeId>>,
 ) -> Result<Evaluated, TensorError> {
-    // DIAGNOSTIC (proxima-debugger, remove before landing): brackets the
-    // portion of evaluate_quantized that is neither the per-node-kind loop
-    // below nor run_node_into itself -- shape::infer, bind::bind,
-    // node_retirement, and the buffers table setup all run here, none of
-    // it visible in the diag_kind_ticks table.
+    // brackets the portion of evaluate_quantized that is neither the
+    // per-node loop below nor run_node_into itself -- shape::infer,
+    // bind::bind, node_retirement, and the buffers table setup all run
+    // here. Committed once, at the end of the call, via
+    // `instrument::record_evaluate_quantized_phase` -- see that function's
+    // own doc for why this replaced a per-call `DIAG` eprintln.
     #[cfg(feature = "instrument")]
-    let diag_setup_started = instrument::read_ticks();
+    let setup_started = instrument::read_ticks();
     let shapes = shape::infer(program, symbols)?;
     let block_nodes = block_node_ids(program);
     if blocks.len() != block_nodes.len() {
@@ -2758,17 +2759,15 @@ pub fn evaluate_quantized_with_scratch(
         grouped
     };
 
-    // DIAGNOSTIC (proxima-debugger, instrument-only): peak_live_buffers
-    // counts occupied slots, not bytes -- a live buffer set of 12 entries
-    // could be 12 MiB or 12 GiB. This mirrors that count but sums the actual
-    // f32 byte length of every live entry, so the peak is reported in bytes.
-    // Gated (unlike `peak_live_buffers` itself below, which `finish` needs
-    // unconditionally): nothing in `Evaluated` carries a byte figure, only
-    // the `DIAG` eprintln this landing also gated does, so an
-    // instrument-off build pays neither the closure call nor its
-    // `O(program.len())` rescan per node.
+    // peak live-buffer BYTE count (not slot count -- a 12-entry live set
+    // could be 12 MiB or 12 GiB), fed to
+    // `instrument::record_evaluate_quantized_phase` once at the end of the
+    // call rather than a per-call `DIAG` eprintln. Gated (unlike
+    // `peak_live_buffers` itself below, which `finish` needs
+    // unconditionally): an instrument-off build pays neither the closure
+    // call nor its `O(program.len())` rescan per node.
     #[cfg(feature = "instrument")]
-    let diag_live_bytes = |buffers: &[Option<Cow<[f32]>>]| -> usize {
+    let live_bytes = |buffers: &[Option<Cow<[f32]>>]| -> usize {
         buffers.iter().flatten().map(|cow| cow.len() * core::mem::size_of::<f32>()).sum()
     };
 
@@ -2782,32 +2781,16 @@ pub fn evaluate_quantized_with_scratch(
     let mut peak_live_buffers = live_count(&buffers);
     let mut live_now = peak_live_buffers;
     #[cfg(feature = "instrument")]
-    let mut diag_peak_live_bytes = diag_live_bytes(&buffers);
+    let mut peak_live_bytes = live_bytes(&buffers);
+    // everything in the loop body below OTHER than `run_node_into` -- the
+    // output `Vec`'s zero-fill allocation and the live-bytes bookkeeping
+    // after the call. Committed once, at the end of the call, via
+    // `instrument::record_evaluate_quantized_phase`; costs nothing outside
+    // an instrumented run.
     #[cfg(feature = "instrument")]
-    let mut diag_peak_position = 0usize;
-    // DIAGNOSTIC (proxima-debugger, remove before landing): wall time by
-    // node kind for this one serial evaluation loop -- `evaluate_quantized`
-    // never routes through `evaluate_node_parallel`, so the only per-node
-    // parallelism a forward pass gets is `run_reduce_quantized`'s internal
-    // `matmul_rows_threaded` dispatch (the "reduce_matmul_quantized"
-    // bucket below); every other kind runs fully serial on this one
-    // thread. Keyed by the label `diag_node_kind_label` derives from the
-    // same `quantized_operand` check `run_reduce_with_quantized_weights`
-    // itself uses, so the bucket a node lands in matches the arm that
-    // actually ran it.
+    let mut loop_overhead_ticks: u64 = 0;
     #[cfg(feature = "instrument")]
-    let mut diag_kind_ticks: BTreeMap<&'static str, (u64, u64)> = BTreeMap::new();
-    // DIAGNOSTIC (proxima-debugger, remove before landing): everything in
-    // this loop body OTHER than run_node_into -- the output Vec's zero-fill
-    // allocation (ahead of diag_node_started so it is never in
-    // diag_kind_ticks) and the live-bytes bookkeeping after the call
-    // (`diag_live_bytes` rescans the whole buffers table every node, but is
-    // itself instrument-gated now -- see that closure's own doc). This
-    // counter is instrument-only so it costs nothing outside this run.
-    #[cfg(feature = "instrument")]
-    let mut diag_loop_overhead_ticks: u64 = 0;
-    #[cfg(feature = "instrument")]
-    let diag_setup_ticks = instrument::elapsed_ticks(diag_setup_started);
+    let setup_ticks = instrument::elapsed_ticks(setup_started);
     // Entered ONCE, before the node loop -- not per matmul call -- so the
     // wake this session amortizes is paid once per forward pass, the same
     // amortization `prime/src/os/cohort.rs`'s own module doc measures
@@ -2847,7 +2830,7 @@ pub fn evaluate_quantized_with_scratch(
             let run_end = staged_batch_run_end(&resolved, position, &quantized_weights);
             if run_end - position >= STAGED_BATCH_MIN_LEN {
                 #[cfg(feature = "instrument")]
-                let diag_batch_started = instrument::read_ticks();
+                let batch_started = instrument::read_ticks();
                 run_staged_batch(
                     &resolved[position..run_end],
                     position,
@@ -2862,9 +2845,7 @@ pub fn evaluate_quantized_with_scratch(
                 peak_live_buffers = peak_live_buffers.max(live_now);
                 #[cfg(feature = "instrument")]
                 {
-                    let entry = diag_kind_ticks.entry("staged_batch").or_insert((0, 0));
-                    entry.0 += (run_end - position) as u64;
-                    entry.1 += instrument::elapsed_ticks(diag_batch_started);
+                    loop_overhead_ticks += instrument::elapsed_ticks(batch_started);
                 }
                 position = run_end;
                 continue;
@@ -2882,29 +2863,19 @@ pub fn evaluate_quantized_with_scratch(
         let epilogue_fused_away = epilogue_fuse_skip.contains(&computed.node);
         if !epilogue_fused_away {
             #[cfg(feature = "instrument")]
-            let diag_alloc_started = instrument::read_ticks();
+            let alloc_started = instrument::read_ticks();
             let mut output = take_or_allocate(free_buffers, node_output_len(computed));
             #[cfg(feature = "instrument")]
             {
-                diag_loop_overhead_ticks += instrument::elapsed_ticks(diag_alloc_started);
+                loop_overhead_ticks += instrument::elapsed_ticks(alloc_started);
             }
-            #[cfg(feature = "instrument")]
-            let diag_node_label = diag_node_kind_label(computed, &quantized_weights);
-            #[cfg(feature = "instrument")]
-            let diag_node_started = instrument::read_ticks();
             #[cfg(feature = "epilogue-profile-probe")]
             let epilogue_profile_started = std::time::Instant::now();
             run_node_into(computed, &buffers, Some(&quantized_weights), session.as_ref(), &mut output)?;
             #[cfg(feature = "epilogue-profile-probe")]
             epilogue_profile_record(computed, &epilogue_profile_reduce_nodes, epilogue_profile_started.elapsed().as_nanos() as u64);
             #[cfg(feature = "instrument")]
-            {
-                let entry = diag_kind_ticks.entry(diag_node_label).or_insert((0, 0));
-                entry.0 += 1;
-                entry.1 += instrument::elapsed_ticks(diag_node_started);
-            }
-            #[cfg(feature = "instrument")]
-            let diag_bookkeeping_started = instrument::read_ticks();
+            let bookkeeping_started = instrument::read_ticks();
             buffers[computed.node.0 as usize] = Some(Cow::Owned(output));
             // `computed.node` is written exactly once (this position, in
             // program order), so this is always a `None` -> `Some` transition --
@@ -2913,15 +2884,11 @@ pub fn evaluate_quantized_with_scratch(
             peak_live_buffers = peak_live_buffers.max(live_now);
             #[cfg(feature = "instrument")]
             {
-                let current_bytes = diag_live_bytes(&buffers);
-                if current_bytes > diag_peak_live_bytes {
-                    diag_peak_live_bytes = current_bytes;
-                    diag_peak_position = position;
-                }
+                peak_live_bytes = peak_live_bytes.max(live_bytes(&buffers));
             }
             #[cfg(feature = "instrument")]
             {
-                diag_loop_overhead_ticks += instrument::elapsed_ticks(diag_bookkeeping_started);
+                loop_overhead_ticks += instrument::elapsed_ticks(bookkeeping_started);
             }
         }
         // `docs/discipline.md` ROW 183 Phase 2: fire every fusion whose
@@ -3016,225 +2983,31 @@ pub fn evaluate_quantized_with_scratch(
         position += 1;
     }
     #[cfg(feature = "instrument")]
-    std::eprintln!(
-        "DIAG evaluate_quantized: peak_live_buffers={peak_live_buffers} peak_live_bytes={diag_peak_live_bytes} ({:.4} GiB) at resolved_position={diag_peak_position}/{} node={:?}",
-        diag_peak_live_bytes as f64 / (1024.0 * 1024.0 * 1024.0),
-        resolved.len(),
-        resolved.get(diag_peak_position).map(|computed| computed.node),
-    );
-    #[cfg(feature = "instrument")]
-    {
-        // captured before `diag_kind_ticks.into_iter()` below consumes the
-        // map -- `nsper` task (2026-08-21): pairs with `MAC_OPS` (only
-        // `run_reduce`'s dense f32 path increments it; `run_reduce_quantized`
-        // uses its own `MATMUL_Q4K_MACS`/etc counters and `run_elementwise`
-        // never touches it, so this map's combined "reduce_f32_dense_gemm" +
-        // "reduce_f32_dense_small" ticks (ROW 201/202's own split of what
-        // used to be one "reduce_f32_dense" bucket) and `MAC_OPS`'s snapshot
-        // are the SAME node population).
-        let reduce_dense_gemm_entry = diag_kind_ticks.get("reduce_f32_dense_gemm").copied();
-        let reduce_dense_small_entry = diag_kind_ticks.get("reduce_f32_dense_small").copied();
-        let reduce_dense_entry = match (reduce_dense_gemm_entry, reduce_dense_small_entry) {
-            (Some((gemm_count, gemm_ticks)), Some((small_count, small_ticks))) => {
-                Some((gemm_count + small_count, gemm_ticks + small_ticks))
-            }
-            (Some(entry), None) | (None, Some(entry)) => Some(entry),
-            (None, None) => None,
-        };
-        let total_ticks: u64 = diag_kind_ticks.values().map(|(_, ticks)| *ticks).sum();
-        let mut ranked: Vec<(&str, u64, u64)> =
-            diag_kind_ticks.into_iter().map(|(label, (count, ticks))| (label, count, ticks)).collect();
-        ranked.sort_by_key(|entry| core::cmp::Reverse(entry.2));
-        for (label, count, ticks) in ranked {
-            std::eprintln!(
-                "DIAG evaluate_quantized node_kind={label} count={count} total_ms={:.3} pct_of_forward={:.2}",
-                instrument::ticks_to_nanos(ticks) as f64 / 1_000_000.0,
-                100.0 * ticks as f64 / total_ticks as f64,
-            );
-        }
-        // ROW 202's own per-node dispatch-floor probe: mean ns/node for the
-        // small-reduce bucket alone, printed unconditionally (not folded
-        // into the ranked loop above) so it survives a grep even when the
-        // small bucket is not the top-ranked row.
-        if let Some((small_count, small_ticks)) = reduce_dense_small_entry {
-            std::eprintln!(
-                "DIAG reduce_f32_dense_small per_node_ns={:.1} count={small_count}",
-                instrument::ticks_to_nanos(small_ticks) as f64 / small_count.max(1) as f64,
-            );
-        }
-        std::eprintln!(
-            "DIAG evaluate_quantized setup_ms={:.3} loop_overhead_ms={:.3}",
-            instrument::ticks_to_nanos(diag_setup_ticks) as f64 / 1_000_000.0,
-            instrument::ticks_to_nanos(diag_loop_overhead_ticks) as f64 / 1_000_000.0,
-        );
-        // DIAGNOSTIC (proxima-debugger, remove before landing): the fixed
-        // per-node cost inside `run_elementwise_range`, split at the seam
-        // this decode-speed investigation measured against -- setup (operand
-        // span resolution, stride/gather scratch), the `step_values`
-        // allocation, and the position loop. `snapshot_and_reset` so a caller
-        // running several `evaluate_quantized` calls back to back (a decode
-        // loop) gets one call's breakdown per printout, not a running total.
-        let elementwise_calls = instrument::ELEMENTWISE_RANGE_CALLS.snapshot_and_reset();
-        let elementwise_setup_ticks = instrument::ELEMENTWISE_SETUP_TICKS.snapshot_and_reset();
-        let elementwise_step_values_ticks = instrument::ELEMENTWISE_STEP_VALUES_TICKS.snapshot_and_reset();
-        let elementwise_loop_ticks = instrument::ELEMENTWISE_LOOP_TICKS.snapshot_and_reset();
-        let elementwise_cohort_rounds = instrument::ELEMENTWISE_COHORT_ROUNDS.snapshot_and_reset();
-        if elementwise_calls > 0 {
-            std::eprintln!(
-                "DIAG evaluate_quantized elementwise_breakdown calls={elementwise_calls} cohort_rounds={elementwise_cohort_rounds} setup_ms={:.3} step_values_ms={:.3} loop_ms={:.3} setup_ns_per_call={:.1} step_values_ns_per_call={:.1}",
-                instrument::ticks_to_nanos(elementwise_setup_ticks) as f64 / 1_000_000.0,
-                instrument::ticks_to_nanos(elementwise_step_values_ticks) as f64 / 1_000_000.0,
-                instrument::ticks_to_nanos(elementwise_loop_ticks) as f64 / 1_000_000.0,
-                instrument::ticks_to_nanos(elementwise_setup_ticks) as f64 / elementwise_calls as f64,
-                instrument::ticks_to_nanos(elementwise_step_values_ticks) as f64 / elementwise_calls as f64,
-            );
-        }
-        // achieved ns/element (nsper task, 2026-08-21): `MAC_OPS` is the
-        // exact element denominator for `reduce_f32_dense` (see the comment
-        // on `reduce_dense_entry` above); `reduce_dense_entry`'s ticks are
-        // the SAME per-node wall time the `node_kind=reduce_f32_dense` row
-        // above already printed, just paired with an element count here.
-        let reduce_dense_mac_ops = instrument::MAC_OPS.snapshot_and_reset();
-        if let Some((reduce_dense_count, reduce_dense_ticks)) = reduce_dense_entry {
-            let reduce_dense_ns = instrument::ticks_to_nanos(reduce_dense_ticks) as f64;
-            let ns_per_element = if reduce_dense_mac_ops > 0 {
-                reduce_dense_ns / reduce_dense_mac_ops as f64
-            } else {
-                0.0
-            };
-            std::eprintln!(
-                "DIAG nsper reduce_f32_dense calls={reduce_dense_count} mac_ops={reduce_dense_mac_ops} total_ms={:.3} ns_per_element={:.4}",
-                reduce_dense_ns / 1_000_000.0,
-                ns_per_element,
-            );
-        }
-        // per-path-kind wall time within `reduce_f32_dense` (residual-profile
-        // task, 2026-08-30): `instrument::record_reduce_path_ticks`'s own doc
-        // explains why this is a separate, `run_reduce`-only timer. The sum
-        // of these four should equal `reduce_dense_entry`'s own ticks above
-        // (same node population, same `run_node_into` call boundary) --
-        // reported separately, not reconciled here, so a divergence stays
-        // visible rather than silently averaged away.
-        let reduce_dot_fast_ticks = instrument::REDUCE_PATH_DOT_FAST_TICKS.snapshot_and_reset();
-        let reduce_width_fast_ticks = instrument::REDUCE_PATH_WIDTH_FAST_TICKS.snapshot_and_reset();
-        let reduce_conv_tile_ticks = instrument::REDUCE_PATH_CONV_TILE_TICKS.snapshot_and_reset();
-        let reduce_generic_ticks = instrument::REDUCE_PATH_GENERIC_TICKS.snapshot_and_reset();
-        std::eprintln!(
-            "DIAG reduce_path_ticks dot_fast_ms={:.3} width_fast_ms={:.3} conv_tile_ms={:.3} generic_ms={:.3}",
-            instrument::ticks_to_nanos(reduce_dot_fast_ticks) as f64 / 1_000_000.0,
-            instrument::ticks_to_nanos(reduce_width_fast_ticks) as f64 / 1_000_000.0,
-            instrument::ticks_to_nanos(reduce_conv_tile_ticks) as f64 / 1_000_000.0,
-            instrument::ticks_to_nanos(reduce_generic_ticks) as f64 / 1_000_000.0,
-        );
-        // achieved ns/element split by `BodyShape` (nsper task, 2026-08-21):
-        // `Unary`/`Binary` (monomorphic) versus `Generic` (fused multi-step)
-        // -- a DIFFERENT axis from `Path::WidthFast`/`Path::Generic` (the
-        // affine-operand fast-path gate) already printed via
-        // `elementwise_breakdown` above. Compares directly against this
-        // crate's own 0.38ns/element monomorphic figure (`cpu.rs:2159`).
-        let monomorphic_ticks = instrument::ELEMENTWISE_LOOP_TICKS_MONOMORPHIC.snapshot_and_reset();
-        let monomorphic_elements = instrument::ELEMENTWISE_ELEMENTS_MONOMORPHIC.snapshot_and_reset();
-        let generic_ticks = instrument::ELEMENTWISE_LOOP_TICKS_GENERIC.snapshot_and_reset();
-        let generic_elements = instrument::ELEMENTWISE_ELEMENTS_GENERIC.snapshot_and_reset();
-        if monomorphic_elements > 0 {
-            std::eprintln!(
-                "DIAG nsper elementwise_monomorphic elements={monomorphic_elements} total_ms={:.3} ns_per_element={:.4}",
-                instrument::ticks_to_nanos(monomorphic_ticks) as f64 / 1_000_000.0,
-                instrument::ticks_to_nanos(monomorphic_ticks) as f64 / monomorphic_elements as f64,
-            );
-        }
-        if generic_elements > 0 {
-            std::eprintln!(
-                "DIAG nsper elementwise_generic elements={generic_elements} total_ms={:.3} ns_per_element={:.4}",
-                instrument::ticks_to_nanos(generic_ticks) as f64 / 1_000_000.0,
-                instrument::ticks_to_nanos(generic_ticks) as f64 / generic_elements as f64,
-            );
-        }
-        // fast_path-vs-slow-path split within `Unary`/`Binary` (`Monomorphic`)
-        // (residual-profile task, 2026-08-30): mirrors the `Generic` split
-        // immediately below -- answers whether `window_materialize`'s own
-        // `Binary` multiply (Conv's im2col copy, `proxima-onnx/src/lower.rs`)
-        // takes the affine width-copy fast path or falls to the per-element
-        // gather loop despite being classified `Monomorphic`.
-        let monomorphic_fast_ticks = instrument::ELEMENTWISE_LOOP_TICKS_MONOMORPHIC_FAST.snapshot_and_reset();
-        let monomorphic_fast_elements = instrument::ELEMENTWISE_ELEMENTS_MONOMORPHIC_FAST.snapshot_and_reset();
-        let monomorphic_slow_ticks = instrument::ELEMENTWISE_LOOP_TICKS_MONOMORPHIC_SLOW.snapshot_and_reset();
-        let monomorphic_slow_elements = instrument::ELEMENTWISE_ELEMENTS_MONOMORPHIC_SLOW.snapshot_and_reset();
-        if monomorphic_fast_elements > 0 {
-            std::eprintln!(
-                "DIAG nsper elementwise_monomorphic_fast_path elements={monomorphic_fast_elements} total_ms={:.3} ns_per_element={:.4}",
-                instrument::ticks_to_nanos(monomorphic_fast_ticks) as f64 / 1_000_000.0,
-                instrument::ticks_to_nanos(monomorphic_fast_ticks) as f64 / monomorphic_fast_elements as f64,
-            );
-        }
-        if monomorphic_slow_elements > 0 {
-            std::eprintln!(
-                "DIAG nsper elementwise_monomorphic_slow_path elements={monomorphic_slow_elements} total_ms={:.3} ns_per_element={:.4}",
-                instrument::ticks_to_nanos(monomorphic_slow_ticks) as f64 / 1_000_000.0,
-                instrument::ticks_to_nanos(monomorphic_slow_ticks) as f64 / monomorphic_slow_elements as f64,
-            );
-        }
-        // window-materialize-shaped copy split within `monomorphic_fast_path`
-        // (rung 2, `docs/discipline.md` ROW 154): `window_copy_operand`'s own
-        // specialized row-segment copy vs the remaining `elementwise_width_fast`
-        // per-row dispatch, both members of `monomorphic_fast_path` above.
-        let window_copy_ticks = instrument::ELEMENTWISE_LOOP_TICKS_WINDOW_COPY.snapshot_and_reset();
-        let window_copy_elements = instrument::ELEMENTWISE_ELEMENTS_WINDOW_COPY.snapshot_and_reset();
-        if window_copy_elements > 0 {
-            std::eprintln!(
-                "DIAG nsper elementwise_window_copy elements={window_copy_elements} total_ms={:.3} ns_per_element={:.4}",
-                instrument::ticks_to_nanos(window_copy_ticks) as f64 / 1_000_000.0,
-                instrument::ticks_to_nanos(window_copy_ticks) as f64 / window_copy_elements as f64,
-            );
-        }
-        // fast_path-vs-slow-path split within `Generic` (A-vs-B task,
-        // 2026-08-21): answers whether `Generic`'s 14.9x-slower-than-
-        // monomorphic figure is (A) almost all elements falling to the
-        // per-element `apply_body` gather loop (`fast_path=false`) or (B)
-        // the affine fast path itself running ~15x off the monomorphic
-        // rate. Same ticks/elements the `elementwise_generic` row above
-        // already summed, split by the `fast_path` bool computed once per
-        // call in `run_elementwise_range`.
-        let generic_fast_ticks = instrument::ELEMENTWISE_LOOP_TICKS_GENERIC_FAST.snapshot_and_reset();
-        let generic_fast_elements = instrument::ELEMENTWISE_ELEMENTS_GENERIC_FAST.snapshot_and_reset();
-        let generic_slow_ticks = instrument::ELEMENTWISE_LOOP_TICKS_GENERIC_SLOW.snapshot_and_reset();
-        let generic_slow_elements = instrument::ELEMENTWISE_ELEMENTS_GENERIC_SLOW.snapshot_and_reset();
-        if generic_fast_elements > 0 {
-            std::eprintln!(
-                "DIAG nsper elementwise_generic_fast_path elements={generic_fast_elements} total_ms={:.3} ns_per_element={:.4}",
-                instrument::ticks_to_nanos(generic_fast_ticks) as f64 / 1_000_000.0,
-                instrument::ticks_to_nanos(generic_fast_ticks) as f64 / generic_fast_elements as f64,
-            );
-        }
-        if generic_slow_elements > 0 {
-            std::eprintln!(
-                "DIAG nsper elementwise_generic_slow_path elements={generic_slow_elements} total_ms={:.3} ns_per_element={:.4}",
-                instrument::ticks_to_nanos(generic_slow_ticks) as f64 / 1_000_000.0,
-                instrument::ticks_to_nanos(generic_slow_ticks) as f64 / generic_slow_elements as f64,
-            );
-        }
-        // call-size distribution (nsper task, 2026-08-21): how many
-        // `run_elementwise_range` calls landed at each element count this
-        // step -- answers "numerous small calls" vs "few large ones"
-        // without guessing from a median call count alone.
-        let mut call_sizes = instrument::elementwise_call_size_snapshot_and_reset();
-        call_sizes.sort_by_key(|(size, _)| *size);
-        let total_size_calls: u64 = call_sizes.iter().map(|(_, count)| *count).sum();
-        for (size, count) in &call_sizes {
-            std::eprintln!(
-                "DIAG nsper elementwise_call_size elements={size} calls={count} pct_of_calls={:.2}",
-                100.0 * *count as f64 / total_size_calls.max(1) as f64,
-            );
-        }
-    }
-    #[cfg(feature = "instrument")]
-    let diag_finish_started = instrument::read_ticks();
+    let finish_started = instrument::read_ticks();
 
     let result = finish(&shapes, &effective_outputs, buffers, root, peak_live_buffers);
+    // real signal (peak live bytes, per-phase wall time) committed once per
+    // call into the crate's own counter mechanism -- see
+    // `instrument::record_evaluate_quantized_phase`'s own doc for why this
+    // replaced a per-call `DIAG` eprintln block (17-30 lines/call, which had
+    // inverted the sign of two independent measurements this session by
+    // adding stderr-flush cost to the loop it was timing). Everything else
+    // the removed block printed (per-node-kind ticks, elementwise phase
+    // breakdown, `BodyShape` ns/element splits, reduce-path ticks, call-size
+    // histogram) already lives in this module's own `REDUCE_PATH_*`,
+    // `ELEMENTWISE_*`, and `MAC_OPS` counters, now readable directly via
+    // `instrument::reduce_path_totals`, `instrument::elementwise_phase_totals`,
+    // `instrument::elementwise_bodyshape_totals`, and
+    // `instrument::elementwise_call_size_snapshot_and_reset` -- a caller
+    // wanting a per-call delta resets first, the same
+    // reset-then-run-then-read shape `reduce_gemm_path_totals`'s own callers
+    // already use.
     #[cfg(feature = "instrument")]
-    std::eprintln!(
-        "DIAG evaluate_quantized finish_ms={:.3}",
-        instrument::ticks_to_nanos(instrument::elapsed_ticks(diag_finish_started)) as f64 / 1_000_000.0,
+    instrument::record_evaluate_quantized_phase(
+        setup_ticks,
+        loop_overhead_ticks,
+        instrument::elapsed_ticks(finish_started),
+        peak_live_bytes as u64,
     );
     Ok(result)
 }
@@ -3310,20 +3083,18 @@ pub fn evaluate_quantized_named_with_scratch<'block>(
     free_buffers: &mut Vec<Vec<f32>>,
     validated_weight_nodes: &mut Option<BTreeSet<NodeId>>,
 ) -> Result<Evaluated, TensorError> {
-    // DIAGNOSTIC (proxima-debugger, remove before landing): this name
-    // resolution runs before evaluate_quantized's own diag_setup_started
+    // this name resolution runs before `evaluate_quantized`'s own setup
     // timer starts, so it is invisible to every counter that function
-    // reports -- a linear `find` over `named` per weight tensor, O(block
-    // count * named count) string compares.
+    // commits -- a linear `find` over `named` per weight tensor, O(block
+    // count * named count) string compares. Committed via its own
+    // counter (`instrument::record_evaluate_quantized_resolve`) rather than
+    // folded into `evaluate_quantized`'s phase record, which never sees this
+    // call boundary.
     #[cfg(feature = "instrument")]
-    let diag_resolve_started = instrument::read_ticks();
+    let resolve_started = instrument::read_ticks();
     let blocks = resolve_named_blocks(program, named)?;
     #[cfg(feature = "instrument")]
-    std::eprintln!(
-        "DIAG evaluate_quantized_named resolve_ms={:.3} block_count={}",
-        instrument::ticks_to_nanos(instrument::elapsed_ticks(diag_resolve_started)) as f64 / 1_000_000.0,
-        blocks.len(),
-    );
+    instrument::record_evaluate_quantized_resolve(instrument::elapsed_ticks(resolve_started));
     evaluate_quantized_with_scratch(program, symbols, &blocks, outputs, free_buffers, validated_weight_nodes)
 }
 
@@ -5448,40 +5219,6 @@ fn reduce_is_gemm_shaped(resolved: &BoundOp) -> bool {
         return false;
     };
     operands.iter().any(|(node, _, _)| node != first_node)
-}
-
-/// proxima-debugger diagnostic (`evaluate_quantized`'s per-node-kind timing
-/// table): buckets a bound op the same way [`run_node_into`]'s own match
-/// dispatches it, splitting `Keep::Reduce` into the quantized-matmul arm
-/// ([`run_reduce_quantized`], parallel-dispatched) versus the dense f32 arm
-/// ([`run_reduce`], serial) via the same [`quantized_operand`] check
-/// [`run_reduce_with_quantized_weights`] itself gates on. `docs/discipline.md`
-/// ROW 201 found the dense f32 arm's own `reduce_f32_dense` bucket merges
-/// two populations that pay very different per-node costs (170 nodes vs the
-/// 96 `MatMul`s `bge_matmul_micro`'s isolated bench actually measures) --
-/// [`reduce_is_gemm_shaped`] splits it by operand identity (see that
-/// function's own doc for why an output-shape-based split measured wrong),
-/// so the split costs one small slice walk beyond work already done for
-/// every other purpose in this module.
-#[cfg(feature = "instrument")]
-fn diag_node_kind_label(resolved: &BoundOp, quantized_weights: &BTreeMap<NodeId, QuantizedBlock>) -> &'static str {
-    match &resolved.kind {
-        BoundOpKind::Elementwise { .. } => "elementwise",
-        BoundOpKind::Reduce {
-            keep: Keep::Reduce, ..
-        } => {
-            if quantized_operand(resolved, quantized_weights).is_some() {
-                "reduce_matmul_quantized"
-            } else if reduce_is_gemm_shaped(resolved) {
-                "reduce_f32_dense_gemm"
-            } else {
-                "reduce_f32_dense_small"
-            }
-        }
-        BoundOpKind::Reduce { keep: Keep::Scan, .. } => "scan",
-        BoundOpKind::Iota => "iota",
-        BoundOpKind::Constant { .. } => "constant",
-    }
 }
 
 #[cfg(any(feature = "q4k-int8-dot", feature = "q5k-int8-dot", feature = "q6k-int8-dot"))]
