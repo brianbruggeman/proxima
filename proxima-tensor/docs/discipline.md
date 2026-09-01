@@ -17136,3 +17136,119 @@ No new literal introduced: `TILE_COLS` (the same `proxima_tensor::sized::TILE_CO
 **Opt-sweep (mandatory axes, this component):** state machine -- N/A, a leaf `match` arm added to an existing exhaustive enum match, no new state; bytes-first -- N/A, f32 buffers throughout, matches the three existing arms; borrowed views -- DONE, `buffers[]`/`reduce_values` read via borrowed slices, no copy; zero-copy -- DONE; copy-over-clone -- N/A, no cloning; SIMD -- N/A, scalar per-element arithmetic matching the interpreted path's own op order bit-for-bit (a deliberate design constraint -- SIMDizing this arm risks reassociation, which would break the bit-identity this row's own measurement confirms); stack-over-heap -- DONE, zero heap allocation (stated budget above, not allocator-instrumented -- residual below); branchless -- N/A, one `match` per fusion hit (once per LayerNorm site, not per element) then a straight-line inner loop, same shape as the three existing arms; no dynamic dispatch -- DONE, direct `match` on a 4-variant enum; O(1) per element -- DONE, each output element costs a fixed number of reads + arithmetic ops regardless of tensor size.
 
 **Decision: LANDED, rides the existing default-on `EPILOGUE_FUSE_ENABLED` gate (ROW 186) -- no new toggle needed, this is a widened admission on an already-default-on mechanism.** Residuals carried forward, named not hidden: (1) no allocator-instrumented test confirming the stated zero-allocation hot-path budget for the new arm specifically (same shape as ROW 188's residual #4); (2) no early-fire optimization for the variance-sum reduce -- it still materializes into `buffers[]` normally (this row closes ROW 185's INTERPRETATION finding, not a second "skip materializing the reduce" optimization, which remains open for a future session); (3) the e2e measurement's unfused arm carries 12.63% CoV from mid-run host contention (noted in the row, not hidden) -- a fully quiet-host rerun would tighten the confidence interval on the ~2.9% e2e delta; (4) `bge_eval.rs`'s own instrumentation (paired fused/unfused runs, CoV, bit-identity check) is new to this row and worth keeping as the crate's own re-provable BGE regression check, not reverted.
+## ROW 192 -- two-cell measurement-only reseal session (60-minute hard budget, `bench/conv-reseal` branch, `proxima-wt-reseal` worktree, off `main` `e17e7fa` unchanged -- `e17e7fa` IS ROW 190's own landed intrinsics commit, so this row's "AFTER" measurements are the tree's current, only, `aarch64` code path, not a diff swap). **Zero source changes this row** -- every number below is a fresh re-run of an already-landed command, no new lever, matching this task's own "measurement-only" framing. Allocation budget: N/A to this row (no code touched; ROW 190's own 341/229/197 allocation-count claim and ROW 189's own zero-hot-path-allocation claim are unchanged and NOT re-instrumented this session).
+
+**Host loadout (read plainly, not softened):** Apple M1 Max, macOS, arm64, `release` profile for every timed number. Six stray multi-day-old pegged processes were present and confirmed via `ps aux` throughout this session (four `snapshot-probe` PIDs 20816/20780/20984/20969 at 88-100% CPU each, two `psci-dispatch-probe` PIDs 13546/13288 at 87-100% CPU each, running since Wed03PM/Sun02AM) -- ROW 187 cited **five** such processes; this session's own count is **six**, not reconciled against ROW 187's number, presence recorded per this task's own instruction, none started or killed by this session. These six alone hold this host's `uptime` 1-minute load average at a structural floor of roughly **9-11** even with zero other activity (observed directly, e.g. `9.75`, `8.44`, `8.76` at the quietest points reached this session) -- the task's own "below ~6" purity bar was accordingly **never literally met**; the achievable floor is the ROW 187-precedented ~10, and that is what "quiet" means on this host. On top of that floor, a **separate, different agent's own cargo build** (confirmed via `ps -eo command | grep rustc` showing real crate compiles -- `toml_edit`, `serde_norway`, `darling_core`, `proxima_primitives`, `simd_json`, `syn`, and later a `cargo doc -p proxima-tensor` invocation out of `/tmp/cargo_target`, a DIFFERENT `CARGO_TARGET_DIR` than this row's own `reseal-target`) churned intermittently through the first ~30 minutes of this session, pushing 1-minute load to 44.18 at its peak; every measured run below was preceded by a `pgrep -fl 'cargo|rustc|criterion|nextest'` check (filtered of this row's own `reseal-target` path, `cdb-daemon`, `sccache`, and shell-snapshot noise) and only run when that check came back empty. One run (CELL 1's run 4) still landed mid-contention despite a clean pre-check and was caught by the same "agrees with its own sibling runs to within ~1%" convention ROW 190 established, flagged, and excluded below.
+
+### CELL 1 -- ROW 190's own named residual: 5-clean-run reseal of the intrinsics `band_kh`/conv2/conv3 numbers
+
+Re-prove command: ROW 190's own re-prove command, verbatim -- `cd proxima-wt-reseal && CARGO_TARGET_DIR=<scratch> cargo build --release -p proxima-onnx --bench tile_pipeline --features tile-pipeline-bench`, then the produced `deps/tile_pipeline-*` binary run directly with `"^tile_pipeline_band_kh$"` as its own first argument (criterion filter, not `cargo bench`), reading the `tile_pipeline stage profile [band_kh], 200 forward passes: ...` printed line each run (this line prints once per binary invocation regardless of the criterion filter argument, which criterion applies to its own bench arms, not this row's own `println!`).
+
+6 total invocations, each preceded by its own `pgrep`+`uptime` purity check:
+
+| run | `uptime` before | `uptime` after | band_kh (200-pass avg, us) | conv2 (us) | conv3 (us) | verdict |
+|---|---|---|---|---|---|---|
+| 1 | 10.70/18.01/24.55 | 10.53/16.37/23.41 | 399.290 | 114.257 | 197.250 | clean |
+| 2 | 9.77/16.19/21.26 | 20.76/17.34/21.25 | 401.774 | 112.686 | 198.972 | clean (agrees with run 1 to 0.62%; load rose after the reading was already captured) |
+| 3 | 22.93/18.08/21.42 | 24.41/19.76/21.81 | 407.015 | 114.734 | 200.145 | clean (agrees with runs 1-2 to 1.94%; elevated load throughout, matching ROW 190's own "profiler survives contention" finding) |
+| 4 | 24.85/19.93/21.85 | 18.47/19.48/21.56 | 454.738 | 132.921 | 215.532 | **CONTENDED, discarded** -- 13.4% above the runs-1-3 cluster, exceeds the 1% agreement bar |
+| 5 | 17.71/19.30/21.49 | 12.63/17.51/20.65 | 399.647 | 112.480 | 198.525 | clean (agrees with runs 1-3 to 1.83%) |
+| 6 | 11.84/17.18/20.49 | 9.98/15.59/19.65 | 396.530 | 111.917 | 197.251 | clean (agrees with runs 1-3-5 to 1.11%; run 4's replacement) |
+
+**Clean set (5 runs: 1, 2, 3, 5, 6):**
+
+| stage | mean (us) | CoV | range (us) |
+|---|---|---|---|
+| band_kh | 400.851 | 0.98% | [396.530, 407.015] |
+| conv2 | 113.215 | 1.07% | [111.917, 114.734] |
+| conv3 | 198.429 | 0.62% | [197.250, 200.145] |
+
+**Derived (from the measured times above, ROW 190's own MAC-counting convention, not re-derived):**
+
+| | ROW 190's own after (3 clean runs) | this session's reseal (5 clean runs) |
+|---|---|---|
+| conv3 GMAC/s (1,672,704 MACs / stage time) | 8.527 | 8.430 |
+| conv3 vs 48 GMAC/s roofline | 5.63x over | 5.70x over |
+| whole-net GMAC/s (2,756,960 MACs / band_kh) | 6.998 | 6.878 |
+| whole-net vs 48 GMAC/s roofline | 6.86x over | 6.98x over |
+| whole-net vs torch/Accelerate incumbent (0.119ms) | 3.31x slower | 3.37x slower |
+
+**Does ROW 190's -14.92% hold, tighten, or shrink? It shrinks, and the win still holds.** Comparing this session's own fresh after-mean (400.851us, 5 clean runs, CoV 0.98%) against ROW 190's own unchanged before-reference (462.947us, that row's own 2-clean-run pre-intrinsics baseline, not re-measured this session since no source reverted): delta = **-13.42%**, ratio = **1.155x** -- down from ROW 190's own headline -14.92% / 1.175x. Separately, this session's own after-mean (400.851us) sits **+1.76% above** ROW 190's own after-mean (393.907us, 3 clean runs, CoV 0.19%) -- outside ROW 190's own tighter CoV band but within this session's own wider one, and directionally consistent with a host carrying more background floor load (six pegged processes this session vs whatever ROW 190's own session held). **Neither side was refuted**: the intrinsics win is real, reproduced independently in a separate session on a separate day, and the point estimate moved from 1.175x to 1.155x -- a real but modest shrink, not noise-swamped (0.98% CoV vs a 1.76-3.9% shift), not a reversal.
+
+### CELL 2 -- conv-route promotion evidence: paired interleaved e2e, default NEON vs `PROXIMA_ACCELERATE_GEMM=1`
+
+Re-prove command: ROW 189's own re-prove form, verbatim -- `cd proxima-wt-reseal && CARGO_TARGET_DIR=<scratch> cargo test --release -p proxima-onnx --test real_mnist_accuracy --no-run`, then the produced `deps/real_mnist_accuracy-*` binary run directly (`--ignored --nocapture`, the single test in this binary), reading the printed `real_mnist accuracy: 0.9900 (990/1000 images) in <duration>` line -- the SAME 1000-image `Instant`-timed loop ROW 189 measured, with `PROXIMA_ACCELERATE_GEMM=1` set in the environment for the Accelerate arm only.
+
+5 rounds, interleaved NEON/Accelerate/NEON/Accelerate/... (10 total process invocations), all ten completing inside a single ~1-minute window with `uptime` never exceeding 9.29/13.99/18.73 and the pre-check (`pgrep -fl 'cargo|rustc|criterion|nextest'`, same filter as CELL 1) empty before the batch started and never re-triggered mid-batch -- the quietest, cleanest-purity window this session reached:
+
+| round | arm | wall time | accuracy |
+|---|---|---|---|
+| 1 | NEON | 932.649ms | 0.9900 (990/1000) |
+| 1 | Accelerate | 924.443ms | 0.9900 (990/1000) |
+| 2 | NEON | 1176.104ms | 0.9900 (990/1000) |
+| 2 | Accelerate | 753.690ms | 0.9900 (990/1000) |
+| 3 | NEON | 1140.789ms | 0.9900 (990/1000) |
+| 3 | Accelerate | 746.212ms | 0.9900 (990/1000) |
+| 4 | NEON | 1138.944ms | 0.9900 (990/1000) |
+| 4 | Accelerate | 736.750ms | 0.9900 (990/1000) |
+| 5 | NEON | 899.665ms | 0.9900 (990/1000) |
+| 5 | Accelerate | 910.929ms | 0.9900 (990/1000) |
+
+All 10 runs: identical 990/1000 accuracy, matching ROW 188/189's own precedent (argmax-level oracle for a BLAS-summation-order swap, principle 14).
+
+| arm | mean | CoV | range | design-favors |
+|---|---|---|---|---|
+| NEON (default) | 1057.630ms (1.0576ms/image) | **12.34%** | [899.665, 1176.104]ms | ours |
+| Accelerate (`PROXIMA_ACCELERATE_GEMM=1`) | 814.405ms (0.8144ms/image) | **11.62%** | [736.750, 924.443]ms | incumbent (AMX is Accelerate's own home turf) |
+
+Both arms' CoV exceeds the 5% trust threshold (matching ROW 189's own NEON-side finding of 8.51%; both sides are noisy this session, not just one). **Read as a range comparison per this task's own convention: the ranges OVERLAP this session** -- NEON's own minimum (899.665ms) sits BELOW Accelerate's own maximum (924.443ms) -- unlike ROW 189, where NEON's minimum (927.596ms) exceeded Accelerate's maximum (823.361ms) and the ranges were cleanly separated. Per-round ratios (NEON/Accelerate) are themselves bimodal, not uniformly ~1.3x: round 1 = 1.009x, round 2 = 1.560x, round 3 = 1.529x, round 4 = 1.546x, round 5 = 0.988x -- two of five rounds show near-parity, three show Accelerate leading by ~1.5x. No mechanism for this bimodality was instrumented this session (named residual, not a claim); the grand mean ratio is **NEON/Accelerate = 1.299x (-22.99%)**, close to but below ROW 189's own 1.329x (-24.76%).
+
+**Pre-registration check (stated in the task before this cell's own measurement): "the executor-path NEON arm should be UNCHANGED from ROW 189's 1.029s and Accelerate should still lead by ~1.33x."** Verified, not refuted: this session's NEON mean (1.0576s) is **+2.75%** above ROW 189's own 1.029187s -- well inside this session's own 12.34% CoV, i.e. statistically indistinguishable from "unchanged" (ROW 190's own commit touched only the bench-support pipeline kernel, never `proxima-tensor`'s `conv_gemm_tile_plan`/`run_conv_gemm_tile` executor path that this e2e test actually exercises -- confirmed by re-reading `git diff 62c1757 HEAD -- proxima-tensor/src/cpu.rs`, which is empty, this session). Accelerate's own lead (1.299x measured vs ~1.33x predicted) is a 2.3-percentage-point undershoot, itself inside both arms' own CoV bands.
+
+**Where the intrinsics win lives vs where it doesn't (restated plainly, per this task's own instruction).** ROW 190's win is entirely inside `proxima-onnx/benches/support/tile_pipeline.rs`'s own `dot_chunked_k4_tile_multirow` kernel -- a bench-support-only pipeline lane, confirmed zero-diff against `proxima-tensor/src/cpu.rs` this session. The executor's own NEON conv kernels (`conv_gemm_tile_plan`/`run_conv_gemm_tile`, `cpu.rs:8068`/`8291`, the ACTUAL code path `real_mnist_accuracy`'s default arm runs) have **not** received the same intrinsics treatment -- CELL 2's own NEON arm is unchanged from ROW 189 within noise, exactly as predicted, because it is running the SAME unmodified code ROW 189 already measured (confirmed: `git diff a4bdabf HEAD -- proxima-tensor/src/cpu.rs` -- `a4bdabf` is ROW 189's own landing commit, the last one to touch `cpu.rs` before ROW 190 -- is 0 lines, this session). **If** CELL 1's own disassembly-diagnosed mechanism (LLVM's auto-vectorizer choosing a transpose-based cross-lane shape once a `row` axis joins a `lane` axis) generalizes to `run_conv_gemm_tile`'s own row-blocked accumulator shape -- not verified this session, the two functions were not diffed against each other -- porting the intrinsics shape into `cpu.rs`'s conv/width tile paths is the identified follow-on, with a predicted band in the same 1.15-1.25x-per-stage neighborhood CELL 1 measured, not yet attempted or scoped.
+
+### Decision evidence (assembled, not decided -- principle 19: this is a conclusion, the promotion decision belongs to the owner)
+
+| input | value | source |
+|---|---|---|
+| Accelerate conv route e2e (this session) | 814.405ms mean, CoV 11.62%, range [736.750, 924.443]ms | CELL 2 above |
+| default NEON conv route e2e (this session) | 1057.630ms mean, CoV 12.34%, range [899.665, 1176.104]ms | CELL 2 above |
+| e2e ratio (this session) | 1.299x (ranges overlap) | CELL 2 above |
+| e2e ratio (ROW 189, prior session) | 1.329x (ranges did not overlap) | ROW 189 |
+| fc route (flat GEMV, `neon_tile_plan`) | tied, not a win, default-off unaffected either way | ROW 188 |
+| BGE zero-risk fallback fact | the route only fires on plan-detected conv GEMMs (`conv_gemm_tile_plan`'s own gate at `cpu.rs:8068`-`8209`); any decline (`seed != 0.0`, negative stride, `i32`/`usize` overflow) falls back to the unmodified NEON path, unchanged behavior | ROW 189's own Phase B description, re-read this session, unchanged |
+| what default-on changes for a mac user | the `ACCELERATE_GEMM_ENABLED` toggle default flips from `false` to `true` for `aarch64`+macOS `Conv` nodes specifically; `cpu.rs:1086` | ROW 188/189, re-read this session |
+| what default-on changes for a linux/other user | nothing -- the route is `#[cfg(all(target_os = "macos", target_arch = "aarch64"))]`-gated at the call site (`real_mnist_accuracy.rs:114`) and Accelerate itself is a macOS-only framework; non-macOS builds compile zero lines of this path regardless of the toggle's own default | re-read this session, unchanged from ROW 188/189 |
+| residual not closed by this session | CELL 1's own mechanism (transpose-tax) not verified to generalize to `run_conv_gemm_tile`'s own shape; ROW 189's own named residuals (micro-cell CoV across repeat runs, logit deviation, allocator-instrumented test, `larger_square` NEON arm) remain open | this row, plus ROW 189 |
+
+### Gates (this session, this host, `reseal-target` CARGO_TARGET_DIR)
+
+- `cargo nextest run -p proxima-tensor`: **459 passed, 0 failed, 4 skipped**, exit 0.
+- `cargo nextest run -p proxima-onnx --all-features`: **98 passed, 0 failed, 4 skipped**, exit 0.
+- `cargo clippy -p proxima-tensor --all-targets --all-features -- -D warnings`: clean, exit 0.
+- `cargo doc -p proxima-tensor --no-deps --all-features`: clean, exit 0.
+
+### Re-prove commands (principle 16)
+
+```
+cd proxima-wt-reseal && CARGO_TARGET_DIR=<scratch> cargo nextest run -p proxima-tensor
+cd proxima-wt-reseal && CARGO_TARGET_DIR=<scratch> cargo nextest run -p proxima-onnx --all-features
+cd proxima-wt-reseal && CARGO_TARGET_DIR=<scratch> cargo clippy -p proxima-tensor --all-targets --all-features -- -D warnings
+cd proxima-wt-reseal && CARGO_TARGET_DIR=<scratch> cargo doc -p proxima-tensor --no-deps --all-features
+cd proxima-wt-reseal && CARGO_TARGET_DIR=<scratch> cargo build --release -p proxima-onnx --bench tile_pipeline --features tile-pipeline-bench
+# then run the produced deps/tile_pipeline-* binary directly with "^tile_pipeline_band_kh$" as its first argument, 5x,
+# checking `uptime` and `pgrep -fl 'cargo|rustc|criterion|nextest'` (filtered of own target dir) empty before each,
+# reading the "tile_pipeline stage profile [band_kh], 200 forward passes: ..." printed line each run
+cd proxima-wt-reseal && CARGO_TARGET_DIR=<scratch> cargo test --release -p proxima-onnx --test real_mnist_accuracy --no-run
+# then run the produced deps/real_mnist_accuracy-* binary directly with `real_mnist_onnx_classifies_real_test_images_at_reference_accuracy --ignored --nocapture`,
+# interleaved with the same invocation prefixed by PROXIMA_ACCELERATE_GEMM=1, 5 rounds each, reading the printed
+# "real_mnist accuracy: 0.9900 (990/1000 images) in <duration>" line each run
+git diff a4bdabf HEAD -- proxima-tensor/src/cpu.rs   # empty -- confirms this row's own claim that the intrinsics change (ROW 190) never touched the executor path (a4bdabf is ROW 189's own last commit to touch cpu.rs)
+```
+
+### Named, NOT attempted this session (out of the 60-minute measurement-only budget)
+
+- **Whether CELL 1's own transpose-tax mechanism generalizes to `run_conv_gemm_tile`'s own row-blocked accumulator shape** -- named as the identified follow-on, not scoped, not disassembled this session.
+- **A literal sub-6 `uptime` reading** -- never reached this session; the host's own structural floor (six pegged processes) sits at ~9-11 even at its quietest. Every "clean" designation in this row means "pre-check empty AND at or near this host's own achievable floor," not the task's own literal <6 bar.
+- **Reconciling ROW 187's own "five" pegged-process count against this session's own "six"** -- not investigated; presence recorded, count discrepancy named, cause not determined, nothing killed.
+- **CELL 2's own per-round bimodality (two rounds near-parity, three rounds ~1.5x)** -- observed, not explained; no profiler or `perf` instrumentation was attached to isolate which of the ten runs' own host conditions produced the split.
