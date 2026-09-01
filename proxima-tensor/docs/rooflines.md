@@ -1,16 +1,36 @@
 # Machine rooflines, per scoreboard lane
 
-Derived from measurements already recorded in `docs/discipline.md`. Every
-constant below cites its ROW and, where the row gives one, a `file:line`. No
-benchmarking ran to produce this document — it is a re-derivable read of the
-existing log, on Apple M1 Max / macOS / arm64, single core unless stated.
-Numbers tagged **MEASURED** were read off an instrument in the cited row;
-**DERIVED** means computed from other cited numbers in this doc;
-**ASSUMED/DEBT** means no citable measurement exists and the number is either
-a standard-formula estimate (flagged) or explicitly not produced here.
+Apple M1 Max / macOS / arm64, single core unless stated. Every constant
+cites its ROW or its branch/commit. Numbers tagged **MEASURED** were read
+off an instrument; **DERIVED** means computed from other cited numbers in
+this doc; **ASSUMED/DEBT** means no citable measurement exists and the
+number is either a standard-formula estimate (flagged) or explicitly not
+produced here.
 
-Re-derive this doc by re-reading the cited ROWs; nothing here should be
-trusted without opening `discipline.md` at the cited line.
+**Provenance changed 2026-09-01.** The original edition of this doc was a
+pure re-read of `discipline.md` with no benchmarking of its own. It is no
+longer that: the BGE lane now carries measurements taken directly, on
+branches not yet merged to `main` (`perf/amx-width-tile` `a03b96d`,
+`perf/width-tile-accs` `15b02cf`, `perf/plan-cache` `e5bdb8e`), plus a
+re-run of the ROW 195 profile at `1f56f95`. Those cells cite the branch,
+not a ROW, and are marked as such. Do not treat this doc as re-derivable
+from the log alone until those branches land and their rows are written.
+
+**As-of dates, per lane** — a lane with no fresh measurement keeps its last
+recorded figure and says so, rather than being silently carried forward as
+current:
+
+| lane | current-best figure last MEASURED | freshness |
+|---|---|---|
+| BGE-small embedding | 2026-09-01, this session | **CURRENT** |
+| mnist f32 inference | ROW 190/192 | stale — not re-measured since |
+| train-step MLP b32 | ROW 179 | stale — not re-measured since |
+| q4_K CPU kernel | ROW 116 | stale — not re-measured since |
+| q4_K GPU decode (Metal) | ROW 193 | stale — not re-measured since |
+
+Re-derive the ROW-cited figures by opening `discipline.md` at the cited
+line; re-derive the branch-cited ones with the re-prove commands in the
+matching lane section.
 
 ## Roofline discipline: physics-only ceilings, self-limits kept separate
 
@@ -543,26 +563,79 @@ S-independent; compute time scales with S):
 | 8 (avg) | 3.515 ms | 1.758 ms | compute |
 | 9 | 3.955 ms | 1.758 ms | compute |
 
-The AMX-measured band (ROW 189) is explicitly flagged at conv shapes and
-was never measured for BERT-style batch=1 GEMM shapes (`Sx384 @ 384x384`,
-`Sx384 @ 384x1536`) — **named as an unmeasured candidate, not applied
-here**, per this lane's own no-guessing constraint.
+**AMX DEBT CLOSED, 2026-09-01 — and it moves this lane's roofline.** ROW 189's
+AMX band was flagged at conv shapes and had never been measured at BERT-style
+batch=1 GEMM shapes. It has now been measured at exactly this lane's own
+shapes, via `cblas_sgemm` on the width-tile route (branch
+`perf/amx-width-tile`, `a03b96d`, quiet host, 5 repeats, paired against the
+packed-NEON arm):
+
+| shape | M=7 | M=8 | M=9 |
+|---|---|---|---|
+| QKVO `(M,384)x(384,384)` | 67.16 | 64.38 | 86.64 |
+| FFN-up `(M,384)x(384,1536)` | 62.18 | 73.62 | 81.77 |
+| FFN-down `(M,1536)x(1536,384)` | 67.55 | 79.12 | 87.88 |
+
+All figures GMAC/s. **Every cell exceeds the 48.5 GMAC/s NEON per-core
+ceiling** this lane's roofline was derived from, by 1.28x-1.84x — so the
+3.515 ms/sentence figure below is a NEON-only ceiling, not this machine's
+ceiling, exactly the substitution `rooflines.md`'s own matrix-ceiling note
+(above, "the box's real ceiling is the max over its compute units") warns
+against. These are Apple's `cblas_sgemm` rates, not this crate's own achieved
+dispatch rate, so they are admissible as a machine constant under the
+physics-only rule — but they are measured AT THESE SHAPES, and M=7-9 is the
+binding limit: ROW 189's 467 GFLOP/s (233 GMAC/s) at an M=64 synthetic shape
+shows the unit itself has far more headroom than this lane's tiny M can
+extract. Carried as the shape-bound AMX ceiling, not as AMX's peak.
 
 ### Roofline vs current best
 
-**Machine roofline (compute-bound, NEON 48.5 GMAC/s ceiling): 3.515
-ms/sentence** (mean across the 3 real sentences' MAC counts; range
-3.074-3.955 ms across the individual 7/8/9-token sentences).
+**Machine roofline (compute-bound), two units, both stated:**
 
-**Current best: 26.68 ms/sentence** (ROW 191, fused arm, 5 paired runs, CoV
-4.68%) — corroborated by ROW 195's own fresh 5-run sweep, 24.57-26.35
-ms/sentence (CoV 3.99-4.26% per sweep, two independent sweeps), and by
-ROW 195's profile-run wall-clock, 25.62 ms/sentence over 20 iterations x 3
-sentences (60 calls).
+- **AMX/Accelerate, measured at this lane's own shapes: 1.94-2.75
+  ms/sentence** (170,465,280 MACs / 88.0 GMAC/s best cell = 1.94 ms;
+  / 62.2 GMAC/s worst cell = 2.75 ms). THIS IS THE BINDING MACHINE
+  CEILING for this box — it is the max over compute units, per the
+  matrix-ceiling note above.
+- **NEON per-core, 48.5 GMAC/s: 3.515 ms/sentence** (mean across the 3
+  real sentences; range 3.074-3.955 ms). Retained as the PORTABLE ceiling
+  — the number that binds on non-Apple aarch64 targets with no matrix
+  coprocessor — never as this machine's ceiling.
 
-**Gap to machine roofline: 26.68 / 3.515 = 7.59x** (using ROW 191's cited
-number against the mean-shape roofline; 6.75x-8.68x across the individual
-sentence lengths' own roofline).
+The 3.515 ms figure was reported as "the" machine roofline for this lane
+through ROWs 195-208. It was a NEON-only ceiling and understated the
+machine by 1.28-1.81x. Corrected here at the first measurement that could
+falsify it.
+
+**Current best, 2026-09-01, by arm — no single path yet carries every
+landed lever, so this is a set of measurements, not one number:**
+
+| arm | M=7 | M=8 | M=9 | what it carries |
+|---|---|---|---|---|
+| `evaluate_named`, sealed `bge_eval` path | 18.44 | 18.01 | 19.98 | fusion only |
+| arena + packing (ROW 206) | 12.13 | 11.47 | 13.42 | packing + arena, NO fusion |
+| arena + packing + **Accelerate** | 13.14 | **11.52** | 13.50 | + AMX, still no fusion |
+| per-sentence COLD, uncached lowering | 44.08 | 42.26 | 48.70 | what a production caller actually pays |
+| per-sentence, lowering cached | 18.15 | 17.62 | 20.03 | lowering cache only |
+
+All ms/sentence. CoV per cell is in the discipline rows; cells above the 5%
+trust line are flagged there and not point-quoted here.
+
+Two facts this table makes visible that the prior single-number form hid:
+(1) `build_static_arena*` never calls `run_rewrite_worklist`, so every
+packed/arena number above was measured WITHOUT fusion, and every fused
+number WITHOUT packing — no measurement of the two together has ever
+existed; (2) the sealed harness times evaluation only, excluding a
+26-30 ms/sentence `lower_graph_pinned` cost (`proxima-onnx/src/lower.rs:
+246-262` decodes and then `.clone()`s the full 133 MB weight set on every
+call), so the shipping per-sentence cost was ~2.4x the headline figure.
+
+**Gap to machine roofline:** against the AMX ceiling (1.94-2.75 ms), the
+best measured arm (11.47 ms) is **4.2x-5.9x**; against the portable NEON
+ceiling (3.515 ms), **3.26x**. The incumbent `onnxruntime` (5.6682
+ms/sentence, CoV 1.76%, `intra_op=1 inter_op=1`, `scripts/onnx_reference/`)
+is itself **2.1x-2.9x off the AMX ceiling** — the incumbent is a rung, not
+the target.
 
 ### Per-node-class profile (closes the "no BGE-side profiler breakdown" DEBT)
 
@@ -571,24 +644,48 @@ feature (reuses the landed `epilogue-profile-probe` probe unchanged — no
 new instrumentation), 20 iterations x 3 sentences = 60 `evaluate_named`
 calls, 3-call warm-up excluded from the counters:
 
+**SUPERSEDED — the ROW 195 profile below was taken at 25.62 ms/sentence,
+before ROWs 198-208 landed. Re-run 2026-09-01 at `1f56f95`, same harness,
+same 60 calls x 3 sentences (M=8 shown; M=9 and M=7 in the row):**
+
 | node class | calls | ns total | % of attributed step time | ns/call |
 |---|---|---|---|---|
-| (a) reduce-fold (96 `MatMul`s + reduce-shaped ops) | 10,200 | 1,228,430,665 | **88.65%** | 120,434.4 |
-| (b) post-reduce epilogue (fused `LayerNorm`/bias) | 4,320 | 43,645,297 | 3.15% | 10,103.1 |
-| (c) everything else (softmax/transpose/reshape/gather glue) | 36,120 | 113,584,993 | 8.20% | 3,144.7 |
-| **total attributed** | 50,640 | 1,385,660,955 | 100% | — 23.09 ms/sentence attributed vs 25.62 ms/sentence wall-clock (the ~2.5 ms/sentence gap is lowering-adjacent glue outside the profiled loop, e.g. per-sentence `lower_graph_pinned`) |
+| (a) reduce-fold | 7,200 | 788,519,278 | **83.70%** | 109,516.6 |
+| — (a.1) gemm-shaped (96 `MatMul`s) | 5,760 | 786,407,606 | **83.47%** | 136,529.1 |
+| — (a.2) small non-gemm (LayerNorm/pool) | 1,440 | 2,111,672 | 0.22% | 1,466.4 |
+| (b) post-reduce epilogue | 4,320 | 42,120,755 | 4.47% | 9,750.2 |
+| (c) everything else (softmax/glue/gather) | 34,620 | 111,476,293 | 11.83% | 3,220.0 |
+| **total attributed** | 46,140 | 942,116,326 | 100% | 15.70 ms/sentence attributed vs **18.34 ms/sentence wall-clock** |
 
-**The next lever, named:** the 88.65% reduce-fold mass is exactly the 96
-`MatMul`s (+ reduce-shaped attention ops). `instrument`'s own `mac_ops`
-counter over that same mass measures **8.31 GMAC/s effective throughput**
-(`DIAG nsper reduce_f32_dense`, averaged over 63 calls incl. warm-up:
-10,750,162,752 MACs / 1,293.2 ms). Against the 48.5 GMAC/s NEON compute
-ceiling this is a **5.84x gap inside the reduce/matmul path alone**
-(48.5 / 8.31) — smaller than, but the dominant contributor to, the 7.59x
-e2e gap above. The interpreted/generic dispatch path (not a tiled NEON
-kernel) is the next lever the chase map should point at; the fused
-`LayerNorm` epilogue (class b, 3.15%) is already near its own floor per
-ROW 191 and is not where the remaining time lives.
+Prior (ROW 195, superseded): 88.65% / 3.15% / 8.20%, 23.09 attributed vs
+25.62 wall-clock.
+
+**The next lever, re-derived from the current profile — the ROW 195 reading
+below it is wrong and is corrected here.** ROW 195 named "the
+interpreted/generic dispatch path (not a tiled NEON kernel)" as the lever,
+inferring a slow kernel from an 8.31 GMAC/s aggregate. That inference is
+now falsified: the same width-tile kernel, measured in isolation against
+packed panels at exactly these shapes (branch `perf/width-tile-accs`,
+`15b02cf`, quiet host, CoV <1%), runs at **48.0-48.8 GMAC/s** — at the NEON
+ceiling, on every BGE shape at every M. A 16-vs-24 accumulator sweep across
+the same shapes moved it 2-4%, so register pressure is measured out too.
+
+In-graph, the same kernel delivers **13.0 GMAC/s** (5,760 calls,
+136,529 ns/call, 1.776 MMAC/call). **The 3.7x lives between "the graph asks
+for a matmul" and "the kernel runs" — not in the kernel and not in register
+blocking.** That is the open diagnosis, not a kernel-quality problem.
+
+Two mechanisms already found inside that gap, both structural:
+- `build_static_arena*` (`cpu.rs:598-719`) calls `bind::bind` directly and
+  never `run_rewrite_worklist`, so the packed/arena path has NO fusion —
+  every arena number was measured without it and every fused number
+  without packing.
+- Class (b) at 4.47% is confirmed near its floor, so `LayerNorm` epilogue
+  work is NOT where remaining time lives — and ORT's own optimized graph
+  (351 nodes: `LayerNormalization` x25, `BiasGelu` x12, `FusedMatMul` x12,
+  `MatMul` x84) fires no matmul-count-reducing fusion either. ORT runs the
+  same 96 matmuls we do at 5.6682 ms/sentence. The gap is throughput per
+  matmul, not graph structure.
 
 Re-prove command:
 ```
@@ -608,8 +705,30 @@ cd <worktree> && CARGO_TARGET_DIR=<scratch> BGE_MODEL_PATH=<local BGE checkout>/
   hidden-state tensor sizes, not a counter-measured figure — it does not
   change the binding-constraint conclusion (weight bytes dominate by ~36x)
   but is flagged as unmeasured, not guessed-and-hidden.
-- AMX candidate rate remains unmeasured at BGE's own GEMM shapes (named
-  above, not applied).
+- ~~AMX candidate rate remains unmeasured at BGE's own GEMM shapes.~~
+  **CLOSED 2026-09-01**, `perf/amx-width-tile` `a03b96d` — 62.2-88.0 GMAC/s
+  measured at this lane's own shapes; it moved this lane's roofline from
+  3.515 to 1.94-2.75 ms/sentence. See the AMX table above.
+- **THE OPEN GAP: 3.7x in-graph vs isolated, unattributed.** The width-tile
+  kernel runs at 48.0-48.8 GMAC/s isolated and 13.0 GMAC/s in-graph on the
+  same shapes. Kernel quality and register blocking are both measured out.
+  Candidate mechanisms not yet discriminated: route miss (some of the 96
+  MatMuls never reaching the width tile — the N==0 class, prior in ROWs
+  197/199), in-route overhead outside the microkernel, residual cold-cache
+  after packing, and per-call `shape::infer` + `bind::bind` + per-node alloc
+  (`cpu.rs:464-479`). Diagnosis in flight on `perf/route-census`.
+- **No arm carries every landed lever.** Fusion, packing+arena, Accelerate,
+  and the lowering cache have each been measured alone or in pairs; the
+  combined path does not exist yet (`perf/unify-arena-fusion` in flight).
+  Every ratio in this lane is therefore a lower bound on what the landed
+  work can do, and none of them may be summed — composition is measured,
+  never derived.
+- **`lower_graph_pinned` costs 26-30 ms/sentence** and is excluded from the
+  sealed harness's timed window (`bge_eval.rs:96` vs `:98`). Root cause:
+  `lower.rs:246-262` decodes and then `.clone()`s the full 133 MB weight
+  set on every call. Cached: -58.3% to -58.9% per sentence
+  (`perf/plan-cache` `e5bdb8e`). Until that lands, every published
+  ms/sentence in this lane understates the shipping cost by ~2.4x.
 
 ---
 
@@ -630,7 +749,19 @@ such — never silently promoted to a machine-roofline gap.
 | train-step (MLP 784-128-10, b32, Adam) | NEON per-core compute (6,545,408 MACs @ 48.5 GMAC/s; bandwidth candidate 41.8-48.6us is non-binding, AMX candidate unmeasured at this shape) | **~135 us/step** | ~0.768-0.778 ms/step, composed from this crate's own 0.26-0.29 ns/element interpreted-dispatch rate (DERIVED) | 1.3699 ms/step (ROW 179) | **~10.1x** (pytorch itself is 2.8x off this ceiling, ROW 159) | whole-step MAC count and byte-traffic enumeration are both formula-derived, not counter-measured; AMX candidate unmeasured at M=32 |
 | q4_K int8 dot (decode GEMV) | co-bound: kernel is at/just-over the DRAM streaming ceiling | 124.4-144.4 GMAC/s (bandwidth) | N/A (kernel already at the physics ceiling — no distinct self-limit below it) | 147.72-150.60 GMAC/s (kernel, ROW 116) | **effectively closed, ~1.0x** (kernel already at ceiling; gap lives in production orchestration, 3.74-3.81x on w=1) | read-only bandwidth ceiling never independently measured |
 | q4_K GPU decode (Metal, same MAC constant) | **GPU-BW DEBT** — no independent GPU streaming-bandwidth ceiling measured (`membw_probe`'s Metal arm is the wrong probe shape, reduce-to-scalar not streaming copy) | **DEBT — not measured** (GPU-BW DEBT; not substituted with a spec-sheet figure) | N/A (no composed self-limit derived this lane; kernel-only 124.7 GMAC/s, 57.032 ms/token, ROW 193, is a measured point, not a derived floor) | **69.9 ms/token** full decode loop (103.6 GMAC/s, ROW 193) | **not computable to machine** (roofline unmeasured); reference-only vs incumbent llama.cpp Metal achieved **17.1 ms/token** (416.1 GMAC/s, ROW 193) — **4.02x under incumbent** (3.34x on kernel-only) | GPU streaming bandwidth ceiling never cleanly measured; per-shape numbers op-isolated, not batched |
-| BGE-small embedding (7-9 tok, 96 MatMuls, hidden=384/12 layers/12 heads/intermediate=1536) | NEON per-core compute (170,465,280 MACs/sentence avg @ 48.5 GMAC/s; AI=1.283 MACs/byte is above the 0.642 MACs/byte ridge point vs the 69.95-81.21 GB/s bandwidth candidate, so bandwidth is non-binding; AMX candidate unmeasured at this GEMM shape) | **3.515 ms/sentence** (mean; 3.074-3.955 ms range across the 7/8/9-token sentences) | N/A (no composed self-limit derived this lane) | 26.68 ms/sentence e2e (ROW 191); reduce/matmul path alone measures 8.31 GMAC/s effective (ROW 195) | **7.59x** (5.84x inside the reduce/matmul path alone, 48.5/8.31 GMAC/s) | activation-bytes DERIVED not counter-measured; reduce class not split by MatMul shape (QKVO vs FFN vs QK^T/softmax@V); AMX unmeasured at this GEMM shape |
+| BGE-small embedding (7-9 tok, 96 MatMuls, hidden=384/12 layers/12 heads/intermediate=1536) | AMX/Accelerate compute, measured at this lane's own shapes (62.2-88.0 GMAC/s, `perf/amx-width-tile` `a03b96d`); NEON 48.5 GMAC/s is the PORTABLE ceiling, not this box's; AI=1.283 MACs/byte is above the 0.642 ridge point vs the 69.95-81.21 GB/s candidate, so bandwidth is non-binding | **1.94-2.75 ms/sentence (AMX, binding)**; 3.515 ms/sentence (NEON, portable) | N/A (no composed self-limit derived this lane) | 11.47 ms/sentence best arm (arena+packing+Accelerate, no fusion); 18.01 on the sealed fusion-only path; 42.26 per-sentence cold | **4.2x-5.9x to AMX** (3.26x to the portable NEON ceiling) | no arm carries fusion AND packing together (`build_static_arena*` never calls `run_rewrite_worklist`); activation-bytes DERIVED not counter-measured; reduce class not split by MatMul shape; in-graph GEMM runs 13.0 GMAC/s vs 48.0-48.8 for the same kernel in isolation, 3.7x unattributed |
+
+**A roofline derived from one compute unit is not a machine roofline.** The
+BGE lane carried "3.515 ms/sentence" as its machine ceiling through ROWs
+195-208. It was NEON-only, on a box whose matrix unit measures 62.2-88.0
+GMAC/s at that lane's own shapes — so the real ceiling was 1.94-2.75 ms and
+every gap-to-roofline figure in that lane understated the target by
+1.28-1.81x. This is the same failure mode as the train-step self-limit
+below, one level up: not "our own cost mistaken for physics," but "one
+unit's physics mistaken for the machine's." The matrix-ceiling note at the
+top of this doc existed precisely to prevent it and was not applied. Any
+lane whose work is matrix-shaped must state BOTH units or it is
+understating its own target.
 
 **The chase number is the machine roofline gap, not the self-limit gap, and
 never a bare incumbent-reference ratio.** Train-step's self-limit gap alone
