@@ -93,6 +93,7 @@ impl RowBand {
 /// sealed executor's own constant-folding would reach, done once at stage
 /// construction so the hot per-pixel path pays one `mul_add`, not a
 /// division and a sqrt.
+#[derive(Clone)]
 pub struct BatchNormAffine {
     scale: Vec<f32>,
     shift: Vec<f32>,
@@ -549,6 +550,7 @@ pub fn block_on_ready<F: std::future::Future>(future: F) -> F::Output {
 /// `lowered.initializers` (no copy) -- field names mirror the ONNX
 /// initializer names 1:1, see `proxima-onnx/examples/scratch_graph_dump.rs`
 /// output cited in ROW 155 for the provenance of every shape below.
+#[derive(Clone, Copy)]
 pub struct MnistWeights<'data> {
     pub conv1_weight: &'data [f32],
     pub conv1_bias: &'data [f32],

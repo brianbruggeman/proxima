@@ -40,6 +40,12 @@ mnist-diag = ["std", "proxima-tensor/instrument"]
 # dep graph, and this is a measured experiment against the sealed baseline,
 # not a production default.
 tile-pipeline-bench = ["std"]
+# stage-parallelism vs data-parallelism probe (`benches/stage_parallel.rs`):
+# 4 pipeline stages on 4 threads connected by `proxima_core::ring::mpsc::Ring`
+# (lock-free MPMC used SPSC-style) vs 4 independent single-thread pipelines on
+# 4 threads. Bench-only, default-off (compile-time gate, gate 1) -- depends on
+# `tile-pipeline-bench`'s own stage types, never a production default.
+stage-parallel-bench = ["tile-pipeline-bench"]
 
 [dependencies]
 proxima-primitives = { workspace = true, default-features = false }
@@ -58,6 +64,7 @@ tempfile.workspace = true
 temp-env.workspace = true
 proxima-tensor = { features = ["std", "test-support"], path = "../proxima-tensor", default-features = false }
 criterion.workspace = true
+proxima-core = { path = "../proxima-core", default-features = false, features = ["alloc"] }
 
 [[bench]]
 name = "mnist_f32_lane"
@@ -68,6 +75,11 @@ required-features = ["mnist-f32-bench"]
 name = "tile_pipeline"
 harness = false
 required-features = ["tile-pipeline-bench"]
+
+[[bench]]
+name = "stage_parallel"
+harness = false
+required-features = ["stage-parallel-bench"]
 
 [[example]]
 name = "mnist_diag"
