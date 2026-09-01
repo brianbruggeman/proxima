@@ -79,21 +79,27 @@ impl StreamConnection for QuicStreamConnection {
 // boxed because `poll_connect` takes `&self`, so the asynchronous QUIC
 // connect/open-bi sequence must live across polls in the same way as the
 // listener's accept sequence below.
-type QuicConnectFut =
-    Pin<Box<dyn std::future::Future<Output = io::Result<QuicStreamConnection>> + Send>>;
+type QuicConnectFut = Pin<
+    Box<
+        dyn std::future::Future<Output = io::Result<(QuicStreamConnection, quinn::Connection)>>
+            + Send,
+    >,
+>;
 
 /// QUIC client adapter for stream protocols such as DNS-over-QUIC.
 ///
-/// Each `poll_connect` establishes one authenticated QUIC connection and
-/// opens one bidirectional application stream. The caller supplies a TLS
+/// Each `poll_connect` opens one bidirectional application stream, reusing a
+/// bounded pool of authenticated QUIC connections. The caller supplies a TLS
 /// config whose ALPN is appropriate for its protocol (DoQ uses `doq`). The
 /// returned stream uses the existing bounded protocol framing; this adapter
-/// owns only endpoint, handshake, and stream setup.
+/// owns only endpoint, handshake, stream setup, and bounded connection reuse.
 pub struct QuicUpstream {
     endpoint: Endpoint,
     server_addr: SocketAddr,
     server_name: String,
     in_flight: Mutex<Option<QuicConnectFut>>,
+    connections: Mutex<Vec<quinn::Connection>>,
+    max_connections: usize,
 }
 
 impl QuicUpstream {
@@ -104,6 +110,24 @@ impl QuicUpstream {
         server_name: impl Into<String>,
         tls_config: rustls::ClientConfig,
     ) -> io::Result<Self> {
+        Self::with_client_config_and_limit(server_addr, server_name, tls_config, 1)
+    }
+
+    /// Build a client endpoint with a bounded connection pool. A limit of
+    /// zero is rejected so configuration mistakes fail before any network
+    /// activity.
+    pub fn with_client_config_and_limit(
+        server_addr: SocketAddr,
+        server_name: impl Into<String>,
+        tls_config: rustls::ClientConfig,
+        max_connections: usize,
+    ) -> io::Result<Self> {
+        if max_connections == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "quic connection pool limit must be non-zero",
+            ));
+        }
         let local = if server_addr.is_ipv4() {
             SocketAddr::from(([0u8; 4], 0))
         } else {
@@ -118,7 +142,14 @@ impl QuicUpstream {
             server_addr,
             server_name: server_name.into(),
             in_flight: Mutex::new(None),
+            connections: Mutex::new(Vec::with_capacity(max_connections.min(4))),
+            max_connections,
         })
+    }
+
+    #[cfg(test)]
+    fn pooled_connection_count(&self) -> usize {
+        self.connections.lock().expect("quic pool lock").len()
     }
 }
 
@@ -132,23 +163,44 @@ impl StreamUpstream for QuicUpstream {
         let endpoint = self.endpoint.clone();
         let server_addr = self.server_addr;
         let server_name = self.server_name.clone();
+        let pooled = self
+            .connections
+            .lock()
+            .ok()
+            .and_then(|mut connections| connections.pop());
         let future = slot.get_or_insert_with(|| {
             Box::pin(async move {
-                let connecting = endpoint
-                    .connect(server_addr, &server_name)
-                    .map_err(|error| io::Error::other(format!("quic connect: {error}")))?;
-                let connection = connecting
-                    .await
-                    .map_err(|error| io::Error::other(format!("quic handshake: {error}")))?;
+                let connect = || async {
+                    let connecting = endpoint
+                        .connect(server_addr, &server_name)
+                        .map_err(|error| io::Error::other(format!("quic connect: {error}")))?;
+                    connecting
+                        .await
+                        .map_err(|error| io::Error::other(format!("quic handshake: {error}")))
+                };
+                let connection = if let Some(connection) = pooled {
+                    connection
+                } else {
+                    connect().await?
+                };
                 let peer = connection.remote_address();
-                let (send, recv) = connection
-                    .open_bi()
-                    .await
-                    .map_err(|error| io::Error::other(format!("quic open stream: {error}")))?;
-                Ok::<QuicStreamConnection, io::Error>(QuicStreamConnection::new(
-                    send,
-                    recv,
-                    Some(peer),
+                let (send, recv) = match connection.open_bi().await {
+                    Ok(stream) => stream,
+                    Err(_) => {
+                        let connection = connect().await?;
+                        let peer = connection.remote_address();
+                        let (send, recv) = connection.open_bi().await.map_err(|error| {
+                            io::Error::other(format!("quic open stream: {error}"))
+                        })?;
+                        return Ok((
+                            QuicStreamConnection::new(send, recv, Some(peer)),
+                            connection,
+                        ));
+                    }
+                };
+                Ok((
+                    QuicStreamConnection::new(send, recv, Some(peer)),
+                    connection,
                 ))
             })
         });
@@ -156,7 +208,14 @@ impl StreamUpstream for QuicUpstream {
             Poll::Pending => Poll::Pending,
             Poll::Ready(result) => {
                 slot.take();
-                Poll::Ready(result.map(|connection| Box::new(connection) as Self::Conn))
+                Poll::Ready(result.map(|(connection, pooled)| {
+                    if let Ok(mut connections) = self.connections.lock() {
+                        if connections.len() < self.max_connections {
+                            connections.push(pooled);
+                        }
+                    }
+                    Box::new(connection) as Self::Conn
+                }))
             }
         }
     }
@@ -305,11 +364,13 @@ mod tests {
             .with_custom_certificate_verifier(Arc::new(AcceptAnyCertificate))
             .with_no_client_auth();
         tls.alpn_protocols = vec![b"doq".to_vec()];
-        let upstream =
-            QuicUpstream::with_client_config(server_addr, "localhost", tls).expect("quic upstream");
+        let upstream = Arc::new(
+            QuicUpstream::with_client_config(server_addr, "localhost", tls).expect("quic upstream"),
+        );
 
+        let upstream_for_client = Arc::clone(&upstream);
         let client_task = tokio::spawn(async move {
-            let mut client = std::future::poll_fn(|cx| upstream.poll_connect(cx))
+            let mut client = std::future::poll_fn(|cx| upstream_for_client.poll_connect(cx))
                 .await
                 .expect("connect stream");
             client.write_all(b"doq-frame").await.expect("client write");
@@ -319,6 +380,7 @@ mod tests {
             .await
             .expect("accept stream");
         let mut client = client_task.await.expect("client task");
+        assert_eq!(upstream.pooled_connection_count(), 1);
         let mut request = [0u8; 9];
         server.read_exact(&mut request).await.expect("server read");
         assert_eq!(&request, b"doq-frame");
