@@ -89,4 +89,22 @@ pub enum SafetensorsError {
         expected: u64,
         found: u64,
     },
+
+    /// The writer was handed a caller-supplied `__metadata__` entry under
+    /// [`crate::sized::FORMAT_VERSION_KEY`] -- that key is reserved for the
+    /// format-version stamp [`crate::writer::write_complete`] always writes
+    /// itself and would otherwise silently collide with it.
+    #[error("metadata key {key:?} is reserved for the format-version stamp")]
+    ReservedMetadataKey { key: String },
+
+    /// The `__metadata__[FORMAT_VERSION_KEY]` value is present but does not
+    /// parse as `major.minor` (two `u16`s separated by a single `.`).
+    #[error("format-version stamp {found:?} does not parse as major.minor")]
+    InvalidFormatVersion { found: String },
+
+    /// The stamped major version exceeds
+    /// [`crate::sized::FORMAT_VERSION_MAJOR`] -- this reader was built
+    /// against an older major and cannot safely interpret the file.
+    #[error("file format version {found:?} is newer than the supported major {supported_major} (this reader supports major <= {supported_major})")]
+    UnsupportedFormatVersion { found: String, supported_major: u16 },
 }

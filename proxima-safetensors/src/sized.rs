@@ -27,3 +27,25 @@ pub const HEADER_LEN_BYTES: usize = 8;
 /// lowered per-process (a caller with a known-small model corpus may want
 /// a tighter cap than the reference implementation's own ceiling).
 pub const MAX_HEADER_BYTES: u64 = 100_000_000;
+
+/// `__metadata__` key [`crate::writer::write_complete`] always stamps and
+/// [`crate::parser::Manifest::format_version`] reads back -- format-
+/// identity, not policy, since a reader older than the writer must be able
+/// to find it under a fixed name at any tier. See `crate::version` for the
+/// accept/reject table.
+pub const FORMAT_VERSION_KEY: &str = "proxima_format_version";
+
+/// Bumped for a layout or semantic break this reader cannot interpret
+/// without a migration -- e.g. a different `data_offsets` convention, or a
+/// tensor directory field changing meaning. A file whose stamped major
+/// exceeds this is rejected by
+/// [`crate::parser::Manifest::format_version`] rather than silently
+/// mis-read.
+pub const FORMAT_VERSION_MAJOR: u16 = 1;
+
+/// Bumped for an additive change a reader built against an older minor can
+/// safely ignore -- e.g. a new advisory `__metadata__` key this crate
+/// starts writing. Never gates acceptance: any minor at a supported major
+/// is accepted regardless of whether it is newer than
+/// [`FORMAT_VERSION_MINOR`].
+pub const FORMAT_VERSION_MINOR: u16 = 0;

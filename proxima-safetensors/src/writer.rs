@@ -42,8 +42,12 @@ pub struct SafetensorsModel<'a> {
 /// # Errors
 ///
 /// [`SafetensorsError::ReservedTensorName`] for a tensor named
-/// `__metadata__`; [`SafetensorsError::DuplicateTensorName`] for repeated
-/// names; [`SafetensorsError::UnsupportedDtype`] if `dtype` has no
+/// `__metadata__`; [`SafetensorsError::ReservedMetadataKey`] if
+/// `model.metadata` itself sets [`crate::sized::FORMAT_VERSION_KEY`] --
+/// that entry is always written by this function, from
+/// [`crate::sized::FORMAT_VERSION_MAJOR`]/[`crate::sized::FORMAT_VERSION_MINOR`],
+/// never from the caller; [`SafetensorsError::DuplicateTensorName`] for
+/// repeated names; [`SafetensorsError::UnsupportedDtype`] if `dtype` has no
 /// safetensors wire string (currently `Int128`/`UInt128`);
 /// [`SafetensorsError::TensorDataLengthMismatch`] if a tensor's `data`
 /// doesn't match the byte length its `shape` and `dtype` imply.
@@ -52,13 +56,18 @@ pub fn write_complete(model: &SafetensorsModel<'_>) -> Result<Vec<u8>, Safetenso
     let mut data = Vec::new();
     let mut header = serde_json::Map::new();
 
-    if !model.metadata.is_empty() {
-        let mut meta_object = serde_json::Map::new();
-        for (key, value) in &model.metadata {
-            meta_object.insert(key.clone(), serde_json::Value::String(value.clone()));
+    let mut meta_object = serde_json::Map::new();
+    meta_object.insert(
+        crate::sized::FORMAT_VERSION_KEY.to_string(),
+        serde_json::Value::String(crate::version::current_version_string()),
+    );
+    for (key, value) in &model.metadata {
+        if key == crate::sized::FORMAT_VERSION_KEY {
+            return Err(SafetensorsError::ReservedMetadataKey { key: key.clone() });
         }
-        header.insert("__metadata__".to_string(), serde_json::Value::Object(meta_object));
+        meta_object.insert(key.clone(), serde_json::Value::String(value.clone()));
     }
+    header.insert("__metadata__".to_string(), serde_json::Value::Object(meta_object));
 
     for tensor in &model.tensors {
         if tensor.name == "__metadata__" {
@@ -151,7 +160,13 @@ mod tests {
             ("cube", "BOOL", &[2, 2, 2], 8),
         ];
         let metadata_entries: &[(&str, &str)] = &[("format", "pt"), ("author", "test")];
-        let (reference_bytes, reference_offsets) = build_buffer(entries, metadata_entries);
+        let version_stamp = crate::version::current_version_string();
+        let reference_metadata_entries: Vec<(&str, &str)> = metadata_entries
+            .iter()
+            .copied()
+            .chain(core::iter::once((crate::sized::FORMAT_VERSION_KEY, version_stamp.as_str())))
+            .collect();
+        let (reference_bytes, reference_offsets) = build_buffer(entries, &reference_metadata_entries);
         let reference_manifest = parse_whole(&reference_bytes).expect("reference buffer parses");
 
         let owned_payloads: Vec<Vec<u8>> = entries
@@ -253,5 +268,93 @@ mod tests {
             outcome,
             Err(SafetensorsError::ReservedTensorName { .. })
         ));
+    }
+
+    #[test]
+    fn write_complete_stamps_a_format_version_a_caller_wrote_none() {
+        let data = [0u8; 4];
+        let model = SafetensorsModel {
+            tensors: vec![TensorPayload {
+                name: "t".to_string(),
+                dtype: DType::Float32,
+                shape: vec![1],
+                data: &data,
+            }],
+            metadata: BTreeMap::new(),
+        };
+        let written = write_complete(&model).expect("writes a model with no caller metadata");
+        let manifest = parse_whole(&written).expect("written buffer parses back");
+
+        assert_eq!(
+            manifest.metadata.get(crate::sized::FORMAT_VERSION_KEY),
+            Some(&crate::version::current_version_string()),
+            "write_complete must always stamp the current format version"
+        );
+        assert_eq!(
+            manifest.format_version().expect("stamped version is valid"),
+            (crate::sized::FORMAT_VERSION_MAJOR, crate::sized::FORMAT_VERSION_MINOR)
+        );
+    }
+
+    #[test]
+    fn write_complete_rejects_a_caller_supplied_format_version_key() {
+        let data = [0u8; 4];
+        let mut metadata = BTreeMap::new();
+        metadata.insert(crate::sized::FORMAT_VERSION_KEY.to_string(), "9.9".to_string());
+        let model = SafetensorsModel {
+            tensors: vec![TensorPayload {
+                name: "t".to_string(),
+                dtype: DType::Float32,
+                shape: vec![1],
+                data: &data,
+            }],
+            metadata,
+        };
+        let outcome = write_complete(&model);
+        assert!(matches!(
+            outcome,
+            Err(SafetensorsError::ReservedMetadataKey { ref key }) if key == crate::sized::FORMAT_VERSION_KEY
+        ));
+    }
+
+    /// The exact fixture shape every safetensors file this workspace wrote
+    /// before this stamp existed has: no `__metadata__` entry under
+    /// [`crate::sized::FORMAT_VERSION_KEY`] at all -- built directly via
+    /// `crate::tests::build_buffer`, bypassing `write_complete`'s always-on
+    /// stamp, since that is the only way to reproduce a genuinely
+    /// pre-change file byte-for-byte.
+    #[test]
+    fn a_pre_change_file_with_no_stamp_at_all_still_loads_as_v1() {
+        let entries: &[(&str, &str, &[u64], usize)] = &[("w", "F32", &[2], 8)];
+        let (pre_change_bytes, _offsets) = build_buffer(entries, &[("format", "pt")]);
+
+        let manifest = parse_whole(&pre_change_bytes).expect("pre-change file still parses");
+        assert!(
+            !manifest.metadata.contains_key(crate::sized::FORMAT_VERSION_KEY),
+            "fixture must genuinely carry no version stamp"
+        );
+        assert_eq!(manifest.format_version().expect("absent stamp is accepted"), (1, 0));
+    }
+
+    #[test]
+    fn an_unknown_major_version_is_a_typed_error_naming_file_and_supported_versions() {
+        let unknown_major = crate::sized::FORMAT_VERSION_MAJOR + 1;
+        let entries: &[(&str, &str, &[u64], usize)] = &[("w", "F32", &[2], 8)];
+        let stamp = alloc::format!("{unknown_major}.0");
+        let (bytes, _offsets) = build_buffer(entries, &[(crate::sized::FORMAT_VERSION_KEY, stamp.as_str())]);
+
+        let manifest = parse_whole(&bytes).expect("header itself is well-formed");
+        let outcome = manifest.format_version();
+        assert!(matches!(
+            outcome,
+            Err(SafetensorsError::UnsupportedFormatVersion { supported_major, .. })
+                if supported_major == crate::sized::FORMAT_VERSION_MAJOR
+        ));
+        let message = outcome.unwrap_err().to_string();
+        assert!(message.contains(&stamp), "error must name the file's own version: {message}");
+        assert!(
+            message.contains(&crate::sized::FORMAT_VERSION_MAJOR.to_string()),
+            "error must name the supported range: {message}"
+        );
     }
 }
