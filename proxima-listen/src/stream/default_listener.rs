@@ -26,6 +26,7 @@ use crate::{
 use proxima_core::ProximaError;
 use proxima_primitives::pipe::handler::PipeHandle;
 use proxima_primitives::stream::StreamConnection;
+use proxima_primitives::sync::AsyncMutex;
 use proxima_runtime::Runtime;
 
 /// Counts every finishing connection that found the release channel
@@ -170,7 +171,23 @@ async fn serve_via_factory(
     // (it never itself awaits this channel), so a full channel only pends
     // the finishing connection's own task briefly — never a deadlock —
     // while capping worst-case queue memory under a release burst.
+    //
+    // `futures::channel::mpsc` grants every `Sender` clone its own
+    // guaranteed slot on top of the buffer, regardless of how full the
+    // channel already is — so handing `spawn_handler` a fresh
+    // `release_tx.clone()` per accepted connection (the shape this used to
+    // be) defeats the bound entirely. There is exactly ONE live `Sender`
+    // for this channel's whole life; every spawned handler borrows it
+    // through `AsyncMutex` (a waker-based async gate — pends the task
+    // instead of blocking a thread) instead of minting a new clone. Every
+    // spawned handler task on this core is cooperatively driven on a
+    // single OS thread (see `spawn_handler`'s own doc: `?Send` for life,
+    // pinned rather than work-stolen), so contention on this mutex is
+    // scheduling contention, never true parallel access — the gate exists
+    // to share the one `Sender` across `'static` tasks, not to arbitrate
+    // real concurrent execution.
     let (release_tx, mut release_rx) = mpsc::channel::<ConnectionHandle>(release_channel_capacity);
+    let release_tx = Arc::new(AsyncMutex::new(release_tx));
     loop {
         futures::select_biased! {
             _ = (&mut shutdown).fuse() => match core.begin_drain() {
@@ -183,7 +200,7 @@ async fn serve_via_factory(
             accepted = poll_fn(|cx| acceptor.poll_accept(cx)).fuse() => match accepted {
                 Ok(conn) => match core.admit(crate::peer_ip(conn.peer().as_ref())) {
                     Admission::Admit { handle, .. } => spawn_handler(
-                        conn, handle, release_tx.clone(), dispatch.clone(),
+                        conn, handle, Arc::clone(&release_tx), dispatch.clone(),
                         method.clone(), path.clone(), chunk_bytes, label.clone(),
                         runtime.clone(),
                     ),
@@ -222,7 +239,7 @@ async fn drain_connections(
 fn spawn_handler<C: StreamConnection>(
     conn: C,
     handle: ConnectionHandle,
-    mut release_tx: mpsc::Sender<ConnectionHandle>,
+    release_tx: Arc<AsyncMutex<mpsc::Sender<ConnectionHandle>>>,
     dispatch: PipeHandle,
     method: String,
     path: String,
@@ -241,11 +258,20 @@ fn spawn_handler<C: StreamConnection>(
         // available); on `Full` record the pressure observable, then fall
         // to the awaiting `send` — pends this connection's own task until
         // the accept loop drains a slot. Never a silent drop of a release.
-        if let Err(err) = release_tx.try_send(handle)
+        //
+        // `lock().await` acquires the ONE live `Sender` shared by every
+        // finishing connection (see its construction in `serve_via_factory`)
+        // instead of minting a fresh clone — a fresh clone per connection is
+        // exactly the defect this pends: `futures::channel::mpsc` gives
+        // every clone its own guaranteed slot, so a clone-per-connection
+        // producer could never actually observe `Full` and this pressure
+        // counter could never engage.
+        let mut sender = release_tx.lock().await;
+        if let Err(err) = sender.try_send(handle)
             && err.is_full()
         {
             RELEASE_CHANNEL_PRESSURE.add(1, &[]);
-            let _ = release_tx.send(handle).await;
+            let _ = sender.send(handle).await;
         }
     });
     // dispatch through the installed Runtime (Prime's CoreShard or tokio's
@@ -414,50 +440,69 @@ mod tests {
             .await;
     }
 
-    // `spawn_handler` clones `release_tx` ONCE per accepted connection
-    // (`serve_via_factory`'s `release_tx.clone()` above) and that clone
-    // sends AT MOST once, at connection end. `futures::channel::mpsc`
-    // grants a brand-new `Sender` clone its own guaranteed slot regardless
-    // of how full the channel already is (each clone starts with its own
-    // `maybe_parked = false`, checked purely locally by `try_send` — never
-    // consulting the shared queue depth on that clone's first attempt).
-    // Reproduces exactly `spawn_handler`'s release snippet (line ~244) for
-    // three concurrently-finishing connections against a zero-capacity
-    // channel with nothing ever draining it: this proves the actual
-    // contract — every release still lands via `try_send`'s fast path, and
-    // `RELEASE_CHANNEL_PRESSURE` never increments, because the guarantee
-    // is per-clone, not per-channel-capacity.
-    #[test]
-    fn release_channel_pressure_never_engages_because_each_connection_clones_a_fresh_sender() {
+    // `spawn_handler` used to clone `release_tx` fresh per accepted
+    // connection. `futures::channel::mpsc` grants every `Sender` clone its
+    // own guaranteed slot regardless of how full the channel already is
+    // (each clone starts with its own `maybe_parked = false`, checked
+    // purely locally by `try_send` — never consulting the shared queue
+    // depth on that clone's first attempt) — so a clone-per-connection
+    // producer could never actually observe `Full` and
+    // `RELEASE_CHANNEL_PRESSURE` could never engage.
+    //
+    // The fix: every finishing connection now shares the SAME live
+    // `Sender`, serialized through `AsyncMutex` (see `serve_via_factory`'s
+    // construction of `release_tx`). This test proves the FIXED contract —
+    // reproducing exactly `spawn_handler`'s release snippet for three
+    // concurrently-finishing connections sharing a channel with a single
+    // reserved slot (capacity 0): at least one of the three genuinely
+    // contends and pends, every release still lands losslessly, and the
+    // pressure counter records the real contention instead of staying
+    // permanently at zero.
+    #[proxima::test]
+    async fn release_channel_pressure_engages_because_connections_now_share_one_sender() {
         let before = RELEASE_CHANNEL_PRESSURE.get();
         let (release_tx, mut release_rx) = mpsc::channel::<ConnectionHandle>(0);
+        let release_tx = Arc::new(AsyncMutex::new(release_tx));
 
-        for slot in 0..3_u32 {
-            let mut this_connections_clone = release_tx.clone();
-            let handle = ConnectionHandle(slot);
-            // The exact snippet `spawn_handler` runs when a connection ends.
-            if let Err(err) = this_connections_clone.try_send(handle)
-                && err.is_full()
-            {
-                RELEASE_CHANNEL_PRESSURE.add(1, &[]);
+        let release_one = |slot: u32| {
+            let release_tx = Arc::clone(&release_tx);
+            async move {
+                let handle = ConnectionHandle(slot);
+                // The exact snippet `spawn_handler` runs when a connection ends.
+                let mut sender = release_tx.lock().await;
+                if let Err(err) = sender.try_send(handle)
+                    && err.is_full()
+                {
+                    RELEASE_CHANNEL_PRESSURE.add(1, &[]);
+                    let _ = sender.send(handle).await;
+                }
             }
-        }
-        drop(release_tx);
+        };
 
-        assert_eq!(
-            RELEASE_CHANNEL_PRESSURE.get(),
-            before,
-            "try_send on a freshly-cloned Sender never observes Full, so the pressure \
-             counter this call site claims to maintain never actually increments"
-        );
+        let releases = futures::future::join3(release_one(0), release_one(1), release_one(2));
+        let drain = async {
+            let mut released = Vec::new();
+            while released.len() < 3 {
+                match release_rx.next().await {
+                    Some(handle) => released.push(handle),
+                    None => break,
+                }
+            }
+            released
+        };
+        let (_, released) = futures::join!(releases, drain);
 
-        let released: Vec<ConnectionHandle> =
-            std::iter::from_fn(|| release_rx.try_recv().ok()).collect();
         assert_eq!(
             released.len(),
             3,
-            "all three releases land despite the channel's configured capacity of 0 — \
-             the 'bounded' release_tx enforces no bound against a clone-per-connection producer"
+            "all three releases land losslessly despite the channel's configured \
+             capacity of 0 — the shared sender pends instead of dropping work"
+        );
+        assert!(
+            RELEASE_CHANNEL_PRESSURE.get() > before,
+            "with only one reserved slot shared by three concurrently-finishing \
+             connections, at least one try_send must observe Full and increment \
+             the pressure counter — the bound now actually engages"
         );
     }
 
