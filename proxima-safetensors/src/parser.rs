@@ -69,6 +69,21 @@ impl Manifest {
             .max()
             .unwrap_or(0)
     }
+
+    /// Validates and returns the `(major, minor)` format-version stamp
+    /// [`crate::writer::write_complete`] writes into `self.metadata` — see
+    /// `crate::version` for the accept/reject table. A file with no stamp
+    /// (every file this workspace wrote before the stamp existed) is
+    /// accepted as `(1, 0)`.
+    ///
+    /// # Errors
+    ///
+    /// [`SafetensorsError::InvalidFormatVersion`] if the stamp doesn't
+    /// parse as `major.minor`; [`SafetensorsError::UnsupportedFormatVersion`]
+    /// if its major exceeds what this reader supports.
+    pub fn format_version(&self) -> Result<(u16, u16), SafetensorsError> {
+        crate::version::parse(&self.metadata)
+    }
 }
 
 /// Sans-IO parser FSM. Feed chunks via [`Self::push`], split anywhere;

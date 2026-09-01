@@ -32,6 +32,7 @@ mod header_codec;
 mod parser;
 mod pipe;
 pub mod sized;
+mod version;
 mod writer;
 
 pub use dtype::{dtype_to_wire, map_dtype};
@@ -39,7 +40,7 @@ pub use error::SafetensorsError;
 pub use header_codec::HeaderCodec;
 pub use parser::{Manifest, SafetensorsParser, TensorEntry};
 pub use pipe::parse_complete;
-pub use sized::{HEADER_LEN_BYTES, MAX_HEADER_BYTES};
+pub use sized::{FORMAT_VERSION_KEY, FORMAT_VERSION_MAJOR, FORMAT_VERSION_MINOR, HEADER_LEN_BYTES, MAX_HEADER_BYTES};
 pub use writer::{SafetensorsModel, TensorPayload, write_complete};
 
 #[cfg(test)]

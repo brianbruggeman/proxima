@@ -134,7 +134,11 @@ pub fn save_state(program: &[Op], state: &State, path: &Path) -> Result<(), Pers
 /// # Errors
 ///
 /// [`PersistError::Io`] if `path` cannot be read; [`PersistError::Safetensors`]
-/// if the bytes are not a well-formed safetensors file;
+/// if the bytes are not a well-formed safetensors file, or if
+/// [`proxima_safetensors::Manifest::format_version`] rejects the
+/// checkpoint's `__metadata__` format-version stamp (a checkpoint with no
+/// stamp at all -- every one this crate wrote before the stamp existed --
+/// is accepted, not rejected);
 /// [`PersistError::UndeclaredParameter`]/[`PersistError::SymbolicShape`] for
 /// the same program-shape faults [`save_state`] raises;
 /// [`PersistError::MissingParameter`] if `program` declares a name the
@@ -144,6 +148,7 @@ pub fn load_state(program: &[Op], path: &Path) -> Result<State, PersistError> {
     let path_display = path.display().to_string();
     let bytes = std::fs::read(path)?;
     let manifest = SafetensorsParser::new().push(&bytes)?.finish()?;
+    manifest.format_version()?;
 
     let header_len_start = HEADER_LEN_BYTES;
     let header_len = bytes
@@ -214,6 +219,51 @@ mod tests {
 
     fn toy_state() -> State {
         vec![(String::from("w"), vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]), (String::from("b"), vec![0.1, 0.2, 0.3])]
+    }
+
+    /// Hand-builds a safetensors wire buffer the same way
+    /// `proxima_safetensors::tests::build_buffer` does, bypassing
+    /// [`proxima_safetensors::write_complete`]'s always-on format-version
+    /// stamp -- the only way to reproduce a checkpoint byte-for-byte as
+    /// this crate's `save_state` would have written it before that stamp
+    /// existed, or to plant an arbitrary tampered stamp for the
+    /// unsupported-version test below.
+    fn hand_written_checkpoint_bytes(entries: &[(&str, &[u64], &[f32])], metadata: &[(&str, &str)]) -> Vec<u8> {
+        let mut header = String::from("{");
+        if !metadata.is_empty() {
+            header.push_str("\"__metadata__\":{");
+            for (index, (key, value)) in metadata.iter().enumerate() {
+                if index > 0 {
+                    header.push(',');
+                }
+                header.push_str(&alloc::format!("{key:?}:{value:?}"));
+            }
+            header.push_str("},");
+        }
+
+        let mut data = Vec::new();
+        for (index, (name, shape, values)) in entries.iter().enumerate() {
+            if index > 0 {
+                header.push(',');
+            }
+            let start = data.len() as u64;
+            for value in values.iter() {
+                data.extend_from_slice(&value.to_le_bytes());
+            }
+            let end = data.len() as u64;
+            let shape_json = shape.iter().map(ToString::to_string).collect::<Vec<_>>().join(",");
+            header.push_str(&alloc::format!(
+                "{name:?}:{{\"dtype\":\"F32\",\"shape\":[{shape_json}],\"data_offsets\":[{start},{end}]}}"
+            ));
+        }
+        header.push('}');
+
+        let header_bytes = header.into_bytes();
+        let mut wire = Vec::new();
+        wire.extend_from_slice(&(header_bytes.len() as u64).to_le_bytes());
+        wire.extend_from_slice(&header_bytes);
+        wire.extend_from_slice(&data);
+        wire
     }
 
     #[test]
@@ -296,6 +346,49 @@ mod tests {
         assert!(
             matches!(outcome, Err(PersistError::MissingParameter { ref name, .. }) if name == "b"),
             "expected a MissingParameter for b, got {outcome:?}"
+        );
+    }
+
+    /// Every checkpoint `save_state` ever wrote before
+    /// [`proxima_safetensors::write_complete`] started stamping a
+    /// format-version key must keep loading -- this fixture reproduces
+    /// that exact shape (no `__metadata__` entry at all) rather than
+    /// relying on `save_state` itself, which now always stamps.
+    #[test]
+    fn load_state_accepts_a_pre_change_checkpoint_carrying_no_format_version_stamp() {
+        let program = toy_program();
+        let state = toy_state();
+        let bytes = hand_written_checkpoint_bytes(
+            &[("w", &[2, 3], &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]), ("b", &[3], &[0.1, 0.2, 0.3])],
+            &[],
+        );
+        let file = tempfile::NamedTempFile::new().expect("create temp checkpoint file");
+        std::fs::write(file.path(), &bytes).expect("write pre-change-shaped checkpoint bytes");
+
+        let loaded = load_state(&program, file.path()).expect("pre-change checkpoint with no version stamp still loads");
+        assert_eq!(loaded, state, "pre-change checkpoint must load byte-for-byte identical values");
+    }
+
+    #[test]
+    fn load_state_rejects_a_checkpoint_declaring_an_unsupported_major_format_version() {
+        let program = toy_program();
+        let unknown_major = proxima_safetensors::FORMAT_VERSION_MAJOR + 1;
+        let unsupported_stamp = alloc::format!("{unknown_major}.0");
+        let bytes = hand_written_checkpoint_bytes(
+            &[("w", &[2, 3], &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]), ("b", &[3], &[0.1, 0.2, 0.3])],
+            &[(proxima_safetensors::FORMAT_VERSION_KEY, unsupported_stamp.as_str())],
+        );
+        let file = tempfile::NamedTempFile::new().expect("create temp checkpoint file");
+        std::fs::write(file.path(), &bytes).expect("write checkpoint with an unsupported version stamp");
+
+        let outcome = load_state(&program, file.path());
+        assert!(
+            matches!(
+                outcome,
+                Err(PersistError::Safetensors(SafetensorsError::UnsupportedFormatVersion { ref found, .. }))
+                    if found == &unsupported_stamp
+            ),
+            "expected an UnsupportedFormatVersion naming {unsupported_stamp:?}, got {outcome:?}"
         );
     }
 }
