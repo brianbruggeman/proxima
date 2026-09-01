@@ -12,6 +12,35 @@ a standard-formula estimate (flagged) or explicitly not produced here.
 Re-derive this doc by re-reading the cited ROWs; nothing here should be
 trusted without opening `discipline.md` at the cited line.
 
+## Roofline discipline: physics-only ceilings, self-limits kept separate
+
+**Owner ruling, 2026-09-01.** A roofline derives from silicon physics ONLY —
+bandwidth (bytes/s), unit compute rates (MACs/s or FLOP/s), bytes moved, MAC
+counts. A ceiling derived from this crate's OWN code costs (interpreted
+per-element dispatch, an achieved-not-peak rate, a specific kernel's own
+measured ns/element) is a **SELF-LIMIT**, not a roofline — it describes what
+this architecture currently costs, not what the hardware allows. Every lane
+below states BOTH, separately labeled, never blended into one number:
+
+- **MACHINE ROOFLINE** — physics-only: bandwidth ceiling, NEON/AMX compute
+  ceiling, or the max/min composition of the two, cited at a hardware
+  constant, never at this crate's own achieved rate.
+- **CURRENT-ARCHITECTURE FLOOR** — a self-limit: the best this specific
+  dispatch/execution shape can do, cited at this crate's own measured rate.
+  Kept as an indictment of the architecture, not mistaken for the ceiling —
+  **the current-architecture floor is the next deletion target, not the
+  ceiling.**
+
+**Trigger.** The train-step lane below presented a composed
+"0.768-0.778ms roofline" built entirely from this crate's own
+0.2612-0.2865 ns/element interpreted-dispatch rate (ROW 176/179,
+`discipline.md:15807`/`16307`) — a self-limit dressed as a hardware ceiling.
+PyTorch measures **0.380ms** on the identical shape (ROW 159,
+`discipline.md:14448`; corroborated at ROW 157's own 0.3406ms,
+`discipline.md:14260`) — beneath the claimed "roofline" by 2x, which is
+sufficient on its own to prove the composed number was never a ceiling. The
+corrected derivation is below.
+
 ## Two machine-constants tables
 
 ### Bandwidth (single core, this M1 Max)
@@ -54,6 +83,11 @@ re-derives (`discipline.md:15220`, "Roofline-implied ns/MAC ... 2,756,960
 total MACs").
 
 ### Candidate ceilings
+
+All three rows below are **MACHINE ROOFLINE** (physics-only: a hardware
+compute rate divided into this doc's own MAC count) — no self-limit
+conflation in this lane; no "our own achieved dispatch rate" figure is used
+as a ceiling anywhere in this section.
 
 | ceiling | formula | value | cite |
 |---|---|---|---|
@@ -113,31 +147,101 @@ divided by 100; `discipline.md:15815-15818`). `*_slow` counters are exactly
 zero at every measured row — no element in this lane ever falls off the fast
 dispatch path.
 
-### Candidate ceilings
+### CURRENT-ARCHITECTURE FLOOR (self-limit — this crate's own dispatch cost, not physics)
 
-| component | ceiling | formula | value | cite |
+This composition was previously mislabeled a "roofline." It is not: every
+input is this crate's own achieved interpreted-dispatch rate, not a hardware
+constant. Kept intact below as the indictment of the current dispatch
+architecture, not the ceiling to chase.
+
+| component | floor | formula | value | cite |
 |---|---|---|---|---|
-| node 87 (bandwidth-bound Add, [32,784,128], 12 B/element) | same-shape streaming ceiling | 38,535,168 B / 69.95 GB/s | **550.42-551.67 us** (hand-rolled triad, this shape) | ROW 176, `discipline.md:15764-15781` |
+| node 87 (bandwidth-bound Add, [32,784,128], 12 B/element), this crate's own achieved rate | same-shape streaming, hand-rolled triad at this shape | 38,535,168 B / 69.95 GB/s | **550.42-551.67 us** | ROW 176, `discipline.md:15764-15781` |
 | `generic_fast` mass, at the crate's own dedicated-kernel floor | dispatch floor | 367,140 x 0.2865 ns | **105.2 us** | ROW 179 rate, `discipline.md:16307` |
 | `generic_fast` mass, at the pure hand-rolled floor (upper-bound optimism) | dispatch floor | 367,140 x 0.2612 ns | **95.9 us** | ROW 176 rate, `discipline.md:15807` |
 | `monomorphic_fast` mass, at this-shape's measured bandwidth ceiling | bandwidth floor | 3,919,759 x 0.1715 ns (node-87-matched hand-rolled rate) | **672.3 us** | ROW 176, `discipline.md:15781` |
-| whole-step compute-only floor (architecture-derived MAC count, **DERIVED, flagged**) | NEON compute | see below | **~135 us** | this doc, formula below |
 
-**DERIVED MAC count (flagged, not independently cited):** forward fc1 (b=32,
-784x128) + backward grad-weight fc1 (same shape) + forward fc2 (b=32, 128x10)
-+ backward grad-input fc2 + backward grad-weight fc2 = 2x(32x784x128) +
+Composed self-limit (elementwise mass only, DERIVED as a sum of the two
+element-count x measured-rate rows above, NOT a single sealed benchmark):
+95.9-105.2 us (`generic_fast`) + 672.3 us (`monomorphic_fast` at its
+shape-specific bandwidth ceiling) = **~768-778 us CURRENT-ARCHITECTURE
+FLOOR**, not a roofline: it is built entirely from this crate's own
+interpreted-dispatch rates (ROW 181, `discipline.md:16460`), and the
+architecture producing it is itself the next deletion target.
+
+### MACHINE ROOFLINE (physics-only, two candidates)
+
+**Compute-bound candidate — NEON per-core, whole-step MAC count (DERIVED MAC
+count, flagged, not independently cited):** forward fc1 (b=32, 784x128) +
+backward grad-weight fc1 (same shape) + forward fc2 (b=32, 128x10) +
+backward grad-input fc2 + backward grad-weight fc2 = 2x(32x784x128) +
 3x(32x128x10) = 6,422,528 + 122,880 = **6,545,408 MACs**, standard backprop
 MAC-counting convention (grad-input for the input layer omitted — no
-upstream layer consumes it). At 48.5 GMAC/s NEON: 6,545,408 / 48.5e9 =
-**134.96 us**. This MAC count is a formula-based estimate from the stated
-784-128-10/batch-32 architecture, not read off a per-step MAC counter in the
-log — carried as a DEBT (see below), not trusted as tightly as the two
-element-count-based floors above.
+upstream layer consumes it). At the NEON register-blocked FMA hardware
+ceiling this doc's own bandwidth table cites for the mnist lane (**48.5
+GMAC/s**, 24-accumulator saturation point, ROW 20 sweep table,
+`discipline.md:1903-1910`, cited at ROW 145 `discipline.md:13433-13434`):
+6,545,408 / 48.5e9 = **134.96 us**. This MAC count is a formula-based
+estimate from the stated 784-128-10/batch-32 architecture, not read off a
+per-step MAC counter in the log — carried as a DEBT (see below).
+
+**Bandwidth-bound candidate — real per-step byte traffic, enumerated by
+stream, MLP 784-128-10 batch=32 f32 (4 B/element), trainable-param count
+`P` = W1(784x128=100,352) + b1(128) + W2(128x10=1,280) + b2(10) = **101,770
+elements**:**
+
+| stream | elements | formula | bytes |
+|---|---|---|---:|
+| params read, forward pass (W1,b1,W2,b2) | 101,770 | `P` | 407,080 |
+| params read, backward (W2 only — propagates grad into layer1) | 1,280 | `W2` | 5,120 |
+| activations written, forward (h1 [32,128], h2 [32,10]) | 4,416 | 32x128 + 32x10 | 17,664 |
+| activations read, backward (h1, h2, input x [32,784]) | 29,504 | h1+h2+x | 118,016 |
+| grads written (dW1,db1,dW2,db2) | 101,770 | `P` | 407,080 |
+| grads read by Adam | 101,770 | `P` | 407,080 |
+| Adam m,v read (old) | 203,540 | `2P` | 814,160 |
+| Adam m,v written (new) | 203,540 | `2P` | 814,160 |
+| params written (post-update W,b) | 101,770 | `P` | 407,080 |
+| **total** | | | **3,397,440 B (3.24 MiB)** |
+
+This is a DERIVED, formula-based traffic enumeration (not a byte counter read
+off an instrument) — carried as DEBT alongside the MAC count. It omits any
+loss-scalar/logit-softmax traffic (negligible, batch=32 x 10 elements) and
+assumes no operand is re-read from a hot cache for free (worst-case DRAM
+assumption, consistent with this doc's own triad-ceiling convention). At the
+same-shape streaming ceiling (**69.95 GB/s**) and the DRAM-bound ceiling
+(**81.21 GB/s**, both ROW 176, `discipline.md:15776-15777`):
+3,397,440 / 69.95e9 = **48.58 us**; 3,397,440 / 81.21e9 = **41.84 us** ->
+**41.8-48.6 us bandwidth-bound candidate**.
+
+**AMX candidate (second unit column, measured-at-conv-shapes caveat).** FLOPs
+= 2 x 6,545,408 MACs = 13,090,816 FLOPs. Applying the measured Accelerate/AMX
+`cblas_sgemm` rates this doc's own bandwidth table cites at ROW 189
+(`discipline.md:16920-16922`, mnist's real conv shapes, 7.84-64.55 GFLOP/s;
+`discipline.md:16923`, the M=64 synthetic shape, 467.0 GFLOP/s) gives a wide,
+**unmeasured-at-this-shape** band: 13,090,816 / 64.55e9 = 202.8 us down to
+13,090,816 / 467.0e9 = 28.0 us, or up to 1670 us at the smallest cited rate
+(7.84 GFLOP/s, mnist's M=8 conv1 layer). **This is not a tight candidate**:
+train-step's own GEMM shapes (M=batch=32 for both fc1/fc2, K=784/128, N=128/10)
+have never been measured under Accelerate. ROW 188 found Accelerate TIES NEON
+at fc's own `M=1` GEVM shapes (`discipline.md:16912`, batch-1 inference,
+not this batch-32 train shape); ROW 189 found Accelerate WINS 1.97-5.51x at
+conv's `M=8..24` shapes (closer in magnitude to this lane's own `M=32`). Train
+step's own AMX ceiling sits somewhere in this band, unresolved — carried as
+DEBT, not asserted.
 
 ### Binding constraint
 
-**Dispatch floor, not bandwidth, not compute** — this is the log's own
-explicit, cross-validated conclusion (ROW 181, `discipline.md:16460`): the
+**Compute-bound**, machine roofline = **~135 us** (NEON candidate), since
+134.96 us (compute) > 41.8-48.6 us (bandwidth) — this workload's own
+arithmetic intensity (6,545,408 MACs / 3,397,440 bytes = 1.93 MACs/byte)
+sits on the compute-bound side of the classic roofline ridge point at these
+shapes. This is the OPPOSITE conclusion from the current-architecture floor's
+own binding constraint below: the machine has slack in both bandwidth AND
+compute relative to what this crate currently spends dispatching.
+
+The current-architecture floor's own binding constraint, unchanged from the
+log's own explicit, cross-validated conclusion (ROW 181,
+`discipline.md:16460`): **dispatch cost, not bandwidth, not compute** — the
 crate's per-element interpreted-dispatch cost (0.2612-0.2865 ns/element,
 measured at 3 independent points: hand-rolled floor, `FusedAdamUpdate`
 kernel, and the large-block streaming asymptote) is **3.5-5x slower per
@@ -152,35 +256,36 @@ overhead riding on top.
 
 ### Roofline vs current best
 
-Composed floor (elementwise mass only, DERIVED as a sum of the two
-element-count x measured-rate rows above, NOT a single sealed benchmark):
-95.9-105.2 us (`generic_fast`) + 672.3 us (`monomorphic_fast` at its
-shape-specific bandwidth ceiling) = **~768-778 us**. Adding the DERIVED
-whole-step compute-only floor (135 us) as a rough upper-bound composition
-(the elementwise floor already includes most matmul-adjacent work per ROW
-174's own node attribution, so this is not a clean sum — flagged) gives an
-outer bound of **~900 us-1.0 ms**.
+| milestone | value | tag | cite |
+|---|---|---|---|
+| **machine roofline (compute-bound, NEON)** | **~135 us/step** | MACHINE ROOFLINE | this doc, DERIVED above |
+| machine roofline, bandwidth-bound candidate (non-binding) | ~41.8-48.6 us/step | MACHINE ROOFLINE, non-binding | this doc, DERIVED above |
+| machine roofline, AMX candidate (unmeasured at this shape) | ~28-1670 us/step | MACHINE ROOFLINE, wide DEBT band | this doc, DERIVED above |
+| pytorch incumbent (single-thread, quiet-host p50 range) | 0.317-0.471 ms (mean 0.380 ms) | reference point, between floor and ceiling | ROW 159, `discipline.md:14448`; corroborated ROW 157 0.3406ms, `discipline.md:14260` |
+| current-architecture floor (self-limit, composed) | ~0.768-0.778 ms | CURRENT-ARCHITECTURE FLOOR | this doc, DERIVED above |
+| current best sealed (mean-of-p50, 3 runs, CoV 0.29%) | **1.3699 ms** | measured | ROW 179, `discipline.md:16307` |
+| pre-`FusedAdamUpdate` baseline | 1.8831 ms | measured | ROW 177, `discipline.md:15853` |
 
-| milestone | value | cite |
-|---|---|---|
-| current best sealed (mean-of-p50, 3 runs, CoV 0.29%) | **1.3699 ms** | ROW 179, `discipline.md:16307` |
-| pre-`FusedAdamUpdate` baseline | 1.8831 ms | ROW 177, `discipline.md:15853` |
-| composed dispatch-floor estimate (elementwise mass only) | ~0.768-0.778 ms | this doc, DERIVED above |
-
-Gap multiple, current best vs the composed elementwise-mass floor: **1.3699 /
-0.773 = 1.77x** (midpoint of the 0.768-0.778 ms band). This is a DERIVED
-composition, not a single measured target — reported as a band, not a point.
+Gap multiples, all vs the ~135 us MACHINE ROOFLINE: current best **1.3699 ms
+/ 0.135 ms = 10.1x**; pytorch **0.380 ms / 0.135 ms = 2.8x** (torch itself
+sits 2.8x off the physics ceiling — the incumbent has its own dispatch tax,
+just a far smaller one); current-architecture floor **0.773 ms / 0.135 ms =
+5.7x** (midpoint of the 0.768-0.778 ms band) — i.e. even if this crate hit
+its OWN best-case dispatch floor exactly, it would still be 5.7x off the
+machine, because the floor is architecture-limited, not physics-limited.
+Gap, current best vs pytorch: **1.3699 / 0.380 = 3.6x**.
 
 ### Debts
 
-- The 6,545,408-MAC whole-step compute count is a standard-formula DERIVATION
-  from the stated architecture, not a counter read from an instrument. Named
-  as DEBT: no per-step MAC counter exists in this crate's instrumentation
-  (only element counters for the fast-dispatch paths).
-- The "~900 us-1.0 ms" outer-bound composition double-counts an unknown
-  fraction of node 87's own Add against the DERIVED MAC-based compute floor
-  (ROW 176 already notes node 87 is part of the grad_w1 reduce accumulation,
-  `discipline.md:15783`) — flagged, not resolved, this session.
+- The 6,545,408-MAC whole-step compute count and the 3,397,440-byte traffic
+  enumeration are both standard-formula DERIVATIONS from the stated
+  architecture, not counters read from an instrument. Named as DEBT: no
+  per-step MAC counter or byte counter exists in this crate's
+  instrumentation (only element counters for the fast-dispatch paths).
+- The AMX candidate band (28-1670 us) is DEBT-heavy: no Accelerate/AMX
+  measurement exists at train-step's own M=32 GEMM shapes; the two anchors
+  cited (conv M=8-24, synthetic M=64) bracket but do not pin this lane's own
+  rate.
 - 66.04%/22.72%/9.17% (elementwise/reduce/dead-constant) phase shares are
   ROW 174's own (`discipline.md:15609`), measured against a since-superseded
   2.0935 ms sealed step, not re-normalized to the current 1.3699 ms step.
@@ -205,6 +310,10 @@ scale with weight-matrix size, so they are excluded from the weight-side
 bytes/MAC figure).
 
 ### Candidate ceilings
+
+The first two rows are **MACHINE ROOFLINE** (bandwidth is a hardware
+constant divided by a bytes/MAC relationship, no achieved-rate substitution).
+The remaining rows are measured kernels/production paths, not rooflines.
 
 | ceiling | formula | value | cite |
 |---|---|---|---|
@@ -414,13 +523,31 @@ grounded ratio available: **26.68 ms measured / roofline unknown**.
 
 ## Summary table
 
-| lane | binding constraint | roofline | current best | gap | debts |
-|---|---|---|---|---|---|
-| mnist f32 inference | NEON per-core compute (0.057 ms/image) | 0.057 ms/image | 0.393907 ms/image (ROW 190) | **6.91x** | full-net AMX roofline unmeasured |
-| train-step (MLP 784-128-10, b32, Adam) | this crate's own interpreted per-element dispatch floor (0.26-0.29 ns/element) | ~0.768-0.778 ms/step (composed, DERIVED) | 1.3699 ms/step (ROW 179) | **~1.77x** (DERIVED band) | whole-step MAC count is formula-derived, not counter-measured |
-| q4_K int8 dot (decode GEMV) | co-bound: kernel is at/just-over the DRAM streaming ceiling | 124.4-144.4 GMAC/s (bandwidth) | 147.72-150.60 GMAC/s (kernel, ROW 116) | **effectively closed, ~1.0x** (kernel already at ceiling; gap lives in production orchestration, 3.74-3.81x on w=1) | read-only bandwidth ceiling never independently measured |
-| q4_K GPU decode (Metal, same MAC constant) | no GPU bandwidth ceiling measured; read against incumbent's achieved rate | 416.1 GMAC/s (llama.cpp Metal achieved, ROW 193) | 124.7 GMAC/s (kernel-only, batched, ROW 193) | **3.34x under incumbent** (4.02x on full decode loop, orchestration adds ~0.7x) | GPU streaming ceiling unmeasured; per-shape numbers op-isolated, not batched |
-| BGE-small embedding (7-9 tok, LayerNorm epilogue) | unknown for the whole net; LayerNorm epilogue op itself is dispatch-floor-shaped (5.25 ns/element fused vs 32.90 ns/element interpreted) | not computable (no whole-net MAC/byte count) | 26.68 ms/sentence e2e (ROW 191) | **not computable** | architecture (layers/intermediate size), full-net MAC count, full-net bytes-moved all unrecorded |
+Three columns where a self-limit exists: **machine roofline** (physics-only,
+the ceiling), **current-architecture floor** (self-limit, this crate's own
+best-case dispatch cost — N/A where no such composition exists), and
+**current best** (measured). Gap is always reported **to the MACHINE
+roofline** — the chase number, never to the self-limit. Where the machine
+roofline itself is unmeasured (named DEBT), the gap column falls back to a
+reference-only ratio against an incumbent's own achieved rate, flagged as
+such — never silently promoted to a machine-roofline gap.
+
+| lane | binding constraint (machine) | machine roofline | current-architecture floor (self-limit) | current best | gap-to-MACHINE | debts |
+|---|---|---|---|---|---|---|
+| mnist f32 inference | NEON per-core compute | 0.057 ms/image | N/A (no composed self-limit derived this lane) | 0.393907 ms/image (ROW 190) | **6.91x** | full-net AMX roofline unmeasured |
+| train-step (MLP 784-128-10, b32, Adam) | NEON per-core compute (6,545,408 MACs @ 48.5 GMAC/s; bandwidth candidate 41.8-48.6us is non-binding, AMX candidate unmeasured at this shape) | **~135 us/step** | ~0.768-0.778 ms/step, composed from this crate's own 0.26-0.29 ns/element interpreted-dispatch rate (DERIVED) | 1.3699 ms/step (ROW 179) | **~10.1x** (pytorch itself is 2.8x off this ceiling, ROW 159) | whole-step MAC count and byte-traffic enumeration are both formula-derived, not counter-measured; AMX candidate unmeasured at M=32 |
+| q4_K int8 dot (decode GEMV) | co-bound: kernel is at/just-over the DRAM streaming ceiling | 124.4-144.4 GMAC/s (bandwidth) | N/A (kernel already at the physics ceiling — no distinct self-limit below it) | 147.72-150.60 GMAC/s (kernel, ROW 116) | **effectively closed, ~1.0x** (kernel already at ceiling; gap lives in production orchestration, 3.74-3.81x on w=1) | read-only bandwidth ceiling never independently measured |
+| q4_K GPU decode (Metal, same MAC constant) | **GPU-BW DEBT** — no independent GPU streaming-bandwidth ceiling measured (`membw_probe`'s Metal arm is the wrong probe shape, reduce-to-scalar not streaming copy) | **DEBT — not measured** (GPU-BW DEBT; not substituted with a spec-sheet figure) | N/A (no composed self-limit derived this lane; kernel-only 124.7 GMAC/s, 57.032 ms/token, ROW 193, is a measured point, not a derived floor) | **69.9 ms/token** full decode loop (103.6 GMAC/s, ROW 193) | **not computable to machine** (roofline unmeasured); reference-only vs incumbent llama.cpp Metal achieved **17.1 ms/token** (416.1 GMAC/s, ROW 193) — **4.02x under incumbent** (3.34x on kernel-only) | GPU streaming bandwidth ceiling never cleanly measured; per-shape numbers op-isolated, not batched |
+| BGE-small embedding (7-9 tok, LayerNorm epilogue) | unknown for the whole net — no MAC/byte count exists to compute one | not computable (no whole-net MAC/byte count) | LayerNorm epilogue op itself is dispatch-floor-shaped (5.25 ns/element fused vs 32.90 ns/element interpreted), but is only ~4.5% of sentence time | 26.68 ms/sentence e2e (ROW 191) | **not computable** | architecture (layers/intermediate size), full-net MAC count, full-net bytes-moved all unrecorded |
+
+**The chase number is the machine roofline gap, not the self-limit gap, and
+never a bare incumbent-reference ratio.** Train-step's self-limit gap alone
+(1.3699 / 0.773 = 1.77x) understated the real target by 5.7x — closing
+dispatch cost to its own best-case floor still leaves 5.7x on the table
+against what the hardware allows. The GPU decode lane's 4.02x-under-incumbent
+figure is the same trap in the other direction: it is not a gap-to-machine
+at all (no GPU bandwidth ceiling exists yet), so it is reported as a
+reference ratio, not conflated with the physics gap the other lanes carry.
 
 All citations above point at `proxima-tensor/docs/discipline.md`; re-derive
 by opening the cited `ROW`/`file:line` pairs directly.
