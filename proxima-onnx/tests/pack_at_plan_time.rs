@@ -16,10 +16,11 @@
 //! shape (`K=32, N=64`) satisfying `width_tile_plan`'s own gate
 //! (`width >= WIDTH_TILE_VECS * 4 == 16`).
 //!
-//! Run with the lever ON to exercise the packed arm for real:
-//! `cargo test -p proxima-onnx --test pack_at_plan_time --features
-//! proxima-tensor/pack-at-plan-time,proxima-tensor/instrument`. Without that
-//! feature flag `packed_width_panels` stays empty and both arms take the
+//! `docs/discipline.md` ROW 207 promoted plan-time packing to default-on
+//! (`aarch64`, std): a plain `cargo test -p proxima-onnx --test
+//! pack_at_plan_time` now exercises the packed arm for real on `aarch64`.
+//! Off `aarch64`, or with `proxima_tensor::cpu::set_pack_at_plan_time_enabled(false)`
+//! called first, `packed_width_panels` stays empty and both arms take the
 //! same unpacked path — the bit-identity assertion still holds (trivially),
 //! but is not evidence the packed kernel ran.
 
