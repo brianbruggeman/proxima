@@ -88,6 +88,9 @@ pub(crate) fn message_to_answer(message: &Message<'_>) -> Option<DnsAnswer> {
 pub(crate) fn message_to_answer_with_metadata(
     message: &Message<'_>,
 ) -> Option<DnsAnswerWithMetadata> {
+    if !message.header.flags.is_response() || message.header.flags.opcode() != 0 {
+        return None;
+    }
     if message.header.qdcount != 1 {
         return None;
     }

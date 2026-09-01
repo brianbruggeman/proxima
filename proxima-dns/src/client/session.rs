@@ -193,4 +193,35 @@ mod tests {
             })
         ));
     }
+
+    #[test]
+    fn decode_response_rejects_non_response_or_nonstandard_opcode() {
+        let mut response = Vec::new();
+        let flags = proxima_protocols::dns::Flags::for_response(true, false, true, 0);
+        encode::encode_response(
+            7,
+            flags,
+            EncodeQuestion {
+                name: "example.com.",
+                qtype: 1,
+                qclass: 1,
+            },
+            &[],
+            &mut response,
+        )
+        .unwrap();
+
+        response[2] &= 0x7f;
+        assert!(matches!(
+            decode_response_with_metadata(7, &response),
+            Err(DnsClientError::Wire(_))
+        ));
+
+        response[2] |= 0x80;
+        response[2] |= 0x08;
+        assert!(matches!(
+            decode_response_with_metadata(7, &response),
+            Err(DnsClientError::Wire(_))
+        ));
+    }
 }
