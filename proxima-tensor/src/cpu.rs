@@ -787,6 +787,95 @@ fn is_post_reduce_epilogue(computed: &BoundOp, reduce_nodes: &[bool]) -> bool {
     reduce_operand_count == 1
 }
 
+/// `docs/discipline.md` ROW 190's own widened admission: [`is_post_reduce_epilogue`]
+/// requires the reduce operand to be the element-for-element walked one (a
+/// non-broadcast layout) — structurally true for the mnist conv/matmul-bias
+/// shape, structurally FALSE for a `LayerNormalization` tail, whose
+/// mean/variance reduce is read through a keepdims BROADCAST instead (see
+/// [`EpilogueKind::LayerNorm`]'s own doc). This is the consumer-side-only
+/// widening the map called for: same admission QUESTION ("is this node a
+/// sole consumer of exactly one reduce, plus broadcasts") answered by a
+/// second, disjoint shape test rather than by loosening the first — a
+/// candidate this function accepts can never ALSO satisfy
+/// [`is_post_reduce_epilogue`] (that function demands the reduce be
+/// non-broadcast; this one demands it be broadcast), so trying both in
+/// sequence never double-admits one candidate under two kinds.
+///
+/// Returns `(primary_slot, reduce_slot)`: `primary_slot` is the sole
+/// non-broadcast operand (the element-for-element walked one — `centered`,
+/// never itself a reduce); `reduce_slot` is the sole BROADCAST operand whose
+/// node is a `Keep::Reduce` output. Every other operand is either a
+/// non-reduce broadcast (`gamma`/`beta`/scalars) or absent.
+fn is_post_reduce_epilogue_broadcast_reduce(computed: &BoundOp, reduce_nodes: &[bool]) -> Option<(usize, usize)> {
+    let BoundOpKind::Elementwise { operands, .. } = &computed.kind else {
+        return None;
+    };
+    let mut primary_slot: Option<usize> = None;
+    let mut reduce_slot: Option<usize> = None;
+    for (slot, (node, layout, gather)) in operands.iter().enumerate() {
+        let is_broadcast = layout.strides.contains(&0);
+        let is_reduce_output = gather.is_none() && reduce_nodes.get(node.0 as usize).copied().unwrap_or(false);
+        if is_broadcast {
+            if is_reduce_output {
+                if reduce_slot.is_some() {
+                    return None;
+                }
+                reduce_slot = Some(slot);
+            }
+        } else {
+            if is_reduce_output || primary_slot.is_some() {
+                return None;
+            }
+            primary_slot = Some(slot);
+        }
+    }
+    primary_slot.zip(reduce_slot)
+}
+
+/// Is `layout` a `LayerNorm` reduce operand's own keepdims-broadcast
+/// addressing of `extents` — zero stride on the LAST axis (the reduced,
+/// hidden/feature axis, broadcast back over it) and standard row-major
+/// addressing over every OTHER axis, matching the reduce's own smaller
+/// physical buffer (kept axes only, contiguous). Sibling to
+/// [`epilogue_is_contiguous_row_major`], which validates the DIFFERENT
+/// shape the other three [`EpilogueKind`]s need (full-rank contiguous, no
+/// dropped axis).
+fn epilogue_reduce_operand_matches_leading_axes(layout: &bind::Layout, extents: &[u64]) -> bool {
+    if layout.base != 0 || layout.strides.len() != extents.len() {
+        return false;
+    }
+    let Some(leading_extents) = extents.len().checked_sub(1).map(|last| &extents[..last]) else {
+        return false;
+    };
+    if layout.strides.last().copied().unwrap_or(0) != 0 {
+        return false;
+    }
+    let mut expected = 1i64;
+    for (axis, &extent) in leading_extents.iter().enumerate().rev() {
+        if layout.strides.get(axis).copied().unwrap_or(0) != expected {
+            return false;
+        }
+        expected *= extent as i64;
+    }
+    true
+}
+
+/// Is `layout` a `LayerNorm` `gamma`/`beta` operand's own broadcast: zero
+/// stride on every axis except the LAST (contiguous, stride 1 — a plain
+/// `[hidden]`-shaped tensor broadcast over every leading axis).
+fn epilogue_broadcast_operand_matches_last_axis(layout: &bind::Layout) -> bool {
+    let Some((&last_stride, leading_strides)) = layout.strides.split_last() else {
+        return false;
+    };
+    layout.base == 0 && last_stride == 1 && leading_strides.iter().all(|&stride| stride == 0)
+}
+
+/// Is `layout` a pure rank-0 scalar broadcast — every stride zero. Used for
+/// `LayerNorm`'s `1/N` and `eps` operands, both lower-time constants.
+fn epilogue_is_scalar_broadcast(layout: &bind::Layout) -> bool {
+    layout.strides.iter().all(|&stride| stride == 0)
+}
+
 /// `docs/discipline.md` ROW 184 Phase 3: the three exact op-sequence +
 /// operand-wiring shapes a real diagnostic dump (`epilogue_fuse_plan`'s own
 /// insertion site, temporarily instrumented, reverted before commit) found
@@ -801,6 +890,23 @@ fn is_post_reduce_epilogue(computed: &BoundOp, reduce_nodes: &[bool]) -> bool {
 /// not fuse this node at all" -- the UNFUSED two-pass path runs instead,
 /// never ROW 183's own interpreted `apply_body`-per-element evaluator
 /// (measured +17.4% e2e slower).
+/// `docs/discipline.md` ROW 190: `LayerNorm` is a fourth, structurally
+/// distinct shape from `Clip`/`ClipNorm`/`Norm` — a real BERT-style ONNX
+/// export's `LayerNormalization` unrolling, confirmed against BGE-small's
+/// own 25 LayerNorm sites via `epilogue_dump_shapes`-style instrumentation
+/// (run and reverted, never landed):
+/// `((centered) / sqrt(reduce * (1/N) + eps)) * gamma + beta`. The other
+/// three kinds all walk the REDUCE operand element-for-element (it IS the
+/// per-position accumulator, bias-added at every output position); here the
+/// reduce (a `ReduceMean`-derived sum-of-squared-centered-values) is instead
+/// consumed through a KEEPDIMS broadcast — one value per row, re-read for
+/// every column in that row — while the operand walked element-for-element
+/// is `centered` (`x - mean`), itself an ordinary prior elementwise node,
+/// never a reduce. `gamma`/`beta` compound this: they vary over the LAST
+/// (hidden/feature) axis, the opposite axis from the one the reduce
+/// broadcasts over — the one shape this kind's own kernel arm hard-codes,
+/// verified structurally at admission (`epilogue_reduce_operand_matches_leading_axes`
+/// / `epilogue_broadcast_operand_matches_last_axis` below), never assumed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum EpilogueKind {
     /// `max(reduce + bias, zero)`.
@@ -809,6 +915,9 @@ enum EpilogueKind {
     ClipNorm,
     /// `((reduce + bias - mean) / sqrt(var + eps)) * gamma + beta`, no relu.
     Norm,
+    /// `(centered / sqrt(reduce * (1/N) + eps)) * gamma + beta` — BERT-style
+    /// `LayerNormalization`'s own unrolled tail; see this variant's own doc.
+    LayerNorm,
 }
 
 fn epilogue_step_is(step: &bind::BodyStep, op: ScalarOp, args: &[StepArg]) -> bool {
@@ -844,6 +953,16 @@ fn detect_epilogue_kind(body: &ComposedBody) -> Option<EpilogueKind> {
         && epilogue_step_is(&steps[6], ScalarOp::Add, &[Step(5), Operand(6)]);
     if is_norm {
         return Some(EpilogueKind::Norm);
+    }
+    let is_layer_norm = steps.len() == 6
+        && epilogue_step_is(&steps[0], ScalarOp::Multiply, &[Operand(1), Operand(2)])
+        && epilogue_step_is(&steps[1], ScalarOp::Add, &[Step(0), Operand(3)])
+        && epilogue_step_is(&steps[2], ScalarOp::SquareRoot, &[Step(1)])
+        && epilogue_step_is(&steps[3], ScalarOp::Divide, &[Operand(0), Step(2)])
+        && epilogue_step_is(&steps[4], ScalarOp::Multiply, &[Step(3), Operand(4)])
+        && epilogue_step_is(&steps[5], ScalarOp::Add, &[Step(4), Operand(5)]);
+    if is_layer_norm {
+        return Some(EpilogueKind::LayerNorm);
     }
     None
 }
@@ -959,25 +1078,46 @@ fn epilogue_fuse_plan(
     }
     let mut plan = BTreeMap::new();
     for (index, computed) in resolved.iter().enumerate() {
-        if !is_post_reduce_epilogue(computed, &reduce_nodes) {
-            continue;
-        }
         let BoundOpKind::Elementwise { operands, body } = &computed.kind else {
             continue;
         };
-        let Some(reduce_slot) = operands.iter().position(|(node, layout, gather)| {
-            gather.is_none() && !layout.strides.contains(&0) && reduce_nodes.get(node.0 as usize).copied().unwrap_or(false)
-        }) else {
+        // Two disjoint admission shapes (`docs/discipline.md` ROW 190's own
+        // widening): [`is_post_reduce_epilogue`] admits Clip/ClipNorm/Norm,
+        // where the reduce is the element-for-element walked operand;
+        // [`is_post_reduce_epilogue_broadcast_reduce`] admits `LayerNorm`,
+        // where the reduce is read through a keepdims broadcast instead and
+        // a DIFFERENT, non-reduce operand (`centered`) is walked
+        // element-for-element. A candidate can satisfy at most one — see
+        // that function's own doc for why.
+        let (reduce_slot, primary_slot) = if is_post_reduce_epilogue(computed, &reduce_nodes) {
+            let Some(reduce_slot) = operands.iter().position(|(node, layout, gather)| {
+                gather.is_none() && !layout.strides.contains(&0) && reduce_nodes.get(node.0 as usize).copied().unwrap_or(false)
+            }) else {
+                continue;
+            };
+            (reduce_slot, None)
+        } else if let Some((primary_slot, reduce_slot)) = is_post_reduce_epilogue_broadcast_reduce(computed, &reduce_nodes) {
+            (reduce_slot, Some(primary_slot))
+        } else {
             continue;
         };
-        // the monomorphized kernels below encode "operand 0 is the reduce"
-        // as part of each detected shape's own fixed wiring (verified
-        // against the real diagnostic dump) — a candidate that structurally
-        // matches `is_post_reduce_epilogue` but wires the reduce into a
-        // DIFFERENT operand slot is real, just not one of the three shapes
-        // this row builds a kernel for, so it falls back to unfused rather
-        // than risk misreading the wrong slot as the reduce.
-        if reduce_slot != 0 {
+        let Some(kind) = detect_epilogue_kind(body) else {
+            continue;
+        };
+        // the monomorphized kernels below encode a FIXED operand wiring per
+        // `kind` (verified against the real diagnostic dump) — a candidate
+        // that structurally matches admission but wires operands into
+        // different slots is real, just not a shape this row builds a
+        // kernel for, so it falls back to unfused rather than risk
+        // misreading the wrong slot.
+        let expected_reduce_slot = match kind {
+            EpilogueKind::Clip | EpilogueKind::ClipNorm | EpilogueKind::Norm => 0,
+            EpilogueKind::LayerNorm => 1,
+        };
+        if reduce_slot != expected_reduce_slot {
+            continue;
+        }
+        if kind == EpilogueKind::LayerNorm && primary_slot != Some(0) {
             continue;
         }
         let reduce_node = operands[reduce_slot].0;
@@ -1005,14 +1145,47 @@ fn epilogue_fuse_plan(
         if operands.iter().any(|(node, ..)| *node != reduce_node && quantized_weights.contains_key(node)) {
             continue;
         }
-        let Some(kind) = detect_epilogue_kind(body) else {
-            continue;
-        };
-        if !epilogue_is_contiguous_row_major(&operands[reduce_slot].1, &computed.extents) {
-            continue;
-        }
-        let Ok(hoist_axis) = epilogue_hoist_axis(operands, reduce_slot) else {
-            continue;
+        let hoist_axis = if kind == EpilogueKind::LayerNorm {
+            // `LayerNorm`'s own geometry (see [`EpilogueKind::LayerNorm`]'s
+            // doc): the reduce broadcasts over the LAST axis (hidden), so the
+            // (before, at, after) split hoists at the SECOND-TO-LAST axis —
+            // `at` walks rows, `after` walks the hidden axis `gamma`/`beta`
+            // vary over (handled by a dedicated inner-axis read in
+            // [`apply_epilogue_fused_monomorphic`], never this function's
+            // single-axis `epilogue_hoist_axis`, which cannot express two
+            // disjoint broadcast axes at once).
+            let Some(row_axis) = computed.extents.len().checked_sub(2) else {
+                continue;
+            };
+            let Some(primary) = primary_slot.and_then(|slot| operands.get(slot)) else {
+                continue;
+            };
+            let Some((reciprocal_n, epsilon, gamma, beta)) = (match operands.get(2..6) {
+                Some([reciprocal_n, epsilon, gamma, beta]) => Some((reciprocal_n, epsilon, gamma, beta)),
+                _ => None,
+            }) else {
+                continue;
+            };
+            if !epilogue_reduce_operand_matches_leading_axes(&operands[reduce_slot].1, &computed.extents) {
+                continue;
+            }
+            if !epilogue_is_contiguous_row_major(&primary.1, &computed.extents) {
+                continue;
+            }
+            let scalar_slots_ok = epilogue_is_scalar_broadcast(&reciprocal_n.1) && epilogue_is_scalar_broadcast(&epsilon.1);
+            let affine_slots_ok = epilogue_broadcast_operand_matches_last_axis(&gamma.1) && epilogue_broadcast_operand_matches_last_axis(&beta.1);
+            if !scalar_slots_ok || !affine_slots_ok {
+                continue;
+            }
+            Some(row_axis)
+        } else {
+            if !epilogue_is_contiguous_row_major(&operands[reduce_slot].1, &computed.extents) {
+                continue;
+            }
+            let Ok(hoist_axis) = epilogue_hoist_axis(operands, reduce_slot) else {
+                continue;
+            };
+            hoist_axis
         };
         let fire_position = operands
             .iter()
@@ -1169,10 +1342,26 @@ fn apply_epilogue_fused_monomorphic(kind: EpilogueKind, consumer: &BoundOp, redu
         let source: &[f32] = if *node == reduce_node { reduce_values } else { buffers[node.0 as usize].as_deref().unwrap_or(&[]) };
         usize::try_from(offset).ok().and_then(|index| source.get(index)).copied().unwrap_or(0.0)
     };
+    // `LayerNorm`'s own second broadcast axis (the LAST/hidden axis
+    // `gamma`/`beta` vary over, disjoint from `axis` above): a dedicated
+    // read keyed on the innermost loop position instead of `column`, since
+    // `read`'s single `coordinate[axis]` cannot express two independently
+    // varying axes at once (see [`EpilogueKind::LayerNorm`]'s own doc).
+    let inner_axis = rank.saturating_sub(1);
+    let read_inner = |slot: usize, inner: u64| -> f32 {
+        let (node, layout, _gather) = &operands[slot];
+        let mut coordinate = [0u64; bind::MAX_INLINE_RANK];
+        if inner_axis < rank && inner_axis < bind::MAX_INLINE_RANK {
+            coordinate[inner_axis] = inner;
+        }
+        let offset = layout.offset_of(&coordinate[..rank.min(bind::MAX_INLINE_RANK)]);
+        let source: &[f32] = buffers[node.0 as usize].as_deref().unwrap_or(&[]);
+        usize::try_from(offset).ok().and_then(|index| source.get(index)).copied().unwrap_or(0.0)
+    };
 
     let mut reduce_index = 0usize;
     let mut out_index = 0usize;
-    for _outer in 0..before {
+    for outer in 0..before {
         for column in 0..at {
             match kind {
                 EpilogueKind::Clip => {
@@ -1217,6 +1406,32 @@ fn apply_epilogue_fused_monomorphic(kind: EpilogueKind, consumer: &BoundOp, redu
                         reduce_index += 1;
                         let biased = value + bias;
                         let centered = biased - mean;
+                        let normalized = centered / denominator;
+                        output[out_index] = normalized * gamma + beta;
+                        out_index += 1;
+                    }
+                }
+                EpilogueKind::LayerNorm => {
+                    // `reduce_values` here holds the variance-sum reduce's
+                    // OWN materialized buffer -- shape `(before, at)`
+                    // (hidden already dropped by the reduce), addressed
+                    // directly rather than via `reduce_index`'s per-output-
+                    // element counter (that counter walks `before*at*after`
+                    // elements; this reduce needs exactly one read per
+                    // `(outer, column)` row, reused across every `after`
+                    // position in that row).
+                    let primary_node = operands[0].0;
+                    let primary = buffers[primary_node.0 as usize].as_deref().unwrap_or(&[]);
+                    let reciprocal_n = read(2, 0);
+                    let epsilon = read(3, 0);
+                    let row_index = (outer as usize).saturating_mul(at as usize).saturating_add(column as usize);
+                    let sum_squared = reduce_values.get(row_index).copied().unwrap_or(0.0);
+                    let variance = sum_squared * reciprocal_n;
+                    let denominator = (variance + epsilon).sqrt();
+                    for inner in 0..after {
+                        let centered = primary.get(out_index).copied().unwrap_or(0.0);
+                        let gamma = read_inner(4, inner);
+                        let beta = read_inner(5, inner);
                         let normalized = centered / denominator;
                         output[out_index] = normalized * gamma + beta;
                         out_index += 1;
