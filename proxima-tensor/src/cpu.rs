@@ -16938,7 +16938,7 @@ mod tests {
                 // (`m x k` and `n x k` row-major, this function's own doc),
                 // `out_head` exactly `m*n` -- every bound `try_run_accelerate_sgemm`'s
                 // own `# Safety` requires.
-                let accelerated = unsafe { try_run_accelerate_sgemm(a_head, 0, k, b_head, 0, k, out_head, 0, n, m, n, k, 1, 0.0) };
+                let accelerated = unsafe { try_run_accelerate_sgemm(a_head, 0, k, b_head, 0, k, out_head, 0, n, m, n, k, 1, 0.0, true) };
                 assert!(accelerated, "try_run_accelerate_sgemm declined a shape this nano expects to run: m={m} n={n} k={k}");
             }
             out
