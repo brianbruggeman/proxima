@@ -39,6 +39,14 @@ ggml-bench = ["std"]
 # Execution-level only -- never touches `bind::bind`'s fusion decisions.
 # Default-off until the probe's own bench proves it earns the switch.
 dynamic-elision-probe = ["std"]
+# `docs/discipline.md` ROW 181 reduce-epilogue profile probe: temporary
+# per-node wall-time attribution inside `run_resolved_nodes_in_arena`,
+# bucketed by node class (reduce-fold, post-reduce elementwise epilogue,
+# everything else) via `std::time::Instant`. Execution-level only, reads
+# `arena.resolved`'s already-bound `BoundOpKind`/operands, never touches
+# `bind::bind`. Default-off; exists to answer the profile gate before any
+# fusion mechanism is built, not to ship.
+epilogue-profile-probe = ["std"]
 # real execution-witness counters (elements/bytes/gather-vs-affine) plus
 # per-bound-op spans over `proxima-telemetry`'s legacy Metrics/Telemetry
 # surface — default-off, no effect on the default build or the no_std+alloc
