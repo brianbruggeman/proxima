@@ -197,6 +197,7 @@ impl DnsClientUpstream {
         qtype: u16,
         qclass: u16,
     ) -> Result<DnsAnswerWithMetadata, DnsClientError> {
+        let deadline = now() + core::time::Duration::from_millis(self.config.query_timeout_ms);
         let query = encode_query(id, name, qtype, qclass, true)?;
         let frame_len = u16::try_from(query.len())
             .map_err(|_| DnsClientError::Wire("DNS-over-TCP query exceeds 65535 bytes".into()))?;
@@ -204,20 +205,23 @@ impl DnsClientUpstream {
         frame.extend_from_slice(&frame_len.to_be_bytes());
         frame.extend_from_slice(&query);
 
-        let mut connection = tcp_upstream
-            .connect()
+        let mut connection = timeout_at(deadline, tcp_upstream.connect())
             .await
+            .map_err(|_| DnsClientError::Timeout(self.config.query_timeout_ms))?
             .map_err(DnsClientError::Io)?;
-        connection
-            .write_all(&frame)
+        timeout_at(deadline, connection.write_all(&frame))
             .await
+            .map_err(|_| DnsClientError::Timeout(self.config.query_timeout_ms))?
             .map_err(DnsClientError::Io)?;
-        connection.flush().await.map_err(DnsClientError::Io)?;
+        timeout_at(deadline, connection.flush())
+            .await
+            .map_err(|_| DnsClientError::Timeout(self.config.query_timeout_ms))?
+            .map_err(DnsClientError::Io)?;
 
         let mut length = [0u8; 2];
-        connection
-            .read_exact(&mut length)
+        timeout_at(deadline, connection.read_exact(&mut length))
             .await
+            .map_err(|_| DnsClientError::Timeout(self.config.query_timeout_ms))?
             .map_err(DnsClientError::Io)?;
         let response_len = usize::from(u16::from_be_bytes(length));
         if response_len == 0 || response_len > MAX_TCP_REPLY_BYTES {
@@ -226,9 +230,9 @@ impl DnsClientUpstream {
             ));
         }
         let mut response = vec![0u8; response_len];
-        connection
-            .read_exact(&mut response)
+        timeout_at(deadline, connection.read_exact(&mut response))
             .await
+            .map_err(|_| DnsClientError::Timeout(self.config.query_timeout_ms))?
             .map_err(DnsClientError::Io)?;
         decode_response_with_metadata(id, &response)
     }
