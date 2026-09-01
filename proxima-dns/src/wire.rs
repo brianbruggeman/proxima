@@ -25,7 +25,7 @@ use proxima_telemetry::warn;
 
 use crate::pipes::DnsAnswer;
 #[cfg(feature = "client")]
-use crate::pipes::{DnsAnswerMetadata, DnsAnswerRecord, DnsAnswerWithMetadata, DnsQuery};
+use crate::pipes::{DnsAnswerMetadata, DnsAnswerRecord, DnsAnswerWithMetadata};
 #[cfg(feature = "listen")]
 use crate::pipes::{DnsPipeHandle, DnsQuery, UDP_TRANSPORT, build_request};
 
