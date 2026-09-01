@@ -5718,18 +5718,38 @@ fn run_reduce_with_quantized_weights<B: Deref<Target = [f32]>>(
 /// packed-weight byte lengths instead of reading `output_axes` the way this
 /// does, which is what let its shape drift out of step with this one
 /// (`proxima-tensor` cached-attention quantized-seam fix).
-struct ReduceAxisShape<'op> {
+struct ReduceAxisShape {
     reduction_dims: Vec<u16>,
-    leading_output_axes: &'op [u16],
+    leading_output_axes: Vec<u16>,
     last_output_dim: Option<u16>,
     leading_extents: Vec<u64>,
     reduction_extents: Vec<u64>,
     width: usize,
 }
 
-fn resolve_reduce_axis_shape<'op>(resolved: &BoundOp, output_axes: &'op [u16]) -> ReduceAxisShape<'op> {
+/// `leading_output_axes` elides any axis of extent 1: a size-1 axis has
+/// exactly one legal coordinate, so it contributes nothing to addressing
+/// (`full_coordinate`'s zero-init already leaves that slot at `0` forever —
+/// every caller below builds `full_coordinate` as `vec![0u64; extents.len()]`
+/// once and never writes an omitted axis's slot). Squeezing it out here,
+/// once per bound op, is what lets `neon_tile_plan`/`width_tile_plan`'s
+/// shared `leading_output_axes.len() == 1` gate see THROUGH a batch axis a
+/// lowering pass never flattened into the token axis instead of counting it
+/// (`docs/discipline.md` ROW 196: BGE's `MatMul([1,seq,384], [384,N])` keeps
+/// `batch=1` as its own leading axis, so both AArch64 tile kernels decline
+/// for 72 of 96 matmuls). Sound at ANY position among the leading axes, not
+/// only the first: each survives independently in `leading_extents`
+/// (`leading_product` unaffected -- multiplying by 1 is a no-op) and each
+/// axis's `full_coordinate` slot is touched only through this same
+/// leading-axis list, so dropping one changes no other axis's addressing.
+fn resolve_reduce_axis_shape(resolved: &BoundOp, output_axes: &[u16]) -> ReduceAxisShape {
     let reduction_dims: Vec<u16> = (0..resolved.extents.len() as u16).filter(|dim| !output_axes.contains(dim)).collect();
-    let (leading_output_axes, last_output_dim) = output_axes_split(output_axes);
+    let (leading_output_axes_raw, last_output_dim) = output_axes_split(output_axes);
+    let leading_output_axes: Vec<u16> = leading_output_axes_raw
+        .iter()
+        .copied()
+        .filter(|&dim| resolved.extents[dim as usize] != 1)
+        .collect();
 
     let leading_extents: Vec<u64> = leading_output_axes.iter().map(|dim| resolved.extents[*dim as usize]).collect();
     let reduction_extents: Vec<u64> = reduction_dims.iter().map(|dim| resolved.extents[*dim as usize]).collect();
@@ -5820,6 +5840,10 @@ fn run_reduce<B: Deref<Target = [f32]>>(
         reduction_extents,
         width,
     } = resolve_reduce_axis_shape(resolved, output_axes.as_slice());
+    // every downstream site in this function takes `&[u16]` (`neon_tile_plan`,
+    // `width_tile_plan`, `conv_gemm_tile_plan`, `merge_coordinates_into`) --
+    // shadow to a borrow once here rather than touch each call site.
+    let leading_output_axes: &[u16] = &leading_output_axes;
 
     // loop-invariant: neither `last_output_dim` nor the operand views change
     // across the whole node, so this stride table is built once instead of
