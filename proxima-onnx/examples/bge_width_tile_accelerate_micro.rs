@@ -143,7 +143,7 @@ fn shape_block(name: &str, m: usize, k: usize, n: usize) {
         assert!(engagement > 0, "engagement proof: accelerate arm must record at least one hit, got 0");
     }
 
-    let outcome = if ratio >= 0.50 && ratio <= 0.95 { "HIT" } else { "MISS" };
+    let outcome = if (0.50..=0.95).contains(&ratio) { "HIT" } else { "MISS" };
     println!("    -> pre-registered prediction: 0.50x-0.95x -> {outcome}");
 }
 
