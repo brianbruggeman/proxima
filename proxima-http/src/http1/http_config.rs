@@ -1,6 +1,6 @@
 //! Wire + runtime config types for the `http` upstream, shared by both
 //! the hyper-backed [`super::upstream`] and the tokio-free prime client
-//! ([`super::client`] / [`super::prime_upstream`]).
+//! (`super::client` / `super::prime_upstream`).
 //!
 //! Pure data — no hyper, no tokio — so this module compiles under either
 //! `http1` (the hyper stack) or `http1-stream-client` (the prime stack)
