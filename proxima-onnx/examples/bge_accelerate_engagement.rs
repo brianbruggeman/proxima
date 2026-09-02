@@ -12,8 +12,6 @@ use std::env;
 use std::fs;
 use std::path::Path;
 
-use proxima_tensor::cpu;
-
 const MODEL_PATH_ENV: &str = "BGE_MODEL_PATH";
 
 fn sentences() -> [(&'static str, Vec<i64>); 3] {
@@ -85,9 +83,12 @@ fn main() {
     let graph = model.graph.as_ref().expect("graph");
 
     #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-    cpu::set_accelerate_gemm_enabled(true);
+    proxima_tensor::cpu::set_accelerate_gemm_enabled(true);
 
-    let before_width = cpu::width_tile_counters();
+    #[cfg(all(target_arch = "aarch64", feature = "mnist-diag"))]
+    let before_width = proxima_tensor::cpu::width_tile_counters();
+    #[cfg(not(all(target_arch = "aarch64", feature = "mnist-diag")))]
+    let before_width = (0u64, 0u64, 0u64);
     for (name, tokens) in sentences().iter() {
         let sequence_length = tokens.len();
         let mut pins = std::collections::BTreeMap::new();
@@ -109,19 +110,29 @@ fn main() {
         );
         println!("{name:?}: embedding[:4]={:?}", &embedding[0..4]);
     }
-    let after_width = cpu::width_tile_counters();
+    #[cfg(all(target_arch = "aarch64", feature = "mnist-diag"))]
+    let after_width = proxima_tensor::cpu::width_tile_counters();
+    #[cfg(not(all(target_arch = "aarch64", feature = "mnist-diag")))]
+    let after_width = (0u64, 0u64, 0u64);
+
+    #[cfg(all(target_arch = "aarch64", feature = "mnist-diag"))]
+    println!(
+        "width_tile_counters() delta = (bytes={}, invocations={}, fallback={})",
+        after_width.0.saturating_sub(before_width.0),
+        after_width.1.saturating_sub(before_width.1),
+        after_width.2.saturating_sub(before_width.2)
+    );
+    #[cfg(not(all(target_arch = "aarch64", feature = "mnist-diag")))]
+    {
+        let _ = (before_width, after_width);
+        println!("non-aarch64 or non-mnist-diag build: width_tile_counters() does not exist");
+    }
 
     #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
     {
-        let (hits, declined) = cpu::accelerate_gemm_totals();
+        let (hits, declined) = proxima_tensor::cpu::accelerate_gemm_totals();
         println!(
             "ACCELERATE_GEMM_ENABLED=true, accelerate_gemm_totals() = (hits={hits}, declined={declined})"
-        );
-        println!(
-            "width_tile_counters() delta = (bytes={}, invocations={}, fallback={})",
-            after_width.0.saturating_sub(before_width.0),
-            after_width.1.saturating_sub(before_width.1),
-            after_width.2.saturating_sub(before_width.2)
         );
         assert_eq!(
             hits, 0,
@@ -129,8 +140,5 @@ fn main() {
         );
     }
     #[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
-    {
-        let _ = (before_width, after_width);
-        println!("non-aarch64-macos host: ACCELERATE_GEMM_ENABLED does not exist on this target");
-    }
+    println!("non-aarch64-macos host: ACCELERATE_GEMM_ENABLED does not exist on this target");
 }

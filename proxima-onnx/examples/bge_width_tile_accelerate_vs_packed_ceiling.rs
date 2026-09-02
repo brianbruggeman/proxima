@@ -36,8 +36,7 @@
 use proxima_onnx::lower::{Lowered, lower_graph};
 use proxima_onnx::messages::{GraphProto, NodeProto, TensorProto, ValueInfoProto};
 use proxima_tensor::cpu::{
-    self, StaticArena, build_static_arena, build_static_arena_with_constants,
-    evaluate_named_with_arena,
+    StaticArena, build_static_arena, build_static_arena_with_constants, evaluate_named_with_arena,
 };
 
 const CALLS_PER_REPEAT: usize = 300;
@@ -126,7 +125,7 @@ fn time_calls(arena: &mut StaticArena, named: &NamedInputs<'_>) -> Timed {
 
 fn packed_neon_arm(m: usize, k: usize, n: usize) -> Timed {
     #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-    cpu::set_accelerate_gemm_enabled(false);
+    proxima_tensor::cpu::set_accelerate_gemm_enabled(false);
     let lowered = build_instance(m, k, n, 0x6000_0000);
     let output = lowered.graph_outputs[0].1;
     let rhs_data = lowered
@@ -148,7 +147,7 @@ fn packed_neon_arm(m: usize, k: usize, n: usize) -> Timed {
 
 fn accelerate_arm(m: usize, k: usize, n: usize) -> Timed {
     #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-    cpu::set_accelerate_gemm_enabled(true);
+    proxima_tensor::cpu::set_accelerate_gemm_enabled(true);
     let lowered = build_instance(m, k, n, 0x7000_0000);
     let output = lowered.graph_outputs[0].1;
     let mut arena =
@@ -191,7 +190,7 @@ fn shape_block(name: &str, m: usize, k: usize, n: usize) {
     );
     #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
     {
-        let (hits, declined) = cpu::accelerate_gemm_totals();
+        let (hits, declined) = proxima_tensor::cpu::accelerate_gemm_totals();
         println!("    -> accelerate_gemm_totals() cumulative: hits={hits} declined={declined}");
     }
     let outcome = if ratio > 1.0 { "HIT" } else { "MISS" };
