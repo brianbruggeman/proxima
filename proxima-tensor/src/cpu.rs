@@ -9234,6 +9234,18 @@ struct WidthTilePlan {
     outer_stride_a: i64,
     outer_stride_b: i64,
     outer_stride_out: i64,
+    /// `float32x4_t` vectors [`run_width_tile_neon`] tiles this call at --
+    /// `WIDTH_TILE_VECS` (4, 16-wide) for every node this tile already
+    /// served, unchanged; `2` (8-wide) or `1` (4-wide) for the narrow-N
+    /// nodes `width_tile_vecs_for` admits (narrow-tile task, 2026-09-01) --
+    /// `attn_qk`'s `Q@K^T`, `N = seq_len` in `{7, 8, 9}`, always below the
+    /// `WIDTH_TILE_VECS * 4 == 16` main-tile floor. Selects which
+    /// monomorphisation of [`gemm_width_tile_neon`] the call site
+    /// instantiates -- a runtime value driving a compile-time const generic
+    /// choice via [`try_run_width_tile`]'s own match, the same shape
+    /// `width_row_remainder_tile!`'s `$rows` literal dispatch already uses
+    /// for `ROWS`.
+    vecs: usize,
 }
 
 /// Whether `dims` (`resolve_reduce_axis_shape`'s own outer-to-inner order)
@@ -9264,6 +9276,29 @@ fn composed_reduction_stride(
         extent_total = extent_total.saturating_mul(resolved.extents[dim as usize] as i64);
     }
     Some((extent_total, stride))
+}
+
+/// Which [`gemm_width_tile_neon`] `VECS` monomorphisation `width` admits,
+/// `None` when even the narrowest (`VECS = 1`, 4-wide) tile does not fit --
+/// narrow-tile task (2026-09-01), discharging ROW 216's named residual.
+/// `WIDTH_TILE_VECS` (4, 16-wide) is unchanged and checked first so every
+/// node the main tile already serves takes the SAME branch it always has;
+/// `2` (8-wide) matches BGE's `Q@K^T` `N = 8` sentence exactly, `1` (4-wide)
+/// covers `N` in `4..=7` (BGE's `N = 7` sentence) with a 3-column scalar
+/// tail [`run_width_tile_neon`]'s existing column-tail loop already walks
+/// unchanged -- no new remainder mechanism, the same one `VECS = 4` nodes
+/// use when `width` is not itself a multiple of `WIDTH_TILE_VECS * 4`.
+#[cfg(target_arch = "aarch64")]
+const fn width_tile_vecs_for(width: usize) -> Option<usize> {
+    if width >= WIDTH_TILE_VECS * 4 {
+        Some(WIDTH_TILE_VECS)
+    } else if width >= 8 {
+        Some(2)
+    } else if width >= 4 {
+        Some(1)
+    } else {
+        None
+    }
 }
 
 /// Resolves [`WidthTilePlan`] once per bound op, or `None` when this node
@@ -9416,7 +9451,7 @@ fn width_tile_plan(context: &WidthPathContext) -> Option<WidthTilePlan> {
         .iter()
         .map(|&dim| context.resolved.extents[dim as usize] as i64)
         .product();
-    if context.width < WIDTH_TILE_VECS * 4 {
+    let Some(vecs) = width_tile_vecs_for(context.width) else {
         #[cfg(feature = "instrument")]
         record_decline(
             instrument::WidthDeclineReason::NarrowWidth,
@@ -9427,7 +9462,7 @@ fn width_tile_plan(context: &WidthPathContext) -> Option<WidthTilePlan> {
             stride_b_early,
         );
         return None;
-    }
+    };
     let Some(last_output_dim) = context.last_output_dim else {
         #[cfg(feature = "instrument")]
         record_decline(
@@ -9621,6 +9656,7 @@ fn width_tile_plan(context: &WidthPathContext) -> Option<WidthTilePlan> {
         outer_stride_a: outer_info.map_or(0, |(_, stride_a, ..)| stride_a),
         outer_stride_b: outer_info.map_or(0, |(_, _, stride_b, _)| stride_b),
         outer_stride_out: outer_info.map_or(0, |(_, _, _, stride_out)| stride_out),
+        vecs,
     })
 }
 
@@ -9862,7 +9898,14 @@ fn width_tile_pack_candidate(resolved: &BoundOp) -> Option<WidthTilePlan> {
         width,
         out_layout,
     };
-    width_tile_plan(&context)
+    // narrow-tile task (2026-09-01): packing panels are built and sized for
+    // the `VECS = WIDTH_TILE_VECS` (16-wide) tile only -- a narrow-`vecs`
+    // plan's `run_width_tile_neon::<VECS>` reads `tile_cols = VECS * 4`-wide
+    // strided slices from `data_b_unpacked` unconditionally (see
+    // `try_run_width_tile`'s own dispatch), so declining here rather than
+    // building a mismatched-width panel buffer keeps the existing packing
+    // pipeline byte-for-byte unchanged for the 84 nodes it already serves.
+    width_tile_plan(&context).filter(|plan| plan.vecs == WIDTH_TILE_VECS)
 }
 
 /// Scans every resolved node for a width-tile reduce whose `b` operand is
@@ -9968,7 +10011,7 @@ fn width_tile_scalar_cell(a: KStridedTile, b: KStridedTile, k: usize, seed: f32)
 /// [`NEON_TILE_ROW_REMAINDER_ELEMENTS`]'s own coverage identity for the
 /// dot-path tile).
 #[cfg(target_arch = "aarch64")]
-fn run_width_tile_neon(
+fn run_width_tile_neon<const VECS: usize>(
     plan: &WidthTilePlan,
     raw: &[&[f32]],
     packed: Option<&PackedWidthPanels>,
@@ -9993,7 +10036,7 @@ fn run_width_tile_neon(
 
     let data_a = raw[plan.a_operand];
     let data_b_unpacked = raw[plan.b_operand];
-    let tile_cols = WIDTH_TILE_VECS * 4;
+    let tile_cols = VECS * 4;
     let row_tiles = plan.leading_total / WIDTH_TILE_ROWS;
     let col_tiles = plan.width / tile_cols;
     // law 6∘5: only trusted when the packed panel buffer covers every full
@@ -10043,7 +10086,7 @@ fn run_width_tile_neon(
                         plan.k_stride_b,
                     ),
                 };
-                let mut tile_out = [[[plan.seed; 4]; WIDTH_TILE_VECS]; WIDTH_TILE_ROWS];
+                let mut tile_out = [[[plan.seed; 4]; VECS]; WIDTH_TILE_ROWS];
 
                 // caller-checked: `base_a`/`base_b` plus every stride-scaled
                 // offset the kernel touches stay inside `data_a`/`b_data`,
@@ -10051,7 +10094,7 @@ fn run_width_tile_neon(
                 // tiles carved out of `plan.leading_total`/`plan.width` (packed:
                 // `full_col_tiles`/`k_total` sized exactly to match).
                 unsafe {
-                    gemm_width_tile_neon::<WIDTH_TILE_ROWS, WIDTH_TILE_VECS>(
+                    gemm_width_tile_neon::<WIDTH_TILE_ROWS, VECS>(
                         KStridedTile {
                             data: data_a,
                             base: base_a,
@@ -10146,7 +10189,7 @@ fn run_width_tile_neon(
                             plan.k_stride_b,
                         ),
                     };
-                    let mut tile_out = [[[plan.seed; 4]; WIDTH_TILE_VECS]; $rows];
+                    let mut tile_out = [[[plan.seed; 4]; VECS]; $rows];
 
                     // caller-checked: same argument `run_width_tile_neon`'s main
                     // loop above already proves for `WIDTH_TILE_ROWS` rows, just
@@ -10155,7 +10198,7 @@ fn run_width_tile_neon(
                     // exactly the greedy 2-then-1 dispatch below never
                     // overshooting `plan.leading_total`.
                     unsafe {
-                        gemm_width_tile_neon::<$rows, WIDTH_TILE_VECS>(
+                        gemm_width_tile_neon::<$rows, VECS>(
                             KStridedTile {
                                 data: data_a,
                                 base: base_a,
@@ -10280,10 +10323,32 @@ fn try_run_width_tile(
     output: &mut [f32],
 ) -> bool {
     match width_tile_plan(context) {
-        Some(plan) => {
-            run_width_tile_neon(&plan, raw, packed, output);
+        // narrow-tile task (2026-09-01): `plan.vecs` is a runtime value
+        // selecting a compile-time `gemm_width_tile_neon` monomorphisation
+        // -- resolved here, once, the same way `width_row_remainder_tile!`'s
+        // `$rows` literal already resolves `ROWS`. `vecs == WIDTH_TILE_VECS`
+        // is the pre-existing path, byte-for-byte: same generic argument,
+        // same `packed` panels. The narrow arms never receive `packed` --
+        // `width_tile_pack_candidate` never builds a panel buffer for them
+        // (see its own doc), so passing one through would only ever be a
+        // stale buffer from an unrelated node; `None` states that plainly
+        // instead of relying on the runtime filter to catch it.
+        Some(plan) if plan.vecs == WIDTH_TILE_VECS => {
+            run_width_tile_neon::<WIDTH_TILE_VECS>(&plan, raw, packed, output);
             true
         }
+        Some(plan) if plan.vecs == 2 => {
+            run_width_tile_neon::<2>(&plan, raw, None, output);
+            true
+        }
+        Some(plan) if plan.vecs == 1 => {
+            run_width_tile_neon::<1>(&plan, raw, None, output);
+            true
+        }
+        Some(plan) => unreachable!(
+            "width_tile_vecs_for only emits vecs in {{1, 2, WIDTH_TILE_VECS}}, got {}",
+            plan.vecs
+        ),
         None => false,
     }
 }
@@ -18649,7 +18714,7 @@ mod tests {
             out
         }
 
-        fn neon_route(
+        fn neon_route<const VECS: usize>(
             a: &[f32],
             b_kn: &[f32],
             heads: usize,
@@ -18678,8 +18743,9 @@ mod tests {
                 outer_stride_a: (m * k) as i64,
                 outer_stride_b: (k * n) as i64,
                 outer_stride_out: (m * n) as i64,
+                vecs: VECS,
             };
-            run_width_tile_neon(&plan, &raw, None, &mut out);
+            run_width_tile_neon::<VECS>(&plan, &raw, None, &mut out);
             out
         }
 
@@ -18767,7 +18833,7 @@ mod tests {
                     let mut neon_samples = Vec::with_capacity(REPEATS);
                     for _ in 0..REPEATS {
                         let started = Instant::now();
-                        neon_out = neon_route(&a, &b_kn, HEADS, m, k, n);
+                        neon_out = neon_route::<WIDTH_TILE_VECS>(&a, &b_kn, HEADS, m, k, n);
                         neon_samples.push(started.elapsed().as_nanos() as f64);
                     }
                     for (got, want) in neon_out.iter().zip(&reference) {
@@ -18814,6 +18880,181 @@ mod tests {
                     "{name:<10} M={m:<2} K={k:<2} N={n:<2} width_eligible={width_eligible:<5} scalar_ns={scalar_mean:>9.1} (cov={scalar_cov:.3}) {neon_report} {accelerate_report}"
                 );
             }
+        }
+    }
+
+    /// KILL-EARLY nano (narrow-tile task, 2026-09-01, binding on ROW
+    /// 198/199): the untiled scalar path vs the narrow-`VECS` NEON width
+    /// tile at BGE's `Q@K^T` inner shape `(M,32)x(32,M)`, `M` in `{7, 8,
+    /// 9}`, `heads=12` — the exact class [`attention_tile_shapes_nano`]
+    /// above reports `neon_ns=N/A` for. Two arms per `M`: `forced_vecs2`
+    /// runs `gemm_width_tile_neon::<_, 2>` exactly as the binding
+    /// instruction names it (at `N=7` this walks ZERO full 8-wide tiles —
+    /// `col_tiles = 7/8 = 0` — so every element falls through the same
+    /// scalar column-tail loop the untiled path already uses, measuring
+    /// only the tile/outer-loop overhead with no compensating NEON work);
+    /// `admitted` runs whichever `VECS` [`width_tile_vecs_for`] actually
+    /// selects for that `N` (`1` at `N=7`, `2` at `N=8/9`, identical to
+    /// `forced_vecs2` at `N=8/9`). `#[ignore]`: manual, not part of the CI
+    /// gate — `cargo test -p proxima-tensor --release
+    /// narrow_width_tile_shapes_nano -- --ignored --nocapture`.
+    #[cfg(target_arch = "aarch64")]
+    #[test]
+    #[ignore = "manual nano bench, not a CI gate; see this test's own doc"]
+    fn narrow_width_tile_shapes_nano() {
+        const HEADS: usize = 12;
+        const REPEATS: usize = 7;
+
+        fn scalar_reference(
+            a: &[f32],
+            b_kn: &[f32],
+            heads: usize,
+            m: usize,
+            k: usize,
+            n: usize,
+        ) -> Vec<f32> {
+            let mut out = vec![0.0f32; heads * m * n];
+            for head in 0..heads {
+                let a_head = &a[head * m * k..(head + 1) * m * k];
+                let b_head = &b_kn[head * k * n..(head + 1) * k * n];
+                let out_head = &mut out[head * m * n..(head + 1) * m * n];
+                for row in 0..m {
+                    for col in 0..n {
+                        let value = width_tile_scalar_cell(
+                            KStridedTile {
+                                data: a_head,
+                                base: (row * k) as i64,
+                                k_stride: 1,
+                            },
+                            KStridedTile {
+                                data: b_head,
+                                base: col as i64,
+                                k_stride: n as i64,
+                            },
+                            k,
+                            0.0,
+                        );
+                        out_head[row * n + col] = value;
+                    }
+                }
+            }
+            out
+        }
+
+        fn neon_route<const VECS: usize>(
+            a: &[f32],
+            b_kn: &[f32],
+            heads: usize,
+            m: usize,
+            k: usize,
+            n: usize,
+        ) -> Vec<f32> {
+            let mut out = vec![0.0f32; heads * m * n];
+            let raw: [&[f32]; 2] = [a, b_kn];
+            let plan = WidthTilePlan {
+                a_operand: 0,
+                b_operand: 1,
+                row_stride_a: k as i64,
+                base_a: 0,
+                k_stride_a: 1,
+                base_b: 0,
+                k_stride_b: n as i64,
+                out_base: 0,
+                out_row_stride: n as i64,
+                out_col_stride: 1,
+                leading_total: m,
+                reduction_total: k,
+                width: n,
+                seed: 0.0,
+                outer_extent: heads,
+                outer_stride_a: (m * k) as i64,
+                outer_stride_b: (k * n) as i64,
+                outer_stride_out: (m * n) as i64,
+                vecs: VECS,
+            };
+            run_width_tile_neon::<VECS>(&plan, &raw, None, &mut out);
+            out
+        }
+
+        fn mean_cov(samples: &[f64]) -> (f64, f64) {
+            let mean = samples.iter().sum::<f64>() / samples.len() as f64;
+            let variance = samples
+                .iter()
+                .map(|sample| (sample - mean).powi(2))
+                .sum::<f64>()
+                / samples.len() as f64;
+            (mean, variance.sqrt() / mean)
+        }
+
+        let load = std::process::Command::new("uptime")
+            .output()
+            .map(|out| String::from_utf8_lossy(&out.stdout).trim().to_string())
+            .unwrap_or_else(|_| "uptime unavailable".to_string());
+        eprintln!(
+            "narrow_width_tile_shapes_nano: heads={HEADS} repeats={REPEATS} ambient_load={load}"
+        );
+
+        for m in [7usize, 8, 9] {
+            let (k, n) = (32usize, m);
+            let mut rng = Lcg(0x9E37_79B9 ^ (m as u64) ^ ((k as u64) << 8) ^ ((n as u64) << 16));
+            let a: Vec<f32> = (0..HEADS * m * k).map(|_| rng.next_unit()).collect();
+            let b_kn: Vec<f32> = (0..HEADS * k * n).map(|_| rng.next_unit()).collect();
+
+            let reference = scalar_reference(&a, &b_kn, HEADS, m, k, n);
+
+            let mut scalar_samples = Vec::with_capacity(REPEATS);
+            for _ in 0..REPEATS {
+                let started = Instant::now();
+                let out = scalar_reference(&a, &b_kn, HEADS, m, k, n);
+                scalar_samples.push(started.elapsed().as_nanos() as f64);
+                std::hint::black_box(&out);
+            }
+            let (scalar_mean, scalar_cov) = mean_cov(&scalar_samples);
+
+            let mut forced2_out = neon_route::<2>(&a, &b_kn, HEADS, m, k, n);
+            for (got, want) in forced2_out.iter().zip(&reference) {
+                assert_eq!(
+                    got.to_bits(),
+                    want.to_bits(),
+                    "vecs=2 not bit-identical to scalar reference: got={got} want={want}"
+                );
+            }
+            let mut forced2_samples = Vec::with_capacity(REPEATS);
+            for _ in 0..REPEATS {
+                let started = Instant::now();
+                forced2_out = neon_route::<2>(&a, &b_kn, HEADS, m, k, n);
+                forced2_samples.push(started.elapsed().as_nanos() as f64);
+            }
+            std::hint::black_box(&forced2_out);
+            let (forced2_mean, forced2_cov) = mean_cov(&forced2_samples);
+
+            let admitted_vecs = width_tile_vecs_for(n).expect("N=7/8/9 all admit at least VECS=1");
+            let (admitted_mean, admitted_cov) = if admitted_vecs == 2 {
+                (forced2_mean, forced2_cov)
+            } else {
+                let mut admitted_out = neon_route::<1>(&a, &b_kn, HEADS, m, k, n);
+                for (got, want) in admitted_out.iter().zip(&reference) {
+                    assert_eq!(
+                        got.to_bits(),
+                        want.to_bits(),
+                        "vecs=1 not bit-identical to scalar reference: got={got} want={want}"
+                    );
+                }
+                let mut admitted_samples = Vec::with_capacity(REPEATS);
+                for _ in 0..REPEATS {
+                    let started = Instant::now();
+                    admitted_out = neon_route::<1>(&a, &b_kn, HEADS, m, k, n);
+                    admitted_samples.push(started.elapsed().as_nanos() as f64);
+                }
+                std::hint::black_box(&admitted_out);
+                mean_cov(&admitted_samples)
+            };
+            let admitted_speedup = scalar_mean / admitted_mean;
+
+            eprintln!(
+                "Q@K^T M={m:<2} K={k:<2} N={n:<2} scalar_ns={scalar_mean:>9.1} (cov={scalar_cov:.3}) forced_vecs2_ns={forced2_mean:>9.1} (cov={forced2_cov:.3}) forced_vecs2_speedup={:.3}x admitted_vecs={admitted_vecs} admitted_ns={admitted_mean:>9.1} (cov={admitted_cov:.3}) admitted_speedup={admitted_speedup:.3}x",
+                scalar_mean / forced2_mean
+            );
         }
     }
 
