@@ -436,10 +436,10 @@ pub fn evaluate(
 /// survives the cut.
 ///
 /// Every `named` entry here is float32 by construction (this function's own
-/// signature), so this is [`evaluate_named_via_arena`] — [`StaticArena`]'s
+/// signature), so this is `evaluate_named_via_arena` — [`StaticArena`]'s
 /// buffer reuse, law 6∘5 weight packing, and dead/static-node skip, all
-/// reached through a bounded process-wide cache
-/// ([`ARENA_CACHE`]/[`checkout_arena`]) rather than a caller-owned handle.
+/// reached through a bounded process-wide cache (`ARENA_CACHE`/
+/// `checkout_arena`, both private) rather than a caller-owned handle.
 /// `evaluate_quantized_named`/[`evaluate_quantized_with_scratch`] remain the
 /// entry point for a caller that mixes in real quantized weight blocks — a
 /// capability [`StaticArena`] does not carry — but this function never
@@ -1096,9 +1096,7 @@ static ARENA_CACHE: Mutex<Vec<CachedArena>> = Mutex::new(Vec::new());
 /// continuing is safe and matches this crate's own "no unwrap/expect
 /// outside tests" discipline better than propagating a poison panic would.
 fn lock_arena_cache() -> MutexGuard<'static, Vec<CachedArena>> {
-    ARENA_CACHE
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner)
+    ARENA_CACHE.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
 /// Engagement evidence for the cache above: how many [`checkout_arena`]
@@ -3533,8 +3531,8 @@ pub fn evaluate_quantized_with_scratch(
 /// nodes in order, look each one's name up in `named`, and hand the
 /// resolved positional `blocks: &[QuantizedBlock]` straight to
 /// [`evaluate_quantized`]. [`evaluate_named`] no longer routes through
-/// here (see that function's own doc: it reaches
-/// [`evaluate_named_via_arena`] directly, since it only ever has
+/// here (see that function's own doc: it reaches `evaluate_named_via_arena`
+/// (private) directly, since it only ever has
 /// `Float32` blocks to hand this loop) — this function remains the entry
 /// point for a caller mixing in a real quantized (non-`Float32`) weight
 /// block, a capability [`StaticArena`] does not carry.
