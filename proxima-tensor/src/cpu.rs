@@ -436,10 +436,10 @@ pub fn evaluate(
 /// survives the cut.
 ///
 /// Every `named` entry here is float32 by construction (this function's own
-/// signature), so this is [`evaluate_named_via_arena`] — [`StaticArena`]'s
+/// signature), so this is `evaluate_named_via_arena` — [`StaticArena`]'s
 /// buffer reuse, law 6∘5 weight packing, and dead/static-node skip, all
-/// reached through a bounded process-wide cache
-/// ([`ARENA_CACHE`]/[`checkout_arena`]) rather than a caller-owned handle.
+/// reached through a bounded process-wide cache (`ARENA_CACHE`/
+/// `checkout_arena`, both private) rather than a caller-owned handle.
 /// `evaluate_quantized_named`/[`evaluate_quantized_with_scratch`] remain the
 /// entry point for a caller that mixes in real quantized weight blocks — a
 /// capability [`StaticArena`] does not carry — but this function never
@@ -567,8 +567,8 @@ pub struct StaticArena {
     /// [`run_resolved_nodes_in_arena`] looks this map up per resolved node
     /// on its way to deciding whether to route through
     /// [`run_reduce`]'s packed arm. Always empty off `aarch64` or with the
-    /// bench/test escape valve [`set_pack_at_plan_time_enabled`] flipped off
-    /// -- [`build_packed_width_panels`] is the only populator and it checks
+    /// bench/test escape valve `set_pack_at_plan_time_enabled` (aarch64-only)
+    /// flipped off -- [`build_packed_width_panels`] is the only populator and it checks
     /// the valve before scanning.
     packed_width_panels: BTreeMap<NodeId, PackedWidthPanels>,
     /// `run_rewrite_worklist`'s law 1/2 admission (`docs/rewrite-algebra.md`
@@ -697,9 +697,9 @@ pub fn build_static_arena(
 ///
 /// Default-on since `docs/discipline.md` ROW 207's promotion, `aarch64`
 /// only — off aarch64, or with the bench/test escape valve
-/// [`set_pack_at_plan_time_enabled`] flipped off, this is byte-for-byte
-/// [`build_static_arena`] plus binding `constant_inputs` into the arena's
-/// input buffers, no packing performed.
+/// `set_pack_at_plan_time_enabled` (aarch64-only) flipped off, this is
+/// byte-for-byte [`build_static_arena`] plus binding `constant_inputs` into
+/// the arena's input buffers, no packing performed.
 ///
 /// # Errors
 /// The same errors [`build_static_arena`] raises, plus
@@ -1929,7 +1929,7 @@ pub fn set_accelerate_gemm_enabled(enabled: bool) {
 /// `(hits, declined)` where `declined` counts a `neon_tile_plan` gate pass
 /// that fell through to NEON anyway (non-contiguous output row or a
 /// non-zero reduce seed). Snapshot-only; a re-prove command resets via
-/// process restart, same as [`neon_tile_counters`].
+/// process restart, same as `neon_tile_counters` (behind `instrument`).
 #[must_use]
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 pub fn accelerate_gemm_totals() -> (u64, u64) {
@@ -3677,8 +3677,8 @@ pub fn evaluate_quantized_with_scratch(
 /// nodes in order, look each one's name up in `named`, and hand the
 /// resolved positional `blocks: &[QuantizedBlock]` straight to
 /// [`evaluate_quantized`]. [`evaluate_named`] no longer routes through
-/// here (see that function's own doc: it reaches
-/// [`evaluate_named_via_arena`] directly, since it only ever has
+/// here (see that function's own doc: it reaches `evaluate_named_via_arena`
+/// (private) directly, since it only ever has
 /// `Float32` blocks to hand this loop) — this function remains the entry
 /// point for a caller mixing in a real quantized (non-`Float32`) weight
 /// block, a capability [`StaticArena`] does not carry.
@@ -9884,17 +9884,38 @@ fn width_tile_plan(context: &WidthPathContext) -> Option<WidthTilePlan> {
     // which operand is `a` (row-varying, contiguous over `k`) vs `b`
     // (weight-like, constant per row). Zero non-degenerate axes: `leading_dim`
     // stays whatever `leading_output_axes[0]` is (extent 1, a single
-    // degenerate row) -- the pre-existing behavior. One: unchanged, that
-    // axis is the row axis, no outer loop. Two (`attn_qk`/`attn_v`): the
-    // axis where `layout_b`'s stride is 0 is the row axis (the SAME shape
-    // every other node already proves); the other must be a genuine outer
-    // axis both operands step by -- `layout_b`'s stride nonzero there by
-    // construction (the complement), and `layout_a`'s stride ALSO nonzero
-    // (else `a` never changes across it, a shape this tile has not proven
-    // and declines rather than guesses).
+    // degenerate row) -- the pre-existing behavior, and safe regardless of
+    // `layout_b`'s stride there since the row loop below only ever runs once.
+    // One: `gemm_width_tile_neon` has no `row_stride_b` -- it reads `b` from
+    // the SAME base for every row, so this is only sound when `b` is truly
+    // row-invariant (`layout_b.stride(only) == 0`, the shared-weight GEMM
+    // shape). A per-row `b` (a batched/grouped fold, e.g. a per-head weight
+    // slice reached only after `bind`'s elementwise-into-reduce fusion)
+    // silently reused row 0's `b` slice for every row here before this
+    // check existed -- proven by `omega`'s `backend_parity`/`metal_real_forward`
+    // real-forward-graph gates, which caught it as every row/head of a
+    // fused reduce collapsing to the first row's value. Two (`attn_qk`/
+    // `attn_v`): the axis where `layout_b`'s stride is 0 is the row axis
+    // (the SAME shape every other node already proves); the other must be a
+    // genuine outer axis both operands step by -- `layout_b`'s stride
+    // nonzero there by construction (the complement), and `layout_a`'s
+    // stride ALSO nonzero (else `a` never changes across it, a shape this
+    // tile has not proven and declines rather than guesses).
     let (leading_dim, outer_dim) = match non_degenerate_leading.as_slice() {
         [] => (context.leading_output_axes[0], None),
-        &[only] => (only, None),
+        &[only] if layout_b.stride(only) == 0 => (only, None),
+        &[_] => {
+            #[cfg(feature = "instrument")]
+            record_decline(
+                instrument::WidthDeclineReason::AxesShape,
+                leading_total_early,
+                reduction_total_early,
+                width_i64,
+                stride_a_early,
+                stride_b_early,
+            );
+            return None;
+        }
         &[first, second] => match (layout_b.stride(first), layout_b.stride(second)) {
             (0, other) if other != 0 => (first, Some(second)),
             (other, 0) if other != 0 => (second, Some(first)),
@@ -10389,6 +10410,28 @@ fn run_width_tile_neon<const VECS: usize>(
     #[cfg(feature = "instrument")]
     WIDTH_TILE_GATE_PASSES.fetch_add(1, Ordering::Relaxed);
 
+    // composition-split task (2026-09-01): whole-function wall time, read
+    // first thing, committed at the tail alongside `kernel_ticks` below --
+    // `record_width_tile_split_ticks`'s own doc names why this pair (fn
+    // entry/exit) is the right granularity: cheap enough not to perturb a
+    // function this short-lived, coarse enough to bound the surround.
+    #[cfg(feature = "instrument")]
+    let width_tile_fn_started = instrument::read_ticks();
+    // ticks strictly inside `gemm_width_tile_neon`, summed across every call
+    // this function makes (main tile loop below, plus the row-remainder
+    // macro's own call site) -- accumulated locally, committed once, same
+    // discipline as every other counter in this function. Read at the CALL
+    // boundary, never inside the kernel's own k-loop: a ~1-2us kernel call
+    // can absorb a read-pair's overhead, a per-element inner loop could not.
+    #[cfg(feature = "instrument")]
+    let mut width_tile_kernel_ticks = 0u64;
+    // MACs those same kernel calls computed -- `ROWS * tile_cols *
+    // reduction_total` per call, tracked separately from `run_reduce`'s own
+    // `MAC_OPS` so the column-tail scalar fallback's MACs never mix in (see
+    // `WIDTH_TILE_KERNEL_MACS`'s own doc).
+    #[cfg(feature = "instrument")]
+    let mut width_tile_kernel_macs = 0u64;
+
     // accumulated locally across the whole tile walk and committed once at
     // the end, never as a per-element atomic inside the fallback loops.
     #[cfg(feature = "instrument")]
@@ -10462,6 +10505,8 @@ fn run_width_tile_neon<const VECS: usize>(
                 // guaranteed by `row_tiles`/`col_tiles` only covering whole
                 // tiles carved out of `plan.leading_total`/`plan.width` (packed:
                 // `full_col_tiles`/`k_total` sized exactly to match).
+                #[cfg(feature = "instrument")]
+                let kernel_started = instrument::read_ticks();
                 unsafe {
                     gemm_width_tile_neon::<WIDTH_TILE_ROWS, VECS>(
                         KStridedTile {
@@ -10481,6 +10526,9 @@ fn run_width_tile_neon<const VECS: usize>(
                 }
                 #[cfg(feature = "instrument")]
                 {
+                    width_tile_kernel_ticks += instrument::elapsed_ticks(kernel_started);
+                    width_tile_kernel_macs +=
+                        WIDTH_TILE_ROWS as u64 * tile_cols as u64 * plan.reduction_total as u64;
                     width_tile_invocations += 1;
                 }
 
@@ -10566,6 +10614,8 @@ fn run_width_tile_neon<const VECS: usize>(
                     // inside `plan.leading_total`, since `row_start + $rows` is
                     // exactly the greedy 2-then-1 dispatch below never
                     // overshooting `plan.leading_total`.
+                    #[cfg(feature = "instrument")]
+                    let kernel_started = instrument::read_ticks();
                     unsafe {
                         gemm_width_tile_neon::<$rows, VECS>(
                             KStridedTile {
@@ -10585,6 +10635,9 @@ fn run_width_tile_neon<const VECS: usize>(
                     }
                     #[cfg(feature = "instrument")]
                     {
+                        width_tile_kernel_ticks += instrument::elapsed_ticks(kernel_started);
+                        width_tile_kernel_macs +=
+                            $rows as u64 * tile_cols as u64 * plan.reduction_total as u64;
                         width_tile_row_remainder_invocations += 1;
                         width_tile_row_remainder_elements += ($rows * tile_cols) as u64;
                     }
@@ -10674,6 +10727,11 @@ fn run_width_tile_neon<const VECS: usize>(
         if col_tiles * tile_cols < plan.width {
             counter!(instrument::WIDTH_TILE_COLUMN_TAIL_PRESENT, 1);
         }
+        instrument::record_width_tile_split_ticks(
+            width_tile_kernel_ticks,
+            width_tile_kernel_macs,
+            instrument::elapsed_ticks(width_tile_fn_started),
+        );
     }
 }
 
@@ -20871,6 +20929,116 @@ mod tests {
         (program, sum)
     }
 
+    /// `sum_e lhs[e] * rhs[h, e, d]` over iteration space `(h, e, d)`: `lhs`
+    /// broadcasts over the leading axis `h` AND the width axis `d` (varies
+    /// only along the reduction axis `e`, ROW 35's `hidden` operand
+    /// shape), `rhs` varies over all three (ROW 35's per-head `attn_q`
+    /// weight slice, `[heads, embed, head_dim]`). `sum` is the ONLY
+    /// consumer of the `Multiply`, so `bind` fuses it into the `Reduce`'s
+    /// own `BoundOp` when `sum` is the sole requested output — the exact
+    /// shape `width_tile_plan`'s single-non-degenerate-leading-axis branch
+    /// (`cpu.rs`) reaches, and the one it silently mishandled before that
+    /// branch verified `layout_b.stride(leading_dim) == 0`.
+    fn batched_matmul_program_with_per_row_weight(
+        rows: u32,
+        contraction: u32,
+        width: u32,
+    ) -> (Vec<Op>, NodeId) {
+        let mut program = Vec::new();
+        let lhs = f32_block(&mut program, &[Extent::Static(contraction)]);
+        let rhs = f32_block(
+            &mut program,
+            &[
+                Extent::Static(rows),
+                Extent::Static(contraction),
+                Extent::Static(width),
+            ],
+        );
+        let product = append(
+            &mut program,
+            Op::Elementwise {
+                dtype: DType::Float32,
+                body: ScalarOp::Multiply,
+                operands: alloc::vec![
+                    (lhs, IndexMap::Affine(map::projection(3, &[1]))),
+                    (rhs, IndexMap::Affine(map::projection(3, &[0, 1, 2]))),
+                ],
+                name: None,
+            },
+        );
+        let sum = append(
+            &mut program,
+            Op::Reduce(Reduce {
+                dtype: DType::Float32,
+                body: ScalarOp::Add,
+                init: ReduceInit::Zero,
+                operand: product,
+                in_map: IndexMap::Affine(map::projection(3, &[0, 1, 2])),
+                out_map: IndexMap::Affine(map::projection(3, &[0, 2])),
+                keep: Keep::Reduce,
+                name: Some("batched_matmul_per_row_weight".into()),
+            }),
+        );
+        (program, sum)
+    }
+
+    /// Same per-row-weight bug shape as [`batched_matmul_program_with_per_row_weight`],
+    /// but the reduction is split across TWO axes (`k_outer`, `k_inner`) that
+    /// `composed_reduction_stride` must fold into one virtual `k` before
+    /// `width_tile_plan`'s leading-axis guard is ever reached — the
+    /// `composed_reduction_stride` widening task's own shape
+    /// (`attn_o`'s `[heads, head_dim]`), paired with a deliberately
+    /// row-varying `b` to prove that widening a DIFFERENT axis (reduction,
+    /// not leading) never bypasses the `layout_b.stride(leading_dim) == 0`
+    /// check the leading axis itself still enforces.
+    fn batched_matmul_program_with_per_row_weight_composed_reduction(
+        rows: u32,
+        k_outer: u32,
+        k_inner: u32,
+        width: u32,
+    ) -> (Vec<Op>, NodeId) {
+        let mut program = Vec::new();
+        let lhs = f32_block(
+            &mut program,
+            &[Extent::Static(k_outer), Extent::Static(k_inner)],
+        );
+        let rhs = f32_block(
+            &mut program,
+            &[
+                Extent::Static(rows),
+                Extent::Static(k_outer),
+                Extent::Static(k_inner),
+                Extent::Static(width),
+            ],
+        );
+        let product = append(
+            &mut program,
+            Op::Elementwise {
+                dtype: DType::Float32,
+                body: ScalarOp::Multiply,
+                operands: alloc::vec![
+                    (lhs, IndexMap::Affine(map::projection(4, &[1, 2]))),
+                    (rhs, IndexMap::Affine(map::projection(4, &[0, 1, 2, 3]))),
+                ],
+                name: None,
+            },
+        );
+        let sum = append(
+            &mut program,
+            Op::Reduce(Reduce {
+                dtype: DType::Float32,
+                body: ScalarOp::Add,
+                init: ReduceInit::Zero,
+                operand: product,
+                in_map: IndexMap::Affine(map::projection(4, &[0, 1, 2, 3])),
+                out_map: IndexMap::Affine(map::projection(4, &[0, 3])),
+                keep: Keep::Reduce,
+                name: Some("batched_matmul_per_row_weight_composed_reduction".into()),
+            }),
+        );
+        (program, sum)
+    }
+
     /// `table[ids[s], d]` over iteration space `(s, d)`: dim 0 (vocab) is
     /// gathered by `ids`, dim 1 (feature) is a plain projection.
     fn embedding_lookup_program(vocab: u32, dim: u32, seq: u32) -> (Vec<Op>, NodeId) {
@@ -21110,6 +21278,173 @@ mod tests {
             evaluated.root(),
             naive_matmul(&lhs, &rhs, m, k, n).as_slice()
         );
+        let _ = sum;
+    }
+
+    /// Regression for the bug `omega`'s `backend_parity`/`metal_real_forward`
+    /// real-forward-graph gates caught: `relative=1.3264047 max_diff=6.9346437`
+    /// between CPU and Metal, traced to the FIRST divergent node in the
+    /// mistral cached-forward program (a `Reduce` fusing an RoPE-projection
+    /// `Multiply` whose second operand varies per attention head). Metal was
+    /// correct; the CPU width-tile fast path (`width_tile_plan`, `cpu.rs`)
+    /// was wrong — its single-leading-axis branch never checked that the
+    /// "weight" operand (`b`, reused from the SAME base for every row by
+    /// `gemm_width_tile_neon`, which carries no `row_stride_b`) was actually
+    /// row-invariant, so every row silently read row 0's slice of `b`.
+    ///
+    /// `rows=8` spans two full `WIDTH_TILE_ROWS=4` tiles plus none left over,
+    /// `width=16` is exactly `WIDTH_TILE_VECS * 4` (the fast path's minimum),
+    /// and `contraction=6` is short enough to keep the reference loop
+    /// readable — this is the smallest shape that still reaches
+    /// `width_tile_plan`'s single-leading-axis branch with a genuinely
+    /// row-varying `b`. Requesting `sum` alone as the sole output is what
+    /// makes `bind` fuse the `Multiply` into the `Reduce`'s own `BoundOp` in
+    /// the first place (`requesting_the_intermediate_elementwise_op_as_an_output_prevents_fusion`
+    /// in `bind.rs` proves the converse).
+    #[test]
+    fn a_reduce_fusing_a_per_row_weight_operand_computes_a_distinct_value_per_row() {
+        let (rows, contraction, width) = (8u32, 6u32, 16u32);
+        let (program, sum) = batched_matmul_program_with_per_row_weight(rows, contraction, width);
+
+        let lhs: Vec<f32> = (0..contraction).map(|value| 1.0 + value as f32).collect();
+        let rhs: Vec<f32> = (0..rows * contraction * width)
+            .map(|value| value as f32 * 0.001)
+            .collect();
+
+        let evaluated = evaluate(&program, &[], &[&lhs, &rhs], &[])
+            .expect("the fused per-row-weight reduce evaluates");
+        assert_eq!(evaluated.shape(), &[rows as u64, width as u64]);
+
+        let mut reference = vec![0.0f32; (rows * width) as usize];
+        for row in 0..rows {
+            for col in 0..width {
+                let mut total = 0.0f32;
+                for k in 0..contraction {
+                    let lhs_value = lhs[k as usize];
+                    let rhs_value = rhs[(row * contraction * width + k * width + col) as usize];
+                    total += lhs_value * rhs_value;
+                }
+                reference[(row * width + col) as usize] = total;
+            }
+        }
+        assert_all_close(evaluated.root(), &reference, 1e-5);
+
+        // the exact shape of the bug this guards: every row collapsing to
+        // row 0's value because `b`'s base never advanced past the first
+        // row. Assert the FIRST divergent row directly rather than trusting
+        // the aggregate `assert_all_close` above alone.
+        let output = evaluated.root();
+        let row0 = &output[..width as usize];
+        for row in 1..rows as usize {
+            let this_row = &output[row * width as usize..(row + 1) * width as usize];
+            assert_ne!(
+                this_row, row0,
+                "row {row} collapsed to row 0's value -- the per-row weight operand was not advanced"
+            );
+        }
+        let _ = sum;
+    }
+
+    /// `composed_reduction_stride` (`perf/width-gate-decline`) widened
+    /// `width_tile_plan` to fold a two-axis reduction into one virtual `k` --
+    /// the same shape `attn_o`'s `[heads, head_dim]` weight reduce composes.
+    /// That widening touches the REDUCTION axes only; this proves it can
+    /// never smuggle a row-varying `b` past the leading-axis guard, since
+    /// the guard runs on `layout_b.stride(leading_dim)` before the composed
+    /// reduction stride is ever computed. `k_outer=3, k_inner=4` gives a
+    /// row-major-composable `contraction=12`; `width=16` keeps this test on
+    /// the main (`VECS=4`) tile, isolating the reduction-axis widening from
+    /// the narrow-width widening covered separately below.
+    #[test]
+    fn a_composed_two_axis_reduction_fusing_a_per_row_weight_operand_computes_a_distinct_value_per_row()
+     {
+        let (rows, k_outer, k_inner, width) = (8u32, 3u32, 4u32, 16u32);
+        let contraction = k_outer * k_inner;
+        let (program, sum) = batched_matmul_program_with_per_row_weight_composed_reduction(
+            rows, k_outer, k_inner, width,
+        );
+
+        let lhs: Vec<f32> = (0..contraction).map(|value| 1.0 + value as f32).collect();
+        let rhs: Vec<f32> = (0..rows * contraction * width)
+            .map(|value| value as f32 * 0.001)
+            .collect();
+
+        let evaluated = evaluate(&program, &[], &[&lhs, &rhs], &[])
+            .expect("the composed-reduction per-row-weight reduce evaluates");
+        assert_eq!(evaluated.shape(), &[rows as u64, width as u64]);
+
+        let mut reference = vec![0.0f32; (rows * width) as usize];
+        for row in 0..rows {
+            for col in 0..width {
+                let mut total = 0.0f32;
+                for k in 0..contraction {
+                    let lhs_value = lhs[k as usize];
+                    let rhs_value = rhs[(row * contraction * width + k * width + col) as usize];
+                    total += lhs_value * rhs_value;
+                }
+                reference[(row * width + col) as usize] = total;
+            }
+        }
+        assert_all_close(evaluated.root(), &reference, 1e-5);
+
+        let output = evaluated.root();
+        let row0 = &output[..width as usize];
+        for row in 1..rows as usize {
+            let this_row = &output[row * width as usize..(row + 1) * width as usize];
+            assert_ne!(
+                this_row, row0,
+                "row {row} collapsed to row 0's value -- the composed-reduction widening let a per-row weight operand through unguarded"
+            );
+        }
+        let _ = sum;
+    }
+
+    /// `width_tile_vecs_for` (`perf/narrow-tile`) widened `width_tile_plan`
+    /// to admit `width` below the main tile's `WIDTH_TILE_VECS * 4 == 16`
+    /// floor (`VECS=2`/`VECS=1`), unlocking nodes that used to decline at
+    /// `NarrowWidth` before ever reaching the leading-axis guard. `width=8`
+    /// selects `VECS=2` -- BGE's own `attn_qk` `N=8` sentence
+    /// (`width_tile_vecs_for`'s doc) -- paired with the same row-varying `b`
+    /// shape as the original regression, proving the narrow-width path is
+    /// declined exactly like the main-tile path rather than exempted from
+    /// the guard.
+    #[test]
+    fn a_narrow_width_reduce_fusing_a_per_row_weight_operand_computes_a_distinct_value_per_row() {
+        let (rows, contraction, width) = (8u32, 6u32, 8u32);
+        let (program, sum) = batched_matmul_program_with_per_row_weight(rows, contraction, width);
+
+        let lhs: Vec<f32> = (0..contraction).map(|value| 1.0 + value as f32).collect();
+        let rhs: Vec<f32> = (0..rows * contraction * width)
+            .map(|value| value as f32 * 0.001)
+            .collect();
+
+        let evaluated = evaluate(&program, &[], &[&lhs, &rhs], &[])
+            .expect("the narrow-width per-row-weight reduce evaluates");
+        assert_eq!(evaluated.shape(), &[rows as u64, width as u64]);
+
+        let mut reference = vec![0.0f32; (rows * width) as usize];
+        for row in 0..rows {
+            for col in 0..width {
+                let mut total = 0.0f32;
+                for k in 0..contraction {
+                    let lhs_value = lhs[k as usize];
+                    let rhs_value = rhs[(row * contraction * width + k * width + col) as usize];
+                    total += lhs_value * rhs_value;
+                }
+                reference[(row * width + col) as usize] = total;
+            }
+        }
+        assert_all_close(evaluated.root(), &reference, 1e-5);
+
+        let output = evaluated.root();
+        let row0 = &output[..width as usize];
+        for row in 1..rows as usize {
+            let this_row = &output[row * width as usize..(row + 1) * width as usize];
+            assert_ne!(
+                this_row, row0,
+                "row {row} collapsed to row 0's value -- the narrow-width widening let a per-row weight operand through unguarded"
+            );
+        }
         let _ = sum;
     }
 

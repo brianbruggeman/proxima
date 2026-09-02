@@ -37,10 +37,51 @@ use std::path::Path;
 use std::time::{Duration, Instant};
 
 use proxima_tensor::NodeId;
+// `cpu` (bare module path) is only referenced from the aarch64/macos-gated
+// wrapper bodies below plus the `bge-eval-diag`-gated engagement block
+// further down -- off both, the bare import is unused.
+#[cfg(any(target_arch = "aarch64", feature = "bge-eval-diag"))]
+use proxima_tensor::cpu;
 use proxima_tensor::cpu::{
-    self, StaticArena, arena_packed_node_count, build_static_arena_with_constants, evaluate_named,
+    StaticArena, arena_packed_node_count, build_static_arena_with_constants, evaluate_named,
     evaluate_named_with_arena,
 };
+
+/// `cpu::set_accelerate_gemm_enabled`/`cpu::accelerate_gemm_totals` exist
+/// only on macOS/aarch64 (Accelerate is a platform framework). This example
+/// calls them unconditionally throughout, so it needs a portable stand-in
+/// rather than a `#[cfg]` at every call site -- off that target the valve is
+/// a no-op and the counters read zero, which is honest: Accelerate never
+/// runs there.
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+fn set_accelerate_gemm_enabled(enabled: bool) {
+    cpu::set_accelerate_gemm_enabled(enabled);
+}
+#[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
+fn set_accelerate_gemm_enabled(_enabled: bool) {}
+
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+fn accelerate_gemm_totals() -> (u64, u64) {
+    cpu::accelerate_gemm_totals()
+}
+#[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
+fn accelerate_gemm_totals() -> (u64, u64) {
+    (0, 0)
+}
+
+/// `cpu::width_tile_counters` is gated `aarch64 + feature = "instrument"`;
+/// the `bge-eval-diag` block below only ever runs with `instrument` already
+/// on (it rides in on `bge-eval-diag`'s own feature union) and is this
+/// stand-in's only caller, so both arms carry that feature gate too --
+/// otherwise the stand-in is dead code whenever `bge-eval-diag` is off.
+#[cfg(all(target_arch = "aarch64", feature = "bge-eval-diag"))]
+fn width_tile_counters() -> (u64, u64, u64) {
+    cpu::width_tile_counters()
+}
+#[cfg(all(not(target_arch = "aarch64"), feature = "bge-eval-diag"))]
+fn width_tile_counters() -> (u64, u64, u64) {
+    (0, 0, 0)
+}
 
 /// This crate never hardcodes a path onto another repo's checkout -- the
 /// model lives on whichever host happens to have it cached, named by
@@ -204,7 +245,7 @@ fn run_pass_arena(
     lower_hits: &mut usize,
     lower_misses: &mut usize,
 ) -> (Vec<Duration>, Vec<Vec<f32>>) {
-    cpu::set_accelerate_gemm_enabled(accelerate);
+    set_accelerate_gemm_enabled(accelerate);
     let mut durations = Vec::with_capacity(items.len());
     let mut embeddings = Vec::with_capacity(items.len());
     for (_, tokens) in items {
@@ -334,7 +375,7 @@ fn main() {
         accel_run_means.push(mean);
         last_accel_embeddings = embeddings;
     }
-    cpu::set_accelerate_gemm_enabled(false);
+    set_accelerate_gemm_enabled(false);
 
     #[cfg(feature = "bge-eval-diag")]
     {
@@ -488,17 +529,24 @@ fn main() {
         "engagement N==0 is RED: no width-tile node was packed on the real BGE graph"
     );
 
-    let (accel_hits, accel_declined) = cpu::accelerate_gemm_totals();
+    let (accel_hits, accel_declined) = accelerate_gemm_totals();
     println!(
         "4. accelerate_gemm_totals (process-cumulative): hits={accel_hits} declined={accel_declined}"
     );
-    assert!(
-        accel_hits > 0,
-        "engagement N==0 is RED: the Accelerate GEMM route never fired"
-    );
-    assert_eq!(
-        accel_declined, 0,
-        "Accelerate route declined a call it should have accepted -- see ACCELERATE_GEMM_DECLINED's own doc"
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    {
+        assert!(
+            accel_hits > 0,
+            "engagement N==0 is RED: the Accelerate GEMM route never fired"
+        );
+        assert_eq!(
+            accel_declined, 0,
+            "Accelerate route declined a call it should have accepted -- see ACCELERATE_GEMM_DECLINED's own doc"
+        );
+    }
+    #[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
+    println!(
+        "non-aarch64-macos host: Accelerate does not exist on this target, skipping engagement proof 4"
     );
 
     #[cfg(feature = "bge-eval-diag")]
@@ -511,8 +559,8 @@ fn main() {
         // (reusing the already-built arenas) purely to read the counters.
         proxima_tensor::instrument::reset_reduce_gemm_path();
         proxima_tensor::instrument::reset_width_tile_decline();
-        let (gate_before, invocations_before, _) = cpu::width_tile_counters();
-        cpu::set_accelerate_gemm_enabled(false);
+        let (gate_before, invocations_before, _) = width_tile_counters();
+        set_accelerate_gemm_enabled(false);
         for (_, tokens) in &items {
             let cache_key = tokens.len() as u64;
             let lowered = lower_cache.get(&cache_key).expect("lowering cache warm");
@@ -530,15 +578,20 @@ fn main() {
         }
         let (_, _, width_fast_calls, _, _, _, _, _) =
             proxima_tensor::instrument::reduce_gemm_path_totals();
-        let (gate_after, invocations_after, _) = cpu::width_tile_counters();
+        let (gate_after, invocations_after, _) = width_tile_counters();
         let gate_delta = gate_after - gate_before;
         let invocations_delta = invocations_after - invocations_before;
         println!(
             "5. width_tile_plan gate (diag build, one untimed corpus pass, 3 sentences): {gate_delta} of {width_fast_calls} WidthFast-classified calls resolved Some ({invocations_delta} tile invocations)"
         );
+        #[cfg(target_arch = "aarch64")]
         assert!(
             gate_delta > 0,
             "engagement N==0 is RED: width_tile_plan never engaged on the arena path"
+        );
+        #[cfg(not(target_arch = "aarch64"))]
+        println!(
+            "non-aarch64 host: width_tile_counters() does not exist, skipping engagement proof 5"
         );
     }
 
@@ -552,7 +605,7 @@ fn main() {
     println!("\n=== DEFAULT-PATH MEASUREMENT (plain evaluate_named, no caller opt-in) ===");
     let default_arm_runs: usize = 5;
     for accelerate in [false, true] {
-        cpu::set_accelerate_gemm_enabled(accelerate);
+        set_accelerate_gemm_enabled(accelerate);
         #[cfg(feature = "bge-eval-diag")]
         {
             cpu::arena_cache_reset();
@@ -645,11 +698,14 @@ fn main() {
             // only with Accelerate off; with it on, `accelerate_gemm_totals`
             // is the counter that proves the SAME `width_tile_plan` gate fired.
             if accelerate {
-                let (accel_hits, _) = cpu::accelerate_gemm_totals();
-                assert!(
-                    accel_hits > 0,
-                    "engagement N==0 is RED: Accelerate route never fired on the default evaluate_named path"
-                );
+                #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+                {
+                    let (accel_hits, _) = accelerate_gemm_totals();
+                    assert!(
+                        accel_hits > 0,
+                        "engagement N==0 is RED: Accelerate route never fired on the default evaluate_named path"
+                    );
+                }
             } else {
                 assert!(
                     width_fast_calls > 0,
@@ -673,7 +729,7 @@ fn main() {
             );
         }
     }
-    cpu::set_accelerate_gemm_enabled(false);
+    set_accelerate_gemm_enabled(false);
 
     println!("\n=== SEALED MEASUREMENT (StaticArena fast path, ms/sentence) ===");
     println!("runs={runs}");

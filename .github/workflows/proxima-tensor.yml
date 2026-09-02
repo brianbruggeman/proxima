@@ -130,14 +130,21 @@ jobs:
               cargo clippy -p ${{ matrix.crate }} --no-default-features --features alloc -- -D warnings
             fi
           else
-            cargo clippy -p ${{ matrix.crate }} --all-targets --all-features -- -D warnings
-            cargo nextest run -p ${{ matrix.crate }} --all-features --no-fail-fast
+            # "default" means bare default features, no flags -- NOT
+            # `--all-features`. That union previously masked a missing
+            # `required-features` entry in proxima-onnx (E0425 on
+            # `proxima-onnx (default)`, gh run 33574313078): under
+            # `--all-features` the gate the example needed was always on, so
+            # this cell stayed green while a real default build did not
+            # compile.
+            cargo clippy -p ${{ matrix.crate }} --all-targets -- -D warnings
+            cargo nextest run -p ${{ matrix.crate }} --no-fail-fast
             # rustdoc is its own gate, not a clippy side effect: three private
             # `dequantize_block` fns and a private `Phase::Done` broke their own
             # modules' intra-doc links in proxima-gguf and nothing here ran
             # `cargo doc` to see it. clippy and nextest are both green on a
             # crate whose docs do not build.
-            cargo doc -p ${{ matrix.crate }} --no-deps --all-features
+            cargo doc -p ${{ matrix.crate }} --no-deps
           fi
 
   # omega carries the Metal execution driver, gated by `objc2` deps that only

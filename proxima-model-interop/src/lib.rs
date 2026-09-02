@@ -6,7 +6,7 @@
 //! [`transform::gguf_to_safetensors`] and [`transform::safetensors_to_gguf`]
 //! for exactly what each direction preserves and what it doesn't.
 //!
-//! [`generate::LoadedModel`] is this crate's other reachable capability:
+//! `generate::LoadedModel` (`std`-gated) is this crate's other reachable capability:
 //! bind a checkpoint's weights once, then run greedy-decode text
 //! generation against them through `proxima_primitives::pipe::Pipe` --
 //! see that module's own doc for the load-once/generate-repeatedly shape.

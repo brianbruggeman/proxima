@@ -45,6 +45,45 @@ use proxima_tensor::cpu;
 const MODEL_PATH_ENV: &str = "BGE_MODEL_PATH";
 const WARMUP_CALLS: usize = 3;
 const MEASURED_CALLS: usize = 60;
+// composition-split task (2026-09-01): closes ROW 213's own named residual
+// (this file's "H2/H3 note", below) -- independent reps for a CoV, not a
+// single aggregate measurement, the same discipline `bge_width_tile_accs.rs`
+// already uses for its own GMAC/s table.
+const SPLIT_REPS: usize = 5;
+
+fn mean(values: &[f64]) -> f64 {
+    values.iter().sum::<f64>() / values.len() as f64
+}
+
+fn coefficient_of_variation_percent(values: &[f64]) -> f64 {
+    let average = mean(values);
+    if average == 0.0 {
+        return 0.0;
+    }
+    let variance = values
+        .iter()
+        .map(|value| (value - average).powi(2))
+        .sum::<f64>()
+        / values.len() as f64;
+    variance.sqrt() / average * 100.0
+}
+
+/// Per-call overhead of one `read_ticks()`/`elapsed_ticks()` pair, timed
+/// around nothing -- the number the reader subtracts from every kernel-call
+/// boundary reading below, since a ticks read around a ~1-2us kernel call is
+/// cheap but not free.
+fn measure_ticks_pair_overhead_ns() -> f64 {
+    const OVERHEAD_SAMPLES: usize = 100_000;
+    let started = proxima_tensor::instrument::read_ticks();
+    for _ in 0..OVERHEAD_SAMPLES {
+        let pair_start = proxima_tensor::instrument::read_ticks();
+        let elapsed = proxima_tensor::instrument::elapsed_ticks(pair_start);
+        std::hint::black_box(elapsed);
+    }
+    let total_ticks = proxima_tensor::instrument::elapsed_ticks(started);
+    let total_ns = proxima_tensor::instrument::ticks_to_nanos(total_ticks);
+    total_ns as f64 / OVERHEAD_SAMPLES as f64
+}
 
 fn sentences() -> [(&'static str, Vec<i64>); 3] {
     [
@@ -324,17 +363,143 @@ fn main() {
         combined_generic.1 as f64 / combined_generic.0.max(1) as f64
     );
 
-    // H2 vs H3 split: within `width_fast`'s own hit calls, ns inside
-    // `gemm_width_tile_neon` vs ns in the rest of `run_width_tile_neon`
-    // (address computation, column tail, row-remainder dispatch, output
-    // store) is NOT separately timed by any existing counter -- the
-    // `WIDTH_TILE_*` family counts calls/invocations/fallback elements,
-    // never ticks. `REDUCE_GEMM_PATH_WIDTH_FAST_TICKS` above is the whole
-    // `run_reduce` call including that overhead, so it upper-bounds but
-    // does not isolate H2's own share. Named here as the residual, not
-    // measured (see report).
+    // H2/H3 split (composition-split task, 2026-09-01): closes the residual
+    // this section used to name -- `instrument::width_tile_split_totals()`
+    // now times ns strictly inside `gemm_width_tile_neon` separately from
+    // the rest of `run_width_tile_neon`, and `reduce_gemm_path_totals()`'s
+    // own `width_fast_ticks` (already read above, whole `run_reduce`) gives
+    // the third bucket by subtraction. `SPLIT_REPS` independent reps, not
+    // one aggregate measurement, so every cell below carries a CoV%.
+    let overhead_ns_per_pair = measure_ticks_pair_overhead_ns();
     println!(
-        "\nH2/H3 note: no existing counter times ns strictly inside gemm_width_tile_neon alone (vs the rest of run_width_tile_neon) -- REDUCE_GEMM_PATH_WIDTH_FAST_TICKS above is the whole run_reduce call for width_fast-routed nodes, an upper bound on the kernel's own share, not an isolation of it."
+        "\n=== H2/H3: kernel-vs-surround-vs-outside split ({SPLIT_REPS} reps x {MEASURED_CALLS} calls/rep) ==="
+    );
+    println!(
+        "  per-call ticks-pair instrumentation overhead: {overhead_ns_per_pair:.2} ns/pair (measured over 100000 empty read_ticks/elapsed_ticks pairs)"
+    );
+
+    let mut combined_kernel_ns = Vec::new();
+    let mut combined_surround_ns = Vec::new();
+    let mut combined_outside_ns = Vec::new();
+    let mut combined_kernel_macs_total = 0u64;
+    let mut combined_kernel_ns_total = 0.0f64;
+
+    for ((lowered, output), (name, tokens)) in lowered_per_sentence.iter().zip(items.iter()) {
+        let sequence_length = tokens.len();
+        for _ in 0..WARMUP_CALLS {
+            run_one(lowered, *output, tokens);
+        }
+
+        let mut kernel_ns_per_call = Vec::with_capacity(SPLIT_REPS);
+        let mut surround_ns_per_call = Vec::with_capacity(SPLIT_REPS);
+        let mut outside_ns_per_call = Vec::with_capacity(SPLIT_REPS);
+        let mut gmacs_per_rep = Vec::with_capacity(SPLIT_REPS);
+        #[cfg(target_arch = "aarch64")]
+        let mut last_kernel_invocations = 0u64;
+        #[cfg(not(target_arch = "aarch64"))]
+        let last_kernel_invocations = 0u64;
+        let mut last_fn_calls = 0u64;
+        let mut last_width_fast_calls = 0u64;
+
+        for _ in 0..SPLIT_REPS {
+            proxima_tensor::instrument::reset_width_tile_split();
+            proxima_tensor::instrument::reset_reduce_gemm_path();
+            #[cfg(target_arch = "aarch64")]
+            let (_, main_invocations_before, _) = cpu::width_tile_counters();
+            #[cfg(target_arch = "aarch64")]
+            let row_remainder_invocations_before = cpu::width_tile_row_remainder_invocations();
+
+            for _ in 0..MEASURED_CALLS {
+                run_one(lowered, *output, tokens);
+            }
+
+            let (kernel_ticks, kernel_macs, fn_ticks, fn_calls) =
+                proxima_tensor::instrument::width_tile_split_totals();
+            let (_, _, width_fast_calls, width_fast_ticks, _, _, _, _) =
+                proxima_tensor::instrument::reduce_gemm_path_totals();
+            #[cfg(target_arch = "aarch64")]
+            let (_, main_invocations_after, _) = cpu::width_tile_counters();
+            #[cfg(target_arch = "aarch64")]
+            let row_remainder_invocations_after = cpu::width_tile_row_remainder_invocations();
+
+            let kernel_ns = proxima_tensor::instrument::ticks_to_nanos(kernel_ticks) as f64;
+            let fn_ns = proxima_tensor::instrument::ticks_to_nanos(fn_ticks) as f64;
+            let reduce_ns = proxima_tensor::instrument::ticks_to_nanos(width_fast_ticks) as f64;
+            let surround_ns = (fn_ns - kernel_ns).max(0.0);
+            let outside_ns = (reduce_ns - fn_ns).max(0.0);
+
+            kernel_ns_per_call.push(kernel_ns / MEASURED_CALLS as f64);
+            surround_ns_per_call.push(surround_ns / MEASURED_CALLS as f64);
+            outside_ns_per_call.push(outside_ns / MEASURED_CALLS as f64);
+            gmacs_per_rep.push(kernel_macs as f64 / kernel_ns.max(1.0));
+            combined_kernel_macs_total += kernel_macs;
+            combined_kernel_ns_total += kernel_ns;
+            last_fn_calls = fn_calls;
+            last_width_fast_calls = width_fast_calls;
+            #[cfg(target_arch = "aarch64")]
+            {
+                last_kernel_invocations = (main_invocations_after - main_invocations_before)
+                    + (row_remainder_invocations_after - row_remainder_invocations_before);
+            }
+        }
+
+        println!("--- {name:?} (M={sequence_length}) ---");
+        println!(
+            "  N: {last_fn_calls} run_width_tile_neon calls/rep ({last_width_fast_calls} width_fast run_reduce calls/rep, match={}), {last_kernel_invocations} gemm_width_tile_neon kernel invocations/rep",
+            if last_fn_calls == last_width_fast_calls {
+                "OK"
+            } else {
+                "MISMATCH"
+            }
+        );
+        println!(
+            "  kernel   (gemm_width_tile_neon)      : {:>9.1} ns/call, CoV={:>5.2}%",
+            mean(&kernel_ns_per_call),
+            coefficient_of_variation_percent(&kernel_ns_per_call)
+        );
+        println!(
+            "  surround (rest of run_width_tile_neon): {:>9.1} ns/call, CoV={:>5.2}%",
+            mean(&surround_ns_per_call),
+            coefficient_of_variation_percent(&surround_ns_per_call)
+        );
+        println!(
+            "  outside  (run_reduce outside the fn)  : {:>9.1} ns/call, CoV={:>5.2}%",
+            mean(&outside_ns_per_call),
+            coefficient_of_variation_percent(&outside_ns_per_call)
+        );
+        println!(
+            "  in-kernel GMAC/s: {:>7.3}, CoV={:>5.2}%  (isolated gemm_width_tile_neon ceiling: 48.0-48.8 GMAC/s, ROW 210)",
+            mean(&gmacs_per_rep),
+            coefficient_of_variation_percent(&gmacs_per_rep)
+        );
+
+        combined_kernel_ns.extend(kernel_ns_per_call);
+        combined_surround_ns.extend(surround_ns_per_call);
+        combined_outside_ns.extend(outside_ns_per_call);
+    }
+
+    println!(
+        "\n=== composition split, combined across {} sentences ===",
+        items.len()
+    );
+    println!(
+        "  kernel   : {:>9.1} ns/call mean, CoV={:>5.2}%",
+        mean(&combined_kernel_ns),
+        coefficient_of_variation_percent(&combined_kernel_ns)
+    );
+    println!(
+        "  surround : {:>9.1} ns/call mean, CoV={:>5.2}%",
+        mean(&combined_surround_ns),
+        coefficient_of_variation_percent(&combined_surround_ns)
+    );
+    println!(
+        "  outside  : {:>9.1} ns/call mean, CoV={:>5.2}%",
+        mean(&combined_outside_ns),
+        coefficient_of_variation_percent(&combined_outside_ns)
+    );
+    println!(
+        "  in-kernel GMAC/s (combined, macs-weighted): {:.3}",
+        combined_kernel_macs_total as f64 / combined_kernel_ns_total.max(1.0)
     );
 
     // H4 sizing: evaluate_named (bind + shape::infer + per-node alloc EVERY

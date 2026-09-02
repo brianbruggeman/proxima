@@ -361,6 +361,75 @@ pub fn reset_bind_rebind_compare() {
     let _ = BIND_REBIND_COMPARE_TICKS.snapshot_and_reset();
 }
 
+// composition-split task (2026-09-01): closes ROW 213's named residual
+// (`bge_route_census.rs`'s own "H2/H3 note") -- `REDUCE_GEMM_PATH_WIDTH_FAST_TICKS`
+// above times the WHOLE `run_reduce` call for a width-tile-routed node, never
+// isolating ns strictly inside `gemm_width_tile_neon` from the address
+// computation / column tail / row-remainder dispatch / output store that
+// surrounds it inside `run_width_tile_neon`, or from the plan-resolution /
+// gate-check overhead in `run_reduce` outside `run_width_tile_neon` entirely.
+// `WIDTH_TILE_KERNEL_TICKS` sums ticks read at the CALL boundary around every
+// `gemm_width_tile_neon` invocation (main tile loop and the row-remainder
+// macro, both), never inside the kernel's own k-loop -- a read pair around a
+// ~1-2us kernel call is cheap relative to the call; a read pair inside the
+// per-k inner loop would dominate it (see this module's own overhead
+// measurement, `record_width_tile_split_ticks`'s doc). `WIDTH_TILE_FN_TICKS`
+// times `run_width_tile_neon` entry-to-exit, so `fn_ticks - kernel_ticks` is
+// the surround, and `REDUCE_GEMM_PATH_WIDTH_FAST_TICKS - fn_ticks` is
+// `run_reduce`'s own overhead outside `run_width_tile_neon` entirely.
+pub static WIDTH_TILE_KERNEL_TICKS: Counter =
+    Counter::new("proxima_tensor.width_tile.kernel_ticks");
+pub static WIDTH_TILE_FN_TICKS: Counter = Counter::new("proxima_tensor.width_tile.fn_ticks");
+pub static WIDTH_TILE_FN_CALLS: Counter = Counter::new("proxima_tensor.width_tile.fn_calls");
+/// MACs computed strictly by `gemm_width_tile_neon` invocations (main tile
+/// plus row-remainder tiles), `ROWS * tile_cols * reduction_total` per call,
+/// summed the same way `run_reduce`'s own `counters.mac_ops` tally does --
+/// but tracked separately here, inside `run_width_tile_neon` where
+/// `plan.reduction_total` is read directly, so this total never mixes in the
+/// column-tail scalar fallback's own MACs the way `run_reduce`'s aggregate
+/// `MAC_OPS` counter does (that counter adds `fallback_delta *
+/// reduction_total` too, since the fallback cell is still a real MAC, just
+/// not a kernel one).
+pub static WIDTH_TILE_KERNEL_MACS: Counter = Counter::new("proxima_tensor.width_tile.kernel_macs");
+
+/// Records one `run_width_tile_neon` call's split: `kernel_ticks` is the sum
+/// of every `gemm_width_tile_neon` call-boundary pair taken inside it (main
+/// tile plus row-remainder tiles), `kernel_macs` is the MACs those same
+/// calls computed, `fn_ticks` is the whole function's own entry-to-exit
+/// elapsed ticks. Called once per `run_width_tile_neon` call, from its own
+/// tail, mirroring [`record_reduce_gemm_path_ticks`]'s once-per-call commit
+/// shape.
+pub fn record_width_tile_split_ticks(kernel_ticks: u64, kernel_macs: u64, fn_ticks: u64) {
+    counter!(WIDTH_TILE_KERNEL_TICKS, kernel_ticks);
+    counter!(WIDTH_TILE_KERNEL_MACS, kernel_macs);
+    counter!(WIDTH_TILE_FN_TICKS, fn_ticks);
+    counter!(WIDTH_TILE_FN_CALLS, 1);
+}
+
+/// Snapshot of the kernel/macs/fn/calls quadruple: `(kernel_ticks,
+/// kernel_macs, fn_ticks, fn_calls)`. `fn_ticks - kernel_ticks` is ticks
+/// spent in the rest of `run_width_tile_neon`; pair with
+/// [`reduce_gemm_path_totals`]'s own `width_fast_ticks` (whole `run_reduce`)
+/// to get the third bucket, ticks in `run_reduce` outside
+/// `run_width_tile_neon` entirely.
+#[must_use]
+pub fn width_tile_split_totals() -> (u64, u64, u64, u64) {
+    (
+        WIDTH_TILE_KERNEL_TICKS.get(),
+        WIDTH_TILE_KERNEL_MACS.get(),
+        WIDTH_TILE_FN_TICKS.get(),
+        WIDTH_TILE_FN_CALLS.get(),
+    )
+}
+
+/// Resets the kernel/macs/fn/calls quadruple to zero.
+pub fn reset_width_tile_split() {
+    let _ = WIDTH_TILE_KERNEL_TICKS.snapshot_and_reset();
+    let _ = WIDTH_TILE_KERNEL_MACS.snapshot_and_reset();
+    let _ = WIDTH_TILE_FN_TICKS.snapshot_and_reset();
+    let _ = WIDTH_TILE_FN_CALLS.snapshot_and_reset();
+}
+
 // per-parallel-node wall-clock breakdown for `cpu::run_chunks_threaded` /
 // `cpu::evaluate_node_parallel`: where does thread::scope time actually go.
 pub static PARALLEL_NODES: Counter = Counter::new("proxima_tensor.parallel_nodes");

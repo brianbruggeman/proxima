@@ -153,7 +153,7 @@ impl OnnxParser {
 /// this function's only remaining responsibility is the onnx-specific
 /// `max_len_delimited_field` sanity cap (build-time default
 /// [`crate::sized::MAX_LEN_DELIMITED_FIELD`], overridable at `std` via
-/// [`crate::config::OnnxParserConfig`]). `parse_field` alone cannot apply
+/// `OnnxParserConfig` (std-only)). `parse_field` alone cannot apply
 /// that cap: it has no concept of "too big to ever arrive" versus "still
 /// arriving", so a `Len` field's declared length is peeked first -- before
 /// `parse_field` would otherwise report `Short` and leave the FSM waiting
