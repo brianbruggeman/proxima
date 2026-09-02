@@ -1,4 +1,4 @@
-"""Loads the MNIST t10k idx3/idx1 test split from
+"""Loads the MNIST t10k (test) and train idx3/idx1 splits from
 ~/.cache/burn-dataset/mnist, mirroring
 proxima-onnx/tests/real_mnist_accuracy.rs's own idx parsing and
 normalization ((pixel/255 - 0.1307) / 0.3081 over the raw u8 pixel, never
@@ -25,6 +25,18 @@ def test_labels_path() -> Path:
 
 def dataset_present() -> bool:
     return test_images_path().exists() and test_labels_path().exists()
+
+
+def train_images_path() -> Path:
+    return DATASET_DIR / "train" / "train-images-idx3-ubyte"
+
+
+def train_labels_path() -> Path:
+    return DATASET_DIR / "train" / "train-labels-idx1-ubyte"
+
+
+def train_dataset_present() -> bool:
+    return train_images_path().exists() and train_labels_path().exists()
 
 
 def _idx_header(data: bytes) -> tuple[int, list[int]]:
