@@ -328,6 +328,19 @@ fn main() {
         );
         proxima_tensor::instrument::reset_checkout_arena_key_compare();
         proxima_tensor::instrument::reset_bind_rebind_compare();
+
+        let mut total_packed = 0usize;
+        let mut total_unpacked = 0usize;
+        for arena in arena_cache.values() {
+            let (packed, unpacked) = cpu::arena_named_byte_split(arena);
+            total_packed += packed;
+            total_unpacked += unpacked;
+        }
+        println!(
+            "named-input byte split across {} cached arenas: packed={total_packed} bytes unpacked={total_unpacked} bytes total={} bytes",
+            arena_cache.len(),
+            total_packed + total_unpacked
+        );
     }
 
     // Correctness: bit-identity vs the `evaluate_named` oracle for the NEON
