@@ -13,6 +13,24 @@
 //! per-shape median/CoV over `RUNS` repeats rather than a single min, plus
 //! GMAC/s alongside GB/s.
 //!
+//! **Degenerate-control fix (ROW 234 follow-up):** the per-size ABSOLUTE
+//! GB/s this file prints is fixed-cost-dominated, not a bandwidth number --
+//! `--features instrument` route-fingerprinting shows every dispatch takes
+//! `reduce-packed-row-blocked` (the correct kernel; option (a), wrong route,
+//! is refuted) and `block_upload_ms` is 3-5% of wall time (option (b)'s
+//! "buffer upload" half is refuted -- the packed `Vec<u8>` lands page-
+//! aligned and already takes `upload_packed_bytes`'s no-copy path), but
+//! `gpu_exec_ms` (`command_buffer.commit()` + `waitUntilCompleted()`) IS
+//! effectively the whole per-call wall time: a fixed Metal command-buffer
+//! submission/completion cost the real decode loop pays ONCE per token
+//! (one encoder for the whole ~1196-op forward) and this probe pays FRESH
+//! on every `execute_plan` call, because each call is its own one-op
+//! command buffer. THE FIX: the marginal computation at the bottom of this
+//! file (already present, previously a secondary footnote) is now the
+//! PRIMARY reported number and the one to compare against ROW 221's
+//! 70.76 GB/s -- see that block's own comment for why it cancels the fixed
+//! cost and why shapes[0]/shapes[1] (not shapes[2]) are the valid pair.
+//!
 //! `q4k_matvec_probe.rs`'s OWN 3D-projection program shape
 //! (`[rows, k]`/`[k, 1]`) was tried first and rejected on a false lead: its
 //! CPU-vs-Metal check disagreed by `max_relative=122.8` at 4096x4096. A
@@ -234,6 +252,42 @@ fn run() {
              not gated -- see module doc)"
         );
 
+        #[cfg(feature = "instrument")]
+        {
+            use std::collections::BTreeMap;
+
+            use proxima_tensor::instrument::ticks_to_nanos;
+
+            let (_, timings) =
+                omega::metal::execute_plan_op_timed(&plan, &blocks).expect("op-timed executes");
+            let mut kind_counts: BTreeMap<&'static str, usize> = BTreeMap::new();
+            for timing in &timings {
+                *kind_counts.entry(timing.kind).or_insert(0) += 1;
+            }
+            println!("  route counts: {kind_counts:?}");
+
+            let _ = omega::metal::PREPARE_CALLS.snapshot_and_reset();
+            let _ = omega::metal::PREPARE_TICKS.snapshot_and_reset();
+            let _ = omega::metal::BLOCK_UPLOAD_CALLS.snapshot_and_reset();
+            let _ = omega::metal::BLOCK_UPLOAD_TICKS.snapshot_and_reset();
+            let _ = omega::metal::GPU_EXEC_CALLS.snapshot_and_reset();
+            let _ = omega::metal::GPU_EXEC_TICKS.snapshot_and_reset();
+            omega::execute_plan(&plan, &blocks).expect("diag executes");
+            let block_upload_ms = ticks_to_nanos(omega::metal::BLOCK_UPLOAD_TICKS.get()) as f64 / 1e6;
+            let gpu_exec_ms = ticks_to_nanos(omega::metal::GPU_EXEC_TICKS.get()) as f64 / 1e6;
+            println!(
+                "  per-call phase: block_upload_ms={block_upload_ms:.4} gpu_exec_ms={gpu_exec_ms:.4} \
+                 block_upload_calls={} gpu_exec_calls={}",
+                omega::metal::BLOCK_UPLOAD_CALLS.get(),
+                omega::metal::GPU_EXEC_CALLS.get()
+            );
+            let weight_bytes_diag = packed.len() as f64;
+            println!(
+                "  kernel-only GB/s (gpu_exec_ms denominator) = {:.2}",
+                (weight_bytes_diag / 1e9) / (gpu_exec_ms / 1000.0)
+            );
+        }
+
         // warm loop -- plan once, execute repeatedly, the serving-loop
         // shape `q4k_matvec_probe.rs` already established.
         omega::execute_plan(&plan, &blocks).expect("warmup executes");
@@ -281,11 +335,38 @@ fn run() {
         );
     }
 
-    // ROW 71-style two-size marginal bandwidth, on the smallest and largest
-    // shapes this run measured (`4096x4096` -> `14336x4096`): a difference
-    // of two medians cancels the per-call fixed cost (compile/upload/
-    // readback, see `q4k_matvec_probe.rs`'s own doc), which a single-size
-    // absolute figure cannot.
+    // ROOT CAUSE (this file's own diagnostic run, instrument feature,
+    // route-fingerprinted): every shape dispatches exactly ONE
+    // `reduce-packed-row-blocked` op -- the SAME kernel the decode loop
+    // runs, so option (a) (wrong route) is REFUTED by a counter read, not
+    // an assumption. `block_upload_ms` is ~3-5% of the per-call wall time
+    // in every shape (the packed weight `Vec<u8>` lands page-aligned, so
+    // `upload_packed_bytes` (`src/metal.rs:1673`) already takes the
+    // automatic no-copy path regardless of `Plan::mark_resident` -- NOT the
+    // cause). `gpu_exec_ms` (the `command_buffer.commit()` +
+    // `waitUntilCompleted()` round trip, `src/metal.rs:528-536`) is
+    // effectively the ENTIRE per-call wall time. That round trip pays a
+    // fixed CPU/Metal command-buffer submission-and-completion cost once
+    // per `execute_plan` call -- the REAL decode loop encodes its whole
+    // ~1196-op forward into ONE command buffer and pays that cost ONCE PER
+    // TOKEN (`src/metal.rs:481-497`'s own module doc: "ONE
+    // `MTLComputeCommandEncoder` for the whole program"), amortised across
+    // every op; THIS probe's single-`Reduce`-op program pays it FRESH on
+    // every one of its `RUNS` timed samples, so the per-size absolute GB/s
+    // above is a FIXED-COST measurement, not a bandwidth one, and cannot be
+    // expected to reproduce ROW 221's 70.76 GB/s.
+    //
+    // ACCEPTANCE CRITERION FIX: ROW 71's two-size marginal method
+    // (`proxima-tensor/docs/discipline.md:5079-5081`) cancels exactly that
+    // fixed cost -- a difference of two medians subtracts the constant
+    // per-call term, leaving only the bytes-proportional term. This is now
+    // the PRIMARY reported number (not a secondary footnote): shapes[0]
+    // (4096x4096) and shapes[1] (14336x4096) share `k=4096` and differ only
+    // in row count, so the marginal isolates the bytes axis without also
+    // crossing the reduction-depth axis shapes[2] (`k=14336`) would
+    // introduce -- see the module doc for why a 4096x4096 -> 4096x14336
+    // marginal is NOT a valid bandwidth pair.
+    const ROW_221_BASELINE_GB_S: f64 = 70.76;
     if results.len() >= 2 {
         let small = &results[0];
         let large = &results[1];
@@ -294,10 +375,20 @@ fn run() {
         let delta_ms = large.median_ms - small.median_ms;
         let delta_bytes = large_bytes - small_bytes;
         let marginal_gbs = (delta_bytes / 1e9) / (delta_ms / 1000.0);
+        let ratio = marginal_gbs / ROW_221_BASELINE_GB_S;
         println!(
-            "marginal ({} -> {}): delta_bytes={delta_bytes:.0} delta_ms={delta_ms:.4} \
-             marginal_GB/s={marginal_gbs:.2}",
+            "marginal ({} -> {}, fixed-cost cancelled -- THE BASELINE ARM): \
+             delta_bytes={delta_bytes:.0} delta_ms={delta_ms:.4} marginal_GB/s={marginal_gbs:.2} \
+             vs ROW_221_baseline={ROW_221_BASELINE_GB_S:.2} ratio={ratio:.3}",
             small.label, large.label
+        );
+        println!(
+            "  UNMEASURED-ON-THIS-RUN: host load was contended (see run log); \
+             this number is a real computation over real samples but the samples \
+             themselves were captured on a loaded box and are not a sealed claim. \
+             Re-prove with the box lock held and load < 1.0: \
+             CARGO_TARGET_DIR=<scratch>/target cargo run -p omega --release \
+             --features metal,cpu,instrument --example q4k_matvec_nsg_probe"
         );
     }
 }
