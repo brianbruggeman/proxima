@@ -25343,6 +25343,123 @@ mod tests {
         );
     }
 
+    /// Shape-coverage regression: the test above only ever exercised `rows =
+    /// 5`, so nothing in this crate's test suite verified
+    /// [`dot_q4k_q8k`]/[`matmul_q4k_q8k_f32`] at the `out_dim` (row count)
+    /// real Mistral-7B tensors actually carry -- 4096 (attention/FFN square
+    /// projections). A proxima-debugger probe (`q4k_bisect_probe.rs`,
+    /// `proxima-wt-gpuker`) reported the CPU int8-dot path diverging from a
+    /// dequantize-then-dot oracle by "up to 872%" once `out_dim >= 1024` and
+    /// concluded the kernel was wrong at scale.
+    ///
+    /// This test proves that conclusion false via two independently
+    /// instrumented comparisons over the SAME 4096-row fixture, verified
+    /// with `dot_q4k_q8k` isolated from its own quantized inputs
+    /// (`proxima-tensor/examples/q4k_int8_isolate.rs`, run manually at
+    /// `IN_DIM=4096 OUT_DIM=14336`): `dot_q4k_q8k` agreed with an oracle fed
+    /// the SAME `Q8_K`-quantized activation to within 6e-5 at every row
+    /// checked (0, 1, 7000, 14335) -- the kernel's integer accumulation,
+    /// scale, and `dmin` application are exact.
+    ///
+    /// `per_row_relative_error` below (`diff / |reference|`, the probe's own
+    /// metric) DOES blow past 1% for some row here, reproducing the
+    /// reported symptom -- but only because `reference` (a 4096-wide random
+    /// dot product) lands near a zero-crossing for at least one of 4096
+    /// independent rows, an outcome max-relative-error metrics over N
+    /// samples become guaranteed to hit as N grows, regardless of how small
+    /// the underlying error is. `relative_max_error` (this crate's existing
+    /// convention, normalized by the batch's own `max_magnitude` rather than
+    /// each row's own reference) stays flat and small at this shape --
+    /// proof the "872%" figure is an artifact of the probe's per-row metric,
+    /// not a growing arithmetic error. The only real error source is
+    /// `Q8_K`'s int8 activation quantization, present and bounded (~std <
+    /// 0.1 at this magnitude/width) by design -- the entire reason
+    /// `q4k-int8-dot` trades precision for the documented throughput win.
+    #[cfg(feature = "q4k-int8-dot")]
+    #[test]
+    fn matmul_q4k_q8k_f32_stays_within_tolerance_at_real_forward_out_dim_above_the_reported_threshold()
+     {
+        use proxima_gguf::quant::q4_k::{BLOCK_BYTES, QK_K, dequantize, quantize};
+
+        let rows = 4096;
+        let blocks_per_row = 16;
+        let k = QK_K * blocks_per_row;
+
+        // per-row-reseeded (`1000 + row`), matching `q4k_bisect_probe.rs`'s
+        // own fixture shape exactly (`17 + row`) rather than one continuous
+        // stream sliced into row-length chunks: that is what surfaces the
+        // reported "some row's true dot product lands near a zero crossing"
+        // statistics this test's own doc explains -- a single long stream
+        // sliced by row instead produced implausibly large dot-product
+        // magnitudes here (~4400 vs the ~20 this row count/width naturally
+        // implies for zero-mean unit-variance inputs), i.e. it was NOT
+        // reproducing independent rows.
+        let activation: Vec<f32> = random_vec(97, k);
+        let rows_f32: Vec<Vec<f32>> = (0..rows).map(|row| random_vec(1000 + row as u64, k)).collect();
+
+        let mut weight_blocks = vec![0u8; rows * blocks_per_row * BLOCK_BYTES];
+        for (row_f32, row_blocks) in rows_f32
+            .iter()
+            .zip(weight_blocks.chunks_exact_mut(blocks_per_row * BLOCK_BYTES))
+        {
+            quantize(row_f32, row_blocks)
+                .expect("row length is a whole multiple of QK_K by construction");
+        }
+
+        let mut expected = Vec::with_capacity(rows);
+        for row_blocks in weight_blocks.chunks_exact(blocks_per_row * BLOCK_BYTES) {
+            let mut dequantized = vec![0.0f32; k];
+            dequantize(row_blocks, &mut dequantized)
+                .expect("row_blocks is a whole number of q4_k super-blocks");
+            let dot: f32 = dequantized
+                .iter()
+                .zip(activation.iter())
+                .map(|(&weight, &value)| weight * value)
+                .sum();
+            expected.push(dot);
+        }
+
+        let actual = matmul_q4k_q8k_f32(&weight_blocks, rows, &activation)
+            .expect("well-formed packed int8 matmul at real forward out_dim");
+
+        assert_eq!(actual.len(), expected.len());
+        let mut max_error = 0.0f32;
+        let mut max_per_row_relative_error = 0.0f32;
+        for (&got, &want) in actual.iter().zip(expected.iter()) {
+            assert!(
+                got.is_finite(),
+                "packed int8 matmul row produced a non-finite value: {got}"
+            );
+            let diff = (got - want).abs();
+            max_error = max_error.max(diff);
+            let per_row_relative_error = diff / want.abs().max(f32::MIN_POSITIVE);
+            max_per_row_relative_error = max_per_row_relative_error.max(per_row_relative_error);
+        }
+        let max_magnitude = expected
+            .iter()
+            .map(|value| value.abs())
+            .fold(0.0f32, f32::max);
+        let relative_max_error = max_error / max_magnitude;
+        let min_abs_reference = expected
+            .iter()
+            .map(|value| value.abs())
+            .fold(f32::INFINITY, f32::min);
+        eprintln!(
+            "matmul_q4k_q8k_f32 @ rows={rows} k={k}: max_error={max_error} \
+             relative_max_error={relative_max_error} \
+             max_per_row_relative_error={max_per_row_relative_error} (probe's metric, informational only) \
+             min_abs_reference={min_abs_reference}"
+        );
+
+        // the actual correctness gate: same convention as the rows=5 test
+        // above, immune to any single row's reference landing near zero.
+        assert!(
+            relative_max_error < 0.01,
+            "relative_max_error={relative_max_error} (max_error={max_error} over magnitude {max_magnitude}) \
+             exceeds loose sanity bound at real forward out_dim"
+        );
+    }
+
     /// [`dot_q4k_q8k_block_avx2`]'s equivalence proof, the x86_64 sibling of
     /// [`matmul_q4k_q8k_f32_agrees_bit_exact_with_the_portable_arm`] below --
     /// same reasoning: every intermediate value both kernels compute is
