@@ -440,6 +440,123 @@ fn main() {
         );
     }
 
+    // `docs/discipline.md` "one execution path" collapse: plain `evaluate_named`
+    // (no `StaticArena`, no local cache, no `constant_inputs` opt-in) is now
+    // `cpu::evaluate_named_via_arena` internally -- this block proves that
+    // reaching it directly, the way a caller who never read this file's own
+    // arena plumbing would, still gets the SAME arena-backed default (builds
+    // 3 arenas over `default_arm_runs * items.len()` calls, then reuses
+    // them) with no code on the caller's side beyond calling `evaluate_named`.
+    println!(
+        "\n=== DEFAULT-PATH MEASUREMENT (plain evaluate_named, no caller opt-in) ==="
+    );
+    let default_arm_runs: usize = 5;
+    for accelerate in [false, true] {
+        cpu::set_accelerate_gemm_enabled(accelerate);
+        #[cfg(feature = "bge-eval-diag")]
+        {
+            cpu::arena_cache_reset();
+            cpu::rewrite_engine_reset();
+            proxima_tensor::instrument::reset_reduce_gemm_path();
+        }
+        let mut run_means = Vec::new();
+        for _run in 0..default_arm_runs {
+            let mut durations = Vec::with_capacity(items.len());
+            for (_, tokens) in &items {
+                let mut pins = BTreeMap::new();
+                pins.insert("batch_size", 1u64);
+                pins.insert("sequence_length", tokens.len() as u64);
+                let cache_key = tokens.len() as u64;
+                let (lowered, _hit) = proxima_onnx::lower::lower_graph_pinned_cached(
+                    &mut lower_cache,
+                    graph,
+                    &pins,
+                    cache_key,
+                )
+                .expect("lower BGE-small with pinned symbolic axes (cached)");
+                let output: NodeId = lowered
+                    .graph_outputs
+                    .first()
+                    .expect("last_hidden_state output")
+                    .1;
+                let (input_ids, attention_mask, token_type_ids) = dynamic_inputs(tokens);
+                let named = named_inputs(
+                    &lowered.initializers,
+                    &lowered.graph_inputs,
+                    &input_ids,
+                    &attention_mask,
+                    &token_type_ids,
+                );
+                let eval_start = Instant::now();
+                let _evaluated = evaluate_named(&lowered.program, &[], &named, &[output])
+                    .expect("default-path evaluate_named");
+                durations.push(eval_start.elapsed());
+            }
+            run_means.push(mean_ms(&durations));
+        }
+        let mean = run_means.iter().sum::<f64>() / run_means.len() as f64;
+        let cov = coefficient_of_variation(&run_means, mean);
+        println!(
+            "accelerate={accelerate}: per-run means={run_means:?} mean_ms/sentence={mean:.4} CoV%={cov:.2}"
+        );
+        #[cfg(feature = "bge-eval-diag")]
+        {
+            let (builds, hits) = cpu::arena_cache_totals();
+            let packed = cpu::arena_cache_packed_node_count();
+            let (depth1, depth2) = cpu::rewrite_engine_depth_fires();
+            let (_, _, width_fast_calls, _, _, _, generic_calls, _) =
+                proxima_tensor::instrument::reduce_gemm_path_totals();
+            println!(
+                "  ENGAGEMENT: arena_cache builds={builds} hits={hits} packed_node_count={packed} \
+                 rewrite_depth1_fires={depth1} rewrite_depth2_fires={depth2} \
+                 width_fast_gemm_calls={width_fast_calls} generic_gemm_calls={generic_calls} \
+                 over {} evaluate_named calls",
+                default_arm_runs * items.len()
+            );
+            assert_eq!(
+                builds, 3,
+                "engagement N mismatch: default evaluate_named path should build exactly 3 arenas (one per distinct pinned length), never per call"
+            );
+            // NAMED RESIDUAL, not silently swallowed: law 6∘5 packing needs
+            // `constant_inputs` (which of this program's `Op::Input` names
+            // are call-invariant weights) -- `evaluate_named`'s own
+            // signature carries no such signal, only a flat `named` list
+            // with weights and per-call activations mixed together
+            // (`checkout_arena` -> `build_static_arena`, never
+            // `build_static_arena_with_constants`). `packed == 0` here is
+            // real and expected on THIS path; the explicit
+            // `evaluate_named_with_arena` arm above (which passes
+            // `constant_inputs`) is what proves packing engages at all.
+            println!(
+                "  NOTE: packed_node_count={packed} on the default (zero-opt-in) path -- \
+                 law 6∘5 packing needs a caller-named constant-input set this signature does not carry, \
+                 see this block's own comment"
+            );
+            assert!(
+                depth1 > 0 || depth2 > 0,
+                "engagement N==0 is RED: rewrite fusion never fired on the default evaluate_named path"
+            );
+            // Accelerate's own route (`try_run_accelerate_width_gemm`) returns
+            // before `run_reduce` ever reaches the `record_reduce_gemm_path_ticks`
+            // call this counter feeds, so `width_fast_calls` is the right N
+            // only with Accelerate off; with it on, `accelerate_gemm_totals`
+            // is the counter that proves the SAME `width_tile_plan` gate fired.
+            if accelerate {
+                let (accel_hits, _) = cpu::accelerate_gemm_totals();
+                assert!(
+                    accel_hits > 0,
+                    "engagement N==0 is RED: Accelerate route never fired on the default evaluate_named path"
+                );
+            } else {
+                assert!(
+                    width_fast_calls > 0,
+                    "engagement N==0 is RED: width_tile_plan (WidthFast) never engaged on the default evaluate_named path"
+                );
+            }
+        }
+    }
+    cpu::set_accelerate_gemm_enabled(false);
+
     println!("\n=== SEALED MEASUREMENT (StaticArena fast path, ms/sentence) ===");
     println!("runs={runs}");
     let neon_mean = neon_run_means.iter().sum::<f64>() / neon_run_means.len() as f64;
