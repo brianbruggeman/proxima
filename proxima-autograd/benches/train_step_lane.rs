@@ -883,6 +883,18 @@ fn run_per_node_profile(lane: &TrainingLane) {
             stat.kind_label, stat.extents
         );
     }
+
+    let (dot_calls, dot_ticks, width_calls, width_ticks, conv_calls, conv_ticks, generic_calls, generic_ticks) =
+        instrument::reduce_gemm_path_totals();
+    eprintln!(
+        "train_step_lane: reduce-gemm route census (cumulative over the whole run, warmup included) -- \
+         dot_fast calls={dot_calls} ticks_us={:.3} width_fast calls={width_calls} ticks_us={:.3} \
+         conv_tile calls={conv_calls} ticks_us={:.3} generic calls={generic_calls} ticks_us={:.3}",
+        instrument::ticks_to_nanos(dot_ticks) as f64 / 1000.0,
+        instrument::ticks_to_nanos(width_ticks) as f64 / 1000.0,
+        instrument::ticks_to_nanos(conv_ticks) as f64 / 1000.0,
+        instrument::ticks_to_nanos(generic_ticks) as f64 / 1000.0,
+    );
 }
 
 fn main() {
