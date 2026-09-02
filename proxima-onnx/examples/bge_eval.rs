@@ -517,20 +517,21 @@ fn main() {
                 builds, 3,
                 "engagement N mismatch: default evaluate_named path should build exactly 3 arenas (one per distinct pinned length), never per call"
             );
-            // NAMED RESIDUAL, not silently swallowed: law 6∘5 packing needs
-            // `constant_inputs` (which of this program's `Op::Input` names
-            // are call-invariant weights) -- `evaluate_named`'s own
-            // signature carries no such signal, only a flat `named` list
-            // with weights and per-call activations mixed together
-            // (`checkout_arena` -> `build_static_arena`, never
-            // `build_static_arena_with_constants`). `packed == 0` here is
-            // real and expected on THIS path; the explicit
-            // `evaluate_named_with_arena` arm above (which passes
-            // `constant_inputs`) is what proves packing engages at all.
-            println!(
-                "  NOTE: packed_node_count={packed} on the default (zero-opt-in) path -- \
-                 law 6∘5 packing needs a caller-named constant-input set this signature does not carry, \
-                 see this block's own comment"
+            // `checkout_arena` now derives `constant_inputs` from `named`
+            // itself on a cache miss (every genuine `Op::Input` name,
+            // filtered against `block_node_ids` so a stray `named` entry can
+            // never trip `UnboundInputName`) -- `evaluate_named`'s own
+            // signature still carries no explicit weights-vs-activations
+            // signal, so this is a structural GUESS, never a caller promise:
+            // `build_packed_width_panels` only actually packs the subset
+            // that is ALSO the 2-D `b` operand of a width-tile-eligible
+            // `Reduce`, and `bind_named_inputs_into_arena`'s own rebind
+            // check drops a packed panel the instant a later call proves the
+            // guess wrong for that node. `packed > 0` here is the proof this
+            // now engages with zero caller opt-in.
+            assert!(
+                packed > 0,
+                "engagement N==0 is RED: packed_node_count should be nonzero now that checkout_arena derives constant_inputs from the program"
             );
             assert!(
                 depth1 > 0 || depth2 > 0,
