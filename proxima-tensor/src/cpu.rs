@@ -10020,6 +10020,28 @@ fn run_width_tile_neon<const VECS: usize>(
     #[cfg(feature = "instrument")]
     WIDTH_TILE_GATE_PASSES.fetch_add(1, Ordering::Relaxed);
 
+    // composition-split task (2026-09-01): whole-function wall time, read
+    // first thing, committed at the tail alongside `kernel_ticks` below --
+    // `record_width_tile_split_ticks`'s own doc names why this pair (fn
+    // entry/exit) is the right granularity: cheap enough not to perturb a
+    // function this short-lived, coarse enough to bound the surround.
+    #[cfg(feature = "instrument")]
+    let width_tile_fn_started = instrument::read_ticks();
+    // ticks strictly inside `gemm_width_tile_neon`, summed across every call
+    // this function makes (main tile loop below, plus the row-remainder
+    // macro's own call site) -- accumulated locally, committed once, same
+    // discipline as every other counter in this function. Read at the CALL
+    // boundary, never inside the kernel's own k-loop: a ~1-2us kernel call
+    // can absorb a read-pair's overhead, a per-element inner loop could not.
+    #[cfg(feature = "instrument")]
+    let mut width_tile_kernel_ticks = 0u64;
+    // MACs those same kernel calls computed -- `ROWS * tile_cols *
+    // reduction_total` per call, tracked separately from `run_reduce`'s own
+    // `MAC_OPS` so the column-tail scalar fallback's MACs never mix in (see
+    // `WIDTH_TILE_KERNEL_MACS`'s own doc).
+    #[cfg(feature = "instrument")]
+    let mut width_tile_kernel_macs = 0u64;
+
     // accumulated locally across the whole tile walk and committed once at
     // the end, never as a per-element atomic inside the fallback loops.
     #[cfg(feature = "instrument")]
@@ -10093,6 +10115,8 @@ fn run_width_tile_neon<const VECS: usize>(
                 // guaranteed by `row_tiles`/`col_tiles` only covering whole
                 // tiles carved out of `plan.leading_total`/`plan.width` (packed:
                 // `full_col_tiles`/`k_total` sized exactly to match).
+                #[cfg(feature = "instrument")]
+                let kernel_started = instrument::read_ticks();
                 unsafe {
                     gemm_width_tile_neon::<WIDTH_TILE_ROWS, VECS>(
                         KStridedTile {
@@ -10112,6 +10136,9 @@ fn run_width_tile_neon<const VECS: usize>(
                 }
                 #[cfg(feature = "instrument")]
                 {
+                    width_tile_kernel_ticks += instrument::elapsed_ticks(kernel_started);
+                    width_tile_kernel_macs +=
+                        WIDTH_TILE_ROWS as u64 * tile_cols as u64 * plan.reduction_total as u64;
                     width_tile_invocations += 1;
                 }
 
@@ -10197,6 +10224,8 @@ fn run_width_tile_neon<const VECS: usize>(
                     // inside `plan.leading_total`, since `row_start + $rows` is
                     // exactly the greedy 2-then-1 dispatch below never
                     // overshooting `plan.leading_total`.
+                    #[cfg(feature = "instrument")]
+                    let kernel_started = instrument::read_ticks();
                     unsafe {
                         gemm_width_tile_neon::<$rows, VECS>(
                             KStridedTile {
@@ -10216,6 +10245,9 @@ fn run_width_tile_neon<const VECS: usize>(
                     }
                     #[cfg(feature = "instrument")]
                     {
+                        width_tile_kernel_ticks += instrument::elapsed_ticks(kernel_started);
+                        width_tile_kernel_macs +=
+                            $rows as u64 * tile_cols as u64 * plan.reduction_total as u64;
                         width_tile_row_remainder_invocations += 1;
                         width_tile_row_remainder_elements += ($rows * tile_cols) as u64;
                     }
@@ -10305,6 +10337,11 @@ fn run_width_tile_neon<const VECS: usize>(
         if col_tiles * tile_cols < plan.width {
             counter!(instrument::WIDTH_TILE_COLUMN_TAIL_PRESENT, 1);
         }
+        instrument::record_width_tile_split_ticks(
+            width_tile_kernel_ticks,
+            width_tile_kernel_macs,
+            instrument::elapsed_ticks(width_tile_fn_started),
+        );
     }
 }
 
