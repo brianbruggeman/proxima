@@ -9765,24 +9765,25 @@ fn width_tile_plan(context: &WidthPathContext) -> Option<WidthTilePlan> {
         );
         return None;
     }
-    // attention-tile task (2026-09-01): up to TWO non-degenerate leading
-    // axes now reach this point -- `attn_qk`/`attn_v` (BGE's Q@K^T and
-    // softmax@V folds) carry `[heads, seq_q]`, neither extent 1. Which of
-    // the two is the tile's own "row" axis (only the `a` operand varies
-    // over it, `b` constant -- the shape every single-axis node already
-    // proves) versus the "outer" axis (both operands step by it, e.g.
-    // per-head K/V) is a physical-stride question, answered below once
-    // `layout_a`/`layout_b` are resolved -- not an extent question, so only
-    // bound and collect candidates here. More than 2 non-degenerate leading
-    // axes has no proven shape and declines now rather than being guessed
-    // at further down.
+    // attention-tile task (2026-09-01) + three-axis-merge task (2026-09-02):
+    // up to THREE non-degenerate leading axes now reach this point --
+    // `attn_qk`/`attn_v` at batch > 1 (BGE's Q@K^T and softmax@V folds)
+    // carry `[batch, heads, seq_q]`, none extent 1 once batch stops being
+    // elided. Which axis is the tile's own "row" axis (only the `a` operand
+    // varies over it, `b` constant -- the shape every single-axis node
+    // already proves) versus the "outer" axis/axes (both operands step by
+    // them, e.g. per-batch-per-head K/V) is a physical-stride question,
+    // answered below once `layout_a`/`layout_b` are resolved -- not an
+    // extent question, so only bound and collect candidates here. More
+    // than 3 non-degenerate leading axes has no proven shape and declines
+    // now rather than being guessed at further down.
     let non_degenerate_leading: Vec<u16> = context
         .leading_output_axes
         .iter()
         .copied()
         .filter(|&axis| context.resolved.extents[axis as usize] != 1)
         .collect();
-    if non_degenerate_leading.len() > 2 {
+    if non_degenerate_leading.len() > 3 {
         #[cfg(feature = "instrument")]
         record_decline(
             instrument::WidthDeclineReason::AxesShape,
@@ -9903,7 +9904,7 @@ fn width_tile_plan(context: &WidthPathContext) -> Option<WidthTilePlan> {
     // nonzero there by construction (the complement), and `layout_a`'s
     // stride ALSO nonzero (else `a` never changes across it, a shape this
     // tile has not proven and declines rather than guesses).
-    let (leading_dim, outer_dim, merged_leading) = match non_degenerate_leading.as_slice() {
+    let (leading_dim, outer_dims, merged_leading) = match non_degenerate_leading.as_slice() {
         [] => (context.leading_output_axes[0], None, None),
         &[only] if layout_b.stride(only) == 0 => (only, None, None),
         &[_] => {
@@ -9919,8 +9920,8 @@ fn width_tile_plan(context: &WidthPathContext) -> Option<WidthTilePlan> {
             return None;
         }
         &[first, second] => match (layout_b.stride(first), layout_b.stride(second)) {
-            (0, other) if other != 0 => (first, Some(second), None),
-            (other, 0) if other != 0 => (second, Some(first), None),
+            (0, other) if other != 0 => (first, Some((second, None)), None),
+            (other, 0) if other != 0 => (second, Some((first, None)), None),
             // batch-widen task (2026-09-02): `b` (the weight) is invariant
             // over BOTH leading axes at once -- a plain `[batch, seq, k] @
             // [k, n]` GEMM once `batch` stops being elided (extent > 1).
@@ -9972,16 +9973,53 @@ fn width_tile_plan(context: &WidthPathContext) -> Option<WidthTilePlan> {
                 return None;
             }
         },
-        _ => unreachable!("non_degenerate_leading.len() > 2 already declined above"),
+        // three-axis-merge task (2026-09-02): `attn_qk`/`attn_v` at batch >
+        // 1 carry `[batch, heads, seq_q]`, all three non-degenerate --
+        // established from `lower_matmul`'s own affine projections
+        // (`proxima-onnx/src/lower.rs`), not assumed: `b` (K/V)'s pattern
+        // skips `seq_q` (axis 2) on both operands for both folds, so `seq_q`
+        // is the row axis (`b` invariant, the same shape every single-axis
+        // node already proves) and `batch`/`heads` are the two axes `b`
+        // genuinely varies over -- there is no third "outer" role, `batch`
+        // and `heads` must instead compose into ONE outer step the same way
+        // the two-axis `(0, 0)` arm above composes a row, reusing
+        // `composed_reduction_stride` again rather than re-deriving it.
+        // Exactly one candidate may have `b`-stride 0 -- zero or two-plus
+        // has no proven shape and declines (`AxesShape`) rather than
+        // guessing which axis is the row.
+        &[first, second, third] => {
+            let row_candidates: Vec<u16> = [first, second, third]
+                .into_iter()
+                .filter(|&axis| layout_b.stride(axis) == 0)
+                .collect();
+            match *row_candidates.as_slice() {
+                [row] if row == first => (first, Some((second, Some(third))), None),
+                [row] if row == second => (second, Some((first, Some(third))), None),
+                [row] if row == third => (third, Some((first, Some(second))), None),
+                _ => {
+                    #[cfg(feature = "instrument")]
+                    record_decline(
+                        instrument::WidthDeclineReason::AxesShape,
+                        leading_total_early,
+                        reduction_total_early,
+                        width_i64,
+                        stride_a_early,
+                        stride_b_early,
+                    );
+                    return None;
+                }
+            }
+        }
+        _ => unreachable!("non_degenerate_leading.len() > 3 already declined above"),
     };
-    let outer_info = match outer_dim {
-        Some(axis) if layout_a.stride(axis) != 0 => Some((
+    let outer_info = match outer_dims {
+        Some((axis, None)) if layout_a.stride(axis) != 0 => Some((
             context.resolved.extents[axis as usize] as usize,
             layout_a.stride(axis),
             layout_b.stride(axis),
             context.out_layout.stride(axis),
         )),
-        Some(_) => {
+        Some((_, None)) => {
             #[cfg(feature = "instrument")]
             record_decline(
                 instrument::WidthDeclineReason::AxesShape,
@@ -9992,6 +10030,43 @@ fn width_tile_plan(context: &WidthPathContext) -> Option<WidthTilePlan> {
                 stride_b_early,
             );
             return None;
+        }
+        // three-axis-merge task (2026-09-02): `batch`/`heads` compose into
+        // ONE outer step, the same row-major-VIEW proof the two-axis `(0,
+        // 0)` row merge above already gives, applied to `layout_a`,
+        // `layout_b`, AND `context.out_layout` this time -- unlike the row
+        // merge, `b` genuinely steps here (that is what makes these axes
+        // "outer" rather than "row"), so all three operands must
+        // independently compose to the SAME extent or this declines rather
+        // than guessing.
+        Some((first, Some(second))) => {
+            let outer_total_early = context.resolved.extents[first as usize] as i64
+                * context.resolved.extents[second as usize] as i64;
+            match (
+                composed_reduction_stride(context.resolved, &[first, second], layout_a),
+                composed_reduction_stride(context.resolved, &[first, second], layout_b),
+                composed_reduction_stride(context.resolved, &[first, second], context.out_layout),
+            ) {
+                (Some((extent_a, stride_a)), Some((extent_b, stride_b)), Some((extent_out, stride_out)))
+                    if extent_a == outer_total_early
+                        && extent_b == outer_total_early
+                        && extent_out == outer_total_early =>
+                {
+                    Some((outer_total_early as usize, stride_a, stride_b, stride_out))
+                }
+                _ => {
+                    #[cfg(feature = "instrument")]
+                    record_decline(
+                        instrument::WidthDeclineReason::AxesShape,
+                        leading_total_early,
+                        reduction_total_early,
+                        width_i64,
+                        stride_a_early,
+                        stride_b_early,
+                    );
+                    return None;
+                }
+            }
         }
         None => None,
     };
@@ -21211,6 +21286,71 @@ mod tests {
         (program, sum)
     }
 
+    /// Same 3-non-degenerate-leading-axis shape as
+    /// [`three_leading_axes_matmul_program`], but `rhs` now varies over the
+    /// two OUTER axes (`outer`, `batch`) too, invariant only on `seq` (the
+    /// row axis) -- BGE's own `attn_qk`/`attn_v` shape at batch > 1
+    /// (`[batch, heads, seq_q]`), established from `lower_matmul`'s own
+    /// affine projections (`proxima-onnx/src/lower.rs:1084-1200`): K/V's
+    /// pattern always skips the row axis and always carries `batch` and
+    /// `heads`. `three_leading_axes_matmul_program`'s all-invariant `rhs`
+    /// cannot stand in for this -- a genuinely different stride shape, and
+    /// the one the three-axis-merge task (2026-09-02) closes.
+    #[cfg(all(target_arch = "aarch64", feature = "instrument"))]
+    fn three_leading_axes_batched_matmul_program(
+        outer: u32,
+        batch: u32,
+        seq: u32,
+        contraction: u32,
+        width: u32,
+    ) -> (Vec<Op>, NodeId) {
+        let mut program = Vec::new();
+        let lhs = f32_block(
+            &mut program,
+            &[
+                Extent::Static(outer),
+                Extent::Static(batch),
+                Extent::Static(seq),
+                Extent::Static(contraction),
+            ],
+        );
+        let rhs = f32_block(
+            &mut program,
+            &[
+                Extent::Static(outer),
+                Extent::Static(batch),
+                Extent::Static(contraction),
+                Extent::Static(width),
+            ],
+        );
+        let product = append(
+            &mut program,
+            Op::Elementwise {
+                dtype: DType::Float32,
+                body: ScalarOp::Multiply,
+                operands: alloc::vec![
+                    (lhs, IndexMap::Affine(map::projection(5, &[0, 1, 2, 3]))),
+                    (rhs, IndexMap::Affine(map::projection(5, &[0, 1, 3, 4]))),
+                ],
+                name: None,
+            },
+        );
+        let sum = append(
+            &mut program,
+            Op::Reduce(Reduce {
+                dtype: DType::Float32,
+                body: ScalarOp::Add,
+                init: ReduceInit::Zero,
+                operand: product,
+                in_map: IndexMap::Affine(map::projection(5, &[0, 1, 2, 3, 4])),
+                out_map: IndexMap::Affine(map::projection(5, &[0, 1, 2, 4])),
+                keep: Keep::Reduce,
+                name: Some("three_leading_axes_batched_matmul".into()),
+            }),
+        );
+        (program, sum)
+    }
+
     /// `table[ids[s], d]` over iteration space `(s, d)`: dim 0 (vocab) is
     /// gathered by `ids`, dim 1 (feature) is a plain projection.
     fn embedding_lookup_program(vocab: u32, dim: u32, seq: u32) -> (Vec<Op>, NodeId) {
@@ -21685,12 +21825,19 @@ mod tests {
         );
     }
 
-    /// Negative ratchet: BGE's own `attn_qk`/`attn_v` shape (3 non-degenerate
-    /// leading axes) is the KNOWN remaining decline this task's fix did not
-    /// close (24 of 96 folds, `docs/discipline.md`'s own batch sweep
-    /// census). Pinned explicitly so a future widening of the leading-axis
-    /// merge must re-derive this test's expected engagement rather than
-    /// silently making it pass for the wrong reason.
+    /// Negative ratchet, UPDATED by the three-axis-merge task (2026-09-02):
+    /// this is NO LONGER "3 leading axes always decline" -- BGE's own
+    /// `attn_qk`/`attn_v` shape (1 row axis + 2 `b`-varying outer axes that
+    /// compose) now engages, see
+    /// `a_three_leading_axis_batched_reduce_engages_width_tile_and_matches_naive_matmul`
+    /// below. This test instead pins the OTHER 3-axis shape,
+    /// `three_leading_axes_matmul_program`'s `rhs` invariant over ALL THREE
+    /// leading axes (a plain shared-weight GEMM, not attention) -- no axis
+    /// is the unique row candidate (`layout_b.stride == 0` on all three),
+    /// so `width_tile_plan`'s 3-axis arm still declines it, unchanged.
+    /// Pinned explicitly so a future widening past "exactly one row axis"
+    /// must re-derive this test's expected engagement rather than silently
+    /// making it pass for the wrong reason.
     #[test]
     #[cfg(all(target_arch = "aarch64", feature = "instrument"))]
     fn a_three_leading_axis_reduce_declines_width_tile_with_axes_shape_reason() {
@@ -21721,9 +21868,9 @@ mod tests {
         assert_eq!(
             gate_passes_after - gate_passes_before,
             0,
-            "a 3-leading-axis GEMM engaged width_tile_plan -- if this fires, the leading-axis \
-             merge was widened past 2 axes; re-derive this test's expected engagement count \
-             rather than deleting the assertion"
+            "the all-invariant-rhs 3-leading-axis GEMM engaged width_tile_plan -- if this fires, \
+             a shape with no unique row axis started engaging; re-derive this test's expected \
+             engagement count rather than deleting the assertion"
         );
         let declines = instrument::width_tile_decline_snapshot();
         let matched = declines
@@ -21733,8 +21880,72 @@ mod tests {
         assert_eq!(
             matched.1,
             instrument::WidthDeclineReason::AxesShape,
-            "expected AxesShape (>2 non-degenerate leading axes), got {:?}",
+            "expected AxesShape (no unique row axis among 3 non-degenerate leading axes), got {:?}",
             matched.1
+        );
+    }
+
+    /// Positive ratchet: BGE's own `attn_qk`/`attn_v` shape (`[batch, heads,
+    /// seq_q]`, `b` invariant on `seq_q` alone, varying on `batch` AND
+    /// `heads`) must route through `width_tile_plan`, not just compute the
+    /// right answer -- the exact 24-of-96 decline the three-axis-merge task
+    /// (2026-09-02) closes. Fails the moment a future change re-introduces
+    /// the 72/96-at-batch>1 regression this task fixed.
+    #[test]
+    #[cfg(all(target_arch = "aarch64", feature = "instrument"))]
+    fn a_three_leading_axis_batched_reduce_engages_width_tile_and_matches_naive_matmul() {
+        let (outer, batch, seq, contraction, width) = (2u32, 3u32, 4u32, 5u32, 16u32);
+        let (program, sum) =
+            three_leading_axes_batched_matmul_program(outer, batch, seq, contraction, width);
+
+        let lhs: Vec<f32> = (0..outer * batch * seq * contraction)
+            .map(|value| value as f32 * 0.01 + 1.0)
+            .collect();
+        let rhs: Vec<f32> = (0..outer * batch * contraction * width)
+            .map(|value| value as f32 * 0.001)
+            .collect();
+
+        instrument::reset_width_tile_decline();
+        let (gate_passes_before, invocations_before, _) = width_tile_counters();
+        let evaluated = evaluate(&program, &[], &[&lhs, &rhs], &[])
+            .expect("the batched three-leading-axis reduce evaluates");
+        let (gate_passes_after, invocations_after, _) = width_tile_counters();
+
+        assert_eq!(
+            evaluated.shape(),
+            &[outer as u64, batch as u64, seq as u64, width as u64]
+        );
+        let mut reference = vec![0.0f32; (outer * batch * seq * width) as usize];
+        for slice in 0..(outer * batch) as usize {
+            let lhs_slice = &lhs[slice * (seq * contraction) as usize
+                ..(slice + 1) * (seq * contraction) as usize];
+            let rhs_slice = &rhs[slice * (contraction * width) as usize
+                ..(slice + 1) * (contraction * width) as usize];
+            let slice_out = naive_matmul(
+                lhs_slice,
+                rhs_slice,
+                seq as usize,
+                contraction as usize,
+                width as usize,
+            );
+            reference[slice * (seq * width) as usize..(slice + 1) * (seq * width) as usize]
+                .copy_from_slice(&slice_out);
+        }
+        assert_all_close(evaluated.root(), &reference, 1e-5);
+
+        let gate_delta = gate_passes_after - gate_passes_before;
+        let invocation_delta = invocations_after - invocations_before;
+        assert!(
+            gate_delta > 0 && invocation_delta > 0,
+            "width_tile_plan declined the batched three-leading-axis (batch, heads, seq_q) reduce \
+             -- gate_delta={gate_delta} invocation_delta={invocation_delta}, expected both > 0. \
+             `assert_all_close` above would still pass on the generic-interpreter fallback -- \
+             THIS is the assertion that catches the regression"
+        );
+        let declines = instrument::width_tile_decline_snapshot();
+        assert!(
+            declines.iter().all(|&(node, ..)| node != sum.0),
+            "the batched three-leading-axis node declined instead of engaging: {declines:?}"
         );
     }
 

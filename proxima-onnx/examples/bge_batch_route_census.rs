@@ -326,7 +326,7 @@ fn main() {
     let model = proxima_onnx::pipe::parse_complete(&bytes).expect("parse");
     let graph = model.graph.as_ref().expect("graph");
 
-    for &batch in &[1u64, 8u64] {
+    for &batch in &[1u64, 8u64, 32u64] {
         census_one_batch(graph, batch);
     }
 
