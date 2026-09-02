@@ -10,7 +10,6 @@
 use core::future::Future;
 use core::sync::atomic::{AtomicU64, Ordering};
 use std::collections::{BTreeMap, HashSet};
-#[cfg(target_os = "macos")]
 use std::sync::OnceLock;
 use std::sync::{Mutex, PoisonError};
 use std::thread::ThreadId;
@@ -359,6 +358,91 @@ pub fn bind_rebind_compare_totals() -> (u64, u64) {
 pub fn reset_bind_rebind_compare() {
     let _ = BIND_REBIND_COMPARE_CALLS.snapshot_and_reset();
     let _ = BIND_REBIND_COMPARE_TICKS.snapshot_and_reset();
+}
+
+// per-node arena profile (`docs/discipline.md` ROW 174, rebuilt permanently
+// after that row's own temporary `arena-diag`-feature accumulator was
+// reverted before commit and had to be paid for again by a later session):
+// `run_resolved_nodes_in_arena` (`cpu.rs`) dispatches ~100 live `BoundOp`s
+// per training step, and no committed counter above is keyed by [`NodeId`]
+// -- every one aggregates by KIND or PHASE, which cannot answer "which
+// specific node is the mass". Gated on `PROXIMA_ARENA_PER_NODE=1`, read
+// once via a cached bool (same shape as `cpu.rs`'s own
+// `cohort_quorum_completion_enabled`), so an ordinary `instrument`-featured
+// run -- every OTHER counter in this module, all cheap atomic adds -- never
+// pays this accumulator's heavier `Mutex`-guarded `BTreeMap` insert unless
+// a caller explicitly asks for the per-node table.
+#[must_use]
+pub fn arena_per_node_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var("PROXIMA_ARENA_PER_NODE").is_ok_and(|value| value == "1"))
+}
+
+/// One [`NodeId`]'s accumulated cost across every step of a profiling run:
+/// hit count, total ticks, a static op-kind label, and the extents it ran
+/// over (captured once, on first hit -- a node's shape never changes across
+/// steps in a [`crate::cpu::StaticArena`], the same call-invariance
+/// [`crate::cpu::build_static_arena`]'s own `static_nodes` lever relies on).
+#[derive(Debug, Clone)]
+pub struct ArenaNodeStat {
+    pub count: u64,
+    pub ticks: u64,
+    pub kind_label: &'static str,
+    pub extents: Vec<u64>,
+}
+
+static ARENA_PER_NODE_TICKS: OnceLock<Mutex<BTreeMap<u32, ArenaNodeStat>>> = OnceLock::new();
+
+/// Records one resolved node's elapsed ticks for one dispatch inside
+/// `run_resolved_nodes_in_arena` -- a no-op (single cached-bool load, no
+/// lock taken) unless [`arena_per_node_enabled`] is true, so a plain
+/// `--features instrument` run without the env var never touches the
+/// `Mutex`.
+pub fn record_arena_node_ticks(node: NodeId, kind_label: &'static str, extents: &[u64], ticks: u64) {
+    if !arena_per_node_enabled() {
+        return;
+    }
+    let table = ARENA_PER_NODE_TICKS.get_or_init(|| Mutex::new(BTreeMap::new()));
+    let mut guard = table.lock().unwrap_or_else(PoisonError::into_inner);
+    let entry = guard.entry(node.0).or_insert_with(|| ArenaNodeStat {
+        count: 0,
+        ticks: 0,
+        kind_label,
+        extents: extents.to_vec(),
+    });
+    entry.count += 1;
+    entry.ticks += ticks;
+}
+
+/// Clears the per-node accumulator -- called after a profiling run's own
+/// warm-up steps, before its timed/measured window, so warm-up
+/// compilation/caching effects never pollute the attributed breakdown
+/// (matches `cpu.rs`'s own `epilogue_profile_reset` precedent).
+pub fn reset_arena_per_node() {
+    if let Some(table) = ARENA_PER_NODE_TICKS.get() {
+        table.lock().unwrap_or_else(PoisonError::into_inner).clear();
+    }
+}
+
+/// Snapshot of the per-node table, `(node_id, stat)` sorted by node id. An
+/// empty return while [`arena_per_node_enabled`] is true means
+/// `run_resolved_nodes_in_arena` never dispatched a single node during the
+/// window this was read over -- the caller (a diagnostic driver, never the
+/// timed hot path) must assert its own returned length before trusting a
+/// printed table, per this workspace's N==0-is-RED discipline.
+#[must_use]
+pub fn arena_per_node_snapshot() -> Vec<(u32, ArenaNodeStat)> {
+    ARENA_PER_NODE_TICKS
+        .get()
+        .map(|table| {
+            table
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .iter()
+                .map(|(node, stat)| (*node, stat.clone()))
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 // composition-split task (2026-09-01): closes ROW 213's named residual

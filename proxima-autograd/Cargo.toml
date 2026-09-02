@@ -39,6 +39,14 @@ safetensors = ["std", "dep:proxima-safetensors"]
 # host-local MNIST idx dataset (the bench clean-skips when it's absent, but
 # the feature keeps criterion out of a default `cargo build`/`cargo test`).
 train-step-bench = ["std"]
+# `docs/discipline.md` ROW 174/234: the per-node arena breakdown for the
+# SAME `train_step_lane.rs` program, captured by an untimed diagnostic run
+# with `proxima-tensor/instrument` on -- deliberately separate from
+# `train-step-bench` above, whose own module doc states it does NOT enable
+# `instrument` (30-40% overhead on every `run_reduce`/`run_elementwise`
+# call would pollute the sealed timing). Also requires `PROXIMA_ARENA_PER_NODE=1`
+# in the environment at run time (`instrument::arena_per_node_enabled`).
+train-step-profile = ["train-step-bench", "proxima-tensor/instrument"]
 
 [dependencies]
 bon = { workspace = true, optional = true }
