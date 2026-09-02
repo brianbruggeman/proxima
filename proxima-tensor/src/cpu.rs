@@ -2932,6 +2932,36 @@ pub fn arena_packed_node_count(arena: &StaticArena) -> usize {
     arena.packed_width_panels.len()
 }
 
+/// Diagnostic-only measurement for the rebind-identity task (`docs/
+/// discipline.md`, 2026-09-01): `(packed_bytes, unpacked_bytes)` across
+/// every [`StaticArena::input_names`] entry, split by whether that node
+/// backs a live [`PackedWidthPanels::source`] (any panel, since a weight
+/// can in principle back more than one). Answers "how much of the rebind
+/// compare's own byte volume would a packed-only compare actually cover"
+/// BEFORE assuming that direction helps -- never called from
+/// [`bind_named_inputs_into_arena`]'s own hot path.
+#[doc(hidden)]
+#[must_use]
+pub fn arena_named_byte_split(arena: &StaticArena) -> (usize, usize) {
+    let mut packed_bytes = 0usize;
+    let mut unpacked_bytes = 0usize;
+    for (node, _) in &arena.input_names {
+        let bytes = arena.buffers[node.0 as usize]
+            .as_deref()
+            .map_or(0, core::mem::size_of_val);
+        let backs_panel = arena
+            .packed_width_panels
+            .values()
+            .any(|panel| panel.source == *node);
+        if backs_panel {
+            packed_bytes += bytes;
+        } else {
+            unpacked_bytes += bytes;
+        }
+    }
+    (packed_bytes, unpacked_bytes)
+}
+
 /// The in-place counterpart to [`evaluate_named_with_arena`]: a caller
 /// whose `rebind` targets stay resident IN the arena across steps (a
 /// training loop's own parameters and optimizer state, per
