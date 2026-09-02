@@ -357,13 +357,19 @@ mod mac {
         }
     }
 
+    /// Thread count for BOTH arms comes from the launching shell's
+    /// environment, read (never set) here -- `PROXIMA_MATMUL_WORKERS` for
+    /// arm A's `OnceLock` (`cpu.rs:12585-12601`, fixed at the FIRST call in
+    /// the process, so a shell-level `export` before `exec` is the only
+    /// reliable way to control it) and `VECLIB_MAXIMUM_THREADS` for
+    /// Accelerate's own internal pool (arms B/C's `cblas_sgemm`). Printed,
+    /// not asserted -- Accelerate exposes no readback API, so this prints
+    /// what the process saw in its environment, not proof the framework
+    /// honored it; the sweep's own arm-C throughput is the behavioral check.
     pub fn run(path: &str) {
-        // SAFETY: single-threaded, set before any timed work, matching
-        // bench_q4k_matmul.rs's own convention for eliminating core-count
-        // drift from a `_t1`-labeled measurement.
-        unsafe {
-            std::env::set_var("PROXIMA_MATMUL_WORKERS", "1");
-        }
+        let workers = std::env::var("PROXIMA_MATMUL_WORKERS").unwrap_or_else(|_| "unset".to_string());
+        let veclib = std::env::var("VECLIB_MAXIMUM_THREADS").unwrap_or_else(|_| "unset".to_string());
+        println!("PROXIMA_MATMUL_WORKERS={workers} VECLIB_MAXIMUM_THREADS={veclib}");
         let (parsed, file_len) = parse_header(Path::new(path));
         let mut file = File::open(path).expect("reopen real gguf file for tensor data");
         for shape in SHAPES {
