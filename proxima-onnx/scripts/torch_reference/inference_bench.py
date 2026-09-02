@@ -20,6 +20,7 @@ import torch
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from data import dataset_present, load_normalized_images, test_images_path  # noqa: E402
+from diagnostics import report_and_verify_threads, report_load_average  # noqa: E402
 from model import load_model  # noqa: E402
 
 WARMUP_IMAGES = 50
@@ -52,6 +53,8 @@ def main() -> None:
     args = parse_args()
     torch.set_num_threads(args.threads)
 
+    report_load_average("start")
+
     model = load_model()
     batches = load_batches(WARMUP_IMAGES + args.runs)
 
@@ -59,11 +62,15 @@ def main() -> None:
         for index in range(WARMUP_IMAGES):
             model(batches[index : index + 1])
 
+        report_and_verify_threads(args.threads)
+
         samples_ms: list[float] = []
         for index in range(WARMUP_IMAGES, WARMUP_IMAGES + args.runs):
             start = time.perf_counter()
             model(batches[index : index + 1])
             samples_ms.append((time.perf_counter() - start) * 1000.0)
+
+    report_load_average("end")
 
     samples_ms.sort()
     mean = statistics.mean(samples_ms)
