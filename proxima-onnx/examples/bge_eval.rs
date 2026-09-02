@@ -1,7 +1,23 @@
 //! BGE-small-en-v1.5 end-to-end acceptance run: parse -> lower (with pinned
-//! symbolic batch/sequence axes) -> evaluate on the generic executor ->
-//! CLS-pooled, L2-normalized sentence embeddings -> cosine-similarity
-//! sanity check.
+//! symbolic batch/sequence axes, cached across calls) -> evaluate on the
+//! `StaticArena` fast path -> CLS-pooled, L2-normalized sentence embeddings
+//! -> cosine-similarity sanity check.
+//!
+//! `docs/discipline.md` ROW 217 named this file's own gap: everything
+//! needed to reach the 9.734 ms/sentence `StaticArena` + Accelerate number
+//! was landed in the tree (ROW 214's arena+fusion unification, ROW 212's
+//! Accelerate route, ROW 211's lowering cache, ROW 207's plan-time weight
+//! packing) but this SEALED harness still called plain `cpu::evaluate_named`
+//! and published 16.588 ms. This file closes that gap: it builds one
+//! [`proxima_tensor::cpu::StaticArena`] per distinct pinned sentence length
+//! (the corpus has 3: 7/8/9 tokens), naming the graph's own initializers as
+//! `constant_inputs` (they are constant by construction -- the same
+//! invariant [`proxima_tensor::cpu::build_static_arena_with_constants`]'s
+//! own doc asks a caller to assert), reuses that arena across every call
+//! against the same pinned shape, and keeps
+//! [`proxima_onnx::lower::lower_graph_pinned_cached`] amortizing the
+//! ~26-30ms/call re-decode `lower_graph_pinned` alone would otherwise pay
+//! every time.
 //!
 //! Tokenization: `proxima-tokenizer` is a byte-level BPE tokenizer (see its
 //! own crate doc); BGE's `tokenizer.json` declares `BertNormalizer` /
@@ -14,10 +30,17 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
+use std::collections::BTreeMap;
 use std::env;
 use std::fs;
 use std::path::Path;
-use std::time::Instant;
+use std::time::{Duration, Instant};
+
+use proxima_tensor::NodeId;
+use proxima_tensor::cpu::{
+    self, StaticArena, arena_packed_node_count, build_static_arena_with_constants, evaluate_named,
+    evaluate_named_with_arena,
+};
 
 /// This crate never hardcodes a path onto another repo's checkout -- the
 /// model lives on whichever host happens to have it cached, named by
@@ -46,47 +69,56 @@ fn sentences() -> [(&'static str, Vec<i64>); 3] {
     ]
 }
 
-fn embed(
-    lowered_program: &[proxima_tensor::Op],
-    graph_inputs: &[String],
-    initializers: &[(String, Vec<f32>)],
-    output: proxima_tensor::NodeId,
-    tokens: &[i64],
-) -> Vec<f32> {
+/// Lowering-plan cache, keyed by pinned sequence length -- ROW 211's own
+/// lever, amortizing the ~26-30ms/call re-decode of every real weight
+/// initializer down to once per distinct pinned shape.
+type LowerCache = BTreeMap<u64, proxima_onnx::lower::Lowered>;
+
+/// Arena cache, keyed by the SAME pinned sequence length -- this file's own
+/// new lever. An entry is built exactly once, on that shape's first call,
+/// and reused by every subsequent call against the same shape for the rest
+/// of the process.
+type ArenaCache = BTreeMap<u64, StaticArena>;
+
+fn dynamic_inputs(tokens: &[i64]) -> (Vec<f32>, Vec<f32>, Vec<f32>) {
     let sequence_length = tokens.len();
-    let input_ids: Vec<f32> = tokens.iter().map(|&id| id as f32).collect();
+    let input_ids = tokens.iter().map(|&id| id as f32).collect();
     let attention_mask = vec![1.0f32; sequence_length];
     let token_type_ids = vec![0.0f32; sequence_length];
+    (input_ids, attention_mask, token_type_ids)
+}
 
+/// Every `Op::Input` name this graph declares, initializers included --
+/// `evaluate_named_with_arena`'s own `require_all = true` binding loop
+/// expects an entry for every input the arena sized at build time, even the
+/// ones `constant_inputs` already pre-bound (a caller re-sending the same
+/// bytes overwrites them with the identical value, per
+/// `build_static_arena_with_constants`'s own doc). What `constant_inputs`
+/// buys is the plan-time width-tile weight packing, not a skipped rebind.
+fn named_inputs<'data>(
+    initializers: &'data [(String, Vec<f32>)],
+    graph_inputs: &'data [String],
+    input_ids: &'data [f32],
+    attention_mask: &'data [f32],
+    token_type_ids: &'data [f32],
+) -> Vec<(&'data str, &'data [f32])> {
     let mut named: Vec<(&str, &[f32])> = initializers
         .iter()
         .map(|(name, data)| (name.as_str(), data.as_slice()))
         .collect();
     for name in graph_inputs {
         let data: &[f32] = match name.as_str() {
-            "input_ids" => &input_ids,
-            "attention_mask" => &attention_mask,
-            "token_type_ids" => &token_type_ids,
+            "input_ids" => input_ids,
+            "attention_mask" => attention_mask,
+            "token_type_ids" => token_type_ids,
             other => panic!("unexpected graph input {other:?}"),
         };
         named.push((name.as_str(), data));
     }
+    named
+}
 
-    let evaluated = proxima_tensor::cpu::evaluate_named(lowered_program, &[], &named, &[output])
-        .expect("evaluate BGE-small on the generic executor");
-    let (data, shape) = evaluated.get(output).expect("last_hidden_state present");
-    assert_eq!(
-        shape,
-        &[1u64, sequence_length as u64, 384u64],
-        "unexpected last_hidden_state shape"
-    );
-    assert!(
-        data.iter().all(|value| value.is_finite()),
-        "non-finite value in last_hidden_state"
-    );
-
-    // CLS pooling (BGE's own documented usage: sentence embedding is the
-    // first token's hidden state), then L2-normalize.
+fn cls_normalize(data: &[f32]) -> Vec<f32> {
     let cls = &data[0..384];
     let norm = cls.iter().map(|value| value * value).sum::<f32>().sqrt();
     cls.iter().map(|&value| value / norm).collect()
@@ -96,79 +128,108 @@ fn cosine(a: &[f32], b: &[f32]) -> f32 {
     a.iter().zip(b.iter()).map(|(&x, &y)| x * y).sum()
 }
 
-/// `docs/discipline.md` ROW 190's own measurement harness: runs the full
-/// sentence set once with the `LayerNorm` epilogue fusion at whatever state
-/// `proxima_tensor::cpu::set_epilogue_fuse_enabled` last left it, returning
-/// per-sentence eval durations, the fusion engagement counters
-/// (`epilogue_fuse_totals`, reset first so this call's own count is
-/// isolated), and the resulting embeddings for a bit-identity/cosine
-/// comparison between the fused and unfused arms.
-/// `docs/discipline.md` ROW 204 adds the cluster-fusion counters
-/// (`layer_norm_cluster_totals`) alongside ROW 190's own single-hop
-/// counters -- both reset first, so this call's own count is isolated from
-/// any earlier pass.
-type RunPassResult = (
-    Vec<std::time::Duration>,
-    Vec<Vec<f32>>,
-    (u64, u64, u64),
-    (u64, u64, u64),
-);
+fn max_abs_diff(a: &[f32], b: &[f32]) -> f32 {
+    a.iter()
+        .zip(b.iter())
+        .map(|(&left, &right)| (left - right).abs())
+        .fold(0.0f32, f32::max)
+}
 
-/// `docs/discipline.md` (this session): `lower_graph_pinned` re-decodes AND
-/// re-clones every one of BGE-small's real weight initializers on every
-/// call (measured directly against the real model: ~26-30ms/call, the
-/// dominant per-sentence cost, larger than `evaluate_named` itself) even
-/// though the whole corpus pins `sequence_length` to only 3 distinct
-/// values. `lower_cache` amortizes that cost to once per distinct pinned
-/// shape across this file's own 5-run x 2-arm x 3-sentence loop (30 calls,
-/// 3 real shapes) via [`proxima_onnx::lower::lower_graph_pinned_cached`] --
-/// the plan-cache this session's task named, applied to the ACTUAL
-/// dominant cost this session measured rather than the ~2.5ms/sentence ROW
-/// 195 originally attributed to it (see this session's own report for the
-/// direct measurement that superseded ROW 195's derived number).
-type LowerCache = std::collections::BTreeMap<u64, proxima_onnx::lower::Lowered>;
+fn coefficient_of_variation(samples: &[f64], mean: f64) -> f64 {
+    if samples.len() < 2 || mean == 0.0 {
+        return 0.0;
+    }
+    let variance = samples
+        .iter()
+        .map(|&value| (value - mean).powi(2))
+        .sum::<f64>()
+        / samples.len() as f64;
+    variance.sqrt() / mean * 100.0
+}
 
-fn run_pass(
+fn mean_ms(durations: &[Duration]) -> f64 {
+    let total: Duration = durations.iter().sum();
+    (total.as_secs_f64() * 1000.0) / durations.len() as f64
+}
+
+/// One pass over the whole corpus on the `StaticArena` fast path: for each
+/// sentence, look up (or build, on first sight of that pinned shape) the
+/// arena via `arena_cache`, look up (or lower, on first sight) the plan via
+/// `lower_cache`, then evaluate. Timing starts AFTER both cache lookups --
+/// the point of both caches is amortizing exactly that cost off the timed
+/// window. `arena_builds`/`lower_hits`/`lower_misses` are the engagement
+/// bookkeeping this file's own report asserts nonzero/exact against.
+#[allow(clippy::too_many_arguments)]
+fn run_pass_arena(
     graph: &proxima_onnx::messages::GraphProto<'_>,
     items: &[(&str, Vec<i64>)],
     lower_cache: &mut LowerCache,
-) -> RunPassResult {
-    proxima_tensor::cpu::epilogue_fuse_reset();
-    proxima_tensor::cpu::layer_norm_cluster_reset();
-    proxima_tensor::cpu::rewrite_engine_reset();
-    let mut durations = Vec::new();
-    let mut embeddings = Vec::new();
+    arena_cache: &mut ArenaCache,
+    accelerate: bool,
+    arena_builds: &mut usize,
+    lower_hits: &mut usize,
+    lower_misses: &mut usize,
+) -> (Vec<Duration>, Vec<Vec<f32>>) {
+    cpu::set_accelerate_gemm_enabled(accelerate);
+    let mut durations = Vec::with_capacity(items.len());
+    let mut embeddings = Vec::with_capacity(items.len());
     for (_, tokens) in items {
-        let mut pins = std::collections::BTreeMap::new();
+        let mut pins = BTreeMap::new();
         pins.insert("batch_size", 1u64);
         pins.insert("sequence_length", tokens.len() as u64);
         let cache_key = tokens.len() as u64;
         let (lowered, cache_hit) =
             proxima_onnx::lower::lower_graph_pinned_cached(lower_cache, graph, &pins, cache_key)
                 .expect("lower BGE-small with pinned symbolic axes (cached)");
-        let _ = cache_hit;
-        let output = lowered
+        if cache_hit {
+            *lower_hits += 1;
+        } else {
+            *lower_misses += 1;
+        }
+        let output: NodeId = lowered
             .graph_outputs
             .first()
             .expect("last_hidden_state output")
             .1;
-        let eval_start = Instant::now();
-        let embedding = embed(
-            &lowered.program,
-            &lowered.graph_inputs,
+
+        let arena = arena_cache.entry(cache_key).or_insert_with(|| {
+            *arena_builds += 1;
+            let constant_inputs: Vec<(&str, &[f32])> = lowered
+                .initializers
+                .iter()
+                .map(|(name, data)| (name.as_str(), data.as_slice()))
+                .collect();
+            build_static_arena_with_constants(&lowered.program, &[], &[output], &constant_inputs)
+                .expect("build BGE-small static arena")
+        });
+
+        let (input_ids, attention_mask, token_type_ids) = dynamic_inputs(tokens);
+        let named = named_inputs(
             &lowered.initializers,
-            output,
-            tokens,
+            &lowered.graph_inputs,
+            &input_ids,
+            &attention_mask,
+            &token_type_ids,
         );
+
+        let eval_start = Instant::now();
+        let evaluated = evaluate_named_with_arena(arena, &named)
+            .expect("evaluate BGE-small on the StaticArena fast path");
         durations.push(eval_start.elapsed());
-        embeddings.push(embedding);
+
+        let (data, shape) = evaluated.get(output).expect("last_hidden_state present");
+        assert_eq!(
+            shape,
+            &[1u64, tokens.len() as u64, 384u64],
+            "unexpected last_hidden_state shape"
+        );
+        assert!(
+            data.iter().all(|value| value.is_finite()),
+            "non-finite value in last_hidden_state"
+        );
+        embeddings.push(cls_normalize(data));
     }
-    (
-        durations,
-        embeddings,
-        proxima_tensor::cpu::epilogue_fuse_totals(),
-        proxima_tensor::cpu::layer_norm_cluster_totals(),
-    )
+    (durations, embeddings)
 }
 
 fn main() {
@@ -192,94 +253,213 @@ fn main() {
         .and_then(|value| value.parse().ok())
         .unwrap_or(5);
 
-    let mut fused_run_means = Vec::new();
-    let mut unfused_run_means = Vec::new();
-    let mut fused_embeddings_last = Vec::new();
-    let mut unfused_embeddings_last = Vec::new();
-    let mut fused_totals = (0u64, 0u64, 0u64);
-    let mut cluster_totals = (0u64, 0u64, 0u64);
-    let mut engine_depth_fires = (0u64, 0u64);
-    let mut lower_cache: LowerCache = LowerCache::new();
+    let mut lower_cache = LowerCache::new();
+    let mut arena_cache = ArenaCache::new();
+    let mut arena_builds = 0usize;
+    let mut lower_hits = 0usize;
+    let mut lower_misses = 0usize;
+
+    let mut neon_run_means = Vec::new();
+    let mut accel_run_means = Vec::new();
+    let mut last_neon_embeddings = Vec::new();
+    let mut last_accel_embeddings = Vec::new();
 
     for run in 0..runs {
-        proxima_tensor::cpu::set_epilogue_fuse_enabled(true);
-        let (durations, embeddings, totals, cluster) = run_pass(graph, &items, &mut lower_cache);
-        let mean: std::time::Duration =
-            durations.iter().sum::<std::time::Duration>() / durations.len() as u32;
-        println!(
-            "run {run} fused: per-sentence={durations:?} mean={mean:?} fuse_hits={} fuse_elements={} fuse_nanos={} ln_cluster_hits={} ln_cluster_elements={} ln_cluster_nanos={}",
-            totals.0, totals.1, totals.2, cluster.0, cluster.1, cluster.2
+        let (durations, embeddings) = run_pass_arena(
+            graph,
+            &items,
+            &mut lower_cache,
+            &mut arena_cache,
+            false,
+            &mut arena_builds,
+            &mut lower_hits,
+            &mut lower_misses,
         );
-        fused_run_means.push(mean.as_secs_f64() * 1000.0);
-        fused_embeddings_last = embeddings;
-        fused_totals = totals;
-        cluster_totals = cluster;
-        engine_depth_fires = proxima_tensor::cpu::rewrite_engine_depth_fires();
+        let mean = mean_ms(&durations);
+        println!("run {run} neon(accelerate=off): per-sentence={durations:?} mean_ms={mean:.4}");
+        neon_run_means.push(mean);
+        last_neon_embeddings = embeddings;
 
-        proxima_tensor::cpu::set_epilogue_fuse_enabled(false);
-        let (durations, embeddings, totals, cluster) = run_pass(graph, &items, &mut lower_cache);
-        let mean: std::time::Duration =
-            durations.iter().sum::<std::time::Duration>() / durations.len() as u32;
-        println!(
-            "run {run} unfused: per-sentence={durations:?} mean={mean:?} fuse_hits={} fuse_elements={} fuse_nanos={} ln_cluster_hits={} ln_cluster_elements={} ln_cluster_nanos={}",
-            totals.0, totals.1, totals.2, cluster.0, cluster.1, cluster.2
+        let (durations, embeddings) = run_pass_arena(
+            graph,
+            &items,
+            &mut lower_cache,
+            &mut arena_cache,
+            true,
+            &mut arena_builds,
+            &mut lower_hits,
+            &mut lower_misses,
         );
-        unfused_run_means.push(mean.as_secs_f64() * 1000.0);
-        unfused_embeddings_last = embeddings;
-        proxima_tensor::cpu::set_epilogue_fuse_enabled(true);
+        let mean = mean_ms(&durations);
+        println!("run {run} accelerate(on): per-sentence={durations:?} mean_ms={mean:.4}");
+        accel_run_means.push(mean);
+        last_accel_embeddings = embeddings;
+    }
+    cpu::set_accelerate_gemm_enabled(false);
+
+    // Correctness: bit-identity vs the `evaluate_named` oracle for the NEON
+    // arm. The lowering cache is already warm from the timed loop above, so
+    // this reads it directly (no `lower_graph_pinned_cached` call, and so no
+    // effect on `lower_hits`/`lower_misses` -- those numbers describe only
+    // the timed loop's own 30 calls).
+    let mut oracle_embeddings = Vec::with_capacity(items.len());
+    for (_, tokens) in &items {
+        let cache_key = tokens.len() as u64;
+        let lowered = lower_cache
+            .get(&cache_key)
+            .expect("lowering cache warm from the timed loop above");
+        let output = lowered
+            .graph_outputs
+            .first()
+            .expect("last_hidden_state output")
+            .1;
+        let (input_ids, attention_mask, token_type_ids) = dynamic_inputs(tokens);
+        let named = named_inputs(
+            &lowered.initializers,
+            &lowered.graph_inputs,
+            &input_ids,
+            &attention_mask,
+            &token_type_ids,
+        );
+        let evaluated = evaluate_named(&lowered.program, &[], &named, &[output])
+            .expect("oracle evaluate_named");
+        let (data, _) = evaluated.get(output).expect("oracle output");
+        oracle_embeddings.push(cls_normalize(data));
     }
 
-    let bit_identical = fused_embeddings_last.len() == unfused_embeddings_last.len()
-        && fused_embeddings_last
+    let bit_identical = oracle_embeddings.len() == last_neon_embeddings.len()
+        && oracle_embeddings
             .iter()
-            .zip(unfused_embeddings_last.iter())
-            .all(|(fused, unfused)| {
-                fused.len() == unfused.len()
-                    && fused
+            .zip(last_neon_embeddings.iter())
+            .all(|(oracle, arena)| {
+                oracle.len() == arena.len()
+                    && oracle
                         .iter()
-                        .zip(unfused.iter())
+                        .zip(arena.iter())
                         .all(|(&left, &right)| left.to_bits() == right.to_bits())
             });
+    println!(
+        "\nbit_identical(StaticArena NEON vs evaluate_named oracle, last run) = {bit_identical}"
+    );
+    assert!(
+        bit_identical,
+        "StaticArena NEON path drifted from the evaluate_named oracle -- correctness bar violated"
+    );
 
-    let fused_mean = fused_run_means.iter().sum::<f64>() / fused_run_means.len() as f64;
-    let fused_cov = coefficient_of_variation(&fused_run_means, fused_mean);
-    let unfused_mean = unfused_run_means.iter().sum::<f64>() / unfused_run_means.len() as f64;
-    let unfused_cov = coefficient_of_variation(&unfused_run_means, unfused_mean);
+    let accel_max_diffs: Vec<f32> = last_accel_embeddings
+        .iter()
+        .zip(oracle_embeddings.iter())
+        .map(|(accel, oracle)| max_abs_diff(accel, oracle))
+        .collect();
+    println!(
+        "accelerate max_abs_diff vs evaluate_named oracle per sentence (last run) = {accel_max_diffs:?}"
+    );
 
-    println!("=== ROW 190 summary ===");
+    println!("\n=== ENGAGEMENT PROOF ===");
+    println!(
+        "1. arena builds = {arena_builds} (expected 3, one per distinct pinned sequence length, never per call)"
+    );
+    assert_eq!(
+        arena_builds, 3,
+        "engagement N mismatch: StaticArena should build exactly once per distinct pinned shape"
+    );
+
+    let lower_total = lower_hits + lower_misses;
+    println!(
+        "2. lowering cache: {lower_misses} misses / {lower_hits} hits across {lower_total} embed() calls"
+    );
+    assert_eq!(
+        lower_misses, 3,
+        "engagement N mismatch: lowering cache misses"
+    );
+    assert_eq!(
+        lower_hits,
+        runs * 2 * items.len() - 3,
+        "engagement N mismatch: lowering cache hits"
+    );
+
+    let packed_nodes: usize = arena_cache.values().map(arena_packed_node_count).sum();
+    println!("3. packed width-tile node count (summed over 3 arenas) = {packed_nodes}");
+    assert!(
+        packed_nodes > 0,
+        "engagement N==0 is RED: no width-tile node was packed on the real BGE graph"
+    );
+
+    let (accel_hits, accel_declined) = cpu::accelerate_gemm_totals();
+    println!(
+        "4. accelerate_gemm_totals (process-cumulative): hits={accel_hits} declined={accel_declined}"
+    );
+    assert!(
+        accel_hits > 0,
+        "engagement N==0 is RED: the Accelerate GEMM route never fired"
+    );
+    assert_eq!(
+        accel_declined, 0,
+        "Accelerate route declined a call it should have accepted -- see ACCELERATE_GEMM_DECLINED's own doc"
+    );
+
+    #[cfg(feature = "bge-eval-diag")]
+    {
+        // `width_tile_plan`'s own gate-pass/invocation counters live behind
+        // `proxima-tensor/instrument`, which this crate's own `mnist-diag`
+        // feature already documents as adding 30-40% overhead to every
+        // `run_reduce`/`run_elementwise` call -- never safe to enable on the
+        // timed loop above. This block runs ONE extra, untimed corpus pass
+        // (reusing the already-built arenas) purely to read the counters.
+        proxima_tensor::instrument::reset_reduce_gemm_path();
+        proxima_tensor::instrument::reset_width_tile_decline();
+        let (gate_before, invocations_before, _) = cpu::width_tile_counters();
+        cpu::set_accelerate_gemm_enabled(false);
+        for (_, tokens) in &items {
+            let cache_key = tokens.len() as u64;
+            let lowered = lower_cache.get(&cache_key).expect("lowering cache warm");
+            let (input_ids, attention_mask, token_type_ids) = dynamic_inputs(tokens);
+            let named = named_inputs(
+                &lowered.initializers,
+                &lowered.graph_inputs,
+                &input_ids,
+                &attention_mask,
+                &token_type_ids,
+            );
+            let arena = arena_cache
+                .get_mut(&cache_key)
+                .expect("arena already built by the timed loop");
+            let _ = evaluate_named_with_arena(arena, &named).expect("diag pass eval");
+        }
+        let (_, _, width_fast_calls, _, _, _, _, _) =
+            proxima_tensor::instrument::reduce_gemm_path_totals();
+        let (gate_after, invocations_after, _) = cpu::width_tile_counters();
+        let gate_delta = gate_after - gate_before;
+        let invocations_delta = invocations_after - invocations_before;
+        println!(
+            "5. width_tile_plan gate (diag build, one untimed corpus pass, 3 sentences): {gate_delta} of {width_fast_calls} WidthFast-classified calls resolved Some ({invocations_delta} tile invocations)"
+        );
+        assert!(
+            gate_delta > 0,
+            "engagement N==0 is RED: width_tile_plan never engaged on the arena path"
+        );
+    }
+
+    println!("\n=== SEALED MEASUREMENT (StaticArena fast path, ms/sentence) ===");
     println!("runs={runs}");
+    let neon_mean = neon_run_means.iter().sum::<f64>() / neon_run_means.len() as f64;
+    let neon_cov = coefficient_of_variation(&neon_run_means, neon_mean);
+    let accel_mean = accel_run_means.iter().sum::<f64>() / accel_run_means.len() as f64;
+    let accel_cov = coefficient_of_variation(&accel_run_means, accel_mean);
     println!(
-        "lower_graph_pinned_cached: distinct pinned shapes cached={} total run_pass calls to embed()={} (expect cache_len == distinct sentence lengths, not one per call)",
-        lower_cache.len(),
-        runs * 2 * items.len()
+        "neon(accelerate=off) per-run means: {neon_run_means:?} mean={neon_mean:.4} CoV%={neon_cov:.2}"
     );
     println!(
-        "fused engagement (last run): hits={} elements={} nanos={}",
-        fused_totals.0, fused_totals.1, fused_totals.2
+        "accelerate(on) per-run means: {accel_run_means:?} mean={accel_mean:.4} CoV%={accel_cov:.2}"
     );
-    println!(
-        "ln_cluster engagement (last run): hits={} elements={} nanos={}",
-        cluster_totals.0, cluster_totals.1, cluster_totals.2
-    );
-    println!(
-        "rewrite engine depth fires (last FUSED run, reset-per-call snapshot): depth1(law1_2_epilogue_absorption)={} depth2(law2_layer_norm_cluster_upgrade)={}",
-        engine_depth_fires.0, engine_depth_fires.1
-    );
-    println!(
-        "fused mean per-sentence ms across runs: {fused_run_means:?} mean={fused_mean:.4} CoV={fused_cov:.4}"
-    );
-    println!(
-        "unfused mean per-sentence ms across runs: {unfused_run_means:?} mean={unfused_mean:.4} CoV={unfused_cov:.4}"
-    );
-    println!("bit_identical(fused vs unfused, last run's embeddings)={bit_identical}");
 
-    let similar = cosine(&fused_embeddings_last[0], &fused_embeddings_last[1]);
-    let dissimilar_a = cosine(&fused_embeddings_last[0], &fused_embeddings_last[2]);
-    let dissimilar_b = cosine(&fused_embeddings_last[1], &fused_embeddings_last[2]);
+    let similar = cosine(&last_neon_embeddings[0], &last_neon_embeddings[1]);
+    let dissimilar_a = cosine(&last_neon_embeddings[0], &last_neon_embeddings[2]);
+    let dissimilar_b = cosine(&last_neon_embeddings[1], &last_neon_embeddings[2]);
     println!("cosine(A,B similar)={similar:.6}");
     println!("cosine(A,C dissimilar)={dissimilar_a:.6}");
     println!("cosine(B,C dissimilar)={dissimilar_b:.6}");
-    for (name, embedding) in ["A", "B", "C"].iter().zip(fused_embeddings_last.iter()) {
+    for (name, embedding) in ["A", "B", "C"].iter().zip(last_neon_embeddings.iter()) {
         println!("embedding[{name}][:8]={:?}", &embedding[0..8]);
     }
     assert!(
@@ -290,17 +470,17 @@ fn main() {
         similar > dissimilar_b,
         "similar pair should score higher than dissimilar pair B"
     );
+    assert!(
+        (similar - 0.936311).abs() < 1e-5,
+        "cosine(A,B) drifted from the sealed oracle"
+    );
+    assert!(
+        (dissimilar_a - 0.378777).abs() < 1e-5,
+        "cosine(A,C) drifted from the sealed oracle"
+    );
+    assert!(
+        (dissimilar_b - 0.334176).abs() < 1e-5,
+        "cosine(B,C) drifted from the sealed oracle"
+    );
     println!("sanity check passed: similar sentence pair scores higher than dissimilar pairs");
-}
-
-fn coefficient_of_variation(samples: &[f64], mean: f64) -> f64 {
-    if samples.len() < 2 || mean == 0.0 {
-        return 0.0;
-    }
-    let variance = samples
-        .iter()
-        .map(|&value| (value - mean).powi(2))
-        .sum::<f64>()
-        / samples.len() as f64;
-    variance.sqrt() / mean
 }
