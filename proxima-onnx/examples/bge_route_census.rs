@@ -394,7 +394,10 @@ fn main() {
         let mut surround_ns_per_call = Vec::with_capacity(SPLIT_REPS);
         let mut outside_ns_per_call = Vec::with_capacity(SPLIT_REPS);
         let mut gmacs_per_rep = Vec::with_capacity(SPLIT_REPS);
+        #[cfg(target_arch = "aarch64")]
         let mut last_kernel_invocations = 0u64;
+        #[cfg(not(target_arch = "aarch64"))]
+        let last_kernel_invocations = 0u64;
         let mut last_fn_calls = 0u64;
         let mut last_width_fast_calls = 0u64;
 

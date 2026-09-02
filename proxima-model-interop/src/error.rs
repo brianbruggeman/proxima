@@ -49,14 +49,14 @@ pub enum InteropError {
     #[error(transparent)]
     Quant(#[from] proxima_gguf::quant::QuantError),
 
-    /// [`crate::loader::prefault`]'s shared background pool failed to build,
+    /// `crate::loader::prefault`'s (`std`-gated) shared background pool failed to build,
     /// or a spawned page-touch chunk never reported back (a worker panic;
     /// `ProximaBackgroundPool` catches and discards worker panics rather
     /// than propagating them).
     #[error("prefault: {0}")]
     PrefaultPoolUnavailable(String),
 
-    /// [`crate::bind::gguf_tensor_as_packed_block`] found `tensor` stored as
+    /// `crate::bind::gguf_tensor_as_packed_block` (`std`-gated) found `tensor` stored as
     /// `F32` but its absolute file offset is not a multiple of
     /// `align_of::<f32>()` -- reinterpreting the raw bytes as `&[f32]`
     /// without copying would be unsound, so the caller must fall back to
@@ -253,12 +253,12 @@ pub enum InteropError {
         embedding: u32,
     },
 
-    /// [`crate::lfm2::lfm2_architecture_from_metadata`]'s `key` (e.g.
+    /// `crate::lfm2::lfm2_architecture_from_metadata`'s (`std`-gated) `key` (e.g.
     /// `lfm2moe.attention.head_count_kv`) is a per-layer array whose
     /// nonzero entries (the real attention layers' own kv head count)
     /// disagree with each other -- the zero entries (convolution layers)
     /// are expected and skipped, but every attention layer must still
-    /// share one real kv head count for [`crate::lfm2::Lfm2Architecture::kv_heads`]
+    /// share one real kv head count for `crate::lfm2::Lfm2Architecture::kv_heads`
     /// to mean anything.
     #[error(
         "gguf metadata key {key:?} has {distinct_values} distinct nonzero per-layer values; Lfm2Architecture cannot represent per-layer variation"

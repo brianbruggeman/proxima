@@ -7,7 +7,7 @@
 //! Two tables, two different code enums as their source of truth:
 //! [`GGML_CAPABILITY_TABLE`] mirrors the codec/topology/backend cells
 //! `tests/capability_matrix.rs` actually drives through
-//! [`crate::LoadedModel`]'s public `Pipe`; the quantized-packed-format table
+//! `crate::LoadedModel`'s (`std`-gated) public `Pipe`; the quantized-packed-format table
 //! (built in `examples/generate_compatibility_doc.rs`, `metal`-feature-gated
 //! because it reads `omega::msl::PackedCodec`) mirrors every variant of that
 //! enum against the CPU kernel (`proxima_tensor::cpu::QuantizedBlock`) and
@@ -21,7 +21,7 @@ use core::fmt::Write as _;
 use proxima_gguf::GgmlType;
 
 /// Which checkpoint shape a cell was driven through --
-/// [`crate::generate::LoadedModel::load`]'s dense path vs its
+/// `crate::generate::LoadedModel::load`'s (`std`-gated) dense path vs its
 /// `architecture.expert_count > 0` routed path.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Topology {
