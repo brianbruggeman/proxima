@@ -18626,3 +18626,141 @@ Every entry below is a measurement, not an argument. Recorded together because t
 **The target is not hypothetical: 11.6-15.3 -> 30.2 GMAC/s**, demonstrated by onnxruntime on the SAME silicon, SAME graph, SAME computation class, pure NEON, single-threaded, **no BLAS linked** (`otool -L` on `onnxruntime_pybind11_state.so`: CoreML/Foundation/CoreFoundation/libiconv/libc++/libSystem/libobjc only; `providers=["CPUExecutionProvider"]` pinned at `bench.py:160`). A shortfall is a statement about our memory-access organization, never about the hardware, the shape, or NEON. **AMX at 62.2-88.0 GMAC/s is upside BEYOND ~30, not what is required to catch ORT.**
 
 **METHOD LESSONS, both of which cost real rows.** (1) A warm single-buffer microbench and a real graph are different measurement CONTEXTS, not one number seen twice -- ROW 210's 48.0-48.8 was the kernel's cache-resident rate, read for several rows as its production rate. Nano cells for a weight-streaming workload must defeat cache or they measure a regime production never enters. (2) **Timed arms cannot share a box with anything.** Six to eight agents ran in parallel while several took timings; every contaminated cell in ROWs 219/222/225 traces to that, and the one arm that would settle the surviving mechanism is exactly the one that needed a quiet host. Correctness work (builds, tests, gates) is load-insensitive and may run concurrently; measurement may not.
+
+## ROW 229 -- the deployed shape set was never measured: a sequence-length sweep, a cache-thrash census, and a batch defect the 3-sentence harness could not see.
+
+Every BGE number through ROW 228 is **three sentences of 7, 8 and 9 tokens, batch=1**. Real embedding traffic is document chunks at varied lengths, batched. None of that had been measured, and all three axes moved the answer.
+
+**(A) Sequence-length sweep**, S in {8,32,64,128,256,512} (`max_position_embeddings=512` read from the real HF `config.json`, not assumed), batch=1, ours vs onnxruntime through the committed `scripts/onnx_reference/`:
+
+| S | ours Accel (CoV%) | ours NEON | ORT (CoV%) | ours/ORT | ms/token Accel / ORT | max abs delta vs ORT |
+|---|---|---|---|---|---|---|
+| 8 | 6.2642 (1.76) | 6.3287 | 4.7706 (1.41) | **1.31x behind** | 0.783 / 0.596 | 1.46e-7 |
+| 32 | 13.7771 (0.29) | 24.0800 | 17.1225 (0.33) | **1.24x AHEAD** | 0.431 / 0.535 | 1.75e-7 |
+| 64 | 24.4071 (0.08) | 48.8469 | 33.3597 (1.60) | **1.37x AHEAD** | 0.381 / 0.521 | 1.88e-7 |
+| 128 | 47.8866 (3.47) | 101.7232 | 67.6372 (0.32) | **1.41x AHEAD** | 0.374 / 0.528 | 2.14e-7 |
+| 256 | 108.3259 (1.99) | 219.0324 | 144.1795 (0.41) | **1.33x AHEAD** | 0.423 / 0.563 | 1.74e-7 |
+| 512 | 242.3623 (0.66) | 523.9593 | 326.0983 (0.27) | **1.35x AHEAD** | 0.473 / 0.637 | 3.98e-7 |
+
+**We beat onnxruntime at every length from 32 to 512 and lose only at S=8, by 1.5 ms absolute.** NEON-only loses everywhere (1.41x behind at S=32, 1.61x at S=512) -- **the Accelerate valve IS the win**, and it is default-off. `ms/token` is not flat for either arm: it climbs from S=32 to 512 (ours 0.431->0.473, ORT 0.535->0.637), attention's O(S^2) term visible in both, ours scaling somewhat worse (1.36x vs 1.19x growth 32->512).
+
+**A PRE-REGISTRATION THAT MISSED, in the informative direction.** I predicted the 12 `NarrowWidth` declines (`attention/self/MatMul`, N = seq_len < the tile's 16-column floor) would vanish only as S grew, so long sequences would be relatively better-shaped for us. **They were already gone at every S from 8 to 512 -- 96/96, zero declines, `width_tile_decline_snapshot()` empty.** The attention-tile work had closed them before this checkout. So the S^2 attention cost we pay is TILED work, not fallback work, and the residual scaling gap is kernel efficiency, not engagement.
+
+**(B) Cache thrash.** `ARENA_CACHE_CAPACITY = 8`, FIFO, keyed by pinned shape. Stream of 200 draws over 20 distinct lengths (`16 + 24*i`, i in 0..20, xorshift-seeded order, no cyclic pattern that would flatter the cache):
+
+| stream | distinct shapes | builds/hits | note |
+|---|---|---|---|
+| exact-length | 20 | **113/87 -- 56.5% MISS** | confounded (S mixes with hit/miss) |
+| **controlled probe, S=128 fixed** | 1 probe + 9 evictors | 80/8 | **miss 138.66 ms vs hit 111.32 ms -- 1.25x, clean** |
+| bucketed to {32,64,128,256,512} | 5 | **5/195 -- 2.5% MISS** | confounded, but the miss-rate collapse is the point |
+
+Because eviction is a hard FIFO cliff, **the cache starts costing more than it saves the instant distinct shapes exceed 8** -- every call past the 8th evicts something needed again. Bucketing collapses the miss rate 56.5% -> 2.5%; at ~27 ms per miss that is the actionable recommendation. **Caveat stated plainly: the bucketed run used the bucket length directly as S, not a padded-and-masked S, so it is a cache-pressure proxy, not a validated padding path.**
+
+**(C) Batch sweep, S=128** -- the finding that opened ROWs 230-231: ours regressed **4.1x per sentence** at batch>1 (102.4473 -> 419.9547 ms/sentence, then FLAT to 420.6479 at B=32) while onnxruntime stayed flat at 67.57-70.54. Batching was free amortization for the incumbent and a tax for us. Flat-in-B is the signature of a per-sentence-CONSTANT cost, not a progressively degrading one.
+
+Branch `bench/bge-real-traffic`, commit `37fcde6`.
+
+## ROW 230 -- at batch>1, `width_tile_plan` engagement was ZERO of 96. Every MatMul ran the generic scalar interpreter.
+
+**Measured, not inferred** (`proxima-onnx/examples/bge_batch_route_census.rs`, S=128):
+
+| | B=1 | B=8 pre-fix | B=8 post-fix |
+|---|---|---|---|
+| engagement | **96/96** | **0/96** | **72/96** |
+| decline reason | none | `AxesShape` x96 | `AxesShape` x24 |
+| main-tile (ROWS=4) invocations / 60 calls | 7,741,440 | **0** | 39,813,120 |
+
+Decline row, verbatim: `%232 | .../query/MatMul_output_0 | AxesShape | 60 | 1024 | 384 | 384 | 0 | 1` -- `m=1024` is exactly `batch(8) x seq(128)`, so the decline fires on the MERGED leading-axis product, not a per-shape mismatch.
+
+**Root cause, `cpu.rs` `width_tile_plan` two-leading-axis resolution.** Once `batch_size>1` stops `resolve_reduce_axis_shape`'s extent-1 elision (`cpu.rs:7392-7424`, ROW 196/200's own fix) from dropping the batch axis, a plain `[batch, seq, k] @ [k, n]` MatMul carries TWO non-degenerate leading axes. The match arm only recognised `b` invariant over exactly ONE axis -- `(0, other)` or `(other, 0)`, the `attn_qk`/`attn_v` "heads is outer, seq is row" shape the attention-tile work added. **A plain weight matrix is invariant over BOTH: `(0, 0)`.** That fell to the `_ =>` catch-all and declined all 72 plain-GEMM folds, sending them through the fully generic per-element `apply_scalar_op`/`gather_cursors` loop across the entire M=1024 row space. That loop's per-row cost is fixed regardless of row count -- **exactly the "flat 8->32" signature ROW 229(C) recorded.**
+
+**ROW 210's ROWS-dominates-VECS amortization theory was the wrong lead.** The mechanism is not "the wrong kernel ran"; it is "no kernel ran at all."
+
+**Fix** (`b781d0c`): a `(0,0)` branch reusing the existing `composed_reduction_stride` helper to test whether the two leading axes compose row-major on `layout_a` and `context.out_layout` (`stride(batch) == stride(seq) * extent(seq)`); when they do, the pair merges into one flat leading axis of extent `batch*seq`, restoring the identical tile the B=1 path already used. **No new type** -- the existing composition primitive, reused. `leading_total_early` promoted from instrument-only to unconditional since production logic now reads it.
+
+**Correctness:** `bge_batch_correctness_probe.rs` compares every one of the 8 batched rows against an independent batch=1 run on that row's own tokens -- **max_abs_diff = 0e0, bit-identical, all 8.** That directly tests the merged-axis stride arithmetic (this change's risk surface) rather than leaning on an external diff. B=1 path bit-identical and the sealed 3-sentence oracle exact. Gates: tensor 483, onnx 105, autograd 147, `proxima-tensor-gate.sh` 21/0.
+
+## ROW 231 -- the last 24: a three-leading-axis merge takes engagement to 96/96 at every batch, and ms/sentence finally FALLS with batch.
+
+The 24 survivors of ROW 230 are `attn_qk` (n=128) and `attn_v` (n=32), 12 layers x 2, carrying THREE non-degenerate leading axes at batch>1 -- batch, heads, seq_q -- hitting the explicit `non_degenerate_leading.len() > 2` cap.
+
+**`b`'s stride pattern established FROM SOURCE, not by analogy** (`proxima-onnx/src/lower.rs:1084-1200`, `lower_matmul`): both ops are rank-5 iteration spaces `[batch, heads, seq_q, contraction, width]`, and K's/V's affine pattern is `projection(5, &[0,1,3,4])` -- it carries `batch` (axis 0) and `heads` (axis 1) and **skips `seq_q` (axis 2)**. So `b` is invariant on `seq_q` ALONE and genuinely varies on both batch and heads. Runtime census agrees: `stride_a=0, stride_b=1` on all 24. **`seq_q` is therefore the only legal row axis** -- which matters, because `WidthTilePlan` has no `row_stride_b` and putting a `b`-varying axis in the row role is precisely the silent wrong-answer bug fixed in ROW 223.
+
+**Pipe question:** no new type. The existing `outer_extent`/`outer_stride_a/b/out` fields are reused unchanged; only the intermediate `outer_dim: Option<u16>` widened to `Option<(u16, Option<u16>)>` (mirroring the existing `merged_leading: Option<(i64,i64,usize)>` shape), plus one 3-element match arm reusing `composed_reduction_stride` to compose batch+heads into one outer step across `layout_a`, `layout_b` AND `context.out_layout`. The row is only ever the UNIQUE axis with `layout_b.stride(axis) == 0`; zero or more than one such candidate declines `AxesShape` rather than guessing.
+
+**KILL-EARLY nano at the real shapes** (paired, 7 reps x 50 calls, warmup 2x50, threshold toggled and reverted, diff clean):
+
+| shape | batch | scalar ns/call | tiled ns/call | CoV% before/after | speedup |
+|---|---|---|---|---|---|
+| attn_qk n=128 | 8 | 13,540,910.7 | 2,136,577.7 | 1.40 / 12.90 | **6.34x** |
+| attn_qk n=128 | 32 | 52,233,584.4 | 7,006,480.4 | 0.15 / 1.26 | **7.46x** |
+| attn_v n=32 | 8 | 32,666,648.6 | 1,253,870.6 | 0.26 / 1.34 | **26.06x** |
+| attn_v n=32 | 32 | 131,239,608.8 | 5,552,332.9 | 0.07 / 5.09 | **23.64x** |
+
+Faster at every real shape **including n=32, which sits at the `WIDTH_TILE_VECS*4` width floor** -- a loss there was pre-registered as plausible and did not occur. Routed.
+
+**Engagement: 96/96 at B=1, B=8 AND B=32**, zero declines at any batch, confirmed independently by two harnesses (`bge_batch_route_census` and `bge_batch_seal`'s own census).
+
+**BATCH SEAL, quiet host confirmed twice 60s apart, S=128, ms/sentence:**
+
+| batch | ours NEON | ours Accelerate | onnxruntime |
+|---|---|---|---|
+| 1 | 106.6467 (1.53%) | 52.5878 (4.08%) | 69.4499 (0.63%) |
+| 8 | 102.4589 (0.51%) | **42.1995 (0.73%)** | 68.8134 (0.45%) |
+| 32 | 102.2099 (0.11%) | **41.7164 (0.42%)** | 72.5476 (0.20%) |
+
+**ms/sentence now FALLS with batch** (52.59 -> 42.20 -> 41.72), reversing ROW 230's post-fix flattening (51.60 -> 114.31 -> 119.78) and ROW 229(C)'s pre-fix regression (102.45 -> 419.95 -> 420.65). **At B=32 that is 24.0 sentences/sec against onnxruntime's 13.8 -- 1.74x.**
+
+**THE RATCHET, and this is the class fix.** Four times in one session a `width_tile_plan` decline silently routed traffic to the generic interpreter while producing CORRECT answers, so no correctness test failed and only a bad benchmark number exposed it: 36 of 96 at B=1, then 12 more, then 96 of 96 at B>1, then these 24. Engagement had only ever been checked by a human reading a census example's stdout. Now three tests in `cpu.rs`'s `mod tests` run in ordinary `cargo nextest`, need **no `BGE_MODEL_PATH`** (synthetic graphs at the real shapes), and assert COUNTS and named decline REASONS rather than "something engaged":
+- `a_two_leading_axis_shared_weight_reduce_engages_width_tile_and_matches_naive_matmul` -- the `(0,0)` merge, asserts gate-pass/invocation deltas > 0 AND correctness vs `naive_matmul`.
+- `a_three_leading_axis_batched_reduce_engages_width_tile_and_matches_naive_matmul` -- the real attn shape (rhs varies over the two outer axes, invariant on the row axis only).
+- `a_three_leading_axis_reduce_declines_width_tile_with_axes_shape_reason` -- **UPDATED, not deleted**: now pins a different 3-axis shape (rhs invariant over all three leading axes, no unique row candidate) which still correctly declines.
+**Proof the ratchet fires:** the `(0,0)` merge arm was temporarily forced to decline; the positive test failed with `gate_delta=0 invocation_delta=0, expected both > 0`; reverting restored PASS. Gated `#[cfg(all(target_arch = "aarch64", feature = "instrument"))]` so it neither fails to compile nor silently no-ops off that combination.
+
+**Correctness:** B=1 bit-identical, sealed oracle EXACT 0.936311 / 0.378777 / 0.334176, `bge_batch_correctness_probe` max_abs_diff **0e0** across all 8 rows. **Gates:** `proxima-tensor-gate.sh` 21/0; proxima-tensor **486 passed** / 7 skipped; proxima-onnx 105/4 skipped; proxima-autograd 147; clippy clean on both crates. Branches `perf/batch-regression` `b781d0c` -> `perf/batch-seal` `139bcb4` -> `perf/three-axis-merge` `5de6afa`, landed on `main` as a fast-forward (9 files, +2188/-25).
+
+## ROW 232 -- Q4_K vs dequant+AMX: the crossover is M in [8,16], and it survives thread symmetry only after a 1-vs-N asymmetry in our own probe was found and fixed.
+
+Three arms at real openchat-3.5-1210 GGUF bytes (`attn_q_4096x4096`, `ffn_gate_4096x14336`), M in {1..256}, n=7/cell: **A** native `matmul_q4k_q8k_f32_wide` int8-dot, **B** per-call dequant into an f32 staging buffer then `cblas_sgemm` (dequant timed INSIDE), **C** `cblas_sgemm` on already-f32 weights (the ceiling B chases).
+
+**A FAIRNESS DEFECT IN OUR OWN PROBE, found by reading its source.** `quant_amx_crossover_probe.rs:360-366` ran `unsafe { std::env::set_var("PROXIMA_MATMUL_WORKERS", "1"); }` at the top of `run()` -- before any matmul, so arm A was genuinely pinned to ONE thread. `grep VECLIB` returned nothing: **arm C ran on Accelerate's own unpinned pool the whole time.** One of our threads against N of Apple's -- the same asymmetry as llama.cpp's `-t 8` against our single-threaded orchestration. Fixed (`5a388d2`) by deleting the in-process override and deferring both to the launching shell, which lands before `matmul_worker_count()`'s `OnceLock` latches at first call.
+
+**Result: the crossover did NOT move.** Both pinned to 1 (clean, CoV mostly <4%): arm C overtakes A between M=8-16, arm B at M=16 -- identical in both shapes. Both at 8 (host loaded, CoV to 152%, directional only): consistent, M=4-16 discounting one contention outlier. So the crossover is a kernel property, not a core-count artifact. **`VECLIB_MAXIMUM_THREADS` has NO readback API** -- evidence it takes effect is behavioural only (arm C at `attn_q` M=256: 363 / ~468 / 664 GMAC/s at `=1` / unset / `=8`), stated as consistent-with, not proof.
+
+**Dequant is a FIXED per-call cost**, flat in M: ~2.04-2.16 ms (attn_q), ~7.2-8.0 ms (ffn_gate). ~50% of arm B's total at M=1, under 27% by M=256. **That flatness IS the amortization mechanism**, and it is exactly why a per-TILE staging buffer works where a per-LOAD conversion cannot.
+
+**Correctness:** arm A within the established 0.5 quant tolerance (9.3e-4 to 3.3e-3 measured), arms B/C within 2.4e-7 of a scalar reference and `bc_diff = 0e0` in every cell.
+
+**Residuals:** no clean 8-vs-8 run, so a shift below that noise floor is not excluded; multi-threaded arm A not swept (ROW 143's own note says it would push the crossover higher). Branch `probe/quant-amx-crossover`, `1db5bfd` + `5a388d2`.
+
+## ROW 233 -- quantizing BGE: a clean NEGATIVE on both axes. Fidelity fails AND the rate does not transfer.
+
+**Fidelity, real BGE weights through a real forward** (`q4_k::quantize` then `q4_k::dequantize` round-trip, no bridge needed to measure):
+
+| S | condition | f32-vs-quantized cosine | max abs delta |
+|---|---|---|---|
+| ~8 | all-tensors-q4k | 0.990812 / 0.990833 / 0.991416 | 0.0221 |
+| 128 | all-tensors-q4k | **0.984709** | 0.0342 |
+| 512 | all-tensors-q4k | **0.982588** | 0.0310 |
+
+**Below the 0.99 gate at S=128 and S=512, and DEGRADING with sequence length.** Cosine-oracle drift at S~8: pair 0-2 moved 0.378777 -> 0.367549 (0.011228), pair 1-2 0.334176 -> 0.323494 (0.010682). Rank order held on this 3-item set; absolute similarity moved ~1pp.
+
+**`PrecisionPolicy` gives ZERO drift reduction for BGE** -- `all-tensors-q4k` and `policy-q4k` are BIT-IDENTICAL, because every BGE role maps to `Q4_K` under `llama_cpp_q4_k_s()`; the policy's only non-Q4_K branches are norms (already 1-D excluded) and a MoE router BGE has none of. **The embedding table is NOT the dominant drift contributor**: excluding `TokenEmbd` (46.9 MB of 132.85 MB, consumed via `Gather`) moved cosine by 0.0002-0.0009 with INCONSISTENT sign. Drift accumulates through 72 quantized transformer matrices, not the one lookup table.
+
+**And the rate does not transfer -- it LOSES to AMX at BGE's own shapes.** ROW 116's 147.72-150.60 GMAC/s is Q4_K at LLM decode GEMV shapes: large, `QK_K=256`-aligned K. At BGE's shapes:
+
+| shape | rows x k(padded) | GMAC/s | true-k-equivalent | GB/s | CoV% |
+|---|---|---|---|---|---|
+| QKVO (k 384 -> 512 padded) | 384x512 | 28.36 | **21.27** | 15.95 | 0.21 |
+| FFN-up (k 384 -> 512 padded) | 1536x512 | 32.21 | **24.16** | 18.12 | 0.68 |
+| FFN-down (k=1536, native) | 384x1536 | 33.09 | **33.09** | 18.62 | 0.05 |
+
+All 9 cells CoV < 1.2%. **Against AMX f32 at the same shapes (62.2-88.0 GMAC/s, ROW 212), Q4_K loses by 2-3x.**
+
+**Mechanism, structural not tunable: Q4_K's block is 256 elements; BGE's hidden is 384 = 1.5 x 256.** QKVO and FFN-up must pad k 384->512, wasting **33.3%** of the compute; only FFN-down (1536 = 6x256) is native. **Quantization's win is bound to K's size AND its alignment to the codec's block quantum.**
+
+**The bridge is ~90% built and is NOT justified for BGE.** Confirmed present: `q4_k::quantize` (`q4_k.rs:417`), `q4_k::dequantize` (`:185`), `dequantize_block` (`:141`), `PrecisionPolicy::target_for` (`policy.rs:210`), `TensorRole::classify` (`:77`), `writer::write_complete` (`writer.rs:65`), `Lowered.initializers` (`lower.rs:173`), and the zero-copy `gguf_tensor_as_packed_block` (`proxima-model-interop/src/bind.rs:140`, returns `QuantizedBlock<'a>` borrowing the mapped file). **`proxima-gguf` has NO dependency on `proxima-onnx`/`proxima-tensor`** -- confirmed, only doc-comment mentions. The missing piece is a bridge that would live in `proxima-onnx` or a thin crate depending on both, never inside `proxima-gguf`, preserving that direction. It needs a BERT-name -> `TensorRole` classifier, since `TensorRole::classify` understands only llama.cpp naming.
+
+**Three-regime map, each measured, none interchangeable:** LLM decode (M=1, large aligned K) -> Q4_K, 5-22x over AMX. LLM prefill (M >~ 8-16) -> per-tile dequant + `cblas_sgemm`. BGE embed (k=384 misaligned) -> AMX f32, what already ships. **GGUF->ONNX->f32->Accelerate is the wrong shape in both directions**: it pays dequant once per LOAD rather than per TILE, so it never sees the M-amortization ROW 232 measured, while materializing 4096x4096x4 = 67 MB per matrix across ~225 matmul weights versus the 9.4-33 MB packed Q4_K.
+
+**Gates:** `proxima-tensor-gate.sh` 21/0; `proxima-gguf --all-features` **116 passed** / 3 skipped; clippy clean. Branch `probe/onnx-to-gguf`, `a480fda`.
