@@ -218,6 +218,7 @@ harness = false
 [[bench]]
 name = "atomic_permits"
 harness = false
+required-features = ["atomic-permits"]
 
 [[bench]]
 name = "pipe_fanout_parity"

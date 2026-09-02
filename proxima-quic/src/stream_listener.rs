@@ -147,7 +147,7 @@ impl QuicUpstream {
         })
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, feature = "tokio-compat"))]
     #[allow(clippy::expect_used)]
     fn pooled_connection_count(&self) -> usize {
         self.connections.lock().expect("quic pool lock").len()

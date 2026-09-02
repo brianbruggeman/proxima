@@ -3,7 +3,9 @@
 //! iteration, `size`/`threads` from argv, `iters` (default 9) repeats. Reuses
 //! `matmul_program_rhs_transposed`/`Lcg`/`random_vec` verbatim from
 //! `sweep_gemm.rs` so the checksum lines up with that harness's reference
-//! values (512 -> 135.87619, 1024 -> 260.24106, 2048 -> 513.10425).
+//! values (512 -> 7.67010, 1024 -> 16.38366, 2048 -> 4.68941 — repinned
+//! 2026-09-01, see `sweep_gemm.rs`'s own doc for why the pre-`e0310ff`
+//! series does not reproduce).
 //!
 //! `busy_ns` is time spent inside the compute kernel, summed across every OS
 //! thread that ran a chunk this iteration. It is `Instant`-derived, so it

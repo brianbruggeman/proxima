@@ -116,11 +116,19 @@ name = "mnist_diag"
 required-features = ["mnist-diag"]
 
 [[example]]
+name = "bge_accelerate_engagement"
+required-features = ["mnist-diag"]
+
+[[example]]
 name = "epilogue_profile"
 required-features = ["epilogue-profile-diag"]
 
 [[example]]
 name = "bge_epilogue_profile"
+required-features = ["epilogue-profile-diag"]
+
+[[example]]
+name = "bge_epilogue_profile_pack"
 required-features = ["epilogue-profile-diag"]
 
 [[example]]

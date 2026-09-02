@@ -18,12 +18,12 @@
 //! `&[u8]` and never performs IO. It compiles under
 //! `--no-default-features` (`alloc` is the floor; `std` only adds
 //! `thiserror`'s `std::error::Error` impl, forwards
-//! `proxima-protocols/std`, and adds [`config`]). [`sized`] holds the
-//! build-time floor constant ([`sized::MAX_LEN_DELIMITED_FIELD`]) that
-//! [`parser::OnnxParser::new`] always uses; [`config`]'s
+//! `proxima-protocols/std`, and adds `config`, std-only). [`sized`] holds
+//! the build-time floor constant ([`sized::MAX_LEN_DELIMITED_FIELD`]) that
+//! [`parser::OnnxParser::new`] always uses; `config`'s
 //! `OnnxParserConfig` (std-only, conflaguration-backed) seeds its runtime
 //! default from that same constant and can override it per-process via
-//! [`parser::OnnxParser::with_config`].
+//! `OnnxParser::with_config` (std-only).
 //!
 //! # Layout source
 //!
