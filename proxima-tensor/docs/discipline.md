@@ -18294,3 +18294,335 @@ Campaign start (ROW 191/195) was 26.68 ms/sentence and 4.37-4.74x ORT. **Sealed 
 `cargo fmt --all`: **275 files changed, +37,849 / -9,328 lines.** Gates re-run on the formatted tree, all green: `check` on the three changed crates exit 0; proxima-tensor `std,instrument` **477 passed**; proxima-onnx all-features **105 passed** (including `pipeline_full_test_split_accuracy_is_exactly_0_9900`); clippy `-D warnings` clean. Commit `f65aee5`.
 
 **Named work item: check in a `rustfmt.toml`.** A 275-file reformat is a one-time cost only if the config is pinned immediately afterward. Without it, the next contributor on a different toolchain re-diverges and the next `fmt` produces another five-figure diff that buries real changes in review.
+
+## ROW 218 -- the torch cell's 1.76x swing root-caused: arm ORDER inside one process, not thread config. ROW 217's named inconsistency, closed.
+
+**The contradiction.** Three irreconcilable torch numbers on one host, one model, one nominal `num_threads=1` config: ROW 195's 10.0360; ROW 217's contaminated run ~9.7-10.6 (discarded); ROW 217's quiet re-take 15.988 CoV 4.47%. A quiet box producing a number 60% SLOWER than a loaded box is backwards.
+
+**H1 (thread setting not taking effect) REFUTED DIRECTLY, not inferred.** `torch.get_num_threads()` / `get_num_interop_threads()` read LIVE per run immediately before each timed loop -- not at config time -- plus `torch.__config__.parallel_info()` and `OMP`/`MKL`/`VECLIB`/`NUMEXPR`/`OPENBLAS_NUM_THREADS` as seen in `os.environ`. **Verified 1/1 in every condition below, no exceptions.**
+
+| condition (torch arm, thread-verified 1/1, quiet unless noted) | ms/sentence | CoV% | quotable |
+|---|---|---|---|
+| standalone, quiet box | **16.7208** | 4.39% | yes |
+| standalone, quiet, preceded by a 2s single-threaded busy-loop -- **CONTROL** | 17.9403 | 4.37% | yes -- **no speedup** |
+| standalone, `taskpolicy -c utility` QoS clamp | 10.7182 | 11.00% | no -- range 9.64-12.87 |
+| standalone, 8x synthetic `yes` processes pegging cores | 14.6597 | 12.71% | no -- range 12.97-18.24 |
+| **torch run AFTER the ORT arm, same process** (the harness's own default invocation) | **9.5136** | 4.23% | yes |
+| ORT arm, same runs -- **CONTROL** | 5.6408 | 1.89% | yes -- within 1.7% of three prior independent takes |
+
+**Mechanism.** The busy-loop control is what makes this a finding rather than a story: generic single-threaded CPU work does NOT move the number (17.94 vs 16.72, indistinguishable), so it is not thermal or frequency residency. Three independently-toggled scheduling perturbations -- QoS clamp, multi-process contention, and prior in-process ORT execution -- all move it the SAME direction, to 9.5-14.7 ms. This is OS scheduling / QoS placement on this M1 Max's hybrid core layout (8 P-core + 2 E-core, confirmed via `sysctl hw.perflevel{0,1}`). **The exact kernel knob (QoS class vs core-cluster placement) is UNRESOLVED and named as such: `powermetrics`/`spindump` would settle it, both require root, unavailable in this sandbox.** ORT is unaffected across every condition -- whatever this is, it is specific to torch's own threading/runtime.
+
+**DECISION: each arm runs in its OWN subprocess; the ISOLATED number is canonical.** An incumbent arm must measure the incumbent, not the incumbent warmed by a different framework's process state. A number that swings 1.76x on the same quiet box with identical verified thread config, driven purely by what else ran in the process earlier, is measuring the HARNESS, not the library. Process isolation removes the variable rather than picking a side of it.
+
+**ROW 195's 10.0360 torch cell is RETRACTED.** It sits almost exactly between the two escalated readings (torch-after-ORT 9.51, `taskpolicy` 10.72) and nowhere near the isolated 16.72-17.94 band; its original (deleted) script used the same ORT-then-torch-in-one-process convention this harness did. Mechanistically consistent with being a torch-after-ORT-warm reading, not torch's steady state. The original script no longer exists to confirm arm order byte-for-byte, so this is a strong correlation, not a re-run proof -- stated as such. **Note the direction: the retracted number was the one that made our own position look narrowly better. A cell that flatters us and cannot be reproduced is the first one to distrust.**
+
+**Harness hardened.** `bench.py` forces the five thread env vars in `os.environ` before any import that could read them; `build_torch_embed` RAISES and refuses to build if `torch.get_num_threads() != 1`, and every `run_arm` pass re-checks live for mid-run drift -- **smoke-tested by spoofing `torch.get_num_threads` to return 4 and confirming it raises**, not merely asserted. Honest limitation recorded rather than overclaimed: onnxruntime's Python `SessionOptions` exposes no independent as-honored readback distinct from what the script just set, so the ORT-side thread check is tautological in the current API (confirmed by attempting to spoof it); torch's check reads independent global runtime state and is real.
+
+**Consequence for the board:** against the canonical isolated torch cell (16.7208 CoV 4.39%), our best measured BGE arm (9.734 CoV 0.76%, M=8) is **1.72x AHEAD of pytorch**, and our shipping `bge_eval` path (16.588 CoV 3.98%) is **dead even with it**. Both remain behind onnxruntime (5.6408 CoV 1.89%).
+
+## ROW 219 -- narrow-width tile instantiations close the last 12: `width_tile_plan` engagement 84/96 -> **96/96, zero declines**. Discharges ROW 216's named residual.
+
+**Pre-registration, and it was WRONG in the useful direction.** The dispatch predicted this fix would probably FAIL, on ROW 210's own evidence: `ROWS` dominates `VECS` (holding VECS=6, dropping ROWS 4->2->1 fell 49-50 -> 33-35 -> 18-19 GMAC/s, b-vector load cost amortized over fewer FMA rows), so a 2-vector tile was expected to have too little to amortize. **That reasoning does not transfer, and the miss is instructive: ROW 210's finding was about ROWS at fixed VECS on LARGE-N shapes where the tile was already at ceiling. Here the comparison baseline is not a 4-vector tile -- it is an untiled per-element SCALAR loop. The question was never "is a 2-wide tile efficient", it was "is a 2-wide tile better than no tile", and those have different answers.** Work item, general: a prior finding's direction only transfers when the BASELINE transfers too; check the baseline before importing a mechanism as a prediction.
+
+**Pipe question.** Expressible with existing machinery: `gemm_width_tile_neon<ROWS, VECS>` was already const-generic (ROW 210's refactor), so `run_width_tile_neon` was made generic over the same `VECS`, plus a `width_tile_vecs_for(width)` dispatch helper -- a plain function, not a type -- widening `width_tile_plan`'s existing gate to admit `VECS=2` (width 8-15) and `VECS=1` (width 4-7), dispatched at the one existing call site via `match plan.vecs`. **No struct, no trait, no type minted.** Second binary question: `try_run_width_tile`'s call site is character-identical before and after; what changed is that the gate resolves `Some` for widths 4-15 instead of unconditionally declining. A real capability, not a relocation.
+
+**NANO, release, 7 repeats, `Q@K^T` inner `(M,32)x(32,M)`, 12 heads, bit-EXACT assertion (`to_bits()` equality vs the scalar reference, not an epsilon):**
+
+| M | K | N | scalar ns (CoV) | forced VECS=2 ns (CoV) | forced speedup | admitted VECS | admitted ns (CoV) | admitted speedup |
+|---|---|---|---|---|---|---|---|---|
+| 7 | 32 | 7 | 13916.7 (0.006) | 13791.4 (0.002) | 1.009x | **1** | **7184.6** (0.016) | **1.937x** |
+| 8 | 32 | 8 | 17982.0 (0.003) | 1149.0 (0.033) | **15.650x** | **2** | **1149.0** (0.033) | **15.650x** |
+| 9 | 32 | 9 | 22743.9 (0.007) | 3780.0 (0.011) | **6.017x** | **2** | **3780.0** (0.011) | **6.017x** |
+
+**Kill-early bar, read honestly.** The literal "forced VECS=2 faster at EVERY M" bar **FAILS at M=7** (1.009x, a wash within CoV) -- and the mechanism is exact, not hand-waved: N=7 < 8 means zero full 8-wide tiles, so everything falls through the scalar column tail and the "tiled" arm IS the scalar arm. That negative blocks nothing, because `width_tile_vecs_for` never routes N=7 to VECS=2 (its threshold is width >= 8); N=7 routes to VECS=1, independently measured at **1.937x**, exercising a genuine 4-wide tile plus a 3-column scalar tail. Reported this way rather than quietly scoring the bar against the admitted path, because the forced-VECS=2 cell is the one that tests the hypothesis as stated.
+
+**Engagement, asserted:** `bge_route_census` reports **5760 of 5760** calls resolving `Some` = **96 of 96 nodes**, all three sentences, and "width_tile_plan declines (0 distinct node/reason pairs)". Session trajectory: **60/96 -> 72/96 -> 84/96 -> 96/96.** Every MatMul in the BGE graph now reaches a real NEON tile; the untiled per-element scalar fallback is no longer executed by this workload at all.
+
+**Correctness.** All three admitted-path cells pass `assert_eq!(got.to_bits(), want.to_bits())` against the scalar reference. `bge_eval --release` reproduces the cosine oracle exactly: 0.936311 / 0.378777 / 0.334176.
+
+**MILLI NOT CAPTURED -- stated, not fudged.** A post-change `bge_eval` run gave fused mean 17.47 ms / unfused 16.69 ms over 5 runs, but there is no paired before-this-task run on this box in this session, and the host went from load-avg 4.9 to 17.8 mid-run with a sibling agent blocking on the cargo package-cache lock. **No e2e delta is reported for this row.** The nano rung plus the 96/96 engagement is what this row establishes; the e2e number belongs to the next clean seal.
+
+**Gates (N asserted).** proxima-tensor `std,instrument` **477 passed**/7 skipped (was 6 -- +1 for the new ignored nano test); proxima-onnx all-features **105 passed**/4 skipped (includes `pipeline_full_test_split_accuracy_is_exactly_0_9900`, PASS); `real_mnist_accuracy` release run-ignored 1 passed; `rewrite_law_equivalence` 5 passed/1 ignored (law-4 stub); clippy `-D warnings` clean; `--no-default-features --features alloc` clean. Branch `perf/narrow-tile`, commit `83c390b`, off `perf/bge-integration` `3076d81`, one file changed (`proxima-tensor/src/cpu.rs`, +255/-14).
+
+## ROW 220 -- the pytorch arms, hardened and re-run: NEITHER cited figure reproduces, and they miss in OPPOSITE directions.
+
+**A STALE PREMISE, CAUGHT BY THE AGENT BEFORE IT WROTE ANYTHING.** The dispatch asserted that ROW 189's mnist-torch cell (0.119 ms/image) and ROW 159's train-step-torch cell (0.380 ms/step) were "uncommitted, unreproducible citations" and instructed building a new harness at `scripts/torch_reference/`, mirroring today's `scripts/onnx_reference/`. **That premise was false.** A committed pytorch reference harness covering BOTH lanes already exists at `proxima-onnx/scripts/torch_reference/` (commit `ba7dbe0`, "bench(onnx): land the pytorch reference harness", confirmed an ancestor of this branch's base via `git merge-base --is-ancestor`). It follows a different but equally real convention -- multi-file (`model.py`/`data.py`/`accuracy_check.py`/`inference_bench.py`/`train_bench.py`/`profile_inference.py`) rather than `bench.py`+`run.sh`. The agent verified this, declined to duplicate a second incumbent-arm harness for the same citations at a second path, and closed the gaps in place instead. **Recorded because the dispatch error was mine and the check that caught it was cheap: `git log --diff-filter=A` on the suspected path, before writing. The ORT harness genuinely was missing this morning; I generalised from that to torch without looking.**
+
+**What was added** (commit `1a71f78`): `diagnostics.py` (thread / `parallel_info` / env-var / load-average capture, `SystemExit` if a single-thread request does not land), wired into both bench entry points; `mac_count_check.py` (independent MAC cross-check against `model.py`'s live module).
+
+**Thread config, captured at run time, identical every run, fail-loud gate never fired:**
+```
+torch.get_num_threads()=1  torch.get_num_interop_threads()=10
+env: OMP_NUM_THREADS=<unset> MKL_NUM_THREADS=<unset> VECLIB_MAXIMUM_THREADS=<unset>
+ATen/Parallel: at::get_num_threads():1  at::get_num_interop_threads():10
+OpenMP 201811, omp_get_max_threads():1 | MKL not found | MKLDNN not found
+std::thread::hardware_concurrency():10 | ATen parallel backend: OpenMP
+```
+
+**MAC cross-check, Lane A: PASSED EXACTLY.** `mac_count_check.py` computes `MnistNet`'s per-layer MACs from the live module: conv1 48,672 / conv2 663,552 / conv3 1,672,704 / fc1 371,712 / fc2 320 = **2,756,960**, an exact match to this log's own cited total. The arm is provably timing the right network, not a fast number for a different one.
+
+**HOST: LOADED THROUGHOUT, labelled not laundered.** `pgrep -fl 'cargo|rustc|nextest'` (filtered of `cdb-daemon`/`sccache`) returned 12-46 matching processes on every check, including two 60s-apart checks and repeated checks during the runs -- three sibling worktree sessions were building. Every number below is LOADED-HOST.
+
+**Lane A -- mnist f32 inference, ms/image, 5 runs x 200 measured** (venv torch 2.5.1; the committed `requirements.txt` pins torch 2.13.0 -- a real version divergence, named below):
+
+| arm | p50 range | mean range | CoV | threads | accuracy |
+|---|---|---|---|---|---|
+| torch (LOADED) | **0.1523-0.1723 ms** | 0.1528-0.1816 | 1.0-18.4% | 1 (verified) | **0.9900** (990/1000) |
+| ours, `proxima-onnx/benches/mnist_f32_lane.rs` (LOADED) | 0.693-0.799 ms | sweep mean 0.800 | 56.3% | single-core | **0.9900** (990/1000) |
+
+Accuracy matches EXACTLY between arms. Ratio ours/torch, both loaded: **~4.4x behind**. **ROW 189's 0.119 ms did NOT reproduce -- this session sits 28-45% ABOVE it.**
+
+**Lane B -- train-step MLP 784-128-10, batch 32, Adam, ms/step, 5 runs x 200 steps:**
+
+| arm | p50 range | mean | CoV | threads |
+|---|---|---|---|---|
+| torch (LOADED) | **0.2676-0.3313 ms** | 0.2725-0.3327 | 9.5-26.8% | 1 (verified) |
+| ours, `proxima-autograd/benches/train_step_lane.rs`, `train_step_arena` (LOADED) | **1.3610-1.3693 ms** | 1.3620 | **0.32%** | -- |
+
+Convergence gate bit-identical across all three ours-variants (baseline/scratch/arena): first-quarter avg loss 0.6827 -> last-quarter 0.3410. Ratio ours/torch: **~4.1-5.1x behind**. **ROW 159's 0.380 and ROW 157's 0.3406 did NOT reproduce -- this session landed BELOW both.**
+
+**THE INTERESTING PART, and the reason neither miss can be waved at host load: the two lanes miss in OPPOSITE DIRECTIONS.** Lane A's torch is 28-45% SLOWER than its citation; Lane B's torch is FASTER than its citation. Load is a one-directional pressure -- it cannot make one lane slower and another faster in the same session. So at least one other term is real. Candidates NAMED, none isolated this session: the torch version divergence (2.5.1 run vs 2.13.0 pinned -- ATen's conv and Adam paths did not necessarily change in the same direction between versions), and op-mix sensitivity to the hybrid-core scheduling effect ROW 218 measured on this same box for the BGE torch arm. **Residual, explicitly not resolved: both lanes need a quiet-box re-take on the PINNED torch version before either citation is corrected or retired.** Until then ROW 189's 0.119 and ROW 159's 0.380 are neither confirmed nor retracted -- they are unreproduced, which is a third state and is the honest one.
+
+**OUR OWN train-step number reproduces ROW 179 essentially exactly** -- 1.3610-1.3693 vs the cited 1.3699, at CoV 0.32% on a loaded box. That is the strongest single reproduction in this row and it is the arm nobody suspected. It also means the train-step lane's gap is real and stable: **~4.1-5.1x behind torch, and 10.1x off that lane's own ~135 us machine roofline** -- the largest untouched gap on the board, and nothing this session addressed it.
+
+**Gates (N asserted).** `cargo nextest run -p proxima-autograd --all-features`: **147 run, 147 passed** (3 slow), 0 skipped. `cargo nextest run -p proxima-onnx --all-features`: **105 run, 105 passed**, 4 skipped. Branch `bench/torch-arms`, commit `1a71f78`, not pushed. Diff scoped to `proxima-onnx/scripts/torch_reference/` -- no Rust source touched.
+
+## ROW 221 -- GPU decode ladder: the bandwidth probe is fixed, the incumbent is finally a committed harness, encoder churn is REFUTED, and the gap is the KERNEL.
+
+**Committed incumbent, first time in this lane.** ROW 116 and ROW 193 both cite llama.cpp Metal from a hand-built external checkout with no committed script and no CoV -- the same phantom-cell class as the burn 1.36 citation that inverted when someone finally built a harness. `scripts/llama_reference/` (README + `run.sh`) now records the pinned checkout `b25346221dadb9101aa9dda55431dde4d3596943` (verified this session against ROW 193's cited `b2534622`), the cmake flags read from `CMakeCache.txt`, the model path and byte size, and the exact `llama-bench` invocation.
+
+**STEP 1 -- the bandwidth roofline debt, PARTIALLY closed and honestly labelled.** `membw_probe`'s Metal arm used a reduce-to-scalar (`Add`), which serialises on the final threadgroup fold and measures DISPATCH, not bandwidth -- it returned 0.3-0.4 GB/s. Reshaped to `Op::Elementwise{Negate}`, identity map, one GPU thread per element, read+write counted (an existing primitive; no new type):
+
+| size | bytes | min ms | GB/s | CoV% |
+|---|---|---|---|---|
+| 256 KiB (sub-L1) | 0.52 MB | 0.2492 | 2.1 | 14.06 |
+| 8 MiB (in L2) | 16.78 MB | 1.6098 | 10.4 | 13.35 |
+| 64 MiB (past SLC) | 134.22 MB | 9.9127 | 13.5 | 8.15 |
+| 256 MiB (deep DRAM) | 536.87 MB | 53.9489 | 10.0 | 18.18 |
+| two-size marginal (64->256 MiB) | 1610.6 MB delta | 179.886 delta | **9.0** | n/a |
+
+25-30x better shaped than the old figure and still far under any plausible M1 Max unified-memory ceiling. **Named residual, not chased: readback of the output buffer (same size as the input) happens INSIDE the timed window and is not in the GB/s numerator, which deflates every row.** No spec-sheet number substituted. The lane still does not have a trustworthy roofline -- the debt is narrower, not closed.
+
+**STEP 2 -- both arms re-measured fresh, CoV on the incumbent for the first time.** Host loaded (1-min avg 25.0 then 8.9 on a 10-core box); every cell labelled contended.
+
+| arm | ms/token | GB/s | GMAC/s | n | CoV | threads |
+|---|---|---|---|---|---|---|
+| llama.cpp Metal (`llama-bench -n 32 -r 5 -t 8 -ngl 99`) | 20.589 | 194.3 | 345.4 | 5 | **2.59%** | **8 CPU** |
+| proxima Metal, GPU-kernel-only (`gpu_exec_ms`, steady steps 1-7) | 56.527 | 70.76 | 125.8 | 7 | **0.41%** | **1** |
+| proxima Metal, full decode step (`evaluate_ms`) | 67.917 | 58.89 | 104.7 | 7 | **1.71%** | **1** |
+
+2.75x kernel-only, 3.30x full-loop -- both NARROWER than ROW 193's 3.34x/4.09x, and consistent: today's llama.cpp arm also degraded under load (48.57 t/s vs ROW 193's 58.53 t/s). **THREAD ASYMMETRY, stated loudly: `-t 8` gives the incumbent eight CPU threads for orchestration; `grep -n "thread::spawn\|rayon\|std::thread"` over `omega/src/metal.rs` and `proxima-model-interop/src/{generate,bind}.rs` returns NOTHING -- our entire CPU-side orchestration is single-threaded.** It does not overturn the headline (kernel dominates, below), but part of the 11.39 ms orchestration slice is thread count, not algorithm, and this session did not split it.
+
+**STEP 3 -- ENCODER CHURN REFUTED BY READING BOTH SOURCES, and it was the leading hypothesis.** `omega/src/metal.rs:475-479` takes ONE `command_buffer`; `:497-502` takes ONE `computeCommandEncoder`; `:511-525` encodes EVERY `BoundOp` into that same encoder; `:526` is a single `endEncoding()`. `ggml-metal.m:5693-5739` at llama.cpp's default `n_cb=1` has the identical shape. **Command buffers/token 1 vs 1. Encoders/token 1 vs 1 -- parity, both sides.**
+
+**Where the hypothesis came from is the real lesson: `metal.rs`'s own module doc (lines 35-44) said "its own `MTLComputeCommandEncoder`, ended before the next op's encoder is opened" -- describing a per-op shape the code had already left behind, while the inline comment at `:481-496` in the SAME FILE stated the truth ("ONE ... for the whole program ... not one per op").** One file, two contradictory descriptions of its own execution model, 450 lines apart, and the wrong one was the module doc -- the first thing anyone reads. A doc was read as the artifact and became a hypothesis. Fixed (commit `7e58f6b`), along with a second stale cross-reference at `:499-501` that pointed at the deleted "two encoders" framing; `grep -n "encoder"` confirms no others, and `execute_plan_op_timed`'s doc correctly self-describes as the per-op diagnostic exception.
+
+**Attribution: the KERNEL, not orchestration.** `gpu_exec_ms` is **83.2%** of the full decode step (56.527/67.917); orchestration is 16.8% (11.390 ms, CoV 9.88%). Named breakdown: `op_setup_ms` 4.4603 (CoV 10.17%) is 39% of the orchestration slice; `op_setup + emit + encode_dispatch + pipeline_lookup` = 5.92 ms = 52% of it -- CPU-side per-dispatch setup across a measured `encode_dispatch_calls=1196` dispatches/token, not extra buffers or encoders. `pipeline_compile_ms` is 0.0000 in steady state (no misses).
+
+A clean apples-to-apples dispatch count for llama.cpp is **UNMEASURED**: `llama-eval-callback` showed ~1158 named tensors per forward, but `ggml-metal.m:1836-1843` marks `RESHAPE`/`VIEW`/`TRANSPOSE`/`PERMUTE`/`NONE` as `"noop -> next node"` with zero dispatch cost, so that raw count overstates their real dispatches. Residual, named not guessed.
+
+**STEP 4 -- ladder NOT reached, deliberately.** The dominant proven component (GPU kernel throughput, 83% of the step, 125.8 vs their 345.4 GMAC/s) has no cheap fix inside budget -- it means rewriting the Q4_K dequant-matmul Metal kernel, a standing debt. The attribution IS this row's deliverable.
+
+**THE LANE-LEVEL CONTRAST worth carrying forward: CPU/BGE and GPU/decode have OPPOSITE diagnoses.** On CPU the kernel is at its NEON ceiling and the deficit is elsewhere (ROW 222); on GPU the kernel is 83% of the step and orchestration is fine. Do not import one lane's lever into the other.
+
+**Gates.** proxima-tensor `std,instrument` **477 passed**/6 skipped; clippy on proxima-tensor and on omega both clean; `cargo doc -p omega` clean. `cargo nextest run -p omega --features metal,cpu,instrument`: **95 passed, 2 FAILED, 1 skipped (N=97 asserted)**. Branch `perf/gpu-decode-ladder`, commits `0fecd5a` + `7e58f6b`, not pushed.
+
+**A REAL CORRECTNESS FAILURE FOUND ON MAIN, verified pre-existing by stashing and re-running against `3076d81`:** `omega::backend_parity::the_wrapper_agrees_with_itself_across_cpu_and_metal` and `omega::metal_real_forward::metal_runs_the_real_forward_graph_and_agrees_with_the_cpu` both fail with the IDENTICAL signature `relative=1.3264047 max_diff=6.9346437`. **Our CPU and Metal backends disagree by 133% on the real forward graph.** Identical relative error in two independently-written tests implies ONE root cause in the shared wrapper path; 133% is structural (stride, transposed operand, wrong axis), not precision drift. **Every GPU throughput number in this row and in ROW 193 may be timing wrong arithmetic.** The decode measurements went through `generate.rs`'s `runtime.evaluate`, a different path, and that path was NOT independently verified unaffected this session. Under diagnosis on `fix/omega-backend-parity`; that answer decides whether this lane's numbers stand.
+
+## ROW 222 -- the composition thesis, PRE-REGISTERED AND FALSIFIED. The in-graph GEMM gap is INSIDE the kernel.
+
+**The thesis, stated so it could fail:** "onnxruntime beats proxima on COMPOSITION, not COMPUTATION." It rested on a subtraction -- our kernel measures 48.0-48.8 GMAC/s isolated (ROW 210) and 62.2-88.0 via AMX (ROW 212), ORT delivers 30.2 GMAC/s whole-model on pure NEON with no BLAS linked (`otool -L`: CoreML/Foundation/libc++/libobjc only; `providers=["CPUExecutionProvider"]` pinned at `bench.py:160`), and we delivered 17.5 GMAC/s whole-model. Subtracting implied composition cost us ~64-80% of the step and ORT ~38%. **A subtraction is not a measurement.** ROW 213 had named this exact residual and left it open: no counter timed ns strictly inside `gemm_width_tile_neon` versus the rest of `run_width_tile_neon`.
+
+**FALSIFICATION CONDITION, written before measuring:** if in-kernel time is the MAJORITY of in-graph GEMM time, the composition thesis is WRONG and the gap is cold-cache or a rate that degrades at graph scale.
+
+**Instrument.** `WIDTH_TILE_KERNEL_TICKS`/`WIDTH_TILE_KERNEL_MACS`/`WIDTH_TILE_FN_TICKS`/`WIDTH_TILE_FN_CALLS` + `record_width_tile_split_ticks`/`width_tile_split_totals`/`reset_width_tile_split` (`instrument.rs`), with ticks pairs around BOTH `gemm_width_tile_neon` call sites inside `run_width_tile_neon` (main tile loop and the `width_row_remainder_tile!` macro), summed locally and committed once at the function tail alongside a whole-function pair. Counters, not a type; `instrument`-gated; no `eprintln!`, no file dump. **Instrumentation overhead MEASURED, not assumed: 12.25-12.32 ns/pair** over 100,000 empty pairs -- negligible against µs-scale kernel calls. Base verified 96/96 (`5760 of 5760`) before any measurement.
+
+**MEASURED, two runs under different load, 5 reps x 60 calls each:**
+
+| bucket | run 1 | run 2 |
+|---|---|---|
+| inside `gemm_width_tile_neon` | **98.8%** | **98.6%** |
+| surround (address calc, tile bookkeeping, column tail, store) | 1.2% | 1.4% |
+| outside, in `run_reduce` around the width-tile call | 0.3% | 0.2% |
+
+N asserted every cell: 5760 `run_width_tile_neon` calls/rep == 5760 `width_fast` `run_reduce` calls/rep (`match=OK`) for all three sentences and both runs; 362,880-544,320 kernel invocations/rep. None zero.
+
+**In-kernel rate: 11.0-14.5 GMAC/s in-graph (run 2; run 1 combined 8.10) against the 48.0-48.8 GMAC/s the SAME kernel achieves isolated -- 17-27% of its own ceiling.** Cross-check that the MAC counter measures real work, not an artifact: run 2's M=8 back-derived MACs (~170.5M) match an independent hand computation for one M=8 BGE forward (12 layers x QKV/attn-out/QK^T/softmax@V/FFN).
+
+**THE THESIS IS FALSIFIED, by a wide margin, reproducibly.** Glue costs 1.4-1.7% combined. ORT is not beating us on composition. **ORT is beating us because their kernel sustains 30.2 GMAC/s on real graph data and ours collapses from 48.5 to ~13 -- and the isolated 48.5 was measuring a warm, single-reused weight buffer that does not exist in production.**
+
+**What the falsification points at, arithmetic named for the next row:** BGE reads **132,848,640 weight bytes/sentence** (33,212,160 initializer elements x 4), each EXACTLY ONCE at batch=1. A ~12-13 ms gemm mass is an effective read rate of **~10.2-11.1 GB/s** against ROW 176's measured 69.95 GB/s streaming ceiling -- **~15%, on a read ROW 205's packing already made sequential (`b`'s `k_stride == tile_cols`).** A sequential read at 15% of streaming bandwidth is LATENCY-bound, not bandwidth-bound: too few outstanding loads to cover DRAM latency. This is ROW 203's own first-touch mechanism (6.6-10.3 GB/s, 9-15% of ceiling), which packing improved 1.33-1.72x and did not close. **ORT proves it is closable on this silicon with layout alone -- 30.2 GMAC/s, pure NEON, and per the ORT source read, no prefetch instructions at all.**
+
+**METHOD LESSON, and it invalidates a framing this campaign carried for several rows: a warm single-buffer microbench and a real graph are different measurement contexts, not one number seen twice.** ROW 210's 48.0-48.8 GMAC/s was true and was read as the kernel's production rate; it is the kernel's CACHE-RESIDENT rate. Every cold-path claim built on it was overstated. Nano cells for a weight-streaming workload MUST defeat cache (ROW 181's `ROTATION=64` round-robin precedent) or they measure a regime production never enters.
+
+**Gates (N asserted).** proxima-tensor `std,instrument` **477 passed**/7 skipped; proxima-onnx all-features **105 passed**/4 skipped incl. `pipeline_full_test_split_accuracy_is_exactly_0_9900`; clippy clean; `--no-default-features --features alloc` clean; cosine oracle reproduced via the passing `bge_arena_fusion_bit_identity` test. Branch `perf/composition-split`, commit `31adf35`, off `perf/narrow-tile` `83c390b`, not pushed. ~18 minutes of a 70-minute budget.
+
+## ROW 223 -- a SILENT WRONG-ANSWER BUG in `width_tile_plan`, shipped on `main`, found only because omega compares two independent implementations of the same graph.
+
+**Symptom.** `omega::backend_parity::the_wrapper_agrees_with_itself_across_cpu_and_metal` and `omega::metal_real_forward::metal_runs_the_real_forward_graph_and_agrees_with_the_cpu` both failed with the IDENTICAL signature `relative=1.3264047 max_diff=6.9346437`. 133% is not precision drift.
+
+**My framing was wrong and the data resolved it one-way.** I called it "our CPU and Metal backends disagree" -- symmetric, and false. **Metal was CORRECT** (matched all-nodes ground truth at `relative=0.0000004930123` on the full logits root, and comparably tight on all 7 real roots); **CPU's fused fast path was wrong.**
+
+**Root cause, `proxima-tensor/src/cpu.rs:9502-9504` (pre-fix), in `width_tile_plan`'s leading-axis match.** `WidthTilePlan` (`cpu.rs:9218-9237`) carries `row_stride_a` (`:9221`), `base_b` (`:9224`), `k_stride_b` (`:9225`) and `outer_stride_b` (`:9235`) -- and **no `row_stride_b`**, by design: `b` is the shared-weight operand, read from one base for every row. `b` may vary along the OUTER axis; it may never vary along the ROW axis. The `&[only] => (only, None)` arm accepted the sole non-degenerate leading axis as the row axis **unconditionally**, without the `layout_b.stride(only) == 0` check the two-axis branch a few lines below already enforced for its own `outer_dim`. When `b` genuinely varied along that axis -- a per-attention-head weight slice, reachable only after `bind`'s elementwise-into-reduce fusion -- **the kernel silently reused row 0's slice of `b` for every row.**
+
+**Proven with payload data, not inference.** First divergent node `NodeId(35)`, `Reduce(Add)` over the RoPE Q-projection (`sum_e hidden[e] * attn_q_weight[e,h,d]`), shape `[1,4,16]` (batch, heads, head_dim). Requesting ONLY `NodeId(35)` as output:
+```
+head0 = [-0.5366, 2.3581, -0.7385, -2.0545, -4.0388, ...]
+head1 = IDENTICAL to head0
+head2 = IDENTICAL to head0
+head3 = IDENTICAL to head0
+ground truth (all-nodes-as-outputs, no fusion) head1 = [0.7015, -0.3860, 0.5199, ...]
+```
+All four heads collapsed onto head 0. Confirmed at the `BoundOp` level: unfused = `operands: [(NodeId(34), ..)], element_body: Identity`; fused = `operands: [(NodeId(33), strides=[64,0,0,1]), (NodeId(16), strides=[0,16,1,64])], element_body: Multiply` -- `b` (node 16, the weight) has stride **16**, nonzero, on the sole leading axis, which the gate accepted anyway.
+
+**Fix:** gate the `&[only]` arm on `layout_b.stride(only) == 0`; decline `WidthDeclineReason::AxesShape` otherwise, falling through to the already-correct generic reduce path. **No `cfg` or kernel change** -- an admission-gate correction only.
+
+**Regression test:** `cpu::tests::a_reduce_fusing_a_per_row_weight_operand_computes_a_distinct_value_per_row` -- a minimal fused `Reduce(Multiply)` with a genuinely row-varying `b`, asserted first against a naive triple-loop reference and then **row-by-row (`row != row0`)**, so a future regression localises to "which row collapsed" instead of reappearing as a 133% aggregate. Verified by reverting only the fix hunk: test failed exactly as predicted (`relative error 0.6428572`, `actual=1.12 expected=3.1360002`); restored, passed.
+
+**BLAST RADIUS, stated precisely.** `proxima-model-interop/src/generate.rs:545-551` (`select_backend`) chooses `Backend::Metal` ONLY when `config.gpu_layers == GPU_LAYERS_ALL`; every other config takes `Backend::Cpu`, which calls `evaluate_quantized_named_with_scratch` directly with a small roots list (`generate.rs:965-972`) -- exactly the shape that triggers `bind`'s elementwise-into-reduce fusion into `width_tile_plan`. The RoPE per-head-weight fold is structural to `mistral_cached_forward_program`, the builder real inference uses, at any `head_dim >= WIDTH_TILE_VECS*4` (16). **Any decode step with `gpu_layers != GPU_LAYERS_ALL` was computing wrong Q-projection and logit values before this fix.** The full-GPU-offload arm was independently proven correct and was never affected. Which `gpu_layers` value ROW 193's and this session's GPU numbers used was NOT determined (tripwire prevented opening that worktree) -- named, not guessed.
+
+**WHY OUR OWN SUITE RAN GREEN ALL SESSION, and this is the lesson: BGE has no parity test.** The bug lives in `proxima-tensor`, on the exact function this session widened four times (60/96 -> 72 -> 84 -> 96/96), and every proxima-tensor and proxima-onnx gate stayed green throughout. It surfaced in `omega` only because omega's `backend_parity` is the one test in this workspace that compares two INDEPENDENT implementations of the same graph. BGE's own correctness rests on a cosine oracle against onnxruntime/torch (6.5e-8, ROW 195) -- which is why BGE was unaffected (its `b` operands are genuinely row-invariant weights) and also why a BGE-shaped instance of this bug would have been caught, but a decode-shaped one was not. **Emitted work item: a CPU-vs-reference parity test for the decode path, not just the embedding path.**
+
+**Gates (N asserted).** `cargo nextest run -p omega --features metal,cpu,instrument`: **97 run, 97 passed**, 1 skipped (was 95 passed / 2 FAILED). `cargo nextest run -p proxima-tensor --features std,instrument`: **478 passed**, 6 skipped (477 + the new regression test). clippy on both crates clean. Branch `fix/omega-backend-parity`, commit `edcbf4e`, not pushed.
+
+## ROW 224 -- `main` was pushed RED: four CI jobs failing, one of them a real compile error, and every local gate this session was the wrong configuration.
+
+**`gh run view 33574313078`** at sha `3076d81` (exact match to `main`'s tip, pushed this session) -- `completed/failure`:
+
+| job | status | cause |
+|---|---|---|
+| `proxima-tensor-gate.sh` | failure | broken intra-doc link, x86_64-only |
+| `omega-gate.sh (macos-latest)` | failure | ROW 223's wrong-`b` bug |
+| `compare-bench (metal vs cpu)` | failure | not investigated |
+| `proxima-onnx (default)` | failure | **`E0425` -- a real compile error** |
+
+**The rustdoc break was NOT the instance I diagnosed.** I sent an agent after `accelerate_gemm_totals` (`cpu.rs:1609`, `cfg(all(macos, aarch64))`) linking `neon_tile_counters` (`cpu.rs:10484`, additionally `feature="instrument"`). Real, and broken on a default mac build. **But CI was failing on a different one:** `build_static_arena_with_constants` (`cpu.rs:674`, unconditional) and the private `packed_width_panels` field doc (`cpu.rs:544`) both link `set_pack_at_plan_time_enabled`, gated bare `cfg(target_arch="aarch64")` -- **invisible on every dev box here, because every dev box here is arm64 and the link resolves locally.** Only `--target x86_64-unknown-linux-gnu` reproduces it. Cross-doc reproduced CI's error byte-for-byte pre-fix and cleared it post-fix.
+
+**Five broken links total**, all demoted to plain code-formatted text with a parenthetical naming the narrower gate; **no `cfg` touched** (aligning gates would change what compiles): 2 in `cpu.rs`, plus `proxima-onnx`'s `lib.rs:21,23,26` / `sized.rs:3` / `parser.rs:156` (all linking `config`/`OnnxParserConfig`/`OnnxParser::with_config`, std-only, from unconditional module docs -- genuinely broken under `--no-default-features --features alloc`, proved by direct run), plus `lower.rs:615`'s cross-crate `proxima_tensor::spec` link that can NEVER resolve because proxima-onnx never enables tensor's `config` feature.
+
+**Also found, NOT fixed, different class:** 17 more unresolved links in `proxima-onnx/src/lower.rs` (`lower_gemm`, `concat_pair`, `Reduce::out_map`, `pad_axis`, `crate::lift::scalar_op_type`, `Conv1dAttrs::stride_w`, `crate::map::IndexMap::Computed`, ...) -- stale/wrong paths to private items, not cfg-narrowing, invisible to every gate here because nothing runs `--document-private-items`. Named for the record.
+
+**Gate script corrected: it is 21 cells, not 22** (20 array cells + 1 doctest cell). After the fix: **passed 21, failed 0, doctests 1** natively on arm64-macos, with the 3 rustdoc cells additionally cross-verified clean on `--target x86_64-unknown-linux-gnu`. `cargo fmt --check` clean on both changed crates. Commit `9f7a9af`, branch `fix/rustdoc-gate`.
+
+**CI TRIGGER HOLE, confirmed from the workflow files.** `no-std.yml` push branches `[main, nostd-cliff, nostd-tier-lift, verify/*]`; `proxima-tensor.yml` push branches `[main, feat/tensor-*, verify/*]`. Neither file's `pull_request` trigger restricts the SOURCE branch (`branches: [main]` is the PR TARGET). **Every branch this session was `perf/*` or `fix/*`, matching neither push list -- so pushing any of them ran ZERO gates.** Only a PR into `main`, or `workflow_dispatch`, would have. The first real gate run happened when `main` itself was pushed, and it was red.
+
+**THE STRUCTURAL FINDING, three defects with one shape: the configuration CI builds is one nobody here builds.** (1) The rustdoc break needs x86_64; all dev boxes are arm64. (2) The `E0425` needs DEFAULT features; every local run used `--all-features` or `--features instrument`. (3) ROW 223's wrong-`b` bug needs a two-implementation comparison; only omega has one. **~20 gate invocations ran this session and not one was a failing configuration** -- because gates were being hand-picked instead of running `scripts/proxima-tensor-gate.sh`, which exists precisely so nobody has to pick. Its own header already warns that an alloc-only build compiles ZERO lines of `cpu.rs` and that agents had previously read those cells green as coverage for a `cpu.rs` change. That warning was written for this exact mistake and it was made again.
+
+## ROW 225 -- the cold-read-latency mechanism, PRE-REGISTERED AND FALSIFIED. Cold equals warm; the surviving candidate needs a quiet box nobody gave it.
+
+**Pre-registration** (owner-sharpened mid-task; the precise claim was "memory-system utilization is latency/parallelism limited rather than bandwidth limited", NOT "latency-bound", and the ORT evidence proves closability through **memory-access organization + kernel scheduling**, NOT "layout alone"): latency-bound predicts a cold single-stream kernel near the in-graph 11.0-14.5 GMAC/s; issue-limited predicts cold within ~1.3x of warm.
+
+**MEASURED, quiet host, `gemm_width_tile_neon::<4,4>` at production shapes, ROW 181's 64-buffer rotation (36-144 MiB, clearing the measured 12 MiB shared L2):**
+
+| shape | M=7 cold/warm | M=8 cold/warm | M=9 cold/warm |
+|---|---|---|---|
+| QKVO | 1.092x | 0.897x | 0.951x |
+| FFN-up | 1.222x | 1.006x | 1.026x |
+| FFN-down | 1.098x | 1.044x | 0.989x |
+
+Cold absolute: 33.780-47.960 GMAC/s. **MISS on latency-bound, HIT on the issue-limited alternative -- every cell within 0.90-1.22x.** The same run reproduced the in-graph rate directly at 11.6-15.3 GMAC/s, so the gap is current, not stale.
+
+**FALSIFIED: cold DRAM-read latency on a single sequential packed stream is NOT what holds the kernel to in-graph rates.** The kernel sustains near-ceiling throughput cache-hot or genuinely cold, **as long as it is the only stream in flight.** Per the binding kill-early rule the climb stopped here; no prefetch, unroll, or panel-blocking attack was built, because building one would have been optimizing an unproven cause.
+
+**The surviving candidate, and why it is NOT admissible yet.** A 72-node interleaved multi-shape arm (8x rotation, ~648 MiB, many concurrent heterogeneous streams with no intervening non-GEMM work) measured **19.105 GMAC/s (CoV 14.71%)** and **24.981 (CoV 17.63%)** across two attempts -- between single-stream-cold (33.8-48.0) and in-graph (11.6-15.3), directionally suggestive that **stream count and heterogeneity**, not per-stream latency, carry the residual. **Both cells are far above the 5% trust line and are reported as a range, not a point estimate.** 7-17 sibling processes were visible on repeated `pgrep` checks during both attempts, and the WARM control destabilized identically (CoV 38-98%), proving the contamination was host-wide rather than cold-arm-specific.
+
+**THE CONTAMINATION WAS SELF-INFLICTED AND IT IS THE ROW'S MAIN LESSON.** Six to eight agents were dispatched in parallel while several were asked to take timed measurements. The workspace's own rule -- ONE measurement owner of the box at a time -- was violated for most of the session, and the single arm that would discriminate the last surviving mechanism is precisely the one that needed a quiet box. Correctness work (builds, tests, gates) is load-insensitive and can run concurrently; timed arms cannot, and must not be scheduled alongside it.
+
+**Owner's dimension sweep NOT BUILT** (budget reached at the gate stage, and the sharpened brief arrived after nano): load-distance/prefetch as a swept distance parameter, K-blocking, packing-tile geometry, and accumulator-count-as-memory-parallelism (distinct from ROW 210's settled arithmetic-occupancy axis), each as its own arm reporting **paired GB/s AND GMAC/s per cell** so the regime that moved is identifiable. Named as the next session's opening work, on a verified-quiet host, after the interleaved arm is re-taken cleanly.
+
+**The target is not hypothetical.** 11.0-14.5 -> **30.2 GMAC/s**, demonstrated by onnxruntime on the SAME silicon, SAME graph, SAME computation class, pure NEON, single-threaded, no BLAS linked (`otool -L`: CoreML/Foundation/libc++/libobjc only; `providers=["CPUExecutionProvider"]` pinned at `bench.py:160`). A shortfall is a statement about our memory-access organization, never about the hardware, the shape, or NEON. **AMX at 62.2-88.0 GMAC/s is upside BEYOND ~30, not what is required to catch ORT** -- if closing this needs the coprocessor, something in the NEON path is still wrong.
+
+**Mechanisms eliminated with numbers, cumulative:** kernel arithmetic (at NEON ceiling isolated, ROW 210); register/accumulator starvation (2-4%, ROW 210); composition/glue (1.4-1.7%, ROW 222); single-stream cold-read latency (cold ~= warm, this row). **Surviving: concurrent heterogeneous stream pressure -- unproven, needs a quiet box.**
+
+**Gates (N asserted).** proxima-tensor `std,instrument` **477 passed**/7 skipped; proxima-onnx all-features **105 passed**/4 skipped; `real_mnist_accuracy` 1 passed; `rewrite_law_equivalence` 5 passed/1 ignored; clippy clean; `--no-default-features --features alloc` clean. Engagement unchanged at **96/96** (5760 of 5760). Zero library source changed -- one diagnostic example added, so bit-identity is N/A this row. Branch `perf/kernel-latency`, commit `14f1304`, off `perf/composition-split` `31adf35`, not pushed.
+
+## ROW 226 -- ONE PATH: `evaluate_named` reaches every landed lever with zero caller opt-in. 26.68 -> 10.294 ms/sentence sealed.
+
+**The defect this closes.** Two execution loops served one graph, each carrying half the landed work: `evaluate_quantized_with_scratch` had fusion but no arena and no packing; `build_static_arena*` had arena reuse and packing but never called `run_rewrite_worklist`. Every optimization since ROW 164 landed on one and had to be re-landed on the other or silently did not apply. Owner ruling: "we should not have duplicate or separate fucking paths."
+
+**Built, in three stages, each measured:**
+1. `evaluate_named` (`cpu.rs:454`) routes through `evaluate_named_via_arena` -> a bounded `ARENA_CACHE` (`Mutex<Vec<CachedArena>>`, `ARENA_CACHE_CAPACITY = 8`, FIFO, hit proven by FULL VALUE EQUALITY of `(program, symbols, outputs)` -- never pointer identity, no ABA) -> `run_resolved_nodes_in_arena`. Fusion and width-tile dispatch engage on the default path for the first time. **`packed_node_count` still 0** -- `evaluate_named`'s signature had no way to name call-invariant weights.
+2. `checkout_arena` derives `constant_inputs` from the bind list itself, filtered against `block_node_ids(program)`, offering every genuine `Op::Input` name as a packing candidate; `build_packed_width_panels`'s existing 2-D width-tile gate still decides which are actually packed. **No field added to `Op`** (209 construction sites workspace-wide -- out of proportion to the fix), no new type: `PackedWidthPanels` gained one `source: NodeId` field on an existing private struct. **`packed_node_count` 0 -> 216.**
+3. Soundness backstop: `bind_named_inputs_into_arena` compares each rebind's bytes against the arena's buffer and drops every `PackedWidthPanels` whose `source` is that node on mismatch, BEFORE `run_resolved_nodes_in_arena` reads one. A name that varies call-to-call falls back to unpacked permanently for that arena -- never stale data.
+
+**THE MEASUREMENT THAT NEARLY GOT MISSED, and the lesson in it.** Post-collapse the sealed harness read 19.80 ms/sentence (NEON) and 18.26 (Accelerate) -- both CoV under 5%, both WORSE than the 16.588 pre-collapse baseline. Two per-call costs were the suspects: the full-program equality compare, and the 132 MB rebind compare. Instrumented both (`checkout_arena_key_compare_{calls,ticks}`, `bind_rebind_compare_{calls,ticks}`, `instrument.rs`, wired at `cpu.rs:1200-1211` and `cpu.rs:896-897,941-942`):
+
+| suspect | ns/call | share of a ~19.4ms step | verdict |
+|---|---|---|---|
+| `checkout_arena` key compare | 28,227 | **0.15%** | not indicted |
+| `bind_named_inputs_into_arena` rebind compare | **11,421,155** | **59%** | INDICTED |
+
+**Root cause: `slot.as_slice() != data` compared `[f32]`, which CANNOT take Rust's `memcmp` specialization -- NaN and `-0.0` semantics block it for float types -- so it degraded to a scalar per-element loop over 132,848,640 bytes on EVERY call.** Replaced with a byte-level compare (`f32_slice_as_bytes`, mirroring the crate's existing `reinterpret_slice` pattern; `f32` has no padding, `u8` alignment 1).
+
+**The fix is MORE sound, not a speed/safety trade.** The loop's own doc frames the contract as "did the BYTES change." `f32::eq` did not answer that: `-0.0 == 0.0` would report UNCHANGED on a genuine bit-level rebind (serving a stale buffer -- a wrong-answer bug), and `NaN != NaN` would report CHANGED on a bit-identical resend (needless invalidation). Byte-compare fixes both directions and admits no new failure mode.
+
+**SEALED `bge_eval`, quiet host (gate empty twice 60s apart), ms/sentence, run 0 reported separately because it pays all 3 arena-build-plus-pack costs inline:**
+
+| arm | run 0 | steady (runs 1-4) | all-5 mean | CoV% |
+|---|---|---|---|---|
+| BEFORE NEON | 26.6488 | 19.0716 | 20.5870 | 14.96 -- RANGE ONLY |
+| BEFORE Accelerate | 18.5483 | 17.3302 | 17.5738 | 2.79 |
+| AFTER NEON | 13.9320 | 11.5963 | 12.0634 | 7.81 -- RANGE ONLY |
+| **AFTER Accelerate** | 10.2800 | 10.2974 | **10.2940** | **0.51** |
+
+**Correctness.** `bit_identical(StaticArena NEON vs evaluate_named oracle) = true`; Accelerate `max_abs_diff` vs oracle `[0.0, 7.45e-8, 4.10e-8]`; cosine oracle EXACT 0.936311 / 0.378777 / 0.334176; `packed_node_count` 216; arena builds 3 across 15 calls; `width_tile_plan` 288/288 resolved. Two new soundness tests PASS: `evaluate_named_packs_a_named_weight_with_zero_caller_opt_in`, `evaluate_named_rebinding_a_packed_weight_never_serves_a_stale_panel`. `proxima-autograd` 147 -- `train::fit` (`train.rs:167`) calls `build_static_arena` directly, never `checkout_arena`, structurally unreachable by this change.
+
+**NOT the literal single loop, stated honestly.** `evaluate_quantized_with_scratch`'s own per-position loop REMAINS, serving `evaluate`/`evaluate_quantized`/`evaluate_quantized_named` with real quantized (`Q4K`/`Q5K`) weight blocks -- a capability `StaticArena` does not have. Only `evaluate_named`'s reachability was collapsed. `evaluate_named_with_arena` also stays `pub` (guaranteed-warm arena beyond the 8-entry bound, in-place rebind) -- a deliberate choice, not an oversight.
+
+**RESIDUAL, MEASURED, LARGE: the rebind compare is still 4,460,956 ns/call -- ~43% of the 10.29 ms step.** A memcmp of 132 MB at ~30 GB/s, run every call to prove weights that never change did not change. Candidate directions with their hazards named: source pointer+length identity (ABA -- a freed buffer reallocated at the same address), a producer-owned generation counter (a caller bypassing the producer), comparing only the 216 packed names rather than all bound names, or first-bind-only with explicit invalidation (an API contract change). **A wrong answer is unacceptable at any speed; if none can be proven sound, keeping the full compare and recording "irreducible without an API change" is the correct outcome.**
+
+**Ladder position, sealed path, zero opt-in:** ORT 5.724 ms/sentence aggregate (CoV 0.63%) -> **1.80x**. torch isolated 16.7208 (CoV 4.39%) -> **1.62x AHEAD**. Campaign: **26.68 -> 10.294, 4.37-4.74x ORT -> 1.80x.**
+
+## ROW 227 -- `main` pushed twice today; CI is the only thing that told the truth either time.
+
+**First push, `3076d81`.** Believed green on ~20 hand-picked local gate invocations. `gh run view 33574313078`: **4 jobs red**, including `proxima-onnx (default)` failing to COMPILE (`E0425`). Not one of the ~20 local invocations was a failing configuration -- see ROW 224 for the three-way structural cause (arm64-only dev boxes hide bare-`aarch64` cfg errors; `--all-features` everywhere hides missing `required-features`; one implementation hides wrong arithmetic).
+
+**Second push, `e101f3e`** (`release/green-main`, 25 files, +1908/-300), assembled from `verify/parity-vs-widened` + `fix/rustdoc-gate` + `fix/onnx-default-build` + `perf/one-path`, verified before pushing: `scripts/proxima-tensor-gate.sh` **21 passed / 0 failed**; 4 cross-target commands (`doc`/`check` x `proxima-tensor`/`proxima-onnx` on `x86_64-unknown-linux-gnu`) EXIT 0; proxima-tensor 480 / proxima-onnx 105 / omega 97 / proxima-autograd 147; `cargo fmt --all --check` EXIT 0; BGE engagement 5760/5760 zero declines; cosine oracle exact.
+
+**Result, `gh run list --branch main` at `e101f3e`:**
+
+| job | `3076d81` | `e101f3e` |
+|---|---|---|
+| `proxima-tensor-gate.sh` | FAIL | **PASS** |
+| `omega-gate.sh (macos-latest)` | FAIL | **PASS** |
+| `proxima-onnx (default)` | FAIL | **PASS** |
+| `compare-bench (metal vs cpu)` | FAIL | **FAIL** |
+| `quic-h3-gate.sh` | (did not run) | **FAIL** |
+| `proxima-config-gate.sh` | (did not run) | **FAIL** |
+| 10 other workflows | -- | all success |
+
+```
+proxima-quic:       error: method `pooled_connection_count` is never used
+proxima-primitives: error[E0432]: unresolved import
+                    `proxima_primitives::sync::AtomicPermitPool`  (bench "atomic_permits")
+omega:              cargo bench -p omega --features metal --bench metal_vs_cpu -- --quick
+                    error: bench failed  (exit 101; underlying cause NOT captured by
+                    `gh run view --log-failed`, which showed only the wrapper)
+```
+
+**Three defects on `main`, all mine, all under fix on `fix/ci-red-remainder`.** Working hypothesis under test, not assumed: `scripts/ci-affected.py` gates jobs on changed paths, and a repo-wide `cargo fmt --all` (275 files) marks every area affected -- so gate scripts that had not run in a long time finally ran. The fix branch must prove this by running both gate scripts at `3076d81` and comparing exit codes, plus `ci-affected.py` against `git diff --name-only 3076d81..e101f3e`. **Neither error gets silenced: a dead method is either dead (delete it) or its caller was removed (that is the bug); an unresolved bench import is either a stale bench or a missing `required-features`. Reading the source decides which; a blanket `allow(dead_code)` decides nothing.**
+
+**The CI-trigger hole, fixed in this push.** `.github/workflows/proxima-tensor.yml`'s `model-formats` job branched on `matrix.tier`, and the `default` arm's `else` branch unconditionally ran `--all-features` for clippy, nextest and rustdoc. The label said "default"; the command unioned every feature on. **No gate in this repo had ever built these crates at genuinely bare default features** -- exactly how a missing `required-features` shipped undetected. Now runs bare. Re-verified across all 5 matrix crates (gguf, safetensors, onnx, model-interop, tokenizer) x {native check, native clippy, x86_64 check, x86_64 clippy} = **20/20 green**, plus rustdoc on both targets.
+
+**Five more defects that fix exposed, all the same class -- code that only breaks in a configuration nobody built:** `bge_eval.rs` 7 unconditional `cpu::` calls; `bge_route_census.rs` unused `mut` off aarch64; `proxima-model-interop` crate docs linking 5 std-gated items (broke rustdoc at bare `default = []`); and `cpu.rs` linking 3 items `perf/one-path` had just made private (`evaluate_named_via_arena`, `ARENA_CACHE`, `checkout_arena`) -- **that one broke rustdoc on EVERY target, not just cross-compiled ones.**
+
+**Also still open, named not buried:** 17 unresolved intra-doc links in `proxima-onnx/src/lower.rs` (stale paths to private items), visible only under `--document-private-items`, which no gate runs. Different class, unfixed.
+
+## ROW 228 -- the BGE lane's mechanism ledger: four candidates eliminated with numbers, one surviving, one measured and open.
+
+Every entry below is a measurement, not an argument. Recorded together because the campaign's cost this session was mostly in mechanisms that sounded right and were not.
+
+| candidate | verdict | the number that decided it |
+|---|---|---|
+| kernel arithmetic too slow (ROW 195's named lever) | **FALSIFIED** | `gemm_width_tile_neon` isolated: **48.0-48.8 GMAC/s** = ROW 20's NEON ceiling, every BGE shape, every M (ROW 210) |
+| register/accumulator starvation | **FALSIFIED** | 16 vs 20 vs 24 accumulators: **1.021x / 1.014x / 1.041x** at M=8 (ROW 210) |
+| composition / per-node glue | **FALSIFIED** | kernel is **98.6-98.8%** of in-graph GEMM time; surround 1.2-1.4%, outside 0.2-0.3% (ROW 222) |
+| single-stream cold-read latency | **FALSIFIED** | cold/warm **0.90-1.22x** across 9 cells, 64-buffer rotation, 36-144 MiB, clearing the measured 12 MiB L2 (ROW 225) |
+| concurrent heterogeneous stream pressure | **SURVIVING, UNPROVEN** | 72-node interleaved, ~648 MiB: **19.1-25.0 GMAC/s**, between single-stream-cold (33.8-48.0) and in-graph (11.6-15.3) -- but **CoV 14.71% / 17.63%, both above the trust line** |
+| per-call rebind compare | **CONFIRMED, PARTIALLY FIXED** | 11.42 -> 4.46 ms/call; still **~43%** of the 10.29 ms step (ROW 226) |
+
+**Two framings corrected by the owner mid-session, both load-bearing.** (1) "latency-bound" overstated it -- the defensible claim is *memory-system utilization is latency/parallelism limited rather than bandwidth limited*; the 132,848,640 bytes / 12-13 ms ~= 10.2-11.1 GB/s against 69.95 GB/s establishes only that we are NOT bandwidth-saturated. (2) "ORT proves it is closable with layout alone" overstated the evidence -- ORT proves it closable through **memory-access organization + kernel scheduling**; MLAS may reach its MLP via blocking, load ordering and unrolling with no prefetch instruction anywhere, so "MLAS issues no prefetch" is evidence for neither side. The corrected experiment varies ONE structural dimension per arm (block depth, rows/columns in flight, load distance, packing tile geometry, accumulator count ONLY as a memory-request multiplier -- ROW 210 settled the arithmetic-occupancy axis at 2-4%), reports **paired GB/s AND GMAC/s per cell** so the regime that moved is identifiable, and rotates over enough distinct buffers to defeat the **LLC**, not merely L2.
+
+**The target is not hypothetical: 11.6-15.3 -> 30.2 GMAC/s**, demonstrated by onnxruntime on the SAME silicon, SAME graph, SAME computation class, pure NEON, single-threaded, **no BLAS linked** (`otool -L` on `onnxruntime_pybind11_state.so`: CoreML/Foundation/CoreFoundation/libiconv/libc++/libSystem/libobjc only; `providers=["CPUExecutionProvider"]` pinned at `bench.py:160`). A shortfall is a statement about our memory-access organization, never about the hardware, the shape, or NEON. **AMX at 62.2-88.0 GMAC/s is upside BEYOND ~30, not what is required to catch ORT.**
+
+**METHOD LESSONS, both of which cost real rows.** (1) A warm single-buffer microbench and a real graph are different measurement CONTEXTS, not one number seen twice -- ROW 210's 48.0-48.8 was the kernel's cache-resident rate, read for several rows as its production rate. Nano cells for a weight-streaming workload must defeat cache or they measure a regime production never enters. (2) **Timed arms cannot share a box with anything.** Six to eight agents ran in parallel while several took timings; every contaminated cell in ROWs 219/222/225 traces to that, and the one arm that would settle the surviving mechanism is exactly the one that needed a quiet host. Correctness work (builds, tests, gates) is load-insensitive and may run concurrently; measurement may not.
