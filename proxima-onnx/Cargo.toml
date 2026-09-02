@@ -146,3 +146,7 @@ required-features = ["std"]
 [[example]]
 name = "bge_traffic_sweep"
 required-features = ["bge-eval-diag"]
+
+[[example]]
+name = "bge_batch_seal"
+required-features = ["epilogue-profile-diag"]
