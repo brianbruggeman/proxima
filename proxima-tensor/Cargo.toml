@@ -264,6 +264,10 @@ required-features = ["config"]
 name = "operand_access_table"
 required-features = ["instrument", "config"]
 
+[[example]]
+name = "bge_q4k_rate_probe"
+required-features = ["test-support", "q4k-int8-dot"]
+
 [target.'cfg(target_vendor = "apple")'.dependencies]
 # `matmul_worker_count`'s P-core-only sizing (`sysctlbyname("hw.perflevel0.logicalcpu")`)
 # needs libc unconditionally at the `std` tier on Apple only. Gated by

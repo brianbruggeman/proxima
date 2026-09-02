@@ -87,6 +87,7 @@ proxima-tensor = { features = ["std", "test-support"], path = "../proxima-tensor
 criterion.workspace = true
 proxima-core = { path = "../proxima-core", default-features = false, features = ["alloc"] }
 hdrhistogram.workspace = true
+proxima-gguf = { path = "../proxima-gguf" }
 
 [[bench]]
 name = "mnist_f32_lane"
