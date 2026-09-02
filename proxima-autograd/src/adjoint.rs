@@ -317,6 +317,18 @@ fn differentiate_core(
     // program). Indexing `grad_of` by every `Op::Input` in the FULL
     // `program` would walk off the end of `grad_of` the moment any such
     // later node existed.
+    // ROW 237: the reduce-body-Add adjoint arm above materializes a
+    // same-shape zero-anchor `Add` purely so shape inference can resolve
+    // every axis (`expr::broadcast_anchor`'s own doc); when the very next
+    // node is a `Multiply` that already resolves the same axes from its
+    // other operand, the anchor buys nothing at runtime and its own reduce
+    // consumer inherits a non-broadcast (real, materialized) operand stride
+    // that a downstream GEMM tile's row-invariance gate then declines. Run
+    // once over the whole differentiated program, not per-arm above, since
+    // every `ScalarOp::Add`/`Maximum`/`Minimum`/`Multiply` reduce-body arm
+    // builds the identical `(gradient, anchor)` shape.
+    expr::eliminate_broadcast_anchor_adds(&mut new_program);
+
     let gradients = program[..=loss_index]
         .iter()
         .enumerate()
@@ -1405,6 +1417,62 @@ mod differentiate_wanted_tests {
             differentiate_wanted(&program, loss, &[w]).expect("wanted-scoped differentiate");
         assert!(wanted.gradient_of_named("x").is_none());
         assert!(wanted.gradient_of_named("w").is_some());
+    }
+
+    /// ROW 237: `build_matmul_loss`'s `grad_w` is the exact transposed-A
+    /// shape `train_step_lane`'s real `grad_w1` node hits (`x`'s own
+    /// backward-product operand carries the reduce's contracted axis as a
+    /// genuine broadcast, not a materialized copy) -- this is the
+    /// regression test for `expr::eliminate_broadcast_anchor_adds`
+    /// (`proxima-autograd/src/expr.rs`), on the smallest fixture that
+    /// reproduces the same `differentiate_reduce`/product-rule composition
+    /// as the real MLP's node 87/88/90.
+    #[proxima::test]
+    async fn broadcast_anchor_elimination_keeps_grad_w_correct_and_drops_the_anchor() {
+        let (program, _x, _w, loss) = build_matmul_loss();
+        let x_values = [1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0];
+        let w_values = [0.0f32; 12];
+
+        let differentiated = differentiate(&program, loss).expect("full differentiate");
+        let grad_w = differentiated
+            .gradient_of_named("w")
+            .expect("w feeds the loss");
+
+        // idempotence proof: a second pass over the already-differentiated
+        // program finds nothing left to rewrite -- `differentiate_core`
+        // already ran this pass to a fixed point, so the same defining
+        // `Multiply` no longer references a materialized zero-anchor `Add`.
+        let mut rerun = differentiated.program.clone();
+        expr::eliminate_broadcast_anchor_adds(&mut rerun);
+        assert_eq!(
+            rerun, differentiated.program,
+            "eliminate_broadcast_anchor_adds must be a no-op on an already-rewritten program"
+        );
+
+        // closed-form oracle, independent of central-difference machinery:
+        // `loss = sum_i sum_k sum_j x[i,j] * w[j,k]`, so
+        // `d(loss)/d(w[j,k]) = sum_i x[i,j]` for every `k` -- `x` row-major
+        // `[2,3]` gives column sums `[5, 7, 9]`, broadcast across all 4
+        // columns of `w`'s own `[3,4]` shape.
+        let evaluated = proxima_tensor::cpu::evaluate_named(
+            &differentiated.program,
+            &[],
+            &[("x", &x_values), ("w", &w_values)],
+            &[grad_w],
+        )
+        .expect("differentiated program evaluates");
+        let grad_w_values = &evaluated.get(grad_w).expect("requested").0;
+        let expected_row_sums = [5.0f32, 7.0, 9.0];
+        for row in 0..3usize {
+            for col in 0..4usize {
+                let actual = grad_w_values[row * 4 + col];
+                assert!(
+                    (actual - expected_row_sums[row]).abs() < 1e-6,
+                    "grad_w[{row}][{col}]: expected {} (closed-form column sum), got {actual}",
+                    expected_row_sums[row]
+                );
+            }
+        }
     }
 }
 
