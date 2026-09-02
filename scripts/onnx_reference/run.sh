@@ -20,6 +20,11 @@
 #                         this writing)
 #   ONNX_REF_RUNS          runs per arm (default: 5, matches bge_eval.rs's
 #                         own BGE_EVAL_RUNS default)
+#   ONNX_REF_MODE          "isolated" (default) -- each arm runs in its own
+#                         subprocess, PID-verified; "same-process" -- both
+#                         arms in one process, the OLD convention, kept only
+#                         as a labeled control reproducing a known 1.76x
+#                         cross-arm-contamination artifact (see README)
 
 set -euo pipefail
 
@@ -56,6 +61,6 @@ else
 fi
 
 echo
-echo "running bench.py (BGE_MODEL_PATH=$BGE_MODEL_PATH, runs=${ONNX_REF_RUNS:-5})…"
+echo "running bench.py (BGE_MODEL_PATH=$BGE_MODEL_PATH, runs=${ONNX_REF_RUNS:-5}, mode=${ONNX_REF_MODE:-isolated})…"
 echo
-BGE_MODEL_PATH="$BGE_MODEL_PATH" ONNX_REF_RUNS="${ONNX_REF_RUNS:-5}" "$VENV_DIR/bin/python" "$HERE/bench.py"
+BGE_MODEL_PATH="$BGE_MODEL_PATH" ONNX_REF_RUNS="${ONNX_REF_RUNS:-5}" ONNX_REF_MODE="${ONNX_REF_MODE:-isolated}" "$VENV_DIR/bin/python" "$HERE/bench.py"
