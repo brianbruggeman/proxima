@@ -33,37 +33,43 @@
 //!
 //! # Execution model
 //!
-//! One `MTLCommandBuffer` per [`execute`] call, not per op: every `BoundOp`
-//! in the program is encoded — its own `MTLComputeCommandEncoder`, ended
-//! before the next op's encoder is opened — into that SAME command buffer,
-//! and only then is it `commit()`ted and `waitUntilCompleted()` exactly
-//! once, in [`execute`]. Every expression used to pay a full CPU<->GPU
-//! round trip; batching means only the genuine program outputs
-//! (`finish`'s `effective_outputs`) ever cross back to the host, and
-//! intermediates never do (they already didn't — `device_buffers` keeps
-//! them GPU-resident between ops; what changes here is that the CPU no
-//! longer blocks between ops either).
+//! One `MTLCommandBuffer` AND one `MTLComputeCommandEncoder` per [`execute`]
+//! call: every `BoundOp` in `prepared.resolved` is encoded, in program
+//! order, into that SAME encoder (see `encode_op`'s call site), the encoder
+//! is `endEncoding()`d exactly once after the loop, and only then is the
+//! command buffer `commit()`ted and `waitUntilCompleted()` exactly once, in
+//! [`execute`]. Every expression used to pay a full CPU<->GPU round trip;
+//! batching means only the genuine program outputs (`finish`'s
+//! `effective_outputs`) ever cross back to the host, and intermediates
+//! never do (they already didn't — `device_buffers` keeps them
+//! GPU-resident between ops; what changes here is that the CPU no longer
+//! blocks between ops either).
 //!
-//! Ordering is guaranteed, not assumed: a later op reading a buffer an
-//! earlier op wrote is correct because every buffer here comes from
-//! `device.newBuffer*` (see `allocate_buffer`, `upload_block`) with
-//! `MTLResourceOptions::StorageModeShared` only — never
+//! Ordering is guaranteed, not assumed: `computeCommandEncoder()` (no
+//! dispatch-type argument) defaults to `MTLDispatchTypeSerial`, so the
+//! encoder's dispatches execute in encode order, and a later op reading a
+//! buffer an earlier op wrote sees that write because every buffer here
+//! comes from `device.newBuffer*` (see `allocate_buffer`, `upload_block`)
+//! with `MTLResourceOptions::StorageModeShared` only — never
 //! `HazardTrackingModeUntracked` — and a buffer's `hazardTrackingMode` for
 //! any resource created directly from a device (as opposed to a heap)
 //! defaults to tracked (`objc2-metal-0.3.2`'s
 //! `src/generated/MTLResource.rs:326-329`: "Resources created from heaps
 //! are by default untracked, whereas resources created from the device are
-//! by default tracked."). Metal's documented contract for a tracked
-//! resource is that it inserts an implicit execution barrier between two
-//! encoders in the *same* command buffer whenever the later one reads what
-//! the earlier one wrote. That guarantee composes with [`execute`] encoding
+//! by default tracked."). That guarantee composes with [`execute`] encoding
 //! `prepared.resolved` strictly in program order (the same order
 //! `prepare`'s own [`proxima_tensor::node_retirement`] call already relies on for liveness), so
-//! sequential encode order plus default hazard tracking is the mechanism —
+//! serial dispatch order plus default hazard tracking is the mechanism —
 //! not an assumption that the GPU happens to serialize. This holds equally
 //! for the no-copy buffers `upload_block` hands out (see "Host buffer
 //! upload" below): `newBufferWithBytesNoCopy_length_options_deallocator`
 //! takes the same `MTLResourceOptions`, so its hazard mode is identical.
+//!
+//! llama.cpp's `ggml-metal.m` at its default `n_cb=1` uses the identical
+//! shape — one command buffer, one encoder per token — so encoder count is
+//! not where the two runtimes' decode paths diverge: measured this
+//! session, GPU kernel time is 83.2% of the decode step and orchestration
+//! is 16.8%.
 //!
 //! Every `MTLBuffer` is `storageModeShared`: on Apple Silicon's unified
 //! memory, that makes reading a result back a plain pointer read, no blit
@@ -512,10 +518,9 @@ pub fn execute_plan(plan: &Plan, blocks: &[QuantizedBlock<'_>]) -> Result<Evalua
     // serial encoder is Metal's documented behavior for tracked resources
     // (every buffer here is `storageModeShared`, never
     // `HazardTrackingModeUntracked` -- see the module doc's "Execution
-    // model"), so this is the SAME correctness argument that section already
-    // makes for two encoders in one command buffer, just one level tighter:
-    // one encoder's own dispatches were always ordered and hazard-tracked
-    // relative to each other, encoder boundaries or not.
+    // model"), so this is the SAME correctness argument that section makes
+    // for this one encoder's dispatches: they were always ordered and
+    // hazard-tracked relative to each other, encoder boundaries or not.
     let encoder =
         command_buffer
             .computeCommandEncoder()
