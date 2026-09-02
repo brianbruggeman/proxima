@@ -134,3 +134,7 @@ required-features = ["epilogue-profile-diag"]
 [[example]]
 name = "bge_route_census"
 required-features = ["epilogue-profile-diag"]
+
+[[example]]
+name = "bge_traffic_sweep"
+required-features = ["bge-eval-diag"]
