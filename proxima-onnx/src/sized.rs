@@ -1,6 +1,6 @@
 //! Build-time constants -- the no_std+alloc floor's only configuration
 //! surface (conflaguration's tier-2 pattern: constants ARE the config
-//! below `std`). At `std`, [`crate::config::OnnxParserConfig`] seeds its
+//! below `std`). At `std`, `OnnxParserConfig` (std-only) seeds its
 //! runtime default from this, never re-declaring it, so the two can never
 //! drift apart (`defaults_track_the_sized_floor` in `config.rs` pins the
 //! invariant).
