@@ -513,6 +513,18 @@ pub struct StaticArena {
     root: NodeId,
     input_names: Vec<(NodeId, String)>,
     buffers: Vec<Option<Vec<f32>>>,
+    /// Every [`input_names`] node [`build_static_arena_with_constants`]'s own
+    /// `constant_inputs` loop already bound with real data before this arena
+    /// was handed back — `bind_named_inputs_into_arena`'s own `require_all`
+    /// check reads this so a caller who stops re-passing an already-bound
+    /// weight every call is not an unbound-input error: the byte compare
+    /// this field lets a caller skip is the same 132 MB memcmp
+    /// `docs/discipline.md`'s rebind-identity task measured at ~4.46 ms/call
+    /// of BGE's sealed evaluate. A name absent here still goes through the
+    /// full bind-and-compare path the instant a caller DOES re-pass it
+    /// (`bind_named_inputs_into_arena`'s `Some(data)` arm never consults
+    /// this set), so a re-sent constant is exactly as safe as before.
+    constant_bound: BTreeSet<NodeId>,
     /// Nodes in `resolved` with zero consumers among every other resolved
     /// node's own operands and no membership in `effective_outputs` —
     /// `docs/discipline.md` ROW 166's own dead node (`bind`'s
@@ -790,6 +802,7 @@ pub fn build_static_arena_with_constants(
     // value too — matches `bind_named_inputs_into_arena`'s own per-slot
     // copy, just against the zero-initialized buffer this function itself
     // just built above.
+    let mut constant_bound = BTreeSet::new();
     for (name, data) in constant_inputs {
         let (node, _) = input_names
             .iter()
@@ -807,6 +820,7 @@ pub fn build_static_arena_with_constants(
             });
         }
         slot.copy_from_slice(data);
+        constant_bound.insert(*node);
     }
 
     for computed in &resolved {
@@ -835,6 +849,7 @@ pub fn build_static_arena_with_constants(
         root,
         input_names,
         buffers,
+        constant_bound,
         dead,
         static_nodes,
         packed_width_panels,
@@ -896,7 +911,9 @@ fn f32_slice_as_bytes(slice: &[f32]) -> &[u8] {
     // SAFETY: `f32` is `Copy`, has no padding bytes, and `u8`'s alignment
     // (1) never exceeds `f32`'s -- reinterpreting the same backing memory as
     // `size_of_val(slice)` bytes is always valid.
-    unsafe { core::slice::from_raw_parts(slice.as_ptr().cast::<u8>(), core::mem::size_of_val(slice)) }
+    unsafe {
+        core::slice::from_raw_parts(slice.as_ptr().cast::<u8>(), core::mem::size_of_val(slice))
+    }
 }
 
 /// [`evaluate_named_with_arena`]'s own input-binding loop, factored out so
@@ -918,6 +935,12 @@ fn bind_named_inputs_into_arena(
             .map(|(_, data)| *data);
         let data = match found {
             Some(data) => data,
+            // A name `build_static_arena_with_constants`'s own `constant_inputs`
+            // loop already bound is correct in the arena right now without
+            // being re-passed -- `require_all` asks "is every genuine input
+            // satisfied", not "is every name present in `named`", and a
+            // constant-bound weight satisfies the former by construction.
+            None if require_all && arena.constant_bound.contains(node) => continue,
             None if require_all => return Err(TensorError::UnboundInputName(name.clone())),
             None => continue,
         };
@@ -1144,9 +1167,7 @@ static ARENA_CACHE: Mutex<Vec<CachedArena>> = Mutex::new(Vec::new());
 /// continuing is safe and matches this crate's own "no unwrap/expect
 /// outside tests" discipline better than propagating a poison panic would.
 fn lock_arena_cache() -> MutexGuard<'static, Vec<CachedArena>> {
-    ARENA_CACHE
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner)
+    ARENA_CACHE.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
 /// Engagement evidence for the cache above: how many [`checkout_arena`]
@@ -20185,6 +20206,51 @@ mod tests {
                 .expect("sum output present"),
             &naive_matmul(&x, &w_second, m, k, n),
             1e-4,
+        );
+    }
+
+    /// The bind-weights-once safety case (`docs/discipline.md`, rebind-identity
+    /// task, 2026-09-01): `b` is bound ONCE at build time via
+    /// `constant_inputs`, then never repeated in `named` on the first
+    /// `evaluate_named_with_arena` call -- `require_all = true` must still
+    /// succeed (`StaticArena::constant_bound` satisfies it), and the
+    /// answer must reflect the bound bytes, not zero. A SECOND call then
+    /// DOES re-pass `b`, with DIFFERENT bytes: this is the safety half --
+    /// `bind_named_inputs_into_arena`'s `Some(data)` arm never consults
+    /// `constant_bound`, so a caller who re-sends a constant is exactly as
+    /// correct as one who never used `constant_inputs` at all, and the
+    /// answer must reflect the NEW bytes.
+    #[test]
+    fn evaluate_named_with_arena_answers_a_constant_bound_input_without_a_repass_and_still_honors_a_repass()
+     {
+        let (program, sum) = named_add_program();
+        let a = vec![1.0f32, 2.0, 3.0, 4.0];
+        let b_first = vec![10.0f32, 20.0, 30.0, 40.0];
+
+        let mut arena =
+            build_static_arena_with_constants(&program, &[], &[sum], &[("b", &b_first)])
+                .expect("build arena with b bound at construction time");
+
+        // First call: `named` carries ONLY `a` -- `b` is never re-passed.
+        // `require_all = true` must not raise `UnboundInputName` for `b`.
+        let first = evaluate_named_with_arena(&mut arena, &[("a", &a)])
+            .expect("require_all is satisfied by a constant-bound input without a repass");
+        assert_eq!(
+            first.get(sum).map(|(data, _)| data.to_vec()),
+            Some(vec![11.0f32, 22.0, 33.0, 44.0]),
+            "first call must reflect the constant_inputs-bound b, not a zero-filled slot"
+        );
+
+        // Second call: `b` IS re-passed, with DIFFERENT bytes than the
+        // constant_inputs bind. The rebind byte-compare must still catch
+        // this and the answer must reflect the NEW b, never the old one.
+        let b_second = vec![100.0f32, 200.0, 300.0, 400.0];
+        let second = evaluate_named_with_arena(&mut arena, &[("a", &a), ("b", &b_second)])
+            .expect("a caller may still repass a constant-bound input");
+        assert_eq!(
+            second.get(sum).map(|(data, _)| data.to_vec()),
+            Some(vec![101.0f32, 202.0, 303.0, 404.0]),
+            "a repassed constant-bound input with different bytes must invalidate the stale value"
         );
     }
 
