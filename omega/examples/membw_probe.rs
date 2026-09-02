@@ -18,12 +18,24 @@
 //!     threaded and multi-threaded (`std::thread::available_parallelism`).
 //!     One add per element — as close to zero arithmetic-per-byte as a
 //!     reduction can get without becoming a no-op the compiler deletes.
-//!   - Metal: the same shape (one full reduce-to-scalar, Add, over one big
-//!     f32 buffer), run through `omega::execute_plan` at two buffer sizes so
-//!     the marginal difference cancels the per-call fixed cost — the SAME
-//!     two-size technique `q4k_matvec_probe` uses and this file's own ROW 71
-//!     established as mandatory once a single-size number was shown to
-//!     conflate kernel-bandwidth with per-call driver overhead.
+//!   - Metal: a streaming COPY, not a reduction — `Op::Elementwise` with a
+//!     one-operand `Negate` body, identity index map, one GPU thread per
+//!     element: each thread reads its own f32 and writes its own f32, with
+//!     no cross-thread fold and no atomic. A reduce-to-scalar (this file's
+//!     prior shape, struck as ROW 193's own logged debt) serializes on the
+//!     final accumulator and measures dispatch/serialization cost, not
+//!     memory bandwidth; a streaming elementwise op has no such fold, so its
+//!     achieved rate is bounded only by how fast the device can move bytes.
+//!     Bytes counted are READ + WRITE (`2 * elements * 4`), the true traffic
+//!     a copy generates — halving that would silently relabel this as a
+//!     read-only number it never measured. Run through `omega::execute_plan`
+//!     at two buffer sizes so the marginal difference cancels the per-call
+//!     fixed cost — the SAME two-size technique `q4k_matvec_probe` uses and
+//!     this file's own ROW 71 established as mandatory once a single-size
+//!     number was shown to conflate kernel-bandwidth with per-call driver
+//!     overhead. A sweep across sizes spanning below/at/above this host's
+//!     cache tiers (256 KiB L1-ish, 8 MiB within L2, 64/256 MiB past SLC)
+//!     is also reported per-size so the DRAM-bound asymptote is visible.
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
@@ -120,11 +132,13 @@ fn run_cpu_arm() {
 #[cfg(all(feature = "metal", feature = "cpu", target_os = "macos"))]
 fn run_metal_arm() {
     use proxima_tensor::{
-        DType, Extent, IndexMap, Keep, NodeId, Op, QuantizedBlock, Reduce, ReduceInit, ScalarOp,
-        append, map,
+        DType, Extent, IndexMap, NodeId, Op, QuantizedBlock, ScalarOp, append, map,
     };
 
-    fn full_reduce_program(elements: u32) -> (Vec<Op>, NodeId) {
+    // pipe question: `Op::Elementwise` with a unary `Negate` body and an
+    // identity index map is an existing primitive -- one GPU thread reads
+    // its own element and writes its own element, no fold, no new type.
+    fn streaming_copy_program(elements: u32) -> (Vec<Op>, NodeId) {
         let mut program = Vec::new();
         let source = append(
             &mut program,
@@ -134,30 +148,38 @@ fn run_metal_arm() {
                 name: None,
             },
         );
-        let sum = append(
+        let copy = append(
             &mut program,
-            Op::Reduce(Reduce {
+            Op::Elementwise {
                 dtype: DType::Float32,
-                body: ScalarOp::Add,
-                init: ReduceInit::Zero,
-                operand: source,
-                in_map: IndexMap::Affine(map::projection(1, &[0])),
-                out_map: IndexMap::Affine(map::projection(1, &[])),
-                keep: Keep::Reduce,
+                body: ScalarOp::Negate,
+                operands: vec![(source, IndexMap::Affine(map::projection(1, &[0])))],
                 name: None,
-            }),
+            },
         );
-        (program, sum)
+        (program, copy)
     }
 
-    fn measure(elements: u32, runs: usize) -> (f64, f64) {
-        let bytes = f64::from(elements) * 4.0;
+    fn cov(samples_ms: &[f64]) -> f64 {
+        let mean = samples_ms.iter().sum::<f64>() / samples_ms.len() as f64;
+        let variance = samples_ms
+            .iter()
+            .map(|value| (value - mean).powi(2))
+            .sum::<f64>()
+            / samples_ms.len() as f64;
+        (variance.sqrt() / mean) * 100.0
+    }
+
+    // read + write: a streaming copy moves both directions, and reporting
+    // only the read half would understate real traffic.
+    fn measure_samples(elements: u32, runs: usize) -> (f64, Vec<f64>) {
+        let bytes = f64::from(elements) * 4.0 * 2.0;
         let data: Vec<f32> = (0..elements)
             .map(|index| (f64::from(index) * 1e-6).sin() as f32)
             .collect();
-        let (program, sum) = full_reduce_program(elements);
+        let (program, copy) = streaming_copy_program(elements);
         let blocks = [QuantizedBlock::Float32(&data)];
-        let resolved = omega::plan(&program, &[], &blocks, &[sum]).expect("membw probe plans");
+        let resolved = omega::plan(&program, &[], &blocks, &[copy]).expect("membw probe plans");
         omega::execute_plan(&resolved, &blocks).expect("membw probe warms up");
         let mut samples = Vec::with_capacity(runs);
         for _ in 0..runs {
@@ -166,6 +188,11 @@ fn run_metal_arm() {
             samples.push(started.elapsed().as_secs_f64() * 1000.0);
             black_box(out);
         }
+        (bytes, samples)
+    }
+
+    fn measure(elements: u32, runs: usize) -> (f64, f64) {
+        let (bytes, mut samples) = measure_samples(elements, runs);
         samples.sort_by(f64::total_cmp);
         (samples[0], bytes)
     }
@@ -182,7 +209,7 @@ fn run_metal_arm() {
     let marginal_gbs = (delta_bytes / 1e9) / (delta_ms / 1000.0);
 
     println!(
-        "membw_probe Metal arm: pattern=full reduce-to-scalar (Add), one add per element, {RUNS} runs, min per size"
+        "membw_probe Metal arm: pattern=streaming copy (Elementwise Negate, read+write, one op per element), {RUNS} runs, min per size"
     );
     println!(
         "  small  buffer={:.1} MB  min={small_ms:.3} ms  single-size={:.1} GB/s",
@@ -198,6 +225,27 @@ fn run_metal_arm() {
         "  MARGINAL (large-small, cancels per-call fixed cost): {:.1} MB in {delta_ms:.3} ms = {marginal_gbs:.1} GB/s",
         delta_bytes / 1e6
     );
+
+    // Cache-tier sweep: below L1 tile, within L2, at/above SLC, well past
+    // SLC into pure DRAM -- so the DRAM-bound asymptote is visible rather
+    // than assumed from the two-size marginal alone.
+    println!("  cache-tier sweep (elements, MB, min ms, GB/s, CoV%):");
+    for elements in [
+        64 * 1024,        // 256 KiB, sub-L1
+        2 * 1024 * 1024,  // 8 MiB, within M1 Max per-cluster L2 (12 MiB)
+        16 * 1024 * 1024, // 64 MiB, past the ~48 MiB SLC
+        64 * 1024 * 1024, // 256 MiB, deep DRAM
+    ] {
+        let (bytes, mut samples) = measure_samples(elements, RUNS);
+        samples.sort_by(f64::total_cmp);
+        let min_ms = samples[0];
+        let sweep_cov = cov(&samples);
+        println!(
+            "    elements={elements:<10} {:>8.2} MB  min={min_ms:.4} ms  {:.1} GB/s  CoV={sweep_cov:.2}%",
+            bytes / 1e6,
+            (bytes / 1e9) / (min_ms / 1000.0)
+        );
+    }
 }
 
 #[cfg(not(all(feature = "metal", feature = "cpu", target_os = "macos")))]
