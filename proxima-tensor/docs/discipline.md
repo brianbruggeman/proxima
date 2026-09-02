@@ -18220,3 +18220,77 @@ C/A = **0.6965**.
 **Correctness.** `bge_eval` release run reproduces the cosine oracle EXACTLY: 0.936311 / 0.378777 / 0.334176.
 
 **Gates (N asserted).** proxima-tensor `std,instrument` **477 passed**/5 skipped/0 failed; proxima-onnx all-features **103 passed**/4 skipped; `real_mnist_accuracy` release run-ignored **1 passed, exactly 0.9900**; `rewrite_law_equivalence` 5 passed/1 ignored (the pre-existing law-4-PROPOSED stub); clippy `-D warnings` clean; no-default-features+alloc clean. Branch `perf/width-gate-decline`, commit `7cba12f`, off `perf/route-census` `c9e13d2`, not pushed. 4 files: `proxima-tensor/src/cpu.rs`, `proxima-tensor/src/instrument.rs`, `proxima-onnx/src/lower.rs`, `proxima-onnx/examples/bge_route_census.rs`.
+
+## ROW 216 -- the 12 `softmax@V` nodes reach the NEON kernel: `width_tile_plan` 72/96 -> 84/96. Discharges ROW 215's named residual for one of its two classes; the other is a recorded negative.
+
+**Pipe question, answered before building.** Expressible with existing machinery: four fields (`outer_extent`, `outer_stride_a`, `outer_stride_b`, `outer_stride_out`) on the EXISTING `WidthTilePlan` struct. `ConvGemmTilePlan` already carries exactly this shape for its REDUCTION axes; this applies the same shape to the LEADING axes. `run_width_tile_neon` gains an outer loop wrapping its existing walk with a shadowed, offset-adjusted `local_plan`. No new function, no new struct. Second binary question, answered by writing the call site both ways: the call site (`try_run_width_tile`) is character-identical before and after; what changed is that `width_tile_plan` now resolves which of two leading axes is "row" (b-constant) versus "outer" (both operands step by it, decided via `layout_b.stride`) and returns `Some` when the split proves out, instead of rejecting `AxesShape` unconditionally. The diff is entirely inside the gate -- a real capability, not a relocation.
+
+**NANO at the deployed shape set, 7 repeats** (`cpu::tests::attention_tile_shapes_nano`, `#[ignore]`d), `softmax@V` inner `(M,M)x(M,32)`:
+
+| M | K | N | scalar ns (CoV) | NEON ns (CoV) | NEON speedup | Accelerate ns (CoV) | Accel speedup |
+|---|---|---|---|---|---|---|---|
+| 7 | 7 | 32 | 11506.0 (0.005) | **1970.3** (0.405) | **5.840x** | 3666.4 (0.033) | 3.138x |
+| 8 | 8 | 32 | 15226.1 (0.089) | **1886.9** (0.224) | **8.070x** | 3577.7 (0.013) | 4.256x |
+| 9 | 9 | 32 | 18160.6 (0.002) | **2143.0** (0.034) | **8.474x** | 4720.3 (0.015) | 3.847x |
+
+NEON wins at every real M AND beats Accelerate at every real M, so **the Accelerate route was deliberately NOT wired for this class** -- the field addition alone suffices, and adding a second route with its own toggle would have been surface bought for nothing.
+
+**`Q@K^T` (12 nodes): NOT ROUTED, a measured negative.** Inner shape `(M,32)x(32,M)`: N = seq_len = 7/8/9, always below `WIDTH_TILE_VECS*4 = 16`, so `width_tile_plan`'s pre-existing `NarrowWidth` gate declines it regardless of this fix -- NEON is STRUCTURALLY excluded, exactly as the dispatch anticipated. Accelerate measured 8.274x at M=8 and 4.266x at M=9 -- but **two independent runs of M=7 disagreed on DIRECTION** (0.197x, i.e. 5x slower, vs 1.181x; CoV 2.209 and 1.010) on a box at load 8-10 of 10 cores. The kill-early bar is "faster at EVERY real shape in the class" and M=7 does not meet it with any confidence. Building a production Accelerate-width route on an unresolved M=7 reading is precisely the ROW 198 mistake that cost 1.8x e2e. Declined and recorded.
+
+**Engagement, asserted:** `bge_route_census` reports `width_tile_plan gate: 5040 of 5760` = **84 of 96 nodes** (was 72). The 12 remaining declines are named individually -- `%277 %387 %497 %607 %717 %827 %937 %1047 %1157 %1267 %1377 %1487` (`attention/self/MatMul`, layers 0-11), reason `NarrowWidth`, `m=96 k=32 n=8`. **Named next lever:** ROW 210 made `VECS` a const generic, so a `VECS=2` (8-column) instantiation matches `n=8` exactly and is now cheap to try. Not attempted -- the seal took priority and a second agent on the box would have contaminated it.
+
+**Correctness.** Bit-identical for every pre-existing single-leading-axis node by construction (`outer_extent=1` runs the loop once at zero offset). The new nano test asserts multi-head NEON output against a scalar reference to <1e-4; the Accelerate comparison arm uses <1e-3 (f32 BLAS reassociation, stated). `bge_eval --release` reproduces the cosine oracle exactly: 0.936311 / 0.378777 / 0.334176.
+
+**Process note, recorded because it is a trap for the next session:** `cargo fmt -p proxima-tensor` was run once and reformatted **40 files, 5200+ lines in `cpu.rs` alone** -- this repo's committed style does NOT match installed `rustfmt 1.9.0` defaults. Reverted before anything was lost. `cargo fmt` must not be run crate-wide here until the config divergence is investigated.
+
+**Gates (N asserted).** proxima-tensor `std,instrument` **477 passed**/6 skipped/0 failed; proxima-onnx all-features **103 passed**/4 skipped; `real_mnist_accuracy` 1 passed; `rewrite_law_equivalence` 5 passed/1 ignored; clippy clean; no-default-features+alloc clean. Branch `perf/attention-tile`, commit `8d3df0e`, off `perf/width-gate-decline` `7cba12f`.
+
+## ROW 217 -- SIX BRANCHES INTEGRATED AND THE LANE IS SEALED ON A QUIET BOX. This is the first BGE number in this log measured with every landed lever in one binary.
+
+**Merge, `perf/bge-integration`, tip `4e76294`.** Order: `width-tile-accs` `15b02cf` (const-generic refactor, the base every kernel edit rebases onto) -> `width-gate-decline` `7cba12f` (carries `route-census` `c9e13d2`) -> `unify-arena-fusion` `623e6b5` -> `amx-width-tile` `a03b96d` -> `plan-cache` `e5bdb8e` -> `attention-tile` `8d3df0e`. First five merged clean. **The sixth had a real conflict AND a silent one:** `attention-tile` predates the const-generic refactor, so it still used `gemm_width_tile_neon::<ROWS>` with the flat `[[f32; VECS*4]; ROWS]` output; worse, git's 3-way merge auto-picked attention-tile's OLD-shape row-remainder macro body OUTSIDE any conflict marker -- a divergence the merge never flagged. Resolved by hand-reconstructing the whole function: HEAD's const-generic signature and nested `[[[f32;4];VECS];ROWS]` output kept authoritative, attention-tile's `outer_step` loop applied onto that shape wrapping both the main walk and the remainder macro. **The lesson is the unflagged one: a clean-looking 3-way merge in a file two branches both restructured can silently take the wrong side outside the markers. `cargo check` after EVERY merge, never five then debug, is what caught it** -- along with a downstream signature mismatch (a nano-bench call site still passing 13 args to `try_run_accelerate_sgemm` from before `transpose_b` was added).
+
+**Diagnostic print block REMOVED** (ROW 213's third residual). The ~17-30 `eprintln!` lines per call in `evaluate_quantized_with_scratch` had inverted the SIGN of two independent measurements this session (ROW 213's H4 sizing, and ROW 214's arm-D anomaly). Real signal preserved into the crate's existing counter mechanism, never an env-gated file dump: `EVALUATE_QUANTIZED_*` counters plus `evaluate_quantized_phase_totals()`/`reset_evaluate_quantized_phase()`, and new `reduce_path_totals()` / `elementwise_phase_totals()` / `elementwise_bodyshape_totals()` accessors exposing counters that already existed but were only ever drained by the removed print. Dead `diag_node_kind_label` deleted. `mnist_diag.rs` grepped stderr for `mac_ops=`; repointed at `instrument::totals().mac_ops`.
+
+**ENGAGEMENT, asserted at two checkpoints and cross-checked independently:** 72/96 after merges 1-5, **84/96 after merge 6** (`5040 of 5760`), corroborated off a different path by `bge_width_tile_accelerate_milli`'s own `engagement-hits=5040`. The 12 `NarrowWidth` declines reproduced by name and reason.
+
+**THE SEAL** (quiet box confirmed empty twice 60s apart; every binary built before any timed arm).
+
+*Arm 1 -- sealed `bge_eval`, default config, 5 runs:* M=8 **16.588 ms CoV 3.98%**, M=9 **18.097 CoV 0.42%**, M=7 **17.122 CoV 0.54%**.
+
+*Arm 2 -- `StaticArena` path, NEON vs Accelerate, 60 calls/arm/run x 5 runs, engagement 5040:*
+
+| sentence | NEON ms (CoV) | Accelerate ms (CoV) | ratio |
+|---|---|---|---|
+| M=8 | 16.968 (0.31%) | **9.734 (0.76%)** | 0.574x (-42.6%) |
+| M=9 | 18.965 (0.52%) | **10.118 (0.31%)** | 0.534x (-46.7%) |
+| M=7 | 17.864 (0.19%) | 13.879 (**5.75% -- UNQUOTABLE, range 12.9-14.9 ms**) | 0.777x |
+
+`max_abs_diff(neon, accelerate) = 0` on every sentence.
+
+*Arm 3 -- cold vs cached lowering:* cached **16.622 / 18.668 / 17.558 ms** (CoV 1.80-2.48%); uncached 38.838 / 39.627 / 42.254 ms at **CoV 11.09-14.07% -- UNQUOTABLE, ranges 33.0-44.3 / 36.7-48.7 / 35.6-52.3 ms**. ~2.3x, and the uncached rung is noisy enough that only the range is honest.
+
+*Arm 4 -- incumbents, same `model.onnx`, quiet re-take:* **onnxruntime 5.724 ms/sentence CoV 0.63%** (per sentence 4.735 / 6.327 / 6.110, CoV 0.34-0.79%); **torch 15.988 CoV 4.47%** (per sentence CoV 4.34-4.62%, all now under the trust line -- ROW 209's 16.79% debt is discharged).
+
+**AN INCONSISTENCY IN ARM 4, NAMED NOT SMOOTHED.** The integrator's first attempt at this arm ran concurrently with two of its own background builds, self-caught, discarded, and re-run alone. But the CONTAMINATED run measured torch at ~9.7-10.6 ms (matching ROW 195's own 10.036) and the CLEAN run measures ~16.0 ms. **A quiet box producing a slower number than a loaded one is backwards, and it is not explained.** Both cannot be torch's steady state under the stated single-thread config. The clean run is tabled because protocol says so, but the pair is an open inconsistency, and it puts ROW 195's own 10.036 torch cell in question too. **Work item: torch's arm needs a third measurement with `torch.get_num_threads()` and thermal state captured at run time -- the candidate mechanisms are a thread-count setting not actually taking effect in one of the runs, or CPU boost residency differing between them.** Do not quote either torch number as settled until that runs. onnxruntime is unaffected: 5.724 CoV 0.63% clean, within 1.0% of ROW 209's 5.6682 and 1.7% of ROW 195's 5.6296 -- three independent takes agreeing.
+
+*Arm 5 -- mnist lane:* ours (generic `evaluate_named`, criterion) **0.613 ms/image** (CI [608.96, 616.53] us, sweep CoV 2.79%), accuracy 0.9900; **burn** (`NdArray<f32>`, single-thread, no SIMD -- burn's own FLOOR config) 0.921 ms, CoV 2.70%, accuracy 0.9900. **ROW 187's position INVERTS: the generic path was 1.16-1.18x BEHIND burn's floor; it now measures 1.50x AHEAD of it.** Caveat kept attached: this is burn's reduced config, its full default remains unmeasured, and the comparison is generic-vs-burn -- **no "ours, specialized" arena arm exists in the mnist lane** (`StaticArena` is wired for BGE only; `mnist_f32_lane.rs`/`mnist_tail_soak.rs` exercise only the generic path). Named rather than fabricated.
+
+**LADDER POSITION, sealed, against onnxruntime's own per-sentence numbers and the ROW 212-corrected AMX machine roofline (1.94-2.75 ms):**
+
+| sentence | ours, best sealed arm | ORT | x ORT | x AMX roofline |
+|---|---|---|---|---|
+| M=8 | 9.734 | 4.735 | **2.06x** | 3.5-5.0x |
+| M=9 | 10.118 | 6.327 | **1.60x** | 3.7-5.2x |
+| M=7 | ~12.9-14.9 | 6.110 | 2.11-2.44x | 4.7-7.7x |
+
+Campaign start (ROW 191/195) was 26.68 ms/sentence and 4.37-4.74x ORT. **Sealed today: 9.734-10.118 ms at the two quotable sentence lengths, 1.60-2.06x ORT.**
+
+**THE HONEST GAP THIS SEAL EXPOSES, stated because it is the next task and not a footnote: arm 1 and arm 2 are different harnesses.** `bge_eval.rs:57` -- the SEALED harness -- still calls plain `cpu::evaluate_named` and measures **16.588 ms**. The 9.734 ms lives on the `StaticArena` path with Accelerate on. Everything needed to unify them is now landed in one tree (ROW 214 ported fusion into the arena and proved it bit-identical; ROW 212 built the Accelerate route; ROW 211 cached the lowering) -- **but `bge_eval` has not been repointed at it, so the shipping number is still 16.588, not 9.734.** This is the SAME defect class as ROW 207's "default-on" packing that reached no production caller, recurring one level up. It is the single highest-value remaining item and it is now a wiring change, not a port.
+
+**Gates (N asserted, all green).** proxima-tensor `std,instrument` **477 passed**/6 skipped/0 failed; proxima-onnx all-features **105 passed**/4 skipped (includes `pipeline_full_test_split_accuracy_is_exactly_0_9900` PASS and `bge_arena_fusion_bit_identity` PASS); proxima-autograd all-features **147/147** (the slow real-training test run separately at 105s -- nextest's 60s default killed it under the tool's 120s cap, not a failure); `real_mnist_accuracy` 1 passed -- **this test asserts `>= 0.95`, NOT exactly 0.9900** (`real_mnist_accuracy.rs:186`; the exact assertion is in `tile_pipeline_differential.rs`, also PASS -- an earlier dispatch of mine named the wrong test as the accuracy gate and a real regression could have passed it); `rewrite_law_equivalence` 5 passed/1 ignored; clippy on the three changed crates clean; `--no-default-features --features alloc` clean; `cargo doc` clean. **`cargo clippy --workspace` cannot run on this host** -- `proxima-net`'s build script requires `pkg-config libdpdk`, absent; pre-existing environment limitation, untouched by these merges, scoped to the three changed crates instead and said so rather than reporting a workspace-clean that never ran. Cosine oracle 0.936311 / 0.378777 / 0.334176 reproduced **exactly on six independent arms, zero drift**.
+
+**Repo-wide format, owner-directed, landed.** `rustfmt 1.9.0-stable (88d9e12ae1 2026-08-18)`, and **no `rustfmt.toml` or `.rustfmt.toml` exists anywhere in this repo** -- which is the whole explanation for the style divergence ROW 216 flagged as a trap. There was never a pinned config, so the committed style was simply whatever each contributor's toolchain happened to produce, and any `fmt` run on a newer toolchain was always going to rewrite the tree. Not a rustfmt defect, not a repo-style choice: an absence.
+
+`cargo fmt --all`: **275 files changed, +37,849 / -9,328 lines.** Gates re-run on the formatted tree, all green: `check` on the three changed crates exit 0; proxima-tensor `std,instrument` **477 passed**; proxima-onnx all-features **105 passed** (including `pipeline_full_test_split_accuracy_is_exactly_0_9900`); clippy `-D warnings` clean. Commit `f65aee5`.
+
+**Named work item: check in a `rustfmt.toml`.** A 275-file reformat is a one-time cost only if the config is pinned immediately afterward. Without it, the next contributor on a different toolchain re-diverges and the next `fmt` produces another five-figure diff that buries real changes in review.
