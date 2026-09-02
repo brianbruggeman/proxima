@@ -9491,17 +9491,38 @@ fn width_tile_plan(context: &WidthPathContext) -> Option<WidthTilePlan> {
     // which operand is `a` (row-varying, contiguous over `k`) vs `b`
     // (weight-like, constant per row). Zero non-degenerate axes: `leading_dim`
     // stays whatever `leading_output_axes[0]` is (extent 1, a single
-    // degenerate row) -- the pre-existing behavior. One: unchanged, that
-    // axis is the row axis, no outer loop. Two (`attn_qk`/`attn_v`): the
-    // axis where `layout_b`'s stride is 0 is the row axis (the SAME shape
-    // every other node already proves); the other must be a genuine outer
-    // axis both operands step by -- `layout_b`'s stride nonzero there by
-    // construction (the complement), and `layout_a`'s stride ALSO nonzero
-    // (else `a` never changes across it, a shape this tile has not proven
-    // and declines rather than guesses).
+    // degenerate row) -- the pre-existing behavior, and safe regardless of
+    // `layout_b`'s stride there since the row loop below only ever runs once.
+    // One: `gemm_width_tile_neon` has no `row_stride_b` -- it reads `b` from
+    // the SAME base for every row, so this is only sound when `b` is truly
+    // row-invariant (`layout_b.stride(only) == 0`, the shared-weight GEMM
+    // shape). A per-row `b` (a batched/grouped fold, e.g. a per-head weight
+    // slice reached only after `bind`'s elementwise-into-reduce fusion)
+    // silently reused row 0's `b` slice for every row here before this
+    // check existed -- proven by `omega`'s `backend_parity`/`metal_real_forward`
+    // real-forward-graph gates, which caught it as every row/head of a
+    // fused reduce collapsing to the first row's value. Two (`attn_qk`/
+    // `attn_v`): the axis where `layout_b`'s stride is 0 is the row axis
+    // (the SAME shape every other node already proves); the other must be a
+    // genuine outer axis both operands step by -- `layout_b`'s stride
+    // nonzero there by construction (the complement), and `layout_a`'s
+    // stride ALSO nonzero (else `a` never changes across it, a shape this
+    // tile has not proven and declines rather than guesses).
     let (leading_dim, outer_dim) = match non_degenerate_leading.as_slice() {
         [] => (context.leading_output_axes[0], None),
-        &[only] => (only, None),
+        &[only] if layout_b.stride(only) == 0 => (only, None),
+        &[_] => {
+            #[cfg(feature = "instrument")]
+            record_decline(
+                instrument::WidthDeclineReason::AxesShape,
+                leading_total_early,
+                reduction_total_early,
+                width_i64,
+                stride_a_early,
+                stride_b_early,
+            );
+            return None;
+        }
         &[first, second] => match (layout_b.stride(first), layout_b.stride(second)) {
             (0, other) if other != 0 => (first, Some(second)),
             (other, 0) if other != 0 => (second, Some(first)),
@@ -20062,6 +20083,59 @@ mod tests {
         (program, sum)
     }
 
+    /// `sum_e lhs[e] * rhs[h, e, d]` over iteration space `(h, e, d)`: `lhs`
+    /// broadcasts over the leading axis `h` AND the width axis `d` (varies
+    /// only along the reduction axis `e`, ROW 35's `hidden` operand
+    /// shape), `rhs` varies over all three (ROW 35's per-head `attn_q`
+    /// weight slice, `[heads, embed, head_dim]`). `sum` is the ONLY
+    /// consumer of the `Multiply`, so `bind` fuses it into the `Reduce`'s
+    /// own `BoundOp` when `sum` is the sole requested output — the exact
+    /// shape `width_tile_plan`'s single-non-degenerate-leading-axis branch
+    /// (`cpu.rs`) reaches, and the one it silently mishandled before that
+    /// branch verified `layout_b.stride(leading_dim) == 0`.
+    fn batched_matmul_program_with_per_row_weight(
+        rows: u32,
+        contraction: u32,
+        width: u32,
+    ) -> (Vec<Op>, NodeId) {
+        let mut program = Vec::new();
+        let lhs = f32_block(&mut program, &[Extent::Static(contraction)]);
+        let rhs = f32_block(
+            &mut program,
+            &[
+                Extent::Static(rows),
+                Extent::Static(contraction),
+                Extent::Static(width),
+            ],
+        );
+        let product = append(
+            &mut program,
+            Op::Elementwise {
+                dtype: DType::Float32,
+                body: ScalarOp::Multiply,
+                operands: alloc::vec![
+                    (lhs, IndexMap::Affine(map::projection(3, &[1]))),
+                    (rhs, IndexMap::Affine(map::projection(3, &[0, 1, 2]))),
+                ],
+                name: None,
+            },
+        );
+        let sum = append(
+            &mut program,
+            Op::Reduce(Reduce {
+                dtype: DType::Float32,
+                body: ScalarOp::Add,
+                init: ReduceInit::Zero,
+                operand: product,
+                in_map: IndexMap::Affine(map::projection(3, &[0, 1, 2])),
+                out_map: IndexMap::Affine(map::projection(3, &[0, 2])),
+                keep: Keep::Reduce,
+                name: Some("batched_matmul_per_row_weight".into()),
+            }),
+        );
+        (program, sum)
+    }
+
     /// `table[ids[s], d]` over iteration space `(s, d)`: dim 0 (vocab) is
     /// gathered by `ids`, dim 1 (feature) is a plain projection.
     fn embedding_lookup_program(vocab: u32, dim: u32, seq: u32) -> (Vec<Op>, NodeId) {
@@ -20301,6 +20375,72 @@ mod tests {
             evaluated.root(),
             naive_matmul(&lhs, &rhs, m, k, n).as_slice()
         );
+        let _ = sum;
+    }
+
+    /// Regression for the bug `omega`'s `backend_parity`/`metal_real_forward`
+    /// real-forward-graph gates caught: `relative=1.3264047 max_diff=6.9346437`
+    /// between CPU and Metal, traced to the FIRST divergent node in the
+    /// mistral cached-forward program (a `Reduce` fusing an RoPE-projection
+    /// `Multiply` whose second operand varies per attention head). Metal was
+    /// correct; the CPU width-tile fast path (`width_tile_plan`, `cpu.rs`)
+    /// was wrong — its single-leading-axis branch never checked that the
+    /// "weight" operand (`b`, reused from the SAME base for every row by
+    /// `gemm_width_tile_neon`, which carries no `row_stride_b`) was actually
+    /// row-invariant, so every row silently read row 0's slice of `b`.
+    ///
+    /// `rows=8` spans two full `WIDTH_TILE_ROWS=4` tiles plus none left over,
+    /// `width=16` is exactly `WIDTH_TILE_VECS * 4` (the fast path's minimum),
+    /// and `contraction=6` is short enough to keep the reference loop
+    /// readable — this is the smallest shape that still reaches
+    /// `width_tile_plan`'s single-leading-axis branch with a genuinely
+    /// row-varying `b`. Requesting `sum` alone as the sole output is what
+    /// makes `bind` fuse the `Multiply` into the `Reduce`'s own `BoundOp` in
+    /// the first place (`requesting_the_intermediate_elementwise_op_as_an_output_prevents_fusion`
+    /// in `bind.rs` proves the converse).
+    #[test]
+    fn a_reduce_fusing_a_per_row_weight_operand_computes_a_distinct_value_per_row() {
+        let (rows, contraction, width) = (8u32, 6u32, 16u32);
+        let (program, sum) =
+            batched_matmul_program_with_per_row_weight(rows, contraction, width);
+
+        let lhs: Vec<f32> = (0..contraction).map(|value| 1.0 + value as f32).collect();
+        let rhs: Vec<f32> = (0..rows * contraction * width)
+            .map(|value| value as f32 * 0.001)
+            .collect();
+
+        let evaluated = evaluate(&program, &[], &[&lhs, &rhs], &[])
+            .expect("the fused per-row-weight reduce evaluates");
+        assert_eq!(evaluated.shape(), &[rows as u64, width as u64]);
+
+        let mut reference = vec![0.0f32; (rows * width) as usize];
+        for row in 0..rows {
+            for col in 0..width {
+                let mut total = 0.0f32;
+                for k in 0..contraction {
+                    let lhs_value = lhs[k as usize];
+                    let rhs_value =
+                        rhs[(row * contraction * width + k * width + col) as usize];
+                    total += lhs_value * rhs_value;
+                }
+                reference[(row * width + col) as usize] = total;
+            }
+        }
+        assert_all_close(evaluated.root(), &reference, 1e-5);
+
+        // the exact shape of the bug this guards: every row collapsing to
+        // row 0's value because `b`'s base never advanced past the first
+        // row. Assert the FIRST divergent row directly rather than trusting
+        // the aggregate `assert_all_close` above alone.
+        let output = evaluated.root();
+        let row0 = &output[..width as usize];
+        for row in 1..rows as usize {
+            let this_row = &output[row * width as usize..(row + 1) * width as usize];
+            assert_ne!(
+                this_row, row0,
+                "row {row} collapsed to row 0's value -- the per-row weight operand was not advanced"
+            );
+        }
         let _ = sum;
     }
 
