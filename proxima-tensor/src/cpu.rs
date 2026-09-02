@@ -966,6 +966,22 @@ fn bind_named_inputs_into_arena(
     Ok(())
 }
 
+/// `docs/discipline.md` ROW 174/234's own per-node profile: a coarse,
+/// four-way label distinguishing [`BoundOpKind`] variants, not the
+/// finer `Path::{DotFast,WidthFast,ConvTile,Generic}` route census
+/// [`instrument::reduce_path_totals`]/[`instrument::reduce_gemm_path_totals`]
+/// already answer for reduce-shaped nodes specifically -- this label is
+/// keyed by [`NodeId`] instead, the axis nothing else in this module covers.
+#[cfg(feature = "instrument")]
+fn arena_node_kind_label(kind: &BoundOpKind) -> &'static str {
+    match kind {
+        BoundOpKind::Elementwise { .. } => "elementwise",
+        BoundOpKind::Reduce { .. } => "reduce",
+        BoundOpKind::Iota => "iota",
+        BoundOpKind::Constant { .. } => "constant",
+    }
+}
+
 /// [`evaluate_named_with_arena`]'s own resolved-node execution loop,
 /// factored out so [`evaluate_named_with_arena_in_place`] shares the
 /// identical execution path rather than a second copy of it.
@@ -993,6 +1009,8 @@ fn run_resolved_nodes_in_arena(arena: &mut StaticArena) -> Result<(), TensorErro
             })?;
             #[cfg(feature = "epilogue-profile-probe")]
             let profile_start = std::time::Instant::now();
+            #[cfg(feature = "instrument")]
+            let node_profile_started = instrument::read_ticks();
             // law 6∘5: a node with a plan-time-packed `b` operand skips
             // `run_node_into`'s dispatch entirely and calls `run_reduce`
             // directly with the packed panel -- `run_node_into`'s own
@@ -1011,6 +1029,18 @@ fn run_resolved_nodes_in_arena(arena: &mut StaticArena) -> Result<(), TensorErro
                 computed,
                 &reduce_nodes,
                 profile_start.elapsed().as_nanos() as u64,
+            );
+            // `docs/discipline.md` ROW 174/234: the only counter in this
+            // loop keyed by NodeId rather than kind/phase -- see
+            // `instrument::record_arena_node_ticks`'s own doc for why this
+            // is a cached-bool no-op unless a caller has explicitly opted
+            // into `PROXIMA_ARENA_PER_NODE=1`.
+            #[cfg(feature = "instrument")]
+            instrument::record_arena_node_ticks(
+                node,
+                arena_node_kind_label(&computed.kind),
+                &computed.extents,
+                instrument::elapsed_ticks(node_profile_started),
             );
             arena.buffers[node_index] = Some(output);
         }

@@ -38,21 +38,24 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::too_many_arguments)]
 
+#[cfg(not(feature = "train-step-profile"))]
 use std::cell::RefCell;
+#[cfg(not(feature = "train-step-profile"))]
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
+#[cfg(not(feature = "train-step-profile"))]
 use std::time::Instant;
 
+#[cfg(not(feature = "train-step-profile"))]
 use criterion::Criterion;
 use proxima_autograd::activation::relu;
 use proxima_autograd::adjoint::differentiate_wanted;
 use proxima_autograd::loss::softmax_cross_entropy;
 use proxima_autograd::optimizer::{AdamConfig, AdamOperands, adam_step, step_input};
 use proxima_autograd::train::{State, train_step};
-use proxima_tensor::cpu::{
-    QuantizedBlock, StaticArena, build_static_arena, evaluate_named_with_arena,
-    evaluate_quantized_named_with_scratch,
-};
+#[cfg(not(feature = "train-step-profile"))]
+use proxima_tensor::cpu::{QuantizedBlock, evaluate_quantized_named_with_scratch};
+use proxima_tensor::cpu::{StaticArena, build_static_arena, evaluate_named_with_arena};
 use proxima_tensor::dtype::DType;
 use proxima_tensor::map::{self, IndexMap};
 use proxima_tensor::op::{self, Extent, NodeId, Op, ReduceInit, ScalarOp};
@@ -60,6 +63,7 @@ use proxima_tensor::op::{self, Extent, NodeId, Op, ReduceInit, ScalarOp};
 /// [`train_step_scratch`]'s two threaded-across-the-run pieces, named once so
 /// the criterion closure below doesn't repeat the tuple type at both the
 /// `RefCell` declaration and the destructure.
+#[cfg(not(feature = "train-step-profile"))]
 type ScratchPool = (Vec<Vec<f32>>, Option<BTreeSet<NodeId>>);
 
 /// Bench-local twin of [`train_step`], composing
@@ -67,6 +71,7 @@ type ScratchPool = (Vec<Vec<f32>>, Option<BTreeSet<NodeId>>);
 /// `train::train_step`'s own `evaluate_named` (fresh `free_buffers` every
 /// call) -- see this file's own top-level doc for why this stays
 /// bench-local rather than a `train::train_step_with_scratch` landing.
+#[cfg(not(feature = "train-step-profile"))]
 fn train_step_scratch(
     program: &[Op],
     loss: NodeId,
@@ -574,11 +579,13 @@ fn named_for_step<'a>(
         .collect()
 }
 
+#[cfg(not(feature = "train-step-profile"))]
 fn percentile(sorted_ns: &[u64], fraction: f64) -> u64 {
     let index = ((sorted_ns.len() as f64 - 1.0) * fraction).round() as usize;
     sorted_ns[index]
 }
 
+#[cfg(not(feature = "train-step-profile"))]
 struct SweepResult {
     per_step_ns: Vec<u64>,
     loss_curve: Vec<f32>,
@@ -589,6 +596,7 @@ struct SweepResult {
 /// timed, over the given `lane`'s real batches, calling [`train_step`] fresh
 /// every step -- the sealed ROW 159 baseline arm, `evaluate_named`'s own
 /// `free_buffers: Vec::new()` per call, never threaded across steps.
+#[cfg(not(feature = "train-step-profile"))]
 fn sweep_baseline(lane: &TrainingLane) -> SweepResult {
     let mut state = lane.initial_state.clone();
     for batch in &lane.batches[..WARMUP_STEPS] {
@@ -622,6 +630,7 @@ fn sweep_baseline(lane: &TrainingLane) -> SweepResult {
 /// pool and ONE `validated_weight_nodes` cache carried across the whole run
 /// -- the ROW 159 attacked-and-ROLLED-BACK lever arm (see this file's own
 /// top-level doc).
+#[cfg(not(feature = "train-step-profile"))]
 fn sweep_scratch(lane: &TrainingLane) -> SweepResult {
     let mut state = lane.initial_state.clone();
     let mut free_buffers: Vec<Vec<f32>> = Vec::new();
@@ -667,6 +676,7 @@ fn sweep_scratch(lane: &TrainingLane) -> SweepResult {
 /// state, but the graph is bound and every node's output buffer sized ONCE
 /// (`build_static_arena`, before the loop) and reused unchanged in size for
 /// every step -- ROW 164's static-arena lever.
+#[cfg(not(feature = "train-step-profile"))]
 fn sweep_arena(lane: &TrainingLane) -> SweepResult {
     let mut outputs = Vec::with_capacity(lane.rebind.len() + 1);
     outputs.push(lane.loss);
@@ -766,6 +776,7 @@ fn assert_arena_bit_identical_to_baseline(lane: &TrainingLane) {
     );
 }
 
+#[cfg(not(feature = "train-step-profile"))]
 fn report_sweep(label: &str, result: &SweepResult) {
     assert!(
         result.loss_curve.iter().all(|value| value.is_finite()),
@@ -806,6 +817,74 @@ fn report_sweep(label: &str, result: &SweepResult) {
     );
 }
 
+/// `docs/discipline.md` ROW 174/234's own untimed diagnostic run: builds
+/// the SAME arena [`sweep_arena`] does, runs the SAME warm-up window, then
+/// resets `proxima_tensor::instrument`'s per-node accumulator and runs
+/// exactly [`MEASURED_STEPS`] more real steps -- matching the sealed sweep's
+/// own measured-window shape so the printed us/step figures are comparable
+/// to a sealed number, even though this run itself is never the sealed
+/// number (`train-step-profile` pulls in `proxima-tensor/instrument`, whose
+/// own per-call tick reads are NOT free -- see this file's own top-level
+/// doc for why `train-step-bench` alone deliberately excludes it).
+#[cfg(feature = "train-step-profile")]
+fn run_per_node_profile(lane: &TrainingLane) {
+    use proxima_tensor::instrument;
+
+    assert!(
+        instrument::arena_per_node_enabled(),
+        "train_step_lane: --features train-step-profile requires PROXIMA_ARENA_PER_NODE=1 in the environment"
+    );
+
+    let mut outputs = Vec::with_capacity(lane.rebind.len() + 1);
+    outputs.push(lane.loss);
+    outputs.extend(lane.rebind.iter().map(|(node, _)| *node));
+    let mut arena = build_static_arena(&lane.program, &[], &outputs)
+        .expect("build_static_arena builds the training lane");
+
+    let mut state = lane.initial_state.clone();
+    for batch in &lane.batches[..WARMUP_STEPS] {
+        let named = named_for_step(batch, &state);
+        let (_loss, next_state) = train_step_arena(&mut arena, &named, lane.loss, &lane.rebind);
+        state = next_state;
+    }
+
+    instrument::reset_arena_per_node();
+    for batch in &lane.batches[WARMUP_STEPS..WARMUP_STEPS + MEASURED_STEPS] {
+        let named = named_for_step(batch, &state);
+        let (_loss, next_state) = train_step_arena(&mut arena, &named, lane.loss, &lane.rebind);
+        state = next_state;
+    }
+
+    let mut table = instrument::arena_per_node_snapshot();
+    assert!(
+        !table.is_empty(),
+        "train_step_lane: per-node profile captured ZERO nodes -- instrumentation did not fire (N==0 is RED)"
+    );
+    table.sort_by_key(|entry| std::cmp::Reverse(entry.1.ticks));
+
+    let total_ticks: u64 = table.iter().map(|(_, stat)| stat.ticks).sum();
+    let total_us = instrument::ticks_to_nanos(total_ticks) as f64 / 1000.0;
+    eprintln!(
+        "train_step_lane: per-node profile -- {} live nodes recorded over {MEASURED_STEPS} measured steps, {:.3}us/step total (instrumented, NOT the sealed number)",
+        table.len(),
+        total_us / MEASURED_STEPS as f64
+    );
+    for (node_id, stat) in &table {
+        let us_per_step =
+            instrument::ticks_to_nanos(stat.ticks) as f64 / 1000.0 / MEASURED_STEPS as f64;
+        let pct_of_total = stat.ticks as f64 / total_ticks as f64 * 100.0;
+        assert_eq!(
+            stat.count, MEASURED_STEPS as u64,
+            "node {node_id}: expected exactly {MEASURED_STEPS} hits (one per measured step), got {}",
+            stat.count
+        );
+        eprintln!(
+            "  node={node_id:>4} kind={:<11} extents={:?} us/step={us_per_step:>8.4} pct={pct_of_total:>6.3}%",
+            stat.kind_label, stat.extents
+        );
+    }
+}
+
 fn main() {
     if !dataset_present() {
         eprintln!("train_step_lane: skipping, no host-local MNIST idx dataset under {DATASET_DIR}");
@@ -820,16 +899,28 @@ fn main() {
 
     assert_arena_bit_identical_to_baseline(&lane);
 
-    let baseline = sweep_baseline(&lane);
+    #[cfg(feature = "train-step-profile")]
+    run_per_node_profile(&lane);
+    #[cfg(not(feature = "train-step-profile"))]
+    run_sealed_sweeps(&lane);
+}
+
+/// The sealed baseline/scratch/arena sweeps plus criterion groups --
+/// factored out of [`main`] so the `train-step-profile` diagnostic branch
+/// above can skip this entirely via `#[cfg]` (a runtime `return` here would
+/// leave this dead code unreachable under that feature, not merely unused).
+#[cfg(not(feature = "train-step-profile"))]
+fn run_sealed_sweeps(lane: &TrainingLane) {
+    let baseline = sweep_baseline(lane);
     report_sweep("baseline train_step (fresh alloc every call)", &baseline);
 
-    let scratch = sweep_scratch(&lane);
+    let scratch = sweep_scratch(lane);
     report_sweep(
         "train_step_with_scratch (pool threaded across the run)",
         &scratch,
     );
 
-    let arena = sweep_arena(&lane);
+    let arena = sweep_arena(lane);
     report_sweep("train_step_arena (static arena, bind+size once)", &arena);
 
     // criterion groups: repeated calls against each arm's own post-warm-up
