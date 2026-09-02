@@ -136,5 +136,13 @@ name = "bge_route_census"
 required-features = ["epilogue-profile-diag"]
 
 [[example]]
+name = "bge_batch_route_census"
+required-features = ["epilogue-profile-diag"]
+
+[[example]]
+name = "bge_batch_correctness_probe"
+required-features = ["std"]
+
+[[example]]
 name = "bge_traffic_sweep"
 required-features = ["bge-eval-diag"]
