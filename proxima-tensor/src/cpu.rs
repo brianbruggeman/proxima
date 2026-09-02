@@ -541,8 +541,8 @@ pub struct StaticArena {
     /// [`run_resolved_nodes_in_arena`] looks this map up per resolved node
     /// on its way to deciding whether to route through
     /// [`run_reduce`]'s packed arm. Always empty off `aarch64` or with the
-    /// bench/test escape valve [`set_pack_at_plan_time_enabled`] flipped off
-    /// -- [`build_packed_width_panels`] is the only populator and it checks
+    /// bench/test escape valve `set_pack_at_plan_time_enabled` (aarch64-only)
+    /// flipped off -- [`build_packed_width_panels`] is the only populator and it checks
     /// the valve before scanning.
     packed_width_panels: BTreeMap<NodeId, PackedWidthPanels>,
     /// `run_rewrite_worklist`'s law 1/2 admission (`docs/rewrite-algebra.md`
@@ -671,9 +671,9 @@ pub fn build_static_arena(
 ///
 /// Default-on since `docs/discipline.md` ROW 207's promotion, `aarch64`
 /// only — off aarch64, or with the bench/test escape valve
-/// [`set_pack_at_plan_time_enabled`] flipped off, this is byte-for-byte
-/// [`build_static_arena`] plus binding `constant_inputs` into the arena's
-/// input buffers, no packing performed.
+/// `set_pack_at_plan_time_enabled` (aarch64-only) flipped off, this is
+/// byte-for-byte [`build_static_arena`] plus binding `constant_inputs` into
+/// the arena's input buffers, no packing performed.
 ///
 /// # Errors
 /// The same errors [`build_static_arena`] raises, plus
@@ -1603,7 +1603,7 @@ pub fn set_accelerate_gemm_enabled(enabled: bool) {
 /// `(hits, declined)` where `declined` counts a `neon_tile_plan` gate pass
 /// that fell through to NEON anyway (non-contiguous output row or a
 /// non-zero reduce seed). Snapshot-only; a re-prove command resets via
-/// process restart, same as [`neon_tile_counters`].
+/// process restart, same as `neon_tile_counters` (behind `instrument`).
 #[must_use]
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 pub fn accelerate_gemm_totals() -> (u64, u64) {
