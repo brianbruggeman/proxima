@@ -163,6 +163,15 @@ metal-buffer-pool = ["metal"]
 # does: the eligibility gate and kernel body live in `msl.rs` (alloc-tier),
 # but the dispatch geometry only has meaning for a Metal dispatch.
 metal-q4k-split-k = ["metal"]
+# `nsg=2` threadgroup geometry for the row-blocked packed path (`msl.rs`'s
+# `tiled_gemm_threadgroup_width`), mirroring ggml's `N_SG_Q4_K`
+# (`ggml-metal-impl.h:33`): 2 simdgroups cooperate per threadgroup instead of
+# 1, halving threadgroup count at the same `grid.threads`. Default-off per
+# the same discipline as `metal-tiled-gemm` above -- a geometry change earns
+# the production default only after the nano bench (`docs/discipline.md`
+# ROW 270) and a decode-step seal on a quiet box, not on the mechanism
+# argument alone.
+metal-packed-row-nsg2 = ["metal"]
 # Portable GPU execution driver (src/wgsl.rs, src/wgpu_driver.rs) — the
 # wgpu/WGSL counterpart of `metal` above, one abstraction layer over: same
 # `BoundOp` descriptor, same emit-then-drive split, different target ISA

@@ -3905,6 +3905,19 @@ fn tiled_gemm_threadgroup_width(
             return Some(SIMD_WIDTH * split);
         }
     }
+    #[cfg(feature = "metal-packed-row-nsg2")]
+    if packed_row_block(resolved, quantized).is_some() {
+        // ggml's `N_SG_Q4_K` (`ggml-metal-impl.h:33`): PACKED_ROW_NSG
+        // simdgroups cooperate in one threadgroup instead of one, halving
+        // threadgroup count for the same `grid.threads` -- `push_packed_row_
+        // blocked_body` addresses its output group purely from
+        // `gid / SIMD_WIDTH` (`thread_position_in_grid`), which
+        // `dispatchThreads:threadsPerThreadgroup:` assigns identically
+        // regardless of how threads are grouped into threadgroups, so
+        // widening here needs no `sgitg`/row-indexing change in the kernel
+        // body itself (`docs/discipline.md` ROW 270).
+        return Some((PACKED_ROW_NSG as u64) * SIMD_WIDTH);
+    }
     if packed_row_block(resolved, quantized).is_some() {
         return Some(crate::sized::PACKED_ROW_BLOCK_SIMDGROUPS * SIMD_WIDTH);
     }
@@ -4004,6 +4017,14 @@ fn cooperative_reduce_width(
 ) -> u64 {
     SIMD_WIDTH
 }
+
+/// Simdgroups per threadgroup for the row-blocked packed path, mirroring
+/// ggml's `N_SG_Q4_K` (`ggml-metal-impl.h:33`). Feature-gated
+/// (`metal-packed-row-nsg2`), default-off until the nano bench in
+/// `docs/discipline.md` ROW 270 clears the compile-out-clean + e2e gates a
+/// production default requires.
+#[cfg(feature = "metal-packed-row-nsg2")]
+const PACKED_ROW_NSG: usize = 2;
 
 // the emitter threads a bound op's full shape (rank, axes, reduce op, init,
 // element type, codec flags) into one kernel body; splitting that into a
