@@ -14424,6 +14424,27 @@ pub fn matmul_q4k_q8k_f32(
     matmul_q4k_q8k_f32_impl(weights, rows, activation, 1, None)
 }
 
+/// Benchable entry point for the multi-position (`leading_total > 1`) wide
+/// fold `run_reduce_quantized` already calls at real `leading_total` scale
+/// for prefill (`cpu.rs:7093`) -- same `matmul_q4k_q8k_f32_impl`,
+/// `session = None`, no new logic. Exists only so a bench/example outside
+/// this module can measure the exact kernel production prefill dispatches
+/// to, instead of approximating it with a `leading_total`-times loop over
+/// [`matmul_q4k_q8k_f32`].
+///
+/// # Errors
+/// Same as [`matmul_q4k_q8k_f32`], plus `leading_total == 0` or
+/// `activation.len()` not a whole multiple of `leading_total`.
+#[cfg(feature = "q4k-int8-dot")]
+pub fn matmul_q4k_q8k_f32_wide(
+    weights: &[u8],
+    rows: usize,
+    activation: &[f32],
+    leading_total: usize,
+) -> Result<Vec<f32>, TensorError> {
+    matmul_q4k_q8k_f32_impl(weights, rows, activation, leading_total, None)
+}
+
 /// [`matmul_q4k_q8k_f32`]'s body, plus `leading_total` (the sequence-position
 /// count [`run_reduce_quantized`] already derives as `activation.len() / k`
 /// at `cpu.rs:2179`) and the [`CohortSession`] a caller already inside a
