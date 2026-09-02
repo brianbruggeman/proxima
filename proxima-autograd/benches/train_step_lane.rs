@@ -895,6 +895,20 @@ fn run_per_node_profile(lane: &TrainingLane) {
         instrument::ticks_to_nanos(conv_ticks) as f64 / 1000.0,
         instrument::ticks_to_nanos(generic_ticks) as f64 / 1000.0,
     );
+
+    // transposed-A task (2026-09-02): the aggregate route census above
+    // cannot say which route a SPECIFIC node took -- node 90 (`grad_w1`)
+    // and node 7 (forward `l1`) share the same three-axis shape, so the
+    // per-node `width_tile_plan` decline census (`cpu.rs:9696`,
+    // `instrument::width_tile_decline_snapshot`) is the only artifact that
+    // can name node 90's own route.
+    for (node, reason, calls, m, k, n, stride_a, stride_b) in
+        instrument::width_tile_decline_snapshot()
+    {
+        eprintln!(
+            "  width_tile_decline node={node:>4} reason={reason:?} calls={calls} m={m} k={k} n={n} stride_a={stride_a} stride_b={stride_b}"
+        );
+    }
 }
 
 fn main() {
