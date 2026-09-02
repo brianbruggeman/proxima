@@ -781,12 +781,12 @@ fn greedy_sample_matches(
         let logits_values = evaluated.get(logits).expect("logits requested").0;
         let position = generated.len() - 1;
         let row = &logits_values[position * corpus.vocab_size..(position + 1) * corpus.vocab_size];
-        let (best_index, _) = row
-            .iter()
-            .enumerate()
-            .fold((0usize, f32::NEG_INFINITY), |best, (index, &value)| {
-                if value > best.1 { (index, value) } else { best }
-            });
+        let (best_index, _) =
+            row.iter()
+                .enumerate()
+                .fold((0usize, f32::NEG_INFINITY), |best, (index, &value)| {
+                    if value > best.1 { (index, value) } else { best }
+                });
         generated.push(best_index as u32);
     }
     let training_prefix: alloc::vec::Vec<u32> = corpus.compact_ids[0..SEQ_LEN].to_vec();

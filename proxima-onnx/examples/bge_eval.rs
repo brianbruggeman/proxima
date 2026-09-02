@@ -442,7 +442,9 @@ fn main() {
         );
     }
     #[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
-    println!("non-aarch64-macos host: Accelerate does not exist on this target, skipping engagement proof 4");
+    println!(
+        "non-aarch64-macos host: Accelerate does not exist on this target, skipping engagement proof 4"
+    );
 
     #[cfg(feature = "bge-eval-diag")]
     {
@@ -486,7 +488,9 @@ fn main() {
             "engagement N==0 is RED: width_tile_plan never engaged on the arena path"
         );
         #[cfg(not(target_arch = "aarch64"))]
-        println!("non-aarch64 host: width_tile_counters() does not exist, skipping engagement proof 5");
+        println!(
+            "non-aarch64 host: width_tile_counters() does not exist, skipping engagement proof 5"
+        );
     }
 
     // `docs/discipline.md` "one execution path" collapse: plain `evaluate_named`
@@ -496,9 +500,7 @@ fn main() {
     // arena plumbing would, still gets the SAME arena-backed default (builds
     // 3 arenas over `default_arm_runs * items.len()` calls, then reuses
     // them) with no code on the caller's side beyond calling `evaluate_named`.
-    println!(
-        "\n=== DEFAULT-PATH MEASUREMENT (plain evaluate_named, no caller opt-in) ==="
-    );
+    println!("\n=== DEFAULT-PATH MEASUREMENT (plain evaluate_named, no caller opt-in) ===");
     let default_arm_runs: usize = 5;
     for accelerate in [false, true] {
         set_accelerate_gemm_enabled(accelerate);
