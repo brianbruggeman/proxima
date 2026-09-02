@@ -9794,7 +9794,9 @@ fn width_tile_plan(context: &WidthPathContext) -> Option<WidthTilePlan> {
         );
         return None;
     }
-    #[cfg(feature = "instrument")]
+    // batch-widen task (2026-09-02): no longer instrument-only -- the `(0,
+    // 0)` two-leading-axis merge below reads this to sanity-check the
+    // composed extent unconditionally, not just to log a decline.
     let leading_total_early: i64 = if non_degenerate_leading.is_empty() {
         1
     } else {
@@ -9901,9 +9903,9 @@ fn width_tile_plan(context: &WidthPathContext) -> Option<WidthTilePlan> {
     // nonzero there by construction (the complement), and `layout_a`'s
     // stride ALSO nonzero (else `a` never changes across it, a shape this
     // tile has not proven and declines rather than guesses).
-    let (leading_dim, outer_dim) = match non_degenerate_leading.as_slice() {
-        [] => (context.leading_output_axes[0], None),
-        &[only] if layout_b.stride(only) == 0 => (only, None),
+    let (leading_dim, outer_dim, merged_leading) = match non_degenerate_leading.as_slice() {
+        [] => (context.leading_output_axes[0], None, None),
+        &[only] if layout_b.stride(only) == 0 => (only, None, None),
         &[_] => {
             #[cfg(feature = "instrument")]
             record_decline(
@@ -9917,8 +9919,46 @@ fn width_tile_plan(context: &WidthPathContext) -> Option<WidthTilePlan> {
             return None;
         }
         &[first, second] => match (layout_b.stride(first), layout_b.stride(second)) {
-            (0, other) if other != 0 => (first, Some(second)),
-            (other, 0) if other != 0 => (second, Some(first)),
+            (0, other) if other != 0 => (first, Some(second), None),
+            (other, 0) if other != 0 => (second, Some(first), None),
+            // batch-widen task (2026-09-02): `b` (the weight) is invariant
+            // over BOTH leading axes at once -- a plain `[batch, seq, k] @
+            // [k, n]` GEMM once `batch` stops being elided (extent > 1).
+            // There is no genuine "outer" step here (`b` never varies), so
+            // `first`/`second` just need to compose row-major on `a` and
+            // `out` to become one flat leading axis of extent `first *
+            // second` -- the SAME row-major-VIEW proof
+            // `composed_reduction_stride` already gives the multi-axis
+            // REDUCTION case below (ROW 210's `attn_o`), reused verbatim
+            // rather than re-derived (`leading_output_axes`'s own
+            // outer-to-inner order, `[first, second]`, is exactly the
+            // `dims` order that function expects). Any operand that does
+            // NOT compose (a real broadcast or a transposed batch axis)
+            // still declines, unchanged.
+            (0, 0) => {
+                match (
+                    composed_reduction_stride(context.resolved, &[first, second], layout_a),
+                    composed_reduction_stride(context.resolved, &[first, second], context.out_layout),
+                ) {
+                    (Some((extent_a, stride_a)), Some((extent_out, stride_out)))
+                        if extent_a == leading_total_early && extent_out == leading_total_early =>
+                    {
+                        (first, None, Some((stride_a, stride_out, leading_total_early as usize)))
+                    }
+                    _ => {
+                        #[cfg(feature = "instrument")]
+                        record_decline(
+                            instrument::WidthDeclineReason::AxesShape,
+                            leading_total_early,
+                            reduction_total_early,
+                            width_i64,
+                            stride_a_early,
+                            stride_b_early,
+                        );
+                        return None;
+                    }
+                }
+            }
             _ => {
                 #[cfg(feature = "instrument")]
                 record_decline(
@@ -10016,18 +10056,34 @@ fn width_tile_plan(context: &WidthPathContext) -> Option<WidthTilePlan> {
         (stride_a, stride_b, extent_a as usize)
     };
 
+    // `merged_leading` is `Some` only from the `(0, 0)` two-axis case just
+    // above -- a single composed row stride/extent standing in for
+    // `layout_a.stride(leading_dim)`/`context.out_layout.stride(leading_dim)`/
+    // `context.resolved.extents[leading_dim]`, since no single axis index
+    // names the merged (batch, seq) pair. `None` is every pre-existing
+    // shape (0 or 1 non-degenerate leading axes, or the "one b-invariant,
+    // one outer" two-axis case), unchanged.
+    let (row_stride_a, out_row_stride, leading_total) = match merged_leading {
+        Some((stride_a, stride_out, extent)) => (stride_a, stride_out, extent),
+        None => (
+            layout_a.stride(leading_dim),
+            context.out_layout.stride(leading_dim),
+            context.resolved.extents[leading_dim as usize] as usize,
+        ),
+    };
+
     Some(WidthTilePlan {
         a_operand,
         b_operand,
-        row_stride_a: layout_a.stride(leading_dim),
+        row_stride_a,
         base_a: layout_a.base,
         k_stride_a,
         base_b: layout_b.base,
         k_stride_b,
         out_base: context.out_layout.base,
-        out_row_stride: context.out_layout.stride(leading_dim),
+        out_row_stride,
         out_col_stride: context.out_layout.stride(last_output_dim),
-        leading_total: context.resolved.extents[leading_dim as usize] as usize,
+        leading_total,
         reduction_total,
         width: context.width,
         seed: initial_value(context.init).unwrap_or(0.0),
