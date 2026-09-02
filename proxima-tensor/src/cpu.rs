@@ -883,6 +883,22 @@ pub fn evaluate_named_with_arena(
     Ok(Evaluated::from_parts(arena.root, results, None))
 }
 
+/// Reinterprets `slice` as raw bytes, no copy -- `f32` has no padding and
+/// `u8` has alignment 1, so any valid `&[f32]` pointer/length is a valid
+/// `&[u8]` view of the identical `size_of_val(slice)` bytes.
+///
+/// # Safety
+/// None required beyond `slice` itself being a valid `&[f32]`, which the
+/// caller already has by construction -- this is a pointer-cast view, never
+/// a mutation, so no aliasing or lifetime hazard beyond what `slice` already
+/// carries.
+fn f32_slice_as_bytes(slice: &[f32]) -> &[u8] {
+    // SAFETY: `f32` is `Copy`, has no padding bytes, and `u8`'s alignment
+    // (1) never exceeds `f32`'s -- reinterpreting the same backing memory as
+    // `size_of_val(slice)` bytes is always valid.
+    unsafe { core::slice::from_raw_parts(slice.as_ptr().cast::<u8>(), core::mem::size_of_val(slice)) }
+}
+
 /// [`evaluate_named_with_arena`]'s own input-binding loop, factored out so
 /// [`evaluate_named_with_arena_in_place`] can reuse it with `require_all =
 /// false`: a name absent from `named` is treated as "already correct in
@@ -893,6 +909,8 @@ fn bind_named_inputs_into_arena(
     named: &[(&str, &[f32])],
     require_all: bool,
 ) -> Result<(), TensorError> {
+    #[cfg(feature = "instrument")]
+    let compare_started = instrument::read_ticks();
     for (node, name) in &arena.input_names {
         let found = named
             .iter()
@@ -924,7 +942,18 @@ fn bind_named_inputs_into_arena(
         // that node for the rest of its life. A rebind that repeats the same
         // bytes (every real BGE weight, every call) leaves `packed_width_panels`
         // untouched, so the amortized packing gain survives.
-        if slot.as_slice() != data {
+        //
+        // Compared as raw BYTES (`f32_slice_as_bytes`), not `f32::eq` --
+        // this loop's own contract is "did the bytes change", the exact
+        // question a byte compare answers and `[f32]::eq` does not: IEEE
+        // `NaN != NaN` would report "changed" for a bit-identical resend,
+        // and `-0.0 == 0.0` would report "unchanged" for a genuine sign-bit
+        // flip, missing a real change the buffer needed. Byte comparison
+        // also lets `[u8]::eq` take the stdlib's memcmp fast path instead of
+        // a scalar per-element float compare -- measured 11.4ms/call of a
+        // ~19ms step for BGE's 132MB of initializers before this change
+        // (`docs/discipline.md`, hit-cost regression task, 2026-09-01).
+        if f32_slice_as_bytes(slot.as_slice()) != f32_slice_as_bytes(data) {
             slot.copy_from_slice(data);
             if !arena.packed_width_panels.is_empty() {
                 arena
@@ -933,6 +962,8 @@ fn bind_named_inputs_into_arena(
             }
         }
     }
+    #[cfg(feature = "instrument")]
+    instrument::record_bind_rebind_compare_ticks(instrument::elapsed_ticks(compare_started));
     Ok(())
 }
 
@@ -1198,9 +1229,16 @@ fn checkout_arena(
 ) -> Result<StaticArena, TensorError> {
     {
         let mut cache = lock_arena_cache();
-        if let Some(index) = cache.iter().position(|entry| {
+        #[cfg(feature = "instrument")]
+        let compare_started = instrument::read_ticks();
+        let found = cache.iter().position(|entry| {
             entry.program == program && entry.symbols == symbols && entry.outputs == outputs
-        }) {
+        });
+        #[cfg(feature = "instrument")]
+        instrument::record_checkout_arena_key_compare_ticks(instrument::elapsed_ticks(
+            compare_started,
+        ));
+        if let Some(index) = found {
             ARENA_CACHE_HITS.fetch_add(1, EpilogueFuseOrdering::Relaxed);
             return Ok(cache.remove(index).arena);
         }

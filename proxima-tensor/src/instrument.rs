@@ -296,6 +296,71 @@ pub fn reset_reduce_gemm_path() {
     let _ = REDUCE_GEMM_PATH_GENERIC_TICKS.snapshot_and_reset();
 }
 
+// hit-cost regression task (2026-09-01): the two per-call suspects the
+// collapse introduced on `evaluate_named_with_arena`'s own path --
+// `cpu::checkout_arena`'s full `(program, symbols, outputs)` value-equality
+// cache-key compare, and `cpu::bind_named_inputs_into_arena`'s per-slot
+// byte-compare rebind check. Each pair is calls+ticks, same shape as
+// `REDUCE_GEMM_PATH_*` above, committed once per call from a single
+// `read_ticks()`/`elapsed_ticks()` bracket around the compare loop itself,
+// never inside it.
+pub static CHECKOUT_ARENA_KEY_COMPARE_CALLS: Counter =
+    Counter::new("proxima_tensor.checkout_arena.key_compare_calls");
+pub static CHECKOUT_ARENA_KEY_COMPARE_TICKS: Counter =
+    Counter::new("proxima_tensor.checkout_arena.key_compare_ticks");
+pub static BIND_REBIND_COMPARE_CALLS: Counter =
+    Counter::new("proxima_tensor.bind_named_inputs.rebind_compare_calls");
+pub static BIND_REBIND_COMPARE_TICKS: Counter =
+    Counter::new("proxima_tensor.bind_named_inputs.rebind_compare_ticks");
+
+/// Records one `checkout_arena` call's cache-key equality-scan cost --
+/// `ticks` brackets only the `cache.iter().position(...)` full-value
+/// `(program, symbols, outputs)` compare, not the build-on-miss path below
+/// it.
+pub fn record_checkout_arena_key_compare_ticks(ticks: u64) {
+    counter!(CHECKOUT_ARENA_KEY_COMPARE_CALLS, 1);
+    counter!(CHECKOUT_ARENA_KEY_COMPARE_TICKS, ticks);
+}
+
+/// `(calls, ticks)` for [`record_checkout_arena_key_compare_ticks`].
+#[must_use]
+pub fn checkout_arena_key_compare_totals() -> (u64, u64) {
+    (
+        CHECKOUT_ARENA_KEY_COMPARE_CALLS.get(),
+        CHECKOUT_ARENA_KEY_COMPARE_TICKS.get(),
+    )
+}
+
+/// Resets the checkout-arena key-compare counters to zero.
+pub fn reset_checkout_arena_key_compare() {
+    let _ = CHECKOUT_ARENA_KEY_COMPARE_CALLS.snapshot_and_reset();
+    let _ = CHECKOUT_ARENA_KEY_COMPARE_TICKS.snapshot_and_reset();
+}
+
+/// Records one `bind_named_inputs_into_arena` call's total rebind
+/// byte-compare cost -- `ticks` brackets the whole per-slot loop (every
+/// `slot.as_slice() != data` comparison across every bound input, weights
+/// included), not the occasional `copy_from_slice` a real mismatch triggers.
+pub fn record_bind_rebind_compare_ticks(ticks: u64) {
+    counter!(BIND_REBIND_COMPARE_CALLS, 1);
+    counter!(BIND_REBIND_COMPARE_TICKS, ticks);
+}
+
+/// `(calls, ticks)` for [`record_bind_rebind_compare_ticks`].
+#[must_use]
+pub fn bind_rebind_compare_totals() -> (u64, u64) {
+    (
+        BIND_REBIND_COMPARE_CALLS.get(),
+        BIND_REBIND_COMPARE_TICKS.get(),
+    )
+}
+
+/// Resets the bind-rebind-compare counters to zero.
+pub fn reset_bind_rebind_compare() {
+    let _ = BIND_REBIND_COMPARE_CALLS.snapshot_and_reset();
+    let _ = BIND_REBIND_COMPARE_TICKS.snapshot_and_reset();
+}
+
 // per-parallel-node wall-clock breakdown for `cpu::run_chunks_threaded` /
 // `cpu::evaluate_node_parallel`: where does thread::scope time actually go.
 pub static PARALLEL_NODES: Counter = Counter::new("proxima_tensor.parallel_nodes");

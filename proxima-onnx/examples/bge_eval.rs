@@ -253,6 +253,12 @@ fn main() {
         .and_then(|value| value.parse().ok())
         .unwrap_or(5);
 
+    #[cfg(feature = "bge-eval-diag")]
+    {
+        proxima_tensor::instrument::reset_checkout_arena_key_compare();
+        proxima_tensor::instrument::reset_bind_rebind_compare();
+    }
+
     let mut lower_cache = LowerCache::new();
     let mut arena_cache = ArenaCache::new();
     let mut arena_builds = 0usize;
@@ -296,6 +302,33 @@ fn main() {
         last_accel_embeddings = embeddings;
     }
     cpu::set_accelerate_gemm_enabled(false);
+
+    #[cfg(feature = "bge-eval-diag")]
+    {
+        let (checkout_calls, checkout_ticks) =
+            proxima_tensor::instrument::checkout_arena_key_compare_totals();
+        let (bind_calls, bind_ticks) = proxima_tensor::instrument::bind_rebind_compare_totals();
+        let checkout_ns_per_call = proxima_tensor::instrument::ticks_to_nanos(checkout_ticks)
+            .checked_div(checkout_calls)
+            .unwrap_or(0);
+        let bind_ns_per_call = proxima_tensor::instrument::ticks_to_nanos(bind_ticks)
+            .checked_div(bind_calls)
+            .unwrap_or(0);
+        println!(
+            "\n=== HIT-COST INSTRUMENTATION (SEALED loop, {} evaluate_named_with_arena calls) ===",
+            runs * 2 * items.len()
+        );
+        println!(
+            "checkout_arena key-compare: calls={checkout_calls} total_ns={} ns/call={checkout_ns_per_call} (expected 0: SEALED loop holds its own arena, never calls checkout_arena)",
+            proxima_tensor::instrument::ticks_to_nanos(checkout_ticks)
+        );
+        println!(
+            "bind_named_inputs rebind byte-compare: calls={bind_calls} total_ns={} ns/call={bind_ns_per_call}",
+            proxima_tensor::instrument::ticks_to_nanos(bind_ticks)
+        );
+        proxima_tensor::instrument::reset_checkout_arena_key_compare();
+        proxima_tensor::instrument::reset_bind_rebind_compare();
+    }
 
     // Correctness: bit-identity vs the `evaluate_named` oracle for the NEON
     // arm. The lowering cache is already warm from the timed loop above, so
@@ -458,6 +491,8 @@ fn main() {
             cpu::arena_cache_reset();
             cpu::rewrite_engine_reset();
             proxima_tensor::instrument::reset_reduce_gemm_path();
+            proxima_tensor::instrument::reset_checkout_arena_key_compare();
+            proxima_tensor::instrument::reset_bind_rebind_compare();
         }
         let mut run_means = Vec::new();
         for _run in 0..default_arm_runs {
@@ -554,6 +589,22 @@ fn main() {
                     "engagement N==0 is RED: width_tile_plan (WidthFast) never engaged on the default evaluate_named path"
                 );
             }
+            let (checkout_calls, checkout_ticks) =
+                proxima_tensor::instrument::checkout_arena_key_compare_totals();
+            let (bind_calls, bind_ticks) =
+                proxima_tensor::instrument::bind_rebind_compare_totals();
+            let checkout_ns_per_call = proxima_tensor::instrument::ticks_to_nanos(checkout_ticks)
+                .checked_div(checkout_calls)
+                .unwrap_or(0);
+            let bind_ns_per_call = proxima_tensor::instrument::ticks_to_nanos(bind_ticks)
+                .checked_div(bind_calls)
+                .unwrap_or(0);
+            println!(
+                "  HIT-COST (DEFAULT-PATH, accelerate={accelerate}, {} evaluate_named calls): \
+                 checkout_arena key-compare calls={checkout_calls} ns/call={checkout_ns_per_call}; \
+                 bind rebind byte-compare calls={bind_calls} ns/call={bind_ns_per_call}",
+                default_arm_runs * items.len()
+            );
         }
     }
     cpu::set_accelerate_gemm_enabled(false);
