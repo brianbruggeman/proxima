@@ -9234,6 +9234,18 @@ struct WidthTilePlan {
     outer_stride_a: i64,
     outer_stride_b: i64,
     outer_stride_out: i64,
+    /// `float32x4_t` vectors [`run_width_tile_neon`] tiles this call at --
+    /// `WIDTH_TILE_VECS` (4, 16-wide) for every node this tile already
+    /// served, unchanged; `2` (8-wide) or `1` (4-wide) for the narrow-N
+    /// nodes `width_tile_vecs_for` admits (narrow-tile task, 2026-09-01) --
+    /// `attn_qk`'s `Q@K^T`, `N = seq_len` in `{7, 8, 9}`, always below the
+    /// `WIDTH_TILE_VECS * 4 == 16` main-tile floor. Selects which
+    /// monomorphisation of [`gemm_width_tile_neon`] the call site
+    /// instantiates -- a runtime value driving a compile-time const generic
+    /// choice via [`try_run_width_tile`]'s own match, the same shape
+    /// `width_row_remainder_tile!`'s `$rows` literal dispatch already uses
+    /// for `ROWS`.
+    vecs: usize,
 }
 
 /// Whether `dims` (`resolve_reduce_axis_shape`'s own outer-to-inner order)
@@ -9264,6 +9276,29 @@ fn composed_reduction_stride(
         extent_total = extent_total.saturating_mul(resolved.extents[dim as usize] as i64);
     }
     Some((extent_total, stride))
+}
+
+/// Which [`gemm_width_tile_neon`] `VECS` monomorphisation `width` admits,
+/// `None` when even the narrowest (`VECS = 1`, 4-wide) tile does not fit --
+/// narrow-tile task (2026-09-01), discharging ROW 216's named residual.
+/// `WIDTH_TILE_VECS` (4, 16-wide) is unchanged and checked first so every
+/// node the main tile already serves takes the SAME branch it always has;
+/// `2` (8-wide) matches BGE's `Q@K^T` `N = 8` sentence exactly, `1` (4-wide)
+/// covers `N` in `4..=7` (BGE's `N = 7` sentence) with a 3-column scalar
+/// tail [`run_width_tile_neon`]'s existing column-tail loop already walks
+/// unchanged -- no new remainder mechanism, the same one `VECS = 4` nodes
+/// use when `width` is not itself a multiple of `WIDTH_TILE_VECS * 4`.
+#[cfg(target_arch = "aarch64")]
+const fn width_tile_vecs_for(width: usize) -> Option<usize> {
+    if width >= WIDTH_TILE_VECS * 4 {
+        Some(WIDTH_TILE_VECS)
+    } else if width >= 8 {
+        Some(2)
+    } else if width >= 4 {
+        Some(1)
+    } else {
+        None
+    }
 }
 
 /// Resolves [`WidthTilePlan`] once per bound op, or `None` when this node
@@ -9416,7 +9451,7 @@ fn width_tile_plan(context: &WidthPathContext) -> Option<WidthTilePlan> {
         .iter()
         .map(|&dim| context.resolved.extents[dim as usize] as i64)
         .product();
-    if context.width < WIDTH_TILE_VECS * 4 {
+    let Some(vecs) = width_tile_vecs_for(context.width) else {
         #[cfg(feature = "instrument")]
         record_decline(
             instrument::WidthDeclineReason::NarrowWidth,
@@ -9427,7 +9462,7 @@ fn width_tile_plan(context: &WidthPathContext) -> Option<WidthTilePlan> {
             stride_b_early,
         );
         return None;
-    }
+    };
     let Some(last_output_dim) = context.last_output_dim else {
         #[cfg(feature = "instrument")]
         record_decline(
@@ -9491,17 +9526,38 @@ fn width_tile_plan(context: &WidthPathContext) -> Option<WidthTilePlan> {
     // which operand is `a` (row-varying, contiguous over `k`) vs `b`
     // (weight-like, constant per row). Zero non-degenerate axes: `leading_dim`
     // stays whatever `leading_output_axes[0]` is (extent 1, a single
-    // degenerate row) -- the pre-existing behavior. One: unchanged, that
-    // axis is the row axis, no outer loop. Two (`attn_qk`/`attn_v`): the
-    // axis where `layout_b`'s stride is 0 is the row axis (the SAME shape
-    // every other node already proves); the other must be a genuine outer
-    // axis both operands step by -- `layout_b`'s stride nonzero there by
-    // construction (the complement), and `layout_a`'s stride ALSO nonzero
-    // (else `a` never changes across it, a shape this tile has not proven
-    // and declines rather than guesses).
+    // degenerate row) -- the pre-existing behavior, and safe regardless of
+    // `layout_b`'s stride there since the row loop below only ever runs once.
+    // One: `gemm_width_tile_neon` has no `row_stride_b` -- it reads `b` from
+    // the SAME base for every row, so this is only sound when `b` is truly
+    // row-invariant (`layout_b.stride(only) == 0`, the shared-weight GEMM
+    // shape). A per-row `b` (a batched/grouped fold, e.g. a per-head weight
+    // slice reached only after `bind`'s elementwise-into-reduce fusion)
+    // silently reused row 0's `b` slice for every row here before this
+    // check existed -- proven by `omega`'s `backend_parity`/`metal_real_forward`
+    // real-forward-graph gates, which caught it as every row/head of a
+    // fused reduce collapsing to the first row's value. Two (`attn_qk`/
+    // `attn_v`): the axis where `layout_b`'s stride is 0 is the row axis
+    // (the SAME shape every other node already proves); the other must be a
+    // genuine outer axis both operands step by -- `layout_b`'s stride
+    // nonzero there by construction (the complement), and `layout_a`'s
+    // stride ALSO nonzero (else `a` never changes across it, a shape this
+    // tile has not proven and declines rather than guesses).
     let (leading_dim, outer_dim) = match non_degenerate_leading.as_slice() {
         [] => (context.leading_output_axes[0], None),
-        &[only] => (only, None),
+        &[only] if layout_b.stride(only) == 0 => (only, None),
+        &[_] => {
+            #[cfg(feature = "instrument")]
+            record_decline(
+                instrument::WidthDeclineReason::AxesShape,
+                leading_total_early,
+                reduction_total_early,
+                width_i64,
+                stride_a_early,
+                stride_b_early,
+            );
+            return None;
+        }
         &[first, second] => match (layout_b.stride(first), layout_b.stride(second)) {
             (0, other) if other != 0 => (first, Some(second)),
             (other, 0) if other != 0 => (second, Some(first)),
@@ -9621,6 +9677,7 @@ fn width_tile_plan(context: &WidthPathContext) -> Option<WidthTilePlan> {
         outer_stride_a: outer_info.map_or(0, |(_, stride_a, ..)| stride_a),
         outer_stride_b: outer_info.map_or(0, |(_, _, stride_b, _)| stride_b),
         outer_stride_out: outer_info.map_or(0, |(_, _, _, stride_out)| stride_out),
+        vecs,
     })
 }
 
@@ -9862,7 +9919,14 @@ fn width_tile_pack_candidate(resolved: &BoundOp) -> Option<WidthTilePlan> {
         width,
         out_layout,
     };
-    width_tile_plan(&context)
+    // narrow-tile task (2026-09-01): packing panels are built and sized for
+    // the `VECS = WIDTH_TILE_VECS` (16-wide) tile only -- a narrow-`vecs`
+    // plan's `run_width_tile_neon::<VECS>` reads `tile_cols = VECS * 4`-wide
+    // strided slices from `data_b_unpacked` unconditionally (see
+    // `try_run_width_tile`'s own dispatch), so declining here rather than
+    // building a mismatched-width panel buffer keeps the existing packing
+    // pipeline byte-for-byte unchanged for the 84 nodes it already serves.
+    width_tile_plan(&context).filter(|plan| plan.vecs == WIDTH_TILE_VECS)
 }
 
 /// Scans every resolved node for a width-tile reduce whose `b` operand is
@@ -9968,7 +10032,7 @@ fn width_tile_scalar_cell(a: KStridedTile, b: KStridedTile, k: usize, seed: f32)
 /// [`NEON_TILE_ROW_REMAINDER_ELEMENTS`]'s own coverage identity for the
 /// dot-path tile).
 #[cfg(target_arch = "aarch64")]
-fn run_width_tile_neon(
+fn run_width_tile_neon<const VECS: usize>(
     plan: &WidthTilePlan,
     raw: &[&[f32]],
     packed: Option<&PackedWidthPanels>,
@@ -9976,6 +10040,28 @@ fn run_width_tile_neon(
 ) {
     #[cfg(feature = "instrument")]
     WIDTH_TILE_GATE_PASSES.fetch_add(1, Ordering::Relaxed);
+
+    // composition-split task (2026-09-01): whole-function wall time, read
+    // first thing, committed at the tail alongside `kernel_ticks` below --
+    // `record_width_tile_split_ticks`'s own doc names why this pair (fn
+    // entry/exit) is the right granularity: cheap enough not to perturb a
+    // function this short-lived, coarse enough to bound the surround.
+    #[cfg(feature = "instrument")]
+    let width_tile_fn_started = instrument::read_ticks();
+    // ticks strictly inside `gemm_width_tile_neon`, summed across every call
+    // this function makes (main tile loop below, plus the row-remainder
+    // macro's own call site) -- accumulated locally, committed once, same
+    // discipline as every other counter in this function. Read at the CALL
+    // boundary, never inside the kernel's own k-loop: a ~1-2us kernel call
+    // can absorb a read-pair's overhead, a per-element inner loop could not.
+    #[cfg(feature = "instrument")]
+    let mut width_tile_kernel_ticks = 0u64;
+    // MACs those same kernel calls computed -- `ROWS * tile_cols *
+    // reduction_total` per call, tracked separately from `run_reduce`'s own
+    // `MAC_OPS` so the column-tail scalar fallback's MACs never mix in (see
+    // `WIDTH_TILE_KERNEL_MACS`'s own doc).
+    #[cfg(feature = "instrument")]
+    let mut width_tile_kernel_macs = 0u64;
 
     // accumulated locally across the whole tile walk and committed once at
     // the end, never as a per-element atomic inside the fallback loops.
@@ -9993,7 +10079,7 @@ fn run_width_tile_neon(
 
     let data_a = raw[plan.a_operand];
     let data_b_unpacked = raw[plan.b_operand];
-    let tile_cols = WIDTH_TILE_VECS * 4;
+    let tile_cols = VECS * 4;
     let row_tiles = plan.leading_total / WIDTH_TILE_ROWS;
     let col_tiles = plan.width / tile_cols;
     // law 6∘5: only trusted when the packed panel buffer covers every full
@@ -10043,15 +10129,17 @@ fn run_width_tile_neon(
                         plan.k_stride_b,
                     ),
                 };
-                let mut tile_out = [[[plan.seed; 4]; WIDTH_TILE_VECS]; WIDTH_TILE_ROWS];
+                let mut tile_out = [[[plan.seed; 4]; VECS]; WIDTH_TILE_ROWS];
 
                 // caller-checked: `base_a`/`base_b` plus every stride-scaled
                 // offset the kernel touches stay inside `data_a`/`b_data`,
                 // guaranteed by `row_tiles`/`col_tiles` only covering whole
                 // tiles carved out of `plan.leading_total`/`plan.width` (packed:
                 // `full_col_tiles`/`k_total` sized exactly to match).
+                #[cfg(feature = "instrument")]
+                let kernel_started = instrument::read_ticks();
                 unsafe {
-                    gemm_width_tile_neon::<WIDTH_TILE_ROWS, WIDTH_TILE_VECS>(
+                    gemm_width_tile_neon::<WIDTH_TILE_ROWS, VECS>(
                         KStridedTile {
                             data: data_a,
                             base: base_a,
@@ -10069,6 +10157,9 @@ fn run_width_tile_neon(
                 }
                 #[cfg(feature = "instrument")]
                 {
+                    width_tile_kernel_ticks += instrument::elapsed_ticks(kernel_started);
+                    width_tile_kernel_macs +=
+                        WIDTH_TILE_ROWS as u64 * tile_cols as u64 * plan.reduction_total as u64;
                     width_tile_invocations += 1;
                 }
 
@@ -10146,7 +10237,7 @@ fn run_width_tile_neon(
                             plan.k_stride_b,
                         ),
                     };
-                    let mut tile_out = [[[plan.seed; 4]; WIDTH_TILE_VECS]; $rows];
+                    let mut tile_out = [[[plan.seed; 4]; VECS]; $rows];
 
                     // caller-checked: same argument `run_width_tile_neon`'s main
                     // loop above already proves for `WIDTH_TILE_ROWS` rows, just
@@ -10154,8 +10245,10 @@ fn run_width_tile_neon(
                     // inside `plan.leading_total`, since `row_start + $rows` is
                     // exactly the greedy 2-then-1 dispatch below never
                     // overshooting `plan.leading_total`.
+                    #[cfg(feature = "instrument")]
+                    let kernel_started = instrument::read_ticks();
                     unsafe {
-                        gemm_width_tile_neon::<$rows, WIDTH_TILE_VECS>(
+                        gemm_width_tile_neon::<$rows, VECS>(
                             KStridedTile {
                                 data: data_a,
                                 base: base_a,
@@ -10173,6 +10266,9 @@ fn run_width_tile_neon(
                     }
                     #[cfg(feature = "instrument")]
                     {
+                        width_tile_kernel_ticks += instrument::elapsed_ticks(kernel_started);
+                        width_tile_kernel_macs +=
+                            $rows as u64 * tile_cols as u64 * plan.reduction_total as u64;
                         width_tile_row_remainder_invocations += 1;
                         width_tile_row_remainder_elements += ($rows * tile_cols) as u64;
                     }
@@ -10262,6 +10358,11 @@ fn run_width_tile_neon(
         if col_tiles * tile_cols < plan.width {
             counter!(instrument::WIDTH_TILE_COLUMN_TAIL_PRESENT, 1);
         }
+        instrument::record_width_tile_split_ticks(
+            width_tile_kernel_ticks,
+            width_tile_kernel_macs,
+            instrument::elapsed_ticks(width_tile_fn_started),
+        );
     }
 }
 
@@ -10280,10 +10381,32 @@ fn try_run_width_tile(
     output: &mut [f32],
 ) -> bool {
     match width_tile_plan(context) {
-        Some(plan) => {
-            run_width_tile_neon(&plan, raw, packed, output);
+        // narrow-tile task (2026-09-01): `plan.vecs` is a runtime value
+        // selecting a compile-time `gemm_width_tile_neon` monomorphisation
+        // -- resolved here, once, the same way `width_row_remainder_tile!`'s
+        // `$rows` literal already resolves `ROWS`. `vecs == WIDTH_TILE_VECS`
+        // is the pre-existing path, byte-for-byte: same generic argument,
+        // same `packed` panels. The narrow arms never receive `packed` --
+        // `width_tile_pack_candidate` never builds a panel buffer for them
+        // (see its own doc), so passing one through would only ever be a
+        // stale buffer from an unrelated node; `None` states that plainly
+        // instead of relying on the runtime filter to catch it.
+        Some(plan) if plan.vecs == WIDTH_TILE_VECS => {
+            run_width_tile_neon::<WIDTH_TILE_VECS>(&plan, raw, packed, output);
             true
         }
+        Some(plan) if plan.vecs == 2 => {
+            run_width_tile_neon::<2>(&plan, raw, None, output);
+            true
+        }
+        Some(plan) if plan.vecs == 1 => {
+            run_width_tile_neon::<1>(&plan, raw, None, output);
+            true
+        }
+        Some(plan) => unreachable!(
+            "width_tile_vecs_for only emits vecs in {{1, 2, WIDTH_TILE_VECS}}, got {}",
+            plan.vecs
+        ),
         None => false,
     }
 }
@@ -18649,7 +18772,7 @@ mod tests {
             out
         }
 
-        fn neon_route(
+        fn neon_route<const VECS: usize>(
             a: &[f32],
             b_kn: &[f32],
             heads: usize,
@@ -18678,8 +18801,9 @@ mod tests {
                 outer_stride_a: (m * k) as i64,
                 outer_stride_b: (k * n) as i64,
                 outer_stride_out: (m * n) as i64,
+                vecs: VECS,
             };
-            run_width_tile_neon(&plan, &raw, None, &mut out);
+            run_width_tile_neon::<VECS>(&plan, &raw, None, &mut out);
             out
         }
 
@@ -18767,7 +18891,7 @@ mod tests {
                     let mut neon_samples = Vec::with_capacity(REPEATS);
                     for _ in 0..REPEATS {
                         let started = Instant::now();
-                        neon_out = neon_route(&a, &b_kn, HEADS, m, k, n);
+                        neon_out = neon_route::<WIDTH_TILE_VECS>(&a, &b_kn, HEADS, m, k, n);
                         neon_samples.push(started.elapsed().as_nanos() as f64);
                     }
                     for (got, want) in neon_out.iter().zip(&reference) {
@@ -18814,6 +18938,181 @@ mod tests {
                     "{name:<10} M={m:<2} K={k:<2} N={n:<2} width_eligible={width_eligible:<5} scalar_ns={scalar_mean:>9.1} (cov={scalar_cov:.3}) {neon_report} {accelerate_report}"
                 );
             }
+        }
+    }
+
+    /// KILL-EARLY nano (narrow-tile task, 2026-09-01, binding on ROW
+    /// 198/199): the untiled scalar path vs the narrow-`VECS` NEON width
+    /// tile at BGE's `Q@K^T` inner shape `(M,32)x(32,M)`, `M` in `{7, 8,
+    /// 9}`, `heads=12` — the exact class [`attention_tile_shapes_nano`]
+    /// above reports `neon_ns=N/A` for. Two arms per `M`: `forced_vecs2`
+    /// runs `gemm_width_tile_neon::<_, 2>` exactly as the binding
+    /// instruction names it (at `N=7` this walks ZERO full 8-wide tiles —
+    /// `col_tiles = 7/8 = 0` — so every element falls through the same
+    /// scalar column-tail loop the untiled path already uses, measuring
+    /// only the tile/outer-loop overhead with no compensating NEON work);
+    /// `admitted` runs whichever `VECS` [`width_tile_vecs_for`] actually
+    /// selects for that `N` (`1` at `N=7`, `2` at `N=8/9`, identical to
+    /// `forced_vecs2` at `N=8/9`). `#[ignore]`: manual, not part of the CI
+    /// gate — `cargo test -p proxima-tensor --release
+    /// narrow_width_tile_shapes_nano -- --ignored --nocapture`.
+    #[cfg(target_arch = "aarch64")]
+    #[test]
+    #[ignore = "manual nano bench, not a CI gate; see this test's own doc"]
+    fn narrow_width_tile_shapes_nano() {
+        const HEADS: usize = 12;
+        const REPEATS: usize = 7;
+
+        fn scalar_reference(
+            a: &[f32],
+            b_kn: &[f32],
+            heads: usize,
+            m: usize,
+            k: usize,
+            n: usize,
+        ) -> Vec<f32> {
+            let mut out = vec![0.0f32; heads * m * n];
+            for head in 0..heads {
+                let a_head = &a[head * m * k..(head + 1) * m * k];
+                let b_head = &b_kn[head * k * n..(head + 1) * k * n];
+                let out_head = &mut out[head * m * n..(head + 1) * m * n];
+                for row in 0..m {
+                    for col in 0..n {
+                        let value = width_tile_scalar_cell(
+                            KStridedTile {
+                                data: a_head,
+                                base: (row * k) as i64,
+                                k_stride: 1,
+                            },
+                            KStridedTile {
+                                data: b_head,
+                                base: col as i64,
+                                k_stride: n as i64,
+                            },
+                            k,
+                            0.0,
+                        );
+                        out_head[row * n + col] = value;
+                    }
+                }
+            }
+            out
+        }
+
+        fn neon_route<const VECS: usize>(
+            a: &[f32],
+            b_kn: &[f32],
+            heads: usize,
+            m: usize,
+            k: usize,
+            n: usize,
+        ) -> Vec<f32> {
+            let mut out = vec![0.0f32; heads * m * n];
+            let raw: [&[f32]; 2] = [a, b_kn];
+            let plan = WidthTilePlan {
+                a_operand: 0,
+                b_operand: 1,
+                row_stride_a: k as i64,
+                base_a: 0,
+                k_stride_a: 1,
+                base_b: 0,
+                k_stride_b: n as i64,
+                out_base: 0,
+                out_row_stride: n as i64,
+                out_col_stride: 1,
+                leading_total: m,
+                reduction_total: k,
+                width: n,
+                seed: 0.0,
+                outer_extent: heads,
+                outer_stride_a: (m * k) as i64,
+                outer_stride_b: (k * n) as i64,
+                outer_stride_out: (m * n) as i64,
+                vecs: VECS,
+            };
+            run_width_tile_neon::<VECS>(&plan, &raw, None, &mut out);
+            out
+        }
+
+        fn mean_cov(samples: &[f64]) -> (f64, f64) {
+            let mean = samples.iter().sum::<f64>() / samples.len() as f64;
+            let variance = samples
+                .iter()
+                .map(|sample| (sample - mean).powi(2))
+                .sum::<f64>()
+                / samples.len() as f64;
+            (mean, variance.sqrt() / mean)
+        }
+
+        let load = std::process::Command::new("uptime")
+            .output()
+            .map(|out| String::from_utf8_lossy(&out.stdout).trim().to_string())
+            .unwrap_or_else(|_| "uptime unavailable".to_string());
+        eprintln!(
+            "narrow_width_tile_shapes_nano: heads={HEADS} repeats={REPEATS} ambient_load={load}"
+        );
+
+        for m in [7usize, 8, 9] {
+            let (k, n) = (32usize, m);
+            let mut rng = Lcg(0x9E37_79B9 ^ (m as u64) ^ ((k as u64) << 8) ^ ((n as u64) << 16));
+            let a: Vec<f32> = (0..HEADS * m * k).map(|_| rng.next_unit()).collect();
+            let b_kn: Vec<f32> = (0..HEADS * k * n).map(|_| rng.next_unit()).collect();
+
+            let reference = scalar_reference(&a, &b_kn, HEADS, m, k, n);
+
+            let mut scalar_samples = Vec::with_capacity(REPEATS);
+            for _ in 0..REPEATS {
+                let started = Instant::now();
+                let out = scalar_reference(&a, &b_kn, HEADS, m, k, n);
+                scalar_samples.push(started.elapsed().as_nanos() as f64);
+                std::hint::black_box(&out);
+            }
+            let (scalar_mean, scalar_cov) = mean_cov(&scalar_samples);
+
+            let mut forced2_out = neon_route::<2>(&a, &b_kn, HEADS, m, k, n);
+            for (got, want) in forced2_out.iter().zip(&reference) {
+                assert_eq!(
+                    got.to_bits(),
+                    want.to_bits(),
+                    "vecs=2 not bit-identical to scalar reference: got={got} want={want}"
+                );
+            }
+            let mut forced2_samples = Vec::with_capacity(REPEATS);
+            for _ in 0..REPEATS {
+                let started = Instant::now();
+                forced2_out = neon_route::<2>(&a, &b_kn, HEADS, m, k, n);
+                forced2_samples.push(started.elapsed().as_nanos() as f64);
+            }
+            std::hint::black_box(&forced2_out);
+            let (forced2_mean, forced2_cov) = mean_cov(&forced2_samples);
+
+            let admitted_vecs = width_tile_vecs_for(n).expect("N=7/8/9 all admit at least VECS=1");
+            let (admitted_mean, admitted_cov) = if admitted_vecs == 2 {
+                (forced2_mean, forced2_cov)
+            } else {
+                let mut admitted_out = neon_route::<1>(&a, &b_kn, HEADS, m, k, n);
+                for (got, want) in admitted_out.iter().zip(&reference) {
+                    assert_eq!(
+                        got.to_bits(),
+                        want.to_bits(),
+                        "vecs=1 not bit-identical to scalar reference: got={got} want={want}"
+                    );
+                }
+                let mut admitted_samples = Vec::with_capacity(REPEATS);
+                for _ in 0..REPEATS {
+                    let started = Instant::now();
+                    admitted_out = neon_route::<1>(&a, &b_kn, HEADS, m, k, n);
+                    admitted_samples.push(started.elapsed().as_nanos() as f64);
+                }
+                std::hint::black_box(&admitted_out);
+                mean_cov(&admitted_samples)
+            };
+            let admitted_speedup = scalar_mean / admitted_mean;
+
+            eprintln!(
+                "Q@K^T M={m:<2} K={k:<2} N={n:<2} scalar_ns={scalar_mean:>9.1} (cov={scalar_cov:.3}) forced_vecs2_ns={forced2_mean:>9.1} (cov={forced2_cov:.3}) forced_vecs2_speedup={:.3}x admitted_vecs={admitted_vecs} admitted_ns={admitted_mean:>9.1} (cov={admitted_cov:.3}) admitted_speedup={admitted_speedup:.3}x",
+                scalar_mean / forced2_mean
+            );
         }
     }
 
@@ -20062,6 +20361,116 @@ mod tests {
         (program, sum)
     }
 
+    /// `sum_e lhs[e] * rhs[h, e, d]` over iteration space `(h, e, d)`: `lhs`
+    /// broadcasts over the leading axis `h` AND the width axis `d` (varies
+    /// only along the reduction axis `e`, ROW 35's `hidden` operand
+    /// shape), `rhs` varies over all three (ROW 35's per-head `attn_q`
+    /// weight slice, `[heads, embed, head_dim]`). `sum` is the ONLY
+    /// consumer of the `Multiply`, so `bind` fuses it into the `Reduce`'s
+    /// own `BoundOp` when `sum` is the sole requested output — the exact
+    /// shape `width_tile_plan`'s single-non-degenerate-leading-axis branch
+    /// (`cpu.rs`) reaches, and the one it silently mishandled before that
+    /// branch verified `layout_b.stride(leading_dim) == 0`.
+    fn batched_matmul_program_with_per_row_weight(
+        rows: u32,
+        contraction: u32,
+        width: u32,
+    ) -> (Vec<Op>, NodeId) {
+        let mut program = Vec::new();
+        let lhs = f32_block(&mut program, &[Extent::Static(contraction)]);
+        let rhs = f32_block(
+            &mut program,
+            &[
+                Extent::Static(rows),
+                Extent::Static(contraction),
+                Extent::Static(width),
+            ],
+        );
+        let product = append(
+            &mut program,
+            Op::Elementwise {
+                dtype: DType::Float32,
+                body: ScalarOp::Multiply,
+                operands: alloc::vec![
+                    (lhs, IndexMap::Affine(map::projection(3, &[1]))),
+                    (rhs, IndexMap::Affine(map::projection(3, &[0, 1, 2]))),
+                ],
+                name: None,
+            },
+        );
+        let sum = append(
+            &mut program,
+            Op::Reduce(Reduce {
+                dtype: DType::Float32,
+                body: ScalarOp::Add,
+                init: ReduceInit::Zero,
+                operand: product,
+                in_map: IndexMap::Affine(map::projection(3, &[0, 1, 2])),
+                out_map: IndexMap::Affine(map::projection(3, &[0, 2])),
+                keep: Keep::Reduce,
+                name: Some("batched_matmul_per_row_weight".into()),
+            }),
+        );
+        (program, sum)
+    }
+
+    /// Same per-row-weight bug shape as [`batched_matmul_program_with_per_row_weight`],
+    /// but the reduction is split across TWO axes (`k_outer`, `k_inner`) that
+    /// `composed_reduction_stride` must fold into one virtual `k` before
+    /// `width_tile_plan`'s leading-axis guard is ever reached — the
+    /// `composed_reduction_stride` widening task's own shape
+    /// (`attn_o`'s `[heads, head_dim]`), paired with a deliberately
+    /// row-varying `b` to prove that widening a DIFFERENT axis (reduction,
+    /// not leading) never bypasses the `layout_b.stride(leading_dim) == 0`
+    /// check the leading axis itself still enforces.
+    fn batched_matmul_program_with_per_row_weight_composed_reduction(
+        rows: u32,
+        k_outer: u32,
+        k_inner: u32,
+        width: u32,
+    ) -> (Vec<Op>, NodeId) {
+        let mut program = Vec::new();
+        let lhs = f32_block(
+            &mut program,
+            &[Extent::Static(k_outer), Extent::Static(k_inner)],
+        );
+        let rhs = f32_block(
+            &mut program,
+            &[
+                Extent::Static(rows),
+                Extent::Static(k_outer),
+                Extent::Static(k_inner),
+                Extent::Static(width),
+            ],
+        );
+        let product = append(
+            &mut program,
+            Op::Elementwise {
+                dtype: DType::Float32,
+                body: ScalarOp::Multiply,
+                operands: alloc::vec![
+                    (lhs, IndexMap::Affine(map::projection(4, &[1, 2]))),
+                    (rhs, IndexMap::Affine(map::projection(4, &[0, 1, 2, 3]))),
+                ],
+                name: None,
+            },
+        );
+        let sum = append(
+            &mut program,
+            Op::Reduce(Reduce {
+                dtype: DType::Float32,
+                body: ScalarOp::Add,
+                init: ReduceInit::Zero,
+                operand: product,
+                in_map: IndexMap::Affine(map::projection(4, &[0, 1, 2, 3])),
+                out_map: IndexMap::Affine(map::projection(4, &[0, 3])),
+                keep: Keep::Reduce,
+                name: Some("batched_matmul_per_row_weight_composed_reduction".into()),
+            }),
+        );
+        (program, sum)
+    }
+
     /// `table[ids[s], d]` over iteration space `(s, d)`: dim 0 (vocab) is
     /// gathered by `ids`, dim 1 (feature) is a plain projection.
     fn embedding_lookup_program(vocab: u32, dim: u32, seq: u32) -> (Vec<Op>, NodeId) {
@@ -20301,6 +20710,173 @@ mod tests {
             evaluated.root(),
             naive_matmul(&lhs, &rhs, m, k, n).as_slice()
         );
+        let _ = sum;
+    }
+
+    /// Regression for the bug `omega`'s `backend_parity`/`metal_real_forward`
+    /// real-forward-graph gates caught: `relative=1.3264047 max_diff=6.9346437`
+    /// between CPU and Metal, traced to the FIRST divergent node in the
+    /// mistral cached-forward program (a `Reduce` fusing an RoPE-projection
+    /// `Multiply` whose second operand varies per attention head). Metal was
+    /// correct; the CPU width-tile fast path (`width_tile_plan`, `cpu.rs`)
+    /// was wrong — its single-leading-axis branch never checked that the
+    /// "weight" operand (`b`, reused from the SAME base for every row by
+    /// `gemm_width_tile_neon`, which carries no `row_stride_b`) was actually
+    /// row-invariant, so every row silently read row 0's slice of `b`.
+    ///
+    /// `rows=8` spans two full `WIDTH_TILE_ROWS=4` tiles plus none left over,
+    /// `width=16` is exactly `WIDTH_TILE_VECS * 4` (the fast path's minimum),
+    /// and `contraction=6` is short enough to keep the reference loop
+    /// readable — this is the smallest shape that still reaches
+    /// `width_tile_plan`'s single-leading-axis branch with a genuinely
+    /// row-varying `b`. Requesting `sum` alone as the sole output is what
+    /// makes `bind` fuse the `Multiply` into the `Reduce`'s own `BoundOp` in
+    /// the first place (`requesting_the_intermediate_elementwise_op_as_an_output_prevents_fusion`
+    /// in `bind.rs` proves the converse).
+    #[test]
+    fn a_reduce_fusing_a_per_row_weight_operand_computes_a_distinct_value_per_row() {
+        let (rows, contraction, width) = (8u32, 6u32, 16u32);
+        let (program, sum) = batched_matmul_program_with_per_row_weight(rows, contraction, width);
+
+        let lhs: Vec<f32> = (0..contraction).map(|value| 1.0 + value as f32).collect();
+        let rhs: Vec<f32> = (0..rows * contraction * width)
+            .map(|value| value as f32 * 0.001)
+            .collect();
+
+        let evaluated = evaluate(&program, &[], &[&lhs, &rhs], &[])
+            .expect("the fused per-row-weight reduce evaluates");
+        assert_eq!(evaluated.shape(), &[rows as u64, width as u64]);
+
+        let mut reference = vec![0.0f32; (rows * width) as usize];
+        for row in 0..rows {
+            for col in 0..width {
+                let mut total = 0.0f32;
+                for k in 0..contraction {
+                    let lhs_value = lhs[k as usize];
+                    let rhs_value = rhs[(row * contraction * width + k * width + col) as usize];
+                    total += lhs_value * rhs_value;
+                }
+                reference[(row * width + col) as usize] = total;
+            }
+        }
+        assert_all_close(evaluated.root(), &reference, 1e-5);
+
+        // the exact shape of the bug this guards: every row collapsing to
+        // row 0's value because `b`'s base never advanced past the first
+        // row. Assert the FIRST divergent row directly rather than trusting
+        // the aggregate `assert_all_close` above alone.
+        let output = evaluated.root();
+        let row0 = &output[..width as usize];
+        for row in 1..rows as usize {
+            let this_row = &output[row * width as usize..(row + 1) * width as usize];
+            assert_ne!(
+                this_row, row0,
+                "row {row} collapsed to row 0's value -- the per-row weight operand was not advanced"
+            );
+        }
+        let _ = sum;
+    }
+
+    /// `composed_reduction_stride` (`perf/width-gate-decline`) widened
+    /// `width_tile_plan` to fold a two-axis reduction into one virtual `k` --
+    /// the same shape `attn_o`'s `[heads, head_dim]` weight reduce composes.
+    /// That widening touches the REDUCTION axes only; this proves it can
+    /// never smuggle a row-varying `b` past the leading-axis guard, since
+    /// the guard runs on `layout_b.stride(leading_dim)` before the composed
+    /// reduction stride is ever computed. `k_outer=3, k_inner=4` gives a
+    /// row-major-composable `contraction=12`; `width=16` keeps this test on
+    /// the main (`VECS=4`) tile, isolating the reduction-axis widening from
+    /// the narrow-width widening covered separately below.
+    #[test]
+    fn a_composed_two_axis_reduction_fusing_a_per_row_weight_operand_computes_a_distinct_value_per_row()
+     {
+        let (rows, k_outer, k_inner, width) = (8u32, 3u32, 4u32, 16u32);
+        let contraction = k_outer * k_inner;
+        let (program, sum) = batched_matmul_program_with_per_row_weight_composed_reduction(
+            rows, k_outer, k_inner, width,
+        );
+
+        let lhs: Vec<f32> = (0..contraction).map(|value| 1.0 + value as f32).collect();
+        let rhs: Vec<f32> = (0..rows * contraction * width)
+            .map(|value| value as f32 * 0.001)
+            .collect();
+
+        let evaluated = evaluate(&program, &[], &[&lhs, &rhs], &[])
+            .expect("the composed-reduction per-row-weight reduce evaluates");
+        assert_eq!(evaluated.shape(), &[rows as u64, width as u64]);
+
+        let mut reference = vec![0.0f32; (rows * width) as usize];
+        for row in 0..rows {
+            for col in 0..width {
+                let mut total = 0.0f32;
+                for k in 0..contraction {
+                    let lhs_value = lhs[k as usize];
+                    let rhs_value = rhs[(row * contraction * width + k * width + col) as usize];
+                    total += lhs_value * rhs_value;
+                }
+                reference[(row * width + col) as usize] = total;
+            }
+        }
+        assert_all_close(evaluated.root(), &reference, 1e-5);
+
+        let output = evaluated.root();
+        let row0 = &output[..width as usize];
+        for row in 1..rows as usize {
+            let this_row = &output[row * width as usize..(row + 1) * width as usize];
+            assert_ne!(
+                this_row, row0,
+                "row {row} collapsed to row 0's value -- the composed-reduction widening let a per-row weight operand through unguarded"
+            );
+        }
+        let _ = sum;
+    }
+
+    /// `width_tile_vecs_for` (`perf/narrow-tile`) widened `width_tile_plan`
+    /// to admit `width` below the main tile's `WIDTH_TILE_VECS * 4 == 16`
+    /// floor (`VECS=2`/`VECS=1`), unlocking nodes that used to decline at
+    /// `NarrowWidth` before ever reaching the leading-axis guard. `width=8`
+    /// selects `VECS=2` -- BGE's own `attn_qk` `N=8` sentence
+    /// (`width_tile_vecs_for`'s doc) -- paired with the same row-varying `b`
+    /// shape as the original regression, proving the narrow-width path is
+    /// declined exactly like the main-tile path rather than exempted from
+    /// the guard.
+    #[test]
+    fn a_narrow_width_reduce_fusing_a_per_row_weight_operand_computes_a_distinct_value_per_row() {
+        let (rows, contraction, width) = (8u32, 6u32, 8u32);
+        let (program, sum) = batched_matmul_program_with_per_row_weight(rows, contraction, width);
+
+        let lhs: Vec<f32> = (0..contraction).map(|value| 1.0 + value as f32).collect();
+        let rhs: Vec<f32> = (0..rows * contraction * width)
+            .map(|value| value as f32 * 0.001)
+            .collect();
+
+        let evaluated = evaluate(&program, &[], &[&lhs, &rhs], &[])
+            .expect("the narrow-width per-row-weight reduce evaluates");
+        assert_eq!(evaluated.shape(), &[rows as u64, width as u64]);
+
+        let mut reference = vec![0.0f32; (rows * width) as usize];
+        for row in 0..rows {
+            for col in 0..width {
+                let mut total = 0.0f32;
+                for k in 0..contraction {
+                    let lhs_value = lhs[k as usize];
+                    let rhs_value = rhs[(row * contraction * width + k * width + col) as usize];
+                    total += lhs_value * rhs_value;
+                }
+                reference[(row * width + col) as usize] = total;
+            }
+        }
+        assert_all_close(evaluated.root(), &reference, 1e-5);
+
+        let output = evaluated.root();
+        let row0 = &output[..width as usize];
+        for row in 1..rows as usize {
+            let this_row = &output[row * width as usize..(row + 1) * width as usize];
+            assert_ne!(
+                this_row, row0,
+                "row {row} collapsed to row 0's value -- the narrow-width widening let a per-row weight operand through unguarded"
+            );
+        }
         let _ = sum;
     }
 
