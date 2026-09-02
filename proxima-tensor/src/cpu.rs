@@ -20414,6 +20414,63 @@ mod tests {
         (program, sum)
     }
 
+    /// Same per-row-weight bug shape as [`batched_matmul_program_with_per_row_weight`],
+    /// but the reduction is split across TWO axes (`k_outer`, `k_inner`) that
+    /// `composed_reduction_stride` must fold into one virtual `k` before
+    /// `width_tile_plan`'s leading-axis guard is ever reached — the
+    /// `composed_reduction_stride` widening task's own shape
+    /// (`attn_o`'s `[heads, head_dim]`), paired with a deliberately
+    /// row-varying `b` to prove that widening a DIFFERENT axis (reduction,
+    /// not leading) never bypasses the `layout_b.stride(leading_dim) == 0`
+    /// check the leading axis itself still enforces.
+    fn batched_matmul_program_with_per_row_weight_composed_reduction(
+        rows: u32,
+        k_outer: u32,
+        k_inner: u32,
+        width: u32,
+    ) -> (Vec<Op>, NodeId) {
+        let mut program = Vec::new();
+        let lhs = f32_block(
+            &mut program,
+            &[Extent::Static(k_outer), Extent::Static(k_inner)],
+        );
+        let rhs = f32_block(
+            &mut program,
+            &[
+                Extent::Static(rows),
+                Extent::Static(k_outer),
+                Extent::Static(k_inner),
+                Extent::Static(width),
+            ],
+        );
+        let product = append(
+            &mut program,
+            Op::Elementwise {
+                dtype: DType::Float32,
+                body: ScalarOp::Multiply,
+                operands: alloc::vec![
+                    (lhs, IndexMap::Affine(map::projection(4, &[1, 2]))),
+                    (rhs, IndexMap::Affine(map::projection(4, &[0, 1, 2, 3]))),
+                ],
+                name: None,
+            },
+        );
+        let sum = append(
+            &mut program,
+            Op::Reduce(Reduce {
+                dtype: DType::Float32,
+                body: ScalarOp::Add,
+                init: ReduceInit::Zero,
+                operand: product,
+                in_map: IndexMap::Affine(map::projection(4, &[0, 1, 2, 3])),
+                out_map: IndexMap::Affine(map::projection(4, &[0, 3])),
+                keep: Keep::Reduce,
+                name: Some("batched_matmul_per_row_weight_composed_reduction".into()),
+            }),
+        );
+        (program, sum)
+    }
+
     /// `table[ids[s], d]` over iteration space `(s, d)`: dim 0 (vocab) is
     /// gathered by `ids`, dim 1 (feature) is a plain projection.
     fn embedding_lookup_program(vocab: u32, dim: u32, seq: u32) -> (Vec<Op>, NodeId) {
@@ -20679,8 +20736,7 @@ mod tests {
     #[test]
     fn a_reduce_fusing_a_per_row_weight_operand_computes_a_distinct_value_per_row() {
         let (rows, contraction, width) = (8u32, 6u32, 16u32);
-        let (program, sum) =
-            batched_matmul_program_with_per_row_weight(rows, contraction, width);
+        let (program, sum) = batched_matmul_program_with_per_row_weight(rows, contraction, width);
 
         let lhs: Vec<f32> = (0..contraction).map(|value| 1.0 + value as f32).collect();
         let rhs: Vec<f32> = (0..rows * contraction * width)
@@ -20697,8 +20753,7 @@ mod tests {
                 let mut total = 0.0f32;
                 for k in 0..contraction {
                     let lhs_value = lhs[k as usize];
-                    let rhs_value =
-                        rhs[(row * contraction * width + k * width + col) as usize];
+                    let rhs_value = rhs[(row * contraction * width + k * width + col) as usize];
                     total += lhs_value * rhs_value;
                 }
                 reference[(row * width + col) as usize] = total;
@@ -20717,6 +20772,109 @@ mod tests {
             assert_ne!(
                 this_row, row0,
                 "row {row} collapsed to row 0's value -- the per-row weight operand was not advanced"
+            );
+        }
+        let _ = sum;
+    }
+
+    /// `composed_reduction_stride` (`perf/width-gate-decline`) widened
+    /// `width_tile_plan` to fold a two-axis reduction into one virtual `k` --
+    /// the same shape `attn_o`'s `[heads, head_dim]` weight reduce composes.
+    /// That widening touches the REDUCTION axes only; this proves it can
+    /// never smuggle a row-varying `b` past the leading-axis guard, since
+    /// the guard runs on `layout_b.stride(leading_dim)` before the composed
+    /// reduction stride is ever computed. `k_outer=3, k_inner=4` gives a
+    /// row-major-composable `contraction=12`; `width=16` keeps this test on
+    /// the main (`VECS=4`) tile, isolating the reduction-axis widening from
+    /// the narrow-width widening covered separately below.
+    #[test]
+    fn a_composed_two_axis_reduction_fusing_a_per_row_weight_operand_computes_a_distinct_value_per_row()
+     {
+        let (rows, k_outer, k_inner, width) = (8u32, 3u32, 4u32, 16u32);
+        let contraction = k_outer * k_inner;
+        let (program, sum) = batched_matmul_program_with_per_row_weight_composed_reduction(
+            rows, k_outer, k_inner, width,
+        );
+
+        let lhs: Vec<f32> = (0..contraction).map(|value| 1.0 + value as f32).collect();
+        let rhs: Vec<f32> = (0..rows * contraction * width)
+            .map(|value| value as f32 * 0.001)
+            .collect();
+
+        let evaluated = evaluate(&program, &[], &[&lhs, &rhs], &[])
+            .expect("the composed-reduction per-row-weight reduce evaluates");
+        assert_eq!(evaluated.shape(), &[rows as u64, width as u64]);
+
+        let mut reference = vec![0.0f32; (rows * width) as usize];
+        for row in 0..rows {
+            for col in 0..width {
+                let mut total = 0.0f32;
+                for k in 0..contraction {
+                    let lhs_value = lhs[k as usize];
+                    let rhs_value = rhs[(row * contraction * width + k * width + col) as usize];
+                    total += lhs_value * rhs_value;
+                }
+                reference[(row * width + col) as usize] = total;
+            }
+        }
+        assert_all_close(evaluated.root(), &reference, 1e-5);
+
+        let output = evaluated.root();
+        let row0 = &output[..width as usize];
+        for row in 1..rows as usize {
+            let this_row = &output[row * width as usize..(row + 1) * width as usize];
+            assert_ne!(
+                this_row, row0,
+                "row {row} collapsed to row 0's value -- the composed-reduction widening let a per-row weight operand through unguarded"
+            );
+        }
+        let _ = sum;
+    }
+
+    /// `width_tile_vecs_for` (`perf/narrow-tile`) widened `width_tile_plan`
+    /// to admit `width` below the main tile's `WIDTH_TILE_VECS * 4 == 16`
+    /// floor (`VECS=2`/`VECS=1`), unlocking nodes that used to decline at
+    /// `NarrowWidth` before ever reaching the leading-axis guard. `width=8`
+    /// selects `VECS=2` -- BGE's own `attn_qk` `N=8` sentence
+    /// (`width_tile_vecs_for`'s doc) -- paired with the same row-varying `b`
+    /// shape as the original regression, proving the narrow-width path is
+    /// declined exactly like the main-tile path rather than exempted from
+    /// the guard.
+    #[test]
+    fn a_narrow_width_reduce_fusing_a_per_row_weight_operand_computes_a_distinct_value_per_row() {
+        let (rows, contraction, width) = (8u32, 6u32, 8u32);
+        let (program, sum) = batched_matmul_program_with_per_row_weight(rows, contraction, width);
+
+        let lhs: Vec<f32> = (0..contraction).map(|value| 1.0 + value as f32).collect();
+        let rhs: Vec<f32> = (0..rows * contraction * width)
+            .map(|value| value as f32 * 0.001)
+            .collect();
+
+        let evaluated = evaluate(&program, &[], &[&lhs, &rhs], &[])
+            .expect("the narrow-width per-row-weight reduce evaluates");
+        assert_eq!(evaluated.shape(), &[rows as u64, width as u64]);
+
+        let mut reference = vec![0.0f32; (rows * width) as usize];
+        for row in 0..rows {
+            for col in 0..width {
+                let mut total = 0.0f32;
+                for k in 0..contraction {
+                    let lhs_value = lhs[k as usize];
+                    let rhs_value = rhs[(row * contraction * width + k * width + col) as usize];
+                    total += lhs_value * rhs_value;
+                }
+                reference[(row * width + col) as usize] = total;
+            }
+        }
+        assert_all_close(evaluated.root(), &reference, 1e-5);
+
+        let output = evaluated.root();
+        let row0 = &output[..width as usize];
+        for row in 1..rows as usize {
+            let this_row = &output[row * width as usize..(row + 1) * width as usize];
+            assert_ne!(
+                this_row, row0,
+                "row {row} collapsed to row 0's value -- the narrow-width widening let a per-row weight operand through unguarded"
             );
         }
         let _ = sum;
