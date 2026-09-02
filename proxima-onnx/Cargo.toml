@@ -38,6 +38,13 @@ mnist-tail-bench = ["std"]
 # build with it -- this is a separate opt-in specifically for the
 # non-timed, one-shot diagnostic run.
 mnist-diag = ["std", "proxima-tensor/instrument"]
+# ROW 217's own repoint (`examples/bge_eval.rs`): reads
+# `cpu::width_tile_counters()`/`instrument::reduce_gemm_path_totals()` for
+# one untimed corpus pass to prove `width_tile_plan` engagement on the
+# sealed harness's own `StaticArena` fast path -- same non-timed-diagnostic
+# placement as `mnist-diag` above, since `instrument` overhead must never
+# reach the timed measurement loop.
+bge-eval-diag = ["std", "proxima-tensor/instrument"]
 # ROW 181's own profile-gate probe (`examples/epilogue_profile.rs`):
 # per-node-class wall time inside `run_resolved_nodes_in_arena`, bucketed
 # by reduce-fold / post-reduce elementwise epilogue / everything else.

@@ -13,8 +13,15 @@ import argparse
 import statistics
 import time
 
+import sys
+from pathlib import Path
+
 import torch
 from torch import nn
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from diagnostics import report_and_verify_threads, report_load_average  # noqa: E402
 
 
 def parse_args() -> argparse.Namespace:
@@ -40,6 +47,8 @@ def main() -> None:
     torch.set_num_threads(args.threads)
     torch.manual_seed(0)
 
+    report_load_average("start")
+
     model = build_model()
     optimizer = torch.optim.Adam(model.parameters())
     loss_fn = nn.CrossEntropyLoss()
@@ -58,11 +67,15 @@ def main() -> None:
     for index in range(args.warmup):
         train_step(index)
 
+    report_and_verify_threads(args.threads)
+
     samples_ms: list[float] = []
     for index in range(args.warmup, total_steps):
         start = time.perf_counter()
         train_step(index)
         samples_ms.append((time.perf_counter() - start) * 1000.0)
+
+    report_load_average("end")
 
     samples_ms.sort()
     mean = statistics.mean(samples_ms)
