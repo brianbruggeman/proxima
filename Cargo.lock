@@ -4592,6 +4592,7 @@ dependencies = [
  "criterion",
  "hdrhistogram",
  "proxima-core",
+ "proxima-gguf",
  "proxima-primitives",
  "proxima-protocols",
  "proxima-tensor",
