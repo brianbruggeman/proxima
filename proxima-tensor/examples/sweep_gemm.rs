@@ -1,17 +1,25 @@
 #![allow(clippy::expect_used)]
-//! PRESERVED COPY — do not delete. This is the ONLY artifact that reproduces
-//! the `260.24106` checksum every proxima-tensor branch was verified against
-//! on 2026-08-18. It lived untracked in a detached-HEAD worktree
-//! (`scratchpad/sweep-wt`) and was created and deleted repeatedly by agents.
-//! Belongs in the repo permanently — see the landing recommendation.
+//! PRESERVED COPY — do not delete. This lived untracked in a detached-HEAD
+//! worktree (`scratchpad/sweep-wt`) and was created and deleted repeatedly by
+//! agents. Belongs in the repo permanently — see the landing recommendation.
 //!
 //! Measurement-only sweep harness: size and thread count taken from argv,
 //! reports mean GFLOPS and a checksum. `Lcg` copied verbatim from
 //! `benches/bench_vs_ggml.rs`, `matmul_program_rhs_transposed` copied
 //! verbatim from `examples/profile_hot.rs`.
 //!
-//! Reference: `sweep_gemm 1024 4 5` prints `checksum=260.24106`.
-//! Other reference checksums: 512 -> 135.87619, 2048 -> 513.10425.
+//! Reference checksums verified on 2026-08-18 (`sweep_gemm 1024 4 5` printed
+//! `checksum=260.24106`; 512 -> 135.87619, 2048 -> 513.10425) do NOT
+//! reproduce as of `e0310ff` (2026-08-30, `fix(tensor): correct
+//! Lcg::next_unit's halved-range bug`) — that commit fixed
+//! `test_support::Lcg::next_unit` to draw from `[-1, 1)` as documented
+//! instead of the `[-1, 0)` it silently drew from before, which is a real
+//! correctness fix, not a regression: the old checksums were computed
+//! against biased-mean inputs. Current values (verified against an
+//! independent from-scratch Rust + numpy oracle, see
+//! `omega/benches/metal_vs_cpu.rs`'s `reference_checksum` doc for the full
+//! derivation): `sweep_gemm 1024 4 5` now prints `checksum=16.38366`;
+//! 512 -> 7.67010, 2048 -> 4.68941.
 
 use std::env;
 use std::num::NonZeroUsize;

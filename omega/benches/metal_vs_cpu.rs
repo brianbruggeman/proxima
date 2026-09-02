@@ -8,10 +8,12 @@
 //!
 //! - `gemm_square_f32`: compute-bound square GEMM at 512/1024/2048, the
 //!   `rhs`-transposed contraction `proxima-tensor/examples/sweep_gemm.rs`
-//!   already checksums (512 -> 135.87619, 1024 -> 260.24106,
-//!   2048 -> 513.10425) — `root()[0]` is asserted against those numbers
-//!   before any timing arm runs, so a GPU checksum drift is caught before it
-//!   could be misread as a perf win.
+//!   already checksums (512 -> 7.67010, 1024 -> 16.38366,
+//!   2048 -> 4.68941 — repinned 2026-09-01 after `e0310ff` fixed
+//!   `Lcg::next_unit`'s halved-range bug; see `reference_checksum`'s own
+//!   doc) — `root()[0]` is asserted against those numbers before any
+//!   timing arm runs, so a GPU checksum drift is caught before it could be
+//!   misread as a perf win.
 //! - `matvec_batch1_f32`: bandwidth-bound batch-1 matvec at the model's real
 //!   weight shapes (4096x4096, 4096x14336, 14336x4096 — `attn_q`/`attn_output`,
 //!   `ffn_gate`/`ffn_up`, `ffn_down` in `spec::mistral_forward_program`'s
@@ -177,14 +179,51 @@ fn assert_checksum_agrees(case: &str, cpu: f32, metal: f32, k: u32) {
     );
 }
 
-/// Pinned reference checksums from `sweep_gemm.rs`'s module doc — a second,
-/// independent anchor beyond "cpu and metal agree with each other" (both
-/// backends could agree on a shared regression).
+/// Pinned reference checksums — a second, independent anchor beyond "cpu and
+/// metal agree with each other" (both backends could agree on a shared
+/// regression).
+///
+/// Repinned 2026-09-01, replacing the `135.87619`/`260.24106`/`513.10425`
+/// series carried since 2026-08-18. Those were computed against
+/// `Lcg::next_unit`'s pre-`e0310ff` bug (`proxima-tensor/src/test_support.rs`:
+/// shifting by 33 bits instead of 32 drew from `[-1, 0)` instead of the
+/// documented `[-1, 1)`), which biased every product positive and made the
+/// checksum grow ~linearly with size. `e0310ff` (2026-08-30) fixed the
+/// shift; the fix is correct (the crate's own doc for `next_unit` says
+/// `[-1, 1)`) and was never re-derived here, so this anchor was checking the
+/// new, correct generator against the old, buggy one's output and failing
+/// for the right reason on the wrong grounds.
+///
+/// New values verified three independent ways for size 512/1024/2048, all
+/// agreeing to 5 decimals: (1) a from-scratch Rust binary reimplementing
+/// `Lcg::next_unit` and a naive `f64`-accumulated dot product with no
+/// dependency on this crate or `proxima_tensor`, (2) a from-scratch numpy
+/// reimplementation of the same LCG doing a full `A @ B.T` matmul and
+/// reading `[0, 0]`, (3) this crate's own `evaluate`/`execute` paths (the
+/// values below). The checksum is `root()[0]`, which for this program's
+/// `[m, n]` row-major output is `output[0, 0]` — the dot product of the
+/// first `size` elements of `random_vec(1, ...)` against the first `size`
+/// elements of `random_vec(2, ...)`, since `k == size` here and a matrix
+/// row occupies a contiguous prefix of its row-major flat buffer.
+///
+/// The post-fix series is non-monotonic (2048's checksum is lower than
+/// 1024's) because the fix removed the bias: each of the `size` product
+/// terms is now mean-zero (`[-1, 1)` uniform inputs), so the sum behaves
+/// like a mean-zero random walk of length `size` (`std ~ sigma * sqrt(size)`
+/// for the deterministic LCG sequence) rather than a biased quantity that
+/// necessarily grows with `size`. Which draw of that walk lands where for a
+/// fixed seed is not required to be monotonic, and isn't here — the
+/// independent oracle reproduces the same non-monotonicity bit-for-bit, so
+/// it is a property of the (now-correct) input distribution, not a defect.
+///
+/// To re-derive: reimplement `Lcg::next_unit` (shift 32, current form)
+/// standalone, generate `random_vec(1, size)` and `random_vec(2, size)`,
+/// and take their dot product in `f64`.
 fn reference_checksum(size: u32) -> Option<f32> {
     match size {
-        512 => Some(135.87619),
-        1024 => Some(260.24106),
-        2048 => Some(513.10425),
+        512 => Some(7.67010),
+        1024 => Some(16.38366),
+        2048 => Some(4.68941),
         _ => None,
     }
 }
