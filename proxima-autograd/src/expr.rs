@@ -218,3 +218,159 @@ pub(crate) fn reverse_1d(extent: u64) -> Option<IndexMap> {
         &[(&[map::AxisTerm::scaled(0, -1)], offset)],
     )))
 }
+
+/// Eliminates the `Add(narrow, zero_anchor)` pattern [`broadcast_anchor`]
+/// builds purely to give shape inference a same-rank operand with a real
+/// term on every axis (that function's own doc) -- whenever a `Multiply`
+/// reads the add through the plain identity map, the anchor contributes
+/// nothing the multiply's OTHER operand cannot supply on its own, so this
+/// substitutes `narrow`'s own `(NodeId, IndexMap)` straight into the
+/// multiply and leaves the add/constant pair as dead code
+/// ([`proxima_tensor::live::annotate`] already drops unreferenced nodes
+/// from the live set the multiply-consumer's arena build reads, so no new
+/// liveness machinery is needed here).
+///
+/// `proxima-tensor/docs/discipline.md` ROW 237: this exact pattern is
+/// `differentiate_reduce`'s `ScalarOp::Add` arm broadcasting a matmul's
+/// upstream gradient back across the contracted axis before the product
+/// rule multiplies it against the other factor -- on the mnist MLP lane's
+/// `grad_w1` node the materialized add alone cost 26.5% of the step
+/// (`train_step_lane --features train-step-profile`, node 87), and left
+/// the multiply's own downstream reduce (node 90) reading a physically
+/// non-broadcast operand, which is why `width_tile_plan`
+/// (`proxima-tensor/src/cpu.rs:9940`) declined it (`AxesShape`, the "b"
+/// operand not truly row-invariant) and forced the untiled per-element
+/// fallback loop.
+///
+/// Value-preserving and index-preserving: no `NodeId` is renumbered or
+/// deleted, so every existing `grad_of`/`gathered_of`/output reference
+/// stays valid; the rewritten operand's `IndexMap` is copied verbatim from
+/// `narrow`'s own definition, so the value read at every iteration point
+/// is IDENTICAL (`x + 0 == x`), never merely close. Idempotent: a second
+/// pass over an already-rewritten program finds nothing left to match.
+pub(crate) fn eliminate_broadcast_anchor_adds(program: &mut [Op]) {
+    for index in 0..program.len() {
+        let Op::Elementwise {
+            body: ScalarOp::Multiply,
+            operands,
+            ..
+        } = &program[index]
+        else {
+            continue;
+        };
+        let Some(rank) = operands.first().map(|(_, view)| view.affine().iter_rank) else {
+            continue;
+        };
+        let rewritten: Vec<Option<(NodeId, IndexMap)>> = operands
+            .iter()
+            .map(|(operand_id, operand_view)| {
+                resolve_anchor_bypass(program, *operand_id, operand_view)
+            })
+            .collect();
+        if rewritten.iter().all(Option::is_none) {
+            continue;
+        }
+        // reduce-body `Multiply` (`d(prod x)/dx_i`) pairs TWO anchor-adds
+        // together (`numerator`'s `output_broadcast * gradient_broadcast`,
+        // adjoint.rs's `ScalarOp::Multiply` reduce arm) -- both narrow
+        // sides can share the SAME missing axis, so dropping both anchors
+        // would leave that axis unconstrained (`shape::infer`'s own
+        // `UnconstrainedDim`, caught by `reduce_multiply_gradient_matches_*`
+        // regression tests). Union every operand's post-rewrite covered
+        // axes and only commit when the whole rank is still covered --
+        // exactly the same guarantee the ORIGINAL anchor-bearing operands
+        // provided, so this can never turn a previously-resolvable program
+        // unresolvable.
+        let covered = operands
+            .iter()
+            .zip(&rewritten)
+            .fold(0u64, |mask, ((_, original_view), replacement)| {
+                let view = replacement.as_ref().map_or(original_view, |(_, view)| view);
+                mask | covered_axes(view)
+            });
+        if covered != full_axis_mask(rank) {
+            continue;
+        }
+        let Op::Elementwise { operands, .. } = &mut program[index] else {
+            unreachable!("the match above already proved this index is Elementwise");
+        };
+        for (slot, replacement) in operands.iter_mut().zip(rewritten) {
+            if let Some(narrow) = replacement {
+                *slot = narrow;
+            }
+        }
+    }
+}
+
+/// Bitmask of axes `view` supplies a real (non-empty) term for.
+/// `full_axis_mask`-compatible: axis `i` set means `view`'s `IndexPattern`
+/// constrains dimension `i`, the same "real term" test
+/// [`is_pure_projection`] applies per axis.
+fn covered_axes(view: &IndexMap) -> u64 {
+    view.affine()
+        .axes
+        .iter()
+        .enumerate()
+        .filter(|(_, axis)| !axis.terms.is_empty())
+        .fold(0u64, |mask, (index, _)| mask | (1u64 << index))
+}
+
+/// Every axis `0..rank` set -- `rank` never exceeds 64 in this crate's own
+/// tensors (`u16` extents, `iter_rank: u16`, and no program in this
+/// workspace approaches even a fraction of that), so the bitmask never
+/// truncates.
+fn full_axis_mask(rank: u16) -> u64 {
+    if rank >= 64 {
+        u64::MAX
+    } else {
+        (1u64 << rank) - 1
+    }
+}
+
+/// `Some((narrow_id, narrow_view))` when `operand_id` names an
+/// `Add(narrow, zero_anchor)` node (either operand order) whose zero side
+/// is a same-rank identity-mapped [`Op::Constant`] at `value: 0.0`, AND
+/// `operand_view` (the caller's own view INTO that add) is the plain
+/// identity map over the add's iteration rank -- the one shape this
+/// rewrite proves safe without composing index maps. `None` for every
+/// other shape, including a permuted or further-broadcast view into the
+/// add, which this pass leaves untouched rather than guess a composition.
+fn resolve_anchor_bypass(
+    program: &[Op],
+    operand_id: NodeId,
+    operand_view: &IndexMap,
+) -> Option<(NodeId, IndexMap)> {
+    let Op::Elementwise {
+        body: ScalarOp::Add,
+        operands: add_operands,
+        ..
+    } = program.get(operand_id.0 as usize)?
+    else {
+        return None;
+    };
+    let [(first_id, first_view), (second_id, second_view)] = add_operands.as_slice() else {
+        return None;
+    };
+    let add_rank = first_view.affine().iter_rank;
+    if *operand_view != identity(add_rank) {
+        return None;
+    }
+    if is_zero_anchor(program, *second_id, second_view, add_rank) {
+        return Some((*first_id, first_view.clone()));
+    }
+    if is_zero_anchor(program, *first_id, first_view, add_rank) {
+        return Some((*second_id, second_view.clone()));
+    }
+    None
+}
+
+/// Whether `candidate` is a same-rank identity-mapped zero constant --
+/// [`broadcast_anchor`]'s own output node, read back through the exact
+/// `full` view every one of its call sites pairs it with.
+fn is_zero_anchor(program: &[Op], candidate: NodeId, view: &IndexMap, rank: u16) -> bool {
+    *view == identity(rank)
+        && matches!(
+            program.get(candidate.0 as usize),
+            Some(Op::Constant { value, .. }) if *value == 0.0
+        )
+}
