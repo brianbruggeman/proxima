@@ -9,6 +9,13 @@ LOAD_ONE_MINUTE_THRESHOLD="${SEALED_PASS_LOAD_THRESHOLD:-5.0}"
 QUIET_BOX_WAIT_TIMEOUT_SECONDS="${SEALED_PASS_WAIT_TIMEOUT_SECONDS:-600}"
 QUIET_BOX_POLL_INTERVAL_SECONDS="${SEALED_PASS_POLL_INTERVAL_SECONDS:-15}"
 
+# exact executable names only (pgrep -x matches comm, not a path substring)
+# so ~/.cargo/bin/cdb-daemon and ~/.cargo/bin/sccache never match "cargo".
+BUILDER_EXECUTABLE_NAMES='cargo|rustc|cc|clang|ld'
+# belt-and-suspenders: these are long-lived daemons that must never count
+# as a builder even if a future name collision slips past -x.
+PERSISTENT_DAEMON_NAMES='cdb-daemon|sccache|rust-analyzer'
+
 LLAMA_BENCH_BINARY="/Users/brianbruggeman/repos/others/llama.cpp/build/bin/llama-bench"
 OPENCHAT_GGUF_MODEL="/Users/brianbruggeman/.lmstudio/models/TheBloke/openchat-3.5-1210-GGUF/openchat-3.5-1210.Q4_K_S.gguf"
 TORCH_REFERENCE_ROOT="$PROXIMA_MAIN_ROOT/proxima-onnx/scripts/torch_reference"
@@ -71,7 +78,7 @@ current_load_one_minute() {
 }
 
 concurrent_build_process_line() {
-  pgrep -fl 'cargo|rustc' || true
+  pgrep -x -l "$BUILDER_EXECUTABLE_NAMES" 2>/dev/null | grep -Ev "$PERSISTENT_DAEMON_NAMES" || true
 }
 
 box_is_quiet() {
