@@ -914,7 +914,24 @@ fn bind_named_inputs_into_arena(
                 found: data.len(),
             });
         }
-        slot.copy_from_slice(data);
+        // `checkout_arena` derives `constant_inputs` from `program` structure
+        // alone, so a name it treats as call-invariant is a STRUCTURAL guess
+        // (an `Op::Input` leaf, no more), never a caller promise -- this is
+        // the guess's own soundness check. A rebind that changes the bytes
+        // proves the guess wrong for this node, so every panel packed from it
+        // is dropped here, before `run_resolved_nodes_in_arena` ever reads
+        // one -- the arena falls back to `run_node_into`'s unpacked path for
+        // that node for the rest of its life. A rebind that repeats the same
+        // bytes (every real BGE weight, every call) leaves `packed_width_panels`
+        // untouched, so the amortized packing gain survives.
+        if slot.as_slice() != data {
+            slot.copy_from_slice(data);
+            if !arena.packed_width_panels.is_empty() {
+                arena
+                    .packed_width_panels
+                    .retain(|_, panel| panel.source != *node);
+            }
+        }
     }
     Ok(())
 }
@@ -1143,13 +1160,41 @@ pub fn arena_cache_packed_node_count() -> usize {
 }
 
 /// Checks a [`StaticArena`] matching `(program, symbols, outputs)` out of
-/// [`ARENA_CACHE`], building one via [`build_static_arena`] on a miss. See
-/// [`ARENA_CACHE`]'s own doc for the lock discipline and the concurrent-miss
-/// case.
+/// [`ARENA_CACHE`], building one via [`build_static_arena_with_constants`] on
+/// a miss. See [`ARENA_CACHE`]'s own doc for the lock discipline and the
+/// concurrent-miss case.
+///
+/// `named` is [`evaluate_named`]'s own binding data, threaded in here so a
+/// miss can derive `constant_inputs` from it directly -- `program` alone
+/// never carries which of its [`Op::Input`] leaves are call-invariant
+/// weights (an ONNX initializer and a graph runtime input both lower to the
+/// same `Op::Input` shape, `proxima-onnx/src/lower.rs`'s own module doc:
+/// "Initializers become named `Op::Input` leaves"), so `named` -- the one
+/// place actual data is present -- is the only thing this function CAN
+/// derive from without widening [`evaluate_named`]'s own public signature or
+/// asking a caller to say which name is which.
+///
+/// Every genuine `Op::Input` name in `named` (never a stray extra --
+/// filtered against [`block_node_ids`] so an unrelated `named` entry can
+/// never trip [`build_static_arena_with_constants`]'s own `UnboundInputName`
+/// check) is offered as a `constant_inputs` candidate. This is a STRUCTURAL
+/// guess, not a promise: [`build_packed_width_panels`] only actually packs
+/// the subset that is ALSO the 2-D `b` operand of a width-tile-eligible
+/// `Reduce`, and [`bind_named_inputs_into_arena`]'s own rebind check drops
+/// any packed panel the instant a later call proves the guess wrong for that
+/// node (see that function's own doc) -- so a name that turns out to vary
+/// call-to-call never serves stale data, it just stops being packed.
+///
+/// `proxima_autograd::train::fit` never reaches this function at all: it
+/// holds its own arena via a direct [`build_static_arena`] call (empty
+/// `constant_inputs`, `docs/discipline.md` ROW 207's own training-safety
+/// invariant), so a trainable parameter is never even offered as a
+/// candidate here, structurally, regardless of anything below.
 fn checkout_arena(
     program: &[Op],
     symbols: &[u64],
     outputs: &[NodeId],
+    named: &[(&str, &[f32])],
 ) -> Result<StaticArena, TensorError> {
     {
         let mut cache = lock_arena_cache();
@@ -1161,7 +1206,17 @@ fn checkout_arena(
         }
     }
     ARENA_CACHE_BUILDS.fetch_add(1, EpilogueFuseOrdering::Relaxed);
-    build_static_arena(program, symbols, outputs)
+    let input_names = block_node_ids(program);
+    let constant_inputs: Vec<(&str, &[f32])> = named
+        .iter()
+        .filter(|(name, _)| {
+            input_names
+                .iter()
+                .any(|node| program[node.0 as usize].name() == Some(*name))
+        })
+        .copied()
+        .collect();
+    build_static_arena_with_constants(program, symbols, outputs, &constant_inputs)
 }
 
 /// Returns `arena` to [`ARENA_CACHE`] for the next [`checkout_arena`] call
@@ -1214,7 +1269,7 @@ fn evaluate_named_via_arena(
         outputs.to_vec()
     };
 
-    let mut arena = checkout_arena(program, symbols, &effective_outputs)?;
+    let mut arena = checkout_arena(program, symbols, &effective_outputs, named)?;
     let run = bind_named_inputs_into_arena(&mut arena, named, true)
         .and_then(|()| run_resolved_nodes_in_arena(&mut arena));
     match run {
@@ -10002,6 +10057,14 @@ struct PackedWidthPanels {
     tile_cols: usize,
     k_total: usize,
     full_col_tiles: usize,
+    /// The `b`-operand [`Op::Input`] node this panel was packed from --
+    /// [`bind_named_inputs_into_arena`]'s own invalidation check reads this
+    /// to know which packed panels a rebind of THIS node makes stale. Not a
+    /// new soundness mechanism bolted on top of packing: it is what lets
+    /// packing stay safe when [`checkout_arena`] derives `constant_inputs`
+    /// from `program` structure rather than a caller's explicit promise --
+    /// see [`checkout_arena`]'s own doc.
+    source: NodeId,
 }
 
 /// `docs/discipline.md` ROW 207's own paired-bench escape, same shape as
@@ -10042,6 +10105,7 @@ fn pack_width_tile_panels(
     k_stride_b: i64,
     k_total: usize,
     width: usize,
+    source: NodeId,
 ) -> PackedWidthPanels {
     let tile_cols = WIDTH_TILE_VECS * 4;
     let full_col_tiles = width / tile_cols;
@@ -10060,6 +10124,7 @@ fn pack_width_tile_panels(
         tile_cols,
         k_total,
         full_col_tiles,
+        source,
     }
 }
 
@@ -10176,6 +10241,7 @@ fn build_packed_width_panels(
                 plan.k_stride_b,
                 plan.reduction_total,
                 plan.width,
+                b_node,
             ),
         );
     }
@@ -19900,6 +19966,157 @@ mod tests {
         assert_eq!(
             arena_second.get(sum).map(|(data, _)| data.to_vec()),
             Some(vec![101.0, 202.0, 303.0, 404.0])
+        );
+    }
+
+    /// [`matmul_program`], but both leaves are NAMED -- `checkout_arena`'s
+    /// own derivation (every genuine `Op::Input` name in `named` is a
+    /// `constant_inputs` candidate) only has anything to find when the
+    /// program's leaves carry names at all, same as any real ONNX-lowered
+    /// program (`proxima-onnx/src/lower.rs`'s own doc: initializers AND
+    /// runtime inputs both lower to a named `Op::Input`). `n` is
+    /// `WIDTH_TILE_VECS * 4` so the `w` operand clears
+    /// [`width_tile_pack_candidate`]'s tile-width admission.
+    #[cfg(target_arch = "aarch64")]
+    fn named_matmul_program(m: u32, k: u32, n: u32) -> (Vec<Op>, NodeId) {
+        let mut program = Vec::new();
+        let lhs = append(
+            &mut program,
+            Op::Input {
+                dtype: DType::Float32,
+                shape: alloc::vec![Extent::Static(m), Extent::Static(k)],
+                name: Some(String::from("x")),
+            },
+        );
+        let rhs = append(
+            &mut program,
+            Op::Input {
+                dtype: DType::Float32,
+                shape: alloc::vec![Extent::Static(k), Extent::Static(n)],
+                name: Some(String::from("w")),
+            },
+        );
+        let product = append(
+            &mut program,
+            Op::Elementwise {
+                dtype: DType::Float32,
+                body: ScalarOp::Multiply,
+                operands: alloc::vec![
+                    (lhs, IndexMap::Affine(map::projection(3, &[0, 2]))),
+                    (rhs, IndexMap::Affine(map::projection(3, &[2, 1]))),
+                ],
+                name: None,
+            },
+        );
+        let sum = append(
+            &mut program,
+            Op::Reduce(Reduce {
+                dtype: DType::Float32,
+                body: ScalarOp::Add,
+                init: ReduceInit::Zero,
+                operand: product,
+                in_map: IndexMap::Affine(map::projection(3, &[0, 1, 2])),
+                out_map: IndexMap::Affine(map::projection(3, &[0, 1])),
+                keep: Keep::Reduce,
+                name: Some("named_matmul".into()),
+            }),
+        );
+        (program, sum)
+    }
+
+    /// `docs/discipline.md` ROW 208's own defect closed: plain
+    /// [`evaluate_named`] on a named-leaf matmul program now packs the `w`
+    /// (weight) operand with ZERO caller opt-in -- `checkout_arena` derives
+    /// `constant_inputs` from `named` itself on the cache miss, and
+    /// [`build_packed_width_panels`]'s own structural gate (2-D, `b`
+    /// operand of a width-tile-eligible `Reduce`) is what actually decides
+    /// `w` qualifies. Packed and unpacked results must agree bit for bit
+    /// (packing is a layout reorder of the SAME source elements, never a
+    /// different computation, `pack_width_tile_panels`'s own doc).
+    #[cfg(target_arch = "aarch64")]
+    #[test]
+    fn evaluate_named_packs_a_named_weight_with_zero_caller_opt_in() {
+        let width_tile_n = (WIDTH_TILE_VECS * 4) as u32;
+        let (program, sum) = named_matmul_program(4, WIDTH_TILE_ROWS as u32 * 8, width_tile_n);
+        let m = 4usize;
+        let k = WIDTH_TILE_ROWS * 8;
+        let n = width_tile_n as usize;
+
+        let x: Vec<f32> = (0..m * k).map(|i| (i as f32 * 0.01) - 3.0).collect();
+        let w: Vec<f32> = (0..k * n).map(|i| (i as f32 * 0.02) - 5.0).collect();
+        let named: [(&str, &[f32]); 2] = [("x", &x), ("w", &w)];
+
+        let packed = evaluate_named(&program, &[], &named, &[sum])
+            .expect("named matmul evaluates through the default (packing-eligible) path");
+
+        let mut unpacked_arena = build_static_arena(&program, &[], &[sum])
+            .expect("same program builds an unpacked reference arena");
+        let unpacked = evaluate_named_with_arena(&mut unpacked_arena, &named)
+            .expect("unpacked reference arena evaluates");
+
+        assert_eq!(
+            packed.get(sum).map(|(data, _)| data.to_vec()),
+            unpacked.get(sum).map(|(data, _)| data.to_vec()),
+            "the default (now packing-eligible) path must agree bit for bit with the explicit, \
+             never-packed reference arena -- packing is a layout reorder, never a different sum"
+        );
+
+        let expected = naive_matmul(&x, &w, m, k, n);
+        assert_all_close(
+            &packed
+                .get(sum)
+                .map(|(data, _)| data.to_vec())
+                .expect("sum output present"),
+            &expected,
+            1e-4,
+        );
+    }
+
+    /// The soundness half of the fix above: `checkout_arena` derives
+    /// `constant_inputs` STRUCTURALLY (every named `Op::Input`), never from
+    /// a caller's promise, so a name it guessed was call-invariant can turn
+    /// out not to be. Rebinding `w` to DIFFERENT bytes under the identical
+    /// `(program, symbols, outputs)` cache key must still produce the
+    /// correct answer for the NEW weights, never the panel packed from the
+    /// old ones -- [`bind_named_inputs_into_arena`]'s own rebind check
+    /// (`panel.source`) is what has to catch this.
+    #[cfg(target_arch = "aarch64")]
+    #[test]
+    fn evaluate_named_rebinding_a_packed_weight_never_serves_a_stale_panel() {
+        let width_tile_n = (WIDTH_TILE_VECS * 4) as u32;
+        let (program, sum) = named_matmul_program(4, WIDTH_TILE_ROWS as u32 * 8, width_tile_n);
+        let m = 4usize;
+        let k = WIDTH_TILE_ROWS * 8;
+        let n = width_tile_n as usize;
+
+        let x: Vec<f32> = (0..m * k).map(|i| (i as f32 * 0.01) - 3.0).collect();
+        let w_first: Vec<f32> = (0..k * n).map(|i| (i as f32 * 0.02) - 5.0).collect();
+        let first_named: [(&str, &[f32]); 2] = [("x", &x), ("w", &w_first)];
+        let first = evaluate_named(&program, &[], &first_named, &[sum])
+            .expect("first call (builds and packs the arena)");
+        assert_all_close(
+            &first
+                .get(sum)
+                .map(|(data, _)| data.to_vec())
+                .expect("sum output present"),
+            &naive_matmul(&x, &w_first, m, k, n),
+            1e-4,
+        );
+
+        // SAME cache key (identical program/symbols/outputs), DIFFERENT `w`
+        // bytes -- exactly the case `checkout_arena`'s doc warns a
+        // structural guess must survive.
+        let w_second: Vec<f32> = (0..k * n).map(|i| (i as f32 * -0.03) + 1.0).collect();
+        let second_named: [(&str, &[f32]); 2] = [("x", &x), ("w", &w_second)];
+        let second = evaluate_named(&program, &[], &second_named, &[sum])
+            .expect("second call (same cache key, rebinds w)");
+        assert_all_close(
+            &second
+                .get(sum)
+                .map(|(data, _)| data.to_vec())
+                .expect("sum output present"),
+            &naive_matmul(&x, &w_second, m, k, n),
+            1e-4,
         );
     }
 
