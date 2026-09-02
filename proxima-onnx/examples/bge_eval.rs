@@ -89,12 +89,14 @@ fn dynamic_inputs(tokens: &[i64]) -> (Vec<f32>, Vec<f32>, Vec<f32>) {
 }
 
 /// Every `Op::Input` name this graph declares, initializers included --
-/// `evaluate_named_with_arena`'s own `require_all = true` binding loop
-/// expects an entry for every input the arena sized at build time, even the
-/// ones `constant_inputs` already pre-bound (a caller re-sending the same
-/// bytes overwrites them with the identical value, per
-/// `build_static_arena_with_constants`'s own doc). What `constant_inputs`
-/// buys is the plan-time width-tile weight packing, not a skipped rebind.
+/// needed the FIRST time a shape is seen, since `checkout_arena`/
+/// `build_static_arena_with_constants` derive their own `constant_inputs`
+/// from whichever names are actually present (the oracle path below, and
+/// `checkout_arena`'s own zero-caller-opt-in default path, both start an
+/// arena from nothing on every call and so need the full initializer list
+/// to bind weights at all). A caller who already holds a `StaticArena`
+/// built with `constant_inputs` should use `runtime_named_inputs` instead
+/// -- see its own doc for why.
 fn named_inputs<'data>(
     initializers: &'data [(String, Vec<f32>)],
     graph_inputs: &'data [String],
@@ -116,6 +118,38 @@ fn named_inputs<'data>(
         named.push((name.as_str(), data));
     }
     named
+}
+
+/// Only this graph's genuine per-call `Op::Input` names -- `input_ids`,
+/// `attention_mask`, `token_type_ids` -- never an initializer. Correct
+/// against an arena already built via `build_static_arena_with_constants`
+/// with the graph's own initializers as `constant_inputs`: those weight
+/// buffers were bound once at build time (`StaticArena::constant_bound`
+/// records exactly which nodes), so `evaluate_named_with_arena`'s
+/// `require_all = true` check is satisfied for them without a caller
+/// re-passing ~132.85 MB of bytes -- and therefore without
+/// `bind_named_inputs_into_arena` byte-comparing them -- every call. What a
+/// caller can do with this that it could not do with `named_inputs`: pass
+/// only the few KB of real per-sentence data and still satisfy the same
+/// arena the full initializer list would have.
+fn runtime_named_inputs<'data>(
+    graph_inputs: &'data [String],
+    input_ids: &'data [f32],
+    attention_mask: &'data [f32],
+    token_type_ids: &'data [f32],
+) -> Vec<(&'data str, &'data [f32])> {
+    graph_inputs
+        .iter()
+        .map(|name| {
+            let data: &[f32] = match name.as_str() {
+                "input_ids" => input_ids,
+                "attention_mask" => attention_mask,
+                "token_type_ids" => token_type_ids,
+                other => panic!("unexpected graph input {other:?}"),
+            };
+            (name.as_str(), data)
+        })
+        .collect()
 }
 
 fn cls_normalize(data: &[f32]) -> Vec<f32> {
@@ -204,8 +238,7 @@ fn run_pass_arena(
         });
 
         let (input_ids, attention_mask, token_type_ids) = dynamic_inputs(tokens);
-        let named = named_inputs(
-            &lowered.initializers,
+        let named = runtime_named_inputs(
             &lowered.graph_inputs,
             &input_ids,
             &attention_mask,
@@ -341,6 +374,30 @@ fn main() {
             arena_cache.len(),
             total_packed + total_unpacked
         );
+
+        // STEP 1's own byte-split question (rebind-identity follow-up task,
+        // 2026-09-01): of a `named` argument that carries every initializer
+        // plus the 3 genuine runtime inputs, how many bytes are which --
+        // measured straight off `lowered.initializers`' real byte lengths
+        // and each sentence's real token count, never hardcoded.
+        let mut total_constant_bytes = 0usize;
+        let mut total_runtime_bytes = 0usize;
+        for (_, tokens) in &items {
+            let cache_key = tokens.len() as u64;
+            let lowered = lower_cache.get(&cache_key).expect("lowering cache warm");
+            let constant_bytes: usize = lowered
+                .initializers
+                .iter()
+                .map(|(_, data)| core::mem::size_of_val(data.as_slice()))
+                .sum();
+            let runtime_bytes = tokens.len() * core::mem::size_of::<f32>() * 3;
+            total_constant_bytes += constant_bytes;
+            total_runtime_bytes += runtime_bytes;
+        }
+        println!(
+            "constant-vs-runtime byte split, one full corpus pass (3 sentences), the volume `named_inputs` used to \
+             re-pass every call: constant(initializers)={total_constant_bytes} bytes runtime(input_ids+attention_mask+token_type_ids)={total_runtime_bytes} bytes"
+        );
     }
 
     // Correctness: bit-identity vs the `evaluate_named` oracle for the NEON
@@ -460,8 +517,7 @@ fn main() {
             let cache_key = tokens.len() as u64;
             let lowered = lower_cache.get(&cache_key).expect("lowering cache warm");
             let (input_ids, attention_mask, token_type_ids) = dynamic_inputs(tokens);
-            let named = named_inputs(
-                &lowered.initializers,
+            let named = runtime_named_inputs(
                 &lowered.graph_inputs,
                 &input_ids,
                 &attention_mask,
@@ -493,9 +549,7 @@ fn main() {
     // arena plumbing would, still gets the SAME arena-backed default (builds
     // 3 arenas over `default_arm_runs * items.len()` calls, then reuses
     // them) with no code on the caller's side beyond calling `evaluate_named`.
-    println!(
-        "\n=== DEFAULT-PATH MEASUREMENT (plain evaluate_named, no caller opt-in) ==="
-    );
+    println!("\n=== DEFAULT-PATH MEASUREMENT (plain evaluate_named, no caller opt-in) ===");
     let default_arm_runs: usize = 5;
     for accelerate in [false, true] {
         cpu::set_accelerate_gemm_enabled(accelerate);
@@ -604,8 +658,7 @@ fn main() {
             }
             let (checkout_calls, checkout_ticks) =
                 proxima_tensor::instrument::checkout_arena_key_compare_totals();
-            let (bind_calls, bind_ticks) =
-                proxima_tensor::instrument::bind_rebind_compare_totals();
+            let (bind_calls, bind_ticks) = proxima_tensor::instrument::bind_rebind_compare_totals();
             let checkout_ns_per_call = proxima_tensor::instrument::ticks_to_nanos(checkout_ticks)
                 .checked_div(checkout_calls)
                 .unwrap_or(0);
