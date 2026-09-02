@@ -37,7 +37,7 @@ use std::env;
 use std::fs;
 use std::path::Path;
 
-use proxima_tensor::cpu::{self, StaticArena, build_static_arena, evaluate_named_with_arena};
+use proxima_tensor::cpu::{StaticArena, build_static_arena, evaluate_named_with_arena};
 
 const MODEL_PATH_ENV: &str = "BGE_MODEL_PATH";
 const WARMUP_CALLS: usize = 3;
@@ -77,7 +77,7 @@ fn timed_arm(
     accelerate: bool,
 ) -> (f64, u64, Vec<f32>) {
     #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-    cpu::set_accelerate_gemm_enabled(accelerate);
+    proxima_tensor::cpu::set_accelerate_gemm_enabled(accelerate);
     let _ = accelerate;
 
     for _ in 0..WARMUP_CALLS {
@@ -86,7 +86,7 @@ fn timed_arm(
     }
 
     #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-    let (hits_before, _) = cpu::accelerate_gemm_totals();
+    let (hits_before, _) = proxima_tensor::cpu::accelerate_gemm_totals();
     let start = std::time::Instant::now();
     let mut last_embedding = Vec::new();
     for _ in 0..MEASURED_CALLS {
@@ -98,7 +98,7 @@ fn timed_arm(
     }
     let elapsed_ms = start.elapsed().as_secs_f64() * 1000.0 / MEASURED_CALLS as f64;
     #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-    let (hits_after, _) = cpu::accelerate_gemm_totals();
+    let (hits_after, _) = proxima_tensor::cpu::accelerate_gemm_totals();
     #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
     let engagement = hits_after - hits_before;
     #[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]

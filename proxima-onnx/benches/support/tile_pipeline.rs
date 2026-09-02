@@ -61,8 +61,15 @@ use proxima_primitives::pipe::{AndThen, Pipe};
 /// Register-tile width this module mirrors from `proxima_tensor::sized`
 /// (the SAME sizing constant the landed `gemm_tile_neon` kernel uses, not a
 /// fresh magic number -- see ROW 155's magic-const audit note for the ones
-/// that are NOT yet routed through a shared constant).
+/// that are NOT yet routed through a shared constant). `sized::TILE_COLS`
+/// only exists on the aarch64 build that owns the NEON kernel this module
+/// mirrors; the portable fallback below (`dot_chunked_k4_tile_multirow`'s
+/// `not(target_arch = "aarch64")` arm) needs the same width as a plain
+/// `usize`, so this module carries its own copy of the same value there.
+#[cfg(target_arch = "aarch64")]
 pub const TILE_COLS: usize = proxima_tensor::sized::TILE_COLS;
+#[cfg(not(target_arch = "aarch64"))]
+pub const TILE_COLS: usize = 4;
 
 /// Upper bound on `ci * kh * kw` across mnist's 3 real conv folds
 /// (`16*3*3 = 144`, conv3's own shape) -- sizes the gather stack array so

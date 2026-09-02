@@ -20,7 +20,7 @@
 
 use proxima_onnx::lower::{Lowered, lower_graph};
 use proxima_onnx::messages::{GraphProto, NodeProto, TensorProto, ValueInfoProto};
-use proxima_tensor::cpu::{self, StaticArena, build_static_arena, evaluate_named_with_arena};
+use proxima_tensor::cpu::{StaticArena, build_static_arena, evaluate_named_with_arena};
 
 const CALLS_PER_REPEAT: usize = 300;
 const REPEATS: usize = 5;
@@ -119,7 +119,7 @@ type NamedInputs<'a> = Vec<(&'a str, &'a [f32])>;
 
 fn arm(m: usize, k: usize, n: usize, salt: u32, accelerate: bool) -> Timed {
     #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-    cpu::set_accelerate_gemm_enabled(accelerate);
+    proxima_tensor::cpu::set_accelerate_gemm_enabled(accelerate);
     let _ = accelerate;
 
     let lowered = build_instance(m, k, n, salt);
@@ -146,7 +146,7 @@ fn shape_block(name: &str, m: usize, k: usize, n: usize) {
     println!("\n=== {name}: M={m} K={k} N={n} ({macs:.4} GMAC/call) ===");
 
     #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-    let (hits_before, _declined_before) = cpu::accelerate_gemm_totals();
+    let (hits_before, _declined_before) = proxima_tensor::cpu::accelerate_gemm_totals();
 
     // interleaved: neon-then-accelerate on even repeats, accelerate-then-neon
     // on odd repeats -- REPEATS is folded into `arm`'s own 5-repeat timing
@@ -171,7 +171,7 @@ fn shape_block(name: &str, m: usize, k: usize, n: usize) {
 
     #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
     {
-        let (hits_after, declined_after) = cpu::accelerate_gemm_totals();
+        let (hits_after, declined_after) = proxima_tensor::cpu::accelerate_gemm_totals();
         let engagement = hits_after - hits_before;
         println!(
             "    -> accelerate_gemm_totals() delta this cell: hits={engagement} declined_cumulative={declined_after}"
