@@ -67,7 +67,10 @@ pub fn write_complete(model: &SafetensorsModel<'_>) -> Result<Vec<u8>, Safetenso
         }
         meta_object.insert(key.clone(), serde_json::Value::String(value.clone()));
     }
-    header.insert("__metadata__".to_string(), serde_json::Value::Object(meta_object));
+    header.insert(
+        "__metadata__".to_string(),
+        serde_json::Value::Object(meta_object),
+    );
 
     for tensor in &model.tensors {
         if tensor.name == "__metadata__" {
@@ -82,10 +85,11 @@ pub fn write_complete(model: &SafetensorsModel<'_>) -> Result<Vec<u8>, Safetenso
         }
         seen_names.push(tensor.name.as_str());
 
-        let dtype_wire = dtype_to_wire(tensor.dtype).ok_or_else(|| SafetensorsError::UnsupportedDtype {
-            tensor: tensor.name.clone(),
-            dtype: alloc::format!("{:?}", tensor.dtype),
-        })?;
+        let dtype_wire =
+            dtype_to_wire(tensor.dtype).ok_or_else(|| SafetensorsError::UnsupportedDtype {
+                tensor: tensor.name.clone(),
+                dtype: alloc::format!("{:?}", tensor.dtype),
+            })?;
 
         let element_count: u64 = tensor.shape.iter().product();
         let expected = element_count * tensor.dtype.size_bytes() as u64;
@@ -102,7 +106,10 @@ pub fn write_complete(model: &SafetensorsModel<'_>) -> Result<Vec<u8>, Safetenso
         let end = data.len() as u64;
 
         let mut entry = serde_json::Map::new();
-        entry.insert("dtype".to_string(), serde_json::Value::String(dtype_wire.to_string()));
+        entry.insert(
+            "dtype".to_string(),
+            serde_json::Value::String(dtype_wire.to_string()),
+        );
         entry.insert(
             "shape".to_string(),
             serde_json::Value::Array(tensor.shape.iter().map(|dim| (*dim).into()).collect()),
@@ -164,9 +171,13 @@ mod tests {
         let reference_metadata_entries: Vec<(&str, &str)> = metadata_entries
             .iter()
             .copied()
-            .chain(core::iter::once((crate::sized::FORMAT_VERSION_KEY, version_stamp.as_str())))
+            .chain(core::iter::once((
+                crate::sized::FORMAT_VERSION_KEY,
+                version_stamp.as_str(),
+            )))
             .collect();
-        let (reference_bytes, reference_offsets) = build_buffer(entries, &reference_metadata_entries);
+        let (reference_bytes, reference_offsets) =
+            build_buffer(entries, &reference_metadata_entries);
         let reference_manifest = parse_whole(&reference_bytes).expect("reference buffer parses");
 
         let owned_payloads: Vec<Vec<u8>> = entries
@@ -198,9 +209,16 @@ mod tests {
         let data_region = &written[8 + header_len..];
         for (name, (expected_start, expected_end)) in &reference_offsets {
             let entry = manifest.tensor(name).expect("tensor present");
-            assert_eq!(entry.data_offsets, (*expected_start, *expected_end), "tensor {name} offsets");
+            assert_eq!(
+                entry.data_offsets,
+                (*expected_start, *expected_end),
+                "tensor {name} offsets"
+            );
             let actual = &data_region[*expected_start as usize..*expected_end as usize];
-            let payload = &owned_payloads[entries.iter().position(|(candidate, ..)| candidate == name).expect("entry present")];
+            let payload = &owned_payloads[entries
+                .iter()
+                .position(|(candidate, ..)| candidate == name)
+                .expect("entry present")];
             assert_eq!(actual, payload.as_slice(), "tensor {name} payload bytes");
         }
     }
@@ -292,7 +310,10 @@ mod tests {
         );
         assert_eq!(
             manifest.format_version().expect("stamped version is valid"),
-            (crate::sized::FORMAT_VERSION_MAJOR, crate::sized::FORMAT_VERSION_MINOR)
+            (
+                crate::sized::FORMAT_VERSION_MAJOR,
+                crate::sized::FORMAT_VERSION_MINOR
+            )
         );
     }
 
@@ -300,7 +321,10 @@ mod tests {
     fn write_complete_rejects_a_caller_supplied_format_version_key() {
         let data = [0u8; 4];
         let mut metadata = BTreeMap::new();
-        metadata.insert(crate::sized::FORMAT_VERSION_KEY.to_string(), "9.9".to_string());
+        metadata.insert(
+            crate::sized::FORMAT_VERSION_KEY.to_string(),
+            "9.9".to_string(),
+        );
         let model = SafetensorsModel {
             tensors: vec![TensorPayload {
                 name: "t".to_string(),
@@ -330,10 +354,15 @@ mod tests {
 
         let manifest = parse_whole(&pre_change_bytes).expect("pre-change file still parses");
         assert!(
-            !manifest.metadata.contains_key(crate::sized::FORMAT_VERSION_KEY),
+            !manifest
+                .metadata
+                .contains_key(crate::sized::FORMAT_VERSION_KEY),
             "fixture must genuinely carry no version stamp"
         );
-        assert_eq!(manifest.format_version().expect("absent stamp is accepted"), (1, 0));
+        assert_eq!(
+            manifest.format_version().expect("absent stamp is accepted"),
+            (1, 0)
+        );
     }
 
     #[test]
@@ -341,7 +370,10 @@ mod tests {
         let unknown_major = crate::sized::FORMAT_VERSION_MAJOR + 1;
         let entries: &[(&str, &str, &[u64], usize)] = &[("w", "F32", &[2], 8)];
         let stamp = alloc::format!("{unknown_major}.0");
-        let (bytes, _offsets) = build_buffer(entries, &[(crate::sized::FORMAT_VERSION_KEY, stamp.as_str())]);
+        let (bytes, _offsets) = build_buffer(
+            entries,
+            &[(crate::sized::FORMAT_VERSION_KEY, stamp.as_str())],
+        );
 
         let manifest = parse_whole(&bytes).expect("header itself is well-formed");
         let outcome = manifest.format_version();
@@ -351,7 +383,10 @@ mod tests {
                 if supported_major == crate::sized::FORMAT_VERSION_MAJOR
         ));
         let message = outcome.unwrap_err().to_string();
-        assert!(message.contains(&stamp), "error must name the file's own version: {message}");
+        assert!(
+            message.contains(&stamp),
+            "error must name the file's own version: {message}"
+        );
         assert!(
             message.contains(&crate::sized::FORMAT_VERSION_MAJOR.to_string()),
             "error must name the supported range: {message}"

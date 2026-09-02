@@ -28,7 +28,10 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use criterion::Criterion;
-use proxima_tensor::{DType, Extent, IndexMap, Keep, NodeId, Op, Reduce, ReduceInit, ScalarOp, TypedBuffer, append, evaluate_typed, map};
+use proxima_tensor::{
+    DType, Extent, IndexMap, Keep, NodeId, Op, Reduce, ReduceInit, ScalarOp, TypedBuffer, append,
+    evaluate_typed, map,
+};
 
 /// One `Conv` layer's shape: `co` output channels, `ci` input channels,
 /// `oy`/`ox` output spatial extent, `kh`/`kw` kernel extent -- exactly the
@@ -46,10 +49,42 @@ struct ConvShape {
 /// mnist's 3 real `Conv` folds (ROW 148's measured `extents`, re-labeled
 /// `co,ci,oy,ox,kh,kw`) plus one larger square shape past all three.
 const SHAPES: [ConvShape; 4] = [
-    ConvShape { label: "mnist_layer1_co8_ci1_26x26", co: 8, ci: 1, oy: 26, ox: 26, kh: 3, kw: 3 },
-    ConvShape { label: "mnist_layer2_co16_ci8_24x24", co: 16, ci: 8, oy: 24, ox: 24, kh: 3, kw: 3 },
-    ConvShape { label: "mnist_layer3_co24_ci16_22x22", co: 24, ci: 16, oy: 22, ox: 22, kh: 3, kw: 3 },
-    ConvShape { label: "larger_square_co64_ci32_32x32", co: 64, ci: 32, oy: 32, ox: 32, kh: 3, kw: 3 },
+    ConvShape {
+        label: "mnist_layer1_co8_ci1_26x26",
+        co: 8,
+        ci: 1,
+        oy: 26,
+        ox: 26,
+        kh: 3,
+        kw: 3,
+    },
+    ConvShape {
+        label: "mnist_layer2_co16_ci8_24x24",
+        co: 16,
+        ci: 8,
+        oy: 24,
+        ox: 24,
+        kh: 3,
+        kw: 3,
+    },
+    ConvShape {
+        label: "mnist_layer3_co24_ci16_22x22",
+        co: 24,
+        ci: 16,
+        oy: 22,
+        ox: 22,
+        kh: 3,
+        kw: 3,
+    },
+    ConvShape {
+        label: "larger_square_co64_ci32_32x32",
+        co: 64,
+        ci: 32,
+        oy: 32,
+        ox: 32,
+        kh: 3,
+        kw: 3,
+    },
 ];
 
 fn input(program: &mut Vec<Op>, shape: &[u32]) -> NodeId {
@@ -75,7 +110,10 @@ fn input(program: &mut Vec<Op>, shape: &[u32]) -> NodeId {
 /// shape, strides, or total MAC count at all.
 fn conv_program(shape: &ConvShape, extra_step: bool) -> (Vec<Op>, NodeId, NodeId, NodeId) {
     let mut program = Vec::new();
-    let windowed = input(&mut program, &[1, shape.ci, shape.oy, shape.ox, shape.kh, shape.kw]);
+    let windowed = input(
+        &mut program,
+        &[1, shape.ci, shape.oy, shape.ox, shape.kh, shape.kw],
+    );
     let weight = input(&mut program, &[shape.co, shape.ci, shape.kh, shape.kw]);
 
     // shared iteration space: 0=n 1=co 2=oy 3=ox 4=ci 5=ky 6=kx -- identical
@@ -87,7 +125,10 @@ fn conv_program(shape: &ConvShape, extra_step: bool) -> (Vec<Op>, NodeId, NodeId
         Op::Elementwise {
             dtype: DType::Float32,
             body: ScalarOp::Multiply,
-            operands: vec![(windowed, IndexMap::Affine(windowed_pattern)), (weight, IndexMap::Affine(weight_pattern))],
+            operands: vec![
+                (windowed, IndexMap::Affine(windowed_pattern)),
+                (weight, IndexMap::Affine(weight_pattern)),
+            ],
             name: None,
         },
     );
@@ -97,7 +138,15 @@ fn conv_program(shape: &ConvShape, extra_step: bool) -> (Vec<Op>, NodeId, NodeId
             &mut program,
             Op::Constant {
                 dtype: DType::Float32,
-                shape: vec![Extent::Static(1), Extent::Static(shape.co), Extent::Static(shape.oy), Extent::Static(shape.ox), Extent::Static(shape.ci), Extent::Static(shape.kh), Extent::Static(shape.kw)],
+                shape: vec![
+                    Extent::Static(1),
+                    Extent::Static(shape.co),
+                    Extent::Static(shape.oy),
+                    Extent::Static(shape.ox),
+                    Extent::Static(shape.ci),
+                    Extent::Static(shape.kh),
+                    Extent::Static(shape.kw),
+                ],
                 value: 1.0,
             },
         );
@@ -107,9 +156,15 @@ fn conv_program(shape: &ConvShape, extra_step: bool) -> (Vec<Op>, NodeId, NodeId
                 dtype: DType::Float32,
                 body: ScalarOp::Multiply,
                 operands: vec![
-                (product, IndexMap::Affine(map::projection(7, &[0, 1, 2, 3, 4, 5, 6]))),
-                (ones, IndexMap::Affine(map::projection(7, &[0, 1, 2, 3, 4, 5, 6]))),
-            ],
+                    (
+                        product,
+                        IndexMap::Affine(map::projection(7, &[0, 1, 2, 3, 4, 5, 6])),
+                    ),
+                    (
+                        ones,
+                        IndexMap::Affine(map::projection(7, &[0, 1, 2, 3, 4, 5, 6])),
+                    ),
+                ],
                 name: None,
             },
         );
@@ -135,12 +190,23 @@ fn deterministic_data(len: usize, phase: f32) -> Vec<f32> {
     (0..len).map(|value| (value as f32 * phase).sin()).collect()
 }
 
-fn run(program: &[Op], windowed: NodeId, weight: NodeId, output: NodeId, windowed_data: &[f32], weight_data: &[f32]) -> Vec<f32> {
+fn run(
+    program: &[Op],
+    windowed: NodeId,
+    weight: NodeId,
+    output: NodeId,
+    windowed_data: &[f32],
+    weight_data: &[f32],
+) -> Vec<f32> {
     let _ = windowed;
     let _ = weight;
-    let blocks = [TypedBuffer::Float32(windowed_data.to_vec()), TypedBuffer::Float32(weight_data.to_vec())];
+    let blocks = [
+        TypedBuffer::Float32(windowed_data.to_vec()),
+        TypedBuffer::Float32(weight_data.to_vec()),
+    ];
     let rows = evaluate_typed(program, &[], &blocks, &[output]).expect("evaluate_typed");
-    let (_, _, TypedBuffer::Float32(data)) = rows.into_iter().next().expect("one output row") else {
+    let (_, _, TypedBuffer::Float32(data)) = rows.into_iter().next().expect("one output row")
+    else {
         panic!("conv reduce output was not f32");
     };
     data
@@ -165,17 +231,40 @@ fn main() {
         let windowed_data = deterministic_data(windowed_len, 0.0137);
         let weight_data = deterministic_data(weight_len, 0.0271);
 
-        let (engaged_program, engaged_windowed, engaged_weight, engaged_output) = conv_program(shape, false);
-        let (generic_program, generic_windowed, generic_weight, generic_output) = conv_program(shape, true);
+        let (engaged_program, engaged_windowed, engaged_weight, engaged_output) =
+            conv_program(shape, false);
+        let (generic_program, generic_windowed, generic_weight, generic_output) =
+            conv_program(shape, true);
 
         // correctness self-check, once per shape, outside the timed loop:
         // both arms must agree bit-for-bit -- the whole point of the
         // extra-step technique is that it changes ONLY which executor path
         // runs, never the numeric result.
-        let engaged_result = run(&engaged_program, engaged_windowed, engaged_weight, engaged_output, &windowed_data, &weight_data);
-        let generic_result = run(&generic_program, generic_windowed, generic_weight, generic_output, &windowed_data, &weight_data);
-        assert_eq!(engaged_result.len(), generic_result.len(), "{}: output length mismatch", shape.label);
-        for (index, (&engaged_value, &generic_value)) in engaged_result.iter().zip(&generic_result).enumerate() {
+        let engaged_result = run(
+            &engaged_program,
+            engaged_windowed,
+            engaged_weight,
+            engaged_output,
+            &windowed_data,
+            &weight_data,
+        );
+        let generic_result = run(
+            &generic_program,
+            generic_windowed,
+            generic_weight,
+            generic_output,
+            &windowed_data,
+            &weight_data,
+        );
+        assert_eq!(
+            engaged_result.len(),
+            generic_result.len(),
+            "{}: output length mismatch",
+            shape.label
+        );
+        for (index, (&engaged_value, &generic_value)) in
+            engaged_result.iter().zip(&generic_result).enumerate()
+        {
             assert!(
                 (engaged_value - generic_value).abs() <= engaged_value.abs() * 1e-5 + 1e-6,
                 "{}: element {index} diverged: conv_tile={engaged_value} generic={generic_value}",
@@ -184,10 +273,28 @@ fn main() {
         }
 
         group.bench_function(format!("{}/conv_tile", shape.label), |bencher| {
-            bencher.iter(|| run(&engaged_program, engaged_windowed, engaged_weight, engaged_output, &windowed_data, &weight_data));
+            bencher.iter(|| {
+                run(
+                    &engaged_program,
+                    engaged_windowed,
+                    engaged_weight,
+                    engaged_output,
+                    &windowed_data,
+                    &weight_data,
+                )
+            });
         });
         group.bench_function(format!("{}/generic", shape.label), |bencher| {
-            bencher.iter(|| run(&generic_program, generic_windowed, generic_weight, generic_output, &windowed_data, &weight_data));
+            bencher.iter(|| {
+                run(
+                    &generic_program,
+                    generic_windowed,
+                    generic_weight,
+                    generic_output,
+                    &windowed_data,
+                    &weight_data,
+                )
+            });
         });
     }
 

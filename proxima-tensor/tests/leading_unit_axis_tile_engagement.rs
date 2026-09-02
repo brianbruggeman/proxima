@@ -21,14 +21,31 @@ use proxima_tensor::{Extent, IndexMap, NodeId, Op, ReduceInit, ScalarOp, append,
 /// plain (non-transposed) RHS — the layout `width_tile_plan` targets.
 fn matmul_program_unbatched(m: u32, k: u32, n: u32) -> (Vec<Op>, NodeId) {
     let mut program = Vec::new();
-    let lhs = append(&mut program, Op::Input { dtype: proxima_tensor::DType::Float32, shape: vec![Extent::Static(m), Extent::Static(k)], name: None });
-    let rhs = append(&mut program, Op::Input { dtype: proxima_tensor::DType::Float32, shape: vec![Extent::Static(k), Extent::Static(n)], name: None });
+    let lhs = append(
+        &mut program,
+        Op::Input {
+            dtype: proxima_tensor::DType::Float32,
+            shape: vec![Extent::Static(m), Extent::Static(k)],
+            name: None,
+        },
+    );
+    let rhs = append(
+        &mut program,
+        Op::Input {
+            dtype: proxima_tensor::DType::Float32,
+            shape: vec![Extent::Static(k), Extent::Static(n)],
+            name: None,
+        },
+    );
     let product = append(
         &mut program,
         Op::Elementwise {
             dtype: proxima_tensor::DType::Float32,
             body: ScalarOp::Multiply,
-            operands: vec![(lhs, IndexMap::Affine(map::projection(3, &[0, 2]))), (rhs, IndexMap::Affine(map::projection(3, &[2, 1])))],
+            operands: vec![
+                (lhs, IndexMap::Affine(map::projection(3, &[0, 2]))),
+                (rhs, IndexMap::Affine(map::projection(3, &[2, 1]))),
+            ],
             name: None,
         },
     );
@@ -54,14 +71,31 @@ fn matmul_program_unbatched(m: u32, k: u32, n: u32) -> (Vec<Op>, NodeId) {
 /// (`proxima-onnx/src/lower.rs:743-826`) produces for BGE's real graph.
 fn matmul_program_batched(m: u32, k: u32, n: u32) -> (Vec<Op>, NodeId) {
     let mut program = Vec::new();
-    let lhs = append(&mut program, Op::Input { dtype: proxima_tensor::DType::Float32, shape: vec![Extent::Static(1), Extent::Static(m), Extent::Static(k)], name: None });
-    let rhs = append(&mut program, Op::Input { dtype: proxima_tensor::DType::Float32, shape: vec![Extent::Static(k), Extent::Static(n)], name: None });
+    let lhs = append(
+        &mut program,
+        Op::Input {
+            dtype: proxima_tensor::DType::Float32,
+            shape: vec![Extent::Static(1), Extent::Static(m), Extent::Static(k)],
+            name: None,
+        },
+    );
+    let rhs = append(
+        &mut program,
+        Op::Input {
+            dtype: proxima_tensor::DType::Float32,
+            shape: vec![Extent::Static(k), Extent::Static(n)],
+            name: None,
+        },
+    );
     let product = append(
         &mut program,
         Op::Elementwise {
             dtype: proxima_tensor::DType::Float32,
             body: ScalarOp::Multiply,
-            operands: vec![(lhs, IndexMap::Affine(map::projection(4, &[0, 1, 3]))), (rhs, IndexMap::Affine(map::projection(4, &[3, 2])))],
+            operands: vec![
+                (lhs, IndexMap::Affine(map::projection(4, &[0, 1, 3]))),
+                (rhs, IndexMap::Affine(map::projection(4, &[3, 2]))),
+            ],
             name: None,
         },
     );
@@ -88,8 +122,12 @@ fn matmul_program_batched(m: u32, k: u32, n: u32) -> (Vec<Op>, NodeId) {
 #[test]
 fn leading_unit_axis_matches_unbatched_bit_identical() {
     let (m, k, n) = (8u32, 64u32, 64u32);
-    let lhs: Vec<f32> = (0..(m * k) as usize).map(|index| (index as f32 * 0.0137).sin()).collect();
-    let rhs: Vec<f32> = (0..(k * n) as usize).map(|index| (index as f32 * 0.0271).cos()).collect();
+    let lhs: Vec<f32> = (0..(m * k) as usize)
+        .map(|index| (index as f32 * 0.0137).sin())
+        .collect();
+    let rhs: Vec<f32> = (0..(k * n) as usize)
+        .map(|index| (index as f32 * 0.0271).cos())
+        .collect();
 
     let (unbatched_program, _) = matmul_program_unbatched(m, k, n);
     let unbatched = match evaluate(&unbatched_program, &[], &[&lhs, &rhs], &[]) {
@@ -105,7 +143,11 @@ fn leading_unit_axis_matches_unbatched_bit_identical() {
 
     let unbatched_root = unbatched.root();
     let batched_root = batched.root();
-    assert_eq!(batched_root.len(), unbatched_root.len(), "batched/unbatched output length mismatch");
+    assert_eq!(
+        batched_root.len(),
+        unbatched_root.len(),
+        "batched/unbatched output length mismatch"
+    );
     assert_eq!(
         batched_root.to_vec(),
         unbatched_root.to_vec(),
@@ -123,8 +165,12 @@ fn leading_unit_axis_matches_unbatched_bit_identical() {
 #[test]
 fn leading_unit_axis_fires_the_width_tile() {
     let (m, k, n) = (8u32, 64u32, 64u32);
-    let lhs: Vec<f32> = (0..(m * k) as usize).map(|index| (index as f32 * 0.0137).sin()).collect();
-    let rhs: Vec<f32> = (0..(k * n) as usize).map(|index| (index as f32 * 0.0271).cos()).collect();
+    let lhs: Vec<f32> = (0..(m * k) as usize)
+        .map(|index| (index as f32 * 0.0137).sin())
+        .collect();
+    let rhs: Vec<f32> = (0..(k * n) as usize)
+        .map(|index| (index as f32 * 0.0271).cos())
+        .collect();
 
     let (gate_before, invocations_before, _) = proxima_tensor::cpu::width_tile_counters();
 
@@ -138,7 +184,9 @@ fn leading_unit_axis_fires_the_width_tile() {
     let (gate_after, invocations_after, _) = proxima_tensor::cpu::width_tile_counters();
     let gate_delta = gate_after - gate_before;
     let invocations_delta = invocations_after - invocations_before;
-    println!("leading_unit_axis_fires_the_width_tile: gate_passes={gate_delta} invocations={invocations_delta}");
+    println!(
+        "leading_unit_axis_fires_the_width_tile: gate_passes={gate_delta} invocations={invocations_delta}"
+    );
 
     assert!(
         gate_delta > 0,

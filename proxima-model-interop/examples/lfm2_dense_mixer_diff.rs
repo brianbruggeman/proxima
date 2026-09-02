@@ -40,28 +40,50 @@ use std::fs;
 use std::path::PathBuf;
 
 use proxima_gguf::pipe::parse_complete;
-use proxima_model_interop::{Lfm2Architecture, lfm2_architecture_from_metadata, lfm2_forward_values};
+use proxima_model_interop::{
+    Lfm2Architecture, lfm2_architecture_from_metadata, lfm2_forward_values,
+};
 use proxima_tensor::op::{NodeId, Op, ReduceInit, ScalarOp};
 use proxima_tensor::spec::lfm2_forward_program_with_experts;
 
 fn read_oracle_activation(path: &PathBuf) -> Vec<f32> {
-    let bytes = fs::read(path).unwrap_or_else(|error| panic!("read oracle activation at {path:?}: {error}"));
-    bytes.as_chunks::<4>().0.iter().map(|chunk| f32::from_le_bytes(*chunk)).collect()
+    let bytes = fs::read(path)
+        .unwrap_or_else(|error| panic!("read oracle activation at {path:?}: {error}"));
+    bytes
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|chunk| f32::from_le_bytes(*chunk))
+        .collect()
 }
 
 /// `lfm2_moe_route_diff.rs`'s own `reduce_operand`, duplicated -- see that
 /// file's own doc.
-fn reduce_operand(program: &[Op], node: NodeId, expected_body: ScalarOp, expected_init: ReduceInit) -> NodeId {
+fn reduce_operand(
+    program: &[Op],
+    node: NodeId,
+    expected_body: ScalarOp,
+    expected_init: ReduceInit,
+) -> NodeId {
     match &program[node.0 as usize] {
-        Op::Reduce(reduce) if reduce.body == expected_body && reduce.init == expected_init => reduce.operand,
-        other => panic!("node {node:?}: expected a {expected_body:?}/{expected_init:?} reduce, got {other:?}"),
+        Op::Reduce(reduce) if reduce.body == expected_body && reduce.init == expected_init => {
+            reduce.operand
+        }
+        other => panic!(
+            "node {node:?}: expected a {expected_body:?}/{expected_init:?} reduce, got {other:?}"
+        ),
     }
 }
 
 /// `lfm2_moe_route_diff.rs`'s own `elementwise_first_operand`, generalized to
 /// an arbitrary operand INDEX -- layer 0's own walk needs `branch_c`
 /// (`gated_output`'s operand 1), which the MoE walk never did.
-fn elementwise_operand(program: &[Op], node: NodeId, expected_body: ScalarOp, index: usize) -> NodeId {
+fn elementwise_operand(
+    program: &[Op],
+    node: NodeId,
+    expected_body: ScalarOp,
+    index: usize,
+) -> NodeId {
     match &program[node.0 as usize] {
         Op::Elementwise { body, operands, .. } if *body == expected_body => operands[index].0,
         other => panic!("node {node:?}: expected a {expected_body:?} elementwise, got {other:?}"),
@@ -76,7 +98,10 @@ fn elementwise_first_operand(program: &[Op], node: NodeId, expected_body: Scalar
 /// own `input_node_id`, duplicated.
 fn input_node_id(program: &[Op], name: &str) -> NodeId {
     for (index, op) in program.iter().enumerate() {
-        if let Op::Input { name: Some(candidate), .. } = op
+        if let Op::Input {
+            name: Some(candidate),
+            ..
+        } = op
             && candidate == name
         {
             return NodeId(index as u32);
@@ -95,7 +120,11 @@ fn input_node_id(program: &[Op], name: &str) -> NodeId {
 /// this layer's own `w_gate` as an operand.
 fn gate_product_node_id(program: &[Op], w_gate_id: NodeId) -> NodeId {
     for (index, op) in program.iter().enumerate() {
-        if let Op::Elementwise { body: ScalarOp::Multiply, operands, .. } = op
+        if let Op::Elementwise {
+            body: ScalarOp::Multiply,
+            operands,
+            ..
+        } = op
             && operands.len() == 2
             && operands[1].0 == w_gate_id
         {
@@ -125,7 +154,11 @@ fn max_abs(values: &[f32]) -> f32 {
 fn report(label: &str, ours: &[f32], theirs: &[f32], embedding: usize) {
     let (diff, worst_index) = max_abs_diff(ours, theirs);
     let oracle_max = max_abs(theirs);
-    let relative = if oracle_max > 0.0 { diff / oracle_max } else { f32::INFINITY };
+    let relative = if oracle_max > 0.0 {
+        diff / oracle_max
+    } else {
+        f32::INFINITY
+    };
     let worst_token = worst_index / embedding;
     let worst_dim = worst_index % embedding;
     println!(
@@ -141,8 +174,14 @@ fn main() {
     let oracle_dir = env::args().nth(2).unwrap_or_else(|| {
         "/private/tmp/claude-501/-Users-brianbruggeman-repos-slot-0/6cd9e134-c1a3-450a-be93-76dd95389bf4/scratchpad/oracle/dump_lfm2".to_string()
     });
-    let prompt = env::args().nth(3).unwrap_or_else(|| "The capital of France is".to_string());
-    let layer: u32 = env::args().nth(4).unwrap_or_else(|| "0".to_string()).parse().expect("layer arg is a u32");
+    let prompt = env::args()
+        .nth(3)
+        .unwrap_or_else(|| "The capital of France is".to_string());
+    let layer: u32 = env::args()
+        .nth(4)
+        .unwrap_or_else(|| "0".to_string())
+        .parse()
+        .expect("layer arg is a u32");
 
     let model_path = PathBuf::from(&model_path);
     let oracle_dir = PathBuf::from(&oracle_dir);
@@ -157,12 +196,19 @@ fn main() {
 
     let file_bytes = fs::read(&model_path).expect("read lfm2 gguf checkpoint");
     let parsed = parse_complete(&file_bytes).expect("parse lfm2 gguf checkpoint");
-    let architecture: Lfm2Architecture = lfm2_architecture_from_metadata(&parsed).expect("derive lfm2 architecture from gguf metadata");
-    assert!(layer < architecture.leading_dense_block_count, "layer {layer} is not a dense layer (leading_dense_block_count={})", architecture.leading_dense_block_count);
+    let architecture: Lfm2Architecture = lfm2_architecture_from_metadata(&parsed)
+        .expect("derive lfm2 architecture from gguf metadata");
+    assert!(
+        layer < architecture.leading_dense_block_count,
+        "layer {layer} is not a dense layer (leading_dense_block_count={})",
+        architecture.leading_dense_block_count
+    );
 
-    let vocab = proxima_tokenizer::gguf::vocab_from_metadata(&parsed).expect("build vocab from gguf metadata");
+    let vocab = proxima_tokenizer::gguf::vocab_from_metadata(&parsed)
+        .expect("build vocab from gguf metadata");
     let add_bos = vocab.add_bos_token().unwrap_or(true);
-    let ids = proxima_tokenizer::encode_with_bos_eos(&prompt, &vocab, add_bos, false).expect("tokenize prompt");
+    let ids = proxima_tokenizer::encode_with_bos_eos(&prompt, &vocab, add_bos, false)
+        .expect("tokenize prompt");
 
     let (full_program, _logits_root) = lfm2_forward_program_with_experts(
         architecture.vocab,
@@ -185,13 +231,18 @@ fn main() {
     let gate_product_id = gate_product_node_id(&full_program, w_gate_id);
     let normed2_id = elementwise_operand(&full_program, gate_product_id, ScalarOp::Multiply, 0);
     let normed_inner_id = elementwise_first_operand(&full_program, normed2_id, ScalarOp::Multiply);
-    let post_mixer_id = elementwise_first_operand(&full_program, normed_inner_id, ScalarOp::Multiply);
+    let post_mixer_id =
+        elementwise_first_operand(&full_program, normed_inner_id, ScalarOp::Multiply);
     let mixer_out_id = elementwise_first_operand(&full_program, post_mixer_id, ScalarOp::Add);
-    let out_product_id = reduce_operand(&full_program, mixer_out_id, ScalarOp::Add, ReduceInit::Zero);
-    let gated_output_id = elementwise_first_operand(&full_program, out_product_id, ScalarOp::Multiply);
+    let out_product_id =
+        reduce_operand(&full_program, mixer_out_id, ScalarOp::Add, ReduceInit::Zero);
+    let gated_output_id =
+        elementwise_first_operand(&full_program, out_product_id, ScalarOp::Multiply);
     let branch_c_id = elementwise_operand(&full_program, gated_output_id, ScalarOp::Multiply, 1);
-    let branch_c_product_id = reduce_operand(&full_program, branch_c_id, ScalarOp::Add, ReduceInit::Zero);
-    let normed_id = elementwise_first_operand(&full_program, branch_c_product_id, ScalarOp::Multiply);
+    let branch_c_product_id =
+        reduce_operand(&full_program, branch_c_id, ScalarOp::Add, ReduceInit::Zero);
+    let normed_id =
+        elementwise_first_operand(&full_program, branch_c_product_id, ScalarOp::Multiply);
     // deeper still: `convolved` (post causal-conv, pre-C-gate --
     // `append_lfm2_conv_mixer`'s own `convolved` variable) and
     // `branch_b`/`branch_x` (the B/x streams feeding the conv), walked
@@ -201,8 +252,10 @@ fn main() {
     // `windowed = Identity([(gated_input, gathered_map)])`,
     // `gated_input = Multiply([branch_b, branch_x])` -- `spec.rs`'s own
     // `causal_conv1d`/`append_lfm2_conv_mixer` bodies).
-    let convolved_id = elementwise_first_operand(&full_program, gated_output_id, ScalarOp::Multiply);
-    let masked_tap_id = reduce_operand(&full_program, convolved_id, ScalarOp::Add, ReduceInit::Zero);
+    let convolved_id =
+        elementwise_first_operand(&full_program, gated_output_id, ScalarOp::Multiply);
+    let masked_tap_id =
+        reduce_operand(&full_program, convolved_id, ScalarOp::Add, ReduceInit::Zero);
     let tap_product_id = elementwise_operand(&full_program, masked_tap_id, ScalarOp::Select, 1);
     let windowed_id = elementwise_first_operand(&full_program, tap_product_id, ScalarOp::Multiply);
     let gated_input_id = elementwise_first_operand(&full_program, windowed_id, ScalarOp::Identity);
@@ -213,8 +266,19 @@ fn main() {
         "layer={layer} normed={normed_id:?} branch_b={branch_b_id:?} branch_x={branch_x_id:?} branch_c={branch_c_id:?} convolved={convolved_id:?} mixer_out={mixer_out_id:?} post_mixer={post_mixer_id:?} normed2={normed2_id:?}"
     );
 
-    let all_node_ids = [normed_id, branch_b_id, branch_x_id, branch_c_id, convolved_id, mixer_out_id, post_mixer_id, normed2_id];
-    let (_logits, values) = lfm2_forward_values(&parsed, &file_bytes, &architecture, &ids, &all_node_ids).expect("evaluate this layer's own bisection node values");
+    let all_node_ids = [
+        normed_id,
+        branch_b_id,
+        branch_x_id,
+        branch_c_id,
+        convolved_id,
+        mixer_out_id,
+        post_mixer_id,
+        normed2_id,
+    ];
+    let (_logits, values) =
+        lfm2_forward_values(&parsed, &file_bytes, &architecture, &ids, &all_node_ids)
+            .expect("evaluate this layer's own bisection node values");
     let ours_normed = values[0].as_slice();
     let ours_branch_b = values[1].as_slice();
     let ours_branch_x = values[2].as_slice();
@@ -235,9 +299,20 @@ fn main() {
     // see `lfm2_layer_oracle_diff.rs`'s own updated doc on why the probe's
     // stale `inp_embd` name is dead); every later layer's residual input is
     // the previous layer's own `l_out`.
-    let layer_input_path = if layer == 0 { oracle_dir.join("model.embed_tokens.f32") } else { oracle_dir.join(format!("l_out-{}.f32", layer - 1)) };
+    let layer_input_path = if layer == 0 {
+        oracle_dir.join("model.embed_tokens.f32")
+    } else {
+        oracle_dir.join(format!("l_out-{}.f32", layer - 1))
+    };
 
-    for (label, path) in [("normed", &normed_path), ("bcx", &bcx_path), ("conv", &conv_path), ("mixer_out", &mixer_out_path), ("normed2", &normed2_path), ("layer_input", &layer_input_path)] {
+    for (label, path) in [
+        ("normed", &normed_path),
+        ("bcx", &bcx_path),
+        ("conv", &conv_path),
+        ("mixer_out", &mixer_out_path),
+        ("normed2", &normed2_path),
+        ("layer_input", &layer_input_path),
+    ] {
         if !path.exists() {
             println!("MISSING_ORACLE_FILE for {label} at {path:?}");
             return;
@@ -250,7 +325,11 @@ fn main() {
     let their_mixer_out = read_oracle_activation(&mixer_out_path);
     let their_normed2 = read_oracle_activation(&normed2_path);
     let their_layer_input = read_oracle_activation(&layer_input_path);
-    let their_post_mixer: Vec<f32> = their_mixer_out.iter().zip(&their_layer_input).map(|(mixer, input)| mixer + input).collect();
+    let their_post_mixer: Vec<f32> = their_mixer_out
+        .iter()
+        .zip(&their_layer_input)
+        .map(|(mixer, input)| mixer + input)
+        .collect();
 
     // `their_bcx` is `[3*embedding]` per token, chunk 0 = B, chunk 1 = C,
     // chunk 2 = ungated x (`build_shortconv_block`'s own `ggml_view_3d`
@@ -263,18 +342,61 @@ fn main() {
     let mut their_branch_x = vec![0f32; n_tokens * embedding];
     for token in 0..n_tokens {
         let base = token * 3 * embedding;
-        their_branch_b[token * embedding..(token + 1) * embedding].copy_from_slice(&their_bcx[base..base + embedding]);
-        their_branch_c[token * embedding..(token + 1) * embedding].copy_from_slice(&their_bcx[base + embedding..base + 2 * embedding]);
-        their_branch_x[token * embedding..(token + 1) * embedding].copy_from_slice(&their_bcx[base + 2 * embedding..base + 3 * embedding]);
+        their_branch_b[token * embedding..(token + 1) * embedding]
+            .copy_from_slice(&their_bcx[base..base + embedding]);
+        their_branch_c[token * embedding..(token + 1) * embedding]
+            .copy_from_slice(&their_bcx[base + embedding..base + 2 * embedding]);
+        their_branch_x[token * embedding..(token + 1) * embedding]
+            .copy_from_slice(&their_bcx[base + 2 * embedding..base + 3 * embedding]);
     }
 
     println!("\nWITHIN-layer-{layer} bisection (dense FFN, in program order):");
-    report("normed      (mixer rmsnorm output, feeds B/C/x)", ours_normed, &their_normed, embedding);
-    report("branch_b    (post-projection, PRE B*x gate)     ", ours_branch_b, &their_branch_b, embedding);
-    report("branch_x    (post-projection, PRE B*x gate)     ", ours_branch_x, &their_branch_x, embedding);
-    report("branch_c    (post-projection, PRE conv gate)    ", ours_branch_c, &their_branch_c, embedding);
-    report("convolved   (post causal-conv, PRE C-gate)      ", ours_convolved, &their_conv, embedding);
-    report("mixer_out   (pre-residual conv-mixer output)    ", ours_mixer_out, &their_mixer_out, embedding);
-    report("post_mixer  (post-residual, dense FFN's input)  ", ours_post_mixer, &their_post_mixer, embedding);
-    report("normed2     (ffn_norm output, dense FFN's input)", ours_normed2, &their_normed2, embedding);
+    report(
+        "normed      (mixer rmsnorm output, feeds B/C/x)",
+        ours_normed,
+        &their_normed,
+        embedding,
+    );
+    report(
+        "branch_b    (post-projection, PRE B*x gate)     ",
+        ours_branch_b,
+        &their_branch_b,
+        embedding,
+    );
+    report(
+        "branch_x    (post-projection, PRE B*x gate)     ",
+        ours_branch_x,
+        &their_branch_x,
+        embedding,
+    );
+    report(
+        "branch_c    (post-projection, PRE conv gate)    ",
+        ours_branch_c,
+        &their_branch_c,
+        embedding,
+    );
+    report(
+        "convolved   (post causal-conv, PRE C-gate)      ",
+        ours_convolved,
+        &their_conv,
+        embedding,
+    );
+    report(
+        "mixer_out   (pre-residual conv-mixer output)    ",
+        ours_mixer_out,
+        &their_mixer_out,
+        embedding,
+    );
+    report(
+        "post_mixer  (post-residual, dense FFN's input)  ",
+        ours_post_mixer,
+        &their_post_mixer,
+        embedding,
+    );
+    report(
+        "normed2     (ffn_norm output, dense FFN's input)",
+        ours_normed2,
+        &their_normed2,
+        embedding,
+    );
 }

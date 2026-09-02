@@ -20,18 +20,27 @@ use crate::{decode, encode, encode_with_bos_eos};
 /// `<|begin_of_text|>`/`<|end_of_text|>`), so this crate's tests are not
 /// only ever run against `tiny_vocab`'s two-merge case.
 fn synthetic_vocab() -> Vocab {
-    let mut tokens: Vec<String> = (0..=255u8).map(|byte| String::from(byte_to_char(byte))).collect();
-    for word in ["he", "hel", "lo", "hello", "<|begin_of_text|>", "<|end_of_text|>"] {
+    let mut tokens: Vec<String> = (0..=255u8)
+        .map(|byte| String::from(byte_to_char(byte)))
+        .collect();
+    for word in [
+        "he",
+        "hel",
+        "lo",
+        "hello",
+        "<|begin_of_text|>",
+        "<|end_of_text|>",
+    ] {
         tokens.push(word.to_string());
     }
     let bos_id = (tokens.len() - 2) as u32;
     let eos_id = (tokens.len() - 1) as u32;
 
     let merges = [
-        "h e",     // -> "he"
-        "he l",    // -> "hel"
-        "l o",     // -> "lo"
-        "hel lo",  // -> "hello"
+        "h e",    // -> "he"
+        "he l",   // -> "hel"
+        "l o",    // -> "lo"
+        "hel lo", // -> "hello"
     ]
     .map(String::from);
 
@@ -50,13 +59,16 @@ fn round_trip_covers_multi_step_merges_and_plain_bytes() {
         "Hello, World! 123",
         "  leading and trailing spaces  ",
         "\t\ttabs\n\nand newlines\n",
-        "日本語テスト",  // multi-byte UTF-8 with no merge rules at all
+        "日本語テスト", // multi-byte UTF-8 with no merge rules at all
         "emoji: \u{1F600}\u{1F601}",
         "",
     ] {
         let ids = encode(text, &vocab).expect("encodes");
         let decoded = decode(&ids, &vocab).expect("decodes");
-        assert_eq!(decoded, text, "round trip failed for {text:?} (ids: {ids:?})");
+        assert_eq!(
+            decoded, text,
+            "round trip failed for {text:?} (ids: {ids:?})"
+        );
     }
 }
 
@@ -71,7 +83,8 @@ fn special_tokens_are_explicit_not_silently_dropped() {
     // explicit opt-in adds both, and decode still reconstructs exactly
     // the literal text those control tokens' display strings carry --
     // nothing about them is dropped.
-    let with_special = encode_with_bos_eos("hello", &vocab, true, true).expect("encode with bos/eos");
+    let with_special =
+        encode_with_bos_eos("hello", &vocab, true, true).expect("encode with bos/eos");
     assert_eq!(with_special.first().copied(), vocab.bos_token_id());
     assert_eq!(with_special.last().copied(), vocab.eos_token_id());
     let decoded = decode(&with_special, &vocab).expect("decodes");
@@ -99,7 +112,13 @@ fn empty_input_encodes_to_no_tokens() {
 fn decoding_an_unknown_token_id_is_a_typed_error_not_a_panic() {
     let vocab = synthetic_vocab();
     let error = decode(&[999_999], &vocab).expect_err("id far outside the vocab");
-    assert!(matches!(error, TokenizerError::TokenIdOutOfRange { token_id: 999_999, .. }));
+    assert!(matches!(
+        error,
+        TokenizerError::TokenIdOutOfRange {
+            token_id: 999_999,
+            ..
+        }
+    ));
 }
 
 /// A vocab covering all 256 base byte tokens plus four `Control`-typed
@@ -109,21 +128,34 @@ fn decoding_an_unknown_token_id_is_a_typed_error_not_a_panic() {
 /// `"<tag>extra"` (the last two sharing `"<tag>"` as a literal byte
 /// prefix, for the longest-match cases).
 fn vocab_with_added_tokens() -> (Vocab, u32, u32, u32, u32) {
-    let mut tokens: Vec<String> = (0..=255u8).map(|byte| String::from(byte_to_char(byte))).collect();
+    let mut tokens: Vec<String> = (0..=255u8)
+        .map(|byte| String::from(byte_to_char(byte)))
+        .collect();
     let markers = ["<start>", "<end>", "<tag>", "<tag>extra"];
     for marker in markers {
         tokens.push(marker.to_string());
     }
     let vocab = Vocab::new(tokens, &[], None, None, None).expect("vocab builds");
 
-    let marker_ids: Vec<u32> = markers.iter().map(|marker| vocab.token_id(marker).expect("marker token present")).collect();
+    let marker_ids: Vec<u32> = markers
+        .iter()
+        .map(|marker| vocab.token_id(marker).expect("marker token present"))
+        .collect();
     let mut token_types = vec![TokenType::Normal; vocab.len()];
     for &id in &marker_ids {
         token_types[id as usize] = TokenType::Control;
     }
-    let vocab = vocab.with_token_types(token_types).expect("token types apply");
+    let vocab = vocab
+        .with_token_types(token_types)
+        .expect("token types apply");
 
-    (vocab, marker_ids[0], marker_ids[1], marker_ids[2], marker_ids[3])
+    (
+        vocab,
+        marker_ids[0],
+        marker_ids[1],
+        marker_ids[2],
+        marker_ids[3],
+    )
 }
 
 #[test]
@@ -175,10 +207,16 @@ fn angle_brackets_and_pipes_outside_a_registered_marker_are_ordinary_text() {
     let text = "a < b | c </end unmatched>";
     let ids = encode(text, &vocab).expect("encodes");
     for marker_id in [start_id, end_id, tag_id, tag_extra_id] {
-        assert!(!ids.contains(&marker_id), "no registered marker id should appear for {text:?} (ids: {ids:?})");
+        assert!(
+            !ids.contains(&marker_id),
+            "no registered marker id should appear for {text:?} (ids: {ids:?})"
+        );
     }
     let decoded = decode(&ids, &vocab).expect("decodes");
-    assert_eq!(decoded, text, "plain text with no marker present must still round-trip exactly");
+    assert_eq!(
+        decoded, text,
+        "plain text with no marker present must still round-trip exactly"
+    );
 }
 
 #[test]
@@ -225,7 +263,10 @@ mod real_fixture {
             ("3333", vec![8765, 18]),
             ("33333", vec![8765, 1644]),
             ("333333", vec![8765, 8765]),
-            ("w048 7tuijk dsdfhu", vec![86, 23904, 220, 22, 83, 2005, 42908, 11729, 3013, 17156]),
+            (
+                "w048 7tuijk dsdfhu",
+                vec![86, 23904, 220, 22, 83, 2005, 42908, 11729, 3013, 17156],
+            ),
         ]
     }
 
@@ -237,7 +278,8 @@ mod real_fixture {
             eprintln!("no real .gguf found at {candidate:?}, skipping");
             return None;
         }
-        let (parsed, _bytes) = proxima_gguf::edge::read_file(candidate).expect("parse real gguf file");
+        let (parsed, _bytes) =
+            proxima_gguf::edge::read_file(candidate).expect("parse real gguf file");
         Some(vocab_from_metadata(&parsed).expect("build vocab from real metadata"))
     }
 
@@ -248,12 +290,17 @@ mod real_fixture {
     #[test]
     #[ignore = "depends on a real .gguf checkout outside this repo"]
     fn round_trips_against_the_real_vocab() {
-        let Some(vocab) = load_real_vocab() else { return };
+        let Some(vocab) = load_real_vocab() else {
+            return;
+        };
         let mut count = 0;
         for (text, _) in oracle_cases() {
             let ids = encode(text, &vocab).expect("encodes against real vocab");
             let decoded = decode(&ids, &vocab).expect("decodes against real vocab");
-            assert_eq!(decoded, text, "round trip failed for {text:?} (ids: {ids:?})");
+            assert_eq!(
+                decoded, text,
+                "round trip failed for {text:?} (ids: {ids:?})"
+            );
             count += 1;
         }
         // also a few strings the oracle table doesn't cover, still
@@ -266,11 +313,17 @@ mod real_fixture {
         ] {
             let ids = encode(text, &vocab).expect("encodes against real vocab");
             let decoded = decode(&ids, &vocab).expect("decodes against real vocab");
-            assert_eq!(decoded, text, "round trip failed for {text:?} (ids: {ids:?})");
+            assert_eq!(
+                decoded, text,
+                "round trip failed for {text:?} (ids: {ids:?})"
+            );
             count += 1;
         }
         println!("round_trips_against_the_real_vocab: {count} strings, all round-tripped");
-        assert!(count > 0, "the real fixture must actually have been exercised");
+        assert!(
+            count > 0,
+            "the real fixture must actually have been exercised"
+        );
     }
 
     /// Compares this crate's token ids against llama.cpp's own oracle
@@ -283,7 +336,9 @@ mod real_fixture {
     #[test]
     #[ignore = "depends on a real .gguf checkout outside this repo"]
     fn reports_parity_against_llama_cpp_oracle_ids() {
-        let Some(vocab) = load_real_vocab() else { return };
+        let Some(vocab) = load_real_vocab() else {
+            return;
+        };
         let mut matched = 0;
         let mut total = 0;
         for (text, expected) in oracle_cases() {

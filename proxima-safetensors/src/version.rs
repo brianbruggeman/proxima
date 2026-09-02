@@ -87,15 +87,24 @@ mod tests {
     #[test]
     fn a_newer_minor_at_the_same_major_is_accepted() {
         let mut metadata = BTreeMap::new();
-        metadata.insert(FORMAT_VERSION_KEY.to_string(), alloc::format!("{FORMAT_VERSION_MAJOR}.9999"));
-        assert_eq!(parse(&metadata).expect("newer minor is additive"), (FORMAT_VERSION_MAJOR, 9999));
+        metadata.insert(
+            FORMAT_VERSION_KEY.to_string(),
+            alloc::format!("{FORMAT_VERSION_MAJOR}.9999"),
+        );
+        assert_eq!(
+            parse(&metadata).expect("newer minor is additive"),
+            (FORMAT_VERSION_MAJOR, 9999)
+        );
     }
 
     #[test]
     fn a_newer_major_is_a_typed_error_naming_the_found_and_supported_versions() {
         let mut metadata = BTreeMap::new();
         let newer_major = FORMAT_VERSION_MAJOR + 1;
-        metadata.insert(FORMAT_VERSION_KEY.to_string(), alloc::format!("{newer_major}.0"));
+        metadata.insert(
+            FORMAT_VERSION_KEY.to_string(),
+            alloc::format!("{newer_major}.0"),
+        );
         let outcome = parse(&metadata);
         assert!(matches!(
             outcome,
@@ -103,8 +112,14 @@ mod tests {
                 if supported_major == FORMAT_VERSION_MAJOR
         ));
         let message = outcome.unwrap_err().to_string();
-        assert!(message.contains(&alloc::format!("{newer_major}.0")), "error must name the file's version: {message}");
-        assert!(message.contains(&FORMAT_VERSION_MAJOR.to_string()), "error must name the supported range: {message}");
+        assert!(
+            message.contains(&alloc::format!("{newer_major}.0")),
+            "error must name the file's version: {message}"
+        );
+        assert!(
+            message.contains(&FORMAT_VERSION_MAJOR.to_string()),
+            "error must name the supported range: {message}"
+        );
     }
 
     #[test]
@@ -112,6 +127,9 @@ mod tests {
         let mut metadata = BTreeMap::new();
         metadata.insert(FORMAT_VERSION_KEY.to_string(), "not-a-version".to_string());
         let outcome = parse(&metadata);
-        assert!(matches!(outcome, Err(SafetensorsError::InvalidFormatVersion { .. })));
+        assert!(matches!(
+            outcome,
+            Err(SafetensorsError::InvalidFormatVersion { .. })
+        ));
     }
 }

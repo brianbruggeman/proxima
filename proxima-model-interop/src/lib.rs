@@ -40,19 +40,22 @@ mod loader;
 mod serving;
 mod transform;
 
-pub use bind::{ModelArchitecture, architecture_from_metadata, gguf_tensor_as_f32};
 #[cfg(feature = "std")]
 pub use bind::gguf_tensor_as_packed_block;
+pub use bind::{ModelArchitecture, architecture_from_metadata, gguf_tensor_as_f32};
 pub use dtype::{dtype_to_ggml, ggml_to_dtype};
 pub use error::InteropError;
 #[cfg(feature = "std")]
 pub use generate::LoadedModel;
 pub use hf_config::{HfConfig, architecture_from_hf_config, parse_hf_config};
 #[cfg(feature = "std")]
-pub use lfm2::{Lfm2Architecture, lfm2_architecture_from_metadata, lfm2_forward_values, run_lfm2_prefill};
+pub use lfm2::{
+    Lfm2Architecture, lfm2_architecture_from_metadata, lfm2_forward_values, run_lfm2_prefill,
+};
 #[cfg(feature = "std")]
 pub use loader::{PREFAULT_OVERSUBSCRIBE, PREFAULT_STRIDE_BYTES, prefault};
 pub use serving::{
-    DEFAULT_MODEL_PATH, GPU_LAYERS_ALL, REASONING_BUDGET_UNBOUNDED, ServingConfig, apply_serving_config,
+    DEFAULT_MODEL_PATH, GPU_LAYERS_ALL, REASONING_BUDGET_UNBOUNDED, ServingConfig,
+    apply_serving_config,
 };
 pub use transform::{gguf_to_safetensors, safetensors_to_gguf};

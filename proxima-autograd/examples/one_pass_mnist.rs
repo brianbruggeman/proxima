@@ -124,7 +124,10 @@ const CG_RELATIVE_RESIDUAL_TOLERANCE: f32 = 1e-4;
 const LAMBDA_SCALE: f32 = 1e-2;
 
 fn checkpoint_present() -> bool {
-    train_images_path().exists() && train_labels_path().exists() && test_images_path().exists() && test_labels_path().exists()
+    train_images_path().exists()
+        && train_labels_path().exists()
+        && test_images_path().exists()
+        && test_labels_path().exists()
 }
 
 fn train_images_path() -> std::path::PathBuf {
@@ -151,7 +154,12 @@ fn idx_header(bytes: &[u8]) -> (usize, Vec<usize>) {
     let mut extents = Vec::with_capacity(dimension_count - 1);
     for axis in 1..dimension_count {
         let offset = 4 + axis * 4;
-        extents.push(u32::from_be_bytes([bytes[offset], bytes[offset + 1], bytes[offset + 2], bytes[offset + 3]]) as usize);
+        extents.push(u32::from_be_bytes([
+            bytes[offset],
+            bytes[offset + 1],
+            bytes[offset + 2],
+            bytes[offset + 3],
+        ]) as usize);
     }
     (item_count, extents)
 }
@@ -162,7 +170,10 @@ fn load_normalized_images(path: &std::path::Path, limit: usize) -> Vec<f32> {
     let pixel_count = extents.iter().product::<usize>();
     let take = item_count.min(limit);
     let header_length = 4 + extents.len() * 4 + 4;
-    bytes[header_length..header_length + take * pixel_count].iter().map(|&pixel| ((pixel as f32 / 255.0) - 0.1307) / 0.3081).collect()
+    bytes[header_length..header_length + take * pixel_count]
+        .iter()
+        .map(|&pixel| ((pixel as f32 / 255.0) - 0.1307) / 0.3081)
+        .collect()
 }
 
 fn load_one_hot_labels(path: &std::path::Path, limit: usize) -> (Vec<f32>, Vec<u8>) {
@@ -178,7 +189,14 @@ fn load_one_hot_labels(path: &std::path::Path, limit: usize) -> (Vec<f32>, Vec<u
 }
 
 fn leaf(program: &mut Vec<Op>, name: &str, shape: Vec<Extent>) -> NodeId {
-    op::append(program, Op::Input { dtype: DType::Float32, shape, name: Some(name.into()) })
+    op::append(
+        program,
+        Op::Input {
+            dtype: DType::Float32,
+            shape,
+            name: Some(name.into()),
+        },
+    )
 }
 
 fn identity(rank: u16) -> IndexMap {
@@ -190,10 +208,23 @@ fn axes(rank: u16, selected: &[u16]) -> IndexMap {
 }
 
 fn elementwise(program: &mut Vec<Op>, body: ScalarOp, operands: Vec<(NodeId, IndexMap)>) -> NodeId {
-    op::append(program, Op::Elementwise { dtype: DType::Float32, body, operands, name: None })
+    op::append(
+        program,
+        Op::Elementwise {
+            dtype: DType::Float32,
+            body,
+            operands,
+            name: None,
+        },
+    )
 }
 
-fn reduce_add(program: &mut Vec<Op>, operand: NodeId, in_map: IndexMap, out_map: IndexMap) -> NodeId {
+fn reduce_add(
+    program: &mut Vec<Op>,
+    operand: NodeId,
+    in_map: IndexMap,
+    out_map: IndexMap,
+) -> NodeId {
     op::append(
         program,
         Op::Reduce(op::Reduce {
@@ -216,8 +247,19 @@ fn reduce_add(program: &mut Vec<Op>, operand: NodeId, in_map: IndexMap, out_map:
 /// contracted: feature projection contracts `in`, the Gram accumulation
 /// contracts `batch`, and the CG matvec contracts the state dimension --
 /// one function, three call sites, no per-shape duplication.
-fn matmul3(program: &mut Vec<Op>, left: NodeId, left_axes: &[u16], right: NodeId, right_axes: &[u16], keep: &[u16]) -> NodeId {
-    let product = elementwise(program, ScalarOp::Multiply, vec![(left, axes(3, left_axes)), (right, axes(3, right_axes))]);
+fn matmul3(
+    program: &mut Vec<Op>,
+    left: NodeId,
+    left_axes: &[u16],
+    right: NodeId,
+    right_axes: &[u16],
+    keep: &[u16],
+) -> NodeId {
+    let product = elementwise(
+        program,
+        ScalarOp::Multiply,
+        vec![(left, axes(3, left_axes)), (right, axes(3, right_axes))],
+    );
     reduce_add(program, product, identity(3), axes(3, keep))
 }
 
@@ -225,7 +267,11 @@ fn matmul3(program: &mut Vec<Op>, left: NodeId, left_axes: &[u16], right: NodeId
 /// column-wise dot product [`build_cg_step`] needs three times per
 /// iteration (`r . r`, `p . (A p)`, `new_r . new_r`).
 fn colwise_dot(program: &mut Vec<Op>, a: NodeId, b: NodeId) -> NodeId {
-    let product = elementwise(program, ScalarOp::Multiply, vec![(a, identity(2)), (b, identity(2))]);
+    let product = elementwise(
+        program,
+        ScalarOp::Multiply,
+        vec![(a, identity(2)), (b, identity(2))],
+    );
     reduce_add(program, product, identity(2), axes(2, &[1]))
 }
 
@@ -269,11 +315,23 @@ fn random_bias(seed: u64, out_dim: usize) -> Vec<f32> {
 /// `w [784, k]` (frozen), `b [k]` (frozen), `h = relu(x @ w + b) [batch, k]`.
 fn build_feature_program(batch: usize, k: usize) -> (Vec<Op>, NodeId, NodeId, NodeId, NodeId) {
     let mut program = Vec::new();
-    let x = leaf(&mut program, "x", vec![Extent::Static(batch as u32), Extent::Static(IN_DIM as u32)]);
-    let w = leaf(&mut program, "w", vec![Extent::Static(IN_DIM as u32), Extent::Static(k as u32)]);
+    let x = leaf(
+        &mut program,
+        "x",
+        vec![Extent::Static(batch as u32), Extent::Static(IN_DIM as u32)],
+    );
+    let w = leaf(
+        &mut program,
+        "w",
+        vec![Extent::Static(IN_DIM as u32), Extent::Static(k as u32)],
+    );
     let b = leaf(&mut program, "b", vec![Extent::Static(k as u32)]);
     let h_pre = matmul3(&mut program, x, &[0, 1], w, &[1, 2], &[0, 2]);
-    let h_biased = elementwise(&mut program, ScalarOp::Add, vec![(h_pre, identity(2)), (b, axes(2, &[1]))]);
+    let h_biased = elementwise(
+        &mut program,
+        ScalarOp::Add,
+        vec![(h_pre, identity(2)), (b, axes(2, &[1]))],
+    );
     let h = relu(&mut program, DType::Float32, h_biased, 2);
     (program, x, w, b, h)
 }
@@ -285,8 +343,16 @@ fn build_feature_program(batch: usize, k: usize) -> (Vec<Op>, NodeId, NodeId, No
 /// feature axis [`build_feature_program`] contracts.
 fn build_gram_program(batch: usize, k: usize) -> (Vec<Op>, NodeId, NodeId, NodeId, NodeId) {
     let mut program = Vec::new();
-    let h = leaf(&mut program, "h", vec![Extent::Static(batch as u32), Extent::Static(k as u32)]);
-    let y = leaf(&mut program, "y", vec![Extent::Static(batch as u32), Extent::Static(OUT_DIM as u32)]);
+    let h = leaf(
+        &mut program,
+        "h",
+        vec![Extent::Static(batch as u32), Extent::Static(k as u32)],
+    );
+    let y = leaf(
+        &mut program,
+        "y",
+        vec![Extent::Static(batch as u32), Extent::Static(OUT_DIM as u32)],
+    );
     let gram_hh = matmul3(&mut program, h, &[0, 1], h, &[0, 2], &[1, 2]);
     let gram_hy = matmul3(&mut program, h, &[0, 1], y, &[0, 2], &[1, 2]);
     (program, h, y, gram_hh, gram_hy)
@@ -315,33 +381,92 @@ struct CgStep {
 /// loop.
 fn build_cg_step(k: usize) -> CgStep {
     let mut program = Vec::new();
-    let a = leaf(&mut program, "a", vec![Extent::Static(k as u32), Extent::Static(k as u32)]);
-    let x = leaf(&mut program, "x", vec![Extent::Static(k as u32), Extent::Static(OUT_DIM as u32)]);
-    let r = leaf(&mut program, "r", vec![Extent::Static(k as u32), Extent::Static(OUT_DIM as u32)]);
-    let p = leaf(&mut program, "p", vec![Extent::Static(k as u32), Extent::Static(OUT_DIM as u32)]);
+    let a = leaf(
+        &mut program,
+        "a",
+        vec![Extent::Static(k as u32), Extent::Static(k as u32)],
+    );
+    let x = leaf(
+        &mut program,
+        "x",
+        vec![Extent::Static(k as u32), Extent::Static(OUT_DIM as u32)],
+    );
+    let r = leaf(
+        &mut program,
+        "r",
+        vec![Extent::Static(k as u32), Extent::Static(OUT_DIM as u32)],
+    );
+    let p = leaf(
+        &mut program,
+        "p",
+        vec![Extent::Static(k as u32), Extent::Static(OUT_DIM as u32)],
+    );
 
     let ap = matmul3(&mut program, a, &[0, 1], p, &[1, 2], &[0, 2]);
     let r_dot_r = colwise_dot(&mut program, r, r);
     let p_dot_ap = colwise_dot(&mut program, p, ap);
-    let alpha = elementwise(&mut program, ScalarOp::Divide, vec![(r_dot_r, identity(1)), (p_dot_ap, identity(1))]);
+    let alpha = elementwise(
+        &mut program,
+        ScalarOp::Divide,
+        vec![(r_dot_r, identity(1)), (p_dot_ap, identity(1))],
+    );
 
-    let alpha_p = elementwise(&mut program, ScalarOp::Multiply, vec![(p, identity(2)), (alpha, axes(2, &[1]))]);
-    let new_x = elementwise(&mut program, ScalarOp::Add, vec![(x, identity(2)), (alpha_p, identity(2))]);
+    let alpha_p = elementwise(
+        &mut program,
+        ScalarOp::Multiply,
+        vec![(p, identity(2)), (alpha, axes(2, &[1]))],
+    );
+    let new_x = elementwise(
+        &mut program,
+        ScalarOp::Add,
+        vec![(x, identity(2)), (alpha_p, identity(2))],
+    );
 
-    let alpha_ap = elementwise(&mut program, ScalarOp::Multiply, vec![(ap, identity(2)), (alpha, axes(2, &[1]))]);
-    let new_r = elementwise(&mut program, ScalarOp::Subtract, vec![(r, identity(2)), (alpha_ap, identity(2))]);
+    let alpha_ap = elementwise(
+        &mut program,
+        ScalarOp::Multiply,
+        vec![(ap, identity(2)), (alpha, axes(2, &[1]))],
+    );
+    let new_r = elementwise(
+        &mut program,
+        ScalarOp::Subtract,
+        vec![(r, identity(2)), (alpha_ap, identity(2))],
+    );
 
     let new_r_dot_r = colwise_dot(&mut program, new_r, new_r);
-    let beta = elementwise(&mut program, ScalarOp::Divide, vec![(new_r_dot_r, identity(1)), (r_dot_r, identity(1))]);
+    let beta = elementwise(
+        &mut program,
+        ScalarOp::Divide,
+        vec![(new_r_dot_r, identity(1)), (r_dot_r, identity(1))],
+    );
 
-    let beta_p = elementwise(&mut program, ScalarOp::Multiply, vec![(p, identity(2)), (beta, axes(2, &[1]))]);
-    let new_p = elementwise(&mut program, ScalarOp::Add, vec![(new_r, identity(2)), (beta_p, identity(2))]);
+    let beta_p = elementwise(
+        &mut program,
+        ScalarOp::Multiply,
+        vec![(p, identity(2)), (beta, axes(2, &[1]))],
+    );
+    let new_p = elementwise(
+        &mut program,
+        ScalarOp::Add,
+        vec![(new_r, identity(2)), (beta_p, identity(2))],
+    );
 
-    CgStep { program, new_x, new_r, new_p, new_r_dot_r }
+    CgStep {
+        program,
+        new_x,
+        new_r,
+        new_p,
+        new_r_dot_r,
+    }
 }
 
 fn argmax_row(values: &[f32]) -> usize {
-    values.iter().enumerate().max_by(|left, right| left.1.total_cmp(right.1)).map(|(index, _)| index).expect("nonempty logits")
+    values
+        .iter()
+        .enumerate()
+        .max_by(|left, right| left.1.total_cmp(right.1))
+        .map(|(index, _)| index)
+        .expect("nonempty logits")
 }
 
 struct RungResult {
@@ -359,11 +484,24 @@ struct RungResult {
 /// Runs the full hypothesis for one `k`: one streaming pass over the 60k
 /// training images accumulating `A`/`B`, a data-free CG solve, and a full
 /// 10k-test-image evaluation.
-fn run_rung(w: &[f32], b: &[f32], k: usize, train_images: &[f32], train_one_hot: &[f32], test_images: &[f32], test_labels: &[u8]) -> RungResult {
-    assert_eq!(TRAIN_EXAMPLES % TRAIN_BATCH, 0, "batch must divide the train set evenly for the exactly-once-visit assertion to hold");
+fn run_rung(
+    w: &[f32],
+    b: &[f32],
+    k: usize,
+    train_images: &[f32],
+    train_one_hot: &[f32],
+    test_images: &[f32],
+    test_labels: &[u8],
+) -> RungResult {
+    assert_eq!(
+        TRAIN_EXAMPLES % TRAIN_BATCH,
+        0,
+        "batch must divide the train set evenly for the exactly-once-visit assertion to hold"
+    );
     let batch_count = TRAIN_EXAMPLES / TRAIN_BATCH;
 
-    let (feature_program, feature_x, feature_w, feature_b, feature_h) = build_feature_program(TRAIN_BATCH, k);
+    let (feature_program, feature_x, feature_w, feature_b, feature_h) =
+        build_feature_program(TRAIN_BATCH, k);
     let (gram_program, gram_h, gram_y, gram_hh, gram_hy) = build_gram_program(TRAIN_BATCH, k);
 
     let mut a_total = vec![0.0f32; k * k];
@@ -379,8 +517,13 @@ fn run_rung(w: &[f32], b: &[f32], k: usize, train_images: &[f32], train_one_hot:
         let y_batch = &train_one_hot[label_start..label_start + TRAIN_BATCH * OUT_DIM];
 
         let feature_named: Vec<(&str, &[f32])> = vec![("x", x_batch), ("w", w), ("b", b)];
-        let feature_evaluated = proxima_tensor::cpu::evaluate_named(&feature_program, &[], &feature_named, &[feature_h])
-            .expect("feature program evaluates on this batch");
+        let feature_evaluated = proxima_tensor::cpu::evaluate_named(
+            &feature_program,
+            &[],
+            &feature_named,
+            &[feature_h],
+        )
+        .expect("feature program evaluates on this batch");
         let (h_batch, _shape) = feature_evaluated.get(feature_h).expect("h present");
 
         for row in h_batch.chunks_exact(k) {
@@ -392,8 +535,13 @@ fn run_rung(w: &[f32], b: &[f32], k: usize, train_images: &[f32], train_one_hot:
         }
 
         let gram_named: Vec<(&str, &[f32])> = vec![("h", h_batch), ("y", y_batch)];
-        let gram_evaluated =
-            proxima_tensor::cpu::evaluate_named(&gram_program, &[], &gram_named, &[gram_hh, gram_hy]).expect("gram program evaluates on this batch");
+        let gram_evaluated = proxima_tensor::cpu::evaluate_named(
+            &gram_program,
+            &[],
+            &gram_named,
+            &[gram_hh, gram_hy],
+        )
+        .expect("gram program evaluates on this batch");
         let (batch_hh, _) = gram_evaluated.get(gram_hh).expect("gram_hh present");
         let (batch_hy, _) = gram_evaluated.get(gram_hy).expect("gram_hy present");
 
@@ -406,7 +554,10 @@ fn run_rung(w: &[f32], b: &[f32], k: usize, train_images: &[f32], train_one_hot:
         images_visited += TRAIN_BATCH;
     }
     let one_pass_wall_clock = one_pass_start.elapsed();
-    assert_eq!(images_visited, TRAIN_EXAMPLES, "every training image must be visited exactly once by the streaming accumulation pass");
+    assert_eq!(
+        images_visited, TRAIN_EXAMPLES,
+        "every training image must be visited exactly once by the streaming accumulation pass"
+    );
     let dead_unit_fraction = dead_units.iter().filter(|&&dead| dead).count() as f64 / k as f64;
 
     // `lambda = 1e-2 * trace(A) / k`: index arithmetic over `A`'s own
@@ -424,20 +575,42 @@ fn run_rung(w: &[f32], b: &[f32], k: usize, train_images: &[f32], train_one_hot:
     let mut x_state = vec![0.0f32; k * OUT_DIM];
     let mut r_state = b_total.clone();
     let mut p_state = b_total.clone();
-    let b_norm: f32 = b_total.iter().map(|value| value * value).sum::<f32>().sqrt().max(1e-12);
+    let b_norm: f32 = b_total
+        .iter()
+        .map(|value| value * value)
+        .sum::<f32>()
+        .sqrt()
+        .max(1e-12);
 
     let solve_start = std::time::Instant::now();
     let mut cg_iters = 0usize;
     let mut relative_residual = f32::INFINITY;
     for iteration in 1..=CG_MAX_ITERS {
-        let cg_named: Vec<(&str, &[f32])> = vec![("a", &a_total), ("x", &x_state), ("r", &r_state), ("p", &p_state)];
-        let evaluated = proxima_tensor::cpu::evaluate_named(&cg_step.program, &[], &cg_named, &[cg_step.new_x, cg_step.new_r, cg_step.new_p, cg_step.new_r_dot_r])
-            .expect("cg step evaluates");
+        let cg_named: Vec<(&str, &[f32])> = vec![
+            ("a", &a_total),
+            ("x", &x_state),
+            ("r", &r_state),
+            ("p", &p_state),
+        ];
+        let evaluated = proxima_tensor::cpu::evaluate_named(
+            &cg_step.program,
+            &[],
+            &cg_named,
+            &[
+                cg_step.new_x,
+                cg_step.new_r,
+                cg_step.new_p,
+                cg_step.new_r_dot_r,
+            ],
+        )
+        .expect("cg step evaluates");
 
         let (new_x, _) = evaluated.get(cg_step.new_x).expect("new_x present");
         let (new_r, _) = evaluated.get(cg_step.new_r).expect("new_r present");
         let (new_p, _) = evaluated.get(cg_step.new_p).expect("new_p present");
-        let (new_r_dot_r, _) = evaluated.get(cg_step.new_r_dot_r).expect("new_r_dot_r present");
+        let (new_r_dot_r, _) = evaluated
+            .get(cg_step.new_r_dot_r)
+            .expect("new_r_dot_r present");
 
         x_state = new_x.to_vec();
         r_state = new_r.to_vec();
@@ -453,17 +626,40 @@ fn run_rung(w: &[f32], b: &[f32], k: usize, train_images: &[f32], train_one_hot:
     let solve_wall_clock = solve_start.elapsed();
     let beta = x_state;
 
-    let (predict_program, predict_x, predict_w, predict_b, predict_h) = build_feature_program(TEST_EXAMPLES, k);
+    let (predict_program, predict_x, predict_w, predict_b, predict_h) =
+        build_feature_program(TEST_EXAMPLES, k);
     let predict_named: Vec<(&str, &[f32])> = vec![("x", test_images), ("w", w), ("b", b)];
-    let predict_evaluated = proxima_tensor::cpu::evaluate_named(&predict_program, &[], &predict_named, &[predict_h]).expect("predict features evaluate");
+    let predict_evaluated =
+        proxima_tensor::cpu::evaluate_named(&predict_program, &[], &predict_named, &[predict_h])
+            .expect("predict features evaluate");
     let (test_h, _) = predict_evaluated.get(predict_h).expect("test h present");
 
     let mut logits_program = Vec::new();
-    let logits_h = leaf(&mut logits_program, "h", vec![Extent::Static(TEST_EXAMPLES as u32), Extent::Static(k as u32)]);
-    let logits_beta = leaf(&mut logits_program, "beta", vec![Extent::Static(k as u32), Extent::Static(OUT_DIM as u32)]);
-    let logits = matmul3(&mut logits_program, logits_h, &[0, 1], logits_beta, &[1, 2], &[0, 2]);
+    let logits_h = leaf(
+        &mut logits_program,
+        "h",
+        vec![
+            Extent::Static(TEST_EXAMPLES as u32),
+            Extent::Static(k as u32),
+        ],
+    );
+    let logits_beta = leaf(
+        &mut logits_program,
+        "beta",
+        vec![Extent::Static(k as u32), Extent::Static(OUT_DIM as u32)],
+    );
+    let logits = matmul3(
+        &mut logits_program,
+        logits_h,
+        &[0, 1],
+        logits_beta,
+        &[1, 2],
+        &[0, 2],
+    );
     let logits_named: Vec<(&str, &[f32])> = vec![("h", test_h), ("beta", &beta)];
-    let logits_evaluated = proxima_tensor::cpu::evaluate_named(&logits_program, &[], &logits_named, &[logits]).expect("logits evaluate");
+    let logits_evaluated =
+        proxima_tensor::cpu::evaluate_named(&logits_program, &[], &logits_named, &[logits])
+            .expect("logits evaluate");
     let (logits_values, _) = logits_evaluated.get(logits).expect("logits present");
 
     let mut correct = 0usize;
@@ -480,11 +676,24 @@ fn run_rung(w: &[f32], b: &[f32], k: usize, train_images: &[f32], train_one_hot:
     let test_accuracy = correct as f64 / test_labels.len() as f64;
     let mut per_class_accuracy = [0.0f64; OUT_DIM];
     for class in 0..OUT_DIM {
-        per_class_accuracy[class] = per_class_correct[class] as f64 / per_class_total[class].max(1) as f64;
+        per_class_accuracy[class] =
+            per_class_correct[class] as f64 / per_class_total[class].max(1) as f64;
     }
 
-    let _ = (feature_x, feature_w, feature_b, gram_h, gram_y, predict_x, predict_w, predict_b);
-    RungResult { k, lambda, cg_iters, relative_residual, one_pass_wall_clock, solve_wall_clock, test_accuracy, dead_unit_fraction, per_class_accuracy }
+    let _ = (
+        feature_x, feature_w, feature_b, gram_h, gram_y, predict_x, predict_w, predict_b,
+    );
+    RungResult {
+        k,
+        lambda,
+        cg_iters,
+        relative_residual,
+        one_pass_wall_clock,
+        solve_wall_clock,
+        test_accuracy,
+        dead_unit_fraction,
+        per_class_accuracy,
+    }
 }
 
 fn main() {
@@ -497,7 +706,11 @@ fn main() {
     let (train_one_hot, _train_labels) = load_one_hot_labels(&train_labels_path(), TRAIN_EXAMPLES);
     let test_images = load_normalized_images(&test_images_path(), TEST_EXAMPLES);
     let (_test_one_hot, test_labels) = load_one_hot_labels(&test_labels_path(), TEST_EXAMPLES);
-    assert_eq!(test_labels.len(), TEST_EXAMPLES, "full 10k mnist test set required for the accuracy claim");
+    assert_eq!(
+        test_labels.len(),
+        TEST_EXAMPLES,
+        "full 10k mnist test set required for the accuracy claim"
+    );
 
     let k_ladder = [1000usize, 2000, 4000];
     let mut results = Vec::new();
@@ -505,7 +718,15 @@ fn main() {
         eprintln!("one_pass_mnist: starting k={k}");
         let w = random_projection(0x0FF5_9E37_79B9_D6C6 ^ k as u64, IN_DIM, k);
         let b = random_bias(0x1B87_3593_2745_A26D ^ k as u64, k);
-        let result = run_rung(&w, &b, k, &train_images, &train_one_hot, &test_images, &test_labels);
+        let result = run_rung(
+            &w,
+            &b,
+            k,
+            &train_images,
+            &train_one_hot,
+            &test_images,
+            &test_labels,
+        );
         eprintln!(
             "one_pass_mnist: k={} lambda={:.6} cg_iters={} relative_residual={:.6} one_pass_wall_clock={:?} solve_wall_clock={:?} test_accuracy={:.4} dead_unit_fraction={:.4} per_class_accuracy={:?}",
             result.k,
@@ -521,20 +742,39 @@ fn main() {
         results.push(result);
     }
 
-    eprintln!("\n| k | lambda | cg iters | relative residual | one-pass wall clock | solve wall clock | test accuracy |");
+    eprintln!(
+        "\n| k | lambda | cg iters | relative residual | one-pass wall clock | solve wall clock | test accuracy |"
+    );
     eprintln!("|---:|---:|---:|---:|---:|---:|---:|");
     for result in &results {
         eprintln!(
             "| {} | {:.6} | {} | {:.6} | {:?} | {:?} | {:.4} |",
-            result.k, result.lambda, result.cg_iters, result.relative_residual, result.one_pass_wall_clock, result.solve_wall_clock, result.test_accuracy
+            result.k,
+            result.lambda,
+            result.cg_iters,
+            result.relative_residual,
+            result.one_pass_wall_clock,
+            result.solve_wall_clock,
+            result.test_accuracy
         );
     }
-    eprintln!("| context: real_mnist_training.rs rung C (28 epochs, full 60k, MLP) | -- | -- | -- | -- | -- | 0.9786 |");
+    eprintln!(
+        "| context: real_mnist_training.rs rung C (28 epochs, full 60k, MLP) | -- | -- | -- | -- | -- | 0.9786 |"
+    );
 
-    let best = results.iter().max_by(|left, right| left.test_accuracy.total_cmp(&right.test_accuracy)).expect("at least one rung ran");
+    let best = results
+        .iter()
+        .max_by(|left, right| left.test_accuracy.total_cmp(&right.test_accuracy))
+        .expect("at least one rung ran");
     if best.test_accuracy >= 0.97 {
-        eprintln!("\nhypothesis SUPPORTED: k={} reached {:.4} >= 0.97 from one streaming pass, zero epochs", best.k, best.test_accuracy);
+        eprintln!(
+            "\nhypothesis SUPPORTED: k={} reached {:.4} >= 0.97 from one streaming pass, zero epochs",
+            best.k, best.test_accuracy
+        );
     } else {
-        eprintln!("\nhypothesis NOT SUPPORTED: best rung k={} reached {:.4} < 0.97", best.k, best.test_accuracy);
+        eprintln!(
+            "\nhypothesis NOT SUPPORTED: best rung k={} reached {:.4} < 0.97",
+            best.k, best.test_accuracy
+        );
     }
 }

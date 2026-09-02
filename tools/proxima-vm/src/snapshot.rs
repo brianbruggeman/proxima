@@ -140,7 +140,10 @@ fn strb_unsigned_offset(transfer_reg: u8, base_reg: u8) -> u32 {
 
 /// aarch64 `ADD <Xd>, <Xn>, <Xm>` (shifted register, no shift).
 fn add_register(dest_reg: u8, base_reg: u8, offset_reg: u8) -> u32 {
-    0x8B00_0000_u32 | (u32::from(offset_reg) << 16) | (u32::from(base_reg) << 5) | u32::from(dest_reg)
+    0x8B00_0000_u32
+        | (u32::from(offset_reg) << 16)
+        | (u32::from(base_reg) << 5)
+        | u32::from(dest_reg)
 }
 
 /// aarch64 `SUBS <Xd>, <Xn>, #imm12` (sets flags — [`dirty_probe_guest_code`]'s
@@ -178,7 +181,12 @@ fn cbnz(transfer_reg: u8, word_offset: i32) -> u32 {
 /// the code page (never recorded dirty, yet mutated). Embedding the program
 /// as ordinary snapshot bytes means [`WarmVm::restore`]/[`WarmVm::restore_dirty`]
 /// carry it exactly the same way they carry every other guest-memory byte.
-fn dirty_probe_guest_code(data_offset: u64, stride: u16, page_count: u16, byte_value: u8) -> [u32; DIRTY_PROBE_CODE_WORDS] {
+fn dirty_probe_guest_code(
+    data_offset: u64,
+    stride: u16,
+    page_count: u16,
+    byte_value: u8,
+) -> [u32; DIRTY_PROBE_CODE_WORDS] {
     [
         movz(1, (data_offset & 0xffff) as u16, 0),
         movk(1, ((data_offset >> 16) & 0xffff) as u16, 1),
@@ -231,7 +239,8 @@ pub fn dirty_probe_snapshot(
         data_offset >= code_bytes,
         "data_offset {data_offset} overlaps the {code_bytes}-byte dirty-probe guest code"
     );
-    let highest_touched = data_offset + usize::from(stride) * usize::from(page_count.saturating_sub(1));
+    let highest_touched =
+        data_offset + usize::from(stride) * usize::from(page_count.saturating_sub(1));
     assert!(
         highest_touched < target_size,
         "highest touched address {highest_touched} does not fit within target_size {target_size}"
@@ -246,7 +255,11 @@ pub fn dirty_probe_snapshot(
         *byte = pattern_byte(offset, seed);
     }
 
-    VmSnapshot { registers: VcpuRegisters::default(), guest_memory, emitted: Vec::new() }
+    VmSnapshot {
+        registers: VcpuRegisters::default(),
+        guest_memory,
+        emitted: Vec::new(),
+    }
 }
 
 impl VmSnapshot {
@@ -458,7 +471,9 @@ impl LayeredBase {
     ///
     /// Returns [`ProximaError::Upstream`] naming the failing platform call.
     pub fn new(capacity: usize) -> Result<Self, ProximaError> {
-        Ok(Self { region: crate::named_memory::GuestMemoryRegion::create(capacity)? })
+        Ok(Self {
+            region: crate::named_memory::GuestMemoryRegion::create(capacity)?,
+        })
     }
 
     /// Number of bytes this base reserves.
@@ -493,7 +508,9 @@ impl LayeredBase {
     ///
     /// Returns [`ProximaError::Upstream`] naming the failing platform call.
     pub fn share(&self) -> Result<LayeredBaseView, ProximaError> {
-        Ok(LayeredBaseView { view: self.region.map_shared_view()? })
+        Ok(LayeredBaseView {
+            view: self.region.map_shared_view()?,
+        })
     }
 }
 
@@ -652,7 +669,9 @@ impl WarmVm {
     ) -> Result<WarmRestoreReport, ProximaError> {
         self.inner
             .as_mut()
-            .ok_or_else(|| ProximaError::Config("this WarmVm was not constructed via WarmVm::new".into()))?
+            .ok_or_else(|| {
+                ProximaError::Config("this WarmVm was not constructed via WarmVm::new".into())
+            })?
             .restore(snapshot, page_size)
     }
 
@@ -712,14 +731,20 @@ impl WarmVm {
     ) -> Result<Self, ProximaError> {
         Ok(Self {
             inner: None,
-            layered: Some(platform::LayeredHandle::new_shared(base_view, delta_capacity, ipa_base)?),
+            layered: Some(platform::LayeredHandle::new_shared(
+                base_view,
+                delta_capacity,
+                ipa_base,
+            )?),
         })
     }
 
     fn layered_mut(&mut self) -> Result<&mut platform::LayeredHandle, ProximaError> {
-        self.layered
-            .as_mut()
-            .ok_or_else(|| ProximaError::Config("this WarmVm was not constructed via WarmVm::new_layered(_over)".into()))
+        self.layered.as_mut().ok_or_else(|| {
+            ProximaError::Config(
+                "this WarmVm was not constructed via WarmVm::new_layered(_over)".into(),
+            )
+        })
     }
 
     /// Writes `guest_memory` into this [`WarmVm`]'s OWN [`LayeredBase`] (the
@@ -759,7 +784,11 @@ impl WarmVm {
     pub fn layered_base_view(&self) -> Result<LayeredBaseView, ProximaError> {
         self.layered
             .as_ref()
-            .ok_or_else(|| ProximaError::Config("this WarmVm was not constructed via WarmVm::new_layered(_over)".into()))?
+            .ok_or_else(|| {
+                ProximaError::Config(
+                    "this WarmVm was not constructed via WarmVm::new_layered(_over)".into(),
+                )
+            })?
             .share_base()
     }
 
@@ -770,7 +799,10 @@ impl WarmVm {
     /// # Errors
     ///
     /// Returns [`ProximaError::Upstream`] naming the failing platform call.
-    pub fn run_dirty_write(&mut self, expected_page_count: u64) -> Result<DirtyRunReport, ProximaError> {
+    pub fn run_dirty_write(
+        &mut self,
+        expected_page_count: u64,
+    ) -> Result<DirtyRunReport, ProximaError> {
         self.layered_mut()?.run(expected_page_count)
     }
 
@@ -822,8 +854,9 @@ mod platform {
     use proxima_core::ProximaError;
 
     use super::{
-        DirtyRunReport, LayeredAdoptReport, LayeredBase, LayeredBaseView, LayeredRestoreReport, RawVcpuRegisters,
-        RestorePhases, RestoreReport, VcpuRegisters, VmSnapshot, WarmRestorePhases, WarmRestoreReport,
+        DirtyRunReport, LayeredAdoptReport, LayeredBase, LayeredBaseView, LayeredRestoreReport,
+        RawVcpuRegisters, RestorePhases, RestoreReport, VcpuRegisters, VmSnapshot,
+        WarmRestorePhases, WarmRestoreReport,
     };
 
     const ERROR_CAPACITY: usize = 512;
@@ -1151,7 +1184,10 @@ mod platform {
                 fault_count,
                 resumed_x0,
                 resumed_matched_trap: resumed_ok != 0,
-                phases: WarmRestorePhases { register_restore_nanos, first_retrap_nanos },
+                phases: WarmRestorePhases {
+                    register_restore_nanos,
+                    first_retrap_nanos,
+                },
             })
         }
 
@@ -1193,7 +1229,10 @@ mod platform {
         fn raw_parts_mut(&mut self) -> (*mut c_void, usize) {
             match self {
                 Self::Owned(base) => (
-                    base.region.primary_slice_mut().as_mut_ptr().cast::<c_void>(),
+                    base.region
+                        .primary_slice_mut()
+                        .as_mut_ptr()
+                        .cast::<c_void>(),
                     base.region.len(),
                 ),
                 Self::Shared(view) => (
@@ -1246,7 +1285,11 @@ mod platform {
     }
 
     impl LayeredHandle {
-        fn construct(mut base: BaseStorage, delta_capacity: usize, ipa_base: u64) -> Result<Self, ProximaError> {
+        fn construct(
+            mut base: BaseStorage,
+            delta_capacity: usize,
+            ipa_base: u64,
+        ) -> Result<Self, ProximaError> {
             let mut delta = crate::named_memory::GuestMemoryRegion::create(delta_capacity)?;
             let (base_ptr, base_size) = base.raw_parts_mut();
             let delta_ptr = delta.primary_slice_mut().as_mut_ptr().cast::<c_void>();
@@ -1272,10 +1315,21 @@ mod platform {
             let granule = unsafe { proxima_vm_host_page_size() };
             let dirty_bitmap = vec![0_u8; bitmap_capacity(base_size, granule)];
             let dirty_page_indices = vec![0_u32; page_count(base_size, granule)];
-            Ok(Self { base, delta, dirty_bitmap, dirty_page_indices, dirty_page_index_count: 0, context })
+            Ok(Self {
+                base,
+                delta,
+                dirty_bitmap,
+                dirty_page_indices,
+                dirty_page_index_count: 0,
+                context,
+            })
         }
 
-        pub(super) fn new_owned(base: LayeredBase, delta_capacity: usize, ipa_base: u64) -> Result<Self, ProximaError> {
+        pub(super) fn new_owned(
+            base: LayeredBase,
+            delta_capacity: usize,
+            ipa_base: u64,
+        ) -> Result<Self, ProximaError> {
             Self::construct(BaseStorage::Owned(base), delta_capacity, ipa_base)
         }
 
@@ -1287,10 +1341,14 @@ mod platform {
             Self::construct(BaseStorage::Shared(base_view), delta_capacity, ipa_base)
         }
 
-        pub(super) fn write_base_and_adopt(&mut self, guest_memory: &[u8]) -> Result<LayeredAdoptReport, ProximaError> {
+        pub(super) fn write_base_and_adopt(
+            &mut self,
+            guest_memory: &[u8],
+        ) -> Result<LayeredAdoptReport, ProximaError> {
             match &mut self.base {
                 BaseStorage::Owned(base) => {
-                    base.region.primary_slice_mut()[..guest_memory.len()].copy_from_slice(guest_memory);
+                    base.region.primary_slice_mut()[..guest_memory.len()]
+                        .copy_from_slice(guest_memory);
                 }
                 BaseStorage::Shared(_) => {
                     return Err(ProximaError::Config(
@@ -1321,10 +1379,16 @@ mod platform {
             if status != 0 {
                 return Err(ProximaError::Upstream(read_error(&error_buffer)));
             }
-            Ok(LayeredAdoptReport { map_nanos, register_reset_nanos })
+            Ok(LayeredAdoptReport {
+                map_nanos,
+                register_reset_nanos,
+            })
         }
 
-        pub(super) fn run(&mut self, expected_page_count: u64) -> Result<DirtyRunReport, ProximaError> {
+        pub(super) fn run(
+            &mut self,
+            expected_page_count: u64,
+        ) -> Result<DirtyRunReport, ProximaError> {
             let mut run_wall_nanos: u64 = 0;
             let mut fault_count: u64 = 0;
             let mut newly_dirty_page_count: u64 = 0;
@@ -1431,12 +1495,11 @@ mod platform {
     use proxima_core::ProximaError;
 
     use super::{
-        DirtyRunReport, LayeredAdoptReport, LayeredBase, LayeredBaseView, LayeredRestoreReport, RestoreReport,
-        VmSnapshot, WarmRestoreReport,
+        DirtyRunReport, LayeredAdoptReport, LayeredBase, LayeredBaseView, LayeredRestoreReport,
+        RestoreReport, VmSnapshot, WarmRestoreReport,
     };
 
-    const UNSUPPORTED: &str =
-        "vm snapshot capture/restore supports linux/x86_64 KVM and macos/aarch64 Hypervisor.framework only";
+    const UNSUPPORTED: &str = "vm snapshot capture/restore supports linux/x86_64 KVM and macos/aarch64 Hypervisor.framework only";
 
     pub(super) fn capture(_message: &[u8]) -> Result<VmSnapshot, ProximaError> {
         Err(ProximaError::Config(UNSUPPORTED.into()))
@@ -1472,7 +1535,11 @@ mod platform {
     pub(super) struct LayeredHandle;
 
     impl LayeredHandle {
-        pub(super) fn new_owned(_base: LayeredBase, _delta_capacity: usize, _ipa_base: u64) -> Result<Self, ProximaError> {
+        pub(super) fn new_owned(
+            _base: LayeredBase,
+            _delta_capacity: usize,
+            _ipa_base: u64,
+        ) -> Result<Self, ProximaError> {
             Err(ProximaError::Config(UNSUPPORTED.into()))
         }
 
@@ -1484,7 +1551,10 @@ mod platform {
             Err(ProximaError::Config(UNSUPPORTED.into()))
         }
 
-        pub(super) fn write_base_and_adopt(&mut self, _guest_memory: &[u8]) -> Result<LayeredAdoptReport, ProximaError> {
+        pub(super) fn write_base_and_adopt(
+            &mut self,
+            _guest_memory: &[u8],
+        ) -> Result<LayeredAdoptReport, ProximaError> {
             Err(ProximaError::Config(UNSUPPORTED.into()))
         }
 
@@ -1492,7 +1562,10 @@ mod platform {
             Err(ProximaError::Config(UNSUPPORTED.into()))
         }
 
-        pub(super) fn run(&mut self, _expected_page_count: u64) -> Result<DirtyRunReport, ProximaError> {
+        pub(super) fn run(
+            &mut self,
+            _expected_page_count: u64,
+        ) -> Result<DirtyRunReport, ProximaError> {
             Err(ProximaError::Config(UNSUPPORTED.into()))
         }
 

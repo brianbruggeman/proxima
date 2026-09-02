@@ -44,7 +44,11 @@ fn contraction_len(chars: &[char]) -> Option<usize> {
     if chars.first().copied() != Some('\'') {
         return None;
     }
-    let lower = |index: usize| chars.get(index).map(|character| character.to_ascii_lowercase());
+    let lower = |index: usize| {
+        chars
+            .get(index)
+            .map(|character| character.to_ascii_lowercase())
+    };
     match (lower(1), lower(2)) {
         (Some('r'), Some('e')) | (Some('v'), Some('e')) | (Some('l'), Some('l')) => Some(3),
         (Some('s'), _) | (Some('t'), _) | (Some('m'), _) | (Some('d'), _) => Some(2),
@@ -114,7 +118,10 @@ fn match_at(chars: &[char], index: usize) -> usize {
 fn match_letters(chars: &[char]) -> Option<usize> {
     let first = *chars.first()?;
     if is_letter(first) {
-        let run = chars.iter().take_while(|character| is_letter(**character)).count();
+        let run = chars
+            .iter()
+            .take_while(|character| is_letter(**character))
+            .count();
         return Some(run);
     }
     if first != '\r'
@@ -123,7 +130,10 @@ fn match_letters(chars: &[char]) -> Option<usize> {
         && let Some(&second) = chars.get(1)
         && is_letter(second)
     {
-        let run = chars[1..].iter().take_while(|character| is_letter(**character)).count();
+        let run = chars[1..]
+            .iter()
+            .take_while(|character| is_letter(**character))
+            .count();
         return Some(1 + run);
     }
     None
@@ -135,7 +145,10 @@ fn match_digits(chars: &[char]) -> Option<usize> {
     if !is_digit(first) {
         return None;
     }
-    let run = chars.iter().take_while(|character| is_digit(**character)).count();
+    let run = chars
+        .iter()
+        .take_while(|character| is_digit(**character))
+        .count();
     Some(run.min(3))
 }
 
@@ -149,7 +162,10 @@ fn match_punct(chars: &[char]) -> Option<usize> {
     } else {
         return None;
     };
-    let punct_run = chars[lead..].iter().take_while(|character| is_punct(**character)).count();
+    let punct_run = chars[lead..]
+        .iter()
+        .take_while(|character| is_punct(**character))
+        .count();
     if punct_run == 0 {
         return None;
     }
@@ -169,8 +185,13 @@ fn match_whitespace_with_newline(chars: &[char]) -> Option<usize> {
     if !first.is_whitespace() {
         return None;
     }
-    let run = chars.iter().take_while(|character| character.is_whitespace()).count();
-    let last_newline = chars[..run].iter().rposition(|character| *character == '\r' || *character == '\n')?;
+    let run = chars
+        .iter()
+        .take_while(|character| character.is_whitespace())
+        .count();
+    let last_newline = chars[..run]
+        .iter()
+        .rposition(|character| *character == '\r' || *character == '\n')?;
     Some(last_newline + 1)
 }
 
@@ -184,7 +205,10 @@ fn match_trailing_whitespace(chars: &[char]) -> Option<usize> {
     if !first.is_whitespace() {
         return None;
     }
-    let run = chars.iter().take_while(|character| character.is_whitespace()).count();
+    let run = chars
+        .iter()
+        .take_while(|character| character.is_whitespace())
+        .count();
     if run == chars.len() {
         Some(run)
     } else if run > 1 {
@@ -199,7 +223,10 @@ mod tests {
     use super::*;
 
     fn spans(text: &str) -> Vec<&str> {
-        pretokenize(text).into_iter().map(|range| &text[range]).collect()
+        pretokenize(text)
+            .into_iter()
+            .map(|range| &text[range])
+            .collect()
     }
 
     #[test]
@@ -244,7 +271,8 @@ mod tests {
 
     #[test]
     fn every_span_concatenates_back_to_the_original_text() {
-        let text = "Hello, y'all! How are you \u{1F601} ?\u{6211}\u{60F3}\u{5728}apple1314151\u{5929}~";
+        let text =
+            "Hello, y'all! How are you \u{1F601} ?\u{6211}\u{60F3}\u{5728}apple1314151\u{5929}~";
         let mut rebuilt = alloc::string::String::new();
         for span in spans(text) {
             rebuilt.push_str(span);

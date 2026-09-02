@@ -159,9 +159,6 @@ mod tests {
         let mut bytes = 1u64.to_le_bytes().to_vec();
         bytes.push(0xFF);
         let mut reader = Reader::new(&bytes);
-        assert_eq!(
-            reader.string(),
-            Some(Err(StringError::InvalidUtf8))
-        );
+        assert_eq!(reader.string(), Some(Err(StringError::InvalidUtf8)));
     }
 }

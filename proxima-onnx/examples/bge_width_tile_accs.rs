@@ -79,7 +79,13 @@ mod sweep {
 
     /// One full `row_tiles x col_tiles` walk over the packed shape -- the
     /// unit `time_calls` repeats `CALLS_PER_REPEAT` times per repeat.
-    fn run_shape_pass<const ROWS: usize, const VECS: usize>(a: &[f32], k_total: usize, row_tiles: usize, packed_b: &[f32], col_tiles: usize) {
+    fn run_shape_pass<const ROWS: usize, const VECS: usize>(
+        a: &[f32],
+        k_total: usize,
+        row_tiles: usize,
+        packed_b: &[f32],
+        col_tiles: usize,
+    ) {
         let tile_cols = VECS * 4;
         for row_tile in 0..row_tiles {
             let base_a = (row_tile * ROWS * k_total) as i64;
@@ -93,9 +99,17 @@ mod sweep {
                 // callers below.
                 unsafe {
                     gemm_width_tile_neon::<ROWS, VECS>(
-                        KStridedTile { data: a, base: base_a, k_stride: 1 },
+                        KStridedTile {
+                            data: a,
+                            base: base_a,
+                            k_stride: 1,
+                        },
                         k_total as i64,
-                        KStridedTile { data: packed_b, base: base_b, k_stride: tile_cols as i64 },
+                        KStridedTile {
+                            data: packed_b,
+                            base: base_b,
+                            k_stride: tile_cols as i64,
+                        },
                         k_total,
                         &mut tile_out,
                     );
@@ -116,17 +130,40 @@ mod sweep {
             ns_per_call_per_repeat.push(elapsed.as_nanos() as f64 / CALLS_PER_REPEAT as f64);
         }
         let mean = ns_per_call_per_repeat.iter().sum::<f64>() / ns_per_call_per_repeat.len() as f64;
-        let variance = ns_per_call_per_repeat.iter().map(|value| (value - mean).powi(2)).sum::<f64>() / ns_per_call_per_repeat.len() as f64;
+        let variance = ns_per_call_per_repeat
+            .iter()
+            .map(|value| (value - mean).powi(2))
+            .sum::<f64>()
+            / ns_per_call_per_repeat.len() as f64;
         let cov = variance.sqrt() / mean * 100.0;
-        Timed { mean_ns: mean, cov_pct: cov, samples: ns_per_call_per_repeat }
+        Timed {
+            mean_ns: mean,
+            cov_pct: cov,
+            samples: ns_per_call_per_repeat,
+        }
     }
 
-    fn report(config: &str, shape: &str, m: usize, macs_per_pass: f64, timed: &Timed, gate_state: &str) {
+    fn report(
+        config: &str,
+        shape: &str,
+        m: usize,
+        macs_per_pass: f64,
+        timed: &Timed,
+        gate_state: &str,
+    ) {
         let gmac_s = macs_per_pass / (timed.mean_ns / 1e9) / 1e9;
-        let cov_flag = if timed.cov_pct > 5.0 { " (CoV>5%, range not point mean)" } else { "" };
+        let cov_flag = if timed.cov_pct > 5.0 {
+            " (CoV>5%, range not point mean)"
+        } else {
+            ""
+        };
         let range = if timed.cov_pct > 5.0 {
             let min = timed.samples.iter().cloned().fold(f64::INFINITY, f64::min);
-            let max = timed.samples.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+            let max = timed
+                .samples
+                .iter()
+                .cloned()
+                .fold(f64::NEG_INFINITY, f64::max);
             format!(" range=[{min:.1},{max:.1}]ns")
         } else {
             String::new()
@@ -144,22 +181,37 @@ mod sweep {
     macro_rules! run_config {
         ($rows:literal, $vecs:literal, $label:expr, $gate_state:expr) => {{
             let tile_cols = $vecs * 4;
-            for &(shape_name, k_total, n) in &[("QKVO", 384usize, 384usize), ("FFN-up", 384usize, 1536usize), ("FFN-down", 1536usize, 384usize)] {
-                let a_full = deterministic_data(9 * k_total, 0x1000_0000u32.wrapping_add(($rows * 31 + $vecs) as u32));
-                let b_full = deterministic_data(k_total * n, 0x2000_0000u32.wrapping_add(($rows * 31 + $vecs) as u32));
+            for &(shape_name, k_total, n) in &[
+                ("QKVO", 384usize, 384usize),
+                ("FFN-up", 384usize, 1536usize),
+                ("FFN-down", 1536usize, 384usize),
+            ] {
+                let a_full = deterministic_data(
+                    9 * k_total,
+                    0x1000_0000u32.wrapping_add(($rows * 31 + $vecs) as u32),
+                );
+                let b_full = deterministic_data(
+                    k_total * n,
+                    0x2000_0000u32.wrapping_add(($rows * 31 + $vecs) as u32),
+                );
                 let (packed_b, col_tiles) = pack_panels(&b_full, k_total, n, tile_cols);
                 let macs_per_invocation = ($rows * $vecs * 4 * k_total) as f64;
 
                 for &m in &shape_ms() {
                     let row_tiles = m / $rows;
                     if row_tiles == 0 {
-                        println!("{:<22} | {shape_name:<9} | M={m:<2} | n/a: M < ROWS={}", $label, $rows);
+                        println!(
+                            "{:<22} | {shape_name:<9} | M={m:<2} | n/a: M < ROWS={}",
+                            $label, $rows
+                        );
                         continue;
                     }
                     let macs_per_pass = macs_per_invocation * (row_tiles * col_tiles) as f64;
                     let a_needed = &a_full[..row_tiles * $rows * k_total];
                     let timed = time_calls(|| {
-                        run_shape_pass::<$rows, $vecs>(a_needed, k_total, row_tiles, &packed_b, col_tiles);
+                        run_shape_pass::<$rows, $vecs>(
+                            a_needed, k_total, row_tiles, &packed_b, col_tiles,
+                        );
                     });
                     report($label, shape_name, m, macs_per_pass, &timed, $gate_state);
                 }
@@ -168,7 +220,9 @@ mod sweep {
     }
 
     pub fn run(gate_state: &str) {
-        println!("bge_width_tile_accs: width-tile accumulator sweep -- ROWS*VECS registers, packed weights, M in {{1,7,8,9}}");
+        println!(
+            "bge_width_tile_accs: width-tile accumulator sweep -- ROWS*VECS registers, packed weights, M in {{1,7,8,9}}"
+        );
         println!(
             "PRE-REGISTRATION (see file doc comment): VECS=6 beats VECS=4 by >=1.15x at M=8 on QKVO/FFN; VECS=5 lands between; any config spilling past 32 vector registers regresses (none in this sweep spill)."
         );

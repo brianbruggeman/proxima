@@ -39,16 +39,16 @@ pub mod used;
 
 pub use avail::{AvailRing, RingCursor};
 pub use blk::{
-    BLK_REQ_HEADER_LEN, BLK_STATUS_LEN, BlkConfigSpace, BlkReqHeader, BlkReqHeaderFields, DEVICE_ID_BLK,
-    RequestType, STATUS_IOERR, STATUS_OK, STATUS_UNSUPP, read_blk_status, write_blk_req_header,
-    write_blk_status,
+    BLK_REQ_HEADER_LEN, BLK_STATUS_LEN, BlkConfigSpace, BlkReqHeader, BlkReqHeaderFields,
+    DEVICE_ID_BLK, RequestType, STATUS_IOERR, STATUS_OK, STATUS_UNSUPP, read_blk_status,
+    write_blk_req_header, write_blk_status,
 };
 pub use descriptor::{DESC_LEN, Descriptor, DescriptorChain, DescriptorFlags};
 pub use error::DecodeError;
 pub use mmio::{DEVICE_ID_CONSOLE, MAGIC_VALUE, MmioAccess, MmioDevice, MmioEffect, MmioError};
 pub use net::{
-    CONFIG_SPACE_BASE, DEVICE_ID_NET, FEATURE_NET_MAC, NET_HDR_LEN, NET_STATUS_LINK_UP, NetConfigSpace,
-    NetHdr, NetHdrFields, NetHdrFlags, write_net_hdr,
+    CONFIG_SPACE_BASE, DEVICE_ID_NET, FEATURE_NET_MAC, NET_HDR_LEN, NET_STATUS_LINK_UP,
+    NetConfigSpace, NetHdr, NetHdrFields, NetHdrFlags, write_net_hdr,
 };
 pub use status::{DeviceStatus, FEATURE_VERSION_1, Negotiation, NegotiationError};
 pub use used::{USED_ELEM_LEN, UsedElem, UsedRing, write_used_elem};

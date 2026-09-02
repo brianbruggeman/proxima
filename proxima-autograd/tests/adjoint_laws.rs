@@ -124,11 +124,26 @@ fn leaf(program: &mut Vec<Op>, name: &str, extent: usize) -> NodeId {
 }
 
 fn leaf_shaped(program: &mut Vec<Op>, name: &str, shape: Vec<Extent>) -> NodeId {
-    op::append(program, Op::Input { dtype: DType::Float32, shape, name: Some(name.into()) })
+    op::append(
+        program,
+        Op::Input {
+            dtype: DType::Float32,
+            shape,
+            name: Some(name.into()),
+        },
+    )
 }
 
 fn elementwise(program: &mut Vec<Op>, body: ScalarOp, operands: Vec<(NodeId, IndexMap)>) -> NodeId {
-    op::append(program, Op::Elementwise { dtype: DType::Float32, body, operands, name: None })
+    op::append(
+        program,
+        Op::Elementwise {
+            dtype: DType::Float32,
+            body,
+            operands,
+            name: None,
+        },
+    )
 }
 
 fn ident_map(rank: u16) -> IndexMap {
@@ -168,11 +183,22 @@ fn reduce_node(
 /// something [`differentiate`] accepts (`adjoint.rs:194-196` rejects a
 /// non-scalar loss).
 fn reduce_scalar_add(program: &mut Vec<Op>, operand: NodeId, rank: u16) -> NodeId {
-    reduce_node(program, ScalarOp::Add, ReduceInit::Zero, operand, ident_map(rank), broadcast(rank))
+    reduce_node(
+        program,
+        ScalarOp::Add,
+        ReduceInit::Zero,
+        operand,
+        ident_map(rank),
+        broadcast(rank),
+    )
 }
 
 fn get(evaluated: &proxima_tensor::cpu::Evaluated, node: NodeId) -> Vec<f32> {
-    evaluated.get(node).expect("requested node evaluated").0.to_vec()
+    evaluated
+        .get(node)
+        .expect("requested node evaluated")
+        .0
+        .to_vec()
 }
 
 /// The tolerance this file uses whenever the "known" side of a comparison
@@ -187,7 +213,10 @@ fn combined_tolerance(numeric: f32) -> f32 {
 
 fn assert_close(analytic: f32, numeric: f32, tolerance: f32, context: alloc::string::String) {
     let diff = (analytic - numeric).abs();
-    assert!(diff <= tolerance, "{context}: analytic={analytic} numeric={numeric} diff={diff} tolerance={tolerance}");
+    assert!(
+        diff <= tolerance,
+        "{context}: analytic={analytic} numeric={numeric} diff={diff} tolerance={tolerance}"
+    );
 }
 
 // ---------------------------------------------------------------------
@@ -200,7 +229,11 @@ fn assert_close(analytic: f32, numeric: f32, tolerance: f32, context: alloc::str
 fn build_f_program(x_values: &[f32]) -> (Vec<Op>, NodeId) {
     let mut program = Vec::new();
     let x = leaf(&mut program, "x", x_values.len());
-    let u = elementwise(&mut program, ScalarOp::Multiply, vec![(x, ident_map(1)), (x, ident_map(1))]);
+    let u = elementwise(
+        &mut program,
+        ScalarOp::Multiply,
+        vec![(x, ident_map(1)), (x, ident_map(1))],
+    );
     let loss = reduce_scalar_add(&mut program, u, 1);
     (program, loss)
 }
@@ -216,7 +249,11 @@ fn build_g_program(weight_values: &[f32]) -> (Vec<Op>, NodeId) {
     let u = leaf(&mut program, "u", weight_values.len());
     let weight = leaf(&mut program, "weight", weight_values.len());
     let v = elementwise(&mut program, ScalarOp::Exponential, vec![(u, ident_map(1))]);
-    let w = elementwise(&mut program, ScalarOp::Multiply, vec![(v, ident_map(1)), (weight, ident_map(1))]);
+    let w = elementwise(
+        &mut program,
+        ScalarOp::Multiply,
+        vec![(v, ident_map(1)), (weight, ident_map(1))],
+    );
     let loss = reduce_scalar_add(&mut program, w, 1);
     (program, loss)
 }
@@ -228,15 +265,27 @@ fn build_g_program(weight_values: &[f32]) -> (Vec<Op>, NodeId) {
 /// to trigger (`proxima-autograd/tests/actor_critic.rs`'s two-loss-node
 /// policy/value split is the real-world instance; this is the minimal
 /// one).
-fn build_full_program(x_values: &[f32], y_values: &[f32], weight_values: &[f32]) -> (Vec<Op>, NodeId, NodeId) {
+fn build_full_program(
+    x_values: &[f32],
+    y_values: &[f32],
+    weight_values: &[f32],
+) -> (Vec<Op>, NodeId, NodeId) {
     let mut program = Vec::new();
     let x = leaf(&mut program, "x", x_values.len()); // 0
-    let u = elementwise(&mut program, ScalarOp::Multiply, vec![(x, ident_map(1)), (x, ident_map(1))]); // 1
+    let u = elementwise(
+        &mut program,
+        ScalarOp::Multiply,
+        vec![(x, ident_map(1)), (x, ident_map(1))],
+    ); // 1
     let loss1 = reduce_scalar_add(&mut program, u, 1); // 2
     let _y = leaf(&mut program, "y", y_values.len()); // 3 -- past loss1's index
     let weight = leaf(&mut program, "weight", weight_values.len()); // 4
     let v = elementwise(&mut program, ScalarOp::Exponential, vec![(u, ident_map(1))]); // 5
-    let w = elementwise(&mut program, ScalarOp::Multiply, vec![(v, ident_map(1)), (weight, ident_map(1))]); // 6
+    let w = elementwise(
+        &mut program,
+        ScalarOp::Multiply,
+        vec![(v, ident_map(1)), (weight, ident_map(1))],
+    ); // 6
     let loss2 = reduce_scalar_add(&mut program, w, 1); // 7
     (program, loss1, loss2)
 }
@@ -262,20 +311,36 @@ async fn differentiating_a_program_at_an_earlier_node_composes_with_the_rest_of_
     let u_values: Vec<f32> = x_values.iter().map(|value| value * value).collect();
 
     let (f_program, f_loss) = build_f_program(&x_values);
-    let f_differentiated = differentiate(&f_program, f_loss).expect("f differentiates in isolation");
-    let grad_x_f_node = f_differentiated.gradient_of_named("x").expect("x feeds f's loss");
+    let f_differentiated =
+        differentiate(&f_program, f_loss).expect("f differentiates in isolation");
+    let grad_x_f_node = f_differentiated
+        .gradient_of_named("x")
+        .expect("x feeds f's loss");
     let grad_x_f = get(
-        &evaluate_named(&f_differentiated.program, &[], &[("x", &x_values)], &[grad_x_f_node])
-            .expect("f's adjoint program evaluates"),
+        &evaluate_named(
+            &f_differentiated.program,
+            &[],
+            &[("x", &x_values)],
+            &[grad_x_f_node],
+        )
+        .expect("f's adjoint program evaluates"),
         grad_x_f_node,
     );
 
     let (g_program, g_loss) = build_g_program(&weight_values);
-    let g_differentiated = differentiate(&g_program, g_loss).expect("g differentiates in isolation");
-    let grad_u_g_node = g_differentiated.gradient_of_named("u").expect("u feeds g's loss");
+    let g_differentiated =
+        differentiate(&g_program, g_loss).expect("g differentiates in isolation");
+    let grad_u_g_node = g_differentiated
+        .gradient_of_named("u")
+        .expect("u feeds g's loss");
     let grad_u_g = get(
-        &evaluate_named(&g_differentiated.program, &[], &[("u", &u_values), ("weight", &weight_values)], &[grad_u_g_node])
-            .expect("g's adjoint program evaluates"),
+        &evaluate_named(
+            &g_differentiated.program,
+            &[],
+            &[("u", &u_values), ("weight", &weight_values)],
+            &[grad_u_g_node],
+        )
+        .expect("g's adjoint program evaluates"),
         grad_u_g_node,
     );
 
@@ -285,12 +350,18 @@ async fn differentiating_a_program_at_an_earlier_node_composes_with_the_rest_of_
          earlier loss node and a trailing, unrelated Input -- this is the composition \
          defect 3's fix protects",
     );
-    let grad_x_composite_node = composite_differentiated.gradient_of_named("x").expect("x feeds the composite loss");
+    let grad_x_composite_node = composite_differentiated
+        .gradient_of_named("x")
+        .expect("x feeds the composite loss");
     let grad_x_composite = get(
         &evaluate_named(
             &composite_differentiated.program,
             &[],
-            &[("x", &x_values), ("y", &y_values), ("weight", &weight_values)],
+            &[
+                ("x", &x_values),
+                ("y", &y_values),
+                ("weight", &weight_values),
+            ],
             &[grad_x_composite_node],
         )
         .expect("composite adjoint program evaluates"),
@@ -307,8 +378,13 @@ async fn differentiating_a_program_at_an_earlier_node_composes_with_the_rest_of_
     );
     let grad_x_embedded_node = f_within_full.gradient_of_named("x").expect("x feeds loss1");
     let grad_x_embedded = get(
-        &evaluate_named(&f_within_full.program, &[], &[("x", &x_values)], &[grad_x_embedded_node])
-            .expect("embedded f adjoint program evaluates"),
+        &evaluate_named(
+            &f_within_full.program,
+            &[],
+            &[("x", &x_values)],
+            &[grad_x_embedded_node],
+        )
+        .expect("embedded f adjoint program evaluates"),
         grad_x_embedded_node,
     );
 
@@ -358,23 +434,42 @@ async fn the_adjoint_is_linear_in_its_seed() {
     let x_values = [0.6_f32, -1.4, 2.1, 0.3];
     let a_values = [0.5_f32, -2.0, 1.25, 3.0];
     let b_values = [-1.0_f32, 0.75, 2.5, -0.5];
-    let sum_values: Vec<f32> = a_values.iter().zip(b_values).map(|(left, right)| left + right).collect();
+    let sum_values: Vec<f32> = a_values
+        .iter()
+        .zip(b_values)
+        .map(|(left, right)| left + right)
+        .collect();
 
     let mut program = Vec::new();
     let x = leaf(&mut program, "x", x_values.len());
     let weight = leaf(&mut program, "weight", x_values.len());
-    let u = elementwise(&mut program, ScalarOp::Multiply, vec![(x, ident_map(1)), (x, ident_map(1))]);
+    let u = elementwise(
+        &mut program,
+        ScalarOp::Multiply,
+        vec![(x, ident_map(1)), (x, ident_map(1))],
+    );
     let v = elementwise(&mut program, ScalarOp::Exponential, vec![(u, ident_map(1))]);
-    let w = elementwise(&mut program, ScalarOp::Multiply, vec![(v, ident_map(1)), (weight, ident_map(1))]);
+    let w = elementwise(
+        &mut program,
+        ScalarOp::Multiply,
+        vec![(v, ident_map(1)), (weight, ident_map(1))],
+    );
     let loss = reduce_scalar_add(&mut program, w, 1);
 
     let differentiated = differentiate(&program, loss).expect("network differentiates");
-    let grad_x_node = differentiated.gradient_of_named("x").expect("x feeds the loss");
+    let grad_x_node = differentiated
+        .gradient_of_named("x")
+        .expect("x feeds the loss");
 
     let evaluate_with = |weight_bound: &[f32]| {
         get(
-            &evaluate_named(&differentiated.program, &[], &[("x", &x_values), ("weight", weight_bound)], &[grad_x_node])
-                .expect("adjoint program evaluates"),
+            &evaluate_named(
+                &differentiated.program,
+                &[],
+                &[("x", &x_values), ("weight", weight_bound)],
+                &[grad_x_node],
+            )
+            .expect("adjoint program evaluates"),
             grad_x_node,
         )
     };
@@ -455,14 +550,26 @@ async fn unary_scalar_op_local_derivative_matches_the_closed_form(
     let x = leaf(&mut program, "x", x_values.len());
     let weight = leaf(&mut program, "weight", weight_values.len());
     let u = elementwise(&mut program, body, vec![(x, ident_map(1))]);
-    let w = elementwise(&mut program, ScalarOp::Multiply, vec![(u, ident_map(1)), (weight, ident_map(1))]);
+    let w = elementwise(
+        &mut program,
+        ScalarOp::Multiply,
+        vec![(u, ident_map(1)), (weight, ident_map(1))],
+    );
     let loss = reduce_scalar_add(&mut program, w, 1);
 
-    let differentiated = differentiate(&program, loss).expect("elementwise unary op differentiates");
-    let grad_x_node = differentiated.gradient_of_named("x").expect("x feeds the loss");
+    let differentiated =
+        differentiate(&program, loss).expect("elementwise unary op differentiates");
+    let grad_x_node = differentiated
+        .gradient_of_named("x")
+        .expect("x feeds the loss");
     let grad_x = get(
-        &evaluate_named(&differentiated.program, &[], &[("x", x_values), ("weight", &weight_values)], &[grad_x_node])
-            .expect("adjoint program evaluates"),
+        &evaluate_named(
+            &differentiated.program,
+            &[],
+            &[("x", x_values), ("weight", &weight_values)],
+            &[grad_x_node],
+        )
+        .expect("adjoint program evaluates"),
         grad_x_node,
     );
 
@@ -473,7 +580,10 @@ async fn unary_scalar_op_local_derivative_matches_the_closed_form(
             recovered,
             expected,
             combined_tolerance(expected),
-            format!("{body:?}'({}) recovered={recovered} expected={expected}", x_values[index]),
+            format!(
+                "{body:?}'({}) recovered={recovered} expected={expected}",
+                x_values[index]
+            ),
         );
     }
 }
@@ -543,13 +653,26 @@ async fn binary_scalar_op_local_derivative_matches_the_closed_form(
     let a = leaf(&mut program, "a", a_values.len());
     let b = leaf(&mut program, "b", b_values.len());
     let weight = leaf(&mut program, "weight", weight_values.len());
-    let u = elementwise(&mut program, body, vec![(a, ident_map(1)), (b, ident_map(1))]);
-    let w = elementwise(&mut program, ScalarOp::Multiply, vec![(u, ident_map(1)), (weight, ident_map(1))]);
+    let u = elementwise(
+        &mut program,
+        body,
+        vec![(a, ident_map(1)), (b, ident_map(1))],
+    );
+    let w = elementwise(
+        &mut program,
+        ScalarOp::Multiply,
+        vec![(u, ident_map(1)), (weight, ident_map(1))],
+    );
     let loss = reduce_scalar_add(&mut program, w, 1);
 
-    let differentiated = differentiate(&program, loss).expect("elementwise binary op differentiates");
-    let grad_a_node = differentiated.gradient_of_named("a").expect("a feeds the loss");
-    let grad_b_node = differentiated.gradient_of_named("b").expect("b feeds the loss");
+    let differentiated =
+        differentiate(&program, loss).expect("elementwise binary op differentiates");
+    let grad_a_node = differentiated
+        .gradient_of_named("a")
+        .expect("a feeds the loss");
+    let grad_b_node = differentiated
+        .gradient_of_named("b")
+        .expect("b feeds the loss");
     let evaluated = evaluate_named(
         &differentiated.program,
         &[],
@@ -567,7 +690,10 @@ async fn binary_scalar_op_local_derivative_matches_the_closed_form(
             recovered_da,
             expected_da,
             combined_tolerance(expected_da),
-            format!("{body:?} d/da at (a={}, b={})", a_values[index], b_values[index]),
+            format!(
+                "{body:?} d/da at (a={}, b={})",
+                a_values[index], b_values[index]
+            ),
         );
 
         let recovered_db = grad_b[index] / weight_values[index];
@@ -576,7 +702,10 @@ async fn binary_scalar_op_local_derivative_matches_the_closed_form(
             recovered_db,
             expected_db,
             combined_tolerance(expected_db),
-            format!("{body:?} d/db at (a={}, b={})", a_values[index], b_values[index]),
+            format!(
+                "{body:?} d/db at (a={}, b={})",
+                a_values[index], b_values[index]
+            ),
         );
     }
 }
@@ -594,11 +723,20 @@ async fn comparator_ops_never_produce_a_gradient(#[case] body: ScalarOp) {
     let mut program = Vec::new();
     let a = leaf(&mut program, "a", a_values.len());
     let b = leaf(&mut program, "b", b_values.len());
-    let mask = elementwise(&mut program, body, vec![(a, ident_map(1)), (b, ident_map(1))]);
-    let squared = elementwise(&mut program, ScalarOp::Multiply, vec![(mask, ident_map(1)), (mask, ident_map(1))]);
+    let mask = elementwise(
+        &mut program,
+        body,
+        vec![(a, ident_map(1)), (b, ident_map(1))],
+    );
+    let squared = elementwise(
+        &mut program,
+        ScalarOp::Multiply,
+        vec![(mask, ident_map(1)), (mask, ident_map(1))],
+    );
     let loss = reduce_scalar_add(&mut program, squared, 1);
 
-    let differentiated = differentiate(&program, loss).expect("comparator-only program differentiates");
+    let differentiated =
+        differentiate(&program, loss).expect("comparator-only program differentiates");
     assert!(
         differentiated.gradient_of_named("a").is_none(),
         "{body:?} must not route a gradient to its left operand"
@@ -628,21 +766,37 @@ async fn select_routes_the_seed_by_its_own_condition_mask() {
     let mut program = Vec::new();
     let a = leaf(&mut program, "a", a_values.len());
     let b = leaf(&mut program, "b", b_values.len());
-    let condition = elementwise(&mut program, ScalarOp::Greater, vec![(a, ident_map(1)), (b, ident_map(1))]);
+    let condition = elementwise(
+        &mut program,
+        ScalarOp::Greater,
+        vec![(a, ident_map(1)), (b, ident_map(1))],
+    );
     let true_branch = leaf(&mut program, "true_branch", true_values.len());
     let false_branch = leaf(&mut program, "false_branch", false_values.len());
     let weight = leaf(&mut program, "weight", weight_values.len());
     let selected = elementwise(
         &mut program,
         ScalarOp::Select,
-        vec![(condition, ident_map(1)), (true_branch, ident_map(1)), (false_branch, ident_map(1))],
+        vec![
+            (condition, ident_map(1)),
+            (true_branch, ident_map(1)),
+            (false_branch, ident_map(1)),
+        ],
     );
-    let w = elementwise(&mut program, ScalarOp::Multiply, vec![(selected, ident_map(1)), (weight, ident_map(1))]);
+    let w = elementwise(
+        &mut program,
+        ScalarOp::Multiply,
+        vec![(selected, ident_map(1)), (weight, ident_map(1))],
+    );
     let loss = reduce_scalar_add(&mut program, w, 1);
 
     let differentiated = differentiate(&program, loss).expect("select program differentiates");
-    let grad_true_node = differentiated.gradient_of_named("true_branch").expect("true_branch feeds the loss");
-    let grad_false_node = differentiated.gradient_of_named("false_branch").expect("false_branch feeds the loss");
+    let grad_true_node = differentiated
+        .gradient_of_named("true_branch")
+        .expect("true_branch feeds the loss");
+    let grad_false_node = differentiated
+        .gradient_of_named("false_branch")
+        .expect("false_branch feeds the loss");
     let evaluated = evaluate_named(
         &differentiated.program,
         &[],
@@ -662,8 +816,18 @@ async fn select_routes_the_seed_by_its_own_condition_mask() {
     for index in 0..a_values.len() {
         let expected_true = weight_values[index] * condition_values[index];
         let expected_false = weight_values[index] * (1.0 - condition_values[index]);
-        assert_close(grad_true[index], expected_true, 1e-4, format!("select true_branch mask at index {index}"));
-        assert_close(grad_false[index], expected_false, 1e-4, format!("select false_branch mask at index {index}"));
+        assert_close(
+            grad_true[index],
+            expected_true,
+            1e-4,
+            format!("select true_branch mask at index {index}"),
+        );
+        assert_close(
+            grad_false[index],
+            expected_false,
+            1e-4,
+            format!("select false_branch mask at index {index}"),
+        );
     }
 }
 
@@ -687,17 +851,39 @@ async fn reduce_add_broadcasts_the_seed_to_every_contributing_element() {
     let weight_values = [0.5_f32, -2.0, 1.5]; // one weight per row
 
     let mut program = Vec::new();
-    let x = leaf_shaped(&mut program, "x", vec![Extent::Static(3), Extent::Static(2)]);
+    let x = leaf_shaped(
+        &mut program,
+        "x",
+        vec![Extent::Static(3), Extent::Static(2)],
+    );
     let weight = leaf(&mut program, "weight", weight_values.len());
-    let row_sum = reduce_node(&mut program, ScalarOp::Add, ReduceInit::Zero, x, ident_map(2), IndexMap::Affine(map::projection(2, &[0])));
-    let w = elementwise(&mut program, ScalarOp::Multiply, vec![(row_sum, ident_map(1)), (weight, ident_map(1))]);
+    let row_sum = reduce_node(
+        &mut program,
+        ScalarOp::Add,
+        ReduceInit::Zero,
+        x,
+        ident_map(2),
+        IndexMap::Affine(map::projection(2, &[0])),
+    );
+    let w = elementwise(
+        &mut program,
+        ScalarOp::Multiply,
+        vec![(row_sum, ident_map(1)), (weight, ident_map(1))],
+    );
     let loss = reduce_scalar_add(&mut program, w, 1);
 
     let differentiated = differentiate(&program, loss).expect("Reduce(Add) differentiates");
-    let grad_x_node = differentiated.gradient_of_named("x").expect("x feeds the loss");
+    let grad_x_node = differentiated
+        .gradient_of_named("x")
+        .expect("x feeds the loss");
     let grad_x = get(
-        &evaluate_named(&differentiated.program, &[], &[("x", &x_values), ("weight", &weight_values)], &[grad_x_node])
-            .expect("adjoint program evaluates"),
+        &evaluate_named(
+            &differentiated.program,
+            &[],
+            &[("x", &x_values), ("weight", &weight_values)],
+            &[grad_x_node],
+        )
+        .expect("adjoint program evaluates"),
         grad_x_node,
     );
 
@@ -741,10 +927,19 @@ async fn reduce_max_and_min_route_only_to_the_argmax_or_argmin_mask(
     let x = leaf(&mut program, "x", x_values.len());
     let loss = reduce_node(&mut program, body, init, x, ident_map(1), broadcast(1));
 
-    let differentiated = differentiate(&program, loss).expect("Reduce(Maximum/Minimum) differentiates");
-    let grad_x_node = differentiated.gradient_of_named("x").expect("x feeds the loss");
+    let differentiated =
+        differentiate(&program, loss).expect("Reduce(Maximum/Minimum) differentiates");
+    let grad_x_node = differentiated
+        .gradient_of_named("x")
+        .expect("x feeds the loss");
     let grad_x = get(
-        &evaluate_named(&differentiated.program, &[], &[("x", x_values)], &[grad_x_node]).expect("adjoint program evaluates"),
+        &evaluate_named(
+            &differentiated.program,
+            &[],
+            &[("x", x_values)],
+            &[grad_x_node],
+        )
+        .expect("adjoint program evaluates"),
         grad_x_node,
     );
 
@@ -775,17 +970,45 @@ async fn reduce_multiply_divides_the_seed_by_each_input_exactly() {
     let mut program = Vec::new();
     let x = leaf(&mut program, "x", x_values.len());
     let weight = leaf_shaped(&mut program, "weight", vec![]);
-    let product = reduce_node(&mut program, ScalarOp::Multiply, ReduceInit::One, x, ident_map(1), broadcast(1));
-    let loss = elementwise(&mut program, ScalarOp::Multiply, vec![(product, ident_map(0)), (weight, ident_map(0))]);
+    let product = reduce_node(
+        &mut program,
+        ScalarOp::Multiply,
+        ReduceInit::One,
+        x,
+        ident_map(1),
+        broadcast(1),
+    );
+    let loss = elementwise(
+        &mut program,
+        ScalarOp::Multiply,
+        vec![(product, ident_map(0)), (weight, ident_map(0))],
+    );
 
     let differentiated = differentiate(&program, loss).expect("Reduce(Multiply) differentiates");
-    let grad_x_node = differentiated.gradient_of_named("x").expect("x feeds the loss");
+    let grad_x_node = differentiated
+        .gradient_of_named("x")
+        .expect("x feeds the loss");
     let grad_x = get(
-        &evaluate_named(&differentiated.program, &[], &[("x", &x_values), ("weight", &[weight_value])], &[grad_x_node])
-            .expect("adjoint program evaluates"),
+        &evaluate_named(
+            &differentiated.program,
+            &[],
+            &[("x", &x_values), ("weight", &[weight_value])],
+            &[grad_x_node],
+        )
+        .expect("adjoint program evaluates"),
         grad_x_node,
     );
 
-    assert_close(grad_x[0], 10.0, 1e-4, format!("Reduce(Multiply) d/dx_0, got {grad_x:?}"));
-    assert_close(grad_x[1], 6.0, 1e-4, format!("Reduce(Multiply) d/dx_1, got {grad_x:?}"));
+    assert_close(
+        grad_x[0],
+        10.0,
+        1e-4,
+        format!("Reduce(Multiply) d/dx_0, got {grad_x:?}"),
+    );
+    assert_close(
+        grad_x[1],
+        6.0,
+        1e-4,
+        format!("Reduce(Multiply) d/dx_1, got {grad_x:?}"),
+    );
 }

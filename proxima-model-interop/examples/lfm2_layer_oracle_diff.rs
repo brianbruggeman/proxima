@@ -28,7 +28,9 @@ use std::fs;
 use std::path::PathBuf;
 
 use proxima_gguf::pipe::parse_complete;
-use proxima_model_interop::{Lfm2Architecture, lfm2_architecture_from_metadata, lfm2_forward_values};
+use proxima_model_interop::{
+    Lfm2Architecture, lfm2_architecture_from_metadata, lfm2_forward_values,
+};
 use proxima_telemetry::export::{Exporter, Formatter};
 use proxima_telemetry::level::Level;
 use proxima_telemetry::recorder::Recorder;
@@ -36,8 +38,14 @@ use proxima_tensor::op::NodeId;
 use proxima_tensor::spec::lfm2_forward_program_with_experts;
 
 fn read_oracle_activation(path: &PathBuf) -> Vec<f32> {
-    let bytes = fs::read(path).unwrap_or_else(|error| panic!("read oracle activation at {path:?}: {error}"));
-    bytes.as_chunks::<4>().0.iter().map(|chunk| f32::from_le_bytes(*chunk)).collect()
+    let bytes = fs::read(path)
+        .unwrap_or_else(|error| panic!("read oracle activation at {path:?}: {error}"));
+    bytes
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|chunk| f32::from_le_bytes(*chunk))
+        .collect()
 }
 
 /// The last `NodeId` a `depth`-deep throwaway program shares with a
@@ -101,7 +109,11 @@ fn layer_boundary_node_id(architecture: &Lfm2Architecture, depth: u32) -> NodeId
     )
     .expect("build deep throwaway lfm2 program");
 
-    let first_diff = shallow.iter().zip(deep.iter()).position(|(left, right)| left != right).unwrap_or(shallow.len());
+    let first_diff = shallow
+        .iter()
+        .zip(deep.iter())
+        .position(|(left, right)| left != right)
+        .unwrap_or(shallow.len());
     NodeId((first_diff - 1) as u32)
 }
 
@@ -140,8 +152,12 @@ fn main() {
     let oracle_dir = env::args().nth(2).unwrap_or_else(|| {
         "/private/tmp/claude-501/-Users-brianbruggeman-repos-slot-0/6cd9e134-c1a3-450a-be93-76dd95389bf4/scratchpad/oracle/dump_lfm2".to_string()
     });
-    let prompt = env::args().nth(3).unwrap_or_else(|| "The capital of France is".to_string());
-    let log_path = env::args().nth(4).unwrap_or_else(|| "lfm2_layer_diff.jsonl".to_string());
+    let prompt = env::args()
+        .nth(3)
+        .unwrap_or_else(|| "The capital of France is".to_string());
+    let log_path = env::args()
+        .nth(4)
+        .unwrap_or_else(|| "lfm2_layer_diff.jsonl".to_string());
 
     let model_path = PathBuf::from(&model_path);
     let oracle_dir = PathBuf::from(&oracle_dir);
@@ -154,15 +170,22 @@ fn main() {
         return;
     }
 
-    let recorder = Recorder::builder().export(Exporter::file(&log_path).format(Formatter::Text)).expect("file exporter").install().expect("recorder");
+    let recorder = Recorder::builder()
+        .export(Exporter::file(&log_path).format(Formatter::Text))
+        .expect("file exporter")
+        .install()
+        .expect("recorder");
 
     let file_bytes = fs::read(&model_path).expect("read lfm2 gguf checkpoint");
     let parsed = parse_complete(&file_bytes).expect("parse lfm2 gguf checkpoint");
-    let architecture: Lfm2Architecture = lfm2_architecture_from_metadata(&parsed).expect("derive lfm2 architecture from gguf metadata");
+    let architecture: Lfm2Architecture = lfm2_architecture_from_metadata(&parsed)
+        .expect("derive lfm2 architecture from gguf metadata");
 
-    let vocab = proxima_tokenizer::gguf::vocab_from_metadata(&parsed).expect("build vocab from gguf metadata");
+    let vocab = proxima_tokenizer::gguf::vocab_from_metadata(&parsed)
+        .expect("build vocab from gguf metadata");
     let add_bos = vocab.add_bos_token().unwrap_or(true);
-    let ids = proxima_tokenizer::encode_with_bos_eos(&prompt, &vocab, add_bos, false).expect("tokenize prompt");
+    let ids = proxima_tokenizer::encode_with_bos_eos(&prompt, &vocab, add_bos, false)
+        .expect("tokenize prompt");
 
     let block_count = architecture.block_count;
     // `inp_embd` first: the token-embedding gather is the first tensor
@@ -179,7 +202,9 @@ fn main() {
         labels.push(format!("l_out-{layer}"));
     }
 
-    let (_logits, activations) = lfm2_forward_values(&parsed, &file_bytes, &architecture, &ids, &node_ids).expect("compute our own layer activations");
+    let (_logits, activations) =
+        lfm2_forward_values(&parsed, &file_bytes, &architecture, &ids, &node_ids)
+            .expect("compute our own layer activations");
 
     // `oracle_dump.cpp`'s `build_inp_embd`-path leaf, `"inp_embd"`, is a
     // structurally dead name for a tokenized prompt (see that file's own
@@ -187,11 +212,17 @@ fn main() {
     // `model.embed_tokens.f32`, dumped by this run's rebuilt probe.
     let inp_embd_oracle_path = oracle_dir.join("model.embed_tokens.f32");
 
-    println!("label kind node_id oracle_mean_abs oracle_max_abs our_mean_abs max_abs_diff relative_diff worst_index ours_value theirs_value");
+    println!(
+        "label kind node_id oracle_mean_abs oracle_max_abs our_mean_abs max_abs_diff relative_diff worst_index ours_value theirs_value"
+    );
     let mut relative_bound: Option<f32> = None;
     let mut first_divergence: Option<(String, &'static str, f32)> = None;
     for (layer, (label, values)) in labels.iter().zip(activations.iter()).enumerate() {
-        let oracle_path = if label == "inp_embd" { inp_embd_oracle_path.clone() } else { oracle_dir.join(format!("{label}.f32")) };
+        let oracle_path = if label == "inp_embd" {
+            inp_embd_oracle_path.clone()
+        } else {
+            oracle_dir.join(format!("{label}.f32"))
+        };
         if !oracle_path.exists() {
             println!("{label} MISSING_ORACLE_FILE at {oracle_path:?}");
             continue;
@@ -209,7 +240,11 @@ fn main() {
         } else if theirs.len() < values.len() && values.len() % theirs.len() == 0 {
             &values[values.len() - theirs.len()..]
         } else {
-            panic!("{label}: element count mismatch: ours={} theirs={}", values.len(), theirs.len());
+            panic!(
+                "{label}: element count mismatch: ours={} theirs={}",
+                values.len(),
+                theirs.len()
+            );
         };
 
         let mut max_abs_diff = 0f32;
@@ -227,13 +262,19 @@ fn main() {
         // guard against a degenerate all-zero oracle slice (would divide by
         // zero and print `inf`, masking a real signal as "worse than
         // everything").
-        let relative_diff = if oracle_max > 0.0 { max_abs_diff / oracle_max } else { f32::INFINITY };
-        let kind = if label == "inp_embd" { "embedding" } else { layer_kind_label(&architecture, layer - 1) };
+        let relative_diff = if oracle_max > 0.0 {
+            max_abs_diff / oracle_max
+        } else {
+            f32::INFINITY
+        };
+        let kind = if label == "inp_embd" {
+            "embedding"
+        } else {
+            layer_kind_label(&architecture, layer - 1)
+        };
         println!(
             "{label} {kind} node={} {oracle_mean:.6e} {oracle_max:.6e} {our_mean:.6e} {max_abs_diff:.6e} {relative_diff:.6e} {worst_index} {:.6} {:.6}",
-            node_ids[layer].0,
-            ours[worst_index],
-            theirs[worst_index]
+            node_ids[layer].0, ours[worst_index], theirs[worst_index]
         );
 
         // `inp_embd`'s own relative diff is pure per-element dequantization
@@ -248,12 +289,18 @@ fn main() {
         }
         let bound = relative_bound.unwrap_or(RELATIVE_DIVERGENCE_THRESHOLD);
 
-        let level = if relative_diff > bound { Level::WARN } else { Level::DEBUG };
+        let level = if relative_diff > bound {
+            Level::WARN
+        } else {
+            Level::DEBUG
+        };
         let layer_label: &'static str = Box::leak(label.clone().into_boxed_str());
         recorder
             .log()
             .level(level)
-            .message("lfm2 layer activation compared against oracle, relative to oracle's own scale")
+            .message(
+                "lfm2 layer activation compared against oracle, relative to oracle's own scale",
+            )
             .module_path(module_path!())
             .tag("layer", layer_label)
             .tag("kind", kind)
@@ -269,9 +316,14 @@ fn main() {
     }
     while recorder.drain() > 0 {}
 
-    println!("\nrelative_bound_used={:e} (10x inp_embd's own measured relative diff)", relative_bound.unwrap_or(RELATIVE_DIVERGENCE_THRESHOLD));
+    println!(
+        "\nrelative_bound_used={:e} (10x inp_embd's own measured relative diff)",
+        relative_bound.unwrap_or(RELATIVE_DIVERGENCE_THRESHOLD)
+    );
     match first_divergence {
-        Some((label, kind, relative_diff)) => println!("\nfirst relative divergence at: {label} (kind={kind}, relative_diff={relative_diff:e})"),
+        Some((label, kind, relative_diff)) => println!(
+            "\nfirst relative divergence at: {label} (kind={kind}, relative_diff={relative_diff:e})"
+        ),
         None => println!("\nno relative divergence found at any dumped layer"),
     }
 }

@@ -243,7 +243,8 @@ pub const MIN_QUANTIZE_BLOCKS_FOR_DISPATCH: usize = generated::MIN_QUANTIZE_BLOC
 /// `64_000` sits above every other shape (left serial) and below
 /// `ffn_gate`/`ffn_up`'s 86,016 (dispatched).
 #[cfg(feature = "std")]
-pub const MIN_TRANSPOSE_ELEMENTS_FOR_DISPATCH: usize = generated::MIN_TRANSPOSE_ELEMENTS_FOR_DISPATCH;
+pub const MIN_TRANSPOSE_ELEMENTS_FOR_DISPATCH: usize =
+    generated::MIN_TRANSPOSE_ELEMENTS_FOR_DISPATCH;
 
 /// Output rows one call to `gemm_width_tile_neon` computes. Sizes a fixed
 /// `[[f32; _]; WIDTH_TILE_ROWS]` output array -- cannot be runtime config

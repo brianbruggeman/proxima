@@ -29,7 +29,9 @@ use std::fs;
 use std::path::PathBuf;
 
 use proxima_gguf::pipe::parse_complete;
-use proxima_model_interop::{Lfm2Architecture, lfm2_architecture_from_metadata, lfm2_forward_values};
+use proxima_model_interop::{
+    Lfm2Architecture, lfm2_architecture_from_metadata, lfm2_forward_values,
+};
 use proxima_telemetry::export::{Exporter, Formatter};
 use proxima_telemetry::level::Level;
 use proxima_telemetry::recorder::Recorder;
@@ -40,13 +42,23 @@ use proxima_telemetry::recorder::Recorder;
 /// logits land bit-identical.
 fn ranked_indices(logits: &[f32]) -> Vec<usize> {
     let mut indices: Vec<usize> = (0..logits.len()).collect();
-    indices.sort_by(|left, right| logits[*right].total_cmp(&logits[*left]).then_with(|| left.cmp(right)));
+    indices.sort_by(|left, right| {
+        logits[*right]
+            .total_cmp(&logits[*left])
+            .then_with(|| left.cmp(right))
+    });
     indices
 }
 
 fn read_oracle_logits(path: &PathBuf) -> Vec<f32> {
-    let bytes = fs::read(path).unwrap_or_else(|error| panic!("read oracle logits at {path:?}: {error}"));
-    bytes.as_chunks::<4>().0.iter().map(|chunk| f32::from_le_bytes(*chunk)).collect()
+    let bytes =
+        fs::read(path).unwrap_or_else(|error| panic!("read oracle logits at {path:?}: {error}"));
+    bytes
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|chunk| f32::from_le_bytes(*chunk))
+        .collect()
 }
 
 fn main() {
@@ -56,8 +68,12 @@ fn main() {
     let oracle_path = env::args().nth(2).unwrap_or_else(|| {
         "/private/tmp/claude-501/-Users-brianbruggeman-repos-slot-0/6cd9e134-c1a3-450a-be93-76dd95389bf4/scratchpad/oracle/dump_lfm2/final_logits.f32".to_string()
     });
-    let prompt = env::args().nth(3).unwrap_or_else(|| "The capital of France is".to_string());
-    let log_path = env::args().nth(4).unwrap_or_else(|| "lfm2_logit_diff.jsonl".to_string());
+    let prompt = env::args()
+        .nth(3)
+        .unwrap_or_else(|| "The capital of France is".to_string());
+    let log_path = env::args()
+        .nth(4)
+        .unwrap_or_else(|| "lfm2_logit_diff.jsonl".to_string());
 
     let model_path = PathBuf::from(&model_path);
     let oracle_path = PathBuf::from(&oracle_path);
@@ -70,20 +86,32 @@ fn main() {
         return;
     }
 
-    let recorder = Recorder::builder().export(Exporter::file(&log_path).format(Formatter::Text)).expect("file exporter").install().expect("recorder");
+    let recorder = Recorder::builder()
+        .export(Exporter::file(&log_path).format(Formatter::Text))
+        .expect("file exporter")
+        .install()
+        .expect("recorder");
 
     let file_bytes = fs::read(&model_path).expect("read lfm2 gguf checkpoint");
     let parsed = parse_complete(&file_bytes).expect("parse lfm2 gguf checkpoint");
-    let architecture: Lfm2Architecture = lfm2_architecture_from_metadata(&parsed).expect("derive lfm2 architecture from gguf metadata");
+    let architecture: Lfm2Architecture = lfm2_architecture_from_metadata(&parsed)
+        .expect("derive lfm2 architecture from gguf metadata");
 
-    let vocab = proxima_tokenizer::gguf::vocab_from_metadata(&parsed).expect("build vocab from gguf metadata");
+    let vocab = proxima_tokenizer::gguf::vocab_from_metadata(&parsed)
+        .expect("build vocab from gguf metadata");
     let add_bos = vocab.add_bos_token().unwrap_or(true);
-    let ids = proxima_tokenizer::encode_with_bos_eos(&prompt, &vocab, add_bos, false).expect("tokenize prompt");
+    let ids = proxima_tokenizer::encode_with_bos_eos(&prompt, &vocab, add_bos, false)
+        .expect("tokenize prompt");
 
-    let (ours, _extras) = lfm2_forward_values(&parsed, &file_bytes, &architecture, &ids, &[]).expect("compute our own forward logits");
+    let (ours, _extras) = lfm2_forward_values(&parsed, &file_bytes, &architecture, &ids, &[])
+        .expect("compute our own forward logits");
     let theirs = read_oracle_logits(&oracle_path);
 
-    assert_eq!(ours.len(), theirs.len(), "vocab size mismatch between our logits and the oracle dump");
+    assert_eq!(
+        ours.len(),
+        theirs.len(),
+        "vocab size mismatch between our logits and the oracle dump"
+    );
 
     let our_ranked = ranked_indices(&ours);
     let their_ranked = ranked_indices(&theirs);
@@ -130,13 +158,30 @@ fn main() {
     while recorder.drain() > 0 {}
 
     println!("prompt={prompt:?} ids={ids:?} vocab_size={}", ours.len());
-    println!("argmax_matches={argmax_matches} max_abs_diff={max_abs_diff:e} worst_index={worst_index}");
-    println!("our_top1_token={} our_top1_logit={:.6} our_top2_logit={:.6}", our_ranked[0], our_top1, our_top2);
-    println!("their_top1_token={} their_top1_logit={:.6} their_top2_logit={:.6}", their_ranked[0], their_top1, their_top2);
-    println!("ours[worst_index]={:.6} theirs[worst_index]={:.6}", ours[worst_index], theirs[worst_index]);
+    println!(
+        "argmax_matches={argmax_matches} max_abs_diff={max_abs_diff:e} worst_index={worst_index}"
+    );
+    println!(
+        "our_top1_token={} our_top1_logit={:.6} our_top2_logit={:.6}",
+        our_ranked[0], our_top1, our_top2
+    );
+    println!(
+        "their_top1_token={} their_top1_logit={:.6} their_top2_logit={:.6}",
+        their_ranked[0], their_top1, their_top2
+    );
+    println!(
+        "ours[worst_index]={:.6} theirs[worst_index]={:.6}",
+        ours[worst_index], theirs[worst_index]
+    );
 
     println!("\nrank ours_token ours_logit theirs_token theirs_logit");
     for rank in 0..10 {
-        println!("{rank} {} {:.6} {} {:.6}", our_ranked[rank], ours[our_ranked[rank]], their_ranked[rank], theirs[their_ranked[rank]]);
+        println!(
+            "{rank} {} {:.6} {} {:.6}",
+            our_ranked[rank],
+            ours[our_ranked[rank]],
+            their_ranked[rank],
+            theirs[their_ranked[rank]]
+        );
     }
 }

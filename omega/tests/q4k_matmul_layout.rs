@@ -21,7 +21,10 @@
 use proxima_gguf::quant::q4_k::{BLOCK_BYTES, QK_K, dequantize, quantize};
 use proxima_tensor::cpu::evaluate_quantized;
 use proxima_tensor::test_support::Lcg;
-use proxima_tensor::{DType, Extent, IndexMap, Keep, NodeId, Op, QuantizedBlock, Reduce, ReduceInit, ScalarOp, append, projection};
+use proxima_tensor::{
+    DType, Extent, IndexMap, Keep, NodeId, Op, QuantizedBlock, Reduce, ReduceInit, ScalarOp,
+    append, projection,
+};
 
 fn random_vec(seed: u64, count: usize) -> Vec<f32> {
     let mut lcg = Lcg(seed);
@@ -86,7 +89,10 @@ fn matmul_program(in_dim: u32, out_dim: u32) -> (Vec<Op>, NodeId) {
 fn pack_rows(rows: &[Vec<f32>], in_dim: usize) -> Vec<u8> {
     let blocks_per_row = in_dim / QK_K;
     let mut packed = vec![0u8; rows.len() * blocks_per_row * BLOCK_BYTES];
-    for (row, row_packed) in rows.iter().zip(packed.chunks_exact_mut(blocks_per_row * BLOCK_BYTES)) {
+    for (row, row_packed) in rows
+        .iter()
+        .zip(packed.chunks_exact_mut(blocks_per_row * BLOCK_BYTES))
+    {
         quantize(row, row_packed).expect("in_dim is a whole multiple of QK_K");
     }
     packed
@@ -102,34 +108,57 @@ fn expected_output(packed: &[u8], in_dim: usize, out_dim: usize, activation: &[f
     for row_packed in packed.chunks_exact(blocks_per_row * BLOCK_BYTES) {
         let mut row = vec![0.0f32; in_dim];
         dequantize(row_packed, &mut row).expect("packed row dequantizes");
-        let dot: f32 = row.iter().zip(activation.iter()).map(|(weight, value)| weight * value).sum();
+        let dot: f32 = row
+            .iter()
+            .zip(activation.iter())
+            .map(|(weight, value)| weight * value)
+            .sum();
         expected.push(dot);
     }
-    assert_eq!(expected.len(), out_dim, "degenerate fixture: one row per output element");
+    assert_eq!(
+        expected.len(),
+        out_dim,
+        "degenerate fixture: one row per output element"
+    );
     expected
 }
 
 #[test]
-fn metal_agrees_with_cpu_and_the_independent_reference_on_a_q4k_weight_declared_reduction_axis_first() {
+fn metal_agrees_with_cpu_and_the_independent_reference_on_a_q4k_weight_declared_reduction_axis_first()
+ {
     const IN_DIM: usize = 512;
     const OUT_DIM: usize = 3;
 
-    let rows: Vec<Vec<f32>> = (0..OUT_DIM).map(|row| random_vec(17 + row as u64, IN_DIM)).collect();
+    let rows: Vec<Vec<f32>> = (0..OUT_DIM)
+        .map(|row| random_vec(17 + row as u64, IN_DIM))
+        .collect();
     let packed = pack_rows(&rows, IN_DIM);
     let activation = random_vec(97, IN_DIM);
     let expected = expected_output(&packed, IN_DIM, OUT_DIM, &activation);
 
     let (program, sum) = matmul_program(IN_DIM as u32, OUT_DIM as u32);
-    let blocks = [QuantizedBlock::Q4K(&packed), QuantizedBlock::Float32(&activation)];
+    let blocks = [
+        QuantizedBlock::Q4K(&packed),
+        QuantizedBlock::Float32(&activation),
+    ];
 
     let cpu = evaluate_quantized(&program, &[], &blocks, &[sum]).expect("cpu runs the matmul");
     let plan = omega::plan(&program, &[], &blocks, &[sum]).expect("metal plans the matmul");
-    let metal = omega::execute_plan(&plan, &blocks).expect("metal runs the matmul on a real device");
+    let metal =
+        omega::execute_plan(&plan, &blocks).expect("metal runs the matmul on a real device");
 
     let cpu_root = cpu.root();
     let metal_root = metal.root();
-    assert_eq!(cpu_root.len(), OUT_DIM, "degenerate gate: cpu produced no output");
-    assert_eq!(metal_root.len(), OUT_DIM, "degenerate gate: metal produced no output");
+    assert_eq!(
+        cpu_root.len(),
+        OUT_DIM,
+        "degenerate gate: cpu produced no output"
+    );
+    assert_eq!(
+        metal_root.len(),
+        OUT_DIM,
+        "degenerate gate: metal produced no output"
+    );
 
     // relative, not absolute: both quantized-matmul paths fold 512 terms in a
     // different order than this test's own plain `f32` dot (int8-dot SIMD
@@ -137,8 +166,11 @@ fn metal_agrees_with_cpu_and_the_independent_reference_on_a_q4k_weight_declared_
     // is expected and is not the layout defect this test exists to catch --
     // that defect reads the WRONG BYTES, which misses by orders of
     // magnitude, not fractions of a percent.
-    for (index, ((&cpu_value, &metal_value), &reference)) in
-        cpu_root.iter().zip(metal_root.iter()).zip(expected.iter()).enumerate()
+    for (index, ((&cpu_value, &metal_value), &reference)) in cpu_root
+        .iter()
+        .zip(metal_root.iter())
+        .zip(expected.iter())
+        .enumerate()
     {
         let scale = reference.abs().max(f32::MIN_POSITIVE);
         let cpu_relative = (cpu_value - reference).abs() / scale;

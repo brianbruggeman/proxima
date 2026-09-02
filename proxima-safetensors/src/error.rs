@@ -46,13 +46,15 @@ pub enum SafetensorsError {
 
     /// `data_offsets` are inverted (`start > end`).
     #[error("tensor {tensor:?} has invalid offsets [{start}, {end})")]
-    InvalidOffsets { tensor: String, start: u64, end: u64 },
+    InvalidOffsets {
+        tensor: String,
+        start: u64,
+        end: u64,
+    },
 
     /// `data_offsets` reference bytes past the end of the byte buffer
     /// that followed the header.
-    #[error(
-        "tensor {tensor:?} offsets [{start}, {end}) exceed the {buffer_len}-byte data buffer"
-    )]
+    #[error("tensor {tensor:?} offsets [{start}, {end}) exceed the {buffer_len}-byte data buffer")]
     OffsetOutOfBounds {
         tensor: String,
         start: u64,
@@ -83,7 +85,9 @@ pub enum SafetensorsError {
     /// header's own declared `data_offsets` range, so a malformed or
     /// adversarial header cannot declare a shape wider than its own
     /// byte range and have a downstream consumer read past it.
-    #[error("tensor {tensor:?} data is {found} bytes, expected {expected} from its shape and dtype")]
+    #[error(
+        "tensor {tensor:?} data is {found} bytes, expected {expected} from its shape and dtype"
+    )]
     TensorDataLengthMismatch {
         tensor: String,
         expected: u64,
@@ -105,6 +109,8 @@ pub enum SafetensorsError {
     /// The stamped major version exceeds
     /// [`crate::sized::FORMAT_VERSION_MAJOR`] -- this reader was built
     /// against an older major and cannot safely interpret the file.
-    #[error("file format version {found:?} is newer than the supported major {supported_major} (this reader supports major <= {supported_major})")]
+    #[error(
+        "file format version {found:?} is newer than the supported major {supported_major} (this reader supports major <= {supported_major})"
+    )]
     UnsupportedFormatVersion { found: String, supported_major: u16 },
 }

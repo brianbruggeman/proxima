@@ -219,7 +219,9 @@ impl<const MAX_QUEUES: usize> MmioDevice<MAX_QUEUES> {
 
     #[must_use]
     pub fn queue_is_ready(&self, queue: u16) -> Option<bool> {
-        self.queues.get(usize::from(queue)).map(|config| config.ready)
+        self.queues
+            .get(usize::from(queue))
+            .map(|config| config.ready)
     }
 
     fn selected_queue_mut(&mut self) -> Result<&mut QueueConfig, MmioError> {
@@ -240,16 +242,24 @@ impl<const MAX_QUEUES: usize> MmioDevice<MAX_QUEUES> {
     pub fn apply(&mut self, access: MmioAccess) -> Result<MmioEffect, MmioError> {
         match (access.offset, access.is_write) {
             (REG_MAGIC_VALUE, false) => Ok(MmioEffect::ReadValue(MAGIC_VALUE)),
-            (REG_MAGIC_VALUE, true) => Err(MmioError::ReadOnlyRegister { offset: access.offset }),
+            (REG_MAGIC_VALUE, true) => Err(MmioError::ReadOnlyRegister {
+                offset: access.offset,
+            }),
 
             (REG_VERSION, false) => Ok(MmioEffect::ReadValue(TRANSPORT_VERSION)),
-            (REG_VERSION, true) => Err(MmioError::ReadOnlyRegister { offset: access.offset }),
+            (REG_VERSION, true) => Err(MmioError::ReadOnlyRegister {
+                offset: access.offset,
+            }),
 
             (REG_DEVICE_ID, false) => Ok(MmioEffect::ReadValue(self.device_id)),
-            (REG_DEVICE_ID, true) => Err(MmioError::ReadOnlyRegister { offset: access.offset }),
+            (REG_DEVICE_ID, true) => Err(MmioError::ReadOnlyRegister {
+                offset: access.offset,
+            }),
 
             (REG_VENDOR_ID, false) => Ok(MmioEffect::ReadValue(0)),
-            (REG_VENDOR_ID, true) => Err(MmioError::ReadOnlyRegister { offset: access.offset }),
+            (REG_VENDOR_ID, true) => Err(MmioError::ReadOnlyRegister {
+                offset: access.offset,
+            }),
 
             (REG_DEVICE_FEATURES, false) => {
                 let word = if self.device_features_sel == 0 {
@@ -259,15 +269,17 @@ impl<const MAX_QUEUES: usize> MmioDevice<MAX_QUEUES> {
                 };
                 Ok(MmioEffect::ReadValue(word))
             }
-            (REG_DEVICE_FEATURES, true) => Err(MmioError::ReadOnlyRegister { offset: access.offset }),
+            (REG_DEVICE_FEATURES, true) => Err(MmioError::ReadOnlyRegister {
+                offset: access.offset,
+            }),
 
             (REG_DEVICE_FEATURES_SEL, true) => {
                 self.device_features_sel = access.value;
                 Ok(MmioEffect::Applied)
             }
-            (REG_DEVICE_FEATURES_SEL, false) => {
-                Err(MmioError::WriteOnlyRegister { offset: access.offset })
-            }
+            (REG_DEVICE_FEATURES_SEL, false) => Err(MmioError::WriteOnlyRegister {
+                offset: access.offset,
+            }),
 
             (REG_DRIVER_FEATURES, true) => {
                 self.acked_features = if self.driver_features_sel == 0 {
@@ -278,33 +290,39 @@ impl<const MAX_QUEUES: usize> MmioDevice<MAX_QUEUES> {
                 self.negotiation.ack_features(self.acked_features);
                 Ok(MmioEffect::Applied)
             }
-            (REG_DRIVER_FEATURES, false) => {
-                Err(MmioError::WriteOnlyRegister { offset: access.offset })
-            }
+            (REG_DRIVER_FEATURES, false) => Err(MmioError::WriteOnlyRegister {
+                offset: access.offset,
+            }),
 
             (REG_DRIVER_FEATURES_SEL, true) => {
                 self.driver_features_sel = access.value;
                 Ok(MmioEffect::Applied)
             }
-            (REG_DRIVER_FEATURES_SEL, false) => {
-                Err(MmioError::WriteOnlyRegister { offset: access.offset })
-            }
+            (REG_DRIVER_FEATURES_SEL, false) => Err(MmioError::WriteOnlyRegister {
+                offset: access.offset,
+            }),
 
             (REG_QUEUE_SEL, true) => {
                 self.queue_sel = access.value as u16;
                 Ok(MmioEffect::Applied)
             }
-            (REG_QUEUE_SEL, false) => Err(MmioError::WriteOnlyRegister { offset: access.offset }),
+            (REG_QUEUE_SEL, false) => Err(MmioError::WriteOnlyRegister {
+                offset: access.offset,
+            }),
 
             (REG_QUEUE_NUM_MAX, false) => Ok(MmioEffect::ReadValue(u32::from(self.queue_num_max))),
-            (REG_QUEUE_NUM_MAX, true) => Err(MmioError::ReadOnlyRegister { offset: access.offset }),
+            (REG_QUEUE_NUM_MAX, true) => Err(MmioError::ReadOnlyRegister {
+                offset: access.offset,
+            }),
 
             (REG_QUEUE_NUM, true) => {
                 let value = access.value as u16;
                 self.selected_queue_mut()?.num = value;
                 Ok(MmioEffect::Applied)
             }
-            (REG_QUEUE_NUM, false) => Err(MmioError::WriteOnlyRegister { offset: access.offset }),
+            (REG_QUEUE_NUM, false) => Err(MmioError::WriteOnlyRegister {
+                offset: access.offset,
+            }),
 
             (REG_QUEUE_READY, true) => {
                 let ready = access.value != 0;
@@ -320,19 +338,19 @@ impl<const MAX_QUEUES: usize> MmioDevice<MAX_QUEUES> {
             (REG_QUEUE_NOTIFY, true) => Ok(MmioEffect::QueueNotify {
                 queue: access.value as u16,
             }),
-            (REG_QUEUE_NOTIFY, false) => {
-                Err(MmioError::WriteOnlyRegister { offset: access.offset })
-            }
+            (REG_QUEUE_NOTIFY, false) => Err(MmioError::WriteOnlyRegister {
+                offset: access.offset,
+            }),
 
             (REG_INTERRUPT_STATUS, false) => Ok(MmioEffect::ReadValue(0)),
-            (REG_INTERRUPT_STATUS, true) => {
-                Err(MmioError::ReadOnlyRegister { offset: access.offset })
-            }
+            (REG_INTERRUPT_STATUS, true) => Err(MmioError::ReadOnlyRegister {
+                offset: access.offset,
+            }),
 
             (REG_INTERRUPT_ACK, true) => Ok(MmioEffect::Applied),
-            (REG_INTERRUPT_ACK, false) => {
-                Err(MmioError::WriteOnlyRegister { offset: access.offset })
-            }
+            (REG_INTERRUPT_ACK, false) => Err(MmioError::WriteOnlyRegister {
+                offset: access.offset,
+            }),
 
             (REG_STATUS, true) => self
                 .negotiation
@@ -356,7 +374,9 @@ impl<const MAX_QUEUES: usize> MmioDevice<MAX_QUEUES> {
                 Ok(MmioEffect::Applied)
             }
             (REG_QUEUE_DESC_LOW | REG_QUEUE_DESC_HIGH, false) => {
-                Err(MmioError::WriteOnlyRegister { offset: access.offset })
+                Err(MmioError::WriteOnlyRegister {
+                    offset: access.offset,
+                })
             }
 
             (REG_QUEUE_DRIVER_LOW, true) => {
@@ -372,7 +392,9 @@ impl<const MAX_QUEUES: usize> MmioDevice<MAX_QUEUES> {
                 Ok(MmioEffect::Applied)
             }
             (REG_QUEUE_DRIVER_LOW | REG_QUEUE_DRIVER_HIGH, false) => {
-                Err(MmioError::WriteOnlyRegister { offset: access.offset })
+                Err(MmioError::WriteOnlyRegister {
+                    offset: access.offset,
+                })
             }
 
             (REG_QUEUE_DEVICE_LOW, true) => {
@@ -388,13 +410,15 @@ impl<const MAX_QUEUES: usize> MmioDevice<MAX_QUEUES> {
                 Ok(MmioEffect::Applied)
             }
             (REG_QUEUE_DEVICE_LOW | REG_QUEUE_DEVICE_HIGH, false) => {
-                Err(MmioError::WriteOnlyRegister { offset: access.offset })
+                Err(MmioError::WriteOnlyRegister {
+                    offset: access.offset,
+                })
             }
 
             (REG_CONFIG_GENERATION, false) => Ok(MmioEffect::ReadValue(0)),
-            (REG_CONFIG_GENERATION, true) => {
-                Err(MmioError::ReadOnlyRegister { offset: access.offset })
-            }
+            (REG_CONFIG_GENERATION, true) => Err(MmioError::ReadOnlyRegister {
+                offset: access.offset,
+            }),
 
             (offset, _) => Err(MmioError::UnknownRegister { offset }),
         }
@@ -451,7 +475,9 @@ mod tests {
 
         // 2. status handshake bytes 0x01, 0x03 (spec §3.1.1 steps 1-3).
         assert_eq!(
-            device.apply(write(REG_STATUS, u32::from(STATUS_ACKNOWLEDGE))).unwrap(),
+            device
+                .apply(write(REG_STATUS, u32::from(STATUS_ACKNOWLEDGE)))
+                .unwrap(),
             MmioEffect::StatusTransition(DeviceStatus::Acknowledged)
         );
         assert_eq!(
@@ -488,12 +514,18 @@ mod tests {
             device.apply(write(REG_DRIVER_FEATURES_SEL, 0)).unwrap(),
             MmioEffect::Applied
         );
-        assert_eq!(device.apply(write(REG_DRIVER_FEATURES, 0)).unwrap(), MmioEffect::Applied);
+        assert_eq!(
+            device.apply(write(REG_DRIVER_FEATURES, 0)).unwrap(),
+            MmioEffect::Applied
+        );
         assert_eq!(
             device.apply(write(REG_DRIVER_FEATURES_SEL, 1)).unwrap(),
             MmioEffect::Applied
         );
-        assert_eq!(device.apply(write(REG_DRIVER_FEATURES, 1)).unwrap(), MmioEffect::Applied);
+        assert_eq!(
+            device.apply(write(REG_DRIVER_FEATURES, 1)).unwrap(),
+            MmioEffect::Applied
+        );
 
         // 4. status byte 0x0b: FEATURES_OK.
         assert_eq!(
@@ -518,12 +550,18 @@ mod tests {
 
         // 5. queue setup: select queue 0, read QueueNumMax, set QueueNum,
         // program the three split address-pair registers, mark ready.
-        assert_eq!(device.apply(write(REG_QUEUE_SEL, 0)).unwrap(), MmioEffect::Applied);
+        assert_eq!(
+            device.apply(write(REG_QUEUE_SEL, 0)).unwrap(),
+            MmioEffect::Applied
+        );
         assert_eq!(
             device.apply(read(REG_QUEUE_NUM_MAX)).unwrap(),
             MmioEffect::ReadValue(4)
         );
-        assert_eq!(device.apply(write(REG_QUEUE_NUM, 4)).unwrap(), MmioEffect::Applied);
+        assert_eq!(
+            device.apply(write(REG_QUEUE_NUM, 4)).unwrap(),
+            MmioEffect::Applied
+        );
         assert_eq!(
             device.apply(write(REG_QUEUE_DESC_LOW, 0x1000)).unwrap(),
             MmioEffect::Applied
@@ -550,7 +588,10 @@ mod tests {
         );
         assert_eq!(
             device.apply(write(REG_QUEUE_READY, 1)).unwrap(),
-            MmioEffect::QueueReady { queue: 0, ready: true }
+            MmioEffect::QueueReady {
+                queue: 0,
+                ready: true
+            }
         );
 
         // 6. status byte 0x0f: DRIVER_OK — the device is live.
@@ -558,7 +599,9 @@ mod tests {
             device
                 .apply(write(
                     REG_STATUS,
-                    u32::from(STATUS_ACKNOWLEDGE | STATUS_DRIVER | STATUS_FEATURES_OK | STATUS_DRIVER_OK)
+                    u32::from(
+                        STATUS_ACKNOWLEDGE | STATUS_DRIVER | STATUS_FEATURES_OK | STATUS_DRIVER_OK
+                    )
                 ))
                 .unwrap(),
             MmioEffect::StatusTransition(DeviceStatus::DriverOk {
@@ -585,7 +628,9 @@ mod tests {
         let mut device = MmioDevice::<1>::new(DEVICE_ID_CONSOLE, 4, FEATURE_VERSION_1);
         assert_eq!(
             device.apply(write(REG_MAGIC_VALUE, 0)).unwrap_err(),
-            MmioError::ReadOnlyRegister { offset: REG_MAGIC_VALUE }
+            MmioError::ReadOnlyRegister {
+                offset: REG_MAGIC_VALUE
+            }
         );
     }
 
@@ -594,7 +639,9 @@ mod tests {
         let mut device = MmioDevice::<1>::new(DEVICE_ID_CONSOLE, 4, FEATURE_VERSION_1);
         assert_eq!(
             device.apply(read(REG_QUEUE_NOTIFY)).unwrap_err(),
-            MmioError::WriteOnlyRegister { offset: REG_QUEUE_NOTIFY }
+            MmioError::WriteOnlyRegister {
+                offset: REG_QUEUE_NOTIFY
+            }
         );
     }
 
@@ -613,7 +660,10 @@ mod tests {
         device.apply(write(REG_QUEUE_SEL, 5)).unwrap();
         assert_eq!(
             device.apply(write(REG_QUEUE_NUM, 4)).unwrap_err(),
-            MmioError::QueueSelectOutOfRange { queue: 5, queue_count: 1 }
+            MmioError::QueueSelectOutOfRange {
+                queue: 5,
+                queue_count: 1
+            }
         );
     }
 
@@ -622,6 +672,9 @@ mod tests {
         let mut device = MmioDevice::<1>::new(DEVICE_ID_CONSOLE, 4, FEATURE_VERSION_1);
         let attempted = u32::from(STATUS_ACKNOWLEDGE | STATUS_DRIVER_OK);
         let error = device.apply(write(REG_STATUS, attempted)).unwrap_err();
-        assert!(matches!(error, MmioError::Negotiation(NegotiationError::OutOfOrder { .. })));
+        assert!(matches!(
+            error,
+            MmioError::Negotiation(NegotiationError::OutOfOrder { .. })
+        ));
     }
 }

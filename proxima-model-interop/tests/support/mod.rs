@@ -21,7 +21,9 @@
 use arrayvec::ArrayVec;
 use proxima_gguf::quant::{QuantError, q4_k, q5_k, q6_k, q8_0};
 use proxima_gguf::tensor::MAX_DIMS;
-use proxima_gguf::{GgmlType, GgufModel, MetadataArray, MetadataValue, TensorPayload, write_complete};
+use proxima_gguf::{
+    GgmlType, GgufModel, MetadataArray, MetadataValue, TensorPayload, write_complete,
+};
 use proxima_tensor::test_support::Lcg;
 use proxima_tokenizer::byte_level::byte_to_char;
 
@@ -68,7 +70,10 @@ pub fn encode_weights(codec: GgmlType, values: &[f32]) -> Vec<u8> {
     let blocks = values.len() as u64 / layout.block_elements;
     let byte_len = (blocks * layout.block_bytes) as usize;
     match codec {
-        GgmlType::F32 => values.iter().flat_map(|value| value.to_le_bytes()).collect(),
+        GgmlType::F32 => values
+            .iter()
+            .flat_map(|value| value.to_le_bytes())
+            .collect(),
         GgmlType::Q4_K => encode_with(byte_len, values, q4_k::quantize),
         GgmlType::Q5_K => encode_with(byte_len, values, q5_k::quantize),
         GgmlType::Q6_K => encode_with(byte_len, values, q6_k::quantize),
@@ -77,7 +82,11 @@ pub fn encode_weights(codec: GgmlType, values: &[f32]) -> Vec<u8> {
     }
 }
 
-fn encode_with(byte_len: usize, values: &[f32], quantize: fn(&[f32], &mut [u8]) -> Result<(), QuantError>) -> Vec<u8> {
+fn encode_with(
+    byte_len: usize,
+    values: &[f32],
+    quantize: fn(&[f32], &mut [u8]) -> Result<(), QuantError>,
+) -> Vec<u8> {
     let mut output = vec![0u8; byte_len];
     quantize(values, &mut output).expect("real codec quantizes this fixture's own weight data");
     output
@@ -90,36 +99,81 @@ fn encode_with(byte_len: usize, values: &[f32], quantize: fn(&[f32], &mut [u8]) 
 /// `LoadedModel`'s own decode loop to recognize [`EOS_TOKEN_ID`] as its
 /// stopping signal.
 fn tokenizer_metadata(metadata: &mut Vec<(String, MetadataValue)>) {
-    let mut tokens: Vec<String> = (0..=255u8).map(|byte| String::from(byte_to_char(byte))).collect();
+    let mut tokens: Vec<String> = (0..=255u8)
+        .map(|byte| String::from(byte_to_char(byte)))
+        .collect();
     tokens.push(String::from("<|endoftext|>"));
-    metadata.push((String::from("tokenizer.ggml.model"), MetadataValue::String(String::from("gpt2"))));
-    metadata.push((String::from("tokenizer.ggml.tokens"), MetadataValue::Array(MetadataArray::String(tokens))));
+    metadata.push((
+        String::from("tokenizer.ggml.model"),
+        MetadataValue::String(String::from("gpt2")),
+    ));
+    metadata.push((
+        String::from("tokenizer.ggml.tokens"),
+        MetadataValue::Array(MetadataArray::String(tokens)),
+    ));
     metadata.push((
         String::from("tokenizer.ggml.merges"),
         MetadataValue::Array(MetadataArray::String(Vec::new())),
     ));
-    metadata.push((String::from("tokenizer.ggml.bos_token_id"), MetadataValue::U32(0)));
-    metadata.push((String::from("tokenizer.ggml.eos_token_id"), MetadataValue::U32(EOS_TOKEN_ID)));
+    metadata.push((
+        String::from("tokenizer.ggml.bos_token_id"),
+        MetadataValue::U32(0),
+    ));
+    metadata.push((
+        String::from("tokenizer.ggml.eos_token_id"),
+        MetadataValue::U32(EOS_TOKEN_ID),
+    ));
 }
 
 fn architecture_metadata(metadata: &mut Vec<(String, MetadataValue)>) {
-    metadata.push((String::from("general.architecture"), MetadataValue::String(String::from("llama"))));
-    metadata.push((String::from("llama.embedding_length"), MetadataValue::U32(EMBEDDING)));
-    metadata.push((String::from("llama.feed_forward_length"), MetadataValue::U32(FEED_FORWARD)));
-    metadata.push((String::from("llama.attention.head_count"), MetadataValue::U32(QUERY_HEADS)));
-    metadata.push((String::from("llama.attention.head_count_kv"), MetadataValue::U32(KV_HEADS)));
-    metadata.push((String::from("llama.block_count"), MetadataValue::U32(BLOCK_COUNT)));
-    metadata.push((String::from("llama.rope.dimension_count"), MetadataValue::U32(HEAD_DIM)));
+    metadata.push((
+        String::from("general.architecture"),
+        MetadataValue::String(String::from("llama")),
+    ));
+    metadata.push((
+        String::from("llama.embedding_length"),
+        MetadataValue::U32(EMBEDDING),
+    ));
+    metadata.push((
+        String::from("llama.feed_forward_length"),
+        MetadataValue::U32(FEED_FORWARD),
+    ));
+    metadata.push((
+        String::from("llama.attention.head_count"),
+        MetadataValue::U32(QUERY_HEADS),
+    ));
+    metadata.push((
+        String::from("llama.attention.head_count_kv"),
+        MetadataValue::U32(KV_HEADS),
+    ));
+    metadata.push((
+        String::from("llama.block_count"),
+        MetadataValue::U32(BLOCK_COUNT),
+    ));
+    metadata.push((
+        String::from("llama.rope.dimension_count"),
+        MetadataValue::U32(HEAD_DIM),
+    ));
 }
 
 /// [`architecture_metadata`] plus the two MoE-only keys
 /// [`bind_all_weights`](proxima_model_interop) reads
 /// (`bind.rs:263-264`'s own `metadata_u32_optional` lookups) to route a
 /// layer's FFN through the routed path instead of the dense triple.
-fn moe_architecture_metadata(metadata: &mut Vec<(String, MetadataValue)>, expert_count: u32, expert_used_count: u32) {
+fn moe_architecture_metadata(
+    metadata: &mut Vec<(String, MetadataValue)>,
+    expert_count: u32,
+    expert_used_count: u32,
+) {
     architecture_metadata(metadata);
-    metadata.push((String::from("llama.expert_count"), MetadataValue::U32(expert_count)));
-    metadata.push((String::from("llama.expert_used_count"), MetadataValue::U32(expert_used_count)));
+    metadata.push((
+        String::from("llama.expert_count"),
+        MetadataValue::U32(expert_count),
+    ));
+    metadata.push((
+        String::from("llama.expert_used_count"),
+        MetadataValue::U32(expert_used_count),
+    ));
 }
 
 /// A checkpoint's projection weight -- always `codec`, `dims = [in_dim,
@@ -160,9 +214,20 @@ fn push_moe_expert_stack(
     in_dim: u32,
     out_dim: u32,
 ) {
-    let values = random_vec(seed, expert_count as usize * in_dim as usize * out_dim as usize);
+    let values = random_vec(
+        seed,
+        expert_count as usize * in_dim as usize * out_dim as usize,
+    );
     buffers.push(encode_weights(codec, &values));
-    specs.push((name, dims(&[u64::from(in_dim), u64::from(out_dim), u64::from(expert_count)]), codec));
+    specs.push((
+        name,
+        dims(&[
+            u64::from(in_dim),
+            u64::from(out_dim),
+            u64::from(expert_count),
+        ]),
+        codec,
+    ));
 }
 
 /// `output.weight` -- like [`push_matmul_weight`], but every row is
@@ -198,7 +263,11 @@ fn push_output_projection(
 ) {
     let values = vec![0.0f32; embedding as usize * vocab as usize];
     buffers.push(encode_weights(codec, &values));
-    specs.push((String::from("output.weight"), dims(&[u64::from(embedding), u64::from(vocab)]), codec));
+    specs.push((
+        String::from("output.weight"),
+        dims(&[u64::from(embedding), u64::from(vocab)]),
+        codec,
+    ));
 }
 
 /// A dense (always-`F32`) 1-D weight -- every real checkpoint's own norm
@@ -239,11 +308,29 @@ pub fn checkpoint_bytes(weight_codec: GgmlType) -> Vec<u8> {
         seed
     };
 
-    push_dense_vector(&mut buffers, &mut specs, String::from("token_embd.weight"), next_seed(), vocab * embedding);
+    push_dense_vector(
+        &mut buffers,
+        &mut specs,
+        String::from("token_embd.weight"),
+        next_seed(),
+        vocab * embedding,
+    );
 
     for layer in 0..BLOCK_COUNT {
-        push_dense_vector(&mut buffers, &mut specs, format!("blk.{layer}.attn_norm.weight"), next_seed(), embedding);
-        push_dense_vector(&mut buffers, &mut specs, format!("blk.{layer}.ffn_norm.weight"), next_seed(), embedding);
+        push_dense_vector(
+            &mut buffers,
+            &mut specs,
+            format!("blk.{layer}.attn_norm.weight"),
+            next_seed(),
+            embedding,
+        );
+        push_dense_vector(
+            &mut buffers,
+            &mut specs,
+            format!("blk.{layer}.ffn_norm.weight"),
+            next_seed(),
+            embedding,
+        );
         push_matmul_weight(
             &mut buffers,
             &mut specs,
@@ -309,7 +396,13 @@ pub fn checkpoint_bytes(weight_codec: GgmlType) -> Vec<u8> {
         );
     }
 
-    push_dense_vector(&mut buffers, &mut specs, String::from("output_norm.weight"), next_seed(), embedding);
+    push_dense_vector(
+        &mut buffers,
+        &mut specs,
+        String::from("output_norm.weight"),
+        next_seed(),
+        embedding,
+    );
     push_output_projection(&mut buffers, &mut specs, weight_codec, embedding, vocab);
 
     let tensors: Vec<TensorPayload<'_>> = specs
@@ -327,7 +420,11 @@ pub fn checkpoint_bytes(weight_codec: GgmlType) -> Vec<u8> {
     architecture_metadata(&mut metadata);
     tokenizer_metadata(&mut metadata);
 
-    let model = GgufModel { version: 3, metadata, tensors };
+    let model = GgufModel {
+        version: 3,
+        metadata,
+        tensors,
+    };
     write_complete(&model).expect("writes a well-formed synthetic checkpoint")
 }
 
@@ -351,7 +448,11 @@ pub const EXPERT_USED_COUNT: u32 = 2;
 /// shape as [`checkpoint_bytes`] -- the only difference is which FFN weight
 /// family each layer carries.
 #[must_use]
-pub fn checkpoint_bytes_moe(weight_codec: GgmlType, expert_count: u32, expert_used_count: u32) -> Vec<u8> {
+pub fn checkpoint_bytes_moe(
+    weight_codec: GgmlType,
+    expert_count: u32,
+    expert_used_count: u32,
+) -> Vec<u8> {
     let embedding = EMBEDDING;
     let feed_forward = FEED_FORWARD;
     let kv_dim = KV_HEADS * HEAD_DIM;
@@ -365,11 +466,29 @@ pub fn checkpoint_bytes_moe(weight_codec: GgmlType, expert_count: u32, expert_us
         seed
     };
 
-    push_dense_vector(&mut buffers, &mut specs, String::from("token_embd.weight"), next_seed(), vocab * embedding);
+    push_dense_vector(
+        &mut buffers,
+        &mut specs,
+        String::from("token_embd.weight"),
+        next_seed(),
+        vocab * embedding,
+    );
 
     for layer in 0..BLOCK_COUNT {
-        push_dense_vector(&mut buffers, &mut specs, format!("blk.{layer}.attn_norm.weight"), next_seed(), embedding);
-        push_dense_vector(&mut buffers, &mut specs, format!("blk.{layer}.ffn_norm.weight"), next_seed(), embedding);
+        push_dense_vector(
+            &mut buffers,
+            &mut specs,
+            format!("blk.{layer}.attn_norm.weight"),
+            next_seed(),
+            embedding,
+        );
+        push_dense_vector(
+            &mut buffers,
+            &mut specs,
+            format!("blk.{layer}.ffn_norm.weight"),
+            next_seed(),
+            embedding,
+        );
         push_matmul_weight(
             &mut buffers,
             &mut specs,
@@ -415,8 +534,16 @@ pub fn checkpoint_bytes_moe(weight_codec: GgmlType, expert_count: u32, expert_us
             embedding,
             expert_count,
         );
-        for (projection, out_dim) in [("ffn_gate", feed_forward), ("ffn_up", feed_forward), ("ffn_down", embedding)] {
-            let in_dim = if projection == "ffn_down" { feed_forward } else { embedding };
+        for (projection, out_dim) in [
+            ("ffn_gate", feed_forward),
+            ("ffn_up", feed_forward),
+            ("ffn_down", embedding),
+        ] {
+            let in_dim = if projection == "ffn_down" {
+                feed_forward
+            } else {
+                embedding
+            };
             push_moe_expert_stack(
                 &mut buffers,
                 &mut specs,
@@ -430,7 +557,13 @@ pub fn checkpoint_bytes_moe(weight_codec: GgmlType, expert_count: u32, expert_us
         }
     }
 
-    push_dense_vector(&mut buffers, &mut specs, String::from("output_norm.weight"), next_seed(), embedding);
+    push_dense_vector(
+        &mut buffers,
+        &mut specs,
+        String::from("output_norm.weight"),
+        next_seed(),
+        embedding,
+    );
     push_output_projection(&mut buffers, &mut specs, weight_codec, embedding, vocab);
 
     let tensors: Vec<TensorPayload<'_>> = specs
@@ -448,6 +581,10 @@ pub fn checkpoint_bytes_moe(weight_codec: GgmlType, expert_count: u32, expert_us
     moe_architecture_metadata(&mut metadata, expert_count, expert_used_count);
     tokenizer_metadata(&mut metadata);
 
-    let model = GgufModel { version: 3, metadata, tensors };
+    let model = GgufModel {
+        version: 3,
+        metadata,
+        tensors,
+    };
     write_complete(&model).expect("writes a well-formed synthetic MoE checkpoint")
 }

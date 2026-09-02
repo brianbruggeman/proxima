@@ -168,7 +168,9 @@ pub fn parse_hf_config(bytes: &[u8]) -> Result<HfConfig, InteropError> {
 /// against, so the enum would carry a fact nothing reads.
 #[must_use]
 pub fn architecture_from_hf_config(config: &HfConfig) -> ModelArchitecture {
-    let kv_heads = config.num_key_value_heads.unwrap_or(config.num_attention_heads);
+    let kv_heads = config
+        .num_key_value_heads
+        .unwrap_or(config.num_attention_heads);
     let head_dim = config
         .head_dim
         .unwrap_or_else(|| config.hidden_size / config.num_attention_heads.max(1));
@@ -181,7 +183,9 @@ pub fn architecture_from_hf_config(config: &HfConfig) -> ModelArchitecture {
     let feed_forward = if expert_count == 0 {
         config.intermediate_size
     } else {
-        config.moe_intermediate_size.unwrap_or(config.intermediate_size)
+        config
+            .moe_intermediate_size
+            .unwrap_or(config.intermediate_size)
     };
 
     ModelArchitecture {
@@ -255,7 +259,10 @@ mod tests {
             .expect("real qwen3 moe config.json parses");
 
         assert_eq!(config.model_type, "qwen3_moe");
-        assert_eq!(config.architectures, alloc::vec![String::from("Qwen3MoeForCausalLM")]);
+        assert_eq!(
+            config.architectures,
+            alloc::vec![String::from("Qwen3MoeForCausalLM")]
+        );
         assert_eq!(config.hidden_size, 2048);
         assert_eq!(config.num_attention_heads, 32);
         assert_eq!(config.num_key_value_heads, Some(4));
@@ -352,7 +359,11 @@ mod tests {
         }"#;
         let config = parse_hf_config(json.as_bytes()).expect("mixtral-style config.json parses");
 
-        assert_eq!(config.num_experts, Some(8), "num_local_experts must alias into num_experts");
+        assert_eq!(
+            config.num_experts,
+            Some(8),
+            "num_local_experts must alias into num_experts"
+        );
         assert_eq!(architecture_from_hf_config(&config).expert_count, 8);
     }
 
@@ -384,9 +395,13 @@ mod tests {
 
     #[test]
     fn real_smollm2_config_json_derives_a_tied_dense_architecture() {
-        let config = parse_hf_config(REAL_SMOLLM2_CONFIG_JSON.as_bytes()).expect("real smollm2 config.json parses");
+        let config = parse_hf_config(REAL_SMOLLM2_CONFIG_JSON.as_bytes())
+            .expect("real smollm2 config.json parses");
 
-        assert!(config.tie_word_embeddings, "smollm2 ships tie_word_embeddings: true");
+        assert!(
+            config.tie_word_embeddings,
+            "smollm2 ships tie_word_embeddings: true"
+        );
 
         let architecture = architecture_from_hf_config(&config);
         assert_eq!(

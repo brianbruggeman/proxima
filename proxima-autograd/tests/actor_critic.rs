@@ -61,7 +61,14 @@ const ACTION_DIM: usize = 3;
 const HIDDEN_DIM: usize = 6;
 
 fn leaf(program: &mut Vec<Op>, name: &str, shape: Vec<Extent>) -> NodeId {
-    op::append(program, Op::Input { dtype: DType::Float32, shape, name: Some(name.into()) })
+    op::append(
+        program,
+        Op::Input {
+            dtype: DType::Float32,
+            shape,
+            name: Some(name.into()),
+        },
+    )
 }
 
 fn scalar_leaf(program: &mut Vec<Op>, name: &str) -> NodeId {
@@ -69,14 +76,34 @@ fn scalar_leaf(program: &mut Vec<Op>, name: &str) -> NodeId {
 }
 
 fn constant(program: &mut Vec<Op>, value: f32) -> NodeId {
-    op::append(program, Op::Constant { dtype: DType::Float32, shape: Vec::new(), value })
+    op::append(
+        program,
+        Op::Constant {
+            dtype: DType::Float32,
+            shape: Vec::new(),
+            value,
+        },
+    )
 }
 
 fn elementwise(program: &mut Vec<Op>, body: ScalarOp, operands: Vec<(NodeId, IndexMap)>) -> NodeId {
-    op::append(program, Op::Elementwise { dtype: DType::Float32, body, operands, name: None })
+    op::append(
+        program,
+        Op::Elementwise {
+            dtype: DType::Float32,
+            body,
+            operands,
+            name: None,
+        },
+    )
 }
 
-fn reduce_add(program: &mut Vec<Op>, operand: NodeId, in_map: IndexMap, out_map: IndexMap) -> NodeId {
+fn reduce_add(
+    program: &mut Vec<Op>,
+    operand: NodeId,
+    in_map: IndexMap,
+    out_map: IndexMap,
+) -> NodeId {
     op::append(
         program,
         Op::Reduce(proxima_tensor::op::Reduce {
@@ -107,14 +134,28 @@ fn dense(program: &mut Vec<Op>, x: NodeId, w: NodeId, b: NodeId) -> NodeId {
     let product = elementwise(
         program,
         ScalarOp::Multiply,
-        alloc::vec![(w, identity(2)), (x, IndexMap::Affine(map::projection(2, &[0])))],
+        alloc::vec![
+            (w, identity(2)),
+            (x, IndexMap::Affine(map::projection(2, &[0])))
+        ],
     );
-    let matmul = reduce_add(program, product, identity(2), IndexMap::Affine(map::projection(2, &[1])));
-    elementwise(program, ScalarOp::Add, alloc::vec![(matmul, identity(1)), (b, identity(1))])
+    let matmul = reduce_add(
+        program,
+        product,
+        identity(2),
+        IndexMap::Affine(map::projection(2, &[1])),
+    );
+    elementwise(
+        program,
+        ScalarOp::Add,
+        alloc::vec![(matmul, identity(1)), (b, identity(1))],
+    )
 }
 
 fn counter_pattern(seed: usize, count: usize) -> Vec<f32> {
-    (0..count).map(|index| (((seed + index) * 7 % 13) as f32 - 6.0) / 12.0).collect()
+    (0..count)
+        .map(|index| (((seed + index) * 7 % 13) as f32 - 6.0) / 12.0)
+        .collect()
 }
 
 fn one_hot(index: usize, dim: usize) -> Vec<f32> {
@@ -157,45 +198,133 @@ struct ActorCritic {
 /// [`value_loss_gradient_never_reaches_policy_parameters`]).
 fn build_actor_critic() -> ActorCritic {
     let mut program = Vec::new();
-    let state = leaf(&mut program, "x", alloc::vec![Extent::Static(STATE_DIM as u32)]);
+    let state = leaf(
+        &mut program,
+        "x",
+        alloc::vec![Extent::Static(STATE_DIM as u32)],
+    );
 
-    let w1v = leaf(&mut program, "w1v", alloc::vec![Extent::Static(STATE_DIM as u32), Extent::Static(HIDDEN_DIM as u32)]);
-    let b1v = leaf(&mut program, "b1v", alloc::vec![Extent::Static(HIDDEN_DIM as u32)]);
-    let w2v = leaf(&mut program, "w2v", alloc::vec![Extent::Static(HIDDEN_DIM as u32), Extent::Static(1)]);
+    let w1v = leaf(
+        &mut program,
+        "w1v",
+        alloc::vec![
+            Extent::Static(STATE_DIM as u32),
+            Extent::Static(HIDDEN_DIM as u32)
+        ],
+    );
+    let b1v = leaf(
+        &mut program,
+        "b1v",
+        alloc::vec![Extent::Static(HIDDEN_DIM as u32)],
+    );
+    let w2v = leaf(
+        &mut program,
+        "w2v",
+        alloc::vec![Extent::Static(HIDDEN_DIM as u32), Extent::Static(1)],
+    );
     let b2v = leaf(&mut program, "b2v", alloc::vec![Extent::Static(1)]);
     let hidden_v_pre = dense(&mut program, state, w1v, b1v);
     let hidden_v = relu(&mut program, DType::Float32, hidden_v_pre, 1);
     let value_vec = dense(&mut program, hidden_v, w2v, b2v);
-    let value = reduce_add(&mut program, value_vec, identity(1), IndexMap::Affine(map::projection(1, &[])));
+    let value = reduce_add(
+        &mut program,
+        value_vec,
+        identity(1),
+        IndexMap::Affine(map::projection(1, &[])),
+    );
 
     let reward = scalar_leaf(&mut program, "reward");
-    let diff = elementwise(&mut program, ScalarOp::Subtract, alloc::vec![(value, identity(0)), (reward, identity(0))]);
-    let value_loss = elementwise(&mut program, ScalarOp::Multiply, alloc::vec![(diff, identity(0)), (diff, identity(0))]);
+    let diff = elementwise(
+        &mut program,
+        ScalarOp::Subtract,
+        alloc::vec![(value, identity(0)), (reward, identity(0))],
+    );
+    let value_loss = elementwise(
+        &mut program,
+        ScalarOp::Multiply,
+        alloc::vec![(diff, identity(0)), (diff, identity(0))],
+    );
 
-    let w1p = leaf(&mut program, "w1p", alloc::vec![Extent::Static(STATE_DIM as u32), Extent::Static(HIDDEN_DIM as u32)]);
-    let b1p = leaf(&mut program, "b1p", alloc::vec![Extent::Static(HIDDEN_DIM as u32)]);
-    let w2p = leaf(&mut program, "w2p", alloc::vec![Extent::Static(HIDDEN_DIM as u32), Extent::Static(ACTION_DIM as u32)]);
-    let b2p = leaf(&mut program, "b2p", alloc::vec![Extent::Static(ACTION_DIM as u32)]);
+    let w1p = leaf(
+        &mut program,
+        "w1p",
+        alloc::vec![
+            Extent::Static(STATE_DIM as u32),
+            Extent::Static(HIDDEN_DIM as u32)
+        ],
+    );
+    let b1p = leaf(
+        &mut program,
+        "b1p",
+        alloc::vec![Extent::Static(HIDDEN_DIM as u32)],
+    );
+    let w2p = leaf(
+        &mut program,
+        "w2p",
+        alloc::vec![
+            Extent::Static(HIDDEN_DIM as u32),
+            Extent::Static(ACTION_DIM as u32)
+        ],
+    );
+    let b2p = leaf(
+        &mut program,
+        "b2p",
+        alloc::vec![Extent::Static(ACTION_DIM as u32)],
+    );
     let hidden_p_pre = dense(&mut program, state, w1p, b1p);
     let hidden_p = relu(&mut program, DType::Float32, hidden_p_pre, 1);
     let logits = dense(&mut program, hidden_p, w2p, b2p);
     let probabilities = softmax(&mut program, DType::Float32, logits, 1, 0);
 
-    let action_one_hot = leaf(&mut program, "action_one_hot", alloc::vec![Extent::Static(ACTION_DIM as u32)]);
+    let action_one_hot = leaf(
+        &mut program,
+        "action_one_hot",
+        alloc::vec![Extent::Static(ACTION_DIM as u32)],
+    );
     // `+ 1e-7` before the log: once the policy sharpens, an unchosen action's
     // probability can round to exactly 0.0 and `0.0 * log(0.0)` is NaN -- the
     // exact underflow `f7cab09` hit in the language-model milestone.
     let log_epsilon = constant(&mut program, 1e-7);
-    let stabilized =
-        elementwise(&mut program, ScalarOp::Add, alloc::vec![(probabilities, identity(1)), (log_epsilon, broadcast(1))]);
-    let log_probabilities = elementwise(&mut program, ScalarOp::Logarithm, alloc::vec![(stabilized, identity(1))]);
-    let weighted =
-        elementwise(&mut program, ScalarOp::Multiply, alloc::vec![(action_one_hot, identity(1)), (log_probabilities, identity(1))]);
-    let log_pi_a = reduce_add(&mut program, weighted, identity(1), IndexMap::Affine(map::projection(1, &[])));
+    let stabilized = elementwise(
+        &mut program,
+        ScalarOp::Add,
+        alloc::vec![(probabilities, identity(1)), (log_epsilon, broadcast(1))],
+    );
+    let log_probabilities = elementwise(
+        &mut program,
+        ScalarOp::Logarithm,
+        alloc::vec![(stabilized, identity(1))],
+    );
+    let weighted = elementwise(
+        &mut program,
+        ScalarOp::Multiply,
+        alloc::vec![
+            (action_one_hot, identity(1)),
+            (log_probabilities, identity(1))
+        ],
+    );
+    let log_pi_a = reduce_add(
+        &mut program,
+        weighted,
+        identity(1),
+        IndexMap::Affine(map::projection(1, &[])),
+    );
 
-    let advantage = elementwise(&mut program, ScalarOp::Subtract, alloc::vec![(reward, identity(0)), (value, identity(0))]);
-    let product = elementwise(&mut program, ScalarOp::Multiply, alloc::vec![(log_pi_a, identity(0)), (advantage, identity(0))]);
-    let policy_loss = elementwise(&mut program, ScalarOp::Negate, alloc::vec![(product, identity(0))]);
+    let advantage = elementwise(
+        &mut program,
+        ScalarOp::Subtract,
+        alloc::vec![(reward, identity(0)), (value, identity(0))],
+    );
+    let product = elementwise(
+        &mut program,
+        ScalarOp::Multiply,
+        alloc::vec![(log_pi_a, identity(0)), (advantage, identity(0))],
+    );
+    let policy_loss = elementwise(
+        &mut program,
+        ScalarOp::Negate,
+        alloc::vec![(product, identity(0))],
+    );
 
     ActorCritic {
         program,
@@ -206,15 +335,24 @@ fn build_actor_critic() -> ActorCritic {
         policy_param_names: ["w1p", "b1p", "w2p", "b2p"],
         policy_param_nodes: [w1p, b1p, w2p, b2p],
         policy_param_shapes: [
-            alloc::vec![Extent::Static(STATE_DIM as u32), Extent::Static(HIDDEN_DIM as u32)],
+            alloc::vec![
+                Extent::Static(STATE_DIM as u32),
+                Extent::Static(HIDDEN_DIM as u32)
+            ],
             alloc::vec![Extent::Static(HIDDEN_DIM as u32)],
-            alloc::vec![Extent::Static(HIDDEN_DIM as u32), Extent::Static(ACTION_DIM as u32)],
+            alloc::vec![
+                Extent::Static(HIDDEN_DIM as u32),
+                Extent::Static(ACTION_DIM as u32)
+            ],
             alloc::vec![Extent::Static(ACTION_DIM as u32)],
         ],
         value_param_names: ["w1v", "b1v", "w2v", "b2v"],
         value_param_nodes: [w1v, b1v, w2v, b2v],
         value_param_shapes: [
-            alloc::vec![Extent::Static(STATE_DIM as u32), Extent::Static(HIDDEN_DIM as u32)],
+            alloc::vec![
+                Extent::Static(STATE_DIM as u32),
+                Extent::Static(HIDDEN_DIM as u32)
+            ],
             alloc::vec![Extent::Static(HIDDEN_DIM as u32)],
             alloc::vec![Extent::Static(HIDDEN_DIM as u32), Extent::Static(1)],
             alloc::vec![Extent::Static(1)],
@@ -245,8 +383,10 @@ fn wire_adam(
     gradient_source: &Differentiated,
 ) -> AdamWiring {
     let step = step_input(program, step_name);
-    let mut m_names: [alloc::string::String; 4] = core::array::from_fn(|_| alloc::string::String::new());
-    let mut v_names: [alloc::string::String; 4] = core::array::from_fn(|_| alloc::string::String::new());
+    let mut m_names: [alloc::string::String; 4] =
+        core::array::from_fn(|_| alloc::string::String::new());
+    let mut v_names: [alloc::string::String; 4] =
+        core::array::from_fn(|_| alloc::string::String::new());
     let mut new_param = [NodeId(0); 4];
     let mut new_m = [NodeId(0); 4];
     let mut new_v = [NodeId(0); 4];
@@ -258,11 +398,24 @@ fn wire_adam(
         let v_name = alloc::format!("v_{name}");
         let m_node = leaf(program, &m_name, param_shapes[index].clone());
         let v_node = leaf(program, &v_name, param_shapes[index].clone());
-        let grad = gradient_source
-            .gradient_of_named(name)
-            .unwrap_or_else(|| panic!("{name} must feed the loss node {:?} differentiate was called on", gradient_source.loss));
-        let (updated_param, updated_m, updated_v) =
-            adam_step(program, config, rank, AdamOperands { param: param_nodes[index], grad, m: m_node, v: v_node }, step);
+        let grad = gradient_source.gradient_of_named(name).unwrap_or_else(|| {
+            panic!(
+                "{name} must feed the loss node {:?} differentiate was called on",
+                gradient_source.loss
+            )
+        });
+        let (updated_param, updated_m, updated_v) = adam_step(
+            program,
+            config,
+            rank,
+            AdamOperands {
+                param: param_nodes[index],
+                grad,
+                m: m_node,
+                v: v_node,
+            },
+            step,
+        );
         m_names[index] = m_name;
         v_names[index] = v_name;
         new_param[index] = updated_param;
@@ -270,7 +423,14 @@ fn wire_adam(
         new_v[index] = updated_v;
     }
 
-    AdamWiring { step_name, m_names, v_names, new_param, new_m, new_v }
+    AdamWiring {
+        step_name,
+        m_names,
+        v_names,
+        new_param,
+        new_m,
+        new_v,
+    }
 }
 
 /// Deterministic splitmix64 -- no external RNG dependency, reproducible
@@ -357,21 +517,51 @@ fn build_bindings<'a>(
         (value_wiring.step_name, step_value),
     ];
     for index in 0..4 {
-        named.push((actor_critic.policy_param_names[index], policy.params[index].as_slice()));
-        named.push((policy_wiring.m_names[index].as_str(), policy.m[index].as_slice()));
-        named.push((policy_wiring.v_names[index].as_str(), policy.v[index].as_slice()));
-        named.push((actor_critic.value_param_names[index], value.params[index].as_slice()));
-        named.push((value_wiring.m_names[index].as_str(), value.m[index].as_slice()));
-        named.push((value_wiring.v_names[index].as_str(), value.v[index].as_slice()));
+        named.push((
+            actor_critic.policy_param_names[index],
+            policy.params[index].as_slice(),
+        ));
+        named.push((
+            policy_wiring.m_names[index].as_str(),
+            policy.m[index].as_slice(),
+        ));
+        named.push((
+            policy_wiring.v_names[index].as_str(),
+            policy.v[index].as_slice(),
+        ));
+        named.push((
+            actor_critic.value_param_names[index],
+            value.params[index].as_slice(),
+        ));
+        named.push((
+            value_wiring.m_names[index].as_str(),
+            value.m[index].as_slice(),
+        ));
+        named.push((
+            value_wiring.v_names[index].as_str(),
+            value.v[index].as_slice(),
+        ));
     }
     named
 }
 
 fn apply_update(state: &mut NetState, wiring: &AdamWiring, evaluated: &Evaluated) {
     for index in 0..4 {
-        state.params[index] = evaluated.get(wiring.new_param[index]).expect("new param requested").0.to_vec();
-        state.m[index] = evaluated.get(wiring.new_m[index]).expect("new m requested").0.to_vec();
-        state.v[index] = evaluated.get(wiring.new_v[index]).expect("new v requested").0.to_vec();
+        state.params[index] = evaluated
+            .get(wiring.new_param[index])
+            .expect("new param requested")
+            .0
+            .to_vec();
+        state.m[index] = evaluated
+            .get(wiring.new_m[index])
+            .expect("new m requested")
+            .0
+            .to_vec();
+        state.v[index] = evaluated
+            .get(wiring.new_v[index])
+            .expect("new v requested")
+            .0
+            .to_vec();
     }
     state.step += 1;
 }
@@ -392,12 +582,21 @@ struct TrainingResult {
 /// proves is nonzero, applied here on purpose to show what breaks.
 fn run_actor_critic(steps: u32, use_contaminated_value_gradient: bool) -> TrainingResult {
     let actor_critic = build_actor_critic();
-    let differentiated_value = differentiate(&actor_critic.program, actor_critic.value_loss).expect("value loss differentiates");
-    let differentiated_policy = differentiate(&actor_critic.program, actor_critic.policy_loss).expect("policy loss differentiates");
+    let differentiated_value = differentiate(&actor_critic.program, actor_critic.value_loss)
+        .expect("value loss differentiates");
+    let differentiated_policy = differentiate(&actor_critic.program, actor_critic.policy_loss)
+        .expect("policy loss differentiates");
 
-    let value_gradient_source = if use_contaminated_value_gradient { &differentiated_policy } else { &differentiated_value };
+    let value_gradient_source = if use_contaminated_value_gradient {
+        &differentiated_policy
+    } else {
+        &differentiated_value
+    };
     let mut value_program = value_gradient_source.program.clone();
-    let value_config = AdamConfig { learning_rate: 0.1, ..AdamConfig::default() };
+    let value_config = AdamConfig {
+        learning_rate: 0.1,
+        ..AdamConfig::default()
+    };
     let value_wiring = wire_adam(
         &mut value_program,
         &value_config,
@@ -409,7 +608,10 @@ fn run_actor_critic(steps: u32, use_contaminated_value_gradient: bool) -> Traini
     );
 
     let mut policy_program = differentiated_policy.program.clone();
-    let policy_config = AdamConfig { learning_rate: 0.05, ..AdamConfig::default() };
+    let policy_config = AdamConfig {
+        learning_rate: 0.05,
+        ..AdamConfig::default()
+    };
     let policy_wiring = wire_adam(
         &mut policy_program,
         &policy_config,
@@ -447,9 +649,18 @@ fn run_actor_critic(steps: u32, use_contaminated_value_gradient: bool) -> Traini
             &policy_step,
             &value_step,
         );
-        let probe = evaluate_named(&actor_critic.program, &[], &probe_bindings, &[actor_critic.probabilities])
-            .expect("probe forward pass evaluates");
-        let probabilities = probe.get(actor_critic.probabilities).expect("probabilities requested").0.to_vec();
+        let probe = evaluate_named(
+            &actor_critic.program,
+            &[],
+            &probe_bindings,
+            &[actor_critic.probabilities],
+        )
+        .expect("probe forward pass evaluates");
+        let probabilities = probe
+            .get(actor_critic.probabilities)
+            .expect("probabilities requested")
+            .0
+            .to_vec();
 
         let action = sample_action(&probabilities, &mut rng);
         let reward_value = [reward_for(state, action)];
@@ -472,17 +683,27 @@ fn run_actor_critic(steps: u32, use_contaminated_value_gradient: bool) -> Traini
         value_outputs.extend_from_slice(&value_wiring.new_param);
         value_outputs.extend_from_slice(&value_wiring.new_m);
         value_outputs.extend_from_slice(&value_wiring.new_v);
-        let value_evaluated =
-            evaluate_named(&value_program, &[], &named, &value_outputs).expect("value program evaluates");
-        value_loss_curve.push(value_evaluated.get(actor_critic.value_loss).expect("value loss requested").0[0]);
+        let value_evaluated = evaluate_named(&value_program, &[], &named, &value_outputs)
+            .expect("value program evaluates");
+        value_loss_curve.push(
+            value_evaluated
+                .get(actor_critic.value_loss)
+                .expect("value loss requested")
+                .0[0],
+        );
 
         let mut policy_outputs = alloc::vec![actor_critic.policy_loss];
         policy_outputs.extend_from_slice(&policy_wiring.new_param);
         policy_outputs.extend_from_slice(&policy_wiring.new_m);
         policy_outputs.extend_from_slice(&policy_wiring.new_v);
-        let policy_evaluated =
-            evaluate_named(&policy_program, &[], &named, &policy_outputs).expect("policy program evaluates");
-        policy_loss_curve.push(policy_evaluated.get(actor_critic.policy_loss).expect("policy loss requested").0[0]);
+        let policy_evaluated = evaluate_named(&policy_program, &[], &named, &policy_outputs)
+            .expect("policy program evaluates");
+        policy_loss_curve.push(
+            policy_evaluated
+                .get(actor_critic.policy_loss)
+                .expect("policy loss requested")
+                .0[0],
+        );
 
         apply_update(&mut value_state, &value_wiring, &value_evaluated);
         apply_update(&mut policy_state, &policy_wiring, &policy_evaluated);
@@ -506,16 +727,31 @@ fn run_actor_critic(steps: u32, use_contaminated_value_gradient: bool) -> Traini
             &policy_step,
             &value_step,
         );
-        let evaluated = evaluate_named(&actor_critic.program, &[], &bindings, &[actor_critic.probabilities, actor_critic.value])
-            .expect("final forward pass evaluates");
-        final_probabilities[state] = evaluated.get(actor_critic.probabilities).expect("probabilities requested").0.to_vec();
-        final_value_predictions[state] = evaluated.get(actor_critic.value).expect("value requested").0[0];
+        let evaluated = evaluate_named(
+            &actor_critic.program,
+            &[],
+            &bindings,
+            &[actor_critic.probabilities, actor_critic.value],
+        )
+        .expect("final forward pass evaluates");
+        final_probabilities[state] = evaluated
+            .get(actor_critic.probabilities)
+            .expect("probabilities requested")
+            .0
+            .to_vec();
+        final_value_predictions[state] = evaluated
+            .get(actor_critic.value)
+            .expect("value requested")
+            .0[0];
     }
 
-
-    TrainingResult { final_probabilities, final_value_predictions, value_loss_curve, policy_loss_curve }
+    TrainingResult {
+        final_probabilities,
+        final_value_predictions,
+        value_loss_curve,
+        policy_loss_curve,
+    }
 }
-
 
 /// The combined absolute+relative criterion this session's own report calls
 /// out (`f7cab09` measured raw relative error, which blows up on a
@@ -590,14 +826,36 @@ fn numeric_gradient(
 
     buffers[which][index] = original + step;
     let plus = forward_loss_at(
-        program, loss, x, reward, action_one_hot, buffers[0], buffers[1], buffers[2], buffers[3], buffers[4],
-        buffers[5], buffers[6], buffers[7],
+        program,
+        loss,
+        x,
+        reward,
+        action_one_hot,
+        buffers[0],
+        buffers[1],
+        buffers[2],
+        buffers[3],
+        buffers[4],
+        buffers[5],
+        buffers[6],
+        buffers[7],
     );
 
     buffers[which][index] = original - step;
     let minus = forward_loss_at(
-        program, loss, x, reward, action_one_hot, buffers[0], buffers[1], buffers[2], buffers[3], buffers[4],
-        buffers[5], buffers[6], buffers[7],
+        program,
+        loss,
+        x,
+        reward,
+        action_one_hot,
+        buffers[0],
+        buffers[1],
+        buffers[2],
+        buffers[3],
+        buffers[4],
+        buffers[5],
+        buffers[6],
+        buffers[7],
     );
 
     buffers[which][index] = original;
@@ -617,21 +875,24 @@ fn numeric_gradient(
 #[proxima::test]
 async fn policy_loss_gradient_reaches_the_value_net_but_is_never_applied_to_it() {
     let actor_critic = build_actor_critic();
-    let differentiated_policy =
-        differentiate(&actor_critic.program, actor_critic.policy_loss).expect("policy loss differentiates");
-    let differentiated_value =
-        differentiate(&actor_critic.program, actor_critic.value_loss).expect("value loss differentiates");
+    let differentiated_policy = differentiate(&actor_critic.program, actor_critic.policy_loss)
+        .expect("policy loss differentiates");
+    let differentiated_value = differentiate(&actor_critic.program, actor_critic.value_loss)
+        .expect("value loss differentiates");
 
     assert!(
         differentiated_value.gradient_of_named("w1p").is_none(),
         "value_loss's own truncated program ends before the policy net's ops even exist -- there is \
          structurally no policy gradient to read out of it, not merely a zeroed one"
     );
-    assert!(differentiated_value.gradient_of_named("b2p").is_none(), "same absence for every policy parameter");
+    assert!(
+        differentiated_value.gradient_of_named("b2p").is_none(),
+        "same absence for every policy parameter"
+    );
 
-    let grad_w1v_from_policy_loss = differentiated_policy
-        .gradient_of_named("w1v")
-        .expect("policy_loss reads w1v through the value baseline inside `advantage = reward - value`");
+    let grad_w1v_from_policy_loss = differentiated_policy.gradient_of_named("w1v").expect(
+        "policy_loss reads w1v through the value baseline inside `advantage = reward - value`",
+    );
 
     let x = one_hot(0, STATE_DIM);
     let reward = [-1.0f32];
@@ -665,9 +926,16 @@ async fn policy_loss_gradient_reaches_the_value_net_but_is_never_applied_to_it()
     )
     .expect("policy adjoint program lowers and evaluates");
 
-    let contaminated = evaluated.get(grad_w1v_from_policy_loss).expect("requested").0;
-    let max_abs_value = contaminated.iter().fold(0.0f32, |worst, &value| worst.max(value.abs()));
-    std::eprintln!("policy_loss's gradient into w1v (computed, never applied): max |value| = {max_abs_value}, values = {contaminated:?}");
+    let contaminated = evaluated
+        .get(grad_w1v_from_policy_loss)
+        .expect("requested")
+        .0;
+    let max_abs_value = contaminated
+        .iter()
+        .fold(0.0f32, |worst, &value| worst.max(value.abs()));
+    std::eprintln!(
+        "policy_loss's gradient into w1v (computed, never applied): max |value| = {max_abs_value}, values = {contaminated:?}"
+    );
     assert!(
         max_abs_value > 1e-4,
         "policy_loss's backward pass must genuinely reach w1v with a nonzero contribution -- this is the exact \
@@ -692,15 +960,21 @@ async fn policy_converges_to_the_known_optimal_action_and_value_predicts_the_exp
             .max_by(|left, right| left.1.total_cmp(right.1))
             .map(|(action, _)| action)
             .expect("three actions");
-        let expected_return: f32 =
-            probabilities.iter().enumerate().map(|(action, &probability)| probability * reward_for(state, action)).sum();
+        let expected_return: f32 = probabilities
+            .iter()
+            .enumerate()
+            .map(|(action, &probability)| probability * reward_for(state, action))
+            .sum();
         let value_prediction = result.final_value_predictions[state];
         std::eprintln!(
             "state {state}: probabilities {probabilities:?}, best action {best_action}, value prediction \
              {value_prediction}, E_a~pi[reward] {expected_return}"
         );
 
-        assert_eq!(best_action, state, "state {state}'s known-optimal action is itself; got {probabilities:?}");
+        assert_eq!(
+            best_action, state,
+            "state {state}'s known-optimal action is itself; got {probabilities:?}"
+        );
         assert!(
             probabilities[state] > 0.6,
             "state {state} must clearly prefer the optimal action over uniform (1/3), got {probabilities:?}"
@@ -712,21 +986,32 @@ async fn policy_converges_to_the_known_optimal_action_and_value_predicts_the_exp
     }
 
     assert!(
-        result.value_loss_curve.iter().all(|value| value.is_finite()),
+        result
+            .value_loss_curve
+            .iter()
+            .all(|value| value.is_finite()),
         "value loss curve went non-finite: {:?}",
         &result.value_loss_curve[..10]
     );
     assert!(
-        result.policy_loss_curve.iter().all(|value| value.is_finite()),
+        result
+            .policy_loss_curve
+            .iter()
+            .all(|value| value.is_finite()),
         "policy loss curve went non-finite: {:?}",
         &result.policy_loss_curve[..10]
     );
 
     let window = 30;
-    let early_value_loss: f32 = result.value_loss_curve[..window].iter().sum::<f32>() / window as f32;
-    let late_value_loss: f32 =
-        result.value_loss_curve[result.value_loss_curve.len() - window..].iter().sum::<f32>() / window as f32;
-    std::eprintln!("value loss: early {window}-step average {early_value_loss}, late average {late_value_loss}");
+    let early_value_loss: f32 =
+        result.value_loss_curve[..window].iter().sum::<f32>() / window as f32;
+    let late_value_loss: f32 = result.value_loss_curve[result.value_loss_curve.len() - window..]
+        .iter()
+        .sum::<f32>()
+        / window as f32;
+    std::eprintln!(
+        "value loss: early {window}-step average {early_value_loss}, late average {late_value_loss}"
+    );
     assert!(
         late_value_loss < early_value_loss,
         "value net's MSE must decrease over training: early {early_value_loss}, late {late_value_loss}"
@@ -744,14 +1029,19 @@ async fn policy_converges_to_the_known_optimal_action_and_value_predicts_the_exp
 #[proxima::test]
 #[case::correct_gradient_source_converges(false)]
 #[case::contaminated_gradient_source_fails_to_converge(true)]
-async fn value_net_convergence_depends_on_which_differentiated_it_is_stepped_from(#[case] use_contaminated_value_gradient: bool) {
+async fn value_net_convergence_depends_on_which_differentiated_it_is_stepped_from(
+    #[case] use_contaminated_value_gradient: bool,
+) {
     let result = run_actor_critic(1200, use_contaminated_value_gradient);
 
     let mut worst_error = 0.0f32;
     for state in 0..STATE_DIM {
         let probabilities = &result.final_probabilities[state];
-        let expected_return: f32 =
-            probabilities.iter().enumerate().map(|(action, &probability)| probability * reward_for(state, action)).sum();
+        let expected_return: f32 = probabilities
+            .iter()
+            .enumerate()
+            .map(|(action, &probability)| probability * reward_for(state, action))
+            .sum();
         let error = (result.final_value_predictions[state] - expected_return).abs();
         worst_error = worst_error.max(error);
     }
@@ -782,8 +1072,8 @@ async fn value_net_convergence_depends_on_which_differentiated_it_is_stepped_fro
 #[proxima::test]
 async fn value_network_gradient_check_matches_central_difference() {
     let actor_critic = build_actor_critic();
-    let differentiated =
-        differentiate(&actor_critic.program, actor_critic.value_loss).expect("value loss differentiates");
+    let differentiated = differentiate(&actor_critic.program, actor_critic.value_loss)
+        .expect("value loss differentiates");
 
     let x = alloc::vec![0.37f32, -0.52, 0.68];
     let reward = [-1.0f32];
@@ -797,10 +1087,18 @@ async fn value_network_gradient_check_matches_central_difference() {
     let mut w2p = counter_pattern(307, HIDDEN_DIM * ACTION_DIM);
     let mut b2p = counter_pattern(308, ACTION_DIM);
 
-    let grad_w1v = differentiated.gradient_of_named("w1v").expect("w1v feeds value_loss");
-    let grad_b1v = differentiated.gradient_of_named("b1v").expect("b1v feeds value_loss");
-    let grad_w2v = differentiated.gradient_of_named("w2v").expect("w2v feeds value_loss");
-    let grad_b2v = differentiated.gradient_of_named("b2v").expect("b2v feeds value_loss");
+    let grad_w1v = differentiated
+        .gradient_of_named("w1v")
+        .expect("w1v feeds value_loss");
+    let grad_b1v = differentiated
+        .gradient_of_named("b1v")
+        .expect("b1v feeds value_loss");
+    let grad_w2v = differentiated
+        .gradient_of_named("w2v")
+        .expect("w2v feeds value_loss");
+    let grad_b2v = differentiated
+        .gradient_of_named("b2v")
+        .expect("b2v feeds value_loss");
 
     let evaluated = evaluate_named(
         &differentiated.program,
@@ -829,9 +1127,12 @@ async fn value_network_gradient_check_matches_central_difference() {
 
     let step = 1e-3f32;
     let mut worst = (0.0f32, "", 0usize);
-    for (which, name, analytic) in
-        [(0usize, "w1v", &analytic_w1v), (1, "b1v", &analytic_b1v), (2, "w2v", &analytic_w2v), (3, "b2v", &analytic_b2v)]
-    {
+    for (which, name, analytic) in [
+        (0usize, "w1v", &analytic_w1v),
+        (1, "b1v", &analytic_b1v),
+        (2, "w2v", &analytic_w2v),
+        (3, "b2v", &analytic_b2v),
+    ] {
         for (index, &analytic_value) in analytic.iter().enumerate() {
             let numeric = numeric_gradient(
                 &actor_critic.program,
@@ -839,7 +1140,9 @@ async fn value_network_gradient_check_matches_central_difference() {
                 &x,
                 &reward,
                 &action_one_hot,
-                &mut [&mut w1v, &mut b1v, &mut w2v, &mut b2v, &mut w1p, &mut b1p, &mut w2p, &mut b2p],
+                &mut [
+                    &mut w1v, &mut b1v, &mut w2v, &mut b2v, &mut w1p, &mut b1p, &mut w2p, &mut b2p,
+                ],
                 which,
                 index,
                 step,
@@ -854,7 +1157,10 @@ async fn value_network_gradient_check_matches_central_difference() {
     }
 
     std::eprintln!("value network gradient check: worst combined-criterion deviation {worst:?}");
-    assert_eq!(worst.0, 0.0, "value network gradient failed the combined criterion at {worst:?}");
+    assert_eq!(
+        worst.0, 0.0,
+        "value network gradient failed the combined criterion at {worst:?}"
+    );
 }
 
 /// Gradient check 2 of 2: the policy net, under the same combined
@@ -864,8 +1170,8 @@ async fn value_network_gradient_check_matches_central_difference() {
 #[proxima::test]
 async fn policy_network_gradient_check_matches_central_difference() {
     let actor_critic = build_actor_critic();
-    let differentiated =
-        differentiate(&actor_critic.program, actor_critic.policy_loss).expect("policy loss differentiates");
+    let differentiated = differentiate(&actor_critic.program, actor_critic.policy_loss)
+        .expect("policy loss differentiates");
 
     let x = alloc::vec![-0.44f32, 0.81, 0.19];
     let reward = [1.0f32];
@@ -879,10 +1185,18 @@ async fn policy_network_gradient_check_matches_central_difference() {
     let mut w2p = counter_pattern(507, HIDDEN_DIM * ACTION_DIM);
     let mut b2p = counter_pattern(508, ACTION_DIM);
 
-    let grad_w1p = differentiated.gradient_of_named("w1p").expect("w1p feeds policy_loss");
-    let grad_b1p = differentiated.gradient_of_named("b1p").expect("b1p feeds policy_loss");
-    let grad_w2p = differentiated.gradient_of_named("w2p").expect("w2p feeds policy_loss");
-    let grad_b2p = differentiated.gradient_of_named("b2p").expect("b2p feeds policy_loss");
+    let grad_w1p = differentiated
+        .gradient_of_named("w1p")
+        .expect("w1p feeds policy_loss");
+    let grad_b1p = differentiated
+        .gradient_of_named("b1p")
+        .expect("b1p feeds policy_loss");
+    let grad_w2p = differentiated
+        .gradient_of_named("w2p")
+        .expect("w2p feeds policy_loss");
+    let grad_b2p = differentiated
+        .gradient_of_named("b2p")
+        .expect("b2p feeds policy_loss");
 
     let evaluated = evaluate_named(
         &differentiated.program,
@@ -911,9 +1225,12 @@ async fn policy_network_gradient_check_matches_central_difference() {
 
     let step = 1e-3f32;
     let mut worst = (0.0f32, "", 0usize);
-    for (which, name, analytic) in
-        [(4usize, "w1p", &analytic_w1p), (5, "b1p", &analytic_b1p), (6, "w2p", &analytic_w2p), (7, "b2p", &analytic_b2p)]
-    {
+    for (which, name, analytic) in [
+        (4usize, "w1p", &analytic_w1p),
+        (5, "b1p", &analytic_b1p),
+        (6, "w2p", &analytic_w2p),
+        (7, "b2p", &analytic_b2p),
+    ] {
         for (index, &analytic_value) in analytic.iter().enumerate() {
             let numeric = numeric_gradient(
                 &actor_critic.program,
@@ -921,7 +1238,9 @@ async fn policy_network_gradient_check_matches_central_difference() {
                 &x,
                 &reward,
                 &action_one_hot,
-                &mut [&mut w1v, &mut b1v, &mut w2v, &mut b2v, &mut w1p, &mut b1p, &mut w2p, &mut b2p],
+                &mut [
+                    &mut w1v, &mut b1v, &mut w2v, &mut b2v, &mut w1p, &mut b1p, &mut w2p, &mut b2p,
+                ],
                 which,
                 index,
                 step,
@@ -936,5 +1255,8 @@ async fn policy_network_gradient_check_matches_central_difference() {
     }
 
     std::eprintln!("policy network gradient check: worst combined-criterion deviation {worst:?}");
-    assert_eq!(worst.0, 0.0, "policy network gradient failed the combined criterion at {worst:?}");
+    assert_eq!(
+        worst.0, 0.0,
+        "policy network gradient failed the combined criterion at {worst:?}"
+    );
 }

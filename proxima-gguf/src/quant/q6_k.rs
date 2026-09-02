@@ -39,7 +39,10 @@ const SCALES_BYTES: usize = SUB_BLOCKS;
 /// 3*QK_K/4, ...)` at `ggml-common.h:326`.
 pub const BLOCK_BYTES: usize = {
     let layout = GgmlType::Q6_K.block_layout();
-    assert!(layout.block_elements as usize == QK_K, "GgmlType::Q6_K block_elements drifted from QK_K");
+    assert!(
+        layout.block_elements as usize == QK_K,
+        "GgmlType::Q6_K block_elements drifted from QK_K"
+    );
     layout.block_bytes as usize
 };
 
@@ -162,7 +165,12 @@ pub fn dequantize(data: &[u8], output: &mut [f32]) -> Result<(), QuantError> {
             expected,
         });
     }
-    for (block, out_chunk) in data.as_chunks::<BLOCK_BYTES>().0.iter().zip(output.as_chunks_mut::<QK_K>().0) {
+    for (block, out_chunk) in data
+        .as_chunks::<BLOCK_BYTES>()
+        .0
+        .iter()
+        .zip(output.as_chunks_mut::<QK_K>().0)
+    {
         dequantize_block(block, out_chunk);
     }
     Ok(())
@@ -258,9 +266,12 @@ fn quantize_block(x: &[f32], output: &mut [u8]) {
 
     for sub_block in 0..SUB_BLOCKS {
         let mut chunk = [0.0f32; SUB_BLOCK_ELEMENTS];
-        chunk.copy_from_slice(&x[sub_block * SUB_BLOCK_ELEMENTS..(sub_block + 1) * SUB_BLOCK_ELEMENTS]);
+        chunk.copy_from_slice(
+            &x[sub_block * SUB_BLOCK_ELEMENTS..(sub_block + 1) * SUB_BLOCK_ELEMENTS],
+        );
         let (sub_levels, scale) = make_qx_quants_16(&chunk);
-        levels[sub_block * SUB_BLOCK_ELEMENTS..(sub_block + 1) * SUB_BLOCK_ELEMENTS].copy_from_slice(&sub_levels);
+        levels[sub_block * SUB_BLOCK_ELEMENTS..(sub_block + 1) * SUB_BLOCK_ELEMENTS]
+            .copy_from_slice(&sub_levels);
         scales[sub_block] = scale;
         let abs_scale = scale.abs();
         if abs_scale > max_abs_scale {
@@ -295,7 +306,10 @@ fn quantize_block(x: &[f32], output: &mut [u8]) {
     }
 
     output[D_OFFSET..D_OFFSET + 2].copy_from_slice(&block_scale.to_le_bytes());
-    for (byte, &code) in output[SCALES_OFFSET..SCALES_OFFSET + SCALES_BYTES].iter_mut().zip(scale_codes.iter()) {
+    for (byte, &code) in output[SCALES_OFFSET..SCALES_OFFSET + SCALES_BYTES]
+        .iter_mut()
+        .zip(scale_codes.iter())
+    {
         *byte = code as u8;
     }
 
@@ -342,7 +356,12 @@ pub fn quantize(input: &[f32], output: &mut [u8]) -> Result<(), QuantError> {
             expected,
         });
     }
-    for (chunk, out_block) in input.as_chunks::<QK_K>().0.iter().zip(output.as_chunks_mut::<BLOCK_BYTES>().0) {
+    for (chunk, out_block) in input
+        .as_chunks::<QK_K>()
+        .0
+        .iter()
+        .zip(output.as_chunks_mut::<BLOCK_BYTES>().0)
+    {
         quantize_block(chunk, out_block);
     }
     Ok(())
@@ -357,7 +376,10 @@ mod tests {
 
     use proxima_telemetry::debug;
 
-    use super::{BLOCK_BYTES, CODEC, QH_BYTES, QK_K, QL_BYTES, QuantError, SCALES_BYTES, dequantize, quantize};
+    use super::{
+        BLOCK_BYTES, CODEC, QH_BYTES, QK_K, QL_BYTES, QuantError, SCALES_BYTES, dequantize,
+        quantize,
+    };
 
     /// One super-block, hand-packed and hand-decoded, checked against the
     /// `x = d*sc*q` formula computed by hand -- not by calling
@@ -419,7 +441,8 @@ mod tests {
         {
             *byte = code as u8;
         }
-        block[QL_BYTES + QH_BYTES + SCALES_BYTES..].copy_from_slice(&half::f16::from_f32(1.0).to_le_bytes());
+        block[QL_BYTES + QH_BYTES + SCALES_BYTES..]
+            .copy_from_slice(&half::f16::from_f32(1.0).to_le_bytes());
 
         // A sub-block's scale multiplies every one of the 16 `l` positions
         // it covers, not just the hand-picked probe -- the 15 untouched
@@ -490,15 +513,24 @@ mod tests {
         let mut max_error = 0.0f32;
         let mut sum_sq_error = 0.0f64;
         for (got, want) in output.iter().zip(input.iter()) {
-            assert!(got.is_finite(), "dequantized value must be finite, got {got}");
+            assert!(
+                got.is_finite(),
+                "dequantized value must be finite, got {got}"
+            );
             let diff = (got - want).abs();
             max_error = max_error.max(diff);
             sum_sq_error += f64::from(diff) * f64::from(diff);
         }
         let rms_error = (sum_sq_error / elements as f64).sqrt();
         debug!(max_error, rms_error, "quant.q6_k smooth-signal round trip");
-        assert!(max_error < 0.15, "max_error={max_error} exceeds loose sanity bound");
-        assert!(rms_error < 0.05, "rms_error={rms_error} exceeds loose sanity bound");
+        assert!(
+            max_error < 0.15,
+            "max_error={max_error} exceeds loose sanity bound"
+        );
+        assert!(
+            rms_error < 0.05,
+            "rms_error={rms_error} exceeds loose sanity bound"
+        );
     }
 
     #[test]

@@ -53,7 +53,10 @@ fn sum_multi_threaded(buffer: &[f32], workers: usize) -> f32 {
             .chunks(chunk_len)
             .map(|chunk| scope.spawn(move || chunk.iter().copied().sum::<f32>()))
             .collect();
-        handles.into_iter().map(|handle| handle.join().expect("worker thread panicked")).sum()
+        handles
+            .into_iter()
+            .map(|handle| handle.join().expect("worker thread panicked"))
+            .sum()
     })
 }
 
@@ -71,7 +74,9 @@ fn run_cpu_arm() {
     }
     single_ms.sort_by(f64::total_cmp);
 
-    let workers = std::thread::available_parallelism().map(std::num::NonZero::get).unwrap_or(1);
+    let workers = std::thread::available_parallelism()
+        .map(std::num::NonZero::get)
+        .unwrap_or(1);
     let mut multi_ms = Vec::with_capacity(CPU_RUNS);
     for _ in 0..CPU_RUNS {
         let started = Instant::now();
@@ -84,12 +89,18 @@ fn run_cpu_arm() {
     let gbs = |ms: f64| (bytes as f64 / 1e9) / (ms / 1000.0);
     let cov = |samples: &[f64]| {
         let mean = samples.iter().sum::<f64>() / samples.len() as f64;
-        let variance =
-            samples.iter().map(|value| (value - mean).powi(2)).sum::<f64>() / samples.len() as f64;
+        let variance = samples
+            .iter()
+            .map(|value| (value - mean).powi(2))
+            .sum::<f64>()
+            / samples.len() as f64;
         (variance.sqrt() / mean) * 100.0
     };
 
-    println!("membw_probe CPU arm: buffer={} MiB ({bytes} bytes), pattern=single-pass streaming sum-reduce, {CPU_RUNS} runs, min reported (sibling-process interference inflates, never deflates)", bytes / (1024 * 1024));
+    println!(
+        "membw_probe CPU arm: buffer={} MiB ({bytes} bytes), pattern=single-pass streaming sum-reduce, {CPU_RUNS} runs, min reported (sibling-process interference inflates, never deflates)",
+        bytes / (1024 * 1024)
+    );
     println!(
         "  single-thread: min={:.3} ms  {:.1} GB/s   CoV={:.2}%   all_ms={:?}",
         single_ms[0],
@@ -109,15 +120,19 @@ fn run_cpu_arm() {
 #[cfg(all(feature = "metal", feature = "cpu", target_os = "macos"))]
 fn run_metal_arm() {
     use proxima_tensor::{
-        DType, Extent, IndexMap, Keep, NodeId, Op, QuantizedBlock, Reduce, ReduceInit, ScalarOp, append,
-        map,
+        DType, Extent, IndexMap, Keep, NodeId, Op, QuantizedBlock, Reduce, ReduceInit, ScalarOp,
+        append, map,
     };
 
     fn full_reduce_program(elements: u32) -> (Vec<Op>, NodeId) {
         let mut program = Vec::new();
         let source = append(
             &mut program,
-            Op::Input { dtype: DType::Float32, shape: vec![Extent::Static(elements)], name: None },
+            Op::Input {
+                dtype: DType::Float32,
+                shape: vec![Extent::Static(elements)],
+                name: None,
+            },
         );
         let sum = append(
             &mut program,
@@ -137,7 +152,9 @@ fn run_metal_arm() {
 
     fn measure(elements: u32, runs: usize) -> (f64, f64) {
         let bytes = f64::from(elements) * 4.0;
-        let data: Vec<f32> = (0..elements).map(|index| (f64::from(index) * 1e-6).sin() as f32).collect();
+        let data: Vec<f32> = (0..elements)
+            .map(|index| (f64::from(index) * 1e-6).sin() as f32)
+            .collect();
         let (program, sum) = full_reduce_program(elements);
         let blocks = [QuantizedBlock::Float32(&data)];
         let resolved = omega::plan(&program, &[], &blocks, &[sum]).expect("membw probe plans");

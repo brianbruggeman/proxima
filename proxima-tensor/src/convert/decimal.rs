@@ -35,7 +35,11 @@ use proxima_primitives::pipe::Pipe;
 /// call is missing, only the one this crate chooses not to depend on.
 #[must_use]
 fn round_half_away_from_zero(value: f64) -> f64 {
-    if value >= 0.0 { value + 0.5 } else { value - 0.5 }
+    if value >= 0.0 {
+        value + 0.5
+    } else {
+        value - 0.5
+    }
 }
 
 /// Every fault a decimal conversion can raise: a scale too large for its
@@ -47,7 +51,9 @@ pub enum DecimalError {
     #[error("scale 10^{scale} does not fit a {bits}-bit mantissa")]
     ScaleOutOfRange { scale: u32, bits: u32 },
 
-    #[error("decimal multiply overflowed the {bits}-bit mantissa's intermediate at scale 10^{scale}")]
+    #[error(
+        "decimal multiply overflowed the {bits}-bit mantissa's intermediate at scale 10^{scale}"
+    )]
     MultiplyOverflow { bits: u32, scale: u32 },
 }
 
@@ -84,7 +90,10 @@ impl ToFixed<i64> {
         10_i64
             .checked_pow(scale)
             .ok_or(DecimalError::ScaleOutOfRange { scale, bits: 64 })?;
-        Ok(Self { scale, marker: PhantomData })
+        Ok(Self {
+            scale,
+            marker: PhantomData,
+        })
     }
 }
 
@@ -111,7 +120,10 @@ impl FromFixed<i64> {
         10_i64
             .checked_pow(scale)
             .ok_or(DecimalError::ScaleOutOfRange { scale, bits: 64 })?;
-        Ok(Self { scale, marker: PhantomData })
+        Ok(Self {
+            scale,
+            marker: PhantomData,
+        })
     }
 }
 
@@ -138,7 +150,10 @@ impl ToFixed<i128> {
         10_i128
             .checked_pow(scale)
             .ok_or(DecimalError::ScaleOutOfRange { scale, bits: 128 })?;
-        Ok(Self { scale, marker: PhantomData })
+        Ok(Self {
+            scale,
+            marker: PhantomData,
+        })
     }
 }
 
@@ -165,7 +180,10 @@ impl FromFixed<i128> {
         10_i128
             .checked_pow(scale)
             .ok_or(DecimalError::ScaleOutOfRange { scale, bits: 128 })?;
-        Ok(Self { scale, marker: PhantomData })
+        Ok(Self {
+            scale,
+            marker: PhantomData,
+        })
     }
 }
 
@@ -192,7 +210,10 @@ impl DecimalMultiply<i64> {
         10_i128
             .checked_pow(scale)
             .ok_or(DecimalError::ScaleOutOfRange { scale, bits: 128 })?;
-        Ok(Self { scale, marker: PhantomData })
+        Ok(Self {
+            scale,
+            marker: PhantomData,
+        })
     }
 }
 
@@ -213,7 +234,8 @@ impl Pipe for DecimalMultiply<i64> {
             let widened = i128::from(left) * i128::from(right);
             let divisor = 10_i128.pow(scale);
             let rescaled = widened / divisor;
-            i64::try_from(rescaled).map_err(|_error| DecimalError::MultiplyOverflow { bits: 64, scale })
+            i64::try_from(rescaled)
+                .map_err(|_error| DecimalError::MultiplyOverflow { bits: 64, scale })
         }
     }
 }
@@ -225,7 +247,10 @@ impl DecimalMultiply<i128> {
         10_i128
             .checked_pow(scale)
             .ok_or(DecimalError::ScaleOutOfRange { scale, bits: 128 })?;
-        Ok(Self { scale, marker: PhantomData })
+        Ok(Self {
+            scale,
+            marker: PhantomData,
+        })
     }
 }
 
@@ -238,7 +263,10 @@ impl Pipe for DecimalMultiply<i128> {
     /// so the product itself is the boundary: [`i128::checked_mul`] reports
     /// overflow directly rather than this pipe attempting an intermediate
     /// that does not exist.
-    fn call(&self, (left, right): (i128, i128)) -> impl Future<Output = Result<i128, DecimalError>> {
+    fn call(
+        &self,
+        (left, right): (i128, i128),
+    ) -> impl Future<Output = Result<i128, DecimalError>> {
         let scale = self.scale;
         async move {
             let product = left
@@ -310,12 +338,24 @@ mod tests {
         let one = 10_i128.pow(9);
         let past_boundary = 10_i128.pow(13) * one; // 1e13, past the ~1e12 measured ceiling
         let error = block_on(pipe.call((past_boundary, past_boundary))).expect_err("exceeds i128");
-        assert_eq!(error, DecimalError::MultiplyOverflow { bits: 128, scale: 9 });
+        assert_eq!(
+            error,
+            DecimalError::MultiplyOverflow {
+                bits: 128,
+                scale: 9
+            }
+        );
     }
 
     #[test]
     fn scale_out_of_range_is_rejected_at_construction_not_at_call_time() {
         let error = ToFixed::<i64>::new(19).expect_err("10^19 overflows i64");
-        assert_eq!(error, DecimalError::ScaleOutOfRange { scale: 19, bits: 64 });
+        assert_eq!(
+            error,
+            DecimalError::ScaleOutOfRange {
+                scale: 19,
+                bits: 64
+            }
+        );
     }
 }

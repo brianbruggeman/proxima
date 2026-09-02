@@ -64,14 +64,18 @@ mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
     use proptest::prelude::*;
-    
+
     #[proxima::test]
     #[case::forward(1, 2, true)]
     #[case::backward(2, 1, false)]
     #[case::equal(5, 5, false)]
     #[case::wrap_forward(0xFFFF_FFFF, 0, true)]
     #[case::wrap_backward(0, 0xFFFF_FFFF, false)]
-    async fn precedes_follows_rfc1982(#[case] left: u32, #[case] right: u32, #[case] expected: bool) {
+    async fn precedes_follows_rfc1982(
+        #[case] left: u32,
+        #[case] right: u32,
+        #[case] expected: bool,
+    ) {
         assert_eq!(SeqNum(left).precedes(SeqNum(right)), expected);
     }
 

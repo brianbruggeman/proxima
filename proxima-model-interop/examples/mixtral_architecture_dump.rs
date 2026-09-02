@@ -29,11 +29,20 @@ fn main() {
     let architecture = architecture_from_metadata(&parsed).expect("derive architecture");
     println!("{architecture:#?}");
 
-    let stacked_present = parsed.tensors.iter().any(|tensor| tensor.name == "blk.0.ffn_gate_exps.weight");
+    let stacked_present = parsed
+        .tensors
+        .iter()
+        .any(|tensor| tensor.name == "blk.0.ffn_gate_exps.weight");
     println!("blk.0.ffn_gate_exps.weight present={stacked_present}");
     for tensor in &parsed.tensors {
-        if tensor.name.starts_with("blk.0.ffn_gate") || tensor.name.starts_with("blk.0.ffn_up") || tensor.name.starts_with("blk.0.ffn_down") {
-            println!("{} type={:?} dims={:?}", tensor.name, tensor.ggml_type, tensor.dims);
+        if tensor.name.starts_with("blk.0.ffn_gate")
+            || tensor.name.starts_with("blk.0.ffn_up")
+            || tensor.name.starts_with("blk.0.ffn_down")
+        {
+            println!(
+                "{} type={:?} dims={:?}",
+                tensor.name, tensor.ggml_type, tensor.dims
+            );
         }
     }
 }

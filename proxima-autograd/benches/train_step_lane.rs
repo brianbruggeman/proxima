@@ -49,7 +49,10 @@ use proxima_autograd::adjoint::differentiate_wanted;
 use proxima_autograd::loss::softmax_cross_entropy;
 use proxima_autograd::optimizer::{AdamConfig, AdamOperands, adam_step, step_input};
 use proxima_autograd::train::{State, train_step};
-use proxima_tensor::cpu::{QuantizedBlock, StaticArena, build_static_arena, evaluate_named_with_arena, evaluate_quantized_named_with_scratch};
+use proxima_tensor::cpu::{
+    QuantizedBlock, StaticArena, build_static_arena, evaluate_named_with_arena,
+    evaluate_quantized_named_with_scratch,
+};
 use proxima_tensor::dtype::DType;
 use proxima_tensor::map::{self, IndexMap};
 use proxima_tensor::op::{self, Extent, NodeId, Op, ReduceInit, ScalarOp};
@@ -75,14 +78,29 @@ fn train_step_scratch(
     let mut outputs = Vec::with_capacity(rebind.len() + 1);
     outputs.push(loss);
     outputs.extend(rebind.iter().map(|(node, _)| *node));
-    let wrapped: Vec<(&str, QuantizedBlock)> = named.iter().map(|(name, data)| (*name, QuantizedBlock::Float32(data))).collect();
-    let evaluated = evaluate_quantized_named_with_scratch(program, &[], &wrapped, &outputs, free_buffers, validated_weight_nodes)
-        .expect("train_step_scratch evaluates");
-    let loss_value = evaluated.get(loss).and_then(|(data, _)| data.first().copied()).unwrap_or(0.0);
+    let wrapped: Vec<(&str, QuantizedBlock)> = named
+        .iter()
+        .map(|(name, data)| (*name, QuantizedBlock::Float32(data)))
+        .collect();
+    let evaluated = evaluate_quantized_named_with_scratch(
+        program,
+        &[],
+        &wrapped,
+        &outputs,
+        free_buffers,
+        validated_weight_nodes,
+    )
+    .expect("train_step_scratch evaluates");
+    let loss_value = evaluated
+        .get(loss)
+        .and_then(|(data, _)| data.first().copied())
+        .unwrap_or(0.0);
     let next_state = rebind
         .iter()
         .map(|(node, name)| {
-            let values = evaluated.get(*node).map_or_else(Vec::new, |(data, _)| data.to_vec());
+            let values = evaluated
+                .get(*node)
+                .map_or_else(Vec::new, |(data, _)| data.to_vec());
             (String::from(*name), values)
         })
         .collect();
@@ -95,13 +113,23 @@ fn train_step_scratch(
 /// outside the sweep loop, so every call here reuses the SAME per-node
 /// buffers `build_static_arena` sized once, with no `shape::infer`, no
 /// `bind::bind`, and no per-node `Vec` allocation on this call's own path.
-fn train_step_arena(arena: &mut StaticArena, named: &[(&str, &[f32])], loss: NodeId, rebind: &[(NodeId, &str)]) -> (f32, State) {
+fn train_step_arena(
+    arena: &mut StaticArena,
+    named: &[(&str, &[f32])],
+    loss: NodeId,
+    rebind: &[(NodeId, &str)],
+) -> (f32, State) {
     let evaluated = evaluate_named_with_arena(arena, named).expect("train_step_arena evaluates");
-    let loss_value = evaluated.get(loss).and_then(|(data, _)| data.first().copied()).unwrap_or(0.0);
+    let loss_value = evaluated
+        .get(loss)
+        .and_then(|(data, _)| data.first().copied())
+        .unwrap_or(0.0);
     let next_state = rebind
         .iter()
         .map(|(node, name)| {
-            let values = evaluated.get(*node).map_or_else(Vec::new, |(data, _)| data.to_vec());
+            let values = evaluated
+                .get(*node)
+                .map_or_else(Vec::new, |(data, _)| data.to_vec());
             (String::from(*name), values)
         })
         .collect();
@@ -136,7 +164,12 @@ fn idx_header(bytes: &[u8]) -> (usize, Vec<usize>) {
     let mut extents = Vec::with_capacity(dimension_count - 1);
     for axis in 1..dimension_count {
         let offset = 4 + axis * 4;
-        extents.push(u32::from_be_bytes([bytes[offset], bytes[offset + 1], bytes[offset + 2], bytes[offset + 3]]) as usize);
+        extents.push(u32::from_be_bytes([
+            bytes[offset],
+            bytes[offset + 1],
+            bytes[offset + 2],
+            bytes[offset + 3],
+        ]) as usize);
     }
     (item_count, extents)
 }
@@ -147,7 +180,10 @@ fn load_normalized_images(path: &Path, limit: usize) -> Vec<f32> {
     let pixel_count = extents.iter().product::<usize>();
     let take = item_count.min(limit);
     let header_length = 4 + extents.len() * 4 + 4;
-    bytes[header_length..header_length + take * pixel_count].iter().map(|&pixel| ((pixel as f32 / 255.0) - 0.1307) / 0.3081).collect()
+    bytes[header_length..header_length + take * pixel_count]
+        .iter()
+        .map(|&pixel| ((pixel as f32 / 255.0) - 0.1307) / 0.3081)
+        .collect()
 }
 
 fn load_one_hot_labels(path: &Path, limit: usize) -> Vec<f32> {
@@ -163,7 +199,14 @@ fn load_one_hot_labels(path: &Path, limit: usize) -> Vec<f32> {
 }
 
 fn leaf(program: &mut Vec<Op>, name: &str, shape: Vec<Extent>) -> NodeId {
-    op::append(program, Op::Input { dtype: DType::Float32, shape, name: Some(name.into()) })
+    op::append(
+        program,
+        Op::Input {
+            dtype: DType::Float32,
+            shape,
+            name: Some(name.into()),
+        },
+    )
 }
 
 fn identity(rank: u16) -> IndexMap {
@@ -175,10 +218,23 @@ fn axes(rank: u16, selected: &[u16]) -> IndexMap {
 }
 
 fn elementwise(program: &mut Vec<Op>, body: ScalarOp, operands: Vec<(NodeId, IndexMap)>) -> NodeId {
-    op::append(program, Op::Elementwise { dtype: DType::Float32, body, operands, name: None })
+    op::append(
+        program,
+        Op::Elementwise {
+            dtype: DType::Float32,
+            body,
+            operands,
+            name: None,
+        },
+    )
 }
 
-fn reduce_add(program: &mut Vec<Op>, operand: NodeId, in_map: IndexMap, out_map: IndexMap) -> NodeId {
+fn reduce_add(
+    program: &mut Vec<Op>,
+    operand: NodeId,
+    in_map: IndexMap,
+    out_map: IndexMap,
+) -> NodeId {
     op::append(
         program,
         Op::Reduce(op::Reduce {
@@ -197,9 +253,17 @@ fn reduce_add(program: &mut Vec<Op>, operand: NodeId, in_map: IndexMap, out_map:
 /// `real_mnist_training.rs`'s own `batched_dense`, verbatim -- a bench
 /// binary cannot depend on a sibling test binary's helpers.
 fn batched_dense(program: &mut Vec<Op>, x: NodeId, w: NodeId, b: NodeId) -> NodeId {
-    let product = elementwise(program, ScalarOp::Multiply, vec![(w, axes(3, &[1, 2])), (x, axes(3, &[0, 1]))]);
+    let product = elementwise(
+        program,
+        ScalarOp::Multiply,
+        vec![(w, axes(3, &[1, 2])), (x, axes(3, &[0, 1]))],
+    );
     let matmul = reduce_add(program, product, identity(3), axes(3, &[0, 2]));
-    elementwise(program, ScalarOp::Add, vec![(matmul, identity(2)), (b, axes(2, &[1]))])
+    elementwise(
+        program,
+        ScalarOp::Add,
+        vec![(matmul, identity(2)), (b, axes(2, &[1]))],
+    )
 }
 
 struct Network {
@@ -213,11 +277,33 @@ struct Network {
 
 fn build_network() -> Network {
     let mut program = Vec::new();
-    let x = leaf(&mut program, "x", vec![Extent::Static(BATCH as u32), Extent::Static(IN_DIM as u32)]);
-    let y = leaf(&mut program, "y", vec![Extent::Static(BATCH as u32), Extent::Static(OUT_DIM as u32)]);
-    let w1 = leaf(&mut program, "w1", vec![Extent::Static(IN_DIM as u32), Extent::Static(HIDDEN_DIM as u32)]);
+    let x = leaf(
+        &mut program,
+        "x",
+        vec![Extent::Static(BATCH as u32), Extent::Static(IN_DIM as u32)],
+    );
+    let y = leaf(
+        &mut program,
+        "y",
+        vec![Extent::Static(BATCH as u32), Extent::Static(OUT_DIM as u32)],
+    );
+    let w1 = leaf(
+        &mut program,
+        "w1",
+        vec![
+            Extent::Static(IN_DIM as u32),
+            Extent::Static(HIDDEN_DIM as u32),
+        ],
+    );
     let b1 = leaf(&mut program, "b1", vec![Extent::Static(HIDDEN_DIM as u32)]);
-    let w2 = leaf(&mut program, "w2", vec![Extent::Static(HIDDEN_DIM as u32), Extent::Static(OUT_DIM as u32)]);
+    let w2 = leaf(
+        &mut program,
+        "w2",
+        vec![
+            Extent::Static(HIDDEN_DIM as u32),
+            Extent::Static(OUT_DIM as u32),
+        ],
+    );
     let b2 = leaf(&mut program, "b2", vec![Extent::Static(OUT_DIM as u32)]);
 
     let h_pre = batched_dense(&mut program, x, w1, b1);
@@ -225,10 +311,28 @@ fn build_network() -> Network {
     let logits = batched_dense(&mut program, h, w2, b2);
     let summed_loss = softmax_cross_entropy(&mut program, DType::Float32, logits, y, 2, 1);
 
-    let inverse_batch = op::append(&mut program, Op::Constant { dtype: DType::Float32, shape: Vec::new(), value: 1.0 / BATCH as f32 });
-    let loss = elementwise(&mut program, ScalarOp::Multiply, vec![(summed_loss, identity(0)), (inverse_batch, identity(0))]);
+    let inverse_batch = op::append(
+        &mut program,
+        Op::Constant {
+            dtype: DType::Float32,
+            shape: Vec::new(),
+            value: 1.0 / BATCH as f32,
+        },
+    );
+    let loss = elementwise(
+        &mut program,
+        ScalarOp::Multiply,
+        vec![(summed_loss, identity(0)), (inverse_batch, identity(0))],
+    );
 
-    Network { program, w1, b1, w2, b2, loss }
+    Network {
+        program,
+        w1,
+        b1,
+        w2,
+        b2,
+        loss,
+    }
 }
 
 fn he_init(seed: u64, count: usize, fan_in: usize) -> Vec<f32> {
@@ -266,28 +370,120 @@ fn build_training_lane() -> TrainingLane {
     // `differentiate`'s own `x`/`y` gradients would be computed and then
     // never read, matching ROW 161's `grad_x`=8.58%-of-step finding.
     let wanted = [network.w1, network.b1, network.w2, network.b2];
-    let differentiated = differentiate_wanted(&network.program, network.loss, &wanted).expect("scalar loss differentiates");
-    let grad_w1 = differentiated.gradient_of_named("w1").expect("w1 feeds the loss");
-    let grad_b1 = differentiated.gradient_of_named("b1").expect("b1 feeds the loss");
-    let grad_w2 = differentiated.gradient_of_named("w2").expect("w2 feeds the loss");
-    let grad_b2 = differentiated.gradient_of_named("b2").expect("b2 feeds the loss");
+    let differentiated = differentiate_wanted(&network.program, network.loss, &wanted)
+        .expect("scalar loss differentiates");
+    let grad_w1 = differentiated
+        .gradient_of_named("w1")
+        .expect("w1 feeds the loss");
+    let grad_b1 = differentiated
+        .gradient_of_named("b1")
+        .expect("b1 feeds the loss");
+    let grad_w2 = differentiated
+        .gradient_of_named("w2")
+        .expect("w2 feeds the loss");
+    let grad_b2 = differentiated
+        .gradient_of_named("b2")
+        .expect("b2 feeds the loss");
     let mut program = differentiated.program;
-    let config = AdamConfig { learning_rate: 0.001, ..AdamConfig::default() };
+    let config = AdamConfig {
+        learning_rate: 0.001,
+        ..AdamConfig::default()
+    };
     let step_node = step_input(&mut program, "step");
 
-    let m_w1 = leaf(&mut program, "m_w1", vec![Extent::Static(IN_DIM as u32), Extent::Static(HIDDEN_DIM as u32)]);
-    let v_w1 = leaf(&mut program, "v_w1", vec![Extent::Static(IN_DIM as u32), Extent::Static(HIDDEN_DIM as u32)]);
-    let m_b1 = leaf(&mut program, "m_b1", vec![Extent::Static(HIDDEN_DIM as u32)]);
-    let v_b1 = leaf(&mut program, "v_b1", vec![Extent::Static(HIDDEN_DIM as u32)]);
-    let m_w2 = leaf(&mut program, "m_w2", vec![Extent::Static(HIDDEN_DIM as u32), Extent::Static(OUT_DIM as u32)]);
-    let v_w2 = leaf(&mut program, "v_w2", vec![Extent::Static(HIDDEN_DIM as u32), Extent::Static(OUT_DIM as u32)]);
+    let m_w1 = leaf(
+        &mut program,
+        "m_w1",
+        vec![
+            Extent::Static(IN_DIM as u32),
+            Extent::Static(HIDDEN_DIM as u32),
+        ],
+    );
+    let v_w1 = leaf(
+        &mut program,
+        "v_w1",
+        vec![
+            Extent::Static(IN_DIM as u32),
+            Extent::Static(HIDDEN_DIM as u32),
+        ],
+    );
+    let m_b1 = leaf(
+        &mut program,
+        "m_b1",
+        vec![Extent::Static(HIDDEN_DIM as u32)],
+    );
+    let v_b1 = leaf(
+        &mut program,
+        "v_b1",
+        vec![Extent::Static(HIDDEN_DIM as u32)],
+    );
+    let m_w2 = leaf(
+        &mut program,
+        "m_w2",
+        vec![
+            Extent::Static(HIDDEN_DIM as u32),
+            Extent::Static(OUT_DIM as u32),
+        ],
+    );
+    let v_w2 = leaf(
+        &mut program,
+        "v_w2",
+        vec![
+            Extent::Static(HIDDEN_DIM as u32),
+            Extent::Static(OUT_DIM as u32),
+        ],
+    );
     let m_b2 = leaf(&mut program, "m_b2", vec![Extent::Static(OUT_DIM as u32)]);
     let v_b2 = leaf(&mut program, "v_b2", vec![Extent::Static(OUT_DIM as u32)]);
 
-    let (new_w1, new_m_w1, new_v_w1) = adam_step(&mut program, &config, 2, AdamOperands { param: network.w1, grad: grad_w1, m: m_w1, v: v_w1 }, step_node);
-    let (new_b1, new_m_b1, new_v_b1) = adam_step(&mut program, &config, 1, AdamOperands { param: network.b1, grad: grad_b1, m: m_b1, v: v_b1 }, step_node);
-    let (new_w2, new_m_w2, new_v_w2) = adam_step(&mut program, &config, 2, AdamOperands { param: network.w2, grad: grad_w2, m: m_w2, v: v_w2 }, step_node);
-    let (new_b2, new_m_b2, new_v_b2) = adam_step(&mut program, &config, 1, AdamOperands { param: network.b2, grad: grad_b2, m: m_b2, v: v_b2 }, step_node);
+    let (new_w1, new_m_w1, new_v_w1) = adam_step(
+        &mut program,
+        &config,
+        2,
+        AdamOperands {
+            param: network.w1,
+            grad: grad_w1,
+            m: m_w1,
+            v: v_w1,
+        },
+        step_node,
+    );
+    let (new_b1, new_m_b1, new_v_b1) = adam_step(
+        &mut program,
+        &config,
+        1,
+        AdamOperands {
+            param: network.b1,
+            grad: grad_b1,
+            m: m_b1,
+            v: v_b1,
+        },
+        step_node,
+    );
+    let (new_w2, new_m_w2, new_v_w2) = adam_step(
+        &mut program,
+        &config,
+        2,
+        AdamOperands {
+            param: network.w2,
+            grad: grad_w2,
+            m: m_w2,
+            v: v_w2,
+        },
+        step_node,
+    );
+    let (new_b2, new_m_b2, new_v_b2) = adam_step(
+        &mut program,
+        &config,
+        1,
+        AdamOperands {
+            param: network.b2,
+            grad: grad_b2,
+            m: m_b2,
+            v: v_b2,
+        },
+        step_node,
+    );
 
     let rebind: Vec<(NodeId, &'static str)> = vec![
         (new_w1, "w1"),
@@ -305,13 +501,19 @@ fn build_training_lane() -> TrainingLane {
     ];
 
     let initial_state: State = vec![
-        ("w1".into(), he_init(0x9E37_79B9, IN_DIM * HIDDEN_DIM, IN_DIM)),
+        (
+            "w1".into(),
+            he_init(0x9E37_79B9, IN_DIM * HIDDEN_DIM, IN_DIM),
+        ),
         ("m_w1".into(), zeros(IN_DIM * HIDDEN_DIM)),
         ("v_w1".into(), zeros(IN_DIM * HIDDEN_DIM)),
         ("b1".into(), zeros(HIDDEN_DIM)),
         ("m_b1".into(), zeros(HIDDEN_DIM)),
         ("v_b1".into(), zeros(HIDDEN_DIM)),
-        ("w2".into(), he_init(0x8542_D2C3, HIDDEN_DIM * OUT_DIM, HIDDEN_DIM)),
+        (
+            "w2".into(),
+            he_init(0x8542_D2C3, HIDDEN_DIM * OUT_DIM, HIDDEN_DIM),
+        ),
         ("m_w2".into(), zeros(HIDDEN_DIM * OUT_DIM)),
         ("v_w2".into(), zeros(HIDDEN_DIM * OUT_DIM)),
         ("b2".into(), zeros(OUT_DIM)),
@@ -323,7 +525,11 @@ fn build_training_lane() -> TrainingLane {
     let train_one_hot = load_one_hot_labels(&train_labels_path(), TRAIN_EXAMPLES);
     let example_count = TRAIN_EXAMPLES - (TRAIN_EXAMPLES % BATCH);
     let batch_count = example_count / BATCH;
-    assert!(batch_count >= WARMUP_STEPS + MEASURED_STEPS, "need {} distinct real batches, got {batch_count}", WARMUP_STEPS + MEASURED_STEPS);
+    assert!(
+        batch_count >= WARMUP_STEPS + MEASURED_STEPS,
+        "need {} distinct real batches, got {batch_count}",
+        WARMUP_STEPS + MEASURED_STEPS
+    );
 
     let batches: Vec<Vec<(&'static str, Vec<f32>)>> = (0..batch_count)
         .map(|batch_index| {
@@ -331,21 +537,40 @@ fn build_training_lane() -> TrainingLane {
             let label_start = batch_index * BATCH * OUT_DIM;
             let step_value = vec![(batch_index + 1) as f32];
             vec![
-                ("x", train_images[image_start..image_start + BATCH * IN_DIM].to_vec()),
-                ("y", train_one_hot[label_start..label_start + BATCH * OUT_DIM].to_vec()),
+                (
+                    "x",
+                    train_images[image_start..image_start + BATCH * IN_DIM].to_vec(),
+                ),
+                (
+                    "y",
+                    train_one_hot[label_start..label_start + BATCH * OUT_DIM].to_vec(),
+                ),
                 ("step", step_value),
             ]
         })
         .collect();
 
-    TrainingLane { program, loss: network.loss, rebind, initial_state, batches }
+    TrainingLane {
+        program,
+        loss: network.loss,
+        rebind,
+        initial_state,
+        batches,
+    }
 }
 
-fn named_for_step<'a>(batch: &'a [(&'static str, Vec<f32>)], state: &'a State) -> Vec<(&'a str, &'a [f32])> {
+fn named_for_step<'a>(
+    batch: &'a [(&'static str, Vec<f32>)],
+    state: &'a State,
+) -> Vec<(&'a str, &'a [f32])> {
     batch
         .iter()
         .map(|(name, values)| (*name, values.as_slice()))
-        .chain(state.iter().map(|(name, values)| (name.as_str(), values.as_slice())))
+        .chain(
+            state
+                .iter()
+                .map(|(name, values)| (name.as_str(), values.as_slice())),
+        )
         .collect()
 }
 
@@ -368,7 +593,8 @@ fn sweep_baseline(lane: &TrainingLane) -> SweepResult {
     let mut state = lane.initial_state.clone();
     for batch in &lane.batches[..WARMUP_STEPS] {
         let named = named_for_step(batch, &state);
-        let (_loss, next_state) = train_step(&lane.program, lane.loss, &lane.rebind, &named).expect("warm-up train_step evaluates");
+        let (_loss, next_state) = train_step(&lane.program, lane.loss, &lane.rebind, &named)
+            .expect("warm-up train_step evaluates");
         state = next_state;
     }
 
@@ -377,12 +603,17 @@ fn sweep_baseline(lane: &TrainingLane) -> SweepResult {
     for batch in &lane.batches[WARMUP_STEPS..WARMUP_STEPS + MEASURED_STEPS] {
         let named = named_for_step(batch, &state);
         let start = Instant::now();
-        let (loss_value, next_state) = train_step(&lane.program, lane.loss, &lane.rebind, &named).expect("measured train_step evaluates");
+        let (loss_value, next_state) = train_step(&lane.program, lane.loss, &lane.rebind, &named)
+            .expect("measured train_step evaluates");
         per_step_ns.push(start.elapsed().as_nanos() as u64);
         loss_curve.push(loss_value);
         state = next_state;
     }
-    SweepResult { per_step_ns, loss_curve, final_state: state }
+    SweepResult {
+        per_step_ns,
+        loss_curve,
+        final_state: state,
+    }
 }
 
 /// Same real training run as [`sweep_baseline`], same batches, same initial
@@ -397,7 +628,14 @@ fn sweep_scratch(lane: &TrainingLane) -> SweepResult {
     let mut validated_weight_nodes: Option<BTreeSet<NodeId>> = None;
     for batch in &lane.batches[..WARMUP_STEPS] {
         let named = named_for_step(batch, &state);
-        let (_loss, next_state) = train_step_scratch(&lane.program, lane.loss, &lane.rebind, &named, &mut free_buffers, &mut validated_weight_nodes);
+        let (_loss, next_state) = train_step_scratch(
+            &lane.program,
+            lane.loss,
+            &lane.rebind,
+            &named,
+            &mut free_buffers,
+            &mut validated_weight_nodes,
+        );
         state = next_state;
     }
 
@@ -406,12 +644,23 @@ fn sweep_scratch(lane: &TrainingLane) -> SweepResult {
     for batch in &lane.batches[WARMUP_STEPS..WARMUP_STEPS + MEASURED_STEPS] {
         let named = named_for_step(batch, &state);
         let start = Instant::now();
-        let (loss_value, next_state) = train_step_scratch(&lane.program, lane.loss, &lane.rebind, &named, &mut free_buffers, &mut validated_weight_nodes);
+        let (loss_value, next_state) = train_step_scratch(
+            &lane.program,
+            lane.loss,
+            &lane.rebind,
+            &named,
+            &mut free_buffers,
+            &mut validated_weight_nodes,
+        );
         per_step_ns.push(start.elapsed().as_nanos() as u64);
         loss_curve.push(loss_value);
         state = next_state;
     }
-    SweepResult { per_step_ns, loss_curve, final_state: state }
+    SweepResult {
+        per_step_ns,
+        loss_curve,
+        final_state: state,
+    }
 }
 
 /// Same real training run as [`sweep_baseline`], same batches, same initial
@@ -422,7 +671,8 @@ fn sweep_arena(lane: &TrainingLane) -> SweepResult {
     let mut outputs = Vec::with_capacity(lane.rebind.len() + 1);
     outputs.push(lane.loss);
     outputs.extend(lane.rebind.iter().map(|(node, _)| *node));
-    let mut arena = build_static_arena(&lane.program, &[], &outputs).expect("build_static_arena builds the training lane");
+    let mut arena = build_static_arena(&lane.program, &[], &outputs)
+        .expect("build_static_arena builds the training lane");
 
     let mut state = lane.initial_state.clone();
     for batch in &lane.batches[..WARMUP_STEPS] {
@@ -436,12 +686,17 @@ fn sweep_arena(lane: &TrainingLane) -> SweepResult {
     for batch in &lane.batches[WARMUP_STEPS..WARMUP_STEPS + MEASURED_STEPS] {
         let named = named_for_step(batch, &state);
         let start = Instant::now();
-        let (loss_value, next_state) = train_step_arena(&mut arena, &named, lane.loss, &lane.rebind);
+        let (loss_value, next_state) =
+            train_step_arena(&mut arena, &named, lane.loss, &lane.rebind);
         per_step_ns.push(start.elapsed().as_nanos() as u64);
         loss_curve.push(loss_value);
         state = next_state;
     }
-    SweepResult { per_step_ns, loss_curve, final_state: state }
+    SweepResult {
+        per_step_ns,
+        loss_curve,
+        final_state: state,
+    }
 }
 
 /// Correctness gate for ROW 164: runs [`train_step`] (fresh-alloc baseline)
@@ -454,32 +709,61 @@ fn assert_arena_bit_identical_to_baseline(lane: &TrainingLane) {
     let mut outputs = Vec::with_capacity(lane.rebind.len() + 1);
     outputs.push(lane.loss);
     outputs.extend(lane.rebind.iter().map(|(node, _)| *node));
-    let mut arena = build_static_arena(&lane.program, &[], &outputs).expect("build_static_arena builds the training lane");
+    let mut arena = build_static_arena(&lane.program, &[], &outputs)
+        .expect("build_static_arena builds the training lane");
 
     let mut baseline_state = lane.initial_state.clone();
     let mut arena_state = lane.initial_state.clone();
     for (step_index, batch) in lane.batches[..3].iter().enumerate() {
         let baseline_named = named_for_step(batch, &baseline_state);
-        let (baseline_loss, next_baseline_state) = train_step(&lane.program, lane.loss, &lane.rebind, &baseline_named).expect("baseline train_step evaluates");
+        let (baseline_loss, next_baseline_state) =
+            train_step(&lane.program, lane.loss, &lane.rebind, &baseline_named)
+                .expect("baseline train_step evaluates");
 
         let arena_named = named_for_step(batch, &arena_state);
-        let (arena_loss, next_arena_state) = train_step_arena(&mut arena, &arena_named, lane.loss, &lane.rebind);
+        let (arena_loss, next_arena_state) =
+            train_step_arena(&mut arena, &arena_named, lane.loss, &lane.rebind);
 
-        assert_eq!(baseline_loss.to_bits(), arena_loss.to_bits(), "step {step_index}: loss diverged between baseline and arena paths");
-        assert_eq!(next_baseline_state.len(), 12, "step {step_index}: expected exactly 12 rebind outputs");
-        assert_eq!(next_arena_state.len(), 12, "step {step_index}: expected exactly 12 rebind outputs");
-        for ((baseline_name, baseline_values), (arena_name, arena_values)) in next_baseline_state.iter().zip(next_arena_state.iter()) {
-            assert_eq!(baseline_name, arena_name, "step {step_index}: rebind name ordering diverged");
+        assert_eq!(
+            baseline_loss.to_bits(),
+            arena_loss.to_bits(),
+            "step {step_index}: loss diverged between baseline and arena paths"
+        );
+        assert_eq!(
+            next_baseline_state.len(),
+            12,
+            "step {step_index}: expected exactly 12 rebind outputs"
+        );
+        assert_eq!(
+            next_arena_state.len(),
+            12,
+            "step {step_index}: expected exactly 12 rebind outputs"
+        );
+        for ((baseline_name, baseline_values), (arena_name, arena_values)) in
+            next_baseline_state.iter().zip(next_arena_state.iter())
+        {
             assert_eq!(
-                baseline_values.iter().map(|value| value.to_bits()).collect::<Vec<_>>(),
-                arena_values.iter().map(|value| value.to_bits()).collect::<Vec<_>>(),
+                baseline_name, arena_name,
+                "step {step_index}: rebind name ordering diverged"
+            );
+            assert_eq!(
+                baseline_values
+                    .iter()
+                    .map(|value| value.to_bits())
+                    .collect::<Vec<_>>(),
+                arena_values
+                    .iter()
+                    .map(|value| value.to_bits())
+                    .collect::<Vec<_>>(),
                 "step {step_index}: rebind output {baseline_name} diverged between baseline and arena paths"
             );
         }
         baseline_state = next_baseline_state;
         arena_state = next_arena_state;
     }
-    eprintln!("train_step_lane: arena vs baseline bit-identical over 3 consecutive real steps (loss + all 12 rebind outputs)");
+    eprintln!(
+        "train_step_lane: arena vs baseline bit-identical over 3 consecutive real steps (loss + all 12 rebind outputs)"
+    );
 }
 
 fn report_sweep(label: &str, result: &SweepResult) {
@@ -490,8 +774,13 @@ fn report_sweep(label: &str, result: &SweepResult) {
     );
     let first_quarter = MEASURED_STEPS / 4;
     let first_avg = result.loss_curve[..first_quarter].iter().sum::<f32>() / first_quarter as f32;
-    let last_avg = result.loss_curve[MEASURED_STEPS - first_quarter..].iter().sum::<f32>() / first_quarter as f32;
-    eprintln!("train_step_lane[{label}]: convergence gate: first-quarter-avg-loss={first_avg:.4} last-quarter-avg-loss={last_avg:.4}");
+    let last_avg = result.loss_curve[MEASURED_STEPS - first_quarter..]
+        .iter()
+        .sum::<f32>()
+        / first_quarter as f32;
+    eprintln!(
+        "train_step_lane[{label}]: convergence gate: first-quarter-avg-loss={first_avg:.4} last-quarter-avg-loss={last_avg:.4}"
+    );
     assert!(
         last_avg < first_avg,
         "{label}: expected loss to decrease over the {MEASURED_STEPS}-step benched run (real training step, not a cost-only replay), got {first_avg:.4} -> {last_avg:.4}"
@@ -500,7 +789,11 @@ fn report_sweep(label: &str, result: &SweepResult) {
     let mut sorted_ns = result.per_step_ns.clone();
     sorted_ns.sort_unstable();
     let mean_ns = sorted_ns.iter().sum::<u64>() as f64 / sorted_ns.len() as f64;
-    let variance = sorted_ns.iter().map(|&value| (value as f64 - mean_ns).powi(2)).sum::<f64>() / sorted_ns.len() as f64;
+    let variance = sorted_ns
+        .iter()
+        .map(|&value| (value as f64 - mean_ns).powi(2))
+        .sum::<f64>()
+        / sorted_ns.len() as f64;
     let cov = variance.sqrt() / mean_ns * 100.0;
     let p50_ns = percentile(&sorted_ns, 0.50);
     let p95_ns = percentile(&sorted_ns, 0.95);
@@ -531,7 +824,10 @@ fn main() {
     report_sweep("baseline train_step (fresh alloc every call)", &baseline);
 
     let scratch = sweep_scratch(&lane);
-    report_sweep("train_step_with_scratch (pool threaded across the run)", &scratch);
+    report_sweep(
+        "train_step_with_scratch (pool threaded across the run)",
+        &scratch,
+    );
 
     let arena = sweep_arena(&lane);
     report_sweep("train_step_arena (static arena, bind+size once)", &arena);
@@ -548,23 +844,37 @@ fn main() {
     group.sample_size(30);
 
     let baseline_state = baseline.final_state.clone();
-    group.bench_function("train_step_mlp_784_128_10_batch32_adam_baseline", |bencher| {
-        bencher.iter(|| {
-            let named = named_for_step(&fixed_named_batch, &baseline_state);
-            train_step(&lane.program, lane.loss, &lane.rebind, &named).expect("train_step evaluates")
-        });
-    });
+    group.bench_function(
+        "train_step_mlp_784_128_10_batch32_adam_baseline",
+        |bencher| {
+            bencher.iter(|| {
+                let named = named_for_step(&fixed_named_batch, &baseline_state);
+                train_step(&lane.program, lane.loss, &lane.rebind, &named)
+                    .expect("train_step evaluates")
+            });
+        },
+    );
 
     let scratch_state = scratch.final_state.clone();
     let scratch_pool: RefCell<ScratchPool> = RefCell::new((Vec::new(), None));
-    group.bench_function("train_step_mlp_784_128_10_batch32_adam_scratch", |bencher| {
-        bencher.iter(|| {
-            let named = named_for_step(&fixed_named_batch, &scratch_state);
-            let mut pool = scratch_pool.borrow_mut();
-            let (free_buffers, validated_weight_nodes) = &mut *pool;
-            train_step_scratch(&lane.program, lane.loss, &lane.rebind, &named, free_buffers, validated_weight_nodes)
-        });
-    });
+    group.bench_function(
+        "train_step_mlp_784_128_10_batch32_adam_scratch",
+        |bencher| {
+            bencher.iter(|| {
+                let named = named_for_step(&fixed_named_batch, &scratch_state);
+                let mut pool = scratch_pool.borrow_mut();
+                let (free_buffers, validated_weight_nodes) = &mut *pool;
+                train_step_scratch(
+                    &lane.program,
+                    lane.loss,
+                    &lane.rebind,
+                    &named,
+                    free_buffers,
+                    validated_weight_nodes,
+                )
+            });
+        },
+    );
     group.finish();
     criterion.final_summary();
 }

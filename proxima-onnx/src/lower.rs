@@ -51,7 +51,9 @@ use proxima_tensor::{
 };
 use thiserror::Error;
 
-use crate::messages::{AttributeProto, DimensionValue, GraphProto, NodeProto, TensorProto, TypeValue, ValueInfoProto};
+use crate::messages::{
+    AttributeProto, DimensionValue, GraphProto, NodeProto, TensorProto, TypeValue, ValueInfoProto,
+};
 
 /// Everything that can go wrong lowering a parsed ONNX graph into a
 /// [`proxima_tensor::Op`] program. Distinct from
@@ -68,15 +70,29 @@ pub enum LowerError {
     UnsupportedOp { name: String, op_type: String },
 
     #[error("node {name:?} (op_type {op_type:?}) references unknown value {value:?}")]
-    UnknownValue { name: String, op_type: String, value: String },
+    UnknownValue {
+        name: String,
+        op_type: String,
+        value: String,
+    },
 
     #[error("node {name:?} (op_type {op_type:?}) is missing required input at position {index}")]
-    MissingInput { name: String, op_type: String, index: usize },
+    MissingInput {
+        name: String,
+        op_type: String,
+        index: usize,
+    },
 
     #[error("node {name:?} (op_type {op_type:?}) has an unsupported shape: {reason}")]
-    UnsupportedShape { name: String, op_type: String, reason: String },
+    UnsupportedShape {
+        name: String,
+        op_type: String,
+        reason: String,
+    },
 
-    #[error("initializer {name:?} declares data_type {data_type} with no float_data/raw_data payload this lowering can decode")]
+    #[error(
+        "initializer {name:?} declares data_type {data_type} with no float_data/raw_data payload this lowering can decode"
+    )]
     UndecodableInitializer { name: String, data_type: i32 },
 
     #[error("graph {name:?} has no nodes")]
@@ -94,8 +110,14 @@ pub enum LowerError {
     /// which is out of scope for a dataflow program. See this module's own
     /// doc for the `If`/`Scan`/`Loop` classification this error is raised
     /// from.
-    #[error("node {name:?} (op_type {op_type:?}) needs control flow this dataflow ISA cannot express: {reason}")]
-    DataDependentControlFlow { name: String, op_type: String, reason: String },
+    #[error(
+        "node {name:?} (op_type {op_type:?}) needs control flow this dataflow ISA cannot express: {reason}"
+    )]
+    DataDependentControlFlow {
+        name: String,
+        op_type: String,
+        reason: String,
+    },
 }
 
 /// One ONNX value's lowering state: which [`NodeId`] produces it and its
@@ -218,7 +240,10 @@ pub fn lower_graph(graph: &GraphProto<'_>) -> Result<Lowered, LowerError> {
 /// `pins` directly rather than the caller mutating the parsed
 /// [`GraphProto`] beforehand (which would require an owned, mutable copy
 /// of borrowed proto data the parser never produces).
-pub fn lower_graph_pinned(graph: &GraphProto<'_>, pins: &BTreeMap<&str, u64>) -> Result<Lowered, LowerError> {
+pub fn lower_graph_pinned(
+    graph: &GraphProto<'_>,
+    pins: &BTreeMap<&str, u64>,
+) -> Result<Lowered, LowerError> {
     let mut program: Vec<Op> = Vec::new();
     let mut values: BTreeMap<String, Value> = BTreeMap::new();
 
@@ -239,7 +264,9 @@ pub fn lower_graph_pinned(graph: &GraphProto<'_>, pins: &BTreeMap<&str, u64>) ->
         .filter_map(|node| node.input.get(1).copied())
         .filter(|&name| {
             let used_elsewhere = graph.node.iter().any(|node| {
-                node.input.iter().enumerate().any(|(index, &input_name)| input_name == name && !(node.op_type == "Reshape" && index == 1))
+                node.input.iter().enumerate().any(|(index, &input_name)| {
+                    input_name == name && !(node.op_type == "Reshape" && index == 1)
+                })
             });
             let is_graph_output = graph.output.iter().any(|output| output.name == name);
             !used_elsewhere && !is_graph_output
@@ -256,7 +283,8 @@ pub fn lower_graph_pinned(graph: &GraphProto<'_>, pins: &BTreeMap<&str, u64>) ->
     for tensor in &graph.initializer {
         let shape = tensor_shape(tensor);
         let data = decode_numeric_tensor(tensor)?;
-        fold.initializer_data.insert(tensor.name.to_string(), data.clone());
+        fold.initializer_data
+            .insert(tensor.name.to_string(), data.clone());
         if shape_only_names.contains(tensor.name) {
             continue;
         }
@@ -264,11 +292,22 @@ pub fn lower_graph_pinned(graph: &GraphProto<'_>, pins: &BTreeMap<&str, u64>) ->
             &mut program,
             Op::Input {
                 dtype: onnx_dtype_to_op_dtype(tensor.data_type),
-                shape: shape.iter().map(|&extent| Extent::Static(extent as u32)).collect(),
+                shape: shape
+                    .iter()
+                    .map(|&extent| Extent::Static(extent as u32))
+                    .collect(),
                 name: Some(tensor.name.to_string()),
             },
         );
-        values.insert(tensor.name.to_string(), Value { node, shape, view: None, flatten_source: None });
+        values.insert(
+            tensor.name.to_string(),
+            Value {
+                node,
+                shape,
+                view: None,
+                flatten_source: None,
+            },
+        );
         fold.initializers.push((tensor.name.to_string(), data));
     }
 
@@ -288,21 +327,38 @@ pub fn lower_graph_pinned(graph: &GraphProto<'_>, pins: &BTreeMap<&str, u64>) ->
         // `Mul`), never as a `Gather` index -- tagging it `Int32` from its
         // ONNX declaration alone would trip that scan for no reason this
         // pass's own f32-storage convention needs.
-        let dtype = if graph_input_feeds_gather_indices(graph, input.name) { value_info_dtype(input) } else { DType::Float32 };
+        let dtype = if graph_input_feeds_gather_indices(graph, input.name) {
+            value_info_dtype(input)
+        } else {
+            DType::Float32
+        };
         let node = append(
             &mut program,
             Op::Input {
                 dtype,
-                shape: shape.iter().map(|&extent| Extent::Static(extent as u32)).collect(),
+                shape: shape
+                    .iter()
+                    .map(|&extent| Extent::Static(extent as u32))
+                    .collect(),
                 name: Some(input.name.to_string()),
             },
         );
-        values.insert(input.name.to_string(), Value { node, shape, view: None, flatten_source: None });
+        values.insert(
+            input.name.to_string(),
+            Value {
+                node,
+                shape,
+                view: None,
+                flatten_source: None,
+            },
+        );
         graph_inputs.push(input.name.to_string());
     }
 
     if graph.node.is_empty() {
-        return Err(LowerError::EmptyGraph { name: graph.name.to_string() });
+        return Err(LowerError::EmptyGraph {
+            name: graph.name.to_string(),
+        });
     }
 
     let mut matmul_names = Vec::new();
@@ -328,10 +384,33 @@ pub fn lower_graph_pinned(graph: &GraphProto<'_>, pins: &BTreeMap<&str, u64>) ->
             // so a caller always gets a real `NodeId` for every declared
             // graph output.
             Err(_) => {
-                let flat = resolve_constant_array(output.name, &fold.initializer_data, &fold.constant_values, &fold.constant_arrays)
-                    .ok_or_else(|| LowerError::UnknownValue { name: graph.name.to_string(), op_type: "graph_output".to_string(), value: output.name.to_string() })?;
-                let shape = fold.constant_tensor_shapes.get(output.name).cloned().unwrap_or_else(|| alloc::vec![flat.len() as u64]);
-                let id = append(&mut program, Op::Input { dtype: DType::Float32, shape: shape.iter().map(|&extent| Extent::Static(extent as u32)).collect(), name: Some(output.name.to_string()) });
+                let flat = resolve_constant_array(
+                    output.name,
+                    &fold.initializer_data,
+                    &fold.constant_values,
+                    &fold.constant_arrays,
+                )
+                .ok_or_else(|| LowerError::UnknownValue {
+                    name: graph.name.to_string(),
+                    op_type: "graph_output".to_string(),
+                    value: output.name.to_string(),
+                })?;
+                let shape = fold
+                    .constant_tensor_shapes
+                    .get(output.name)
+                    .cloned()
+                    .unwrap_or_else(|| alloc::vec![flat.len() as u64]);
+                let id = append(
+                    &mut program,
+                    Op::Input {
+                        dtype: DType::Float32,
+                        shape: shape
+                            .iter()
+                            .map(|&extent| Extent::Static(extent as u32))
+                            .collect(),
+                        name: Some(output.name.to_string()),
+                    },
+                );
                 fold.initializers.push((output.name.to_string(), flat));
                 id
             }
@@ -339,7 +418,13 @@ pub fn lower_graph_pinned(graph: &GraphProto<'_>, pins: &BTreeMap<&str, u64>) ->
         graph_outputs.push((output.name.to_string(), node));
     }
 
-    Ok(Lowered { program, initializers: fold.initializers, graph_inputs, graph_outputs, matmul_names })
+    Ok(Lowered {
+        program,
+        initializers: fold.initializers,
+        graph_inputs,
+        graph_outputs,
+        matmul_names,
+    })
 }
 
 /// [`lower_graph_pinned`], plus one capability it does not have on its own:
@@ -377,7 +462,12 @@ pub fn lower_graph_pinned_cached<'cache>(
     }
 }
 
-fn lower_node(program: &mut Vec<Op>, values: &mut BTreeMap<String, Value>, fold: &mut FoldState, node: &NodeProto<'_>) -> Result<(), LowerError> {
+fn lower_node(
+    program: &mut Vec<Op>,
+    values: &mut BTreeMap<String, Value>,
+    fold: &mut FoldState,
+    node: &NodeProto<'_>,
+) -> Result<(), LowerError> {
     match node.op_type {
         "Add" => lower_binary(program, values, node, ScalarOp::Add),
         "Sub" => lower_binary(program, values, node, ScalarOp::Subtract),
@@ -410,8 +500,20 @@ fn lower_node(program: &mut Vec<Op>, values: &mut BTreeMap<String, Value>, fold:
         "Scan" => lower_scan(program, values, fold, node),
         "Loop" => lower_loop(program, values, fold, node),
         "ReduceSum" => lower_reduce(program, values, node, ScalarOp::Add, ReduceInit::Zero),
-        "ReduceMax" => lower_reduce(program, values, node, ScalarOp::Maximum, ReduceInit::NegativeInfinity),
-        "ReduceMin" => lower_reduce(program, values, node, ScalarOp::Minimum, ReduceInit::PositiveInfinity),
+        "ReduceMax" => lower_reduce(
+            program,
+            values,
+            node,
+            ScalarOp::Maximum,
+            ReduceInit::NegativeInfinity,
+        ),
+        "ReduceMin" => lower_reduce(
+            program,
+            values,
+            node,
+            ScalarOp::Minimum,
+            ReduceInit::PositiveInfinity,
+        ),
         "ReduceProd" => lower_reduce(program, values, node, ScalarOp::Multiply, ReduceInit::One),
         "ReduceMean" => lower_reduce_mean(program, values, node),
         "Reshape" => lower_reshape(program, values, fold, node),
@@ -427,7 +529,10 @@ fn lower_node(program: &mut Vec<Op>, values: &mut BTreeMap<String, Value>, fold:
         "Pow" => lower_pow(program, values, fold, node),
         "Slice" => lower_slice(program, values, fold, node),
         "Dropout" => lower_dropout(program, values, fold, node),
-        other => Err(LowerError::UnsupportedOp { name: node.name.to_string(), op_type: other.to_string() }),
+        other => Err(LowerError::UnsupportedOp {
+            name: node.name.to_string(),
+            op_type: other.to_string(),
+        }),
     }
 }
 
@@ -436,11 +541,14 @@ fn lookup<'value>(
     node: &NodeProto<'_>,
     index: usize,
 ) -> Result<&'value Value, LowerError> {
-    let name = node.input.get(index).ok_or_else(|| LowerError::MissingInput {
-        name: node.name.to_string(),
-        op_type: node.op_type.to_string(),
-        index,
-    })?;
+    let name = node
+        .input
+        .get(index)
+        .ok_or_else(|| LowerError::MissingInput {
+            name: node.name.to_string(),
+            op_type: node.op_type.to_string(),
+            index,
+        })?;
     lookup_by_name(values, name, node.op_type, node.name)
 }
 
@@ -457,14 +565,33 @@ fn lookup_by_name<'value>(
     })
 }
 
-fn bind_output(values: &mut BTreeMap<String, Value>, node: &NodeProto<'_>, index: usize, id: NodeId, shape: Vec<u64>) {
+fn bind_output(
+    values: &mut BTreeMap<String, Value>,
+    node: &NodeProto<'_>,
+    index: usize,
+    id: NodeId,
+    shape: Vec<u64>,
+) {
     if let Some(name) = node.output.get(index) {
-        values.insert((*name).to_string(), Value { node: id, shape, view: None, flatten_source: None });
+        values.insert(
+            (*name).to_string(),
+            Value {
+                node: id,
+                shape,
+                view: None,
+                flatten_source: None,
+            },
+        );
     }
 }
 
-fn find_attr<'node>(node: &'node NodeProto<'_>, name: &str) -> Option<&'node AttributeProto<'node>> {
-    node.attribute.iter().find(|attribute| attribute.name == name)
+fn find_attr<'node>(
+    node: &'node NodeProto<'_>,
+    name: &str,
+) -> Option<&'node AttributeProto<'node>> {
+    node.attribute
+        .iter()
+        .find(|attribute| attribute.name == name)
 }
 
 fn attr_int(node: &NodeProto<'_>, name: &str) -> Option<i64> {
@@ -492,11 +619,30 @@ fn scalar_broadcast_pattern(out_rank: usize) -> IndexPattern {
 }
 
 fn constant_scalar(program: &mut Vec<Op>, value: f32) -> NodeId {
-    append(program, Op::Constant { dtype: DType::Float32, shape: Vec::new(), value })
+    append(
+        program,
+        Op::Constant {
+            dtype: DType::Float32,
+            shape: Vec::new(),
+            value,
+        },
+    )
 }
 
-fn build_elementwise(program: &mut Vec<Op>, body: ScalarOp, operands: Vec<(NodeId, IndexMap)>) -> NodeId {
-    append(program, Op::Elementwise { dtype: DType::Float32, body, operands, name: None })
+fn build_elementwise(
+    program: &mut Vec<Op>,
+    body: ScalarOp,
+    operands: Vec<(NodeId, IndexMap)>,
+) -> NodeId {
+    append(
+        program,
+        Op::Elementwise {
+            dtype: DType::Float32,
+            body,
+            operands,
+            name: None,
+        },
+    )
 }
 
 fn build_reduce(
@@ -526,7 +672,11 @@ fn build_reduce(
 /// Numpy-style broadcast of two shapes, right-aligned -- the rule every
 /// ONNX binary elementwise op (`Add`/`Sub`/`Mul`/`Div`) and `Gemm`'s bias
 /// addition follow.
-fn broadcast_shapes(node: &NodeProto<'_>, lhs: &[u64], rhs: &[u64]) -> Result<Vec<u64>, LowerError> {
+fn broadcast_shapes(
+    node: &NodeProto<'_>,
+    lhs: &[u64],
+    rhs: &[u64],
+) -> Result<Vec<u64>, LowerError> {
     let rank = lhs.len().max(rhs.len());
     let mut reversed = Vec::with_capacity(rank);
     for axis_from_right in 0..rank {
@@ -540,7 +690,10 @@ fn broadcast_shapes(node: &NodeProto<'_>, lhs: &[u64], rhs: &[u64]) -> Result<Ve
                 return Err(LowerError::UnsupportedShape {
                     name: node.name.to_string(),
                     op_type: node.op_type.to_string(),
-                    reason: format!("incompatible broadcast extents {a} and {b} at axis -{}", axis_from_right + 1),
+                    reason: format!(
+                        "incompatible broadcast extents {a} and {b} at axis -{}",
+                        axis_from_right + 1
+                    ),
                 });
             }
         };
@@ -551,7 +704,11 @@ fn broadcast_shapes(node: &NodeProto<'_>, lhs: &[u64], rhs: &[u64]) -> Result<Ve
 }
 
 fn extent_from_right(shape: &[u64], axis_from_right: usize) -> u64 {
-    if axis_from_right >= shape.len() { 1 } else { shape[shape.len() - 1 - axis_from_right] }
+    if axis_from_right >= shape.len() {
+        1
+    } else {
+        shape[shape.len() - 1 - axis_from_right]
+    }
 }
 
 /// An operand's [`IndexPattern`] against a broadcast iteration space of
@@ -570,11 +727,17 @@ fn broadcast_pattern(operand_shape: &[u64], out_shape: &[u64]) -> IndexPattern {
             if extent == 1 && out_shape[leading + index] != 1 {
                 AxisIndex::default()
             } else {
-                AxisIndex { terms: core::iter::once(AxisTerm::projection(iter_axis)).collect(), offset: 0 }
+                AxisIndex {
+                    terms: core::iter::once(AxisTerm::projection(iter_axis)).collect(),
+                    offset: 0,
+                }
             }
         })
         .collect();
-    IndexPattern { iter_rank: out_rank, axes }
+    IndexPattern {
+        iter_rank: out_rank,
+        axes,
+    }
 }
 
 /// [`broadcast_pattern`] against `value`'s *logical* shape, then composed
@@ -585,22 +748,38 @@ fn broadcast_pattern(operand_shape: &[u64], out_shape: &[u64]) -> IndexPattern {
 fn operand_pattern(value: &Value, out_shape: &[u64]) -> IndexPattern {
     let out_rank = out_shape.len() as u16;
     let logical = broadcast_pattern(&value.shape, out_shape);
-    let Some(view) = &value.view else { return logical };
+    let Some(view) = &value.view else {
+        return logical;
+    };
 
-    let mut by_real_axis: alloc::collections::BTreeMap<u16, u16> = alloc::collections::BTreeMap::new();
+    let mut by_real_axis: alloc::collections::BTreeMap<u16, u16> =
+        alloc::collections::BTreeMap::new();
     for (logical_axis, axis_index) in logical.axes.iter().enumerate() {
-        let Some(real_axis) = view[logical_axis] else { continue };
+        let Some(real_axis) = view[logical_axis] else {
+            continue;
+        };
         if let [term] = axis_index.terms.as_slice() {
             by_real_axis.insert(real_axis, term.axis);
         }
     }
     let axes = (0..by_real_axis.len() as u16)
-        .map(|real_axis| AxisIndex { terms: core::iter::once(AxisTerm::projection(by_real_axis[&real_axis])).collect(), offset: 0 })
+        .map(|real_axis| AxisIndex {
+            terms: core::iter::once(AxisTerm::projection(by_real_axis[&real_axis])).collect(),
+            offset: 0,
+        })
         .collect();
-    IndexPattern { iter_rank: out_rank, axes }
+    IndexPattern {
+        iter_rank: out_rank,
+        axes,
+    }
 }
 
-fn lower_binary(program: &mut Vec<Op>, values: &mut BTreeMap<String, Value>, node: &NodeProto<'_>, body: ScalarOp) -> Result<(), LowerError> {
+fn lower_binary(
+    program: &mut Vec<Op>,
+    values: &mut BTreeMap<String, Value>,
+    node: &NodeProto<'_>,
+    body: ScalarOp,
+) -> Result<(), LowerError> {
     let lhs = lookup(values, node, 0)?.clone();
     let rhs = lookup(values, node, 1)?.clone();
 
@@ -636,8 +815,14 @@ fn lower_binary(program: &mut Vec<Op>, values: &mut BTreeMap<String, Value>, nod
 
     let out_shape = broadcast_shapes(node, &lhs.shape, &rhs.shape)?;
     let operands = alloc::vec![
-        (lhs.node, IndexMap::Affine(operand_pattern(&lhs, &out_shape))),
-        (rhs.node, IndexMap::Affine(operand_pattern(&rhs, &out_shape))),
+        (
+            lhs.node,
+            IndexMap::Affine(operand_pattern(&lhs, &out_shape))
+        ),
+        (
+            rhs.node,
+            IndexMap::Affine(operand_pattern(&rhs, &out_shape))
+        ),
     ];
     let id = build_elementwise(program, body, operands);
     bind_output(values, node, 0, id, out_shape);
@@ -651,19 +836,42 @@ fn lower_binary(program: &mut Vec<Op>, values: &mut BTreeMap<String, Value>, nod
 /// `viewed`'s exact `shape`/`view` forward onto the new physical node --
 /// whatever reads this output downstream still sees the identical virtual
 /// axes, just over freshly computed data.
-fn lower_binary_scalar_preserving_view(program: &mut Vec<Op>, body: ScalarOp, viewed: &Value, scalar_node: NodeId, scalar_is_lhs: bool) -> Value {
+fn lower_binary_scalar_preserving_view(
+    program: &mut Vec<Op>,
+    body: ScalarOp,
+    viewed: &Value,
+    scalar_node: NodeId,
+    scalar_is_lhs: bool,
+) -> Value {
     let real_rank = match &viewed.view {
         Some(view) => view.iter().filter(|axis| axis.is_some()).count(),
         None => viewed.shape.len(),
     };
     let pattern = identity_pattern(real_rank);
     let operands = if scalar_is_lhs {
-        alloc::vec![(scalar_node, IndexMap::Affine(scalar_broadcast_pattern(real_rank))), (viewed.node, IndexMap::Affine(pattern))]
+        alloc::vec![
+            (
+                scalar_node,
+                IndexMap::Affine(scalar_broadcast_pattern(real_rank))
+            ),
+            (viewed.node, IndexMap::Affine(pattern))
+        ]
     } else {
-        alloc::vec![(viewed.node, IndexMap::Affine(pattern)), (scalar_node, IndexMap::Affine(scalar_broadcast_pattern(real_rank)))]
+        alloc::vec![
+            (viewed.node, IndexMap::Affine(pattern)),
+            (
+                scalar_node,
+                IndexMap::Affine(scalar_broadcast_pattern(real_rank))
+            )
+        ]
     };
     let id = build_elementwise(program, body, operands);
-    Value { node: id, shape: viewed.shape.clone(), view: viewed.view.clone(), flatten_source: None }
+    Value {
+        node: id,
+        shape: viewed.shape.clone(),
+        view: viewed.view.clone(),
+        flatten_source: None,
+    }
 }
 
 /// Every plain single-operand `ScalarOp` (`Tanh`/`Exp`/`Log`/`Sqrt`/`Neg`/
@@ -672,16 +880,33 @@ fn lower_binary_scalar_preserving_view(program: &mut Vec<Op>, body: ScalarOp, vi
 /// [`lower_cast`]'s own doc, the same constraint), so this reads `input` at
 /// its REAL rank and passes `shape`/`view` straight through onto the new
 /// output rather than `identity_pattern` against the full logical rank.
-fn lower_unary(program: &mut Vec<Op>, values: &mut BTreeMap<String, Value>, node: &NodeProto<'_>, body: ScalarOp) -> Result<(), LowerError> {
+fn lower_unary(
+    program: &mut Vec<Op>,
+    values: &mut BTreeMap<String, Value>,
+    node: &NodeProto<'_>,
+    body: ScalarOp,
+) -> Result<(), LowerError> {
     let input = lookup(values, node, 0)?.clone();
     let real_rank = match &input.view {
         Some(view) => view.iter().filter(|axis| axis.is_some()).count(),
         None => input.shape.len(),
     };
     let pattern = identity_pattern(real_rank);
-    let id = build_elementwise(program, body, alloc::vec![(input.node, IndexMap::Affine(pattern))]);
+    let id = build_elementwise(
+        program,
+        body,
+        alloc::vec![(input.node, IndexMap::Affine(pattern))],
+    );
     if let Some(output_name) = node.output.first() {
-        values.insert((*output_name).to_string(), Value { node: id, shape: input.shape, view: input.view, flatten_source: None });
+        values.insert(
+            (*output_name).to_string(),
+            Value {
+                node: id,
+                shape: input.shape,
+                view: input.view,
+                flatten_source: None,
+            },
+        );
     }
     Ok(())
 }
@@ -689,7 +914,11 @@ fn lower_unary(program: &mut Vec<Op>, values: &mut BTreeMap<String, Value>, node
 /// `Relu(x) = max(x, 0)` -- one [`ScalarOp::Maximum`] against a rank-0
 /// [`Op::Constant`], the decomposition the ISA's own doc names for exactly
 /// this kind of clamp.
-fn lower_relu(program: &mut Vec<Op>, values: &mut BTreeMap<String, Value>, node: &NodeProto<'_>) -> Result<(), LowerError> {
+fn lower_relu(
+    program: &mut Vec<Op>,
+    values: &mut BTreeMap<String, Value>,
+    node: &NodeProto<'_>,
+) -> Result<(), LowerError> {
     let input = lookup(values, node, 0)?.clone();
     let rank = input.shape.len();
     let zero = constant_scalar(program, 0.0);
@@ -713,11 +942,20 @@ fn lower_relu(program: &mut Vec<Op>, values: &mut BTreeMap<String, Value>, node:
 /// broadcast pattern [`conv2d_core`]'s own bias add already builds, not
 /// [`operand_pattern`]'s trailing-axis numpy broadcast (which would align
 /// `[C]` against `x`'s *last* axis, wrong for `NCHW`).
-fn lower_batchnorm(program: &mut Vec<Op>, values: &mut BTreeMap<String, Value>, node: &NodeProto<'_>) -> Result<(), LowerError> {
+fn lower_batchnorm(
+    program: &mut Vec<Op>,
+    values: &mut BTreeMap<String, Value>,
+    node: &NodeProto<'_>,
+) -> Result<(), LowerError> {
     let name = node.name.to_string();
     let op_type = node.op_type.to_string();
     if attr_int(node, "training_mode").unwrap_or(0) != 0 {
-        return Err(LowerError::UnsupportedShape { name, op_type, reason: "BatchNormalization lowering supports training_mode=0 (inference) only".to_string() });
+        return Err(LowerError::UnsupportedShape {
+            name,
+            op_type,
+            reason: "BatchNormalization lowering supports training_mode=0 (inference) only"
+                .to_string(),
+        });
     }
     let input = lookup(values, node, 0)?.clone();
     let scale = lookup(values, node, 1)?.clone();
@@ -726,12 +964,28 @@ fn lower_batchnorm(program: &mut Vec<Op>, values: &mut BTreeMap<String, Value>, 
     let var = lookup(values, node, 4)?.clone();
     let rank = input.shape.len();
     if rank < 2 {
-        return Err(LowerError::UnsupportedShape { name, op_type, reason: "BatchNormalization lowering requires a rank >= 2 input (channel axis 1)".to_string() });
+        return Err(LowerError::UnsupportedShape {
+            name,
+            op_type,
+            reason: "BatchNormalization lowering requires a rank >= 2 input (channel axis 1)"
+                .to_string(),
+        });
     }
     let channels = input.shape[1];
-    for (operand_name, operand) in [("scale", &scale), ("bias", &bias), ("mean", &mean), ("var", &var)] {
+    for (operand_name, operand) in [
+        ("scale", &scale),
+        ("bias", &bias),
+        ("mean", &mean),
+        ("var", &var),
+    ] {
         if operand.shape != alloc::vec![channels] {
-            return Err(LowerError::UnsupportedShape { name, op_type, reason: format!("BatchNormalization {operand_name} must be a rank-1 tensor sized to the input's channel axis") });
+            return Err(LowerError::UnsupportedShape {
+                name,
+                op_type,
+                reason: format!(
+                    "BatchNormalization {operand_name} must be a rank-1 tensor sized to the input's channel axis"
+                ),
+            });
         }
     }
     let epsilon = attr_float(node, "epsilon").unwrap_or(1e-5);
@@ -740,20 +994,49 @@ fn lower_batchnorm(program: &mut Vec<Op>, values: &mut BTreeMap<String, Value>, 
     let centered = build_elementwise(
         program,
         ScalarOp::Subtract,
-        alloc::vec![(input.node, IndexMap::Affine(identity_pattern(rank))), (mean.node, IndexMap::Affine(channel_pattern.clone()))],
+        alloc::vec![
+            (input.node, IndexMap::Affine(identity_pattern(rank))),
+            (mean.node, IndexMap::Affine(channel_pattern.clone()))
+        ],
     );
     let epsilon_const = constant_scalar(program, epsilon);
     let variance_eps = build_elementwise(
         program,
         ScalarOp::Add,
-        alloc::vec![(var.node, IndexMap::Affine(identity_pattern(1))), (epsilon_const, IndexMap::Affine(scalar_broadcast_pattern(1)))],
+        alloc::vec![
+            (var.node, IndexMap::Affine(identity_pattern(1))),
+            (epsilon_const, IndexMap::Affine(scalar_broadcast_pattern(1)))
+        ],
     );
-    let std_dev = build_elementwise(program, ScalarOp::SquareRoot, alloc::vec![(variance_eps, IndexMap::Affine(identity_pattern(1)))]);
-    let normalized =
-        build_elementwise(program, ScalarOp::Divide, alloc::vec![(centered, IndexMap::Affine(identity_pattern(rank))), (std_dev, IndexMap::Affine(channel_pattern.clone()))]);
-    let scaled =
-        build_elementwise(program, ScalarOp::Multiply, alloc::vec![(normalized, IndexMap::Affine(identity_pattern(rank))), (scale.node, IndexMap::Affine(channel_pattern.clone()))]);
-    let result = build_elementwise(program, ScalarOp::Add, alloc::vec![(scaled, IndexMap::Affine(identity_pattern(rank))), (bias.node, IndexMap::Affine(channel_pattern))]);
+    let std_dev = build_elementwise(
+        program,
+        ScalarOp::SquareRoot,
+        alloc::vec![(variance_eps, IndexMap::Affine(identity_pattern(1)))],
+    );
+    let normalized = build_elementwise(
+        program,
+        ScalarOp::Divide,
+        alloc::vec![
+            (centered, IndexMap::Affine(identity_pattern(rank))),
+            (std_dev, IndexMap::Affine(channel_pattern.clone()))
+        ],
+    );
+    let scaled = build_elementwise(
+        program,
+        ScalarOp::Multiply,
+        alloc::vec![
+            (normalized, IndexMap::Affine(identity_pattern(rank))),
+            (scale.node, IndexMap::Affine(channel_pattern.clone()))
+        ],
+    );
+    let result = build_elementwise(
+        program,
+        ScalarOp::Add,
+        alloc::vec![
+            (scaled, IndexMap::Affine(identity_pattern(rank))),
+            (bias.node, IndexMap::Affine(channel_pattern))
+        ],
+    );
     bind_output(values, node, 0, result, input.shape);
     Ok(())
 }
@@ -762,11 +1045,23 @@ fn lower_batchnorm(program: &mut Vec<Op>, values: &mut BTreeMap<String, Value>, 
 /// existing `Negate`/`Exponential`/`Add`/`Reciprocal` bodies; no dedicated
 /// sigmoid primitive exists in the ISA on purpose (this crate's own doc:
 /// "composite activations desugar into several expressions").
-fn lower_sigmoid(program: &mut Vec<Op>, values: &mut BTreeMap<String, Value>, node: &NodeProto<'_>) -> Result<(), LowerError> {
+fn lower_sigmoid(
+    program: &mut Vec<Op>,
+    values: &mut BTreeMap<String, Value>,
+    node: &NodeProto<'_>,
+) -> Result<(), LowerError> {
     let input = lookup(values, node, 0)?.clone();
     let rank = input.shape.len();
-    let negated = build_elementwise(program, ScalarOp::Negate, alloc::vec![(input.node, IndexMap::Affine(identity_pattern(rank)))]);
-    let exponentiated = build_elementwise(program, ScalarOp::Exponential, alloc::vec![(negated, IndexMap::Affine(identity_pattern(rank)))]);
+    let negated = build_elementwise(
+        program,
+        ScalarOp::Negate,
+        alloc::vec![(input.node, IndexMap::Affine(identity_pattern(rank)))],
+    );
+    let exponentiated = build_elementwise(
+        program,
+        ScalarOp::Exponential,
+        alloc::vec![(negated, IndexMap::Affine(identity_pattern(rank)))],
+    );
     let one = constant_scalar(program, 1.0);
     let denominator = build_elementwise(
         program,
@@ -776,7 +1071,11 @@ fn lower_sigmoid(program: &mut Vec<Op>, values: &mut BTreeMap<String, Value>, no
             (one, IndexMap::Affine(scalar_broadcast_pattern(rank))),
         ],
     );
-    let id = build_elementwise(program, ScalarOp::Reciprocal, alloc::vec![(denominator, IndexMap::Affine(identity_pattern(rank)))]);
+    let id = build_elementwise(
+        program,
+        ScalarOp::Reciprocal,
+        alloc::vec![(denominator, IndexMap::Affine(identity_pattern(rank)))],
+    );
     bind_output(values, node, 0, id, input.shape);
     Ok(())
 }
@@ -792,7 +1091,11 @@ fn lower_sigmoid(program: &mut Vec<Op>, values: &mut BTreeMap<String, Value>, no
 /// uses -- so `[B, M, K] x [K, N]` (rhs has no batch dims at all) is just the
 /// degenerate case where `extent_from_right` treats the missing leading axes
 /// as broadcastable.
-fn lower_matmul(program: &mut Vec<Op>, values: &mut BTreeMap<String, Value>, node: &NodeProto<'_>) -> Result<(), LowerError> {
+fn lower_matmul(
+    program: &mut Vec<Op>,
+    values: &mut BTreeMap<String, Value>,
+    node: &NodeProto<'_>,
+) -> Result<(), LowerError> {
     let lhs = lookup(values, node, 0)?.clone();
     let rhs = lookup(values, node, 1)?.clone();
     if lhs.shape.len() < 2 || rhs.shape.len() < 2 {
@@ -815,7 +1118,9 @@ fn lower_matmul(program: &mut Vec<Op>, values: &mut BTreeMap<String, Value>, nod
         return Err(LowerError::UnsupportedShape {
             name: node.name.to_string(),
             op_type: node.op_type.to_string(),
-            reason: format!("contracted dim mismatch: lhs contributes {k}, rhs contributes {k_rhs}"),
+            reason: format!(
+                "contracted dim mismatch: lhs contributes {k}, rhs contributes {k_rhs}"
+            ),
         });
     }
 
@@ -823,7 +1128,9 @@ fn lower_matmul(program: &mut Vec<Op>, values: &mut BTreeMap<String, Value>, nod
         return Err(LowerError::UnsupportedShape {
             name: node.name.to_string(),
             op_type: node.op_type.to_string(),
-            reason: "MatMul with both operands produced by a real-axis-merging Reshape is not supported".to_string(),
+            reason:
+                "MatMul with both operands produced by a real-axis-merging Reshape is not supported"
+                    .to_string(),
         });
     }
 
@@ -836,7 +1143,9 @@ fn lower_matmul(program: &mut Vec<Op>, values: &mut BTreeMap<String, Value>, nod
     // `MatMul`'s batched one.
     let m_axis = batch_rank as u16;
     let k_extents: Vec<u64> = match (&lhs.flatten_source, &rhs.flatten_source) {
-        (Some((real_shape, split)), None) | (None, Some((real_shape, split))) => real_shape[*split..].to_vec(),
+        (Some((real_shape, split)), None) | (None, Some((real_shape, split))) => {
+            real_shape[*split..].to_vec()
+        }
         _ => alloc::vec![k],
     };
     let flattened = lhs.flatten_source.is_some() || rhs.flatten_source.is_some();
@@ -872,8 +1181,23 @@ fn lower_matmul(program: &mut Vec<Op>, values: &mut BTreeMap<String, Value>, nod
     let out_shape: Vec<u64> = out_batch.iter().copied().chain([m, n]).collect();
     let out_kept: Vec<u16> = (0..batch_rank as u16).chain([m_axis, n_axis]).collect();
 
-    let product = build_elementwise(program, ScalarOp::Multiply, alloc::vec![(lhs.node, IndexMap::Affine(lhs_pattern)), (rhs.node, IndexMap::Affine(rhs_pattern))]);
-    let id = build_reduce(program, ScalarOp::Add, ReduceInit::Zero, product, identity_pattern(iter_rank as usize), projection(iter_rank, &out_kept), Some("matmul".to_string()));
+    let product = build_elementwise(
+        program,
+        ScalarOp::Multiply,
+        alloc::vec![
+            (lhs.node, IndexMap::Affine(lhs_pattern)),
+            (rhs.node, IndexMap::Affine(rhs_pattern))
+        ],
+    );
+    let id = build_reduce(
+        program,
+        ScalarOp::Add,
+        ReduceInit::Zero,
+        product,
+        identity_pattern(iter_rank as usize),
+        projection(iter_rank, &out_kept),
+        Some("matmul".to_string()),
+    );
     bind_output(values, node, 0, id, out_shape);
     Ok(())
 }
@@ -881,13 +1205,31 @@ fn lower_matmul(program: &mut Vec<Op>, values: &mut BTreeMap<String, Value>, nod
 /// The shared matmul core [`lower_matmul`] and [`lower_gemm`] both build:
 /// an iteration space `(i, j, k)` with `k` contracted, `lhs`/`rhs` each
 /// addressed by their own (possibly transposed) pattern into that space.
-fn matmul2d(program: &mut Vec<Op>, lhs: NodeId, lhs_pattern: IndexPattern, rhs: NodeId, rhs_pattern: IndexPattern, name: Option<String>) -> NodeId {
+fn matmul2d(
+    program: &mut Vec<Op>,
+    lhs: NodeId,
+    lhs_pattern: IndexPattern,
+    rhs: NodeId,
+    rhs_pattern: IndexPattern,
+    name: Option<String>,
+) -> NodeId {
     let product = build_elementwise(
         program,
         ScalarOp::Multiply,
-        alloc::vec![(lhs, IndexMap::Affine(lhs_pattern)), (rhs, IndexMap::Affine(rhs_pattern))],
+        alloc::vec![
+            (lhs, IndexMap::Affine(lhs_pattern)),
+            (rhs, IndexMap::Affine(rhs_pattern))
+        ],
     );
-    build_reduce(program, ScalarOp::Add, ReduceInit::Zero, product, projection(3, &[0, 1, 2]), projection(3, &[0, 1]), name)
+    build_reduce(
+        program,
+        ScalarOp::Add,
+        ReduceInit::Zero,
+        product,
+        projection(3, &[0, 1, 2]),
+        projection(3, &[0, 1]),
+        name,
+    )
 }
 
 /// One `Gemm` operand's real-axis [`AxisIndex`] for a logical axis the
@@ -905,7 +1247,10 @@ fn matmul2d(program: &mut Vec<Op>, lhs: NodeId, lhs_pattern: IndexPattern, rhs: 
 /// no-div/mod boundary is untouched.
 fn flat_axis_index(extents: &[u64], iter_axes: &[u16]) -> AxisIndex {
     if iter_axes.len() == 1 {
-        return AxisIndex { terms: core::iter::once(AxisTerm::projection(iter_axes[0])).collect(), offset: 0 };
+        return AxisIndex {
+            terms: core::iter::once(AxisTerm::projection(iter_axes[0])).collect(),
+            offset: 0,
+        };
     }
     let terms = (0..extents.len())
         .map(|index| {
@@ -922,7 +1267,13 @@ fn flat_axis_index(extents: &[u64], iter_axes: &[u16]) -> AxisIndex {
 /// of [`flat_axis_index`]'s "plain side" case, which instead sums several
 /// iteration axes into the *other* operand's one real axis.
 fn owned_axis_indices(iter_axes: &[u16]) -> Vec<AxisIndex> {
-    iter_axes.iter().map(|&axis| AxisIndex { terms: core::iter::once(AxisTerm::projection(axis)).collect(), offset: 0 }).collect()
+    iter_axes
+        .iter()
+        .map(|&axis| AxisIndex {
+            terms: core::iter::once(AxisTerm::projection(axis)).collect(),
+            offset: 0,
+        })
+        .collect()
 }
 
 /// [`lower_reshape`]'s materializing SPLIT path: `input`'s trailing real
@@ -944,7 +1295,11 @@ fn owned_axis_indices(iter_axes: &[u16]) -> Vec<AxisIndex> {
 /// axis through that computed index -- the same primitive
 /// [`slice_axis_range`] already uses, generalized from a 1-D index to an
 /// N-D one.
-fn materialize_reshape_split(program: &mut Vec<Op>, input: &Value, out_shape: &[u64]) -> Option<Value> {
+fn materialize_reshape_split(
+    program: &mut Vec<Op>,
+    input: &Value,
+    out_shape: &[u64],
+) -> Option<Value> {
     let real_rank = input.shape.len();
     if real_rank == 0 || out_shape.len() <= real_rank {
         return None;
@@ -975,7 +1330,13 @@ fn materialize_reshape_split(program: &mut Vec<Op>, input: &Value, out_shape: &[
     let sub_rank = tail.len() as u16;
     let mut scaled_positions = Vec::with_capacity(tail.len());
     for (sub_index, &extent) in tail.iter().enumerate() {
-        let position = append(program, Op::Iota { dtype: DType::Float32, extent: Extent::Static(extent as u32) });
+        let position = append(
+            program,
+            Op::Iota {
+                dtype: DType::Float32,
+                extent: Extent::Static(extent as u32),
+            },
+        );
         let stride: u64 = tail[sub_index + 1..].iter().product();
         let scaled = if stride == 1 {
             position
@@ -984,7 +1345,10 @@ fn materialize_reshape_split(program: &mut Vec<Op>, input: &Value, out_shape: &[
             build_elementwise(
                 program,
                 ScalarOp::Multiply,
-                alloc::vec![(position, IndexMap::Affine(identity_pattern(1))), (stride_const, IndexMap::Affine(scalar_broadcast_pattern(1)))],
+                alloc::vec![
+                    (position, IndexMap::Affine(identity_pattern(1))),
+                    (stride_const, IndexMap::Affine(scalar_broadcast_pattern(1)))
+                ],
             )
         };
         scaled_positions.push(scaled);
@@ -994,26 +1358,63 @@ fn materialize_reshape_split(program: &mut Vec<Op>, input: &Value, out_shape: &[
     for &next in &scaled_positions[1..] {
         let widened_rank = accumulated_rank + 1;
         let accumulator_pattern = identity_pattern(accumulated_rank as usize);
-        let next_pattern = IndexPattern { iter_rank: widened_rank, axes: alloc::vec![single_term_axis(accumulated_rank)] };
+        let next_pattern = IndexPattern {
+            iter_rank: widened_rank,
+            axes: alloc::vec![single_term_axis(accumulated_rank)],
+        };
         combined = build_elementwise(
             program,
             ScalarOp::Add,
             alloc::vec![
-                (combined, IndexMap::Affine(IndexPattern { iter_rank: widened_rank, axes: accumulator_pattern.axes })),
+                (
+                    combined,
+                    IndexMap::Affine(IndexPattern {
+                        iter_rank: widened_rank,
+                        axes: accumulator_pattern.axes
+                    })
+                ),
                 (next, IndexMap::Affine(next_pattern)),
             ],
         );
         accumulated_rank = widened_rank;
     }
-    let combined = build_elementwise_dtype(program, DType::Int32, ScalarOp::Identity, alloc::vec![(combined, IndexMap::Affine(identity_pattern(sub_rank as usize)))]);
+    let combined = build_elementwise_dtype(
+        program,
+        DType::Int32,
+        ScalarOp::Identity,
+        alloc::vec![(
+            combined,
+            IndexMap::Affine(identity_pattern(sub_rank as usize))
+        )],
+    );
 
     let out_rank = out_shape.len() as u16;
     let sub_iter_axes: Vec<u16> = (prefix as u16..out_rank).collect();
-    let index_map = IndexPattern { iter_rank: out_rank, axes: sub_iter_axes.iter().map(|&axis| single_term_axis(axis)).collect() };
+    let index_map = IndexPattern {
+        iter_rank: out_rank,
+        axes: sub_iter_axes
+            .iter()
+            .map(|&axis| single_term_axis(axis))
+            .collect(),
+    };
     let base = concat_base_pattern(out_rank, real_rank, prefix);
-    let gathered_map = IndexMap::Computed { indices: combined, index_map, base, gathered_dim: prefix as u16 };
-    let id = build_elementwise(program, ScalarOp::Identity, alloc::vec![(input.node, gathered_map)]);
-    Some(Value { node: id, shape: out_shape.to_vec(), view: None, flatten_source: None })
+    let gathered_map = IndexMap::Computed {
+        indices: combined,
+        index_map,
+        base,
+        gathered_dim: prefix as u16,
+    };
+    let id = build_elementwise(
+        program,
+        ScalarOp::Identity,
+        alloc::vec![(input.node, gathered_map)],
+    );
+    Some(Value {
+        node: id,
+        shape: out_shape.to_vec(),
+        view: None,
+        flatten_source: None,
+    })
 }
 
 /// [`lower_reshape`]'s deferred MERGE path: `real_shape`'s trailing run of
@@ -1039,7 +1440,10 @@ fn reshape_merge_boundary(real_shape: &[u64], out_shape: &[u64]) -> Option<(Vec<
 }
 
 fn single_term_axis(axis: u16) -> AxisIndex {
-    AxisIndex { terms: core::iter::once(AxisTerm::projection(axis)).collect(), offset: 0 }
+    AxisIndex {
+        terms: core::iter::once(AxisTerm::projection(axis)).collect(),
+        offset: 0,
+    }
 }
 
 /// `Gemm(A, B, C) = alpha * (A' @ B') + beta * C`, `A'`/`B'` optionally
@@ -1058,7 +1462,11 @@ fn single_term_axis(axis: u16) -> AxisIndex {
 /// other axis (and the `alpha`/`beta`/bias composition below) is untouched,
 /// since the widened axes are reduced away before this function's own
 /// logical `[m, n]` output shape is ever seen downstream.
-fn lower_gemm(program: &mut Vec<Op>, values: &mut BTreeMap<String, Value>, node: &NodeProto<'_>) -> Result<(), LowerError> {
+fn lower_gemm(
+    program: &mut Vec<Op>,
+    values: &mut BTreeMap<String, Value>,
+    node: &NodeProto<'_>,
+) -> Result<(), LowerError> {
     let a = lookup(values, node, 0)?.clone();
     let b = lookup(values, node, 1)?.clone();
     if a.shape.len() != 2 || b.shape.len() != 2 {
@@ -1073,10 +1481,16 @@ fn lower_gemm(program: &mut Vec<Op>, values: &mut BTreeMap<String, Value>, node:
     let alpha = attr_float(node, "alpha").unwrap_or(1.0);
     let beta = attr_float(node, "beta").unwrap_or(1.0);
 
-    let (m, k, a_pattern_plain) =
-        if trans_a { (a.shape[1], a.shape[0], projection(3, &[2, 0])) } else { (a.shape[0], a.shape[1], projection(3, &[0, 2])) };
-    let (k2, n, b_pattern_plain) =
-        if trans_b { (b.shape[1], b.shape[0], projection(3, &[1, 2])) } else { (b.shape[0], b.shape[1], projection(3, &[2, 1])) };
+    let (m, k, a_pattern_plain) = if trans_a {
+        (a.shape[1], a.shape[0], projection(3, &[2, 0]))
+    } else {
+        (a.shape[0], a.shape[1], projection(3, &[0, 2]))
+    };
+    let (k2, n, b_pattern_plain) = if trans_b {
+        (b.shape[1], b.shape[0], projection(3, &[1, 2]))
+    } else {
+        (b.shape[0], b.shape[1], projection(3, &[2, 1]))
+    };
     if k != k2 {
         return Err(LowerError::UnsupportedShape {
             name: node.name.to_string(),
@@ -1087,7 +1501,14 @@ fn lower_gemm(program: &mut Vec<Op>, values: &mut BTreeMap<String, Value>, node:
     let out_shape = alloc::vec![m, n];
 
     let matmul = match (&a.flatten_source, &b.flatten_source) {
-        (None, None) => matmul2d(program, a.node, a_pattern_plain, b.node, b_pattern_plain, Some("gemm_matmul".to_string())),
+        (None, None) => matmul2d(
+            program,
+            a.node,
+            a_pattern_plain,
+            b.node,
+            b_pattern_plain,
+            Some("gemm_matmul".to_string()),
+        ),
         (Some(_), Some(_)) => {
             return Err(LowerError::UnsupportedShape {
                 name: node.name.to_string(),
@@ -1097,20 +1518,33 @@ fn lower_gemm(program: &mut Vec<Op>, values: &mut BTreeMap<String, Value>, node:
         }
         (a_flatten, b_flatten) => {
             let a_owns = a_flatten.is_some();
-            let (real_shape, split) = a_flatten.as_ref().or(b_flatten.as_ref()).ok_or_else(|| LowerError::UnsupportedShape {
-                name: node.name.to_string(),
-                op_type: node.op_type.to_string(),
-                reason: "Gemm flatten-widening reached with neither operand flattened".to_string(),
-            })?;
+            let (real_shape, split) =
+                a_flatten.as_ref().or(b_flatten.as_ref()).ok_or_else(|| {
+                    LowerError::UnsupportedShape {
+                        name: node.name.to_string(),
+                        op_type: node.op_type.to_string(),
+                        reason: "Gemm flatten-widening reached with neither operand flattened"
+                            .to_string(),
+                    }
+                })?;
             if (a_owns && trans_a) || (!a_owns && trans_b) {
                 return Err(LowerError::UnsupportedShape {
                     name: node.name.to_string(),
                     op_type: node.op_type.to_string(),
-                    reason: "Gemm transA/transB on a Flatten-merged operand is not supported".to_string(),
+                    reason: "Gemm transA/transB on a Flatten-merged operand is not supported"
+                        .to_string(),
                 });
             }
-            let k_extents: Vec<u64> = if a_owns { real_shape[*split..].to_vec() } else { real_shape[..*split].to_vec() };
-            let own_extent = if a_owns { &real_shape[..*split] } else { &real_shape[*split..] };
+            let k_extents: Vec<u64> = if a_owns {
+                real_shape[*split..].to_vec()
+            } else {
+                real_shape[..*split].to_vec()
+            };
+            let own_extent = if a_owns {
+                &real_shape[..*split]
+            } else {
+                &real_shape[*split..]
+            };
             if own_extent.len() != 1 {
                 return Err(LowerError::UnsupportedShape {
                     name: node.name.to_string(),
@@ -1126,29 +1560,59 @@ fn lower_gemm(program: &mut Vec<Op>, values: &mut BTreeMap<String, Value>, node:
                 axes.extend(owned_axis_indices(&k_subaxes));
                 IndexPattern { iter_rank, axes }
             } else if trans_a {
-                IndexPattern { iter_rank, axes: alloc::vec![flat_axis_index(&k_extents, &k_subaxes), single_term_axis(0)] }
+                IndexPattern {
+                    iter_rank,
+                    axes: alloc::vec![flat_axis_index(&k_extents, &k_subaxes), single_term_axis(0)],
+                }
             } else {
-                IndexPattern { iter_rank, axes: alloc::vec![single_term_axis(0), flat_axis_index(&k_extents, &k_subaxes)] }
+                IndexPattern {
+                    iter_rank,
+                    axes: alloc::vec![single_term_axis(0), flat_axis_index(&k_extents, &k_subaxes)],
+                }
             };
             let b_pattern = if !a_owns {
                 let mut axes = owned_axis_indices(&k_subaxes);
                 axes.push(single_term_axis(1));
                 IndexPattern { iter_rank, axes }
             } else if trans_b {
-                IndexPattern { iter_rank, axes: alloc::vec![single_term_axis(1), flat_axis_index(&k_extents, &k_subaxes)] }
+                IndexPattern {
+                    iter_rank,
+                    axes: alloc::vec![single_term_axis(1), flat_axis_index(&k_extents, &k_subaxes)],
+                }
             } else {
-                IndexPattern { iter_rank, axes: alloc::vec![flat_axis_index(&k_extents, &k_subaxes), single_term_axis(1)] }
+                IndexPattern {
+                    iter_rank,
+                    axes: alloc::vec![flat_axis_index(&k_extents, &k_subaxes), single_term_axis(1)],
+                }
             };
 
-            let product = build_elementwise(program, ScalarOp::Multiply, alloc::vec![(a.node, IndexMap::Affine(a_pattern)), (b.node, IndexMap::Affine(b_pattern))]);
-            build_reduce(program, ScalarOp::Add, ReduceInit::Zero, product, identity_pattern(iter_rank as usize), projection(iter_rank, &[0, 1]), Some("gemm_matmul".to_string()))
+            let product = build_elementwise(
+                program,
+                ScalarOp::Multiply,
+                alloc::vec![
+                    (a.node, IndexMap::Affine(a_pattern)),
+                    (b.node, IndexMap::Affine(b_pattern))
+                ],
+            );
+            build_reduce(
+                program,
+                ScalarOp::Add,
+                ReduceInit::Zero,
+                product,
+                identity_pattern(iter_rank as usize),
+                projection(iter_rank, &[0, 1]),
+                Some("gemm_matmul".to_string()),
+            )
         }
     };
     let alpha_node = constant_scalar(program, alpha);
     let scaled = build_elementwise(
         program,
         ScalarOp::Multiply,
-        alloc::vec![(matmul, IndexMap::Affine(identity_pattern(2))), (alpha_node, IndexMap::Affine(scalar_broadcast_pattern(2)))],
+        alloc::vec![
+            (matmul, IndexMap::Affine(identity_pattern(2))),
+            (alpha_node, IndexMap::Affine(scalar_broadcast_pattern(2)))
+        ],
     );
 
     let result = match node.input.get(2) {
@@ -1169,14 +1633,20 @@ fn lower_gemm(program: &mut Vec<Op>, values: &mut BTreeMap<String, Value>, node:
                 ScalarOp::Multiply,
                 alloc::vec![
                     (c_value.node, IndexMap::Affine(identity_pattern(c_rank))),
-                    (beta_node, IndexMap::Affine(scalar_broadcast_pattern(c_rank))),
+                    (
+                        beta_node,
+                        IndexMap::Affine(scalar_broadcast_pattern(c_rank))
+                    ),
                 ],
             );
             let c_scaled_pattern = broadcast_pattern(&c_value.shape, &out_shape);
             build_elementwise(
                 program,
                 ScalarOp::Add,
-                alloc::vec![(scaled, IndexMap::Affine(identity_pattern(2))), (c_scaled, IndexMap::Affine(c_scaled_pattern))],
+                alloc::vec![
+                    (scaled, IndexMap::Affine(identity_pattern(2))),
+                    (c_scaled, IndexMap::Affine(c_scaled_pattern))
+                ],
             )
         }
         None => scaled,
@@ -1195,7 +1665,11 @@ fn lower_gemm(program: &mut Vec<Op>, values: &mut BTreeMap<String, Value>, node:
 /// the later elementwise operand pattern reading that reduced result back at
 /// full rank: no transpose round-trip needed, since [`Op::Reduce`]'s own
 /// `in_map`/`out_map` already address an arbitrary-rank iteration space.
-fn lower_softmax(program: &mut Vec<Op>, values: &mut BTreeMap<String, Value>, node: &NodeProto<'_>) -> Result<(), LowerError> {
+fn lower_softmax(
+    program: &mut Vec<Op>,
+    values: &mut BTreeMap<String, Value>,
+    node: &NodeProto<'_>,
+) -> Result<(), LowerError> {
     let input = lookup(values, node, 0)?.clone();
     let rank = input.shape.len();
     if rank == 0 {
@@ -1215,21 +1689,49 @@ fn lower_softmax(program: &mut Vec<Op>, values: &mut BTreeMap<String, Value>, no
         });
     }
     let reduced_axis = normalized_axis as u16;
-    let kept: Vec<u16> = (0..rank as u16).filter(|&candidate| candidate != reduced_axis).collect();
+    let kept: Vec<u16> = (0..rank as u16)
+        .filter(|&candidate| candidate != reduced_axis)
+        .collect();
     let out_map = projection(rank as u16, &kept);
 
-    let row_max = build_reduce(program, ScalarOp::Maximum, ReduceInit::NegativeInfinity, input.node, identity_pattern(rank), out_map.clone(), None);
+    let row_max = build_reduce(
+        program,
+        ScalarOp::Maximum,
+        ReduceInit::NegativeInfinity,
+        input.node,
+        identity_pattern(rank),
+        out_map.clone(),
+        None,
+    );
     let shifted = build_elementwise(
         program,
         ScalarOp::Subtract,
-        alloc::vec![(input.node, IndexMap::Affine(identity_pattern(rank))), (row_max, IndexMap::Affine(out_map.clone()))],
+        alloc::vec![
+            (input.node, IndexMap::Affine(identity_pattern(rank))),
+            (row_max, IndexMap::Affine(out_map.clone()))
+        ],
     );
-    let exponentiated = build_elementwise(program, ScalarOp::Exponential, alloc::vec![(shifted, IndexMap::Affine(identity_pattern(rank)))]);
-    let row_sum = build_reduce(program, ScalarOp::Add, ReduceInit::Zero, exponentiated, identity_pattern(rank), out_map.clone(), None);
+    let exponentiated = build_elementwise(
+        program,
+        ScalarOp::Exponential,
+        alloc::vec![(shifted, IndexMap::Affine(identity_pattern(rank)))],
+    );
+    let row_sum = build_reduce(
+        program,
+        ScalarOp::Add,
+        ReduceInit::Zero,
+        exponentiated,
+        identity_pattern(rank),
+        out_map.clone(),
+        None,
+    );
     let id = build_elementwise(
         program,
         ScalarOp::Divide,
-        alloc::vec![(exponentiated, IndexMap::Affine(identity_pattern(rank))), (row_sum, IndexMap::Affine(out_map))],
+        alloc::vec![
+            (exponentiated, IndexMap::Affine(identity_pattern(rank))),
+            (row_sum, IndexMap::Affine(out_map))
+        ],
     );
     bind_output(values, node, 0, id, input.shape);
     Ok(())
@@ -1243,34 +1745,78 @@ fn lower_softmax(program: &mut Vec<Op>, values: &mut BTreeMap<String, Value>, no
 /// `Reduce(Maximum)`/`Subtract`/`Exponential`/`Reduce(Add)` prefix as
 /// [`lower_softmax`], substituting one `Logarithm` + `Subtract` for its
 /// final `Divide`.
-fn lower_logsoftmax(program: &mut Vec<Op>, values: &mut BTreeMap<String, Value>, node: &NodeProto<'_>) -> Result<(), LowerError> {
+fn lower_logsoftmax(
+    program: &mut Vec<Op>,
+    values: &mut BTreeMap<String, Value>,
+    node: &NodeProto<'_>,
+) -> Result<(), LowerError> {
     let input = lookup(values, node, 0)?.clone();
     let rank = input.shape.len();
     if rank == 0 {
-        return Err(LowerError::UnsupportedShape { name: node.name.to_string(), op_type: node.op_type.to_string(), reason: "LogSoftmax requires input of rank >= 1".to_string() });
+        return Err(LowerError::UnsupportedShape {
+            name: node.name.to_string(),
+            op_type: node.op_type.to_string(),
+            reason: "LogSoftmax requires input of rank >= 1".to_string(),
+        });
     }
     let axis = attr_int(node, "axis").unwrap_or(-1);
     let normalized_axis = if axis < 0 { axis + rank as i64 } else { axis };
     if normalized_axis < 0 || normalized_axis as usize >= rank {
-        return Err(LowerError::UnsupportedShape { name: node.name.to_string(), op_type: node.op_type.to_string(), reason: format!("LogSoftmax axis {axis} is out of range for rank {rank}") });
+        return Err(LowerError::UnsupportedShape {
+            name: node.name.to_string(),
+            op_type: node.op_type.to_string(),
+            reason: format!("LogSoftmax axis {axis} is out of range for rank {rank}"),
+        });
     }
     let reduced_axis = normalized_axis as u16;
-    let kept: Vec<u16> = (0..rank as u16).filter(|&candidate| candidate != reduced_axis).collect();
+    let kept: Vec<u16> = (0..rank as u16)
+        .filter(|&candidate| candidate != reduced_axis)
+        .collect();
     let out_map = projection(rank as u16, &kept);
 
-    let row_max = build_reduce(program, ScalarOp::Maximum, ReduceInit::NegativeInfinity, input.node, identity_pattern(rank), out_map.clone(), None);
+    let row_max = build_reduce(
+        program,
+        ScalarOp::Maximum,
+        ReduceInit::NegativeInfinity,
+        input.node,
+        identity_pattern(rank),
+        out_map.clone(),
+        None,
+    );
     let shifted = build_elementwise(
         program,
         ScalarOp::Subtract,
-        alloc::vec![(input.node, IndexMap::Affine(identity_pattern(rank))), (row_max, IndexMap::Affine(out_map.clone()))],
+        alloc::vec![
+            (input.node, IndexMap::Affine(identity_pattern(rank))),
+            (row_max, IndexMap::Affine(out_map.clone()))
+        ],
     );
-    let exponentiated = build_elementwise(program, ScalarOp::Exponential, alloc::vec![(shifted, IndexMap::Affine(identity_pattern(rank)))]);
-    let row_sum = build_reduce(program, ScalarOp::Add, ReduceInit::Zero, exponentiated, identity_pattern(rank), out_map.clone(), None);
-    let log_sum = build_elementwise(program, ScalarOp::Logarithm, alloc::vec![(row_sum, IndexMap::Affine(identity_pattern(kept.len())))]);
+    let exponentiated = build_elementwise(
+        program,
+        ScalarOp::Exponential,
+        alloc::vec![(shifted, IndexMap::Affine(identity_pattern(rank)))],
+    );
+    let row_sum = build_reduce(
+        program,
+        ScalarOp::Add,
+        ReduceInit::Zero,
+        exponentiated,
+        identity_pattern(rank),
+        out_map.clone(),
+        None,
+    );
+    let log_sum = build_elementwise(
+        program,
+        ScalarOp::Logarithm,
+        alloc::vec![(row_sum, IndexMap::Affine(identity_pattern(kept.len())))],
+    );
     let id = build_elementwise(
         program,
         ScalarOp::Subtract,
-        alloc::vec![(shifted, IndexMap::Affine(identity_pattern(rank))), (log_sum, IndexMap::Affine(out_map))],
+        alloc::vec![
+            (shifted, IndexMap::Affine(identity_pattern(rank))),
+            (log_sum, IndexMap::Affine(out_map))
+        ],
     );
     bind_output(values, node, 0, id, input.shape);
     Ok(())
@@ -1281,11 +1827,17 @@ fn lower_logsoftmax(program: &mut Vec<Op>, values: &mut BTreeMap<String, Value>,
 /// algebra, only in whichever backend materializes the result, exactly the
 /// "transpose | permute the projected iteration axes" row in
 /// `proxima-tensor/src/map.rs`'s own doc table.
-fn lower_transpose(program: &mut Vec<Op>, values: &mut BTreeMap<String, Value>, node: &NodeProto<'_>) -> Result<(), LowerError> {
+fn lower_transpose(
+    program: &mut Vec<Op>,
+    values: &mut BTreeMap<String, Value>,
+    node: &NodeProto<'_>,
+) -> Result<(), LowerError> {
     let input = lookup(values, node, 0)?.clone();
     let rank = input.shape.len();
     let perm: Vec<u16> = match find_attr(node, "perm") {
-        Some(attribute) if !attribute.ints.is_empty() => attribute.ints.iter().map(|&value| value as u16).collect(),
+        Some(attribute) if !attribute.ints.is_empty() => {
+            attribute.ints.iter().map(|&value| value as u16).collect()
+        }
         _ => (0..rank as u16).rev().collect(),
     };
     if perm.len() != rank {
@@ -1295,7 +1847,10 @@ fn lower_transpose(program: &mut Vec<Op>, values: &mut BTreeMap<String, Value>, 
             reason: format!("perm has {} entries, input has rank {rank}", perm.len()),
         });
     }
-    let out_shape: Vec<u64> = perm.iter().map(|&axis| input.shape[axis as usize]).collect();
+    let out_shape: Vec<u64> = perm
+        .iter()
+        .map(|&axis| input.shape[axis as usize])
+        .collect();
 
     // operand axis k (input axis k) is read from iteration axis i where
     // perm[i] == k, i.e. the inverse permutation.
@@ -1304,7 +1859,11 @@ fn lower_transpose(program: &mut Vec<Op>, values: &mut BTreeMap<String, Value>, 
         inverse[source_axis as usize] = destination_axis as u16;
     }
     let pattern = projection(rank as u16, &inverse);
-    let id = build_elementwise(program, ScalarOp::Identity, alloc::vec![(input.node, IndexMap::Affine(pattern))]);
+    let id = build_elementwise(
+        program,
+        ScalarOp::Identity,
+        alloc::vec![(input.node, IndexMap::Affine(pattern))],
+    );
     bind_output(values, node, 0, id, out_shape);
     Ok(())
 }
@@ -1320,29 +1879,72 @@ fn lower_transpose(program: &mut Vec<Op>, values: &mut BTreeMap<String, Value>, 
 /// `data.shape[:axis] + indices.shape + data.shape[axis+1:]` -- so `base`'s
 /// entries just shift which iteration axis each non-gathered `data` axis
 /// reads from by `indices_rank` once past `axis`.
-fn lower_gather(program: &mut Vec<Op>, values: &mut BTreeMap<String, Value>, fold: &mut FoldState, node: &NodeProto<'_>) -> Result<(), LowerError> {
-    let data_name = node.input.first().copied().ok_or_else(|| LowerError::MissingInput { name: node.name.to_string(), op_type: node.op_type.to_string(), index: 0 })?;
+fn lower_gather(
+    program: &mut Vec<Op>,
+    values: &mut BTreeMap<String, Value>,
+    fold: &mut FoldState,
+    node: &NodeProto<'_>,
+) -> Result<(), LowerError> {
+    let data_name = node
+        .input
+        .first()
+        .copied()
+        .ok_or_else(|| LowerError::MissingInput {
+            name: node.name.to_string(),
+            op_type: node.op_type.to_string(),
+            index: 0,
+        })?;
     if !values.contains_key(data_name) {
         // `data` is a lower-time-only array (see `lower_shape`'s doc) -- no
         // `IndexMap::Computed` op is needed, the gather is just an index into
         // the already-known flat element list, done here at lower time.
-        let data = resolve_constant_array(data_name, &fold.initializer_data, &fold.constant_values, &fold.constant_arrays)
-            .ok_or_else(|| LowerError::UnknownValue { name: node.name.to_string(), op_type: node.op_type.to_string(), value: data_name.to_string() })?;
-        let indices_name = node.input.get(1).copied().ok_or_else(|| LowerError::MissingInput { name: node.name.to_string(), op_type: node.op_type.to_string(), index: 1 })?;
-        let indices = resolve_constant_array(indices_name, &fold.initializer_data, &fold.constant_values, &fold.constant_arrays).ok_or_else(|| LowerError::UnsupportedShape {
+        let data = resolve_constant_array(
+            data_name,
+            &fold.initializer_data,
+            &fold.constant_values,
+            &fold.constant_arrays,
+        )
+        .ok_or_else(|| LowerError::UnknownValue {
             name: node.name.to_string(),
             op_type: node.op_type.to_string(),
-            reason: "Gather over a lower-time constant array requires lower-time-constant indices too".to_string(),
+            value: data_name.to_string(),
+        })?;
+        let indices_name = node
+            .input
+            .get(1)
+            .copied()
+            .ok_or_else(|| LowerError::MissingInput {
+                name: node.name.to_string(),
+                op_type: node.op_type.to_string(),
+                index: 1,
+            })?;
+        let indices = resolve_constant_array(
+            indices_name,
+            &fold.initializer_data,
+            &fold.constant_values,
+            &fold.constant_arrays,
+        )
+        .ok_or_else(|| LowerError::UnsupportedShape {
+            name: node.name.to_string(),
+            op_type: node.op_type.to_string(),
+            reason:
+                "Gather over a lower-time constant array requires lower-time-constant indices too"
+                    .to_string(),
         })?;
         let gathered: Vec<f32> = indices
             .iter()
             .map(|&raw_index| {
-                let index = if raw_index < 0.0 { raw_index + data.len() as f32 } else { raw_index };
+                let index = if raw_index < 0.0 {
+                    raw_index + data.len() as f32
+                } else {
+                    raw_index
+                };
                 data[index as usize]
             })
             .collect();
         if let Some(output_name) = node.output.first() {
-            fold.constant_arrays.insert((*output_name).to_string(), gathered);
+            fold.constant_arrays
+                .insert((*output_name).to_string(), gathered);
         }
         return Ok(());
     }
@@ -1358,7 +1960,11 @@ fn lower_gather(program: &mut Vec<Op>, values: &mut BTreeMap<String, Value>, fol
     }
     let data_rank = data.shape.len();
     let axis = attr_int(node, "axis").unwrap_or(0);
-    let normalized_axis = if axis < 0 { axis + data_rank as i64 } else { axis };
+    let normalized_axis = if axis < 0 {
+        axis + data_rank as i64
+    } else {
+        axis
+    };
     if normalized_axis < 0 || normalized_axis as usize >= data_rank {
         return Err(LowerError::UnsupportedShape {
             name: node.name.to_string(),
@@ -1370,20 +1976,34 @@ fn lower_gather(program: &mut Vec<Op>, values: &mut BTreeMap<String, Value>, fol
 
     let indices_rank = indices.shape.len();
     let iter_rank = (data_rank - 1 + indices_rank) as u16;
-    let index_map = projection(iter_rank, &(0..indices_rank as u16).map(|offset| axis as u16 + offset).collect::<Vec<_>>());
+    let index_map = projection(
+        iter_rank,
+        &(0..indices_rank as u16)
+            .map(|offset| axis as u16 + offset)
+            .collect::<Vec<_>>(),
+    );
 
     let mut base_axes: Vec<AxisIndex> = Vec::with_capacity(data_rank);
     for data_axis in 0..data_rank {
         if data_axis == axis {
             base_axes.push(AxisIndex::default());
         } else if data_axis < axis {
-            base_axes.push(AxisIndex { terms: core::iter::once(AxisTerm::projection(data_axis as u16)).collect(), offset: 0 });
+            base_axes.push(AxisIndex {
+                terms: core::iter::once(AxisTerm::projection(data_axis as u16)).collect(),
+                offset: 0,
+            });
         } else {
             let iter_axis = (data_axis - 1 + indices_rank) as u16;
-            base_axes.push(AxisIndex { terms: core::iter::once(AxisTerm::projection(iter_axis)).collect(), offset: 0 });
+            base_axes.push(AxisIndex {
+                terms: core::iter::once(AxisTerm::projection(iter_axis)).collect(),
+                offset: 0,
+            });
         }
     }
-    let base = IndexPattern { iter_rank, axes: base_axes };
+    let base = IndexPattern {
+        iter_rank,
+        axes: base_axes,
+    };
     // `IndexMap::Computed`'s own doc requires an integer `indices` `DType`.
     // Most producers (a graph input feeding `Gather` directly, or
     // [`slice_axis_range`]'s own index construction) already tag their
@@ -1399,15 +2019,39 @@ fn lower_gather(program: &mut Vec<Op>, values: &mut BTreeMap<String, Value>, fol
     // constant-data fallback (materialized `Float32` since its consumer is
     // not knowable there, that function's own doc) is the one case that
     // needs it.
-    let indices_dtype = program.get(indices.node.0 as usize).map(proxima_tensor::Op::dtype).unwrap_or(DType::Float32);
+    let indices_dtype = program
+        .get(indices.node.0 as usize)
+        .map(proxima_tensor::Op::dtype)
+        .unwrap_or(DType::Float32);
     let indices_node = if indices_dtype == DType::Int32 {
         indices.node
     } else {
-        build_elementwise_dtype(program, DType::Int32, ScalarOp::Identity, alloc::vec![(indices.node, IndexMap::Affine(identity_pattern(indices_rank)))])
+        build_elementwise_dtype(
+            program,
+            DType::Int32,
+            ScalarOp::Identity,
+            alloc::vec![(
+                indices.node,
+                IndexMap::Affine(identity_pattern(indices_rank))
+            )],
+        )
     };
-    let gathered_map = IndexMap::Computed { indices: indices_node, index_map, base, gathered_dim: axis as u16 };
+    let gathered_map = IndexMap::Computed {
+        indices: indices_node,
+        index_map,
+        base,
+        gathered_dim: axis as u16,
+    };
 
-    let id = append(program, Op::Elementwise { dtype: DType::Float32, body: ScalarOp::Identity, operands: alloc::vec![(data.node, gathered_map)], name: None });
+    let id = append(
+        program,
+        Op::Elementwise {
+            dtype: DType::Float32,
+            body: ScalarOp::Identity,
+            operands: alloc::vec![(data.node, gathered_map)],
+            name: None,
+        },
+    );
     let mut out_shape = data.shape[..axis].to_vec();
     out_shape.extend_from_slice(&indices.shape);
     out_shape.extend_from_slice(&data.shape[axis + 1..]);
@@ -1425,26 +2069,47 @@ fn lower_gather(program: &mut Vec<Op>, values: &mut BTreeMap<String, Value>, fol
 /// axis be pinned by some operand, and a fresh axis has none). This is the
 /// inverse of [`crate::lift::lift_graph`]'s `Unsqueeze` prelude for a
 /// broadcast operand.
-fn lower_unsqueeze(_program: &mut Vec<Op>, values: &mut BTreeMap<String, Value>, constant_arrays: &mut BTreeMap<String, Vec<f32>>, node: &NodeProto<'_>) -> Result<(), LowerError> {
-    let input_name = node.input.first().copied().ok_or_else(|| LowerError::MissingInput { name: node.name.to_string(), op_type: node.op_type.to_string(), index: 0 })?;
+fn lower_unsqueeze(
+    _program: &mut Vec<Op>,
+    values: &mut BTreeMap<String, Value>,
+    constant_arrays: &mut BTreeMap<String, Vec<f32>>,
+    node: &NodeProto<'_>,
+) -> Result<(), LowerError> {
+    let input_name = node
+        .input
+        .first()
+        .copied()
+        .ok_or_else(|| LowerError::MissingInput {
+            name: node.name.to_string(),
+            op_type: node.op_type.to_string(),
+            index: 0,
+        })?;
     if !values.contains_key(input_name) {
         // `Shape`'s output (and anything gathered/unsqueezed from it) never
         // gets a live `Op` -- see `lower_shape`'s own doc -- so an `Unsqueeze`
         // over one just carries the same lower-time array forward under the
         // new output name, unchanged: inserting a logical size-1 axis has no
         // effect on the flat element list this fold-only path tracks.
-        let array = constant_arrays.get(input_name).cloned().ok_or_else(|| LowerError::UnknownValue {
-            name: node.name.to_string(),
-            op_type: node.op_type.to_string(),
-            value: input_name.to_string(),
-        })?;
+        let array =
+            constant_arrays
+                .get(input_name)
+                .cloned()
+                .ok_or_else(|| LowerError::UnknownValue {
+                    name: node.name.to_string(),
+                    op_type: node.op_type.to_string(),
+                    value: input_name.to_string(),
+                })?;
         if let Some(output_name) = node.output.first() {
             constant_arrays.insert((*output_name).to_string(), array);
         }
         return Ok(());
     }
     let input = lookup(values, node, 0)?.clone();
-    let mut axes: Vec<u16> = attr_ints(node, "axes").unwrap_or(&[]).iter().map(|&value| value as u16).collect();
+    let mut axes: Vec<u16> = attr_ints(node, "axes")
+        .unwrap_or(&[])
+        .iter()
+        .map(|&value| value as u16)
+        .collect();
     axes.sort_unstable();
     let out_rank = input.shape.len() + axes.len();
     let mut out_shape = Vec::with_capacity(out_rank);
@@ -1465,7 +2130,15 @@ fn lower_unsqueeze(_program: &mut Vec<Op>, values: &mut BTreeMap<String, Value>,
         }
     }
     if let Some(output_name) = node.output.first() {
-        values.insert((*output_name).to_string(), Value { node: input.node, shape: out_shape, view: Some(view), flatten_source: None });
+        values.insert(
+            (*output_name).to_string(),
+            Value {
+                node: input.node,
+                shape: out_shape,
+                view: Some(view),
+                flatten_source: None,
+            },
+        );
     }
     Ok(())
 }
@@ -1475,14 +2148,25 @@ fn lower_unsqueeze(_program: &mut Vec<Op>, values: &mut BTreeMap<String, Value>,
 /// [`crate::lift::lift_graph`]'s own `Op::Constant` -> `Constant` node
 /// emission produces -- [`Op::Constant`] itself carries a single scalar
 /// broadcast across its declared shape, never per-element data.
-fn lower_constant(program: &mut Vec<Op>, values: &mut BTreeMap<String, Value>, fold: &mut FoldState, node: &NodeProto<'_>) -> Result<(), LowerError> {
-    let tensor = find_attr(node, "value").and_then(|attribute| attribute.t.as_ref()).ok_or_else(|| LowerError::UnsupportedShape {
-        name: node.name.to_string(),
-        op_type: node.op_type.to_string(),
-        reason: "Constant node has no \"value\" tensor attribute".to_string(),
-    })?;
+fn lower_constant(
+    program: &mut Vec<Op>,
+    values: &mut BTreeMap<String, Value>,
+    fold: &mut FoldState,
+    node: &NodeProto<'_>,
+) -> Result<(), LowerError> {
+    let tensor = find_attr(node, "value")
+        .and_then(|attribute| attribute.t.as_ref())
+        .ok_or_else(|| LowerError::UnsupportedShape {
+            name: node.name.to_string(),
+            op_type: node.op_type.to_string(),
+            reason: "Constant node has no \"value\" tensor attribute".to_string(),
+        })?;
     let shape = tensor_shape(tensor);
-    let decoded = decode_numeric_tensor(tensor).map_err(|_| LowerError::UndecodableInitializer { name: node.name.to_string(), data_type: tensor.data_type })?;
+    let decoded =
+        decode_numeric_tensor(tensor).map_err(|_| LowerError::UndecodableInitializer {
+            name: node.name.to_string(),
+            data_type: tensor.data_type,
+        })?;
     if let Some(output_name) = node.output.first() {
         // recorded unconditionally, whatever the shape, so a `Slice`
         // starts/ends/axes/steps operand (or a `Gather`/`Unsqueeze` chain
@@ -1492,8 +2176,10 @@ fn lower_constant(program: &mut Vec<Op>, values: &mut BTreeMap<String, Value>, f
         // ORIGINAL (pre-flattening) rank alongside it -- [`lower_slice`]'s
         // own constant-data fallback is the one reader that needs a real
         // multi-axis shape rather than treating every folded array as flat.
-        fold.constant_arrays.insert((*output_name).to_string(), decoded.clone());
-        fold.constant_tensor_shapes.insert((*output_name).to_string(), shape.clone());
+        fold.constant_arrays
+            .insert((*output_name).to_string(), decoded.clone());
+        fold.constant_tensor_shapes
+            .insert((*output_name).to_string(), shape.clone());
     }
     let value = decoded.first().copied().unwrap_or(0.0);
     if decoded.iter().any(|&element| element != value) {
@@ -1511,13 +2197,24 @@ fn lower_constant(program: &mut Vec<Op>, values: &mut BTreeMap<String, Value>, f
         // whether or not anything downstream needs it as one.
         return Ok(());
     }
-    let id = append(program, Op::Constant { dtype: DType::Float32, shape: shape.iter().map(|&extent| Extent::Static(extent as u32)).collect(), value });
+    let id = append(
+        program,
+        Op::Constant {
+            dtype: DType::Float32,
+            shape: shape
+                .iter()
+                .map(|&extent| Extent::Static(extent as u32))
+                .collect(),
+            value,
+        },
+    );
     if let Some(output_name) = node.output.first() {
         // recorded unconditionally (uniform value, whatever the shape) so a
         // downstream `If`/`Loop` condition or trip count sourced from a
         // `Constant` node -- not only a graph initializer -- is still
         // foldable at lower time; see `constant_scalar_value`.
-        fold.constant_values.insert((*output_name).to_string(), value);
+        fold.constant_values
+            .insert((*output_name).to_string(), value);
     }
     bind_output(values, node, 0, id, shape);
     Ok(())
@@ -1528,15 +2225,32 @@ fn lower_constant(program: &mut Vec<Op>, values: &mut BTreeMap<String, Value>, f
 /// `ScalarOp::Select -> "Where"` emission. Pure dataflow, no subgraph: the
 /// same [`ScalarOp::Select`] three-operand composition [`concat_pair`] and
 /// [`pad_axis`] already build for their own clamp-and-select shapes.
-fn lower_where(program: &mut Vec<Op>, values: &mut BTreeMap<String, Value>, node: &NodeProto<'_>) -> Result<(), LowerError> {
+fn lower_where(
+    program: &mut Vec<Op>,
+    values: &mut BTreeMap<String, Value>,
+    node: &NodeProto<'_>,
+) -> Result<(), LowerError> {
     let cond = lookup(values, node, 0)?.clone();
     let lhs = lookup(values, node, 1)?.clone();
     let rhs = lookup(values, node, 2)?.clone();
-    let out_shape = broadcast_shapes(node, &broadcast_shapes(node, &cond.shape, &lhs.shape)?, &rhs.shape)?;
+    let out_shape = broadcast_shapes(
+        node,
+        &broadcast_shapes(node, &cond.shape, &lhs.shape)?,
+        &rhs.shape,
+    )?;
     let operands = alloc::vec![
-        (cond.node, IndexMap::Affine(operand_pattern(&cond, &out_shape))),
-        (lhs.node, IndexMap::Affine(operand_pattern(&lhs, &out_shape))),
-        (rhs.node, IndexMap::Affine(operand_pattern(&rhs, &out_shape))),
+        (
+            cond.node,
+            IndexMap::Affine(operand_pattern(&cond, &out_shape))
+        ),
+        (
+            lhs.node,
+            IndexMap::Affine(operand_pattern(&lhs, &out_shape))
+        ),
+        (
+            rhs.node,
+            IndexMap::Affine(operand_pattern(&rhs, &out_shape))
+        ),
     ];
     let id = build_elementwise(program, ScalarOp::Select, operands);
     bind_output(values, node, 0, id, out_shape);
@@ -1560,13 +2274,19 @@ fn optional_input<'node>(node: &'node NodeProto<'_>, index: usize) -> Option<&'n
 /// [`lower_if`]/[`lower_loop`] use to decide whether a condition or trip
 /// count is a lower-time constant (unrollable) or only known from computed
 /// data (the RISC-sufficiency boundary, [`LowerError::DataDependentControlFlow`]).
-fn constant_scalar_value(name: &str, initializer_data: &BTreeMap<String, Vec<f32>>, constant_values: &BTreeMap<String, f32>) -> Option<f32> {
+fn constant_scalar_value(
+    name: &str,
+    initializer_data: &BTreeMap<String, Vec<f32>>,
+    constant_values: &BTreeMap<String, f32>,
+) -> Option<f32> {
     if let Some(&value) = constant_values.get(name) {
         return Some(value);
     }
     let data = initializer_data.get(name)?;
     let first = *data.first()?;
-    data.iter().all(|&element| element == first).then_some(first)
+    data.iter()
+        .all(|&element| element == first)
+        .then_some(first)
 }
 
 /// The full-array generalization of [`constant_scalar_value`]: every
@@ -1605,8 +2325,22 @@ fn resolve_index_operand(
     constant_arrays: &BTreeMap<String, Vec<f32>>,
     unsupported: &dyn Fn(String) -> LowerError,
 ) -> Result<Vec<f32>, LowerError> {
-    let name = node.input.get(index).copied().ok_or_else(|| LowerError::MissingInput { name: node.name.to_string(), op_type: node.op_type.to_string(), index })?;
-    resolve_constant_array(name, initializer_data, constant_values, constant_arrays).ok_or_else(|| unsupported(format!("Slice operand at input {index} must be a lower-time constant")))
+    let name = node
+        .input
+        .get(index)
+        .copied()
+        .ok_or_else(|| LowerError::MissingInput {
+            name: node.name.to_string(),
+            op_type: node.op_type.to_string(),
+            index,
+        })?;
+    resolve_constant_array(name, initializer_data, constant_values, constant_arrays).ok_or_else(
+        || {
+            unsupported(format!(
+                "Slice operand at input {index} must be a lower-time constant"
+            ))
+        },
+    )
 }
 
 /// A row-major sub-block of `data` (declared shape `shape`): `ranges[axis]`
@@ -1653,19 +2387,29 @@ fn slice_constant_tensor(data: &[f32], shape: &[u64], ranges: &[(u64, u64)]) -> 
 /// an outer node, surfaces as an ordinary [`LowerError::UnknownValue`] the
 /// first subgraph node that reads it -- If/Loop/Scan bodies in practice
 /// only ever capture outer names or compute fresh ones via `Constant`).
-fn lower_subgraph_nodes(program: &mut Vec<Op>, values: &mut BTreeMap<String, Value>, fold: &mut FoldState, subgraph: &GraphProto<'_>) -> Result<(), LowerError> {
+fn lower_subgraph_nodes(
+    program: &mut Vec<Op>,
+    values: &mut BTreeMap<String, Value>,
+    fold: &mut FoldState,
+    subgraph: &GraphProto<'_>,
+) -> Result<(), LowerError> {
     for node in &subgraph.node {
         lower_node(program, values, fold, node)?;
     }
     Ok(())
 }
 
-fn required_graph_attr<'node>(node: &'node NodeProto<'_>, name: &str) -> Result<&'node GraphProto<'node>, LowerError> {
-    find_attr(node, name).and_then(|attribute| attribute.g.as_ref()).ok_or_else(|| LowerError::UnsupportedShape {
-        name: node.name.to_string(),
-        op_type: node.op_type.to_string(),
-        reason: format!("{} requires a {name:?} graph attribute", node.op_type),
-    })
+fn required_graph_attr<'node>(
+    node: &'node NodeProto<'_>,
+    name: &str,
+) -> Result<&'node GraphProto<'node>, LowerError> {
+    find_attr(node, name)
+        .and_then(|attribute| attribute.g.as_ref())
+        .ok_or_else(|| LowerError::UnsupportedShape {
+            name: node.name.to_string(),
+            op_type: node.op_type.to_string(),
+            reason: format!("{} requires a {name:?} graph attribute", node.op_type),
+        })
 }
 
 /// `If(cond, then_branch, else_branch)`.
@@ -1685,13 +2429,28 @@ fn required_graph_attr<'node>(node: &'node NodeProto<'_>, name: &str) -> Result<
 /// shaped tensor at the same output position, [`ScalarOp::Select`] has no
 /// broadcast that reconciles them, and that is named as
 /// [`LowerError::UnsupportedShape`] rather than silently picking one side.
-fn lower_if(program: &mut Vec<Op>, values: &mut BTreeMap<String, Value>, fold: &mut FoldState, node: &NodeProto<'_>) -> Result<(), LowerError> {
-    let cond_name = node.input.first().ok_or_else(|| LowerError::MissingInput { name: node.name.to_string(), op_type: node.op_type.to_string(), index: 0 })?;
+fn lower_if(
+    program: &mut Vec<Op>,
+    values: &mut BTreeMap<String, Value>,
+    fold: &mut FoldState,
+    node: &NodeProto<'_>,
+) -> Result<(), LowerError> {
+    let cond_name = node.input.first().ok_or_else(|| LowerError::MissingInput {
+        name: node.name.to_string(),
+        op_type: node.op_type.to_string(),
+        index: 0,
+    })?;
     let then_branch = required_graph_attr(node, "then_branch")?;
     let else_branch = required_graph_attr(node, "else_branch")?;
 
-    if let Some(cond_value) = constant_scalar_value(cond_name, &fold.initializer_data, &fold.constant_values) {
-        let chosen = if cond_value != 0.0 { then_branch } else { else_branch };
+    if let Some(cond_value) =
+        constant_scalar_value(cond_name, &fold.initializer_data, &fold.constant_values)
+    {
+        let chosen = if cond_value != 0.0 {
+            then_branch
+        } else {
+            else_branch
+        };
         lower_subgraph_nodes(program, values, fold, chosen)?;
         for (index, output_name) in node.output.iter().enumerate() {
             let branch_output = chosen.output.get(index).ok_or_else(|| LowerError::UnsupportedShape {
@@ -1699,7 +2458,8 @@ fn lower_if(program: &mut Vec<Op>, values: &mut BTreeMap<String, Value>, fold: &
                 op_type: node.op_type.to_string(),
                 reason: format!("chosen If branch declares fewer outputs than the If node at position {index}"),
             })?;
-            let value = lookup_by_name(values, branch_output.name, node.op_type, node.name)?.clone();
+            let value =
+                lookup_by_name(values, branch_output.name, node.op_type, node.name)?.clone();
             values.insert((*output_name).to_string(), value);
         }
         return Ok(());
@@ -1709,16 +2469,28 @@ fn lower_if(program: &mut Vec<Op>, values: &mut BTreeMap<String, Value>, fold: &
     lower_subgraph_nodes(program, values, fold, then_branch)?;
     lower_subgraph_nodes(program, values, fold, else_branch)?;
     for index in 0..node.output.len() {
-        let then_output = then_branch.output.get(index).ok_or_else(|| LowerError::UnsupportedShape {
-            name: node.name.to_string(),
-            op_type: node.op_type.to_string(),
-            reason: format!("then_branch declares fewer outputs than the If node at position {index}"),
-        })?;
-        let else_output = else_branch.output.get(index).ok_or_else(|| LowerError::UnsupportedShape {
-            name: node.name.to_string(),
-            op_type: node.op_type.to_string(),
-            reason: format!("else_branch declares fewer outputs than the If node at position {index}"),
-        })?;
+        let then_output =
+            then_branch
+                .output
+                .get(index)
+                .ok_or_else(|| LowerError::UnsupportedShape {
+                    name: node.name.to_string(),
+                    op_type: node.op_type.to_string(),
+                    reason: format!(
+                        "then_branch declares fewer outputs than the If node at position {index}"
+                    ),
+                })?;
+        let else_output =
+            else_branch
+                .output
+                .get(index)
+                .ok_or_else(|| LowerError::UnsupportedShape {
+                    name: node.name.to_string(),
+                    op_type: node.op_type.to_string(),
+                    reason: format!(
+                        "else_branch declares fewer outputs than the If node at position {index}"
+                    ),
+                })?;
         let then_value = lookup_by_name(values, then_output.name, node.op_type, node.name)?.clone();
         let else_value = lookup_by_name(values, else_output.name, node.op_type, node.name)?.clone();
         if then_value.shape != else_value.shape {
@@ -1734,7 +2506,10 @@ fn lower_if(program: &mut Vec<Op>, values: &mut BTreeMap<String, Value>, fold: &
         let out_shape = then_value.shape.clone();
         let rank = out_shape.len();
         let operands = alloc::vec![
-            (cond_value.node, IndexMap::Affine(operand_pattern(&cond_value, &out_shape))),
+            (
+                cond_value.node,
+                IndexMap::Affine(operand_pattern(&cond_value, &out_shape))
+            ),
             (then_value.node, IndexMap::Affine(identity_pattern(rank))),
             (else_value.node, IndexMap::Affine(identity_pattern(rank))),
         ];
@@ -1759,13 +2534,31 @@ fn lower_if(program: &mut Vec<Op>, values: &mut BTreeMap<String, Value>, fold: &
 fn slice_axis0(program: &mut Vec<Op>, value: &Value, index: u64) -> Value {
     let rank = value.shape.len();
     let mut axes = Vec::with_capacity(rank);
-    axes.push(AxisIndex { terms: Default::default(), offset: index as i32 });
+    axes.push(AxisIndex {
+        terms: Default::default(),
+        offset: index as i32,
+    });
     for axis in 1..rank {
-        axes.push(AxisIndex { terms: core::iter::once(AxisTerm::projection((axis - 1) as u16)).collect(), offset: 0 });
+        axes.push(AxisIndex {
+            terms: core::iter::once(AxisTerm::projection((axis - 1) as u16)).collect(),
+            offset: 0,
+        });
     }
-    let pattern = IndexPattern { iter_rank: (rank - 1) as u16, axes };
-    let id = build_elementwise(program, ScalarOp::Identity, alloc::vec![(value.node, IndexMap::Affine(pattern))]);
-    Value { node: id, shape: value.shape[1..].to_vec(), view: None, flatten_source: None }
+    let pattern = IndexPattern {
+        iter_rank: (rank - 1) as u16,
+        axes,
+    };
+    let id = build_elementwise(
+        program,
+        ScalarOp::Identity,
+        alloc::vec![(value.node, IndexMap::Affine(pattern))],
+    );
+    Value {
+        node: id,
+        shape: value.shape[1..].to_vec(),
+        view: None,
+        flatten_source: None,
+    }
 }
 
 /// `Scan(initial_state..., scan_input...)`: `Scan`'s own trip count is
@@ -1784,19 +2577,26 @@ fn slice_axis0(program: &mut Vec<Op>, value: &Value, index: u64) -> Value {
 /// yet build), more than one `scan_input`/state variable, and any
 /// `scan_input_axes`/`scan_output_axes`/`scan_input_directions` attribute
 /// other than the all-default case.
-fn lower_scan(program: &mut Vec<Op>, values: &mut BTreeMap<String, Value>, fold: &mut FoldState, node: &NodeProto<'_>) -> Result<(), LowerError> {
+fn lower_scan(
+    program: &mut Vec<Op>,
+    values: &mut BTreeMap<String, Value>,
+    fold: &mut FoldState,
+    node: &NodeProto<'_>,
+) -> Result<(), LowerError> {
     let name = node.name.to_string();
     let op_type = node.op_type.to_string();
-    let num_scan_inputs = attr_int(node, "num_scan_inputs").ok_or_else(|| LowerError::UnsupportedShape {
-        name: name.clone(),
-        op_type: op_type.clone(),
-        reason: "Scan requires a num_scan_inputs attribute".to_string(),
-    })?;
+    let num_scan_inputs =
+        attr_int(node, "num_scan_inputs").ok_or_else(|| LowerError::UnsupportedShape {
+            name: name.clone(),
+            op_type: op_type.clone(),
+            reason: "Scan requires a num_scan_inputs attribute".to_string(),
+        })?;
     if num_scan_inputs != 1 || node.input.len() != 2 {
         return Err(LowerError::UnsupportedShape {
             name,
             op_type,
-            reason: "Scan lowering supports exactly one state variable and one scan_input".to_string(),
+            reason: "Scan lowering supports exactly one state variable and one scan_input"
+                .to_string(),
         });
     }
     let body = required_graph_attr(node, "body")?;
@@ -1811,7 +2611,11 @@ fn lower_scan(program: &mut Vec<Op>, values: &mut BTreeMap<String, Value>, fold:
     let mut state = lookup(values, node, 0)?.clone();
     let scan_input = lookup(values, node, 1)?.clone();
     if scan_input.shape.is_empty() {
-        return Err(LowerError::UnsupportedShape { name, op_type, reason: "Scan scan_input must be rank >= 1".to_string() });
+        return Err(LowerError::UnsupportedShape {
+            name,
+            op_type,
+            reason: "Scan scan_input must be rank >= 1".to_string(),
+        });
     }
     let trip_count = scan_input.shape[0];
 
@@ -1852,23 +2656,50 @@ fn lower_scan(program: &mut Vec<Op>, values: &mut BTreeMap<String, Value>, fold:
 /// this subprogram itself produced" has no expression in the algebra. This
 /// is named [`LowerError::DataDependentControlFlow`], never a fabricated
 /// primitive and never a silently-truncated unroll.
-fn lower_loop(program: &mut Vec<Op>, values: &mut BTreeMap<String, Value>, fold: &mut FoldState, node: &NodeProto<'_>) -> Result<(), LowerError> {
+fn lower_loop(
+    program: &mut Vec<Op>,
+    values: &mut BTreeMap<String, Value>,
+    fold: &mut FoldState,
+    node: &NodeProto<'_>,
+) -> Result<(), LowerError> {
     let name = node.name.to_string();
     let op_type = node.op_type.to_string();
-    let boundary = |reason: &str| LowerError::DataDependentControlFlow { name: name.clone(), op_type: op_type.clone(), reason: reason.to_string() };
+    let boundary = |reason: &str| LowerError::DataDependentControlFlow {
+        name: name.clone(),
+        op_type: op_type.clone(),
+        reason: reason.to_string(),
+    };
 
     let trip_count = match optional_input(node, 0) {
-        Some(trip_name) => match constant_scalar_value(trip_name, &fold.initializer_data, &fold.constant_values) {
-            Some(value) => value as u64,
-            None => return Err(boundary("trip count M is only known from computed data, not a lower-time constant")),
-        },
-        None => return Err(boundary("no trip count M was given, so iteration count depends only on a runtime cond")),
+        Some(trip_name) => {
+            match constant_scalar_value(trip_name, &fold.initializer_data, &fold.constant_values) {
+                Some(value) => value as u64,
+                None => {
+                    return Err(boundary(
+                        "trip count M is only known from computed data, not a lower-time constant",
+                    ));
+                }
+            }
+        }
+        None => {
+            return Err(boundary(
+                "no trip count M was given, so iteration count depends only on a runtime cond",
+            ));
+        }
     };
     if let Some(cond_name) = optional_input(node, 1) {
         match constant_scalar_value(cond_name, &fold.initializer_data, &fold.constant_values) {
             Some(value) if value != 0.0 => {}
-            Some(_) => return Err(boundary("initial cond is a lower-time-constant false, zero iterations is not modeled")),
-            None => return Err(boundary("cond is only known from computed data, so iterations may terminate early at runtime")),
+            Some(_) => {
+                return Err(boundary(
+                    "initial cond is a lower-time-constant false, zero iterations is not modeled",
+                ));
+            }
+            None => {
+                return Err(boundary(
+                    "cond is only known from computed data, so iterations may terminate early at runtime",
+                ));
+            }
         }
     }
 
@@ -1882,22 +2713,43 @@ fn lower_loop(program: &mut Vec<Op>, values: &mut BTreeMap<String, Value>, fold:
         });
     }
 
-    let mut state: Vec<Value> = (0..num_state).map(|index| lookup(values, node, index + 2).cloned()).collect::<Result<_, _>>()?;
+    let mut state: Vec<Value> = (0..num_state)
+        .map(|index| lookup(values, node, index + 2).cloned())
+        .collect::<Result<_, _>>()?;
 
     for iteration in 0..trip_count {
         let iter_node = constant_scalar(program, iteration as f32);
-        values.insert(body.input[0].name.to_string(), Value { node: iter_node, shape: Vec::new(), view: None, flatten_source: None });
+        values.insert(
+            body.input[0].name.to_string(),
+            Value {
+                node: iter_node,
+                shape: Vec::new(),
+                view: None,
+                flatten_source: None,
+            },
+        );
         for (state_index, state_value) in state.iter().enumerate() {
-            values.insert(body.input[state_index + 2].name.to_string(), state_value.clone());
+            values.insert(
+                body.input[state_index + 2].name.to_string(),
+                state_value.clone(),
+            );
         }
         lower_subgraph_nodes(program, values, fold, body)?;
         state = (0..num_state)
-            .map(|index| lookup_by_name(values, body.output[index + 1].name, "Loop", node.name).cloned())
+            .map(|index| {
+                lookup_by_name(values, body.output[index + 1].name, "Loop", node.name).cloned()
+            })
             .collect::<Result<_, _>>()?;
     }
 
     for (index, state_value) in state.iter().enumerate() {
-        bind_output(values, node, index, state_value.node, state_value.shape.clone());
+        bind_output(
+            values,
+            node,
+            index,
+            state_value.node,
+            state_value.shape.clone(),
+        );
     }
     Ok(())
 }
@@ -1907,7 +2759,13 @@ fn lower_loop(program: &mut Vec<Op>, values: &mut BTreeMap<String, Value>, fold:
 /// emission) and `keepdims == 0` -- the only form [`Op::Reduce`] can
 /// express, since it drops the reduced axes rather than keeping a size-1
 /// placeholder.
-fn lower_reduce(program: &mut Vec<Op>, values: &mut BTreeMap<String, Value>, node: &NodeProto<'_>, body: ScalarOp, init: ReduceInit) -> Result<(), LowerError> {
+fn lower_reduce(
+    program: &mut Vec<Op>,
+    values: &mut BTreeMap<String, Value>,
+    node: &NodeProto<'_>,
+    body: ScalarOp,
+    init: ReduceInit,
+) -> Result<(), LowerError> {
     let input = lookup(values, node, 0)?.clone();
     let rank = input.shape.len();
     let keepdims = attr_int(node, "keepdims").unwrap_or(0);
@@ -1919,9 +2777,22 @@ fn lower_reduce(program: &mut Vec<Op>, values: &mut BTreeMap<String, Value>, nod
         });
     }
     let axes: Vec<usize> = attr_ints(node, "axes").unwrap_or(&[]).iter().map(|&value| if value < 0 { value + rank as i64 } else { value } as usize).collect();
-    let kept: Vec<u16> = (0..rank as u16).filter(|axis| !axes.contains(&(*axis as usize))).collect();
-    let out_shape: Vec<u64> = kept.iter().map(|&axis| input.shape[axis as usize]).collect();
-    let id = build_reduce(program, body, init, input.node, identity_pattern(rank), projection(rank as u16, &kept), None);
+    let kept: Vec<u16> = (0..rank as u16)
+        .filter(|axis| !axes.contains(&(*axis as usize)))
+        .collect();
+    let out_shape: Vec<u64> = kept
+        .iter()
+        .map(|&axis| input.shape[axis as usize])
+        .collect();
+    let id = build_reduce(
+        program,
+        body,
+        init,
+        input.node,
+        identity_pattern(rank),
+        projection(rank as u16, &kept),
+        None,
+    );
     bind_output(values, node, 0, id, out_shape);
     Ok(())
 }
@@ -1939,7 +2810,11 @@ fn lower_reduce(program: &mut Vec<Op>, values: &mut BTreeMap<String, Value>, nod
 /// that function's doc) -- the physical [`Op::Reduce`] still drops them
 /// (`Keep::Reduce` always does, `proxima-tensor/src/shape.rs:205`), only the
 /// logical [`Value`] presented to consumers regains them.
-fn lower_reduce_mean(program: &mut Vec<Op>, values: &mut BTreeMap<String, Value>, node: &NodeProto<'_>) -> Result<(), LowerError> {
+fn lower_reduce_mean(
+    program: &mut Vec<Op>,
+    values: &mut BTreeMap<String, Value>,
+    node: &NodeProto<'_>,
+) -> Result<(), LowerError> {
     let input = lookup(values, node, 0)?.clone();
     let rank = input.shape.len();
     let keepdims = attr_int(node, "keepdims").unwrap_or(1);
@@ -1947,20 +2822,40 @@ fn lower_reduce_mean(program: &mut Vec<Op>, values: &mut BTreeMap<String, Value>
     if axes.is_empty() {
         axes = (0..rank).collect();
     }
-    let kept: Vec<u16> = (0..rank as u16).filter(|axis| !axes.contains(&(*axis as usize))).collect();
+    let kept: Vec<u16> = (0..rank as u16)
+        .filter(|axis| !axes.contains(&(*axis as usize)))
+        .collect();
     let count: u64 = axes.iter().map(|&axis| input.shape[axis]).product();
     if count == 0 {
-        return Err(LowerError::UnsupportedShape { name: node.name.to_string(), op_type: node.op_type.to_string(), reason: "ReduceMean over a zero-extent axis has no defined mean".to_string() });
+        return Err(LowerError::UnsupportedShape {
+            name: node.name.to_string(),
+            op_type: node.op_type.to_string(),
+            reason: "ReduceMean over a zero-extent axis has no defined mean".to_string(),
+        });
     }
-    let sum_shape: Vec<u64> = kept.iter().map(|&axis| input.shape[axis as usize]).collect();
-    let sum_id = build_reduce(program, ScalarOp::Add, ReduceInit::Zero, input.node, identity_pattern(rank), projection(rank as u16, &kept), None);
+    let sum_shape: Vec<u64> = kept
+        .iter()
+        .map(|&axis| input.shape[axis as usize])
+        .collect();
+    let sum_id = build_reduce(
+        program,
+        ScalarOp::Add,
+        ReduceInit::Zero,
+        input.node,
+        identity_pattern(rank),
+        projection(rank as u16, &kept),
+        None,
+    );
     let reciprocal_count = constant_scalar(program, 1.0 / count as f32);
     let mean_id = build_elementwise(
         program,
         ScalarOp::Multiply,
         alloc::vec![
             (sum_id, IndexMap::Affine(identity_pattern(kept.len()))),
-            (reciprocal_count, IndexMap::Affine(scalar_broadcast_pattern(kept.len()))),
+            (
+                reciprocal_count,
+                IndexMap::Affine(scalar_broadcast_pattern(kept.len()))
+            ),
         ],
     );
     if keepdims == 0 {
@@ -1981,7 +2876,15 @@ fn lower_reduce_mean(program: &mut Vec<Op>, values: &mut BTreeMap<String, Value>
         }
     }
     if let Some(output_name) = node.output.first() {
-        values.insert((*output_name).to_string(), Value { node: mean_id, shape: out_shape, view: Some(view), flatten_source: None });
+        values.insert(
+            (*output_name).to_string(),
+            Value {
+                node: mean_id,
+                shape: out_shape,
+                view: Some(view),
+                flatten_source: None,
+            },
+        );
     }
     Ok(())
 }
@@ -2000,19 +2903,38 @@ fn lower_reduce_mean(program: &mut Vec<Op>, values: &mut BTreeMap<String, Value>
 /// per-element without a dedicated `ScalarOp`, so this pass only closes the
 /// lower-time-constant case (the same restriction [`lower_reshape`]'s
 /// `shape` operand and [`lower_slice`]'s `starts`/`ends` already carry).
-fn lower_pow(program: &mut Vec<Op>, values: &mut BTreeMap<String, Value>, fold: &FoldState, node: &NodeProto<'_>) -> Result<(), LowerError> {
+fn lower_pow(
+    program: &mut Vec<Op>,
+    values: &mut BTreeMap<String, Value>,
+    fold: &FoldState,
+    node: &NodeProto<'_>,
+) -> Result<(), LowerError> {
     let base = lookup(values, node, 0)?.clone();
-    let exponent_name = node.input.get(1).copied().ok_or_else(|| LowerError::MissingInput { name: node.name.to_string(), op_type: node.op_type.to_string(), index: 1 })?;
-    let exponent = constant_scalar_value(exponent_name, &fold.initializer_data, &fold.constant_values).ok_or_else(|| LowerError::UnsupportedShape {
-        name: node.name.to_string(),
-        op_type: node.op_type.to_string(),
-        reason: "Pow lowering requires a lower-time-constant exponent".to_string(),
-    })?;
+    let exponent_name = node
+        .input
+        .get(1)
+        .copied()
+        .ok_or_else(|| LowerError::MissingInput {
+            name: node.name.to_string(),
+            op_type: node.op_type.to_string(),
+            index: 1,
+        })?;
+    let exponent =
+        constant_scalar_value(exponent_name, &fold.initializer_data, &fold.constant_values)
+            .ok_or_else(|| LowerError::UnsupportedShape {
+                name: node.name.to_string(),
+                op_type: node.op_type.to_string(),
+                reason: "Pow lowering requires a lower-time-constant exponent".to_string(),
+            })?;
     let rank = base.shape.len();
     let pattern = identity_pattern(rank);
 
     let id = if exponent == 0.5 {
-        build_elementwise(program, ScalarOp::SquareRoot, alloc::vec![(base.node, IndexMap::Affine(pattern))])
+        build_elementwise(
+            program,
+            ScalarOp::SquareRoot,
+            alloc::vec![(base.node, IndexMap::Affine(pattern))],
+        )
     } else if exponent == (exponent as i64) as f32 && (0.0..=64.0).contains(&exponent) {
         // `exponent == (exponent as i64) as f32` (not `f32::fract`, a
         // `std`-only intrinsic this `no_std + alloc` tier does not have)
@@ -2020,23 +2942,55 @@ fn lower_pow(program: &mut Vec<Op>, values: &mut BTreeMap<String, Value>, fold: 
         // value this bound (`0..=64`) can hold.
         let count = exponent as u32;
         if count == 0 {
-            append(program, Op::Constant { dtype: DType::Float32, shape: base.shape.iter().map(|&extent| Extent::Static(extent as u32)).collect(), value: 1.0 })
+            append(
+                program,
+                Op::Constant {
+                    dtype: DType::Float32,
+                    shape: base
+                        .shape
+                        .iter()
+                        .map(|&extent| Extent::Static(extent as u32))
+                        .collect(),
+                    value: 1.0,
+                },
+            )
         } else {
             let mut accumulator = base.node;
             for _ in 1..count {
-                accumulator = build_elementwise(program, ScalarOp::Multiply, alloc::vec![(accumulator, IndexMap::Affine(pattern.clone())), (base.node, IndexMap::Affine(pattern.clone()))]);
+                accumulator = build_elementwise(
+                    program,
+                    ScalarOp::Multiply,
+                    alloc::vec![
+                        (accumulator, IndexMap::Affine(pattern.clone())),
+                        (base.node, IndexMap::Affine(pattern.clone()))
+                    ],
+                );
             }
             accumulator
         }
     } else {
-        let logarithm = build_elementwise(program, ScalarOp::Logarithm, alloc::vec![(base.node, IndexMap::Affine(pattern.clone()))]);
+        let logarithm = build_elementwise(
+            program,
+            ScalarOp::Logarithm,
+            alloc::vec![(base.node, IndexMap::Affine(pattern.clone()))],
+        );
         let exponent_node = constant_scalar(program, exponent);
         let scaled = build_elementwise(
             program,
             ScalarOp::Multiply,
-            alloc::vec![(logarithm, IndexMap::Affine(pattern.clone())), (exponent_node, IndexMap::Affine(scalar_broadcast_pattern(rank)))],
+            alloc::vec![
+                (logarithm, IndexMap::Affine(pattern.clone())),
+                (
+                    exponent_node,
+                    IndexMap::Affine(scalar_broadcast_pattern(rank))
+                )
+            ],
         );
-        build_elementwise(program, ScalarOp::Exponential, alloc::vec![(scaled, IndexMap::Affine(pattern))])
+        build_elementwise(
+            program,
+            ScalarOp::Exponential,
+            alloc::vec![(scaled, IndexMap::Affine(pattern))],
+        )
     };
     bind_output(values, node, 0, id, base.shape);
     Ok(())
@@ -2055,7 +3009,11 @@ fn lower_pow(program: &mut Vec<Op>, values: &mut BTreeMap<String, Value>, fold: 
 /// required indices dtype). Any other target is a named
 /// [`LowerError::UnsupportedShape`] rather than a silent wrong-dtype
 /// identity.
-fn lower_cast(program: &mut Vec<Op>, values: &mut BTreeMap<String, Value>, node: &NodeProto<'_>) -> Result<(), LowerError> {
+fn lower_cast(
+    program: &mut Vec<Op>,
+    values: &mut BTreeMap<String, Value>,
+    node: &NodeProto<'_>,
+) -> Result<(), LowerError> {
     let input = lookup(values, node, 0)?.clone();
     let to = attr_int(node, "to").ok_or_else(|| LowerError::UnsupportedShape {
         name: node.name.to_string(),
@@ -2069,7 +3027,9 @@ fn lower_cast(program: &mut Vec<Op>, values: &mut BTreeMap<String, Value>, node:
             return Err(LowerError::UnsupportedShape {
                 name: node.name.to_string(),
                 op_type: node.op_type.to_string(),
-                reason: format!("Cast to dtype {other} is not supported (only Float32/Int32/Int64 targets are)"),
+                reason: format!(
+                    "Cast to dtype {other} is not supported (only Float32/Int32/Int64 targets are)"
+                ),
             });
         }
     };
@@ -2087,12 +3047,33 @@ fn lower_cast(program: &mut Vec<Op>, values: &mut BTreeMap<String, Value>, node:
     // whatever consumer reads it downstream still sees the same virtual
     // axes, now over the freshly re-dtyped node.
     let real_shape: Vec<u64> = match &input.view {
-        Some(view) => input.shape.iter().zip(view.iter()).filter_map(|(&extent, axis)| axis.map(|_| extent)).collect(),
+        Some(view) => input
+            .shape
+            .iter()
+            .zip(view.iter())
+            .filter_map(|(&extent, axis)| axis.map(|_| extent))
+            .collect(),
         None => input.shape.clone(),
     };
-    let id = build_elementwise_dtype(program, dtype, ScalarOp::Identity, alloc::vec![(input.node, IndexMap::Affine(identity_pattern(real_shape.len())))]);
+    let id = build_elementwise_dtype(
+        program,
+        dtype,
+        ScalarOp::Identity,
+        alloc::vec![(
+            input.node,
+            IndexMap::Affine(identity_pattern(real_shape.len()))
+        )],
+    );
     if let Some(output_name) = node.output.first() {
-        values.insert((*output_name).to_string(), Value { node: id, shape: input.shape, view: input.view, flatten_source: None });
+        values.insert(
+            (*output_name).to_string(),
+            Value {
+                node: id,
+                shape: input.shape,
+                view: input.view,
+                flatten_source: None,
+            },
+        );
     }
     Ok(())
 }
@@ -2109,12 +3090,22 @@ fn lower_cast(program: &mut Vec<Op>, values: &mut BTreeMap<String, Value>, node:
 /// produces -- rides through this pass without ever materializing an
 /// `Op::Input` leaf for a value only ever consumed as lower-time-constant
 /// integers.
-fn lower_shape(values: &BTreeMap<String, Value>, constant_arrays: &mut BTreeMap<String, Vec<f32>>, node: &NodeProto<'_>) -> Result<(), LowerError> {
+fn lower_shape(
+    values: &BTreeMap<String, Value>,
+    constant_arrays: &mut BTreeMap<String, Vec<f32>>,
+    node: &NodeProto<'_>,
+) -> Result<(), LowerError> {
     let data = lookup(values, node, 0)?;
     let rank = data.shape.len() as i64;
     let start = attr_int(node, "start").unwrap_or(0);
     let end = attr_int(node, "end").unwrap_or(rank);
-    let normalize = |value: i64| -> i64 { if value < 0 { (value + rank).max(0) } else { value.min(rank) } };
+    let normalize = |value: i64| -> i64 {
+        if value < 0 {
+            (value + rank).max(0)
+        } else {
+            value.min(rank)
+        }
+    };
     let (start, end) = (normalize(start) as usize, normalize(end) as usize);
     if start > end {
         return Err(LowerError::UnsupportedShape {
@@ -2123,7 +3114,10 @@ fn lower_shape(values: &BTreeMap<String, Value>, constant_arrays: &mut BTreeMap<
             reason: format!("Shape start {start} is past end {end}"),
         });
     }
-    let shape_values: Vec<f32> = data.shape[start..end].iter().map(|&extent| extent as f32).collect();
+    let shape_values: Vec<f32> = data.shape[start..end]
+        .iter()
+        .map(|&extent| extent as f32)
+        .collect();
     if let Some(output_name) = node.output.first() {
         constant_arrays.insert((*output_name).to_string(), shape_values);
     }
@@ -2145,9 +3139,26 @@ fn lower_shape(values: &BTreeMap<String, Value>, constant_arrays: &mut BTreeMap<
 /// is a named [`LowerError::UnsupportedShape`] -- see [`lower_pow`]'s own
 /// doc for why this pass restricts to the lower-time-constant case rather
 /// than inventing a data-dependent slice primitive.
-fn lower_slice(program: &mut Vec<Op>, values: &mut BTreeMap<String, Value>, fold: &mut FoldState, node: &NodeProto<'_>) -> Result<(), LowerError> {
-    let unsupported = |reason: String| LowerError::UnsupportedShape { name: node.name.to_string(), op_type: node.op_type.to_string(), reason };
-    let data_name = node.input.first().copied().ok_or_else(|| LowerError::MissingInput { name: node.name.to_string(), op_type: node.op_type.to_string(), index: 0 })?;
+fn lower_slice(
+    program: &mut Vec<Op>,
+    values: &mut BTreeMap<String, Value>,
+    fold: &mut FoldState,
+    node: &NodeProto<'_>,
+) -> Result<(), LowerError> {
+    let unsupported = |reason: String| LowerError::UnsupportedShape {
+        name: node.name.to_string(),
+        op_type: node.op_type.to_string(),
+        reason,
+    };
+    let data_name = node
+        .input
+        .first()
+        .copied()
+        .ok_or_else(|| LowerError::MissingInput {
+            name: node.name.to_string(),
+            op_type: node.op_type.to_string(),
+            index: 0,
+        })?;
 
     if !values.contains_key(data_name) {
         // `data` is a per-element `Constant` node's own payload (never
@@ -2161,26 +3172,64 @@ fn lower_slice(program: &mut Vec<Op>, values: &mut BTreeMap<String, Value>, fold
         // `indices`, the one consumer this pass has seen) get a real
         // `NodeId`, its data riding in `Lowered.initializers` for
         // `evaluate_named` to bind exactly like any other constant weight.
-        let flat = resolve_constant_array(data_name, &fold.initializer_data, &fold.constant_values, &fold.constant_arrays)
-            .ok_or_else(|| LowerError::UnknownValue { name: node.name.to_string(), op_type: node.op_type.to_string(), value: data_name.to_string() })?;
-        let shape = fold.constant_tensor_shapes.get(data_name).cloned().unwrap_or_else(|| alloc::vec![flat.len() as u64]);
-        let starts = resolve_index_operand(node, 1, &fold.initializer_data, &fold.constant_values, &fold.constant_arrays, &unsupported)?;
-        let ends = resolve_index_operand(node, 2, &fold.initializer_data, &fold.constant_values, &fold.constant_arrays, &unsupported)?;
+        let flat = resolve_constant_array(
+            data_name,
+            &fold.initializer_data,
+            &fold.constant_values,
+            &fold.constant_arrays,
+        )
+        .ok_or_else(|| LowerError::UnknownValue {
+            name: node.name.to_string(),
+            op_type: node.op_type.to_string(),
+            value: data_name.to_string(),
+        })?;
+        let shape = fold
+            .constant_tensor_shapes
+            .get(data_name)
+            .cloned()
+            .unwrap_or_else(|| alloc::vec![flat.len() as u64]);
+        let starts = resolve_index_operand(
+            node,
+            1,
+            &fold.initializer_data,
+            &fold.constant_values,
+            &fold.constant_arrays,
+            &unsupported,
+        )?;
+        let ends = resolve_index_operand(
+            node,
+            2,
+            &fold.initializer_data,
+            &fold.constant_values,
+            &fold.constant_arrays,
+            &unsupported,
+        )?;
         let axes: Vec<i64> = match node.input.get(3).copied().filter(|name| !name.is_empty()) {
-            Some(name) => resolve_constant_array(name, &fold.initializer_data, &fold.constant_values, &fold.constant_arrays)
-                .ok_or_else(|| unsupported("Slice axes must be a lower-time constant".to_string()))?
-                .iter()
-                .map(|&value| value as i64)
-                .collect(),
+            Some(name) => resolve_constant_array(
+                name,
+                &fold.initializer_data,
+                &fold.constant_values,
+                &fold.constant_arrays,
+            )
+            .ok_or_else(|| unsupported("Slice axes must be a lower-time constant".to_string()))?
+            .iter()
+            .map(|&value| value as i64)
+            .collect(),
             None => (0..starts.len() as i64).collect(),
         };
         if starts.len() != ends.len() || starts.len() != axes.len() {
-            return Err(unsupported("Slice starts/ends/axes must all have the same length".to_string()));
+            return Err(unsupported(
+                "Slice starts/ends/axes must all have the same length".to_string(),
+            ));
         }
         let mut ranges: Vec<(u64, u64)> = shape.iter().map(|&extent| (0u64, extent)).collect();
         for index in 0..starts.len() {
             let raw_axis = axes[index];
-            let axis = if raw_axis < 0 { (raw_axis + shape.len() as i64) as usize } else { raw_axis as usize };
+            let axis = if raw_axis < 0 {
+                (raw_axis + shape.len() as i64) as usize
+            } else {
+                raw_axis as usize
+            };
             let extent = shape[axis] as i64;
             let normalize = |value: f32| -> i64 {
                 let value = value as i64;
@@ -2193,7 +3242,10 @@ fn lower_slice(program: &mut Vec<Op>, values: &mut BTreeMap<String, Value>, fold
         }
         let sliced = slice_constant_tensor(&flat, &shape, &ranges);
         let out_shape: Vec<u64> = ranges.iter().map(|&(_, length)| length).collect();
-        let output_name = node.output.first().ok_or_else(|| unsupported("Slice node declares no output".to_string()))?;
+        let output_name = node
+            .output
+            .first()
+            .ok_or_else(|| unsupported("Slice node declares no output".to_string()))?;
         // `Float32`, not `Int32`: [`cpu::reject_non_float32`] rejects any
         // `Int32`-tagged node reachable outside a `Computed.indices`
         // reference, and this materialized leaf's own consumers are not
@@ -2201,8 +3253,26 @@ fn lower_slice(program: &mut Vec<Op>, values: &mut BTreeMap<String, Value>, fold
         // operand to `Int32` at the point of need (that function's own
         // doc), so this leaf staying `Float32` is exactly as usable there
         // as it is for a caller that reads it directly.
-        let id = append(program, Op::Input { dtype: DType::Float32, shape: out_shape.iter().map(|&extent| Extent::Static(extent as u32)).collect(), name: Some((*output_name).to_string()) });
-        values.insert((*output_name).to_string(), Value { node: id, shape: out_shape, view: None, flatten_source: None });
+        let id = append(
+            program,
+            Op::Input {
+                dtype: DType::Float32,
+                shape: out_shape
+                    .iter()
+                    .map(|&extent| Extent::Static(extent as u32))
+                    .collect(),
+                name: Some((*output_name).to_string()),
+            },
+        );
+        values.insert(
+            (*output_name).to_string(),
+            Value {
+                node: id,
+                shape: out_shape,
+                view: None,
+                flatten_source: None,
+            },
+        );
         fold.initializers.push(((*output_name).to_string(), sliced));
         return Ok(());
     }
@@ -2211,36 +3281,71 @@ fn lower_slice(program: &mut Vec<Op>, values: &mut BTreeMap<String, Value>, fold
     let rank = data.shape.len();
 
     let resolve = |index: usize, what: &str| -> Result<Vec<f32>, LowerError> {
-        let name = node.input.get(index).copied().ok_or_else(|| LowerError::MissingInput { name: node.name.to_string(), op_type: node.op_type.to_string(), index })?;
-        resolve_constant_array(name, &fold.initializer_data, &fold.constant_values, &fold.constant_arrays).ok_or_else(|| unsupported(format!("Slice {what} must be a lower-time constant")))
+        let name = node
+            .input
+            .get(index)
+            .copied()
+            .ok_or_else(|| LowerError::MissingInput {
+                name: node.name.to_string(),
+                op_type: node.op_type.to_string(),
+                index,
+            })?;
+        resolve_constant_array(
+            name,
+            &fold.initializer_data,
+            &fold.constant_values,
+            &fold.constant_arrays,
+        )
+        .ok_or_else(|| unsupported(format!("Slice {what} must be a lower-time constant")))
     };
     let starts = resolve(1, "starts")?;
     let ends = resolve(2, "ends")?;
     let axes: Vec<i64> = match node.input.get(3).copied().filter(|name| !name.is_empty()) {
-        Some(name) => resolve_constant_array(name, &fold.initializer_data, &fold.constant_values, &fold.constant_arrays)
-            .ok_or_else(|| unsupported("Slice axes must be a lower-time constant".to_string()))?
-            .iter()
-            .map(|&value| value as i64)
-            .collect(),
+        Some(name) => resolve_constant_array(
+            name,
+            &fold.initializer_data,
+            &fold.constant_values,
+            &fold.constant_arrays,
+        )
+        .ok_or_else(|| unsupported("Slice axes must be a lower-time constant".to_string()))?
+        .iter()
+        .map(|&value| value as i64)
+        .collect(),
         None => (0..starts.len() as i64).collect(),
     };
     let steps: Vec<f32> = match node.input.get(4).copied().filter(|name| !name.is_empty()) {
-        Some(name) => resolve_constant_array(name, &fold.initializer_data, &fold.constant_values, &fold.constant_arrays).ok_or_else(|| unsupported("Slice steps must be a lower-time constant".to_string()))?,
+        Some(name) => resolve_constant_array(
+            name,
+            &fold.initializer_data,
+            &fold.constant_values,
+            &fold.constant_arrays,
+        )
+        .ok_or_else(|| unsupported("Slice steps must be a lower-time constant".to_string()))?,
         None => alloc::vec![1.0; starts.len()],
     };
     if starts.len() != ends.len() || starts.len() != axes.len() || starts.len() != steps.len() {
-        return Err(unsupported("Slice starts/ends/axes/steps must all have the same length".to_string()));
+        return Err(unsupported(
+            "Slice starts/ends/axes/steps must all have the same length".to_string(),
+        ));
     }
 
     let mut current = data;
     for index in 0..starts.len() {
         if steps[index] != 1.0 {
-            return Err(unsupported("Slice lowering supports step=1 only".to_string()));
+            return Err(unsupported(
+                "Slice lowering supports step=1 only".to_string(),
+            ));
         }
         let raw_axis = axes[index];
-        let axis = if raw_axis < 0 { (raw_axis + rank as i64) as usize } else { raw_axis as usize };
+        let axis = if raw_axis < 0 {
+            (raw_axis + rank as i64) as usize
+        } else {
+            raw_axis as usize
+        };
         if axis >= current.shape.len() {
-            return Err(unsupported(format!("Slice axis {raw_axis} is out of range for rank {rank}")));
+            return Err(unsupported(format!(
+                "Slice axis {raw_axis} is out of range for rank {rank}"
+            )));
         }
         let extent = current.shape[axis] as i64;
         let normalize = |value: f32| -> i64 {
@@ -2267,16 +3372,24 @@ fn lower_slice(program: &mut Vec<Op>, values: &mut BTreeMap<String, Value>, fold
 /// a lower-time constant) is a named [`LowerError::UnsupportedShape`] rather
 /// than silently dropping training-time stochastic behavior this pass
 /// cannot express as pure dataflow.
-fn lower_dropout(program: &mut Vec<Op>, values: &mut BTreeMap<String, Value>, fold: &FoldState, node: &NodeProto<'_>) -> Result<(), LowerError> {
+fn lower_dropout(
+    program: &mut Vec<Op>,
+    values: &mut BTreeMap<String, Value>,
+    fold: &FoldState,
+    node: &NodeProto<'_>,
+) -> Result<(), LowerError> {
     let training_mode_active = match optional_input(node, 2) {
         None => false,
-        Some(name) => constant_scalar_value(name, &fold.initializer_data, &fold.constant_values).map(|value| value != 0.0).unwrap_or(true),
+        Some(name) => constant_scalar_value(name, &fold.initializer_data, &fold.constant_values)
+            .map(|value| value != 0.0)
+            .unwrap_or(true),
     };
     if training_mode_active {
         return Err(LowerError::UnsupportedShape {
             name: node.name.to_string(),
             op_type: node.op_type.to_string(),
-            reason: "Dropout lowering supports inference (training_mode absent or 0) only".to_string(),
+            reason: "Dropout lowering supports inference (training_mode absent or 0) only"
+                .to_string(),
         });
     }
     lower_unary(program, values, node, ScalarOp::Identity)
@@ -2291,15 +3404,30 @@ fn lower_dropout(program: &mut Vec<Op>, values: &mut BTreeMap<String, Value>, fo
 /// own convention for a constant-folded target shape); `0` copies the
 /// source extent (unless `allowzero`) and at most one `-1` is inferred from
 /// the total element count, both per the ONNX `Reshape` spec.
-fn lower_reshape(program: &mut Vec<Op>, values: &mut BTreeMap<String, Value>, fold: &FoldState, node: &NodeProto<'_>) -> Result<(), LowerError> {
+fn lower_reshape(
+    program: &mut Vec<Op>,
+    values: &mut BTreeMap<String, Value>,
+    fold: &FoldState,
+    node: &NodeProto<'_>,
+) -> Result<(), LowerError> {
     let input = lookup(values, node, 0)?.clone();
-    let shape_name = node.input.get(1).ok_or_else(|| LowerError::MissingInput { name: node.name.to_string(), op_type: node.op_type.to_string(), index: 1 })?;
+    let shape_name = node.input.get(1).ok_or_else(|| LowerError::MissingInput {
+        name: node.name.to_string(),
+        op_type: node.op_type.to_string(),
+        index: 1,
+    })?;
     // `resolve_constant_array` (not `initializer_data` alone) so a `shape`
     // operand assembled at lower time -- the `Shape -> Gather -> Unsqueeze ->
     // Concat` chain [`lower_shape`]'s own doc names, the shape a BERT
     // multi-head reshape's target dims take -- resolves exactly like a plain
     // graph-initializer shape tensor always has.
-    let shape_data = resolve_constant_array(shape_name, &fold.initializer_data, &fold.constant_values, &fold.constant_arrays).ok_or_else(|| LowerError::UnsupportedShape {
+    let shape_data = resolve_constant_array(
+        shape_name,
+        &fold.initializer_data,
+        &fold.constant_values,
+        &fold.constant_arrays,
+    )
+    .ok_or_else(|| LowerError::UnsupportedShape {
         name: node.name.to_string(),
         op_type: node.op_type.to_string(),
         reason: "Reshape lowering requires the shape input to be a lower-time constant".to_string(),
@@ -2309,21 +3437,34 @@ fn lower_reshape(program: &mut Vec<Op>, values: &mut BTreeMap<String, Value>, fo
     let mut target: Vec<i64> = shape_data.iter().map(|&value| value as i64).collect();
     for (axis, value) in target.iter_mut().enumerate() {
         if *value == 0 && !allowzero {
-            *value = *input.shape.get(axis).ok_or_else(|| LowerError::UnsupportedShape {
-                name: node.name.to_string(),
-                op_type: node.op_type.to_string(),
-                reason: format!("shape entry 0 at axis {axis} has no matching source axis to copy"),
-            })? as i64;
+            *value = *input
+                .shape
+                .get(axis)
+                .ok_or_else(|| LowerError::UnsupportedShape {
+                    name: node.name.to_string(),
+                    op_type: node.op_type.to_string(),
+                    reason: format!(
+                        "shape entry 0 at axis {axis} has no matching source axis to copy"
+                    ),
+                })? as i64;
         }
     }
     let negative_slots = target.iter().filter(|&&value| value == -1).count();
     if negative_slots > 1 {
-        return Err(LowerError::UnsupportedShape { name: node.name.to_string(), op_type: node.op_type.to_string(), reason: "Reshape shape has more than one -1 entry".to_string() });
+        return Err(LowerError::UnsupportedShape {
+            name: node.name.to_string(),
+            op_type: node.op_type.to_string(),
+            reason: "Reshape shape has more than one -1 entry".to_string(),
+        });
     }
     let total: i64 = input.shape.iter().product::<u64>() as i64;
     if negative_slots == 1 {
         let known_product: i64 = target.iter().filter(|&&value| value != -1).product();
-        let inferred = if known_product == 0 { 0 } else { total / known_product };
+        let inferred = if known_product == 0 {
+            0
+        } else {
+            total / known_product
+        };
         for value in &mut target {
             if *value == -1 {
                 *value = inferred;
@@ -2335,7 +3476,9 @@ fn lower_reshape(program: &mut Vec<Op>, values: &mut BTreeMap<String, Value>, fo
         return Err(LowerError::UnsupportedShape {
             name: node.name.to_string(),
             op_type: node.op_type.to_string(),
-            reason: format!("Reshape target element count does not match source ({total} elements)"),
+            reason: format!(
+                "Reshape target element count does not match source ({total} elements)"
+            ),
         });
     }
 
@@ -2346,9 +3489,19 @@ fn lower_reshape(program: &mut Vec<Op>, values: &mut BTreeMap<String, Value>, fo
                 op_type: node.op_type.to_string(),
                 reason: "Reshape of a value carrying a virtual (Unsqueeze-inserted) axis view must not merge or split any of its real axes -- only inserting/dropping size-1 axes composes with the existing view".to_string(),
             })?;
-            Value { node: input.node, shape: out_shape, view, flatten_source: None }
+            Value {
+                node: input.node,
+                shape: out_shape,
+                view,
+                flatten_source: None,
+            }
         } else if input.shape == out_shape {
-            Value { node: input.node, shape: out_shape, view: None, flatten_source: None }
+            Value {
+                node: input.node,
+                shape: out_shape,
+                view: None,
+                flatten_source: None,
+            }
         } else if let Some(split) = materialize_reshape_split(program, &input, &out_shape) {
             split
         } else if let Some(flatten_source) = reshape_merge_boundary(&input.shape, &out_shape) {
@@ -2362,7 +3515,12 @@ fn lower_reshape(program: &mut Vec<Op>, values: &mut BTreeMap<String, Value>, fo
             // `flatten_source`: [`lower_matmul`]'s flatten-aware branch
             // widens ITS OWN iteration space to read the pre-merge real axes
             // directly, never materializing the merge at all.
-            Value { node: input.node, shape: out_shape, view: None, flatten_source: Some(flatten_source) }
+            Value {
+                node: input.node,
+                shape: out_shape,
+                view: None,
+                flatten_source: Some(flatten_source),
+            }
         } else {
             return Err(LowerError::UnsupportedShape {
                 name: node.name.to_string(),
@@ -2396,9 +3554,16 @@ fn lower_reshape(program: &mut Vec<Op>, values: &mut BTreeMap<String, Value>, fo
 /// [`LowerError::UnsupportedShape`] for that case rather than binding a
 /// silently wrong view.
 fn compose_reshape_view(value: &Value, out_shape: &[u64]) -> Option<Option<Vec<Option<u16>>>> {
-    let Some(view) = &value.view else { return Some(None) };
+    let Some(view) = &value.view else {
+        return Some(None);
+    };
 
-    let real_shape: Vec<u64> = value.shape.iter().zip(view.iter()).filter_map(|(&extent, axis)| axis.map(|_| extent)).collect();
+    let real_shape: Vec<u64> = value
+        .shape
+        .iter()
+        .zip(view.iter())
+        .filter_map(|(&extent, axis)| axis.map(|_| extent))
+        .collect();
     let real_axes: Vec<u16> = view.iter().filter_map(|axis| *axis).collect();
 
     let mut new_view: Vec<Option<u16>> = Vec::with_capacity(out_shape.len());
@@ -2431,7 +3596,10 @@ fn compose_reshape_view(value: &Value, out_shape: &[u64]) -> Option<Option<Vec<O
 /// `[prod(dims[:axis]), prod(dims[axis:])]` -- computed straight from the
 /// already-known source shape, no `shape` input to decode. Same view-alias
 /// treatment as [`lower_reshape`]: layout, not compute.
-fn lower_flatten(values: &mut BTreeMap<String, Value>, node: &NodeProto<'_>) -> Result<(), LowerError> {
+fn lower_flatten(
+    values: &mut BTreeMap<String, Value>,
+    node: &NodeProto<'_>,
+) -> Result<(), LowerError> {
     let input = lookup(values, node, 0)?.clone();
     let rank = input.shape.len();
     let axis = attr_int(node, "axis").unwrap_or(1);
@@ -2460,8 +3628,20 @@ fn lower_flatten(values: &mut BTreeMap<String, Value>, node: &NodeProto<'_>) -> 
         // ([`lower_gemm`]/[`gemm_operand_pattern`]) can address `node`
         // directly instead of the (wrong, rank-mismatched) logical shape.
         // See [`Value::flatten_source`]'s own doc.
-        let flatten_source = if input.view.is_none() && input.shape != out_shape { Some((input.shape.clone(), split)) } else { None };
-        values.insert((*output_name).to_string(), Value { node: input.node, shape: out_shape, view, flatten_source });
+        let flatten_source = if input.view.is_none() && input.shape != out_shape {
+            Some((input.shape.clone(), split))
+        } else {
+            None
+        };
+        values.insert(
+            (*output_name).to_string(),
+            Value {
+                node: input.node,
+                shape: out_shape,
+                view,
+                flatten_source,
+            },
+        );
     }
     Ok(())
 }
@@ -2477,9 +3657,18 @@ fn lower_flatten(values: &mut BTreeMap<String, Value>, node: &NodeProto<'_>) -> 
 /// (unclamped) position against `lhs`'s extent. This is the same `Computed`
 /// mechanism [`lower_gather`] uses, generalized from an externally supplied
 /// index to a locally computed one.
-fn lower_concat(program: &mut Vec<Op>, values: &mut BTreeMap<String, Value>, fold: &mut FoldState, node: &NodeProto<'_>) -> Result<(), LowerError> {
+fn lower_concat(
+    program: &mut Vec<Op>,
+    values: &mut BTreeMap<String, Value>,
+    fold: &mut FoldState,
+    node: &NodeProto<'_>,
+) -> Result<(), LowerError> {
     if node.input.len() < 2 {
-        return Err(LowerError::MissingInput { name: node.name.to_string(), op_type: node.op_type.to_string(), index: 1 });
+        return Err(LowerError::MissingInput {
+            name: node.name.to_string(),
+            op_type: node.op_type.to_string(),
+            index: 1,
+        });
     }
     let first_name = node.input[0];
     if !values.contains_key(first_name) {
@@ -2498,7 +3687,8 @@ fn lower_concat(program: &mut Vec<Op>, values: &mut BTreeMap<String, Value>, fol
             flat.extend(part);
         }
         if let Some(output_name) = node.output.first() {
-            fold.constant_arrays.insert((*output_name).to_string(), flat);
+            fold.constant_arrays
+                .insert((*output_name).to_string(), flat);
         }
         return Ok(());
     }
@@ -2511,7 +3701,11 @@ fn lower_concat(program: &mut Vec<Op>, values: &mut BTreeMap<String, Value>, fol
     })?;
     let normalized_axis = if axis < 0 { axis + rank as i64 } else { axis };
     if normalized_axis < 0 || normalized_axis as usize >= rank {
-        return Err(LowerError::UnsupportedShape { name: node.name.to_string(), op_type: node.op_type.to_string(), reason: format!("Concat axis {axis} is out of range for rank {rank}") });
+        return Err(LowerError::UnsupportedShape {
+            name: node.name.to_string(),
+            op_type: node.op_type.to_string(),
+            reason: format!("Concat axis {axis} is out of range for rank {rank}"),
+        });
     }
     let axis = normalized_axis as usize;
 
@@ -2524,14 +3718,37 @@ fn lower_concat(program: &mut Vec<Op>, values: &mut BTreeMap<String, Value>, fol
     Ok(())
 }
 
-fn build_elementwise_dtype(program: &mut Vec<Op>, dtype: DType, body: ScalarOp, operands: Vec<(NodeId, IndexMap)>) -> NodeId {
-    append(program, Op::Elementwise { dtype, body, operands, name: None })
+fn build_elementwise_dtype(
+    program: &mut Vec<Op>,
+    dtype: DType,
+    body: ScalarOp,
+    operands: Vec<(NodeId, IndexMap)>,
+) -> NodeId {
+    append(
+        program,
+        Op::Elementwise {
+            dtype,
+            body,
+            operands,
+            name: None,
+        },
+    )
 }
 
-fn concat_pair(program: &mut Vec<Op>, node: &NodeProto<'_>, lhs: &Value, rhs: &Value, axis: usize) -> Result<Value, LowerError> {
+fn concat_pair(
+    program: &mut Vec<Op>,
+    node: &NodeProto<'_>,
+    lhs: &Value,
+    rhs: &Value,
+    axis: usize,
+) -> Result<Value, LowerError> {
     let rank = lhs.shape.len();
     if rhs.shape.len() != rank {
-        return Err(LowerError::UnsupportedShape { name: node.name.to_string(), op_type: node.op_type.to_string(), reason: "Concat inputs must share rank".to_string() });
+        return Err(LowerError::UnsupportedShape {
+            name: node.name.to_string(),
+            op_type: node.op_type.to_string(),
+            reason: "Concat inputs must share rank".to_string(),
+        });
     }
     let axis_u16 = axis as u16;
     let out_rank = rank as u16;
@@ -2547,7 +3764,13 @@ fn concat_pair(program: &mut Vec<Op>, node: &NodeProto<'_>, lhs: &Value, rhs: &V
     // every node feeding *into* them (still exact-integer-valued f32
     // arithmetic under the hood, per this crate's own "every buffer is f32"
     // convention) stays tagged `Float32`.
-    let position = append(program, Op::Iota { dtype: DType::Float32, extent: Extent::Static(out_extent as u32) });
+    let position = append(
+        program,
+        Op::Iota {
+            dtype: DType::Float32,
+            extent: Extent::Static(out_extent as u32),
+        },
+    );
     let lhs_extent_const = constant_scalar(program, lhs_extent as f32);
     let zero_const = constant_scalar(program, 0.0);
     let lhs_extent_minus1_const = constant_scalar(program, lhs_extent as f32 - 1.0);
@@ -2557,38 +3780,94 @@ fn concat_pair(program: &mut Vec<Op>, node: &NodeProto<'_>, lhs: &Value, rhs: &V
         program,
         DType::Int32,
         ScalarOp::Minimum,
-        alloc::vec![(position, IndexMap::Affine(identity_pattern(1))), (lhs_extent_minus1_const, IndexMap::Affine(scalar_broadcast_pattern(1)))],
+        alloc::vec![
+            (position, IndexMap::Affine(identity_pattern(1))),
+            (
+                lhs_extent_minus1_const,
+                IndexMap::Affine(scalar_broadcast_pattern(1))
+            )
+        ],
     );
     let position_minus_lhs = build_elementwise(
         program,
         ScalarOp::Subtract,
-        alloc::vec![(position, IndexMap::Affine(identity_pattern(1))), (lhs_extent_const, IndexMap::Affine(scalar_broadcast_pattern(1)))],
+        alloc::vec![
+            (position, IndexMap::Affine(identity_pattern(1))),
+            (
+                lhs_extent_const,
+                IndexMap::Affine(scalar_broadcast_pattern(1))
+            )
+        ],
     );
     let position_minus_lhs_floored = build_elementwise(
         program,
         ScalarOp::Maximum,
-        alloc::vec![(position_minus_lhs, IndexMap::Affine(identity_pattern(1))), (zero_const, IndexMap::Affine(scalar_broadcast_pattern(1)))],
+        alloc::vec![
+            (position_minus_lhs, IndexMap::Affine(identity_pattern(1))),
+            (zero_const, IndexMap::Affine(scalar_broadcast_pattern(1)))
+        ],
     );
     let rhs_index = build_elementwise_dtype(
         program,
         DType::Int32,
         ScalarOp::Minimum,
-        alloc::vec![(position_minus_lhs_floored, IndexMap::Affine(identity_pattern(1))), (rhs_extent_minus1_const, IndexMap::Affine(scalar_broadcast_pattern(1)))],
+        alloc::vec![
+            (
+                position_minus_lhs_floored,
+                IndexMap::Affine(identity_pattern(1))
+            ),
+            (
+                rhs_extent_minus1_const,
+                IndexMap::Affine(scalar_broadcast_pattern(1))
+            )
+        ],
     );
     let cond = build_elementwise(
         program,
         ScalarOp::Greater,
-        alloc::vec![(lhs_extent_const, IndexMap::Affine(scalar_broadcast_pattern(1))), (position, IndexMap::Affine(identity_pattern(1)))],
+        alloc::vec![
+            (
+                lhs_extent_const,
+                IndexMap::Affine(scalar_broadcast_pattern(1))
+            ),
+            (position, IndexMap::Affine(identity_pattern(1)))
+        ],
     );
 
     let index_map_pattern = projection(out_rank, &[axis_u16]);
     let base = concat_base_pattern(out_rank, rank, axis);
 
-    let lhs_gathered_map = IndexMap::Computed { indices: lhs_index, index_map: index_map_pattern.clone(), base: base.clone(), gathered_dim: axis_u16 };
-    let lhs_gathered = append(program, Op::Elementwise { dtype: DType::Float32, body: ScalarOp::Identity, operands: alloc::vec![(lhs.node, lhs_gathered_map)], name: None });
+    let lhs_gathered_map = IndexMap::Computed {
+        indices: lhs_index,
+        index_map: index_map_pattern.clone(),
+        base: base.clone(),
+        gathered_dim: axis_u16,
+    };
+    let lhs_gathered = append(
+        program,
+        Op::Elementwise {
+            dtype: DType::Float32,
+            body: ScalarOp::Identity,
+            operands: alloc::vec![(lhs.node, lhs_gathered_map)],
+            name: None,
+        },
+    );
 
-    let rhs_gathered_map = IndexMap::Computed { indices: rhs_index, index_map: index_map_pattern, base, gathered_dim: axis_u16 };
-    let rhs_gathered = append(program, Op::Elementwise { dtype: DType::Float32, body: ScalarOp::Identity, operands: alloc::vec![(rhs.node, rhs_gathered_map)], name: None });
+    let rhs_gathered_map = IndexMap::Computed {
+        indices: rhs_index,
+        index_map: index_map_pattern,
+        base,
+        gathered_dim: axis_u16,
+    };
+    let rhs_gathered = append(
+        program,
+        Op::Elementwise {
+            dtype: DType::Float32,
+            body: ScalarOp::Identity,
+            operands: alloc::vec![(rhs.node, rhs_gathered_map)],
+            name: None,
+        },
+    );
 
     let id = build_elementwise(
         program,
@@ -2599,7 +3878,12 @@ fn concat_pair(program: &mut Vec<Op>, node: &NodeProto<'_>, lhs: &Value, rhs: &V
             (rhs_gathered, IndexMap::Affine(identity_pattern(rank))),
         ],
     );
-    Ok(Value { node: id, shape: out_shape, view: None, flatten_source: None })
+    Ok(Value {
+        node: id,
+        shape: out_shape,
+        view: None,
+        flatten_source: None,
+    })
 }
 
 /// A `Computed` gather's `base` pattern for a concat operand: every axis but
@@ -2613,7 +3897,10 @@ fn concat_base_pattern(iter_rank: u16, rank: usize, skip_axis: usize) -> IndexPa
             if data_axis == skip_axis {
                 AxisIndex::default()
             } else {
-                AxisIndex { terms: core::iter::once(AxisTerm::projection(data_axis as u16)).collect(), offset: 0 }
+                AxisIndex {
+                    terms: core::iter::once(AxisTerm::projection(data_axis as u16)).collect(),
+                    offset: 0,
+                }
             }
         })
         .collect();
@@ -2625,7 +3912,9 @@ fn attr_str<'node>(node: &'node NodeProto<'_>, name: &str) -> Option<&'node [u8]
 }
 
 fn attr_ints_or(node: &NodeProto<'_>, name: &str, default: &[i64]) -> Vec<i64> {
-    attr_ints(node, name).map(<[i64]>::to_vec).unwrap_or_else(|| default.to_vec())
+    attr_ints(node, name)
+        .map(<[i64]>::to_vec)
+        .unwrap_or_else(|| default.to_vec())
 }
 
 /// Zero- (or `fill`-) pads one axis of `value` by `(before, after)` --
@@ -2641,7 +3930,14 @@ fn attr_ints_or(node: &NodeProto<'_>, name: &str, default: &[i64]) -> Vec<i64> {
 /// the iteration space's own zero origin (`specs/conv2d.toml`'s header
 /// documents this empirically), so the padded region must be a real,
 /// zero-origined operand before any window reads it.
-fn pad_axis(program: &mut Vec<Op>, value: &Value, axis: usize, before: u64, after: u64, fill: f32) -> Value {
+fn pad_axis(
+    program: &mut Vec<Op>,
+    value: &Value,
+    axis: usize,
+    before: u64,
+    after: u64,
+    fill: f32,
+) -> Value {
     if before == 0 && after == 0 {
         return value.clone();
     }
@@ -2652,7 +3948,13 @@ fn pad_axis(program: &mut Vec<Op>, value: &Value, axis: usize, before: u64, afte
     let mut out_shape = value.shape.clone();
     out_shape[axis] = out_extent;
 
-    let position = append(program, Op::Iota { dtype: DType::Float32, extent: Extent::Static(out_extent as u32) });
+    let position = append(
+        program,
+        Op::Iota {
+            dtype: DType::Float32,
+            extent: Extent::Static(out_extent as u32),
+        },
+    );
     let before_const = constant_scalar(program, before as f32);
     let zero_const = constant_scalar(program, 0.0);
     let minus_one_const = constant_scalar(program, -1.0);
@@ -2662,39 +3964,72 @@ fn pad_axis(program: &mut Vec<Op>, value: &Value, axis: usize, before: u64, afte
     let shifted = build_elementwise(
         program,
         ScalarOp::Subtract,
-        alloc::vec![(position, IndexMap::Affine(identity_pattern(1))), (before_const, IndexMap::Affine(scalar_broadcast_pattern(1)))],
+        alloc::vec![
+            (position, IndexMap::Affine(identity_pattern(1))),
+            (before_const, IndexMap::Affine(scalar_broadcast_pattern(1)))
+        ],
     );
     let clamped_low = build_elementwise(
         program,
         ScalarOp::Maximum,
-        alloc::vec![(shifted, IndexMap::Affine(identity_pattern(1))), (zero_const, IndexMap::Affine(scalar_broadcast_pattern(1)))],
+        alloc::vec![
+            (shifted, IndexMap::Affine(identity_pattern(1))),
+            (zero_const, IndexMap::Affine(scalar_broadcast_pattern(1)))
+        ],
     );
     let clamped_index = build_elementwise_dtype(
         program,
         DType::Int32,
         ScalarOp::Minimum,
-        alloc::vec![(clamped_low, IndexMap::Affine(identity_pattern(1))), (extent_minus1_const, IndexMap::Affine(scalar_broadcast_pattern(1)))],
+        alloc::vec![
+            (clamped_low, IndexMap::Affine(identity_pattern(1))),
+            (
+                extent_minus1_const,
+                IndexMap::Affine(scalar_broadcast_pattern(1))
+            )
+        ],
     );
     let valid_low = build_elementwise(
         program,
         ScalarOp::Greater,
-        alloc::vec![(shifted, IndexMap::Affine(identity_pattern(1))), (minus_one_const, IndexMap::Affine(scalar_broadcast_pattern(1)))],
+        alloc::vec![
+            (shifted, IndexMap::Affine(identity_pattern(1))),
+            (
+                minus_one_const,
+                IndexMap::Affine(scalar_broadcast_pattern(1))
+            )
+        ],
     );
     let valid_high = build_elementwise(
         program,
         ScalarOp::Greater,
-        alloc::vec![(extent_const, IndexMap::Affine(scalar_broadcast_pattern(1))), (shifted, IndexMap::Affine(identity_pattern(1)))],
+        alloc::vec![
+            (extent_const, IndexMap::Affine(scalar_broadcast_pattern(1))),
+            (shifted, IndexMap::Affine(identity_pattern(1)))
+        ],
     );
     let mask = build_elementwise(
         program,
         ScalarOp::Multiply,
-        alloc::vec![(valid_low, IndexMap::Affine(identity_pattern(1))), (valid_high, IndexMap::Affine(identity_pattern(1)))],
+        alloc::vec![
+            (valid_low, IndexMap::Affine(identity_pattern(1))),
+            (valid_high, IndexMap::Affine(identity_pattern(1)))
+        ],
     );
 
     let index_map_pattern = projection(rank_u16, &[axis as u16]);
     let base = concat_base_pattern(rank_u16, rank, axis);
-    let gathered_map = IndexMap::Computed { indices: clamped_index, index_map: index_map_pattern, base, gathered_dim: axis as u16 };
-    let gathered = build_elementwise(program, ScalarOp::Identity, alloc::vec![(value.node, gathered_map)]);
+    let gathered_map = IndexMap::Computed {
+        indices: clamped_index,
+        index_map: index_map_pattern,
+        base,
+        gathered_dim: axis as u16,
+    };
+    let gathered = build_elementwise(
+        program,
+        ScalarOp::Identity,
+        alloc::vec![(value.node, gathered_map)],
+    );
 
     let fill_const = constant_scalar(program, fill);
     let output = build_elementwise(
@@ -2706,7 +4041,12 @@ fn pad_axis(program: &mut Vec<Op>, value: &Value, axis: usize, before: u64, afte
             (fill_const, IndexMap::Affine(scalar_broadcast_pattern(rank))),
         ],
     );
-    Value { node: output, shape: out_shape, view: None, flatten_source: None }
+    Value {
+        node: output,
+        shape: out_shape,
+        view: None,
+        flatten_source: None,
+    }
 }
 
 /// A static, in-bounds contiguous slice of `value` along `axis`:
@@ -2727,26 +4067,60 @@ fn pad_axis(program: &mut Vec<Op>, value: &Value, axis: usize, before: u64, afte
 /// included). No mask or clamp needed here, unlike [`pad_axis`]: every index
 /// this builds is already in `value`'s bounds by construction (`start +
 /// length <= value.shape[axis]`, [`lower_conv`]'s own group-size check).
-fn slice_axis_range(program: &mut Vec<Op>, value: &Value, axis: usize, start: u64, length: u64) -> Value {
+fn slice_axis_range(
+    program: &mut Vec<Op>,
+    value: &Value,
+    axis: usize,
+    start: u64,
+    length: u64,
+) -> Value {
     let rank = value.shape.len();
     let rank_u16 = rank as u16;
     let mut out_shape = value.shape.clone();
     out_shape[axis] = length;
 
-    let position = append(program, Op::Iota { dtype: DType::Float32, extent: Extent::Static(length as u32) });
+    let position = append(
+        program,
+        Op::Iota {
+            dtype: DType::Float32,
+            extent: Extent::Static(length as u32),
+        },
+    );
     let start_const = constant_scalar(program, start as f32);
     let shifted = build_elementwise(
         program,
         ScalarOp::Add,
-        alloc::vec![(position, IndexMap::Affine(identity_pattern(1))), (start_const, IndexMap::Affine(scalar_broadcast_pattern(1)))],
+        alloc::vec![
+            (position, IndexMap::Affine(identity_pattern(1))),
+            (start_const, IndexMap::Affine(scalar_broadcast_pattern(1)))
+        ],
     );
-    let index = build_elementwise_dtype(program, DType::Int32, ScalarOp::Identity, alloc::vec![(shifted, IndexMap::Affine(identity_pattern(1)))]);
+    let index = build_elementwise_dtype(
+        program,
+        DType::Int32,
+        ScalarOp::Identity,
+        alloc::vec![(shifted, IndexMap::Affine(identity_pattern(1)))],
+    );
 
     let index_map_pattern = projection(rank_u16, &[axis as u16]);
     let base = concat_base_pattern(rank_u16, rank, axis);
-    let gathered_map = IndexMap::Computed { indices: index, index_map: index_map_pattern, base, gathered_dim: axis as u16 };
-    let id = build_elementwise(program, ScalarOp::Identity, alloc::vec![(value.node, gathered_map)]);
-    Value { node: id, shape: out_shape, view: None, flatten_source: None }
+    let gathered_map = IndexMap::Computed {
+        indices: index,
+        index_map: index_map_pattern,
+        base,
+        gathered_dim: axis as u16,
+    };
+    let id = build_elementwise(
+        program,
+        ScalarOp::Identity,
+        alloc::vec![(value.node, gathered_map)],
+    );
+    Value {
+        node: id,
+        shape: out_shape,
+        view: None,
+        flatten_source: None,
+    }
 }
 
 /// A `Value`-level permutation, the same composition [`lower_transpose`]
@@ -2755,14 +4129,26 @@ fn slice_axis_range(program: &mut Vec<Op>, value: &Value, axis: usize, start: u6
 /// without a synthetic [`NodeProto`] to drive it through.
 fn permute_value(program: &mut Vec<Op>, value: &Value, perm: &[u16]) -> Value {
     let rank = value.shape.len();
-    let out_shape: Vec<u64> = perm.iter().map(|&axis| value.shape[axis as usize]).collect();
+    let out_shape: Vec<u64> = perm
+        .iter()
+        .map(|&axis| value.shape[axis as usize])
+        .collect();
     let mut inverse = alloc::vec![0u16; rank];
     for (destination_axis, &source_axis) in perm.iter().enumerate() {
         inverse[source_axis as usize] = destination_axis as u16;
     }
     let pattern = projection(rank as u16, &inverse);
-    let id = build_elementwise(program, ScalarOp::Identity, alloc::vec![(value.node, IndexMap::Affine(pattern))]);
-    Value { node: id, shape: out_shape, view: None, flatten_source: None }
+    let id = build_elementwise(
+        program,
+        ScalarOp::Identity,
+        alloc::vec![(value.node, IndexMap::Affine(pattern))],
+    );
+    Value {
+        node: id,
+        shape: out_shape,
+        view: None,
+        flatten_source: None,
+    }
 }
 
 /// Reverses `value` along `axis`: index `i` reads source index `extent - 1 -
@@ -2777,20 +4163,51 @@ fn reverse_axis(program: &mut Vec<Op>, value: &Value, axis: usize) -> Value {
     let extent = value.shape[axis];
     let out_shape = value.shape.clone();
 
-    let position = append(program, Op::Iota { dtype: DType::Float32, extent: Extent::Static(extent as u32) });
+    let position = append(
+        program,
+        Op::Iota {
+            dtype: DType::Float32,
+            extent: Extent::Static(extent as u32),
+        },
+    );
     let extent_minus1_const = constant_scalar(program, extent as f32 - 1.0);
     let reversed = build_elementwise(
         program,
         ScalarOp::Subtract,
-        alloc::vec![(extent_minus1_const, IndexMap::Affine(scalar_broadcast_pattern(1))), (position, IndexMap::Affine(identity_pattern(1)))],
+        alloc::vec![
+            (
+                extent_minus1_const,
+                IndexMap::Affine(scalar_broadcast_pattern(1))
+            ),
+            (position, IndexMap::Affine(identity_pattern(1)))
+        ],
     );
-    let index = build_elementwise_dtype(program, DType::Int32, ScalarOp::Identity, alloc::vec![(reversed, IndexMap::Affine(identity_pattern(1)))]);
+    let index = build_elementwise_dtype(
+        program,
+        DType::Int32,
+        ScalarOp::Identity,
+        alloc::vec![(reversed, IndexMap::Affine(identity_pattern(1)))],
+    );
 
     let index_map_pattern = projection(rank_u16, &[axis as u16]);
     let base = concat_base_pattern(rank_u16, rank, axis);
-    let gathered_map = IndexMap::Computed { indices: index, index_map: index_map_pattern, base, gathered_dim: axis as u16 };
-    let id = build_elementwise(program, ScalarOp::Identity, alloc::vec![(value.node, gathered_map)]);
-    Value { node: id, shape: out_shape, view: None, flatten_source: None }
+    let gathered_map = IndexMap::Computed {
+        indices: index,
+        index_map: index_map_pattern,
+        base,
+        gathered_dim: axis as u16,
+    };
+    let id = build_elementwise(
+        program,
+        ScalarOp::Identity,
+        alloc::vec![(value.node, gathered_map)],
+    );
+    Value {
+        node: id,
+        shape: out_shape,
+        view: None,
+        flatten_source: None,
+    }
 }
 
 /// `ConvTranspose`, rank-4, `group = 1`, any `stride`/`dilation`.
@@ -2827,7 +4244,11 @@ fn reverse_axis(program: &mut Vec<Op>, value: &Value, axis: usize) -> Value {
 /// `ScalarOp`s over `Iota`-sourced positions -- see [`scatter_mask_axis`])
 /// multiplied into the reduced operand -- no div/mod, no new `Op`/
 /// `ScalarOp`/`IndexMap`.
-fn lower_convtranspose(program: &mut Vec<Op>, values: &mut BTreeMap<String, Value>, node: &NodeProto<'_>) -> Result<(), LowerError> {
+fn lower_convtranspose(
+    program: &mut Vec<Op>,
+    values: &mut BTreeMap<String, Value>,
+    node: &NodeProto<'_>,
+) -> Result<(), LowerError> {
     let image = lookup(values, node, 0)?.clone();
     let weight = lookup(values, node, 1)?.clone();
     let name = node.name.to_string();
@@ -2838,16 +4259,30 @@ fn lower_convtranspose(program: &mut Vec<Op>, values: &mut BTreeMap<String, Valu
     }
     let group = attr_int(node, "group").unwrap_or(1);
     if group < 1 {
-        return Err(LowerError::UnsupportedShape { name, op_type, reason: "ConvTranspose group attribute must be >= 1".to_string() });
+        return Err(LowerError::UnsupportedShape {
+            name,
+            op_type,
+            reason: "ConvTranspose group attribute must be >= 1".to_string(),
+        });
     }
     let group = group as u64;
-    if attr_ints(node, "output_padding").is_some_and(|values| values.iter().any(|&value| value != 0)) {
-        return Err(LowerError::UnsupportedShape { name, op_type, reason: "ConvTranspose lowering does not support a nonzero output_padding".to_string() });
+    if attr_ints(node, "output_padding")
+        .is_some_and(|values| values.iter().any(|&value| value != 0))
+    {
+        return Err(LowerError::UnsupportedShape {
+            name,
+            op_type,
+            reason: "ConvTranspose lowering does not support a nonzero output_padding".to_string(),
+        });
     }
     let strides = attr_ints_or(node, "strides", &[1, 1]);
     let dilations = attr_ints_or(node, "dilations", &[1, 1]);
     if strides.len() != 2 || dilations.len() != 2 {
-        return Err(LowerError::UnsupportedShape { name, op_type, reason: "ConvTranspose lowering supports 2D strides/dilations only".to_string() });
+        return Err(LowerError::UnsupportedShape {
+            name,
+            op_type,
+            reason: "ConvTranspose lowering supports 2D strides/dilations only".to_string(),
+        });
     }
     let (stride_h, stride_w) = (strides[0], strides[1]);
     let (dilation_h, dilation_w) = (dilations[0], dilations[1]);
@@ -2867,18 +4302,24 @@ fn lower_convtranspose(program: &mut Vec<Op>, values: &mut BTreeMap<String, Valu
     let total_out_channels = out_channels_per_group * group;
     let kernel_h = weight.shape[2];
     let kernel_w = weight.shape[3];
-    let (pad_top, pad_left, pad_bottom, pad_right) = parse_convtranspose2d_pads(node, kernel_h, kernel_w, stride_h, stride_w, dilation_h, dilation_w)?;
+    let (pad_top, pad_left, pad_bottom, pad_right) = parse_convtranspose2d_pads(
+        node, kernel_h, kernel_w, stride_h, stride_w, dilation_h, dilation_w,
+    )?;
 
     if weight_in_channels != in_channels {
         return Err(LowerError::UnsupportedShape {
             name: node.name.to_string(),
             op_type: node.op_type.to_string(),
-            reason: format!("ConvTranspose weight in-channels {weight_in_channels} does not match image channels {in_channels}"),
+            reason: format!(
+                "ConvTranspose weight in-channels {weight_in_channels} does not match image channels {in_channels}"
+            ),
         });
     }
 
     let bias = match node.input.get(2) {
-        Some(bias_name) => Some(lookup_by_name(values, bias_name, node.op_type, node.name)?.clone()),
+        Some(bias_name) => {
+            Some(lookup_by_name(values, bias_name, node.op_type, node.name)?.clone())
+        }
         None => None,
     };
     if let Some(bias) = &bias
@@ -2893,7 +4334,21 @@ fn lower_convtranspose(program: &mut Vec<Op>, values: &mut BTreeMap<String, Valu
 
     if group == 1 {
         let result = convtranspose2d_single_group(
-            program, node, &image, &weight, bias.as_ref(), kernel_h, kernel_w, stride_h, stride_w, dilation_h, dilation_w, pad_top, pad_left, pad_bottom, pad_right,
+            program,
+            node,
+            &image,
+            &weight,
+            bias.as_ref(),
+            kernel_h,
+            kernel_w,
+            stride_h,
+            stride_w,
+            dilation_h,
+            dilation_w,
+            pad_top,
+            pad_left,
+            pad_bottom,
+            pad_right,
         )?;
         bind_output(values, node, 0, result.node, result.shape);
         return Ok(());
@@ -2903,18 +4358,54 @@ fn lower_convtranspose(program: &mut Vec<Op>, values: &mut BTreeMap<String, Valu
         return Err(LowerError::UnsupportedShape {
             name: node.name.to_string(),
             op_type: node.op_type.to_string(),
-            reason: format!("ConvTranspose image channels {in_channels} must be evenly divisible by group {group}"),
+            reason: format!(
+                "ConvTranspose image channels {in_channels} must be evenly divisible by group {group}"
+            ),
         });
     }
     let in_channels_per_group = in_channels / group;
 
     let mut accumulator: Option<Value> = None;
     for group_index in 0..group {
-        let image_slice = slice_axis_range(program, &image, 1, group_index * in_channels_per_group, in_channels_per_group);
-        let weight_slice = slice_axis_range(program, &weight, 0, group_index * in_channels_per_group, in_channels_per_group);
-        let bias_slice = bias.as_ref().map(|bias| slice_axis_range(program, bias, 0, group_index * out_channels_per_group, out_channels_per_group));
+        let image_slice = slice_axis_range(
+            program,
+            &image,
+            1,
+            group_index * in_channels_per_group,
+            in_channels_per_group,
+        );
+        let weight_slice = slice_axis_range(
+            program,
+            &weight,
+            0,
+            group_index * in_channels_per_group,
+            in_channels_per_group,
+        );
+        let bias_slice = bias.as_ref().map(|bias| {
+            slice_axis_range(
+                program,
+                bias,
+                0,
+                group_index * out_channels_per_group,
+                out_channels_per_group,
+            )
+        });
         let group_result = convtranspose2d_single_group(
-            program, node, &image_slice, &weight_slice, bias_slice.as_ref(), kernel_h, kernel_w, stride_h, stride_w, dilation_h, dilation_w, pad_top, pad_left, pad_bottom, pad_right,
+            program,
+            node,
+            &image_slice,
+            &weight_slice,
+            bias_slice.as_ref(),
+            kernel_h,
+            kernel_w,
+            stride_h,
+            stride_w,
+            dilation_h,
+            dilation_w,
+            pad_top,
+            pad_left,
+            pad_bottom,
+            pad_right,
         )?;
         accumulator = Some(match accumulator {
             None => group_result,
@@ -2922,7 +4413,11 @@ fn lower_convtranspose(program: &mut Vec<Op>, values: &mut BTreeMap<String, Valu
         });
     }
     let Some(result) = accumulator else {
-        return Err(LowerError::UnsupportedShape { name: node.name.to_string(), op_type: node.op_type.to_string(), reason: "ConvTranspose group must be >= 1".to_string() });
+        return Err(LowerError::UnsupportedShape {
+            name: node.name.to_string(),
+            op_type: node.op_type.to_string(),
+            reason: "ConvTranspose group must be >= 1".to_string(),
+        });
     };
     bind_output(values, node, 0, result.node, result.shape);
     Ok(())
@@ -2979,10 +4474,21 @@ fn convtranspose2d_single_group(
             pad_bottom: new_pad_bottom,
             pad_right: new_pad_right,
         };
-        return conv2d_core(program, node, image, &flipped_weight, bias, attrs, Some("convtranspose2d".to_string()));
+        return conv2d_core(
+            program,
+            node,
+            image,
+            &flipped_weight,
+            bias,
+            attrs,
+            Some("convtranspose2d".to_string()),
+        );
     }
 
-    convtranspose2d_scatter(program, image, weight, bias, kernel_h, kernel_w, stride_h, stride_w, dilation_h, dilation_w, pad_top, pad_left, pad_bottom, pad_right)
+    convtranspose2d_scatter(
+        program, image, weight, bias, kernel_h, kernel_w, stride_h, stride_w, dilation_h,
+        dilation_w, pad_top, pad_left, pad_bottom, pad_right,
+    )
 }
 
 /// One position axis of the general `ConvTranspose` scatter relation
@@ -2996,32 +4502,81 @@ fn convtranspose2d_single_group(
 /// shifted give the many-body affine combination that idiom's single
 /// `indices` operand does not need. No div/mod, no new `Op`/`ScalarOp`/
 /// `IndexMap`.
-fn scatter_mask_axis(program: &mut Vec<Op>, out_extent: u64, in_extent: u64, kernel_extent: u64, stride: i64, dilation: i64, pad: i64) -> NodeId {
-    let out_pos = append(program, Op::Iota { dtype: DType::Float32, extent: Extent::Static(out_extent as u32) });
-    let in_pos = append(program, Op::Iota { dtype: DType::Float32, extent: Extent::Static(in_extent as u32) });
-    let kernel_pos = append(program, Op::Iota { dtype: DType::Float32, extent: Extent::Static(kernel_extent as u32) });
+fn scatter_mask_axis(
+    program: &mut Vec<Op>,
+    out_extent: u64,
+    in_extent: u64,
+    kernel_extent: u64,
+    stride: i64,
+    dilation: i64,
+    pad: i64,
+) -> NodeId {
+    let out_pos = append(
+        program,
+        Op::Iota {
+            dtype: DType::Float32,
+            extent: Extent::Static(out_extent as u32),
+        },
+    );
+    let in_pos = append(
+        program,
+        Op::Iota {
+            dtype: DType::Float32,
+            extent: Extent::Static(in_extent as u32),
+        },
+    );
+    let kernel_pos = append(
+        program,
+        Op::Iota {
+            dtype: DType::Float32,
+            extent: Extent::Static(kernel_extent as u32),
+        },
+    );
 
     let stride_c = constant_scalar(program, stride as f32);
     let dilation_c = constant_scalar(program, dilation as f32);
     let pad_c = constant_scalar(program, pad as f32);
 
-    let scaled_in = build_elementwise(program, ScalarOp::Multiply, alloc::vec![(in_pos, IndexMap::Affine(identity_pattern(1))), (stride_c, IndexMap::Affine(scalar_broadcast_pattern(1)))]);
+    let scaled_in = build_elementwise(
+        program,
+        ScalarOp::Multiply,
+        alloc::vec![
+            (in_pos, IndexMap::Affine(identity_pattern(1))),
+            (stride_c, IndexMap::Affine(scalar_broadcast_pattern(1)))
+        ],
+    );
     let scaled_kernel = build_elementwise(
         program,
         ScalarOp::Multiply,
-        alloc::vec![(kernel_pos, IndexMap::Affine(identity_pattern(1))), (dilation_c, IndexMap::Affine(scalar_broadcast_pattern(1)))],
+        alloc::vec![
+            (kernel_pos, IndexMap::Affine(identity_pattern(1))),
+            (dilation_c, IndexMap::Affine(scalar_broadcast_pattern(1)))
+        ],
     );
     let summed = build_elementwise(
         program,
         ScalarOp::Add,
-        alloc::vec![(scaled_in, IndexMap::Affine(projection(2, &[0]))), (scaled_kernel, IndexMap::Affine(projection(2, &[1])))],
+        alloc::vec![
+            (scaled_in, IndexMap::Affine(projection(2, &[0]))),
+            (scaled_kernel, IndexMap::Affine(projection(2, &[1])))
+        ],
     );
-    let source_pos = build_elementwise(program, ScalarOp::Subtract, alloc::vec![(summed, IndexMap::Affine(identity_pattern(2))), (pad_c, IndexMap::Affine(scalar_broadcast_pattern(2)))]);
+    let source_pos = build_elementwise(
+        program,
+        ScalarOp::Subtract,
+        alloc::vec![
+            (summed, IndexMap::Affine(identity_pattern(2))),
+            (pad_c, IndexMap::Affine(scalar_broadcast_pattern(2)))
+        ],
+    );
 
     build_elementwise(
         program,
         ScalarOp::Equal,
-        alloc::vec![(out_pos, IndexMap::Affine(projection(3, &[0]))), (source_pos, IndexMap::Affine(projection(3, &[1, 2])))],
+        alloc::vec![
+            (out_pos, IndexMap::Affine(projection(3, &[0]))),
+            (source_pos, IndexMap::Affine(projection(3, &[1, 2])))
+        ],
     )
 }
 
@@ -3062,11 +4617,21 @@ fn convtranspose2d_scatter(
     let in_w = image.shape[3];
     let out_channels = weight.shape[1];
 
-    let out_h = ((in_h as i64 - 1) * stride_h - pad_top - pad_bottom + dilation_h * (kernel_h as i64 - 1) + 1).max(0) as u64;
-    let out_w = ((in_w as i64 - 1) * stride_w - pad_left - pad_right + dilation_w * (kernel_w as i64 - 1) + 1).max(0) as u64;
+    let out_h = ((in_h as i64 - 1) * stride_h - pad_top - pad_bottom
+        + dilation_h * (kernel_h as i64 - 1)
+        + 1)
+    .max(0) as u64;
+    let out_w = ((in_w as i64 - 1) * stride_w - pad_left - pad_right
+        + dilation_w * (kernel_w as i64 - 1)
+        + 1)
+    .max(0) as u64;
 
-    let mask_h = scatter_mask_axis(program, out_h, in_h, kernel_h, stride_h, dilation_h, pad_top);
-    let mask_w = scatter_mask_axis(program, out_w, in_w, kernel_w, stride_w, dilation_w, pad_left);
+    let mask_h = scatter_mask_axis(
+        program, out_h, in_h, kernel_h, stride_h, dilation_h, pad_top,
+    );
+    let mask_w = scatter_mask_axis(
+        program, out_w, in_w, kernel_w, stride_w, dilation_w, pad_left,
+    );
 
     // Each of the three products below must, on its own, cover every axis
     // of its own iteration space from its two operands (`shape::infer`
@@ -3077,28 +4642,65 @@ fn convtranspose2d_scatter(
     // 7=oy 8=ox.
     let reduce_space = projection(7, &[0, 2, 3, 4]); // image: n, ci, iy, ix
     let weight_pattern = projection(7, &[2, 1, 5, 6]); // weight: ci, co, kh, kw
-    let image_times_weight = build_elementwise(program, ScalarOp::Multiply, alloc::vec![(image.node, IndexMap::Affine(reduce_space)), (weight.node, IndexMap::Affine(weight_pattern))]);
+    let image_times_weight = build_elementwise(
+        program,
+        ScalarOp::Multiply,
+        alloc::vec![
+            (image.node, IndexMap::Affine(reduce_space)),
+            (weight.node, IndexMap::Affine(weight_pattern))
+        ],
+    );
 
     let step1_pattern = projection(8, &[0, 1, 2, 3, 4, 5, 6]);
     let mask_h_pattern = projection(8, &[7, 3, 5]); // mask_h: oy, iy, ky
-    let masked_h = build_elementwise(program, ScalarOp::Multiply, alloc::vec![(image_times_weight, IndexMap::Affine(step1_pattern)), (mask_h, IndexMap::Affine(mask_h_pattern))]);
+    let masked_h = build_elementwise(
+        program,
+        ScalarOp::Multiply,
+        alloc::vec![
+            (image_times_weight, IndexMap::Affine(step1_pattern)),
+            (mask_h, IndexMap::Affine(mask_h_pattern))
+        ],
+    );
 
     let step2_pattern = projection(9, &[0, 1, 2, 3, 4, 5, 6, 7]);
     let mask_w_pattern = projection(9, &[8, 4, 6]); // mask_w: ox, ix, kx
-    let masked = build_elementwise(program, ScalarOp::Multiply, alloc::vec![(masked_h, IndexMap::Affine(step2_pattern)), (mask_w, IndexMap::Affine(mask_w_pattern))]);
+    let masked = build_elementwise(
+        program,
+        ScalarOp::Multiply,
+        alloc::vec![
+            (masked_h, IndexMap::Affine(step2_pattern)),
+            (mask_w, IndexMap::Affine(mask_w_pattern))
+        ],
+    );
 
     let out_shape = alloc::vec![batch, out_channels, out_h, out_w];
-    let reduced = build_reduce(program, ScalarOp::Add, ReduceInit::Zero, masked, identity_pattern(9), projection(9, &[0, 1, 7, 8]), Some("convtranspose2d_scatter".to_string()));
+    let reduced = build_reduce(
+        program,
+        ScalarOp::Add,
+        ReduceInit::Zero,
+        masked,
+        identity_pattern(9),
+        projection(9, &[0, 1, 7, 8]),
+        Some("convtranspose2d_scatter".to_string()),
+    );
 
     let result = match bias {
         Some(bias) => build_elementwise(
             program,
             ScalarOp::Add,
-            alloc::vec![(reduced, IndexMap::Affine(identity_pattern(4))), (bias.node, IndexMap::Affine(projection(4, &[1])))],
+            alloc::vec![
+                (reduced, IndexMap::Affine(identity_pattern(4))),
+                (bias.node, IndexMap::Affine(projection(4, &[1])))
+            ],
         ),
         None => reduced,
     };
-    Ok(Value { node: result, shape: out_shape, view: None, flatten_source: None })
+    Ok(Value {
+        node: result,
+        shape: out_shape,
+        view: None,
+        flatten_source: None,
+    })
 }
 
 /// One `stride*out + dilation*kernel` window term -- `map.rs`'s
@@ -3106,7 +4708,12 @@ fn convtranspose2d_scatter(
 /// [`AxisIndex`] sums terms instead of holding one.
 fn window_axis(out_axis: u16, kernel_axis: u16, stride: i64, dilation: i64) -> AxisIndex {
     AxisIndex {
-        terms: alloc::vec![AxisTerm::scaled(out_axis, stride as i32), AxisTerm::scaled(kernel_axis, dilation as i32)].into_iter().collect(),
+        terms: alloc::vec![
+            AxisTerm::scaled(out_axis, stride as i32),
+            AxisTerm::scaled(kernel_axis, dilation as i32)
+        ]
+        .into_iter()
+        .collect(),
         offset: 0,
     }
 }
@@ -3114,8 +4721,15 @@ fn window_axis(out_axis: u16, kernel_axis: u16, stride: i64, dilation: i64) -> A
 /// `Conv`'s output spatial extent for one axis, ONNX's own formula:
 /// `floor((padded - dilation*(kernel-1) - 1) / stride) + 1`. `None` when the
 /// kernel's dilated span does not fit the padded axis at all.
-fn conv_output_extent(padded_extent: u64, kernel_extent: u64, stride: i64, dilation: i64) -> Option<u64> {
-    let span = (dilation as u64).checked_mul(kernel_extent.checked_sub(1)?)?.checked_add(1)?;
+fn conv_output_extent(
+    padded_extent: u64,
+    kernel_extent: u64,
+    stride: i64,
+    dilation: i64,
+) -> Option<u64> {
+    let span = (dilation as u64)
+        .checked_mul(kernel_extent.checked_sub(1)?)?
+        .checked_add(1)?;
     if span > padded_extent {
         return None;
     }
@@ -3137,8 +4751,17 @@ fn conv_output_extent(padded_extent: u64, kernel_extent: u64, stride: i64, dilat
 /// [`pad_axis`] call it already makes (the `-inf`/`0.0` fill value that
 /// call already carries is exactly the right value to overhang into, for
 /// `MaxPool`/`AveragePool` respectively) -- never a new `Op`/`IndexMap`.
-fn conv_output_extent_ceil(input_extent: u64, pad_before: u64, pad_after: u64, kernel_extent: u64, stride: i64, dilation: i64) -> Option<(u64, u64)> {
-    let span = (dilation as u64).checked_mul(kernel_extent.checked_sub(1)?)?.checked_add(1)?;
+fn conv_output_extent_ceil(
+    input_extent: u64,
+    pad_before: u64,
+    pad_after: u64,
+    kernel_extent: u64,
+    stride: i64,
+    dilation: i64,
+) -> Option<(u64, u64)> {
+    let span = (dilation as u64)
+        .checked_mul(kernel_extent.checked_sub(1)?)?
+        .checked_add(1)?;
     let padded_extent = input_extent + pad_before + pad_after;
     if span > padded_extent {
         return None;
@@ -3194,8 +4817,14 @@ fn window_materialize(program: &mut Vec<Op>, image: &Value, spec: WindowSpec) ->
     let image_pattern = IndexPattern {
         iter_rank: 6,
         axes: alloc::vec![
-            AxisIndex { terms: core::iter::once(AxisTerm::projection(0)).collect(), offset: 0 },
-            AxisIndex { terms: core::iter::once(AxisTerm::projection(1)).collect(), offset: 0 },
+            AxisIndex {
+                terms: core::iter::once(AxisTerm::projection(0)).collect(),
+                offset: 0
+            },
+            AxisIndex {
+                terms: core::iter::once(AxisTerm::projection(1)).collect(),
+                offset: 0
+            },
             window_axis(2, 4, spec.stride_h, spec.dilation_h),
             window_axis(3, 5, spec.stride_w, spec.dilation_w),
         ],
@@ -3204,7 +4833,10 @@ fn window_materialize(program: &mut Vec<Op>, image: &Value, spec: WindowSpec) ->
         program,
         Op::Constant {
             dtype: DType::Float32,
-            shape: alloc::vec![spec.out_h, spec.out_w, spec.kernel_h, spec.kernel_w].iter().map(|&extent| Extent::Static(extent as u32)).collect(),
+            shape: alloc::vec![spec.out_h, spec.out_w, spec.kernel_h, spec.kernel_w]
+                .iter()
+                .map(|&extent| Extent::Static(extent as u32))
+                .collect(),
             value: 1.0,
         },
     );
@@ -3212,10 +4844,25 @@ fn window_materialize(program: &mut Vec<Op>, image: &Value, spec: WindowSpec) ->
     let windowed = build_elementwise(
         program,
         ScalarOp::Multiply,
-        alloc::vec![(image.node, IndexMap::Affine(image_pattern)), (stamp, IndexMap::Affine(stamp_pattern))],
+        alloc::vec![
+            (image.node, IndexMap::Affine(image_pattern)),
+            (stamp, IndexMap::Affine(stamp_pattern))
+        ],
     );
-    let shape = alloc::vec![image.shape[0], image.shape[1], spec.out_h, spec.out_w, spec.kernel_h, spec.kernel_w];
-    Value { node: windowed, shape, view: None, flatten_source: None }
+    let shape = alloc::vec![
+        image.shape[0],
+        image.shape[1],
+        spec.out_h,
+        spec.out_w,
+        spec.kernel_h,
+        spec.kernel_w
+    ];
+    Value {
+        node: windowed,
+        shape,
+        view: None,
+        flatten_source: None,
+    }
 }
 
 /// Rank-3 (`[n, c, w]`) analogue of [`window_materialize`]: one spatial axis
@@ -3227,27 +4874,55 @@ fn window_materialize(program: &mut Vec<Op>, image: &Value, spec: WindowSpec) ->
 /// would trade a second small function for a rank-indexed axis-layout table
 /// -- no simpler, and this crate's own convention (`lower_gather` aside,
 /// which *is* genuinely rank-generic) is one function per fixed spatial rank.
-fn window_materialize1d(program: &mut Vec<Op>, image: &Value, out_w: u64, kernel_w: u64, stride_w: i64, dilation_w: i64) -> Value {
+fn window_materialize1d(
+    program: &mut Vec<Op>,
+    image: &Value,
+    out_w: u64,
+    kernel_w: u64,
+    stride_w: i64,
+    dilation_w: i64,
+) -> Value {
     let image_pattern = IndexPattern {
         iter_rank: 4,
         axes: alloc::vec![
-            AxisIndex { terms: core::iter::once(AxisTerm::projection(0)).collect(), offset: 0 },
-            AxisIndex { terms: core::iter::once(AxisTerm::projection(1)).collect(), offset: 0 },
+            AxisIndex {
+                terms: core::iter::once(AxisTerm::projection(0)).collect(),
+                offset: 0
+            },
+            AxisIndex {
+                terms: core::iter::once(AxisTerm::projection(1)).collect(),
+                offset: 0
+            },
             window_axis(2, 3, stride_w, dilation_w),
         ],
     };
     let stamp = append(
         program,
-        Op::Constant { dtype: DType::Float32, shape: alloc::vec![out_w, kernel_w].iter().map(|&extent| Extent::Static(extent as u32)).collect(), value: 1.0 },
+        Op::Constant {
+            dtype: DType::Float32,
+            shape: alloc::vec![out_w, kernel_w]
+                .iter()
+                .map(|&extent| Extent::Static(extent as u32))
+                .collect(),
+            value: 1.0,
+        },
     );
     let stamp_pattern = projection(4, &[2, 3]);
     let windowed = build_elementwise(
         program,
         ScalarOp::Multiply,
-        alloc::vec![(image.node, IndexMap::Affine(image_pattern)), (stamp, IndexMap::Affine(stamp_pattern))],
+        alloc::vec![
+            (image.node, IndexMap::Affine(image_pattern)),
+            (stamp, IndexMap::Affine(stamp_pattern))
+        ],
     );
     let shape = alloc::vec![image.shape[0], image.shape[1], out_w, kernel_w];
-    Value { node: windowed, shape, view: None, flatten_source: None }
+    Value {
+        node: windowed,
+        shape,
+        view: None,
+        flatten_source: None,
+    }
 }
 
 /// Rank-5 (`[n, c, d, h, w]`) analogue of [`window_materialize`]: three
@@ -3277,8 +4952,14 @@ fn window_materialize3d(
     let image_pattern = IndexPattern {
         iter_rank: 8,
         axes: alloc::vec![
-            AxisIndex { terms: core::iter::once(AxisTerm::projection(0)).collect(), offset: 0 },
-            AxisIndex { terms: core::iter::once(AxisTerm::projection(1)).collect(), offset: 0 },
+            AxisIndex {
+                terms: core::iter::once(AxisTerm::projection(0)).collect(),
+                offset: 0
+            },
+            AxisIndex {
+                terms: core::iter::once(AxisTerm::projection(1)).collect(),
+                offset: 0
+            },
             window_axis(2, 5, stride_d, dilation_d),
             window_axis(3, 6, stride_h, dilation_h),
             window_axis(4, 7, stride_w, dilation_w),
@@ -3288,7 +4969,10 @@ fn window_materialize3d(
         program,
         Op::Constant {
             dtype: DType::Float32,
-            shape: alloc::vec![out_d, out_h, out_w, kernel_d, kernel_h, kernel_w].iter().map(|&extent| Extent::Static(extent as u32)).collect(),
+            shape: alloc::vec![out_d, out_h, out_w, kernel_d, kernel_h, kernel_w]
+                .iter()
+                .map(|&extent| Extent::Static(extent as u32))
+                .collect(),
             value: 1.0,
         },
     );
@@ -3296,10 +4980,27 @@ fn window_materialize3d(
     let windowed = build_elementwise(
         program,
         ScalarOp::Multiply,
-        alloc::vec![(image.node, IndexMap::Affine(image_pattern)), (stamp, IndexMap::Affine(stamp_pattern))],
+        alloc::vec![
+            (image.node, IndexMap::Affine(image_pattern)),
+            (stamp, IndexMap::Affine(stamp_pattern))
+        ],
     );
-    let shape = alloc::vec![image.shape[0], image.shape[1], out_d, out_h, out_w, kernel_d, kernel_h, kernel_w];
-    Value { node: windowed, shape, view: None, flatten_source: None }
+    let shape = alloc::vec![
+        image.shape[0],
+        image.shape[1],
+        out_d,
+        out_h,
+        out_w,
+        kernel_d,
+        kernel_h,
+        kernel_w
+    ];
+    Value {
+        node: windowed,
+        shape,
+        view: None,
+        flatten_source: None,
+    }
 }
 
 /// `Conv`, rank-3 `[n, ci, w]` image and rank-3 `[co, ci, kw]` weight
@@ -3310,18 +5011,43 @@ fn window_materialize3d(
 /// [`conv2d_core`]: [`pad_axis`] on the one spatial axis,
 /// [`window_materialize1d`], `Elementwise(Multiply)` against the weight,
 /// `Reduce(Add)` over `(ci, kw)`.
-fn conv1d_core(program: &mut Vec<Op>, node: &NodeProto<'_>, image: &Value, weight: &Value, bias: Option<&Value>, attrs: Conv2dAttrs) -> Result<Value, LowerError> {
+fn conv1d_core(
+    program: &mut Vec<Op>,
+    node: &NodeProto<'_>,
+    image: &Value,
+    weight: &Value,
+    bias: Option<&Value>,
+    attrs: Conv2dAttrs,
+) -> Result<Value, LowerError> {
     let name = node.name.to_string();
     let op_type = node.op_type.to_string();
     let batch = image.shape[0];
     let out_channels = weight.shape[0];
     let kernel_w = weight.shape[2];
 
-    let padded = pad_axis(program, image, 2, attrs.pad_left as u64, attrs.pad_right as u64, 0.0);
+    let padded = pad_axis(
+        program,
+        image,
+        2,
+        attrs.pad_left as u64,
+        attrs.pad_right as u64,
+        0.0,
+    );
     let out_w = conv_output_extent(padded.shape[2], kernel_w, attrs.stride_w, attrs.dilation_w)
-        .ok_or_else(|| LowerError::UnsupportedShape { name: name.clone(), op_type: op_type.clone(), reason: "Conv1d kernel does not fit the padded input width".to_string() })?;
+        .ok_or_else(|| LowerError::UnsupportedShape {
+            name: name.clone(),
+            op_type: op_type.clone(),
+            reason: "Conv1d kernel does not fit the padded input width".to_string(),
+        })?;
 
-    let windowed = window_materialize1d(program, &padded, out_w, kernel_w, attrs.stride_w, attrs.dilation_w);
+    let windowed = window_materialize1d(
+        program,
+        &padded,
+        out_w,
+        kernel_w,
+        attrs.stride_w,
+        attrs.dilation_w,
+    );
 
     // shared iteration space: 0=n 1=co 2=ow 3=ci 4=kw
     let windowed_pattern = projection(5, &[0, 3, 2, 4]);
@@ -3329,26 +5055,49 @@ fn conv1d_core(program: &mut Vec<Op>, node: &NodeProto<'_>, image: &Value, weigh
     let product = build_elementwise(
         program,
         ScalarOp::Multiply,
-        alloc::vec![(windowed.node, IndexMap::Affine(windowed_pattern)), (weight.node, IndexMap::Affine(weight_pattern))],
+        alloc::vec![
+            (windowed.node, IndexMap::Affine(windowed_pattern)),
+            (weight.node, IndexMap::Affine(weight_pattern))
+        ],
     );
 
     let out_shape = alloc::vec![batch, out_channels, out_w];
-    let reduced = build_reduce(program, ScalarOp::Add, ReduceInit::Zero, product, identity_pattern(5), projection(5, &[0, 1, 2]), Some("conv1d".to_string()));
+    let reduced = build_reduce(
+        program,
+        ScalarOp::Add,
+        ReduceInit::Zero,
+        product,
+        identity_pattern(5),
+        projection(5, &[0, 1, 2]),
+        Some("conv1d".to_string()),
+    );
 
     let result = match bias {
         Some(bias) => {
             if bias.shape != alloc::vec![out_channels] {
-                return Err(LowerError::UnsupportedShape { name, op_type, reason: "Conv bias must be a rank-1 tensor sized to out_channels".to_string() });
+                return Err(LowerError::UnsupportedShape {
+                    name,
+                    op_type,
+                    reason: "Conv bias must be a rank-1 tensor sized to out_channels".to_string(),
+                });
             }
             build_elementwise(
                 program,
                 ScalarOp::Add,
-                alloc::vec![(reduced, IndexMap::Affine(identity_pattern(3))), (bias.node, IndexMap::Affine(projection(3, &[1])))],
+                alloc::vec![
+                    (reduced, IndexMap::Affine(identity_pattern(3))),
+                    (bias.node, IndexMap::Affine(projection(3, &[1])))
+                ],
             )
         }
         None => reduced,
     };
-    Ok(Value { node: result, shape: out_shape, view: None, flatten_source: None })
+    Ok(Value {
+        node: result,
+        shape: out_shape,
+        view: None,
+        flatten_source: None,
+    })
 }
 
 /// The `strides`/`dilations`/`pads` 2D `Conv` attribute triple, parsed once
@@ -3371,14 +5120,24 @@ struct Conv2dAttrs {
 /// `SAME_LOWER`. Feeds straight into the same `pad_axis`/`conv_output_extent`
 /// pair the explicit `pads` attribute already drives -- no new padding
 /// machinery, only where the two numbers come from.
-fn same_pad_axis(input_extent: u64, kernel_extent: u64, stride: i64, dilation: i64, lower: bool) -> (i64, i64) {
+fn same_pad_axis(
+    input_extent: u64,
+    kernel_extent: u64,
+    stride: i64,
+    dilation: i64,
+    lower: bool,
+) -> (i64, i64) {
     let stride = stride as u64;
     let output_extent = input_extent.div_ceil(stride).max(1);
     let span = (dilation as u64) * kernel_extent.saturating_sub(1) + 1;
     let needed = ((output_extent - 1) * stride + span).saturating_sub(input_extent);
     let small = needed / 2;
     let large = needed - small;
-    if lower { (large as i64, small as i64) } else { (small as i64, large as i64) }
+    if lower {
+        (large as i64, small as i64)
+    } else {
+        (small as i64, large as i64)
+    }
 }
 
 /// [`same_pad_axis`]'s `ConvTranspose` sibling: the ONNX `ConvTranspose`
@@ -3394,7 +5153,12 @@ fn same_pad_axis(input_extent: u64, kernel_extent: u64, stride: i64, dilation: i
 /// stride) is a crop [`pad_axis`]'s `u64` before/after cannot express, so
 /// the caller turns that into a named [`LowerError::UnsupportedShape`]
 /// rather than wrapping to a huge padding.
-fn same_pad_axis_convtranspose(kernel_extent: u64, stride: i64, dilation: i64, lower: bool) -> Option<(i64, i64)> {
+fn same_pad_axis_convtranspose(
+    kernel_extent: u64,
+    stride: i64,
+    dilation: i64,
+    lower: bool,
+) -> Option<(i64, i64)> {
     let span = (dilation as u64) * kernel_extent.saturating_sub(1) + 1;
     let total = span as i64 - stride;
     if total < 0 {
@@ -3402,7 +5166,11 @@ fn same_pad_axis_convtranspose(kernel_extent: u64, stride: i64, dilation: i64, l
     }
     let small = total / 2;
     let large = total - small;
-    Some(if lower { (large, small) } else { (small, large) })
+    Some(if lower {
+        (large, small)
+    } else {
+        (small, large)
+    })
 }
 
 /// `ConvTranspose`'s `strides`/`dilations`/`auto_pad` resolution --
@@ -3428,7 +5196,11 @@ fn parse_convtranspose2d_pads(
         b"NOTSET" => {
             let pads = attr_ints_or(node, "pads", &[0, 0, 0, 0]);
             if pads.len() != 4 {
-                return Err(LowerError::UnsupportedShape { name, op_type, reason: "ConvTranspose lowering supports 2D pads only".to_string() });
+                return Err(LowerError::UnsupportedShape {
+                    name,
+                    op_type,
+                    reason: "ConvTranspose lowering supports 2D pads only".to_string(),
+                });
             }
             Ok((pads[0], pads[1], pads[2], pads[3]))
         }
@@ -3441,7 +5213,13 @@ fn parse_convtranspose2d_pads(
                 .ok_or_else(|| LowerError::UnsupportedShape { name: name.clone(), op_type: op_type.clone(), reason: "ConvTranspose SAME auto_pad requires stride <= the kernel's dilated span on the width axis".to_string() })?;
             Ok((top, left, bottom, right))
         }
-        _ => Err(LowerError::UnsupportedShape { name, op_type, reason: "ConvTranspose lowering supports auto_pad NOTSET/VALID/SAME_UPPER/SAME_LOWER only".to_string() }),
+        _ => Err(LowerError::UnsupportedShape {
+            name,
+            op_type,
+            reason:
+                "ConvTranspose lowering supports auto_pad NOTSET/VALID/SAME_UPPER/SAME_LOWER only"
+                    .to_string(),
+        }),
     }
 }
 
@@ -3451,13 +5229,23 @@ fn parse_convtranspose2d_pads(
 /// `SAME_LOWER` compute it via [`same_pad_axis`] from the image and kernel
 /// spatial extents) -- the one place every 2D window op resolves padding, so
 /// `auto_pad` support lands once for `Conv`, `MaxPool`, and `AveragePool`.
-fn parse_conv2d_attrs(node: &NodeProto<'_>, image_h: u64, image_w: u64, kernel_h: u64, kernel_w: u64) -> Result<Conv2dAttrs, LowerError> {
+fn parse_conv2d_attrs(
+    node: &NodeProto<'_>,
+    image_h: u64,
+    image_w: u64,
+    kernel_h: u64,
+    kernel_w: u64,
+) -> Result<Conv2dAttrs, LowerError> {
     let name = node.name.to_string();
     let op_type = node.op_type.to_string();
     let strides = attr_ints_or(node, "strides", &[1, 1]);
     let dilations = attr_ints_or(node, "dilations", &[1, 1]);
     if strides.len() != 2 || dilations.len() != 2 {
-        return Err(LowerError::UnsupportedShape { name, op_type, reason: "Conv lowering supports 2D strides/dilations only".to_string() });
+        return Err(LowerError::UnsupportedShape {
+            name,
+            op_type,
+            reason: "Conv lowering supports 2D strides/dilations only".to_string(),
+        });
     }
     let (stride_h, stride_w) = (strides[0], strides[1]);
     let (dilation_h, dilation_w) = (dilations[0], dilations[1]);
@@ -3467,7 +5255,11 @@ fn parse_conv2d_attrs(node: &NodeProto<'_>, image_h: u64, image_w: u64, kernel_h
         b"NOTSET" => {
             let pads = attr_ints_or(node, "pads", &[0, 0, 0, 0]);
             if pads.len() != 4 {
-                return Err(LowerError::UnsupportedShape { name, op_type, reason: "Conv lowering supports 2D pads only".to_string() });
+                return Err(LowerError::UnsupportedShape {
+                    name,
+                    op_type,
+                    reason: "Conv lowering supports 2D pads only".to_string(),
+                });
             }
             (pads[0], pads[2], pads[1], pads[3])
         }
@@ -3478,22 +5270,46 @@ fn parse_conv2d_attrs(node: &NodeProto<'_>, image_h: u64, image_w: u64, kernel_h
             let (left, right) = same_pad_axis(image_w, kernel_w, stride_w, dilation_w, lower);
             (top, bottom, left, right)
         }
-        _ => return Err(LowerError::UnsupportedShape { name, op_type, reason: "Conv lowering supports auto_pad NOTSET/VALID/SAME_UPPER/SAME_LOWER only".to_string() }),
+        _ => {
+            return Err(LowerError::UnsupportedShape {
+                name,
+                op_type,
+                reason: "Conv lowering supports auto_pad NOTSET/VALID/SAME_UPPER/SAME_LOWER only"
+                    .to_string(),
+            });
+        }
     };
-    Ok(Conv2dAttrs { stride_h, stride_w, dilation_h, dilation_w, pad_top, pad_left, pad_bottom, pad_right })
+    Ok(Conv2dAttrs {
+        stride_h,
+        stride_w,
+        dilation_h,
+        dilation_w,
+        pad_top,
+        pad_left,
+        pad_bottom,
+        pad_right,
+    })
 }
 
 /// [`Conv1dAttrs::stride_w`]/etc. parsed from a `Conv1d` node's
 /// `strides`/`dilations`/`pads`, reusing [`Conv2dAttrs`]'s field names so
 /// [`conv1d_core`] shares its parameter shape with [`conv2d_core`] -- the
 /// unused `_h` fields are never read on the rank-3 path.
-fn parse_conv1d_attrs(node: &NodeProto<'_>, image_w: u64, kernel_w: u64) -> Result<Conv2dAttrs, LowerError> {
+fn parse_conv1d_attrs(
+    node: &NodeProto<'_>,
+    image_w: u64,
+    kernel_w: u64,
+) -> Result<Conv2dAttrs, LowerError> {
     let name = node.name.to_string();
     let op_type = node.op_type.to_string();
     let strides = attr_ints_or(node, "strides", &[1]);
     let dilations = attr_ints_or(node, "dilations", &[1]);
     if strides.len() != 1 || dilations.len() != 1 {
-        return Err(LowerError::UnsupportedShape { name, op_type, reason: "Conv1d lowering supports 1D strides/dilations only".to_string() });
+        return Err(LowerError::UnsupportedShape {
+            name,
+            op_type,
+            reason: "Conv1d lowering supports 1D strides/dilations only".to_string(),
+        });
     }
     let (stride_w, dilation_w) = (strides[0], dilations[0]);
 
@@ -3502,15 +5318,41 @@ fn parse_conv1d_attrs(node: &NodeProto<'_>, image_w: u64, kernel_w: u64) -> Resu
         b"NOTSET" => {
             let pads = attr_ints_or(node, "pads", &[0, 0]);
             if pads.len() != 2 {
-                return Err(LowerError::UnsupportedShape { name, op_type, reason: "Conv1d lowering supports 1D pads only".to_string() });
+                return Err(LowerError::UnsupportedShape {
+                    name,
+                    op_type,
+                    reason: "Conv1d lowering supports 1D pads only".to_string(),
+                });
             }
             (pads[0], pads[1])
         }
         b"VALID" => (0, 0),
-        b"SAME_UPPER" | b"SAME_LOWER" => same_pad_axis(image_w, kernel_w, stride_w, dilation_w, auto_pad == b"SAME_LOWER"),
-        _ => return Err(LowerError::UnsupportedShape { name, op_type, reason: "Conv1d lowering supports auto_pad NOTSET/VALID/SAME_UPPER/SAME_LOWER only".to_string() }),
+        b"SAME_UPPER" | b"SAME_LOWER" => same_pad_axis(
+            image_w,
+            kernel_w,
+            stride_w,
+            dilation_w,
+            auto_pad == b"SAME_LOWER",
+        ),
+        _ => {
+            return Err(LowerError::UnsupportedShape {
+                name,
+                op_type,
+                reason: "Conv1d lowering supports auto_pad NOTSET/VALID/SAME_UPPER/SAME_LOWER only"
+                    .to_string(),
+            });
+        }
     };
-    Ok(Conv2dAttrs { stride_h: 1, stride_w, dilation_h: 1, dilation_w, pad_top: 0, pad_left, pad_bottom: 0, pad_right })
+    Ok(Conv2dAttrs {
+        stride_h: 1,
+        stride_w,
+        dilation_h: 1,
+        dilation_w,
+        pad_top: 0,
+        pad_left,
+        pad_bottom: 0,
+        pad_right,
+    })
 }
 
 /// `Conv`, rank-3 (`group >= 1`): parses attrs, validates channels, and
@@ -3520,7 +5362,11 @@ fn parse_conv1d_attrs(node: &NodeProto<'_>, image_w: u64, kernel_w: u64) -> Resu
 /// ([`concat_pair`]) -- the exact rank-3 mirror of [`lower_conv`]'s
 /// `group != 1` decomposition (see that function's own doc for why this is
 /// the RISC-correct resolution rather than a fused `IndexMap`).
-fn lower_conv1d(program: &mut Vec<Op>, values: &mut BTreeMap<String, Value>, node: &NodeProto<'_>) -> Result<(), LowerError> {
+fn lower_conv1d(
+    program: &mut Vec<Op>,
+    values: &mut BTreeMap<String, Value>,
+    node: &NodeProto<'_>,
+) -> Result<(), LowerError> {
     let image = lookup(values, node, 0)?.clone();
     let weight = lookup(values, node, 1)?.clone();
     let name = node.name.to_string();
@@ -3528,13 +5374,19 @@ fn lower_conv1d(program: &mut Vec<Op>, values: &mut BTreeMap<String, Value>, nod
 
     let group = attr_int(node, "group").unwrap_or(1);
     if group < 1 {
-        return Err(LowerError::UnsupportedShape { name, op_type, reason: "Conv1d group attribute must be >= 1".to_string() });
+        return Err(LowerError::UnsupportedShape {
+            name,
+            op_type,
+            reason: "Conv1d group attribute must be >= 1".to_string(),
+        });
     }
     let group = group as u64;
 
     let attrs = parse_conv1d_attrs(node, image.shape[2], weight.shape[2])?;
     let bias = match node.input.get(2) {
-        Some(bias_name) => Some(lookup_by_name(values, bias_name, node.op_type, node.name)?.clone()),
+        Some(bias_name) => {
+            Some(lookup_by_name(values, bias_name, node.op_type, node.name)?.clone())
+        }
         None => None,
     };
 
@@ -3544,7 +5396,10 @@ fn lower_conv1d(program: &mut Vec<Op>, values: &mut BTreeMap<String, Value>, nod
             return Err(LowerError::UnsupportedShape {
                 name: node.name.to_string(),
                 op_type: node.op_type.to_string(),
-                reason: format!("Conv1d weight in-channels {} does not match image channels {in_channels}", weight.shape[1]),
+                reason: format!(
+                    "Conv1d weight in-channels {} does not match image channels {in_channels}",
+                    weight.shape[1]
+                ),
             });
         }
         let result = conv1d_core(program, node, &image, &weight, bias.as_ref(), attrs)?;
@@ -3559,7 +5414,9 @@ fn lower_conv1d(program: &mut Vec<Op>, values: &mut BTreeMap<String, Value>, nod
         return Err(LowerError::UnsupportedShape {
             name: node.name.to_string(),
             op_type: node.op_type.to_string(),
-            reason: format!("Conv1d image channels {in_channels} and weight output channels {total_out_channels} must both be evenly divisible by group {group}"),
+            reason: format!(
+                "Conv1d image channels {in_channels} and weight output channels {total_out_channels} must both be evenly divisible by group {group}"
+            ),
         });
     }
     let in_channels_per_group = in_channels / group;
@@ -3568,7 +5425,9 @@ fn lower_conv1d(program: &mut Vec<Op>, values: &mut BTreeMap<String, Value>, nod
         return Err(LowerError::UnsupportedShape {
             name: node.name.to_string(),
             op_type: node.op_type.to_string(),
-            reason: format!("Conv1d weight in-channels {weight_in_channels} does not match image channels {in_channels} / group {group}"),
+            reason: format!(
+                "Conv1d weight in-channels {weight_in_channels} does not match image channels {in_channels} / group {group}"
+            ),
         });
     }
     if let Some(bias) = &bias
@@ -3577,23 +5436,56 @@ fn lower_conv1d(program: &mut Vec<Op>, values: &mut BTreeMap<String, Value>, nod
         return Err(LowerError::UnsupportedShape {
             name: node.name.to_string(),
             op_type: node.op_type.to_string(),
-            reason: "Conv1d bias must be a rank-1 tensor sized to the total (grouped) output channels".to_string(),
+            reason:
+                "Conv1d bias must be a rank-1 tensor sized to the total (grouped) output channels"
+                    .to_string(),
         });
     }
 
     let mut accumulator: Option<Value> = None;
     for group_index in 0..group {
-        let image_slice = slice_axis_range(program, &image, 1, group_index * in_channels_per_group, in_channels_per_group);
-        let weight_slice = slice_axis_range(program, &weight, 0, group_index * out_channels_per_group, out_channels_per_group);
-        let bias_slice = bias.as_ref().map(|bias| slice_axis_range(program, bias, 0, group_index * out_channels_per_group, out_channels_per_group));
-        let group_result = conv1d_core(program, node, &image_slice, &weight_slice, bias_slice.as_ref(), attrs)?;
+        let image_slice = slice_axis_range(
+            program,
+            &image,
+            1,
+            group_index * in_channels_per_group,
+            in_channels_per_group,
+        );
+        let weight_slice = slice_axis_range(
+            program,
+            &weight,
+            0,
+            group_index * out_channels_per_group,
+            out_channels_per_group,
+        );
+        let bias_slice = bias.as_ref().map(|bias| {
+            slice_axis_range(
+                program,
+                bias,
+                0,
+                group_index * out_channels_per_group,
+                out_channels_per_group,
+            )
+        });
+        let group_result = conv1d_core(
+            program,
+            node,
+            &image_slice,
+            &weight_slice,
+            bias_slice.as_ref(),
+            attrs,
+        )?;
         accumulator = Some(match accumulator {
             None => group_result,
             Some(previous) => concat_pair(program, node, &previous, &group_result, 1)?,
         });
     }
     let Some(result) = accumulator else {
-        return Err(LowerError::UnsupportedShape { name: node.name.to_string(), op_type: node.op_type.to_string(), reason: "Conv1d group must be >= 1".to_string() });
+        return Err(LowerError::UnsupportedShape {
+            name: node.name.to_string(),
+            op_type: node.op_type.to_string(),
+            reason: "Conv1d group must be >= 1".to_string(),
+        });
     };
     bind_output(values, node, 0, result.node, result.shape);
     Ok(())
@@ -3623,18 +5515,49 @@ fn conv2d_core(
     let kernel_h = weight.shape[2];
     let kernel_w = weight.shape[3];
 
-    let padded_w = pad_axis(program, image, 3, attrs.pad_left as u64, attrs.pad_right as u64, 0.0);
-    let padded = pad_axis(program, &padded_w, 2, attrs.pad_top as u64, attrs.pad_bottom as u64, 0.0);
+    let padded_w = pad_axis(
+        program,
+        image,
+        3,
+        attrs.pad_left as u64,
+        attrs.pad_right as u64,
+        0.0,
+    );
+    let padded = pad_axis(
+        program,
+        &padded_w,
+        2,
+        attrs.pad_top as u64,
+        attrs.pad_bottom as u64,
+        0.0,
+    );
 
     let out_h = conv_output_extent(padded.shape[2], kernel_h, attrs.stride_h, attrs.dilation_h)
-        .ok_or_else(|| LowerError::UnsupportedShape { name: name.clone(), op_type: op_type.clone(), reason: "Conv kernel does not fit the padded image height".to_string() })?;
+        .ok_or_else(|| LowerError::UnsupportedShape {
+            name: name.clone(),
+            op_type: op_type.clone(),
+            reason: "Conv kernel does not fit the padded image height".to_string(),
+        })?;
     let out_w = conv_output_extent(padded.shape[3], kernel_w, attrs.stride_w, attrs.dilation_w)
-        .ok_or_else(|| LowerError::UnsupportedShape { name: name.clone(), op_type: op_type.clone(), reason: "Conv kernel does not fit the padded image width".to_string() })?;
+        .ok_or_else(|| LowerError::UnsupportedShape {
+            name: name.clone(),
+            op_type: op_type.clone(),
+            reason: "Conv kernel does not fit the padded image width".to_string(),
+        })?;
 
     let windowed = window_materialize(
         program,
         &padded,
-        WindowSpec { out_h, out_w, kernel_h, kernel_w, stride_h: attrs.stride_h, stride_w: attrs.stride_w, dilation_h: attrs.dilation_h, dilation_w: attrs.dilation_w },
+        WindowSpec {
+            out_h,
+            out_w,
+            kernel_h,
+            kernel_w,
+            stride_h: attrs.stride_h,
+            stride_w: attrs.stride_w,
+            dilation_h: attrs.dilation_h,
+            dilation_w: attrs.dilation_w,
+        },
     );
 
     // shared iteration space: 0=n 1=co 2=oy 3=ox 4=ci 5=ky 6=kx
@@ -3643,26 +5566,49 @@ fn conv2d_core(
     let product = build_elementwise(
         program,
         ScalarOp::Multiply,
-        alloc::vec![(windowed.node, IndexMap::Affine(windowed_pattern)), (weight.node, IndexMap::Affine(weight_pattern))],
+        alloc::vec![
+            (windowed.node, IndexMap::Affine(windowed_pattern)),
+            (weight.node, IndexMap::Affine(weight_pattern))
+        ],
     );
 
     let out_shape = alloc::vec![batch, out_channels, out_h, out_w];
-    let reduced = build_reduce(program, ScalarOp::Add, ReduceInit::Zero, product, identity_pattern(7), projection(7, &[0, 1, 2, 3]), op_name);
+    let reduced = build_reduce(
+        program,
+        ScalarOp::Add,
+        ReduceInit::Zero,
+        product,
+        identity_pattern(7),
+        projection(7, &[0, 1, 2, 3]),
+        op_name,
+    );
 
     let result = match bias {
         Some(bias) => {
             if bias.shape != alloc::vec![out_channels] {
-                return Err(LowerError::UnsupportedShape { name, op_type, reason: "Conv bias must be a rank-1 tensor sized to out_channels".to_string() });
+                return Err(LowerError::UnsupportedShape {
+                    name,
+                    op_type,
+                    reason: "Conv bias must be a rank-1 tensor sized to out_channels".to_string(),
+                });
             }
             build_elementwise(
                 program,
                 ScalarOp::Add,
-                alloc::vec![(reduced, IndexMap::Affine(identity_pattern(4))), (bias.node, IndexMap::Affine(projection(4, &[1])))],
+                alloc::vec![
+                    (reduced, IndexMap::Affine(identity_pattern(4))),
+                    (bias.node, IndexMap::Affine(projection(4, &[1])))
+                ],
             )
         }
         None => reduced,
     };
-    Ok(Value { node: result, shape: out_shape, view: None, flatten_source: None })
+    Ok(Value {
+        node: result,
+        shape: out_shape,
+        view: None,
+        flatten_source: None,
+    })
 }
 
 /// The `strides`/`dilations`/`pads` 3D `Conv`/pooling attribute sextuple --
@@ -3688,13 +5634,25 @@ struct Conv3dAttrs {
 /// [`same_pad_axis`], three spatial axes instead of two. ONNX's `pads`
 /// attribute for a 3D op is `[d0, h0, w0, d1, h1, w1]` (all "begin" axes,
 /// then all "end" axes).
-fn parse_conv3d_attrs(node: &NodeProto<'_>, image_d: u64, image_h: u64, image_w: u64, kernel_d: u64, kernel_h: u64, kernel_w: u64) -> Result<Conv3dAttrs, LowerError> {
+fn parse_conv3d_attrs(
+    node: &NodeProto<'_>,
+    image_d: u64,
+    image_h: u64,
+    image_w: u64,
+    kernel_d: u64,
+    kernel_h: u64,
+    kernel_w: u64,
+) -> Result<Conv3dAttrs, LowerError> {
     let name = node.name.to_string();
     let op_type = node.op_type.to_string();
     let strides = attr_ints_or(node, "strides", &[1, 1, 1]);
     let dilations = attr_ints_or(node, "dilations", &[1, 1, 1]);
     if strides.len() != 3 || dilations.len() != 3 {
-        return Err(LowerError::UnsupportedShape { name, op_type, reason: "Conv lowering supports 3D strides/dilations only".to_string() });
+        return Err(LowerError::UnsupportedShape {
+            name,
+            op_type,
+            reason: "Conv lowering supports 3D strides/dilations only".to_string(),
+        });
     }
     let (stride_d, stride_h, stride_w) = (strides[0], strides[1], strides[2]);
     let (dilation_d, dilation_h, dilation_w) = (dilations[0], dilations[1], dilations[2]);
@@ -3704,7 +5662,11 @@ fn parse_conv3d_attrs(node: &NodeProto<'_>, image_d: u64, image_h: u64, image_w:
         b"NOTSET" => {
             let pads = attr_ints_or(node, "pads", &[0, 0, 0, 0, 0, 0]);
             if pads.len() != 6 {
-                return Err(LowerError::UnsupportedShape { name, op_type, reason: "Conv lowering supports 3D pads only".to_string() });
+                return Err(LowerError::UnsupportedShape {
+                    name,
+                    op_type,
+                    reason: "Conv lowering supports 3D pads only".to_string(),
+                });
             }
             (pads[0], pads[3], pads[1], pads[4], pads[2], pads[5])
         }
@@ -3716,9 +5678,29 @@ fn parse_conv3d_attrs(node: &NodeProto<'_>, image_d: u64, image_h: u64, image_w:
             let (w0, w1) = same_pad_axis(image_w, kernel_w, stride_w, dilation_w, lower);
             (d0, d1, h0, h1, w0, w1)
         }
-        _ => return Err(LowerError::UnsupportedShape { name, op_type, reason: "Conv lowering supports auto_pad NOTSET/VALID/SAME_UPPER/SAME_LOWER only".to_string() }),
+        _ => {
+            return Err(LowerError::UnsupportedShape {
+                name,
+                op_type,
+                reason: "Conv lowering supports auto_pad NOTSET/VALID/SAME_UPPER/SAME_LOWER only"
+                    .to_string(),
+            });
+        }
     };
-    Ok(Conv3dAttrs { stride_d, stride_h, stride_w, dilation_d, dilation_h, dilation_w, pad_d0, pad_h0, pad_w0, pad_d1, pad_h1, pad_w1 })
+    Ok(Conv3dAttrs {
+        stride_d,
+        stride_h,
+        stride_w,
+        dilation_d,
+        dilation_h,
+        dilation_w,
+        pad_d0,
+        pad_h0,
+        pad_w0,
+        pad_d1,
+        pad_h1,
+        pad_w1,
+    })
 }
 
 /// `Conv`, rank-5 `[n, ci, d, h, w]` image and rank-5 `[co, ci, kd, kh, kw]`
@@ -3728,23 +5710,63 @@ fn parse_conv3d_attrs(node: &NodeProto<'_>, image_d: u64, image_h: u64, image_w:
 /// of [`conv2d_core`]: [`pad_axis`] on each of the three spatial axes,
 /// [`window_materialize3d`], `Elementwise(Multiply)` against the weight,
 /// `Reduce(Add)` over `(ci, kd, kh, kw)`.
-fn conv3d_core(program: &mut Vec<Op>, node: &NodeProto<'_>, image: &Value, weight: &Value, bias: Option<&Value>, attrs: Conv3dAttrs) -> Result<Value, LowerError> {
+fn conv3d_core(
+    program: &mut Vec<Op>,
+    node: &NodeProto<'_>,
+    image: &Value,
+    weight: &Value,
+    bias: Option<&Value>,
+    attrs: Conv3dAttrs,
+) -> Result<Value, LowerError> {
     let name = node.name.to_string();
     let op_type = node.op_type.to_string();
     let batch = image.shape[0];
     let out_channels = weight.shape[0];
     let (kernel_d, kernel_h, kernel_w) = (weight.shape[2], weight.shape[3], weight.shape[4]);
 
-    let padded_w = pad_axis(program, image, 4, attrs.pad_w0 as u64, attrs.pad_w1 as u64, 0.0);
-    let padded_h = pad_axis(program, &padded_w, 3, attrs.pad_h0 as u64, attrs.pad_h1 as u64, 0.0);
-    let padded = pad_axis(program, &padded_h, 2, attrs.pad_d0 as u64, attrs.pad_d1 as u64, 0.0);
+    let padded_w = pad_axis(
+        program,
+        image,
+        4,
+        attrs.pad_w0 as u64,
+        attrs.pad_w1 as u64,
+        0.0,
+    );
+    let padded_h = pad_axis(
+        program,
+        &padded_w,
+        3,
+        attrs.pad_h0 as u64,
+        attrs.pad_h1 as u64,
+        0.0,
+    );
+    let padded = pad_axis(
+        program,
+        &padded_h,
+        2,
+        attrs.pad_d0 as u64,
+        attrs.pad_d1 as u64,
+        0.0,
+    );
 
     let out_d = conv_output_extent(padded.shape[2], kernel_d, attrs.stride_d, attrs.dilation_d)
-        .ok_or_else(|| LowerError::UnsupportedShape { name: name.clone(), op_type: op_type.clone(), reason: "Conv kernel does not fit the padded image depth".to_string() })?;
+        .ok_or_else(|| LowerError::UnsupportedShape {
+            name: name.clone(),
+            op_type: op_type.clone(),
+            reason: "Conv kernel does not fit the padded image depth".to_string(),
+        })?;
     let out_h = conv_output_extent(padded.shape[3], kernel_h, attrs.stride_h, attrs.dilation_h)
-        .ok_or_else(|| LowerError::UnsupportedShape { name: name.clone(), op_type: op_type.clone(), reason: "Conv kernel does not fit the padded image height".to_string() })?;
+        .ok_or_else(|| LowerError::UnsupportedShape {
+            name: name.clone(),
+            op_type: op_type.clone(),
+            reason: "Conv kernel does not fit the padded image height".to_string(),
+        })?;
     let out_w = conv_output_extent(padded.shape[4], kernel_w, attrs.stride_w, attrs.dilation_w)
-        .ok_or_else(|| LowerError::UnsupportedShape { name: name.clone(), op_type: op_type.clone(), reason: "Conv kernel does not fit the padded image width".to_string() })?;
+        .ok_or_else(|| LowerError::UnsupportedShape {
+            name: name.clone(),
+            op_type: op_type.clone(),
+            reason: "Conv kernel does not fit the padded image width".to_string(),
+        })?;
 
     let windowed = window_materialize3d(
         program,
@@ -3769,26 +5791,49 @@ fn conv3d_core(program: &mut Vec<Op>, node: &NodeProto<'_>, image: &Value, weigh
     let product = build_elementwise(
         program,
         ScalarOp::Multiply,
-        alloc::vec![(windowed.node, IndexMap::Affine(windowed_pattern)), (weight.node, IndexMap::Affine(weight_pattern))],
+        alloc::vec![
+            (windowed.node, IndexMap::Affine(windowed_pattern)),
+            (weight.node, IndexMap::Affine(weight_pattern))
+        ],
     );
 
     let out_shape = alloc::vec![batch, out_channels, out_d, out_h, out_w];
-    let reduced = build_reduce(program, ScalarOp::Add, ReduceInit::Zero, product, identity_pattern(9), projection(9, &[0, 1, 2, 3, 4]), Some("conv3d".to_string()));
+    let reduced = build_reduce(
+        program,
+        ScalarOp::Add,
+        ReduceInit::Zero,
+        product,
+        identity_pattern(9),
+        projection(9, &[0, 1, 2, 3, 4]),
+        Some("conv3d".to_string()),
+    );
 
     let result = match bias {
         Some(bias) => {
             if bias.shape != alloc::vec![out_channels] {
-                return Err(LowerError::UnsupportedShape { name, op_type, reason: "Conv bias must be a rank-1 tensor sized to out_channels".to_string() });
+                return Err(LowerError::UnsupportedShape {
+                    name,
+                    op_type,
+                    reason: "Conv bias must be a rank-1 tensor sized to out_channels".to_string(),
+                });
             }
             build_elementwise(
                 program,
                 ScalarOp::Add,
-                alloc::vec![(reduced, IndexMap::Affine(identity_pattern(5))), (bias.node, IndexMap::Affine(projection(5, &[1])))],
+                alloc::vec![
+                    (reduced, IndexMap::Affine(identity_pattern(5))),
+                    (bias.node, IndexMap::Affine(projection(5, &[1])))
+                ],
             )
         }
         None => reduced,
     };
-    Ok(Value { node: result, shape: out_shape, view: None, flatten_source: None })
+    Ok(Value {
+        node: result,
+        shape: out_shape,
+        view: None,
+        flatten_source: None,
+    })
 }
 
 /// `Conv`, rank-5, `group >= 1`: `group=1` calls [`conv3d_core`] directly;
@@ -3799,7 +5844,11 @@ fn conv3d_core(program: &mut Vec<Op>, node: &NodeProto<'_>, image: &Value, weigh
 /// output-channel axis. Weight layout is `[co, ci, kd, kh, kw]`, the same
 /// channel-axis positions ([`lower_conv`]'s own doc explains why this loop,
 /// not a fused `IndexMap`, is the RISC-correct resolution).
-fn lower_conv3d(program: &mut Vec<Op>, values: &mut BTreeMap<String, Value>, node: &NodeProto<'_>) -> Result<(), LowerError> {
+fn lower_conv3d(
+    program: &mut Vec<Op>,
+    values: &mut BTreeMap<String, Value>,
+    node: &NodeProto<'_>,
+) -> Result<(), LowerError> {
     let image = lookup(values, node, 0)?.clone();
     let weight = lookup(values, node, 1)?.clone();
     let name = node.name.to_string();
@@ -3807,16 +5856,30 @@ fn lower_conv3d(program: &mut Vec<Op>, values: &mut BTreeMap<String, Value>, nod
 
     let group = attr_int(node, "group").unwrap_or(1);
     if group < 1 {
-        return Err(LowerError::UnsupportedShape { name, op_type, reason: "Conv3d group attribute must be >= 1".to_string() });
+        return Err(LowerError::UnsupportedShape {
+            name,
+            op_type,
+            reason: "Conv3d group attribute must be >= 1".to_string(),
+        });
     }
     let group = group as u64;
 
     let in_channels = image.shape[1];
     let total_out_channels = weight.shape[0];
     let weight_in_channels = weight.shape[1];
-    let attrs = parse_conv3d_attrs(node, image.shape[2], image.shape[3], image.shape[4], weight.shape[2], weight.shape[3], weight.shape[4])?;
+    let attrs = parse_conv3d_attrs(
+        node,
+        image.shape[2],
+        image.shape[3],
+        image.shape[4],
+        weight.shape[2],
+        weight.shape[3],
+        weight.shape[4],
+    )?;
     let bias = match node.input.get(2) {
-        Some(bias_name) => Some(lookup_by_name(values, bias_name, node.op_type, node.name)?.clone()),
+        Some(bias_name) => {
+            Some(lookup_by_name(values, bias_name, node.op_type, node.name)?.clone())
+        }
         None => None,
     };
 
@@ -3825,7 +5888,9 @@ fn lower_conv3d(program: &mut Vec<Op>, values: &mut BTreeMap<String, Value>, nod
             return Err(LowerError::UnsupportedShape {
                 name: node.name.to_string(),
                 op_type: node.op_type.to_string(),
-                reason: format!("Conv3d weight in-channels {weight_in_channels} does not match image channels {in_channels}"),
+                reason: format!(
+                    "Conv3d weight in-channels {weight_in_channels} does not match image channels {in_channels}"
+                ),
             });
         }
         let result = conv3d_core(program, node, &image, &weight, bias.as_ref(), attrs)?;
@@ -3837,7 +5902,9 @@ fn lower_conv3d(program: &mut Vec<Op>, values: &mut BTreeMap<String, Value>, nod
         return Err(LowerError::UnsupportedShape {
             name: node.name.to_string(),
             op_type: node.op_type.to_string(),
-            reason: format!("Conv3d image channels {in_channels} and weight output channels {total_out_channels} must both be evenly divisible by group {group}"),
+            reason: format!(
+                "Conv3d image channels {in_channels} and weight output channels {total_out_channels} must both be evenly divisible by group {group}"
+            ),
         });
     }
     let in_channels_per_group = in_channels / group;
@@ -3846,7 +5913,9 @@ fn lower_conv3d(program: &mut Vec<Op>, values: &mut BTreeMap<String, Value>, nod
         return Err(LowerError::UnsupportedShape {
             name: node.name.to_string(),
             op_type: node.op_type.to_string(),
-            reason: format!("Conv3d weight in-channels {weight_in_channels} does not match image channels {in_channels} / group {group}"),
+            reason: format!(
+                "Conv3d weight in-channels {weight_in_channels} does not match image channels {in_channels} / group {group}"
+            ),
         });
     }
     if let Some(bias) = &bias
@@ -3855,23 +5924,56 @@ fn lower_conv3d(program: &mut Vec<Op>, values: &mut BTreeMap<String, Value>, nod
         return Err(LowerError::UnsupportedShape {
             name: node.name.to_string(),
             op_type: node.op_type.to_string(),
-            reason: "Conv3d bias must be a rank-1 tensor sized to the total (grouped) output channels".to_string(),
+            reason:
+                "Conv3d bias must be a rank-1 tensor sized to the total (grouped) output channels"
+                    .to_string(),
         });
     }
 
     let mut accumulator: Option<Value> = None;
     for group_index in 0..group {
-        let image_slice = slice_axis_range(program, &image, 1, group_index * in_channels_per_group, in_channels_per_group);
-        let weight_slice = slice_axis_range(program, &weight, 0, group_index * out_channels_per_group, out_channels_per_group);
-        let bias_slice = bias.as_ref().map(|bias| slice_axis_range(program, bias, 0, group_index * out_channels_per_group, out_channels_per_group));
-        let group_result = conv3d_core(program, node, &image_slice, &weight_slice, bias_slice.as_ref(), attrs)?;
+        let image_slice = slice_axis_range(
+            program,
+            &image,
+            1,
+            group_index * in_channels_per_group,
+            in_channels_per_group,
+        );
+        let weight_slice = slice_axis_range(
+            program,
+            &weight,
+            0,
+            group_index * out_channels_per_group,
+            out_channels_per_group,
+        );
+        let bias_slice = bias.as_ref().map(|bias| {
+            slice_axis_range(
+                program,
+                bias,
+                0,
+                group_index * out_channels_per_group,
+                out_channels_per_group,
+            )
+        });
+        let group_result = conv3d_core(
+            program,
+            node,
+            &image_slice,
+            &weight_slice,
+            bias_slice.as_ref(),
+            attrs,
+        )?;
         accumulator = Some(match accumulator {
             None => group_result,
             Some(previous) => concat_pair(program, node, &previous, &group_result, 1)?,
         });
     }
     let Some(result) = accumulator else {
-        return Err(LowerError::UnsupportedShape { name: node.name.to_string(), op_type: node.op_type.to_string(), reason: "Conv3d group must be >= 1".to_string() });
+        return Err(LowerError::UnsupportedShape {
+            name: node.name.to_string(),
+            op_type: node.op_type.to_string(),
+            reason: "Conv3d group must be >= 1".to_string(),
+        });
     };
     bind_output(values, node, 0, result.node, result.shape);
     Ok(())
@@ -3892,7 +5994,11 @@ fn lower_conv3d(program: &mut Vec<Op>, values: &mut BTreeMap<String, Value>, nod
 /// *static* extent, so the loop below is a lower-time unroll (`group` more
 /// `Op`s in `program`), never a runtime branch -- no div/mod anywhere, no new
 /// `Op`/`ScalarOp`/`IndexMap` variant.
-fn lower_conv(program: &mut Vec<Op>, values: &mut BTreeMap<String, Value>, node: &NodeProto<'_>) -> Result<(), LowerError> {
+fn lower_conv(
+    program: &mut Vec<Op>,
+    values: &mut BTreeMap<String, Value>,
+    node: &NodeProto<'_>,
+) -> Result<(), LowerError> {
     let image = lookup(values, node, 0)?.clone();
     let weight = lookup(values, node, 1)?.clone();
     let name = node.name.to_string();
@@ -3914,18 +6020,30 @@ fn lower_conv(program: &mut Vec<Op>, values: &mut BTreeMap<String, Value>, node:
     }
     let group = attr_int(node, "group").unwrap_or(1);
     if group < 1 {
-        return Err(LowerError::UnsupportedShape { name, op_type, reason: "Conv group attribute must be >= 1".to_string() });
+        return Err(LowerError::UnsupportedShape {
+            name,
+            op_type,
+            reason: "Conv group attribute must be >= 1".to_string(),
+        });
     }
     let group = group as u64;
 
-    let attrs = parse_conv2d_attrs(node, image.shape[2], image.shape[3], weight.shape[2], weight.shape[3])?;
+    let attrs = parse_conv2d_attrs(
+        node,
+        image.shape[2],
+        image.shape[3],
+        weight.shape[2],
+        weight.shape[3],
+    )?;
     let batch = image.shape[0];
     let in_channels = image.shape[1];
     let total_out_channels = weight.shape[0];
     let weight_in_channels = weight.shape[1];
 
     let bias = match node.input.get(2) {
-        Some(bias_name) => Some(lookup_by_name(values, bias_name, node.op_type, node.name)?.clone()),
+        Some(bias_name) => {
+            Some(lookup_by_name(values, bias_name, node.op_type, node.name)?.clone())
+        }
         None => None,
     };
 
@@ -3934,10 +6052,20 @@ fn lower_conv(program: &mut Vec<Op>, values: &mut BTreeMap<String, Value>, node:
             return Err(LowerError::UnsupportedShape {
                 name: node.name.to_string(),
                 op_type: node.op_type.to_string(),
-                reason: format!("Conv weight in-channels {weight_in_channels} does not match image channels {in_channels}"),
+                reason: format!(
+                    "Conv weight in-channels {weight_in_channels} does not match image channels {in_channels}"
+                ),
             });
         }
-        let result = conv2d_core(program, node, &image, &weight, bias.as_ref(), attrs, Some("conv2d".to_string()))?;
+        let result = conv2d_core(
+            program,
+            node,
+            &image,
+            &weight,
+            bias.as_ref(),
+            attrs,
+            Some("conv2d".to_string()),
+        )?;
         bind_output(values, node, 0, result.node, result.shape);
         return Ok(());
     }
@@ -3946,7 +6074,9 @@ fn lower_conv(program: &mut Vec<Op>, values: &mut BTreeMap<String, Value>, node:
         return Err(LowerError::UnsupportedShape {
             name: node.name.to_string(),
             op_type: node.op_type.to_string(),
-            reason: format!("Conv image channels {in_channels} and weight output channels {total_out_channels} must both be evenly divisible by group {group}"),
+            reason: format!(
+                "Conv image channels {in_channels} and weight output channels {total_out_channels} must both be evenly divisible by group {group}"
+            ),
         });
     }
     let in_channels_per_group = in_channels / group;
@@ -3955,7 +6085,9 @@ fn lower_conv(program: &mut Vec<Op>, values: &mut BTreeMap<String, Value>, node:
         return Err(LowerError::UnsupportedShape {
             name: node.name.to_string(),
             op_type: node.op_type.to_string(),
-            reason: format!("Conv weight in-channels {weight_in_channels} does not match image channels {in_channels} / group {group}"),
+            reason: format!(
+                "Conv weight in-channels {weight_in_channels} does not match image channels {in_channels} / group {group}"
+            ),
         });
     }
     if let Some(bias) = &bias
@@ -3964,23 +6096,57 @@ fn lower_conv(program: &mut Vec<Op>, values: &mut BTreeMap<String, Value>, node:
         return Err(LowerError::UnsupportedShape {
             name: node.name.to_string(),
             op_type: node.op_type.to_string(),
-            reason: "Conv bias must be a rank-1 tensor sized to the total (grouped) output channels".to_string(),
+            reason:
+                "Conv bias must be a rank-1 tensor sized to the total (grouped) output channels"
+                    .to_string(),
         });
     }
 
     let mut accumulator: Option<Value> = None;
     for group_index in 0..group {
-        let image_slice = slice_axis_range(program, &image, 1, group_index * in_channels_per_group, in_channels_per_group);
-        let weight_slice = slice_axis_range(program, &weight, 0, group_index * out_channels_per_group, out_channels_per_group);
-        let bias_slice = bias.as_ref().map(|bias| slice_axis_range(program, bias, 0, group_index * out_channels_per_group, out_channels_per_group));
-        let group_result = conv2d_core(program, node, &image_slice, &weight_slice, bias_slice.as_ref(), attrs, None)?;
+        let image_slice = slice_axis_range(
+            program,
+            &image,
+            1,
+            group_index * in_channels_per_group,
+            in_channels_per_group,
+        );
+        let weight_slice = slice_axis_range(
+            program,
+            &weight,
+            0,
+            group_index * out_channels_per_group,
+            out_channels_per_group,
+        );
+        let bias_slice = bias.as_ref().map(|bias| {
+            slice_axis_range(
+                program,
+                bias,
+                0,
+                group_index * out_channels_per_group,
+                out_channels_per_group,
+            )
+        });
+        let group_result = conv2d_core(
+            program,
+            node,
+            &image_slice,
+            &weight_slice,
+            bias_slice.as_ref(),
+            attrs,
+            None,
+        )?;
         accumulator = Some(match accumulator {
             None => group_result,
             Some(previous) => concat_pair(program, node, &previous, &group_result, 1)?,
         });
     }
     let Some(result) = accumulator else {
-        return Err(LowerError::UnsupportedShape { name: node.name.to_string(), op_type: node.op_type.to_string(), reason: "Conv group must be >= 1".to_string() });
+        return Err(LowerError::UnsupportedShape {
+            name: node.name.to_string(),
+            op_type: node.op_type.to_string(),
+            reason: "Conv group must be >= 1".to_string(),
+        });
     };
     bind_output(values, node, 0, result.node, result.shape);
     Ok(())
@@ -4007,17 +6173,27 @@ struct PoolPlan {
     pads: (u64, u64, u64, u64),
 }
 
-fn plan_pool(program: &mut Vec<Op>, node: &NodeProto<'_>, image: &Value, fill: f32) -> Result<PoolPlan, LowerError> {
+fn plan_pool(
+    program: &mut Vec<Op>,
+    node: &NodeProto<'_>,
+    image: &Value,
+    fill: f32,
+) -> Result<PoolPlan, LowerError> {
     let name = node.name.to_string();
     let op_type = node.op_type.to_string();
     if image.shape.len() != 4 {
-        return Err(LowerError::UnsupportedShape { name, op_type, reason: format!("{} lowering supports rank-4 NCHW input only", node.op_type) });
+        return Err(LowerError::UnsupportedShape {
+            name,
+            op_type,
+            reason: format!("{} lowering supports rank-4 NCHW input only", node.op_type),
+        });
     }
-    let kernel_shape = attr_ints(node, "kernel_shape").ok_or_else(|| LowerError::UnsupportedShape {
-        name: node.name.to_string(),
-        op_type: node.op_type.to_string(),
-        reason: format!("{} requires a kernel_shape attribute", node.op_type),
-    })?;
+    let kernel_shape =
+        attr_ints(node, "kernel_shape").ok_or_else(|| LowerError::UnsupportedShape {
+            name: node.name.to_string(),
+            op_type: node.op_type.to_string(),
+            reason: format!("{} requires a kernel_shape attribute", node.op_type),
+        })?;
     if kernel_shape.len() != 2 {
         return Err(LowerError::UnsupportedShape {
             name: node.name.to_string(),
@@ -4032,7 +6208,10 @@ fn plan_pool(program: &mut Vec<Op>, node: &NodeProto<'_>, image: &Value, fill: f
         return Err(LowerError::UnsupportedShape {
             name: node.name.to_string(),
             op_type: node.op_type.to_string(),
-            reason: format!("{} lowering supports 2D strides/dilations only", node.op_type),
+            reason: format!(
+                "{} lowering supports 2D strides/dilations only",
+                node.op_type
+            ),
         });
     }
     let (stride_h, stride_w) = (strides[0], strides[1]);
@@ -4043,32 +6222,69 @@ fn plan_pool(program: &mut Vec<Op>, node: &NodeProto<'_>, image: &Value, fill: f
         b"NOTSET" => {
             let pads = attr_ints_or(node, "pads", &[0, 0, 0, 0]);
             if pads.len() != 4 {
-                return Err(LowerError::UnsupportedShape { name, op_type, reason: format!("{} lowering supports 2D pads only", node.op_type) });
+                return Err(LowerError::UnsupportedShape {
+                    name,
+                    op_type,
+                    reason: format!("{} lowering supports 2D pads only", node.op_type),
+                });
             }
             (pads[0], pads[2], pads[1], pads[3])
         }
         b"VALID" => (0, 0, 0, 0),
         b"SAME_UPPER" | b"SAME_LOWER" => {
             let lower = auto_pad == b"SAME_LOWER";
-            let (top, bottom) = same_pad_axis(image.shape[2], kernel_h, stride_h, dilation_h, lower);
-            let (left, right) = same_pad_axis(image.shape[3], kernel_w, stride_w, dilation_w, lower);
+            let (top, bottom) =
+                same_pad_axis(image.shape[2], kernel_h, stride_h, dilation_h, lower);
+            let (left, right) =
+                same_pad_axis(image.shape[3], kernel_w, stride_w, dilation_w, lower);
             (top, bottom, left, right)
         }
         _ => {
             return Err(LowerError::UnsupportedShape {
                 name,
                 op_type,
-                reason: format!("{} lowering supports auto_pad NOTSET/VALID/SAME_UPPER/SAME_LOWER only", node.op_type),
+                reason: format!(
+                    "{} lowering supports auto_pad NOTSET/VALID/SAME_UPPER/SAME_LOWER only",
+                    node.op_type
+                ),
             });
         }
     };
 
     let ceil_mode = attr_int(node, "ceil_mode").unwrap_or(0) != 0;
     let (pad_bottom, pad_right, out_h, out_w) = if ceil_mode {
-        let (out_h, pad_bottom) = conv_output_extent_ceil(image.shape[2], pad_top as u64, pad_bottom as u64, kernel_h, stride_h, dilation_h)
-            .ok_or_else(|| LowerError::UnsupportedShape { name: name.clone(), op_type: op_type.clone(), reason: format!("{} kernel does not fit the padded input height", node.op_type) })?;
-        let (out_w, pad_right) = conv_output_extent_ceil(image.shape[3], pad_left as u64, pad_right as u64, kernel_w, stride_w, dilation_w)
-            .ok_or_else(|| LowerError::UnsupportedShape { name: name.clone(), op_type: op_type.clone(), reason: format!("{} kernel does not fit the padded input width", node.op_type) })?;
+        let (out_h, pad_bottom) = conv_output_extent_ceil(
+            image.shape[2],
+            pad_top as u64,
+            pad_bottom as u64,
+            kernel_h,
+            stride_h,
+            dilation_h,
+        )
+        .ok_or_else(|| LowerError::UnsupportedShape {
+            name: name.clone(),
+            op_type: op_type.clone(),
+            reason: format!(
+                "{} kernel does not fit the padded input height",
+                node.op_type
+            ),
+        })?;
+        let (out_w, pad_right) = conv_output_extent_ceil(
+            image.shape[3],
+            pad_left as u64,
+            pad_right as u64,
+            kernel_w,
+            stride_w,
+            dilation_w,
+        )
+        .ok_or_else(|| LowerError::UnsupportedShape {
+            name: name.clone(),
+            op_type: op_type.clone(),
+            reason: format!(
+                "{} kernel does not fit the padded input width",
+                node.op_type
+            ),
+        })?;
         (pad_bottom, pad_right, out_h, out_w)
     } else {
         (pad_bottom as u64, pad_right as u64, 0, 0)
@@ -4080,21 +6296,39 @@ fn plan_pool(program: &mut Vec<Op>, node: &NodeProto<'_>, image: &Value, fill: f
     let (out_h, out_w) = if ceil_mode {
         (out_h, out_w)
     } else {
-        let out_h = conv_output_extent(padded.shape[2], kernel_h, stride_h, dilation_h).ok_or_else(|| LowerError::UnsupportedShape {
-            name: node.name.to_string(),
-            op_type: node.op_type.to_string(),
-            reason: format!("{} kernel does not fit the padded input height", node.op_type),
-        })?;
-        let out_w = conv_output_extent(padded.shape[3], kernel_w, stride_w, dilation_w).ok_or_else(|| LowerError::UnsupportedShape {
-            name: node.name.to_string(),
-            op_type: node.op_type.to_string(),
-            reason: format!("{} kernel does not fit the padded input width", node.op_type),
-        })?;
+        let out_h = conv_output_extent(padded.shape[2], kernel_h, stride_h, dilation_h)
+            .ok_or_else(|| LowerError::UnsupportedShape {
+                name: node.name.to_string(),
+                op_type: node.op_type.to_string(),
+                reason: format!(
+                    "{} kernel does not fit the padded input height",
+                    node.op_type
+                ),
+            })?;
+        let out_w = conv_output_extent(padded.shape[3], kernel_w, stride_w, dilation_w)
+            .ok_or_else(|| LowerError::UnsupportedShape {
+                name: node.name.to_string(),
+                op_type: node.op_type.to_string(),
+                reason: format!(
+                    "{} kernel does not fit the padded input width",
+                    node.op_type
+                ),
+            })?;
         (out_h, out_w)
     };
 
     let out_shape = alloc::vec![image.shape[0], image.shape[1], out_h, out_w];
-    Ok(PoolPlan { padded, kernel_h, kernel_w, stride_h, stride_w, dilation_h, dilation_w, out_shape, pads: (pad_top as u64, pad_left as u64, pad_bottom, pad_right) })
+    Ok(PoolPlan {
+        padded,
+        kernel_h,
+        kernel_w,
+        stride_h,
+        stride_w,
+        dilation_h,
+        dilation_w,
+        out_shape,
+        pads: (pad_top as u64, pad_left as u64, pad_bottom, pad_right),
+    })
 }
 
 /// A `[n, c, h, w]`-shaped, spatial-axis-broadcast coordinate field: every
@@ -4109,10 +6343,38 @@ fn plan_pool(program: &mut Vec<Op>, node: &NodeProto<'_>, image: &Value, fill: f
 /// reads it straight off, no new `Op`/`ScalarOp`/`IndexMap`.
 fn coordinate_image(program: &mut Vec<Op>, shape: &[u64], axis: u16) -> Value {
     let extent = shape[axis as usize];
-    let ones = append(program, Op::Constant { dtype: DType::Float32, shape: shape.iter().map(|&value| Extent::Static(value as u32)).collect(), value: 1.0 });
-    let iota = append(program, Op::Iota { dtype: DType::Float32, extent: Extent::Static(extent as u32) });
-    let id = build_elementwise(program, ScalarOp::Multiply, alloc::vec![(iota, IndexMap::Affine(projection(4, &[axis]))), (ones, IndexMap::Affine(identity_pattern(4)))]);
-    Value { node: id, shape: shape.to_vec(), view: None, flatten_source: None }
+    let ones = append(
+        program,
+        Op::Constant {
+            dtype: DType::Float32,
+            shape: shape
+                .iter()
+                .map(|&value| Extent::Static(value as u32))
+                .collect(),
+            value: 1.0,
+        },
+    );
+    let iota = append(
+        program,
+        Op::Iota {
+            dtype: DType::Float32,
+            extent: Extent::Static(extent as u32),
+        },
+    );
+    let id = build_elementwise(
+        program,
+        ScalarOp::Multiply,
+        alloc::vec![
+            (iota, IndexMap::Affine(projection(4, &[axis]))),
+            (ones, IndexMap::Affine(identity_pattern(4)))
+        ],
+    );
+    Value {
+        node: id,
+        shape: shape.to_vec(),
+        view: None,
+        flatten_source: None,
+    }
 }
 
 /// `MaxPool`'s optional second (`Indices`) output: the position, in the
@@ -4155,46 +6417,167 @@ fn maxpool_indices(
     let col_windowed = window_materialize(program, &col_image, spec);
     let pad_top_c = constant_scalar(program, pad_top as f32);
     let pad_left_c = constant_scalar(program, pad_left as f32);
-    let row_original =
-        build_elementwise(program, ScalarOp::Subtract, alloc::vec![(row_windowed.node, IndexMap::Affine(identity_pattern(6))), (pad_top_c, IndexMap::Affine(scalar_broadcast_pattern(6)))]);
-    let col_original =
-        build_elementwise(program, ScalarOp::Subtract, alloc::vec![(col_windowed.node, IndexMap::Affine(identity_pattern(6))), (pad_left_c, IndexMap::Affine(scalar_broadcast_pattern(6)))]);
+    let row_original = build_elementwise(
+        program,
+        ScalarOp::Subtract,
+        alloc::vec![
+            (row_windowed.node, IndexMap::Affine(identity_pattern(6))),
+            (pad_top_c, IndexMap::Affine(scalar_broadcast_pattern(6)))
+        ],
+    );
+    let col_original = build_elementwise(
+        program,
+        ScalarOp::Subtract,
+        alloc::vec![
+            (col_windowed.node, IndexMap::Affine(identity_pattern(6))),
+            (pad_left_c, IndexMap::Affine(scalar_broadcast_pattern(6)))
+        ],
+    );
 
     let full_stamp = append(
         program,
         Op::Constant {
             dtype: DType::Float32,
-            shape: alloc::vec![n, channels, spec.out_h, spec.out_w, spec.kernel_h, spec.kernel_w].iter().map(|&value| Extent::Static(value as u32)).collect(),
+            shape: alloc::vec![
+                n,
+                channels,
+                spec.out_h,
+                spec.out_w,
+                spec.kernel_h,
+                spec.kernel_w
+            ]
+            .iter()
+            .map(|&value| Extent::Static(value as u32))
+            .collect(),
             value: 1.0,
         },
     );
-    let n_iota = append(program, Op::Iota { dtype: DType::Float32, extent: Extent::Static(n as u32) });
-    let n_value = build_elementwise(program, ScalarOp::Multiply, alloc::vec![(n_iota, IndexMap::Affine(projection(6, &[0]))), (full_stamp, IndexMap::Affine(identity_pattern(6)))]);
-    let c_iota = append(program, Op::Iota { dtype: DType::Float32, extent: Extent::Static(channels as u32) });
-    let c_value = build_elementwise(program, ScalarOp::Multiply, alloc::vec![(c_iota, IndexMap::Affine(projection(6, &[1]))), (full_stamp, IndexMap::Affine(identity_pattern(6)))]);
+    let n_iota = append(
+        program,
+        Op::Iota {
+            dtype: DType::Float32,
+            extent: Extent::Static(n as u32),
+        },
+    );
+    let n_value = build_elementwise(
+        program,
+        ScalarOp::Multiply,
+        alloc::vec![
+            (n_iota, IndexMap::Affine(projection(6, &[0]))),
+            (full_stamp, IndexMap::Affine(identity_pattern(6)))
+        ],
+    );
+    let c_iota = append(
+        program,
+        Op::Iota {
+            dtype: DType::Float32,
+            extent: Extent::Static(channels as u32),
+        },
+    );
+    let c_value = build_elementwise(
+        program,
+        ScalarOp::Multiply,
+        alloc::vec![
+            (c_iota, IndexMap::Affine(projection(6, &[1]))),
+            (full_stamp, IndexMap::Affine(identity_pattern(6)))
+        ],
+    );
     let channels_c = constant_scalar(program, channels as f32);
-    let n_scaled = build_elementwise(program, ScalarOp::Multiply, alloc::vec![(n_value, IndexMap::Affine(identity_pattern(6))), (channels_c, IndexMap::Affine(scalar_broadcast_pattern(6)))]);
-    let nc = build_elementwise(program, ScalarOp::Add, alloc::vec![(n_scaled, IndexMap::Affine(identity_pattern(6))), (c_value, IndexMap::Affine(identity_pattern(6)))]);
+    let n_scaled = build_elementwise(
+        program,
+        ScalarOp::Multiply,
+        alloc::vec![
+            (n_value, IndexMap::Affine(identity_pattern(6))),
+            (channels_c, IndexMap::Affine(scalar_broadcast_pattern(6)))
+        ],
+    );
+    let nc = build_elementwise(
+        program,
+        ScalarOp::Add,
+        alloc::vec![
+            (n_scaled, IndexMap::Affine(identity_pattern(6))),
+            (c_value, IndexMap::Affine(identity_pattern(6)))
+        ],
+    );
 
-    let (major_extent, major_term, minor_term) =
-        if storage_order == 0 { (original_h, row_original, col_original) } else { (original_w, col_original, row_original) };
+    let (major_extent, major_term, minor_term) = if storage_order == 0 {
+        (original_h, row_original, col_original)
+    } else {
+        (original_w, col_original, row_original)
+    };
     let major_extent_c = constant_scalar(program, major_extent as f32);
-    let step1 = build_elementwise(program, ScalarOp::Multiply, alloc::vec![(nc, IndexMap::Affine(identity_pattern(6))), (major_extent_c, IndexMap::Affine(scalar_broadcast_pattern(6)))]);
-    let step2 = build_elementwise(program, ScalarOp::Add, alloc::vec![(step1, IndexMap::Affine(identity_pattern(6))), (major_term, IndexMap::Affine(identity_pattern(6)))]);
-    let minor_extent = if storage_order == 0 { original_w } else { original_h };
+    let step1 = build_elementwise(
+        program,
+        ScalarOp::Multiply,
+        alloc::vec![
+            (nc, IndexMap::Affine(identity_pattern(6))),
+            (
+                major_extent_c,
+                IndexMap::Affine(scalar_broadcast_pattern(6))
+            )
+        ],
+    );
+    let step2 = build_elementwise(
+        program,
+        ScalarOp::Add,
+        alloc::vec![
+            (step1, IndexMap::Affine(identity_pattern(6))),
+            (major_term, IndexMap::Affine(identity_pattern(6)))
+        ],
+    );
+    let minor_extent = if storage_order == 0 {
+        original_w
+    } else {
+        original_h
+    };
     let minor_extent_c = constant_scalar(program, minor_extent as f32);
-    let step3 = build_elementwise(program, ScalarOp::Multiply, alloc::vec![(step2, IndexMap::Affine(identity_pattern(6))), (minor_extent_c, IndexMap::Affine(scalar_broadcast_pattern(6)))]);
-    let flat_index = build_elementwise(program, ScalarOp::Add, alloc::vec![(step3, IndexMap::Affine(identity_pattern(6))), (minor_term, IndexMap::Affine(identity_pattern(6)))]);
+    let step3 = build_elementwise(
+        program,
+        ScalarOp::Multiply,
+        alloc::vec![
+            (step2, IndexMap::Affine(identity_pattern(6))),
+            (
+                minor_extent_c,
+                IndexMap::Affine(scalar_broadcast_pattern(6))
+            )
+        ],
+    );
+    let flat_index = build_elementwise(
+        program,
+        ScalarOp::Add,
+        alloc::vec![
+            (step3, IndexMap::Affine(identity_pattern(6))),
+            (minor_term, IndexMap::Affine(identity_pattern(6)))
+        ],
+    );
 
-    let is_winner =
-        build_elementwise(program, ScalarOp::Equal, alloc::vec![(windowed.node, IndexMap::Affine(identity_pattern(6))), (row_max, IndexMap::Affine(projection(6, &[0, 1, 2, 3])))]);
+    let is_winner = build_elementwise(
+        program,
+        ScalarOp::Equal,
+        alloc::vec![
+            (windowed.node, IndexMap::Affine(identity_pattern(6))),
+            (row_max, IndexMap::Affine(projection(6, &[0, 1, 2, 3])))
+        ],
+    );
     let sentinel = constant_scalar(program, f32::MAX);
     let candidate = build_elementwise(
         program,
         ScalarOp::Select,
-        alloc::vec![(is_winner, IndexMap::Affine(identity_pattern(6))), (flat_index, IndexMap::Affine(identity_pattern(6))), (sentinel, IndexMap::Affine(scalar_broadcast_pattern(6)))],
+        alloc::vec![
+            (is_winner, IndexMap::Affine(identity_pattern(6))),
+            (flat_index, IndexMap::Affine(identity_pattern(6))),
+            (sentinel, IndexMap::Affine(scalar_broadcast_pattern(6)))
+        ],
     );
-    build_reduce(program, ScalarOp::Minimum, ReduceInit::PositiveInfinity, candidate, identity_pattern(6), projection(6, &[0, 1, 2, 3]), Some("maxpool2d_indices".to_string()))
+    build_reduce(
+        program,
+        ScalarOp::Minimum,
+        ReduceInit::PositiveInfinity,
+        candidate,
+        identity_pattern(6),
+        projection(6, &[0, 1, 2, 3]),
+        Some("maxpool2d_indices".to_string()),
+    )
 }
 
 /// `MaxPool`: [`window_materialize`] (padded with `-inf` so a padded cell
@@ -4208,7 +6591,11 @@ fn maxpool_indices(
 ///
 /// Deferred: rank other than 4 or 5 (1D `MaxPool`), `Indices` for the rank-5
 /// (`MaxPool3d`) path.
-fn lower_maxpool(program: &mut Vec<Op>, values: &mut BTreeMap<String, Value>, node: &NodeProto<'_>) -> Result<(), LowerError> {
+fn lower_maxpool(
+    program: &mut Vec<Op>,
+    values: &mut BTreeMap<String, Value>,
+    node: &NodeProto<'_>,
+) -> Result<(), LowerError> {
     let image = lookup(values, node, 0)?.clone();
     if image.shape.len() == 5 {
         return lower_maxpool3d(program, values, node);
@@ -4225,11 +6612,30 @@ fn lower_maxpool(program: &mut Vec<Op>, values: &mut BTreeMap<String, Value>, no
         dilation_w: plan.dilation_w,
     };
     let windowed = window_materialize(program, &plan.padded, spec);
-    let result = build_reduce(program, ScalarOp::Maximum, ReduceInit::NegativeInfinity, windowed.node, identity_pattern(6), projection(6, &[0, 1, 2, 3]), Some("maxpool2d".to_string()));
+    let result = build_reduce(
+        program,
+        ScalarOp::Maximum,
+        ReduceInit::NegativeInfinity,
+        windowed.node,
+        identity_pattern(6),
+        projection(6, &[0, 1, 2, 3]),
+        Some("maxpool2d".to_string()),
+    );
     if node.output.get(1).is_some() {
         let (pad_top, pad_left, _, _) = plan.pads;
         let storage_order = attr_int(node, "storage_order").unwrap_or(0);
-        let indices = maxpool_indices(program, &windowed, result, &plan.padded.shape, image.shape[2], image.shape[3], pad_top, pad_left, spec, storage_order);
+        let indices = maxpool_indices(
+            program,
+            &windowed,
+            result,
+            &plan.padded.shape,
+            image.shape[2],
+            image.shape[3],
+            pad_top,
+            pad_left,
+            spec,
+            storage_order,
+        );
         bind_output(values, node, 1, indices, plan.out_shape.clone());
     }
     bind_output(values, node, 0, result, plan.out_shape);
@@ -4246,14 +6652,42 @@ fn lower_maxpool(program: &mut Vec<Op>, values: &mut BTreeMap<String, Value>, no
 /// -- an `Op::Constant` ones tensor, [`pad_axis`], [`window_materialize`],
 /// `Reduce(Add)`, all four already used by the numerator path, no new `Op`/
 /// `ScalarOp`/`IndexMap`.
-fn valid_window_count(program: &mut Vec<Op>, image_shape: &[u64], pads: (u64, u64, u64, u64), spec: WindowSpec) -> NodeId {
+fn valid_window_count(
+    program: &mut Vec<Op>,
+    image_shape: &[u64],
+    pads: (u64, u64, u64, u64),
+    spec: WindowSpec,
+) -> NodeId {
     let (pad_top, pad_left, pad_bottom, pad_right) = pads;
-    let ones = append(program, Op::Constant { dtype: DType::Float32, shape: image_shape.iter().map(|&extent| Extent::Static(extent as u32)).collect(), value: 1.0 });
-    let ones_value = Value { node: ones, shape: image_shape.to_vec(), view: None, flatten_source: None };
+    let ones = append(
+        program,
+        Op::Constant {
+            dtype: DType::Float32,
+            shape: image_shape
+                .iter()
+                .map(|&extent| Extent::Static(extent as u32))
+                .collect(),
+            value: 1.0,
+        },
+    );
+    let ones_value = Value {
+        node: ones,
+        shape: image_shape.to_vec(),
+        view: None,
+        flatten_source: None,
+    };
     let padded_w = pad_axis(program, &ones_value, 3, pad_left, pad_right, 0.0);
     let padded = pad_axis(program, &padded_w, 2, pad_top, pad_bottom, 0.0);
     let windowed = window_materialize(program, &padded, spec);
-    build_reduce(program, ScalarOp::Add, ReduceInit::Zero, windowed.node, identity_pattern(6), projection(6, &[0, 1, 2, 3]), Some("averagepool2d_count".to_string()))
+    build_reduce(
+        program,
+        ScalarOp::Add,
+        ReduceInit::Zero,
+        windowed.node,
+        identity_pattern(6),
+        projection(6, &[0, 1, 2, 3]),
+        Some("averagepool2d_count".to_string()),
+    )
 }
 
 /// `AveragePool`: [`window_materialize`] (zero-padded), `Reduce(Add)` over
@@ -4264,7 +6698,11 @@ fn valid_window_count(program: &mut Vec<Op>, image_shape: &[u64], pads: (u64, u6
 /// `auto_pad`, or [`plan_pool`]'s own `ceil_mode` overhang -- instead divides
 /// by [`valid_window_count`]'s per-position valid-cell count, so a padded
 /// window never dilutes its average with the padding value.
-fn lower_averagepool(program: &mut Vec<Op>, values: &mut BTreeMap<String, Value>, node: &NodeProto<'_>) -> Result<(), LowerError> {
+fn lower_averagepool(
+    program: &mut Vec<Op>,
+    values: &mut BTreeMap<String, Value>,
+    node: &NodeProto<'_>,
+) -> Result<(), LowerError> {
     let image = lookup(values, node, 0)?.clone();
     if image.shape.len() == 5 {
         return lower_averagepool3d(program, values, node);
@@ -4295,11 +6733,25 @@ fn lower_averagepool(program: &mut Vec<Op>, values: &mut BTreeMap<String, Value>
     let has_padding = pad_top != 0 || pad_left != 0 || pad_bottom != 0 || pad_right != 0;
     let result = if count_include_pad == 0 && has_padding {
         let count = valid_window_count(program, &image.shape, plan.pads, spec);
-        build_elementwise(program, ScalarOp::Divide, alloc::vec![(summed, IndexMap::Affine(identity_pattern(4))), (count, IndexMap::Affine(identity_pattern(4)))])
+        build_elementwise(
+            program,
+            ScalarOp::Divide,
+            alloc::vec![
+                (summed, IndexMap::Affine(identity_pattern(4))),
+                (count, IndexMap::Affine(identity_pattern(4)))
+            ],
+        )
     } else {
         let window_size = (plan.kernel_h * plan.kernel_w) as f32;
         let inverse = constant_scalar(program, 1.0 / window_size);
-        build_elementwise(program, ScalarOp::Multiply, alloc::vec![(summed, IndexMap::Affine(identity_pattern(4))), (inverse, IndexMap::Affine(scalar_broadcast_pattern(4)))])
+        build_elementwise(
+            program,
+            ScalarOp::Multiply,
+            alloc::vec![
+                (summed, IndexMap::Affine(identity_pattern(4))),
+                (inverse, IndexMap::Affine(scalar_broadcast_pattern(4)))
+            ],
+        )
     };
     bind_output(values, node, 0, result, plan.out_shape);
     Ok(())
@@ -4326,12 +6778,18 @@ struct PoolPlan3d {
 /// [`plan_pool`]'s rank-5 mirror: same `kernel_shape`/`strides`/
 /// `dilations`/`pads`/`auto_pad` resolution (via [`parse_conv3d_attrs`]'s
 /// `pads`-ordering convention), three spatial axes instead of two.
-fn plan_pool3d(program: &mut Vec<Op>, node: &NodeProto<'_>, image: &Value, fill: f32) -> Result<PoolPlan3d, LowerError> {
-    let kernel_shape = attr_ints(node, "kernel_shape").ok_or_else(|| LowerError::UnsupportedShape {
-        name: node.name.to_string(),
-        op_type: node.op_type.to_string(),
-        reason: format!("{} requires a kernel_shape attribute", node.op_type),
-    })?;
+fn plan_pool3d(
+    program: &mut Vec<Op>,
+    node: &NodeProto<'_>,
+    image: &Value,
+    fill: f32,
+) -> Result<PoolPlan3d, LowerError> {
+    let kernel_shape =
+        attr_ints(node, "kernel_shape").ok_or_else(|| LowerError::UnsupportedShape {
+            name: node.name.to_string(),
+            op_type: node.op_type.to_string(),
+            reason: format!("{} requires a kernel_shape attribute", node.op_type),
+        })?;
     if kernel_shape.len() != 3 {
         return Err(LowerError::UnsupportedShape {
             name: node.name.to_string(),
@@ -4339,23 +6797,84 @@ fn plan_pool3d(program: &mut Vec<Op>, node: &NodeProto<'_>, image: &Value, fill:
             reason: format!("{} lowering supports 2D or 3D pooling only", node.op_type),
         });
     }
-    let (kernel_d, kernel_h, kernel_w) = (kernel_shape[0] as u64, kernel_shape[1] as u64, kernel_shape[2] as u64);
+    let (kernel_d, kernel_h, kernel_w) = (
+        kernel_shape[0] as u64,
+        kernel_shape[1] as u64,
+        kernel_shape[2] as u64,
+    );
 
-    let attrs = parse_conv3d_attrs(node, image.shape[2], image.shape[3], image.shape[4], kernel_d, kernel_h, kernel_w)?;
+    let attrs = parse_conv3d_attrs(
+        node,
+        image.shape[2],
+        image.shape[3],
+        image.shape[4],
+        kernel_d,
+        kernel_h,
+        kernel_w,
+    )?;
     let name = node.name.to_string();
     let op_type = node.op_type.to_string();
 
     let ceil_mode = attr_int(node, "ceil_mode").unwrap_or(0) != 0;
     let (pad_d1, pad_h1, pad_w1, out_d, out_h, out_w) = if ceil_mode {
-        let (out_d, pad_d1) = conv_output_extent_ceil(image.shape[2], attrs.pad_d0 as u64, attrs.pad_d1 as u64, kernel_d, attrs.stride_d, attrs.dilation_d)
-            .ok_or_else(|| LowerError::UnsupportedShape { name: name.clone(), op_type: op_type.clone(), reason: format!("{} kernel does not fit the padded input depth", node.op_type) })?;
-        let (out_h, pad_h1) = conv_output_extent_ceil(image.shape[3], attrs.pad_h0 as u64, attrs.pad_h1 as u64, kernel_h, attrs.stride_h, attrs.dilation_h)
-            .ok_or_else(|| LowerError::UnsupportedShape { name: name.clone(), op_type: op_type.clone(), reason: format!("{} kernel does not fit the padded input height", node.op_type) })?;
-        let (out_w, pad_w1) = conv_output_extent_ceil(image.shape[4], attrs.pad_w0 as u64, attrs.pad_w1 as u64, kernel_w, attrs.stride_w, attrs.dilation_w)
-            .ok_or_else(|| LowerError::UnsupportedShape { name: name.clone(), op_type: op_type.clone(), reason: format!("{} kernel does not fit the padded input width", node.op_type) })?;
+        let (out_d, pad_d1) = conv_output_extent_ceil(
+            image.shape[2],
+            attrs.pad_d0 as u64,
+            attrs.pad_d1 as u64,
+            kernel_d,
+            attrs.stride_d,
+            attrs.dilation_d,
+        )
+        .ok_or_else(|| LowerError::UnsupportedShape {
+            name: name.clone(),
+            op_type: op_type.clone(),
+            reason: format!(
+                "{} kernel does not fit the padded input depth",
+                node.op_type
+            ),
+        })?;
+        let (out_h, pad_h1) = conv_output_extent_ceil(
+            image.shape[3],
+            attrs.pad_h0 as u64,
+            attrs.pad_h1 as u64,
+            kernel_h,
+            attrs.stride_h,
+            attrs.dilation_h,
+        )
+        .ok_or_else(|| LowerError::UnsupportedShape {
+            name: name.clone(),
+            op_type: op_type.clone(),
+            reason: format!(
+                "{} kernel does not fit the padded input height",
+                node.op_type
+            ),
+        })?;
+        let (out_w, pad_w1) = conv_output_extent_ceil(
+            image.shape[4],
+            attrs.pad_w0 as u64,
+            attrs.pad_w1 as u64,
+            kernel_w,
+            attrs.stride_w,
+            attrs.dilation_w,
+        )
+        .ok_or_else(|| LowerError::UnsupportedShape {
+            name: name.clone(),
+            op_type: op_type.clone(),
+            reason: format!(
+                "{} kernel does not fit the padded input width",
+                node.op_type
+            ),
+        })?;
         (pad_d1, pad_h1, pad_w1, out_d, out_h, out_w)
     } else {
-        (attrs.pad_d1 as u64, attrs.pad_h1 as u64, attrs.pad_w1 as u64, 0, 0, 0)
+        (
+            attrs.pad_d1 as u64,
+            attrs.pad_h1 as u64,
+            attrs.pad_w1 as u64,
+            0,
+            0,
+            0,
+        )
     };
 
     let padded_w = pad_axis(program, image, 4, attrs.pad_w0 as u64, pad_w1, fill);
@@ -4365,21 +6884,33 @@ fn plan_pool3d(program: &mut Vec<Op>, node: &NodeProto<'_>, image: &Value, fill:
     let (out_d, out_h, out_w) = if ceil_mode {
         (out_d, out_h, out_w)
     } else {
-        let out_d = conv_output_extent(padded.shape[2], kernel_d, attrs.stride_d, attrs.dilation_d).ok_or_else(|| LowerError::UnsupportedShape {
-            name: node.name.to_string(),
-            op_type: node.op_type.to_string(),
-            reason: format!("{} kernel does not fit the padded input depth", node.op_type),
-        })?;
-        let out_h = conv_output_extent(padded.shape[3], kernel_h, attrs.stride_h, attrs.dilation_h).ok_or_else(|| LowerError::UnsupportedShape {
-            name: node.name.to_string(),
-            op_type: node.op_type.to_string(),
-            reason: format!("{} kernel does not fit the padded input height", node.op_type),
-        })?;
-        let out_w = conv_output_extent(padded.shape[4], kernel_w, attrs.stride_w, attrs.dilation_w).ok_or_else(|| LowerError::UnsupportedShape {
-            name: node.name.to_string(),
-            op_type: node.op_type.to_string(),
-            reason: format!("{} kernel does not fit the padded input width", node.op_type),
-        })?;
+        let out_d = conv_output_extent(padded.shape[2], kernel_d, attrs.stride_d, attrs.dilation_d)
+            .ok_or_else(|| LowerError::UnsupportedShape {
+                name: node.name.to_string(),
+                op_type: node.op_type.to_string(),
+                reason: format!(
+                    "{} kernel does not fit the padded input depth",
+                    node.op_type
+                ),
+            })?;
+        let out_h = conv_output_extent(padded.shape[3], kernel_h, attrs.stride_h, attrs.dilation_h)
+            .ok_or_else(|| LowerError::UnsupportedShape {
+                name: node.name.to_string(),
+                op_type: node.op_type.to_string(),
+                reason: format!(
+                    "{} kernel does not fit the padded input height",
+                    node.op_type
+                ),
+            })?;
+        let out_w = conv_output_extent(padded.shape[4], kernel_w, attrs.stride_w, attrs.dilation_w)
+            .ok_or_else(|| LowerError::UnsupportedShape {
+                name: node.name.to_string(),
+                op_type: node.op_type.to_string(),
+                reason: format!(
+                    "{} kernel does not fit the padded input width",
+                    node.op_type
+                ),
+            })?;
         (out_d, out_h, out_w)
     };
 
@@ -4396,13 +6927,24 @@ fn plan_pool3d(program: &mut Vec<Op>, node: &NodeProto<'_>, image: &Value, fill:
         dilation_h: attrs.dilation_h,
         dilation_w: attrs.dilation_w,
         out_shape,
-        pads: (attrs.pad_d0 as u64, attrs.pad_h0 as u64, attrs.pad_w0 as u64, pad_d1, pad_h1, pad_w1),
+        pads: (
+            attrs.pad_d0 as u64,
+            attrs.pad_h0 as u64,
+            attrs.pad_w0 as u64,
+            pad_d1,
+            pad_h1,
+            pad_w1,
+        ),
     })
 }
 
 /// `MaxPool`, rank-5 (3D): [`lower_maxpool`]'s rank-5 mirror, called from
 /// its rank dispatch.
-fn lower_maxpool3d(program: &mut Vec<Op>, values: &mut BTreeMap<String, Value>, node: &NodeProto<'_>) -> Result<(), LowerError> {
+fn lower_maxpool3d(
+    program: &mut Vec<Op>,
+    values: &mut BTreeMap<String, Value>,
+    node: &NodeProto<'_>,
+) -> Result<(), LowerError> {
     let image = lookup(values, node, 0)?.clone();
     let plan = plan_pool3d(program, node, &image, f32::NEG_INFINITY)?;
     let windowed = window_materialize3d(
@@ -4456,19 +6998,49 @@ fn valid_window_count3d(
     dilation_w: i64,
 ) -> NodeId {
     let (pad_d0, pad_h0, pad_w0, pad_d1, pad_h1, pad_w1) = pads;
-    let ones = append(program, Op::Constant { dtype: DType::Float32, shape: image_shape.iter().map(|&extent| Extent::Static(extent as u32)).collect(), value: 1.0 });
-    let ones_value = Value { node: ones, shape: image_shape.to_vec(), view: None, flatten_source: None };
+    let ones = append(
+        program,
+        Op::Constant {
+            dtype: DType::Float32,
+            shape: image_shape
+                .iter()
+                .map(|&extent| Extent::Static(extent as u32))
+                .collect(),
+            value: 1.0,
+        },
+    );
+    let ones_value = Value {
+        node: ones,
+        shape: image_shape.to_vec(),
+        view: None,
+        flatten_source: None,
+    };
     let padded_w = pad_axis(program, &ones_value, 4, pad_w0, pad_w1, 0.0);
     let padded_h = pad_axis(program, &padded_w, 3, pad_h0, pad_h1, 0.0);
     let padded = pad_axis(program, &padded_h, 2, pad_d0, pad_d1, 0.0);
-    let windowed = window_materialize3d(program, &padded, out_d, out_h, out_w, kernel_d, kernel_h, kernel_w, stride_d, stride_h, stride_w, dilation_d, dilation_h, dilation_w);
-    build_reduce(program, ScalarOp::Add, ReduceInit::Zero, windowed.node, identity_pattern(8), projection(8, &[0, 1, 2, 3, 4]), Some("averagepool3d_count".to_string()))
+    let windowed = window_materialize3d(
+        program, &padded, out_d, out_h, out_w, kernel_d, kernel_h, kernel_w, stride_d, stride_h,
+        stride_w, dilation_d, dilation_h, dilation_w,
+    );
+    build_reduce(
+        program,
+        ScalarOp::Add,
+        ReduceInit::Zero,
+        windowed.node,
+        identity_pattern(8),
+        projection(8, &[0, 1, 2, 3, 4]),
+        Some("averagepool3d_count".to_string()),
+    )
 }
 
 /// `AveragePool`, rank-5 (3D): [`lower_averagepool`]'s rank-5 mirror, called
 /// from its rank dispatch. Same `count_include_pad`-driven divisor switch
 /// as the 2D path -- see [`lower_averagepool`]'s own doc.
-fn lower_averagepool3d(program: &mut Vec<Op>, values: &mut BTreeMap<String, Value>, node: &NodeProto<'_>) -> Result<(), LowerError> {
+fn lower_averagepool3d(
+    program: &mut Vec<Op>,
+    values: &mut BTreeMap<String, Value>,
+    node: &NodeProto<'_>,
+) -> Result<(), LowerError> {
     let count_include_pad = attr_int(node, "count_include_pad").unwrap_or(0);
     let image = lookup(values, node, 0)?.clone();
     let plan = plan_pool3d(program, node, &image, 0.0)?;
@@ -4498,7 +7070,8 @@ fn lower_averagepool3d(program: &mut Vec<Op>, values: &mut BTreeMap<String, Valu
         Some("averagepool3d".to_string()),
     );
     let (pad_d0, pad_h0, pad_w0, pad_d1, pad_h1, pad_w1) = plan.pads;
-    let has_padding = pad_d0 != 0 || pad_h0 != 0 || pad_w0 != 0 || pad_d1 != 0 || pad_h1 != 0 || pad_w1 != 0;
+    let has_padding =
+        pad_d0 != 0 || pad_h0 != 0 || pad_w0 != 0 || pad_d1 != 0 || pad_h1 != 0 || pad_w1 != 0;
     let result = if count_include_pad == 0 && has_padding {
         let count = valid_window_count3d(
             program,
@@ -4517,11 +7090,25 @@ fn lower_averagepool3d(program: &mut Vec<Op>, values: &mut BTreeMap<String, Valu
             plan.dilation_h,
             plan.dilation_w,
         );
-        build_elementwise(program, ScalarOp::Divide, alloc::vec![(summed, IndexMap::Affine(identity_pattern(5))), (count, IndexMap::Affine(identity_pattern(5)))])
+        build_elementwise(
+            program,
+            ScalarOp::Divide,
+            alloc::vec![
+                (summed, IndexMap::Affine(identity_pattern(5))),
+                (count, IndexMap::Affine(identity_pattern(5)))
+            ],
+        )
     } else {
         let window_size = (plan.kernel_d * plan.kernel_h * plan.kernel_w) as f32;
         let inverse = constant_scalar(program, 1.0 / window_size);
-        build_elementwise(program, ScalarOp::Multiply, alloc::vec![(summed, IndexMap::Affine(identity_pattern(5))), (inverse, IndexMap::Affine(scalar_broadcast_pattern(5)))])
+        build_elementwise(
+            program,
+            ScalarOp::Multiply,
+            alloc::vec![
+                (summed, IndexMap::Affine(identity_pattern(5))),
+                (inverse, IndexMap::Affine(scalar_broadcast_pattern(5)))
+            ],
+        )
     };
     bind_output(values, node, 0, result, plan.out_shape);
     Ok(())
@@ -4560,21 +7147,44 @@ fn decode_numeric_tensor(tensor: &TensorProto<'_>) -> Result<Vec<f32>, LowerErro
         return Ok(tensor.float_data.clone());
     }
     if !tensor.int64_data.is_empty() {
-        return Ok(tensor.int64_data.iter().map(|&value| value as f32).collect());
+        return Ok(tensor
+            .int64_data
+            .iter()
+            .map(|&value| value as f32)
+            .collect());
     }
     if !tensor.int32_data.is_empty() {
-        return Ok(tensor.int32_data.iter().map(|&value| value as f32).collect());
+        return Ok(tensor
+            .int32_data
+            .iter()
+            .map(|&value| value as f32)
+            .collect());
     }
     if let Some(raw) = tensor.raw_data {
         match tensor.data_type {
             7 if raw.len() % 8 == 0 => {
-                return Ok(raw.as_chunks::<8>().0.iter().map(|&chunk| i64::from_le_bytes(chunk) as f32).collect());
+                return Ok(raw
+                    .as_chunks::<8>()
+                    .0
+                    .iter()
+                    .map(|&chunk| i64::from_le_bytes(chunk) as f32)
+                    .collect());
             }
             6 if raw.len() % 4 == 0 => {
-                return Ok(raw.as_chunks::<4>().0.iter().map(|&chunk| i32::from_le_bytes(chunk) as f32).collect());
+                return Ok(raw
+                    .as_chunks::<4>()
+                    .0
+                    .iter()
+                    .map(|&chunk| i32::from_le_bytes(chunk) as f32)
+                    .collect());
             }
             _ if raw.len() % 4 == 0 => {
-                return Ok(raw.as_chunks::<4>().0.iter().map(|&chunk| f32::from_le_bytes(chunk)).collect());
+                return Ok(raw
+                    .as_chunks::<4>()
+                    .0
+                    .iter()
+                    .map(|&chunk| f32::from_le_bytes(chunk))
+                    .collect());
             }
             _ => {}
         }
@@ -4582,7 +7192,10 @@ fn decode_numeric_tensor(tensor: &TensorProto<'_>) -> Result<Vec<f32>, LowerErro
     if tensor.dims.iter().product::<i64>() == 0 {
         return Ok(Vec::new());
     }
-    Err(LowerError::UndecodableInitializer { name: tensor.name.to_string(), data_type: tensor.data_type })
+    Err(LowerError::UndecodableInitializer {
+        name: tensor.name.to_string(),
+        data_type: tensor.data_type,
+    })
 }
 
 /// A graph input's declared dtype, via [`onnx_dtype_to_op_dtype`] --
@@ -4591,8 +7204,12 @@ fn decode_numeric_tensor(tensor: &TensorProto<'_>) -> Result<Vec<f32>, LowerErro
 /// that needs the strict form gets [`LowerError::UnsupportedShape`] from
 /// that function regardless).
 fn value_info_dtype(value_info: &ValueInfoProto<'_>) -> DType {
-    let Some(type_proto) = value_info.r#type.as_ref() else { return DType::Float32 };
-    let Some(TypeValue::Tensor(tensor_type)) = type_proto.value.as_ref() else { return DType::Float32 };
+    let Some(type_proto) = value_info.r#type.as_ref() else {
+        return DType::Float32;
+    };
+    let Some(TypeValue::Tensor(tensor_type)) = type_proto.value.as_ref() else {
+        return DType::Float32;
+    };
     onnx_dtype_to_op_dtype(tensor_type.elem_type)
 }
 
@@ -4603,7 +7220,10 @@ fn value_info_dtype(value_info: &ValueInfoProto<'_>) -> DType {
 /// call site's own doc for why this, not the ONNX-declared dtype alone,
 /// decides.
 fn graph_input_feeds_gather_indices(graph: &GraphProto<'_>, name: &str) -> bool {
-    graph.node.iter().any(|node| node.op_type == "Gather" && node.input.get(1) == Some(&name))
+    graph
+        .node
+        .iter()
+        .any(|node| node.op_type == "Gather" && node.input.get(1) == Some(&name))
 }
 
 /// A graph input's declared shape -- this pass lowers to concrete
@@ -4611,27 +7231,37 @@ fn graph_input_feeds_gather_indices(graph: &GraphProto<'_>, name: &str) -> bool 
 /// dimension is only accepted when [`lower_graph_pinned`]'s own `pins` map
 /// names a concrete extent for it; otherwise it is rejected exactly as
 /// [`lower_graph`] (an empty `pins`) always has.
-fn value_info_shape(value_info: &ValueInfoProto<'_>, pins: &BTreeMap<&str, u64>) -> Result<Vec<u64>, LowerError> {
+fn value_info_shape(
+    value_info: &ValueInfoProto<'_>,
+    pins: &BTreeMap<&str, u64>,
+) -> Result<Vec<u64>, LowerError> {
     let unsupported = |reason: &str| LowerError::UnsupportedShape {
         name: value_info.name.to_string(),
         op_type: "graph_input".to_string(),
         reason: reason.to_string(),
     };
-    let type_proto = value_info.r#type.as_ref().ok_or_else(|| unsupported("missing type"))?;
+    let type_proto = value_info
+        .r#type
+        .as_ref()
+        .ok_or_else(|| unsupported("missing type"))?;
     let Some(TypeValue::Tensor(tensor_type)) = type_proto.value.as_ref() else {
         return Err(unsupported("only Tensor-typed graph inputs are supported"));
     };
-    let shape = tensor_type.shape.as_ref().ok_or_else(|| unsupported("missing shape"))?;
+    let shape = tensor_type
+        .shape
+        .as_ref()
+        .ok_or_else(|| unsupported("missing shape"))?;
     shape
         .dim
         .iter()
         .map(|dimension| match &dimension.value {
             Some(DimensionValue::Value(value)) => Ok(*value as u64),
-            Some(DimensionValue::Param(name)) => pins
-                .get(name)
-                .copied()
-                .ok_or_else(|| unsupported(&format!("symbolic dimension {name:?} has no pinned extent"))),
-            None => Err(unsupported("symbolic dimensions are not supported by this lowering")),
+            Some(DimensionValue::Param(name)) => pins.get(name).copied().ok_or_else(|| {
+                unsupported(&format!("symbolic dimension {name:?} has no pinned extent"))
+            }),
+            None => Err(unsupported(
+                "symbolic dimensions are not supported by this lowering",
+            )),
         })
         .collect()
 }
@@ -4650,13 +7280,19 @@ mod tests {
         let shape = TensorShapeProto {
             dim: dims
                 .iter()
-                .map(|&value| Dimension { value: Some(DimensionValue::Value(value)), denotation: "" })
+                .map(|&value| Dimension {
+                    value: Some(DimensionValue::Value(value)),
+                    denotation: "",
+                })
                 .collect(),
         };
         ValueInfoProto {
             name,
             r#type: Some(TypeProto {
-                value: Some(TypeValue::Tensor(TypeProtoTensor { elem_type: 1, shape: Some(shape) })),
+                value: Some(TypeValue::Tensor(TypeProtoTensor {
+                    elem_type: 1,
+                    shape: Some(shape),
+                })),
                 denotation: "",
             }),
             doc_string: "",
@@ -4664,7 +7300,13 @@ mod tests {
     }
 
     fn f32_initializer(name: &'static str, dims: &[i64], data: &[f32]) -> TensorProto<'static> {
-        TensorProto { dims: dims.to_vec(), data_type: 1, float_data: data.to_vec(), name, ..TensorProto::default() }
+        TensorProto {
+            dims: dims.to_vec(),
+            data_type: 1,
+            float_data: data.to_vec(),
+            name,
+            ..TensorProto::default()
+        }
     }
 
     /// `Add`'s broadcast path: a `[3]` bias vector added into a `[2, 3]`
@@ -4675,20 +7317,34 @@ mod tests {
     fn add_broadcasts_a_bias_vector_into_a_matrix() {
         let x_initializer = f32_initializer("x", &[2, 3], &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
         let bias_initializer = f32_initializer("bias", &[3], &[10.0, 20.0, 30.0]);
-        let node = NodeProto { input: vec!["x", "bias"], output: vec!["y"], op_type: "Add", name: "add", ..NodeProto::default() };
+        let node = NodeProto {
+            input: vec!["x", "bias"],
+            output: vec!["y"],
+            op_type: "Add",
+            name: "add",
+            ..NodeProto::default()
+        };
         let graph = GraphProto {
             node: vec![node],
             name: "add_graph",
             initializer: vec![x_initializer, bias_initializer],
             input: Vec::new(),
-            output: vec![ValueInfoProto { name: "y", ..ValueInfoProto::default() }],
+            output: vec![ValueInfoProto {
+                name: "y",
+                ..ValueInfoProto::default()
+            }],
             ..GraphProto::default()
         };
 
         let lowered = lower_graph(&graph).expect("lower Add");
-        let named: Vec<(&str, &[f32])> = lowered.initializers.iter().map(|(name, data)| (name.as_str(), data.as_slice())).collect();
+        let named: Vec<(&str, &[f32])> = lowered
+            .initializers
+            .iter()
+            .map(|(name, data)| (name.as_str(), data.as_slice()))
+            .collect();
         let output = lowered.graph_outputs[0].1;
-        let evaluated = evaluate_named(&lowered.program, &[], &named, &[output]).expect("evaluate Add");
+        let evaluated =
+            evaluate_named(&lowered.program, &[], &named, &[output]).expect("evaluate Add");
         let (data, shape) = evaluated.get(output).expect("y present");
 
         assert_eq!(shape, &[2, 3]);
@@ -4700,21 +7356,39 @@ mod tests {
     #[test]
     fn transpose_permutes_a_matrix() {
         let x_initializer = f32_initializer("x", &[2, 3], &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
-        let perm_attribute = AttributeProto { name: "perm", ints: vec![1, 0], ..AttributeProto::default() };
-        let node =
-            NodeProto { input: vec!["x"], output: vec!["y"], op_type: "Transpose", name: "transpose", attribute: vec![perm_attribute], ..NodeProto::default() };
+        let perm_attribute = AttributeProto {
+            name: "perm",
+            ints: vec![1, 0],
+            ..AttributeProto::default()
+        };
+        let node = NodeProto {
+            input: vec!["x"],
+            output: vec!["y"],
+            op_type: "Transpose",
+            name: "transpose",
+            attribute: vec![perm_attribute],
+            ..NodeProto::default()
+        };
         let graph = GraphProto {
             node: vec![node],
             name: "transpose_graph",
             initializer: vec![x_initializer],
-            output: vec![ValueInfoProto { name: "y", ..ValueInfoProto::default() }],
+            output: vec![ValueInfoProto {
+                name: "y",
+                ..ValueInfoProto::default()
+            }],
             ..GraphProto::default()
         };
 
         let lowered = lower_graph(&graph).expect("lower Transpose");
-        let named: Vec<(&str, &[f32])> = lowered.initializers.iter().map(|(name, data)| (name.as_str(), data.as_slice())).collect();
+        let named: Vec<(&str, &[f32])> = lowered
+            .initializers
+            .iter()
+            .map(|(name, data)| (name.as_str(), data.as_slice()))
+            .collect();
         let output = lowered.graph_outputs[0].1;
-        let evaluated = evaluate_named(&lowered.program, &[], &named, &[output]).expect("evaluate Transpose");
+        let evaluated =
+            evaluate_named(&lowered.program, &[], &named, &[output]).expect("evaluate Transpose");
         let (data, shape) = evaluated.get(output).expect("y present");
 
         assert_eq!(shape, &[3, 2]);
@@ -4728,20 +7402,40 @@ mod tests {
     #[test]
     fn gather_selects_rows_by_index() {
         let table_initializer = f32_initializer("table", &[3, 2], &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
-        let indices_initializer = TensorProto { dims: vec![2], data_type: 7, int64_data: vec![2, 0], name: "ids", ..TensorProto::default() };
-        let node = NodeProto { input: vec!["table", "ids"], output: vec!["y"], op_type: "Gather", name: "gather", ..NodeProto::default() };
+        let indices_initializer = TensorProto {
+            dims: vec![2],
+            data_type: 7,
+            int64_data: vec![2, 0],
+            name: "ids",
+            ..TensorProto::default()
+        };
+        let node = NodeProto {
+            input: vec!["table", "ids"],
+            output: vec!["y"],
+            op_type: "Gather",
+            name: "gather",
+            ..NodeProto::default()
+        };
         let graph = GraphProto {
             node: vec![node],
             name: "gather_graph",
             initializer: vec![table_initializer, indices_initializer],
-            output: vec![ValueInfoProto { name: "y", ..ValueInfoProto::default() }],
+            output: vec![ValueInfoProto {
+                name: "y",
+                ..ValueInfoProto::default()
+            }],
             ..GraphProto::default()
         };
 
         let lowered = lower_graph(&graph).expect("lower Gather");
-        let named: Vec<(&str, &[f32])> = lowered.initializers.iter().map(|(name, data)| (name.as_str(), data.as_slice())).collect();
+        let named: Vec<(&str, &[f32])> = lowered
+            .initializers
+            .iter()
+            .map(|(name, data)| (name.as_str(), data.as_slice()))
+            .collect();
         let output = lowered.graph_outputs[0].1;
-        let evaluated = evaluate_named(&lowered.program, &[], &named, &[output]).expect("evaluate Gather");
+        let evaluated =
+            evaluate_named(&lowered.program, &[], &named, &[output]).expect("evaluate Gather");
         let (data, shape) = evaluated.get(output).expect("y present");
 
         assert_eq!(shape, &[2, 2]);
@@ -4754,17 +7448,29 @@ mod tests {
     #[test]
     fn unsupported_op_type_is_a_typed_error_not_a_panic() {
         let x_initializer = f32_initializer("x", &[2], &[1.0, 2.0]);
-        let node = NodeProto { input: vec!["x"], output: vec!["y"], op_type: "LSTM", name: "lstm", ..NodeProto::default() };
+        let node = NodeProto {
+            input: vec!["x"],
+            output: vec!["y"],
+            op_type: "LSTM",
+            name: "lstm",
+            ..NodeProto::default()
+        };
         let graph = GraphProto {
             node: vec![node],
             name: "unsupported_graph",
             initializer: vec![x_initializer],
-            output: vec![ValueInfoProto { name: "y", ..ValueInfoProto::default() }],
+            output: vec![ValueInfoProto {
+                name: "y",
+                ..ValueInfoProto::default()
+            }],
             ..GraphProto::default()
         };
 
         let error = lower_graph(&graph).expect_err("LSTM has no lowering");
-        assert!(matches!(error, LowerError::UnsupportedOp { .. }), "expected UnsupportedOp, got {error:?}");
+        assert!(
+            matches!(error, LowerError::UnsupportedOp { .. }),
+            "expected UnsupportedOp, got {error:?}"
+        );
     }
 
     /// `Reshape` merging `[2, 3, 4]`'s TRAILING two axes into `[2, 12]`:
@@ -4778,49 +7484,109 @@ mod tests {
     /// TRAILING merged axis" restriction.
     #[test]
     fn reshape_merges_a_trailing_axis_run_without_appending_an_op() {
-        let x_initializer = f32_initializer("x", &[2, 3, 4], &(0..24).map(|value| value as f32).collect::<Vec<_>>());
-        let shape_initializer = TensorProto { dims: vec![2], data_type: 7, int64_data: vec![2, 12], name: "shape", ..TensorProto::default() };
-        let node = NodeProto { input: vec!["x", "shape"], output: vec!["y"], op_type: "Reshape", name: "reshape", ..NodeProto::default() };
+        let x_initializer = f32_initializer(
+            "x",
+            &[2, 3, 4],
+            &(0..24).map(|value| value as f32).collect::<Vec<_>>(),
+        );
+        let shape_initializer = TensorProto {
+            dims: vec![2],
+            data_type: 7,
+            int64_data: vec![2, 12],
+            name: "shape",
+            ..TensorProto::default()
+        };
+        let node = NodeProto {
+            input: vec!["x", "shape"],
+            output: vec!["y"],
+            op_type: "Reshape",
+            name: "reshape",
+            ..NodeProto::default()
+        };
         let graph = GraphProto {
             node: vec![node],
             name: "reshape_merge_graph",
             initializer: vec![x_initializer, shape_initializer],
-            output: vec![ValueInfoProto { name: "y", ..ValueInfoProto::default() }],
+            output: vec![ValueInfoProto {
+                name: "y",
+                ..ValueInfoProto::default()
+            }],
             ..GraphProto::default()
         };
 
         let lowered = lower_graph(&graph).expect("lower Reshape merge");
-        assert_eq!(lowered.program.len(), 1, "a deferred (flatten_source) merge appends no new Op (the shape tensor is value-only, never a live leaf)");
+        assert_eq!(
+            lowered.program.len(),
+            1,
+            "a deferred (flatten_source) merge appends no new Op (the shape tensor is value-only, never a live leaf)"
+        );
 
-        let named: Vec<(&str, &[f32])> = lowered.initializers.iter().map(|(name, data)| (name.as_str(), data.as_slice())).collect();
+        let named: Vec<(&str, &[f32])> = lowered
+            .initializers
+            .iter()
+            .map(|(name, data)| (name.as_str(), data.as_slice()))
+            .collect();
         let output = lowered.graph_outputs[0].1;
-        let evaluated = evaluate_named(&lowered.program, &[], &named, &[output]).expect("evaluate Reshape merge");
+        let evaluated = evaluate_named(&lowered.program, &[], &named, &[output])
+            .expect("evaluate Reshape merge");
         let (data, _) = evaluated.get(output).expect("y present");
         let expected: Vec<f32> = (0..24).map(|value| value as f32).collect();
-        assert_eq!(data, expected.as_slice(), "merge preserves element order (flattened)");
+        assert_eq!(
+            data,
+            expected.as_slice(),
+            "merge preserves element order (flattened)"
+        );
     }
 
     /// `Reshape` merging all the way down to a flat `[24]` -- the same
     /// view-alias mechanism, one more axis collapsed.
     #[test]
     fn reshape_flattens_to_rank_one_without_appending_an_op() {
-        let x_initializer = f32_initializer("x", &[2, 3, 4], &(0..24).map(|value| value as f32).collect::<Vec<_>>());
-        let shape_initializer = TensorProto { dims: vec![1], data_type: 7, int64_data: vec![24], name: "shape", ..TensorProto::default() };
-        let node = NodeProto { input: vec!["x", "shape"], output: vec!["y"], op_type: "Reshape", name: "reshape", ..NodeProto::default() };
+        let x_initializer = f32_initializer(
+            "x",
+            &[2, 3, 4],
+            &(0..24).map(|value| value as f32).collect::<Vec<_>>(),
+        );
+        let shape_initializer = TensorProto {
+            dims: vec![1],
+            data_type: 7,
+            int64_data: vec![24],
+            name: "shape",
+            ..TensorProto::default()
+        };
+        let node = NodeProto {
+            input: vec!["x", "shape"],
+            output: vec!["y"],
+            op_type: "Reshape",
+            name: "reshape",
+            ..NodeProto::default()
+        };
         let graph = GraphProto {
             node: vec![node],
             name: "reshape_flatten_graph",
             initializer: vec![x_initializer, shape_initializer],
-            output: vec![ValueInfoProto { name: "y", ..ValueInfoProto::default() }],
+            output: vec![ValueInfoProto {
+                name: "y",
+                ..ValueInfoProto::default()
+            }],
             ..GraphProto::default()
         };
 
         let lowered = lower_graph(&graph).expect("lower Reshape flatten");
-        assert_eq!(lowered.program.len(), 1, "a contiguous reshape appends no new Op (the shape tensor is value-only, never a live leaf)");
+        assert_eq!(
+            lowered.program.len(),
+            1,
+            "a contiguous reshape appends no new Op (the shape tensor is value-only, never a live leaf)"
+        );
 
-        let named: Vec<(&str, &[f32])> = lowered.initializers.iter().map(|(name, data)| (name.as_str(), data.as_slice())).collect();
+        let named: Vec<(&str, &[f32])> = lowered
+            .initializers
+            .iter()
+            .map(|(name, data)| (name.as_str(), data.as_slice()))
+            .collect();
         let output = lowered.graph_outputs[0].1;
-        let evaluated = evaluate_named(&lowered.program, &[], &named, &[output]).expect("evaluate Reshape flatten");
+        let evaluated = evaluate_named(&lowered.program, &[], &named, &[output])
+            .expect("evaluate Reshape flatten");
         let (data, _) = evaluated.get(output).expect("y present");
         let expected: Vec<f32> = (0..24).map(|value| value as f32).collect();
         assert_eq!(data, expected.as_slice());
@@ -4837,26 +7603,58 @@ mod tests {
     /// reproduces exactly, not on program length.
     #[test]
     fn reshape_splits_a_flat_axis_via_a_materializing_gather() {
-        let x_initializer = f32_initializer("x", &[24], &(0..24).map(|value| value as f32).collect::<Vec<_>>());
-        let shape_initializer = TensorProto { dims: vec![3], data_type: 7, int64_data: vec![2, 3, 4], name: "shape", ..TensorProto::default() };
-        let node = NodeProto { input: vec!["x", "shape"], output: vec!["y"], op_type: "Reshape", name: "reshape", ..NodeProto::default() };
+        let x_initializer = f32_initializer(
+            "x",
+            &[24],
+            &(0..24).map(|value| value as f32).collect::<Vec<_>>(),
+        );
+        let shape_initializer = TensorProto {
+            dims: vec![3],
+            data_type: 7,
+            int64_data: vec![2, 3, 4],
+            name: "shape",
+            ..TensorProto::default()
+        };
+        let node = NodeProto {
+            input: vec!["x", "shape"],
+            output: vec!["y"],
+            op_type: "Reshape",
+            name: "reshape",
+            ..NodeProto::default()
+        };
         let graph = GraphProto {
             node: vec![node],
             name: "reshape_split_graph",
             initializer: vec![x_initializer, shape_initializer],
-            output: vec![ValueInfoProto { name: "y", ..ValueInfoProto::default() }],
+            output: vec![ValueInfoProto {
+                name: "y",
+                ..ValueInfoProto::default()
+            }],
             ..GraphProto::default()
         };
 
         let lowered = lower_graph(&graph).expect("lower Reshape split");
 
-        let named: Vec<(&str, &[f32])> = lowered.initializers.iter().map(|(name, data)| (name.as_str(), data.as_slice())).collect();
+        let named: Vec<(&str, &[f32])> = lowered
+            .initializers
+            .iter()
+            .map(|(name, data)| (name.as_str(), data.as_slice()))
+            .collect();
         let output = lowered.graph_outputs[0].1;
-        let evaluated = evaluate_named(&lowered.program, &[], &named, &[output]).expect("evaluate Reshape split");
+        let evaluated = evaluate_named(&lowered.program, &[], &named, &[output])
+            .expect("evaluate Reshape split");
         let (data, shape) = evaluated.get(output).expect("y present");
-        assert_eq!(shape, &[2, 3, 4], "split reports the real, materialized [2, 3, 4] shape");
+        assert_eq!(
+            shape,
+            &[2, 3, 4],
+            "split reports the real, materialized [2, 3, 4] shape"
+        );
         let expected: Vec<f32> = (0..24).map(|value| value as f32).collect();
-        assert_eq!(data, expected.as_slice(), "split preserves element order (still flattened)");
+        assert_eq!(
+            data,
+            expected.as_slice(),
+            "split preserves element order (still flattened)"
+        );
     }
 
     /// `Unsqueeze(axes=[1])` on `[2, 3]` (giving `x` a [`Value::view`]
@@ -4874,29 +7672,70 @@ mod tests {
     #[test]
     fn reshape_after_unsqueeze_composes_the_view_instead_of_discarding_it() {
         let x_initializer = f32_initializer("x", &[2, 3], &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
-        let bias_initializer = f32_initializer("bias", &[2, 3], &[10.0, 20.0, 30.0, 40.0, 50.0, 60.0]);
-        let unsqueeze_axes = AttributeProto { name: "axes", ints: vec![1], ..AttributeProto::default() };
-        let unsqueeze =
-            NodeProto { input: vec!["x"], output: vec!["u"], op_type: "Unsqueeze", name: "unsqueeze", attribute: vec![unsqueeze_axes], ..NodeProto::default() };
-        let shape_initializer = TensorProto { dims: vec![2], data_type: 7, int64_data: vec![2, 3], name: "shape", ..TensorProto::default() };
-        let reshape = NodeProto { input: vec!["u", "shape"], output: vec!["r"], op_type: "Reshape", name: "reshape", ..NodeProto::default() };
-        let add = NodeProto { input: vec!["r", "bias"], output: vec!["y"], op_type: "Add", name: "add", ..NodeProto::default() };
+        let bias_initializer =
+            f32_initializer("bias", &[2, 3], &[10.0, 20.0, 30.0, 40.0, 50.0, 60.0]);
+        let unsqueeze_axes = AttributeProto {
+            name: "axes",
+            ints: vec![1],
+            ..AttributeProto::default()
+        };
+        let unsqueeze = NodeProto {
+            input: vec!["x"],
+            output: vec!["u"],
+            op_type: "Unsqueeze",
+            name: "unsqueeze",
+            attribute: vec![unsqueeze_axes],
+            ..NodeProto::default()
+        };
+        let shape_initializer = TensorProto {
+            dims: vec![2],
+            data_type: 7,
+            int64_data: vec![2, 3],
+            name: "shape",
+            ..TensorProto::default()
+        };
+        let reshape = NodeProto {
+            input: vec!["u", "shape"],
+            output: vec!["r"],
+            op_type: "Reshape",
+            name: "reshape",
+            ..NodeProto::default()
+        };
+        let add = NodeProto {
+            input: vec!["r", "bias"],
+            output: vec!["y"],
+            op_type: "Add",
+            name: "add",
+            ..NodeProto::default()
+        };
         let graph = GraphProto {
             node: vec![unsqueeze, reshape, add],
             name: "unsqueeze_reshape_graph",
             initializer: vec![x_initializer, bias_initializer, shape_initializer],
-            output: vec![ValueInfoProto { name: "y", ..ValueInfoProto::default() }],
+            output: vec![ValueInfoProto {
+                name: "y",
+                ..ValueInfoProto::default()
+            }],
             ..GraphProto::default()
         };
 
         let lowered = lower_graph(&graph).expect("lower Unsqueeze -> Reshape -> Add");
-        let named: Vec<(&str, &[f32])> = lowered.initializers.iter().map(|(name, data)| (name.as_str(), data.as_slice())).collect();
+        let named: Vec<(&str, &[f32])> = lowered
+            .initializers
+            .iter()
+            .map(|(name, data)| (name.as_str(), data.as_slice()))
+            .collect();
         let output = lowered.graph_outputs[0].1;
-        let evaluated = evaluate_named(&lowered.program, &[], &named, &[output]).expect("evaluate Unsqueeze -> Reshape -> Add");
+        let evaluated = evaluate_named(&lowered.program, &[], &named, &[output])
+            .expect("evaluate Unsqueeze -> Reshape -> Add");
         let (data, shape) = evaluated.get(output).expect("y present");
 
         assert_eq!(shape, &[2, 3]);
-        assert_eq!(data, &[11.0, 22.0, 33.0, 44.0, 55.0, 66.0], "reshape must recover x's real axes, not treat the squeezed shape as x's physical layout");
+        assert_eq!(
+            data,
+            &[11.0, 22.0, 33.0, 44.0, 55.0, 66.0],
+            "reshape must recover x's real axes, not treat the squeezed shape as x's physical layout"
+        );
     }
 
     /// A `Reshape` chained after `Unsqueeze` that genuinely merges a real,
@@ -4906,21 +7745,50 @@ mod tests {
     #[test]
     fn reshape_after_unsqueeze_that_merges_a_real_axis_is_a_named_error() {
         let x_initializer = f32_initializer("x", &[2, 3], &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
-        let unsqueeze_axes = AttributeProto { name: "axes", ints: vec![1], ..AttributeProto::default() };
-        let unsqueeze =
-            NodeProto { input: vec!["x"], output: vec!["u"], op_type: "Unsqueeze", name: "unsqueeze", attribute: vec![unsqueeze_axes], ..NodeProto::default() };
-        let shape_initializer = TensorProto { dims: vec![1], data_type: 7, int64_data: vec![6], name: "shape", ..TensorProto::default() };
-        let reshape = NodeProto { input: vec!["u", "shape"], output: vec!["y"], op_type: "Reshape", name: "reshape", ..NodeProto::default() };
+        let unsqueeze_axes = AttributeProto {
+            name: "axes",
+            ints: vec![1],
+            ..AttributeProto::default()
+        };
+        let unsqueeze = NodeProto {
+            input: vec!["x"],
+            output: vec!["u"],
+            op_type: "Unsqueeze",
+            name: "unsqueeze",
+            attribute: vec![unsqueeze_axes],
+            ..NodeProto::default()
+        };
+        let shape_initializer = TensorProto {
+            dims: vec![1],
+            data_type: 7,
+            int64_data: vec![6],
+            name: "shape",
+            ..TensorProto::default()
+        };
+        let reshape = NodeProto {
+            input: vec!["u", "shape"],
+            output: vec!["y"],
+            op_type: "Reshape",
+            name: "reshape",
+            ..NodeProto::default()
+        };
         let graph = GraphProto {
             node: vec![unsqueeze, reshape],
             name: "unsqueeze_reshape_merge_graph",
             initializer: vec![x_initializer, shape_initializer],
-            output: vec![ValueInfoProto { name: "y", ..ValueInfoProto::default() }],
+            output: vec![ValueInfoProto {
+                name: "y",
+                ..ValueInfoProto::default()
+            }],
             ..GraphProto::default()
         };
 
-        let error = lower_graph(&graph).expect_err("merging real axes across a view cannot compose");
-        assert!(matches!(error, LowerError::UnsupportedShape { .. }), "expected UnsupportedShape, got {error:?}");
+        let error =
+            lower_graph(&graph).expect_err("merging real axes across a view cannot compose");
+        assert!(
+            matches!(error, LowerError::UnsupportedShape { .. }),
+            "expected UnsupportedShape, got {error:?}"
+        );
     }
 
     /// `BatchNormalization` (inference), `NCHW` input `[1, 2, 1, 2]`:
@@ -4943,21 +7811,38 @@ mod tests {
         let graph = GraphProto {
             node: vec![node],
             name: "batchnorm_graph",
-            initializer: vec![x_initializer, scale_initializer, bias_initializer, mean_initializer, var_initializer],
-            output: vec![ValueInfoProto { name: "y", ..ValueInfoProto::default() }],
+            initializer: vec![
+                x_initializer,
+                scale_initializer,
+                bias_initializer,
+                mean_initializer,
+                var_initializer,
+            ],
+            output: vec![ValueInfoProto {
+                name: "y",
+                ..ValueInfoProto::default()
+            }],
             ..GraphProto::default()
         };
 
         let lowered = lower_graph(&graph).expect("lower BatchNormalization");
-        let named: Vec<(&str, &[f32])> = lowered.initializers.iter().map(|(name, data)| (name.as_str(), data.as_slice())).collect();
+        let named: Vec<(&str, &[f32])> = lowered
+            .initializers
+            .iter()
+            .map(|(name, data)| (name.as_str(), data.as_slice()))
+            .collect();
         let output = lowered.graph_outputs[0].1;
-        let evaluated = evaluate_named(&lowered.program, &[], &named, &[output]).expect("evaluate BatchNormalization");
+        let evaluated = evaluate_named(&lowered.program, &[], &named, &[output])
+            .expect("evaluate BatchNormalization");
         let (data, shape) = evaluated.get(output).expect("y present");
 
         assert_eq!(shape, &[1, 2, 1, 2]);
         let expected = [-2.0, 2.0, 0.5, 1.5];
         for (actual, expected) in data.iter().zip(expected.iter()) {
-            assert!((actual - expected).abs() < 1e-3, "batchnorm output {actual} does not match hand-computed {expected}");
+            assert!(
+                (actual - expected).abs() < 1e-3,
+                "batchnorm output {actual} does not match hand-computed {expected}"
+            );
         }
     }
 
@@ -4970,25 +7855,45 @@ mod tests {
     #[test]
     fn logsoftmax_exponentiates_back_to_a_probability_distribution() {
         let x_initializer = f32_initializer("x", &[3], &[0.0, 1.0, 2.0]);
-        let node = NodeProto { input: vec!["x"], output: vec!["y"], op_type: "LogSoftmax", name: "logsoftmax", ..NodeProto::default() };
+        let node = NodeProto {
+            input: vec!["x"],
+            output: vec!["y"],
+            op_type: "LogSoftmax",
+            name: "logsoftmax",
+            ..NodeProto::default()
+        };
         let graph = GraphProto {
             node: vec![node],
             name: "logsoftmax_graph",
             initializer: vec![x_initializer],
-            output: vec![ValueInfoProto { name: "y", ..ValueInfoProto::default() }],
+            output: vec![ValueInfoProto {
+                name: "y",
+                ..ValueInfoProto::default()
+            }],
             ..GraphProto::default()
         };
 
         let lowered = lower_graph(&graph).expect("lower LogSoftmax");
-        let named: Vec<(&str, &[f32])> = lowered.initializers.iter().map(|(name, data)| (name.as_str(), data.as_slice())).collect();
+        let named: Vec<(&str, &[f32])> = lowered
+            .initializers
+            .iter()
+            .map(|(name, data)| (name.as_str(), data.as_slice()))
+            .collect();
         let output = lowered.graph_outputs[0].1;
-        let evaluated = evaluate_named(&lowered.program, &[], &named, &[output]).expect("evaluate LogSoftmax");
+        let evaluated =
+            evaluate_named(&lowered.program, &[], &named, &[output]).expect("evaluate LogSoftmax");
         let (data, shape) = evaluated.get(output).expect("y present");
 
         assert_eq!(shape, &[3]);
         let total: f32 = data.iter().map(|&value| value.exp()).sum();
-        assert!((total - 1.0).abs() < 1e-5, "exp(LogSoftmax(x)) must sum to 1.0, got {total}");
-        assert!(data[2] > data[1] && data[1] > data[0], "LogSoftmax preserves x's ordering");
+        assert!(
+            (total - 1.0).abs() < 1e-5,
+            "exp(LogSoftmax(x)) must sum to 1.0, got {total}"
+        );
+        assert!(
+            data[2] > data[1] && data[1] > data[0],
+            "LogSoftmax preserves x's ordering"
+        );
     }
 
     /// `Concat` along `axis=0` of two `[2, 2]` matrices.
@@ -4996,21 +7901,39 @@ mod tests {
     fn concat_joins_two_matrices_along_axis_zero() {
         let a_initializer = f32_initializer("a", &[2, 2], &[1.0, 2.0, 3.0, 4.0]);
         let b_initializer = f32_initializer("b", &[2, 2], &[5.0, 6.0, 7.0, 8.0]);
-        let axis_attribute = AttributeProto { name: "axis", i: 0, ..AttributeProto::default() };
-        let node =
-            NodeProto { input: vec!["a", "b"], output: vec!["y"], op_type: "Concat", name: "concat", attribute: vec![axis_attribute], ..NodeProto::default() };
+        let axis_attribute = AttributeProto {
+            name: "axis",
+            i: 0,
+            ..AttributeProto::default()
+        };
+        let node = NodeProto {
+            input: vec!["a", "b"],
+            output: vec!["y"],
+            op_type: "Concat",
+            name: "concat",
+            attribute: vec![axis_attribute],
+            ..NodeProto::default()
+        };
         let graph = GraphProto {
             node: vec![node],
             name: "concat_axis0_graph",
             initializer: vec![a_initializer, b_initializer],
-            output: vec![ValueInfoProto { name: "y", ..ValueInfoProto::default() }],
+            output: vec![ValueInfoProto {
+                name: "y",
+                ..ValueInfoProto::default()
+            }],
             ..GraphProto::default()
         };
 
         let lowered = lower_graph(&graph).expect("lower Concat axis=0");
-        let named: Vec<(&str, &[f32])> = lowered.initializers.iter().map(|(name, data)| (name.as_str(), data.as_slice())).collect();
+        let named: Vec<(&str, &[f32])> = lowered
+            .initializers
+            .iter()
+            .map(|(name, data)| (name.as_str(), data.as_slice()))
+            .collect();
         let output = lowered.graph_outputs[0].1;
-        let evaluated = evaluate_named(&lowered.program, &[], &named, &[output]).expect("evaluate Concat axis=0");
+        let evaluated = evaluate_named(&lowered.program, &[], &named, &[output])
+            .expect("evaluate Concat axis=0");
         let (data, shape) = evaluated.get(output).expect("y present");
 
         assert_eq!(shape, &[4, 2]);
@@ -5024,7 +7947,11 @@ mod tests {
         let a_initializer = f32_initializer("a", &[2, 1], &[1.0, 4.0]);
         let b_initializer = f32_initializer("b", &[2, 2], &[2.0, 3.0, 5.0, 6.0]);
         let c_initializer = f32_initializer("c", &[2, 1], &[7.0, 8.0]);
-        let axis_attribute = AttributeProto { name: "axis", i: 1, ..AttributeProto::default() };
+        let axis_attribute = AttributeProto {
+            name: "axis",
+            i: 1,
+            ..AttributeProto::default()
+        };
         let node = NodeProto {
             input: vec!["a", "b", "c"],
             output: vec!["y"],
@@ -5037,14 +7964,22 @@ mod tests {
             node: vec![node],
             name: "concat_axis1_graph",
             initializer: vec![a_initializer, b_initializer, c_initializer],
-            output: vec![ValueInfoProto { name: "y", ..ValueInfoProto::default() }],
+            output: vec![ValueInfoProto {
+                name: "y",
+                ..ValueInfoProto::default()
+            }],
             ..GraphProto::default()
         };
 
         let lowered = lower_graph(&graph).expect("lower Concat axis=1");
-        let named: Vec<(&str, &[f32])> = lowered.initializers.iter().map(|(name, data)| (name.as_str(), data.as_slice())).collect();
+        let named: Vec<(&str, &[f32])> = lowered
+            .initializers
+            .iter()
+            .map(|(name, data)| (name.as_str(), data.as_slice()))
+            .collect();
         let output = lowered.graph_outputs[0].1;
-        let evaluated = evaluate_named(&lowered.program, &[], &named, &[output]).expect("evaluate Concat axis=1");
+        let evaluated = evaluate_named(&lowered.program, &[], &named, &[output])
+            .expect("evaluate Concat axis=1");
         let (data, shape) = evaluated.get(output).expect("y present");
 
         assert_eq!(shape, &[2, 4]);
@@ -5055,21 +7990,43 @@ mod tests {
     /// batch.
     #[test]
     fn matmul_contracts_a_batch_of_matrices() {
-        let a_initializer = f32_initializer("a", &[2, 2, 3], &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0]);
-        let b_initializer = f32_initializer("b", &[2, 3, 2], &[1.0, 0.0, 0.0, 1.0, 1.0, 1.0, 2.0, 0.0, 0.0, 2.0, 1.0, 1.0]);
-        let node = NodeProto { input: vec!["a", "b"], output: vec!["y"], op_type: "MatMul", name: "matmul", ..NodeProto::default() };
+        let a_initializer = f32_initializer(
+            "a",
+            &[2, 2, 3],
+            &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+        );
+        let b_initializer = f32_initializer(
+            "b",
+            &[2, 3, 2],
+            &[1.0, 0.0, 0.0, 1.0, 1.0, 1.0, 2.0, 0.0, 0.0, 2.0, 1.0, 1.0],
+        );
+        let node = NodeProto {
+            input: vec!["a", "b"],
+            output: vec!["y"],
+            op_type: "MatMul",
+            name: "matmul",
+            ..NodeProto::default()
+        };
         let graph = GraphProto {
             node: vec![node],
             name: "batched_matmul_graph",
             initializer: vec![a_initializer, b_initializer],
-            output: vec![ValueInfoProto { name: "y", ..ValueInfoProto::default() }],
+            output: vec![ValueInfoProto {
+                name: "y",
+                ..ValueInfoProto::default()
+            }],
             ..GraphProto::default()
         };
 
         let lowered = lower_graph(&graph).expect("lower batched MatMul");
-        let named: Vec<(&str, &[f32])> = lowered.initializers.iter().map(|(name, data)| (name.as_str(), data.as_slice())).collect();
+        let named: Vec<(&str, &[f32])> = lowered
+            .initializers
+            .iter()
+            .map(|(name, data)| (name.as_str(), data.as_slice()))
+            .collect();
         let output = lowered.graph_outputs[0].1;
-        let evaluated = evaluate_named(&lowered.program, &[], &named, &[output]).expect("evaluate batched MatMul");
+        let evaluated = evaluate_named(&lowered.program, &[], &named, &[output])
+            .expect("evaluate batched MatMul");
         let (data, shape) = evaluated.get(output).expect("y present");
 
         assert_eq!(shape, &[2, 2, 2]);
@@ -5084,21 +8041,39 @@ mod tests {
     /// axis as extent 1.
     #[test]
     fn matmul_broadcasts_a_shared_right_hand_matrix_across_the_batch() {
-        let a_initializer = f32_initializer("a", &[2, 2, 3], &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0]);
+        let a_initializer = f32_initializer(
+            "a",
+            &[2, 2, 3],
+            &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+        );
         let b_initializer = f32_initializer("b", &[3, 2], &[1.0, 0.0, 0.0, 1.0, 1.0, 1.0]);
-        let node = NodeProto { input: vec!["a", "b"], output: vec!["y"], op_type: "MatMul", name: "matmul", ..NodeProto::default() };
+        let node = NodeProto {
+            input: vec!["a", "b"],
+            output: vec!["y"],
+            op_type: "MatMul",
+            name: "matmul",
+            ..NodeProto::default()
+        };
         let graph = GraphProto {
             node: vec![node],
             name: "broadcast_matmul_graph",
             initializer: vec![a_initializer, b_initializer],
-            output: vec![ValueInfoProto { name: "y", ..ValueInfoProto::default() }],
+            output: vec![ValueInfoProto {
+                name: "y",
+                ..ValueInfoProto::default()
+            }],
             ..GraphProto::default()
         };
 
         let lowered = lower_graph(&graph).expect("lower broadcast MatMul");
-        let named: Vec<(&str, &[f32])> = lowered.initializers.iter().map(|(name, data)| (name.as_str(), data.as_slice())).collect();
+        let named: Vec<(&str, &[f32])> = lowered
+            .initializers
+            .iter()
+            .map(|(name, data)| (name.as_str(), data.as_slice()))
+            .collect();
         let output = lowered.graph_outputs[0].1;
-        let evaluated = evaluate_named(&lowered.program, &[], &named, &[output]).expect("evaluate broadcast MatMul");
+        let evaluated = evaluate_named(&lowered.program, &[], &named, &[output])
+            .expect("evaluate broadcast MatMul");
         let (data, shape) = evaluated.get(output).expect("y present");
 
         assert_eq!(shape, &[2, 2, 2]);
@@ -5121,13 +8096,21 @@ mod tests {
     /// assertion, not just produce a differently-scaled right answer.
     #[test]
     fn gemm_contracts_a_flattened_real_rank_four_operand() {
-        let x_initializer = f32_initializer("x", &[1, 2, 2, 2], &[10.0, 20.0, 30.0, 40.0, 50.0, 60.0, 70.0, 80.0]);
+        let x_initializer = f32_initializer(
+            "x",
+            &[1, 2, 2, 2],
+            &[10.0, 20.0, 30.0, 40.0, 50.0, 60.0, 70.0, 80.0],
+        );
         let flatten_node = NodeProto {
             input: vec!["x"],
             output: vec!["x_flat"],
             op_type: "Flatten",
             name: "flatten",
-            attribute: vec![AttributeProto { name: "axis", i: 1, ..AttributeProto::default() }],
+            attribute: vec![AttributeProto {
+                name: "axis",
+                i: 1,
+                ..AttributeProto::default()
+            }],
             ..NodeProto::default()
         };
         #[rustfmt::skip]
@@ -5145,19 +8128,33 @@ mod tests {
                 1.0, 0.0, 1.0,
             ],
         );
-        let gemm_node = NodeProto { input: vec!["x_flat", "b"], output: vec!["y"], op_type: "Gemm", name: "gemm", ..NodeProto::default() };
+        let gemm_node = NodeProto {
+            input: vec!["x_flat", "b"],
+            output: vec!["y"],
+            op_type: "Gemm",
+            name: "gemm",
+            ..NodeProto::default()
+        };
         let graph = GraphProto {
             node: vec![flatten_node, gemm_node],
             name: "flatten_gemm_graph",
             initializer: vec![x_initializer, b_initializer],
-            output: vec![ValueInfoProto { name: "y", ..ValueInfoProto::default() }],
+            output: vec![ValueInfoProto {
+                name: "y",
+                ..ValueInfoProto::default()
+            }],
             ..GraphProto::default()
         };
 
         let lowered = lower_graph(&graph).expect("lower Flatten -> Gemm");
-        let named: Vec<(&str, &[f32])> = lowered.initializers.iter().map(|(name, data)| (name.as_str(), data.as_slice())).collect();
+        let named: Vec<(&str, &[f32])> = lowered
+            .initializers
+            .iter()
+            .map(|(name, data)| (name.as_str(), data.as_slice()))
+            .collect();
         let output = lowered.graph_outputs[0].1;
-        let evaluated = evaluate_named(&lowered.program, &[], &named, &[output]).expect("evaluate Flatten -> Gemm");
+        let evaluated = evaluate_named(&lowered.program, &[], &named, &[output])
+            .expect("evaluate Flatten -> Gemm");
         let (data, shape) = evaluated.get(output).expect("y present");
 
         assert_eq!(shape, &[1, 3]);
@@ -5172,27 +8169,49 @@ mod tests {
     #[test]
     fn softmax_reduces_the_leading_axis() {
         let x_initializer = f32_initializer("x", &[3, 2], &[0.0, 1.0, 0.0, 1.0, 0.0, 1.0]);
-        let axis_attribute = AttributeProto { name: "axis", i: 0, ..AttributeProto::default() };
-        let node = NodeProto { input: vec!["x"], output: vec!["y"], op_type: "Softmax", name: "softmax", attribute: vec![axis_attribute], ..NodeProto::default() };
+        let axis_attribute = AttributeProto {
+            name: "axis",
+            i: 0,
+            ..AttributeProto::default()
+        };
+        let node = NodeProto {
+            input: vec!["x"],
+            output: vec!["y"],
+            op_type: "Softmax",
+            name: "softmax",
+            attribute: vec![axis_attribute],
+            ..NodeProto::default()
+        };
         let graph = GraphProto {
             node: vec![node],
             name: "softmax_axis0_graph",
             initializer: vec![x_initializer],
-            output: vec![ValueInfoProto { name: "y", ..ValueInfoProto::default() }],
+            output: vec![ValueInfoProto {
+                name: "y",
+                ..ValueInfoProto::default()
+            }],
             ..GraphProto::default()
         };
 
         let lowered = lower_graph(&graph).expect("lower Softmax axis=0");
-        let named: Vec<(&str, &[f32])> = lowered.initializers.iter().map(|(name, data)| (name.as_str(), data.as_slice())).collect();
+        let named: Vec<(&str, &[f32])> = lowered
+            .initializers
+            .iter()
+            .map(|(name, data)| (name.as_str(), data.as_slice()))
+            .collect();
         let output = lowered.graph_outputs[0].1;
-        let evaluated = evaluate_named(&lowered.program, &[], &named, &[output]).expect("evaluate Softmax axis=0");
+        let evaluated = evaluate_named(&lowered.program, &[], &named, &[output])
+            .expect("evaluate Softmax axis=0");
         let (data, shape) = evaluated.get(output).expect("y present");
 
         assert_eq!(shape, &[3, 2]);
         // every column is identical ([0,0,0] or [1,1,1]), so softmax over the
         // 3-element column is uniform: 1/3 each.
         for &value in data {
-            assert!((value - 1.0 / 3.0).abs() < 1e-6, "expected uniform 1/3, got {value}");
+            assert!(
+                (value - 1.0 / 3.0).abs() < 1e-6,
+                "expected uniform 1/3, got {value}"
+            );
         }
     }
 
@@ -5200,34 +8219,63 @@ mod tests {
     /// neither leading nor trailing.
     #[test]
     fn softmax_reduces_a_middle_axis_of_a_rank_three_input() {
-        let x_initializer = f32_initializer("x", &[2, 3, 2], &[0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
-        let axis_attribute = AttributeProto { name: "axis", i: 1, ..AttributeProto::default() };
-        let node = NodeProto { input: vec!["x"], output: vec!["y"], op_type: "Softmax", name: "softmax", attribute: vec![axis_attribute], ..NodeProto::default() };
+        let x_initializer = f32_initializer(
+            "x",
+            &[2, 3, 2],
+            &[0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
+        );
+        let axis_attribute = AttributeProto {
+            name: "axis",
+            i: 1,
+            ..AttributeProto::default()
+        };
+        let node = NodeProto {
+            input: vec!["x"],
+            output: vec!["y"],
+            op_type: "Softmax",
+            name: "softmax",
+            attribute: vec![axis_attribute],
+            ..NodeProto::default()
+        };
         let graph = GraphProto {
             node: vec![node],
             name: "softmax_axis1_graph",
             initializer: vec![x_initializer],
-            output: vec![ValueInfoProto { name: "y", ..ValueInfoProto::default() }],
+            output: vec![ValueInfoProto {
+                name: "y",
+                ..ValueInfoProto::default()
+            }],
             ..GraphProto::default()
         };
 
         let lowered = lower_graph(&graph).expect("lower Softmax axis=1");
-        let named: Vec<(&str, &[f32])> = lowered.initializers.iter().map(|(name, data)| (name.as_str(), data.as_slice())).collect();
+        let named: Vec<(&str, &[f32])> = lowered
+            .initializers
+            .iter()
+            .map(|(name, data)| (name.as_str(), data.as_slice()))
+            .collect();
         let output = lowered.graph_outputs[0].1;
-        let evaluated = evaluate_named(&lowered.program, &[], &named, &[output]).expect("evaluate Softmax axis=1");
+        let evaluated = evaluate_named(&lowered.program, &[], &named, &[output])
+            .expect("evaluate Softmax axis=1");
         let (data, shape) = evaluated.get(output).expect("y present");
 
         assert_eq!(shape, &[2, 3, 2]);
         // batch 0 is all zero along the reduced axis -> uniform 1/3.
         for &value in &data[0..6] {
-            assert!((value - 1.0 / 3.0).abs() < 1e-6, "expected uniform 1/3, got {value}");
+            assert!(
+                (value - 1.0 / 3.0).abs() < 1e-6,
+                "expected uniform 1/3, got {value}"
+            );
         }
         // batch 1, each column sums to 1.
         let column0_sum = data[6] + data[8] + data[10];
         let column1_sum = data[7] + data[9] + data[11];
         assert!((column0_sum - 1.0).abs() < 1e-5);
         assert!((column1_sum - 1.0).abs() < 1e-5);
-        assert!(data[10] > data[8] && data[8] > data[6], "softmax preserves ordering within the reduced axis");
+        assert!(
+            data[10] > data[8] && data[8] > data[6],
+            "softmax preserves ordering within the reduced axis"
+        );
     }
 
     /// `Gather(data, indices, axis=1)` on a `[2, 3]` table with
@@ -5236,22 +8284,46 @@ mod tests {
     #[test]
     fn gather_selects_columns_by_index_at_a_general_axis() {
         let table_initializer = f32_initializer("table", &[2, 3], &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
-        let indices_initializer = TensorProto { dims: vec![2], data_type: 7, int64_data: vec![2, 0], name: "ids", ..TensorProto::default() };
-        let axis_attribute = AttributeProto { name: "axis", i: 1, ..AttributeProto::default() };
-        let node =
-            NodeProto { input: vec!["table", "ids"], output: vec!["y"], op_type: "Gather", name: "gather", attribute: vec![axis_attribute], ..NodeProto::default() };
+        let indices_initializer = TensorProto {
+            dims: vec![2],
+            data_type: 7,
+            int64_data: vec![2, 0],
+            name: "ids",
+            ..TensorProto::default()
+        };
+        let axis_attribute = AttributeProto {
+            name: "axis",
+            i: 1,
+            ..AttributeProto::default()
+        };
+        let node = NodeProto {
+            input: vec!["table", "ids"],
+            output: vec!["y"],
+            op_type: "Gather",
+            name: "gather",
+            attribute: vec![axis_attribute],
+            ..NodeProto::default()
+        };
         let graph = GraphProto {
             node: vec![node],
             name: "gather_axis1_graph",
             initializer: vec![table_initializer, indices_initializer],
-            output: vec![ValueInfoProto { name: "y", ..ValueInfoProto::default() }],
+            output: vec![ValueInfoProto {
+                name: "y",
+                ..ValueInfoProto::default()
+            }],
             ..GraphProto::default()
         };
 
         let lowered = lower_graph(&graph).expect("lower Gather axis=1");
-        let named: Vec<(&str, &[f32])> = lowered.initializers.iter().map(|(name, data)| (name.as_str(), data.as_slice())).collect();
+        let named: Vec<(&str, &[f32])> = lowered
+            .initializers
+            .iter()
+            .map(|(name, data)| (name.as_str(), data.as_slice()))
+            .collect();
         let output = lowered.graph_outputs[0].1;
-        let evaluated = evaluate_named(&lowered.program, &[], &named, &[output]).expect("evaluate Gather axis=1");
+        let evaluated = evaluate_named(&lowered.program, &[], &named, &[output])
+            .expect("evaluate Gather axis=1");
         let (data, shape) = evaluated.get(output).expect("y present");
 
         assert_eq!(shape, &[2, 2]);
@@ -5267,10 +8339,20 @@ mod tests {
     #[test]
     fn symbolic_graph_input_dimension_is_rejected() {
         let mut value_info = input_value_info("x", &[2]);
-        if let Some(TypeProto { value: Some(TypeValue::Tensor(tensor)), .. }) = value_info.r#type.as_mut() {
-            tensor.shape = Some(TensorShapeProto { dim: vec![Dimension { value: Some(DimensionValue::Param("batch")), denotation: "" }] });
+        if let Some(TypeProto {
+            value: Some(TypeValue::Tensor(tensor)),
+            ..
+        }) = value_info.r#type.as_mut()
+        {
+            tensor.shape = Some(TensorShapeProto {
+                dim: vec![Dimension {
+                    value: Some(DimensionValue::Param("batch")),
+                    denotation: "",
+                }],
+            });
         }
-        let error = value_info_shape(&value_info, &BTreeMap::new()).expect_err("symbolic dim rejected");
+        let error =
+            value_info_shape(&value_info, &BTreeMap::new()).expect_err("symbolic dim rejected");
         assert!(matches!(error, LowerError::UnsupportedShape { .. }));
     }
 
@@ -5280,8 +8362,17 @@ mod tests {
     #[test]
     fn symbolic_graph_input_dimension_resolves_when_pinned() {
         let mut value_info = input_value_info("x", &[2]);
-        if let Some(TypeProto { value: Some(TypeValue::Tensor(tensor)), .. }) = value_info.r#type.as_mut() {
-            tensor.shape = Some(TensorShapeProto { dim: vec![Dimension { value: Some(DimensionValue::Param("batch")), denotation: "" }] });
+        if let Some(TypeProto {
+            value: Some(TypeValue::Tensor(tensor)),
+            ..
+        }) = value_info.r#type.as_mut()
+        {
+            tensor.shape = Some(TensorShapeProto {
+                dim: vec![Dimension {
+                    value: Some(DimensionValue::Param("batch")),
+                    denotation: "",
+                }],
+            });
         }
         let mut pins: BTreeMap<&str, u64> = BTreeMap::new();
         pins.insert("batch", 4);
@@ -5290,11 +8381,19 @@ mod tests {
     }
 
     fn ints_attribute(name: &'static str, ints: Vec<i64>) -> AttributeProto<'static> {
-        AttributeProto { name, ints, ..AttributeProto::default() }
+        AttributeProto {
+            name,
+            ints,
+            ..AttributeProto::default()
+        }
     }
 
     fn int_attribute(name: &'static str, value: i64) -> AttributeProto<'static> {
-        AttributeProto { name, i: value, ..AttributeProto::default() }
+        AttributeProto {
+            name,
+            i: value,
+            ..AttributeProto::default()
+        }
     }
 
     /// `Conv`, stride 1, no padding: a 3x3 all-ones kernel over a `4x4`
@@ -5304,25 +8403,47 @@ mod tests {
     /// independently summed reference.
     #[test]
     fn conv_stride1_no_pad_sums_each_3x3_window() {
-        let image = f32_initializer("image", &[1, 1, 4, 4], &(1..=16).map(|value| value as f32).collect::<Vec<_>>());
+        let image = f32_initializer(
+            "image",
+            &[1, 1, 4, 4],
+            &(1..=16).map(|value| value as f32).collect::<Vec<_>>(),
+        );
         let weight = f32_initializer("weight", &[1, 1, 3, 3], &[1.0; 9]);
-        let node = NodeProto { input: vec!["image", "weight"], output: vec!["y"], op_type: "Conv", name: "conv", ..NodeProto::default() };
+        let node = NodeProto {
+            input: vec!["image", "weight"],
+            output: vec!["y"],
+            op_type: "Conv",
+            name: "conv",
+            ..NodeProto::default()
+        };
         let graph = GraphProto {
             node: vec![node],
             name: "conv_stride1_graph",
             initializer: vec![image, weight],
-            output: vec![ValueInfoProto { name: "y", ..ValueInfoProto::default() }],
+            output: vec![ValueInfoProto {
+                name: "y",
+                ..ValueInfoProto::default()
+            }],
             ..GraphProto::default()
         };
 
         let lowered = lower_graph(&graph).expect("lower Conv");
-        let named: Vec<(&str, &[f32])> = lowered.initializers.iter().map(|(name, data)| (name.as_str(), data.as_slice())).collect();
+        let named: Vec<(&str, &[f32])> = lowered
+            .initializers
+            .iter()
+            .map(|(name, data)| (name.as_str(), data.as_slice()))
+            .collect();
         let output = lowered.graph_outputs[0].1;
-        let evaluated = evaluate_named(&lowered.program, &[], &named, &[output]).expect("evaluate Conv");
+        let evaluated =
+            evaluate_named(&lowered.program, &[], &named, &[output]).expect("evaluate Conv");
         let (data, shape) = evaluated.get(output).expect("y present");
 
         assert_eq!(shape, &[1, 1, 2, 2]);
-        assert_eq!(data, &[54.0, 63.0, 90.0, 99.0], "hand-summed 3x3 windows over the 4x4 image");
+        assert_eq!(
+            data,
+            &[54.0, 63.0, 90.0, 99.0],
+            "hand-summed 3x3 windows over the 4x4 image"
+        );
     }
 
     /// `Conv`, stride 2 and `pads = [1, 1, 1, 1]`: exercises [`pad_axis`]'s
@@ -5331,58 +8452,99 @@ mod tests {
     /// verified against a manually zero-padded 6x6 reference.
     #[test]
     fn conv_stride2_with_padding_sums_each_padded_window() {
-        let image = f32_initializer("image", &[1, 1, 4, 4], &(1..=16).map(|value| value as f32).collect::<Vec<_>>());
+        let image = f32_initializer(
+            "image",
+            &[1, 1, 4, 4],
+            &(1..=16).map(|value| value as f32).collect::<Vec<_>>(),
+        );
         let weight = f32_initializer("weight", &[1, 1, 3, 3], &[1.0; 9]);
         let node = NodeProto {
             input: vec!["image", "weight"],
             output: vec!["y"],
             op_type: "Conv",
             name: "conv",
-            attribute: vec![ints_attribute("strides", vec![2, 2]), ints_attribute("pads", vec![1, 1, 1, 1])],
+            attribute: vec![
+                ints_attribute("strides", vec![2, 2]),
+                ints_attribute("pads", vec![1, 1, 1, 1]),
+            ],
             ..NodeProto::default()
         };
         let graph = GraphProto {
             node: vec![node],
             name: "conv_stride2_pad1_graph",
             initializer: vec![image, weight],
-            output: vec![ValueInfoProto { name: "y", ..ValueInfoProto::default() }],
+            output: vec![ValueInfoProto {
+                name: "y",
+                ..ValueInfoProto::default()
+            }],
             ..GraphProto::default()
         };
 
         let lowered = lower_graph(&graph).expect("lower Conv stride2 pad1");
-        let named: Vec<(&str, &[f32])> = lowered.initializers.iter().map(|(name, data)| (name.as_str(), data.as_slice())).collect();
+        let named: Vec<(&str, &[f32])> = lowered
+            .initializers
+            .iter()
+            .map(|(name, data)| (name.as_str(), data.as_slice()))
+            .collect();
         let output = lowered.graph_outputs[0].1;
-        let evaluated = evaluate_named(&lowered.program, &[], &named, &[output]).expect("evaluate Conv stride2 pad1");
+        let evaluated = evaluate_named(&lowered.program, &[], &named, &[output])
+            .expect("evaluate Conv stride2 pad1");
         let (data, shape) = evaluated.get(output).expect("y present");
 
         assert_eq!(shape, &[1, 1, 2, 2]);
-        assert_eq!(data, &[14.0, 30.0, 57.0, 99.0], "hand-summed windows over the zero-padded 6x6 image");
+        assert_eq!(
+            data,
+            &[14.0, 30.0, 57.0, 99.0],
+            "hand-summed windows over the zero-padded 6x6 image"
+        );
     }
 
     /// `Conv` with a bias operand: the trailing broadcast `Add` [`lower_conv`]
     /// appends over the `co` axis, on top of the stride-1 no-pad case above.
     #[test]
     fn conv_adds_a_per_output_channel_bias() {
-        let image = f32_initializer("image", &[1, 1, 4, 4], &(1..=16).map(|value| value as f32).collect::<Vec<_>>());
+        let image = f32_initializer(
+            "image",
+            &[1, 1, 4, 4],
+            &(1..=16).map(|value| value as f32).collect::<Vec<_>>(),
+        );
         let weight = f32_initializer("weight", &[1, 1, 3, 3], &[1.0; 9]);
         let bias = f32_initializer("bias", &[1], &[100.0]);
-        let node = NodeProto { input: vec!["image", "weight", "bias"], output: vec!["y"], op_type: "Conv", name: "conv", ..NodeProto::default() };
+        let node = NodeProto {
+            input: vec!["image", "weight", "bias"],
+            output: vec!["y"],
+            op_type: "Conv",
+            name: "conv",
+            ..NodeProto::default()
+        };
         let graph = GraphProto {
             node: vec![node],
             name: "conv_bias_graph",
             initializer: vec![image, weight, bias],
-            output: vec![ValueInfoProto { name: "y", ..ValueInfoProto::default() }],
+            output: vec![ValueInfoProto {
+                name: "y",
+                ..ValueInfoProto::default()
+            }],
             ..GraphProto::default()
         };
 
         let lowered = lower_graph(&graph).expect("lower Conv with bias");
-        let named: Vec<(&str, &[f32])> = lowered.initializers.iter().map(|(name, data)| (name.as_str(), data.as_slice())).collect();
+        let named: Vec<(&str, &[f32])> = lowered
+            .initializers
+            .iter()
+            .map(|(name, data)| (name.as_str(), data.as_slice()))
+            .collect();
         let output = lowered.graph_outputs[0].1;
-        let evaluated = evaluate_named(&lowered.program, &[], &named, &[output]).expect("evaluate Conv with bias");
+        let evaluated = evaluate_named(&lowered.program, &[], &named, &[output])
+            .expect("evaluate Conv with bias");
         let (data, shape) = evaluated.get(output).expect("y present");
 
         assert_eq!(shape, &[1, 1, 2, 2]);
-        assert_eq!(data, &[154.0, 163.0, 190.0, 199.0], "bias 100 added to every windowed sum");
+        assert_eq!(
+            data,
+            &[154.0, 163.0, 190.0, 199.0],
+            "bias 100 added to every windowed sum"
+        );
     }
 
     /// `Conv` with `group=2` on an all-zero image lowers cleanly to an
@@ -5400,25 +8562,40 @@ mod tests {
             output: vec!["y"],
             op_type: "Conv",
             name: "conv",
-            attribute: vec![AttributeProto { name: "group", i: 2, ..AttributeProto::default() }],
+            attribute: vec![AttributeProto {
+                name: "group",
+                i: 2,
+                ..AttributeProto::default()
+            }],
             ..NodeProto::default()
         };
         let graph = GraphProto {
             node: vec![node],
             name: "conv_grouped_graph",
             initializer: vec![image, weight],
-            output: vec![ValueInfoProto { name: "y", ..ValueInfoProto::default() }],
+            output: vec![ValueInfoProto {
+                name: "y",
+                ..ValueInfoProto::default()
+            }],
             ..GraphProto::default()
         };
 
         let lowered = lower_graph(&graph).expect("lower grouped Conv");
-        let named: Vec<(&str, &[f32])> = lowered.initializers.iter().map(|(name, data)| (name.as_str(), data.as_slice())).collect();
+        let named: Vec<(&str, &[f32])> = lowered
+            .initializers
+            .iter()
+            .map(|(name, data)| (name.as_str(), data.as_slice()))
+            .collect();
         let output = lowered.graph_outputs[0].1;
-        let evaluated = evaluate_named(&lowered.program, &[], &named, &[output]).expect("evaluate grouped Conv");
+        let evaluated = evaluate_named(&lowered.program, &[], &named, &[output])
+            .expect("evaluate grouped Conv");
         let (data, shape) = evaluated.get(output).expect("y present");
 
         assert_eq!(shape, &[1, 2, 2, 2]);
-        assert!(data.iter().all(|&value| value == 0.0), "an all-zero image convolves to an all-zero output");
+        assert!(
+            data.iter().all(|&value| value == 0.0),
+            "an all-zero image convolves to an all-zero output"
+        );
     }
 
     /// `MaxPool`, 2x2 kernel and stride: [`window_materialize`] padded with
@@ -5426,31 +8603,50 @@ mod tests {
     /// window -- hand-verified against the per-block max of a 4x4 image.
     #[test]
     fn maxpool_2x2_takes_the_max_of_each_block() {
-        let image = f32_initializer("image", &[1, 1, 4, 4], &(1..=16).map(|value| value as f32).collect::<Vec<_>>());
+        let image = f32_initializer(
+            "image",
+            &[1, 1, 4, 4],
+            &(1..=16).map(|value| value as f32).collect::<Vec<_>>(),
+        );
         let node = NodeProto {
             input: vec!["image"],
             output: vec!["y"],
             op_type: "MaxPool",
             name: "maxpool",
-            attribute: vec![ints_attribute("kernel_shape", vec![2, 2]), ints_attribute("strides", vec![2, 2])],
+            attribute: vec![
+                ints_attribute("kernel_shape", vec![2, 2]),
+                ints_attribute("strides", vec![2, 2]),
+            ],
             ..NodeProto::default()
         };
         let graph = GraphProto {
             node: vec![node],
             name: "maxpool_graph",
             initializer: vec![image],
-            output: vec![ValueInfoProto { name: "y", ..ValueInfoProto::default() }],
+            output: vec![ValueInfoProto {
+                name: "y",
+                ..ValueInfoProto::default()
+            }],
             ..GraphProto::default()
         };
 
         let lowered = lower_graph(&graph).expect("lower MaxPool");
-        let named: Vec<(&str, &[f32])> = lowered.initializers.iter().map(|(name, data)| (name.as_str(), data.as_slice())).collect();
+        let named: Vec<(&str, &[f32])> = lowered
+            .initializers
+            .iter()
+            .map(|(name, data)| (name.as_str(), data.as_slice()))
+            .collect();
         let output = lowered.graph_outputs[0].1;
-        let evaluated = evaluate_named(&lowered.program, &[], &named, &[output]).expect("evaluate MaxPool");
+        let evaluated =
+            evaluate_named(&lowered.program, &[], &named, &[output]).expect("evaluate MaxPool");
         let (data, shape) = evaluated.get(output).expect("y present");
 
         assert_eq!(shape, &[1, 1, 2, 2]);
-        assert_eq!(data, &[6.0, 8.0, 14.0, 16.0], "max of each 2x2 block of the 4x4 image");
+        assert_eq!(
+            data,
+            &[6.0, 8.0, 14.0, 16.0],
+            "max of each 2x2 block of the 4x4 image"
+        );
     }
 
     /// `MaxPool`'s optional `Indices` output, `storage_order=0` (row-major,
@@ -5478,27 +8674,48 @@ mod tests {
             output: vec!["y", "indices"],
             op_type: "MaxPool",
             name: "maxpool",
-            attribute: vec![ints_attribute("kernel_shape", vec![2, 2]), ints_attribute("strides", vec![2, 2])],
+            attribute: vec![
+                ints_attribute("kernel_shape", vec![2, 2]),
+                ints_attribute("strides", vec![2, 2]),
+            ],
             ..NodeProto::default()
         };
         let graph = GraphProto {
             node: vec![node],
             name: "maxpool_indices_graph",
             initializer: vec![image],
-            output: vec![ValueInfoProto { name: "y", ..ValueInfoProto::default() }, ValueInfoProto { name: "indices", ..ValueInfoProto::default() }],
+            output: vec![
+                ValueInfoProto {
+                    name: "y",
+                    ..ValueInfoProto::default()
+                },
+                ValueInfoProto {
+                    name: "indices",
+                    ..ValueInfoProto::default()
+                },
+            ],
             ..GraphProto::default()
         };
 
         let lowered = lower_graph(&graph).expect("lower MaxPool with Indices");
-        let named: Vec<(&str, &[f32])> = lowered.initializers.iter().map(|(name, data)| (name.as_str(), data.as_slice())).collect();
+        let named: Vec<(&str, &[f32])> = lowered
+            .initializers
+            .iter()
+            .map(|(name, data)| (name.as_str(), data.as_slice()))
+            .collect();
         let y_output = lowered.graph_outputs[0].1;
         let indices_output = lowered.graph_outputs[1].1;
-        let evaluated = evaluate_named(&lowered.program, &[], &named, &[y_output, indices_output]).expect("evaluate MaxPool with Indices");
+        let evaluated = evaluate_named(&lowered.program, &[], &named, &[y_output, indices_output])
+            .expect("evaluate MaxPool with Indices");
         let (y_data, y_shape) = evaluated.get(y_output).expect("y present");
         let (indices_data, indices_shape) = evaluated.get(indices_output).expect("indices present");
 
         assert_eq!(y_shape, &[1, 1, 2, 2]);
-        assert_eq!(y_data, &[5.0, 8.0, 9.0, 4.0], "the four per-window maxima, including the tied window's shared value");
+        assert_eq!(
+            y_data,
+            &[5.0, 8.0, 9.0, 4.0],
+            "the four per-window maxima, including the tied window's shared value"
+        );
         assert_eq!(indices_shape, &[1, 1, 2, 2]);
         assert_eq!(
             indices_data,
@@ -5533,7 +8750,11 @@ mod tests {
             attribute: vec![
                 ints_attribute("kernel_shape", vec![2, 2]),
                 ints_attribute("strides", vec![2, 2]),
-                AttributeProto { name: "storage_order", i: 1, ..AttributeProto::default() },
+                AttributeProto {
+                    name: "storage_order",
+                    i: 1,
+                    ..AttributeProto::default()
+                },
             ],
             ..NodeProto::default()
         };
@@ -5541,17 +8762,35 @@ mod tests {
             node: vec![node],
             name: "maxpool_indices_column_major_graph",
             initializer: vec![image],
-            output: vec![ValueInfoProto { name: "y", ..ValueInfoProto::default() }, ValueInfoProto { name: "indices", ..ValueInfoProto::default() }],
+            output: vec![
+                ValueInfoProto {
+                    name: "y",
+                    ..ValueInfoProto::default()
+                },
+                ValueInfoProto {
+                    name: "indices",
+                    ..ValueInfoProto::default()
+                },
+            ],
             ..GraphProto::default()
         };
 
         let lowered = lower_graph(&graph).expect("lower MaxPool with column-major Indices");
-        let named: Vec<(&str, &[f32])> = lowered.initializers.iter().map(|(name, data)| (name.as_str(), data.as_slice())).collect();
+        let named: Vec<(&str, &[f32])> = lowered
+            .initializers
+            .iter()
+            .map(|(name, data)| (name.as_str(), data.as_slice()))
+            .collect();
         let indices_output = lowered.graph_outputs[1].1;
-        let evaluated = evaluate_named(&lowered.program, &[], &named, &[indices_output]).expect("evaluate MaxPool with column-major Indices");
+        let evaluated = evaluate_named(&lowered.program, &[], &named, &[indices_output])
+            .expect("evaluate MaxPool with column-major Indices");
         let (indices_data, _) = evaluated.get(indices_output).expect("indices present");
 
-        assert_eq!(indices_data, &[1.0, 9.0, 3.0, 15.0], "column-major flat indices; window 0's tie now breaks toward (1,0) = index 1 under column-major numbering");
+        assert_eq!(
+            indices_data,
+            &[1.0, 9.0, 3.0, 15.0],
+            "column-major flat indices; window 0's tie now breaks toward (1,0) = index 1 under column-major numbering"
+        );
     }
 
     /// `AveragePool`, 2x2 kernel and stride: [`window_materialize`] padded
@@ -5559,31 +8798,50 @@ mod tests {
     /// `1/4` scale -- hand-verified against the per-block mean.
     #[test]
     fn averagepool_2x2_takes_the_mean_of_each_block() {
-        let image = f32_initializer("image", &[1, 1, 4, 4], &(1..=16).map(|value| value as f32).collect::<Vec<_>>());
+        let image = f32_initializer(
+            "image",
+            &[1, 1, 4, 4],
+            &(1..=16).map(|value| value as f32).collect::<Vec<_>>(),
+        );
         let node = NodeProto {
             input: vec!["image"],
             output: vec!["y"],
             op_type: "AveragePool",
             name: "averagepool",
-            attribute: vec![ints_attribute("kernel_shape", vec![2, 2]), ints_attribute("strides", vec![2, 2])],
+            attribute: vec![
+                ints_attribute("kernel_shape", vec![2, 2]),
+                ints_attribute("strides", vec![2, 2]),
+            ],
             ..NodeProto::default()
         };
         let graph = GraphProto {
             node: vec![node],
             name: "averagepool_graph",
             initializer: vec![image],
-            output: vec![ValueInfoProto { name: "y", ..ValueInfoProto::default() }],
+            output: vec![ValueInfoProto {
+                name: "y",
+                ..ValueInfoProto::default()
+            }],
             ..GraphProto::default()
         };
 
         let lowered = lower_graph(&graph).expect("lower AveragePool");
-        let named: Vec<(&str, &[f32])> = lowered.initializers.iter().map(|(name, data)| (name.as_str(), data.as_slice())).collect();
+        let named: Vec<(&str, &[f32])> = lowered
+            .initializers
+            .iter()
+            .map(|(name, data)| (name.as_str(), data.as_slice()))
+            .collect();
         let output = lowered.graph_outputs[0].1;
-        let evaluated = evaluate_named(&lowered.program, &[], &named, &[output]).expect("evaluate AveragePool");
+        let evaluated =
+            evaluate_named(&lowered.program, &[], &named, &[output]).expect("evaluate AveragePool");
         let (data, shape) = evaluated.get(output).expect("y present");
 
         assert_eq!(shape, &[1, 1, 2, 2]);
-        assert_eq!(data, &[3.5, 5.5, 11.5, 13.5], "mean of each 2x2 block of the 4x4 image");
+        assert_eq!(
+            data,
+            &[3.5, 5.5, 11.5, 13.5],
+            "mean of each 2x2 block of the 4x4 image"
+        );
     }
 
     /// `AveragePool` with nonzero `pads` and ONNX's default
@@ -5595,27 +8853,43 @@ mod tests {
     /// re-derivation through the code under test.
     #[test]
     fn averagepool_padded_count_include_pad_zero_excludes_padding_from_the_divisor() {
-        let image = f32_initializer("image", &[1, 1, 4, 4], &(1..=16).map(|value| value as f32).collect::<Vec<_>>());
+        let image = f32_initializer(
+            "image",
+            &[1, 1, 4, 4],
+            &(1..=16).map(|value| value as f32).collect::<Vec<_>>(),
+        );
         let node = NodeProto {
             input: vec!["image"],
             output: vec!["y"],
             op_type: "AveragePool",
             name: "averagepool",
-            attribute: vec![ints_attribute("kernel_shape", vec![2, 2]), ints_attribute("pads", vec![1, 1, 1, 1])],
+            attribute: vec![
+                ints_attribute("kernel_shape", vec![2, 2]),
+                ints_attribute("pads", vec![1, 1, 1, 1]),
+            ],
             ..NodeProto::default()
         };
         let graph = GraphProto {
             node: vec![node],
             name: "averagepool_padded_graph",
             initializer: vec![image],
-            output: vec![ValueInfoProto { name: "y", ..ValueInfoProto::default() }],
+            output: vec![ValueInfoProto {
+                name: "y",
+                ..ValueInfoProto::default()
+            }],
             ..GraphProto::default()
         };
 
-        let lowered = lower_graph(&graph).expect("lower padded AveragePool with count_include_pad=0");
-        let named: Vec<(&str, &[f32])> = lowered.initializers.iter().map(|(name, data)| (name.as_str(), data.as_slice())).collect();
+        let lowered =
+            lower_graph(&graph).expect("lower padded AveragePool with count_include_pad=0");
+        let named: Vec<(&str, &[f32])> = lowered
+            .initializers
+            .iter()
+            .map(|(name, data)| (name.as_str(), data.as_slice()))
+            .collect();
         let output = lowered.graph_outputs[0].1;
-        let evaluated = evaluate_named(&lowered.program, &[], &named, &[output]).expect("evaluate padded AveragePool");
+        let evaluated = evaluate_named(&lowered.program, &[], &named, &[output])
+            .expect("evaluate padded AveragePool");
         let (data, shape) = evaluated.get(output).expect("y present");
 
         assert_eq!(shape, &[1, 1, 5, 5]);
@@ -5627,7 +8901,11 @@ mod tests {
             11.0, 11.5, 12.5, 13.5, 14.0,
             13.0, 13.5, 14.5, 15.5, 16.0,
         ];
-        assert_eq!(data, expected.as_slice(), "hand-derived valid-cell-count averages over the zero-padded 6x6 grid");
+        assert_eq!(
+            data,
+            expected.as_slice(),
+            "hand-derived valid-cell-count averages over the zero-padded 6x6 grid"
+        );
     }
 
     /// `AveragePool` with nonzero `pads` and `count_include_pad=1`: the
@@ -5637,34 +8915,59 @@ mod tests {
     /// `kernel_h*kernel_w` regardless of how many cells were real.
     #[test]
     fn averagepool_padded_count_include_pad_one_uses_the_fixed_divisor() {
-        let image = f32_initializer("image", &[1, 1, 4, 4], &(1..=16).map(|value| value as f32).collect::<Vec<_>>());
+        let image = f32_initializer(
+            "image",
+            &[1, 1, 4, 4],
+            &(1..=16).map(|value| value as f32).collect::<Vec<_>>(),
+        );
         let node = NodeProto {
             input: vec!["image"],
             output: vec!["y"],
             op_type: "AveragePool",
             name: "averagepool",
-            attribute: vec![ints_attribute("kernel_shape", vec![2, 2]), ints_attribute("pads", vec![1, 1, 1, 1]), int_attribute("count_include_pad", 1)],
+            attribute: vec![
+                ints_attribute("kernel_shape", vec![2, 2]),
+                ints_attribute("pads", vec![1, 1, 1, 1]),
+                int_attribute("count_include_pad", 1),
+            ],
             ..NodeProto::default()
         };
         let graph = GraphProto {
             node: vec![node],
             name: "averagepool_padded_include_graph",
             initializer: vec![image],
-            output: vec![ValueInfoProto { name: "y", ..ValueInfoProto::default() }],
+            output: vec![ValueInfoProto {
+                name: "y",
+                ..ValueInfoProto::default()
+            }],
             ..GraphProto::default()
         };
 
-        let lowered = lower_graph(&graph).expect("lower padded AveragePool with count_include_pad=1");
-        let named: Vec<(&str, &[f32])> = lowered.initializers.iter().map(|(name, data)| (name.as_str(), data.as_slice())).collect();
+        let lowered =
+            lower_graph(&graph).expect("lower padded AveragePool with count_include_pad=1");
+        let named: Vec<(&str, &[f32])> = lowered
+            .initializers
+            .iter()
+            .map(|(name, data)| (name.as_str(), data.as_slice()))
+            .collect();
         let output = lowered.graph_outputs[0].1;
-        let evaluated = evaluate_named(&lowered.program, &[], &named, &[output]).expect("evaluate padded AveragePool count_include_pad=1");
+        let evaluated = evaluate_named(&lowered.program, &[], &named, &[output])
+            .expect("evaluate padded AveragePool count_include_pad=1");
         let (data, shape) = evaluated.get(output).expect("y present");
 
         assert_eq!(shape, &[1, 1, 5, 5]);
         // top-left window sums only the single real cell (1.0) but still divides by kh*kw=4.
-        assert!((data[0] - 0.25).abs() < 1e-6, "top-left window is 1.0 / 4 with padding counted, got {}", data[0]);
+        assert!(
+            (data[0] - 0.25).abs() < 1e-6,
+            "top-left window is 1.0 / 4 with padding counted, got {}",
+            data[0]
+        );
         // the fully-interior window (oy=1, ox=1) has no padding, so both divisors already agree.
-        assert!((data[6] - 3.5).abs() < 1e-6, "interior window unaffected by count_include_pad, got {}", data[6]);
+        assert!(
+            (data[6] - 3.5).abs() < 1e-6,
+            "interior window unaffected by count_include_pad, got {}",
+            data[6]
+        );
     }
 
     /// `MaxPool` with `ceil_mode=1`: [`conv_output_extent_ceil`]'s rounding
@@ -5680,30 +8983,53 @@ mod tests {
             output: vec!["y"],
             op_type: "MaxPool",
             name: "maxpool_ceil",
-            attribute: vec![ints_attribute("kernel_shape", vec![1, 2]), ints_attribute("strides", vec![1, 2]), int_attribute("ceil_mode", 1)],
+            attribute: vec![
+                ints_attribute("kernel_shape", vec![1, 2]),
+                ints_attribute("strides", vec![1, 2]),
+                int_attribute("ceil_mode", 1),
+            ],
             ..NodeProto::default()
         };
         let graph = GraphProto {
             node: vec![node],
             name: "maxpool_ceil_graph",
             initializer: vec![image],
-            output: vec![ValueInfoProto { name: "y", ..ValueInfoProto::default() }],
+            output: vec![ValueInfoProto {
+                name: "y",
+                ..ValueInfoProto::default()
+            }],
             ..GraphProto::default()
         };
 
         let lowered = lower_graph(&graph).expect("lower MaxPool ceil_mode=1");
-        let named: Vec<(&str, &[f32])> = lowered.initializers.iter().map(|(name, data)| (name.as_str(), data.as_slice())).collect();
+        let named: Vec<(&str, &[f32])> = lowered
+            .initializers
+            .iter()
+            .map(|(name, data)| (name.as_str(), data.as_slice()))
+            .collect();
         let output = lowered.graph_outputs[0].1;
-        let evaluated = evaluate_named(&lowered.program, &[], &named, &[output]).expect("evaluate MaxPool ceil_mode=1");
+        let evaluated = evaluate_named(&lowered.program, &[], &named, &[output])
+            .expect("evaluate MaxPool ceil_mode=1");
         let (data, shape) = evaluated.get(output).expect("y present");
 
         // floor((5-2)/2)+1 = 2 windows without ceil_mode; ceil_mode=1 widens to 3.
         assert_eq!(shape, &[1, 1, 1, 3]);
-        assert_eq!(data, &[3.0, 5.0, 4.0], "windows [1,3]=3, [2,5]=5, [4,-inf]=4 -- the overhang never wins the max");
+        assert_eq!(
+            data,
+            &[3.0, 5.0, 4.0],
+            "windows [1,3]=3, [2,5]=5, [4,-inf]=4 -- the overhang never wins the max"
+        );
     }
 
-    fn graph_attribute(name: &'static str, subgraph: GraphProto<'static>) -> AttributeProto<'static> {
-        AttributeProto { name, g: Some(subgraph), ..AttributeProto::default() }
+    fn graph_attribute(
+        name: &'static str,
+        subgraph: GraphProto<'static>,
+    ) -> AttributeProto<'static> {
+        AttributeProto {
+            name,
+            g: Some(subgraph),
+            ..AttributeProto::default()
+        }
     }
 
     /// `Where(cond, x, y)`: pure dataflow, [`ScalarOp::Select`] over the
@@ -5714,23 +9040,41 @@ mod tests {
         let cond_initializer = f32_initializer("cond", &[2], &[1.0, 0.0]);
         let x_initializer = f32_initializer("x", &[2], &[10.0, 20.0]);
         let y_initializer = f32_initializer("y", &[2], &[30.0, 40.0]);
-        let node = NodeProto { input: vec!["cond", "x", "y"], output: vec!["z"], op_type: "Where", name: "where", ..NodeProto::default() };
+        let node = NodeProto {
+            input: vec!["cond", "x", "y"],
+            output: vec!["z"],
+            op_type: "Where",
+            name: "where",
+            ..NodeProto::default()
+        };
         let graph = GraphProto {
             node: vec![node],
             name: "where_graph",
             initializer: vec![cond_initializer, x_initializer, y_initializer],
-            output: vec![ValueInfoProto { name: "z", ..ValueInfoProto::default() }],
+            output: vec![ValueInfoProto {
+                name: "z",
+                ..ValueInfoProto::default()
+            }],
             ..GraphProto::default()
         };
 
         let lowered = lower_graph(&graph).expect("lower Where");
-        let named: Vec<(&str, &[f32])> = lowered.initializers.iter().map(|(name, data)| (name.as_str(), data.as_slice())).collect();
+        let named: Vec<(&str, &[f32])> = lowered
+            .initializers
+            .iter()
+            .map(|(name, data)| (name.as_str(), data.as_slice()))
+            .collect();
         let output = lowered.graph_outputs[0].1;
-        let evaluated = evaluate_named(&lowered.program, &[], &named, &[output]).expect("evaluate Where");
+        let evaluated =
+            evaluate_named(&lowered.program, &[], &named, &[output]).expect("evaluate Where");
         let (data, shape) = evaluated.get(output).expect("z present");
 
         assert_eq!(shape, &[2]);
-        assert_eq!(data, &[10.0, 40.0], "cond[0]=1 picks x[0]=10, cond[1]=0 picks y[1]=40");
+        assert_eq!(
+            data,
+            &[10.0, 40.0],
+            "cond[0]=1 picks x[0]=10, cond[1]=0 picks y[1]=40"
+        );
     }
 
     /// `If` whose `cond` is a graph initializer (a lower-time constant):
@@ -5741,15 +9085,33 @@ mod tests {
         let x_initializer = f32_initializer("x", &[1], &[5.0]);
         let cond_initializer = f32_initializer("cond", &[], &[1.0]);
         let then_branch = GraphProto {
-            node: vec![NodeProto { input: vec!["x"], output: vec!["then_out"], op_type: "Identity", name: "then_identity", ..NodeProto::default() }],
+            node: vec![NodeProto {
+                input: vec!["x"],
+                output: vec!["then_out"],
+                op_type: "Identity",
+                name: "then_identity",
+                ..NodeProto::default()
+            }],
             name: "then",
-            output: vec![ValueInfoProto { name: "then_out", ..ValueInfoProto::default() }],
+            output: vec![ValueInfoProto {
+                name: "then_out",
+                ..ValueInfoProto::default()
+            }],
             ..GraphProto::default()
         };
         let else_branch = GraphProto {
-            node: vec![NodeProto { input: vec!["x"], output: vec!["else_out"], op_type: "Neg", name: "else_neg", ..NodeProto::default() }],
+            node: vec![NodeProto {
+                input: vec!["x"],
+                output: vec!["else_out"],
+                op_type: "Neg",
+                name: "else_neg",
+                ..NodeProto::default()
+            }],
             name: "else",
-            output: vec![ValueInfoProto { name: "else_out", ..ValueInfoProto::default() }],
+            output: vec![ValueInfoProto {
+                name: "else_out",
+                ..ValueInfoProto::default()
+            }],
             ..GraphProto::default()
         };
         let node = NodeProto {
@@ -5757,14 +9119,20 @@ mod tests {
             output: vec!["y"],
             op_type: "If",
             name: "if",
-            attribute: vec![graph_attribute("then_branch", then_branch), graph_attribute("else_branch", else_branch)],
+            attribute: vec![
+                graph_attribute("then_branch", then_branch),
+                graph_attribute("else_branch", else_branch),
+            ],
             ..NodeProto::default()
         };
         let graph = GraphProto {
             node: vec![node],
             name: "if_const_graph",
             initializer: vec![x_initializer, cond_initializer],
-            output: vec![ValueInfoProto { name: "y", ..ValueInfoProto::default() }],
+            output: vec![ValueInfoProto {
+                name: "y",
+                ..ValueInfoProto::default()
+            }],
             ..GraphProto::default()
         };
 
@@ -5775,11 +9143,20 @@ mod tests {
             "x's and cond's Input leaves plus then_branch's Identity are appended -- else_branch is never lowered"
         );
 
-        let named: Vec<(&str, &[f32])> = lowered.initializers.iter().map(|(name, data)| (name.as_str(), data.as_slice())).collect();
+        let named: Vec<(&str, &[f32])> = lowered
+            .initializers
+            .iter()
+            .map(|(name, data)| (name.as_str(), data.as_slice()))
+            .collect();
         let output = lowered.graph_outputs[0].1;
-        let evaluated = evaluate_named(&lowered.program, &[], &named, &[output]).expect("evaluate If constant true");
+        let evaluated = evaluate_named(&lowered.program, &[], &named, &[output])
+            .expect("evaluate If constant true");
         let (data, _) = evaluated.get(output).expect("y present");
-        assert_eq!(data, &[5.0], "constant-true cond picks then_branch (Identity(x))");
+        assert_eq!(
+            data,
+            &[5.0],
+            "constant-true cond picks then_branch (Identity(x))"
+        );
     }
 
     /// `If` whose `cond` is only known from computed data (`Greater`, not an
@@ -5791,17 +9168,41 @@ mod tests {
     fn if_with_data_dependent_condition_selects_between_both_lowered_branches() {
         let x_initializer = f32_initializer("x", &[1], &[3.0]);
         let zero_initializer = f32_initializer("zero", &[1], &[0.0]);
-        let cond_node = NodeProto { input: vec!["x", "zero"], output: vec!["cond"], op_type: "Greater", name: "greater", ..NodeProto::default() };
+        let cond_node = NodeProto {
+            input: vec!["x", "zero"],
+            output: vec!["cond"],
+            op_type: "Greater",
+            name: "greater",
+            ..NodeProto::default()
+        };
         let then_branch = GraphProto {
-            node: vec![NodeProto { input: vec!["x"], output: vec!["then_out"], op_type: "Identity", name: "then_identity", ..NodeProto::default() }],
+            node: vec![NodeProto {
+                input: vec!["x"],
+                output: vec!["then_out"],
+                op_type: "Identity",
+                name: "then_identity",
+                ..NodeProto::default()
+            }],
             name: "then",
-            output: vec![ValueInfoProto { name: "then_out", ..ValueInfoProto::default() }],
+            output: vec![ValueInfoProto {
+                name: "then_out",
+                ..ValueInfoProto::default()
+            }],
             ..GraphProto::default()
         };
         let else_branch = GraphProto {
-            node: vec![NodeProto { input: vec!["x"], output: vec!["else_out"], op_type: "Neg", name: "else_neg", ..NodeProto::default() }],
+            node: vec![NodeProto {
+                input: vec!["x"],
+                output: vec!["else_out"],
+                op_type: "Neg",
+                name: "else_neg",
+                ..NodeProto::default()
+            }],
             name: "else",
-            output: vec![ValueInfoProto { name: "else_out", ..ValueInfoProto::default() }],
+            output: vec![ValueInfoProto {
+                name: "else_out",
+                ..ValueInfoProto::default()
+            }],
             ..GraphProto::default()
         };
         let if_node = NodeProto {
@@ -5809,23 +9210,38 @@ mod tests {
             output: vec!["y"],
             op_type: "If",
             name: "if",
-            attribute: vec![graph_attribute("then_branch", then_branch), graph_attribute("else_branch", else_branch)],
+            attribute: vec![
+                graph_attribute("then_branch", then_branch),
+                graph_attribute("else_branch", else_branch),
+            ],
             ..NodeProto::default()
         };
         let graph = GraphProto {
             node: vec![cond_node, if_node],
             name: "if_data_dependent_graph",
             initializer: vec![x_initializer, zero_initializer],
-            output: vec![ValueInfoProto { name: "y", ..ValueInfoProto::default() }],
+            output: vec![ValueInfoProto {
+                name: "y",
+                ..ValueInfoProto::default()
+            }],
             ..GraphProto::default()
         };
 
         let lowered = lower_graph(&graph).expect("lower If with data-dependent cond");
-        let named: Vec<(&str, &[f32])> = lowered.initializers.iter().map(|(name, data)| (name.as_str(), data.as_slice())).collect();
+        let named: Vec<(&str, &[f32])> = lowered
+            .initializers
+            .iter()
+            .map(|(name, data)| (name.as_str(), data.as_slice()))
+            .collect();
         let output = lowered.graph_outputs[0].1;
-        let evaluated = evaluate_named(&lowered.program, &[], &named, &[output]).expect("evaluate If data-dependent");
+        let evaluated = evaluate_named(&lowered.program, &[], &named, &[output])
+            .expect("evaluate If data-dependent");
         let (data, _) = evaluated.get(output).expect("y present");
-        assert_eq!(data, &[3.0], "x=3 > 0, cond true, Select picks then_branch's Identity(x)=3");
+        assert_eq!(
+            data,
+            &[3.0],
+            "x=3 > 0, cond true, Select picks then_branch's Identity(x)=3"
+        );
     }
 
     /// The boundary Option A itself names: a data-dependent `If` whose two
@@ -5836,11 +9252,26 @@ mod tests {
     fn if_data_dependent_with_shape_mismatched_branches_is_a_named_unsupported_shape() {
         let x_initializer = f32_initializer("x", &[1], &[3.0]);
         let zero_initializer = f32_initializer("zero", &[1], &[0.0]);
-        let cond_node = NodeProto { input: vec!["x", "zero"], output: vec!["cond"], op_type: "Greater", name: "greater", ..NodeProto::default() };
+        let cond_node = NodeProto {
+            input: vec!["x", "zero"],
+            output: vec!["cond"],
+            op_type: "Greater",
+            name: "greater",
+            ..NodeProto::default()
+        };
         let then_branch = GraphProto {
-            node: vec![NodeProto { input: vec!["x"], output: vec!["then_out"], op_type: "Identity", name: "then_identity", ..NodeProto::default() }],
+            node: vec![NodeProto {
+                input: vec!["x"],
+                output: vec!["then_out"],
+                op_type: "Identity",
+                name: "then_identity",
+                ..NodeProto::default()
+            }],
             name: "then",
-            output: vec![ValueInfoProto { name: "then_out", ..ValueInfoProto::default() }],
+            output: vec![ValueInfoProto {
+                name: "then_out",
+                ..ValueInfoProto::default()
+            }],
             ..GraphProto::default()
         };
         let else_branch = GraphProto {
@@ -5849,11 +9280,18 @@ mod tests {
                 output: vec!["else_out"],
                 op_type: "Concat",
                 name: "else_concat",
-                attribute: vec![AttributeProto { name: "axis", i: 0, ..AttributeProto::default() }],
+                attribute: vec![AttributeProto {
+                    name: "axis",
+                    i: 0,
+                    ..AttributeProto::default()
+                }],
                 ..NodeProto::default()
             }],
             name: "else",
-            output: vec![ValueInfoProto { name: "else_out", ..ValueInfoProto::default() }],
+            output: vec![ValueInfoProto {
+                name: "else_out",
+                ..ValueInfoProto::default()
+            }],
             ..GraphProto::default()
         };
         let if_node = NodeProto {
@@ -5861,19 +9299,28 @@ mod tests {
             output: vec!["y"],
             op_type: "If",
             name: "if",
-            attribute: vec![graph_attribute("then_branch", then_branch), graph_attribute("else_branch", else_branch)],
+            attribute: vec![
+                graph_attribute("then_branch", then_branch),
+                graph_attribute("else_branch", else_branch),
+            ],
             ..NodeProto::default()
         };
         let graph = GraphProto {
             node: vec![cond_node, if_node],
             name: "if_shape_mismatch_graph",
             initializer: vec![x_initializer, zero_initializer],
-            output: vec![ValueInfoProto { name: "y", ..ValueInfoProto::default() }],
+            output: vec![ValueInfoProto {
+                name: "y",
+                ..ValueInfoProto::default()
+            }],
             ..GraphProto::default()
         };
 
         let error = lower_graph(&graph).expect_err("differently-shaped branches cannot Select");
-        assert!(matches!(error, LowerError::UnsupportedShape { .. }), "expected UnsupportedShape, got {error:?}");
+        assert!(
+            matches!(error, LowerError::UnsupportedShape { .. }),
+            "expected UnsupportedShape, got {error:?}"
+        );
     }
 
     /// `Scan` with one state variable and one `scan_input`: unrolled `trip
@@ -5885,10 +9332,28 @@ mod tests {
         let state_initializer = f32_initializer("state0", &[], &[0.0]);
         let sequence_initializer = f32_initializer("seq", &[4], &[1.0, 2.0, 3.0, 4.0]);
         let body = GraphProto {
-            node: vec![NodeProto { input: vec!["state_in", "slice"], output: vec!["state_out"], op_type: "Add", name: "body_add", ..NodeProto::default() }],
+            node: vec![NodeProto {
+                input: vec!["state_in", "slice"],
+                output: vec!["state_out"],
+                op_type: "Add",
+                name: "body_add",
+                ..NodeProto::default()
+            }],
             name: "scan_body",
-            input: vec![ValueInfoProto { name: "state_in", ..ValueInfoProto::default() }, ValueInfoProto { name: "slice", ..ValueInfoProto::default() }],
-            output: vec![ValueInfoProto { name: "state_out", ..ValueInfoProto::default() }],
+            input: vec![
+                ValueInfoProto {
+                    name: "state_in",
+                    ..ValueInfoProto::default()
+                },
+                ValueInfoProto {
+                    name: "slice",
+                    ..ValueInfoProto::default()
+                },
+            ],
+            output: vec![ValueInfoProto {
+                name: "state_out",
+                ..ValueInfoProto::default()
+            }],
             ..GraphProto::default()
         };
         let node = NodeProto {
@@ -5896,23 +9361,42 @@ mod tests {
             output: vec!["y"],
             op_type: "Scan",
             name: "scan",
-            attribute: vec![AttributeProto { name: "num_scan_inputs", i: 1, ..AttributeProto::default() }, graph_attribute("body", body)],
+            attribute: vec![
+                AttributeProto {
+                    name: "num_scan_inputs",
+                    i: 1,
+                    ..AttributeProto::default()
+                },
+                graph_attribute("body", body),
+            ],
             ..NodeProto::default()
         };
         let graph = GraphProto {
             node: vec![node],
             name: "scan_sum_graph",
             initializer: vec![state_initializer, sequence_initializer],
-            output: vec![ValueInfoProto { name: "y", ..ValueInfoProto::default() }],
+            output: vec![ValueInfoProto {
+                name: "y",
+                ..ValueInfoProto::default()
+            }],
             ..GraphProto::default()
         };
 
         let lowered = lower_graph(&graph).expect("lower Scan");
-        let named: Vec<(&str, &[f32])> = lowered.initializers.iter().map(|(name, data)| (name.as_str(), data.as_slice())).collect();
+        let named: Vec<(&str, &[f32])> = lowered
+            .initializers
+            .iter()
+            .map(|(name, data)| (name.as_str(), data.as_slice()))
+            .collect();
         let output = lowered.graph_outputs[0].1;
-        let evaluated = evaluate_named(&lowered.program, &[], &named, &[output]).expect("evaluate Scan");
+        let evaluated =
+            evaluate_named(&lowered.program, &[], &named, &[output]).expect("evaluate Scan");
         let (data, _) = evaluated.get(output).expect("y present");
-        assert_eq!(data, &[10.0], "1 + 2 + 3 + 4 unrolled across four appended body copies");
+        assert_eq!(
+            data,
+            &[10.0],
+            "1 + 2 + 3 + 4 unrolled across four appended body copies"
+        );
     }
 
     /// `Loop` with a lower-time-constant `M` (no `cond` input): unrolled
@@ -5924,14 +9408,38 @@ mod tests {
         let state_initializer = f32_initializer("state0", &[], &[0.0]);
         let one_initializer = f32_initializer("one", &[], &[1.0]);
         let body = GraphProto {
-            node: vec![NodeProto { input: vec!["state_in", "one"], output: vec!["state_out"], op_type: "Add", name: "body_add", ..NodeProto::default() }],
+            node: vec![NodeProto {
+                input: vec!["state_in", "one"],
+                output: vec!["state_out"],
+                op_type: "Add",
+                name: "body_add",
+                ..NodeProto::default()
+            }],
             name: "loop_body",
             input: vec![
-                ValueInfoProto { name: "iter_num", ..ValueInfoProto::default() },
-                ValueInfoProto { name: "cond_in", ..ValueInfoProto::default() },
-                ValueInfoProto { name: "state_in", ..ValueInfoProto::default() },
+                ValueInfoProto {
+                    name: "iter_num",
+                    ..ValueInfoProto::default()
+                },
+                ValueInfoProto {
+                    name: "cond_in",
+                    ..ValueInfoProto::default()
+                },
+                ValueInfoProto {
+                    name: "state_in",
+                    ..ValueInfoProto::default()
+                },
             ],
-            output: vec![ValueInfoProto { name: "cond_out_unused", ..ValueInfoProto::default() }, ValueInfoProto { name: "state_out", ..ValueInfoProto::default() }],
+            output: vec![
+                ValueInfoProto {
+                    name: "cond_out_unused",
+                    ..ValueInfoProto::default()
+                },
+                ValueInfoProto {
+                    name: "state_out",
+                    ..ValueInfoProto::default()
+                },
+            ],
             ..GraphProto::default()
         };
         let node = NodeProto {
@@ -5946,16 +9454,28 @@ mod tests {
             node: vec![node],
             name: "loop_static_graph",
             initializer: vec![trip_initializer, state_initializer, one_initializer],
-            output: vec![ValueInfoProto { name: "y", ..ValueInfoProto::default() }],
+            output: vec![ValueInfoProto {
+                name: "y",
+                ..ValueInfoProto::default()
+            }],
             ..GraphProto::default()
         };
 
         let lowered = lower_graph(&graph).expect("lower Loop with static trip count");
-        let named: Vec<(&str, &[f32])> = lowered.initializers.iter().map(|(name, data)| (name.as_str(), data.as_slice())).collect();
+        let named: Vec<(&str, &[f32])> = lowered
+            .initializers
+            .iter()
+            .map(|(name, data)| (name.as_str(), data.as_slice()))
+            .collect();
         let output = lowered.graph_outputs[0].1;
-        let evaluated = evaluate_named(&lowered.program, &[], &named, &[output]).expect("evaluate Loop static");
+        let evaluated =
+            evaluate_named(&lowered.program, &[], &named, &[output]).expect("evaluate Loop static");
         let (data, _) = evaluated.get(output).expect("y present");
-        assert_eq!(data, &[3.0], "0 + 1 + 1 + 1 across three unrolled body copies");
+        assert_eq!(
+            data,
+            &[3.0],
+            "0 + 1 + 1 + 1 across three unrolled body copies"
+        );
     }
 
     /// The RISC-sufficiency boundary this crate's control-flow lowering
@@ -5969,14 +9489,38 @@ mod tests {
         let state_initializer = f32_initializer("state0", &[], &[0.0]);
         let one_initializer = f32_initializer("one", &[], &[1.0]);
         let body = GraphProto {
-            node: vec![NodeProto { input: vec!["state_in", "one"], output: vec!["state_out"], op_type: "Add", name: "body_add", ..NodeProto::default() }],
+            node: vec![NodeProto {
+                input: vec!["state_in", "one"],
+                output: vec!["state_out"],
+                op_type: "Add",
+                name: "body_add",
+                ..NodeProto::default()
+            }],
             name: "loop_body",
             input: vec![
-                ValueInfoProto { name: "iter_num", ..ValueInfoProto::default() },
-                ValueInfoProto { name: "cond_in", ..ValueInfoProto::default() },
-                ValueInfoProto { name: "state_in", ..ValueInfoProto::default() },
+                ValueInfoProto {
+                    name: "iter_num",
+                    ..ValueInfoProto::default()
+                },
+                ValueInfoProto {
+                    name: "cond_in",
+                    ..ValueInfoProto::default()
+                },
+                ValueInfoProto {
+                    name: "state_in",
+                    ..ValueInfoProto::default()
+                },
             ],
-            output: vec![ValueInfoProto { name: "cond_out_unused", ..ValueInfoProto::default() }, ValueInfoProto { name: "state_out", ..ValueInfoProto::default() }],
+            output: vec![
+                ValueInfoProto {
+                    name: "cond_out_unused",
+                    ..ValueInfoProto::default()
+                },
+                ValueInfoProto {
+                    name: "state_out",
+                    ..ValueInfoProto::default()
+                },
+            ],
             ..GraphProto::default()
         };
         let node = NodeProto {
@@ -5992,11 +9536,15 @@ mod tests {
             name: "loop_runtime_trip_graph",
             input: vec![input_value_info("trip", &[])],
             initializer: vec![state_initializer, one_initializer],
-            output: vec![ValueInfoProto { name: "y", ..ValueInfoProto::default() }],
+            output: vec![ValueInfoProto {
+                name: "y",
+                ..ValueInfoProto::default()
+            }],
             ..GraphProto::default()
         };
 
-        let error = lower_graph(&graph).expect_err("a graph-input trip count is not a lower-time constant");
+        let error =
+            lower_graph(&graph).expect_err("a graph-input trip count is not a lower-time constant");
         assert!(
             matches!(error, LowerError::DataDependentControlFlow { .. }),
             "expected DataDependentControlFlow, got {error:?}"
@@ -6021,7 +9569,11 @@ mod tests {
         image_data.extend(channel1.iter().copied());
         let image = f32_initializer("image", &[1, 2, 4, 4], &image_data);
         let weight = f32_initializer("weight", &[2, 1, 3, 3], &[1.0; 18]);
-        let group_attribute = AttributeProto { name: "group", i: 2, ..AttributeProto::default() };
+        let group_attribute = AttributeProto {
+            name: "group",
+            i: 2,
+            ..AttributeProto::default()
+        };
         let node = NodeProto {
             input: vec!["image", "weight"],
             output: vec!["y"],
@@ -6034,21 +9586,37 @@ mod tests {
             node: vec![node],
             name: "grouped_conv_depthwise_graph",
             initializer: vec![image, weight],
-            output: vec![ValueInfoProto { name: "y", ..ValueInfoProto::default() }],
+            output: vec![ValueInfoProto {
+                name: "y",
+                ..ValueInfoProto::default()
+            }],
             ..GraphProto::default()
         };
 
         let lowered = lower_graph(&graph).expect("lower grouped Conv");
-        let named: Vec<(&str, &[f32])> = lowered.initializers.iter().map(|(name, data)| (name.as_str(), data.as_slice())).collect();
+        let named: Vec<(&str, &[f32])> = lowered
+            .initializers
+            .iter()
+            .map(|(name, data)| (name.as_str(), data.as_slice()))
+            .collect();
         let output = lowered.graph_outputs[0].1;
-        let evaluated = evaluate_named(&lowered.program, &[], &named, &[output]).expect("evaluate grouped Conv");
+        let evaluated = evaluate_named(&lowered.program, &[], &named, &[output])
+            .expect("evaluate grouped Conv");
         let (data, shape) = evaluated.get(output).expect("y present");
 
         assert_eq!(shape, &[1, 2, 2, 2]);
         // channel 0 group: same 3x3 window sums as the single-channel case.
-        assert_eq!(&data[0..4], &[54.0, 63.0, 90.0, 99.0], "group 0 matches the un-grouped single-channel sums");
+        assert_eq!(
+            &data[0..4],
+            &[54.0, 63.0, 90.0, 99.0],
+            "group 0 matches the un-grouped single-channel sums"
+        );
         // channel 1 group: every input value doubled -> every window sum doubled.
-        assert_eq!(&data[4..8], &[108.0, 126.0, 180.0, 198.0], "group 1 sees only its own (doubled) channel");
+        assert_eq!(
+            &data[4..8],
+            &[108.0, 126.0, 180.0, 198.0],
+            "group 1 sees only its own (doubled) channel"
+        );
     }
 
     /// `group` not dividing the image's channel count is a named
@@ -6057,7 +9625,11 @@ mod tests {
     fn grouped_conv_rejects_a_group_that_does_not_divide_channels() {
         let image = f32_initializer("image", &[1, 3, 4, 4], &[1.0; 48]);
         let weight = f32_initializer("weight", &[2, 1, 3, 3], &[1.0; 18]);
-        let group_attribute = AttributeProto { name: "group", i: 2, ..AttributeProto::default() };
+        let group_attribute = AttributeProto {
+            name: "group",
+            i: 2,
+            ..AttributeProto::default()
+        };
         let node = NodeProto {
             input: vec!["image", "weight"],
             output: vec!["y"],
@@ -6070,11 +9642,15 @@ mod tests {
             node: vec![node],
             name: "grouped_conv_bad_group_graph",
             initializer: vec![image, weight],
-            output: vec![ValueInfoProto { name: "y", ..ValueInfoProto::default() }],
+            output: vec![ValueInfoProto {
+                name: "y",
+                ..ValueInfoProto::default()
+            }],
             ..GraphProto::default()
         };
 
-        let error = lower_graph(&graph).expect_err("group=2 does not evenly divide 3 image channels");
+        let error =
+            lower_graph(&graph).expect_err("group=2 does not evenly divide 3 image channels");
         assert!(matches!(error, LowerError::UnsupportedShape { .. }));
     }
 
@@ -6085,23 +9661,41 @@ mod tests {
     fn conv1d_stride1_no_pad_sums_each_3_wide_window() {
         let image = f32_initializer("image", &[1, 1, 5], &[1.0, 2.0, 3.0, 4.0, 5.0]);
         let weight = f32_initializer("weight", &[1, 1, 3], &[1.0; 3]);
-        let node = NodeProto { input: vec!["image", "weight"], output: vec!["y"], op_type: "Conv", name: "conv1d", ..NodeProto::default() };
+        let node = NodeProto {
+            input: vec!["image", "weight"],
+            output: vec!["y"],
+            op_type: "Conv",
+            name: "conv1d",
+            ..NodeProto::default()
+        };
         let graph = GraphProto {
             node: vec![node],
             name: "conv1d_stride1_graph",
             initializer: vec![image, weight],
-            output: vec![ValueInfoProto { name: "y", ..ValueInfoProto::default() }],
+            output: vec![ValueInfoProto {
+                name: "y",
+                ..ValueInfoProto::default()
+            }],
             ..GraphProto::default()
         };
 
         let lowered = lower_graph(&graph).expect("lower Conv1d");
-        let named: Vec<(&str, &[f32])> = lowered.initializers.iter().map(|(name, data)| (name.as_str(), data.as_slice())).collect();
+        let named: Vec<(&str, &[f32])> = lowered
+            .initializers
+            .iter()
+            .map(|(name, data)| (name.as_str(), data.as_slice()))
+            .collect();
         let output = lowered.graph_outputs[0].1;
-        let evaluated = evaluate_named(&lowered.program, &[], &named, &[output]).expect("evaluate Conv1d");
+        let evaluated =
+            evaluate_named(&lowered.program, &[], &named, &[output]).expect("evaluate Conv1d");
         let (data, shape) = evaluated.get(output).expect("y present");
 
         assert_eq!(shape, &[1, 1, 3]);
-        assert_eq!(data, &[6.0, 9.0, 12.0], "hand-summed 3-wide windows over [1,2,3,4,5]");
+        assert_eq!(
+            data,
+            &[6.0, 9.0, 12.0],
+            "hand-summed 3-wide windows over [1,2,3,4,5]"
+        );
     }
 
     /// `Conv1d`, stride 2 and `pads = [1, 1]`: exercises [`pad_axis`]'s
@@ -6117,26 +9711,41 @@ mod tests {
             output: vec!["y"],
             op_type: "Conv",
             name: "conv1d",
-            attribute: vec![ints_attribute("strides", vec![2]), ints_attribute("pads", vec![1, 1])],
+            attribute: vec![
+                ints_attribute("strides", vec![2]),
+                ints_attribute("pads", vec![1, 1]),
+            ],
             ..NodeProto::default()
         };
         let graph = GraphProto {
             node: vec![node],
             name: "conv1d_stride2_pad1_graph",
             initializer: vec![image, weight],
-            output: vec![ValueInfoProto { name: "y", ..ValueInfoProto::default() }],
+            output: vec![ValueInfoProto {
+                name: "y",
+                ..ValueInfoProto::default()
+            }],
             ..GraphProto::default()
         };
 
         let lowered = lower_graph(&graph).expect("lower Conv1d stride2 pad1");
-        let named: Vec<(&str, &[f32])> = lowered.initializers.iter().map(|(name, data)| (name.as_str(), data.as_slice())).collect();
+        let named: Vec<(&str, &[f32])> = lowered
+            .initializers
+            .iter()
+            .map(|(name, data)| (name.as_str(), data.as_slice()))
+            .collect();
         let output = lowered.graph_outputs[0].1;
-        let evaluated = evaluate_named(&lowered.program, &[], &named, &[output]).expect("evaluate Conv1d stride2 pad1");
+        let evaluated = evaluate_named(&lowered.program, &[], &named, &[output])
+            .expect("evaluate Conv1d stride2 pad1");
         let (data, shape) = evaluated.get(output).expect("y present");
 
         // padded: [0, 1, 2, 3, 4, 5, 0] -- windows at offsets 0,2,4: [0,1,2]=3, [2,3,4]=9, [4,5,0]=9
         assert_eq!(shape, &[1, 1, 3]);
-        assert_eq!(data, &[3.0, 9.0, 9.0], "hand-summed windows over the zero-padded length-7 signal");
+        assert_eq!(
+            data,
+            &[3.0, 9.0, 9.0],
+            "hand-summed windows over the zero-padded length-7 signal"
+        );
     }
 
     /// `ConvTranspose`, stride 1, no padding, single channel: a `2x2` image
@@ -6148,23 +9757,41 @@ mod tests {
     fn convtranspose_stride1_no_pad_produces_the_full_output() {
         let image = f32_initializer("image", &[1, 1, 2, 2], &[1.0, 2.0, 3.0, 4.0]);
         let weight = f32_initializer("weight", &[1, 1, 2, 2], &[1.0, 2.0, 3.0, 4.0]);
-        let node = NodeProto { input: vec!["image", "weight"], output: vec!["y"], op_type: "ConvTranspose", name: "convtranspose", ..NodeProto::default() };
+        let node = NodeProto {
+            input: vec!["image", "weight"],
+            output: vec!["y"],
+            op_type: "ConvTranspose",
+            name: "convtranspose",
+            ..NodeProto::default()
+        };
         let graph = GraphProto {
             node: vec![node],
             name: "convtranspose_stride1_graph",
             initializer: vec![image, weight],
-            output: vec![ValueInfoProto { name: "y", ..ValueInfoProto::default() }],
+            output: vec![ValueInfoProto {
+                name: "y",
+                ..ValueInfoProto::default()
+            }],
             ..GraphProto::default()
         };
 
         let lowered = lower_graph(&graph).expect("lower ConvTranspose");
-        let named: Vec<(&str, &[f32])> = lowered.initializers.iter().map(|(name, data)| (name.as_str(), data.as_slice())).collect();
+        let named: Vec<(&str, &[f32])> = lowered
+            .initializers
+            .iter()
+            .map(|(name, data)| (name.as_str(), data.as_slice()))
+            .collect();
         let output = lowered.graph_outputs[0].1;
-        let evaluated = evaluate_named(&lowered.program, &[], &named, &[output]).expect("evaluate ConvTranspose");
+        let evaluated = evaluate_named(&lowered.program, &[], &named, &[output])
+            .expect("evaluate ConvTranspose");
         let (data, shape) = evaluated.get(output).expect("y present");
 
         assert_eq!(shape, &[1, 1, 3, 3]);
-        assert_eq!(data, &[1.0, 4.0, 4.0, 6.0, 20.0, 16.0, 9.0, 24.0, 16.0], "hand-derived full-output overlap-add");
+        assert_eq!(
+            data,
+            &[1.0, 4.0, 4.0, 6.0, 20.0, 16.0, 9.0, 24.0, 16.0],
+            "hand-derived full-output overlap-add"
+        );
     }
 
     /// Grouped `ConvTranspose`, `group = in_channels = 2`: [`lower_convtranspose`]'s
@@ -6181,9 +9808,21 @@ mod tests {
     /// leak into group 0's compute.
     #[test]
     fn grouped_convtranspose_slices_channels_independently() {
-        let image = f32_initializer("image", &[1, 2, 2, 2], &[1.0, 2.0, 3.0, 4.0, 2.0, 4.0, 6.0, 8.0]);
-        let weight = f32_initializer("weight", &[2, 1, 2, 2], &[1.0, 2.0, 3.0, 4.0, 1.0, 2.0, 3.0, 4.0]);
-        let group_attribute = AttributeProto { name: "group", i: 2, ..AttributeProto::default() };
+        let image = f32_initializer(
+            "image",
+            &[1, 2, 2, 2],
+            &[1.0, 2.0, 3.0, 4.0, 2.0, 4.0, 6.0, 8.0],
+        );
+        let weight = f32_initializer(
+            "weight",
+            &[2, 1, 2, 2],
+            &[1.0, 2.0, 3.0, 4.0, 1.0, 2.0, 3.0, 4.0],
+        );
+        let group_attribute = AttributeProto {
+            name: "group",
+            i: 2,
+            ..AttributeProto::default()
+        };
         let node = NodeProto {
             input: vec!["image", "weight"],
             output: vec!["y"],
@@ -6196,21 +9835,37 @@ mod tests {
             node: vec![node],
             name: "grouped_convtranspose_graph",
             initializer: vec![image, weight],
-            output: vec![ValueInfoProto { name: "y", ..ValueInfoProto::default() }],
+            output: vec![ValueInfoProto {
+                name: "y",
+                ..ValueInfoProto::default()
+            }],
             ..GraphProto::default()
         };
 
         let lowered = lower_graph(&graph).expect("lower grouped ConvTranspose");
-        let named: Vec<(&str, &[f32])> = lowered.initializers.iter().map(|(name, data)| (name.as_str(), data.as_slice())).collect();
+        let named: Vec<(&str, &[f32])> = lowered
+            .initializers
+            .iter()
+            .map(|(name, data)| (name.as_str(), data.as_slice()))
+            .collect();
         let output = lowered.graph_outputs[0].1;
-        let evaluated = evaluate_named(&lowered.program, &[], &named, &[output]).expect("evaluate grouped ConvTranspose");
+        let evaluated = evaluate_named(&lowered.program, &[], &named, &[output])
+            .expect("evaluate grouped ConvTranspose");
         let (data, shape) = evaluated.get(output).expect("y present");
 
         assert_eq!(shape, &[1, 2, 3, 3]);
         let group0 = &[1.0, 4.0, 4.0, 6.0, 20.0, 16.0, 9.0, 24.0, 16.0];
         let group1: Vec<f32> = group0.iter().map(|&value| value * 2.0).collect();
-        assert_eq!(&data[0..9], group0, "group 0 matches the un-grouped single-channel ConvTranspose");
-        assert_eq!(&data[9..18], group1.as_slice(), "group 1 sees only its own (doubled) channel");
+        assert_eq!(
+            &data[0..9],
+            group0,
+            "group 0 matches the un-grouped single-channel ConvTranspose"
+        );
+        assert_eq!(
+            &data[9..18],
+            group1.as_slice(),
+            "group 1 sees only its own (doubled) channel"
+        );
     }
 
     /// `ConvTranspose` with `auto_pad = SAME_UPPER`, `strides = [2, 2]`,
@@ -6232,21 +9887,36 @@ mod tests {
             output: vec!["y"],
             op_type: "ConvTranspose",
             name: "convtranspose_same",
-            attribute: vec![ints_attribute("strides", vec![2, 2]), AttributeProto { name: "auto_pad", s: b"SAME_UPPER", ..AttributeProto::default() }],
+            attribute: vec![
+                ints_attribute("strides", vec![2, 2]),
+                AttributeProto {
+                    name: "auto_pad",
+                    s: b"SAME_UPPER",
+                    ..AttributeProto::default()
+                },
+            ],
             ..NodeProto::default()
         };
         let graph = GraphProto {
             node: vec![node],
             name: "convtranspose_same_upper_graph",
             initializer: vec![image, weight],
-            output: vec![ValueInfoProto { name: "y", ..ValueInfoProto::default() }],
+            output: vec![ValueInfoProto {
+                name: "y",
+                ..ValueInfoProto::default()
+            }],
             ..GraphProto::default()
         };
 
         let lowered = lower_graph(&graph).expect("lower ConvTranspose SAME_UPPER");
-        let named: Vec<(&str, &[f32])> = lowered.initializers.iter().map(|(name, data)| (name.as_str(), data.as_slice())).collect();
+        let named: Vec<(&str, &[f32])> = lowered
+            .initializers
+            .iter()
+            .map(|(name, data)| (name.as_str(), data.as_slice()))
+            .collect();
         let output = lowered.graph_outputs[0].1;
-        let evaluated = evaluate_named(&lowered.program, &[], &named, &[output]).expect("evaluate ConvTranspose SAME_UPPER");
+        let evaluated = evaluate_named(&lowered.program, &[], &named, &[output])
+            .expect("evaluate ConvTranspose SAME_UPPER");
         let (data, shape) = evaluated.get(output).expect("y present");
 
         // in * stride = 2 * 2 = 4, per ONNX's auto_pad output-shape rule.
@@ -6258,7 +9928,11 @@ mod tests {
             4.0, 4.0, 10.0, 6.0,
             3.0, 3.0, 7.0, 4.0,
         ];
-        assert_eq!(data, expected.as_slice(), "hand-derived row/col overlap counts through the SAME-resolved pads");
+        assert_eq!(
+            data,
+            expected.as_slice(),
+            "hand-derived row/col overlap counts through the SAME-resolved pads"
+        );
     }
 
     /// `ConvTranspose` with `strides = [2, 2]`: the general masked-reduce
@@ -6282,20 +9956,30 @@ mod tests {
             node: vec![node],
             name: "convtranspose_stride2_graph",
             initializer: vec![image, weight],
-            output: vec![ValueInfoProto { name: "y", ..ValueInfoProto::default() }],
+            output: vec![ValueInfoProto {
+                name: "y",
+                ..ValueInfoProto::default()
+            }],
             ..GraphProto::default()
         };
 
         let lowered = lower_graph(&graph).expect("lower ConvTranspose stride=2");
-        let named: Vec<(&str, &[f32])> = lowered.initializers.iter().map(|(name, data)| (name.as_str(), data.as_slice())).collect();
+        let named: Vec<(&str, &[f32])> = lowered
+            .initializers
+            .iter()
+            .map(|(name, data)| (name.as_str(), data.as_slice()))
+            .collect();
         let output = lowered.graph_outputs[0].1;
-        let evaluated = evaluate_named(&lowered.program, &[], &named, &[output]).expect("evaluate ConvTranspose stride=2");
+        let evaluated = evaluate_named(&lowered.program, &[], &named, &[output])
+            .expect("evaluate ConvTranspose stride=2");
         let (data, shape) = evaluated.get(output).expect("y present");
 
         assert_eq!(shape, &[1, 1, 4, 4]);
         assert_eq!(
             data,
-            &[1.0, 2.0, 2.0, 4.0, 3.0, 4.0, 6.0, 8.0, 3.0, 6.0, 4.0, 8.0, 9.0, 12.0, 12.0, 16.0],
+            &[
+                1.0, 2.0, 2.0, 4.0, 3.0, 4.0, 6.0, 8.0, 3.0, 6.0, 4.0, 8.0, 9.0, 12.0, 12.0, 16.0
+            ],
             "each input cell scattered into its own non-overlapping 2x2 kernel block"
         );
     }
@@ -6313,26 +9997,42 @@ mod tests {
             output: vec!["y"],
             op_type: "Conv",
             name: "conv1d_same",
-            attribute: vec![AttributeProto { name: "auto_pad", s: b"SAME_UPPER", ..AttributeProto::default() }],
+            attribute: vec![AttributeProto {
+                name: "auto_pad",
+                s: b"SAME_UPPER",
+                ..AttributeProto::default()
+            }],
             ..NodeProto::default()
         };
         let graph = GraphProto {
             node: vec![node],
             name: "conv1d_same_upper_graph",
             initializer: vec![image, weight],
-            output: vec![ValueInfoProto { name: "y", ..ValueInfoProto::default() }],
+            output: vec![ValueInfoProto {
+                name: "y",
+                ..ValueInfoProto::default()
+            }],
             ..GraphProto::default()
         };
 
         let lowered = lower_graph(&graph).expect("lower Conv1d SAME_UPPER");
-        let named: Vec<(&str, &[f32])> = lowered.initializers.iter().map(|(name, data)| (name.as_str(), data.as_slice())).collect();
+        let named: Vec<(&str, &[f32])> = lowered
+            .initializers
+            .iter()
+            .map(|(name, data)| (name.as_str(), data.as_slice()))
+            .collect();
         let output = lowered.graph_outputs[0].1;
-        let evaluated = evaluate_named(&lowered.program, &[], &named, &[output]).expect("evaluate Conv1d SAME_UPPER");
+        let evaluated = evaluate_named(&lowered.program, &[], &named, &[output])
+            .expect("evaluate Conv1d SAME_UPPER");
         let (data, shape) = evaluated.get(output).expect("y present");
 
         // padded (pad=[1,1]): [0,1,2,3,4,0] -- windows: [0,1,2]=3 [1,2,3]=6 [2,3,4]=9 [3,4,0]=7
         assert_eq!(shape, &[1, 1, 4]);
-        assert_eq!(data, &[3.0, 6.0, 9.0, 7.0], "SAME_UPPER's even split pads both edges by one");
+        assert_eq!(
+            data,
+            &[3.0, 6.0, 9.0, 7.0],
+            "SAME_UPPER's even split pads both edges by one"
+        );
     }
 
     /// `Conv1d`, `group = 2` (depthwise): each of 2 input channels convolves
@@ -6341,33 +10041,53 @@ mod tests {
     /// per channel.
     #[test]
     fn conv1d_grouped_convolves_each_channel_independently() {
-        let image = f32_initializer("image", &[1, 2, 4], &[1.0, 2.0, 3.0, 4.0, 10.0, 20.0, 30.0, 40.0]);
+        let image = f32_initializer(
+            "image",
+            &[1, 2, 4],
+            &[1.0, 2.0, 3.0, 4.0, 10.0, 20.0, 30.0, 40.0],
+        );
         let weight = f32_initializer("weight", &[2, 1, 2], &[1.0, 1.0, 2.0, 2.0]);
         let node = NodeProto {
             input: vec!["image", "weight"],
             output: vec!["y"],
             op_type: "Conv",
             name: "conv1d_grouped",
-            attribute: vec![AttributeProto { name: "group", i: 2, ..AttributeProto::default() }],
+            attribute: vec![AttributeProto {
+                name: "group",
+                i: 2,
+                ..AttributeProto::default()
+            }],
             ..NodeProto::default()
         };
         let graph = GraphProto {
             node: vec![node],
             name: "conv1d_grouped_graph",
             initializer: vec![image, weight],
-            output: vec![ValueInfoProto { name: "y", ..ValueInfoProto::default() }],
+            output: vec![ValueInfoProto {
+                name: "y",
+                ..ValueInfoProto::default()
+            }],
             ..GraphProto::default()
         };
 
         let lowered = lower_graph(&graph).expect("lower grouped Conv1d");
-        let named: Vec<(&str, &[f32])> = lowered.initializers.iter().map(|(name, data)| (name.as_str(), data.as_slice())).collect();
+        let named: Vec<(&str, &[f32])> = lowered
+            .initializers
+            .iter()
+            .map(|(name, data)| (name.as_str(), data.as_slice()))
+            .collect();
         let output = lowered.graph_outputs[0].1;
-        let evaluated = evaluate_named(&lowered.program, &[], &named, &[output]).expect("evaluate grouped Conv1d");
+        let evaluated = evaluate_named(&lowered.program, &[], &named, &[output])
+            .expect("evaluate grouped Conv1d");
         let (data, shape) = evaluated.get(output).expect("y present");
 
         // channel 0: [1,2,3,4] * kernel [1,1] -> [3,5,7]; channel 1: [10,20,30,40] * kernel [2,2] -> [60,100,140]
         assert_eq!(shape, &[1, 2, 3]);
-        assert_eq!(data, &[3.0, 5.0, 7.0, 60.0, 100.0, 140.0], "each group convolves its own channel with its own kernel");
+        assert_eq!(
+            data,
+            &[3.0, 5.0, 7.0, 60.0, 100.0, 140.0],
+            "each group convolves its own channel with its own kernel"
+        );
     }
 
     /// `Conv`, rank-5 (3D), stride 1, no padding: [`lower_conv3d`]'s rank-5
@@ -6378,23 +10098,41 @@ mod tests {
     fn conv3d_stride1_no_pad_sums_each_2_deep_window() {
         let image = f32_initializer("image", &[1, 1, 3, 1, 1], &[1.0, 2.0, 3.0]);
         let weight = f32_initializer("weight", &[1, 1, 2, 1, 1], &[1.0, 1.0]);
-        let node = NodeProto { input: vec!["image", "weight"], output: vec!["y"], op_type: "Conv", name: "conv3d", ..NodeProto::default() };
+        let node = NodeProto {
+            input: vec!["image", "weight"],
+            output: vec!["y"],
+            op_type: "Conv",
+            name: "conv3d",
+            ..NodeProto::default()
+        };
         let graph = GraphProto {
             node: vec![node],
             name: "conv3d_stride1_graph",
             initializer: vec![image, weight],
-            output: vec![ValueInfoProto { name: "y", ..ValueInfoProto::default() }],
+            output: vec![ValueInfoProto {
+                name: "y",
+                ..ValueInfoProto::default()
+            }],
             ..GraphProto::default()
         };
 
         let lowered = lower_graph(&graph).expect("lower Conv3d");
-        let named: Vec<(&str, &[f32])> = lowered.initializers.iter().map(|(name, data)| (name.as_str(), data.as_slice())).collect();
+        let named: Vec<(&str, &[f32])> = lowered
+            .initializers
+            .iter()
+            .map(|(name, data)| (name.as_str(), data.as_slice()))
+            .collect();
         let output = lowered.graph_outputs[0].1;
-        let evaluated = evaluate_named(&lowered.program, &[], &named, &[output]).expect("evaluate Conv3d");
+        let evaluated =
+            evaluate_named(&lowered.program, &[], &named, &[output]).expect("evaluate Conv3d");
         let (data, shape) = evaluated.get(output).expect("y present");
 
         assert_eq!(shape, &[1, 1, 2, 1, 1]);
-        assert_eq!(data, &[3.0, 5.0], "hand-summed 2-deep windows over the depth axis [1,2,3]");
+        assert_eq!(
+            data,
+            &[3.0, 5.0],
+            "hand-summed 2-deep windows over the depth axis [1,2,3]"
+        );
     }
 
     /// Grouped `Conv3d`, `group = in_channels = 2`: [`lower_conv3d`]'s
@@ -6408,7 +10146,11 @@ mod tests {
     fn grouped_conv3d_slices_channels_independently() {
         let image = f32_initializer("image", &[1, 2, 3, 1, 1], &[1.0, 2.0, 3.0, 2.0, 4.0, 6.0]);
         let weight = f32_initializer("weight", &[2, 1, 2, 1, 1], &[1.0, 1.0, 1.0, 1.0]);
-        let group_attribute = AttributeProto { name: "group", i: 2, ..AttributeProto::default() };
+        let group_attribute = AttributeProto {
+            name: "group",
+            i: 2,
+            ..AttributeProto::default()
+        };
         let node = NodeProto {
             input: vec!["image", "weight"],
             output: vec!["y"],
@@ -6421,19 +10163,35 @@ mod tests {
             node: vec![node],
             name: "grouped_conv3d_graph",
             initializer: vec![image, weight],
-            output: vec![ValueInfoProto { name: "y", ..ValueInfoProto::default() }],
+            output: vec![ValueInfoProto {
+                name: "y",
+                ..ValueInfoProto::default()
+            }],
             ..GraphProto::default()
         };
 
         let lowered = lower_graph(&graph).expect("lower grouped Conv3d");
-        let named: Vec<(&str, &[f32])> = lowered.initializers.iter().map(|(name, data)| (name.as_str(), data.as_slice())).collect();
+        let named: Vec<(&str, &[f32])> = lowered
+            .initializers
+            .iter()
+            .map(|(name, data)| (name.as_str(), data.as_slice()))
+            .collect();
         let output = lowered.graph_outputs[0].1;
-        let evaluated = evaluate_named(&lowered.program, &[], &named, &[output]).expect("evaluate grouped Conv3d");
+        let evaluated = evaluate_named(&lowered.program, &[], &named, &[output])
+            .expect("evaluate grouped Conv3d");
         let (data, shape) = evaluated.get(output).expect("y present");
 
         assert_eq!(shape, &[1, 2, 2, 1, 1]);
-        assert_eq!(&data[0..2], &[3.0, 5.0], "group 0 matches the un-grouped single-channel depth-window sums");
-        assert_eq!(&data[2..4], &[6.0, 10.0], "group 1 sees only its own (doubled) channel");
+        assert_eq!(
+            &data[0..2],
+            &[3.0, 5.0],
+            "group 0 matches the un-grouped single-channel depth-window sums"
+        );
+        assert_eq!(
+            &data[2..4],
+            &[6.0, 10.0],
+            "group 1 sees only its own (doubled) channel"
+        );
     }
 
     /// `MaxPool`, rank-5 (3D): [`lower_maxpool3d`]'s rank-5 mirror of
@@ -6454,18 +10212,30 @@ mod tests {
             node: vec![node],
             name: "maxpool3d_graph",
             initializer: vec![image],
-            output: vec![ValueInfoProto { name: "y", ..ValueInfoProto::default() }],
+            output: vec![ValueInfoProto {
+                name: "y",
+                ..ValueInfoProto::default()
+            }],
             ..GraphProto::default()
         };
 
         let lowered = lower_graph(&graph).expect("lower MaxPool3d");
-        let named: Vec<(&str, &[f32])> = lowered.initializers.iter().map(|(name, data)| (name.as_str(), data.as_slice())).collect();
+        let named: Vec<(&str, &[f32])> = lowered
+            .initializers
+            .iter()
+            .map(|(name, data)| (name.as_str(), data.as_slice()))
+            .collect();
         let output = lowered.graph_outputs[0].1;
-        let evaluated = evaluate_named(&lowered.program, &[], &named, &[output]).expect("evaluate MaxPool3d");
+        let evaluated =
+            evaluate_named(&lowered.program, &[], &named, &[output]).expect("evaluate MaxPool3d");
         let (data, shape) = evaluated.get(output).expect("y present");
 
         assert_eq!(shape, &[1, 1, 2, 1, 1]);
-        assert_eq!(data, &[3.0, 3.0], "max of each 2-deep window over [1,3,2]: max(1,3)=3, max(3,2)=3");
+        assert_eq!(
+            data,
+            &[3.0, 3.0],
+            "max of each 2-deep window over [1,3,2]: max(1,3)=3, max(3,2)=3"
+        );
     }
 
     /// `AveragePool`, rank-5 (3D): [`lower_averagepool3d`]'s rank-5 mirror
@@ -6486,23 +10256,57 @@ mod tests {
             node: vec![node],
             name: "averagepool3d_graph",
             initializer: vec![image],
-            output: vec![ValueInfoProto { name: "y", ..ValueInfoProto::default() }],
+            output: vec![ValueInfoProto {
+                name: "y",
+                ..ValueInfoProto::default()
+            }],
             ..GraphProto::default()
         };
 
         let lowered = lower_graph(&graph).expect("lower AveragePool3d");
-        let named: Vec<(&str, &[f32])> = lowered.initializers.iter().map(|(name, data)| (name.as_str(), data.as_slice())).collect();
+        let named: Vec<(&str, &[f32])> = lowered
+            .initializers
+            .iter()
+            .map(|(name, data)| (name.as_str(), data.as_slice()))
+            .collect();
         let output = lowered.graph_outputs[0].1;
-        let evaluated = evaluate_named(&lowered.program, &[], &named, &[output]).expect("evaluate AveragePool3d");
+        let evaluated = evaluate_named(&lowered.program, &[], &named, &[output])
+            .expect("evaluate AveragePool3d");
         let (data, shape) = evaluated.get(output).expect("y present");
 
         assert_eq!(shape, &[1, 1, 2, 1, 1]);
-        assert_eq!(data, &[2.0, 4.0], "mean of each 2-deep window over [1,3,5]: (1+3)/2=2, (3+5)/2=4");
+        assert_eq!(
+            data,
+            &[2.0, 4.0],
+            "mean of each 2-deep window over [1,3,5]: (1+3)/2=2, (3+5)/2=4"
+        );
     }
 
-    fn constant_tensor_node(output: &'static str, name: &'static str, dims: Vec<i64>, data: Vec<f32>) -> NodeProto<'static> {
-        let tensor = TensorProto { dims, data_type: 1, float_data: data, name: "value", ..TensorProto::default() };
-        NodeProto { input: Vec::new(), output: alloc::vec![output], op_type: "Constant", name, attribute: alloc::vec![AttributeProto { name: "value", t: Some(tensor), ..AttributeProto::default() }], ..NodeProto::default() }
+    fn constant_tensor_node(
+        output: &'static str,
+        name: &'static str,
+        dims: Vec<i64>,
+        data: Vec<f32>,
+    ) -> NodeProto<'static> {
+        let tensor = TensorProto {
+            dims,
+            data_type: 1,
+            float_data: data,
+            name: "value",
+            ..TensorProto::default()
+        };
+        NodeProto {
+            input: Vec::new(),
+            output: alloc::vec![output],
+            op_type: "Constant",
+            name,
+            attribute: alloc::vec![AttributeProto {
+                name: "value",
+                t: Some(tensor),
+                ..AttributeProto::default()
+            }],
+            ..NodeProto::default()
+        }
     }
 
     /// `Cast(to=Float32)`: this pass's own f32-storage convention (every
@@ -6511,13 +10315,34 @@ mod tests {
     #[test]
     fn cast_to_float32_is_identity_on_the_values() {
         let x = f32_initializer("x", &[3], &[1.0, 2.0, 3.0]);
-        let node = NodeProto { input: alloc::vec!["x"], output: alloc::vec!["y"], op_type: "Cast", name: "cast", attribute: alloc::vec![int_attribute("to", 1)], ..NodeProto::default() };
-        let graph = GraphProto { node: alloc::vec![node], name: "cast_graph", initializer: alloc::vec![x], output: alloc::vec![ValueInfoProto { name: "y", ..ValueInfoProto::default() }], ..GraphProto::default() };
+        let node = NodeProto {
+            input: alloc::vec!["x"],
+            output: alloc::vec!["y"],
+            op_type: "Cast",
+            name: "cast",
+            attribute: alloc::vec![int_attribute("to", 1)],
+            ..NodeProto::default()
+        };
+        let graph = GraphProto {
+            node: alloc::vec![node],
+            name: "cast_graph",
+            initializer: alloc::vec![x],
+            output: alloc::vec![ValueInfoProto {
+                name: "y",
+                ..ValueInfoProto::default()
+            }],
+            ..GraphProto::default()
+        };
 
         let lowered = lower_graph(&graph).expect("lower Cast");
-        let named: Vec<(&str, &[f32])> = lowered.initializers.iter().map(|(name, data)| (name.as_str(), data.as_slice())).collect();
+        let named: Vec<(&str, &[f32])> = lowered
+            .initializers
+            .iter()
+            .map(|(name, data)| (name.as_str(), data.as_slice()))
+            .collect();
         let output = lowered.graph_outputs[0].1;
-        let evaluated = evaluate_named(&lowered.program, &[], &named, &[output]).expect("evaluate Cast");
+        let evaluated =
+            evaluate_named(&lowered.program, &[], &named, &[output]).expect("evaluate Cast");
         let (data, shape) = evaluated.get(output).expect("y present");
         assert_eq!(shape, &[3]);
         assert_eq!(data, &[1.0, 2.0, 3.0]);
@@ -6531,21 +10356,50 @@ mod tests {
     #[test]
     fn cast_on_a_double_unsqueezed_operand_preserves_the_virtual_axes() {
         let x = f32_initializer("x", &[2], &[5.0, 6.0]);
-        let unsqueeze0 = NodeProto { input: alloc::vec!["x"], output: alloc::vec!["u0"], op_type: "Unsqueeze", name: "unsqueeze0", attribute: alloc::vec![ints_attribute("axes", alloc::vec![0])], ..NodeProto::default() };
-        let unsqueeze1 = NodeProto { input: alloc::vec!["u0"], output: alloc::vec!["u1"], op_type: "Unsqueeze", name: "unsqueeze1", attribute: alloc::vec![ints_attribute("axes", alloc::vec![0])], ..NodeProto::default() };
-        let cast = NodeProto { input: alloc::vec!["u1"], output: alloc::vec!["y"], op_type: "Cast", name: "cast", attribute: alloc::vec![int_attribute("to", 1)], ..NodeProto::default() };
+        let unsqueeze0 = NodeProto {
+            input: alloc::vec!["x"],
+            output: alloc::vec!["u0"],
+            op_type: "Unsqueeze",
+            name: "unsqueeze0",
+            attribute: alloc::vec![ints_attribute("axes", alloc::vec![0])],
+            ..NodeProto::default()
+        };
+        let unsqueeze1 = NodeProto {
+            input: alloc::vec!["u0"],
+            output: alloc::vec!["u1"],
+            op_type: "Unsqueeze",
+            name: "unsqueeze1",
+            attribute: alloc::vec![ints_attribute("axes", alloc::vec![0])],
+            ..NodeProto::default()
+        };
+        let cast = NodeProto {
+            input: alloc::vec!["u1"],
+            output: alloc::vec!["y"],
+            op_type: "Cast",
+            name: "cast",
+            attribute: alloc::vec![int_attribute("to", 1)],
+            ..NodeProto::default()
+        };
         let graph = GraphProto {
             node: alloc::vec![unsqueeze0, unsqueeze1, cast],
             name: "cast_view_graph",
             initializer: alloc::vec![x],
-            output: alloc::vec![ValueInfoProto { name: "y", ..ValueInfoProto::default() }],
+            output: alloc::vec![ValueInfoProto {
+                name: "y",
+                ..ValueInfoProto::default()
+            }],
             ..GraphProto::default()
         };
 
         let lowered = lower_graph(&graph).expect("lower Cast over a double-unsqueezed operand");
-        let named: Vec<(&str, &[f32])> = lowered.initializers.iter().map(|(name, data)| (name.as_str(), data.as_slice())).collect();
+        let named: Vec<(&str, &[f32])> = lowered
+            .initializers
+            .iter()
+            .map(|(name, data)| (name.as_str(), data.as_slice()))
+            .collect();
         let output = lowered.graph_outputs[0].1;
-        let evaluated = evaluate_named(&lowered.program, &[], &named, &[output]).expect("evaluate Cast over a view");
+        let evaluated = evaluate_named(&lowered.program, &[], &named, &[output])
+            .expect("evaluate Cast over a view");
         let (data, shape) = evaluated.get(output).expect("y present");
         // `shape::infer` reports the REAL (rank-1) physical shape here --
         // the two virtual axes only exist in this pass's own `Value`
@@ -6566,14 +10420,30 @@ mod tests {
     #[test]
     fn shape_folds_into_a_gather_picking_one_axis() {
         let x = f32_initializer("x", &[2, 3], &[0.0, 0.0, 0.0, 0.0, 0.0, 0.0]);
-        let shape_node = NodeProto { input: alloc::vec!["x"], output: alloc::vec!["shape"], op_type: "Shape", name: "shape", ..NodeProto::default() };
+        let shape_node = NodeProto {
+            input: alloc::vec!["x"],
+            output: alloc::vec!["shape"],
+            op_type: "Shape",
+            name: "shape",
+            ..NodeProto::default()
+        };
         let index = constant_tensor_node("index", "index_const", alloc::vec![], alloc::vec![1.0]);
-        let gather = NodeProto { input: alloc::vec!["shape", "index"], output: alloc::vec!["y"], op_type: "Gather", name: "gather", attribute: alloc::vec![int_attribute("axis", 0)], ..NodeProto::default() };
+        let gather = NodeProto {
+            input: alloc::vec!["shape", "index"],
+            output: alloc::vec!["y"],
+            op_type: "Gather",
+            name: "gather",
+            attribute: alloc::vec![int_attribute("axis", 0)],
+            ..NodeProto::default()
+        };
         let graph = GraphProto {
             node: alloc::vec![shape_node, index, gather],
             name: "shape_gather_graph",
             initializer: alloc::vec![x],
-            output: alloc::vec![ValueInfoProto { name: "y", ..ValueInfoProto::default() }],
+            output: alloc::vec![ValueInfoProto {
+                name: "y",
+                ..ValueInfoProto::default()
+            }],
             ..GraphProto::default()
         };
 
@@ -6583,9 +10453,14 @@ mod tests {
         // that still needs a live leaf -- `lower_graph_pinned`'s own
         // graph-output fallback materializes it.
         let lowered = lower_graph(&graph).expect("lower Shape -> Gather");
-        let named: Vec<(&str, &[f32])> = lowered.initializers.iter().map(|(name, data)| (name.as_str(), data.as_slice())).collect();
+        let named: Vec<(&str, &[f32])> = lowered
+            .initializers
+            .iter()
+            .map(|(name, data)| (name.as_str(), data.as_slice()))
+            .collect();
         let output = lowered.graph_outputs[0].1;
-        let evaluated = evaluate_named(&lowered.program, &[], &named, &[output]).expect("evaluate Shape -> Gather");
+        let evaluated = evaluate_named(&lowered.program, &[], &named, &[output])
+            .expect("evaluate Shape -> Gather");
         let (data, _) = evaluated.get(output).expect("y present");
         assert_eq!(data, &[3.0], "axis 1 of [2, 3] is 3");
     }
@@ -6594,14 +10469,39 @@ mod tests {
     #[test]
     fn pow_with_integer_exponent_is_repeated_multiply() {
         let x = f32_initializer("x", &[3], &[2.0, 3.0, 4.0]);
-        let exponent = constant_tensor_node("exponent", "exponent_const", alloc::vec![], alloc::vec![2.0]);
-        let node = NodeProto { input: alloc::vec!["x", "exponent"], output: alloc::vec!["y"], op_type: "Pow", name: "pow", ..NodeProto::default() };
-        let graph = GraphProto { node: alloc::vec![exponent, node], name: "pow_graph", initializer: alloc::vec![x], output: alloc::vec![ValueInfoProto { name: "y", ..ValueInfoProto::default() }], ..GraphProto::default() };
+        let exponent = constant_tensor_node(
+            "exponent",
+            "exponent_const",
+            alloc::vec![],
+            alloc::vec![2.0],
+        );
+        let node = NodeProto {
+            input: alloc::vec!["x", "exponent"],
+            output: alloc::vec!["y"],
+            op_type: "Pow",
+            name: "pow",
+            ..NodeProto::default()
+        };
+        let graph = GraphProto {
+            node: alloc::vec![exponent, node],
+            name: "pow_graph",
+            initializer: alloc::vec![x],
+            output: alloc::vec![ValueInfoProto {
+                name: "y",
+                ..ValueInfoProto::default()
+            }],
+            ..GraphProto::default()
+        };
 
         let lowered = lower_graph(&graph).expect("lower Pow(x, 2)");
-        let named: Vec<(&str, &[f32])> = lowered.initializers.iter().map(|(name, data)| (name.as_str(), data.as_slice())).collect();
+        let named: Vec<(&str, &[f32])> = lowered
+            .initializers
+            .iter()
+            .map(|(name, data)| (name.as_str(), data.as_slice()))
+            .collect();
         let output = lowered.graph_outputs[0].1;
-        let evaluated = evaluate_named(&lowered.program, &[], &named, &[output]).expect("evaluate Pow(x, 2)");
+        let evaluated =
+            evaluate_named(&lowered.program, &[], &named, &[output]).expect("evaluate Pow(x, 2)");
         let (data, _) = evaluated.get(output).expect("y present");
         assert_eq!(data, &[4.0, 9.0, 16.0]);
     }
@@ -6611,17 +10511,45 @@ mod tests {
     #[test]
     fn pow_with_one_half_exponent_is_square_root() {
         let x = f32_initializer("x", &[3], &[4.0, 9.0, 16.0]);
-        let exponent = constant_tensor_node("exponent", "exponent_const", alloc::vec![], alloc::vec![0.5]);
-        let node = NodeProto { input: alloc::vec!["x", "exponent"], output: alloc::vec!["y"], op_type: "Pow", name: "pow", ..NodeProto::default() };
-        let graph = GraphProto { node: alloc::vec![exponent, node], name: "pow_sqrt_graph", initializer: alloc::vec![x], output: alloc::vec![ValueInfoProto { name: "y", ..ValueInfoProto::default() }], ..GraphProto::default() };
+        let exponent = constant_tensor_node(
+            "exponent",
+            "exponent_const",
+            alloc::vec![],
+            alloc::vec![0.5],
+        );
+        let node = NodeProto {
+            input: alloc::vec!["x", "exponent"],
+            output: alloc::vec!["y"],
+            op_type: "Pow",
+            name: "pow",
+            ..NodeProto::default()
+        };
+        let graph = GraphProto {
+            node: alloc::vec![exponent, node],
+            name: "pow_sqrt_graph",
+            initializer: alloc::vec![x],
+            output: alloc::vec![ValueInfoProto {
+                name: "y",
+                ..ValueInfoProto::default()
+            }],
+            ..GraphProto::default()
+        };
 
         let lowered = lower_graph(&graph).expect("lower Pow(x, 0.5)");
-        let named: Vec<(&str, &[f32])> = lowered.initializers.iter().map(|(name, data)| (name.as_str(), data.as_slice())).collect();
+        let named: Vec<(&str, &[f32])> = lowered
+            .initializers
+            .iter()
+            .map(|(name, data)| (name.as_str(), data.as_slice()))
+            .collect();
         let output = lowered.graph_outputs[0].1;
-        let evaluated = evaluate_named(&lowered.program, &[], &named, &[output]).expect("evaluate Pow(x, 0.5)");
+        let evaluated =
+            evaluate_named(&lowered.program, &[], &named, &[output]).expect("evaluate Pow(x, 0.5)");
         let (data, _) = evaluated.get(output).expect("y present");
         for (actual, expected) in data.iter().zip([2.0f32, 3.0, 4.0]) {
-            assert!((actual - expected).abs() < 1e-5, "got {actual}, expected {expected}");
+            assert!(
+                (actual - expected).abs() < 1e-5,
+                "got {actual}, expected {expected}"
+            );
         }
     }
 
@@ -6632,17 +10560,45 @@ mod tests {
     #[test]
     fn pow_with_negative_exponent_uses_the_log_domain_path() {
         let x = f32_initializer("x", &[2], &[2.0, 4.0]);
-        let exponent = constant_tensor_node("exponent", "exponent_const", alloc::vec![], alloc::vec![-1.0]);
-        let node = NodeProto { input: alloc::vec!["x", "exponent"], output: alloc::vec!["y"], op_type: "Pow", name: "pow", ..NodeProto::default() };
-        let graph = GraphProto { node: alloc::vec![exponent, node], name: "pow_neg_graph", initializer: alloc::vec![x], output: alloc::vec![ValueInfoProto { name: "y", ..ValueInfoProto::default() }], ..GraphProto::default() };
+        let exponent = constant_tensor_node(
+            "exponent",
+            "exponent_const",
+            alloc::vec![],
+            alloc::vec![-1.0],
+        );
+        let node = NodeProto {
+            input: alloc::vec!["x", "exponent"],
+            output: alloc::vec!["y"],
+            op_type: "Pow",
+            name: "pow",
+            ..NodeProto::default()
+        };
+        let graph = GraphProto {
+            node: alloc::vec![exponent, node],
+            name: "pow_neg_graph",
+            initializer: alloc::vec![x],
+            output: alloc::vec![ValueInfoProto {
+                name: "y",
+                ..ValueInfoProto::default()
+            }],
+            ..GraphProto::default()
+        };
 
         let lowered = lower_graph(&graph).expect("lower Pow(x, -1)");
-        let named: Vec<(&str, &[f32])> = lowered.initializers.iter().map(|(name, data)| (name.as_str(), data.as_slice())).collect();
+        let named: Vec<(&str, &[f32])> = lowered
+            .initializers
+            .iter()
+            .map(|(name, data)| (name.as_str(), data.as_slice()))
+            .collect();
         let output = lowered.graph_outputs[0].1;
-        let evaluated = evaluate_named(&lowered.program, &[], &named, &[output]).expect("evaluate Pow(x, -1)");
+        let evaluated =
+            evaluate_named(&lowered.program, &[], &named, &[output]).expect("evaluate Pow(x, -1)");
         let (data, _) = evaluated.get(output).expect("y present");
         for (actual, expected) in data.iter().zip([0.5f32, 0.25]) {
-            assert!((actual - expected).abs() < 1e-4, "got {actual}, expected {expected}");
+            assert!(
+                (actual - expected).abs() < 1e-4,
+                "got {actual}, expected {expected}"
+            );
         }
     }
 
@@ -6653,23 +10609,48 @@ mod tests {
     #[test]
     fn reduce_mean_keepdims_broadcasts_back_against_the_input() {
         let x = f32_initializer("x", &[2, 3], &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
-        let mean = NodeProto { input: alloc::vec!["x"], output: alloc::vec!["mean"], op_type: "ReduceMean", name: "reduce_mean", attribute: alloc::vec![ints_attribute("axes", alloc::vec![-1])], ..NodeProto::default() };
-        let centered = NodeProto { input: alloc::vec!["x", "mean"], output: alloc::vec!["y"], op_type: "Sub", name: "sub", ..NodeProto::default() };
+        let mean = NodeProto {
+            input: alloc::vec!["x"],
+            output: alloc::vec!["mean"],
+            op_type: "ReduceMean",
+            name: "reduce_mean",
+            attribute: alloc::vec![ints_attribute("axes", alloc::vec![-1])],
+            ..NodeProto::default()
+        };
+        let centered = NodeProto {
+            input: alloc::vec!["x", "mean"],
+            output: alloc::vec!["y"],
+            op_type: "Sub",
+            name: "sub",
+            ..NodeProto::default()
+        };
         let graph = GraphProto {
             node: alloc::vec![mean, centered],
             name: "reduce_mean_graph",
             initializer: alloc::vec![x],
-            output: alloc::vec![ValueInfoProto { name: "y", ..ValueInfoProto::default() }],
+            output: alloc::vec![ValueInfoProto {
+                name: "y",
+                ..ValueInfoProto::default()
+            }],
             ..GraphProto::default()
         };
 
         let lowered = lower_graph(&graph).expect("lower ReduceMean(keepdims=1) -> Sub");
-        let named: Vec<(&str, &[f32])> = lowered.initializers.iter().map(|(name, data)| (name.as_str(), data.as_slice())).collect();
+        let named: Vec<(&str, &[f32])> = lowered
+            .initializers
+            .iter()
+            .map(|(name, data)| (name.as_str(), data.as_slice()))
+            .collect();
         let output = lowered.graph_outputs[0].1;
-        let evaluated = evaluate_named(&lowered.program, &[], &named, &[output]).expect("evaluate ReduceMean -> Sub");
+        let evaluated = evaluate_named(&lowered.program, &[], &named, &[output])
+            .expect("evaluate ReduceMean -> Sub");
         let (data, shape) = evaluated.get(output).expect("y present");
         assert_eq!(shape, &[2, 3]);
-        assert_eq!(data, &[-1.0, 0.0, 1.0, -1.0, 0.0, 1.0], "row means are 2 and 5; each row centers around its own mean");
+        assert_eq!(
+            data,
+            &[-1.0, 0.0, 1.0, -1.0, 0.0, 1.0],
+            "row means are 2 and 5; each row centers around its own mean"
+        );
     }
 
     /// `ReduceMean(axes=[-1], keepdims=0)`: the plain (non-keepdims) shape
@@ -6683,15 +10664,32 @@ mod tests {
             output: alloc::vec!["y"],
             op_type: "ReduceMean",
             name: "reduce_mean",
-            attribute: alloc::vec![ints_attribute("axes", alloc::vec![-1]), int_attribute("keepdims", 0)],
+            attribute: alloc::vec![
+                ints_attribute("axes", alloc::vec![-1]),
+                int_attribute("keepdims", 0)
+            ],
             ..NodeProto::default()
         };
-        let graph = GraphProto { node: alloc::vec![node], name: "reduce_mean_no_keepdims_graph", initializer: alloc::vec![x], output: alloc::vec![ValueInfoProto { name: "y", ..ValueInfoProto::default() }], ..GraphProto::default() };
+        let graph = GraphProto {
+            node: alloc::vec![node],
+            name: "reduce_mean_no_keepdims_graph",
+            initializer: alloc::vec![x],
+            output: alloc::vec![ValueInfoProto {
+                name: "y",
+                ..ValueInfoProto::default()
+            }],
+            ..GraphProto::default()
+        };
 
         let lowered = lower_graph(&graph).expect("lower ReduceMean(keepdims=0)");
-        let named: Vec<(&str, &[f32])> = lowered.initializers.iter().map(|(name, data)| (name.as_str(), data.as_slice())).collect();
+        let named: Vec<(&str, &[f32])> = lowered
+            .initializers
+            .iter()
+            .map(|(name, data)| (name.as_str(), data.as_slice()))
+            .collect();
         let output = lowered.graph_outputs[0].1;
-        let evaluated = evaluate_named(&lowered.program, &[], &named, &[output]).expect("evaluate ReduceMean(keepdims=0)");
+        let evaluated = evaluate_named(&lowered.program, &[], &named, &[output])
+            .expect("evaluate ReduceMean(keepdims=0)");
         let (data, shape) = evaluated.get(output).expect("y present");
         assert_eq!(shape, &[2]);
         assert_eq!(data, &[2.0, 5.0]);
@@ -6704,22 +10702,37 @@ mod tests {
     #[test]
     fn slice_picks_a_static_range_of_one_axis() {
         let x = f32_initializer("x", &[4], &[10.0, 20.0, 30.0, 40.0]);
-        let starts = constant_tensor_node("starts", "starts_const", alloc::vec![1], alloc::vec![1.0]);
+        let starts =
+            constant_tensor_node("starts", "starts_const", alloc::vec![1], alloc::vec![1.0]);
         let ends = constant_tensor_node("ends", "ends_const", alloc::vec![1], alloc::vec![3.0]);
         let axes = constant_tensor_node("axes", "axes_const", alloc::vec![1], alloc::vec![0.0]);
-        let node = NodeProto { input: alloc::vec!["x", "starts", "ends", "axes"], output: alloc::vec!["y"], op_type: "Slice", name: "slice", ..NodeProto::default() };
+        let node = NodeProto {
+            input: alloc::vec!["x", "starts", "ends", "axes"],
+            output: alloc::vec!["y"],
+            op_type: "Slice",
+            name: "slice",
+            ..NodeProto::default()
+        };
         let graph = GraphProto {
             node: alloc::vec![starts, ends, axes, node],
             name: "slice_graph",
             initializer: alloc::vec![x],
-            output: alloc::vec![ValueInfoProto { name: "y", ..ValueInfoProto::default() }],
+            output: alloc::vec![ValueInfoProto {
+                name: "y",
+                ..ValueInfoProto::default()
+            }],
             ..GraphProto::default()
         };
 
         let lowered = lower_graph(&graph).expect("lower Slice");
-        let named: Vec<(&str, &[f32])> = lowered.initializers.iter().map(|(name, data)| (name.as_str(), data.as_slice())).collect();
+        let named: Vec<(&str, &[f32])> = lowered
+            .initializers
+            .iter()
+            .map(|(name, data)| (name.as_str(), data.as_slice()))
+            .collect();
         let output = lowered.graph_outputs[0].1;
-        let evaluated = evaluate_named(&lowered.program, &[], &named, &[output]).expect("evaluate Slice");
+        let evaluated =
+            evaluate_named(&lowered.program, &[], &named, &[output]).expect("evaluate Slice");
         let (data, shape) = evaluated.get(output).expect("y present");
         assert_eq!(shape, &[2]);
         assert_eq!(data, &[20.0, 30.0]);
@@ -6733,22 +10746,42 @@ mod tests {
     /// materialized values.
     #[test]
     fn slice_over_a_constant_node_payload_materializes_a_live_leaf() {
-        let table = constant_tensor_node("table", "table_const", alloc::vec![1, 4], alloc::vec![10.0, 11.0, 12.0, 13.0]);
-        let starts = constant_tensor_node("starts", "starts_const", alloc::vec![1], alloc::vec![0.0]);
+        let table = constant_tensor_node(
+            "table",
+            "table_const",
+            alloc::vec![1, 4],
+            alloc::vec![10.0, 11.0, 12.0, 13.0],
+        );
+        let starts =
+            constant_tensor_node("starts", "starts_const", alloc::vec![1], alloc::vec![0.0]);
         let ends = constant_tensor_node("ends", "ends_const", alloc::vec![1], alloc::vec![2.0]);
         let axes = constant_tensor_node("axes", "axes_const", alloc::vec![1], alloc::vec![1.0]);
-        let node = NodeProto { input: alloc::vec!["table", "starts", "ends", "axes"], output: alloc::vec!["y"], op_type: "Slice", name: "slice", ..NodeProto::default() };
+        let node = NodeProto {
+            input: alloc::vec!["table", "starts", "ends", "axes"],
+            output: alloc::vec!["y"],
+            op_type: "Slice",
+            name: "slice",
+            ..NodeProto::default()
+        };
         let graph = GraphProto {
             node: alloc::vec![table, starts, ends, axes, node],
             name: "slice_constant_graph",
-            output: alloc::vec![ValueInfoProto { name: "y", ..ValueInfoProto::default() }],
+            output: alloc::vec![ValueInfoProto {
+                name: "y",
+                ..ValueInfoProto::default()
+            }],
             ..GraphProto::default()
         };
 
         let lowered = lower_graph(&graph).expect("lower Slice over a Constant node payload");
-        let named: Vec<(&str, &[f32])> = lowered.initializers.iter().map(|(name, data)| (name.as_str(), data.as_slice())).collect();
+        let named: Vec<(&str, &[f32])> = lowered
+            .initializers
+            .iter()
+            .map(|(name, data)| (name.as_str(), data.as_slice()))
+            .collect();
         let output = lowered.graph_outputs[0].1;
-        let evaluated = evaluate_named(&lowered.program, &[], &named, &[output]).expect("evaluate Slice over a Constant node payload");
+        let evaluated = evaluate_named(&lowered.program, &[], &named, &[output])
+            .expect("evaluate Slice over a Constant node payload");
         let (data, shape) = evaluated.get(output).expect("y present");
         assert_eq!(shape, &[1, 2]);
         assert_eq!(data, &[10.0, 11.0]);
@@ -6758,13 +10791,33 @@ mod tests {
     #[test]
     fn dropout_without_training_mode_is_identity() {
         let x = f32_initializer("x", &[3], &[1.0, 2.0, 3.0]);
-        let node = NodeProto { input: alloc::vec!["x"], output: alloc::vec!["y"], op_type: "Dropout", name: "dropout", ..NodeProto::default() };
-        let graph = GraphProto { node: alloc::vec![node], name: "dropout_graph", initializer: alloc::vec![x], output: alloc::vec![ValueInfoProto { name: "y", ..ValueInfoProto::default() }], ..GraphProto::default() };
+        let node = NodeProto {
+            input: alloc::vec!["x"],
+            output: alloc::vec!["y"],
+            op_type: "Dropout",
+            name: "dropout",
+            ..NodeProto::default()
+        };
+        let graph = GraphProto {
+            node: alloc::vec![node],
+            name: "dropout_graph",
+            initializer: alloc::vec![x],
+            output: alloc::vec![ValueInfoProto {
+                name: "y",
+                ..ValueInfoProto::default()
+            }],
+            ..GraphProto::default()
+        };
 
         let lowered = lower_graph(&graph).expect("lower Dropout");
-        let named: Vec<(&str, &[f32])> = lowered.initializers.iter().map(|(name, data)| (name.as_str(), data.as_slice())).collect();
+        let named: Vec<(&str, &[f32])> = lowered
+            .initializers
+            .iter()
+            .map(|(name, data)| (name.as_str(), data.as_slice()))
+            .collect();
         let output = lowered.graph_outputs[0].1;
-        let evaluated = evaluate_named(&lowered.program, &[], &named, &[output]).expect("evaluate Dropout");
+        let evaluated =
+            evaluate_named(&lowered.program, &[], &named, &[output]).expect("evaluate Dropout");
         let (data, _) = evaluated.get(output).expect("y present");
         assert_eq!(data, &[1.0, 2.0, 3.0]);
     }
@@ -6775,18 +10828,35 @@ mod tests {
     #[test]
     fn dropout_with_training_mode_true_is_a_named_unsupported_shape() {
         let x = f32_initializer("x", &[3], &[1.0, 2.0, 3.0]);
-        let training_mode = constant_tensor_node("training_mode", "training_mode_const", alloc::vec![], alloc::vec![1.0]);
-        let node = NodeProto { input: alloc::vec!["x", "", "training_mode"], output: alloc::vec!["y"], op_type: "Dropout", name: "dropout", ..NodeProto::default() };
+        let training_mode = constant_tensor_node(
+            "training_mode",
+            "training_mode_const",
+            alloc::vec![],
+            alloc::vec![1.0],
+        );
+        let node = NodeProto {
+            input: alloc::vec!["x", "", "training_mode"],
+            output: alloc::vec!["y"],
+            op_type: "Dropout",
+            name: "dropout",
+            ..NodeProto::default()
+        };
         let graph = GraphProto {
             node: alloc::vec![training_mode, node],
             name: "dropout_training_graph",
             initializer: alloc::vec![x],
-            output: alloc::vec![ValueInfoProto { name: "y", ..ValueInfoProto::default() }],
+            output: alloc::vec![ValueInfoProto {
+                name: "y",
+                ..ValueInfoProto::default()
+            }],
             ..GraphProto::default()
         };
 
         let error = lower_graph(&graph).expect_err("Dropout with training_mode=1 is unsupported");
-        assert!(matches!(error, LowerError::UnsupportedShape { .. }), "expected UnsupportedShape, got {error:?}");
+        assert!(
+            matches!(error, LowerError::UnsupportedShape { .. }),
+            "expected UnsupportedShape, got {error:?}"
+        );
     }
 
     /// [`lower_graph_pinned_cached`]'s own contract: a graph with a
@@ -6800,22 +10870,47 @@ mod tests {
     #[test]
     fn lower_graph_pinned_cached_hits_on_repeat_and_matches_uncached() {
         let mut activation = input_value_info("activation", &[2]);
-        if let Some(TypeProto { value: Some(TypeValue::Tensor(tensor)), .. }) = activation.r#type.as_mut() {
+        if let Some(TypeProto {
+            value: Some(TypeValue::Tensor(tensor)),
+            ..
+        }) = activation.r#type.as_mut()
+        {
             tensor.shape = Some(TensorShapeProto {
                 dim: vec![
-                    Dimension { value: Some(DimensionValue::Param("m")), denotation: "" },
-                    Dimension { value: Some(DimensionValue::Value(4)), denotation: "" },
+                    Dimension {
+                        value: Some(DimensionValue::Param("m")),
+                        denotation: "",
+                    },
+                    Dimension {
+                        value: Some(DimensionValue::Value(4)),
+                        denotation: "",
+                    },
                 ],
             });
         }
-        let weight = f32_initializer("weight", &[4, 3], &[0.5, -1.0, 2.0, 0.25, 1.5, -0.5, 3.0, 0.0, -2.0, 1.0, 0.75, -1.25]);
-        let node = NodeProto { input: vec!["activation", "weight"], output: vec!["y"], op_type: "MatMul", name: "matmul", ..NodeProto::default() };
+        let weight = f32_initializer(
+            "weight",
+            &[4, 3],
+            &[
+                0.5, -1.0, 2.0, 0.25, 1.5, -0.5, 3.0, 0.0, -2.0, 1.0, 0.75, -1.25,
+            ],
+        );
+        let node = NodeProto {
+            input: vec!["activation", "weight"],
+            output: vec!["y"],
+            op_type: "MatMul",
+            name: "matmul",
+            ..NodeProto::default()
+        };
         let graph = GraphProto {
             node: vec![node],
             name: "pinned_cache_graph",
             initializer: vec![weight],
             input: vec![activation],
-            output: vec![ValueInfoProto { name: "y", ..ValueInfoProto::default() }],
+            output: vec![ValueInfoProto {
+                name: "y",
+                ..ValueInfoProto::default()
+            }],
             ..GraphProto::default()
         };
 
@@ -6823,27 +10918,62 @@ mod tests {
         pins.insert("m", 5);
 
         let mut cache: BTreeMap<u64, Lowered> = BTreeMap::new();
-        let (first, first_hit) = lower_graph_pinned_cached(&mut cache, &graph, &pins, 5).expect("first lowering populates the cache");
-        assert!(!first_hit, "cache must be empty on the first call for a fresh shape");
+        let (first, first_hit) = lower_graph_pinned_cached(&mut cache, &graph, &pins, 5)
+            .expect("first lowering populates the cache");
+        assert!(
+            !first_hit,
+            "cache must be empty on the first call for a fresh shape"
+        );
         let first_program_len = first.program.len();
         let first_initializers = first.initializers.clone();
 
-        let (second, second_hit) = lower_graph_pinned_cached(&mut cache, &graph, &pins, 5).expect("second lowering reuses the cache");
-        assert!(second_hit, "repeat call at the same cache_key must report a cache hit");
-        assert_eq!(second.program.len(), first_program_len, "cached program must be the SAME lowering, not a fresh one");
-        assert_eq!(second.initializers, first_initializers, "cached initializers must be bit-identical to the first lowering");
+        let (second, second_hit) = lower_graph_pinned_cached(&mut cache, &graph, &pins, 5)
+            .expect("second lowering reuses the cache");
+        assert!(
+            second_hit,
+            "repeat call at the same cache_key must report a cache hit"
+        );
+        assert_eq!(
+            second.program.len(),
+            first_program_len,
+            "cached program must be the SAME lowering, not a fresh one"
+        );
+        assert_eq!(
+            second.initializers, first_initializers,
+            "cached initializers must be bit-identical to the first lowering"
+        );
         let second_program_len = second.program.len();
         let second_initializers = second.initializers.clone();
-        assert_eq!(cache.len(), 1, "a second call at the SAME shape must not grow the cache");
+        assert_eq!(
+            cache.len(),
+            1,
+            "a second call at the SAME shape must not grow the cache"
+        );
 
-        let uncached = lower_graph_pinned(&graph, &pins).expect("uncached lowering for the bit-identity oracle");
-        assert_eq!(second_initializers, uncached.initializers, "cached lowering must be bit-identical to an independently, freshly lowered call at the same pins");
-        assert_eq!(second_program_len, uncached.program.len(), "cached program length must match a fresh lowering's own program length");
+        let uncached = lower_graph_pinned(&graph, &pins)
+            .expect("uncached lowering for the bit-identity oracle");
+        assert_eq!(
+            second_initializers, uncached.initializers,
+            "cached lowering must be bit-identical to an independently, freshly lowered call at the same pins"
+        );
+        assert_eq!(
+            second_program_len,
+            uncached.program.len(),
+            "cached program length must match a fresh lowering's own program length"
+        );
 
         let mut other_pins: BTreeMap<&str, u64> = BTreeMap::new();
         other_pins.insert("m", 7);
-        let (_third, third_hit) = lower_graph_pinned_cached(&mut cache, &graph, &other_pins, 7).expect("a genuinely different shape misses the cache");
-        assert!(!third_hit, "a different cache_key must miss even though the graph and other pins are unchanged");
-        assert_eq!(cache.len(), 2, "a genuinely new shape grows the cache by exactly one entry");
+        let (_third, third_hit) = lower_graph_pinned_cached(&mut cache, &graph, &other_pins, 7)
+            .expect("a genuinely different shape misses the cache");
+        assert!(
+            !third_hit,
+            "a different cache_key must miss even though the graph and other pins are unchanged"
+        );
+        assert_eq!(
+            cache.len(),
+            2,
+            "a genuinely new shape grows the cache by exactly one entry"
+        );
     }
 }

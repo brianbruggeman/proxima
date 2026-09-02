@@ -58,7 +58,9 @@ use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use proxima_tensor::{BoundOp, BoundOpKind, ComposedBody, DType, Keep, NodeId, ReduceInit, ScalarOp, StepArg};
+use proxima_tensor::{
+    BoundOp, BoundOpKind, ComposedBody, DType, Keep, NodeId, ReduceInit, ScalarOp, StepArg,
+};
 
 use crate::error::EmitError;
 use crate::msl::{Binding, PackedCodec, PackedOperands};
@@ -141,7 +143,10 @@ pub struct CudaGridSpec {
 /// assert!(kernel.source.contains("tanhf("));
 /// # Ok::<(), Box<dyn std::error::Error>>(())
 /// ```
-pub fn emit_cuda(resolved: &BoundOp, packed_operands: &PackedOperands) -> Result<CudaKernel, EmitError> {
+pub fn emit_cuda(
+    resolved: &BoundOp,
+    packed_operands: &PackedOperands,
+) -> Result<CudaKernel, EmitError> {
     validate(resolved)?;
     let entry = entry_name(resolved);
     let quantized = operand_codecs(resolved, packed_operands);
@@ -177,7 +182,10 @@ pub fn emit_cuda(resolved: &BoundOp, packed_operands: &PackedOperands) -> Result
     })
 }
 
-fn operand_codecs(resolved: &BoundOp, packed_operands: &PackedOperands) -> Vec<Option<PackedCodec>> {
+fn operand_codecs(
+    resolved: &BoundOp,
+    packed_operands: &PackedOperands,
+) -> Vec<Option<PackedCodec>> {
     resolved
         .operands()
         .iter()
@@ -230,13 +238,19 @@ fn validate(resolved: &BoundOp) -> Result<(), EmitError> {
     } = &resolved.kind
     {
         if out_scatter.is_some() {
-            return Err(EmitError::ScatterNotSupported { node: resolved.node });
+            return Err(EmitError::ScatterNotSupported {
+                node: resolved.node,
+            });
         }
         if matches!(reduce_op, ScalarOp::Select) {
-            return Err(EmitError::ReductionBodyIsSelect { node: resolved.node });
+            return Err(EmitError::ReductionBodyIsSelect {
+                node: resolved.node,
+            });
         }
         if *keep == Keep::Scan && resolved.extents.is_empty() {
-            return Err(EmitError::EmptyScan { node: resolved.node });
+            return Err(EmitError::EmptyScan {
+                node: resolved.node,
+            });
         }
     }
     Ok(())
@@ -301,7 +315,10 @@ fn grid_threads(resolved: &BoundOp) -> u64 {
             keep: Keep::Reduce,
             ..
         } => {
-            let output_total: u64 = output_axes.iter().map(|dim| resolved.extents[*dim as usize]).product();
+            let output_total: u64 = output_axes
+                .iter()
+                .map(|dim| resolved.extents[*dim as usize])
+                .product();
             if reduce_is_cooperative(resolved) {
                 output_total * WARP_SIZE
             } else {
@@ -364,7 +381,9 @@ fn shuffle_combine_expr(op: ScalarOp, accumulator: &str, shuffled: &str) -> Stri
         | ScalarOp::Erf
         | ScalarOp::Greater
         | ScalarOp::Equal
-        | ScalarOp::Select => unreachable!("shuffle_combine_expr is only called for a cooperative reduce_op"),
+        | ScalarOp::Select => {
+            unreachable!("shuffle_combine_expr is only called for a cooperative reduce_op")
+        }
     }
 }
 
@@ -409,11 +428,9 @@ fn keep_token(keep: Keep) -> &'static str {
 
 fn is_leaf(body: &ComposedBody) -> bool {
     body.steps.len() == 1
-        && body.steps[0]
-            .args
-            .iter()
-            .enumerate()
-            .all(|(index, arg)| matches!(arg, StepArg::Operand(operand) if *operand as usize == index))
+        && body.steps[0].args.iter().enumerate().all(
+            |(index, arg)| matches!(arg, StepArg::Operand(operand) if *operand as usize == index),
+        )
 }
 
 fn body_fingerprint(body: &ComposedBody) -> String {
@@ -464,7 +481,9 @@ fn entry_name(resolved: &BoundOp) -> String {
             let reduce_body = op_token(*reduce_op);
             let init = init_token(*init);
             let output_rank = output_axes.len();
-            format!("omega_cuda_{kind}_r{rank}_o{output_rank}_n{operand_count}_{body}_{reduce_body}_{init}")
+            format!(
+                "omega_cuda_{kind}_r{rank}_o{output_rank}_n{operand_count}_{body}_{reduce_body}_{init}"
+            )
         }
         BoundOpKind::Iota => format!("omega_cuda_iota_r{rank}"),
         BoundOpKind::Constant { value } => {
@@ -543,11 +562,18 @@ fn cooperative_identity_token(op: ScalarOp) -> &'static str {
         | ScalarOp::Erf
         | ScalarOp::Greater
         | ScalarOp::Equal
-        | ScalarOp::Select => unreachable!("cooperative_identity_token is only called for a cooperative reduce_op"),
+        | ScalarOp::Select => {
+            unreachable!("cooperative_identity_token is only called for a cooperative reduce_op")
+        }
     }
 }
 
-fn push_body_steps(source: &mut String, body: &ComposedBody, indent: &str, element_type: &str) -> String {
+fn push_body_steps(
+    source: &mut String,
+    body: &ComposedBody,
+    indent: &str,
+    element_type: &str,
+) -> String {
     for (index, step) in body.steps.iter().enumerate() {
         let args: Vec<String> = step
             .args
@@ -616,10 +642,14 @@ fn kernel_signature(
             Some(PackedCodec::Float16) => "__half",
             Some(_) => "unsigned char",
         };
-        source.push_str(&format!("    const {binding_type}* __restrict__ in{index},\n"));
+        source.push_str(&format!(
+            "    const {binding_type}* __restrict__ in{index},\n"
+        ));
     }
     for slot in 0..gather_count {
-        source.push_str(&format!("    const float* __restrict__ gather_idx{slot},\n"));
+        source.push_str(&format!(
+            "    const float* __restrict__ gather_idx{slot},\n"
+        ));
     }
     source.push_str(&format!("    {element_type}* __restrict__ out,\n"));
     source.push_str("    const Uniforms* __restrict__ u_ptr");
@@ -638,8 +668,12 @@ fn push_gather_uniform_fields(source: &mut String, gather_count: usize, rank_len
         return;
     }
     source.push_str(&format!("    long gather_index_base[{gather_count}];\n"));
-    source.push_str(&format!("    long gather_index_strides[{gather_count}][{rank_len}];\n"));
-    source.push_str(&format!("    long gather_element_stride[{gather_count}];\n"));
+    source.push_str(&format!(
+        "    long gather_index_strides[{gather_count}][{rank_len}];\n"
+    ));
+    source.push_str(&format!(
+        "    long gather_element_stride[{gather_count}];\n"
+    ));
     source.push_str(&format!("    long gather_extent[{gather_count}];\n"));
 }
 
@@ -653,7 +687,12 @@ fn push_gather_uniform_fields(source: &mut String, gather_count: usize, rank_len
 /// is still nonzero) without needing a value-carrying atomic, and the driver
 /// only needs to know a fault occurred to build a
 /// `TensorError::GatherIndexOutOfRange` the way it already does for Metal.
-fn push_gather_fault_check(source: &mut String, operand_index: usize, gather_slot: usize, indent: &str) {
+fn push_gather_fault_check(
+    source: &mut String,
+    operand_index: usize,
+    gather_slot: usize,
+    indent: &str,
+) {
     source.push_str(&format!(
         "{indent}if (fetched{operand_index} < 0 || fetched{operand_index} >= u.gather_extent[{gather_slot}]) {{\n"
     ));
@@ -722,7 +761,11 @@ fn operand_read(index: usize, offset: &str, codec: Option<PackedCodec>) -> Strin
     }
 }
 
-fn render_elementwise(resolved: &BoundOp, entry: &str, quantized: &[Option<PackedCodec>]) -> Result<String, EmitError> {
+fn render_elementwise(
+    resolved: &BoundOp,
+    entry: &str,
+    quantized: &[Option<PackedCodec>],
+) -> Result<String, EmitError> {
     let rank = resolved.extents.len();
     let rank_len = rank.max(1);
     let operand_count = resolved.operands().len();
@@ -737,7 +780,9 @@ fn render_elementwise(resolved: &BoundOp, entry: &str, quantized: &[Option<Packe
     source.push_str("    long total_elements;\n");
     source.push_str(&format!("    long extents[{rank_len}];\n"));
     source.push_str(&format!("    long operand_base[{operand_count}];\n"));
-    source.push_str(&format!("    long operand_strides[{operand_count}][{rank_len}];\n"));
+    source.push_str(&format!(
+        "    long operand_strides[{operand_count}][{rank_len}];\n"
+    ));
     push_gather_uniform_fields(&mut source, gather_count, rank_len);
     source.push_str("};\n\n");
 
@@ -762,11 +807,21 @@ fn render_elementwise(resolved: &BoundOp, entry: &str, quantized: &[Option<Packe
             ));
         }
         if let Some(slot) = gather_slot {
-            push_gather_fetch(&mut source, index, *slot, rank, "coord", &format!("off{index}"));
+            push_gather_fetch(
+                &mut source,
+                index,
+                *slot,
+                rank,
+                "coord",
+                &format!("off{index}"),
+            );
         }
     }
 
-    source.push_str(&format!("    {element_type} scratch[{}];\n", operand_count.max(1)));
+    source.push_str(&format!(
+        "    {element_type} scratch[{}];\n",
+        operand_count.max(1)
+    ));
     for (index, &codec) in quantized.iter().enumerate() {
         source.push_str(&format!(
             "    scratch[{index}] = {};\n",
@@ -826,7 +881,9 @@ fn push_serial_reduce_body(
 
     source.push_str("    for (long r = 0; r < u.reduction_total; r++) {\n");
     if reduce_rank > 0 {
-        source.push_str(&format!("        long reduction_coord[{reduce_rank_len}];\n"));
+        source.push_str(&format!(
+            "        long reduction_coord[{reduce_rank_len}];\n"
+        ));
         source.push_str("        long remaining_r = r;\n");
         for index in (0..reduce_rank).rev() {
             source.push_str(&format!(
@@ -835,22 +892,36 @@ fn push_serial_reduce_body(
             ));
         }
         for (index, dim) in reduce_dims.iter().enumerate() {
-            source.push_str(&format!("        full_coord[{dim}] = reduction_coord[{index}];\n"));
+            source.push_str(&format!(
+                "        full_coord[{dim}] = reduction_coord[{index}];\n"
+            ));
         }
     }
 
     for (index, gather_slot) in gather_slots.iter().enumerate() {
-        source.push_str(&format!("        long off{index} = u.operand_base[{index}];\n"));
+        source.push_str(&format!(
+            "        long off{index} = u.operand_base[{index}];\n"
+        ));
         for dim in 0..rank {
             source.push_str(&format!(
                 "        off{index} += full_coord[{dim}] * u.operand_strides[{index}][{dim}];\n"
             ));
         }
         if let Some(slot) = gather_slot {
-            push_gather_fetch(source, index, *slot, rank, "full_coord", &format!("off{index}"));
+            push_gather_fetch(
+                source,
+                index,
+                *slot,
+                rank,
+                "full_coord",
+                &format!("off{index}"),
+            );
         }
     }
-    source.push_str(&format!("        {element_type} scratch[{}];\n", operand_count.max(1)));
+    source.push_str(&format!(
+        "        {element_type} scratch[{}];\n",
+        operand_count.max(1)
+    ));
     for (index, &codec) in quantized.iter().enumerate() {
         source.push_str(&format!(
             "        scratch[{index}] = {};\n",
@@ -860,13 +931,17 @@ fn push_serial_reduce_body(
     let value_expr = push_body_steps(source, resolved.element_body(), "        ", element_type);
     source.push_str(&format!("        {element_type} value = {value_expr};\n"));
     let combine_expr = scalar_op_expr(reduce_op, &["accumulator", "value"]);
-    source.push_str(&format!("        accumulator = seeded ? {combine_expr} : value;\n"));
+    source.push_str(&format!(
+        "        accumulator = seeded ? {combine_expr} : value;\n"
+    ));
     source.push_str("        seeded = true;\n");
     source.push_str("    }\n");
 
     source.push_str("    long out_offset = u.out_base;\n");
     for dim in 0..rank {
-        source.push_str(&format!("    out_offset += full_coord[{dim}] * u.out_strides[{dim}];\n"));
+        source.push_str(&format!(
+            "    out_offset += full_coord[{dim}] * u.out_strides[{dim}];\n"
+        ));
     }
     source.push_str("    out[out_offset] = accumulator;\n");
 }
@@ -900,7 +975,9 @@ fn push_cooperative_reduce_body(
 
     source.push_str(&format!("    long output_index = gid / {WARP_SIZE};\n"));
     source.push_str("    if (output_index >= u.output_total) { return; }\n");
-    source.push_str(&format!("    unsigned int lane = (unsigned int)(gid % {WARP_SIZE});\n"));
+    source.push_str(&format!(
+        "    unsigned int lane = (unsigned int)(gid % {WARP_SIZE});\n"
+    ));
 
     source.push_str(&format!("    long full_coord[{rank_len}];\n"));
     for dim in 0..rank {
@@ -937,7 +1014,9 @@ fn push_cooperative_reduce_body(
         "    for (long r = (long)lane; r < u.reduction_total; r += {WARP_SIZE}) {{\n"
     ));
     if reduce_rank > 0 {
-        source.push_str(&format!("        long reduction_coord[{reduce_rank_len}];\n"));
+        source.push_str(&format!(
+            "        long reduction_coord[{reduce_rank_len}];\n"
+        ));
         source.push_str("        long remaining_r = r;\n");
         for index in (0..reduce_rank).rev() {
             source.push_str(&format!(
@@ -946,12 +1025,16 @@ fn push_cooperative_reduce_body(
             ));
         }
         for (index, dim) in reduce_dims.iter().enumerate() {
-            source.push_str(&format!("        full_coord[{dim}] = reduction_coord[{index}];\n"));
+            source.push_str(&format!(
+                "        full_coord[{dim}] = reduction_coord[{index}];\n"
+            ));
         }
     }
 
     for (index, &codec) in quantized.iter().enumerate() {
-        source.push_str(&format!("        long off{index} = u.operand_base[{index}];\n"));
+        source.push_str(&format!(
+            "        long off{index} = u.operand_base[{index}];\n"
+        ));
         for dim in 0..rank {
             source.push_str(&format!(
                 "        off{index} += full_coord[{dim}] * u.operand_strides[{index}][{dim}];\n"
@@ -959,7 +1042,10 @@ fn push_cooperative_reduce_body(
         }
         let _ = codec;
     }
-    source.push_str(&format!("        {element_type} scratch[{}];\n", operand_count.max(1)));
+    source.push_str(&format!(
+        "        {element_type} scratch[{}];\n",
+        operand_count.max(1)
+    ));
     for (index, &codec) in quantized.iter().enumerate() {
         source.push_str(&format!(
             "        scratch[{index}] = {};\n",
@@ -969,12 +1055,17 @@ fn push_cooperative_reduce_body(
     let value_expr = push_body_steps(source, resolved.element_body(), "        ", element_type);
     source.push_str(&format!("        {element_type} value = {value_expr};\n"));
     let combine_expr = scalar_op_expr(reduce_op, &["accumulator", "value"]);
-    source.push_str(&format!("        accumulator = seeded ? {combine_expr} : value;\n"));
+    source.push_str(&format!(
+        "        accumulator = seeded ? {combine_expr} : value;\n"
+    ));
     source.push_str("        seeded = true;\n");
     source.push_str("    }\n");
 
     source.push_str("    #pragma unroll\n");
-    source.push_str(&format!("    for (int shift = {}; shift > 0; shift >>= 1) {{\n", WARP_SIZE / 2));
+    source.push_str(&format!(
+        "    for (int shift = {}; shift > 0; shift >>= 1) {{\n",
+        WARP_SIZE / 2
+    ));
     source.push_str(&format!(
         "        {element_type} shuffled = __shfl_down_sync(0xffffffffu, accumulator, shift);\n"
     ));
@@ -985,12 +1076,18 @@ fn push_cooperative_reduce_body(
     source.push_str("    if (lane != 0u) { return; }\n");
     source.push_str("    long out_offset = u.out_base;\n");
     for dim in 0..rank {
-        source.push_str(&format!("    out_offset += full_coord[{dim}] * u.out_strides[{dim}];\n"));
+        source.push_str(&format!(
+            "    out_offset += full_coord[{dim}] * u.out_strides[{dim}];\n"
+        ));
     }
     source.push_str("    out[out_offset] = accumulator;\n");
 }
 
-fn render_reduce(resolved: &BoundOp, entry: &str, quantized: &[Option<PackedCodec>]) -> Result<String, EmitError> {
+fn render_reduce(
+    resolved: &BoundOp,
+    entry: &str,
+    quantized: &[Option<PackedCodec>],
+) -> Result<String, EmitError> {
     let BoundOpKind::Reduce {
         reduce_op,
         init,
@@ -1021,7 +1118,9 @@ fn render_reduce(resolved: &BoundOp, entry: &str, quantized: &[Option<PackedCode
     source.push_str(&format!("    long output_extents[{output_rank_len}];\n"));
     source.push_str(&format!("    long reduction_extents[{reduce_rank_len}];\n"));
     source.push_str(&format!("    long operand_base[{operand_count}];\n"));
-    source.push_str(&format!("    long operand_strides[{operand_count}][{rank_len}];\n"));
+    source.push_str(&format!(
+        "    long operand_strides[{operand_count}][{rank_len}];\n"
+    ));
     source.push_str("    long out_base;\n");
     source.push_str(&format!("    long out_strides[{rank_len}];\n"));
     push_gather_uniform_fields(&mut source, gather_count, rank_len);
@@ -1065,7 +1164,11 @@ fn render_reduce(resolved: &BoundOp, entry: &str, quantized: &[Option<PackedCode
     Ok(source)
 }
 
-fn render_scan(resolved: &BoundOp, entry: &str, quantized: &[Option<PackedCodec>]) -> Result<String, EmitError> {
+fn render_scan(
+    resolved: &BoundOp,
+    entry: &str,
+    quantized: &[Option<PackedCodec>],
+) -> Result<String, EmitError> {
     let BoundOpKind::Reduce {
         reduce_op, init, ..
     } = &resolved.kind
@@ -1090,7 +1193,9 @@ fn render_scan(resolved: &BoundOp, entry: &str, quantized: &[Option<PackedCodec>
     source.push_str("    long inner_len;\n");
     source.push_str(&format!("    long outer_extents[{outer_rank_len}];\n"));
     source.push_str(&format!("    long operand_base[{operand_count}];\n"));
-    source.push_str(&format!("    long operand_strides[{operand_count}][{rank_len}];\n"));
+    source.push_str(&format!(
+        "    long operand_strides[{operand_count}][{rank_len}];\n"
+    ));
     source.push_str("    long out_base;\n");
     source.push_str(&format!("    long out_strides[{rank_len}];\n"));
     push_gather_uniform_fields(&mut source, gather_count, rank_len);
@@ -1118,14 +1223,18 @@ fn render_scan(resolved: &BoundOp, entry: &str, quantized: &[Option<PackedCodec>
         }
     }
     for (index, gather_slot) in gather_slots.iter().enumerate() {
-        source.push_str(&format!("        long running{index} = u.operand_base[{index}];\n"));
+        source.push_str(&format!(
+            "        long running{index} = u.operand_base[{index}];\n"
+        ));
         for dim in 0..outer_rank {
             source.push_str(&format!(
                 "        running{index} += outer_coord[{dim}] * u.operand_strides[{index}][{dim}];\n"
             ));
         }
         if let Some(slot) = gather_slot {
-            source.push_str(&format!("        long gather_running{index} = u.gather_index_base[{slot}];\n"));
+            source.push_str(&format!(
+                "        long gather_running{index} = u.gather_index_base[{slot}];\n"
+            ));
             for dim in 0..outer_rank {
                 source.push_str(&format!(
                     "        gather_running{index} += outer_coord[{dim}] * u.gather_index_strides[{slot}][{dim}];\n"
@@ -1135,11 +1244,16 @@ fn render_scan(resolved: &BoundOp, entry: &str, quantized: &[Option<PackedCodec>
     }
     source.push_str("        long out_running = u.out_base;\n");
     for dim in 0..outer_rank {
-        source.push_str(&format!("        out_running += outer_coord[{dim}] * u.out_strides[{dim}];\n"));
+        source.push_str(&format!(
+            "        out_running += outer_coord[{dim}] * u.out_strides[{dim}];\n"
+        ));
     }
 
     source.push_str("        for (long step = 0; step < u.inner_len; step++) {\n");
-    source.push_str(&format!("            {element_type} scratch[{}];\n", operand_count.max(1)));
+    source.push_str(&format!(
+        "            {element_type} scratch[{}];\n",
+        operand_count.max(1)
+    ));
     for (index, gather_slot) in gather_slots.iter().enumerate() {
         if let Some(slot) = gather_slot {
             source.push_str(&format!(
@@ -1169,13 +1283,24 @@ fn render_scan(resolved: &BoundOp, entry: &str, quantized: &[Option<PackedCodec>
             "            running{index} += u.operand_strides[{index}][{last_dim}];\n"
         ));
     }
-    let value_expr = push_body_steps(&mut source, resolved.element_body(), "            ", element_type);
-    source.push_str(&format!("            {element_type} value = {value_expr};\n"));
+    let value_expr = push_body_steps(
+        &mut source,
+        resolved.element_body(),
+        "            ",
+        element_type,
+    );
+    source.push_str(&format!(
+        "            {element_type} value = {value_expr};\n"
+    ));
     let combine_expr = scalar_op_expr(*reduce_op, &["accumulator", "value"]);
-    source.push_str(&format!("            accumulator = seeded ? {combine_expr} : value;\n"));
+    source.push_str(&format!(
+        "            accumulator = seeded ? {combine_expr} : value;\n"
+    ));
     source.push_str("            seeded = true;\n");
     source.push_str("            out[out_running] = accumulator;\n");
-    source.push_str(&format!("            out_running += u.out_strides[{last_dim}];\n"));
+    source.push_str(&format!(
+        "            out_running += u.out_strides[{last_dim}];\n"
+    ));
     source.push_str("        }\n");
     source.push_str("    }\n");
     source.push_str("}\n");
@@ -1351,7 +1476,8 @@ mod tests {
     use alloc::vec::Vec;
 
     use proxima_tensor::{
-        AxisTerm, DType, Extent, IndexMap, Keep, Op, Reduce, ReduceInit, ScalarOp, append, bind, infer, map,
+        AxisTerm, DType, Extent, IndexMap, Keep, Op, Reduce, ReduceInit, ScalarOp, append, bind,
+        infer, map,
     };
 
     use super::*;
@@ -1545,7 +1671,13 @@ mod tests {
             kernel.bindings,
             vec![
                 Binding::Input(bound.operands()[0].0),
-                Binding::Indices(bound.operands()[0].2.as_ref().expect("operand 0 gathers").indices),
+                Binding::Indices(
+                    bound.operands()[0]
+                        .2
+                        .as_ref()
+                        .expect("operand 0 gathers")
+                        .indices
+                ),
                 Binding::Output(bound.node),
                 Binding::Uniforms,
                 Binding::Fault,
@@ -1553,7 +1685,11 @@ mod tests {
         );
     }
 
-    fn packed_elementwise_op(codec: PackedCodec, block_bytes: usize, block_elements: usize) -> (BoundOp, PackedOperands) {
+    fn packed_elementwise_op(
+        codec: PackedCodec,
+        block_bytes: usize,
+        block_elements: usize,
+    ) -> (BoundOp, PackedOperands) {
         let mut program = Vec::new();
         let weight = append(
             &mut program,
@@ -1583,7 +1719,8 @@ mod tests {
 
     #[test]
     fn q4k_operand_emits_q4k_element_read() {
-        let (bound, packed) = packed_elementwise_op(PackedCodec::Q4K, Q4K_BLOCK_BYTES, Q4K_BLOCK_ELEMENTS);
+        let (bound, packed) =
+            packed_elementwise_op(PackedCodec::Q4K, Q4K_BLOCK_BYTES, Q4K_BLOCK_ELEMENTS);
         let kernel = emit_cuda(&bound, &packed).expect("emit succeeds");
         assert!(kernel.source.contains("q4k_element(in0"));
         assert!(kernel.source.contains(&format!("* {Q4K_BLOCK_BYTES}")));
@@ -1591,35 +1728,43 @@ mod tests {
 
     #[test]
     fn q5k_operand_emits_q5k_element_read() {
-        let (bound, packed) = packed_elementwise_op(PackedCodec::Q5K, Q5K_BLOCK_BYTES, Q4K_BLOCK_ELEMENTS);
+        let (bound, packed) =
+            packed_elementwise_op(PackedCodec::Q5K, Q5K_BLOCK_BYTES, Q4K_BLOCK_ELEMENTS);
         let kernel = emit_cuda(&bound, &packed).expect("emit succeeds");
         assert!(kernel.source.contains("q5k_element(in0"));
     }
 
     #[test]
     fn q6k_operand_emits_q6k_element_read() {
-        let (bound, packed) = packed_elementwise_op(PackedCodec::Q6K, Q6K_BLOCK_BYTES, Q4K_BLOCK_ELEMENTS);
+        let (bound, packed) =
+            packed_elementwise_op(PackedCodec::Q6K, Q6K_BLOCK_BYTES, Q4K_BLOCK_ELEMENTS);
         let kernel = emit_cuda(&bound, &packed).expect("emit succeeds");
         assert!(kernel.source.contains("q6k_element(in0"));
     }
 
     #[test]
     fn q8_0_operand_emits_q8_0_element_read() {
-        let (bound, packed) = packed_elementwise_op(PackedCodec::Q8_0, Q8_0_BLOCK_BYTES, Q8_0_BLOCK_ELEMENTS);
+        let (bound, packed) =
+            packed_elementwise_op(PackedCodec::Q8_0, Q8_0_BLOCK_BYTES, Q8_0_BLOCK_ELEMENTS);
         let kernel = emit_cuda(&bound, &packed).expect("emit succeeds");
         assert!(kernel.source.contains("q8_0_element(in0"));
     }
 
     #[test]
     fn q4_0_operand_emits_q4_0_element_read() {
-        let (bound, packed) = packed_elementwise_op(PackedCodec::Q4_0, Q4_0_BLOCK_BYTES, Q4_0_BLOCK_ELEMENTS);
+        let (bound, packed) =
+            packed_elementwise_op(PackedCodec::Q4_0, Q4_0_BLOCK_BYTES, Q4_0_BLOCK_ELEMENTS);
         let kernel = emit_cuda(&bound, &packed).expect("emit succeeds");
         assert!(kernel.source.contains("q4_0_element(in0"));
     }
 
     #[test]
     fn bfloat16_operand_emits_bf16_element_read() {
-        let (bound, packed) = packed_elementwise_op(PackedCodec::BFloat16, BFLOAT16_BLOCK_BYTES, BFLOAT16_BLOCK_ELEMENTS);
+        let (bound, packed) = packed_elementwise_op(
+            PackedCodec::BFloat16,
+            BFLOAT16_BLOCK_BYTES,
+            BFLOAT16_BLOCK_ELEMENTS,
+        );
         let kernel = emit_cuda(&bound, &packed).expect("emit succeeds");
         assert!(kernel.source.contains("bf16_element(in0"));
     }

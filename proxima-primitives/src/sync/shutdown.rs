@@ -219,7 +219,9 @@ impl ShutdownBarrier {
             // `cores_acked < num_cores` is the caller-visible signal that
             // the deadline, not every core, ended the drain.
             if report_acked.load(Ordering::SeqCst) < num_cores {
-                let _ = proxima_core::time::timeout(BROADCAST_DROP_DEADLINE, report_notify.notified()).await;
+                let _ =
+                    proxima_core::time::timeout(BROADCAST_DROP_DEADLINE, report_notify.notified())
+                        .await;
             }
             ShutdownReport {
                 cores_acked: report_acked.load(Ordering::SeqCst),

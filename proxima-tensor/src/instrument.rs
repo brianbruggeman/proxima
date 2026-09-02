@@ -10,9 +10,9 @@
 use core::future::Future;
 use core::sync::atomic::{AtomicU64, Ordering};
 use std::collections::{BTreeMap, HashSet};
-use std::sync::{Mutex, PoisonError};
 #[cfg(target_os = "macos")]
 use std::sync::OnceLock;
+use std::sync::{Mutex, PoisonError};
 use std::thread::ThreadId;
 
 use proxima_clock::ticks::Ticks;
@@ -58,7 +58,10 @@ fn raw_tick() -> u64 {
 // the identity function on this path.
 #[cfg(not(target_os = "macos"))]
 fn raw_tick() -> u64 {
-    let mut now = libc::timespec { tv_sec: 0, tv_nsec: 0 };
+    let mut now = libc::timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
     // SAFETY: `now` is a valid out-pointer; `CLOCK_MONOTONIC` is supported
     // on every target this crate builds for.
     unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut now) };
@@ -137,7 +140,8 @@ impl Pipe for TensorTickSource {
 pub static BOUND_OPS: Counter = Counter::new("proxima_tensor.bound_ops");
 pub static MAC_OPS: Counter = Counter::new("proxima_tensor.mac_ops");
 pub static OPERAND_LOADS: Counter = Counter::new("proxima_tensor.operand_loads");
-pub static DISTINCT_OPERAND_ELEMENTS: Counter = Counter::new("proxima_tensor.distinct_operand_elements");
+pub static DISTINCT_OPERAND_ELEMENTS: Counter =
+    Counter::new("proxima_tensor.distinct_operand_elements");
 pub static OUTPUT_WRITES: Counter = Counter::new("proxima_tensor.output_writes");
 pub static PATH_DOT_FAST: Counter = Counter::new("proxima_tensor.path.dot_fast");
 pub static PATH_WIDTH_FAST: Counter = Counter::new("proxima_tensor.path.width_fast");
@@ -162,10 +166,14 @@ pub static KERNEL_CALLS: Counter = Counter::new("proxima_tensor.kernel_calls");
 // timing (`ELEMENTWISE_LOOP_TICKS*`). Answers `docs/discipline.md`'s own
 // standing question — ROW 149's residual attribution to `width_fast`/
 // `dot_fast` was "by elimination", never measured directly.
-pub static REDUCE_PATH_DOT_FAST_TICKS: Counter = Counter::new("proxima_tensor.reduce_path.dot_fast_ticks");
-pub static REDUCE_PATH_WIDTH_FAST_TICKS: Counter = Counter::new("proxima_tensor.reduce_path.width_fast_ticks");
-pub static REDUCE_PATH_CONV_TILE_TICKS: Counter = Counter::new("proxima_tensor.reduce_path.conv_tile_ticks");
-pub static REDUCE_PATH_GENERIC_TICKS: Counter = Counter::new("proxima_tensor.reduce_path.generic_ticks");
+pub static REDUCE_PATH_DOT_FAST_TICKS: Counter =
+    Counter::new("proxima_tensor.reduce_path.dot_fast_ticks");
+pub static REDUCE_PATH_WIDTH_FAST_TICKS: Counter =
+    Counter::new("proxima_tensor.reduce_path.width_fast_ticks");
+pub static REDUCE_PATH_CONV_TILE_TICKS: Counter =
+    Counter::new("proxima_tensor.reduce_path.conv_tile_ticks");
+pub static REDUCE_PATH_GENERIC_TICKS: Counter =
+    Counter::new("proxima_tensor.reduce_path.generic_ticks");
 
 /// Records one `run_reduce` call's elapsed ticks against the path it
 /// actually took — called once per call, from whichever of the three early
@@ -217,8 +225,10 @@ pub fn reset_reduce_path() {
 // are a pure ADDITIVE detail (never a replacement) the same way
 // `EPILOGUE_PROFILE_REDUCE_GEMM_*` sits beside `EPILOGUE_PROFILE_REDUCE_*`
 // in `cpu.rs`.
-pub static REDUCE_GEMM_PATH_DOT_FAST_CALLS: Counter = Counter::new("proxima_tensor.reduce_gemm_path.dot_fast_calls");
-pub static REDUCE_GEMM_PATH_DOT_FAST_TICKS: Counter = Counter::new("proxima_tensor.reduce_gemm_path.dot_fast_ticks");
+pub static REDUCE_GEMM_PATH_DOT_FAST_CALLS: Counter =
+    Counter::new("proxima_tensor.reduce_gemm_path.dot_fast_calls");
+pub static REDUCE_GEMM_PATH_DOT_FAST_TICKS: Counter =
+    Counter::new("proxima_tensor.reduce_gemm_path.dot_fast_ticks");
 pub static REDUCE_GEMM_PATH_WIDTH_FAST_CALLS: Counter =
     Counter::new("proxima_tensor.reduce_gemm_path.width_fast_calls");
 pub static REDUCE_GEMM_PATH_WIDTH_FAST_TICKS: Counter =
@@ -227,8 +237,10 @@ pub static REDUCE_GEMM_PATH_CONV_TILE_CALLS: Counter =
     Counter::new("proxima_tensor.reduce_gemm_path.conv_tile_calls");
 pub static REDUCE_GEMM_PATH_CONV_TILE_TICKS: Counter =
     Counter::new("proxima_tensor.reduce_gemm_path.conv_tile_ticks");
-pub static REDUCE_GEMM_PATH_GENERIC_CALLS: Counter = Counter::new("proxima_tensor.reduce_gemm_path.generic_calls");
-pub static REDUCE_GEMM_PATH_GENERIC_TICKS: Counter = Counter::new("proxima_tensor.reduce_gemm_path.generic_ticks");
+pub static REDUCE_GEMM_PATH_GENERIC_CALLS: Counter =
+    Counter::new("proxima_tensor.reduce_gemm_path.generic_calls");
+pub static REDUCE_GEMM_PATH_GENERIC_TICKS: Counter =
+    Counter::new("proxima_tensor.reduce_gemm_path.generic_ticks");
 
 /// Records one `run_reduce` call's elapsed ticks against the path it took,
 /// restricted to gemm-shaped (two-distinct-operand) reduce folds -- called
@@ -370,8 +382,13 @@ static WORKER_BUSY_TICKS: Mutex<Vec<(ThreadId, u64)>> = Mutex::new(Vec::new());
 /// instead of by chunk.
 pub fn record_worker_busy_ticks(ticks: u64) {
     let thread_id = std::thread::current().id();
-    let mut totals = WORKER_BUSY_TICKS.lock().unwrap_or_else(PoisonError::into_inner);
-    match totals.iter_mut().find(|(existing, _)| *existing == thread_id) {
+    let mut totals = WORKER_BUSY_TICKS
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
+    match totals
+        .iter_mut()
+        .find(|(existing, _)| *existing == thread_id)
+    {
         Some((_, total)) => *total += ticks,
         None => totals.push((thread_id, ticks)),
     }
@@ -382,12 +399,16 @@ pub fn record_worker_busy_ticks(ticks: u64) {
 /// thread that claimed at least one chunk. Order is not meaningful.
 #[must_use]
 pub fn worker_busy_snapshot() -> Vec<u64> {
-    let totals = WORKER_BUSY_TICKS.lock().unwrap_or_else(PoisonError::into_inner);
+    let totals = WORKER_BUSY_TICKS
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
     totals.iter().map(|(_, ticks)| *ticks).collect()
 }
 
 pub fn reset_worker_busy() {
-    let mut totals = WORKER_BUSY_TICKS.lock().unwrap_or_else(PoisonError::into_inner);
+    let mut totals = WORKER_BUSY_TICKS
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
     totals.clear();
 }
 
@@ -423,7 +444,10 @@ static WORKER_CPU_NANOS: Mutex<Vec<(ThreadId, CpuWorkload, u64)>> = Mutex::new(V
 /// delta, this does not advance while the thread is off-core.
 #[must_use]
 pub fn thread_cpu_nanos() -> u64 {
-    let mut now = libc::timespec { tv_sec: 0, tv_nsec: 0 };
+    let mut now = libc::timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
     if unsafe { libc::clock_gettime(libc::CLOCK_THREAD_CPUTIME_ID, &mut now) } != 0 {
         return 0;
     }
@@ -434,10 +458,14 @@ pub fn thread_cpu_nanos() -> u64 {
 /// for `workload`, the deschedule-immune peer of [`record_worker_busy_ticks`].
 pub fn record_worker_cpu_nanos(workload: CpuWorkload, nanos: u64) {
     let thread_id = std::thread::current().id();
-    let mut totals = WORKER_CPU_NANOS.lock().unwrap_or_else(PoisonError::into_inner);
-    match totals.iter_mut().find(|(existing_thread, existing_workload, _)| {
-        *existing_thread == thread_id && *existing_workload == workload
-    }) {
+    let mut totals = WORKER_CPU_NANOS
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
+    match totals
+        .iter_mut()
+        .find(|(existing_thread, existing_workload, _)| {
+            *existing_thread == thread_id && *existing_workload == workload
+        }) {
         Some((_, _, total)) => *total += nanos,
         None => totals.push((thread_id, workload, nanos)),
     }
@@ -450,7 +478,9 @@ pub fn record_worker_cpu_nanos(workload: CpuWorkload, nanos: u64) {
 /// together itself.
 #[must_use]
 pub fn worker_cpu_snapshot() -> Vec<u64> {
-    let totals = WORKER_CPU_NANOS.lock().unwrap_or_else(PoisonError::into_inner);
+    let totals = WORKER_CPU_NANOS
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
     totals.iter().map(|(_, _, nanos)| *nanos).collect()
 }
 
@@ -459,7 +489,9 @@ pub fn worker_cpu_snapshot() -> Vec<u64> {
 /// macs) without elementwise CPU time inflating the numerator.
 #[must_use]
 pub fn worker_cpu_snapshot_for(workload: CpuWorkload) -> Vec<u64> {
-    let totals = WORKER_CPU_NANOS.lock().unwrap_or_else(PoisonError::into_inner);
+    let totals = WORKER_CPU_NANOS
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
     totals
         .iter()
         .filter(|(_, existing_workload, _)| *existing_workload == workload)
@@ -468,7 +500,9 @@ pub fn worker_cpu_snapshot_for(workload: CpuWorkload) -> Vec<u64> {
 }
 
 pub fn reset_worker_cpu() {
-    let mut totals = WORKER_CPU_NANOS.lock().unwrap_or_else(PoisonError::into_inner);
+    let mut totals = WORKER_CPU_NANOS
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
     totals.clear();
 }
 
@@ -596,7 +630,9 @@ static Q4K_SHAPE_TICKS: Mutex<BTreeMap<ShapeKey, ShapeTotals>> = Mutex::new(BTre
 /// Adds one `(rows, k)`-shaped call's macs and elapsed ticks to that
 /// shape's running `(calls, macs, ticks)` triple.
 pub fn record_q4k_shape_call(rows: u64, k: u64, macs: u64, ticks: u64) {
-    let mut buckets = Q4K_SHAPE_TICKS.lock().unwrap_or_else(PoisonError::into_inner);
+    let mut buckets = Q4K_SHAPE_TICKS
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
     let entry = buckets.entry((rows, k)).or_insert((0, 0, 0));
     entry.0 += 1;
     entry.1 += macs;
@@ -608,7 +644,9 @@ pub fn record_q4k_shape_call(rows: u64, k: u64, macs: u64, ticks: u64) {
 /// by key (`BTreeMap` iteration order), not by any measured field.
 #[must_use]
 pub fn q4k_shape_snapshot() -> Vec<(u64, u64, u64, u64, u64)> {
-    let buckets = Q4K_SHAPE_TICKS.lock().unwrap_or_else(PoisonError::into_inner);
+    let buckets = Q4K_SHAPE_TICKS
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
     buckets
         .iter()
         .map(|(&(rows, k), &(calls, macs, ticks))| (rows, k, calls, macs, ticks))
@@ -616,7 +654,9 @@ pub fn q4k_shape_snapshot() -> Vec<(u64, u64, u64, u64, u64)> {
 }
 
 pub fn reset_q4k_shape_buckets() {
-    let mut buckets = Q4K_SHAPE_TICKS.lock().unwrap_or_else(PoisonError::into_inner);
+    let mut buckets = Q4K_SHAPE_TICKS
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
     buckets.clear();
 }
 
@@ -665,14 +705,27 @@ pub type WidthDeclineTotals = (u64, i64, i64, i64, i64, i64);
 /// `type_complexity` lint on the `Vec` return type, not a new domain concept.
 pub type WidthDeclineRow = (u32, WidthDeclineReason, u64, i64, i64, i64, i64, i64);
 
-static WIDTH_TILE_DECLINE: Mutex<BTreeMap<(u32, WidthDeclineReason), WidthDeclineTotals>> = Mutex::new(BTreeMap::new());
+static WIDTH_TILE_DECLINE: Mutex<BTreeMap<(u32, WidthDeclineReason), WidthDeclineTotals>> =
+    Mutex::new(BTreeMap::new());
 
 /// Records one `width_tile_plan` decline for `node`, first-observed shape
 /// `(m, k, n)` and operand strides `(stride_a, stride_b)` (`-1` where not
 /// resolvable at that decline point, see [`WidthDeclineTotals`]).
-pub fn record_width_tile_decline(node: NodeId, reason: WidthDeclineReason, m: i64, k: i64, n: i64, stride_a: i64, stride_b: i64) {
-    let mut buckets = WIDTH_TILE_DECLINE.lock().unwrap_or_else(PoisonError::into_inner);
-    let entry = buckets.entry((node.0, reason)).or_insert((0, m, k, n, stride_a, stride_b));
+pub fn record_width_tile_decline(
+    node: NodeId,
+    reason: WidthDeclineReason,
+    m: i64,
+    k: i64,
+    n: i64,
+    stride_a: i64,
+    stride_b: i64,
+) {
+    let mut buckets = WIDTH_TILE_DECLINE
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
+    let entry = buckets
+        .entry((node.0, reason))
+        .or_insert((0, m, k, n, stride_a, stride_b));
     entry.0 += 1;
 }
 
@@ -681,15 +734,21 @@ pub fn record_width_tile_decline(node: NodeId, reason: WidthDeclineReason, m: i6
 /// stride_a, stride_b)` — sorted by key (`BTreeMap` iteration order).
 #[must_use]
 pub fn width_tile_decline_snapshot() -> Vec<WidthDeclineRow> {
-    let buckets = WIDTH_TILE_DECLINE.lock().unwrap_or_else(PoisonError::into_inner);
+    let buckets = WIDTH_TILE_DECLINE
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
     buckets
         .iter()
-        .map(|(&(node, reason), &(calls, m, k, n, stride_a, stride_b))| (node, reason, calls, m, k, n, stride_a, stride_b))
+        .map(|(&(node, reason), &(calls, m, k, n, stride_a, stride_b))| {
+            (node, reason, calls, m, k, n, stride_a, stride_b)
+        })
         .collect()
 }
 
 pub fn reset_width_tile_decline() {
-    let mut buckets = WIDTH_TILE_DECLINE.lock().unwrap_or_else(PoisonError::into_inner);
+    let mut buckets = WIDTH_TILE_DECLINE
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
     buckets.clear();
 }
 
@@ -922,9 +981,11 @@ pub fn matmul_chunk_totals() -> MatmulChunkTotals {
 pub static SERIAL_PREPARE_TICKS: Counter = Counter::new("proxima_tensor.serial_prepare_ticks");
 pub static SERIAL_ALLOC_TICKS: Counter = Counter::new("proxima_tensor.serial_alloc_ticks");
 pub static SERIAL_SPLIT_TICKS: Counter = Counter::new("proxima_tensor.serial_split_ticks");
-pub static SERIAL_SLICE_CARVE_TICKS: Counter = Counter::new("proxima_tensor.serial_slice_carve_ticks");
+pub static SERIAL_SLICE_CARVE_TICKS: Counter =
+    Counter::new("proxima_tensor.serial_slice_carve_ticks");
 pub static SERIAL_FINISH_TICKS: Counter = Counter::new("proxima_tensor.serial_finish_ticks");
-pub static SERIAL_BOOKKEEPING_TICKS: Counter = Counter::new("proxima_tensor.serial_bookkeeping_ticks");
+pub static SERIAL_BOOKKEEPING_TICKS: Counter =
+    Counter::new("proxima_tensor.serial_bookkeeping_ticks");
 // only nonzero on the `workers == 1` (or below-threshold) arm, where
 // `evaluate_node_parallel` never reaches `run_chunks_threaded` at all.
 pub static SERIAL_SEQUENTIAL_COMPUTE_TICKS: Counter =
@@ -941,24 +1002,29 @@ pub static SERIAL_EVALUATE_PARALLEL_CALLS: Counter =
 // fused-body table even when the node's body is `Unary`/`Binary` and never
 // reads it), and the position loop that follows. Committed once per node
 // call, never per element or per position.
-pub static ELEMENTWISE_SETUP_TICKS: Counter = Counter::new("proxima_tensor.elementwise_setup_ticks");
+pub static ELEMENTWISE_SETUP_TICKS: Counter =
+    Counter::new("proxima_tensor.elementwise_setup_ticks");
 pub static ELEMENTWISE_STEP_VALUES_TICKS: Counter =
     Counter::new("proxima_tensor.elementwise_step_values_ticks");
 pub static ELEMENTWISE_LOOP_TICKS: Counter = Counter::new("proxima_tensor.elementwise_loop_ticks");
-pub static ELEMENTWISE_RANGE_CALLS: Counter = Counter::new("proxima_tensor.elementwise_range_calls");
+pub static ELEMENTWISE_RANGE_CALLS: Counter =
+    Counter::new("proxima_tensor.elementwise_range_calls");
 // ROW 178 row-flattening mechanism check: how many `run_elementwise_range`
 // calls collapsed their whole outer-row odometer into one
 // `elementwise_width_fast` call, and the total row count those calls
 // covered -- `hits / ELEMENTWISE_RANGE_CALLS` and `rows / hits` (mean rows
 // collapsed per hit) are the two numbers that confirm or refute engagement.
-pub static ELEMENTWISE_FLAT_RANGE_HITS: Counter = Counter::new("proxima_tensor.elementwise_flat_range_hits");
-pub static ELEMENTWISE_FLAT_RANGE_ROWS: Counter = Counter::new("proxima_tensor.elementwise_flat_range_rows");
+pub static ELEMENTWISE_FLAT_RANGE_HITS: Counter =
+    Counter::new("proxima_tensor.elementwise_flat_range_hits");
+pub static ELEMENTWISE_FLAT_RANGE_ROWS: Counter =
+    Counter::new("proxima_tensor.elementwise_flat_range_rows");
 // `run_elementwise_dispatch`'s own cohort-round count -- how many of a
 // forward pass's elementwise nodes actually open a `CohortSession::run`
 // round (as opposed to falling straight through to the sequential
 // `run_elementwise` because `outer_len < 2`, `workers <= 1`, or the node is
 // below `PARALLEL_THRESHOLD`).
-pub static ELEMENTWISE_COHORT_ROUNDS: Counter = Counter::new("proxima_tensor.elementwise_cohort_rounds");
+pub static ELEMENTWISE_COHORT_ROUNDS: Counter =
+    Counter::new("proxima_tensor.elementwise_cohort_rounds");
 
 /// Snapshot of `run_elementwise_range`'s own fixed-per-call breakdown --
 /// `(calls, setup_ticks, step_values_ticks, loop_ticks, cohort_rounds)`.
@@ -1170,8 +1236,14 @@ pub fn record_alloc(site: AllocSite, bytes: u64) {
     let (count, byte_total) = match site {
         AllocSite::Other => (&ALLOC_SITE_OTHER_COUNT, &ALLOC_SITE_OTHER_BYTES),
         AllocSite::Prepare => (&ALLOC_SITE_PREPARE_COUNT, &ALLOC_SITE_PREPARE_BYTES),
-        AllocSite::OutputBuffer => (&ALLOC_SITE_OUTPUT_BUFFER_COUNT, &ALLOC_SITE_OUTPUT_BUFFER_BYTES),
-        AllocSite::ChunkSlices => (&ALLOC_SITE_CHUNK_SLICES_COUNT, &ALLOC_SITE_CHUNK_SLICES_BYTES),
+        AllocSite::OutputBuffer => (
+            &ALLOC_SITE_OUTPUT_BUFFER_COUNT,
+            &ALLOC_SITE_OUTPUT_BUFFER_BYTES,
+        ),
+        AllocSite::ChunkSlices => (
+            &ALLOC_SITE_CHUNK_SLICES_COUNT,
+            &ALLOC_SITE_CHUNK_SLICES_BYTES,
+        ),
     };
     count.fetch_add(1, Ordering::Relaxed);
     byte_total.fetch_add(bytes, Ordering::Relaxed);
@@ -1347,9 +1419,16 @@ static OPERAND_ACCESS: Mutex<BTreeMap<NodeId, OperandAccess>> = Mutex::new(BTree
 /// derived by walking elements. See the module-level comment above this
 /// struct for why `reads`/`bytes` sum across calls while `distinct_elements`/
 /// `total_elements` take the max.
-pub fn record_operand_access(node: NodeId, reads: u64, distinct_elements: u64, total_elements: u64) {
+pub fn record_operand_access(
+    node: NodeId,
+    reads: u64,
+    distinct_elements: u64,
+    total_elements: u64,
+) {
     let bytes = reads * size_of::<f32>() as u64;
-    let mut table = OPERAND_ACCESS.lock().unwrap_or_else(PoisonError::into_inner);
+    let mut table = OPERAND_ACCESS
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
     let entry = table.entry(node).or_default();
     entry.reads += reads;
     entry.bytes += bytes;
@@ -1386,7 +1465,9 @@ pub struct OperandAccessRow {
 /// still wants to read again.
 #[must_use]
 pub fn operand_access_totals() -> Vec<OperandAccessRow> {
-    let table = OPERAND_ACCESS.lock().unwrap_or_else(PoisonError::into_inner);
+    let table = OPERAND_ACCESS
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
     table
         .iter()
         .map(|(&node, &access)| OperandAccessRow { node, access })
@@ -1401,14 +1482,20 @@ pub fn operand_access_totals() -> Vec<OperandAccessRow> {
 /// bare `0` would erase it.
 #[must_use]
 pub fn operand_access_of(node: NodeId) -> Option<OperandAccess> {
-    let table = OPERAND_ACCESS.lock().unwrap_or_else(PoisonError::into_inner);
+    let table = OPERAND_ACCESS
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
     table.get(&node).copied()
 }
 
 pub fn reset_operand_access() {
-    let mut table = OPERAND_ACCESS.lock().unwrap_or_else(PoisonError::into_inner);
+    let mut table = OPERAND_ACCESS
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
     table.clear();
-    let mut rows = GATHER_ROWS_TOUCHED.lock().unwrap_or_else(PoisonError::into_inner);
+    let mut rows = GATHER_ROWS_TOUCHED
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
     rows.clear();
 }
 
@@ -1427,7 +1514,9 @@ static GATHER_ROWS_TOUCHED: Mutex<BTreeMap<NodeId, HashSet<u64>>> = Mutex::new(B
 /// per row-level index fetch, from `cpu::fill_gather_cursors` — see the
 /// static above for why that call frequency is cheap.
 pub fn record_gather_row(node: NodeId, row_index: u64) {
-    let mut rows = GATHER_ROWS_TOUCHED.lock().unwrap_or_else(PoisonError::into_inner);
+    let mut rows = GATHER_ROWS_TOUCHED
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
     rows.entry(node).or_default().insert(row_index);
 }
 
@@ -1439,7 +1528,9 @@ pub fn record_gather_row(node: NodeId, row_index: u64) {
 /// its bound op finishes.
 #[must_use]
 pub fn gather_distinct_rows(node: NodeId) -> u64 {
-    let rows = GATHER_ROWS_TOUCHED.lock().unwrap_or_else(PoisonError::into_inner);
+    let rows = GATHER_ROWS_TOUCHED
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
     rows.get(&node).map_or(0, HashSet::len) as u64
 }
 
@@ -1470,8 +1561,10 @@ pub static MATMUL_Q4K_TRANSPOSE_TICKS: Counter =
 // (ROW97's landed `is_staged_batch_eligible` restriction) but may mix
 // Q4K/Q5K/Q6K within one run, so a codec-specific name would misrepresent
 // what is inside it.
-pub static STAGED_MATMUL_ROUND_TICKS: Counter = Counter::new("proxima_tensor.matmul.staged_round_ticks");
-pub static STAGED_MATMUL_TRANSPOSE_TICKS: Counter = Counter::new("proxima_tensor.matmul.staged_transpose_ticks");
+pub static STAGED_MATMUL_ROUND_TICKS: Counter =
+    Counter::new("proxima_tensor.matmul.staged_round_ticks");
+pub static STAGED_MATMUL_TRANSPOSE_TICKS: Counter =
+    Counter::new("proxima_tensor.matmul.staged_transpose_ticks");
 pub static STAGED_MATMUL_MACS: Counter = Counter::new("proxima_tensor.matmul.staged_macs");
 pub static STAGED_MATMUL_NODES: Counter = Counter::new("proxima_tensor.matmul.staged_nodes");
 // deliberately its OWN counter, not a second call site into
@@ -1486,7 +1579,8 @@ pub static STAGED_MATMUL_NODES: Counter = Counter::new("proxima_tensor.matmul.st
 // of that same line's own `bucket_ms`) and makes `matmul_split_staged`'s
 // quantize time an honest, separately-attributed figure instead of a silent
 // reinterpretation of what `quantize_activation_ms` used to mean.
-pub static STAGED_MATMUL_QUANTIZE_TICKS: Counter = Counter::new("proxima_tensor.matmul.staged_quantize_ticks");
+pub static STAGED_MATMUL_QUANTIZE_TICKS: Counter =
+    Counter::new("proxima_tensor.matmul.staged_quantize_ticks");
 
 // discipline.md ROW 140's own hypothesis check: does the SAME activation
 // node (e.g. the post-attention-norm vector feeding `attn_q`/`attn_k`/
@@ -1525,7 +1619,9 @@ static QUANTIZE_ACTIVATION_CALLS_BY_NODE: Mutex<Vec<u64>> = Mutex::new(Vec::new(
 /// counter existed had no way to tell "quantized once, reused three times"
 /// apart from "quantized three times, once per consumer".
 pub fn record_quantize_activation_call(activation_node: NodeId) {
-    let mut calls = QUANTIZE_ACTIVATION_CALLS_BY_NODE.lock().unwrap_or_else(PoisonError::into_inner);
+    let mut calls = QUANTIZE_ACTIVATION_CALLS_BY_NODE
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
     let index = activation_node.0 as usize;
     if index >= calls.len() {
         calls.resize(index + 1, 0);
@@ -1540,14 +1636,18 @@ pub fn record_quantize_activation_call(activation_node: NodeId) {
 /// fan-out and states its own size.
 #[must_use]
 pub fn quantize_activation_call_stats() -> (u64, u64) {
-    let calls = QUANTIZE_ACTIVATION_CALLS_BY_NODE.lock().unwrap_or_else(PoisonError::into_inner);
+    let calls = QUANTIZE_ACTIVATION_CALLS_BY_NODE
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
     let total_calls: u64 = calls.iter().sum();
     let distinct_nodes = calls.iter().filter(|&&count| count > 0).count() as u64;
     (total_calls, distinct_nodes)
 }
 
 fn reset_quantize_activation_calls() {
-    let mut calls = QUANTIZE_ACTIVATION_CALLS_BY_NODE.lock().unwrap_or_else(PoisonError::into_inner);
+    let mut calls = QUANTIZE_ACTIVATION_CALLS_BY_NODE
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
     calls.iter_mut().for_each(|count| *count = 0);
     let _ = QUANTIZE_ACTIVATION_CACHE_HITS.snapshot_and_reset();
 }
@@ -1558,7 +1658,8 @@ fn reset_quantize_activation_calls() {
 /// same activation node. Zero on a build that never lands the fix; nonzero
 /// is the direct witness that the cache is doing real work, not just
 /// compiling.
-pub static QUANTIZE_ACTIVATION_CACHE_HITS: Counter = Counter::new("proxima_tensor.matmul.quantize_activation_cache_hits");
+pub static QUANTIZE_ACTIVATION_CACHE_HITS: Counter =
+    Counter::new("proxima_tensor.matmul.quantize_activation_cache_hits");
 
 /// Records one cache hit — called from `cpu::build_matmul_stage_plan` when
 /// `activation_node` is already present in this step's own
@@ -1661,8 +1762,10 @@ pub static ELEMENTWISE_LOOP_TICKS_MONOMORPHIC: Counter =
     Counter::new("proxima_tensor.elementwise_loop_ticks_monomorphic");
 pub static ELEMENTWISE_ELEMENTS_MONOMORPHIC: Counter =
     Counter::new("proxima_tensor.elementwise_elements_monomorphic");
-pub static ELEMENTWISE_LOOP_TICKS_GENERIC: Counter = Counter::new("proxima_tensor.elementwise_loop_ticks_generic");
-pub static ELEMENTWISE_ELEMENTS_GENERIC: Counter = Counter::new("proxima_tensor.elementwise_elements_generic");
+pub static ELEMENTWISE_LOOP_TICKS_GENERIC: Counter =
+    Counter::new("proxima_tensor.elementwise_loop_ticks_generic");
+pub static ELEMENTWISE_ELEMENTS_GENERIC: Counter =
+    Counter::new("proxima_tensor.elementwise_elements_generic");
 
 // fast_path-vs-slow-path split within `Generic` (A-vs-B task, 2026-08-21):
 // `Generic`'s own 14.9x-slower-than-monomorphic figure mixes two different
@@ -1725,13 +1828,34 @@ pub static ELEMENTWISE_ELEMENTS_WINDOW_COPY: Counter =
 #[must_use]
 pub fn elementwise_bodyshape_totals() -> ElementwiseBodyShapeTotals {
     ElementwiseBodyShapeTotals {
-        monomorphic: (ELEMENTWISE_LOOP_TICKS_MONOMORPHIC.get(), ELEMENTWISE_ELEMENTS_MONOMORPHIC.get()),
-        generic: (ELEMENTWISE_LOOP_TICKS_GENERIC.get(), ELEMENTWISE_ELEMENTS_GENERIC.get()),
-        monomorphic_fast: (ELEMENTWISE_LOOP_TICKS_MONOMORPHIC_FAST.get(), ELEMENTWISE_ELEMENTS_MONOMORPHIC_FAST.get()),
-        monomorphic_slow: (ELEMENTWISE_LOOP_TICKS_MONOMORPHIC_SLOW.get(), ELEMENTWISE_ELEMENTS_MONOMORPHIC_SLOW.get()),
-        generic_fast: (ELEMENTWISE_LOOP_TICKS_GENERIC_FAST.get(), ELEMENTWISE_ELEMENTS_GENERIC_FAST.get()),
-        generic_slow: (ELEMENTWISE_LOOP_TICKS_GENERIC_SLOW.get(), ELEMENTWISE_ELEMENTS_GENERIC_SLOW.get()),
-        window_copy: (ELEMENTWISE_LOOP_TICKS_WINDOW_COPY.get(), ELEMENTWISE_ELEMENTS_WINDOW_COPY.get()),
+        monomorphic: (
+            ELEMENTWISE_LOOP_TICKS_MONOMORPHIC.get(),
+            ELEMENTWISE_ELEMENTS_MONOMORPHIC.get(),
+        ),
+        generic: (
+            ELEMENTWISE_LOOP_TICKS_GENERIC.get(),
+            ELEMENTWISE_ELEMENTS_GENERIC.get(),
+        ),
+        monomorphic_fast: (
+            ELEMENTWISE_LOOP_TICKS_MONOMORPHIC_FAST.get(),
+            ELEMENTWISE_ELEMENTS_MONOMORPHIC_FAST.get(),
+        ),
+        monomorphic_slow: (
+            ELEMENTWISE_LOOP_TICKS_MONOMORPHIC_SLOW.get(),
+            ELEMENTWISE_ELEMENTS_MONOMORPHIC_SLOW.get(),
+        ),
+        generic_fast: (
+            ELEMENTWISE_LOOP_TICKS_GENERIC_FAST.get(),
+            ELEMENTWISE_ELEMENTS_GENERIC_FAST.get(),
+        ),
+        generic_slow: (
+            ELEMENTWISE_LOOP_TICKS_GENERIC_SLOW.get(),
+            ELEMENTWISE_ELEMENTS_GENERIC_SLOW.get(),
+        ),
+        window_copy: (
+            ELEMENTWISE_LOOP_TICKS_WINDOW_COPY.get(),
+            ELEMENTWISE_ELEMENTS_WINDOW_COPY.get(),
+        ),
     }
 }
 
@@ -1785,7 +1909,8 @@ pub static ELEMENTWISE_LOOP_TICKS_FUSED_ADAM: Counter =
     Counter::new("proxima_tensor.elementwise_loop_ticks_fused_adam");
 pub static ELEMENTWISE_ELEMENTS_FUSED_ADAM: Counter =
     Counter::new("proxima_tensor.elementwise_elements_fused_adam");
-pub static ELEMENTWISE_FUSED_ADAM_HITS: Counter = Counter::new("proxima_tensor.elementwise_fused_adam_hits");
+pub static ELEMENTWISE_FUSED_ADAM_HITS: Counter =
+    Counter::new("proxima_tensor.elementwise_fused_adam_hits");
 
 // call-size distribution: how many `run_elementwise_range` calls processed
 // how many elements, this process run. A `Counter` can only sum, so the
@@ -1800,7 +1925,9 @@ static ELEMENTWISE_CALL_SIZES: Mutex<BTreeMap<u64, u64>> = Mutex::new(BTreeMap::
 /// (`counters.output_writes`, already the exact per-call count the caller
 /// computed for its own commit -- never re-derived from extents here).
 pub fn record_elementwise_call_size(elements: u64) {
-    let mut table = ELEMENTWISE_CALL_SIZES.lock().unwrap_or_else(PoisonError::into_inner);
+    let mut table = ELEMENTWISE_CALL_SIZES
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
     *table.entry(elements).or_insert(0) += 1;
 }
 
@@ -1810,7 +1937,9 @@ pub fn record_elementwise_call_size(elements: u64) {
 /// `snapshot_and_reset` in this module.
 #[must_use]
 pub fn elementwise_call_size_snapshot_and_reset() -> Vec<(u64, u64)> {
-    let mut table = ELEMENTWISE_CALL_SIZES.lock().unwrap_or_else(PoisonError::into_inner);
+    let mut table = ELEMENTWISE_CALL_SIZES
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
     let sizes: Vec<(u64, u64)> = table.iter().map(|(size, count)| (*size, *count)).collect();
     table.clear();
     sizes
@@ -1823,7 +1952,8 @@ pub fn elementwise_call_size_snapshot_and_reset() -> Vec<(u64, u64)> {
 // stderr-flush cost to the very loop it was timing). Same shape as
 // `reduce_gemm_path_totals` above: plain `Counter`s, read back via
 // `evaluate_quantized_phase_totals`, reset via `reset_evaluate_quantized_phase`.
-pub static EVALUATE_QUANTIZED_CALLS: Counter = Counter::new("proxima_tensor.evaluate_quantized_calls");
+pub static EVALUATE_QUANTIZED_CALLS: Counter =
+    Counter::new("proxima_tensor.evaluate_quantized_calls");
 pub static EVALUATE_QUANTIZED_RESOLVE_TICKS: Counter =
     Counter::new("proxima_tensor.evaluate_quantized_resolve_ticks");
 pub static EVALUATE_QUANTIZED_SETUP_TICKS: Counter =
@@ -1844,7 +1974,12 @@ pub static EVALUATE_QUANTIZED_PEAK_LIVE_BYTES: AtomicU64 = AtomicU64::new(0);
 /// own name-resolution step is a separate call boundary entirely (it runs
 /// BEFORE this function is ever entered), so its ticks commit through
 /// [`record_evaluate_quantized_resolve`] instead of here.
-pub fn record_evaluate_quantized_phase(setup_ticks: u64, loop_overhead_ticks: u64, finish_ticks: u64, peak_live_bytes: u64) {
+pub fn record_evaluate_quantized_phase(
+    setup_ticks: u64,
+    loop_overhead_ticks: u64,
+    finish_ticks: u64,
+    peak_live_bytes: u64,
+) {
     counter!(EVALUATE_QUANTIZED_CALLS, 1);
     counter!(EVALUATE_QUANTIZED_SETUP_TICKS, setup_ticks);
     counter!(EVALUATE_QUANTIZED_LOOP_OVERHEAD_TICKS, loop_overhead_ticks);

@@ -35,7 +35,9 @@
 use std::collections::BTreeSet;
 
 use proxima_tensor::spec::mistral_cached_forward_program;
-use proxima_tensor::{BoundOpKind, Keep, NodeId, Op, ScalarOp, bind, correct_packed_matmul_layouts, infer};
+use proxima_tensor::{
+    BoundOpKind, Keep, NodeId, Op, ScalarOp, bind, correct_packed_matmul_layouts, infer,
+};
 
 #[cfg(feature = "instrument")]
 struct RejectionShape {
@@ -83,7 +85,15 @@ fn main() {
 
     let mut matmul_weight_names: BTreeSet<String> = BTreeSet::new();
     for layer in 0..BLOCKS {
-        for suffix in ["attn_q", "attn_k", "attn_v", "attn_output", "ffn_gate", "ffn_up", "ffn_down"] {
+        for suffix in [
+            "attn_q",
+            "attn_k",
+            "attn_v",
+            "attn_output",
+            "ffn_gate",
+            "ffn_up",
+            "ffn_down",
+        ] {
             matmul_weight_names.insert(format!("blk.{layer}.{suffix}.weight"));
         }
     }
@@ -101,16 +111,20 @@ fn main() {
         .collect();
 
     #[cfg(feature = "instrument")]
-    let packed_operands: omega::PackedOperands =
-        q4k_operands.iter().map(|node| (*node, omega::PackedCodec::Q4K)).collect();
+    let packed_operands: omega::PackedOperands = q4k_operands
+        .iter()
+        .map(|node| (*node, omega::PackedCodec::Q4K))
+        .collect();
 
     // MIRRORS `metal::prepare` exactly, same as `real_forward_packed_probe.rs`.
     let mut bound = bind(&program, &shapes, &roots).expect("the real forward binds");
     correct_packed_matmul_layouts(&mut bound, &q4k_operands);
 
     #[cfg(feature = "instrument")]
-    let mut rejection_table: std::collections::BTreeMap<(String, String, String), RejectionShape> =
-        std::collections::BTreeMap::new();
+    let mut rejection_table: std::collections::BTreeMap<
+        (String, String, String),
+        RejectionShape,
+    > = std::collections::BTreeMap::new();
     let mut attention_matmuls_seen = 0usize;
 
     for op in &bound {
@@ -139,7 +153,9 @@ fn main() {
 
         let label = if packed_a || packed_b {
             let weight_node = if packed_a { node_a } else { node_b };
-            let weight_name = program[weight_node.0 as usize].name().expect("a q4k_operands node is always an Op::Input with a name");
+            let weight_name = program[weight_node.0 as usize]
+                .name()
+                .expect("a q4k_operands node is always an Op::Input with a name");
             let family = strip_layer_index(weight_name);
             if !family.contains("attn_") {
                 // ffn_gate/ffn_up/ffn_down/output.weight already have their
@@ -155,7 +171,10 @@ fn main() {
             let is_value_product = [node_a, node_b].into_iter().any(|node| {
                 matches!(
                     &program[node.0 as usize],
-                    Op::Elementwise { body: ScalarOp::Exponential, .. }
+                    Op::Elementwise {
+                        body: ScalarOp::Exponential,
+                        ..
+                    }
                 )
             });
             if is_value_product {
@@ -169,26 +188,35 @@ fn main() {
 
         #[cfg(feature = "instrument")]
         {
-            let quantized: Vec<Option<omega::PackedCodec>> =
-                operands.iter().map(|(node, _, _)| packed_operands.get(node).copied()).collect();
+            let quantized: Vec<Option<omega::PackedCodec>> = operands
+                .iter()
+                .map(|(node, _, _)| packed_operands.get(node).copied())
+                .collect();
             let packed_reason = match omega::msl::diagnose_packed_row_block(op, &quantized) {
                 Ok(()) => "PASS (row-blocked)".to_string(),
                 Err(rejection) => format!("packed_row_block: {rejection:?}"),
             };
-            let tiled_reason = match omega::msl::diagnose_tiled_gemm_block(op, &quantized, *reduce_op, *init, output_axes) {
+            let tiled_reason = match omega::msl::diagnose_tiled_gemm_block(
+                op,
+                &quantized,
+                *reduce_op,
+                *init,
+                output_axes,
+            ) {
                 Ok(()) => "PASS (tiled-gemm)".to_string(),
                 Err(rejection) => format!("tiled_gemm: {rejection:?}"),
             };
-            let reduce_dims: Vec<u16> =
-                (0..op.extents.len() as u16).filter(|dim| !output_axes.contains(dim)).collect();
-            let entry = rejection_table.entry((label, packed_reason, tiled_reason)).or_insert_with(|| {
-                RejectionShape {
+            let reduce_dims: Vec<u16> = (0..op.extents.len() as u16)
+                .filter(|dim| !output_axes.contains(dim))
+                .collect();
+            let entry = rejection_table
+                .entry((label, packed_reason, tiled_reason))
+                .or_insert_with(|| RejectionShape {
                     count: 0,
                     extents: op.extents.clone(),
                     output_axes: output_axes.to_vec(),
                     reduce_dims,
-                }
-            });
+                });
             entry.count += 1;
         }
         #[cfg(not(feature = "instrument"))]
@@ -197,8 +225,13 @@ fn main() {
         }
     }
 
-    println!("attention matmuls (Q/K/V/O projections + score/value products) seen: {attention_matmuls_seen}");
-    assert_ne!(attention_matmuls_seen, 0, "degenerate probe: no attention matmul ever visited");
+    println!(
+        "attention matmuls (Q/K/V/O projections + score/value products) seen: {attention_matmuls_seen}"
+    );
+    assert_ne!(
+        attention_matmuls_seen, 0,
+        "degenerate probe: no attention matmul ever visited"
+    );
 
     #[cfg(feature = "instrument")]
     {
@@ -223,7 +256,9 @@ fn main() {
 /// lines, not worth a shared dependency for).
 fn strip_layer_index(name: &str) -> String {
     name.split('.')
-        .filter(|segment| segment.parse::<u32>().is_err() && *segment != "blk" && *segment != "weight")
+        .filter(|segment| {
+            segment.parse::<u32>().is_err() && *segment != "blk" && *segment != "weight"
+        })
         .collect::<Vec<&str>>()
         .join(".")
 }

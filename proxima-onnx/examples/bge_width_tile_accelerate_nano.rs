@@ -41,7 +41,13 @@ fn deterministic_data(len: usize, salt: u32) -> Vec<f32> {
 }
 
 fn f32_initializer(name: &'static str, dims: Vec<i64>, data: Vec<f32>) -> TensorProto<'static> {
-    TensorProto { dims, data_type: 1, float_data: data, name, ..TensorProto::default() }
+    TensorProto {
+        dims,
+        data_type: 1,
+        float_data: data,
+        name,
+        ..TensorProto::default()
+    }
 }
 
 struct Timed {
@@ -59,20 +65,34 @@ fn run_arm(m: usize, k: usize, n: usize, accelerate: bool) -> Timed {
     let rhs_data = deterministic_data(k * n, 0x9abc_def0);
     let lhs = f32_initializer("lhs", vec![m as i64, k as i64], lhs_data);
     let rhs = f32_initializer("rhs", vec![k as i64, n as i64], rhs_data);
-    let node = NodeProto { input: vec!["lhs", "rhs"], output: vec!["y"], op_type: "MatMul", name: "matmul", ..NodeProto::default() };
+    let node = NodeProto {
+        input: vec!["lhs", "rhs"],
+        output: vec!["y"],
+        op_type: "MatMul",
+        name: "matmul",
+        ..NodeProto::default()
+    };
     let graph = GraphProto {
         node: vec![node],
         name: "nano_accelerate_graph",
         initializer: vec![lhs, rhs],
-        output: vec![ValueInfoProto { name: "y", ..ValueInfoProto::default() }],
+        output: vec![ValueInfoProto {
+            name: "y",
+            ..ValueInfoProto::default()
+        }],
         ..GraphProto::default()
     };
     let lowered = lower_graph(&graph).expect("lower synthetic MatMul");
-    let named: Vec<(&str, &[f32])> = lowered.initializers.iter().map(|(name, data)| (name.as_str(), data.as_slice())).collect();
+    let named: Vec<(&str, &[f32])> = lowered
+        .initializers
+        .iter()
+        .map(|(name, data)| (name.as_str(), data.as_slice()))
+        .collect();
     let output = lowered.graph_outputs[0].1;
 
     for _ in 0..50 {
-        let evaluated = evaluate_named(&lowered.program, &[], &named, &[output]).expect("warm-up eval");
+        let evaluated =
+            evaluate_named(&lowered.program, &[], &named, &[output]).expect("warm-up eval");
         std::hint::black_box(&evaluated);
     }
 
@@ -80,16 +100,25 @@ fn run_arm(m: usize, k: usize, n: usize, accelerate: bool) -> Timed {
     for _ in 0..REPEATS {
         let start = std::time::Instant::now();
         for _ in 0..CALLS_PER_REPEAT {
-            let evaluated = evaluate_named(&lowered.program, &[], &named, &[output]).expect("timed eval");
+            let evaluated =
+                evaluate_named(&lowered.program, &[], &named, &[output]).expect("timed eval");
             std::hint::black_box(&evaluated);
         }
         let elapsed = start.elapsed();
         ns_per_call_per_repeat.push(elapsed.as_nanos() as f64 / CALLS_PER_REPEAT as f64);
     }
     let mean = ns_per_call_per_repeat.iter().sum::<f64>() / ns_per_call_per_repeat.len() as f64;
-    let variance = ns_per_call_per_repeat.iter().map(|value| (value - mean).powi(2)).sum::<f64>() / ns_per_call_per_repeat.len() as f64;
+    let variance = ns_per_call_per_repeat
+        .iter()
+        .map(|value| (value - mean).powi(2))
+        .sum::<f64>()
+        / ns_per_call_per_repeat.len() as f64;
     let cov = variance.sqrt() / mean * 100.0;
-    Timed { mean_ns: mean, cov_pct: cov, samples: ns_per_call_per_repeat }
+    Timed {
+        mean_ns: mean,
+        cov_pct: cov,
+        samples: ns_per_call_per_repeat,
+    }
 }
 
 fn report(label: &str, m: usize, k: usize, n: usize, timed: &Timed) {
@@ -100,7 +129,11 @@ fn report(label: &str, m: usize, k: usize, n: usize, timed: &Timed) {
         timed.mean_ns,
         timed.cov_pct,
         gmac_s,
-        timed.samples.iter().map(|value| format!("{value:.0}")).collect::<Vec<_>>()
+        timed
+            .samples
+            .iter()
+            .map(|value| format!("{value:.0}"))
+            .collect::<Vec<_>>()
     );
 }
 
@@ -112,13 +145,19 @@ fn shape_block(name: &str, m: usize, k: usize, n: usize) {
     let accelerate = run_arm(m, k, n, true);
     report("accelerate", m, k, n, &accelerate);
     let ratio = accelerate.mean_ns / neon.mean_ns;
-    println!("    -> accelerate/neon: {ratio:.3}x (<1 = accelerate faster, >1 = accelerate slower)");
+    println!(
+        "    -> accelerate/neon: {ratio:.3}x (<1 = accelerate faster, >1 = accelerate slower)"
+    );
     #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
     {
         let (hits, declined) = proxima_tensor::cpu::accelerate_gemm_totals();
         println!("    -> accelerate_gemm_totals() cumulative: hits={hits} declined={declined}");
     }
-    let prediction = if m == 1 { "TIE-OR-LOSS (ratio near or above 1.0)" } else { "WIN (ratio well below 1.0)" };
+    let prediction = if m == 1 {
+        "TIE-OR-LOSS (ratio near or above 1.0)"
+    } else {
+        "WIN (ratio well below 1.0)"
+    };
     let outcome = match m {
         1 => {
             if ratio <= 1.15 {
@@ -139,8 +178,12 @@ fn shape_block(name: &str, m: usize, k: usize, n: usize) {
 }
 
 fn main() {
-    println!("bge_width_tile_accelerate_nano: ROW 209 NANO rung -- cblas_sgemm vs NEON width tile, BGE real shapes, M in {{1,7,8,9}}");
-    println!("PRE-REGISTRATION (see file doc comment): WIN (ratio<0.95) at M=7/8/9, TIE-OR-LOSS (ratio<=1.15) at M=1. A MISS here kills the climb.");
+    println!(
+        "bge_width_tile_accelerate_nano: ROW 209 NANO rung -- cblas_sgemm vs NEON width tile, BGE real shapes, M in {{1,7,8,9}}"
+    );
+    println!(
+        "PRE-REGISTRATION (see file doc comment): WIN (ratio<0.95) at M=7/8/9, TIE-OR-LOSS (ratio<=1.15) at M=1. A MISS here kills the climb."
+    );
     for &m in &[1usize, 7, 8, 9] {
         shape_block("QKVO", m, 384, 384);
         shape_block("FFN-up", m, 384, 1536);

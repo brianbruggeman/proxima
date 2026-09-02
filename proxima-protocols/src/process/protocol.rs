@@ -164,9 +164,7 @@ impl ChildRequest {
     pub fn path(&self) -> Option<&str> {
         match self {
             Self::Open { path, .. } => Some(path.as_str()),
-            Self::Read { .. } | Self::Write { .. } | Self::Close { .. } | Self::Stat { .. } => {
-                None
-            }
+            Self::Read { .. } | Self::Write { .. } | Self::Close { .. } | Self::Stat { .. } => None,
         }
     }
 

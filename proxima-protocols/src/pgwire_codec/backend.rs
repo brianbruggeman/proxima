@@ -1002,7 +1002,6 @@ pub fn encode_error_response(
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-    
     use super::super::error::ParseError;
     use super::super::types::{CopyFormat, FormatCode, Oid, TransactionStatus};
     use super::super::views::FieldDescription;

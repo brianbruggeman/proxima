@@ -79,7 +79,11 @@ fn q5k_element_host(block: &[u8], index: usize) -> f32 {
     let (scale_code, min_code) = q5k_scale_min_host(scales, sub_block);
     let scale = d * f32::from(scale_code);
     let minimum = dmin * f32::from(min_code);
-    let mask: u8 = if low { 1u8 << (2 * chunk) } else { 2u8 << (2 * chunk) };
+    let mask: u8 = if low {
+        1u8 << (2 * chunk)
+    } else {
+        2u8 << (2 * chunk)
+    };
 
     let qs_byte = qs[chunk * 32 + offset];
     let nibble = if low { qs_byte & 0x0F } else { qs_byte >> 4 };
@@ -137,7 +141,11 @@ fn q5k_qh_bit_is_selected_by_mask_not_by_a_second_qh_index() {
 
     let element_0 = q5k_element_host(&block, 0);
     let element_128 = q5k_element_host(&block, 128);
-    assert_eq!(element_0, 2.0 * 1.0 * 16.0, "element 0 must read qh[0] bit 0 as set");
+    assert_eq!(
+        element_0,
+        2.0 * 1.0 * 16.0,
+        "element 0 must read qh[0] bit 0 as set"
+    );
     assert_eq!(
         element_128, 0.0,
         "element 128 must read qh[0]'s bit 4 (via its own mask), NOT a second qh byte, and see it unset"

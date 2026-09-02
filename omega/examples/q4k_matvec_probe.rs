@@ -16,7 +16,6 @@
 //! figure this driver can produce today, and it is still an upper bound on
 //! the cost rather than a clean kernel measurement.
 
-
 // a probe, not library code: a failure here should abort loudly with the
 // message rather than thread a Result out to `main`, the same way this
 // crate's own benches and parity tests do.
@@ -117,7 +116,11 @@ fn run() {
             let started = Instant::now();
             let out = omega::execute_plan(&resolved, &blocks).expect("probe executes");
             samples.push(started.elapsed().as_secs_f64() * 1000.0);
-            assert_eq!(out.root().len(), rows as usize, "degenerate probe: no output");
+            assert_eq!(
+                out.root().len(),
+                rows as usize,
+                "degenerate probe: no output"
+            );
         }
         samples.sort_by(f64::total_cmp);
         // min, not median: a sibling process on this box interferes, and
@@ -135,17 +138,27 @@ fn run() {
         let (program, sum) = matvec_program(4096, 4096);
         let shapes = infer(&program, &[]).expect("probe program infers");
         let nests = bind(&program, &shapes, &[sum]).expect("probe program binds");
-        println!("q4k_matvec_probe bound_ops={} (1 == fused, 2 == materializing)", nests.len());
-        let kernel = omega::emit(&nests[0], &std::collections::BTreeMap::new())
-            .expect("probe kernel emits");
-        println!("--- emitted kernel entry={} grid={:?}", kernel.entry, kernel.grid);
+        println!(
+            "q4k_matvec_probe bound_ops={} (1 == fused, 2 == materializing)",
+            nests.len()
+        );
+        let kernel =
+            omega::emit(&nests[0], &std::collections::BTreeMap::new()).expect("probe kernel emits");
+        println!(
+            "--- emitted kernel entry={} grid={:?}",
+            kernel.entry, kernel.grid
+        );
         println!("{}", kernel.source);
         println!("--- end kernel");
         for (index, bound) in nests.iter().enumerate() {
             println!(
                 "  op{index} kind={:?} output_elements={}",
                 core::mem::discriminant(&bound.kind),
-                bound.extents.iter().map(|extent| *extent as usize).product::<usize>()
+                bound
+                    .extents
+                    .iter()
+                    .map(|extent| *extent as usize)
+                    .product::<usize>()
             );
         }
     }
@@ -258,8 +271,8 @@ fn run() {
     let f32_large_ms = measure_f32(16384, K, RUNS);
     let f32_small_bytes = 4096.0 * f64::from(K) * 4.0;
     let f32_large_bytes = 16384.0 * f64::from(K) * 4.0;
-    let f32_marginal_gbs = ((f32_large_bytes - f32_small_bytes) / 1e9)
-        / ((f32_large_ms - f32_small_ms) / 1000.0);
+    let f32_marginal_gbs =
+        ((f32_large_bytes - f32_small_bytes) / 1e9) / ((f32_large_ms - f32_small_ms) / 1000.0);
     // fixed cost, extrapolated back to zero bytes from the two points
     let f32_slope_ms_per_byte = (f32_large_ms - f32_small_ms) / (f32_large_bytes - f32_small_bytes);
     let f32_fixed_ms = f32_small_ms - f32_slope_ms_per_byte * f32_small_bytes;

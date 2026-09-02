@@ -101,14 +101,13 @@ fn start_proxima_default_tokio() -> SocketAddr {
                         let dispatch = dispatch.clone();
                         let in_flight = Arc::new(AtomicU64::new(0));
                         tokio::spawn(async move {
-                            let _ =
-                                proxima::h3::serve_h3_connection(
-                                    connection,
-                                    dispatch,
-                                    in_flight,
-                                    proxima::h3::DEFAULT_REQUEST_BODY_CHANNEL_CAPACITY,
-                                )
-                                    .await;
+                            let _ = proxima::h3::serve_h3_connection(
+                                connection,
+                                dispatch,
+                                in_flight,
+                                proxima::h3::DEFAULT_REQUEST_BODY_CHANNEL_CAPACITY,
+                            )
+                            .await;
                         });
                     }
                     Some(Err(_)) => continue,

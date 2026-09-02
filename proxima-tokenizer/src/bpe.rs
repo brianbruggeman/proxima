@@ -19,7 +19,10 @@ use crate::vocab::Vocab;
 /// base token) but is threaded through in case a future vocab
 /// construction path relaxes that guarantee.
 pub fn encode_pretoken(bytes: &[u8], vocab: &Vocab) -> Result<Vec<u32>, TokenizerError> {
-    let mut ids: Vec<u32> = bytes.iter().map(|&byte| vocab.base_byte_token(byte)).collect();
+    let mut ids: Vec<u32> = bytes
+        .iter()
+        .map(|&byte| vocab.base_byte_token(byte))
+        .collect();
     if ids.len() < 2 {
         return Ok(ids);
     }
@@ -55,7 +58,10 @@ pub fn decode_ids(ids: &[u32], vocab: &Vocab) -> Result<Vec<u8>, TokenizerError>
     for &id in ids {
         let piece = vocab
             .token_bytes(id)
-            .ok_or(TokenizerError::TokenIdOutOfRange { token_id: id, vocab_len: vocab.len() })?;
+            .ok_or(TokenizerError::TokenIdOutOfRange {
+                token_id: id,
+                vocab_len: vocab.len(),
+            })?;
         bytes.extend_from_slice(piece);
     }
     Ok(bytes)

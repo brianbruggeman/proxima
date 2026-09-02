@@ -35,7 +35,13 @@ fn deterministic_data(len: usize, salt: u32) -> Vec<f32> {
 }
 
 fn f32_initializer(name: &'static str, dims: Vec<i64>, data: Vec<f32>) -> TensorProto<'static> {
-    TensorProto { dims, data_type: 1, float_data: data, name, ..TensorProto::default() }
+    TensorProto {
+        dims,
+        data_type: 1,
+        float_data: data,
+        name,
+        ..TensorProto::default()
+    }
 }
 
 fn build_instance(m: usize, k: usize, n: usize, salt: u32) -> Lowered {
@@ -43,12 +49,21 @@ fn build_instance(m: usize, k: usize, n: usize, salt: u32) -> Lowered {
     let rhs_data = deterministic_data(k * n, salt.wrapping_add(0x1111_1111));
     let lhs = f32_initializer("lhs", vec![m as i64, k as i64], lhs_data);
     let rhs = f32_initializer("rhs", vec![k as i64, n as i64], rhs_data);
-    let node = NodeProto { input: vec!["lhs", "rhs"], output: vec!["y"], op_type: "MatMul", name: "matmul", ..NodeProto::default() };
+    let node = NodeProto {
+        input: vec!["lhs", "rhs"],
+        output: vec!["y"],
+        op_type: "MatMul",
+        name: "matmul",
+        ..NodeProto::default()
+    };
     let graph = GraphProto {
         node: vec![node],
         name: "micro_accelerate_graph",
         initializer: vec![lhs, rhs],
-        output: vec![ValueInfoProto { name: "y", ..ValueInfoProto::default() }],
+        output: vec![ValueInfoProto {
+            name: "y",
+            ..ValueInfoProto::default()
+        }],
         ..GraphProto::default()
     };
     lower_graph(&graph).expect("lower synthetic MatMul")
@@ -71,9 +86,17 @@ fn time_calls<F: FnMut(usize)>(mut call: F) -> Timed {
         ns_per_call_per_repeat.push(elapsed.as_nanos() as f64 / CALLS_PER_REPEAT as f64);
     }
     let mean = ns_per_call_per_repeat.iter().sum::<f64>() / ns_per_call_per_repeat.len() as f64;
-    let variance = ns_per_call_per_repeat.iter().map(|value| (value - mean).powi(2)).sum::<f64>() / ns_per_call_per_repeat.len() as f64;
+    let variance = ns_per_call_per_repeat
+        .iter()
+        .map(|value| (value - mean).powi(2))
+        .sum::<f64>()
+        / ns_per_call_per_repeat.len() as f64;
     let cov = variance.sqrt() / mean * 100.0;
-    Timed { mean_ns: mean, cov_pct: cov, samples: ns_per_call_per_repeat }
+    Timed {
+        mean_ns: mean,
+        cov_pct: cov,
+        samples: ns_per_call_per_repeat,
+    }
 }
 
 fn report(label: &str, m: usize, k: usize, n: usize, timed: &Timed) {
@@ -84,7 +107,11 @@ fn report(label: &str, m: usize, k: usize, n: usize, timed: &Timed) {
         timed.mean_ns,
         timed.cov_pct,
         gmac_s,
-        timed.samples.iter().map(|value| format!("{value:.0}")).collect::<Vec<_>>()
+        timed
+            .samples
+            .iter()
+            .map(|value| format!("{value:.0}"))
+            .collect::<Vec<_>>()
     );
 }
 
@@ -97,8 +124,13 @@ fn arm(m: usize, k: usize, n: usize, salt: u32, accelerate: bool) -> Timed {
 
     let lowered = build_instance(m, k, n, salt);
     let output = lowered.graph_outputs[0].1;
-    let mut arena: StaticArena = build_static_arena(&lowered.program, &[], &[output]).expect("build arena");
-    let named: NamedInputs<'_> = lowered.initializers.iter().map(|(name, data)| (name.as_str(), data.as_slice())).collect();
+    let mut arena: StaticArena =
+        build_static_arena(&lowered.program, &[], &[output]).expect("build arena");
+    let named: NamedInputs<'_> = lowered
+        .initializers
+        .iter()
+        .map(|(name, data)| (name.as_str(), data.as_slice()))
+        .collect();
     for _ in 0..50 {
         let evaluated = evaluate_named_with_arena(&mut arena, &named).expect("warm-up eval");
         std::hint::black_box(&evaluated);
@@ -133,23 +165,38 @@ fn shape_block(name: &str, m: usize, k: usize, n: usize) {
     report("neon", m, k, n, &neon);
     report("accelerate", m, k, n, &accelerate);
     let ratio = accelerate.mean_ns / neon.mean_ns;
-    println!("    -> accelerate/neon: {ratio:.3}x (<1 = accelerate faster, >1 = accelerate slower)");
+    println!(
+        "    -> accelerate/neon: {ratio:.3}x (<1 = accelerate faster, >1 = accelerate slower)"
+    );
 
     #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
     {
         let (hits_after, declined_after) = cpu::accelerate_gemm_totals();
         let engagement = hits_after - hits_before;
-        println!("    -> accelerate_gemm_totals() delta this cell: hits={engagement} declined_cumulative={declined_after}");
-        assert!(engagement > 0, "engagement proof: accelerate arm must record at least one hit, got 0");
+        println!(
+            "    -> accelerate_gemm_totals() delta this cell: hits={engagement} declined_cumulative={declined_after}"
+        );
+        assert!(
+            engagement > 0,
+            "engagement proof: accelerate arm must record at least one hit, got 0"
+        );
     }
 
-    let outcome = if (0.50..=0.95).contains(&ratio) { "HIT" } else { "MISS" };
+    let outcome = if (0.50..=0.95).contains(&ratio) {
+        "HIT"
+    } else {
+        "MISS"
+    };
     println!("    -> pre-registered prediction: 0.50x-0.95x -> {outcome}");
 }
 
 fn main() {
-    println!("bge_width_tile_accelerate_micro: ROW 209 MICRO rung -- real StaticArena plan machinery, paired interleaved arms, BGE real shapes, M in {{1,7,8,9}}");
-    println!("PRE-REGISTRATION (see file doc comment): ratio in 0.50x-0.95x at every cell, engagement (accelerate_gemm_totals hits) > 0 required.");
+    println!(
+        "bge_width_tile_accelerate_micro: ROW 209 MICRO rung -- real StaticArena plan machinery, paired interleaved arms, BGE real shapes, M in {{1,7,8,9}}"
+    );
+    println!(
+        "PRE-REGISTRATION (see file doc comment): ratio in 0.50x-0.95x at every cell, engagement (accelerate_gemm_totals hits) > 0 required."
+    );
     for &m in &[1usize, 7, 8, 9] {
         shape_block("QKVO", m, 384, 384);
         shape_block("FFN-up", m, 384, 1536);

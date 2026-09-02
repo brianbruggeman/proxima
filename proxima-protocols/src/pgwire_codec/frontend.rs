@@ -675,7 +675,6 @@ impl<'a> BindWriter<'a> {
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-    
     use super::super::error::{EncodeError, ParseError};
     use super::super::types::{FormatCode, ProtocolVersion};
     use super::*;

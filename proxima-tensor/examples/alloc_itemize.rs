@@ -173,11 +173,16 @@ fn is_plumbing(symbol: &str) -> bool {
         .strip_prefix('<')
         .unwrap_or(symbol)
         .starts_with("alloc::alloc::");
-    is_raw_allocator_frame || PLUMBING_MARKERS.iter().any(|marker| symbol.contains(marker))
+    is_raw_allocator_frame
+        || PLUMBING_MARKERS
+            .iter()
+            .any(|marker| symbol.contains(marker))
 }
 
 fn is_boundary(symbol: &str) -> bool {
-    BOUNDARY_MARKERS.iter().any(|marker| symbol.contains(marker))
+    BOUNDARY_MARKERS
+        .iter()
+        .any(|marker| symbol.contains(marker))
 }
 
 const CHAIN_DEPTH: usize = 6;

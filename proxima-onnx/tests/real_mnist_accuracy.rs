@@ -23,7 +23,8 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 use std::vec::Vec;
 
-const MODEL_PATH: &str = "/Users/brianbruggeman/repos/others/burn/examples/onnx-inference/src/model/mnist.onnx";
+const MODEL_PATH: &str =
+    "/Users/brianbruggeman/repos/others/burn/examples/onnx-inference/src/model/mnist.onnx";
 const DATASET_DIR: &str = "/Users/brianbruggeman/.cache/burn-dataset/mnist";
 const TEST_IMAGES_COUNT: usize = 1000;
 
@@ -55,7 +56,12 @@ fn idx_header(bytes: &[u8]) -> (usize, Vec<usize>) {
     let mut extents = Vec::with_capacity(dimension_count - 1);
     for axis in 1..dimension_count {
         let offset = 4 + axis * 4;
-        extents.push(u32::from_be_bytes([bytes[offset], bytes[offset + 1], bytes[offset + 2], bytes[offset + 3]]) as usize);
+        extents.push(u32::from_be_bytes([
+            bytes[offset],
+            bytes[offset + 1],
+            bytes[offset + 2],
+            bytes[offset + 3],
+        ]) as usize);
     }
     (item_count, extents)
 }
@@ -73,7 +79,10 @@ fn load_normalized_images(path: &Path, limit: usize) -> Vec<Vec<f32>> {
     (0..take)
         .map(|image_index| {
             let start = header_length + image_index * pixel_count;
-            bytes[start..start + pixel_count].iter().map(|&pixel| ((pixel as f32 / 255.0) - 0.1307) / 0.3081).collect()
+            bytes[start..start + pixel_count]
+                .iter()
+                .map(|&pixel| ((pixel as f32 / 255.0) - 0.1307) / 0.3081)
+                .collect()
         })
         .collect()
 }
@@ -86,7 +95,12 @@ fn load_labels(path: &Path, limit: usize) -> Vec<u8> {
 }
 
 fn argmax(values: &[f32]) -> usize {
-    values.iter().enumerate().max_by(|left, right| left.1.total_cmp(right.1)).map(|(index, _)| index).expect("nonempty logits")
+    values
+        .iter()
+        .enumerate()
+        .max_by(|left, right| left.1.total_cmp(right.1))
+        .map(|(index, _)| index)
+        .expect("nonempty logits")
 }
 
 /// Parses and lowers the real `mnist.onnx` checkpoint once, then evaluates
@@ -117,18 +131,40 @@ fn real_mnist_onnx_classifies_real_test_images_at_reference_accuracy() {
     }
 
     let bytes = fs::read(MODEL_PATH).expect("read the real mnist.onnx checkpoint");
-    let model = proxima_onnx::pipe::parse_complete(&bytes).expect("parse the real mnist.onnx checkpoint");
+    let model =
+        proxima_onnx::pipe::parse_complete(&bytes).expect("parse the real mnist.onnx checkpoint");
     let graph = model.graph.as_ref().expect("real mnist model has a graph");
-    let lowered = proxima_onnx::lower::lower_graph(graph).expect("lower the real mnist.onnx graph to Op");
+    let lowered =
+        proxima_onnx::lower::lower_graph(graph).expect("lower the real mnist.onnx graph to Op");
 
-    let graph_input_name = lowered.graph_inputs.first().expect("real mnist model declares at least one input").clone();
-    let output_node = lowered.graph_outputs.first().expect("real mnist model declares at least one output").1;
-    let initializers: Vec<(&str, &[f32])> = lowered.initializers.iter().map(|(name, data)| (name.as_str(), data.as_slice())).collect();
+    let graph_input_name = lowered
+        .graph_inputs
+        .first()
+        .expect("real mnist model declares at least one input")
+        .clone();
+    let output_node = lowered
+        .graph_outputs
+        .first()
+        .expect("real mnist model declares at least one output")
+        .1;
+    let initializers: Vec<(&str, &[f32])> = lowered
+        .initializers
+        .iter()
+        .map(|(name, data)| (name.as_str(), data.as_slice()))
+        .collect();
 
     let images = load_normalized_images(&test_images_path(), TEST_IMAGES_COUNT);
     let labels = load_labels(&test_labels_path(), TEST_IMAGES_COUNT);
-    assert_eq!(images.len(), labels.len(), "same number of images and labels");
-    assert!(images.len() >= TEST_IMAGES_COUNT, "expected at least {TEST_IMAGES_COUNT} real test images, got {}", images.len());
+    assert_eq!(
+        images.len(),
+        labels.len(),
+        "same number of images and labels"
+    );
+    assert!(
+        images.len() >= TEST_IMAGES_COUNT,
+        "expected at least {TEST_IMAGES_COUNT} real test images, got {}",
+        images.len()
+    );
 
     let start = Instant::now();
     let mut correct = 0_usize;
@@ -136,10 +172,17 @@ fn real_mnist_onnx_classifies_real_test_images_at_reference_accuracy() {
     for (index, (image, &label)) in images.iter().zip(labels.iter()).enumerate() {
         let mut named = initializers.clone();
         named.push((graph_input_name.as_str(), image.as_slice()));
-        let evaluated = proxima_tensor::cpu::evaluate_named(&lowered.program, &[], &named, &[output_node])
-            .unwrap_or_else(|error| panic!("evaluate real mnist image {index}: {error}"));
-        let (data, shape) = evaluated.get(output_node).expect("real mnist output present");
-        assert_eq!(shape, &std::vec![1_u64, 10], "LogSoftmax over 10 MNIST classes");
+        let evaluated =
+            proxima_tensor::cpu::evaluate_named(&lowered.program, &[], &named, &[output_node])
+                .unwrap_or_else(|error| panic!("evaluate real mnist image {index}: {error}"));
+        let (data, shape) = evaluated
+            .get(output_node)
+            .expect("real mnist output present");
+        assert_eq!(
+            shape,
+            &std::vec![1_u64, 10],
+            "LogSoftmax over 10 MNIST classes"
+        );
         let predicted = argmax(data);
         if predicted == label as usize {
             correct += 1;
@@ -151,7 +194,10 @@ fn real_mnist_onnx_classifies_real_test_images_at_reference_accuracy() {
     let elapsed = start.elapsed();
     let accuracy = correct as f64 / images.len() as f64;
 
-    eprintln!("real_mnist accuracy: {accuracy:.4} ({correct}/{} images) in {elapsed:?}", images.len());
+    eprintln!(
+        "real_mnist accuracy: {accuracy:.4} ({correct}/{} images) in {elapsed:?}",
+        images.len()
+    );
     let (hits, elements, nanos) = proxima_tensor::cpu::epilogue_fuse_totals();
     eprintln!(
         "real_mnist epilogue_fuse: hits={hits} elements={elements} nanos={nanos} ns_per_element={:.4}",
@@ -164,7 +210,9 @@ fn real_mnist_onnx_classifies_real_test_images_at_reference_accuracy() {
     #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
     {
         let (accelerate_hits, accelerate_declined) = proxima_tensor::cpu::accelerate_gemm_totals();
-        eprintln!("real_mnist accelerate_gemm: hits={accelerate_hits} declined={accelerate_declined}");
+        eprintln!(
+            "real_mnist accelerate_gemm: hits={accelerate_hits} declined={accelerate_declined}"
+        );
     }
     for (index, predicted, label) in &sample_rows {
         eprintln!("real_mnist sample[{index}]: predicted={predicted} label={label}");
@@ -181,7 +229,14 @@ fn real_mnist_onnx_classifies_real_test_images_at_reference_accuracy() {
     // cannot report its N is not a gate).
     let (ln_cluster_hits, ..) = proxima_tensor::cpu::layer_norm_cluster_totals();
     eprintln!("real_mnist ln_cluster: hits={ln_cluster_hits}");
-    assert_eq!(ln_cluster_hits, 0, "the LayerNorm cluster matcher must never fire on mnist's own batchnorm-shaped epilogues");
+    assert_eq!(
+        ln_cluster_hits, 0,
+        "the LayerNorm cluster matcher must never fire on mnist's own batchnorm-shaped epilogues"
+    );
 
-    assert!(accuracy >= 0.95, "expected real mnist.onnx to classify at least 95% of {} real test images, got {accuracy:.4}", images.len());
+    assert!(
+        accuracy >= 0.95,
+        "expected real mnist.onnx to classify at least 95% of {} real test images, got {accuracy:.4}",
+        images.len()
+    );
 }

@@ -27,7 +27,9 @@ use std::time::Instant;
 
 use proxima_tensor::instrument;
 use proxima_tensor::test_support::Lcg;
-use proxima_tensor::{Extent, IndexMap, NodeId, Op, ReduceInit, ScalarOp, append, evaluate_parallel, map};
+use proxima_tensor::{
+    Extent, IndexMap, NodeId, Op, ReduceInit, ScalarOp, append, evaluate_parallel, map,
+};
 
 fn random_vec(seed: u64, n: usize, scale: f32) -> Vec<f32> {
     let mut lcg = Lcg(seed);
@@ -85,8 +87,11 @@ fn mean_and_stddev(values: &[u64]) -> (f64, f64) {
         return (0.0, 0.0);
     }
     let mean = values.iter().sum::<u64>() as f64 / values.len() as f64;
-    let variance =
-        values.iter().map(|value| (*value as f64 - mean).powi(2)).sum::<f64>() / values.len() as f64;
+    let variance = values
+        .iter()
+        .map(|value| (*value as f64 - mean).powi(2))
+        .sum::<f64>()
+        / values.len() as f64;
     (mean, variance.sqrt())
 }
 
@@ -109,7 +114,8 @@ fn main() {
     let rhs_t = random_vec(2, (n * k) as usize, 1.0);
     let workers = NonZeroUsize::new(threads).expect("threads must be nonzero");
 
-    let _ = evaluate_parallel(&program, &[], &[&lhs, &rhs_t], &[], workers).expect("warmup gemm evaluates");
+    let _ = evaluate_parallel(&program, &[], &[&lhs, &rhs_t], &[], workers)
+        .expect("warmup gemm evaluates");
 
     for iter in 0..iters {
         instrument::reset();
@@ -119,8 +125,8 @@ fn main() {
         instrument::reset_worker_cpu();
 
         let wall_start = Instant::now();
-        let evaluated =
-            evaluate_parallel(&program, &[], &[&lhs, &rhs_t], &[], workers).expect("gemm evaluates");
+        let evaluated = evaluate_parallel(&program, &[], &[&lhs, &rhs_t], &[], workers)
+            .expect("gemm evaluates");
         let wall_ns = wall_start.elapsed().as_nanos() as u64;
         let checksum = evaluated.root()[0];
 
@@ -129,19 +135,29 @@ fn main() {
         let sequential_compute_nanos = instrument::ticks_to_nanos(serial.sequential_compute_ticks);
         // raw tick deltas (`instrument::read_ticks`'s doc), converted once
         // here rather than per element.
-        let busy_samples: Vec<u64> =
-            instrument::worker_busy_snapshot().into_iter().map(instrument::ticks_to_nanos).collect();
+        let busy_samples: Vec<u64> = instrument::worker_busy_snapshot()
+            .into_iter()
+            .map(instrument::ticks_to_nanos)
+            .collect();
 
-        let (busy_ns, busy_workers, busy_min, busy_max, busy_mean, busy_stddev) = if busy_samples.is_empty() {
-            let sequential = sequential_compute_nanos;
-            (sequential, 1u64, sequential, sequential, sequential as f64, 0.0)
-        } else {
-            let sum: u64 = busy_samples.iter().sum();
-            let min = *busy_samples.iter().min().expect("nonempty");
-            let max = *busy_samples.iter().max().expect("nonempty");
-            let (mean, stddev) = mean_and_stddev(&busy_samples);
-            (sum, busy_samples.len() as u64, min, max, mean, stddev)
-        };
+        let (busy_ns, busy_workers, busy_min, busy_max, busy_mean, busy_stddev) =
+            if busy_samples.is_empty() {
+                let sequential = sequential_compute_nanos;
+                (
+                    sequential,
+                    1u64,
+                    sequential,
+                    sequential,
+                    sequential as f64,
+                    0.0,
+                )
+            } else {
+                let sum: u64 = busy_samples.iter().sum();
+                let min = *busy_samples.iter().min().expect("nonempty");
+                let max = *busy_samples.iter().max().expect("nonempty");
+                let (mean, stddev) = mean_and_stddev(&busy_samples);
+                (sum, busy_samples.len() as u64, min, max, mean, stddev)
+            };
         let busy_per_mac = busy_ns as f64 / totals.mac_ops.max(1) as f64;
 
         // busy_ns is Instant-derived and keeps running while a worker is

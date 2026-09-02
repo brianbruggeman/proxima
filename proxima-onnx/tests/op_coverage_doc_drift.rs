@@ -13,7 +13,8 @@ const COMMITTED_DOC: &str = include_str!("../docs/op_coverage.md");
 
 #[test]
 fn op_coverage_doc_matches_lower_node_match_arms() {
-    let rendered = render_markdown(LOWER_RS_SOURCE).expect("lower.rs still has both parser markers");
+    let rendered =
+        render_markdown(LOWER_RS_SOURCE).expect("lower.rs still has both parser markers");
     assert_eq!(
         COMMITTED_DOC, rendered,
         "docs/op_coverage.md no longer matches src/lower.rs's lower_node match arms. \

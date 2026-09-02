@@ -27,11 +27,11 @@ use std::io::{Read, Seek, SeekFrom};
 
 use proxima_safetensors::{Manifest, SafetensorsParser};
 use proxima_tensor::{
-    DType, Extent, IndexMap, Keep, NodeId, Op, QuantizedBlock, Reduce, ReduceInit, ScalarOp, append, evaluate, map,
+    DType, Extent, IndexMap, Keep, NodeId, Op, QuantizedBlock, Reduce, ReduceInit, ScalarOp,
+    append, evaluate, map,
 };
 
-const REAL_QWEN3_SAFETENSORS_PATH: &str =
-    "/Users/brianbruggeman/.lmstudio/models/lmstudio-community/Qwen3-30B-A3B-MLX-4bit/model-00001-of-00004.safetensors";
+const REAL_QWEN3_SAFETENSORS_PATH: &str = "/Users/brianbruggeman/.lmstudio/models/lmstudio-community/Qwen3-30B-A3B-MLX-4bit/model-00001-of-00004.safetensors";
 
 const TARGET_TENSOR: &str = "model.layers.0.mlp.gate.biases";
 
@@ -49,7 +49,11 @@ fn real_manifest(path: &std::path::Path) -> Option<(Manifest, u64, std::fs::File
     let mut header_bytes = vec![0u8; header_len as usize];
     file.read_exact(&mut header_bytes).ok()?;
 
-    let parser = SafetensorsParser::new().push(&len_prefix).ok()?.push(&header_bytes).ok()?;
+    let parser = SafetensorsParser::new()
+        .push(&len_prefix)
+        .ok()?
+        .push(&header_bytes)
+        .ok()?;
     let SafetensorsParser::TensorData { manifest, seen } = parser else {
         eprintln!("safetensors header did not fully parse from the first {header_len} bytes");
         return None;
@@ -129,8 +133,16 @@ fn metal_matmul_on_real_mlp_gate_biases_bf16_bytes_matches_the_dequantized_f32_c
         eprintln!("{TARGET_TENSOR} not present in this checkpoint; test skipped");
         return;
     };
-    assert_eq!(entry.dtype, DType::BFloat16, "{TARGET_TENSOR} must be the real bf16 tensor this test targets");
-    assert_eq!(entry.shape, vec![128, 32], "{TARGET_TENSOR}'s real shape must match this test's fixture");
+    assert_eq!(
+        entry.dtype,
+        DType::BFloat16,
+        "{TARGET_TENSOR} must be the real bf16 tensor this test targets"
+    );
+    assert_eq!(
+        entry.shape,
+        vec![128, 32],
+        "{TARGET_TENSOR}'s real shape must match this test's fixture"
+    );
 
     let rows = entry.shape[0] as usize;
     let k = entry.shape[1] as usize;
@@ -138,11 +150,15 @@ fn metal_matmul_on_real_mlp_gate_biases_bf16_bytes_matches_the_dequantized_f32_c
     assert_eq!(byte_len, rows * k * 2, "bf16 is 2 bytes/element");
 
     let mut weight_bytes = vec![0u8; byte_len];
-    file.seek(SeekFrom::Start(data_start + entry.data_offsets.0)).expect("seek to tensor data");
-    file.read_exact(&mut weight_bytes).expect("read exact real tensor byte range");
+    file.seek(SeekFrom::Start(data_start + entry.data_offsets.0))
+        .expect("seek to tensor data");
+    file.read_exact(&mut weight_bytes)
+        .expect("read exact real tensor byte range");
 
     // Non-degenerate, deterministic activation -- not all-ones or all-zero.
-    let activation: Vec<f32> = (0..k).map(|index| ((index % 7) as f32 - 3.0) * 0.5).collect();
+    let activation: Vec<f32> = (0..k)
+        .map(|index| ((index % 7) as f32 - 3.0) * 0.5)
+        .collect();
 
     // Independent reference decode of the SAME real bytes (`half::bf16::
     // from_le_bytes` called directly here, never through the kernel under
@@ -159,14 +175,17 @@ fn metal_matmul_on_real_mlp_gate_biases_bf16_bytes_matches_the_dequantized_f32_c
     let metal = omega::execute(
         &packed_program,
         &[],
-        &[QuantizedBlock::BFloat16(&weight_bytes), QuantizedBlock::Float32(&activation)],
+        &[
+            QuantizedBlock::BFloat16(&weight_bytes),
+            QuantizedBlock::Float32(&activation),
+        ],
         &[packed_sum],
     )
     .expect("metal executes a bf16 matmul on real mlp.gate.biases bytes");
 
     let (f32_program, f32_sum) = matmul_program(rows as u32, k as u32, DType::Float32);
-    let cpu =
-        evaluate(&f32_program, &[], &[&dequantized, &activation], &[f32_sum]).expect("dequantized f32 cpu matmul evaluates");
+    let cpu = evaluate(&f32_program, &[], &[&dequantized, &activation], &[f32_sum])
+        .expect("dequantized f32 cpu matmul evaluates");
 
     let actual = metal.root();
     let expected = cpu.root();
@@ -178,8 +197,15 @@ fn metal_matmul_on_real_mlp_gate_biases_bf16_bytes_matches_the_dequantized_f32_c
         assert!(got.is_finite(), "metal produced a non-finite value: {got}");
         max_diff = max_diff.max((got - want).abs());
     }
-    let max_magnitude = expected.iter().map(|value| value.abs()).fold(0.0f32, f32::max);
-    let relative = if max_magnitude > 0.0 { max_diff / max_magnitude } else { max_diff };
+    let max_magnitude = expected
+        .iter()
+        .map(|value| value.abs())
+        .fold(0.0f32, f32::max);
+    let relative = if max_magnitude > 0.0 {
+        max_diff / max_magnitude
+    } else {
+        max_diff
+    };
     eprintln!(
         "real {TARGET_TENSOR} (BFloat16, {rows}x{k}) metal vs dequantized-f32 cpu: \
          max_diff={max_diff} max_magnitude={max_magnitude} relative={relative}"

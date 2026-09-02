@@ -98,13 +98,10 @@ mod tests {
 
     #[test]
     fn env_override_takes_effect_and_does_not_leak() {
-        temp_env::with_vars(
-            [("ONNX_MAX_LEN_DELIMITED_FIELD", Some("4096"))],
-            || {
-                let config = OnnxParserConfig::from_env().expect("from_env");
-                assert_eq!(config.max_len_delimited_field, 4096);
-            },
-        );
+        temp_env::with_vars([("ONNX_MAX_LEN_DELIMITED_FIELD", Some("4096"))], || {
+            let config = OnnxParserConfig::from_env().expect("from_env");
+            assert_eq!(config.max_len_delimited_field, 4096);
+        });
 
         // outside the scoped block, the override must not leak into a
         // fresh read.
@@ -118,7 +115,9 @@ mod tests {
 
     #[test]
     fn zero_max_len_delimited_field_rejected() {
-        let config = OnnxParserConfig::builder().max_len_delimited_field(0).build();
+        let config = OnnxParserConfig::builder()
+            .max_len_delimited_field(0)
+            .build();
         let err = config
             .validate()
             .expect_err("validate must reject max_len_delimited_field = 0");
@@ -141,7 +140,9 @@ mod tests {
         push_tag(7, 2, &mut bytes);
         push_varint(2048, &mut bytes);
         parser.feed(&bytes);
-        let err = parser.poll().expect_err("declared length exceeds config cap");
+        let err = parser
+            .poll()
+            .expect_err("declared length exceeds config cap");
         assert!(matches!(
             err,
             crate::error::OnnxError::DeclaredLengthTooLarge {

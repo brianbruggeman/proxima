@@ -25,7 +25,8 @@ use std::path::{Path, PathBuf};
 
 use proxima_tensor::{cpu, instrument};
 
-const MODEL_PATH: &str = "/Users/brianbruggeman/repos/others/burn/examples/onnx-inference/src/model/mnist.onnx";
+const MODEL_PATH: &str =
+    "/Users/brianbruggeman/repos/others/burn/examples/onnx-inference/src/model/mnist.onnx";
 const DATASET_DIR: &str = "/Users/brianbruggeman/.cache/burn-dataset/mnist";
 const PROFILE_IMAGES: usize = 200;
 
@@ -39,7 +40,12 @@ fn idx_header(bytes: &[u8]) -> (usize, Vec<usize>) {
     let mut extents = Vec::with_capacity(dimension_count - 1);
     for axis in 1..dimension_count {
         let offset = 4 + axis * 4;
-        extents.push(u32::from_be_bytes([bytes[offset], bytes[offset + 1], bytes[offset + 2], bytes[offset + 3]]) as usize);
+        extents.push(u32::from_be_bytes([
+            bytes[offset],
+            bytes[offset + 1],
+            bytes[offset + 2],
+            bytes[offset + 3],
+        ]) as usize);
     }
     (item_count, extents)
 }
@@ -53,7 +59,10 @@ fn load_normalized_images(path: &Path, limit: usize) -> Vec<Vec<f32>> {
     (0..take)
         .map(|image_index| {
             let start = header_length + image_index * pixel_count;
-            bytes[start..start + pixel_count].iter().map(|&pixel| ((pixel as f32 / 255.0) - 0.1307) / 0.3081).collect()
+            bytes[start..start + pixel_count]
+                .iter()
+                .map(|&pixel| ((pixel as f32 / 255.0) - 0.1307) / 0.3081)
+                .collect()
         })
         .collect()
 }
@@ -64,28 +73,48 @@ fn main() {
         return;
     }
     if !test_images_path().exists() {
-        eprintln!("epilogue_profile: skipping, no host-local MNIST idx dataset under {DATASET_DIR}");
+        eprintln!(
+            "epilogue_profile: skipping, no host-local MNIST idx dataset under {DATASET_DIR}"
+        );
         return;
     }
 
     let bytes = fs::read(MODEL_PATH).expect("read the real mnist.onnx checkpoint");
-    let model = proxima_onnx::pipe::parse_complete(&bytes).expect("parse the real mnist.onnx checkpoint");
+    let model =
+        proxima_onnx::pipe::parse_complete(&bytes).expect("parse the real mnist.onnx checkpoint");
     let graph = model.graph.as_ref().expect("real mnist model has a graph");
-    let lowered = proxima_onnx::lower::lower_graph(graph).expect("lower the real mnist.onnx graph to Op");
+    let lowered =
+        proxima_onnx::lower::lower_graph(graph).expect("lower the real mnist.onnx graph to Op");
 
-    let graph_input_name = lowered.graph_inputs.first().expect("real mnist model declares at least one input").clone();
-    let output_node = lowered.graph_outputs.first().expect("real mnist model declares at least one output").1;
-    let initializers: Vec<(&str, &[f32])> = lowered.initializers.iter().map(|(name, data)| (name.as_str(), data.as_slice())).collect();
+    let graph_input_name = lowered
+        .graph_inputs
+        .first()
+        .expect("real mnist model declares at least one input")
+        .clone();
+    let output_node = lowered
+        .graph_outputs
+        .first()
+        .expect("real mnist model declares at least one output")
+        .1;
+    let initializers: Vec<(&str, &[f32])> = lowered
+        .initializers
+        .iter()
+        .map(|(name, data)| (name.as_str(), data.as_slice()))
+        .collect();
 
     let images = load_normalized_images(&test_images_path(), PROFILE_IMAGES);
-    assert!(!images.is_empty(), "expected at least one real mnist test image");
+    assert!(
+        !images.is_empty(),
+        "expected at least one real mnist test image"
+    );
 
     // warm-up: outside both instrument and the probe's own reset window, so
     // first-call effects (allocator warm-up, page faults) never pollute the
     // attributed breakdown.
     let mut named = initializers.clone();
     named.push((graph_input_name.as_str(), images[0].as_slice()));
-    let _ = cpu::evaluate_named(&lowered.program, &[], &named, &[output_node]).expect("warm-up eval");
+    let _ =
+        cpu::evaluate_named(&lowered.program, &[], &named, &[output_node]).expect("warm-up eval");
 
     instrument::reset();
     cpu::epilogue_profile_reset();
@@ -93,11 +122,13 @@ fn main() {
     for image in &images {
         let mut named = initializers.clone();
         named.push((graph_input_name.as_str(), image.as_slice()));
-        let evaluated = cpu::evaluate_named(&lowered.program, &[], &named, &[output_node]).expect("evaluate real mnist image");
+        let evaluated = cpu::evaluate_named(&lowered.program, &[], &named, &[output_node])
+            .expect("evaluate real mnist image");
         std::hint::black_box(&evaluated);
     }
 
-    let (reduce_nanos, reduce_calls, epilogue_nanos, epilogue_calls, other_nanos, other_calls) = cpu::epilogue_profile_totals();
+    let (reduce_nanos, reduce_calls, epilogue_nanos, epilogue_calls, other_nanos, other_calls) =
+        cpu::epilogue_profile_totals();
     let total_nanos = reduce_nanos + epilogue_nanos + other_nanos;
     let total_calls = reduce_calls + epilogue_calls + other_calls;
     let percent = |nanos: u64| -> f64 {
@@ -108,7 +139,10 @@ fn main() {
         }
     };
 
-    println!("epilogue_profile: {} real mnist images, evaluate_quantized_with_scratch node-class breakdown", images.len());
+    println!(
+        "epilogue_profile: {} real mnist images, evaluate_quantized_with_scratch node-class breakdown",
+        images.len()
+    );
     println!(
         "  (a) reduce-fold      : {:>10} calls, {:>12} ns total, {:6.2}% of step time, {:.1} ns/call",
         reduce_calls,
@@ -130,12 +164,19 @@ fn main() {
         percent(other_nanos),
         other_nanos as f64 / other_calls.max(1) as f64
     );
-    println!("  total                 : {total_calls:>10} calls, {total_nanos:>12} ns total over {} images ({:.3} ms/image)", images.len(), total_nanos as f64 / images.len() as f64 / 1e6);
+    println!(
+        "  total                 : {total_calls:>10} calls, {total_nanos:>12} ns total over {} images ({:.3} ms/image)",
+        images.len(),
+        total_nanos as f64 / images.len() as f64 / 1e6
+    );
 
     let path_totals = instrument::totals();
     println!(
         "  corroborating path_* counters (reduce tile-vs-generic split, instrument feature): dot_fast={} width_fast={} conv_tile={} generic={}",
-        path_totals.path_dot_fast, path_totals.path_width_fast, path_totals.path_conv_tile, path_totals.path_generic
+        path_totals.path_dot_fast,
+        path_totals.path_width_fast,
+        path_totals.path_conv_tile,
+        path_totals.path_generic
     );
 
     const GATE_THRESHOLD_PERCENT: f64 = 10.0;

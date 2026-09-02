@@ -39,7 +39,10 @@ pub const K_SCALE_SIZE: usize = 12;
 /// K_SCALE_SIZE + QK_K/2, ...)` at `ggml-common.h:296`.
 pub const BLOCK_BYTES: usize = {
     let layout = GgmlType::Q4_K.block_layout();
-    assert!(layout.block_elements as usize == QK_K, "GgmlType::Q4_K block_elements drifted from QK_K");
+    assert!(
+        layout.block_elements as usize == QK_K,
+        "GgmlType::Q4_K block_elements drifted from QK_K"
+    );
     layout.block_bytes as usize
 };
 
@@ -154,7 +157,8 @@ pub fn dequantize_block(block: &[u8], output: &mut [f32]) {
         let min_hi = dmin * f32::from(min_hi);
 
         for offset in 0..SUB_BLOCK_ELEMENTS {
-            output[out_offset + offset] = scale_lo * f32::from(qs[qs_offset + offset] & 0x0F) - min_lo;
+            output[out_offset + offset] =
+                scale_lo * f32::from(qs[qs_offset + offset] & 0x0F) - min_lo;
             output[out_offset + SUB_BLOCK_ELEMENTS + offset] =
                 scale_hi * f32::from(qs[qs_offset + offset] >> 4) - min_hi;
         }
@@ -191,7 +195,12 @@ pub fn dequantize(data: &[u8], output: &mut [f32]) -> Result<(), QuantError> {
             expected,
         });
     }
-    for (block, out_chunk) in data.as_chunks::<BLOCK_BYTES>().0.iter().zip(output.as_chunks_mut::<QK_K>().0) {
+    for (block, out_chunk) in data
+        .as_chunks::<BLOCK_BYTES>()
+        .0
+        .iter()
+        .zip(output.as_chunks_mut::<QK_K>().0)
+    {
         dequantize_block(block, out_chunk);
     }
     Ok(())
@@ -208,7 +217,10 @@ pub fn dequantize(data: &[u8], output: &mut [f32]) -> Result<(), QuantError> {
 /// each solves the weighted normal equations for the best affine fit
 /// given that candidate's rounded levels, keeping whichever candidate
 /// minimizes weighted squared error.
-fn make_qkx2_quants_32(x: &[f32; SUB_BLOCK_ELEMENTS], weights: &[f32; SUB_BLOCK_ELEMENTS]) -> ([u8; SUB_BLOCK_ELEMENTS], f32, f32) {
+fn make_qkx2_quants_32(
+    x: &[f32; SUB_BLOCK_ELEMENTS],
+    weights: &[f32; SUB_BLOCK_ELEMENTS],
+) -> ([u8; SUB_BLOCK_ELEMENTS], f32, f32) {
     const NMAX: i32 = 15;
     const NMAX_F: f32 = NMAX as f32;
 
@@ -262,7 +274,8 @@ fn make_qkx2_quants_32(x: &[f32; SUB_BLOCK_ELEMENTS], weights: &[f32; SUB_BLOCK_
         }
         let mut error = 0.0f32;
         for index in 0..SUB_BLOCK_ELEMENTS {
-            let diff = candidate_scale * f32::from(candidate_levels[index]) + candidate_min - x[index];
+            let diff =
+                candidate_scale * f32::from(candidate_levels[index]) + candidate_min - x[index];
             error += weights[index] * diff * diff;
         }
         if error < best_error {
@@ -328,7 +341,9 @@ fn quantize_block(x: &[f32], output: &mut [u8]) {
 
     for sub_block in 0..SUB_BLOCKS {
         let mut chunk = [0.0f32; SUB_BLOCK_ELEMENTS];
-        chunk.copy_from_slice(&x[sub_block * SUB_BLOCK_ELEMENTS..(sub_block + 1) * SUB_BLOCK_ELEMENTS]);
+        chunk.copy_from_slice(
+            &x[sub_block * SUB_BLOCK_ELEMENTS..(sub_block + 1) * SUB_BLOCK_ELEMENTS],
+        );
         let sum_sq: f32 = chunk.iter().map(|value| value * value).sum();
         let av_x = libm::sqrtf(sum_sq / SUB_BLOCK_ELEMENTS as f32);
         let mut weights = [0.0f32; SUB_BLOCK_ELEMENTS];
@@ -336,14 +351,19 @@ fn quantize_block(x: &[f32], output: &mut [u8]) {
             *weight = av_x + value.abs();
         }
         let (sub_levels, sub_min, sub_scale) = make_qkx2_quants_32(&chunk, &weights);
-        levels[sub_block * SUB_BLOCK_ELEMENTS..(sub_block + 1) * SUB_BLOCK_ELEMENTS].copy_from_slice(&sub_levels);
+        levels[sub_block * SUB_BLOCK_ELEMENTS..(sub_block + 1) * SUB_BLOCK_ELEMENTS]
+            .copy_from_slice(&sub_levels);
         mins[sub_block] = sub_min;
         scales[sub_block] = sub_scale;
     }
 
     let max_scale = scales.iter().copied().fold(0.0f32, f32::max);
     let max_min = mins.iter().copied().fold(0.0f32, f32::max);
-    let scale_step = if max_scale > 0.0 { 63.0 / max_scale } else { 0.0 };
+    let scale_step = if max_scale > 0.0 {
+        63.0 / max_scale
+    } else {
+        0.0
+    };
     let min_step = if max_min > 0.0 { 63.0 / max_min } else { 0.0 };
 
     let mut scale_codes = [0u8; SUB_BLOCKS];
@@ -378,7 +398,8 @@ fn quantize_block(x: &[f32], output: &mut [u8]) {
     let mut qs_offset = 0usize;
     for base in (0..QK_K).step_by(64) {
         for offset in 0..SUB_BLOCK_ELEMENTS {
-            qs[qs_offset + offset] = levels[base + offset] | (levels[base + SUB_BLOCK_ELEMENTS + offset] << 4);
+            qs[qs_offset + offset] =
+                levels[base + offset] | (levels[base + SUB_BLOCK_ELEMENTS + offset] << 4);
         }
         qs_offset += SUB_BLOCK_ELEMENTS;
     }
@@ -410,7 +431,12 @@ pub fn quantize(input: &[f32], output: &mut [u8]) -> Result<(), QuantError> {
             expected,
         });
     }
-    for (chunk, out_block) in input.as_chunks::<QK_K>().0.iter().zip(output.as_chunks_mut::<BLOCK_BYTES>().0) {
+    for (chunk, out_block) in input
+        .as_chunks::<QK_K>()
+        .0
+        .iter()
+        .zip(output.as_chunks_mut::<BLOCK_BYTES>().0)
+    {
         quantize_block(chunk, out_block);
     }
     Ok(())
@@ -426,7 +452,8 @@ mod tests {
     use proxima_telemetry::debug;
 
     use super::{
-        BLOCK_BYTES, CODEC, K_SCALE_SIZE, QK_K, QuantError, SUB_BLOCK_ELEMENTS, SUB_BLOCKS, dequantize, quantize,
+        BLOCK_BYTES, CODEC, K_SCALE_SIZE, QK_K, QuantError, SUB_BLOCK_ELEMENTS, SUB_BLOCKS,
+        dequantize, quantize,
     };
 
     /// One super-block, hand-packed and hand-decoded, checked against the
@@ -452,7 +479,8 @@ mod tests {
         const MIN: [u32; SUB_BLOCKS] = [61, 2, 44, 9, 50, 19, 6, 63];
         // hand-derived packing (see doc comment): scales[j]=sc[j]|((sc[j+4]>>4)<<6),
         // scales[j+4]=m[j]|((m[j+4]>>4)<<6) for j<4; scales[j+4]=(sc[j]&0xF)|((m[j]&0xF)<<4) for j>=4.
-        let packed_scales: [u8; K_SCALE_SIZE] = [131, 45, 204, 127, 253, 66, 44, 201, 33, 55, 106, 245];
+        let packed_scales: [u8; K_SCALE_SIZE] =
+            [131, 45, 204, 127, 253, 66, 44, 201, 33, 55, 106, 245];
 
         // qs is all zero except one probe byte per 32-byte region, each
         // touching one low-nibble and one high-nibble output element.
@@ -472,7 +500,12 @@ mod tests {
         // computed by hand (d=1.0, dmin=0.5): zero everywhere except the
         // four probe positions.
         let mut expected = [0.0f32; QK_K];
-        for (sub_block, out) in expected.as_chunks_mut::<SUB_BLOCK_ELEMENTS>().0.iter_mut().enumerate() {
+        for (sub_block, out) in expected
+            .as_chunks_mut::<SUB_BLOCK_ELEMENTS>()
+            .0
+            .iter_mut()
+            .enumerate()
+        {
             out.fill(-0.5 * MIN[sub_block] as f32);
         }
         expected[0] = 3.0 * 7.0 - 0.5 * 61.0; // sub_block 0: sc=3, m=61, q=7 -> 21 - 30.5 = -9.5
@@ -552,15 +585,24 @@ mod tests {
         let mut max_error = 0.0f32;
         let mut sum_sq_error = 0.0f64;
         for (got, want) in output.iter().zip(input.iter()) {
-            assert!(got.is_finite(), "dequantized value must be finite, got {got}");
+            assert!(
+                got.is_finite(),
+                "dequantized value must be finite, got {got}"
+            );
             let diff = (got - want).abs();
             max_error = max_error.max(diff);
             sum_sq_error += f64::from(diff) * f64::from(diff);
         }
         let rms_error = (sum_sq_error / elements as f64).sqrt();
         debug!(max_error, rms_error, "quant.q4_k smooth-signal round trip");
-        assert!(max_error < 0.6, "max_error={max_error} exceeds loose sanity bound");
-        assert!(rms_error < 0.2, "rms_error={rms_error} exceeds loose sanity bound");
+        assert!(
+            max_error < 0.6,
+            "max_error={max_error} exceeds loose sanity bound"
+        );
+        assert!(
+            rms_error < 0.2,
+            "rms_error={rms_error} exceeds loose sanity bound"
+        );
     }
 
     #[test]

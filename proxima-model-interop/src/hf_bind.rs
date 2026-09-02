@@ -37,14 +37,19 @@ use proxima_safetensors::Manifest;
 use proxima_tensor::DType;
 use proxima_tensor::cpu::QuantizedBlock;
 
-use crate::bind::{BoundWeights, ModelArchitecture, aligned_f32_view, dequantize, reinterpret_f32, transpose_out_in_to_in_out};
+use crate::bind::{
+    BoundWeights, ModelArchitecture, aligned_f32_view, dequantize, reinterpret_f32,
+    transpose_out_in_to_in_out,
+};
 use crate::error::InteropError;
 
 fn find_entry<'manifest>(
     manifest: &'manifest Manifest,
     name: &str,
 ) -> Result<&'manifest proxima_safetensors::TensorEntry, InteropError> {
-    manifest.tensor(name).ok_or_else(|| InteropError::UnknownTensor { name: name.into() })
+    manifest
+        .tensor(name)
+        .ok_or_else(|| InteropError::UnknownTensor { name: name.into() })
 }
 
 /// `entry.data_offsets` are relative to the first byte AFTER the header
@@ -67,11 +72,22 @@ fn tensor_bytes<'file>(
         .checked_add(entry.data_offsets.1)
         .and_then(|value| usize::try_from(value).ok());
     match (start, end) {
-        (Some(start), Some(end)) => file_bytes.get(start..end).ok_or_else(|| InteropError::UnknownTensor {
-            name: format!("{} (byte range {start}..{end} outside a {}-byte buffer)", entry.name, file_bytes.len()),
-        }),
+        (Some(start), Some(end)) => {
+            file_bytes
+                .get(start..end)
+                .ok_or_else(|| InteropError::UnknownTensor {
+                    name: format!(
+                        "{} (byte range {start}..{end} outside a {}-byte buffer)",
+                        entry.name,
+                        file_bytes.len()
+                    ),
+                })
+        }
         _ => Err(InteropError::UnknownTensor {
-            name: format!("{} (data_start {data_start} + declared offsets overflow usize)", entry.name),
+            name: format!(
+                "{} (data_start {data_start} + declared offsets overflow usize)",
+                entry.name
+            ),
         }),
     }
 }
@@ -99,11 +115,11 @@ pub(crate) fn safetensors_tensor_as_packed_block<'file>(
     let entry = find_entry(manifest, name)?;
     let bytes = tensor_bytes(file_bytes, data_start, entry)?;
     match entry.dtype {
-        DType::Float32 => aligned_f32_view(bytes).map(QuantizedBlock::Float32).ok_or_else(|| {
-            InteropError::MisalignedFloat32Tensor {
+        DType::Float32 => aligned_f32_view(bytes)
+            .map(QuantizedBlock::Float32)
+            .ok_or_else(|| InteropError::MisalignedFloat32Tensor {
                 tensor: entry.name.clone(),
-            }
-        }),
+            }),
         DType::Float16 => Ok(QuantizedBlock::Float16(bytes)),
         DType::BFloat16 => Ok(QuantizedBlock::BFloat16(bytes)),
         other => Err(InteropError::UndecodableSafetensorsDType {
@@ -125,7 +141,12 @@ pub(crate) fn safetensors_tensor_as_packed_block<'file>(
 /// Same as [`safetensors_tensor_as_packed_block`], plus
 /// [`InteropError::Quant`] if a `Float16`/`BFloat16` tensor's byte length is
 /// not a whole number of 2-byte elements.
-pub(crate) fn safetensors_tensor_as_f32(manifest: &Manifest, file_bytes: &[u8], data_start: u64, name: &str) -> Result<Vec<f32>, InteropError> {
+pub(crate) fn safetensors_tensor_as_f32(
+    manifest: &Manifest,
+    file_bytes: &[u8],
+    data_start: u64,
+    name: &str,
+) -> Result<Vec<f32>, InteropError> {
     let entry = find_entry(manifest, name)?;
     let bytes = tensor_bytes(file_bytes, data_start, entry)?;
     let element_count = entry.shape.iter().product::<u64>() as usize;
@@ -184,7 +205,8 @@ fn hf_bind_dense<'file>(
             state.packed.push((store_name, block));
         }
         Ok(_) | Err(_) => {
-            let decoded = safetensors_tensor_as_f32(manifest, file_bytes, data_start, &lookup_name)?;
+            let decoded =
+                safetensors_tensor_as_f32(manifest, file_bytes, data_start, &lookup_name)?;
             state.resident_bytes += decoded.len() * core::mem::size_of::<f32>();
             state.owned.push((store_name, decoded));
         }
@@ -230,8 +252,10 @@ fn permute_rope_rows(flat: &[f32], head_count: usize, head_dim: usize, in_dim: u
             let source_odd = (head * head_dim + half + i) * in_dim;
             let dest_even = (head * head_dim + 2 * i) * in_dim;
             let dest_odd = (head * head_dim + 2 * i + 1) * in_dim;
-            permuted[dest_even..dest_even + in_dim].copy_from_slice(&flat[source_even..source_even + in_dim]);
-            permuted[dest_odd..dest_odd + in_dim].copy_from_slice(&flat[source_odd..source_odd + in_dim]);
+            permuted[dest_even..dest_even + in_dim]
+                .copy_from_slice(&flat[source_even..source_even + in_dim]);
+            permuted[dest_odd..dest_odd + in_dim]
+                .copy_from_slice(&flat[source_odd..source_odd + in_dim]);
         }
     }
     permuted
@@ -263,7 +287,10 @@ fn hf_bind_rope_weight<'file>(
     let permuted = permute_rope_rows(&decoded, head_count, head_dim, in_dim);
     let out_dim = head_count * head_dim;
     state.resident_bytes += permuted.len() * core::mem::size_of::<f32>();
-    state.owned.push((store_name, transpose_out_in_to_in_out(&permuted, &lookup_name, out_dim, in_dim)?));
+    state.owned.push((
+        store_name,
+        transpose_out_in_to_in_out(&permuted, &lookup_name, out_dim, in_dim)?,
+    ));
     Ok(())
 }
 
@@ -317,11 +344,13 @@ fn hf_bind_matmul_weight<'file>(
 ) -> Result<(), InteropError> {
     match safetensors_tensor_as_packed_block(manifest, file_bytes, data_start, &lookup_name) {
         Ok(QuantizedBlock::Float32(_)) | Err(_) => {
-            let decoded = safetensors_tensor_as_f32(manifest, file_bytes, data_start, &lookup_name)?;
+            let decoded =
+                safetensors_tensor_as_f32(manifest, file_bytes, data_start, &lookup_name)?;
             state.resident_bytes += decoded.len() * core::mem::size_of::<f32>();
-            state
-                .owned
-                .push((store_name, transpose_out_in_to_in_out(&decoded, &lookup_name, out_dim, in_dim)?));
+            state.owned.push((
+                store_name,
+                transpose_out_in_to_in_out(&decoded, &lookup_name, out_dim, in_dim)?,
+            ));
         }
         Ok(block) => state.packed.push((store_name, block)),
     }
@@ -481,10 +510,24 @@ pub(crate) fn bind_all_weights_from_safetensors<'file>(
     let feed_forward = architecture.feed_forward as usize;
     let vocab = architecture.vocab as usize;
 
-    hf_bind_dense(manifest, file_bytes, data_start, names::embed_tokens(), node_names::token_embd(), &mut state)?;
+    hf_bind_dense(
+        manifest,
+        file_bytes,
+        data_start,
+        names::embed_tokens(),
+        node_names::token_embd(),
+        &mut state,
+    )?;
 
     for layer in 0..architecture.block_count {
-        hf_bind_dense(manifest, file_bytes, data_start, names::input_layernorm(layer), node_names::attn_norm(layer), &mut state)?;
+        hf_bind_dense(
+            manifest,
+            file_bytes,
+            data_start,
+            names::input_layernorm(layer),
+            node_names::attn_norm(layer),
+            &mut state,
+        )?;
         hf_bind_dense(
             manifest,
             file_bytes,
@@ -515,7 +558,16 @@ pub(crate) fn bind_all_weights_from_safetensors<'file>(
             embedding,
             &mut state,
         )?;
-        hf_bind_matmul_weight(manifest, file_bytes, data_start, names::v_proj(layer), node_names::attn_v(layer), kv_dim, embedding, &mut state)?;
+        hf_bind_matmul_weight(
+            manifest,
+            file_bytes,
+            data_start,
+            names::v_proj(layer),
+            node_names::attn_v(layer),
+            kv_dim,
+            embedding,
+            &mut state,
+        )?;
         hf_bind_matmul_weight(
             manifest,
             file_bytes,
@@ -558,7 +610,14 @@ pub(crate) fn bind_all_weights_from_safetensors<'file>(
         )?;
     }
 
-    hf_bind_dense(manifest, file_bytes, data_start, names::final_norm(), node_names::output_norm(), &mut state)?;
+    hf_bind_dense(
+        manifest,
+        file_bytes,
+        data_start,
+        names::final_norm(),
+        node_names::output_norm(),
+        &mut state,
+    )?;
 
     // A tied checkpoint (HF's `tie_word_embeddings: true`, e.g. real
     // SmolLM2-135M-Instruct) ships no `lm_head.weight` tensor at all -- its
@@ -569,8 +628,21 @@ pub(crate) fn bind_all_weights_from_safetensors<'file>(
     // on-disk shape (`[vocab, embedding]`) is exactly that for
     // `out_dim = vocab, in_dim = embedding` -- the same shape `lm_head.weight`
     // would have carried on an untied checkpoint.
-    let output_lookup_name = if architecture.tied_embeddings { names::embed_tokens() } else { names::lm_head() };
-    hf_bind_matmul_weight(manifest, file_bytes, data_start, output_lookup_name, node_names::output_weight(), vocab, embedding, &mut state)?;
+    let output_lookup_name = if architecture.tied_embeddings {
+        names::embed_tokens()
+    } else {
+        names::lm_head()
+    };
+    hf_bind_matmul_weight(
+        manifest,
+        file_bytes,
+        data_start,
+        output_lookup_name,
+        node_names::output_weight(),
+        vocab,
+        embedding,
+        &mut state,
+    )?;
     Ok(state)
 }
 
@@ -584,7 +656,10 @@ mod tests {
     use super::*;
 
     fn f32_bytes(values: &[f32]) -> Vec<u8> {
-        values.iter().flat_map(|value| value.to_le_bytes()).collect::<Vec<u8>>()
+        values
+            .iter()
+            .flat_map(|value| value.to_le_bytes())
+            .collect::<Vec<u8>>()
     }
 
     /// `8 + header_len`, read off a real written safetensors buffer's own
@@ -678,18 +753,24 @@ mod tests {
     #[test]
     fn binds_every_dense_weight_name_from_a_real_safetensors_buffer() {
         let file_bytes = tiny_dense_checkpoint();
-        let manifest = proxima_safetensors::parse_complete(&file_bytes).expect("parses real safetensors buffer");
+        let manifest = proxima_safetensors::parse_complete(&file_bytes)
+            .expect("parses real safetensors buffer");
         let architecture = tiny_dense_architecture();
         let data_start = header_data_start(&file_bytes);
 
-        let bound = bind_all_weights_from_safetensors(&manifest, &file_bytes, data_start, &architecture)
-            .expect("binds every dense weight this architecture's forward program needs");
+        let bound =
+            bind_all_weights_from_safetensors(&manifest, &file_bytes, data_start, &architecture)
+                .expect("binds every dense weight this architecture's forward program needs");
 
         // 12 tensors total: embed_tokens, 2 norms, 4 attention projections,
         // 3 ffn projections, final_norm, lm_head -- every one bound as an
         // owned f32 buffer here since none of this fixture's tensors are
         // 4-byte-misaligned within the written buffer.
-        assert_eq!(bound.owned.len() + bound.packed.len(), 12, "every named weight must bind, none silently skipped");
+        assert_eq!(
+            bound.owned.len() + bound.packed.len(),
+            12,
+            "every named weight must bind, none silently skipped"
+        );
 
         // Every stored key must be the forward program's own GGUF-convention
         // node name, NEVER the HF on-disk name this checkpoint's manifest
@@ -704,13 +785,24 @@ mod tests {
             .map(|(name, _)| name.as_str())
             .chain(bound.packed.iter().map(|(name, _)| name.as_str()))
             .collect();
-        for expected in ["token_embd.weight", "blk.0.attn_norm.weight", "blk.0.ffn_norm.weight", "output_norm.weight", "output.weight"] {
+        for expected in [
+            "token_embd.weight",
+            "blk.0.attn_norm.weight",
+            "blk.0.ffn_norm.weight",
+            "output_norm.weight",
+            "output.weight",
+        ] {
             assert!(
                 stored_names.contains(&expected),
                 "expected the GGUF-convention node name {expected:?} among stored keys {stored_names:?}"
             );
         }
-        for hf_name in ["model.embed_tokens.weight", "model.layers.0.input_layernorm.weight", "model.norm.weight", "lm_head.weight"] {
+        for hf_name in [
+            "model.embed_tokens.weight",
+            "model.layers.0.input_layernorm.weight",
+            "model.norm.weight",
+            "lm_head.weight",
+        ] {
             assert!(
                 !stored_names.contains(&hf_name),
                 "the HF on-disk name {hf_name:?} must never be the STORED key -- only the lookup key"
@@ -733,8 +825,13 @@ mod tests {
         let architecture = tiny_dense_architecture();
         let vocab = architecture.vocab as usize;
         let embedding = architecture.embedding as usize;
-        let values: Vec<half::bf16> = (0..vocab * embedding).map(|index| half::bf16::from_f32(index as f32 * 0.5)).collect();
-        let bytes: Vec<u8> = values.iter().flat_map(|value| value.to_le_bytes()).collect();
+        let values: Vec<half::bf16> = (0..vocab * embedding)
+            .map(|index| half::bf16::from_f32(index as f32 * 0.5))
+            .collect();
+        let bytes: Vec<u8> = values
+            .iter()
+            .flat_map(|value| value.to_le_bytes())
+            .collect();
         let tensors = vec![TensorPayload {
             name: names::embed_tokens(),
             dtype: DType::BFloat16,
@@ -746,7 +843,8 @@ mod tests {
             metadata: alloc::collections::BTreeMap::new(),
         })
         .expect("writes a real bf16 safetensors buffer");
-        let manifest = proxima_safetensors::parse_complete(&file_bytes).expect("parses real safetensors buffer");
+        let manifest = proxima_safetensors::parse_complete(&file_bytes)
+            .expect("parses real safetensors buffer");
         let data_start = header_data_start(&file_bytes);
 
         let mut state = BoundWeights {
@@ -755,11 +853,26 @@ mod tests {
             packed: Vec::new(),
             packed_owned: Vec::new(),
         };
-        hf_bind_dense(&manifest, &file_bytes, data_start, names::embed_tokens(), node_names::token_embd(), &mut state)
-            .expect("binds the real bf16 embedding table");
+        hf_bind_dense(
+            &manifest,
+            &file_bytes,
+            data_start,
+            names::embed_tokens(),
+            node_names::token_embd(),
+            &mut state,
+        )
+        .expect("binds the real bf16 embedding table");
 
-        assert_eq!(state.owned.len(), 1, "the bf16 embedding table must decode to an OWNED f32 buffer");
-        assert_eq!(state.packed.len(), 0, "the bf16 embedding table must NEVER bind packed -- gather cannot read it there");
+        assert_eq!(
+            state.owned.len(),
+            1,
+            "the bf16 embedding table must decode to an OWNED f32 buffer"
+        );
+        assert_eq!(
+            state.packed.len(),
+            0,
+            "the bf16 embedding table must NEVER bind packed -- gather cannot read it there"
+        );
         assert_eq!(state.owned[0].0, "token_embd.weight");
         assert_eq!(state.owned[0].1.len(), vocab * embedding);
         // real-value check, not just shape: the first decoded element must
@@ -814,21 +927,37 @@ mod tests {
             metadata: alloc::collections::BTreeMap::new(),
         })
         .expect("writes a real safetensors buffer with no lm_head.weight tensor");
-        let manifest = proxima_safetensors::parse_complete(&file_bytes).expect("parses real safetensors buffer");
+        let manifest = proxima_safetensors::parse_complete(&file_bytes)
+            .expect("parses real safetensors buffer");
         let data_start = header_data_start(&file_bytes);
 
         let bound = bind_all_weights_from_safetensors(&manifest, &file_bytes, data_start, &architecture)
             .expect("a tied checkpoint must bind output.weight from embed_tokens, not error looking for lm_head.weight");
 
-        let stored_names: alloc::vec::Vec<&str> =
-            bound.owned.iter().map(|(name, _)| name.as_str()).chain(bound.packed.iter().map(|(name, _)| name.as_str())).collect();
-        assert!(stored_names.contains(&"output.weight"), "output.weight must still be bound: {stored_names:?}");
+        let stored_names: alloc::vec::Vec<&str> = bound
+            .owned
+            .iter()
+            .map(|(name, _)| name.as_str())
+            .chain(bound.packed.iter().map(|(name, _)| name.as_str()))
+            .collect();
+        assert!(
+            stored_names.contains(&"output.weight"),
+            "output.weight must still be bound: {stored_names:?}"
+        );
         // 12 STORED entries, same as the untied fixture: 11 on-disk tensors,
         // but `embed_tokens` is read TWICE -- once for `token_embd.weight`,
         // once for `output.weight` -- so the program still gets 12 named
         // inputs even though the checkpoint carries one fewer on-disk tensor.
-        assert_eq!(bound.owned.len() + bound.packed.len(), 12, "embed_tokens binds twice: once as token_embd.weight, once as output.weight");
-        assert_eq!(manifest.tensors.len(), 11, "the checkpoint fixture itself carries 11 on-disk tensors, one fewer than the untied fixture's 12, since lm_head.weight is absent");
+        assert_eq!(
+            bound.owned.len() + bound.packed.len(),
+            12,
+            "embed_tokens binds twice: once as token_embd.weight, once as output.weight"
+        );
+        assert_eq!(
+            manifest.tensors.len(),
+            11,
+            "the checkpoint fixture itself carries 11 on-disk tensors, one fewer than the untied fixture's 12, since lm_head.weight is absent"
+        );
     }
 
     /// The one weight this test perturbs by transposing it wrong would prove
@@ -871,9 +1000,13 @@ mod tests {
                 metadata: alloc::collections::BTreeMap::new(),
             })
             .expect("writes a real safetensors buffer");
-            let manifest = proxima_safetensors::parse_complete(&file_bytes).expect("parses real safetensors buffer");
-            let entry = manifest.tensor(&names::q_proj(0)).expect("q_proj entry present");
-            let data_start = 8 + u64::from_le_bytes(file_bytes[..8].try_into().expect("8-byte length prefix"));
+            let manifest = proxima_safetensors::parse_complete(&file_bytes)
+                .expect("parses real safetensors buffer");
+            let entry = manifest
+                .tensor(&names::q_proj(0))
+                .expect("q_proj entry present");
+            let data_start =
+                8 + u64::from_le_bytes(file_bytes[..8].try_into().expect("8-byte length prefix"));
             let absolute_offset = data_start + entry.data_offsets.0;
             if absolute_offset.is_multiple_of(4) {
                 continue; // still aligned with this padding length; try the next one
@@ -902,7 +1035,9 @@ mod tests {
             );
             return;
         }
-        panic!("could not construct a misaligned f32 tensor offset with padding in 0..4 -- test setup bug");
+        panic!(
+            "could not construct a misaligned f32 tensor offset with padding in 0..4 -- test setup bug"
+        );
     }
 
     /// The decisive proof for this file's own fix: a raw-packed `F32`
@@ -1001,7 +1136,11 @@ mod tests {
             state.packed.is_empty(),
             "an F32 matmul weight must never take the raw-packed path -- nothing downstream corrects its layout"
         );
-        assert_eq!(state.owned.len(), 1, "the F32 matmul weight must land in the transposed owned path");
+        assert_eq!(
+            state.owned.len(),
+            1,
+            "the F32 matmul weight must land in the transposed owned path"
+        );
         let bound_weight = &state.owned[0].1;
 
         // Deliberately NOT symmetric around zero (`index - 2.5` sums to
@@ -1037,8 +1176,20 @@ mod tests {
                 dtype: proxima_tensor::dtype::DType::Float32,
                 body: proxima_tensor::op::ScalarOp::Multiply,
                 operands: alloc::vec![
-                    (activation_node, proxima_tensor::map::IndexMap::Affine(proxima_tensor::map::projection(2, &[1]))),
-                    (weight_node, proxima_tensor::map::IndexMap::Affine(proxima_tensor::map::projection(2, &[1, 0]))),
+                    (
+                        activation_node,
+                        proxima_tensor::map::IndexMap::Affine(proxima_tensor::map::projection(
+                            2,
+                            &[1]
+                        ))
+                    ),
+                    (
+                        weight_node,
+                        proxima_tensor::map::IndexMap::Affine(proxima_tensor::map::projection(
+                            2,
+                            &[1, 0]
+                        ))
+                    ),
                 ],
                 name: None,
             },
@@ -1050,8 +1201,14 @@ mod tests {
                 body: proxima_tensor::op::ScalarOp::Add,
                 init: proxima_tensor::op::ReduceInit::Zero,
                 operand: product,
-                in_map: proxima_tensor::map::IndexMap::Affine(proxima_tensor::map::projection(2, &[0, 1])),
-                out_map: proxima_tensor::map::IndexMap::Affine(proxima_tensor::map::projection(2, &[0])),
+                in_map: proxima_tensor::map::IndexMap::Affine(proxima_tensor::map::projection(
+                    2,
+                    &[0, 1],
+                )),
+                out_map: proxima_tensor::map::IndexMap::Affine(proxima_tensor::map::projection(
+                    2,
+                    &[0],
+                )),
                 keep: proxima_tensor::op::Keep::Reduce,
                 name: Some("logits".into()),
             }),
@@ -1061,8 +1218,9 @@ mod tests {
             ("activation", QuantizedBlock::Float32(activation.as_slice())),
             ("gate", QuantizedBlock::Float32(bound_weight.as_slice())),
         ];
-        let evaluated = proxima_tensor::cpu::evaluate_quantized_named(&program, &[], &named, &[logits])
-            .expect("evaluate the bound matmul weight through the real interpreter");
+        let evaluated =
+            proxima_tensor::cpu::evaluate_quantized_named(&program, &[], &named, &[logits])
+                .expect("evaluate the bound matmul weight through the real interpreter");
         let ours = evaluated.root();
 
         let mut oracle = vec![0.0f32; out_dim];
@@ -1077,7 +1235,10 @@ mod tests {
         std::println!("raw_packed_f32_matmul ours={ours:?} oracle={oracle:?}");
         for (out_index, (found, wanted)) in ours.iter().zip(&oracle).enumerate() {
             let diff = (found - wanted).abs();
-            assert!(diff < 1e-4, "output {out_index}: found={found} wanted={wanted} diff={diff}");
+            assert!(
+                diff < 1e-4,
+                "output {out_index}: found={found} wanted={wanted} diff={diff}"
+            );
         }
     }
 
@@ -1095,7 +1256,10 @@ mod tests {
         };
 
         assert!(
-            matches!(error, InteropError::HfMoeWeightsUnsupported { expert_count: 8 }),
+            matches!(
+                error,
+                InteropError::HfMoeWeightsUnsupported { expert_count: 8 }
+            ),
             "expected HfMoeWeightsUnsupported{{expert_count: 8}}, got {error:?}"
         );
     }

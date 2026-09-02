@@ -272,7 +272,6 @@ pub mod error_field {
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-    
     use super::*;
 
     #[proxima::test]
@@ -317,7 +316,10 @@ mod tests {
     #[case::statement(b'S', Some(StatementTarget::Statement))]
     #[case::portal(b'P', Some(StatementTarget::Portal))]
     #[case::invalid_x(b'X', None)]
-    async fn statement_target_from_byte(#[case] input: u8, #[case] expected: Option<StatementTarget>) {
+    async fn statement_target_from_byte(
+        #[case] input: u8,
+        #[case] expected: Option<StatementTarget>,
+    ) {
         assert_eq!(StatementTarget::from_byte(input), expected);
     }
 

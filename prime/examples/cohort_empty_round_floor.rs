@@ -163,7 +163,9 @@ fn main() {
 
         let chunk_multipliers: [usize; 3] = [1, members, members * 4];
         for &chunks in &chunk_multipliers {
-            let round = EmptyRound { chunk_count: chunks };
+            let round = EmptyRound {
+                chunk_count: chunks,
+            };
             let stats = time_rounds(&session, &round);
             print_stats("empty", members, chunks, &stats);
             if chunks == 1 {
@@ -173,7 +175,10 @@ fn main() {
         println!("uptime: {}", uptime_line());
     }
 
-    println!("\n-- decode-sized round: one chunk, ~{:.0} ns of arithmetic --", TARGET_CHUNK_WORK_NS);
+    println!(
+        "\n-- decode-sized round: one chunk, ~{:.0} ns of arithmetic --",
+        TARGET_CHUNK_WORK_NS
+    );
     for &members in &MEMBER_COUNTS {
         let config = ThreadCohort::<Infallible>::builder()
             .members(NonZeroUsize::new(members).expect("nonzero"))

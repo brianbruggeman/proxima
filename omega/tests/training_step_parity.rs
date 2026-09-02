@@ -32,21 +32,44 @@ use proxima_autograd::adjoint::differentiate;
 use proxima_autograd::loss::softmax_cross_entropy;
 use proxima_autograd::optimizer::{AdamConfig, AdamOperands, adam_step, step_input};
 use proxima_tensor::test_support::Lcg;
-use proxima_tensor::{DType, Extent, IndexMap, Keep, NodeId, Op, QuantizedBlock, Reduce, ReduceInit, ScalarOp, append, map};
+use proxima_tensor::{
+    DType, Extent, IndexMap, Keep, NodeId, Op, QuantizedBlock, Reduce, ReduceInit, ScalarOp,
+    append, map,
+};
 
 const IN_DIM: usize = 3;
 const HIDDEN_DIM: usize = 4;
 const OUT_DIM: usize = 2;
 
 fn leaf(program: &mut Vec<Op>, name: &str, shape: Vec<Extent>) -> NodeId {
-    append(program, Op::Input { dtype: DType::Float32, shape, name: Some(name.into()) })
+    append(
+        program,
+        Op::Input {
+            dtype: DType::Float32,
+            shape,
+            name: Some(name.into()),
+        },
+    )
 }
 
 fn elementwise(program: &mut Vec<Op>, body: ScalarOp, operands: Vec<(NodeId, IndexMap)>) -> NodeId {
-    append(program, Op::Elementwise { dtype: DType::Float32, body, operands, name: None })
+    append(
+        program,
+        Op::Elementwise {
+            dtype: DType::Float32,
+            body,
+            operands,
+            name: None,
+        },
+    )
 }
 
-fn reduce_add(program: &mut Vec<Op>, operand: NodeId, in_map: IndexMap, out_map: IndexMap) -> NodeId {
+fn reduce_add(
+    program: &mut Vec<Op>,
+    operand: NodeId,
+    in_map: IndexMap,
+    out_map: IndexMap,
+) -> NodeId {
     append(
         program,
         Op::Reduce(Reduce {
@@ -67,13 +90,31 @@ fn identity(rank: u16) -> IndexMap {
 }
 
 fn dense(program: &mut Vec<Op>, x: NodeId, w: NodeId, b: NodeId) -> NodeId {
-    let product = elementwise(program, ScalarOp::Multiply, vec![(w, identity(2)), (x, IndexMap::Affine(map::projection(2, &[0])))]);
-    let matmul = reduce_add(program, product, identity(2), IndexMap::Affine(map::projection(2, &[1])));
-    elementwise(program, ScalarOp::Add, vec![(matmul, identity(1)), (b, identity(1))])
+    let product = elementwise(
+        program,
+        ScalarOp::Multiply,
+        vec![
+            (w, identity(2)),
+            (x, IndexMap::Affine(map::projection(2, &[0]))),
+        ],
+    );
+    let matmul = reduce_add(
+        program,
+        product,
+        identity(2),
+        IndexMap::Affine(map::projection(2, &[1])),
+    );
+    elementwise(
+        program,
+        ScalarOp::Add,
+        vec![(matmul, identity(1)), (b, identity(1))],
+    )
 }
 
 fn counter_pattern(seed: usize, count: usize) -> Vec<f32> {
-    (0..count).map(|index| (((seed + index) * 7 % 13) as f32 - 6.0) / 12.0).collect()
+    (0..count)
+        .map(|index| (((seed + index) * 7 % 13) as f32 - 6.0) / 12.0)
+        .collect()
 }
 
 /// One MLP training step: forward, `differentiate`, then an Adam update for
@@ -94,9 +135,23 @@ fn build_training_step() -> TrainingStep {
     let mut program = Vec::new();
     let x = leaf(&mut program, "x", vec![Extent::Static(IN_DIM as u32)]);
     let y = leaf(&mut program, "y", vec![Extent::Static(OUT_DIM as u32)]);
-    let w1 = leaf(&mut program, "w1", vec![Extent::Static(IN_DIM as u32), Extent::Static(HIDDEN_DIM as u32)]);
+    let w1 = leaf(
+        &mut program,
+        "w1",
+        vec![
+            Extent::Static(IN_DIM as u32),
+            Extent::Static(HIDDEN_DIM as u32),
+        ],
+    );
     let b1 = leaf(&mut program, "b1", vec![Extent::Static(HIDDEN_DIM as u32)]);
-    let w2 = leaf(&mut program, "w2", vec![Extent::Static(HIDDEN_DIM as u32), Extent::Static(OUT_DIM as u32)]);
+    let w2 = leaf(
+        &mut program,
+        "w2",
+        vec![
+            Extent::Static(HIDDEN_DIM as u32),
+            Extent::Static(OUT_DIM as u32),
+        ],
+    );
     let b2 = leaf(&mut program, "b2", vec![Extent::Static(OUT_DIM as u32)]);
 
     let h_pre = dense(&mut program, x, w1, b1);
@@ -105,28 +160,119 @@ fn build_training_step() -> TrainingStep {
     let loss = softmax_cross_entropy(&mut program, DType::Float32, out_pre, y, 1, 0);
 
     let differentiated = differentiate(&program, loss).expect("scalar loss differentiates");
-    let grad_w1 = differentiated.gradient_of_named("w1").expect("w1 feeds the loss");
-    let grad_b1 = differentiated.gradient_of_named("b1").expect("b1 feeds the loss");
-    let grad_w2 = differentiated.gradient_of_named("w2").expect("w2 feeds the loss");
-    let grad_b2 = differentiated.gradient_of_named("b2").expect("b2 feeds the loss");
+    let grad_w1 = differentiated
+        .gradient_of_named("w1")
+        .expect("w1 feeds the loss");
+    let grad_b1 = differentiated
+        .gradient_of_named("b1")
+        .expect("b1 feeds the loss");
+    let grad_w2 = differentiated
+        .gradient_of_named("w2")
+        .expect("w2 feeds the loss");
+    let grad_b2 = differentiated
+        .gradient_of_named("b2")
+        .expect("b2 feeds the loss");
     let mut program = differentiated.program;
 
-    let config = AdamConfig { learning_rate: 0.05, ..AdamConfig::default() };
+    let config = AdamConfig {
+        learning_rate: 0.05,
+        ..AdamConfig::default()
+    };
     let step_node = step_input(&mut program, "step");
 
-    let m_w1 = leaf(&mut program, "m_w1", vec![Extent::Static(IN_DIM as u32), Extent::Static(HIDDEN_DIM as u32)]);
-    let v_w1 = leaf(&mut program, "v_w1", vec![Extent::Static(IN_DIM as u32), Extent::Static(HIDDEN_DIM as u32)]);
-    let m_b1 = leaf(&mut program, "m_b1", vec![Extent::Static(HIDDEN_DIM as u32)]);
-    let v_b1 = leaf(&mut program, "v_b1", vec![Extent::Static(HIDDEN_DIM as u32)]);
-    let m_w2 = leaf(&mut program, "m_w2", vec![Extent::Static(HIDDEN_DIM as u32), Extent::Static(OUT_DIM as u32)]);
-    let v_w2 = leaf(&mut program, "v_w2", vec![Extent::Static(HIDDEN_DIM as u32), Extent::Static(OUT_DIM as u32)]);
+    let m_w1 = leaf(
+        &mut program,
+        "m_w1",
+        vec![
+            Extent::Static(IN_DIM as u32),
+            Extent::Static(HIDDEN_DIM as u32),
+        ],
+    );
+    let v_w1 = leaf(
+        &mut program,
+        "v_w1",
+        vec![
+            Extent::Static(IN_DIM as u32),
+            Extent::Static(HIDDEN_DIM as u32),
+        ],
+    );
+    let m_b1 = leaf(
+        &mut program,
+        "m_b1",
+        vec![Extent::Static(HIDDEN_DIM as u32)],
+    );
+    let v_b1 = leaf(
+        &mut program,
+        "v_b1",
+        vec![Extent::Static(HIDDEN_DIM as u32)],
+    );
+    let m_w2 = leaf(
+        &mut program,
+        "m_w2",
+        vec![
+            Extent::Static(HIDDEN_DIM as u32),
+            Extent::Static(OUT_DIM as u32),
+        ],
+    );
+    let v_w2 = leaf(
+        &mut program,
+        "v_w2",
+        vec![
+            Extent::Static(HIDDEN_DIM as u32),
+            Extent::Static(OUT_DIM as u32),
+        ],
+    );
     let m_b2 = leaf(&mut program, "m_b2", vec![Extent::Static(OUT_DIM as u32)]);
     let v_b2 = leaf(&mut program, "v_b2", vec![Extent::Static(OUT_DIM as u32)]);
 
-    let (new_w1, new_m_w1, new_v_w1) = adam_step(&mut program, &config, 2, AdamOperands { param: w1, grad: grad_w1, m: m_w1, v: v_w1 }, step_node);
-    let (new_b1, new_m_b1, new_v_b1) = adam_step(&mut program, &config, 1, AdamOperands { param: b1, grad: grad_b1, m: m_b1, v: v_b1 }, step_node);
-    let (new_w2, new_m_w2, new_v_w2) = adam_step(&mut program, &config, 2, AdamOperands { param: w2, grad: grad_w2, m: m_w2, v: v_w2 }, step_node);
-    let (new_b2, new_m_b2, new_v_b2) = adam_step(&mut program, &config, 1, AdamOperands { param: b2, grad: grad_b2, m: m_b2, v: v_b2 }, step_node);
+    let (new_w1, new_m_w1, new_v_w1) = adam_step(
+        &mut program,
+        &config,
+        2,
+        AdamOperands {
+            param: w1,
+            grad: grad_w1,
+            m: m_w1,
+            v: v_w1,
+        },
+        step_node,
+    );
+    let (new_b1, new_m_b1, new_v_b1) = adam_step(
+        &mut program,
+        &config,
+        1,
+        AdamOperands {
+            param: b1,
+            grad: grad_b1,
+            m: m_b1,
+            v: v_b1,
+        },
+        step_node,
+    );
+    let (new_w2, new_m_w2, new_v_w2) = adam_step(
+        &mut program,
+        &config,
+        2,
+        AdamOperands {
+            param: w2,
+            grad: grad_w2,
+            m: m_w2,
+            v: v_w2,
+        },
+        step_node,
+    );
+    let (new_b2, new_m_b2, new_v_b2) = adam_step(
+        &mut program,
+        &config,
+        1,
+        AdamOperands {
+            param: b2,
+            grad: grad_b2,
+            m: m_b2,
+            v: v_b2,
+        },
+        step_node,
+    );
 
     let rebind = vec![
         (new_w1, "w1"),
@@ -143,7 +289,11 @@ fn build_training_step() -> TrainingStep {
         (new_v_b2, "v_b2"),
     ];
 
-    TrainingStep { program, loss, rebind }
+    TrainingStep {
+        program,
+        loss,
+        rebind,
+    }
 }
 
 fn initial_state() -> BTreeMap<String, Vec<f32>> {
@@ -164,7 +314,10 @@ fn initial_state() -> BTreeMap<String, Vec<f32>> {
 }
 
 fn as_named_blocks(owned: &[(String, Vec<f32>)]) -> Vec<(&str, QuantizedBlock<'_>)> {
-    owned.iter().map(|(name, data)| (name.as_str(), QuantizedBlock::Float32(data.as_slice()))).collect()
+    owned
+        .iter()
+        .map(|(name, data)| (name.as_str(), QuantizedBlock::Float32(data.as_slice())))
+        .collect()
 }
 
 fn outputs_of(step: &TrainingStep) -> Vec<NodeId> {
@@ -173,7 +326,11 @@ fn outputs_of(step: &TrainingStep) -> Vec<NodeId> {
 
 /// Runs one training step on `backend` and returns `(new_param, new_m,
 /// new_v)` for every output node, in `step.rebind`'s order.
-fn run_one_step(backend: Backend, step: &TrainingStep, batch: &[(String, Vec<f32>)]) -> Vec<Vec<f32>> {
+fn run_one_step(
+    backend: Backend,
+    step: &TrainingStep,
+    batch: &[(String, Vec<f32>)],
+) -> Vec<Vec<f32>> {
     let named_blocks = as_named_blocks(batch);
     let outputs = outputs_of(step);
     let mut plan = plan_named(backend, &step.program, &[], &named_blocks, &outputs)
@@ -182,7 +339,13 @@ fn run_one_step(backend: Backend, step: &TrainingStep, batch: &[(String, Vec<f32
         .unwrap_or_else(|error| panic!("{} executes the training step: {error}", backend.name()));
     outputs
         .iter()
-        .map(|node| evaluated.get(*node).unwrap_or_else(|| panic!("{} produced no output for {node:?}", backend.name())).0.to_vec())
+        .map(|node| {
+            evaluated
+                .get(*node)
+                .unwrap_or_else(|| panic!("{} produced no output for {node:?}", backend.name()))
+                .0
+                .to_vec()
+        })
         .collect()
 }
 
@@ -200,17 +363,31 @@ fn one_step_batch() -> Vec<(String, Vec<f32>)> {
 }
 
 fn assert_parity(backend_name: &str, cpu: &[Vec<f32>], gpu: &[Vec<f32>], tolerance: f32) {
-    assert_eq!(cpu.len(), gpu.len(), "{backend_name}: output count mismatch");
+    assert_eq!(
+        cpu.len(),
+        gpu.len(),
+        "{backend_name}: output count mismatch"
+    );
     let mut worst_diff = 0.0f32;
     for (cpu_values, gpu_values) in cpu.iter().zip(gpu.iter()) {
-        assert_eq!(cpu_values.len(), gpu_values.len(), "{backend_name}: buffer length mismatch");
+        assert_eq!(
+            cpu_values.len(),
+            gpu_values.len(),
+            "{backend_name}: buffer length mismatch"
+        );
         for (&want, &got) in cpu_values.iter().zip(gpu_values.iter()) {
-            assert!(got.is_finite(), "{backend_name} produced a non-finite value: {got}");
+            assert!(
+                got.is_finite(),
+                "{backend_name} produced a non-finite value: {got}"
+            );
             worst_diff = worst_diff.max((want - got).abs());
         }
     }
     eprintln!("{backend_name} training-step parity: worst_diff={worst_diff} tolerance={tolerance}");
-    assert!(worst_diff < tolerance, "{backend_name} disagrees with cpu on the training step: worst_diff={worst_diff} tolerance={tolerance}");
+    assert!(
+        worst_diff < tolerance,
+        "{backend_name} disagrees with cpu on the training step: worst_diff={worst_diff} tolerance={tolerance}"
+    );
 }
 
 /// Proves the entire forward + backward + Adam-step graph
@@ -274,9 +451,11 @@ fn a_graph_past_the_adapter_storage_buffer_limit_is_a_named_error_on_wgpu() {
             name: Some("probe".into()),
         }];
         let probe_data = vec![0.0f32];
-        let probe_named: Vec<(&str, QuantizedBlock<'_>)> = vec![("probe", QuantizedBlock::Float32(&probe_data))];
-        let probe_plan = omega::wgpu_driver::plan_named(&probe_program, &[], &probe_named, &[NodeId(0)])
-            .expect("a single-input identity program plans on wgpu");
+        let probe_named: Vec<(&str, QuantizedBlock<'_>)> =
+            vec![("probe", QuantizedBlock::Float32(&probe_data))];
+        let probe_plan =
+            omega::wgpu_driver::plan_named(&probe_program, &[], &probe_named, &[NodeId(0)])
+                .expect("a single-input identity program plans on wgpu");
         probe_plan.limits().max_storage_buffers_per_shader_stage
     };
     // 1 output + 1 uniforms binding are always present, so this many leaf
@@ -287,22 +466,51 @@ fn a_graph_past_the_adapter_storage_buffer_limit_is_a_named_error_on_wgpu() {
     let mut program = Vec::new();
     let identity = IndexMap::Affine(map::projection(1, &[0]));
     let addends: Vec<NodeId> = (0..addend_count)
-        .map(|index| leaf(&mut program, &format!("addend{index}"), vec![Extent::Static(1)]))
+        .map(|index| {
+            leaf(
+                &mut program,
+                &format!("addend{index}"),
+                vec![Extent::Static(1)],
+            )
+        })
         .collect();
     let sum = addends
         .iter()
         .skip(1)
-        .fold(addends[0], |accumulator, addend| elementwise(&mut program, ScalarOp::Add, vec![(accumulator, identity.clone()), (*addend, identity.clone())]));
+        .fold(addends[0], |accumulator, addend| {
+            elementwise(
+                &mut program,
+                ScalarOp::Add,
+                vec![(accumulator, identity.clone()), (*addend, identity.clone())],
+            )
+        });
 
-    let owned: Vec<(String, Vec<f32>)> = addends.iter().enumerate().map(|(index, _)| (format!("addend{index}"), vec![1.0f32])).collect();
+    let owned: Vec<(String, Vec<f32>)> = addends
+        .iter()
+        .enumerate()
+        .map(|(index, _)| (format!("addend{index}"), vec![1.0f32]))
+        .collect();
     let named_blocks = as_named_blocks(&owned);
 
-    let mut plan = plan_named(Backend::Wgpu, &program, &[], &named_blocks, &[sum]).expect("this program plans (limit is checked at dispatch, not plan)");
-    let error = execute_plan_named(&mut plan, &named_blocks).expect_err("a graph past the adapter's storage-buffer limit is a named error, not a panic");
+    let mut plan = plan_named(Backend::Wgpu, &program, &[], &named_blocks, &[sum])
+        .expect("this program plans (limit is checked at dispatch, not plan)");
+    let error = execute_plan_named(&mut plan, &named_blocks).expect_err(
+        "a graph past the adapter's storage-buffer limit is a named error, not a panic",
+    );
     match error {
-        omega::backend::BackendError::Wgpu(WgpuError::TooManyStorageBuffers { needed, limit, .. }) => {
-            assert_eq!(limit, device_limit, "the named error reports this device's actual limit");
-            assert!(needed > limit, "needed ({needed}) must exceed limit ({limit}) for this to be the right error");
+        omega::backend::BackendError::Wgpu(WgpuError::TooManyStorageBuffers {
+            needed,
+            limit,
+            ..
+        }) => {
+            assert_eq!(
+                limit, device_limit,
+                "the named error reports this device's actual limit"
+            );
+            assert!(
+                needed > limit,
+                "needed ({needed}) must exceed limit ({limit}) for this to be the right error"
+            );
         }
         other => panic!("expected WgpuError::TooManyStorageBuffers, got {other:?}"),
     }
@@ -320,7 +528,12 @@ fn run_multi_step_on(backend: Backend) -> Vec<f32> {
     let mut outputs = outputs_of(&step);
     outputs.push(step.loss);
 
-    let examples: [[f32; IN_DIM]; 4] = [[1.0, 0.5, 0.2], [-1.0, -0.5, 0.3], [0.8, -0.2, 0.1], [-0.3, 0.1, 0.9]];
+    let examples: [[f32; IN_DIM]; 4] = [
+        [1.0, 0.5, 0.2],
+        [-1.0, -0.5, 0.3],
+        [0.8, -0.2, 0.1],
+        [-0.3, 0.1, 0.9],
+    ];
     let labels: [[f32; OUT_DIM]; 4] = [[0.0, 1.0], [1.0, 0.0], [0.0, 1.0], [1.0, 0.0]];
 
     let mut state = initial_state();
@@ -333,19 +546,36 @@ fn run_multi_step_on(backend: Backend) -> Vec<f32> {
         state.insert("y".into(), labels[batch_index].to_vec());
         state.insert("step".into(), vec![f32::from(step_number as u16)]);
 
-        let owned: Vec<(String, Vec<f32>)> = state.iter().map(|(name, data)| (name.clone(), data.clone())).collect();
+        let owned: Vec<(String, Vec<f32>)> = state
+            .iter()
+            .map(|(name, data)| (name.clone(), data.clone()))
+            .collect();
         let named_blocks = as_named_blocks(&owned);
 
         let mut plan = plan_named(backend, &step.program, &[], &named_blocks, &outputs)
-            .unwrap_or_else(|error| panic!("{} plans training step {step_number}: {error}", backend.name()));
-        let evaluated = execute_plan_named(&mut plan, &named_blocks)
-            .unwrap_or_else(|error| panic!("{} executes training step {step_number}: {error}", backend.name()));
+            .unwrap_or_else(|error| {
+                panic!(
+                    "{} plans training step {step_number}: {error}",
+                    backend.name()
+                )
+            });
+        let evaluated = execute_plan_named(&mut plan, &named_blocks).unwrap_or_else(|error| {
+            panic!(
+                "{} executes training step {step_number}: {error}",
+                backend.name()
+            )
+        });
 
-        let step_loss = evaluated.get(step.loss).unwrap_or_else(|| panic!("{} produced no loss output", backend.name())).0[0];
+        let step_loss = evaluated
+            .get(step.loss)
+            .unwrap_or_else(|| panic!("{} produced no loss output", backend.name()))
+            .0[0];
         loss_curve.push(step_loss);
 
         for (node, name) in &step.rebind {
-            let (data, _shape) = evaluated.get(*node).unwrap_or_else(|| panic!("{} produced no output for {node:?}", backend.name()));
+            let (data, _shape) = evaluated
+                .get(*node)
+                .unwrap_or_else(|| panic!("{} produced no output for {node:?}", backend.name()));
             state.insert((*name).into(), data.to_vec());
         }
     }
@@ -358,7 +588,10 @@ fn run_multi_step_on(backend: Backend) -> Vec<f32> {
 fn ten_training_steps_rebind_state_and_the_loss_drops_on_metal() {
     let loss_curve = run_multi_step_on(Backend::Metal);
     eprintln!("metal multi-step loss curve: {loss_curve:?}");
-    assert!(loss_curve.iter().all(|value| value.is_finite()), "loss went non-finite on metal: {loss_curve:?}");
+    assert!(
+        loss_curve.iter().all(|value| value.is_finite()),
+        "loss went non-finite on metal: {loss_curve:?}"
+    );
     assert!(
         loss_curve.last().expect("at least one step ran") < &loss_curve[0],
         "expected the loss to drop across 10 rebound steps on metal, got {loss_curve:?}"
@@ -374,7 +607,10 @@ fn ten_training_steps_rebind_state_and_the_loss_drops_on_metal() {
 fn ten_training_steps_rebind_state_and_the_loss_drops_on_wgpu() {
     let loss_curve = run_multi_step_on(Backend::Wgpu);
     eprintln!("wgpu multi-step loss curve: {loss_curve:?}");
-    assert!(loss_curve.iter().all(|value| value.is_finite()), "loss went non-finite on wgpu: {loss_curve:?}");
+    assert!(
+        loss_curve.iter().all(|value| value.is_finite()),
+        "loss went non-finite on wgpu: {loss_curve:?}"
+    );
     assert!(
         loss_curve.last().expect("at least one step ran") < &loss_curve[0],
         "expected the loss to drop across 10 rebound steps on wgpu, got {loss_curve:?}"

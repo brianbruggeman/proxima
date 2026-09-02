@@ -42,7 +42,10 @@ pub fn dedupe_and_sum_rows(
     row_len: usize,
 ) -> Result<(Vec<u32>, Vec<f32>), AutogradError> {
     if row_len == 0 || values.len() != indices.len() * row_len {
-        return Err(AutogradError::SparseRowLengthMismatch { row_len, found: values.len() });
+        return Err(AutogradError::SparseRowLengthMismatch {
+            row_len,
+            found: values.len(),
+        });
     }
 
     let mut slot_of: BTreeMap<u32, usize> = BTreeMap::new();
@@ -93,7 +96,11 @@ mod tests {
         let (unique_ids, summed) =
             dedupe_and_sum_rows(&indices, &values, 1).expect("row_len divides evenly");
 
-        assert_eq!(unique_ids, vec![0, 2, 1], "first-seen order of distinct ids");
+        assert_eq!(
+            unique_ids,
+            vec![0, 2, 1],
+            "first-seen order of distinct ids"
+        );
         assert_eq!(
             summed,
             vec![40.0, 20.0, 40.0],
@@ -122,7 +129,10 @@ mod tests {
 
         assert_eq!(
             outcome,
-            Err(AutogradError::SparseRowLengthMismatch { row_len: 2, found: 3 }),
+            Err(AutogradError::SparseRowLengthMismatch {
+                row_len: 2,
+                found: 3
+            }),
             "3 values do not divide evenly into 2 rows of length 2"
         );
     }

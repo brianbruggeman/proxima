@@ -35,8 +35,7 @@ const PL011_CAPACITY: usize = 65_536;
 // at all, the cheapest possible answer to the SMP-IPI wall this probe's own
 // bootargs line names) precede the always-present earlycon/console/panic
 // trio the M5/M5b investigations already anchored.
-const BOOTARGS: &str =
-    "nosmp nr_cpus=1 earlycon=pl011,mmio32,0x9000000 console=ttyAMA0 panic=-1";
+const BOOTARGS: &str = "nosmp nr_cpus=1 earlycon=pl011,mmio32,0x9000000 console=ttyAMA0 panic=-1";
 
 fn main() -> Result<(), Box<dyn Error>> {
     let mut arguments = env::args().skip(1);

@@ -58,7 +58,12 @@ use crate::expr;
 #[derive(Debug, Clone, Copy, PartialEq)]
 #[cfg_attr(
     feature = "config",
-    derive(bon::Builder, serde::Serialize, serde::Deserialize, conflaguration::Settings)
+    derive(
+        bon::Builder,
+        serde::Serialize,
+        serde::Deserialize,
+        conflaguration::Settings
+    )
 )]
 #[cfg_attr(feature = "config", settings(prefix = "AUTOGRAD_ADAM"))]
 #[cfg_attr(feature = "config", builder(derive(Clone, Debug)))]
@@ -132,7 +137,12 @@ pub fn adam_step(
     operands: AdamOperands,
     step: NodeId,
 ) -> (NodeId, NodeId, NodeId) {
-    let AdamOperands { param, grad, m: m_prev, v: v_prev } = operands;
+    let AdamOperands {
+        param,
+        grad,
+        m: m_prev,
+        v: v_prev,
+    } = operands;
     let full = expr::identity(rank);
     let scalar = expr::broadcast(rank);
     let dtype = DType::Float32;
@@ -142,7 +152,13 @@ pub fn adam_step(
     let beta2 = expr::constant(program, dtype, config.beta2);
     let one_minus_beta2 = expr::constant(program, dtype, 1.0 - config.beta2);
 
-    let m_scaled = expr::binary(program, dtype, ScalarOp::Multiply, (beta1, scalar.clone()), (m_prev, full.clone()));
+    let m_scaled = expr::binary(
+        program,
+        dtype,
+        ScalarOp::Multiply,
+        (beta1, scalar.clone()),
+        (m_prev, full.clone()),
+    );
     let grad_scaled = expr::binary(
         program,
         dtype,
@@ -150,10 +166,28 @@ pub fn adam_step(
         (one_minus_beta1, scalar.clone()),
         (grad, full.clone()),
     );
-    let m_new = expr::binary(program, dtype, ScalarOp::Add, (m_scaled, full.clone()), (grad_scaled, full.clone()));
+    let m_new = expr::binary(
+        program,
+        dtype,
+        ScalarOp::Add,
+        (m_scaled, full.clone()),
+        (grad_scaled, full.clone()),
+    );
 
-    let grad_sq = expr::binary(program, dtype, ScalarOp::Multiply, (grad, full.clone()), (grad, full.clone()));
-    let v_scaled = expr::binary(program, dtype, ScalarOp::Multiply, (beta2, scalar.clone()), (v_prev, full.clone()));
+    let grad_sq = expr::binary(
+        program,
+        dtype,
+        ScalarOp::Multiply,
+        (grad, full.clone()),
+        (grad, full.clone()),
+    );
+    let v_scaled = expr::binary(
+        program,
+        dtype,
+        ScalarOp::Multiply,
+        (beta2, scalar.clone()),
+        (v_prev, full.clone()),
+    );
     let grad_sq_scaled = expr::binary(
         program,
         dtype,
@@ -161,27 +195,84 @@ pub fn adam_step(
         (one_minus_beta2, scalar.clone()),
         (grad_sq, full.clone()),
     );
-    let v_new = expr::binary(program, dtype, ScalarOp::Add, (v_scaled, full.clone()), (grad_sq_scaled, full.clone()));
+    let v_new = expr::binary(
+        program,
+        dtype,
+        ScalarOp::Add,
+        (v_scaled, full.clone()),
+        (grad_sq_scaled, full.clone()),
+    );
 
     let bias1_denominator = bias_correction(program, step, libm::logf(config.beta1));
     let bias2_denominator = bias_correction(program, step, libm::logf(config.beta2));
     let zeroth = expr::identity(0);
 
-    let recip_bias1 = expr::unary(program, dtype, ScalarOp::Reciprocal, (bias1_denominator, zeroth.clone()));
-    let m_hat = expr::binary(program, dtype, ScalarOp::Multiply, (m_new, full.clone()), (recip_bias1, scalar.clone()));
+    let recip_bias1 = expr::unary(
+        program,
+        dtype,
+        ScalarOp::Reciprocal,
+        (bias1_denominator, zeroth.clone()),
+    );
+    let m_hat = expr::binary(
+        program,
+        dtype,
+        ScalarOp::Multiply,
+        (m_new, full.clone()),
+        (recip_bias1, scalar.clone()),
+    );
 
-    let recip_bias2 = expr::unary(program, dtype, ScalarOp::Reciprocal, (bias2_denominator, zeroth));
-    let v_hat = expr::binary(program, dtype, ScalarOp::Multiply, (v_new, full.clone()), (recip_bias2, scalar.clone()));
+    let recip_bias2 = expr::unary(
+        program,
+        dtype,
+        ScalarOp::Reciprocal,
+        (bias2_denominator, zeroth),
+    );
+    let v_hat = expr::binary(
+        program,
+        dtype,
+        ScalarOp::Multiply,
+        (v_new, full.clone()),
+        (recip_bias2, scalar.clone()),
+    );
 
     let sqrt_v_hat = expr::unary(program, dtype, ScalarOp::SquareRoot, (v_hat, full.clone()));
     let epsilon = expr::constant(program, dtype, config.epsilon);
-    let denominator = expr::binary(program, dtype, ScalarOp::Add, (sqrt_v_hat, full.clone()), (epsilon, scalar.clone()));
-    let recip_denominator = expr::unary(program, dtype, ScalarOp::Reciprocal, (denominator, full.clone()));
-    let update = expr::binary(program, dtype, ScalarOp::Multiply, (m_hat, full.clone()), (recip_denominator, full.clone()));
+    let denominator = expr::binary(
+        program,
+        dtype,
+        ScalarOp::Add,
+        (sqrt_v_hat, full.clone()),
+        (epsilon, scalar.clone()),
+    );
+    let recip_denominator = expr::unary(
+        program,
+        dtype,
+        ScalarOp::Reciprocal,
+        (denominator, full.clone()),
+    );
+    let update = expr::binary(
+        program,
+        dtype,
+        ScalarOp::Multiply,
+        (m_hat, full.clone()),
+        (recip_denominator, full.clone()),
+    );
 
     let learning_rate = expr::constant(program, dtype, config.learning_rate);
-    let scaled_update = expr::binary(program, dtype, ScalarOp::Multiply, (learning_rate, scalar), (update, full.clone()));
-    let new_param = expr::binary(program, dtype, ScalarOp::Subtract, (param, full.clone()), (scaled_update, full));
+    let scaled_update = expr::binary(
+        program,
+        dtype,
+        ScalarOp::Multiply,
+        (learning_rate, scalar),
+        (update, full.clone()),
+    );
+    let new_param = expr::binary(
+        program,
+        dtype,
+        ScalarOp::Subtract,
+        (param, full.clone()),
+        (scaled_update, full),
+    );
 
     (new_param, m_new, v_new)
 }
@@ -201,9 +292,20 @@ fn bias_correction(program: &mut Vec<Op>, step: NodeId, ln_beta: f32) -> NodeId 
         (step, zeroth.clone()),
         (ln_beta_constant, zeroth.clone()),
     );
-    let beta_pow_step = expr::unary(program, dtype, ScalarOp::Exponential, (exponent, zeroth.clone()));
+    let beta_pow_step = expr::unary(
+        program,
+        dtype,
+        ScalarOp::Exponential,
+        (exponent, zeroth.clone()),
+    );
     let one = expr::constant(program, dtype, 1.0);
-    expr::binary(program, dtype, ScalarOp::Subtract, (one, zeroth.clone()), (beta_pow_step, zeroth))
+    expr::binary(
+        program,
+        dtype,
+        ScalarOp::Subtract,
+        (one, zeroth.clone()),
+        (beta_pow_step, zeroth),
+    )
 }
 
 /// [`adam_step`] wearing this workspace's uniform `Pipe` shape — see this
@@ -226,7 +328,12 @@ impl AdamStep {
     /// already be an `Op::Input` in it (see [`step_input`]).
     #[must_use]
     pub fn new(program: Vec<Op>, config: AdamConfig, rank: u16, step: NodeId) -> Self {
-        Self { program: RefCell::new(program), config, rank, step }
+        Self {
+            program: RefCell::new(program),
+            config,
+            rank,
+            step,
+        }
     }
 
     /// Hands the accumulated program back to the caller once every
@@ -249,7 +356,13 @@ impl Pipe for AdamStep {
     fn call(&self, operands: Self::In) -> impl Future<Output = Result<Self::Out, Infallible>> {
         async move {
             let mut program = self.program.borrow_mut();
-            Ok(adam_step(&mut program, &self.config, self.rank, operands, self.step))
+            Ok(adam_step(
+                &mut program,
+                &self.config,
+                self.rank,
+                operands,
+                self.step,
+            ))
         }
     }
 }
@@ -259,7 +372,12 @@ impl Pipe for AdamStep {
 #[derive(Debug, Clone, Copy, PartialEq)]
 #[cfg_attr(
     feature = "config",
-    derive(bon::Builder, serde::Serialize, serde::Deserialize, conflaguration::Settings)
+    derive(
+        bon::Builder,
+        serde::Serialize,
+        serde::Deserialize,
+        conflaguration::Settings
+    )
 )]
 #[cfg_attr(feature = "config", settings(prefix = "AUTOGRAD_SGD"))]
 #[cfg_attr(feature = "config", builder(derive(Clone, Debug)))]
@@ -271,7 +389,9 @@ pub struct SgdConfig {
 
 impl Default for SgdConfig {
     fn default() -> Self {
-        Self { learning_rate: 0.01 }
+        Self {
+            learning_rate: 0.01,
+        }
     }
 }
 
@@ -280,14 +400,32 @@ impl Default for SgdConfig {
 /// smallest possible instance of this module's "elementwise expression, not
 /// a method on anything" shape (this module's own doc).
 #[must_use]
-pub fn sgd_step(program: &mut Vec<Op>, config: &SgdConfig, rank: u16, param: NodeId, grad: NodeId) -> NodeId {
+pub fn sgd_step(
+    program: &mut Vec<Op>,
+    config: &SgdConfig,
+    rank: u16,
+    param: NodeId,
+    grad: NodeId,
+) -> NodeId {
     let full = expr::identity(rank);
     let scalar = expr::broadcast(rank);
     let dtype = DType::Float32;
 
     let learning_rate = expr::constant(program, dtype, config.learning_rate);
-    let scaled_grad = expr::binary(program, dtype, ScalarOp::Multiply, (learning_rate, scalar), (grad, full.clone()));
-    expr::binary(program, dtype, ScalarOp::Subtract, (param, full.clone()), (scaled_grad, full))
+    let scaled_grad = expr::binary(
+        program,
+        dtype,
+        ScalarOp::Multiply,
+        (learning_rate, scalar),
+        (grad, full.clone()),
+    );
+    expr::binary(
+        program,
+        dtype,
+        ScalarOp::Subtract,
+        (param, full.clone()),
+        (scaled_grad, full),
+    )
 }
 
 /// [`sgd_step`] wearing this workspace's uniform `Pipe` shape — see
@@ -305,7 +443,11 @@ pub struct SgdStep {
 impl SgdStep {
     #[must_use]
     pub fn new(program: Vec<Op>, config: SgdConfig, rank: u16) -> Self {
-        Self { program: RefCell::new(program), config, rank }
+        Self {
+            program: RefCell::new(program),
+            config,
+            rank,
+        }
     }
 
     #[must_use]
@@ -331,7 +473,12 @@ impl Pipe for SgdStep {
 #[derive(Debug, Clone, Copy, PartialEq)]
 #[cfg_attr(
     feature = "config",
-    derive(bon::Builder, serde::Serialize, serde::Deserialize, conflaguration::Settings)
+    derive(
+        bon::Builder,
+        serde::Serialize,
+        serde::Deserialize,
+        conflaguration::Settings
+    )
 )]
 #[cfg_attr(feature = "config", settings(prefix = "AUTOGRAD_RMSPROP"))]
 #[cfg_attr(feature = "config", builder(derive(Clone, Debug)))]
@@ -349,7 +496,11 @@ pub struct RmspropConfig {
 
 impl Default for RmspropConfig {
     fn default() -> Self {
-        Self { learning_rate: 0.001, decay: 0.9, epsilon: 1e-8 }
+        Self {
+            learning_rate: 0.001,
+            decay: 0.9,
+            epsilon: 1e-8,
+        }
     }
 }
 
@@ -374,8 +525,20 @@ pub fn rmsprop_step(
     let decay = expr::constant(program, dtype, config.decay);
     let one_minus_decay = expr::constant(program, dtype, 1.0 - config.decay);
 
-    let grad_sq = expr::binary(program, dtype, ScalarOp::Multiply, (grad, full.clone()), (grad, full.clone()));
-    let v_scaled = expr::binary(program, dtype, ScalarOp::Multiply, (decay, scalar.clone()), (v_prev, full.clone()));
+    let grad_sq = expr::binary(
+        program,
+        dtype,
+        ScalarOp::Multiply,
+        (grad, full.clone()),
+        (grad, full.clone()),
+    );
+    let v_scaled = expr::binary(
+        program,
+        dtype,
+        ScalarOp::Multiply,
+        (decay, scalar.clone()),
+        (v_prev, full.clone()),
+    );
     let grad_sq_scaled = expr::binary(
         program,
         dtype,
@@ -383,17 +546,52 @@ pub fn rmsprop_step(
         (one_minus_decay, scalar.clone()),
         (grad_sq, full.clone()),
     );
-    let v_new = expr::binary(program, dtype, ScalarOp::Add, (v_scaled, full.clone()), (grad_sq_scaled, full.clone()));
+    let v_new = expr::binary(
+        program,
+        dtype,
+        ScalarOp::Add,
+        (v_scaled, full.clone()),
+        (grad_sq_scaled, full.clone()),
+    );
 
     let sqrt_v = expr::unary(program, dtype, ScalarOp::SquareRoot, (v_new, full.clone()));
     let epsilon = expr::constant(program, dtype, config.epsilon);
-    let denominator = expr::binary(program, dtype, ScalarOp::Add, (sqrt_v, full.clone()), (epsilon, scalar.clone()));
-    let recip_denominator = expr::unary(program, dtype, ScalarOp::Reciprocal, (denominator, full.clone()));
-    let update = expr::binary(program, dtype, ScalarOp::Multiply, (grad, full.clone()), (recip_denominator, full.clone()));
+    let denominator = expr::binary(
+        program,
+        dtype,
+        ScalarOp::Add,
+        (sqrt_v, full.clone()),
+        (epsilon, scalar.clone()),
+    );
+    let recip_denominator = expr::unary(
+        program,
+        dtype,
+        ScalarOp::Reciprocal,
+        (denominator, full.clone()),
+    );
+    let update = expr::binary(
+        program,
+        dtype,
+        ScalarOp::Multiply,
+        (grad, full.clone()),
+        (recip_denominator, full.clone()),
+    );
 
     let learning_rate = expr::constant(program, dtype, config.learning_rate);
-    let scaled_update = expr::binary(program, dtype, ScalarOp::Multiply, (learning_rate, scalar), (update, full.clone()));
-    let new_param = expr::binary(program, dtype, ScalarOp::Subtract, (param, full.clone()), (scaled_update, full));
+    let scaled_update = expr::binary(
+        program,
+        dtype,
+        ScalarOp::Multiply,
+        (learning_rate, scalar),
+        (update, full.clone()),
+    );
+    let new_param = expr::binary(
+        program,
+        dtype,
+        ScalarOp::Subtract,
+        (param, full.clone()),
+        (scaled_update, full),
+    );
 
     (new_param, v_new)
 }
@@ -410,7 +608,11 @@ pub struct RmspropStep {
 impl RmspropStep {
     #[must_use]
     pub fn new(program: Vec<Op>, config: RmspropConfig, rank: u16) -> Self {
-        Self { program: RefCell::new(program), config, rank }
+        Self {
+            program: RefCell::new(program),
+            config,
+            rank,
+        }
     }
 
     #[must_use]
@@ -424,10 +626,20 @@ impl Pipe for RmspropStep {
     type Out = (NodeId, NodeId);
     type Err = Infallible;
 
-    fn call(&self, (param, grad, v_prev): Self::In) -> impl Future<Output = Result<Self::Out, Infallible>> {
+    fn call(
+        &self,
+        (param, grad, v_prev): Self::In,
+    ) -> impl Future<Output = Result<Self::Out, Infallible>> {
         async move {
             let mut program = self.program.borrow_mut();
-            Ok(rmsprop_step(&mut program, &self.config, self.rank, param, grad, v_prev))
+            Ok(rmsprop_step(
+                &mut program,
+                &self.config,
+                self.rank,
+                param,
+                grad,
+                v_prev,
+            ))
         }
     }
 }
@@ -437,7 +649,12 @@ impl Pipe for RmspropStep {
 #[derive(Debug, Clone, Copy, PartialEq)]
 #[cfg_attr(
     feature = "config",
-    derive(bon::Builder, serde::Serialize, serde::Deserialize, conflaguration::Settings)
+    derive(
+        bon::Builder,
+        serde::Serialize,
+        serde::Deserialize,
+        conflaguration::Settings
+    )
 )]
 #[cfg_attr(feature = "config", settings(prefix = "AUTOGRAD_ADAMW"))]
 #[cfg_attr(feature = "config", builder(derive(Clone, Debug)))]
@@ -455,7 +672,13 @@ pub struct AdamwConfig {
 
 impl Default for AdamwConfig {
     fn default() -> Self {
-        Self { learning_rate: 0.001, beta1: 0.9, beta2: 0.999, epsilon: 1e-8, weight_decay: 0.01 }
+        Self {
+            learning_rate: 0.001,
+            beta1: 0.9,
+            beta2: 0.999,
+            epsilon: 1e-8,
+            weight_decay: 0.01,
+        }
     }
 }
 
@@ -475,7 +698,12 @@ pub fn adamw_step(
     operands: AdamOperands,
     step: NodeId,
 ) -> (NodeId, NodeId, NodeId) {
-    let AdamOperands { param, grad, m: m_prev, v: v_prev } = operands;
+    let AdamOperands {
+        param,
+        grad,
+        m: m_prev,
+        v: v_prev,
+    } = operands;
     let full = expr::identity(rank);
     let scalar = expr::broadcast(rank);
     let dtype = DType::Float32;
@@ -485,7 +713,13 @@ pub fn adamw_step(
     let beta2 = expr::constant(program, dtype, config.beta2);
     let one_minus_beta2 = expr::constant(program, dtype, 1.0 - config.beta2);
 
-    let m_scaled = expr::binary(program, dtype, ScalarOp::Multiply, (beta1, scalar.clone()), (m_prev, full.clone()));
+    let m_scaled = expr::binary(
+        program,
+        dtype,
+        ScalarOp::Multiply,
+        (beta1, scalar.clone()),
+        (m_prev, full.clone()),
+    );
     let grad_scaled = expr::binary(
         program,
         dtype,
@@ -493,10 +727,28 @@ pub fn adamw_step(
         (one_minus_beta1, scalar.clone()),
         (grad, full.clone()),
     );
-    let m_new = expr::binary(program, dtype, ScalarOp::Add, (m_scaled, full.clone()), (grad_scaled, full.clone()));
+    let m_new = expr::binary(
+        program,
+        dtype,
+        ScalarOp::Add,
+        (m_scaled, full.clone()),
+        (grad_scaled, full.clone()),
+    );
 
-    let grad_sq = expr::binary(program, dtype, ScalarOp::Multiply, (grad, full.clone()), (grad, full.clone()));
-    let v_scaled = expr::binary(program, dtype, ScalarOp::Multiply, (beta2, scalar.clone()), (v_prev, full.clone()));
+    let grad_sq = expr::binary(
+        program,
+        dtype,
+        ScalarOp::Multiply,
+        (grad, full.clone()),
+        (grad, full.clone()),
+    );
+    let v_scaled = expr::binary(
+        program,
+        dtype,
+        ScalarOp::Multiply,
+        (beta2, scalar.clone()),
+        (v_prev, full.clone()),
+    );
     let grad_sq_scaled = expr::binary(
         program,
         dtype,
@@ -504,31 +756,100 @@ pub fn adamw_step(
         (one_minus_beta2, scalar.clone()),
         (grad_sq, full.clone()),
     );
-    let v_new = expr::binary(program, dtype, ScalarOp::Add, (v_scaled, full.clone()), (grad_sq_scaled, full.clone()));
+    let v_new = expr::binary(
+        program,
+        dtype,
+        ScalarOp::Add,
+        (v_scaled, full.clone()),
+        (grad_sq_scaled, full.clone()),
+    );
 
     let bias1_denominator = bias_correction(program, step, libm::logf(config.beta1));
     let bias2_denominator = bias_correction(program, step, libm::logf(config.beta2));
     let zeroth = expr::identity(0);
 
-    let recip_bias1 = expr::unary(program, dtype, ScalarOp::Reciprocal, (bias1_denominator, zeroth.clone()));
-    let m_hat = expr::binary(program, dtype, ScalarOp::Multiply, (m_new, full.clone()), (recip_bias1, scalar.clone()));
+    let recip_bias1 = expr::unary(
+        program,
+        dtype,
+        ScalarOp::Reciprocal,
+        (bias1_denominator, zeroth.clone()),
+    );
+    let m_hat = expr::binary(
+        program,
+        dtype,
+        ScalarOp::Multiply,
+        (m_new, full.clone()),
+        (recip_bias1, scalar.clone()),
+    );
 
-    let recip_bias2 = expr::unary(program, dtype, ScalarOp::Reciprocal, (bias2_denominator, zeroth));
-    let v_hat = expr::binary(program, dtype, ScalarOp::Multiply, (v_new, full.clone()), (recip_bias2, scalar.clone()));
+    let recip_bias2 = expr::unary(
+        program,
+        dtype,
+        ScalarOp::Reciprocal,
+        (bias2_denominator, zeroth),
+    );
+    let v_hat = expr::binary(
+        program,
+        dtype,
+        ScalarOp::Multiply,
+        (v_new, full.clone()),
+        (recip_bias2, scalar.clone()),
+    );
 
     let sqrt_v_hat = expr::unary(program, dtype, ScalarOp::SquareRoot, (v_hat, full.clone()));
     let epsilon = expr::constant(program, dtype, config.epsilon);
-    let denominator = expr::binary(program, dtype, ScalarOp::Add, (sqrt_v_hat, full.clone()), (epsilon, scalar.clone()));
-    let recip_denominator = expr::unary(program, dtype, ScalarOp::Reciprocal, (denominator, full.clone()));
-    let adaptive_update = expr::binary(program, dtype, ScalarOp::Multiply, (m_hat, full.clone()), (recip_denominator, full.clone()));
+    let denominator = expr::binary(
+        program,
+        dtype,
+        ScalarOp::Add,
+        (sqrt_v_hat, full.clone()),
+        (epsilon, scalar.clone()),
+    );
+    let recip_denominator = expr::unary(
+        program,
+        dtype,
+        ScalarOp::Reciprocal,
+        (denominator, full.clone()),
+    );
+    let adaptive_update = expr::binary(
+        program,
+        dtype,
+        ScalarOp::Multiply,
+        (m_hat, full.clone()),
+        (recip_denominator, full.clone()),
+    );
 
     let weight_decay = expr::constant(program, dtype, config.weight_decay);
-    let decay_term = expr::binary(program, dtype, ScalarOp::Multiply, (weight_decay, scalar.clone()), (param, full.clone()));
-    let update = expr::binary(program, dtype, ScalarOp::Add, (adaptive_update, full.clone()), (decay_term, full.clone()));
+    let decay_term = expr::binary(
+        program,
+        dtype,
+        ScalarOp::Multiply,
+        (weight_decay, scalar.clone()),
+        (param, full.clone()),
+    );
+    let update = expr::binary(
+        program,
+        dtype,
+        ScalarOp::Add,
+        (adaptive_update, full.clone()),
+        (decay_term, full.clone()),
+    );
 
     let learning_rate = expr::constant(program, dtype, config.learning_rate);
-    let scaled_update = expr::binary(program, dtype, ScalarOp::Multiply, (learning_rate, scalar), (update, full.clone()));
-    let new_param = expr::binary(program, dtype, ScalarOp::Subtract, (param, full.clone()), (scaled_update, full));
+    let scaled_update = expr::binary(
+        program,
+        dtype,
+        ScalarOp::Multiply,
+        (learning_rate, scalar),
+        (update, full.clone()),
+    );
+    let new_param = expr::binary(
+        program,
+        dtype,
+        ScalarOp::Subtract,
+        (param, full.clone()),
+        (scaled_update, full),
+    );
 
     (new_param, m_new, v_new)
 }
@@ -548,7 +869,12 @@ pub struct AdamwStep {
 impl AdamwStep {
     #[must_use]
     pub fn new(program: Vec<Op>, config: AdamwConfig, rank: u16, step: NodeId) -> Self {
-        Self { program: RefCell::new(program), config, rank, step }
+        Self {
+            program: RefCell::new(program),
+            config,
+            rank,
+            step,
+        }
     }
 
     #[must_use]
@@ -565,7 +891,13 @@ impl Pipe for AdamwStep {
     fn call(&self, operands: Self::In) -> impl Future<Output = Result<Self::Out, Infallible>> {
         async move {
             let mut program = self.program.borrow_mut();
-            Ok(adamw_step(&mut program, &self.config, self.rank, operands, self.step))
+            Ok(adamw_step(
+                &mut program,
+                &self.config,
+                self.rank,
+                operands,
+                self.step,
+            ))
         }
     }
 }
@@ -600,8 +932,18 @@ mod tests {
         let step = step_input(&mut program, "step");
         let config = AdamConfig::default();
 
-        let (new_param, new_m, new_v) =
-            adam_step(&mut program, &config, 1, AdamOperands { param, grad, m: m_prev, v: v_prev }, step);
+        let (new_param, new_m, new_v) = adam_step(
+            &mut program,
+            &config,
+            1,
+            AdamOperands {
+                param,
+                grad,
+                m: m_prev,
+                v: v_prev,
+            },
+            step,
+        );
 
         let param_values = [1.0f32, -1.0];
         let grad_values = [1.0f32, -1.0];
@@ -632,9 +974,11 @@ mod tests {
         );
 
         let updated_m = evaluated.get(new_m).expect("new_m requested").0;
-        assert!((updated_m[0] - 0.1).abs() < 1e-6, "m = (1-b1)*g, got {updated_m:?}");
+        assert!(
+            (updated_m[0] - 0.1).abs() < 1e-6,
+            "m = (1-b1)*g, got {updated_m:?}"
+        );
     }
-
 
     /// Same reasoning as `adjoint::pipe_tests::block_on_once`: `AdamStep`'s
     /// `RefCell` makes its `Pipe::call` future `!Send` by design (base
@@ -658,7 +1002,12 @@ mod tests {
         let v_prev = leaf(&mut program, "v", 2);
         let step = step_input(&mut program, "step");
         let config = AdamConfig::default();
-        let operands = AdamOperands { param, grad, m: m_prev, v: v_prev };
+        let operands = AdamOperands {
+            param,
+            grad,
+            m: m_prev,
+            v: v_prev,
+        };
 
         let mut via_function_program = program.clone();
         let via_function = adam_step(&mut via_function_program, &config, 1, operands, step);
@@ -667,7 +1016,10 @@ mod tests {
         let via_pipe = block_on_once(pipe.call(operands)).expect("adam_step never fails");
         let via_pipe_program = pipe.finish();
 
-        assert_eq!(via_pipe, via_function, "the Pipe wrapper must append the exact same nodes");
+        assert_eq!(
+            via_pipe, via_function,
+            "the Pipe wrapper must append the exact same nodes"
+        );
         assert_eq!(
             via_pipe_program, via_function_program,
             "the Pipe wrapper must grow the shared program identically to the free function"
@@ -730,16 +1082,29 @@ mod tests {
         let evaluated = proxima_tensor::cpu::evaluate_named(
             &program,
             &[],
-            &[("param", &param_values), ("grad", &grad_values), ("v", &zero)],
+            &[
+                ("param", &param_values),
+                ("grad", &grad_values),
+                ("v", &zero),
+            ],
             &[new_param, new_v],
         )
         .expect("rmsprop program lowers and evaluates");
         let updated_param = evaluated.get(new_param).expect("new_param requested").0;
         let updated_v = evaluated.get(new_v).expect("new_v requested").0;
 
-        assert!((updated_param[0] - 0.996_837_7).abs() < 1e-5, "got {updated_param:?}");
-        assert!((updated_param[1] - (-0.996_837_7)).abs() < 1e-5, "got {updated_param:?}");
-        assert!((updated_v[0] - 0.1).abs() < 1e-6, "v = (1-decay)*g^2, got {updated_v:?}");
+        assert!(
+            (updated_param[0] - 0.996_837_7).abs() < 1e-5,
+            "got {updated_param:?}"
+        );
+        assert!(
+            (updated_param[1] - (-0.996_837_7)).abs() < 1e-5,
+            "got {updated_param:?}"
+        );
+        assert!(
+            (updated_v[0] - 0.1).abs() < 1e-6,
+            "v = (1-decay)*g^2, got {updated_v:?}"
+        );
     }
 
     #[test]
@@ -754,7 +1119,8 @@ mod tests {
         let via_function = rmsprop_step(&mut via_function_program, &config, 1, param, grad, v_prev);
 
         let pipe = RmspropStep::new(program, config, 1);
-        let via_pipe = block_on_once(pipe.call((param, grad, v_prev))).expect("rmsprop_step never fails");
+        let via_pipe =
+            block_on_once(pipe.call((param, grad, v_prev))).expect("rmsprop_step never fails");
         let via_pipe_program = pipe.finish();
 
         assert_eq!(via_pipe, via_function);
@@ -770,7 +1136,12 @@ mod tests {
         let v_prev = leaf(&mut program, "v", 2);
         let step = step_input(&mut program, "step");
         let config = AdamwConfig::default();
-        let operands = AdamOperands { param, grad, m: m_prev, v: v_prev };
+        let operands = AdamOperands {
+            param,
+            grad,
+            m: m_prev,
+            v: v_prev,
+        };
         let (new_param, new_m, new_v) = adamw_step(&mut program, &config, 1, operands, step);
 
         let param_values = [1.0f32, -1.0];
@@ -795,8 +1166,14 @@ mod tests {
         // hand-computed: m_hat=[1,-1], v_hat=[1,1], adaptive_update~=[1,-1],
         // decay_term=weight_decay*param=[0.01,-0.01], update=[1.01,-1.01],
         // new_param = param - lr*update = [1-0.00101, -1+0.00101]
-        assert!((updated_param[0] - 0.998_99).abs() < 1e-4, "got {updated_param:?}");
-        assert!((updated_param[1] - (-0.998_99)).abs() < 1e-4, "got {updated_param:?}");
+        assert!(
+            (updated_param[0] - 0.998_99).abs() < 1e-4,
+            "got {updated_param:?}"
+        );
+        assert!(
+            (updated_param[1] - (-0.998_99)).abs() < 1e-4,
+            "got {updated_param:?}"
+        );
     }
 
     #[test]
@@ -808,7 +1185,12 @@ mod tests {
         let v_prev = leaf(&mut program, "v", 2);
         let step = step_input(&mut program, "step");
         let config = AdamwConfig::default();
-        let operands = AdamOperands { param, grad, m: m_prev, v: v_prev };
+        let operands = AdamOperands {
+            param,
+            grad,
+            m: m_prev,
+            v: v_prev,
+        };
 
         let mut via_function_program = program.clone();
         let via_function = adamw_step(&mut via_function_program, &config, 1, operands, step);

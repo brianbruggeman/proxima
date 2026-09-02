@@ -69,7 +69,8 @@ unsafe impl GlobalAlloc for CountingAllocator {
 #[global_allocator]
 static ALLOCATOR: CountingAllocator = CountingAllocator;
 
-const MODEL_PATH: &str = "/Users/brianbruggeman/repos/others/burn/examples/onnx-inference/src/model/mnist.onnx";
+const MODEL_PATH: &str =
+    "/Users/brianbruggeman/repos/others/burn/examples/onnx-inference/src/model/mnist.onnx";
 const DATASET_DIR: &str = "/Users/brianbruggeman/.cache/burn-dataset/mnist";
 const IMAGE_COUNT: usize = 120;
 
@@ -95,7 +96,12 @@ fn idx_header(bytes: &[u8]) -> (usize, Vec<usize>) {
     let mut extents = Vec::with_capacity(dimension_count - 1);
     for axis in 1..dimension_count {
         let offset = 4 + axis * 4;
-        extents.push(u32::from_be_bytes([bytes[offset], bytes[offset + 1], bytes[offset + 2], bytes[offset + 3]]) as usize);
+        extents.push(u32::from_be_bytes([
+            bytes[offset],
+            bytes[offset + 1],
+            bytes[offset + 2],
+            bytes[offset + 3],
+        ]) as usize);
     }
     (item_count, extents)
 }
@@ -109,7 +115,10 @@ fn load_normalized_images(path: &Path, limit: usize) -> Vec<Vec<f32>> {
     (0..take)
         .map(|image_index| {
             let start = header_length + image_index * pixel_count;
-            bytes[start..start + pixel_count].iter().map(|&pixel| ((pixel as f32 / 255.0) - 0.1307) / 0.3081).collect()
+            bytes[start..start + pixel_count]
+                .iter()
+                .map(|&pixel| ((pixel as f32 / 255.0) - 0.1307) / 0.3081)
+                .collect()
         })
         .collect()
 }
@@ -133,21 +142,40 @@ fn fused_eval_loop_allocation_count_over_100_plus_images() {
     }
 
     let bytes = fs::read(MODEL_PATH).expect("read the real mnist.onnx checkpoint");
-    let model = proxima_onnx::pipe::parse_complete(&bytes).expect("parse the real mnist.onnx checkpoint");
+    let model =
+        proxima_onnx::pipe::parse_complete(&bytes).expect("parse the real mnist.onnx checkpoint");
     let graph = model.graph.as_ref().expect("real mnist model has a graph");
-    let lowered = proxima_onnx::lower::lower_graph(graph).expect("lower the real mnist.onnx graph to Op");
+    let lowered =
+        proxima_onnx::lower::lower_graph(graph).expect("lower the real mnist.onnx graph to Op");
 
-    let graph_input_name = lowered.graph_inputs.first().expect("real mnist model declares at least one input").clone();
-    let output_node = lowered.graph_outputs.first().expect("real mnist model declares at least one output").1;
-    let initializers: Vec<(&str, &[f32])> = lowered.initializers.iter().map(|(name, data)| (name.as_str(), data.as_slice())).collect();
+    let graph_input_name = lowered
+        .graph_inputs
+        .first()
+        .expect("real mnist model declares at least one input")
+        .clone();
+    let output_node = lowered
+        .graph_outputs
+        .first()
+        .expect("real mnist model declares at least one output")
+        .1;
+    let initializers: Vec<(&str, &[f32])> = lowered
+        .initializers
+        .iter()
+        .map(|(name, data)| (name.as_str(), data.as_slice()))
+        .collect();
 
     let images = load_normalized_images(&test_images_path(), IMAGE_COUNT);
-    assert!(images.len() >= IMAGE_COUNT, "expected at least {IMAGE_COUNT} real test images, got {}", images.len());
+    assert!(
+        images.len() >= IMAGE_COUNT,
+        "expected at least {IMAGE_COUNT} real test images, got {}",
+        images.len()
+    );
 
     let evaluate = |image: &[f32]| {
         let mut named = initializers.clone();
         named.push((graph_input_name.as_str(), image));
-        proxima_tensor::cpu::evaluate_named(&lowered.program, &[], &named, &[output_node]).expect("evaluate real mnist image")
+        proxima_tensor::cpu::evaluate_named(&lowered.program, &[], &named, &[output_node])
+            .expect("evaluate real mnist image")
     };
 
     // warm-up: uncounted, primes any first-call-only setup.
@@ -164,7 +192,10 @@ fn fused_eval_loop_allocation_count_over_100_plus_images() {
     let total_allocations = count_after - count_before;
     let per_image = total_allocations as f64 / images.len() as f64;
 
-    eprintln!("epilogue_fuse_alloc: images={} total_allocations={total_allocations} per_image={per_image:.4}", images.len());
+    eprintln!(
+        "epilogue_fuse_alloc: images={} total_allocations={total_allocations} per_image={per_image:.4}",
+        images.len()
+    );
 
     let (hits, elements, nanos) = proxima_tensor::cpu::epilogue_fuse_totals();
     eprintln!(
@@ -172,5 +203,8 @@ fn fused_eval_loop_allocation_count_over_100_plus_images() {
         hits as f64 / images.len() as f64,
         elements as f64 / images.len() as f64
     );
-    assert!(hits > 0, "epilogue fusion must actually fire on the real mnist model (N==0 tripwire)");
+    assert!(
+        hits > 0,
+        "epilogue fusion must actually fire on the real mnist model (N==0 tripwire)"
+    );
 }

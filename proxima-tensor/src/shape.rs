@@ -529,7 +529,9 @@ fn scatter_output_shape(
                 return Ok(extent);
             }
             match axis.terms.as_slice() {
-                [term] if term.coeff == 1 && axis.offset == 0 => Ok(iter_extents[term.axis as usize]),
+                [term] if term.coeff == 1 && axis.offset == 0 => {
+                    Ok(iter_extents[term.axis as usize])
+                }
                 _ => Err(TensorError::NotLowerable {
                     node: here,
                     reason: "a scatter output map's non-scattered axes must be pure projections",
@@ -1209,7 +1211,9 @@ mod tests {
     #[test]
     fn a_scatter_as_a_keep_scan_is_rejected() {
         let (mut program, _) = scatter_program(3);
-        let last = program.pop().expect("scatter_program pushes at least one reduce");
+        let last = program
+            .pop()
+            .expect("scatter_program pushes at least one reduce");
         let Op::Reduce(mut reduce) = last else {
             panic!("scatter_program's last op is a Reduce");
         };
@@ -1223,15 +1227,17 @@ mod tests {
     #[test]
     fn a_scatter_with_first_element_init_is_rejected() {
         let (mut program, _) = scatter_program(3);
-        let last = program.pop().expect("scatter_program pushes at least one reduce");
+        let last = program
+            .pop()
+            .expect("scatter_program pushes at least one reduce");
         let Op::Reduce(mut reduce) = last else {
             panic!("scatter_program's last op is a Reduce");
         };
         reduce.init = ReduceInit::FirstElement;
         append(&mut program, Op::Reduce(reduce));
 
-        let error =
-            infer(&program, &[]).expect_err("which source is \"first\" at a collision is undefined");
+        let error = infer(&program, &[])
+            .expect_err("which source is \"first\" at a collision is undefined");
         assert!(matches!(error, TensorError::NotLowerable { .. }), "{error}");
     }
 
@@ -1289,7 +1295,10 @@ mod tests {
 
         let fused_map = IndexMap::Affine(map::affine(
             2,
-            &[(&[AxisTerm::projection(0)], 0), (&[AxisTerm::scaled(1, 1)], 8)],
+            &[
+                (&[AxisTerm::projection(0)], 0),
+                (&[AxisTerm::scaled(1, 1)], 8),
+            ],
         ));
         let donor_map = IndexMap::Affine(map::projection(2, &[0, 1]));
         let sliced = append(
@@ -1327,7 +1336,10 @@ mod tests {
         // on-disk width of 12.
         let fused_map = IndexMap::Affine(map::affine(
             2,
-            &[(&[AxisTerm::projection(0)], 0), (&[AxisTerm::scaled(1, 1)], 9)],
+            &[
+                (&[AxisTerm::projection(0)], 0),
+                (&[AxisTerm::scaled(1, 1)], 9),
+            ],
         ));
         let donor_map = IndexMap::Affine(map::projection(2, &[0, 1]));
         append(
@@ -1340,8 +1352,12 @@ mod tests {
             },
         );
 
-        let error = infer(&program, &[]).expect_err("a slice window past the buffer end is rejected");
-        assert!(matches!(error, TensorError::IndexOutOfBounds { .. }), "{error}");
+        let error =
+            infer(&program, &[]).expect_err("a slice window past the buffer end is rejected");
+        assert!(
+            matches!(error, TensorError::IndexOutOfBounds { .. }),
+            "{error}"
+        );
     }
 
     /// The residual limitation `unify_iteration_space` cannot lift from
@@ -1372,9 +1388,13 @@ mod tests {
             },
         );
 
-        let error = infer(&program, &[])
-            .expect_err("an offset-0 slice narrower than its operand cannot be told apart from a full read");
-        assert!(matches!(error, TensorError::ExtentMismatch { .. }), "{error}");
+        let error = infer(&program, &[]).expect_err(
+            "an offset-0 slice narrower than its operand cannot be told apart from a full read",
+        );
+        assert!(
+            matches!(error, TensorError::ExtentMismatch { .. }),
+            "{error}"
+        );
     }
 
     /// Row 131's own question -- "is this a precedence rule rather than a
@@ -1467,10 +1487,7 @@ mod tests {
             &mut program,
             Op::Constant {
                 dtype: DType::Float32,
-                shape: alloc::vec![
-                    Extent::Static(chunk_extent),
-                    Extent::Static(chunk_width)
-                ],
+                shape: alloc::vec![Extent::Static(chunk_extent), Extent::Static(chunk_width)],
                 value: 0.0,
             },
         );
@@ -1528,7 +1545,11 @@ mod tests {
         let at = |row: u32, chunk: u32, within: u32| {
             data[((row * chunk_extent + chunk) * chunk_width + within) as usize]
         };
-        assert_eq!(at(0, 0, 0), 0.0, "chunk 0 (offset 0) reads fused's first column");
+        assert_eq!(
+            at(0, 0, 0),
+            0.0,
+            "chunk 0 (offset 0) reads fused's first column"
+        );
         assert_eq!(
             at(0, 1, 0),
             2048.0,
@@ -1582,9 +1603,8 @@ mod tests {
 
         let fused_data: Vec<f32> = (0..2 * 6144).map(|index| index as f32).collect();
         let donor_data = alloc::vec![0.0f32; 2 * 2048];
-        let evaluated =
-            crate::cpu::evaluate(&program, &[], &[&fused_data, &donor_data], &[sliced])
-                .expect("a nonzero-offset slice with a donor evaluates");
+        let evaluated = crate::cpu::evaluate(&program, &[], &[&fused_data, &donor_data], &[sliced])
+            .expect("a nonzero-offset slice with a donor evaluates");
         let (data, shape) = evaluated.get(sliced).expect("sliced is a requested output");
 
         assert_eq!(shape, &[2, 2048]);

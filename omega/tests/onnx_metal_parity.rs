@@ -27,7 +27,10 @@ use proxima_onnx::pipe::parse_complete;
 use proxima_tensor::QuantizedBlock;
 
 fn f32_bytes(values: &[f32]) -> Vec<u8> {
-    values.iter().flat_map(|value| value.to_le_bytes()).collect()
+    values
+        .iter()
+        .flat_map(|value| value.to_le_bytes())
+        .collect()
 }
 
 /// LEB128 varint, same wire encoding `proxima_protocols::protobuf_wire`'s
@@ -152,7 +155,13 @@ fn build_node(fixture: &NodeFixture<'_>) -> Vec<u8> {
     buf
 }
 
-fn build_graph(nodes: &[Vec<u8>], name: &str, initializers: &[Vec<u8>], inputs: &[Vec<u8>], outputs: &[Vec<u8>]) -> Vec<u8> {
+fn build_graph(
+    nodes: &[Vec<u8>],
+    name: &str,
+    initializers: &[Vec<u8>],
+    inputs: &[Vec<u8>],
+    outputs: &[Vec<u8>],
+) -> Vec<u8> {
     let mut buf = Vec::new();
     for node in nodes {
         push_len(1, node, &mut buf);
@@ -175,7 +184,9 @@ fn build_graph(nodes: &[Vec<u8>], name: &str, initializers: &[Vec<u8>], inputs: 
 /// the lowered program.
 fn two_layer_mlp_model_bytes() -> (Vec<u8>, [f32; 6]) {
     let x_data: [f32; 6] = [1.0, 0.5, -1.0, 0.0, 2.0, 1.0];
-    let w1_data: [f32; 12] = [0.1, 0.2, -0.1, 0.05, 0.3, -0.2, 0.4, 0.1, -0.5, 0.1, 0.2, -0.3];
+    let w1_data: [f32; 12] = [
+        0.1, 0.2, -0.1, 0.05, 0.3, -0.2, 0.4, 0.1, -0.5, 0.1, 0.2, -0.3,
+    ];
     let b1_data: [f32; 4] = [0.1, -0.1, 0.05, 0.0];
     let w2_data: [f32; 8] = [0.2, -0.3, 0.1, 0.4, -0.2, 0.05, 0.3, 0.1];
     let b2_data: [f32; 2] = [0.0, 0.1];
@@ -185,14 +196,48 @@ fn two_layer_mlp_model_bytes() -> (Vec<u8>, [f32; 6]) {
     let x_input = build_value_info("x", &x_type);
     let y_output = build_value_info("y", &[]);
 
-    let w1_tensor = build_tensor(&TensorFixture { dims: &[3, 4], name: "W1", raw_data: &f32_bytes(&w1_data) });
-    let b1_tensor = build_tensor(&TensorFixture { dims: &[4], name: "b1", raw_data: &f32_bytes(&b1_data) });
-    let w2_tensor = build_tensor(&TensorFixture { dims: &[4, 2], name: "W2", raw_data: &f32_bytes(&w2_data) });
-    let b2_tensor = build_tensor(&TensorFixture { dims: &[2], name: "b2", raw_data: &f32_bytes(&b2_data) });
+    let w1_tensor = build_tensor(&TensorFixture {
+        dims: &[3, 4],
+        name: "W1",
+        raw_data: &f32_bytes(&w1_data),
+    });
+    let b1_tensor = build_tensor(&TensorFixture {
+        dims: &[4],
+        name: "b1",
+        raw_data: &f32_bytes(&b1_data),
+    });
+    let w2_tensor = build_tensor(&TensorFixture {
+        dims: &[4, 2],
+        name: "W2",
+        raw_data: &f32_bytes(&w2_data),
+    });
+    let b2_tensor = build_tensor(&TensorFixture {
+        dims: &[2],
+        name: "b2",
+        raw_data: &f32_bytes(&b2_data),
+    });
 
-    let gemm1 = build_node(&NodeFixture { input: &["x", "W1", "b1"], output: &["h"], name: "gemm1", op_type: "Gemm", attributes: &[] });
-    let relu = build_node(&NodeFixture { input: &["h"], output: &["hr"], name: "relu", op_type: "Relu", attributes: &[] });
-    let gemm2 = build_node(&NodeFixture { input: &["hr", "W2", "b2"], output: &["logits"], name: "gemm2", op_type: "Gemm", attributes: &[] });
+    let gemm1 = build_node(&NodeFixture {
+        input: &["x", "W1", "b1"],
+        output: &["h"],
+        name: "gemm1",
+        op_type: "Gemm",
+        attributes: &[],
+    });
+    let relu = build_node(&NodeFixture {
+        input: &["h"],
+        output: &["hr"],
+        name: "relu",
+        op_type: "Relu",
+        attributes: &[],
+    });
+    let gemm2 = build_node(&NodeFixture {
+        input: &["hr", "W2", "b2"],
+        output: &["logits"],
+        name: "gemm2",
+        op_type: "Gemm",
+        attributes: &[],
+    });
     let softmax = build_node(&NodeFixture {
         input: &["logits"],
         output: &["y"],
@@ -201,7 +246,13 @@ fn two_layer_mlp_model_bytes() -> (Vec<u8>, [f32; 6]) {
         attributes: &[build_attribute_int("axis", 1)],
     });
 
-    let graph = build_graph(&[gemm1, relu, gemm2, softmax], "mlp", &[w1_tensor, b1_tensor, w2_tensor, b2_tensor], &[x_input], &[y_output]);
+    let graph = build_graph(
+        &[gemm1, relu, gemm2, softmax],
+        "mlp",
+        &[w1_tensor, b1_tensor, w2_tensor, b2_tensor],
+        &[x_input],
+        &[y_output],
+    );
 
     let mut bytes = Vec::new();
     push_varint(1, 8, &mut bytes); // ir_version
@@ -247,7 +298,10 @@ fn an_onnx_lowered_mlp_runs_on_metal_at_cpu_parity_through_the_backend_wrapper()
     let (metal_data, metal_shape) = metal.get(output_node).expect("metal y present");
 
     assert_eq!(cpu_shape, &[2, 2]);
-    assert_eq!(metal_shape, cpu_shape, "metal preserves the cpu-inferred output shape");
+    assert_eq!(
+        metal_shape, cpu_shape,
+        "metal preserves the cpu-inferred output shape"
+    );
     assert_eq!(metal_data.len(), cpu_data.len());
 
     // hand-computed via `bc -l`, same reference `proxima-onnx`'s own
@@ -255,7 +309,10 @@ fn an_onnx_lowered_mlp_runs_on_metal_at_cpu_parity_through_the_backend_wrapper()
     // softmax(relu(x @ W1 + b1) @ W2 + b2).
     let expected = [0.599_888_4_f32, 0.400_111_6, 0.434_749_25, 0.565_250_74];
     for (actual, expected) in metal_data.iter().zip(expected.iter()) {
-        assert!((actual - expected).abs() < 1e-3, "metal softmax output {actual} does not match hand-computed reference {expected}");
+        assert!(
+            (actual - expected).abs() < 1e-3,
+            "metal softmax output {actual} does not match hand-computed reference {expected}"
+        );
     }
 
     // GPU-appropriate tolerance (`metal_parity.rs`'s widened arms use 5e-3
@@ -267,7 +324,10 @@ fn an_onnx_lowered_mlp_runs_on_metal_at_cpu_parity_through_the_backend_wrapper()
         .zip(metal_data.iter())
         .map(|(left, right)| (left - right).abs())
         .fold(0.0f32, f32::max);
-    println!("onnx mlp cpu-vs-metal: {} elements compared, max abs diff = {max_abs_diff:e}", cpu_data.len());
+    println!(
+        "onnx mlp cpu-vs-metal: {} elements compared, max abs diff = {max_abs_diff:e}",
+        cpu_data.len()
+    );
     assert!(
         max_abs_diff <= 1e-3,
         "omega's cpu and metal arms disagree on the onnx-lowered mlp: max_abs_diff={max_abs_diff}"
@@ -275,6 +335,12 @@ fn an_onnx_lowered_mlp_runs_on_metal_at_cpu_parity_through_the_backend_wrapper()
 
     let row0_sum = metal_data[0] + metal_data[1];
     let row1_sum = metal_data[2] + metal_data[3];
-    assert!((row0_sum - 1.0).abs() < 1e-3, "metal softmax row 0 sums to {row0_sum}, not 1.0");
-    assert!((row1_sum - 1.0).abs() < 1e-3, "metal softmax row 1 sums to {row1_sum}, not 1.0");
+    assert!(
+        (row0_sum - 1.0).abs() < 1e-3,
+        "metal softmax row 0 sums to {row0_sum}, not 1.0"
+    );
+    assert!(
+        (row1_sum - 1.0).abs() < 1e-3,
+        "metal softmax row 1 sums to {row1_sum}, not 1.0"
+    );
 }

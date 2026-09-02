@@ -93,8 +93,7 @@ fn log_parked_reclaim(parked: &ParkedResource, cqe_result: i32) {
         ParkedResource::StreamBuffer(buffer) => {
             debug!(
                 bytes = buffer.len(),
-                cqe_result,
-                "kernel confirmed completion, freeing parked stream buffer"
+                cqe_result, "kernel confirmed completion, freeing parked stream buffer"
             );
         }
         ParkedResource::AcceptStorage {

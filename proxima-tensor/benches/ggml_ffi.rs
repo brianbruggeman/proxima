@@ -72,18 +72,39 @@ unsafe extern "C" {
         a: *mut ggml_tensor,
         b: *mut ggml_tensor,
     ) -> *mut ggml_tensor;
-    pub fn ggml_rms_norm(ctx: *mut ggml_context, a: *mut ggml_tensor, eps: f32) -> *mut ggml_tensor;
+    pub fn ggml_rms_norm(ctx: *mut ggml_context, a: *mut ggml_tensor, eps: f32)
+    -> *mut ggml_tensor;
     pub fn ggml_silu(ctx: *mut ggml_context, a: *mut ggml_tensor) -> *mut ggml_tensor;
-    pub fn ggml_add(ctx: *mut ggml_context, a: *mut ggml_tensor, b: *mut ggml_tensor) -> *mut ggml_tensor;
-    pub fn ggml_mul(ctx: *mut ggml_context, a: *mut ggml_tensor, b: *mut ggml_tensor) -> *mut ggml_tensor;
-    pub fn ggml_sub(ctx: *mut ggml_context, a: *mut ggml_tensor, b: *mut ggml_tensor) -> *mut ggml_tensor;
-    pub fn ggml_div(ctx: *mut ggml_context, a: *mut ggml_tensor, b: *mut ggml_tensor) -> *mut ggml_tensor;
+    pub fn ggml_add(
+        ctx: *mut ggml_context,
+        a: *mut ggml_tensor,
+        b: *mut ggml_tensor,
+    ) -> *mut ggml_tensor;
+    pub fn ggml_mul(
+        ctx: *mut ggml_context,
+        a: *mut ggml_tensor,
+        b: *mut ggml_tensor,
+    ) -> *mut ggml_tensor;
+    pub fn ggml_sub(
+        ctx: *mut ggml_context,
+        a: *mut ggml_tensor,
+        b: *mut ggml_tensor,
+    ) -> *mut ggml_tensor;
+    pub fn ggml_div(
+        ctx: *mut ggml_context,
+        a: *mut ggml_tensor,
+        b: *mut ggml_tensor,
+    ) -> *mut ggml_tensor;
     pub fn ggml_sqr(ctx: *mut ggml_context, a: *mut ggml_tensor) -> *mut ggml_tensor;
     pub fn ggml_sqrt(ctx: *mut ggml_context, a: *mut ggml_tensor) -> *mut ggml_tensor;
     pub fn ggml_exp(ctx: *mut ggml_context, a: *mut ggml_tensor) -> *mut ggml_tensor;
     pub fn ggml_neg(ctx: *mut ggml_context, a: *mut ggml_tensor) -> *mut ggml_tensor;
     pub fn ggml_scale(ctx: *mut ggml_context, a: *mut ggml_tensor, s: f32) -> *mut ggml_tensor;
-    pub fn ggml_get_rows(ctx: *mut ggml_context, a: *mut ggml_tensor, b: *mut ggml_tensor) -> *mut ggml_tensor;
+    pub fn ggml_get_rows(
+        ctx: *mut ggml_context,
+        a: *mut ggml_tensor,
+        b: *mut ggml_tensor,
+    ) -> *mut ggml_tensor;
     pub fn ggml_sum_rows(ctx: *mut ggml_context, a: *mut ggml_tensor) -> *mut ggml_tensor;
     pub fn ggml_tanh(ctx: *mut ggml_context, a: *mut ggml_tensor) -> *mut ggml_tensor;
 

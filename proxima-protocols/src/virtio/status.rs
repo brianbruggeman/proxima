@@ -29,7 +29,11 @@ pub enum NegotiationError {
     OutOfOrder { attempted: u8, from: DeviceStatus },
     /// The driver acked a feature bit the device never offered (spec §2.2:
     /// `acked ⊆ offered` is the only legal relation).
-    AckedUnofferedFeatures { offered: u64, acked: u64, unoffered: u64 },
+    AckedUnofferedFeatures {
+        offered: u64,
+        acked: u64,
+        unoffered: u64,
+    },
     /// The device offered `VIRTIO_F_VERSION_1` and the driver's ack did not
     /// include it.
     MissingVersion1 { offered: u64, acked: u64 },
@@ -314,15 +318,12 @@ mod tests {
     #[test]
     fn driver_ok_before_features_ok_is_rejected() {
         let mut negotiation = Negotiation::new();
-        negotiation
-            .write_status(STATUS_ACKNOWLEDGE)
-            .expect("ack");
+        negotiation.write_status(STATUS_ACKNOWLEDGE).expect("ack");
         negotiation
             .write_status(STATUS_ACKNOWLEDGE | STATUS_DRIVER)
             .expect("driver known");
 
-        let attempted =
-            STATUS_ACKNOWLEDGE | STATUS_DRIVER | STATUS_FEATURES_OK | STATUS_DRIVER_OK;
+        let attempted = STATUS_ACKNOWLEDGE | STATUS_DRIVER | STATUS_FEATURES_OK | STATUS_DRIVER_OK;
         assert_eq!(
             negotiation.write_status(attempted).unwrap_err(),
             NegotiationError::OutOfOrder {
@@ -339,9 +340,7 @@ mod tests {
     #[test]
     fn ack_of_unoffered_feature_bit_is_rejected() {
         let mut negotiation = Negotiation::new();
-        negotiation
-            .write_status(STATUS_ACKNOWLEDGE)
-            .expect("ack");
+        negotiation.write_status(STATUS_ACKNOWLEDGE).expect("ack");
         negotiation
             .write_status(STATUS_ACKNOWLEDGE | STATUS_DRIVER)
             .expect("driver known");
@@ -370,9 +369,7 @@ mod tests {
     #[test]
     fn dropping_version_1_from_the_ack_is_rejected() {
         let mut negotiation = Negotiation::new();
-        negotiation
-            .write_status(STATUS_ACKNOWLEDGE)
-            .expect("ack");
+        negotiation.write_status(STATUS_ACKNOWLEDGE).expect("ack");
         negotiation
             .write_status(STATUS_ACKNOWLEDGE | STATUS_DRIVER)
             .expect("driver known");
@@ -395,14 +392,15 @@ mod tests {
     #[test]
     fn reset_is_legal_from_any_state() {
         let mut negotiation = Negotiation::new();
-        negotiation
-            .write_status(STATUS_ACKNOWLEDGE)
-            .expect("ack");
+        negotiation.write_status(STATUS_ACKNOWLEDGE).expect("ack");
         negotiation
             .write_status(STATUS_ACKNOWLEDGE | STATUS_DRIVER)
             .expect("driver known");
 
-        assert_eq!(negotiation.write_status(0).expect("reset"), DeviceStatus::Reset);
+        assert_eq!(
+            negotiation.write_status(0).expect("reset"),
+            DeviceStatus::Reset
+        );
         assert_eq!(negotiation.status(), DeviceStatus::Reset);
     }
 
@@ -412,9 +410,7 @@ mod tests {
     #[test]
     fn failed_bit_layers_onto_the_current_state() {
         let mut negotiation = Negotiation::new();
-        negotiation
-            .write_status(STATUS_ACKNOWLEDGE)
-            .expect("ack");
+        negotiation.write_status(STATUS_ACKNOWLEDGE).expect("ack");
         negotiation
             .write_status(STATUS_ACKNOWLEDGE | STATUS_DRIVER)
             .expect("driver known");
@@ -428,7 +424,10 @@ mod tests {
         );
 
         // reset clears it, matching the driver's only legal recovery path.
-        assert_eq!(negotiation.write_status(0).expect("reset"), DeviceStatus::Reset);
+        assert_eq!(
+            negotiation.write_status(0).expect("reset"),
+            DeviceStatus::Reset
+        );
     }
 
     /// `FAILED` set together with bits that do not match the accumulated
@@ -437,9 +436,7 @@ mod tests {
     #[test]
     fn failed_bit_with_mismatched_lower_bits_is_illegal() {
         let mut negotiation = Negotiation::new();
-        negotiation
-            .write_status(STATUS_ACKNOWLEDGE)
-            .expect("ack");
+        negotiation.write_status(STATUS_ACKNOWLEDGE).expect("ack");
 
         let bogus = STATUS_ACKNOWLEDGE | STATUS_DRIVER_OK | STATUS_FAILED;
         assert_eq!(

@@ -89,7 +89,12 @@ pub type WeightShape = (u64, u64, u64, u64);
 /// (this module builds no padding machinery; see this module's own doc for
 /// why the architecture it targets does not need one).
 #[must_use]
-pub fn conv2d_output_shape(image_shape: ImageShape, weight_shape: WeightShape, stride_h: u64, stride_w: u64) -> Option<ImageShape> {
+pub fn conv2d_output_shape(
+    image_shape: ImageShape,
+    weight_shape: WeightShape,
+    stride_h: u64,
+    stride_w: u64,
+) -> Option<ImageShape> {
     let (batch, in_channels, height, width) = image_shape;
     let (out_channels, weight_in_channels, kernel_h, kernel_w) = weight_shape;
     if weight_in_channels != in_channels || stride_h == 0 || stride_w == 0 {
@@ -131,23 +136,47 @@ pub fn conv2d(
 
     // image axes: n=0, c=1, h=2, w=3 -- window h first (axis 2), reducing it
     // away and landing the two new axes (oy, ky) at the end: [n, c, w, oy, ky].
-    let windowed_h = masked_window_axis(program, dtype, image, 4, 2, height, out_h, kernel_h, stride_h);
+    let windowed_h = masked_window_axis(
+        program, dtype, image, 4, 2, height, out_h, kernel_h, stride_h,
+    );
     // windowed_h axes: n=0, c=1, w=2, oy=3, ky=4 -- window w next (now axis
     // 2), landing [n, c, oy, ky, ox, kx].
-    let windowed = masked_window_axis(program, dtype, windowed_h, 5, 2, width, out_w, kernel_w, stride_w);
+    let windowed = masked_window_axis(
+        program, dtype, windowed_h, 5, 2, width, out_w, kernel_w, stride_w,
+    );
 
     // shared iteration space: 0=n 1=co 2=ci 3=oy 4=ky 5=ox 6=kx
     let windowed_pattern = IndexMap::Affine(map::projection(7, &[0, 2, 3, 4, 5, 6]));
     let weight_pattern = IndexMap::Affine(map::projection(7, &[1, 2, 4, 6]));
-    let product = expr::binary(program, dtype, ScalarOp::Multiply, (windowed, windowed_pattern), (weight, weight_pattern));
+    let product = expr::binary(
+        program,
+        dtype,
+        ScalarOp::Multiply,
+        (windowed, windowed_pattern),
+        (weight, weight_pattern),
+    );
 
     let out_map = IndexMap::Affine(map::projection(7, &[0, 1, 3, 5]));
-    let reduced = expr::reduce(program, dtype, ScalarOp::Add, ReduceInit::Zero, product, expr::identity(7), out_map);
+    let reduced = expr::reduce(
+        program,
+        dtype,
+        ScalarOp::Add,
+        ReduceInit::Zero,
+        product,
+        expr::identity(7),
+        out_map,
+    );
 
     let result = match bias {
         Some(bias) => {
             let bias_pattern = IndexMap::Affine(map::projection(4, &[1]));
-            expr::binary(program, dtype, ScalarOp::Add, (reduced, expr::identity(4)), (bias, bias_pattern))
+            expr::binary(
+                program,
+                dtype,
+                ScalarOp::Add,
+                (reduced, expr::identity(4)),
+                (bias, bias_pattern),
+            )
         }
         None => reduced,
     };
@@ -183,13 +212,36 @@ fn masked_window_axis(
     let mask = window_mask(program, source_extent, out_extent, kernel_extent, stride);
     let source_axes: Vec<u16> = (0..source_rank as u16).collect();
     let source_pattern = IndexMap::Affine(map::projection(widened_rank_u16, &source_axes));
-    let mask_pattern = IndexMap::Affine(map::projection(widened_rank_u16, &[windowed_axis as u16, out_position_axis, kernel_position_axis]));
+    let mask_pattern = IndexMap::Affine(map::projection(
+        widened_rank_u16,
+        &[
+            windowed_axis as u16,
+            out_position_axis,
+            kernel_position_axis,
+        ],
+    ));
 
-    let masked = expr::binary(program, dtype, ScalarOp::Multiply, (source, source_pattern), (mask, mask_pattern));
+    let masked = expr::binary(
+        program,
+        dtype,
+        ScalarOp::Multiply,
+        (source, source_pattern),
+        (mask, mask_pattern),
+    );
 
-    let keep_axes: Vec<u16> = (0..widened_rank_u16).filter(|&axis| axis != windowed_axis as u16).collect();
+    let keep_axes: Vec<u16> = (0..widened_rank_u16)
+        .filter(|&axis| axis != windowed_axis as u16)
+        .collect();
     let out_map = IndexMap::Affine(map::projection(widened_rank_u16, &keep_axes));
-    expr::reduce(program, dtype, ScalarOp::Add, ReduceInit::Zero, masked, expr::identity(widened_rank_u16), out_map)
+    expr::reduce(
+        program,
+        dtype,
+        ScalarOp::Add,
+        ReduceInit::Zero,
+        masked,
+        expr::identity(widened_rank_u16),
+        out_map,
+    )
 }
 
 /// `mask[source_position, out_position, kernel_position] = (source_position
@@ -198,13 +250,43 @@ fn masked_window_axis(
 /// `proxima-onnx/src/lower.rs`'s `scatter_mask_axis` builds for
 /// `ConvTranspose`'s general case, without that function's `pad` term (this
 /// module builds no padding; see this module's own doc).
-fn window_mask(program: &mut Vec<Op>, source_extent: u64, out_extent: u64, kernel_extent: u64, stride: u64) -> NodeId {
-    let source_position = op::append(program, Op::Iota { dtype: DType::Float32, extent: Extent::Static(source_extent as u32) });
-    let out_position = op::append(program, Op::Iota { dtype: DType::Float32, extent: Extent::Static(out_extent as u32) });
-    let kernel_position = op::append(program, Op::Iota { dtype: DType::Float32, extent: Extent::Static(kernel_extent as u32) });
+fn window_mask(
+    program: &mut Vec<Op>,
+    source_extent: u64,
+    out_extent: u64,
+    kernel_extent: u64,
+    stride: u64,
+) -> NodeId {
+    let source_position = op::append(
+        program,
+        Op::Iota {
+            dtype: DType::Float32,
+            extent: Extent::Static(source_extent as u32),
+        },
+    );
+    let out_position = op::append(
+        program,
+        Op::Iota {
+            dtype: DType::Float32,
+            extent: Extent::Static(out_extent as u32),
+        },
+    );
+    let kernel_position = op::append(
+        program,
+        Op::Iota {
+            dtype: DType::Float32,
+            extent: Extent::Static(kernel_extent as u32),
+        },
+    );
 
     let stride_const = expr::constant(program, DType::Float32, stride as f32);
-    let scaled_out = expr::binary(program, DType::Float32, ScalarOp::Multiply, (out_position, expr::identity(1)), (stride_const, expr::broadcast(1)));
+    let scaled_out = expr::binary(
+        program,
+        DType::Float32,
+        ScalarOp::Multiply,
+        (out_position, expr::identity(1)),
+        (stride_const, expr::broadcast(1)),
+    );
     let combined = expr::binary(
         program,
         DType::Float32,
@@ -232,7 +314,14 @@ mod tests {
     use super::*;
 
     fn leaf(program: &mut Vec<Op>, name: &str, shape: Vec<Extent>) -> NodeId {
-        op::append(program, Op::Input { dtype: DType::Float32, shape, name: Some(name.into()) })
+        op::append(
+            program,
+            Op::Input {
+                dtype: DType::Float32,
+                shape,
+                name: Some(name.into()),
+            },
+        )
     }
 
     /// Hand-worked example: a `4x4` single-channel image, a `2x2` kernel,
@@ -255,18 +344,59 @@ mod tests {
         let weight_values: [f32; 4] = [1.0, 0.0, 0.0, -1.0];
 
         let mut program = Vec::new();
-        let image = leaf(&mut program, "image", vec![Extent::Static(1), Extent::Static(1), Extent::Static(4), Extent::Static(4)]);
-        let weight = leaf(&mut program, "weight", vec![Extent::Static(1), Extent::Static(1), Extent::Static(2), Extent::Static(2)]);
-        let out = conv2d(&mut program, DType::Float32, image, (1, 1, 4, 4), weight, (1, 1, 2, 2), None, 1, 1).expect("2x2 kernel fits a 4x4 image at stride 1");
+        let image = leaf(
+            &mut program,
+            "image",
+            vec![
+                Extent::Static(1),
+                Extent::Static(1),
+                Extent::Static(4),
+                Extent::Static(4),
+            ],
+        );
+        let weight = leaf(
+            &mut program,
+            "weight",
+            vec![
+                Extent::Static(1),
+                Extent::Static(1),
+                Extent::Static(2),
+                Extent::Static(2),
+            ],
+        );
+        let out = conv2d(
+            &mut program,
+            DType::Float32,
+            image,
+            (1, 1, 4, 4),
+            weight,
+            (1, 1, 2, 2),
+            None,
+            1,
+            1,
+        )
+        .expect("2x2 kernel fits a 4x4 image at stride 1");
 
-        let evaluated = proxima_tensor::cpu::evaluate_named(&program, &[], &[("image", &image_values), ("weight", &weight_values)], &[out])
-            .expect("conv2d program lowers and evaluates");
+        let evaluated = proxima_tensor::cpu::evaluate_named(
+            &program,
+            &[],
+            &[("image", &image_values), ("weight", &weight_values)],
+            &[out],
+        )
+        .expect("conv2d program lowers and evaluates");
         let (result, shape) = evaluated.get(out).expect("conv output requested");
-        assert_eq!(shape, &vec![1, 1, 3, 3], "a 2x2 kernel over a 4x4 image at stride 1 produces a 3x3 output");
+        assert_eq!(
+            shape,
+            &vec![1, 1, 3, 3],
+            "a 2x2 kernel over a 4x4 image at stride 1 produces a 3x3 output"
+        );
 
         let expected = [-5.0f32, -5.0, -5.0, -5.0, -5.0, -5.0, -5.0, -5.0, -5.0];
         for (position, (&got, &want)) in result.iter().zip(expected.iter()).enumerate() {
-            assert!((got - want).abs() < 1e-6, "position {position}: got {got}, want {want}, full result {result:?}");
+            assert!(
+                (got - want).abs() < 1e-6,
+                "position {position}: got {got}, want {want}, full result {result:?}"
+            );
         }
     }
 
@@ -293,20 +423,61 @@ mod tests {
         let weight_values: [f32; 4] = [1.0, 0.0, 0.0, -1.0];
 
         let mut program = Vec::new();
-        let image = leaf(&mut program, "image", vec![Extent::Static(1), Extent::Static(1), Extent::Static(5), Extent::Static(5)]);
-        let weight = leaf(&mut program, "weight", vec![Extent::Static(1), Extent::Static(1), Extent::Static(2), Extent::Static(2)]);
-        let out = conv2d(&mut program, DType::Float32, image, (1, 1, 5, 5), weight, (1, 1, 2, 2), None, 2, 2).expect("2x2 kernel fits a 5x5 image at stride 2");
+        let image = leaf(
+            &mut program,
+            "image",
+            vec![
+                Extent::Static(1),
+                Extent::Static(1),
+                Extent::Static(5),
+                Extent::Static(5),
+            ],
+        );
+        let weight = leaf(
+            &mut program,
+            "weight",
+            vec![
+                Extent::Static(1),
+                Extent::Static(1),
+                Extent::Static(2),
+                Extent::Static(2),
+            ],
+        );
+        let out = conv2d(
+            &mut program,
+            DType::Float32,
+            image,
+            (1, 1, 5, 5),
+            weight,
+            (1, 1, 2, 2),
+            None,
+            2,
+            2,
+        )
+        .expect("2x2 kernel fits a 5x5 image at stride 2");
 
-        let evaluated = proxima_tensor::cpu::evaluate_named(&program, &[], &[("image", &image_values), ("weight", &weight_values)], &[out])
-            .expect("conv2d program lowers and evaluates");
+        let evaluated = proxima_tensor::cpu::evaluate_named(
+            &program,
+            &[],
+            &[("image", &image_values), ("weight", &weight_values)],
+            &[out],
+        )
+        .expect("conv2d program lowers and evaluates");
         let (result, shape) = evaluated.get(out).expect("conv output requested");
-        assert_eq!(shape, &vec![1, 1, 2, 2], "a 2x2 kernel over a 5x5 image at stride 2 produces a 2x2 output");
+        assert_eq!(
+            shape,
+            &vec![1, 1, 2, 2],
+            "a 2x2 kernel over a 5x5 image at stride 2 produces a 2x2 output"
+        );
 
         // out[0,0]=image[0,0]-image[1,1]=0-6=-6; out[0,1]=image[0,2]-image[1,3]=2-8=-6;
         // out[1,0]=image[2,0]-image[3,1]=10-16=-6; out[1,1]=image[2,2]-image[3,3]=12-18=-6.
         let expected = [-6.0f32, -6.0, -6.0, -6.0];
         for (position, (&got, &want)) in result.iter().zip(expected.iter()).enumerate() {
-            assert!((got - want).abs() < 1e-6, "position {position}: got {got}, want {want}, full result {result:?}");
+            assert!(
+                (got - want).abs() < 1e-6,
+                "position {position}: got {got}, want {want}, full result {result:?}"
+            );
         }
     }
 
@@ -339,8 +510,10 @@ mod tests {
                                 for kx in 0..kernel {
                                     let iy = oy * stride + ky;
                                     let ix = ox * stride + kx;
-                                    let image_index = ((n * in_channels + ci) * height + iy) * width + ix;
-                                    let weight_index = ((co * in_channels + ci) * kernel + ky) * kernel + kx;
+                                    let image_index =
+                                        ((n * in_channels + ci) * height + iy) * width + ix;
+                                    let weight_index =
+                                        ((co * in_channels + ci) * kernel + ky) * kernel + kx;
                                     accumulator += image[image_index] * weight[weight_index];
                                 }
                             }
@@ -366,34 +539,94 @@ mod tests {
         let out_channels = 2usize;
 
         let image_values = pseudo_random(0x51EE_D0A5, batch * in_channels * height * width);
-        let weight1_values = pseudo_random(0xACE1_5EED, mid_channels * in_channels * kernel * kernel);
-        let weight2_values = pseudo_random(0xC0FF_EE11, out_channels * mid_channels * kernel * kernel);
+        let weight1_values =
+            pseudo_random(0xACE1_5EED, mid_channels * in_channels * kernel * kernel);
+        let weight2_values =
+            pseudo_random(0xC0FF_EE11, out_channels * mid_channels * kernel * kernel);
 
         let mut program = Vec::new();
-        let image = leaf(&mut program, "image", vec![Extent::Static(batch as u32), Extent::Static(in_channels as u32), Extent::Static(height as u32), Extent::Static(width as u32)]);
-        let weight1 = leaf(&mut program, "weight1", vec![Extent::Static(mid_channels as u32), Extent::Static(in_channels as u32), Extent::Static(kernel as u32), Extent::Static(kernel as u32)]);
-        let weight2 = leaf(&mut program, "weight2", vec![Extent::Static(out_channels as u32), Extent::Static(mid_channels as u32), Extent::Static(kernel as u32), Extent::Static(kernel as u32)]);
+        let image = leaf(
+            &mut program,
+            "image",
+            vec![
+                Extent::Static(batch as u32),
+                Extent::Static(in_channels as u32),
+                Extent::Static(height as u32),
+                Extent::Static(width as u32),
+            ],
+        );
+        let weight1 = leaf(
+            &mut program,
+            "weight1",
+            vec![
+                Extent::Static(mid_channels as u32),
+                Extent::Static(in_channels as u32),
+                Extent::Static(kernel as u32),
+                Extent::Static(kernel as u32),
+            ],
+        );
+        let weight2 = leaf(
+            &mut program,
+            "weight2",
+            vec![
+                Extent::Static(out_channels as u32),
+                Extent::Static(mid_channels as u32),
+                Extent::Static(kernel as u32),
+                Extent::Static(kernel as u32),
+            ],
+        );
 
         let hidden = conv2d(
             &mut program,
             DType::Float32,
             image,
-            (batch as u64, in_channels as u64, height as u64, width as u64),
+            (
+                batch as u64,
+                in_channels as u64,
+                height as u64,
+                width as u64,
+            ),
             weight1,
-            (mid_channels as u64, in_channels as u64, kernel as u64, kernel as u64),
+            (
+                mid_channels as u64,
+                in_channels as u64,
+                kernel as u64,
+                kernel as u64,
+            ),
             None,
             stride as u64,
             stride as u64,
         )
         .expect("3x3 kernel fits a 9x9 image at stride 2");
-        let (_, _, mid_h, mid_w) = conv2d_output_shape((batch as u64, in_channels as u64, height as u64, width as u64), (mid_channels as u64, in_channels as u64, kernel as u64, kernel as u64), stride as u64, stride as u64).expect("mid shape");
+        let (_, _, mid_h, mid_w) = conv2d_output_shape(
+            (
+                batch as u64,
+                in_channels as u64,
+                height as u64,
+                width as u64,
+            ),
+            (
+                mid_channels as u64,
+                in_channels as u64,
+                kernel as u64,
+                kernel as u64,
+            ),
+            stride as u64,
+            stride as u64,
+        )
+        .expect("mid shape");
         let out = conv2d(
             &mut program,
             DType::Float32,
             hidden,
             (batch as u64, mid_channels as u64, mid_h, mid_w),
             weight2,
-            (out_channels as u64, mid_channels as u64, kernel as u64, kernel as u64),
+            (
+                out_channels as u64,
+                mid_channels as u64,
+                kernel as u64,
+                kernel as u64,
+            ),
             None,
             stride as u64,
             stride as u64,
@@ -403,17 +636,44 @@ mod tests {
         let evaluated = proxima_tensor::cpu::evaluate_named(
             &program,
             &[],
-            &[("image", &image_values), ("weight1", &weight1_values), ("weight2", &weight2_values)],
+            &[
+                ("image", &image_values),
+                ("weight1", &weight1_values),
+                ("weight2", &weight2_values),
+            ],
             &[out],
         )
         .expect("stacked conv2d program lowers and evaluates");
         let (result, _shape) = evaluated.get(out).expect("stacked conv2d output requested");
 
-        let (hidden_reference, hidden_h, hidden_w) = brute_force_conv2d(&image_values, batch, in_channels, height, width, &weight1_values, mid_channels, kernel, stride);
-        let (expected, _out_h, _out_w) = brute_force_conv2d(&hidden_reference, batch, mid_channels, hidden_h, hidden_w, &weight2_values, out_channels, kernel, stride);
+        let (hidden_reference, hidden_h, hidden_w) = brute_force_conv2d(
+            &image_values,
+            batch,
+            in_channels,
+            height,
+            width,
+            &weight1_values,
+            mid_channels,
+            kernel,
+            stride,
+        );
+        let (expected, _out_h, _out_w) = brute_force_conv2d(
+            &hidden_reference,
+            batch,
+            mid_channels,
+            hidden_h,
+            hidden_w,
+            &weight2_values,
+            out_channels,
+            kernel,
+            stride,
+        );
 
         for (position, (&got, &want)) in result.iter().zip(expected.iter()).enumerate() {
-            assert!((got - want).abs() < 1e-4, "position {position}: got {got}, want {want}");
+            assert!(
+                (got - want).abs() < 1e-4,
+                "position {position}: got {got}, want {want}"
+            );
         }
     }
 
@@ -427,36 +687,100 @@ mod tests {
         let out_channels = 2usize;
 
         let image_values = pseudo_random(0x51EE_D0A5, batch * in_channels * height * width);
-        let weight1_values = pseudo_random(0xACE1_5EED, mid_channels * in_channels * kernel * kernel);
+        let weight1_values =
+            pseudo_random(0xACE1_5EED, mid_channels * in_channels * kernel * kernel);
         let bias1_values = pseudo_random(0xB1A5_0001, mid_channels);
-        let weight2_values = pseudo_random(0xC0FF_EE11, out_channels * mid_channels * kernel * kernel);
+        let weight2_values =
+            pseudo_random(0xC0FF_EE11, out_channels * mid_channels * kernel * kernel);
 
         let mut program = Vec::new();
-        let image = leaf(&mut program, "image", vec![Extent::Static(batch as u32), Extent::Static(in_channels as u32), Extent::Static(height as u32), Extent::Static(width as u32)]);
-        let weight1 = leaf(&mut program, "weight1", vec![Extent::Static(mid_channels as u32), Extent::Static(in_channels as u32), Extent::Static(kernel as u32), Extent::Static(kernel as u32)]);
-        let bias1 = leaf(&mut program, "bias1", vec![Extent::Static(mid_channels as u32)]);
-        let weight2 = leaf(&mut program, "weight2", vec![Extent::Static(out_channels as u32), Extent::Static(mid_channels as u32), Extent::Static(kernel as u32), Extent::Static(kernel as u32)]);
+        let image = leaf(
+            &mut program,
+            "image",
+            vec![
+                Extent::Static(batch as u32),
+                Extent::Static(in_channels as u32),
+                Extent::Static(height as u32),
+                Extent::Static(width as u32),
+            ],
+        );
+        let weight1 = leaf(
+            &mut program,
+            "weight1",
+            vec![
+                Extent::Static(mid_channels as u32),
+                Extent::Static(in_channels as u32),
+                Extent::Static(kernel as u32),
+                Extent::Static(kernel as u32),
+            ],
+        );
+        let bias1 = leaf(
+            &mut program,
+            "bias1",
+            vec![Extent::Static(mid_channels as u32)],
+        );
+        let weight2 = leaf(
+            &mut program,
+            "weight2",
+            vec![
+                Extent::Static(out_channels as u32),
+                Extent::Static(mid_channels as u32),
+                Extent::Static(kernel as u32),
+                Extent::Static(kernel as u32),
+            ],
+        );
 
         let hidden = conv2d(
             &mut program,
             DType::Float32,
             image,
-            (batch as u64, in_channels as u64, height as u64, width as u64),
+            (
+                batch as u64,
+                in_channels as u64,
+                height as u64,
+                width as u64,
+            ),
             weight1,
-            (mid_channels as u64, in_channels as u64, kernel as u64, kernel as u64),
+            (
+                mid_channels as u64,
+                in_channels as u64,
+                kernel as u64,
+                kernel as u64,
+            ),
             Some(bias1),
             stride as u64,
             stride as u64,
         )
         .expect("3x3 kernel fits a 9x9 image at stride 2");
-        let (_, _, mid_h, mid_w) = conv2d_output_shape((batch as u64, in_channels as u64, height as u64, width as u64), (mid_channels as u64, in_channels as u64, kernel as u64, kernel as u64), stride as u64, stride as u64).expect("mid shape");
+        let (_, _, mid_h, mid_w) = conv2d_output_shape(
+            (
+                batch as u64,
+                in_channels as u64,
+                height as u64,
+                width as u64,
+            ),
+            (
+                mid_channels as u64,
+                in_channels as u64,
+                kernel as u64,
+                kernel as u64,
+            ),
+            stride as u64,
+            stride as u64,
+        )
+        .expect("mid shape");
         let out = conv2d(
             &mut program,
             DType::Float32,
             hidden,
             (batch as u64, mid_channels as u64, mid_h, mid_w),
             weight2,
-            (out_channels as u64, mid_channels as u64, kernel as u64, kernel as u64),
+            (
+                out_channels as u64,
+                mid_channels as u64,
+                kernel as u64,
+                kernel as u64,
+            ),
             None,
             stride as u64,
             stride as u64,
@@ -466,15 +790,47 @@ mod tests {
         let evaluated = proxima_tensor::cpu::evaluate_named(
             &program,
             &[],
-            &[("image", &image_values), ("weight1", &weight1_values), ("bias1", &bias1_values), ("weight2", &weight2_values)],
+            &[
+                ("image", &image_values),
+                ("weight1", &weight1_values),
+                ("bias1", &bias1_values),
+                ("weight2", &weight2_values),
+            ],
             &[out],
         )
         .expect("stacked conv2d program lowers and evaluates");
         let (result, _shape) = evaluated.get(out).expect("stacked conv2d output requested");
 
-        let (mut hidden_reference, hidden_h, hidden_w) = brute_force_conv2d(&image_values, batch, in_channels, height, width, &weight1_values, mid_channels, kernel, stride);
-        add_bias(&mut hidden_reference, batch, mid_channels, hidden_h, hidden_w, &bias1_values);
-        let (expected, _out_h, _out_w) = brute_force_conv2d(&hidden_reference, batch, mid_channels, hidden_h, hidden_w, &weight2_values, out_channels, kernel, stride);
+        let (mut hidden_reference, hidden_h, hidden_w) = brute_force_conv2d(
+            &image_values,
+            batch,
+            in_channels,
+            height,
+            width,
+            &weight1_values,
+            mid_channels,
+            kernel,
+            stride,
+        );
+        add_bias(
+            &mut hidden_reference,
+            batch,
+            mid_channels,
+            hidden_h,
+            hidden_w,
+            &bias1_values,
+        );
+        let (expected, _out_h, _out_w) = brute_force_conv2d(
+            &hidden_reference,
+            batch,
+            mid_channels,
+            hidden_h,
+            hidden_w,
+            &weight2_values,
+            out_channels,
+            kernel,
+            stride,
+        );
 
         let mut worst = 0.0f32;
         for (position, (&got, &want)) in result.iter().zip(expected.iter()).enumerate() {
@@ -482,7 +838,10 @@ mod tests {
             if difference > worst {
                 worst = difference;
             }
-            assert!(difference < 1e-3, "position {position}: got {got}, want {want}, worst-so-far {worst}");
+            assert!(
+                difference < 1e-3,
+                "position {position}: got {got}, want {want}, worst-so-far {worst}"
+            );
         }
     }
 
@@ -498,39 +857,107 @@ mod tests {
         let out_channels = 16usize;
 
         let image_values = pseudo_random(0x51EE_D0A5, batch * in_channels * height * width);
-        let weight1_values = pseudo_random(0xACE1_5EED, mid_channels * in_channels * kernel * kernel);
+        let weight1_values =
+            pseudo_random(0xACE1_5EED, mid_channels * in_channels * kernel * kernel);
         let bias1_values = pseudo_random(0xB1A5_0001, mid_channels);
-        let weight2_values = pseudo_random(0xC0FF_EE11, out_channels * mid_channels * kernel * kernel);
+        let weight2_values =
+            pseudo_random(0xC0FF_EE11, out_channels * mid_channels * kernel * kernel);
         let bias2_values = pseudo_random(0xB1A5_0002, out_channels);
 
         let mut program = Vec::new();
-        let image = leaf(&mut program, "image", vec![Extent::Static(batch as u32), Extent::Static(in_channels as u32), Extent::Static(height as u32), Extent::Static(width as u32)]);
-        let weight1 = leaf(&mut program, "weight1", vec![Extent::Static(mid_channels as u32), Extent::Static(in_channels as u32), Extent::Static(kernel as u32), Extent::Static(kernel as u32)]);
-        let bias1 = leaf(&mut program, "bias1", vec![Extent::Static(mid_channels as u32)]);
-        let weight2 = leaf(&mut program, "weight2", vec![Extent::Static(out_channels as u32), Extent::Static(mid_channels as u32), Extent::Static(kernel as u32), Extent::Static(kernel as u32)]);
-        let bias2 = leaf(&mut program, "bias2", vec![Extent::Static(out_channels as u32)]);
+        let image = leaf(
+            &mut program,
+            "image",
+            vec![
+                Extent::Static(batch as u32),
+                Extent::Static(in_channels as u32),
+                Extent::Static(height as u32),
+                Extent::Static(width as u32),
+            ],
+        );
+        let weight1 = leaf(
+            &mut program,
+            "weight1",
+            vec![
+                Extent::Static(mid_channels as u32),
+                Extent::Static(in_channels as u32),
+                Extent::Static(kernel as u32),
+                Extent::Static(kernel as u32),
+            ],
+        );
+        let bias1 = leaf(
+            &mut program,
+            "bias1",
+            vec![Extent::Static(mid_channels as u32)],
+        );
+        let weight2 = leaf(
+            &mut program,
+            "weight2",
+            vec![
+                Extent::Static(out_channels as u32),
+                Extent::Static(mid_channels as u32),
+                Extent::Static(kernel as u32),
+                Extent::Static(kernel as u32),
+            ],
+        );
+        let bias2 = leaf(
+            &mut program,
+            "bias2",
+            vec![Extent::Static(out_channels as u32)],
+        );
 
         let hidden_pre = conv2d(
             &mut program,
             DType::Float32,
             image,
-            (batch as u64, in_channels as u64, height as u64, width as u64),
+            (
+                batch as u64,
+                in_channels as u64,
+                height as u64,
+                width as u64,
+            ),
             weight1,
-            (mid_channels as u64, in_channels as u64, kernel as u64, kernel as u64),
+            (
+                mid_channels as u64,
+                in_channels as u64,
+                kernel as u64,
+                kernel as u64,
+            ),
             Some(bias1),
             stride as u64,
             stride as u64,
         )
         .expect("3x3 kernel fits a 28x28 image at stride 2");
         let hidden = crate::activation::relu(&mut program, DType::Float32, hidden_pre, 4);
-        let (_, _, mid_h, mid_w) = conv2d_output_shape((batch as u64, in_channels as u64, height as u64, width as u64), (mid_channels as u64, in_channels as u64, kernel as u64, kernel as u64), stride as u64, stride as u64).expect("mid shape");
+        let (_, _, mid_h, mid_w) = conv2d_output_shape(
+            (
+                batch as u64,
+                in_channels as u64,
+                height as u64,
+                width as u64,
+            ),
+            (
+                mid_channels as u64,
+                in_channels as u64,
+                kernel as u64,
+                kernel as u64,
+            ),
+            stride as u64,
+            stride as u64,
+        )
+        .expect("mid shape");
         let out_pre = conv2d(
             &mut program,
             DType::Float32,
             hidden,
             (batch as u64, mid_channels as u64, mid_h, mid_w),
             weight2,
-            (out_channels as u64, mid_channels as u64, kernel as u64, kernel as u64),
+            (
+                out_channels as u64,
+                mid_channels as u64,
+                kernel as u64,
+                kernel as u64,
+            ),
             Some(bias2),
             stride as u64,
             stride as u64,
@@ -553,10 +980,44 @@ mod tests {
         .expect("stacked conv2d program lowers and evaluates");
         let (result, _shape) = evaluated.get(out).expect("stacked conv2d output requested");
 
-        let (mut hidden_reference, hidden_h, hidden_w) = brute_force_conv2d(&image_values, batch, in_channels, height, width, &weight1_values, mid_channels, kernel, stride);
-        add_bias_and_relu(&mut hidden_reference, batch, mid_channels, hidden_h, hidden_w, &bias1_values);
-        let (mut expected, out_h, out_w) = brute_force_conv2d(&hidden_reference, batch, mid_channels, hidden_h, hidden_w, &weight2_values, out_channels, kernel, stride);
-        add_bias_and_relu(&mut expected, batch, out_channels, out_h, out_w, &bias2_values);
+        let (mut hidden_reference, hidden_h, hidden_w) = brute_force_conv2d(
+            &image_values,
+            batch,
+            in_channels,
+            height,
+            width,
+            &weight1_values,
+            mid_channels,
+            kernel,
+            stride,
+        );
+        add_bias_and_relu(
+            &mut hidden_reference,
+            batch,
+            mid_channels,
+            hidden_h,
+            hidden_w,
+            &bias1_values,
+        );
+        let (mut expected, out_h, out_w) = brute_force_conv2d(
+            &hidden_reference,
+            batch,
+            mid_channels,
+            hidden_h,
+            hidden_w,
+            &weight2_values,
+            out_channels,
+            kernel,
+            stride,
+        );
+        add_bias_and_relu(
+            &mut expected,
+            batch,
+            out_channels,
+            out_h,
+            out_w,
+            &bias2_values,
+        );
 
         let mut worst = 0.0f32;
         for (position, (&got, &want)) in result.iter().zip(expected.iter()).enumerate() {
@@ -564,11 +1025,21 @@ mod tests {
             if difference > worst {
                 worst = difference;
             }
-            assert!(difference < 1e-3, "position {position}: got {got}, want {want}, worst-so-far {worst}");
+            assert!(
+                difference < 1e-3,
+                "position {position}: got {got}, want {want}, worst-so-far {worst}"
+            );
         }
     }
 
-    fn add_bias(values: &mut [f32], batch: usize, channels: usize, height: usize, width: usize, bias: &[f32]) {
+    fn add_bias(
+        values: &mut [f32],
+        batch: usize,
+        channels: usize,
+        height: usize,
+        width: usize,
+        bias: &[f32],
+    ) {
         for n in 0..batch {
             for (channel, &channel_bias) in bias.iter().enumerate().take(channels) {
                 for position in 0..height * width {
@@ -579,7 +1050,14 @@ mod tests {
         }
     }
 
-    fn add_bias_and_relu(values: &mut [f32], batch: usize, channels: usize, height: usize, width: usize, bias: &[f32]) {
+    fn add_bias_and_relu(
+        values: &mut [f32],
+        batch: usize,
+        channels: usize,
+        height: usize,
+        width: usize,
+        bias: &[f32],
+    ) {
         add_bias(values, batch, channels, height, width, bias);
         for value in values.iter_mut() {
             *value = value.max(0.0);
@@ -590,38 +1068,98 @@ mod tests {
     /// with bias, at real MNIST layer-1 dimensions -- isolates whether bias
     /// alone at this scale disagrees, independent of any second layer.
     #[proxima::test]
-    async fn single_layer_forward_only_with_bias_at_real_mnist_dimensions_matches_a_brute_force_reference() {
+    async fn single_layer_forward_only_with_bias_at_real_mnist_dimensions_matches_a_brute_force_reference()
+     {
         let (batch, in_channels, height, width) = (2usize, 1usize, 28usize, 28usize);
         let (mid_channels, kernel, stride) = (8usize, 3usize, 2usize);
 
         let image_values = pseudo_random(0x51EE_D0A5, batch * in_channels * height * width);
-        let weight1_values = pseudo_random(0xACE1_5EED, mid_channels * in_channels * kernel * kernel);
+        let weight1_values =
+            pseudo_random(0xACE1_5EED, mid_channels * in_channels * kernel * kernel);
         let bias1_values = pseudo_random(0xB1A5_0001, mid_channels);
 
         let mut program = Vec::new();
-        let image = leaf(&mut program, "image", vec![Extent::Static(batch as u32), Extent::Static(in_channels as u32), Extent::Static(height as u32), Extent::Static(width as u32)]);
-        let weight1 = leaf(&mut program, "weight1", vec![Extent::Static(mid_channels as u32), Extent::Static(in_channels as u32), Extent::Static(kernel as u32), Extent::Static(kernel as u32)]);
-        let bias1 = leaf(&mut program, "bias1", vec![Extent::Static(mid_channels as u32)]);
+        let image = leaf(
+            &mut program,
+            "image",
+            vec![
+                Extent::Static(batch as u32),
+                Extent::Static(in_channels as u32),
+                Extent::Static(height as u32),
+                Extent::Static(width as u32),
+            ],
+        );
+        let weight1 = leaf(
+            &mut program,
+            "weight1",
+            vec![
+                Extent::Static(mid_channels as u32),
+                Extent::Static(in_channels as u32),
+                Extent::Static(kernel as u32),
+                Extent::Static(kernel as u32),
+            ],
+        );
+        let bias1 = leaf(
+            &mut program,
+            "bias1",
+            vec![Extent::Static(mid_channels as u32)],
+        );
 
         let out = conv2d(
             &mut program,
             DType::Float32,
             image,
-            (batch as u64, in_channels as u64, height as u64, width as u64),
+            (
+                batch as u64,
+                in_channels as u64,
+                height as u64,
+                width as u64,
+            ),
             weight1,
-            (mid_channels as u64, in_channels as u64, kernel as u64, kernel as u64),
+            (
+                mid_channels as u64,
+                in_channels as u64,
+                kernel as u64,
+                kernel as u64,
+            ),
             Some(bias1),
             stride as u64,
             stride as u64,
         )
         .expect("3x3 kernel fits a 28x28 image at stride 2");
 
-        let evaluated = proxima_tensor::cpu::evaluate_named(&program, &[], &[("image", &image_values), ("weight1", &weight1_values), ("bias1", &bias1_values)], &[out])
-            .expect("conv2d program lowers and evaluates");
+        let evaluated = proxima_tensor::cpu::evaluate_named(
+            &program,
+            &[],
+            &[
+                ("image", &image_values),
+                ("weight1", &weight1_values),
+                ("bias1", &bias1_values),
+            ],
+            &[out],
+        )
+        .expect("conv2d program lowers and evaluates");
         let (result, _shape) = evaluated.get(out).expect("conv2d output requested");
 
-        let (mut expected, _out_h, _out_w) = brute_force_conv2d(&image_values, batch, in_channels, height, width, &weight1_values, mid_channels, kernel, stride);
-        add_bias(&mut expected, batch, mid_channels, _out_h, _out_w, &bias1_values);
+        let (mut expected, _out_h, _out_w) = brute_force_conv2d(
+            &image_values,
+            batch,
+            in_channels,
+            height,
+            width,
+            &weight1_values,
+            mid_channels,
+            kernel,
+            stride,
+        );
+        add_bias(
+            &mut expected,
+            batch,
+            mid_channels,
+            _out_h,
+            _out_w,
+            &bias1_values,
+        );
 
         let mut worst = 0.0f32;
         for (position, (&got, &want)) in result.iter().zip(expected.iter()).enumerate() {
@@ -629,7 +1167,10 @@ mod tests {
             if difference > worst {
                 worst = difference;
             }
-            assert!(difference < 1e-3, "position {position}: got {got}, want {want}, worst-so-far {worst}");
+            assert!(
+                difference < 1e-3,
+                "position {position}: got {got}, want {want}, worst-so-far {worst}"
+            );
         }
     }
 
@@ -676,16 +1217,60 @@ mod tests {
     #[proxima::test]
     async fn conv2d_gradient_matches_central_difference_on_every_parameter() {
         let mut program = Vec::new();
-        let image = leaf(&mut program, "image", vec![Extent::Static(1), Extent::Static(2), Extent::Static(5), Extent::Static(5)]);
-        let weight = leaf(&mut program, "weight", vec![Extent::Static(3), Extent::Static(2), Extent::Static(3), Extent::Static(3)]);
+        let image = leaf(
+            &mut program,
+            "image",
+            vec![
+                Extent::Static(1),
+                Extent::Static(2),
+                Extent::Static(5),
+                Extent::Static(5),
+            ],
+        );
+        let weight = leaf(
+            &mut program,
+            "weight",
+            vec![
+                Extent::Static(3),
+                Extent::Static(2),
+                Extent::Static(3),
+                Extent::Static(3),
+            ],
+        );
         let bias = leaf(&mut program, "bias", vec![Extent::Static(3)]);
-        let out = conv2d(&mut program, DType::Float32, image, (1, 2, 5, 5), weight, (3, 2, 3, 3), Some(bias), 2, 2).expect("3x3 kernel fits a 5x5 image at stride 2");
-        let loss = crate::expr::reduce(&mut program, DType::Float32, ScalarOp::Add, ReduceInit::Zero, out, crate::expr::identity(4), crate::expr::broadcast(4));
+        let out = conv2d(
+            &mut program,
+            DType::Float32,
+            image,
+            (1, 2, 5, 5),
+            weight,
+            (3, 2, 3, 3),
+            Some(bias),
+            2,
+            2,
+        )
+        .expect("3x3 kernel fits a 5x5 image at stride 2");
+        let loss = crate::expr::reduce(
+            &mut program,
+            DType::Float32,
+            ScalarOp::Add,
+            ReduceInit::Zero,
+            out,
+            crate::expr::identity(4),
+            crate::expr::broadcast(4),
+        );
 
-        let differentiated = crate::adjoint::differentiate(&program, loss).expect("conv2d program differentiates");
-        let grad_image = differentiated.gradient_of_named("image").expect("image feeds the loss");
-        let grad_weight = differentiated.gradient_of_named("weight").expect("weight feeds the loss");
-        let grad_bias = differentiated.gradient_of_named("bias").expect("bias feeds the loss");
+        let differentiated =
+            crate::adjoint::differentiate(&program, loss).expect("conv2d program differentiates");
+        let grad_image = differentiated
+            .gradient_of_named("image")
+            .expect("image feeds the loss");
+        let grad_weight = differentiated
+            .gradient_of_named("weight")
+            .expect("weight feeds the loss");
+        let grad_bias = differentiated
+            .gradient_of_named("bias")
+            .expect("bias feeds the loss");
 
         let image_values = pseudo_random(0x9E37_79B9, 50);
         let weight_values = pseudo_random(0x8542_D2C3, 54);
@@ -694,20 +1279,41 @@ mod tests {
         let evaluated = proxima_tensor::cpu::evaluate_named(
             &differentiated.program,
             &[],
-            &[("image", &image_values), ("weight", &weight_values), ("bias", &bias_values)],
+            &[
+                ("image", &image_values),
+                ("weight", &weight_values),
+                ("bias", &bias_values),
+            ],
             &[grad_image, grad_weight, grad_bias],
         )
         .expect("adjoint program lowers and evaluates");
-        let analytic_image = evaluated.get(grad_image).expect("grad_image requested").0.to_vec();
-        let analytic_weight = evaluated.get(grad_weight).expect("grad_weight requested").0.to_vec();
-        let analytic_bias = evaluated.get(grad_bias).expect("grad_bias requested").0.to_vec();
+        let analytic_image = evaluated
+            .get(grad_image)
+            .expect("grad_image requested")
+            .0
+            .to_vec();
+        let analytic_weight = evaluated
+            .get(grad_weight)
+            .expect("grad_weight requested")
+            .0
+            .to_vec();
+        let analytic_bias = evaluated
+            .get(grad_bias)
+            .expect("grad_bias requested")
+            .0
+            .to_vec();
 
         let loss_at = |image: &[f32], weight: &[f32], bias: &[f32]| {
-            proxima_tensor::cpu::evaluate_named(&program, &[], &[("image", image), ("weight", weight), ("bias", bias)], &[loss])
-                .expect("forward program lowers and evaluates")
-                .get(loss)
-                .expect("loss requested")
-                .0[0]
+            proxima_tensor::cpu::evaluate_named(
+                &program,
+                &[],
+                &[("image", image), ("weight", weight), ("bias", bias)],
+                &[loss],
+            )
+            .expect("forward program lowers and evaluates")
+            .get(loss)
+            .expect("loss requested")
+            .0[0]
         };
 
         let step = 1e-3f32;
@@ -758,8 +1364,16 @@ mod tests {
             }
         }
 
-        std::eprintln!("conv2d max relative gradient-check error: {} at {}[{}]", worst.0, worst.1, worst.2);
-        assert!(worst.0 < 5e-3, "conv2d adjoint disagreed with central difference: {worst:?}");
+        std::eprintln!(
+            "conv2d max relative gradient-check error: {} at {}[{}]",
+            worst.0,
+            worst.1,
+            worst.2
+        );
+        assert!(
+            worst.0 < 5e-3,
+            "conv2d adjoint disagreed with central difference: {worst:?}"
+        );
     }
 
     /// Two stacked `conv2d` layers, no activation between them to keep the
@@ -772,16 +1386,76 @@ mod tests {
     #[proxima::test]
     async fn stacked_conv2d_gradient_reaches_the_first_layers_weight() {
         let mut program = Vec::new();
-        let image = leaf(&mut program, "image", vec![Extent::Static(1), Extent::Static(1), Extent::Static(6), Extent::Static(6)]);
-        let weight1 = leaf(&mut program, "weight1", vec![Extent::Static(2), Extent::Static(1), Extent::Static(3), Extent::Static(3)]);
-        let weight2 = leaf(&mut program, "weight2", vec![Extent::Static(1), Extent::Static(2), Extent::Static(2), Extent::Static(2)]);
+        let image = leaf(
+            &mut program,
+            "image",
+            vec![
+                Extent::Static(1),
+                Extent::Static(1),
+                Extent::Static(6),
+                Extent::Static(6),
+            ],
+        );
+        let weight1 = leaf(
+            &mut program,
+            "weight1",
+            vec![
+                Extent::Static(2),
+                Extent::Static(1),
+                Extent::Static(3),
+                Extent::Static(3),
+            ],
+        );
+        let weight2 = leaf(
+            &mut program,
+            "weight2",
+            vec![
+                Extent::Static(1),
+                Extent::Static(2),
+                Extent::Static(2),
+                Extent::Static(2),
+            ],
+        );
 
-        let hidden = conv2d(&mut program, DType::Float32, image, (1, 1, 6, 6), weight1, (2, 1, 3, 3), None, 1, 1).expect("3x3 kernel fits a 6x6 image at stride 1");
-        let out = conv2d(&mut program, DType::Float32, hidden, (1, 2, 4, 4), weight2, (1, 2, 2, 2), None, 1, 1).expect("2x2 kernel fits a 4x4 image at stride 1");
-        let loss = crate::expr::reduce(&mut program, DType::Float32, ScalarOp::Add, ReduceInit::Zero, out, crate::expr::identity(4), crate::expr::broadcast(4));
+        let hidden = conv2d(
+            &mut program,
+            DType::Float32,
+            image,
+            (1, 1, 6, 6),
+            weight1,
+            (2, 1, 3, 3),
+            None,
+            1,
+            1,
+        )
+        .expect("3x3 kernel fits a 6x6 image at stride 1");
+        let out = conv2d(
+            &mut program,
+            DType::Float32,
+            hidden,
+            (1, 2, 4, 4),
+            weight2,
+            (1, 2, 2, 2),
+            None,
+            1,
+            1,
+        )
+        .expect("2x2 kernel fits a 4x4 image at stride 1");
+        let loss = crate::expr::reduce(
+            &mut program,
+            DType::Float32,
+            ScalarOp::Add,
+            ReduceInit::Zero,
+            out,
+            crate::expr::identity(4),
+            crate::expr::broadcast(4),
+        );
 
-        let differentiated = crate::adjoint::differentiate(&program, loss).expect("stacked conv2d program differentiates");
-        let grad_weight1 = differentiated.gradient_of_named("weight1").expect("weight1 must receive a gradient through the second layer's own image operand");
+        let differentiated = crate::adjoint::differentiate(&program, loss)
+            .expect("stacked conv2d program differentiates");
+        let grad_weight1 = differentiated
+            .gradient_of_named("weight1")
+            .expect("weight1 must receive a gradient through the second layer's own image operand");
 
         let image_values: Vec<f32> = (0..36).map(|index| (index as f32 - 18.0) / 6.0).collect();
         let weight1_values: Vec<f32> = (0..18).map(|index| (index as f32 - 9.0) / 6.0).collect();
@@ -790,20 +1464,40 @@ mod tests {
         let evaluated = proxima_tensor::cpu::evaluate_named(
             &differentiated.program,
             &[],
-            &[("image", &image_values), ("weight1", &weight1_values), ("weight2", &weight2_values)],
+            &[
+                ("image", &image_values),
+                ("weight1", &weight1_values),
+                ("weight2", &weight2_values),
+            ],
             &[grad_weight1],
         )
         .expect("adjoint program lowers and evaluates");
-        let analytic_weight1 = evaluated.get(grad_weight1).expect("grad_weight1 requested").0.to_vec();
+        let analytic_weight1 = evaluated
+            .get(grad_weight1)
+            .expect("grad_weight1 requested")
+            .0
+            .to_vec();
 
-        assert!(analytic_weight1.iter().any(|&value| value != 0.0), "weight1's gradient must be nonzero somewhere, got {analytic_weight1:?}");
+        assert!(
+            analytic_weight1.iter().any(|&value| value != 0.0),
+            "weight1's gradient must be nonzero somewhere, got {analytic_weight1:?}"
+        );
 
         let loss_at = |weight1: &[f32]| {
-            proxima_tensor::cpu::evaluate_named(&program, &[], &[("image", &image_values), ("weight1", weight1), ("weight2", &weight2_values)], &[loss])
-                .expect("forward program lowers and evaluates")
-                .get(loss)
-                .expect("loss requested")
-                .0[0]
+            proxima_tensor::cpu::evaluate_named(
+                &program,
+                &[],
+                &[
+                    ("image", &image_values),
+                    ("weight1", weight1),
+                    ("weight2", &weight2_values),
+                ],
+                &[loss],
+            )
+            .expect("forward program lowers and evaluates")
+            .get(loss)
+            .expect("loss requested")
+            .0[0]
         };
 
         let step = 1e-3f32;
@@ -823,8 +1517,15 @@ mod tests {
             }
         }
 
-        std::eprintln!("stacked conv2d weight1 max relative gradient-check error: {} at index {}", worst.0, worst.1);
-        assert!(worst.0 < 5e-3, "stacked conv2d's first-layer weight gradient disagreed with central difference: {worst:?}");
+        std::eprintln!(
+            "stacked conv2d weight1 max relative gradient-check error: {} at index {}",
+            worst.0,
+            worst.1
+        );
+        assert!(
+            worst.0 < 5e-3,
+            "stacked conv2d's first-layer weight gradient disagreed with central difference: {worst:?}"
+        );
     }
 
     /// Isolates whether a stride greater than 1 on BOTH stacked layers
@@ -836,16 +1537,76 @@ mod tests {
     #[proxima::test]
     async fn stacked_conv2d_with_stride_two_on_both_layers_matches_central_difference() {
         let mut program = Vec::new();
-        let image = leaf(&mut program, "image", vec![Extent::Static(1), Extent::Static(1), Extent::Static(9), Extent::Static(9)]);
-        let weight1 = leaf(&mut program, "weight1", vec![Extent::Static(2), Extent::Static(1), Extent::Static(3), Extent::Static(3)]);
-        let weight2 = leaf(&mut program, "weight2", vec![Extent::Static(1), Extent::Static(2), Extent::Static(2), Extent::Static(2)]);
+        let image = leaf(
+            &mut program,
+            "image",
+            vec![
+                Extent::Static(1),
+                Extent::Static(1),
+                Extent::Static(9),
+                Extent::Static(9),
+            ],
+        );
+        let weight1 = leaf(
+            &mut program,
+            "weight1",
+            vec![
+                Extent::Static(2),
+                Extent::Static(1),
+                Extent::Static(3),
+                Extent::Static(3),
+            ],
+        );
+        let weight2 = leaf(
+            &mut program,
+            "weight2",
+            vec![
+                Extent::Static(1),
+                Extent::Static(2),
+                Extent::Static(2),
+                Extent::Static(2),
+            ],
+        );
 
-        let hidden = conv2d(&mut program, DType::Float32, image, (1, 1, 9, 9), weight1, (2, 1, 3, 3), None, 2, 2).expect("3x3 kernel fits a 9x9 image at stride 2");
-        let out = conv2d(&mut program, DType::Float32, hidden, (1, 2, 4, 4), weight2, (1, 2, 2, 2), None, 2, 2).expect("2x2 kernel fits a 4x4 image at stride 2");
-        let loss = crate::expr::reduce(&mut program, DType::Float32, ScalarOp::Add, ReduceInit::Zero, out, crate::expr::identity(4), crate::expr::broadcast(4));
+        let hidden = conv2d(
+            &mut program,
+            DType::Float32,
+            image,
+            (1, 1, 9, 9),
+            weight1,
+            (2, 1, 3, 3),
+            None,
+            2,
+            2,
+        )
+        .expect("3x3 kernel fits a 9x9 image at stride 2");
+        let out = conv2d(
+            &mut program,
+            DType::Float32,
+            hidden,
+            (1, 2, 4, 4),
+            weight2,
+            (1, 2, 2, 2),
+            None,
+            2,
+            2,
+        )
+        .expect("2x2 kernel fits a 4x4 image at stride 2");
+        let loss = crate::expr::reduce(
+            &mut program,
+            DType::Float32,
+            ScalarOp::Add,
+            ReduceInit::Zero,
+            out,
+            crate::expr::identity(4),
+            crate::expr::broadcast(4),
+        );
 
-        let differentiated = crate::adjoint::differentiate(&program, loss).expect("stacked conv2d program differentiates");
-        let grad_weight1 = differentiated.gradient_of_named("weight1").expect("weight1 must receive a gradient through the second layer's own image operand");
+        let differentiated = crate::adjoint::differentiate(&program, loss)
+            .expect("stacked conv2d program differentiates");
+        let grad_weight1 = differentiated
+            .gradient_of_named("weight1")
+            .expect("weight1 must receive a gradient through the second layer's own image operand");
 
         let image_values = pseudo_random(0x1234_5678, 81);
         let weight1_values = pseudo_random(0x9ABC_DEF0, 18);
@@ -854,18 +1615,35 @@ mod tests {
         let evaluated = proxima_tensor::cpu::evaluate_named(
             &differentiated.program,
             &[],
-            &[("image", &image_values), ("weight1", &weight1_values), ("weight2", &weight2_values)],
+            &[
+                ("image", &image_values),
+                ("weight1", &weight1_values),
+                ("weight2", &weight2_values),
+            ],
             &[grad_weight1],
         )
         .expect("adjoint program lowers and evaluates");
-        let analytic_weight1 = evaluated.get(grad_weight1).expect("grad_weight1 requested").0.to_vec();
+        let analytic_weight1 = evaluated
+            .get(grad_weight1)
+            .expect("grad_weight1 requested")
+            .0
+            .to_vec();
 
         let loss_at = |weight1: &[f32]| {
-            proxima_tensor::cpu::evaluate_named(&program, &[], &[("image", &image_values), ("weight1", weight1), ("weight2", &weight2_values)], &[loss])
-                .expect("forward program lowers and evaluates")
-                .get(loss)
-                .expect("loss requested")
-                .0[0]
+            proxima_tensor::cpu::evaluate_named(
+                &program,
+                &[],
+                &[
+                    ("image", &image_values),
+                    ("weight1", weight1),
+                    ("weight2", &weight2_values),
+                ],
+                &[loss],
+            )
+            .expect("forward program lowers and evaluates")
+            .get(loss)
+            .expect("loss requested")
+            .0[0]
         };
 
         let step = 1e-3f32;
@@ -885,16 +1663,40 @@ mod tests {
             }
         }
 
-        std::eprintln!("stacked stride-2 conv2d weight1 max relative gradient-check error: {} at index {}", worst.0, worst.1);
-        assert!(worst.0 < 5e-3, "stacked stride-2 conv2d's first-layer weight gradient disagreed with central difference: {worst:?}");
+        std::eprintln!(
+            "stacked stride-2 conv2d weight1 max relative gradient-check error: {} at index {}",
+            worst.0,
+            worst.1
+        );
+        assert!(
+            worst.0 < 5e-3,
+            "stacked stride-2 conv2d's first-layer weight gradient disagreed with central difference: {worst:?}"
+        );
     }
 
     #[test]
     fn conv2d_output_shape_matches_the_standard_valid_convolution_formula() {
-        assert_eq!(conv2d_output_shape((1, 1, 4, 4), (1, 1, 2, 2), 1, 1), Some((1, 1, 3, 3)));
-        assert_eq!(conv2d_output_shape((32, 1, 28, 28), (8, 1, 3, 3), 2, 2), Some((32, 8, 13, 13)));
-        assert_eq!(conv2d_output_shape((32, 8, 13, 13), (16, 8, 3, 3), 2, 2), Some((32, 16, 6, 6)));
-        assert_eq!(conv2d_output_shape((1, 1, 2, 2), (1, 1, 3, 3), 1, 1), None, "kernel larger than the image cannot fit");
-        assert_eq!(conv2d_output_shape((1, 2, 4, 4), (1, 3, 2, 2), 1, 1), None, "weight in-channels must match the image");
+        assert_eq!(
+            conv2d_output_shape((1, 1, 4, 4), (1, 1, 2, 2), 1, 1),
+            Some((1, 1, 3, 3))
+        );
+        assert_eq!(
+            conv2d_output_shape((32, 1, 28, 28), (8, 1, 3, 3), 2, 2),
+            Some((32, 8, 13, 13))
+        );
+        assert_eq!(
+            conv2d_output_shape((32, 8, 13, 13), (16, 8, 3, 3), 2, 2),
+            Some((32, 16, 6, 6))
+        );
+        assert_eq!(
+            conv2d_output_shape((1, 1, 2, 2), (1, 1, 3, 3), 1, 1),
+            None,
+            "kernel larger than the image cannot fit"
+        );
+        assert_eq!(
+            conv2d_output_shape((1, 2, 4, 4), (1, 3, 2, 2), 1, 1),
+            None,
+            "weight in-channels must match the image"
+        );
     }
 }

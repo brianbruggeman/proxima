@@ -87,10 +87,7 @@ fn emit_sizing_consts(out_dir: &Path) {
     );
     let fan_in_source_cap = require_usize(
         "fan_in.source_cap",
-        require_nonzero(
-            "fan_in.source_cap",
-            resolve(&root, "fan_in", "source_cap"),
-        ),
+        require_nonzero("fan_in.source_cap", resolve(&root, "fan_in", "source_cap")),
     );
 
     let retry_out = format!(

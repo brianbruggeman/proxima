@@ -205,7 +205,9 @@ fn write_type_proto(value: &TypeProto<'_>) -> Vec<u8> {
         Some(TypeValue::Sequence(inner)) => push_len(4, &write_type_proto(inner), &mut buf),
         Some(TypeValue::Map(map)) => push_len(5, &write_type_proto_map(map), &mut buf),
         Some(TypeValue::Optional(inner)) => push_len(9, &write_type_proto(inner), &mut buf),
-        Some(TypeValue::SparseTensor(tensor)) => push_len(8, &write_type_proto_tensor(tensor), &mut buf),
+        Some(TypeValue::SparseTensor(tensor)) => {
+            push_len(8, &write_type_proto_tensor(tensor), &mut buf)
+        }
         None => {}
     }
     push_str(6, value.denotation, &mut buf);
@@ -370,13 +372,33 @@ mod tests {
     fn build_reference_model() -> ModelProto<'static> {
         let x_shape = TensorShapeProto {
             dim: vec![
-                Dimension { value: Some(DimensionValue::Value(2)), denotation: "" },
-                Dimension { value: Some(DimensionValue::Param("batch")), denotation: "seq" },
+                Dimension {
+                    value: Some(DimensionValue::Value(2)),
+                    denotation: "",
+                },
+                Dimension {
+                    value: Some(DimensionValue::Param("batch")),
+                    denotation: "seq",
+                },
             ],
         };
-        let x_type = TypeProto { value: Some(TypeValue::Tensor(TypeProtoTensor { elem_type: 1, shape: Some(x_shape) })), denotation: "" };
-        let x_input = ValueInfoProto { name: "x", r#type: Some(x_type), doc_string: "input x" };
-        let y_output = ValueInfoProto { name: "y", r#type: None, doc_string: "" };
+        let x_type = TypeProto {
+            value: Some(TypeValue::Tensor(TypeProtoTensor {
+                elem_type: 1,
+                shape: Some(x_shape),
+            })),
+            denotation: "",
+        };
+        let x_input = ValueInfoProto {
+            name: "x",
+            r#type: Some(x_type),
+            doc_string: "input x",
+        };
+        let y_output = ValueInfoProto {
+            name: "y",
+            r#type: None,
+            doc_string: "",
+        };
 
         let weight = TensorProto {
             dims: vec![2, 2],
@@ -386,11 +408,32 @@ mod tests {
             raw_data: Some(&[0, 0, 128, 63, 0, 0, 0, 64, 0, 0, 64, 64, 0, 0, 128, 64]),
             ..TensorProto::default()
         };
-        let int_tensor = TensorProto { dims: vec![3], data_type: 7, int64_data: vec![-1, 0, 5], name: "ids", ..TensorProto::default() };
+        let int_tensor = TensorProto {
+            dims: vec![3],
+            data_type: 7,
+            int64_data: vec![-1, 0, 5],
+            name: "ids",
+            ..TensorProto::default()
+        };
 
-        let float_attr = AttributeProto { name: "alpha", type_raw: 1, f: 1.5, ..AttributeProto::default() };
-        let ints_attr = AttributeProto { name: "perm", type_raw: 7, ints: vec![1, 0, 2], ..AttributeProto::default() };
-        let tensor_attr = AttributeProto { name: "value", type_raw: 4, t: Some(int_tensor.clone()), ..AttributeProto::default() };
+        let float_attr = AttributeProto {
+            name: "alpha",
+            type_raw: 1,
+            f: 1.5,
+            ..AttributeProto::default()
+        };
+        let ints_attr = AttributeProto {
+            name: "perm",
+            type_raw: 7,
+            ints: vec![1, 0, 2],
+            ..AttributeProto::default()
+        };
+        let tensor_attr = AttributeProto {
+            name: "value",
+            type_raw: 4,
+            t: Some(int_tensor.clone()),
+            ..AttributeProto::default()
+        };
 
         let node0 = NodeProto {
             input: vec!["x", "W"],
@@ -402,7 +445,13 @@ mod tests {
             attribute: vec![float_attr, ints_attr, tensor_attr],
             doc_string: "gemm node",
         };
-        let node1 = NodeProto { input: vec!["z"], output: vec!["y"], name: "node1", op_type: "Relu", ..NodeProto::default() };
+        let node1 = NodeProto {
+            input: vec!["z"],
+            output: vec!["y"],
+            name: "node1",
+            op_type: "Relu",
+            ..NodeProto::default()
+        };
 
         let graph = GraphProto {
             node: vec![node0, node1],
@@ -411,12 +460,18 @@ mod tests {
             doc_string: "a graph exercising every field this writer covers",
             input: vec![x_input],
             output: vec![y_output],
-            value_info: vec![ValueInfoProto { name: "z", ..ValueInfoProto::default() }],
+            value_info: vec![ValueInfoProto {
+                name: "z",
+                ..ValueInfoProto::default()
+            }],
         };
 
         ModelProto {
             ir_version: 8,
-            opset_import: vec![OperatorSetIdProto { domain: "", version: 17 }],
+            opset_import: vec![OperatorSetIdProto {
+                domain: "",
+                version: 17,
+            }],
             producer_name: "proxima-onnx",
             producer_version: "0.1",
             domain: "ai.proxima",
@@ -458,10 +513,20 @@ mod tests {
     fn write_model_proto_matches_hand_encoded_wire_semantics() {
         let reference = build_reference_model();
         let bytes = write_model_proto(&reference);
-        let parsed_graph = decode_model_proto(&bytes).expect("parses").graph.expect("graph present");
+        let parsed_graph = decode_model_proto(&bytes)
+            .expect("parses")
+            .graph
+            .expect("graph present");
         assert_eq!(parsed_graph.node.len(), 2);
         assert_eq!(parsed_graph.node[0].op_type, "Gemm");
-        assert_eq!(parsed_graph.node[0].attribute[2].t.as_ref().expect("tensor attr").int64_data, vec![-1, 0, 5]);
+        assert_eq!(
+            parsed_graph.node[0].attribute[2]
+                .t
+                .as_ref()
+                .expect("tensor attr")
+                .int64_data,
+            vec![-1, 0, 5]
+        );
         assert_eq!(parsed_graph.initializer[0].name, "W");
         let _ = parsed_graph.name.to_string();
     }

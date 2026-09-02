@@ -2095,8 +2095,7 @@ mod tests {
         ) -> Pin<Box<dyn Future<Output = Result<(), ProximaError>> + Send + '_>> {
             Box::pin(async move {
                 Err(ProximaError::Config(
-                    "synthetic startup failure: missing required feature `never-enabled`"
-                        .into(),
+                    "synthetic startup failure: missing required feature `never-enabled`".into(),
                 ))
             })
         }

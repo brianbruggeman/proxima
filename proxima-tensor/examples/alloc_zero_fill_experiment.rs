@@ -27,10 +27,21 @@ const ITERATIONS: usize = 200;
 const WARMUP: usize = 20;
 
 fn mean_and_cov(samples: &[Duration]) -> (f64, f64) {
-    let nanos: Vec<f64> = samples.iter().map(|sample| sample.as_nanos() as f64).collect();
+    let nanos: Vec<f64> = samples
+        .iter()
+        .map(|sample| sample.as_nanos() as f64)
+        .collect();
     let mean = nanos.iter().sum::<f64>() / nanos.len() as f64;
-    let variance = nanos.iter().map(|value| (value - mean).powi(2)).sum::<f64>() / nanos.len() as f64;
-    let cov_percent = if mean == 0.0 { 0.0 } else { variance.sqrt() / mean * 100.0 };
+    let variance = nanos
+        .iter()
+        .map(|value| (value - mean).powi(2))
+        .sum::<f64>()
+        / nanos.len() as f64;
+    let cov_percent = if mean == 0.0 {
+        0.0
+    } else {
+        variance.sqrt() / mean * 100.0
+    };
     (mean, cov_percent)
 }
 
@@ -77,7 +88,10 @@ fn time_vec_zeroed_macro(iterations: usize) -> Vec<Duration> {
 
 fn report(label: &str, samples: &[Duration]) {
     let (mean_ns, cov_percent) = mean_and_cov(samples);
-    println!("{label}: mean_ns={mean_ns:.1} cov_percent={cov_percent:.2} n={}", samples.len());
+    println!(
+        "{label}: mean_ns={mean_ns:.1} cov_percent={cov_percent:.2} n={}",
+        samples.len()
+    );
 }
 
 fn main() {

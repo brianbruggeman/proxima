@@ -662,12 +662,11 @@ fn end_to_end_chain_synthesizes_honeypot_hostname() {
     // Stage 3: the fd-keyed Read addresses the already-selected
     // ground directly by handle — resolving a handle back to its
     // ground is the dispatcher's job, not the path router's.
-    let response = hostname_source
-        .call_sync(ChildRequest::Read {
-            handle,
-            max_bytes: 256,
-            offset: 0,
-        });
+    let response = hostname_source.call_sync(ChildRequest::Read {
+        handle,
+        max_bytes: 256,
+        offset: 0,
+    });
 
     // Stage 4: FrameEncoder turns the typed ChildResponse into
     // wire bytes the shim can decode, then decode it back.

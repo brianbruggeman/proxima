@@ -164,8 +164,11 @@ fn median(values: &mut [f64]) -> f64 {
 
 fn coefficient_of_variation(values: &[f64]) -> f64 {
     let mean = values.iter().sum::<f64>() / values.len() as f64;
-    let variance =
-        values.iter().map(|value| (value - mean).powi(2)).sum::<f64>() / values.len() as f64;
+    let variance = values
+        .iter()
+        .map(|value| (value - mean).powi(2))
+        .sum::<f64>()
+        / values.len() as f64;
     variance.sqrt() / mean
 }
 
@@ -184,12 +187,25 @@ fn report(cell: &CellResult, ideal_ns: f64) {
         let max = sorted.last().copied().unwrap_or(f64::NAN);
         println!(
             "members={:>2} chunks={:>3} {:<10} range={:>9.1}-{:<9.1} ns/round (CoV {:.1}% > 5%, reporting range) overhead/chunk={:>7.1} ns  samples={:?}",
-            cell.members, cell.chunks, profile_name, min, max, cov * 100.0, overhead_per_chunk, sorted
+            cell.members,
+            cell.chunks,
+            profile_name,
+            min,
+            max,
+            cov * 100.0,
+            overhead_per_chunk,
+            sorted
         );
     } else {
         println!(
             "members={:>2} chunks={:>3} {:<10} median={:>9.1} ns/round  CoV={:.2}%  overhead/chunk={:>7.1} ns  samples={:?}",
-            cell.members, cell.chunks, profile_name, round_median, cov * 100.0, overhead_per_chunk, sorted
+            cell.members,
+            cell.chunks,
+            profile_name,
+            round_median,
+            cov * 100.0,
+            overhead_per_chunk,
+            sorted
         );
     }
 }

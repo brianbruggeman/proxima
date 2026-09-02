@@ -56,7 +56,8 @@ use std::time::Instant;
 use proxima_tensor::{NodeId, Op};
 use proxima_vm::named_memory::GuestMemoryRegion;
 
-const MODEL_PATH: &str = "/Users/brianbruggeman/repos/others/burn/examples/onnx-inference/src/model/mnist.onnx";
+const MODEL_PATH: &str =
+    "/Users/brianbruggeman/repos/others/burn/examples/onnx-inference/src/model/mnist.onnx";
 const DATASET_DIR: &str = "/Users/brianbruggeman/.cache/burn-dataset/mnist";
 const INPUT_PIXELS: usize = 28 * 28;
 const OUTPUT_CLASSES: usize = 10;
@@ -76,15 +77,26 @@ fn load_one_normalized_image(path: &Path) -> Result<[f32; INPUT_PIXELS], Box<dyn
     let mut extents = Vec::with_capacity(dimension_count - 1);
     for axis in 1..dimension_count {
         let offset = 4 + axis * 4;
-        extents.push(u32::from_be_bytes([bytes[offset], bytes[offset + 1], bytes[offset + 2], bytes[offset + 3]]) as usize);
+        extents.push(u32::from_be_bytes([
+            bytes[offset],
+            bytes[offset + 1],
+            bytes[offset + 2],
+            bytes[offset + 3],
+        ]) as usize);
     }
     let pixel_count: usize = extents.iter().product();
     if pixel_count != INPUT_PIXELS {
-        return Err(format!("expected {INPUT_PIXELS} pixels per image, idx3 header declares {pixel_count}").into());
+        return Err(format!(
+            "expected {INPUT_PIXELS} pixels per image, idx3 header declares {pixel_count}"
+        )
+        .into());
     }
     let header_length = 4 + extents.len() * 4 + 4;
     let mut image = [0.0_f32; INPUT_PIXELS];
-    for (slot, &pixel) in image.iter_mut().zip(&bytes[header_length..header_length + pixel_count]) {
+    for (slot, &pixel) in image
+        .iter_mut()
+        .zip(&bytes[header_length..header_length + pixel_count])
+    {
         *slot = ((pixel as f32) / 255.0 - 0.1307) / 0.3081;
     }
     Ok(image)
@@ -104,20 +116,42 @@ struct ModelState {
 
 fn load_model(path: &Path) -> Result<ModelState, Box<dyn Error>> {
     let bytes = fs::read(path)?;
-    let model = proxima_onnx::pipe::parse_complete(&bytes).map_err(|error| format!("parse mnist.onnx: {error}"))?;
+    let model = proxima_onnx::pipe::parse_complete(&bytes)
+        .map_err(|error| format!("parse mnist.onnx: {error}"))?;
     let graph = model.graph.as_ref().ok_or("mnist.onnx has no graph")?;
-    let lowered = proxima_onnx::lower::lower_graph(graph).map_err(|error| format!("lower mnist.onnx: {error}"))?;
-    let graph_input_name = lowered.graph_inputs.first().ok_or("mnist.onnx declares no graph input")?.clone();
-    let output_node = lowered.graph_outputs.first().ok_or("mnist.onnx declares no graph output")?.1;
-    Ok(ModelState { program: lowered.program, initializers: lowered.initializers, graph_input_name, output_node })
+    let lowered = proxima_onnx::lower::lower_graph(graph)
+        .map_err(|error| format!("lower mnist.onnx: {error}"))?;
+    let graph_input_name = lowered
+        .graph_inputs
+        .first()
+        .ok_or("mnist.onnx declares no graph input")?
+        .clone();
+    let output_node = lowered
+        .graph_outputs
+        .first()
+        .ok_or("mnist.onnx declares no graph output")?
+        .1;
+    Ok(ModelState {
+        program: lowered.program,
+        initializers: lowered.initializers,
+        graph_input_name,
+        output_node,
+    })
 }
 
-fn forward(model: &ModelState, initializers: &[(&str, &[f32])], image: &[f32; INPUT_PIXELS]) -> Result<Vec<f32>, Box<dyn Error>> {
+fn forward(
+    model: &ModelState,
+    initializers: &[(&str, &[f32])],
+    image: &[f32; INPUT_PIXELS],
+) -> Result<Vec<f32>, Box<dyn Error>> {
     let mut named: Vec<(&str, &[f32])> = initializers.to_vec();
     named.push((model.graph_input_name.as_str(), image.as_slice()));
-    let evaluated = proxima_tensor::cpu::evaluate_named(&model.program, &[], &named, &[model.output_node])
-        .map_err(|error| format!("mnist forward failed: {error}"))?;
-    let (logits, shape) = evaluated.get(model.output_node).ok_or("mnist forward produced no output")?;
+    let evaluated =
+        proxima_tensor::cpu::evaluate_named(&model.program, &[], &named, &[model.output_node])
+            .map_err(|error| format!("mnist forward failed: {error}"))?;
+    let (logits, shape) = evaluated
+        .get(model.output_node)
+        .ok_or("mnist forward produced no output")?;
     if shape != [1_u64, OUTPUT_CLASSES as u64] {
         return Err(format!("expected a 1x{OUTPUT_CLASSES} logit row, got shape {shape:?}").into());
     }
@@ -146,7 +180,11 @@ fn build_weight_blob(initializers: &[(String, Vec<f32>)]) -> (Vec<u8>, Vec<Weigh
         for value in data {
             blob.extend_from_slice(&value.to_le_bytes());
         }
-        manifest.push(WeightEntry { name: name.clone(), offset, f32_count: data.len() });
+        manifest.push(WeightEntry {
+            name: name.clone(),
+            offset,
+            f32_count: data.len(),
+        });
     }
     (blob, manifest)
 }
@@ -158,13 +196,19 @@ fn build_weight_blob(initializers: &[(String, Vec<f32>)]) -> (Vec<u8>, Vec<Weigh
 /// separately from the mapping call itself (`decode_nanos`), so the
 /// restore/map number the pre-registered claim gates on is never inflated
 /// by this reconstruction cost.
-fn decode_named<'manifest>(mapped: &[u8], manifest: &'manifest [WeightEntry]) -> Vec<(&'manifest str, Vec<f32>)> {
+fn decode_named<'manifest>(
+    mapped: &[u8],
+    manifest: &'manifest [WeightEntry],
+) -> Vec<(&'manifest str, Vec<f32>)> {
     manifest
         .iter()
         .map(|entry| {
             let byte_range = &mapped[entry.offset..entry.offset + entry.f32_count * 4];
             let (chunks, _remainder) = byte_range.as_chunks::<4>();
-            let values: Vec<f32> = chunks.iter().map(|chunk| f32::from_le_bytes(*chunk)).collect();
+            let values: Vec<f32> = chunks
+                .iter()
+                .map(|chunk| f32::from_le_bytes(*chunk))
+                .collect();
             (entry.name.as_str(), values)
         })
         .collect()
@@ -180,7 +224,11 @@ fn coefficient_of_variation(samples: &[u128]) -> f64 {
     if mean == 0.0 {
         return 0.0;
     }
-    let variance = samples.iter().map(|&value| (value as f64 - mean).powi(2)).sum::<f64>() / samples.len() as f64;
+    let variance = samples
+        .iter()
+        .map(|&value| (value as f64 - mean).powi(2))
+        .sum::<f64>()
+        / samples.len() as f64;
     variance.sqrt() / mean
 }
 
@@ -196,11 +244,15 @@ fn report_phase(label: &str, run_p50s: &[u128]) {
 
 fn main() -> Result<(), Box<dyn Error>> {
     if !Path::new(MODEL_PATH).exists() {
-        eprintln!("restore_to_inference_probe: skipping, no host-local mnist.onnx checkout at {MODEL_PATH}");
+        eprintln!(
+            "restore_to_inference_probe: skipping, no host-local mnist.onnx checkout at {MODEL_PATH}"
+        );
         return Ok(());
     }
     if !test_image_path().exists() {
-        eprintln!("restore_to_inference_probe: skipping, no host-local MNIST idx dataset under {DATASET_DIR}");
+        eprintln!(
+            "restore_to_inference_probe: skipping, no host-local MNIST idx dataset under {DATASET_DIR}"
+        );
         return Ok(());
     }
 
@@ -223,7 +275,11 @@ fn main() -> Result<(), Box<dyn Error>> {
     // Direct-load reference logits -- the model's own owned initializers,
     // never touching the mapped region at all. The correctness oracle every
     // restored run below is checked against.
-    let direct_initializers: Vec<(&str, &[f32])> = model.initializers.iter().map(|(name, data)| (name.as_str(), data.as_slice())).collect();
+    let direct_initializers: Vec<(&str, &[f32])> = model
+        .initializers
+        .iter()
+        .map(|(name, data)| (name.as_str(), data.as_slice()))
+        .collect();
     let direct_logits = forward(&model, &direct_initializers, &image)?;
 
     let mut map_run_p50s = Vec::with_capacity(RUN_COUNT);
@@ -247,7 +303,10 @@ fn main() -> Result<(), Box<dyn Error>> {
 
             let decode_start = Instant::now();
             let named = decode_named(view.as_slice(), &manifest);
-            let named_refs: Vec<(&str, &[f32])> = named.iter().map(|(name, data)| (*name, data.as_slice())).collect();
+            let named_refs: Vec<(&str, &[f32])> = named
+                .iter()
+                .map(|(name, data)| (*name, data.as_slice()))
+                .collect();
             let decode_nanos = decode_start.elapsed().as_nanos();
 
             let forward_start = Instant::now();
@@ -308,7 +367,11 @@ fn main() -> Result<(), Box<dyn Error>> {
         for iteration in 0..ITERATIONS_PER_RUN {
             let naive_start = Instant::now();
             let naive_model = load_model(Path::new(MODEL_PATH))?;
-            let naive_initializers: Vec<(&str, &[f32])> = naive_model.initializers.iter().map(|(name, data)| (name.as_str(), data.as_slice())).collect();
+            let naive_initializers: Vec<(&str, &[f32])> = naive_model
+                .initializers
+                .iter()
+                .map(|(name, data)| (name.as_str(), data.as_slice()))
+                .collect();
             let _logits = forward(&naive_model, &naive_initializers, &image)?;
             let naive_nanos = naive_start.elapsed().as_nanos();
             println!("iteration_naive_cold_start_nanos:{run_index}:{iteration}:{naive_nanos}");
@@ -327,5 +390,10 @@ fn main() -> Result<(), Box<dyn Error>> {
 }
 
 fn argmax(values: &[f32]) -> usize {
-    values.iter().enumerate().max_by(|left, right| left.1.total_cmp(right.1)).map(|(index, _)| index).unwrap_or(0)
+    values
+        .iter()
+        .enumerate()
+        .max_by(|left, right| left.1.total_cmp(right.1))
+        .map(|(index, _)| index)
+        .unwrap_or(0)
 }

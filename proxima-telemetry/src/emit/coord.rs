@@ -239,7 +239,6 @@ mod tests {
         clippy::default_constructed_unit_structs
     )]
 
-    
     use super::{Coord, CoordError, SEG_MAX};
     use crate::level::Level;
 
@@ -271,7 +270,11 @@ mod tests {
     #[case::shorter_not_in_deeper("17.3", "17.3.5", false)]
     #[case::deep_in_band("17.2.1", "17", true)]
     #[case::other_band_excluded("13.2.1", "17", false)]
-    async fn subtree_membership(#[case] candidate: &str, #[case] ancestor: &str, #[case] want: bool) {
+    async fn subtree_membership(
+        #[case] candidate: &str,
+        #[case] ancestor: &str,
+        #[case] want: bool,
+    ) {
         let candidate = Coord::parse(candidate).unwrap();
         let ancestor = Coord::parse(ancestor).unwrap();
         assert_eq!(candidate.in_subtree_of(ancestor), want);

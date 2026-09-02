@@ -74,8 +74,14 @@ pub fn real_forward_fixture_with_cached_len(cached_len: u64) -> RealForwardFixtu
     for (position, op) in program.iter().enumerate() {
         let Op::Input { name, .. } = op else { continue };
         let node = NodeId(position as u32);
-        let count: usize = shapes.of(node).iter().map(|extent| *extent as usize).product();
-        let name = name.clone().expect("every block input in this program is named");
+        let count: usize = shapes
+            .of(node)
+            .iter()
+            .map(|extent| *extent as usize)
+            .product();
+        let name = name
+            .clone()
+            .expect("every block input in this program is named");
         // an empty block is legitimate here: a KV-cache input is genuinely
         // zero-length at `cached_len == 0`, and padding it to one element is
         // an invented value the shape check correctly rejects.

@@ -38,8 +38,8 @@ use core::mem::size_of;
 use std::sync::mpsc;
 
 use proxima_tensor::{
-    BoundOp, BoundOpKind, DType, Evaluated, Keep, Lookup, NodeId, Op, QuantizedBlock, Shapes, TensorError,
-    bind, infer, resolve_named_blocks,
+    BoundOp, BoundOpKind, DType, Evaluated, Keep, Lookup, NodeId, Op, QuantizedBlock, Shapes,
+    TensorError, bind, infer, resolve_named_blocks,
 };
 
 use crate::error::EmitError;
@@ -56,7 +56,9 @@ pub enum WgpuError {
     #[error("wgpu driver error: {0}")]
     Driver(String),
     /// v1 uploads `Float32` blocks only — see the module doc.
-    #[error("node {node} is bound to a {codec} block, which the wgpu v1 driver does not upload (float32 only)")]
+    #[error(
+        "node {node} is bound to a {codec} block, which the wgpu v1 driver does not upload (float32 only)"
+    )]
     UnsupportedBlock { node: NodeId, codec: &'static str },
     #[error(transparent)]
     Tensor(#[from] TensorError),
@@ -70,8 +72,14 @@ pub enum WgpuError {
     /// with no error scope around it: an unchecked over-limit pipeline is an
     /// uncaught panic, not a `Result::Err` (the finding
     /// `training_step_parity.rs` named against the pre-fix driver).
-    #[error("node {node} needs {needed} storage buffer bindings but this device supports at most {limit} per shader stage")]
-    TooManyStorageBuffers { node: NodeId, needed: u32, limit: u32 },
+    #[error(
+        "node {node} needs {needed} storage buffer bindings but this device supports at most {limit} per shader stage"
+    )]
+    TooManyStorageBuffers {
+        node: NodeId,
+        needed: u32,
+        limit: u32,
+    },
 }
 
 /// A resolved, reusable program bound to one live `wgpu` device — the
@@ -161,7 +169,9 @@ fn packed_block_bytes_slice<'a>(block: &QuantizedBlock<'a>) -> &'a [u8] {
         | QuantizedBlock::Q4_0(bytes)
         | QuantizedBlock::Float16(bytes)
         | QuantizedBlock::BFloat16(bytes) => bytes,
-        QuantizedBlock::Float32(_) => unreachable!("packed_block_bytes_slice is never called for a Float32 block"),
+        QuantizedBlock::Float32(_) => {
+            unreachable!("packed_block_bytes_slice is never called for a Float32 block")
+        }
     }
 }
 
@@ -205,7 +215,8 @@ fn acquire_device() -> Result<(wgpu::Device, wgpu::Queue, WgslCaps), WgpuError> 
     // at `request_device`, so this is gated on `adapter.features()` first,
     // never requested blind.
     let adapter_features = adapter.features();
-    let requested_features = adapter_features & (wgpu::Features::SHADER_F16 | wgpu::Features::SUBGROUP);
+    let requested_features =
+        adapter_features & (wgpu::Features::SHADER_F16 | wgpu::Features::SUBGROUP);
     let adapter_info = adapter.get_info();
     // this driver owns its device exclusively (see the struct doc's "no
     // thread-local cache" stance) and never shares it with a swapchain, so
@@ -253,7 +264,12 @@ fn acquire_device() -> Result<(wgpu::Device, wgpu::Queue, WgslCaps), WgpuError> 
 ///
 /// # Errors
 /// Propagates inference/binding failures and device acquisition failures.
-pub fn plan(program: &[Op], symbols: &[u64], blocks: &[QuantizedBlock<'_>], outputs: &[NodeId]) -> Result<WgpuPlan, WgpuError> {
+pub fn plan(
+    program: &[Op],
+    symbols: &[u64],
+    blocks: &[QuantizedBlock<'_>],
+    outputs: &[NodeId],
+) -> Result<WgpuPlan, WgpuError> {
     let shapes = infer(program, symbols)?;
     let root = program
         .len()
@@ -367,7 +383,11 @@ fn reduction_dims(bound: &BoundOp, output_axes: &[u16]) -> Vec<u16> {
 /// A no-op when `bound` gathers nothing, matching that field-emission's own
 /// empty-array early exit.
 fn push_gather_uniforms(bytes: &mut Vec<u8>, bound: &BoundOp, rank_len: usize) {
-    let ordered: Vec<&Lookup> = bound.operands().iter().filter_map(|(_, _, gather)| gather.as_ref()).collect();
+    let ordered: Vec<&Lookup> = bound
+        .operands()
+        .iter()
+        .filter_map(|(_, _, gather)| gather.as_ref())
+        .collect();
     if ordered.is_empty() {
         return;
     }
@@ -512,7 +532,11 @@ fn bound_output_len(bound: &BoundOp) -> usize {
             .iter()
             .map(|axis| bound.extents[*axis as usize] as usize)
             .product(),
-        _ => bound.extents.iter().map(|extent| *extent as usize).product(),
+        _ => bound
+            .extents
+            .iter()
+            .map(|extent| *extent as usize)
+            .product(),
     }
 }
 
@@ -521,7 +545,12 @@ fn bound_output_len(bound: &BoundOp) -> usize {
 /// multiple of 4), but a packed codec's own block width need not be (`Q6_K`'s
 /// 210-byte super-block is not), so this rounds up rather than trusting the
 /// caller.
-fn storage_buffer(device: &wgpu::Device, label: &str, len_bytes: usize, extra: wgpu::BufferUsages) -> wgpu::Buffer {
+fn storage_buffer(
+    device: &wgpu::Device,
+    label: &str,
+    len_bytes: usize,
+    extra: wgpu::BufferUsages,
+) -> wgpu::Buffer {
     device.create_buffer(&wgpu::BufferDescriptor {
         label: Some(label),
         size: len_bytes.max(4).div_ceil(4) as u64 * 4,
@@ -567,7 +596,10 @@ fn gpu_dtype(program: &[Op], node: NodeId) -> DType {
 /// # Errors
 /// Propagates block-shape mismatches, unsupported (non-`Float32`) blocks,
 /// and every WGSL emit/dispatch failure.
-pub fn execute_plan(plan: &mut WgpuPlan, blocks: &[QuantizedBlock<'_>]) -> Result<Evaluated, WgpuError> {
+pub fn execute_plan(
+    plan: &mut WgpuPlan,
+    blocks: &[QuantizedBlock<'_>],
+) -> Result<Evaluated, WgpuError> {
     if blocks.len() != plan.block_nodes.len() {
         return Err(TensorError::InputCountMismatch {
             expected: plan.block_nodes.len(),
@@ -586,7 +618,10 @@ pub fn execute_plan(plan: &mut WgpuPlan, blocks: &[QuantizedBlock<'_>]) -> Resul
                         codec: block_codec_name(block),
                     });
                 };
-                (packed_block_bytes_slice(block).len(), packed_expected_bytes(codec, elements))
+                (
+                    packed_block_bytes_slice(block).len(),
+                    packed_expected_bytes(codec, elements),
+                )
             }
         };
         if found != expected {
@@ -609,12 +644,18 @@ pub fn execute_plan(plan: &mut WgpuPlan, blocks: &[QuantizedBlock<'_>]) -> Resul
                     size_of::<f32>() * data.len().max(1),
                     wgpu::BufferUsages::COPY_DST,
                 );
-                plan.queue.write_buffer(&buffer, 0, bytemuck::cast_slice(data));
+                plan.queue
+                    .write_buffer(&buffer, 0, bytemuck::cast_slice(data));
                 buffer
             }
             _ => {
                 let bytes = packed_block_bytes_slice(block);
-                let buffer = storage_buffer(&plan.device, "omega-wgpu-packed-input", bytes.len(), wgpu::BufferUsages::COPY_DST);
+                let buffer = storage_buffer(
+                    &plan.device,
+                    "omega-wgpu-packed-input",
+                    bytes.len(),
+                    wgpu::BufferUsages::COPY_DST,
+                );
                 plan.queue.write_buffer(&buffer, 0, bytes);
                 buffer
             }
@@ -685,7 +726,8 @@ pub fn execute_plan(plan: &mut WgpuPlan, blocks: &[QuantizedBlock<'_>]) -> Resul
                 size_of::<u32>() * gathers,
                 wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::COPY_SRC,
             );
-            plan.queue.write_buffer(&buffer, 0, &alloc::vec![0u8; size_of::<u32>() * gathers]);
+            plan.queue
+                .write_buffer(&buffer, 0, &alloc::vec![0u8; size_of::<u32>() * gathers]);
             buffer
         });
 
@@ -694,14 +736,22 @@ pub fn execute_plan(plan: &mut WgpuPlan, blocks: &[QuantizedBlock<'_>]) -> Resul
         let mut entries: Vec<wgpu::BindGroupEntry<'_>> = Vec::with_capacity(kernel.bindings.len());
         for (index, binding) in kernel.bindings.iter().enumerate() {
             let resource = match binding {
-                Binding::Input(node) | Binding::Output(node) | Binding::Indices(node) => device_buffers
-                    .get(node)
-                    .ok_or_else(|| WgpuError::Driver(alloc::format!("no device buffer for node {node}")))?
-                    .as_entire_binding(),
+                Binding::Input(node) | Binding::Output(node) | Binding::Indices(node) => {
+                    device_buffers
+                        .get(node)
+                        .ok_or_else(|| {
+                            WgpuError::Driver(alloc::format!("no device buffer for node {node}"))
+                        })?
+                        .as_entire_binding()
+                }
                 Binding::Uniforms => uniform_buffer.as_entire_binding(),
                 Binding::Fault => fault_buffer
                     .as_ref()
-                    .ok_or_else(|| WgpuError::Driver("gather kernel requested but no fault buffer allocated".into()))?
+                    .ok_or_else(|| {
+                        WgpuError::Driver(
+                            "gather kernel requested but no fault buffer allocated".into(),
+                        )
+                    })?
                     .as_entire_binding(),
             };
             entries.push(wgpu::BindGroupEntry {
@@ -715,7 +765,10 @@ pub fn execute_plan(plan: &mut WgpuPlan, blocks: &[QuantizedBlock<'_>]) -> Resul
             entries: &entries,
         });
 
-        let workgroups = kernel.threads.div_ceil(u64::from(kernel.workgroup_size)).max(1) as u32;
+        let workgroups = kernel
+            .threads
+            .div_ceil(u64::from(kernel.workgroup_size))
+            .max(1) as u32;
         let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
             label: Some(kernel.entry.as_str()),
             timestamp_writes: None,
@@ -754,7 +807,8 @@ pub fn execute_plan(plan: &mut WgpuPlan, blocks: &[QuantizedBlock<'_>]) -> Resul
         staging.push((*node, staged));
     }
 
-    let mut fault_staging: Vec<(NodeId, wgpu::Buffer, Vec<u64>)> = Vec::with_capacity(pending_faults.len());
+    let mut fault_staging: Vec<(NodeId, wgpu::Buffer, Vec<u64>)> =
+        Vec::with_capacity(pending_faults.len());
     for (node, source, extents) in &pending_faults {
         let byte_len = source.size();
         let staged = plan.device.create_buffer(&wgpu::BufferDescriptor {
@@ -809,7 +863,10 @@ pub fn execute_plan(plan: &mut WgpuPlan, blocks: &[QuantizedBlock<'_>]) -> Resul
 ///
 /// # Errors
 /// Propagates name resolution and execution failures.
-pub fn execute_plan_named(plan: &mut WgpuPlan, named: &[(&str, QuantizedBlock<'_>)]) -> Result<Evaluated, WgpuError> {
+pub fn execute_plan_named(
+    plan: &mut WgpuPlan,
+    named: &[(&str, QuantizedBlock<'_>)],
+) -> Result<Evaluated, WgpuError> {
     let blocks = resolve_named_blocks(&plan.program, named)?;
     execute_plan(plan, &blocks)
 }

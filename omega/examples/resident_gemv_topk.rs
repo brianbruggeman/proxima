@@ -171,21 +171,15 @@ fn run() {
     /// both device-side selection arms so a disagreement can only be about
     /// WHICH values were selected, never how ties within one method break.
     fn rank_descending(values: &[f32]) -> Vec<(f32, usize)> {
-        let mut indexed: Vec<(f32, usize)> =
-            values.iter().copied().zip(0..).collect::<Vec<_>>();
-        indexed.sort_by(|left, right| {
-            right.0.total_cmp(&left.0).then(left.1.cmp(&right.1))
-        });
+        let mut indexed: Vec<(f32, usize)> = values.iter().copied().zip(0..).collect::<Vec<_>>();
+        indexed.sort_by(|left, right| right.0.total_cmp(&left.0).then(left.1.cmp(&right.1)));
         indexed
     }
 
     /// The host-side incumbent this probe exists to retire: `O(N log N)`.
     fn full_sort_topk(values: &[f32], k: usize) -> Vec<(f32, usize)> {
-        let mut indexed: Vec<(f32, usize)> =
-            values.iter().copied().zip(0..).collect::<Vec<_>>();
-        indexed.sort_by(|left, right| {
-            right.0.total_cmp(&left.0).then(left.1.cmp(&right.1))
-        });
+        let mut indexed: Vec<(f32, usize)> = values.iter().copied().zip(0..).collect::<Vec<_>>();
+        indexed.sort_by(|left, right| right.0.total_cmp(&left.0).then(left.1.cmp(&right.1)));
         indexed.truncate(k);
         indexed
     }
@@ -193,8 +187,7 @@ fn run() {
     /// The fix: partition around the k-th element (`O(N)` expected), sort
     /// only the k-slice for order. Never fully orders the tail.
     fn partial_select_topk(values: &[f32], k: usize) -> Vec<(f32, usize)> {
-        let mut indexed: Vec<(f32, usize)> =
-            values.iter().copied().zip(0..).collect::<Vec<_>>();
+        let mut indexed: Vec<(f32, usize)> = values.iter().copied().zip(0..).collect::<Vec<_>>();
         let bound = k.min(indexed.len());
         if bound > 0 && bound < indexed.len() {
             indexed.select_nth_unstable_by(bound - 1, |left, right| {
@@ -202,9 +195,7 @@ fn run() {
             });
         }
         indexed.truncate(bound);
-        indexed.sort_by(|left, right| {
-            right.0.total_cmp(&left.0).then(left.1.cmp(&right.1))
-        });
+        indexed.sort_by(|left, right| right.0.total_cmp(&left.0).then(left.1.cmp(&right.1)));
         indexed
     }
 
@@ -216,7 +207,8 @@ fn run() {
                 candidate.len()
             ));
         }
-        for (rank, (oracle_slot, candidate_slot)) in oracle.iter().zip(candidate.iter()).enumerate() {
+        for (rank, (oracle_slot, candidate_slot)) in oracle.iter().zip(candidate.iter()).enumerate()
+        {
             let diff = (oracle_slot.0 - candidate_slot.0).abs();
             if diff > TOLERANCE || oracle_slot.1 != candidate_slot.1 {
                 return Some(format!(
@@ -244,10 +236,17 @@ fn run() {
 
     fn mean_and_cov(samples_ms: &[f64]) -> (f64, f64) {
         let mean = samples_ms.iter().sum::<f64>() / samples_ms.len() as f64;
-        let variance = samples_ms.iter().map(|value| (value - mean).powi(2)).sum::<f64>()
+        let variance = samples_ms
+            .iter()
+            .map(|value| (value - mean).powi(2))
+            .sum::<f64>()
             / samples_ms.len() as f64;
         let stddev = variance.sqrt();
-        let cov_pct = if mean > 0.0 { stddev / mean * 100.0 } else { 0.0 };
+        let cov_pct = if mean > 0.0 {
+            stddev / mean * 100.0
+        } else {
+            0.0
+        };
         (mean, cov_pct)
     }
 
@@ -304,7 +303,10 @@ fn run() {
 
         let resolved = {
             let warmup_query = query_at(0);
-            let blocks = [QuantizedBlock::Float32(&corpus), QuantizedBlock::Float32(&warmup_query)];
+            let blocks = [
+                QuantizedBlock::Float32(&corpus),
+                QuantizedBlock::Float32(&warmup_query),
+            ];
             let resolved = omega::plan(&program, &[], &blocks, &[sum])
                 .map_err(|error| format!("plan failed at rows={rows}: {error}"))?;
             omega::execute_plan(&resolved, &blocks)
@@ -314,14 +316,20 @@ fn run() {
 
         for warmup_index in 1..=WARMUP_QUERIES as u64 {
             let query = query_at(warmup_index);
-            let blocks = [QuantizedBlock::Float32(&corpus), QuantizedBlock::Float32(&query)];
+            let blocks = [
+                QuantizedBlock::Float32(&corpus),
+                QuantizedBlock::Float32(&query),
+            ];
             omega::execute_plan(&resolved, &blocks)
                 .map_err(|error| format!("warmup execute failed at rows={rows}: {error}"))?;
         }
 
         for query_index in 0..TIMED_QUERIES as u64 {
             let query = query_at(1000 + query_index);
-            let blocks = [QuantizedBlock::Float32(&corpus), QuantizedBlock::Float32(&query)];
+            let blocks = [
+                QuantizedBlock::Float32(&corpus),
+                QuantizedBlock::Float32(&query),
+            ];
 
             let gemv_started = Instant::now();
             let evaluated = omega::execute_plan(&resolved, &blocks)
@@ -329,7 +337,11 @@ fn run() {
             let gemv_elapsed_ms = gemv_started.elapsed().as_secs_f64() * 1000.0;
 
             let distances = evaluated.root();
-            assert_eq!(distances.len(), rows, "degenerate probe: no output at rows={rows}");
+            assert_eq!(
+                distances.len(),
+                rows,
+                "degenerate probe: no output at rows={rows}"
+            );
 
             if query_index == 0 {
                 let oracle_dots: Vec<f32> = (0..rows)
@@ -345,11 +357,11 @@ fn run() {
                 let partial_select_top = partial_select_topk(distances, TOP_K);
 
                 if let Some(mismatch) = slots_agree(oracle_top, &full_sort_top) {
-                    gate_failure =
-                        Some(format!("full_sort vs oracle at rows={rows}: {mismatch}"));
+                    gate_failure = Some(format!("full_sort vs oracle at rows={rows}: {mismatch}"));
                 } else if let Some(mismatch) = slots_agree(oracle_top, &partial_select_top) {
-                    gate_failure =
-                        Some(format!("partial_select vs oracle at rows={rows}: {mismatch}"));
+                    gate_failure = Some(format!(
+                        "partial_select vs oracle at rows={rows}: {mismatch}"
+                    ));
                 }
             }
 
@@ -447,9 +459,20 @@ fn run() {
     println!();
     println!(
         "{:>9} | {:>16} | {:>16} | {:>7} | {:>14} | {:>7} | {:>18} | {:>7} | {:>13} | {:>13} | {:>9} | {:>9} | {:>10} | {:>18}",
-        "rows", "gemv p50 (ms)", "gemv p99 (ms)", "gemv CoV%", "full_sort p50", "fs CoV%",
-        "partial_select p50", "ps CoV%", "total(fs) ms", "total(ps) ms", "GB/s(fs)", "GB/s(ps)",
-        "peak RSS GiB", "nocopy att/reuse/wire"
+        "rows",
+        "gemv p50 (ms)",
+        "gemv p99 (ms)",
+        "gemv CoV%",
+        "full_sort p50",
+        "fs CoV%",
+        "partial_select p50",
+        "ps CoV%",
+        "total(fs) ms",
+        "total(ps) ms",
+        "GB/s(fs)",
+        "GB/s(ps)",
+        "peak RSS GiB",
+        "nocopy att/reuse/wire"
     );
     for row in &rows_out {
         println!(
@@ -484,7 +507,10 @@ fn run() {
         );
     }
 
-    let baseline_path = concat!(env!("CARGO_MANIFEST_DIR"), "/examples/resident_gemv_topk.baseline.json");
+    let baseline_path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/examples/resident_gemv_topk.baseline.json"
+    );
     let mut json = String::new();
     json.push_str("{\n");
     json.push_str(&format!("  \"dimension\": {DIMENSION},\n"));
@@ -523,8 +549,9 @@ fn run() {
     json.push_str("  ],\n");
     json.push_str(&format!("  \"any_gate_failed\": {any_gate_failed}\n"));
     json.push_str("}\n");
-    std::fs::write(baseline_path, &json)
-        .unwrap_or_else(|error| panic!("failed to write baseline json to {baseline_path}: {error}"));
+    std::fs::write(baseline_path, &json).unwrap_or_else(|error| {
+        panic!("failed to write baseline json to {baseline_path}: {error}")
+    });
     println!();
     println!("baseline written: {baseline_path}");
 

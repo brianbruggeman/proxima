@@ -32,7 +32,8 @@ use std::sync::Arc;
 use proxima::prime::PrimeRuntime;
 use proxima::runtime::PrimeServeExt;
 
-const MODEL_PATH: &str = "/Users/brianbruggeman/repos/others/burn/examples/onnx-inference/src/model/mnist.onnx";
+const MODEL_PATH: &str =
+    "/Users/brianbruggeman/repos/others/burn/examples/onnx-inference/src/model/mnist.onnx";
 
 fn main() -> Result<(), Box<dyn Error>> {
     let Some(model) = pipeline::load_model(Path::new(MODEL_PATH))? else {
@@ -42,10 +43,20 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     let handler = pipeline::build_handler(Arc::new(model));
 
-    let runtime = Arc::new(PrimeRuntime::builder().cores(1).background_inline().build()?);
-    let addr = std::env::args().nth(1).unwrap_or_else(|| "127.0.0.1:0".to_string()).parse()?;
+    let runtime = Arc::new(
+        PrimeRuntime::builder()
+            .cores(1)
+            .background_inline()
+            .build()?,
+    );
+    let addr = std::env::args()
+        .nth(1)
+        .unwrap_or_else(|| "127.0.0.1:0".to_string())
+        .parse()?;
     let handle = runtime.serve_http(addr, handler)?;
-    let bound = handle.bind_addr().ok_or("listener did not report a bound address")?;
+    let bound = handle
+        .bind_addr()
+        .ok_or("listener did not report a bound address")?;
 
     // LISTENING line is the smoke test's synchronization point: it starts
     // this binary as a child process and blocks on stdout until this

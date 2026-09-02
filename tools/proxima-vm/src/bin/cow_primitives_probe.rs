@@ -113,7 +113,9 @@ unsafe extern "C" {
 }
 
 fn read_error(buffer: &[c_char]) -> String {
-    unsafe { CStr::from_ptr(buffer.as_ptr()) }.to_string_lossy().into_owned()
+    unsafe { CStr::from_ptr(buffer.as_ptr()) }
+        .to_string_lossy()
+        .into_owned()
 }
 
 fn new_error_buffer() -> [c_char; ERROR_CAPACITY] {
@@ -134,7 +136,13 @@ fn run_cow_view_candidate(size_label: &str, size: usize) -> Result<(), Box<dyn E
     let mut handle: i32 = -1;
     let mut error_buffer = new_error_buffer();
     let status = unsafe {
-        proxima_vm_probe_create_source(size, &raw mut host_address, &raw mut handle, error_buffer.as_mut_ptr(), ERROR_CAPACITY)
+        proxima_vm_probe_create_source(
+            size,
+            &raw mut host_address,
+            &raw mut handle,
+            error_buffer.as_mut_ptr(),
+            ERROR_CAPACITY,
+        )
     };
     if status != 0 {
         return Err(read_error(&error_buffer).into());
@@ -206,7 +214,13 @@ fn run_vm_copy_candidate(size_label: &str, size: usize) -> Result<(), Box<dyn Er
     let mut handle: i32 = -1;
     let mut error_buffer = new_error_buffer();
     let status = unsafe {
-        proxima_vm_probe_create_source(size, &raw mut host_address, &raw mut handle, error_buffer.as_mut_ptr(), ERROR_CAPACITY)
+        proxima_vm_probe_create_source(
+            size,
+            &raw mut host_address,
+            &raw mut handle,
+            error_buffer.as_mut_ptr(),
+            ERROR_CAPACITY,
+        )
     };
     if status != 0 {
         return Err(read_error(&error_buffer).into());
@@ -239,7 +253,10 @@ fn run_vm_copy_candidate(size_label: &str, size: usize) -> Result<(), Box<dyn Er
         };
         println!("vmcopy_kern_return:{size_label}:{index}:{kern_return}");
         if status != 0 {
-            println!("vmcopy_rejected:{size_label}:{index}:{}", read_error(&error_buffer));
+            println!(
+                "vmcopy_rejected:{size_label}:{index}:{}",
+                read_error(&error_buffer)
+            );
             rejected = true;
             break;
         }
@@ -265,7 +282,13 @@ fn run_protect_whole_candidate(size_label: &str, size: usize) -> Result<(), Box<
     let mut handle: i32 = -1;
     let mut error_buffer = new_error_buffer();
     let status = unsafe {
-        proxima_vm_probe_create_source(size, &raw mut host_address, &raw mut handle, error_buffer.as_mut_ptr(), ERROR_CAPACITY)
+        proxima_vm_probe_create_source(
+            size,
+            &raw mut host_address,
+            &raw mut handle,
+            error_buffer.as_mut_ptr(),
+            ERROR_CAPACITY,
+        )
     };
     if status != 0 {
         return Err(read_error(&error_buffer).into());
@@ -282,10 +305,20 @@ fn run_protect_whole_candidate(size_label: &str, size: usize) -> Result<(), Box<
         let mut nanos: u64 = 0;
         let mut error_buffer = new_error_buffer();
         let status = unsafe {
-            proxima_vm_probe_protect_whole(0, size, want_read_only, &raw mut nanos, error_buffer.as_mut_ptr(), ERROR_CAPACITY)
+            proxima_vm_probe_protect_whole(
+                0,
+                size,
+                want_read_only,
+                &raw mut nanos,
+                error_buffer.as_mut_ptr(),
+                ERROR_CAPACITY,
+            )
         };
         if status != 0 {
-            eprintln!("protect_whole error at {size_label}#{index}: {}", read_error(&error_buffer));
+            eprintln!(
+                "protect_whole error at {size_label}#{index}: {}",
+                read_error(&error_buffer)
+            );
             break;
         }
         println!("protect_whole_nanos:{size_label}:{index}:{nanos}");
@@ -303,7 +336,10 @@ unsafe extern "C" {
 
 const HV_MEMORY_READ_WRITE: u64 = 1 | 2;
 
-unsafe fn proxima_vm_probe_vm_create_guard_map(host_address: *mut c_void, size: usize) -> Result<(), Box<dyn Error>> {
+unsafe fn proxima_vm_probe_vm_create_guard_map(
+    host_address: *mut c_void,
+    size: usize,
+) -> Result<(), Box<dyn Error>> {
     let status = unsafe { hv_vm_map(host_address, 0, size, HV_MEMORY_READ_WRITE) };
     if status != 0 {
         return Err(format!("hv_vm_map guard failed: 0x{status:x}").into());
@@ -326,7 +362,13 @@ fn run_protect_per_page_candidate() -> Result<(), Box<dyn Error>> {
     let mut handle: i32 = -1;
     let mut error_buffer = new_error_buffer();
     let status = unsafe {
-        proxima_vm_probe_create_source(SIZE, &raw mut host_address, &raw mut handle, error_buffer.as_mut_ptr(), ERROR_CAPACITY)
+        proxima_vm_probe_create_source(
+            SIZE,
+            &raw mut host_address,
+            &raw mut handle,
+            error_buffer.as_mut_ptr(),
+            ERROR_CAPACITY,
+        )
     };
     if status != 0 {
         return Err(read_error(&error_buffer).into());
@@ -337,7 +379,14 @@ fn run_protect_per_page_candidate() -> Result<(), Box<dyn Error>> {
     let mut nanos = vec![0u64; PAGE_COUNT];
     let mut error_buffer = new_error_buffer();
     let status = unsafe {
-        proxima_vm_probe_protect_per_page(0, GRANULE, PAGE_COUNT, nanos.as_mut_ptr(), error_buffer.as_mut_ptr(), ERROR_CAPACITY)
+        proxima_vm_probe_protect_per_page(
+            0,
+            GRANULE,
+            PAGE_COUNT,
+            nanos.as_mut_ptr(),
+            error_buffer.as_mut_ptr(),
+            ERROR_CAPACITY,
+        )
     };
     if status != 0 {
         eprintln!("protect_per_page error: {}", read_error(&error_buffer));

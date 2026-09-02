@@ -166,11 +166,11 @@ use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
+use core::cell::RefCell;
 use core::ffi::c_void;
 use core::mem::{size_of, size_of_val};
 use core::ptr::NonNull;
 use std::sync::OnceLock;
-use core::cell::RefCell;
 
 use half::f16;
 use objc2::rc::Retained;
@@ -184,17 +184,17 @@ use objc2_metal::{
 use proxima_telemetry::counter;
 use proxima_telemetry::metric::Counter;
 
+#[cfg(feature = "instrument")]
+use proxima_tensor::instrument::{elapsed_ticks, read_ticks};
 use proxima_tensor::{
     BoundOp, BoundOpKind, DType, Evaluated, IndexMap, Keep, Lookup, NodeId, Op, QuantizedBlock,
     Shapes, TensorError, bind, correct_packed_matmul_layouts, infer, resolve_named_blocks,
 };
-#[cfg(feature = "instrument")]
-use proxima_tensor::instrument::{elapsed_ticks, read_ticks};
 
 use crate::error::EmitError;
-use crate::msl::{gather_count, kernel_cache_key, kernel_dispatch_shape, reduction_dims};
 #[cfg(feature = "instrument")]
 use crate::msl::diagnose_packed_row_block;
+use crate::msl::{gather_count, kernel_cache_key, kernel_dispatch_shape, reduction_dims};
 use crate::{Binding, GridSpec, Kernel, PackedCodec, PackedOperands, emit};
 
 /// A live Metal buffer handle — the shape every device-buffer table and
@@ -494,11 +494,12 @@ pub fn execute_plan(plan: &Plan, blocks: &[QuantizedBlock<'_>]) -> Result<Evalua
     // makes for two encoders in one command buffer, just one level tighter:
     // one encoder's own dispatches were always ordered and hazard-tracked
     // relative to each other, encoder boundaries or not.
-    let encoder = command_buffer
-        .computeCommandEncoder()
-        .ok_or_else(|| MetalError::CompileFailed {
-            log: "command buffer refused to hand out a compute encoder".to_string(),
-        })?;
+    let encoder =
+        command_buffer
+            .computeCommandEncoder()
+            .ok_or_else(|| MetalError::CompileFailed {
+                log: "command buffer refused to hand out a compute encoder".to_string(),
+            })?;
 
     // pipelines live in this thread's `PIPELINE_CACHE`, not here: see that
     // static's own doc for why per-call was the defect.
@@ -508,7 +509,13 @@ pub fn execute_plan(plan: &Plan, blocks: &[QuantizedBlock<'_>]) -> Result<Evalua
     // completes. See the module doc's "Gather fault reporting" section.
     let mut pending_faults: Vec<PendingFault<'_>> = Vec::new();
     for (position, bound) in prepared.resolved.iter().enumerate() {
-        let fault = encode_op(&device, &encoder, &mut device_buffers, bound, packed_operands)?;
+        let fault = encode_op(
+            &device,
+            &encoder,
+            &mut device_buffers,
+            bound,
+            packed_operands,
+        )?;
         if let Some((fault_buffer, gathers)) = fault {
             pending_faults.push((bound, fault_buffer, gathers));
         }
@@ -689,16 +696,24 @@ pub fn execute_plan_op_timed(
             .ok_or_else(|| MetalError::CompileFailed {
                 log: "command queue refused to hand out a command buffer".to_string(),
             })?;
-        let encoder = command_buffer
-            .computeCommandEncoder()
-            .ok_or_else(|| MetalError::CompileFailed {
-                log: "command buffer refused to hand out a compute encoder".to_string(),
-            })?;
-        let fault = encode_op(&device, &encoder, &mut device_buffers, bound, packed_operands)?;
+        let encoder =
+            command_buffer
+                .computeCommandEncoder()
+                .ok_or_else(|| MetalError::CompileFailed {
+                    log: "command buffer refused to hand out a compute encoder".to_string(),
+                })?;
+        let fault = encode_op(
+            &device,
+            &encoder,
+            &mut device_buffers,
+            bound,
+            packed_operands,
+        )?;
         encoder.endEncoding();
         command_buffer.commit();
         command_buffer.waitUntilCompleted();
-        let gpu_ns = ((command_buffer.GPUEndTime() - command_buffer.GPUStartTime()) * 1e9).max(0.0) as u64;
+        let gpu_ns =
+            ((command_buffer.GPUEndTime() - command_buffer.GPUStartTime()) * 1e9).max(0.0) as u64;
         if let Some((fault_buffer, gathers)) = fault {
             check_gather_fault(bound, &fault_buffer, gathers)?;
         }
@@ -754,7 +769,9 @@ fn classify_kind(bound: &BoundOp, packed_operands: &PackedOperands) -> &'static 
         BoundOpKind::Elementwise { .. } => "elementwise",
         BoundOpKind::Iota => "iota",
         BoundOpKind::Constant { .. } => "constant",
-        BoundOpKind::Reduce { keep: Keep::Scan, .. } => "scan",
+        BoundOpKind::Reduce {
+            keep: Keep::Scan, ..
+        } => "scan",
         BoundOpKind::Reduce {
             keep: Keep::Reduce, ..
         } => match emit(bound, packed_operands) {
@@ -766,7 +783,9 @@ fn classify_kind(bound: &BoundOp, packed_operands: &PackedOperands) -> &'static 
             // kernel bodies -- `simdgroup_multiply_accumulate` only ever
             // appears in [`crate::msl::push_tiled_gemm_body`]'s emitted
             // source, so it is the one marker that still disambiguates them.
-            Ok(kernel) if kernel.source.contains("simdgroup_multiply_accumulate") => "reduce-tiled-gemm",
+            Ok(kernel) if kernel.source.contains("simdgroup_multiply_accumulate") => {
+                "reduce-tiled-gemm"
+            }
             Ok(kernel)
                 if kernel.source.contains("q4k_run8(blk")
                     || kernel.source.contains("q5k_value(blk")
@@ -796,11 +815,20 @@ fn classify_kind(bound: &BoundOp, packed_operands: &PackedOperands) -> &'static 
 /// names the exact gate that rejected it.
 #[cfg(feature = "instrument")]
 fn diagnose_kind(bound: &BoundOp, packed_operands: &PackedOperands) -> Option<String> {
-    if !matches!(bound.kind, BoundOpKind::Reduce { keep: Keep::Reduce, .. }) {
+    if !matches!(
+        bound.kind,
+        BoundOpKind::Reduce {
+            keep: Keep::Reduce,
+            ..
+        }
+    ) {
         return None;
     }
-    let quantized: Vec<Option<PackedCodec>> =
-        bound.operands().iter().map(|(node, _, _)| packed_operands.get(node).copied()).collect();
+    let quantized: Vec<Option<PackedCodec>> = bound
+        .operands()
+        .iter()
+        .map(|(node, _, _)| packed_operands.get(node).copied())
+        .collect();
     Some(match diagnose_packed_row_block(bound, &quantized) {
         Ok(()) => "PASS".to_string(),
         Err(rejection) => format!("{rejection:?}"),
@@ -822,7 +850,6 @@ struct Prepared {
     /// need this set alongside a node's own declared dtype.
     index_nodes: BTreeSet<NodeId>,
 }
-
 
 /// Element count of one bound block, whatever codec carries it. The CPU
 /// evaluator's own block table is [`QuantizedBlock`]; this driver now takes
@@ -869,11 +896,12 @@ fn block_element_count(block: &QuantizedBlock<'_>) -> Result<usize, MetalError> 
         }
         // Half-precision weights are one element per block -- no
         // super-block to divide out, unlike every quantized codec above.
-        QuantizedBlock::Float16(bytes) => {
-            Ok((bytes.len() / crate::msl::FLOAT16_BLOCK_BYTES) * crate::msl::FLOAT16_BLOCK_ELEMENTS)
-        }
+        QuantizedBlock::Float16(bytes) => Ok(
+            (bytes.len() / crate::msl::FLOAT16_BLOCK_BYTES) * crate::msl::FLOAT16_BLOCK_ELEMENTS
+        ),
         QuantizedBlock::BFloat16(bytes) => {
-            Ok((bytes.len() / crate::msl::BFLOAT16_BLOCK_BYTES) * crate::msl::BFLOAT16_BLOCK_ELEMENTS)
+            Ok((bytes.len() / crate::msl::BFLOAT16_BLOCK_BYTES)
+                * crate::msl::BFLOAT16_BLOCK_ELEMENTS)
         }
     }
 }
@@ -1374,7 +1402,9 @@ fn pipeline_for(
         counter!(PIPELINE_COMPILE_TICKS, elapsed_ticks(compile_started));
     }
     PIPELINE_CACHE.with(|cache| {
-        cache.borrow_mut().insert(cache_key.to_string(), pipeline.clone());
+        cache
+            .borrow_mut()
+            .insert(cache_key.to_string(), pipeline.clone());
     });
     Ok(pipeline)
 }
@@ -1775,8 +1805,10 @@ thread_local! {
 /// witness that the ~5.84 GB/token `proxima-tensor/docs/discipline.md` ROW 82
 /// measured moving through `upload_block_copy` on every step now moves
 /// exactly once per distinct weight buffer, never once per token.
-pub static RESIDENT_BUFFER_UPLOADS: Counter = Counter::new("omega.metal.upload_block.resident_upload");
-pub static RESIDENT_BUFFER_REUSES: Counter = Counter::new("omega.metal.upload_block.resident_reuse");
+pub static RESIDENT_BUFFER_UPLOADS: Counter =
+    Counter::new("omega.metal.upload_block.resident_upload");
+pub static RESIDENT_BUFFER_REUSES: Counter =
+    Counter::new("omega.metal.upload_block.resident_reuse");
 
 /// The copy-path counterpart to [`upload_block_no_copy`]: called only for a
 /// block [`upload_block_as_float`]/[`upload_packed_bytes`] already found
@@ -1847,7 +1879,6 @@ fn zero_fault_buffer(buffer: &ProtocolObject<dyn MTLBuffer>, gather_count: usize
     };
     slots.fill(0);
 }
-
 
 thread_local! {
     /// Uniform blobs, keyed by their own bytes. A plan's uniforms are a
@@ -2022,12 +2053,22 @@ fn encode_op(
     #[cfg(feature = "instrument")]
     let encode_dispatch_started = read_ticks();
     encoder.setComputePipelineState(&pipeline);
-    bind_buffers(encoder, &bindings, device_buffers, &output, &uniforms, fault.as_ref())?;
+    bind_buffers(
+        encoder,
+        &bindings,
+        device_buffers,
+        &output,
+        &uniforms,
+        fault.as_ref(),
+    )?;
     dispatch(encoder, &pipeline, grid);
     #[cfg(feature = "instrument")]
     {
         counter!(ENCODE_DISPATCH_CALLS, 1);
-        counter!(ENCODE_DISPATCH_TICKS, elapsed_ticks(encode_dispatch_started));
+        counter!(
+            ENCODE_DISPATCH_TICKS,
+            elapsed_ticks(encode_dispatch_started)
+        );
     }
 
     device_buffers.insert(bound.node, output);

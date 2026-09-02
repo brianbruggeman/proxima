@@ -49,10 +49,10 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use bytes::Bytes;
 use futures::channel::oneshot;
 use futures::{FutureExt, select};
+use proxima_telemetry::{debug, error, warn};
 use tokio::io::{AsyncRead, AsyncWrite};
 #[cfg(feature = "tls")]
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use proxima_telemetry::{debug, error, warn};
 use tokio_util::compat::TokioAsyncReadCompatExt;
 
 use crate::body::RequestStream;

@@ -249,11 +249,19 @@ fn main() {
     let alloc_after = ALLOC_COUNT.load(Ordering::Relaxed);
 
     println!("gemm {m}x{k}x{n}: {:.3}s", elapsed.as_secs_f64());
-    println!("root[0]={} root_len={}", evaluated.root()[0], evaluated.root().len());
-    println!("allocations during evaluate(): {}", alloc_after - alloc_before);
+    println!(
+        "root[0]={} root_len={}",
+        evaluated.root()[0],
+        evaluated.root().len()
+    );
+    println!(
+        "allocations during evaluate(): {}",
+        alloc_after - alloc_before
+    );
     #[cfg(all(target_arch = "aarch64", feature = "instrument"))]
     {
-        let (gate_passes, invocations, fallback_elements) = proxima_tensor::cpu::width_tile_counters();
+        let (gate_passes, invocations, fallback_elements) =
+            proxima_tensor::cpu::width_tile_counters();
         println!(
             "width_tile gate_passes={gate_passes} invocations={invocations} fallback_elements={fallback_elements}"
         );
@@ -282,9 +290,13 @@ fn main() {
         #[cfg(feature = "instrument")]
         proxima_tensor::instrument::reset();
         let start = Instant::now();
-        let evaluated = evaluate(&program, &[], &[&lhs, &rhs_t], &[]).expect("transposed-rhs gemm evaluates");
+        let evaluated =
+            evaluate(&program, &[], &[&lhs, &rhs_t], &[]).expect("transposed-rhs gemm evaluates");
         let elapsed = start.elapsed();
-        println!("gemm_rhs_transposed {m}x{k}x{n}: {:.3}s", elapsed.as_secs_f64());
+        println!(
+            "gemm_rhs_transposed {m}x{k}x{n}: {:.3}s",
+            elapsed.as_secs_f64()
+        );
         println!(
             "gemm_rhs_transposed root[0]={} root_len={}",
             evaluated.root()[0],
@@ -292,7 +304,8 @@ fn main() {
         );
         #[cfg(all(target_arch = "aarch64", feature = "instrument"))]
         {
-            let (gate_passes, invocations, fallback_elements) = proxima_tensor::cpu::neon_tile_counters();
+            let (gate_passes, invocations, fallback_elements) =
+                proxima_tensor::cpu::neon_tile_counters();
             println!(
                 "neon_tile gate_passes={gate_passes} invocations={invocations} fallback_elements={fallback_elements}"
             );
@@ -315,20 +328,30 @@ fn main() {
         let a: Vec<f32> = (0..len).map(|value| (value % 13) as f32 + 1.0).collect();
         let b: Vec<f32> = (0..len).map(|value| (value % 7) as f32 + 1.0).collect();
         let start = Instant::now();
-        let evaluated = evaluate(&program, &[], &[&a, &b], &[]).expect("elementwise binary evaluates");
+        let evaluated =
+            evaluate(&program, &[], &[&a, &b], &[]).expect("elementwise binary evaluates");
         let elapsed = start.elapsed();
         println!("elementwise_binary {len}: {:.4}s", elapsed.as_secs_f64());
-        println!("elementwise_binary root[0]={} root_len={}", evaluated.root()[0], evaluated.root().len());
+        println!(
+            "elementwise_binary root[0]={} root_len={}",
+            evaluated.root()[0],
+            evaluated.root().len()
+        );
     }
 
     {
         let (program, _out) = elementwise_chain_program(len);
         let input: Vec<f32> = (0..len).map(|value| (value % 13) as f32 + 1.0).collect();
         let start = Instant::now();
-        let evaluated = evaluate(&program, &[], &[&input], &[]).expect("elementwise chain evaluates");
+        let evaluated =
+            evaluate(&program, &[], &[&input], &[]).expect("elementwise chain evaluates");
         let elapsed = start.elapsed();
         println!("elementwise_chain {len}: {:.4}s", elapsed.as_secs_f64());
-        println!("elementwise_chain root[0]={} root_len={}", evaluated.root()[0], evaluated.root().len());
+        println!(
+            "elementwise_chain root[0]={} root_len={}",
+            evaluated.root()[0],
+            evaluated.root().len()
+        );
     }
 
     {
@@ -338,6 +361,10 @@ fn main() {
         let evaluated = evaluate(&program, &[], &[&input], &[]).expect("scan evaluates");
         let elapsed = start.elapsed();
         println!("scan {len}: {:.4}s", elapsed.as_secs_f64());
-        println!("scan root[0]={} root_len={}", evaluated.root()[0], evaluated.root().len());
+        println!(
+            "scan root[0]={} root_len={}",
+            evaluated.root()[0],
+            evaluated.root().len()
+        );
     }
 }

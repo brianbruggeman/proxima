@@ -62,7 +62,9 @@ pub enum InteropError {
     /// without copying would be unsound, so the caller must fall back to
     /// [`crate::bind::gguf_tensor_as_f32`]'s owned, byte-at-a-time decode
     /// instead.
-    #[error("tensor {tensor:?} is f32 but its file offset is not 4-byte aligned, cannot borrow as &[f32]")]
+    #[error(
+        "tensor {tensor:?} is f32 but its file offset is not 4-byte aligned, cannot borrow as &[f32]"
+    )]
     MisalignedFloat32Tensor { tensor: String },
 
     /// [`crate::bind::architecture_from_metadata`] needed `key` (either
@@ -76,7 +78,9 @@ pub enum InteropError {
     /// [`crate::bind::architecture_from_metadata`]'s vocab derivation: the
     /// `token_embd.weight` tensor's element count did not divide evenly by
     /// `embedding_length`.
-    #[error("token_embd.weight has {elements} elements, which does not divide evenly by embedding_length {embedding}")]
+    #[error(
+        "token_embd.weight has {elements} elements, which does not divide evenly by embedding_length {embedding}"
+    )]
     VocabShapeMismatch { elements: u64, embedding: u32 },
 
     /// [`crate::bind::architecture_from_metadata`] found `key` (e.g.
@@ -89,7 +93,9 @@ pub enum InteropError {
     /// represent genuine per-layer variation, so this surfaces as a typed,
     /// named gap rather than silently picking one layer's value (the max,
     /// the first nonzero, ...) and presenting it as if it applied uniformly.
-    #[error("gguf metadata key {key:?} has {distinct_values} distinct per-layer values; ModelArchitecture cannot represent per-layer variation")]
+    #[error(
+        "gguf metadata key {key:?} has {distinct_values} distinct per-layer values; ModelArchitecture cannot represent per-layer variation"
+    )]
     HeterogeneousMetadataArray { key: String, distinct_values: usize },
 
     /// `crate::generate`'s cached forward program failed to build or
@@ -139,7 +145,10 @@ pub enum InteropError {
     /// `sequence` (the tokenized prompt length) exceeds the caller's own
     /// configured `context_length` (`-c`).
     #[error("prompt sequence {sequence} exceeds configured context_length {context_length} (-c)")]
-    SequenceExceedsContextLength { sequence: usize, context_length: u32 },
+    SequenceExceedsContextLength {
+        sequence: usize,
+        context_length: u32,
+    },
 
     /// [`crate::serving::apply_serving_config`] found a [`crate::serving::ServingConfig`]
     /// field requesting behavior this forward path does not implement yet --
@@ -172,7 +181,9 @@ pub enum InteropError {
     /// [`Self::MoeExpertShapeMismatch`], but for a plain (non-MoE) matmul
     /// weight: the tensor directory's own declared shape disagrees with
     /// the architecture hparams `out_dim`/`in_dim` were derived from.
-    #[error("weight {tensor:?} has {elements} elements, but out_dim={out_dim} in_dim={in_dim} needs {expected}")]
+    #[error(
+        "weight {tensor:?} has {elements} elements, but out_dim={out_dim} in_dim={in_dim} needs {expected}"
+    )]
     DenseWeightShapeMismatch {
         tensor: String,
         elements: usize,
@@ -194,7 +205,9 @@ pub enum InteropError {
     /// unquantized HF checkpoint's own on-disk types); an integer dtype, a
     /// quantized layout's packed integer payload (e.g. MLX's `U32`), or any
     /// other unhandled type surfaces here rather than misreading bytes.
-    #[error("tensor {tensor:?} has dtype {dtype:?}, which this crate has no dense-weight decoder for")]
+    #[error(
+        "tensor {tensor:?} has dtype {dtype:?}, which this crate has no dense-weight decoder for"
+    )]
     UndecodableSafetensorsDType { tensor: String, dtype: DType },
 
     /// `crate::hf_bind::bind_all_weights_from_safetensors` was asked to
@@ -206,7 +219,9 @@ pub enum InteropError {
     /// available here is MLX's packed `weight`/`scales`/`biases` layout,
     /// explicitly out of scope) is not yet implemented -- a caller gets a
     /// typed, named gap rather than a silent wrong bind.
-    #[error("checkpoint has expert_count={expert_count}, but hf mixture-of-experts weight binding is not implemented (dense hf checkpoints only)")]
+    #[error(
+        "checkpoint has expert_count={expert_count}, but hf mixture-of-experts weight binding is not implemented (dense hf checkpoints only)"
+    )]
     HfMoeWeightsUnsupported { expert_count: u32 },
 
     /// `crate::lfm2::bind_lfm2_shortconv_in_proj`'s fused `blk.{layer}.shortconv.in_proj.weight`
@@ -229,8 +244,14 @@ pub enum InteropError {
     /// observed on the real checkpoint (`embedding = 2048 = 8 * 256`), but
     /// a row-boundary split is only provably block-aligned when this holds,
     /// so it is checked rather than assumed.
-    #[error("blk.{layer}.shortconv.in_proj.weight has ggml type {ggml_type:?}, whose block size does not evenly divide embedding={embedding}")]
-    ShortConvInProjNotBlockAligned { layer: u32, ggml_type: GgmlType, embedding: u32 },
+    #[error(
+        "blk.{layer}.shortconv.in_proj.weight has ggml type {ggml_type:?}, whose block size does not evenly divide embedding={embedding}"
+    )]
+    ShortConvInProjNotBlockAligned {
+        layer: u32,
+        ggml_type: GgmlType,
+        embedding: u32,
+    },
 
     /// [`crate::lfm2::lfm2_architecture_from_metadata`]'s `key` (e.g.
     /// `lfm2moe.attention.head_count_kv`) is a per-layer array whose
@@ -239,6 +260,8 @@ pub enum InteropError {
     /// are expected and skipped, but every attention layer must still
     /// share one real kv head count for [`crate::lfm2::Lfm2Architecture::kv_heads`]
     /// to mean anything.
-    #[error("gguf metadata key {key:?} has {distinct_values} distinct nonzero per-layer values; Lfm2Architecture cannot represent per-layer variation")]
+    #[error(
+        "gguf metadata key {key:?} has {distinct_values} distinct nonzero per-layer values; Lfm2Architecture cannot represent per-layer variation"
+    )]
     HeterogeneousNonzeroMetadataArray { key: String, distinct_values: usize },
 }

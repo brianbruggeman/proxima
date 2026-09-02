@@ -60,33 +60,33 @@ use core::future::Future;
 use proxima_gguf::GgmlType;
 use proxima_gguf::pipe::ParsedGguf;
 use proxima_primitives::pipe::Pipe;
-use proxima_tensor::cpu::{Evaluated, QuantizedBlock};
 #[cfg(not(feature = "metal"))]
 use proxima_tensor::cpu::evaluate_quantized_named_with_scratch;
+use proxima_tensor::cpu::{Evaluated, QuantizedBlock};
 use proxima_tensor::op::{NodeId, Op};
 use proxima_tensor::spec::{CachedLayerRoots, mistral_cached_forward_program_with_experts};
 use proxima_tokenizer::{SamplingConfig, Vocab, sample_next_token};
 
-#[cfg(feature = "metal")]
-use omega::backend::{Backend, Plan, execute_plan_named, mark_resident, plan_named};
 #[cfg(all(feature = "instrument", feature = "metal", target_os = "macos"))]
 use omega::backend::execute_plan_named_metal_op_timed;
+#[cfg(feature = "metal")]
+use omega::backend::{Backend, Plan, execute_plan_named, mark_resident, plan_named};
 #[cfg(all(feature = "instrument", feature = "metal", target_os = "macos"))]
 use omega::metal::OpGpuTiming;
 #[cfg(all(feature = "instrument", feature = "metal", target_os = "macos"))]
 use omega::metal::metal_stage_totals;
 #[cfg(feature = "instrument")]
-use proxima_tensor::instrument::{elapsed_ticks, read_ticks, ticks_to_nanos};
-#[cfg(feature = "instrument")]
 use proxima_telemetry::debug;
+#[cfg(feature = "instrument")]
+use proxima_tensor::instrument::{elapsed_ticks, read_ticks, ticks_to_nanos};
 
 use crate::bind::{BoundWeights, ModelArchitecture, architecture_from_metadata, bind_all_weights};
 use crate::error::InteropError;
 use crate::hf_bind::bind_all_weights_from_safetensors;
-use crate::serving::ServingConfig;
-use crate::serving::apply_serving_config;
 #[cfg(feature = "metal")]
 use crate::serving::GPU_LAYERS_ALL;
+use crate::serving::ServingConfig;
+use crate::serving::apply_serving_config;
 
 const RMS_EPSILON: f32 = 1e-5;
 
@@ -114,7 +114,8 @@ fn report_op_timings(step: usize, timings: &[OpGpuTiming]) {
         total_gpu_ns as f64 / 1e6,
     );
 
-    let mut by_kind: alloc::collections::BTreeMap<&'static str, (u64, u64, u64)> = alloc::collections::BTreeMap::new();
+    let mut by_kind: alloc::collections::BTreeMap<&'static str, (u64, u64, u64)> =
+        alloc::collections::BTreeMap::new();
     for timing in timings {
         let entry = by_kind.entry(timing.kind).or_insert((0, 0, 0));
         entry.0 += 1;
@@ -157,7 +158,8 @@ fn report_op_timings(step: usize, timings: &[OpGpuTiming]) {
     // discipline log's "by tensor name where you can recover it" ask ends
     // on, since a per-node top-20 line cannot show whether a whole KIND is
     // slow or just its biggest instance.
-    let mut by_family: alloc::collections::BTreeMap<String, FamilyGpuStats> = alloc::collections::BTreeMap::new();
+    let mut by_family: alloc::collections::BTreeMap<String, FamilyGpuStats> =
+        alloc::collections::BTreeMap::new();
     for timing in timings {
         let family = match &timing.weight_name {
             Some(name) => strip_layer_index(name),
@@ -185,7 +187,11 @@ fn report_op_timings(step: usize, timings: &[OpGpuTiming]) {
             stats.op_count,
             stats.gpu_ns as f64 / 1e6,
             stats.operand_bytes,
-            if stats.operand_bytes == 0 { 0.0 } else { stats.gpu_ns as f64 / stats.operand_bytes as f64 },
+            if stats.operand_bytes == 0 {
+                0.0
+            } else {
+                stats.gpu_ns as f64 / stats.operand_bytes as f64
+            },
             stats.min_operand_count,
             stats.max_operand_count,
             stats.row_blocked_count,
@@ -401,7 +407,8 @@ impl<'file> LoadedModel<'file> {
         architecture: ModelArchitecture,
         vocab: Vocab,
     ) -> Result<Self, InteropError> {
-        let weights = bind_all_weights_from_safetensors(manifest, file_bytes, data_start, &architecture)?;
+        let weights =
+            bind_all_weights_from_safetensors(manifest, file_bytes, data_start, &architecture)?;
         let (program, logits_root, cache_roots) = mistral_cached_forward_program_with_experts(
             architecture.vocab,
             architecture.embedding,
@@ -439,7 +446,11 @@ struct LayerCache {
 
 impl LayerCache {
     fn new() -> Self {
-        Self { k_even: Vec::new(), k_odd: Vec::new(), v: Vec::new() }
+        Self {
+            k_even: Vec::new(),
+            k_odd: Vec::new(),
+            v: Vec::new(),
+        }
     }
 
     fn append(&mut self, even: &[f32], odd: &[f32], value: &[f32]) {
@@ -497,7 +508,12 @@ fn build_position_inputs(
         }
     }
 
-    PositionInputs { ids_f32, epsilon, cos, sin }
+    PositionInputs {
+        ids_f32,
+        epsilon,
+        cos,
+        sin,
+    }
 }
 
 /// The fully-supported [`ServingConfig`]: every knob [`apply_serving_config`]
@@ -527,7 +543,11 @@ fn supported_serving_config() -> ServingConfig<'static> {
 /// needs to distinguish.
 #[cfg(feature = "metal")]
 fn select_backend(config: &ServingConfig) -> Backend {
-    if config.gpu_layers == GPU_LAYERS_ALL { Backend::Metal } else { Backend::Cpu }
+    if config.gpu_layers == GPU_LAYERS_ALL {
+        Backend::Metal
+    } else {
+        Backend::Cpu
+    }
 }
 
 // `dequantize_unsupported_metal_weights`/`resolve_packed_block` (the
@@ -660,7 +680,10 @@ pub(crate) struct BackendRuntime {
 #[cfg(not(feature = "metal"))]
 impl BackendRuntime {
     pub(crate) fn new(_config: &ServingConfig) -> Self {
-        Self { free_buffers: Vec::new(), validated_weight_nodes: None }
+        Self {
+            free_buffers: Vec::new(),
+            validated_weight_nodes: None,
+        }
     }
 
     /// `resident_names` is unused on this backend: the CPU evaluator has no
@@ -691,7 +714,10 @@ impl<'file> Pipe for LoadedModel<'file> {
     type Out = (Vec<u32>, String, bool);
     type Err = InteropError;
 
-    fn call(&self, input: (String, usize)) -> impl Future<Output = Result<(Vec<u32>, String, bool), InteropError>> {
+    fn call(
+        &self,
+        input: (String, usize),
+    ) -> impl Future<Output = Result<(Vec<u32>, String, bool), InteropError>> {
         async move {
             let (prompt, max_tokens) = input;
             self.generate(&prompt, max_tokens)
@@ -736,7 +762,11 @@ impl<'file> LoadedModel<'file> {
     /// CPU backend, so this runs exactly the forward it always has, on
     /// CPU, regardless of whether this build was compiled with the
     /// `metal` feature.
-    fn generate(&self, prompt: &str, max_tokens: usize) -> Result<(Vec<u32>, String, bool), InteropError> {
+    fn generate(
+        &self,
+        prompt: &str,
+        max_tokens: usize,
+    ) -> Result<(Vec<u32>, String, bool), InteropError> {
         self.generate_with_serving_config(prompt, max_tokens, supported_serving_config())
     }
 
@@ -816,7 +846,8 @@ impl<'file> LoadedModel<'file> {
                 )
             })
             .collect();
-        let mut layer_caches: Vec<LayerCache> = (0..block_count).map(|_| LayerCache::new()).collect();
+        let mut layer_caches: Vec<LayerCache> =
+            (0..block_count).map(|_| LayerCache::new()).collect();
 
         // The caller's own knowledge of which named blocks are STATIC --
         // bound once in `LoadedModel::load` and never mutated again -- fixed
@@ -833,237 +864,286 @@ impl<'file> LoadedModel<'file> {
             .iter()
             .map(|(name, _)| name.as_str())
             .chain(self.weights.packed.iter().map(|(name, _)| name.as_str()))
-            .chain(self.weights.packed_owned.iter().map(|(name, _, _)| name.as_str()))
+            .chain(
+                self.weights
+                    .packed_owned
+                    .iter()
+                    .map(|(name, _, _)| name.as_str()),
+            )
             .collect();
 
         let mut cached_len = 0usize;
         let mut next_ids = ids;
         let vocab_size = self.architecture.vocab as usize;
 
-        let (generated_ids, stopped_by_eos) = decode_until_stop_or_budget(&self.vocab, max_tokens, |_step| {
-            // ROW 130's own fix, built: every counter this step's
-            // `evaluate_ms` decomposition reads is zeroed HERE, at step
-            // start, and read back after `evaluate_ticks` below is computed
-            // -- a single step's own cost, measured directly inside one
-            // process, never inferred by differencing two independent
-            // launches' cumulative-since-start counters (that differencing
-            // is exact for the integer counts ROW 129 used it for, and NOT
-            // for timings -- ROW 130's own postmortem on why it produced a
-            // sub-bucket larger than its parent and a negative duration).
-            #[cfg(feature = "instrument")]
-            proxima_tensor::instrument::reset_step();
-            #[cfg(feature = "instrument")]
-            let step_started = read_ticks();
+        let (generated_ids, stopped_by_eos) = decode_until_stop_or_budget(
+            &self.vocab,
+            max_tokens,
+            |_step| {
+                // ROW 130's own fix, built: every counter this step's
+                // `evaluate_ms` decomposition reads is zeroed HERE, at step
+                // start, and read back after `evaluate_ticks` below is computed
+                // -- a single step's own cost, measured directly inside one
+                // process, never inferred by differencing two independent
+                // launches' cumulative-since-start counters (that differencing
+                // is exact for the integer counts ROW 129 used it for, and NOT
+                // for timings -- ROW 130's own postmortem on why it produced a
+                // sub-bucket larger than its parent and a negative duration).
+                #[cfg(feature = "instrument")]
+                proxima_tensor::instrument::reset_step();
+                #[cfg(feature = "instrument")]
+                let step_started = read_ticks();
 
-            let new_count = next_ids.len();
-            #[cfg(feature = "instrument")]
-            let apply_serving_config_started = read_ticks();
-            apply_serving_config(serving_config, cached_len + new_count)?;
-            #[cfg(feature = "instrument")]
-            let apply_serving_config_ticks = elapsed_ticks(apply_serving_config_started);
+                let new_count = next_ids.len();
+                #[cfg(feature = "instrument")]
+                let apply_serving_config_started = read_ticks();
+                apply_serving_config(serving_config, cached_len + new_count)?;
+                #[cfg(feature = "instrument")]
+                let apply_serving_config_ticks = elapsed_ticks(apply_serving_config_started);
 
-            #[cfg(feature = "instrument")]
-            let build_position_inputs_started = read_ticks();
-            let inputs = build_position_inputs(
-                &next_ids,
-                cached_len,
-                self.architecture.head_dim,
-                self.architecture.rope_freq_base,
-            );
-            #[cfg(feature = "instrument")]
-            let build_position_inputs_ticks = elapsed_ticks(build_position_inputs_started);
+                #[cfg(feature = "instrument")]
+                let build_position_inputs_started = read_ticks();
+                let inputs = build_position_inputs(
+                    &next_ids,
+                    cached_len,
+                    self.architecture.head_dim,
+                    self.architecture.rope_freq_base,
+                );
+                #[cfg(feature = "instrument")]
+                let build_position_inputs_ticks = elapsed_ticks(build_position_inputs_started);
 
-            let mut named_blocks: Vec<(&str, QuantizedBlock)> = Vec::with_capacity(
-                self.weights.owned.len() + self.weights.packed.len() + self.weights.packed_owned.len() + 3 + layer_caches.len() * 3,
-            );
-            #[cfg(feature = "instrument")]
-            let named_blocks_weights_started = read_ticks();
-            named_blocks.push(("ids", QuantizedBlock::Float32(inputs.ids_f32.as_slice())));
-            for (name, data) in &self.weights.owned {
-                named_blocks.push((name.as_str(), QuantizedBlock::Float32(data.as_slice())));
-            }
-            for (name, block) in &self.weights.packed {
-                named_blocks.push((name.as_str(), *block));
-            }
-            for (name, bytes, kind) in &self.weights.packed_owned {
-                named_blocks.push((name.as_str(), kind.as_block(bytes)));
-            }
-            named_blocks.push(("eps", QuantizedBlock::Float32(inputs.epsilon.as_slice())));
-            named_blocks.push(("rope_cos", QuantizedBlock::Float32(inputs.cos.as_slice())));
-            named_blocks.push(("rope_sin", QuantizedBlock::Float32(inputs.sin.as_slice())));
-            #[cfg(feature = "instrument")]
-            let named_blocks_weights_ticks = elapsed_ticks(named_blocks_weights_started);
-
-            // KV-cache HOST -> DEVICE traffic: every named block below is the
-            // FULL accumulated history (`LayerCache::append` only grows these,
-            // never truncates), so this is the full `cached_len`-sized array
-            // re-bound as a model input every single step -- not the
-            // `new_count`-sized increment. Measured directly as element
-            // counts read off the `Vec`s themselves (a size, not a timing),
-            // so it is exact and needs no instrumentation to be turned on.
-            #[cfg(feature = "instrument")]
-            let kv_cache_upload_elements: u64 = layer_caches
-                .iter()
-                .map(|cache| (cache.k_even.len() + cache.k_odd.len() + cache.v.len()) as u64)
-                .sum();
-            #[cfg(feature = "instrument")]
-            let named_blocks_kv_started = read_ticks();
-            for (layer, (k_even_name, k_odd_name, v_name)) in kv_cache_names.iter().enumerate() {
-                named_blocks.extend(layer_caches[layer].named_blocks(k_even_name, k_odd_name, v_name));
-            }
-            #[cfg(feature = "instrument")]
-            let named_blocks_kv_ticks = elapsed_ticks(named_blocks_kv_started);
-
-            let symbols = [new_count as u64, cached_len as u64];
-            let mut roots: Vec<NodeId> = Vec::with_capacity(1 + self.cache_roots.len() * 3);
-            roots.push(self.logits_root);
-            for (even, odd, value) in &self.cache_roots {
-                roots.push(*even);
-                roots.push(*odd);
-                roots.push(*value);
-            }
-
-            #[cfg(feature = "instrument")]
-            let evaluate_started = read_ticks();
-            // `PROXIMA_METAL_OP_PROFILE_STEP` -- diagnostic-only, `instrument`-gated,
-            // default-off: unset in every production run, so `runtime.evaluate`
-            // is the only path a caller without this env var ever takes. When
-            // set to this step's own index, this ONE step instead runs
-            // `evaluate_op_timed` (per-op command buffers, see that method's own
-            // doc for the cost) and prints the per-op GPU attribution this
-            // crate's own discipline log needed to settle the `gpu_exec`
-            // investigation. Every other step, and every run without the env
-            // var, is byte-for-byte the pre-existing path.
-            #[cfg(all(feature = "instrument", feature = "metal", target_os = "macos"))]
-            let evaluated = match std::env::var("PROXIMA_METAL_OP_PROFILE_STEP")
-                .ok()
-                .and_then(|value| value.parse::<usize>().ok())
-            {
-                Some(target) if target == _step => {
-                    let (evaluated, timings) =
-                        runtime.evaluate_op_timed(&self.program, &symbols, &named_blocks, &roots, &resident_names)?;
-                    report_op_timings(_step, &timings);
-                    evaluated
+                let mut named_blocks: Vec<(&str, QuantizedBlock)> = Vec::with_capacity(
+                    self.weights.owned.len()
+                        + self.weights.packed.len()
+                        + self.weights.packed_owned.len()
+                        + 3
+                        + layer_caches.len() * 3,
+                );
+                #[cfg(feature = "instrument")]
+                let named_blocks_weights_started = read_ticks();
+                named_blocks.push(("ids", QuantizedBlock::Float32(inputs.ids_f32.as_slice())));
+                for (name, data) in &self.weights.owned {
+                    named_blocks.push((name.as_str(), QuantizedBlock::Float32(data.as_slice())));
                 }
-                _ => runtime.evaluate(&self.program, &symbols, &named_blocks, &roots, &resident_names)?,
-            };
-            #[cfg(not(all(feature = "instrument", feature = "metal", target_os = "macos")))]
-            let evaluated = runtime.evaluate(&self.program, &symbols, &named_blocks, &roots, &resident_names)?;
-            #[cfg(feature = "instrument")]
-            let evaluate_ticks = elapsed_ticks(evaluate_started);
-            #[cfg(all(feature = "instrument", feature = "metal", target_os = "macos"))]
-            let metal_stage = metal_stage_totals();
+                for (name, block) in &self.weights.packed {
+                    named_blocks.push((name.as_str(), *block));
+                }
+                for (name, bytes, kind) in &self.weights.packed_owned {
+                    named_blocks.push((name.as_str(), kind.as_block(bytes)));
+                }
+                named_blocks.push(("eps", QuantizedBlock::Float32(inputs.epsilon.as_slice())));
+                named_blocks.push(("rope_cos", QuantizedBlock::Float32(inputs.cos.as_slice())));
+                named_blocks.push(("rope_sin", QuantizedBlock::Float32(inputs.sin.as_slice())));
+                #[cfg(feature = "instrument")]
+                let named_blocks_weights_ticks = elapsed_ticks(named_blocks_weights_started);
 
-            // KV-cache DEVICE -> HOST readback + host append: unlike the
-            // upload above, `evaluated.get(*even)` etc. is this step's own
-            // `new_count`-sized OUTPUT increment (what the forward computed
-            // for the newly-added positions), which `LayerCache::append`
-            // then extends onto the growing history -- so this side is
-            // expected to stay FLAT across tokens where the upload side
-            // grows. `layer_cache_append` ticks/bytes below are the pure
-            // host `extend_from_slice` memcpy cost, distinct from the GPU
-            // readback `metal_stage_totals` already reports.
-            #[cfg(feature = "instrument")]
-            let layer_cache_append_started = read_ticks();
-            #[cfg(feature = "instrument")]
-            let mut layer_cache_append_elements: u64 = 0;
-            for (layer, (even, odd, value)) in self.cache_roots.iter().enumerate() {
-                let (even_data, _) = evaluated.get(*even).ok_or(InteropError::MissingEvaluatedNode { node: *even })?;
-                let (odd_data, _) = evaluated.get(*odd).ok_or(InteropError::MissingEvaluatedNode { node: *odd })?;
-                let (value_data, _) = evaluated.get(*value).ok_or(InteropError::MissingEvaluatedNode { node: *value })?;
+                // KV-cache HOST -> DEVICE traffic: every named block below is the
+                // FULL accumulated history (`LayerCache::append` only grows these,
+                // never truncates), so this is the full `cached_len`-sized array
+                // re-bound as a model input every single step -- not the
+                // `new_count`-sized increment. Measured directly as element
+                // counts read off the `Vec`s themselves (a size, not a timing),
+                // so it is exact and needs no instrumentation to be turned on.
+                #[cfg(feature = "instrument")]
+                let kv_cache_upload_elements: u64 = layer_caches
+                    .iter()
+                    .map(|cache| (cache.k_even.len() + cache.k_odd.len() + cache.v.len()) as u64)
+                    .sum();
+                #[cfg(feature = "instrument")]
+                let named_blocks_kv_started = read_ticks();
+                for (layer, (k_even_name, k_odd_name, v_name)) in kv_cache_names.iter().enumerate()
+                {
+                    named_blocks.extend(layer_caches[layer].named_blocks(
+                        k_even_name,
+                        k_odd_name,
+                        v_name,
+                    ));
+                }
+                #[cfg(feature = "instrument")]
+                let named_blocks_kv_ticks = elapsed_ticks(named_blocks_kv_started);
+
+                let symbols = [new_count as u64, cached_len as u64];
+                let mut roots: Vec<NodeId> = Vec::with_capacity(1 + self.cache_roots.len() * 3);
+                roots.push(self.logits_root);
+                for (even, odd, value) in &self.cache_roots {
+                    roots.push(*even);
+                    roots.push(*odd);
+                    roots.push(*value);
+                }
+
+                #[cfg(feature = "instrument")]
+                let evaluate_started = read_ticks();
+                // `PROXIMA_METAL_OP_PROFILE_STEP` -- diagnostic-only, `instrument`-gated,
+                // default-off: unset in every production run, so `runtime.evaluate`
+                // is the only path a caller without this env var ever takes. When
+                // set to this step's own index, this ONE step instead runs
+                // `evaluate_op_timed` (per-op command buffers, see that method's own
+                // doc for the cost) and prints the per-op GPU attribution this
+                // crate's own discipline log needed to settle the `gpu_exec`
+                // investigation. Every other step, and every run without the env
+                // var, is byte-for-byte the pre-existing path.
+                #[cfg(all(feature = "instrument", feature = "metal", target_os = "macos"))]
+                let evaluated = match std::env::var("PROXIMA_METAL_OP_PROFILE_STEP")
+                    .ok()
+                    .and_then(|value| value.parse::<usize>().ok())
+                {
+                    Some(target) if target == _step => {
+                        let (evaluated, timings) = runtime.evaluate_op_timed(
+                            &self.program,
+                            &symbols,
+                            &named_blocks,
+                            &roots,
+                            &resident_names,
+                        )?;
+                        report_op_timings(_step, &timings);
+                        evaluated
+                    }
+                    _ => runtime.evaluate(
+                        &self.program,
+                        &symbols,
+                        &named_blocks,
+                        &roots,
+                        &resident_names,
+                    )?,
+                };
+                #[cfg(not(all(feature = "instrument", feature = "metal", target_os = "macos")))]
+                let evaluated = runtime.evaluate(
+                    &self.program,
+                    &symbols,
+                    &named_blocks,
+                    &roots,
+                    &resident_names,
+                )?;
+                #[cfg(feature = "instrument")]
+                let evaluate_ticks = elapsed_ticks(evaluate_started);
+                #[cfg(all(feature = "instrument", feature = "metal", target_os = "macos"))]
+                let metal_stage = metal_stage_totals();
+
+                // KV-cache DEVICE -> HOST readback + host append: unlike the
+                // upload above, `evaluated.get(*even)` etc. is this step's own
+                // `new_count`-sized OUTPUT increment (what the forward computed
+                // for the newly-added positions), which `LayerCache::append`
+                // then extends onto the growing history -- so this side is
+                // expected to stay FLAT across tokens where the upload side
+                // grows. `layer_cache_append` ticks/bytes below are the pure
+                // host `extend_from_slice` memcpy cost, distinct from the GPU
+                // readback `metal_stage_totals` already reports.
+                #[cfg(feature = "instrument")]
+                let layer_cache_append_started = read_ticks();
+                #[cfg(feature = "instrument")]
+                let mut layer_cache_append_elements: u64 = 0;
+                for (layer, (even, odd, value)) in self.cache_roots.iter().enumerate() {
+                    let (even_data, _) = evaluated
+                        .get(*even)
+                        .ok_or(InteropError::MissingEvaluatedNode { node: *even })?;
+                    let (odd_data, _) = evaluated
+                        .get(*odd)
+                        .ok_or(InteropError::MissingEvaluatedNode { node: *odd })?;
+                    let (value_data, _) = evaluated
+                        .get(*value)
+                        .ok_or(InteropError::MissingEvaluatedNode { node: *value })?;
+                    #[cfg(feature = "instrument")]
+                    {
+                        layer_cache_append_elements +=
+                            (even_data.len() + odd_data.len() + value_data.len()) as u64;
+                    }
+                    layer_caches[layer].append(even_data, odd_data, value_data);
+                }
+                #[cfg(feature = "instrument")]
+                let layer_cache_append_ticks = elapsed_ticks(layer_cache_append_started);
+                cached_len += new_count;
+
+                let (logits, _shape) =
+                    evaluated
+                        .get(self.logits_root)
+                        .ok_or(InteropError::MissingEvaluatedNode {
+                            node: self.logits_root,
+                        })?;
+                let last_position = &logits[(new_count - 1) * vocab_size..new_count * vocab_size];
+
+                #[cfg(feature = "instrument")]
+                let greedy_pick_started = read_ticks();
+                let recent_window_start = token_history.len().saturating_sub(repeat_window);
+                let recent_tokens = &token_history[recent_window_start..];
+                let token_id =
+                    sample_next_token(last_position, recent_tokens, sample_config, &mut rng)
+                        .ok_or(InteropError::EmptyLogits)?;
+                token_history.push(token_id);
+                #[cfg(feature = "instrument")]
+                let greedy_pick_ticks = elapsed_ticks(greedy_pick_started);
+                next_ids = alloc::vec![token_id];
+
                 #[cfg(feature = "instrument")]
                 {
-                    layer_cache_append_elements += (even_data.len() + odd_data.len() + value_data.len()) as u64;
-                }
-                layer_caches[layer].append(even_data, odd_data, value_data);
-            }
-            #[cfg(feature = "instrument")]
-            let layer_cache_append_ticks = elapsed_ticks(layer_cache_append_started);
-            cached_len += new_count;
-
-            let (logits, _shape) = evaluated
-                .get(self.logits_root)
-                .ok_or(InteropError::MissingEvaluatedNode { node: self.logits_root })?;
-            let last_position = &logits[(new_count - 1) * vocab_size..new_count * vocab_size];
-
-            #[cfg(feature = "instrument")]
-            let greedy_pick_started = read_ticks();
-            let recent_window_start = token_history.len().saturating_sub(repeat_window);
-            let recent_tokens = &token_history[recent_window_start..];
-            let token_id =
-                sample_next_token(last_position, recent_tokens, sample_config, &mut rng).ok_or(InteropError::EmptyLogits)?;
-            token_history.push(token_id);
-            #[cfg(feature = "instrument")]
-            let greedy_pick_ticks = elapsed_ticks(greedy_pick_started);
-            next_ids = alloc::vec![token_id];
-
-            #[cfg(feature = "instrument")]
-            {
-                let ms = |ticks: u64| ticks_to_nanos(ticks) as f64 / 1e6;
-                std::println!(
-                    "token_breakdown step={_step} new_count={new_count} cached_len_before={} \
+                    let ms = |ticks: u64| ticks_to_nanos(ticks) as f64 / 1e6;
+                    std::println!(
+                        "token_breakdown step={_step} new_count={new_count} cached_len_before={} \
                      step_wall_ms={:.3} apply_serving_config_ms={:.3} build_position_inputs_ms={:.3} \
                      named_blocks_weights_ms={:.3} named_blocks_kv_ms={:.3} kv_cache_upload_bytes={} \
                      evaluate_ms={:.3} layer_cache_append_ms={:.3} layer_cache_append_bytes={} \
                      greedy_pick_ms={:.3}",
-                    cached_len,
-                    ms(elapsed_ticks(step_started)),
-                    ms(apply_serving_config_ticks),
-                    ms(build_position_inputs_ticks),
-                    ms(named_blocks_weights_ticks),
-                    ms(named_blocks_kv_ticks),
-                    kv_cache_upload_elements * 4,
-                    ms(evaluate_ticks),
-                    ms(layer_cache_append_ticks),
-                    layer_cache_append_elements * 4,
-                    ms(greedy_pick_ticks),
-                );
-                // ROW 130's per-step-reset attribution: kernel / dispatch+
-                // setup / park+spin+wake, all on the CALLING thread's own
-                // wall clock (never summed across the cohort's other worker
-                // threads, which run concurrently with it, not serially
-                // inside it -- see `CohortLeaderAttribution`'s own doc).
-                // `evaluate_ns` is this step's own tick-based total, already
-                // reset per step by `reset_step`; `residual_ns` is
-                // everything `evaluate_ms` paid for that these three terms
-                // do not name -- non-matmul ops (elementwise/reduce/scan),
-                // quantize/transpose bookkeeping, and staged-batch setup
-                // outside the cohort round itself. `saturating_sub` so a
-                // negative residual is impossible to construct by
-                // arithmetic; reported as 0 with `residual_underflow=true`
-                // if the three named terms would have exceeded the parent,
-                // which is itself a sanity-gate failure worth seeing rather
-                // than silently wrapping.
-                let attribution = proxima_tensor::instrument::cohort_leader_attribution();
-                let evaluate_ns = ticks_to_nanos(evaluate_ticks);
-                let named_ns = attribution.kernel_nanos + attribution.dispatch_nanos + attribution.park_spin_wake_nanos;
-                let residual_underflow = named_ns > evaluate_ns;
-                let residual_ns = evaluate_ns.saturating_sub(named_ns);
-                std::println!(
-                    "token_attribution step={_step} evaluate_ms={:.3} kernel_ms={:.3} dispatch_ms={:.3} \
+                        cached_len,
+                        ms(elapsed_ticks(step_started)),
+                        ms(apply_serving_config_ticks),
+                        ms(build_position_inputs_ticks),
+                        ms(named_blocks_weights_ticks),
+                        ms(named_blocks_kv_ticks),
+                        kv_cache_upload_elements * 4,
+                        ms(evaluate_ticks),
+                        ms(layer_cache_append_ticks),
+                        layer_cache_append_elements * 4,
+                        ms(greedy_pick_ticks),
+                    );
+                    // ROW 130's per-step-reset attribution: kernel / dispatch+
+                    // setup / park+spin+wake, all on the CALLING thread's own
+                    // wall clock (never summed across the cohort's other worker
+                    // threads, which run concurrently with it, not serially
+                    // inside it -- see `CohortLeaderAttribution`'s own doc).
+                    // `evaluate_ns` is this step's own tick-based total, already
+                    // reset per step by `reset_step`; `residual_ns` is
+                    // everything `evaluate_ms` paid for that these three terms
+                    // do not name -- non-matmul ops (elementwise/reduce/scan),
+                    // quantize/transpose bookkeeping, and staged-batch setup
+                    // outside the cohort round itself. `saturating_sub` so a
+                    // negative residual is impossible to construct by
+                    // arithmetic; reported as 0 with `residual_underflow=true`
+                    // if the three named terms would have exceeded the parent,
+                    // which is itself a sanity-gate failure worth seeing rather
+                    // than silently wrapping.
+                    let attribution = proxima_tensor::instrument::cohort_leader_attribution();
+                    let evaluate_ns = ticks_to_nanos(evaluate_ticks);
+                    let named_ns = attribution.kernel_nanos
+                        + attribution.dispatch_nanos
+                        + attribution.park_spin_wake_nanos;
+                    let residual_underflow = named_ns > evaluate_ns;
+                    let residual_ns = evaluate_ns.saturating_sub(named_ns);
+                    std::println!(
+                        "token_attribution step={_step} evaluate_ms={:.3} kernel_ms={:.3} dispatch_ms={:.3} \
                      park_spin_wake_ms={:.3} residual_ms={:.3} residual_underflow={residual_underflow} \
                      named_plus_residual_ms={:.3}",
-                    evaluate_ns as f64 / 1e6,
-                    attribution.kernel_nanos as f64 / 1e6,
-                    attribution.dispatch_nanos as f64 / 1e6,
-                    attribution.park_spin_wake_nanos as f64 / 1e6,
-                    residual_ns as f64 / 1e6,
-                    (named_ns + residual_ns) as f64 / 1e6,
-                );
-                // ROW 140's own redundant-activation-quantize hypothesis
-                // check: `total_calls` vs `distinct_nodes` across every
-                // matmul reduce node this step evaluated. 1:1 kills the
-                // hypothesis; a ratio near the QKV/gate-up fan-out (2-3x)
-                // confirms it.
-                let (quantize_total_calls, quantize_distinct_nodes) = proxima_tensor::instrument::quantize_activation_call_stats();
-                let quantize_cache_hits = proxima_tensor::instrument::QUANTIZE_ACTIVATION_CACHE_HITS.get();
-                std::println!(
-                    "token_quantize_calls step={_step} total_calls={quantize_total_calls} distinct_nodes={quantize_distinct_nodes} \
+                        evaluate_ns as f64 / 1e6,
+                        attribution.kernel_nanos as f64 / 1e6,
+                        attribution.dispatch_nanos as f64 / 1e6,
+                        attribution.park_spin_wake_nanos as f64 / 1e6,
+                        residual_ns as f64 / 1e6,
+                        (named_ns + residual_ns) as f64 / 1e6,
+                    );
+                    // ROW 140's own redundant-activation-quantize hypothesis
+                    // check: `total_calls` vs `distinct_nodes` across every
+                    // matmul reduce node this step evaluated. 1:1 kills the
+                    // hypothesis; a ratio near the QKV/gate-up fan-out (2-3x)
+                    // confirms it.
+                    let (quantize_total_calls, quantize_distinct_nodes) =
+                        proxima_tensor::instrument::quantize_activation_call_stats();
+                    let quantize_cache_hits =
+                        proxima_tensor::instrument::QUANTIZE_ACTIVATION_CACHE_HITS.get();
+                    std::println!(
+                        "token_quantize_calls step={_step} total_calls={quantize_total_calls} distinct_nodes={quantize_distinct_nodes} \
                      cache_hits={quantize_cache_hits}"
-                );
-                #[cfg(all(feature = "metal", target_os = "macos"))]
-                std::println!(
-                    "token_breakdown_metal step={_step} prepare_calls={} prepare_ms={:.3} \
+                    );
+                    #[cfg(all(feature = "metal", target_os = "macos"))]
+                    std::println!(
+                        "token_breakdown_metal step={_step} prepare_calls={} prepare_ms={:.3} \
                      emit_calls={} emit_ms={:.3} pipeline_hits={} pipeline_misses={} pipeline_compile_ms={:.3} \
                      block_upload_calls={} block_upload_ms={:.3} block_upload_bytes={} \
                      op_setup_calls={} op_setup_ms={:.3} \
@@ -1073,37 +1153,38 @@ impl<'file> LoadedModel<'file> {
                      readback_calls={} readback_ms={:.3} readback_bytes={} \
                      nocopy_uploads={} copying_uploads={} nocopy_reuses={} \
                      resident_uploads={} resident_reuses={}",
-                    metal_stage.prepare_calls,
-                    ms(metal_stage.prepare_ticks),
-                    metal_stage.emit_calls,
-                    ms(metal_stage.emit_ticks),
-                    metal_stage.pipeline_hits,
-                    metal_stage.pipeline_misses,
-                    ms(metal_stage.pipeline_compile_ticks),
-                    metal_stage.block_upload_calls,
-                    ms(metal_stage.block_upload_ticks),
-                    metal_stage.block_upload_bytes,
-                    metal_stage.op_setup_calls,
-                    ms(metal_stage.op_setup_ticks),
-                    metal_stage.pipeline_lookup_calls,
-                    ms(metal_stage.pipeline_lookup_ticks),
-                    metal_stage.encode_dispatch_calls,
-                    ms(metal_stage.encode_dispatch_ticks),
-                    metal_stage.gpu_exec_calls,
-                    ms(metal_stage.gpu_exec_ticks),
-                    metal_stage.readback_calls,
-                    ms(metal_stage.readback_ticks),
-                    metal_stage.readback_bytes,
-                    metal_stage.nocopy_uploads,
-                    metal_stage.copying_uploads,
-                    metal_stage.nocopy_reuses,
-                    metal_stage.resident_uploads,
-                    metal_stage.resident_reuses,
-                );
-            }
+                        metal_stage.prepare_calls,
+                        ms(metal_stage.prepare_ticks),
+                        metal_stage.emit_calls,
+                        ms(metal_stage.emit_ticks),
+                        metal_stage.pipeline_hits,
+                        metal_stage.pipeline_misses,
+                        ms(metal_stage.pipeline_compile_ticks),
+                        metal_stage.block_upload_calls,
+                        ms(metal_stage.block_upload_ticks),
+                        metal_stage.block_upload_bytes,
+                        metal_stage.op_setup_calls,
+                        ms(metal_stage.op_setup_ticks),
+                        metal_stage.pipeline_lookup_calls,
+                        ms(metal_stage.pipeline_lookup_ticks),
+                        metal_stage.encode_dispatch_calls,
+                        ms(metal_stage.encode_dispatch_ticks),
+                        metal_stage.gpu_exec_calls,
+                        ms(metal_stage.gpu_exec_ticks),
+                        metal_stage.readback_calls,
+                        ms(metal_stage.readback_ticks),
+                        metal_stage.readback_bytes,
+                        metal_stage.nocopy_uploads,
+                        metal_stage.copying_uploads,
+                        metal_stage.nocopy_reuses,
+                        metal_stage.resident_uploads,
+                        metal_stage.resident_reuses,
+                    );
+                }
 
-            Ok(token_id)
-        })?;
+                Ok(token_id)
+            },
+        )?;
 
         let text = proxima_tokenizer::decode(&generated_ids, &self.vocab)?;
         Ok((generated_ids, text, stopped_by_eos))
@@ -1136,7 +1217,11 @@ impl<'file> LoadedModel<'file> {
     /// [`InteropError::MissingEvaluatedNode`] if any `node_ids` entry was
     /// never computed by this checkpoint's own forward program (a caller
     /// passed a `NodeId` from a differently-shaped program).
-    pub fn forward_node_values(&self, prompt: &str, node_ids: &[NodeId]) -> Result<Vec<Vec<f32>>, InteropError> {
+    pub fn forward_node_values(
+        &self,
+        prompt: &str,
+        node_ids: &[NodeId],
+    ) -> Result<Vec<Vec<f32>>, InteropError> {
         let serving_config = supported_serving_config();
         let mut runtime = BackendRuntime::new(&serving_config);
 
@@ -1147,7 +1232,12 @@ impl<'file> LoadedModel<'file> {
             self.vocab.add_eos_token().unwrap_or(false),
         )?;
         apply_serving_config(&serving_config, ids.len())?;
-        let inputs = build_position_inputs(&ids, 0, self.architecture.head_dim, self.architecture.rope_freq_base);
+        let inputs = build_position_inputs(
+            &ids,
+            0,
+            self.architecture.head_dim,
+            self.architecture.rope_freq_base,
+        );
 
         let block_count = self.architecture.block_count as usize;
         let empty_cache = LayerCache::new();
@@ -1162,7 +1252,11 @@ impl<'file> LoadedModel<'file> {
             .collect();
 
         let mut named_blocks: Vec<(&str, QuantizedBlock)> = Vec::with_capacity(
-            self.weights.owned.len() + self.weights.packed.len() + self.weights.packed_owned.len() + 3 + block_count * 3,
+            self.weights.owned.len()
+                + self.weights.packed.len()
+                + self.weights.packed_owned.len()
+                + 3
+                + block_count * 3,
         );
         named_blocks.push(("ids", QuantizedBlock::Float32(inputs.ids_f32.as_slice())));
         for (name, data) in &self.weights.owned {
@@ -1187,11 +1281,22 @@ impl<'file> LoadedModel<'file> {
             .iter()
             .map(|(name, _)| name.as_str())
             .chain(self.weights.packed.iter().map(|(name, _)| name.as_str()))
-            .chain(self.weights.packed_owned.iter().map(|(name, _, _)| name.as_str()))
+            .chain(
+                self.weights
+                    .packed_owned
+                    .iter()
+                    .map(|(name, _, _)| name.as_str()),
+            )
             .collect();
 
         let symbols = [ids.len() as u64, 0u64];
-        let evaluated = runtime.evaluate(&self.program, &symbols, &named_blocks, node_ids, &resident_names)?;
+        let evaluated = runtime.evaluate(
+            &self.program,
+            &symbols,
+            &named_blocks,
+            node_ids,
+            &resident_names,
+        )?;
 
         node_ids
             .iter()
@@ -1231,7 +1336,9 @@ impl<'file> LoadedModel<'file> {
         {
             let mut ranked: Vec<usize> = (0..last_position.len()).collect();
             ranked.sort_by(|left, right| {
-                last_position[*right].total_cmp(&last_position[*left]).then_with(|| left.cmp(right))
+                last_position[*right]
+                    .total_cmp(&last_position[*left])
+                    .then_with(|| left.cmp(right))
             });
             let top1_token = ranked[0] as u64;
             let top1_logit = f64::from(last_position[ranked[0]]);
@@ -1267,7 +1374,9 @@ mod tests {
     /// public knowledge, not an internal detail this test needs to reach
     /// into the crate for.
     fn vocab_with_eos(eos_id: u32) -> Vocab {
-        let mut tokens: Vec<String> = (0..=255u8).map(|byte| alloc::format!("<0x{byte:02X}>")).collect();
+        let mut tokens: Vec<String> = (0..=255u8)
+            .map(|byte| alloc::format!("<0x{byte:02X}>"))
+            .collect();
         tokens.push(String::from("<eos-marker>"));
         Vocab::new(tokens, &[], Some(0), Some(eos_id), None).expect("minimal vocab builds")
     }
@@ -1289,9 +1398,19 @@ mod tests {
         })
         .expect("scripted token source never errors");
 
-        assert_eq!(generated_ids, alloc::vec![10, 20], "eos id must not be appended to the generated ids");
-        assert!(stopped_by_eos, "must report that the stop was the model's own eos signal");
-        assert_eq!(calls, 3, "must not pull a 4th token once eos is seen on the 3rd");
+        assert_eq!(
+            generated_ids,
+            alloc::vec![10, 20],
+            "eos id must not be appended to the generated ids"
+        );
+        assert!(
+            stopped_by_eos,
+            "must report that the stop was the model's own eos signal"
+        );
+        assert_eq!(
+            calls, 3,
+            "must not pull a 4th token once eos is seen on the 3rd"
+        );
     }
 
     /// The other half of the invariant: when the model never emits eos,
@@ -1304,12 +1423,25 @@ mod tests {
         let scripted_tokens = [10u32, 20, 30, 40];
 
         let (generated_ids, stopped_by_eos) =
-            decode_until_stop_or_budget(&vocab, scripted_tokens.len(), |step| Ok(scripted_tokens[step]))
-                .expect("scripted token source never errors");
+            decode_until_stop_or_budget(&vocab, scripted_tokens.len(), |step| {
+                Ok(scripted_tokens[step])
+            })
+            .expect("scripted token source never errors");
 
-        assert_eq!(generated_ids, alloc::vec![10, 20, 30, 40], "every scripted token is a real id, none is eos");
-        assert!(!stopped_by_eos, "budget exhaustion must not be reported as an eos stop");
-        assert_eq!(generated_ids.len(), scripted_tokens.len(), "budget exhaustion still runs every requested step");
+        assert_eq!(
+            generated_ids,
+            alloc::vec![10, 20, 30, 40],
+            "every scripted token is a real id, none is eos"
+        );
+        assert!(
+            !stopped_by_eos,
+            "budget exhaustion must not be reported as an eos stop"
+        );
+        assert_eq!(
+            generated_ids.len(),
+            scripted_tokens.len(),
+            "budget exhaustion still runs every requested step"
+        );
     }
 
     /// Degenerate control: if the eos comparison were broken (e.g. always
@@ -1328,8 +1460,14 @@ mod tests {
         })
         .expect("scripted token source never errors");
 
-        assert!(generated_ids.is_empty(), "an immediate eos must produce zero generated ids");
+        assert!(
+            generated_ids.is_empty(),
+            "an immediate eos must produce zero generated ids"
+        );
         assert!(stopped_by_eos);
-        assert_eq!(calls, 1, "must stop after exactly one call, not run toward the budget of 10");
+        assert_eq!(
+            calls, 1,
+            "must stop after exactly one call, not run toward the budget of 10"
+        );
     }
 }

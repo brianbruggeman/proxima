@@ -102,10 +102,30 @@ fn main() {
     // contraction under a different algebra, reachable only because the
     // algebra is data rather than a kernel name.
     let arms: [(&str, ScalarOp, ScalarOp, ReduceInit); 4] = [
-        ("sum_of_products", ScalarOp::Multiply, ScalarOp::Add, ReduceInit::Zero),
-        ("max_of_products", ScalarOp::Multiply, ScalarOp::Maximum, ReduceInit::NegativeInfinity),
-        ("max_of_sums", ScalarOp::Add, ScalarOp::Maximum, ReduceInit::NegativeInfinity),
-        ("min_of_diffs", ScalarOp::Subtract, ScalarOp::Minimum, ReduceInit::PositiveInfinity),
+        (
+            "sum_of_products",
+            ScalarOp::Multiply,
+            ScalarOp::Add,
+            ReduceInit::Zero,
+        ),
+        (
+            "max_of_products",
+            ScalarOp::Multiply,
+            ScalarOp::Maximum,
+            ReduceInit::NegativeInfinity,
+        ),
+        (
+            "max_of_sums",
+            ScalarOp::Add,
+            ScalarOp::Maximum,
+            ReduceInit::NegativeInfinity,
+        ),
+        (
+            "min_of_diffs",
+            ScalarOp::Subtract,
+            ScalarOp::Minimum,
+            ReduceInit::PositiveInfinity,
+        ),
     ];
 
     for (name, body, reduce, init) in arms {

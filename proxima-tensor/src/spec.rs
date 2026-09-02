@@ -547,9 +547,7 @@ fn elementwise(
 ) -> Result<NodeId, TensorError> {
     let operands = inputs
         .iter()
-        .map(|(node, notation)| {
-            Ok((*node, IndexMap::Affine(parse_operand_pattern(notation)?)))
-        })
+        .map(|(node, notation)| Ok((*node, IndexMap::Affine(parse_operand_pattern(notation)?))))
         .collect::<Result<Vec<(NodeId, IndexMap)>, TensorError>>()?;
     Ok(op::append(
         program,
@@ -662,9 +660,28 @@ fn embedding_lookup(program: &mut Vec<Op>, table: NodeId, ids: NodeId) -> NodeId
 /// node: `x` normalized by its own root-mean-square, then scaled by `gamma`
 /// (`[embedding]`, broadcast `d->sd`), the checkpoint's learned
 /// `*_norm.weight` — RMSNorm without it is a different, un-trained function.
-fn rmsnorm(program: &mut Vec<Op>, x: NodeId, gamma: NodeId, inv_dim: NodeId, eps: NodeId) -> Result<NodeId, TensorError> {
-    let squared = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(x, "sd->sd"), (x, "sd->sd")])?;
-    let sum_squares = reduce(program, DType::Float32, ScalarOp::Add, ReduceInit::Zero, squared, "sd->sd", "s->sd")?;
+fn rmsnorm(
+    program: &mut Vec<Op>,
+    x: NodeId,
+    gamma: NodeId,
+    inv_dim: NodeId,
+    eps: NodeId,
+) -> Result<NodeId, TensorError> {
+    let squared = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Multiply,
+        &[(x, "sd->sd"), (x, "sd->sd")],
+    )?;
+    let sum_squares = reduce(
+        program,
+        DType::Float32,
+        ScalarOp::Add,
+        ReduceInit::Zero,
+        squared,
+        "sd->sd",
+        "s->sd",
+    )?;
     let mean_square = elementwise(
         program,
         DType::Float32,
@@ -677,8 +694,18 @@ fn rmsnorm(program: &mut Vec<Op>, x: NodeId, gamma: NodeId, inv_dim: NodeId, eps
         ScalarOp::Add,
         &[(mean_square, "s->s"), (eps, "s->s")],
     )?;
-    let rms = elementwise(program, DType::Float32, ScalarOp::SquareRoot, &[(mean_square_eps, "s->s")])?;
-    let inv_rms = elementwise(program, DType::Float32, ScalarOp::Reciprocal, &[(rms, "s->s")])?;
+    let rms = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::SquareRoot,
+        &[(mean_square_eps, "s->s")],
+    )?;
+    let inv_rms = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Reciprocal,
+        &[(rms, "s->s")],
+    )?;
     let normed = elementwise(
         program,
         DType::Float32,
@@ -704,7 +731,14 @@ fn rmsnorm(program: &mut Vec<Op>, x: NodeId, gamma: NodeId, inv_dim: NodeId, eps
 /// query-head axis (`h`, [`append_attention_mixer`]'s own letter) from K's
 /// kv-head axis (`u`) so this one function serves both call sites without
 /// two copies of the same six ops.
-fn rmsnorm_per_head(program: &mut Vec<Op>, x: NodeId, gamma: NodeId, inv_head_dim: NodeId, eps: NodeId, head: char) -> Result<NodeId, TensorError> {
+fn rmsnorm_per_head(
+    program: &mut Vec<Op>,
+    x: NodeId,
+    gamma: NodeId,
+    inv_head_dim: NodeId,
+    eps: NodeId,
+    head: char,
+) -> Result<NodeId, TensorError> {
     let full = alloc::format!("s{head}d->s{head}d");
     let identity = alloc::format!("s{head}->s{head}");
     let broadcast_over_d = alloc::format!("s{head}->s{head}d");
@@ -712,13 +746,29 @@ fn rmsnorm_per_head(program: &mut Vec<Op>, x: NodeId, gamma: NodeId, inv_head_di
     let eps_map = alloc::format!("s->s{head}");
     let gamma_map = alloc::format!("d->s{head}d");
 
-    let squared = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(x, full.as_str()), (x, full.as_str())])?;
-    let sum_squares = reduce(program, DType::Float32, ScalarOp::Add, ReduceInit::Zero, squared, full.as_str(), broadcast_over_d.as_str())?;
+    let squared = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Multiply,
+        &[(x, full.as_str()), (x, full.as_str())],
+    )?;
+    let sum_squares = reduce(
+        program,
+        DType::Float32,
+        ScalarOp::Add,
+        ReduceInit::Zero,
+        squared,
+        full.as_str(),
+        broadcast_over_d.as_str(),
+    )?;
     let mean_square = elementwise(
         program,
         DType::Float32,
         ScalarOp::Multiply,
-        &[(sum_squares, identity.as_str()), (inv_head_dim, inv_head_dim_map.as_str())],
+        &[
+            (sum_squares, identity.as_str()),
+            (inv_head_dim, inv_head_dim_map.as_str()),
+        ],
     )?;
     let mean_square_eps = elementwise(
         program,
@@ -726,10 +776,30 @@ fn rmsnorm_per_head(program: &mut Vec<Op>, x: NodeId, gamma: NodeId, inv_head_di
         ScalarOp::Add,
         &[(mean_square, identity.as_str()), (eps, eps_map.as_str())],
     )?;
-    let rms = elementwise(program, DType::Float32, ScalarOp::SquareRoot, &[(mean_square_eps, identity.as_str())])?;
-    let inv_rms = elementwise(program, DType::Float32, ScalarOp::Reciprocal, &[(rms, identity.as_str())])?;
-    let normed = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(x, full.as_str()), (inv_rms, broadcast_over_d.as_str())])?;
-    elementwise(program, DType::Float32, ScalarOp::Multiply, &[(normed, full.as_str()), (gamma, gamma_map.as_str())])
+    let rms = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::SquareRoot,
+        &[(mean_square_eps, identity.as_str())],
+    )?;
+    let inv_rms = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Reciprocal,
+        &[(rms, identity.as_str())],
+    )?;
+    let normed = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Multiply,
+        &[(x, full.as_str()), (inv_rms, broadcast_over_d.as_str())],
+    )?;
+    elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Multiply,
+        &[(normed, full.as_str()), (gamma, gamma_map.as_str())],
+    )
 }
 
 /// The causal mask's data-independent half: `is_future` (a `(query, key)`
@@ -745,8 +815,20 @@ fn rmsnorm_per_head(program: &mut Vec<Op>, x: NodeId, gamma: NodeId, inv_head_di
 /// number that never varies. It is now one rank-0 [`Op::Constant`], which
 /// is also why it broadcasts as `"->stug"` rather than `"s->stug"`.
 fn causal_mask(program: &mut Vec<Op>) -> Result<(NodeId, NodeId), TensorError> {
-    let query_index = op::append(program, Op::Iota { dtype: DType::Float32, extent: Extent::Symbolic(0) });
-    let key_index = op::append(program, Op::Iota { dtype: DType::Float32, extent: Extent::Symbolic(0) });
+    let query_index = op::append(
+        program,
+        Op::Iota {
+            dtype: DType::Float32,
+            extent: Extent::Symbolic(0),
+        },
+    );
+    let key_index = op::append(
+        program,
+        Op::Iota {
+            dtype: DType::Float32,
+            extent: Extent::Symbolic(0),
+        },
+    );
     let is_future = elementwise(
         program,
         DType::Float32,
@@ -790,38 +872,190 @@ fn append_mistral_layer(
 ) -> Result<NodeId, TensorError> {
     let normed = rmsnorm(program, x, attn_norm_weight, inv_dim, eps)?;
 
-    let q_product = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(normed, "si->shdi"), (wq, "ihd->shdi")])?;
-    let q = reduce(program, DType::Float32, ScalarOp::Add, ReduceInit::Zero, q_product, "shdi->shdi", "shd->shdi")?;
+    let q_product = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Multiply,
+        &[(normed, "si->shdi"), (wq, "ihd->shdi")],
+    )?;
+    let q = reduce(
+        program,
+        DType::Float32,
+        ScalarOp::Add,
+        ReduceInit::Zero,
+        q_product,
+        "shdi->shdi",
+        "shd->shdi",
+    )?;
 
-    let k_product = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(normed, "si->sudi"), (wk, "iud->sudi")])?;
-    let k = reduce(program, DType::Float32, ScalarOp::Add, ReduceInit::Zero, k_product, "sudi->sudi", "sud->sudi")?;
+    let k_product = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Multiply,
+        &[(normed, "si->sudi"), (wk, "iud->sudi")],
+    )?;
+    let k = reduce(
+        program,
+        DType::Float32,
+        ScalarOp::Add,
+        ReduceInit::Zero,
+        k_product,
+        "sudi->sudi",
+        "sud->sudi",
+    )?;
 
-    let v_product = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(normed, "si->sudi"), (wv, "iud->sudi")])?;
-    let v = reduce(program, DType::Float32, ScalarOp::Add, ReduceInit::Zero, v_product, "sudi->sudi", "sud->sudi")?;
+    let v_product = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Multiply,
+        &[(normed, "si->sudi"), (wv, "iud->sudi")],
+    )?;
+    let v = reduce(
+        program,
+        DType::Float32,
+        ScalarOp::Add,
+        ReduceInit::Zero,
+        v_product,
+        "sudi->sudi",
+        "sud->sudi",
+    )?;
 
-    let q_even_cos = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(q, "s,h,2*i->shi"), (cos, "si->shi")])?;
-    let q_odd_sin = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(q, "s,h,2*i+1->shi"), (sin, "si->shi")])?;
-    let rotated_q_even = elementwise(program, DType::Float32, ScalarOp::Subtract, &[(q_even_cos, "shi->shi"), (q_odd_sin, "shi->shi")])?;
-    let q_even_sin = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(q, "s,h,2*i->shi"), (sin, "si->shi")])?;
-    let q_odd_cos = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(q, "s,h,2*i+1->shi"), (cos, "si->shi")])?;
-    let rotated_q_odd = elementwise(program, DType::Float32, ScalarOp::Add, &[(q_even_sin, "shi->shi"), (q_odd_cos, "shi->shi")])?;
+    let q_even_cos = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Multiply,
+        &[(q, "s,h,2*i->shi"), (cos, "si->shi")],
+    )?;
+    let q_odd_sin = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Multiply,
+        &[(q, "s,h,2*i+1->shi"), (sin, "si->shi")],
+    )?;
+    let rotated_q_even = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Subtract,
+        &[(q_even_cos, "shi->shi"), (q_odd_sin, "shi->shi")],
+    )?;
+    let q_even_sin = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Multiply,
+        &[(q, "s,h,2*i->shi"), (sin, "si->shi")],
+    )?;
+    let q_odd_cos = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Multiply,
+        &[(q, "s,h,2*i+1->shi"), (cos, "si->shi")],
+    )?;
+    let rotated_q_odd = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Add,
+        &[(q_even_sin, "shi->shi"), (q_odd_cos, "shi->shi")],
+    )?;
 
-    let k_even_cos = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(k, "s,u,2*i->sui"), (cos, "si->sui")])?;
-    let k_odd_sin = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(k, "s,u,2*i+1->sui"), (sin, "si->sui")])?;
-    let rotated_k_even = elementwise(program, DType::Float32, ScalarOp::Subtract, &[(k_even_cos, "sui->sui"), (k_odd_sin, "sui->sui")])?;
-    let k_even_sin = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(k, "s,u,2*i->sui"), (sin, "si->sui")])?;
-    let k_odd_cos = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(k, "s,u,2*i+1->sui"), (cos, "si->sui")])?;
-    let rotated_k_odd = elementwise(program, DType::Float32, ScalarOp::Add, &[(k_even_sin, "sui->sui"), (k_odd_cos, "sui->sui")])?;
+    let k_even_cos = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Multiply,
+        &[(k, "s,u,2*i->sui"), (cos, "si->sui")],
+    )?;
+    let k_odd_sin = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Multiply,
+        &[(k, "s,u,2*i+1->sui"), (sin, "si->sui")],
+    )?;
+    let rotated_k_even = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Subtract,
+        &[(k_even_cos, "sui->sui"), (k_odd_sin, "sui->sui")],
+    )?;
+    let k_even_sin = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Multiply,
+        &[(k, "s,u,2*i->sui"), (sin, "si->sui")],
+    )?;
+    let k_odd_cos = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Multiply,
+        &[(k, "s,u,2*i+1->sui"), (cos, "si->sui")],
+    )?;
+    let rotated_k_odd = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Add,
+        &[(k_even_sin, "sui->sui"), (k_odd_cos, "sui->sui")],
+    )?;
 
     let group_map = alloc::format!("s,{group}*u+g,i->sugi");
-    let q_even_grouped = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(rotated_q_even, group_map.as_str()), (group_ones, "ug->sugi")])?;
-    let q_odd_grouped = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(rotated_q_odd, group_map.as_str()), (group_ones, "ug->sugi")])?;
+    let q_even_grouped = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Multiply,
+        &[
+            (rotated_q_even, group_map.as_str()),
+            (group_ones, "ug->sugi"),
+        ],
+    )?;
+    let q_odd_grouped = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Multiply,
+        &[
+            (rotated_q_odd, group_map.as_str()),
+            (group_ones, "ug->sugi"),
+        ],
+    )?;
 
-    let score_even_product = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(q_even_grouped, "sugi->stugi"), (rotated_k_even, "tui->stugi")])?;
-    let score_even = reduce(program, DType::Float32, ScalarOp::Add, ReduceInit::Zero, score_even_product, "stugi->stugi", "stug->stugi")?;
-    let score_odd_product = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(q_odd_grouped, "sugi->stugi"), (rotated_k_odd, "tui->stugi")])?;
-    let score_odd = reduce(program, DType::Float32, ScalarOp::Add, ReduceInit::Zero, score_odd_product, "stugi->stugi", "stug->stugi")?;
-    let scores = elementwise(program, DType::Float32, ScalarOp::Add, &[(score_even, "stug->stug"), (score_odd, "stug->stug")])?;
+    let score_even_product = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Multiply,
+        &[
+            (q_even_grouped, "sugi->stugi"),
+            (rotated_k_even, "tui->stugi"),
+        ],
+    )?;
+    let score_even = reduce(
+        program,
+        DType::Float32,
+        ScalarOp::Add,
+        ReduceInit::Zero,
+        score_even_product,
+        "stugi->stugi",
+        "stug->stugi",
+    )?;
+    let score_odd_product = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Multiply,
+        &[
+            (q_odd_grouped, "sugi->stugi"),
+            (rotated_k_odd, "tui->stugi"),
+        ],
+    )?;
+    let score_odd = reduce(
+        program,
+        DType::Float32,
+        ScalarOp::Add,
+        ReduceInit::Zero,
+        score_odd_product,
+        "stugi->stugi",
+        "stug->stugi",
+    )?;
+    let scores = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Add,
+        &[(score_even, "stug->stug"), (score_odd, "stug->stug")],
+    )?;
 
     // attention's usual `1/sqrt(d_k)`: without it QK^T over a real head_dim
     // (128) saturates softmax toward one-hot instead of blending.
@@ -838,42 +1072,187 @@ fn append_mistral_layer(
         program,
         DType::Float32,
         ScalarOp::Select,
-        &[(is_future, "st->stug"), (neg_infinity, "->stug"), (scores_scaled, "stug->stug")],
+        &[
+            (is_future, "st->stug"),
+            (neg_infinity, "->stug"),
+            (scores_scaled, "stug->stug"),
+        ],
     )?;
 
-    let score_max = reduce(program, DType::Float32, ScalarOp::Maximum, ReduceInit::NegativeInfinity, scores_masked, "stug->stug", "sug->stug")?;
-    let shifted = elementwise(program, DType::Float32, ScalarOp::Subtract, &[(scores_masked, "stug->stug"), (score_max, "sug->stug")])?;
-    let weights = elementwise(program, DType::Float32, ScalarOp::Exponential, &[(shifted, "stug->stug")])?;
-    let weight_sum = reduce(program, DType::Float32, ScalarOp::Add, ReduceInit::Zero, weights, "stug->stug", "sug->stug")?;
-    let inv_weight_sum = elementwise(program, DType::Float32, ScalarOp::Reciprocal, &[(weight_sum, "sug->sug")])?;
-    let probabilities = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(weights, "stug->stug"), (inv_weight_sum, "sug->stug")])?;
+    let score_max = reduce(
+        program,
+        DType::Float32,
+        ScalarOp::Maximum,
+        ReduceInit::NegativeInfinity,
+        scores_masked,
+        "stug->stug",
+        "sug->stug",
+    )?;
+    let shifted = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Subtract,
+        &[(scores_masked, "stug->stug"), (score_max, "sug->stug")],
+    )?;
+    let weights = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Exponential,
+        &[(shifted, "stug->stug")],
+    )?;
+    let weight_sum = reduce(
+        program,
+        DType::Float32,
+        ScalarOp::Add,
+        ReduceInit::Zero,
+        weights,
+        "stug->stug",
+        "sug->stug",
+    )?;
+    let inv_weight_sum = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Reciprocal,
+        &[(weight_sum, "sug->sug")],
+    )?;
+    let probabilities = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Multiply,
+        &[(weights, "stug->stug"), (inv_weight_sum, "sug->stug")],
+    )?;
 
-    let attended_product = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(probabilities, "stug->stugd"), (v, "tud->stugd")])?;
-    let attended = reduce(program, DType::Float32, ScalarOp::Add, ReduceInit::Zero, attended_product, "stugd->stugd", "sugd->stugd")?;
+    let attended_product = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Multiply,
+        &[(probabilities, "stug->stugd"), (v, "tud->stugd")],
+    )?;
+    let attended = reduce(
+        program,
+        DType::Float32,
+        ScalarOp::Add,
+        ReduceInit::Zero,
+        attended_product,
+        "stugd->stugd",
+        "sugd->stugd",
+    )?;
 
-    let wo_product = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(attended, "sugd->sugdo"), (wo, "ugdo->sugdo")])?;
-    let attn_out = reduce(program, DType::Float32, ScalarOp::Add, ReduceInit::Zero, wo_product, "sugdo->sugdo", "so->sugdo")?;
+    let wo_product = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Multiply,
+        &[(attended, "sugd->sugdo"), (wo, "ugdo->sugdo")],
+    )?;
+    let attn_out = reduce(
+        program,
+        DType::Float32,
+        ScalarOp::Add,
+        ReduceInit::Zero,
+        wo_product,
+        "sugdo->sugdo",
+        "so->sugdo",
+    )?;
 
-    let residual1 = elementwise(program, DType::Float32, ScalarOp::Add, &[(attn_out, "sd->sd"), (x, "sd->sd")])?;
+    let residual1 = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Add,
+        &[(attn_out, "sd->sd"), (x, "sd->sd")],
+    )?;
 
     let normed2 = rmsnorm(program, residual1, ffn_norm_weight, inv_dim, eps)?;
 
-    let gate_product = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(normed2, "sd->sdg"), (w_gate, "dg->sdg")])?;
-    let gate = reduce(program, DType::Float32, ScalarOp::Add, ReduceInit::Zero, gate_product, "sdg->sdg", "sg->sdg")?;
-    let up_product = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(normed2, "sd->sdg"), (w_up, "dg->sdg")])?;
-    let up = reduce(program, DType::Float32, ScalarOp::Add, ReduceInit::Zero, up_product, "sdg->sdg", "sg->sdg")?;
+    let gate_product = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Multiply,
+        &[(normed2, "sd->sdg"), (w_gate, "dg->sdg")],
+    )?;
+    let gate = reduce(
+        program,
+        DType::Float32,
+        ScalarOp::Add,
+        ReduceInit::Zero,
+        gate_product,
+        "sdg->sdg",
+        "sg->sdg",
+    )?;
+    let up_product = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Multiply,
+        &[(normed2, "sd->sdg"), (w_up, "dg->sdg")],
+    )?;
+    let up = reduce(
+        program,
+        DType::Float32,
+        ScalarOp::Add,
+        ReduceInit::Zero,
+        up_product,
+        "sdg->sdg",
+        "sg->sdg",
+    )?;
 
-    let neg_gate = elementwise(program, DType::Float32, ScalarOp::Negate, &[(gate, "sg->sg")])?;
-    let exp_neg_gate = elementwise(program, DType::Float32, ScalarOp::Exponential, &[(neg_gate, "sg->sg")])?;
-    let one_plus_exp = elementwise(program, DType::Float32, ScalarOp::Add, &[(exp_neg_gate, "sg->sg"), (ones, "->sg")])?;
-    let sigmoid_gate = elementwise(program, DType::Float32, ScalarOp::Reciprocal, &[(one_plus_exp, "sg->sg")])?;
-    let silu_gate = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(gate, "sg->sg"), (sigmoid_gate, "sg->sg")])?;
-    let ffn_hidden = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(silu_gate, "sg->sg"), (up, "sg->sg")])?;
+    let neg_gate = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Negate,
+        &[(gate, "sg->sg")],
+    )?;
+    let exp_neg_gate = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Exponential,
+        &[(neg_gate, "sg->sg")],
+    )?;
+    let one_plus_exp = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Add,
+        &[(exp_neg_gate, "sg->sg"), (ones, "->sg")],
+    )?;
+    let sigmoid_gate = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Reciprocal,
+        &[(one_plus_exp, "sg->sg")],
+    )?;
+    let silu_gate = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Multiply,
+        &[(gate, "sg->sg"), (sigmoid_gate, "sg->sg")],
+    )?;
+    let ffn_hidden = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Multiply,
+        &[(silu_gate, "sg->sg"), (up, "sg->sg")],
+    )?;
 
-    let down_product = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(ffn_hidden, "sg->sgd"), (w_down, "gd->sgd")])?;
-    let ffn_out = reduce(program, DType::Float32, ScalarOp::Add, ReduceInit::Zero, down_product, "sgd->sgd", "sd->sgd")?;
+    let down_product = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Multiply,
+        &[(ffn_hidden, "sg->sgd"), (w_down, "gd->sgd")],
+    )?;
+    let ffn_out = reduce(
+        program,
+        DType::Float32,
+        ScalarOp::Add,
+        ReduceInit::Zero,
+        down_product,
+        "sgd->sgd",
+        "sd->sgd",
+    )?;
 
-    elementwise(program, DType::Float32, ScalarOp::Add, &[(ffn_out, "sd->sd"), (residual1, "sd->sd")])
+    elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Add,
+        &[(ffn_out, "sd->sd"), (residual1, "sd->sd")],
+    )
 }
 
 /// Rust-code counterpart of `specs/moe_block.toml`'s `ffn_product` node:
@@ -883,7 +1262,12 @@ fn append_mistral_layer(
 /// over `d_in` to finish the matmul. The same [`IndexMap::Computed`] gather
 /// [`embedding_lookup`] uses, with one extra non-gathered axis (`d_out`)
 /// spliced in after the gathered one instead of none.
-fn gathered_expert_product(program: &mut Vec<Op>, stack: NodeId, route: NodeId, x: NodeId) -> NodeId {
+fn gathered_expert_product(
+    program: &mut Vec<Op>,
+    stack: NodeId,
+    route: NodeId,
+    x: NodeId,
+) -> NodeId {
     let gathered_map = IndexMap::Computed {
         indices: route,
         index_map: map::projection(3, &[0]),
@@ -992,24 +1376,68 @@ fn append_moe_ffn(
         });
     }
 
-    let gate_product = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(x, "sd->sde"), (gate_inp, "de->sde")])?;
-    let logits = reduce(program, DType::Float32, ScalarOp::Add, ReduceInit::Zero, gate_product, "sde->sde", "se->sde")?;
+    let gate_product = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Multiply,
+        &[(x, "sd->sde"), (gate_inp, "de->sde")],
+    )?;
+    let logits = reduce(
+        program,
+        DType::Float32,
+        ScalarOp::Add,
+        ReduceInit::Zero,
+        gate_product,
+        "sde->sde",
+        "se->sde",
+    )?;
 
     let scores = match gating {
         ExpertGatingFunc::Softmax => logits,
         ExpertGatingFunc::Sigmoid => {
-            let neg_logits = elementwise(program, DType::Float32, ScalarOp::Negate, &[(logits, "se->se")])?;
-            let exp_neg_logits = elementwise(program, DType::Float32, ScalarOp::Exponential, &[(neg_logits, "se->se")])?;
-            let one_plus_exp = elementwise(program, DType::Float32, ScalarOp::Add, &[(exp_neg_logits, "se->se"), (ones, "->se")])?;
-            elementwise(program, DType::Float32, ScalarOp::Reciprocal, &[(one_plus_exp, "se->se")])?
+            let neg_logits = elementwise(
+                program,
+                DType::Float32,
+                ScalarOp::Negate,
+                &[(logits, "se->se")],
+            )?;
+            let exp_neg_logits = elementwise(
+                program,
+                DType::Float32,
+                ScalarOp::Exponential,
+                &[(neg_logits, "se->se")],
+            )?;
+            let one_plus_exp = elementwise(
+                program,
+                DType::Float32,
+                ScalarOp::Add,
+                &[(exp_neg_logits, "se->se"), (ones, "->se")],
+            )?;
+            elementwise(
+                program,
+                DType::Float32,
+                ScalarOp::Reciprocal,
+                &[(one_plus_exp, "se->se")],
+            )?
         }
     };
     let mut selection_scores = match expert_bias {
-        Some(bias) => elementwise(program, DType::Float32, ScalarOp::Add, &[(scores, "se->se"), (bias, "e->se")])?,
+        Some(bias) => elementwise(
+            program,
+            DType::Float32,
+            ScalarOp::Add,
+            &[(scores, "se->se"), (bias, "e->se")],
+        )?,
         None => scores,
     };
 
-    let expert_index = op::append(program, Op::Iota { dtype: DType::Float32, extent: Extent::Static(expert_count) });
+    let expert_index = op::append(
+        program,
+        Op::Iota {
+            dtype: DType::Float32,
+            extent: Extent::Static(expert_count),
+        },
+    );
     let neg_infinity = scalar_constant(program, f32::NEG_INFINITY);
 
     let mut weighted_sum: Option<NodeId> = None;
@@ -1017,52 +1445,180 @@ fn append_moe_ffn(
     let mut max_selection_0: Option<NodeId> = None;
 
     for round in 0..expert_used_count {
-        let max_selection = reduce(program, DType::Float32, ScalarOp::Maximum, ReduceInit::NegativeInfinity, selection_scores, "se->se", "s->se")?;
-        let mask = elementwise(program, DType::Float32, ScalarOp::Equal, &[(selection_scores, "se->se"), (max_selection, "s->se")])?;
-        let candidate = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(mask, "se->se"), (expert_index, "e->se")])?;
-        let route = reduce(program, DType::Int32, ScalarOp::Maximum, ReduceInit::Zero, candidate, "se->se", "s->se")?;
+        let max_selection = reduce(
+            program,
+            DType::Float32,
+            ScalarOp::Maximum,
+            ReduceInit::NegativeInfinity,
+            selection_scores,
+            "se->se",
+            "s->se",
+        )?;
+        let mask = elementwise(
+            program,
+            DType::Float32,
+            ScalarOp::Equal,
+            &[(selection_scores, "se->se"), (max_selection, "s->se")],
+        )?;
+        let candidate = elementwise(
+            program,
+            DType::Float32,
+            ScalarOp::Multiply,
+            &[(mask, "se->se"), (expert_index, "e->se")],
+        )?;
+        let route = reduce(
+            program,
+            DType::Int32,
+            ScalarOp::Maximum,
+            ReduceInit::Zero,
+            candidate,
+            "se->se",
+            "s->se",
+        )?;
 
         let weight = match gating {
             ExpertGatingFunc::Softmax => {
                 let first_max = *max_selection_0.get_or_insert(max_selection);
-                let shifted = elementwise(program, DType::Float32, ScalarOp::Subtract, &[(max_selection, "s->s"), (first_max, "s->s")])?;
-                elementwise(program, DType::Float32, ScalarOp::Exponential, &[(shifted, "s->s")])?
+                let shifted = elementwise(
+                    program,
+                    DType::Float32,
+                    ScalarOp::Subtract,
+                    &[(max_selection, "s->s"), (first_max, "s->s")],
+                )?;
+                elementwise(
+                    program,
+                    DType::Float32,
+                    ScalarOp::Exponential,
+                    &[(shifted, "s->s")],
+                )?
             }
             ExpertGatingFunc::Sigmoid => {
                 // unbiased `scores` at the masked (selected) position, never
                 // `max_selection` itself -- that would be the biased score.
-                let masked_scores = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(mask, "se->se"), (scores, "se->se")])?;
-                reduce(program, DType::Float32, ScalarOp::Add, ReduceInit::Zero, masked_scores, "se->se", "s->se")?
+                let masked_scores = elementwise(
+                    program,
+                    DType::Float32,
+                    ScalarOp::Multiply,
+                    &[(mask, "se->se"), (scores, "se->se")],
+                )?;
+                reduce(
+                    program,
+                    DType::Float32,
+                    ScalarOp::Add,
+                    ReduceInit::Zero,
+                    masked_scores,
+                    "se->se",
+                    "s->se",
+                )?
             }
         };
 
         let gate_expert_product = gathered_expert_product(program, expert_w_gate, route, x);
-        let gate_expert = reduce(program, DType::Float32, ScalarOp::Add, ReduceInit::Zero, gate_expert_product, "sio->sio", "so->sio")?;
+        let gate_expert = reduce(
+            program,
+            DType::Float32,
+            ScalarOp::Add,
+            ReduceInit::Zero,
+            gate_expert_product,
+            "sio->sio",
+            "so->sio",
+        )?;
         let up_expert_product = gathered_expert_product(program, expert_w_up, route, x);
-        let up_expert = reduce(program, DType::Float32, ScalarOp::Add, ReduceInit::Zero, up_expert_product, "sio->sio", "so->sio")?;
+        let up_expert = reduce(
+            program,
+            DType::Float32,
+            ScalarOp::Add,
+            ReduceInit::Zero,
+            up_expert_product,
+            "sio->sio",
+            "so->sio",
+        )?;
 
-        let neg_gate = elementwise(program, DType::Float32, ScalarOp::Negate, &[(gate_expert, "sg->sg")])?;
-        let exp_neg_gate = elementwise(program, DType::Float32, ScalarOp::Exponential, &[(neg_gate, "sg->sg")])?;
-        let one_plus_exp = elementwise(program, DType::Float32, ScalarOp::Add, &[(exp_neg_gate, "sg->sg"), (ones, "->sg")])?;
-        let sigmoid_gate = elementwise(program, DType::Float32, ScalarOp::Reciprocal, &[(one_plus_exp, "sg->sg")])?;
-        let silu_gate = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(gate_expert, "sg->sg"), (sigmoid_gate, "sg->sg")])?;
-        let ffn_hidden = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(silu_gate, "sg->sg"), (up_expert, "sg->sg")])?;
+        let neg_gate = elementwise(
+            program,
+            DType::Float32,
+            ScalarOp::Negate,
+            &[(gate_expert, "sg->sg")],
+        )?;
+        let exp_neg_gate = elementwise(
+            program,
+            DType::Float32,
+            ScalarOp::Exponential,
+            &[(neg_gate, "sg->sg")],
+        )?;
+        let one_plus_exp = elementwise(
+            program,
+            DType::Float32,
+            ScalarOp::Add,
+            &[(exp_neg_gate, "sg->sg"), (ones, "->sg")],
+        )?;
+        let sigmoid_gate = elementwise(
+            program,
+            DType::Float32,
+            ScalarOp::Reciprocal,
+            &[(one_plus_exp, "sg->sg")],
+        )?;
+        let silu_gate = elementwise(
+            program,
+            DType::Float32,
+            ScalarOp::Multiply,
+            &[(gate_expert, "sg->sg"), (sigmoid_gate, "sg->sg")],
+        )?;
+        let ffn_hidden = elementwise(
+            program,
+            DType::Float32,
+            ScalarOp::Multiply,
+            &[(silu_gate, "sg->sg"), (up_expert, "sg->sg")],
+        )?;
 
-        let down_expert_product = gathered_expert_product(program, expert_w_down, route, ffn_hidden);
-        let round_ffn = reduce(program, DType::Float32, ScalarOp::Add, ReduceInit::Zero, down_expert_product, "sio->sio", "so->sio")?;
+        let down_expert_product =
+            gathered_expert_product(program, expert_w_down, route, ffn_hidden);
+        let round_ffn = reduce(
+            program,
+            DType::Float32,
+            ScalarOp::Add,
+            ReduceInit::Zero,
+            down_expert_product,
+            "sio->sio",
+            "so->sio",
+        )?;
 
-        let weighted_round = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(round_ffn, "sd->sd"), (weight, "s->sd")])?;
+        let weighted_round = elementwise(
+            program,
+            DType::Float32,
+            ScalarOp::Multiply,
+            &[(round_ffn, "sd->sd"), (weight, "s->sd")],
+        )?;
         weighted_sum = Some(match weighted_sum {
-            Some(accum) => elementwise(program, DType::Float32, ScalarOp::Add, &[(accum, "sd->sd"), (weighted_round, "sd->sd")])?,
+            Some(accum) => elementwise(
+                program,
+                DType::Float32,
+                ScalarOp::Add,
+                &[(accum, "sd->sd"), (weighted_round, "sd->sd")],
+            )?,
             None => weighted_round,
         });
         weight_total = Some(match weight_total {
-            Some(accum) => elementwise(program, DType::Float32, ScalarOp::Add, &[(accum, "s->s"), (weight, "s->s")])?,
+            Some(accum) => elementwise(
+                program,
+                DType::Float32,
+                ScalarOp::Add,
+                &[(accum, "s->s"), (weight, "s->s")],
+            )?,
             None => weight,
         });
 
         if round + 1 < expert_used_count {
-            selection_scores = elementwise(program, DType::Float32, ScalarOp::Select, &[(mask, "se->se"), (neg_infinity, "->se"), (selection_scores, "se->se")])?;
+            selection_scores = elementwise(
+                program,
+                DType::Float32,
+                ScalarOp::Select,
+                &[
+                    (mask, "se->se"),
+                    (neg_infinity, "->se"),
+                    (selection_scores, "se->se"),
+                ],
+            )?;
         }
     }
 
@@ -1076,8 +1632,18 @@ fn append_moe_ffn(
         expert_count,
         expert_used_count,
     })?;
-    let inv_weight_total = elementwise(program, DType::Float32, ScalarOp::Reciprocal, &[(weight_total, "s->s")])?;
-    elementwise(program, DType::Float32, ScalarOp::Multiply, &[(weighted_sum, "sd->sd"), (inv_weight_total, "s->sd")])
+    let inv_weight_total = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Reciprocal,
+        &[(weight_total, "s->s")],
+    )?;
+    elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Multiply,
+        &[(weighted_sum, "sd->sd"), (inv_weight_total, "s->sd")],
+    )
 }
 
 /// [`append_mistral_layer`]'s mixture-of-experts counterpart: identical
@@ -1116,38 +1682,190 @@ fn append_mistral_moe_layer(
 ) -> Result<NodeId, TensorError> {
     let normed = rmsnorm(program, x, attn_norm_weight, inv_dim, eps)?;
 
-    let q_product = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(normed, "si->shdi"), (wq, "ihd->shdi")])?;
-    let q = reduce(program, DType::Float32, ScalarOp::Add, ReduceInit::Zero, q_product, "shdi->shdi", "shd->shdi")?;
+    let q_product = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Multiply,
+        &[(normed, "si->shdi"), (wq, "ihd->shdi")],
+    )?;
+    let q = reduce(
+        program,
+        DType::Float32,
+        ScalarOp::Add,
+        ReduceInit::Zero,
+        q_product,
+        "shdi->shdi",
+        "shd->shdi",
+    )?;
 
-    let k_product = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(normed, "si->sudi"), (wk, "iud->sudi")])?;
-    let k = reduce(program, DType::Float32, ScalarOp::Add, ReduceInit::Zero, k_product, "sudi->sudi", "sud->sudi")?;
+    let k_product = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Multiply,
+        &[(normed, "si->sudi"), (wk, "iud->sudi")],
+    )?;
+    let k = reduce(
+        program,
+        DType::Float32,
+        ScalarOp::Add,
+        ReduceInit::Zero,
+        k_product,
+        "sudi->sudi",
+        "sud->sudi",
+    )?;
 
-    let v_product = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(normed, "si->sudi"), (wv, "iud->sudi")])?;
-    let v = reduce(program, DType::Float32, ScalarOp::Add, ReduceInit::Zero, v_product, "sudi->sudi", "sud->sudi")?;
+    let v_product = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Multiply,
+        &[(normed, "si->sudi"), (wv, "iud->sudi")],
+    )?;
+    let v = reduce(
+        program,
+        DType::Float32,
+        ScalarOp::Add,
+        ReduceInit::Zero,
+        v_product,
+        "sudi->sudi",
+        "sud->sudi",
+    )?;
 
-    let q_even_cos = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(q, "s,h,2*i->shi"), (cos, "si->shi")])?;
-    let q_odd_sin = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(q, "s,h,2*i+1->shi"), (sin, "si->shi")])?;
-    let rotated_q_even = elementwise(program, DType::Float32, ScalarOp::Subtract, &[(q_even_cos, "shi->shi"), (q_odd_sin, "shi->shi")])?;
-    let q_even_sin = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(q, "s,h,2*i->shi"), (sin, "si->shi")])?;
-    let q_odd_cos = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(q, "s,h,2*i+1->shi"), (cos, "si->shi")])?;
-    let rotated_q_odd = elementwise(program, DType::Float32, ScalarOp::Add, &[(q_even_sin, "shi->shi"), (q_odd_cos, "shi->shi")])?;
+    let q_even_cos = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Multiply,
+        &[(q, "s,h,2*i->shi"), (cos, "si->shi")],
+    )?;
+    let q_odd_sin = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Multiply,
+        &[(q, "s,h,2*i+1->shi"), (sin, "si->shi")],
+    )?;
+    let rotated_q_even = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Subtract,
+        &[(q_even_cos, "shi->shi"), (q_odd_sin, "shi->shi")],
+    )?;
+    let q_even_sin = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Multiply,
+        &[(q, "s,h,2*i->shi"), (sin, "si->shi")],
+    )?;
+    let q_odd_cos = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Multiply,
+        &[(q, "s,h,2*i+1->shi"), (cos, "si->shi")],
+    )?;
+    let rotated_q_odd = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Add,
+        &[(q_even_sin, "shi->shi"), (q_odd_cos, "shi->shi")],
+    )?;
 
-    let k_even_cos = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(k, "s,u,2*i->sui"), (cos, "si->sui")])?;
-    let k_odd_sin = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(k, "s,u,2*i+1->sui"), (sin, "si->sui")])?;
-    let rotated_k_even = elementwise(program, DType::Float32, ScalarOp::Subtract, &[(k_even_cos, "sui->sui"), (k_odd_sin, "sui->sui")])?;
-    let k_even_sin = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(k, "s,u,2*i->sui"), (sin, "si->sui")])?;
-    let k_odd_cos = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(k, "s,u,2*i+1->sui"), (cos, "si->sui")])?;
-    let rotated_k_odd = elementwise(program, DType::Float32, ScalarOp::Add, &[(k_even_sin, "sui->sui"), (k_odd_cos, "sui->sui")])?;
+    let k_even_cos = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Multiply,
+        &[(k, "s,u,2*i->sui"), (cos, "si->sui")],
+    )?;
+    let k_odd_sin = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Multiply,
+        &[(k, "s,u,2*i+1->sui"), (sin, "si->sui")],
+    )?;
+    let rotated_k_even = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Subtract,
+        &[(k_even_cos, "sui->sui"), (k_odd_sin, "sui->sui")],
+    )?;
+    let k_even_sin = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Multiply,
+        &[(k, "s,u,2*i->sui"), (sin, "si->sui")],
+    )?;
+    let k_odd_cos = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Multiply,
+        &[(k, "s,u,2*i+1->sui"), (cos, "si->sui")],
+    )?;
+    let rotated_k_odd = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Add,
+        &[(k_even_sin, "sui->sui"), (k_odd_cos, "sui->sui")],
+    )?;
 
     let group_map = alloc::format!("s,{group}*u+g,i->sugi");
-    let q_even_grouped = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(rotated_q_even, group_map.as_str()), (group_ones, "ug->sugi")])?;
-    let q_odd_grouped = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(rotated_q_odd, group_map.as_str()), (group_ones, "ug->sugi")])?;
+    let q_even_grouped = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Multiply,
+        &[
+            (rotated_q_even, group_map.as_str()),
+            (group_ones, "ug->sugi"),
+        ],
+    )?;
+    let q_odd_grouped = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Multiply,
+        &[
+            (rotated_q_odd, group_map.as_str()),
+            (group_ones, "ug->sugi"),
+        ],
+    )?;
 
-    let score_even_product = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(q_even_grouped, "sugi->stugi"), (rotated_k_even, "tui->stugi")])?;
-    let score_even = reduce(program, DType::Float32, ScalarOp::Add, ReduceInit::Zero, score_even_product, "stugi->stugi", "stug->stugi")?;
-    let score_odd_product = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(q_odd_grouped, "sugi->stugi"), (rotated_k_odd, "tui->stugi")])?;
-    let score_odd = reduce(program, DType::Float32, ScalarOp::Add, ReduceInit::Zero, score_odd_product, "stugi->stugi", "stug->stugi")?;
-    let scores = elementwise(program, DType::Float32, ScalarOp::Add, &[(score_even, "stug->stug"), (score_odd, "stug->stug")])?;
+    let score_even_product = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Multiply,
+        &[
+            (q_even_grouped, "sugi->stugi"),
+            (rotated_k_even, "tui->stugi"),
+        ],
+    )?;
+    let score_even = reduce(
+        program,
+        DType::Float32,
+        ScalarOp::Add,
+        ReduceInit::Zero,
+        score_even_product,
+        "stugi->stugi",
+        "stug->stugi",
+    )?;
+    let score_odd_product = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Multiply,
+        &[
+            (q_odd_grouped, "sugi->stugi"),
+            (rotated_k_odd, "tui->stugi"),
+        ],
+    )?;
+    let score_odd = reduce(
+        program,
+        DType::Float32,
+        ScalarOp::Add,
+        ReduceInit::Zero,
+        score_odd_product,
+        "stugi->stugi",
+        "stug->stugi",
+    )?;
+    let scores = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Add,
+        &[(score_even, "stug->stug"), (score_odd, "stug->stug")],
+    )?;
 
     let scores_scaled = elementwise(
         program,
@@ -1160,23 +1878,94 @@ fn append_mistral_moe_layer(
         program,
         DType::Float32,
         ScalarOp::Select,
-        &[(is_future, "st->stug"), (neg_infinity, "->stug"), (scores_scaled, "stug->stug")],
+        &[
+            (is_future, "st->stug"),
+            (neg_infinity, "->stug"),
+            (scores_scaled, "stug->stug"),
+        ],
     )?;
 
-    let score_max = reduce(program, DType::Float32, ScalarOp::Maximum, ReduceInit::NegativeInfinity, scores_masked, "stug->stug", "sug->stug")?;
-    let shifted = elementwise(program, DType::Float32, ScalarOp::Subtract, &[(scores_masked, "stug->stug"), (score_max, "sug->stug")])?;
-    let weights = elementwise(program, DType::Float32, ScalarOp::Exponential, &[(shifted, "stug->stug")])?;
-    let weight_sum = reduce(program, DType::Float32, ScalarOp::Add, ReduceInit::Zero, weights, "stug->stug", "sug->stug")?;
-    let inv_weight_sum = elementwise(program, DType::Float32, ScalarOp::Reciprocal, &[(weight_sum, "sug->sug")])?;
-    let probabilities = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(weights, "stug->stug"), (inv_weight_sum, "sug->stug")])?;
+    let score_max = reduce(
+        program,
+        DType::Float32,
+        ScalarOp::Maximum,
+        ReduceInit::NegativeInfinity,
+        scores_masked,
+        "stug->stug",
+        "sug->stug",
+    )?;
+    let shifted = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Subtract,
+        &[(scores_masked, "stug->stug"), (score_max, "sug->stug")],
+    )?;
+    let weights = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Exponential,
+        &[(shifted, "stug->stug")],
+    )?;
+    let weight_sum = reduce(
+        program,
+        DType::Float32,
+        ScalarOp::Add,
+        ReduceInit::Zero,
+        weights,
+        "stug->stug",
+        "sug->stug",
+    )?;
+    let inv_weight_sum = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Reciprocal,
+        &[(weight_sum, "sug->sug")],
+    )?;
+    let probabilities = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Multiply,
+        &[(weights, "stug->stug"), (inv_weight_sum, "sug->stug")],
+    )?;
 
-    let attended_product = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(probabilities, "stug->stugd"), (v, "tud->stugd")])?;
-    let attended = reduce(program, DType::Float32, ScalarOp::Add, ReduceInit::Zero, attended_product, "stugd->stugd", "sugd->stugd")?;
+    let attended_product = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Multiply,
+        &[(probabilities, "stug->stugd"), (v, "tud->stugd")],
+    )?;
+    let attended = reduce(
+        program,
+        DType::Float32,
+        ScalarOp::Add,
+        ReduceInit::Zero,
+        attended_product,
+        "stugd->stugd",
+        "sugd->stugd",
+    )?;
 
-    let wo_product = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(attended, "sugd->sugdo"), (wo, "ugdo->sugdo")])?;
-    let attn_out = reduce(program, DType::Float32, ScalarOp::Add, ReduceInit::Zero, wo_product, "sugdo->sugdo", "so->sugdo")?;
+    let wo_product = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Multiply,
+        &[(attended, "sugd->sugdo"), (wo, "ugdo->sugdo")],
+    )?;
+    let attn_out = reduce(
+        program,
+        DType::Float32,
+        ScalarOp::Add,
+        ReduceInit::Zero,
+        wo_product,
+        "sugdo->sugdo",
+        "so->sugdo",
+    )?;
 
-    let residual1 = elementwise(program, DType::Float32, ScalarOp::Add, &[(attn_out, "sd->sd"), (x, "sd->sd")])?;
+    let residual1 = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Add,
+        &[(attn_out, "sd->sd"), (x, "sd->sd")],
+    )?;
 
     let normed2 = rmsnorm(program, residual1, ffn_norm_weight, inv_dim, eps)?;
 
@@ -1194,7 +1983,12 @@ fn append_mistral_moe_layer(
         None,
     )?;
 
-    elementwise(program, DType::Float32, ScalarOp::Add, &[(ffn_out, "sd->sd"), (residual1, "sd->sd")])
+    elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Add,
+        &[(ffn_out, "sd->sd"), (residual1, "sd->sd")],
+    )
 }
 
 /// The whole model as one program: token embedding lookup, `block_count`
@@ -1238,7 +2032,12 @@ pub fn mistral_forward_program(
 
     let mut program = Vec::new();
 
-    let ids = input_leaf(&mut program, DType::Int32, alloc::vec![Extent::Symbolic(0)], "ids");
+    let ids = input_leaf(
+        &mut program,
+        DType::Int32,
+        alloc::vec![Extent::Symbolic(0)],
+        "ids",
+    );
     let table = input_leaf(
         &mut program,
         DType::Float32,
@@ -1295,19 +2094,31 @@ pub fn mistral_forward_program(
         let wq = input_leaf(
             &mut program,
             DType::Float32,
-            alloc::vec![Extent::Static(embedding), Extent::Static(query_heads), Extent::Static(head_dim)],
+            alloc::vec![
+                Extent::Static(embedding),
+                Extent::Static(query_heads),
+                Extent::Static(head_dim)
+            ],
             &alloc::format!("blk.{layer}.attn_q.weight"),
         );
         let wk = input_leaf(
             &mut program,
             DType::Float32,
-            alloc::vec![Extent::Static(embedding), Extent::Static(kv_heads), Extent::Static(head_dim)],
+            alloc::vec![
+                Extent::Static(embedding),
+                Extent::Static(kv_heads),
+                Extent::Static(head_dim)
+            ],
             &alloc::format!("blk.{layer}.attn_k.weight"),
         );
         let wv = input_leaf(
             &mut program,
             DType::Float32,
-            alloc::vec![Extent::Static(embedding), Extent::Static(kv_heads), Extent::Static(head_dim)],
+            alloc::vec![
+                Extent::Static(embedding),
+                Extent::Static(kv_heads),
+                Extent::Static(head_dim)
+            ],
             &alloc::format!("blk.{layer}.attn_v.weight"),
         );
         let wo = input_leaf(
@@ -1374,19 +2185,31 @@ pub fn mistral_forward_program(
             let expert_w_gate = input_leaf(
                 &mut program,
                 DType::Float32,
-                alloc::vec![Extent::Static(expert_count), Extent::Static(embedding), Extent::Static(feed_forward)],
+                alloc::vec![
+                    Extent::Static(expert_count),
+                    Extent::Static(embedding),
+                    Extent::Static(feed_forward)
+                ],
                 &alloc::format!("blk.{layer}.ffn_gate_exps.weight"),
             );
             let expert_w_up = input_leaf(
                 &mut program,
                 DType::Float32,
-                alloc::vec![Extent::Static(expert_count), Extent::Static(embedding), Extent::Static(feed_forward)],
+                alloc::vec![
+                    Extent::Static(expert_count),
+                    Extent::Static(embedding),
+                    Extent::Static(feed_forward)
+                ],
                 &alloc::format!("blk.{layer}.ffn_up_exps.weight"),
             );
             let expert_w_down = input_leaf(
                 &mut program,
                 DType::Float32,
-                alloc::vec![Extent::Static(expert_count), Extent::Static(feed_forward), Extent::Static(embedding)],
+                alloc::vec![
+                    Extent::Static(expert_count),
+                    Extent::Static(feed_forward),
+                    Extent::Static(embedding)
+                ],
                 &alloc::format!("blk.{layer}.ffn_down_exps.weight"),
             );
 
@@ -1419,7 +2242,12 @@ pub fn mistral_forward_program(
         };
     }
 
-    let output_norm_weight = input_leaf(&mut program, DType::Float32, alloc::vec![Extent::Static(embedding)], "output_norm.weight");
+    let output_norm_weight = input_leaf(
+        &mut program,
+        DType::Float32,
+        alloc::vec![Extent::Static(embedding)],
+        "output_norm.weight",
+    );
     let normed_final = rmsnorm(&mut program, x, output_norm_weight, inv_dim, eps)?;
 
     let lm_head = input_leaf(
@@ -1434,7 +2262,15 @@ pub fn mistral_forward_program(
         ScalarOp::Multiply,
         &[(normed_final, "sd->sdv"), (lm_head, "dv->sdv")],
     )?;
-    reduce(&mut program, DType::Float32, ScalarOp::Add, ReduceInit::Zero, logits_product, "sdv->sdv", "sv->sdv")?;
+    reduce(
+        &mut program,
+        DType::Float32,
+        ScalarOp::Add,
+        ReduceInit::Zero,
+        logits_product,
+        "sdv->sdv",
+        "sv->sdv",
+    )?;
 
     Ok(program)
 }
@@ -1497,112 +2333,513 @@ fn append_mistral_cached_layer(
 ) -> Result<(NodeId, CachedLayerRoots), TensorError> {
     let normed = rmsnorm(program, x, attn_norm_weight, inv_dim, eps)?;
 
-    let q_product = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(normed, "si->shdi"), (wq, "ihd->shdi")])?;
-    let q = reduce(program, DType::Float32, ScalarOp::Add, ReduceInit::Zero, q_product, "shdi->shdi", "shd->shdi")?;
+    let q_product = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Multiply,
+        &[(normed, "si->shdi"), (wq, "ihd->shdi")],
+    )?;
+    let q = reduce(
+        program,
+        DType::Float32,
+        ScalarOp::Add,
+        ReduceInit::Zero,
+        q_product,
+        "shdi->shdi",
+        "shd->shdi",
+    )?;
 
-    let k_new_product = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(normed, "si->sudi"), (wk, "iud->sudi")])?;
-    let k_new = reduce(program, DType::Float32, ScalarOp::Add, ReduceInit::Zero, k_new_product, "sudi->sudi", "sud->sudi")?;
+    let k_new_product = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Multiply,
+        &[(normed, "si->sudi"), (wk, "iud->sudi")],
+    )?;
+    let k_new = reduce(
+        program,
+        DType::Float32,
+        ScalarOp::Add,
+        ReduceInit::Zero,
+        k_new_product,
+        "sudi->sudi",
+        "sud->sudi",
+    )?;
 
-    let v_product = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(normed, "si->sudi"), (wv, "iud->sudi")])?;
-    let v_new = reduce(program, DType::Float32, ScalarOp::Add, ReduceInit::Zero, v_product, "sudi->sudi", "sud->sudi")?;
+    let v_product = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Multiply,
+        &[(normed, "si->sudi"), (wv, "iud->sudi")],
+    )?;
+    let v_new = reduce(
+        program,
+        DType::Float32,
+        ScalarOp::Add,
+        ReduceInit::Zero,
+        v_product,
+        "sudi->sudi",
+        "sud->sudi",
+    )?;
 
-    let q_even_cos = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(q, "s,h,2*i->shi"), (cos_new, "si->shi")])?;
-    let q_odd_sin = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(q, "s,h,2*i+1->shi"), (sin_new, "si->shi")])?;
-    let rotated_q_even = elementwise(program, DType::Float32, ScalarOp::Subtract, &[(q_even_cos, "shi->shi"), (q_odd_sin, "shi->shi")])?;
-    let q_even_sin = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(q, "s,h,2*i->shi"), (sin_new, "si->shi")])?;
-    let q_odd_cos = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(q, "s,h,2*i+1->shi"), (cos_new, "si->shi")])?;
-    let rotated_q_odd = elementwise(program, DType::Float32, ScalarOp::Add, &[(q_even_sin, "shi->shi"), (q_odd_cos, "shi->shi")])?;
+    let q_even_cos = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Multiply,
+        &[(q, "s,h,2*i->shi"), (cos_new, "si->shi")],
+    )?;
+    let q_odd_sin = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Multiply,
+        &[(q, "s,h,2*i+1->shi"), (sin_new, "si->shi")],
+    )?;
+    let rotated_q_even = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Subtract,
+        &[(q_even_cos, "shi->shi"), (q_odd_sin, "shi->shi")],
+    )?;
+    let q_even_sin = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Multiply,
+        &[(q, "s,h,2*i->shi"), (sin_new, "si->shi")],
+    )?;
+    let q_odd_cos = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Multiply,
+        &[(q, "s,h,2*i+1->shi"), (cos_new, "si->shi")],
+    )?;
+    let rotated_q_odd = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Add,
+        &[(q_even_sin, "shi->shi"), (q_odd_cos, "shi->shi")],
+    )?;
 
-    let k_new_even_cos = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(k_new, "s,u,2*i->sui"), (cos_new, "si->sui")])?;
-    let k_new_odd_sin = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(k_new, "s,u,2*i+1->sui"), (sin_new, "si->sui")])?;
-    let rotated_k_new_even =
-        elementwise(program, DType::Float32, ScalarOp::Subtract, &[(k_new_even_cos, "sui->sui"), (k_new_odd_sin, "sui->sui")])?;
-    let k_new_even_sin = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(k_new, "s,u,2*i->sui"), (sin_new, "si->sui")])?;
-    let k_new_odd_cos = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(k_new, "s,u,2*i+1->sui"), (cos_new, "si->sui")])?;
-    let rotated_k_new_odd =
-        elementwise(program, DType::Float32, ScalarOp::Add, &[(k_new_even_sin, "sui->sui"), (k_new_odd_cos, "sui->sui")])?;
+    let k_new_even_cos = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Multiply,
+        &[(k_new, "s,u,2*i->sui"), (cos_new, "si->sui")],
+    )?;
+    let k_new_odd_sin = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Multiply,
+        &[(k_new, "s,u,2*i+1->sui"), (sin_new, "si->sui")],
+    )?;
+    let rotated_k_new_even = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Subtract,
+        &[(k_new_even_cos, "sui->sui"), (k_new_odd_sin, "sui->sui")],
+    )?;
+    let k_new_even_sin = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Multiply,
+        &[(k_new, "s,u,2*i->sui"), (sin_new, "si->sui")],
+    )?;
+    let k_new_odd_cos = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Multiply,
+        &[(k_new, "s,u,2*i+1->sui"), (cos_new, "si->sui")],
+    )?;
+    let rotated_k_new_odd = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Add,
+        &[(k_new_even_sin, "sui->sui"), (k_new_odd_cos, "sui->sui")],
+    )?;
 
     let group_map = alloc::format!("s,{group}*u+g,i->sugi");
-    let q_even_grouped = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(rotated_q_even, group_map.as_str()), (group_ones, "ug->sugi")])?;
-    let q_odd_grouped = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(rotated_q_odd, group_map.as_str()), (group_ones, "ug->sugi")])?;
+    let q_even_grouped = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Multiply,
+        &[
+            (rotated_q_even, group_map.as_str()),
+            (group_ones, "ug->sugi"),
+        ],
+    )?;
+    let q_odd_grouped = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Multiply,
+        &[
+            (rotated_q_odd, group_map.as_str()),
+            (group_ones, "ug->sugi"),
+        ],
+    )?;
 
     // cached block: query `s` against every already-rotated cached key `t`
     // (symbol 1's extent, zero on the very first call) -- never masked, a
     // cached position is always in the past of a new query.
-    let score_cached_even_product =
-        elementwise(program, DType::Float32, ScalarOp::Multiply, &[(q_even_grouped, "sugi->stugi"), (k_even_cache, "tui->stugi")])?;
-    let score_cached_even = reduce(program, DType::Float32, ScalarOp::Add, ReduceInit::Zero, score_cached_even_product, "stugi->stugi", "stug->stugi")?;
-    let score_cached_odd_product =
-        elementwise(program, DType::Float32, ScalarOp::Multiply, &[(q_odd_grouped, "sugi->stugi"), (k_odd_cache, "tui->stugi")])?;
-    let score_cached_odd = reduce(program, DType::Float32, ScalarOp::Add, ReduceInit::Zero, score_cached_odd_product, "stugi->stugi", "stug->stugi")?;
-    let score_cached = elementwise(program, DType::Float32, ScalarOp::Add, &[(score_cached_even, "stug->stug"), (score_cached_odd, "stug->stug")])?;
-    let score_cached_scaled = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(score_cached, "stug->stug"), (inv_sqrt_head_dim, "->stug")])?;
+    let score_cached_even_product = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Multiply,
+        &[
+            (q_even_grouped, "sugi->stugi"),
+            (k_even_cache, "tui->stugi"),
+        ],
+    )?;
+    let score_cached_even = reduce(
+        program,
+        DType::Float32,
+        ScalarOp::Add,
+        ReduceInit::Zero,
+        score_cached_even_product,
+        "stugi->stugi",
+        "stug->stugi",
+    )?;
+    let score_cached_odd_product = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Multiply,
+        &[(q_odd_grouped, "sugi->stugi"), (k_odd_cache, "tui->stugi")],
+    )?;
+    let score_cached_odd = reduce(
+        program,
+        DType::Float32,
+        ScalarOp::Add,
+        ReduceInit::Zero,
+        score_cached_odd_product,
+        "stugi->stugi",
+        "stug->stugi",
+    )?;
+    let score_cached = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Add,
+        &[
+            (score_cached_even, "stug->stug"),
+            (score_cached_odd, "stug->stug"),
+        ],
+    )?;
+    let score_cached_scaled = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Multiply,
+        &[(score_cached, "stug->stug"), (inv_sqrt_head_dim, "->stug")],
+    )?;
 
     // new block: query `s` against this call's own freshly rotated key `w`
     // (symbol 0's extent, same range as `s`) -- causal within the block,
     // reusing `is_future` unchanged since it is already `[s, w]`-shaped.
-    let score_new_even_product =
-        elementwise(program, DType::Float32, ScalarOp::Multiply, &[(q_even_grouped, "sugi->swugi"), (rotated_k_new_even, "wui->swugi")])?;
-    let score_new_even = reduce(program, DType::Float32, ScalarOp::Add, ReduceInit::Zero, score_new_even_product, "swugi->swugi", "swug->swugi")?;
-    let score_new_odd_product =
-        elementwise(program, DType::Float32, ScalarOp::Multiply, &[(q_odd_grouped, "sugi->swugi"), (rotated_k_new_odd, "wui->swugi")])?;
-    let score_new_odd = reduce(program, DType::Float32, ScalarOp::Add, ReduceInit::Zero, score_new_odd_product, "swugi->swugi", "swug->swugi")?;
-    let score_new = elementwise(program, DType::Float32, ScalarOp::Add, &[(score_new_even, "swug->swug"), (score_new_odd, "swug->swug")])?;
-    let score_new_scaled = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(score_new, "swug->swug"), (inv_sqrt_head_dim, "->swug")])?;
+    let score_new_even_product = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Multiply,
+        &[
+            (q_even_grouped, "sugi->swugi"),
+            (rotated_k_new_even, "wui->swugi"),
+        ],
+    )?;
+    let score_new_even = reduce(
+        program,
+        DType::Float32,
+        ScalarOp::Add,
+        ReduceInit::Zero,
+        score_new_even_product,
+        "swugi->swugi",
+        "swug->swugi",
+    )?;
+    let score_new_odd_product = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Multiply,
+        &[
+            (q_odd_grouped, "sugi->swugi"),
+            (rotated_k_new_odd, "wui->swugi"),
+        ],
+    )?;
+    let score_new_odd = reduce(
+        program,
+        DType::Float32,
+        ScalarOp::Add,
+        ReduceInit::Zero,
+        score_new_odd_product,
+        "swugi->swugi",
+        "swug->swugi",
+    )?;
+    let score_new = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Add,
+        &[
+            (score_new_even, "swug->swug"),
+            (score_new_odd, "swug->swug"),
+        ],
+    )?;
+    let score_new_scaled = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Multiply,
+        &[(score_new, "swug->swug"), (inv_sqrt_head_dim, "->swug")],
+    )?;
     let neg_infinity = scalar_constant(program, f32::NEG_INFINITY);
     let score_new_masked = elementwise(
         program,
         DType::Float32,
         ScalarOp::Select,
-        &[(is_future, "sw->swug"), (neg_infinity, "->swug"), (score_new_scaled, "swug->swug")],
+        &[
+            (is_future, "sw->swug"),
+            (neg_infinity, "->swug"),
+            (score_new_scaled, "swug->swug"),
+        ],
     )?;
 
     // online-softmax combine: two disjoint key ranges, one shared max and
     // one shared normalizer, no literal concatenation anywhere.
-    let score_max_cached = reduce(program, DType::Float32, ScalarOp::Maximum, ReduceInit::NegativeInfinity, score_cached_scaled, "stug->stug", "sug->stug")?;
-    let score_max_new = reduce(program, DType::Float32, ScalarOp::Maximum, ReduceInit::NegativeInfinity, score_new_masked, "swug->swug", "sug->swug")?;
-    let global_max = elementwise(program, DType::Float32, ScalarOp::Maximum, &[(score_max_cached, "sug->sug"), (score_max_new, "sug->sug")])?;
+    let score_max_cached = reduce(
+        program,
+        DType::Float32,
+        ScalarOp::Maximum,
+        ReduceInit::NegativeInfinity,
+        score_cached_scaled,
+        "stug->stug",
+        "sug->stug",
+    )?;
+    let score_max_new = reduce(
+        program,
+        DType::Float32,
+        ScalarOp::Maximum,
+        ReduceInit::NegativeInfinity,
+        score_new_masked,
+        "swug->swug",
+        "sug->swug",
+    )?;
+    let global_max = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Maximum,
+        &[(score_max_cached, "sug->sug"), (score_max_new, "sug->sug")],
+    )?;
 
-    let shifted_cached = elementwise(program, DType::Float32, ScalarOp::Subtract, &[(score_cached_scaled, "stug->stug"), (global_max, "sug->stug")])?;
-    let weights_cached = elementwise(program, DType::Float32, ScalarOp::Exponential, &[(shifted_cached, "stug->stug")])?;
-    let shifted_new = elementwise(program, DType::Float32, ScalarOp::Subtract, &[(score_new_masked, "swug->swug"), (global_max, "sug->swug")])?;
-    let weights_new = elementwise(program, DType::Float32, ScalarOp::Exponential, &[(shifted_new, "swug->swug")])?;
+    let shifted_cached = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Subtract,
+        &[
+            (score_cached_scaled, "stug->stug"),
+            (global_max, "sug->stug"),
+        ],
+    )?;
+    let weights_cached = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Exponential,
+        &[(shifted_cached, "stug->stug")],
+    )?;
+    let shifted_new = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Subtract,
+        &[(score_new_masked, "swug->swug"), (global_max, "sug->swug")],
+    )?;
+    let weights_new = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Exponential,
+        &[(shifted_new, "swug->swug")],
+    )?;
 
-    let sum_cached = reduce(program, DType::Float32, ScalarOp::Add, ReduceInit::Zero, weights_cached, "stug->stug", "sug->stug")?;
-    let sum_new = reduce(program, DType::Float32, ScalarOp::Add, ReduceInit::Zero, weights_new, "swug->swug", "sug->swug")?;
-    let weight_sum = elementwise(program, DType::Float32, ScalarOp::Add, &[(sum_cached, "sug->sug"), (sum_new, "sug->sug")])?;
-    let inv_weight_sum = elementwise(program, DType::Float32, ScalarOp::Reciprocal, &[(weight_sum, "sug->sug")])?;
+    let sum_cached = reduce(
+        program,
+        DType::Float32,
+        ScalarOp::Add,
+        ReduceInit::Zero,
+        weights_cached,
+        "stug->stug",
+        "sug->stug",
+    )?;
+    let sum_new = reduce(
+        program,
+        DType::Float32,
+        ScalarOp::Add,
+        ReduceInit::Zero,
+        weights_new,
+        "swug->swug",
+        "sug->swug",
+    )?;
+    let weight_sum = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Add,
+        &[(sum_cached, "sug->sug"), (sum_new, "sug->sug")],
+    )?;
+    let inv_weight_sum = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Reciprocal,
+        &[(weight_sum, "sug->sug")],
+    )?;
 
-    let attended_cached_product = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(weights_cached, "stug->stugd"), (v_cache, "tud->stugd")])?;
-    let attended_cached = reduce(program, DType::Float32, ScalarOp::Add, ReduceInit::Zero, attended_cached_product, "stugd->stugd", "sugd->stugd")?;
-    let attended_new_product = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(weights_new, "swug->swugd"), (v_new, "wud->swugd")])?;
-    let attended_new = reduce(program, DType::Float32, ScalarOp::Add, ReduceInit::Zero, attended_new_product, "swugd->swugd", "sugd->swugd")?;
-    let attended_sum = elementwise(program, DType::Float32, ScalarOp::Add, &[(attended_cached, "sugd->sugd"), (attended_new, "sugd->sugd")])?;
-    let attended = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(attended_sum, "sugd->sugd"), (inv_weight_sum, "sug->sugd")])?;
+    let attended_cached_product = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Multiply,
+        &[(weights_cached, "stug->stugd"), (v_cache, "tud->stugd")],
+    )?;
+    let attended_cached = reduce(
+        program,
+        DType::Float32,
+        ScalarOp::Add,
+        ReduceInit::Zero,
+        attended_cached_product,
+        "stugd->stugd",
+        "sugd->stugd",
+    )?;
+    let attended_new_product = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Multiply,
+        &[(weights_new, "swug->swugd"), (v_new, "wud->swugd")],
+    )?;
+    let attended_new = reduce(
+        program,
+        DType::Float32,
+        ScalarOp::Add,
+        ReduceInit::Zero,
+        attended_new_product,
+        "swugd->swugd",
+        "sugd->swugd",
+    )?;
+    let attended_sum = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Add,
+        &[
+            (attended_cached, "sugd->sugd"),
+            (attended_new, "sugd->sugd"),
+        ],
+    )?;
+    let attended = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Multiply,
+        &[(attended_sum, "sugd->sugd"), (inv_weight_sum, "sug->sugd")],
+    )?;
 
-    let wo_product = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(attended, "sugd->sugdo"), (wo, "ugdo->sugdo")])?;
-    let attn_out = reduce(program, DType::Float32, ScalarOp::Add, ReduceInit::Zero, wo_product, "sugdo->sugdo", "so->sugdo")?;
+    let wo_product = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Multiply,
+        &[(attended, "sugd->sugdo"), (wo, "ugdo->sugdo")],
+    )?;
+    let attn_out = reduce(
+        program,
+        DType::Float32,
+        ScalarOp::Add,
+        ReduceInit::Zero,
+        wo_product,
+        "sugdo->sugdo",
+        "so->sugdo",
+    )?;
 
-    let residual1 = elementwise(program, DType::Float32, ScalarOp::Add, &[(attn_out, "sd->sd"), (x, "sd->sd")])?;
+    let residual1 = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Add,
+        &[(attn_out, "sd->sd"), (x, "sd->sd")],
+    )?;
 
     let normed2 = rmsnorm(program, residual1, ffn_norm_weight, inv_dim, eps)?;
 
-    let gate_product = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(normed2, "sd->sdg"), (w_gate, "dg->sdg")])?;
-    let gate = reduce(program, DType::Float32, ScalarOp::Add, ReduceInit::Zero, gate_product, "sdg->sdg", "sg->sdg")?;
-    let up_product = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(normed2, "sd->sdg"), (w_up, "dg->sdg")])?;
-    let up = reduce(program, DType::Float32, ScalarOp::Add, ReduceInit::Zero, up_product, "sdg->sdg", "sg->sdg")?;
+    let gate_product = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Multiply,
+        &[(normed2, "sd->sdg"), (w_gate, "dg->sdg")],
+    )?;
+    let gate = reduce(
+        program,
+        DType::Float32,
+        ScalarOp::Add,
+        ReduceInit::Zero,
+        gate_product,
+        "sdg->sdg",
+        "sg->sdg",
+    )?;
+    let up_product = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Multiply,
+        &[(normed2, "sd->sdg"), (w_up, "dg->sdg")],
+    )?;
+    let up = reduce(
+        program,
+        DType::Float32,
+        ScalarOp::Add,
+        ReduceInit::Zero,
+        up_product,
+        "sdg->sdg",
+        "sg->sdg",
+    )?;
 
-    let neg_gate = elementwise(program, DType::Float32, ScalarOp::Negate, &[(gate, "sg->sg")])?;
-    let exp_neg_gate = elementwise(program, DType::Float32, ScalarOp::Exponential, &[(neg_gate, "sg->sg")])?;
-    let one_plus_exp = elementwise(program, DType::Float32, ScalarOp::Add, &[(exp_neg_gate, "sg->sg"), (ones, "->sg")])?;
-    let sigmoid_gate = elementwise(program, DType::Float32, ScalarOp::Reciprocal, &[(one_plus_exp, "sg->sg")])?;
-    let silu_gate = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(gate, "sg->sg"), (sigmoid_gate, "sg->sg")])?;
-    let ffn_hidden = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(silu_gate, "sg->sg"), (up, "sg->sg")])?;
+    let neg_gate = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Negate,
+        &[(gate, "sg->sg")],
+    )?;
+    let exp_neg_gate = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Exponential,
+        &[(neg_gate, "sg->sg")],
+    )?;
+    let one_plus_exp = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Add,
+        &[(exp_neg_gate, "sg->sg"), (ones, "->sg")],
+    )?;
+    let sigmoid_gate = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Reciprocal,
+        &[(one_plus_exp, "sg->sg")],
+    )?;
+    let silu_gate = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Multiply,
+        &[(gate, "sg->sg"), (sigmoid_gate, "sg->sg")],
+    )?;
+    let ffn_hidden = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Multiply,
+        &[(silu_gate, "sg->sg"), (up, "sg->sg")],
+    )?;
 
-    let down_product = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(ffn_hidden, "sg->sgd"), (w_down, "gd->sgd")])?;
-    let ffn_out = reduce(program, DType::Float32, ScalarOp::Add, ReduceInit::Zero, down_product, "sgd->sgd", "sd->sgd")?;
+    let down_product = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Multiply,
+        &[(ffn_hidden, "sg->sgd"), (w_down, "gd->sgd")],
+    )?;
+    let ffn_out = reduce(
+        program,
+        DType::Float32,
+        ScalarOp::Add,
+        ReduceInit::Zero,
+        down_product,
+        "sgd->sgd",
+        "sd->sgd",
+    )?;
 
-    let x_next = elementwise(program, DType::Float32, ScalarOp::Add, &[(ffn_out, "sd->sd"), (residual1, "sd->sd")])?;
+    let x_next = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Add,
+        &[(ffn_out, "sd->sd"), (residual1, "sd->sd")],
+    )?;
 
     Ok((x_next, (rotated_k_new_even, rotated_k_new_odd, v_new)))
 }
@@ -1647,85 +2884,412 @@ fn append_mistral_cached_moe_layer(
 ) -> Result<(NodeId, CachedLayerRoots), TensorError> {
     let normed = rmsnorm(program, x, attn_norm_weight, inv_dim, eps)?;
 
-    let q_product = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(normed, "si->shdi"), (wq, "ihd->shdi")])?;
-    let q = reduce(program, DType::Float32, ScalarOp::Add, ReduceInit::Zero, q_product, "shdi->shdi", "shd->shdi")?;
+    let q_product = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Multiply,
+        &[(normed, "si->shdi"), (wq, "ihd->shdi")],
+    )?;
+    let q = reduce(
+        program,
+        DType::Float32,
+        ScalarOp::Add,
+        ReduceInit::Zero,
+        q_product,
+        "shdi->shdi",
+        "shd->shdi",
+    )?;
 
-    let k_new_product = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(normed, "si->sudi"), (wk, "iud->sudi")])?;
-    let k_new = reduce(program, DType::Float32, ScalarOp::Add, ReduceInit::Zero, k_new_product, "sudi->sudi", "sud->sudi")?;
+    let k_new_product = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Multiply,
+        &[(normed, "si->sudi"), (wk, "iud->sudi")],
+    )?;
+    let k_new = reduce(
+        program,
+        DType::Float32,
+        ScalarOp::Add,
+        ReduceInit::Zero,
+        k_new_product,
+        "sudi->sudi",
+        "sud->sudi",
+    )?;
 
-    let v_product = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(normed, "si->sudi"), (wv, "iud->sudi")])?;
-    let v_new = reduce(program, DType::Float32, ScalarOp::Add, ReduceInit::Zero, v_product, "sudi->sudi", "sud->sudi")?;
+    let v_product = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Multiply,
+        &[(normed, "si->sudi"), (wv, "iud->sudi")],
+    )?;
+    let v_new = reduce(
+        program,
+        DType::Float32,
+        ScalarOp::Add,
+        ReduceInit::Zero,
+        v_product,
+        "sudi->sudi",
+        "sud->sudi",
+    )?;
 
-    let q_even_cos = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(q, "s,h,2*i->shi"), (cos_new, "si->shi")])?;
-    let q_odd_sin = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(q, "s,h,2*i+1->shi"), (sin_new, "si->shi")])?;
-    let rotated_q_even = elementwise(program, DType::Float32, ScalarOp::Subtract, &[(q_even_cos, "shi->shi"), (q_odd_sin, "shi->shi")])?;
-    let q_even_sin = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(q, "s,h,2*i->shi"), (sin_new, "si->shi")])?;
-    let q_odd_cos = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(q, "s,h,2*i+1->shi"), (cos_new, "si->shi")])?;
-    let rotated_q_odd = elementwise(program, DType::Float32, ScalarOp::Add, &[(q_even_sin, "shi->shi"), (q_odd_cos, "shi->shi")])?;
+    let q_even_cos = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Multiply,
+        &[(q, "s,h,2*i->shi"), (cos_new, "si->shi")],
+    )?;
+    let q_odd_sin = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Multiply,
+        &[(q, "s,h,2*i+1->shi"), (sin_new, "si->shi")],
+    )?;
+    let rotated_q_even = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Subtract,
+        &[(q_even_cos, "shi->shi"), (q_odd_sin, "shi->shi")],
+    )?;
+    let q_even_sin = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Multiply,
+        &[(q, "s,h,2*i->shi"), (sin_new, "si->shi")],
+    )?;
+    let q_odd_cos = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Multiply,
+        &[(q, "s,h,2*i+1->shi"), (cos_new, "si->shi")],
+    )?;
+    let rotated_q_odd = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Add,
+        &[(q_even_sin, "shi->shi"), (q_odd_cos, "shi->shi")],
+    )?;
 
-    let k_new_even_cos = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(k_new, "s,u,2*i->sui"), (cos_new, "si->sui")])?;
-    let k_new_odd_sin = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(k_new, "s,u,2*i+1->sui"), (sin_new, "si->sui")])?;
-    let rotated_k_new_even =
-        elementwise(program, DType::Float32, ScalarOp::Subtract, &[(k_new_even_cos, "sui->sui"), (k_new_odd_sin, "sui->sui")])?;
-    let k_new_even_sin = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(k_new, "s,u,2*i->sui"), (sin_new, "si->sui")])?;
-    let k_new_odd_cos = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(k_new, "s,u,2*i+1->sui"), (cos_new, "si->sui")])?;
-    let rotated_k_new_odd =
-        elementwise(program, DType::Float32, ScalarOp::Add, &[(k_new_even_sin, "sui->sui"), (k_new_odd_cos, "sui->sui")])?;
+    let k_new_even_cos = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Multiply,
+        &[(k_new, "s,u,2*i->sui"), (cos_new, "si->sui")],
+    )?;
+    let k_new_odd_sin = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Multiply,
+        &[(k_new, "s,u,2*i+1->sui"), (sin_new, "si->sui")],
+    )?;
+    let rotated_k_new_even = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Subtract,
+        &[(k_new_even_cos, "sui->sui"), (k_new_odd_sin, "sui->sui")],
+    )?;
+    let k_new_even_sin = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Multiply,
+        &[(k_new, "s,u,2*i->sui"), (sin_new, "si->sui")],
+    )?;
+    let k_new_odd_cos = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Multiply,
+        &[(k_new, "s,u,2*i+1->sui"), (cos_new, "si->sui")],
+    )?;
+    let rotated_k_new_odd = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Add,
+        &[(k_new_even_sin, "sui->sui"), (k_new_odd_cos, "sui->sui")],
+    )?;
 
     let group_map = alloc::format!("s,{group}*u+g,i->sugi");
-    let q_even_grouped = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(rotated_q_even, group_map.as_str()), (group_ones, "ug->sugi")])?;
-    let q_odd_grouped = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(rotated_q_odd, group_map.as_str()), (group_ones, "ug->sugi")])?;
+    let q_even_grouped = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Multiply,
+        &[
+            (rotated_q_even, group_map.as_str()),
+            (group_ones, "ug->sugi"),
+        ],
+    )?;
+    let q_odd_grouped = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Multiply,
+        &[
+            (rotated_q_odd, group_map.as_str()),
+            (group_ones, "ug->sugi"),
+        ],
+    )?;
 
-    let score_cached_even_product =
-        elementwise(program, DType::Float32, ScalarOp::Multiply, &[(q_even_grouped, "sugi->stugi"), (k_even_cache, "tui->stugi")])?;
-    let score_cached_even = reduce(program, DType::Float32, ScalarOp::Add, ReduceInit::Zero, score_cached_even_product, "stugi->stugi", "stug->stugi")?;
-    let score_cached_odd_product =
-        elementwise(program, DType::Float32, ScalarOp::Multiply, &[(q_odd_grouped, "sugi->stugi"), (k_odd_cache, "tui->stugi")])?;
-    let score_cached_odd = reduce(program, DType::Float32, ScalarOp::Add, ReduceInit::Zero, score_cached_odd_product, "stugi->stugi", "stug->stugi")?;
-    let score_cached = elementwise(program, DType::Float32, ScalarOp::Add, &[(score_cached_even, "stug->stug"), (score_cached_odd, "stug->stug")])?;
-    let score_cached_scaled = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(score_cached, "stug->stug"), (inv_sqrt_head_dim, "->stug")])?;
+    let score_cached_even_product = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Multiply,
+        &[
+            (q_even_grouped, "sugi->stugi"),
+            (k_even_cache, "tui->stugi"),
+        ],
+    )?;
+    let score_cached_even = reduce(
+        program,
+        DType::Float32,
+        ScalarOp::Add,
+        ReduceInit::Zero,
+        score_cached_even_product,
+        "stugi->stugi",
+        "stug->stugi",
+    )?;
+    let score_cached_odd_product = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Multiply,
+        &[(q_odd_grouped, "sugi->stugi"), (k_odd_cache, "tui->stugi")],
+    )?;
+    let score_cached_odd = reduce(
+        program,
+        DType::Float32,
+        ScalarOp::Add,
+        ReduceInit::Zero,
+        score_cached_odd_product,
+        "stugi->stugi",
+        "stug->stugi",
+    )?;
+    let score_cached = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Add,
+        &[
+            (score_cached_even, "stug->stug"),
+            (score_cached_odd, "stug->stug"),
+        ],
+    )?;
+    let score_cached_scaled = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Multiply,
+        &[(score_cached, "stug->stug"), (inv_sqrt_head_dim, "->stug")],
+    )?;
 
-    let score_new_even_product =
-        elementwise(program, DType::Float32, ScalarOp::Multiply, &[(q_even_grouped, "sugi->swugi"), (rotated_k_new_even, "wui->swugi")])?;
-    let score_new_even = reduce(program, DType::Float32, ScalarOp::Add, ReduceInit::Zero, score_new_even_product, "swugi->swugi", "swug->swugi")?;
-    let score_new_odd_product =
-        elementwise(program, DType::Float32, ScalarOp::Multiply, &[(q_odd_grouped, "sugi->swugi"), (rotated_k_new_odd, "wui->swugi")])?;
-    let score_new_odd = reduce(program, DType::Float32, ScalarOp::Add, ReduceInit::Zero, score_new_odd_product, "swugi->swugi", "swug->swugi")?;
-    let score_new = elementwise(program, DType::Float32, ScalarOp::Add, &[(score_new_even, "swug->swug"), (score_new_odd, "swug->swug")])?;
-    let score_new_scaled = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(score_new, "swug->swug"), (inv_sqrt_head_dim, "->swug")])?;
+    let score_new_even_product = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Multiply,
+        &[
+            (q_even_grouped, "sugi->swugi"),
+            (rotated_k_new_even, "wui->swugi"),
+        ],
+    )?;
+    let score_new_even = reduce(
+        program,
+        DType::Float32,
+        ScalarOp::Add,
+        ReduceInit::Zero,
+        score_new_even_product,
+        "swugi->swugi",
+        "swug->swugi",
+    )?;
+    let score_new_odd_product = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Multiply,
+        &[
+            (q_odd_grouped, "sugi->swugi"),
+            (rotated_k_new_odd, "wui->swugi"),
+        ],
+    )?;
+    let score_new_odd = reduce(
+        program,
+        DType::Float32,
+        ScalarOp::Add,
+        ReduceInit::Zero,
+        score_new_odd_product,
+        "swugi->swugi",
+        "swug->swugi",
+    )?;
+    let score_new = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Add,
+        &[
+            (score_new_even, "swug->swug"),
+            (score_new_odd, "swug->swug"),
+        ],
+    )?;
+    let score_new_scaled = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Multiply,
+        &[(score_new, "swug->swug"), (inv_sqrt_head_dim, "->swug")],
+    )?;
     let neg_infinity = scalar_constant(program, f32::NEG_INFINITY);
     let score_new_masked = elementwise(
         program,
         DType::Float32,
         ScalarOp::Select,
-        &[(is_future, "sw->swug"), (neg_infinity, "->swug"), (score_new_scaled, "swug->swug")],
+        &[
+            (is_future, "sw->swug"),
+            (neg_infinity, "->swug"),
+            (score_new_scaled, "swug->swug"),
+        ],
     )?;
 
-    let score_max_cached = reduce(program, DType::Float32, ScalarOp::Maximum, ReduceInit::NegativeInfinity, score_cached_scaled, "stug->stug", "sug->stug")?;
-    let score_max_new = reduce(program, DType::Float32, ScalarOp::Maximum, ReduceInit::NegativeInfinity, score_new_masked, "swug->swug", "sug->swug")?;
-    let global_max = elementwise(program, DType::Float32, ScalarOp::Maximum, &[(score_max_cached, "sug->sug"), (score_max_new, "sug->sug")])?;
+    let score_max_cached = reduce(
+        program,
+        DType::Float32,
+        ScalarOp::Maximum,
+        ReduceInit::NegativeInfinity,
+        score_cached_scaled,
+        "stug->stug",
+        "sug->stug",
+    )?;
+    let score_max_new = reduce(
+        program,
+        DType::Float32,
+        ScalarOp::Maximum,
+        ReduceInit::NegativeInfinity,
+        score_new_masked,
+        "swug->swug",
+        "sug->swug",
+    )?;
+    let global_max = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Maximum,
+        &[(score_max_cached, "sug->sug"), (score_max_new, "sug->sug")],
+    )?;
 
-    let shifted_cached = elementwise(program, DType::Float32, ScalarOp::Subtract, &[(score_cached_scaled, "stug->stug"), (global_max, "sug->stug")])?;
-    let weights_cached = elementwise(program, DType::Float32, ScalarOp::Exponential, &[(shifted_cached, "stug->stug")])?;
-    let shifted_new = elementwise(program, DType::Float32, ScalarOp::Subtract, &[(score_new_masked, "swug->swug"), (global_max, "sug->swug")])?;
-    let weights_new = elementwise(program, DType::Float32, ScalarOp::Exponential, &[(shifted_new, "swug->swug")])?;
+    let shifted_cached = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Subtract,
+        &[
+            (score_cached_scaled, "stug->stug"),
+            (global_max, "sug->stug"),
+        ],
+    )?;
+    let weights_cached = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Exponential,
+        &[(shifted_cached, "stug->stug")],
+    )?;
+    let shifted_new = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Subtract,
+        &[(score_new_masked, "swug->swug"), (global_max, "sug->swug")],
+    )?;
+    let weights_new = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Exponential,
+        &[(shifted_new, "swug->swug")],
+    )?;
 
-    let sum_cached = reduce(program, DType::Float32, ScalarOp::Add, ReduceInit::Zero, weights_cached, "stug->stug", "sug->stug")?;
-    let sum_new = reduce(program, DType::Float32, ScalarOp::Add, ReduceInit::Zero, weights_new, "swug->swug", "sug->swug")?;
-    let weight_sum = elementwise(program, DType::Float32, ScalarOp::Add, &[(sum_cached, "sug->sug"), (sum_new, "sug->sug")])?;
-    let inv_weight_sum = elementwise(program, DType::Float32, ScalarOp::Reciprocal, &[(weight_sum, "sug->sug")])?;
+    let sum_cached = reduce(
+        program,
+        DType::Float32,
+        ScalarOp::Add,
+        ReduceInit::Zero,
+        weights_cached,
+        "stug->stug",
+        "sug->stug",
+    )?;
+    let sum_new = reduce(
+        program,
+        DType::Float32,
+        ScalarOp::Add,
+        ReduceInit::Zero,
+        weights_new,
+        "swug->swug",
+        "sug->swug",
+    )?;
+    let weight_sum = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Add,
+        &[(sum_cached, "sug->sug"), (sum_new, "sug->sug")],
+    )?;
+    let inv_weight_sum = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Reciprocal,
+        &[(weight_sum, "sug->sug")],
+    )?;
 
-    let attended_cached_product = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(weights_cached, "stug->stugd"), (v_cache, "tud->stugd")])?;
-    let attended_cached = reduce(program, DType::Float32, ScalarOp::Add, ReduceInit::Zero, attended_cached_product, "stugd->stugd", "sugd->stugd")?;
-    let attended_new_product = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(weights_new, "swug->swugd"), (v_new, "wud->swugd")])?;
-    let attended_new = reduce(program, DType::Float32, ScalarOp::Add, ReduceInit::Zero, attended_new_product, "swugd->swugd", "sugd->swugd")?;
-    let attended_sum = elementwise(program, DType::Float32, ScalarOp::Add, &[(attended_cached, "sugd->sugd"), (attended_new, "sugd->sugd")])?;
-    let attended = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(attended_sum, "sugd->sugd"), (inv_weight_sum, "sug->sugd")])?;
+    let attended_cached_product = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Multiply,
+        &[(weights_cached, "stug->stugd"), (v_cache, "tud->stugd")],
+    )?;
+    let attended_cached = reduce(
+        program,
+        DType::Float32,
+        ScalarOp::Add,
+        ReduceInit::Zero,
+        attended_cached_product,
+        "stugd->stugd",
+        "sugd->stugd",
+    )?;
+    let attended_new_product = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Multiply,
+        &[(weights_new, "swug->swugd"), (v_new, "wud->swugd")],
+    )?;
+    let attended_new = reduce(
+        program,
+        DType::Float32,
+        ScalarOp::Add,
+        ReduceInit::Zero,
+        attended_new_product,
+        "swugd->swugd",
+        "sugd->swugd",
+    )?;
+    let attended_sum = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Add,
+        &[
+            (attended_cached, "sugd->sugd"),
+            (attended_new, "sugd->sugd"),
+        ],
+    )?;
+    let attended = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Multiply,
+        &[(attended_sum, "sugd->sugd"), (inv_weight_sum, "sug->sugd")],
+    )?;
 
-    let wo_product = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(attended, "sugd->sugdo"), (wo, "ugdo->sugdo")])?;
-    let attn_out = reduce(program, DType::Float32, ScalarOp::Add, ReduceInit::Zero, wo_product, "sugdo->sugdo", "so->sugdo")?;
+    let wo_product = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Multiply,
+        &[(attended, "sugd->sugdo"), (wo, "ugdo->sugdo")],
+    )?;
+    let attn_out = reduce(
+        program,
+        DType::Float32,
+        ScalarOp::Add,
+        ReduceInit::Zero,
+        wo_product,
+        "sugdo->sugdo",
+        "so->sugdo",
+    )?;
 
-    let residual1 = elementwise(program, DType::Float32, ScalarOp::Add, &[(attn_out, "sd->sd"), (x, "sd->sd")])?;
+    let residual1 = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Add,
+        &[(attn_out, "sd->sd"), (x, "sd->sd")],
+    )?;
 
     let normed2 = rmsnorm(program, residual1, ffn_norm_weight, inv_dim, eps)?;
 
@@ -1743,7 +3307,12 @@ fn append_mistral_cached_moe_layer(
         None,
     )?;
 
-    let x_next = elementwise(program, DType::Float32, ScalarOp::Add, &[(ffn_out, "sd->sd"), (residual1, "sd->sd")])?;
+    let x_next = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Add,
+        &[(ffn_out, "sd->sd"), (residual1, "sd->sd")],
+    )?;
 
     Ok((x_next, (rotated_k_new_even, rotated_k_new_odd, v_new)))
 }
@@ -1816,17 +3385,44 @@ impl LayerKind {
 /// Taps whose *unclamped* position is negative (real left-padding) are zeroed
 /// post-gather via `Select`, mirroring how [`causal_mask`] masks attention
 /// scores rather than ever reading an invalid position.
-fn causal_conv1d(program: &mut Vec<Op>, x: NodeId, weight: NodeId, l_cache: u32) -> Result<NodeId, TensorError> {
+fn causal_conv1d(
+    program: &mut Vec<Op>,
+    x: NodeId,
+    weight: NodeId,
+    l_cache: u32,
+) -> Result<NodeId, TensorError> {
     if l_cache == 0 {
         return Err(TensorError::InvalidConvConfig { l_cache });
     }
 
-    let sequence_index = op::append(program, Op::Iota { dtype: DType::Float32, extent: Extent::Symbolic(0) });
-    let tap_index = op::append(program, Op::Iota { dtype: DType::Float32, extent: Extent::Static(l_cache) });
+    let sequence_index = op::append(
+        program,
+        Op::Iota {
+            dtype: DType::Float32,
+            extent: Extent::Symbolic(0),
+        },
+    );
+    let tap_index = op::append(
+        program,
+        Op::Iota {
+            dtype: DType::Float32,
+            extent: Extent::Static(l_cache),
+        },
+    );
     let window_offset = scalar_constant(program, -((l_cache - 1) as f32));
 
-    let sequence_plus_tap = elementwise(program, DType::Float32, ScalarOp::Add, &[(sequence_index, "s->sl"), (tap_index, "l->sl")])?;
-    let raw_position = elementwise(program, DType::Float32, ScalarOp::Add, &[(sequence_plus_tap, "sl->sl"), (window_offset, "->sl")])?;
+    let sequence_plus_tap = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Add,
+        &[(sequence_index, "s->sl"), (tap_index, "l->sl")],
+    )?;
+    let raw_position = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Add,
+        &[(sequence_plus_tap, "sl->sl"), (window_offset, "->sl")],
+    )?;
 
     // `clamped_position` must be an `Op::Reduce`, not a plain `Elementwise`,
     // even though the fold itself is trivial (`max` over a synthetic 2-wide
@@ -1844,7 +3440,13 @@ fn causal_conv1d(program: &mut Vec<Op>, x: NodeId, weight: NodeId, l_cache: u32)
     // index in this crate (`route` in [`gathered_expert_product`]) is already
     // a `Reduce`, never a bare `Elementwise` -- this mirrors that, rather
     // than being a new exception.
-    let candidate_axis = op::append(program, Op::Iota { dtype: DType::Float32, extent: Extent::Static(2) });
+    let candidate_axis = op::append(
+        program,
+        Op::Iota {
+            dtype: DType::Float32,
+            extent: Extent::Static(2),
+        },
+    );
     let zero = scalar_constant(program, 0.0);
     // `zero_wide`, not the rank-0 `zero` above, is `is_raw_slot`'s second
     // operand: a rank-0 operand contributes no extent to any axis, so
@@ -1863,17 +3465,39 @@ fn causal_conv1d(program: &mut Vec<Op>, x: NodeId, weight: NodeId, l_cache: u32)
             value: 0.0,
         },
     );
-    let is_raw_slot = elementwise(program, DType::Float32, ScalarOp::Equal, &[(candidate_axis, "c->slc"), (zero_wide, "sl->slc")])?;
+    let is_raw_slot = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Equal,
+        &[(candidate_axis, "c->slc"), (zero_wide, "sl->slc")],
+    )?;
     let candidate = elementwise(
         program,
         DType::Float32,
         ScalarOp::Select,
-        &[(is_raw_slot, "slc->slc"), (raw_position, "sl->slc"), (zero, "->slc")],
+        &[
+            (is_raw_slot, "slc->slc"),
+            (raw_position, "sl->slc"),
+            (zero, "->slc"),
+        ],
     )?;
-    let clamped_position = reduce(program, DType::Int32, ScalarOp::Maximum, ReduceInit::NegativeInfinity, candidate, "slc->slc", "sl->slc")?;
+    let clamped_position = reduce(
+        program,
+        DType::Int32,
+        ScalarOp::Maximum,
+        ReduceInit::NegativeInfinity,
+        candidate,
+        "slc->slc",
+        "sl->slc",
+    )?;
 
     let negative_one = scalar_constant(program, -1.0);
-    let is_valid = elementwise(program, DType::Float32, ScalarOp::Greater, &[(raw_position, "sl->sl"), (negative_one, "->sl")])?;
+    let is_valid = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Greater,
+        &[(raw_position, "sl->sl"), (negative_one, "->sl")],
+    )?;
 
     let gathered_map = IndexMap::Computed {
         indices: clamped_position,
@@ -1909,16 +3533,33 @@ fn causal_conv1d(program: &mut Vec<Op>, x: NodeId, weight: NodeId, l_cache: u32)
     // ..)`), so `l_cache` -- not `embedding` -- is genuinely contiguous per
     // channel on disk. Every caller of this function must declare `weight`'s
     // `Op::Input` shape the same way.
-    let tap_product = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(windowed, "sld->sld"), (weight, "dl->sld")])?;
+    let tap_product = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Multiply,
+        &[(windowed, "sld->sld"), (weight, "dl->sld")],
+    )?;
     let zero_tap = scalar_constant(program, 0.0);
     let masked_tap = elementwise(
         program,
         DType::Float32,
         ScalarOp::Select,
-        &[(is_valid, "sl->sld"), (tap_product, "sld->sld"), (zero_tap, "->sld")],
+        &[
+            (is_valid, "sl->sld"),
+            (tap_product, "sld->sld"),
+            (zero_tap, "->sld"),
+        ],
     )?;
 
-    reduce(program, DType::Float32, ScalarOp::Add, ReduceInit::Zero, masked_tap, "sld->sld", "sd->sld")
+    reduce(
+        program,
+        DType::Float32,
+        ScalarOp::Add,
+        ReduceInit::Zero,
+        masked_tap,
+        "sld->sld",
+        "sd->sld",
+    )
 }
 
 /// LFM2's gated short-convolution mixer, [`append_mistral_layer`]'s
@@ -1981,23 +3622,90 @@ fn append_lfm2_conv_mixer(
 ) -> Result<NodeId, TensorError> {
     let normed = rmsnorm(program, x, norm_weight, inv_dim, eps)?;
 
-    let branch_b_product = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(normed, "sd->sdg"), (b_proj, "dg->sdg")])?;
-    let branch_b = reduce(program, DType::Float32, ScalarOp::Add, ReduceInit::Zero, branch_b_product, "sdg->sdg", "sg->sdg")?;
+    let branch_b_product = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Multiply,
+        &[(normed, "sd->sdg"), (b_proj, "dg->sdg")],
+    )?;
+    let branch_b = reduce(
+        program,
+        DType::Float32,
+        ScalarOp::Add,
+        ReduceInit::Zero,
+        branch_b_product,
+        "sdg->sdg",
+        "sg->sdg",
+    )?;
 
-    let branch_x_product = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(normed, "sd->sdg"), (x_proj, "dg->sdg")])?;
-    let branch_x = reduce(program, DType::Float32, ScalarOp::Add, ReduceInit::Zero, branch_x_product, "sdg->sdg", "sg->sdg")?;
+    let branch_x_product = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Multiply,
+        &[(normed, "sd->sdg"), (x_proj, "dg->sdg")],
+    )?;
+    let branch_x = reduce(
+        program,
+        DType::Float32,
+        ScalarOp::Add,
+        ReduceInit::Zero,
+        branch_x_product,
+        "sdg->sdg",
+        "sg->sdg",
+    )?;
 
-    let branch_c_product = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(normed, "sd->sdg"), (c_proj, "dg->sdg")])?;
-    let branch_c = reduce(program, DType::Float32, ScalarOp::Add, ReduceInit::Zero, branch_c_product, "sdg->sdg", "sg->sdg")?;
+    let branch_c_product = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Multiply,
+        &[(normed, "sd->sdg"), (c_proj, "dg->sdg")],
+    )?;
+    let branch_c = reduce(
+        program,
+        DType::Float32,
+        ScalarOp::Add,
+        ReduceInit::Zero,
+        branch_c_product,
+        "sdg->sdg",
+        "sg->sdg",
+    )?;
 
-    let gated_input = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(branch_b, "sg->sg"), (branch_x, "sg->sg")])?;
+    let gated_input = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Multiply,
+        &[(branch_b, "sg->sg"), (branch_x, "sg->sg")],
+    )?;
     let convolved = causal_conv1d(program, gated_input, conv_weight, l_cache)?;
-    let gated_output = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(convolved, "sg->sg"), (branch_c, "sg->sg")])?;
+    let gated_output = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Multiply,
+        &[(convolved, "sg->sg"), (branch_c, "sg->sg")],
+    )?;
 
-    let out_product = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(gated_output, "sd->sdo"), (out_proj, "do->sdo")])?;
-    let mixer_out = reduce(program, DType::Float32, ScalarOp::Add, ReduceInit::Zero, out_product, "sdo->sdo", "so->sdo")?;
+    let out_product = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Multiply,
+        &[(gated_output, "sd->sdo"), (out_proj, "do->sdo")],
+    )?;
+    let mixer_out = reduce(
+        program,
+        DType::Float32,
+        ScalarOp::Add,
+        ReduceInit::Zero,
+        out_product,
+        "sdo->sdo",
+        "so->sdo",
+    )?;
 
-    elementwise(program, DType::Float32, ScalarOp::Add, &[(mixer_out, "sd->sd"), (x, "sd->sd")])
+    elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Add,
+        &[(mixer_out, "sd->sd"), (x, "sd->sd")],
+    )
 }
 
 /// [`append_mistral_layer`]'s attention sub-block in isolation (RoPE + GQA +
@@ -2033,67 +3741,295 @@ fn append_attention_mixer(
 ) -> Result<NodeId, TensorError> {
     let normed = rmsnorm(program, x, attn_norm_weight, inv_dim, eps)?;
 
-    let q_product = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(normed, "si->shdi"), (wq, "ihd->shdi")])?;
-    let q_raw = reduce(program, DType::Float32, ScalarOp::Add, ReduceInit::Zero, q_product, "shdi->shdi", "shd->shdi")?;
+    let q_product = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Multiply,
+        &[(normed, "si->shdi"), (wq, "ihd->shdi")],
+    )?;
+    let q_raw = reduce(
+        program,
+        DType::Float32,
+        ScalarOp::Add,
+        ReduceInit::Zero,
+        q_product,
+        "shdi->shdi",
+        "shd->shdi",
+    )?;
     // [`Lfm2MoeAttention.q_layernorm`]'s own placement
     // (`modeling_lfm2_moe.py:331`): normalizes right after the head
     // reshape, BEFORE `apply_rotary_pos_emb` -- never after.
     let q = rmsnorm_per_head(program, q_raw, q_norm_weight, inv_head_dim, eps, 'h')?;
 
-    let k_product = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(normed, "si->sudi"), (wk, "iud->sudi")])?;
-    let k_raw = reduce(program, DType::Float32, ScalarOp::Add, ReduceInit::Zero, k_product, "sudi->sudi", "sud->sudi")?;
+    let k_product = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Multiply,
+        &[(normed, "si->sudi"), (wk, "iud->sudi")],
+    )?;
+    let k_raw = reduce(
+        program,
+        DType::Float32,
+        ScalarOp::Add,
+        ReduceInit::Zero,
+        k_product,
+        "sudi->sudi",
+        "sud->sudi",
+    )?;
     let k = rmsnorm_per_head(program, k_raw, k_norm_weight, inv_head_dim, eps, 'u')?;
 
-    let v_product = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(normed, "si->sudi"), (wv, "iud->sudi")])?;
-    let v = reduce(program, DType::Float32, ScalarOp::Add, ReduceInit::Zero, v_product, "sudi->sudi", "sud->sudi")?;
+    let v_product = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Multiply,
+        &[(normed, "si->sudi"), (wv, "iud->sudi")],
+    )?;
+    let v = reduce(
+        program,
+        DType::Float32,
+        ScalarOp::Add,
+        ReduceInit::Zero,
+        v_product,
+        "sudi->sudi",
+        "sud->sudi",
+    )?;
 
-    let q_even_cos = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(q, "s,h,2*i->shi"), (cos, "si->shi")])?;
-    let q_odd_sin = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(q, "s,h,2*i+1->shi"), (sin, "si->shi")])?;
-    let rotated_q_even = elementwise(program, DType::Float32, ScalarOp::Subtract, &[(q_even_cos, "shi->shi"), (q_odd_sin, "shi->shi")])?;
-    let q_even_sin = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(q, "s,h,2*i->shi"), (sin, "si->shi")])?;
-    let q_odd_cos = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(q, "s,h,2*i+1->shi"), (cos, "si->shi")])?;
-    let rotated_q_odd = elementwise(program, DType::Float32, ScalarOp::Add, &[(q_even_sin, "shi->shi"), (q_odd_cos, "shi->shi")])?;
+    let q_even_cos = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Multiply,
+        &[(q, "s,h,2*i->shi"), (cos, "si->shi")],
+    )?;
+    let q_odd_sin = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Multiply,
+        &[(q, "s,h,2*i+1->shi"), (sin, "si->shi")],
+    )?;
+    let rotated_q_even = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Subtract,
+        &[(q_even_cos, "shi->shi"), (q_odd_sin, "shi->shi")],
+    )?;
+    let q_even_sin = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Multiply,
+        &[(q, "s,h,2*i->shi"), (sin, "si->shi")],
+    )?;
+    let q_odd_cos = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Multiply,
+        &[(q, "s,h,2*i+1->shi"), (cos, "si->shi")],
+    )?;
+    let rotated_q_odd = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Add,
+        &[(q_even_sin, "shi->shi"), (q_odd_cos, "shi->shi")],
+    )?;
 
-    let k_even_cos = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(k, "s,u,2*i->sui"), (cos, "si->sui")])?;
-    let k_odd_sin = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(k, "s,u,2*i+1->sui"), (sin, "si->sui")])?;
-    let rotated_k_even = elementwise(program, DType::Float32, ScalarOp::Subtract, &[(k_even_cos, "sui->sui"), (k_odd_sin, "sui->sui")])?;
-    let k_even_sin = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(k, "s,u,2*i->sui"), (sin, "si->sui")])?;
-    let k_odd_cos = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(k, "s,u,2*i+1->sui"), (cos, "si->sui")])?;
-    let rotated_k_odd = elementwise(program, DType::Float32, ScalarOp::Add, &[(k_even_sin, "sui->sui"), (k_odd_cos, "sui->sui")])?;
+    let k_even_cos = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Multiply,
+        &[(k, "s,u,2*i->sui"), (cos, "si->sui")],
+    )?;
+    let k_odd_sin = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Multiply,
+        &[(k, "s,u,2*i+1->sui"), (sin, "si->sui")],
+    )?;
+    let rotated_k_even = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Subtract,
+        &[(k_even_cos, "sui->sui"), (k_odd_sin, "sui->sui")],
+    )?;
+    let k_even_sin = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Multiply,
+        &[(k, "s,u,2*i->sui"), (sin, "si->sui")],
+    )?;
+    let k_odd_cos = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Multiply,
+        &[(k, "s,u,2*i+1->sui"), (cos, "si->sui")],
+    )?;
+    let rotated_k_odd = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Add,
+        &[(k_even_sin, "sui->sui"), (k_odd_cos, "sui->sui")],
+    )?;
 
     let group_map = alloc::format!("s,{group}*u+g,i->sugi");
-    let q_even_grouped = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(rotated_q_even, group_map.as_str()), (group_ones, "ug->sugi")])?;
-    let q_odd_grouped = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(rotated_q_odd, group_map.as_str()), (group_ones, "ug->sugi")])?;
+    let q_even_grouped = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Multiply,
+        &[
+            (rotated_q_even, group_map.as_str()),
+            (group_ones, "ug->sugi"),
+        ],
+    )?;
+    let q_odd_grouped = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Multiply,
+        &[
+            (rotated_q_odd, group_map.as_str()),
+            (group_ones, "ug->sugi"),
+        ],
+    )?;
 
-    let score_even_product = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(q_even_grouped, "sugi->stugi"), (rotated_k_even, "tui->stugi")])?;
-    let score_even = reduce(program, DType::Float32, ScalarOp::Add, ReduceInit::Zero, score_even_product, "stugi->stugi", "stug->stugi")?;
-    let score_odd_product = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(q_odd_grouped, "sugi->stugi"), (rotated_k_odd, "tui->stugi")])?;
-    let score_odd = reduce(program, DType::Float32, ScalarOp::Add, ReduceInit::Zero, score_odd_product, "stugi->stugi", "stug->stugi")?;
-    let scores = elementwise(program, DType::Float32, ScalarOp::Add, &[(score_even, "stug->stug"), (score_odd, "stug->stug")])?;
+    let score_even_product = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Multiply,
+        &[
+            (q_even_grouped, "sugi->stugi"),
+            (rotated_k_even, "tui->stugi"),
+        ],
+    )?;
+    let score_even = reduce(
+        program,
+        DType::Float32,
+        ScalarOp::Add,
+        ReduceInit::Zero,
+        score_even_product,
+        "stugi->stugi",
+        "stug->stugi",
+    )?;
+    let score_odd_product = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Multiply,
+        &[
+            (q_odd_grouped, "sugi->stugi"),
+            (rotated_k_odd, "tui->stugi"),
+        ],
+    )?;
+    let score_odd = reduce(
+        program,
+        DType::Float32,
+        ScalarOp::Add,
+        ReduceInit::Zero,
+        score_odd_product,
+        "stugi->stugi",
+        "stug->stugi",
+    )?;
+    let scores = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Add,
+        &[(score_even, "stug->stug"), (score_odd, "stug->stug")],
+    )?;
 
-    let scores_scaled = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(scores, "stug->stug"), (inv_sqrt_head_dim, "->stug")])?;
+    let scores_scaled = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Multiply,
+        &[(scores, "stug->stug"), (inv_sqrt_head_dim, "->stug")],
+    )?;
 
     let scores_masked = elementwise(
         program,
         DType::Float32,
         ScalarOp::Select,
-        &[(is_future, "st->stug"), (neg_infinity, "->stug"), (scores_scaled, "stug->stug")],
+        &[
+            (is_future, "st->stug"),
+            (neg_infinity, "->stug"),
+            (scores_scaled, "stug->stug"),
+        ],
     )?;
 
-    let score_max = reduce(program, DType::Float32, ScalarOp::Maximum, ReduceInit::NegativeInfinity, scores_masked, "stug->stug", "sug->stug")?;
-    let shifted = elementwise(program, DType::Float32, ScalarOp::Subtract, &[(scores_masked, "stug->stug"), (score_max, "sug->stug")])?;
-    let weights = elementwise(program, DType::Float32, ScalarOp::Exponential, &[(shifted, "stug->stug")])?;
-    let weight_sum = reduce(program, DType::Float32, ScalarOp::Add, ReduceInit::Zero, weights, "stug->stug", "sug->stug")?;
-    let inv_weight_sum = elementwise(program, DType::Float32, ScalarOp::Reciprocal, &[(weight_sum, "sug->sug")])?;
-    let probabilities = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(weights, "stug->stug"), (inv_weight_sum, "sug->stug")])?;
+    let score_max = reduce(
+        program,
+        DType::Float32,
+        ScalarOp::Maximum,
+        ReduceInit::NegativeInfinity,
+        scores_masked,
+        "stug->stug",
+        "sug->stug",
+    )?;
+    let shifted = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Subtract,
+        &[(scores_masked, "stug->stug"), (score_max, "sug->stug")],
+    )?;
+    let weights = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Exponential,
+        &[(shifted, "stug->stug")],
+    )?;
+    let weight_sum = reduce(
+        program,
+        DType::Float32,
+        ScalarOp::Add,
+        ReduceInit::Zero,
+        weights,
+        "stug->stug",
+        "sug->stug",
+    )?;
+    let inv_weight_sum = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Reciprocal,
+        &[(weight_sum, "sug->sug")],
+    )?;
+    let probabilities = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Multiply,
+        &[(weights, "stug->stug"), (inv_weight_sum, "sug->stug")],
+    )?;
 
-    let attended_product = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(probabilities, "stug->stugd"), (v, "tud->stugd")])?;
-    let attended = reduce(program, DType::Float32, ScalarOp::Add, ReduceInit::Zero, attended_product, "stugd->stugd", "sugd->stugd")?;
+    let attended_product = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Multiply,
+        &[(probabilities, "stug->stugd"), (v, "tud->stugd")],
+    )?;
+    let attended = reduce(
+        program,
+        DType::Float32,
+        ScalarOp::Add,
+        ReduceInit::Zero,
+        attended_product,
+        "stugd->stugd",
+        "sugd->stugd",
+    )?;
 
-    let wo_product = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(attended, "sugd->sugdo"), (wo, "ugdo->sugdo")])?;
-    let attn_out = reduce(program, DType::Float32, ScalarOp::Add, ReduceInit::Zero, wo_product, "sugdo->sugdo", "so->sugdo")?;
+    let wo_product = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Multiply,
+        &[(attended, "sugd->sugdo"), (wo, "ugdo->sugdo")],
+    )?;
+    let attn_out = reduce(
+        program,
+        DType::Float32,
+        ScalarOp::Add,
+        ReduceInit::Zero,
+        wo_product,
+        "sugdo->sugdo",
+        "so->sugdo",
+    )?;
 
-    elementwise(program, DType::Float32, ScalarOp::Add, &[(attn_out, "sd->sd"), (x, "sd->sd")])
+    elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Add,
+        &[(attn_out, "sd->sd"), (x, "sd->sd")],
+    )
 }
 
 /// LFM2.5-8B-A1B's hybrid forward pass: `block_count` blocks, each either
@@ -2142,7 +4078,12 @@ pub fn lfm2_forward_program_with_experts(
 
     let mut program = Vec::new();
 
-    let ids = input_leaf(&mut program, DType::Int32, alloc::vec![Extent::Symbolic(0)], "ids");
+    let ids = input_leaf(
+        &mut program,
+        DType::Int32,
+        alloc::vec![Extent::Symbolic(0)],
+        "ids",
+    );
     let table = input_leaf(
         &mut program,
         DType::Float32,
@@ -2156,8 +4097,18 @@ pub fn lfm2_forward_program_with_experts(
     let ones = scalar_constant(&mut program, 1.0);
     let inv_sqrt_head_dim = scalar_constant(&mut program, 1.0 / (head_dim as f32).sqrt());
     let inv_head_dim = scalar_constant(&mut program, 1.0 / head_dim as f32);
-    let cos = input_leaf(&mut program, DType::Float32, alloc::vec![Extent::Symbolic(0), Extent::Static(pairs)], "rope_cos");
-    let sin = input_leaf(&mut program, DType::Float32, alloc::vec![Extent::Symbolic(0), Extent::Static(pairs)], "rope_sin");
+    let cos = input_leaf(
+        &mut program,
+        DType::Float32,
+        alloc::vec![Extent::Symbolic(0), Extent::Static(pairs)],
+        "rope_cos",
+    );
+    let sin = input_leaf(
+        &mut program,
+        DType::Float32,
+        alloc::vec![Extent::Symbolic(0), Extent::Static(pairs)],
+        "rope_sin",
+    );
     let group_ones = op::append(
         &mut program,
         Op::Constant {
@@ -2188,19 +4139,31 @@ pub fn lfm2_forward_program_with_experts(
                 let wq = input_leaf(
                     &mut program,
                     DType::Float32,
-                    alloc::vec![Extent::Static(embedding), Extent::Static(query_heads), Extent::Static(head_dim)],
+                    alloc::vec![
+                        Extent::Static(embedding),
+                        Extent::Static(query_heads),
+                        Extent::Static(head_dim)
+                    ],
                     &alloc::format!("blk.{layer}.attn_q.weight"),
                 );
                 let wk = input_leaf(
                     &mut program,
                     DType::Float32,
-                    alloc::vec![Extent::Static(embedding), Extent::Static(kv_heads), Extent::Static(head_dim)],
+                    alloc::vec![
+                        Extent::Static(embedding),
+                        Extent::Static(kv_heads),
+                        Extent::Static(head_dim)
+                    ],
                     &alloc::format!("blk.{layer}.attn_k.weight"),
                 );
                 let wv = input_leaf(
                     &mut program,
                     DType::Float32,
-                    alloc::vec![Extent::Static(embedding), Extent::Static(kv_heads), Extent::Static(head_dim)],
+                    alloc::vec![
+                        Extent::Static(embedding),
+                        Extent::Static(kv_heads),
+                        Extent::Static(head_dim)
+                    ],
                     &alloc::format!("blk.{layer}.attn_v.weight"),
                 );
                 let wo = input_leaf(
@@ -2292,7 +4255,19 @@ pub fn lfm2_forward_program_with_experts(
                     alloc::vec![Extent::Static(embedding), Extent::Static(embedding)],
                     &alloc::format!("blk.{layer}.shortconv.out_proj.weight"),
                 );
-                append_lfm2_conv_mixer(&mut program, x, inv_dim, eps, attn_norm_weight, b_proj, c_proj, x_proj, conv_weight, out_proj, l_cache)?
+                append_lfm2_conv_mixer(
+                    &mut program,
+                    x,
+                    inv_dim,
+                    eps,
+                    attn_norm_weight,
+                    b_proj,
+                    c_proj,
+                    x_proj,
+                    conv_weight,
+                    out_proj,
+                    l_cache,
+                )?
             }
         };
 
@@ -2317,20 +4292,89 @@ pub fn lfm2_forward_program_with_experts(
                 alloc::vec![Extent::Static(feed_forward), Extent::Static(embedding)],
                 &alloc::format!("blk.{layer}.ffn_down.weight"),
             );
-            let gate_product = elementwise(&mut program, DType::Float32, ScalarOp::Multiply, &[(normed2, "sd->sdg"), (w_gate, "dg->sdg")])?;
-            let gate = reduce(&mut program, DType::Float32, ScalarOp::Add, ReduceInit::Zero, gate_product, "sdg->sdg", "sg->sdg")?;
-            let up_product = elementwise(&mut program, DType::Float32, ScalarOp::Multiply, &[(normed2, "sd->sdg"), (w_up, "dg->sdg")])?;
-            let up = reduce(&mut program, DType::Float32, ScalarOp::Add, ReduceInit::Zero, up_product, "sdg->sdg", "sg->sdg")?;
+            let gate_product = elementwise(
+                &mut program,
+                DType::Float32,
+                ScalarOp::Multiply,
+                &[(normed2, "sd->sdg"), (w_gate, "dg->sdg")],
+            )?;
+            let gate = reduce(
+                &mut program,
+                DType::Float32,
+                ScalarOp::Add,
+                ReduceInit::Zero,
+                gate_product,
+                "sdg->sdg",
+                "sg->sdg",
+            )?;
+            let up_product = elementwise(
+                &mut program,
+                DType::Float32,
+                ScalarOp::Multiply,
+                &[(normed2, "sd->sdg"), (w_up, "dg->sdg")],
+            )?;
+            let up = reduce(
+                &mut program,
+                DType::Float32,
+                ScalarOp::Add,
+                ReduceInit::Zero,
+                up_product,
+                "sdg->sdg",
+                "sg->sdg",
+            )?;
 
-            let neg_gate = elementwise(&mut program, DType::Float32, ScalarOp::Negate, &[(gate, "sg->sg")])?;
-            let exp_neg_gate = elementwise(&mut program, DType::Float32, ScalarOp::Exponential, &[(neg_gate, "sg->sg")])?;
-            let one_plus_exp = elementwise(&mut program, DType::Float32, ScalarOp::Add, &[(exp_neg_gate, "sg->sg"), (ones, "->sg")])?;
-            let sigmoid_gate = elementwise(&mut program, DType::Float32, ScalarOp::Reciprocal, &[(one_plus_exp, "sg->sg")])?;
-            let silu_gate = elementwise(&mut program, DType::Float32, ScalarOp::Multiply, &[(gate, "sg->sg"), (sigmoid_gate, "sg->sg")])?;
-            let ffn_hidden = elementwise(&mut program, DType::Float32, ScalarOp::Multiply, &[(silu_gate, "sg->sg"), (up, "sg->sg")])?;
+            let neg_gate = elementwise(
+                &mut program,
+                DType::Float32,
+                ScalarOp::Negate,
+                &[(gate, "sg->sg")],
+            )?;
+            let exp_neg_gate = elementwise(
+                &mut program,
+                DType::Float32,
+                ScalarOp::Exponential,
+                &[(neg_gate, "sg->sg")],
+            )?;
+            let one_plus_exp = elementwise(
+                &mut program,
+                DType::Float32,
+                ScalarOp::Add,
+                &[(exp_neg_gate, "sg->sg"), (ones, "->sg")],
+            )?;
+            let sigmoid_gate = elementwise(
+                &mut program,
+                DType::Float32,
+                ScalarOp::Reciprocal,
+                &[(one_plus_exp, "sg->sg")],
+            )?;
+            let silu_gate = elementwise(
+                &mut program,
+                DType::Float32,
+                ScalarOp::Multiply,
+                &[(gate, "sg->sg"), (sigmoid_gate, "sg->sg")],
+            )?;
+            let ffn_hidden = elementwise(
+                &mut program,
+                DType::Float32,
+                ScalarOp::Multiply,
+                &[(silu_gate, "sg->sg"), (up, "sg->sg")],
+            )?;
 
-            let down_product = elementwise(&mut program, DType::Float32, ScalarOp::Multiply, &[(ffn_hidden, "sg->sgd"), (w_down, "gd->sgd")])?;
-            reduce(&mut program, DType::Float32, ScalarOp::Add, ReduceInit::Zero, down_product, "sgd->sgd", "sd->sgd")?
+            let down_product = elementwise(
+                &mut program,
+                DType::Float32,
+                ScalarOp::Multiply,
+                &[(ffn_hidden, "sg->sgd"), (w_down, "gd->sgd")],
+            )?;
+            reduce(
+                &mut program,
+                DType::Float32,
+                ScalarOp::Add,
+                ReduceInit::Zero,
+                down_product,
+                "sgd->sgd",
+                "sd->sgd",
+            )?
         } else {
             let gate_inp = input_leaf(
                 &mut program,
@@ -2341,19 +4385,31 @@ pub fn lfm2_forward_program_with_experts(
             let expert_w_gate = input_leaf(
                 &mut program,
                 DType::Float32,
-                alloc::vec![Extent::Static(expert_count), Extent::Static(embedding), Extent::Static(expert_feed_forward)],
+                alloc::vec![
+                    Extent::Static(expert_count),
+                    Extent::Static(embedding),
+                    Extent::Static(expert_feed_forward)
+                ],
                 &alloc::format!("blk.{layer}.ffn_gate_exps.weight"),
             );
             let expert_w_up = input_leaf(
                 &mut program,
                 DType::Float32,
-                alloc::vec![Extent::Static(expert_count), Extent::Static(embedding), Extent::Static(expert_feed_forward)],
+                alloc::vec![
+                    Extent::Static(expert_count),
+                    Extent::Static(embedding),
+                    Extent::Static(expert_feed_forward)
+                ],
                 &alloc::format!("blk.{layer}.ffn_up_exps.weight"),
             );
             let expert_w_down = input_leaf(
                 &mut program,
                 DType::Float32,
-                alloc::vec![Extent::Static(expert_count), Extent::Static(expert_feed_forward), Extent::Static(embedding)],
+                alloc::vec![
+                    Extent::Static(expert_count),
+                    Extent::Static(expert_feed_forward),
+                    Extent::Static(embedding)
+                ],
                 &alloc::format!("blk.{layer}.ffn_down_exps.weight"),
             );
             let expert_bias = input_leaf(
@@ -2377,15 +4433,43 @@ pub fn lfm2_forward_program_with_experts(
             )?
         };
 
-        x = elementwise(&mut program, DType::Float32, ScalarOp::Add, &[(ffn_out, "sd->sd"), (post_mixer, "sd->sd")])?;
+        x = elementwise(
+            &mut program,
+            DType::Float32,
+            ScalarOp::Add,
+            &[(ffn_out, "sd->sd"), (post_mixer, "sd->sd")],
+        )?;
     }
 
-    let output_norm_weight = input_leaf(&mut program, DType::Float32, alloc::vec![Extent::Static(embedding)], "output_norm.weight");
+    let output_norm_weight = input_leaf(
+        &mut program,
+        DType::Float32,
+        alloc::vec![Extent::Static(embedding)],
+        "output_norm.weight",
+    );
     let normed_final = rmsnorm(&mut program, x, output_norm_weight, inv_dim, eps)?;
 
-    let lm_head = input_leaf(&mut program, DType::Float32, alloc::vec![Extent::Static(embedding), Extent::Static(vocab)], "output.weight");
-    let logits_product = elementwise(&mut program, DType::Float32, ScalarOp::Multiply, &[(normed_final, "sd->sdv"), (lm_head, "dv->sdv")])?;
-    let logits = reduce(&mut program, DType::Float32, ScalarOp::Add, ReduceInit::Zero, logits_product, "sdv->sdv", "sv->sdv")?;
+    let lm_head = input_leaf(
+        &mut program,
+        DType::Float32,
+        alloc::vec![Extent::Static(embedding), Extent::Static(vocab)],
+        "output.weight",
+    );
+    let logits_product = elementwise(
+        &mut program,
+        DType::Float32,
+        ScalarOp::Multiply,
+        &[(normed_final, "sd->sdv"), (lm_head, "dv->sdv")],
+    )?;
+    let logits = reduce(
+        &mut program,
+        DType::Float32,
+        ScalarOp::Add,
+        ReduceInit::Zero,
+        logits_product,
+        "sdv->sdv",
+        "sv->sdv",
+    )?;
 
     Ok((program, logits))
 }
@@ -2426,7 +4510,17 @@ pub fn mistral_cached_forward_program(
     head_dim: u32,
     block_count: u32,
 ) -> Result<(Vec<Op>, NodeId, Vec<CachedLayerRoots>), TensorError> {
-    mistral_cached_forward_program_with_experts(vocab, embedding, feed_forward, query_heads, kv_heads, head_dim, block_count, 0, 0)
+    mistral_cached_forward_program_with_experts(
+        vocab,
+        embedding,
+        feed_forward,
+        query_heads,
+        kv_heads,
+        head_dim,
+        block_count,
+        0,
+        0,
+    )
 }
 
 /// [`mistral_cached_forward_program`]'s mixture-of-experts-capable
@@ -2458,7 +4552,12 @@ pub fn mistral_cached_forward_program_with_experts(
 
     let mut program = Vec::new();
 
-    let ids = input_leaf(&mut program, DType::Int32, alloc::vec![Extent::Symbolic(0)], "ids");
+    let ids = input_leaf(
+        &mut program,
+        DType::Int32,
+        alloc::vec![Extent::Symbolic(0)],
+        "ids",
+    );
     let table = input_leaf(
         &mut program,
         DType::Float32,
@@ -2511,19 +4610,31 @@ pub fn mistral_cached_forward_program_with_experts(
         let wq = input_leaf(
             &mut program,
             DType::Float32,
-            alloc::vec![Extent::Static(embedding), Extent::Static(query_heads), Extent::Static(head_dim)],
+            alloc::vec![
+                Extent::Static(embedding),
+                Extent::Static(query_heads),
+                Extent::Static(head_dim)
+            ],
             &alloc::format!("blk.{layer}.attn_q.weight"),
         );
         let wk = input_leaf(
             &mut program,
             DType::Float32,
-            alloc::vec![Extent::Static(embedding), Extent::Static(kv_heads), Extent::Static(head_dim)],
+            alloc::vec![
+                Extent::Static(embedding),
+                Extent::Static(kv_heads),
+                Extent::Static(head_dim)
+            ],
             &alloc::format!("blk.{layer}.attn_k.weight"),
         );
         let wv = input_leaf(
             &mut program,
             DType::Float32,
-            alloc::vec![Extent::Static(embedding), Extent::Static(kv_heads), Extent::Static(head_dim)],
+            alloc::vec![
+                Extent::Static(embedding),
+                Extent::Static(kv_heads),
+                Extent::Static(head_dim)
+            ],
             &alloc::format!("blk.{layer}.attn_v.weight"),
         );
         let wo = input_leaf(
@@ -2540,19 +4651,31 @@ pub fn mistral_cached_forward_program_with_experts(
         let k_even_cache = input_leaf(
             &mut program,
             DType::Float32,
-            alloc::vec![Extent::Symbolic(1), Extent::Static(kv_heads), Extent::Static(pairs)],
+            alloc::vec![
+                Extent::Symbolic(1),
+                Extent::Static(kv_heads),
+                Extent::Static(pairs)
+            ],
             &alloc::format!("kv_cache.{layer}.k_even"),
         );
         let k_odd_cache = input_leaf(
             &mut program,
             DType::Float32,
-            alloc::vec![Extent::Symbolic(1), Extent::Static(kv_heads), Extent::Static(pairs)],
+            alloc::vec![
+                Extent::Symbolic(1),
+                Extent::Static(kv_heads),
+                Extent::Static(pairs)
+            ],
             &alloc::format!("kv_cache.{layer}.k_odd"),
         );
         let v_cache = input_leaf(
             &mut program,
             DType::Float32,
-            alloc::vec![Extent::Symbolic(1), Extent::Static(kv_heads), Extent::Static(head_dim)],
+            alloc::vec![
+                Extent::Symbolic(1),
+                Extent::Static(kv_heads),
+                Extent::Static(head_dim)
+            ],
             &alloc::format!("kv_cache.{layer}.v"),
         );
 
@@ -2611,19 +4734,31 @@ pub fn mistral_cached_forward_program_with_experts(
             let expert_w_gate = input_leaf(
                 &mut program,
                 DType::Float32,
-                alloc::vec![Extent::Static(expert_count), Extent::Static(embedding), Extent::Static(feed_forward)],
+                alloc::vec![
+                    Extent::Static(expert_count),
+                    Extent::Static(embedding),
+                    Extent::Static(feed_forward)
+                ],
                 &alloc::format!("blk.{layer}.ffn_gate_exps.weight"),
             );
             let expert_w_up = input_leaf(
                 &mut program,
                 DType::Float32,
-                alloc::vec![Extent::Static(expert_count), Extent::Static(embedding), Extent::Static(feed_forward)],
+                alloc::vec![
+                    Extent::Static(expert_count),
+                    Extent::Static(embedding),
+                    Extent::Static(feed_forward)
+                ],
                 &alloc::format!("blk.{layer}.ffn_up_exps.weight"),
             );
             let expert_w_down = input_leaf(
                 &mut program,
                 DType::Float32,
-                alloc::vec![Extent::Static(expert_count), Extent::Static(feed_forward), Extent::Static(embedding)],
+                alloc::vec![
+                    Extent::Static(expert_count),
+                    Extent::Static(feed_forward),
+                    Extent::Static(embedding)
+                ],
                 &alloc::format!("blk.{layer}.ffn_down_exps.weight"),
             );
 
@@ -2660,7 +4795,12 @@ pub fn mistral_cached_forward_program_with_experts(
         cache_roots.push(layer_roots);
     }
 
-    let output_norm_weight = input_leaf(&mut program, DType::Float32, alloc::vec![Extent::Static(embedding)], "output_norm.weight");
+    let output_norm_weight = input_leaf(
+        &mut program,
+        DType::Float32,
+        alloc::vec![Extent::Static(embedding)],
+        "output_norm.weight",
+    );
     let normed_final = rmsnorm(&mut program, x, output_norm_weight, inv_dim, eps)?;
 
     let lm_head = input_leaf(
@@ -2675,7 +4815,15 @@ pub fn mistral_cached_forward_program_with_experts(
         ScalarOp::Multiply,
         &[(normed_final, "sd->sdv"), (lm_head, "dv->sdv")],
     )?;
-    let logits = reduce(&mut program, DType::Float32, ScalarOp::Add, ReduceInit::Zero, logits_product, "sdv->sdv", "sv->sdv")?;
+    let logits = reduce(
+        &mut program,
+        DType::Float32,
+        ScalarOp::Add,
+        ReduceInit::Zero,
+        logits_product,
+        "sdv->sdv",
+        "sv->sdv",
+    )?;
 
     Ok((program, logits, cache_roots))
 }
@@ -3077,19 +5225,36 @@ shape = ["seq"]
         let root = NodeId(program.len() as u32 - 1);
 
         let workers = core::num::NonZeroUsize::new(1).expect("one worker is nonzero");
-        let evaluated =
-            crate::cpu::evaluate_parallel(&program, &symbols, &blocks, &[root, probabilities], workers)
-                .expect("the block evaluates");
+        let evaluated = crate::cpu::evaluate_parallel(
+            &program,
+            &symbols,
+            &blocks,
+            &[root, probabilities],
+            workers,
+        )
+        .expect("the block evaluates");
 
         let output = evaluated.root();
-        assert_eq!(output.len(), SEQUENCE * MODEL, "a vacuous output proves nothing");
-        assert!(output.iter().all(|value| value.is_finite()), "output must be finite");
+        assert_eq!(
+            output.len(),
+            SEQUENCE * MODEL,
+            "a vacuous output proves nothing"
+        );
+        assert!(
+            output.iter().all(|value| value.is_finite()),
+            "output must be finite"
+        );
 
-        let (rows, _) = evaluated.get(probabilities).expect("probabilities were requested");
+        let (rows, _) = evaluated
+            .get(probabilities)
+            .expect("probabilities were requested");
         assert_eq!(rows.len(), SEQUENCE * SEQUENCE);
         for row in rows.as_chunks::<SEQUENCE>().0 {
             let total: f32 = row.iter().sum();
-            assert!((total - 1.0).abs() < 1e-5, "softmax row sums to {total}, not 1.0");
+            assert!(
+                (total - 1.0).abs() < 1e-5,
+                "softmax row sums to {total}, not 1.0"
+            );
             let max = row.iter().copied().fold(f32::MIN, f32::max);
             let min = row.iter().copied().fold(f32::MAX, f32::min);
             assert!(
@@ -3245,10 +5410,19 @@ shape = ["seq"]
         .expect("the causal block evaluates");
 
         let output = evaluated.root();
-        assert_eq!(output.len(), SEQUENCE * MODEL, "a vacuous output proves nothing");
-        assert!(output.iter().all(|value| value.is_finite()), "output must be finite");
+        assert_eq!(
+            output.len(),
+            SEQUENCE * MODEL,
+            "a vacuous output proves nothing"
+        );
+        assert!(
+            output.iter().all(|value| value.is_finite()),
+            "output must be finite"
+        );
 
-        let (rows, _) = evaluated.get(probabilities).expect("probabilities were requested");
+        let (rows, _) = evaluated
+            .get(probabilities)
+            .expect("probabilities were requested");
         assert_eq!(rows.len(), SEQUENCE * SEQUENCE);
 
         let mut checked = 0usize;
@@ -3337,18 +5511,35 @@ shape = ["seq"]
             &down_weights,
         ];
 
-        let evaluated =
-            crate::cpu::evaluate_parallel(&program, &symbols, &real_blocks, &[root, probabilities], workers)
-                .expect("the block evaluates");
+        let evaluated = crate::cpu::evaluate_parallel(
+            &program,
+            &symbols,
+            &real_blocks,
+            &[root, probabilities],
+            workers,
+        )
+        .expect("the block evaluates");
 
         let output = evaluated.root();
-        assert_eq!(output.len(), SEQUENCE * MODEL, "a vacuous output proves nothing");
-        assert!(output.iter().all(|value| value.is_finite()), "output must be finite");
+        assert_eq!(
+            output.len(),
+            SEQUENCE * MODEL,
+            "a vacuous output proves nothing"
+        );
+        assert!(
+            output.iter().all(|value| value.is_finite()),
+            "output must be finite"
+        );
 
-        let (rows, _) = evaluated.get(probabilities).expect("probabilities were requested");
+        let (rows, _) = evaluated
+            .get(probabilities)
+            .expect("probabilities were requested");
         for row in rows.as_chunks::<SEQUENCE>().0 {
             let total: f32 = row.iter().sum();
-            assert!((total - 1.0).abs() < 1e-5, "softmax row sums to {total}, not 1.0");
+            assert!(
+                (total - 1.0).abs() < 1e-5,
+                "softmax row sums to {total}, not 1.0"
+            );
         }
 
         // --- run 2: degenerate control. every projection weight is zero, so
@@ -3443,11 +5634,15 @@ shape = ["seq"]
 
         let root = NodeId(program.len() as u32 - 1);
         let blocks: [&[f32]; 2] = [&image, &kernel];
-        let evaluated =
-            crate::cpu::evaluate(&program, &symbols, &blocks, &[root]).expect("the convolution evaluates");
+        let evaluated = crate::cpu::evaluate(&program, &symbols, &blocks, &[root])
+            .expect("the convolution evaluates");
 
         let output = evaluated.root();
-        assert_eq!(output.len(), 2 * IMAGE * IMAGE, "a vacuous output proves nothing");
+        assert_eq!(
+            output.len(),
+            2 * IMAGE * IMAGE,
+            "a vacuous output proves nothing"
+        );
 
         let channel_0 = &output[..IMAGE * IMAGE];
         let channel_1 = &output[IMAGE * IMAGE..];
@@ -3471,7 +5666,11 @@ shape = ["seq"]
     /// checks the graph against, independent of anything the graph did.
     fn matvec(row: &[f32], matrix: &[f32], d_in: usize, d_out: usize) -> alloc::vec::Vec<f32> {
         (0..d_out)
-            .map(|out| (0..d_in).map(|inp| row[inp] * matrix[inp * d_out + out]).sum())
+            .map(|out| {
+                (0..d_in)
+                    .map(|inp| row[inp] * matrix[inp * d_out + out])
+                    .sum()
+            })
             .collect()
     }
 
@@ -3525,8 +5724,18 @@ shape = ["seq"]
         let matrix_a: [f32; D_IN * D_OUT] = [1.0, 0.0, 0.0, 1.0, 1.0, 1.0];
         let matrix_b: [f32; D_IN * D_OUT] = [2.0, 0.0, 0.0, 2.0, 1.0, -1.0];
         let expert_w: [f32; N_EXPERTS * D_IN * D_OUT] = [
-            matrix_a[0], matrix_a[1], matrix_a[2], matrix_a[3], matrix_a[4], matrix_a[5],
-            matrix_b[0], matrix_b[1], matrix_b[2], matrix_b[3], matrix_b[4], matrix_b[5],
+            matrix_a[0],
+            matrix_a[1],
+            matrix_a[2],
+            matrix_a[3],
+            matrix_a[4],
+            matrix_a[5],
+            matrix_b[0],
+            matrix_b[1],
+            matrix_b[2],
+            matrix_b[3],
+            matrix_b[4],
+            matrix_b[5],
         ];
         let blocks: [&[f32]; 3] = [&x, &gate_w, &expert_w];
 
@@ -3534,7 +5743,11 @@ shape = ["seq"]
             crate::cpu::evaluate_parallel(&program, &symbols, &blocks, &[root], workers)
                 .expect("the moe block evaluates");
         let output = evaluated.root();
-        assert_eq!(output.len(), SEQUENCE * D_OUT, "a vacuous output proves nothing");
+        assert_eq!(
+            output.len(),
+            SEQUENCE * D_OUT,
+            "a vacuous output proves nothing"
+        );
 
         let expected_token0 = matvec(&x[0..D_IN], &matrix_a, D_IN, D_OUT);
         let expected_token1 = matvec(&x[D_IN..2 * D_IN], &matrix_b, D_IN, D_OUT);
@@ -3558,18 +5771,23 @@ shape = ["seq"]
         // not change the answer from `x @ matrix_a`.
         let swapped_gate_w: [f32; D_IN * N_EXPERTS] = [0.0, 1.0, 0.0, 0.0, 1.0, 0.0];
         let uniform_expert_w: [f32; N_EXPERTS * D_IN * D_OUT] = [
-            matrix_a[0], matrix_a[1], matrix_a[2], matrix_a[3], matrix_a[4], matrix_a[5],
-            matrix_a[0], matrix_a[1], matrix_a[2], matrix_a[3], matrix_a[4], matrix_a[5],
+            matrix_a[0],
+            matrix_a[1],
+            matrix_a[2],
+            matrix_a[3],
+            matrix_a[4],
+            matrix_a[5],
+            matrix_a[0],
+            matrix_a[1],
+            matrix_a[2],
+            matrix_a[3],
+            matrix_a[4],
+            matrix_a[5],
         ];
         let degenerate_blocks: [&[f32]; 3] = [&x, &swapped_gate_w, &uniform_expert_w];
-        let evaluated_degenerate = crate::cpu::evaluate_parallel(
-            &program,
-            &symbols,
-            &degenerate_blocks,
-            &[root],
-            workers,
-        )
-        .expect("the degenerate moe block evaluates");
+        let evaluated_degenerate =
+            crate::cpu::evaluate_parallel(&program, &symbols, &degenerate_blocks, &[root], workers)
+                .expect("the degenerate moe block evaluates");
         let degenerate_output = evaluated_degenerate.root();
 
         let expected_uniform_token0 = matvec(&x[0..D_IN], &matrix_a, D_IN, D_OUT);
@@ -3663,7 +5881,14 @@ shape = ["seq"]
     /// [`append_moe_ffn`] builds -- the same role [`matvec`] plays for the
     /// bare-linear probes above, just with the real per-layer nonlinearity
     /// [`append_mistral_layer`]'s dense FFN also runs.
-    fn swiglu_ffn(x: &[f32], gate_w: &[f32], up_w: &[f32], down_w: &[f32], d_in: usize, hidden: usize) -> alloc::vec::Vec<f32> {
+    fn swiglu_ffn(
+        x: &[f32],
+        gate_w: &[f32],
+        up_w: &[f32],
+        down_w: &[f32],
+        d_in: usize,
+        hidden: usize,
+    ) -> alloc::vec::Vec<f32> {
         let gate = matvec(x, gate_w, d_in, hidden);
         let up = matvec(x, up_w, d_in, hidden);
         let activated: alloc::vec::Vec<f32> = gate
@@ -3689,15 +5914,29 @@ shape = ["seq"]
         for _ in 0..k {
             let winner = *remaining
                 .iter()
-                .max_by(|&&left, &&right| logits[left].partial_cmp(&logits[right]).expect("logits are finite"))
+                .max_by(|&&left, &&right| {
+                    logits[left]
+                        .partial_cmp(&logits[right])
+                        .expect("logits are finite")
+                })
                 .expect("k does not exceed the expert count");
             routes.push(winner);
             remaining.retain(|&candidate| candidate != winner);
         }
-        let max_logit = routes.iter().map(|&expert| logits[expert]).fold(f32::NEG_INFINITY, f32::max);
-        let unnormalized: alloc::vec::Vec<f32> = routes.iter().map(|&expert| (logits[expert] - max_logit).exp()).collect();
+        let max_logit = routes
+            .iter()
+            .map(|&expert| logits[expert])
+            .fold(f32::NEG_INFINITY, f32::max);
+        let unnormalized: alloc::vec::Vec<f32> = routes
+            .iter()
+            .map(|&expert| (logits[expert] - max_logit).exp())
+            .collect();
         let total: f32 = unnormalized.iter().sum();
-        routes.into_iter().zip(unnormalized).map(|(expert, weight)| (expert, weight / total)).collect()
+        routes
+            .into_iter()
+            .zip(unnormalized)
+            .map(|(expert, weight)| (expert, weight / total))
+            .collect()
     }
 
     /// End-to-end proof for [`append_moe_ffn`]/[`append_mistral_moe_layer`]:
@@ -3730,44 +5969,74 @@ shape = ["seq"]
         // gate_inp[d, e]: logits[s, e] = sum_d x[s, d] * gate_inp[d, e].
         let gate_inp: [f32; EMBEDDING * EXPERT_COUNT as usize] = [1.0, 0.0, 0.0, 0.0, 1.0, 2.0];
 
-        let gate_weights: [[f32; EMBEDDING * FEED_FORWARD]; 3] =
-            [[1.0, 0.0, 0.0, 1.0], [2.0, 0.0, 0.0, 2.0], [1.0, 1.0, 1.0, 1.0]];
-        let up_weights: [[f32; EMBEDDING * FEED_FORWARD]; 3] =
-            [[1.0, 1.0, 1.0, 1.0], [0.0, 1.0, 1.0, 0.0], [2.0, 0.0, 0.0, 2.0]];
-        let down_weights: [[f32; FEED_FORWARD * EMBEDDING]; 3] =
-            [[1.0, 0.0, 0.0, 1.0], [1.0, 1.0, 1.0, 1.0], [0.0, 1.0, 1.0, 0.0]];
+        let gate_weights: [[f32; EMBEDDING * FEED_FORWARD]; 3] = [
+            [1.0, 0.0, 0.0, 1.0],
+            [2.0, 0.0, 0.0, 2.0],
+            [1.0, 1.0, 1.0, 1.0],
+        ];
+        let up_weights: [[f32; EMBEDDING * FEED_FORWARD]; 3] = [
+            [1.0, 1.0, 1.0, 1.0],
+            [0.0, 1.0, 1.0, 0.0],
+            [2.0, 0.0, 0.0, 2.0],
+        ];
+        let down_weights: [[f32; FEED_FORWARD * EMBEDDING]; 3] = [
+            [1.0, 0.0, 0.0, 1.0],
+            [1.0, 1.0, 1.0, 1.0],
+            [0.0, 1.0, 1.0, 0.0],
+        ];
 
-        let stack_experts = |weights: &[[f32; EMBEDDING * FEED_FORWARD]; 3]| -> alloc::vec::Vec<f32> {
-            weights.iter().flatten().copied().collect()
-        };
+        let stack_experts =
+            |weights: &[[f32; EMBEDDING * FEED_FORWARD]; 3]| -> alloc::vec::Vec<f32> {
+                weights.iter().flatten().copied().collect()
+            };
         let expert_w_gate = stack_experts(&gate_weights);
         let expert_w_up = stack_experts(&up_weights);
         let expert_w_down: alloc::vec::Vec<f32> = down_weights.iter().flatten().copied().collect();
 
         let mut program = Vec::new();
-        let x_node = input_leaf(&mut program, DType::Float32, alloc::vec![Extent::Symbolic(0), Extent::Static(EMBEDDING as u32)], "x");
+        let x_node = input_leaf(
+            &mut program,
+            DType::Float32,
+            alloc::vec![Extent::Symbolic(0), Extent::Static(EMBEDDING as u32)],
+            "x",
+        );
         let gate_inp_node = input_leaf(
             &mut program,
             DType::Float32,
-            alloc::vec![Extent::Static(EMBEDDING as u32), Extent::Static(EXPERT_COUNT)],
+            alloc::vec![
+                Extent::Static(EMBEDDING as u32),
+                Extent::Static(EXPERT_COUNT)
+            ],
             "gate_inp",
         );
         let expert_w_gate_node = input_leaf(
             &mut program,
             DType::Float32,
-            alloc::vec![Extent::Static(EXPERT_COUNT), Extent::Static(EMBEDDING as u32), Extent::Static(FEED_FORWARD as u32)],
+            alloc::vec![
+                Extent::Static(EXPERT_COUNT),
+                Extent::Static(EMBEDDING as u32),
+                Extent::Static(FEED_FORWARD as u32)
+            ],
             "expert_w_gate",
         );
         let expert_w_up_node = input_leaf(
             &mut program,
             DType::Float32,
-            alloc::vec![Extent::Static(EXPERT_COUNT), Extent::Static(EMBEDDING as u32), Extent::Static(FEED_FORWARD as u32)],
+            alloc::vec![
+                Extent::Static(EXPERT_COUNT),
+                Extent::Static(EMBEDDING as u32),
+                Extent::Static(FEED_FORWARD as u32)
+            ],
             "expert_w_up",
         );
         let expert_w_down_node = input_leaf(
             &mut program,
             DType::Float32,
-            alloc::vec![Extent::Static(EXPERT_COUNT), Extent::Static(FEED_FORWARD as u32), Extent::Static(EMBEDDING as u32)],
+            alloc::vec![
+                Extent::Static(EXPERT_COUNT),
+                Extent::Static(FEED_FORWARD as u32),
+                Extent::Static(EMBEDDING as u32)
+            ],
             "expert_w_down",
         );
         let ones = scalar_constant(&mut program, 1.0);
@@ -3793,13 +6062,22 @@ shape = ["seq"]
         let blocks: [&[f32]; 5] = [&x, &gate_inp, &expert_w_gate, &expert_w_up, &expert_w_down];
         let workers = core::num::NonZeroUsize::new(1).expect("one worker is nonzero");
         let evaluated =
-            crate::cpu::evaluate_parallel(&program, &symbols, &blocks, &[root], workers).expect("the routed ffn evaluates");
+            crate::cpu::evaluate_parallel(&program, &symbols, &blocks, &[root], workers)
+                .expect("the routed ffn evaluates");
         let output = evaluated.root();
-        assert_eq!(output.len(), SEQUENCE * EMBEDDING, "a vacuous output proves nothing");
+        assert_eq!(
+            output.len(),
+            SEQUENCE * EMBEDDING,
+            "a vacuous output proves nothing"
+        );
 
         for (token, x_row) in x.chunks(EMBEDDING).enumerate() {
             let logits: alloc::vec::Vec<f32> = (0..EXPERT_COUNT as usize)
-                .map(|expert| (0..EMBEDDING).map(|dim| x_row[dim] * gate_inp[dim * EXPERT_COUNT as usize + expert]).sum())
+                .map(|expert| {
+                    (0..EMBEDDING)
+                        .map(|dim| x_row[dim] * gate_inp[dim * EXPERT_COUNT as usize + expert])
+                        .sum()
+                })
                 .collect();
             let routes = top_k_routes_and_weights(&logits, EXPERT_USED_COUNT as usize);
             let mut expected = alloc::vec![0.0f32; EMBEDDING];
@@ -3835,21 +6113,39 @@ shape = ["seq"]
     /// shape (max-by, retain, normalize) with the two extra steps LFM2's
     /// gating needs: a sigmoid instead of a softmax, and a bias that
     /// participates in the `max_by` but never in the returned weight.
-    fn sigmoid_topk_routes_and_weights(logits: &[f32], bias: &[f32], k: usize) -> alloc::vec::Vec<(usize, f32)> {
-        let scores: alloc::vec::Vec<f32> = logits.iter().map(|&logit| 1.0 / (1.0 + (-logit).exp())).collect();
-        let selection: alloc::vec::Vec<f32> = scores.iter().zip(bias).map(|(&score, &b)| score + b).collect();
+    fn sigmoid_topk_routes_and_weights(
+        logits: &[f32],
+        bias: &[f32],
+        k: usize,
+    ) -> alloc::vec::Vec<(usize, f32)> {
+        let scores: alloc::vec::Vec<f32> = logits
+            .iter()
+            .map(|&logit| 1.0 / (1.0 + (-logit).exp()))
+            .collect();
+        let selection: alloc::vec::Vec<f32> = scores
+            .iter()
+            .zip(bias)
+            .map(|(&score, &b)| score + b)
+            .collect();
         let mut remaining: alloc::vec::Vec<usize> = (0..logits.len()).collect();
         let mut routes = alloc::vec::Vec::new();
         for _ in 0..k {
             let winner = *remaining
                 .iter()
-                .max_by(|&&left, &&right| selection[left].partial_cmp(&selection[right]).expect("selection scores are finite"))
+                .max_by(|&&left, &&right| {
+                    selection[left]
+                        .partial_cmp(&selection[right])
+                        .expect("selection scores are finite")
+                })
                 .expect("k does not exceed the expert count");
             routes.push(winner);
             remaining.retain(|&candidate| candidate != winner);
         }
         let total: f32 = routes.iter().map(|&expert| scores[expert]).sum();
-        routes.into_iter().map(|expert| (expert, scores[expert] / total)).collect()
+        routes
+            .into_iter()
+            .map(|expert| (expert, scores[expert] / total))
+            .collect()
     }
 
     /// [`sigmoid_topk_routes_and_weights`]'s own contract, proved directly
@@ -3865,27 +6161,48 @@ shape = ["seq"]
         let sigmoid = |value: f32| 1.0 / (1.0 + (-value).exp());
 
         let unbiased = sigmoid_topk_routes_and_weights(&logits, &[0.0, 0.0, 0.0], 2);
-        let mut unbiased_experts: alloc::vec::Vec<usize> = unbiased.iter().map(|(expert, _)| *expert).collect();
+        let mut unbiased_experts: alloc::vec::Vec<usize> =
+            unbiased.iter().map(|(expert, _)| *expert).collect();
         unbiased_experts.sort_unstable();
-        assert_eq!(unbiased_experts, alloc::vec![0, 2], "unbiased sigmoid ranking matches raw-logit ranking: e2 > e0 > e1");
+        assert_eq!(
+            unbiased_experts,
+            alloc::vec![0, 2],
+            "unbiased sigmoid ranking matches raw-logit ranking: e2 > e0 > e1"
+        );
 
         // pushes e1 (raw sigmoid ~0.881) above e0 (raw sigmoid ~0.953) for
         // SELECTION only: 0.881 + 0.2 = 1.081 > 0.953, but e2 (~0.982) still
         // wins outright, so the selected PAIR changes from {e0, e2} to {e1, e2}.
         let biased = sigmoid_topk_routes_and_weights(&logits, &[0.0, 0.2, 0.0], 2);
-        let mut biased_experts: alloc::vec::Vec<usize> = biased.iter().map(|(expert, _)| *expert).collect();
+        let mut biased_experts: alloc::vec::Vec<usize> =
+            biased.iter().map(|(expert, _)| *expert).collect();
         biased_experts.sort_unstable();
-        assert_eq!(biased_experts, alloc::vec![1, 2], "a large-enough bias on e1 must swap it in for e0");
+        assert_eq!(
+            biased_experts,
+            alloc::vec![1, 2],
+            "a large-enough bias on e1 must swap it in for e0"
+        );
 
-        let e1_weight = biased.iter().find(|(expert, _)| *expert == 1).map(|(_, weight)| *weight).expect("e1 was selected");
-        let e2_weight = biased.iter().find(|(expert, _)| *expert == 2).map(|(_, weight)| *weight).expect("e2 was selected");
+        let e1_weight = biased
+            .iter()
+            .find(|(expert, _)| *expert == 1)
+            .map(|(_, weight)| *weight)
+            .expect("e1 was selected");
+        let e2_weight = biased
+            .iter()
+            .find(|(expert, _)| *expert == 2)
+            .map(|(_, weight)| *weight)
+            .expect("e2 was selected");
         let expected_e1 = sigmoid(2.0) / (sigmoid(2.0) + sigmoid(4.0));
         let expected_e2 = sigmoid(4.0) / (sigmoid(2.0) + sigmoid(4.0));
         assert!(
             (e1_weight - expected_e1).abs() < 1e-6,
             "e1's weight must be its UNBIASED sigmoid share ({expected_e1}), got {e1_weight} -- the bias must never reach the weight"
         );
-        assert!((e2_weight - expected_e2).abs() < 1e-6, "e2's weight must be its unbiased sigmoid share ({expected_e2}), got {e2_weight}");
+        assert!(
+            (e2_weight - expected_e2).abs() < 1e-6,
+            "e2's weight must be its unbiased sigmoid share ({expected_e2}), got {e2_weight}"
+        );
     }
 
     /// End-to-end proof for [`append_moe_ffn`]'s `Sigmoid` branch, same
@@ -3900,7 +6217,8 @@ shape = ["seq"]
     /// bias is a per-expert additive term the graph applies uniformly, not
     /// a per-token special case.
     #[test]
-    fn a_routed_ffn_built_by_append_moe_ffn_with_sigmoid_gating_and_bias_matches_an_independent_reference() {
+    fn a_routed_ffn_built_by_append_moe_ffn_with_sigmoid_gating_and_bias_matches_an_independent_reference()
+     {
         const SEQUENCE: usize = 2;
         const EMBEDDING: usize = 2;
         const FEED_FORWARD: usize = 2;
@@ -3911,47 +6229,82 @@ shape = ["seq"]
         let gate_inp: [f32; EMBEDDING * EXPERT_COUNT as usize] = [1.0, 0.0, 0.0, 0.0, 1.0, 2.0];
         let bias: [f32; EXPERT_COUNT as usize] = [0.0, 0.2, 0.0];
 
-        let gate_weights: [[f32; EMBEDDING * FEED_FORWARD]; 3] =
-            [[1.0, 0.0, 0.0, 1.0], [2.0, 0.0, 0.0, 2.0], [1.0, 1.0, 1.0, 1.0]];
-        let up_weights: [[f32; EMBEDDING * FEED_FORWARD]; 3] =
-            [[1.0, 1.0, 1.0, 1.0], [0.0, 1.0, 1.0, 0.0], [2.0, 0.0, 0.0, 2.0]];
-        let down_weights: [[f32; FEED_FORWARD * EMBEDDING]; 3] =
-            [[1.0, 0.0, 0.0, 1.0], [1.0, 1.0, 1.0, 1.0], [0.0, 1.0, 1.0, 0.0]];
+        let gate_weights: [[f32; EMBEDDING * FEED_FORWARD]; 3] = [
+            [1.0, 0.0, 0.0, 1.0],
+            [2.0, 0.0, 0.0, 2.0],
+            [1.0, 1.0, 1.0, 1.0],
+        ];
+        let up_weights: [[f32; EMBEDDING * FEED_FORWARD]; 3] = [
+            [1.0, 1.0, 1.0, 1.0],
+            [0.0, 1.0, 1.0, 0.0],
+            [2.0, 0.0, 0.0, 2.0],
+        ];
+        let down_weights: [[f32; FEED_FORWARD * EMBEDDING]; 3] = [
+            [1.0, 0.0, 0.0, 1.0],
+            [1.0, 1.0, 1.0, 1.0],
+            [0.0, 1.0, 1.0, 0.0],
+        ];
 
-        let stack_experts = |weights: &[[f32; EMBEDDING * FEED_FORWARD]; 3]| -> alloc::vec::Vec<f32> {
-            weights.iter().flatten().copied().collect()
-        };
+        let stack_experts =
+            |weights: &[[f32; EMBEDDING * FEED_FORWARD]; 3]| -> alloc::vec::Vec<f32> {
+                weights.iter().flatten().copied().collect()
+            };
         let expert_w_gate = stack_experts(&gate_weights);
         let expert_w_up = stack_experts(&up_weights);
         let expert_w_down: alloc::vec::Vec<f32> = down_weights.iter().flatten().copied().collect();
 
         let mut program = Vec::new();
-        let x_node = input_leaf(&mut program, DType::Float32, alloc::vec![Extent::Symbolic(0), Extent::Static(EMBEDDING as u32)], "x");
+        let x_node = input_leaf(
+            &mut program,
+            DType::Float32,
+            alloc::vec![Extent::Symbolic(0), Extent::Static(EMBEDDING as u32)],
+            "x",
+        );
         let gate_inp_node = input_leaf(
             &mut program,
             DType::Float32,
-            alloc::vec![Extent::Static(EMBEDDING as u32), Extent::Static(EXPERT_COUNT)],
+            alloc::vec![
+                Extent::Static(EMBEDDING as u32),
+                Extent::Static(EXPERT_COUNT)
+            ],
             "gate_inp",
         );
         let expert_w_gate_node = input_leaf(
             &mut program,
             DType::Float32,
-            alloc::vec![Extent::Static(EXPERT_COUNT), Extent::Static(EMBEDDING as u32), Extent::Static(FEED_FORWARD as u32)],
+            alloc::vec![
+                Extent::Static(EXPERT_COUNT),
+                Extent::Static(EMBEDDING as u32),
+                Extent::Static(FEED_FORWARD as u32)
+            ],
             "expert_w_gate",
         );
         let expert_w_up_node = input_leaf(
             &mut program,
             DType::Float32,
-            alloc::vec![Extent::Static(EXPERT_COUNT), Extent::Static(EMBEDDING as u32), Extent::Static(FEED_FORWARD as u32)],
+            alloc::vec![
+                Extent::Static(EXPERT_COUNT),
+                Extent::Static(EMBEDDING as u32),
+                Extent::Static(FEED_FORWARD as u32)
+            ],
             "expert_w_up",
         );
         let expert_w_down_node = input_leaf(
             &mut program,
             DType::Float32,
-            alloc::vec![Extent::Static(EXPERT_COUNT), Extent::Static(FEED_FORWARD as u32), Extent::Static(EMBEDDING as u32)],
+            alloc::vec![
+                Extent::Static(EXPERT_COUNT),
+                Extent::Static(FEED_FORWARD as u32),
+                Extent::Static(EMBEDDING as u32)
+            ],
             "expert_w_down",
         );
-        let bias_node = input_leaf(&mut program, DType::Float32, alloc::vec![Extent::Static(EXPERT_COUNT)], "bias");
+        let bias_node = input_leaf(
+            &mut program,
+            DType::Float32,
+            alloc::vec![Extent::Static(EXPERT_COUNT)],
+            "bias",
+        );
         let ones = scalar_constant(&mut program, 1.0);
 
         let root = append_moe_ffn(
@@ -3972,18 +6325,35 @@ shape = ["seq"]
         let symbols = [SEQUENCE as u64];
         crate::shape::infer(&program, &symbols).expect("the sigmoid-gated routed ffn infers");
 
-        let blocks: [&[f32]; 6] = [&x, &gate_inp, &expert_w_gate, &expert_w_up, &expert_w_down, &bias];
+        let blocks: [&[f32]; 6] = [
+            &x,
+            &gate_inp,
+            &expert_w_gate,
+            &expert_w_up,
+            &expert_w_down,
+            &bias,
+        ];
         let workers = core::num::NonZeroUsize::new(1).expect("one worker is nonzero");
         let evaluated =
-            crate::cpu::evaluate_parallel(&program, &symbols, &blocks, &[root], workers).expect("the sigmoid-gated routed ffn evaluates");
+            crate::cpu::evaluate_parallel(&program, &symbols, &blocks, &[root], workers)
+                .expect("the sigmoid-gated routed ffn evaluates");
         let output = evaluated.root();
-        assert_eq!(output.len(), SEQUENCE * EMBEDDING, "a vacuous output proves nothing");
+        assert_eq!(
+            output.len(),
+            SEQUENCE * EMBEDDING,
+            "a vacuous output proves nothing"
+        );
 
         for (token, x_row) in x.chunks(EMBEDDING).enumerate() {
             let logits: alloc::vec::Vec<f32> = (0..EXPERT_COUNT as usize)
-                .map(|expert| (0..EMBEDDING).map(|dim| x_row[dim] * gate_inp[dim * EXPERT_COUNT as usize + expert]).sum())
+                .map(|expert| {
+                    (0..EMBEDDING)
+                        .map(|dim| x_row[dim] * gate_inp[dim * EXPERT_COUNT as usize + expert])
+                        .sum()
+                })
                 .collect();
-            let routes = sigmoid_topk_routes_and_weights(&logits, &bias, EXPERT_USED_COUNT as usize);
+            let routes =
+                sigmoid_topk_routes_and_weights(&logits, &bias, EXPERT_USED_COUNT as usize);
             let mut expected = alloc::vec![0.0f32; EMBEDDING];
             for (expert, weight) in &routes {
                 let expert_out = swiglu_ffn(
@@ -4019,7 +6389,9 @@ shape = ["seq"]
     fn synth_row(seed: u64, len: usize, scale: f32) -> alloc::vec::Vec<f32> {
         (0..len)
             .map(|index| {
-                let mixed = seed.wrapping_mul(2_654_435_761).wrapping_add((index as u64).wrapping_mul(40_503));
+                let mixed = seed
+                    .wrapping_mul(2_654_435_761)
+                    .wrapping_add((index as u64).wrapping_mul(40_503));
                 let unit = ((mixed >> 16) & 0xFFFF) as f32 / 65_535.0;
                 (unit * 2.0 - 1.0) * scale
             })
@@ -4036,7 +6408,10 @@ shape = ["seq"]
         use proxima_gguf::quant::q4_k::{BLOCK_BYTES, quantize};
 
         let mut packed = alloc::vec![0u8; rows * BLOCK_BYTES];
-        for (row, out_block) in matrix.chunks_exact(k).zip(packed.as_chunks_mut::<BLOCK_BYTES>().0) {
+        for (row, out_block) in matrix
+            .chunks_exact(k)
+            .zip(packed.as_chunks_mut::<BLOCK_BYTES>().0)
+        {
             quantize(row, out_block).expect("k is QK_K by construction");
         }
         packed
@@ -4088,11 +6463,13 @@ shape = ["seq"]
     fn matmul_q4k_active(weights: &[u8], rows: usize, activation: &[f32]) -> alloc::vec::Vec<f32> {
         #[cfg(feature = "q4k-int8-dot")]
         {
-            crate::cpu::matmul_q4k_q8k_f32(weights, rows, activation).expect("packed q4k matmul evaluates")
+            crate::cpu::matmul_q4k_q8k_f32(weights, rows, activation)
+                .expect("packed q4k matmul evaluates")
         }
         #[cfg(not(feature = "q4k-int8-dot"))]
         {
-            crate::cpu::matmul_q4k_f32(weights, rows, activation).expect("packed q4k matmul evaluates")
+            crate::cpu::matmul_q4k_f32(weights, rows, activation)
+                .expect("packed q4k matmul evaluates")
         }
     }
 
@@ -4130,8 +6507,10 @@ shape = ["seq"]
             .enumerate()
             .map(|(expert, &scale)| synth_row(101 + expert as u64, ROWS * k, scale))
             .collect();
-        let expert_blocks: alloc::vec::Vec<alloc::vec::Vec<u8>> =
-            expert_matrices.iter().map(|matrix| quantize_rows(matrix, ROWS, k)).collect();
+        let expert_blocks: alloc::vec::Vec<alloc::vec::Vec<u8>> = expert_matrices
+            .iter()
+            .map(|matrix| quantize_rows(matrix, ROWS, k))
+            .collect();
         let stacked_weight: alloc::vec::Vec<u8> = expert_blocks.iter().flatten().copied().collect();
 
         let activation: alloc::vec::Vec<f32> = synth_row(211, SEQUENCE * k, 1.0);
@@ -4149,7 +6528,11 @@ shape = ["seq"]
         let stack_node = input_leaf(
             &mut program,
             DType::Float32,
-            alloc::vec![Extent::Static(EXPERT_COUNT), Extent::Static(k as u32), Extent::Static(ROWS as u32)],
+            alloc::vec![
+                Extent::Static(EXPERT_COUNT),
+                Extent::Static(k as u32),
+                Extent::Static(ROWS as u32)
+            ],
             "expert_stack",
         );
         // `Int32`, not `Float32` -- the same declared dtype
@@ -4160,8 +6543,18 @@ shape = ["seq"]
         // itself (`run_reduce_quantized`'s `raw_index = *index_buffer.get(..)`)
         // always reads the bound buffer as `f32` regardless -- `Int32` here
         // is shape-inference metadata, not a storage format.
-        let route_node = input_leaf(&mut program, DType::Int32, alloc::vec![Extent::Static(SEQUENCE as u32)], "route");
-        let x_node = input_leaf(&mut program, DType::Float32, alloc::vec![Extent::Static(SEQUENCE as u32), Extent::Static(k as u32)], "x");
+        let route_node = input_leaf(
+            &mut program,
+            DType::Int32,
+            alloc::vec![Extent::Static(SEQUENCE as u32)],
+            "route",
+        );
+        let x_node = input_leaf(
+            &mut program,
+            DType::Float32,
+            alloc::vec![Extent::Static(SEQUENCE as u32), Extent::Static(k as u32)],
+            "x",
+        );
 
         let product = gathered_expert_product(&mut program, stack_node, route_node, x_node);
         let sum = op::append(
@@ -4255,19 +6648,40 @@ shape = ["seq"]
         const SEQUENCE: usize = 3;
 
         let expert_scales = [1.0f32, 5.0, 20.0];
-        let gate_matrices: alloc::vec::Vec<alloc::vec::Vec<f32>> =
-            expert_scales.iter().enumerate().map(|(expert, &scale)| synth_row(1_001 + expert as u64, FEED_FORWARD * EMBEDDING, scale)).collect();
-        let up_matrices: alloc::vec::Vec<alloc::vec::Vec<f32>> =
-            expert_scales.iter().enumerate().map(|(expert, &scale)| synth_row(2_002 + expert as u64, FEED_FORWARD * EMBEDDING, scale)).collect();
-        let down_matrices: alloc::vec::Vec<alloc::vec::Vec<f32>> =
-            expert_scales.iter().enumerate().map(|(expert, &scale)| synth_row(3_003 + expert as u64, EMBEDDING * FEED_FORWARD, scale)).collect();
+        let gate_matrices: alloc::vec::Vec<alloc::vec::Vec<f32>> = expert_scales
+            .iter()
+            .enumerate()
+            .map(|(expert, &scale)| {
+                synth_row(1_001 + expert as u64, FEED_FORWARD * EMBEDDING, scale)
+            })
+            .collect();
+        let up_matrices: alloc::vec::Vec<alloc::vec::Vec<f32>> = expert_scales
+            .iter()
+            .enumerate()
+            .map(|(expert, &scale)| {
+                synth_row(2_002 + expert as u64, FEED_FORWARD * EMBEDDING, scale)
+            })
+            .collect();
+        let down_matrices: alloc::vec::Vec<alloc::vec::Vec<f32>> = expert_scales
+            .iter()
+            .enumerate()
+            .map(|(expert, &scale)| {
+                synth_row(3_003 + expert as u64, EMBEDDING * FEED_FORWARD, scale)
+            })
+            .collect();
 
-        let gate_blocks: alloc::vec::Vec<alloc::vec::Vec<u8>> =
-            gate_matrices.iter().map(|matrix| quantize_rows(matrix, FEED_FORWARD, EMBEDDING)).collect();
-        let up_blocks: alloc::vec::Vec<alloc::vec::Vec<u8>> =
-            up_matrices.iter().map(|matrix| quantize_rows(matrix, FEED_FORWARD, EMBEDDING)).collect();
-        let down_blocks: alloc::vec::Vec<alloc::vec::Vec<u8>> =
-            down_matrices.iter().map(|matrix| quantize_rows(matrix, EMBEDDING, FEED_FORWARD)).collect();
+        let gate_blocks: alloc::vec::Vec<alloc::vec::Vec<u8>> = gate_matrices
+            .iter()
+            .map(|matrix| quantize_rows(matrix, FEED_FORWARD, EMBEDDING))
+            .collect();
+        let up_blocks: alloc::vec::Vec<alloc::vec::Vec<u8>> = up_matrices
+            .iter()
+            .map(|matrix| quantize_rows(matrix, FEED_FORWARD, EMBEDDING))
+            .collect();
+        let down_blocks: alloc::vec::Vec<alloc::vec::Vec<u8>> = down_matrices
+            .iter()
+            .map(|matrix| quantize_rows(matrix, EMBEDDING, FEED_FORWARD))
+            .collect();
 
         let stacked_gate: alloc::vec::Vec<u8> = gate_blocks.iter().flatten().copied().collect();
         let stacked_up: alloc::vec::Vec<u8> = up_blocks.iter().flatten().copied().collect();
@@ -4288,29 +6702,49 @@ shape = ["seq"]
         }
 
         let mut program = Vec::new();
-        let x_node = input_leaf(&mut program, DType::Float32, alloc::vec![Extent::Symbolic(0), Extent::Static(EMBEDDING as u32)], "x");
+        let x_node = input_leaf(
+            &mut program,
+            DType::Float32,
+            alloc::vec![Extent::Symbolic(0), Extent::Static(EMBEDDING as u32)],
+            "x",
+        );
         let gate_inp_node = input_leaf(
             &mut program,
             DType::Float32,
-            alloc::vec![Extent::Static(EMBEDDING as u32), Extent::Static(EXPERT_COUNT)],
+            alloc::vec![
+                Extent::Static(EMBEDDING as u32),
+                Extent::Static(EXPERT_COUNT)
+            ],
             "gate_inp",
         );
         let expert_w_gate_node = input_leaf(
             &mut program,
             DType::Float32,
-            alloc::vec![Extent::Static(EXPERT_COUNT), Extent::Static(EMBEDDING as u32), Extent::Static(FEED_FORWARD as u32)],
+            alloc::vec![
+                Extent::Static(EXPERT_COUNT),
+                Extent::Static(EMBEDDING as u32),
+                Extent::Static(FEED_FORWARD as u32)
+            ],
             "expert_w_gate",
         );
         let expert_w_up_node = input_leaf(
             &mut program,
             DType::Float32,
-            alloc::vec![Extent::Static(EXPERT_COUNT), Extent::Static(EMBEDDING as u32), Extent::Static(FEED_FORWARD as u32)],
+            alloc::vec![
+                Extent::Static(EXPERT_COUNT),
+                Extent::Static(EMBEDDING as u32),
+                Extent::Static(FEED_FORWARD as u32)
+            ],
             "expert_w_up",
         );
         let expert_w_down_node = input_leaf(
             &mut program,
             DType::Float32,
-            alloc::vec![Extent::Static(EXPERT_COUNT), Extent::Static(FEED_FORWARD as u32), Extent::Static(EMBEDDING as u32)],
+            alloc::vec![
+                Extent::Static(EXPERT_COUNT),
+                Extent::Static(FEED_FORWARD as u32),
+                Extent::Static(EMBEDDING as u32)
+            ],
             "expert_w_down",
         );
         let ones = scalar_constant(&mut program, 1.0);
@@ -4340,10 +6774,15 @@ shape = ["seq"]
             crate::cpu::QuantizedBlock::Q4K(&stacked_up),
             crate::cpu::QuantizedBlock::Q4K(&stacked_down),
         ];
-        let evaluated = crate::cpu::evaluate_quantized(&program, &symbols, &quantized_blocks, &[root])
-            .expect("the packed-stack routed ffn evaluates over Q4_K");
+        let evaluated =
+            crate::cpu::evaluate_quantized(&program, &symbols, &quantized_blocks, &[root])
+                .expect("the packed-stack routed ffn evaluates over Q4_K");
         let output = evaluated.root();
-        assert_eq!(output.len(), SEQUENCE * EMBEDDING, "a vacuous output proves nothing");
+        assert_eq!(
+            output.len(),
+            SEQUENCE * EMBEDDING,
+            "a vacuous output proves nothing"
+        );
 
         for (token, &expert) in true_route.iter().enumerate() {
             let x_row = &x[token * EMBEDDING..(token + 1) * EMBEDDING];
@@ -4397,20 +6836,45 @@ shape = ["seq"]
         // not a routing defect this test exists to catch.
         let dequantized_gate: alloc::vec::Vec<f32> = gate_blocks
             .iter()
-            .flat_map(|bytes| transpose_rows(&dequantize_rows(bytes, FEED_FORWARD, EMBEDDING), FEED_FORWARD, EMBEDDING))
+            .flat_map(|bytes| {
+                transpose_rows(
+                    &dequantize_rows(bytes, FEED_FORWARD, EMBEDDING),
+                    FEED_FORWARD,
+                    EMBEDDING,
+                )
+            })
             .collect();
         let dequantized_up: alloc::vec::Vec<f32> = up_blocks
             .iter()
-            .flat_map(|bytes| transpose_rows(&dequantize_rows(bytes, FEED_FORWARD, EMBEDDING), FEED_FORWARD, EMBEDDING))
+            .flat_map(|bytes| {
+                transpose_rows(
+                    &dequantize_rows(bytes, FEED_FORWARD, EMBEDDING),
+                    FEED_FORWARD,
+                    EMBEDDING,
+                )
+            })
             .collect();
         let dequantized_down: alloc::vec::Vec<f32> = down_blocks
             .iter()
-            .flat_map(|bytes| transpose_rows(&dequantize_rows(bytes, EMBEDDING, FEED_FORWARD), EMBEDDING, FEED_FORWARD))
+            .flat_map(|bytes| {
+                transpose_rows(
+                    &dequantize_rows(bytes, EMBEDDING, FEED_FORWARD),
+                    EMBEDDING,
+                    FEED_FORWARD,
+                )
+            })
             .collect();
-        let f32_blocks: [&[f32]; 5] = [&x, &gate_inp, &dequantized_gate, &dequantized_up, &dequantized_down];
+        let f32_blocks: [&[f32]; 5] = [
+            &x,
+            &gate_inp,
+            &dequantized_gate,
+            &dequantized_up,
+            &dequantized_down,
+        ];
         let workers = core::num::NonZeroUsize::new(1).expect("one worker is nonzero");
-        let dequantized_evaluated = crate::cpu::evaluate_parallel(&program, &symbols, &f32_blocks, &[root], workers)
-            .expect("the dequantized-f32 routed ffn evaluates");
+        let dequantized_evaluated =
+            crate::cpu::evaluate_parallel(&program, &symbols, &f32_blocks, &[root], workers)
+                .expect("the dequantized-f32 routed ffn evaluates");
         let dequantized_output = dequantized_evaluated.root();
         for (found_value, dequantized_value) in output.iter().zip(dequantized_output.iter()) {
             let scale = found_value.abs().max(dequantized_value.abs()).max(1.0);
@@ -4504,8 +6968,7 @@ shape = ["seq"]
                         for dim in 0..head_dim {
                             let query_value =
                                 q[(query_position * query_heads + query_head) * head_dim + dim];
-                            let key_value =
-                                k[(key_position * kv_heads + kv_head) * head_dim + dim];
+                            let key_value = k[(key_position * kv_heads + kv_head) * head_dim + dim];
                             score += query_value * key_value;
                         }
                         scores[key_position] = score;
@@ -4530,9 +6993,9 @@ shape = ["seq"]
                                 v[(key_position * kv_heads + kv_head) * head_dim + dim];
                             accumulator += probability * value_value;
                         }
-                        let index =
-                            ((query_position * kv_heads + kv_head) * group + offset) * head_dim
-                                + dim;
+                        let index = ((query_position * kv_heads + kv_head) * group + offset)
+                            * head_dim
+                            + dim;
                         output[index] = accumulator;
                     }
                 }
@@ -4615,8 +7078,15 @@ shape = ["seq"]
 
         let output = evaluated.root();
         let expected_len = sequence * kv_heads * group * head_dim;
-        assert_eq!(output.len(), expected_len, "a vacuous output proves nothing");
-        assert!(output.iter().all(|value| value.is_finite()), "output must be finite");
+        assert_eq!(
+            output.len(),
+            expected_len,
+            "a vacuous output proves nothing"
+        );
+        assert!(
+            output.iter().all(|value| value.is_finite()),
+            "output must be finite"
+        );
 
         let expected = expected_gqa_attended(&x, &wq, &wk, &wv, dims);
         assert_eq!(expected.len(), expected_len);
@@ -4630,9 +7100,14 @@ shape = ["seq"]
             );
             compared += 1;
         }
-        assert_eq!(compared, expected_len, "every element must be checked, not a subset");
+        assert_eq!(
+            compared, expected_len,
+            "every element must be checked, not a subset"
+        );
 
-        let (rows, _) = evaluated.get(probabilities).expect("probabilities were requested");
+        let (rows, _) = evaluated
+            .get(probabilities)
+            .expect("probabilities were requested");
         assert_eq!(rows.len(), sequence * sequence * kv_heads * group);
 
         let mut checked = 0usize;
@@ -4742,32 +7217,97 @@ shape = ["seq"]
 
         fn build(scaled: bool) -> (Vec<Op>, NodeId) {
             let mut program = Vec::new();
-            let query = input_leaf(&mut program, DType::Float32, alloc::vec![Extent::Symbolic(0), Extent::Static(HEAD_DIM as u32)], "q");
-            let key = input_leaf(&mut program, DType::Float32, alloc::vec![Extent::Static(KEYS as u32), Extent::Static(HEAD_DIM as u32)], "k");
+            let query = input_leaf(
+                &mut program,
+                DType::Float32,
+                alloc::vec![Extent::Symbolic(0), Extent::Static(HEAD_DIM as u32)],
+                "q",
+            );
+            let key = input_leaf(
+                &mut program,
+                DType::Float32,
+                alloc::vec![Extent::Static(KEYS as u32), Extent::Static(HEAD_DIM as u32)],
+                "k",
+            );
 
-            let score_product = elementwise(&mut program, DType::Float32, ScalarOp::Multiply, &[(query, "sh->sth"), (key, "th->sth")])
-                .expect("score product builds");
-            let scores = reduce(&mut program, DType::Float32, ScalarOp::Add, ReduceInit::Zero, score_product, "sth->sth", "st->sth")
-                .expect("scores reduce builds");
+            let score_product = elementwise(
+                &mut program,
+                DType::Float32,
+                ScalarOp::Multiply,
+                &[(query, "sh->sth"), (key, "th->sth")],
+            )
+            .expect("score product builds");
+            let scores = reduce(
+                &mut program,
+                DType::Float32,
+                ScalarOp::Add,
+                ReduceInit::Zero,
+                score_product,
+                "sth->sth",
+                "st->sth",
+            )
+            .expect("scores reduce builds");
             let scores = if scaled {
-                let inv_sqrt_head_dim = scalar_constant(&mut program, 1.0 / (HEAD_DIM as f32).sqrt());
-                elementwise(&mut program, DType::Float32, ScalarOp::Multiply, &[(scores, "st->st"), (inv_sqrt_head_dim, "->st")])
-                    .expect("scaling multiply builds")
+                let inv_sqrt_head_dim =
+                    scalar_constant(&mut program, 1.0 / (HEAD_DIM as f32).sqrt());
+                elementwise(
+                    &mut program,
+                    DType::Float32,
+                    ScalarOp::Multiply,
+                    &[(scores, "st->st"), (inv_sqrt_head_dim, "->st")],
+                )
+                .expect("scaling multiply builds")
             } else {
                 scores
             };
-            let score_max = reduce(&mut program, DType::Float32, ScalarOp::Maximum, ReduceInit::NegativeInfinity, scores, "st->st", "s->st")
-                .expect("max reduce builds");
-            let shifted = elementwise(&mut program, DType::Float32, ScalarOp::Subtract, &[(scores, "st->st"), (score_max, "s->st")])
-                .expect("shift builds");
-            let weights = elementwise(&mut program, DType::Float32, ScalarOp::Exponential, &[(shifted, "st->st")])
-                .expect("exponential builds");
-            let weight_sum = reduce(&mut program, DType::Float32, ScalarOp::Add, ReduceInit::Zero, weights, "st->st", "s->st")
-                .expect("weight sum reduce builds");
-            let inv_weight_sum = elementwise(&mut program, DType::Float32, ScalarOp::Reciprocal, &[(weight_sum, "s->s")])
-                .expect("reciprocal builds");
-            let probabilities = elementwise(&mut program, DType::Float32, ScalarOp::Multiply, &[(weights, "st->st"), (inv_weight_sum, "s->st")])
-                .expect("probabilities multiply builds");
+            let score_max = reduce(
+                &mut program,
+                DType::Float32,
+                ScalarOp::Maximum,
+                ReduceInit::NegativeInfinity,
+                scores,
+                "st->st",
+                "s->st",
+            )
+            .expect("max reduce builds");
+            let shifted = elementwise(
+                &mut program,
+                DType::Float32,
+                ScalarOp::Subtract,
+                &[(scores, "st->st"), (score_max, "s->st")],
+            )
+            .expect("shift builds");
+            let weights = elementwise(
+                &mut program,
+                DType::Float32,
+                ScalarOp::Exponential,
+                &[(shifted, "st->st")],
+            )
+            .expect("exponential builds");
+            let weight_sum = reduce(
+                &mut program,
+                DType::Float32,
+                ScalarOp::Add,
+                ReduceInit::Zero,
+                weights,
+                "st->st",
+                "s->st",
+            )
+            .expect("weight sum reduce builds");
+            let inv_weight_sum = elementwise(
+                &mut program,
+                DType::Float32,
+                ScalarOp::Reciprocal,
+                &[(weight_sum, "s->s")],
+            )
+            .expect("reciprocal builds");
+            let probabilities = elementwise(
+                &mut program,
+                DType::Float32,
+                ScalarOp::Multiply,
+                &[(weights, "st->st"), (inv_weight_sum, "s->st")],
+            )
+            .expect("probabilities multiply builds");
             (program, probabilities)
         }
 
@@ -4779,21 +7319,32 @@ shape = ["seq"]
 
         let evaluate = |scaled: bool| -> Vec<f32> {
             let (program, probabilities) = build(scaled);
-            crate::shape::infer(&program, &symbols).expect("the isolated score/softmax slice infers");
+            crate::shape::infer(&program, &symbols)
+                .expect("the isolated score/softmax slice infers");
             let root = NodeId(program.len() as u32 - 1);
-            assert_eq!(root, probabilities, "probabilities is the program's own last node");
+            assert_eq!(
+                root, probabilities,
+                "probabilities is the program's own last node"
+            );
             let blocks: [&[f32]; 2] = [&query_vector, &key_vectors];
-            let evaluated = crate::cpu::evaluate_parallel(&program, &symbols, &blocks, &[root], workers)
-                .expect("the isolated score/softmax slice evaluates");
+            let evaluated =
+                crate::cpu::evaluate_parallel(&program, &symbols, &blocks, &[root], workers)
+                    .expect("the isolated score/softmax slice evaluates");
             evaluated.root().to_vec()
         };
 
         let unscaled = evaluate(false);
         let scaled = evaluate(true);
 
-        for (label, row) in [("unscaled (pre-fix)", &unscaled), ("scaled (post-fix)", &scaled)] {
+        for (label, row) in [
+            ("unscaled (pre-fix)", &unscaled),
+            ("scaled (post-fix)", &scaled),
+        ] {
             let total: f32 = row.iter().sum();
-            assert!((total - 1.0).abs() < 1e-4, "{label} softmax row sums to {total}, not 1.0");
+            assert!(
+                (total - 1.0).abs() < 1e-4,
+                "{label} softmax row sums to {total}, not 1.0"
+            );
         }
 
         let unscaled_max = unscaled[0];
@@ -4927,8 +7478,8 @@ shape = ["seq"]
         let ffn_out = NodeId(ffn_out as u32);
         let root = NodeId(program.len() as u32 - 1);
 
-        let bound = crate::bind::bind(&program, &shapes, &[root, ffn_out])
-            .expect("the real layer binds");
+        let bound =
+            crate::bind::bind(&program, &shapes, &[root, ffn_out]).expect("the real layer binds");
         let ffn_out_body_steps = bound
             .iter()
             .find(|op| op.node == ffn_out)
@@ -4947,8 +7498,15 @@ shape = ["seq"]
         std::println!("wall_clock={wall:?}");
 
         let output = evaluated.root();
-        assert_eq!(output.len(), SEQUENCE * EMBEDDING, "a vacuous output proves nothing");
-        assert!(output.iter().all(|value| value.is_finite()), "output must be finite");
+        assert_eq!(
+            output.len(),
+            SEQUENCE * EMBEDDING,
+            "a vacuous output proves nothing"
+        );
+        assert!(
+            output.iter().all(|value| value.is_finite()),
+            "output must be finite"
+        );
     }
 
     /// The evaluation half of the milestone above: `mistral_layer_small.toml`
@@ -5034,7 +7592,9 @@ shape = ["seq"]
             "output must be finite"
         );
 
-        let (rows, _) = evaluated.get(probabilities).expect("probabilities were requested");
+        let (rows, _) = evaluated
+            .get(probabilities)
+            .expect("probabilities were requested");
         assert_eq!(rows.len(), SEQUENCE * SEQUENCE * KV_HEADS * GROUP);
 
         // probabilities is laid out `(query, key, kv_head, group_offset)`
@@ -5098,7 +7658,13 @@ shape = ["seq"]
             })
             .collect();
 
-        for collapsed in ["inv_dim", "ones", "group_ones", "inv_sqrt_head_dim", "neg_infinity"] {
+        for collapsed in [
+            "inv_dim",
+            "ones",
+            "group_ones",
+            "inv_sqrt_head_dim",
+            "neg_infinity",
+        ] {
             assert!(
                 !bound.contains(&collapsed),
                 "{collapsed} is a literal and must be an Op::Constant, not a bound Input; \
@@ -5108,7 +7674,10 @@ shape = ["seq"]
 
         assert!(bound.contains(&"eps"), "eps is model metadata, still bound");
         assert!(bound.contains(&"ids"), "ids is per-call data, still bound");
-        assert!(bound.contains(&"rope_cos"), "rope_cos varies with position, still bound");
+        assert!(
+            bound.contains(&"rope_cos"),
+            "rope_cos varies with position, still bound"
+        );
     }
 
     /// `op = "constant"` is the TOML face of [`Op::Constant`], and
@@ -5219,8 +7788,8 @@ value = 1.0
         for (even, odd, value) in &cached_roots {
             cached_outputs.extend_from_slice(&[*even, *odd, *value]);
         }
-        let cached_shapes =
-            crate::shape::infer(&cached_program, &[1, 71]).expect("one new position against a 71-position cache infers");
+        let cached_shapes = crate::shape::infer(&cached_program, &[1, 71])
+            .expect("one new position against a 71-position cache infers");
         let bound = crate::bind::bind(&cached_program, &cached_shapes, &cached_outputs)
             .expect("the cached program binds")
             .len();
@@ -5266,21 +7835,34 @@ value = 1.0
         const REPEATS: usize = 20;
 
         let mut program = Vec::new();
-        let seed = input_leaf(&mut program, DType::Float32, alloc::vec![Extent::Static(1)], "seed");
+        let seed = input_leaf(
+            &mut program,
+            DType::Float32,
+            alloc::vec![Extent::Static(1)],
+            "seed",
+        );
         let mut level: Vec<NodeId> = (0..LEAVES)
             .map(|_| {
-                elementwise(&mut program, DType::Float32, ScalarOp::Add, &[(seed, "a->a"), (seed, "a->a")])
-                    .expect("a scalar add lowers")
+                elementwise(
+                    &mut program,
+                    DType::Float32,
+                    ScalarOp::Add,
+                    &[(seed, "a->a"), (seed, "a->a")],
+                )
+                .expect("a scalar add lowers")
             })
             .collect();
         while level.len() > 1 {
             level = level
                 .chunks(2)
                 .map(|pair| match pair {
-                    [left, right] => {
-                        elementwise(&mut program, DType::Float32, ScalarOp::Add, &[(*left, "a->a"), (*right, "a->a")])
-                            .expect("a scalar add lowers")
-                    }
+                    [left, right] => elementwise(
+                        &mut program,
+                        DType::Float32,
+                        ScalarOp::Add,
+                        &[(*left, "a->a"), (*right, "a->a")],
+                    )
+                    .expect("a scalar add lowers"),
                     [only] => *only,
                     _ => unreachable!("chunks(2) yields one or two"),
                 })
@@ -5295,7 +7877,8 @@ value = 1.0
         let mut samples: Vec<f64> = Vec::with_capacity(REPEATS);
         for _ in 0..REPEATS {
             let started = std::time::Instant::now();
-            crate::cpu::evaluate_named(&program, &[1], &named, &[root]).expect("the tree evaluates");
+            crate::cpu::evaluate_named(&program, &[1], &named, &[root])
+                .expect("the tree evaluates");
             samples.push(started.elapsed().as_secs_f64() * 1e9 / total as f64);
         }
         samples.sort_by(|left, right| left.partial_cmp(right).expect("no nan timings"));
@@ -5324,19 +7907,34 @@ value = 1.0
             .unwrap_or(256);
 
         let mut program = Vec::new();
-        let seed = input_leaf(&mut program, DType::Float32, alloc::vec![Extent::Static(1)], "seed");
+        let seed = input_leaf(
+            &mut program,
+            DType::Float32,
+            alloc::vec![Extent::Static(1)],
+            "seed",
+        );
         let mut tip = seed;
         for _ in 0..depth {
-            tip = elementwise(&mut program, DType::Float32, ScalarOp::Add, &[(tip, "a->a"), (seed, "a->a")])
-                .expect("a scalar add chains");
+            tip = elementwise(
+                &mut program,
+                DType::Float32,
+                ScalarOp::Add,
+                &[(tip, "a->a"), (seed, "a->a")],
+            )
+            .expect("a scalar add chains");
         }
 
         let seed_data = alloc::vec![1.0f32];
         let named: [(&str, &[f32]); 1] = [("seed", seed_data.as_slice())];
-        let evaluated = crate::cpu::evaluate_named(&program, &[1], &named, &[tip]).expect("the chain evaluates");
+        let evaluated = crate::cpu::evaluate_named(&program, &[1], &named, &[tip])
+            .expect("the chain evaluates");
         let (data, _) = evaluated.get(tip).expect("chain tip present");
 
-        std::println!("chain_depth depth={depth} nodes={} value={}", program.len(), data[0]);
+        std::println!(
+            "chain_depth depth={depth} nodes={} value={}",
+            program.len(),
+            data[0]
+        );
         assert_eq!(data[0], 1.0 + depth as f32, "each link adds one seed");
     }
 
@@ -5386,7 +7984,9 @@ value = 1.0
         // `no_repeated_scalar_crosses_the_binding_surface` asserts.
         // `block_node_ids` (cpu.rs) reads `Input`s positionally, which is
         // why this order is load-bearing, not cosmetic.
-        let ids: Vec<f32> = (0..SEQUENCE).map(|position| (position % VOCAB) as f32).collect();
+        let ids: Vec<f32> = (0..SEQUENCE)
+            .map(|position| (position % VOCAB) as f32)
+            .collect();
         let table = random_vec(200, VOCAB * EMBEDDING);
         let epsilon = alloc::vec![1e-5f32; SEQUENCE];
         let cos = random_vec(201, SEQUENCE * PAIRS);
@@ -5430,8 +8030,9 @@ value = 1.0
         let workers = core::num::NonZeroUsize::new(1).expect("one worker is nonzero");
 
         let wall_start = std::time::Instant::now();
-        let evaluated = crate::cpu::evaluate_parallel(&program, &symbols, &blocks, &[root], workers)
-            .expect("the whole real-dimension mistral forward pass evaluates");
+        let evaluated =
+            crate::cpu::evaluate_parallel(&program, &symbols, &blocks, &[root], workers)
+                .expect("the whole real-dimension mistral forward pass evaluates");
         let wall = wall_start.elapsed();
         std::println!(
             "whole_forward_pass: wall_clock={wall:?} per_layer={:?}",
@@ -5439,8 +8040,15 @@ value = 1.0
         );
 
         let output = evaluated.root();
-        assert_eq!(output.len(), SEQUENCE * VOCAB, "logits must be [seq, vocab]");
-        assert!(output.iter().all(|value| value.is_finite()), "logits must be finite");
+        assert_eq!(
+            output.len(),
+            SEQUENCE * VOCAB,
+            "logits must be [seq, vocab]"
+        );
+        assert!(
+            output.iter().all(|value| value.is_finite()),
+            "logits must be finite"
+        );
 
         let last_row = &output[(SEQUENCE - 1) * VOCAB..SEQUENCE * VOCAB];
         let argmax = last_row
@@ -5461,14 +8069,20 @@ value = 1.0
     /// computes per call, generalized with a start offset so a decode
     /// step's lone new position gets its true absolute angle instead of
     /// position 0.
-    fn rope_angles(start: usize, count: usize, pairs: usize, head_dim: usize) -> (Vec<f32>, Vec<f32>) {
+    fn rope_angles(
+        start: usize,
+        count: usize,
+        pairs: usize,
+        head_dim: usize,
+    ) -> (Vec<f32>, Vec<f32>) {
         let mut cos = alloc::vec![0.0f32; count * pairs];
         let mut sin = alloc::vec![0.0f32; count * pairs];
         for offset in 0..count {
             let position = (start + offset) as f32;
             for pair in 0..pairs {
-                let theta =
-                    position * crate::sized::ROPE_FREQ_BASE_DEFAULT.powf(-((2 * pair) as f32) / (head_dim as f32));
+                let theta = position
+                    * crate::sized::ROPE_FREQ_BASE_DEFAULT
+                        .powf(-((2 * pair) as f32) / (head_dim as f32));
                 cos[offset * pairs + pair] = theta.cos();
                 sin[offset * pairs + pair] = theta.sin();
             }
@@ -5575,8 +8189,13 @@ value = 1.0
                 ]
             })
             .collect();
-        let mut uncached_named: Vec<(&str, &[f32])> =
-            alloc::vec![("ids", ids_f32.as_slice()), ("token_embd.weight", table.as_slice()), ("eps", epsilon_full.as_slice()), ("rope_cos", cos_full.as_slice()), ("rope_sin", sin_full.as_slice())];
+        let mut uncached_named: Vec<(&str, &[f32])> = alloc::vec![
+            ("ids", ids_f32.as_slice()),
+            ("token_embd.weight", table.as_slice()),
+            ("eps", epsilon_full.as_slice()),
+            ("rope_cos", cos_full.as_slice()),
+            ("rope_sin", sin_full.as_slice())
+        ];
         for (layer_index, weights) in layers.iter().enumerate() {
             let names = &layer_names[layer_index];
             uncached_named.push((names[0].as_str(), weights.attn_norm.as_slice()));
@@ -5593,9 +8212,16 @@ value = 1.0
         uncached_named.push(("output.weight", lm_head.as_slice()));
 
         let uncached_root = NodeId(uncached_program.len() as u32 - 1);
-        let uncached_evaluated = crate::cpu::evaluate_named(&uncached_program, &[SEQUENCE as u64], &uncached_named, &[uncached_root])
-            .expect("uncached forward pass evaluates");
-        let (uncached_logits, uncached_shape) = uncached_evaluated.get(uncached_root).expect("uncached logits present");
+        let uncached_evaluated = crate::cpu::evaluate_named(
+            &uncached_program,
+            &[SEQUENCE as u64],
+            &uncached_named,
+            &[uncached_root],
+        )
+        .expect("uncached forward pass evaluates");
+        let (uncached_logits, uncached_shape) = uncached_evaluated
+            .get(uncached_root)
+            .expect("uncached logits present");
         assert_eq!(uncached_shape, [SEQUENCE as u64, VOCAB as u64]);
         let uncached_last_position = &uncached_logits[(SEQUENCE - 1) * VOCAB..SEQUENCE * VOCAB];
 
@@ -5659,14 +8285,21 @@ value = 1.0
             prefill_roots.push(*value);
         }
         let prefill_symbols = [PROMPT_LEN as u64, 0u64];
-        let prefill_evaluated = crate::cpu::evaluate_named(&cached_program, &prefill_symbols, &prefill_named, &prefill_roots)
-            .expect("prefill call evaluates");
+        let prefill_evaluated = crate::cpu::evaluate_named(
+            &cached_program,
+            &prefill_symbols,
+            &prefill_named,
+            &prefill_roots,
+        )
+        .expect("prefill call evaluates");
 
         let mut k_even_cache: Vec<Vec<f32>> = Vec::with_capacity(BLOCK_COUNT as usize);
         let mut k_odd_cache: Vec<Vec<f32>> = Vec::with_capacity(BLOCK_COUNT as usize);
         let mut v_cache: Vec<Vec<f32>> = Vec::with_capacity(BLOCK_COUNT as usize);
         for (even, odd, value) in &cache_roots {
-            let (even_data, _) = prefill_evaluated.get(*even).expect("prefill k_even present");
+            let (even_data, _) = prefill_evaluated
+                .get(*even)
+                .expect("prefill k_even present");
             let (odd_data, _) = prefill_evaluated.get(*odd).expect("prefill k_odd present");
             let (value_data, _) = prefill_evaluated.get(*value).expect("prefill v present");
             k_even_cache.push(even_data.to_vec());
@@ -5702,9 +8335,16 @@ value = 1.0
         }
 
         let decode_symbols = [1u64, PROMPT_LEN as u64];
-        let decode_evaluated = crate::cpu::evaluate_named(&cached_program, &decode_symbols, &decode_named, &[cached_logits_root])
-            .expect("decode call evaluates");
-        let (decode_logits, decode_shape) = decode_evaluated.get(cached_logits_root).expect("decode logits present");
+        let decode_evaluated = crate::cpu::evaluate_named(
+            &cached_program,
+            &decode_symbols,
+            &decode_named,
+            &[cached_logits_root],
+        )
+        .expect("decode call evaluates");
+        let (decode_logits, decode_shape) = decode_evaluated
+            .get(cached_logits_root)
+            .expect("decode logits present");
         assert_eq!(decode_shape, [1u64, VOCAB as u64]);
 
         let max_diff = uncached_last_position
@@ -5716,7 +8356,9 @@ value = 1.0
             "cached_decode_vs_uncached: oracle={uncached_last_position:?} cached={decode_logits:?} max_diff={max_diff}"
         );
         assert!(
-            uncached_last_position.iter().any(|&value| value != uncached_last_position[0]),
+            uncached_last_position
+                .iter()
+                .any(|&value| value != uncached_last_position[0]),
             "degenerate control: oracle logits are all-equal, this run proves nothing"
         );
         assert!(
@@ -5766,8 +8408,13 @@ value = 1.0
 
         let x_data = [1.0f32, 2.0, 3.0, 4.0];
         let weight_data = [1.0f32, 10.0, 100.0];
-        let evaluated = crate::cpu::evaluate_named(&program, &[4], &[("x", &x_data), ("weight", &weight_data)], &[output])
-            .expect("causal conv evaluates");
+        let evaluated = crate::cpu::evaluate_named(
+            &program,
+            &[4],
+            &[("x", &x_data), ("weight", &weight_data)],
+            &[output],
+        )
+        .expect("causal conv evaluates");
         let (result, shape) = evaluated.get(output).expect("conv output present");
 
         std::println!("causal_conv1d result={result:?} shape={shape:?}");
@@ -5804,13 +8451,19 @@ value = 1.0
         // matches (out[0]'s only real contribution is tap l=2, so this alone
         // would move it too -- included to show the test is not vacuous).
         let perturbed_weight_data = [1.0f32, 10.0, 99.0];
-        let evaluated = crate::cpu::evaluate_named(&program, &[4], &[("x", &x_data), ("weight", &perturbed_weight_data)], &[output])
-            .expect("causal conv evaluates");
+        let evaluated = crate::cpu::evaluate_named(
+            &program,
+            &[4],
+            &[("x", &x_data), ("weight", &perturbed_weight_data)],
+            &[output],
+        )
+        .expect("causal conv evaluates");
         let (result, _shape) = evaluated.get(output).expect("conv output present");
 
         std::println!("perturbed causal_conv1d result={result:?}");
         assert_ne!(
-            result, [100.0, 210.0, 321.0, 432.0],
+            result,
+            [100.0, 210.0, 321.0, 432.0],
             "a perturbed tap weight must move the output away from the hand-computed reference \
              (if this assertion cannot fail, the test above proves nothing)"
         );
@@ -5858,13 +8511,21 @@ value = 1.0
         // channel-major, tap-fastest: `[ch0_l0, ch0_l1, ch0_l2, ch1_l0, ch1_l1, ch1_l2]`
         // -- the real checkpoint's own on-disk axis order.
         let weight_data = [1.0f32, 10.0, 100.0, 1000.0, 1.0, 1.0];
-        let evaluated = crate::cpu::evaluate_named(&program, &[4], &[("x", &x_data), ("weight", &weight_data)], &[output])
-            .expect("causal conv evaluates");
+        let evaluated = crate::cpu::evaluate_named(
+            &program,
+            &[4],
+            &[("x", &x_data), ("weight", &weight_data)],
+            &[output],
+        )
+        .expect("causal conv evaluates");
         let (result, shape) = evaluated.get(output).expect("conv output present");
 
         std::println!("multi-channel causal_conv1d result={result:?} shape={shape:?}");
         assert_eq!(shape, [4u64, 2u64]);
-        assert_eq!(result, [100.0, 2.0, 210.0, 4.0, 321.0, 2004.0, 432.0, 2004.0]);
+        assert_eq!(
+            result,
+            [100.0, 2.0, 210.0, 4.0, 321.0, 2004.0, 432.0, 2004.0]
+        );
     }
 
     /// [`rmsnorm_per_head`] against a hand-computed RMS norm -- one token,
@@ -5905,20 +8566,29 @@ value = 1.0
             },
         );
         let inv_head_dim = scalar_constant(&mut program, 0.5);
-        let output = rmsnorm_per_head(&mut program, x, gamma, inv_head_dim, eps, 'h').expect("per-head rmsnorm lowers");
+        let output = rmsnorm_per_head(&mut program, x, gamma, inv_head_dim, eps, 'h')
+            .expect("per-head rmsnorm lowers");
 
         let x_data = [3.0f32, 4.0, 1.0, 1.0];
         let gamma_data = [2.0f32, 0.5];
         let eps_data = [0.0f32];
-        let evaluated = crate::cpu::evaluate_named(&program, &[1], &[("x", &x_data), ("gamma", &gamma_data), ("eps", &eps_data)], &[output])
-            .expect("per-head rmsnorm evaluates");
+        let evaluated = crate::cpu::evaluate_named(
+            &program,
+            &[1],
+            &[("x", &x_data), ("gamma", &gamma_data), ("eps", &eps_data)],
+            &[output],
+        )
+        .expect("per-head rmsnorm evaluates");
         let (result, shape) = evaluated.get(output).expect("rmsnorm output present");
 
         std::println!("rmsnorm_per_head result={result:?} shape={shape:?}");
         assert_eq!(shape, [1u64, 2u64, 2u64]);
         let expected = [1.6970563f32, 0.56568545, 2.0, 0.5];
         for (found, wanted) in result.iter().zip(&expected) {
-            assert!((found - wanted).abs() < 1e-5, "got {result:?}, expected {expected:?}");
+            assert!(
+                (found - wanted).abs() < 1e-5,
+                "got {result:?}, expected {expected:?}"
+            );
         }
     }
 
@@ -5952,14 +8622,24 @@ value = 1.0
             },
         );
         let inv_head_dim = scalar_constant(&mut program, 0.5);
-        let output = rmsnorm_per_head(&mut program, x, gamma, inv_head_dim, eps, 'h').expect("per-head rmsnorm lowers");
+        let output = rmsnorm_per_head(&mut program, x, gamma, inv_head_dim, eps, 'h')
+            .expect("per-head rmsnorm lowers");
 
         let x_data = [3.0f32, 4.0, 1.0, 1.0];
         // gamma[0] perturbed from 2.0 to 3.0.
         let perturbed_gamma_data = [3.0f32, 0.5];
         let eps_data = [0.0f32];
-        let evaluated = crate::cpu::evaluate_named(&program, &[1], &[("x", &x_data), ("gamma", &perturbed_gamma_data), ("eps", &eps_data)], &[output])
-            .expect("per-head rmsnorm evaluates");
+        let evaluated = crate::cpu::evaluate_named(
+            &program,
+            &[1],
+            &[
+                ("x", &x_data),
+                ("gamma", &perturbed_gamma_data),
+                ("eps", &eps_data),
+            ],
+            &[output],
+        )
+        .expect("per-head rmsnorm evaluates");
         let (result, _shape) = evaluated.get(output).expect("rmsnorm output present");
 
         std::println!("perturbed rmsnorm_per_head result={result:?}");
@@ -5980,14 +8660,16 @@ value = 1.0
         #[case] expected: LayerKind,
     ) {
         let names = ["token_embd.weight", marker, "output_norm.weight"];
-        let derived = LayerKind::from_tensor_names(names, layer).expect("a real block names exactly one marker");
+        let derived = LayerKind::from_tensor_names(names, layer)
+            .expect("a real block names exactly one marker");
         assert_eq!(derived, expected);
     }
 
     #[proxima::test]
     async fn layer_kind_names_the_block_when_neither_marker_is_present() {
         let names = ["token_embd.weight", "output_norm.weight"];
-        let error = LayerKind::from_tensor_names(names, 7).expect_err("a block with no marker cannot derive a kind");
+        let error = LayerKind::from_tensor_names(names, 7)
+            .expect_err("a block with no marker cannot derive a kind");
         assert!(
             matches!(error, TensorError::UndeterminedLayerKind { layer: 7 }),
             "got {error:?}"
@@ -6020,16 +8702,33 @@ value = 1.0
             .collect();
 
         let build_start = std::time::Instant::now();
-        let (program, _logits) =
-            lfm2_forward_program_with_experts(128_000, 2048, 7168, 1792, 32, 8, 64, 24, 32, 4, 2, 3, &layer_kinds)
-                .expect("the hybrid forward pass lowers to a program");
+        let (program, _logits) = lfm2_forward_program_with_experts(
+            128_000,
+            2048,
+            7168,
+            1792,
+            32,
+            8,
+            64,
+            24,
+            32,
+            4,
+            2,
+            3,
+            &layer_kinds,
+        )
+        .expect("the hybrid forward pass lowers to a program");
         let build_elapsed = build_start.elapsed();
 
         let infer_start = std::time::Instant::now();
-        crate::shape::infer(&program, &[REAL_CONTEXT]).expect("the hybrid forward pass infers at its real context length");
+        crate::shape::infer(&program, &[REAL_CONTEXT])
+            .expect("the hybrid forward pass infers at its real context length");
         let infer_elapsed = infer_start.elapsed();
 
-        std::println!("lfm2_forward_program_with_experts: nodes={} build={build_elapsed:?} infer={infer_elapsed:?}", program.len());
+        std::println!(
+            "lfm2_forward_program_with_experts: nodes={} build={build_elapsed:?} infer={infer_elapsed:?}",
+            program.len()
+        );
         assert!(
             program.len() > 1_000,
             "24 hybrid blocks plus embedding/lm-head should be well over a thousand nodes, not {}",
@@ -6040,10 +8739,30 @@ value = 1.0
     #[proxima::test]
     async fn lfm2_forward_program_rejects_a_layer_kinds_length_mismatch() {
         let layer_kinds = [LayerKind::Attention, LayerKind::ShortConv];
-        let error = lfm2_forward_program_with_experts(128_000, 2048, 7168, 1792, 32, 8, 64, 24, 32, 4, 2, 3, &layer_kinds)
-            .expect_err("2 layer_kinds against block_count=24 must be rejected");
+        let error = lfm2_forward_program_with_experts(
+            128_000,
+            2048,
+            7168,
+            1792,
+            32,
+            8,
+            64,
+            24,
+            32,
+            4,
+            2,
+            3,
+            &layer_kinds,
+        )
+        .expect_err("2 layer_kinds against block_count=24 must be rejected");
         assert!(
-            matches!(error, TensorError::LayerKindCountMismatch { expected: 24, found: 2 }),
+            matches!(
+                error,
+                TensorError::LayerKindCountMismatch {
+                    expected: 24,
+                    found: 2
+                }
+            ),
             "got {error:?}"
         );
     }
@@ -6067,7 +8786,11 @@ value = 1.0
                 name: Some("weight".into()),
             },
         );
-        let error = causal_conv1d(&mut program, x, weight, 0).expect_err("l_cache=0 has no window to convolve");
-        assert!(matches!(error, TensorError::InvalidConvConfig { l_cache: 0 }), "got {error:?}");
+        let error = causal_conv1d(&mut program, x, weight, 0)
+            .expect_err("l_cache=0 has no window to convolve");
+        assert!(
+            matches!(error, TensorError::InvalidConvConfig { l_cache: 0 }),
+            "got {error:?}"
+        );
     }
 }

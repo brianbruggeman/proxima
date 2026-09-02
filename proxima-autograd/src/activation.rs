@@ -126,10 +126,26 @@ pub fn sigmoid(program: &mut Vec<Op>, dtype: DType, x: NodeId, rank: u16) -> Nod
     let full = expr::identity(rank);
     let scalar = expr::broadcast(rank);
     let negated = expr::unary(program, dtype, ScalarOp::Negate, (x, full.clone()));
-    let exponentiated = expr::unary(program, dtype, ScalarOp::Exponential, (negated, full.clone()));
+    let exponentiated = expr::unary(
+        program,
+        dtype,
+        ScalarOp::Exponential,
+        (negated, full.clone()),
+    );
     let one = expr::constant(program, dtype, 1.0);
-    let denominator = expr::binary(program, dtype, ScalarOp::Add, (one, scalar), (exponentiated, full));
-    expr::unary(program, dtype, ScalarOp::Reciprocal, (denominator, expr::identity(rank)))
+    let denominator = expr::binary(
+        program,
+        dtype,
+        ScalarOp::Add,
+        (one, scalar),
+        (exponentiated, full),
+    );
+    expr::unary(
+        program,
+        dtype,
+        ScalarOp::Reciprocal,
+        (denominator, expr::identity(rank)),
+    )
 }
 
 /// `x * sigmoid(x)` (SiLU / Swish), elementwise, at whatever rank `x` was
@@ -139,7 +155,13 @@ pub fn sigmoid(program: &mut Vec<Op>, dtype: DType, x: NodeId, rank: u16) -> Nod
 #[must_use]
 pub fn silu(program: &mut Vec<Op>, dtype: DType, x: NodeId, rank: u16) -> NodeId {
     let sigmoid_x = sigmoid(program, dtype, x, rank);
-    expr::binary(program, dtype, ScalarOp::Multiply, (x, expr::identity(rank)), (sigmoid_x, expr::identity(rank)))
+    expr::binary(
+        program,
+        dtype,
+        ScalarOp::Multiply,
+        (x, expr::identity(rank)),
+        (sigmoid_x, expr::identity(rank)),
+    )
 }
 
 /// `0.5 * x * (1 + erf(x / sqrt(2)))` (exact, not the tanh approximation),
@@ -152,13 +174,42 @@ pub fn gelu(program: &mut Vec<Op>, dtype: DType, x: NodeId, rank: u16) -> NodeId
     let full = expr::identity(rank);
     let scalar = expr::broadcast(rank);
     let inverse_sqrt_two = expr::constant(program, dtype, core::f32::consts::FRAC_1_SQRT_2);
-    let scaled = expr::binary(program, dtype, ScalarOp::Multiply, (x, full.clone()), (inverse_sqrt_two, scalar.clone()));
-    let erf_scaled = expr::unary(program, dtype, ScalarOp::Erf, (scaled, expr::identity(rank)));
+    let scaled = expr::binary(
+        program,
+        dtype,
+        ScalarOp::Multiply,
+        (x, full.clone()),
+        (inverse_sqrt_two, scalar.clone()),
+    );
+    let erf_scaled = expr::unary(
+        program,
+        dtype,
+        ScalarOp::Erf,
+        (scaled, expr::identity(rank)),
+    );
     let one = expr::constant(program, dtype, 1.0);
-    let one_plus_erf = expr::binary(program, dtype, ScalarOp::Add, (one, scalar.clone()), (erf_scaled, full.clone()));
-    let x_times = expr::binary(program, dtype, ScalarOp::Multiply, (x, full), (one_plus_erf, expr::identity(rank)));
+    let one_plus_erf = expr::binary(
+        program,
+        dtype,
+        ScalarOp::Add,
+        (one, scalar.clone()),
+        (erf_scaled, full.clone()),
+    );
+    let x_times = expr::binary(
+        program,
+        dtype,
+        ScalarOp::Multiply,
+        (x, full),
+        (one_plus_erf, expr::identity(rank)),
+    );
     let half = expr::constant(program, dtype, 0.5);
-    expr::binary(program, dtype, ScalarOp::Multiply, (half, scalar), (x_times, expr::identity(rank)))
+    expr::binary(
+        program,
+        dtype,
+        ScalarOp::Multiply,
+        (half, scalar),
+        (x_times, expr::identity(rank)),
+    )
 }
 
 #[cfg(test)]
@@ -208,7 +259,11 @@ mod tests {
         let result = evaluated.root();
 
         let denom = (-2.0f32).exp() + (-1.0f32).exp() + 0.0f32.exp();
-        let expected = [(-2.0f32).exp() / denom, (-1.0f32).exp() / denom, 1.0 / denom];
+        let expected = [
+            (-2.0f32).exp() / denom,
+            (-1.0f32).exp() / denom,
+            1.0 / denom,
+        ];
         for (got, want) in result.iter().zip(expected.iter()) {
             assert!(
                 (got - want).abs() < 1e-6,
@@ -224,7 +279,11 @@ mod tests {
         let mut program = Vec::new();
         let x = proxima_tensor::op::append(
             &mut program,
-            Op::Input { dtype: DType::Float32, shape: vec![Extent::Static(3)], name: Some("x".into()) },
+            Op::Input {
+                dtype: DType::Float32,
+                shape: vec![Extent::Static(3)],
+                name: Some("x".into()),
+            },
         );
         let out = sigmoid(&mut program, DType::Float32, x, 1);
 
@@ -242,7 +301,11 @@ mod tests {
         let mut program = Vec::new();
         let x = proxima_tensor::op::append(
             &mut program,
-            Op::Input { dtype: DType::Float32, shape: vec![Extent::Static(3)], name: Some("x".into()) },
+            Op::Input {
+                dtype: DType::Float32,
+                shape: vec![Extent::Static(3)],
+                name: Some("x".into()),
+            },
         );
         let out = silu(&mut program, DType::Float32, x, 1);
 
@@ -260,7 +323,11 @@ mod tests {
         let mut program = Vec::new();
         let x = proxima_tensor::op::append(
             &mut program,
-            Op::Input { dtype: DType::Float32, shape: vec![Extent::Static(3)], name: Some("x".into()) },
+            Op::Input {
+                dtype: DType::Float32,
+                shape: vec![Extent::Static(3)],
+                name: Some("x".into()),
+            },
         );
         let out = gelu(&mut program, DType::Float32, x, 1);
 
@@ -277,12 +344,18 @@ mod tests {
     /// gradient falls out of the existing adjoint rules composed over
     /// `Negate`/`Exponential`/`Add`/`Reciprocal`/`Multiply`/`Erf` -- no
     /// activation-specific adjoint rule exists anywhere in this crate.
-    fn activation_gradient_matches_central_difference(activation: fn(&mut Vec<Op>, DType, NodeId, u16) -> NodeId) {
+    fn activation_gradient_matches_central_difference(
+        activation: fn(&mut Vec<Op>, DType, NodeId, u16) -> NodeId,
+    ) {
         let x_values = [-1.7f32, -0.3, 0.4, 2.1];
         let mut program = Vec::new();
         let x = proxima_tensor::op::append(
             &mut program,
-            Op::Input { dtype: DType::Float32, shape: vec![Extent::Static(x_values.len() as u32)], name: Some("x".into()) },
+            Op::Input {
+                dtype: DType::Float32,
+                shape: vec![Extent::Static(x_values.len() as u32)],
+                name: Some("x".into()),
+            },
         );
         let activated = activation(&mut program, DType::Float32, x, 1);
         let loss = proxima_tensor::op::append(
@@ -299,10 +372,18 @@ mod tests {
             }),
         );
 
-        let differentiated = crate::adjoint::differentiate(&program, loss).expect("scalar loss differentiates");
-        let grad_x = differentiated.gradient_of_named("x").expect("x feeds the loss");
-        let evaluated = proxima_tensor::cpu::evaluate_named(&differentiated.program, &[], &[("x", &x_values)], &[grad_x])
-            .expect("adjoint program lowers and evaluates");
+        let differentiated =
+            crate::adjoint::differentiate(&program, loss).expect("scalar loss differentiates");
+        let grad_x = differentiated
+            .gradient_of_named("x")
+            .expect("x feeds the loss");
+        let evaluated = proxima_tensor::cpu::evaluate_named(
+            &differentiated.program,
+            &[],
+            &[("x", &x_values)],
+            &[grad_x],
+        )
+        .expect("adjoint program lowers and evaluates");
         let analytic = evaluated.get(grad_x).expect("grad_x requested").0;
 
         let step = 1e-3f32;
@@ -324,7 +405,8 @@ mod tests {
             perturbed[index] = original;
 
             let numeric = (plus - minus) / (2.0 * step);
-            let relative = (analytic[index] - numeric).abs() / (analytic[index].abs().max(numeric.abs()) + 1e-6);
+            let relative = (analytic[index] - numeric).abs()
+                / (analytic[index].abs().max(numeric.abs()) + 1e-6);
             assert!(
                 relative < 5e-3,
                 "index {index}: analytic={} numeric={numeric} relative={relative}",

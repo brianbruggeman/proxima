@@ -31,7 +31,10 @@ pub const QK8_0: usize = 32;
 /// at `ggml-common.h:214`.
 pub const BLOCK_BYTES: usize = {
     let layout = GgmlType::Q8_0.block_layout();
-    assert!(layout.block_elements as usize == QK8_0, "GgmlType::Q8_0 block_elements drifted from QK8_0");
+    assert!(
+        layout.block_elements as usize == QK8_0,
+        "GgmlType::Q8_0 block_elements drifted from QK8_0"
+    );
     layout.block_bytes as usize
 };
 
@@ -102,7 +105,12 @@ pub fn dequantize(data: &[u8], output: &mut [f32]) -> Result<(), QuantError> {
             expected,
         });
     }
-    for (block, out_chunk) in data.as_chunks::<BLOCK_BYTES>().0.iter().zip(output.as_chunks_mut::<QK8_0>().0) {
+    for (block, out_chunk) in data
+        .as_chunks::<BLOCK_BYTES>()
+        .0
+        .iter()
+        .zip(output.as_chunks_mut::<QK8_0>().0)
+    {
         dequantize_block(block, out_chunk);
     }
     Ok(())
@@ -157,7 +165,12 @@ pub fn quantize(input: &[f32], output: &mut [u8]) -> Result<(), QuantError> {
             expected,
         });
     }
-    for (chunk, out_block) in input.as_chunks::<QK8_0>().0.iter().zip(output.as_chunks_mut::<BLOCK_BYTES>().0) {
+    for (chunk, out_block) in input
+        .as_chunks::<QK8_0>()
+        .0
+        .iter()
+        .zip(output.as_chunks_mut::<BLOCK_BYTES>().0)
+    {
         quantize_block(chunk, out_block);
     }
     Ok(())
@@ -186,8 +199,8 @@ mod tests {
         // wire byte a decoder must still read correctly) and both
         // positive and negative values.
         let qs: [i8; QK8_0] = [
-            0, 1, -1, 127, -127, -128, 64, -64, 5, -5, 100, -100, 3, -3, 50, -50, 2, -2, 90, -90, 10, -10, 60, -60,
-            7, -7, 40, -40, 20, -20, 80, -80,
+            0, 1, -1, 127, -127, -128, 64, -64, 5, -5, 100, -100, 3, -3, 50, -50, 2, -2, 90, -90,
+            10, -10, 60, -60, 7, -7, 40, -40, 20, -20, 80, -80,
         ];
 
         let mut block = [0u8; BLOCK_BYTES];
@@ -240,15 +253,24 @@ mod tests {
         let mut max_error = 0.0f32;
         let mut sum_sq_error = 0.0f64;
         for (got, want) in output.iter().zip(input.iter()) {
-            assert!(got.is_finite(), "dequantized value must be finite, got {got}");
+            assert!(
+                got.is_finite(),
+                "dequantized value must be finite, got {got}"
+            );
             let diff = (got - want).abs();
             max_error = max_error.max(diff);
             sum_sq_error += f64::from(diff) * f64::from(diff);
         }
         let rms_error = (sum_sq_error / elements as f64).sqrt();
         debug!(max_error, rms_error, "quant.q8_0 smooth-signal round trip");
-        assert!(max_error < 0.03, "max_error={max_error} exceeds loose sanity bound");
-        assert!(rms_error < 0.02, "rms_error={rms_error} exceeds loose sanity bound");
+        assert!(
+            max_error < 0.03,
+            "max_error={max_error} exceeds loose sanity bound"
+        );
+        assert!(
+            rms_error < 0.02,
+            "rms_error={rms_error} exceeds loose sanity bound"
+        );
     }
 
     #[test]

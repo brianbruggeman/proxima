@@ -15,12 +15,12 @@
 
 pub mod bf16;
 pub mod f16;
+pub mod policy;
 pub mod q4_0;
 pub mod q4_k;
 pub mod q5_k;
 pub mod q6_k;
 pub mod q8_0;
-pub mod policy;
 
 use thiserror::Error;
 
@@ -37,7 +37,9 @@ pub enum QuantError {
         found: usize,
         block_bytes: usize,
     },
-    #[error("input length {found} elements is not a multiple of the {codec} {unit} size {block_elements}")]
+    #[error(
+        "input length {found} elements is not a multiple of the {codec} {unit} size {block_elements}"
+    )]
     InputNotElementMultiple {
         codec: &'static str,
         /// `"super-block"` for the K-quants (`q4_k`/`q5_k`/`q6_k`), plain

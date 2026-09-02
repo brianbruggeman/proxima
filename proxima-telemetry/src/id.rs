@@ -262,7 +262,7 @@ mod tests {
     use super::*;
     use rand::rngs::SmallRng;
     use rand::{Rng, SeedableRng};
-    
+
     const REF_INPUT: &[u8] = b"00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01";
 
     #[proxima::test]

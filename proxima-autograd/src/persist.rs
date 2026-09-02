@@ -24,7 +24,9 @@ use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 use std::path::Path;
 
-use proxima_safetensors::{HEADER_LEN_BYTES, SafetensorsError, SafetensorsModel, SafetensorsParser, TensorPayload};
+use proxima_safetensors::{
+    HEADER_LEN_BYTES, SafetensorsError, SafetensorsModel, SafetensorsParser, TensorPayload,
+};
 use proxima_tensor::DType;
 use proxima_tensor::op::{Extent, Op};
 
@@ -54,8 +56,14 @@ pub enum PersistError {
     #[error("checkpoint at {path} is missing parameter {name}, which the program declares")]
     MissingParameter { path: String, name: String },
 
-    #[error("parameter {name} shape mismatch: program declares {expected:?}, checkpoint has {found:?}")]
-    ShapeMismatch { name: String, expected: Vec<u64>, found: Vec<u64> },
+    #[error(
+        "parameter {name} shape mismatch: program declares {expected:?}, checkpoint has {found:?}"
+    )]
+    ShapeMismatch {
+        name: String,
+        expected: Vec<u64>,
+        found: Vec<u64>,
+    },
 
     #[error("checkpoint at {path} is shorter than its own declared header length")]
     TruncatedTensorData { path: String },
@@ -72,16 +80,25 @@ fn declared_shape(program: &[Op], name: &str) -> Result<Vec<u64>, PersistError> 
     let shape = program
         .iter()
         .find_map(|op| match op {
-            Op::Input { name: Some(candidate), shape, .. } if candidate == name => Some(shape),
+            Op::Input {
+                name: Some(candidate),
+                shape,
+                ..
+            } if candidate == name => Some(shape),
             _ => None,
         })
-        .ok_or_else(|| PersistError::UndeclaredParameter { name: name.to_string() })?;
+        .ok_or_else(|| PersistError::UndeclaredParameter {
+            name: name.to_string(),
+        })?;
 
     shape
         .iter()
         .map(|extent| match extent {
             Extent::Static(size) => Ok(u64::from(*size)),
-            Extent::Symbolic(symbol) => Err(PersistError::SymbolicShape { name: name.to_string(), symbol: *symbol }),
+            Extent::Symbolic(symbol) => Err(PersistError::SymbolicShape {
+                name: name.to_string(),
+                symbol: *symbol,
+            }),
         })
         .collect()
 }
@@ -101,7 +118,10 @@ pub fn save_state(program: &[Op], state: &State, path: &Path) -> Result<(), Pers
     let mut byte_buffers: Vec<(String, Vec<u64>, Vec<u8>)> = Vec::with_capacity(state.len());
     for (name, values) in state {
         let shape = declared_shape(program, name)?;
-        let bytes: Vec<u8> = values.iter().flat_map(|value| value.to_le_bytes()).collect();
+        let bytes: Vec<u8> = values
+            .iter()
+            .flat_map(|value| value.to_le_bytes())
+            .collect();
         byte_buffers.push((name.clone(), shape, bytes));
     }
 
@@ -114,7 +134,10 @@ pub fn save_state(program: &[Op], state: &State, path: &Path) -> Result<(), Pers
             data: bytes.as_slice(),
         })
         .collect();
-    let model = SafetensorsModel { tensors, metadata: alloc::collections::BTreeMap::new() };
+    let model = SafetensorsModel {
+        tensors,
+        metadata: alloc::collections::BTreeMap::new(),
+    };
     let wire = proxima_safetensors::write_complete(&model)?;
     std::fs::write(path, wire)?;
     Ok(())
@@ -155,15 +178,21 @@ pub fn load_state(program: &[Op], path: &Path) -> Result<State, PersistError> {
         .get(..header_len_start)
         .and_then(|slice| <[u8; 8]>::try_from(slice).ok())
         .map(u64::from_le_bytes)
-        .ok_or_else(|| PersistError::TruncatedTensorData { path: path_display.clone() })?;
+        .ok_or_else(|| PersistError::TruncatedTensorData {
+            path: path_display.clone(),
+        })?;
     let data_start = header_len_start + header_len as usize;
     let data_region = bytes
         .get(data_start..)
-        .ok_or_else(|| PersistError::TruncatedTensorData { path: path_display.clone() })?;
+        .ok_or_else(|| PersistError::TruncatedTensorData {
+            path: path_display.clone(),
+        })?;
 
     let mut declared_names: Vec<&str> = Vec::new();
     for op in program {
-        if let Op::Input { name: Some(name), .. } = op
+        if let Op::Input {
+            name: Some(name), ..
+        } = op
             && !declared_names.contains(&name.as_str())
         {
             declared_names.push(name.as_str());
@@ -173,10 +202,12 @@ pub fn load_state(program: &[Op], path: &Path) -> Result<State, PersistError> {
     let mut state = Vec::with_capacity(declared_names.len());
     for name in declared_names {
         let expected_shape = declared_shape(program, name)?;
-        let entry = manifest.tensor(name).ok_or_else(|| PersistError::MissingParameter {
-            path: path_display.clone(),
-            name: name.to_string(),
-        })?;
+        let entry = manifest
+            .tensor(name)
+            .ok_or_else(|| PersistError::MissingParameter {
+                path: path_display.clone(),
+                name: name.to_string(),
+            })?;
         if entry.shape != expected_shape {
             return Err(PersistError::ShapeMismatch {
                 name: name.to_string(),
@@ -188,8 +219,15 @@ pub fn load_state(program: &[Op], path: &Path) -> Result<State, PersistError> {
         let (start, end) = entry.data_offsets;
         let raw = data_region
             .get(start as usize..end as usize)
-            .ok_or_else(|| PersistError::TruncatedTensorData { path: path_display.clone() })?;
-        let values: Vec<f32> = raw.as_chunks::<4>().0.iter().map(|chunk| f32::from_le_bytes(*chunk)).collect();
+            .ok_or_else(|| PersistError::TruncatedTensorData {
+                path: path_display.clone(),
+            })?;
+        let values: Vec<f32> = raw
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|chunk| f32::from_le_bytes(*chunk))
+            .collect();
         state.push((name.to_string(), values));
     }
 
@@ -207,18 +245,32 @@ mod tests {
     use super::*;
 
     fn leaf(program: &mut Vec<Op>, name: &str, shape: Vec<Extent>) -> NodeId {
-        op::append(program, Op::Input { dtype: TensorDType::Float32, shape, name: Some(name.into()) })
+        op::append(
+            program,
+            Op::Input {
+                dtype: TensorDType::Float32,
+                shape,
+                name: Some(name.into()),
+            },
+        )
     }
 
     fn toy_program() -> Vec<Op> {
         let mut program = Vec::new();
-        leaf(&mut program, "w", vec![Extent::Static(2), Extent::Static(3)]);
+        leaf(
+            &mut program,
+            "w",
+            vec![Extent::Static(2), Extent::Static(3)],
+        );
         leaf(&mut program, "b", vec![Extent::Static(3)]);
         program
     }
 
     fn toy_state() -> State {
-        vec![(String::from("w"), vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]), (String::from("b"), vec![0.1, 0.2, 0.3])]
+        vec![
+            (String::from("w"), vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]),
+            (String::from("b"), vec![0.1, 0.2, 0.3]),
+        ]
     }
 
     /// Hand-builds a safetensors wire buffer the same way
@@ -228,7 +280,10 @@ mod tests {
     /// this crate's `save_state` would have written it before that stamp
     /// existed, or to plant an arbitrary tampered stamp for the
     /// unsupported-version test below.
-    fn hand_written_checkpoint_bytes(entries: &[(&str, &[u64], &[f32])], metadata: &[(&str, &str)]) -> Vec<u8> {
+    fn hand_written_checkpoint_bytes(
+        entries: &[(&str, &[u64], &[f32])],
+        metadata: &[(&str, &str)],
+    ) -> Vec<u8> {
         let mut header = String::from("{");
         if !metadata.is_empty() {
             header.push_str("\"__metadata__\":{");
@@ -251,7 +306,11 @@ mod tests {
                 data.extend_from_slice(&value.to_le_bytes());
             }
             let end = data.len() as u64;
-            let shape_json = shape.iter().map(ToString::to_string).collect::<Vec<_>>().join(",");
+            let shape_json = shape
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join(",");
             header.push_str(&alloc::format!(
                 "{name:?}:{{\"dtype\":\"F32\",\"shape\":[{shape_json}],\"data_offsets\":[{start},{end}]}}"
             ));
@@ -277,7 +336,11 @@ mod tests {
 
         assert_eq!(loaded.len(), state.len());
         for (name, values) in &state {
-            let found = loaded.iter().find(|(candidate, _)| candidate == name).map(|(_, values)| values).expect("name present after round trip");
+            let found = loaded
+                .iter()
+                .find(|(candidate, _)| candidate == name)
+                .map(|(_, values)| values)
+                .expect("name present after round trip");
             assert_eq!(found, values, "buffer for {name} must round-trip exactly");
         }
     }
@@ -290,7 +353,11 @@ mod tests {
 
         save_state(&program, &state, file.path()).expect("save_state writes the checkpoint");
         let bytes = std::fs::read(file.path()).expect("read written checkpoint");
-        let manifest = SafetensorsParser::new().push(&bytes).expect("parser accepts the bytes").finish().expect("manifest parses");
+        let manifest = SafetensorsParser::new()
+            .push(&bytes)
+            .expect("parser accepts the bytes")
+            .finish()
+            .expect("manifest parses");
 
         let w_entry = manifest.tensor("w").expect("w present in the manifest");
         assert_eq!(w_entry.dtype, proxima_tensor::DType::Float32);
@@ -323,7 +390,11 @@ mod tests {
         save_state(&save_program, &state, file.path()).expect("save_state writes the checkpoint");
 
         let mut load_program = Vec::new();
-        leaf(&mut load_program, "w", vec![Extent::Static(3), Extent::Static(2)]);
+        leaf(
+            &mut load_program,
+            "w",
+            vec![Extent::Static(3), Extent::Static(2)],
+        );
         leaf(&mut load_program, "b", vec![Extent::Static(3)]);
 
         let outcome = load_state(&load_program, file.path());
@@ -336,7 +407,11 @@ mod tests {
     #[test]
     fn load_state_rejects_a_checkpoint_missing_a_parameter_the_program_declares() {
         let mut save_program = Vec::new();
-        leaf(&mut save_program, "w", vec![Extent::Static(2), Extent::Static(3)]);
+        leaf(
+            &mut save_program,
+            "w",
+            vec![Extent::Static(2), Extent::Static(3)],
+        );
         let state = vec![(String::from("w"), vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0])];
         let file = tempfile::NamedTempFile::new().expect("create temp checkpoint file");
         save_state(&save_program, &state, file.path()).expect("save_state writes the checkpoint");
@@ -359,14 +434,21 @@ mod tests {
         let program = toy_program();
         let state = toy_state();
         let bytes = hand_written_checkpoint_bytes(
-            &[("w", &[2, 3], &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]), ("b", &[3], &[0.1, 0.2, 0.3])],
+            &[
+                ("w", &[2, 3], &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]),
+                ("b", &[3], &[0.1, 0.2, 0.3]),
+            ],
             &[],
         );
         let file = tempfile::NamedTempFile::new().expect("create temp checkpoint file");
         std::fs::write(file.path(), &bytes).expect("write pre-change-shaped checkpoint bytes");
 
-        let loaded = load_state(&program, file.path()).expect("pre-change checkpoint with no version stamp still loads");
-        assert_eq!(loaded, state, "pre-change checkpoint must load byte-for-byte identical values");
+        let loaded = load_state(&program, file.path())
+            .expect("pre-change checkpoint with no version stamp still loads");
+        assert_eq!(
+            loaded, state,
+            "pre-change checkpoint must load byte-for-byte identical values"
+        );
     }
 
     #[test]
@@ -375,11 +457,18 @@ mod tests {
         let unknown_major = proxima_safetensors::FORMAT_VERSION_MAJOR + 1;
         let unsupported_stamp = alloc::format!("{unknown_major}.0");
         let bytes = hand_written_checkpoint_bytes(
-            &[("w", &[2, 3], &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]), ("b", &[3], &[0.1, 0.2, 0.3])],
-            &[(proxima_safetensors::FORMAT_VERSION_KEY, unsupported_stamp.as_str())],
+            &[
+                ("w", &[2, 3], &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]),
+                ("b", &[3], &[0.1, 0.2, 0.3]),
+            ],
+            &[(
+                proxima_safetensors::FORMAT_VERSION_KEY,
+                unsupported_stamp.as_str(),
+            )],
         );
         let file = tempfile::NamedTempFile::new().expect("create temp checkpoint file");
-        std::fs::write(file.path(), &bytes).expect("write checkpoint with an unsupported version stamp");
+        std::fs::write(file.path(), &bytes)
+            .expect("write checkpoint with an unsupported version stamp");
 
         let outcome = load_state(&program, file.path());
         assert!(

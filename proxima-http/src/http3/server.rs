@@ -391,8 +391,7 @@ mod tests {
     }
 
     #[proxima::test]
-    async fn send_body_chunk_pends_the_producer_once_the_channel_reaches_its_configured_capacity()
-    {
+    async fn send_body_chunk_pends_the_producer_once_the_channel_reaches_its_configured_capacity() {
         // `futures::channel::mpsc::channel(buffer)` guarantees `buffer +
         // num_senders` try_send slots (see the crate's own doc on
         // `channel`) — with the single sender this test holds, capacity 1

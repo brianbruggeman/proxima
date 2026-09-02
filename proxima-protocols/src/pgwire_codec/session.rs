@@ -713,7 +713,6 @@ impl Session {
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-    
     use super::super::frontend::{FrontendMessage, InitialMessage, parse_frontend, parse_initial};
     use super::super::types::{ProtocolVersion, StatementTarget, TransactionStatus};
     use super::{AuthFlow, Disposition, Session, SessionError, StateName, WirePhase};
@@ -1628,7 +1627,10 @@ mod tests {
     #[case::cancelling(StateName::Cancelling, WirePhase::Closed)]
     #[case::terminated(StateName::Terminated, WirePhase::Closed)]
     #[case::failed(StateName::Failed, WirePhase::Closed)]
-    async fn wire_phase_matches_state(#[case] state_name: StateName, #[case] expected_phase: WirePhase) {
+    async fn wire_phase_matches_state(
+        #[case] state_name: StateName,
+        #[case] expected_phase: WirePhase,
+    ) {
         let session = reach_state(state_name);
         assert_eq!(
             session.wire_phase(),

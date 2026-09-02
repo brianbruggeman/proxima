@@ -119,7 +119,14 @@ impl Vocab {
         eos_token_id: Option<u32>,
         unknown_token_id: Option<u32>,
     ) -> Result<Self, TokenizerError> {
-        Self::assemble(tokens, merges, Vec::new(), bos_token_id, eos_token_id, unknown_token_id)
+        Self::assemble(
+            tokens,
+            merges,
+            Vec::new(),
+            bos_token_id,
+            eos_token_id,
+            unknown_token_id,
+        )
     }
 
     /// Builds a SentencePiece-unigram vocab (`tokenizer.ggml.model =
@@ -150,7 +157,14 @@ impl Vocab {
                 scores_len: scores.len(),
             });
         }
-        Self::assemble(tokens, &[], scores, bos_token_id, eos_token_id, unknown_token_id)
+        Self::assemble(
+            tokens,
+            &[],
+            scores,
+            bos_token_id,
+            eos_token_id,
+            unknown_token_id,
+        )
     }
 
     fn assemble(
@@ -201,39 +215,40 @@ impl Vocab {
         let mut merge_ranks = BTreeMap::new();
         for (rank, merge) in merges.iter().enumerate() {
             let mut halves = merge.split(' ');
-            let (Some(left), Some(right), None) = (halves.next(), halves.next(), halves.next()) else {
+            let (Some(left), Some(right), None) = (halves.next(), halves.next(), halves.next())
+            else {
                 return Err(TokenizerError::MalformedMergeRule {
                     index: rank,
                     merge: merge.clone(),
                 });
             };
-            let left_id = token_to_id
-                .get(left)
-                .copied()
-                .ok_or_else(|| TokenizerError::UnresolvedMerge {
-                    index: rank,
-                    left: String::from(left),
-                    right: String::from(right),
-                })?;
-            let right_id = token_to_id
-                .get(right)
-                .copied()
-                .ok_or_else(|| TokenizerError::UnresolvedMerge {
-                    index: rank,
-                    left: String::from(left),
-                    right: String::from(right),
-                })?;
+            let left_id =
+                token_to_id
+                    .get(left)
+                    .copied()
+                    .ok_or_else(|| TokenizerError::UnresolvedMerge {
+                        index: rank,
+                        left: String::from(left),
+                        right: String::from(right),
+                    })?;
+            let right_id =
+                token_to_id
+                    .get(right)
+                    .copied()
+                    .ok_or_else(|| TokenizerError::UnresolvedMerge {
+                        index: rank,
+                        left: String::from(left),
+                        right: String::from(right),
+                    })?;
             let mut merged = String::with_capacity(left.len() + right.len());
             merged.push_str(left);
             merged.push_str(right);
-            let merged_id =
-                token_to_id
-                    .get(merged.as_str())
-                    .copied()
-                    .ok_or(TokenizerError::UnresolvedMergeResult {
-                        index: rank,
-                        merged,
-                    })?;
+            let merged_id = token_to_id.get(merged.as_str()).copied().ok_or(
+                TokenizerError::UnresolvedMergeResult {
+                    index: rank,
+                    merged,
+                },
+            )?;
             merge_ranks.insert(
                 (left_id, right_id),
                 MergeRule {
@@ -303,7 +318,11 @@ impl Vocab {
     /// calls this reports `None` from both accessors, matching every
     /// existing caller's behavior exactly.
     #[must_use]
-    pub fn with_bos_eos_policy(mut self, add_bos_token: Option<bool>, add_eos_token: Option<bool>) -> Self {
+    pub fn with_bos_eos_policy(
+        mut self,
+        add_bos_token: Option<bool>,
+        add_eos_token: Option<bool>,
+    ) -> Self {
         self.add_bos_token = add_bos_token;
         self.add_eos_token = add_eos_token;
         self
@@ -499,7 +518,9 @@ pub(crate) mod tests {
     /// A tiny vocab covering the base 256 byte tokens plus enough merges
     /// to combine "h" + "i" -> "hi", used across this crate's tests.
     pub(crate) fn tiny_vocab() -> Vocab {
-        let mut tokens: Vec<String> = (0..=255u8).map(|byte| String::from(byte_to_char(byte))).collect();
+        let mut tokens: Vec<String> = (0..=255u8)
+            .map(|byte| String::from(byte_to_char(byte)))
+            .collect();
         tokens.push(String::from("hi"));
         let mut space_hi = String::new();
         space_hi.push(byte_to_char(b' '));
@@ -521,11 +542,17 @@ pub(crate) mod tests {
     pub(crate) fn tiny_unigram_vocab() -> Vocab {
         let mut tokens: Vec<String> = (0..=255u8).map(hex_fallback_token).collect();
         let mut scores = vec![0.0f32; tokens.len()];
-        for (word, score) in [("\u{2581}", -3.0), ("\u{2581}h", -5.0), ("hi", -2.0), ("\u{2581}hi", -1.0)] {
+        for (word, score) in [
+            ("\u{2581}", -3.0),
+            ("\u{2581}h", -5.0),
+            ("hi", -2.0),
+            ("\u{2581}hi", -1.0),
+        ] {
             tokens.push(String::from(word));
             scores.push(score);
         }
-        Vocab::new_unigram(tokens, scores, Some(1), Some(2), None).expect("tiny unigram vocab builds")
+        Vocab::new_unigram(tokens, scores, Some(1), Some(2), None)
+            .expect("tiny unigram vocab builds")
     }
 
     /// A vocab missing one of the 256 base byte tokens must still build --
@@ -536,33 +563,56 @@ pub(crate) mod tests {
     /// falls back to token id `0` for the byte this fixture omits.
     #[test]
     fn missing_base_byte_token_builds_with_a_fallback_not_an_error() {
-        let tokens: Vec<String> = (0..=254u8).map(|byte| String::from(byte_to_char(byte))).collect();
-        let vocab = Vocab::new(tokens, &[], None, None, None).expect("a vocab missing byte 255's token still builds");
-        assert_eq!(vocab.base_byte_token(255), 0, "the missing byte falls back to token id 0");
+        let tokens: Vec<String> = (0..=254u8)
+            .map(|byte| String::from(byte_to_char(byte)))
+            .collect();
+        let vocab = Vocab::new(tokens, &[], None, None, None)
+            .expect("a vocab missing byte 255's token still builds");
+        assert_eq!(
+            vocab.base_byte_token(255),
+            0,
+            "the missing byte falls back to token id 0"
+        );
     }
 
     #[test]
     fn malformed_merge_rule_is_an_error() {
-        let tokens: Vec<String> = (0..=255u8).map(|byte| String::from(byte_to_char(byte))).collect();
+        let tokens: Vec<String> = (0..=255u8)
+            .map(|byte| String::from(byte_to_char(byte)))
+            .collect();
         let merges = vec![String::from("only-one-half")];
         let error = Vocab::new(tokens, &merges, None, None, None).expect_err("malformed merge");
-        assert!(matches!(error, TokenizerError::MalformedMergeRule { index: 0, .. }));
+        assert!(matches!(
+            error,
+            TokenizerError::MalformedMergeRule { index: 0, .. }
+        ));
     }
 
     #[test]
     fn unresolved_merge_is_an_error() {
-        let tokens: Vec<String> = (0..=255u8).map(|byte| String::from(byte_to_char(byte))).collect();
+        let tokens: Vec<String> = (0..=255u8)
+            .map(|byte| String::from(byte_to_char(byte)))
+            .collect();
         let merges = vec![String::from("h nonexistent-token")];
         let error = Vocab::new(tokens, &merges, None, None, None).expect_err("unresolved merge");
-        assert!(matches!(error, TokenizerError::UnresolvedMerge { index: 0, .. }));
+        assert!(matches!(
+            error,
+            TokenizerError::UnresolvedMerge { index: 0, .. }
+        ));
     }
 
     #[test]
     fn unresolved_merge_result_is_an_error() {
-        let tokens: Vec<String> = (0..=255u8).map(|byte| String::from(byte_to_char(byte))).collect();
+        let tokens: Vec<String> = (0..=255u8)
+            .map(|byte| String::from(byte_to_char(byte)))
+            .collect();
         let merges = vec![String::from("h i")]; // "hi" never added to `tokens`
-        let error = Vocab::new(tokens, &merges, None, None, None).expect_err("unresolved merge result");
-        assert!(matches!(error, TokenizerError::UnresolvedMergeResult { index: 0, .. }));
+        let error =
+            Vocab::new(tokens, &merges, None, None, None).expect_err("unresolved merge result");
+        assert!(matches!(
+            error,
+            TokenizerError::UnresolvedMergeResult { index: 0, .. }
+        ));
     }
 
     #[test]
@@ -589,10 +639,14 @@ pub(crate) mod tests {
     #[test]
     fn score_array_length_mismatch_is_an_error() {
         let tokens: Vec<String> = (0..=255u8).map(hex_fallback_token).collect();
-        let error = Vocab::new_unigram(tokens, vec![0.0; 10], None, None, None).expect_err("length mismatch");
+        let error = Vocab::new_unigram(tokens, vec![0.0; 10], None, None, None)
+            .expect_err("length mismatch");
         assert!(matches!(
             error,
-            TokenizerError::ScoreArrayLengthMismatch { tokens_len: 256, scores_len: 10 }
+            TokenizerError::ScoreArrayLengthMismatch {
+                tokens_len: 256,
+                scores_len: 10
+            }
         ));
     }
 
@@ -617,6 +671,10 @@ pub(crate) mod tests {
         let vocab = tiny_vocab().with_bos_eos_policy(Some(true), Some(false));
         assert_eq!(vocab.add_bos_token(), Some(true));
         assert_eq!(vocab.add_eos_token(), Some(false));
-        assert_ne!(vocab.add_eos_token(), None, "Some(false) must not read back as None");
+        assert_ne!(
+            vocab.add_eos_token(),
+            None,
+            "Some(false) must not read back as None"
+        );
     }
 }

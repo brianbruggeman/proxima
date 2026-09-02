@@ -60,8 +60,7 @@ pub const REASONING_BUDGET_UNBOUNDED: i32 = -1;
 /// The forward test's former hardcoded `FIXTURE_PATH`, kept as the
 /// [`ServingConfig::default`] `model_path` so existing tests keep running
 /// unmodified when no caller supplies their own checkpoint.
-pub const DEFAULT_MODEL_PATH: &str =
-    "/Users/brianbruggeman/.lmstudio/models/TheBloke/openchat-3.5-1210-GGUF/openchat-3.5-1210.Q4_K_S.gguf";
+pub const DEFAULT_MODEL_PATH: &str = "/Users/brianbruggeman/.lmstudio/models/TheBloke/openchat-3.5-1210-GGUF/openchat-3.5-1210.Q4_K_S.gguf";
 
 /// One field per llama-server flag the repo owner's invocation sets,
 /// plus `model_path`. See the module doc for why each field's shape is
@@ -377,7 +376,10 @@ mod tests {
     fn default_sampling_config_is_fully_disabled() {
         let config = ServingConfig::default();
 
-        assert_eq!(config.temperature, 0.0, "greedy, not upstream's 0.80 default");
+        assert_eq!(
+            config.temperature, 0.0,
+            "greedy, not upstream's 0.80 default"
+        );
         assert_eq!(config.top_k, 0, "disabled");
         assert_eq!(config.top_p, 1.0, "disabled");
         assert_eq!(config.min_p, 0.0, "disabled");
@@ -448,8 +450,8 @@ mod tests {
             parallel_sequences: 4,
             ..ServingConfig::default()
         };
-        let error = apply_serving_config(&config, 6)
-            .expect_err("parallel_sequences != 1 must be rejected");
+        let error =
+            apply_serving_config(&config, 6).expect_err("parallel_sequences != 1 must be rejected");
         assert!(error.to_string().contains("parallel_sequences"));
     }
 

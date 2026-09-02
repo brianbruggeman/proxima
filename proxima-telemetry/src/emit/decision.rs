@@ -70,7 +70,6 @@ mod tests {
         clippy::default_constructed_unit_structs
     )]
 
-    
     use super::EmitThreshold;
     use crate::emit::Coord;
     use crate::level::Level;

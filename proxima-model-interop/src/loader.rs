@@ -95,7 +95,9 @@ pub fn prefault(bytes: &[u8]) -> Result<(), InteropError> {
     let base_address = bytes.as_ptr() as usize;
     let next_index = Arc::new(AtomicUsize::new(0));
     let (sender, receiver) = sync_channel(chunk_ranges_len);
-    let spawned_count = workers.saturating_sub(1).min(chunk_ranges_len.saturating_sub(1));
+    let spawned_count = workers
+        .saturating_sub(1)
+        .min(chunk_ranges_len.saturating_sub(1));
 
     for _ in 0..spawned_count {
         let sender = sender.clone();
@@ -160,7 +162,9 @@ fn claim_and_touch(
         }
         let (start, end) = chunk_ranges[index];
         // SAFETY: see this function's doc comment.
-        let chunk = unsafe { core::slice::from_raw_parts((base_address + start) as *const u8, end - start) };
+        let chunk = unsafe {
+            core::slice::from_raw_parts((base_address + start) as *const u8, end - start)
+        };
         let mut checksum: u8 = 0;
         for touch_offset in (0..chunk.len()).step_by(PREFAULT_STRIDE_BYTES) {
             checksum = core::hint::black_box(checksum.wrapping_add(chunk[touch_offset]));
@@ -204,7 +208,10 @@ mod tests {
     #[test]
     fn empty_slice_is_a_no_op() {
         let outcome = prefault(&[]);
-        assert!(outcome.is_ok(), "empty slice must not touch the pool at all");
+        assert!(
+            outcome.is_ok(),
+            "empty slice must not touch the pool at all"
+        );
     }
 
     /// Every byte at a `PREFAULT_STRIDE_BYTES` boundary is read, including
@@ -215,13 +222,19 @@ mod tests {
     fn covers_a_buffer_that_spans_many_chunks_and_a_partial_tail() {
         let bytes = alloc::vec![7u8; PREFAULT_STRIDE_BYTES * 37 + 129];
         let outcome = prefault(&bytes);
-        assert!(outcome.is_ok(), "prefault over a multi-chunk buffer must succeed: {outcome:?}");
+        assert!(
+            outcome.is_ok(),
+            "prefault over a multi-chunk buffer must succeed: {outcome:?}"
+        );
     }
 
     #[test]
     fn single_byte_buffer_succeeds() {
         let bytes = [42u8];
         let outcome = prefault(&bytes);
-        assert!(outcome.is_ok(), "single-byte buffer must succeed: {outcome:?}");
+        assert!(
+            outcome.is_ok(),
+            "single-byte buffer must succeed: {outcome:?}"
+        );
     }
 }
