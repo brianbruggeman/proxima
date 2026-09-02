@@ -21095,6 +21095,122 @@ mod tests {
         (program, sum)
     }
 
+    /// Plain `[batch, seq, k] @ [k, n]` GEMM -- BGE's own `MatMul` shape
+    /// once `batch_size` stops being elided (extent > 1): the weight
+    /// (`rhs`) is invariant over BOTH leading axes, the exact `(0, 0)` case
+    /// the batch-widen fix (`composed_reduction_stride` reused inside
+    /// `width_tile_plan`'s two-leading-axis arm, `cpu.rs`) exists to merge
+    /// into one flat leading axis rather than decline. `batch=4, seq=8`
+    /// gives two non-degenerate leading axes (32 rows once merged), `k=6`
+    /// short enough to keep the reference loop readable, `n=16` exactly
+    /// `WIDTH_TILE_VECS * 4` -- the main tile floor, same width the
+    /// single-leading-axis regressions above use.
+    #[cfg(all(target_arch = "aarch64", feature = "instrument"))]
+    fn two_leading_axes_shared_weight_matmul_program(
+        batch: u32,
+        seq: u32,
+        contraction: u32,
+        width: u32,
+    ) -> (Vec<Op>, NodeId) {
+        let mut program = Vec::new();
+        let lhs = f32_block(
+            &mut program,
+            &[
+                Extent::Static(batch),
+                Extent::Static(seq),
+                Extent::Static(contraction),
+            ],
+        );
+        let rhs = f32_block(
+            &mut program,
+            &[Extent::Static(contraction), Extent::Static(width)],
+        );
+        let product = append(
+            &mut program,
+            Op::Elementwise {
+                dtype: DType::Float32,
+                body: ScalarOp::Multiply,
+                operands: alloc::vec![
+                    (lhs, IndexMap::Affine(map::projection(4, &[0, 1, 2]))),
+                    (rhs, IndexMap::Affine(map::projection(4, &[2, 3]))),
+                ],
+                name: None,
+            },
+        );
+        let sum = append(
+            &mut program,
+            Op::Reduce(Reduce {
+                dtype: DType::Float32,
+                body: ScalarOp::Add,
+                init: ReduceInit::Zero,
+                operand: product,
+                in_map: IndexMap::Affine(map::projection(4, &[0, 1, 2, 3])),
+                out_map: IndexMap::Affine(map::projection(4, &[0, 1, 3])),
+                keep: Keep::Reduce,
+                name: Some("two_leading_axes_shared_weight_matmul".into()),
+            }),
+        );
+        (program, sum)
+    }
+
+    /// Same shared-weight GEMM shape as
+    /// [`two_leading_axes_shared_weight_matmul_program`], with a THIRD
+    /// non-degenerate leading axis prepended (`outer`) -- BGE's own
+    /// `attn_qk`/`attn_v` shape (`[heads, batch*seq]` effectively, 3
+    /// leading axes once batch stops eliding), which `width_tile_plan`'s
+    /// `non_degenerate_leading.len() > 2` guard still declines (`AxesShape`,
+    /// `cpu.rs`) rather than guesses at a merge with no proven shape. Pins
+    /// the KNOWN remaining decline this task's fix did not close.
+    #[cfg(all(target_arch = "aarch64", feature = "instrument"))]
+    fn three_leading_axes_matmul_program(
+        outer: u32,
+        batch: u32,
+        seq: u32,
+        contraction: u32,
+        width: u32,
+    ) -> (Vec<Op>, NodeId) {
+        let mut program = Vec::new();
+        let lhs = f32_block(
+            &mut program,
+            &[
+                Extent::Static(outer),
+                Extent::Static(batch),
+                Extent::Static(seq),
+                Extent::Static(contraction),
+            ],
+        );
+        let rhs = f32_block(
+            &mut program,
+            &[Extent::Static(contraction), Extent::Static(width)],
+        );
+        let product = append(
+            &mut program,
+            Op::Elementwise {
+                dtype: DType::Float32,
+                body: ScalarOp::Multiply,
+                operands: alloc::vec![
+                    (lhs, IndexMap::Affine(map::projection(5, &[0, 1, 2, 3]))),
+                    (rhs, IndexMap::Affine(map::projection(5, &[3, 4]))),
+                ],
+                name: None,
+            },
+        );
+        let sum = append(
+            &mut program,
+            Op::Reduce(Reduce {
+                dtype: DType::Float32,
+                body: ScalarOp::Add,
+                init: ReduceInit::Zero,
+                operand: product,
+                in_map: IndexMap::Affine(map::projection(5, &[0, 1, 2, 3, 4])),
+                out_map: IndexMap::Affine(map::projection(5, &[0, 1, 2, 4])),
+                keep: Keep::Reduce,
+                name: Some("three_leading_axes_matmul".into()),
+            }),
+        );
+        (program, sum)
+    }
+
     /// `table[ids[s], d]` over iteration space `(s, d)`: dim 0 (vocab) is
     /// gathered by `ids`, dim 1 (feature) is a plain projection.
     fn embedding_lookup_program(vocab: u32, dim: u32, seq: u32) -> (Vec<Op>, NodeId) {
@@ -21502,6 +21618,124 @@ mod tests {
             );
         }
         let _ = sum;
+    }
+
+    // batch-seal task (2026-09-02): a `width_tile_plan` decline is INVISIBLE
+    // to every correctness assertion above -- the generic scalar interpreter
+    // computes the exact same numbers as the tile, just slower. Three
+    // instances of exactly this shape landed in one day (36/96 declined at
+    // batch=1 `AxesShape`, 24/96 attention-node declines, then 96/96 at
+    // batch>1) and every one passed every existing test; the only thing that
+    // ever caught them was a human reading a census example's stdout. The
+    // two tests below assert the ENGAGEMENT COUNT directly so the next
+    // instance of this shape fails `cargo nextest`, not a benchmark.
+    //
+    // pipe question, in writing: is either test a new library type? No --
+    // both are `#[test]` functions built entirely from primitives this file
+    // already has (`Op::Elementwise`/`Op::Reduce`, `evaluate`,
+    // `width_tile_counters`, `instrument::width_tile_decline_snapshot`).
+    // Nothing here is a combinator, a wrapper, or a coercion host; there is
+    // no call a caller could make that did not already exist. Not minted.
+
+    /// Positive ratchet: BGE's own plain `[batch, seq, k] @ [k, n]` MatMul
+    /// shape (weight invariant over BOTH leading axes, the `(0, 0)` case the
+    /// batch-widen fix engages) must route through `width_tile_plan`, not
+    /// just compute the right answer. Fails the moment a future change
+    /// re-introduces the 96/96-at-batch>1 regression this task sealed.
+    #[test]
+    #[cfg(all(target_arch = "aarch64", feature = "instrument"))]
+    fn a_two_leading_axis_shared_weight_reduce_engages_width_tile_and_matches_naive_matmul() {
+        let (batch, seq, contraction, width) = (4u32, 8u32, 6u32, 16u32);
+        let (program, sum) =
+            two_leading_axes_shared_weight_matmul_program(batch, seq, contraction, width);
+
+        let rows = batch * seq;
+        let lhs: Vec<f32> = (0..rows * contraction)
+            .map(|value| value as f32 * 0.01 + 1.0)
+            .collect();
+        let rhs: Vec<f32> = (0..contraction * width).map(|value| value as f32 * 0.001).collect();
+
+        instrument::reset_width_tile_decline();
+        let (gate_passes_before, invocations_before, _) = width_tile_counters();
+        let evaluated = evaluate(&program, &[], &[&lhs, &rhs], &[])
+            .expect("the two-leading-axis shared-weight reduce evaluates");
+        let (gate_passes_after, invocations_after, _) = width_tile_counters();
+
+        assert_eq!(
+            evaluated.shape(),
+            &[batch as u64, seq as u64, width as u64]
+        );
+        let reference =
+            naive_matmul(&lhs, &rhs, rows as usize, contraction as usize, width as usize);
+        assert_all_close(evaluated.root(), &reference, 1e-5);
+
+        let gate_delta = gate_passes_after - gate_passes_before;
+        let invocation_delta = invocations_after - invocations_before;
+        assert!(
+            gate_delta > 0 && invocation_delta > 0,
+            "width_tile_plan declined the two-leading-axis (batch, seq) shared-weight GEMM -- \
+             gate_delta={gate_delta} invocation_delta={invocation_delta}, expected both > 0. \
+             `assert_all_close` above would still pass on the generic-interpreter fallback -- \
+             THIS is the assertion that catches the regression"
+        );
+        let declines = instrument::width_tile_decline_snapshot();
+        assert!(
+            declines.iter().all(|&(node, ..)| node != sum.0),
+            "the two-leading-axis shared-weight node declined instead of engaging: {declines:?}"
+        );
+    }
+
+    /// Negative ratchet: BGE's own `attn_qk`/`attn_v` shape (3 non-degenerate
+    /// leading axes) is the KNOWN remaining decline this task's fix did not
+    /// close (24 of 96 folds, `docs/discipline.md`'s own batch sweep
+    /// census). Pinned explicitly so a future widening of the leading-axis
+    /// merge must re-derive this test's expected engagement rather than
+    /// silently making it pass for the wrong reason.
+    #[test]
+    #[cfg(all(target_arch = "aarch64", feature = "instrument"))]
+    fn a_three_leading_axis_reduce_declines_width_tile_with_axes_shape_reason() {
+        let (outer, batch, seq, contraction, width) = (2u32, 3u32, 4u32, 5u32, 16u32);
+        let (program, sum) =
+            three_leading_axes_matmul_program(outer, batch, seq, contraction, width);
+
+        let rows = outer * batch * seq;
+        let lhs: Vec<f32> = (0..rows * contraction)
+            .map(|value| value as f32 * 0.01 + 1.0)
+            .collect();
+        let rhs: Vec<f32> = (0..contraction * width).map(|value| value as f32 * 0.001).collect();
+
+        instrument::reset_width_tile_decline();
+        let (gate_passes_before, _, _) = width_tile_counters();
+        let evaluated = evaluate(&program, &[], &[&lhs, &rhs], &[])
+            .expect("the three-leading-axis reduce evaluates on the generic path");
+        let (gate_passes_after, _, _) = width_tile_counters();
+
+        assert_eq!(
+            evaluated.shape(),
+            &[outer as u64, batch as u64, seq as u64, width as u64]
+        );
+        let reference =
+            naive_matmul(&lhs, &rhs, rows as usize, contraction as usize, width as usize);
+        assert_all_close(evaluated.root(), &reference, 1e-5);
+
+        assert_eq!(
+            gate_passes_after - gate_passes_before,
+            0,
+            "a 3-leading-axis GEMM engaged width_tile_plan -- if this fires, the leading-axis \
+             merge was widened past 2 axes; re-derive this test's expected engagement count \
+             rather than deleting the assertion"
+        );
+        let declines = instrument::width_tile_decline_snapshot();
+        let matched = declines
+            .iter()
+            .find(|&&(node, ..)| node == sum.0)
+            .expect("the three-leading-axis node should have recorded a width_tile_plan decline");
+        assert_eq!(
+            matched.1,
+            instrument::WidthDeclineReason::AxesShape,
+            "expected AxesShape (>2 non-degenerate leading axes), got {:?}",
+            matched.1
+        );
     }
 
     #[test]
