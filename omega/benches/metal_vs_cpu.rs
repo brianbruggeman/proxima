@@ -199,7 +199,8 @@ fn bench_gemm_square(c: &mut Criterion) {
         let gpu_blocks: [QuantizedBlock<'_>; 2] = blocks.map(QuantizedBlock::Float32);
 
         let cpu = evaluate(&program, &[], &blocks, &[]).expect("cpu gemm evaluates");
-        let metal = execute(&program, &[], &gpu_blocks, &[]).expect("metal gemm executes on a real device");
+        let metal =
+            execute(&program, &[], &gpu_blocks, &[]).expect("metal gemm executes on a real device");
         let cpu_checksum = cpu.root()[0];
         let metal_checksum = metal.root()[0];
         assert_checksum_agrees("gemm_square", cpu_checksum, metal_checksum, size);
@@ -209,7 +210,12 @@ fn bench_gemm_square(c: &mut Criterion) {
             // the same LCG seeds (1, 2) in the same rhs-transposed layout —
             // matching the exact program the reference checksum was pinned
             // against, not merely a same-shaped one.
-            assert_checksum_agrees("gemm_square_vs_pinned_reference", reference, cpu_checksum, size);
+            assert_checksum_agrees(
+                "gemm_square_vs_pinned_reference",
+                reference,
+                cpu_checksum,
+                size,
+            );
         }
 
         // 2 FLOP per multiply-add, m=k=n=size.
@@ -217,10 +223,14 @@ fn bench_gemm_square(c: &mut Criterion) {
         group.throughput(Throughput::Elements(flops));
 
         group.bench_with_input(BenchmarkId::new("cpu", size), &size, |bencher, _| {
-            bencher.iter(|| black_box(evaluate(&program, &[], &blocks, &[]).expect("cpu gemm evaluates")));
+            bencher.iter(|| {
+                black_box(evaluate(&program, &[], &blocks, &[]).expect("cpu gemm evaluates"))
+            });
         });
         group.bench_with_input(BenchmarkId::new("metal", size), &size, |bencher, _| {
-            bencher.iter(|| black_box(execute(&program, &[], &gpu_blocks, &[]).expect("metal gemm executes")));
+            bencher.iter(|| {
+                black_box(execute(&program, &[], &gpu_blocks, &[]).expect("metal gemm executes"))
+            });
         });
     }
     group.finish();
@@ -232,8 +242,11 @@ fn bench_matvec_batch1(c: &mut Criterion) {
     // `mistral_forward_program` carries: `attn_q`/`attn_output`
     // (4096x4096), `ffn_gate`/`ffn_up` (14336x4096), `ffn_down`
     // (4096x14336).
-    let shapes: [(u32, u32, &str); 3] =
-        [(4096, 4096, "4096x4096"), (14336, 4096, "4096x14336"), (4096, 14336, "14336x4096")];
+    let shapes: [(u32, u32, &str); 3] = [
+        (4096, 4096, "4096x4096"),
+        (14336, 4096, "4096x14336"),
+        (4096, 14336, "14336x4096"),
+    ];
 
     for (out_dim, in_dim, label) in shapes {
         let (program, _root) = matvec_program(out_dim, in_dim);
@@ -243,7 +256,8 @@ fn bench_matvec_batch1(c: &mut Criterion) {
         let gpu_blocks: [QuantizedBlock<'_>; 2] = blocks.map(QuantizedBlock::Float32);
 
         let cpu = evaluate(&program, &[], &blocks, &[]).expect("cpu matvec evaluates");
-        let metal = execute(&program, &[], &gpu_blocks, &[]).expect("metal matvec executes on a real device");
+        let metal = execute(&program, &[], &gpu_blocks, &[])
+            .expect("metal matvec executes on a real device");
         assert_checksum_agrees("matvec", cpu.root()[0], metal.root()[0], in_dim);
 
         // bandwidth-bound: the weight matrix is read exactly once per call
@@ -256,10 +270,14 @@ fn bench_matvec_batch1(c: &mut Criterion) {
         group.throughput(Throughput::Bytes(weight_bytes));
 
         group.bench_with_input(BenchmarkId::new("cpu", label), &label, |bencher, _| {
-            bencher.iter(|| black_box(evaluate(&program, &[], &blocks, &[]).expect("cpu matvec evaluates")));
+            bencher.iter(|| {
+                black_box(evaluate(&program, &[], &blocks, &[]).expect("cpu matvec evaluates"))
+            });
         });
         group.bench_with_input(BenchmarkId::new("metal", label), &label, |bencher, _| {
-            bencher.iter(|| black_box(execute(&program, &[], &gpu_blocks, &[]).expect("metal matvec executes")));
+            bencher.iter(|| {
+                black_box(execute(&program, &[], &gpu_blocks, &[]).expect("metal matvec executes"))
+            });
         });
     }
     group.finish();

@@ -302,7 +302,7 @@ pub use proxima_primitives::pipe::telemetry_surface::{HistogramSummary, MetricsS
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
-    
+
     #[test]
     fn labels_sort_by_name_for_stable_keys() {
         let one = Labels::from_pairs(&[("zone", "a"), ("region", "us")]);

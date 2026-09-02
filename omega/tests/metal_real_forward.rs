@@ -15,8 +15,8 @@
 #![cfg(all(feature = "metal", target_os = "macos"))]
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-use proxima_tensor::cpu::evaluate_quantized_named_with_scratch;
 use proxima_tensor::NodeId;
+use proxima_tensor::cpu::evaluate_quantized_named_with_scratch;
 
 mod support;
 use support::{as_named_blocks, real_forward_fixture, real_forward_fixture_with_cached_len};
@@ -59,7 +59,10 @@ fn metal_runs_the_real_forward_graph_and_agrees_with_the_cpu() {
         assert!(got.is_finite(), "metal produced a non-finite logit: {got}");
         max_diff = max_diff.max((got - want).abs());
     }
-    let max_magnitude = expected.iter().map(|value| value.abs()).fold(0.0f32, f32::max);
+    let max_magnitude = expected
+        .iter()
+        .map(|value| value.abs())
+        .fold(0.0f32, f32::max);
     let relative = max_diff / max_magnitude.max(f32::MIN_POSITIVE);
     eprintln!(
         "real forward: max_diff={max_diff} max_magnitude={max_magnitude} relative={relative}"
@@ -121,7 +124,10 @@ fn metal_agrees_with_cpu_on_a_nonempty_kv_cache() {
             cpu_data.len(),
             metal_data.len()
         );
-        let max_magnitude = cpu_data.iter().map(|value| value.abs()).fold(0.0f32, f32::max);
+        let max_magnitude = cpu_data
+            .iter()
+            .map(|value| value.abs())
+            .fold(0.0f32, f32::max);
         for (&got, &want) in metal_data.iter().zip(cpu_data.iter()) {
             let diff = (got - want).abs();
             let relative = diff / max_magnitude.max(f32::MIN_POSITIVE);

@@ -1340,8 +1340,7 @@ mod tests {
 
         let before = RESPONSE_CHANNEL_PRESSURE.get();
         let dispatch = proxima_primitives::pipe::handler::into_handle(ConstantOkDispatch);
-        let (response_tx, mut response_rx) =
-            futures::channel::mpsc::channel::<DispatchResult>(0);
+        let (response_tx, mut response_rx) = futures::channel::mpsc::channel::<DispatchResult>(0);
         let response_tx = Arc::new(AsyncMutex::new(response_tx));
         let mut in_flight: FuturesUnordered<Pin<Box<dyn Future<Output = ()> + Send>>> =
             FuturesUnordered::new();
@@ -1425,8 +1424,7 @@ mod tests {
 
         let driver = h3_state.get_mut(&handle_id).expect("just seeded above");
         let dispatch = proxima_primitives::pipe::handler::into_handle(ConstantOkDispatch);
-        let (response_tx, mut response_rx) =
-            futures::channel::mpsc::channel::<DispatchResult>(1);
+        let (response_tx, mut response_rx) = futures::channel::mpsc::channel::<DispatchResult>(1);
         let response_tx = Arc::new(AsyncMutex::new(response_tx));
         let mut in_flight: FuturesUnordered<Pin<Box<dyn Future<Output = ()> + Send>>> =
             FuturesUnordered::new();
@@ -1440,9 +1438,7 @@ mod tests {
         )
         .expect("self-healed connection still dispatches its pending request");
 
-        futures::executor::block_on(async {
-            while in_flight.next().await.is_some() {}
-        });
+        futures::executor::block_on(async { while in_flight.next().await.is_some() {} });
         let result = futures::executor::block_on(response_rx.next())
             .expect("the request served on the self-heal tick delivers a response, not silence");
         assert_eq!(

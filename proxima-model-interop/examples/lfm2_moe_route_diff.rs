@@ -37,14 +37,22 @@ use std::fs;
 use std::path::PathBuf;
 
 use proxima_gguf::pipe::parse_complete;
-use proxima_model_interop::{Lfm2Architecture, lfm2_architecture_from_metadata, lfm2_forward_values};
+use proxima_model_interop::{
+    Lfm2Architecture, lfm2_architecture_from_metadata, lfm2_forward_values,
+};
 use proxima_tensor::dtype::DType;
 use proxima_tensor::op::{NodeId, Op, ReduceInit, ScalarOp};
 use proxima_tensor::spec::lfm2_forward_program_with_experts;
 
 fn read_oracle_route(path: &PathBuf) -> Vec<f32> {
-    let bytes = fs::read(path).unwrap_or_else(|error| panic!("read oracle route dump at {path:?}: {error}"));
-    bytes.as_chunks::<4>().0.iter().map(|chunk| f32::from_le_bytes(*chunk)).collect()
+    let bytes = fs::read(path)
+        .unwrap_or_else(|error| panic!("read oracle route dump at {path:?}: {error}"));
+    bytes
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|chunk| f32::from_le_bytes(*chunk))
+        .collect()
 }
 
 /// [`lfm2_layer_oracle_diff.rs`]'s own `layer_boundary_node_id`, duplicated
@@ -90,7 +98,11 @@ fn layer_boundary_node_id(architecture: &Lfm2Architecture, depth: u32) -> NodeId
     )
     .expect("build deep throwaway lfm2 program");
 
-    let first_diff = shallow.iter().zip(deep.iter()).position(|(left, right)| left != right).unwrap_or(shallow.len());
+    let first_diff = shallow
+        .iter()
+        .zip(deep.iter())
+        .position(|(left, right)| left != right)
+        .unwrap_or(shallow.len());
     NodeId((first_diff - 1) as u32)
 }
 
@@ -119,10 +131,19 @@ fn route_node_ids(program: &[Op], layer_start: u32, layer_end: u32) -> Vec<NodeI
 /// expects at that hop -- a wrong expectation means the backward walk landed
 /// on the wrong node, and this fails loudly rather than silently reading an
 /// unrelated value.
-fn reduce_operand(program: &[Op], node: NodeId, expected_body: ScalarOp, expected_init: ReduceInit) -> NodeId {
+fn reduce_operand(
+    program: &[Op],
+    node: NodeId,
+    expected_body: ScalarOp,
+    expected_init: ReduceInit,
+) -> NodeId {
     match &program[node.0 as usize] {
-        Op::Reduce(reduce) if reduce.body == expected_body && reduce.init == expected_init => reduce.operand,
-        other => panic!("node {node:?}: expected a {expected_body:?}/{expected_init:?} reduce, got {other:?}"),
+        Op::Reduce(reduce) if reduce.body == expected_body && reduce.init == expected_init => {
+            reduce.operand
+        }
+        other => panic!(
+            "node {node:?}: expected a {expected_body:?}/{expected_init:?} reduce, got {other:?}"
+        ),
     }
 }
 
@@ -187,7 +208,10 @@ fn mixer_pipeline_node_ids(program: &[Op], logits_id: NodeId) -> [NodeId; 3] {
 /// unambiguous lookup, never a structural walk.
 fn input_node_id(program: &[Op], name: &str) -> NodeId {
     for (index, op) in program.iter().enumerate() {
-        if let Op::Input { name: Some(candidate), .. } = op
+        if let Op::Input {
+            name: Some(candidate),
+            ..
+        } = op
             && candidate == name
         {
             return NodeId(index as u32);
@@ -216,8 +240,14 @@ fn main() {
     let oracle_dir = env::args().nth(2).unwrap_or_else(|| {
         "/private/tmp/claude-501/-Users-brianbruggeman-repos-slot-0/6cd9e134-c1a3-450a-be93-76dd95389bf4/scratchpad/oracle/dump_lfm2_routing".to_string()
     });
-    let prompt = env::args().nth(3).unwrap_or_else(|| "The capital of France is".to_string());
-    let layer: u32 = env::args().nth(4).unwrap_or_else(|| "5".to_string()).parse().expect("layer arg is a u32");
+    let prompt = env::args()
+        .nth(3)
+        .unwrap_or_else(|| "The capital of France is".to_string());
+    let layer: u32 = env::args()
+        .nth(4)
+        .unwrap_or_else(|| "5".to_string())
+        .parse()
+        .expect("layer arg is a u32");
 
     let model_path = PathBuf::from(&model_path);
     let oracle_dir = PathBuf::from(&oracle_dir);
@@ -233,11 +263,14 @@ fn main() {
 
     let file_bytes = fs::read(&model_path).expect("read lfm2 gguf checkpoint");
     let parsed = parse_complete(&file_bytes).expect("parse lfm2 gguf checkpoint");
-    let architecture: Lfm2Architecture = lfm2_architecture_from_metadata(&parsed).expect("derive lfm2 architecture from gguf metadata");
+    let architecture: Lfm2Architecture = lfm2_architecture_from_metadata(&parsed)
+        .expect("derive lfm2 architecture from gguf metadata");
 
-    let vocab = proxima_tokenizer::gguf::vocab_from_metadata(&parsed).expect("build vocab from gguf metadata");
+    let vocab = proxima_tokenizer::gguf::vocab_from_metadata(&parsed)
+        .expect("build vocab from gguf metadata");
     let add_bos = vocab.add_bos_token().unwrap_or(true);
-    let ids = proxima_tokenizer::encode_with_bos_eos(&prompt, &vocab, add_bos, false).expect("tokenize prompt");
+    let ids = proxima_tokenizer::encode_with_bos_eos(&prompt, &vocab, add_bos, false)
+        .expect("tokenize prompt");
 
     let (full_program, _logits_root) = lfm2_forward_program_with_experts(
         architecture.vocab,
@@ -271,13 +304,25 @@ fn main() {
         "expected one route node per expert_used_count round"
     );
 
-    let [logits_id, scores_id, selection_scores_id] = gate_pipeline_node_ids(&full_program, route_ids[0]);
-    let [normed2_id, post_mixer_id, mixer_out_id] = mixer_pipeline_node_ids(&full_program, logits_id);
+    let [logits_id, scores_id, selection_scores_id] =
+        gate_pipeline_node_ids(&full_program, route_ids[0]);
+    let [normed2_id, post_mixer_id, mixer_out_id] =
+        mixer_pipeline_node_ids(&full_program, logits_id);
     let ffn_norm_weight_id = input_node_id(&full_program, &format!("blk.{layer}.ffn_norm.weight"));
     let mut all_node_ids = route_ids.clone();
-    all_node_ids.extend_from_slice(&[logits_id, scores_id, selection_scores_id, normed2_id, post_mixer_id, mixer_out_id, ffn_norm_weight_id]);
+    all_node_ids.extend_from_slice(&[
+        logits_id,
+        scores_id,
+        selection_scores_id,
+        normed2_id,
+        post_mixer_id,
+        mixer_out_id,
+        ffn_norm_weight_id,
+    ]);
 
-    let (_logits, extras) = lfm2_forward_values(&parsed, &file_bytes, &architecture, &ids, &all_node_ids).expect("evaluate our own route node values");
+    let (_logits, extras) =
+        lfm2_forward_values(&parsed, &file_bytes, &architecture, &ids, &all_node_ids)
+            .expect("evaluate our own route node values");
     let (route_values, rest) = extras.split_at(route_ids.len());
     let (ours_logits, rest) = rest.split_at(1);
     let (ours_scores, rest) = rest.split_at(1);
@@ -295,7 +340,11 @@ fn main() {
 
     let theirs = read_oracle_route(&oracle_path);
     let n_expert_used = architecture.expert_used_count as usize;
-    assert_eq!(theirs.len(), ids.len() * n_expert_used, "oracle route dump element count mismatch");
+    assert_eq!(
+        theirs.len(),
+        ids.len() * n_expert_used,
+        "oracle route dump element count mismatch"
+    );
 
     println!("\ntoken round ours_expert theirs_expert match");
     let mut any_mismatch = false;
@@ -310,13 +359,18 @@ fn main() {
     }
 
     if any_mismatch {
-        println!("\nROUTING DIVERGES at layer {layer}: at least one token/round selected a different expert");
+        println!(
+            "\nROUTING DIVERGES at layer {layer}: at least one token/round selected a different expert"
+        );
     } else {
         println!("\nrouting matches exactly at layer {layer}: divergence enters elsewhere");
     }
 
     let expert_count = architecture.expert_count as usize;
-    let oracle_gate_dir = oracle_dir.parent().unwrap_or(&oracle_dir).join("dump_lfm2_gate");
+    let oracle_gate_dir = oracle_dir
+        .parent()
+        .unwrap_or(&oracle_dir)
+        .join("dump_lfm2_gate");
     let logits_path = oracle_gate_dir.join(format!("ffn_moe_logits-{layer}.f32"));
     let probs_path = oracle_gate_dir.join(format!("ffn_moe_probs-{layer}.f32"));
     let probs_biased_path = oracle_gate_dir.join(format!("ffn_moe_probs_biased-{layer}.f32"));
@@ -325,7 +379,9 @@ fn main() {
         let their_scores = read_oracle_route(&probs_path);
         let their_selection_scores = read_oracle_route(&probs_biased_path);
 
-        println!("\ntoken expert ours_logit theirs_logit ours_score theirs_score ours_selection theirs_selection");
+        println!(
+            "\ntoken expert ours_logit theirs_logit ours_score theirs_score ours_selection theirs_selection"
+        );
         for token in 0..ids.len() {
             let mut worst_logit_diff = 0f32;
             let mut worst_expert = 0usize;
@@ -349,10 +405,15 @@ fn main() {
             );
         }
     } else {
-        println!("\nskipping gate-pipeline comparison: no oracle logits/probs dump at {oracle_gate_dir:?}");
+        println!(
+            "\nskipping gate-pipeline comparison: no oracle logits/probs dump at {oracle_gate_dir:?}"
+        );
     }
 
-    let oracle_intra_dir = oracle_dir.parent().unwrap_or(&oracle_dir).join("dump_lfm2_intra");
+    let oracle_intra_dir = oracle_dir
+        .parent()
+        .unwrap_or(&oracle_dir)
+        .join("dump_lfm2_intra");
     // `model.layers.{}.ffn_out-<il>` is llama.cpp's own naming quirk, not
     // ours -- `lfm2.cpp:270-275`'s two consecutive `cb()` calls both rename
     // the SAME `ffn_norm_out` tensor, so the value dumped under the
@@ -368,7 +429,8 @@ fn main() {
         proxima_tensor::spec::LayerKind::Attention => "self_attn.out_proj",
         proxima_tensor::spec::LayerKind::ShortConv => "conv.out_proj",
     };
-    let mixer_out_path = oracle_intra_dir.join(format!("model.layers.{{}}.{mixer_out_suffix}-{layer}.f32"));
+    let mixer_out_path =
+        oracle_intra_dir.join(format!("model.layers.{{}}.{mixer_out_suffix}-{layer}.f32"));
     let normed2_path = oracle_intra_dir.join(format!("model.layers.{{}}.ffn_out-{layer}.f32"));
     // `post_mixer = mixer_out + (layer `layer`'s own residual input)`
     // (`spec.rs:1991`) -- for `layer > 0` that residual input is exactly
@@ -377,12 +439,20 @@ fn main() {
     // reusing our own `post_mixer` as a stand-in for theirs. `inp_embd.f32`
     // was never real for a tokenized prompt (see `lfm2_layer_oracle_diff.rs`'s
     // own doc); the real first tensor is `model.embed_tokens.f32`.
-    let layer_input_path = if layer == 0 { oracle_dir.join("model.embed_tokens.f32") } else { oracle_dir.join(format!("l_out-{}.f32", layer - 1)) };
+    let layer_input_path = if layer == 0 {
+        oracle_dir.join("model.embed_tokens.f32")
+    } else {
+        oracle_dir.join(format!("l_out-{}.f32", layer - 1))
+    };
     if mixer_out_path.exists() && normed2_path.exists() && layer_input_path.exists() {
         let their_mixer_out = read_oracle_route(&mixer_out_path);
         let their_normed2 = read_oracle_route(&normed2_path);
         let their_layer_input = read_oracle_route(&layer_input_path);
-        let their_post_mixer: Vec<f32> = their_mixer_out.iter().zip(&their_layer_input).map(|(mix, input)| mix + input).collect();
+        let their_post_mixer: Vec<f32> = their_mixer_out
+            .iter()
+            .zip(&their_layer_input)
+            .map(|(mix, input)| mix + input)
+            .collect();
 
         let (mixer_out_diff, mixer_out_worst) = max_abs_diff(ours_mixer_out, &their_mixer_out);
         let (post_mixer_diff, post_mixer_worst) = max_abs_diff(ours_post_mixer, &their_post_mixer);
@@ -442,7 +512,8 @@ fn main() {
         // introduced by this layer's own mixer.
         let ours_layer_input_worst = ours_post_mixer[normed2_worst] - ours_mixer_out[normed2_worst];
         let their_layer_input_worst = their_layer_input[normed2_worst];
-        let mixer_out_worst_at_dim = (ours_mixer_out[normed2_worst] - their_mixer_out[normed2_worst]).abs();
+        let mixer_out_worst_at_dim =
+            (ours_mixer_out[normed2_worst] - their_mixer_out[normed2_worst]).abs();
 
         // `lfm2_layer_oracle_diff.rs`'s own full-sweep table named a
         // DIFFERENT worst position for this exact layer's `l_out` --
@@ -476,6 +547,8 @@ fn main() {
             mixer_out_worst_at_dim
         );
     } else {
-        println!("\nskipping within-layer bisection: no oracle mixer_out/normed2/layer-input dump at {oracle_intra_dir:?} / {layer_input_path:?}");
+        println!(
+            "\nskipping within-layer bisection: no oracle mixer_out/normed2/layer-input dump at {oracle_intra_dir:?} / {layer_input_path:?}"
+        );
     }
 }

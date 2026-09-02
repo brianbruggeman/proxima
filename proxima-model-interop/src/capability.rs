@@ -91,22 +91,118 @@ reject_non_float32 (proxima-tensor/src/cpu.rs) rejects any non-Float32 elementwi
 /// placeholders), then the one MoE cell
 /// (`moe_architecture_cpu_forward_prefill_and_decode`).
 pub const GGML_CAPABILITY_TABLE: &[GgmlCell] = &[
-    GgmlCell { codec: GgmlType::F32, codec_name: "F32", topology: Topology::Dense, backend: Backend::Cpu, status: CellStatus::Supported },
-    GgmlCell { codec: GgmlType::Q8_0, codec_name: "Q8_0", topology: Topology::Dense, backend: Backend::Cpu, status: CellStatus::Supported },
-    GgmlCell { codec: GgmlType::Q4_K, codec_name: "Q4_K", topology: Topology::Dense, backend: Backend::Cpu, status: CellStatus::Supported },
-    GgmlCell { codec: GgmlType::Q5_K, codec_name: "Q5_K", topology: Topology::Dense, backend: Backend::Cpu, status: CellStatus::Supported },
-    GgmlCell { codec: GgmlType::Q6_K, codec_name: "Q6_K", topology: Topology::Dense, backend: Backend::Cpu, status: CellStatus::Supported },
-    GgmlCell { codec: GgmlType::Q4_0, codec_name: "Q4_0", topology: Topology::Dense, backend: Backend::Cpu, status: CellStatus::Unimplemented(UNREPRESENTABLE) },
-    GgmlCell { codec: GgmlType::Q5_0, codec_name: "Q5_0", topology: Topology::Dense, backend: Backend::Cpu, status: CellStatus::Unimplemented(UNREPRESENTABLE) },
-    GgmlCell { codec: GgmlType::Q2_K, codec_name: "Q2_K", topology: Topology::Dense, backend: Backend::Cpu, status: CellStatus::Unimplemented(UNREPRESENTABLE) },
-    GgmlCell { codec: GgmlType::Q3_K, codec_name: "Q3_K", topology: Topology::Dense, backend: Backend::Cpu, status: CellStatus::Unimplemented(UNREPRESENTABLE) },
-    GgmlCell { codec: GgmlType::F16, codec_name: "F16", topology: Topology::Dense, backend: Backend::Cpu, status: CellStatus::Unimplemented(F16_ACTIVATION_UNSUPPORTED) },
-    GgmlCell { codec: GgmlType::F32, codec_name: "F32", topology: Topology::Moe, backend: Backend::Cpu, status: CellStatus::Supported },
-    GgmlCell { codec: GgmlType::F32, codec_name: "F32", topology: Topology::Dense, backend: Backend::Metal, status: CellStatus::Supported },
-    GgmlCell { codec: GgmlType::Q8_0, codec_name: "Q8_0", topology: Topology::Dense, backend: Backend::Metal, status: CellStatus::Supported },
-    GgmlCell { codec: GgmlType::Q4_K, codec_name: "Q4_K", topology: Topology::Dense, backend: Backend::Metal, status: CellStatus::Supported },
-    GgmlCell { codec: GgmlType::Q5_K, codec_name: "Q5_K", topology: Topology::Dense, backend: Backend::Metal, status: CellStatus::Supported },
-    GgmlCell { codec: GgmlType::Q6_K, codec_name: "Q6_K", topology: Topology::Dense, backend: Backend::Metal, status: CellStatus::Supported },
+    GgmlCell {
+        codec: GgmlType::F32,
+        codec_name: "F32",
+        topology: Topology::Dense,
+        backend: Backend::Cpu,
+        status: CellStatus::Supported,
+    },
+    GgmlCell {
+        codec: GgmlType::Q8_0,
+        codec_name: "Q8_0",
+        topology: Topology::Dense,
+        backend: Backend::Cpu,
+        status: CellStatus::Supported,
+    },
+    GgmlCell {
+        codec: GgmlType::Q4_K,
+        codec_name: "Q4_K",
+        topology: Topology::Dense,
+        backend: Backend::Cpu,
+        status: CellStatus::Supported,
+    },
+    GgmlCell {
+        codec: GgmlType::Q5_K,
+        codec_name: "Q5_K",
+        topology: Topology::Dense,
+        backend: Backend::Cpu,
+        status: CellStatus::Supported,
+    },
+    GgmlCell {
+        codec: GgmlType::Q6_K,
+        codec_name: "Q6_K",
+        topology: Topology::Dense,
+        backend: Backend::Cpu,
+        status: CellStatus::Supported,
+    },
+    GgmlCell {
+        codec: GgmlType::Q4_0,
+        codec_name: "Q4_0",
+        topology: Topology::Dense,
+        backend: Backend::Cpu,
+        status: CellStatus::Unimplemented(UNREPRESENTABLE),
+    },
+    GgmlCell {
+        codec: GgmlType::Q5_0,
+        codec_name: "Q5_0",
+        topology: Topology::Dense,
+        backend: Backend::Cpu,
+        status: CellStatus::Unimplemented(UNREPRESENTABLE),
+    },
+    GgmlCell {
+        codec: GgmlType::Q2_K,
+        codec_name: "Q2_K",
+        topology: Topology::Dense,
+        backend: Backend::Cpu,
+        status: CellStatus::Unimplemented(UNREPRESENTABLE),
+    },
+    GgmlCell {
+        codec: GgmlType::Q3_K,
+        codec_name: "Q3_K",
+        topology: Topology::Dense,
+        backend: Backend::Cpu,
+        status: CellStatus::Unimplemented(UNREPRESENTABLE),
+    },
+    GgmlCell {
+        codec: GgmlType::F16,
+        codec_name: "F16",
+        topology: Topology::Dense,
+        backend: Backend::Cpu,
+        status: CellStatus::Unimplemented(F16_ACTIVATION_UNSUPPORTED),
+    },
+    GgmlCell {
+        codec: GgmlType::F32,
+        codec_name: "F32",
+        topology: Topology::Moe,
+        backend: Backend::Cpu,
+        status: CellStatus::Supported,
+    },
+    GgmlCell {
+        codec: GgmlType::F32,
+        codec_name: "F32",
+        topology: Topology::Dense,
+        backend: Backend::Metal,
+        status: CellStatus::Supported,
+    },
+    GgmlCell {
+        codec: GgmlType::Q8_0,
+        codec_name: "Q8_0",
+        topology: Topology::Dense,
+        backend: Backend::Metal,
+        status: CellStatus::Supported,
+    },
+    GgmlCell {
+        codec: GgmlType::Q4_K,
+        codec_name: "Q4_K",
+        topology: Topology::Dense,
+        backend: Backend::Metal,
+        status: CellStatus::Supported,
+    },
+    GgmlCell {
+        codec: GgmlType::Q5_K,
+        codec_name: "Q5_K",
+        topology: Topology::Dense,
+        backend: Backend::Metal,
+        status: CellStatus::Supported,
+    },
+    GgmlCell {
+        codec: GgmlType::Q6_K,
+        codec_name: "Q6_K",
+        topology: Topology::Dense,
+        backend: Backend::Metal,
+        status: CellStatus::Supported,
+    },
 ];
 
 fn write_row(out: &mut String, codec: &str, topology: &str, backend: &str, status: CellStatus) {
@@ -133,7 +229,13 @@ pub fn render_ggml_matrix_markdown() -> String {
     out.push_str("| codec | topology | backend | status |\n");
     out.push_str("| --- | --- | --- | --- |\n");
     for cell in GGML_CAPABILITY_TABLE {
-        write_row(&mut out, cell.codec_name, cell.topology.label(), cell.backend.label(), cell.status);
+        write_row(
+            &mut out,
+            cell.codec_name,
+            cell.topology.label(),
+            cell.backend.label(),
+            cell.status,
+        );
     }
     out
 }
@@ -147,7 +249,11 @@ pub fn render_ggml_matrix_markdown() -> String {
 pub fn supported_dense_cpu_codecs() -> Vec<GgmlType> {
     GGML_CAPABILITY_TABLE
         .iter()
-        .filter(|cell| cell.topology == Topology::Dense && cell.backend == Backend::Cpu && cell.status == CellStatus::Supported)
+        .filter(|cell| {
+            cell.topology == Topology::Dense
+                && cell.backend == Backend::Cpu
+                && cell.status == CellStatus::Supported
+        })
         .map(|cell| cell.codec)
         .collect()
 }
@@ -187,16 +293,29 @@ pub mod quant_format {
     /// The 7 [`PackedCodec`] variants, exhaustively -- adding an 8th to
     /// `omega::msl::PackedCodec` without adding it here is a compile error,
     /// not a silently stale doc.
-    const ALL_CODECS: &[PackedCodec] =
-        &[PackedCodec::Q4K, PackedCodec::Q5K, PackedCodec::Q6K, PackedCodec::Q8_0, PackedCodec::Q4_0, PackedCodec::Float16, PackedCodec::BFloat16];
+    const ALL_CODECS: &[PackedCodec] = &[
+        PackedCodec::Q4K,
+        PackedCodec::Q5K,
+        PackedCodec::Q6K,
+        PackedCodec::Q8_0,
+        PackedCodec::Q4_0,
+        PackedCodec::Float16,
+        PackedCodec::BFloat16,
+    ];
 
     #[must_use]
     pub fn render_markdown() -> String {
         let mut out = String::new();
-        out.push_str("| packed codec | cpu kernel | metal emitter | wgsl emitter | cuda emitter |\n");
+        out.push_str(
+            "| packed codec | cpu kernel | metal emitter | wgsl emitter | cuda emitter |\n",
+        );
         out.push_str("| --- | --- | --- | --- | --- |\n");
         for &codec in ALL_CODECS {
-            let _ = writeln!(out, "| {} | supported | supported | supported | supported |", codec_name(codec));
+            let _ = writeln!(
+                out,
+                "| {} | supported | supported | supported | supported |",
+                codec_name(codec)
+            );
         }
         out
     }
@@ -204,14 +323,19 @@ pub mod quant_format {
 
 #[cfg(test)]
 mod tests {
-    use super::{CellStatus, GGML_CAPABILITY_TABLE, render_ggml_matrix_markdown, supported_dense_cpu_codecs};
+    use super::{
+        CellStatus, GGML_CAPABILITY_TABLE, render_ggml_matrix_markdown, supported_dense_cpu_codecs,
+    };
 
     #[test]
     fn table_has_no_duplicate_cells() {
         let mut seen = alloc::vec::Vec::new();
         for cell in GGML_CAPABILITY_TABLE {
             let key = (cell.codec_name, cell.topology, cell.backend);
-            assert!(!seen.contains(&key), "duplicate cell in GGML_CAPABILITY_TABLE: {key:?}");
+            assert!(
+                !seen.contains(&key),
+                "duplicate cell in GGML_CAPABILITY_TABLE: {key:?}"
+            );
             seen.push(key);
         }
     }
@@ -219,21 +343,33 @@ mod tests {
     #[test]
     fn supported_dense_cpu_codecs_matches_the_five_hand_written_test_functions() {
         let supported = supported_dense_cpu_codecs();
-        assert_eq!(supported.len(), 5, "capability_matrix.rs currently drives exactly 5 supported dense-cpu codecs");
+        assert_eq!(
+            supported.len(),
+            5,
+            "capability_matrix.rs currently drives exactly 5 supported dense-cpu codecs"
+        );
     }
 
     #[test]
     fn render_emits_one_row_per_table_cell_plus_the_header() {
         let rendered = render_ggml_matrix_markdown();
         let row_count = rendered.lines().count();
-        assert_eq!(row_count, GGML_CAPABILITY_TABLE.len() + 2, "one header line, one separator line, one row per cell");
+        assert_eq!(
+            row_count,
+            GGML_CAPABILITY_TABLE.len() + 2,
+            "one header line, one separator line, one row per cell"
+        );
     }
 
     #[test]
     fn unimplemented_cells_all_name_a_reason() {
         for cell in GGML_CAPABILITY_TABLE {
             if let CellStatus::Unimplemented(reason) = cell.status {
-                assert!(!reason.is_empty(), "{} must name why it is unimplemented", cell.codec_name);
+                assert!(
+                    !reason.is_empty(),
+                    "{} must name why it is unimplemented",
+                    cell.codec_name
+                );
             }
         }
     }
@@ -246,6 +382,10 @@ mod quant_format_tests {
     #[test]
     fn renders_exactly_seven_packed_codec_rows_plus_the_header() {
         let rendered = render_markdown();
-        assert_eq!(rendered.lines().count(), 9, "7 PackedCodec variants, 1 header row, 1 separator row");
+        assert_eq!(
+            rendered.lines().count(),
+            9,
+            "7 PackedCodec variants, 1 header row, 1 separator row"
+        );
     }
 }

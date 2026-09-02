@@ -177,7 +177,6 @@ mod tests {
         clippy::default_constructed_unit_structs
     )]
 
-    
     use crate::metric::{Counter, Gauge, MetricSample, NumberDataPoint, UpDownCounter};
     use crate::tag::ScalarValue;
 

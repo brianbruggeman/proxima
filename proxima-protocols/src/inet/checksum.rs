@@ -75,7 +75,7 @@ mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
     use proptest::prelude::*;
-    
+
     // RFC 1071 §3 worked example: derived by hand in the discipline log.
     #[test]
     fn rfc1071_section3_example() {

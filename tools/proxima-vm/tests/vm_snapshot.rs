@@ -61,7 +61,12 @@ impl SignedProbes {
             .expect("copy the built layered probe");
 
         if HYPERVISOR_LANE {
-            for path in [&capture_path, &restore_path, &warm_restore_path, &layered_path] {
+            for path in [
+                &capture_path,
+                &restore_path,
+                &warm_restore_path,
+                &layered_path,
+            ] {
                 let status = Command::new("codesign")
                     .arg("--force")
                     .arg("--sign")
@@ -137,7 +142,10 @@ impl SignedProbes {
         String::from_utf8_lossy(&output.stdout)
             .into_owned()
             .lines()
-            .filter_map(|line| line.split_once(':').map(|(key, value)| (key.to_string(), value.to_string())))
+            .filter_map(|line| {
+                line.split_once(':')
+                    .map(|(key, value)| (key.to_string(), value.to_string()))
+            })
             .collect()
     }
 
@@ -230,7 +238,10 @@ impl SignedProbes {
         );
 
         let mut command = Command::new(&self.warm_restore_path);
-        command.arg(&snapshot_path).arg(page_size.to_string()).arg(iterations.to_string());
+        command
+            .arg(&snapshot_path)
+            .arg(page_size.to_string())
+            .arg(iterations.to_string());
         if let Some(target_size) = target_size {
             command.arg(target_size.to_string());
             command.arg(content_mode.unwrap_or("same"));
@@ -268,15 +279,27 @@ fn percentiles_and_cov(mut samples: Vec<u64>) -> (u64, u64, f64) {
     let p50 = samples[len / 2];
     let p99 = samples[(len * 99 / 100).min(len - 1)];
     let mean = samples.iter().sum::<u64>() as f64 / len as f64;
-    let variance = samples.iter().map(|&sample| (sample as f64 - mean).powi(2)).sum::<f64>() / len as f64;
-    let cov = if mean > 0.0 { variance.sqrt() / mean } else { 0.0 };
+    let variance = samples
+        .iter()
+        .map(|&sample| (sample as f64 - mean).powi(2))
+        .sum::<f64>()
+        / len as f64;
+    let cov = if mean > 0.0 {
+        variance.sqrt() / mean
+    } else {
+        0.0
+    };
     (p50, p99, cov)
 }
 
 /// Pulls every `iteration_<field>:<index>:<value>` series out of
 /// `snapshot_and_warm_restore_sized`'s returned map, parsed as `u64`
 /// nanoseconds, in index order.
-fn iteration_series(fields: &HashMap<(String, String), String>, field: &str, iterations: usize) -> Vec<u64> {
+fn iteration_series(
+    fields: &HashMap<(String, String), String>,
+    field: &str,
+    iterations: usize,
+) -> Vec<u64> {
     (0..iterations)
         .map(|index| {
             fields[&(field.to_string(), index.to_string())]
@@ -441,7 +464,9 @@ async fn warm_restore_wall_time_scales_with_snapshot_memory_size() {
         ("256MiB", 256 * 1024 * 1024),
     ];
 
-    println!("| size | warm p50 (ns) | warm p99 (ns) | warm CoV | memcpy p50 (ns) | memcpy p99 (ns) | delta p50 (ns) |");
+    println!(
+        "| size | warm p50 (ns) | warm p99 (ns) | warm CoV | memcpy p50 (ns) | memcpy p99 (ns) | delta p50 (ns) |"
+    );
     println!("|---|---|---|---|---|---|---|");
 
     for (label, size) in SIZES {
@@ -478,7 +503,8 @@ async fn warm_restore_wall_time_scales_with_snapshot_memory_size() {
         );
 
         let warm_wall_nanos = iteration_series(&fields, "iteration_call_wall_nanos", ITERATIONS);
-        let memcpy_control_nanos = iteration_series(&fields, "iteration_memcpy_control_nanos", ITERATIONS);
+        let memcpy_control_nanos =
+            iteration_series(&fields, "iteration_memcpy_control_nanos", ITERATIONS);
 
         let (warm_p50, warm_p99, warm_cov) = percentiles_and_cov(warm_wall_nanos);
         let (memcpy_p50, memcpy_p99, _memcpy_cov) = percentiles_and_cov(memcpy_control_nanos);
@@ -533,12 +559,14 @@ async fn warm_restore_cost_is_size_bound_not_content_bound() {
     assert_eq!(alternate_matched, ITERATIONS);
 
     let same_wall_nanos = iteration_series(&same_fields, "iteration_call_wall_nanos", ITERATIONS);
-    let alternate_wall_nanos = iteration_series(&alternate_fields, "iteration_call_wall_nanos", ITERATIONS);
+    let alternate_wall_nanos =
+        iteration_series(&alternate_fields, "iteration_call_wall_nanos", ITERATIONS);
 
     let (same_p50, _same_p99, _same_cov) = percentiles_and_cov(same_wall_nanos);
     let (alternate_p50, _alternate_p99, _alternate_cov) = percentiles_and_cov(alternate_wall_nanos);
 
-    let relative_difference = (same_p50 as f64 - alternate_p50 as f64).abs() / (same_p50.max(alternate_p50) as f64);
+    let relative_difference =
+        (same_p50 as f64 - alternate_p50 as f64).abs() / (same_p50.max(alternate_p50) as f64);
 
     println!(
         "content-bound control at {SIZE} bytes: same_content p50={same_p50}ns \
@@ -572,7 +600,9 @@ async fn layered_restore_reproduces_the_base_byte_identically_over_the_whole_reg
     let fields = probes.run_layered_sweep(1024 * 1024, 32, 10);
 
     assert_eq!(
-        fields.get(&("byte_identical_twin_oracle".to_string(), String::new())).map(String::as_str),
+        fields
+            .get(&("byte_identical_twin_oracle".to_string(), String::new()))
+            .map(String::as_str),
         Some("true"),
         "the base's bytes must match the original snapshot content exactly after every dirty-write/restore cycle"
     );
@@ -595,7 +625,8 @@ async fn layered_restore_actually_remaps_dirtied_pages_read_only(#[case] dirty_p
     let probes = SignedProbes::prepare();
     let fields = probes.run_layered_sweep(16 * 1024 * 1024, dirty_page_count, 3);
 
-    let post_restore_fault_count: u16 = fields[&("post_restore_fault_count".to_string(), String::new())]
+    let post_restore_fault_count: u16 = fields
+        [&("post_restore_fault_count".to_string(), String::new())]
         .parse()
         .expect("parse post_restore_fault_count");
     assert_eq!(
@@ -623,7 +654,9 @@ async fn layered_restore_cost_scales_with_dirty_page_count_not_region_size() {
         ("256MiB", 256 * 1024 * 1024, 4096),
     ];
 
-    println!("| size | K | restore p50 (ns) | restore p99 (ns) | run p50 (ns) | unprotected-run p50 (ns) |");
+    println!(
+        "| size | K | restore p50 (ns) | restore p99 (ns) | run p50 (ns) | unprotected-run p50 (ns) |"
+    );
     println!("|---|---|---|---|---|---|");
 
     for (label, size, dirty_page_count) in CASES {
@@ -633,22 +666,34 @@ async fn layered_restore_cost_scales_with_dirty_page_count_not_region_size() {
         let byte_identical = fields
             .get(&("byte_identical_twin_oracle".to_string(), String::new()))
             .map(String::as_str);
-        assert_eq!(byte_identical, Some("true"), "size={label} K={dirty_page_count}: base must survive intact");
+        assert_eq!(
+            byte_identical,
+            Some("true"),
+            "size={label} K={dirty_page_count}: base must survive intact"
+        );
 
-        let post_restore_fault_count: u16 = fields[&("post_restore_fault_count".to_string(), String::new())]
+        let post_restore_fault_count: u16 = fields
+            [&("post_restore_fault_count".to_string(), String::new())]
             .parse()
             .expect("parse post_restore_fault_count");
-        assert_eq!(post_restore_fault_count, dirty_page_count, "size={label} K={dirty_page_count}: must re-trap");
+        assert_eq!(
+            post_restore_fault_count, dirty_page_count,
+            "size={label} K={dirty_page_count}: must re-trap"
+        );
 
         let restore_nanos = iteration_series(&fields, "iteration_restore_wall_nanos", ITERATIONS);
         let run_nanos = iteration_series(&fields, "iteration_run_wall_nanos", ITERATIONS);
-        let unprotected_nanos = iteration_series(&fields, "iteration_unprotected_run_wall_nanos", ITERATIONS);
+        let unprotected_nanos =
+            iteration_series(&fields, "iteration_unprotected_run_wall_nanos", ITERATIONS);
 
         let (restore_p50, restore_p99, _restore_cov) = percentiles_and_cov(restore_nanos);
         let (run_p50, _run_p99, _run_cov) = percentiles_and_cov(run_nanos);
-        let (unprotected_p50, _unprotected_p99, _unprotected_cov) = percentiles_and_cov(unprotected_nanos);
+        let (unprotected_p50, _unprotected_p99, _unprotected_cov) =
+            percentiles_and_cov(unprotected_nanos);
 
-        println!("| {label} | {dirty_page_count} | {restore_p50} | {restore_p99} | {run_p50} | {unprotected_p50} |");
+        println!(
+            "| {label} | {dirty_page_count} | {restore_p50} | {restore_p99} | {run_p50} | {unprotected_p50} |"
+        );
     }
 }
 
@@ -665,7 +710,10 @@ async fn two_warm_vms_share_one_base_without_observing_each_others_writes() {
     let probes = SignedProbes::prepare();
     let fields = probes.run_layered_sharing();
 
-    assert_eq!(fields.get("vm_a_run_halted_ok").map(String::as_str), Some("true"));
+    assert_eq!(
+        fields.get("vm_a_run_halted_ok").map(String::as_str),
+        Some("true")
+    );
     assert_eq!(
         fields.get("base_unaffected").map(String::as_str),
         Some("true"),

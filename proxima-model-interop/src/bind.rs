@@ -52,7 +52,11 @@ use crate::error::InteropError;
 /// `file_bytes`; [`InteropError::Quant`] if a block-quantized tensor's
 /// byte length doesn't match its own codec's block-size contract;
 /// [`InteropError::UnrepresentableGgmlType`] for an undecoded `GgmlType`.
-pub fn gguf_tensor_as_f32(parsed: &ParsedGguf, file_bytes: &[u8], name: &str) -> Result<Vec<f32>, InteropError> {
+pub fn gguf_tensor_as_f32(
+    parsed: &ParsedGguf,
+    file_bytes: &[u8],
+    name: &str,
+) -> Result<Vec<f32>, InteropError> {
     let tensor = find_tensor(parsed, name)?;
     let range = parsed.tensor_data_range(tensor, file_bytes.len() as u64)?;
     let data = &file_bytes[range.start as usize..range.end as usize];
@@ -186,10 +190,15 @@ pub(crate) fn aligned_f32_view(bytes: &[u8]) -> Option<&[f32]> {
         return None;
     }
     // SAFETY: see this function's doc.
-    Some(unsafe { core::slice::from_raw_parts(bytes.as_ptr().cast::<f32>(), bytes.len() / float_size) })
+    Some(unsafe {
+        core::slice::from_raw_parts(bytes.as_ptr().cast::<f32>(), bytes.len() / float_size)
+    })
 }
 
-pub(crate) fn find_tensor<'a>(parsed: &'a ParsedGguf, name: &str) -> Result<&'a TensorInfo, InteropError> {
+pub(crate) fn find_tensor<'a>(
+    parsed: &'a ParsedGguf,
+    name: &str,
+) -> Result<&'a TensorInfo, InteropError> {
     parsed
         .tensors
         .iter()
@@ -324,9 +333,18 @@ pub struct ModelArchitecture {
 pub fn architecture_from_metadata(parsed: &ParsedGguf) -> Result<ModelArchitecture, InteropError> {
     let architecture = metadata_str(parsed, "general.architecture")?;
     let embedding = metadata_u32(parsed, &alloc::format!("{architecture}.embedding_length"))?;
-    let feed_forward = metadata_u32(parsed, &alloc::format!("{architecture}.feed_forward_length"))?;
-    let query_heads = metadata_u32(parsed, &alloc::format!("{architecture}.attention.head_count"))?;
-    let kv_heads = metadata_u32_or_uniform_array(parsed, &alloc::format!("{architecture}.attention.head_count_kv"))?;
+    let feed_forward = metadata_u32(
+        parsed,
+        &alloc::format!("{architecture}.feed_forward_length"),
+    )?;
+    let query_heads = metadata_u32(
+        parsed,
+        &alloc::format!("{architecture}.attention.head_count"),
+    )?;
+    let kv_heads = metadata_u32_or_uniform_array(
+        parsed,
+        &alloc::format!("{architecture}.attention.head_count_kv"),
+    )?;
     let block_count = metadata_u32(parsed, &alloc::format!("{architecture}.block_count"))?;
     let head_dim = metadata_u32_optional_or(
         parsed,
@@ -334,8 +352,10 @@ pub fn architecture_from_metadata(parsed: &ParsedGguf) -> Result<ModelArchitectu
         embedding / query_heads.max(1),
     );
     let vocab = vocab_from_token_embedding(parsed, embedding)?;
-    let expert_count = metadata_u32_optional(parsed, &alloc::format!("{architecture}.expert_count"));
-    let expert_used_count = metadata_u32_optional(parsed, &alloc::format!("{architecture}.expert_used_count"));
+    let expert_count =
+        metadata_u32_optional(parsed, &alloc::format!("{architecture}.expert_count"));
+    let expert_used_count =
+        metadata_u32_optional(parsed, &alloc::format!("{architecture}.expert_used_count"));
     let rope_freq_base = metadata_f32_optional(
         parsed,
         &alloc::format!("{architecture}.rope.freq_base"),
@@ -356,7 +376,10 @@ pub fn architecture_from_metadata(parsed: &ParsedGguf) -> Result<ModelArchitectu
     })
 }
 
-pub(crate) fn metadata_str<'parsed>(parsed: &'parsed ParsedGguf, key: &str) -> Result<&'parsed str, InteropError> {
+pub(crate) fn metadata_str<'parsed>(
+    parsed: &'parsed ParsedGguf,
+    key: &str,
+) -> Result<&'parsed str, InteropError> {
     parsed
         .metadata_value(key)
         .and_then(MetadataValue::as_str)
@@ -385,7 +408,10 @@ pub(crate) fn metadata_u32_optional(parsed: &ParsedGguf, key: &str) -> u32 {
 /// derived value, unlike a mixture-of-experts-only key where `0` genuinely
 /// means "not present."
 pub(crate) fn metadata_u32_optional_or(parsed: &ParsedGguf, key: &str, default: u32) -> u32 {
-    parsed.metadata_value(key).and_then(MetadataValue::as_u32).unwrap_or(default)
+    parsed
+        .metadata_value(key)
+        .and_then(MetadataValue::as_u32)
+        .unwrap_or(default)
 }
 
 /// Same lookup as [`metadata_u32`], but also accepts `key` stored as a
@@ -415,14 +441,21 @@ fn metadata_u32_or_uniform_array(parsed: &ParsedGguf, key: &str) -> Result<u32, 
 
     match parsed.metadata_value(key) {
         Some(MetadataValue::U32(value)) => Ok(*value),
-        Some(MetadataValue::I32(value)) => u32::try_from(*value).map_err(|_| InteropError::HeterogeneousMetadataArray {
-            key: key.into(),
-            distinct_values: 1,
-        }),
-        Some(MetadataValue::Array(MetadataArray::U32(values))) => uniform_u32_array(key, values.iter().copied()),
-        Some(MetadataValue::Array(MetadataArray::I32(values))) => {
-            uniform_u32_array(key, values.iter().map(|value| u32::try_from(*value).unwrap_or(u32::MAX)))
+        Some(MetadataValue::I32(value)) => {
+            u32::try_from(*value).map_err(|_| InteropError::HeterogeneousMetadataArray {
+                key: key.into(),
+                distinct_values: 1,
+            })
         }
+        Some(MetadataValue::Array(MetadataArray::U32(values))) => {
+            uniform_u32_array(key, values.iter().copied())
+        }
+        Some(MetadataValue::Array(MetadataArray::I32(values))) => uniform_u32_array(
+            key,
+            values
+                .iter()
+                .map(|value| u32::try_from(*value).unwrap_or(u32::MAX)),
+        ),
         _ => Err(InteropError::MissingMetadataKey { key: key.into() }),
     }
 }
@@ -462,12 +495,18 @@ pub(crate) fn metadata_f32_optional(parsed: &ParsedGguf, key: &str, default: f32
     }
 }
 
-pub(crate) fn vocab_from_token_embedding(parsed: &ParsedGguf, embedding: u32) -> Result<u32, InteropError> {
+pub(crate) fn vocab_from_token_embedding(
+    parsed: &ParsedGguf,
+    embedding: u32,
+) -> Result<u32, InteropError> {
     let tensor = find_tensor(parsed, "token_embd.weight")?;
     let elements = tensor.element_count();
     let divisor = u64::from(embedding);
     if divisor == 0 || !elements.is_multiple_of(divisor) {
-        return Err(InteropError::VocabShapeMismatch { elements, embedding });
+        return Err(InteropError::VocabShapeMismatch {
+            elements,
+            embedding,
+        });
     }
     Ok((elements / divisor) as u32)
 }
@@ -486,7 +525,10 @@ pub(crate) fn vocab_from_token_embedding(parsed: &ParsedGguf, embedding: u32) ->
 pub(crate) struct BoundWeights<'file> {
     pub(crate) resident_bytes: usize,
     pub(crate) owned: Vec<(alloc::string::String, Vec<f32>)>,
-    pub(crate) packed: Vec<(alloc::string::String, proxima_tensor::cpu::QuantizedBlock<'file>)>,
+    pub(crate) packed: Vec<(
+        alloc::string::String,
+        proxima_tensor::cpu::QuantizedBlock<'file>,
+    )>,
     pub(crate) packed_owned: Vec<(alloc::string::String, Vec<u8>, PackedOwnedKind)>,
 }
 
@@ -514,7 +556,10 @@ impl PackedOwnedKind {
     /// Borrows `bytes` as the [`proxima_tensor::cpu::QuantizedBlock`] variant
     /// this tag names -- the deferred half of the split [`PackedOwnedKind`]'s
     /// own doc describes.
-    pub(crate) fn as_block<'bytes>(self, bytes: &'bytes [u8]) -> proxima_tensor::cpu::QuantizedBlock<'bytes> {
+    pub(crate) fn as_block<'bytes>(
+        self,
+        bytes: &'bytes [u8],
+    ) -> proxima_tensor::cpu::QuantizedBlock<'bytes> {
         match self {
             PackedOwnedKind::Q4K => proxima_tensor::cpu::QuantizedBlock::Q4K(bytes),
             PackedOwnedKind::Q5K => proxima_tensor::cpu::QuantizedBlock::Q5K(bytes),
@@ -641,7 +686,15 @@ pub(crate) fn bind_matmul_weight<'file>(
     in_dim: usize,
     state: &mut BoundWeights<'file>,
 ) -> Result<(), InteropError> {
-    bind_matmul_weight_as(parsed, file_bytes, &name.clone(), name, out_dim, in_dim, state)
+    bind_matmul_weight_as(
+        parsed,
+        file_bytes,
+        &name.clone(),
+        name,
+        out_dim,
+        in_dim,
+        state,
+    )
 }
 
 /// [`bind_matmul_weight`]'s underlying step, split out the same way
@@ -718,7 +771,8 @@ fn transpose_expert_stack(
         // `slab.len() == per_expert == out_dim * in_dim` by construction --
         // the length check above already proved it for every expert slab.
         let slab_transposed = transpose_out_in_to_in_out(slab, tensor, out_dim, in_dim)?;
-        transposed[expert * per_expert..(expert + 1) * per_expert].copy_from_slice(&slab_transposed);
+        transposed[expert * per_expert..(expert + 1) * per_expert]
+            .copy_from_slice(&slab_transposed);
     }
     Ok(transposed)
 }
@@ -730,7 +784,11 @@ fn transpose_expert_stack(
 /// does not have what was expected"), with the underlying `RestackError`'s
 /// own message embedded in `name` rather than discarded.
 #[cfg(feature = "std")]
-fn restack_error_as_interop_error(layer: u32, projection: &str, error: proxima_gguf::restack::RestackError) -> InteropError {
+fn restack_error_as_interop_error(
+    layer: u32,
+    projection: &str,
+    error: proxima_gguf::restack::RestackError,
+) -> InteropError {
     InteropError::UnknownTensor {
         name: alloc::format!("blk.{layer}.{projection}.*.weight (restack failed: {error})"),
     }
@@ -777,10 +835,13 @@ fn bind_moe_stacked_experts<'file>(
     state: &mut BoundWeights<'file>,
 ) -> Result<(), InteropError> {
     match gguf_tensor_as_packed_block(parsed, file_bytes, &name) {
-        Ok(block @ proxima_tensor::cpu::QuantizedBlock::Float32(_)) => state.packed.push((name, block)),
+        Ok(block @ proxima_tensor::cpu::QuantizedBlock::Float32(_)) => {
+            state.packed.push((name, block))
+        }
         Ok(_) | Err(_) => {
             let decoded = gguf_tensor_as_f32(parsed, file_bytes, &name)?;
-            let transposed = transpose_expert_stack(&decoded, &name, expert_count, out_dim, in_dim)?;
+            let transposed =
+                transpose_expert_stack(&decoded, &name, expert_count, out_dim, in_dim)?;
             state.resident_bytes += transposed.len() * core::mem::size_of::<f32>();
             state.owned.push((name, transposed));
         }
@@ -855,12 +916,26 @@ pub(crate) fn bind_moe_expert_weights<'file>(
 ) -> Result<(), InteropError> {
     let stacked_name = alloc::format!("blk.{layer}.{projection}_exps.weight");
     if find_tensor(parsed, &stacked_name).is_ok() {
-        return bind_moe_stacked_experts(parsed, file_bytes, stacked_name, expert_count as usize, out_dim, in_dim, state);
+        return bind_moe_stacked_experts(
+            parsed,
+            file_bytes,
+            stacked_name,
+            expert_count as usize,
+            out_dim,
+            in_dim,
+            state,
+        );
     }
 
-    let experts = discover_experts(&parsed.tensors, u64::from(layer), projection, u64::from(expert_count))
+    let experts = discover_experts(
+        &parsed.tensors,
+        u64::from(layer),
+        projection,
+        u64::from(expert_count),
+    )
+    .map_err(|error| restack_error_as_interop_error(layer, projection, error))?;
+    let plan = plan_stack(&experts)
         .map_err(|error| restack_error_as_interop_error(layer, projection, error))?;
-    let plan = plan_stack(&experts).map_err(|error| restack_error_as_interop_error(layer, projection, error))?;
 
     let mut sources: Vec<&[u8]> = Vec::with_capacity(experts.len());
     for tensor in &experts {
@@ -869,7 +944,8 @@ pub(crate) fn bind_moe_expert_weights<'file>(
     }
 
     let mut stacked_bytes = vec![0u8; plan.total_bytes as usize];
-    restack_into(&mut stacked_bytes, &plan, &sources).map_err(|error| restack_error_as_interop_error(layer, projection, error))?;
+    restack_into(&mut stacked_bytes, &plan, &sources)
+        .map_err(|error| restack_error_as_interop_error(layer, projection, error))?;
 
     if let Some(kind) = PackedOwnedKind::from_ggml_type(plan.ggml_type) {
         state.resident_bytes += stacked_bytes.len();
@@ -886,7 +962,13 @@ pub(crate) fn bind_moe_expert_weights<'file>(
             });
         }
     };
-    let transposed = transpose_expert_stack(&decoded, &stacked_name, expert_count as usize, out_dim, in_dim)?;
+    let transposed = transpose_expert_stack(
+        &decoded,
+        &stacked_name,
+        expert_count as usize,
+        out_dim,
+        in_dim,
+    )?;
     state.resident_bytes += transposed.len() * core::mem::size_of::<f32>();
     state.owned.push((stacked_name, transposed));
     Ok(())
@@ -930,17 +1012,76 @@ pub(crate) fn bind_all_weights<'file>(
     bind_dense(parsed, file_bytes, "token_embd.weight".into(), &mut state)?;
 
     for layer in 0..architecture.block_count {
-        bind_dense(parsed, file_bytes, alloc::format!("blk.{layer}.attn_norm.weight"), &mut state)?;
-        bind_dense(parsed, file_bytes, alloc::format!("blk.{layer}.ffn_norm.weight"), &mut state)?;
-        bind_matmul_weight(parsed, file_bytes, alloc::format!("blk.{layer}.attn_q.weight"), embedding, embedding, &mut state)?;
-        bind_matmul_weight(parsed, file_bytes, alloc::format!("blk.{layer}.attn_k.weight"), kv_dim, embedding, &mut state)?;
-        bind_matmul_weight(parsed, file_bytes, alloc::format!("blk.{layer}.attn_v.weight"), kv_dim, embedding, &mut state)?;
-        bind_matmul_weight(parsed, file_bytes, alloc::format!("blk.{layer}.attn_output.weight"), embedding, embedding, &mut state)?;
+        bind_dense(
+            parsed,
+            file_bytes,
+            alloc::format!("blk.{layer}.attn_norm.weight"),
+            &mut state,
+        )?;
+        bind_dense(
+            parsed,
+            file_bytes,
+            alloc::format!("blk.{layer}.ffn_norm.weight"),
+            &mut state,
+        )?;
+        bind_matmul_weight(
+            parsed,
+            file_bytes,
+            alloc::format!("blk.{layer}.attn_q.weight"),
+            embedding,
+            embedding,
+            &mut state,
+        )?;
+        bind_matmul_weight(
+            parsed,
+            file_bytes,
+            alloc::format!("blk.{layer}.attn_k.weight"),
+            kv_dim,
+            embedding,
+            &mut state,
+        )?;
+        bind_matmul_weight(
+            parsed,
+            file_bytes,
+            alloc::format!("blk.{layer}.attn_v.weight"),
+            kv_dim,
+            embedding,
+            &mut state,
+        )?;
+        bind_matmul_weight(
+            parsed,
+            file_bytes,
+            alloc::format!("blk.{layer}.attn_output.weight"),
+            embedding,
+            embedding,
+            &mut state,
+        )?;
 
         if architecture.expert_count == 0 {
-            bind_matmul_weight(parsed, file_bytes, alloc::format!("blk.{layer}.ffn_gate.weight"), feed_forward, embedding, &mut state)?;
-            bind_matmul_weight(parsed, file_bytes, alloc::format!("blk.{layer}.ffn_up.weight"), feed_forward, embedding, &mut state)?;
-            bind_matmul_weight(parsed, file_bytes, alloc::format!("blk.{layer}.ffn_down.weight"), embedding, feed_forward, &mut state)?;
+            bind_matmul_weight(
+                parsed,
+                file_bytes,
+                alloc::format!("blk.{layer}.ffn_gate.weight"),
+                feed_forward,
+                embedding,
+                &mut state,
+            )?;
+            bind_matmul_weight(
+                parsed,
+                file_bytes,
+                alloc::format!("blk.{layer}.ffn_up.weight"),
+                feed_forward,
+                embedding,
+                &mut state,
+            )?;
+            bind_matmul_weight(
+                parsed,
+                file_bytes,
+                alloc::format!("blk.{layer}.ffn_down.weight"),
+                embedding,
+                feed_forward,
+                &mut state,
+            )?;
         } else {
             let expert_count = architecture.expert_count;
             bind_matmul_weight(
@@ -956,13 +1097,29 @@ pub(crate) fn bind_all_weights<'file>(
                 ("ffn_up", feed_forward, embedding),
                 ("ffn_down", embedding, feed_forward),
             ] {
-                bind_moe_expert_weights(parsed, file_bytes, layer, projection, expert_count, out_dim, in_dim, &mut state)?;
+                bind_moe_expert_weights(
+                    parsed,
+                    file_bytes,
+                    layer,
+                    projection,
+                    expert_count,
+                    out_dim,
+                    in_dim,
+                    &mut state,
+                )?;
             }
         }
     }
 
     bind_dense(parsed, file_bytes, "output_norm.weight".into(), &mut state)?;
-    bind_matmul_weight(parsed, file_bytes, "output.weight".into(), vocab, embedding, &mut state)?;
+    bind_matmul_weight(
+        parsed,
+        file_bytes,
+        "output.weight".into(),
+        vocab,
+        embedding,
+        &mut state,
+    )?;
     Ok(state)
 }
 
@@ -1059,7 +1216,10 @@ mod tests {
                 on_disk[out_index * in_dim + in_index] = (out_index * 10 + in_index) as f32;
             }
         }
-        let bytes: Vec<u8> = on_disk.iter().flat_map(|value| value.to_le_bytes()).collect();
+        let bytes: Vec<u8> = on_disk
+            .iter()
+            .flat_map(|value| value.to_le_bytes())
+            .collect();
 
         let model = GgufModel {
             version: 3,
@@ -1071,8 +1231,10 @@ mod tests {
                 data: &bytes,
             }],
         };
-        let file_bytes = write_complete(&model).expect("writes gguf with an asymmetric f32 matmul weight");
-        let parsed = proxima_gguf::pipe::parse_complete(&file_bytes).expect("parses gguf with an asymmetric f32 matmul weight");
+        let file_bytes =
+            write_complete(&model).expect("writes gguf with an asymmetric f32 matmul weight");
+        let parsed = proxima_gguf::pipe::parse_complete(&file_bytes)
+            .expect("parses gguf with an asymmetric f32 matmul weight");
 
         let mut state = BoundWeights {
             resident_bytes: 0,
@@ -1080,13 +1242,25 @@ mod tests {
             packed: Vec::new(),
             packed_owned: Vec::new(),
         };
-        bind_matmul_weight_as(&parsed, &file_bytes, "blk.0.ffn_gate_inp.weight", "gate".to_string(), out_dim, in_dim, &mut state)
-            .expect("binds the asymmetric f32 matmul weight");
+        bind_matmul_weight_as(
+            &parsed,
+            &file_bytes,
+            "blk.0.ffn_gate_inp.weight",
+            "gate".to_string(),
+            out_dim,
+            in_dim,
+            &mut state,
+        )
+        .expect("binds the asymmetric f32 matmul weight");
         assert!(
             state.packed.is_empty(),
             "an F32 matmul weight must never take the raw-packed path -- nothing downstream corrects its layout"
         );
-        assert_eq!(state.owned.len(), 1, "the F32 matmul weight must land in the transposed owned path");
+        assert_eq!(
+            state.owned.len(),
+            1,
+            "the F32 matmul weight must land in the transposed owned path"
+        );
         let bound_weight = &state.owned[0].1;
 
         // Deliberately NOT symmetric around zero (an earlier draft used
@@ -1124,8 +1298,20 @@ mod tests {
                 dtype: proxima_tensor::dtype::DType::Float32,
                 body: proxima_tensor::op::ScalarOp::Multiply,
                 operands: alloc::vec![
-                    (activation_node, proxima_tensor::map::IndexMap::Affine(proxima_tensor::map::projection(2, &[1]))),
-                    (weight_node, proxima_tensor::map::IndexMap::Affine(proxima_tensor::map::projection(2, &[1, 0]))),
+                    (
+                        activation_node,
+                        proxima_tensor::map::IndexMap::Affine(proxima_tensor::map::projection(
+                            2,
+                            &[1]
+                        ))
+                    ),
+                    (
+                        weight_node,
+                        proxima_tensor::map::IndexMap::Affine(proxima_tensor::map::projection(
+                            2,
+                            &[1, 0]
+                        ))
+                    ),
                 ],
                 name: None,
             },
@@ -1137,19 +1323,32 @@ mod tests {
                 body: proxima_tensor::op::ScalarOp::Add,
                 init: proxima_tensor::op::ReduceInit::Zero,
                 operand: product,
-                in_map: proxima_tensor::map::IndexMap::Affine(proxima_tensor::map::projection(2, &[0, 1])),
-                out_map: proxima_tensor::map::IndexMap::Affine(proxima_tensor::map::projection(2, &[0])),
+                in_map: proxima_tensor::map::IndexMap::Affine(proxima_tensor::map::projection(
+                    2,
+                    &[0, 1],
+                )),
+                out_map: proxima_tensor::map::IndexMap::Affine(proxima_tensor::map::projection(
+                    2,
+                    &[0],
+                )),
                 keep: proxima_tensor::op::Keep::Reduce,
                 name: Some("logits".to_string()),
             }),
         );
 
         let named = [
-            ("activation", proxima_tensor::cpu::QuantizedBlock::Float32(activation.as_slice())),
-            ("gate", proxima_tensor::cpu::QuantizedBlock::Float32(bound_weight.as_slice())),
+            (
+                "activation",
+                proxima_tensor::cpu::QuantizedBlock::Float32(activation.as_slice()),
+            ),
+            (
+                "gate",
+                proxima_tensor::cpu::QuantizedBlock::Float32(bound_weight.as_slice()),
+            ),
         ];
-        let evaluated = proxima_tensor::cpu::evaluate_quantized_named(&program, &[], &named, &[logits])
-            .expect("evaluate the bound matmul weight through the real interpreter");
+        let evaluated =
+            proxima_tensor::cpu::evaluate_quantized_named(&program, &[], &named, &[logits])
+                .expect("evaluate the bound matmul weight through the real interpreter");
         let ours = evaluated.root();
 
         let mut oracle = vec![0.0f32; out_dim];
@@ -1164,7 +1363,10 @@ mod tests {
         std::println!("raw_packed_f32_matmul ours={ours:?} oracle={oracle:?}");
         for (out_index, (found, wanted)) in ours.iter().zip(&oracle).enumerate() {
             let diff = (found - wanted).abs();
-            assert!(diff < 1e-4, "output {out_index}: found={found} wanted={wanted} diff={diff}");
+            assert!(
+                diff < 1e-4,
+                "output {out_index}: found={found} wanted={wanted} diff={diff}"
+            );
         }
     }
 
@@ -1181,7 +1383,13 @@ mod tests {
         let in_dim = 8;
         let one_expert_short = vec![0.0f32; (expert_count - 1) * out_dim * in_dim];
 
-        let result = transpose_expert_stack(&one_expert_short, "blk.0.ffn_gate_exps.weight", expert_count, out_dim, in_dim);
+        let result = transpose_expert_stack(
+            &one_expert_short,
+            "blk.0.ffn_gate_exps.weight",
+            expert_count,
+            out_dim,
+            in_dim,
+        );
 
         assert!(
             matches!(result, Err(InteropError::MoeExpertShapeMismatch { .. })),
@@ -1212,7 +1420,10 @@ mod tests {
     #[test]
     fn f32_tensor_reinterprets_bytes_exactly() {
         let values = [1.0f32, -2.5, 3.25, 0.0];
-        let bytes: Vec<u8> = values.iter().flat_map(|value| value.to_le_bytes()).collect();
+        let bytes: Vec<u8> = values
+            .iter()
+            .flat_map(|value| value.to_le_bytes())
+            .collect();
         let model = GgufModel {
             version: 3,
             metadata: Vec::new(),
@@ -1226,7 +1437,8 @@ mod tests {
         let file_bytes = write_complete(&model).expect("writes gguf");
         let parsed = proxima_gguf::parse_complete(&file_bytes).expect("parses gguf");
 
-        let decoded = gguf_tensor_as_f32(&parsed, &file_bytes, "weights").expect("bind f32 tensor by name");
+        let decoded =
+            gguf_tensor_as_f32(&parsed, &file_bytes, "weights").expect("bind f32 tensor by name");
         assert_eq!(decoded, values);
     }
 
@@ -1257,13 +1469,21 @@ mod tests {
         let file_bytes = write_complete(&model).expect("writes quantized gguf");
         let parsed = proxima_gguf::parse_complete(&file_bytes).expect("parses quantized gguf");
 
-        let decoded =
-            gguf_tensor_as_f32(&parsed, &file_bytes, "blk.0.ffn_gate.weight").expect("bind q4_k tensor by name");
+        let decoded = gguf_tensor_as_f32(&parsed, &file_bytes, "blk.0.ffn_gate.weight")
+            .expect("bind q4_k tensor by name");
         assert_eq!(decoded.len(), q4_k::QK_K);
         // element 0: d*sc*q - dmin*m = 1.0*3.0*7.0 - 0.5*61.0 = -9.5
-        assert!((decoded[0] - (-9.5)).abs() < 1e-6, "decoded[0]={}", decoded[0]);
+        assert!(
+            (decoded[0] - (-9.5)).abs() < 1e-6,
+            "decoded[0]={}",
+            decoded[0]
+        );
         // every other element in sub_block 0 shares scale/min with q=0.
-        assert!((decoded[1] - (-30.5)).abs() < 1e-6, "decoded[1]={}", decoded[1]);
+        assert!(
+            (decoded[1] - (-30.5)).abs() < 1e-6,
+            "decoded[1]={}",
+            decoded[1]
+        );
     }
 
     #[test]
@@ -1297,7 +1517,10 @@ mod tests {
         let parsed = proxima_gguf::parse_complete(&file_bytes).expect("parses q4_0 gguf");
 
         let outcome = gguf_tensor_as_f32(&parsed, &file_bytes, "blk.0.attn_q.weight");
-        assert!(matches!(outcome, Err(InteropError::UnrepresentableGgmlType { .. })));
+        assert!(matches!(
+            outcome,
+            Err(InteropError::UnrepresentableGgmlType { .. })
+        ));
     }
 
     /// [`architecture_from_metadata`] against a synthetic checkpoint whose
@@ -1313,7 +1536,10 @@ mod tests {
         let model = GgufModel {
             version: 3,
             metadata: vec![
-                ("general.architecture".to_string(), Value::String("llama".to_string())),
+                (
+                    "general.architecture".to_string(),
+                    Value::String("llama".to_string()),
+                ),
                 ("llama.embedding_length".to_string(), Value::U32(8)),
                 ("llama.feed_forward_length".to_string(), Value::U32(32)),
                 ("llama.attention.head_count".to_string(), Value::U32(2)),
@@ -1329,9 +1555,11 @@ mod tests {
             }],
         };
         let file_bytes = write_complete(&model).expect("writes gguf with architecture metadata");
-        let parsed = proxima_gguf::parse_complete(&file_bytes).expect("parses gguf with architecture metadata");
+        let parsed = proxima_gguf::parse_complete(&file_bytes)
+            .expect("parses gguf with architecture metadata");
 
-        let architecture = architecture_from_metadata(&parsed).expect("derive architecture from real metadata keys");
+        let architecture = architecture_from_metadata(&parsed)
+            .expect("derive architecture from real metadata keys");
         assert_eq!(
             architecture,
             ModelArchitecture {
@@ -1364,7 +1592,10 @@ mod tests {
         let model = GgufModel {
             version: 3,
             metadata: vec![
-                ("general.architecture".to_string(), Value::String("llama".to_string())),
+                (
+                    "general.architecture".to_string(),
+                    Value::String("llama".to_string()),
+                ),
                 ("llama.embedding_length".to_string(), Value::U32(8)),
                 ("llama.feed_forward_length".to_string(), Value::U32(32)),
                 ("llama.attention.head_count".to_string(), Value::U32(2)),
@@ -1382,10 +1613,15 @@ mod tests {
             }],
         };
         let file_bytes = write_complete(&model).expect("writes gguf with moe metadata");
-        let parsed = proxima_gguf::parse_complete(&file_bytes).expect("parses gguf with moe metadata");
+        let parsed =
+            proxima_gguf::parse_complete(&file_bytes).expect("parses gguf with moe metadata");
 
-        let architecture = architecture_from_metadata(&parsed).expect("derive architecture from real metadata keys");
-        assert_eq!(architecture.expert_count, 8, "expert_count must read the real metadata key, not default to 0");
+        let architecture = architecture_from_metadata(&parsed)
+            .expect("derive architecture from real metadata keys");
+        assert_eq!(
+            architecture.expert_count, 8,
+            "expert_count must read the real metadata key, not default to 0"
+        );
         assert_eq!(
             architecture.expert_used_count, 2,
             "expert_used_count must read the real metadata key, not default to 0"
@@ -1407,7 +1643,10 @@ mod tests {
         let model = GgufModel {
             version: 3,
             metadata: vec![
-                ("general.architecture".to_string(), Value::String("llama".to_string())),
+                (
+                    "general.architecture".to_string(),
+                    Value::String("llama".to_string()),
+                ),
                 ("llama.embedding_length".to_string(), Value::U32(8)),
                 ("llama.feed_forward_length".to_string(), Value::U32(32)),
                 ("llama.attention.head_count".to_string(), Value::U32(2)),
@@ -1423,11 +1662,15 @@ mod tests {
             }],
         };
         let file_bytes = write_complete(&model).expect("writes gguf without rope.dimension_count");
-        let parsed = proxima_gguf::parse_complete(&file_bytes).expect("parses gguf without rope.dimension_count");
+        let parsed = proxima_gguf::parse_complete(&file_bytes)
+            .expect("parses gguf without rope.dimension_count");
 
-        let architecture =
-            architecture_from_metadata(&parsed).expect("absent rope.dimension_count must derive, not error");
-        assert_eq!(architecture.head_dim, 4, "head_dim must derive as embedding(8) / query_heads(2)");
+        let architecture = architecture_from_metadata(&parsed)
+            .expect("absent rope.dimension_count must derive, not error");
+        assert_eq!(
+            architecture.head_dim, 4,
+            "head_dim must derive as embedding(8) / query_heads(2)"
+        );
     }
 
     /// `{architecture}.attention.head_count_kv` stored as a per-layer
@@ -1443,11 +1686,17 @@ mod tests {
         let model = GgufModel {
             version: 3,
             metadata: vec![
-                ("general.architecture".to_string(), Value::String("llama".to_string())),
+                (
+                    "general.architecture".to_string(),
+                    Value::String("llama".to_string()),
+                ),
                 ("llama.embedding_length".to_string(), Value::U32(8)),
                 ("llama.feed_forward_length".to_string(), Value::U32(32)),
                 ("llama.attention.head_count".to_string(), Value::U32(2)),
-                ("llama.attention.head_count_kv".to_string(), Value::Array(MetadataArray::I32(vec![1, 1, 1, 1]))),
+                (
+                    "llama.attention.head_count_kv".to_string(),
+                    Value::Array(MetadataArray::I32(vec![1, 1, 1, 1])),
+                ),
                 ("llama.block_count".to_string(), Value::U32(4)),
                 ("llama.rope.dimension_count".to_string(), Value::U32(4)),
             ],
@@ -1458,11 +1707,13 @@ mod tests {
                 data: &embed_bytes,
             }],
         };
-        let file_bytes = write_complete(&model).expect("writes gguf with a uniform head_count_kv array");
-        let parsed = proxima_gguf::parse_complete(&file_bytes).expect("parses gguf with a uniform head_count_kv array");
+        let file_bytes =
+            write_complete(&model).expect("writes gguf with a uniform head_count_kv array");
+        let parsed = proxima_gguf::parse_complete(&file_bytes)
+            .expect("parses gguf with a uniform head_count_kv array");
 
-        let architecture =
-            architecture_from_metadata(&parsed).expect("a uniform per-layer array must read as its one scalar");
+        let architecture = architecture_from_metadata(&parsed)
+            .expect("a uniform per-layer array must read as its one scalar");
         assert_eq!(architecture.kv_heads, 1);
     }
 
@@ -1485,7 +1736,10 @@ mod tests {
         let model = GgufModel {
             version: 3,
             metadata: vec![
-                ("general.architecture".to_string(), Value::String("lfm2".to_string())),
+                (
+                    "general.architecture".to_string(),
+                    Value::String("lfm2".to_string()),
+                ),
                 ("lfm2.embedding_length".to_string(), Value::U32(8)),
                 ("lfm2.feed_forward_length".to_string(), Value::U32(32)),
                 ("lfm2.attention.head_count".to_string(), Value::U32(2)),
@@ -1503,9 +1757,10 @@ mod tests {
                 data: &embed_bytes,
             }],
         };
-        let file_bytes = write_complete(&model).expect("writes gguf with a heterogeneous head_count_kv array");
-        let parsed =
-            proxima_gguf::parse_complete(&file_bytes).expect("parses gguf with a heterogeneous head_count_kv array");
+        let file_bytes =
+            write_complete(&model).expect("writes gguf with a heterogeneous head_count_kv array");
+        let parsed = proxima_gguf::parse_complete(&file_bytes)
+            .expect("parses gguf with a heterogeneous head_count_kv array");
 
         let outcome = architecture_from_metadata(&parsed);
         assert!(
@@ -1538,7 +1793,10 @@ mod tests {
         let model = GgufModel {
             version: 3,
             metadata: vec![
-                ("general.architecture".to_string(), Value::String("llama".to_string())),
+                (
+                    "general.architecture".to_string(),
+                    Value::String("llama".to_string()),
+                ),
                 ("llama.embedding_length".to_string(), Value::U32(8)),
                 ("llama.feed_forward_length".to_string(), Value::U32(32)),
                 ("llama.attention.head_count".to_string(), Value::U32(2)),
@@ -1554,12 +1812,16 @@ mod tests {
                 data: &embed_bytes,
             }],
         };
-        let file_bytes = write_complete(&model).expect("writes gguf with a non-default rope.freq_base");
-        let parsed = proxima_gguf::parse_complete(&file_bytes).expect("parses gguf with a non-default rope.freq_base");
+        let file_bytes =
+            write_complete(&model).expect("writes gguf with a non-default rope.freq_base");
+        let parsed = proxima_gguf::parse_complete(&file_bytes)
+            .expect("parses gguf with a non-default rope.freq_base");
 
-        let architecture = architecture_from_metadata(&parsed).expect("derive architecture from real metadata keys");
+        let architecture = architecture_from_metadata(&parsed)
+            .expect("derive architecture from real metadata keys");
         assert_eq!(
-            architecture.rope_freq_base, freq_base,
+            architecture.rope_freq_base,
+            freq_base,
             "rope_freq_base must read the checkpoint's own metadata key, never the {}-default",
             proxima_tensor::sized::ROPE_FREQ_BASE_DEFAULT
         );
@@ -1582,7 +1844,10 @@ mod tests {
         let model = GgufModel {
             version: 3,
             metadata: vec![
-                ("general.architecture".to_string(), Value::String("llama".to_string())),
+                (
+                    "general.architecture".to_string(),
+                    Value::String("llama".to_string()),
+                ),
                 ("llama.embedding_length".to_string(), Value::U32(8)),
                 ("llama.feed_forward_length".to_string(), Value::U32(32)),
                 ("llama.attention.head_count".to_string(), Value::U32(2)),
@@ -1599,10 +1864,15 @@ mod tests {
             }],
         };
         let file_bytes = write_complete(&model).expect("writes gguf with an f64 rope.freq_base");
-        let parsed = proxima_gguf::parse_complete(&file_bytes).expect("parses gguf with an f64 rope.freq_base");
+        let parsed = proxima_gguf::parse_complete(&file_bytes)
+            .expect("parses gguf with an f64 rope.freq_base");
 
-        let architecture = architecture_from_metadata(&parsed).expect("derive architecture from real metadata keys");
-        assert_eq!(architecture.rope_freq_base, 1_000_000.0, "an f64-encoded key must still be read");
+        let architecture = architecture_from_metadata(&parsed)
+            .expect("derive architecture from real metadata keys");
+        assert_eq!(
+            architecture.rope_freq_base, 1_000_000.0,
+            "an f64-encoded key must still be read"
+        );
     }
 
     #[test]
@@ -1673,13 +1943,21 @@ mod moe_memory_shape {
     /// names for this exact fixture shape.
     fn expert_values(seed: u32) -> alloc::vec::Vec<f32> {
         (0..(OUT_DIM * IN_DIM))
-            .map(|index| ((index as u32).wrapping_mul(2_654_435_761).wrapping_add(seed) % 1000) as f32 / 1000.0 - 0.5)
+            .map(|index| {
+                ((index as u32)
+                    .wrapping_mul(2_654_435_761)
+                    .wrapping_add(seed)
+                    % 1000) as f32
+                    / 1000.0
+                    - 0.5
+            })
             .collect()
     }
 
     fn quantize_q4_k(values: &[f32]) -> alloc::vec::Vec<u8> {
         let mut bytes = alloc::vec![0u8; values.len() / q4_k::QK_K * q4_k::BLOCK_BYTES];
-        q4_k::quantize(values, &mut bytes).expect("real q4_k encoder quantizes this fixture's own weight data");
+        q4_k::quantize(values, &mut bytes)
+            .expect("real q4_k encoder quantizes this fixture's own weight data");
         bytes
     }
 
@@ -1688,11 +1966,15 @@ mod moe_memory_shape {
     /// [`bind_moe_stacked_experts`]'s safe packed arm actually fires (see
     /// that function's own doc for why only `F32` is safe here).
     fn checkpoint_with_native_stacked_f32_experts() -> alloc::vec::Vec<u8> {
-        let mut values: alloc::vec::Vec<f32> = alloc::vec::Vec::with_capacity(EXPERT_COUNT as usize * OUT_DIM * IN_DIM);
+        let mut values: alloc::vec::Vec<f32> =
+            alloc::vec::Vec::with_capacity(EXPERT_COUNT as usize * OUT_DIM * IN_DIM);
         for expert in 0..EXPERT_COUNT {
             values.extend(expert_values(expert));
         }
-        let bytes: alloc::vec::Vec<u8> = values.iter().flat_map(|value| value.to_le_bytes()).collect();
+        let bytes: alloc::vec::Vec<u8> = values
+            .iter()
+            .flat_map(|value| value.to_le_bytes())
+            .collect();
         let model = GgufModel {
             version: 3,
             metadata: alloc::vec::Vec::new(),
@@ -1703,7 +1985,8 @@ mod moe_memory_shape {
                 data: &bytes,
             }],
         };
-        write_complete(&model).expect("writes a well-formed synthetic native-stacked moe checkpoint")
+        write_complete(&model)
+            .expect("writes a well-formed synthetic native-stacked moe checkpoint")
     }
 
     /// The real Mixtral-8x7B on-disk convention (`restack.rs`'s own module
@@ -1733,7 +2016,8 @@ mod moe_memory_shape {
             metadata: alloc::vec::Vec::new(),
             tensors: payloads,
         };
-        write_complete(&model).expect("writes a well-formed synthetic per-expert-tensor moe checkpoint")
+        write_complete(&model)
+            .expect("writes a well-formed synthetic per-expert-tensor moe checkpoint")
     }
 
     fn empty_state(file_bytes: &[u8]) -> BoundWeights<'_> {
@@ -1746,11 +2030,19 @@ mod moe_memory_shape {
     }
 
     fn owned_bytes_total(state: &BoundWeights) -> usize {
-        state.owned.iter().map(|(_, data)| data.len() * core::mem::size_of::<f32>()).sum()
+        state
+            .owned
+            .iter()
+            .map(|(_, data)| data.len() * core::mem::size_of::<f32>())
+            .sum()
     }
 
     fn packed_owned_bytes_total(state: &BoundWeights) -> usize {
-        state.packed_owned.iter().map(|(_, bytes, _)| bytes.len()).sum()
+        state
+            .packed_owned
+            .iter()
+            .map(|(_, bytes, _)| bytes.len())
+            .sum()
     }
 
     /// A real Mixtral-8x7B's own shape, for the assertion's own numbers to
@@ -1783,26 +2075,60 @@ mod moe_memory_shape {
     #[proxima::test]
     #[case::native_stacked_f32(true)]
     #[case::per_expert_q4_k(false)]
-    async fn moe_owned_allocation_matches_the_checkpoints_own_layout_convention(#[case] native_stacked: bool) {
+    async fn moe_owned_allocation_matches_the_checkpoints_own_layout_convention(
+        #[case] native_stacked: bool,
+    ) {
         let file_bytes = if native_stacked {
             checkpoint_with_native_stacked_f32_experts()
         } else {
             checkpoint_with_per_expert_q4_k_tensors()
         };
-        let parsed = proxima_gguf::parse_complete(&file_bytes).expect("parses synthetic moe checkpoint");
+        let parsed =
+            proxima_gguf::parse_complete(&file_bytes).expect("parses synthetic moe checkpoint");
         let mut state = empty_state(&file_bytes);
 
-        bind_moe_expert_weights(&parsed, &file_bytes, 0, "ffn_gate", EXPERT_COUNT, OUT_DIM, IN_DIM, &mut state)
-            .expect("binds this case's own expert tensor layout");
+        bind_moe_expert_weights(
+            &parsed,
+            &file_bytes,
+            0,
+            "ffn_gate",
+            EXPERT_COUNT,
+            OUT_DIM,
+            IN_DIM,
+            &mut state,
+        )
+        .expect("binds this case's own expert tensor layout");
 
         if native_stacked {
-            assert_eq!(state.packed.len(), 1, "one packed entry for the whole native stack, no per-expert split");
-            assert!(state.packed_owned.is_empty(), "a native stacked tensor has one contiguous byte range -- nothing to restack");
-            assert_eq!(owned_bytes_total(&state), 0, "an f32 native stack must borrow zero-copy, allocating no owned f32 bytes");
+            assert_eq!(
+                state.packed.len(),
+                1,
+                "one packed entry for the whole native stack, no per-expert split"
+            );
+            assert!(
+                state.packed_owned.is_empty(),
+                "a native stacked tensor has one contiguous byte range -- nothing to restack"
+            );
+            assert_eq!(
+                owned_bytes_total(&state),
+                0,
+                "an f32 native stack must borrow zero-copy, allocating no owned f32 bytes"
+            );
         } else {
-            assert!(state.packed.is_empty(), "the restacked buffer is caller-owned, never a zero-copy borrow out of file_bytes");
-            assert_eq!(state.packed_owned.len(), 1, "one restacked packed entry for the whole q4_k expert stack");
-            assert_eq!(owned_bytes_total(&state), 0, "a q4_k expert stack must stay packed, allocating no dequantized f32 bytes");
+            assert!(
+                state.packed.is_empty(),
+                "the restacked buffer is caller-owned, never a zero-copy borrow out of file_bytes"
+            );
+            assert_eq!(
+                state.packed_owned.len(),
+                1,
+                "one restacked packed entry for the whole q4_k expert stack"
+            );
+            assert_eq!(
+                owned_bytes_total(&state),
+                0,
+                "a q4_k expert stack must stay packed, allocating no dequantized f32 bytes"
+            );
             assert_eq!(
                 packed_owned_bytes_total(&state),
                 packed_floor_bytes(),
@@ -1823,11 +2149,21 @@ mod moe_memory_shape {
     #[proxima::test]
     async fn moe_experts_now_stay_packed_for_the_real_per_expert_tensor_convention() {
         let file_bytes = checkpoint_with_per_expert_q4_k_tensors();
-        let parsed = proxima_gguf::parse_complete(&file_bytes).expect("parses synthetic per-expert-tensor moe checkpoint");
+        let parsed = proxima_gguf::parse_complete(&file_bytes)
+            .expect("parses synthetic per-expert-tensor moe checkpoint");
         let mut state = empty_state(&file_bytes);
 
-        bind_moe_expert_weights(&parsed, &file_bytes, 0, "ffn_gate", EXPERT_COUNT, OUT_DIM, IN_DIM, &mut state)
-            .expect("binds the per-expert-tensor q4_k experts");
+        bind_moe_expert_weights(
+            &parsed,
+            &file_bytes,
+            0,
+            "ffn_gate",
+            EXPERT_COUNT,
+            OUT_DIM,
+            IN_DIM,
+            &mut state,
+        )
+        .expect("binds the per-expert-tensor q4_k experts");
 
         let owned = owned_bytes_total(&state);
         let packed_owned = packed_owned_bytes_total(&state);
@@ -1836,7 +2172,10 @@ mod moe_memory_shape {
             packed_floor_bytes(),
             dequantized_owned_ceiling_bytes()
         );
-        assert_eq!(owned, 0, "a q4_k expert stack must allocate zero dequantized f32 bytes");
+        assert_eq!(
+            owned, 0,
+            "a q4_k expert stack must allocate zero dequantized f32 bytes"
+        );
         assert!(
             packed_owned <= packed_floor_bytes() * 2,
             "packed-owned allocation ({packed_owned} bytes) must be proportional to the packed size ({} bytes), not to \
@@ -1866,7 +2205,9 @@ mod real_openchat_file {
     use proxima_gguf::quant::q4_k;
     use proxima_primitives::pipe::Pipe;
     use proxima_tensor::DType;
-    use proxima_tensor::cpu::{QuantizedBlock, evaluate_named, evaluate_quantized_named_with_scratch};
+    use proxima_tensor::cpu::{
+        QuantizedBlock, evaluate_named, evaluate_quantized_named_with_scratch,
+    };
     use proxima_tensor::map::{self, IndexMap};
     use proxima_tensor::op::{self, Extent, Keep, Op, Reduce, ReduceInit, ScalarOp, append};
 
@@ -1902,7 +2243,8 @@ mod real_openchat_file {
     impl MappedGguf {
         fn open(path: &std::path::Path) -> std::io::Result<Self> {
             let file = std::fs::File::open(path)?;
-            let len = usize::try_from(file.metadata()?.len()).expect("fixture file length fits in usize");
+            let len =
+                usize::try_from(file.metadata()?.len()).expect("fixture file length fits in usize");
             // SAFETY: `len` matches the just-opened file's own length; `file`
             // is kept alive in `_file` for as long as `base` is used, and the
             // mapping is read-only/private so no writer can observe or race it.
@@ -1918,7 +2260,11 @@ mod real_openchat_file {
             }
             .expect("mmap host-local openchat gguf fixture")
             .cast::<u8>();
-            Ok(Self { base, len, _file: file })
+            Ok(Self {
+                base,
+                len,
+                _file: file,
+            })
         }
 
         fn as_slice(&self) -> &[u8] {
@@ -1988,7 +2334,9 @@ mod real_openchat_file {
         let mut context = Context::from_waker(waker);
         match future.as_mut().poll(&mut context) {
             Poll::Ready(output) => output,
-            Poll::Pending => unreachable!("proxima-model-interop pipes never yield: no internal .await"),
+            Poll::Pending => {
+                unreachable!("proxima-model-interop pipes never yield: no internal .await")
+            }
         }
     }
 
@@ -2015,10 +2363,12 @@ mod real_openchat_file {
 
         let mapped = MappedGguf::open(path).expect("mmap host-local openchat gguf fixture");
         let file_bytes = mapped.as_slice();
-        let parsed = proxima_gguf::pipe::parse_complete(file_bytes).expect("parse host-local openchat gguf fixture");
+        let parsed = proxima_gguf::pipe::parse_complete(file_bytes)
+            .expect("parse host-local openchat gguf fixture");
         prefault_if_requested(file_bytes);
 
-        let model = LoadedModel::load(&parsed, file_bytes).expect("load real openchat checkpoint through the public path");
+        let model = LoadedModel::load(&parsed, file_bytes)
+            .expect("load real openchat checkpoint through the public path");
         let prompt = "The capital of France is";
         let forward_start = std::time::Instant::now();
         let generated = block_on(model.call((prompt.into(), 1)))
@@ -2033,8 +2383,14 @@ mod real_openchat_file {
 
         // llama.cpp's own captured greedy answer for this exact prompt and
         // checkpoint (guiding-principle 14: the incumbent is the oracle).
-        assert_eq!(generated.0[0], 2651, "greedy token id drifted off llama.cpp's captured answer");
-        assert_eq!(generated.1, "known", "greedy token text drifted off llama.cpp's captured answer");
+        assert_eq!(
+            generated.0[0], 2651,
+            "greedy token id drifted off llama.cpp's captured answer"
+        );
+        assert_eq!(
+            generated.1, "known",
+            "greedy token text drifted off llama.cpp's captured answer"
+        );
     }
 
     /// The multi-token counterpart, through the same public path: one
@@ -2060,10 +2416,12 @@ mod real_openchat_file {
 
         let mapped = MappedGguf::open(path).expect("mmap host-local openchat gguf fixture");
         let file_bytes = mapped.as_slice();
-        let parsed = proxima_gguf::pipe::parse_complete(file_bytes).expect("parse host-local openchat gguf fixture");
+        let parsed = proxima_gguf::pipe::parse_complete(file_bytes)
+            .expect("parse host-local openchat gguf fixture");
         prefault_if_requested(file_bytes);
 
-        let model = LoadedModel::load(&parsed, file_bytes).expect("load real openchat checkpoint through the public path");
+        let model = LoadedModel::load(&parsed, file_bytes)
+            .expect("load real openchat checkpoint through the public path");
         let prompt = decode_loop_prompt();
         let max_tokens = decode_loop_max_tokens();
 
@@ -2073,7 +2431,8 @@ mod real_openchat_file {
             .expect("generate through the public Pipe path");
         let total_elapsed = decode_start.elapsed();
         let tokens_generated = generated.0.len();
-        let mean_ms_per_token = total_elapsed.as_secs_f64() * 1000.0 / tokens_generated.max(1) as f64;
+        let mean_ms_per_token =
+            total_elapsed.as_secs_f64() * 1000.0 / tokens_generated.max(1) as f64;
 
         std::println!(
             "decode_summary tokens_generated={tokens_generated} stopped_by_eos={} total_wall_clock_ms={:.3} mean_ms_per_token={mean_ms_per_token:.3} generated_text={:?}",
@@ -2096,7 +2455,11 @@ mod real_openchat_file {
                 "quant_arm q4k_macs={} q4k_ms={:.3} q4k_ns_per_mac={:.5} q5k_macs={} q6k_macs={} q5k_f32_calls={} q6k_f32_calls={} reduce_quantized_calls={} workers_calls={} workers_none={}",
                 quant.q4k_macs,
                 q4k_ns as f64 / 1e6,
-                if quant.q4k_macs == 0 { 0.0 } else { q4k_ns as f64 / quant.q4k_macs as f64 },
+                if quant.q4k_macs == 0 {
+                    0.0
+                } else {
+                    q4k_ns as f64 / quant.q4k_macs as f64
+                },
                 quant.q5k_macs,
                 quant.q6k_macs,
                 quant.q5k_f32_calls,
@@ -2149,7 +2512,8 @@ mod real_openchat_file {
                 if quant.staged_macs == 0 {
                     0.0
                 } else {
-                    proxima_tensor::instrument::ticks_to_nanos(quant.staged_round_ticks) as f64 / quant.staged_macs as f64
+                    proxima_tensor::instrument::ticks_to_nanos(quant.staged_round_ticks) as f64
+                        / quant.staged_macs as f64
                 },
             );
             let rounds = cohort_diag::ROUNDS.load(Ordering::Relaxed);
@@ -2165,7 +2529,8 @@ mod real_openchat_file {
                 if slot_rounds == 0 {
                     continue;
                 }
-                let first_claim_ns = cohort_diag::SLOT_FIRST_CLAIM_NANOS[slot].load(Ordering::Relaxed);
+                let first_claim_ns =
+                    cohort_diag::SLOT_FIRST_CLAIM_NANOS[slot].load(Ordering::Relaxed);
                 let tail_ns = cohort_diag::SLOT_TAIL_NANOS[slot].load(Ordering::Relaxed);
                 let compute_ns = cohort_diag::SLOT_COMPUTE_NANOS[slot].load(Ordering::Relaxed);
                 let chunks = cohort_diag::SLOT_CHUNKS[slot].load(Ordering::Relaxed);
@@ -2183,16 +2548,25 @@ mod real_openchat_file {
         // eos id actually is (`<|end_of_turn|>`, not `</s>`). the budget is
         // still a hard ceiling either way, and an eos stop must be
         // distinguishable from budget exhaustion via `generated.2`.
-        assert!(tokens_generated <= max_tokens, "decode loop must never exceed the requested budget");
+        assert!(
+            tokens_generated <= max_tokens,
+            "decode loop must never exceed the requested budget"
+        );
         if generated.2 {
             assert!(
                 tokens_generated < max_tokens,
                 "an eos stop must have produced strictly fewer ids than the full budget"
             );
         } else {
-            assert_eq!(tokens_generated, max_tokens, "budget exhaustion must produce exactly one id per step");
+            assert_eq!(
+                tokens_generated, max_tokens,
+                "budget exhaustion must produce exactly one id per step"
+            );
         }
-        assert!(!generated.1.is_empty(), "degenerate control: decode loop produced no text");
+        assert!(
+            !generated.1.is_empty(),
+            "degenerate control: decode loop produced no text"
+        );
     }
 
     /// Same cached decode loop, on the Metal backend instead of CPU:
@@ -2226,10 +2600,12 @@ mod real_openchat_file {
 
         let mapped = MappedGguf::open(path).expect("mmap host-local openchat gguf fixture");
         let file_bytes = mapped.as_slice();
-        let parsed = proxima_gguf::pipe::parse_complete(file_bytes).expect("parse host-local openchat gguf fixture");
+        let parsed = proxima_gguf::pipe::parse_complete(file_bytes)
+            .expect("parse host-local openchat gguf fixture");
         prefault_if_requested(file_bytes);
 
-        let model = LoadedModel::load(&parsed, file_bytes).expect("load real openchat checkpoint through the public path");
+        let model = LoadedModel::load(&parsed, file_bytes)
+            .expect("load real openchat checkpoint through the public path");
         let prompt = decode_loop_prompt();
         let max_tokens = decode_loop_max_tokens();
 
@@ -2270,7 +2646,10 @@ mod real_openchat_file {
             runtime.plan_misses, forward_calls_taken,
             "every forward step builds exactly one new plan when none can ever be reused"
         );
-        assert!(!generated.1.is_empty(), "degenerate control: metal decode loop produced no text");
+        assert!(
+            !generated.1.is_empty(),
+            "degenerate control: metal decode loop produced no text"
+        );
     }
 
     /// Diagnostic-only: drives the same real cached decode loop as
@@ -2303,10 +2682,12 @@ mod real_openchat_file {
 
         let mapped = MappedGguf::open(path).expect("mmap host-local openchat gguf fixture");
         let file_bytes = mapped.as_slice();
-        let parsed = proxima_gguf::pipe::parse_complete(file_bytes).expect("parse host-local openchat gguf fixture");
+        let parsed = proxima_gguf::pipe::parse_complete(file_bytes)
+            .expect("parse host-local openchat gguf fixture");
         prefault_if_requested(file_bytes);
 
-        let model = LoadedModel::load(&parsed, file_bytes).expect("load real openchat checkpoint through the public path");
+        let model = LoadedModel::load(&parsed, file_bytes)
+            .expect("load real openchat checkpoint through the public path");
         let prompt = decode_loop_prompt();
         let max_tokens = 5;
 
@@ -2345,7 +2726,10 @@ mod real_openchat_file {
             generated.2,
             generated.1
         );
-        assert!(!generated.1.is_empty(), "degenerate control: metal decode loop produced no text");
+        assert!(
+            !generated.1.is_empty(),
+            "degenerate control: metal decode loop produced no text"
+        );
     }
 
     /// Same harness as
@@ -2377,10 +2761,12 @@ mod real_openchat_file {
 
         let mapped = MappedGguf::open(path).expect("mmap host-local openchat gguf fixture");
         let file_bytes = mapped.as_slice();
-        let parsed = proxima_gguf::pipe::parse_complete(file_bytes).expect("parse host-local openchat gguf fixture");
+        let parsed = proxima_gguf::pipe::parse_complete(file_bytes)
+            .expect("parse host-local openchat gguf fixture");
         prefault_if_requested(file_bytes);
 
-        let model = LoadedModel::load(&parsed, file_bytes).expect("load real openchat checkpoint through the public path");
+        let model = LoadedModel::load(&parsed, file_bytes)
+            .expect("load real openchat checkpoint through the public path");
         let prompt = decode_loop_prompt();
         let max_tokens = 1;
 
@@ -2415,7 +2801,10 @@ mod real_openchat_file {
             generated.2,
             generated.1
         );
-        assert!(!generated.1.is_empty(), "degenerate control: metal decode loop produced no text");
+        assert!(
+            !generated.1.is_empty(),
+            "degenerate control: metal decode loop produced no text"
+        );
     }
 
     /// Every real openchat weight this checkpoint's cached forward program
@@ -2450,13 +2839,19 @@ mod real_openchat_file {
         for offset in 0..new_count {
             let position = (start_position + offset) as f32;
             for pair in 0..pairs {
-                let theta = position * rope_freq_base.powf(-((2 * pair) as f32) / (head_dim as f32));
+                let theta =
+                    position * rope_freq_base.powf(-((2 * pair) as f32) / (head_dim as f32));
                 cos[offset * pairs + pair] = theta.cos();
                 sin[offset * pairs + pair] = theta.sin();
             }
         }
 
-        CachedPositionInputs { ids_f32, epsilon, cos, sin }
+        CachedPositionInputs {
+            ids_f32,
+            epsilon,
+            cos,
+            sin,
+        }
     }
 
     const RMS_EPSILON: f32 = 1e-5;
@@ -2469,15 +2864,31 @@ mod real_openchat_file {
     /// tensors through -- this seam test evaluates only one step
     /// (`cached_len == 0`), so nothing ever appends and `Q8_0` stays empty.
     enum LayerCache {
-        Float32 { k_even: Vec<f32>, k_odd: Vec<f32>, v: Vec<f32> },
-        Q8_0 { k_even: Vec<u8>, k_odd: Vec<u8>, v: Vec<u8> },
+        Float32 {
+            k_even: Vec<f32>,
+            k_odd: Vec<f32>,
+            v: Vec<f32>,
+        },
+        Q8_0 {
+            k_even: Vec<u8>,
+            k_odd: Vec<u8>,
+            v: Vec<u8>,
+        },
     }
 
     impl LayerCache {
         fn new(precision: GgmlType) -> Self {
             match precision {
-                GgmlType::Q8_0 => LayerCache::Q8_0 { k_even: Vec::new(), k_odd: Vec::new(), v: Vec::new() },
-                _ => LayerCache::Float32 { k_even: Vec::new(), k_odd: Vec::new(), v: Vec::new() },
+                GgmlType::Q8_0 => LayerCache::Q8_0 {
+                    k_even: Vec::new(),
+                    k_odd: Vec::new(),
+                    v: Vec::new(),
+                },
+                _ => LayerCache::Float32 {
+                    k_even: Vec::new(),
+                    k_odd: Vec::new(),
+                    v: Vec::new(),
+                },
             }
         }
 
@@ -2532,9 +2943,12 @@ mod real_openchat_file {
         let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let mapped = MappedGguf::open(path).expect("mmap host-local openchat gguf fixture");
             let file_bytes = mapped.as_slice();
-            let parsed = proxima_gguf::pipe::parse_complete(file_bytes).expect("parse host-local openchat gguf fixture");
-            let architecture = architecture_from_metadata(&parsed).expect("derive architecture from real metadata");
-            let weights = bind_all_weights(&parsed, file_bytes, &architecture).expect("bind real openchat checkpoint weights");
+            let parsed = proxima_gguf::pipe::parse_complete(file_bytes)
+                .expect("parse host-local openchat gguf fixture");
+            let architecture = architecture_from_metadata(&parsed)
+                .expect("derive architecture from real metadata");
+            let weights = bind_all_weights(&parsed, file_bytes, &architecture)
+                .expect("bind real openchat checkpoint weights");
 
             use proxima_tensor::spec::mistral_cached_forward_program;
             let (program, logits_root, cache_roots) = mistral_cached_forward_program(
@@ -2548,8 +2962,11 @@ mod real_openchat_file {
             )
             .expect("the cached forward pass lowers to a program");
 
-            let kv_cache_names: Vec<(alloc::string::String, alloc::string::String, alloc::string::String)> = (0..architecture
-                .block_count as usize)
+            let kv_cache_names: Vec<(
+                alloc::string::String,
+                alloc::string::String,
+                alloc::string::String,
+            )> = (0..architecture.block_count as usize)
                 .map(|layer| {
                     (
                         alloc::format!("kv_cache.{layer}.k_even"),
@@ -2558,18 +2975,29 @@ mod real_openchat_file {
                     )
                 })
                 .collect();
-            let layer_caches: Vec<LayerCache> =
-                (0..architecture.block_count as usize).map(|_| LayerCache::new(GgmlType::Q8_0)).collect();
+            let layer_caches: Vec<LayerCache> = (0..architecture.block_count as usize)
+                .map(|_| LayerCache::new(GgmlType::Q8_0))
+                .collect();
 
             let prompt = default_prompt();
             let ids = proxima_tokenizer::gguf::vocab_from_metadata(&parsed)
-                .and_then(|vocab| proxima_tokenizer::encode_with_bos_eos(&prompt, &vocab, true, false))
+                .and_then(|vocab| {
+                    proxima_tokenizer::encode_with_bos_eos(&prompt, &vocab, true, false)
+                })
                 .expect("build vocab and encode prompt");
 
-            let inputs =
-                build_cached_position_inputs(&ids, 0, architecture.head_dim, architecture.rope_freq_base);
-            let mut named_blocks: Vec<(&str, QuantizedBlock)> =
-                Vec::with_capacity(weights.owned.len() + weights.packed.len() + 3 + architecture.block_count as usize * 3);
+            let inputs = build_cached_position_inputs(
+                &ids,
+                0,
+                architecture.head_dim,
+                architecture.rope_freq_base,
+            );
+            let mut named_blocks: Vec<(&str, QuantizedBlock)> = Vec::with_capacity(
+                weights.owned.len()
+                    + weights.packed.len()
+                    + 3
+                    + architecture.block_count as usize * 3,
+            );
             named_blocks.push(("ids", QuantizedBlock::Float32(inputs.ids_f32.as_slice())));
             for (name, data) in &weights.owned {
                 named_blocks.push((name.as_str(), QuantizedBlock::Float32(data.as_slice())));
@@ -2581,7 +3009,11 @@ mod real_openchat_file {
             named_blocks.push(("rope_cos", QuantizedBlock::Float32(inputs.cos.as_slice())));
             named_blocks.push(("rope_sin", QuantizedBlock::Float32(inputs.sin.as_slice())));
             for (layer, (k_even_name, k_odd_name, v_name)) in kv_cache_names.iter().enumerate() {
-                named_blocks.extend(layer_caches[layer].named_blocks(k_even_name, k_odd_name, v_name));
+                named_blocks.extend(layer_caches[layer].named_blocks(
+                    k_even_name,
+                    k_odd_name,
+                    v_name,
+                ));
             }
 
             let symbols = [ids.len() as u64, 0u64];
@@ -2602,7 +3034,9 @@ mod real_openchat_file {
                 &mut free_buffers,
                 &mut validated_weight_nodes,
             )
-            .expect("evaluate_quantized_named_with_scratch binds the q8_0 cache seam probe by name");
+            .expect(
+                "evaluate_quantized_named_with_scratch binds the q8_0 cache seam probe by name",
+            );
         }));
 
         let panic_payload = outcome.expect_err(
@@ -2612,7 +3046,11 @@ mod real_openchat_file {
         let message = panic_payload
             .downcast_ref::<alloc::string::String>()
             .cloned()
-            .or_else(|| panic_payload.downcast_ref::<&str>().map(|value| alloc::string::String::from(*value)))
+            .or_else(|| {
+                panic_payload
+                    .downcast_ref::<&str>()
+                    .map(|value| alloc::string::String::from(*value))
+            })
             .unwrap_or_default();
         assert!(
             message.contains(
@@ -2640,7 +3078,8 @@ mod real_openchat_file {
             return;
         }
 
-        let (parsed, file_bytes) = proxima_gguf::edge::read_file(path).expect("read host-local openchat gguf fixture");
+        let (parsed, file_bytes) =
+            proxima_gguf::edge::read_file(path).expect("read host-local openchat gguf fixture");
 
         // a mid-network `ffn_gate` row, not `token_embd`'s row 0 -- that
         // row is the padding-token embedding and its first super-block
@@ -2655,12 +3094,17 @@ mod real_openchat_file {
                     && tensor.name.contains("ffn_gate")
             })
             .map(|tensor| tensor.name.clone())
-            .expect("openchat checkpoint has at least one q4_k ffn_gate tensor with a full super-block");
+            .expect(
+                "openchat checkpoint has at least one q4_k ffn_gate tensor with a full super-block",
+            );
 
-        let decoded = gguf_tensor_as_f32(&parsed, &file_bytes, &tensor_name).expect("bind real q4_k tensor by name");
+        let decoded = gguf_tensor_as_f32(&parsed, &file_bytes, &tensor_name)
+            .expect("bind real q4_k tensor by name");
         let weight_row: Vec<f32> = decoded[..q4_k::QK_K].to_vec();
 
-        let activation: Vec<f32> = (0..q4_k::QK_K).map(|index| 0.01 * (index as f32) - 1.28).collect();
+        let activation: Vec<f32> = (0..q4_k::QK_K)
+            .map(|index| 0.01 * (index as f32) - 1.28)
+            .collect();
 
         let mut program = Vec::new();
         let weight_node = append(
@@ -2685,7 +3129,10 @@ mod real_openchat_file {
             Op::Elementwise {
                 dtype: DType::Float32,
                 body: ScalarOp::Multiply,
-                operands: alloc::vec![(weight_node, identity_map.clone()), (activation_node, identity_map)],
+                operands: alloc::vec![
+                    (weight_node, identity_map.clone()),
+                    (activation_node, identity_map)
+                ],
                 name: None,
             },
         );
@@ -2704,14 +3151,24 @@ mod real_openchat_file {
         );
 
         let symbols: Vec<u64> = Vec::new();
-        let named: [(&str, &[f32]); 2] = [("weight", weight_row.as_slice()), ("activation", activation.as_slice())];
-        let evaluated = evaluate_named(&program, &symbols, &named, &[dot]).expect("evaluate_named binds by name");
-        let (interpreter_output, _shape) = evaluated.get(dot).expect("dot product node present in output");
+        let named: [(&str, &[f32]); 2] = [
+            ("weight", weight_row.as_slice()),
+            ("activation", activation.as_slice()),
+        ];
+        let evaluated = evaluate_named(&program, &symbols, &named, &[dot])
+            .expect("evaluate_named binds by name");
+        let (interpreter_output, _shape) = evaluated
+            .get(dot)
+            .expect("dot product node present in output");
 
         // independent computation: raw bytes -> dequantize_block -> manual
         // dot product, never touching `bind::gguf_tensor_as_f32` or the
         // interpreter.
-        let tensor = parsed.tensors.iter().find(|tensor| tensor.name == tensor_name).expect("tensor still present");
+        let tensor = parsed
+            .tensors
+            .iter()
+            .find(|tensor| tensor.name == tensor_name)
+            .expect("tensor still present");
         let range = parsed
             .tensor_data_range(tensor, file_bytes.len() as u64)
             .expect("tensor byte range");
@@ -2733,7 +3190,10 @@ mod real_openchat_file {
             expected.abs() > 1e-3,
             "degenerate control: expected dot product is ~zero ({expected}), this run proves nothing about real agreement"
         );
-        assert!(max_diff < 1e-3, "interpreter and independent dequantize-then-multiply diverged: max_diff={max_diff}");
+        assert!(
+            max_diff < 1e-3,
+            "interpreter and independent dequantize-then-multiply diverged: max_diff={max_diff}"
+        );
     }
 }
 
@@ -2760,8 +3220,7 @@ mod real_mixtral_file {
 
     use super::*;
 
-    const FIXTURE_PATH: &str =
-        "/Users/brianbruggeman/.lmstudio/models/NousResearch/Nous-Hermes-2-Mixtral-8x7B-DPO-GGUF/Nous-Hermes-2-Mixtral-8x7B-DPO.Q4_K_S.gguf";
+    const FIXTURE_PATH: &str = "/Users/brianbruggeman/.lmstudio/models/NousResearch/Nous-Hermes-2-Mixtral-8x7B-DPO-GGUF/Nous-Hermes-2-Mixtral-8x7B-DPO.Q4_K_S.gguf";
 
     /// Grows `header_buf` and re-parses until [`parse_complete`] stops
     /// reporting truncation, the same growing loop `restack.rs`'s own real
@@ -2776,7 +3235,9 @@ mod real_mixtral_file {
             for cap in [4usize << 20, 16 << 20, 64 << 20] {
                 $header_buf.resize(cap, 0);
                 $file.seek(SeekFrom::Start(0)).expect("seek to file start");
-                let read = $file.read(&mut $header_buf).expect("read gguf header region");
+                let read = $file
+                    .read(&mut $header_buf)
+                    .expect("read gguf header region");
                 $header_buf.truncate(read);
                 if let Ok(result) = parse_complete(&$header_buf) {
                     parsed = Some(result);
@@ -2805,10 +3266,17 @@ mod real_mixtral_file {
         let mut header_buf: Vec<u8> = Vec::new();
         let parsed = parse_header_region!(file, header_buf);
 
-        let architecture = architecture_from_metadata(&parsed).expect("derive architecture from the real mixtral checkpoint");
+        let architecture = architecture_from_metadata(&parsed)
+            .expect("derive architecture from the real mixtral checkpoint");
         std::println!("real_mixtral architecture={architecture:?}");
-        assert_eq!(architecture.expert_count, 8, "Mixtral-8x7B carries 8 experts per layer");
-        assert_eq!(architecture.expert_used_count, 2, "Mixtral-8x7B routes top-2");
+        assert_eq!(
+            architecture.expert_count, 8,
+            "Mixtral-8x7B carries 8 experts per layer"
+        );
+        assert_eq!(
+            architecture.expert_used_count, 2,
+            "Mixtral-8x7B routes top-2"
+        );
     }
 
     /// Header-only (no tensor payload touched): tallies every real tensor's
@@ -2832,9 +3300,12 @@ mod real_mixtral_file {
         let mut header_buf: Vec<u8> = Vec::new();
         let parsed = parse_header_region!(file, header_buf);
 
-        let mut counts: alloc::collections::BTreeMap<alloc::string::String, usize> = alloc::collections::BTreeMap::new();
+        let mut counts: alloc::collections::BTreeMap<alloc::string::String, usize> =
+            alloc::collections::BTreeMap::new();
         for tensor in &parsed.tensors {
-            *counts.entry(alloc::format!("{:?}", tensor.ggml_type)).or_insert(0) += 1;
+            *counts
+                .entry(alloc::format!("{:?}", tensor.ggml_type))
+                .or_insert(0) += 1;
         }
         std::println!("real_mixtral tensor_count={}", parsed.tensors.len());
         for (ggml_type, count) in &counts {
@@ -2842,10 +3313,14 @@ mod real_mixtral_file {
         }
 
         let supported = ["F32", "Q4_K", "Q5_K", "Q6_K", "Q8_0"];
-        let unsupported: Vec<(&alloc::string::String, &usize)> =
-            counts.iter().filter(|(ggml_type, _)| !supported.contains(&ggml_type.as_str())).collect();
+        let unsupported: Vec<(&alloc::string::String, &usize)> = counts
+            .iter()
+            .filter(|(ggml_type, _)| !supported.contains(&ggml_type.as_str()))
+            .collect();
         if unsupported.is_empty() {
-            std::println!("real_mixtral every real tensor's codec is one this crate already decodes");
+            std::println!(
+                "real_mixtral every real tensor's codec is one this crate already decodes"
+            );
         } else {
             for (ggml_type, count) in &unsupported {
                 std::println!("real_mixtral UNSUPPORTED codec={ggml_type} tensor_count={count}");
@@ -2853,7 +3328,9 @@ mod real_mixtral_file {
             let sample_names: Vec<&str> = parsed
                 .tensors
                 .iter()
-                .filter(|tensor| !supported.contains(&alloc::format!("{:?}", tensor.ggml_type).as_str()))
+                .filter(|tensor| {
+                    !supported.contains(&alloc::format!("{:?}", tensor.ggml_type).as_str())
+                })
                 .take(6)
                 .map(|tensor| tensor.name.as_str())
                 .collect();
@@ -2862,10 +3339,17 @@ mod real_mixtral_file {
 
         match parsed.metadata_value("tokenizer.chat_template") {
             Some(MetadataValue::String(template)) => {
-                std::println!("real_mixtral chat_template_len={} chat_template={template:?}", template.len());
+                std::println!(
+                    "real_mixtral chat_template_len={} chat_template={template:?}",
+                    template.len()
+                );
             }
-            Some(other) => std::println!("real_mixtral tokenizer.chat_template present but not a string: {other:?}"),
-            None => std::println!("real_mixtral no tokenizer.chat_template key in this checkpoint's metadata"),
+            Some(other) => std::println!(
+                "real_mixtral tokenizer.chat_template present but not a string: {other:?}"
+            ),
+            None => std::println!(
+                "real_mixtral no tokenizer.chat_template key in this checkpoint's metadata"
+            ),
         }
     }
 
@@ -2892,42 +3376,58 @@ mod real_mixtral_file {
         let mut header_buf: Vec<u8> = Vec::new();
         let parsed = parse_header_region!(file, header_buf);
 
-        let architecture = architecture_from_metadata(&parsed).expect("derive architecture from the real mixtral checkpoint");
+        let architecture = architecture_from_metadata(&parsed)
+            .expect("derive architecture from the real mixtral checkpoint");
         let layer = 0u64;
         let projection = "ffn_gate";
 
-        let experts = discover_experts(&parsed.tensors, layer, projection, u64::from(architecture.expert_count))
-            .expect("discovers all 8 real experts for layer 0's ffn_gate projection");
+        let experts = discover_experts(
+            &parsed.tensors,
+            layer,
+            projection,
+            u64::from(architecture.expert_count),
+        )
+        .expect("discovers all 8 real experts for layer 0's ffn_gate projection");
 
         let mut sources_owned: Vec<Vec<u8>> = Vec::with_capacity(experts.len());
         for expert in &experts {
-            let range = parsed.tensor_data_range(expert, file_len).expect("expert tensor range within file");
+            let range = parsed
+                .tensor_data_range(expert, file_len)
+                .expect("expert tensor range within file");
             let mut bytes = alloc::vec![0u8; (range.end - range.start) as usize];
-            file.seek(SeekFrom::Start(range.start)).expect("seek to expert tensor data");
-            file.read_exact(&mut bytes).expect("read expert tensor bytes");
+            file.seek(SeekFrom::Start(range.start))
+                .expect("seek to expert tensor data");
+            file.read_exact(&mut bytes)
+                .expect("read expert tensor bytes");
             sources_owned.push(bytes);
         }
         let sources: Vec<&[u8]> = sources_owned.iter().map(Vec::as_slice).collect();
 
         let plan = plan_stack(&experts).expect("plans stack for real experts");
         let mut stacked_bytes = alloc::vec![0u8; plan.total_bytes as usize];
-        restack_into(&mut stacked_bytes, &plan, &sources).expect("restacks real experts into destination buffer");
+        restack_into(&mut stacked_bytes, &plan, &sources)
+            .expect("restacks real experts into destination buffer");
 
         let out_dim = architecture.feed_forward as usize;
         let in_dim = architecture.embedding as usize;
         let per_expert_elements = out_dim * in_dim;
         let total_elements = per_expert_elements * experts.len();
-        let decoded = dequantize(&stacked_bytes, total_elements, q4_k::dequantize).expect("dequantizes the real restacked experts");
-        let bound = transpose_expert_stack(&decoded, "test_moe_stack", experts.len(), out_dim, in_dim)
-            .expect("expert_count/out_dim/in_dim agree with the real restacked byte length");
+        let decoded = dequantize(&stacked_bytes, total_elements, q4_k::dequantize)
+            .expect("dequantizes the real restacked experts");
+        let bound =
+            transpose_expert_stack(&decoded, "test_moe_stack", experts.len(), out_dim, in_dim)
+                .expect("expert_count/out_dim/in_dim agree with the real restacked byte length");
 
         for (expert_index, expert_bytes) in sources.iter().enumerate() {
             let mut expected = alloc::vec![0.0f32; per_expert_elements];
-            q4_k::dequantize(expert_bytes, &mut expected).expect("independently dequantizes expert's own real bytes");
+            q4_k::dequantize(expert_bytes, &mut expected)
+                .expect("independently dequantizes expert's own real bytes");
 
-            let bound_slab = &bound[expert_index * per_expert_elements..(expert_index + 1) * per_expert_elements];
-            let un_transposed = transpose_out_in_to_in_out(bound_slab, "test_expert_slab", in_dim, out_dim)
-                .expect("in_dim/out_dim agree with the real bound slab length");
+            let bound_slab = &bound
+                [expert_index * per_expert_elements..(expert_index + 1) * per_expert_elements];
+            let un_transposed =
+                transpose_out_in_to_in_out(bound_slab, "test_expert_slab", in_dim, out_dim)
+                    .expect("in_dim/out_dim agree with the real bound slab length");
             let max_diff = un_transposed
                 .iter()
                 .zip(&expected)
@@ -2976,35 +3476,59 @@ mod real_mixtral_file {
         let mut header_buf: Vec<u8> = Vec::new();
         let parsed = parse_header_region!(file, header_buf);
 
-        let architecture = architecture_from_metadata(&parsed).expect("derive architecture from the real mixtral checkpoint");
+        let architecture = architecture_from_metadata(&parsed)
+            .expect("derive architecture from the real mixtral checkpoint");
         let router_name = "blk.0.ffn_gate_inp.weight";
-        let router_tensor = parsed.tensors.iter().find(|tensor| tensor.name == router_name).expect("real checkpoint carries a layer-0 router tensor");
-        assert_eq!(router_tensor.ggml_type, GgmlType::F16, "this real checkpoint's own router tensor must be F16 for this test to prove anything");
+        let router_tensor = parsed
+            .tensors
+            .iter()
+            .find(|tensor| tensor.name == router_name)
+            .expect("real checkpoint carries a layer-0 router tensor");
+        assert_eq!(
+            router_tensor.ggml_type,
+            GgmlType::F16,
+            "this real checkpoint's own router tensor must be F16 for this test to prove anything"
+        );
 
-        let range = parsed.tensor_data_range(router_tensor, file_len).expect("router tensor range within file");
+        let range = parsed
+            .tensor_data_range(router_tensor, file_len)
+            .expect("router tensor range within file");
         let mut prefix = alloc::vec![0u8; range.end as usize];
         file.seek(SeekFrom::Start(0)).expect("seek to file start");
-        file.read_exact(&mut prefix[..range.end as usize]).expect("read file prefix through the router tensor's own byte range");
+        file.read_exact(&mut prefix[..range.end as usize])
+            .expect("read file prefix through the router tensor's own byte range");
 
-        let block = gguf_tensor_as_packed_block(&parsed, &prefix, router_name).expect("f16 router tensor now decodes packed instead of UnrepresentableGgmlType");
+        let block = gguf_tensor_as_packed_block(&parsed, &prefix, router_name)
+            .expect("f16 router tensor now decodes packed instead of UnrepresentableGgmlType");
         let router_bytes = match block {
             proxima_tensor::cpu::QuantizedBlock::Float16(bytes) => bytes,
-            other => panic!("expected a Float16 packed block for the real f16 router tensor, got {other:?}"),
+            other => panic!(
+                "expected a Float16 packed block for the real f16 router tensor, got {other:?}"
+            ),
         };
 
         let embedding = architecture.embedding as usize;
         let expert_count = architecture.expert_count as usize;
-        assert_eq!(router_bytes.len(), embedding * expert_count * 2, "router byte length must match embedding * expert_count f16 elements");
+        assert_eq!(
+            router_bytes.len(),
+            embedding * expert_count * 2,
+            "router byte length must match embedding * expert_count f16 elements"
+        );
 
-        let activation: Vec<f32> = (0..embedding).map(|index| ((index % 7) as f32) - 3.0).collect();
-        let ours = proxima_tensor::cpu::matmul_f16_f32(router_bytes, expert_count, &activation).expect("matmul_f16_f32 runs against the real router bytes");
+        let activation: Vec<f32> = (0..embedding)
+            .map(|index| ((index % 7) as f32) - 3.0)
+            .collect();
+        let ours = proxima_tensor::cpu::matmul_f16_f32(router_bytes, expert_count, &activation)
+            .expect("matmul_f16_f32 runs against the real router bytes");
 
         let mut expected = alloc::vec![0.0f32; expert_count];
         for (expert_index, logit) in expected.iter_mut().enumerate() {
-            let row = &router_bytes[expert_index * embedding * 2..(expert_index + 1) * embedding * 2];
+            let row =
+                &router_bytes[expert_index * embedding * 2..(expert_index + 1) * embedding * 2];
             let mut accumulator = 0.0f32;
             for (element_index, chunk) in row.as_chunks::<2>().0.iter().enumerate() {
-                let weight = half::f16::from_bits(u16::from_le_bytes([chunk[0], chunk[1]])).to_f32();
+                let weight =
+                    half::f16::from_bits(u16::from_le_bytes([chunk[0], chunk[1]])).to_f32();
                 accumulator += weight * activation[element_index];
             }
             *logit = accumulator;
@@ -3013,7 +3537,10 @@ mod real_mixtral_file {
         std::println!("real_mixtral router ours={ours:?} expected={expected:?}");
         for (expert_index, (found, wanted)) in ours.iter().zip(&expected).enumerate() {
             let diff = (found - wanted).abs();
-            assert!(diff < 1e-3, "router logit for expert {expert_index}: found={found} wanted={wanted} diff={diff}");
+            assert!(
+                diff < 1e-3,
+                "router logit for expert {expert_index}: found={found} wanted={wanted} diff={diff}"
+            );
         }
     }
 
@@ -3033,7 +3560,8 @@ mod real_mixtral_file {
         fn open(path: &std::path::Path) -> std::io::Result<Self> {
             use std::os::fd::AsFd;
             let file = std::fs::File::open(path)?;
-            let len = usize::try_from(file.metadata()?.len()).expect("fixture file length fits in usize");
+            let len =
+                usize::try_from(file.metadata()?.len()).expect("fixture file length fits in usize");
             // SAFETY: `len` matches the just-opened file's own length; `file`
             // is kept alive in `_file` for as long as `base` is used, and the
             // mapping is read-only/private so no writer can observe or race it.
@@ -3048,7 +3576,11 @@ mod real_mixtral_file {
                 )
             }
             .expect("mmap host-local mixtral gguf fixture");
-            Ok(Self { base, len, _file: file })
+            Ok(Self {
+                base,
+                len,
+                _file: file,
+            })
         }
 
         fn as_slice(&self) -> &[u8] {
@@ -3078,7 +3610,9 @@ mod real_mixtral_file {
         let mut context = core::task::Context::from_waker(waker);
         match future.as_mut().poll(&mut context) {
             core::task::Poll::Ready(output) => output,
-            core::task::Poll::Pending => unreachable!("proxima-model-interop pipes never yield: no internal .await"),
+            core::task::Poll::Pending => {
+                unreachable!("proxima-model-interop pipes never yield: no internal .await")
+            }
         }
     }
 
@@ -3138,8 +3672,7 @@ mod real_mixtral_file {
             return;
         }
 
-        let prompt =
-            "<|im_start|>user\nWrite one sentence about the ocean.<|im_end|>\n<|im_start|>assistant\n";
+        let prompt = "<|im_start|>user\nWrite one sentence about the ocean.<|im_end|>\n<|im_start|>assistant\n";
 
         let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let mapped = MappedGguf::open(path).expect("mmap host-local mixtral gguf fixture");
@@ -3165,7 +3698,11 @@ mod real_mixtral_file {
                 let message = panic_payload
                     .downcast_ref::<alloc::string::String>()
                     .cloned()
-                    .or_else(|| panic_payload.downcast_ref::<&str>().map(|value| alloc::string::String::from(*value)))
+                    .or_else(|| {
+                        panic_payload
+                            .downcast_ref::<&str>()
+                            .map(|value| alloc::string::String::from(*value))
+                    })
                     .unwrap_or_default();
                 std::println!("real_mixtral OUTCOME=panic message={message}");
             }
@@ -3203,7 +3740,9 @@ mod real_lfm2_hybrid_file {
             for cap in [4usize << 20, 16 << 20, 64 << 20] {
                 $header_buf.resize(cap, 0);
                 $file.seek(SeekFrom::Start(0)).expect("seek to file start");
-                let read = $file.read(&mut $header_buf).expect("read gguf header region");
+                let read = $file
+                    .read(&mut $header_buf)
+                    .expect("read gguf header region");
                 $header_buf.truncate(read);
                 if let Ok(result) = parse_complete(&$header_buf) {
                     parsed = Some(result);
@@ -3240,7 +3779,10 @@ mod real_lfm2_hybrid_file {
         let outcome = architecture_from_metadata(&parsed);
         std::println!("real_lfm2 architecture_from_metadata outcome={outcome:?}");
         assert!(
-            matches!(outcome, Err(InteropError::HeterogeneousMetadataArray { .. })),
+            matches!(
+                outcome,
+                Err(InteropError::HeterogeneousMetadataArray { .. })
+            ),
             "LFM2's real per-layer-varying head_count_kv must surface the named, honest error \
              (never MissingMetadataKey, and never a silently-picked scalar), got {outcome:?}"
         );
@@ -3266,15 +3808,25 @@ mod real_lfm2_hybrid_file {
         let mut header_buf: Vec<u8> = Vec::new();
         let parsed = parse_header_region!(file, header_buf);
 
-        let architecture_name =
-            metadata_str(&parsed, "general.architecture").expect("general.architecture present on a real gguf");
-        let embedding = metadata_u32(&parsed, &alloc::format!("{architecture_name}.embedding_length"))
-            .expect("embedding_length present on a real gguf");
-        let query_heads = metadata_u32(&parsed, &alloc::format!("{architecture_name}.attention.head_count"))
-            .expect("attention.head_count present on a real gguf");
+        let architecture_name = metadata_str(&parsed, "general.architecture")
+            .expect("general.architecture present on a real gguf");
+        let embedding = metadata_u32(
+            &parsed,
+            &alloc::format!("{architecture_name}.embedding_length"),
+        )
+        .expect("embedding_length present on a real gguf");
+        let query_heads = metadata_u32(
+            &parsed,
+            &alloc::format!("{architecture_name}.attention.head_count"),
+        )
+        .expect("attention.head_count present on a real gguf");
         let rope_dimension_count_key = alloc::format!("{architecture_name}.rope.dimension_count");
         let key_present = parsed.metadata_value(&rope_dimension_count_key).is_some();
-        let derived_head_dim = metadata_u32_optional_or(&parsed, &rope_dimension_count_key, embedding / query_heads.max(1));
+        let derived_head_dim = metadata_u32_optional_or(
+            &parsed,
+            &rope_dimension_count_key,
+            embedding / query_heads.max(1),
+        );
 
         std::println!(
             "real_lfm2 architecture={architecture_name} embedding={embedding} query_heads={query_heads} \

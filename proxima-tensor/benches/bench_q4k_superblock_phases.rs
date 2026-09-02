@@ -57,9 +57,9 @@ use proxima_tensor::test_support::Lcg;
 
 #[cfg(target_arch = "aarch64")]
 use core::arch::aarch64::{
-    int32x4_t, int8x16_t, uint8x16_t, vaddq_s32, vaddq_u8, vaddvq_s32, vandq_u8, vdupq_n_s32,
-    vdupq_n_u8, vget_high_s16, vget_low_s16, vld1_u32, vld1q_s16, vld1q_s8, vld1q_u8, vmovl_u8,
-    vmull_s16, vpaddq_s16, vreinterpret_u8_u32, vreinterpretq_s16_u16, vreinterpretq_s8_u8,
+    int8x16_t, int32x4_t, uint8x16_t, vaddq_s32, vaddq_u8, vaddvq_s32, vandq_u8, vdupq_n_s32,
+    vdupq_n_u8, vget_high_s16, vget_low_s16, vld1_u32, vld1q_s8, vld1q_s16, vld1q_u8, vmovl_u8,
+    vmull_s16, vpaddq_s16, vreinterpret_u8_u32, vreinterpretq_s8_u8, vreinterpretq_s16_u16,
     vshrq_n_u8,
 };
 
@@ -496,8 +496,11 @@ struct Stat {
 impl Stat {
     fn from(samples: &[f64]) -> Self {
         let mean = samples.iter().sum::<f64>() / samples.len() as f64;
-        let variance =
-            samples.iter().map(|value| (value - mean) * (value - mean)).sum::<f64>() / samples.len() as f64;
+        let variance = samples
+            .iter()
+            .map(|value| (value - mean) * (value - mean))
+            .sum::<f64>()
+            / samples.len() as f64;
         Self {
             mean,
             cov: variance.sqrt() / mean,
@@ -556,10 +559,16 @@ fn parse_header(path: &Path) -> (ParsedGguf, u64) {
             let mut completion = None;
             for event in events {
                 match event {
-                    GgufEvent::Header { version: version_value, .. } => version = Some(version_value),
+                    GgufEvent::Header {
+                        version: version_value,
+                        ..
+                    } => version = Some(version_value),
                     GgufEvent::Metadata { key, value } => metadata.push((key, value)),
                     GgufEvent::Tensor(tensor) => tensors.push(tensor),
-                    GgufEvent::Complete { data_offset, alignment } => {
+                    GgufEvent::Complete {
+                        data_offset,
+                        alignment,
+                    } => {
                         completion = Some((data_offset, alignment));
                     }
                 }
@@ -580,7 +589,10 @@ fn parse_header(path: &Path) -> (ParsedGguf, u64) {
                 );
             }
         }
-        assert!(prefix_len < (1 << 26), "gguf header/directory exceeded 64 MiB prefix budget");
+        assert!(
+            prefix_len < (1 << 26),
+            "gguf header/directory exceeded 64 MiB prefix budget"
+        );
         prefix_len *= 2;
     }
 }
@@ -595,13 +607,20 @@ fn find_tensor<'a>(parsed: &'a ParsedGguf, name: &str) -> &'a TensorInfo {
 }
 
 #[cfg(target_arch = "aarch64")]
-fn read_tensor_bytes(file: &mut File, parsed: &ParsedGguf, tensor: &TensorInfo, file_len: u64) -> Vec<u8> {
+fn read_tensor_bytes(
+    file: &mut File,
+    parsed: &ParsedGguf,
+    tensor: &TensorInfo,
+    file_len: u64,
+) -> Vec<u8> {
     let range = parsed
         .tensor_data_range(tensor, file_len)
         .expect("tensor byte range within file bounds");
     let mut buf = vec![0u8; (range.end - range.start) as usize];
-    file.seek(SeekFrom::Start(range.start)).expect("seek to tensor data");
-    file.read_exact(&mut buf).expect("read exact tensor byte range");
+    file.seek(SeekFrom::Start(range.start))
+        .expect("seek to tensor data");
+    file.read_exact(&mut buf)
+        .expect("read exact tensor byte range");
     buf
 }
 
@@ -611,23 +630,23 @@ macro_rules! arm_pass {
         || {
             let mut total = 0.0f32;
             for _ in 0..$repeats {
-            for buffer in $buffers.iter() {
-                for row in buffer.chunks_exact($row_bytes) {
-                    let mut acc = 0.0f32;
-                    for (weight_block, q8k_block) in row
-                        .chunks_exact(Q4K_BLOCK_BYTES)
-                        .zip($activation.chunks_exact(Q8K_BLOCK_BYTES))
-                    {
-                        // SAFETY: aarch64 build implies FEAT_DotProd on every
-                        // target this workspace builds for (build.rs
-                        // `emit_dotprod_cfg`); `chunks_exact` guarantees both
-                        // slices are exactly one super-block wide, which is
-                        // `dot_q4k_q8k`'s own argument for the same call.
-                        acc += unsafe { $arm(weight_block, q8k_block) };
+                for buffer in $buffers.iter() {
+                    for row in buffer.chunks_exact($row_bytes) {
+                        let mut acc = 0.0f32;
+                        for (weight_block, q8k_block) in row
+                            .chunks_exact(Q4K_BLOCK_BYTES)
+                            .zip($activation.chunks_exact(Q8K_BLOCK_BYTES))
+                        {
+                            // SAFETY: aarch64 build implies FEAT_DotProd on every
+                            // target this workspace builds for (build.rs
+                            // `emit_dotprod_cfg`); `chunks_exact` guarantees both
+                            // slices are exactly one super-block wide, which is
+                            // `dot_q4k_q8k`'s own argument for the same call.
+                            acc += unsafe { $arm(weight_block, q8k_block) };
+                        }
+                        total += acc;
                     }
-                    total += acc;
                 }
-            }
             }
             total
         }
@@ -635,8 +654,17 @@ macro_rules! arm_pass {
 }
 
 #[cfg(target_arch = "aarch64")]
-fn run_configuration(label: &str, buffers: &[Vec<u8>], activation_q8k: &[u8], blocks_per_row: usize, repeats: u64) {
-    let macs: u64 = buffers.iter().map(|buffer| (buffer.len() / Q4K_BLOCK_BYTES) as u64).sum::<u64>()
+fn run_configuration(
+    label: &str,
+    buffers: &[Vec<u8>],
+    activation_q8k: &[u8],
+    blocks_per_row: usize,
+    repeats: u64,
+) {
+    let macs: u64 = buffers
+        .iter()
+        .map(|buffer| (buffer.len() / Q4K_BLOCK_BYTES) as u64)
+        .sum::<u64>()
         * Q4K_BLOCK_ELEMENTS as u64
         * repeats;
     let bytes: usize = buffers.iter().map(Vec::len).sum();
@@ -662,7 +690,10 @@ fn run_configuration(label: &str, buffers: &[Vec<u8>], activation_q8k: &[u8], bl
         macs,
     );
 
-    let full = time_pass(arm_pass!(buffers, activation_q8k, row_bytes, repeats, q4k_arm_full), macs);
+    let full = time_pass(
+        arm_pass!(buffers, activation_q8k, row_bytes, repeats, q4k_arm_full),
+        macs,
+    );
     report("real_dot_q4k_q8k (shipped)", &real, None);
     report("local_full (reconstruction)", &full, None);
     println!(
@@ -673,30 +704,72 @@ fn run_configuration(label: &str, buffers: &[Vec<u8>], activation_q8k: &[u8], bl
     let arms: [(&str, Stat); 5] = [
         (
             "minus_mins_correction",
-            time_pass(arm_pass!(buffers, activation_q8k, row_bytes, repeats, q4k_arm_no_mins), macs),
+            time_pass(
+                arm_pass!(buffers, activation_q8k, row_bytes, repeats, q4k_arm_no_mins),
+                macs,
+            ),
         ),
         (
             "minus_scale_application",
-            time_pass(arm_pass!(buffers, activation_q8k, row_bytes, repeats, q4k_arm_no_scale_apply), macs),
+            time_pass(
+                arm_pass!(
+                    buffers,
+                    activation_q8k,
+                    row_bytes,
+                    repeats,
+                    q4k_arm_no_scale_apply
+                ),
+                macs,
+            ),
         ),
         (
             "minus_nibble_mask_shift",
-            time_pass(arm_pass!(buffers, activation_q8k, row_bytes, repeats, q4k_arm_no_nibble_alu), macs),
+            time_pass(
+                arm_pass!(
+                    buffers,
+                    activation_q8k,
+                    row_bytes,
+                    repeats,
+                    q4k_arm_no_nibble_alu
+                ),
+                macs,
+            ),
         ),
         (
             "sdot_loop_only",
-            time_pass(arm_pass!(buffers, activation_q8k, row_bytes, repeats, q4k_arm_sdot_only), macs),
+            time_pass(
+                arm_pass!(
+                    buffers,
+                    activation_q8k,
+                    row_bytes,
+                    repeats,
+                    q4k_arm_sdot_only
+                ),
+                macs,
+            ),
         ),
         (
             "touch_only_control",
-            time_pass(arm_pass!(buffers, activation_q8k, row_bytes, repeats, q4k_arm_touch_only), macs),
+            time_pass(
+                arm_pass!(
+                    buffers,
+                    activation_q8k,
+                    row_bytes,
+                    repeats,
+                    q4k_arm_touch_only
+                ),
+                macs,
+            ),
         ),
     ];
     for (name, stat) in &arms {
         report(name, stat, Some(&full));
     }
 
-    let phase_sum: f64 = arms[..3].iter().map(|(_, stat)| full.mean - stat.mean).sum();
+    let phase_sum: f64 = arms[..3]
+        .iter()
+        .map(|(_, stat)| full.mean - stat.mean)
+        .sum();
     let floor = arms[4].1.mean;
     println!(
         "accounting: touch_floor {floor:.5} + named_phases {phase_sum:.5} = {:.5}; full {:.5}; RESIDUAL {:+.5} ns/mac ({:+.1}% of full)",
@@ -709,7 +782,9 @@ fn run_configuration(label: &str, buffers: &[Vec<u8>], activation_q8k: &[u8], bl
 
 #[cfg(target_arch = "aarch64")]
 fn bench_quantize(in_dims: &[usize]) {
-    println!("\n=== quantize_row_q8k: per-call cost of the once-per-matmul activation quantize ===");
+    println!(
+        "\n=== quantize_row_q8k: per-call cost of the once-per-matmul activation quantize ==="
+    );
     for &in_dim in in_dims {
         let mut lcg = Lcg(99);
         let activation: Vec<f32> = (0..in_dim).map(|_| lcg.next_unit() * 0.5).collect();
@@ -748,13 +823,18 @@ fn main() {
     let in_dim = warm_tensor.dims[0] as usize;
     let out_dim = warm_tensor.dims[1] as usize;
     let blocks_per_row = in_dim / Q4K_BLOCK_ELEMENTS;
-    println!("tensor blk.N.attn_q.weight dims=[{in_dim}, {out_dim}] blocks_per_row={blocks_per_row}");
+    println!(
+        "tensor blk.N.attn_q.weight dims=[{in_dim}, {out_dim}] blocks_per_row={blocks_per_row}"
+    );
 
     let mut cold_buffers: Vec<Vec<u8>> = Vec::with_capacity(BLOCK_COUNT);
     for block in 0..BLOCK_COUNT {
         let name = format!("blk.{block}.attn_q.weight");
         let tensor = find_tensor(&parsed, &name);
-        assert_eq!(tensor.dims[0] as usize, in_dim, "{name}: in_dim shape drift vs blk.0");
+        assert_eq!(
+            tensor.dims[0] as usize, in_dim,
+            "{name}: in_dim shape drift vs blk.0"
+        );
         cold_buffers.push(read_tensor_bytes(&mut file, &parsed, tensor, file_len));
     }
     let warm_buffers = vec![cold_buffers[0].clone()];
@@ -782,16 +862,35 @@ fn main() {
         );
         checked_rows += 1;
     }
-    println!("reconstruction agrees with dot_q4k_q8k on {checked_rows} real rows (N asserted, not assumed)");
+    println!(
+        "reconstruction agrees with dot_q4k_q8k on {checked_rows} real rows (N asserted, not assumed)"
+    );
     // SAFETY: aarch64 implies FEAT_DotProd here; both slices are one super-block wide.
-    let countable = unsafe { keep_countable_copies(&cold_buffers[0][..Q4K_BLOCK_BYTES], &activation_q8k[..Q8K_BLOCK_BYTES]) };
+    let countable = unsafe {
+        keep_countable_copies(
+            &cold_buffers[0][..Q4K_BLOCK_BYTES],
+            &activation_q8k[..Q8K_BLOCK_BYTES],
+        )
+    };
     println!("countable copies retained for objdump (sum {countable:.3}, never timed)");
 
     // WARM repeats 32x so both configurations time the same total work
     // (~537M macs/sample); a single 16.8M-mac pass is ~0.4 ms and far too
     // short to be stable against ambient scheduling.
-    run_configuration("WARM (single 9.0 MiB tensor, 32 repeats)", &warm_buffers, &activation_q8k, blocks_per_row, BLOCK_COUNT as u64);
-    run_configuration("COLD (32 distinct tensors)", &cold_buffers, &activation_q8k, blocks_per_row, 1);
+    run_configuration(
+        "WARM (single 9.0 MiB tensor, 32 repeats)",
+        &warm_buffers,
+        &activation_q8k,
+        blocks_per_row,
+        BLOCK_COUNT as u64,
+    );
+    run_configuration(
+        "COLD (32 distinct tensors)",
+        &cold_buffers,
+        &activation_q8k,
+        blocks_per_row,
+        1,
+    );
     bench_quantize(&[4096, 14336]);
 }
 

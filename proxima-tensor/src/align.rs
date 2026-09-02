@@ -67,12 +67,11 @@ impl AlignedBuffer {
     /// the caller's request, never a plain out-of-memory condition (which
     /// the allocator itself still aborts on, matching `Vec`'s own policy).
     pub fn new(min_elements: usize, page_size: usize) -> Result<Self, TensorError> {
-        let element_bytes =
-            min_elements
-                .checked_mul(size_of::<f32>())
-                .ok_or(TensorError::AlignedAllocationRejected {
-                    reason: "requested element count overflows a byte length in usize",
-                })?;
+        let element_bytes = min_elements.checked_mul(size_of::<f32>()).ok_or(
+            TensorError::AlignedAllocationRejected {
+                reason: "requested element count overflows a byte length in usize",
+            },
+        )?;
         let rounded_bytes = element_bytes.next_multiple_of(page_size).max(page_size);
         let layout = Layout::from_size_align(rounded_bytes, page_size).map_err(|_| {
             TensorError::AlignedAllocationRejected {
@@ -159,7 +158,11 @@ mod tests {
     fn pointer_is_page_aligned() {
         let buffer = AlignedBuffer::new(4096, PAGE).expect("small request never fails");
         let address = buffer.as_ptr() as usize;
-        assert_eq!(address % PAGE, 0, "pointer {address:#x} is not page-aligned");
+        assert_eq!(
+            address % PAGE,
+            0,
+            "pointer {address:#x} is not page-aligned"
+        );
     }
 
     #[test]

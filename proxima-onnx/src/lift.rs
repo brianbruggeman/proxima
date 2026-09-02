@@ -97,7 +97,9 @@ use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
-use proxima_tensor::{AxisIndex, DType, Extent, IndexMap, IndexPattern, Keep, NodeId, Op, ScalarOp, projection};
+use proxima_tensor::{
+    AxisIndex, DType, Extent, IndexMap, IndexPattern, Keep, NodeId, Op, ScalarOp, projection,
+};
 use thiserror::Error;
 
 use crate::writer::{push_i32, push_i64, push_len, push_packed_f32, push_packed_i64, push_str};
@@ -110,17 +112,27 @@ use crate::writer::{push_i32, push_i64, push_len, push_packed_f32, push_packed_i
 pub enum LiftError {
     #[error("node {node}: symbolic extent has no faithful ONNX concrete shape")]
     SymbolicExtent { node: NodeId },
-    #[error("node {node}: index pattern axis has three or more terms, or a two-term (window) axis whose iteration extents no sibling operand exposes -- no single faithful ONNX op expresses this")]
+    #[error(
+        "node {node}: index pattern axis has three or more terms, or a two-term (window) axis whose iteration extents no sibling operand exposes -- no single faithful ONNX op expresses this"
+    )]
     NonAffineAxis { node: NodeId },
-    #[error("node {node}: reduce/scan out_map axis is not a plain projection, or repeats an iteration axis -- no single faithful ONNX op expresses this")]
+    #[error(
+        "node {node}: reduce/scan out_map axis is not a plain projection, or repeats an iteration axis -- no single faithful ONNX op expresses this"
+    )]
     PermutedOutMap { node: NodeId },
     #[error("node {node}: reduce body {body:?} has no faithful primitive ONNX reduce op")]
     UnsupportedReduceBody { node: NodeId, body: ScalarOp },
-    #[error("node {node}: Keep::Scan reduce body {body:?} has no faithful ONNX cumulative op, or spans more than one axis")]
+    #[error(
+        "node {node}: Keep::Scan reduce body {body:?} has no faithful ONNX cumulative op, or spans more than one axis"
+    )]
     UnsupportedScan { node: NodeId, body: ScalarOp },
-    #[error("node {node}: data-dependent (Computed) index map is out of scope except the axis-0 gather shape lower_gather produces")]
+    #[error(
+        "node {node}: data-dependent (Computed) index map is out of scope except the axis-0 gather shape lower_gather produces"
+    )]
     UnsupportedComputedMap { node: NodeId },
-    #[error("input node {node} ({name:?}) is neither a declared graph input nor a declared initializer")]
+    #[error(
+        "input node {node} ({name:?}) is neither a declared graph input nor a declared initializer"
+    )]
     UnboundInput { node: NodeId, name: String },
     #[error("initializer {name:?} has no data among the initializers this lift was given")]
     MissingInitializerData { name: String },
@@ -256,7 +268,14 @@ fn value_info_bytes(name: &str, dims: &[i64]) -> Vec<u8> {
 
 /// One assembled `NodeProto`, pushed as a length-delimited `node` field
 /// (field 1) directly into the caller's graph buffer.
-fn emit_node(buf: &mut Vec<u8>, inputs: &[&str], outputs: &[&str], name: &str, op_type: &str, attributes: &[Vec<u8>]) {
+fn emit_node(
+    buf: &mut Vec<u8>,
+    inputs: &[&str],
+    outputs: &[&str],
+    name: &str,
+    op_type: &str,
+    attributes: &[Vec<u8>],
+) {
     let mut node = Vec::new();
     for input in inputs {
         push_str(1, input, &mut node);
@@ -318,8 +337,12 @@ fn try_matmul_shape(program: &[Op], reduce: &proxima_tensor::Reduce) -> Option<M
     if reduce.body != ScalarOp::Add || reduce.keep != Keep::Reduce {
         return None;
     }
-    let IndexMap::Affine(in_pattern) = &reduce.in_map else { return None };
-    let IndexMap::Affine(out_pattern) = &reduce.out_map else { return None };
+    let IndexMap::Affine(in_pattern) = &reduce.in_map else {
+        return None;
+    };
+    let IndexMap::Affine(out_pattern) = &reduce.out_map else {
+        return None;
+    };
     if in_pattern.iter_rank != 3 || in_pattern.axes.len() != 3 {
         return None;
     }
@@ -330,13 +353,26 @@ fn try_matmul_shape(program: &[Op], reduce: &proxima_tensor::Reduce) -> Option<M
     }
 
     let elementwise_node = reduce.operand;
-    let Some(Op::Elementwise { body: ScalarOp::Multiply, operands, .. }) = program.get(elementwise_node.0 as usize) else {
+    let Some(Op::Elementwise {
+        body: ScalarOp::Multiply,
+        operands,
+        ..
+    }) = program.get(elementwise_node.0 as usize)
+    else {
         return None;
     };
-    let [(lhs, IndexMap::Affine(lhs_pattern)), (rhs, IndexMap::Affine(rhs_pattern))] = operands.as_slice() else {
+    let [
+        (lhs, IndexMap::Affine(lhs_pattern)),
+        (rhs, IndexMap::Affine(rhs_pattern)),
+    ] = operands.as_slice()
+    else {
         return None;
     };
-    if lhs_pattern.iter_rank != 3 || lhs_pattern.axes.len() != 2 || rhs_pattern.iter_rank != 3 || rhs_pattern.axes.len() != 2 {
+    if lhs_pattern.iter_rank != 3
+        || lhs_pattern.axes.len() != 2
+        || rhs_pattern.iter_rank != 3
+        || rhs_pattern.axes.len() != 2
+    {
         return None;
     }
     let lhs_axis0 = single_term_axis(&lhs_pattern.axes[0])?;
@@ -375,7 +411,13 @@ fn try_matmul_shape(program: &[Op], reduce: &proxima_tensor::Reduce) -> Option<M
         return None;
     }
 
-    Some(MatmulShape { elementwise_node, lhs: *lhs, rhs: *rhs, trans_a, trans_b })
+    Some(MatmulShape {
+        elementwise_node,
+        lhs: *lhs,
+        rhs: *rhs,
+        trans_a,
+        trans_b,
+    })
 }
 
 /// A recognized `Reduce(Add)`-over-`Elementwise(Multiply)`-over-
@@ -402,7 +444,12 @@ struct ConvShape {
 /// two terms in one axis.
 fn window_axis_terms(axis_index: &AxisIndex) -> Option<(u16, i32, u16, i32)> {
     match axis_index.terms.as_slice() {
-        [out_term, kernel_term] if axis_index.offset == 0 => Some((out_term.axis, out_term.coeff, kernel_term.axis, kernel_term.coeff)),
+        [out_term, kernel_term] if axis_index.offset == 0 => Some((
+            out_term.axis,
+            out_term.coeff,
+            kernel_term.axis,
+            kernel_term.coeff,
+        )),
         _ => None,
     }
 }
@@ -432,8 +479,12 @@ fn try_conv_shape(program: &[Op], reduce: &proxima_tensor::Reduce) -> Option<Con
     if reduce.body != ScalarOp::Add || reduce.keep != Keep::Reduce {
         return None;
     }
-    let IndexMap::Affine(in_pattern) = &reduce.in_map else { return None };
-    let IndexMap::Affine(out_pattern) = &reduce.out_map else { return None };
+    let IndexMap::Affine(in_pattern) = &reduce.in_map else {
+        return None;
+    };
+    let IndexMap::Affine(out_pattern) = &reduce.out_map else {
+        return None;
+    };
     if in_pattern.iter_rank != 7 || in_pattern.axes.len() != 7 {
         return None;
     }
@@ -452,34 +503,78 @@ fn try_conv_shape(program: &[Op], reduce: &proxima_tensor::Reduce) -> Option<Con
     }
 
     let product_node = reduce.operand;
-    let Some(Op::Elementwise { body: ScalarOp::Multiply, operands: product_operands, .. }) = program.get(product_node.0 as usize) else { return None };
-    let [(windowed_node, IndexMap::Affine(windowed_pattern)), (weight, IndexMap::Affine(weight_pattern))] = product_operands.as_slice() else { return None };
+    let Some(Op::Elementwise {
+        body: ScalarOp::Multiply,
+        operands: product_operands,
+        ..
+    }) = program.get(product_node.0 as usize)
+    else {
+        return None;
+    };
+    let [
+        (windowed_node, IndexMap::Affine(windowed_pattern)),
+        (weight, IndexMap::Affine(weight_pattern)),
+    ] = product_operands.as_slice()
+    else {
+        return None;
+    };
     let expected_windowed_pattern = projection(7, &[0, 4, 2, 3, 5, 6]);
     let expected_weight_pattern = projection(7, &[1, 4, 5, 6]);
-    if windowed_pattern != &expected_windowed_pattern || weight_pattern != &expected_weight_pattern {
+    if windowed_pattern != &expected_windowed_pattern || weight_pattern != &expected_weight_pattern
+    {
         return None;
     }
 
-    let Some(Op::Elementwise { body: ScalarOp::Multiply, operands: window_operands, .. }) = program.get(windowed_node.0 as usize) else { return None };
-    let [(image, IndexMap::Affine(image_pattern)), (stamp, IndexMap::Affine(stamp_pattern))] = window_operands.as_slice() else { return None };
-    if image_pattern.iter_rank != 6 || image_pattern.axes.len() != 4 || stamp_pattern != &projection(6, &[2, 3, 4, 5]) {
+    let Some(Op::Elementwise {
+        body: ScalarOp::Multiply,
+        operands: window_operands,
+        ..
+    }) = program.get(windowed_node.0 as usize)
+    else {
+        return None;
+    };
+    let [
+        (image, IndexMap::Affine(image_pattern)),
+        (stamp, IndexMap::Affine(stamp_pattern)),
+    ] = window_operands.as_slice()
+    else {
+        return None;
+    };
+    if image_pattern.iter_rank != 6
+        || image_pattern.axes.len() != 4
+        || stamp_pattern != &projection(6, &[2, 3, 4, 5])
+    {
         return None;
     }
-    if single_term_axis(&image_pattern.axes[0]) != Some(0) || single_term_axis(&image_pattern.axes[1]) != Some(1) {
+    if single_term_axis(&image_pattern.axes[0]) != Some(0)
+        || single_term_axis(&image_pattern.axes[1]) != Some(1)
+    {
         return None;
     }
-    let (out_h_axis, stride_h, kernel_h_axis, dilation_h) = window_axis_terms(&image_pattern.axes[2])?;
-    let (out_w_axis, stride_w, kernel_w_axis, dilation_w) = window_axis_terms(&image_pattern.axes[3])?;
+    let (out_h_axis, stride_h, kernel_h_axis, dilation_h) =
+        window_axis_terms(&image_pattern.axes[2])?;
+    let (out_w_axis, stride_w, kernel_w_axis, dilation_w) =
+        window_axis_terms(&image_pattern.axes[3])?;
     if (out_h_axis, kernel_h_axis, out_w_axis, kernel_w_axis) != (2, 4, 3, 5) {
         return None;
     }
     // a real (nonzero) pad shows up as a `pad_axis`-built `Select`; scoped
     // to the unpadded case (this function's own doc).
-    if matches!(program.get(image.0 as usize), Some(Op::Elementwise { body: ScalarOp::Select, .. })) {
+    if matches!(
+        program.get(image.0 as usize),
+        Some(Op::Elementwise {
+            body: ScalarOp::Select,
+            ..
+        })
+    ) {
         return None;
     }
     let stamp_shape = leaf_shape(program, *stamp)?;
-    let (Some(Extent::Static(kernel_h)), Some(Extent::Static(kernel_w))) = (stamp_shape.get(2), stamp_shape.get(3)) else { return None };
+    let (Some(Extent::Static(kernel_h)), Some(Extent::Static(kernel_w))) =
+        (stamp_shape.get(2), stamp_shape.get(3))
+    else {
+        return None;
+    };
 
     Some(ConvShape {
         product_node,
@@ -504,7 +599,8 @@ fn try_conv_shape(program: &[Op], reduce: &proxima_tensor::Reduce) -> Option<Con
 /// `Mul` node.
 fn count_consumers(program: &[Op], graph_outputs: &[(String, NodeId)]) -> BTreeMap<u32, u32> {
     let mut counts: BTreeMap<u32, u32> = BTreeMap::new();
-    let bump = |counts: &mut BTreeMap<u32, u32>, node: NodeId| *counts.entry(node.0).or_insert(0) += 1;
+    let bump =
+        |counts: &mut BTreeMap<u32, u32>, node: NodeId| *counts.entry(node.0).or_insert(0) += 1;
     let bump_map = |counts: &mut BTreeMap<u32, u32>, map: &IndexMap| {
         if let IndexMap::Computed { indices, .. } = map {
             bump(counts, *indices);
@@ -551,10 +647,16 @@ fn leaf_shape(program: &[Op], node: NodeId) -> Option<&[Extent]> {
 fn known_iter_extents(operands: &[(NodeId, IndexMap)], program: &[Op]) -> BTreeMap<u16, u64> {
     let mut extents = BTreeMap::new();
     for (operand_id, map) in operands {
-        let IndexMap::Affine(pattern) = map else { continue };
-        let Some(shape) = leaf_shape(program, *operand_id) else { continue };
+        let IndexMap::Affine(pattern) = map else {
+            continue;
+        };
+        let Some(shape) = leaf_shape(program, *operand_id) else {
+            continue;
+        };
         for (operand_axis, axis_index) in pattern.axes.iter().enumerate() {
-            let Some(iter_axis) = single_term_axis(axis_index) else { continue };
+            let Some(iter_axis) = single_term_axis(axis_index) else {
+                continue;
+            };
             if let Some(Extent::Static(extent)) = shape.get(operand_axis) {
                 extents.entry(iter_axis).or_insert(u64::from(*extent));
             }
@@ -614,12 +716,20 @@ fn resolve_affine(
                 covered.push((virtual_axis, real_axis));
             }
             [term_a, term_b] => {
-                let extent_a = *known_extents.get(&term_a.axis).ok_or(LiftError::NonAffineAxis { node })?;
-                let extent_b = *known_extents.get(&term_b.axis).ok_or(LiftError::NonAffineAxis { node })?;
+                let extent_a = *known_extents
+                    .get(&term_a.axis)
+                    .ok_or(LiftError::NonAffineAxis { node })?;
+                let extent_b = *known_extents
+                    .get(&term_b.axis)
+                    .ok_or(LiftError::NonAffineAxis { node })?;
                 let mut indices = Vec::with_capacity((extent_a * extent_b) as usize);
                 for value_a in 0..extent_a as i64 {
                     for value_b in 0..extent_b as i64 {
-                        indices.push(value_a * i64::from(term_a.coeff) + value_b * i64::from(term_b.coeff) + i64::from(axis_index.offset));
+                        indices.push(
+                            value_a * i64::from(term_a.coeff)
+                                + value_b * i64::from(term_b.coeff)
+                                + i64::from(axis_index.offset),
+                        );
                     }
                 }
                 // a graph-level initializer, not a `Constant` node -- `crate::lower`'s
@@ -628,11 +738,22 @@ fn resolve_affine(
                 // the same way the `CumSum` axis initializer further down this file does.
                 *fresh += 1;
                 let indices_name = format!("lift_window_indices_{}", *fresh);
-                initializers.push(int64_tensor_bytes(&[extent_a as i64, extent_b as i64], &indices_name, &indices));
+                initializers.push(int64_tensor_bytes(
+                    &[extent_a as i64, extent_b as i64],
+                    &indices_name,
+                    &indices,
+                ));
 
                 *fresh += 1;
                 let gathered = format!("lift_window_gather_{}", *fresh);
-                emit_node(buf, &[current.as_str(), indices_name.as_str()], &[gathered.as_str()], &gathered, "Gather", &[attr_int("axis", i64::from(real_axis))]);
+                emit_node(
+                    buf,
+                    &[current.as_str(), indices_name.as_str()],
+                    &[gathered.as_str()],
+                    &gathered,
+                    "Gather",
+                    &[attr_int("axis", i64::from(real_axis))],
+                );
                 current = gathered;
 
                 covered.push((term_a.axis, real_axis));
@@ -645,22 +766,46 @@ fn resolve_affine(
 
     covered.sort_by_key(|&(iter_axis, _)| iter_axis);
     let order: Vec<u16> = covered.iter().map(|&(_, real_axis)| real_axis).collect();
-    let missing: Vec<i64> = (0..pattern.iter_rank).filter(|iter_axis| !covered.iter().any(|&(candidate, _)| candidate == *iter_axis)).map(i64::from).collect();
+    let missing: Vec<i64> = (0..pattern.iter_rank)
+        .filter(|iter_axis| {
+            !covered
+                .iter()
+                .any(|&(candidate, _)| candidate == *iter_axis)
+        })
+        .map(i64::from)
+        .collect();
 
-    let is_identity_order = order.iter().enumerate().all(|(index, &axis)| axis as usize == index);
+    let is_identity_order = order
+        .iter()
+        .enumerate()
+        .all(|(index, &axis)| axis as usize == index);
 
     if !is_identity_order {
         *fresh += 1;
         let transposed = format!("lift_transpose_{}", *fresh);
         let perm: Vec<i64> = order.iter().map(|&axis| i64::from(axis)).collect();
-        emit_node(buf, &[current.as_str()], &[transposed.as_str()], &transposed, "Transpose", &[attr_ints("perm", &perm)]);
+        emit_node(
+            buf,
+            &[current.as_str()],
+            &[transposed.as_str()],
+            &transposed,
+            "Transpose",
+            &[attr_ints("perm", &perm)],
+        );
         current = transposed;
     }
 
     if !missing.is_empty() {
         *fresh += 1;
         let unsqueezed = format!("lift_unsqueeze_{}", *fresh);
-        emit_node(buf, &[current.as_str()], &[unsqueezed.as_str()], &unsqueezed, "Unsqueeze", &[attr_ints("axes", &missing)]);
+        emit_node(
+            buf,
+            &[current.as_str()],
+            &[unsqueezed.as_str()],
+            &unsqueezed,
+            "Unsqueeze",
+            &[attr_ints("axes", &missing)],
+        );
         current = unsqueezed;
     }
 
@@ -678,7 +823,11 @@ struct ReducedAxes {
     perm: Option<Vec<i64>>,
 }
 
-fn reduced_axes(node: NodeId, in_map: &IndexPattern, out_map: &IndexPattern) -> Result<ReducedAxes, LiftError> {
+fn reduced_axes(
+    node: NodeId,
+    in_map: &IndexPattern,
+    out_map: &IndexPattern,
+) -> Result<ReducedAxes, LiftError> {
     let mut out_covered: Vec<u16> = Vec::with_capacity(out_map.axes.len());
     for axis_index in &out_map.axes {
         match single_term_axis(axis_index) {
@@ -691,14 +840,22 @@ fn reduced_axes(node: NodeId, in_map: &IndexPattern, out_map: &IndexPattern) -> 
     if ascending_order.windows(2).any(|pair| pair[0] == pair[1]) {
         return Err(LiftError::PermutedOutMap { node });
     }
-    let axes = (0..in_map.iter_rank).filter(|axis| !out_covered.contains(axis)).map(i64::from).collect();
+    let axes = (0..in_map.iter_rank)
+        .filter(|axis| !out_covered.contains(axis))
+        .map(i64::from)
+        .collect();
     let is_ascending = out_covered.windows(2).all(|pair| pair[0] < pair[1]);
     let perm = if is_ascending {
         None
     } else {
         let mapped: Vec<i64> = out_covered
             .iter()
-            .map(|axis| ascending_order.iter().position(|candidate| candidate == axis).map(|position| position as i64))
+            .map(|axis| {
+                ascending_order
+                    .iter()
+                    .position(|candidate| candidate == axis)
+                    .map(|position| position as i64)
+            })
             .collect::<Option<Vec<i64>>>()
             .ok_or(LiftError::PermutedOutMap { node })?;
         Some(mapped)
@@ -722,9 +879,13 @@ pub fn lift_graph(input: LiftInput<'_>) -> Result<Vec<u8>, LiftError> {
     let mut graph_inputs = Vec::new();
     let mut fresh: u32 = 0;
 
-    let mut output_names_by_node: alloc::collections::BTreeMap<u32, Vec<String>> = alloc::collections::BTreeMap::new();
+    let mut output_names_by_node: alloc::collections::BTreeMap<u32, Vec<String>> =
+        alloc::collections::BTreeMap::new();
     for (output_name, node_id) in input.graph_outputs {
-        output_names_by_node.entry(node_id.0).or_default().push(output_name.clone());
+        output_names_by_node
+            .entry(node_id.0)
+            .or_default()
+            .push(output_name.clone());
     }
 
     // Pattern-raising (this module's own doc): a matched `MatmulShape`'s
@@ -735,11 +896,19 @@ pub fn lift_graph(input: LiftInput<'_>) -> Result<Vec<u8>, LiftError> {
     // node.
     let consumer_counts = count_consumers(input.program, input.graph_outputs);
     let mut matmul_shapes: BTreeMap<u32, MatmulShape> = BTreeMap::new();
-    let mut subsumed_elementwise: alloc::collections::BTreeSet<u32> = alloc::collections::BTreeSet::new();
+    let mut subsumed_elementwise: alloc::collections::BTreeSet<u32> =
+        alloc::collections::BTreeSet::new();
     for (index, op) in input.program.iter().enumerate() {
         let Op::Reduce(reduce) = op else { continue };
-        let Some(shape) = try_matmul_shape(input.program, reduce) else { continue };
-        if consumer_counts.get(&shape.elementwise_node.0).copied().unwrap_or(0) != 1 {
+        let Some(shape) = try_matmul_shape(input.program, reduce) else {
+            continue;
+        };
+        if consumer_counts
+            .get(&shape.elementwise_node.0)
+            .copied()
+            .unwrap_or(0)
+            != 1
+        {
             continue;
         }
         subsumed_elementwise.insert(shape.elementwise_node.0);
@@ -757,8 +926,20 @@ pub fn lift_graph(input: LiftInput<'_>) -> Result<Vec<u8>, LiftError> {
         if matmul_shapes.contains_key(&(index as u32)) {
             continue;
         }
-        let Some(shape) = try_conv_shape(input.program, reduce) else { continue };
-        if consumer_counts.get(&shape.product_node.0).copied().unwrap_or(0) != 1 || consumer_counts.get(&shape.windowed_node.0).copied().unwrap_or(0) != 1 {
+        let Some(shape) = try_conv_shape(input.program, reduce) else {
+            continue;
+        };
+        if consumer_counts
+            .get(&shape.product_node.0)
+            .copied()
+            .unwrap_or(0)
+            != 1
+            || consumer_counts
+                .get(&shape.windowed_node.0)
+                .copied()
+                .unwrap_or(0)
+                != 1
+        {
             continue;
         }
         subsumed_elementwise.insert(shape.product_node.0);
@@ -768,21 +949,38 @@ pub fn lift_graph(input: LiftInput<'_>) -> Result<Vec<u8>, LiftError> {
 
     for (index, op) in input.program.iter().enumerate() {
         let node_id = NodeId(index as u32);
-        let primary_name = match output_names_by_node.get(&node_id.0).and_then(|list| list.first()) {
+        let primary_name = match output_names_by_node
+            .get(&node_id.0)
+            .and_then(|list| list.first())
+        {
             Some(declared) => declared.clone(),
             None => match op {
-                Op::Input { name: Some(bound_name), .. } => bound_name.clone(),
+                Op::Input {
+                    name: Some(bound_name),
+                    ..
+                } => bound_name.clone(),
                 _ => format!("v{index}"),
             },
         };
 
         match op {
             Op::Input { dtype, shape, name } => {
-                let bound_name = name.clone().ok_or_else(|| LiftError::UnboundInput { node: node_id, name: primary_name.clone() })?;
+                let bound_name = name.clone().ok_or_else(|| LiftError::UnboundInput {
+                    node: node_id,
+                    name: primary_name.clone(),
+                })?;
                 let dims = extents_to_dims(node_id, shape)?;
-                if input.graph_inputs.iter().any(|candidate| candidate == &bound_name) {
+                if input
+                    .graph_inputs
+                    .iter()
+                    .any(|candidate| candidate == &bound_name)
+                {
                     graph_inputs.push(value_info_bytes(&bound_name, &dims));
-                } else if let Some((_, data)) = input.initializers.iter().find(|(candidate, _)| candidate == &bound_name) {
+                } else if let Some((_, data)) = input
+                    .initializers
+                    .iter()
+                    .find(|(candidate, _)| candidate == &bound_name)
+                {
                     // an `Op::Input` tagged `Int32` is a `Computed`-gather
                     // `indices` leaf (see `onnx_dtype_to_op_dtype`'s own doc);
                     // this crate stores every buffer as f32 regardless, so
@@ -809,17 +1007,32 @@ pub fn lift_graph(input: LiftInput<'_>) -> Result<Vec<u8>, LiftError> {
             }
             Op::Constant { shape, value, .. } => {
                 let dims = extents_to_dims(node_id, shape)?;
-                let element_count: usize = dims.iter().map(|dim| *dim as usize).product::<usize>().max(1);
+                let element_count: usize = dims
+                    .iter()
+                    .map(|dim| *dim as usize)
+                    .product::<usize>()
+                    .max(1);
                 let values: Vec<f32> = alloc::vec![*value; element_count];
                 let tensor = float_tensor_bytes(&dims, &primary_name, &values);
-                emit_node(&mut nodes, &[], &[primary_name.as_str()], &primary_name, "Constant", &[attr_tensor("value", &tensor)]);
+                emit_node(
+                    &mut nodes,
+                    &[],
+                    &[primary_name.as_str()],
+                    &primary_name,
+                    "Constant",
+                    &[attr_tensor("value", &tensor)],
+                );
             }
             Op::Iota { extent, .. } => {
                 let Extent::Static(count) = extent else {
                     return Err(LiftError::SymbolicExtent { node: node_id });
                 };
                 let values: Vec<f32> = (0..*count).map(|value| value as f32).collect();
-                initializers.push(float_tensor_bytes(&[i64::from(*count)], &primary_name, &values));
+                initializers.push(float_tensor_bytes(
+                    &[i64::from(*count)],
+                    &primary_name,
+                    &values,
+                ));
             }
             Op::Elementwise { body, operands, .. } if subsumed_elementwise.contains(&node_id.0) => {
                 // Folded directly into the `MatMul` its consuming `Reduce`
@@ -834,8 +1047,21 @@ pub fn lift_graph(input: LiftInput<'_>) -> Result<Vec<u8>, LiftError> {
                 for (operand_id, map) in operands {
                     let source_name = names[operand_id.0 as usize].clone();
                     let resolved = match map {
-                        IndexMap::Affine(pattern) => resolve_affine(node_id, &mut nodes, &mut initializers, &mut fresh, &source_name, pattern, &known_extents)?,
-                        IndexMap::Computed { indices, index_map, base, gathered_dim } => resolve_gather(
+                        IndexMap::Affine(pattern) => resolve_affine(
+                            node_id,
+                            &mut nodes,
+                            &mut initializers,
+                            &mut fresh,
+                            &source_name,
+                            pattern,
+                            &known_extents,
+                        )?,
+                        IndexMap::Computed {
+                            indices,
+                            index_map,
+                            base,
+                            gathered_dim,
+                        } => resolve_gather(
                             node_id,
                             &mut nodes,
                             &mut initializers,
@@ -852,7 +1078,14 @@ pub fn lift_graph(input: LiftInput<'_>) -> Result<Vec<u8>, LiftError> {
                     operand_names.push(resolved);
                 }
                 let operand_refs: Vec<&str> = operand_names.iter().map(String::as_str).collect();
-                emit_node(&mut nodes, &operand_refs, &[primary_name.as_str()], &primary_name, scalar_op_type(*body), &[]);
+                emit_node(
+                    &mut nodes,
+                    &operand_refs,
+                    &[primary_name.as_str()],
+                    &primary_name,
+                    scalar_op_type(*body),
+                    &[],
+                );
             }
             Op::Reduce(reduce) if matmul_shapes.contains_key(&node_id.0) => {
                 // Pattern-raised (this module's own doc): the shape
@@ -872,9 +1105,23 @@ pub fn lift_graph(input: LiftInput<'_>) -> Result<Vec<u8>, LiftError> {
                     if shape.trans_b {
                         attributes.push(attr_int("transB", 1));
                     }
-                    emit_node(&mut nodes, &[lhs_name.as_str(), rhs_name.as_str()], &[primary_name.as_str()], &primary_name, "Gemm", &attributes);
+                    emit_node(
+                        &mut nodes,
+                        &[lhs_name.as_str(), rhs_name.as_str()],
+                        &[primary_name.as_str()],
+                        &primary_name,
+                        "Gemm",
+                        &attributes,
+                    );
                 } else {
-                    emit_node(&mut nodes, &[lhs_name.as_str(), rhs_name.as_str()], &[primary_name.as_str()], &primary_name, "MatMul", &[]);
+                    emit_node(
+                        &mut nodes,
+                        &[lhs_name.as_str(), rhs_name.as_str()],
+                        &[primary_name.as_str()],
+                        &primary_name,
+                        "MatMul",
+                        &[],
+                    );
                 }
             }
             Op::Reduce(reduce) if conv_shapes.contains_key(&node_id.0) => {
@@ -888,24 +1135,46 @@ pub fn lift_graph(input: LiftInput<'_>) -> Result<Vec<u8>, LiftError> {
                 let image_name = names[shape.image.0 as usize].clone();
                 let weight_name = names[shape.weight.0 as usize].clone();
                 let attributes = alloc::vec![
-                    attr_ints("kernel_shape", &[shape.kernel_h as i64, shape.kernel_w as i64]),
+                    attr_ints(
+                        "kernel_shape",
+                        &[shape.kernel_h as i64, shape.kernel_w as i64]
+                    ),
                     attr_ints("strides", &[shape.stride_h, shape.stride_w]),
                     attr_ints("dilations", &[shape.dilation_h, shape.dilation_w]),
                     attr_ints("pads", &[0, 0, 0, 0]),
                 ];
-                emit_node(&mut nodes, &[image_name.as_str(), weight_name.as_str()], &[primary_name.as_str()], &primary_name, "Conv", &attributes);
+                emit_node(
+                    &mut nodes,
+                    &[image_name.as_str(), weight_name.as_str()],
+                    &[primary_name.as_str()],
+                    &primary_name,
+                    "Conv",
+                    &attributes,
+                );
             }
             Op::Reduce(reduce) => {
                 let in_pattern = match &reduce.in_map {
                     IndexMap::Affine(pattern) => pattern,
-                    IndexMap::Computed { .. } => return Err(LiftError::UnsupportedComputedMap { node: node_id }),
+                    IndexMap::Computed { .. } => {
+                        return Err(LiftError::UnsupportedComputedMap { node: node_id });
+                    }
                 };
                 let out_pattern = match &reduce.out_map {
                     IndexMap::Affine(pattern) => pattern,
-                    IndexMap::Computed { .. } => return Err(LiftError::UnsupportedComputedMap { node: node_id }),
+                    IndexMap::Computed { .. } => {
+                        return Err(LiftError::UnsupportedComputedMap { node: node_id });
+                    }
                 };
                 let source_name = names[reduce.operand.0 as usize].clone();
-                let resolved = resolve_affine(node_id, &mut nodes, &mut initializers, &mut fresh, &source_name, in_pattern, &BTreeMap::new())?;
+                let resolved = resolve_affine(
+                    node_id,
+                    &mut nodes,
+                    &mut initializers,
+                    &mut fresh,
+                    &source_name,
+                    in_pattern,
+                    &BTreeMap::new(),
+                )?;
                 let reduce_axes = reduced_axes(node_id, in_pattern, out_pattern)?;
                 let final_name = primary_name.clone();
                 let staged_name = if reduce_axes.perm.is_some() {
@@ -917,12 +1186,30 @@ pub fn lift_graph(input: LiftInput<'_>) -> Result<Vec<u8>, LiftError> {
 
                 match reduce.keep {
                     Keep::Reduce => {
-                        let op_type = reduce_op_type(reduce.body).ok_or(LiftError::UnsupportedReduceBody { node: node_id, body: reduce.body })?;
-                        emit_node(&mut nodes, &[resolved.as_str()], &[staged_name.as_str()], &staged_name, op_type, &[attr_ints("axes", &reduce_axes.axes), attr_int("keepdims", 0)]);
+                        let op_type = reduce_op_type(reduce.body).ok_or(
+                            LiftError::UnsupportedReduceBody {
+                                node: node_id,
+                                body: reduce.body,
+                            },
+                        )?;
+                        emit_node(
+                            &mut nodes,
+                            &[resolved.as_str()],
+                            &[staged_name.as_str()],
+                            &staged_name,
+                            op_type,
+                            &[
+                                attr_ints("axes", &reduce_axes.axes),
+                                attr_int("keepdims", 0),
+                            ],
+                        );
                     }
                     Keep::Scan => {
                         if reduce.body != ScalarOp::Add || reduce_axes.axes.len() != 1 {
-                            return Err(LiftError::UnsupportedScan { node: node_id, body: reduce.body });
+                            return Err(LiftError::UnsupportedScan {
+                                node: node_id,
+                                body: reduce.body,
+                            });
                         }
                         fresh += 1;
                         let axis_name = format!("lift_cumsum_axis_{fresh}");
@@ -934,19 +1221,40 @@ pub fn lift_graph(input: LiftInput<'_>) -> Result<Vec<u8>, LiftError> {
                             push_str(8, &axis_name, &mut buf);
                             buf
                         });
-                        emit_node(&mut nodes, &[resolved.as_str(), axis_name.as_str()], &[staged_name.as_str()], &staged_name, "CumSum", &[]);
+                        emit_node(
+                            &mut nodes,
+                            &[resolved.as_str(), axis_name.as_str()],
+                            &[staged_name.as_str()],
+                            &staged_name,
+                            "CumSum",
+                            &[],
+                        );
                     }
                 }
 
                 if let Some(perm) = &reduce_axes.perm {
-                    emit_node(&mut nodes, &[staged_name.as_str()], &[final_name.as_str()], &final_name, "Transpose", &[attr_ints("perm", perm)]);
+                    emit_node(
+                        &mut nodes,
+                        &[staged_name.as_str()],
+                        &[final_name.as_str()],
+                        &final_name,
+                        "Transpose",
+                        &[attr_ints("perm", perm)],
+                    );
                 }
             }
         }
 
         if let Some(extra_output_names) = output_names_by_node.get(&node_id.0) {
             for extra in extra_output_names.iter().skip(1) {
-                emit_node(&mut nodes, &[primary_name.as_str()], &[extra.as_str()], extra, "Identity", &[]);
+                emit_node(
+                    &mut nodes,
+                    &[primary_name.as_str()],
+                    &[extra.as_str()],
+                    extra,
+                    "Identity",
+                    &[],
+                );
             }
         }
 
@@ -1008,16 +1316,23 @@ fn fold_constant_indices(program: &[Op], node: NodeId) -> Option<Vec<f32>> {
         Op::Constant { shape, value, .. } => {
             let mut element_count: u64 = 1;
             for extent in shape {
-                let Extent::Static(count) = extent else { return None };
+                let Extent::Static(count) = extent else {
+                    return None;
+                };
                 element_count = element_count.checked_mul(u64::from(*count))?;
             }
             Some(alloc::vec![*value; element_count as usize])
         }
-        Op::Iota { extent: Extent::Static(count), .. } => Some((0..*count).map(|value| value as f32).collect()),
+        Op::Iota {
+            extent: Extent::Static(count),
+            ..
+        } => Some((0..*count).map(|value| value as f32).collect()),
         Op::Elementwise { body, operands, .. } => {
             let mut folded_operands: Vec<Vec<f32>> = Vec::with_capacity(operands.len());
             for (operand_id, map) in operands {
-                let IndexMap::Affine(pattern) = map else { return None };
+                let IndexMap::Affine(pattern) = map else {
+                    return None;
+                };
                 if pattern.iter_rank > 1 || pattern.axes.len() > 1 {
                     return None;
                 }
@@ -1026,7 +1341,16 @@ fn fold_constant_indices(program: &[Op], node: NodeId) -> Option<Vec<f32>> {
             let length = folded_operands.iter().map(Vec::len).max()?;
             let mut result = Vec::with_capacity(length);
             for position in 0..length {
-                let values: Vec<f32> = folded_operands.iter().map(|values| if values.len() == 1 { values[0] } else { values[position] }).collect();
+                let values: Vec<f32> = folded_operands
+                    .iter()
+                    .map(|values| {
+                        if values.len() == 1 {
+                            values[0]
+                        } else {
+                            values[position]
+                        }
+                    })
+                    .collect();
                 result.push(eval_scalar_op(*body, &values)?);
             }
             Some(result)
@@ -1077,7 +1401,11 @@ fn resolve_gather(
         if data_axis == gathered_dim {
             continue;
         }
-        let expected = if data_axis < gathered_dim { data_axis } else { data_axis - 1 + indices_rank };
+        let expected = if data_axis < gathered_dim {
+            data_axis
+        } else {
+            data_axis - 1 + indices_rank
+        };
         if single_term_axis(axis_index) != Some(expected) {
             return Err(LiftError::UnsupportedComputedMap { node });
         }
@@ -1092,7 +1420,11 @@ fn resolve_gather(
                 let exact: Vec<i64> = values.iter().map(|&value| value as i64).collect();
                 *fresh += 1;
                 let folded_name = format!("lift_gather_indices_{}", *fresh);
-                initializers.push(int64_tensor_bytes(&[exact.len() as i64], &folded_name, &exact));
+                initializers.push(int64_tensor_bytes(
+                    &[exact.len() as i64],
+                    &folded_name,
+                    &exact,
+                ));
                 folded_name
             }
             None => names[indices.0 as usize].clone(),
@@ -1103,7 +1435,14 @@ fn resolve_gather(
 
     *fresh += 1;
     let output_name = format!("lift_gather_{}", *fresh);
-    emit_node(buf, &[data_name, indices_name.as_str()], &[output_name.as_str()], &output_name, "Gather", &[attr_int("axis", i64::from(gathered_dim))]);
+    emit_node(
+        buf,
+        &[data_name, indices_name.as_str()],
+        &[output_name.as_str()],
+        &output_name,
+        "Gather",
+        &[attr_int("axis", i64::from(gathered_dim))],
+    );
     Ok(output_name)
 }
 
@@ -1135,11 +1474,21 @@ mod tests {
     use crate::pipe::parse_complete;
 
     fn f32_initializer(name: &'static str, dims: &[i64], data: &[f32]) -> TensorProto<'static> {
-        TensorProto { dims: dims.to_vec(), data_type: 1, float_data: data.to_vec(), name, ..TensorProto::default() }
+        TensorProto {
+            dims: dims.to_vec(),
+            data_type: 1,
+            float_data: data.to_vec(),
+            name,
+            ..TensorProto::default()
+        }
     }
 
     fn ints_attribute(name: &'static str, ints: Vec<i64>) -> AttributeProto<'static> {
-        AttributeProto { name, ints, ..AttributeProto::default() }
+        AttributeProto {
+            name,
+            ints,
+            ..AttributeProto::default()
+        }
     }
 
     /// Drives the full write-side loop this crate's ONNX support closes,
@@ -1149,10 +1498,17 @@ mod tests {
     /// asserting the two agree to `1e-4`.
     fn assert_graph_round_trips_through_lift(graph: &GraphProto<'_>, lifted_name: &'static str) {
         let original = lower_graph(graph).expect("lower the fixture graph");
-        let original_named: Vec<(&str, &[f32])> = original.initializers.iter().map(|(name, data)| (name.as_str(), data.as_slice())).collect();
+        let original_named: Vec<(&str, &[f32])> = original
+            .initializers
+            .iter()
+            .map(|(name, data)| (name.as_str(), data.as_slice()))
+            .collect();
         let original_output = original.graph_outputs[0].1;
-        let baseline = evaluate_named(&original.program, &[], &original_named, &[original_output]).expect("evaluate the original program");
-        let (baseline_data, baseline_shape) = baseline.get(original_output).expect("baseline output present");
+        let baseline = evaluate_named(&original.program, &[], &original_named, &[original_output])
+            .expect("evaluate the original program");
+        let (baseline_data, baseline_shape) = baseline
+            .get(original_output)
+            .expect("baseline output present");
 
         let lift_input = LiftInput {
             program: &original.program,
@@ -1163,19 +1519,36 @@ mod tests {
         };
         let lifted_bytes = lift_model(lift_input).expect("lift the program to onnx bytes");
 
-        let reparsed_model = parse_complete(&lifted_bytes).expect("lifted bytes parse back to a ModelProto");
+        let reparsed_model =
+            parse_complete(&lifted_bytes).expect("lifted bytes parse back to a ModelProto");
         let reparsed_graph = reparsed_model.graph.as_ref().expect("lifted graph present");
-        assert!(!reparsed_graph.node.is_empty(), "lifted graph carries its primitive-op nodes");
+        assert!(
+            !reparsed_graph.node.is_empty(),
+            "lifted graph carries its primitive-op nodes"
+        );
 
         let reloaded = lower_graph(reparsed_graph).expect("lower the lifted graph back to Op");
-        let reloaded_named: Vec<(&str, &[f32])> = reloaded.initializers.iter().map(|(name, data)| (name.as_str(), data.as_slice())).collect();
+        let reloaded_named: Vec<(&str, &[f32])> = reloaded
+            .initializers
+            .iter()
+            .map(|(name, data)| (name.as_str(), data.as_slice()))
+            .collect();
         let reloaded_output = reloaded.graph_outputs[0].1;
-        let evaluated = evaluate_named(&reloaded.program, &[], &reloaded_named, &[reloaded_output]).expect("evaluate the round-tripped program");
-        let (data, shape) = evaluated.get(reloaded_output).expect("round-tripped output present");
+        let evaluated = evaluate_named(&reloaded.program, &[], &reloaded_named, &[reloaded_output])
+            .expect("evaluate the round-tripped program");
+        let (data, shape) = evaluated
+            .get(reloaded_output)
+            .expect("round-tripped output present");
 
-        assert_eq!(shape, baseline_shape, "lift round trip changed the output shape");
+        assert_eq!(
+            shape, baseline_shape,
+            "lift round trip changed the output shape"
+        );
         for (actual, expected) in data.iter().zip(baseline_data.iter()) {
-            assert!((actual - expected).abs() < 1e-4, "round-tripped {actual} does not match baseline {expected}");
+            assert!(
+                (actual - expected).abs() < 1e-4,
+                "round-tripped {actual} does not match baseline {expected}"
+            );
         }
     }
 
@@ -1190,14 +1563,27 @@ mod tests {
     /// hand-verifies.
     #[test]
     fn conv_stride1_window_axis_round_trips_through_lift() {
-        let image = f32_initializer("image", &[1, 1, 4, 4], &(1..=16).map(|value| value as f32).collect::<Vec<_>>());
+        let image = f32_initializer(
+            "image",
+            &[1, 1, 4, 4],
+            &(1..=16).map(|value| value as f32).collect::<Vec<_>>(),
+        );
         let weight = f32_initializer("weight", &[1, 1, 3, 3], &[1.0; 9]);
-        let node = NodeProto { input: vec!["image", "weight"], output: vec!["y"], op_type: "Conv", name: "conv", ..NodeProto::default() };
+        let node = NodeProto {
+            input: vec!["image", "weight"],
+            output: vec!["y"],
+            op_type: "Conv",
+            name: "conv",
+            ..NodeProto::default()
+        };
         let graph = GraphProto {
             node: vec![node],
             name: "conv_stride1_graph",
             initializer: vec![image, weight],
-            output: vec![ValueInfoProto { name: "y", ..ValueInfoProto::default() }],
+            output: vec![ValueInfoProto {
+                name: "y",
+                ..ValueInfoProto::default()
+            }],
             ..GraphProto::default()
         };
 
@@ -1210,20 +1596,33 @@ mod tests {
     /// `Conv`-specific.
     #[test]
     fn maxpool_2x2_window_axis_round_trips_through_lift() {
-        let image = f32_initializer("image", &[1, 1, 4, 4], &[1.0, 3.0, 2.0, 4.0, 5.0, 7.0, 6.0, 8.0, 9.0, 11.0, 10.0, 12.0, 13.0, 15.0, 14.0, 16.0]);
+        let image = f32_initializer(
+            "image",
+            &[1, 1, 4, 4],
+            &[
+                1.0, 3.0, 2.0, 4.0, 5.0, 7.0, 6.0, 8.0, 9.0, 11.0, 10.0, 12.0, 13.0, 15.0, 14.0,
+                16.0,
+            ],
+        );
         let node = NodeProto {
             input: vec!["image"],
             output: vec!["y"],
             op_type: "MaxPool",
             name: "maxpool",
-            attribute: vec![ints_attribute("kernel_shape", vec![2, 2]), ints_attribute("strides", vec![2, 2])],
+            attribute: vec![
+                ints_attribute("kernel_shape", vec![2, 2]),
+                ints_attribute("strides", vec![2, 2]),
+            ],
             ..NodeProto::default()
         };
         let graph = GraphProto {
             node: vec![node],
             name: "maxpool_graph",
             initializer: vec![image],
-            output: vec![ValueInfoProto { name: "y", ..ValueInfoProto::default() }],
+            output: vec![ValueInfoProto {
+                name: "y",
+                ..ValueInfoProto::default()
+            }],
             ..GraphProto::default()
         };
 
@@ -1241,12 +1640,21 @@ mod tests {
     fn degenerate_broadcast_axis_round_trips_through_lift() {
         let lhs = f32_initializer("lhs", &[2, 3], &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
         let rhs = f32_initializer("rhs", &[1, 3], &[10.0, 20.0, 30.0]);
-        let node = NodeProto { input: vec!["lhs", "rhs"], output: vec!["y"], op_type: "Add", name: "add", ..NodeProto::default() };
+        let node = NodeProto {
+            input: vec!["lhs", "rhs"],
+            output: vec!["y"],
+            op_type: "Add",
+            name: "add",
+            ..NodeProto::default()
+        };
         let graph = GraphProto {
             node: vec![node],
             name: "broadcast_add_graph",
             initializer: vec![lhs, rhs],
-            output: vec![ValueInfoProto { name: "y", ..ValueInfoProto::default() }],
+            output: vec![ValueInfoProto {
+                name: "y",
+                ..ValueInfoProto::default()
+            }],
             ..GraphProto::default()
         };
 
@@ -1266,21 +1674,40 @@ mod tests {
         let mut program = Vec::new();
         let x = append(
             &mut program,
-            Op::Input { dtype: proxima_tensor::DType::Float32, shape: vec![Extent::Static(2), Extent::Static(3), Extent::Static(4)], name: Some("x".to_string()) },
+            Op::Input {
+                dtype: proxima_tensor::DType::Float32,
+                shape: vec![Extent::Static(2), Extent::Static(3), Extent::Static(4)],
+                name: Some("x".to_string()),
+            },
         );
         let in_map = IndexMap::Affine(IndexPattern {
             iter_rank: 3,
             axes: vec![
-                AxisIndex { terms: core::iter::once(proxima_tensor::AxisTerm::projection(0)).collect(), offset: 0 },
-                AxisIndex { terms: core::iter::once(proxima_tensor::AxisTerm::projection(1)).collect(), offset: 0 },
-                AxisIndex { terms: core::iter::once(proxima_tensor::AxisTerm::projection(2)).collect(), offset: 0 },
+                AxisIndex {
+                    terms: core::iter::once(proxima_tensor::AxisTerm::projection(0)).collect(),
+                    offset: 0,
+                },
+                AxisIndex {
+                    terms: core::iter::once(proxima_tensor::AxisTerm::projection(1)).collect(),
+                    offset: 0,
+                },
+                AxisIndex {
+                    terms: core::iter::once(proxima_tensor::AxisTerm::projection(2)).collect(),
+                    offset: 0,
+                },
             ],
         });
         let out_map = IndexMap::Affine(IndexPattern {
             iter_rank: 3,
             axes: vec![
-                AxisIndex { terms: core::iter::once(proxima_tensor::AxisTerm::projection(2)).collect(), offset: 0 },
-                AxisIndex { terms: core::iter::once(proxima_tensor::AxisTerm::projection(0)).collect(), offset: 0 },
+                AxisIndex {
+                    terms: core::iter::once(proxima_tensor::AxisTerm::projection(2)).collect(),
+                    offset: 0,
+                },
+                AxisIndex {
+                    terms: core::iter::once(proxima_tensor::AxisTerm::projection(0)).collect(),
+                    offset: 0,
+                },
             ],
         });
         let reduced = append(
@@ -1299,9 +1726,15 @@ mod tests {
 
         let x_data: [f32; 24] = core::array::from_fn(|index| index as f32);
         let named: [(&str, &[f32]); 1] = [("x", &x_data)];
-        let baseline = evaluate_named(&program, &[], &named, &[reduced]).expect("evaluate the permuted-out_map fixture");
-        let (baseline_data, baseline_shape) = baseline.get(reduced).expect("baseline output present");
-        assert_eq!(baseline_shape, &[4, 2], "out_map [2, 0] transposes the naturally-ascending [2, 4] reduce shape");
+        let baseline = evaluate_named(&program, &[], &named, &[reduced])
+            .expect("evaluate the permuted-out_map fixture");
+        let (baseline_data, baseline_shape) =
+            baseline.get(reduced).expect("baseline output present");
+        assert_eq!(
+            baseline_shape,
+            &[4, 2],
+            "out_map [2, 0] transposes the naturally-ascending [2, 4] reduce shape"
+        );
 
         let lift_input = LiftInput {
             program: &program,
@@ -1310,19 +1743,28 @@ mod tests {
             graph_outputs: &[("y".to_string(), reduced)],
             graph_name: "permuted_reduce_lifted",
         };
-        let lifted_bytes = lift_model(lift_input).expect("lift the permuted-out_map program to onnx bytes");
+        let lifted_bytes =
+            lift_model(lift_input).expect("lift the permuted-out_map program to onnx bytes");
 
-        let reparsed_model = parse_complete(&lifted_bytes).expect("lifted bytes parse back to a ModelProto");
+        let reparsed_model =
+            parse_complete(&lifted_bytes).expect("lifted bytes parse back to a ModelProto");
         let reparsed_graph = reparsed_model.graph.as_ref().expect("lifted graph present");
-        let reloaded = lower_graph(reparsed_graph).expect("lower the lifted permuted-reduce graph back to Op");
+        let reloaded =
+            lower_graph(reparsed_graph).expect("lower the lifted permuted-reduce graph back to Op");
         let reloaded_named: [(&str, &[f32]); 1] = [("x", &x_data)];
         let reloaded_output = reloaded.graph_outputs[0].1;
-        let evaluated = evaluate_named(&reloaded.program, &[], &reloaded_named, &[reloaded_output]).expect("evaluate the round-tripped permuted-reduce program");
-        let (data, shape) = evaluated.get(reloaded_output).expect("round-tripped output present");
+        let evaluated = evaluate_named(&reloaded.program, &[], &reloaded_named, &[reloaded_output])
+            .expect("evaluate the round-tripped permuted-reduce program");
+        let (data, shape) = evaluated
+            .get(reloaded_output)
+            .expect("round-tripped output present");
 
         assert_eq!(shape, baseline_shape);
         for (actual, expected) in data.iter().zip(baseline_data.iter()) {
-            assert!((actual - expected).abs() < 1e-4, "round-tripped {actual} does not match baseline {expected}");
+            assert!(
+                (actual - expected).abs() < 1e-4,
+                "round-tripped {actual} does not match baseline {expected}"
+            );
         }
     }
 
@@ -1333,17 +1775,39 @@ mod tests {
     fn three_term_axis_is_a_named_lift_error_not_a_silent_truncation() {
         let x = append(
             &mut Vec::new(),
-            Op::Input { dtype: proxima_tensor::DType::Float32, shape: vec![], name: None },
+            Op::Input {
+                dtype: proxima_tensor::DType::Float32,
+                shape: vec![],
+                name: None,
+            },
         );
         let three_terms = AxisIndex {
-            terms: vec![proxima_tensor::AxisTerm::scaled(0, 1), proxima_tensor::AxisTerm::scaled(1, 1), proxima_tensor::AxisTerm::scaled(2, 1)].into_iter().collect(),
+            terms: vec![
+                proxima_tensor::AxisTerm::scaled(0, 1),
+                proxima_tensor::AxisTerm::scaled(1, 1),
+                proxima_tensor::AxisTerm::scaled(2, 1),
+            ]
+            .into_iter()
+            .collect(),
             offset: 0,
         };
-        let pattern = IndexPattern { iter_rank: 3, axes: vec![three_terms] };
+        let pattern = IndexPattern {
+            iter_rank: 3,
+            axes: vec![three_terms],
+        };
         let mut buf = Vec::new();
         let mut fresh = 0u32;
         let mut initializers = Vec::new();
-        let error = resolve_affine(x, &mut buf, &mut initializers, &mut fresh, "source", &pattern, &BTreeMap::new()).expect_err("three-term axis is unsupported");
+        let error = resolve_affine(
+            x,
+            &mut buf,
+            &mut initializers,
+            &mut fresh,
+            "source",
+            &pattern,
+            &BTreeMap::new(),
+        )
+        .expect_err("three-term axis is unsupported");
         assert!(matches!(error, LiftError::NonAffineAxis { .. }));
     }
 
@@ -1354,15 +1818,34 @@ mod tests {
     #[test]
     fn gather_at_a_general_axis_round_trips_through_lift() {
         let table = f32_initializer("table", &[2, 3], &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
-        let indices = TensorProto { dims: vec![2], data_type: 7, int64_data: vec![2, 0], name: "ids", ..TensorProto::default() };
-        let axis_attribute = AttributeProto { name: "axis", i: 1, ..AttributeProto::default() };
-        let node =
-            NodeProto { input: vec!["table", "ids"], output: vec!["y"], op_type: "Gather", name: "gather", attribute: vec![axis_attribute], ..NodeProto::default() };
+        let indices = TensorProto {
+            dims: vec![2],
+            data_type: 7,
+            int64_data: vec![2, 0],
+            name: "ids",
+            ..TensorProto::default()
+        };
+        let axis_attribute = AttributeProto {
+            name: "axis",
+            i: 1,
+            ..AttributeProto::default()
+        };
+        let node = NodeProto {
+            input: vec!["table", "ids"],
+            output: vec!["y"],
+            op_type: "Gather",
+            name: "gather",
+            attribute: vec![axis_attribute],
+            ..NodeProto::default()
+        };
         let graph = GraphProto {
             node: vec![node],
             name: "gather_axis1_graph",
             initializer: vec![table, indices],
-            output: vec![ValueInfoProto { name: "y", ..ValueInfoProto::default() }],
+            output: vec![ValueInfoProto {
+                name: "y",
+                ..ValueInfoProto::default()
+            }],
             ..GraphProto::default()
         };
 
@@ -1379,21 +1862,31 @@ mod tests {
     /// padded `Conv`/`Pool` could not be lifted back to ONNX at all.
     #[test]
     fn padded_conv_round_trips_through_lift() {
-        let image = f32_initializer("image", &[1, 1, 4, 4], &(1..=16).map(|value| value as f32).collect::<Vec<_>>());
+        let image = f32_initializer(
+            "image",
+            &[1, 1, 4, 4],
+            &(1..=16).map(|value| value as f32).collect::<Vec<_>>(),
+        );
         let weight = f32_initializer("weight", &[1, 1, 3, 3], &[1.0; 9]);
         let node = NodeProto {
             input: vec!["image", "weight"],
             output: vec!["y"],
             op_type: "Conv",
             name: "conv",
-            attribute: vec![ints_attribute("pads", vec![1, 1, 1, 1]), ints_attribute("strides", vec![2, 2])],
+            attribute: vec![
+                ints_attribute("pads", vec![1, 1, 1, 1]),
+                ints_attribute("strides", vec![2, 2]),
+            ],
             ..NodeProto::default()
         };
         let graph = GraphProto {
             node: vec![node],
             name: "padded_conv_graph",
             initializer: vec![image, weight],
-            output: vec![ValueInfoProto { name: "y", ..ValueInfoProto::default() }],
+            output: vec![ValueInfoProto {
+                name: "y",
+                ..ValueInfoProto::default()
+            }],
             ..GraphProto::default()
         };
 
@@ -1406,10 +1899,20 @@ mod tests {
     #[test]
     fn non_add_scan_body_is_a_named_lift_error() {
         let mut program = Vec::new();
-        let x = append(&mut program, Op::Input { dtype: proxima_tensor::DType::Float32, shape: vec![Extent::Static(4)], name: Some("x".to_string()) });
+        let x = append(
+            &mut program,
+            Op::Input {
+                dtype: proxima_tensor::DType::Float32,
+                shape: vec![Extent::Static(4)],
+                name: Some("x".to_string()),
+            },
+        );
         let identity = IndexMap::Affine(IndexPattern {
             iter_rank: 1,
-            axes: vec![AxisIndex { terms: core::iter::once(proxima_tensor::AxisTerm::projection(0)).collect(), offset: 0 }],
+            axes: vec![AxisIndex {
+                terms: core::iter::once(proxima_tensor::AxisTerm::projection(0)).collect(),
+                offset: 0,
+            }],
         });
         let scanned = append(
             &mut program,
@@ -1432,7 +1935,8 @@ mod tests {
             graph_outputs: &[("y".to_string(), scanned)],
             graph_name: "non_add_scan",
         };
-        let error = lift_model(lift_input).expect_err("Multiply scan body has no faithful ONNX cumulative op");
+        let error = lift_model(lift_input)
+            .expect_err("Multiply scan body has no faithful ONNX cumulative op");
         assert!(matches!(error, LiftError::UnsupportedScan { .. }));
     }
 
@@ -1448,12 +1952,21 @@ mod tests {
     fn matmul_lifts_to_a_matmul_node_not_mul_reducesum() {
         let lhs = f32_initializer("lhs", &[2, 3], &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
         let rhs = f32_initializer("rhs", &[3, 2], &[7.0, 8.0, 9.0, 10.0, 11.0, 12.0]);
-        let node = NodeProto { input: vec!["lhs", "rhs"], output: vec!["y"], op_type: "MatMul", name: "matmul", ..NodeProto::default() };
+        let node = NodeProto {
+            input: vec!["lhs", "rhs"],
+            output: vec!["y"],
+            op_type: "MatMul",
+            name: "matmul",
+            ..NodeProto::default()
+        };
         let graph = GraphProto {
             node: vec![node],
             name: "matmul_graph",
             initializer: vec![lhs, rhs],
-            output: vec![ValueInfoProto { name: "y", ..ValueInfoProto::default() }],
+            output: vec![ValueInfoProto {
+                name: "y",
+                ..ValueInfoProto::default()
+            }],
             ..GraphProto::default()
         };
 
@@ -1466,11 +1979,20 @@ mod tests {
             graph_name: "matmul_lifted",
         };
         let lifted_bytes = lift_model(lift_input).expect("lift MatMul to onnx bytes");
-        let reparsed_model = parse_complete(&lifted_bytes).expect("lifted bytes parse back to a ModelProto");
+        let reparsed_model =
+            parse_complete(&lifted_bytes).expect("lifted bytes parse back to a ModelProto");
         let reparsed_graph = reparsed_model.graph.as_ref().expect("lifted graph present");
 
-        let op_types: Vec<&str> = reparsed_graph.node.iter().map(|node| node.op_type).collect();
-        assert_eq!(op_types, ["MatMul"], "lifted graph is a single named MatMul node, not Mul+ReduceSum");
+        let op_types: Vec<&str> = reparsed_graph
+            .node
+            .iter()
+            .map(|node| node.op_type)
+            .collect();
+        assert_eq!(
+            op_types,
+            ["MatMul"],
+            "lifted graph is a single named MatMul node, not Mul+ReduceSum"
+        );
 
         assert_graph_round_trips_through_lift(&graph, "matmul_lifted_roundtrip");
     }

@@ -31,10 +31,12 @@ use std::cell::Cell;
 
 use proxima_onnx::lower::lower_graph;
 use proxima_onnx::messages::{
-    Dimension, DimensionValue, GraphProto, NodeProto, TensorProto, TensorShapeProto, TypeProto, TypeProtoTensor, TypeValue,
-    ValueInfoProto,
+    Dimension, DimensionValue, GraphProto, NodeProto, TensorProto, TensorShapeProto, TypeProto,
+    TypeProtoTensor, TypeValue, ValueInfoProto,
 };
-use proxima_tensor::cpu::{build_static_arena, build_static_arena_with_constants, evaluate_named_with_arena};
+use proxima_tensor::cpu::{
+    build_static_arena, build_static_arena_with_constants, evaluate_named_with_arena,
+};
 
 thread_local! {
     static ALLOCATIONS: Cell<usize> = const { Cell::new(0) };
@@ -73,7 +75,13 @@ fn deterministic_data(len: usize, salt: u32) -> Vec<f32> {
 }
 
 fn f32_initializer(name: &'static str, dims: Vec<i64>, data: Vec<f32>) -> TensorProto<'static> {
-    TensorProto { dims, data_type: 1, float_data: data, name, ..TensorProto::default() }
+    TensorProto {
+        dims,
+        data_type: 1,
+        float_data: data,
+        name,
+        ..TensorProto::default()
+    }
 }
 
 /// One `activation[M,K] @ weight[K,N] -> [M,N]` graph, `weight` a real ONNX
@@ -85,7 +93,12 @@ fn f32_initializer(name: &'static str, dims: Vec<i64>, data: Vec<f32>) -> Tensor
 /// sentence length, never by rebinding a shorter/longer activation into the
 /// same arena — the same fixed-shape contract a real BGE bucketed-length
 /// caller already lives under).
-fn build_matmul_graph(m: usize, k: usize, n: usize, weight_salt: u32) -> (Vec<proxima_tensor::Op>, Vec<f32>, proxima_tensor::NodeId) {
+fn build_matmul_graph(
+    m: usize,
+    k: usize,
+    n: usize,
+    weight_salt: u32,
+) -> (Vec<proxima_tensor::Op>, Vec<f32>, proxima_tensor::NodeId) {
     let weight_data = deterministic_data(k * n, weight_salt);
     let weight = f32_initializer("weight", vec![k as i64, n as i64], weight_data.clone());
     let node = NodeProto {
@@ -100,8 +113,14 @@ fn build_matmul_graph(m: usize, k: usize, n: usize, weight_salt: u32) -> (Vec<pr
             elem_type: 1,
             shape: Some(TensorShapeProto {
                 dim: vec![
-                    Dimension { value: Some(DimensionValue::Value(m as i64)), denotation: "" },
-                    Dimension { value: Some(DimensionValue::Value(k as i64)), denotation: "" },
+                    Dimension {
+                        value: Some(DimensionValue::Value(m as i64)),
+                        denotation: "",
+                    },
+                    Dimension {
+                        value: Some(DimensionValue::Value(k as i64)),
+                        denotation: "",
+                    },
                 ],
             }),
         })),
@@ -111,12 +130,23 @@ fn build_matmul_graph(m: usize, k: usize, n: usize, weight_salt: u32) -> (Vec<pr
         node: vec![node],
         name: "pack_at_plan_time_graph",
         initializer: vec![weight],
-        input: vec![ValueInfoProto { name: "activation", r#type: Some(activation_type), ..ValueInfoProto::default() }],
-        output: vec![ValueInfoProto { name: "y", ..ValueInfoProto::default() }],
+        input: vec![ValueInfoProto {
+            name: "activation",
+            r#type: Some(activation_type),
+            ..ValueInfoProto::default()
+        }],
+        output: vec![ValueInfoProto {
+            name: "y",
+            ..ValueInfoProto::default()
+        }],
         ..GraphProto::default()
     };
     let lowered = lower_graph(&graph).expect("lower synthetic MatMul graph");
-    let output = lowered.graph_outputs.first().expect("graph declares an output").1;
+    let output = lowered
+        .graph_outputs
+        .first()
+        .expect("graph declares an output")
+        .1;
     (lowered.program, weight_data, output)
 }
 
@@ -131,17 +161,29 @@ fn packed_and_unpacked_arenas_agree_bit_for_bit_across_sentence_lengths() {
     for (sentence_index, m) in [1usize, 3, 7].into_iter().enumerate() {
         let (program, weight_data, output) = build_matmul_graph(m, K, N, 0xC0FF_EE00);
         let activation = deterministic_data(m * K, 0xA5A5_0000 + sentence_index as u32);
-        let named: [(&str, &[f32]); 2] = [("activation", activation.as_slice()), ("weight", weight_data.as_slice())];
+        let named: [(&str, &[f32]); 2] = [
+            ("activation", activation.as_slice()),
+            ("weight", weight_data.as_slice()),
+        ];
 
-        let mut unpacked_arena = build_static_arena(&program, &[], &[output]).expect("build unpacked arena");
-        let mut packed_arena =
-            build_static_arena_with_constants(&program, &[], &[output], &[("weight", weight_data.as_slice())])
-                .expect("build packed arena");
+        let mut unpacked_arena =
+            build_static_arena(&program, &[], &[output]).expect("build unpacked arena");
+        let mut packed_arena = build_static_arena_with_constants(
+            &program,
+            &[],
+            &[output],
+            &[("weight", weight_data.as_slice())],
+        )
+        .expect("build packed arena");
 
-        let unpacked_result = evaluate_named_with_arena(&mut unpacked_arena, &named).expect("unpacked eval");
-        let packed_result = evaluate_named_with_arena(&mut packed_arena, &named).expect("packed eval");
+        let unpacked_result =
+            evaluate_named_with_arena(&mut unpacked_arena, &named).expect("unpacked eval");
+        let packed_result =
+            evaluate_named_with_arena(&mut packed_arena, &named).expect("packed eval");
 
-        let (unpacked_output, _) = unpacked_result.get(output).expect("unpacked output present");
+        let (unpacked_output, _) = unpacked_result
+            .get(output)
+            .expect("unpacked output present");
         let (packed_output, _) = packed_result.get(output).expect("packed output present");
 
         assert_eq!(
@@ -165,10 +207,18 @@ fn packed_arena_hot_loop_allocation_count_over_100_iterations() {
     const ITERATIONS: usize = 100;
     let (program, weight_data, output) = build_matmul_graph(M, K, N, 0xDEAD_BEEF);
 
-    let mut arena = build_static_arena_with_constants(&program, &[], &[output], &[("weight", weight_data.as_slice())])
-        .expect("build packed arena");
+    let mut arena = build_static_arena_with_constants(
+        &program,
+        &[],
+        &[output],
+        &[("weight", weight_data.as_slice())],
+    )
+    .expect("build packed arena");
     let activation = deterministic_data(M * K, 0x1234_5678);
-    let named: [(&str, &[f32]); 2] = [("activation", activation.as_slice()), ("weight", weight_data.as_slice())];
+    let named: [(&str, &[f32]); 2] = [
+        ("activation", activation.as_slice()),
+        ("weight", weight_data.as_slice()),
+    ];
 
     // warm-up: uncounted, primes any first-call-only setup this call path has.
     let _ = evaluate_named_with_arena(&mut arena, &named).expect("warm-up eval");

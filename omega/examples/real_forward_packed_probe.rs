@@ -74,7 +74,15 @@ fn main() {
     // packs, never the norms/embedding `bind_dense` keeps Float32.
     let mut matmul_weight_names: BTreeSet<String> = BTreeSet::new();
     for layer in 0..BLOCKS {
-        for suffix in ["attn_q", "attn_k", "attn_v", "attn_output", "ffn_gate", "ffn_up", "ffn_down"] {
+        for suffix in [
+            "attn_q",
+            "attn_k",
+            "attn_v",
+            "attn_output",
+            "ffn_gate",
+            "ffn_up",
+            "ffn_down",
+        ] {
             matmul_weight_names.insert(format!("blk.{layer}.{suffix}.weight"));
         }
     }
@@ -95,8 +103,10 @@ fn main() {
     // map `omega::metal` itself builds in production
     // (`packed_operands_of`), not the bare node set `correct_packed_matmul_layouts`
     // still takes (that one stays codec-agnostic).
-    let packed_operands: omega::PackedOperands =
-        q4k_operands.iter().map(|node| (*node, omega::PackedCodec::Q4K)).collect();
+    let packed_operands: omega::PackedOperands = q4k_operands
+        .iter()
+        .map(|node| (*node, omega::PackedCodec::Q4K))
+        .collect();
     println!(
         "matmul weight names={} resolved to q4k_operands={}",
         matmul_weight_names.len(),
@@ -128,15 +138,27 @@ fn main() {
         std::collections::BTreeMap::new();
 
     for op in &bound {
-        let is_reduce_keep_reduce = matches!(op.kind, BoundOpKind::Reduce { keep: Keep::Reduce, .. });
-        let has_packed_operand = op.operands().iter().any(|(node, _, _)| q4k_operands.contains(node));
+        let is_reduce_keep_reduce = matches!(
+            op.kind,
+            BoundOpKind::Reduce {
+                keep: Keep::Reduce,
+                ..
+            }
+        );
+        let has_packed_operand = op
+            .operands()
+            .iter()
+            .any(|(node, _, _)| q4k_operands.contains(node));
         if !(is_reduce_keep_reduce && has_packed_operand) {
             continue;
         }
         reduce_with_packed_operand += 1;
         if reduce_with_packed_operand <= 6 {
-            let packed_operand_count =
-                op.operands().iter().filter(|(node, _, _)| q4k_operands.contains(node)).count();
+            let packed_operand_count = op
+                .operands()
+                .iter()
+                .filter(|(node, _, _)| q4k_operands.contains(node))
+                .count();
             println!(
                 "diag node={:?} extents={:?} operand_count={} packed_operand_count={} kind={:?}",
                 op.node,
@@ -149,8 +171,11 @@ fn main() {
 
         #[cfg(feature = "instrument")]
         {
-            let quantized: Vec<Option<omega::PackedCodec>> =
-                op.operands().iter().map(|(node, _, _)| packed_operands.get(node).copied()).collect();
+            let quantized: Vec<Option<omega::PackedCodec>> = op
+                .operands()
+                .iter()
+                .map(|(node, _, _)| packed_operands.get(node).copied())
+                .collect();
             let weight_node = op
                 .operands()
                 .iter()
@@ -165,10 +190,15 @@ fn main() {
                 BoundOpKind::Reduce { output_axes, .. } => output_axes.to_vec(),
                 _ => Vec::new(),
             };
-            let reduce_dims: Vec<u16> =
-                (0..op.extents.len() as u16).filter(|dim| !output_axes.contains(dim)).collect();
+            let reduce_dims: Vec<u16> = (0..op.extents.len() as u16)
+                .filter(|dim| !output_axes.contains(dim))
+                .collect();
             let weight_strides: Vec<i64> = weight_node
-                .and_then(|node| op.operands().iter().find(|(candidate, _, _)| *candidate == node))
+                .and_then(|node| {
+                    op.operands()
+                        .iter()
+                        .find(|(candidate, _, _)| *candidate == node)
+                })
                 .map(|(_, layout, _)| reduce_dims.iter().map(|&dim| layout.stride(dim)).collect())
                 .unwrap_or_default();
 
@@ -177,17 +207,20 @@ fn main() {
                 Err(rejection) => format!("{rejection:?}"),
             };
 
-            let entry = rejection_table.entry((family, reason)).or_insert_with(|| RejectionShape {
-                count: 0,
-                extents: op.extents.clone(),
-                output_axes: output_axes.clone(),
-                reduce_dims: reduce_dims.clone(),
-                weight_strides_at_reduce_dims: weight_strides.clone(),
-            });
+            let entry = rejection_table
+                .entry((family, reason))
+                .or_insert_with(|| RejectionShape {
+                    count: 0,
+                    extents: op.extents.clone(),
+                    output_axes: output_axes.clone(),
+                    reduce_dims: reduce_dims.clone(),
+                    weight_strides_at_reduce_dims: weight_strides.clone(),
+                });
             entry.count += 1;
         }
 
-        let kernel = omega::emit(op, &packed_operands).expect("the real forward's own bound ops emit");
+        let kernel =
+            omega::emit(op, &packed_operands).expect("the real forward's own bound ops emit");
         // `q4k_run8`/`q4k_element`'s own FUNCTION DEFINITIONS are always
         // part of the emitted prelude regardless of which path a given
         // reduce body takes, so the marker has to be the CALL SITE, not the
@@ -227,12 +260,18 @@ fn main() {
     // `msl.rs` and guessing.
     #[cfg(feature = "instrument")]
     {
-        println!("\n=== rejection table: tensor family, extents, output_axes, reduce_dims, weight strides at reduce_dims, gate ===");
+        println!(
+            "\n=== rejection table: tensor family, extents, output_axes, reduce_dims, weight strides at reduce_dims, gate ==="
+        );
         for ((family, reason), shape) in &rejection_table {
             println!(
                 "family={family:?} count={} extents={:?} output_axes={:?} \
                  reduce_dims={:?} weight_strides_at_reduce_dims={:?} gate={reason}",
-                shape.count, shape.extents, shape.output_axes, shape.reduce_dims, shape.weight_strides_at_reduce_dims,
+                shape.count,
+                shape.extents,
+                shape.output_axes,
+                shape.reduce_dims,
+                shape.weight_strides_at_reduce_dims,
             );
         }
     }
@@ -246,7 +285,10 @@ fn main() {
         println!("{source}");
     }
 
-    assert_ne!(reduce_with_packed_operand, 0, "degenerate probe: no reduce op ever saw a packed operand");
+    assert_ne!(
+        reduce_with_packed_operand, 0,
+        "degenerate probe: no reduce op ever saw a packed operand"
+    );
 }
 
 /// `blk.7.ffn_down.weight` -> `ffn_down.weight`: drops exactly one

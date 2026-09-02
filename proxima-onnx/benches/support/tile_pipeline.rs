@@ -43,7 +43,12 @@
 //! `tests/tile_pipeline_differential.rs`), gated end-to-end behind the
 //! `tile-pipeline-bench` feature.
 
-#![allow(clippy::unwrap_used, clippy::expect_used, clippy::too_many_arguments, clippy::similar_names)]
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::too_many_arguments,
+    clippy::similar_names
+)]
 
 use std::cell::RefCell;
 use std::collections::VecDeque;
@@ -101,8 +106,17 @@ pub struct BatchNormAffine {
 
 impl BatchNormAffine {
     pub fn new(weight: &[f32], bias: &[f32], mean: &[f32], var: &[f32], epsilon: f32) -> Self {
-        let scale: Vec<f32> = weight.iter().zip(var).map(|(&w, &v)| w / (v + epsilon).sqrt()).collect();
-        let shift: Vec<f32> = bias.iter().zip(mean).zip(&scale).map(|((&b, &m), &s)| b - m * s).collect();
+        let scale: Vec<f32> = weight
+            .iter()
+            .zip(var)
+            .map(|(&w, &v)| w / (v + epsilon).sqrt())
+            .collect();
+        let shift: Vec<f32> = bias
+            .iter()
+            .zip(mean)
+            .zip(&scale)
+            .map(|((&b, &m), &s)| b - m * s)
+            .collect();
         Self { scale, shift }
     }
 
@@ -152,9 +166,16 @@ impl<'weights, const BLOCKED: bool, const ROWS: usize> ConvReluStage<'weights, B
         bias: &'weights [f32],
         batch_norm: Option<BatchNormAffine>,
     ) -> Self {
-        assert_eq!(weight.len(), channels_out * channels_in * kernel_height * kernel_width, "conv weight shape mismatch");
+        assert_eq!(
+            weight.len(),
+            channels_out * channels_in * kernel_height * kernel_width,
+            "conv weight shape mismatch"
+        );
         assert_eq!(bias.len(), channels_out, "conv bias shape mismatch");
-        assert!(channels_out.is_multiple_of(TILE_COLS), "output channels must tile evenly by TILE_COLS");
+        assert!(
+            channels_out.is_multiple_of(TILE_COLS),
+            "output channels must tile evenly by TILE_COLS"
+        );
         Self {
             channels_in,
             channels_out,
@@ -176,12 +197,18 @@ impl<'weights, const BLOCKED: bool, const ROWS: usize> ConvReluStage<'weights, B
     /// throughout). Order matches the conv weight's own `[co][ci][kh][kw]`
     /// flattening exactly, so the dot-product below needs no further
     /// permutation.
-    fn gather_window(&self, ring: &VecDeque<Vec<f32>>, output_column: usize, scratch: &mut [f32; MAX_K]) {
+    fn gather_window(
+        &self,
+        ring: &VecDeque<Vec<f32>>,
+        output_column: usize,
+        scratch: &mut [f32; MAX_K],
+    ) {
         for channel in 0..self.channels_in {
             for (kernel_row, source_row) in ring.iter().take(self.kernel_height).enumerate() {
                 let start = channel * self.input_width + output_column;
                 let destination = (channel * self.kernel_height + kernel_row) * self.kernel_width;
-                scratch[destination..destination + self.kernel_width].copy_from_slice(&source_row[start..start + self.kernel_width]);
+                scratch[destination..destination + self.kernel_width]
+                    .copy_from_slice(&source_row[start..start + self.kernel_width]);
             }
         }
     }
@@ -214,15 +241,26 @@ impl<'weights, const BLOCKED: bool, const ROWS: usize> ConvReluStage<'weights, B
                 for (row, gather) in gathers.iter_mut().enumerate() {
                     self.gather_window(ring, output_column + row, gather);
                 }
-                let windows: [&[f32]; ROWS] = std::array::from_fn(|row| &gathers[row][..reduction_width]);
-                self.emit_blocked_columns::<ROWS>(&mut output_row, windows, output_column, reduction_width);
+                let windows: [&[f32]; ROWS] =
+                    std::array::from_fn(|row| &gathers[row][..reduction_width]);
+                self.emit_blocked_columns::<ROWS>(
+                    &mut output_row,
+                    windows,
+                    output_column,
+                    reduction_width,
+                );
                 output_column += ROWS;
             }
             while output_column < self.output_width {
                 let mut gather = [0.0_f32; MAX_K];
                 self.gather_window(ring, output_column, &mut gather);
                 let windows: [&[f32]; 1] = [&gather[..reduction_width]];
-                self.emit_blocked_columns::<1>(&mut output_row, windows, output_column, reduction_width);
+                self.emit_blocked_columns::<1>(
+                    &mut output_row,
+                    windows,
+                    output_column,
+                    reduction_width,
+                );
                 output_column += 1;
             }
         } else {
@@ -257,7 +295,13 @@ impl<'weights, const BLOCKED: bool, const ROWS: usize> ConvReluStage<'weights, B
     /// shared by [`compute_output_row`]'s own main (`BLOCK = ROWS`) and
     /// remainder (`BLOCK = 1`) loops so there is exactly one place this
     /// bias/ReLU/batch-norm epilogue is written, not two.
-    fn emit_blocked_columns<const BLOCK: usize>(&self, output_row: &mut [f32], windows: [&[f32]; BLOCK], output_column: usize, reduction_width: usize) {
+    fn emit_blocked_columns<const BLOCK: usize>(
+        &self,
+        output_row: &mut [f32],
+        windows: [&[f32]; BLOCK],
+        output_column: usize,
+        reduction_width: usize,
+    ) {
         let mut channel_out = 0;
         while channel_out < self.channels_out {
             let weight_rows: [&[f32]; TILE_COLS] = std::array::from_fn(|lane| {
@@ -353,7 +397,10 @@ impl<'weights, const BLOCKED: bool, const ROWS: usize> ConvReluStage<'weights, B
 /// structurally different, disassembly-confirmed-worse instruction stream.
 #[cfg(target_arch = "aarch64")]
 #[inline(never)]
-fn dot_chunked_k4_tile_multirow<const ROWS: usize>(windows: [&[f32]; ROWS], weight_rows: [&[f32]; TILE_COLS]) -> [[f32; TILE_COLS]; ROWS] {
+fn dot_chunked_k4_tile_multirow<const ROWS: usize>(
+    windows: [&[f32]; ROWS],
+    weight_rows: [&[f32]; TILE_COLS],
+) -> [[f32; TILE_COLS]; ROWS] {
     use core::arch::aarch64::{float32x4_t, vaddvq_f32, vdupq_n_f32, vfmaq_f32, vld1q_f32};
 
     let reduction_width = weight_rows[0].len();
@@ -369,14 +416,17 @@ fn dot_chunked_k4_tile_multirow<const ROWS: usize>(windows: [&[f32]; ROWS], weig
     // `gather_window` output and `self.weight`'s own row slicing) -- no
     // load ever reads past either slice's own bounds.
     unsafe {
-        let mut accumulators: [[float32x4_t; TILE_COLS]; ROWS] = [[vdupq_n_f32(0.0); TILE_COLS]; ROWS];
+        let mut accumulators: [[float32x4_t; TILE_COLS]; ROWS] =
+            [[vdupq_n_f32(0.0); TILE_COLS]; ROWS];
         for chunk_index in 0..chunk_count {
             let offset = chunk_index * 4;
-            let weight_vectors: [float32x4_t; TILE_COLS] = std::array::from_fn(|lane| vld1q_f32(weight_rows[lane].as_ptr().add(offset)));
+            let weight_vectors: [float32x4_t; TILE_COLS] =
+                std::array::from_fn(|lane| vld1q_f32(weight_rows[lane].as_ptr().add(offset)));
             for row in 0..ROWS {
                 let window_vector = vld1q_f32(windows[row].as_ptr().add(offset));
                 for lane in 0..TILE_COLS {
-                    accumulators[row][lane] = vfmaq_f32(accumulators[row][lane], window_vector, weight_vectors[lane]);
+                    accumulators[row][lane] =
+                        vfmaq_f32(accumulators[row][lane], window_vector, weight_vectors[lane]);
                 }
             }
         }
@@ -398,20 +448,31 @@ fn dot_chunked_k4_tile_multirow<const ROWS: usize>(windows: [&[f32]; ROWS], weig
 /// there).
 #[cfg(not(target_arch = "aarch64"))]
 #[inline(never)]
-fn dot_chunked_k4_tile_multirow<const ROWS: usize>(windows: [&[f32]; ROWS], weight_rows: [&[f32]; TILE_COLS]) -> [[f32; TILE_COLS]; ROWS] {
-    let weight_chunks: [&[[f32; 4]]; TILE_COLS] = std::array::from_fn(|lane| weight_rows[lane].as_chunks::<4>().0);
-    let weight_remainders: [&[f32]; TILE_COLS] = std::array::from_fn(|lane| weight_rows[lane].as_chunks::<4>().1);
-    let window_chunks: [&[[f32; 4]]; ROWS] = std::array::from_fn(|row| windows[row].as_chunks::<4>().0);
-    let window_remainders: [&[f32]; ROWS] = std::array::from_fn(|row| windows[row].as_chunks::<4>().1);
+fn dot_chunked_k4_tile_multirow<const ROWS: usize>(
+    windows: [&[f32]; ROWS],
+    weight_rows: [&[f32]; TILE_COLS],
+) -> [[f32; TILE_COLS]; ROWS] {
+    let weight_chunks: [&[[f32; 4]]; TILE_COLS] =
+        std::array::from_fn(|lane| weight_rows[lane].as_chunks::<4>().0);
+    let weight_remainders: [&[f32]; TILE_COLS] =
+        std::array::from_fn(|lane| weight_rows[lane].as_chunks::<4>().1);
+    let window_chunks: [&[[f32; 4]]; ROWS] =
+        std::array::from_fn(|row| windows[row].as_chunks::<4>().0);
+    let window_remainders: [&[f32]; ROWS] =
+        std::array::from_fn(|row| windows[row].as_chunks::<4>().1);
     let chunk_count = weight_chunks[0].len();
     let mut accumulators = [[[0.0_f32; 4]; TILE_COLS]; ROWS];
     for chunk_index in 0..chunk_count {
-        let weight_chunk_values: [[f32; 4]; TILE_COLS] = std::array::from_fn(|lane| weight_chunks[lane][chunk_index]);
+        let weight_chunk_values: [[f32; 4]; TILE_COLS] =
+            std::array::from_fn(|lane| weight_chunks[lane][chunk_index]);
         for row in 0..ROWS {
             let window_chunk = window_chunks[row][chunk_index];
             for lane in 0..TILE_COLS {
                 for element in 0..4 {
-                    accumulators[row][lane][element] = window_chunk[element].mul_add(weight_chunk_values[lane][element], accumulators[row][lane][element]);
+                    accumulators[row][lane][element] = window_chunk[element].mul_add(
+                        weight_chunk_values[lane][element],
+                        accumulators[row][lane][element],
+                    );
                 }
             }
         }
@@ -420,7 +481,9 @@ fn dot_chunked_k4_tile_multirow<const ROWS: usize>(windows: [&[f32]; ROWS], weig
         std::array::from_fn(|lane| {
             let accumulator = accumulators[row][lane];
             let mut total = accumulator[0] + accumulator[1] + accumulator[2] + accumulator[3];
-            for (&window_value, &weight_value) in window_remainders[row].iter().zip(weight_remainders[lane]) {
+            for (&window_value, &weight_value) in
+                window_remainders[row].iter().zip(weight_remainders[lane])
+            {
                 total = window_value.mul_add(weight_value, total);
             }
             total
@@ -443,7 +506,9 @@ fn dot_chunked_k4(window: &[f32], weight_row: &[f32]) -> f32 {
     let (weight_chunks, weight_remainder) = weight_row.as_chunks::<4>();
     let mut lanes = [0.0_f32; 4];
     for (window_chunk, weight_chunk) in window_chunks.iter().zip(weight_chunks) {
-        for ((lane, &window_value), &weight_value) in lanes.iter_mut().zip(window_chunk).zip(weight_chunk) {
+        for ((lane, &window_value), &weight_value) in
+            lanes.iter_mut().zip(window_chunk).zip(weight_chunk)
+        {
             *lane = window_value.mul_add(weight_value, *lane);
         }
     }
@@ -479,7 +544,12 @@ impl<const BLOCKED: bool, const ROWS: usize> ConvReluStage<'_, BLOCKED, ROWS> {
         for row in emitted_rows {
             data.extend(row);
         }
-        RowBand { channels: self.channels_out, width: self.output_width, rows, data }
+        RowBand {
+            channels: self.channels_out,
+            width: self.output_width,
+            rows,
+            data,
+        }
     }
 
     /// ROW 172's direct-call surface: identical output to `Pipe::call`,
@@ -495,7 +565,10 @@ impl<const BLOCKED: bool, const ROWS: usize> Pipe for ConvReluStage<'_, BLOCKED,
     type Out = RowBand;
     type Err = Infallible;
 
-    fn call(&self, input: Self::In) -> impl std::future::Future<Output = Result<Self::Out, Self::Err>> {
+    fn call(
+        &self,
+        input: Self::In,
+    ) -> impl std::future::Future<Output = Result<Self::Out, Self::Err>> {
         async move { Ok(self.process_band(input)) }
     }
 }
@@ -527,15 +600,29 @@ pub struct FcAccumulateStage<'weights> {
 }
 
 impl<'weights> FcAccumulateStage<'weights> {
-    pub fn new(channels: usize, height: usize, width: usize, out_features: usize, weight: &'weights [f32], bias: &'weights [f32]) -> Self {
-        assert_eq!(weight.len(), out_features * channels * height * width, "fc1 weight shape mismatch");
+    pub fn new(
+        channels: usize,
+        height: usize,
+        width: usize,
+        out_features: usize,
+        weight: &'weights [f32],
+        bias: &'weights [f32],
+    ) -> Self {
+        assert_eq!(
+            weight.len(),
+            out_features * channels * height * width,
+            "fc1 weight shape mismatch"
+        );
         assert_eq!(bias.len(), out_features, "fc1 bias shape mismatch");
         Self {
             channels,
             height,
             width,
             weight,
-            state: Rc::new(RefCell::new(FcAccumulatorState { accumulator: bias.to_vec(), rows_seen: 0 })),
+            state: Rc::new(RefCell::new(FcAccumulatorState {
+                accumulator: bias.to_vec(),
+                rows_seen: 0,
+            })),
         }
     }
 
@@ -547,8 +634,15 @@ impl<'weights> FcAccumulateStage<'weights> {
     /// silently wrong, never a value worth returning.
     pub fn finalize(&self) -> Vec<f32> {
         let state = self.state.borrow();
-        assert_eq!(state.rows_seen, self.height, "fc1 accumulator did not see every row of the flattened activation");
-        state.accumulator.iter().map(|&value| value.max(0.0)).collect()
+        assert_eq!(
+            state.rows_seen, self.height,
+            "fc1 accumulator did not see every row of the flattened activation"
+        );
+        state
+            .accumulator
+            .iter()
+            .map(|&value| value.max(0.0))
+            .collect()
     }
 }
 
@@ -595,7 +689,10 @@ impl Pipe for FcAccumulateStage<'_> {
     type Out = ();
     type Err = Infallible;
 
-    fn call(&self, input: Self::In) -> impl std::future::Future<Output = Result<Self::Out, Self::Err>> {
+    fn call(
+        &self,
+        input: Self::In,
+    ) -> impl std::future::Future<Output = Result<Self::Out, Self::Err>> {
         async move {
             self.process_band(input);
             Ok(())
@@ -645,7 +742,13 @@ pub struct MnistWeights<'data> {
 
 impl<'data> MnistWeights<'data> {
     pub fn from_initializers(initializers: &[(&'data str, &'data [f32])]) -> Self {
-        let find = |name: &str| -> &'data [f32] { initializers.iter().find(|(candidate, _)| *candidate == name).unwrap_or_else(|| panic!("missing initializer {name}")).1 };
+        let find = |name: &str| -> &'data [f32] {
+            initializers
+                .iter()
+                .find(|(candidate, _)| *candidate == name)
+                .unwrap_or_else(|| panic!("missing initializer {name}"))
+                .1
+        };
         Self {
             conv1_weight: find("conv1.weight"),
             conv1_bias: find("conv1.bias"),
@@ -671,21 +774,40 @@ impl<'data> MnistWeights<'data> {
 
 const EPSILON: f32 = 1e-5;
 
-fn matvec_bias(weight: &[f32], bias: &[f32], input: &[f32], out_features: usize, in_features: usize) -> Vec<f32> {
+fn matvec_bias(
+    weight: &[f32],
+    bias: &[f32],
+    input: &[f32],
+    out_features: usize,
+    in_features: usize,
+) -> Vec<f32> {
     (0..out_features)
         .map(|output_index| {
             let row = &weight[output_index * in_features..(output_index + 1) * in_features];
-            let dot: f32 = row.iter().zip(input).fold(0.0_f32, |accumulator, (&weight_value, &input_value)| input_value.mul_add(weight_value, accumulator));
+            let dot: f32 = row.iter().zip(input).fold(
+                0.0_f32,
+                |accumulator, (&weight_value, &input_value)| {
+                    input_value.mul_add(weight_value, accumulator)
+                },
+            );
             dot + bias[output_index]
         })
         .collect()
 }
 
-fn apply_batch_norm(values: &[f32], weight: &[f32], bias: &[f32], mean: &[f32], var: &[f32]) -> Vec<f32> {
+fn apply_batch_norm(
+    values: &[f32],
+    weight: &[f32],
+    bias: &[f32],
+    mean: &[f32],
+    var: &[f32],
+) -> Vec<f32> {
     values
         .iter()
         .enumerate()
-        .map(|(index, &value)| (value - mean[index]) / (var[index] + EPSILON).sqrt() * weight[index] + bias[index])
+        .map(|(index, &value)| {
+            (value - mean[index]) / (var[index] + EPSILON).sqrt() * weight[index] + bias[index]
+        })
         .collect()
 }
 
@@ -713,8 +835,18 @@ pub struct BandRows(pub usize);
 /// call. Returns the 10 log-softmax logits -- bit-comparable to
 /// `cpu::evaluate_named`'s own output up to reassociation (see the
 /// differential test).
-pub fn run_pipeline_forward(image: &[f32], weights: &MnistWeights<'_>, band: BandRows) -> [f32; 10] {
-    let batch_norm1 = BatchNormAffine::new(weights.norm1_weight, weights.norm1_bias, weights.norm1_running_mean, weights.norm1_running_var, EPSILON);
+pub fn run_pipeline_forward(
+    image: &[f32],
+    weights: &MnistWeights<'_>,
+    band: BandRows,
+) -> [f32; 10] {
+    let batch_norm1 = BatchNormAffine::new(
+        weights.norm1_weight,
+        weights.norm1_bias,
+        weights.norm1_running_mean,
+        weights.norm1_running_var,
+        EPSILON,
+    );
 
     // ROW 170/171: conv1 (`reduction_width` = 9) calls the unblocked,
     // auto-inlining `dot_chunked_k4` form (`BLOCKED = false`); conv2/conv3
@@ -724,9 +856,36 @@ pub fn run_pipeline_forward(image: &[f32], weights: &MnistWeights<'_>, band: Ban
     // micro-vet: `ROWS = 4` beat `ROWS = 1`/`2` on both conv2 and conv3).
     // fc1 always calls `dot_chunked_k4` directly (see
     // `FcAccumulateStage::call`'s own doc).
-    let stage1 = ConvReluStage::<false>::new(1, 8, 3, 3, 28, weights.conv1_weight, weights.conv1_bias, None);
-    let stage2 = ConvReluStage::<true, 4>::new(8, 16, 3, 3, 26, weights.conv2_weight, weights.conv2_bias, None);
-    let stage3 = ConvReluStage::<true, 4>::new(16, 24, 3, 3, 24, weights.conv3_weight, weights.conv3_bias, Some(batch_norm1));
+    let stage1 = ConvReluStage::<false>::new(
+        1,
+        8,
+        3,
+        3,
+        28,
+        weights.conv1_weight,
+        weights.conv1_bias,
+        None,
+    );
+    let stage2 = ConvReluStage::<true, 4>::new(
+        8,
+        16,
+        3,
+        3,
+        26,
+        weights.conv2_weight,
+        weights.conv2_bias,
+        None,
+    );
+    let stage3 = ConvReluStage::<true, 4>::new(
+        16,
+        24,
+        3,
+        3,
+        24,
+        weights.conv3_weight,
+        weights.conv3_bias,
+        Some(batch_norm1),
+    );
     let fc_stage = FcAccumulateStage::new(24, 22, 22, 32, weights.fc1_weight, weights.fc1_bias);
     let fc_stage_for_finalize = fc_stage.clone();
 
@@ -736,14 +895,25 @@ pub fn run_pipeline_forward(image: &[f32], weights: &MnistWeights<'_>, band: Ban
     while row < 28 {
         let take = band.0.min(28 - row);
         let data = image[row * 28..(row + take) * 28].to_vec();
-        let input_band = RowBand { channels: 1, width: 28, rows: take, data };
+        let input_band = RowBand {
+            channels: 1,
+            width: 28,
+            rows: take,
+            data,
+        };
         block_on_ready(pipeline.call(input_band)).expect("tile pipeline stages are infallible");
         row += take;
     }
 
     let fc1_out = fc_stage_for_finalize.finalize();
     let fc2_out = matvec_bias(weights.fc2_weight, weights.fc2_bias, &fc1_out, 10, 32);
-    let bn2_out = apply_batch_norm(&fc2_out, weights.norm2_weight, weights.norm2_bias, weights.norm2_running_mean, weights.norm2_running_var);
+    let bn2_out = apply_batch_norm(
+        &fc2_out,
+        weights.norm2_weight,
+        weights.norm2_bias,
+        weights.norm2_running_mean,
+        weights.norm2_running_var,
+    );
     log_softmax(&bn2_out)
 }
 
@@ -755,19 +925,61 @@ pub fn run_pipeline_forward(image: &[f32], weights: &MnistWeights<'_>, band: Ban
 /// identical arithmetic -- never the production surface (that stays
 /// `run_pipeline_forward`, `AndThen`-composed, per this module's own sans-IO
 /// state-machine design); a measurement-only twin, bench-gated.
-pub fn run_pipeline_forward_direct(image: &[f32], weights: &MnistWeights<'_>, band: BandRows) -> [f32; 10] {
-    let batch_norm1 = BatchNormAffine::new(weights.norm1_weight, weights.norm1_bias, weights.norm1_running_mean, weights.norm1_running_var, EPSILON);
+pub fn run_pipeline_forward_direct(
+    image: &[f32],
+    weights: &MnistWeights<'_>,
+    band: BandRows,
+) -> [f32; 10] {
+    let batch_norm1 = BatchNormAffine::new(
+        weights.norm1_weight,
+        weights.norm1_bias,
+        weights.norm1_running_mean,
+        weights.norm1_running_var,
+        EPSILON,
+    );
 
-    let stage1 = ConvReluStage::<false>::new(1, 8, 3, 3, 28, weights.conv1_weight, weights.conv1_bias, None);
-    let stage2 = ConvReluStage::<true, 4>::new(8, 16, 3, 3, 26, weights.conv2_weight, weights.conv2_bias, None);
-    let stage3 = ConvReluStage::<true, 4>::new(16, 24, 3, 3, 24, weights.conv3_weight, weights.conv3_bias, Some(batch_norm1));
+    let stage1 = ConvReluStage::<false>::new(
+        1,
+        8,
+        3,
+        3,
+        28,
+        weights.conv1_weight,
+        weights.conv1_bias,
+        None,
+    );
+    let stage2 = ConvReluStage::<true, 4>::new(
+        8,
+        16,
+        3,
+        3,
+        26,
+        weights.conv2_weight,
+        weights.conv2_bias,
+        None,
+    );
+    let stage3 = ConvReluStage::<true, 4>::new(
+        16,
+        24,
+        3,
+        3,
+        24,
+        weights.conv3_weight,
+        weights.conv3_bias,
+        Some(batch_norm1),
+    );
     let fc_stage = FcAccumulateStage::new(24, 22, 22, 32, weights.fc1_weight, weights.fc1_bias);
 
     let mut row = 0;
     while row < 28 {
         let take = band.0.min(28 - row);
         let data = image[row * 28..(row + take) * 28].to_vec();
-        let input_band = RowBand { channels: 1, width: 28, rows: take, data };
+        let input_band = RowBand {
+            channels: 1,
+            width: 28,
+            rows: take,
+            data,
+        };
         let out1 = stage1.compute_direct(input_band);
         let out2 = stage2.compute_direct(out1);
         let out3 = stage3.compute_direct(out2);
@@ -777,6 +989,12 @@ pub fn run_pipeline_forward_direct(image: &[f32], weights: &MnistWeights<'_>, ba
 
     let fc1_out = fc_stage.finalize();
     let fc2_out = matvec_bias(weights.fc2_weight, weights.fc2_bias, &fc1_out, 10, 32);
-    let bn2_out = apply_batch_norm(&fc2_out, weights.norm2_weight, weights.norm2_bias, weights.norm2_running_mean, weights.norm2_running_var);
+    let bn2_out = apply_batch_norm(
+        &fc2_out,
+        weights.norm2_weight,
+        weights.norm2_bias,
+        weights.norm2_running_mean,
+        weights.norm2_running_var,
+    );
     log_softmax(&bn2_out)
 }

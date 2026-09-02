@@ -126,7 +126,10 @@ pub struct BlkReqHeaderFields {
 }
 
 /// Write one `virtio_blk_req` header into `out` (spec §5.2.6).
-pub fn write_blk_req_header(out: &mut [u8], fields: BlkReqHeaderFields) -> Result<usize, DecodeError> {
+pub fn write_blk_req_header(
+    out: &mut [u8],
+    fields: BlkReqHeaderFields,
+) -> Result<usize, DecodeError> {
     if out.len() < BLK_REQ_HEADER_LEN {
         return Err(DecodeError::Truncated {
             need: BLK_REQ_HEADER_LEN,
@@ -188,7 +191,11 @@ impl BlkConfigSpace {
     #[must_use]
     pub fn new(capacity_sectors: u64, queue_num_max: u16) -> Self {
         Self {
-            transport: MmioDevice::new(DEVICE_ID_BLK, queue_num_max, super::status::FEATURE_VERSION_1),
+            transport: MmioDevice::new(
+                DEVICE_ID_BLK,
+                queue_num_max,
+                super::status::FEATURE_VERSION_1,
+            ),
             capacity_sectors,
         }
     }
@@ -212,12 +219,16 @@ impl BlkConfigSpace {
             REG_CONFIG_CAPACITY_LOW if !access.is_write => {
                 Ok(MmioEffect::ReadValue(self.capacity_sectors as u32))
             }
-            REG_CONFIG_CAPACITY_LOW => Err(MmioError::ReadOnlyRegister { offset: access.offset }),
+            REG_CONFIG_CAPACITY_LOW => Err(MmioError::ReadOnlyRegister {
+                offset: access.offset,
+            }),
 
             REG_CONFIG_CAPACITY_HIGH if !access.is_write => {
                 Ok(MmioEffect::ReadValue((self.capacity_sectors >> 32) as u32))
             }
-            REG_CONFIG_CAPACITY_HIGH => Err(MmioError::ReadOnlyRegister { offset: access.offset }),
+            REG_CONFIG_CAPACITY_HIGH => Err(MmioError::ReadOnlyRegister {
+                offset: access.offset,
+            }),
 
             _ => self.transport.apply(access),
         }
@@ -229,7 +240,9 @@ mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
     use crate::virtio::descriptor::{DESC_LEN, DescriptorChain};
-    use crate::virtio::status::{STATUS_ACKNOWLEDGE, STATUS_DRIVER, STATUS_DRIVER_OK, STATUS_FEATURES_OK};
+    use crate::virtio::status::{
+        STATUS_ACKNOWLEDGE, STATUS_DRIVER, STATUS_DRIVER_OK, STATUS_FEATURES_OK,
+    };
 
     /// Worked example (principle 9 / /algorithm-development): a hand-derived
     /// three-descriptor READ (`VIRTIO_BLK_T_IN`) chain the driver publishes
@@ -316,7 +329,10 @@ mod tests {
         let mut status_byte = [0xffu8; BLK_STATUS_LEN];
         write_blk_status(&mut status_byte, STATUS_OK).expect("1-byte buffer fits status");
         assert_eq!(status_byte, [STATUS_OK]);
-        assert_eq!(read_blk_status(&status_byte).expect("status byte present"), STATUS_OK);
+        assert_eq!(
+            read_blk_status(&status_byte).expect("status byte present"),
+            STATUS_OK
+        );
         assert_eq!(sector_bytes[0], 0);
         assert_eq!(sector_bytes[255], 255);
     }
@@ -422,7 +438,10 @@ mod tests {
         let mut out: [u8; 0] = [];
         assert_eq!(
             write_blk_status(&mut out, STATUS_OK).unwrap_err(),
-            DecodeError::Truncated { need: BLK_STATUS_LEN, got: 0 }
+            DecodeError::Truncated {
+                need: BLK_STATUS_LEN,
+                got: 0
+            }
         );
     }
 
@@ -430,7 +449,10 @@ mod tests {
     fn read_blk_status_empty_buffer_is_truncated() {
         assert_eq!(
             read_blk_status(&[]).unwrap_err(),
-            DecodeError::Truncated { need: BLK_STATUS_LEN, got: 0 }
+            DecodeError::Truncated {
+                need: BLK_STATUS_LEN,
+                got: 0
+            }
         );
     }
 
@@ -467,7 +489,9 @@ mod tests {
         };
         assert_eq!(
             device.apply(write).unwrap_err(),
-            MmioError::ReadOnlyRegister { offset: REG_CONFIG_CAPACITY_LOW }
+            MmioError::ReadOnlyRegister {
+                offset: REG_CONFIG_CAPACITY_LOW
+            }
         );
     }
 
@@ -483,10 +507,15 @@ mod tests {
             value: 0,
         };
         assert_eq!(
-            device.apply(read(super::super::mmio::REG_DEVICE_ID)).unwrap(),
+            device
+                .apply(read(super::super::mmio::REG_DEVICE_ID))
+                .unwrap(),
             MmioEffect::ReadValue(DEVICE_ID_BLK)
         );
-        assert_eq!(device.transport().status(), super::super::status::DeviceStatus::Reset);
+        assert_eq!(
+            device.transport().status(),
+            super::super::status::DeviceStatus::Reset
+        );
 
         let write = |offset: u64, value: u32| MmioAccess {
             offset,
@@ -495,7 +524,10 @@ mod tests {
         };
         assert_eq!(
             device
-                .apply(write(super::super::mmio::REG_STATUS, u32::from(STATUS_ACKNOWLEDGE)))
+                .apply(write(
+                    super::super::mmio::REG_STATUS,
+                    u32::from(STATUS_ACKNOWLEDGE)
+                ))
                 .unwrap(),
             MmioEffect::StatusTransition(super::super::status::DeviceStatus::Acknowledged)
         );

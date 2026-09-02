@@ -42,8 +42,14 @@ fn main() -> Result<(), Box<dyn Error>> {
     let input_path = arguments
         .get(1)
         .ok_or("usage: snapshot_warm_restore_probe <input_path> <page_size> <iterations> [target_size] [content_mode]")?;
-    let page_size: usize = arguments.get(2).and_then(|value| value.parse().ok()).unwrap_or(4096);
-    let iterations: usize = arguments.get(3).and_then(|value| value.parse().ok()).unwrap_or(100);
+    let page_size: usize = arguments
+        .get(2)
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(4096);
+    let iterations: usize = arguments
+        .get(3)
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(100);
 
     let bytes = fs::read(input_path)?;
     let snapshot = VmSnapshot::from_postcard_bytes(&bytes)?;
@@ -52,7 +58,10 @@ fn main() -> Result<(), Box<dyn Error>> {
         .get(4)
         .and_then(|value| value.parse().ok())
         .unwrap_or_else(|| snapshot.guest_memory().len());
-    let content_mode = arguments.get(5).cloned().unwrap_or_else(|| "same".to_string());
+    let content_mode = arguments
+        .get(5)
+        .cloned()
+        .unwrap_or_else(|| "same".to_string());
 
     let padded_a = snapshot.with_padded_memory(target_size, PATTERN_SEED_A);
     let padded_b = snapshot.with_padded_memory(target_size, PATTERN_SEED_B);
@@ -95,9 +104,15 @@ fn main() -> Result<(), Box<dyn Error>> {
         if report.resumed_matched_trap {
             matched_count += 1;
         }
-        println!("iteration_resumed_matched_trap:{index}:{}", report.resumed_matched_trap);
+        println!(
+            "iteration_resumed_matched_trap:{index}:{}",
+            report.resumed_matched_trap
+        );
         println!("iteration_resumed_x0:{index}:{}", report.resumed_x0);
-        println!("iteration_restore_wall_nanos:{index}:{}", report.restore_wall_nanos);
+        println!(
+            "iteration_restore_wall_nanos:{index}:{}",
+            report.restore_wall_nanos
+        );
         println!(
             "iteration_touch_all_pages_nanos:{index}:{}",
             report.touch_all_pages_nanos

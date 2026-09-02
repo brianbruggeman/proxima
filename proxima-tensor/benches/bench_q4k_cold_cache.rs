@@ -99,10 +99,16 @@ fn parse_header(path: &Path) -> (ParsedGguf, u64) {
             let mut completion = None;
             for event in events {
                 match event {
-                    GgufEvent::Header { version: version_value, .. } => version = Some(version_value),
+                    GgufEvent::Header {
+                        version: version_value,
+                        ..
+                    } => version = Some(version_value),
                     GgufEvent::Metadata { key, value } => metadata.push((key, value)),
                     GgufEvent::Tensor(tensor) => tensors.push(tensor),
-                    GgufEvent::Complete { data_offset, alignment } => {
+                    GgufEvent::Complete {
+                        data_offset,
+                        alignment,
+                    } => {
                         completion = Some((data_offset, alignment));
                     }
                 }
@@ -122,7 +128,10 @@ fn parse_header(path: &Path) -> (ParsedGguf, u64) {
             }
         }
 
-        assert!(prefix_len < (1 << 26), "gguf header/directory exceeded 64 MiB prefix budget");
+        assert!(
+            prefix_len < (1 << 26),
+            "gguf header/directory exceeded 64 MiB prefix budget"
+        );
         prefix_len *= 2;
     }
 }
@@ -135,13 +144,20 @@ fn find_tensor<'a>(parsed: &'a ParsedGguf, name: &str) -> &'a TensorInfo {
         .unwrap_or_else(|| panic!("tensor {name} not found in real gguf file"))
 }
 
-fn read_tensor_bytes(file: &mut File, parsed: &ParsedGguf, tensor: &TensorInfo, file_len: u64) -> Vec<u8> {
+fn read_tensor_bytes(
+    file: &mut File,
+    parsed: &ParsedGguf,
+    tensor: &TensorInfo,
+    file_len: u64,
+) -> Vec<u8> {
     let range = parsed
         .tensor_data_range(tensor, file_len)
         .expect("tensor byte range within file bounds");
     let mut buf = vec![0u8; (range.end - range.start) as usize];
-    file.seek(SeekFrom::Start(range.start)).expect("seek to tensor data");
-    file.read_exact(&mut buf).expect("read exact tensor byte range");
+    file.seek(SeekFrom::Start(range.start))
+        .expect("seek to tensor data");
+    file.read_exact(&mut buf)
+        .expect("read exact tensor byte range");
     buf
 }
 
@@ -165,8 +181,14 @@ fn bench_cold_cache(c: &mut Criterion) {
     for block in 0..BLOCK_COUNT {
         let name = format!("blk.{block}.attn_q.weight");
         let tensor = find_tensor(&parsed, &name);
-        assert_eq!(tensor.dims[0] as usize, in_dim, "{name}: in_dim shape drift vs blk.0");
-        assert_eq!(tensor.dims[1] as usize, out_dim, "{name}: out_dim shape drift vs blk.0");
+        assert_eq!(
+            tensor.dims[0] as usize, in_dim,
+            "{name}: in_dim shape drift vs blk.0"
+        );
+        assert_eq!(
+            tensor.dims[1] as usize, out_dim,
+            "{name}: out_dim shape drift vs blk.0"
+        );
         cold_buffers.push(read_tensor_bytes(&mut file, &parsed, tensor, file_len));
     }
     let cold_total_bytes: usize = cold_buffers.iter().map(Vec::len).sum();
@@ -193,7 +215,8 @@ fn bench_cold_cache(c: &mut Criterion) {
 
     // correctness: both arms must agree on the same real bytes before
     // timing anything.
-    let warm_check = matmul_q4k_q8k_f32(&warm_bytes, out_dim, &activation).expect("warm buffer well-formed");
+    let warm_check =
+        matmul_q4k_q8k_f32(&warm_bytes, out_dim, &activation).expect("warm buffer well-formed");
     assert_eq!(warm_check.len(), out_dim);
     for (index, buffer) in cold_buffers.iter().enumerate() {
         matmul_q4k_q8k_f32(buffer, out_dim, &activation)

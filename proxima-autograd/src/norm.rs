@@ -81,11 +81,30 @@ use crate::expr;
 /// assert_eq!(evaluated.root(), &[2.0, 0.0, 6.0, 0.0]);
 /// ```
 #[must_use]
-pub fn dropout(program: &mut Vec<Op>, dtype: DType, x: NodeId, mask: NodeId, rank: u16, keep_prob: f32) -> NodeId {
+pub fn dropout(
+    program: &mut Vec<Op>,
+    dtype: DType,
+    x: NodeId,
+    mask: NodeId,
+    rank: u16,
+    keep_prob: f32,
+) -> NodeId {
     let full = expr::identity(rank);
-    let masked = expr::binary(program, dtype, ScalarOp::Multiply, (x, full.clone()), (mask, full.clone()));
+    let masked = expr::binary(
+        program,
+        dtype,
+        ScalarOp::Multiply,
+        (x, full.clone()),
+        (mask, full.clone()),
+    );
     let inverse_keep_prob = expr::constant(program, dtype, 1.0 / keep_prob);
-    expr::binary(program, dtype, ScalarOp::Multiply, (masked, full), (inverse_keep_prob, expr::broadcast(rank)))
+    expr::binary(
+        program,
+        dtype,
+        ScalarOp::Multiply,
+        (masked, full),
+        (inverse_keep_prob, expr::broadcast(rank)),
+    )
 }
 
 /// The per-channel iteration map every function in this module reduces
@@ -114,18 +133,64 @@ fn channel_map(rank: u16) -> IndexMap {
 /// extra `Reduce` (it re-reads `centered`, which the caller needs anyway to
 /// build the normalized output) and never subtracts two large, nearly-equal
 /// numbers.
-fn batch_statistics(program: &mut Vec<Op>, dtype: DType, x: NodeId, rank: u16, elements_per_channel: u64) -> (NodeId, NodeId, NodeId) {
+fn batch_statistics(
+    program: &mut Vec<Op>,
+    dtype: DType,
+    x: NodeId,
+    rank: u16,
+    elements_per_channel: u64,
+) -> (NodeId, NodeId, NodeId) {
     let full = expr::identity(rank);
     let channels = channel_map(rank);
     let inverse_count = expr::constant(program, dtype, 1.0 / elements_per_channel as f32);
 
-    let sum = expr::reduce(program, dtype, ScalarOp::Add, ReduceInit::Zero, x, full.clone(), channels.clone());
-    let batch_mean = expr::binary(program, dtype, ScalarOp::Multiply, (sum, expr::identity(1)), (inverse_count, expr::broadcast(1)));
+    let sum = expr::reduce(
+        program,
+        dtype,
+        ScalarOp::Add,
+        ReduceInit::Zero,
+        x,
+        full.clone(),
+        channels.clone(),
+    );
+    let batch_mean = expr::binary(
+        program,
+        dtype,
+        ScalarOp::Multiply,
+        (sum, expr::identity(1)),
+        (inverse_count, expr::broadcast(1)),
+    );
 
-    let centered = expr::binary(program, dtype, ScalarOp::Subtract, (x, full.clone()), (batch_mean, channels.clone()));
-    let squared = expr::binary(program, dtype, ScalarOp::Multiply, (centered, full.clone()), (centered, full.clone()));
-    let sum_squared = expr::reduce(program, dtype, ScalarOp::Add, ReduceInit::Zero, squared, full, channels);
-    let batch_variance = expr::binary(program, dtype, ScalarOp::Multiply, (sum_squared, expr::identity(1)), (inverse_count, expr::broadcast(1)));
+    let centered = expr::binary(
+        program,
+        dtype,
+        ScalarOp::Subtract,
+        (x, full.clone()),
+        (batch_mean, channels.clone()),
+    );
+    let squared = expr::binary(
+        program,
+        dtype,
+        ScalarOp::Multiply,
+        (centered, full.clone()),
+        (centered, full.clone()),
+    );
+    let sum_squared = expr::reduce(
+        program,
+        dtype,
+        ScalarOp::Add,
+        ReduceInit::Zero,
+        squared,
+        full,
+        channels,
+    );
+    let batch_variance = expr::binary(
+        program,
+        dtype,
+        ScalarOp::Multiply,
+        (sum_squared, expr::identity(1)),
+        (inverse_count, expr::broadcast(1)),
+    );
 
     (centered, batch_mean, batch_variance)
 }
@@ -159,17 +224,60 @@ fn batch_statistics(program: &mut Vec<Op>, dtype: DType, x: NodeId, rank: u16, e
 // `crate::optimizer::AdamOperands`'s own doc for the convention this
 // function does not qualify for.
 #[allow(clippy::too_many_arguments)]
-fn normalize_scale_shift(program: &mut Vec<Op>, dtype: DType, centered: NodeId, variance: NodeId, gamma: NodeId, beta: NodeId, rank: u16, eps: f32) -> NodeId {
+fn normalize_scale_shift(
+    program: &mut Vec<Op>,
+    dtype: DType,
+    centered: NodeId,
+    variance: NodeId,
+    gamma: NodeId,
+    beta: NodeId,
+    rank: u16,
+    eps: f32,
+) -> NodeId {
     let full = expr::identity(rank);
     let channels = channel_map(rank);
 
     let eps_const = expr::constant(program, dtype, eps);
-    let variance_eps = expr::binary(program, dtype, ScalarOp::Add, (variance, expr::identity(1)), (eps_const, expr::broadcast(1)));
-    let std_dev = expr::unary(program, dtype, ScalarOp::SquareRoot, (variance_eps, expr::identity(1)));
-    let inverse_std_dev = expr::unary(program, dtype, ScalarOp::Reciprocal, (std_dev, expr::identity(1)));
-    let normalized = expr::binary(program, dtype, ScalarOp::Multiply, (centered, full.clone()), (inverse_std_dev, channels.clone()));
-    let scaled = expr::binary(program, dtype, ScalarOp::Multiply, (normalized, full.clone()), (gamma, channels.clone()));
-    expr::binary(program, dtype, ScalarOp::Add, (scaled, full), (beta, channels))
+    let variance_eps = expr::binary(
+        program,
+        dtype,
+        ScalarOp::Add,
+        (variance, expr::identity(1)),
+        (eps_const, expr::broadcast(1)),
+    );
+    let std_dev = expr::unary(
+        program,
+        dtype,
+        ScalarOp::SquareRoot,
+        (variance_eps, expr::identity(1)),
+    );
+    let inverse_std_dev = expr::unary(
+        program,
+        dtype,
+        ScalarOp::Reciprocal,
+        (std_dev, expr::identity(1)),
+    );
+    let normalized = expr::binary(
+        program,
+        dtype,
+        ScalarOp::Multiply,
+        (centered, full.clone()),
+        (inverse_std_dev, channels.clone()),
+    );
+    let scaled = expr::binary(
+        program,
+        dtype,
+        ScalarOp::Multiply,
+        (normalized, full.clone()),
+        (gamma, channels.clone()),
+    );
+    expr::binary(
+        program,
+        dtype,
+        ScalarOp::Add,
+        (scaled, full),
+        (beta, channels),
+    )
 }
 
 /// Train-mode batchnorm over a rank-`rank` input whose channel axis is `1`
@@ -198,9 +306,28 @@ fn normalize_scale_shift(program: &mut Vec<Op>, dtype: DType, centered: NodeId, 
 /// exists anywhere in this crate.
 #[must_use]
 #[allow(clippy::too_many_arguments)]
-pub fn batchnorm2d_train(program: &mut Vec<Op>, dtype: DType, x: NodeId, gamma: NodeId, beta: NodeId, rank: u16, elements_per_channel: u64, eps: f32) -> (NodeId, NodeId, NodeId) {
-    let (centered, batch_mean, batch_variance) = batch_statistics(program, dtype, x, rank, elements_per_channel);
-    let output = normalize_scale_shift(program, dtype, centered, batch_variance, gamma, beta, rank, eps);
+pub fn batchnorm2d_train(
+    program: &mut Vec<Op>,
+    dtype: DType,
+    x: NodeId,
+    gamma: NodeId,
+    beta: NodeId,
+    rank: u16,
+    elements_per_channel: u64,
+    eps: f32,
+) -> (NodeId, NodeId, NodeId) {
+    let (centered, batch_mean, batch_variance) =
+        batch_statistics(program, dtype, x, rank, elements_per_channel);
+    let output = normalize_scale_shift(
+        program,
+        dtype,
+        centered,
+        batch_variance,
+        gamma,
+        beta,
+        rank,
+        eps,
+    );
     (output, batch_mean, batch_variance)
 }
 
@@ -215,11 +342,36 @@ pub fn batchnorm2d_train(program: &mut Vec<Op>, dtype: DType, x: NodeId, gamma: 
 /// same one.
 #[must_use]
 #[allow(clippy::too_many_arguments)]
-pub fn batchnorm2d_eval(program: &mut Vec<Op>, dtype: DType, x: NodeId, gamma: NodeId, beta: NodeId, running_mean: NodeId, running_variance: NodeId, rank: u16, eps: f32) -> NodeId {
+pub fn batchnorm2d_eval(
+    program: &mut Vec<Op>,
+    dtype: DType,
+    x: NodeId,
+    gamma: NodeId,
+    beta: NodeId,
+    running_mean: NodeId,
+    running_variance: NodeId,
+    rank: u16,
+    eps: f32,
+) -> NodeId {
     let full = expr::identity(rank);
     let channels = channel_map(rank);
-    let centered = expr::binary(program, dtype, ScalarOp::Subtract, (x, full), (running_mean, channels));
-    normalize_scale_shift(program, dtype, centered, running_variance, gamma, beta, rank, eps)
+    let centered = expr::binary(
+        program,
+        dtype,
+        ScalarOp::Subtract,
+        (x, full),
+        (running_mean, channels),
+    );
+    normalize_scale_shift(
+        program,
+        dtype,
+        centered,
+        running_variance,
+        gamma,
+        beta,
+        rank,
+        eps,
+    )
 }
 
 /// `momentum * running + (1 - momentum) * batch` -- the exponential moving
@@ -232,13 +384,37 @@ pub fn batchnorm2d_eval(program: &mut Vec<Op>, dtype: DType, x: NodeId, gamma: N
 /// mission this module ships under asked for the graph-side option
 /// explicitly, not because the host-side one is wrong.
 #[must_use]
-pub fn update_running_stats(program: &mut Vec<Op>, dtype: DType, running: NodeId, batch: NodeId, momentum: f32) -> NodeId {
+pub fn update_running_stats(
+    program: &mut Vec<Op>,
+    dtype: DType,
+    running: NodeId,
+    batch: NodeId,
+    momentum: f32,
+) -> NodeId {
     let full = expr::identity(1);
     let momentum_const = expr::constant(program, dtype, momentum);
     let one_minus_momentum = expr::constant(program, dtype, 1.0 - momentum);
-    let scaled_running = expr::binary(program, dtype, ScalarOp::Multiply, (running, full.clone()), (momentum_const, expr::broadcast(1)));
-    let scaled_batch = expr::binary(program, dtype, ScalarOp::Multiply, (batch, full.clone()), (one_minus_momentum, expr::broadcast(1)));
-    expr::binary(program, dtype, ScalarOp::Add, (scaled_running, full.clone()), (scaled_batch, full))
+    let scaled_running = expr::binary(
+        program,
+        dtype,
+        ScalarOp::Multiply,
+        (running, full.clone()),
+        (momentum_const, expr::broadcast(1)),
+    );
+    let scaled_batch = expr::binary(
+        program,
+        dtype,
+        ScalarOp::Multiply,
+        (batch, full.clone()),
+        (one_minus_momentum, expr::broadcast(1)),
+    );
+    expr::binary(
+        program,
+        dtype,
+        ScalarOp::Add,
+        (scaled_running, full.clone()),
+        (scaled_batch, full),
+    )
 }
 
 #[cfg(test)]
@@ -251,7 +427,14 @@ mod tests {
     use super::*;
 
     fn leaf(program: &mut Vec<Op>, name: &str, shape: Vec<Extent>) -> NodeId {
-        proxima_tensor::op::append(program, Op::Input { dtype: DType::Float32, shape, name: Some(name.into()) })
+        proxima_tensor::op::append(
+            program,
+            Op::Input {
+                dtype: DType::Float32,
+                shape,
+                name: Some(name.into()),
+            },
+        )
     }
 
     #[proxima::test]
@@ -263,9 +446,17 @@ mod tests {
 
         let x_values = [1.0f32, 2.0, 3.0, 4.0];
         let mask_values = [1.0f32, 0.0, 1.0, 0.0];
-        let evaluated = proxima_tensor::cpu::evaluate_named(&program, &[], &[("x", &x_values), ("mask", &mask_values)], &[out])
-            .expect("dropout program lowers and evaluates");
-        assert_eq!(evaluated.get(out).expect("dropout output present").0, &[2.0, 0.0, 6.0, 0.0]);
+        let evaluated = proxima_tensor::cpu::evaluate_named(
+            &program,
+            &[],
+            &[("x", &x_values), ("mask", &mask_values)],
+            &[out],
+        )
+        .expect("dropout program lowers and evaluates");
+        assert_eq!(
+            evaluated.get(out).expect("dropout output present").0,
+            &[2.0, 0.0, 6.0, 0.0]
+        );
     }
 
     #[proxima::test]
@@ -277,9 +468,17 @@ mod tests {
 
         let x_values = [1.0f32, -2.5, 3.0];
         let mask_values = [1.0f32, 1.0, 1.0];
-        let evaluated = proxima_tensor::cpu::evaluate_named(&program, &[], &[("x", &x_values), ("mask", &mask_values)], &[out])
-            .expect("dropout program lowers and evaluates");
-        assert_eq!(evaluated.get(out).expect("dropout output present").0, &x_values);
+        let evaluated = proxima_tensor::cpu::evaluate_named(
+            &program,
+            &[],
+            &[("x", &x_values), ("mask", &mask_values)],
+            &[out],
+        )
+        .expect("dropout program lowers and evaluates");
+        assert_eq!(
+            evaluated.get(out).expect("dropout output present").0,
+            &x_values
+        );
     }
 
     #[proxima::test]
@@ -291,8 +490,16 @@ mod tests {
 
         let x_values = [1.0f32, 2.0, 3.0, 4.0];
         let mask_values = [1.0f32, 0.0, 1.0];
-        let result = proxima_tensor::cpu::evaluate_named(&program, &[], &[("x", &x_values), ("mask", &mask_values)], &[out]);
-        assert!(result.is_err(), "a mask shaped differently than x must be a named error, not a silent broadcast or panic");
+        let result = proxima_tensor::cpu::evaluate_named(
+            &program,
+            &[],
+            &[("x", &x_values), ("mask", &mask_values)],
+            &[out],
+        );
+        assert!(
+            result.is_err(),
+            "a mask shaped differently than x must be a named error, not a silent broadcast or panic"
+        );
     }
 
     /// A tiny `N=2, C=2, H=1, W=1` fixture -- small enough to hand-check.
@@ -300,10 +507,20 @@ mod tests {
     /// channel 1's batch is `[2.0, 2.0]` (mean 2, variance 0).
     fn batchnorm_fixture() -> (Vec<Op>, NodeId, NodeId, NodeId, NodeId, NodeId, NodeId) {
         let mut program = Vec::new();
-        let x = leaf(&mut program, "x", vec![Extent::Static(2), Extent::Static(2), Extent::Static(1), Extent::Static(1)]);
+        let x = leaf(
+            &mut program,
+            "x",
+            vec![
+                Extent::Static(2),
+                Extent::Static(2),
+                Extent::Static(1),
+                Extent::Static(1),
+            ],
+        );
         let gamma = leaf(&mut program, "gamma", vec![Extent::Static(2)]);
         let beta = leaf(&mut program, "beta", vec![Extent::Static(2)]);
-        let (output, batch_mean, batch_variance) = batchnorm2d_train(&mut program, DType::Float32, x, gamma, beta, 4, 2, 1e-5);
+        let (output, batch_mean, batch_variance) =
+            batchnorm2d_train(&mut program, DType::Float32, x, gamma, beta, 4, 2, 1e-5);
         (program, x, gamma, beta, output, batch_mean, batch_variance)
     }
 
@@ -314,51 +531,124 @@ mod tests {
         let x_values = [1.0f32, 2.0, 3.0, 2.0];
         let gamma_values = [1.0f32, 1.0];
         let beta_values = [0.0f32, 0.0];
-        let evaluated = proxima_tensor::cpu::evaluate_named(&program, &[], &[("x", &x_values), ("gamma", &gamma_values), ("beta", &beta_values)], &[output, batch_mean, batch_variance])
-            .expect("batchnorm train program lowers and evaluates");
+        let evaluated = proxima_tensor::cpu::evaluate_named(
+            &program,
+            &[],
+            &[
+                ("x", &x_values),
+                ("gamma", &gamma_values),
+                ("beta", &beta_values),
+            ],
+            &[output, batch_mean, batch_variance],
+        )
+        .expect("batchnorm train program lowers and evaluates");
 
         let mean = evaluated.get(batch_mean).expect("batch_mean present").0;
-        assert!((mean[0] - 2.0).abs() < 1e-5 && (mean[1] - 2.0).abs() < 1e-5, "mean {mean:?}");
-        let variance = evaluated.get(batch_variance).expect("batch_variance present").0;
-        assert!((variance[0] - 1.0).abs() < 1e-5 && variance[1].abs() < 1e-5, "variance {variance:?}");
+        assert!(
+            (mean[0] - 2.0).abs() < 1e-5 && (mean[1] - 2.0).abs() < 1e-5,
+            "mean {mean:?}"
+        );
+        let variance = evaluated
+            .get(batch_variance)
+            .expect("batch_variance present")
+            .0;
+        assert!(
+            (variance[0] - 1.0).abs() < 1e-5 && variance[1].abs() < 1e-5,
+            "variance {variance:?}"
+        );
 
         let expected_channel0_std = (1.0f32 + 1e-5).sqrt();
-        let expected = [-1.0 / expected_channel0_std, 0.0, 1.0 / expected_channel0_std, 0.0];
+        let expected = [
+            -1.0 / expected_channel0_std,
+            0.0,
+            1.0 / expected_channel0_std,
+            0.0,
+        ];
         let result = evaluated.get(output).expect("output present").0;
         for (got, want) in result.iter().zip(expected.iter()) {
-            assert!((got - want).abs() < 1e-4, "got {result:?}, want {expected:?}");
+            assert!(
+                (got - want).abs() < 1e-4,
+                "got {result:?}, want {expected:?}"
+            );
         }
     }
 
     #[proxima::test]
     async fn batchnorm_train_stays_finite_at_batch_size_one() {
         let mut program = Vec::new();
-        let x = leaf(&mut program, "x", vec![Extent::Static(1), Extent::Static(2), Extent::Static(1), Extent::Static(1)]);
+        let x = leaf(
+            &mut program,
+            "x",
+            vec![
+                Extent::Static(1),
+                Extent::Static(2),
+                Extent::Static(1),
+                Extent::Static(1),
+            ],
+        );
         let gamma = leaf(&mut program, "gamma", vec![Extent::Static(2)]);
         let beta = leaf(&mut program, "beta", vec![Extent::Static(2)]);
-        let (output, _batch_mean, batch_variance) = batchnorm2d_train(&mut program, DType::Float32, x, gamma, beta, 4, 1, 1e-5);
+        let (output, _batch_mean, batch_variance) =
+            batchnorm2d_train(&mut program, DType::Float32, x, gamma, beta, 4, 1, 1e-5);
 
         let x_values = [5.0f32, -3.0];
         let gamma_values = [1.0f32, 1.0];
         let beta_values = [0.0f32, 0.0];
-        let evaluated = proxima_tensor::cpu::evaluate_named(&program, &[], &[("x", &x_values), ("gamma", &gamma_values), ("beta", &beta_values)], &[output, batch_variance])
-            .expect("batchnorm train program lowers and evaluates at batch size 1");
+        let evaluated = proxima_tensor::cpu::evaluate_named(
+            &program,
+            &[],
+            &[
+                ("x", &x_values),
+                ("gamma", &gamma_values),
+                ("beta", &beta_values),
+            ],
+            &[output, batch_variance],
+        )
+        .expect("batchnorm train program lowers and evaluates at batch size 1");
 
-        let variance = evaluated.get(batch_variance).expect("batch_variance present").0;
-        assert!(variance.iter().all(|value| *value == 0.0), "a single-example batch has zero variance, got {variance:?}");
+        let variance = evaluated
+            .get(batch_variance)
+            .expect("batch_variance present")
+            .0;
+        assert!(
+            variance.iter().all(|value| *value == 0.0),
+            "a single-example batch has zero variance, got {variance:?}"
+        );
         let result = evaluated.get(output).expect("output present").0;
-        assert!(result.iter().all(|value| value.is_finite()), "N=1 must not divide by zero: eps keeps sqrt(0 + eps) well away from 0, got {result:?}");
+        assert!(
+            result.iter().all(|value| value.is_finite()),
+            "N=1 must not divide by zero: eps keeps sqrt(0 + eps) well away from 0, got {result:?}"
+        );
     }
 
     #[proxima::test]
     async fn batchnorm_eval_matches_running_statistics_not_batch_statistics() {
         let mut program = Vec::new();
-        let x = leaf(&mut program, "x", vec![Extent::Static(2), Extent::Static(2), Extent::Static(1), Extent::Static(1)]);
+        let x = leaf(
+            &mut program,
+            "x",
+            vec![
+                Extent::Static(2),
+                Extent::Static(2),
+                Extent::Static(1),
+                Extent::Static(1),
+            ],
+        );
         let gamma = leaf(&mut program, "gamma", vec![Extent::Static(2)]);
         let beta = leaf(&mut program, "beta", vec![Extent::Static(2)]);
         let running_mean = leaf(&mut program, "running_mean", vec![Extent::Static(2)]);
         let running_variance = leaf(&mut program, "running_variance", vec![Extent::Static(2)]);
-        let output = batchnorm2d_eval(&mut program, DType::Float32, x, gamma, beta, running_mean, running_variance, 4, 1e-5);
+        let output = batchnorm2d_eval(
+            &mut program,
+            DType::Float32,
+            x,
+            gamma,
+            beta,
+            running_mean,
+            running_variance,
+            4,
+            1e-5,
+        );
 
         // Running stats deliberately disagree with the batch's own mean(2)/var(1,0)
         // fixture above, so a pass here proves eval mode reads running_mean/var,
@@ -371,16 +661,30 @@ mod tests {
         let evaluated = proxima_tensor::cpu::evaluate_named(
             &program,
             &[],
-            &[("x", &x_values), ("gamma", &gamma_values), ("beta", &beta_values), ("running_mean", &running_mean_values), ("running_variance", &running_variance_values)],
+            &[
+                ("x", &x_values),
+                ("gamma", &gamma_values),
+                ("beta", &beta_values),
+                ("running_mean", &running_mean_values),
+                ("running_variance", &running_variance_values),
+            ],
             &[output],
         )
         .expect("batchnorm eval program lowers and evaluates");
 
         let expected_std = (1.0f32 + 1e-5).sqrt();
-        let expected = [1.0 / expected_std, 2.0 / expected_std, 3.0 / expected_std, 2.0 / expected_std];
+        let expected = [
+            1.0 / expected_std,
+            2.0 / expected_std,
+            3.0 / expected_std,
+            2.0 / expected_std,
+        ];
         let result = evaluated.get(output).expect("output present").0;
         for (got, want) in result.iter().zip(expected.iter()) {
-            assert!((got - want).abs() < 1e-4, "got {result:?}, want {expected:?}");
+            assert!(
+                (got - want).abs() < 1e-4,
+                "got {result:?}, want {expected:?}"
+            );
         }
     }
 
@@ -393,12 +697,20 @@ mod tests {
 
         let running_values = [0.0f32, 10.0];
         let batch_values = [2.0f32, 5.0];
-        let evaluated = proxima_tensor::cpu::evaluate_named(&program, &[], &[("running", &running_values), ("batch", &batch_values)], &[out])
-            .expect("update_running_stats program lowers and evaluates");
+        let evaluated = proxima_tensor::cpu::evaluate_named(
+            &program,
+            &[],
+            &[("running", &running_values), ("batch", &batch_values)],
+            &[out],
+        )
+        .expect("update_running_stats program lowers and evaluates");
         let expected = [0.9 * 0.0 + 0.1 * 2.0, 0.9 * 10.0 + 0.1 * 5.0];
         let result = evaluated.get(out).expect("output present").0;
         for (got, want) in result.iter().zip(expected.iter()) {
-            assert!((got - want).abs() < 1e-5, "got {result:?}, want {expected:?}");
+            assert!(
+                (got - want).abs() < 1e-5,
+                "got {result:?}, want {expected:?}"
+            );
         }
     }
 
@@ -432,7 +744,11 @@ mod tests {
     /// `beta`) -- the same oracle `activation.rs`'s own
     /// `activation_gradient_matches_central_difference` and `conv.rs`'s own
     /// `conv2d_gradient_matches_central_difference_on_every_parameter` use.
-    fn central_difference_gradient(build: impl Fn(&mut Vec<Op>) -> (NodeId, NodeId, NodeId, NodeId), values_for: &str, count: usize) {
+    fn central_difference_gradient(
+        build: impl Fn(&mut Vec<Op>) -> (NodeId, NodeId, NodeId, NodeId),
+        values_for: &str,
+        count: usize,
+    ) {
         let mut program = Vec::new();
         let (_x, _gamma, _beta, output) = build(&mut program);
         // `output^2`, not plain `output`: every batchnorm channel's
@@ -442,7 +758,13 @@ mod tests {
         // that degeneracy so the true gradient is generically nonzero for
         // every parameter this function checks (see this function's own
         // `pseudo_random` doc for the matching input-side precaution).
-        let squared_output = expr::binary(&mut program, DType::Float32, ScalarOp::Multiply, (output, expr::identity(4)), (output, expr::identity(4)));
+        let squared_output = expr::binary(
+            &mut program,
+            DType::Float32,
+            ScalarOp::Multiply,
+            (output, expr::identity(4)),
+            (output, expr::identity(4)),
+        );
         let loss = proxima_tensor::op::append(
             &mut program,
             Op::Reduce(proxima_tensor::op::Reduce {
@@ -457,22 +779,46 @@ mod tests {
             }),
         );
 
-        let differentiated = crate::adjoint::differentiate(&program, loss).expect("scalar loss differentiates");
-        let target = differentiated.gradient_of_named(values_for).expect("target feeds the loss");
+        let differentiated =
+            crate::adjoint::differentiate(&program, loss).expect("scalar loss differentiates");
+        let target = differentiated
+            .gradient_of_named(values_for)
+            .expect("target feeds the loss");
 
         let x_values = pseudo_random(0x9E37_79B9, 8);
-        let gamma_values = pseudo_random(0x8542_D2C3, 2).iter().map(|value| value + 1.0).collect::<Vec<f32>>();
+        let gamma_values = pseudo_random(0x8542_D2C3, 2)
+            .iter()
+            .map(|value| value + 1.0)
+            .collect::<Vec<f32>>();
         let beta_values = pseudo_random(0xC2B2_AE3D, 2);
         let named = |x_override: &[f32], gamma_override: &[f32], beta_override: &[f32]| -> f32 {
-            proxima_tensor::cpu::evaluate_named(&program, &[], &[("x", x_override), ("gamma", gamma_override), ("beta", beta_override)], &[loss])
-                .expect("forward program lowers and evaluates")
-                .get(loss)
-                .expect("loss requested")
-                .0[0]
+            proxima_tensor::cpu::evaluate_named(
+                &program,
+                &[],
+                &[
+                    ("x", x_override),
+                    ("gamma", gamma_override),
+                    ("beta", beta_override),
+                ],
+                &[loss],
+            )
+            .expect("forward program lowers and evaluates")
+            .get(loss)
+            .expect("loss requested")
+            .0[0]
         };
 
-        let evaluated = proxima_tensor::cpu::evaluate_named(&differentiated.program, &[], &[("x", &x_values), ("gamma", &gamma_values), ("beta", &beta_values)], &[target])
-            .expect("adjoint program lowers and evaluates");
+        let evaluated = proxima_tensor::cpu::evaluate_named(
+            &differentiated.program,
+            &[],
+            &[
+                ("x", &x_values),
+                ("gamma", &gamma_values),
+                ("beta", &beta_values),
+            ],
+            &[target],
+        )
+        .expect("adjoint program lowers and evaluates");
         let analytic = evaluated.get(target).expect("target gradient requested").0;
 
         // `1e-2`, not this crate's usual `1e-3`: `x`'s own gradient runs
@@ -493,7 +839,11 @@ mod tests {
         let step = 1e-2f32;
         let mut worst_relative = 0.0f32;
         for index in 0..count {
-            let (mut x_perturbed, mut gamma_perturbed, mut beta_perturbed) = (x_values.to_vec(), gamma_values.to_vec(), beta_values.to_vec());
+            let (mut x_perturbed, mut gamma_perturbed, mut beta_perturbed) = (
+                x_values.to_vec(),
+                gamma_values.to_vec(),
+                beta_values.to_vec(),
+            );
             let target_slice: &mut [f32] = match values_for {
                 "x" => &mut x_perturbed,
                 "gamma" => &mut gamma_perturbed,
@@ -535,14 +885,26 @@ mod tests {
                 analytic[index]
             );
         }
-        std::eprintln!("batchnorm_train gradient check for {values_for}: worst relative error {worst_relative:.6}");
+        std::eprintln!(
+            "batchnorm_train gradient check for {values_for}: worst relative error {worst_relative:.6}"
+        );
     }
 
     fn build_batchnorm_graph(program: &mut Vec<Op>) -> (NodeId, NodeId, NodeId, NodeId) {
-        let x = leaf(program, "x", vec![Extent::Static(2), Extent::Static(2), Extent::Static(2), Extent::Static(1)]);
+        let x = leaf(
+            program,
+            "x",
+            vec![
+                Extent::Static(2),
+                Extent::Static(2),
+                Extent::Static(2),
+                Extent::Static(1),
+            ],
+        );
         let gamma = leaf(program, "gamma", vec![Extent::Static(2)]);
         let beta = leaf(program, "beta", vec![Extent::Static(2)]);
-        let (output, _batch_mean, _batch_variance) = batchnorm2d_train(program, DType::Float32, x, gamma, beta, 4, 4, 1e-5);
+        let (output, _batch_mean, _batch_variance) =
+            batchnorm2d_train(program, DType::Float32, x, gamma, beta, 4, 4, 1e-5);
         (x, gamma, beta, output)
     }
 

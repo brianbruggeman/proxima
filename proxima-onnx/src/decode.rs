@@ -59,7 +59,9 @@ fn expect_str<'a>(field: Field<'a>) -> Result<&'a str, OnnxError> {
     let field_number = field.field_number();
     match field {
         Field::Len { payload, .. } => {
-            core::str::from_utf8(payload).map_err(|_| OnnxError::InvalidUtf8 { field: field_number })
+            core::str::from_utf8(payload).map_err(|_| OnnxError::InvalidUtf8 {
+                field: field_number,
+            })
         }
         other => Err(OnnxError::WireTypeMismatch {
             field: field_number,
@@ -129,8 +131,11 @@ macro_rules! packed_varint_pusher {
                 Field::Len { payload, .. } => {
                     let mut cursor = payload;
                     while !cursor.is_empty() {
-                        let (value, used) = decode_varint(cursor)
-                            .map_err(|source| OnnxError::Wire { field: field_number, source })?;
+                        let (value, used) =
+                            decode_varint(cursor).map_err(|source| OnnxError::Wire {
+                                field: field_number,
+                                source,
+                            })?;
                         out.push(value as $ty);
                         cursor = &cursor[used..];
                     }
@@ -206,16 +211,23 @@ fn push_f64_packed(field: Field<'_>, out: &mut Vec<f64>) -> Result<(), OnnxError
     }
 }
 
-fn each_field<'a>(buf: &'a [u8], mut visit: impl FnMut(Field<'a>) -> Result<(), OnnxError>) -> Result<(), OnnxError> {
+fn each_field<'a>(
+    buf: &'a [u8],
+    mut visit: impl FnMut(Field<'a>) -> Result<(), OnnxError>,
+) -> Result<(), OnnxError> {
     for field in Fields::new(buf) {
-        let field: Field<'a> = field.map_err(|source: WireError| OnnxError::Wire { field: 0, source })?;
+        let field: Field<'a> =
+            field.map_err(|source: WireError| OnnxError::Wire { field: 0, source })?;
         visit(field)?;
     }
     Ok(())
 }
 
 fn decode_operator_set_id(buf: &[u8]) -> Result<OperatorSetIdProto<'_>, OnnxError> {
-    let mut out = OperatorSetIdProto { domain: "", version: 0 };
+    let mut out = OperatorSetIdProto {
+        domain: "",
+        version: 0,
+    };
     each_field(buf, |field| {
         match field.field_number() {
             1 => out.domain = expect_str(field)?,
@@ -282,11 +294,27 @@ fn decode_type_proto(buf: &[u8]) -> Result<TypeProto<'_>, OnnxError> {
     let mut out = TypeProto::default();
     each_field(buf, |field| {
         match field.field_number() {
-            1 => out.value = Some(TypeValue::Tensor(decode_type_proto_tensor(expect_bytes(field)?)?)),
-            4 => out.value = Some(TypeValue::Sequence(Box::new(decode_type_proto(expect_bytes(field)?)?))),
+            1 => {
+                out.value = Some(TypeValue::Tensor(decode_type_proto_tensor(expect_bytes(
+                    field,
+                )?)?))
+            }
+            4 => {
+                out.value = Some(TypeValue::Sequence(Box::new(decode_type_proto(
+                    expect_bytes(field)?,
+                )?)))
+            }
             5 => out.value = Some(TypeValue::Map(decode_type_proto_map(expect_bytes(field)?)?)),
-            9 => out.value = Some(TypeValue::Optional(Box::new(decode_type_proto(expect_bytes(field)?)?))),
-            8 => out.value = Some(TypeValue::SparseTensor(decode_type_proto_tensor(expect_bytes(field)?)?)),
+            9 => {
+                out.value = Some(TypeValue::Optional(Box::new(decode_type_proto(
+                    expect_bytes(field)?,
+                )?)))
+            }
+            8 => {
+                out.value = Some(TypeValue::SparseTensor(decode_type_proto_tensor(
+                    expect_bytes(field)?,
+                )?))
+            }
             6 => out.denotation = expect_str(field)?,
             _ => {}
         }
@@ -328,7 +356,9 @@ fn decode_attribute(buf: &[u8]) -> Result<AttributeProto<'_>, OnnxError> {
             9 => out.strings.push(expect_bytes(field)?),
             10 => out.tensors.push(decode_tensor(expect_bytes(field)?)?),
             11 => out.graphs.push(decode_graph_proto(expect_bytes(field)?)?),
-            15 => out.type_protos.push(decode_type_proto(expect_bytes(field)?)?),
+            15 => out
+                .type_protos
+                .push(decode_type_proto(expect_bytes(field)?)?),
             _ => {}
         }
         Ok(())
@@ -387,7 +417,9 @@ fn decode_graph_proto(buf: &[u8]) -> Result<GraphProto<'_>, OnnxError> {
             10 => out.doc_string = expect_str(field)?,
             11 => out.input.push(decode_value_info(expect_bytes(field)?)?),
             12 => out.output.push(decode_value_info(expect_bytes(field)?)?),
-            13 => out.value_info.push(decode_value_info(expect_bytes(field)?)?),
+            13 => out
+                .value_info
+                .push(decode_value_info(expect_bytes(field)?)?),
             _ => {}
         }
         Ok(())

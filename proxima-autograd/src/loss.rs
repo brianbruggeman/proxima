@@ -29,16 +29,49 @@ use crate::expr;
 /// `ln(beta)` (that module's own doc: the one thing that changes per call is
 /// a runtime `Op::Input`, everything host-known is a graph-time constant).
 #[must_use]
-pub fn mse(program: &mut Vec<Op>, dtype: DType, pred: NodeId, target: NodeId, rank: u16, element_count: u32) -> NodeId {
+pub fn mse(
+    program: &mut Vec<Op>,
+    dtype: DType,
+    pred: NodeId,
+    target: NodeId,
+    rank: u16,
+    element_count: u32,
+) -> NodeId {
     let full = expr::identity(rank);
     let scalar = expr::broadcast(rank);
 
-    let diff = expr::binary(program, dtype, ScalarOp::Subtract, (pred, full.clone()), (target, full.clone()));
-    let squared = expr::binary(program, dtype, ScalarOp::Multiply, (diff, full.clone()), (diff, full));
-    let sum = expr::reduce(program, dtype, ScalarOp::Add, ReduceInit::Zero, squared, expr::identity(rank), scalar);
+    let diff = expr::binary(
+        program,
+        dtype,
+        ScalarOp::Subtract,
+        (pred, full.clone()),
+        (target, full.clone()),
+    );
+    let squared = expr::binary(
+        program,
+        dtype,
+        ScalarOp::Multiply,
+        (diff, full.clone()),
+        (diff, full),
+    );
+    let sum = expr::reduce(
+        program,
+        dtype,
+        ScalarOp::Add,
+        ReduceInit::Zero,
+        squared,
+        expr::identity(rank),
+        scalar,
+    );
 
     let inverse_count = expr::constant(program, dtype, 1.0 / element_count as f32);
-    expr::binary(program, dtype, ScalarOp::Multiply, (sum, expr::identity(0)), (inverse_count, expr::identity(0)))
+    expr::binary(
+        program,
+        dtype,
+        ScalarOp::Multiply,
+        (sum, expr::identity(0)),
+        (inverse_count, expr::identity(0)),
+    )
 }
 
 /// Cross-entropy between predicted probabilities `probs` and a one-hot (or
@@ -67,17 +100,48 @@ pub fn mse(program: &mut Vec<Op>, dtype: DType, pred: NodeId, target: NodeId, ra
 /// eps-clamped-log fix every incumbent softmax-cross-entropy implementation
 /// carries for the identical reason.
 #[must_use]
-pub fn cross_entropy(program: &mut Vec<Op>, dtype: DType, probs: NodeId, one_hot: NodeId, rank: u16) -> NodeId {
+pub fn cross_entropy(
+    program: &mut Vec<Op>,
+    dtype: DType,
+    probs: NodeId,
+    one_hot: NodeId,
+    rank: u16,
+) -> NodeId {
     const PROBABILITY_FLOOR: f32 = 1e-7;
 
     let full = expr::identity(rank);
     let scalar = expr::broadcast(rank);
 
     let floor = expr::constant(program, dtype, PROBABILITY_FLOOR);
-    let floored_probs = expr::binary(program, dtype, ScalarOp::Maximum, (probs, full.clone()), (floor, scalar.clone()));
-    let log_probs = expr::unary(program, dtype, ScalarOp::Logarithm, (floored_probs, full.clone()));
-    let weighted = expr::binary(program, dtype, ScalarOp::Multiply, (one_hot, full.clone()), (log_probs, full));
-    let sum = expr::reduce(program, dtype, ScalarOp::Add, ReduceInit::Zero, weighted, expr::identity(rank), scalar);
+    let floored_probs = expr::binary(
+        program,
+        dtype,
+        ScalarOp::Maximum,
+        (probs, full.clone()),
+        (floor, scalar.clone()),
+    );
+    let log_probs = expr::unary(
+        program,
+        dtype,
+        ScalarOp::Logarithm,
+        (floored_probs, full.clone()),
+    );
+    let weighted = expr::binary(
+        program,
+        dtype,
+        ScalarOp::Multiply,
+        (one_hot, full.clone()),
+        (log_probs, full),
+    );
+    let sum = expr::reduce(
+        program,
+        dtype,
+        ScalarOp::Add,
+        ReduceInit::Zero,
+        weighted,
+        expr::identity(rank),
+        scalar,
+    );
     expr::unary(program, dtype, ScalarOp::Negate, (sum, expr::identity(0)))
 }
 
@@ -110,7 +174,11 @@ mod tests {
     fn leaf(program: &mut Vec<Op>, name: &str, extent: u32) -> NodeId {
         proxima_tensor::op::append(
             program,
-            Op::Input { dtype: DType::Float32, shape: vec![Extent::Static(extent)], name: Some(name.into()) },
+            Op::Input {
+                dtype: DType::Float32,
+                shape: vec![Extent::Static(extent)],
+                name: Some(name.into()),
+            },
         )
     }
 
@@ -154,7 +222,9 @@ mod tests {
         .expect("cross_entropy program lowers and evaluates");
 
         let expected = -(0.5f32.ln());
-        assert!((evaluated.get(out).expect("cross_entropy requested").0[0] - expected).abs() < 1e-6);
+        assert!(
+            (evaluated.get(out).expect("cross_entropy requested").0[0] - expected).abs() < 1e-6
+        );
     }
 
     #[proxima::test]
@@ -162,7 +232,8 @@ mod tests {
         let mut logits_program = Vec::new();
         let logits = leaf(&mut logits_program, "logits", 3);
         let one_hot = leaf(&mut logits_program, "one_hot", 3);
-        let fused = softmax_cross_entropy(&mut logits_program, DType::Float32, logits, one_hot, 1, 0);
+        let fused =
+            softmax_cross_entropy(&mut logits_program, DType::Float32, logits, one_hot, 1, 0);
 
         let logits_values = [1.0f32, 2.0, 3.0];
         let one_hot_values = [0.0f32, 0.0, 1.0];
@@ -189,7 +260,10 @@ mod tests {
         .expect("split program lowers and evaluates");
         let split_value = split_evaluated.get(split_loss).expect("split requested").0[0];
 
-        assert!((fused_value - split_value).abs() < 1e-6, "fused={fused_value}, split={split_value}");
+        assert!(
+            (fused_value - split_value).abs() < 1e-6,
+            "fused={fused_value}, split={split_value}"
+        );
     }
 
     /// Central-difference gradient checks proving both losses' gradients
@@ -205,8 +279,11 @@ mod tests {
         let target = leaf(&mut program, "target", 3);
         let loss = mse(&mut program, DType::Float32, pred, target, 1, 3);
 
-        let differentiated = crate::adjoint::differentiate(&program, loss).expect("scalar loss differentiates");
-        let grad_pred = differentiated.gradient_of_named("pred").expect("pred feeds the loss");
+        let differentiated =
+            crate::adjoint::differentiate(&program, loss).expect("scalar loss differentiates");
+        let grad_pred = differentiated
+            .gradient_of_named("pred")
+            .expect("pred feeds the loss");
         let evaluated = proxima_tensor::cpu::evaluate_named(
             &differentiated.program,
             &[],
@@ -217,11 +294,16 @@ mod tests {
         let analytic = evaluated.get(grad_pred).expect("grad_pred requested").0;
 
         let loss_at = |perturbed: &[f32]| {
-            proxima_tensor::cpu::evaluate_named(&program, &[], &[("pred", perturbed), ("target", &target_values)], &[loss])
-                .expect("forward program lowers and evaluates")
-                .get(loss)
-                .expect("loss requested")
-                .0[0]
+            proxima_tensor::cpu::evaluate_named(
+                &program,
+                &[],
+                &[("pred", perturbed), ("target", &target_values)],
+                &[loss],
+            )
+            .expect("forward program lowers and evaluates")
+            .get(loss)
+            .expect("loss requested")
+            .0[0]
         };
 
         let step = 1e-3f32;
@@ -235,8 +317,13 @@ mod tests {
             perturbed[index] = original;
 
             let numeric = (plus - minus) / (2.0 * step);
-            let relative = (analytic[index] - numeric).abs() / (analytic[index].abs().max(numeric.abs()) + 1e-6);
-            assert!(relative < 5e-3, "index {index}: analytic={} numeric={numeric}", analytic[index]);
+            let relative = (analytic[index] - numeric).abs()
+                / (analytic[index].abs().max(numeric.abs()) + 1e-6);
+            assert!(
+                relative < 5e-3,
+                "index {index}: analytic={} numeric={numeric}",
+                analytic[index]
+            );
         }
     }
 
@@ -250,8 +337,11 @@ mod tests {
         let one_hot = leaf(&mut program, "one_hot", 3);
         let loss = softmax_cross_entropy(&mut program, DType::Float32, logits, one_hot, 1, 0);
 
-        let differentiated = crate::adjoint::differentiate(&program, loss).expect("scalar loss differentiates");
-        let grad_logits = differentiated.gradient_of_named("logits").expect("logits feeds the loss");
+        let differentiated =
+            crate::adjoint::differentiate(&program, loss).expect("scalar loss differentiates");
+        let grad_logits = differentiated
+            .gradient_of_named("logits")
+            .expect("logits feeds the loss");
         let evaluated = proxima_tensor::cpu::evaluate_named(
             &differentiated.program,
             &[],
@@ -262,11 +352,16 @@ mod tests {
         let analytic = evaluated.get(grad_logits).expect("grad_logits requested").0;
 
         let loss_at = |perturbed: &[f32]| {
-            proxima_tensor::cpu::evaluate_named(&program, &[], &[("logits", perturbed), ("one_hot", &one_hot_values)], &[loss])
-                .expect("forward program lowers and evaluates")
-                .get(loss)
-                .expect("loss requested")
-                .0[0]
+            proxima_tensor::cpu::evaluate_named(
+                &program,
+                &[],
+                &[("logits", perturbed), ("one_hot", &one_hot_values)],
+                &[loss],
+            )
+            .expect("forward program lowers and evaluates")
+            .get(loss)
+            .expect("loss requested")
+            .0[0]
         };
 
         let step = 1e-3f32;
@@ -280,8 +375,13 @@ mod tests {
             perturbed[index] = original;
 
             let numeric = (plus - minus) / (2.0 * step);
-            let relative = (analytic[index] - numeric).abs() / (analytic[index].abs().max(numeric.abs()) + 1e-6);
-            assert!(relative < 5e-3, "index {index}: analytic={} numeric={numeric}", analytic[index]);
+            let relative = (analytic[index] - numeric).abs()
+                / (analytic[index].abs().max(numeric.abs()) + 1e-6);
+            assert!(
+                relative < 5e-3,
+                "index {index}: analytic={} numeric={numeric}",
+                analytic[index]
+            );
         }
     }
 
@@ -296,7 +396,8 @@ mod tests {
     /// `tests/real_mnist_training.rs`'s own doc comment surfaced past its
     /// shipped 4-epoch/8000-example config.
     #[proxima::test]
-    async fn softmax_cross_entropy_gradient_stays_finite_when_a_class_probability_underflows_to_zero() {
+    async fn softmax_cross_entropy_gradient_stays_finite_when_a_class_probability_underflows_to_zero()
+     {
         let logits_values = [-60.0f32, 0.0, 1.0];
         let one_hot_values = [0.0f32, 0.0, 1.0];
 
@@ -305,8 +406,11 @@ mod tests {
         let one_hot = leaf(&mut program, "one_hot", 3);
         let loss = softmax_cross_entropy(&mut program, DType::Float32, logits, one_hot, 1, 0);
 
-        let differentiated = crate::adjoint::differentiate(&program, loss).expect("scalar loss differentiates");
-        let grad_logits = differentiated.gradient_of_named("logits").expect("logits feeds the loss");
+        let differentiated =
+            crate::adjoint::differentiate(&program, loss).expect("scalar loss differentiates");
+        let grad_logits = differentiated
+            .gradient_of_named("logits")
+            .expect("logits feeds the loss");
         let evaluated = proxima_tensor::cpu::evaluate_named(
             &differentiated.program,
             &[],

@@ -72,15 +72,19 @@ static GLOBAL_ALLOCATOR: CountingAllocator = CountingAllocator;
 fn report_allocation_counts(image: &[f32], weights: &tile_pipeline::MnistWeights<'_>) {
     for (label, band_rows) in [("band1", 1), ("band_kh", 3), ("band_2kh", 6)] {
         ALLOCATION_COUNT.store(0, Ordering::Relaxed);
-        let logits = tile_pipeline::run_pipeline_forward(image, weights, tile_pipeline::BandRows(band_rows));
+        let logits =
+            tile_pipeline::run_pipeline_forward(image, weights, tile_pipeline::BandRows(band_rows));
         std::hint::black_box(logits);
         let count = ALLOCATION_COUNT.load(Ordering::Relaxed);
         println!("tile_pipeline allocation count, single forward, {label}: {count} allocations");
     }
 }
 
-use tile_pipeline::{BandRows, BatchNormAffine, ConvReluStage, FcAccumulateStage, MnistWeights, RowBand, block_on_ready, run_pipeline_forward};
 use proxima_primitives::pipe::Pipe;
+use tile_pipeline::{
+    BandRows, BatchNormAffine, ConvReluStage, FcAccumulateStage, MnistWeights, RowBand,
+    block_on_ready, run_pipeline_forward,
+};
 
 /// Wall-clock share per named forward-pass stage -- gate 18 (a perf claim
 /// needs a measurement artifact in the same breath): `run_pipeline_forward`
@@ -113,7 +117,13 @@ impl StageTimings {
     }
 
     fn total(&self) -> Duration {
-        self.band_bookkeeping + self.conv1 + self.conv2 + self.conv3 + self.fc1 + self.fc2 + self.softmax
+        self.band_bookkeeping
+            + self.conv1
+            + self.conv2
+            + self.conv3
+            + self.fc1
+            + self.fc2
+            + self.softmax
     }
 }
 
@@ -121,15 +131,52 @@ impl StageTimings {
 /// `apply_batch_norm` / `log_softmax` inline (all three are private to
 /// `support/tile_pipeline.rs` and under 5 lines each) rather than widening
 /// that module's visibility for a bench-only profiling pass.
-fn run_pipeline_forward_profiled(image: &[f32], weights: &MnistWeights<'_>, band: BandRows) -> ([f32; 10], StageTimings) {
-    let batch_norm1 = BatchNormAffine::new(weights.norm1_weight, weights.norm1_bias, weights.norm1_running_mean, weights.norm1_running_var, 1e-5);
+fn run_pipeline_forward_profiled(
+    image: &[f32],
+    weights: &MnistWeights<'_>,
+    band: BandRows,
+) -> ([f32; 10], StageTimings) {
+    let batch_norm1 = BatchNormAffine::new(
+        weights.norm1_weight,
+        weights.norm1_bias,
+        weights.norm1_running_mean,
+        weights.norm1_running_var,
+        1e-5,
+    );
     // ROW 170/171: per-call-site dot form selection, same as
     // `support::tile_pipeline::run_pipeline_forward` -- conv1 unblocked,
     // conv2/conv3 blocked at ROWS=4 (ROW 171's own micro-vetted winner),
     // fc1 always unblocked.
-    let stage1 = ConvReluStage::<false>::new(1, 8, 3, 3, 28, weights.conv1_weight, weights.conv1_bias, None);
-    let stage2 = ConvReluStage::<true, 4>::new(8, 16, 3, 3, 26, weights.conv2_weight, weights.conv2_bias, None);
-    let stage3 = ConvReluStage::<true, 4>::new(16, 24, 3, 3, 24, weights.conv3_weight, weights.conv3_bias, Some(batch_norm1));
+    let stage1 = ConvReluStage::<false>::new(
+        1,
+        8,
+        3,
+        3,
+        28,
+        weights.conv1_weight,
+        weights.conv1_bias,
+        None,
+    );
+    let stage2 = ConvReluStage::<true, 4>::new(
+        8,
+        16,
+        3,
+        3,
+        26,
+        weights.conv2_weight,
+        weights.conv2_bias,
+        None,
+    );
+    let stage3 = ConvReluStage::<true, 4>::new(
+        16,
+        24,
+        3,
+        3,
+        24,
+        weights.conv3_weight,
+        weights.conv3_bias,
+        Some(batch_norm1),
+    );
     let fc_stage = FcAccumulateStage::new(24, 22, 22, 32, weights.fc1_weight, weights.fc1_bias);
 
     let mut timings = StageTimings::default();
@@ -139,7 +186,12 @@ fn run_pipeline_forward_profiled(image: &[f32], weights: &MnistWeights<'_>, band
 
         let start = Instant::now();
         let data = image[row * 28..(row + take) * 28].to_vec();
-        let input_band = RowBand { channels: 1, width: 28, rows: take, data };
+        let input_band = RowBand {
+            channels: 1,
+            width: 28,
+            rows: take,
+            data,
+        };
         timings.band_bookkeeping += start.elapsed();
 
         let start = Instant::now();
@@ -169,7 +221,12 @@ fn run_pipeline_forward_profiled(image: &[f32], weights: &MnistWeights<'_>, band
     let fc2_out: Vec<f32> = (0..10)
         .map(|output_index| {
             let row = &weights.fc2_weight[output_index * 32..(output_index + 1) * 32];
-            let dot: f32 = row.iter().zip(&fc1_out).fold(0.0_f32, |accumulator, (&weight_value, &input_value)| input_value.mul_add(weight_value, accumulator));
+            let dot: f32 = row.iter().zip(&fc1_out).fold(
+                0.0_f32,
+                |accumulator, (&weight_value, &input_value)| {
+                    input_value.mul_add(weight_value, accumulator)
+                },
+            );
             dot + weights.fc2_bias[output_index]
         })
         .collect();
@@ -179,7 +236,12 @@ fn run_pipeline_forward_profiled(image: &[f32], weights: &MnistWeights<'_>, band
     let bn2_out: Vec<f32> = fc2_out
         .iter()
         .enumerate()
-        .map(|(index, &value)| (value - weights.norm2_running_mean[index]) / (weights.norm2_running_var[index] + 1e-5_f32).sqrt() * weights.norm2_weight[index] + weights.norm2_bias[index])
+        .map(|(index, &value)| {
+            (value - weights.norm2_running_mean[index])
+                / (weights.norm2_running_var[index] + 1e-5_f32).sqrt()
+                * weights.norm2_weight[index]
+                + weights.norm2_bias[index]
+        })
         .collect();
     let max = bn2_out.iter().copied().fold(f32::NEG_INFINITY, f32::max);
     let sum: f32 = bn2_out.iter().map(|&value| (value - max).exp()).sum();
@@ -197,10 +259,17 @@ fn run_pipeline_forward_profiled(image: &[f32], weights: &MnistWeights<'_>, band
 /// through the real `t10k` images, not one image repeated) -- printed once,
 /// non-timed relative to the criterion arms below (the SAME "diagnostic
 /// pass, then clean timed arms" split `report_allocation_counts` uses).
-fn report_stage_profile(images: &[Vec<f32>], weights: &MnistWeights<'_>, band: BandRows, label: &str, iterations: usize) {
+fn report_stage_profile(
+    images: &[Vec<f32>],
+    weights: &MnistWeights<'_>,
+    band: BandRows,
+    label: &str,
+    iterations: usize,
+) {
     let mut total = StageTimings::default();
     for index in 0..iterations {
-        let (logits, timings) = run_pipeline_forward_profiled(&images[index % images.len()], weights, band);
+        let (logits, timings) =
+            run_pipeline_forward_profiled(&images[index % images.len()], weights, band);
         std::hint::black_box(logits);
         total.add(&timings);
     }
@@ -220,7 +289,8 @@ band_bookkeeping={:.3}us conv1={:.3}us conv2={:.3}us conv3={:.3}us fc1={:.3}us f
     );
 }
 
-const MODEL_PATH: &str = "/Users/brianbruggeman/repos/others/burn/examples/onnx-inference/src/model/mnist.onnx";
+const MODEL_PATH: &str =
+    "/Users/brianbruggeman/repos/others/burn/examples/onnx-inference/src/model/mnist.onnx";
 const DATASET_DIR: &str = "/Users/brianbruggeman/.cache/burn-dataset/mnist";
 const BENCH_IMAGES: usize = 50;
 
@@ -242,7 +312,12 @@ fn idx_header(bytes: &[u8]) -> (usize, Vec<usize>) {
     let mut extents = Vec::with_capacity(dimension_count - 1);
     for axis in 1..dimension_count {
         let offset = 4 + axis * 4;
-        extents.push(u32::from_be_bytes([bytes[offset], bytes[offset + 1], bytes[offset + 2], bytes[offset + 3]]) as usize);
+        extents.push(u32::from_be_bytes([
+            bytes[offset],
+            bytes[offset + 1],
+            bytes[offset + 2],
+            bytes[offset + 3],
+        ]) as usize);
     }
     (item_count, extents)
 }
@@ -256,25 +331,35 @@ fn load_normalized_images(path: &Path, limit: usize) -> Vec<Vec<f32>> {
     (0..take)
         .map(|image_index| {
             let start = header_length + image_index * pixel_count;
-            bytes[start..start + pixel_count].iter().map(|&pixel| ((pixel as f32 / 255.0) - 0.1307) / 0.3081).collect()
+            bytes[start..start + pixel_count]
+                .iter()
+                .map(|&pixel| ((pixel as f32 / 255.0) - 0.1307) / 0.3081)
+                .collect()
         })
         .collect()
 }
 
 fn bench_whole_forward(criterion: &mut Criterion) {
     if !checkpoint_present() || !dataset_present() {
-        eprintln!("tile_pipeline bench: skipping, no host-local mnist.onnx checkout or MNIST idx dataset");
+        eprintln!(
+            "tile_pipeline bench: skipping, no host-local mnist.onnx checkout or MNIST idx dataset"
+        );
         return;
     }
 
     let bytes = fs::read(MODEL_PATH).expect("read the real mnist.onnx checkpoint");
-    let model = proxima_onnx::pipe::parse_complete(&bytes).expect("parse the real mnist.onnx checkpoint");
+    let model =
+        proxima_onnx::pipe::parse_complete(&bytes).expect("parse the real mnist.onnx checkpoint");
     let graph = model.graph.as_ref().expect("real mnist model has a graph");
-    let lowered = proxima_onnx::lower::lower_graph(graph).expect("lower the real mnist.onnx graph to Op");
+    let lowered =
+        proxima_onnx::lower::lower_graph(graph).expect("lower the real mnist.onnx graph to Op");
     let graph_input_name = lowered.graph_inputs.first().expect("input").clone();
     let output_node = lowered.graph_outputs.first().expect("output").1;
     let owned_initializers: Vec<(String, Vec<f32>)> = lowered.initializers.clone();
-    let initializer_slices: Vec<(&str, &[f32])> = owned_initializers.iter().map(|(name, data)| (name.as_str(), data.as_slice())).collect();
+    let initializer_slices: Vec<(&str, &[f32])> = owned_initializers
+        .iter()
+        .map(|(name, data)| (name.as_str(), data.as_slice()))
+        .collect();
     let weights = MnistWeights::from_initializers(&initializer_slices);
 
     let images = load_normalized_images(&test_images_path(), BENCH_IMAGES);
@@ -299,13 +384,19 @@ fn bench_whole_forward(criterion: &mut Criterion) {
             incumbent_index.set((current + 1) % images.len());
             let mut named = initializer_slices.clone();
             named.push((graph_input_name.as_str(), images[current].as_slice()));
-            let evaluated = proxima_tensor::cpu::evaluate_named(&lowered.program, &[], &named, &[output_node]).expect("evaluate");
+            let evaluated =
+                proxima_tensor::cpu::evaluate_named(&lowered.program, &[], &named, &[output_node])
+                    .expect("evaluate");
             let (data, _shape) = evaluated.get(output_node).expect("output present");
             std::hint::black_box(data);
         });
     });
 
-    for (label, band_rows) in [("tile_pipeline_band1", 1), ("tile_pipeline_band_kh", 3), ("tile_pipeline_band_2kh", 6)] {
+    for (label, band_rows) in [
+        ("tile_pipeline_band1", 1),
+        ("tile_pipeline_band_kh", 3),
+        ("tile_pipeline_band_2kh", 6),
+    ] {
         let pipeline_index = std::cell::Cell::new(0usize);
         group.bench_function(label, |bencher| {
             bencher.iter(|| {
@@ -328,7 +419,11 @@ fn bench_whole_forward(criterion: &mut Criterion) {
             bencher.iter(|| {
                 let current = direct_index.get();
                 direct_index.set((current + 1) % images.len());
-                let logits = tile_pipeline::run_pipeline_forward_direct(&images[current], &weights, BandRows(3));
+                let logits = tile_pipeline::run_pipeline_forward_direct(
+                    &images[current],
+                    &weights,
+                    BandRows(3),
+                );
                 std::hint::black_box(logits);
             });
         });
@@ -349,16 +444,34 @@ fn bench_whole_forward(criterion: &mut Criterion) {
 /// stage to hold its own full input in the ring rather than stream it,
 /// the closest same-code-path proxy for "materialize the whole layer" this
 /// module can express without a second kernel).
-fn bench_single_layer_neutral_arm(group: &mut criterion::BenchmarkGroup<'_, criterion::measurement::WallTime>, weights: &MnistWeights<'_>, images: &[Vec<f32>]) {
+fn bench_single_layer_neutral_arm(
+    group: &mut criterion::BenchmarkGroup<'_, criterion::measurement::WallTime>,
+    weights: &MnistWeights<'_>,
+    images: &[Vec<f32>],
+) {
     group.bench_function("layer1_banded_kh_rows", |bencher| {
         bencher.iter(|| {
             for image in images {
-                let stage = ConvReluStage::<false>::new(1, 8, 3, 3, 28, weights.conv1_weight, weights.conv1_bias, None);
+                let stage = ConvReluStage::<false>::new(
+                    1,
+                    8,
+                    3,
+                    3,
+                    28,
+                    weights.conv1_weight,
+                    weights.conv1_bias,
+                    None,
+                );
                 let mut row = 0;
                 while row < 28 {
                     let take = 3.min(28 - row);
                     let data = image[row * 28..(row + take) * 28].to_vec();
-                    let band = tile_pipeline::RowBand { channels: 1, width: 28, rows: take, data };
+                    let band = tile_pipeline::RowBand {
+                        channels: 1,
+                        width: 28,
+                        rows: take,
+                        data,
+                    };
                     let out = block_on_ready(stage.call(band)).expect("infallible");
                     std::hint::black_box(out);
                     row += take;
@@ -370,8 +483,22 @@ fn bench_single_layer_neutral_arm(group: &mut criterion::BenchmarkGroup<'_, crit
     group.bench_function("layer1_single_whole_layer_call", |bencher| {
         bencher.iter(|| {
             for image in images {
-                let stage = ConvReluStage::<false>::new(1, 8, 3, 3, 28, weights.conv1_weight, weights.conv1_bias, None);
-                let band = tile_pipeline::RowBand { channels: 1, width: 28, rows: 28, data: image.clone() };
+                let stage = ConvReluStage::<false>::new(
+                    1,
+                    8,
+                    3,
+                    3,
+                    28,
+                    weights.conv1_weight,
+                    weights.conv1_bias,
+                    None,
+                );
+                let band = tile_pipeline::RowBand {
+                    channels: 1,
+                    width: 28,
+                    rows: 28,
+                    data: image.clone(),
+                };
                 let out = block_on_ready(stage.call(band)).expect("infallible");
                 std::hint::black_box(out);
             }

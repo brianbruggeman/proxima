@@ -392,7 +392,11 @@ fn emitted_source_compiles_with_the_metal_toolchain() {
         compiled += 1;
     }
 
-    let expected = if cfg!(feature = "metal-tiled-gemm") { 8 } else { 7 };
+    let expected = if cfg!(feature = "metal-tiled-gemm") {
+        8
+    } else {
+        7
+    };
     assert_eq!(
         compiled, expected,
         "compiled {compiled} kernels, expected exactly {expected} (including a gather, an iota, \

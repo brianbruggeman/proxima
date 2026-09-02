@@ -51,9 +51,7 @@ impl From<RejectMode> for ProximaError {
     fn from(mode: RejectMode) -> Self {
         match mode {
             RejectMode::Drop => ProximaError::Forbidden("forbidden".into()),
-            RejectMode::Error => {
-                ProximaError::Config("filter: predicate rejected request".into())
-            }
+            RejectMode::Error => ProximaError::Config("filter: predicate rejected request".into()),
         }
     }
 }

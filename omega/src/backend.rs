@@ -55,7 +55,7 @@
 
 use std::sync::OnceLock;
 
-use proxima_tensor::{NodeId, Op, QuantizedBlock, TensorError, Evaluated};
+use proxima_tensor::{Evaluated, NodeId, Op, QuantizedBlock, TensorError};
 
 #[cfg(feature = "cpu")]
 use proxima_tensor::cpu::evaluate_quantized_named_with_scratch;
@@ -169,7 +169,9 @@ impl core::str::FromStr for Backend {
 /// (CPU or Metal) produced.
 #[derive(Debug, thiserror::Error)]
 pub enum BackendError {
-    #[error("unknown backend name `{name}`; known backends: cpu, metal, wgpu, vulkan, cuda, npu, ane")]
+    #[error(
+        "unknown backend name `{name}`; known backends: cpu, metal, wgpu, vulkan, cuda, npu, ane"
+    )]
     UnknownName { name: String },
 
     /// The named backend's cargo feature is off, so nothing behind it was
@@ -516,18 +518,26 @@ mod tests {
             Backend::Npu,
             Backend::Ane,
         ] {
-            let parsed: Backend = backend.name().parse().expect("every backend's own name parses back");
+            let parsed: Backend = backend
+                .name()
+                .parse()
+                .expect("every backend's own name parses back");
             assert_eq!(parsed, backend);
         }
     }
 
     #[test]
     fn an_unknown_backend_name_lists_the_known_ones() {
-        let error = "quantum".parse::<Backend>().expect_err("quantum names no backend");
+        let error = "quantum"
+            .parse::<Backend>()
+            .expect_err("quantum names no backend");
         let message = error.to_string();
         assert!(message.contains("quantum"));
         for known in ["cpu", "metal", "wgpu", "vulkan", "cuda", "npu", "ane"] {
-            assert!(message.contains(known), "error should name {known}: {message}");
+            assert!(
+                message.contains(known),
+                "error should name {known}: {message}"
+            );
         }
     }
 
@@ -551,7 +561,10 @@ mod tests {
         );
         assert!(matches!(
             error,
-            BackendError::NotCompiled { backend: "cpu", feature: "cpu" }
+            BackendError::NotCompiled {
+                backend: "cpu",
+                feature: "cpu"
+            }
         ));
     }
 
@@ -564,7 +577,10 @@ mod tests {
         );
         assert!(matches!(
             error,
-            BackendError::NotCompiled { backend: "metal", feature: "metal" }
+            BackendError::NotCompiled {
+                backend: "metal",
+                feature: "metal"
+            }
         ));
     }
 
@@ -576,7 +592,10 @@ mod tests {
         );
         assert!(matches!(
             error,
-            BackendError::NotCompiled { backend: "vulkan", .. } | BackendError::NotImplemented { backend: "vulkan" }
+            BackendError::NotCompiled {
+                backend: "vulkan",
+                ..
+            } | BackendError::NotImplemented { backend: "vulkan" }
         ));
     }
 }

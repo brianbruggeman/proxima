@@ -148,7 +148,11 @@ pub fn partition_at(
     let mut cut_inputs = Vec::with_capacity(crossing.len());
     let mut consumer = Vec::with_capacity(crossing.len() + program.len() - boundary_index - 1);
     for (position, node) in crossing.keys().enumerate() {
-        let extents: Vec<Extent> = shapes.of(*node).iter().map(|extent| Extent::Static(*extent as u32)).collect();
+        let extents: Vec<Extent> = shapes
+            .of(*node)
+            .iter()
+            .map(|extent| Extent::Static(*extent as u32))
+            .collect();
         let name = producer[node.0 as usize]
             .name()
             .map(String::from)
@@ -232,7 +236,8 @@ mod tests {
         let right_data = [10.0_f32, 20.0, 30.0, 40.0];
         let blocks: [&[f32]; 2] = [&left_data, &right_data];
 
-        let whole = cpu::evaluate(&program, &symbols, &blocks, &[]).expect("whole program evaluates");
+        let whole =
+            cpu::evaluate(&program, &symbols, &blocks, &[]).expect("whole program evaluates");
 
         let boundary = NodeId(2);
         let (producer, cut_inputs, consumer) =
@@ -240,13 +245,15 @@ mod tests {
         assert_eq!(cut_inputs.len(), 1, "one value (the sum) crosses this cut");
 
         let producer_outputs: Vec<NodeId> = cut_inputs.iter().map(|(node, _)| *node).collect();
-        let producer_result =
-            cpu::evaluate(&producer, &symbols, &blocks, &producer_outputs).expect("producer evaluates");
+        let producer_result = cpu::evaluate(&producer, &symbols, &blocks, &producer_outputs)
+            .expect("producer evaluates");
 
         let named: Vec<(&str, &[f32])> = cut_inputs
             .iter()
             .map(|(node, name)| {
-                let (data, _shape) = producer_result.get(*node).expect("producer emitted the cut value");
+                let (data, _shape) = producer_result
+                    .get(*node)
+                    .expect("producer emitted the cut value");
                 (name.as_str(), data)
             })
             .collect();
@@ -254,6 +261,10 @@ mod tests {
         let consumer_result =
             cpu::evaluate_named(&consumer, &symbols, &named, &[]).expect("consumer evaluates");
 
-        assert_eq!(consumer_result.root(), whole.root(), "partitioned run must be bit-identical to the whole program");
+        assert_eq!(
+            consumer_result.root(),
+            whole.root(),
+            "partitioned run must be bit-identical to the whole program"
+        );
     }
 }

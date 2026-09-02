@@ -8,9 +8,9 @@
 //! with the regen command named in its own failure message, not a stale
 //! green.
 
-use proxima_model_interop::capability::render_ggml_matrix_markdown;
 #[cfg(feature = "metal")]
 use proxima_model_interop::capability::quant_format::render_markdown as render_quant_format_markdown;
+use proxima_model_interop::capability::render_ggml_matrix_markdown;
 
 const REGEN_COMMAND: &str =
     "cargo run -p proxima-model-interop --example generate_compatibility_doc --features metal";

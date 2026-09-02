@@ -769,7 +769,10 @@ pub fn boot_edk2_firmware(
 
 #[cfg(test)]
 mod tests {
-    use super::{DTB_OFFSET, FLASH_BASE, FLASH_CODE_MAX_SIZE, INITRD_OFFSET, QemuVirtLayout, RAM_BASE, RAM_SIZE};
+    use super::{
+        DTB_OFFSET, FLASH_BASE, FLASH_CODE_MAX_SIZE, INITRD_OFFSET, QemuVirtLayout, RAM_BASE,
+        RAM_SIZE,
+    };
 
     /// [`FLASH_CODE_MAX_SIZE`]'s own doc names this check: the edk2 CODE
     /// flash window this module maps at [`FLASH_BASE`] must end at or
@@ -808,7 +811,12 @@ mod tests {
                 "the worked-example initramfs must not reach the dtb"
             );
         };
-        const { assert!(INITRD_OFFSET < DTB_OFFSET, "initrd offset must precede the dtb") };
+        const {
+            assert!(
+                INITRD_OFFSET < DTB_OFFSET,
+                "initrd offset must precede the dtb"
+            )
+        };
     }
 
     /// The non-aliasing argument this module's own doc makes, checked at

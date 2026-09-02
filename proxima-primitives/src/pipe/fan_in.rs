@@ -388,7 +388,10 @@ where
 // `DropSafe`) — so a `FanIn` of `DropSafe` sources is itself `DropSafe`,
 // which is what lets one nest inside an outer `FanIn` (the outer's `S` bound
 // demands it).
-impl<S: DropSafe, Strategy, const N: usize, Completion> DropSafe for FanIn<S, Strategy, N, Completion> {}
+impl<S: DropSafe, Strategy, const N: usize, Completion> DropSafe
+    for FanIn<S, Strategy, N, Completion>
+{
+}
 
 /// `FanInVec::new` rejected a source count over `FAN_IN_SOURCE_CAP`. Reported,
 /// never silently truncated — a dropped source would be a silently lost stream.
@@ -446,10 +449,11 @@ impl<S, Strategy> FanInVec<S, Strategy> {
                 attempted,
                 capacity: FAN_IN_SOURCE_CAP,
             })?;
-            live.push(AtomicBool::new(true)).map_err(|_| CapacityExceeded {
-                attempted,
-                capacity: FAN_IN_SOURCE_CAP,
-            })?;
+            live.push(AtomicBool::new(true))
+                .map_err(|_| CapacityExceeded {
+                    attempted,
+                    capacity: FAN_IN_SOURCE_CAP,
+                })?;
         }
         let count = backing.len();
         Ok(Self {
@@ -1098,7 +1102,12 @@ mod tests {
         // not get a second turn before the other two are served.
         let fan = FanInVec::new(
             [
-                Script::new([Step::Yield(0), Step::Yield(1), Step::Yield(2), Step::Yield(3)]),
+                Script::new([
+                    Step::Yield(0),
+                    Step::Yield(1),
+                    Step::Yield(2),
+                    Step::Yield(3),
+                ]),
                 Script::new([Step::Yield(100), Step::Done, Step::Done, Step::Done]),
                 Script::new([Step::Yield(200), Step::Done, Step::Done, Step::Done]),
             ],
@@ -1183,8 +1192,11 @@ mod tests {
 
     #[test]
     fn vec_arity_of_one_drains_correctly() {
-        let fan = FanInVec::new([Script::new([Step::Yield(42), Step::Done])], Select::RoundRobin)
-            .expect("1 source fits the default cap");
+        let fan = FanInVec::new(
+            [Script::new([Step::Yield(42), Step::Done])],
+            Select::RoundRobin,
+        )
+        .expect("1 source fits the default cap");
         let mut buf = [0u32; 4];
         let count = drain_vec(&fan, &mut buf);
         assert_eq!(&buf[..count], &[42]);

@@ -31,19 +31,37 @@ const MODEL_PATH_ENV: &str = "BGE_MODEL_PATH";
 /// (cat on a mat), sentence C is topically unrelated (quantum physics).
 fn sentences() -> [(&'static str, Vec<i64>); 3] {
     [
-        ("the cat sat on the mat", vec![101, 1996, 4937, 2938, 2006, 1996, 13523, 102]),
-        ("a cat is sitting on a mat", vec![101, 1037, 4937, 2003, 3564, 2006, 1037, 13523, 102]),
-        ("quantum physics explains atomic energy", vec![101, 8559, 5584, 7607, 9593, 2943, 102]),
+        (
+            "the cat sat on the mat",
+            vec![101, 1996, 4937, 2938, 2006, 1996, 13523, 102],
+        ),
+        (
+            "a cat is sitting on a mat",
+            vec![101, 1037, 4937, 2003, 3564, 2006, 1037, 13523, 102],
+        ),
+        (
+            "quantum physics explains atomic energy",
+            vec![101, 8559, 5584, 7607, 9593, 2943, 102],
+        ),
     ]
 }
 
-fn embed(lowered_program: &[proxima_tensor::Op], graph_inputs: &[String], initializers: &[(String, Vec<f32>)], output: proxima_tensor::NodeId, tokens: &[i64]) -> Vec<f32> {
+fn embed(
+    lowered_program: &[proxima_tensor::Op],
+    graph_inputs: &[String],
+    initializers: &[(String, Vec<f32>)],
+    output: proxima_tensor::NodeId,
+    tokens: &[i64],
+) -> Vec<f32> {
     let sequence_length = tokens.len();
     let input_ids: Vec<f32> = tokens.iter().map(|&id| id as f32).collect();
     let attention_mask = vec![1.0f32; sequence_length];
     let token_type_ids = vec![0.0f32; sequence_length];
 
-    let mut named: Vec<(&str, &[f32])> = initializers.iter().map(|(name, data)| (name.as_str(), data.as_slice())).collect();
+    let mut named: Vec<(&str, &[f32])> = initializers
+        .iter()
+        .map(|(name, data)| (name.as_str(), data.as_slice()))
+        .collect();
     for name in graph_inputs {
         let data: &[f32] = match name.as_str() {
             "input_ids" => &input_ids,
@@ -54,10 +72,18 @@ fn embed(lowered_program: &[proxima_tensor::Op], graph_inputs: &[String], initia
         named.push((name.as_str(), data));
     }
 
-    let evaluated = proxima_tensor::cpu::evaluate_named(lowered_program, &[], &named, &[output]).expect("evaluate BGE-small on the generic executor");
+    let evaluated = proxima_tensor::cpu::evaluate_named(lowered_program, &[], &named, &[output])
+        .expect("evaluate BGE-small on the generic executor");
     let (data, shape) = evaluated.get(output).expect("last_hidden_state present");
-    assert_eq!(shape, &[1u64, sequence_length as u64, 384u64], "unexpected last_hidden_state shape");
-    assert!(data.iter().all(|value| value.is_finite()), "non-finite value in last_hidden_state");
+    assert_eq!(
+        shape,
+        &[1u64, sequence_length as u64, 384u64],
+        "unexpected last_hidden_state shape"
+    );
+    assert!(
+        data.iter().all(|value| value.is_finite()),
+        "non-finite value in last_hidden_state"
+    );
 
     // CLS pooling (BGE's own documented usage: sentence embedding is the
     // first token's hidden state), then L2-normalize.
@@ -81,7 +107,12 @@ fn cosine(a: &[f32], b: &[f32]) -> f32 {
 /// (`layer_norm_cluster_totals`) alongside ROW 190's own single-hop
 /// counters -- both reset first, so this call's own count is isolated from
 /// any earlier pass.
-type RunPassResult = (Vec<std::time::Duration>, Vec<Vec<f32>>, (u64, u64, u64), (u64, u64, u64));
+type RunPassResult = (
+    Vec<std::time::Duration>,
+    Vec<Vec<f32>>,
+    (u64, u64, u64),
+    (u64, u64, u64),
+);
 
 /// `docs/discipline.md` (this session): `lower_graph_pinned` re-decodes AND
 /// re-clones every one of BGE-small's real weight initializers on every
@@ -97,7 +128,11 @@ type RunPassResult = (Vec<std::time::Duration>, Vec<Vec<f32>>, (u64, u64, u64), 
 /// direct measurement that superseded ROW 195's derived number).
 type LowerCache = std::collections::BTreeMap<u64, proxima_onnx::lower::Lowered>;
 
-fn run_pass(graph: &proxima_onnx::messages::GraphProto<'_>, items: &[(&str, Vec<i64>)], lower_cache: &mut LowerCache) -> RunPassResult {
+fn run_pass(
+    graph: &proxima_onnx::messages::GraphProto<'_>,
+    items: &[(&str, Vec<i64>)],
+    lower_cache: &mut LowerCache,
+) -> RunPassResult {
     proxima_tensor::cpu::epilogue_fuse_reset();
     proxima_tensor::cpu::layer_norm_cluster_reset();
     proxima_tensor::cpu::rewrite_engine_reset();
@@ -109,20 +144,38 @@ fn run_pass(graph: &proxima_onnx::messages::GraphProto<'_>, items: &[(&str, Vec<
         pins.insert("sequence_length", tokens.len() as u64);
         let cache_key = tokens.len() as u64;
         let (lowered, cache_hit) =
-            proxima_onnx::lower::lower_graph_pinned_cached(lower_cache, graph, &pins, cache_key).expect("lower BGE-small with pinned symbolic axes (cached)");
+            proxima_onnx::lower::lower_graph_pinned_cached(lower_cache, graph, &pins, cache_key)
+                .expect("lower BGE-small with pinned symbolic axes (cached)");
         let _ = cache_hit;
-        let output = lowered.graph_outputs.first().expect("last_hidden_state output").1;
+        let output = lowered
+            .graph_outputs
+            .first()
+            .expect("last_hidden_state output")
+            .1;
         let eval_start = Instant::now();
-        let embedding = embed(&lowered.program, &lowered.graph_inputs, &lowered.initializers, output, tokens);
+        let embedding = embed(
+            &lowered.program,
+            &lowered.graph_inputs,
+            &lowered.initializers,
+            output,
+            tokens,
+        );
         durations.push(eval_start.elapsed());
         embeddings.push(embedding);
     }
-    (durations, embeddings, proxima_tensor::cpu::epilogue_fuse_totals(), proxima_tensor::cpu::layer_norm_cluster_totals())
+    (
+        durations,
+        embeddings,
+        proxima_tensor::cpu::epilogue_fuse_totals(),
+        proxima_tensor::cpu::layer_norm_cluster_totals(),
+    )
 }
 
 fn main() {
     let Ok(model_path) = env::var(MODEL_PATH_ENV) else {
-        eprintln!("skipping: set {MODEL_PATH_ENV} to a local BGE-small-en-v1.5 model.onnx checkout");
+        eprintln!(
+            "skipping: set {MODEL_PATH_ENV} to a local BGE-small-en-v1.5 model.onnx checkout"
+        );
         return;
     };
     if !Path::new(&model_path).exists() {
@@ -134,7 +187,10 @@ fn main() {
     let graph = model.graph.as_ref().expect("graph");
 
     let items = sentences();
-    let runs: usize = env::var("BGE_EVAL_RUNS").ok().and_then(|value| value.parse().ok()).unwrap_or(5);
+    let runs: usize = env::var("BGE_EVAL_RUNS")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(5);
 
     let mut fused_run_means = Vec::new();
     let mut unfused_run_means = Vec::new();
@@ -148,7 +204,8 @@ fn main() {
     for run in 0..runs {
         proxima_tensor::cpu::set_epilogue_fuse_enabled(true);
         let (durations, embeddings, totals, cluster) = run_pass(graph, &items, &mut lower_cache);
-        let mean: std::time::Duration = durations.iter().sum::<std::time::Duration>() / durations.len() as u32;
+        let mean: std::time::Duration =
+            durations.iter().sum::<std::time::Duration>() / durations.len() as u32;
         println!(
             "run {run} fused: per-sentence={durations:?} mean={mean:?} fuse_hits={} fuse_elements={} fuse_nanos={} ln_cluster_hits={} ln_cluster_elements={} ln_cluster_nanos={}",
             totals.0, totals.1, totals.2, cluster.0, cluster.1, cluster.2
@@ -161,7 +218,8 @@ fn main() {
 
         proxima_tensor::cpu::set_epilogue_fuse_enabled(false);
         let (durations, embeddings, totals, cluster) = run_pass(graph, &items, &mut lower_cache);
-        let mean: std::time::Duration = durations.iter().sum::<std::time::Duration>() / durations.len() as u32;
+        let mean: std::time::Duration =
+            durations.iter().sum::<std::time::Duration>() / durations.len() as u32;
         println!(
             "run {run} unfused: per-sentence={durations:?} mean={mean:?} fuse_hits={} fuse_elements={} fuse_nanos={} ln_cluster_hits={} ln_cluster_elements={} ln_cluster_nanos={}",
             totals.0, totals.1, totals.2, cluster.0, cluster.1, cluster.2
@@ -172,7 +230,16 @@ fn main() {
     }
 
     let bit_identical = fused_embeddings_last.len() == unfused_embeddings_last.len()
-        && fused_embeddings_last.iter().zip(unfused_embeddings_last.iter()).all(|(fused, unfused)| fused.len() == unfused.len() && fused.iter().zip(unfused.iter()).all(|(&left, &right)| left.to_bits() == right.to_bits()));
+        && fused_embeddings_last
+            .iter()
+            .zip(unfused_embeddings_last.iter())
+            .all(|(fused, unfused)| {
+                fused.len() == unfused.len()
+                    && fused
+                        .iter()
+                        .zip(unfused.iter())
+                        .all(|(&left, &right)| left.to_bits() == right.to_bits())
+            });
 
     let fused_mean = fused_run_means.iter().sum::<f64>() / fused_run_means.len() as f64;
     let fused_cov = coefficient_of_variation(&fused_run_means, fused_mean);
@@ -186,14 +253,24 @@ fn main() {
         lower_cache.len(),
         runs * 2 * items.len()
     );
-    println!("fused engagement (last run): hits={} elements={} nanos={}", fused_totals.0, fused_totals.1, fused_totals.2);
-    println!("ln_cluster engagement (last run): hits={} elements={} nanos={}", cluster_totals.0, cluster_totals.1, cluster_totals.2);
+    println!(
+        "fused engagement (last run): hits={} elements={} nanos={}",
+        fused_totals.0, fused_totals.1, fused_totals.2
+    );
+    println!(
+        "ln_cluster engagement (last run): hits={} elements={} nanos={}",
+        cluster_totals.0, cluster_totals.1, cluster_totals.2
+    );
     println!(
         "rewrite engine depth fires (last FUSED run, reset-per-call snapshot): depth1(law1_2_epilogue_absorption)={} depth2(law2_layer_norm_cluster_upgrade)={}",
         engine_depth_fires.0, engine_depth_fires.1
     );
-    println!("fused mean per-sentence ms across runs: {fused_run_means:?} mean={fused_mean:.4} CoV={fused_cov:.4}");
-    println!("unfused mean per-sentence ms across runs: {unfused_run_means:?} mean={unfused_mean:.4} CoV={unfused_cov:.4}");
+    println!(
+        "fused mean per-sentence ms across runs: {fused_run_means:?} mean={fused_mean:.4} CoV={fused_cov:.4}"
+    );
+    println!(
+        "unfused mean per-sentence ms across runs: {unfused_run_means:?} mean={unfused_mean:.4} CoV={unfused_cov:.4}"
+    );
     println!("bit_identical(fused vs unfused, last run's embeddings)={bit_identical}");
 
     let similar = cosine(&fused_embeddings_last[0], &fused_embeddings_last[1]);
@@ -205,8 +282,14 @@ fn main() {
     for (name, embedding) in ["A", "B", "C"].iter().zip(fused_embeddings_last.iter()) {
         println!("embedding[{name}][:8]={:?}", &embedding[0..8]);
     }
-    assert!(similar > dissimilar_a, "similar pair should score higher than dissimilar pair A");
-    assert!(similar > dissimilar_b, "similar pair should score higher than dissimilar pair B");
+    assert!(
+        similar > dissimilar_a,
+        "similar pair should score higher than dissimilar pair A"
+    );
+    assert!(
+        similar > dissimilar_b,
+        "similar pair should score higher than dissimilar pair B"
+    );
     println!("sanity check passed: similar sentence pair scores higher than dissimilar pairs");
 }
 
@@ -214,6 +297,10 @@ fn coefficient_of_variation(samples: &[f64], mean: f64) -> f64 {
     if samples.len() < 2 || mean == 0.0 {
         return 0.0;
     }
-    let variance = samples.iter().map(|&value| (value - mean).powi(2)).sum::<f64>() / samples.len() as f64;
+    let variance = samples
+        .iter()
+        .map(|&value| (value - mean).powi(2))
+        .sum::<f64>()
+        / samples.len() as f64;
     variance.sqrt() / mean
 }

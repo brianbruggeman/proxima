@@ -24,7 +24,10 @@ struct Lcg(u64);
 
 impl Lcg {
     fn next_unit(&mut self) -> f32 {
-        self.0 = self.0.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1);
+        self.0 = self
+            .0
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1);
         let bits = (self.0 >> 33) as u32;
         (bits as f32 / u32::MAX as f32) * 2.0 - 1.0
     }
@@ -73,7 +76,11 @@ fn main() {
     let output = evaluated.root();
     let finite = output.iter().filter(|value| value.is_finite()).count();
 
-    println!("spec={path} sequence={sequence} nodes={} output_elements={}", program.len(), output.len());
+    println!(
+        "spec={path} sequence={sequence} nodes={} output_elements={}",
+        program.len(),
+        output.len()
+    );
     assert_eq!(finite, output.len(), "every output element must be finite");
 
     let mut rows = instrument::operand_access_totals();

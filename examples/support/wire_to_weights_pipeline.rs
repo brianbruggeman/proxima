@@ -89,10 +89,16 @@ pub fn load_model(path: &Path) -> Result<Option<ModelState>, ProximaError> {
     if !path.exists() {
         return Ok(None);
     }
-    let bytes = fs::read(path).map_err(|error| ProximaError::Config(format!("read {}: {error}", path.display())))?;
-    let model = proxima_onnx::pipe::parse_complete(&bytes).map_err(|error| ProximaError::Config(format!("parse mnist.onnx: {error}")))?;
-    let graph = model.graph.as_ref().ok_or_else(|| ProximaError::Config("mnist.onnx has no graph".into()))?;
-    let lowered = proxima_onnx::lower::lower_graph(graph).map_err(|error| ProximaError::Config(format!("lower mnist.onnx: {error}")))?;
+    let bytes = fs::read(path)
+        .map_err(|error| ProximaError::Config(format!("read {}: {error}", path.display())))?;
+    let model = proxima_onnx::pipe::parse_complete(&bytes)
+        .map_err(|error| ProximaError::Config(format!("parse mnist.onnx: {error}")))?;
+    let graph = model
+        .graph
+        .as_ref()
+        .ok_or_else(|| ProximaError::Config("mnist.onnx has no graph".into()))?;
+    let lowered = proxima_onnx::lower::lower_graph(graph)
+        .map_err(|error| ProximaError::Config(format!("lower mnist.onnx: {error}")))?;
 
     let graph_input_name = lowered
         .graph_inputs
@@ -118,7 +124,10 @@ pub fn load_model(path: &Path) -> Result<Option<ModelState>, ProximaError> {
 /// once.
 #[must_use]
 pub fn build_handler(model: Arc<ModelState>) -> PipeHandle {
-    into_handle(AndThen::new(ParseImage, AndThen::new(Classify { model }, RenderResponse)))
+    into_handle(AndThen::new(
+        ParseImage,
+        AndThen::new(Classify { model }, RenderResponse),
+    ))
 }
 
 /// `Request<Bytes> -> [f32; INPUT_PIXELS]`. Admits only `POST /classify`
@@ -135,10 +144,17 @@ impl SendPipe for ParseImage {
     type Out = [f32; INPUT_PIXELS];
     type Err = ProximaError;
 
-    fn call(&self, request: Request<Bytes>) -> impl Future<Output = Result<[f32; INPUT_PIXELS], ProximaError>> + Send {
+    fn call(
+        &self,
+        request: Request<Bytes>,
+    ) -> impl Future<Output = Result<[f32; INPUT_PIXELS], ProximaError>> + Send {
         async move {
             if request.method != "POST" || request.path.as_ref() != b"/classify" {
-                return Err(ProximaError::NotFound(format!("no route for {:?} {}", request.method, String::from_utf8_lossy(&request.path))));
+                return Err(ProximaError::NotFound(format!(
+                    "no route for {:?} {}",
+                    request.method,
+                    String::from_utf8_lossy(&request.path)
+                )));
             }
             let (_, body) = request.body_bytes().await?;
             let expected = INPUT_PIXELS * 4;
@@ -171,18 +187,33 @@ impl SendPipe for Classify {
     type Out = (Vec<f32>, usize);
     type Err = ProximaError;
 
-    fn call(&self, pixels: [f32; INPUT_PIXELS]) -> impl Future<Output = Result<(Vec<f32>, usize), ProximaError>> + Send {
+    fn call(
+        &self,
+        pixels: [f32; INPUT_PIXELS],
+    ) -> impl Future<Output = Result<(Vec<f32>, usize), ProximaError>> + Send {
         async move {
-            let mut named: Vec<(&str, &[f32])> =
-                self.model.initializers.iter().map(|(name, data)| (name.as_str(), data.as_slice())).collect();
+            let mut named: Vec<(&str, &[f32])> = self
+                .model
+                .initializers
+                .iter()
+                .map(|(name, data)| (name.as_str(), data.as_slice()))
+                .collect();
             named.push((self.model.graph_input_name.as_str(), pixels.as_slice()));
 
-            let evaluated = proxima_tensor::cpu::evaluate_named(&self.model.program, &[], &named, &[self.model.output_node])
-                .map_err(|error| ProximaError::Config(format!("mnist forward failed: {error}")))?;
-            let (logits, shape) =
-                evaluated.get(self.model.output_node).ok_or_else(|| ProximaError::Config("mnist forward produced no output".into()))?;
+            let evaluated = proxima_tensor::cpu::evaluate_named(
+                &self.model.program,
+                &[],
+                &named,
+                &[self.model.output_node],
+            )
+            .map_err(|error| ProximaError::Config(format!("mnist forward failed: {error}")))?;
+            let (logits, shape) = evaluated
+                .get(self.model.output_node)
+                .ok_or_else(|| ProximaError::Config("mnist forward produced no output".into()))?;
             if shape != [1_u64, OUTPUT_CLASSES as u64] {
-                return Err(ProximaError::Config(format!("expected a 1x{OUTPUT_CLASSES} logit row, got shape {shape:?}")));
+                return Err(ProximaError::Config(format!(
+                    "expected a 1x{OUTPUT_CLASSES} logit row, got shape {shape:?}"
+                )));
             }
             let predicted = argmax(logits);
             Ok((logits.to_vec(), predicted))
@@ -202,7 +233,10 @@ impl SendPipe for RenderResponse {
     type Out = Response<Bytes>;
     type Err = ProximaError;
 
-    fn call(&self, (logits, predicted): (Vec<f32>, usize)) -> impl Future<Output = Result<Response<Bytes>, ProximaError>> + Send {
+    fn call(
+        &self,
+        (logits, predicted): (Vec<f32>, usize),
+    ) -> impl Future<Output = Result<Response<Bytes>, ProximaError>> + Send {
         async move {
             use std::fmt::Write as _;
 
@@ -222,5 +256,10 @@ impl SendPipe for RenderResponse {
 }
 
 fn argmax(values: &[f32]) -> usize {
-    values.iter().enumerate().max_by(|left, right| left.1.total_cmp(right.1)).map(|(index, _)| index).unwrap_or(0)
+    values
+        .iter()
+        .enumerate()
+        .max_by(|left, right| left.1.total_cmp(right.1))
+        .map(|(index, _)| index)
+        .unwrap_or(0)
 }

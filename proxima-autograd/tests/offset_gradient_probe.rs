@@ -37,7 +37,14 @@ use proxima_tensor::map::{self, AxisTerm, IndexMap};
 use proxima_tensor::op::{self, Extent, NodeId, Op, ReduceInit, ScalarOp};
 
 fn leaf(program: &mut Vec<Op>, name: &str, shape: alloc::vec::Vec<Extent>) -> NodeId {
-    op::append(program, Op::Input { dtype: DType::Float32, shape, name: Some(name.into()) })
+    op::append(
+        program,
+        Op::Input {
+            dtype: DType::Float32,
+            shape,
+            name: Some(name.into()),
+        },
+    )
 }
 
 /// Finding 1: without an anchor, an offset-only axis has nothing to pin
@@ -46,11 +53,26 @@ fn leaf(program: &mut Vec<Op>, name: &str, shape: alloc::vec::Vec<Extent>) -> No
 #[proxima::test]
 async fn an_offset_only_axis_with_no_anchor_is_rejected_by_shape_inference() {
     let mut program = Vec::new();
-    let w = leaf(&mut program, "w", alloc::vec![Extent::Static(2), Extent::Static(6)]);
-    let slice_map = IndexMap::Affine(map::affine(2, &[(&[AxisTerm::projection(0)], 0), (&[AxisTerm::projection(1)], 2)]));
+    let w = leaf(
+        &mut program,
+        "w",
+        alloc::vec![Extent::Static(2), Extent::Static(6)],
+    );
+    let slice_map = IndexMap::Affine(map::affine(
+        2,
+        &[
+            (&[AxisTerm::projection(0)], 0),
+            (&[AxisTerm::projection(1)], 2),
+        ],
+    ));
     let sliced = op::append(
         &mut program,
-        Op::Elementwise { dtype: DType::Float32, body: ScalarOp::Identity, operands: alloc::vec![(w, slice_map)], name: None },
+        Op::Elementwise {
+            dtype: DType::Float32,
+            body: ScalarOp::Identity,
+            operands: alloc::vec![(w, slice_map)],
+            name: None,
+        },
     );
     let loss = op::append(
         &mut program,
@@ -71,16 +93,35 @@ async fn an_offset_only_axis_with_no_anchor_is_rejected_by_shape_inference() {
             std::eprintln!("offset-only axis correctly rejected: {inner}");
         }
         Err(other) => panic!("expected a ShapeInference error, got a different error: {other}"),
-        Ok(_) => panic!("an offset-only axis with no anchor must fail shape inference, not silently pick a size"),
+        Ok(_) => panic!(
+            "an offset-only axis with no anchor must fail shape inference, not silently pick a size"
+        ),
     }
 }
 
 fn build_anchored_slice_program() -> (Vec<Op>, NodeId) {
     let mut program = Vec::new();
-    let w = leaf(&mut program, "w", alloc::vec![Extent::Static(2), Extent::Static(6)]);
-    let anchor = op::append(&mut program, Op::Constant { dtype: DType::Float32, shape: alloc::vec![Extent::Static(2)], value: 0.0 });
+    let w = leaf(
+        &mut program,
+        "w",
+        alloc::vec![Extent::Static(2), Extent::Static(6)],
+    );
+    let anchor = op::append(
+        &mut program,
+        Op::Constant {
+            dtype: DType::Float32,
+            shape: alloc::vec![Extent::Static(2)],
+            value: 0.0,
+        },
+    );
 
-    let slice_map = IndexMap::Affine(map::affine(2, &[(&[AxisTerm::projection(0)], 0), (&[AxisTerm::projection(1)], 2)]));
+    let slice_map = IndexMap::Affine(map::affine(
+        2,
+        &[
+            (&[AxisTerm::projection(0)], 0),
+            (&[AxisTerm::projection(1)], 2),
+        ],
+    ));
     let anchor_map = IndexMap::Affine(map::projection(2, &[1]));
     let sliced = op::append(
         &mut program,
@@ -117,7 +158,10 @@ fn build_anchored_slice_program() -> (Vec<Op>, NodeId) {
 async fn an_anchored_offset_read_differentiates_without_a_shape_error() {
     let (program, loss) = build_anchored_slice_program();
     let differentiated = differentiate(&program, loss).expect("anchored slice differentiates");
-    assert!(differentiated.gradient_of_named("w").is_some(), "w must have a gradient node recorded");
+    assert!(
+        differentiated.gradient_of_named("w").is_some(),
+        "w must have a gradient node recorded"
+    );
 }
 
 /// Finding 3, captured precisely: evaluating that SAME adjoint program's
@@ -135,7 +179,9 @@ async fn an_anchored_offset_read_differentiates_without_a_shape_error() {
 async fn anchored_offset_backward_write_panics_in_the_cpu_evaluator_today() {
     let (program, loss) = build_anchored_slice_program();
     let differentiated = differentiate(&program, loss).expect("anchored slice differentiates");
-    let grad_w = differentiated.gradient_of_named("w").expect("w feeds the loss");
+    let grad_w = differentiated
+        .gradient_of_named("w")
+        .expect("w feeds the loss");
     let w_values: alloc::vec::Vec<f32> = (0..12).map(|index| index as f32).collect();
 
     let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -154,6 +200,8 @@ async fn anchored_offset_backward_write_panics_in_the_cpu_evaluator_today() {
             "evaluation succeeded -- proxima-tensor's evaluator gap appears to be FIXED; replace this test \
              with the positive full-size/zero-off-the-slice assertion this file's own doc describes"
         ),
-        Ok(Err(error)) => panic!("expected a panic (the known cpu.rs:4461 bug), got a typed error instead: {error}"),
+        Ok(Err(error)) => panic!(
+            "expected a panic (the known cpu.rs:4461 bug), got a typed error instead: {error}"
+        ),
     }
 }

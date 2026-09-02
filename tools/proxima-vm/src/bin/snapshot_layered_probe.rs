@@ -20,22 +20,42 @@ use proxima_vm::snapshot::{LayeredBase, WarmVm, dirty_probe_snapshot, host_page_
 const BYTE_VALUE: u8 = 0x2A;
 const SEED: u64 = 0xC0FF_EE00_C0FF_EE00;
 
-fn run_sweep(target_size: usize, dirty_page_count: u16, iterations: usize) -> Result<(), Box<dyn Error>> {
+fn run_sweep(
+    target_size: usize,
+    dirty_page_count: u16,
+    iterations: usize,
+) -> Result<(), Box<dyn Error>> {
     let granule = host_page_size();
     let data_offset = granule;
-    let snapshot = dirty_probe_snapshot(target_size, data_offset, granule as u16, dirty_page_count, BYTE_VALUE, SEED);
+    let snapshot = dirty_probe_snapshot(
+        target_size,
+        data_offset,
+        granule as u16,
+        dirty_page_count,
+        BYTE_VALUE,
+        SEED,
+    );
 
     let base = LayeredBase::new(target_size)?;
     let mut warm_vm = WarmVm::new_layered(base, target_size)?;
     let adopt_report = warm_vm.adopt_base(snapshot.guest_memory())?;
     println!("adopt_map_nanos:{}", adopt_report.map_nanos);
-    println!("adopt_register_reset_nanos:{}", adopt_report.register_reset_nanos);
+    println!(
+        "adopt_register_reset_nanos:{}",
+        adopt_report.register_reset_nanos
+    );
 
     let expected_page_count = u64::from(dirty_page_count);
     for index in 0..iterations {
         let run_report = warm_vm.run_dirty_write(expected_page_count)?;
-        println!("iteration_run_wall_nanos:{index}:{}", run_report.run_wall_nanos);
-        println!("iteration_run_fault_count:{index}:{}", run_report.fault_count);
+        println!(
+            "iteration_run_wall_nanos:{index}:{}",
+            run_report.run_wall_nanos
+        );
+        println!(
+            "iteration_run_fault_count:{index}:{}",
+            run_report.fault_count
+        );
         println!(
             "iteration_run_newly_dirty_page_count:{index}:{}",
             run_report.newly_dirty_page_count
@@ -60,8 +80,14 @@ fn run_sweep(target_size: usize, dirty_page_count: u16, iterations: usize) -> Re
         );
 
         let restore_report = warm_vm.restore_layered()?;
-        println!("iteration_restore_wall_nanos:{index}:{}", restore_report.restore_wall_nanos);
-        println!("iteration_remap_nanos:{index}:{}", restore_report.remap_nanos);
+        println!(
+            "iteration_restore_wall_nanos:{index}:{}",
+            restore_report.restore_wall_nanos
+        );
+        println!(
+            "iteration_remap_nanos:{index}:{}",
+            restore_report.remap_nanos
+        );
         println!(
             "iteration_register_reset_nanos:{index}:{}",
             restore_report.register_reset_nanos
@@ -105,7 +131,8 @@ fn run_sharing() -> Result<(), Box<dyn Error>> {
     let data_offset = granule;
 
     let base = LayeredBase::new(SIZE)?;
-    let base_snapshot = dirty_probe_snapshot(SIZE, data_offset, granule as u16, 4, BYTE_VALUE, SEED);
+    let base_snapshot =
+        dirty_probe_snapshot(SIZE, data_offset, granule as u16, 4, BYTE_VALUE, SEED);
 
     let mut vm_a = WarmVm::new_layered(base, SIZE)?;
     vm_a.adopt_base(base_snapshot.guest_memory())?;
@@ -122,8 +149,10 @@ fn run_sharing() -> Result<(), Box<dyn Error>> {
     let shared_view = vm_a.layered_base_view()?;
     let sample_offset = data_offset;
     let vm_b_thread = std::thread::spawn(move || -> Result<(u8, u64), String> {
-        let mut vm_b = WarmVm::new_layered_over(shared_view, SIZE, SIZE as u64).map_err(|error| error.to_string())?;
-        vm_b.adopt_shared_base().map_err(|error| error.to_string())?;
+        let mut vm_b = WarmVm::new_layered_over(shared_view, SIZE, SIZE as u64)
+            .map_err(|error| error.to_string())?;
+        vm_b.adopt_shared_base()
+            .map_err(|error| error.to_string())?;
         let before = vm_b.layered_delta_bytes(sample_offset, 1)[0];
         let restore = vm_b.restore_layered().map_err(|error| error.to_string())?;
         Ok((before, restore.remapped_page_count))
@@ -161,9 +190,18 @@ fn main() -> Result<(), Box<dyn Error>> {
     match mode {
         "sharing" => run_sharing(),
         _ => {
-            let target_size: usize = arguments.get(2).and_then(|value| value.parse().ok()).unwrap_or(16 * 1024 * 1024);
-            let dirty_page_count: u16 = arguments.get(3).and_then(|value| value.parse().ok()).unwrap_or(16);
-            let iterations: usize = arguments.get(4).and_then(|value| value.parse().ok()).unwrap_or(50);
+            let target_size: usize = arguments
+                .get(2)
+                .and_then(|value| value.parse().ok())
+                .unwrap_or(16 * 1024 * 1024);
+            let dirty_page_count: u16 = arguments
+                .get(3)
+                .and_then(|value| value.parse().ok())
+                .unwrap_or(16);
+            let iterations: usize = arguments
+                .get(4)
+                .and_then(|value| value.parse().ok())
+                .unwrap_or(50);
             run_sweep(target_size, dirty_page_count, iterations)
         }
     }

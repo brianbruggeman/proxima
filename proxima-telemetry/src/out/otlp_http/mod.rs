@@ -126,7 +126,7 @@ mod tests {
 
     use bytes::Bytes;
     use prost::Message;
-    
+
     use crate::id::TraceFlags;
     use crate::id::{SpanId, TraceId};
     use crate::level::Level;

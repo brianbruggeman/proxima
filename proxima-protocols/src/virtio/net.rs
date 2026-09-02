@@ -232,10 +232,17 @@ impl NetConfigSpace {
     /// it are this device's own config-space block.
     pub fn apply(&mut self, access: MmioAccess) -> Result<MmioEffect, MmioError> {
         match access.offset {
-            REG_CONFIG_MAC_LOW if !access.is_write => Ok(MmioEffect::ReadValue(u32::from_le_bytes([
-                self.mac[0], self.mac[1], self.mac[2], self.mac[3],
-            ]))),
-            REG_CONFIG_MAC_LOW => Err(MmioError::ReadOnlyRegister { offset: access.offset }),
+            REG_CONFIG_MAC_LOW if !access.is_write => {
+                Ok(MmioEffect::ReadValue(u32::from_le_bytes([
+                    self.mac[0],
+                    self.mac[1],
+                    self.mac[2],
+                    self.mac[3],
+                ])))
+            }
+            REG_CONFIG_MAC_LOW => Err(MmioError::ReadOnlyRegister {
+                offset: access.offset,
+            }),
 
             REG_CONFIG_MAC_HIGH_STATUS if !access.is_write => {
                 let mut word = [0u8; 4];
@@ -243,10 +250,14 @@ impl NetConfigSpace {
                 word[2..4].copy_from_slice(&NET_STATUS_LINK_UP.to_le_bytes());
                 Ok(MmioEffect::ReadValue(u32::from_le_bytes(word)))
             }
-            REG_CONFIG_MAC_HIGH_STATUS => Err(MmioError::ReadOnlyRegister { offset: access.offset }),
+            REG_CONFIG_MAC_HIGH_STATUS => Err(MmioError::ReadOnlyRegister {
+                offset: access.offset,
+            }),
 
             REG_CONFIG_MAX_VQ_PAIRS if !access.is_write => Ok(MmioEffect::ReadValue(1)),
-            REG_CONFIG_MAX_VQ_PAIRS => Err(MmioError::ReadOnlyRegister { offset: access.offset }),
+            REG_CONFIG_MAX_VQ_PAIRS => Err(MmioError::ReadOnlyRegister {
+                offset: access.offset,
+            }),
 
             _ => self.transport.apply(access),
         }
@@ -258,7 +269,9 @@ mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
     use crate::virtio::descriptor::{DESC_LEN, DescriptorChain};
-    use crate::virtio::status::{STATUS_ACKNOWLEDGE, STATUS_DRIVER, STATUS_DRIVER_OK, STATUS_FEATURES_OK};
+    use crate::virtio::status::{
+        STATUS_ACKNOWLEDGE, STATUS_DRIVER, STATUS_DRIVER_OK, STATUS_FEATURES_OK,
+    };
 
     /// Worked example (principle 9 / /algorithm-development): a hand-derived
     /// two-descriptor TX chain the driver publishes on transmitq1 — one
@@ -305,7 +318,7 @@ mod tests {
         // flags = 0, gso_type = NONE, hdr_len = 0, gso_size = 0,
         // csum_start = 0, csum_offset = 0, num_buffers = 1.
         let hdr_bytes: [u8; NET_HDR_LEN] = [
-            0x00, // flags
+            0x00,     // flags
             GSO_NONE, // gso_type
             0x00, 0x00, // hdr_len
             0x00, 0x00, // gso_size
@@ -370,7 +383,10 @@ mod tests {
         };
 
         device
-            .apply(write(super::super::mmio::REG_STATUS, u32::from(STATUS_ACKNOWLEDGE)))
+            .apply(write(
+                super::super::mmio::REG_STATUS,
+                u32::from(STATUS_ACKNOWLEDGE),
+            ))
             .expect("ack");
         device
             .apply(write(
@@ -404,10 +420,9 @@ mod tests {
             .unwrap_err();
         assert!(matches!(
             error,
-            MmioError::Negotiation(super::super::status::NegotiationError::AckedUnofferedFeatures {
-                unoffered: 1,
-                ..
-            })
+            MmioError::Negotiation(
+                super::super::status::NegotiationError::AckedUnofferedFeatures { unoffered: 1, .. }
+            )
         ));
     }
 
@@ -455,7 +470,9 @@ mod tests {
         };
         assert_eq!(
             device.apply(write).unwrap_err(),
-            MmioError::ReadOnlyRegister { offset: REG_CONFIG_MAC_LOW }
+            MmioError::ReadOnlyRegister {
+                offset: REG_CONFIG_MAC_LOW
+            }
         );
     }
 
@@ -472,10 +489,15 @@ mod tests {
             value: 0,
         };
         assert_eq!(
-            device.apply(read(super::super::mmio::REG_DEVICE_ID)).unwrap(),
+            device
+                .apply(read(super::super::mmio::REG_DEVICE_ID))
+                .unwrap(),
             MmioEffect::ReadValue(DEVICE_ID_NET)
         );
-        assert_eq!(device.transport().status(), super::super::status::DeviceStatus::Reset);
+        assert_eq!(
+            device.transport().status(),
+            super::super::status::DeviceStatus::Reset
+        );
 
         let write = |offset: u64, value: u32| MmioAccess {
             offset,
@@ -484,7 +506,10 @@ mod tests {
         };
         assert_eq!(
             device
-                .apply(write(super::super::mmio::REG_STATUS, u32::from(STATUS_ACKNOWLEDGE)))
+                .apply(write(
+                    super::super::mmio::REG_STATUS,
+                    u32::from(STATUS_ACKNOWLEDGE)
+                ))
                 .unwrap(),
             MmioEffect::StatusTransition(super::super::status::DeviceStatus::Acknowledged)
         );

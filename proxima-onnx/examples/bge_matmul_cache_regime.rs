@@ -23,7 +23,9 @@
 use proxima_onnx::lower::{Lowered, lower_graph};
 use proxima_onnx::messages::{GraphProto, NodeProto, TensorProto, ValueInfoProto};
 use proxima_tensor::NodeId;
-use proxima_tensor::cpu::{StaticArena, build_static_arena_with_constants, evaluate_named, evaluate_named_with_arena};
+use proxima_tensor::cpu::{
+    StaticArena, build_static_arena_with_constants, evaluate_named, evaluate_named_with_arena,
+};
 
 const ROTATION: usize = 64;
 const CALLS_PER_REPEAT: usize = 300;
@@ -39,7 +41,13 @@ fn deterministic_data(len: usize, salt: u32) -> Vec<f32> {
 }
 
 fn f32_initializer(name: &'static str, dims: Vec<i64>, data: Vec<f32>) -> TensorProto<'static> {
-    TensorProto { dims, data_type: 1, float_data: data, name, ..TensorProto::default() }
+    TensorProto {
+        dims,
+        data_type: 1,
+        float_data: data,
+        name,
+        ..TensorProto::default()
+    }
 }
 
 fn build_instance(m: usize, k: usize, n: usize, salt: u32) -> Lowered {
@@ -47,12 +55,21 @@ fn build_instance(m: usize, k: usize, n: usize, salt: u32) -> Lowered {
     let rhs_data = deterministic_data(k * n, salt.wrapping_add(0x1111_1111));
     let lhs = f32_initializer("lhs", vec![1, m as i64, k as i64], lhs_data);
     let rhs = f32_initializer("rhs", vec![k as i64, n as i64], rhs_data);
-    let node = NodeProto { input: vec!["lhs", "rhs"], output: vec!["y"], op_type: "MatMul", name: "matmul", ..NodeProto::default() };
+    let node = NodeProto {
+        input: vec!["lhs", "rhs"],
+        output: vec!["y"],
+        op_type: "MatMul",
+        name: "matmul",
+        ..NodeProto::default()
+    };
     let graph = GraphProto {
         node: vec![node],
         name: "cache_regime_graph",
         initializer: vec![lhs, rhs],
-        output: vec![ValueInfoProto { name: "y", ..ValueInfoProto::default() }],
+        output: vec![ValueInfoProto {
+            name: "y",
+            ..ValueInfoProto::default()
+        }],
         ..GraphProto::default()
     };
     lower_graph(&graph).expect("lower synthetic MatMul")
@@ -75,9 +92,17 @@ fn time_calls<F: FnMut(usize)>(mut call: F) -> Timed {
         ns_per_call_per_repeat.push(elapsed.as_nanos() as f64 / CALLS_PER_REPEAT as f64);
     }
     let mean = ns_per_call_per_repeat.iter().sum::<f64>() / ns_per_call_per_repeat.len() as f64;
-    let variance = ns_per_call_per_repeat.iter().map(|value| (value - mean).powi(2)).sum::<f64>() / ns_per_call_per_repeat.len() as f64;
+    let variance = ns_per_call_per_repeat
+        .iter()
+        .map(|value| (value - mean).powi(2))
+        .sum::<f64>()
+        / ns_per_call_per_repeat.len() as f64;
     let cov = variance.sqrt() / mean * 100.0;
-    Timed { mean_ns: mean, cov_pct: cov, samples: ns_per_call_per_repeat }
+    Timed {
+        mean_ns: mean,
+        cov_pct: cov,
+        samples: ns_per_call_per_repeat,
+    }
 }
 
 fn report(label: &str, m: usize, k: usize, n: usize, timed: &Timed) {
@@ -91,20 +116,30 @@ fn report(label: &str, m: usize, k: usize, n: usize, timed: &Timed) {
         timed.cov_pct,
         gmac_s,
         gb_s,
-        timed.samples.iter().map(|value| format!("{value:.0}")).collect::<Vec<_>>()
+        timed
+            .samples
+            .iter()
+            .map(|value| format!("{value:.0}"))
+            .collect::<Vec<_>>()
     );
 }
 
 fn warm_arm(m: usize, k: usize, n: usize) -> Timed {
     let lowered = build_instance(m, k, n, 0x1000_0000);
-    let named: Vec<(&str, &[f32])> = lowered.initializers.iter().map(|(name, data)| (name.as_str(), data.as_slice())).collect();
+    let named: Vec<(&str, &[f32])> = lowered
+        .initializers
+        .iter()
+        .map(|(name, data)| (name.as_str(), data.as_slice()))
+        .collect();
     let output = lowered.graph_outputs[0].1;
     for _ in 0..50 {
-        let evaluated = evaluate_named(&lowered.program, &[], &named, &[output]).expect("warm-up eval");
+        let evaluated =
+            evaluate_named(&lowered.program, &[], &named, &[output]).expect("warm-up eval");
         std::hint::black_box(&evaluated);
     }
     time_calls(|_index| {
-        let evaluated = evaluate_named(&lowered.program, &[], &named, &[output]).expect("timed eval");
+        let evaluated =
+            evaluate_named(&lowered.program, &[], &named, &[output]).expect("timed eval");
         std::hint::black_box(&evaluated);
     })
 }
@@ -112,11 +147,24 @@ fn warm_arm(m: usize, k: usize, n: usize) -> Timed {
 type NamedInputs<'a> = Vec<(&'a str, &'a [f32])>;
 
 fn cold_arm(m: usize, k: usize, n: usize) -> Timed {
-    let instances: Vec<Lowered> = (0..ROTATION).map(|index| build_instance(m, k, n, 0x2000_0000u32.wrapping_add((index as u32).wrapping_mul(0x9e37_79b9)))).collect();
+    let instances: Vec<Lowered> = (0..ROTATION)
+        .map(|index| {
+            build_instance(
+                m,
+                k,
+                n,
+                0x2000_0000u32.wrapping_add((index as u32).wrapping_mul(0x9e37_79b9)),
+            )
+        })
+        .collect();
     let named_and_output: Vec<(NamedInputs<'_>, NodeId)> = instances
         .iter()
         .map(|lowered| {
-            let named: Vec<(&str, &[f32])> = lowered.initializers.iter().map(|(name, data)| (name.as_str(), data.as_slice())).collect();
+            let named: Vec<(&str, &[f32])> = lowered
+                .initializers
+                .iter()
+                .map(|(name, data)| (name.as_str(), data.as_slice()))
+                .collect();
             (named, lowered.graph_outputs[0].1)
         })
         .collect();
@@ -127,14 +175,16 @@ fn cold_arm(m: usize, k: usize, n: usize) -> Timed {
     // loop starts.
     for index in 0..ROTATION {
         let (named, output) = &named_and_output[index];
-        let evaluated = evaluate_named(&instances[index].program, &[], named, &[*output]).expect("warm-up eval");
+        let evaluated = evaluate_named(&instances[index].program, &[], named, &[*output])
+            .expect("warm-up eval");
         std::hint::black_box(&evaluated);
     }
 
     time_calls(|index| {
         let rotation_index = index % ROTATION;
         let (named, output) = &named_and_output[rotation_index];
-        let evaluated = evaluate_named(&instances[rotation_index].program, &[], named, &[*output]).expect("timed eval");
+        let evaluated = evaluate_named(&instances[rotation_index].program, &[], named, &[*output])
+            .expect("timed eval");
         std::hint::black_box(&evaluated);
     })
 }
@@ -151,32 +201,61 @@ fn cold_arm(m: usize, k: usize, n: usize) -> Timed {
 /// one page-fault-costed touch per weight row.
 fn packed_cold_arm(m: usize, k: usize, n: usize) -> Timed {
     let instances: Vec<Lowered> = (0..ROTATION)
-        .map(|index| build_instance(m, k, n, 0x3000_0000u32.wrapping_add((index as u32).wrapping_mul(0x9e37_79b9))))
+        .map(|index| {
+            build_instance(
+                m,
+                k,
+                n,
+                0x3000_0000u32.wrapping_add((index as u32).wrapping_mul(0x9e37_79b9)),
+            )
+        })
         .collect();
     let mut arenas: Vec<StaticArena> = instances
         .iter()
         .map(|lowered| {
-            let rhs_data = lowered.initializers.iter().find(|(name, _)| name == "rhs").map(|(_, data)| data.as_slice()).expect("rhs initializer present");
+            let rhs_data = lowered
+                .initializers
+                .iter()
+                .find(|(name, _)| name == "rhs")
+                .map(|(_, data)| data.as_slice())
+                .expect("rhs initializer present");
             let output = lowered.graph_outputs[0].1;
-            build_static_arena_with_constants(&lowered.program, &[], &[output], &[("rhs", rhs_data)]).expect("build packed arena")
+            build_static_arena_with_constants(
+                &lowered.program,
+                &[],
+                &[output],
+                &[("rhs", rhs_data)],
+            )
+            .expect("build packed arena")
         })
         .collect();
     let named_per_instance: Vec<NamedInputs<'_>> = instances
         .iter()
-        .map(|lowered| lowered.initializers.iter().map(|(name, data)| (name.as_str(), data.as_slice())).collect())
+        .map(|lowered| {
+            lowered
+                .initializers
+                .iter()
+                .map(|(name, data)| (name.as_str(), data.as_slice()))
+                .collect()
+        })
         .collect();
 
     // untimed single warm-up pass over the WHOLE rotation set, same shape
     // `cold_arm`'s own warm-up has -- forces any first-call-only setup
     // without leaving any single buffer resident.
     for index in 0..ROTATION {
-        let evaluated = evaluate_named_with_arena(&mut arenas[index], &named_per_instance[index]).expect("warm-up eval");
+        let evaluated = evaluate_named_with_arena(&mut arenas[index], &named_per_instance[index])
+            .expect("warm-up eval");
         std::hint::black_box(&evaluated);
     }
 
     time_calls(|index| {
         let rotation_index = index % ROTATION;
-        let evaluated = evaluate_named_with_arena(&mut arenas[rotation_index], &named_per_instance[rotation_index]).expect("timed eval");
+        let evaluated = evaluate_named_with_arena(
+            &mut arenas[rotation_index],
+            &named_per_instance[rotation_index],
+        )
+        .expect("timed eval");
         std::hint::black_box(&evaluated);
     })
 }
@@ -190,28 +269,47 @@ fn packed_cold_arm(m: usize, k: usize, n: usize) -> Timed {
 /// fixes the weight's read stride) into one number.
 fn arena_cold_arm(m: usize, k: usize, n: usize) -> Timed {
     let instances: Vec<Lowered> = (0..ROTATION)
-        .map(|index| build_instance(m, k, n, 0x4000_0000u32.wrapping_add((index as u32).wrapping_mul(0x9e37_79b9))))
+        .map(|index| {
+            build_instance(
+                m,
+                k,
+                n,
+                0x4000_0000u32.wrapping_add((index as u32).wrapping_mul(0x9e37_79b9)),
+            )
+        })
         .collect();
     let mut arenas: Vec<StaticArena> = instances
         .iter()
         .map(|lowered| {
             let output = lowered.graph_outputs[0].1;
-            proxima_tensor::cpu::build_static_arena(&lowered.program, &[], &[output]).expect("build unpacked arena")
+            proxima_tensor::cpu::build_static_arena(&lowered.program, &[], &[output])
+                .expect("build unpacked arena")
         })
         .collect();
     let named_per_instance: Vec<NamedInputs<'_>> = instances
         .iter()
-        .map(|lowered| lowered.initializers.iter().map(|(name, data)| (name.as_str(), data.as_slice())).collect())
+        .map(|lowered| {
+            lowered
+                .initializers
+                .iter()
+                .map(|(name, data)| (name.as_str(), data.as_slice()))
+                .collect()
+        })
         .collect();
 
     for index in 0..ROTATION {
-        let evaluated = evaluate_named_with_arena(&mut arenas[index], &named_per_instance[index]).expect("warm-up eval");
+        let evaluated = evaluate_named_with_arena(&mut arenas[index], &named_per_instance[index])
+            .expect("warm-up eval");
         std::hint::black_box(&evaluated);
     }
 
     time_calls(|index| {
         let rotation_index = index % ROTATION;
-        let evaluated = evaluate_named_with_arena(&mut arenas[rotation_index], &named_per_instance[rotation_index]).expect("timed eval");
+        let evaluated = evaluate_named_with_arena(
+            &mut arenas[rotation_index],
+            &named_per_instance[rotation_index],
+        )
+        .expect("timed eval");
         std::hint::black_box(&evaluated);
     })
 }
@@ -219,17 +317,37 @@ fn arena_cold_arm(m: usize, k: usize, n: usize) -> Timed {
 fn shape_block(name: &str, m: usize, k: usize, n: usize) {
     let macs = (m * k * n) as f64 / 1e9;
     let rotated_mib = (k * n * 4 * ROTATION) as f64 / (1024.0 * 1024.0);
-    println!("\n=== {name}: M={m} K={k} N={n} ({macs:.4} GMAC/call, cold rotation={ROTATION} x weight = {rotated_mib:.1} MiB) ===");
+    println!(
+        "\n=== {name}: M={m} K={k} N={n} ({macs:.4} GMAC/call, cold rotation={ROTATION} x weight = {rotated_mib:.1} MiB) ==="
+    );
     let warm = warm_arm(m, k, n);
     report("warm (existing form, same buffer 300x)", m, k, n, &warm);
     let cold = cold_arm(m, k, n);
-    report("cold (ROW 181 round-robin, 64 distinct weights)", m, k, n, &cold);
+    report(
+        "cold (ROW 181 round-robin, 64 distinct weights)",
+        m,
+        k,
+        n,
+        &cold,
+    );
     let slowdown = cold.mean_ns / warm.mean_ns;
     println!("    -> cold/warm slowdown: {slowdown:.3}x");
     let arena_cold = arena_cold_arm(m, k, n);
-    report("arena-cold (StaticArena, rhs unpacked, isolates arena reuse)", m, k, n, &arena_cold);
+    report(
+        "arena-cold (StaticArena, rhs unpacked, isolates arena reuse)",
+        m,
+        k,
+        n,
+        &arena_cold,
+    );
     let packed_cold = packed_cold_arm(m, k, n);
-    report("packed-cold (law 6∘5, rhs packed at plan time)", m, k, n, &packed_cold);
+    report(
+        "packed-cold (law 6∘5, rhs packed at plan time)",
+        m,
+        k,
+        n,
+        &packed_cold,
+    );
     let packed_vs_cold = packed_cold.mean_ns / cold.mean_ns;
     let packed_vs_arena_cold = packed_cold.mean_ns / arena_cold.mean_ns;
     let packed_vs_warm = packed_cold.mean_ns / warm.mean_ns;
@@ -245,8 +363,12 @@ fn shape_block(name: &str, m: usize, k: usize, n: usize) {
 /// effective triad GB/s should approach (not wildly exceed) the machine's
 /// own measured streaming ceiling (69.95-81.21 GB/s, ROW 176/`rooflines.md`).
 fn main() {
-    println!("bge_matmul_cache_regime: H1 nano cell -- warm (cache-hot, existing form) vs cold (ROW 181 round-robin, {ROTATION} distinct weight buffers) at BGE's own real M shapes");
-    println!("PRE-REGISTRATION: if H1 is the mechanism, cold GMAC/s should land near the in-graph ~10.7 GMAC/s figure (ROW 202's own 96-GEMM attribution), and cold triad-GB/s should approach the 69.95-81.21 GB/s machine streaming ceiling (ROW 176).");
+    println!(
+        "bge_matmul_cache_regime: H1 nano cell -- warm (cache-hot, existing form) vs cold (ROW 181 round-robin, {ROTATION} distinct weight buffers) at BGE's own real M shapes"
+    );
+    println!(
+        "PRE-REGISTRATION: if H1 is the mechanism, cold GMAC/s should land near the in-graph ~10.7 GMAC/s figure (ROW 202's own 96-GEMM attribution), and cold triad-GB/s should approach the 69.95-81.21 GB/s machine streaming ceiling (ROW 176)."
+    );
     for &m in &[7usize, 8, 9] {
         shape_block("QKVO", m, 384, 384);
         shape_block("FFN-down", m, 1536, 384);

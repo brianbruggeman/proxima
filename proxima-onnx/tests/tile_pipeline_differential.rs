@@ -24,7 +24,8 @@ mod tile_pipeline;
 
 use tile_pipeline::{BandRows, MnistWeights, run_pipeline_forward, run_pipeline_forward_direct};
 
-const MODEL_PATH: &str = "/Users/brianbruggeman/repos/others/burn/examples/onnx-inference/src/model/mnist.onnx";
+const MODEL_PATH: &str =
+    "/Users/brianbruggeman/repos/others/burn/examples/onnx-inference/src/model/mnist.onnx";
 const DATASET_DIR: &str = "/Users/brianbruggeman/.cache/burn-dataset/mnist";
 const TEST_IMAGES_COUNT: usize = 1000;
 /// Bound per logit: the reassociation this pipeline introduces is a single
@@ -57,7 +58,12 @@ fn idx_header(bytes: &[u8]) -> (usize, Vec<usize>) {
     let mut extents = Vec::with_capacity(dimension_count - 1);
     for axis in 1..dimension_count {
         let offset = 4 + axis * 4;
-        extents.push(u32::from_be_bytes([bytes[offset], bytes[offset + 1], bytes[offset + 2], bytes[offset + 3]]) as usize);
+        extents.push(u32::from_be_bytes([
+            bytes[offset],
+            bytes[offset + 1],
+            bytes[offset + 2],
+            bytes[offset + 3],
+        ]) as usize);
     }
     (item_count, extents)
 }
@@ -71,7 +77,10 @@ fn load_normalized_images(path: &Path, limit: usize) -> Vec<Vec<f32>> {
     (0..take)
         .map(|image_index| {
             let start = header_length + image_index * pixel_count;
-            bytes[start..start + pixel_count].iter().map(|&pixel| ((pixel as f32 / 255.0) - 0.1307) / 0.3081).collect()
+            bytes[start..start + pixel_count]
+                .iter()
+                .map(|&pixel| ((pixel as f32 / 255.0) - 0.1307) / 0.3081)
+                .collect()
         })
         .collect()
 }
@@ -84,7 +93,12 @@ fn load_labels(path: &Path, limit: usize) -> Vec<u8> {
 }
 
 fn argmax(values: &[f32]) -> usize {
-    values.iter().enumerate().max_by(|left, right| left.1.total_cmp(right.1)).map(|(index, _)| index).expect("nonempty logits")
+    values
+        .iter()
+        .enumerate()
+        .max_by(|left, right| left.1.total_cmp(right.1))
+        .map(|(index, _)| index)
+        .expect("nonempty logits")
 }
 
 struct LoadedModel {
@@ -96,20 +110,43 @@ struct LoadedModel {
 
 fn load_model() -> LoadedModel {
     let bytes = fs::read(MODEL_PATH).expect("read the real mnist.onnx checkpoint");
-    let model = proxima_onnx::pipe::parse_complete(&bytes).expect("parse the real mnist.onnx checkpoint");
+    let model =
+        proxima_onnx::pipe::parse_complete(&bytes).expect("parse the real mnist.onnx checkpoint");
     let graph = model.graph.as_ref().expect("real mnist model has a graph");
-    let lowered = proxima_onnx::lower::lower_graph(graph).expect("lower the real mnist.onnx graph to Op");
-    let graph_input_name = lowered.graph_inputs.first().expect("real mnist model declares at least one input").clone();
-    let output_node = lowered.graph_outputs.first().expect("real mnist model declares at least one output").1;
-    LoadedModel { program: lowered.program, graph_input_name, output_node, initializers: lowered.initializers }
+    let lowered =
+        proxima_onnx::lower::lower_graph(graph).expect("lower the real mnist.onnx graph to Op");
+    let graph_input_name = lowered
+        .graph_inputs
+        .first()
+        .expect("real mnist model declares at least one input")
+        .clone();
+    let output_node = lowered
+        .graph_outputs
+        .first()
+        .expect("real mnist model declares at least one output")
+        .1;
+    LoadedModel {
+        program: lowered.program,
+        graph_input_name,
+        output_node,
+        initializers: lowered.initializers,
+    }
 }
 
 fn evaluate_named_logits(model: &LoadedModel, image: &[f32]) -> Vec<f32> {
-    let initializers: Vec<(&str, &[f32])> = model.initializers.iter().map(|(name, data)| (name.as_str(), data.as_slice())).collect();
+    let initializers: Vec<(&str, &[f32])> = model
+        .initializers
+        .iter()
+        .map(|(name, data)| (name.as_str(), data.as_slice()))
+        .collect();
     let mut named = initializers;
     named.push((model.graph_input_name.as_str(), image));
-    let evaluated = proxima_tensor::cpu::evaluate_named(&model.program, &[], &named, &[model.output_node]).expect("evaluate real mnist image via the sealed executor");
-    let (data, shape) = evaluated.get(model.output_node).expect("real mnist output present");
+    let evaluated =
+        proxima_tensor::cpu::evaluate_named(&model.program, &[], &named, &[model.output_node])
+            .expect("evaluate real mnist image via the sealed executor");
+    let (data, shape) = evaluated
+        .get(model.output_node)
+        .expect("real mnist output present");
     assert_eq!(shape, &vec![1_u64, 10], "LogSoftmax over 10 MNIST classes");
     data.to_vec()
 }
@@ -126,21 +163,33 @@ fn pipeline_logits_match_sealed_executor_within_reassociation_bound() {
         return;
     }
     let model = load_model();
-    let weights = MnistWeights::from_initializers(&model.initializers.iter().map(|(name, data)| (name.as_str(), data.as_slice())).collect::<Vec<_>>());
+    let weights = MnistWeights::from_initializers(
+        &model
+            .initializers
+            .iter()
+            .map(|(name, data)| (name.as_str(), data.as_slice()))
+            .collect::<Vec<_>>(),
+    );
     let images = load_normalized_images(&test_images_path(), 20);
 
     for (band_label, band_rows) in [("1-row band", 1), ("kh-row band", 3), ("2kh-row band", 6)] {
         for (index, image) in images.iter().enumerate() {
             let incumbent = evaluate_named_logits(&model, image);
             let pipeline = run_pipeline_forward(image, &weights, BandRows(band_rows));
-            for (logit_index, (&incumbent_value, &pipeline_value)) in incumbent.iter().zip(pipeline.iter()).enumerate() {
+            for (logit_index, (&incumbent_value, &pipeline_value)) in
+                incumbent.iter().zip(pipeline.iter()).enumerate()
+            {
                 let delta = (incumbent_value - pipeline_value).abs();
                 assert!(
                     delta <= LOGIT_ABSOLUTE_TOLERANCE,
                     "{band_label}, image {index}, logit {logit_index}: incumbent={incumbent_value} pipeline={pipeline_value} delta={delta} exceeds {LOGIT_ABSOLUTE_TOLERANCE}"
                 );
             }
-            assert_eq!(argmax(&incumbent), argmax(&pipeline), "{band_label}, image {index}: argmax disagreement");
+            assert_eq!(
+                argmax(&incumbent),
+                argmax(&pipeline),
+                "{band_label}, image {index}: argmax disagreement"
+            );
         }
     }
 }
@@ -158,14 +207,23 @@ fn direct_call_arm_is_bit_identical_to_andthen_composed_pipeline() {
         return;
     }
     let model = load_model();
-    let weights = MnistWeights::from_initializers(&model.initializers.iter().map(|(name, data)| (name.as_str(), data.as_slice())).collect::<Vec<_>>());
+    let weights = MnistWeights::from_initializers(
+        &model
+            .initializers
+            .iter()
+            .map(|(name, data)| (name.as_str(), data.as_slice()))
+            .collect::<Vec<_>>(),
+    );
     let images = load_normalized_images(&test_images_path(), 20);
 
     for (band_label, band_rows) in [("1-row band", 1), ("kh-row band", 3), ("2kh-row band", 6)] {
         for (index, image) in images.iter().enumerate() {
             let composed = run_pipeline_forward(image, &weights, BandRows(band_rows));
             let direct = run_pipeline_forward_direct(image, &weights, BandRows(band_rows));
-            assert_eq!(composed, direct, "{band_label}, image {index}: AndThen-composed and direct-call arms diverged");
+            assert_eq!(
+                composed, direct,
+                "{band_label}, image {index}: AndThen-composed and direct-call arms diverged"
+            );
         }
     }
 }
@@ -181,7 +239,13 @@ fn pipeline_full_test_split_accuracy_is_exactly_0_9900() {
         return;
     }
     let model = load_model();
-    let weights = MnistWeights::from_initializers(&model.initializers.iter().map(|(name, data)| (name.as_str(), data.as_slice())).collect::<Vec<_>>());
+    let weights = MnistWeights::from_initializers(
+        &model
+            .initializers
+            .iter()
+            .map(|(name, data)| (name.as_str(), data.as_slice()))
+            .collect::<Vec<_>>(),
+    );
     let images = load_normalized_images(&test_images_path(), TEST_IMAGES_COUNT);
     let labels = load_labels(&test_labels_path(), TEST_IMAGES_COUNT);
     assert_eq!(images.len(), labels.len());
@@ -195,6 +259,12 @@ fn pipeline_full_test_split_accuracy_is_exactly_0_9900() {
         }
     }
     let accuracy = correct as f64 / images.len() as f64;
-    eprintln!("tile pipeline accuracy: {accuracy:.4} ({correct}/{})", images.len());
-    assert_eq!(correct, 990, "tile pipeline must classify exactly 990/1000 real t10k test images, matching ROW 154's own sealed accuracy bit-for-bit");
+    eprintln!(
+        "tile pipeline accuracy: {accuracy:.4} ({correct}/{})",
+        images.len()
+    );
+    assert_eq!(
+        correct, 990,
+        "tile pipeline must classify exactly 990/1000 real t10k test images, matching ROW 154's own sealed accuracy bit-for-bit"
+    );
 }

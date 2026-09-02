@@ -15,7 +15,10 @@
 use std::num::NonZeroUsize;
 use std::time::{Duration, Instant};
 
-use proxima_tensor::{Extent, IndexMap, NodeId, Op, ReduceInit, ScalarOp, append, bind, evaluate, evaluate_parallel, infer, map};
+use proxima_tensor::{
+    Extent, IndexMap, NodeId, Op, ReduceInit, ScalarOp, append, bind, evaluate, evaluate_parallel,
+    infer, map,
+};
 
 /// Same GEMM, RHS stored transposed (`[n, k]`, ggml's own `mul_mat`
 /// layout) instead of `[k, n]` — copied verbatim from `profile_hot.rs`.
@@ -92,7 +95,13 @@ fn time_evaluate(program: &[Op], lhs: &[f32], rhs_t: &[f32], runs: usize) -> Vec
         .collect()
 }
 
-fn time_evaluate_parallel(program: &[Op], lhs: &[f32], rhs_t: &[f32], workers: usize, runs: usize) -> Vec<Duration> {
+fn time_evaluate_parallel(
+    program: &[Op],
+    lhs: &[f32],
+    rhs_t: &[f32],
+    workers: usize,
+    runs: usize,
+) -> Vec<Duration> {
     let workers = match NonZeroUsize::new(workers) {
         Some(value) => value,
         None => panic!("workers must be nonzero"),
@@ -117,7 +126,10 @@ fn reduce_output_len(chunk: &proxima_tensor::BoundOp) -> usize {
             let (leading, last) = output_axes
                 .as_slice()
                 .split_at(output_axes.len().saturating_sub(1));
-            let leading_product: u64 = leading.iter().map(|axis| chunk.extents[*axis as usize]).product();
+            let leading_product: u64 = leading
+                .iter()
+                .map(|axis| chunk.extents[*axis as usize])
+                .product();
             let width = last.first().map_or(1, |axis| chunk.extents[*axis as usize]);
             leading_product as usize * width as usize
         }
@@ -133,10 +145,16 @@ fn report_worker_sweep(label: &str, program: &[Op], lhs: &[f32], rhs_t: &[f32]) 
     println!("\n=== {label}: serial baseline (evaluate) ===");
     let serial = time_evaluate(program, lhs, rhs_t, 3);
     for (index, sample) in serial.iter().enumerate() {
-        println!("  evaluate run {index}: {:.3} ms", sample.as_secs_f64() * 1000.0);
+        println!(
+            "  evaluate run {index}: {:.3} ms",
+            sample.as_secs_f64() * 1000.0
+        );
     }
     let serial_median = median(serial);
-    println!("  evaluate median: {:.3} ms", serial_median.as_secs_f64() * 1000.0);
+    println!(
+        "  evaluate median: {:.3} ms",
+        serial_median.as_secs_f64() * 1000.0
+    );
 
     println!("=== {label}: worker sweep (evaluate_parallel) ===");
     let mut workers_one_median = None;
@@ -204,7 +222,9 @@ fn report_chunk_distribution(m: u32, k: u32, n: u32) {
 
 #[cfg(all(target_arch = "aarch64", feature = "instrument"))]
 fn report_tile_fallback(m: u32, k: u32, n: u32) {
-    println!("\n=== NEON tile counters (gate passes, invocations, fallback elements): {m}x{k}x{n} ===");
+    println!(
+        "\n=== NEON tile counters (gate passes, invocations, fallback elements): {m}x{k}x{n} ==="
+    );
     let (program, _sum) = matmul_program_rhs_transposed(m, k, n);
     let lhs: Vec<f32> = (0..(m * k)).map(|value| (value % 13) as f32).collect();
     let rhs: Vec<f32> = (0..(k * n)).map(|value| (value % 7) as f32).collect();
@@ -212,7 +232,8 @@ fn report_tile_fallback(m: u32, k: u32, n: u32) {
 
     for workers in [1usize, 8] {
         let before = proxima_tensor::cpu::neon_tile_counters();
-        let row_remainder_invocations_before = proxima_tensor::cpu::neon_tile_row_remainder_invocations();
+        let row_remainder_invocations_before =
+            proxima_tensor::cpu::neon_tile_row_remainder_invocations();
         let row_remainder_elements_before = proxima_tensor::cpu::neon_tile_row_remainder_elements();
         let workers_nonzero = match NonZeroUsize::new(workers) {
             Some(value) => value,
@@ -223,7 +244,8 @@ fn report_tile_fallback(m: u32, k: u32, n: u32) {
             Err(error) => panic!("evaluate_parallel failed: {error:?}"),
         }
         let after = proxima_tensor::cpu::neon_tile_counters();
-        let row_remainder_invocations_after = proxima_tensor::cpu::neon_tile_row_remainder_invocations();
+        let row_remainder_invocations_after =
+            proxima_tensor::cpu::neon_tile_row_remainder_invocations();
         let row_remainder_elements_after = proxima_tensor::cpu::neon_tile_row_remainder_elements();
         println!(
             "  workers={workers}: gate_passes={} invocations={} row_remainder_invocations={} \

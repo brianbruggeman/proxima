@@ -65,10 +65,16 @@ fn parse_header(path: &Path) -> (ParsedGguf, u64) {
                 let mut completion = None;
                 for event in events {
                     match event {
-                        GgufEvent::Header { version: version_value, .. } => version = Some(version_value),
+                        GgufEvent::Header {
+                            version: version_value,
+                            ..
+                        } => version = Some(version_value),
                         GgufEvent::Metadata { key, value } => metadata.push((key, value)),
                         GgufEvent::Tensor(tensor) => tensors.push(tensor),
-                        GgufEvent::Complete { data_offset, alignment } => {
+                        GgufEvent::Complete {
+                            data_offset,
+                            alignment,
+                        } => {
                             completion = Some((data_offset, alignment));
                         }
                     }
@@ -90,7 +96,10 @@ fn parse_header(path: &Path) -> (ParsedGguf, u64) {
             Err(_) => { /* the truncated prefix parsed partway; grow and retry below */ }
         }
 
-        assert!(prefix_len < (1 << 26), "gguf header/directory exceeded 64 MiB prefix budget");
+        assert!(
+            prefix_len < (1 << 26),
+            "gguf header/directory exceeded 64 MiB prefix budget"
+        );
         prefix_len *= 2;
     }
 }
@@ -106,19 +115,35 @@ fn find_tensor<'a>(parsed: &'a ParsedGguf, name: &str) -> &'a TensorInfo {
 /// Reads exactly one tensor's packed bytes off disk via its validated
 /// absolute byte range (`ParsedGguf::tensor_data_range`) — never the whole
 /// file.
-fn read_tensor_bytes(file: &mut File, parsed: &ParsedGguf, tensor: &TensorInfo, file_len: u64) -> Vec<u8> {
+fn read_tensor_bytes(
+    file: &mut File,
+    parsed: &ParsedGguf,
+    tensor: &TensorInfo,
+    file_len: u64,
+) -> Vec<u8> {
     let range = parsed
         .tensor_data_range(tensor, file_len)
         .expect("tensor byte range within file bounds");
     let mut buf = vec![0u8; (range.end - range.start) as usize];
-    file.seek(SeekFrom::Start(range.start)).expect("seek to tensor data");
-    file.read_exact(&mut buf).expect("read exact tensor byte range");
+    file.seek(SeekFrom::Start(range.start))
+        .expect("seek to tensor data");
+    file.read_exact(&mut buf)
+        .expect("read exact tensor byte range");
     buf
 }
 
 fn max_abs_diff(a: &[f32], b: &[f32]) -> f32 {
-    assert_eq!(a.len(), b.len(), "shape mismatch: {} vs {}", a.len(), b.len());
-    a.iter().zip(b).map(|(x, y)| (x - y).abs()).fold(0.0f32, f32::max)
+    assert_eq!(
+        a.len(),
+        b.len(),
+        "shape mismatch: {} vs {}",
+        a.len(),
+        b.len()
+    );
+    a.iter()
+        .zip(b)
+        .map(|(x, y)| (x - y).abs())
+        .fold(0.0f32, f32::max)
 }
 
 struct Plan {
@@ -175,18 +200,28 @@ fn bench_shape(c: &mut Criterion, label: &str, tensor_name: &str, seed: u64) {
 
     let mut file = File::open(gguf_path()).expect("reopen real gguf file for tensor data");
     let weight_bytes = read_tensor_bytes(&mut file, &parsed, tensor, file_len);
-    println!("packed weight bytes: {} ({} rows x {} in_dim)", weight_bytes.len(), out_dim, in_dim);
+    println!(
+        "packed weight bytes: {} ({} rows x {} in_dim)",
+        weight_bytes.len(),
+        out_dim,
+        in_dim
+    );
 
     let mut lcg = Lcg(seed);
     let activation: Vec<f32> = (0..in_dim).map(|_| lcg.next_unit() * 0.5).collect();
 
     // --- correctness first ---
-    let ours = matmul_q4k_f32(&weight_bytes, out_dim, &activation).expect("well-formed real q4_k matmul");
+    let ours =
+        matmul_q4k_f32(&weight_bytes, out_dim, &activation).expect("well-formed real q4_k matmul");
 
     let ggml_out = unsafe {
         let ctx = ggml_ctx((weight_bytes.len() + activation.len() * 4) / (1024 * 1024) + 64);
         let weight = ggml_new_tensor_2d(ctx, GGML_TYPE_Q4_K, in_dim as i64, out_dim as i64);
-        std::ptr::copy_nonoverlapping(weight_bytes.as_ptr(), ggml_get_data(weight).cast::<u8>(), weight_bytes.len());
+        std::ptr::copy_nonoverlapping(
+            weight_bytes.as_ptr(),
+            ggml_get_data(weight).cast::<u8>(),
+            weight_bytes.len(),
+        );
         let vec_tensor = new_f32_1d(ctx, in_dim as i64, &activation);
         let result = ggml_mul_mat(ctx, weight, vec_tensor);
         let graph = build_graph(ctx, result);
@@ -201,12 +236,19 @@ fn bench_shape(c: &mut Criterion, label: &str, tensor_name: &str, seed: u64) {
     // dot products put single-ULP-per-term drift in the 1e-2..1e-1 band —
     // this is the same tolerance row A/B/F/G in bench_vs_ggml.rs use for
     // their own real-weight dot products, not a loosened bar for this file.
-    assert!(diff < 0.5, "{label} numerical mismatch: {diff} (fail fast, no timing below this line)");
+    assert!(
+        diff < 0.5,
+        "{label} numerical mismatch: {diff} (fail fast, no timing below this line)"
+    );
 
     unsafe {
         let ctx = ggml_ctx((weight_bytes.len() + activation.len() * 4) / (1024 * 1024) + 64);
         let weight = ggml_new_tensor_2d(ctx, GGML_TYPE_Q4_K, in_dim as i64, out_dim as i64);
-        std::ptr::copy_nonoverlapping(weight_bytes.as_ptr(), ggml_get_data(weight).cast::<u8>(), weight_bytes.len());
+        std::ptr::copy_nonoverlapping(
+            weight_bytes.as_ptr(),
+            ggml_get_data(weight).cast::<u8>(),
+            weight_bytes.len(),
+        );
         let vec_tensor = new_f32_1d(ctx, in_dim as i64, &activation);
         let result = ggml_mul_mat(ctx, weight, vec_tensor);
         let graph = build_graph(ctx, result);
@@ -241,7 +283,8 @@ fn bench_shape(c: &mut Criterion, label: &str, tensor_name: &str, seed: u64) {
     // ggml oracle output computed above).
     #[cfg(feature = "q4k-int8-dot")]
     {
-        let ours_packed = matmul_q4k_q8k_f32(&weight_bytes, out_dim, &activation).expect("well-formed packed int8 matmul");
+        let ours_packed = matmul_q4k_q8k_f32(&weight_bytes, out_dim, &activation)
+            .expect("well-formed packed int8 matmul");
         let diff_packed = max_abs_diff(&ours_packed, &ggml_out);
         println!("{label} packed-int8 max abs diff (ours vs ggml): {diff_packed:e}");
         assert!(
@@ -249,15 +292,31 @@ fn bench_shape(c: &mut Criterion, label: &str, tensor_name: &str, seed: u64) {
             "{label} packed-int8 numerical mismatch: {diff_packed} (fail fast, no timing below this line)"
         );
 
-        let ours_portable = matmul_q4k_q8k_portable_f32(&weight_bytes, out_dim, &activation).expect("well-formed portable matmul");
-        assert_eq!(ours_packed, ours_portable, "{label}: dispatched and portable packed-int8 arms diverged");
+        let ours_portable = matmul_q4k_q8k_portable_f32(&weight_bytes, out_dim, &activation)
+            .expect("well-formed portable matmul");
+        assert_eq!(
+            ours_packed, ours_portable,
+            "{label}: dispatched and portable packed-int8 arms diverged"
+        );
 
-        c.bench_function(&format!("{label}_proxima_matmul_q4k_q8k_dispatched_t1"), |b| {
-            b.iter(|| black_box(matmul_q4k_q8k_f32(&weight_bytes, out_dim, &activation).unwrap()))
-        });
-        c.bench_function(&format!("{label}_proxima_matmul_q4k_q8k_portable_t1"), |b| {
-            b.iter(|| black_box(matmul_q4k_q8k_portable_f32(&weight_bytes, out_dim, &activation).unwrap()))
-        });
+        c.bench_function(
+            &format!("{label}_proxima_matmul_q4k_q8k_dispatched_t1"),
+            |b| {
+                b.iter(|| {
+                    black_box(matmul_q4k_q8k_f32(&weight_bytes, out_dim, &activation).unwrap())
+                })
+            },
+        );
+        c.bench_function(
+            &format!("{label}_proxima_matmul_q4k_q8k_portable_t1"),
+            |b| {
+                b.iter(|| {
+                    black_box(
+                        matmul_q4k_q8k_portable_f32(&weight_bytes, out_dim, &activation).unwrap(),
+                    )
+                })
+            },
+        );
     }
 
     let macs = (out_dim as u64) * (in_dim as u64);
@@ -324,13 +383,48 @@ fn main() {
         .sample_size(30)
         .measurement_time(Duration::from_secs(5));
 
-    bench_shape(&mut criterion, "attn_q_4096x4096", "blk.0.attn_q.weight", 100);
-    bench_shape(&mut criterion, "attn_output_4096x4096", "blk.0.attn_output.weight", 101);
-    bench_shape(&mut criterion, "attn_k_4096x1024", "blk.0.attn_k.weight", 102);
-    bench_shape(&mut criterion, "attn_v_4096x1024", "blk.0.attn_v.weight", 103);
-    bench_shape(&mut criterion, "ffn_gate_4096x14336", "blk.0.ffn_gate.weight", 104);
-    bench_shape(&mut criterion, "ffn_up_4096x14336", "blk.0.ffn_up.weight", 105);
-    bench_shape(&mut criterion, "ffn_down_14336x4096", "blk.0.ffn_down.weight", 106);
+    bench_shape(
+        &mut criterion,
+        "attn_q_4096x4096",
+        "blk.0.attn_q.weight",
+        100,
+    );
+    bench_shape(
+        &mut criterion,
+        "attn_output_4096x4096",
+        "blk.0.attn_output.weight",
+        101,
+    );
+    bench_shape(
+        &mut criterion,
+        "attn_k_4096x1024",
+        "blk.0.attn_k.weight",
+        102,
+    );
+    bench_shape(
+        &mut criterion,
+        "attn_v_4096x1024",
+        "blk.0.attn_v.weight",
+        103,
+    );
+    bench_shape(
+        &mut criterion,
+        "ffn_gate_4096x14336",
+        "blk.0.ffn_gate.weight",
+        104,
+    );
+    bench_shape(
+        &mut criterion,
+        "ffn_up_4096x14336",
+        "blk.0.ffn_up.weight",
+        105,
+    );
+    bench_shape(
+        &mut criterion,
+        "ffn_down_14336x4096",
+        "blk.0.ffn_down.weight",
+        106,
+    );
     bench_shape(&mut criterion, "lm_head_4096x32002", "output.weight", 107);
 
     criterion.final_summary();

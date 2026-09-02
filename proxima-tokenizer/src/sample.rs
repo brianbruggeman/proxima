@@ -144,9 +144,15 @@ impl Default for SamplingConfig {
     }
 }
 
-fn apply_repetition_penalty(candidates: &mut [(u32, f32)], recent_tokens: &[u32], config: SamplingConfig) {
+fn apply_repetition_penalty(
+    candidates: &mut [(u32, f32)],
+    recent_tokens: &[u32],
+    config: SamplingConfig,
+) {
     if recent_tokens.is_empty()
-        || (config.repeat_penalty == 1.0 && config.frequency_penalty == 0.0 && config.presence_penalty == 0.0)
+        || (config.repeat_penalty == 1.0
+            && config.frequency_penalty == 0.0
+            && config.presence_penalty == 0.0)
     {
         return;
     }
@@ -164,12 +170,21 @@ fn apply_repetition_penalty(candidates: &mut [(u32, f32)], recent_tokens: &[u32]
             candidate.1 /= config.repeat_penalty;
         }
         candidate.1 -= (count as f32) * config.frequency_penalty
-            + if count > 0 { config.presence_penalty } else { 0.0 };
+            + if count > 0 {
+                config.presence_penalty
+            } else {
+                0.0
+            };
     }
 }
 
 fn sort_candidates_descending(candidates: &mut [(u32, f32)]) {
-    candidates.sort_by(|left, right| right.1.partial_cmp(&left.1).unwrap_or(core::cmp::Ordering::Equal));
+    candidates.sort_by(|left, right| {
+        right
+            .1
+            .partial_cmp(&left.1)
+            .unwrap_or(core::cmp::Ordering::Equal)
+    });
 }
 
 fn apply_top_k(candidates: &mut Vec<(u32, f32)>, top_k: i32) {
@@ -182,9 +197,14 @@ fn apply_top_k(candidates: &mut Vec<(u32, f32)>, top_k: i32) {
 }
 
 fn softmax_probabilities(candidates: &[(u32, f32)]) -> Vec<f32> {
-    let max_logit = candidates.iter().map(|candidate| candidate.1).fold(f32::NEG_INFINITY, f32::max);
-    let exponentiated: Vec<f32> =
-        candidates.iter().map(|candidate| libm::expf(candidate.1 - max_logit)).collect();
+    let max_logit = candidates
+        .iter()
+        .map(|candidate| candidate.1)
+        .fold(f32::NEG_INFINITY, f32::max);
+    let exponentiated: Vec<f32> = candidates
+        .iter()
+        .map(|candidate| libm::expf(candidate.1 - max_logit))
+        .collect();
     let sum: f32 = exponentiated.iter().sum();
     exponentiated.into_iter().map(|value| value / sum).collect()
 }
@@ -211,7 +231,10 @@ fn apply_min_p(candidates: &mut Vec<(u32, f32)>, min_p: f32) {
     if min_p <= 0.0 || candidates.is_empty() {
         return;
     }
-    let max_logit = candidates.iter().map(|candidate| candidate.1).fold(f32::NEG_INFINITY, f32::max);
+    let max_logit = candidates
+        .iter()
+        .map(|candidate| candidate.1)
+        .fold(f32::NEG_INFINITY, f32::max);
     let threshold = max_logit + libm::logf(min_p);
     candidates.retain(|candidate| candidate.1 >= threshold);
 }
@@ -226,7 +249,11 @@ fn collapse_to_argmax(candidates: &[(u32, f32)]) -> Option<u32> {
         .map(|(id, _)| id)
 }
 
-fn sample_from_distribution(candidates: &[(u32, f32)], probabilities: &[f32], rng: &mut Rng) -> Option<u32> {
+fn sample_from_distribution(
+    candidates: &[(u32, f32)],
+    probabilities: &[f32],
+    rng: &mut Rng,
+) -> Option<u32> {
     let draw = rng.f32();
     let mut cumulative = 0.0f32;
     for (candidate, probability) in candidates.iter().zip(probabilities) {
@@ -256,8 +283,11 @@ pub fn sample_next_token(
     if logits.is_empty() {
         return None;
     }
-    let mut candidates: Vec<(u32, f32)> =
-        logits.iter().enumerate().map(|(index, &logit)| (index as u32, logit)).collect();
+    let mut candidates: Vec<(u32, f32)> = logits
+        .iter()
+        .enumerate()
+        .map(|(index, &logit)| (index as u32, logit))
+        .collect();
 
     apply_repetition_penalty(&mut candidates, recent_tokens, config);
     apply_top_k(&mut candidates, config.top_k);
@@ -284,8 +314,8 @@ mod tests {
     use fastrand::Rng;
 
     use super::{
-        SamplingConfig, apply_min_p, apply_repetition_penalty, apply_top_k, apply_top_p, greedy_pick,
-        sample_next_token,
+        SamplingConfig, apply_min_p, apply_repetition_penalty, apply_top_k, apply_top_p,
+        greedy_pick, sample_next_token,
     };
 
     #[test]
@@ -346,10 +376,17 @@ mod tests {
     /// first two survive (`src/llama-sampling.cpp:708-733`).
     #[test]
     fn top_p_keeps_the_smallest_prefix_reaching_the_cumulative_threshold() {
-        let mut candidates =
-            vec![(0u32, libm::logf(0.5)), (1, libm::logf(0.3)), (2, libm::logf(0.2))];
+        let mut candidates = vec![
+            (0u32, libm::logf(0.5)),
+            (1, libm::logf(0.3)),
+            (2, libm::logf(0.2)),
+        ];
         apply_top_p(&mut candidates, 0.7);
-        assert_eq!(candidates.len(), 2, "0.5 + 0.3 = 0.8 is the first prefix to reach 0.7");
+        assert_eq!(
+            candidates.len(),
+            2,
+            "0.5 + 0.3 = 0.8 is the first prefix to reach 0.7"
+        );
         assert_eq!(candidates[0].0, 0);
         assert_eq!(candidates[1].0, 1);
     }
@@ -398,8 +435,11 @@ mod tests {
     /// the filter only ever modifies candidates it has a count for.
     #[test]
     fn repetition_penalty_leaves_unseen_tokens_untouched() {
-        let config =
-            SamplingConfig { repeat_penalty: 5.0, frequency_penalty: 1.0, ..SamplingConfig::default() };
+        let config = SamplingConfig {
+            repeat_penalty: 5.0,
+            frequency_penalty: 1.0,
+            ..SamplingConfig::default()
+        };
         let mut candidates = vec![(7u32, 3.0f32)];
         apply_repetition_penalty(&mut candidates, &[1, 2, 3], config);
         assert_eq!(candidates, vec![(7, 3.0)]);
@@ -418,8 +458,11 @@ mod tests {
     /// value, proving the order is load-bearing, not cosmetic.
     #[test]
     fn repetition_penalty_before_temperature_differs_from_after() {
-        let config =
-            SamplingConfig { repeat_penalty: 1.0, frequency_penalty: 2.0, ..SamplingConfig::default() };
+        let config = SamplingConfig {
+            repeat_penalty: 1.0,
+            frequency_penalty: 2.0,
+            ..SamplingConfig::default()
+        };
         let temperature = 2.0f32;
         let recent_tokens = [0u32];
 
@@ -435,8 +478,16 @@ mod tests {
         }
         apply_repetition_penalty(&mut temperature_then_penalty, &recent_tokens, config);
 
-        assert_eq!(penalty_then_temperature, vec![(0, 1.0), (1, 2.0)], "this module's own order");
-        assert_eq!(temperature_then_penalty, vec![(0, 0.0), (1, 2.0)], "the reversed order");
+        assert_eq!(
+            penalty_then_temperature,
+            vec![(0, 1.0), (1, 2.0)],
+            "this module's own order"
+        );
+        assert_eq!(
+            temperature_then_penalty,
+            vec![(0, 0.0), (1, 2.0)],
+            "the reversed order"
+        );
         assert_ne!(
             penalty_then_temperature, temperature_then_penalty,
             "swapping penalty/temperature order changes id 0's logit -- llama.cpp applies \
@@ -453,7 +504,10 @@ mod tests {
         let config = SamplingConfig::default();
         for seed in 0..8u64 {
             let mut rng = Rng::with_seed(seed);
-            assert_eq!(sample_next_token(&logits, &[], config, &mut rng), greedy_pick(&logits));
+            assert_eq!(
+                sample_next_token(&logits, &[], config, &mut rng),
+                greedy_pick(&logits)
+            );
         }
     }
 
@@ -479,15 +533,22 @@ mod tests {
     /// wasn't consumed twice".
     #[test]
     fn same_seed_and_logits_always_pick_the_same_token_across_100_draws() {
-        let config =
-            SamplingConfig { temperature: 1.0, top_p: 0.9, min_p: 0.05, ..SamplingConfig::default() };
+        let config = SamplingConfig {
+            temperature: 1.0,
+            top_p: 0.9,
+            min_p: 0.05,
+            ..SamplingConfig::default()
+        };
         let logits = vec![0.1, 2.5, -1.0, 0.4, 1.8];
         let seed = 0x00C0_FFEE_u64;
 
         let first_draw = sample_next_token(&logits, &[], config, &mut Rng::with_seed(seed));
         for _ in 0..100 {
             let draw = sample_next_token(&logits, &[], config, &mut Rng::with_seed(seed));
-            assert_eq!(draw, first_draw, "same seed + same logits must reproduce the same token");
+            assert_eq!(
+                draw, first_draw,
+                "same seed + same logits must reproduce the same token"
+            );
         }
     }
 
@@ -498,7 +559,10 @@ mod tests {
     /// `Rng` must land near that split, not always pick the same token.
     #[test]
     fn temperature_softmax_distribution_matches_known_probabilities() {
-        let config = SamplingConfig { temperature: 1.0, ..SamplingConfig::default() };
+        let config = SamplingConfig {
+            temperature: 1.0,
+            ..SamplingConfig::default()
+        };
         let logits = vec![1.0f32, 0.0f32];
         let mut rng = Rng::with_seed(0x5EED);
         let draws = 20_000u32;
@@ -524,6 +588,9 @@ mod tests {
     fn empty_logits_sample_nothing() {
         let mut rng = Rng::with_seed(7);
         let empty: Vec<f32> = Vec::new();
-        assert_eq!(sample_next_token(&empty, &[], SamplingConfig::default(), &mut rng), None);
+        assert_eq!(
+            sample_next_token(&empty, &[], SamplingConfig::default(), &mut rng),
+            None
+        );
     }
 }

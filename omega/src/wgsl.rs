@@ -172,7 +172,11 @@ pub struct WgslCaps {
 /// [`EmitError::ArityMismatch`]/[`EmitError::ReductionBodyIsSelect`]/
 /// [`EmitError::EmptyScan`] for the same structural failures
 /// [`crate::msl::emit`] rejects.
-pub fn emit_wgsl(resolved: &BoundOp, caps: WgslCaps, packed_operands: &PackedOperands) -> Result<WgslKernel, EmitError> {
+pub fn emit_wgsl(
+    resolved: &BoundOp,
+    caps: WgslCaps,
+    packed_operands: &PackedOperands,
+) -> Result<WgslKernel, EmitError> {
     validate(resolved, packed_operands)?;
     let entry = entry_name(resolved);
     let element_type = type_token(resolved.node, resolved.dtype, caps)?;
@@ -186,11 +190,15 @@ pub fn emit_wgsl(resolved: &BoundOp, caps: WgslCaps, packed_operands: &PackedOpe
         None
     };
     let source = match &resolved.kind {
-        BoundOpKind::Elementwise { .. } => render_elementwise(resolved, &entry, element_type, &quantized),
+        BoundOpKind::Elementwise { .. } => {
+            render_elementwise(resolved, &entry, element_type, &quantized)
+        }
         BoundOpKind::Reduce {
             keep: Keep::Reduce, ..
         } => match cooperative_width {
-            Some(width) => render_reduce_cooperative(resolved, &entry, element_type, &quantized, width),
+            Some(width) => {
+                render_reduce_cooperative(resolved, &entry, element_type, &quantized, width)
+            }
             None => render_reduce(resolved, &entry, element_type, &quantized),
         },
         BoundOpKind::Reduce {
@@ -213,7 +221,10 @@ pub fn emit_wgsl(resolved: &BoundOp, caps: WgslCaps, packed_operands: &PackedOpe
 }
 
 fn is_cooperative_reduce_op(op: ScalarOp) -> bool {
-    matches!(op, ScalarOp::Add | ScalarOp::Multiply | ScalarOp::Maximum | ScalarOp::Minimum)
+    matches!(
+        op,
+        ScalarOp::Add | ScalarOp::Multiply | ScalarOp::Maximum | ScalarOp::Minimum
+    )
 }
 
 /// Whether `resolved` takes the SIMD-group-cooperative reduce path instead
@@ -257,7 +268,9 @@ fn subgroup_combine_fn(op: ScalarOp) -> &'static str {
         | ScalarOp::Erf
         | ScalarOp::Greater
         | ScalarOp::Equal
-        | ScalarOp::Select => unreachable!("subgroup_combine_fn is only called for a cooperative reduce_op"),
+        | ScalarOp::Select => {
+            unreachable!("subgroup_combine_fn is only called for a cooperative reduce_op")
+        }
     }
 }
 
@@ -285,7 +298,9 @@ fn cooperative_identity_token(op: ScalarOp) -> &'static str {
         | ScalarOp::Erf
         | ScalarOp::Greater
         | ScalarOp::Equal
-        | ScalarOp::Select => unreachable!("cooperative_identity_token is only called for a cooperative reduce_op"),
+        | ScalarOp::Select => {
+            unreachable!("cooperative_identity_token is only called for a cooperative reduce_op")
+        }
     }
 }
 
@@ -346,14 +361,20 @@ fn validate(resolved: &BoundOp, packed_operands: &PackedOperands) -> Result<(), 
     } = &resolved.kind
     {
         if out_scatter.is_some() {
-            return Err(EmitError::ScatterNotSupported { node: resolved.node });
+            return Err(EmitError::ScatterNotSupported {
+                node: resolved.node,
+            });
         }
         if matches!(reduce_op, ScalarOp::Select) {
-            return Err(EmitError::ReductionBodyIsSelect { node: resolved.node });
+            return Err(EmitError::ReductionBodyIsSelect {
+                node: resolved.node,
+            });
         }
         if *keep == Keep::Scan {
             if resolved.extents.is_empty() {
-                return Err(EmitError::EmptyScan { node: resolved.node });
+                return Err(EmitError::EmptyScan {
+                    node: resolved.node,
+                });
             }
             // scan's accumulator persists across every outer line (see
             // `render_scan`'s own doc) -- gather and packed-operand support
@@ -362,7 +383,9 @@ fn validate(resolved: &BoundOp, packed_operands: &PackedOperands) -> Result<(), 
             // ported yet, see the module doc.
             for (node, _, gather) in resolved.operands() {
                 if gather.is_some() {
-                    return Err(EmitError::GatherNotSupported { node: resolved.node });
+                    return Err(EmitError::GatherNotSupported {
+                        node: resolved.node,
+                    });
                 }
                 if packed_operands.contains_key(node) {
                     return Err(EmitError::UnsupportedOpKind {
@@ -379,7 +402,10 @@ fn validate(resolved: &BoundOp, packed_operands: &PackedOperands) -> Result<(), 
 /// One codec slot per operand — the WGSL counterpart of
 /// `crate::msl::operand_codecs`, restated here since that helper is private
 /// to `crate::msl`.
-fn operand_codecs(resolved: &BoundOp, packed_operands: &PackedOperands) -> Vec<Option<PackedCodec>> {
+fn operand_codecs(
+    resolved: &BoundOp,
+    packed_operands: &PackedOperands,
+) -> Vec<Option<PackedCodec>> {
     resolved
         .operands()
         .iter()
@@ -419,7 +445,10 @@ fn grid_threads(resolved: &BoundOp) -> u64 {
             keep: Keep::Reduce,
             output_axes,
             ..
-        } => output_axes.iter().map(|dim| resolved.extents[*dim as usize]).product(),
+        } => output_axes
+            .iter()
+            .map(|dim| resolved.extents[*dim as usize])
+            .product(),
         // exactly one thread -- see `render_scan`'s own doc on why a scan's
         // accumulator persists across every outer line rather than resetting
         // per line, which rules out one thread per line.
@@ -537,8 +566,14 @@ fn entry_name(resolved: &BoundOp) -> String {
             // string alone and never re-diffs source on a cache hit, so a
             // collision silently reuses the wrong axis mapping's compiled
             // pipeline against the second op's uniforms.
-            let axes = output_axes.iter().map(u16::to_string).collect::<Vec<_>>().join("_");
-            format!("omega_wgsl_{kind}_r{rank}_ax{axes}_n{operand_count}_{body}_{reduce_body}_{init}")
+            let axes = output_axes
+                .iter()
+                .map(u16::to_string)
+                .collect::<Vec<_>>()
+                .join("_");
+            format!(
+                "omega_wgsl_{kind}_r{rank}_ax{axes}_n{operand_count}_{body}_{reduce_body}_{init}"
+            )
         }
         BoundOpKind::Iota => format!("omega_wgsl_iota_r{rank}"),
         BoundOpKind::Constant { value } => {
@@ -737,7 +772,12 @@ fn fold_init_tokens(init: proxima_tensor::ReduceInit) -> (&'static str, &'static
     }
 }
 
-fn push_body_steps(source: &mut String, body: &ComposedBody, indent: &str, element_type: &str) -> String {
+fn push_body_steps(
+    source: &mut String,
+    body: &ComposedBody,
+    indent: &str,
+    element_type: &str,
+) -> String {
     for (index, step) in body.steps.iter().enumerate() {
         let args: Vec<String> = step
             .args
@@ -749,7 +789,9 @@ fn push_body_steps(source: &mut String, body: &ComposedBody, indent: &str, eleme
             .collect();
         let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
         let expr = scalar_op_expr(step.op, &arg_refs);
-        source.push_str(&format!("{indent}let step{index}: {element_type} = {expr};\n"));
+        source.push_str(&format!(
+            "{indent}let step{index}: {element_type} = {expr};\n"
+        ));
     }
     format!("step{}", body.steps.len().saturating_sub(1))
 }
@@ -829,7 +871,9 @@ fn push_gather_uniform_fields(source: &mut String, gather_count: usize, rank_len
     if gather_count == 0 {
         return;
     }
-    source.push_str(&format!("    gather_index_base: array<i32, {gather_count}>,\n"));
+    source.push_str(&format!(
+        "    gather_index_base: array<i32, {gather_count}>,\n"
+    ));
     source.push_str(&format!(
         "    gather_index_strides: array<array<i32, {rank_len}>, {gather_count}>,\n"
     ));
@@ -844,7 +888,12 @@ fn push_gather_uniform_fields(source: &mut String, gather_count: usize, rank_len
 /// plays the same role `atomic_fetch_max_explicit` does on the Metal side:
 /// whichever value wins under concurrent invocations is still a genuine
 /// fault, and the driver only needs to know one occurred and at what value.
-fn push_gather_fault_check(source: &mut String, operand_index: usize, gather_slot: usize, indent: &str) {
+fn push_gather_fault_check(
+    source: &mut String,
+    operand_index: usize,
+    gather_slot: usize,
+    indent: &str,
+) {
     source.push_str(&format!(
         "{indent}if (fetched{operand_index} < 0 || fetched{operand_index} >= u.gather_extent[{gather_slot}]) {{\n"
     ));
@@ -934,12 +983,19 @@ fn wgsl_operand_read(index: usize, offset_expr: &str, codec: Option<PackedCodec>
             let elements = codec.block_elements();
             let bytes = codec.block_bytes();
             let function = codec_function_name(codec);
-            format!("{function}_{index}(({offset_expr} / {elements}) * {bytes}, {offset_expr} % {elements})")
+            format!(
+                "{function}_{index}(({offset_expr} / {elements}) * {bytes}, {offset_expr} % {elements})"
+            )
         }
     }
 }
 
-fn render_elementwise(resolved: &BoundOp, entry: &str, element_type: &str, quantized: &[Option<PackedCodec>]) -> String {
+fn render_elementwise(
+    resolved: &BoundOp,
+    entry: &str,
+    element_type: &str,
+    quantized: &[Option<PackedCodec>],
+) -> String {
     let rank = resolved.extents.len();
     let rank_len = rank.max(1);
     let operand_count = resolved.operands().len();
@@ -958,7 +1014,14 @@ fn render_elementwise(resolved: &BoundOp, entry: &str, element_type: &str, quant
     uniforms.push_str("};\n");
 
     let mut source = String::new();
-    preamble(&mut source, operand_count, gather_total, quantized, element_type, &uniforms);
+    preamble(
+        &mut source,
+        operand_count,
+        gather_total,
+        quantized,
+        element_type,
+        &uniforms,
+    );
     kernel_signature(&mut source, entry);
     source.push_str("    if (gid >= u.total_elements) { return; }\n");
 
@@ -973,14 +1036,23 @@ fn render_elementwise(resolved: &BoundOp, entry: &str, element_type: &str, quant
     }
 
     for (index, gather_slot) in slots.iter().enumerate() {
-        source.push_str(&format!("    var off{index}: i32 = u.operand_base[{index}];\n"));
+        source.push_str(&format!(
+            "    var off{index}: i32 = u.operand_base[{index}];\n"
+        ));
         for dim in 0..rank {
             source.push_str(&format!(
                 "    off{index} += coord[{dim}] * u.operand_strides[{index}][{dim}];\n"
             ));
         }
         if let Some(slot) = gather_slot {
-            push_gather_fetch(&mut source, index, *slot, rank, "coord", &format!("off{index}"));
+            push_gather_fetch(
+                &mut source,
+                index,
+                *slot,
+                rank,
+                "coord",
+                &format!("off{index}"),
+            );
         }
     }
 
@@ -1002,7 +1074,12 @@ fn render_elementwise(resolved: &BoundOp, entry: &str, element_type: &str, quant
     source
 }
 
-fn render_reduce(resolved: &BoundOp, entry: &str, element_type: &str, quantized: &[Option<PackedCodec>]) -> String {
+fn render_reduce(
+    resolved: &BoundOp,
+    entry: &str,
+    element_type: &str,
+    quantized: &[Option<PackedCodec>],
+) -> String {
     let BoundOpKind::Reduce {
         reduce_op,
         init,
@@ -1027,7 +1104,9 @@ fn render_reduce(resolved: &BoundOp, entry: &str, element_type: &str, quantized:
     uniforms.push_str("struct Uniforms {\n");
     uniforms.push_str("    output_total: i32,\n");
     uniforms.push_str("    reduction_total: i32,\n");
-    uniforms.push_str(&format!("    output_extents: array<i32, {output_rank_len}>,\n"));
+    uniforms.push_str(&format!(
+        "    output_extents: array<i32, {output_rank_len}>,\n"
+    ));
     uniforms.push_str(&format!(
         "    reduction_extents: array<i32, {reduce_rank_len}>,\n"
     ));
@@ -1041,7 +1120,14 @@ fn render_reduce(resolved: &BoundOp, entry: &str, element_type: &str, quantized:
     uniforms.push_str("};\n");
 
     let mut source = String::new();
-    preamble(&mut source, operand_count, gather_total, quantized, element_type, &uniforms);
+    preamble(
+        &mut source,
+        operand_count,
+        gather_total,
+        quantized,
+        element_type,
+        &uniforms,
+    );
     kernel_signature(&mut source, entry);
     source.push_str("    if (gid >= u.output_total) { return; }\n");
 
@@ -1051,7 +1137,9 @@ fn render_reduce(resolved: &BoundOp, entry: &str, element_type: &str, quantized:
     }
 
     if output_rank > 0 {
-        source.push_str(&format!("    var output_coord: array<i32, {output_rank_len}>;\n"));
+        source.push_str(&format!(
+            "    var output_coord: array<i32, {output_rank_len}>;\n"
+        ));
         source.push_str("    var remaining: i32 = gid;\n");
         for index in (0..output_rank).rev() {
             source.push_str(&format!(
@@ -1065,12 +1153,16 @@ fn render_reduce(resolved: &BoundOp, entry: &str, element_type: &str, quantized:
     }
 
     let (init_expr, seeded_init) = fold_init_tokens(*init);
-    source.push_str(&format!("    var accumulator: {element_type} = {init_expr};\n"));
+    source.push_str(&format!(
+        "    var accumulator: {element_type} = {init_expr};\n"
+    ));
     source.push_str(&format!("    var seeded: bool = {seeded_init};\n"));
 
     source.push_str("    for (var r: i32 = 0; r < u.reduction_total; r = r + 1) {\n");
     if reduce_rank > 0 {
-        source.push_str(&format!("        var reduction_coord: array<i32, {reduce_rank_len}>;\n"));
+        source.push_str(&format!(
+            "        var reduction_coord: array<i32, {reduce_rank_len}>;\n"
+        ));
         source.push_str("        var remaining_r: i32 = r;\n");
         for index in (0..reduce_rank).rev() {
             source.push_str(&format!(
@@ -1079,12 +1171,16 @@ fn render_reduce(resolved: &BoundOp, entry: &str, element_type: &str, quantized:
             ));
         }
         for (index, dim) in reduce_dims.iter().enumerate() {
-            source.push_str(&format!("        full_coord[{dim}] = reduction_coord[{index}];\n"));
+            source.push_str(&format!(
+                "        full_coord[{dim}] = reduction_coord[{index}];\n"
+            ));
         }
     }
 
     for (index, gather_slot) in slots.iter().enumerate() {
-        source.push_str(&format!("        var off{index}: i32 = u.operand_base[{index}];\n"));
+        source.push_str(&format!(
+            "        var off{index}: i32 = u.operand_base[{index}];\n"
+        ));
         for dim in 0..rank {
             source.push_str(&format!(
                 "        off{index} += full_coord[{dim}] * u.operand_strides[{index}][{dim}];\n"
@@ -1111,16 +1207,27 @@ fn render_reduce(resolved: &BoundOp, entry: &str, element_type: &str, quantized:
         let read = read_cast(element_type, &expr);
         source.push_str(&format!("        scratch[{index}] = {read};\n"));
     }
-    let value_expr = push_body_steps(&mut source, resolved.element_body(), "        ", element_type);
-    source.push_str(&format!("        let value: {element_type} = {value_expr};\n"));
+    let value_expr = push_body_steps(
+        &mut source,
+        resolved.element_body(),
+        "        ",
+        element_type,
+    );
+    source.push_str(&format!(
+        "        let value: {element_type} = {value_expr};\n"
+    ));
     let combine_expr = scalar_op_expr(*reduce_op, &["accumulator", "value"]);
-    source.push_str(&format!("        accumulator = select(value, {combine_expr}, seeded);\n"));
+    source.push_str(&format!(
+        "        accumulator = select(value, {combine_expr}, seeded);\n"
+    ));
     source.push_str("        seeded = true;\n");
     source.push_str("    }\n");
 
     source.push_str("    var out_offset: i32 = u.out_base;\n");
     for dim in 0..rank {
-        source.push_str(&format!("    out_offset += full_coord[{dim}] * u.out_strides[{dim}];\n"));
+        source.push_str(&format!(
+            "    out_offset += full_coord[{dim}] * u.out_strides[{dim}];\n"
+        ));
     }
     let stored = write_cast(element_type, "accumulator");
     source.push_str(&format!("    out[out_offset] = {stored};\n"));
@@ -1168,7 +1275,9 @@ fn render_reduce_cooperative(
     uniforms.push_str("struct Uniforms {\n");
     uniforms.push_str("    output_total: i32,\n");
     uniforms.push_str("    reduction_total: i32,\n");
-    uniforms.push_str(&format!("    output_extents: array<i32, {output_rank_len}>,\n"));
+    uniforms.push_str(&format!(
+        "    output_extents: array<i32, {output_rank_len}>,\n"
+    ));
     uniforms.push_str(&format!(
         "    reduction_extents: array<i32, {reduce_rank_len}>,\n"
     ));
@@ -1183,7 +1292,14 @@ fn render_reduce_cooperative(
     let mut source = String::new();
     // no gather ever reaches here (see this function's own doc), so `quantized`
     // is the only per-operand table `preamble` needs and `gather_count` is 0.
-    preamble(&mut source, operand_count, 0, quantized, element_type, &uniforms);
+    preamble(
+        &mut source,
+        operand_count,
+        0,
+        quantized,
+        element_type,
+        &uniforms,
+    );
     cooperative_kernel_signature(&mut source, entry, width);
 
     source.push_str(&format!("    let output_index: i32 = gid / {width};\n"));
@@ -1195,7 +1311,9 @@ fn render_reduce_cooperative(
     }
 
     if output_rank > 0 {
-        source.push_str(&format!("    var output_coord: array<i32, {output_rank_len}>;\n"));
+        source.push_str(&format!(
+            "    var output_coord: array<i32, {output_rank_len}>;\n"
+        ));
         source.push_str("    var remaining: i32 = output_index;\n");
         for index in (0..output_rank).rev() {
             source.push_str(&format!(
@@ -1224,7 +1342,9 @@ fn render_reduce_cooperative(
         "    for (var r: i32 = i32(lane); r < u.reduction_total; r = r + {width}) {{\n"
     ));
     if reduce_rank > 0 {
-        source.push_str(&format!("        var reduction_coord: array<i32, {reduce_rank_len}>;\n"));
+        source.push_str(&format!(
+            "        var reduction_coord: array<i32, {reduce_rank_len}>;\n"
+        ));
         source.push_str("        var remaining_r: i32 = r;\n");
         for index in (0..reduce_rank).rev() {
             source.push_str(&format!(
@@ -1233,12 +1353,16 @@ fn render_reduce_cooperative(
             ));
         }
         for (index, dim) in reduce_dims.iter().enumerate() {
-            source.push_str(&format!("        full_coord[{dim}] = reduction_coord[{index}];\n"));
+            source.push_str(&format!(
+                "        full_coord[{dim}] = reduction_coord[{index}];\n"
+            ));
         }
     }
 
     for index in 0..operand_count {
-        source.push_str(&format!("        var off{index}: i32 = u.operand_base[{index}];\n"));
+        source.push_str(&format!(
+            "        var off{index}: i32 = u.operand_base[{index}];\n"
+        ));
         for dim in 0..rank {
             source.push_str(&format!(
                 "        off{index} += full_coord[{dim}] * u.operand_strides[{index}][{dim}];\n"
@@ -1255,15 +1379,26 @@ fn render_reduce_cooperative(
         let read = read_cast(element_type, &expr);
         source.push_str(&format!("        scratch[{index}] = {read};\n"));
     }
-    let value_expr = push_body_steps(&mut source, resolved.element_body(), "        ", element_type);
-    source.push_str(&format!("        let value: {element_type} = {value_expr};\n"));
+    let value_expr = push_body_steps(
+        &mut source,
+        resolved.element_body(),
+        "        ",
+        element_type,
+    );
+    source.push_str(&format!(
+        "        let value: {element_type} = {value_expr};\n"
+    ));
     let combine_expr = scalar_op_expr(*reduce_op, &["accumulator", "value"]);
-    source.push_str(&format!("        accumulator = select(value, {combine_expr}, seeded);\n"));
+    source.push_str(&format!(
+        "        accumulator = select(value, {combine_expr}, seeded);\n"
+    ));
     source.push_str("        seeded = true;\n");
     source.push_str("    }\n");
 
     let combine_fn = subgroup_combine_fn(*reduce_op);
-    source.push_str(&format!("    let reduced: {element_type} = {combine_fn}(accumulator);\n"));
+    source.push_str(&format!(
+        "    let reduced: {element_type} = {combine_fn}(accumulator);\n"
+    ));
     source.push_str("    if (lane == 0u) {\n");
     source.push_str("        var out_offset: i32 = u.out_base;\n");
     for dim in 0..rank {
@@ -1356,7 +1491,9 @@ fn render_scan(resolved: &BoundOp, entry: &str, element_type: &str) -> String {
     uniforms.push_str("struct Uniforms {\n");
     uniforms.push_str("    outer_total: i32,\n");
     uniforms.push_str("    inner_len: i32,\n");
-    uniforms.push_str(&format!("    outer_extents: array<i32, {outer_rank_len}>,\n"));
+    uniforms.push_str(&format!(
+        "    outer_extents: array<i32, {outer_rank_len}>,\n"
+    ));
     uniforms.push_str(&format!("    operand_base: array<i32, {operand_count}>,\n"));
     uniforms.push_str(&format!(
         "    operand_strides: array<array<i32, {rank_len}>, {operand_count}>,\n"
@@ -1366,7 +1503,14 @@ fn render_scan(resolved: &BoundOp, entry: &str, element_type: &str) -> String {
     uniforms.push_str("};\n");
 
     let mut source = String::new();
-    preamble(&mut source, operand_count, 0, &alloc::vec![None; operand_count], element_type, &uniforms);
+    preamble(
+        &mut source,
+        operand_count,
+        0,
+        &alloc::vec![None; operand_count],
+        element_type,
+        &uniforms,
+    );
     kernel_signature(&mut source, entry);
     // `crate::msl`'s own `push_serial_reduce_body`/`run_scan` (the CPU
     // oracle) carry ONE accumulator across every outer line, not one per
@@ -1378,12 +1522,16 @@ fn render_scan(resolved: &BoundOp, entry: &str, element_type: &str) -> String {
     source.push_str("    if (gid != 0) { return; }\n");
 
     let (init_expr, seeded_init) = fold_init_tokens(*init);
-    source.push_str(&format!("    var accumulator: {element_type} = {init_expr};\n"));
+    source.push_str(&format!(
+        "    var accumulator: {element_type} = {init_expr};\n"
+    ));
     source.push_str(&format!("    var seeded: bool = {seeded_init};\n"));
 
     source.push_str("    for (var outer: i32 = 0; outer < u.outer_total; outer = outer + 1) {\n");
     if outer_rank > 0 {
-        source.push_str(&format!("        var outer_coord: array<i32, {outer_rank_len}>;\n"));
+        source.push_str(&format!(
+            "        var outer_coord: array<i32, {outer_rank_len}>;\n"
+        ));
         source.push_str("        var remaining: i32 = outer;\n");
         for dim in (0..outer_rank).rev() {
             source.push_str(&format!(
@@ -1393,7 +1541,9 @@ fn render_scan(resolved: &BoundOp, entry: &str, element_type: &str) -> String {
         }
     }
     for index in 0..operand_count {
-        source.push_str(&format!("        var running{index}: i32 = u.operand_base[{index}];\n"));
+        source.push_str(&format!(
+            "        var running{index}: i32 = u.operand_base[{index}];\n"
+        ));
         for dim in 0..outer_rank {
             source.push_str(&format!(
                 "        running{index} += outer_coord[{dim}] * u.operand_strides[{index}][{dim}];\n"
@@ -1419,8 +1569,15 @@ fn render_scan(resolved: &BoundOp, entry: &str, element_type: &str) -> String {
             "            running{index} += u.operand_strides[{index}][{last_dim}];\n"
         ));
     }
-    let value_expr = push_body_steps(&mut source, resolved.element_body(), "            ", element_type);
-    source.push_str(&format!("            let value: {element_type} = {value_expr};\n"));
+    let value_expr = push_body_steps(
+        &mut source,
+        resolved.element_body(),
+        "            ",
+        element_type,
+    );
+    source.push_str(&format!(
+        "            let value: {element_type} = {value_expr};\n"
+    ));
     let combine_expr = scalar_op_expr(*reduce_op, &["accumulator", "value"]);
     source.push_str(&format!(
         "            accumulator = select(value, {combine_expr}, seeded);\n"
@@ -1428,7 +1585,9 @@ fn render_scan(resolved: &BoundOp, entry: &str, element_type: &str) -> String {
     source.push_str("            seeded = true;\n");
     let stored = write_cast(element_type, "accumulator");
     source.push_str(&format!("            out[out_running] = {stored};\n"));
-    source.push_str(&format!("            out_running += u.out_strides[{last_dim}];\n"));
+    source.push_str(&format!(
+        "            out_running += u.out_strides[{last_dim}];\n"
+    ));
     source.push_str("        }\n");
     source.push_str("    }\n");
     source.push_str("}\n");
@@ -1472,7 +1631,8 @@ mod tests {
     #[test]
     fn elementwise_tanh_emits_wgsl_with_the_expected_shape() {
         let bound = elementwise_tanh_op(8);
-        let kernel = emit_wgsl(&bound, WgslCaps::default(), &PackedOperands::new()).expect("emit succeeds");
+        let kernel =
+            emit_wgsl(&bound, WgslCaps::default(), &PackedOperands::new()).expect("emit succeeds");
         assert!(kernel.source.contains("@compute"));
         assert!(kernel.source.contains("tanh("));
         assert_eq!(kernel.bindings.len(), 3);
@@ -1481,8 +1641,18 @@ mod tests {
 
     #[test]
     fn same_structure_different_extents_yield_identical_source() {
-        let small = emit_wgsl(&elementwise_tanh_op(4), WgslCaps::default(), &PackedOperands::new()).expect("emit succeeds");
-        let large = emit_wgsl(&elementwise_tanh_op(4096), WgslCaps::default(), &PackedOperands::new()).expect("emit succeeds");
+        let small = emit_wgsl(
+            &elementwise_tanh_op(4),
+            WgslCaps::default(),
+            &PackedOperands::new(),
+        )
+        .expect("emit succeeds");
+        let large = emit_wgsl(
+            &elementwise_tanh_op(4096),
+            WgslCaps::default(),
+            &PackedOperands::new(),
+        )
+        .expect("emit succeeds");
         assert_eq!(small.source, large.source);
         assert_ne!(small.threads, large.threads);
     }
@@ -1510,7 +1680,8 @@ mod tests {
         let shapes = infer(&program, &[]).expect("infer succeeds");
         let bound = bind(&program, &shapes, &[]).expect("bind succeeds");
         let bound = bound.into_iter().next().expect("one bound op");
-        let kernel = emit_wgsl(&bound, WgslCaps::default(), &PackedOperands::new()).expect("emit succeeds");
+        let kernel =
+            emit_wgsl(&bound, WgslCaps::default(), &PackedOperands::new()).expect("emit succeeds");
         assert!(kernel.source.contains("fn proxima_erf"));
         assert!(kernel.source.contains("proxima_erf(scratch[0])"));
     }
@@ -1538,7 +1709,8 @@ mod tests {
         let shapes = infer(&program, &[]).expect("infer succeeds");
         let bound = bind(&program, &shapes, &[]).expect("bind succeeds");
         let bound = bound.into_iter().next().expect("one bound op");
-        let error = emit_wgsl(&bound, WgslCaps::default(), &PackedOperands::new()).expect_err("f16 is rejected without shader_f16");
+        let error = emit_wgsl(&bound, WgslCaps::default(), &PackedOperands::new())
+            .expect_err("f16 is rejected without shader_f16");
         assert!(matches!(error, EmitError::UnsupportedDType { .. }));
     }
 
@@ -1569,11 +1741,18 @@ mod tests {
             shader_f16: true,
             ..WgslCaps::default()
         };
-        let kernel = emit_wgsl(&bound, caps, &PackedOperands::new()).expect("f16 emits when shader_f16 is set");
+        let kernel = emit_wgsl(&bound, caps, &PackedOperands::new())
+            .expect("f16 emits when shader_f16 is set");
         assert!(kernel.source.starts_with("enable f16;\n"));
         assert!(kernel.source.contains("tanh("));
-        assert!(kernel.source.contains("f16(in0[off0])"), "operand read must cast f32 down to f16");
-        assert!(kernel.source.contains("out[gid] = f32("), "output write must cast f16 back up to f32");
+        assert!(
+            kernel.source.contains("f16(in0[off0])"),
+            "operand read must cast f32 down to f16"
+        );
+        assert!(
+            kernel.source.contains("out[gid] = f32("),
+            "output write must cast f16 back up to f32"
+        );
     }
 
     #[test]
@@ -1599,7 +1778,8 @@ mod tests {
         let shapes = infer(&program, &[]).expect("infer succeeds");
         let bound = bind(&program, &shapes, &[]).expect("bind succeeds");
         let bound = bound.into_iter().next().expect("one bound op");
-        let kernel = emit_wgsl(&bound, WgslCaps::default(), &PackedOperands::new()).expect("bf16 collapses to f32 unconditionally");
+        let kernel = emit_wgsl(&bound, WgslCaps::default(), &PackedOperands::new())
+            .expect("bf16 collapses to f32 unconditionally");
         assert!(!kernel.source.contains("enable f16"));
         assert!(kernel.source.contains("var scratch: array<f32, 1>"));
     }
@@ -1653,7 +1833,10 @@ mod tests {
         );
         let shapes = infer(&program, &[]).expect("infer succeeds");
         let bound = bind(&program, &shapes, &[]).expect("bind succeeds");
-        bound.into_iter().next_back().expect("one bound op (the reduce)")
+        bound
+            .into_iter()
+            .next_back()
+            .expect("one bound op (the reduce)")
     }
 
     #[test]
@@ -1663,9 +1846,14 @@ mod tests {
             subgroup_size: Some(32),
             ..WgslCaps::default()
         };
-        let kernel = emit_wgsl(&bound, caps, &PackedOperands::new()).expect("cooperative reduce emits");
+        let kernel =
+            emit_wgsl(&bound, caps, &PackedOperands::new()).expect("cooperative reduce emits");
         assert!(kernel.source.contains("@workgroup_size(32)"));
-        assert!(kernel.source.contains("@builtin(subgroup_invocation_id) lane: u32"));
+        assert!(
+            kernel
+                .source
+                .contains("@builtin(subgroup_invocation_id) lane: u32")
+        );
         assert!(kernel.source.contains("subgroupAdd(accumulator)"));
         assert_eq!(kernel.workgroup_size, 32);
         // one whole subgroup dispatched per output element (m * n = 12).
@@ -1675,8 +1863,8 @@ mod tests {
     #[test]
     fn without_a_confirmed_subgroup_width_the_same_reduce_stays_serial() {
         let bound = matmul_reduce_op(4, 37, 3);
-        let kernel =
-            emit_wgsl(&bound, WgslCaps::default(), &PackedOperands::new()).expect("serial reduce emits");
+        let kernel = emit_wgsl(&bound, WgslCaps::default(), &PackedOperands::new())
+            .expect("serial reduce emits");
         assert!(!kernel.source.contains("subgroupAdd"));
         assert!(kernel.source.contains("@workgroup_size(64)"));
         assert_eq!(kernel.workgroup_size, WORKGROUP_SIZE);
@@ -1696,9 +1884,14 @@ mod tests {
         let shapes = infer(&program, &[]).expect("infer succeeds");
         let bound = bind(&program, &shapes, &[]).expect("bind succeeds");
         let bound = bound.into_iter().next().expect("one bound op");
-        let kernel = emit_wgsl(&bound, WgslCaps::default(), &PackedOperands::new()).expect("iota emits");
+        let kernel =
+            emit_wgsl(&bound, WgslCaps::default(), &PackedOperands::new()).expect("iota emits");
         assert!(kernel.source.contains("out[gid] = f32(gid);"));
-        assert_eq!(kernel.bindings.len(), 2, "output + uniforms, no operand bindings");
+        assert_eq!(
+            kernel.bindings.len(),
+            2,
+            "output + uniforms, no operand bindings"
+        );
         assert_eq!(kernel.threads, 6);
     }
 
@@ -1716,9 +1909,14 @@ mod tests {
         let shapes = infer(&program, &[]).expect("infer succeeds");
         let bound = bind(&program, &shapes, &[]).expect("bind succeeds");
         let bound = bound.into_iter().next().expect("one bound op");
-        let kernel = emit_wgsl(&bound, WgslCaps::default(), &PackedOperands::new()).expect("constant emits");
+        let kernel =
+            emit_wgsl(&bound, WgslCaps::default(), &PackedOperands::new()).expect("constant emits");
         assert!(kernel.source.contains("out[gid] = -1000000000.0;"));
-        assert_eq!(kernel.bindings.len(), 2, "output + uniforms, no operand bindings");
+        assert_eq!(
+            kernel.bindings.len(),
+            2,
+            "output + uniforms, no operand bindings"
+        );
         assert_eq!(kernel.threads, 4);
     }
 

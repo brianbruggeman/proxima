@@ -32,14 +32,38 @@ use proxima_tensor::op::{self, Extent, NodeId, Op, ReduceInit, ScalarOp};
 use proxima_tensor::shape;
 
 fn leaf(program: &mut Vec<Op>, name: &str, shape: alloc::vec::Vec<Extent>) -> NodeId {
-    op::append(program, Op::Input { dtype: DType::Float32, shape, name: Some(name.into()) })
+    op::append(
+        program,
+        Op::Input {
+            dtype: DType::Float32,
+            shape,
+            name: Some(name.into()),
+        },
+    )
 }
 
-fn elementwise(program: &mut Vec<Op>, body: ScalarOp, operands: alloc::vec::Vec<(NodeId, IndexMap)>) -> NodeId {
-    op::append(program, Op::Elementwise { dtype: DType::Float32, body, operands, name: None })
+fn elementwise(
+    program: &mut Vec<Op>,
+    body: ScalarOp,
+    operands: alloc::vec::Vec<(NodeId, IndexMap)>,
+) -> NodeId {
+    op::append(
+        program,
+        Op::Elementwise {
+            dtype: DType::Float32,
+            body,
+            operands,
+            name: None,
+        },
+    )
 }
 
-fn reduce_add(program: &mut Vec<Op>, operand: NodeId, in_map: IndexMap, out_map: IndexMap) -> NodeId {
+fn reduce_add(
+    program: &mut Vec<Op>,
+    operand: NodeId,
+    in_map: IndexMap,
+    out_map: IndexMap,
+) -> NodeId {
     op::append(
         program,
         Op::Reduce(proxima_tensor::op::Reduce {
@@ -120,7 +144,11 @@ fn build_block_layer(batch: usize, block_count: usize, block_size: usize) -> Blo
     let x = leaf(
         &mut program,
         "x",
-        alloc::vec![Extent::Static(batch as u32), Extent::Static(block_count as u32), Extent::Static(block_size as u32)],
+        alloc::vec![
+            Extent::Static(batch as u32),
+            Extent::Static(block_count as u32),
+            Extent::Static(block_size as u32)
+        ],
     );
     let w = leaf(
         &mut program,
@@ -134,14 +162,20 @@ fn build_block_layer(batch: usize, block_count: usize, block_size: usize) -> Blo
 
     // iter (b, block, o, i): x reads (b, block, i) -> axes (0,1,3);
     // w reads (block, o, i), broadcasting over b -> axes (1,2,3).
-    let product = elementwise(&mut program, ScalarOp::Multiply, alloc::vec![(x, proj(4, &[0, 1, 3])), (w, proj(4, &[1, 2, 3]))]);
+    let product = elementwise(
+        &mut program,
+        ScalarOp::Multiply,
+        alloc::vec![(x, proj(4, &[0, 1, 3])), (w, proj(4, &[1, 2, 3]))],
+    );
     let output = reduce_add(&mut program, product, identity(4), proj(4, &[0, 1, 2]));
 
     BlockLayer { program, output }
 }
 
 fn counter_pattern(seed: usize, count: usize) -> alloc::vec::Vec<f32> {
-    (0..count).map(|index| (((seed + index) * 7 % 13) as f32 - 6.0) / 24.0).collect()
+    (0..count)
+        .map(|index| (((seed + index) * 7 % 13) as f32 - 6.0) / 24.0)
+        .collect()
 }
 
 /// Node count for [`build_block_layer`] never depends on `block_count`: two
@@ -161,7 +195,11 @@ async fn program_size_is_constant_while_macs_track_nonzeros_not_dense_shape() {
 
     let mut node_counts: alloc::vec::Vec<usize> = alloc::vec::Vec::new();
     for &(block_count, block_size) in &sweep {
-        assert_eq!(block_count * block_size, DIM, "sweep case must actually partition the same dim");
+        assert_eq!(
+            block_count * block_size,
+            DIM,
+            "sweep case must actually partition the same dim"
+        );
         let layer = build_block_layer(BATCH, block_count, block_size);
         node_counts.push(layer.program.len());
 
@@ -174,18 +212,27 @@ async fn program_size_is_constant_while_macs_track_nonzeros_not_dense_shape() {
             layer.program.len(),
             macs as f64 / dense_macs as f64
         );
-        assert_eq!(macs, expected_macs, "mac count must equal batch * block_count * block_size^2");
+        assert_eq!(
+            macs, expected_macs,
+            "mac count must equal batch * block_count * block_size^2"
+        );
     }
 
     assert_eq!(
-        node_counts.iter().collect::<alloc::collections::BTreeSet<_>>().len(),
+        node_counts
+            .iter()
+            .collect::<alloc::collections::BTreeSet<_>>()
+            .len(),
         1,
         "program.len() must be the SAME constant across every block_count in the sweep: {node_counts:?}"
     );
     std::eprintln!(
         "program.len() is constant at {} across block_count in {:?}",
         node_counts[0],
-        sweep.iter().map(|(c, _)| *c).collect::<alloc::vec::Vec<_>>()
+        sweep
+            .iter()
+            .map(|(c, _)| *c)
+            .collect::<alloc::vec::Vec<_>>()
     );
 }
 
@@ -221,25 +268,48 @@ async fn constructed_sparse_output_matches_a_zero_padded_dense_reference() {
     let x_values = counter_pattern(3, BATCH * BLOCK_COUNT * BLOCK_SIZE);
     let w_values = counter_pattern(11, BLOCK_COUNT * BLOCK_SIZE * BLOCK_SIZE);
 
-    let sparse_evaluated = evaluate_named(&layer.program, &[], &[("x", &x_values), ("w", &w_values)], &[layer.output])
-        .expect("block layer lowers and evaluates");
-    let sparse_output = sparse_evaluated.get(layer.output).expect("output requested").0.to_vec();
+    let sparse_evaluated = evaluate_named(
+        &layer.program,
+        &[],
+        &[("x", &x_values), ("w", &w_values)],
+        &[layer.output],
+    )
+    .expect("block layer lowers and evaluates");
+    let sparse_output = sparse_evaluated
+        .get(layer.output)
+        .expect("output requested")
+        .0
+        .to_vec();
 
     let mut dense_program = alloc::vec::Vec::new();
-    let dense_x = leaf(&mut dense_program, "x_flat", alloc::vec![Extent::Static(BATCH as u32), Extent::Static(DIM as u32)]);
-    let dense_w = leaf(&mut dense_program, "w_dense", alloc::vec![Extent::Static(DIM as u32), Extent::Static(DIM as u32)]);
+    let dense_x = leaf(
+        &mut dense_program,
+        "x_flat",
+        alloc::vec![Extent::Static(BATCH as u32), Extent::Static(DIM as u32)],
+    );
+    let dense_w = leaf(
+        &mut dense_program,
+        "w_dense",
+        alloc::vec![Extent::Static(DIM as u32), Extent::Static(DIM as u32)],
+    );
     let dense_product = elementwise(
         &mut dense_program,
         ScalarOp::Multiply,
         alloc::vec![(dense_x, proj(3, &[0, 2])), (dense_w, proj(3, &[1, 2]))],
     );
-    let dense_output = reduce_add(&mut dense_program, dense_product, identity(3), proj(3, &[0, 1]));
+    let dense_output = reduce_add(
+        &mut dense_program,
+        dense_product,
+        identity(3),
+        proj(3, &[0, 1]),
+    );
 
     let mut w_dense_values = alloc::vec![0.0f32; DIM * DIM];
     for block in 0..BLOCK_COUNT {
         for out_local in 0..BLOCK_SIZE {
             for in_local in 0..BLOCK_SIZE {
-                let block_value = w_values[block * BLOCK_SIZE * BLOCK_SIZE + out_local * BLOCK_SIZE + in_local];
+                let block_value =
+                    w_values[block * BLOCK_SIZE * BLOCK_SIZE + out_local * BLOCK_SIZE + in_local];
                 let row = block * BLOCK_SIZE + out_local;
                 let column = block * BLOCK_SIZE + in_local;
                 w_dense_values[row * DIM + column] = block_value;
@@ -247,9 +317,17 @@ async fn constructed_sparse_output_matches_a_zero_padded_dense_reference() {
         }
     }
 
-    let dense_evaluated = evaluate_named(&dense_program, &[], &[("x_flat", &x_values), ("w_dense", &w_dense_values)], &[dense_output])
-        .expect("dense reference lowers and evaluates");
-    let dense_output_values = dense_evaluated.get(dense_output).expect("output requested").0;
+    let dense_evaluated = evaluate_named(
+        &dense_program,
+        &[],
+        &[("x_flat", &x_values), ("w_dense", &w_dense_values)],
+        &[dense_output],
+    )
+    .expect("dense reference lowers and evaluates");
+    let dense_output_values = dense_evaluated
+        .get(dense_output)
+        .expect("output requested")
+        .0;
 
     assert_eq!(sparse_output.len(), dense_output_values.len());
     let max_diff = sparse_output
@@ -258,7 +336,10 @@ async fn constructed_sparse_output_matches_a_zero_padded_dense_reference() {
         .map(|(&a, &b)| (a - b).abs())
         .fold(0.0f32, f32::max);
     std::eprintln!("constructed-sparse vs zero-padded-dense max abs diff = {max_diff}");
-    assert!(max_diff < 1e-4, "constructed sparse layer must match its dense zero-padded equivalent, max diff {max_diff}");
+    assert!(
+        max_diff < 1e-4,
+        "constructed sparse layer must match its dense zero-padded equivalent, max diff {max_diff}"
+    );
 }
 
 /// Same comparison, deliberately broken: place every block TRANSPOSED
@@ -276,26 +357,49 @@ async fn dense_reference_mismatch_is_actually_caught() {
     let x_values = counter_pattern(5, BATCH * BLOCK_COUNT * BLOCK_SIZE);
     let w_values = counter_pattern(17, BLOCK_COUNT * BLOCK_SIZE * BLOCK_SIZE);
 
-    let sparse_evaluated = evaluate_named(&layer.program, &[], &[("x", &x_values), ("w", &w_values)], &[layer.output])
-        .expect("block layer lowers and evaluates");
-    let sparse_output = sparse_evaluated.get(layer.output).expect("output requested").0.to_vec();
+    let sparse_evaluated = evaluate_named(
+        &layer.program,
+        &[],
+        &[("x", &x_values), ("w", &w_values)],
+        &[layer.output],
+    )
+    .expect("block layer lowers and evaluates");
+    let sparse_output = sparse_evaluated
+        .get(layer.output)
+        .expect("output requested")
+        .0
+        .to_vec();
 
     let mut dense_program = alloc::vec::Vec::new();
-    let dense_x = leaf(&mut dense_program, "x_flat", alloc::vec![Extent::Static(BATCH as u32), Extent::Static(DIM as u32)]);
-    let dense_w = leaf(&mut dense_program, "w_dense", alloc::vec![Extent::Static(DIM as u32), Extent::Static(DIM as u32)]);
+    let dense_x = leaf(
+        &mut dense_program,
+        "x_flat",
+        alloc::vec![Extent::Static(BATCH as u32), Extent::Static(DIM as u32)],
+    );
+    let dense_w = leaf(
+        &mut dense_program,
+        "w_dense",
+        alloc::vec![Extent::Static(DIM as u32), Extent::Static(DIM as u32)],
+    );
     let dense_product = elementwise(
         &mut dense_program,
         ScalarOp::Multiply,
         alloc::vec![(dense_x, proj(3, &[0, 2])), (dense_w, proj(3, &[1, 2]))],
     );
-    let dense_output = reduce_add(&mut dense_program, dense_product, identity(3), proj(3, &[0, 1]));
+    let dense_output = reduce_add(
+        &mut dense_program,
+        dense_product,
+        identity(3),
+        proj(3, &[0, 1]),
+    );
 
     // deliberately WRONG: place every block transposed (row/col swapped).
     let mut w_dense_values = alloc::vec![0.0f32; DIM * DIM];
     for block in 0..BLOCK_COUNT {
         for out_local in 0..BLOCK_SIZE {
             for in_local in 0..BLOCK_SIZE {
-                let block_value = w_values[block * BLOCK_SIZE * BLOCK_SIZE + out_local * BLOCK_SIZE + in_local];
+                let block_value =
+                    w_values[block * BLOCK_SIZE * BLOCK_SIZE + out_local * BLOCK_SIZE + in_local];
                 let row = block * BLOCK_SIZE + in_local; // swapped on purpose
                 let column = block * BLOCK_SIZE + out_local; // swapped on purpose
                 w_dense_values[row * DIM + column] = block_value;
@@ -303,9 +407,17 @@ async fn dense_reference_mismatch_is_actually_caught() {
         }
     }
 
-    let dense_evaluated = evaluate_named(&dense_program, &[], &[("x_flat", &x_values), ("w_dense", &w_dense_values)], &[dense_output])
-        .expect("dense reference lowers and evaluates");
-    let dense_output_values = dense_evaluated.get(dense_output).expect("output requested").0;
+    let dense_evaluated = evaluate_named(
+        &dense_program,
+        &[],
+        &[("x_flat", &x_values), ("w_dense", &w_dense_values)],
+        &[dense_output],
+    )
+    .expect("dense reference lowers and evaluates");
+    let dense_output_values = dense_evaluated
+        .get(dense_output)
+        .expect("output requested")
+        .0;
 
     let max_diff = sparse_output
         .iter()
@@ -313,7 +425,10 @@ async fn dense_reference_mismatch_is_actually_caught() {
         .map(|(&a, &b)| (a - b).abs())
         .fold(0.0f32, f32::max);
     std::eprintln!("deliberately-transposed dense reference max abs diff = {max_diff}");
-    assert!(max_diff > 1e-3, "a transposed dense reference must NOT match (asymmetric block weights make this observable): diff {max_diff}");
+    assert!(
+        max_diff > 1e-3,
+        "a transposed dense reference must NOT match (asymmetric block weights make this observable): diff {max_diff}"
+    );
 }
 
 const GRADIENT_CHECK_ATOL: f32 = 1e-2;
@@ -365,11 +480,15 @@ async fn adjoint_of_a_constructed_sparse_layer_stays_small_and_gradient_checks()
         let loss = reduce_add(&mut program, layer.output, identity(3), empty(3));
 
         let differentiated = differentiate(&program, loss).expect("scalar loss differentiates");
-        let grad_x = differentiated.gradient_of_named("x").expect("x feeds the loss");
-        let grad_w = differentiated.gradient_of_named("w").expect("w feeds the loss");
+        let grad_x = differentiated
+            .gradient_of_named("x")
+            .expect("x feeds the loss");
+        let grad_w = differentiated
+            .gradient_of_named("w")
+            .expect("w feeds the loss");
 
-        let adjoint_appended_macs =
-            total_macs_from(&differentiated.program, program.len()).expect("adjoint-appended slice infers");
+        let adjoint_appended_macs = total_macs_from(&differentiated.program, program.len())
+            .expect("adjoint-appended slice infers");
         std::eprintln!(
             "block_count={block_count} block_size={block_size}: forward program.len()={} \
              adjoint program.len()={} forward_macs={forward_macs} adjoint_appended_macs={adjoint_appended_macs} \
@@ -394,8 +513,13 @@ async fn adjoint_of_a_constructed_sparse_layer_stays_small_and_gradient_checks()
         let x_values = counter_pattern(19, batch * block_count * block_size);
         let w_values = counter_pattern(23, block_count * block_size * block_size);
 
-        let evaluated = evaluate_named(&differentiated.program, &[], &[("x", &x_values), ("w", &w_values)], &[grad_x, grad_w])
-            .expect("adjoint program lowers and evaluates");
+        let evaluated = evaluate_named(
+            &differentiated.program,
+            &[],
+            &[("x", &x_values), ("w", &w_values)],
+            &[grad_x, grad_w],
+        )
+        .expect("adjoint program lowers and evaluates");
         let analytic_x = evaluated.get(grad_x).expect("requested").0.to_vec();
         let analytic_w = evaluated.get(grad_w).expect("requested").0.to_vec();
 
@@ -417,9 +541,17 @@ async fn adjoint_of_a_constructed_sparse_layer_stays_small_and_gradient_checks()
             for index in checked_indices(perturbed.len()) {
                 let original = perturbed[index];
                 perturbed[index] = original + step;
-                let plus = if label == "x" { loss_at(&perturbed, &other_fixed) } else { loss_at(&other_fixed, &perturbed) };
+                let plus = if label == "x" {
+                    loss_at(&perturbed, &other_fixed)
+                } else {
+                    loss_at(&other_fixed, &perturbed)
+                };
                 perturbed[index] = original - step;
-                let minus = if label == "x" { loss_at(&perturbed, &other_fixed) } else { loss_at(&other_fixed, &perturbed) };
+                let minus = if label == "x" {
+                    loss_at(&perturbed, &other_fixed)
+                } else {
+                    loss_at(&other_fixed, &perturbed)
+                };
                 perturbed[index] = original;
 
                 let numeric = (plus - minus) / (2.0 * step);
@@ -447,12 +579,19 @@ async fn gradient_check_tolerance_rejects_a_deliberately_wrong_gradient() {
     let mut program = layer.program.clone();
     let loss = reduce_add(&mut program, layer.output, identity(3), empty(3));
     let differentiated = differentiate(&program, loss).expect("scalar loss differentiates");
-    let grad_x = differentiated.gradient_of_named("x").expect("x feeds the loss");
+    let grad_x = differentiated
+        .gradient_of_named("x")
+        .expect("x feeds the loss");
 
     let x_values = counter_pattern(7, batch * block_count * block_size);
     let w_values = counter_pattern(13, block_count * block_size * block_size);
-    let evaluated = evaluate_named(&differentiated.program, &[], &[("x", &x_values), ("w", &w_values)], &[grad_x])
-        .expect("adjoint program lowers and evaluates");
+    let evaluated = evaluate_named(
+        &differentiated.program,
+        &[],
+        &[("x", &x_values), ("w", &w_values)],
+        &[grad_x],
+    )
+    .expect("adjoint program lowers and evaluates");
     let analytic_x = evaluated.get(grad_x).expect("requested").0.to_vec();
 
     let step = 1e-3f32;
@@ -504,14 +643,21 @@ async fn mixed_block_shapes_cost_one_op_pair_per_distinct_shape() {
     let group_a_macs = total_macs(&group_a.program).expect("group a infers");
     let group_b_macs = total_macs(&group_b.program).expect("group b infers");
 
-    std::eprintln!("uniform (1 shape group, block_count=12): program.len()={} macs={uniform_macs}", uniform.program.len());
+    std::eprintln!(
+        "uniform (1 shape group, block_count=12): program.len()={} macs={uniform_macs}",
+        uniform.program.len()
+    );
     std::eprintln!(
         "mixed (2 shape groups, 8x10 + 4x5): combined program.len()={} combined macs={}",
         group_a.program.len() + group_b.program.len(),
         group_a_macs + group_b_macs
     );
 
-    assert_eq!(uniform.program.len(), 4, "one shape group is exactly Input(x) + Input(w) + Elementwise + Reduce");
+    assert_eq!(
+        uniform.program.len(),
+        4,
+        "one shape group is exactly Input(x) + Input(w) + Elementwise + Reduce"
+    );
     assert_eq!(
         group_a.program.len() + group_b.program.len(),
         8,

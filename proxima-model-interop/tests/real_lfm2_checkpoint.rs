@@ -23,16 +23,20 @@
 #![cfg(feature = "std")]
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-use proxima_model_interop::{Lfm2Architecture, lfm2_architecture_from_metadata, lfm2_forward_values, run_lfm2_prefill};
+use proxima_model_interop::{
+    Lfm2Architecture, lfm2_architecture_from_metadata, lfm2_forward_values, run_lfm2_prefill,
+};
 
-const MODEL_PATH: &str = "/Users/brianbruggeman/.lmstudio/models/LiquidAI/LFM2.5-8B-A1B-GGUF/LFM2.5-8B-A1B-Q4_K_M.gguf";
+const MODEL_PATH: &str =
+    "/Users/brianbruggeman/.lmstudio/models/LiquidAI/LFM2.5-8B-A1B-GGUF/LFM2.5-8B-A1B-Q4_K_M.gguf";
 
 fn checkpoint_present() -> bool {
     std::path::Path::new(MODEL_PATH).exists()
 }
 
 fn load_real_vocab(parsed: &proxima_gguf::pipe::ParsedGguf) -> proxima_tokenizer::Vocab {
-    proxima_tokenizer::gguf::vocab_from_metadata(parsed).expect("build a vocab from the real lfm2 gguf metadata")
+    proxima_tokenizer::gguf::vocab_from_metadata(parsed)
+        .expect("build a vocab from the real lfm2 gguf metadata")
 }
 
 /// The real checkpoint's own hparams, read once and printed -- the same
@@ -49,9 +53,11 @@ fn lfm2_architecture_from_metadata_matches_the_real_checkpoints_own_llama_cli_du
         return;
     }
     let file_bytes = std::fs::read(MODEL_PATH).expect("read the real lfm2 gguf checkpoint");
-    let parsed = proxima_gguf::pipe::parse_complete(&file_bytes).expect("parse the real lfm2 gguf checkpoint");
+    let parsed = proxima_gguf::pipe::parse_complete(&file_bytes)
+        .expect("parse the real lfm2 gguf checkpoint");
 
-    let architecture = lfm2_architecture_from_metadata(&parsed).expect("derive Lfm2Architecture from the real checkpoint");
+    let architecture = lfm2_architecture_from_metadata(&parsed)
+        .expect("derive Lfm2Architecture from the real checkpoint");
     std::println!("real_lfm2 architecture={architecture:?}");
 
     assert_eq!(architecture.block_count, 24);
@@ -66,10 +72,20 @@ fn lfm2_architecture_from_metadata_matches_the_real_checkpoints_own_llama_cli_du
     assert_eq!(architecture.l_cache, 3);
     assert_eq!(architecture.vocab, 128000);
 
-    let attention_layers = architecture.layer_kinds.iter().filter(|kind| matches!(kind, proxima_tensor::spec::LayerKind::Attention)).count();
+    let attention_layers = architecture
+        .layer_kinds
+        .iter()
+        .filter(|kind| matches!(kind, proxima_tensor::spec::LayerKind::Attention))
+        .count();
     let conv_layers = architecture.layer_kinds.len() - attention_layers;
-    assert_eq!(attention_layers, 6, "real checkpoint: 6 attention layers (index % 4 == 2)");
-    assert_eq!(conv_layers, 18, "real checkpoint: 18 short-convolution layers");
+    assert_eq!(
+        attention_layers, 6,
+        "real checkpoint: 6 attention layers (index % 4 == 2)"
+    );
+    assert_eq!(
+        conv_layers, 18,
+        "real checkpoint: 18 short-convolution layers"
+    );
 }
 
 /// Binds every real weight and runs one prefill pass over a short prompt --
@@ -86,8 +102,10 @@ fn runs_one_real_forward_pass_over_the_real_checkpoint() {
         return;
     }
     let file_bytes = std::fs::read(MODEL_PATH).expect("read the real lfm2 gguf checkpoint");
-    let parsed = proxima_gguf::pipe::parse_complete(&file_bytes).expect("parse the real lfm2 gguf checkpoint");
-    let architecture: Lfm2Architecture = lfm2_architecture_from_metadata(&parsed).expect("derive Lfm2Architecture");
+    let parsed = proxima_gguf::pipe::parse_complete(&file_bytes)
+        .expect("parse the real lfm2 gguf checkpoint");
+    let architecture: Lfm2Architecture =
+        lfm2_architecture_from_metadata(&parsed).expect("derive Lfm2Architecture");
     let vocab = load_real_vocab(&parsed);
 
     let prompt = "The capital of France is";
@@ -96,7 +114,10 @@ fn runs_one_real_forward_pass_over_the_real_checkpoint() {
     match outcome {
         Ok((ids, text)) => {
             std::println!("prompt={prompt:?} generated_ids={ids:?} generated_text={text:?}");
-            assert!(!ids.is_empty(), "at least the prompt's own ids must be present");
+            assert!(
+                !ids.is_empty(),
+                "at least the prompt's own ids must be present"
+            );
         }
         Err(error) => {
             std::println!("real lfm2 forward failed: {error:?}");
@@ -119,17 +140,19 @@ fn forward_values_argmax_matches_run_lfm2_prefills_first_generated_token() {
         return;
     }
     let file_bytes = std::fs::read(MODEL_PATH).expect("read the real lfm2 gguf checkpoint");
-    let parsed = proxima_gguf::pipe::parse_complete(&file_bytes).expect("parse the real lfm2 gguf checkpoint");
-    let architecture: Lfm2Architecture = lfm2_architecture_from_metadata(&parsed).expect("derive Lfm2Architecture");
+    let parsed = proxima_gguf::pipe::parse_complete(&file_bytes)
+        .expect("parse the real lfm2 gguf checkpoint");
+    let architecture: Lfm2Architecture =
+        lfm2_architecture_from_metadata(&parsed).expect("derive Lfm2Architecture");
     let vocab = load_real_vocab(&parsed);
 
     let prompt = "The capital of France is";
     let add_bos = vocab.add_bos_token().unwrap_or(true);
-    let ids =
-        proxima_tokenizer::encode_with_bos_eos(prompt, &vocab, add_bos, false).expect("tokenize the real prompt");
+    let ids = proxima_tokenizer::encode_with_bos_eos(prompt, &vocab, add_bos, false)
+        .expect("tokenize the real prompt");
 
-    let (logits, extras) =
-        lfm2_forward_values(&parsed, &file_bytes, &architecture, &ids, &[]).expect("one-shot lfm2 forward");
+    let (logits, extras) = lfm2_forward_values(&parsed, &file_bytes, &architecture, &ids, &[])
+        .expect("one-shot lfm2 forward");
     assert!(extras.is_empty(), "no extra node ids were requested");
 
     let mut best_token = 0u32;
@@ -141,8 +164,9 @@ fn forward_values_argmax_matches_run_lfm2_prefills_first_generated_token() {
         }
     }
 
-    let (generated_ids, _text) = run_lfm2_prefill(&parsed, &file_bytes, &architecture, &vocab, prompt, 1)
-        .expect("run_lfm2_prefill's own one-token decode");
+    let (generated_ids, _text) =
+        run_lfm2_prefill(&parsed, &file_bytes, &architecture, &vocab, prompt, 1)
+            .expect("run_lfm2_prefill's own one-token decode");
     let first_generated_token = generated_ids[ids.len()];
 
     assert_eq!(

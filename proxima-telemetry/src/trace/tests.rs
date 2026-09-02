@@ -2,7 +2,6 @@ use alloc::rc::Rc;
 use alloc::vec::Vec;
 use core::cell::RefCell;
 
-
 use crate::id::{SpanId, TraceId};
 use crate::tag::{ScalarValue, Tag, TagSink};
 use crate::trace::clock::MonotonicCounter;

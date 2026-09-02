@@ -64,7 +64,7 @@ mod tests {
     use core::cell::RefCell;
 
     use bytes::Bytes;
-    
+
     use crate::clock::MonotonicCounter;
     use crate::id::{SpanId, TraceFlags, TraceId};
     use crate::level::Level;

@@ -104,9 +104,24 @@ pub(crate) fn constant(program: &mut Vec<Op>, dtype: DType, value: f32) -> NodeI
 /// constructor at `value: 1.0` for the identical reason -- a broadcast
 /// condition operand can leave an axis just as unconstrained as a reduced
 /// one does.
-pub(crate) fn broadcast_anchor(program: &mut Vec<Op>, dtype: DType, extents: &[u64], value: f32) -> NodeId {
-    let shape = extents.iter().map(|&extent| Extent::Static(extent as u32)).collect();
-    op::append(program, Op::Constant { dtype, shape, value })
+pub(crate) fn broadcast_anchor(
+    program: &mut Vec<Op>,
+    dtype: DType,
+    extents: &[u64],
+    value: f32,
+) -> NodeId {
+    let shape = extents
+        .iter()
+        .map(|&extent| Extent::Static(extent as u32))
+        .collect();
+    op::append(
+        program,
+        Op::Constant {
+            dtype,
+            shape,
+            value,
+        },
+    )
 }
 
 /// Reconstructs the full iteration-space extents an already-validated
@@ -198,5 +213,8 @@ pub(crate) fn scan(
 /// (this module's own doc table, "stride / dilation").
 pub(crate) fn reverse_1d(extent: u64) -> Option<IndexMap> {
     let offset = i32::try_from(extent.saturating_sub(1)).ok()?;
-    Some(IndexMap::Affine(map::affine(1, &[(&[map::AxisTerm::scaled(0, -1)], offset)])))
+    Some(IndexMap::Affine(map::affine(
+        1,
+        &[(&[map::AxisTerm::scaled(0, -1)], offset)],
+    )))
 }

@@ -66,7 +66,11 @@ use core::arch::aarch64::{
 // features rather than duplicating the `use` per format.
 #[cfg(all(
     target_arch = "aarch64",
-    any(feature = "q4k-int8-dot", feature = "q5k-int8-dot", feature = "q6k-int8-dot")
+    any(
+        feature = "q4k-int8-dot",
+        feature = "q5k-int8-dot",
+        feature = "q6k-int8-dot"
+    )
 ))]
 use core::arch::aarch64::{
     vaddvq_s32, vandq_u8, vdupq_n_s32, vdupq_n_u8, vld1q_s8, vld1q_u8, vreinterpretq_s8_u8,
@@ -85,14 +89,17 @@ use core::arch::aarch64::{vld1q_s8_x2, vld1q_u8_x2};
 // `vaddq_s32`) instead of the auto-vectorized scalar loop this replaced.
 #[cfg(all(target_arch = "aarch64", feature = "q4k-int8-dot"))]
 use core::arch::aarch64::{
-    vaddq_s32, vget_high_s16, vget_low_s16, vld1_u32, vld1q_s16, vmovl_u8, vmull_s16,
-    vpaddq_s16, vreinterpret_u8_u32, vreinterpretq_s16_u16,
+    vaddq_s32, vget_high_s16, vget_low_s16, vld1_u32, vld1q_s16, vmovl_u8, vmull_s16, vpaddq_s16,
+    vreinterpret_u8_u32, vreinterpretq_s16_u16,
 };
 // `dot_q5k_q8k_block_neon_dotprod`/`dot_q6k_q8k_block_neon_dotprod`'s extra
 // intrinsics beyond the `Q4_K` set above -- both need to OR a shifted
 // high-bit plane into the low nibble, which `Q4_K` (no high-bit plane at
 // all) never does.
-#[cfg(all(target_arch = "aarch64", any(feature = "q5k-int8-dot", feature = "q6k-int8-dot")))]
+#[cfg(all(
+    target_arch = "aarch64",
+    any(feature = "q5k-int8-dot", feature = "q6k-int8-dot")
+))]
 use core::arch::aarch64::{vorrq_u8, vshlq_n_u8};
 // `dot_q6k_q8k_block_neon_dotprod`'s own extra intrinsics: `Q6_K`'s levels
 // are biased by -32 (`x = d*sc*(q-32)`, `q6_k.rs`'s own module doc) before
@@ -109,13 +116,14 @@ use core::arch::aarch64::{vdupq_n_s8, vsubq_s8};
 // regardless of `-C target-feature=+avx2`), the `#[target_feature(enable =
 // "avx2")]` on the functions below is what keeps the actual instructions
 // gated, not this import.
+use core::any::TypeId;
 #[cfg(all(target_arch = "x86_64", feature = "q4k-int8-dot"))]
 use core::arch::x86_64::{
-    __m256i, _mm256_and_si256, _mm256_castsi256_si128, _mm256_extracti128_si256, _mm256_loadu_si256,
-    _mm256_maddubs_epi16, _mm256_madd_epi16, _mm256_set1_epi16, _mm256_set1_epi8, _mm256_srli_epi16,
-    _mm_add_epi32, _mm_cvtsi128_si32, _mm_shuffle_epi32, _mm_unpackhi_epi64,
+    __m256i, _mm_add_epi32, _mm_cvtsi128_si32, _mm_shuffle_epi32, _mm_unpackhi_epi64,
+    _mm256_and_si256, _mm256_castsi256_si128, _mm256_extracti128_si256, _mm256_loadu_si256,
+    _mm256_madd_epi16, _mm256_maddubs_epi16, _mm256_set1_epi8, _mm256_set1_epi16,
+    _mm256_srli_epi16,
 };
-use core::any::TypeId;
 use core::cell::RefCell;
 use core::future::Future;
 use core::num::NonZeroUsize;
@@ -137,24 +145,29 @@ use core::sync::atomic::AtomicU64;
 ))]
 use core::sync::atomic::Ordering;
 #[cfg(feature = "epilogue-profile-probe")]
-use core::sync::atomic::{AtomicU64 as EpilogueProfileAtomicU64, Ordering as EpilogueProfileOrdering};
+use core::sync::atomic::{
+    AtomicU64 as EpilogueProfileAtomicU64, Ordering as EpilogueProfileOrdering,
+};
 // default-on since the ROW 186 promotion (`docs/discipline.md`) -- the
 // counters and the `AtomicBool` bench/test escape valve both need this
 // import unconditionally now, not only under a probe feature.
-use core::sync::atomic::{AtomicBool as EpilogueFuseAtomicBool, AtomicU64 as EpilogueFuseAtomicU64, Ordering as EpilogueFuseOrdering};
+use core::sync::atomic::{
+    AtomicBool as EpilogueFuseAtomicBool, AtomicU64 as EpilogueFuseAtomicU64,
+    Ordering as EpilogueFuseOrdering,
+};
 use std::borrow::Cow;
-use std::thread;
 use std::sync::atomic::AtomicUsize;
-use std::sync::mpsc::{sync_channel, SyncSender};
+use std::sync::mpsc::{SyncSender, sync_channel};
 use std::sync::{Arc, OnceLock};
+use std::thread;
 
+use prime::os::background::ProximaBackgroundPool;
+use prime::os::cohort::{ChunkIndex, CohortRound, CohortSession, ThreadCohort};
 use proxima_primitives::block_on;
 use proxima_primitives::pipe::Pipe;
 use proxima_primitives::pipe::fan_in::Quorum;
 #[cfg(feature = "instrument")]
 use proxima_telemetry::counter;
-use prime::os::background::ProximaBackgroundPool;
-use prime::os::cohort::{ChunkIndex, CohortRound, CohortSession, ThreadCohort};
 
 type MatmulCohort = ThreadCohort<TensorError>;
 type MatmulSession<'a> = CohortSession<'a, TensorError>;
@@ -434,8 +447,10 @@ pub fn evaluate_named(
     named: &[(&str, &[f32])],
     outputs: &[NodeId],
 ) -> Result<Evaluated, TensorError> {
-    let wrapped: Vec<(&str, QuantizedBlock)> =
-        named.iter().map(|(name, data)| (*name, QuantizedBlock::Float32(data))).collect();
+    let wrapped: Vec<(&str, QuantizedBlock)> = named
+        .iter()
+        .map(|(name, data)| (*name, QuantizedBlock::Float32(data)))
+        .collect();
     evaluate_quantized_named(program, symbols, &wrapped, outputs)
 }
 
@@ -605,7 +620,12 @@ fn dead_resolved_nodes(resolved: &[BoundOp], effective_outputs: &[NodeId]) -> BT
 fn static_resolved_nodes(resolved: &[BoundOp], dead: &BTreeSet<NodeId>) -> BTreeSet<NodeId> {
     resolved
         .iter()
-        .filter(|computed| matches!(computed.kind, BoundOpKind::Constant { .. } | BoundOpKind::Iota))
+        .filter(|computed| {
+            matches!(
+                computed.kind,
+                BoundOpKind::Constant { .. } | BoundOpKind::Iota
+            )
+        })
         .map(|computed| computed.node)
         .filter(|node| !dead.contains(node))
         .collect()
@@ -626,7 +646,11 @@ fn static_resolved_nodes(resolved: &[BoundOp], dead: &BTreeSet<NodeId>) -> BTree
 /// The same shape/dtype/output errors [`evaluate_named`] itself raises,
 /// since this runs the identical `prepare`-shaped validation once up front
 /// instead of on every call.
-pub fn build_static_arena(program: &[Op], symbols: &[u64], outputs: &[NodeId]) -> Result<StaticArena, TensorError> {
+pub fn build_static_arena(
+    program: &[Op],
+    symbols: &[u64],
+    outputs: &[NodeId],
+) -> Result<StaticArena, TensorError> {
     build_static_arena_with_constants(program, symbols, outputs, &[])
 }
 
@@ -686,7 +710,9 @@ pub fn build_static_arena_with_constants(
     let mut input_names = Vec::with_capacity(block_nodes.len());
     let mut buffers: Vec<Option<Vec<f32>>> = vec![None; program.len()];
     for node in &block_nodes {
-        let name = program[node.0 as usize].name().ok_or(TensorError::UnnamedInput(*node))?;
+        let name = program[node.0 as usize]
+            .name()
+            .ok_or(TensorError::UnnamedInput(*node))?;
         input_names.push((*node, String::from(name)));
         buffers[node.0 as usize] = Some(vec![0.0f32; element_count(shapes.of(*node))]);
     }
@@ -705,13 +731,21 @@ pub fn build_static_arena_with_constants(
     // f32-only (`reject_non_float32` above), so `epilogue_fuse_plan`'s own
     // quantized-weight exclusion guard is a no-op here, matching
     // `evaluate_named`'s own all-`Float32` call into this same machinery.
-    let (epilogue_fuse_plan, layer_norm_cluster_plan, rewrite_fires) =
-        run_rewrite_worklist(&resolved, program.len(), &effective_outputs, &BTreeMap::new());
+    let (epilogue_fuse_plan, layer_norm_cluster_plan, rewrite_fires) = run_rewrite_worklist(
+        &resolved,
+        program.len(),
+        &effective_outputs,
+        &BTreeMap::new(),
+    );
     record_rewrite_engine_fires(&rewrite_fires);
     let epilogue_fuse_skip: BTreeSet<NodeId> = epilogue_fuse_plan
         .values()
         .map(|(index, ..)| resolved[*index].node)
-        .chain(layer_norm_cluster_plan.values().flat_map(|cluster| cluster.skip))
+        .chain(
+            layer_norm_cluster_plan
+                .values()
+                .flat_map(|cluster| cluster.skip),
+        )
         .collect();
     let epilogue_fuse_fire_at: BTreeMap<usize, Vec<NodeId>> = {
         let mut grouped: BTreeMap<usize, Vec<NodeId>> = BTreeMap::new();
@@ -719,14 +753,20 @@ pub fn build_static_arena_with_constants(
             if layer_norm_cluster_plan.contains_key(reduce_node) {
                 continue;
             }
-            grouped.entry(*fire_position).or_default().push(*reduce_node);
+            grouped
+                .entry(*fire_position)
+                .or_default()
+                .push(*reduce_node);
         }
         grouped
     };
     let layer_norm_cluster_fire_at: BTreeMap<usize, Vec<NodeId>> = {
         let mut grouped: BTreeMap<usize, Vec<NodeId>> = BTreeMap::new();
         for (reduce_node, cluster) in &layer_norm_cluster_plan {
-            grouped.entry(cluster.fire_position).or_default().push(*reduce_node);
+            grouped
+                .entry(cluster.fire_position)
+                .or_default()
+                .push(*reduce_node);
         }
         grouped
     };
@@ -746,7 +786,11 @@ pub fn build_static_arena_with_constants(
             reason: "static arena has no pre-sized slot for this constant input -- build_static_arena did not size it",
         })?;
         if slot.len() != data.len() {
-            return Err(TensorError::InputSizeMismatch { node: *node, expected: slot.len(), found: data.len() });
+            return Err(TensorError::InputSizeMismatch {
+                node: *node,
+                expected: slot.len(),
+                found: data.len(),
+            });
         }
         slot.copy_from_slice(data);
     }
@@ -765,7 +809,8 @@ pub fn build_static_arena_with_constants(
     }
 
     #[cfg(target_arch = "aarch64")]
-    let packed_width_panels = build_packed_width_panels(&resolved, &shapes, &buffers, &input_names, constant_inputs);
+    let packed_width_panels =
+        build_packed_width_panels(&resolved, &shapes, &buffers, &input_names, constant_inputs);
     #[cfg(not(target_arch = "aarch64"))]
     let packed_width_panels = BTreeMap::new();
 
@@ -801,7 +846,10 @@ pub fn build_static_arena_with_constants(
 /// the program's [`Op::Input`] names; [`TensorError::InputSizeMismatch`] if
 /// a bound buffer's length no longer matches the size [`build_static_arena`]
 /// fixed for it (a genuinely different-shaped call, not a training step).
-pub fn evaluate_named_with_arena(arena: &mut StaticArena, named: &[(&str, &[f32])]) -> Result<Evaluated, TensorError> {
+pub fn evaluate_named_with_arena(
+    arena: &mut StaticArena,
+    named: &[(&str, &[f32])],
+) -> Result<Evaluated, TensorError> {
     bind_named_inputs_into_arena(arena, named, true)?;
     run_resolved_nodes_in_arena(arena)?;
 
@@ -810,7 +858,10 @@ pub fn evaluate_named_with_arena(arena: &mut StaticArena, named: &[(&str, &[f32]
         .iter()
         .map(|node| {
             let shape = arena.shapes.of(*node).to_vec();
-            let data = arena.buffers[node.0 as usize].as_deref().unwrap_or(&[]).to_vec();
+            let data = arena.buffers[node.0 as usize]
+                .as_deref()
+                .unwrap_or(&[])
+                .to_vec();
             (*node, shape, data)
         })
         .collect();
@@ -823,9 +874,16 @@ pub fn evaluate_named_with_arena(arena: &mut StaticArena, named: &[(&str, &[f32]
 /// false`: a name absent from `named` is treated as "already correct in
 /// the arena" (the in-place rebind lever put it there) rather than an
 /// error, instead of duplicating the loop body.
-fn bind_named_inputs_into_arena(arena: &mut StaticArena, named: &[(&str, &[f32])], require_all: bool) -> Result<(), TensorError> {
+fn bind_named_inputs_into_arena(
+    arena: &mut StaticArena,
+    named: &[(&str, &[f32])],
+    require_all: bool,
+) -> Result<(), TensorError> {
     for (node, name) in &arena.input_names {
-        let found = named.iter().find(|(candidate, _)| candidate == name).map(|(_, data)| *data);
+        let found = named
+            .iter()
+            .find(|(candidate, _)| candidate == name)
+            .map(|(_, data)| *data);
         let data = match found {
             Some(data) => data,
             None if require_all => return Err(TensorError::UnboundInputName(name.clone())),
@@ -863,7 +921,9 @@ fn run_resolved_nodes_in_arena(arena: &mut StaticArena) -> Result<(), TensorErro
         // this SAME plan's own `fire_position` (which may be this position
         // or an earlier one, never later -- `epilogue_fuse_plan`/
         // `layer_norm_cluster_plan`'s own `fire_position >= index` guard).
-        let skip_compute = arena.dead.contains(&node) || arena.static_nodes.contains(&node) || arena.epilogue_fuse_skip.contains(&node);
+        let skip_compute = arena.dead.contains(&node)
+            || arena.static_nodes.contains(&node)
+            || arena.epilogue_fuse_skip.contains(&node);
         if !skip_compute {
             let node_index = node.0 as usize;
             let mut output = arena.buffers[node_index].take().ok_or(TensorError::NotLowerable {
@@ -886,7 +946,11 @@ fn run_resolved_nodes_in_arena(arena: &mut StaticArena) -> Result<(), TensorErro
                 None => run_node_into(computed, &arena.buffers, None, None, &mut output)?,
             }
             #[cfg(feature = "epilogue-profile-probe")]
-            epilogue_profile_record(computed, &reduce_nodes, profile_start.elapsed().as_nanos() as u64);
+            epilogue_profile_record(
+                computed,
+                &reduce_nodes,
+                profile_start.elapsed().as_nanos() as u64,
+            );
             arena.buffers[node_index] = Some(output);
         }
         // `evaluate_quantized_with_scratch`'s own identical fire blocks,
@@ -898,7 +962,9 @@ fn run_resolved_nodes_in_arena(arena: &mut StaticArena) -> Result<(), TensorErro
         // allocation on this call's own path.
         if let Some(reduce_nodes) = arena.epilogue_fuse_fire_at.get(&position) {
             for reduce_node in reduce_nodes.clone() {
-                let Some(&(consumer_index, _, kind, hoist_axis)) = arena.epilogue_fuse_plan.get(&reduce_node) else {
+                let Some(&(consumer_index, _, kind, hoist_axis)) =
+                    arena.epilogue_fuse_plan.get(&reduce_node)
+                else {
                     continue;
                 };
                 let consumer_node = arena.resolved[consumer_index].node;
@@ -906,12 +972,26 @@ fn run_resolved_nodes_in_arena(arena: &mut StaticArena) -> Result<(), TensorErro
                     node: consumer_node,
                     reason: "static arena has no pre-sized slot for this epilogue-fused node -- build_static_arena did not size it",
                 })?;
-                let reduce_values = arena.buffers[reduce_node.0 as usize].as_deref().unwrap_or(&[]);
+                let reduce_values = arena.buffers[reduce_node.0 as usize]
+                    .as_deref()
+                    .unwrap_or(&[]);
                 let fuse_started = std::time::Instant::now();
-                apply_epilogue_fused_monomorphic(kind, &arena.resolved[consumer_index], reduce_node, hoist_axis, reduce_values, &arena.buffers, &mut output);
-                EPILOGUE_FUSE_NANOS.fetch_add(fuse_started.elapsed().as_nanos() as u64, EpilogueFuseOrdering::Relaxed);
+                apply_epilogue_fused_monomorphic(
+                    kind,
+                    &arena.resolved[consumer_index],
+                    reduce_node,
+                    hoist_axis,
+                    reduce_values,
+                    &arena.buffers,
+                    &mut output,
+                );
+                EPILOGUE_FUSE_NANOS.fetch_add(
+                    fuse_started.elapsed().as_nanos() as u64,
+                    EpilogueFuseOrdering::Relaxed,
+                );
                 EPILOGUE_FUSE_HITS.fetch_add(1, EpilogueFuseOrdering::Relaxed);
-                EPILOGUE_FUSE_ELEMENTS.fetch_add(output.len() as u64, EpilogueFuseOrdering::Relaxed);
+                EPILOGUE_FUSE_ELEMENTS
+                    .fetch_add(output.len() as u64, EpilogueFuseOrdering::Relaxed);
                 arena.buffers[consumer_node.0 as usize] = Some(output);
             }
         }
@@ -926,10 +1006,20 @@ fn run_resolved_nodes_in_arena(arena: &mut StaticArena) -> Result<(), TensorErro
                     reason: "static arena has no pre-sized slot for this layer-norm-cluster node -- build_static_arena did not size it",
                 })?;
                 let fuse_started = std::time::Instant::now();
-                apply_layer_norm_cluster_fused(&arena.resolved[cluster.tail_index], cluster.x_node, cluster.row_axis, &arena.buffers, &mut output);
-                LAYER_NORM_CLUSTER_NANOS.fetch_add(fuse_started.elapsed().as_nanos() as u64, EpilogueFuseOrdering::Relaxed);
+                apply_layer_norm_cluster_fused(
+                    &arena.resolved[cluster.tail_index],
+                    cluster.x_node,
+                    cluster.row_axis,
+                    &arena.buffers,
+                    &mut output,
+                );
+                LAYER_NORM_CLUSTER_NANOS.fetch_add(
+                    fuse_started.elapsed().as_nanos() as u64,
+                    EpilogueFuseOrdering::Relaxed,
+                );
                 LAYER_NORM_CLUSTER_HITS.fetch_add(1, EpilogueFuseOrdering::Relaxed);
-                LAYER_NORM_CLUSTER_ELEMENTS.fetch_add(output.len() as u64, EpilogueFuseOrdering::Relaxed);
+                LAYER_NORM_CLUSTER_ELEMENTS
+                    .fetch_add(output.len() as u64, EpilogueFuseOrdering::Relaxed);
                 arena.buffers[tail_node.0 as usize] = Some(output);
             }
         }
@@ -945,7 +1035,13 @@ fn run_resolved_nodes_in_arena(arena: &mut StaticArena) -> Result<(), TensorErro
 fn epilogue_profile_reduce_flags(resolved: &[BoundOp], node_count: usize) -> Vec<bool> {
     let mut flags = vec![false; node_count];
     for computed in resolved {
-        if matches!(computed.kind, BoundOpKind::Reduce { keep: Keep::Reduce, .. }) {
+        if matches!(
+            computed.kind,
+            BoundOpKind::Reduce {
+                keep: Keep::Reduce,
+                ..
+            }
+        ) {
             flags[computed.node.0 as usize] = true;
         }
     }
@@ -1012,7 +1108,10 @@ fn is_post_reduce_epilogue(computed: &BoundOp, reduce_nodes: &[bool]) -> bool {
 /// never itself a reduce); `reduce_slot` is the sole BROADCAST operand whose
 /// node is a `Keep::Reduce` output. Every other operand is either a
 /// non-reduce broadcast (`gamma`/`beta`/scalars) or absent.
-fn is_post_reduce_epilogue_broadcast_reduce(computed: &BoundOp, reduce_nodes: &[bool]) -> Option<(usize, usize)> {
+fn is_post_reduce_epilogue_broadcast_reduce(
+    computed: &BoundOp,
+    reduce_nodes: &[bool],
+) -> Option<(usize, usize)> {
     let BoundOpKind::Elementwise { operands, .. } = &computed.kind else {
         return None;
     };
@@ -1020,7 +1119,8 @@ fn is_post_reduce_epilogue_broadcast_reduce(computed: &BoundOp, reduce_nodes: &[
     let mut reduce_slot: Option<usize> = None;
     for (slot, (node, layout, gather)) in operands.iter().enumerate() {
         let is_broadcast = layout.strides.contains(&0);
-        let is_reduce_output = gather.is_none() && reduce_nodes.get(node.0 as usize).copied().unwrap_or(false);
+        let is_reduce_output =
+            gather.is_none() && reduce_nodes.get(node.0 as usize).copied().unwrap_or(false);
         if is_broadcast {
             if is_reduce_output {
                 if reduce_slot.is_some() {
@@ -1133,7 +1233,9 @@ fn epilogue_step_is(step: &bind::BodyStep, op: ScalarOp, args: &[StepArg]) -> bo
 fn detect_epilogue_kind(body: &ComposedBody) -> Option<EpilogueKind> {
     use StepArg::{Operand, Step};
     let steps = body.steps.as_slice();
-    let is_clip = steps.len() == 2 && epilogue_step_is(&steps[0], ScalarOp::Add, &[Operand(0), Operand(1)]) && epilogue_step_is(&steps[1], ScalarOp::Maximum, &[Step(0), Operand(2)]);
+    let is_clip = steps.len() == 2
+        && epilogue_step_is(&steps[0], ScalarOp::Add, &[Operand(0), Operand(1)])
+        && epilogue_step_is(&steps[1], ScalarOp::Maximum, &[Step(0), Operand(2)]);
     if is_clip {
         return Some(EpilogueKind::Clip);
     }
@@ -1203,7 +1305,10 @@ fn epilogue_is_contiguous_row_major(layout: &bind::Layout, extents: &[u64]) -> b
 /// once per outer-loop column instead of once per element. `Err(())` means
 /// two operands disagree on which axis they vary over -- an unsupported shape,
 /// sent back to the unfused path.
-fn epilogue_hoist_axis(operands: &[(NodeId, bind::Layout, Option<bind::Lookup>)], reduce_slot: usize) -> Result<Option<usize>, ()> {
+fn epilogue_hoist_axis(
+    operands: &[(NodeId, bind::Layout, Option<bind::Lookup>)],
+    reduce_slot: usize,
+) -> Result<Option<usize>, ()> {
     let mut axis: Option<usize> = None;
     for (slot, (_, layout, _)) in operands.iter().enumerate() {
         if slot == reduce_slot {
@@ -1297,12 +1402,16 @@ fn epilogue_fuse_plan(
         // that function's own doc for why.
         let (reduce_slot, primary_slot) = if is_post_reduce_epilogue(computed, &reduce_nodes) {
             let Some(reduce_slot) = operands.iter().position(|(node, layout, gather)| {
-                gather.is_none() && !layout.strides.contains(&0) && reduce_nodes.get(node.0 as usize).copied().unwrap_or(false)
+                gather.is_none()
+                    && !layout.strides.contains(&0)
+                    && reduce_nodes.get(node.0 as usize).copied().unwrap_or(false)
             }) else {
                 continue;
             };
             (reduce_slot, None)
-        } else if let Some((primary_slot, reduce_slot)) = is_post_reduce_epilogue_broadcast_reduce(computed, &reduce_nodes) {
+        } else if let Some((primary_slot, reduce_slot)) =
+            is_post_reduce_epilogue_broadcast_reduce(computed, &reduce_nodes)
+        {
             (reduce_slot, Some(primary_slot))
         } else {
             continue;
@@ -1348,7 +1457,10 @@ fn epilogue_fuse_plan(
         if !is_plain_reduce {
             continue;
         }
-        if operands.iter().any(|(node, ..)| *node != reduce_node && quantized_weights.contains_key(node)) {
+        if operands
+            .iter()
+            .any(|(node, ..)| *node != reduce_node && quantized_weights.contains_key(node))
+        {
             continue;
         }
         let hoist_axis = if kind == EpilogueKind::LayerNorm {
@@ -1367,19 +1479,26 @@ fn epilogue_fuse_plan(
                 continue;
             };
             let Some((reciprocal_n, epsilon, gamma, beta)) = (match operands.get(2..6) {
-                Some([reciprocal_n, epsilon, gamma, beta]) => Some((reciprocal_n, epsilon, gamma, beta)),
+                Some([reciprocal_n, epsilon, gamma, beta]) => {
+                    Some((reciprocal_n, epsilon, gamma, beta))
+                }
                 _ => None,
             }) else {
                 continue;
             };
-            if !epilogue_reduce_operand_matches_leading_axes(&operands[reduce_slot].1, &computed.extents) {
+            if !epilogue_reduce_operand_matches_leading_axes(
+                &operands[reduce_slot].1,
+                &computed.extents,
+            ) {
                 continue;
             }
             if !epilogue_is_contiguous_row_major(&primary.1, &computed.extents) {
                 continue;
             }
-            let scalar_slots_ok = epilogue_is_scalar_broadcast(&reciprocal_n.1) && epilogue_is_scalar_broadcast(&epsilon.1);
-            let affine_slots_ok = epilogue_broadcast_operand_matches_last_axis(&gamma.1) && epilogue_broadcast_operand_matches_last_axis(&beta.1);
+            let scalar_slots_ok = epilogue_is_scalar_broadcast(&reciprocal_n.1)
+                && epilogue_is_scalar_broadcast(&epsilon.1);
+            let affine_slots_ok = epilogue_broadcast_operand_matches_last_axis(&gamma.1)
+                && epilogue_broadcast_operand_matches_last_axis(&beta.1);
             if !scalar_slots_ok || !affine_slots_ok {
                 continue;
             }
@@ -1396,7 +1515,12 @@ fn epilogue_fuse_plan(
         let fire_position = operands
             .iter()
             .filter(|(node, ..)| *node != reduce_node)
-            .map(|(node, ..)| node_position.get(node).copied().unwrap_or(producer_position))
+            .map(|(node, ..)| {
+                node_position
+                    .get(node)
+                    .copied()
+                    .unwrap_or(producer_position)
+            })
             .chain(core::iter::once(producer_position))
             .max()
             .unwrap_or(producer_position);
@@ -1542,9 +1666,13 @@ fn apply_epilogue_fused_monomorphic<B: Deref<Target = [f32]>>(
     let extents = &consumer.extents;
     let rank = extents.len();
     let axis = hoist_axis.unwrap_or(rank);
-    let before: u64 = extents.get(..axis.min(rank)).map_or(1, |prefix| prefix.iter().product::<u64>().max(1));
+    let before: u64 = extents
+        .get(..axis.min(rank))
+        .map_or(1, |prefix| prefix.iter().product::<u64>().max(1));
     let at: u64 = if axis < rank { extents[axis] } else { 1 };
-    let after: u64 = extents.get(axis.saturating_add(1)..).map_or(1, |suffix| suffix.iter().product::<u64>().max(1));
+    let after: u64 = extents
+        .get(axis.saturating_add(1)..)
+        .map_or(1, |suffix| suffix.iter().product::<u64>().max(1));
 
     let read = |slot: usize, column: u64| -> f32 {
         let (node, layout, _gather) = &operands[slot];
@@ -1553,8 +1681,16 @@ fn apply_epilogue_fused_monomorphic<B: Deref<Target = [f32]>>(
             coordinate[axis] = column;
         }
         let offset = layout.offset_of(&coordinate[..rank.min(bind::MAX_INLINE_RANK)]);
-        let source: &[f32] = if *node == reduce_node { reduce_values } else { buffers[node.0 as usize].as_deref().unwrap_or(&[]) };
-        usize::try_from(offset).ok().and_then(|index| source.get(index)).copied().unwrap_or(0.0)
+        let source: &[f32] = if *node == reduce_node {
+            reduce_values
+        } else {
+            buffers[node.0 as usize].as_deref().unwrap_or(&[])
+        };
+        usize::try_from(offset)
+            .ok()
+            .and_then(|index| source.get(index))
+            .copied()
+            .unwrap_or(0.0)
     };
     // `LayerNorm`'s own second broadcast axis (the LAST/hidden axis
     // `gamma`/`beta` vary over, disjoint from `axis` above): a dedicated
@@ -1570,7 +1706,11 @@ fn apply_epilogue_fused_monomorphic<B: Deref<Target = [f32]>>(
         }
         let offset = layout.offset_of(&coordinate[..rank.min(bind::MAX_INLINE_RANK)]);
         let source: &[f32] = buffers[node.0 as usize].as_deref().unwrap_or(&[]);
-        usize::try_from(offset).ok().and_then(|index| source.get(index)).copied().unwrap_or(0.0)
+        usize::try_from(offset)
+            .ok()
+            .and_then(|index| source.get(index))
+            .copied()
+            .unwrap_or(0.0)
     };
 
     let mut reduce_index = 0usize;
@@ -1638,7 +1778,9 @@ fn apply_epilogue_fused_monomorphic<B: Deref<Target = [f32]>>(
                     let primary = buffers[primary_node.0 as usize].as_deref().unwrap_or(&[]);
                     let reciprocal_n = read(2, 0);
                     let epsilon = read(3, 0);
-                    let row_index = (outer as usize).saturating_mul(at as usize).saturating_add(column as usize);
+                    let row_index = (outer as usize)
+                        .saturating_mul(at as usize)
+                        .saturating_add(column as usize);
                     let sum_squared = reduce_values.get(row_index).copied().unwrap_or(0.0);
                     let variance = sum_squared * reciprocal_n;
                     let denominator = (variance + epsilon).sqrt();
@@ -1777,7 +1919,11 @@ struct LayerNormClusterPlan {
 /// matching this EXACT shape (wrong op, wrong operand count, a shared
 /// operand read by anything other than the next node in the chain) is left
 /// untouched — `single_hop`'s own tail-only fusion still applies to it.
-fn layer_norm_cluster_plan(resolved: &[BoundOp], effective_outputs: &[NodeId], single_hop: &BTreeMap<NodeId, (usize, usize, EpilogueKind, Option<usize>)>) -> BTreeMap<NodeId, LayerNormClusterPlan> {
+fn layer_norm_cluster_plan(
+    resolved: &[BoundOp],
+    effective_outputs: &[NodeId],
+    single_hop: &BTreeMap<NodeId, (usize, usize, EpilogueKind, Option<usize>)>,
+) -> BTreeMap<NodeId, LayerNormClusterPlan> {
     if single_hop.is_empty() {
         return BTreeMap::new();
     }
@@ -1804,12 +1950,22 @@ fn layer_norm_cluster_plan(resolved: &[BoundOp], effective_outputs: &[NodeId], s
             continue;
         }
         let tail = &resolved[tail_index];
-        let BoundOpKind::Elementwise { operands: tail_operands, .. } = &tail.kind else { continue };
-        let Some((e2_node, ..)) = tail_operands.first() else { continue };
+        let BoundOpKind::Elementwise {
+            operands: tail_operands,
+            ..
+        } = &tail.kind
+        else {
+            continue;
+        };
+        let Some((e2_node, ..)) = tail_operands.first() else {
+            continue;
+        };
         let e2_node = *e2_node;
 
         // R2: sum of squared E2 -- one operand (E2), element_body squares it.
-        let Some(&r2_index) = node_position.get(&r2_node) else { continue };
+        let Some(&r2_index) = node_position.get(&r2_node) else {
+            continue;
+        };
         let r2 = &resolved[r2_index];
         let BoundOpKind::Reduce {
             element_body: r2_body,
@@ -1832,8 +1988,11 @@ fn layer_norm_cluster_plan(resolved: &[BoundOp], effective_outputs: &[NodeId], s
         // 25 sites showed `operands=[e2_node, e2_node]`,
         // `args=[Operand(0), Operand(1)]`, never the naive
         // single-slot-read-twice shape this check first assumed.
-        let is_square_body = r2_body.steps.len() == 1 && r2_body.steps[0].op == ScalarOp::Multiply && r2_body.steps[0].args == [StepArg::Operand(0), StepArg::Operand(1)];
-        let square_operands_ok = r2_operands.len() == 2 && r2_operands[0].0 == e2_node && r2_operands[1].0 == e2_node;
+        let is_square_body = r2_body.steps.len() == 1
+            && r2_body.steps[0].op == ScalarOp::Multiply
+            && r2_body.steps[0].args == [StepArg::Operand(0), StepArg::Operand(1)];
+        let square_operands_ok =
+            r2_operands.len() == 2 && r2_operands[0].0 == e2_node && r2_operands[1].0 == e2_node;
         if !is_square_body || !square_operands_ok {
             continue;
         }
@@ -1856,9 +2015,17 @@ fn layer_norm_cluster_plan(resolved: &[BoundOp], effective_outputs: &[NodeId], s
         // `Multiply(Operand(1), Operand(2)) -> Subtract(Operand(0),
         // Step(0))`, operands `[x, R1 (broadcast), 1/N (scalar)]`, not the
         // 1-step `Subtract(x, e1_node)` shape this check first assumed).
-        let Some(&e2_index) = node_position.get(&e2_node) else { continue };
+        let Some(&e2_index) = node_position.get(&e2_node) else {
+            continue;
+        };
         let e2 = &resolved[e2_index];
-        let BoundOpKind::Elementwise { body: e2_body, operands: e2_operands } = &e2.kind else { continue };
+        let BoundOpKind::Elementwise {
+            body: e2_body,
+            operands: e2_operands,
+        } = &e2.kind
+        else {
+            continue;
+        };
         let is_centered_body = e2_body.steps.len() == 2
             && e2_body.steps[0].op == ScalarOp::Multiply
             && e2_body.steps[0].args == [StepArg::Operand(1), StepArg::Operand(2)]
@@ -1867,7 +2034,12 @@ fn layer_norm_cluster_plan(resolved: &[BoundOp], effective_outputs: &[NodeId], s
         if !is_centered_body {
             continue;
         }
-        let [(x_node, x_layout, x_gather), (r1_node, r1_layout_in_e2, r1_gather), (reciprocal_n_node, reciprocal_n_layout, reciprocal_n_gather)] = e2_operands.as_slice() else {
+        let [
+            (x_node, x_layout, x_gather),
+            (r1_node, r1_layout_in_e2, r1_gather),
+            (reciprocal_n_node, reciprocal_n_layout, reciprocal_n_gather),
+        ] = e2_operands.as_slice()
+        else {
             continue;
         };
         if x_gather.is_some() || r1_gather.is_some() || reciprocal_n_gather.is_some() {
@@ -1893,9 +2065,24 @@ fn layer_norm_cluster_plan(resolved: &[BoundOp], effective_outputs: &[NodeId], s
         // passes, so this admission requires the two constants carry the
         // SAME VALUE (read directly from `BoundOpKind::Constant`, not
         // inferred from `NodeId` identity) rather than being the same node.
-        let Some(&reciprocal_n_index) = node_position.get(reciprocal_n_node) else { continue };
-        let Some(&tail_reciprocal_n_index) = node_position.get(&tail_operands[2].0) else { continue };
-        let (BoundOpKind::Constant { value: reciprocal_n_e2_value }, BoundOpKind::Constant { value: reciprocal_n_tail_value }) = (&resolved[reciprocal_n_index].kind, &resolved[tail_reciprocal_n_index].kind) else {
+        let Some(&reciprocal_n_index) = node_position.get(reciprocal_n_node) else {
+            continue;
+        };
+        let Some(&tail_reciprocal_n_index) = node_position.get(&tail_operands[2].0) else {
+            continue;
+        };
+        let (
+            BoundOpKind::Constant {
+                value: reciprocal_n_e2_value,
+            },
+            BoundOpKind::Constant {
+                value: reciprocal_n_tail_value,
+            },
+        ) = (
+            &resolved[reciprocal_n_index].kind,
+            &resolved[tail_reciprocal_n_index].kind,
+        )
+        else {
             continue;
         };
         if (reciprocal_n_e2_value - reciprocal_n_tail_value).abs() > 1e-9 {
@@ -1906,7 +2093,9 @@ fn layer_norm_cluster_plan(resolved: &[BoundOp], effective_outputs: &[NodeId], s
         }
 
         // R1: sum of x, plain (Identity element body).
-        let Some(&r1_index) = node_position.get(r1_node) else { continue };
+        let Some(&r1_index) = node_position.get(r1_node) else {
+            continue;
+        };
         let r1 = &resolved[r1_index];
         let BoundOpKind::Reduce {
             element_body: r1_body,
@@ -1921,7 +2110,9 @@ fn layer_norm_cluster_plan(resolved: &[BoundOp], effective_outputs: &[NodeId], s
         if *r1_op != ScalarOp::Add || *r1_init != ReduceInit::Zero {
             continue;
         }
-        let is_identity_body = r1_body.steps.len() == 1 && r1_body.steps[0].op == ScalarOp::Identity && r1_body.steps[0].args == [StepArg::Operand(0)];
+        let is_identity_body = r1_body.steps.len() == 1
+            && r1_body.steps[0].op == ScalarOp::Identity
+            && r1_body.steps[0].args == [StepArg::Operand(0)];
         if !is_identity_body || r1_operands.len() != 1 {
             continue;
         }
@@ -2072,7 +2263,11 @@ fn run_rewrite_worklist(
     node_count: usize,
     effective_outputs: &[NodeId],
     quantized_weights: &BTreeMap<NodeId, QuantizedBlock>,
-) -> (SingleHopEpiloguePlan, BTreeMap<NodeId, LayerNormClusterPlan>, Vec<RewriteFire>) {
+) -> (
+    SingleHopEpiloguePlan,
+    BTreeMap<NodeId, LayerNormClusterPlan>,
+    Vec<RewriteFire>,
+) {
     let depth_bound = resolved.len();
     let mut fires = Vec::new();
 
@@ -2165,16 +2360,26 @@ pub fn rewrite_engine_reset() {
 /// own doc bans), then writes the normalize+affine step reusing
 /// [`EpilogueKind::LayerNorm`]'s own arithmetic. Writes ONLY `tail`'s own
 /// buffer -- `x` is read, never mutated.
-fn apply_layer_norm_cluster_fused<B: Deref<Target = [f32]>>(tail: &BoundOp, x_node: NodeId, row_axis: usize, buffers: &[Option<B>], output: &mut [f32]) {
+fn apply_layer_norm_cluster_fused<B: Deref<Target = [f32]>>(
+    tail: &BoundOp,
+    x_node: NodeId,
+    row_axis: usize,
+    buffers: &[Option<B>],
+    output: &mut [f32],
+) {
     let BoundOpKind::Elementwise { operands, .. } = &tail.kind else {
         return;
     };
     let extents = &tail.extents;
     let rank = extents.len();
     let axis = row_axis.min(rank);
-    let before: u64 = extents.get(..axis).map_or(1, |prefix| prefix.iter().product::<u64>().max(1));
+    let before: u64 = extents
+        .get(..axis)
+        .map_or(1, |prefix| prefix.iter().product::<u64>().max(1));
     let at: u64 = extents.get(axis).copied().unwrap_or(1);
-    let hidden: u64 = extents.get(axis.saturating_add(1)..).map_or(1, |suffix| suffix.iter().product::<u64>().max(1));
+    let hidden: u64 = extents
+        .get(axis.saturating_add(1)..)
+        .map_or(1, |suffix| suffix.iter().product::<u64>().max(1));
 
     let x = buffers[x_node.0 as usize].as_deref().unwrap_or(&[]);
     let inner_axis = rank.saturating_sub(1);
@@ -2186,7 +2391,11 @@ fn apply_layer_norm_cluster_fused<B: Deref<Target = [f32]>>(tail: &BoundOp, x_no
         }
         let offset = layout.offset_of(&coordinate[..rank.min(bind::MAX_INLINE_RANK)]);
         let source: &[f32] = buffers[node.0 as usize].as_deref().unwrap_or(&[]);
-        usize::try_from(offset).ok().and_then(|index| source.get(index)).copied().unwrap_or(0.0)
+        usize::try_from(offset)
+            .ok()
+            .and_then(|index| source.get(index))
+            .copied()
+            .unwrap_or(0.0)
     };
     let read_scalar = |slot: usize| -> f32 { read_inner(slot, 0) };
 
@@ -2244,24 +2453,36 @@ static EPILOGUE_PROFILE_OTHER_CALLS: EpilogueProfileAtomicU64 = EpilogueProfileA
 /// classifier, so `EPILOGUE_PROFILE_REDUCE_*` stays byte-identical to what
 /// it measured before this split existed.
 #[cfg(feature = "epilogue-profile-probe")]
-static EPILOGUE_PROFILE_REDUCE_GEMM_NANOS: EpilogueProfileAtomicU64 = EpilogueProfileAtomicU64::new(0);
+static EPILOGUE_PROFILE_REDUCE_GEMM_NANOS: EpilogueProfileAtomicU64 =
+    EpilogueProfileAtomicU64::new(0);
 #[cfg(feature = "epilogue-profile-probe")]
-static EPILOGUE_PROFILE_REDUCE_GEMM_CALLS: EpilogueProfileAtomicU64 = EpilogueProfileAtomicU64::new(0);
+static EPILOGUE_PROFILE_REDUCE_GEMM_CALLS: EpilogueProfileAtomicU64 =
+    EpilogueProfileAtomicU64::new(0);
 #[cfg(feature = "epilogue-profile-probe")]
-static EPILOGUE_PROFILE_REDUCE_SMALL_NANOS: EpilogueProfileAtomicU64 = EpilogueProfileAtomicU64::new(0);
+static EPILOGUE_PROFILE_REDUCE_SMALL_NANOS: EpilogueProfileAtomicU64 =
+    EpilogueProfileAtomicU64::new(0);
 #[cfg(feature = "epilogue-profile-probe")]
-static EPILOGUE_PROFILE_REDUCE_SMALL_CALLS: EpilogueProfileAtomicU64 = EpilogueProfileAtomicU64::new(0);
+static EPILOGUE_PROFILE_REDUCE_SMALL_CALLS: EpilogueProfileAtomicU64 =
+    EpilogueProfileAtomicU64::new(0);
 
 #[cfg(feature = "epilogue-profile-probe")]
 fn epilogue_profile_record(computed: &BoundOp, reduce_nodes: &[bool], elapsed_nanos: u64) {
-    if matches!(computed.kind, BoundOpKind::Reduce { keep: Keep::Reduce, .. }) {
+    if matches!(
+        computed.kind,
+        BoundOpKind::Reduce {
+            keep: Keep::Reduce,
+            ..
+        }
+    ) {
         EPILOGUE_PROFILE_REDUCE_NANOS.fetch_add(elapsed_nanos, EpilogueProfileOrdering::Relaxed);
         EPILOGUE_PROFILE_REDUCE_CALLS.fetch_add(1, EpilogueProfileOrdering::Relaxed);
         if reduce_is_gemm_shaped(computed) {
-            EPILOGUE_PROFILE_REDUCE_GEMM_NANOS.fetch_add(elapsed_nanos, EpilogueProfileOrdering::Relaxed);
+            EPILOGUE_PROFILE_REDUCE_GEMM_NANOS
+                .fetch_add(elapsed_nanos, EpilogueProfileOrdering::Relaxed);
             EPILOGUE_PROFILE_REDUCE_GEMM_CALLS.fetch_add(1, EpilogueProfileOrdering::Relaxed);
         } else {
-            EPILOGUE_PROFILE_REDUCE_SMALL_NANOS.fetch_add(elapsed_nanos, EpilogueProfileOrdering::Relaxed);
+            EPILOGUE_PROFILE_REDUCE_SMALL_NANOS
+                .fetch_add(elapsed_nanos, EpilogueProfileOrdering::Relaxed);
             EPILOGUE_PROFILE_REDUCE_SMALL_CALLS.fetch_add(1, EpilogueProfileOrdering::Relaxed);
         }
     } else if is_post_reduce_epilogue(computed, reduce_nodes) {
@@ -2351,7 +2572,10 @@ pub fn evaluate_named_with_arena_masked(
 ) -> Result<Evaluated, TensorError> {
     bind_named_inputs_into_arena(arena, named, false)?;
     for computed in &arena.resolved {
-        if arena.dead.contains(&computed.node) || arena.static_nodes.contains(&computed.node) || skip.contains(&computed.node) {
+        if arena.dead.contains(&computed.node)
+            || arena.static_nodes.contains(&computed.node)
+            || skip.contains(&computed.node)
+        {
             continue;
         }
         let node_index = computed.node.0 as usize;
@@ -2368,7 +2592,10 @@ pub fn evaluate_named_with_arena_masked(
         .iter()
         .map(|node| {
             let shape = arena.shapes.of(*node).to_vec();
-            let data = arena.buffers[node.0 as usize].as_deref().unwrap_or(&[]).to_vec();
+            let data = arena.buffers[node.0 as usize]
+                .as_deref()
+                .unwrap_or(&[])
+                .to_vec();
             (*node, shape, data)
         })
         .collect();
@@ -2383,7 +2610,10 @@ pub fn evaluate_named_with_arena_masked(
 /// [`evaluate_named_with_arena_in_place`]'s rebind aliasing swapped in).
 #[must_use]
 pub fn arena_output(arena: &StaticArena, node: NodeId) -> Option<&[f32]> {
-    arena.buffers.get(node.0 as usize).and_then(Option::as_deref)
+    arena
+        .buffers
+        .get(node.0 as usize)
+        .and_then(Option::as_deref)
 }
 
 /// Engagement evidence for law 6∘5 (weight packing): how many `resolved`
@@ -2439,7 +2669,9 @@ pub fn evaluate_named_with_arena_in_place(
     bind_named_inputs_into_arena(arena, named, false)?;
     run_resolved_nodes_in_arena(arena)?;
 
-    let loss_value = arena_output(arena, loss).and_then(|data| data.first().copied()).unwrap_or(0.0);
+    let loss_value = arena_output(arena, loss)
+        .and_then(|data| data.first().copied())
+        .unwrap_or(0.0);
 
     for (computed, name) in rebind {
         let input_node = arena
@@ -2475,7 +2707,11 @@ pub fn evaluate_named_with_arena_in_place(
 /// loop's final state back into its own owned buffers.
 #[must_use]
 pub fn arena_named_input<'arena>(arena: &'arena StaticArena, name: &str) -> Option<&'arena [f32]> {
-    let node = arena.input_names.iter().find(|(_, candidate)| candidate == name).map(|(node, _)| *node)?;
+    let node = arena
+        .input_names
+        .iter()
+        .find(|(_, candidate)| candidate == name)
+        .map(|(node, _)| *node)?;
     arena_output(arena, node)
 }
 
@@ -2568,7 +2804,14 @@ pub fn evaluate_quantized(
 ) -> Result<Evaluated, TensorError> {
     let mut free_buffers: Vec<Vec<f32>> = Vec::new();
     let mut validated_weight_nodes: Option<BTreeSet<NodeId>> = None;
-    evaluate_quantized_with_scratch(program, symbols, blocks, outputs, &mut free_buffers, &mut validated_weight_nodes)
+    evaluate_quantized_with_scratch(
+        program,
+        symbols,
+        blocks,
+        outputs,
+        &mut free_buffers,
+        &mut validated_weight_nodes,
+    )
 }
 
 /// Same contract as [`evaluate_quantized`], plus two capabilities a caller
@@ -2705,13 +2948,21 @@ pub fn evaluate_quantized_with_scratch(
     // the SAME plan by its own `fire_position` value, so the main loop can
     // ask "does anything fire here" in O(1) per position instead of
     // scanning the whole plan every iteration.
-    let (epilogue_fuse_plan, layer_norm_cluster_plan, rewrite_fires) =
-        run_rewrite_worklist(&resolved, program.len(), &effective_outputs, &quantized_weights);
+    let (epilogue_fuse_plan, layer_norm_cluster_plan, rewrite_fires) = run_rewrite_worklist(
+        &resolved,
+        program.len(),
+        &effective_outputs,
+        &quantized_weights,
+    );
     record_rewrite_engine_fires(&rewrite_fires);
     let epilogue_fuse_skip: BTreeSet<NodeId> = epilogue_fuse_plan
         .values()
         .map(|(index, ..)| resolved[*index].node)
-        .chain(layer_norm_cluster_plan.values().flat_map(|cluster| cluster.skip))
+        .chain(
+            layer_norm_cluster_plan
+                .values()
+                .flat_map(|cluster| cluster.skip),
+        )
         .collect();
     let epilogue_fuse_fire_at: BTreeMap<usize, Vec<NodeId>> = {
         let mut grouped: BTreeMap<usize, Vec<NodeId>> = BTreeMap::new();
@@ -2721,14 +2972,20 @@ pub fn evaluate_quantized_with_scratch(
             if layer_norm_cluster_plan.contains_key(reduce_node) {
                 continue;
             }
-            grouped.entry(*fire_position).or_default().push(*reduce_node);
+            grouped
+                .entry(*fire_position)
+                .or_default()
+                .push(*reduce_node);
         }
         grouped
     };
     let layer_norm_cluster_fire_at: BTreeMap<usize, Vec<NodeId>> = {
         let mut grouped: BTreeMap<usize, Vec<NodeId>> = BTreeMap::new();
         for (reduce_node, cluster) in &layer_norm_cluster_plan {
-            grouped.entry(cluster.fire_position).or_default().push(*reduce_node);
+            grouped
+                .entry(cluster.fire_position)
+                .or_default()
+                .push(*reduce_node);
         }
         grouped
     };
@@ -2747,7 +3004,10 @@ pub fn evaluate_quantized_with_scratch(
     let layer_norm_cluster_keepalive: BTreeMap<NodeId, usize> = {
         let mut keepalive: BTreeMap<NodeId, usize> = BTreeMap::new();
         for cluster in layer_norm_cluster_plan.values() {
-            keepalive.entry(cluster.x_node).and_modify(|existing| *existing = (*existing).max(cluster.fire_position)).or_insert(cluster.fire_position);
+            keepalive
+                .entry(cluster.x_node)
+                .and_modify(|existing| *existing = (*existing).max(cluster.fire_position))
+                .or_insert(cluster.fire_position);
         }
         keepalive
     };
@@ -2768,7 +3028,11 @@ pub fn evaluate_quantized_with_scratch(
     // call nor its `O(program.len())` rescan per node.
     #[cfg(feature = "instrument")]
     let live_bytes = |buffers: &[Option<Cow<[f32]>>]| -> usize {
-        buffers.iter().flatten().map(|cow| cow.len() * core::mem::size_of::<f32>()).sum()
+        buffers
+            .iter()
+            .flatten()
+            .map(|cow| cow.len() * core::mem::size_of::<f32>())
+            .sum()
     };
 
     // `peak_live_buffers` is real, always-returned `Evaluated` state (see
@@ -2871,9 +3135,19 @@ pub fn evaluate_quantized_with_scratch(
             }
             #[cfg(feature = "epilogue-profile-probe")]
             let epilogue_profile_started = std::time::Instant::now();
-            run_node_into(computed, &buffers, Some(&quantized_weights), session.as_ref(), &mut output)?;
+            run_node_into(
+                computed,
+                &buffers,
+                Some(&quantized_weights),
+                session.as_ref(),
+                &mut output,
+            )?;
             #[cfg(feature = "epilogue-profile-probe")]
-            epilogue_profile_record(computed, &epilogue_profile_reduce_nodes, epilogue_profile_started.elapsed().as_nanos() as u64);
+            epilogue_profile_record(
+                computed,
+                &epilogue_profile_reduce_nodes,
+                epilogue_profile_started.elapsed().as_nanos() as u64,
+            );
             #[cfg(feature = "instrument")]
             let bookkeeping_started = instrument::read_ticks();
             buffers[computed.node.0 as usize] = Some(Cow::Owned(output));
@@ -2904,17 +3178,31 @@ pub fn evaluate_quantized_with_scratch(
         // position, always >= `fire_position` by construction).
         if let Some(reduce_nodes) = epilogue_fuse_fire_at.get(&position) {
             for reduce_node in reduce_nodes {
-                let Some(&(consumer_index, _, kind, hoist_axis)) = epilogue_fuse_plan.get(reduce_node) else {
+                let Some(&(consumer_index, _, kind, hoist_axis)) =
+                    epilogue_fuse_plan.get(reduce_node)
+                else {
                     continue;
                 };
                 let consumer = &resolved[consumer_index];
                 let reduce_values = buffers[reduce_node.0 as usize].as_deref().unwrap_or(&[]);
                 let mut fused_output = take_or_allocate(free_buffers, node_output_len(consumer));
                 let fuse_started = std::time::Instant::now();
-                apply_epilogue_fused_monomorphic(kind, consumer, *reduce_node, hoist_axis, reduce_values, &buffers, &mut fused_output);
-                EPILOGUE_FUSE_NANOS.fetch_add(fuse_started.elapsed().as_nanos() as u64, EpilogueFuseOrdering::Relaxed);
+                apply_epilogue_fused_monomorphic(
+                    kind,
+                    consumer,
+                    *reduce_node,
+                    hoist_axis,
+                    reduce_values,
+                    &buffers,
+                    &mut fused_output,
+                );
+                EPILOGUE_FUSE_NANOS.fetch_add(
+                    fuse_started.elapsed().as_nanos() as u64,
+                    EpilogueFuseOrdering::Relaxed,
+                );
                 EPILOGUE_FUSE_HITS.fetch_add(1, EpilogueFuseOrdering::Relaxed);
-                EPILOGUE_FUSE_ELEMENTS.fetch_add(fused_output.len() as u64, EpilogueFuseOrdering::Relaxed);
+                EPILOGUE_FUSE_ELEMENTS
+                    .fetch_add(fused_output.len() as u64, EpilogueFuseOrdering::Relaxed);
                 buffers[consumer.node.0 as usize] = Some(Cow::Owned(fused_output));
                 live_now += 1;
                 peak_live_buffers = peak_live_buffers.max(live_now);
@@ -2932,10 +3220,20 @@ pub fn evaluate_quantized_with_scratch(
                 let tail = &resolved[cluster.tail_index];
                 let mut fused_output = take_or_allocate(free_buffers, node_output_len(tail));
                 let fuse_started = std::time::Instant::now();
-                apply_layer_norm_cluster_fused(tail, cluster.x_node, cluster.row_axis, &buffers, &mut fused_output);
-                LAYER_NORM_CLUSTER_NANOS.fetch_add(fuse_started.elapsed().as_nanos() as u64, EpilogueFuseOrdering::Relaxed);
+                apply_layer_norm_cluster_fused(
+                    tail,
+                    cluster.x_node,
+                    cluster.row_axis,
+                    &buffers,
+                    &mut fused_output,
+                );
+                LAYER_NORM_CLUSTER_NANOS.fetch_add(
+                    fuse_started.elapsed().as_nanos() as u64,
+                    EpilogueFuseOrdering::Relaxed,
+                );
                 LAYER_NORM_CLUSTER_HITS.fetch_add(1, EpilogueFuseOrdering::Relaxed);
-                LAYER_NORM_CLUSTER_ELEMENTS.fetch_add(fused_output.len() as u64, EpilogueFuseOrdering::Relaxed);
+                LAYER_NORM_CLUSTER_ELEMENTS
+                    .fetch_add(fused_output.len() as u64, EpilogueFuseOrdering::Relaxed);
                 buffers[tail.node.0 as usize] = Some(Cow::Owned(fused_output));
                 live_now += 1;
                 peak_live_buffers = peak_live_buffers.max(live_now);
@@ -2985,7 +3283,13 @@ pub fn evaluate_quantized_with_scratch(
     #[cfg(feature = "instrument")]
     let finish_started = instrument::read_ticks();
 
-    let result = finish(&shapes, &effective_outputs, buffers, root, peak_live_buffers);
+    let result = finish(
+        &shapes,
+        &effective_outputs,
+        buffers,
+        root,
+        peak_live_buffers,
+    );
     // real signal (peak live bytes, per-phase wall time) committed once per
     // call into the crate's own counter mechanism -- see
     // `instrument::record_evaluate_quantized_phase`'s own doc for why this
@@ -3095,7 +3399,14 @@ pub fn evaluate_quantized_named_with_scratch<'block>(
     let blocks = resolve_named_blocks(program, named)?;
     #[cfg(feature = "instrument")]
     instrument::record_evaluate_quantized_resolve(instrument::elapsed_ticks(resolve_started));
-    evaluate_quantized_with_scratch(program, symbols, &blocks, outputs, free_buffers, validated_weight_nodes)
+    evaluate_quantized_with_scratch(
+        program,
+        symbols,
+        &blocks,
+        outputs,
+        free_buffers,
+        validated_weight_nodes,
+    )
 }
 
 /// Shared body for [`evaluate`] and [`evaluate_with_scratch`] — the only
@@ -3168,7 +3479,13 @@ fn evaluate_pooled(
         }
     }
 
-    Ok(finish(&shapes, &effective_outputs, buffers, root, peak_live_buffers))
+    Ok(finish(
+        &shapes,
+        &effective_outputs,
+        buffers,
+        root,
+        peak_live_buffers,
+    ))
 }
 
 /// Takes the buffer at `node`'s slot (leaving `None` behind, exactly as
@@ -3191,7 +3508,11 @@ fn evaluate_pooled(
 /// no-op on an already-`None` slot. A caller that decremented a running live
 /// count unconditionally on every retirement (as this evaluator's `live_now`
 /// used to) drifted low by one per quantized weight and could underflow.
-fn retire_into(buffers: &mut [Option<Cow<'_, [f32]>>], node: NodeId, pool: &mut Vec<Vec<f32>>) -> bool {
+fn retire_into(
+    buffers: &mut [Option<Cow<'_, [f32]>>],
+    node: NodeId,
+    pool: &mut Vec<Vec<f32>>,
+) -> bool {
     match buffers[node.0 as usize].take() {
         Some(Cow::Owned(buffer)) => {
             pool.push(buffer);
@@ -3375,7 +3696,13 @@ pub fn evaluate_parallel(
 
     #[cfg(feature = "instrument")]
     let finish_start = instrument::read_ticks();
-    let evaluated = finish(&shapes, &effective_outputs, buffers, root, peak_live_buffers);
+    let evaluated = finish(
+        &shapes,
+        &effective_outputs,
+        buffers,
+        root,
+        peak_live_buffers,
+    );
     #[cfg(feature = "instrument")]
     {
         counter!(
@@ -3857,12 +4184,16 @@ fn block_node_ids(program: &[Op]) -> Vec<NodeId> {
 // separately-tested execution path for that shape today; wiring a quantized
 // buffer through `evaluate`'s own `blocks` array and `run_reduce`'s NEON
 // tile is the remaining integration work this does not yet do.
-fn reject_non_float32(program: &[Op], quantized_weights: &BTreeSet<NodeId>) -> Result<(), TensorError> {
+fn reject_non_float32(
+    program: &[Op],
+    quantized_weights: &BTreeSet<NodeId>,
+) -> Result<(), TensorError> {
     let index_nodes = index_node_ids(program);
     let referenced_nodes = referenced_node_ids(program);
     for (position, expr) in program.iter().enumerate() {
         let node = NodeId(position as u32);
-        let is_quantized_weight = quantized_weights.contains(&node) && is_quantized_matmul_operand(program, node);
+        let is_quantized_weight =
+            quantized_weights.contains(&node) && is_quantized_matmul_operand(program, node);
         // an `Op::Input` `bind::BoundOpBuilder::push` never materializes into
         // a `BoundOp` (see that match arm's own `Op::Input { .. } => {}`) —
         // it is a pure buffer handle, read directly by whichever node
@@ -3876,7 +4207,8 @@ fn reject_non_float32(program: &[Op], quantized_weights: &BTreeSet<NodeId>) -> R
         // "either a requested output or dead code, and either way it
         // materializes"). A *referenced* non-float32 `Input` still feeds a
         // node that IS unconditionally evaluated, so it stays rejected.
-        let is_unreferenced_input = matches!(expr, Op::Input { .. }) && !referenced_nodes.contains(&node);
+        let is_unreferenced_input =
+            matches!(expr, Op::Input { .. }) && !referenced_nodes.contains(&node);
         if expr.dtype() != DType::Float32
             && !index_nodes.contains(&node)
             && !is_quantized_weight
@@ -3916,7 +4248,8 @@ fn reject_non_float32_outputs(
         let Some(expr) = program.get(node.0 as usize) else {
             continue;
         };
-        let is_quantized_weight = quantized_weights.contains(&node) && is_quantized_matmul_operand(program, node);
+        let is_quantized_weight =
+            quantized_weights.contains(&node) && is_quantized_matmul_operand(program, node);
         if expr.dtype() != DType::Float32 && !index_nodes.contains(&node) && !is_quantized_weight {
             return Err(TensorError::NotLowerable {
                 node,
@@ -3973,9 +4306,9 @@ fn is_quantized_matmul_operand(program: &[Op], node: NodeId) -> bool {
                 if !operands.iter().any(|(source, _)| *source == node) {
                     continue;
                 }
-                let other_operand_is_float32 = operands
-                    .iter()
-                    .any(|(source, _)| *source != node && program[source.0 as usize].dtype() == DType::Float32);
+                let other_operand_is_float32 = operands.iter().any(|(source, _)| {
+                    *source != node && program[source.0 as usize].dtype() == DType::Float32
+                });
                 if *body != ScalarOp::Multiply || operands.len() != 2 || !other_operand_is_float32 {
                     return false;
                 }
@@ -4028,7 +4361,10 @@ fn push_indices_node(map: &IndexMap, nodes: &mut BTreeSet<NodeId>) {
     }
 }
 
-fn buffer_of<T, B: Deref<Target = [T]>>(buffers: &[Option<B>], node: NodeId) -> Result<&[T], TensorError> {
+fn buffer_of<T, B: Deref<Target = [T]>>(
+    buffers: &[Option<B>],
+    node: NodeId,
+) -> Result<&[T], TensorError> {
     buffers[node.0 as usize]
         .as_deref()
         .ok_or(TensorError::NotLowerable {
@@ -4145,9 +4481,13 @@ fn run_node_into<B: Deref<Target = [f32]> + Sync>(
             #[cfg(feature = "instrument")]
             instrument::record_op_kind(instrument::OpKind::Reduce);
             match quantized_weights {
-                Some(quantized_weights) => {
-                    run_reduce_with_quantized_weights(resolved, buffers, quantized_weights, session, output)
-                }
+                Some(quantized_weights) => run_reduce_with_quantized_weights(
+                    resolved,
+                    buffers,
+                    quantized_weights,
+                    session,
+                    output,
+                ),
                 None => run_reduce(resolved, buffers, output, None),
             }
         }
@@ -4266,7 +4606,9 @@ impl<'buffers, B: Deref<Target = [f32]> + Sync + From<Vec<f32>>> Interpreter<'bu
     /// answers the first one through `Pipe::call`.
     #[must_use]
     pub fn get(&self, node: NodeId) -> Option<Vec<f32>> {
-        self.buffers.borrow()[node.0 as usize].as_deref().map(<[f32]>::to_vec)
+        self.buffers.borrow()[node.0 as usize]
+            .as_deref()
+            .map(<[f32]>::to_vec)
     }
 
     /// The actual fold: written once, against a borrowed `&[BoundOp]` rather
@@ -4371,9 +4713,14 @@ fn operand_access_footprint(extents: &[u64], strides: &[i64]) -> (u64, u64) {
 /// reads it back), scaled by the table's own row width
 /// (`Lookup::element_stride`) to report elements rather than rows.
 #[cfg(feature = "instrument")]
-fn record_bound_op_operand_access<B: Deref<Target = [f32]>>(resolved: &BoundOp, buffers: &[Option<B>]) {
+fn record_bound_op_operand_access<B: Deref<Target = [f32]>>(
+    resolved: &BoundOp,
+    buffers: &[Option<B>],
+) {
     for (source, layout, gather) in resolved.operands() {
-        let strides: Vec<i64> = (0..resolved.extents.len() as u16).map(|axis| layout.stride(axis)).collect();
+        let strides: Vec<i64> = (0..resolved.extents.len() as u16)
+            .map(|axis| layout.stride(axis))
+            .collect();
         let (reads, distinct) = operand_access_footprint(&resolved.extents, &strides);
         let total_elements = buffer_of(buffers, *source).map(<[f32]>::len).unwrap_or(0) as u64;
         match gather {
@@ -4716,7 +5063,13 @@ where
         let chunk_output =
             unsafe { core::slice::from_raw_parts_mut(slice_address as *mut f32, slice_len) };
         let outer_end = outer_start + slice_len / self.inner_len;
-        run_elementwise_range(self.resolved, self.buffers, outer_start, outer_end, chunk_output)
+        run_elementwise_range(
+            self.resolved,
+            self.buffers,
+            outer_start,
+            outer_end,
+            chunk_output,
+        )
     }
 }
 
@@ -4794,7 +5147,10 @@ where
         // number of offsets `<= chunk.0` is always `stage + 1` for the
         // owning stage `s` -- `partition_point`'s own contract (first index
         // whose predicate is false) hands that back directly.
-        let stage = self.stage_offsets.partition_point(|&offset| offset <= chunk.0) - 1;
+        let stage = self
+            .stage_offsets
+            .partition_point(|&offset| offset <= chunk.0)
+            - 1;
         let within_stage = chunk.0 - self.stage_offsets[stage];
         if let Some(previous) = stage.checked_sub(1) {
             let previous_len = self.stage_offsets[previous + 1] - self.stage_offsets[previous];
@@ -4865,10 +5221,18 @@ fn run_elementwise_range<B: Deref<Target = [f32]>>(
     // gather path engaged at all). `block_strides` stays empty (never
     // indexed) whenever `block_extent <= 1`, the common case for every
     // rank-1-outer-extents or `kh == 1` shape.
-    let block_dim = if outer_extents.is_empty() { None } else { Some((outer_extents.len() - 1) as u16) };
+    let block_dim = if outer_extents.is_empty() {
+        None
+    } else {
+        Some((outer_extents.len() - 1) as u16)
+    };
     let block_extent = outer_extents.last().copied().unwrap_or(1);
     let block_strides: Vec<i64> = if block_extent > 1 {
-        resolved.operands().iter().map(|(_, view, _)| block_dim.map_or(0, |dim| view.stride(dim))).collect()
+        resolved
+            .operands()
+            .iter()
+            .map(|(_, view, _)| block_dim.map_or(0, |dim| view.stride(dim)))
+            .collect()
     } else {
         Vec::new()
     };
@@ -4884,8 +5248,12 @@ fn run_elementwise_range<B: Deref<Target = [f32]>>(
     // non-negative constant stride" admission, because the dedicated kernel
     // slices `m`/`v`/`param` directly rather than walking `OperandSpan`.
     let fast_path = match shape {
-        BodyShape::Generic(generic_body) => generic_body_is_affine_fast_path(resolved, generic_body, &strides),
-        BodyShape::FusedAdamUpdate(roles, _) => fused_adam_update_is_affine_fast_path(resolved, roles, &strides),
+        BodyShape::Generic(generic_body) => {
+            generic_body_is_affine_fast_path(resolved, generic_body, &strides)
+        }
+        BodyShape::FusedAdamUpdate(roles, _) => {
+            fused_adam_update_is_affine_fast_path(resolved, roles, &strides)
+        }
         _ => body_shape_is_affine_fast_path(resolved, &shape, &strides),
     };
     // rung 2 (`docs/discipline.md` ROW 153's own charter): when the block
@@ -4944,15 +5312,29 @@ fn run_elementwise_range<B: Deref<Target = [f32]>>(
     let flat_width = (outer_end - outer_start) * inner_len;
     let mut step_values = match shape {
         BodyShape::Generic(_) => {
-            let effective_width = if full_range_flat { flat_width } else { inner_len };
-            vec![0.0f32; body.steps.len() * if fast_path { effective_width.min(GENERIC_WIDTH_TILE) } else { 1 }]
+            let effective_width = if full_range_flat {
+                flat_width
+            } else {
+                inner_len
+            };
+            vec![
+                0.0f32;
+                body.steps.len()
+                    * if fast_path {
+                        effective_width.min(GENERIC_WIDTH_TILE)
+                    } else {
+                        1
+                    }
+            ]
         }
         // The dedicated kernel (`elementwise_width_fused_adam_update`) never
         // reads `step_values` -- only the slow per-element gather fallback
         // (`eval_body_shape` -> `apply_body`, reached when `fast_path` is
         // false) needs one scalar row per step, the same shape `Generic`'s
         // own `else { 1 }` branch already sizes for.
-        BodyShape::FusedAdamUpdate(..) => vec![0.0f32; if fast_path { 0 } else { body.steps.len() }],
+        BodyShape::FusedAdamUpdate(..) => {
+            vec![0.0f32; if fast_path { 0 } else { body.steps.len() }]
+        }
         BodyShape::Unary(..) | BodyShape::Binary(..) => Vec::new(),
     };
     #[cfg(feature = "instrument")]
@@ -4968,7 +5350,11 @@ fn run_elementwise_range<B: Deref<Target = [f32]>>(
     #[cfg(feature = "instrument")]
     let mut counters = KernelCounters::default();
     #[cfg(feature = "instrument")]
-    let path = if fast_path { Path::WidthFast } else { Path::Generic };
+    let path = if fast_path {
+        Path::WidthFast
+    } else {
+        Path::Generic
+    };
 
     let mut outer_position = outer_start;
     while outer_position < outer_end {
@@ -4993,7 +5379,10 @@ fn run_elementwise_range<B: Deref<Target = [f32]>>(
             {
                 let elements = output.len() as u64;
                 counter!(instrument::ELEMENTWISE_FLAT_RANGE_HITS, 1);
-                counter!(instrument::ELEMENTWISE_FLAT_RANGE_ROWS, (outer_end - outer_start) as u64);
+                counter!(
+                    instrument::ELEMENTWISE_FLAT_RANGE_ROWS,
+                    (outer_end - outer_start) as u64
+                );
                 counters.leading_iters += (outer_end - outer_start) as u64;
                 counters.kernel_calls += 1;
                 counters.output_writes += elements;
@@ -5023,7 +5412,14 @@ fn run_elementwise_range<B: Deref<Target = [f32]>>(
             let out_slice = &mut output[out_base..out_base + block_extent as usize * inner_len];
             if let Some(operand) = window_copy_operand {
                 let operand = operand as usize;
-                window_copy_block(raw[operand], running[operand], block_strides[operand], block_extent, inner_len, out_slice);
+                window_copy_block(
+                    raw[operand],
+                    running[operand],
+                    block_strides[operand],
+                    block_extent,
+                    inner_len,
+                    out_slice,
+                );
                 #[cfg(feature = "instrument")]
                 {
                     let elements = block_extent * inner_len as u64;
@@ -5049,7 +5445,8 @@ fn run_elementwise_range<B: Deref<Target = [f32]>>(
                         counters.kernel_calls += 1;
                         counters.output_writes += inner_len as u64;
                         for &stride in &strides {
-                            counters.operand_loads += if stride == 0 { 1 } else { inner_len as u64 };
+                            counters.operand_loads +=
+                                if stride == 0 { 1 } else { inner_len as u64 };
                         }
                     }
                     if step + 1 < block_extent {
@@ -5071,7 +5468,14 @@ fn run_elementwise_range<B: Deref<Target = [f32]>>(
 
         if fast_path {
             let out_slice = &mut output[out_base..out_base + inner_len];
-            elementwise_width_fast(&shape, &raw, &running, &strides, out_slice, &mut step_values);
+            elementwise_width_fast(
+                &shape,
+                &raw,
+                &running,
+                &strides,
+                out_slice,
+                &mut step_values,
+            );
             #[cfg(feature = "instrument")]
             {
                 counters.kernel_calls += 1;
@@ -5126,46 +5530,106 @@ fn run_elementwise_range<B: Deref<Target = [f32]>>(
         match shape {
             BodyShape::Generic(_) => {
                 counter!(instrument::ELEMENTWISE_LOOP_TICKS_GENERIC, diag_loop_ticks);
-                counter!(instrument::ELEMENTWISE_ELEMENTS_GENERIC, counters.output_writes);
+                counter!(
+                    instrument::ELEMENTWISE_ELEMENTS_GENERIC,
+                    counters.output_writes
+                );
                 if fast_path {
-                    counter!(instrument::ELEMENTWISE_LOOP_TICKS_GENERIC_FAST, diag_loop_ticks);
-                    counter!(instrument::ELEMENTWISE_ELEMENTS_GENERIC_FAST, counters.output_writes);
+                    counter!(
+                        instrument::ELEMENTWISE_LOOP_TICKS_GENERIC_FAST,
+                        diag_loop_ticks
+                    );
+                    counter!(
+                        instrument::ELEMENTWISE_ELEMENTS_GENERIC_FAST,
+                        counters.output_writes
+                    );
                 } else {
-                    counter!(instrument::ELEMENTWISE_LOOP_TICKS_GENERIC_SLOW, diag_loop_ticks);
-                    counter!(instrument::ELEMENTWISE_ELEMENTS_GENERIC_SLOW, counters.output_writes);
+                    counter!(
+                        instrument::ELEMENTWISE_LOOP_TICKS_GENERIC_SLOW,
+                        diag_loop_ticks
+                    );
+                    counter!(
+                        instrument::ELEMENTWISE_ELEMENTS_GENERIC_SLOW,
+                        counters.output_writes
+                    );
                 }
             }
             BodyShape::FusedAdamUpdate(..) => {
                 counter!(instrument::ELEMENTWISE_LOOP_TICKS_GENERIC, diag_loop_ticks);
-                counter!(instrument::ELEMENTWISE_ELEMENTS_GENERIC, counters.output_writes);
+                counter!(
+                    instrument::ELEMENTWISE_ELEMENTS_GENERIC,
+                    counters.output_writes
+                );
                 if fast_path {
-                    counter!(instrument::ELEMENTWISE_LOOP_TICKS_GENERIC_FAST, diag_loop_ticks);
-                    counter!(instrument::ELEMENTWISE_ELEMENTS_GENERIC_FAST, counters.output_writes);
-                    counter!(instrument::ELEMENTWISE_LOOP_TICKS_FUSED_ADAM, diag_loop_ticks);
-                    counter!(instrument::ELEMENTWISE_ELEMENTS_FUSED_ADAM, counters.output_writes);
+                    counter!(
+                        instrument::ELEMENTWISE_LOOP_TICKS_GENERIC_FAST,
+                        diag_loop_ticks
+                    );
+                    counter!(
+                        instrument::ELEMENTWISE_ELEMENTS_GENERIC_FAST,
+                        counters.output_writes
+                    );
+                    counter!(
+                        instrument::ELEMENTWISE_LOOP_TICKS_FUSED_ADAM,
+                        diag_loop_ticks
+                    );
+                    counter!(
+                        instrument::ELEMENTWISE_ELEMENTS_FUSED_ADAM,
+                        counters.output_writes
+                    );
                     counter!(instrument::ELEMENTWISE_FUSED_ADAM_HITS, 1);
                 } else {
-                    counter!(instrument::ELEMENTWISE_LOOP_TICKS_GENERIC_SLOW, diag_loop_ticks);
-                    counter!(instrument::ELEMENTWISE_ELEMENTS_GENERIC_SLOW, counters.output_writes);
+                    counter!(
+                        instrument::ELEMENTWISE_LOOP_TICKS_GENERIC_SLOW,
+                        diag_loop_ticks
+                    );
+                    counter!(
+                        instrument::ELEMENTWISE_ELEMENTS_GENERIC_SLOW,
+                        counters.output_writes
+                    );
                 }
             }
             BodyShape::Unary(..) | BodyShape::Binary(..) => {
-                counter!(instrument::ELEMENTWISE_LOOP_TICKS_MONOMORPHIC, diag_loop_ticks);
-                counter!(instrument::ELEMENTWISE_ELEMENTS_MONOMORPHIC, counters.output_writes);
+                counter!(
+                    instrument::ELEMENTWISE_LOOP_TICKS_MONOMORPHIC,
+                    diag_loop_ticks
+                );
+                counter!(
+                    instrument::ELEMENTWISE_ELEMENTS_MONOMORPHIC,
+                    counters.output_writes
+                );
                 if window_copy_operand.is_some() {
                     // rung 2 (ROW 153/154): same per-call constant `fast_path`
                     // already splits on, one level narrower — this call's
                     // block-aligned rows took the specialized row-segment copy,
                     // not `elementwise_width_fast`'s per-row dispatch.
-                    counter!(instrument::ELEMENTWISE_LOOP_TICKS_WINDOW_COPY, diag_loop_ticks);
-                    counter!(instrument::ELEMENTWISE_ELEMENTS_WINDOW_COPY, counters.output_writes);
+                    counter!(
+                        instrument::ELEMENTWISE_LOOP_TICKS_WINDOW_COPY,
+                        diag_loop_ticks
+                    );
+                    counter!(
+                        instrument::ELEMENTWISE_ELEMENTS_WINDOW_COPY,
+                        counters.output_writes
+                    );
                 }
                 if fast_path {
-                    counter!(instrument::ELEMENTWISE_LOOP_TICKS_MONOMORPHIC_FAST, diag_loop_ticks);
-                    counter!(instrument::ELEMENTWISE_ELEMENTS_MONOMORPHIC_FAST, counters.output_writes);
+                    counter!(
+                        instrument::ELEMENTWISE_LOOP_TICKS_MONOMORPHIC_FAST,
+                        diag_loop_ticks
+                    );
+                    counter!(
+                        instrument::ELEMENTWISE_ELEMENTS_MONOMORPHIC_FAST,
+                        counters.output_writes
+                    );
                 } else {
-                    counter!(instrument::ELEMENTWISE_LOOP_TICKS_MONOMORPHIC_SLOW, diag_loop_ticks);
-                    counter!(instrument::ELEMENTWISE_ELEMENTS_MONOMORPHIC_SLOW, counters.output_writes);
+                    counter!(
+                        instrument::ELEMENTWISE_LOOP_TICKS_MONOMORPHIC_SLOW,
+                        diag_loop_ticks
+                    );
+                    counter!(
+                        instrument::ELEMENTWISE_ELEMENTS_MONOMORPHIC_SLOW,
+                        counters.output_writes
+                    );
                 }
             }
         }
@@ -5182,11 +5646,24 @@ fn run_elementwise_range<B: Deref<Target = [f32]>>(
 /// [`reject_non_float32`] already proved (via [`is_quantized_matmul_operand`])
 /// feeds exactly one such fold, so this need not re-check the shape, only
 /// find which physical operand it is.
-fn quantized_operand(resolved: &BoundOp, quantized_weights: &BTreeMap<NodeId, QuantizedBlock>) -> Option<NodeId> {
-    if !matches!(resolved.kind, BoundOpKind::Reduce { keep: Keep::Reduce, .. }) {
+fn quantized_operand(
+    resolved: &BoundOp,
+    quantized_weights: &BTreeMap<NodeId, QuantizedBlock>,
+) -> Option<NodeId> {
+    if !matches!(
+        resolved.kind,
+        BoundOpKind::Reduce {
+            keep: Keep::Reduce,
+            ..
+        }
+    ) {
         return None;
     }
-    resolved.operands().iter().map(|(node, _, _)| *node).find(|node| quantized_weights.contains_key(node))
+    resolved
+        .operands()
+        .iter()
+        .map(|(node, _, _)| *node)
+        .find(|node| quantized_weights.contains_key(node))
 }
 
 /// `docs/discipline.md` ROW 202's own named residual, split by node
@@ -5221,7 +5698,11 @@ fn reduce_is_gemm_shaped(resolved: &BoundOp) -> bool {
     operands.iter().any(|(node, _, _)| node != first_node)
 }
 
-#[cfg(any(feature = "q4k-int8-dot", feature = "q5k-int8-dot", feature = "q6k-int8-dot"))]
+#[cfg(any(
+    feature = "q4k-int8-dot",
+    feature = "q5k-int8-dot",
+    feature = "q6k-int8-dot"
+))]
 use crate::sized::MIN_TRANSPOSE_ELEMENTS_FOR_DISPATCH;
 
 /// The `wide` (`[row][position]`) -> `output` (`[position][row]`) transpose
@@ -5236,7 +5717,11 @@ use crate::sized::MIN_TRANSPOSE_ELEMENTS_FOR_DISPATCH;
 /// Falls straight through to the plain serial loop whenever any gate fails:
 /// no session, too few elements, or fewer than two position chunks to split
 /// into.
-#[cfg(any(feature = "q4k-int8-dot", feature = "q5k-int8-dot", feature = "q6k-int8-dot"))]
+#[cfg(any(
+    feature = "q4k-int8-dot",
+    feature = "q5k-int8-dot",
+    feature = "q6k-int8-dot"
+))]
 fn transpose_wide_to_output(
     wide: &[f32],
     rows: usize,
@@ -5290,7 +5775,9 @@ fn transpose_wide_to_output(
     if report.abandoned > 0 {
         return Err(TensorError::ThreadedChunkFailed {
             chunk: report.first_abandoned.map_or(0, |chunk| chunk.0 + 1),
-            reason: alloc::string::String::from("cohort member panicked while running this transpose chunk"),
+            reason: alloc::string::String::from(
+                "cohort member panicked while running this transpose chunk",
+            ),
         });
     }
     Ok(())
@@ -5300,7 +5787,11 @@ fn transpose_wide_to_output(
 /// `(position_start, out_ptr, out_len)` ranges of `output`'s position axis,
 /// run through [`CohortSession::run`]. No error path -- pure data movement,
 /// nothing here can fail the way a matmul row's dot product can.
-#[cfg(any(feature = "q4k-int8-dot", feature = "q5k-int8-dot", feature = "q6k-int8-dot"))]
+#[cfg(any(
+    feature = "q4k-int8-dot",
+    feature = "q5k-int8-dot",
+    feature = "q6k-int8-dot"
+))]
 struct TransposeRound<'round> {
     wide: &'round [f32],
     rows: usize,
@@ -5308,7 +5799,11 @@ struct TransposeRound<'round> {
     chunk_ranges: &'round [(usize, usize, usize)],
 }
 
-#[cfg(any(feature = "q4k-int8-dot", feature = "q5k-int8-dot", feature = "q6k-int8-dot"))]
+#[cfg(any(
+    feature = "q4k-int8-dot",
+    feature = "q5k-int8-dot",
+    feature = "q6k-int8-dot"
+))]
 impl CohortRound<TensorError> for TransposeRound<'_> {
     fn chunks(&self) -> usize {
         self.chunk_ranges.len()
@@ -5326,7 +5821,8 @@ impl CohortRound<TensorError> for TransposeRound<'_> {
         for local_position in 0..position_count {
             let position = position_start + local_position;
             for row in 0..self.rows {
-                chunk_output[local_position * self.rows + row] = self.wide[row * self.leading_total + position];
+                chunk_output[local_position * self.rows + row] =
+                    self.wide[row * self.leading_total + position];
             }
         }
         Ok(())
@@ -5395,10 +5891,15 @@ fn dot_fn_for(weight_block: QuantizedBlock<'_>) -> Option<MatmulRowDotFn> {
 /// node) with fewer, larger ones — it can never ADD a round where none
 /// existed, which is the one property ROW 96's broader version lacked.
 #[cfg(feature = "cohort-staged-graph")]
-fn is_staged_batch_eligible(resolved: &BoundOp, quantized_weights: &BTreeMap<NodeId, QuantizedBlock>) -> bool {
+fn is_staged_batch_eligible(
+    resolved: &BoundOp,
+    quantized_weights: &BTreeMap<NodeId, QuantizedBlock>,
+) -> bool {
     match quantized_operand(resolved, quantized_weights) {
         None => false,
-        Some(weight_node) => quantized_weights.get(&weight_node).is_some_and(|block| dot_fn_for(*block).is_some()),
+        Some(weight_node) => quantized_weights
+            .get(&weight_node)
+            .is_some_and(|block| dot_fn_for(*block).is_some()),
     }
 }
 
@@ -5419,13 +5920,18 @@ fn is_staged_batch_eligible(resolved: &BoundOp, quantized_weights: &BTreeMap<Nod
 /// on an earlier position, so checking positions `start..end` — never
 /// anything after `end` — is exhaustive.
 #[cfg(feature = "cohort-staged-graph")]
-fn staged_batch_run_end(resolved: &[BoundOp], start: usize, quantized_weights: &BTreeMap<NodeId, QuantizedBlock>) -> usize {
+fn staged_batch_run_end(
+    resolved: &[BoundOp],
+    start: usize,
+    quantized_weights: &BTreeMap<NodeId, QuantizedBlock>,
+) -> usize {
     let mut end = start;
     while end < resolved.len() && is_staged_batch_eligible(&resolved[end], quantized_weights) {
-        let reads_from_this_run = resolved[end]
-            .operands()
-            .iter()
-            .any(|(operand, _, _)| resolved[start..end].iter().any(|produced| produced.node == *operand));
+        let reads_from_this_run = resolved[end].operands().iter().any(|(operand, _, _)| {
+            resolved[start..end]
+                .iter()
+                .any(|produced| produced.node == *operand)
+        });
         if reads_from_this_run {
             break;
         }
@@ -5489,7 +5995,10 @@ impl MatmulStagePlan<'_> {
             let weight_row = &self.weights[start..start + self.row_bytes];
             for (position, output_slot) in slot.iter_mut().enumerate() {
                 let q8k_start = position * self.q8k_row_bytes;
-                *output_slot = (self.dot_fn)(weight_row, &self.activation_q8k[q8k_start..q8k_start + self.q8k_row_bytes])?;
+                *output_slot = (self.dot_fn)(
+                    weight_row,
+                    &self.activation_q8k[q8k_start..q8k_start + self.q8k_row_bytes],
+                )?;
             }
         }
         Ok(())
@@ -5532,10 +6041,13 @@ fn build_matmul_stage_plan<'weights>(
             node: resolved.node,
             reason: "quantized matmul reduce has no activation operand",
         })?;
-    let activation = buffers[activation_node.0 as usize].as_deref().ok_or(TensorError::NotLowerable {
-        node: activation_node,
-        reason: "quantized matmul activation operand has no bound buffer",
-    })?;
+    let activation =
+        buffers[activation_node.0 as usize]
+            .as_deref()
+            .ok_or(TensorError::NotLowerable {
+                node: activation_node,
+                reason: "quantized matmul activation operand has no bound buffer",
+            })?;
     let BoundOpKind::Reduce { output_axes, .. } = &resolved.kind else {
         unreachable!("build_matmul_stage_plan is only called for a Keep::Reduce fold")
     };
@@ -5642,50 +6154,53 @@ fn build_matmul_stage_plan<'weights>(
     // refcount bump, no bytes touched); a miss pays the real quantize once
     // and seeds the cache for whichever sibling node reads this same
     // activation next.
-    let activation_q8k: Arc<[u8]> = if let Some(cached) = quantize_cache[activation_node.0 as usize].as_ref() {
-        #[cfg(feature = "instrument")]
-        instrument::record_quantize_activation_cache_hit();
-        Arc::clone(cached)
-    } else {
-        let mut buffer = vec![0u8; block_count * Q8K_BLOCK_BYTES];
-        // `Some(session)` here is safe, unlike inside a stage's own
-        // `run_stage_chunk` closure: this call runs during the precompute
-        // pass, strictly BEFORE `run_staged_batch` opens its round
-        // (`session.run(&round)` has not been called yet), so there is no
-        // in-flight round for a second `session.run` to collide with.
-        // Matches `run_reduce_quantized`'s own unbatched call exactly (same
-        // function, same session), so a wide (prefill-shaped) activation
-        // keeps its existing parallel quantize instead of losing it just
-        // because this node got folded.
-        //
-        // instrumentation-only: a DEDICATED counter (`STAGED_MATMUL_QUANTIZE_TICKS`),
-        // not a second call site into `MATMUL_QUANTIZE_ACTIVATION_TICKS` -- see
-        // that counter's own doc for why sharing it across both call sites broke
-        // `matmul_split`'s own nested-subset arithmetic. Before this counter
-        // existed, this call site had no attribution at all: the staged path's
-        // own quantize cost (160/225 matmul nodes per step, ROW97/98's dominant
-        // bucket) was invisible.
-        #[cfg(feature = "instrument")]
-        let diag_staged_quantize_started = instrument::read_ticks();
-        // ROW 140's own redundant-quantize hypothesis check: recorded on a
-        // CACHE MISS only, i.e. once per distinct activation node this step
-        // actually pays a real quantize for -- see
-        // `instrument::quantize_activation_call_stats`'s own doc.
-        #[cfg(feature = "instrument")]
-        instrument::record_quantize_activation_call(activation_node);
-        quantize_row_q8k_dispatch(activation, &mut buffer, Some(session))?;
-        #[cfg(feature = "instrument")]
-        counter!(
-            instrument::STAGED_MATMUL_QUANTIZE_TICKS,
-            instrument::elapsed_ticks(diag_staged_quantize_started)
-        );
-        let shared: Arc<[u8]> = Arc::from(buffer);
-        quantize_cache[activation_node.0 as usize] = Some(Arc::clone(&shared));
-        shared
-    };
+    let activation_q8k: Arc<[u8]> =
+        if let Some(cached) = quantize_cache[activation_node.0 as usize].as_ref() {
+            #[cfg(feature = "instrument")]
+            instrument::record_quantize_activation_cache_hit();
+            Arc::clone(cached)
+        } else {
+            let mut buffer = vec![0u8; block_count * Q8K_BLOCK_BYTES];
+            // `Some(session)` here is safe, unlike inside a stage's own
+            // `run_stage_chunk` closure: this call runs during the precompute
+            // pass, strictly BEFORE `run_staged_batch` opens its round
+            // (`session.run(&round)` has not been called yet), so there is no
+            // in-flight round for a second `session.run` to collide with.
+            // Matches `run_reduce_quantized`'s own unbatched call exactly (same
+            // function, same session), so a wide (prefill-shaped) activation
+            // keeps its existing parallel quantize instead of losing it just
+            // because this node got folded.
+            //
+            // instrumentation-only: a DEDICATED counter (`STAGED_MATMUL_QUANTIZE_TICKS`),
+            // not a second call site into `MATMUL_QUANTIZE_ACTIVATION_TICKS` -- see
+            // that counter's own doc for why sharing it across both call sites broke
+            // `matmul_split`'s own nested-subset arithmetic. Before this counter
+            // existed, this call site had no attribution at all: the staged path's
+            // own quantize cost (160/225 matmul nodes per step, ROW97/98's dominant
+            // bucket) was invisible.
+            #[cfg(feature = "instrument")]
+            let diag_staged_quantize_started = instrument::read_ticks();
+            // ROW 140's own redundant-quantize hypothesis check: recorded on a
+            // CACHE MISS only, i.e. once per distinct activation node this step
+            // actually pays a real quantize for -- see
+            // `instrument::quantize_activation_call_stats`'s own doc.
+            #[cfg(feature = "instrument")]
+            instrument::record_quantize_activation_call(activation_node);
+            quantize_row_q8k_dispatch(activation, &mut buffer, Some(session))?;
+            #[cfg(feature = "instrument")]
+            counter!(
+                instrument::STAGED_MATMUL_QUANTIZE_TICKS,
+                instrument::elapsed_ticks(diag_staged_quantize_started)
+            );
+            let shared: Arc<[u8]> = Arc::from(buffer);
+            quantize_cache[activation_node.0 as usize] = Some(Arc::clone(&shared));
+            shared
+        };
     #[cfg(feature = "instrument")]
     {
-        let macs = (rows as u64).saturating_mul(k as u64).saturating_mul(leading_total as u64);
+        let macs = (rows as u64)
+            .saturating_mul(k as u64)
+            .saturating_mul(leading_total as u64);
         counter!(instrument::STAGED_MATMUL_MACS, macs);
         counter!(instrument::STAGED_MATMUL_NODES, 1);
     }
@@ -5762,19 +6277,30 @@ fn run_staged_batch(
     live_now: &mut usize,
     quantize_cache: &mut [Option<Arc<[u8]>>],
 ) -> Result<(), TensorError> {
-    let mut run_outputs: Vec<Vec<f32>> =
-        run.iter().map(|node| take_or_allocate(free_buffers, node_output_len(node))).collect();
+    let mut run_outputs: Vec<Vec<f32>> = run
+        .iter()
+        .map(|node| take_or_allocate(free_buffers, node_output_len(node)))
+        .collect();
     let buffers_ref: &[Option<Cow<'_, [f32]>>] = buffers;
 
     let mut plans: Vec<Option<MatmulStagePlan<'_>>> = Vec::with_capacity(run.len());
     for node in run {
         let plan = match quantized_operand(node, quantized_weights) {
             Some(weight_node) => {
-                let weight_block = quantized_weights.get(&weight_node).copied().ok_or(TensorError::NotLowerable {
-                    node: weight_node,
-                    reason: "quantized weight node has no bound byte buffer",
-                })?;
-                build_matmul_stage_plan(node, buffers_ref, weight_block, weight_node, session, quantize_cache)?
+                let weight_block = quantized_weights.get(&weight_node).copied().ok_or(
+                    TensorError::NotLowerable {
+                        node: weight_node,
+                        reason: "quantized weight node has no bound byte buffer",
+                    },
+                )?;
+                build_matmul_stage_plan(
+                    node,
+                    buffers_ref,
+                    weight_block,
+                    weight_node,
+                    session,
+                    quantize_cache,
+                )?
             }
             None => None,
         };
@@ -5787,8 +6313,10 @@ fn run_staged_batch(
             Some(*total)
         }))
         .collect();
-    let output_slots: Vec<(usize, usize)> =
-        run_outputs.iter_mut().map(|buffer| (buffer.as_mut_ptr() as usize, buffer.len())).collect();
+    let output_slots: Vec<(usize, usize)> = run_outputs
+        .iter_mut()
+        .map(|buffer| (buffer.as_mut_ptr() as usize, buffer.len()))
+        .collect();
     let completed: Vec<AtomicUsize> = (0..run.len()).map(|_| AtomicUsize::new(0)).collect();
 
     let round = StagedRound {
@@ -5804,7 +6332,8 @@ fn run_staged_batch(
                     // `ElementwiseRowRound`/`RowRound`'s own `split_at_mut`-carved
                     // ranges — one stage owns this whole slot (`plans[stage]`
                     // is `None`, so this stage is exactly one chunk).
-                    let output = unsafe { core::slice::from_raw_parts_mut(address as *mut f32, length) };
+                    let output =
+                        unsafe { core::slice::from_raw_parts_mut(address as *mut f32, length) };
                     run_node_into(computed, buffers_ref, Some(quantized_weights), None, output)
                 }
             }
@@ -5833,7 +6362,9 @@ fn run_staged_batch(
     if report.abandoned > 0 {
         return Err(TensorError::ThreadedChunkFailed {
             chunk: report.first_abandoned.map_or(0, |chunk| chunk.0 + 1),
-            reason: alloc::string::String::from("cohort member panicked while running a staged graph batch"),
+            reason: alloc::string::String::from(
+                "cohort member panicked while running a staged graph batch",
+            ),
         });
     }
 
@@ -5846,7 +6377,13 @@ fn run_staged_batch(
     let diag_staged_transpose_started = instrument::read_ticks();
     for (offset, node_output) in run_outputs.iter_mut().enumerate() {
         if let Some(plan) = &plans[offset] {
-            transpose_wide_to_output(&plan.wide, plan.rows, plan.width, Some(session), node_output)?;
+            transpose_wide_to_output(
+                &plan.wide,
+                plan.rows,
+                plan.width,
+                Some(session),
+                node_output,
+            )?;
         }
     }
     #[cfg(feature = "instrument")]
@@ -5944,7 +6481,8 @@ fn run_reduce_scatter<B: Deref<Target = [f32]>>(
             element_stride: target.element_stride,
             extent: target.extent,
         };
-        let dest_offset = out_layout.offset_of(&coordinate) + destination.fetch_and_advance(resolved.node)?;
+        let dest_offset =
+            out_layout.offset_of(&coordinate) + destination.fetch_and_advance(resolved.node)?;
         let slot = &mut output[dest_offset as usize];
         *slot = apply_scalar_op(*reduce_op, &[*slot, value]);
     }
@@ -6014,10 +6552,13 @@ fn run_reduce_quantized<B: Deref<Target = [f32]>>(
             node: resolved.node,
             reason: "quantized matmul reduce has no activation operand",
         })?;
-    let activation = buffers[activation_node.0 as usize].as_deref().ok_or(TensorError::NotLowerable {
-        node: activation_node,
-        reason: "quantized matmul activation operand has no bound buffer",
-    })?;
+    let activation =
+        buffers[activation_node.0 as usize]
+            .as_deref()
+            .ok_or(TensorError::NotLowerable {
+                node: activation_node,
+                reason: "quantized matmul activation operand has no bound buffer",
+            })?;
     // ROW 140's own redundant-quantize hypothesis check, unbatched-path
     // twin of `build_matmul_stage_plan`'s call: this function's own
     // wide-fold arms below (`matmul_q4k_q8k_f32_impl` et al.) each quantize
@@ -6082,7 +6623,11 @@ fn run_reduce_quantized<B: Deref<Target = [f32]>>(
     // as any other batch position. `leading_axes`/`leading_extents` are only
     // populated when a gather is present, so the non-gathered path (every
     // codec this crate ran before Mixtral) allocates nothing extra here.
-    let weight_gather = resolved.operands().iter().find(|(node, _, _)| *node == weight_node).and_then(|(_, _, gather)| gather.clone());
+    let weight_gather = resolved
+        .operands()
+        .iter()
+        .find(|(node, _, _)| *node == weight_node)
+        .and_then(|(_, _, gather)| gather.clone());
     let mut rows_total: u64 = 1;
     let mut leading_total_u64: u64 = 1;
     let mut leading_axes: Vec<u16> = Vec::new();
@@ -6146,7 +6691,9 @@ fn run_reduce_quantized<B: Deref<Target = [f32]>>(
     };
     if let Some(gather) = weight_gather.as_ref() {
         let expert_count = usize::try_from(gather.extent).map_err(|_| shape_error())?;
-        let expected_total_bytes = per_expert_bytes.checked_mul(expert_count).ok_or_else(shape_error)?;
+        let expected_total_bytes = per_expert_bytes
+            .checked_mul(expert_count)
+            .ok_or_else(shape_error)?;
         if weights.len() != expected_total_bytes {
             return Err(shape_error());
         }
@@ -6192,7 +6739,12 @@ fn run_reduce_quantized<B: Deref<Target = [f32]>>(
             let diag_call_macs = (rows as u64) * (k as u64) * (leading_total as u64);
             counter!(instrument::MATMUL_Q4K_MACS, diag_call_macs);
             counter!(instrument::MATMUL_Q4K_CALL_TICKS, diag_call_ticks);
-            instrument::record_q4k_shape_call(rows as u64, (k as u64) * leading_total as u64, diag_call_macs, diag_call_ticks);
+            instrument::record_q4k_shape_call(
+                rows as u64,
+                (k as u64) * leading_total as u64,
+                diag_call_macs,
+                diag_call_ticks,
+            );
         }
         // `wide` is row-major `[row][position]` — `matmul_rows_threaded`'s
         // natural shape, weight row as the parallel axis. `output` here is
@@ -6280,8 +6832,16 @@ fn run_reduce_quantized<B: Deref<Target = [f32]>>(
     // not a second index-resolution mechanism. `leading_coordinate`/
     // `full_coordinate` stay empty `Vec`s (no allocation) on the
     // non-gathered path.
-    let mut leading_coordinate = if weight_gather.is_some() { vec![0u64; leading_axes.len()] } else { Vec::new() };
-    let mut full_coordinate = if weight_gather.is_some() { vec![0u64; resolved.extents.len()] } else { Vec::new() };
+    let mut leading_coordinate = if weight_gather.is_some() {
+        vec![0u64; leading_axes.len()]
+    } else {
+        Vec::new()
+    };
+    let mut full_coordinate = if weight_gather.is_some() {
+        vec![0u64; resolved.extents.len()]
+    } else {
+        Vec::new()
+    };
 
     #[cfg(feature = "instrument")]
     counter!(instrument::MATMUL_POSITION_LOOP_ITERS, leading_total as u64);
@@ -6289,9 +6849,16 @@ fn run_reduce_quantized<B: Deref<Target = [f32]>>(
         let activation_row = &activation[position * k..(position + 1) * k];
         let weights: &[u8] = if let Some(gather) = weight_gather.as_ref() {
             unflatten_into(position as u64, &leading_extents, &mut leading_coordinate);
-            merge_coordinates_into(&leading_axes, &leading_coordinate, &[], &[], &mut full_coordinate);
+            merge_coordinates_into(
+                &leading_axes,
+                &leading_coordinate,
+                &[],
+                &[],
+                &mut full_coordinate,
+            );
             let index_buffer = buffer_of(buffers, gather.indices)?;
-            let index_offset = usize::try_from(gather.index_layout.offset_of(&full_coordinate)).map_err(|_| shape_error())?;
+            let index_offset = usize::try_from(gather.index_layout.offset_of(&full_coordinate))
+                .map_err(|_| shape_error())?;
             let raw_index = *index_buffer.get(index_offset).ok_or_else(shape_error)?;
             let expert_index = raw_index as i64;
             if expert_index < 0 || expert_index as u64 >= gather.extent {
@@ -6302,7 +6869,9 @@ fn run_reduce_quantized<B: Deref<Target = [f32]>>(
                 });
             }
             let start = expert_index as usize * per_expert_bytes;
-            weights.get(start..start + per_expert_bytes).ok_or_else(shape_error)?
+            weights
+                .get(start..start + per_expert_bytes)
+                .ok_or_else(shape_error)?
         } else {
             weights
         };
@@ -6372,7 +6941,12 @@ fn run_reduce_quantized<B: Deref<Target = [f32]>>(
                 QuantizedBlock::Q4K(_) => {
                     counter!(instrument::MATMUL_Q4K_MACS, diag_call_macs);
                     counter!(instrument::MATMUL_Q4K_CALL_TICKS, diag_call_ticks);
-                    instrument::record_q4k_shape_call(rows as u64, k as u64, diag_call_macs, diag_call_ticks);
+                    instrument::record_q4k_shape_call(
+                        rows as u64,
+                        k as u64,
+                        diag_call_macs,
+                        diag_call_ticks,
+                    );
                 }
                 QuantizedBlock::Q5K(_) => {
                     counter!(instrument::MATMUL_Q5K_MACS, diag_call_macs);
@@ -6418,11 +6992,22 @@ fn run_reduce_with_quantized_weights<B: Deref<Target = [f32]>>(
     output: &mut [f32],
 ) -> Result<(), TensorError> {
     if let Some(weight_node) = quantized_operand(resolved, quantized_weights) {
-        let weight_block = quantized_weights.get(&weight_node).copied().ok_or(TensorError::NotLowerable {
-            node: weight_node,
-            reason: "quantized weight node has no bound byte buffer",
-        })?;
-        return run_reduce_quantized(resolved, buffers, weight_block, weight_node, session, output);
+        let weight_block =
+            quantized_weights
+                .get(&weight_node)
+                .copied()
+                .ok_or(TensorError::NotLowerable {
+                    node: weight_node,
+                    reason: "quantized weight node has no bound byte buffer",
+                })?;
+        return run_reduce_quantized(
+            resolved,
+            buffers,
+            weight_block,
+            weight_node,
+            session,
+            output,
+        );
     }
     run_reduce(resolved, buffers, output, None)
 }
@@ -6480,19 +7065,29 @@ struct ReduceAxisShape {
 /// `leading_extents` for the kept axis is `[1]`, `leading_total` (product)
 /// is `1`, and the tile plans address exactly the single row this shape has.
 fn resolve_reduce_axis_shape(resolved: &BoundOp, output_axes: &[u16]) -> ReduceAxisShape {
-    let reduction_dims: Vec<u16> = (0..resolved.extents.len() as u16).filter(|dim| !output_axes.contains(dim)).collect();
+    let reduction_dims: Vec<u16> = (0..resolved.extents.len() as u16)
+        .filter(|dim| !output_axes.contains(dim))
+        .collect();
     let (leading_output_axes_raw, last_output_dim) = output_axes_split(output_axes);
     let mut leading_output_axes: Vec<u16> = leading_output_axes_raw
         .iter()
         .copied()
         .filter(|&dim| resolved.extents[dim as usize] != 1)
         .collect();
-    if leading_output_axes.is_empty() && let Some(&first_axis) = leading_output_axes_raw.first() {
+    if leading_output_axes.is_empty()
+        && let Some(&first_axis) = leading_output_axes_raw.first()
+    {
         leading_output_axes.push(first_axis);
     }
 
-    let leading_extents: Vec<u64> = leading_output_axes.iter().map(|dim| resolved.extents[*dim as usize]).collect();
-    let reduction_extents: Vec<u64> = reduction_dims.iter().map(|dim| resolved.extents[*dim as usize]).collect();
+    let leading_extents: Vec<u64> = leading_output_axes
+        .iter()
+        .map(|dim| resolved.extents[*dim as usize])
+        .collect();
+    let reduction_extents: Vec<u64> = reduction_dims
+        .iter()
+        .map(|dim| resolved.extents[*dim as usize])
+        .collect();
     let width = last_output_dim.map_or(1, |dim| resolved.extents[dim as usize] as usize);
 
     ReduceAxisShape {
@@ -6518,7 +7113,11 @@ fn resolve_reduce_axis_shape(resolved: &BoundOp, output_axes: &[u16]) -> ReduceA
 /// flatten) and false for `Conv`'s materialized `windowed` operand, whose
 /// `ci` axis sits outside the window's `oh`/`ow` axes in memory — the
 /// exact mechanism `run_reduce`'s own `reduction_strides` doc cites.
-fn reduction_is_fully_flat(resolved: &BoundOp, reduction_dims: &[u16], operand_index: usize) -> bool {
+fn reduction_is_fully_flat(
+    resolved: &BoundOp,
+    reduction_dims: &[u16],
+    operand_index: usize,
+) -> bool {
     max_flat_reduction_suffix_len(resolved, reduction_dims, operand_index) == reduction_dims.len()
 }
 
@@ -6531,7 +7130,11 @@ fn reduction_is_fully_flat(resolved: &BoundOp, reduction_dims: &[u16], operand_i
 /// find `Conv`'s own inner-contiguous-block boundary (`ky,kx`, length 2)
 /// once the outer `ci` axis breaks the chain `Conv`'s materialized
 /// `windowed` operand never satisfies as a whole.
-fn max_flat_reduction_suffix_len(resolved: &BoundOp, reduction_dims: &[u16], operand_index: usize) -> usize {
+fn max_flat_reduction_suffix_len(
+    resolved: &BoundOp,
+    reduction_dims: &[u16],
+    operand_index: usize,
+) -> usize {
     let view = &resolved.operands()[operand_index].1;
     let mut expected: i64 = 1;
     let mut len = 0usize;
@@ -6625,7 +7228,13 @@ fn run_reduce<B: Deref<Target = [f32]>>(
     // window's `oh`/`ow` axes in memory — see ROW 148's own row-major
     // layout trace), so `Conv` correctly stays ineligible here, unchanged.
     let reduction_strides: Vec<i64> = (0..resolved.operands().len())
-        .map(|index| if reduction_is_fully_flat(resolved, &reduction_dims, index) { 1 } else { i64::MAX })
+        .map(|index| {
+            if reduction_is_fully_flat(resolved, &reduction_dims, index) {
+                1
+            } else {
+                i64::MAX
+            }
+        })
         .collect();
 
     // Resolved ONCE per bound op, never per element: whether every physical
@@ -6638,8 +7247,9 @@ fn run_reduce<B: Deref<Target = [f32]>>(
     // unchanged. The width path wins the tie against the dot path below,
     // the ordering every ROW 3/10 measurement was taken under.
     let fast_path = body_shape_is_affine_fast_path(resolved, &shape, &strides);
-    let reduction_fast_path =
-        !fast_path && !reduction_dims.is_empty() && body_shape_is_affine_fast_path(resolved, &shape, &reduction_strides);
+    let reduction_fast_path = !fast_path
+        && !reduction_dims.is_empty()
+        && body_shape_is_affine_fast_path(resolved, &shape, &reduction_strides);
 
     #[cfg(feature = "instrument")]
     let mut counters = KernelCounters::default();
@@ -6711,14 +7321,18 @@ fn run_reduce<B: Deref<Target = [f32]>>(
                 ACCELERATE_GEMM_HITS.fetch_add(1, EpilogueFuseOrdering::Relaxed);
                 #[cfg(feature = "instrument")]
                 {
-                    let distinct_operand_elements: u64 = raw.iter().map(|buffer| buffer.len() as u64).sum();
+                    let distinct_operand_elements: u64 =
+                        raw.iter().map(|buffer| buffer.len() as u64).sum();
                     counters.kernel_calls += 1;
                     counters.mac_ops += leading_total * width as u64 * reduction_total;
                     counters.operand_loads += (leading_total + width as u64) * reduction_total;
                     counters.leading_iters += leading_total;
                     counters.output_writes += leading_total * width as u64;
                     counters.commit(path, distinct_operand_elements);
-                    instrument::record_reduce_path_ticks(path, instrument::elapsed_ticks(commit_started));
+                    instrument::record_reduce_path_ticks(
+                        path,
+                        instrument::elapsed_ticks(commit_started),
+                    );
                 }
                 return Ok(());
             }
@@ -6727,8 +7341,10 @@ fn run_reduce<B: Deref<Target = [f32]>>(
         #[cfg(feature = "instrument")]
         let width_tile_counters_before = width_tile_counters();
         #[cfg(feature = "instrument")]
-        let width_tile_row_remainder_before =
-            (width_tile_row_remainder_invocations(), width_tile_row_remainder_elements());
+        let width_tile_row_remainder_before = (
+            width_tile_row_remainder_invocations(),
+            width_tile_row_remainder_elements(),
+        );
         if try_run_width_tile(&width_path_context, &raw, packed_width, output) {
             // the tile's own early return skips the rest of this function
             // (including the `counters.commit` call every other path reaches),
@@ -6741,16 +7357,24 @@ fn run_reduce<B: Deref<Target = [f32]>>(
                 let (_, invocations_before, fallback_before) = width_tile_counters_before;
                 let invocations_delta = invocations_after - invocations_before;
                 let fallback_delta = fallback_after - fallback_before;
-                let (row_remainder_invocations_after, row_remainder_elements_after) =
-                    (width_tile_row_remainder_invocations(), width_tile_row_remainder_elements());
-                let (row_remainder_invocations_before, row_remainder_elements_before) = width_tile_row_remainder_before;
-                let row_remainder_invocations_delta = row_remainder_invocations_after - row_remainder_invocations_before;
-                let row_remainder_elements_delta = row_remainder_elements_after - row_remainder_elements_before;
+                let (row_remainder_invocations_after, row_remainder_elements_after) = (
+                    width_tile_row_remainder_invocations(),
+                    width_tile_row_remainder_elements(),
+                );
+                let (row_remainder_invocations_before, row_remainder_elements_before) =
+                    width_tile_row_remainder_before;
+                let row_remainder_invocations_delta =
+                    row_remainder_invocations_after - row_remainder_invocations_before;
+                let row_remainder_elements_delta =
+                    row_remainder_elements_after - row_remainder_elements_before;
                 let tile_cols = (WIDTH_TILE_VECS * 4) as u64;
                 let tile_elements = WIDTH_TILE_ROWS as u64 * tile_cols;
-                counters.kernel_calls += invocations_delta + row_remainder_invocations_delta + fallback_delta;
+                counters.kernel_calls +=
+                    invocations_delta + row_remainder_invocations_delta + fallback_delta;
                 counters.mac_ops += invocations_delta * tile_elements * reduction_total;
-                counters.operand_loads += invocations_delta * (WIDTH_TILE_ROWS + WIDTH_TILE_VECS) as u64 * reduction_total;
+                counters.operand_loads += invocations_delta
+                    * (WIDTH_TILE_ROWS + WIDTH_TILE_VECS) as u64
+                    * reduction_total;
                 // row-remainder tiles (`ROWS` = 2 or 1, ROW 200) contribute the
                 // SAME per-call shape as the main tile, `(ROWS + WIDTH_TILE_VECS)
                 // * reduction_total` operand loads, just at a narrower `ROWS` —
@@ -6761,13 +7385,15 @@ fn run_reduce<B: Deref<Target = [f32]>>(
                 // rather than an approximation from the aggregate counters alone.
                 let row_remainder_rows_sum = row_remainder_elements_delta / tile_cols;
                 counters.mac_ops += row_remainder_elements_delta * reduction_total;
-                counters.operand_loads +=
-                    (row_remainder_rows_sum + row_remainder_invocations_delta * WIDTH_TILE_VECS as u64) * reduction_total;
+                counters.operand_loads += (row_remainder_rows_sum
+                    + row_remainder_invocations_delta * WIDTH_TILE_VECS as u64)
+                    * reduction_total;
                 counters.mac_ops += fallback_delta * reduction_total;
                 counters.operand_loads += fallback_delta * 2 * reduction_total;
                 counters.leading_iters += leading_total;
                 counters.output_writes += leading_total * width as u64;
-                let distinct_operand_elements: u64 = raw.iter().map(|buffer| buffer.len() as u64).sum();
+                let distinct_operand_elements: u64 =
+                    raw.iter().map(|buffer| buffer.len() as u64).sum();
                 counters.commit(path, distinct_operand_elements);
                 let elapsed = instrument::elapsed_ticks(commit_started);
                 instrument::record_reduce_path_ticks(path, elapsed);
@@ -6808,7 +7434,8 @@ fn run_reduce<B: Deref<Target = [f32]>>(
             // tile below on any decline (overflow, negative stride, non-zero
             // seed), same "try, then fall back" shape as the flat route above.
             #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-            let conv_accelerated = ACCELERATE_GEMM_ENABLED.load(EpilogueFuseOrdering::Relaxed) && try_run_accelerate_conv_gemm(&plan, &raw, output);
+            let conv_accelerated = ACCELERATE_GEMM_ENABLED.load(EpilogueFuseOrdering::Relaxed)
+                && try_run_accelerate_conv_gemm(&plan, &raw, output);
             #[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
             let conv_accelerated = false;
             if conv_accelerated {
@@ -6832,10 +7459,12 @@ fn run_reduce<B: Deref<Target = [f32]>>(
                     * (plan.n_total as u64).div_ceil(TILE_COLS as u64)
                     * plan.outer_extent;
                 counters.mac_ops += plan.m_total as u64 * plan.n_total as u64 * reduction_total;
-                counters.operand_loads += (plan.m_total as u64 + plan.n_total as u64) * reduction_total;
+                counters.operand_loads +=
+                    (plan.m_total as u64 + plan.n_total as u64) * reduction_total;
                 counters.leading_iters += plan.m_total as u64;
                 counters.output_writes += plan.m_total as u64 * plan.n_total as u64;
-                let distinct_operand_elements: u64 = raw.iter().map(|buffer| buffer.len() as u64).sum();
+                let distinct_operand_elements: u64 =
+                    raw.iter().map(|buffer| buffer.len() as u64).sum();
                 counters.commit(Path::ConvTile, distinct_operand_elements);
                 let elapsed = instrument::elapsed_ticks(commit_started);
                 instrument::record_reduce_path_ticks(Path::ConvTile, elapsed);
@@ -6911,7 +7540,8 @@ fn run_reduce<B: Deref<Target = [f32]>>(
             ACCELERATE_GEMM_HITS.fetch_add(1, EpilogueFuseOrdering::Relaxed);
             #[cfg(feature = "instrument")]
             {
-                let distinct_operand_elements: u64 = raw.iter().map(|buffer| buffer.len() as u64).sum();
+                let distinct_operand_elements: u64 =
+                    raw.iter().map(|buffer| buffer.len() as u64).sum();
                 counters.kernel_calls += 1;
                 counters.mac_ops += leading_total * width as u64 * reduction_total;
                 counters.operand_loads += (leading_total + width as u64) * reduction_total;
@@ -7003,7 +7633,13 @@ fn run_reduce<B: Deref<Target = [f32]>>(
             let mut leading_flat = 0u64;
             while leading_flat < tiled_leading_rows {
                 unflatten_into(leading_flat, &leading_extents, &mut leading_coordinate);
-                merge_coordinates_into(leading_output_axes, &leading_coordinate, &[], &[], &mut full_coordinate);
+                merge_coordinates_into(
+                    leading_output_axes,
+                    &leading_coordinate,
+                    &[],
+                    &[],
+                    &mut full_coordinate,
+                );
                 full_coordinate[reduction_dims[0] as usize] = 0;
                 if let Some(dim) = last_output_dim {
                     full_coordinate[dim as usize] = 0;
@@ -7076,7 +7712,14 @@ fn run_reduce<B: Deref<Target = [f32]>>(
                         }
                         fill_running_offsets(resolved, &full_coordinate, &mut running);
                         for n in tiled_width_cols..width {
-                            let value = reduce_dot_fast(&shape, *reduce_op, &raw, &running, &reduction_strides, fold);
+                            let value = reduce_dot_fast(
+                                &shape,
+                                *reduce_op,
+                                &raw,
+                                &running,
+                                &reduction_strides,
+                                fold,
+                            );
                             output[(out_prefix + out_stride * n as i64) as usize] = value;
                             #[cfg(feature = "instrument")]
                             {
@@ -7084,7 +7727,11 @@ fn run_reduce<B: Deref<Target = [f32]>>(
                                 counters.kernel_calls += 1;
                                 counters.mac_ops += reduction_total;
                                 for &operand_stride in &reduction_strides {
-                                    counters.operand_loads += if operand_stride == 1 { reduction_total } else { 1 };
+                                    counters.operand_loads += if operand_stride == 1 {
+                                        reduction_total
+                                    } else {
+                                        1
+                                    };
                                 }
                             }
                             for (offset, stride) in running.iter_mut().zip(&strides) {
@@ -7134,7 +7781,13 @@ fn run_reduce<B: Deref<Target = [f32]>>(
                 let leading_axis = leading_output_axes[0] as usize;
                 let out_stride = last_output_dim.map_or(0, |dim| out_layout.stride(dim));
                 unflatten_into(leading_flat, &leading_extents, &mut leading_coordinate);
-                merge_coordinates_into(leading_output_axes, &leading_coordinate, &[], &[], &mut full_coordinate);
+                merge_coordinates_into(
+                    leading_output_axes,
+                    &leading_coordinate,
+                    &[],
+                    &[],
+                    &mut full_coordinate,
+                );
                 full_coordinate[reduction_dims[0] as usize] = 0;
                 if let Some(dim) = last_output_dim {
                     full_coordinate[dim as usize] = 0;
@@ -7202,7 +7855,14 @@ fn run_reduce<B: Deref<Target = [f32]>>(
                         }
                         fill_running_offsets(resolved, &full_coordinate, &mut running);
                         for n in tiled_width_cols..width {
-                            let value = reduce_dot_fast(&shape, *reduce_op, &raw, &running, &reduction_strides, fold);
+                            let value = reduce_dot_fast(
+                                &shape,
+                                *reduce_op,
+                                &raw,
+                                &running,
+                                &reduction_strides,
+                                fold,
+                            );
                             output[(out_prefix + out_stride * n as i64) as usize] = value;
                             #[cfg(feature = "instrument")]
                             {
@@ -7210,7 +7870,11 @@ fn run_reduce<B: Deref<Target = [f32]>>(
                                 counters.kernel_calls += 1;
                                 counters.mac_ops += reduction_total;
                                 for &operand_stride in &reduction_strides {
-                                    counters.operand_loads += if operand_stride == 1 { reduction_total } else { 1 };
+                                    counters.operand_loads += if operand_stride == 1 {
+                                        reduction_total
+                                    } else {
+                                        1
+                                    };
                                 }
                             }
                             for (offset, stride) in running.iter_mut().zip(&strides) {
@@ -7265,7 +7929,13 @@ fn run_reduce<B: Deref<Target = [f32]>>(
                 // of accumulating across the width dim `n` — one full contraction
                 // per output position, in the same k=0..K sequential order the
                 // generic loop below would visit, so results stay bit-identical.
-                merge_coordinates_into(leading_output_axes, &leading_coordinate, &[], &[], &mut full_coordinate);
+                merge_coordinates_into(
+                    leading_output_axes,
+                    &leading_coordinate,
+                    &[],
+                    &[],
+                    &mut full_coordinate,
+                );
                 full_coordinate[reduction_dims[0] as usize] = 0;
                 if let Some(dim) = last_output_dim {
                     full_coordinate[dim as usize] = 0;
@@ -7277,7 +7947,14 @@ fn run_reduce<B: Deref<Target = [f32]>>(
                     seeded,
                 };
                 for slot in &mut accumulator {
-                    *slot = reduce_dot_fast(&shape, *reduce_op, &raw, &running, &reduction_strides, fold);
+                    *slot = reduce_dot_fast(
+                        &shape,
+                        *reduce_op,
+                        &raw,
+                        &running,
+                        &reduction_strides,
+                        fold,
+                    );
                     #[cfg(all(target_arch = "aarch64", feature = "instrument"))]
                     if tile_plan.is_some() {
                         neon_tile_fallback_elements += 1;
@@ -7287,7 +7964,11 @@ fn run_reduce<B: Deref<Target = [f32]>>(
                         counters.kernel_calls += 1;
                         counters.mac_ops += reduction_total;
                         for &operand_stride in &reduction_strides {
-                            counters.operand_loads += if operand_stride == 0 { 1 } else { reduction_total };
+                            counters.operand_loads += if operand_stride == 0 {
+                                1
+                            } else {
+                                reduction_total
+                            };
                         }
                     }
                     for (offset, stride) in running.iter_mut().zip(&strides) {
@@ -7296,7 +7977,11 @@ fn run_reduce<B: Deref<Target = [f32]>>(
                 }
             } else {
                 for reduction_flat in 0..reduction_total {
-                    unflatten_into(reduction_flat, &reduction_extents, &mut reduction_coordinate);
+                    unflatten_into(
+                        reduction_flat,
+                        &reduction_extents,
+                        &mut reduction_coordinate,
+                    );
                     merge_coordinates_into(
                         leading_output_axes,
                         &leading_coordinate,
@@ -7307,13 +7992,22 @@ fn run_reduce<B: Deref<Target = [f32]>>(
                     fill_running_offsets(resolved, &full_coordinate, &mut running);
 
                     if fast_path {
-                        reduce_width_fast(&shape, *reduce_op, &raw, &running, &strides, &mut accumulator, seeded);
+                        reduce_width_fast(
+                            &shape,
+                            *reduce_op,
+                            &raw,
+                            &running,
+                            &strides,
+                            &mut accumulator,
+                            seeded,
+                        );
                         #[cfg(feature = "instrument")]
                         {
                             counters.kernel_calls += 1;
                             counters.mac_ops += width as u64;
                             for &stride in &strides {
-                                counters.operand_loads += if stride == 0 { 1 } else { width as u64 };
+                                counters.operand_loads +=
+                                    if stride == 0 { 1 } else { width as u64 };
                             }
                         }
                         seeded = true;
@@ -7354,7 +8048,13 @@ fn run_reduce<B: Deref<Target = [f32]>>(
                 }
             }
 
-            merge_coordinates_into(leading_output_axes, &leading_coordinate, &[], &[], &mut full_coordinate);
+            merge_coordinates_into(
+                leading_output_axes,
+                &leading_coordinate,
+                &[],
+                &[],
+                &mut full_coordinate,
+            );
             let out_prefix = out_layout.offset_of(&full_coordinate);
             let out_stride = last_output_dim.map_or(0, |dim| out_layout.stride(dim));
             for (slot, value) in accumulator.iter().enumerate() {
@@ -7381,8 +8081,10 @@ fn run_reduce<B: Deref<Target = [f32]>>(
     {
         NEON_TILE_FALLBACK_ELEMENTS.fetch_add(neon_tile_fallback_elements, Ordering::Relaxed);
         NEON_TILE_INVOCATIONS.fetch_add(neon_tile_invocations, Ordering::Relaxed);
-        NEON_TILE_ROW_REMAINDER_INVOCATIONS.fetch_add(neon_tile_row_remainder_invocations, Ordering::Relaxed);
-        NEON_TILE_ROW_REMAINDER_ELEMENTS.fetch_add(neon_tile_row_remainder_elements, Ordering::Relaxed);
+        NEON_TILE_ROW_REMAINDER_INVOCATIONS
+            .fetch_add(neon_tile_row_remainder_invocations, Ordering::Relaxed);
+        NEON_TILE_ROW_REMAINDER_ELEMENTS
+            .fetch_add(neon_tile_row_remainder_elements, Ordering::Relaxed);
         // computed once from `width`/`tiled_width_cols`, both already in
         // scope from earlier in this call — never re-checked per iteration.
         if tile_plan.is_some() && tiled_width_cols < width {
@@ -7451,7 +8153,10 @@ fn run_scan<B: Deref<Target = [f32]>>(
                 &running,
                 &strides,
                 out_slice,
-                ScanState { seeded, accumulator },
+                ScanState {
+                    seeded,
+                    accumulator,
+                },
             );
             seeded = true;
             continue;
@@ -7563,8 +8268,24 @@ struct AdamUpdateRoles {
 /// `StaticArena::static_nodes` (ROW 174/175) already use for a dedicated
 /// fast path beside the general one.
 fn detect_adam_update_roles(body: &ComposedBody) -> Option<AdamUpdateRoles> {
-    let [step0, step1, step2, step3, step4, step5, step6, step7, step8, step9, step10, step11, step12, step13, step14, step15] =
-        body.steps.as_slice()
+    let [
+        step0,
+        step1,
+        step2,
+        step3,
+        step4,
+        step5,
+        step6,
+        step7,
+        step8,
+        step9,
+        step10,
+        step11,
+        step12,
+        step13,
+        step14,
+        step15,
+    ] = body.steps.as_slice()
     else {
         return None;
     };
@@ -7574,14 +8295,20 @@ fn detect_adam_update_roles(body: &ComposedBody) -> Option<AdamUpdateRoles> {
         }
         _ => return None,
     };
-    if !matches!((step1.op, step1.args.as_slice()), (ScalarOp::Exponential, [StepArg::Step(0)])) {
+    if !matches!(
+        (step1.op, step1.args.as_slice()),
+        (ScalarOp::Exponential, [StepArg::Step(0)])
+    ) {
         return None;
     }
     let one_for_bias1 = match (step2.op, step2.args.as_slice()) {
         (ScalarOp::Subtract, [StepArg::Operand(one_for_bias1), StepArg::Step(1)]) => *one_for_bias1,
         _ => return None,
     };
-    if !matches!((step3.op, step3.args.as_slice()), (ScalarOp::Reciprocal, [StepArg::Step(2)])) {
+    if !matches!(
+        (step3.op, step3.args.as_slice()),
+        (ScalarOp::Reciprocal, [StepArg::Step(2)])
+    ) {
         return None;
     }
     let m = match (step4.op, step4.args.as_slice()) {
@@ -7594,28 +8321,40 @@ fn detect_adam_update_roles(body: &ComposedBody) -> Option<AdamUpdateRoles> {
         }
         _ => return None,
     };
-    if !matches!((step6.op, step6.args.as_slice()), (ScalarOp::Exponential, [StepArg::Step(5)])) {
+    if !matches!(
+        (step6.op, step6.args.as_slice()),
+        (ScalarOp::Exponential, [StepArg::Step(5)])
+    ) {
         return None;
     }
     let one_for_bias2 = match (step7.op, step7.args.as_slice()) {
         (ScalarOp::Subtract, [StepArg::Operand(one_for_bias2), StepArg::Step(6)]) => *one_for_bias2,
         _ => return None,
     };
-    if !matches!((step8.op, step8.args.as_slice()), (ScalarOp::Reciprocal, [StepArg::Step(7)])) {
+    if !matches!(
+        (step8.op, step8.args.as_slice()),
+        (ScalarOp::Reciprocal, [StepArg::Step(7)])
+    ) {
         return None;
     }
     let v = match (step9.op, step9.args.as_slice()) {
         (ScalarOp::Multiply, [StepArg::Operand(v), StepArg::Step(8)]) => *v,
         _ => return None,
     };
-    if !matches!((step10.op, step10.args.as_slice()), (ScalarOp::SquareRoot, [StepArg::Step(9)])) {
+    if !matches!(
+        (step10.op, step10.args.as_slice()),
+        (ScalarOp::SquareRoot, [StepArg::Step(9)])
+    ) {
         return None;
     }
     let epsilon = match (step11.op, step11.args.as_slice()) {
         (ScalarOp::Add, [StepArg::Step(10), StepArg::Operand(epsilon)]) => *epsilon,
         _ => return None,
     };
-    if !matches!((step12.op, step12.args.as_slice()), (ScalarOp::Reciprocal, [StepArg::Step(11)])) {
+    if !matches!(
+        (step12.op, step12.args.as_slice()),
+        (ScalarOp::Reciprocal, [StepArg::Step(11)])
+    ) {
         return None;
     }
     if !matches!(
@@ -7625,7 +8364,9 @@ fn detect_adam_update_roles(body: &ComposedBody) -> Option<AdamUpdateRoles> {
         return None;
     }
     let learning_rate = match (step14.op, step14.args.as_slice()) {
-        (ScalarOp::Multiply, [StepArg::Operand(learning_rate), StepArg::Step(13)]) => *learning_rate,
+        (ScalarOp::Multiply, [StepArg::Operand(learning_rate), StepArg::Step(13)]) => {
+            *learning_rate
+        }
         _ => return None,
     };
     let param = match (step15.op, step15.args.as_slice()) {
@@ -7673,14 +8414,17 @@ fn body_shape(body: &ComposedBody) -> BodyShape<'_> {
 fn eval_body_shape(shape: &BodyShape, operand_values: &[f32], step_values: &mut [f32]) -> f32 {
     match *shape {
         BodyShape::Unary(op, a) => apply_scalar_op(op, &[operand_values[a as usize]]),
-        BodyShape::Binary(op, a, b) => {
-            apply_scalar_op(op, &[operand_values[a as usize], operand_values[b as usize]])
-        }
+        BodyShape::Binary(op, a, b) => apply_scalar_op(
+            op,
+            &[operand_values[a as usize], operand_values[b as usize]],
+        ),
         // The gather-fallback loop never reaches the dedicated kernel (that
         // requires the affine fast path -- `fused_adam_update_is_affine_fast_path`)
         // so a `FusedAdamUpdate` here just walks its own carried `ComposedBody`
         // exactly like `Generic`, bit-identical either way.
-        BodyShape::FusedAdamUpdate(_, body) | BodyShape::Generic(body) => apply_body(body, operand_values, step_values),
+        BodyShape::FusedAdamUpdate(_, body) | BodyShape::Generic(body) => {
+            apply_body(body, operand_values, step_values)
+        }
     }
 }
 
@@ -7722,7 +8466,8 @@ fn body_shape_is_affine_fast_path(resolved: &BoundOp, shape: &BodyShape, strides
     match *shape {
         BodyShape::Unary(_, a) => operand_is_unit_or_broadcast(resolved, strides, a),
         BodyShape::Binary(_, a, b) => {
-            operand_is_unit_or_broadcast(resolved, strides, a) && operand_is_unit_or_broadcast(resolved, strides, b)
+            operand_is_unit_or_broadcast(resolved, strides, a)
+                && operand_is_unit_or_broadcast(resolved, strides, b)
         }
         // A reduce/scan body is never fused with the Adam-chain shape in
         // this crate (it is a straight-line elementwise chain, not a
@@ -7757,7 +8502,12 @@ fn body_shape_is_affine_fast_path(resolved: &BoundOp, shape: &BodyShape, strides
 /// (ROW 150's own proof) makes [`window_copy_block`] correct for ANY
 /// operand whose body happens to match this shape, window-materialize or
 /// not (`docs/discipline.md` ROW 153's own rung-2 charter).
-fn window_copy_operand(shape: &BodyShape, fast_path: bool, block_extent: u64, strides: &[i64]) -> Option<u16> {
+fn window_copy_operand(
+    shape: &BodyShape,
+    fast_path: bool,
+    block_extent: u64,
+    strides: &[i64],
+) -> Option<u16> {
     match *shape {
         BodyShape::Unary(ScalarOp::Identity, operand)
             if fast_path && block_extent > 1 && strides[operand as usize] == 1 =>
@@ -7784,7 +8534,14 @@ fn window_copy_operand(shape: &BodyShape, fast_path: bool, block_extent: u64, st
 /// rather than carry a second, unproven-faster code path
 /// (`docs/discipline.md` ROW 154).
 #[inline(always)]
-fn window_copy_block(source: &[f32], src_base: i64, row_stride: i64, block_extent: u64, inner_len: usize, out: &mut [f32]) {
+fn window_copy_block(
+    source: &[f32],
+    src_base: i64,
+    row_stride: i64,
+    block_extent: u64,
+    inner_len: usize,
+    out: &mut [f32],
+) {
     let mut base = src_base;
     let mut out_offset = 0usize;
     for _ in 0..block_extent {
@@ -7802,11 +8559,18 @@ fn window_copy_block(source: &[f32], src_base: i64, row_stride: i64, block_exten
 /// A stride-2 RoPE body (`specs/rope.toml`'s `s,2*i->si`) is what this
 /// width exists for: it used to fail here and fall to the per-element
 /// interpreter at 16.2 ns/element, against 2.2 ns/element on this path.
-fn generic_body_is_affine_fast_path(resolved: &BoundOp, body: &ComposedBody, strides: &[i64]) -> bool {
-    body.steps.iter().flat_map(|step| step.args.iter()).all(|arg| match arg {
-        StepArg::Operand(index) => operand_is_affine(resolved, strides, *index),
-        StepArg::Step(_) => true,
-    })
+fn generic_body_is_affine_fast_path(
+    resolved: &BoundOp,
+    body: &ComposedBody,
+    strides: &[i64],
+) -> bool {
+    body.steps
+        .iter()
+        .flat_map(|step| step.args.iter())
+        .all(|arg| match arg {
+            StepArg::Operand(index) => operand_is_affine(resolved, strides, *index),
+            StepArg::Step(_) => true,
+        })
 }
 
 /// [`run_elementwise`]'s eligibility gate for [`BodyShape::FusedAdamUpdate`]'s
@@ -7823,7 +8587,11 @@ fn generic_body_is_affine_fast_path(resolved: &BoundOp, body: &ComposedBody, str
 /// falls through to `BodyShape::Generic`'s existing tiled path untouched —
 /// this gate, not [`detect_adam_update_roles`]'s structural match, is what
 /// makes that fall-through safe.
-fn fused_adam_update_is_affine_fast_path(resolved: &BoundOp, roles: AdamUpdateRoles, strides: &[i64]) -> bool {
+fn fused_adam_update_is_affine_fast_path(
+    resolved: &BoundOp,
+    roles: AdamUpdateRoles,
+    strides: &[i64],
+) -> bool {
     let is_unit_stride =
         |index: u16| operand_is_affine(resolved, strides, index) && strides[index as usize] == 1;
     let is_broadcast_scalar =
@@ -7946,20 +8714,44 @@ fn combine_reduction(reduce_op: ScalarOp, previous: f32, value: f32, seeded: boo
 /// current caller constructs) falls back to
 /// [`reduce_width_unary_scalar_dispatch`], the ROW 3 implementation:
 /// correct, not accelerated, named rather than silently narrowed away.
-fn reduce_width_unary(op: ScalarOp, reduce_op: ScalarOp, span: OperandSpan, accumulator: &mut [f32], seeded: bool) {
+fn reduce_width_unary(
+    op: ScalarOp,
+    reduce_op: ScalarOp,
+    span: OperandSpan,
+    accumulator: &mut [f32],
+    seeded: bool,
+) {
     macro_rules! unary_op_arm {
         ($f:expr) => {
             match reduce_op {
-                ScalarOp::Add => reduce_width_unary_monomorphic($f, |acc: f32, v: f32| acc + v, span, accumulator, seeded),
-                ScalarOp::Multiply => {
-                    reduce_width_unary_monomorphic($f, |acc: f32, v: f32| acc * v, span, accumulator, seeded)
-                }
-                ScalarOp::Maximum => {
-                    reduce_width_unary_monomorphic($f, |acc: f32, v: f32| acc.max(v), span, accumulator, seeded)
-                }
-                ScalarOp::Minimum => {
-                    reduce_width_unary_monomorphic($f, |acc: f32, v: f32| acc.min(v), span, accumulator, seeded)
-                }
+                ScalarOp::Add => reduce_width_unary_monomorphic(
+                    $f,
+                    |acc: f32, v: f32| acc + v,
+                    span,
+                    accumulator,
+                    seeded,
+                ),
+                ScalarOp::Multiply => reduce_width_unary_monomorphic(
+                    $f,
+                    |acc: f32, v: f32| acc * v,
+                    span,
+                    accumulator,
+                    seeded,
+                ),
+                ScalarOp::Maximum => reduce_width_unary_monomorphic(
+                    $f,
+                    |acc: f32, v: f32| acc.max(v),
+                    span,
+                    accumulator,
+                    seeded,
+                ),
+                ScalarOp::Minimum => reduce_width_unary_monomorphic(
+                    $f,
+                    |acc: f32, v: f32| acc.min(v),
+                    span,
+                    accumulator,
+                    seeded,
+                ),
                 _ => reduce_width_unary_scalar_dispatch(op, reduce_op, span, accumulator, seeded),
             }
         };
@@ -7986,8 +8778,13 @@ fn reduce_width_unary(op: ScalarOp, reduce_op: ScalarOp, span: OperandSpan, accu
 /// before either arm below runs, so the stride-0/stride-1 arms here never
 /// see anything but the two shapes they were always tuned for.
 #[inline(always)]
-fn reduce_width_unary_monomorphic<F, R>(op: F, reduce: R, span: OperandSpan, accumulator: &mut [f32], seeded: bool)
-where
+fn reduce_width_unary_monomorphic<F, R>(
+    op: F,
+    reduce: R,
+    span: OperandSpan,
+    accumulator: &mut [f32],
+    seeded: bool,
+) where
     F: Fn(f32) -> f32,
     R: Fn(f32, f32) -> f32,
 {
@@ -8025,8 +8822,13 @@ where
 /// the stride-1 case — never routed through a reassociating multi-accumulator
 /// fold, which would silently change output for this newly-widened case.
 #[inline(always)]
-fn reduce_width_unary_monomorphic_strided<F, R>(op: F, reduce: R, span: OperandSpan, accumulator: &mut [f32], seeded: bool)
-where
+fn reduce_width_unary_monomorphic_strided<F, R>(
+    op: F,
+    reduce: R,
+    span: OperandSpan,
+    accumulator: &mut [f32],
+    seeded: bool,
+) where
     F: Fn(f32) -> f32,
     R: Fn(f32, f32) -> f32,
 {
@@ -8092,7 +8894,8 @@ fn reduce_width_binary(
             (true, true) => {
                 let slice_a = &a.data[a.base..a.base + width];
                 let slice_b = &b.data[b.base..b.base + width];
-                for ((slot, &value_a), &value_b) in accumulator.iter_mut().zip(slice_a).zip(slice_b) {
+                for ((slot, &value_a), &value_b) in accumulator.iter_mut().zip(slice_a).zip(slice_b)
+                {
                     *slot = value_a.mul_add(value_b, *slot);
                 }
                 return;
@@ -8119,18 +8922,38 @@ fn reduce_width_binary(
     macro_rules! binary_op_arm {
         ($f:expr) => {
             match reduce_op {
-                ScalarOp::Add => {
-                    reduce_width_binary_monomorphic($f, |acc: f32, v: f32| acc + v, a, b, accumulator, seeded)
-                }
-                ScalarOp::Multiply => {
-                    reduce_width_binary_monomorphic($f, |acc: f32, v: f32| acc * v, a, b, accumulator, seeded)
-                }
-                ScalarOp::Maximum => {
-                    reduce_width_binary_monomorphic($f, |acc: f32, v: f32| acc.max(v), a, b, accumulator, seeded)
-                }
-                ScalarOp::Minimum => {
-                    reduce_width_binary_monomorphic($f, |acc: f32, v: f32| acc.min(v), a, b, accumulator, seeded)
-                }
+                ScalarOp::Add => reduce_width_binary_monomorphic(
+                    $f,
+                    |acc: f32, v: f32| acc + v,
+                    a,
+                    b,
+                    accumulator,
+                    seeded,
+                ),
+                ScalarOp::Multiply => reduce_width_binary_monomorphic(
+                    $f,
+                    |acc: f32, v: f32| acc * v,
+                    a,
+                    b,
+                    accumulator,
+                    seeded,
+                ),
+                ScalarOp::Maximum => reduce_width_binary_monomorphic(
+                    $f,
+                    |acc: f32, v: f32| acc.max(v),
+                    a,
+                    b,
+                    accumulator,
+                    seeded,
+                ),
+                ScalarOp::Minimum => reduce_width_binary_monomorphic(
+                    $f,
+                    |acc: f32, v: f32| acc.min(v),
+                    a,
+                    b,
+                    accumulator,
+                    seeded,
+                ),
                 _ => reduce_width_binary_scalar_dispatch(op, reduce_op, a, b, accumulator, seeded),
             }
         };
@@ -8143,7 +8966,9 @@ fn reduce_width_binary(
         ScalarOp::Maximum => binary_op_arm!(|x: f32, y: f32| x.max(y)),
         ScalarOp::Minimum => binary_op_arm!(|x: f32, y: f32| x.min(y)),
         ScalarOp::Greater => binary_op_arm!(|x: f32, y: f32| f32::from(u8::from(x > y))),
-        ScalarOp::Equal => binary_op_arm!(|x: f32, y: f32| f32::from(u8::from((x - y).abs() == 0.0))),
+        ScalarOp::Equal => {
+            binary_op_arm!(|x: f32, y: f32| f32::from(u8::from((x - y).abs() == 0.0)))
+        }
         _ => reduce_width_binary_scalar_dispatch(op, reduce_op, a, b, accumulator, seeded),
     }
 }
@@ -8169,11 +8994,13 @@ fn reduce_width_binary_monomorphic<F, R>(
             let slice_a = &a.data[a.base..a.base + width];
             let slice_b = &b.data[b.base..b.base + width];
             if seeded {
-                for ((slot, &value_a), &value_b) in accumulator.iter_mut().zip(slice_a).zip(slice_b) {
+                for ((slot, &value_a), &value_b) in accumulator.iter_mut().zip(slice_a).zip(slice_b)
+                {
                     *slot = reduce(*slot, op(value_a, value_b));
                 }
             } else {
-                for ((slot, &value_a), &value_b) in accumulator.iter_mut().zip(slice_a).zip(slice_b) {
+                for ((slot, &value_a), &value_b) in accumulator.iter_mut().zip(slice_a).zip(slice_b)
+                {
                     *slot = op(value_a, value_b);
                 }
             }
@@ -8422,7 +9249,11 @@ struct WidthTilePlan {
 /// out=384]`) composes with stride `384` (its own `out`-axis width), never
 /// `1` — `reduction_is_fully_flat` would wrongly decline it.
 #[cfg(target_arch = "aarch64")]
-fn composed_reduction_stride(resolved: &BoundOp, dims: &[u16], layout: &bind::Layout) -> Option<(i64, i64)> {
+fn composed_reduction_stride(
+    resolved: &BoundOp,
+    dims: &[u16],
+    layout: &bind::Layout,
+) -> Option<(i64, i64)> {
     let (&innermost, outer_dims) = dims.split_last()?;
     let stride = layout.stride(innermost);
     let mut extent_total = resolved.extents[innermost as usize] as i64;
@@ -8449,9 +9280,22 @@ fn width_tile_plan(context: &WidthPathContext) -> Option<WidthTilePlan> {
     // `instrument::WidthDeclineTotals`'s own doc for which fields that is,
     // per reason.
     #[cfg(feature = "instrument")]
-    let record_decline = |reason: instrument::WidthDeclineReason, m: i64, k: i64, n: i64, stride_a: i64, stride_b: i64| {
+    let record_decline = |reason: instrument::WidthDeclineReason,
+                          m: i64,
+                          k: i64,
+                          n: i64,
+                          stride_a: i64,
+                          stride_b: i64| {
         if reduce_is_gemm_shaped(context.resolved) {
-            instrument::record_width_tile_decline(context.resolved.node, reason, m, k, n, stride_a, stride_b);
+            instrument::record_width_tile_decline(
+                context.resolved.node,
+                reason,
+                m,
+                k,
+                n,
+                stride_a,
+                stride_b,
+            );
         }
     };
     #[cfg(feature = "instrument")]
@@ -8459,14 +9303,28 @@ fn width_tile_plan(context: &WidthPathContext) -> Option<WidthTilePlan> {
 
     if !FUSED_MULTIPLY_ADD || context.reduce_op != ScalarOp::Add {
         #[cfg(feature = "instrument")]
-        record_decline(instrument::WidthDeclineReason::NoFusedMultiplyAdd, -1, -1, width_i64, -1, -1);
+        record_decline(
+            instrument::WidthDeclineReason::NoFusedMultiplyAdd,
+            -1,
+            -1,
+            width_i64,
+            -1,
+            -1,
+        );
         return None;
     }
     let (operand_a, operand_b) = match *context.shape {
         BodyShape::Binary(ScalarOp::Multiply, operand_a, operand_b) => (operand_a, operand_b),
         _ => {
             #[cfg(feature = "instrument")]
-            record_decline(instrument::WidthDeclineReason::NotMultiplyAddBody, -1, -1, width_i64, -1, -1);
+            record_decline(
+                instrument::WidthDeclineReason::NotMultiplyAddBody,
+                -1,
+                -1,
+                width_i64,
+                -1,
+                -1,
+            );
             return None;
         }
     };
@@ -8476,7 +9334,14 @@ fn width_tile_plan(context: &WidthPathContext) -> Option<WidthTilePlan> {
     let stride_b_early = context.strides[operand_b as usize];
     if matches!(context.init, ReduceInit::FirstElement) {
         #[cfg(feature = "instrument")]
-        record_decline(instrument::WidthDeclineReason::FirstElementInit, -1, -1, width_i64, stride_a_early, stride_b_early);
+        record_decline(
+            instrument::WidthDeclineReason::FirstElementInit,
+            -1,
+            -1,
+            width_i64,
+            stride_a_early,
+            stride_b_early,
+        );
         return None;
     }
     // ROW 210 (width-gate-decline task, 2026-09-01): the per-`NodeId` census
@@ -8497,7 +9362,14 @@ fn width_tile_plan(context: &WidthPathContext) -> Option<WidthTilePlan> {
     // unchanged.
     if context.leading_output_axes.is_empty() || context.reduction_dims.is_empty() {
         #[cfg(feature = "instrument")]
-        record_decline(instrument::WidthDeclineReason::AxesShape, -1, -1, width_i64, stride_a_early, stride_b_early);
+        record_decline(
+            instrument::WidthDeclineReason::AxesShape,
+            -1,
+            -1,
+            width_i64,
+            stride_a_early,
+            stride_b_early,
+        );
         return None;
     }
     // attention-tile task (2026-09-01): up to TWO non-degenerate leading
@@ -8519,17 +9391,31 @@ fn width_tile_plan(context: &WidthPathContext) -> Option<WidthTilePlan> {
         .collect();
     if non_degenerate_leading.len() > 2 {
         #[cfg(feature = "instrument")]
-        record_decline(instrument::WidthDeclineReason::AxesShape, -1, -1, width_i64, stride_a_early, stride_b_early);
+        record_decline(
+            instrument::WidthDeclineReason::AxesShape,
+            -1,
+            -1,
+            width_i64,
+            stride_a_early,
+            stride_b_early,
+        );
         return None;
     }
     #[cfg(feature = "instrument")]
     let leading_total_early: i64 = if non_degenerate_leading.is_empty() {
         1
     } else {
-        non_degenerate_leading.iter().map(|&axis| context.resolved.extents[axis as usize] as i64).product()
+        non_degenerate_leading
+            .iter()
+            .map(|&axis| context.resolved.extents[axis as usize] as i64)
+            .product()
     };
     #[cfg(feature = "instrument")]
-    let reduction_total_early: i64 = context.reduction_dims.iter().map(|&dim| context.resolved.extents[dim as usize] as i64).product();
+    let reduction_total_early: i64 = context
+        .reduction_dims
+        .iter()
+        .map(|&dim| context.resolved.extents[dim as usize] as i64)
+        .product();
     if context.width < WIDTH_TILE_VECS * 4 {
         #[cfg(feature = "instrument")]
         record_decline(
@@ -8570,23 +9456,35 @@ fn width_tile_plan(context: &WidthPathContext) -> Option<WidthTilePlan> {
         );
         return None;
     }
-    let (a_operand, layout_a, b_operand, layout_b) =
-        match (context.strides[operand_a as usize], context.strides[operand_b as usize]) {
-            (0, 1) => (operand_a as usize, layout_a_raw, operand_b as usize, layout_b_raw),
-            (1, 0) => (operand_b as usize, layout_b_raw, operand_a as usize, layout_a_raw),
-            _ => {
-                #[cfg(feature = "instrument")]
-                record_decline(
-                    instrument::WidthDeclineReason::StrideLayout,
-                    leading_total_early,
-                    reduction_total_early,
-                    width_i64,
-                    stride_a_early,
-                    stride_b_early,
-                );
-                return None;
-            }
-        };
+    let (a_operand, layout_a, b_operand, layout_b) = match (
+        context.strides[operand_a as usize],
+        context.strides[operand_b as usize],
+    ) {
+        (0, 1) => (
+            operand_a as usize,
+            layout_a_raw,
+            operand_b as usize,
+            layout_b_raw,
+        ),
+        (1, 0) => (
+            operand_b as usize,
+            layout_b_raw,
+            operand_a as usize,
+            layout_a_raw,
+        ),
+        _ => {
+            #[cfg(feature = "instrument")]
+            record_decline(
+                instrument::WidthDeclineReason::StrideLayout,
+                leading_total_early,
+                reduction_total_early,
+                width_i64,
+                stride_a_early,
+                stride_b_early,
+            );
+            return None;
+        }
+    };
 
     // final leading-axis resolution: needs `layout_a`/`layout_b`'s physical
     // strides, unavailable until the stride-layout match just above settles
@@ -8653,10 +9551,17 @@ fn width_tile_plan(context: &WidthPathContext) -> Option<WidthTilePlan> {
     // which every OTHER width-fast node with `reduction_dims.len() == 1`
     // structurally cannot reach (this branch is unique to the multi-axis
     // case, gated on the same length check either arm shares).
-    let (k_stride_a, k_stride_b, reduction_total) = if let [reduction_dim] = *context.reduction_dims {
-        (layout_a.stride(reduction_dim), layout_b.stride(reduction_dim), context.resolved.extents[reduction_dim as usize] as usize)
+    let (k_stride_a, k_stride_b, reduction_total) = if let [reduction_dim] = *context.reduction_dims
+    {
+        (
+            layout_a.stride(reduction_dim),
+            layout_b.stride(reduction_dim),
+            context.resolved.extents[reduction_dim as usize] as usize,
+        )
     } else {
-        let Some((extent_a, stride_a)) = composed_reduction_stride(context.resolved, context.reduction_dims, layout_a) else {
+        let Some((extent_a, stride_a)) =
+            composed_reduction_stride(context.resolved, context.reduction_dims, layout_a)
+        else {
             #[cfg(feature = "instrument")]
             record_decline(
                 instrument::WidthDeclineReason::AxesShape,
@@ -8668,7 +9573,9 @@ fn width_tile_plan(context: &WidthPathContext) -> Option<WidthTilePlan> {
             );
             return None;
         };
-        let Some((extent_b, stride_b)) = composed_reduction_stride(context.resolved, context.reduction_dims, layout_b) else {
+        let Some((extent_b, stride_b)) =
+            composed_reduction_stride(context.resolved, context.reduction_dims, layout_b)
+        else {
             #[cfg(feature = "instrument")]
             record_decline(
                 instrument::WidthDeclineReason::AxesShape,
@@ -8879,7 +9786,13 @@ pub fn set_pack_at_plan_time_enabled(enabled: bool) {
 /// writing them out in a different order — the property the bit-identity
 /// test in `cpu.rs`'s own test module checks.
 #[cfg(target_arch = "aarch64")]
-fn pack_width_tile_panels(b_data: &[f32], base_b: i64, k_stride_b: i64, k_total: usize, width: usize) -> PackedWidthPanels {
+fn pack_width_tile_panels(
+    b_data: &[f32],
+    base_b: i64,
+    k_stride_b: i64,
+    k_total: usize,
+    width: usize,
+) -> PackedWidthPanels {
     let tile_cols = WIDTH_TILE_VECS * 4;
     let full_col_tiles = width / tile_cols;
     let mut data = vec![0.0f32; full_col_tiles * k_total * tile_cols];
@@ -8888,10 +9801,16 @@ fn pack_width_tile_panels(b_data: &[f32], base_b: i64, k_stride_b: i64, k_total:
         for k in 0..k_total {
             let row_base = col_start + k as i64 * k_stride_b;
             let dst_base = panel * k_total * tile_cols + k * tile_cols;
-            data[dst_base..dst_base + tile_cols].copy_from_slice(&b_data[row_base as usize..row_base as usize + tile_cols]);
+            data[dst_base..dst_base + tile_cols]
+                .copy_from_slice(&b_data[row_base as usize..row_base as usize + tile_cols]);
         }
     }
-    PackedWidthPanels { data, tile_cols, k_total, full_col_tiles }
+    PackedWidthPanels {
+        data,
+        tile_cols,
+        k_total,
+        full_col_tiles,
+    }
 }
 
 /// Re-derives [`WidthTilePlan`] eligibility purely from `resolved` — no
@@ -8973,19 +9892,34 @@ fn build_packed_width_panels(
     }
     let constant_nodes: BTreeSet<NodeId> = constant_inputs
         .iter()
-        .filter_map(|(name, _)| input_names.iter().find(|(_, candidate)| candidate == name).map(|(node, _)| *node))
+        .filter_map(|(name, _)| {
+            input_names
+                .iter()
+                .find(|(_, candidate)| candidate == name)
+                .map(|(node, _)| *node)
+        })
         .collect();
     let mut packed = BTreeMap::new();
     for computed in resolved {
-        let Some(plan) = width_tile_pack_candidate(computed) else { continue };
+        let Some(plan) = width_tile_pack_candidate(computed) else {
+            continue;
+        };
         let (b_node, _, _) = computed.operands()[plan.b_operand];
         if !constant_nodes.contains(&b_node) || shapes.of(b_node).len() != 2 {
             continue;
         }
-        let Some(b_data) = buffers[b_node.0 as usize].as_deref() else { continue };
+        let Some(b_data) = buffers[b_node.0 as usize].as_deref() else {
+            continue;
+        };
         packed.insert(
             computed.node,
-            pack_width_tile_panels(b_data, plan.base_b, plan.k_stride_b, plan.reduction_total, plan.width),
+            pack_width_tile_panels(
+                b_data,
+                plan.base_b,
+                plan.k_stride_b,
+                plan.reduction_total,
+                plan.width,
+            ),
         );
     }
     packed
@@ -9034,7 +9968,12 @@ fn width_tile_scalar_cell(a: KStridedTile, b: KStridedTile, k: usize, seed: f32)
 /// [`NEON_TILE_ROW_REMAINDER_ELEMENTS`]'s own coverage identity for the
 /// dot-path tile).
 #[cfg(target_arch = "aarch64")]
-fn run_width_tile_neon(plan: &WidthTilePlan, raw: &[&[f32]], packed: Option<&PackedWidthPanels>, output: &mut [f32]) {
+fn run_width_tile_neon(
+    plan: &WidthTilePlan,
+    raw: &[&[f32]],
+    packed: Option<&PackedWidthPanels>,
+    output: &mut [f32],
+) {
     #[cfg(feature = "instrument")]
     WIDTH_TILE_GATE_PASSES.fetch_add(1, Ordering::Relaxed);
 
@@ -9098,7 +10037,11 @@ fn run_width_tile_neon(plan: &WidthTilePlan, raw: &[&[f32]], packed: Option<&Pac
                         (col_tile * panels.k_total * panels.tile_cols) as i64,
                         panels.tile_cols as i64,
                     ),
-                    None => (data_b_unpacked, plan.base_b + col_start as i64, plan.k_stride_b),
+                    None => (
+                        data_b_unpacked,
+                        plan.base_b + col_start as i64,
+                        plan.k_stride_b,
+                    ),
                 };
                 let mut tile_out = [[[plan.seed; 4]; WIDTH_TILE_VECS]; WIDTH_TILE_ROWS];
 
@@ -9109,9 +10052,17 @@ fn run_width_tile_neon(plan: &WidthTilePlan, raw: &[&[f32]], packed: Option<&Pac
                 // `full_col_tiles`/`k_total` sized exactly to match).
                 unsafe {
                     gemm_width_tile_neon::<WIDTH_TILE_ROWS, WIDTH_TILE_VECS>(
-                        KStridedTile { data: data_a, base: base_a, k_stride: plan.k_stride_a },
+                        KStridedTile {
+                            data: data_a,
+                            base: base_a,
+                            k_stride: plan.k_stride_a,
+                        },
                         plan.row_stride_a,
-                        KStridedTile { data: b_data, base: base_b, k_stride: k_stride_b },
+                        KStridedTile {
+                            data: b_data,
+                            base: base_b,
+                            k_stride: k_stride_b,
+                        },
                         plan.reduction_total,
                         &mut tile_out,
                     );
@@ -9125,7 +10076,8 @@ fn run_width_tile_neon(plan: &WidthTilePlan, raw: &[&[f32]], packed: Option<&Pac
                     let row_prefix = out_row_prefix + i as i64 * plan.out_row_stride;
                     for (v, quad) in row.iter().enumerate() {
                         for (lane, &value) in quad.iter().enumerate() {
-                            let position = row_prefix + (col_start + v * 4 + lane) as i64 * plan.out_col_stride;
+                            let position = row_prefix
+                                + (col_start + v * 4 + lane) as i64 * plan.out_col_stride;
                             output[position as usize] = value;
                         }
                     }
@@ -9143,11 +10095,17 @@ fn run_width_tile_neon(plan: &WidthTilePlan, raw: &[&[f32]], packed: Option<&Pac
                             base: plan.base_a + row as i64 * plan.row_stride_a,
                             k_stride: plan.k_stride_a,
                         },
-                        KStridedTile { data: data_b_unpacked, base: plan.base_b + col as i64, k_stride: plan.k_stride_b },
+                        KStridedTile {
+                            data: data_b_unpacked,
+                            base: plan.base_b + col as i64,
+                            k_stride: plan.k_stride_b,
+                        },
                         plan.reduction_total,
                         plan.seed,
                     );
-                    let position = plan.out_base + row as i64 * plan.out_row_stride + col as i64 * plan.out_col_stride;
+                    let position = plan.out_base
+                        + row as i64 * plan.out_row_stride
+                        + col as i64 * plan.out_col_stride;
                     output[position as usize] = value;
                     #[cfg(feature = "instrument")]
                     {
@@ -9182,7 +10140,11 @@ fn run_width_tile_neon(plan: &WidthTilePlan, raw: &[&[f32]], packed: Option<&Pac
                             (col_tile * panels.k_total * panels.tile_cols) as i64,
                             panels.tile_cols as i64,
                         ),
-                        None => (data_b_unpacked, plan.base_b + col_start as i64, plan.k_stride_b),
+                        None => (
+                            data_b_unpacked,
+                            plan.base_b + col_start as i64,
+                            plan.k_stride_b,
+                        ),
                     };
                     let mut tile_out = [[[plan.seed; 4]; WIDTH_TILE_VECS]; $rows];
 
@@ -9194,9 +10156,17 @@ fn run_width_tile_neon(plan: &WidthTilePlan, raw: &[&[f32]], packed: Option<&Pac
                     // overshooting `plan.leading_total`.
                     unsafe {
                         gemm_width_tile_neon::<$rows, WIDTH_TILE_VECS>(
-                            KStridedTile { data: data_a, base: base_a, k_stride: plan.k_stride_a },
+                            KStridedTile {
+                                data: data_a,
+                                base: base_a,
+                                k_stride: plan.k_stride_a,
+                            },
                             plan.row_stride_a,
-                            KStridedTile { data: b_data, base: base_b, k_stride: k_stride_b },
+                            KStridedTile {
+                                data: b_data,
+                                base: base_b,
+                                k_stride: k_stride_b,
+                            },
                             plan.reduction_total,
                             &mut tile_out,
                         );
@@ -9211,7 +10181,8 @@ fn run_width_tile_neon(plan: &WidthTilePlan, raw: &[&[f32]], packed: Option<&Pac
                         let row_prefix = out_row_prefix + i as i64 * plan.out_row_stride;
                         for (v, quad) in row.iter().enumerate() {
                             for (lane, &value) in quad.iter().enumerate() {
-                                let position = row_prefix + (col_start + v * 4 + lane) as i64 * plan.out_col_stride;
+                                let position = row_prefix
+                                    + (col_start + v * 4 + lane) as i64 * plan.out_col_stride;
                                 output[position as usize] = value;
                             }
                         }
@@ -9231,12 +10202,17 @@ fn run_width_tile_neon(plan: &WidthTilePlan, raw: &[&[f32]], packed: Option<&Pac
                                 base: plan.base_a + row as i64 * plan.row_stride_a,
                                 k_stride: plan.k_stride_a,
                             },
-                            KStridedTile { data: data_b_unpacked, base: plan.base_b + col as i64, k_stride: plan.k_stride_b },
+                            KStridedTile {
+                                data: data_b_unpacked,
+                                base: plan.base_b + col as i64,
+                                k_stride: plan.k_stride_b,
+                            },
                             plan.reduction_total,
                             plan.seed,
                         );
-                        let position =
-                            plan.out_base + row as i64 * plan.out_row_stride + col as i64 * plan.out_col_stride;
+                        let position = plan.out_base
+                            + row as i64 * plan.out_row_stride
+                            + col as i64 * plan.out_col_stride;
                         output[position as usize] = value;
                         #[cfg(feature = "instrument")]
                         {
@@ -9277,8 +10253,10 @@ fn run_width_tile_neon(plan: &WidthTilePlan, raw: &[&[f32]], packed: Option<&Pac
     {
         WIDTH_TILE_FALLBACK_ELEMENTS.fetch_add(width_tile_fallback_elements, Ordering::Relaxed);
         WIDTH_TILE_INVOCATIONS.fetch_add(width_tile_invocations, Ordering::Relaxed);
-        WIDTH_TILE_ROW_REMAINDER_INVOCATIONS.fetch_add(width_tile_row_remainder_invocations, Ordering::Relaxed);
-        WIDTH_TILE_ROW_REMAINDER_ELEMENTS.fetch_add(width_tile_row_remainder_elements, Ordering::Relaxed);
+        WIDTH_TILE_ROW_REMAINDER_INVOCATIONS
+            .fetch_add(width_tile_row_remainder_invocations, Ordering::Relaxed);
+        WIDTH_TILE_ROW_REMAINDER_ELEMENTS
+            .fetch_add(width_tile_row_remainder_elements, Ordering::Relaxed);
         // computed once from `plan.width`/`tile_cols`, both already in
         // scope — never re-checked per iteration.
         if col_tiles * tile_cols < plan.width {
@@ -9295,7 +10273,12 @@ fn run_width_tile_neon(plan: &WidthTilePlan, raw: &[&[f32]], packed: Option<&Pac
 /// target keeps the per-element width path only, this function never exists
 /// there.
 #[cfg(target_arch = "aarch64")]
-fn try_run_width_tile(context: &WidthPathContext, raw: &[&[f32]], packed: Option<&PackedWidthPanels>, output: &mut [f32]) -> bool {
+fn try_run_width_tile(
+    context: &WidthPathContext,
+    raw: &[&[f32]],
+    packed: Option<&PackedWidthPanels>,
+    output: &mut [f32],
+) -> bool {
     match width_tile_plan(context) {
         Some(plan) => {
             run_width_tile_neon(&plan, raw, packed, output);
@@ -9381,6 +10364,8 @@ fn dot_fold_fused_multiply_add(slice_a: &[f32], slice_b: &[f32], fold: DotFold) 
     acc
 }
 
+#[cfg(target_arch = "aarch64")]
+use crate::sized::TILE_COLS;
 /// Output rows/columns computed per call of [`gemm_tile_neon`] — ggml
 /// tinyBLAS's `RM`/`RN`. Vector width (4) is implied by `float32x4_t`. An
 /// iso-accumulator shape sweep at 1024^3, single-thread (CoV 0.2-0.44%, 7
@@ -9390,8 +10375,6 @@ fn dot_fold_fused_multiply_add(slice_a: &[f32], slice_b: &[f32], fold: DotFold) 
 /// still unexplained.
 #[cfg(target_arch = "aarch64")]
 use crate::sized::TILE_ROWS;
-#[cfg(target_arch = "aarch64")]
-use crate::sized::TILE_COLS;
 
 /// Bytes of L2 budgeted for a resident `b` column panel in the tiled GEMM
 /// pass below. M1 Max: 12 MiB shared L2 per performance cluster of 4 cores —
@@ -9532,7 +10515,11 @@ fn neon_tile_plan(
     strides: &[i64],
     leading_output_axes: &[u16],
 ) -> Option<NeonTilePlan> {
-    if !FUSED_MULTIPLY_ADD || !seeded_always || leading_output_axes.len() != 1 || reduce_op != ScalarOp::Add {
+    if !FUSED_MULTIPLY_ADD
+        || !seeded_always
+        || leading_output_axes.len() != 1
+        || reduce_op != ScalarOp::Add
+    {
         return None;
     }
     let BodyShape::Binary(op, a, b) = *shape else {
@@ -9556,7 +10543,9 @@ fn neon_tile_plan(
         (other, 0) if other != 0 => (index_b, index_a),
         _ => return None,
     };
-    let row_stride_a = resolved.operands()[index_a].1.stride(leading_output_axes[0]);
+    let row_stride_a = resolved.operands()[index_a]
+        .1
+        .stride(leading_output_axes[0]);
     if row_stride_a < 0 {
         return None;
     }
@@ -9667,13 +10656,29 @@ unsafe fn try_run_accelerate_sgemm(
     if out_col_stride != 1 || m == 0 || n == 0 || k == 0 {
         return false;
     }
-    let Ok(m_i32) = i32::try_from(m) else { return false };
-    let Ok(n_i32) = i32::try_from(n) else { return false };
-    let Ok(k_i32) = i32::try_from(k) else { return false };
-    let Ok(lda_i32) = i32::try_from(lda) else { return false };
-    let Ok(ldb_i32) = i32::try_from(ldb) else { return false };
-    let Ok(ldc_i32) = i32::try_from(ldc) else { return false };
-    let trans_b = if transpose_b { CBLAS_TRANS } else { CBLAS_NO_TRANS };
+    let Ok(m_i32) = i32::try_from(m) else {
+        return false;
+    };
+    let Ok(n_i32) = i32::try_from(n) else {
+        return false;
+    };
+    let Ok(k_i32) = i32::try_from(k) else {
+        return false;
+    };
+    let Ok(lda_i32) = i32::try_from(lda) else {
+        return false;
+    };
+    let Ok(ldb_i32) = i32::try_from(ldb) else {
+        return false;
+    };
+    let Ok(ldc_i32) = i32::try_from(ldc) else {
+        return false;
+    };
+    let trans_b = if transpose_b {
+        CBLAS_TRANS
+    } else {
+        CBLAS_NO_TRANS
+    };
     // SAFETY: caller upholds this function's own `# Safety` bound; the four
     // slice-to-pointer conversions below stay in-bounds of `a`/`b`/`c` by
     // that same contract, and `cblas_sgemm` treats `a`/`b` as read-only and
@@ -9740,14 +10745,22 @@ fn try_run_accelerate_width_gemm(plan: &WidthTilePlan, raw: &[&[f32]], output: &
     if plan.seed != 0.0 || plan.k_stride_a != 1 {
         return false;
     }
-    let (Ok(base_a), Ok(row_stride_a), Ok(base_b), Ok(k_stride_b), Ok(out_base), Ok(out_row_stride)) = (
+    let (
+        Ok(base_a),
+        Ok(row_stride_a),
+        Ok(base_b),
+        Ok(k_stride_b),
+        Ok(out_base),
+        Ok(out_row_stride),
+    ) = (
         usize::try_from(plan.base_a),
         usize::try_from(plan.row_stride_a),
         usize::try_from(plan.base_b),
         usize::try_from(plan.k_stride_b),
         usize::try_from(plan.out_base),
         usize::try_from(plan.out_row_stride),
-    ) else {
+    )
+    else {
         return false;
     };
     // SAFETY: `width_tile_plan`'s own gate already proves `a`/`b`
@@ -9801,8 +10814,17 @@ fn try_run_accelerate_width_gemm(plan: &WidthTilePlan, raw: &[&[f32]], output: &
 /// Zero heap allocation: no scratch buffer, no packing, only stack-resident
 /// loop state and pointer arithmetic into the caller's existing buffers.
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-fn try_run_accelerate_conv_gemm(plan: &ConvGemmTilePlan, raw: &[&[f32]], output: &mut [f32]) -> bool {
-    if plan.seed != 0.0 || plan.out_row_stride < 0 || plan.out_base < 0 || plan.outer_stride_m < 0 || plan.outer_stride_n < 0 {
+fn try_run_accelerate_conv_gemm(
+    plan: &ConvGemmTilePlan,
+    raw: &[&[f32]],
+    output: &mut [f32],
+) -> bool {
+    if plan.seed != 0.0
+        || plan.out_row_stride < 0
+        || plan.out_base < 0
+        || plan.outer_stride_m < 0
+        || plan.outer_stride_n < 0
+    {
         return false;
     }
     let (Ok(out_base), Ok(out_row_stride), Ok(col_stride_n), Ok(row_stride_m)) = (
@@ -9815,10 +10837,16 @@ fn try_run_accelerate_conv_gemm(plan: &ConvGemmTilePlan, raw: &[&[f32]], output:
     };
     for step in 0..plan.outer_extent {
         let step = step as i64;
-        let (Some(offset_m), Some(offset_n)) = (plan.outer_stride_m.checked_mul(step), plan.outer_stride_n.checked_mul(step)) else {
+        let (Some(offset_m), Some(offset_n)) = (
+            plan.outer_stride_m.checked_mul(step),
+            plan.outer_stride_n.checked_mul(step),
+        ) else {
             return false;
         };
-        let (Some(base_m), Some(base_n)) = (plan.base_m.checked_add(offset_m), plan.base_n.checked_add(offset_n)) else {
+        let (Some(base_m), Some(base_n)) = (
+            plan.base_m.checked_add(offset_m),
+            plan.base_n.checked_add(offset_n),
+        ) else {
             return false;
         };
         let (Ok(base_m), Ok(base_n)) = (usize::try_from(base_m), usize::try_from(base_n)) else {
@@ -9919,7 +10947,12 @@ struct ConvGemmTilePlan {
 /// the `aarch64`-only [`conv_gemm_tile_plan`] that introduced it; NOT
 /// `#[cfg(target_arch = "aarch64")]` because [`elementwise_rows_are_flat`]
 /// (`docs/discipline.md` ROW 178) reuses it verbatim on every target.
-fn axes_flat_chain(resolved: &BoundOp, axes: &[u16], view: &bind::Layout, unit: i64) -> Option<u64> {
+fn axes_flat_chain(
+    resolved: &BoundOp,
+    axes: &[u16],
+    view: &bind::Layout,
+    unit: i64,
+) -> Option<u64> {
     let mut expected = unit;
     let mut count: u64 = 1;
     for &axis in axes.iter().rev() {
@@ -9951,11 +10984,20 @@ fn axes_flat_chain(resolved: &BoundOp, axes: &[u16], view: &bind::Layout, unit: 
 /// simplicity: an operand the body never reads cannot make this call
 /// INCORRECT by being conservatively included, only cost this one
 /// optimization opportunity on a pathological unread-but-non-flat operand.
-fn elementwise_rows_are_flat(resolved: &BoundOp, outer_axes: &[u16], strides: &[i64], inner_len: usize) -> bool {
-    resolved.operands().iter().enumerate().all(|(index, (_, view, _))| {
-        let unit = strides[index].saturating_mul(inner_len as i64);
-        axes_flat_chain(resolved, outer_axes, view, unit).is_some()
-    })
+fn elementwise_rows_are_flat(
+    resolved: &BoundOp,
+    outer_axes: &[u16],
+    strides: &[i64],
+    inner_len: usize,
+) -> bool {
+    resolved
+        .operands()
+        .iter()
+        .enumerate()
+        .all(|(index, (_, view, _))| {
+            let unit = strides[index].saturating_mul(inner_len as i64);
+            axes_flat_chain(resolved, outer_axes, view, unit).is_some()
+        })
 }
 
 /// Resolves [`ConvGemmTilePlan`] once per bound op, or `None` when this node
@@ -9969,7 +11011,10 @@ fn elementwise_rows_are_flat(resolved: &BoundOp, outer_axes: &[u16], strides: &[
 /// real next step and left unattempted pending this generalization.
 #[cfg(target_arch = "aarch64")]
 fn conv_gemm_tile_plan(context: &ConvGemmContext) -> Option<ConvGemmTilePlan> {
-    if !FUSED_MULTIPLY_ADD || context.reduce_op != ScalarOp::Add || matches!(context.init, ReduceInit::FirstElement) {
+    if !FUSED_MULTIPLY_ADD
+        || context.reduce_op != ScalarOp::Add
+        || matches!(context.init, ReduceInit::FirstElement)
+    {
         return None;
     }
     let BodyShape::Binary(op, operand_a, operand_b) = *context.shape else {
@@ -10015,11 +11060,32 @@ fn conv_gemm_tile_plan(context: &ConvGemmContext) -> Option<ConvGemmTilePlan> {
     }
     let outer_dim = outer_dims[0];
     let inner_dims = &context.reduction_dims[split..];
-    let inner_span: u64 = inner_dims.iter().map(|&dim| resolved.extents[dim as usize]).product();
+    let inner_span: u64 = inner_dims
+        .iter()
+        .map(|&dim| resolved.extents[dim as usize])
+        .product();
     let inner_span_i64 = i64::try_from(inner_span).ok()?;
 
-    try_conv_gemm_assignment(context, index_a, view_a, index_b, view_b, outer_dim, inner_span_i64)
-        .or_else(|| try_conv_gemm_assignment(context, index_b, view_b, index_a, view_a, outer_dim, inner_span_i64))
+    try_conv_gemm_assignment(
+        context,
+        index_a,
+        view_a,
+        index_b,
+        view_b,
+        outer_dim,
+        inner_span_i64,
+    )
+    .or_else(|| {
+        try_conv_gemm_assignment(
+            context,
+            index_b,
+            view_b,
+            index_a,
+            view_a,
+            outer_dim,
+            inner_span_i64,
+        )
+    })
 }
 
 /// One candidate `(M operand, N operand)` assignment for
@@ -10150,7 +11216,12 @@ fn run_conv_gemm_tile(plan: &ConvGemmTilePlan, raw: &[&[f32]], output: &mut [f32
 /// TILE_COLS` leaves over (never fired for any of `Conv`'s 3 real mnist
 /// folds, all `n_total` multiples of 4, but not assumed so here).
 #[cfg(target_arch = "aarch64")]
-fn conv_gemm_row_block<const ROWS: usize>(plan: &ConvGemmTilePlan, raw: &[&[f32]], output: &mut [f32], row_start: usize) {
+fn conv_gemm_row_block<const ROWS: usize>(
+    plan: &ConvGemmTilePlan,
+    raw: &[&[f32]],
+    output: &mut [f32],
+    row_start: usize,
+) {
     let out_row_base = plan.out_base + plan.out_row_stride * row_start as i64;
     let a_row_base = plan.base_m + plan.row_stride_m * row_start as i64;
     let tiled_cols = plan.n_total - plan.n_total % TILE_COLS;
@@ -10167,8 +11238,16 @@ fn conv_gemm_row_block<const ROWS: usize>(plan: &ConvGemmTilePlan, raw: &[&[f32]
             // bound every offset formed below within the source slices.
             unsafe {
                 gemm_tile_neon::<ROWS>(
-                    KStridedTile { data: raw[plan.index_m], base: a_base, k_stride: plan.row_stride_m },
-                    KStridedTile { data: raw[plan.index_n], base: b_base, k_stride: plan.col_stride_n },
+                    KStridedTile {
+                        data: raw[plan.index_m],
+                        base: a_base,
+                        k_stride: plan.row_stride_m,
+                    },
+                    KStridedTile {
+                        data: raw[plan.index_n],
+                        base: b_base,
+                        k_stride: plan.col_stride_n,
+                    },
                     plan.inner_span,
                     &mut tile_out,
                 );
@@ -10192,7 +11271,8 @@ fn conv_gemm_row_block<const ROWS: usize>(plan: &ConvGemmTilePlan, raw: &[&[f32]
             let mut total = plan.seed;
             for _ in 0..plan.outer_extent {
                 for step in 0..plan.inner_span as i64 {
-                    total = raw[plan.index_m][(a_base + step) as usize].mul_add(raw[plan.index_n][(b_base + step) as usize], total);
+                    total = raw[plan.index_m][(a_base + step) as usize]
+                        .mul_add(raw[plan.index_n][(b_base + step) as usize], total);
                 }
                 a_base += plan.outer_stride_m;
                 b_base += plan.outer_stride_n;
@@ -10281,7 +11361,11 @@ fn dot_q4k_f32(weight_row: &[u8], activation: &[f32]) -> Result<f32, TensorError
         acc = dot_fold_fused_multiply_add(
             &scratch,
             activation_chunk,
-            DotFold { len: Q4K_BLOCK_ELEMENTS, init: acc, seeded: true },
+            DotFold {
+                len: Q4K_BLOCK_ELEMENTS,
+                init: acc,
+                seeded: true,
+            },
         );
     }
     Ok(acc)
@@ -10299,7 +11383,11 @@ fn dot_q4k_f32(weight_row: &[u8], activation: &[f32]) -> Result<f32, TensorError
 /// Propagates `dot_q4k_f32`'s [`TensorError::QuantizedShapeMismatch`] for
 /// the first row that fails its shape check, or reports the same error if
 /// `weights.len()` is not a whole multiple of `rows`.
-pub fn matmul_q4k_f32(weights: &[u8], rows: usize, activation: &[f32]) -> Result<Vec<f32>, TensorError> {
+pub fn matmul_q4k_f32(
+    weights: &[u8],
+    rows: usize,
+    activation: &[f32],
+) -> Result<Vec<f32>, TensorError> {
     matmul_quantized_dispatch(
         weights,
         rows,
@@ -10336,10 +11424,14 @@ where
     Row: Fn(&[u8], &[f32]) -> Result<f32, TensorError> + Sync,
 {
     if rows == 0 {
-        return Err(TensorError::QuantizedShapeMismatch { reason: zero_rows_reason });
+        return Err(TensorError::QuantizedShapeMismatch {
+            reason: zero_rows_reason,
+        });
     }
     if !weights.len().is_multiple_of(rows) {
-        return Err(TensorError::QuantizedShapeMismatch { reason: row_length_reason });
+        return Err(TensorError::QuantizedShapeMismatch {
+            reason: row_length_reason,
+        });
     }
     let row_bytes = weights.len() / rows;
     match quantized_matmul_workers(rows, activation.len()) {
@@ -10347,11 +11439,13 @@ where
         // backs the dequantize-then-fold codecs (`matmul_q4k_f32`/`q5k_f32`/
         // `q6k_f32`), called standalone by non-matmul consumers and tests, not
         // through `evaluate_quantized`'s per-forward session.
-        Some(workers) => matmul_rows_threaded(rows, 1, workers, None, activation.len(), |row, slot| {
-            let start = row * row_bytes;
-            slot[0] = dot_row(&weights[start..start + row_bytes], activation)?;
-            Ok(())
-        }),
+        Some(workers) => {
+            matmul_rows_threaded(rows, 1, workers, None, activation.len(), |row, slot| {
+                let start = row * row_bytes;
+                slot[0] = dot_row(&weights[start..start + row_bytes], activation)?;
+                Ok(())
+            })
+        }
         None => weights
             .chunks_exact(row_bytes)
             .map(|weight_row| dot_row(weight_row, activation))
@@ -10396,7 +11490,11 @@ fn dot_q5k_f32(weight_row: &[u8], activation: &[f32]) -> Result<f32, TensorError
         acc = dot_fold_fused_multiply_add(
             &scratch,
             activation_chunk,
-            DotFold { len: Q4K_BLOCK_ELEMENTS, init: acc, seeded: true },
+            DotFold {
+                len: Q4K_BLOCK_ELEMENTS,
+                init: acc,
+                seeded: true,
+            },
         );
     }
     Ok(acc)
@@ -10411,7 +11509,11 @@ fn dot_q5k_f32(weight_row: &[u8], activation: &[f32]) -> Result<f32, TensorError
 /// Propagates `dot_q5k_f32`'s [`TensorError::QuantizedShapeMismatch`], or
 /// reports the same error if `weights.len()` is not a whole multiple of
 /// `rows`.
-pub fn matmul_q5k_f32(weights: &[u8], rows: usize, activation: &[f32]) -> Result<Vec<f32>, TensorError> {
+pub fn matmul_q5k_f32(
+    weights: &[u8],
+    rows: usize,
+    activation: &[f32],
+) -> Result<Vec<f32>, TensorError> {
     // proxima-debugger diagnostic: was ALWAYS sequential -- unlike
     // `matmul_q4k_f32`/`matmul_q4k_q8k_f32`, it never called
     // `quantized_matmul_workers`, so it was invisible to every other
@@ -10474,7 +11576,11 @@ fn dot_q6k_f32(weight_row: &[u8], activation: &[f32]) -> Result<f32, TensorError
         acc = dot_fold_fused_multiply_add(
             &scratch,
             activation_chunk,
-            DotFold { len: Q4K_BLOCK_ELEMENTS, init: acc, seeded: true },
+            DotFold {
+                len: Q4K_BLOCK_ELEMENTS,
+                init: acc,
+                seeded: true,
+            },
         );
     }
     Ok(acc)
@@ -10487,7 +11593,11 @@ fn dot_q6k_f32(weight_row: &[u8], activation: &[f32]) -> Result<f32, TensorError
 /// Propagates `dot_q6k_f32`'s [`TensorError::QuantizedShapeMismatch`], or
 /// reports the same error if `weights.len()` is not a whole multiple of
 /// `rows`.
-pub fn matmul_q6k_f32(weights: &[u8], rows: usize, activation: &[f32]) -> Result<Vec<f32>, TensorError> {
+pub fn matmul_q6k_f32(
+    weights: &[u8],
+    rows: usize,
+    activation: &[f32],
+) -> Result<Vec<f32>, TensorError> {
     // proxima-debugger diagnostic: see the matching note on
     // `matmul_q5k_f32` -- same was-always-sequential shape, now routed
     // through the same `matmul_quantized_dispatch` pool dispatch, same
@@ -10562,7 +11672,11 @@ fn dot_q8_0_f32(weight_row: &[u8], activation: &[f32]) -> Result<f32, TensorErro
         acc = dot_fold_fused_multiply_add(
             &scratch,
             activation_chunk,
-            DotFold { len: Q8_0_BLOCK_ELEMENTS, init: acc, seeded: true },
+            DotFold {
+                len: Q8_0_BLOCK_ELEMENTS,
+                init: acc,
+                seeded: true,
+            },
         );
     }
     Ok(acc)
@@ -10582,7 +11696,11 @@ fn dot_q8_0_f32(weight_row: &[u8], activation: &[f32]) -> Result<f32, TensorErro
 /// Propagates `dot_q8_0_f32`'s [`TensorError::QuantizedShapeMismatch`], or
 /// reports the same error if `weights.len()` is not a whole multiple of
 /// `rows`.
-pub fn matmul_q8_0_f32(weights: &[u8], rows: usize, activation: &[f32]) -> Result<Vec<f32>, TensorError> {
+pub fn matmul_q8_0_f32(
+    weights: &[u8],
+    rows: usize,
+    activation: &[f32],
+) -> Result<Vec<f32>, TensorError> {
     matmul_quantized_dispatch(
         weights,
         rows,
@@ -10640,7 +11758,11 @@ fn dot_q4_0_f32(weight_row: &[u8], activation: &[f32]) -> Result<f32, TensorErro
         acc = dot_fold_fused_multiply_add(
             &scratch,
             activation_chunk,
-            DotFold { len: Q4_0_BLOCK_ELEMENTS, init: acc, seeded: true },
+            DotFold {
+                len: Q4_0_BLOCK_ELEMENTS,
+                init: acc,
+                seeded: true,
+            },
         );
     }
     Ok(acc)
@@ -10655,7 +11777,11 @@ fn dot_q4_0_f32(weight_row: &[u8], activation: &[f32]) -> Result<f32, TensorErro
 /// Propagates `dot_q4_0_f32`'s [`TensorError::QuantizedShapeMismatch`], or
 /// reports the same error if `weights.len()` is not a whole multiple of
 /// `rows`.
-pub fn matmul_q4_0_f32(weights: &[u8], rows: usize, activation: &[f32]) -> Result<Vec<f32>, TensorError> {
+pub fn matmul_q4_0_f32(
+    weights: &[u8],
+    rows: usize,
+    activation: &[f32],
+) -> Result<Vec<f32>, TensorError> {
     matmul_quantized_dispatch(
         weights,
         rows,
@@ -10701,7 +11827,10 @@ const HALF_PRECISION_DOT_CHUNK: usize = Q4K_BLOCK_ELEMENTS;
 /// whole multiple of [`HALF_PRECISION_ELEMENT_BYTES`], or `activation.len()`
 /// does not equal the row's decoded element count.
 fn dot_f16_f32(weight_row: &[u8], activation: &[f32]) -> Result<f32, TensorError> {
-    if !weight_row.len().is_multiple_of(HALF_PRECISION_ELEMENT_BYTES) {
+    if !weight_row
+        .len()
+        .is_multiple_of(HALF_PRECISION_ELEMENT_BYTES)
+    {
         return Err(TensorError::QuantizedShapeMismatch {
             reason: "f16 weight row length is not a whole multiple of 2 bytes",
         });
@@ -10718,16 +11847,26 @@ fn dot_f16_f32(weight_row: &[u8], activation: &[f32]) -> Result<f32, TensorError
     let mut wide_scratch = [0.0f32; HALF_PRECISION_DOT_CHUNK];
     let mut acc = 0.0f32;
     let byte_chunk_len = HALF_PRECISION_DOT_CHUNK * HALF_PRECISION_ELEMENT_BYTES;
-    for (byte_chunk, activation_chunk) in weight_row.chunks(byte_chunk_len).zip(activation.chunks(HALF_PRECISION_DOT_CHUNK)) {
+    for (byte_chunk, activation_chunk) in weight_row
+        .chunks(byte_chunk_len)
+        .zip(activation.chunks(HALF_PRECISION_DOT_CHUNK))
+    {
         let chunk_len = activation_chunk.len();
-        for (slot, bytes) in half_scratch[..chunk_len].iter_mut().zip(byte_chunk.as_chunks::<HALF_PRECISION_ELEMENT_BYTES>().0) {
+        for (slot, bytes) in half_scratch[..chunk_len]
+            .iter_mut()
+            .zip(byte_chunk.as_chunks::<HALF_PRECISION_ELEMENT_BYTES>().0)
+        {
             *slot = f16::from_bits(u16::from_le_bytes([bytes[0], bytes[1]]));
         }
         converter.convert_slice(&half_scratch[..chunk_len], &mut wide_scratch[..chunk_len]);
         acc = dot_fold_fused_multiply_add(
             &wide_scratch[..chunk_len],
             activation_chunk,
-            DotFold { len: chunk_len, init: acc, seeded: true },
+            DotFold {
+                len: chunk_len,
+                init: acc,
+                seeded: true,
+            },
         );
     }
     Ok(acc)
@@ -10741,7 +11880,10 @@ fn dot_f16_f32(weight_row: &[u8], activation: &[f32]) -> Result<f32, TensorError
 /// # Errors
 /// Same shape as [`dot_f16_f32`]'s.
 fn dot_bf16_f32(weight_row: &[u8], activation: &[f32]) -> Result<f32, TensorError> {
-    if !weight_row.len().is_multiple_of(HALF_PRECISION_ELEMENT_BYTES) {
+    if !weight_row
+        .len()
+        .is_multiple_of(HALF_PRECISION_ELEMENT_BYTES)
+    {
         return Err(TensorError::QuantizedShapeMismatch {
             reason: "bf16 weight row length is not a whole multiple of 2 bytes",
         });
@@ -10758,16 +11900,26 @@ fn dot_bf16_f32(weight_row: &[u8], activation: &[f32]) -> Result<f32, TensorErro
     let mut wide_scratch = [0.0f32; HALF_PRECISION_DOT_CHUNK];
     let mut acc = 0.0f32;
     let byte_chunk_len = HALF_PRECISION_DOT_CHUNK * HALF_PRECISION_ELEMENT_BYTES;
-    for (byte_chunk, activation_chunk) in weight_row.chunks(byte_chunk_len).zip(activation.chunks(HALF_PRECISION_DOT_CHUNK)) {
+    for (byte_chunk, activation_chunk) in weight_row
+        .chunks(byte_chunk_len)
+        .zip(activation.chunks(HALF_PRECISION_DOT_CHUNK))
+    {
         let chunk_len = activation_chunk.len();
-        for (slot, bytes) in half_scratch[..chunk_len].iter_mut().zip(byte_chunk.as_chunks::<HALF_PRECISION_ELEMENT_BYTES>().0) {
+        for (slot, bytes) in half_scratch[..chunk_len]
+            .iter_mut()
+            .zip(byte_chunk.as_chunks::<HALF_PRECISION_ELEMENT_BYTES>().0)
+        {
             *slot = bf16::from_bits(u16::from_le_bytes([bytes[0], bytes[1]]));
         }
         converter.convert_slice(&half_scratch[..chunk_len], &mut wide_scratch[..chunk_len]);
         acc = dot_fold_fused_multiply_add(
             &wide_scratch[..chunk_len],
             activation_chunk,
-            DotFold { len: chunk_len, init: acc, seeded: true },
+            DotFold {
+                len: chunk_len,
+                init: acc,
+                seeded: true,
+            },
         );
     }
     Ok(acc)
@@ -10781,7 +11933,11 @@ fn dot_bf16_f32(weight_row: &[u8], activation: &[f32]) -> Result<f32, TensorErro
 /// Propagates `dot_f16_f32`'s [`TensorError::QuantizedShapeMismatch`] for
 /// the first row that fails its shape check, or reports the same error if
 /// `weights.len()` is not a whole multiple of `rows`.
-pub fn matmul_f16_f32(weights: &[u8], rows: usize, activation: &[f32]) -> Result<Vec<f32>, TensorError> {
+pub fn matmul_f16_f32(
+    weights: &[u8],
+    rows: usize,
+    activation: &[f32],
+) -> Result<Vec<f32>, TensorError> {
     matmul_quantized_dispatch(
         weights,
         rows,
@@ -10796,7 +11952,11 @@ pub fn matmul_f16_f32(weights: &[u8], rows: usize, activation: &[f32]) -> Result
 ///
 /// # Errors
 /// Same shape as [`matmul_f16_f32`]'s.
-pub fn matmul_bf16_f32(weights: &[u8], rows: usize, activation: &[f32]) -> Result<Vec<f32>, TensorError> {
+pub fn matmul_bf16_f32(
+    weights: &[u8],
+    rows: usize,
+    activation: &[f32],
+) -> Result<Vec<f32>, TensorError> {
     matmul_quantized_dispatch(
         weights,
         rows,
@@ -10938,8 +12098,12 @@ fn matmul_worker_count() -> usize {
             .and_then(|value| value.parse::<usize>().ok())
             .filter(|&count| count > 0)
             .unwrap_or_else(|| {
-                let available = thread::available_parallelism().map(NonZeroUsize::get).unwrap_or(1);
-                performance_core_count().filter(|&count| count >= 1 && count <= available).unwrap_or(available)
+                let available = thread::available_parallelism()
+                    .map(NonZeroUsize::get)
+                    .unwrap_or(1);
+                performance_core_count()
+                    .filter(|&count| count >= 1 && count <= available)
+                    .unwrap_or(available)
             })
     })
 }
@@ -11137,7 +12301,10 @@ where
 
     if let Some(session) = session {
         #[cfg(feature = "instrument")]
-        counter!(instrument::MATMUL_SETUP_TICKS, instrument::elapsed_ticks(diag_setup_started));
+        counter!(
+            instrument::MATMUL_SETUP_TICKS,
+            instrument::elapsed_ticks(diag_setup_started)
+        );
         #[cfg(feature = "instrument")]
         counter!(instrument::PARALLEL_NODES, 1);
         #[cfg(feature = "instrument")]
@@ -11188,7 +12355,9 @@ where
     let dot_row_address = &dot_row as *const Row as usize;
     let next_index = Arc::new(AtomicUsize::new(0));
     let chunk_ranges: Arc<Vec<(usize, usize, usize)>> = Arc::new(chunk_ranges);
-    let spawned_count = workers.saturating_sub(1).min(chunk_ranges_len.saturating_sub(1));
+    let spawned_count = workers
+        .saturating_sub(1)
+        .min(chunk_ranges_len.saturating_sub(1));
     let (result_sender, result_receiver) = sync_channel(chunk_ranges_len);
     #[cfg(feature = "instrument")]
     counter!(
@@ -11228,7 +12397,13 @@ where
     // the caller pulls from the same shared cursor as every pool task
     // instead of running one reserved chunk: it never sits idle, since
     // finishing a chunk sends it straight back to `next_index` for another.
-    claim_and_run_rows::<Row>(&next_index, dot_row_address, width, &chunk_ranges, &result_sender);
+    claim_and_run_rows::<Row>(
+        &next_index,
+        dot_row_address,
+        width,
+        &chunk_ranges,
+        &result_sender,
+    );
     drop(result_sender);
     #[cfg(feature = "instrument")]
     let diag_own_chunk_ticks = instrument::elapsed_ticks(diag_own_chunk_started);
@@ -11414,18 +12589,42 @@ const Q4K_SUB_BLOCKS: usize = Q4K_BLOCK_ELEMENTS / 32;
 // `Q5_K`, `Q6_K`) dots against -- shared, not duplicated per format, so
 // these constants and `quantize_row_q8k` below build under ANY of the
 // three weight codecs' int8-dot features, not `q4k-int8-dot` alone.
-#[cfg(any(feature = "q4k-int8-dot", feature = "q5k-int8-dot", feature = "q6k-int8-dot"))]
+#[cfg(any(
+    feature = "q4k-int8-dot",
+    feature = "q5k-int8-dot",
+    feature = "q6k-int8-dot"
+))]
 const Q8K_BLOCK_BYTES: usize = 4 + Q4K_BLOCK_ELEMENTS + (Q4K_BLOCK_ELEMENTS / 16) * 2;
-#[cfg(any(feature = "q4k-int8-dot", feature = "q5k-int8-dot", feature = "q6k-int8-dot"))]
+#[cfg(any(
+    feature = "q4k-int8-dot",
+    feature = "q5k-int8-dot",
+    feature = "q6k-int8-dot"
+))]
 const Q8K_D_OFFSET: usize = 0;
-#[cfg(any(feature = "q4k-int8-dot", feature = "q5k-int8-dot", feature = "q6k-int8-dot"))]
+#[cfg(any(
+    feature = "q4k-int8-dot",
+    feature = "q5k-int8-dot",
+    feature = "q6k-int8-dot"
+))]
 const Q8K_QS_OFFSET: usize = 4;
-#[cfg(any(feature = "q4k-int8-dot", feature = "q5k-int8-dot", feature = "q6k-int8-dot"))]
+#[cfg(any(
+    feature = "q4k-int8-dot",
+    feature = "q5k-int8-dot",
+    feature = "q6k-int8-dot"
+))]
 const Q8K_BSUMS_OFFSET: usize = Q8K_QS_OFFSET + Q4K_BLOCK_ELEMENTS;
-#[cfg(any(feature = "q4k-int8-dot", feature = "q5k-int8-dot", feature = "q6k-int8-dot"))]
+#[cfg(any(
+    feature = "q4k-int8-dot",
+    feature = "q5k-int8-dot",
+    feature = "q6k-int8-dot"
+))]
 const Q8K_BSUMS_COUNT: usize = Q4K_BLOCK_ELEMENTS / 16;
 
-#[cfg(any(feature = "q4k-int8-dot", feature = "q5k-int8-dot", feature = "q6k-int8-dot"))]
+#[cfg(any(
+    feature = "q4k-int8-dot",
+    feature = "q5k-int8-dot",
+    feature = "q6k-int8-dot"
+))]
 fn f16_le_at(bytes: &[u8], offset: usize) -> f32 {
     let mut raw = [0u8; 2];
     raw.copy_from_slice(&bytes[offset..offset + 2]);
@@ -11455,7 +12654,11 @@ fn f16_le_at(bytes: &[u8], offset: usize) -> f32 {
 /// # Errors
 /// [`TensorError::QuantizedShapeMismatch`] if either length requirement
 /// above is not met.
-#[cfg(any(feature = "q4k-int8-dot", feature = "q5k-int8-dot", feature = "q6k-int8-dot"))]
+#[cfg(any(
+    feature = "q4k-int8-dot",
+    feature = "q5k-int8-dot",
+    feature = "q6k-int8-dot"
+))]
 use crate::sized::MIN_QUANTIZE_BLOCKS_FOR_DISPATCH;
 
 /// [`quantize_row_q8k`] dispatched across the cohort when a `session` is
@@ -11467,7 +12670,11 @@ use crate::sized::MIN_QUANTIZE_BLOCKS_FOR_DISPATCH;
 /// [`ElementwiseRowRound`]'s outer-position ranges. Falls straight through
 /// to [`quantize_row_q8k`] whenever any gate fails: no session, too few
 /// blocks, or fewer than one worker.
-#[cfg(any(feature = "q4k-int8-dot", feature = "q5k-int8-dot", feature = "q6k-int8-dot"))]
+#[cfg(any(
+    feature = "q4k-int8-dot",
+    feature = "q5k-int8-dot",
+    feature = "q6k-int8-dot"
+))]
 fn quantize_row_q8k_dispatch(
     activation: &[f32],
     output: &mut [u8],
@@ -11522,7 +12729,9 @@ fn quantize_row_q8k_dispatch(
     if report.abandoned > 0 {
         return Err(TensorError::ThreadedChunkFailed {
             chunk: report.first_abandoned.map_or(0, |chunk| chunk.0 + 1),
-            reason: alloc::string::String::from("cohort member panicked while running this quantize chunk"),
+            reason: alloc::string::String::from(
+                "cohort member panicked while running this quantize chunk",
+            ),
         });
     }
     Ok(())
@@ -11533,12 +12742,20 @@ fn quantize_row_q8k_dispatch(
 /// [`CohortSession::run`]. No error path -- every range's shape was already
 /// validated whole, by construction, before the round opens, so
 /// [`quantize_q8k_block`] cannot fail the way a matmul row's dot product can.
-#[cfg(any(feature = "q4k-int8-dot", feature = "q5k-int8-dot", feature = "q6k-int8-dot"))]
+#[cfg(any(
+    feature = "q4k-int8-dot",
+    feature = "q5k-int8-dot",
+    feature = "q6k-int8-dot"
+))]
 struct QuantizeRound<'round> {
     chunk_ranges: &'round [(usize, usize, usize, usize)],
 }
 
-#[cfg(any(feature = "q4k-int8-dot", feature = "q5k-int8-dot", feature = "q6k-int8-dot"))]
+#[cfg(any(
+    feature = "q4k-int8-dot",
+    feature = "q5k-int8-dot",
+    feature = "q6k-int8-dot"
+))]
 impl CohortRound<TensorError> for QuantizeRound<'_> {
     fn chunks(&self) -> usize {
         self.chunk_ranges.len()
@@ -11566,7 +12783,11 @@ impl CohortRound<TensorError> for QuantizeRound<'_> {
     }
 }
 
-#[cfg(any(feature = "q4k-int8-dot", feature = "q5k-int8-dot", feature = "q6k-int8-dot"))]
+#[cfg(any(
+    feature = "q4k-int8-dot",
+    feature = "q5k-int8-dot",
+    feature = "q6k-int8-dot"
+))]
 pub fn quantize_row_q8k(activation: &[f32], output: &mut [u8]) -> Result<(), TensorError> {
     if !activation.len().is_multiple_of(Q4K_BLOCK_ELEMENTS) {
         return Err(TensorError::QuantizedShapeMismatch {
@@ -11590,7 +12811,11 @@ pub fn quantize_row_q8k(activation: &[f32], output: &mut [u8]) -> Result<(), Ten
     Ok(())
 }
 
-#[cfg(any(feature = "q4k-int8-dot", feature = "q5k-int8-dot", feature = "q6k-int8-dot"))]
+#[cfg(any(
+    feature = "q4k-int8-dot",
+    feature = "q5k-int8-dot",
+    feature = "q6k-int8-dot"
+))]
 fn quantize_q8k_block(chunk: &[f32], out_block: &mut [u8]) {
     let mut amax = 0.0f32;
     let mut max = 0.0f32;
@@ -11621,7 +12846,12 @@ fn quantize_q8k_block(chunk: &[f32], out_block: &mut [u8]) {
     }
 
     let bsums_region = &mut out_block[Q8K_BSUMS_OFFSET..Q8K_BSUMS_OFFSET + Q8K_BSUMS_COUNT * 2];
-    for (sixteen, bytes) in levels.as_chunks::<16>().0.iter().zip(bsums_region.as_chunks_mut::<2>().0) {
+    for (sixteen, bytes) in levels
+        .as_chunks::<16>()
+        .0
+        .iter()
+        .zip(bsums_region.as_chunks_mut::<2>().0)
+    {
         let sum: i16 = sixteen.iter().map(|&level| i16::from(level)).sum();
         bytes.copy_from_slice(&sum.to_le_bytes());
     }
@@ -11639,7 +12869,11 @@ fn quantize_q8k_block(chunk: &[f32], out_block: &mut [u8]) {
 ///
 /// # Panics
 /// If `block.len() != Q8K_BLOCK_BYTES` or `output.len() != Q4K_BLOCK_ELEMENTS`.
-#[cfg(any(feature = "q4k-int8-dot", feature = "q5k-int8-dot", feature = "q6k-int8-dot"))]
+#[cfg(any(
+    feature = "q4k-int8-dot",
+    feature = "q5k-int8-dot",
+    feature = "q6k-int8-dot"
+))]
 fn dequantize_q8k_block(block: &[u8], output: &mut [f32]) {
     let mut d_bytes = [0u8; 4];
     d_bytes.copy_from_slice(&block[Q8K_D_OFFSET..Q8K_D_OFFSET + 4]);
@@ -11676,13 +12910,21 @@ fn dequantize_q8k_block(block: &[u8], output: &mut [f32]) {
 /// choosing fused-vs-unfused per matmul row (a build-time feature gate or a
 /// measured per-target decision) holds either behind one type, matched once
 /// inside `call` rather than at every call site.
-#[cfg(any(feature = "q4k-int8-dot", feature = "q5k-int8-dot", feature = "q6k-int8-dot"))]
+#[cfg(any(
+    feature = "q4k-int8-dot",
+    feature = "q5k-int8-dot",
+    feature = "q6k-int8-dot"
+))]
 pub enum QuantDot<'a> {
     Fused(QuantizedBlock<'a>),
     Unfused(QuantizedBlock<'a>),
 }
 
-#[cfg(any(feature = "q4k-int8-dot", feature = "q5k-int8-dot", feature = "q6k-int8-dot"))]
+#[cfg(any(
+    feature = "q4k-int8-dot",
+    feature = "q5k-int8-dot",
+    feature = "q6k-int8-dot"
+))]
 impl<'a> Pipe for QuantDot<'a> {
     type In = &'a [u8];
     type Out = f32;
@@ -11704,7 +12946,11 @@ impl<'a> Pipe for QuantDot<'a> {
 /// int8-dot feature is not compiled in (or a non-K-quant variant like
 /// `Q8_0`/`Float16`) is an honest [`TensorError::NotLowerable`], never a
 /// silent fallback to a different codec's kernel.
-#[cfg(any(feature = "q4k-int8-dot", feature = "q5k-int8-dot", feature = "q6k-int8-dot"))]
+#[cfg(any(
+    feature = "q4k-int8-dot",
+    feature = "q5k-int8-dot",
+    feature = "q6k-int8-dot"
+))]
 fn fused_quant_dot(block: QuantizedBlock<'_>, activation_q8k: &[u8]) -> Result<f32, TensorError> {
     match block {
         #[cfg(feature = "q4k-int8-dot")]
@@ -11725,12 +12971,28 @@ fn fused_quant_dot(block: QuantizedBlock<'_>, activation_q8k: &[u8]) -> Result<f
 /// [`dequantize_q8k_block`]) and fold with a plain multiply-add. Every
 /// length check mirrors [`dot_q4k_q8k`]'s own -- this path takes the
 /// identical `In` shape, so it must reject the identical malformed shapes.
-#[cfg(any(feature = "q4k-int8-dot", feature = "q5k-int8-dot", feature = "q6k-int8-dot"))]
+#[cfg(any(
+    feature = "q4k-int8-dot",
+    feature = "q5k-int8-dot",
+    feature = "q6k-int8-dot"
+))]
 fn unfused_quant_dot(block: QuantizedBlock<'_>, activation_q8k: &[u8]) -> Result<f32, TensorError> {
     let (weight_bytes, block_bytes, qk_k): (&[u8], usize, usize) = match block {
-        QuantizedBlock::Q4K(bytes) => (bytes, proxima_gguf::quant::q4_k::BLOCK_BYTES, proxima_gguf::quant::q4_k::QK_K),
-        QuantizedBlock::Q5K(bytes) => (bytes, proxima_gguf::quant::q5_k::BLOCK_BYTES, proxima_gguf::quant::q5_k::QK_K),
-        QuantizedBlock::Q6K(bytes) => (bytes, proxima_gguf::quant::q6_k::BLOCK_BYTES, proxima_gguf::quant::q6_k::QK_K),
+        QuantizedBlock::Q4K(bytes) => (
+            bytes,
+            proxima_gguf::quant::q4_k::BLOCK_BYTES,
+            proxima_gguf::quant::q4_k::QK_K,
+        ),
+        QuantizedBlock::Q5K(bytes) => (
+            bytes,
+            proxima_gguf::quant::q5_k::BLOCK_BYTES,
+            proxima_gguf::quant::q5_k::QK_K,
+        ),
+        QuantizedBlock::Q6K(bytes) => (
+            bytes,
+            proxima_gguf::quant::q6_k::BLOCK_BYTES,
+            proxima_gguf::quant::q6_k::QK_K,
+        ),
         _ => {
             return Err(TensorError::NotLowerable {
                 node: NodeId(0),
@@ -11772,7 +13034,11 @@ fn unfused_quant_dot(block: QuantizedBlock<'_>, activation_q8k: &[u8]) -> Result
         dequantize_q8k_block(block_bytes, block_f32);
     }
 
-    Ok(weight_f32.iter().zip(&activation_f32).map(|(weight, value)| weight * value).sum())
+    Ok(weight_f32
+        .iter()
+        .zip(&activation_f32)
+        .map(|(weight, value)| weight * value)
+        .sum())
 }
 
 /// One `Q4_K`-weight-row x `Q8_K`-activation int8 dot product --
@@ -11971,7 +13237,8 @@ fn dot_q4k_q8k_block_scalar(weight_block: &[u8], q8k_block: &[u8]) -> f32 {
     let mut sumi = 0i32;
     let mut mins_correction = 0i32;
     for sub_block in 0..Q4K_SUB_BLOCKS {
-        let (scale_code, min_code) = proxima_gguf::quant::q4_k::get_scale_min_k4(sub_block, &scales);
+        let (scale_code, min_code) =
+            proxima_gguf::quant::q4_k::get_scale_min_k4(sub_block, &scales);
 
         let bsum_lo = i16::from_le_bytes([bsums[sub_block * 4], bsums[sub_block * 4 + 1]]);
         let bsum_hi = i16::from_le_bytes([bsums[sub_block * 4 + 2], bsums[sub_block * 4 + 3]]);
@@ -11983,7 +13250,11 @@ fn dot_q4k_q8k_block_scalar(weight_block: &[u8], q8k_block: &[u8]) -> f32 {
         let mut partial = 0i32;
         for offset in 0..32 {
             let byte = qs[byte_base + offset];
-            let nibble = i32::from(if is_high_nibble { byte >> 4 } else { byte & 0x0F });
+            let nibble = i32::from(if is_high_nibble {
+                byte >> 4
+            } else {
+                byte & 0x0F
+            });
             let activation_value = i32::from(activation_qs[activation_base + offset].cast_signed());
             partial += nibble * activation_value;
         }
@@ -12012,11 +13283,19 @@ fn dot_q4k_q8k_block_scalar(weight_block: &[u8], q8k_block: &[u8]) -> f32 {
 /// behavior.
 #[cfg(all(
     target_arch = "aarch64",
-    any(feature = "q4k-int8-dot", feature = "q5k-int8-dot", feature = "q6k-int8-dot")
+    any(
+        feature = "q4k-int8-dot",
+        feature = "q5k-int8-dot",
+        feature = "q6k-int8-dot"
+    )
 ))]
 #[target_feature(enable = "dotprod")]
 #[inline]
-unsafe fn sdot_s32(acc: core::arch::aarch64::int32x4_t, a: core::arch::aarch64::int8x16_t, b: core::arch::aarch64::int8x16_t) -> core::arch::aarch64::int32x4_t {
+unsafe fn sdot_s32(
+    acc: core::arch::aarch64::int32x4_t,
+    a: core::arch::aarch64::int8x16_t,
+    b: core::arch::aarch64::int8x16_t,
+) -> core::arch::aarch64::int32x4_t {
     // SAFETY: caller-guaranteed FEAT_DotProd (this fn's own doc); operands
     // are NEON vector registers, `options(pure, nomem, nostack)` matches
     // that no memory is touched and the instruction has no side effects.
@@ -12319,7 +13598,11 @@ unsafe fn dot_q4k_q8k_block_avx2(weight_block: &[u8], q8k_block: &[u8]) -> f32 {
 /// [`TensorError::QuantizedShapeMismatch`], or reports the same error if
 /// `weights.len()` is not a whole multiple of `rows`.
 #[cfg(feature = "q4k-int8-dot")]
-pub fn matmul_q4k_q8k_f32(weights: &[u8], rows: usize, activation: &[f32]) -> Result<Vec<f32>, TensorError> {
+pub fn matmul_q4k_q8k_f32(
+    weights: &[u8],
+    rows: usize,
+    activation: &[f32],
+) -> Result<Vec<f32>, TensorError> {
     matmul_q4k_q8k_f32_impl(weights, rows, activation, 1, None)
 }
 
@@ -12392,24 +13675,33 @@ fn matmul_q4k_q8k_f32_impl(
 
     let row_bytes = weights.len() / rows;
     match quantized_matmul_workers(rows, activation.len()) {
-        Some(workers) => matmul_rows_threaded(rows, leading_total, workers, session, k, |row, slot| {
-            let start = row * row_bytes;
-            let weight_row = &weights[start..start + row_bytes];
-            for (position, output_slot) in slot.iter_mut().enumerate() {
-                let q8k_start = position * q8k_row_bytes;
-                *output_slot = dot_q4k_q8k(weight_row, &activation_q8k[q8k_start..q8k_start + q8k_row_bytes])?;
-            }
-            Ok(())
-        }),
-        None => weights
-            .chunks_exact(row_bytes)
-            .try_fold(Vec::with_capacity(rows * leading_total), |mut output, weight_row| {
+        Some(workers) => {
+            matmul_rows_threaded(rows, leading_total, workers, session, k, |row, slot| {
+                let start = row * row_bytes;
+                let weight_row = &weights[start..start + row_bytes];
+                for (position, output_slot) in slot.iter_mut().enumerate() {
+                    let q8k_start = position * q8k_row_bytes;
+                    *output_slot = dot_q4k_q8k(
+                        weight_row,
+                        &activation_q8k[q8k_start..q8k_start + q8k_row_bytes],
+                    )?;
+                }
+                Ok(())
+            })
+        }
+        None => weights.chunks_exact(row_bytes).try_fold(
+            Vec::with_capacity(rows * leading_total),
+            |mut output, weight_row| {
                 for position in 0..leading_total {
                     let q8k_start = position * q8k_row_bytes;
-                    output.push(dot_q4k_q8k(weight_row, &activation_q8k[q8k_start..q8k_start + q8k_row_bytes])?);
+                    output.push(dot_q4k_q8k(
+                        weight_row,
+                        &activation_q8k[q8k_start..q8k_start + q8k_row_bytes],
+                    )?);
                 }
                 Ok::<Vec<f32>, TensorError>(output)
-            }),
+            },
+        ),
     }
 }
 
@@ -12423,7 +13715,11 @@ fn matmul_q4k_q8k_f32_impl(
 /// # Errors
 /// Same as [`matmul_q4k_q8k_f32`].
 #[cfg(feature = "q4k-int8-dot")]
-pub fn matmul_q4k_q8k_portable_f32(weights: &[u8], rows: usize, activation: &[f32]) -> Result<Vec<f32>, TensorError> {
+pub fn matmul_q4k_q8k_portable_f32(
+    weights: &[u8],
+    rows: usize,
+    activation: &[f32],
+) -> Result<Vec<f32>, TensorError> {
     if rows == 0 {
         return Err(TensorError::QuantizedShapeMismatch {
             reason: "matmul_q4k_q8k_portable_f32 called with zero rows",
@@ -12594,7 +13890,8 @@ fn dot_q5k_q8k_block_scalar(weight_block: &[u8], q8k_block: &[u8]) -> f32 {
     let mut sumi = 0i32;
     let mut mins_correction = 0i32;
     for sub_block in 0..Q4K_SUB_BLOCKS {
-        let (scale_code, min_code) = proxima_gguf::quant::q4_k::get_scale_min_k4(sub_block, &scales);
+        let (scale_code, min_code) =
+            proxima_gguf::quant::q4_k::get_scale_min_k4(sub_block, &scales);
 
         let bsum_lo = i16::from_le_bytes([bsums[sub_block * 4], bsums[sub_block * 4 + 1]]);
         let bsum_hi = i16::from_le_bytes([bsums[sub_block * 4 + 2], bsums[sub_block * 4 + 3]]);
@@ -12607,7 +13904,11 @@ fn dot_q5k_q8k_block_scalar(weight_block: &[u8], q8k_block: &[u8]) -> f32 {
         let mut partial = 0i32;
         for offset in 0..32 {
             let byte = qs[byte_base + offset];
-            let nibble = i32::from(if is_high_nibble { byte >> 4 } else { byte & 0x0F });
+            let nibble = i32::from(if is_high_nibble {
+                byte >> 4
+            } else {
+                byte & 0x0F
+            });
             let high_bit = i32::from(qh[offset] & qh_mask != 0) * 16;
             let level = nibble + high_bit;
             let activation_value = i32::from(activation_qs[activation_base + offset].cast_signed());
@@ -12722,7 +14023,11 @@ unsafe fn dot_q5k_q8k_block_neon_dotprod(weight_block: &[u8], q8k_block: &[u8]) 
 /// [`TensorError::QuantizedShapeMismatch`], or reports the same error if
 /// `weights.len()` is not a whole multiple of `rows`.
 #[cfg(feature = "q5k-int8-dot")]
-pub fn matmul_q5k_q8k_f32(weights: &[u8], rows: usize, activation: &[f32]) -> Result<Vec<f32>, TensorError> {
+pub fn matmul_q5k_q8k_f32(
+    weights: &[u8],
+    rows: usize,
+    activation: &[f32],
+) -> Result<Vec<f32>, TensorError> {
     matmul_q5k_q8k_f32_impl(weights, rows, activation, 1, None)
 }
 
@@ -12770,24 +14075,33 @@ fn matmul_q5k_q8k_f32_impl(
 
     let row_bytes = weights.len() / rows;
     match quantized_matmul_workers(rows, activation.len()) {
-        Some(workers) => matmul_rows_threaded(rows, leading_total, workers, session, k, |row, slot| {
-            let start = row * row_bytes;
-            let weight_row = &weights[start..start + row_bytes];
-            for (position, output_slot) in slot.iter_mut().enumerate() {
-                let q8k_start = position * q8k_row_bytes;
-                *output_slot = dot_q5k_q8k(weight_row, &activation_q8k[q8k_start..q8k_start + q8k_row_bytes])?;
-            }
-            Ok(())
-        }),
-        None => weights
-            .chunks_exact(row_bytes)
-            .try_fold(Vec::with_capacity(rows * leading_total), |mut output, weight_row| {
+        Some(workers) => {
+            matmul_rows_threaded(rows, leading_total, workers, session, k, |row, slot| {
+                let start = row * row_bytes;
+                let weight_row = &weights[start..start + row_bytes];
+                for (position, output_slot) in slot.iter_mut().enumerate() {
+                    let q8k_start = position * q8k_row_bytes;
+                    *output_slot = dot_q5k_q8k(
+                        weight_row,
+                        &activation_q8k[q8k_start..q8k_start + q8k_row_bytes],
+                    )?;
+                }
+                Ok(())
+            })
+        }
+        None => weights.chunks_exact(row_bytes).try_fold(
+            Vec::with_capacity(rows * leading_total),
+            |mut output, weight_row| {
                 for position in 0..leading_total {
                     let q8k_start = position * q8k_row_bytes;
-                    output.push(dot_q5k_q8k(weight_row, &activation_q8k[q8k_start..q8k_start + q8k_row_bytes])?);
+                    output.push(dot_q5k_q8k(
+                        weight_row,
+                        &activation_q8k[q8k_start..q8k_start + q8k_row_bytes],
+                    )?);
                 }
                 Ok::<Vec<f32>, TensorError>(output)
-            }),
+            },
+        ),
     }
 }
 
@@ -12799,7 +14113,11 @@ fn matmul_q5k_q8k_f32_impl(
 /// # Errors
 /// Same as [`matmul_q5k_q8k_f32`].
 #[cfg(feature = "q5k-int8-dot")]
-pub fn matmul_q5k_q8k_portable_f32(weights: &[u8], rows: usize, activation: &[f32]) -> Result<Vec<f32>, TensorError> {
+pub fn matmul_q5k_q8k_portable_f32(
+    weights: &[u8],
+    rows: usize,
+    activation: &[f32],
+) -> Result<Vec<f32>, TensorError> {
     if rows == 0 {
         return Err(TensorError::QuantizedShapeMismatch {
             reason: "matmul_q5k_q8k_portable_f32 called with zero rows",
@@ -12951,7 +14269,8 @@ fn dot_q6k_q8k_block_scalar(weight_block: &[u8], q8k_block: &[u8]) -> f32 {
     let d_weight = f16_le_at(weight_block, Q6K_D_OFFSET);
     let ql = &weight_block[Q6K_QL_OFFSET..Q6K_QL_OFFSET + Q6K_QL_BYTES];
     let qh = &weight_block[Q6K_QH_OFFSET..Q6K_QH_OFFSET + Q6K_QH_BYTES];
-    let scales = &weight_block[Q6K_SCALES_OFFSET..Q6K_SCALES_OFFSET + proxima_gguf::quant::q6_k::SUB_BLOCKS];
+    let scales =
+        &weight_block[Q6K_SCALES_OFFSET..Q6K_SCALES_OFFSET + proxima_gguf::quant::q6_k::SUB_BLOCKS];
 
     let mut d_bytes = [0u8; 4];
     d_bytes.copy_from_slice(&q8k_block[Q8K_D_OFFSET..Q8K_D_OFFSET + 4]);
@@ -12973,8 +14292,16 @@ fn dot_q6k_q8k_block_scalar(weight_block: &[u8], q8k_block: &[u8]) -> f32 {
         let mut partial = 0i32;
         for offset in 0..sub_block_elements {
             let l = subhalf * sub_block_elements + offset;
-            let ql_byte = if lane == 0 || lane == 2 { ql_half[l] } else { ql_half[l + 32] };
-            let nibble = if lane < 2 { ql_byte & 0x0F } else { ql_byte >> 4 };
+            let ql_byte = if lane == 0 || lane == 2 {
+                ql_half[l]
+            } else {
+                ql_half[l + 32]
+            };
+            let nibble = if lane < 2 {
+                ql_byte & 0x0F
+            } else {
+                ql_byte >> 4
+            };
             let high = (qh_half[l] >> (2 * lane)) & 0x03;
             let level = i32::from(nibble) | (i32::from(high) << 4);
             let quant = level - 32;
@@ -13009,10 +14336,10 @@ fn dot_q6k_q8k_block_scalar(weight_block: &[u8], q8k_block: &[u8]) -> f32 {
 unsafe fn dot_q6k_q8k_block_neon_dotprod(weight_block: &[u8], q8k_block: &[u8]) -> f32 {
     let d_weight = f16_le_at(weight_block, Q6K_D_OFFSET);
     let mut scales = [0i8; 16];
-    for (slot, byte) in scales
-        .iter_mut()
-        .zip(weight_block[Q6K_SCALES_OFFSET..Q6K_SCALES_OFFSET + proxima_gguf::quant::q6_k::SUB_BLOCKS].iter())
-    {
+    for (slot, byte) in scales.iter_mut().zip(
+        weight_block[Q6K_SCALES_OFFSET..Q6K_SCALES_OFFSET + proxima_gguf::quant::q6_k::SUB_BLOCKS]
+            .iter(),
+    ) {
         *slot = byte.cast_signed();
     }
 
@@ -13057,11 +14384,17 @@ unsafe fn dot_q6k_q8k_block_neon_dotprod(weight_block: &[u8], q8k_block: &[u8]) 
             let scale_half = &scales[half * 8..half * 8 + 8];
 
             let low0 = vsubq_s8(
-                vreinterpretq_s8_u8(vorrq_u8(vandq_u8(ql0, m4b), vshlq_n_u8(vandq_u8(qhbits0, high_bits_mask), 4))),
+                vreinterpretq_s8_u8(vorrq_u8(
+                    vandq_u8(ql0, m4b),
+                    vshlq_n_u8(vandq_u8(qhbits0, high_bits_mask), 4),
+                )),
                 m32s,
             );
             let low1 = vsubq_s8(
-                vreinterpretq_s8_u8(vorrq_u8(vandq_u8(ql1, m4b), vshlq_n_u8(vandq_u8(qhbits1, high_bits_mask), 4))),
+                vreinterpretq_s8_u8(vorrq_u8(
+                    vandq_u8(ql1, m4b),
+                    vshlq_n_u8(vandq_u8(qhbits1, high_bits_mask), 4),
+                )),
                 m32s,
             );
             let low2 = vsubq_s8(
@@ -13139,7 +14472,11 @@ unsafe fn dot_q6k_q8k_block_neon_dotprod(weight_block: &[u8], q8k_block: &[u8]) 
 /// [`TensorError::QuantizedShapeMismatch`], or reports the same error if
 /// `weights.len()` is not a whole multiple of `rows`.
 #[cfg(feature = "q6k-int8-dot")]
-pub fn matmul_q6k_q8k_f32(weights: &[u8], rows: usize, activation: &[f32]) -> Result<Vec<f32>, TensorError> {
+pub fn matmul_q6k_q8k_f32(
+    weights: &[u8],
+    rows: usize,
+    activation: &[f32],
+) -> Result<Vec<f32>, TensorError> {
     matmul_q6k_q8k_f32_impl(weights, rows, activation, 1, None)
 }
 
@@ -13187,24 +14524,33 @@ fn matmul_q6k_q8k_f32_impl(
 
     let row_bytes = weights.len() / rows;
     match quantized_matmul_workers(rows, activation.len()) {
-        Some(workers) => matmul_rows_threaded(rows, leading_total, workers, session, k, |row, slot| {
-            let start = row * row_bytes;
-            let weight_row = &weights[start..start + row_bytes];
-            for (position, output_slot) in slot.iter_mut().enumerate() {
-                let q8k_start = position * q8k_row_bytes;
-                *output_slot = dot_q6k_q8k(weight_row, &activation_q8k[q8k_start..q8k_start + q8k_row_bytes])?;
-            }
-            Ok(())
-        }),
-        None => weights
-            .chunks_exact(row_bytes)
-            .try_fold(Vec::with_capacity(rows * leading_total), |mut output, weight_row| {
+        Some(workers) => {
+            matmul_rows_threaded(rows, leading_total, workers, session, k, |row, slot| {
+                let start = row * row_bytes;
+                let weight_row = &weights[start..start + row_bytes];
+                for (position, output_slot) in slot.iter_mut().enumerate() {
+                    let q8k_start = position * q8k_row_bytes;
+                    *output_slot = dot_q6k_q8k(
+                        weight_row,
+                        &activation_q8k[q8k_start..q8k_start + q8k_row_bytes],
+                    )?;
+                }
+                Ok(())
+            })
+        }
+        None => weights.chunks_exact(row_bytes).try_fold(
+            Vec::with_capacity(rows * leading_total),
+            |mut output, weight_row| {
                 for position in 0..leading_total {
                     let q8k_start = position * q8k_row_bytes;
-                    output.push(dot_q6k_q8k(weight_row, &activation_q8k[q8k_start..q8k_start + q8k_row_bytes])?);
+                    output.push(dot_q6k_q8k(
+                        weight_row,
+                        &activation_q8k[q8k_start..q8k_start + q8k_row_bytes],
+                    )?);
                 }
                 Ok::<Vec<f32>, TensorError>(output)
-            }),
+            },
+        ),
     }
 }
 
@@ -13214,7 +14560,11 @@ fn matmul_q6k_q8k_f32_impl(
 /// # Errors
 /// Same as [`matmul_q6k_q8k_f32`].
 #[cfg(feature = "q6k-int8-dot")]
-pub fn matmul_q6k_q8k_portable_f32(weights: &[u8], rows: usize, activation: &[f32]) -> Result<Vec<f32>, TensorError> {
+pub fn matmul_q6k_q8k_portable_f32(
+    weights: &[u8],
+    rows: usize,
+    activation: &[f32],
+) -> Result<Vec<f32>, TensorError> {
     if rows == 0 {
         return Err(TensorError::QuantizedShapeMismatch {
             reason: "matmul_q6k_q8k_portable_f32 called with zero rows",
@@ -13256,7 +14606,12 @@ pub fn matmul_q6k_q8k_portable_f32(weights: &[u8], rows: usize, activation: &[f3
 /// at whichever width `1..=5` the leftover row count needs, instead of a
 /// hand-duplicated copy per width.
 #[cfg(target_arch = "aarch64")]
-unsafe fn gemm_tile_neon<const ROWS: usize>(a: KStridedTile, b: KStridedTile, k: usize, out: &mut [[f32; TILE_COLS]; ROWS]) {
+unsafe fn gemm_tile_neon<const ROWS: usize>(
+    a: KStridedTile,
+    b: KStridedTile,
+    k: usize,
+    out: &mut [[f32; TILE_COLS]; ROWS],
+) {
     // `vdupq_n_f32` requires the `neon` target feature, unconditionally
     // present in the aarch64 base ISA this module is gated on.
     let mut acc = [[unsafe { vdupq_n_f32(0.0) }; TILE_COLS]; ROWS];
@@ -13307,7 +14662,13 @@ unsafe fn gemm_tile_neon<const ROWS: usize>(a: KStridedTile, b: KStridedTile, k:
 /// `len < DOT_LANES` fallback for [`dot_fold_multi_accumulator_binary`] —
 /// too few terms for independent lanes to pay for themselves, and this
 /// keeps tiny-`k` folds byte-for-byte identical to pre-ROW-12 behavior.
-fn dot_fold_scalar_binary<F, R>(op: F, reduce: R, slice_a: &[f32], slice_b: &[f32], fold: DotFold) -> f32
+fn dot_fold_scalar_binary<F, R>(
+    op: F,
+    reduce: R,
+    slice_a: &[f32],
+    slice_b: &[f32],
+    fold: DotFold,
+) -> f32
 where
     F: Fn(f32, f32) -> f32,
     R: Fn(f32, f32) -> f32,
@@ -13345,7 +14706,13 @@ where
 /// seeds each lane with its own first block value instead of `fold.init`,
 /// so no lane ever combines with a non-identity `fold.init` value.
 #[inline(always)]
-fn dot_fold_multi_accumulator_binary<F, R>(op: F, reduce: R, slice_a: &[f32], slice_b: &[f32], fold: DotFold) -> f32
+fn dot_fold_multi_accumulator_binary<F, R>(
+    op: F,
+    reduce: R,
+    slice_a: &[f32],
+    slice_b: &[f32],
+    fold: DotFold,
+) -> f32
 where
     F: Fn(f32, f32) -> f32,
     R: Fn(f32, f32) -> f32,
@@ -13468,7 +14835,9 @@ fn reduce_dot_fast(
     };
     match *shape {
         BodyShape::Unary(op, a) => reduce_dot_unary(op, reduce_op, span_of(a), fold),
-        BodyShape::Binary(op, a, b) => reduce_dot_binary(op, reduce_op, span_of(a), span_of(b), fold),
+        BodyShape::Binary(op, a, b) => {
+            reduce_dot_binary(op, reduce_op, span_of(a), span_of(b), fold)
+        }
         BodyShape::FusedAdamUpdate(..) | BodyShape::Generic(_) => {
             unreachable!("fast path is never entered for a Generic or FusedAdamUpdate body shape")
         }
@@ -13481,10 +14850,18 @@ fn reduce_dot_unary(op: ScalarOp, reduce_op: ScalarOp, span: OperandSpan, fold: 
     macro_rules! unary_op_arm {
         ($f:expr) => {
             match reduce_op {
-                ScalarOp::Add => reduce_dot_unary_monomorphic($f, |acc: f32, v: f32| acc + v, span, fold),
-                ScalarOp::Multiply => reduce_dot_unary_monomorphic($f, |acc: f32, v: f32| acc * v, span, fold),
-                ScalarOp::Maximum => reduce_dot_unary_monomorphic($f, |acc: f32, v: f32| acc.max(v), span, fold),
-                ScalarOp::Minimum => reduce_dot_unary_monomorphic($f, |acc: f32, v: f32| acc.min(v), span, fold),
+                ScalarOp::Add => {
+                    reduce_dot_unary_monomorphic($f, |acc: f32, v: f32| acc + v, span, fold)
+                }
+                ScalarOp::Multiply => {
+                    reduce_dot_unary_monomorphic($f, |acc: f32, v: f32| acc * v, span, fold)
+                }
+                ScalarOp::Maximum => {
+                    reduce_dot_unary_monomorphic($f, |acc: f32, v: f32| acc.max(v), span, fold)
+                }
+                ScalarOp::Minimum => {
+                    reduce_dot_unary_monomorphic($f, |acc: f32, v: f32| acc.min(v), span, fold)
+                }
                 _ => reduce_dot_unary_scalar_dispatch(op, reduce_op, span, fold),
             }
         };
@@ -13544,7 +14921,12 @@ where
 /// through [`dot_fold_multi_accumulator_unary`], which deliberately
 /// reassociates and would silently change output for this newly-widened case.
 #[inline(always)]
-fn reduce_dot_unary_monomorphic_strided<F, R>(op: F, reduce: R, span: OperandSpan, fold: DotFold) -> f32
+fn reduce_dot_unary_monomorphic_strided<F, R>(
+    op: F,
+    reduce: R,
+    span: OperandSpan,
+    fold: DotFold,
+) -> f32
 where
     F: Fn(f32) -> f32,
     R: Fn(f32, f32) -> f32,
@@ -13571,7 +14953,12 @@ where
 /// [`reduce_dot_unary_monomorphic`], dispatched per term via
 /// [`apply_scalar_op`]/[`combine_reduction`]. [`OperandSpan::at`] already
 /// generalizes over every stride.
-fn reduce_dot_unary_scalar_dispatch(op: ScalarOp, reduce_op: ScalarOp, span: OperandSpan, fold: DotFold) -> f32 {
+fn reduce_dot_unary_scalar_dispatch(
+    op: ScalarOp,
+    reduce_op: ScalarOp,
+    span: OperandSpan,
+    fold: DotFold,
+) -> f32 {
     let mut acc = fold.init;
     let mut seeded = fold.seeded;
     for step in 0..fold.len {
@@ -13584,7 +14971,13 @@ fn reduce_dot_unary_scalar_dispatch(op: ScalarOp, reduce_op: ScalarOp, span: Ope
 
 /// Same discipline as [`reduce_dot_unary`], for the two-operand case — the
 /// contraction-dim counterpart of [`reduce_width_binary`].
-fn reduce_dot_binary(op: ScalarOp, reduce_op: ScalarOp, a: OperandSpan, b: OperandSpan, fold: DotFold) -> f32 {
+fn reduce_dot_binary(
+    op: ScalarOp,
+    reduce_op: ScalarOp,
+    a: OperandSpan,
+    b: OperandSpan,
+    fold: DotFold,
+) -> f32 {
     // the multiply-accumulate case — every contraction in every matmul —
     // taken before the generic closure dispatch, because `mul_add` has to be
     // asked for by name (see `dot_fold_fused_multiply_add`). `a.stride == 1
@@ -13604,10 +14997,18 @@ fn reduce_dot_binary(op: ScalarOp, reduce_op: ScalarOp, a: OperandSpan, b: Opera
     macro_rules! binary_op_arm {
         ($f:expr) => {
             match reduce_op {
-                ScalarOp::Add => reduce_dot_binary_monomorphic($f, |acc: f32, v: f32| acc + v, a, b, fold),
-                ScalarOp::Multiply => reduce_dot_binary_monomorphic($f, |acc: f32, v: f32| acc * v, a, b, fold),
-                ScalarOp::Maximum => reduce_dot_binary_monomorphic($f, |acc: f32, v: f32| acc.max(v), a, b, fold),
-                ScalarOp::Minimum => reduce_dot_binary_monomorphic($f, |acc: f32, v: f32| acc.min(v), a, b, fold),
+                ScalarOp::Add => {
+                    reduce_dot_binary_monomorphic($f, |acc: f32, v: f32| acc + v, a, b, fold)
+                }
+                ScalarOp::Multiply => {
+                    reduce_dot_binary_monomorphic($f, |acc: f32, v: f32| acc * v, a, b, fold)
+                }
+                ScalarOp::Maximum => {
+                    reduce_dot_binary_monomorphic($f, |acc: f32, v: f32| acc.max(v), a, b, fold)
+                }
+                ScalarOp::Minimum => {
+                    reduce_dot_binary_monomorphic($f, |acc: f32, v: f32| acc.min(v), a, b, fold)
+                }
                 _ => reduce_dot_binary_scalar_dispatch(op, reduce_op, a, b, fold),
             }
         };
@@ -13620,7 +15021,9 @@ fn reduce_dot_binary(op: ScalarOp, reduce_op: ScalarOp, a: OperandSpan, b: Opera
         ScalarOp::Maximum => binary_op_arm!(|x: f32, y: f32| x.max(y)),
         ScalarOp::Minimum => binary_op_arm!(|x: f32, y: f32| x.min(y)),
         ScalarOp::Greater => binary_op_arm!(|x: f32, y: f32| f32::from(u8::from(x > y))),
-        ScalarOp::Equal => binary_op_arm!(|x: f32, y: f32| f32::from(u8::from((x - y).abs() == 0.0))),
+        ScalarOp::Equal => {
+            binary_op_arm!(|x: f32, y: f32| f32::from(u8::from((x - y).abs() == 0.0)))
+        }
         _ => reduce_dot_binary_scalar_dispatch(op, reduce_op, a, b, fold),
     }
 }
@@ -13633,7 +15036,13 @@ fn reduce_dot_binary(op: ScalarOp, reduce_op: ScalarOp, a: OperandSpan, b: Opera
 /// strided operand delegates to [`reduce_dot_binary_monomorphic_strided`]
 /// before this match runs.
 #[inline(always)]
-fn reduce_dot_binary_monomorphic<F, R>(op: F, reduce: R, a: OperandSpan, b: OperandSpan, fold: DotFold) -> f32
+fn reduce_dot_binary_monomorphic<F, R>(
+    op: F,
+    reduce: R,
+    a: OperandSpan,
+    b: OperandSpan,
+    fold: DotFold,
+) -> f32
 where
     F: Fn(f32, f32) -> f32,
     R: Fn(f32, f32) -> f32,
@@ -13713,7 +15122,13 @@ where
 /// least one of `a`/`b` has a stride > 1 — never routed through
 /// [`dot_fold_multi_accumulator_binary`], which reassociates.
 #[inline(always)]
-fn reduce_dot_binary_monomorphic_strided<F, R>(op: F, reduce: R, a: OperandSpan, b: OperandSpan, fold: DotFold) -> f32
+fn reduce_dot_binary_monomorphic_strided<F, R>(
+    op: F,
+    reduce: R,
+    a: OperandSpan,
+    b: OperandSpan,
+    fold: DotFold,
+) -> f32
 where
     F: Fn(f32, f32) -> f32,
     R: Fn(f32, f32) -> f32,
@@ -13738,7 +15153,13 @@ where
 /// The unaccelerated fallback for a `reduce_op` outside {Add, Multiply,
 /// Maximum, Minimum}. [`OperandSpan::at`] already generalizes over every
 /// stride, so both reads collapse to one expression regardless of stride.
-fn reduce_dot_binary_scalar_dispatch(op: ScalarOp, reduce_op: ScalarOp, a: OperandSpan, b: OperandSpan, fold: DotFold) -> f32 {
+fn reduce_dot_binary_scalar_dispatch(
+    op: ScalarOp,
+    reduce_op: ScalarOp,
+    a: OperandSpan,
+    b: OperandSpan,
+    fold: DotFold,
+) -> f32 {
     let mut acc = fold.init;
     let mut seeded = fold.seeded;
     for step in 0..fold.len {
@@ -13777,8 +15198,12 @@ fn elementwise_width_fast(
     match *shape {
         BodyShape::Unary(op, a) => elementwise_width_unary(op, span_of(a), out),
         BodyShape::Binary(op, a, b) => elementwise_width_binary(op, span_of(a), span_of(b), out),
-        BodyShape::FusedAdamUpdate(roles, _) => elementwise_width_fused_adam_update(roles, raw, running, out),
-        BodyShape::Generic(body) => elementwise_width_generic(body, raw, running, strides, out, step_values),
+        BodyShape::FusedAdamUpdate(roles, _) => {
+            elementwise_width_fused_adam_update(roles, raw, running, out)
+        }
+        BodyShape::Generic(body) => {
+            elementwise_width_generic(body, raw, running, strides, out, step_values)
+        }
     }
 }
 
@@ -13811,7 +15236,12 @@ fn elementwise_width_fast(
 /// reassociation, so output is bit-identical to `elementwise_width_generic`'s
 /// own tiled walk of the identical [`ComposedBody`].
 #[inline(always)]
-fn elementwise_width_fused_adam_update(roles: AdamUpdateRoles, raw: &[&[f32]], running: &[i64], out: &mut [f32]) {
+fn elementwise_width_fused_adam_update(
+    roles: AdamUpdateRoles,
+    raw: &[&[f32]],
+    running: &[i64],
+    out: &mut [f32],
+) {
     let width = out.len();
     let slice_of = |index: u16| {
         let index = index as usize;
@@ -13973,25 +15403,45 @@ fn elementwise_width_generic_step(op: ScalarOp, spans: &[OperandSpan; 3], row: &
     match op {
         ScalarOp::Identity => elementwise_width_unary_monomorphic(|a: f32| a, spans[0], row),
         ScalarOp::Negate => elementwise_width_unary_monomorphic(|a: f32| -a, spans[0], row),
-        ScalarOp::Reciprocal => elementwise_width_unary_monomorphic(|a: f32| 1.0 / a, spans[0], row),
-        ScalarOp::Exponential => elementwise_width_unary_monomorphic(|a: f32| a.exp(), spans[0], row),
+        ScalarOp::Reciprocal => {
+            elementwise_width_unary_monomorphic(|a: f32| 1.0 / a, spans[0], row)
+        }
+        ScalarOp::Exponential => {
+            elementwise_width_unary_monomorphic(|a: f32| a.exp(), spans[0], row)
+        }
         ScalarOp::Logarithm => elementwise_width_unary_monomorphic(|a: f32| a.ln(), spans[0], row),
-        ScalarOp::SquareRoot => elementwise_width_unary_monomorphic(|a: f32| a.sqrt(), spans[0], row),
+        ScalarOp::SquareRoot => {
+            elementwise_width_unary_monomorphic(|a: f32| a.sqrt(), spans[0], row)
+        }
         ScalarOp::Tanh => elementwise_width_unary_monomorphic(|a: f32| a.tanh(), spans[0], row),
         ScalarOp::Erf => elementwise_width_unary_monomorphic(erf_f32, spans[0], row),
-        ScalarOp::Add => elementwise_width_binary_monomorphic(|a: f32, b: f32| a + b, spans[0], spans[1], row),
+        ScalarOp::Add => {
+            elementwise_width_binary_monomorphic(|a: f32, b: f32| a + b, spans[0], spans[1], row)
+        }
         ScalarOp::Subtract => {
             elementwise_width_binary_monomorphic(|a: f32, b: f32| a - b, spans[0], spans[1], row);
         }
         ScalarOp::Multiply => {
             elementwise_width_binary_monomorphic(|a: f32, b: f32| a * b, spans[0], spans[1], row);
         }
-        ScalarOp::Divide => elementwise_width_binary_monomorphic(|a: f32, b: f32| a / b, spans[0], spans[1], row),
+        ScalarOp::Divide => {
+            elementwise_width_binary_monomorphic(|a: f32, b: f32| a / b, spans[0], spans[1], row)
+        }
         ScalarOp::Maximum => {
-            elementwise_width_binary_monomorphic(|a: f32, b: f32| a.max(b), spans[0], spans[1], row);
+            elementwise_width_binary_monomorphic(
+                |a: f32, b: f32| a.max(b),
+                spans[0],
+                spans[1],
+                row,
+            );
         }
         ScalarOp::Minimum => {
-            elementwise_width_binary_monomorphic(|a: f32, b: f32| a.min(b), spans[0], spans[1], row);
+            elementwise_width_binary_monomorphic(
+                |a: f32, b: f32| a.min(b),
+                spans[0],
+                spans[1],
+                row,
+            );
         }
         ScalarOp::Greater => elementwise_width_binary_monomorphic(
             |a: f32, b: f32| f32::from(u8::from(a > b)),
@@ -14043,10 +15493,16 @@ fn elementwise_width_ternary_monomorphic<F>(
     F: Fn(f32, f32, f32) -> f32,
 {
     if condition.is_strided() || when_true.is_strided() || when_false.is_strided() {
-        return elementwise_width_ternary_monomorphic_strided(op, condition, when_true, when_false, row);
+        return elementwise_width_ternary_monomorphic_strided(
+            op, condition, when_true, when_false, row,
+        );
     }
     let width = row.len();
-    match (condition.stride == 1, when_true.stride == 1, when_false.stride == 1) {
+    match (
+        condition.stride == 1,
+        when_true.stride == 1,
+        when_false.stride == 1,
+    ) {
         (true, true, true) => {
             let condition_slice = &condition.data[condition.base..condition.base + width];
             let when_true_slice = &when_true.data[when_true.base..when_true.base + width];
@@ -14141,7 +15597,11 @@ fn elementwise_width_ternary_monomorphic_strided<F>(
     F: Fn(f32, f32, f32) -> f32,
 {
     for (position, slot) in row.iter_mut().enumerate() {
-        *slot = op(condition.at(position), when_true.at(position), when_false.at(position));
+        *slot = op(
+            condition.at(position),
+            when_true.at(position),
+            when_false.at(position),
+        );
     }
 }
 
@@ -14163,7 +15623,9 @@ fn elementwise_width_unary(op: ScalarOp, span: OperandSpan, out: &mut [f32]) {
         | ScalarOp::Minimum
         | ScalarOp::Greater
         | ScalarOp::Equal
-        | ScalarOp::Select => unreachable!("BodyShape::Unary only ever carries an arity-1 ScalarOp"),
+        | ScalarOp::Select => {
+            unreachable!("BodyShape::Unary only ever carries an arity-1 ScalarOp")
+        }
     }
 }
 
@@ -14203,14 +15665,25 @@ where
 fn elementwise_width_binary(op: ScalarOp, a: OperandSpan, b: OperandSpan, out: &mut [f32]) {
     match op {
         ScalarOp::Add => elementwise_width_binary_monomorphic(|x: f32, y: f32| x + y, a, b, out),
-        ScalarOp::Subtract => elementwise_width_binary_monomorphic(|x: f32, y: f32| x - y, a, b, out),
-        ScalarOp::Multiply => elementwise_width_binary_monomorphic(|x: f32, y: f32| x * y, a, b, out),
-        ScalarOp::Divide => elementwise_width_binary_monomorphic(|x: f32, y: f32| x / y, a, b, out),
-        ScalarOp::Maximum => elementwise_width_binary_monomorphic(|x: f32, y: f32| x.max(y), a, b, out),
-        ScalarOp::Minimum => elementwise_width_binary_monomorphic(|x: f32, y: f32| x.min(y), a, b, out),
-        ScalarOp::Greater => {
-            elementwise_width_binary_monomorphic(|x: f32, y: f32| f32::from(u8::from(x > y)), a, b, out)
+        ScalarOp::Subtract => {
+            elementwise_width_binary_monomorphic(|x: f32, y: f32| x - y, a, b, out)
         }
+        ScalarOp::Multiply => {
+            elementwise_width_binary_monomorphic(|x: f32, y: f32| x * y, a, b, out)
+        }
+        ScalarOp::Divide => elementwise_width_binary_monomorphic(|x: f32, y: f32| x / y, a, b, out),
+        ScalarOp::Maximum => {
+            elementwise_width_binary_monomorphic(|x: f32, y: f32| x.max(y), a, b, out)
+        }
+        ScalarOp::Minimum => {
+            elementwise_width_binary_monomorphic(|x: f32, y: f32| x.min(y), a, b, out)
+        }
+        ScalarOp::Greater => elementwise_width_binary_monomorphic(
+            |x: f32, y: f32| f32::from(u8::from(x > y)),
+            a,
+            b,
+            out,
+        ),
         ScalarOp::Equal => elementwise_width_binary_monomorphic(
             |x: f32, y: f32| f32::from(u8::from((x - y).abs() == 0.0)),
             a,
@@ -14225,7 +15698,9 @@ fn elementwise_width_binary(op: ScalarOp, a: OperandSpan, b: OperandSpan, out: &
         | ScalarOp::SquareRoot
         | ScalarOp::Tanh
         | ScalarOp::Erf
-        | ScalarOp::Select => unreachable!("BodyShape::Binary only ever carries an arity-2 ScalarOp"),
+        | ScalarOp::Select => {
+            unreachable!("BodyShape::Binary only ever carries an arity-2 ScalarOp")
+        }
     }
 }
 
@@ -14272,8 +15747,12 @@ where
 /// Independent per-position writes, no accumulator to reorder — one
 /// [`OperandSpan::at`] read per operand per position covers any stride > 1.
 #[inline(always)]
-fn elementwise_width_binary_monomorphic_strided<F>(op: F, a: OperandSpan, b: OperandSpan, out: &mut [f32])
-where
+fn elementwise_width_binary_monomorphic_strided<F>(
+    op: F,
+    a: OperandSpan,
+    b: OperandSpan,
+    out: &mut [f32],
+) where
     F: Fn(f32, f32) -> f32,
 {
     for (position, slot) in out.iter_mut().enumerate() {
@@ -14313,7 +15792,10 @@ fn scan_width_fast(
     out: &mut [f32],
     state: ScanState,
 ) -> f32 {
-    let ScanState { seeded, accumulator } = state;
+    let ScanState {
+        seeded,
+        accumulator,
+    } = state;
     let span_of = |index: u16| {
         let index = index as usize;
         OperandSpan {
@@ -14323,33 +15805,70 @@ fn scan_width_fast(
         }
     };
     match *shape {
-        BodyShape::Unary(op, a) => scan_width_unary(op, reduce_op, span_of(a), out, seeded, accumulator),
-        BodyShape::Binary(op, a, b) => {
-            scan_width_binary(op, reduce_op, span_of(a), span_of(b), out, seeded, accumulator)
+        BodyShape::Unary(op, a) => {
+            scan_width_unary(op, reduce_op, span_of(a), out, seeded, accumulator)
         }
+        BodyShape::Binary(op, a, b) => scan_width_binary(
+            op,
+            reduce_op,
+            span_of(a),
+            span_of(b),
+            out,
+            seeded,
+            accumulator,
+        ),
         BodyShape::FusedAdamUpdate(..) | BodyShape::Generic(_) => {
             unreachable!("fast path is never entered for a Generic or FusedAdamUpdate body shape")
         }
     }
 }
 
-fn scan_width_unary(op: ScalarOp, reduce_op: ScalarOp, span: OperandSpan, out: &mut [f32], seeded: bool, accumulator: f32) -> f32 {
+fn scan_width_unary(
+    op: ScalarOp,
+    reduce_op: ScalarOp,
+    span: OperandSpan,
+    out: &mut [f32],
+    seeded: bool,
+    accumulator: f32,
+) -> f32 {
     macro_rules! unary_op_arm {
         ($f:expr) => {
             match reduce_op {
-                ScalarOp::Add => {
-                    scan_width_unary_monomorphic($f, |acc: f32, v: f32| acc + v, span, out, seeded, accumulator)
+                ScalarOp::Add => scan_width_unary_monomorphic(
+                    $f,
+                    |acc: f32, v: f32| acc + v,
+                    span,
+                    out,
+                    seeded,
+                    accumulator,
+                ),
+                ScalarOp::Multiply => scan_width_unary_monomorphic(
+                    $f,
+                    |acc: f32, v: f32| acc * v,
+                    span,
+                    out,
+                    seeded,
+                    accumulator,
+                ),
+                ScalarOp::Maximum => scan_width_unary_monomorphic(
+                    $f,
+                    |acc: f32, v: f32| acc.max(v),
+                    span,
+                    out,
+                    seeded,
+                    accumulator,
+                ),
+                ScalarOp::Minimum => scan_width_unary_monomorphic(
+                    $f,
+                    |acc: f32, v: f32| acc.min(v),
+                    span,
+                    out,
+                    seeded,
+                    accumulator,
+                ),
+                _ => {
+                    scan_width_unary_scalar_dispatch(op, reduce_op, span, out, seeded, accumulator)
                 }
-                ScalarOp::Multiply => {
-                    scan_width_unary_monomorphic($f, |acc: f32, v: f32| acc * v, span, out, seeded, accumulator)
-                }
-                ScalarOp::Maximum => {
-                    scan_width_unary_monomorphic($f, |acc: f32, v: f32| acc.max(v), span, out, seeded, accumulator)
-                }
-                ScalarOp::Minimum => {
-                    scan_width_unary_monomorphic($f, |acc: f32, v: f32| acc.min(v), span, out, seeded, accumulator)
-                }
-                _ => scan_width_unary_scalar_dispatch(op, reduce_op, span, out, seeded, accumulator),
             }
         };
     }
@@ -14464,19 +15983,45 @@ fn scan_width_binary(
     macro_rules! binary_op_arm {
         ($f:expr) => {
             match reduce_op {
-                ScalarOp::Add => {
-                    scan_width_binary_monomorphic($f, |acc: f32, v: f32| acc + v, a, b, out, seeded, accumulator)
+                ScalarOp::Add => scan_width_binary_monomorphic(
+                    $f,
+                    |acc: f32, v: f32| acc + v,
+                    a,
+                    b,
+                    out,
+                    seeded,
+                    accumulator,
+                ),
+                ScalarOp::Multiply => scan_width_binary_monomorphic(
+                    $f,
+                    |acc: f32, v: f32| acc * v,
+                    a,
+                    b,
+                    out,
+                    seeded,
+                    accumulator,
+                ),
+                ScalarOp::Maximum => scan_width_binary_monomorphic(
+                    $f,
+                    |acc: f32, v: f32| acc.max(v),
+                    a,
+                    b,
+                    out,
+                    seeded,
+                    accumulator,
+                ),
+                ScalarOp::Minimum => scan_width_binary_monomorphic(
+                    $f,
+                    |acc: f32, v: f32| acc.min(v),
+                    a,
+                    b,
+                    out,
+                    seeded,
+                    accumulator,
+                ),
+                _ => {
+                    scan_width_binary_scalar_dispatch(op, reduce_op, a, b, out, seeded, accumulator)
                 }
-                ScalarOp::Multiply => {
-                    scan_width_binary_monomorphic($f, |acc: f32, v: f32| acc * v, a, b, out, seeded, accumulator)
-                }
-                ScalarOp::Maximum => {
-                    scan_width_binary_monomorphic($f, |acc: f32, v: f32| acc.max(v), a, b, out, seeded, accumulator)
-                }
-                ScalarOp::Minimum => {
-                    scan_width_binary_monomorphic($f, |acc: f32, v: f32| acc.min(v), a, b, out, seeded, accumulator)
-                }
-                _ => scan_width_binary_scalar_dispatch(op, reduce_op, a, b, out, seeded, accumulator),
             }
         };
     }
@@ -14488,7 +16033,9 @@ fn scan_width_binary(
         ScalarOp::Maximum => binary_op_arm!(|x: f32, y: f32| x.max(y)),
         ScalarOp::Minimum => binary_op_arm!(|x: f32, y: f32| x.min(y)),
         ScalarOp::Greater => binary_op_arm!(|x: f32, y: f32| f32::from(u8::from(x > y))),
-        ScalarOp::Equal => binary_op_arm!(|x: f32, y: f32| f32::from(u8::from((x - y).abs() == 0.0))),
+        ScalarOp::Equal => {
+            binary_op_arm!(|x: f32, y: f32| f32::from(u8::from((x - y).abs() == 0.0)))
+        }
         _ => scan_width_binary_scalar_dispatch(op, reduce_op, a, b, out, seeded, accumulator),
     }
 }
@@ -14522,7 +16069,11 @@ where
         (true, true) => {
             let slice_a = &a.data[a.base..a.base + width];
             let slice_b = &b.data[b.base..b.base + width];
-            for ((slot, &value_a), &value_b) in out[start..].iter_mut().zip(&slice_a[start..]).zip(&slice_b[start..]) {
+            for ((slot, &value_a), &value_b) in out[start..]
+                .iter_mut()
+                .zip(&slice_a[start..])
+                .zip(&slice_b[start..])
+            {
                 acc = reduce(acc, op(value_a, value_b));
                 *slot = acc;
             }
@@ -14646,7 +16197,11 @@ fn erf_f32(x: f32) -> f32 {
     let sign = if x < 0.0 { -1.0 } else { 1.0 };
     let magnitude = x.abs();
     let t = 1.0 / P.mul_add(magnitude, 1.0);
-    let poly = t * A5.mul_add(t, A4).mul_add(t, A3).mul_add(t, A2).mul_add(t, A1);
+    let poly = t * A5
+        .mul_add(t, A4)
+        .mul_add(t, A3)
+        .mul_add(t, A2)
+        .mul_add(t, A1);
     sign * poly.mul_add(-(-magnitude * magnitude).exp(), 1.0)
 }
 
@@ -14666,7 +16221,11 @@ fn erf_f64(x: f64) -> f64 {
     let sign = if x < 0.0 { -1.0 } else { 1.0 };
     let magnitude = x.abs();
     let t = 1.0 / P.mul_add(magnitude, 1.0);
-    let poly = t * A5.mul_add(t, A4).mul_add(t, A3).mul_add(t, A2).mul_add(t, A1);
+    let poly = t * A5
+        .mul_add(t, A4)
+        .mul_add(t, A3)
+        .mul_add(t, A2)
+        .mul_add(t, A1);
     sign * poly.mul_add(-(-magnitude * magnitude).exp(), 1.0)
 }
 
@@ -15274,10 +16833,13 @@ pub fn evaluate_typed(
     outputs: &[NodeId],
 ) -> Result<Vec<TypedRow<TypedBuffer>>, TensorError> {
     match typed_program_plan(program)? {
-        TypedPlan::Uniform(dtype) => evaluate_uniform_typed(dtype, program, symbols, blocks, outputs),
-        TypedPlan::Widened { operand, accumulator } => {
-            evaluate_widened_typed(operand, accumulator, program, symbols, blocks, outputs)
+        TypedPlan::Uniform(dtype) => {
+            evaluate_uniform_typed(dtype, program, symbols, blocks, outputs)
         }
+        TypedPlan::Widened {
+            operand,
+            accumulator,
+        } => evaluate_widened_typed(operand, accumulator, program, symbols, blocks, outputs),
     }
 }
 
@@ -15336,30 +16898,36 @@ fn evaluate_widened_typed(
     outputs: &[NodeId],
 ) -> Result<Vec<TypedRow<TypedBuffer>>, TensorError> {
     match (operand, accumulator) {
-        (DType::Int8, DType::Int32) => Ok(run_widened_program::<i8, i32>(program, symbols, blocks, outputs)?
-            .into_iter()
-            .map(|(node, shape, data)| (node, shape, TypedBuffer::Int32(data)))
-            .collect()),
-        (DType::Int16, DType::Int64) => Ok(run_widened_program::<i16, i64>(program, symbols, blocks, outputs)?
-            .into_iter()
-            .map(|(node, shape, data)| (node, shape, TypedBuffer::Int64(data)))
-            .collect()),
-        (DType::UInt8, DType::UInt32) => Ok(run_widened_program::<u8, u32>(program, symbols, blocks, outputs)?
-            .into_iter()
-            .map(|(node, shape, data)| (node, shape, TypedBuffer::UInt32(data)))
-            .collect()),
-        (DType::Float16, DType::Float32) => {
-            Ok(run_widened_program::<f16, f32>(program, symbols, blocks, outputs)?
-                .into_iter()
-                .map(|(node, shape, data)| (node, shape, TypedBuffer::Float32(data)))
-                .collect())
-        }
-        (DType::BFloat16, DType::Float32) => {
-            Ok(run_widened_program::<bf16, f32>(program, symbols, blocks, outputs)?
-                .into_iter()
-                .map(|(node, shape, data)| (node, shape, TypedBuffer::Float32(data)))
-                .collect())
-        }
+        (DType::Int8, DType::Int32) => Ok(run_widened_program::<i8, i32>(
+            program, symbols, blocks, outputs,
+        )?
+        .into_iter()
+        .map(|(node, shape, data)| (node, shape, TypedBuffer::Int32(data)))
+        .collect()),
+        (DType::Int16, DType::Int64) => Ok(run_widened_program::<i16, i64>(
+            program, symbols, blocks, outputs,
+        )?
+        .into_iter()
+        .map(|(node, shape, data)| (node, shape, TypedBuffer::Int64(data)))
+        .collect()),
+        (DType::UInt8, DType::UInt32) => Ok(run_widened_program::<u8, u32>(
+            program, symbols, blocks, outputs,
+        )?
+        .into_iter()
+        .map(|(node, shape, data)| (node, shape, TypedBuffer::UInt32(data)))
+        .collect()),
+        (DType::Float16, DType::Float32) => Ok(run_widened_program::<f16, f32>(
+            program, symbols, blocks, outputs,
+        )?
+        .into_iter()
+        .map(|(node, shape, data)| (node, shape, TypedBuffer::Float32(data)))
+        .collect()),
+        (DType::BFloat16, DType::Float32) => Ok(run_widened_program::<bf16, f32>(
+            program, symbols, blocks, outputs,
+        )?
+        .into_iter()
+        .map(|(node, shape, data)| (node, shape, TypedBuffer::Float32(data)))
+        .collect()),
         _ => Err(TensorError::NotLowerable {
             node: NodeId(0),
             reason: "the typed evaluator does not ship a mixed-precision reduce pair for this \
@@ -15389,12 +16957,13 @@ fn typed_buffer_to_index(node: NodeId, buffer: &TypedBuffer) -> Result<Vec<i64>,
         TypedBuffer::UInt64(data) => Ok(data.iter().map(|&value| value as i64).collect()),
         TypedBuffer::Int128(data) => Ok(data.iter().map(|&value| value as i64).collect()),
         TypedBuffer::UInt128(data) => Ok(data.iter().map(|&value| value as i64).collect()),
-        TypedBuffer::Float16(_) | TypedBuffer::BFloat16(_) | TypedBuffer::Float32(_) | TypedBuffer::Float64(_) => {
-            Err(TensorError::NotLowerable {
-                node,
-                reason: "a gather index buffer must carry an integer dtype",
-            })
-        }
+        TypedBuffer::Float16(_)
+        | TypedBuffer::BFloat16(_)
+        | TypedBuffer::Float32(_)
+        | TypedBuffer::Float64(_) => Err(TensorError::NotLowerable {
+            node,
+            reason: "a gather index buffer must carry an integer dtype",
+        }),
     }
 }
 
@@ -15522,11 +17091,17 @@ fn run_typed_program<T: Element>(
     for (position, node) in resolved.iter().enumerate() {
         let mut output = typed_take_or_allocate(&mut free_buffers, node_output_len(node));
         match &node.kind {
-            BoundOpKind::Elementwise { .. } => run_elementwise_typed(node, &buffers, &index_buffers, &mut output)?,
-            BoundOpKind::Reduce { keep: Keep::Reduce, .. } => {
+            BoundOpKind::Elementwise { .. } => {
+                run_elementwise_typed(node, &buffers, &index_buffers, &mut output)?
+            }
+            BoundOpKind::Reduce {
+                keep: Keep::Reduce, ..
+            } => {
                 run_reduce_typed(node, &buffers, &index_buffers, &mut output)?;
             }
-            BoundOpKind::Reduce { keep: Keep::Scan, .. } => {
+            BoundOpKind::Reduce {
+                keep: Keep::Scan, ..
+            } => {
                 run_scan_typed(node, &buffers, &index_buffers, &mut output)?;
             }
             BoundOpKind::Iota => run_iota_typed(&mut output),
@@ -15661,10 +17236,14 @@ where
                 BoundOpKind::Elementwise { .. } => {
                     run_elementwise_typed(node, &buffers_in, &index_buffers, &mut output)?;
                 }
-                BoundOpKind::Reduce { keep: Keep::Reduce, .. } => {
+                BoundOpKind::Reduce {
+                    keep: Keep::Reduce, ..
+                } => {
                     run_reduce_typed(node, &buffers_in, &index_buffers, &mut output)?;
                 }
-                BoundOpKind::Reduce { keep: Keep::Scan, .. } => {
+                BoundOpKind::Reduce {
+                    keep: Keep::Scan, ..
+                } => {
                     run_scan_typed(node, &buffers_in, &index_buffers, &mut output)?;
                 }
                 BoundOpKind::Iota => run_iota_typed(&mut output),
@@ -15673,8 +17252,8 @@ where
             buffers_in[node.node.0 as usize] = Some(Cow::Owned(output));
         } else {
             for (source, _, _) in node.operands() {
-                let needs_widening =
-                    buffers_out[source.0 as usize].is_none() && buffers_in[source.0 as usize].is_some();
+                let needs_widening = buffers_out[source.0 as usize].is_none()
+                    && buffers_in[source.0 as usize].is_some();
                 if needs_widening {
                     let narrow = buffers_in[source.0 as usize].as_deref().unwrap_or_default();
                     let mut widened: Vec<TAcc> = Vec::with_capacity(narrow.len());
@@ -15692,10 +17271,14 @@ where
                 BoundOpKind::Elementwise { .. } => {
                     run_elementwise_typed(node, &buffers_out, &index_buffers, &mut output)?;
                 }
-                BoundOpKind::Reduce { keep: Keep::Reduce, .. } => {
+                BoundOpKind::Reduce {
+                    keep: Keep::Reduce, ..
+                } => {
                     run_reduce_typed(node, &buffers_out, &index_buffers, &mut output)?;
                 }
-                BoundOpKind::Reduce { keep: Keep::Scan, .. } => {
+                BoundOpKind::Reduce {
+                    keep: Keep::Scan, ..
+                } => {
                     run_scan_typed(node, &buffers_out, &index_buffers, &mut output)?;
                 }
                 BoundOpKind::Iota => run_iota_typed(&mut output),
@@ -15744,7 +17327,11 @@ fn typed_take_or_allocate<T: Element>(pool: &mut Vec<Vec<T>>, required: usize) -
 
 /// The typed counterpart of [`retire_into`]: same take-and-stash, generic
 /// over [`Element`].
-fn typed_retire_into<T: Element>(buffers: &mut [Option<Cow<'_, [T]>>], node: NodeId, pool: &mut Vec<Vec<T>>) {
+fn typed_retire_into<T: Element>(
+    buffers: &mut [Option<Cow<'_, [T]>>],
+    node: NodeId,
+    pool: &mut Vec<Vec<T>>,
+) {
     if let Some(Cow::Owned(buffer)) = buffers[node.0 as usize].take() {
         pool.push(buffer);
     }
@@ -15810,7 +17397,8 @@ fn run_elementwise_typed<T: Element>(
         .map(|(_, view, _)| view.stride(innermost_dim))
         .collect();
     let mut running: Vec<i64> = vec![0; raw.len()];
-    let mut gather_cursors: Vec<Option<GatherCursor<'_, i64>>> = (0..raw.len()).map(|_| None).collect();
+    let mut gather_cursors: Vec<Option<GatherCursor<'_, i64>>> =
+        (0..raw.len()).map(|_| None).collect();
     let mut outer_coordinate = vec![0u64; outer_extents.len()];
 
     for outer_position in 0..odometer_len(outer_extents) as usize {
@@ -15920,7 +17508,10 @@ fn run_reduce_typed<T: Element>(
             reason: "scatter is not yet supported by the typed (non-f32) evaluator",
         });
     }
-    let has_gather = resolved.operands().iter().any(|(_, _, lookup)| lookup.is_some());
+    let has_gather = resolved
+        .operands()
+        .iter()
+        .any(|(_, _, lookup)| lookup.is_some());
     if !has_gather && TypeId::of::<T>() == TypeId::of::<f32>() {
         let buffers_f32: Vec<Option<&[f32]>> = buffers
             .iter()
@@ -15989,7 +17580,8 @@ fn run_reduce_generic<T: Element>(
         .map(|(_, view, _)| last_output_dim.map_or(0, |dim| view.stride(dim)))
         .collect();
     let mut running: Vec<i64> = vec![0; raw.len()];
-    let mut gather_cursors: Vec<Option<GatherCursor<'_, i64>>> = (0..raw.len()).map(|_| None).collect();
+    let mut gather_cursors: Vec<Option<GatherCursor<'_, i64>>> =
+        (0..raw.len()).map(|_| None).collect();
     let mut leading_coordinate = vec![0u64; leading_extents.len()];
     let mut reduction_coordinate = vec![0u64; reduction_extents.len()];
     let mut full_coordinate = vec![0u64; resolved.extents.len()];
@@ -16005,7 +17597,11 @@ fn run_reduce_generic<T: Element>(
         let mut seeded = !matches!(init, ReduceInit::FirstElement);
 
         for reduction_flat in 0..reduction_total {
-            unflatten_into(reduction_flat, &reduction_extents, &mut reduction_coordinate);
+            unflatten_into(
+                reduction_flat,
+                &reduction_extents,
+                &mut reduction_coordinate,
+            );
             merge_coordinates_into(
                 leading_output_axes,
                 &leading_coordinate,
@@ -16031,7 +17627,8 @@ fn run_reduce_generic<T: Element>(
                     operand_values[index] = data[offset as usize];
                     running[index] += strides[index];
                 }
-                let value = eval_body_typed(resolved.node, body, &operand_values, &mut step_values)?;
+                let value =
+                    eval_body_typed(resolved.node, body, &operand_values, &mut step_values)?;
                 *slot = if seeded {
                     T::apply(resolved.node, *reduce_op, &[*slot, value])?
                 } else {
@@ -16041,7 +17638,13 @@ fn run_reduce_generic<T: Element>(
             seeded = true;
         }
 
-        merge_coordinates_into(leading_output_axes, &leading_coordinate, &[], &[], &mut full_coordinate);
+        merge_coordinates_into(
+            leading_output_axes,
+            &leading_coordinate,
+            &[],
+            &[],
+            &mut full_coordinate,
+        );
         let out_prefix = out_layout.offset_of(&full_coordinate);
         let out_stride = last_output_dim.map_or(0, |dim| out_layout.stride(dim));
         for (slot, value) in accumulator.iter().enumerate() {
@@ -16061,7 +17664,10 @@ fn run_scan_typed<T: Element>(
     index_buffers: &[Option<Vec<i64>>],
     output: &mut [T],
 ) -> Result<(), TensorError> {
-    let has_gather = resolved.operands().iter().any(|(_, _, lookup)| lookup.is_some());
+    let has_gather = resolved
+        .operands()
+        .iter()
+        .any(|(_, _, lookup)| lookup.is_some());
     if !has_gather && TypeId::of::<T>() == TypeId::of::<f32>() {
         let buffers_f32: Vec<Option<&[f32]>> = buffers
             .iter()
@@ -16111,7 +17717,8 @@ fn run_scan_generic<T: Element>(
         .map(|(_, view, _)| view.stride(innermost_dim))
         .collect();
     let mut running: Vec<i64> = vec![0; raw.len()];
-    let mut gather_cursors: Vec<Option<GatherCursor<'_, i64>>> = (0..raw.len()).map(|_| None).collect();
+    let mut gather_cursors: Vec<Option<GatherCursor<'_, i64>>> =
+        (0..raw.len()).map(|_| None).collect();
     let mut outer_coordinate = vec![0u64; outer_extents.len()];
 
     let mut accumulator = T::reduce_seed(*init).unwrap_or_default();
@@ -16165,13 +17772,14 @@ mod tests {
 
     use crate::test_support::Lcg;
 
-
     /// `stage_offsets` for `stage_count` stages of a UNIFORM `chunks_per_stage`
     /// width -- the shape every pre-existing test used before `StagedRound`
     /// grew variable-width stages; kept as a fixture so those tests read the
     /// same as before, with the new field spelled out.
     fn uniform_stage_offsets(stage_count: usize, chunks_per_stage: usize) -> Vec<usize> {
-        (0..=stage_count).map(|stage| stage * chunks_per_stage).collect()
+        (0..=stage_count)
+            .map(|stage| stage * chunks_per_stage)
+            .collect()
     }
 
     /// The property [`StagedRound`] exists for: a chunk in stage `s` never
@@ -16196,7 +17804,10 @@ mod tests {
     #[case::empty_file("", None)]
     #[case::whitespace_only("   \n", None)]
     #[case::malformed_range("abc", None)]
-    async fn parse_cpu_list_count_matches_sysfs_shapes(#[case] text: &str, #[case] expected: Option<usize>) {
+    async fn parse_cpu_list_count_matches_sysfs_shapes(
+        #[case] text: &str,
+        #[case] expected: Option<usize>,
+    ) {
         assert_eq!(parse_cpu_list_count(text), expected);
     }
 
@@ -16211,7 +17822,8 @@ mod tests {
 
         let stage_offsets = uniform_stage_offsets(STAGES, CHUNKS);
         let completed: Vec<AtomicUsize> = (0..STAGES).map(|_| AtomicUsize::new(0)).collect();
-        let published: Vec<AtomicUsize> = (0..STAGES * CHUNKS).map(|_| AtomicUsize::new(0)).collect();
+        let published: Vec<AtomicUsize> =
+            (0..STAGES * CHUNKS).map(|_| AtomicUsize::new(0)).collect();
         let violations = AtomicUsize::new(0);
 
         let round = StagedRound {
@@ -16240,14 +17852,24 @@ mod tests {
                         if claimed >= total {
                             break;
                         }
-                        round.run_chunk(ChunkIndex(claimed)).expect("staged chunk must not fail");
+                        round
+                            .run_chunk(ChunkIndex(claimed))
+                            .expect("staged chunk must not fail");
                     }
                 });
             }
         });
 
-        assert_eq!(violations.load(Ordering::Relaxed), 0, "a stage ran before its predecessor completed");
-        assert_eq!(total, STAGES * CHUNKS, "flat chunk space must cover every stage");
+        assert_eq!(
+            violations.load(Ordering::Relaxed),
+            0,
+            "a stage ran before its predecessor completed"
+        );
+        assert_eq!(
+            total,
+            STAGES * CHUNKS,
+            "flat chunk space must cover every stage"
+        );
         for (index, slot) in published.iter().enumerate() {
             assert_eq!(slot.load(Ordering::Relaxed), 1, "chunk {index} never ran");
         }
@@ -16273,7 +17895,9 @@ mod tests {
             },
         };
         for chunk in 0..round.chunks() {
-            round.run_chunk(ChunkIndex(chunk)).expect("staged chunk must not fail");
+            round
+                .run_chunk(ChunkIndex(chunk))
+                .expect("staged chunk must not fail");
         }
         assert_eq!(ran.load(Ordering::Relaxed), STAGES * CHUNKS);
     }
@@ -16290,7 +17914,10 @@ mod tests {
             completed: &completed,
             run_stage_chunk: |stage: usize, _within: usize| {
                 if stage == 0 {
-                    Err(TensorError::NotLowerable { node: NodeId(0), reason: "staged round error propagation fixture" })
+                    Err(TensorError::NotLowerable {
+                        node: NodeId(0),
+                        reason: "staged round error propagation fixture",
+                    })
                 } else {
                     Ok(())
                 }
@@ -16298,8 +17925,15 @@ mod tests {
         };
         assert!(round.run_chunk(ChunkIndex(0)).is_err());
         assert!(round.run_chunk(ChunkIndex(1)).is_err());
-        assert_eq!(completed[0].load(Ordering::Relaxed), CHUNKS, "a failed chunk must still publish");
-        assert!(round.run_chunk(ChunkIndex(2)).is_ok(), "stage 1 must not be blocked by stage 0's error");
+        assert_eq!(
+            completed[0].load(Ordering::Relaxed),
+            CHUNKS,
+            "a failed chunk must still publish"
+        );
+        assert!(
+            round.run_chunk(ChunkIndex(2)).is_ok(),
+            "stage 1 must not be blocked by stage 0's error"
+        );
     }
 
     /// The property the whole matmul-fold design depends on
@@ -16321,7 +17955,8 @@ mod tests {
             }))
             .collect();
         let completed: Vec<AtomicUsize> = (0..WIDTHS.len()).map(|_| AtomicUsize::new(0)).collect();
-        let observed_widths: Vec<AtomicUsize> = (0..WIDTHS.len()).map(|_| AtomicUsize::new(0)).collect();
+        let observed_widths: Vec<AtomicUsize> =
+            (0..WIDTHS.len()).map(|_| AtomicUsize::new(0)).collect();
         let violations = AtomicUsize::new(0);
 
         let round = StagedRound {
@@ -16336,13 +17971,27 @@ mod tests {
             },
         };
 
-        assert_eq!(round.chunks(), WIDTHS.iter().sum::<usize>(), "flat chunk space must cover every stage's own width");
+        assert_eq!(
+            round.chunks(),
+            WIDTHS.iter().sum::<usize>(),
+            "flat chunk space must cover every stage's own width"
+        );
         for chunk in 0..round.chunks() {
-            round.run_chunk(ChunkIndex(chunk)).expect("staged chunk must not fail");
+            round
+                .run_chunk(ChunkIndex(chunk))
+                .expect("staged chunk must not fail");
         }
-        assert_eq!(violations.load(Ordering::Relaxed), 0, "a chunk landed in the wrong stage or read the wrong within-stage index");
+        assert_eq!(
+            violations.load(Ordering::Relaxed),
+            0,
+            "a chunk landed in the wrong stage or read the wrong within-stage index"
+        );
         for (stage, width) in WIDTHS.iter().enumerate() {
-            assert_eq!(observed_widths[stage].load(Ordering::Relaxed), *width, "stage {stage} did not run exactly its own width in chunks");
+            assert_eq!(
+                observed_widths[stage].load(Ordering::Relaxed),
+                *width,
+                "stage {stage} did not run exactly its own width in chunks"
+            );
         }
     }
 
@@ -16356,7 +18005,12 @@ mod tests {
     /// by `strides` each step, mirroring [`fill_running_offsets`] plus the
     /// per-element loop body), then [`apply_body`]. No gather in any of
     /// these fixtures, so this omits [`GatherCursor`] entirely.
-    fn reference_generic_body(body: &ComposedBody, raw: &[&[f32]], strides: &[i64], width: usize) -> Vec<f32> {
+    fn reference_generic_body(
+        body: &ComposedBody,
+        raw: &[&[f32]],
+        strides: &[i64],
+        width: usize,
+    ) -> Vec<f32> {
         let mut running = vec![0i64; raw.len()];
         let mut operand_values = vec![0.0f32; raw.len()];
         let mut step_values = vec![0.0f32; body.steps.len()];
@@ -16409,7 +18063,10 @@ mod tests {
     fn rmsnorm_body() -> ComposedBody {
         ComposedBody {
             steps: vec![
-                step(ScalarOp::Multiply, &[StepArg::Operand(0), StepArg::Operand(0)]),
+                step(
+                    ScalarOp::Multiply,
+                    &[StepArg::Operand(0), StepArg::Operand(0)],
+                ),
                 step(ScalarOp::Add, &[StepArg::Step(0), StepArg::Operand(1)]),
                 step(ScalarOp::SquareRoot, &[StepArg::Step(1)]),
                 step(ScalarOp::Reciprocal, &[StepArg::Step(2)]),
@@ -16427,8 +18084,14 @@ mod tests {
     fn rope_body(combine: ScalarOp) -> ComposedBody {
         ComposedBody {
             steps: vec![
-                step(ScalarOp::Multiply, &[StepArg::Operand(0), StepArg::Operand(1)]),
-                step(ScalarOp::Multiply, &[StepArg::Operand(2), StepArg::Operand(3)]),
+                step(
+                    ScalarOp::Multiply,
+                    &[StepArg::Operand(0), StepArg::Operand(1)],
+                ),
+                step(
+                    ScalarOp::Multiply,
+                    &[StepArg::Operand(2), StepArg::Operand(3)],
+                ),
                 step(combine, &[StepArg::Step(0), StepArg::Step(1)]),
             ],
         }
@@ -16462,9 +18125,19 @@ mod tests {
         let running = vec![0i64; raw.len()];
         let mut step_values = vec![0.0f32; body.steps.len() * width];
         let mut actual = vec![0.0f32; width];
-        elementwise_width_generic(&body, &raw, &running, &strides, &mut actual, &mut step_values);
+        elementwise_width_generic(
+            &body,
+            &raw,
+            &running,
+            &strides,
+            &mut actual,
+            &mut step_values,
+        );
 
-        assert_eq!(actual, expected, "width-fast generic path must be bit-identical to the scalar apply_body path");
+        assert_eq!(
+            actual, expected,
+            "width-fast generic path must be bit-identical to the scalar apply_body path"
+        );
     }
 
     /// The exact shape `specs/rope.toml` maps against operand `x`
@@ -16478,7 +18151,10 @@ mod tests {
     #[test]
     fn elementwise_width_generic_matches_scalar_apply_body_for_a_rope_shaped_stride_two_operand() {
         let width = 16;
-        let x: Vec<f32> = random_vec(0x50fe_0000, 2 * width).into_iter().map(|value| value.abs() + 0.25).collect();
+        let x: Vec<f32> = random_vec(0x50fe_0000, 2 * width)
+            .into_iter()
+            .map(|value| value.abs() + 0.25)
+            .collect();
         let cos = random_vec(0x50fe_0001, width);
         let sin = random_vec(0x50fe_0002, width);
 
@@ -16489,17 +18165,35 @@ mod tests {
 
         let x_even: Vec<f32> = (0..width).map(|position| x[2 * position]).collect();
         let x_odd: Vec<f32> = (0..width).map(|position| x[2 * position + 1]).collect();
-        let reference_raw: Vec<&[f32]> = vec![x_even.as_slice(), cos.as_slice(), x_odd.as_slice(), sin.as_slice()];
+        let reference_raw: Vec<&[f32]> = vec![
+            x_even.as_slice(),
+            cos.as_slice(),
+            x_odd.as_slice(),
+            sin.as_slice(),
+        ];
         let reference_strides = vec![1i64, 1, 1, 1];
         let expected = reference_generic_body(&body, &reference_raw, &reference_strides, width);
 
         let mut step_values = vec![0.0f32; body.steps.len() * width];
         let mut actual = vec![0.0f32; width];
-        elementwise_width_generic(&body, &raw, &running, &strides, &mut actual, &mut step_values);
+        elementwise_width_generic(
+            &body,
+            &raw,
+            &running,
+            &strides,
+            &mut actual,
+            &mut step_values,
+        );
 
         assert_eq!(
-            actual.iter().map(|value| value.to_bits()).collect::<Vec<_>>(),
-            expected.iter().map(|value| value.to_bits()).collect::<Vec<_>>(),
+            actual
+                .iter()
+                .map(|value| value.to_bits())
+                .collect::<Vec<_>>(),
+            expected
+                .iter()
+                .map(|value| value.to_bits())
+                .collect::<Vec<_>>(),
             "width-fast generic path must be bit-identical to the scalar apply_body path for a stride-2 operand"
         );
     }
@@ -16522,7 +18216,10 @@ mod tests {
                 dtype: DType::Float32,
                 body: ScalarOp::Multiply,
                 operands: alloc::vec![
-                    (x, IndexMap::Affine(map::affine(1, &[(&[AxisTerm::scaled(0, 2)], 0)]))),
+                    (
+                        x,
+                        IndexMap::Affine(map::affine(1, &[(&[AxisTerm::scaled(0, 2)], 0)]))
+                    ),
                     (y, IndexMap::Affine(map::projection(1, &[0]))),
                 ],
                 name: None,
@@ -16544,9 +18241,12 @@ mod tests {
 
         let x_data = random_vec(0x51de_0000, 2 * k);
         let y_data = random_vec(0x51de_0001, k);
-        let evaluated = evaluate(&program, &[], &[&x_data, &y_data], &[]).expect("stride-2 dot reduce evaluates");
+        let evaluated = evaluate(&program, &[], &[&x_data, &y_data], &[])
+            .expect("stride-2 dot reduce evaluates");
 
-        let expected: f32 = (0..k).map(|position| x_data[2 * position] * y_data[position]).sum();
+        let expected: f32 = (0..k)
+            .map(|position| x_data[2 * position] * y_data[position])
+            .sum();
         assert_eq!(
             evaluated.root()[0].to_bits(),
             expected.to_bits(),
@@ -16607,18 +18307,27 @@ mod tests {
             .collect();
 
         assert_eq!(
-            actual.iter().map(|value| value.to_bits()).collect::<Vec<_>>(),
-            reference.iter().map(|value| value.to_bits()).collect::<Vec<_>>(),
+            actual
+                .iter()
+                .map(|value| value.to_bits())
+                .collect::<Vec<_>>(),
+            reference
+                .iter()
+                .map(|value| value.to_bits())
+                .collect::<Vec<_>>(),
             "fast path must be bit-identical to the scalar reference for a stride-2 operand"
         );
     }
-
 
     /// A minimal [`BoundOp`] carrying `body` and one operand per stride in
     /// `strides` — `Layout`/`node` are placeholders `operand_is_affine`
     /// never reads, only `strides` (passed separately, matching
     /// `run_elementwise`'s own precomputed table) and `gather` matter.
-    fn bound_op_for_gate(body: ComposedBody, strides: &[i64], gather_operand: Option<usize>) -> BoundOp {
+    fn bound_op_for_gate(
+        body: ComposedBody,
+        strides: &[i64],
+        gather_operand: Option<usize>,
+    ) -> BoundOp {
         let operands = strides
             .iter()
             .enumerate()
@@ -16670,7 +18379,9 @@ mod tests {
         #[case] strides: Vec<i64>,
     ) {
         let resolved = bound_op_for_gate(body.clone(), &strides, Some(0));
-        assert!(!generic_body_is_affine_fast_path(&resolved, &body, &strides));
+        assert!(!generic_body_is_affine_fast_path(
+            &resolved, &body, &strides
+        ));
     }
 
     #[proxima::test]
@@ -16692,7 +18403,9 @@ mod tests {
         #[case] strides: Vec<i64>,
     ) {
         let resolved = bound_op_for_gate(body.clone(), &strides, None);
-        assert!(!generic_body_is_affine_fast_path(&resolved, &body, &strides));
+        assert!(!generic_body_is_affine_fast_path(
+            &resolved, &body, &strides
+        ));
     }
 
     /// Dispatches `rows` through the same `claim_and_run_rows` shared-cursor
@@ -16753,7 +18466,9 @@ mod tests {
         let dot_row_address = &dot_row as *const Wide as usize;
         let next_index = Arc::new(AtomicUsize::new(0));
         let chunk_ranges: Arc<Vec<(usize, usize, usize)>> = Arc::new(chunk_ranges);
-        let spawned_count = workers.saturating_sub(1).min(chunk_ranges_len.saturating_sub(1));
+        let spawned_count = workers
+            .saturating_sub(1)
+            .min(chunk_ranges_len.saturating_sub(1));
         let (result_sender, result_receiver) = sync_channel(chunk_ranges_len);
 
         for _ in 0..spawned_count {
@@ -16761,11 +18476,23 @@ mod tests {
             let next_index = Arc::clone(&next_index);
             let chunk_ranges = Arc::clone(&chunk_ranges);
             drop(pool.spawn(move || {
-                claim_and_run_rows::<Wide>(&next_index, dot_row_address, width, &chunk_ranges, &sender);
+                claim_and_run_rows::<Wide>(
+                    &next_index,
+                    dot_row_address,
+                    width,
+                    &chunk_ranges,
+                    &sender,
+                );
                 Ok::<(), _>(())
             }));
         }
-        claim_and_run_rows::<Wide>(&next_index, dot_row_address, width, &chunk_ranges, &result_sender);
+        claim_and_run_rows::<Wide>(
+            &next_index,
+            dot_row_address,
+            width,
+            &chunk_ranges,
+            &result_sender,
+        );
         drop(result_sender);
 
         for _ in 0..chunk_ranges_len {
@@ -16786,12 +18513,12 @@ mod tests {
     #[test]
     #[ignore = "manual microbench, not a CI gate; see this test's own doc"]
     fn bench_row_oversubscribe_picks_the_multiplier() {
-        let workers = thread::available_parallelism().map(NonZeroUsize::get).unwrap_or(1);
+        let workers = thread::available_parallelism()
+            .map(NonZeroUsize::get)
+            .unwrap_or(1);
         let rows = 4096usize;
         let straggler_start = rows - rows / 8;
-        let cost_of = |row: usize| -> u64 {
-            if row >= straggler_start { 4000 } else { 500 }
-        };
+        let cost_of = |row: usize| -> u64 { if row >= straggler_start { 4000 } else { 500 } };
         let dot_row = |row: usize| -> Result<f32, TensorError> {
             let mut accumulator = 0.0f32;
             for iteration in 0..cost_of(row) {
@@ -16811,13 +18538,17 @@ mod tests {
             let mut samples_micros = Vec::with_capacity(5);
             for _ in 0..5 {
                 let started = Instant::now();
-                let output = dispatch_rows_with_oversubscribe(rows, workers, oversubscribe, dot_row);
+                let output =
+                    dispatch_rows_with_oversubscribe(rows, workers, oversubscribe, dot_row);
                 let elapsed = started.elapsed().as_micros() as f64;
                 assert_eq!(output.len(), rows);
                 samples_micros.push(elapsed);
             }
             let mean = samples_micros.iter().sum::<f64>() / samples_micros.len() as f64;
-            let variance = samples_micros.iter().map(|sample| (sample - mean).powi(2)).sum::<f64>()
+            let variance = samples_micros
+                .iter()
+                .map(|sample| (sample - mean).powi(2))
+                .sum::<f64>()
                 / samples_micros.len() as f64;
             let coefficient_of_variation = variance.sqrt() / mean;
             eprintln!(
@@ -16850,7 +18581,10 @@ mod tests {
                 samples_micros.push(elapsed);
             }
             let mean = samples_micros.iter().sum::<f64>() / samples_micros.len() as f64;
-            let variance = samples_micros.iter().map(|sample| (sample - mean).powi(2)).sum::<f64>()
+            let variance = samples_micros
+                .iter()
+                .map(|sample| (sample - mean).powi(2))
+                .sum::<f64>()
                 / samples_micros.len() as f64;
             let coefficient_of_variation = variance.sqrt() / mean;
             eprintln!(
@@ -16879,7 +18613,14 @@ mod tests {
         const HEADS: usize = 12;
         const REPEATS: usize = 7;
 
-        fn scalar_reference(a: &[f32], b_kn: &[f32], heads: usize, m: usize, k: usize, n: usize) -> Vec<f32> {
+        fn scalar_reference(
+            a: &[f32],
+            b_kn: &[f32],
+            heads: usize,
+            m: usize,
+            k: usize,
+            n: usize,
+        ) -> Vec<f32> {
             let mut out = vec![0.0f32; heads * m * n];
             for head in 0..heads {
                 let a_head = &a[head * m * k..(head + 1) * m * k];
@@ -16888,8 +18629,16 @@ mod tests {
                 for row in 0..m {
                     for col in 0..n {
                         let value = width_tile_scalar_cell(
-                            KStridedTile { data: a_head, base: (row * k) as i64, k_stride: 1 },
-                            KStridedTile { data: b_head, base: col as i64, k_stride: n as i64 },
+                            KStridedTile {
+                                data: a_head,
+                                base: (row * k) as i64,
+                                k_stride: 1,
+                            },
+                            KStridedTile {
+                                data: b_head,
+                                base: col as i64,
+                                k_stride: n as i64,
+                            },
                             k,
                             0.0,
                         );
@@ -16900,7 +18649,14 @@ mod tests {
             out
         }
 
-        fn neon_route(a: &[f32], b_kn: &[f32], heads: usize, m: usize, k: usize, n: usize) -> Vec<f32> {
+        fn neon_route(
+            a: &[f32],
+            b_kn: &[f32],
+            heads: usize,
+            m: usize,
+            k: usize,
+            n: usize,
+        ) -> Vec<f32> {
             let mut out = vec![0.0f32; heads * m * n];
             let raw: [&[f32]; 2] = [a, b_kn];
             let plan = WidthTilePlan {
@@ -16928,7 +18684,14 @@ mod tests {
         }
 
         #[cfg(target_os = "macos")]
-        fn accelerate_route(a: &[f32], b_nk: &[f32], heads: usize, m: usize, k: usize, n: usize) -> Vec<f32> {
+        fn accelerate_route(
+            a: &[f32],
+            b_nk: &[f32],
+            heads: usize,
+            m: usize,
+            k: usize,
+            n: usize,
+        ) -> Vec<f32> {
             let mut out = vec![0.0f32; heads * m * n];
             for head in 0..heads {
                 let a_head = &a[head * m * k..(head + 1) * m * k];
@@ -16938,15 +18701,26 @@ mod tests {
                 // (`m x k` and `n x k` row-major, this function's own doc),
                 // `out_head` exactly `m*n` -- every bound `try_run_accelerate_sgemm`'s
                 // own `# Safety` requires.
-                let accelerated = unsafe { try_run_accelerate_sgemm(a_head, 0, k, b_head, 0, k, out_head, 0, n, m, n, k, 1, 0.0, true) };
-                assert!(accelerated, "try_run_accelerate_sgemm declined a shape this nano expects to run: m={m} n={n} k={k}");
+                let accelerated = unsafe {
+                    try_run_accelerate_sgemm(
+                        a_head, 0, k, b_head, 0, k, out_head, 0, n, m, n, k, 1, 0.0, true,
+                    )
+                };
+                assert!(
+                    accelerated,
+                    "try_run_accelerate_sgemm declined a shape this nano expects to run: m={m} n={n} k={k}"
+                );
             }
             out
         }
 
         fn mean_cov(samples: &[f64]) -> (f64, f64) {
             let mean = samples.iter().sum::<f64>() / samples.len() as f64;
-            let variance = samples.iter().map(|sample| (sample - mean).powi(2)).sum::<f64>() / samples.len() as f64;
+            let variance = samples
+                .iter()
+                .map(|sample| (sample - mean).powi(2))
+                .sum::<f64>()
+                / samples.len() as f64;
             (mean, variance.sqrt() / mean)
         }
 
@@ -16954,12 +18728,15 @@ mod tests {
             .output()
             .map(|out| String::from_utf8_lossy(&out.stdout).trim().to_string())
             .unwrap_or_else(|_| "uptime unavailable".to_string());
-        eprintln!("attention_tile_shapes_nano: heads={HEADS} repeats={REPEATS} ambient_load={load}");
+        eprintln!(
+            "attention_tile_shapes_nano: heads={HEADS} repeats={REPEATS} ambient_load={load}"
+        );
 
         for seq_len in [7usize, 8, 9] {
             for (name, k, n) in [("Q@K^T", 32usize, seq_len), ("softmax@V", seq_len, 32usize)] {
                 let m = seq_len;
-                let mut rng = Lcg(0x9E37_79B9 ^ (m as u64) ^ ((k as u64) << 8) ^ ((n as u64) << 16));
+                let mut rng =
+                    Lcg(0x9E37_79B9 ^ (m as u64) ^ ((k as u64) << 8) ^ ((n as u64) << 16));
                 let a: Vec<f32> = (0..HEADS * m * k).map(|_| rng.next_unit()).collect();
                 let b_kn: Vec<f32> = (0..HEADS * k * n).map(|_| rng.next_unit()).collect();
                 // `n x k` row-major transpose of `b_kn`, per-head -- the
@@ -16994,12 +18771,19 @@ mod tests {
                         neon_samples.push(started.elapsed().as_nanos() as f64);
                     }
                     for (got, want) in neon_out.iter().zip(&reference) {
-                        assert!((got - want).abs() < 1e-4, "neon width tile diverged from scalar reference: got={got} want={want}");
+                        assert!(
+                            (got - want).abs() < 1e-4,
+                            "neon width tile diverged from scalar reference: got={got} want={want}"
+                        );
                     }
                     let (neon_mean, neon_cov) = mean_cov(&neon_samples);
-                    format!("neon_ns={neon_mean:>9.1} (cov={neon_cov:.3}) neon_speedup={:.3}x", scalar_mean / neon_mean)
+                    format!(
+                        "neon_ns={neon_mean:>9.1} (cov={neon_cov:.3}) neon_speedup={:.3}x",
+                        scalar_mean / neon_mean
+                    )
                 } else {
-                    "neon_ns=N/A (NarrowWidth-declined, N < WIDTH_TILE_VECS*4, never routed)".to_string()
+                    "neon_ns=N/A (NarrowWidth-declined, N < WIDTH_TILE_VECS*4, never routed)"
+                        .to_string()
                 };
 
                 #[cfg(target_os = "macos")]
@@ -17012,7 +18796,10 @@ mod tests {
                         accelerate_samples.push(started.elapsed().as_nanos() as f64);
                     }
                     for (got, want) in accelerate_out.iter().zip(&reference) {
-                        assert!((got - want).abs() < 1e-3, "accelerate diverged from scalar reference: got={got} want={want}");
+                        assert!(
+                            (got - want).abs() < 1e-3,
+                            "accelerate diverged from scalar reference: got={got} want={want}"
+                        );
                     }
                     let (accelerate_mean, accelerate_cov) = mean_cov(&accelerate_samples);
                     format!(
@@ -17053,19 +18840,29 @@ mod tests {
         let activation = random_vec(seed.wrapping_add(1), K);
 
         let mut packed = vec![0u8; ROWS * BLOCKS_PER_ROW * Q4K_BLOCK_BYTES];
-        for (row_f32, row_packed) in weights_f32.as_chunks::<K>().0.iter().zip(packed.as_chunks_mut::<ROW_BYTES>().0) {
+        for (row_f32, row_packed) in weights_f32
+            .as_chunks::<K>()
+            .0
+            .iter()
+            .zip(packed.as_chunks_mut::<ROW_BYTES>().0)
+        {
             quantize(row_f32, row_packed).expect("2 whole super-blocks quantize cleanly");
         }
 
         let mut dequantized_reference = vec![0.0f32; ROWS];
         let mut dequantized_row = vec![0.0f32; K];
         for (row_index, row_packed) in packed.as_chunks::<ROW_BYTES>().0.iter().enumerate() {
-            dequantize(row_packed, &mut dequantized_row).expect("2 whole super-blocks dequantize cleanly");
-            dequantized_reference[row_index] =
-                dequantized_row.iter().zip(&activation).map(|(weight, value)| weight * value).sum();
+            dequantize(row_packed, &mut dequantized_row)
+                .expect("2 whole super-blocks dequantize cleanly");
+            dequantized_reference[row_index] = dequantized_row
+                .iter()
+                .zip(&activation)
+                .map(|(weight, value)| weight * value)
+                .sum();
         }
 
-        let quantized_result = matmul_q4k_f32(&packed, ROWS, &activation).expect("well-formed quantized matmul");
+        let quantized_result =
+            matmul_q4k_f32(&packed, ROWS, &activation).expect("well-formed quantized matmul");
 
         let mut max_diff = 0.0f32;
         let mut sum_sq_diff = 0.0f64;
@@ -17075,15 +18872,23 @@ mod tests {
             sum_sq_diff += f64::from(diff) * f64::from(diff);
         }
         let rms_diff = (sum_sq_diff / ROWS as f64).sqrt();
-        eprintln!("matmul_q4k_f32 vs dequantize-then-matmul: seed={seed} max_diff={max_diff} rms_diff={rms_diff}");
+        eprintln!(
+            "matmul_q4k_f32 vs dequantize-then-matmul: seed={seed} max_diff={max_diff} rms_diff={rms_diff}"
+        );
 
         // not bit-exact: `dot_q4k_f32` folds one super-block at a time in a
         // single running accumulator, while the reference sums a
         // fully-materialized 512-element row in one linear pass — same
         // terms, different intermediate rounding. Loose bound, not tuned to
         // the measured numbers, matching `q4_k.rs`'s own round-trip tests.
-        assert!(max_diff < 1e-2, "max_diff={max_diff} exceeds parity tolerance");
-        assert!(rms_diff < 1e-2, "rms_diff={rms_diff} exceeds parity tolerance");
+        assert!(
+            max_diff < 1e-2,
+            "max_diff={max_diff} exceeds parity tolerance"
+        );
+        assert!(
+            rms_diff < 1e-2,
+            "rms_diff={rms_diff} exceeds parity tolerance"
+        );
     }
 
     /// [`matmul_worker_count`]'s only machine-independent invariant: the
@@ -17094,9 +18899,14 @@ mod tests {
     /// here.
     #[test]
     fn matmul_worker_count_is_between_one_and_available_parallelism() {
-        let available = thread::available_parallelism().map(NonZeroUsize::get).unwrap_or(1);
+        let available = thread::available_parallelism()
+            .map(NonZeroUsize::get)
+            .unwrap_or(1);
         let workers = matmul_worker_count();
-        assert!(workers >= 1, "worker count must be at least 1, got {workers}");
+        assert!(
+            workers >= 1,
+            "worker count must be at least 1, got {workers}"
+        );
         assert!(
             workers <= available,
             "worker count {workers} exceeds available_parallelism {available}"
@@ -17127,7 +18937,12 @@ mod tests {
         let activation = random_vec(43, K);
 
         let mut packed = vec![0u8; ROWS * BLOCKS_PER_ROW * Q4K_BLOCK_BYTES];
-        for (row_f32, row_packed) in weights_f32.as_chunks::<K>().0.iter().zip(packed.as_chunks_mut::<ROW_BYTES>().0) {
+        for (row_f32, row_packed) in weights_f32
+            .as_chunks::<K>()
+            .0
+            .iter()
+            .zip(packed.as_chunks_mut::<ROW_BYTES>().0)
+        {
             quantize(row_f32, row_packed).expect("2 whole super-blocks quantize cleanly");
         }
 
@@ -17136,7 +18951,8 @@ mod tests {
             "test fixture must actually clear the parallel threshold to exercise the pool path"
         );
 
-        let pooled_result = matmul_q4k_f32(&packed, ROWS, &activation).expect("well-formed quantized matmul");
+        let pooled_result =
+            matmul_q4k_f32(&packed, ROWS, &activation).expect("well-formed quantized matmul");
 
         let sequential_reference: Vec<f32> = packed
             .as_chunks::<ROW_BYTES>()
@@ -17170,7 +18986,12 @@ mod tests {
         let activation = random_vec(45, K);
 
         let mut packed = vec![0u8; ROWS * BLOCKS_PER_ROW * Q5K_BLOCK_BYTES];
-        for (row_f32, row_packed) in weights_f32.as_chunks::<K>().0.iter().zip(packed.as_chunks_mut::<ROW_BYTES>().0) {
+        for (row_f32, row_packed) in weights_f32
+            .as_chunks::<K>()
+            .0
+            .iter()
+            .zip(packed.as_chunks_mut::<ROW_BYTES>().0)
+        {
             quantize(row_f32, row_packed).expect("2 whole super-blocks quantize cleanly");
         }
 
@@ -17179,7 +19000,8 @@ mod tests {
             "test fixture must actually clear the parallel threshold to exercise the pool path"
         );
 
-        let pooled_result = matmul_q5k_f32(&packed, ROWS, &activation).expect("well-formed quantized matmul");
+        let pooled_result =
+            matmul_q5k_f32(&packed, ROWS, &activation).expect("well-formed quantized matmul");
 
         let sequential_reference: Vec<f32> = packed
             .as_chunks::<ROW_BYTES>()
@@ -17210,7 +19032,12 @@ mod tests {
         let activation = random_vec(47, K);
 
         let mut packed = vec![0u8; ROWS * BLOCKS_PER_ROW * Q6K_BLOCK_BYTES];
-        for (row_f32, row_packed) in weights_f32.as_chunks::<K>().0.iter().zip(packed.as_chunks_mut::<ROW_BYTES>().0) {
+        for (row_f32, row_packed) in weights_f32
+            .as_chunks::<K>()
+            .0
+            .iter()
+            .zip(packed.as_chunks_mut::<ROW_BYTES>().0)
+        {
             quantize(row_f32, row_packed).expect("2 whole super-blocks quantize cleanly");
         }
 
@@ -17219,7 +19046,8 @@ mod tests {
             "test fixture must actually clear the parallel threshold to exercise the pool path"
         );
 
-        let pooled_result = matmul_q6k_f32(&packed, ROWS, &activation).expect("well-formed quantized matmul");
+        let pooled_result =
+            matmul_q6k_f32(&packed, ROWS, &activation).expect("well-formed quantized matmul");
 
         let sequential_reference: Vec<f32> = packed
             .as_chunks::<ROW_BYTES>()
@@ -17287,7 +19115,12 @@ mod tests {
         let activation = random_vec(49, K);
 
         let mut packed = vec![0u8; ROWS * BLOCKS_PER_ROW * Q5K_BLOCK_BYTES];
-        for (row_f32, row_packed) in weights_f32.as_chunks::<K>().0.iter().zip(packed.as_chunks_mut::<ROW_BYTES>().0) {
+        for (row_f32, row_packed) in weights_f32
+            .as_chunks::<K>()
+            .0
+            .iter()
+            .zip(packed.as_chunks_mut::<ROW_BYTES>().0)
+        {
             quantize(row_f32, row_packed).expect("2 whole super-blocks quantize cleanly");
         }
 
@@ -17296,7 +19129,8 @@ mod tests {
             "test fixture must actually clear the parallel threshold to exercise the pool path"
         );
 
-        let pooled_result = matmul_q5k_q8k_f32(&packed, ROWS, &activation).expect("well-formed quantized matmul");
+        let pooled_result =
+            matmul_q5k_q8k_f32(&packed, ROWS, &activation).expect("well-formed quantized matmul");
 
         let mut activation_q8k = vec![0u8; BLOCKS_PER_ROW * Q8K_BLOCK_BYTES];
         quantize_row_q8k(&activation, &mut activation_q8k).expect("well-formed activation");
@@ -17331,7 +19165,12 @@ mod tests {
         let activation = random_vec(51, K);
 
         let mut packed = vec![0u8; ROWS * BLOCKS_PER_ROW * Q6K_BLOCK_BYTES];
-        for (row_f32, row_packed) in weights_f32.as_chunks::<K>().0.iter().zip(packed.as_chunks_mut::<ROW_BYTES>().0) {
+        for (row_f32, row_packed) in weights_f32
+            .as_chunks::<K>()
+            .0
+            .iter()
+            .zip(packed.as_chunks_mut::<ROW_BYTES>().0)
+        {
             quantize(row_f32, row_packed).expect("2 whole super-blocks quantize cleanly");
         }
 
@@ -17340,7 +19179,8 @@ mod tests {
             "test fixture must actually clear the parallel threshold to exercise the pool path"
         );
 
-        let pooled_result = matmul_q6k_q8k_f32(&packed, ROWS, &activation).expect("well-formed quantized matmul");
+        let pooled_result =
+            matmul_q6k_q8k_f32(&packed, ROWS, &activation).expect("well-formed quantized matmul");
 
         let mut activation_q8k = vec![0u8; BLOCKS_PER_ROW * Q8K_BLOCK_BYTES];
         quantize_row_q8k(&activation, &mut activation_q8k).expect("well-formed activation");
@@ -17476,11 +19316,16 @@ mod tests {
         let evaluated = evaluate_named(
             &program,
             &[],
-            &[("reshape_shape", &[0.0, 0.0]), ("activation", &[1.0, 2.0, 3.0, 4.0])],
+            &[
+                ("reshape_shape", &[0.0, 0.0]),
+                ("activation", &[1.0, 2.0, 3.0, 4.0]),
+            ],
             &[activation],
         )
         .expect("an all-f32 output cone must evaluate even with a dead non-f32 leaf present");
-        let (data, _shape) = evaluated.get(activation).expect("activation must be a resolved output");
+        let (data, _shape) = evaluated
+            .get(activation)
+            .expect("activation must be a resolved output");
         assert_eq!(data, [1.0, 2.0, 3.0, 4.0].as_slice());
     }
 
@@ -17526,11 +19371,19 @@ mod tests {
         let mut program = Vec::new();
         let a = append(
             &mut program,
-            Op::Input { dtype: DType::Float32, shape: vec![Extent::Static(4)], name: Some(String::from("a")) },
+            Op::Input {
+                dtype: DType::Float32,
+                shape: vec![Extent::Static(4)],
+                name: Some(String::from("a")),
+            },
         );
         let b = append(
             &mut program,
-            Op::Input { dtype: DType::Float32, shape: vec![Extent::Static(4)], name: Some(String::from("b")) },
+            Op::Input {
+                dtype: DType::Float32,
+                shape: vec![Extent::Static(4)],
+                name: Some(String::from("b")),
+            },
         );
         let sum = append(
             &mut program,
@@ -17556,13 +19409,17 @@ mod tests {
     #[test]
     fn evaluate_named_with_arena_matches_evaluate_named_over_two_calls() {
         let (program, sum) = named_add_program();
-        let mut arena = build_static_arena(&program, &[], &[sum]).expect("small program builds a static arena");
+        let mut arena =
+            build_static_arena(&program, &[], &[sum]).expect("small program builds a static arena");
 
         let first_a = [1.0f32, 2.0, 3.0, 4.0];
         let first_b = [10.0f32, 20.0, 30.0, 40.0];
-        let arena_first = evaluate_named_with_arena(&mut arena, &[("a", &first_a), ("b", &first_b)]).expect("first arena call evaluates");
+        let arena_first =
+            evaluate_named_with_arena(&mut arena, &[("a", &first_a), ("b", &first_b)])
+                .expect("first arena call evaluates");
         let baseline_first =
-            evaluate_named(&program, &[], &[("a", &first_a), ("b", &first_b)], &[sum]).expect("first baseline call evaluates");
+            evaluate_named(&program, &[], &[("a", &first_a), ("b", &first_b)], &[sum])
+                .expect("first baseline call evaluates");
         assert_eq!(
             arena_first.get(sum).map(|(data, _)| data.to_vec()),
             baseline_first.get(sum).map(|(data, _)| data.to_vec()),
@@ -17571,15 +19428,21 @@ mod tests {
 
         let second_a = [100.0f32, 200.0, 300.0, 400.0];
         let second_b = [1.0f32, 2.0, 3.0, 4.0];
-        let arena_second = evaluate_named_with_arena(&mut arena, &[("a", &second_a), ("b", &second_b)]).expect("second arena call evaluates");
+        let arena_second =
+            evaluate_named_with_arena(&mut arena, &[("a", &second_a), ("b", &second_b)])
+                .expect("second arena call evaluates");
         let baseline_second =
-            evaluate_named(&program, &[], &[("a", &second_a), ("b", &second_b)], &[sum]).expect("second baseline call evaluates");
+            evaluate_named(&program, &[], &[("a", &second_a), ("b", &second_b)], &[sum])
+                .expect("second baseline call evaluates");
         assert_eq!(
             arena_second.get(sum).map(|(data, _)| data.to_vec()),
             baseline_second.get(sum).map(|(data, _)| data.to_vec()),
             "second call (same arena, reused buffers): arena and fresh-alloc paths must still agree bit for bit"
         );
-        assert_eq!(arena_second.get(sum).map(|(data, _)| data.to_vec()), Some(vec![101.0, 202.0, 303.0, 404.0]));
+        assert_eq!(
+            arena_second.get(sum).map(|(data, _)| data.to_vec()),
+            Some(vec![101.0, 202.0, 303.0, 404.0])
+        );
     }
 
     /// A two-input program with a genuinely dead node -- `dead = a * b`,
@@ -17592,11 +19455,19 @@ mod tests {
         let mut program = Vec::new();
         let a = append(
             &mut program,
-            Op::Input { dtype: DType::Float32, shape: vec![Extent::Static(4)], name: Some(String::from("a")) },
+            Op::Input {
+                dtype: DType::Float32,
+                shape: vec![Extent::Static(4)],
+                name: Some(String::from("a")),
+            },
         );
         let b = append(
             &mut program,
-            Op::Input { dtype: DType::Float32, shape: vec![Extent::Static(4)], name: Some(String::from("b")) },
+            Op::Input {
+                dtype: DType::Float32,
+                shape: vec![Extent::Static(4)],
+                name: Some(String::from("b")),
+            },
         );
         let dead = append(
             &mut program,
@@ -17635,20 +19506,33 @@ mod tests {
     #[test]
     fn build_static_arena_elides_a_node_with_zero_consumers() {
         let (program, dead, live) = dead_node_program();
-        let mut arena = build_static_arena(&program, &[], &[live]).expect("dead-node program builds a static arena");
-        assert!(arena.dead.contains(&dead), "the zero-consumer, non-output node must be marked dead");
-        assert!(!arena.dead.contains(&live), "the requested output must never be marked dead");
+        let mut arena = build_static_arena(&program, &[], &[live])
+            .expect("dead-node program builds a static arena");
+        assert!(
+            arena.dead.contains(&dead),
+            "the zero-consumer, non-output node must be marked dead"
+        );
+        assert!(
+            !arena.dead.contains(&live),
+            "the requested output must never be marked dead"
+        );
 
         let a = [1.0f32, 2.0, 3.0, 4.0];
         let b = [10.0f32, 20.0, 30.0, 40.0];
-        let elided = evaluate_named_with_arena(&mut arena, &[("a", &a), ("b", &b)]).expect("elided arena call evaluates");
-        let baseline = evaluate_named(&program, &[], &[("a", &a), ("b", &b)], &[live]).expect("baseline call evaluates");
+        let elided = evaluate_named_with_arena(&mut arena, &[("a", &a), ("b", &b)])
+            .expect("elided arena call evaluates");
+        let baseline = evaluate_named(&program, &[], &[("a", &a), ("b", &b)], &[live])
+            .expect("baseline call evaluates");
         assert_eq!(
             elided.get(live).map(|(data, _)| data.to_vec()),
             baseline.get(live).map(|(data, _)| data.to_vec()),
             "the live output must be bit-identical whether or not the dead sibling actually executed"
         );
-        assert_eq!(arena_output(&arena, dead), Some([0.0f32, 0.0, 0.0, 0.0].as_slice()), "the elided node's buffer must stay untouched -- run_resolved_nodes_in_arena skipped writing it");
+        assert_eq!(
+            arena_output(&arena, dead),
+            Some([0.0f32, 0.0, 0.0, 0.0].as_slice()),
+            "the elided node's buffer must stay untouched -- run_resolved_nodes_in_arena skipped writing it"
+        );
     }
 
     /// The other half of the same contract: naming `dead` itself as a
@@ -17658,19 +19542,28 @@ mod tests {
     #[test]
     fn build_static_arena_does_not_elide_a_dead_node_that_is_also_a_requested_output() {
         let (program, dead, live) = dead_node_program();
-        let mut arena = build_static_arena(&program, &[], &[dead, live]).expect("dead-node program builds a static arena with dead requested");
-        assert!(!arena.dead.contains(&dead), "requesting the otherwise-dead node as an output must un-elide it");
+        let mut arena = build_static_arena(&program, &[], &[dead, live])
+            .expect("dead-node program builds a static arena with dead requested");
+        assert!(
+            !arena.dead.contains(&dead),
+            "requesting the otherwise-dead node as an output must un-elide it"
+        );
 
         let a = [1.0f32, 2.0, 3.0, 4.0];
         let b = [10.0f32, 20.0, 30.0, 40.0];
-        let evaluated = evaluate_named_with_arena(&mut arena, &[("a", &a), ("b", &b)]).expect("arena call evaluates");
-        let baseline = evaluate_named(&program, &[], &[("a", &a), ("b", &b)], &[dead, live]).expect("baseline call evaluates");
+        let evaluated = evaluate_named_with_arena(&mut arena, &[("a", &a), ("b", &b)])
+            .expect("arena call evaluates");
+        let baseline = evaluate_named(&program, &[], &[("a", &a), ("b", &b)], &[dead, live])
+            .expect("baseline call evaluates");
         assert_eq!(
             evaluated.get(dead).map(|(data, _)| data.to_vec()),
             baseline.get(dead).map(|(data, _)| data.to_vec()),
             "the now-requested node must actually compute, bit-identical to the non-eliding baseline"
         );
-        assert_eq!(evaluated.get(dead).map(|(data, _)| data.to_vec()), Some(vec![10.0, 40.0, 90.0, 160.0]));
+        assert_eq!(
+            evaluated.get(dead).map(|(data, _)| data.to_vec()),
+            Some(vec![10.0, 40.0, 90.0, 160.0])
+        );
     }
 
     /// A one-input program with a `Constant` feeding a live `Add` --
@@ -17680,11 +19573,19 @@ mod tests {
         let mut program = Vec::new();
         let a = append(
             &mut program,
-            Op::Input { dtype: DType::Float32, shape: vec![Extent::Static(4)], name: Some(String::from("a")) },
+            Op::Input {
+                dtype: DType::Float32,
+                shape: vec![Extent::Static(4)],
+                name: Some(String::from("a")),
+            },
         );
         let constant = append(
             &mut program,
-            Op::Constant { dtype: DType::Float32, shape: vec![Extent::Static(4)], value: 5.0 },
+            Op::Constant {
+                dtype: DType::Float32,
+                shape: vec![Extent::Static(4)],
+                value: 5.0,
+            },
         );
         let live = append(
             &mut program,
@@ -17712,28 +19613,50 @@ mod tests {
     #[test]
     fn build_static_arena_runs_a_live_constant_once_and_never_again() {
         let (program, _a, constant, live) = constant_feeds_live_program();
-        let mut arena = build_static_arena(&program, &[], &[live]).expect("constant-feeds-live program builds a static arena");
-        assert!(arena.static_nodes.contains(&constant), "a live Constant-kind node must be marked static");
-        assert!(!arena.dead.contains(&constant), "a consumed Constant must never also be marked dead");
+        let mut arena = build_static_arena(&program, &[], &[live])
+            .expect("constant-feeds-live program builds a static arena");
+        assert!(
+            arena.static_nodes.contains(&constant),
+            "a live Constant-kind node must be marked static"
+        );
+        assert!(
+            !arena.dead.contains(&constant),
+            "a consumed Constant must never also be marked dead"
+        );
 
         let step_one = [1.0f32, 2.0, 3.0, 4.0];
-        let evaluated = evaluate_named_with_arena(&mut arena, &[("a", &step_one)]).expect("step one evaluates");
-        assert_eq!(evaluated.get(live).map(|(data, _)| data.to_vec()), Some(vec![6.0, 7.0, 8.0, 9.0]), "a + the constant's own literal 5.0, computed once at build time");
-        assert_eq!(arena_output(&arena, constant), Some([5.0f32; 4].as_slice()), "the constant's own buffer holds its literal after step one");
+        let evaluated =
+            evaluate_named_with_arena(&mut arena, &[("a", &step_one)]).expect("step one evaluates");
+        assert_eq!(
+            evaluated.get(live).map(|(data, _)| data.to_vec()),
+            Some(vec![6.0, 7.0, 8.0, 9.0]),
+            "a + the constant's own literal 5.0, computed once at build time"
+        );
+        assert_eq!(
+            arena_output(&arena, constant),
+            Some([5.0f32; 4].as_slice()),
+            "the constant's own buffer holds its literal after step one"
+        );
 
         arena.buffers[constant.0 as usize] = Some(alloc::vec![999.0f32; 4]);
 
         let step_two = [10.0f32, 20.0, 30.0, 40.0];
-        let evaluated = evaluate_named_with_arena(&mut arena, &[("a", &step_two)]).expect("step two evaluates");
+        let evaluated =
+            evaluate_named_with_arena(&mut arena, &[("a", &step_two)]).expect("step two evaluates");
         assert_eq!(
             evaluated.get(live).map(|(data, _)| data.to_vec()),
             Some(vec![1009.0, 1019.0, 1029.0, 1039.0]),
             "step two must fold the CORRUPTED buffer, not the literal -- proving run_resolved_nodes_in_arena truly never re-executed the constant"
         );
-        assert_eq!(arena_output(&arena, constant), Some([999.0f32; 4].as_slice()), "the corruption survives step two untouched");
+        assert_eq!(
+            arena_output(&arena, constant),
+            Some([999.0f32; 4].as_slice()),
+            "the corruption survives step two untouched"
+        );
 
         let step_three = [0.0f32, 0.0, 0.0, 0.0];
-        let evaluated = evaluate_named_with_arena(&mut arena, &[("a", &step_three)]).expect("step three evaluates");
+        let evaluated = evaluate_named_with_arena(&mut arena, &[("a", &step_three)])
+            .expect("step three evaluates");
         assert_eq!(
             evaluated.get(live).map(|(data, _)| data.to_vec()),
             Some(vec![999.0, 999.0, 999.0, 999.0]),
@@ -17752,13 +19675,27 @@ mod tests {
         let (mut program, _a, constant, live) = constant_feeds_live_program();
         let dead_constant = append(
             &mut program,
-            Op::Constant { dtype: DType::Float32, shape: vec![Extent::Static(4)], value: 42.0 },
+            Op::Constant {
+                dtype: DType::Float32,
+                shape: vec![Extent::Static(4)],
+                value: 42.0,
+            },
         );
 
-        let arena = build_static_arena(&program, &[], &[live]).expect("program with an unused constant builds a static arena");
-        assert!(arena.dead.contains(&dead_constant), "a zero-consumer Constant must be marked dead");
-        assert!(!arena.static_nodes.contains(&dead_constant), "a dead Constant must not also be marked static -- dead already skips it");
-        assert!(arena.static_nodes.contains(&constant), "the live constant is unaffected by its dead sibling");
+        let arena = build_static_arena(&program, &[], &[live])
+            .expect("program with an unused constant builds a static arena");
+        assert!(
+            arena.dead.contains(&dead_constant),
+            "a zero-consumer Constant must be marked dead"
+        );
+        assert!(
+            !arena.static_nodes.contains(&dead_constant),
+            "a dead Constant must not also be marked static -- dead already skips it"
+        );
+        assert!(
+            arena.static_nodes.contains(&constant),
+            "the live constant is unaffected by its dead sibling"
+        );
     }
 
     /// A `named` binding whose length no longer matches the shape
@@ -17768,14 +19705,18 @@ mod tests {
     #[test]
     fn evaluate_named_with_arena_reports_a_shape_mismatched_rebind_by_name() {
         let (program, sum) = named_add_program();
-        let mut arena = build_static_arena(&program, &[], &[sum]).expect("small program builds a static arena");
+        let mut arena =
+            build_static_arena(&program, &[], &[sum]).expect("small program builds a static arena");
 
         let wrong_length_a = [1.0f32, 2.0, 3.0];
         let full_length_b = [10.0f32, 20.0, 30.0, 40.0];
-        let error = evaluate_named_with_arena(&mut arena, &[("a", &wrong_length_a), ("b", &full_length_b)])
-            .expect_err("a 3-element rebind against a 4-element input slot must be rejected");
+        let error =
+            evaluate_named_with_arena(&mut arena, &[("a", &wrong_length_a), ("b", &full_length_b)])
+                .expect_err("a 3-element rebind against a 4-element input slot must be rejected");
         match error {
-            TensorError::InputSizeMismatch { expected, found, .. } => {
+            TensorError::InputSizeMismatch {
+                expected, found, ..
+            } => {
                 assert_eq!(expected, 4, "the arena's own fixed slot size for `a`");
                 assert_eq!(found, 3, "the mismatched rebind's own length");
             }
@@ -18003,7 +19944,12 @@ mod tests {
         );
 
         let evaluated = evaluate(&program, &[], &[], &[]).expect("a -inf constant evaluates");
-        assert!(evaluated.root().iter().all(|value| *value == f32::NEG_INFINITY));
+        assert!(
+            evaluated
+                .root()
+                .iter()
+                .all(|value| *value == f32::NEG_INFINITY)
+        );
     }
 
     /// `reduce_dot_binary_monomorphic`'s `(true, true)` arm reassociates the
@@ -18402,8 +20348,12 @@ mod tests {
         // grouping) — see ROW 12, `proxima-tensor/docs/discipline.md`.
         let (m, k, n) = (8usize, 1024usize, 8usize);
         let (program, _sum) = matmul_program_rhs_transposed(m as u32, k as u32, n as u32);
-        let lhs: Vec<f32> = (0..m * k).map(|value| (value as f32 * 0.0137).sin()).collect();
-        let rhs_kn: Vec<f32> = (0..k * n).map(|value| (value as f32 * 0.0271).cos()).collect();
+        let lhs: Vec<f32> = (0..m * k)
+            .map(|value| (value as f32 * 0.0137).sin())
+            .collect();
+        let rhs_kn: Vec<f32> = (0..k * n)
+            .map(|value| (value as f32 * 0.0271).cos())
+            .collect();
         let mut rhs_nk = vec![0.0f32; k * n];
         for row in 0..k {
             for col in 0..n {
@@ -19057,8 +21007,13 @@ mod tests {
         let (program, _source, _ids, scattered) = scatter_add_program(3);
         let index_values = [2.0f32, 0.0, 2.0, 1.0];
         let source_values = [10.0f32, 20.0, 30.0, 40.0];
-        let evaluated = evaluate(&program, &[], &[&source_values, &index_values], &[scattered])
-            .expect("the hand-worked scatter example evaluates");
+        let evaluated = evaluate(
+            &program,
+            &[],
+            &[&source_values, &index_values],
+            &[scattered],
+        )
+        .expect("the hand-worked scatter example evaluates");
 
         assert_eq!(
             evaluated.root(),
@@ -19075,8 +21030,13 @@ mod tests {
         let (program, _source, _ids, scattered) = scatter_add_program(5);
         let index_values = [4.0f32, 1.0, 3.0, 0.0];
         let source_values = [10.0f32, 20.0, 30.0, 40.0];
-        let evaluated = evaluate(&program, &[], &[&source_values, &index_values], &[scattered])
-            .expect("a collision-free scatter evaluates");
+        let evaluated = evaluate(
+            &program,
+            &[],
+            &[&source_values, &index_values],
+            &[scattered],
+        )
+        .expect("a collision-free scatter evaluates");
 
         assert_eq!(
             evaluated.root(),
@@ -19096,12 +21056,21 @@ mod tests {
         let (program, _source, _ids, scattered) = scatter_add_program(3);
         let index_values = [0.0f32, 1.0, 3.0, 2.0]; // 3 is out of range for extent 3
         let source_values = [10.0f32, 20.0, 30.0, 40.0];
-        let error = evaluate(&program, &[], &[&source_values, &index_values], &[scattered])
-            .expect_err("index 3 is out of range for destination extent 3");
+        let error = evaluate(
+            &program,
+            &[],
+            &[&source_values, &index_values],
+            &[scattered],
+        )
+        .expect_err("index 3 is out of range for destination extent 3");
         assert!(
             matches!(
                 error,
-                TensorError::GatherIndexOutOfRange { index: 3, extent: 3, .. }
+                TensorError::GatherIndexOutOfRange {
+                    index: 3,
+                    extent: 3,
+                    ..
+                }
             ),
             "{error}"
         );
@@ -19282,7 +21251,9 @@ mod tests {
         }
         let _ = current;
 
-        let input: Vec<f32> = (0..rows * width).map(|value| (value as f32) * 0.0001).collect();
+        let input: Vec<f32> = (0..rows * width)
+            .map(|value| (value as f32) * 0.0001)
+            .collect();
 
         let sequential = evaluate(&program, &[], &[&input], &[]).expect("sequential evaluates");
         let blocks = [QuantizedBlock::Float32(&input)];
@@ -19527,7 +21498,11 @@ mod tests {
         // `scatter_add_matches_the_hand_worked_example` etc. now accept.
         let mut scatter_scan_program = Vec::new();
         let source = f32_block(&mut scatter_scan_program, &[Extent::Static(4)]);
-        let ids = block(&mut scatter_scan_program, DType::Int32, &[Extent::Static(4)]);
+        let ids = block(
+            &mut scatter_scan_program,
+            DType::Int32,
+            &[Extent::Static(4)],
+        );
         let out_map = IndexMap::scatter(ids, map::projection(1, &[0]), 1, &[], 0, 3);
         append(
             &mut scatter_scan_program,
@@ -19560,8 +21535,13 @@ mod tests {
         let index_values = [2.0f32, 0.0, 2.0, 1.0];
         let source_values = [10.0f32, 20.0, 30.0, 40.0];
 
-        let sequential = evaluate(&program, &[], &[&source_values, &index_values], &[scattered])
-            .expect("sequential scatter evaluates");
+        let sequential = evaluate(
+            &program,
+            &[],
+            &[&source_values, &index_values],
+            &[scattered],
+        )
+        .expect("sequential scatter evaluates");
         let parallel = evaluate_parallel(
             &program,
             &[],
@@ -19643,10 +21623,13 @@ mod tests {
         let mut buffers: Vec<Option<Vec<f32>>> = vec![None; program.len()];
         buffers[0] = Some(lhs.clone());
         buffers[1] = Some(rhs.clone());
-        let chain = shapes.and_then(builder).and_then(Interpreter::new(&mut buffers));
+        let chain = shapes
+            .and_then(builder)
+            .and_then(Interpreter::new(&mut buffers));
 
         for expr in &program {
-            block_on(Pipe::call(&chain, expr.clone())).expect("shape+bind+execute pipe step succeeds");
+            block_on(Pipe::call(&chain, expr.clone()))
+                .expect("shape+bind+execute pipe step succeeds");
         }
         // Release the chain's mutable borrow of `buffers` before reading the
         // result back out of it — the interpreter stage was moved into
@@ -19655,8 +21638,9 @@ mod tests {
         // `Interpreter::get` performs, once the borrow is free to take back.
         drop(chain);
 
-        let chain_result =
-            buffers[sum.0 as usize].clone().expect("the matmul node was executed through the composed chain");
+        let chain_result = buffers[sum.0 as usize]
+            .clone()
+            .expect("the matmul node was executed through the composed chain");
 
         let evaluated =
             evaluate(&program, &[], &[&lhs, &rhs], &[]).expect("free-function matmul evaluates");
@@ -19703,8 +21687,7 @@ mod tests {
         #[case] expected: TypedBuffer,
     ) {
         let (program, _, _, _) = typed_add_program(dtype, 3);
-        let results =
-            evaluate_typed(&program, &[], &[lhs, rhs], &[]).expect("typed add evaluates");
+        let results = evaluate_typed(&program, &[], &[lhs, rhs], &[]).expect("typed add evaluates");
         assert_eq!(results.len(), 1);
         let (_, shape, data) = &results[0];
         assert_eq!(shape, &alloc::vec![3u64]);
@@ -19738,9 +21721,19 @@ mod tests {
             },
         );
         let blocks = [TypedBuffer::UInt32(alloc::vec![1, 2])];
-        let error =
-            evaluate_typed(&program, &[], &blocks, &[]).expect_err("u32 has no representable negative");
-        assert!(matches!(error, TensorError::UnsupportedScalarOp { op: ScalarOp::Negate, dtype: DType::UInt32, .. }), "{error}");
+        let error = evaluate_typed(&program, &[], &blocks, &[])
+            .expect_err("u32 has no representable negative");
+        assert!(
+            matches!(
+                error,
+                TensorError::UnsupportedScalarOp {
+                    op: ScalarOp::Negate,
+                    dtype: DType::UInt32,
+                    ..
+                }
+            ),
+            "{error}"
+        );
     }
 
     #[test]
@@ -19760,7 +21753,14 @@ mod tests {
         let error = evaluate_typed(&program, &[], &blocks, &[])
             .expect_err("sqrt is not defined over Int32 by this evaluator");
         assert!(
-            matches!(error, TensorError::UnsupportedScalarOp { op: ScalarOp::SquareRoot, dtype: DType::Int32, .. }),
+            matches!(
+                error,
+                TensorError::UnsupportedScalarOp {
+                    op: ScalarOp::SquareRoot,
+                    dtype: DType::Int32,
+                    ..
+                }
+            ),
             "{error}"
         );
     }
@@ -19779,10 +21779,16 @@ mod tests {
                 name: None,
             },
         );
-        let blocks = [TypedBuffer::Int32(alloc::vec![10]), TypedBuffer::Int32(alloc::vec![0])];
+        let blocks = [
+            TypedBuffer::Int32(alloc::vec![10]),
+            TypedBuffer::Int32(alloc::vec![0]),
+        ];
         let error = evaluate_typed(&program, &[], &blocks, &[])
             .expect_err("integer division by zero is a real error, not UB");
-        assert!(matches!(error, TensorError::CheckedDivisionFailed { .. }), "{error}");
+        assert!(
+            matches!(error, TensorError::CheckedDivisionFailed { .. }),
+            "{error}"
+        );
     }
 
     #[test]
@@ -19799,9 +21805,11 @@ mod tests {
             },
         );
         let blocks = [TypedBuffer::Float64(alloc::vec![4.0, 9.0, 16.0])];
-        let results =
-            evaluate_typed(&program, &[], &blocks, &[]).expect("f64 sqrt evaluates");
-        assert_eq!(results[0].2, TypedBuffer::Float64(alloc::vec![2.0, 3.0, 4.0]));
+        let results = evaluate_typed(&program, &[], &blocks, &[]).expect("f64 sqrt evaluates");
+        assert_eq!(
+            results[0].2,
+            TypedBuffer::Float64(alloc::vec![2.0, 3.0, 4.0])
+        );
     }
 
     #[test]
@@ -19861,8 +21869,9 @@ mod tests {
     fn f32_typed_path_is_unchanged() {
         let (program, _) = typed_reduce_vector_to_scalar_program(DType::Float32, 4);
         let operand = TypedBuffer::Float32(alloc::vec![1.5, 2.5, 3.0, 4.0]);
-        let results = evaluate_typed(&program, &[], &[operand], &[])
-            .expect("a uniform f32 typed program still evaluates via the unchanged NEON-backed path");
+        let results = evaluate_typed(&program, &[], &[operand], &[]).expect(
+            "a uniform f32 typed program still evaluates via the unchanged NEON-backed path",
+        );
         assert_eq!(results[0].2, TypedBuffer::Float32(alloc::vec![11.0]));
     }
 
@@ -19934,11 +21943,21 @@ mod tests {
         let (got, reference): (Vec<f32>, Vec<f32>) = match (&results[0].2, &lhs, &rhs) {
             (TypedBuffer::Float16(sum), TypedBuffer::Float16(lhs), TypedBuffer::Float16(rhs)) => (
                 sum.iter().map(|value| value.to_f32()).collect(),
-                lhs.iter().zip(rhs).map(|(left, right)| left.to_f32() + right.to_f32()).collect(),
+                lhs.iter()
+                    .zip(rhs)
+                    .map(|(left, right)| left.to_f32() + right.to_f32())
+                    .collect(),
             ),
-            (TypedBuffer::BFloat16(sum), TypedBuffer::BFloat16(lhs), TypedBuffer::BFloat16(rhs)) => (
+            (
+                TypedBuffer::BFloat16(sum),
+                TypedBuffer::BFloat16(lhs),
+                TypedBuffer::BFloat16(rhs),
+            ) => (
                 sum.iter().map(|value| value.to_f32()).collect(),
-                lhs.iter().zip(rhs).map(|(left, right)| left.to_f32() + right.to_f32()).collect(),
+                lhs.iter()
+                    .zip(rhs)
+                    .map(|(left, right)| left.to_f32() + right.to_f32())
+                    .collect(),
             ),
             other => panic!("unexpected buffer shape: {other:?}"),
         };
@@ -19962,8 +21981,12 @@ mod tests {
         let (program, _) = typed_reduce_vector_to_scalar_program(dtype, values.len() as u32);
         let expected_f32: f32 = values.iter().sum();
         let operand = match dtype {
-            DType::Float16 => TypedBuffer::Float16(values.iter().map(|value| f16::from_f32(*value)).collect()),
-            DType::BFloat16 => TypedBuffer::BFloat16(values.iter().map(|value| bf16::from_f32(*value)).collect()),
+            DType::Float16 => {
+                TypedBuffer::Float16(values.iter().map(|value| f16::from_f32(*value)).collect())
+            }
+            DType::BFloat16 => {
+                TypedBuffer::BFloat16(values.iter().map(|value| bf16::from_f32(*value)).collect())
+            }
             other => panic!("unexpected dtype in case table: {other:?}"),
         };
         let results = evaluate_typed(&program, &[], &[operand], &[])
@@ -19987,13 +22010,17 @@ mod tests {
         // observable result" shape as the i8/i32 test above, at floating
         // widths instead of integer ones.
         let (program, _) = typed_widened_reduce_program(DType::Float16, DType::Float32, 2);
-        let operand = TypedBuffer::Float16(alloc::vec![f16::from_f32(40000.0), f16::from_f32(40000.0)]);
+        let operand =
+            TypedBuffer::Float16(alloc::vec![f16::from_f32(40000.0), f16::from_f32(40000.0)]);
         let results = evaluate_typed(&program, &[], &[operand], &[])
             .expect("an f16-operand, f32-accumulator reduce evaluates");
         let TypedBuffer::Float32(sum) = &results[0].2 else {
             panic!("widened f16 reduce must produce an f32 accumulator buffer");
         };
-        assert_eq!(sum[0], 80000.0, "the f32 accumulator must carry the true sum, not an f16-saturated infinity");
+        assert_eq!(
+            sum[0], 80000.0,
+            "the f32 accumulator must carry the true sum, not an f16-saturated infinity"
+        );
     }
 
     #[test]
@@ -20042,7 +22069,11 @@ mod tests {
     /// compute width against any integer index width.
     fn typed_gather_program(compute_dtype: DType, index_dtype: DType) -> Vec<Op> {
         let mut program = Vec::new();
-        let table = block(&mut program, compute_dtype, &[Extent::Static(4), Extent::Static(2)]);
+        let table = block(
+            &mut program,
+            compute_dtype,
+            &[Extent::Static(4), Extent::Static(2)],
+        );
         let ids = block(&mut program, index_dtype, &[Extent::Static(3)]);
         let gathered_map = IndexMap::Computed {
             indices: ids,
@@ -20087,7 +22118,8 @@ mod tests {
         #[case] index_dtype: DType,
     ) {
         let program = typed_gather_program(compute_dtype, index_dtype);
-        let plan = typed_program_plan(&program).expect("an integer gather index must not fail the plan");
+        let plan =
+            typed_program_plan(&program).expect("an integer gather index must not fail the plan");
         assert_eq!(
             plan,
             TypedPlan::Uniform(compute_dtype),
@@ -20121,7 +22153,11 @@ mod tests {
         seq: u32,
     ) -> (Vec<Op>, NodeId) {
         let mut program = Vec::new();
-        let table = block(&mut program, compute_dtype, &[Extent::Static(vocab), Extent::Static(dim)]);
+        let table = block(
+            &mut program,
+            compute_dtype,
+            &[Extent::Static(vocab), Extent::Static(dim)],
+        );
         let ids = block(&mut program, index_dtype, &[Extent::Static(seq)]);
         let gathered_map = IndexMap::Computed {
             indices: ids,
@@ -20167,7 +22203,10 @@ mod tests {
         let table = block(
             &mut program,
             compute_dtype,
-            &[Extent::Static(table_shape[0]), Extent::Static(table_shape[1])],
+            &[
+                Extent::Static(table_shape[0]),
+                Extent::Static(table_shape[1]),
+            ],
         );
         let ids = block(&mut program, index_dtype, &[Extent::Static(seq)]);
         let kept_dim = 1 - gathered_dim;
@@ -20207,7 +22246,8 @@ mod tests {
         dim: u32,
         seq: u32,
     ) -> (Vec<Op>, NodeId) {
-        let (mut program, gathered) = typed_embedding_lookup_program(operand_dtype, index_dtype, vocab, dim, seq);
+        let (mut program, gathered) =
+            typed_embedding_lookup_program(operand_dtype, index_dtype, vocab, dim, seq);
         let sum = append(
             &mut program,
             Op::Reduce(Reduce {
@@ -20238,21 +22278,31 @@ mod tests {
     async fn typed_gather_matches_f32_oracle_element_for_element(#[case] index_dtype: DType) {
         let (vocab, dim, seq) = (50usize, 6usize, 5usize);
         let (f32_program, _) = embedding_lookup_program(vocab as u32, dim as u32, seq as u32);
-        let table_data: Vec<f32> = (0..vocab * dim).map(|value| (value % 37) as f32 - 10.0).collect();
+        let table_data: Vec<f32> = (0..vocab * dim)
+            .map(|value| (value % 37) as f32 - 10.0)
+            .collect();
         // row 3 repeated, plus both boundary rows (0 and vocab - 1).
         let ids_f32 = [3.0f32, (vocab - 1) as f32, 0.0, 3.0, 25.0];
-        let oracle = evaluate(&f32_program, &[], &[&table_data, &ids_f32], &[]).expect("f32 oracle evaluates");
+        let oracle = evaluate(&f32_program, &[], &[&table_data, &ids_f32], &[])
+            .expect("f32 oracle evaluates");
 
-        let (typed_program, _) =
-            typed_embedding_lookup_program(DType::Float32, index_dtype, vocab as u32, dim as u32, seq as u32);
+        let (typed_program, _) = typed_embedding_lookup_program(
+            DType::Float32,
+            index_dtype,
+            vocab as u32,
+            dim as u32,
+            seq as u32,
+        );
         let ids_block = match index_dtype {
             DType::Int32 => TypedBuffer::Int32(ids_f32.iter().map(|&value| value as i32).collect()),
-            DType::UInt32 => TypedBuffer::UInt32(ids_f32.iter().map(|&value| value as u32).collect()),
+            DType::UInt32 => {
+                TypedBuffer::UInt32(ids_f32.iter().map(|&value| value as u32).collect())
+            }
             other => panic!("unexpected index dtype in case table: {other:?}"),
         };
         let blocks = [TypedBuffer::Float32(table_data.clone()), ids_block];
-        let results =
-            evaluate_typed(&typed_program, &[], &blocks, &[]).expect("typed gather evaluates against real data");
+        let results = evaluate_typed(&typed_program, &[], &blocks, &[])
+            .expect("typed gather evaluates against real data");
         let TypedBuffer::Float32(got) = &results[0].2 else {
             panic!("expected an f32 result buffer");
         };
@@ -20273,16 +22323,28 @@ mod tests {
     fn typed_gather_f16_compute_matches_f32_oracle_within_half_precision() {
         let (vocab, dim, seq) = (32usize, 4usize, 6usize);
         let (f32_program, _) = embedding_lookup_program(vocab as u32, dim as u32, seq as u32);
-        let table_f32: Vec<f32> = (0..vocab * dim).map(|value| (value % 23) as f32 - 5.0).collect();
+        let table_f32: Vec<f32> = (0..vocab * dim)
+            .map(|value| (value % 23) as f32 - 5.0)
+            .collect();
         let ids_f32 = [0.0f32, (vocab - 1) as f32, 7.0, 7.0, 15.0, 31.0];
-        let oracle = evaluate(&f32_program, &[], &[&table_f32, &ids_f32], &[]).expect("f32 oracle evaluates");
+        let oracle = evaluate(&f32_program, &[], &[&table_f32, &ids_f32], &[])
+            .expect("f32 oracle evaluates");
 
-        let (typed_program, _) =
-            typed_embedding_lookup_program(DType::Float16, DType::Int32, vocab as u32, dim as u32, seq as u32);
-        let table_f16: Vec<f16> = table_f32.iter().map(|&value| f16::from_f32(value)).collect();
+        let (typed_program, _) = typed_embedding_lookup_program(
+            DType::Float16,
+            DType::Int32,
+            vocab as u32,
+            dim as u32,
+            seq as u32,
+        );
+        let table_f16: Vec<f16> = table_f32
+            .iter()
+            .map(|&value| f16::from_f32(value))
+            .collect();
         let ids_i32: Vec<i32> = ids_f32.iter().map(|&value| value as i32).collect();
         let blocks = [TypedBuffer::Float16(table_f16), TypedBuffer::Int32(ids_i32)];
-        let results = evaluate_typed(&typed_program, &[], &blocks, &[]).expect("f16 typed gather evaluates");
+        let results =
+            evaluate_typed(&typed_program, &[], &blocks, &[]).expect("f16 typed gather evaluates");
         let TypedBuffer::Float16(got) = &results[0].2 else {
             panic!("expected an f16 result buffer");
         };
@@ -20303,10 +22365,19 @@ mod tests {
     #[test]
     fn typed_gather_dim1_matches_f32_oracle() {
         let (dim, vocab, seq) = (5usize, 20usize, 4usize);
-        let (f32_program, _) = typed_gather_dim_program(DType::Float32, DType::Int32, [dim as u32, vocab as u32], seq as u32, 1);
-        let table_data: Vec<f32> = (0..dim * vocab).map(|value| (value % 17) as f32 + 1.0).collect();
+        let (f32_program, _) = typed_gather_dim_program(
+            DType::Float32,
+            DType::Int32,
+            [dim as u32, vocab as u32],
+            seq as u32,
+            1,
+        );
+        let table_data: Vec<f32> = (0..dim * vocab)
+            .map(|value| (value % 17) as f32 + 1.0)
+            .collect();
         let ids_f32 = [0.0f32, (vocab - 1) as f32, 9.0, 9.0];
-        let oracle = evaluate(&f32_program, &[], &[&table_data, &ids_f32], &[]).expect("f32 oracle evaluates");
+        let oracle = evaluate(&f32_program, &[], &[&table_data, &ids_f32], &[])
+            .expect("f32 oracle evaluates");
 
         let (typed_program, _) = typed_gather_dim_program(
             DType::Float32,
@@ -20316,8 +22387,12 @@ mod tests {
             1,
         );
         let ids_u32: Vec<u32> = ids_f32.iter().map(|&value| value as u32).collect();
-        let blocks = [TypedBuffer::Float32(table_data.clone()), TypedBuffer::UInt32(ids_u32)];
-        let results = evaluate_typed(&typed_program, &[], &blocks, &[]).expect("gathered_dim: 1 typed gather evaluates");
+        let blocks = [
+            TypedBuffer::Float32(table_data.clone()),
+            TypedBuffer::UInt32(ids_u32),
+        ];
+        let results = evaluate_typed(&typed_program, &[], &blocks, &[])
+            .expect("gathered_dim: 1 typed gather evaluates");
         let TypedBuffer::Float32(got) = &results[0].2 else {
             panic!("expected an f32 result buffer");
         };
@@ -20336,7 +22411,9 @@ mod tests {
     #[test]
     fn widened_reduce_over_a_gathered_f16_operand_matches_a_hand_written_reference() {
         let (vocab, dim, seq) = (10usize, 4usize, 3usize);
-        let table_f32: Vec<f32> = (0..vocab * dim).map(|value| (value % 13) as f32 - 6.0).collect();
+        let table_f32: Vec<f32> = (0..vocab * dim)
+            .map(|value| (value % 13) as f32 - 6.0)
+            .collect();
         let ids = [2u32, 9, 0];
 
         let mut reference = alloc::vec![0.0f32; seq];
@@ -20356,9 +22433,16 @@ mod tests {
             dim as u32,
             seq as u32,
         );
-        let table_f16: Vec<f16> = table_f32.iter().map(|&value| f16::from_f32(value)).collect();
-        let blocks = [TypedBuffer::Float16(table_f16), TypedBuffer::UInt32(ids.to_vec())];
-        let results = evaluate_typed(&program, &[], &blocks, &[]).expect("widened reduce over a gather evaluates");
+        let table_f16: Vec<f16> = table_f32
+            .iter()
+            .map(|&value| f16::from_f32(value))
+            .collect();
+        let blocks = [
+            TypedBuffer::Float16(table_f16),
+            TypedBuffer::UInt32(ids.to_vec()),
+        ];
+        let results = evaluate_typed(&program, &[], &blocks, &[])
+            .expect("widened reduce over a gather evaluates");
         let TypedBuffer::Float32(got) = &results[0].2 else {
             panic!("expected an f32 accumulator buffer");
         };
@@ -20378,8 +22462,9 @@ mod tests {
     #[test]
     fn evaluate_typed_rejects_a_float_gather_index_dtype_at_execution() {
         let program = typed_gather_program(DType::Float32, DType::Float64);
-        let error = evaluate_typed(&program, &[], &[], &[])
-            .expect_err("a float-dtype gather index must be rejected at execution, never silently accepted");
+        let error = evaluate_typed(&program, &[], &[], &[]).expect_err(
+            "a float-dtype gather index must be rejected at execution, never silently accepted",
+        );
         assert!(matches!(error, TensorError::NotLowerable { .. }), "{error}");
     }
 
@@ -20394,22 +22479,36 @@ mod tests {
     #[proxima::test]
     #[case::index_past_the_extent(4)]
     #[case::negative_index(-1)]
-    async fn typed_gather_out_of_range_index_matches_f32_oracle_error_shape(#[case] bad_index: i32) {
+    async fn typed_gather_out_of_range_index_matches_f32_oracle_error_shape(
+        #[case] bad_index: i32,
+    ) {
         let (vocab, dim, seq) = (4usize, 2usize, 1usize);
         let (f32_program, _) = embedding_lookup_program(vocab as u32, dim as u32, seq as u32);
         let table_data: Vec<f32> = (0..vocab * dim).map(|value| value as f32).collect();
         let ids_f32 = [bad_index as f32];
         let oracle_error = evaluate(&f32_program, &[], &[&table_data, &ids_f32], &[])
             .expect_err("the f32 oracle rejects the out-of-range index");
-        let TensorError::GatherIndexOutOfRange { extent: oracle_extent, .. } = oracle_error else {
+        let TensorError::GatherIndexOutOfRange {
+            extent: oracle_extent,
+            ..
+        } = oracle_error
+        else {
             panic!("expected the f32 oracle's own GatherIndexOutOfRange, got {oracle_error}");
         };
 
-        let (typed_program, _) =
-            typed_embedding_lookup_program(DType::Float32, DType::Int32, vocab as u32, dim as u32, seq as u32);
-        let blocks = [TypedBuffer::Float32(table_data), TypedBuffer::Int32(alloc::vec![bad_index])];
-        let typed_error =
-            evaluate_typed(&typed_program, &[], &blocks, &[]).expect_err("the typed evaluator rejects it too");
+        let (typed_program, _) = typed_embedding_lookup_program(
+            DType::Float32,
+            DType::Int32,
+            vocab as u32,
+            dim as u32,
+            seq as u32,
+        );
+        let blocks = [
+            TypedBuffer::Float32(table_data),
+            TypedBuffer::Int32(alloc::vec![bad_index]),
+        ];
+        let typed_error = evaluate_typed(&typed_program, &[], &blocks, &[])
+            .expect_err("the typed evaluator rejects it too");
         let TensorError::GatherIndexOutOfRange {
             index: typed_index,
             extent: typed_extent,
@@ -20419,7 +22518,10 @@ mod tests {
             panic!("expected GatherIndexOutOfRange, got {typed_error}");
         };
         assert_eq!(typed_index, i64::from(bad_index));
-        assert_eq!(typed_extent, oracle_extent, "the typed evaluator must bounds-check against the same extent");
+        assert_eq!(
+            typed_extent, oracle_extent,
+            "the typed evaluator must bounds-check against the same extent"
+        );
     }
 
     /// The honest boundary [`canonical_index_buffers`] draws rather than
@@ -20429,8 +22531,18 @@ mod tests {
     #[test]
     fn evaluate_typed_names_a_computed_gather_index_node_as_not_yet_supported() {
         let mut program = Vec::new();
-        let table = block(&mut program, DType::Float32, &[Extent::Static(4), Extent::Static(2)]);
-        let ids = append(&mut program, Op::Iota { dtype: DType::Int32, extent: Extent::Static(3) });
+        let table = block(
+            &mut program,
+            DType::Float32,
+            &[Extent::Static(4), Extent::Static(2)],
+        );
+        let ids = append(
+            &mut program,
+            Op::Iota {
+                dtype: DType::Int32,
+                extent: Extent::Static(3),
+            },
+        );
         let gathered_map = IndexMap::Computed {
             indices: ids,
             index_map: map::projection(2, &[0]),
@@ -20548,7 +22660,10 @@ mod tests {
         );
         let blocks = [TypedBuffer::Int32(alloc::vec![1, 2, 3, 4, 5])];
         let results = evaluate_typed(&program, &[], &blocks, &[]).expect("typed scan evaluates");
-        assert_eq!(results[0].2, TypedBuffer::Int32(alloc::vec![1, 3, 6, 10, 15]));
+        assert_eq!(
+            results[0].2,
+            TypedBuffer::Int32(alloc::vec![1, 3, 6, 10, 15])
+        );
     }
 
     /// Matmul-shaped: a `Multiply` elementwise body fused into an `Add`
@@ -20619,8 +22734,7 @@ mod tests {
     #[test]
     fn evaluate_typed_matmul_shaped_reduce_matches_a_naive_reference_at_float64() {
         let (m, k, n) = (3usize, 4usize, 2usize);
-        let (program, _, _, _) =
-            typed_matmul_program(DType::Float64, m as u32, k as u32, n as u32);
+        let (program, _, _, _) = typed_matmul_program(DType::Float64, m as u32, k as u32, n as u32);
         let lhs: Vec<f64> = (0..m * k).map(|value| value as f64 * 0.5).collect();
         let rhs: Vec<f64> = (0..k * n).map(|value| value as f64 * 0.25).collect();
         let blocks = [
@@ -20658,12 +22772,16 @@ mod tests {
     #[test]
     fn evaluate_typed_float32_matmul_shaped_reduce_matches_evaluate_bit_for_bit() {
         let (m, k, n) = (6usize, 32usize, 8usize);
-        let (program, _, _, _) =
-            typed_matmul_program(DType::Float32, m as u32, k as u32, n as u32);
-        let lhs: Vec<f32> = (0..m * k).map(|value| (value as f32 * 0.0137).sin()).collect();
-        let rhs: Vec<f32> = (0..k * n).map(|value| (value as f32 * 0.0271).cos()).collect();
+        let (program, _, _, _) = typed_matmul_program(DType::Float32, m as u32, k as u32, n as u32);
+        let lhs: Vec<f32> = (0..m * k)
+            .map(|value| (value as f32 * 0.0137).sin())
+            .collect();
+        let rhs: Vec<f32> = (0..k * n)
+            .map(|value| (value as f32 * 0.0271).cos())
+            .collect();
 
-        let via_evaluate = evaluate(&program, &[], &[&lhs, &rhs], &[]).expect("f32 matmul evaluates");
+        let via_evaluate =
+            evaluate(&program, &[], &[&lhs, &rhs], &[]).expect("f32 matmul evaluates");
         let blocks = [TypedBuffer::Float32(lhs), TypedBuffer::Float32(rhs)];
         let via_typed =
             evaluate_typed(&program, &[], &blocks, &[]).expect("typed f32 matmul evaluates");
@@ -20704,7 +22822,10 @@ mod tests {
 
         assert_eq!(typed_data.len(), via_evaluate.root().len());
         let compared = typed_data.len();
-        assert!(compared > 0, "the bit-identity check compared zero elements");
+        assert!(
+            compared > 0,
+            "the bit-identity check compared zero elements"
+        );
         for (index, (found, expected)) in typed_data.iter().zip(via_evaluate.root()).enumerate() {
             assert_eq!(
                 found.to_bits(),
@@ -20728,8 +22849,16 @@ mod tests {
         // instead). Mirrored here rather than reusing `typed_matmul_program`.
         let (m, k, n) = (12usize, 64usize, 8usize);
         let mut program = Vec::new();
-        let lhs = block(&mut program, DType::Float32, &[Extent::Static(m as u32), Extent::Static(k as u32)]);
-        let rhs = block(&mut program, DType::Float32, &[Extent::Static(n as u32), Extent::Static(k as u32)]);
+        let lhs = block(
+            &mut program,
+            DType::Float32,
+            &[Extent::Static(m as u32), Extent::Static(k as u32)],
+        );
+        let rhs = block(
+            &mut program,
+            DType::Float32,
+            &[Extent::Static(n as u32), Extent::Static(k as u32)],
+        );
         let product = append(
             &mut program,
             Op::Elementwise {
@@ -20755,15 +22884,25 @@ mod tests {
                 name: Some("typed_matmul_rhs_transposed".into()),
             }),
         );
-        let lhs_data: Vec<f32> = (0..m * k).map(|value| (value as f32 * 0.0137).sin()).collect();
-        let rhs_data: Vec<f32> = (0..n * k).map(|value| (value as f32 * 0.0271).cos()).collect();
-        let blocks = [TypedBuffer::Float32(lhs_data), TypedBuffer::Float32(rhs_data)];
+        let lhs_data: Vec<f32> = (0..m * k)
+            .map(|value| (value as f32 * 0.0137).sin())
+            .collect();
+        let rhs_data: Vec<f32> = (0..n * k)
+            .map(|value| (value as f32 * 0.0271).cos())
+            .collect();
+        let blocks = [
+            TypedBuffer::Float32(lhs_data),
+            TypedBuffer::Float32(rhs_data),
+        ];
 
         let (gate_before, invocations_before, _) = neon_tile_counters();
         evaluate_typed(&program, &[], &blocks, &[]).expect("typed f32 matmul evaluates");
         let (gate_after, invocations_after, _) = neon_tile_counters();
 
-        assert!(gate_after > gate_before, "neon_tile_plan never matched through evaluate_typed");
+        assert!(
+            gate_after > gate_before,
+            "neon_tile_plan never matched through evaluate_typed"
+        );
         assert!(
             invocations_after > invocations_before,
             "gemm_tile_neon never ran through evaluate_typed"
@@ -20794,7 +22933,10 @@ mod tests {
         let strides = [30i64, 6, 1];
         let (reads, distinct) = operand_access_footprint(&extents, &strides);
         assert_eq!(reads, 4 * 5 * 6);
-        assert_eq!(distinct, reads, "a dense operand's own footprint is read exactly once per position");
+        assert_eq!(
+            distinct, reads,
+            "a dense operand's own footprint is read exactly once per position"
+        );
     }
 
     #[test]
@@ -20802,8 +22944,16 @@ mod tests {
         let extents = [4u64, 5, 6];
         let strides = [30i64, 0, 1]; // broadcast over the middle axis
         let (reads, distinct) = operand_access_footprint(&extents, &strides);
-        assert_eq!(reads, 4 * 5 * 6, "every iterated position still counts as a read");
-        assert_eq!(distinct, 4 * 6, "the broadcast axis contributes 1, not its extent, to distinct");
+        assert_eq!(
+            reads,
+            4 * 5 * 6,
+            "every iterated position still counts as a read"
+        );
+        assert_eq!(
+            distinct,
+            4 * 6,
+            "the broadcast axis contributes 1, not its extent, to distinct"
+        );
         assert!(reads > distinct);
     }
 
@@ -20865,18 +23015,24 @@ mod tests {
         instrument::reset_operand_access();
         let (vocab, dim, seq) = (1_000u32, 8u32, 6u32);
         let (program, gathered) = embedding_lookup_program(vocab, dim, seq);
-        let table_data: Vec<f32> = (0..(vocab * dim) as usize).map(|value| value as f32).collect();
+        let table_data: Vec<f32> = (0..(vocab * dim) as usize)
+            .map(|value| value as f32)
+            .collect();
         // 6 fetches, 3 distinct rows: 3 and 999 and 500 each hit twice.
         let ids_data = [3.0f32, 3.0, 999.0, 999.0, 500.0, 500.0];
         evaluate(&program, &[], &[&table_data, &ids_data], &[gathered]).expect("gather evaluates");
 
-        let table_access = instrument::operand_access_of(NodeId(0)).expect("table was instrumented");
+        let table_access =
+            instrument::operand_access_of(NodeId(0)).expect("table was instrumented");
         assert_eq!(
             table_access.distinct_elements,
             3 * u64::from(dim),
             "only 3 of {vocab} rows were ever fetched, not the whole table"
         );
-        assert_eq!(table_access.total_elements, u64::from(vocab) * u64::from(dim));
+        assert_eq!(
+            table_access.total_elements,
+            u64::from(vocab) * u64::from(dim)
+        );
         assert!(table_access.distinct_elements < table_access.total_elements);
     }
 
@@ -20897,9 +23053,13 @@ mod tests {
         let lhs_data = random_vec(1, (m * k) as usize);
         let rhs_data = random_vec(2, (k * n) as usize);
         let unused_data = alloc::vec![0.0f32; 3];
-        evaluate(&program, &[], &[&lhs_data, &rhs_data, &unused_data], &[sum]).expect("matmul evaluates");
+        evaluate(&program, &[], &[&lhs_data, &rhs_data, &unused_data], &[sum])
+            .expect("matmul evaluates");
 
-        assert!(instrument::operand_access_of(NodeId(0)).is_some(), "lhs was actually read");
+        assert!(
+            instrument::operand_access_of(NodeId(0)).is_some(),
+            "lhs was actually read"
+        );
         assert_eq!(
             instrument::operand_access_of(unused),
             None,
@@ -20908,12 +23068,20 @@ mod tests {
 
         instrument::reset_operand_access();
         let node = NodeId(42);
-        assert_eq!(instrument::operand_access_of(node), None, "nothing recorded yet");
+        assert_eq!(
+            instrument::operand_access_of(node),
+            None,
+            "nothing recorded yet"
+        );
         instrument::record_operand_access(node, 0, 0, 128);
-        let access = instrument::operand_access_of(node).expect("recording zero reads still creates a row");
+        let access =
+            instrument::operand_access_of(node).expect("recording zero reads still creates a row");
         assert_eq!(access.reads, 0);
         assert_eq!(access.distinct_elements, 0);
-        assert_eq!(access.total_elements, 128, "total size is known even when nothing was ever read");
+        assert_eq!(
+            access.total_elements, 128,
+            "total size is known even when nothing was ever read"
+        );
     }
 
     /// DLMF 7.2 / Abramowitz & Stegun Table 7.1's published `erf(x)`, to the
@@ -21009,7 +23177,8 @@ mod tests {
 
         let values: [f32; 4] = [0.0, 0.5, 1.0, -1.5];
         let blocks: [&[f32]; 1] = [&values];
-        let evaluated = evaluate(&program, &[], &blocks, &[output]).expect("erf elementwise evaluates");
+        let evaluated =
+            evaluate(&program, &[], &blocks, &[output]).expect("erf elementwise evaluates");
 
         let found = evaluated.root();
         assert_eq!(found.len(), values.len());
@@ -21043,15 +23212,22 @@ mod tests {
         // realistic weight-scale values, not degenerate all-zero/constant
         // inputs — `Lcg::next_unit` is already this file's own random-f32
         // fixture generator (see `random_vec` above).
-        let activation: Vec<f32> = random_vec(7, k).into_iter().map(|value| value * 4.0 - 2.0).collect();
-        let weight_f32: Vec<f32> = random_vec(11, rows * k).into_iter().map(|value| value * 4.0 - 2.0).collect();
+        let activation: Vec<f32> = random_vec(7, k)
+            .into_iter()
+            .map(|value| value * 4.0 - 2.0)
+            .collect();
+        let weight_f32: Vec<f32> = random_vec(11, rows * k)
+            .into_iter()
+            .map(|value| value * 4.0 - 2.0)
+            .collect();
 
         let mut weight_blocks = vec![0u8; rows * blocks_per_row * BLOCK_BYTES];
         for (row_f32, row_blocks) in weight_f32
             .chunks_exact(k)
             .zip(weight_blocks.chunks_exact_mut(blocks_per_row * BLOCK_BYTES))
         {
-            quantize(row_f32, row_blocks).expect("row length is a whole multiple of QK_K by construction");
+            quantize(row_f32, row_blocks)
+                .expect("row length is a whole multiple of QK_K by construction");
         }
 
         // incumbent: dequantize the packed bytes back to f32, then a plain
@@ -21059,45 +23235,66 @@ mod tests {
         let mut expected = Vec::with_capacity(rows);
         for row_blocks in weight_blocks.chunks_exact(blocks_per_row * BLOCK_BYTES) {
             let mut dequantized = vec![0.0f32; k];
-            dequantize(row_blocks, &mut dequantized).expect("row_blocks is a whole number of q4_k super-blocks");
-            let dot: f32 = dequantized.iter().zip(activation.iter()).map(|(&weight, &value)| weight * value).sum();
+            dequantize(row_blocks, &mut dequantized)
+                .expect("row_blocks is a whole number of q4_k super-blocks");
+            let dot: f32 = dequantized
+                .iter()
+                .zip(activation.iter())
+                .map(|(&weight, &value)| weight * value)
+                .sum();
             expected.push(dot);
         }
 
-        let actual = matmul_q4k_f32(&weight_blocks, rows, &activation).expect("well-formed quantized matmul");
+        let actual = matmul_q4k_f32(&weight_blocks, rows, &activation)
+            .expect("well-formed quantized matmul");
 
         assert_eq!(actual.len(), expected.len());
         let mut max_error = 0.0f32;
         let mut sum_sq_error = 0.0f64;
         for (&got, &want) in actual.iter().zip(expected.iter()) {
-            assert!(got.is_finite(), "quantized matmul row produced a non-finite value: {got}");
+            assert!(
+                got.is_finite(),
+                "quantized matmul row produced a non-finite value: {got}"
+            );
             let diff = (got - want).abs();
             max_error = max_error.max(diff);
             sum_sq_error += f64::from(diff) * f64::from(diff);
         }
         let rms_error = (sum_sq_error / rows as f64).sqrt();
-        eprintln!("matmul_q4k_f32 vs dequantize-then-matmul: max_error={max_error} rms_error={rms_error}");
+        eprintln!(
+            "matmul_q4k_f32 vs dequantize-then-matmul: max_error={max_error} rms_error={rms_error}"
+        );
 
         // loose sanity bound around the accumulation-order float noise
         // floor for a 768-element dot product at this value scale — not
         // tuned to the measured numbers, matching this crate's existing
         // q4_k round-trip test convention (`proxima-gguf`'s
         // `quantize_dequantize_smooth_signal_round_trip_error`).
-        assert!(max_error < 0.05, "max_error={max_error} exceeds loose sanity bound");
-        assert!(rms_error < 0.02, "rms_error={rms_error} exceeds loose sanity bound");
+        assert!(
+            max_error < 0.05,
+            "max_error={max_error} exceeds loose sanity bound"
+        );
+        assert!(
+            rms_error < 0.02,
+            "rms_error={rms_error} exceeds loose sanity bound"
+        );
     }
 
     /// [`dot_q4k_f32`]'s shape-mismatch guard: an activation slice whose
     /// length does not match the weight row's decoded element count is
     /// rejected, not silently truncated or padded.
     #[test]
-    fn matmul_q4k_f32_rejects_an_activation_length_that_does_not_match_the_weight_rows_element_count() {
+    fn matmul_q4k_f32_rejects_an_activation_length_that_does_not_match_the_weight_rows_element_count()
+     {
         use proxima_gguf::quant::q4_k::BLOCK_BYTES;
 
         let weight_blocks = vec![0u8; BLOCK_BYTES];
         let wrong_length_activation = vec![0.0f32; 200];
         let error = matmul_q4k_f32(&weight_blocks, 1, &wrong_length_activation).unwrap_err();
-        assert!(matches!(error, TensorError::QuantizedShapeMismatch { .. }), "got {error:?}");
+        assert!(
+            matches!(error, TensorError::QuantizedShapeMismatch { .. }),
+            "got {error:?}"
+        );
     }
 
     /// [`matmul_q4k_q8k_f32`] against the SAME incumbent
@@ -21117,38 +23314,57 @@ mod tests {
         let blocks_per_row = 3;
         let k = QK_K * blocks_per_row;
 
-        let activation: Vec<f32> = random_vec(7, k).into_iter().map(|value| value * 4.0 - 2.0).collect();
-        let weight_f32: Vec<f32> = random_vec(11, rows * k).into_iter().map(|value| value * 4.0 - 2.0).collect();
+        let activation: Vec<f32> = random_vec(7, k)
+            .into_iter()
+            .map(|value| value * 4.0 - 2.0)
+            .collect();
+        let weight_f32: Vec<f32> = random_vec(11, rows * k)
+            .into_iter()
+            .map(|value| value * 4.0 - 2.0)
+            .collect();
 
         let mut weight_blocks = vec![0u8; rows * blocks_per_row * BLOCK_BYTES];
         for (row_f32, row_blocks) in weight_f32
             .chunks_exact(k)
             .zip(weight_blocks.chunks_exact_mut(blocks_per_row * BLOCK_BYTES))
         {
-            quantize(row_f32, row_blocks).expect("row length is a whole multiple of QK_K by construction");
+            quantize(row_f32, row_blocks)
+                .expect("row length is a whole multiple of QK_K by construction");
         }
 
         let mut expected = Vec::with_capacity(rows);
         for row_blocks in weight_blocks.chunks_exact(blocks_per_row * BLOCK_BYTES) {
             let mut dequantized = vec![0.0f32; k];
-            dequantize(row_blocks, &mut dequantized).expect("row_blocks is a whole number of q4_k super-blocks");
-            let dot: f32 = dequantized.iter().zip(activation.iter()).map(|(&weight, &value)| weight * value).sum();
+            dequantize(row_blocks, &mut dequantized)
+                .expect("row_blocks is a whole number of q4_k super-blocks");
+            let dot: f32 = dequantized
+                .iter()
+                .zip(activation.iter())
+                .map(|(&weight, &value)| weight * value)
+                .sum();
             expected.push(dot);
         }
 
-        let actual = matmul_q4k_q8k_f32(&weight_blocks, rows, &activation).expect("well-formed packed int8 matmul");
+        let actual = matmul_q4k_q8k_f32(&weight_blocks, rows, &activation)
+            .expect("well-formed packed int8 matmul");
 
         assert_eq!(actual.len(), expected.len());
         let mut max_error = 0.0f32;
         let mut sum_sq_error = 0.0f64;
         for (&got, &want) in actual.iter().zip(expected.iter()) {
-            assert!(got.is_finite(), "packed int8 matmul row produced a non-finite value: {got}");
+            assert!(
+                got.is_finite(),
+                "packed int8 matmul row produced a non-finite value: {got}"
+            );
             let diff = (got - want).abs();
             max_error = max_error.max(diff);
             sum_sq_error += f64::from(diff) * f64::from(diff);
         }
         let rms_error = (sum_sq_error / rows as f64).sqrt();
-        let max_magnitude = expected.iter().map(|value| value.abs()).fold(0.0f32, f32::max);
+        let max_magnitude = expected
+            .iter()
+            .map(|value| value.abs())
+            .fold(0.0f32, f32::max);
         let relative_max_error = max_error / max_magnitude;
         eprintln!(
             "matmul_q4k_q8k_f32 vs dequantize-then-matmul: max_error={max_error} rms_error={rms_error} \
@@ -21200,11 +23416,18 @@ mod tests {
 
         let blocks_per_row = 3;
         let k = QK_K * blocks_per_row;
-        let activation: Vec<f32> = random_vec(29, k).into_iter().map(|value| value * 6.0 - 3.0).collect();
-        let weight_f32: Vec<f32> = random_vec(31, k).into_iter().map(|value| value * 6.0 - 3.0).collect();
+        let activation: Vec<f32> = random_vec(29, k)
+            .into_iter()
+            .map(|value| value * 6.0 - 3.0)
+            .collect();
+        let weight_f32: Vec<f32> = random_vec(31, k)
+            .into_iter()
+            .map(|value| value * 6.0 - 3.0)
+            .collect();
 
         let mut weight_row = vec![0u8; blocks_per_row * BLOCK_BYTES];
-        quantize(&weight_f32, &mut weight_row).expect("row length is a whole multiple of QK_K by construction");
+        quantize(&weight_f32, &mut weight_row)
+            .expect("row length is a whole multiple of QK_K by construction");
 
         let mut activation_q8k = vec![0u8; blocks_per_row * Q8K_BLOCK_BYTES];
         quantize_row_q8k(&activation, &mut activation_q8k).expect("well-formed activation");
@@ -21244,21 +23467,33 @@ mod tests {
         let blocks_per_row = 5;
         let k = QK_K * blocks_per_row;
 
-        let activation: Vec<f32> = random_vec(13, k).into_iter().map(|value| value * 6.0 - 3.0).collect();
-        let weight_f32: Vec<f32> = random_vec(17, rows * k).into_iter().map(|value| value * 6.0 - 3.0).collect();
+        let activation: Vec<f32> = random_vec(13, k)
+            .into_iter()
+            .map(|value| value * 6.0 - 3.0)
+            .collect();
+        let weight_f32: Vec<f32> = random_vec(17, rows * k)
+            .into_iter()
+            .map(|value| value * 6.0 - 3.0)
+            .collect();
 
         let mut weight_blocks = vec![0u8; rows * blocks_per_row * BLOCK_BYTES];
         for (row_f32, row_blocks) in weight_f32
             .chunks_exact(k)
             .zip(weight_blocks.chunks_exact_mut(blocks_per_row * BLOCK_BYTES))
         {
-            quantize(row_f32, row_blocks).expect("row length is a whole multiple of QK_K by construction");
+            quantize(row_f32, row_blocks)
+                .expect("row length is a whole multiple of QK_K by construction");
         }
 
-        let dispatched = matmul_q4k_q8k_f32(&weight_blocks, rows, &activation).expect("well-formed dispatched matmul");
-        let portable = matmul_q4k_q8k_portable_f32(&weight_blocks, rows, &activation).expect("well-formed portable matmul");
+        let dispatched = matmul_q4k_q8k_f32(&weight_blocks, rows, &activation)
+            .expect("well-formed dispatched matmul");
+        let portable = matmul_q4k_q8k_portable_f32(&weight_blocks, rows, &activation)
+            .expect("well-formed portable matmul");
 
-        assert_eq!(dispatched, portable, "dispatched and portable arms diverged -- not merely an acceleration");
+        assert_eq!(
+            dispatched, portable,
+            "dispatched and portable arms diverged -- not merely an acceleration"
+        );
     }
 
     /// [`quantize_row_q8k`]'s all-zero fast path
@@ -21271,7 +23506,10 @@ mod tests {
         let activation = vec![0.0f32; Q4K_BLOCK_ELEMENTS];
         let mut packed = vec![0xFFu8; Q8K_BLOCK_BYTES];
         quantize_row_q8k(&activation, &mut packed).expect("one well-formed super-block");
-        assert!(packed.iter().all(|&byte| byte == 0), "zero activation must pack to an all-zero Q8_K block");
+        assert!(
+            packed.iter().all(|&byte| byte == 0),
+            "zero activation must pack to an all-zero Q8_K block"
+        );
     }
 
     /// [`quantize_row_q8k_dispatch`]'s cohort split against
@@ -21285,21 +23523,32 @@ mod tests {
     #[test]
     fn quantize_row_q8k_dispatch_is_bit_identical_to_the_serial_reference() {
         let block_count = MIN_QUANTIZE_BLOCKS_FOR_DISPATCH * 4;
-        let activation: Vec<f32> =
-            (0..block_count * Q4K_BLOCK_ELEMENTS).map(|index| ((index % 251) as f32 - 125.0) * 0.037).collect();
+        let activation: Vec<f32> = (0..block_count * Q4K_BLOCK_ELEMENTS)
+            .map(|index| ((index % 251) as f32 - 125.0) * 0.037)
+            .collect();
 
         let mut serial = vec![0u8; block_count * Q8K_BLOCK_BYTES];
-        quantize_row_q8k(&activation, &mut serial).expect("well-formed activation quantizes serially");
+        quantize_row_q8k(&activation, &mut serial)
+            .expect("well-formed activation quantizes serially");
 
-        let cohort = MatmulCohort::from_config(MatmulCohort::builder().members(NonZeroUsize::new(4).expect("4 is nonzero")).build())
-            .expect("test cohort with 4 members spawns");
-        let session = cohort.enter().expect("no other session open on a fresh cohort");
+        let cohort = MatmulCohort::from_config(
+            MatmulCohort::builder()
+                .members(NonZeroUsize::new(4).expect("4 is nonzero"))
+                .build(),
+        )
+        .expect("test cohort with 4 members spawns");
+        let session = cohort
+            .enter()
+            .expect("no other session open on a fresh cohort");
         let mut dispatched = vec![0u8; block_count * Q8K_BLOCK_BYTES];
         quantize_row_q8k_dispatch(&activation, &mut dispatched, Some(&session))
             .expect("well-formed activation quantizes through the cohort");
         drop(session);
 
-        assert_eq!(dispatched, serial, "cohort-dispatched Q8_K packing must be bit-identical to the serial reference");
+        assert_eq!(
+            dispatched, serial,
+            "cohort-dispatched Q8_K packing must be bit-identical to the serial reference"
+        );
     }
 
     /// [`transpose_wide_to_output`]'s cohort split against its own serial
@@ -21316,21 +23565,32 @@ mod tests {
             rows * leading_total >= MIN_TRANSPOSE_ELEMENTS_FOR_DISPATCH,
             "this shape must clear the threshold or this test proves nothing about the dispatch path"
         );
-        let wide: Vec<f32> = (0..rows * leading_total).map(|index| index as f32 * 0.5 - 17.0).collect();
+        let wide: Vec<f32> = (0..rows * leading_total)
+            .map(|index| index as f32 * 0.5 - 17.0)
+            .collect();
 
         let mut serial = vec![0.0f32; rows * leading_total];
         transpose_wide_to_output(&wide, rows, leading_total, None, &mut serial)
             .expect("serial transpose never fails");
 
-        let cohort = MatmulCohort::from_config(MatmulCohort::builder().members(NonZeroUsize::new(4).expect("4 is nonzero")).build())
-            .expect("test cohort with 4 members spawns");
-        let session = cohort.enter().expect("no other session open on a fresh cohort");
+        let cohort = MatmulCohort::from_config(
+            MatmulCohort::builder()
+                .members(NonZeroUsize::new(4).expect("4 is nonzero"))
+                .build(),
+        )
+        .expect("test cohort with 4 members spawns");
+        let session = cohort
+            .enter()
+            .expect("no other session open on a fresh cohort");
         let mut dispatched = vec![0.0f32; rows * leading_total];
         transpose_wide_to_output(&wide, rows, leading_total, Some(&session), &mut dispatched)
             .expect("cohort-dispatched transpose never fails");
         drop(session);
 
-        assert_eq!(dispatched, serial, "cohort-dispatched transpose must be bit-identical to the serial reference");
+        assert_eq!(
+            dispatched, serial,
+            "cohort-dispatched transpose must be bit-identical to the serial reference"
+        );
     }
 
     /// [`dot_q4k_q8k`]'s shape-mismatch guard, mirroring
@@ -21343,7 +23603,10 @@ mod tests {
         let weight_block = vec![0u8; Q4K_BLOCK_BYTES];
         let wrong_length_q8k = vec![0u8; Q8K_BLOCK_BYTES - 1];
         let error = dot_q4k_q8k(&weight_block, &wrong_length_q8k).unwrap_err();
-        assert!(matches!(error, TensorError::QuantizedShapeMismatch { .. }), "got {error:?}");
+        assert!(
+            matches!(error, TensorError::QuantizedShapeMismatch { .. }),
+            "got {error:?}"
+        );
     }
 
     /// Same guard, exercised on the always-portable entry point directly
@@ -21354,7 +23617,10 @@ mod tests {
         let weight_row = vec![0u8; Q4K_BLOCK_BYTES - 1];
         let q8k = vec![0u8; Q8K_BLOCK_BYTES];
         let error = dot_q4k_q8k_portable(&weight_row, &q8k).unwrap_err();
-        assert!(matches!(error, TensorError::QuantizedShapeMismatch { .. }), "got {error:?}");
+        assert!(
+            matches!(error, TensorError::QuantizedShapeMismatch { .. }),
+            "got {error:?}"
+        );
     }
 
     /// [`QuantDot::Fused`] vs [`QuantDot::Unfused`] on identical random
@@ -21375,24 +23641,36 @@ mod tests {
         let blocks_per_row = 3;
         let k = QK_K * blocks_per_row;
         let weight_f32 = random_vec(21, k);
-        let activation_f32: Vec<f32> = random_vec(22, k).into_iter().map(|value| value * 4.0 - 2.0).collect();
+        let activation_f32: Vec<f32> = random_vec(22, k)
+            .into_iter()
+            .map(|value| value * 4.0 - 2.0)
+            .collect();
 
         let mut weight_bytes = vec![0u8; blocks_per_row * BLOCK_BYTES];
         quantize(&weight_f32, &mut weight_bytes).expect("k is a whole number of q4_k super-blocks");
         let mut activation_q8k = vec![0u8; blocks_per_row * Q8K_BLOCK_BYTES];
-        quantize_row_q8k(&activation_f32, &mut activation_q8k).expect("k is a whole number of q8_k super-blocks");
+        quantize_row_q8k(&activation_f32, &mut activation_q8k)
+            .expect("k is a whole number of q8_k super-blocks");
 
-        let fused = block_on(QuantDot::Fused(QuantizedBlock::Q4K(&weight_bytes)).call(&activation_q8k))
-            .expect("fused int8 dot evaluates");
-        let unfused = block_on(QuantDot::Unfused(QuantizedBlock::Q4K(&weight_bytes)).call(&activation_q8k))
-            .expect("unfused dequantize-then-fold evaluates");
-        let kernel_ground_truth =
-            dot_q4k_q8k(&weight_bytes, &activation_q8k).expect("the underlying kernel evaluates directly");
+        let fused =
+            block_on(QuantDot::Fused(QuantizedBlock::Q4K(&weight_bytes)).call(&activation_q8k))
+                .expect("fused int8 dot evaluates");
+        let unfused =
+            block_on(QuantDot::Unfused(QuantizedBlock::Q4K(&weight_bytes)).call(&activation_q8k))
+                .expect("unfused dequantize-then-fold evaluates");
+        let kernel_ground_truth = dot_q4k_q8k(&weight_bytes, &activation_q8k)
+            .expect("the underlying kernel evaluates directly");
 
-        assert_eq!(fused, kernel_ground_truth, "QuantDot::Fused must be a bit-exact wrapper over dot_q4k_q8k");
+        assert_eq!(
+            fused, kernel_ground_truth,
+            "QuantDot::Fused must be a bit-exact wrapper over dot_q4k_q8k"
+        );
         let relative_error = (fused - unfused).abs() / fused.abs().max(1.0);
         eprintln!("q4_k QuantDot fused={fused} unfused={unfused} relative_error={relative_error}");
-        assert!(relative_error < 1e-3, "relative_error={relative_error} exceeds parity tolerance");
+        assert!(
+            relative_error < 1e-3,
+            "relative_error={relative_error} exceeds parity tolerance"
+        );
     }
 
     #[cfg(feature = "q5k-int8-dot")]
@@ -21403,24 +23681,36 @@ mod tests {
         let blocks_per_row = 3;
         let k = QK_K * blocks_per_row;
         let weight_f32 = random_vec(23, k);
-        let activation_f32: Vec<f32> = random_vec(24, k).into_iter().map(|value| value * 4.0 - 2.0).collect();
+        let activation_f32: Vec<f32> = random_vec(24, k)
+            .into_iter()
+            .map(|value| value * 4.0 - 2.0)
+            .collect();
 
         let mut weight_bytes = vec![0u8; blocks_per_row * BLOCK_BYTES];
         quantize(&weight_f32, &mut weight_bytes).expect("k is a whole number of q5_k super-blocks");
         let mut activation_q8k = vec![0u8; blocks_per_row * Q8K_BLOCK_BYTES];
-        quantize_row_q8k(&activation_f32, &mut activation_q8k).expect("k is a whole number of q8_k super-blocks");
+        quantize_row_q8k(&activation_f32, &mut activation_q8k)
+            .expect("k is a whole number of q8_k super-blocks");
 
-        let fused = block_on(QuantDot::Fused(QuantizedBlock::Q5K(&weight_bytes)).call(&activation_q8k))
-            .expect("fused int8 dot evaluates");
-        let unfused = block_on(QuantDot::Unfused(QuantizedBlock::Q5K(&weight_bytes)).call(&activation_q8k))
-            .expect("unfused dequantize-then-fold evaluates");
-        let kernel_ground_truth =
-            dot_q5k_q8k(&weight_bytes, &activation_q8k).expect("the underlying kernel evaluates directly");
+        let fused =
+            block_on(QuantDot::Fused(QuantizedBlock::Q5K(&weight_bytes)).call(&activation_q8k))
+                .expect("fused int8 dot evaluates");
+        let unfused =
+            block_on(QuantDot::Unfused(QuantizedBlock::Q5K(&weight_bytes)).call(&activation_q8k))
+                .expect("unfused dequantize-then-fold evaluates");
+        let kernel_ground_truth = dot_q5k_q8k(&weight_bytes, &activation_q8k)
+            .expect("the underlying kernel evaluates directly");
 
-        assert_eq!(fused, kernel_ground_truth, "QuantDot::Fused must be a bit-exact wrapper over dot_q5k_q8k");
+        assert_eq!(
+            fused, kernel_ground_truth,
+            "QuantDot::Fused must be a bit-exact wrapper over dot_q5k_q8k"
+        );
         let relative_error = (fused - unfused).abs() / fused.abs().max(1.0);
         eprintln!("q5_k QuantDot fused={fused} unfused={unfused} relative_error={relative_error}");
-        assert!(relative_error < 1e-3, "relative_error={relative_error} exceeds parity tolerance");
+        assert!(
+            relative_error < 1e-3,
+            "relative_error={relative_error} exceeds parity tolerance"
+        );
     }
 
     #[cfg(feature = "q6k-int8-dot")]
@@ -21431,24 +23721,36 @@ mod tests {
         let blocks_per_row = 3;
         let k = QK_K * blocks_per_row;
         let weight_f32 = random_vec(25, k);
-        let activation_f32: Vec<f32> = random_vec(26, k).into_iter().map(|value| value * 4.0 - 2.0).collect();
+        let activation_f32: Vec<f32> = random_vec(26, k)
+            .into_iter()
+            .map(|value| value * 4.0 - 2.0)
+            .collect();
 
         let mut weight_bytes = vec![0u8; blocks_per_row * BLOCK_BYTES];
         quantize(&weight_f32, &mut weight_bytes).expect("k is a whole number of q6_k super-blocks");
         let mut activation_q8k = vec![0u8; blocks_per_row * Q8K_BLOCK_BYTES];
-        quantize_row_q8k(&activation_f32, &mut activation_q8k).expect("k is a whole number of q8_k super-blocks");
+        quantize_row_q8k(&activation_f32, &mut activation_q8k)
+            .expect("k is a whole number of q8_k super-blocks");
 
-        let fused = block_on(QuantDot::Fused(QuantizedBlock::Q6K(&weight_bytes)).call(&activation_q8k))
-            .expect("fused int8 dot evaluates");
-        let unfused = block_on(QuantDot::Unfused(QuantizedBlock::Q6K(&weight_bytes)).call(&activation_q8k))
-            .expect("unfused dequantize-then-fold evaluates");
-        let kernel_ground_truth =
-            dot_q6k_q8k(&weight_bytes, &activation_q8k).expect("the underlying kernel evaluates directly");
+        let fused =
+            block_on(QuantDot::Fused(QuantizedBlock::Q6K(&weight_bytes)).call(&activation_q8k))
+                .expect("fused int8 dot evaluates");
+        let unfused =
+            block_on(QuantDot::Unfused(QuantizedBlock::Q6K(&weight_bytes)).call(&activation_q8k))
+                .expect("unfused dequantize-then-fold evaluates");
+        let kernel_ground_truth = dot_q6k_q8k(&weight_bytes, &activation_q8k)
+            .expect("the underlying kernel evaluates directly");
 
-        assert_eq!(fused, kernel_ground_truth, "QuantDot::Fused must be a bit-exact wrapper over dot_q6k_q8k");
+        assert_eq!(
+            fused, kernel_ground_truth,
+            "QuantDot::Fused must be a bit-exact wrapper over dot_q6k_q8k"
+        );
         let relative_error = (fused - unfused).abs() / fused.abs().max(1.0);
         eprintln!("q6_k QuantDot fused={fused} unfused={unfused} relative_error={relative_error}");
-        assert!(relative_error < 1e-3, "relative_error={relative_error} exceeds parity tolerance");
+        assert!(
+            relative_error < 1e-3,
+            "relative_error={relative_error} exceeds parity tolerance"
+        );
     }
 
     /// Both arms of [`QuantDot`] take the identical `In` shape
@@ -21461,12 +23763,20 @@ mod tests {
         let activation_q8k = vec![0u8; Q8K_BLOCK_BYTES];
 
         let fused_error =
-            block_on(QuantDot::Fused(QuantizedBlock::Q4K(&weight_row)).call(&activation_q8k)).unwrap_err();
-        assert!(matches!(fused_error, TensorError::QuantizedShapeMismatch { .. }), "got {fused_error:?}");
+            block_on(QuantDot::Fused(QuantizedBlock::Q4K(&weight_row)).call(&activation_q8k))
+                .unwrap_err();
+        assert!(
+            matches!(fused_error, TensorError::QuantizedShapeMismatch { .. }),
+            "got {fused_error:?}"
+        );
 
         let unfused_error =
-            block_on(QuantDot::Unfused(QuantizedBlock::Q4K(&weight_row)).call(&activation_q8k)).unwrap_err();
-        assert!(matches!(unfused_error, TensorError::QuantizedShapeMismatch { .. }), "got {unfused_error:?}");
+            block_on(QuantDot::Unfused(QuantizedBlock::Q4K(&weight_row)).call(&activation_q8k))
+                .unwrap_err();
+        assert!(
+            matches!(unfused_error, TensorError::QuantizedShapeMismatch { .. }),
+            "got {unfused_error:?}"
+        );
     }
 
     /// A codec `QuantDot` does not support (`Q8_0` has no `Q8_K`-activation
@@ -21480,12 +23790,20 @@ mod tests {
         let activation_q8k = vec![0u8; Q8K_BLOCK_BYTES];
 
         let fused_error =
-            block_on(QuantDot::Fused(QuantizedBlock::Q8_0(&weight_row)).call(&activation_q8k)).unwrap_err();
-        assert!(matches!(fused_error, TensorError::NotLowerable { .. }), "got {fused_error:?}");
+            block_on(QuantDot::Fused(QuantizedBlock::Q8_0(&weight_row)).call(&activation_q8k))
+                .unwrap_err();
+        assert!(
+            matches!(fused_error, TensorError::NotLowerable { .. }),
+            "got {fused_error:?}"
+        );
 
         let unfused_error =
-            block_on(QuantDot::Unfused(QuantizedBlock::Q8_0(&weight_row)).call(&activation_q8k)).unwrap_err();
-        assert!(matches!(unfused_error, TensorError::NotLowerable { .. }), "got {unfused_error:?}");
+            block_on(QuantDot::Unfused(QuantizedBlock::Q8_0(&weight_row)).call(&activation_q8k))
+                .unwrap_err();
+        assert!(
+            matches!(unfused_error, TensorError::NotLowerable { .. }),
+            "got {unfused_error:?}"
+        );
     }
 
     /// [`mins_correction_neon`] (the explicit NEON mins-correction path
@@ -21519,16 +23837,22 @@ mod tests {
         };
 
         let mut scales = [0u8; Q4K_SCALE_BYTES];
-        scales.copy_from_slice(&weight_bytes[Q4K_SCALES_OFFSET..Q4K_SCALES_OFFSET + Q4K_SCALE_BYTES]);
+        scales
+            .copy_from_slice(&weight_bytes[Q4K_SCALES_OFFSET..Q4K_SCALES_OFFSET + Q4K_SCALE_BYTES]);
 
-        let activation: Vec<f32> = random_vec(29, Q4K_BLOCK_ELEMENTS).into_iter().map(|value| value * 6.0 - 3.0).collect();
+        let activation: Vec<f32> = random_vec(29, Q4K_BLOCK_ELEMENTS)
+            .into_iter()
+            .map(|value| value * 6.0 - 3.0)
+            .collect();
         let mut activation_q8k = vec![0u8; Q8K_BLOCK_BYTES];
-        quantize_row_q8k(&activation, &mut activation_q8k).expect("well-formed activation super-block");
+        quantize_row_q8k(&activation, &mut activation_q8k)
+            .expect("well-formed activation super-block");
         let bsums = &activation_q8k[Q8K_BSUMS_OFFSET..Q8K_BSUMS_OFFSET + Q8K_BSUMS_COUNT * 2];
 
         let mut expected_mins_correction = 0i32;
         for sub_block in 0..Q4K_SUB_BLOCKS {
-            let (expected_scale, min_code) = proxima_gguf::quant::q4_k::get_scale_min_k4(sub_block, &scales);
+            let (expected_scale, min_code) =
+                proxima_gguf::quant::q4_k::get_scale_min_k4(sub_block, &scales);
             // SAFETY: `q4k_dotprod` cfg guarantees `FEAT_DotProd`; `bsums` is
             // exactly `Q8K_BSUMS_COUNT * 2` bytes from the fixed-size buffer above.
             let (scale_lo, scale_hi, _) = unsafe { mins_correction_neon(&scales, bsums) };
@@ -21538,7 +23862,8 @@ mod tests {
                 scale_byte(scale_hi, (sub_block - 4) as u32)
             };
             assert_eq!(
-                actual_scale, i32::from(expected_scale),
+                actual_scale,
+                i32::from(expected_scale),
                 "scale word diverged from the scalar get_scale_min_k4 route at sub_block {sub_block}"
             );
             let bsum_lo = i16::from_le_bytes([bsums[sub_block * 4], bsums[sub_block * 4 + 1]]);
@@ -21584,16 +23909,22 @@ mod tests {
         };
 
         let mut scales = [0u8; Q4K_SCALE_BYTES];
-        scales.copy_from_slice(&weight_bytes[Q5K_SCALES_OFFSET..Q5K_SCALES_OFFSET + Q4K_SCALE_BYTES]);
+        scales
+            .copy_from_slice(&weight_bytes[Q5K_SCALES_OFFSET..Q5K_SCALES_OFFSET + Q4K_SCALE_BYTES]);
 
-        let activation: Vec<f32> = random_vec(37, Q4K_BLOCK_ELEMENTS).into_iter().map(|value| value * 6.0 - 3.0).collect();
+        let activation: Vec<f32> = random_vec(37, Q4K_BLOCK_ELEMENTS)
+            .into_iter()
+            .map(|value| value * 6.0 - 3.0)
+            .collect();
         let mut activation_q8k = vec![0u8; Q8K_BLOCK_BYTES];
-        quantize_row_q8k(&activation, &mut activation_q8k).expect("well-formed activation super-block");
+        quantize_row_q8k(&activation, &mut activation_q8k)
+            .expect("well-formed activation super-block");
         let bsums = &activation_q8k[Q8K_BSUMS_OFFSET..Q8K_BSUMS_OFFSET + Q8K_BSUMS_COUNT * 2];
 
         let mut expected_mins_correction = 0i32;
         for sub_block in 0..Q4K_SUB_BLOCKS {
-            let (expected_scale, min_code) = proxima_gguf::quant::q4_k::get_scale_min_k4(sub_block, &scales);
+            let (expected_scale, min_code) =
+                proxima_gguf::quant::q4_k::get_scale_min_k4(sub_block, &scales);
             // SAFETY: `q4k_dotprod` cfg guarantees `FEAT_DotProd`; `bsums` is
             // exactly `Q8K_BSUMS_COUNT * 2` bytes from the fixed-size buffer above.
             let (scale_lo, scale_hi, _) = unsafe { mins_correction_neon(&scales, bsums) };
@@ -21603,7 +23934,8 @@ mod tests {
                 scale_byte(scale_hi, (sub_block - 4) as u32)
             };
             assert_eq!(
-                actual_scale, i32::from(expected_scale),
+                actual_scale,
+                i32::from(expected_scale),
                 "scale word diverged from the scalar get_scale_min_k4 route at sub_block {sub_block} on Q5_K bytes"
             );
             let bsum_lo = i16::from_le_bytes([bsums[sub_block * 4], bsums[sub_block * 4 + 1]]);
@@ -21627,7 +23959,11 @@ mod tests {
     /// matrix.
     fn quantized_matmul_program(rows: u32, k: u32) -> (Vec<Op>, NodeId) {
         let mut program = Vec::new();
-        let weight = block(&mut program, DType::UInt8, &[Extent::Static(rows), Extent::Static(k)]);
+        let weight = block(
+            &mut program,
+            DType::UInt8,
+            &[Extent::Static(rows), Extent::Static(k)],
+        );
         let activation = f32_block(&mut program, &[Extent::Static(k), Extent::Static(1)]);
         let product = append(
             &mut program,
@@ -21676,34 +24012,46 @@ mod tests {
         let blocks_per_row = 3;
         let k = QK_K as u32 * blocks_per_row as u32;
 
-        let activation: Vec<f32> = random_vec(13, k as usize).into_iter().map(|value| value * 4.0 - 2.0).collect();
-        let weight_f32: Vec<f32> =
-            random_vec(17, rows as usize * k as usize).into_iter().map(|value| value * 4.0 - 2.0).collect();
+        let activation: Vec<f32> = random_vec(13, k as usize)
+            .into_iter()
+            .map(|value| value * 4.0 - 2.0)
+            .collect();
+        let weight_f32: Vec<f32> = random_vec(17, rows as usize * k as usize)
+            .into_iter()
+            .map(|value| value * 4.0 - 2.0)
+            .collect();
 
         let mut weight_blocks = vec![0u8; rows as usize * blocks_per_row * BLOCK_BYTES];
-        for (row_f32, row_blocks) in
-            weight_f32.chunks_exact(k as usize).zip(weight_blocks.chunks_exact_mut(blocks_per_row * BLOCK_BYTES))
+        for (row_f32, row_blocks) in weight_f32
+            .chunks_exact(k as usize)
+            .zip(weight_blocks.chunks_exact_mut(blocks_per_row * BLOCK_BYTES))
         {
-            quantize(row_f32, row_blocks).expect("row length is a whole multiple of QK_K by construction");
+            quantize(row_f32, row_blocks)
+                .expect("row length is a whole multiple of QK_K by construction");
         }
 
         let (quantized_program, quantized_sum) = quantized_matmul_program(rows, k);
-        let quantized_blocks = [QuantizedBlock::Q4K(&weight_blocks), QuantizedBlock::Float32(&activation)];
-        let quantized_result = evaluate_quantized(&quantized_program, &[], &quantized_blocks, &[quantized_sum])
-            .expect("quantized matmul evaluates end to end");
+        let quantized_blocks = [
+            QuantizedBlock::Q4K(&weight_blocks),
+            QuantizedBlock::Float32(&activation),
+        ];
+        let quantized_result =
+            evaluate_quantized(&quantized_program, &[], &quantized_blocks, &[quantized_sum])
+                .expect("quantized matmul evaluates end to end");
 
         let mut dequantized_weight = vec![0.0f32; rows as usize * k as usize];
         for (row_blocks, row_f32) in weight_blocks
             .chunks_exact(blocks_per_row * BLOCK_BYTES)
             .zip(dequantized_weight.chunks_exact_mut(k as usize))
         {
-            dequantize(row_blocks, row_f32).expect("row_blocks is a whole number of q4_k super-blocks");
+            dequantize(row_blocks, row_f32)
+                .expect("row_blocks is a whole number of q4_k super-blocks");
         }
 
         let (f32_program, f32_sum) = matmul_program(rows, k, 1, false);
         let f32_blocks: [&[f32]; 2] = [&dequantized_weight, &activation];
-        let f32_result =
-            evaluate(&f32_program, &[], &f32_blocks, &[f32_sum]).expect("dequantized f32 matmul evaluates");
+        let f32_result = evaluate(&f32_program, &[], &f32_blocks, &[f32_sum])
+            .expect("dequantized f32 matmul evaluates");
 
         let actual = quantized_result.root();
         let expected = f32_result.root();
@@ -21713,13 +24061,19 @@ mod tests {
         let mut max_diff = 0.0f32;
         let mut sum_sq_diff = 0.0f64;
         for (&got, &want) in actual.iter().zip(expected.iter()) {
-            assert!(got.is_finite(), "evaluate_quantized produced a non-finite value: {got}");
+            assert!(
+                got.is_finite(),
+                "evaluate_quantized produced a non-finite value: {got}"
+            );
             let diff = (got - want).abs();
             max_diff = max_diff.max(diff);
             sum_sq_diff += f64::from(diff) * f64::from(diff);
         }
         let rms_diff = (sum_sq_diff / rows as f64).sqrt();
-        let max_magnitude = expected.iter().map(|value| value.abs()).fold(0.0f32, f32::max);
+        let max_magnitude = expected
+            .iter()
+            .map(|value| value.abs())
+            .fold(0.0f32, f32::max);
         let relative_max_diff = max_diff / max_magnitude;
         eprintln!(
             "evaluate_quantized vs dequantize-then-evaluate: max_diff={max_diff} rms_diff={rms_diff} \
@@ -21747,12 +24101,21 @@ mod tests {
     /// `gathered_dim: 0` and `index_map` reading iteration axis 0 (`s`) is the
     /// same [`IndexMap::Computed`] wiring [`embedding_lookup_program`] uses,
     /// just on the operand [`run_reduce_quantized`] actually dequantizes.
-    fn gathered_quantized_matmul_program(n_experts: u32, rows: u32, k: u32, seq: u32) -> (Vec<Op>, NodeId) {
+    fn gathered_quantized_matmul_program(
+        n_experts: u32,
+        rows: u32,
+        k: u32,
+        seq: u32,
+    ) -> (Vec<Op>, NodeId) {
         let mut program = Vec::new();
         let weight = block(
             &mut program,
             DType::UInt8,
-            &[Extent::Static(n_experts), Extent::Static(rows), Extent::Static(k)],
+            &[
+                Extent::Static(n_experts),
+                Extent::Static(rows),
+                Extent::Static(k),
+            ],
         );
         let route = block(&mut program, DType::Int32, &[Extent::Static(seq)]);
         let activation = f32_block(&mut program, &[Extent::Static(seq), Extent::Static(k)]);
@@ -21835,8 +24198,9 @@ mod tests {
                 .map(|value| (value * 4.0 - 2.0) * scale)
                 .collect();
             let mut blocks = vec![0u8; rows as usize * blocks_per_row * BLOCK_BYTES];
-            for (row_f32, row_blocks) in
-                weight_f32.chunks_exact(k as usize).zip(blocks.chunks_exact_mut(blocks_per_row * BLOCK_BYTES))
+            for (row_f32, row_blocks) in weight_f32
+                .chunks_exact(k as usize)
+                .zip(blocks.chunks_exact_mut(blocks_per_row * BLOCK_BYTES))
             {
                 quantize(row_f32, row_blocks).expect("row length is QK_K by construction");
             }
@@ -21844,8 +24208,10 @@ mod tests {
         }
         let stacked_weight: Vec<u8> = expert_blocks.iter().flatten().copied().collect();
 
-        let activation: Vec<f32> =
-            random_vec(211, seq as usize * k as usize).into_iter().map(|value| value * 2.0 - 1.0).collect();
+        let activation: Vec<f32> = random_vec(211, seq as usize * k as usize)
+            .into_iter()
+            .map(|value| value * 2.0 - 1.0)
+            .collect();
 
         let (program, sum) = gathered_quantized_matmul_program(n_experts, rows, k, seq);
         let quantized_blocks = [
@@ -21869,8 +24235,9 @@ mod tests {
             // a wrong-expert read, which is the one thing this test exists
             // to catch.
             #[cfg(feature = "q4k-int8-dot")]
-            let expected = matmul_q4k_q8k_f32(&expert_blocks[expert], rows as usize, activation_row)
-                .expect("the routed expert's own standalone matmul evaluates");
+            let expected =
+                matmul_q4k_q8k_f32(&expert_blocks[expert], rows as usize, activation_row)
+                    .expect("the routed expert's own standalone matmul evaluates");
             #[cfg(not(feature = "q4k-int8-dot"))]
             let expected = matmul_q4k_f32(&expert_blocks[expert], rows as usize, activation_row)
                 .expect("the routed expert's own standalone matmul evaluates");
@@ -21910,19 +24277,27 @@ mod tests {
         let k = QK_K as u32 * blocks_per_row as u32;
 
         fn quantized_weight_blocks(seed: u64, rows: u32, k: u32, blocks_per_row: usize) -> Vec<u8> {
-            let weight_f32: Vec<f32> =
-                random_vec(seed, rows as usize * k as usize).into_iter().map(|value| value * 4.0 - 2.0).collect();
+            let weight_f32: Vec<f32> = random_vec(seed, rows as usize * k as usize)
+                .into_iter()
+                .map(|value| value * 4.0 - 2.0)
+                .collect();
             let mut weight_blocks = vec![0u8; rows as usize * blocks_per_row * BLOCK_BYTES];
-            for (row_f32, row_blocks) in
-                weight_f32.chunks_exact(k as usize).zip(weight_blocks.chunks_exact_mut(blocks_per_row * BLOCK_BYTES))
+            for (row_f32, row_blocks) in weight_f32
+                .chunks_exact(k as usize)
+                .zip(weight_blocks.chunks_exact_mut(blocks_per_row * BLOCK_BYTES))
             {
-                quantize(row_f32, row_blocks).expect("row length is a whole multiple of QK_K by construction");
+                quantize(row_f32, row_blocks)
+                    .expect("row length is a whole multiple of QK_K by construction");
             }
             weight_blocks
         }
 
         fn append_layer(program: &mut Vec<Op>, rows: u32, k: u32) -> NodeId {
-            let weight = block(program, DType::UInt8, &[Extent::Static(rows), Extent::Static(k)]);
+            let weight = block(
+                program,
+                DType::UInt8,
+                &[Extent::Static(rows), Extent::Static(k)],
+            );
             let activation = f32_block(program, &[Extent::Static(k), Extent::Static(1)]);
             let product = append(
                 program,
@@ -21969,8 +24344,14 @@ mod tests {
 
         let weight1_blocks = quantized_weight_blocks(101, rows, k, blocks_per_row);
         let weight2_blocks = quantized_weight_blocks(202, rows, k, blocks_per_row);
-        let activation1: Vec<f32> = random_vec(303, k as usize).into_iter().map(|value| value * 4.0 - 2.0).collect();
-        let activation2: Vec<f32> = random_vec(404, k as usize).into_iter().map(|value| value * 4.0 - 2.0).collect();
+        let activation1: Vec<f32> = random_vec(303, k as usize)
+            .into_iter()
+            .map(|value| value * 4.0 - 2.0)
+            .collect();
+        let activation2: Vec<f32> = random_vec(404, k as usize)
+            .into_iter()
+            .map(|value| value * 4.0 - 2.0)
+            .collect();
 
         let blocks = [
             QuantizedBlock::Q4K(&weight1_blocks),
@@ -21982,8 +24363,9 @@ mod tests {
         let evaluated = evaluate_quantized(&program, &[], &blocks, &[total])
             .expect("two chained quantized layers evaluate without panicking");
 
-        let peak_live_buffers =
-            evaluated.peak_live_buffers().expect("evaluate_quantized always reports peak_live_buffers");
+        let peak_live_buffers = evaluated
+            .peak_live_buffers()
+            .expect("evaluate_quantized always reports peak_live_buffers");
         assert!(
             peak_live_buffers <= program.len(),
             "peak_live_buffers={peak_live_buffers} exceeds program.len()={} -- a live-buffer count can never \
@@ -22036,11 +24418,19 @@ mod tests {
         let weight = block(
             &mut program,
             DType::UInt8,
-            &[Extent::Static(cached_len), Extent::Static(kv_heads), Extent::Static(head_dim)],
+            &[
+                Extent::Static(cached_len),
+                Extent::Static(kv_heads),
+                Extent::Static(head_dim),
+            ],
         );
         let activation = f32_block(
             &mut program,
-            &[Extent::Static(sequence_len), Extent::Static(cached_len), Extent::Static(kv_heads)],
+            &[
+                Extent::Static(sequence_len),
+                Extent::Static(cached_len),
+                Extent::Static(kv_heads),
+            ],
         );
         let product = append(
             &mut program,
@@ -22069,14 +24459,23 @@ mod tests {
         );
 
         let weight_elements = (cached_len * kv_heads * head_dim) as usize;
-        assert_eq!(weight_elements % QK8_0, 0, "fixture dims must divide evenly into whole Q8_0 blocks");
+        assert_eq!(
+            weight_elements % QK8_0,
+            0,
+            "fixture dims must divide evenly into whole Q8_0 blocks"
+        );
         let weight_f32: Vec<f32> = random_vec(29, weight_elements);
         let mut weight_bytes = vec![0u8; (weight_elements / QK8_0) * BLOCK_BYTES];
-        quantize(&weight_f32, &mut weight_bytes).expect("fixture weight length is a whole multiple of QK8_0");
+        quantize(&weight_f32, &mut weight_bytes)
+            .expect("fixture weight length is a whole multiple of QK8_0");
 
-        let activation_values: Vec<f32> = random_vec(31, (sequence_len * cached_len * kv_heads) as usize);
+        let activation_values: Vec<f32> =
+            random_vec(31, (sequence_len * cached_len * kv_heads) as usize);
 
-        let blocks = [QuantizedBlock::Q8_0(&weight_bytes), QuantizedBlock::Float32(&activation_values)];
+        let blocks = [
+            QuantizedBlock::Q8_0(&weight_bytes),
+            QuantizedBlock::Float32(&activation_values),
+        ];
         let outcome = evaluate_quantized(&program, &[], &blocks, &[sum]);
 
         let error = outcome.expect_err(
@@ -22116,8 +24515,14 @@ mod tests {
     impl HalfPrecisionKind {
         fn pack(self, values: &[f32]) -> Vec<u8> {
             match self {
-                Self::F16 => values.iter().flat_map(|&value| f16::from_f32(value).to_le_bytes()).collect(),
-                Self::Bf16 => values.iter().flat_map(|&value| bf16::from_f32(value).to_le_bytes()).collect(),
+                Self::F16 => values
+                    .iter()
+                    .flat_map(|&value| f16::from_f32(value).to_le_bytes())
+                    .collect(),
+                Self::Bf16 => values
+                    .iter()
+                    .flat_map(|&value| bf16::from_f32(value).to_le_bytes())
+                    .collect(),
             }
         }
 
@@ -22128,7 +24533,12 @@ mod tests {
             }
         }
 
-        fn matmul(self, weights: &[u8], rows: usize, activation: &[f32]) -> Result<Vec<f32>, TensorError> {
+        fn matmul(
+            self,
+            weights: &[u8],
+            rows: usize,
+            activation: &[f32],
+        ) -> Result<Vec<f32>, TensorError> {
             match self {
                 Self::F16 => matmul_f16_f32(weights, rows, activation),
                 Self::Bf16 => matmul_bf16_f32(weights, rows, activation),
@@ -22146,12 +24556,16 @@ mod tests {
     #[proxima::test]
     #[case::f16(HalfPrecisionKind::F16)]
     #[case::bf16(HalfPrecisionKind::Bf16)]
-    async fn dot_half_precision_matches_a_hand_computed_dot_product(#[case] kind: HalfPrecisionKind) {
+    async fn dot_half_precision_matches_a_hand_computed_dot_product(
+        #[case] kind: HalfPrecisionKind,
+    ) {
         let weight = [1.0f32, 2.0, -1.0, 0.5];
         let activation = [2.0f32, 0.5, 3.0, 4.0];
         let weight_bytes = kind.pack(&weight);
 
-        let actual = kind.dot(&weight_bytes, &activation).expect("well-formed half-precision row");
+        let actual = kind
+            .dot(&weight_bytes, &activation)
+            .expect("well-formed half-precision row");
 
         assert_eq!(actual, 2.0f32, "hand-computed dot product ({kind:?})");
     }
@@ -22163,16 +24577,24 @@ mod tests {
     #[proxima::test]
     #[case::f16(HalfPrecisionKind::F16)]
     #[case::bf16(HalfPrecisionKind::Bf16)]
-    async fn matmul_half_precision_matches_a_hand_computed_two_row_matmul(#[case] kind: HalfPrecisionKind) {
+    async fn matmul_half_precision_matches_a_hand_computed_two_row_matmul(
+        #[case] kind: HalfPrecisionKind,
+    ) {
         let row0 = [1.0f32, 2.0, -1.0, 0.5];
         let row1 = [0.0f32, 1.0, 0.0, -2.0];
         let activation = [2.0f32, 0.5, 3.0, 4.0];
         let weights: Vec<f32> = row0.iter().chain(row1.iter()).copied().collect();
         let weight_bytes = kind.pack(&weights);
 
-        let actual = kind.matmul(&weight_bytes, 2, &activation).expect("well-formed 2-row half-precision matmul");
+        let actual = kind
+            .matmul(&weight_bytes, 2, &activation)
+            .expect("well-formed 2-row half-precision matmul");
 
-        assert_eq!(actual, alloc::vec![2.0f32, -7.5], "hand-computed 2-row matmul ({kind:?})");
+        assert_eq!(
+            actual,
+            alloc::vec![2.0f32, -7.5],
+            "hand-computed 2-row matmul ({kind:?})"
+        );
     }
 
     /// Proves the hand-computed assertion above is load-bearing rather than
@@ -22184,14 +24606,18 @@ mod tests {
     #[proxima::test]
     #[case::f16(HalfPrecisionKind::F16)]
     #[case::bf16(HalfPrecisionKind::Bf16)]
-    async fn matmul_half_precision_hand_computed_assertion_can_actually_fail(#[case] kind: HalfPrecisionKind) {
+    async fn matmul_half_precision_hand_computed_assertion_can_actually_fail(
+        #[case] kind: HalfPrecisionKind,
+    ) {
         let row0 = [1.0f32, 2.0, -1.0, 0.5];
         let row1 = [0.0f32, 1.0, 0.0, -2.0];
         let activation = [2.0f32, 0.5, 3.0, 4.0];
         let weights: Vec<f32> = row0.iter().chain(row1.iter()).copied().collect();
         let weight_bytes = kind.pack(&weights);
 
-        let actual = kind.matmul(&weight_bytes, 2, &activation).expect("well-formed 2-row half-precision matmul");
+        let actual = kind
+            .matmul(&weight_bytes, 2, &activation)
+            .expect("well-formed 2-row half-precision matmul");
         let deliberately_wrong = alloc::vec![2.0f32, 123.0];
 
         assert_ne!(
@@ -22236,7 +24662,9 @@ mod tests {
     #[proxima::test]
     #[case::f16(HalfPrecisionKind::F16)]
     #[case::bf16(HalfPrecisionKind::Bf16)]
-    async fn evaluate_quantized_executes_a_half_precision_weight_end_to_end(#[case] kind: HalfPrecisionKind) {
+    async fn evaluate_quantized_executes_a_half_precision_weight_end_to_end(
+        #[case] kind: HalfPrecisionKind,
+    ) {
         const ROWS: u32 = 3;
         const K: u32 = 16;
         const K_USIZE: usize = K as usize;
@@ -22246,7 +24674,11 @@ mod tests {
         let weight_bytes = kind.pack(&weights_f32);
 
         let mut program = Vec::new();
-        let weight = block(&mut program, DType::UInt8, &[Extent::Static(ROWS), Extent::Static(K)]);
+        let weight = block(
+            &mut program,
+            DType::UInt8,
+            &[Extent::Static(ROWS), Extent::Static(K)],
+        );
         let activation_node = f32_block(&mut program, &[Extent::Static(K)]);
         let product = append(
             &mut program,
@@ -22275,29 +24707,47 @@ mod tests {
         );
 
         let blocks = match kind {
-            HalfPrecisionKind::F16 => alloc::vec![QuantizedBlock::Float16(&weight_bytes), QuantizedBlock::Float32(&activation)],
-            HalfPrecisionKind::Bf16 => alloc::vec![QuantizedBlock::BFloat16(&weight_bytes), QuantizedBlock::Float32(&activation)],
+            HalfPrecisionKind::F16 => alloc::vec![
+                QuantizedBlock::Float16(&weight_bytes),
+                QuantizedBlock::Float32(&activation)
+            ],
+            HalfPrecisionKind::Bf16 => alloc::vec![
+                QuantizedBlock::BFloat16(&weight_bytes),
+                QuantizedBlock::Float32(&activation)
+            ],
         };
-        let evaluated = evaluate_quantized(&program, &[], &blocks, &[sum]).expect("half-precision matmul evaluates");
+        let evaluated = evaluate_quantized(&program, &[], &blocks, &[sum])
+            .expect("half-precision matmul evaluates");
         let actual = evaluated.root();
 
         let mut dequantized = vec![0.0f32; (ROWS * K) as usize];
         match kind {
             HalfPrecisionKind::F16 => {
-                proxima_gguf::quant::f16::dequantize(&weight_bytes, &mut dequantized).expect("well-formed f16 bytes");
+                proxima_gguf::quant::f16::dequantize(&weight_bytes, &mut dequantized)
+                    .expect("well-formed f16 bytes");
             }
             HalfPrecisionKind::Bf16 => {
-                proxima_gguf::quant::bf16::dequantize(&weight_bytes, &mut dequantized).expect("well-formed bf16 bytes");
+                proxima_gguf::quant::bf16::dequantize(&weight_bytes, &mut dequantized)
+                    .expect("well-formed bf16 bytes");
             }
         }
         let expected: Vec<f32> = dequantized
             .as_chunks::<K_USIZE>()
             .0
             .iter()
-            .map(|row| row.iter().zip(&activation).map(|(weight, value)| weight * value).sum())
+            .map(|row| {
+                row.iter()
+                    .zip(&activation)
+                    .map(|(weight, value)| weight * value)
+                    .sum()
+            })
             .collect();
 
-        assert_eq!(actual.len(), ROWS as usize, "degenerate gate: no outputs compared");
+        assert_eq!(
+            actual.len(),
+            ROWS as usize,
+            "degenerate gate: no outputs compared"
+        );
         // Not `assert_eq!`: `dot_fold_fused_multiply_add`'s `DOT_LANES` (8)
         // independent partial sums (K=16 here is two whole lanes) combine
         // in a different order than this reference's strict left-to-right
@@ -22308,7 +24758,10 @@ mod tests {
         // shape rather than bit-exact equality.
         let mut max_diff = 0.0f32;
         for (got, want) in actual.iter().zip(&expected) {
-            assert!(got.is_finite(), "half-precision matmul ({kind:?}) produced a non-finite value: {got}");
+            assert!(
+                got.is_finite(),
+                "half-precision matmul ({kind:?}) produced a non-finite value: {got}"
+            );
             max_diff = max_diff.max((got - want).abs());
         }
         eprintln!("half-precision matmul ({kind:?}) vs dequantize-then-fold: max_diff={max_diff}");
@@ -22338,8 +24791,14 @@ mod tests {
     /// file does not exist on this host, so these tests degrade to a
     /// no-op on a machine without the real model file rather than a hard
     /// failure.
-    #[cfg(any(feature = "q4k-int8-dot", feature = "q5k-int8-dot", feature = "q6k-int8-dot"))]
-    fn real_gguf_header(path: &std::path::Path) -> Option<(proxima_gguf::pipe::ParsedGguf, u64, std::fs::File)> {
+    #[cfg(any(
+        feature = "q4k-int8-dot",
+        feature = "q5k-int8-dot",
+        feature = "q6k-int8-dot"
+    ))]
+    fn real_gguf_header(
+        path: &std::path::Path,
+    ) -> Option<(proxima_gguf::pipe::ParsedGguf, u64, std::fs::File)> {
         use std::io::{Read, Seek, SeekFrom};
 
         use proxima_gguf::parser::{GgufEvent, GgufParser};
@@ -22362,10 +24821,16 @@ mod tests {
                 let mut completion = None;
                 for event in events {
                     match event {
-                        GgufEvent::Header { version: version_value, .. } => version = Some(version_value),
+                        GgufEvent::Header {
+                            version: version_value,
+                            ..
+                        } => version = Some(version_value),
                         GgufEvent::Metadata { key, value } => metadata.push((key, value)),
                         GgufEvent::Tensor(tensor) => tensors.push(tensor),
-                        GgufEvent::Complete { data_offset, alignment } => {
+                        GgufEvent::Complete {
+                            data_offset,
+                            alignment,
+                        } => {
                             completion = Some((data_offset, alignment));
                         }
                     }
@@ -22385,7 +24850,10 @@ mod tests {
                 }
             }
 
-            assert!(prefix_len < (1 << 26), "gguf header/directory exceeded 64 MiB prefix budget");
+            assert!(
+                prefix_len < (1 << 26),
+                "gguf header/directory exceeded 64 MiB prefix budget"
+            );
             prefix_len *= 2;
         }
     }
@@ -22396,7 +24864,11 @@ mod tests {
     /// `Q4_K_S` doesn't guarantee a given tensor lands at a given codec on
     /// every quantizer version -- reported, not faked, same stance
     /// `bench_q4k_matmul.rs` takes).
-    #[cfg(any(feature = "q4k-int8-dot", feature = "q5k-int8-dot", feature = "q6k-int8-dot"))]
+    #[cfg(any(
+        feature = "q4k-int8-dot",
+        feature = "q5k-int8-dot",
+        feature = "q6k-int8-dot"
+    ))]
     fn real_tensor_bytes(
         file: &mut std::fs::File,
         parsed: &proxima_gguf::pipe::ParsedGguf,
@@ -22406,7 +24878,10 @@ mod tests {
     ) -> Option<(Vec<u8>, usize, usize)> {
         use std::io::{Read, Seek, SeekFrom};
 
-        let tensor = parsed.tensors.iter().find(|candidate| candidate.name == name)?;
+        let tensor = parsed
+            .tensors
+            .iter()
+            .find(|candidate| candidate.name == name)?;
         if tensor.ggml_type != expect_type {
             eprintln!(
                 "real_tensor_bytes: {name} is {:?} in this file, not {expect_type:?} -- test skipped, not faked",
@@ -22416,16 +24891,23 @@ mod tests {
         }
         let in_dim = tensor.dims[0] as usize;
         let out_dim = tensor.dims[1] as usize;
-        let range = parsed.tensor_data_range(tensor, file_len).expect("tensor byte range within file bounds");
+        let range = parsed
+            .tensor_data_range(tensor, file_len)
+            .expect("tensor byte range within file bounds");
         let mut buf = vec![0u8; (range.end - range.start) as usize];
-        file.seek(SeekFrom::Start(range.start)).expect("seek to tensor data");
-        file.read_exact(&mut buf).expect("read exact tensor byte range");
+        file.seek(SeekFrom::Start(range.start))
+            .expect("seek to tensor data");
+        file.read_exact(&mut buf)
+            .expect("read exact tensor byte range");
         Some((buf, in_dim, out_dim))
     }
 
-    #[cfg(any(feature = "q4k-int8-dot", feature = "q5k-int8-dot", feature = "q6k-int8-dot"))]
-    const REAL_OPENCHAT_GGUF_PATH: &str =
-        "/Users/brianbruggeman/.lmstudio/models/TheBloke/openchat-3.5-1210-GGUF/openchat-3.5-1210.Q4_K_S.gguf";
+    #[cfg(any(
+        feature = "q4k-int8-dot",
+        feature = "q5k-int8-dot",
+        feature = "q6k-int8-dot"
+    ))]
+    const REAL_OPENCHAT_GGUF_PATH: &str = "/Users/brianbruggeman/.lmstudio/models/TheBloke/openchat-3.5-1210-GGUF/openchat-3.5-1210.Q4_K_S.gguf";
 
     /// [`matmul_q5k_q8k_f32`]/[`matmul_q5k_q8k_portable_f32`] agree with
     /// [`matmul_q5k_f32`] (the dequantize-then-fold reference path) on the
@@ -22453,24 +24935,39 @@ mod tests {
             return;
         };
 
-        let activation = random_vec(401, in_dim).into_iter().map(|value| value - 0.5).collect::<Vec<f32>>();
+        let activation = random_vec(401, in_dim)
+            .into_iter()
+            .map(|value| value - 0.5)
+            .collect::<Vec<f32>>();
 
-        let expected = matmul_q5k_f32(&weight_bytes, out_dim, &activation).expect("well-formed dequant reference matmul");
-        let dispatched = matmul_q5k_q8k_f32(&weight_bytes, out_dim, &activation).expect("well-formed packed int8 matmul");
-        let portable = matmul_q5k_q8k_portable_f32(&weight_bytes, out_dim, &activation).expect("well-formed portable matmul");
+        let expected = matmul_q5k_f32(&weight_bytes, out_dim, &activation)
+            .expect("well-formed dequant reference matmul");
+        let dispatched = matmul_q5k_q8k_f32(&weight_bytes, out_dim, &activation)
+            .expect("well-formed packed int8 matmul");
+        let portable = matmul_q5k_q8k_portable_f32(&weight_bytes, out_dim, &activation)
+            .expect("well-formed portable matmul");
 
-        assert_eq!(dispatched, portable, "attn_v: dispatched and portable packed-int8 arms diverged on real bytes");
+        assert_eq!(
+            dispatched, portable,
+            "attn_v: dispatched and portable packed-int8 arms diverged on real bytes"
+        );
 
         let mut max_error = 0.0f32;
         let mut sum_sq_error = 0.0f64;
         for (&got, &want) in dispatched.iter().zip(expected.iter()) {
-            assert!(got.is_finite(), "packed int8 matmul row produced a non-finite value: {got}");
+            assert!(
+                got.is_finite(),
+                "packed int8 matmul row produced a non-finite value: {got}"
+            );
             let diff = (got - want).abs();
             max_error = max_error.max(diff);
             sum_sq_error += f64::from(diff) * f64::from(diff);
         }
         let rms_error = (sum_sq_error / out_dim as f64).sqrt();
-        let max_magnitude = expected.iter().map(|value| value.abs()).fold(0.0f32, f32::max);
+        let max_magnitude = expected
+            .iter()
+            .map(|value| value.abs())
+            .fold(0.0f32, f32::max);
         let relative_max_error = max_error / max_magnitude;
         eprintln!(
             "attn_v (real Q5_K bytes) packed vs dequant-fold reference: max_error={max_error} \
@@ -22509,19 +25006,36 @@ mod tests {
             return;
         };
 
-        let activation = random_vec(402, in_dim).into_iter().map(|value| value - 0.5).collect::<Vec<f32>>();
+        let activation = random_vec(402, in_dim)
+            .into_iter()
+            .map(|value| value - 0.5)
+            .collect::<Vec<f32>>();
 
-        let expected = matmul_q5k_f32(&weight_bytes, out_dim, &activation).expect("well-formed dequant reference matmul");
-        let dispatched = matmul_q5k_q8k_f32(&weight_bytes, out_dim, &activation).expect("well-formed packed int8 matmul");
-        let portable = matmul_q5k_q8k_portable_f32(&weight_bytes, out_dim, &activation).expect("well-formed portable matmul");
+        let expected = matmul_q5k_f32(&weight_bytes, out_dim, &activation)
+            .expect("well-formed dequant reference matmul");
+        let dispatched = matmul_q5k_q8k_f32(&weight_bytes, out_dim, &activation)
+            .expect("well-formed packed int8 matmul");
+        let portable = matmul_q5k_q8k_portable_f32(&weight_bytes, out_dim, &activation)
+            .expect("well-formed portable matmul");
 
-        assert_eq!(dispatched, portable, "ffn_down: dispatched and portable packed-int8 arms diverged on real bytes");
+        assert_eq!(
+            dispatched, portable,
+            "ffn_down: dispatched and portable packed-int8 arms diverged on real bytes"
+        );
 
-        let max_error =
-            dispatched.iter().zip(expected.iter()).map(|(&got, &want)| (got - want).abs()).fold(0.0f32, f32::max);
-        let max_magnitude = expected.iter().map(|value| value.abs()).fold(0.0f32, f32::max);
+        let max_error = dispatched
+            .iter()
+            .zip(expected.iter())
+            .map(|(&got, &want)| (got - want).abs())
+            .fold(0.0f32, f32::max);
+        let max_magnitude = expected
+            .iter()
+            .map(|value| value.abs())
+            .fold(0.0f32, f32::max);
         let relative_max_error = max_error / max_magnitude;
-        eprintln!("ffn_down (real Q5_K bytes) packed vs dequant-fold reference: relative_max_error={relative_max_error}");
+        eprintln!(
+            "ffn_down (real Q5_K bytes) packed vs dequant-fold reference: relative_max_error={relative_max_error}"
+        );
         assert!(
             relative_max_error < 0.01,
             "relative_max_error={relative_max_error} exceeds loose sanity bound"
@@ -22540,30 +25054,49 @@ mod tests {
             eprintln!("real gguf file not found at {REAL_OPENCHAT_GGUF_PATH}; test skipped");
             return;
         };
-        let Some((weight_bytes, in_dim, out_dim)) =
-            real_tensor_bytes(&mut file, &parsed, file_len, "output.weight", proxima_gguf::types::GgmlType::Q6_K)
-        else {
+        let Some((weight_bytes, in_dim, out_dim)) = real_tensor_bytes(
+            &mut file,
+            &parsed,
+            file_len,
+            "output.weight",
+            proxima_gguf::types::GgmlType::Q6_K,
+        ) else {
             return;
         };
 
-        let activation = random_vec(403, in_dim).into_iter().map(|value| value - 0.5).collect::<Vec<f32>>();
+        let activation = random_vec(403, in_dim)
+            .into_iter()
+            .map(|value| value - 0.5)
+            .collect::<Vec<f32>>();
 
-        let expected = matmul_q6k_f32(&weight_bytes, out_dim, &activation).expect("well-formed dequant reference matmul");
-        let dispatched = matmul_q6k_q8k_f32(&weight_bytes, out_dim, &activation).expect("well-formed packed int8 matmul");
-        let portable = matmul_q6k_q8k_portable_f32(&weight_bytes, out_dim, &activation).expect("well-formed portable matmul");
+        let expected = matmul_q6k_f32(&weight_bytes, out_dim, &activation)
+            .expect("well-formed dequant reference matmul");
+        let dispatched = matmul_q6k_q8k_f32(&weight_bytes, out_dim, &activation)
+            .expect("well-formed packed int8 matmul");
+        let portable = matmul_q6k_q8k_portable_f32(&weight_bytes, out_dim, &activation)
+            .expect("well-formed portable matmul");
 
-        assert_eq!(dispatched, portable, "output.weight: dispatched and portable packed-int8 arms diverged on real bytes");
+        assert_eq!(
+            dispatched, portable,
+            "output.weight: dispatched and portable packed-int8 arms diverged on real bytes"
+        );
 
         let mut max_error = 0.0f32;
         let mut sum_sq_error = 0.0f64;
         for (&got, &want) in dispatched.iter().zip(expected.iter()) {
-            assert!(got.is_finite(), "packed int8 matmul row produced a non-finite value: {got}");
+            assert!(
+                got.is_finite(),
+                "packed int8 matmul row produced a non-finite value: {got}"
+            );
             let diff = (got - want).abs();
             max_error = max_error.max(diff);
             sum_sq_error += f64::from(diff) * f64::from(diff);
         }
         let rms_error = (sum_sq_error / out_dim as f64).sqrt();
-        let max_magnitude = expected.iter().map(|value| value.abs()).fold(0.0f32, f32::max);
+        let max_magnitude = expected
+            .iter()
+            .map(|value| value.abs())
+            .fold(0.0f32, f32::max);
         let relative_max_error = max_error / max_magnitude;
         eprintln!(
             "output.weight (real Q6_K bytes) packed vs dequant-fold reference: max_error={max_error} \
@@ -22615,17 +25148,25 @@ mod tests {
         let leading_total = 3usize;
         let activation: Vec<f32> = (0..leading_total)
             .flat_map(|position| {
-                random_vec(500 + position as u64, in_dim).into_iter().map(|value| value - 0.5)
+                random_vec(500 + position as u64, in_dim)
+                    .into_iter()
+                    .map(|value| value - 0.5)
             })
             .collect();
 
         let wide =
-            matmul_q4k_q8k_f32_impl(&weight_bytes, out_dim, &activation, leading_total, None).expect("wide fold call");
-        assert_eq!(wide.len(), out_dim * leading_total, "wide output is not row-major [row][position]");
+            matmul_q4k_q8k_f32_impl(&weight_bytes, out_dim, &activation, leading_total, None)
+                .expect("wide fold call");
+        assert_eq!(
+            wide.len(),
+            out_dim * leading_total,
+            "wide output is not row-major [row][position]"
+        );
 
         for position in 0..leading_total {
             let activation_row = &activation[position * in_dim..(position + 1) * in_dim];
-            let narrow = matmul_q4k_q8k_f32(&weight_bytes, out_dim, activation_row).expect("narrow per-position call");
+            let narrow = matmul_q4k_q8k_f32(&weight_bytes, out_dim, activation_row)
+                .expect("narrow per-position call");
             for row in 0..out_dim {
                 assert_eq!(
                     wide[row * leading_total + position],
@@ -22669,17 +25210,25 @@ mod tests {
         let leading_total = 3usize;
         let activation: Vec<f32> = (0..leading_total)
             .flat_map(|position| {
-                random_vec(600 + position as u64, in_dim).into_iter().map(|value| value - 0.5)
+                random_vec(600 + position as u64, in_dim)
+                    .into_iter()
+                    .map(|value| value - 0.5)
             })
             .collect();
 
         let wide =
-            matmul_q5k_q8k_f32_impl(&weight_bytes, out_dim, &activation, leading_total, None).expect("wide fold call");
-        assert_eq!(wide.len(), out_dim * leading_total, "wide output is not row-major [row][position]");
+            matmul_q5k_q8k_f32_impl(&weight_bytes, out_dim, &activation, leading_total, None)
+                .expect("wide fold call");
+        assert_eq!(
+            wide.len(),
+            out_dim * leading_total,
+            "wide output is not row-major [row][position]"
+        );
 
         for position in 0..leading_total {
             let activation_row = &activation[position * in_dim..(position + 1) * in_dim];
-            let narrow = matmul_q5k_q8k_f32(&weight_bytes, out_dim, activation_row).expect("narrow per-position call");
+            let narrow = matmul_q5k_q8k_f32(&weight_bytes, out_dim, activation_row)
+                .expect("narrow per-position call");
             for row in 0..out_dim {
                 assert_eq!(
                     wide[row * leading_total + position],
@@ -22720,17 +25269,25 @@ mod tests {
         let leading_total = 3usize;
         let activation: Vec<f32> = (0..leading_total)
             .flat_map(|position| {
-                random_vec(700 + position as u64, in_dim).into_iter().map(|value| value - 0.5)
+                random_vec(700 + position as u64, in_dim)
+                    .into_iter()
+                    .map(|value| value - 0.5)
             })
             .collect();
 
         let wide =
-            matmul_q6k_q8k_f32_impl(&weight_bytes, out_dim, &activation, leading_total, None).expect("wide fold call");
-        assert_eq!(wide.len(), out_dim * leading_total, "wide output is not row-major [row][position]");
+            matmul_q6k_q8k_f32_impl(&weight_bytes, out_dim, &activation, leading_total, None)
+                .expect("wide fold call");
+        assert_eq!(
+            wide.len(),
+            out_dim * leading_total,
+            "wide output is not row-major [row][position]"
+        );
 
         for position in 0..leading_total {
             let activation_row = &activation[position * in_dim..(position + 1) * in_dim];
-            let narrow = matmul_q6k_q8k_f32(&weight_bytes, out_dim, activation_row).expect("narrow per-position call");
+            let narrow = matmul_q6k_q8k_f32(&weight_bytes, out_dim, activation_row)
+                .expect("narrow per-position call");
             for row in 0..out_dim {
                 assert_eq!(
                     wide[row * leading_total + position],
@@ -22759,21 +25316,33 @@ mod tests {
         let blocks_per_row = 5;
         let k = QK_K * blocks_per_row;
 
-        let activation: Vec<f32> = random_vec(23, k).into_iter().map(|value| value * 6.0 - 3.0).collect();
-        let weight_f32: Vec<f32> = random_vec(29, rows * k).into_iter().map(|value| value * 6.0 - 3.0).collect();
+        let activation: Vec<f32> = random_vec(23, k)
+            .into_iter()
+            .map(|value| value * 6.0 - 3.0)
+            .collect();
+        let weight_f32: Vec<f32> = random_vec(29, rows * k)
+            .into_iter()
+            .map(|value| value * 6.0 - 3.0)
+            .collect();
 
         let mut weight_blocks = vec![0u8; rows * blocks_per_row * BLOCK_BYTES];
         for (row_f32, row_blocks) in weight_f32
             .chunks_exact(k)
             .zip(weight_blocks.chunks_exact_mut(blocks_per_row * BLOCK_BYTES))
         {
-            quantize(row_f32, row_blocks).expect("row length is a whole multiple of QK_K by construction");
+            quantize(row_f32, row_blocks)
+                .expect("row length is a whole multiple of QK_K by construction");
         }
 
-        let dispatched = matmul_q5k_q8k_f32(&weight_blocks, rows, &activation).expect("well-formed dispatched matmul");
-        let portable = matmul_q5k_q8k_portable_f32(&weight_blocks, rows, &activation).expect("well-formed portable matmul");
+        let dispatched = matmul_q5k_q8k_f32(&weight_blocks, rows, &activation)
+            .expect("well-formed dispatched matmul");
+        let portable = matmul_q5k_q8k_portable_f32(&weight_blocks, rows, &activation)
+            .expect("well-formed portable matmul");
 
-        assert_eq!(dispatched, portable, "dispatched and portable arms diverged -- not merely an acceleration");
+        assert_eq!(
+            dispatched, portable,
+            "dispatched and portable arms diverged -- not merely an acceleration"
+        );
     }
 
     /// [`dot_q6k_q8k_block_neon_dotprod`]'s equivalent bit-exactness proof.
@@ -22786,21 +25355,33 @@ mod tests {
         let blocks_per_row = 5;
         let k = QK_K * blocks_per_row;
 
-        let activation: Vec<f32> = random_vec(31, k).into_iter().map(|value| value * 6.0 - 3.0).collect();
-        let weight_f32: Vec<f32> = random_vec(37, rows * k).into_iter().map(|value| value * 6.0 - 3.0).collect();
+        let activation: Vec<f32> = random_vec(31, k)
+            .into_iter()
+            .map(|value| value * 6.0 - 3.0)
+            .collect();
+        let weight_f32: Vec<f32> = random_vec(37, rows * k)
+            .into_iter()
+            .map(|value| value * 6.0 - 3.0)
+            .collect();
 
         let mut weight_blocks = vec![0u8; rows * blocks_per_row * BLOCK_BYTES];
         for (row_f32, row_blocks) in weight_f32
             .chunks_exact(k)
             .zip(weight_blocks.chunks_exact_mut(blocks_per_row * BLOCK_BYTES))
         {
-            quantize(row_f32, row_blocks).expect("row length is a whole multiple of QK_K by construction");
+            quantize(row_f32, row_blocks)
+                .expect("row length is a whole multiple of QK_K by construction");
         }
 
-        let dispatched = matmul_q6k_q8k_f32(&weight_blocks, rows, &activation).expect("well-formed dispatched matmul");
-        let portable = matmul_q6k_q8k_portable_f32(&weight_blocks, rows, &activation).expect("well-formed portable matmul");
+        let dispatched = matmul_q6k_q8k_f32(&weight_blocks, rows, &activation)
+            .expect("well-formed dispatched matmul");
+        let portable = matmul_q6k_q8k_portable_f32(&weight_blocks, rows, &activation)
+            .expect("well-formed portable matmul");
 
-        assert_eq!(dispatched, portable, "dispatched and portable arms diverged -- not merely an acceleration");
+        assert_eq!(
+            dispatched, portable,
+            "dispatched and portable arms diverged -- not merely an acceleration"
+        );
     }
 
     /// [`QuantizedBlock::Q5K`] routes through [`evaluate_quantized`] end to
@@ -22826,36 +25407,50 @@ mod tests {
             .chunks_exact(k as usize)
             .zip(weight_blocks.chunks_exact_mut(blocks_per_row * BLOCK_BYTES))
         {
-            quantize(row_f32, row_blocks).expect("row length is a whole multiple of QK_K by construction");
+            quantize(row_f32, row_blocks)
+                .expect("row length is a whole multiple of QK_K by construction");
         }
 
         let (program, sum) = quantized_matmul_program(rows, k);
-        let blocks = [QuantizedBlock::Q5K(&weight_blocks), QuantizedBlock::Float32(&activation)];
-        let quantized_result =
-            evaluate_quantized(&program, &[], &blocks, &[sum]).expect("q5_k-quantized matmul evaluates");
+        let blocks = [
+            QuantizedBlock::Q5K(&weight_blocks),
+            QuantizedBlock::Float32(&activation),
+        ];
+        let quantized_result = evaluate_quantized(&program, &[], &blocks, &[sum])
+            .expect("q5_k-quantized matmul evaluates");
 
         let mut dequantized_weight = vec![0.0f32; rows as usize * k as usize];
         for (row_blocks, row_f32) in weight_blocks
             .chunks_exact(blocks_per_row * BLOCK_BYTES)
             .zip(dequantized_weight.chunks_exact_mut(k as usize))
         {
-            dequantize(row_blocks, row_f32).expect("row_blocks is a whole number of q5_k super-blocks");
+            dequantize(row_blocks, row_f32)
+                .expect("row_blocks is a whole number of q5_k super-blocks");
         }
 
         let (f32_program, f32_sum) = matmul_program(rows, k, 1, false);
         let f32_blocks: [&[f32]; 2] = [&dequantized_weight, &activation];
-        let f32_result =
-            evaluate(&f32_program, &[], &f32_blocks, &[f32_sum]).expect("dequantized f32 matmul evaluates");
+        let f32_result = evaluate(&f32_program, &[], &f32_blocks, &[f32_sum])
+            .expect("dequantized f32 matmul evaluates");
 
         let actual = quantized_result.root();
         let expected = f32_result.root();
         assert_eq!(actual.len(), rows as usize);
         assert_eq!(actual.len(), expected.len());
 
-        let max_diff = actual.iter().zip(expected.iter()).map(|(&got, &want)| (got - want).abs()).fold(0.0f32, f32::max);
-        let max_magnitude = expected.iter().map(|value| value.abs()).fold(0.0f32, f32::max);
+        let max_diff = actual
+            .iter()
+            .zip(expected.iter())
+            .map(|(&got, &want)| (got - want).abs())
+            .fold(0.0f32, f32::max);
+        let max_magnitude = expected
+            .iter()
+            .map(|value| value.abs())
+            .fold(0.0f32, f32::max);
         let relative_max_diff = max_diff / max_magnitude;
-        eprintln!("evaluate_quantized (Q5K) vs dequantize-then-evaluate: relative_max_diff={relative_max_diff}");
+        eprintln!(
+            "evaluate_quantized (Q5K) vs dequantize-then-evaluate: relative_max_diff={relative_max_diff}"
+        );
         assert!(
             relative_max_diff < 0.01,
             "relative_max_diff={relative_max_diff} (max_diff={max_diff} over magnitude {max_magnitude}) \
@@ -22904,9 +25499,14 @@ mod tests {
         let rows: u32 = 5;
         let k: u32 = 768;
 
-        let weight_f32: Vec<f32> =
-            random_vec(17, rows as usize * k as usize).into_iter().map(|value| value * 4.0 - 2.0).collect();
-        let activation: Vec<f32> = random_vec(13, k as usize).into_iter().map(|value| value * 4.0 - 2.0).collect();
+        let weight_f32: Vec<f32> = random_vec(17, rows as usize * k as usize)
+            .into_iter()
+            .map(|value| value * 4.0 - 2.0)
+            .collect();
+        let activation: Vec<f32> = random_vec(13, k as usize)
+            .into_iter()
+            .map(|value| value * 4.0 - 2.0)
+            .collect();
 
         let (f32_program, f32_sum) = matmul_program(rows, k, 1, false);
         let reference = evaluate(&f32_program, &[], &[&weight_f32, &activation], &[f32_sum])
@@ -22922,10 +25522,14 @@ mod tests {
                     .chunks_exact(k as usize)
                     .zip(weight_blocks.chunks_exact_mut(blocks_per_row * BLOCK_BYTES))
                 {
-                    quantize(row_f32, row_blocks).expect("row length is a whole multiple of QK_K by construction");
+                    quantize(row_f32, row_blocks)
+                        .expect("row length is a whole multiple of QK_K by construction");
                 }
                 let (program, sum) = quantized_matmul_program(rows, k);
-                let blocks = [QuantizedBlock::Q4K(&weight_blocks), QuantizedBlock::Float32(&activation)];
+                let blocks = [
+                    QuantizedBlock::Q4K(&weight_blocks),
+                    QuantizedBlock::Float32(&activation),
+                ];
                 evaluate_quantized(&program, &[], &blocks, &[sum])
                     .expect("q4_k-quantized matmul evaluates")
                     .root()
@@ -22939,10 +25543,14 @@ mod tests {
                     .chunks_exact(k as usize)
                     .zip(weight_blocks.chunks_exact_mut(blocks_per_row * BLOCK_BYTES))
                 {
-                    quantize(row_f32, row_blocks).expect("row length is a whole multiple of QK_K by construction");
+                    quantize(row_f32, row_blocks)
+                        .expect("row length is a whole multiple of QK_K by construction");
                 }
                 let (program, sum) = quantized_matmul_program(rows, k);
-                let blocks = [QuantizedBlock::Q5K(&weight_blocks), QuantizedBlock::Float32(&activation)];
+                let blocks = [
+                    QuantizedBlock::Q5K(&weight_blocks),
+                    QuantizedBlock::Float32(&activation),
+                ];
                 evaluate_quantized(&program, &[], &blocks, &[sum])
                     .expect("q5_k-quantized matmul evaluates")
                     .root()
@@ -22956,10 +25564,14 @@ mod tests {
                     .chunks_exact(k as usize)
                     .zip(weight_blocks.chunks_exact_mut(blocks_per_row * BLOCK_BYTES))
                 {
-                    quantize(row_f32, row_blocks).expect("row length is a whole multiple of QK_K by construction");
+                    quantize(row_f32, row_blocks)
+                        .expect("row length is a whole multiple of QK_K by construction");
                 }
                 let (program, sum) = quantized_matmul_program(rows, k);
-                let blocks = [QuantizedBlock::Q6K(&weight_blocks), QuantizedBlock::Float32(&activation)];
+                let blocks = [
+                    QuantizedBlock::Q6K(&weight_blocks),
+                    QuantizedBlock::Float32(&activation),
+                ];
                 evaluate_quantized(&program, &[], &blocks, &[sum])
                     .expect("q6_k-quantized matmul evaluates")
                     .root()
@@ -22973,10 +25585,14 @@ mod tests {
                     .chunks_exact(k as usize)
                     .zip(weight_blocks.chunks_exact_mut(blocks_per_row * BLOCK_BYTES))
                 {
-                    quantize(row_f32, row_blocks).expect("row length is a whole multiple of QK8_0 by construction");
+                    quantize(row_f32, row_blocks)
+                        .expect("row length is a whole multiple of QK8_0 by construction");
                 }
                 let (program, sum) = quantized_matmul_program(rows, k);
-                let blocks = [QuantizedBlock::Q8_0(&weight_blocks), QuantizedBlock::Float32(&activation)];
+                let blocks = [
+                    QuantizedBlock::Q8_0(&weight_blocks),
+                    QuantizedBlock::Float32(&activation),
+                ];
                 evaluate_quantized(&program, &[], &blocks, &[sum])
                     .expect("q8_0-quantized matmul evaluates")
                     .root()
@@ -22990,10 +25606,14 @@ mod tests {
                     .chunks_exact(k as usize)
                     .zip(weight_blocks.chunks_exact_mut(blocks_per_row * BLOCK_BYTES))
                 {
-                    quantize(row_f32, row_blocks).expect("row length is a whole multiple of QK4_0 by construction");
+                    quantize(row_f32, row_blocks)
+                        .expect("row length is a whole multiple of QK4_0 by construction");
                 }
                 let (program, sum) = quantized_matmul_program(rows, k);
-                let blocks = [QuantizedBlock::Q4_0(&weight_blocks), QuantizedBlock::Float32(&activation)];
+                let blocks = [
+                    QuantizedBlock::Q4_0(&weight_blocks),
+                    QuantizedBlock::Float32(&activation),
+                ];
                 evaluate_quantized(&program, &[], &blocks, &[sum])
                     .expect("q4_0-quantized matmul evaluates")
                     .root()
@@ -23003,14 +25623,26 @@ mod tests {
         };
 
         let expected = reference.root();
-        assert_eq!(actual.len(), rows as usize, "degenerate gate: no outputs compared");
+        assert_eq!(
+            actual.len(),
+            rows as usize,
+            "degenerate gate: no outputs compared"
+        );
         assert_eq!(actual.len(), expected.len());
 
-        let max_diff =
-            actual.iter().zip(expected.iter()).map(|(&got, &want)| (got - want).abs()).fold(0.0f32, f32::max);
-        let max_magnitude = expected.iter().map(|value| value.abs()).fold(0.0f32, f32::max);
+        let max_diff = actual
+            .iter()
+            .zip(expected.iter())
+            .map(|(&got, &want)| (got - want).abs())
+            .fold(0.0f32, f32::max);
+        let max_magnitude = expected
+            .iter()
+            .map(|value| value.abs())
+            .fold(0.0f32, f32::max);
         let relative = max_diff / max_magnitude;
-        eprintln!("{codec}: relative={relative} tolerance={tolerance} (max_diff={max_diff} max_magnitude={max_magnitude})");
+        eprintln!(
+            "{codec}: relative={relative} tolerance={tolerance} (max_diff={max_diff} max_magnitude={max_magnitude})"
+        );
         assert!(
             relative <= tolerance,
             "{codec}: relative diff {relative} exceeds tolerance {tolerance} -- max_diff={max_diff} \
@@ -23187,7 +25819,10 @@ mod tests {
                 dtype: DType::Float32,
                 body: ScalarOp::Equal,
                 operands: alloc::vec![
-                    (destination_positions, IndexMap::Affine(map::projection(2, &[0]))),
+                    (
+                        destination_positions,
+                        IndexMap::Affine(map::projection(2, &[0]))
+                    ),
                     (indices, IndexMap::Affine(map::projection(2, &[1]))),
                 ],
                 name: None,
@@ -23221,8 +25856,13 @@ mod tests {
 
         let index_values = [0.0f32, 2.0, 0.0, 1.0];
         let source_values = [10.0f32, 20.0, 30.0, 40.0];
-        let evaluated = evaluate(&program, &[], &[&index_values, &source_values], &[scattered])
-            .expect("scatter-add composed from Iota+Equal+Multiply+Reduce lowers and evaluates");
+        let evaluated = evaluate(
+            &program,
+            &[],
+            &[&index_values, &source_values],
+            &[scattered],
+        )
+        .expect("scatter-add composed from Iota+Equal+Multiply+Reduce lowers and evaluates");
 
         assert_eq!(
             evaluated.root(),

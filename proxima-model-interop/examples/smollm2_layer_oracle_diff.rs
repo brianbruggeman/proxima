@@ -31,8 +31,14 @@ use proxima_telemetry::recorder::Recorder;
 use proxima_tensor::spec::mistral_cached_forward_program_with_experts;
 
 fn read_oracle_activation(path: &PathBuf) -> Vec<f32> {
-    let bytes = fs::read(path).unwrap_or_else(|error| panic!("read oracle activation at {path:?}: {error}"));
-    bytes.as_chunks::<4>().0.iter().map(|chunk| f32::from_le_bytes(*chunk)).collect()
+    let bytes = fs::read(path)
+        .unwrap_or_else(|error| panic!("read oracle activation at {path:?}: {error}"));
+    bytes
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|chunk| f32::from_le_bytes(*chunk))
+        .collect()
 }
 
 /// The last `NodeId` a `block_count`-deep throwaway program shares with a
@@ -97,8 +103,12 @@ fn main() {
     let oracle_dir = env::args().nth(2).unwrap_or_else(|| {
         "/private/tmp/claude-501/-Users-brianbruggeman-repos-slot-0/6cd9e134-c1a3-450a-be93-76dd95389bf4/scratchpad/diverge/dump_f16_layers".to_string()
     });
-    let prompt = env::args().nth(3).unwrap_or_else(|| "The capital of France is the".to_string());
-    let log_path = env::args().nth(4).unwrap_or_else(|| "smollm2_layer_diff.jsonl".to_string());
+    let prompt = env::args()
+        .nth(3)
+        .unwrap_or_else(|| "The capital of France is the".to_string());
+    let log_path = env::args()
+        .nth(4)
+        .unwrap_or_else(|| "smollm2_layer_diff.jsonl".to_string());
 
     let model_path = PathBuf::from(&model_dir).join("model.safetensors");
     let oracle_path = PathBuf::from(&oracle_dir);
@@ -117,22 +127,27 @@ fn main() {
         .install()
         .expect("recorder");
 
-    let config_bytes = fs::read(PathBuf::from(&model_dir).join("config.json")).expect("read config.json");
+    let config_bytes =
+        fs::read(PathBuf::from(&model_dir).join("config.json")).expect("read config.json");
     let hf_config = parse_hf_config(&config_bytes).expect("parse config.json");
     let architecture = architecture_from_hf_config(&hf_config);
 
-    let tokenizer_bytes = fs::read(PathBuf::from(&model_dir).join("tokenizer.json")).expect("read tokenizer.json");
-    let vocab = proxima_tokenizer::hf::vocab_from_tokenizer_json(&tokenizer_bytes, Some(1), None, None)
-        .expect("build vocab from tokenizer.json");
+    let tokenizer_bytes =
+        fs::read(PathBuf::from(&model_dir).join("tokenizer.json")).expect("read tokenizer.json");
+    let vocab =
+        proxima_tokenizer::hf::vocab_from_tokenizer_json(&tokenizer_bytes, Some(1), None, None)
+            .expect("build vocab from tokenizer.json");
 
     let file_bytes = fs::read(&model_path).expect("read model.safetensors");
-    let manifest = proxima_safetensors::parse_complete(&file_bytes).expect("parse model.safetensors");
+    let manifest =
+        proxima_safetensors::parse_complete(&file_bytes).expect("parse model.safetensors");
     let mut length_prefix = [0u8; 8];
     length_prefix.copy_from_slice(&file_bytes[..8]);
     let data_start = 8 + u64::from_le_bytes(length_prefix);
 
     let model =
-        LoadedModel::load_from_safetensors(&manifest, &file_bytes, data_start, architecture, vocab).expect("load real smollm2 checkpoint");
+        LoadedModel::load_from_safetensors(&manifest, &file_bytes, data_start, architecture, vocab)
+            .expect("load real smollm2 checkpoint");
 
     let block_count = architecture.block_count;
     let mut node_ids = Vec::with_capacity(block_count as usize + 1);
@@ -160,7 +175,9 @@ fn main() {
         labels.push(format!("l_out-{layer}"));
     }
 
-    let ours = model.forward_node_values(&prompt, &node_ids).expect("compute our own layer activations");
+    let ours = model
+        .forward_node_values(&prompt, &node_ids)
+        .expect("compute our own layer activations");
 
     println!("label node_id max_abs_diff worst_index ours_value theirs_value");
     let mut first_gross_divergence: Option<String> = None;
@@ -171,7 +188,11 @@ fn main() {
             continue;
         }
         let theirs = read_oracle_activation(&oracle_path);
-        assert_eq!(values.len(), theirs.len(), "{label}: element count mismatch");
+        assert_eq!(
+            values.len(),
+            theirs.len(),
+            "{label}: element count mismatch"
+        );
 
         let mut max_abs_diff = 0f32;
         let mut worst_index = 0usize;
@@ -184,12 +205,20 @@ fn main() {
         }
         println!(
             "{label} node={} {:e} {worst_index} {:.6} {:.6}",
-            node_ids[labels.iter().position(|candidate| candidate == label).unwrap()].0,
+            node_ids[labels
+                .iter()
+                .position(|candidate| candidate == label)
+                .unwrap()]
+            .0,
             max_abs_diff,
             values[worst_index],
             theirs[worst_index]
         );
-        let level = if max_abs_diff > 1e-1 { Level::WARN } else { Level::DEBUG };
+        let level = if max_abs_diff > 1e-1 {
+            Level::WARN
+        } else {
+            Level::DEBUG
+        };
         // this diagnostic runs once per layer (31 max on a real checkpoint)
         // and `tag` needs `&'static str`; leaking the per-layer label is
         // bounded and cheaper than threading an owned-string tag type
@@ -217,7 +246,9 @@ fn main() {
             for position in 0..(values.len() / embedding) {
                 let mut position_max = 0f32;
                 for local in 0..embedding {
-                    let diff = (values[position * embedding + local] - theirs[position * embedding + local]).abs();
+                    let diff = (values[position * embedding + local]
+                        - theirs[position * embedding + local])
+                        .abs();
                     position_max = position_max.max(diff);
                 }
                 recorder

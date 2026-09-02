@@ -40,7 +40,10 @@ pub use error::SafetensorsError;
 pub use header_codec::HeaderCodec;
 pub use parser::{Manifest, SafetensorsParser, TensorEntry};
 pub use pipe::parse_complete;
-pub use sized::{FORMAT_VERSION_KEY, FORMAT_VERSION_MAJOR, FORMAT_VERSION_MINOR, HEADER_LEN_BYTES, MAX_HEADER_BYTES};
+pub use sized::{
+    FORMAT_VERSION_KEY, FORMAT_VERSION_MAJOR, FORMAT_VERSION_MINOR, HEADER_LEN_BYTES,
+    MAX_HEADER_BYTES,
+};
 pub use writer::{SafetensorsModel, TensorPayload, write_complete};
 
 #[cfg(test)]
@@ -134,8 +137,14 @@ mod tests {
 
         assert_eq!(manifest.tensors.len(), 4);
         assert!(manifest.tensor("__metadata__").is_none());
-        assert_eq!(manifest.metadata.get("format").map(String::as_str), Some("pt"));
-        assert_eq!(manifest.metadata.get("author").map(String::as_str), Some("test"));
+        assert_eq!(
+            manifest.metadata.get("format").map(String::as_str),
+            Some("pt")
+        );
+        assert_eq!(
+            manifest.metadata.get("author").map(String::as_str),
+            Some("test")
+        );
 
         let scalar = manifest.tensor("scalar").expect("scalar present");
         assert_eq!(scalar.dtype, DType::Float32);
@@ -180,8 +189,7 @@ mod tests {
         assert_eq!(mid_len_prefix, whole);
 
         // mid-JSON: split partway through the header JSON body.
-        let header_len =
-            u64::from_le_bytes(buf[..8].try_into().expect("8 bytes")) as usize;
+        let header_len = u64::from_le_bytes(buf[..8].try_into().expect("8 bytes")) as usize;
         let mid_json_point = 8 + header_len / 2;
         let mid_json = parse_in_chunks(&buf, &[mid_json_point]).expect("splits mid json");
         assert_eq!(mid_json, whole);
@@ -223,7 +231,9 @@ mod tests {
     fn header_length_exceeding_max_is_a_typed_error() {
         let mut wire = vec![0_u8; 8];
         wire[..8].copy_from_slice(&(MAX_HEADER_BYTES + 1).to_le_bytes());
-        let outcome = SafetensorsParser::new().push(&wire).and_then(|parser| parser.finish());
+        let outcome = SafetensorsParser::new()
+            .push(&wire)
+            .and_then(|parser| parser.finish());
         assert!(matches!(
             outcome,
             Err(SafetensorsError::HeaderTooLarge { .. })
@@ -236,7 +246,9 @@ mod tests {
         let mut wire = Vec::new();
         wire.extend_from_slice(&(bad_json.len() as u64).to_le_bytes());
         wire.extend_from_slice(bad_json);
-        let outcome = SafetensorsParser::new().push(&wire).and_then(|parser| parser.finish());
+        let outcome = SafetensorsParser::new()
+            .push(&wire)
+            .and_then(|parser| parser.finish());
         assert!(matches!(
             outcome,
             Err(SafetensorsError::MalformedJson { .. })
@@ -253,7 +265,9 @@ mod tests {
         wire.extend_from_slice(&(json.len() as u64).to_le_bytes());
         wire.extend_from_slice(json);
         wire.extend_from_slice(&[0_u8; 10]);
-        let outcome = SafetensorsParser::new().push(&wire).and_then(|parser| parser.finish());
+        let outcome = SafetensorsParser::new()
+            .push(&wire)
+            .and_then(|parser| parser.finish());
         assert!(matches!(
             outcome,
             Err(SafetensorsError::OffsetOutOfBounds { .. })
@@ -268,7 +282,9 @@ mod tests {
         wire.extend_from_slice(&(json.len() as u64).to_le_bytes());
         wire.extend_from_slice(json);
         wire.extend_from_slice(&[0_u8; 12]);
-        let outcome = SafetensorsParser::new().push(&wire).and_then(|parser| parser.finish());
+        let outcome = SafetensorsParser::new()
+            .push(&wire)
+            .and_then(|parser| parser.finish());
         assert!(matches!(
             outcome,
             Err(SafetensorsError::OverlappingTensors { .. })
@@ -284,7 +300,9 @@ mod tests {
         wire.extend_from_slice(&(json.len() as u64).to_le_bytes());
         wire.extend_from_slice(json);
         wire.extend_from_slice(&[0_u8; 8]);
-        let outcome = SafetensorsParser::new().push(&wire).and_then(|parser| parser.finish());
+        let outcome = SafetensorsParser::new()
+            .push(&wire)
+            .and_then(|parser| parser.finish());
         assert!(matches!(
             outcome,
             Err(SafetensorsError::UnsupportedDtype { .. })
@@ -301,7 +319,9 @@ mod tests {
         let mut wire = Vec::new();
         wire.extend_from_slice(&(json.len() as u64).to_le_bytes());
         wire.extend_from_slice(json);
-        let outcome = SafetensorsParser::new().push(&wire).and_then(|parser| parser.finish());
+        let outcome = SafetensorsParser::new()
+            .push(&wire)
+            .and_then(|parser| parser.finish());
         assert!(outcome.is_err(), "expected a typed error, got {outcome:?}");
     }
 
@@ -321,7 +341,9 @@ mod tests {
         wire.extend_from_slice(&(json.len() as u64).to_le_bytes());
         wire.extend_from_slice(json);
         wire.extend_from_slice(&[0_u8; 4]);
-        let outcome = SafetensorsParser::new().push(&wire).and_then(|parser| parser.finish());
+        let outcome = SafetensorsParser::new()
+            .push(&wire)
+            .and_then(|parser| parser.finish());
         assert!(matches!(
             outcome,
             Err(SafetensorsError::TensorDataLengthMismatch {

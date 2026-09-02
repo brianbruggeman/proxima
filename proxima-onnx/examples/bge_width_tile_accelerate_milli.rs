@@ -46,9 +46,18 @@ const RUNS: usize = 5;
 
 fn sentences() -> [(&'static str, Vec<i64>); 3] {
     [
-        ("the cat sat on the mat", vec![101, 1996, 4937, 2938, 2006, 1996, 13523, 102]),
-        ("a cat is sitting on a mat", vec![101, 1037, 4937, 2003, 3564, 2006, 1037, 13523, 102]),
-        ("quantum physics explains atomic energy", vec![101, 8559, 5584, 7607, 9593, 2943, 102]),
+        (
+            "the cat sat on the mat",
+            vec![101, 1996, 4937, 2938, 2006, 1996, 13523, 102],
+        ),
+        (
+            "a cat is sitting on a mat",
+            vec![101, 1037, 4937, 2003, 3564, 2006, 1037, 13523, 102],
+        ),
+        (
+            "quantum physics explains atomic energy",
+            vec![101, 8559, 5584, 7607, 9593, 2943, 102],
+        ),
     ]
 }
 
@@ -61,7 +70,12 @@ fn cosine(a: &[f32], b: &[f32]) -> f32 {
 
 type NamedInputs<'a> = Vec<(&'a str, &'a [f32])>;
 
-fn timed_arm(arena: &mut StaticArena, named: &NamedInputs<'_>, output: proxima_tensor::NodeId, accelerate: bool) -> (f64, u64, Vec<f32>) {
+fn timed_arm(
+    arena: &mut StaticArena,
+    named: &NamedInputs<'_>,
+    output: proxima_tensor::NodeId,
+    accelerate: bool,
+) -> (f64, u64, Vec<f32>) {
     #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
     cpu::set_accelerate_gemm_enabled(accelerate);
     let _ = accelerate;
@@ -90,7 +104,11 @@ fn timed_arm(arena: &mut StaticArena, named: &NamedInputs<'_>, output: proxima_t
     #[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
     let engagement = 0u64;
 
-    let norm: f32 = last_embedding.iter().map(|value| value * value).sum::<f32>().sqrt();
+    let norm: f32 = last_embedding
+        .iter()
+        .map(|value| value * value)
+        .sum::<f32>()
+        .sqrt();
     for value in &mut last_embedding {
         *value /= norm;
     }
@@ -99,13 +117,19 @@ fn timed_arm(arena: &mut StaticArena, named: &NamedInputs<'_>, output: proxima_t
 
 fn mean_cov(samples: &[f64]) -> (f64, f64) {
     let mean = samples.iter().sum::<f64>() / samples.len() as f64;
-    let variance = samples.iter().map(|value| (value - mean).powi(2)).sum::<f64>() / samples.len() as f64;
+    let variance = samples
+        .iter()
+        .map(|value| (value - mean).powi(2))
+        .sum::<f64>()
+        / samples.len() as f64;
     (mean, variance.sqrt() / mean * 100.0)
 }
 
 fn main() {
     let Ok(model_path) = env::var(MODEL_PATH_ENV) else {
-        eprintln!("skipping: set {MODEL_PATH_ENV} to a local BGE-small-en-v1.5 model.onnx checkout");
+        eprintln!(
+            "skipping: set {MODEL_PATH_ENV} to a local BGE-small-en-v1.5 model.onnx checkout"
+        );
         return;
     };
     if !Path::new(&model_path).exists() {
@@ -116,8 +140,12 @@ fn main() {
     let model = proxima_onnx::pipe::parse_complete(&bytes).expect("parse");
     let graph = model.graph.as_ref().expect("graph");
 
-    println!("bge_width_tile_accelerate_milli: ROW 209 MILLI rung -- real BGE graph, {RUNS} interleaved runs, {WARMUP_CALLS}-call warm-up excluded, {MEASURED_CALLS} measured calls/arm/run");
-    println!("PRE-REGISTRATION: see file doc comment -- predicted step-time ratio ~0.40x-0.65x, engagement > 0 required every accelerate arm.");
+    println!(
+        "bge_width_tile_accelerate_milli: ROW 209 MILLI rung -- real BGE graph, {RUNS} interleaved runs, {WARMUP_CALLS}-call warm-up excluded, {MEASURED_CALLS} measured calls/arm/run"
+    );
+    println!(
+        "PRE-REGISTRATION: see file doc comment -- predicted step-time ratio ~0.40x-0.65x, engagement > 0 required every accelerate arm."
+    );
 
     let mut embeddings_neon = Vec::new();
     let mut embeddings_accelerate = Vec::new();
@@ -127,8 +155,13 @@ fn main() {
         let mut pins = std::collections::BTreeMap::new();
         pins.insert("batch_size", 1u64);
         pins.insert("sequence_length", sequence_length as u64);
-        let lowered = proxima_onnx::lower::lower_graph_pinned(graph, &pins).expect("lower BGE-small with pinned symbolic axes");
-        let output = lowered.graph_outputs.first().expect("last_hidden_state output").1;
+        let lowered = proxima_onnx::lower::lower_graph_pinned(graph, &pins)
+            .expect("lower BGE-small with pinned symbolic axes");
+        let output = lowered
+            .graph_outputs
+            .first()
+            .expect("last_hidden_state output")
+            .1;
 
         let input_ids: Vec<f32> = tokens.iter().map(|&id| id as f32).collect();
         let attention_mask = vec![1.0f32; sequence_length];
@@ -142,7 +175,11 @@ fn main() {
                 other => panic!("unexpected graph input {other:?}"),
             }
         }
-        let mut named: NamedInputs<'_> = lowered.initializers.iter().map(|(weight_name, data)| (weight_name.as_str(), data.as_slice())).collect();
+        let mut named: NamedInputs<'_> = lowered
+            .initializers
+            .iter()
+            .map(|(weight_name, data)| (weight_name.as_str(), data.as_slice()))
+            .collect();
         named.push((input_names[0].as_str(), &input_ids));
         named.push((input_names[1].as_str(), &attention_mask));
         named.push((input_names[2].as_str(), &token_type_ids));
@@ -158,46 +195,92 @@ fn main() {
         for run in 0..RUNS {
             let neon_first = run % 2 == 0;
             if neon_first {
-                let (elapsed, _engagement, embedding) = timed_arm(&mut arena, &named, output, false);
+                let (elapsed, _engagement, embedding) =
+                    timed_arm(&mut arena, &named, output, false);
                 neon_ms.push(elapsed);
                 neon_embedding = embedding;
                 let (elapsed, engagement, embedding) = timed_arm(&mut arena, &named, output, true);
                 accelerate_ms.push(elapsed);
                 accelerate_embedding = embedding;
-                println!("  run {run} (neon, accelerate): neon={:.4}ms accelerate={:.4}ms (engagement-hits={engagement})", neon_ms[run], accelerate_ms[run]);
-                assert!(engagement > 0, "engagement proof: accelerate arm must record at least one accelerate_gemm_totals() hit, got 0");
+                println!(
+                    "  run {run} (neon, accelerate): neon={:.4}ms accelerate={:.4}ms (engagement-hits={engagement})",
+                    neon_ms[run], accelerate_ms[run]
+                );
+                assert!(
+                    engagement > 0,
+                    "engagement proof: accelerate arm must record at least one accelerate_gemm_totals() hit, got 0"
+                );
             } else {
                 let (elapsed, engagement, embedding) = timed_arm(&mut arena, &named, output, true);
                 accelerate_ms.push(elapsed);
                 accelerate_embedding = embedding;
-                let (elapsed, _engagement, embedding) = timed_arm(&mut arena, &named, output, false);
+                let (elapsed, _engagement, embedding) =
+                    timed_arm(&mut arena, &named, output, false);
                 neon_ms.push(elapsed);
                 neon_embedding = embedding;
-                println!("  run {run} (accelerate, neon): accelerate={:.4}ms neon={:.4}ms (engagement-hits={engagement})", accelerate_ms[run], neon_ms[run]);
-                assert!(engagement > 0, "engagement proof: accelerate arm must record at least one accelerate_gemm_totals() hit, got 0");
+                println!(
+                    "  run {run} (accelerate, neon): accelerate={:.4}ms neon={:.4}ms (engagement-hits={engagement})",
+                    accelerate_ms[run], neon_ms[run]
+                );
+                assert!(
+                    engagement > 0,
+                    "engagement proof: accelerate arm must record at least one accelerate_gemm_totals() hit, got 0"
+                );
             }
         }
 
         let (neon_mean, neon_cov) = mean_cov(&neon_ms);
         let (accelerate_mean, accelerate_cov) = mean_cov(&accelerate_ms);
         let ratio = accelerate_mean / neon_mean;
-        println!("  neon:       mean={neon_mean:.4}ms CoV={neon_cov:.2}% samples={:?}", neon_ms.iter().map(|value| format!("{value:.3}")).collect::<Vec<_>>());
-        println!("  accelerate: mean={accelerate_mean:.4}ms CoV={accelerate_cov:.2}% samples={:?}", accelerate_ms.iter().map(|value| format!("{value:.3}")).collect::<Vec<_>>());
-        println!("  -> accelerate/neon step-time ratio: {ratio:.4}x  ({:.2}% delta)", (ratio - 1.0) * 100.0);
-        let outcome = if (0.30..=0.75).contains(&ratio) { "HIT" } else { "MISS" };
-        println!("  -> pre-registered prediction: ~0.40x-0.65x (widened to 0.30x-0.75x for gate purposes) -> {outcome}");
+        println!(
+            "  neon:       mean={neon_mean:.4}ms CoV={neon_cov:.2}% samples={:?}",
+            neon_ms
+                .iter()
+                .map(|value| format!("{value:.3}"))
+                .collect::<Vec<_>>()
+        );
+        println!(
+            "  accelerate: mean={accelerate_mean:.4}ms CoV={accelerate_cov:.2}% samples={:?}",
+            accelerate_ms
+                .iter()
+                .map(|value| format!("{value:.3}"))
+                .collect::<Vec<_>>()
+        );
+        println!(
+            "  -> accelerate/neon step-time ratio: {ratio:.4}x  ({:.2}% delta)",
+            (ratio - 1.0) * 100.0
+        );
+        let outcome = if (0.30..=0.75).contains(&ratio) {
+            "HIT"
+        } else {
+            "MISS"
+        };
+        println!(
+            "  -> pre-registered prediction: ~0.40x-0.65x (widened to 0.30x-0.75x for gate purposes) -> {outcome}"
+        );
         if neon_cov > 5.0 || accelerate_cov > 5.0 {
-            println!("  -> CoV above 5% trust line on at least one arm -- report the RANGE, not the point estimate, for this sentence.");
+            println!(
+                "  -> CoV above 5% trust line on at least one arm -- report the RANGE, not the point estimate, for this sentence."
+            );
         }
 
-        let max_abs_diff = neon_embedding.iter().zip(accelerate_embedding.iter()).map(|(&a, &b)| (a - b).abs()).fold(0.0f32, f32::max);
+        let max_abs_diff = neon_embedding
+            .iter()
+            .zip(accelerate_embedding.iter())
+            .map(|(&a, &b)| (a - b).abs())
+            .fold(0.0f32, f32::max);
         let max_rel_diff = neon_embedding
             .iter()
             .zip(accelerate_embedding.iter())
             .map(|(&a, &b)| (a - b).abs() / a.abs().max(1e-6))
             .fold(0.0f32, f32::max);
-        println!("  -> correctness: max_abs_diff(neon, accelerate)={max_abs_diff:.8} max_rel_diff={max_rel_diff:.8}");
-        assert!(max_abs_diff < 1e-2, "accelerate embedding diverged from neon embedding beyond f32 reorder tolerance: max_abs_diff={max_abs_diff}");
+        println!(
+            "  -> correctness: max_abs_diff(neon, accelerate)={max_abs_diff:.8} max_rel_diff={max_rel_diff:.8}"
+        );
+        assert!(
+            max_abs_diff < 1e-2,
+            "accelerate embedding diverged from neon embedding beyond f32 reorder tolerance: max_abs_diff={max_abs_diff}"
+        );
 
         embeddings_neon.push(neon_embedding);
         embeddings_accelerate.push(accelerate_embedding);
@@ -219,7 +302,15 @@ fn main() {
     println!("cosine(A,C dissimilar)={dissimilar_a_neon:.6}");
     println!("cosine(B,C dissimilar)={dissimilar_b_neon:.6}");
 
-    assert!(similar > dissimilar_a, "accelerate arm: similar pair should score higher than dissimilar pair A");
-    assert!(similar > dissimilar_b, "accelerate arm: similar pair should score higher than dissimilar pair B");
-    println!("sanity check passed on accelerate arm: similar sentence pair scores higher than dissimilar pairs");
+    assert!(
+        similar > dissimilar_a,
+        "accelerate arm: similar pair should score higher than dissimilar pair A"
+    );
+    assert!(
+        similar > dissimilar_b,
+        "accelerate arm: similar pair should score higher than dissimilar pair B"
+    );
+    println!(
+        "sanity check passed on accelerate arm: similar sentence pair scores higher than dissimilar pairs"
+    );
 }

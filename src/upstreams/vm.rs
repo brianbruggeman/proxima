@@ -384,7 +384,10 @@ mod tests {
 
         let from_env: VmConfig = temp_env::with_vars(
             [
-                ("PROXIMA_VM_GUEST_IMAGE_PATH", Some(guest_image_path.as_str())),
+                (
+                    "PROXIMA_VM_GUEST_IMAGE_PATH",
+                    Some(guest_image_path.as_str()),
+                ),
                 ("PROXIMA_VM_NAME", Some("my-fn")),
                 ("PROXIMA_VM_MAX_HYPERCALLS", Some("8")),
                 ("PROXIMA_VM_EMITTED_CAPACITY", Some("128")),

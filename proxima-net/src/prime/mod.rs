@@ -262,7 +262,9 @@ impl PrimeTcpUpstream {
 
     /// Type-erased TCP dialer for consumers whose transport boundary uses
     /// the shared `Box<dyn StreamConnection>` shape.
-    pub fn boxed(addr: SocketAddr) -> std::sync::Arc<dyn StreamUpstream<Conn = Box<dyn StreamConnection>>> {
+    pub fn boxed(
+        addr: SocketAddr,
+    ) -> std::sync::Arc<dyn StreamUpstream<Conn = Box<dyn StreamConnection>>> {
         std::sync::Arc::new(BoxedPrimeTcpUpstream(Self::new(addr)))
     }
 }

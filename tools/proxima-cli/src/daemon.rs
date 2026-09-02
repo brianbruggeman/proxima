@@ -65,8 +65,8 @@ enum Command {
 
 #[proxima::main(runtime = "tokio", flavor = "multi_thread")]
 async fn main() -> ExitCode {
-    let directive = std::env::var("RUST_LOG")
-        .unwrap_or_else(|_| "warn,proxima=info,proximad=info".to_string());
+    let directive =
+        std::env::var("RUST_LOG").unwrap_or_else(|_| "warn,proxima=info,proximad=info".to_string());
     global::install(EnvFilter::parse(&directive));
     let Ok(_recorder) = proxima::init_telemetry() else {
         eprintln!("proximad: failed to install console telemetry");

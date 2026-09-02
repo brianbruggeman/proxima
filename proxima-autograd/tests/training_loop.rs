@@ -8,7 +8,6 @@
 //! reserves an integration test for, rather than a `#[cfg(test)]` module.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-
 use proxima_autograd::activation::{relu, softmax};
 use proxima_autograd::adjoint::differentiate;
 use proxima_autograd::optimizer::{AdamConfig, AdamOperands, adam_step, step_input};
@@ -62,12 +61,22 @@ fn int_leaf(program: &mut Vec<Op>, name: &str, extent: u32) -> NodeId {
 fn elementwise(program: &mut Vec<Op>, body: ScalarOp, operands: Vec<(NodeId, IndexMap)>) -> NodeId {
     op::append(
         program,
-        Op::Elementwise { dtype: DType::Float32, body, operands, name: None },
+        Op::Elementwise {
+            dtype: DType::Float32,
+            body,
+            operands,
+            name: None,
+        },
     )
 }
 
 #[allow(clippy::too_many_arguments)]
-fn reduce_add(program: &mut Vec<Op>, operand: NodeId, in_map: IndexMap, out_map: IndexMap) -> NodeId {
+fn reduce_add(
+    program: &mut Vec<Op>,
+    operand: NodeId,
+    in_map: IndexMap,
+    out_map: IndexMap,
+) -> NodeId {
     op::append(
         program,
         Op::Reduce(proxima_tensor::op::Reduce {
@@ -107,7 +116,11 @@ fn embedding_gather(program: &mut Vec<Op>, table: NodeId, ids: NodeId) -> NodeId
         },
         gathered_dim: 0,
     };
-    elementwise(program, ScalarOp::Identity, alloc::vec![(table, gathered_map)])
+    elementwise(
+        program,
+        ScalarOp::Identity,
+        alloc::vec![(table, gathered_map)],
+    )
 }
 
 /// `x @ w + b` — a dense layer, matmul via `Elementwise(Multiply)` then
@@ -117,10 +130,22 @@ fn dense(program: &mut Vec<Op>, x: NodeId, w: NodeId, b: NodeId) -> NodeId {
     let product = elementwise(
         program,
         ScalarOp::Multiply,
-        alloc::vec![(w, identity(2)), (x, IndexMap::Affine(map::projection(2, &[0])))],
+        alloc::vec![
+            (w, identity(2)),
+            (x, IndexMap::Affine(map::projection(2, &[0])))
+        ],
     );
-    let matmul = reduce_add(program, product, identity(2), IndexMap::Affine(map::projection(2, &[1])));
-    elementwise(program, ScalarOp::Add, alloc::vec![(matmul, identity(1)), (b, identity(1))])
+    let matmul = reduce_add(
+        program,
+        product,
+        identity(2),
+        IndexMap::Affine(map::projection(2, &[1])),
+    );
+    elementwise(
+        program,
+        ScalarOp::Add,
+        alloc::vec![(matmul, identity(1)), (b, identity(1))],
+    )
 }
 
 extern crate alloc;
@@ -134,28 +159,84 @@ extern crate alloc;
 /// rule this crate's own report calls out as the one that is NOT a broadcast.
 fn build_network() -> Network {
     let mut program = Vec::new();
-    let x = leaf(&mut program, "x", alloc::vec![Extent::Static(IN_DIM as u32)]);
-    let y = leaf(&mut program, "y", alloc::vec![Extent::Static(OUT_DIM as u32)]);
-    let w1 = leaf(&mut program, "w1", alloc::vec![Extent::Static(IN_DIM as u32), Extent::Static(HIDDEN_DIM as u32)]);
-    let b1 = leaf(&mut program, "b1", alloc::vec![Extent::Static(HIDDEN_DIM as u32)]);
-    let w2 = leaf(&mut program, "w2", alloc::vec![Extent::Static(HIDDEN_DIM as u32), Extent::Static(OUT_DIM as u32)]);
-    let b2 = leaf(&mut program, "b2", alloc::vec![Extent::Static(OUT_DIM as u32)]);
+    let x = leaf(
+        &mut program,
+        "x",
+        alloc::vec![Extent::Static(IN_DIM as u32)],
+    );
+    let y = leaf(
+        &mut program,
+        "y",
+        alloc::vec![Extent::Static(OUT_DIM as u32)],
+    );
+    let w1 = leaf(
+        &mut program,
+        "w1",
+        alloc::vec![
+            Extent::Static(IN_DIM as u32),
+            Extent::Static(HIDDEN_DIM as u32)
+        ],
+    );
+    let b1 = leaf(
+        &mut program,
+        "b1",
+        alloc::vec![Extent::Static(HIDDEN_DIM as u32)],
+    );
+    let w2 = leaf(
+        &mut program,
+        "w2",
+        alloc::vec![
+            Extent::Static(HIDDEN_DIM as u32),
+            Extent::Static(OUT_DIM as u32)
+        ],
+    );
+    let b2 = leaf(
+        &mut program,
+        "b2",
+        alloc::vec![Extent::Static(OUT_DIM as u32)],
+    );
 
     let h_pre = dense(&mut program, x, w1, b1);
     let h = relu(&mut program, DType::Float32, h_pre, 1);
     let out_pre = dense(&mut program, h, w2, b2);
     let probabilities = softmax(&mut program, DType::Float32, out_pre, 1, 0);
 
-    let log_probabilities = elementwise(&mut program, ScalarOp::Logarithm, alloc::vec![(probabilities, identity(1))]);
-    let weighted = elementwise(&mut program, ScalarOp::Multiply, alloc::vec![(y, identity(1)), (log_probabilities, identity(1))]);
-    let sum = reduce_add(&mut program, weighted, identity(1), IndexMap::Affine(map::projection(1, &[])));
-    let loss = elementwise(&mut program, ScalarOp::Negate, alloc::vec![(sum, identity(0))]);
+    let log_probabilities = elementwise(
+        &mut program,
+        ScalarOp::Logarithm,
+        alloc::vec![(probabilities, identity(1))],
+    );
+    let weighted = elementwise(
+        &mut program,
+        ScalarOp::Multiply,
+        alloc::vec![(y, identity(1)), (log_probabilities, identity(1))],
+    );
+    let sum = reduce_add(
+        &mut program,
+        weighted,
+        identity(1),
+        IndexMap::Affine(map::projection(1, &[])),
+    );
+    let loss = elementwise(
+        &mut program,
+        ScalarOp::Negate,
+        alloc::vec![(sum, identity(0))],
+    );
 
-    Network { program, w1, b1, w2, b2, loss }
+    Network {
+        program,
+        w1,
+        b1,
+        w2,
+        b2,
+        loss,
+    }
 }
 
 fn counter_pattern(seed: usize, count: usize) -> Vec<f32> {
-    (0..count).map(|index| (((seed + index) * 7 % 13) as f32 - 6.0) / 12.0).collect()
+    (0..count)
+        .map(|index| (((seed + index) * 7 % 13) as f32 - 6.0) / 12.0)
+        .collect()
 }
 
 struct Dataset {
@@ -180,7 +261,14 @@ fn loss_at(program: &[Op], loss: NodeId, x: &[f32], y: &[f32], params: [&[f32]; 
     let evaluated = evaluate_named(
         program,
         &[],
-        &[("x", x), ("y", y), ("w1", w1), ("b1", b1), ("w2", w2), ("b2", b2)],
+        &[
+            ("x", x),
+            ("y", y),
+            ("w1", w1),
+            ("b1", b1),
+            ("w2", w2),
+            ("b2", b2),
+        ],
         &[loss],
     )
     .expect("network program lowers and evaluates");
@@ -204,10 +292,22 @@ fn numeric_gradient(
     let original = buffers[which][index];
 
     buffers[which][index] = original + step;
-    let plus = loss_at(program, loss, x, y, [buffers[0], buffers[1], buffers[2], buffers[3]]);
+    let plus = loss_at(
+        program,
+        loss,
+        x,
+        y,
+        [buffers[0], buffers[1], buffers[2], buffers[3]],
+    );
 
     buffers[which][index] = original - step;
-    let minus = loss_at(program, loss, x, y, [buffers[0], buffers[1], buffers[2], buffers[3]]);
+    let minus = loss_at(
+        program,
+        loss,
+        x,
+        y,
+        [buffers[0], buffers[1], buffers[2], buffers[3]],
+    );
 
     buffers[which][index] = original;
     (plus - minus) / (2.0 * step)
@@ -220,7 +320,8 @@ fn relative_error(analytic: f32, numeric: f32) -> f32 {
 #[proxima::test]
 async fn central_difference_matches_the_analytic_gradient_on_every_parameter() {
     let network = build_network();
-    let differentiated = differentiate(&network.program, network.loss).expect("scalar loss differentiates");
+    let differentiated =
+        differentiate(&network.program, network.loss).expect("scalar loss differentiates");
     let data = dataset();
     let (x, y) = (data.examples[0], data.labels[0]);
 
@@ -229,58 +330,133 @@ async fn central_difference_matches_the_analytic_gradient_on_every_parameter() {
     let mut w2 = counter_pattern(3, HIDDEN_DIM * OUT_DIM);
     let mut b2 = counter_pattern(4, OUT_DIM);
 
-    let grad_w1 = differentiated.gradient_of_named("w1").expect("w1 feeds the loss");
-    let grad_b1 = differentiated.gradient_of_named("b1").expect("b1 feeds the loss");
-    let grad_w2 = differentiated.gradient_of_named("w2").expect("w2 feeds the loss");
-    let grad_b2 = differentiated.gradient_of_named("b2").expect("b2 feeds the loss");
+    let grad_w1 = differentiated
+        .gradient_of_named("w1")
+        .expect("w1 feeds the loss");
+    let grad_b1 = differentiated
+        .gradient_of_named("b1")
+        .expect("b1 feeds the loss");
+    let grad_w2 = differentiated
+        .gradient_of_named("w2")
+        .expect("w2 feeds the loss");
+    let grad_b2 = differentiated
+        .gradient_of_named("b2")
+        .expect("b2 feeds the loss");
 
     let evaluated = evaluate_named(
         &differentiated.program,
         &[],
-        &[("x", x.as_slice()), ("y", y.as_slice()), ("w1", &w1), ("b1", &b1), ("w2", &w2), ("b2", &b2)],
+        &[
+            ("x", x.as_slice()),
+            ("y", y.as_slice()),
+            ("w1", &w1),
+            ("b1", &b1),
+            ("w2", &w2),
+            ("b2", &b2),
+        ],
         &[grad_w1, grad_b1, grad_w2, grad_b2],
     )
     .expect("adjoint program lowers and evaluates");
 
-    let analytic_w1 = evaluated.get(grad_w1).expect("grad_w1 requested").0.to_vec();
-    let analytic_b1 = evaluated.get(grad_b1).expect("grad_b1 requested").0.to_vec();
-    let analytic_w2 = evaluated.get(grad_w2).expect("grad_w2 requested").0.to_vec();
-    let analytic_b2 = evaluated.get(grad_b2).expect("grad_b2 requested").0.to_vec();
+    let analytic_w1 = evaluated
+        .get(grad_w1)
+        .expect("grad_w1 requested")
+        .0
+        .to_vec();
+    let analytic_b1 = evaluated
+        .get(grad_b1)
+        .expect("grad_b1 requested")
+        .0
+        .to_vec();
+    let analytic_w2 = evaluated
+        .get(grad_w2)
+        .expect("grad_w2 requested")
+        .0
+        .to_vec();
+    let analytic_b2 = evaluated
+        .get(grad_b2)
+        .expect("grad_b2 requested")
+        .0
+        .to_vec();
 
     let step = 1e-3f32;
     let mut worst = (0.0f32, "", 0usize);
 
     for (index, &analytic_value) in analytic_w1.iter().enumerate() {
-        let numeric = numeric_gradient(&differentiated.program, network.loss, &x, &y, &mut [&mut w1, &mut b1, &mut w2, &mut b2], 0, index, step);
+        let numeric = numeric_gradient(
+            &differentiated.program,
+            network.loss,
+            &x,
+            &y,
+            &mut [&mut w1, &mut b1, &mut w2, &mut b2],
+            0,
+            index,
+            step,
+        );
         let relative = relative_error(analytic_value, numeric);
         if relative > worst.0 {
             worst = (relative, "w1", index);
         }
     }
     for (index, &analytic_value) in analytic_b1.iter().enumerate() {
-        let numeric = numeric_gradient(&differentiated.program, network.loss, &x, &y, &mut [&mut w1, &mut b1, &mut w2, &mut b2], 1, index, step);
+        let numeric = numeric_gradient(
+            &differentiated.program,
+            network.loss,
+            &x,
+            &y,
+            &mut [&mut w1, &mut b1, &mut w2, &mut b2],
+            1,
+            index,
+            step,
+        );
         let relative = relative_error(analytic_value, numeric);
         if relative > worst.0 {
             worst = (relative, "b1", index);
         }
     }
     for (index, &analytic_value) in analytic_w2.iter().enumerate() {
-        let numeric = numeric_gradient(&differentiated.program, network.loss, &x, &y, &mut [&mut w1, &mut b1, &mut w2, &mut b2], 2, index, step);
+        let numeric = numeric_gradient(
+            &differentiated.program,
+            network.loss,
+            &x,
+            &y,
+            &mut [&mut w1, &mut b1, &mut w2, &mut b2],
+            2,
+            index,
+            step,
+        );
         let relative = relative_error(analytic_value, numeric);
         if relative > worst.0 {
             worst = (relative, "w2", index);
         }
     }
     for (index, &analytic_value) in analytic_b2.iter().enumerate() {
-        let numeric = numeric_gradient(&differentiated.program, network.loss, &x, &y, &mut [&mut w1, &mut b1, &mut w2, &mut b2], 3, index, step);
+        let numeric = numeric_gradient(
+            &differentiated.program,
+            network.loss,
+            &x,
+            &y,
+            &mut [&mut w1, &mut b1, &mut w2, &mut b2],
+            3,
+            index,
+            step,
+        );
         let relative = relative_error(analytic_value, numeric);
         if relative > worst.0 {
             worst = (relative, "b2", index);
         }
     }
 
-    std::eprintln!("max relative gradient-check error: {} at {}[{}]", worst.0, worst.1, worst.2);
-    assert!(worst.0 < 5e-3, "central-difference disagreed with the analytic gradient: {worst:?}");
+    std::eprintln!(
+        "max relative gradient-check error: {} at {}[{}]",
+        worst.0,
+        worst.1,
+        worst.2
+    );
+    assert!(
+        worst.0 < 5e-3,
+        "central-difference disagreed with the analytic gradient: {worst:?}"
+    );
 }
 
 /// Deterministic Adam training run over the 4-example dataset, cycling
@@ -292,28 +468,128 @@ async fn central_difference_matches_the_analytic_gradient_on_every_parameter() {
 #[proxima::test]
 async fn adam_training_decreases_the_loss_over_the_dataset() {
     let network = build_network();
-    let differentiated = differentiate(&network.program, network.loss).expect("scalar loss differentiates");
-    let grad_w1 = differentiated.gradient_of_named("w1").expect("w1 feeds the loss");
-    let grad_b1 = differentiated.gradient_of_named("b1").expect("b1 feeds the loss");
-    let grad_w2 = differentiated.gradient_of_named("w2").expect("w2 feeds the loss");
-    let grad_b2 = differentiated.gradient_of_named("b2").expect("b2 feeds the loss");
+    let differentiated =
+        differentiate(&network.program, network.loss).expect("scalar loss differentiates");
+    let grad_w1 = differentiated
+        .gradient_of_named("w1")
+        .expect("w1 feeds the loss");
+    let grad_b1 = differentiated
+        .gradient_of_named("b1")
+        .expect("b1 feeds the loss");
+    let grad_w2 = differentiated
+        .gradient_of_named("w2")
+        .expect("w2 feeds the loss");
+    let grad_b2 = differentiated
+        .gradient_of_named("b2")
+        .expect("b2 feeds the loss");
     let mut program = differentiated.program;
-    let config = AdamConfig { learning_rate: 0.05, ..AdamConfig::default() };
+    let config = AdamConfig {
+        learning_rate: 0.05,
+        ..AdamConfig::default()
+    };
     let step_node = step_input(&mut program, "step");
 
-    let m_w1 = leaf(&mut program, "m_w1", alloc::vec![Extent::Static(IN_DIM as u32), Extent::Static(HIDDEN_DIM as u32)]);
-    let v_w1 = leaf(&mut program, "v_w1", alloc::vec![Extent::Static(IN_DIM as u32), Extent::Static(HIDDEN_DIM as u32)]);
-    let m_b1 = leaf(&mut program, "m_b1", alloc::vec![Extent::Static(HIDDEN_DIM as u32)]);
-    let v_b1 = leaf(&mut program, "v_b1", alloc::vec![Extent::Static(HIDDEN_DIM as u32)]);
-    let m_w2 = leaf(&mut program, "m_w2", alloc::vec![Extent::Static(HIDDEN_DIM as u32), Extent::Static(OUT_DIM as u32)]);
-    let v_w2 = leaf(&mut program, "v_w2", alloc::vec![Extent::Static(HIDDEN_DIM as u32), Extent::Static(OUT_DIM as u32)]);
-    let m_b2 = leaf(&mut program, "m_b2", alloc::vec![Extent::Static(OUT_DIM as u32)]);
-    let v_b2 = leaf(&mut program, "v_b2", alloc::vec![Extent::Static(OUT_DIM as u32)]);
+    let m_w1 = leaf(
+        &mut program,
+        "m_w1",
+        alloc::vec![
+            Extent::Static(IN_DIM as u32),
+            Extent::Static(HIDDEN_DIM as u32)
+        ],
+    );
+    let v_w1 = leaf(
+        &mut program,
+        "v_w1",
+        alloc::vec![
+            Extent::Static(IN_DIM as u32),
+            Extent::Static(HIDDEN_DIM as u32)
+        ],
+    );
+    let m_b1 = leaf(
+        &mut program,
+        "m_b1",
+        alloc::vec![Extent::Static(HIDDEN_DIM as u32)],
+    );
+    let v_b1 = leaf(
+        &mut program,
+        "v_b1",
+        alloc::vec![Extent::Static(HIDDEN_DIM as u32)],
+    );
+    let m_w2 = leaf(
+        &mut program,
+        "m_w2",
+        alloc::vec![
+            Extent::Static(HIDDEN_DIM as u32),
+            Extent::Static(OUT_DIM as u32)
+        ],
+    );
+    let v_w2 = leaf(
+        &mut program,
+        "v_w2",
+        alloc::vec![
+            Extent::Static(HIDDEN_DIM as u32),
+            Extent::Static(OUT_DIM as u32)
+        ],
+    );
+    let m_b2 = leaf(
+        &mut program,
+        "m_b2",
+        alloc::vec![Extent::Static(OUT_DIM as u32)],
+    );
+    let v_b2 = leaf(
+        &mut program,
+        "v_b2",
+        alloc::vec![Extent::Static(OUT_DIM as u32)],
+    );
 
-    let (new_w1, new_m_w1, new_v_w1) = adam_step(&mut program, &config, 2, AdamOperands { param: network.w1, grad: grad_w1, m: m_w1, v: v_w1 }, step_node);
-    let (new_b1, new_m_b1, new_v_b1) = adam_step(&mut program, &config, 1, AdamOperands { param: network.b1, grad: grad_b1, m: m_b1, v: v_b1 }, step_node);
-    let (new_w2, new_m_w2, new_v_w2) = adam_step(&mut program, &config, 2, AdamOperands { param: network.w2, grad: grad_w2, m: m_w2, v: v_w2 }, step_node);
-    let (new_b2, new_m_b2, new_v_b2) = adam_step(&mut program, &config, 1, AdamOperands { param: network.b2, grad: grad_b2, m: m_b2, v: v_b2 }, step_node);
+    let (new_w1, new_m_w1, new_v_w1) = adam_step(
+        &mut program,
+        &config,
+        2,
+        AdamOperands {
+            param: network.w1,
+            grad: grad_w1,
+            m: m_w1,
+            v: v_w1,
+        },
+        step_node,
+    );
+    let (new_b1, new_m_b1, new_v_b1) = adam_step(
+        &mut program,
+        &config,
+        1,
+        AdamOperands {
+            param: network.b1,
+            grad: grad_b1,
+            m: m_b1,
+            v: v_b1,
+        },
+        step_node,
+    );
+    let (new_w2, new_m_w2, new_v_w2) = adam_step(
+        &mut program,
+        &config,
+        2,
+        AdamOperands {
+            param: network.w2,
+            grad: grad_w2,
+            m: m_w2,
+            v: v_w2,
+        },
+        step_node,
+    );
+    let (new_b2, new_m_b2, new_v_b2) = adam_step(
+        &mut program,
+        &config,
+        1,
+        AdamOperands {
+            param: network.b2,
+            grad: grad_b2,
+            m: m_b2,
+            v: v_b2,
+        },
+        step_node,
+    );
 
     let mut w1 = counter_pattern(1, IN_DIM * HIDDEN_DIM);
     let mut b1 = counter_pattern(2, HIDDEN_DIM);
@@ -359,8 +635,19 @@ async fn adam_training_decreases_the_loss_over_the_dataset() {
                     ("step", &step_value),
                 ],
                 &[
-                    network.loss, new_w1, new_m_w1, new_v_w1, new_b1, new_m_b1, new_v_b1, new_w2, new_m_w2, new_v_w2,
-                    new_b2, new_m_b2, new_v_b2,
+                    network.loss,
+                    new_w1,
+                    new_m_w1,
+                    new_v_w1,
+                    new_b1,
+                    new_m_b1,
+                    new_v_b1,
+                    new_w2,
+                    new_m_w2,
+                    new_v_w2,
+                    new_b2,
+                    new_m_b2,
+                    new_v_b2,
                 ],
             )
             .expect("training-step program lowers and evaluates");
@@ -370,14 +657,46 @@ async fn adam_training_decreases_the_loss_over_the_dataset() {
             b1 = evaluated.get(new_b1).expect("new_b1 requested").0.to_vec();
             w2 = evaluated.get(new_w2).expect("new_w2 requested").0.to_vec();
             b2 = evaluated.get(new_b2).expect("new_b2 requested").0.to_vec();
-            m_w1_values = evaluated.get(new_m_w1).expect("new_m_w1 requested").0.to_vec();
-            v_w1_values = evaluated.get(new_v_w1).expect("new_v_w1 requested").0.to_vec();
-            m_b1_values = evaluated.get(new_m_b1).expect("new_m_b1 requested").0.to_vec();
-            v_b1_values = evaluated.get(new_v_b1).expect("new_v_b1 requested").0.to_vec();
-            m_w2_values = evaluated.get(new_m_w2).expect("new_m_w2 requested").0.to_vec();
-            v_w2_values = evaluated.get(new_v_w2).expect("new_v_w2 requested").0.to_vec();
-            m_b2_values = evaluated.get(new_m_b2).expect("new_m_b2 requested").0.to_vec();
-            v_b2_values = evaluated.get(new_v_b2).expect("new_v_b2 requested").0.to_vec();
+            m_w1_values = evaluated
+                .get(new_m_w1)
+                .expect("new_m_w1 requested")
+                .0
+                .to_vec();
+            v_w1_values = evaluated
+                .get(new_v_w1)
+                .expect("new_v_w1 requested")
+                .0
+                .to_vec();
+            m_b1_values = evaluated
+                .get(new_m_b1)
+                .expect("new_m_b1 requested")
+                .0
+                .to_vec();
+            v_b1_values = evaluated
+                .get(new_v_b1)
+                .expect("new_v_b1 requested")
+                .0
+                .to_vec();
+            m_w2_values = evaluated
+                .get(new_m_w2)
+                .expect("new_m_w2 requested")
+                .0
+                .to_vec();
+            v_w2_values = evaluated
+                .get(new_v_w2)
+                .expect("new_v_w2 requested")
+                .0
+                .to_vec();
+            m_b2_values = evaluated
+                .get(new_m_b2)
+                .expect("new_m_b2 requested")
+                .0
+                .to_vec();
+            v_b2_values = evaluated
+                .get(new_v_b2)
+                .expect("new_v_b2 requested")
+                .0
+                .to_vec();
         }
     }
 
@@ -387,11 +706,16 @@ async fn adam_training_decreases_the_loss_over_the_dataset() {
         .chunks(4)
         .map(|epoch| epoch.iter().sum::<f32>() / epoch.len() as f32)
         .collect();
-    std::eprintln!("per-epoch average loss ({} epochs): {epoch_averages:?}", epoch_averages.len());
+    std::eprintln!(
+        "per-epoch average loss ({} epochs): {epoch_averages:?}",
+        epoch_averages.len()
+    );
 
     let initial = epoch_averages[0];
     let final_average = *epoch_averages.last().expect("at least one epoch ran");
-    std::eprintln!("initial epoch-average loss {initial}, final epoch-average loss {final_average}");
+    std::eprintln!(
+        "initial epoch-average loss {initial}, final epoch-average loss {final_average}"
+    );
     assert!(
         final_average < initial * 0.8,
         "expected the epoch-average loss to drop by at least 20% over training, got {initial} -> {final_average}"
@@ -417,7 +741,9 @@ async fn maximum_reduce_adjoint_routes_the_full_gradient_to_the_unique_argmax_on
     let loss = reduce_op_max(&mut program, x);
 
     let differentiated = differentiate(&program, loss).expect("scalar loss differentiates");
-    let grad_x = differentiated.gradient_of_named("x").expect("x feeds the loss");
+    let grad_x = differentiated
+        .gradient_of_named("x")
+        .expect("x feeds the loss");
 
     let values = [3.0f32, 1.0, 2.0];
     let evaluated = evaluate_named(&differentiated.program, &[], &[("x", &values)], &[grad_x])
@@ -448,7 +774,13 @@ fn reduce_op_max(program: &mut Vec<Op>, operand: NodeId) -> NodeId {
     )
 }
 
-fn embedding_loss_at(program: &[Op], loss: NodeId, table: &[f32], ids: &[f32], target: &[f32]) -> f32 {
+fn embedding_loss_at(
+    program: &[Op],
+    loss: NodeId,
+    table: &[f32],
+    ids: &[f32],
+    target: &[f32],
+) -> f32 {
     let evaluated = evaluate_named(
         program,
         &[],
@@ -479,20 +811,53 @@ async fn gathered_gradient_matches_the_analytic_scatter_add_with_a_colliding_ind
     const SEQ: usize = 4;
 
     let mut program = Vec::new();
-    let table = leaf(&mut program, "table", alloc::vec![Extent::Static(VOCAB as u32), Extent::Static(EMBED_DIM as u32)]);
+    let table = leaf(
+        &mut program,
+        "table",
+        alloc::vec![
+            Extent::Static(VOCAB as u32),
+            Extent::Static(EMBED_DIM as u32)
+        ],
+    );
     let ids = int_leaf(&mut program, "ids", SEQ as u32);
-    let target = leaf(&mut program, "target", alloc::vec![Extent::Static(SEQ as u32), Extent::Static(EMBED_DIM as u32)]);
+    let target = leaf(
+        &mut program,
+        "target",
+        alloc::vec![Extent::Static(SEQ as u32), Extent::Static(EMBED_DIM as u32)],
+    );
 
     let gathered = embedding_gather(&mut program, table, ids);
-    let diff = elementwise(&mut program, ScalarOp::Subtract, alloc::vec![(gathered, identity(2)), (target, identity(2))]);
-    let squared = elementwise(&mut program, ScalarOp::Multiply, alloc::vec![(diff, identity(2)), (diff, identity(2))]);
-    let loss = reduce_add(&mut program, squared, identity(2), IndexMap::Affine(map::projection(2, &[])));
+    let diff = elementwise(
+        &mut program,
+        ScalarOp::Subtract,
+        alloc::vec![(gathered, identity(2)), (target, identity(2))],
+    );
+    let squared = elementwise(
+        &mut program,
+        ScalarOp::Multiply,
+        alloc::vec![(diff, identity(2)), (diff, identity(2))],
+    );
+    let loss = reduce_add(
+        &mut program,
+        squared,
+        identity(2),
+        IndexMap::Affine(map::projection(2, &[])),
+    );
 
     let differentiated = differentiate(&program, loss).expect("scalar loss differentiates");
-    let contributions: Vec<_> = differentiated.gathered_gradients_of_named("table").collect();
-    assert_eq!(contributions.len(), 1, "table is gathered by exactly one forward site");
+    let contributions: Vec<_> = differentiated
+        .gathered_gradients_of_named("table")
+        .collect();
+    assert_eq!(
+        contributions.len(),
+        1,
+        "table is gathered by exactly one forward site"
+    );
     let contribution = contributions[0];
-    assert_eq!(contribution.gathered_dim, 0, "vocab is the leading, gathered axis");
+    assert_eq!(
+        contribution.gathered_dim, 0,
+        "vocab is the leading, gathered axis"
+    );
     assert!(
         differentiated.gradient_of_named("table").is_none(),
         "table is read only through the gather, so it has no dense gradient entry"
@@ -505,19 +870,28 @@ async fn gathered_gradient_matches_the_analytic_scatter_add_with_a_colliding_ind
     let evaluated = evaluate_named(
         &differentiated.program,
         &[],
-        &[("table", &table_values), ("ids", &ids_values), ("target", &target_values)],
+        &[
+            ("table", &table_values),
+            ("ids", &ids_values),
+            ("target", &target_values),
+        ],
         &[contribution.values],
     )
     .expect("adjoint program lowers and evaluates");
-    let contribution_values = evaluated.get(contribution.values).expect("contribution requested").0;
+    let contribution_values = evaluated
+        .get(contribution.values)
+        .expect("contribution requested")
+        .0;
 
-    let (unique_ids, summed) = sparse::dedupe_and_sum_rows(&ids_values, contribution_values, EMBED_DIM)
-        .expect("ids and the compact contribution line up row for row");
+    let (unique_ids, summed) =
+        sparse::dedupe_and_sum_rows(&ids_values, contribution_values, EMBED_DIM)
+            .expect("ids and the compact contribution line up row for row");
 
     let mut analytic_table = alloc::vec![0.0f32; VOCAB * EMBED_DIM];
     for (position, &id) in unique_ids.iter().enumerate() {
         let row = &summed[position * EMBED_DIM..(position + 1) * EMBED_DIM];
-        analytic_table[id as usize * EMBED_DIM..id as usize * EMBED_DIM + EMBED_DIM].copy_from_slice(row);
+        analytic_table[id as usize * EMBED_DIM..id as usize * EMBED_DIM + EMBED_DIM]
+            .copy_from_slice(row);
     }
 
     let step = 1e-3f32;
@@ -526,9 +900,21 @@ async fn gathered_gradient_matches_the_analytic_scatter_add_with_a_colliding_ind
     for index in 0..VOCAB * EMBED_DIM {
         let original = table_perturbed[index];
         table_perturbed[index] = original + step;
-        let plus = embedding_loss_at(&program, loss, &table_perturbed, &ids_values, &target_values);
+        let plus = embedding_loss_at(
+            &program,
+            loss,
+            &table_perturbed,
+            &ids_values,
+            &target_values,
+        );
         table_perturbed[index] = original - step;
-        let minus = embedding_loss_at(&program, loss, &table_perturbed, &ids_values, &target_values);
+        let minus = embedding_loss_at(
+            &program,
+            loss,
+            &table_perturbed,
+            &ids_values,
+            &target_values,
+        );
         table_perturbed[index] = original;
 
         let numeric = (plus - minus) / (2.0 * step);
@@ -544,11 +930,18 @@ async fn gathered_gradient_matches_the_analytic_scatter_add_with_a_colliding_ind
         worst.1 / EMBED_DIM,
         worst.1 % EMBED_DIM
     );
-    assert!(worst.0 < 5e-3, "central difference disagreed with the gathered adjoint: {worst:?}");
+    assert!(
+        worst.0 < 5e-3,
+        "central difference disagreed with the gathered adjoint: {worst:?}"
+    );
 
     let mut touched_rows = unique_ids.clone();
     touched_rows.sort_unstable();
-    assert_eq!(touched_rows, alloc::vec![0, 1, 2], "only the three distinct token ids in this batch are touched");
+    assert_eq!(
+        touched_rows,
+        alloc::vec![0, 1, 2],
+        "only the three distinct token ids in this batch are touched"
+    );
     assert_eq!(
         &analytic_table[3 * EMBED_DIM..4 * EMBED_DIM],
         [0.0, 0.0],

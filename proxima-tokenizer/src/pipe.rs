@@ -96,14 +96,18 @@ pub fn encode_with_bos_eos(
     if add_bos {
         let bos = vocab
             .bos_token_id()
-            .ok_or(TokenizerError::MissingMetadataKey { key: "tokenizer.ggml.bos_token_id" })?;
+            .ok_or(TokenizerError::MissingMetadataKey {
+                key: "tokenizer.ggml.bos_token_id",
+            })?;
         ids.push(bos);
     }
     ids.extend(encode(text, vocab)?);
     if add_eos {
         let eos = vocab
             .eos_token_id()
-            .ok_or(TokenizerError::MissingMetadataKey { key: "tokenizer.ggml.eos_token_id" })?;
+            .ok_or(TokenizerError::MissingMetadataKey {
+                key: "tokenizer.ggml.eos_token_id",
+            })?;
         ids.push(eos);
     }
     Ok(ids)
@@ -140,7 +144,10 @@ mod tests {
         let ids = encode_with_bos_eos(" hi", &vocab, true, true).expect("encodes with bos/eos");
         assert_eq!(ids.first().copied(), vocab.bos_token_id());
         assert_eq!(ids.last().copied(), vocab.eos_token_id());
-        assert_eq!(ids.len(), encode(" hi", &vocab).expect("plain encode").len() + 2);
+        assert_eq!(
+            ids.len(),
+            encode(" hi", &vocab).expect("plain encode").len() + 2
+        );
     }
 
     #[test]
@@ -159,7 +166,10 @@ mod tests {
         for text in [" hi", "hi hi", "xyz", "\u{1F600} hi", ""] {
             let ids = encode(text, &vocab).expect("encodes");
             let decoded = decode(&ids, &vocab).expect("decodes");
-            assert_eq!(decoded, text, "round trip failed for {text:?} (ids: {ids:?})");
+            assert_eq!(
+                decoded, text,
+                "round trip failed for {text:?} (ids: {ids:?})"
+            );
         }
     }
 
@@ -173,10 +183,20 @@ mod tests {
         let bpe_vocab = tiny_vocab();
         let unigram_ids = encode("hi", &unigram_vocab).expect("unigram encodes");
         let bpe_ids = encode("hi", &bpe_vocab).expect("bpe encodes");
-        assert_eq!(unigram_ids.len(), 1, "unigram vocab merges \u{2581}hi to one piece");
+        assert_eq!(
+            unigram_ids.len(),
+            1,
+            "unigram vocab merges \u{2581}hi to one piece"
+        );
         assert_eq!(bpe_ids.len(), 1, "bpe vocab merges h+i to one piece");
-        assert_ne!(unigram_ids, bpe_ids, "the two encoders assign different ids for the same text");
-        assert_eq!(decode(&unigram_ids, &unigram_vocab).expect("unigram decodes"), "hi");
+        assert_ne!(
+            unigram_ids, bpe_ids,
+            "the two encoders assign different ids for the same text"
+        );
+        assert_eq!(
+            decode(&unigram_ids, &unigram_vocab).expect("unigram decodes"),
+            "hi"
+        );
         assert_eq!(decode(&bpe_ids, &bpe_vocab).expect("bpe decodes"), "hi");
     }
 }

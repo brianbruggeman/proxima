@@ -198,6 +198,10 @@ mod tests {
             crate::parser::GgufEvent::Complete { alignment, .. } => Some(alignment),
             _ => None,
         });
-        assert_eq!(complete, Some(64), "fallback alignment came from the config");
+        assert_eq!(
+            complete,
+            Some(64),
+            "fallback alignment came from the config"
+        );
     }
 }

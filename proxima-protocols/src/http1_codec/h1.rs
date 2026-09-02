@@ -423,7 +423,10 @@ mod tests {
         b"GET / HTTP/1.1\r\nBad\x00Name: x\r\n\r\n",
         ParseError::InvalidHeaderName
     )]
-    async fn malformed_input_returns_typed_error(#[case] input: &[u8], #[case] expected: ParseError) {
+    async fn malformed_input_returns_typed_error(
+        #[case] input: &[u8],
+        #[case] expected: ParseError,
+    ) {
         let outcome = parse_head(input);
         assert_eq!(outcome, Err(expected));
     }

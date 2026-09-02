@@ -112,7 +112,10 @@ impl SafetensorsParser {
     /// Feed the next chunk, however it was split from the whole stream.
     pub fn push(self, chunk: &[u8]) -> Result<Self, SafetensorsError> {
         match self {
-            Self::Header { mut buf, max_header_bytes } => {
+            Self::Header {
+                mut buf,
+                max_header_bytes,
+            } => {
                 buf.extend_from_slice(chunk);
                 match HeaderCodec.parse_frame_with_limit(&buf, max_header_bytes) {
                     Ok((header_json, consumed)) => {
@@ -124,7 +127,10 @@ impl SafetensorsParser {
                         }
                         Ok(state)
                     }
-                    Err(SafetensorsError::TruncatedInput { .. }) => Ok(Self::Header { buf, max_header_bytes }),
+                    Err(SafetensorsError::TruncatedInput { .. }) => Ok(Self::Header {
+                        buf,
+                        max_header_bytes,
+                    }),
                     Err(error) => Err(error),
                 }
             }
@@ -187,7 +193,10 @@ fn declared_total_len(buf: &[u8]) -> Option<u64> {
     Some(HEADER_LEN_BYTES as u64 + u64::from_le_bytes(len_bytes))
 }
 
-fn validate_offsets_in_bounds(manifest: &Manifest, buffer_len: u64) -> Result<(), SafetensorsError> {
+fn validate_offsets_in_bounds(
+    manifest: &Manifest,
+    buffer_len: u64,
+) -> Result<(), SafetensorsError> {
     for entry in &manifest.tensors {
         if entry.data_offsets.1 > buffer_len {
             return Err(SafetensorsError::OffsetOutOfBounds {
@@ -202,12 +211,13 @@ fn validate_offsets_in_bounds(manifest: &Manifest, buffer_len: u64) -> Result<()
 }
 
 fn parse_manifest(header_json: &[u8]) -> Result<Manifest, SafetensorsError> {
-    let value: serde_json::Value = serde_json::from_slice(header_json).map_err(|error| {
-        SafetensorsError::MalformedJson {
+    let value: serde_json::Value =
+        serde_json::from_slice(header_json).map_err(|error| SafetensorsError::MalformedJson {
             reason: error.to_string(),
-        }
-    })?;
-    let object = value.as_object().ok_or(SafetensorsError::HeaderNotAnObject)?;
+        })?;
+    let object = value
+        .as_object()
+        .ok_or(SafetensorsError::HeaderNotAnObject)?;
 
     let mut tensors = Vec::new();
     let mut metadata = BTreeMap::new();
@@ -240,7 +250,10 @@ fn parse_metadata(value: &serde_json::Value) -> Result<BTreeMap<String, String>,
     Ok(metadata)
 }
 
-fn parse_tensor_entry(name: &str, value: &serde_json::Value) -> Result<TensorEntry, SafetensorsError> {
+fn parse_tensor_entry(
+    name: &str,
+    value: &serde_json::Value,
+) -> Result<TensorEntry, SafetensorsError> {
     let dtype_str = value
         .get("dtype")
         .and_then(serde_json::Value::as_str)

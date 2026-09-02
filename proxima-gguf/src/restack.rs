@@ -58,7 +58,9 @@ type Dims = arrayvec::ArrayVec<u64, MAX_DIMS>;
 /// never panics.
 #[derive(Debug, Error, PartialEq, Eq, Clone)]
 pub enum RestackError {
-    #[error("layer {layer} projection '{projection}' is missing expert {index} (expected tensor '{name}')")]
+    #[error(
+        "layer {layer} projection '{projection}' is missing expert {index} (expected tensor '{name}')"
+    )]
     MissingExpert {
         layer: u64,
         projection: String,
@@ -102,12 +104,18 @@ pub enum RestackError {
     },
 
     #[error("expert {index} source bytes are {found} bytes, expected {expected} per expert")]
-    SourceLengthMismatch { index: u64, expected: u64, found: usize },
+    SourceLengthMismatch {
+        index: u64,
+        expected: u64,
+        found: usize,
+    },
 
     #[error("{found} source slices were given, expected one per expert ({expected})")]
     SourceCountMismatch { expected: usize, found: usize },
 
-    #[error("destination buffer is {found} bytes, expected {expected} for {expert_count} stacked experts")]
+    #[error(
+        "destination buffer is {found} bytes, expected {expected} for {expert_count} stacked experts"
+    )]
     DestinationLengthMismatch {
         expected: u64,
         found: usize,
@@ -205,7 +213,10 @@ pub struct StackPlan {
 /// whole multiple of its ggml type's block size; [`RestackError::Overflow`]
 /// if the per-expert or total byte size can't be computed.
 pub fn plan_stack(experts: &[&TensorInfo]) -> Result<StackPlan, RestackError> {
-    let first = experts.first().copied().ok_or(RestackError::EmptyExpertGroup)?;
+    let first = experts
+        .first()
+        .copied()
+        .ok_or(RestackError::EmptyExpertGroup)?;
 
     let layout = first.ggml_type.block_layout();
     let elements = first.element_count();
@@ -221,11 +232,12 @@ pub fn plan_stack(experts: &[&TensorInfo]) -> Result<StackPlan, RestackError> {
     let per_expert_bytes = first.nbytes().ok_or(RestackError::Overflow {
         context: "expert tensor byte size",
     })?;
-    let total_bytes = per_expert_bytes
-        .checked_mul(experts.len() as u64)
-        .ok_or(RestackError::Overflow {
-            context: "stacked total byte size",
-        })?;
+    let total_bytes =
+        per_expert_bytes
+            .checked_mul(experts.len() as u64)
+            .ok_or(RestackError::Overflow {
+                context: "stacked total byte size",
+            })?;
 
     Ok(StackPlan {
         expert_count: experts.len(),
@@ -250,7 +262,11 @@ pub fn plan_stack(experts: &[&TensorInfo]) -> Result<StackPlan, RestackError> {
 /// [`RestackError::SourceLengthMismatch`] if any source slice's length
 /// disagrees with `plan.per_expert_bytes`; [`RestackError::DestinationLengthMismatch`]
 /// if `dest.len() as u64 != plan.total_bytes`.
-pub fn restack_into(dest: &mut [u8], plan: &StackPlan, sources: &[&[u8]]) -> Result<(), RestackError> {
+pub fn restack_into(
+    dest: &mut [u8],
+    plan: &StackPlan,
+    sources: &[&[u8]],
+) -> Result<(), RestackError> {
     if sources.len() != plan.expert_count {
         return Err(RestackError::SourceCountMismatch {
             expected: plan.expert_count,
@@ -312,7 +328,13 @@ mod tests {
     /// experts' payloads collide and a slicing bug shows up as a value
     /// mismatch rather than an accidental pass.
     fn expert_pattern(expert: u8, len: usize) -> Vec<u8> {
-        (0..len).map(|position| expert.wrapping_mul(251).wrapping_add((position % 251) as u8)).collect()
+        (0..len)
+            .map(|position| {
+                expert
+                    .wrapping_mul(251)
+                    .wrapping_add((position % 251) as u8)
+            })
+            .collect()
     }
 
     /// Q4_0 (block_elements = 32, block_bytes = 18): dims `[32, 2]` gives
@@ -320,8 +342,14 @@ mod tests {
     /// in-memory synthetic fixture while still exercising real
     /// block-quantized arithmetic (not F32, which would trivially pass any
     /// block-alignment check with block_elements == 1).
-    fn build_synthetic_experts(layer: u64, projection: &str, expert_count: u8) -> (Vec<u8>, Vec<Vec<u8>>) {
-        let payloads: Vec<Vec<u8>> = (0..expert_count).map(|expert| expert_pattern(expert, 36)).collect();
+    fn build_synthetic_experts(
+        layer: u64,
+        projection: &str,
+        expert_count: u8,
+    ) -> (Vec<u8>, Vec<Vec<u8>>) {
+        let payloads: Vec<Vec<u8>> = (0..expert_count)
+            .map(|expert| expert_pattern(expert, 36))
+            .collect();
         let tensors: Vec<TensorPayload<'_>> = payloads
             .iter()
             .enumerate()
@@ -334,7 +362,10 @@ mod tests {
             .collect();
         let model = GgufModel {
             version: 3,
-            metadata: vec![("general.architecture".to_string(), crate::value::MetadataValue::String("mixtral".to_string()))],
+            metadata: vec![(
+                "general.architecture".to_string(),
+                crate::value::MetadataValue::String("mixtral".to_string()),
+            )],
             tensors,
         };
         let bytes = write_complete(&model).expect("writes synthetic expert gguf");
@@ -346,7 +377,8 @@ mod tests {
         let (gguf_bytes, payloads) = build_synthetic_experts(0, "ffn_gate", 4);
         let parsed = crate::parse_complete(&gguf_bytes).expect("parses synthetic gguf");
 
-        let experts = discover_experts(&parsed.tensors, 0, "ffn_gate", 4).expect("discovers all four experts");
+        let experts = discover_experts(&parsed.tensors, 0, "ffn_gate", 4)
+            .expect("discovers all four experts");
         assert_eq!(experts.len(), 4);
 
         let plan = plan_stack(&experts).expect("plans stack");
@@ -357,7 +389,9 @@ mod tests {
         let sources: Vec<&[u8]> = experts
             .iter()
             .map(|tensor| {
-                let range = parsed.tensor_data_range(tensor, gguf_bytes.len() as u64).expect("tensor range");
+                let range = parsed
+                    .tensor_data_range(tensor, gguf_bytes.len() as u64)
+                    .expect("tensor range");
                 &gguf_bytes[range.start as usize..range.end as usize]
             })
             .collect();
@@ -366,7 +400,10 @@ mod tests {
         restack_into(&mut stacked, &plan, &sources).expect("restacks into destination buffer");
 
         let expected_concat: Vec<u8> = payloads.iter().flatten().copied().collect();
-        assert_eq!(stacked, expected_concat, "stacked buffer must equal expert-order concatenation");
+        assert_eq!(
+            stacked, expected_concat,
+            "stacked buffer must equal expert-order concatenation"
+        );
 
         for expert in 0..4u64 {
             let gathered = gather_expert(&stacked, &plan, expert).expect("gathers expert back out");
@@ -473,33 +510,49 @@ mod tests {
     fn restack_into_rejects_wrong_source_count() {
         let (gguf_bytes, _payloads) = build_synthetic_experts(0, "ffn_gate", 2);
         let parsed = crate::parse_complete(&gguf_bytes).expect("parses synthetic gguf");
-        let experts = discover_experts(&parsed.tensors, 0, "ffn_gate", 2).expect("discovers experts");
+        let experts =
+            discover_experts(&parsed.tensors, 0, "ffn_gate", 2).expect("discovers experts");
         let plan = plan_stack(&experts).expect("plans stack");
 
         let mut dest = alloc::vec![0u8; plan.total_bytes as usize];
         let outcome = restack_into(&mut dest, &plan, &[&[0u8; 36]]);
-        assert_eq!(outcome, Err(RestackError::SourceCountMismatch { expected: 2, found: 1 }));
+        assert_eq!(
+            outcome,
+            Err(RestackError::SourceCountMismatch {
+                expected: 2,
+                found: 1
+            })
+        );
     }
 
     #[test]
     fn restack_into_rejects_wrong_source_length() {
         let (gguf_bytes, _payloads) = build_synthetic_experts(0, "ffn_gate", 2);
         let parsed = crate::parse_complete(&gguf_bytes).expect("parses synthetic gguf");
-        let experts = discover_experts(&parsed.tensors, 0, "ffn_gate", 2).expect("discovers experts");
+        let experts =
+            discover_experts(&parsed.tensors, 0, "ffn_gate", 2).expect("discovers experts");
         let plan = plan_stack(&experts).expect("plans stack");
 
         let mut dest = alloc::vec![0u8; plan.total_bytes as usize];
         let short = [0u8; 10];
         let full = [0u8; 36];
         let outcome = restack_into(&mut dest, &plan, &[&full, &short]);
-        assert_eq!(outcome, Err(RestackError::SourceLengthMismatch { index: 1, expected: 36, found: 10 }));
+        assert_eq!(
+            outcome,
+            Err(RestackError::SourceLengthMismatch {
+                index: 1,
+                expected: 36,
+                found: 10
+            })
+        );
     }
 
     #[test]
     fn restack_into_rejects_wrong_destination_length() {
         let (gguf_bytes, _payloads) = build_synthetic_experts(0, "ffn_gate", 2);
         let parsed = crate::parse_complete(&gguf_bytes).expect("parses synthetic gguf");
-        let experts = discover_experts(&parsed.tensors, 0, "ffn_gate", 2).expect("discovers experts");
+        let experts =
+            discover_experts(&parsed.tensors, 0, "ffn_gate", 2).expect("discovers experts");
         let plan = plan_stack(&experts).expect("plans stack");
 
         let mut dest = alloc::vec![0u8; 10];
@@ -507,7 +560,11 @@ mod tests {
         let outcome = restack_into(&mut dest, &plan, &[&full, &full]);
         assert_eq!(
             outcome,
-            Err(RestackError::DestinationLengthMismatch { expected: 72, found: 10, expert_count: 2 })
+            Err(RestackError::DestinationLengthMismatch {
+                expected: 72,
+                found: 10,
+                expert_count: 2
+            })
         );
     }
 
@@ -515,7 +572,8 @@ mod tests {
     fn gather_expert_returns_none_past_expert_count() {
         let (gguf_bytes, _payloads) = build_synthetic_experts(0, "ffn_gate", 2);
         let parsed = crate::parse_complete(&gguf_bytes).expect("parses synthetic gguf");
-        let experts = discover_experts(&parsed.tensors, 0, "ffn_gate", 2).expect("discovers experts");
+        let experts =
+            discover_experts(&parsed.tensors, 0, "ffn_gate", 2).expect("discovers experts");
         let plan = plan_stack(&experts).expect("plans stack");
         let stacked = alloc::vec![0u8; plan.total_bytes as usize];
 
@@ -592,14 +650,17 @@ mod tests {
                     .tensor_data_range(expert, file_len)
                     .expect("expert tensor range within file");
                 let mut bytes = alloc::vec![0u8; (range.end - range.start) as usize];
-                file.seek(SeekFrom::Start(range.start)).expect("seek to expert tensor data");
-                file.read_exact(&mut bytes).expect("read expert tensor bytes");
+                file.seek(SeekFrom::Start(range.start))
+                    .expect("seek to expert tensor data");
+                file.read_exact(&mut bytes)
+                    .expect("read expert tensor bytes");
                 sources_owned.push(bytes);
             }
             let sources: Vec<&[u8]> = sources_owned.iter().map(Vec::as_slice).collect();
 
             let mut stacked = alloc::vec![0u8; plan.total_bytes as usize];
-            restack_into(&mut stacked, &plan, &sources).expect("restacks real experts into destination buffer");
+            restack_into(&mut stacked, &plan, &sources)
+                .expect("restacks real experts into destination buffer");
 
             assert_eq!(
                 stacked.len() as u64,
@@ -616,8 +677,12 @@ mod tests {
             );
 
             for expert in 0..8u64 {
-                let gathered = gather_expert(&stacked, &plan, expert).expect("gathers expert back out of real stack");
-                assert_eq!(gathered, sources[expert as usize], "expert {expert} round trip from the real file");
+                let gathered = gather_expert(&stacked, &plan, expert)
+                    .expect("gathers expert back out of real stack");
+                assert_eq!(
+                    gathered, sources[expert as usize],
+                    "expert {expert} round trip from the real file"
+                );
             }
         }
     }

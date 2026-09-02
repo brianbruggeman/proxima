@@ -459,9 +459,7 @@ fn dispatch_timeout() -> Duration {
 #[cfg(feature = "test-prime")]
 fn duration_from_env(key: &str, default: Duration) -> Duration {
     match std::env::var(key) {
-        Ok(value) => value
-            .parse::<u64>()
-            .map_or(default, Duration::from_millis),
+        Ok(value) => value.parse::<u64>().map_or(default, Duration::from_millis),
         Err(_) => default,
     }
 }
@@ -536,7 +534,9 @@ mod tests {
     #[test]
     fn prime_drives_a_non_send_refcell_backed_pipe_future() {
         let outcome = drive_prime(None, |_cx| async move {
-            let pipe = RefCellPipe { state: RefCell::new(0) };
+            let pipe = RefCellPipe {
+                state: RefCell::new(0),
+            };
             assert_eq!(pipe.call(5).await, 5);
             assert_eq!(pipe.call(3).await, 8);
         });

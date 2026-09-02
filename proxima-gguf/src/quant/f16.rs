@@ -71,7 +71,12 @@ pub fn dequantize(data: &[u8], output: &mut [f32]) -> Result<(), QuantError> {
             expected: block_count,
         });
     }
-    for (block, out) in data.as_chunks::<BLOCK_BYTES>().0.iter().zip(output.iter_mut()) {
+    for (block, out) in data
+        .as_chunks::<BLOCK_BYTES>()
+        .0
+        .iter()
+        .zip(output.iter_mut())
+    {
         dequantize_block(block, core::slice::from_mut(out));
     }
     Ok(())
@@ -91,7 +96,12 @@ pub fn quantize(input: &[f32], output: &mut [u8]) -> Result<(), QuantError> {
             expected,
         });
     }
-    for (chunk, &value) in output.as_chunks_mut::<BLOCK_BYTES>().0.iter_mut().zip(input.iter()) {
+    for (chunk, &value) in output
+        .as_chunks_mut::<BLOCK_BYTES>()
+        .0
+        .iter_mut()
+        .zip(input.iter())
+    {
         chunk.copy_from_slice(&half::f16::from_f32(value).to_le_bytes());
     }
     Ok(())
@@ -147,7 +157,10 @@ mod tests {
         let mut output = [0.0f32];
         dequantize(&packed, &mut output).expect("one element");
         assert_eq!(output[0], 1.0f32 + 2.0f32.powi(-10));
-        assert_ne!(output[0], input, "binary16 must not carry f32's extra mantissa bit");
+        assert_ne!(
+            output[0], input,
+            "binary16 must not carry f32's extra mantissa bit"
+        );
     }
 
     #[test]

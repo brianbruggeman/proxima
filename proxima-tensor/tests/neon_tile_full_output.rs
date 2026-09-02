@@ -139,7 +139,13 @@ fn naive_reference(a: &[f32], b_transposed: &[f32], m: usize, k: usize, n: usize
 /// terms in a different order, and both are within normal f32 rounding of
 /// the true answer." A relative-error comparison between two f32 results
 /// alone cannot distinguish those two cases near a zero crossing.
-fn high_precision_reference(a: &[f32], b_transposed: &[f32], m: usize, k: usize, n: usize) -> Vec<f64> {
+fn high_precision_reference(
+    a: &[f32],
+    b_transposed: &[f32],
+    m: usize,
+    k: usize,
+    n: usize,
+) -> Vec<f64> {
     let mut out = vec![0.0f64; m * n];
     for row in 0..m {
         for col in 0..n {
@@ -171,7 +177,13 @@ fn naive_reference_plain_rhs(a: &[f32], b: &[f32], m: usize, k: usize, n: usize)
 
 /// `high_precision_reference`'s sibling for the width-tile's plain `[k, n]`
 /// RHS layout — same f64-accumulated ground truth role documented above.
-fn high_precision_reference_plain_rhs(a: &[f32], b: &[f32], m: usize, k: usize, n: usize) -> Vec<f64> {
+fn high_precision_reference_plain_rhs(
+    a: &[f32],
+    b: &[f32],
+    m: usize,
+    k: usize,
+    n: usize,
+) -> Vec<f64> {
     let mut out = vec![0.0f64; m * n];
     for row in 0..m {
         for col in 0..n {
@@ -198,11 +210,16 @@ fn high_precision_reference_plain_rhs(a: &[f32], b: &[f32], m: usize, k: usize, 
 /// exactly the failure mode this test exists to catch.
 fn check_width_size(size: usize) {
     let (m, k, n) = (size, size, size);
-    let a: Vec<f32> = (0..m * k).map(|index| (index as f32 * 0.0137).sin()).collect();
-    let b: Vec<f32> = (0..k * n).map(|index| (index as f32 * 0.0271).cos()).collect();
+    let a: Vec<f32> = (0..m * k)
+        .map(|index| (index as f32 * 0.0137).sin())
+        .collect();
+    let b: Vec<f32> = (0..k * n)
+        .map(|index| (index as f32 * 0.0271).cos())
+        .collect();
 
     #[cfg(all(target_arch = "aarch64", feature = "instrument"))]
-    let (gate_before, invocations_before, fallback_before) = proxima_tensor::cpu::width_tile_counters();
+    let (gate_before, invocations_before, fallback_before) =
+        proxima_tensor::cpu::width_tile_counters();
     #[cfg(all(target_arch = "aarch64", feature = "instrument"))]
     let row_remainder_elements_before = proxima_tensor::cpu::width_tile_row_remainder_elements();
 
@@ -216,7 +233,11 @@ fn check_width_size(size: usize) {
     let expected = naive_reference_plain_rhs(&a, &b, m, k, n);
     let ground_truth = high_precision_reference_plain_rhs(&a, &b, m, k, n);
 
-    assert_eq!(actual.len(), expected.len(), "width_tile size={size}: output length mismatch");
+    assert_eq!(
+        actual.len(),
+        expected.len(),
+        "width_tile size={size}: output length mismatch"
+    );
 
     let mut tile_error_vs_truth = 0.0f64;
     let mut naive_error_vs_truth = 0.0f64;
@@ -258,11 +279,13 @@ fn check_width_size(size: usize) {
 
     #[cfg(all(target_arch = "aarch64", feature = "instrument"))]
     {
-        let (gate_after, invocations_after, fallback_after) = proxima_tensor::cpu::width_tile_counters();
+        let (gate_after, invocations_after, fallback_after) =
+            proxima_tensor::cpu::width_tile_counters();
         let row_remainder_elements_after = proxima_tensor::cpu::width_tile_row_remainder_elements();
         let gate_delta = gate_after - gate_before;
         let invocations_delta = invocations_after - invocations_before;
-        let row_remainder_elements_delta = row_remainder_elements_after - row_remainder_elements_before;
+        let row_remainder_elements_delta =
+            row_remainder_elements_after - row_remainder_elements_before;
         let fallback_delta = fallback_after - fallback_before;
         // WIDTH_TILE_ROWS(4) * WIDTH_TILE_VECS(4) * 4 lanes/vec = 64
         // outputs/call (`cpu.rs::gemm_width_tile_neon` doc). Leading-row
@@ -289,17 +312,25 @@ fn check_width_size(size: usize) {
              m*n ({expected})",
             expected = m * n
         );
-        assert_eq!(gate_delta, 1, "width_tile size={size}: expected exactly one gate pass for one bound op");
+        assert_eq!(
+            gate_delta, 1,
+            "width_tile size={size}: expected exactly one gate pass for one bound op"
+        );
     }
 }
 
 fn check_size(size: usize) {
     let (m, k, n) = (size, size, size);
-    let a: Vec<f32> = (0..m * k).map(|index| (index as f32 * 0.0137).sin()).collect();
-    let b_transposed: Vec<f32> = (0..n * k).map(|index| (index as f32 * 0.0271).cos()).collect();
+    let a: Vec<f32> = (0..m * k)
+        .map(|index| (index as f32 * 0.0137).sin())
+        .collect();
+    let b_transposed: Vec<f32> = (0..n * k)
+        .map(|index| (index as f32 * 0.0271).cos())
+        .collect();
 
     #[cfg(all(target_arch = "aarch64", feature = "instrument"))]
-    let (gate_before, invocations_before, fallback_before) = proxima_tensor::cpu::neon_tile_counters();
+    let (gate_before, invocations_before, fallback_before) =
+        proxima_tensor::cpu::neon_tile_counters();
     #[cfg(all(target_arch = "aarch64", feature = "instrument"))]
     let row_remainder_elements_before = proxima_tensor::cpu::neon_tile_row_remainder_elements();
 
@@ -313,7 +344,11 @@ fn check_size(size: usize) {
     let expected = naive_reference(&a, &b_transposed, m, k, n);
     let ground_truth = high_precision_reference(&a, &b_transposed, m, k, n);
 
-    assert_eq!(actual.len(), expected.len(), "size={size}: output length mismatch");
+    assert_eq!(
+        actual.len(),
+        expected.len(),
+        "size={size}: output length mismatch"
+    );
 
     // Accuracy vs f64 ground truth: the tile kernel must be no worse than
     // the naive f32 loop, since that is the property that actually matters
@@ -361,11 +396,13 @@ fn check_size(size: usize) {
 
     #[cfg(all(target_arch = "aarch64", feature = "instrument"))]
     {
-        let (gate_after, invocations_after, fallback_after) = proxima_tensor::cpu::neon_tile_counters();
+        let (gate_after, invocations_after, fallback_after) =
+            proxima_tensor::cpu::neon_tile_counters();
         let row_remainder_elements_after = proxima_tensor::cpu::neon_tile_row_remainder_elements();
         let gate_delta = gate_after - gate_before;
         let invocations_delta = invocations_after - invocations_before;
-        let row_remainder_elements_delta = row_remainder_elements_after - row_remainder_elements_before;
+        let row_remainder_elements_delta =
+            row_remainder_elements_after - row_remainder_elements_before;
         let fallback_delta = fallback_after - fallback_before;
         // main 6x4 tile: 24 outputs/call. row-remainder tiles (widths 1..=5):
         // `rows * TILE_COLS` outputs/call, already summed into
@@ -386,7 +423,10 @@ fn check_size(size: usize) {
              ({expected})",
             expected = m * n
         );
-        assert_eq!(gate_delta, 1, "size={size}: expected exactly one gate pass for one bound op");
+        assert_eq!(
+            gate_delta, 1,
+            "size={size}: expected exactly one gate pass for one bound op"
+        );
     }
 }
 
@@ -481,13 +521,19 @@ fn width_tile_full_output_1025_row_and_column_remainder() {
 /// a single `ROWS=1` NEON row-remainder tile does, column tail does not).
 fn check_width_tile_small_m(m: usize) {
     let (k, n) = (64usize, 384usize);
-    let a: Vec<f32> = (0..m * k).map(|index| (index as f32 * 0.0137).sin()).collect();
-    let b: Vec<f32> = (0..k * n).map(|index| (index as f32 * 0.0271).cos()).collect();
+    let a: Vec<f32> = (0..m * k)
+        .map(|index| (index as f32 * 0.0137).sin())
+        .collect();
+    let b: Vec<f32> = (0..k * n)
+        .map(|index| (index as f32 * 0.0271).cos())
+        .collect();
 
     #[cfg(all(target_arch = "aarch64", feature = "instrument"))]
-    let (gate_before, invocations_before, fallback_before) = proxima_tensor::cpu::width_tile_counters();
+    let (gate_before, invocations_before, fallback_before) =
+        proxima_tensor::cpu::width_tile_counters();
     #[cfg(all(target_arch = "aarch64", feature = "instrument"))]
-    let row_remainder_invocations_before = proxima_tensor::cpu::width_tile_row_remainder_invocations();
+    let row_remainder_invocations_before =
+        proxima_tensor::cpu::width_tile_row_remainder_invocations();
     #[cfg(all(target_arch = "aarch64", feature = "instrument"))]
     let row_remainder_elements_before = proxima_tensor::cpu::width_tile_row_remainder_elements();
 
@@ -501,7 +547,11 @@ fn check_width_tile_small_m(m: usize) {
     let expected = naive_reference_plain_rhs(&a, &b, m, k, n);
     let ground_truth = high_precision_reference_plain_rhs(&a, &b, m, k, n);
 
-    assert_eq!(actual.len(), expected.len(), "width_tile small_m={m}: output length mismatch");
+    assert_eq!(
+        actual.len(),
+        expected.len(),
+        "width_tile small_m={m}: output length mismatch"
+    );
 
     let mut tile_error_vs_truth = 0.0f64;
     let mut naive_error_vs_truth = 0.0f64;
@@ -541,13 +591,17 @@ fn check_width_tile_small_m(m: usize) {
 
     #[cfg(all(target_arch = "aarch64", feature = "instrument"))]
     {
-        let (gate_after, invocations_after, fallback_after) = proxima_tensor::cpu::width_tile_counters();
-        let row_remainder_invocations_after = proxima_tensor::cpu::width_tile_row_remainder_invocations();
+        let (gate_after, invocations_after, fallback_after) =
+            proxima_tensor::cpu::width_tile_counters();
+        let row_remainder_invocations_after =
+            proxima_tensor::cpu::width_tile_row_remainder_invocations();
         let row_remainder_elements_after = proxima_tensor::cpu::width_tile_row_remainder_elements();
         let gate_delta = gate_after - gate_before;
         let invocations_delta = invocations_after - invocations_before;
-        let row_remainder_invocations_delta = row_remainder_invocations_after - row_remainder_invocations_before;
-        let row_remainder_elements_delta = row_remainder_elements_after - row_remainder_elements_before;
+        let row_remainder_invocations_delta =
+            row_remainder_invocations_after - row_remainder_invocations_before;
+        let row_remainder_elements_delta =
+            row_remainder_elements_after - row_remainder_elements_before;
         let fallback_delta = fallback_after - fallback_before;
         let covered = invocations_delta * 64 + row_remainder_elements_delta + fallback_delta;
         println!(
@@ -602,7 +656,10 @@ fn check_width_tile_small_m(m: usize) {
              m*n ({expected})",
             expected = m * n
         );
-        assert_eq!(gate_delta, 1, "width_tile small_m={m}: expected exactly one gate pass for one bound op");
+        assert_eq!(
+            gate_delta, 1,
+            "width_tile small_m={m}: expected exactly one gate pass for one bound op"
+        );
     }
 }
 

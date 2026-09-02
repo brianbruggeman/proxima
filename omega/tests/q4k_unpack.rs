@@ -119,7 +119,11 @@ fn q4k_low_and_high_nibbles_of_one_byte_land_32_elements_apart() {
     block[5] = 1;
     block[16] = 0x73;
 
-    assert_eq!(q4k_element_host(&block, 0), 3.0, "element 0 takes the LOW nibble of qs[0]");
+    assert_eq!(
+        q4k_element_host(&block, 0),
+        3.0,
+        "element 0 takes the LOW nibble of qs[0]"
+    );
     assert_eq!(
         q4k_element_host(&block, 32),
         7.0,

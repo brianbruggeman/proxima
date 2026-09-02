@@ -303,8 +303,12 @@ mod tests {
 
     #[test]
     fn ggml_type_to_wire_round_trips_through_from_wire() {
-        for raw in [0, 1, 2, 3, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 34, 35] {
-            let decoded = GgmlType::from_wire(raw).unwrap_or_else(|| panic!("raw={raw} should decode"));
+        for raw in [
+            0, 1, 2, 3, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25,
+            26, 27, 28, 29, 30, 34, 35,
+        ] {
+            let decoded =
+                GgmlType::from_wire(raw).unwrap_or_else(|| panic!("raw={raw} should decode"));
             assert_eq!(decoded.to_wire(), raw, "raw={raw}");
         }
     }

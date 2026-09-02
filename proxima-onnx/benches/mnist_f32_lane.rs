@@ -29,7 +29,8 @@ use std::time::Instant;
 
 use criterion::Criterion;
 
-const MODEL_PATH: &str = "/Users/brianbruggeman/repos/others/burn/examples/onnx-inference/src/model/mnist.onnx";
+const MODEL_PATH: &str =
+    "/Users/brianbruggeman/repos/others/burn/examples/onnx-inference/src/model/mnist.onnx";
 const DATASET_DIR: &str = "/Users/brianbruggeman/.cache/burn-dataset/mnist";
 const TEST_IMAGES_COUNT: usize = 1000;
 // measured this session (see discipline.md): 990/1000 = 0.9900 exactly.
@@ -64,7 +65,12 @@ fn idx_header(bytes: &[u8]) -> (usize, Vec<usize>) {
     let mut extents = Vec::with_capacity(dimension_count - 1);
     for axis in 1..dimension_count {
         let offset = 4 + axis * 4;
-        extents.push(u32::from_be_bytes([bytes[offset], bytes[offset + 1], bytes[offset + 2], bytes[offset + 3]]) as usize);
+        extents.push(u32::from_be_bytes([
+            bytes[offset],
+            bytes[offset + 1],
+            bytes[offset + 2],
+            bytes[offset + 3],
+        ]) as usize);
     }
     (item_count, extents)
 }
@@ -78,7 +84,10 @@ fn load_normalized_images(path: &Path, limit: usize) -> Vec<Vec<f32>> {
     (0..take)
         .map(|image_index| {
             let start = header_length + image_index * pixel_count;
-            bytes[start..start + pixel_count].iter().map(|&pixel| ((pixel as f32 / 255.0) - 0.1307) / 0.3081).collect()
+            bytes[start..start + pixel_count]
+                .iter()
+                .map(|&pixel| ((pixel as f32 / 255.0) - 0.1307) / 0.3081)
+                .collect()
         })
         .collect()
 }
@@ -91,7 +100,12 @@ fn load_labels(path: &Path, limit: usize) -> Vec<u8> {
 }
 
 fn argmax(values: &[f32]) -> usize {
-    values.iter().enumerate().max_by(|left, right| left.1.total_cmp(right.1)).map(|(index, _)| index).expect("nonempty logits")
+    values
+        .iter()
+        .enumerate()
+        .max_by(|left, right| left.1.total_cmp(right.1))
+        .map(|(index, _)| index)
+        .expect("nonempty logits")
 }
 
 /// Register-blocked FMA accumulator chain (8 independent lanes so the
@@ -131,18 +145,40 @@ fn main() {
     }
 
     let bytes = fs::read(MODEL_PATH).expect("read the real mnist.onnx checkpoint");
-    let model = proxima_onnx::pipe::parse_complete(&bytes).expect("parse the real mnist.onnx checkpoint");
+    let model =
+        proxima_onnx::pipe::parse_complete(&bytes).expect("parse the real mnist.onnx checkpoint");
     let graph = model.graph.as_ref().expect("real mnist model has a graph");
-    let lowered = proxima_onnx::lower::lower_graph(graph).expect("lower the real mnist.onnx graph to Op");
+    let lowered =
+        proxima_onnx::lower::lower_graph(graph).expect("lower the real mnist.onnx graph to Op");
 
-    let graph_input_name = lowered.graph_inputs.first().expect("real mnist model declares at least one input").clone();
-    let output_node = lowered.graph_outputs.first().expect("real mnist model declares at least one output").1;
-    let initializers: Vec<(&str, &[f32])> = lowered.initializers.iter().map(|(name, data)| (name.as_str(), data.as_slice())).collect();
+    let graph_input_name = lowered
+        .graph_inputs
+        .first()
+        .expect("real mnist model declares at least one input")
+        .clone();
+    let output_node = lowered
+        .graph_outputs
+        .first()
+        .expect("real mnist model declares at least one output")
+        .1;
+    let initializers: Vec<(&str, &[f32])> = lowered
+        .initializers
+        .iter()
+        .map(|(name, data)| (name.as_str(), data.as_slice()))
+        .collect();
 
     let images = load_normalized_images(&test_images_path(), TEST_IMAGES_COUNT);
     let labels = load_labels(&test_labels_path(), TEST_IMAGES_COUNT);
-    assert_eq!(images.len(), labels.len(), "same number of images and labels");
-    assert!(images.len() >= TEST_IMAGES_COUNT, "expected at least {TEST_IMAGES_COUNT} real test images, got {}", images.len());
+    assert_eq!(
+        images.len(),
+        labels.len(),
+        "same number of images and labels"
+    );
+    assert!(
+        images.len() >= TEST_IMAGES_COUNT,
+        "expected at least {TEST_IMAGES_COUNT} real test images, got {}",
+        images.len()
+    );
 
     // the accuracy gate: this bench can never speed up by computing the
     // wrong function. Evaluated once, outside criterion's own timed loop.
@@ -150,21 +186,36 @@ fn main() {
     for (image, &label) in images.iter().zip(labels.iter()) {
         let mut named = initializers.clone();
         named.push((graph_input_name.as_str(), image.as_slice()));
-        let evaluated = proxima_tensor::cpu::evaluate_named(&lowered.program, &[], &named, &[output_node]).expect("evaluate real mnist image");
-        let (data, _shape) = evaluated.get(output_node).expect("real mnist output present");
+        let evaluated =
+            proxima_tensor::cpu::evaluate_named(&lowered.program, &[], &named, &[output_node])
+                .expect("evaluate real mnist image");
+        let (data, _shape) = evaluated
+            .get(output_node)
+            .expect("real mnist output present");
         if argmax(data) == label as usize {
             correct += 1;
         }
     }
     let accuracy = correct as f64 / images.len() as f64;
-    eprintln!("mnist_f32_lane: accuracy={accuracy:.4} ({correct}/{})", images.len());
-    assert!(accuracy >= MIN_ACCURACY, "expected >= {MIN_ACCURACY} accuracy on {} real mnist test images, got {accuracy:.4}", images.len());
+    eprintln!(
+        "mnist_f32_lane: accuracy={accuracy:.4} ({correct}/{})",
+        images.len()
+    );
+    assert!(
+        accuracy >= MIN_ACCURACY,
+        "expected >= {MIN_ACCURACY} accuracy on {} real mnist test images, got {accuracy:.4}",
+        images.len()
+    );
 
     // roofline: measured fresh, mean of 3, CoV reported (bench-metrics
     // discipline -- never a point estimate above 5% CoV without the range).
     let roofline_samples: Vec<f64> = (0..3).map(|_| fma_roofline_macs_per_sec()).collect();
     let roofline_mean = roofline_samples.iter().sum::<f64>() / roofline_samples.len() as f64;
-    let roofline_variance = roofline_samples.iter().map(|value| (value - roofline_mean).powi(2)).sum::<f64>() / roofline_samples.len() as f64;
+    let roofline_variance = roofline_samples
+        .iter()
+        .map(|value| (value - roofline_mean).powi(2))
+        .sum::<f64>()
+        / roofline_samples.len() as f64;
     let roofline_cov = roofline_variance.sqrt() / roofline_mean * 100.0;
     eprintln!(
         "mnist_f32_lane: single-core FMA roofline = {:.2} GMAC/s ({:.2} GFLOP/s), CoV={roofline_cov:.2}% over {} runs, samples={roofline_samples:?}",
@@ -178,14 +229,17 @@ fn main() {
     // real images, one warm-up pass first.
     let mut named = initializers.clone();
     named.push((graph_input_name.as_str(), images[0].as_slice()));
-    let _ = proxima_tensor::cpu::evaluate_named(&lowered.program, &[], &named, &[output_node]).expect("warm-up eval");
+    let _ = proxima_tensor::cpu::evaluate_named(&lowered.program, &[], &named, &[output_node])
+        .expect("warm-up eval");
 
     let mut per_image_ns: Vec<u64> = Vec::with_capacity(images.len());
     for image in &images {
         let mut named = initializers.clone();
         named.push((graph_input_name.as_str(), image.as_slice()));
         let start = Instant::now();
-        let evaluated = proxima_tensor::cpu::evaluate_named(&lowered.program, &[], &named, &[output_node]).expect("evaluate");
+        let evaluated =
+            proxima_tensor::cpu::evaluate_named(&lowered.program, &[], &named, &[output_node])
+                .expect("evaluate");
         std::hint::black_box(&evaluated);
         per_image_ns.push(start.elapsed().as_nanos() as u64);
     }
@@ -193,7 +247,11 @@ fn main() {
     let sweep_mean_ns = per_image_ns.iter().sum::<u64>() as f64 / per_image_ns.len() as f64;
     let sweep_p50_ns = per_image_ns[per_image_ns.len() / 2];
     let sweep_p95_ns = per_image_ns[(per_image_ns.len() * 95) / 100];
-    let sweep_variance = per_image_ns.iter().map(|&value| (value as f64 - sweep_mean_ns).powi(2)).sum::<f64>() / per_image_ns.len() as f64;
+    let sweep_variance = per_image_ns
+        .iter()
+        .map(|&value| (value as f64 - sweep_mean_ns).powi(2))
+        .sum::<f64>()
+        / per_image_ns.len() as f64;
     let sweep_cov = sweep_variance.sqrt() / sweep_mean_ns * 100.0;
     eprintln!(
         "mnist_f32_lane: manual sweep over {} real images: mean={:.3}ms p50={:.3}ms p95={:.3}ms CoV={sweep_cov:.2}%",
@@ -213,7 +271,8 @@ fn main() {
             index.set((current + 1) % images.len());
             let mut named = initializers.clone();
             named.push((graph_input_name.as_str(), images[current].as_slice()));
-            proxima_tensor::cpu::evaluate_named(&lowered.program, &[], &named, &[output_node]).expect("evaluate")
+            proxima_tensor::cpu::evaluate_named(&lowered.program, &[], &named, &[output_node])
+                .expect("evaluate")
         });
     });
     group.finish();

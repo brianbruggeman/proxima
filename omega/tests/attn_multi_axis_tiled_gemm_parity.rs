@@ -18,7 +18,10 @@
 use proxima_gguf::quant::q4_k::{BLOCK_BYTES, QK_K, dequantize, quantize};
 use proxima_tensor::cpu::evaluate_quantized;
 use proxima_tensor::test_support::Lcg;
-use proxima_tensor::{DType, Extent, IndexMap, Keep, NodeId, Op, QuantizedBlock, Reduce, ReduceInit, ScalarOp, append, projection};
+use proxima_tensor::{
+    DType, Extent, IndexMap, Keep, NodeId, Op, QuantizedBlock, Reduce, ReduceInit, ScalarOp,
+    append, projection,
+};
 
 fn random_vec(seed: u64, count: usize) -> Vec<f32> {
     let mut lcg = Lcg(seed);
@@ -35,13 +38,22 @@ fn random_vec(seed: u64, count: usize) -> Vec<f32> {
 /// puts it -- second, between the token axis and the feature axes -- so
 /// this also re-covers `q4k_matmul_layout.rs`'s "declared reduction axis
 /// first within the weight's own operand" shape, one level up.
-fn multi_axis_matmul_program(tokens: u32, in_dim: u32, heads: u32, head_dim: u32) -> (Vec<Op>, NodeId) {
+fn multi_axis_matmul_program(
+    tokens: u32,
+    in_dim: u32,
+    heads: u32,
+    head_dim: u32,
+) -> (Vec<Op>, NodeId) {
     let mut program = Vec::new();
     let weight = append(
         &mut program,
         Op::Input {
             dtype: DType::UInt8,
-            shape: vec![Extent::Static(in_dim), Extent::Static(heads), Extent::Static(head_dim)],
+            shape: vec![
+                Extent::Static(in_dim),
+                Extent::Static(heads),
+                Extent::Static(head_dim),
+            ],
             name: None,
         },
     );
@@ -91,7 +103,10 @@ fn multi_axis_matmul_program(tokens: u32, in_dim: u32, heads: u32, head_dim: u32
 fn pack_rows(rows: &[Vec<f32>], in_dim: usize) -> Vec<u8> {
     let blocks_per_row = in_dim / QK_K;
     let mut packed = vec![0u8; rows.len() * blocks_per_row * BLOCK_BYTES];
-    for (row, row_packed) in rows.iter().zip(packed.chunks_exact_mut(blocks_per_row * BLOCK_BYTES)) {
+    for (row, row_packed) in rows
+        .iter()
+        .zip(packed.chunks_exact_mut(blocks_per_row * BLOCK_BYTES))
+    {
         quantize(row, row_packed).expect("in_dim is a whole multiple of QK_K");
     }
     packed
@@ -101,7 +116,13 @@ fn pack_rows(rows: &[Vec<f32>], in_dim: usize) -> Vec<u8> {
 /// activation row -- computed independently of both `proxima_tensor::cpu`'s
 /// quantized matmul path and omega's Metal emitter, same independence
 /// `q4k_matmul_layout.rs`'s own `expected_output` holds both backends to.
-fn expected_output(packed: &[u8], in_dim: usize, out_rows: usize, tokens: usize, activation: &[f32]) -> Vec<f32> {
+fn expected_output(
+    packed: &[u8],
+    in_dim: usize,
+    out_rows: usize,
+    tokens: usize,
+    activation: &[f32],
+) -> Vec<f32> {
     let blocks_per_row = in_dim / QK_K;
     let mut dequantized_rows: Vec<Vec<f32>> = Vec::with_capacity(out_rows);
     for row_packed in packed.chunks_exact(blocks_per_row * BLOCK_BYTES) {
@@ -109,14 +130,22 @@ fn expected_output(packed: &[u8], in_dim: usize, out_rows: usize, tokens: usize,
         dequantize(row_packed, &mut row).expect("packed row dequantizes");
         dequantized_rows.push(row);
     }
-    assert_eq!(dequantized_rows.len(), out_rows, "degenerate fixture: one row per feature element");
+    assert_eq!(
+        dequantized_rows.len(),
+        out_rows,
+        "degenerate fixture: one row per feature element"
+    );
 
     // output iteration order matches `out_map`'s (tok, head, hd) -- tok
     // outermost, out_rows (the flattened head/hd feature index) innermost.
     let mut expected = vec![0.0f32; tokens * out_rows];
     for (token_index, token_activation) in activation.chunks_exact(in_dim).enumerate() {
         for (row_index, row) in dequantized_rows.iter().enumerate() {
-            let dot: f32 = row.iter().zip(token_activation.iter()).map(|(weight, value)| weight * value).sum();
+            let dot: f32 = row
+                .iter()
+                .zip(token_activation.iter())
+                .map(|(weight, value)| weight * value)
+                .sum();
             expected[token_index * out_rows + row_index] = dot;
         }
     }
@@ -151,7 +180,8 @@ fn expected_output(packed: &[u8], in_dim: usize, out_rows: usize, tokens: usize,
 /// exists to catch shows up on the Metal side, so that bound stays as tight
 /// as the measured evidence allows, not loosened along with the CPU one).
 #[test]
-fn metal_takes_the_tiled_path_and_agrees_with_the_independent_reference_on_a_two_axis_feature_group() {
+fn metal_takes_the_tiled_path_and_agrees_with_the_independent_reference_on_a_two_axis_feature_group()
+ {
     const CPU_RELATIVE: f32 = 0.012;
     const CPU_ABSOLUTE: f32 = 0.075;
     const METAL_RELATIVE: f32 = 5e-3;
@@ -167,23 +197,34 @@ fn metal_takes_the_tiled_path_and_agrees_with_the_independent_reference_on_a_two
     // two-axis feature group, shows up as a real numeric disagreement here.
     const TOKENS: usize = 20;
 
-    let rows: Vec<Vec<f32>> = (0..OUT_ROWS).map(|row| random_vec(61 + row as u64, IN_DIM)).collect();
+    let rows: Vec<Vec<f32>> = (0..OUT_ROWS)
+        .map(|row| random_vec(61 + row as u64, IN_DIM))
+        .collect();
     let packed = pack_rows(&rows, IN_DIM);
     let activation = random_vec(97, TOKENS * IN_DIM);
     let expected = expected_output(&packed, IN_DIM, OUT_ROWS, TOKENS, &activation);
 
-    let (program, sum) = multi_axis_matmul_program(TOKENS as u32, IN_DIM as u32, HEADS as u32, HEAD_DIM as u32);
-    let blocks = [QuantizedBlock::Q4K(&packed), QuantizedBlock::Float32(&activation)];
+    let (program, sum) =
+        multi_axis_matmul_program(TOKENS as u32, IN_DIM as u32, HEADS as u32, HEAD_DIM as u32);
+    let blocks = [
+        QuantizedBlock::Q4K(&packed),
+        QuantizedBlock::Float32(&activation),
+    ];
 
     // the correctness claim is hollow if this shape silently stayed on the
     // row-blocked path -- confirm the emitted kernel source actually took
     // the `simdgroup_matrix`-tiled body, the same call-site-marker technique
     // `real_forward_packed_probe.rs` uses for the row-blocked/generic split.
     let shapes = proxima_tensor::infer(&program, &[]).expect("the synthetic program infers");
-    let packed_operands: omega::PackedOperands = [(NodeId(0), omega::PackedCodec::Q4K)].into_iter().collect();
-    let mut bound = proxima_tensor::bind(&program, &shapes, &[sum]).expect("the synthetic program binds");
+    let packed_operands: omega::PackedOperands =
+        [(NodeId(0), omega::PackedCodec::Q4K)].into_iter().collect();
+    let mut bound =
+        proxima_tensor::bind(&program, &shapes, &[sum]).expect("the synthetic program binds");
     proxima_tensor::correct_packed_matmul_layouts(&mut bound, &[NodeId(0)].into_iter().collect());
-    let resolved = bound.iter().find(|op| op.node == sum).expect("the reduce node is bound");
+    let resolved = bound
+        .iter()
+        .find(|op| op.node == sum)
+        .expect("the reduce node is bound");
     let kernel = omega::emit(resolved, &packed_operands).expect("the synthetic program emits");
     assert!(
         kernel.source.contains("simdgroup_multiply_accumulate"),
@@ -193,25 +234,38 @@ fn metal_takes_the_tiled_path_and_agrees_with_the_independent_reference_on_a_two
 
     let cpu = evaluate_quantized(&program, &[], &blocks, &[sum]).expect("cpu runs the matmul");
     let plan = omega::plan(&program, &[], &blocks, &[sum]).expect("metal plans the matmul");
-    let metal = omega::execute_plan(&plan, &blocks).expect("metal runs the matmul on a real device");
+    let metal =
+        omega::execute_plan(&plan, &blocks).expect("metal runs the matmul on a real device");
 
     let cpu_root = cpu.root();
     let metal_root = metal.root();
     let element_count = TOKENS * OUT_ROWS;
-    assert_eq!(cpu_root.len(), element_count, "degenerate gate: cpu produced no output");
-    assert_eq!(metal_root.len(), element_count, "degenerate gate: metal produced no output");
+    assert_eq!(
+        cpu_root.len(),
+        element_count,
+        "degenerate gate: cpu produced no output"
+    );
+    assert_eq!(
+        metal_root.len(),
+        element_count,
+        "degenerate gate: metal produced no output"
+    );
 
     let mut worst_metal_relative = 0.0f32;
     let mut worst_cpu_absolute = 0.0f32;
     let mut worst_metal_absolute = 0.0f32;
-    for (index, ((&cpu_value, &metal_value), &reference)) in
-        cpu_root.iter().zip(metal_root.iter()).zip(expected.iter()).enumerate()
+    for (index, ((&cpu_value, &metal_value), &reference)) in cpu_root
+        .iter()
+        .zip(metal_root.iter())
+        .zip(expected.iter())
+        .enumerate()
     {
         let cpu_absolute = (cpu_value - reference).abs();
         let metal_absolute = (metal_value - reference).abs();
         let cpu_bound = CPU_ABSOLUTE + CPU_RELATIVE * reference.abs();
         let metal_bound = METAL_ABSOLUTE + METAL_RELATIVE * reference.abs();
-        worst_metal_relative = worst_metal_relative.max(metal_absolute / reference.abs().max(f32::MIN_POSITIVE));
+        worst_metal_relative =
+            worst_metal_relative.max(metal_absolute / reference.abs().max(f32::MIN_POSITIVE));
         worst_cpu_absolute = worst_cpu_absolute.max(cpu_absolute);
         worst_metal_absolute = worst_metal_absolute.max(metal_absolute);
         assert!(
@@ -248,12 +302,18 @@ fn metal_decode_shaped_attention_matmul_stays_on_the_row_blocked_vector_path() {
     const HEAD_DIM: usize = 8;
     const TOKENS: usize = 1;
 
-    let (program, sum) = multi_axis_matmul_program(TOKENS as u32, IN_DIM as u32, HEADS as u32, HEAD_DIM as u32);
+    let (program, sum) =
+        multi_axis_matmul_program(TOKENS as u32, IN_DIM as u32, HEADS as u32, HEAD_DIM as u32);
     let shapes = proxima_tensor::infer(&program, &[]).expect("the synthetic program infers");
-    let packed_operands: omega::PackedOperands = [(NodeId(0), omega::PackedCodec::Q4K)].into_iter().collect();
-    let mut bound = proxima_tensor::bind(&program, &shapes, &[sum]).expect("the synthetic program binds");
+    let packed_operands: omega::PackedOperands =
+        [(NodeId(0), omega::PackedCodec::Q4K)].into_iter().collect();
+    let mut bound =
+        proxima_tensor::bind(&program, &shapes, &[sum]).expect("the synthetic program binds");
     proxima_tensor::correct_packed_matmul_layouts(&mut bound, &[NodeId(0)].into_iter().collect());
-    let resolved = bound.iter().find(|op| op.node == sum).expect("the reduce node is bound");
+    let resolved = bound
+        .iter()
+        .find(|op| op.node == sum)
+        .expect("the reduce node is bound");
     let kernel = omega::emit(resolved, &packed_operands).expect("the synthetic program emits");
 
     assert!(

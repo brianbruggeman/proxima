@@ -49,21 +49,25 @@ pub mod wgpu_driver;
 #[cfg(feature = "wgpu-backend")]
 pub mod wgsl;
 
+#[cfg(feature = "cuda")]
+pub use cuda::{CudaGridSpec, CudaKernel, WARP_SIZE, emit_cuda};
 pub use error::EmitError;
 #[cfg(all(feature = "metal", target_os = "macos"))]
 pub use metal::{
     MetalError, Plan, execute, execute_plan, execute_plan_named, page_size, plan, plan_named,
 };
 pub use msl::{
-    BF16_UNPACK_MSL, BFLOAT16_BLOCK_BYTES, BFLOAT16_BLOCK_ELEMENTS, Binding,
-    FLOAT16_BLOCK_BYTES, FLOAT16_BLOCK_ELEMENTS, GridSpec, Kernel, PackedCodec, PackedOperands,
-    Q4_0_BLOCK_BYTES, Q4_0_BLOCK_ELEMENTS, Q4_0_UNPACK_MSL, Q4K_BLOCK_BYTES, Q4K_BLOCK_ELEMENTS,
-    Q4K_UNPACK_MSL, Q5K_BLOCK_BYTES, Q5K_UNPACK_MSL, Q6K_BLOCK_BYTES, Q6K_UNPACK_MSL,
-    Q8_0_BLOCK_BYTES, Q8_0_BLOCK_ELEMENTS, Q8_0_UNPACK_MSL, emit,
+    BF16_UNPACK_MSL, BFLOAT16_BLOCK_BYTES, BFLOAT16_BLOCK_ELEMENTS, Binding, FLOAT16_BLOCK_BYTES,
+    FLOAT16_BLOCK_ELEMENTS, GridSpec, Kernel, PackedCodec, PackedOperands, Q4_0_BLOCK_BYTES,
+    Q4_0_BLOCK_ELEMENTS, Q4_0_UNPACK_MSL, Q4K_BLOCK_BYTES, Q4K_BLOCK_ELEMENTS, Q4K_UNPACK_MSL,
+    Q5K_BLOCK_BYTES, Q5K_UNPACK_MSL, Q6K_BLOCK_BYTES, Q6K_UNPACK_MSL, Q8_0_BLOCK_BYTES,
+    Q8_0_BLOCK_ELEMENTS, Q8_0_UNPACK_MSL, emit,
 };
 #[cfg(feature = "wgpu-backend")]
-pub use wgpu_driver::{WgpuError, WgpuPlan, execute_plan as execute_plan_wgpu, execute_plan_named as execute_plan_named_wgpu, plan as plan_wgpu, plan_named as plan_named_wgpu};
+pub use wgpu_driver::{
+    WgpuError, WgpuPlan, execute_plan as execute_plan_wgpu,
+    execute_plan_named as execute_plan_named_wgpu, plan as plan_wgpu,
+    plan_named as plan_named_wgpu,
+};
 #[cfg(feature = "wgpu-backend")]
 pub use wgsl::{WORKGROUP_SIZE, WgslCaps, WgslKernel, emit_wgsl};
-#[cfg(feature = "cuda")]
-pub use cuda::{CudaGridSpec, CudaKernel, WARP_SIZE, emit_cuda};

@@ -56,9 +56,11 @@ pub fn gguf_to_safetensors<'a>(
 ) -> Result<SafetensorsModel<'a>, InteropError> {
     let mut tensors = Vec::with_capacity(parsed.tensors.len());
     for tensor in &parsed.tensors {
-        let dtype = ggml_to_dtype(tensor.ggml_type).ok_or_else(|| InteropError::UnrepresentableGgmlType {
-            tensor: tensor.name.clone(),
-            ggml_type: tensor.ggml_type,
+        let dtype = ggml_to_dtype(tensor.ggml_type).ok_or_else(|| {
+            InteropError::UnrepresentableGgmlType {
+                tensor: tensor.name.clone(),
+                ggml_type: tensor.ggml_type,
+            }
         })?;
         let range = parsed.tensor_data_range(tensor, file_bytes.len() as u64)?;
         let data = &file_bytes[range.start as usize..range.end as usize];
@@ -97,21 +99,25 @@ pub fn gguf_to_safetensors<'a>(
 /// for (`Bool`, any unsigned integer, `Int128`/`UInt128`);
 /// [`InteropError::TooManyDimensions`] if a tensor's shape has more than
 /// [`MAX_DIMS`] dimensions.
-pub fn safetensors_to_gguf<'a>(model: &SafetensorsModel<'a>) -> Result<GgufModel<'a>, InteropError> {
+pub fn safetensors_to_gguf<'a>(
+    model: &SafetensorsModel<'a>,
+) -> Result<GgufModel<'a>, InteropError> {
     let mut tensors = Vec::with_capacity(model.tensors.len());
     for tensor in &model.tensors {
-        let ggml_type = dtype_to_ggml(tensor.dtype).ok_or_else(|| InteropError::UnrepresentableDType {
-            tensor: tensor.name.clone(),
-            dtype: tensor.dtype,
-        })?;
+        let ggml_type =
+            dtype_to_ggml(tensor.dtype).ok_or_else(|| InteropError::UnrepresentableDType {
+                tensor: tensor.name.clone(),
+                dtype: tensor.dtype,
+            })?;
 
         let mut dims: ArrayVec<u64, MAX_DIMS> = ArrayVec::new();
         for dim in &tensor.shape {
-            dims.try_push(*dim).map_err(|_| InteropError::TooManyDimensions {
-                tensor: tensor.name.clone(),
-                found: tensor.shape.len(),
-                max: MAX_DIMS,
-            })?;
+            dims.try_push(*dim)
+                .map_err(|_| InteropError::TooManyDimensions {
+                    tensor: tensor.name.clone(),
+                    found: tensor.shape.len(),
+                    max: MAX_DIMS,
+                })?;
         }
 
         tensors.push(GgufTensorPayload {
@@ -175,7 +181,10 @@ mod tests {
         let norm_data = pattern_bytes(3 * 2); // 3 f16
 
         let original_metadata = vec![
-            ("general.architecture".to_string(), MetadataValue::String("llama".to_string())),
+            (
+                "general.architecture".to_string(),
+                MetadataValue::String("llama".to_string()),
+            ),
             ("llama.context_length".to_string(), MetadataValue::U32(4096)),
             ("general.quantized".to_string(), MetadataValue::Bool(false)),
         ];
@@ -201,9 +210,14 @@ mod tests {
         let gguf_bytes = write_complete(&gguf_model).expect("writes source gguf");
         let parsed_gguf = parse_complete(&gguf_bytes).expect("parses source gguf");
 
-        let safetensors_model = gguf_to_safetensors(&parsed_gguf, &gguf_bytes).expect("gguf -> safetensors");
+        let safetensors_model =
+            gguf_to_safetensors(&parsed_gguf, &gguf_bytes).expect("gguf -> safetensors");
         assert_eq!(safetensors_model.tensors.len(), 2);
-        let embedding = safetensors_model.tensors.iter().find(|t| t.name == "token_embd.weight").expect("embedding present");
+        let embedding = safetensors_model
+            .tensors
+            .iter()
+            .find(|t| t.name == "token_embd.weight")
+            .expect("embedding present");
         assert_eq!(embedding.dtype, DType::Float32);
         assert_eq!(embedding.shape, alloc::vec![4, 4]);
         assert_eq!(embedding.data, embedding_data.as_slice());
@@ -215,11 +229,17 @@ mod tests {
                 MetadataValue::String(text) => text.clone(),
                 other => format!("{other:?}"),
             };
-            assert_eq!(safetensors_model.metadata.get(key), Some(&expected_text), "metadata key {key}");
+            assert_eq!(
+                safetensors_model.metadata.get(key),
+                Some(&expected_text),
+                "metadata key {key}"
+            );
         }
 
-        let safetensors_bytes = proxima_safetensors::write_complete(&safetensors_model).expect("writes safetensors");
-        let reparsed_manifest = parse_safetensors(&safetensors_bytes).expect("parses safetensors back");
+        let safetensors_bytes =
+            proxima_safetensors::write_complete(&safetensors_model).expect("writes safetensors");
+        let reparsed_manifest =
+            parse_safetensors(&safetensors_bytes).expect("parses safetensors back");
         assert_eq!(reparsed_manifest.tensors.len(), 2);
 
         let roundtrip_gguf = safetensors_to_gguf(&safetensors_model).expect("safetensors -> gguf");
@@ -233,8 +253,16 @@ mod tests {
                 .iter()
                 .find(|candidate| candidate.name == original.name)
                 .expect("tensor present after round trip");
-            assert_eq!(roundtrip_tensor.dims, original.dims, "{} dims", original.name);
-            assert_eq!(roundtrip_tensor.ggml_type, original.ggml_type, "{} ggml_type", original.name);
+            assert_eq!(
+                roundtrip_tensor.dims, original.dims,
+                "{} dims",
+                original.name
+            );
+            assert_eq!(
+                roundtrip_tensor.ggml_type, original.ggml_type,
+                "{} ggml_type",
+                original.name
+            );
 
             let original_range = parsed_gguf
                 .tensor_data_range(original, gguf_bytes.len() as u64)
@@ -301,6 +329,9 @@ mod tests {
             metadata: BTreeMap::new(),
         };
         let outcome = safetensors_to_gguf(&model);
-        assert!(matches!(outcome, Err(InteropError::UnrepresentableDType { .. })));
+        assert!(matches!(
+            outcome,
+            Err(InteropError::UnrepresentableDType { .. })
+        ));
     }
 }

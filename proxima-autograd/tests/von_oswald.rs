@@ -100,14 +100,34 @@ use proxima_tensor::map::{self, IndexMap};
 use proxima_tensor::op::{self, Extent, NodeId, Op, ReduceInit, ScalarOp};
 
 fn leaf(program: &mut Vec<Op>, name: &str, shape: Vec<Extent>) -> NodeId {
-    op::append(program, Op::Input { dtype: DType::Float32, shape, name: Some(name.into()) })
+    op::append(
+        program,
+        Op::Input {
+            dtype: DType::Float32,
+            shape,
+            name: Some(name.into()),
+        },
+    )
 }
 
 fn elementwise(program: &mut Vec<Op>, body: ScalarOp, operands: Vec<(NodeId, IndexMap)>) -> NodeId {
-    op::append(program, Op::Elementwise { dtype: DType::Float32, body, operands, name: None })
+    op::append(
+        program,
+        Op::Elementwise {
+            dtype: DType::Float32,
+            body,
+            operands,
+            name: None,
+        },
+    )
 }
 
-fn reduce_add(program: &mut Vec<Op>, operand: NodeId, in_map: IndexMap, out_map: IndexMap) -> NodeId {
+fn reduce_add(
+    program: &mut Vec<Op>,
+    operand: NodeId,
+    in_map: IndexMap,
+    out_map: IndexMap,
+) -> NodeId {
     op::append(
         program,
         Op::Reduce(proxima_tensor::op::Reduce {
@@ -155,35 +175,71 @@ struct Layer {
 /// rejected rather than silently accepted.
 fn build_layer(n: usize, d: usize, q_count: usize, eta: f32, transpose_pred_x_map: bool) -> Layer {
     let mut program = Vec::new();
-    let x = leaf(&mut program, "x", vec![Extent::Static(n as u32), Extent::Static(d as u32)]);
+    let x = leaf(
+        &mut program,
+        "x",
+        vec![Extent::Static(n as u32), Extent::Static(d as u32)],
+    );
     let y = leaf(&mut program, "y", vec![Extent::Static(n as u32)]);
     let w0 = leaf(&mut program, "w0", vec![Extent::Static(d as u32)]);
-    let queries = leaf(&mut program, "queries", vec![Extent::Static(q_count as u32), Extent::Static(d as u32)]);
+    let queries = leaf(
+        &mut program,
+        "queries",
+        vec![Extent::Static(q_count as u32), Extent::Static(d as u32)],
+    );
     let scale = op::append(
         &mut program,
-        Op::Constant { dtype: DType::Float32, shape: Vec::new(), value: -eta / n as f32 },
+        Op::Constant {
+            dtype: DType::Float32,
+            shape: Vec::new(),
+            value: -eta / n as f32,
+        },
     );
 
     // iter (i, k): pred[i] = sum_k x[i,k] * w0[k]
-    let x_pred_map = if transpose_pred_x_map { proj(2, &[1, 0]) } else { proj(2, &[0, 1]) };
-    let pred_product = elementwise(&mut program, ScalarOp::Multiply, vec![(x, x_pred_map), (w0, proj(2, &[1]))]);
+    let x_pred_map = if transpose_pred_x_map {
+        proj(2, &[1, 0])
+    } else {
+        proj(2, &[0, 1])
+    };
+    let pred_product = elementwise(
+        &mut program,
+        ScalarOp::Multiply,
+        vec![(x, x_pred_map), (w0, proj(2, &[1]))],
+    );
     let pred = reduce_add(&mut program, pred_product, identity(2), proj(2, &[0]));
 
     // resid[i] = pred[i] - y[i]
-    let resid = elementwise(&mut program, ScalarOp::Subtract, vec![(pred, identity(1)), (y, identity(1))]);
+    let resid = elementwise(
+        &mut program,
+        ScalarOp::Subtract,
+        vec![(pred, identity(1)), (y, identity(1))],
+    );
 
     // iter (i, k, q): sim[i,q] = sum_k x[i,k] * queries[q,k]
-    let sim_product = elementwise(&mut program, ScalarOp::Multiply, vec![(x, proj(3, &[0, 1])), (queries, proj(3, &[2, 1]))]);
+    let sim_product = elementwise(
+        &mut program,
+        ScalarOp::Multiply,
+        vec![(x, proj(3, &[0, 1])), (queries, proj(3, &[2, 1]))],
+    );
     let sim = reduce_add(&mut program, sim_product, identity(3), proj(3, &[0, 2]));
 
     // iter (i, q): weighted[i,q] = resid[i] * sim[i,q]
-    let weighted = elementwise(&mut program, ScalarOp::Multiply, vec![(resid, proj(2, &[0])), (sim, identity(2))]);
+    let weighted = elementwise(
+        &mut program,
+        ScalarOp::Multiply,
+        vec![(resid, proj(2, &[0])), (sim, identity(2))],
+    );
 
     // total[q] = sum_i weighted[i,q]
     let total = reduce_add(&mut program, weighted, identity(2), proj(2, &[1]));
 
     // delta[q] = total[q] * (-eta/n)
-    let delta = elementwise(&mut program, ScalarOp::Multiply, vec![(total, identity(1)), (scale, empty(1))]);
+    let delta = elementwise(
+        &mut program,
+        ScalarOp::Multiply,
+        vec![(total, identity(1)), (scale, empty(1))],
+    );
 
     Layer { program, w0, delta }
 }
@@ -192,7 +248,11 @@ fn build_layer(n: usize, d: usize, q_count: usize, eta: f32, transpose_pred_x_ma
 /// produced with `q_count == d` (the weight-update reading of [`Layer`]),
 /// never called for the single-query reading.
 fn append_weight_update(program: &mut Vec<Op>, w0: NodeId, delta: NodeId) -> NodeId {
-    elementwise(program, ScalarOp::Add, vec![(w0, identity(1)), (delta, identity(1))])
+    elementwise(
+        program,
+        ScalarOp::Add,
+        vec![(w0, identity(1)), (delta, identity(1))],
+    )
 }
 
 fn flatten(rows: &[Vec<f32>]) -> Vec<f32> {
@@ -200,25 +260,42 @@ fn flatten(rows: &[Vec<f32>]) -> Vec<f32> {
 }
 
 fn identity_matrix(dimension: usize) -> Vec<f32> {
-    (0..dimension).flat_map(|row| (0..dimension).map(move |column| if row == column { 1.0 } else { 0.0 })).collect()
+    (0..dimension)
+        .flat_map(|row| (0..dimension).map(move |column| if row == column { 1.0 } else { 0.0 }))
+        .collect()
 }
 
 /// Independent reference: plain `f32` arithmetic over `Vec<f32>`, no
 /// [`Op`], no [`proxima_autograd`] of any kind, deliberately not sharing a
 /// single helper with [`build_layer`] above.
 fn dot(a: &[f32], b: &[f32]) -> f32 {
-    a.iter().zip(b.iter()).map(|(left, right)| left * right).sum()
+    a.iter()
+        .zip(b.iter())
+        .map(|(left, right)| left * right)
+        .sum()
 }
 
 fn one_gradient_step(w0: &[f32], xs: &[Vec<f32>], ys: &[f32], eta: f32) -> Vec<f32> {
     let context_count = xs.len() as f32;
-    let residuals: Vec<f32> = xs.iter().zip(ys.iter()).map(|(x_i, &y_i)| dot(w0, x_i) - y_i).collect();
+    let residuals: Vec<f32> = xs
+        .iter()
+        .zip(ys.iter())
+        .map(|(x_i, &y_i)| dot(w0, x_i) - y_i)
+        .collect();
     let gradient: Vec<f32> = (0..w0.len())
         .map(|feature| {
-            residuals.iter().zip(xs.iter()).map(|(&residual, x_i)| residual * x_i[feature]).sum::<f32>() / context_count
+            residuals
+                .iter()
+                .zip(xs.iter())
+                .map(|(&residual, x_i)| residual * x_i[feature])
+                .sum::<f32>()
+                / context_count
         })
         .collect();
-    w0.iter().zip(gradient.iter()).map(|(w, g)| w - eta * g).collect()
+    w0.iter()
+        .zip(gradient.iter())
+        .map(|(w, g)| w - eta * g)
+        .collect()
 }
 
 fn least_squares_loss(w: &[f32], xs: &[Vec<f32>], ys: &[f32]) -> f32 {
@@ -288,8 +365,13 @@ async fn single_layer_matches_one_gradient_descent_step() {
     let x_flat = flatten(&x_rows);
 
     let layer = build_layer(CONTEXT_COUNT, FEATURE_DIM, 1, LEARNING_RATE, false);
-    let evaluated = evaluate_named(&layer.program, &[], &[("x", &x_flat), ("y", &y), ("w0", &w0), ("queries", &x_q)], &[layer.delta])
-        .expect("single-query layer lowers and evaluates");
+    let evaluated = evaluate_named(
+        &layer.program,
+        &[],
+        &[("x", &x_flat), ("y", &y), ("w0", &w0), ("queries", &x_q)],
+        &[layer.delta],
+    )
+    .expect("single-query layer lowers and evaluates");
     let graph_delta = evaluated.get(layer.delta).expect("delta requested").0[0];
 
     let w1 = one_gradient_step(&w0, &x_rows, &y, LEARNING_RATE);
@@ -301,7 +383,12 @@ async fn single_layer_matches_one_gradient_descent_step() {
          reference <w1,x_q>-<w0,x_q>={reference_delta}, relative error={relative_error}"
     );
     assert!(
-        within_tolerance(graph_delta, reference_delta, SINGLE_STEP_ATOL, SINGLE_STEP_RTOL),
+        within_tolerance(
+            graph_delta,
+            reference_delta,
+            SINGLE_STEP_ATOL,
+            SINGLE_STEP_RTOL
+        ),
         "construction delta {graph_delta} disagreed with the independent GD-step reference {reference_delta} \
          beyond atol {SINGLE_STEP_ATOL} + rtol {SINGLE_STEP_RTOL}"
     );
@@ -326,19 +413,37 @@ async fn iterating_the_layer_equals_iterating_gradient_descent() {
     let x_flat = flatten(&x_rows);
     let queries_flat = identity_matrix(FEATURE_DIM);
 
-    let mut layer_program = build_layer(CONTEXT_COUNT, FEATURE_DIM, FEATURE_DIM, LEARNING_RATE, false);
-    let w1 = append_weight_update(&mut layer_program.program, layer_program.w0, layer_program.delta);
+    let mut layer_program = build_layer(
+        CONTEXT_COUNT,
+        FEATURE_DIM,
+        FEATURE_DIM,
+        LEARNING_RATE,
+        false,
+    );
+    let w1 = append_weight_update(
+        &mut layer_program.program,
+        layer_program.w0,
+        layer_program.delta,
+    );
 
     let mut graph_weight = initial_weight();
     let mut reference_weight = initial_weight();
     let mut losses = vec![least_squares_loss(&reference_weight, &x_rows, &y)];
-    std::eprintln!("iterating_the_layer_equals_iterating_gradient_descent: step 0 loss={}", losses[0]);
+    std::eprintln!(
+        "iterating_the_layer_equals_iterating_gradient_descent: step 0 loss={}",
+        losses[0]
+    );
 
     for step in 1..=ITERATED_STEPS {
         let evaluated = evaluate_named(
             &layer_program.program,
             &[],
-            &[("x", &x_flat), ("y", &y), ("w0", &graph_weight), ("queries", &queries_flat)],
+            &[
+                ("x", &x_flat),
+                ("y", &y),
+                ("w0", &graph_weight),
+                ("queries", &queries_flat),
+            ],
             &[w1],
         )
         .expect("weight-update layer lowers and evaluates");
@@ -346,7 +451,9 @@ async fn iterating_the_layer_equals_iterating_gradient_descent() {
 
         reference_weight = one_gradient_step(&reference_weight, &x_rows, &y, LEARNING_RATE);
 
-        for (component, (&graph_value, &reference_value)) in graph_weight.iter().zip(reference_weight.iter()).enumerate() {
+        for (component, (&graph_value, &reference_value)) in
+            graph_weight.iter().zip(reference_weight.iter()).enumerate()
+        {
             assert!(
                 within_tolerance(graph_value, reference_value, ITERATION_ATOL, ITERATION_RTOL),
                 "step {step} component {component}: graph w1={graph_value} vs reference w1={reference_value}"
@@ -389,8 +496,12 @@ async fn transposed_pred_operand_map_is_caught_as_a_shape_mismatch() {
     let x_flat = flatten(&x_rows);
 
     let transposed = build_layer(CONTEXT_COUNT, FEATURE_DIM, 1, LEARNING_RATE, true);
-    let transposed_result =
-        evaluate_named(&transposed.program, &[], &[("x", &x_flat), ("y", &y), ("w0", &w0), ("queries", &x_q)], &[transposed.delta]);
+    let transposed_result = evaluate_named(
+        &transposed.program,
+        &[],
+        &[("x", &x_flat), ("y", &y), ("w0", &w0), ("queries", &x_q)],
+        &[transposed.delta],
+    );
     std::eprintln!("transposed pred operand map result: {transposed_result:?}");
     assert!(
         matches!(transposed_result, Err(TensorError::ExtentMismatch { .. })),
@@ -399,9 +510,16 @@ async fn transposed_pred_operand_map_is_caught_as_a_shape_mismatch() {
     );
 
     let reverted = build_layer(CONTEXT_COUNT, FEATURE_DIM, 1, LEARNING_RATE, false);
-    let reverted_result =
-        evaluate_named(&reverted.program, &[], &[("x", &x_flat), ("y", &y), ("w0", &w0), ("queries", &x_q)], &[reverted.delta])
-            .expect("reverted (correct) map must evaluate cleanly with the identical data");
-    let reverted_delta = reverted_result.get(reverted.delta).expect("delta requested").0[0];
+    let reverted_result = evaluate_named(
+        &reverted.program,
+        &[],
+        &[("x", &x_flat), ("y", &y), ("w0", &w0), ("queries", &x_q)],
+        &[reverted.delta],
+    )
+    .expect("reverted (correct) map must evaluate cleanly with the identical data");
+    let reverted_delta = reverted_result
+        .get(reverted.delta)
+        .expect("delta requested")
+        .0[0];
     std::eprintln!("reverted pred operand map result: delta={reverted_delta}");
 }

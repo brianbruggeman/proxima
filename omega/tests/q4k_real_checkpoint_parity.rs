@@ -32,10 +32,11 @@ use proxima_gguf::parser::{GgufEvent, GgufParser};
 use proxima_gguf::pipe::ParsedGguf;
 use proxima_gguf::quant::q4_k;
 use proxima_gguf::types::GgmlType;
-use proxima_tensor::{
-    DType, Extent, IndexMap, Keep, NodeId, Op, QuantizedBlock, Reduce, ReduceInit, ScalarOp, append, evaluate, map,
-};
 use proxima_tensor::test_support::Lcg;
+use proxima_tensor::{
+    DType, Extent, IndexMap, Keep, NodeId, Op, QuantizedBlock, Reduce, ReduceInit, ScalarOp,
+    append, evaluate, map,
+};
 
 /// real GGUF checkpoint path, overridable via `PROXIMA_BENCH_GGUF_PATH` --
 /// the hardcoded default only ever resolves on the machine it was captured
@@ -66,10 +67,16 @@ fn real_gguf_header(path: &std::path::Path) -> Option<(ParsedGguf, u64, std::fs:
             let mut completion = None;
             for event in events {
                 match event {
-                    GgufEvent::Header { version: version_value, .. } => version = Some(version_value),
+                    GgufEvent::Header {
+                        version: version_value,
+                        ..
+                    } => version = Some(version_value),
                     GgufEvent::Metadata { key, value } => metadata.push((key, value)),
                     GgufEvent::Tensor(tensor) => tensors.push(tensor),
-                    GgufEvent::Complete { data_offset, alignment } => {
+                    GgufEvent::Complete {
+                        data_offset,
+                        alignment,
+                    } => {
                         completion = Some((data_offset, alignment));
                     }
                 }
@@ -102,7 +109,10 @@ fn real_tensor_bytes(
     name: &str,
     expect_type: GgmlType,
 ) -> Option<(Vec<u8>, usize, usize)> {
-    let tensor = parsed.tensors.iter().find(|candidate| candidate.name == name)?;
+    let tensor = parsed
+        .tensors
+        .iter()
+        .find(|candidate| candidate.name == name)?;
     if tensor.ggml_type != expect_type {
         eprintln!(
             "real_tensor_bytes: {name} is {:?} in this file, not {expect_type:?} -- test skipped, not faked",
@@ -112,10 +122,14 @@ fn real_tensor_bytes(
     }
     let in_dim = tensor.dims[0] as usize;
     let out_dim = tensor.dims[1] as usize;
-    let range = parsed.tensor_data_range(tensor, file_len).expect("tensor byte range within file bounds");
+    let range = parsed
+        .tensor_data_range(tensor, file_len)
+        .expect("tensor byte range within file bounds");
     let mut buf = vec![0u8; (range.end - range.start) as usize];
-    file.seek(SeekFrom::Start(range.start)).expect("seek to tensor data");
-    file.read_exact(&mut buf).expect("read exact tensor byte range");
+    file.seek(SeekFrom::Start(range.start))
+        .expect("seek to tensor data");
+    file.read_exact(&mut buf)
+        .expect("read exact tensor byte range");
     Some((buf, in_dim, out_dim))
 }
 
@@ -185,16 +199,28 @@ fn metal_matmul_on_real_attn_q_q4k_bytes_matches_the_dequantized_f32_cpu_path() 
         eprintln!("real gguf file not found at {path_string}; test skipped");
         return;
     };
-    let Some((weight_bytes, in_dim, out_dim)) =
-        real_tensor_bytes(&mut file, &parsed, file_len, "blk.0.attn_q.weight", GgmlType::Q4_K)
-    else {
+    let Some((weight_bytes, in_dim, out_dim)) = real_tensor_bytes(
+        &mut file,
+        &parsed,
+        file_len,
+        "blk.0.attn_q.weight",
+        GgmlType::Q4_K,
+    ) else {
         return;
     };
 
     let blocks_per_row = in_dim / q4_k::QK_K;
-    assert_eq!(blocks_per_row * q4_k::QK_K, in_dim, "blk.0.attn_q.weight's in_dim is a whole number of Q4_K super-blocks");
+    assert_eq!(
+        blocks_per_row * q4_k::QK_K,
+        in_dim,
+        "blk.0.attn_q.weight's in_dim is a whole number of Q4_K super-blocks"
+    );
     let row_bytes = blocks_per_row * q4_k::BLOCK_BYTES;
-    assert_eq!(weight_bytes.len(), row_bytes * out_dim, "blk.0.attn_q.weight byte length matches its declared shape");
+    assert_eq!(
+        weight_bytes.len(),
+        row_bytes * out_dim,
+        "blk.0.attn_q.weight byte length matches its declared shape"
+    );
 
     let rows = ROWS_TO_CHECK.min(out_dim);
     let sliced_weight = &weight_bytes[..rows * row_bytes];
@@ -203,7 +229,10 @@ fn metal_matmul_on_real_attn_q_q4k_bytes_matches_the_dequantized_f32_cpu_path() 
     let activation: Vec<f32> = (0..in_dim).map(|_| lcg.next_unit() * 4.0 - 2.0).collect();
 
     let mut dequantized = vec![0.0f32; rows * in_dim];
-    for (row_blocks, row_f32) in sliced_weight.chunks_exact(row_bytes).zip(dequantized.chunks_exact_mut(in_dim)) {
+    for (row_blocks, row_f32) in sliced_weight
+        .chunks_exact(row_bytes)
+        .zip(dequantized.chunks_exact_mut(in_dim))
+    {
         q4_k::dequantize(row_blocks, row_f32).expect("a whole number of q4_k super-blocks per row");
     }
 
@@ -211,14 +240,17 @@ fn metal_matmul_on_real_attn_q_q4k_bytes_matches_the_dequantized_f32_cpu_path() 
     let metal = omega::execute(
         &packed_program,
         &[],
-        &[QuantizedBlock::Q4K(sliced_weight), QuantizedBlock::Float32(&activation)],
+        &[
+            QuantizedBlock::Q4K(sliced_weight),
+            QuantizedBlock::Float32(&activation),
+        ],
         &[packed_sum],
     )
     .expect("metal executes a packed q4_k matmul on real blk.0.attn_q.weight bytes");
 
     let (f32_program, f32_sum) = matmul_program(rows as u32, in_dim as u32, DType::Float32);
-    let cpu =
-        evaluate(&f32_program, &[], &[&dequantized, &activation], &[f32_sum]).expect("dequantized f32 cpu matmul evaluates");
+    let cpu = evaluate(&f32_program, &[], &[&dequantized, &activation], &[f32_sum])
+        .expect("dequantized f32 cpu matmul evaluates");
 
     let actual = metal.root();
     let expected = cpu.root();
@@ -230,7 +262,10 @@ fn metal_matmul_on_real_attn_q_q4k_bytes_matches_the_dequantized_f32_cpu_path() 
         assert!(got.is_finite(), "metal produced a non-finite value: {got}");
         max_diff = max_diff.max((got - want).abs());
     }
-    let max_magnitude = expected.iter().map(|value| value.abs()).fold(0.0f32, f32::max);
+    let max_magnitude = expected
+        .iter()
+        .map(|value| value.abs())
+        .fold(0.0f32, f32::max);
     let relative = max_diff / max_magnitude;
     eprintln!(
         "real blk.0.attn_q.weight (Q4_K, {rows} of {out_dim} rows, k={in_dim}) metal vs dequantized-f32 cpu: \

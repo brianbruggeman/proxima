@@ -34,7 +34,10 @@ fn main() -> Result<(), Box<dyn Error>> {
     println!("vm_create_nanos:{}", report.phases.vm_create_nanos);
     println!("vm_map_nanos:{}", report.phases.vm_map_nanos);
     println!("vcpu_create_nanos:{}", report.phases.vcpu_create_nanos);
-    println!("register_restore_nanos:{}", report.phases.register_restore_nanos);
+    println!(
+        "register_restore_nanos:{}",
+        report.phases.register_restore_nanos
+    );
     println!("first_retrap_nanos:{}", report.phases.first_retrap_nanos);
     Ok(())
 }

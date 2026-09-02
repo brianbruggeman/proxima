@@ -112,7 +112,13 @@ fn build_fixture() -> Fixture {
     // already a multiple of 16.
     let nbytes0 = 32 * 4u64;
     let offset0 = 0u64;
-    push_tensor(&mut buf, "token_embd.weight", &[8, 4], RAW_GGML_F32, offset0);
+    push_tensor(
+        &mut buf,
+        "token_embd.weight",
+        &[8, 4],
+        RAW_GGML_F32,
+        offset0,
+    );
 
     // tensor 1: 64*2=128 elements, Q4_0 (block=32 elems / 18 bytes) ->
     // 4 blocks * 18 = 72 bytes, padded to 80.
@@ -285,7 +291,10 @@ fn fsm_produces_identical_results_across_arbitrary_chunk_boundaries() {
     for chunk_size in [1usize, 3, 7, 13] {
         let split = parse_via_chunks(&fixture.bytes, chunk_size)
             .unwrap_or_else(|error| panic!("chunk_size={chunk_size} failed: {error:?}"));
-        assert_eq!(split, whole, "chunk_size={chunk_size} diverged from whole-buffer parse");
+        assert_eq!(
+            split, whole,
+            "chunk_size={chunk_size} diverged from whole-buffer parse"
+        );
     }
 }
 
@@ -426,8 +435,7 @@ mod real_file {
     use crate::quant::{q4_k, q5_k, q6_k, q8_0};
     use crate::types::GgmlType;
 
-    const FIXTURE_PATH: &str =
-        "/Users/brianbruggeman/.lmstudio/models/TheBloke/openchat-3.5-1210-GGUF/openchat-3.5-1210.Q4_K_S.gguf";
+    const FIXTURE_PATH: &str = "/Users/brianbruggeman/.lmstudio/models/TheBloke/openchat-3.5-1210-GGUF/openchat-3.5-1210.Q4_K_S.gguf";
 
     /// A Mixtral-8x7B checkpoint whose `attn_k`/`attn_v` tensors are
     /// stored as `Q8_0` (verified by inspection: `Q4_K_S` quantizes most
@@ -480,11 +488,17 @@ mod real_file {
         let available = (range.end - range.start) as usize;
         let sample_bytes = available.min(SAMPLE_CAP_BYTES) / q4_k::BLOCK_BYTES * q4_k::BLOCK_BYTES;
         let block_count = sample_bytes / q4_k::BLOCK_BYTES;
-        assert!(block_count > 0, "tensor '{}' is smaller than one q4_k block", tensor.name);
+        assert!(
+            block_count > 0,
+            "tensor '{}' is smaller than one q4_k block",
+            tensor.name
+        );
 
         let mut packed = alloc::vec![0u8; sample_bytes];
-        file.seek(SeekFrom::Start(range.start)).expect("seek to tensor data");
-        file.read_exact(&mut packed).expect("read sampled tensor bytes");
+        file.seek(SeekFrom::Start(range.start))
+            .expect("seek to tensor data");
+        file.read_exact(&mut packed)
+            .expect("read sampled tensor bytes");
 
         let element_count = q4_k::elements_for_blocks(block_count);
         let mut weights = alloc::vec![0.0f32; element_count];
@@ -495,7 +509,10 @@ mod real_file {
         let mut sum = 0.0f64;
         let mut buckets = [0u32; 10];
         for &value in &weights {
-            assert!(value.is_finite(), "dequantized weight must be finite, got {value}");
+            assert!(
+                value.is_finite(),
+                "dequantized weight must be finite, got {value}"
+            );
             min = min.min(value);
             max = max.max(value);
             sum += f64::from(value);
@@ -503,7 +520,11 @@ mod real_file {
             buckets[bucket_index] += 1;
         }
         let mean = sum / element_count as f64;
-        let variance = weights.iter().map(|value| (f64::from(*value) - mean).powi(2)).sum::<f64>() / element_count as f64;
+        let variance = weights
+            .iter()
+            .map(|value| (f64::from(*value) - mean).powi(2))
+            .sum::<f64>()
+            / element_count as f64;
 
         debug!(
             tensor = %tensor.name,
@@ -560,20 +581,32 @@ mod real_file {
             .tensors
             .iter()
             .find(|tensor| tensor.ggml_type == GgmlType::Q8_0 && tensor.name.contains("attn_k"))
-            .or_else(|| parsed.tensors.iter().find(|tensor| tensor.ggml_type == GgmlType::Q8_0))
+            .or_else(|| {
+                parsed
+                    .tensors
+                    .iter()
+                    .find(|tensor| tensor.ggml_type == GgmlType::Q8_0)
+            })
             .expect("fixture model has at least one Q8_0 tensor");
         let range = parsed
             .tensor_data_range(tensor, file_len)
             .expect("tensor data range within file bounds");
 
         let available = (range.end - range.start) as usize;
-        let sample_bytes = available.min(Q8_0_SAMPLE_CAP_BYTES) / q8_0::BLOCK_BYTES * q8_0::BLOCK_BYTES;
+        let sample_bytes =
+            available.min(Q8_0_SAMPLE_CAP_BYTES) / q8_0::BLOCK_BYTES * q8_0::BLOCK_BYTES;
         let block_count = sample_bytes / q8_0::BLOCK_BYTES;
-        assert!(block_count > 0, "tensor '{}' is smaller than one q8_0 block", tensor.name);
+        assert!(
+            block_count > 0,
+            "tensor '{}' is smaller than one q8_0 block",
+            tensor.name
+        );
 
         let mut packed = alloc::vec![0u8; sample_bytes];
-        file.seek(SeekFrom::Start(range.start)).expect("seek to tensor data");
-        file.read_exact(&mut packed).expect("read sampled tensor bytes");
+        file.seek(SeekFrom::Start(range.start))
+            .expect("seek to tensor data");
+        file.read_exact(&mut packed)
+            .expect("read sampled tensor bytes");
 
         let element_count = q8_0::elements_for_blocks(block_count);
         let mut weights = alloc::vec![0.0f32; element_count];
@@ -584,7 +617,10 @@ mod real_file {
         let mut sum = 0.0f64;
         let mut buckets = [0u32; 10];
         for &value in &weights {
-            assert!(value.is_finite(), "dequantized weight must be finite, got {value}");
+            assert!(
+                value.is_finite(),
+                "dequantized weight must be finite, got {value}"
+            );
             min = min.min(value);
             max = max.max(value);
             sum += f64::from(value);
@@ -592,7 +628,11 @@ mod real_file {
             buckets[bucket_index] += 1;
         }
         let mean = sum / element_count as f64;
-        let variance = weights.iter().map(|value| (f64::from(*value) - mean).powi(2)).sum::<f64>() / element_count as f64;
+        let variance = weights
+            .iter()
+            .map(|value| (f64::from(*value) - mean).powi(2))
+            .sum::<f64>()
+            / element_count as f64;
 
         debug!(
             tensor = %tensor.name,
@@ -649,13 +689,20 @@ mod real_file {
             .expect("tensor data range within file bounds");
 
         let available = (range.end - range.start) as usize;
-        let sample_bytes = available.min(Q6_K_SAMPLE_CAP_BYTES) / q6_k::BLOCK_BYTES * q6_k::BLOCK_BYTES;
+        let sample_bytes =
+            available.min(Q6_K_SAMPLE_CAP_BYTES) / q6_k::BLOCK_BYTES * q6_k::BLOCK_BYTES;
         let block_count = sample_bytes / q6_k::BLOCK_BYTES;
-        assert!(block_count > 0, "tensor '{}' is smaller than one q6_k block", tensor.name);
+        assert!(
+            block_count > 0,
+            "tensor '{}' is smaller than one q6_k block",
+            tensor.name
+        );
 
         let mut packed = alloc::vec![0u8; sample_bytes];
-        file.seek(SeekFrom::Start(range.start)).expect("seek to tensor data");
-        file.read_exact(&mut packed).expect("read sampled tensor bytes");
+        file.seek(SeekFrom::Start(range.start))
+            .expect("seek to tensor data");
+        file.read_exact(&mut packed)
+            .expect("read sampled tensor bytes");
 
         let element_count = q6_k::elements_for_blocks(block_count);
         let mut weights = alloc::vec![0.0f32; element_count];
@@ -666,7 +713,10 @@ mod real_file {
         let mut sum = 0.0f64;
         let mut buckets = [0u32; 10];
         for &value in &weights {
-            assert!(value.is_finite(), "dequantized weight must be finite, got {value}");
+            assert!(
+                value.is_finite(),
+                "dequantized weight must be finite, got {value}"
+            );
             min = min.min(value);
             max = max.max(value);
             sum += f64::from(value);
@@ -674,7 +724,11 @@ mod real_file {
             buckets[bucket_index] += 1;
         }
         let mean = sum / element_count as f64;
-        let variance = weights.iter().map(|value| (f64::from(*value) - mean).powi(2)).sum::<f64>() / element_count as f64;
+        let variance = weights
+            .iter()
+            .map(|value| (f64::from(*value) - mean).powi(2))
+            .sum::<f64>()
+            / element_count as f64;
 
         debug!(
             tensor = %tensor.name,
@@ -731,13 +785,20 @@ mod real_file {
             .expect("tensor data range within file bounds");
 
         let available = (range.end - range.start) as usize;
-        let sample_bytes = available.min(Q5_K_SAMPLE_CAP_BYTES) / q5_k::BLOCK_BYTES * q5_k::BLOCK_BYTES;
+        let sample_bytes =
+            available.min(Q5_K_SAMPLE_CAP_BYTES) / q5_k::BLOCK_BYTES * q5_k::BLOCK_BYTES;
         let block_count = sample_bytes / q5_k::BLOCK_BYTES;
-        assert!(block_count > 0, "tensor '{}' is smaller than one q5_k block", tensor.name);
+        assert!(
+            block_count > 0,
+            "tensor '{}' is smaller than one q5_k block",
+            tensor.name
+        );
 
         let mut packed = alloc::vec![0u8; sample_bytes];
-        file.seek(SeekFrom::Start(range.start)).expect("seek to tensor data");
-        file.read_exact(&mut packed).expect("read sampled tensor bytes");
+        file.seek(SeekFrom::Start(range.start))
+            .expect("seek to tensor data");
+        file.read_exact(&mut packed)
+            .expect("read sampled tensor bytes");
 
         let element_count = q5_k::elements_for_blocks(block_count);
         let mut weights = alloc::vec![0.0f32; element_count];
@@ -748,7 +809,10 @@ mod real_file {
         let mut sum = 0.0f64;
         let mut buckets = [0u32; 10];
         for &value in &weights {
-            assert!(value.is_finite(), "dequantized weight must be finite, got {value}");
+            assert!(
+                value.is_finite(),
+                "dequantized weight must be finite, got {value}"
+            );
             min = min.min(value);
             max = max.max(value);
             sum += f64::from(value);
@@ -756,7 +820,11 @@ mod real_file {
             buckets[bucket_index] += 1;
         }
         let mean = sum / element_count as f64;
-        let variance = weights.iter().map(|value| (f64::from(*value) - mean).powi(2)).sum::<f64>() / element_count as f64;
+        let variance = weights
+            .iter()
+            .map(|value| (f64::from(*value) - mean).powi(2))
+            .sum::<f64>()
+            / element_count as f64;
 
         debug!(
             tensor = %tensor.name,
@@ -804,7 +872,8 @@ mod real_file {
         };
 
         let mut histogram: alloc::vec::Vec<(GgmlType, u32)> = alloc::vec::Vec::new();
-        let mut uncovered: alloc::vec::Vec<(alloc::string::String, GgmlType)> = alloc::vec::Vec::new();
+        let mut uncovered: alloc::vec::Vec<(alloc::string::String, GgmlType)> =
+            alloc::vec::Vec::new();
 
         for tensor in &parsed.tensors {
             let ggml_type = tensor.ggml_type;
@@ -815,7 +884,12 @@ mod real_file {
 
             let covered = matches!(
                 ggml_type,
-                GgmlType::F32 | GgmlType::F16 | GgmlType::Q4_K | GgmlType::Q5_K | GgmlType::Q6_K | GgmlType::Q8_0
+                GgmlType::F32
+                    | GgmlType::F16
+                    | GgmlType::Q4_K
+                    | GgmlType::Q5_K
+                    | GgmlType::Q6_K
+                    | GgmlType::Q8_0
             );
             if !covered {
                 uncovered.push((tensor.name.clone(), ggml_type));
@@ -824,7 +898,11 @@ mod real_file {
 
         let total: u32 = histogram.iter().map(|(_, count)| *count).sum();
         debug!(total, ?histogram, "gguf mixtral tensor codec coverage");
-        assert_eq!(total as usize, parsed.tensors.len(), "histogram must account for every tensor exactly once");
+        assert_eq!(
+            total as usize,
+            parsed.tensors.len(),
+            "histogram must account for every tensor exactly once"
+        );
         assert!(
             uncovered.is_empty(),
             "tensors with no codec and not natively f32/f16: {uncovered:?}"
@@ -857,7 +935,10 @@ mod real_file {
         let mut max_error = 0.0f32;
         let mut sum_sq_error = 0.0f64;
         for (want, got) in reference.iter().zip(roundtrip.iter()) {
-            assert!(got.is_finite(), "requantized value must be finite, got {got}");
+            assert!(
+                got.is_finite(),
+                "requantized value must be finite, got {got}"
+            );
             let diff = (got - want).abs();
             max_error = max_error.max(diff);
             sum_sq_error += f64::from(diff) * f64::from(diff);
@@ -884,28 +965,48 @@ mod real_file {
         q4_k::quantize(reference, &mut q4_packed).expect("quantize q4_k");
         let mut q4_roundtrip = alloc::vec![0.0f32; usable];
         q4_k::dequantize(&q4_packed, &mut q4_roundtrip).expect("dequantize q4_k");
-        results.push(measure(GgmlType::Q4_K, q4_packed.len(), reference, &q4_roundtrip));
+        results.push(measure(
+            GgmlType::Q4_K,
+            q4_packed.len(),
+            reference,
+            &q4_roundtrip,
+        ));
 
         let q5_blocks = usable / q5_k::QK_K;
         let mut q5_packed = alloc::vec![0u8; q5_k::bytes_for_blocks(q5_blocks)];
         q5_k::quantize(reference, &mut q5_packed).expect("quantize q5_k");
         let mut q5_roundtrip = alloc::vec![0.0f32; usable];
         q5_k::dequantize(&q5_packed, &mut q5_roundtrip).expect("dequantize q5_k");
-        results.push(measure(GgmlType::Q5_K, q5_packed.len(), reference, &q5_roundtrip));
+        results.push(measure(
+            GgmlType::Q5_K,
+            q5_packed.len(),
+            reference,
+            &q5_roundtrip,
+        ));
 
         let q6_blocks = usable / q6_k::QK_K;
         let mut q6_packed = alloc::vec![0u8; q6_k::bytes_for_blocks(q6_blocks)];
         q6_k::quantize(reference, &mut q6_packed).expect("quantize q6_k");
         let mut q6_roundtrip = alloc::vec![0.0f32; usable];
         q6_k::dequantize(&q6_packed, &mut q6_roundtrip).expect("dequantize q6_k");
-        results.push(measure(GgmlType::Q6_K, q6_packed.len(), reference, &q6_roundtrip));
+        results.push(measure(
+            GgmlType::Q6_K,
+            q6_packed.len(),
+            reference,
+            &q6_roundtrip,
+        ));
 
         let q8_blocks = usable / q8_0::QK8_0;
         let mut q8_packed = alloc::vec![0u8; q8_0::bytes_for_blocks(q8_blocks)];
         q8_0::quantize(reference, &mut q8_packed).expect("quantize q8_0");
         let mut q8_roundtrip = alloc::vec![0.0f32; usable];
         q8_0::dequantize(&q8_packed, &mut q8_roundtrip).expect("dequantize q8_0");
-        results.push(measure(GgmlType::Q8_0, q8_packed.len(), reference, &q8_roundtrip));
+        results.push(measure(
+            GgmlType::Q8_0,
+            q8_packed.len(),
+            reference,
+            &q8_roundtrip,
+        ));
 
         results
     }
@@ -921,14 +1022,18 @@ mod real_file {
         tensor: &crate::tensor::TensorInfo,
         cap_bytes: usize,
     ) -> alloc::vec::Vec<f32> {
-        let range = parsed.tensor_data_range(tensor, file_len).expect("tensor data range within file bounds");
+        let range = parsed
+            .tensor_data_range(tensor, file_len)
+            .expect("tensor data range within file bounds");
         let available = (range.end - range.start) as usize;
         match tensor.ggml_type {
             GgmlType::Q4_K => {
                 let sample_bytes = available.min(cap_bytes) / q4_k::BLOCK_BYTES * q4_k::BLOCK_BYTES;
                 let mut packed = alloc::vec![0u8; sample_bytes];
-                file.seek(SeekFrom::Start(range.start)).expect("seek to tensor data");
-                file.read_exact(&mut packed).expect("read sampled tensor bytes");
+                file.seek(SeekFrom::Start(range.start))
+                    .expect("seek to tensor data");
+                file.read_exact(&mut packed)
+                    .expect("read sampled tensor bytes");
                 let elements = q4_k::elements_for_blocks(sample_bytes / q4_k::BLOCK_BYTES);
                 let mut out = alloc::vec![0.0f32; elements];
                 q4_k::dequantize(&packed, &mut out).expect("dequantize sampled q4_k source");
@@ -937,18 +1042,26 @@ mod real_file {
             GgmlType::Q6_K => {
                 let sample_bytes = available.min(cap_bytes) / q6_k::BLOCK_BYTES * q6_k::BLOCK_BYTES;
                 let mut packed = alloc::vec![0u8; sample_bytes];
-                file.seek(SeekFrom::Start(range.start)).expect("seek to tensor data");
-                file.read_exact(&mut packed).expect("read sampled tensor bytes");
+                file.seek(SeekFrom::Start(range.start))
+                    .expect("seek to tensor data");
+                file.read_exact(&mut packed)
+                    .expect("read sampled tensor bytes");
                 let elements = q6_k::elements_for_blocks(sample_bytes / q6_k::BLOCK_BYTES);
                 let mut out = alloc::vec![0.0f32; elements];
                 q6_k::dequantize(&packed, &mut out).expect("dequantize sampled q6_k source");
                 out
             }
-            other => panic!("dequantize_real_sample: unsupported source type {other:?} for '{}'", tensor.name),
+            other => panic!(
+                "dequantize_real_sample: unsupported source type {other:?} for '{}'",
+                tensor.name
+            ),
         }
     }
 
-    fn find_tensor<'parsed>(parsed: &'parsed crate::pipe::ParsedGguf, name: &str) -> &'parsed crate::tensor::TensorInfo {
+    fn find_tensor<'parsed>(
+        parsed: &'parsed crate::pipe::ParsedGguf,
+        name: &str,
+    ) -> &'parsed crate::tensor::TensorInfo {
         parsed
             .tensors
             .iter()
@@ -992,7 +1105,10 @@ mod real_file {
         };
 
         let mut openchat_file = std::fs::File::open(openchat_path).expect("open openchat fixture");
-        let openchat_len = openchat_file.metadata().expect("stat openchat fixture").len();
+        let openchat_len = openchat_file
+            .metadata()
+            .expect("stat openchat fixture")
+            .len();
         let mut openchat_header = alloc::vec::Vec::new();
         let openchat_parsed = 'grow: {
             for cap in [4usize << 20, 16 << 20, 64 << 20] {
@@ -1008,7 +1124,8 @@ mod real_file {
         };
 
         const CAP: usize = 2 * 1024 * 1024;
-        let mut report: alloc::vec::Vec<(&str, alloc::vec::Vec<CurveLevel>)> = alloc::vec::Vec::new();
+        let mut report: alloc::vec::Vec<(&str, alloc::vec::Vec<CurveLevel>)> =
+            alloc::vec::Vec::new();
 
         let openchat_roles: [(&str, &str); 5] = [
             ("token_embd", "token_embd.weight"),
@@ -1019,7 +1136,13 @@ mod real_file {
         ];
         for (role, tensor_name) in openchat_roles {
             let tensor = find_tensor(&openchat_parsed, tensor_name);
-            let reference = dequantize_real_sample(&mut openchat_file, &openchat_parsed, openchat_len, tensor, CAP);
+            let reference = dequantize_real_sample(
+                &mut openchat_file,
+                &openchat_parsed,
+                openchat_len,
+                tensor,
+                CAP,
+            );
             report.push((role, requantize_curve(&reference)));
         }
 
@@ -1031,14 +1154,24 @@ mod real_file {
         ];
         for (role, tensor_name) in mixtral_roles {
             let tensor = find_tensor(&mixtral_parsed, tensor_name);
-            let reference = dequantize_real_sample(&mut mixtral_file, &mixtral_parsed, mixtral_len, tensor, CAP);
+            let reference = dequantize_real_sample(
+                &mut mixtral_file,
+                &mixtral_parsed,
+                mixtral_len,
+                tensor,
+                CAP,
+            );
             report.push((role, requantize_curve(&reference)));
         }
 
         assert_eq!(report.len(), 9, "expected exactly the 9 sampled roles");
 
         for (role, curve) in &report {
-            assert_eq!(curve.len(), 4, "role {role}: expected all four levels measured");
+            assert_eq!(
+                curve.len(),
+                4,
+                "role {role}: expected all four levels measured"
+            );
             for level in curve {
                 debug!(
                     role = %role,
@@ -1128,18 +1261,42 @@ mod real_models {
     fn describe_array(array: &MetadataArray) -> String {
         let len = array.len();
         match array {
-            MetadataArray::String(values) => format!("string[{len}] sample={:?}", &values[..values.len().min(3)]),
-            MetadataArray::F32(values) => format!("f32[{len}] sample={:?}", &values[..values.len().min(3)]),
-            MetadataArray::I32(values) => format!("i32[{len}] sample={:?}", &values[..values.len().min(3)]),
-            MetadataArray::U32(values) => format!("u32[{len}] sample={:?}", &values[..values.len().min(3)]),
-            MetadataArray::I64(values) => format!("i64[{len}] sample={:?}", &values[..values.len().min(3)]),
-            MetadataArray::U64(values) => format!("u64[{len}] sample={:?}", &values[..values.len().min(3)]),
-            MetadataArray::F64(values) => format!("f64[{len}] sample={:?}", &values[..values.len().min(3)]),
-            MetadataArray::Bool(values) => format!("bool[{len}] sample={:?}", &values[..values.len().min(3)]),
-            MetadataArray::U8(values) => format!("u8[{len}] sample={:?}", &values[..values.len().min(3)]),
-            MetadataArray::I8(values) => format!("i8[{len}] sample={:?}", &values[..values.len().min(3)]),
-            MetadataArray::U16(values) => format!("u16[{len}] sample={:?}", &values[..values.len().min(3)]),
-            MetadataArray::I16(values) => format!("i16[{len}] sample={:?}", &values[..values.len().min(3)]),
+            MetadataArray::String(values) => {
+                format!("string[{len}] sample={:?}", &values[..values.len().min(3)])
+            }
+            MetadataArray::F32(values) => {
+                format!("f32[{len}] sample={:?}", &values[..values.len().min(3)])
+            }
+            MetadataArray::I32(values) => {
+                format!("i32[{len}] sample={:?}", &values[..values.len().min(3)])
+            }
+            MetadataArray::U32(values) => {
+                format!("u32[{len}] sample={:?}", &values[..values.len().min(3)])
+            }
+            MetadataArray::I64(values) => {
+                format!("i64[{len}] sample={:?}", &values[..values.len().min(3)])
+            }
+            MetadataArray::U64(values) => {
+                format!("u64[{len}] sample={:?}", &values[..values.len().min(3)])
+            }
+            MetadataArray::F64(values) => {
+                format!("f64[{len}] sample={:?}", &values[..values.len().min(3)])
+            }
+            MetadataArray::Bool(values) => {
+                format!("bool[{len}] sample={:?}", &values[..values.len().min(3)])
+            }
+            MetadataArray::U8(values) => {
+                format!("u8[{len}] sample={:?}", &values[..values.len().min(3)])
+            }
+            MetadataArray::I8(values) => {
+                format!("i8[{len}] sample={:?}", &values[..values.len().min(3)])
+            }
+            MetadataArray::U16(values) => {
+                format!("u16[{len}] sample={:?}", &values[..values.len().min(3)])
+            }
+            MetadataArray::I16(values) => {
+                format!("i16[{len}] sample={:?}", &values[..values.len().min(3)])
+            }
         }
     }
 
@@ -1157,7 +1314,10 @@ mod real_models {
         }
     }
 
-    fn find_by_suffix<'a>(parsed: &'a ParsedGguf, suffix: &str) -> Option<(&'a str, &'a MetadataValue)> {
+    fn find_by_suffix<'a>(
+        parsed: &'a ParsedGguf,
+        suffix: &str,
+    ) -> Option<(&'a str, &'a MetadataValue)> {
         parsed
             .metadata
             .iter()
@@ -1189,7 +1349,9 @@ mod real_models {
                 None => println!("  <no key ends with '{suffix}'>"),
             }
         }
-        if let Some((key, MetadataValue::Array(MetadataArray::String(tokens)))) = find_by_suffix(parsed, "tokenizer.ggml.tokens") {
+        if let Some((key, MetadataValue::Array(MetadataArray::String(tokens)))) =
+            find_by_suffix(parsed, "tokenizer.ggml.tokens")
+        {
             println!("  {key}.len() [vocab_size] = {}", tokens.len());
         }
     }
@@ -1201,14 +1363,23 @@ mod real_models {
         for tensor in &parsed.tensors {
             let nbytes = u128::from(tensor.nbytes().unwrap_or(0));
             total_bytes += nbytes;
-            let entry = histogram.entry(tensor.ggml_type.to_wire()).or_insert((tensor.ggml_type, 0, 0));
+            let entry =
+                histogram
+                    .entry(tensor.ggml_type.to_wire())
+                    .or_insert((tensor.ggml_type, 0, 0));
             entry.1 += 1;
             entry.2 += nbytes;
         }
         for (ggml_type, count, bytes) in histogram.into_values() {
-            println!("  {ggml_type:?}: count={count} bytes={bytes} ({:.3} GiB)", bytes as f64 / GIB);
+            println!(
+                "  {ggml_type:?}: count={count} bytes={bytes} ({:.3} GiB)",
+                bytes as f64 / GIB
+            );
         }
-        println!("  total packed tensor bytes (on disk) = {total_bytes} ({:.3} GiB)", total_bytes as f64 / GIB);
+        println!(
+            "  total packed tensor bytes (on disk) = {total_bytes} ({:.3} GiB)",
+            total_bytes as f64 / GIB
+        );
     }
 
     const GROUP_PATTERNS: [(&str, &str); 10] = [
@@ -1227,10 +1398,22 @@ mod real_models {
     fn print_functional_groups(parsed: &ParsedGguf) {
         println!("-- functional groups (sample names) --");
         for (label, pattern) in GROUP_PATTERNS {
-            let matches: Vec<&TensorInfo> = parsed.tensors.iter().filter(|tensor| tensor.name.contains(pattern)).collect();
-            println!("  {label} (pattern='{pattern}', {} matches):", matches.len());
+            let matches: Vec<&TensorInfo> = parsed
+                .tensors
+                .iter()
+                .filter(|tensor| tensor.name.contains(pattern))
+                .collect();
+            println!(
+                "  {label} (pattern='{pattern}', {} matches):",
+                matches.len()
+            );
             for tensor in matches.iter().take(3) {
-                println!("    {} dims={:?} type={:?}", tensor.name, tensor.dims.as_slice(), tensor.ggml_type);
+                println!(
+                    "    {} dims={:?} type={:?}",
+                    tensor.name,
+                    tensor.dims.as_slice(),
+                    tensor.ggml_type
+                );
             }
         }
     }
@@ -1273,9 +1456,17 @@ mod real_models {
             packed_bytes += u128::from(tensor.nbytes().unwrap_or(0));
             f32_bytes += u128::from(tensor.element_count()) * 4;
         }
-        println!("-- dequant-to-f32 memory cost (reject_non_float32 requires this before evaluate) --");
-        println!("  packed on disk   = {packed_bytes} bytes ({:.3} GiB)", packed_bytes as f64 / GIB);
-        println!("  dequantized f32  = {f32_bytes} bytes ({:.3} GiB)", f32_bytes as f64 / GIB);
+        println!(
+            "-- dequant-to-f32 memory cost (reject_non_float32 requires this before evaluate) --"
+        );
+        println!(
+            "  packed on disk   = {packed_bytes} bytes ({:.3} GiB)",
+            packed_bytes as f64 / GIB
+        );
+        println!(
+            "  dequantized f32  = {f32_bytes} bytes ({:.3} GiB)",
+            f32_bytes as f64 / GIB
+        );
         println!(
             "  expansion ratio  = {:.2}x",
             f32_bytes as f64 / (packed_bytes.max(1) as f64)
@@ -1283,9 +1474,17 @@ mod real_models {
     }
 
     fn print_full_tensor_list(parsed: &ParsedGguf) {
-        println!("-- full tensor directory ({} entries) --", parsed.tensors.len());
+        println!(
+            "-- full tensor directory ({} entries) --",
+            parsed.tensors.len()
+        );
         for tensor in &parsed.tensors {
-            println!("  {} dims={:?} type={:?}", tensor.name, tensor.dims.as_slice(), tensor.ggml_type);
+            println!(
+                "  {} dims={:?} type={:?}",
+                tensor.name,
+                tensor.dims.as_slice(),
+                tensor.ggml_type
+            );
         }
     }
 
@@ -1300,10 +1499,17 @@ mod real_models {
             }
             println!("\n======== {path_str} ========");
             let (file_len, parsed) = parse_header(path);
-            println!("file_len = {file_len} bytes ({:.3} GiB)", file_len as f64 / GIB);
+            println!(
+                "file_len = {file_len} bytes ({:.3} GiB)",
+                file_len as f64 / GIB
+            );
             println!(
                 "version={} tensor_count={} kv_count={} alignment={} data_offset={}",
-                parsed.version, parsed.tensor_count, parsed.kv_count, parsed.alignment, parsed.data_offset
+                parsed.version,
+                parsed.tensor_count,
+                parsed.kv_count,
+                parsed.alignment,
+                parsed.data_offset
             );
             print_all_metadata(&parsed);
             print_highlights(&parsed);
@@ -1315,4 +1521,3 @@ mod real_models {
         }
     }
 }
-

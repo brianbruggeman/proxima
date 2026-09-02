@@ -147,7 +147,9 @@ mod tests {
     #[proxima::test]
     #[case::int128(DType::Int128)]
     #[case::uint128(DType::UInt128)]
-    async fn dtype_to_wire_returns_none_for_dtypes_safetensors_cannot_represent(#[case] dtype: DType) {
+    async fn dtype_to_wire_returns_none_for_dtypes_safetensors_cannot_represent(
+        #[case] dtype: DType,
+    ) {
         assert_eq!(dtype_to_wire(dtype), None);
     }
 }

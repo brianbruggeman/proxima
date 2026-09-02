@@ -1593,7 +1593,9 @@ impl IccCpuInterface {
                 self.pending_interrupt = InterruptState::Active(intid);
                 Ok(IccEffect::ReadValue(u64::from(intid)))
             }
-            InterruptState::Idle | InterruptState::Active(_) => Ok(IccEffect::ReadValue(ICC_IAR1_SPURIOUS)),
+            InterruptState::Idle | InterruptState::Active(_) => {
+                Ok(IccEffect::ReadValue(ICC_IAR1_SPURIOUS))
+            }
         }
     }
 
@@ -2766,7 +2768,8 @@ mod icc_tests {
     }
 
     #[test]
-    fn eoir1_naming_an_intid_that_was_never_active_is_a_spurious_eoi_accepted_with_no_state_change() {
+    fn eoir1_naming_an_intid_that_was_never_active_is_a_spurious_eoi_accepted_with_no_state_change()
+    {
         let mut icc = IccCpuInterface::new();
         icc.set_pending(27);
         icc.apply(read(3, 0, 12, 12, 0))
@@ -2921,10 +2924,18 @@ mod icc_tests {
     #[test]
     fn oslar_el1_read_is_rejected_as_write_only() {
         let mut icc = IccCpuInterface::new();
-        let error = icc.apply(read(2, 0, 1, 0, 4)).expect_err("oslar_el1 is write-only");
+        let error = icc
+            .apply(read(2, 0, 1, 0, 4))
+            .expect_err("oslar_el1 is write-only");
         assert_eq!(
             error,
-            IccError::WriteOnlyRegister { op0: 2, op1: 0, crn: 1, crm: 0, op2: 4 }
+            IccError::WriteOnlyRegister {
+                op0: 2,
+                op1: 0,
+                crn: 1,
+                crm: 0,
+                op2: 4
+            }
         );
     }
 
@@ -2983,8 +2994,15 @@ mod icc_tests {
         const SGI3_INTID: u64 = 3;
         const TARGET_LIST_BIT_ZERO: u64 = 0b1;
 
-        icc.apply(write(3, 0, 12, 11, 5, (SGI3_INTID << 24) | TARGET_LIST_BIT_ZERO))
-            .expect("icc_sgi1r_el1 write is legal");
+        icc.apply(write(
+            3,
+            0,
+            12,
+            11,
+            5,
+            (SGI3_INTID << 24) | TARGET_LIST_BIT_ZERO,
+        ))
+        .expect("icc_sgi1r_el1 write is legal");
 
         let acknowledge = icc
             .apply(read(3, 0, 12, 12, 0))
@@ -3004,7 +3022,14 @@ mod icc_tests {
         const TARGET_LIST_BIT_ONE: u64 = 0b10;
 
         let applied = icc
-            .apply(write(3, 0, 12, 11, 5, (SGI5_INTID << 24) | TARGET_LIST_BIT_ONE))
+            .apply(write(
+                3,
+                0,
+                12,
+                11,
+                5,
+                (SGI5_INTID << 24) | TARGET_LIST_BIT_ONE,
+            ))
             .expect("icc_sgi1r_el1 write is legal even when it targets nobody modeled");
         assert_eq!(applied, IccEffect::Applied);
 

@@ -51,11 +51,16 @@ pub enum TokenizerError {
     #[error(
         "gguf metadata arrays 'tokenizer.ggml.tokens' (len {tokens_len}) and 'tokenizer.ggml.scores' (len {scores_len}) disagree in length"
     )]
-    ScoreArrayLengthMismatch { tokens_len: usize, scores_len: usize },
+    ScoreArrayLengthMismatch {
+        tokens_len: usize,
+        scores_len: usize,
+    },
 
     #[error("gguf tokenizer.ggml.model '{model}' is not a tokenizer family this crate supports")]
     UnsupportedTokenizerModel { model: String },
 
-    #[error("hf tokenizer.json is not valid json, or is missing model.vocab/model.merges: {reason}")]
+    #[error(
+        "hf tokenizer.json is not valid json, or is missing model.vocab/model.merges: {reason}"
+    )]
     MalformedHfTokenizerJson { reason: String },
 }

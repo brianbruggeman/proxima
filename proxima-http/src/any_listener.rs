@@ -2140,9 +2140,8 @@ mod tests {
             Value::String(socket_path.to_string_lossy().into_owned()),
         );
 
-        let context = ServeContext::new(
-            proxima_primitives::pipe::telemetry_surface::NoopTelemetry::handle(),
-        );
+        let context =
+            ServeContext::new(proxima_primitives::pipe::telemetry_surface::NoopTelemetry::handle());
         let (_shutdown_tx, shutdown_rx) = oneshot::channel();
         let dispatch = into_handle(ConstantOk);
         let bind: SocketAddr = "127.0.0.1:0".parse().expect("parse bind addr");

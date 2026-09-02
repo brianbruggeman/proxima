@@ -16,9 +16,9 @@
 use std::fs;
 use std::path::Path;
 
-use proxima_model_interop::capability::render_ggml_matrix_markdown;
 #[cfg(feature = "metal")]
 use proxima_model_interop::capability::quant_format::render_markdown as render_quant_format_markdown;
+use proxima_model_interop::capability::render_ggml_matrix_markdown;
 
 fn document_body() -> String {
     let mut body = String::new();
@@ -44,8 +44,11 @@ fn document_body() -> String {
 
 fn main() {
     let manifest_dir = env!("CARGO_MANIFEST_DIR");
-    let output_path = Path::new(manifest_dir).join("docs").join("compatibility.md");
-    fs::create_dir_all(output_path.parent().expect("docs dir has a parent")).expect("create docs dir");
+    let output_path = Path::new(manifest_dir)
+        .join("docs")
+        .join("compatibility.md");
+    fs::create_dir_all(output_path.parent().expect("docs dir has a parent"))
+        .expect("create docs dir");
     fs::write(&output_path, document_body()).expect("write compatibility.md");
     println!("wrote {}", output_path.display());
 }

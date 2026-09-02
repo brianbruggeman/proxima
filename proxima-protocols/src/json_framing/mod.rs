@@ -26,9 +26,9 @@ use codec::{HEADER_BYTES, decode_header, encode_header};
 #[cfg(feature = "json_framing-std")]
 use proxima_primitives::sync::AsyncMutex as Mutex;
 #[cfg(feature = "json_framing-std")]
-use serde_json::Value;
-#[cfg(feature = "json_framing-std")]
 use proxima_telemetry::{debug, warn};
+#[cfg(feature = "json_framing-std")]
+use serde_json::Value;
 #[cfg(feature = "json_framing-std")]
 use thiserror::Error;
 

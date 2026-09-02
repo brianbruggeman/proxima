@@ -265,7 +265,9 @@ fn accept_channel_pushes_exactly_one_handle_per_new_initial() {
 // from THIS instance, making capacity 0 genuinely fill after one accept.
 #[test]
 fn accept_channel_overflow_drops_and_counts_but_keeps_the_connection_tracked() {
-    run_on_big_stack(accept_channel_overflow_drops_and_counts_but_keeps_the_connection_tracked_body);
+    run_on_big_stack(
+        accept_channel_overflow_drops_and_counts_but_keeps_the_connection_tracked_body,
+    );
 }
 
 fn accept_channel_overflow_drops_and_counts_but_keeps_the_connection_tracked_body() {
@@ -276,16 +278,14 @@ fn accept_channel_overflow_drops_and_counts_but_keeps_the_connection_tracked_bod
     let server_hello = b"HELLO-DROP-REPLY".to_vec();
     let origin = QuicInstant::from_micros(900_000);
 
-    let mut first_client =
-        build_client(&[0x31_u8; 8], &[0x41_u8; 8], &first_hello, origin);
+    let mut first_client = build_client(&[0x31_u8; 8], &[0x41_u8; 8], &first_hello, origin);
     let mut first_buf = [0u8; 1500];
     let first_datagram = first_client
         .poll_transmit(origin, &mut first_buf)
         .expect("poll")
         .expect("emit");
 
-    let mut second_client =
-        build_client(&[0x51_u8; 8], &[0x61_u8; 8], &second_hello, origin);
+    let mut second_client = build_client(&[0x51_u8; 8], &[0x61_u8; 8], &second_hello, origin);
     let mut second_buf = [0u8; 1500];
     let second_datagram = second_client
         .poll_transmit(origin, &mut second_buf)
@@ -301,24 +301,18 @@ fn accept_channel_overflow_drops_and_counts_but_keeps_the_connection_tracked_bod
     );
 
     let core_now = core_instant(origin);
-    block_on(listener.on_datagram(
-        core_now,
-        peer_addr(21),
-        &first_buf[..first_datagram.len],
-    ))
-    .expect("first NewInitial accepted");
+    block_on(listener.on_datagram(core_now, peer_addr(21), &first_buf[..first_datagram.len]))
+        .expect("first NewInitial accepted");
     assert_eq!(
         super::ACCEPT_CHANNEL_DROPPED.get(),
         before,
         "the first accept fits the channel's one guaranteed slot — no drop yet"
     );
 
-    block_on(listener.on_datagram(
-        core_now,
-        peer_addr(22),
-        &second_buf[..second_datagram.len],
-    ))
-    .expect("second NewInitial still accepts the CONNECTION even though its notification drops");
+    block_on(listener.on_datagram(core_now, peer_addr(22), &second_buf[..second_datagram.len]))
+        .expect(
+            "second NewInitial still accepts the CONNECTION even though its notification drops",
+        );
     assert_eq!(
         super::ACCEPT_CHANNEL_DROPPED.get(),
         before + 1,

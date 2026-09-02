@@ -27,13 +27,13 @@ use proxima_gguf::parser::{GgufEvent, GgufParser};
 use proxima_gguf::pipe::ParsedGguf;
 use proxima_gguf::quant::f16;
 use proxima_gguf::types::GgmlType;
-use proxima_tensor::{
-    DType, Extent, IndexMap, Keep, NodeId, Op, QuantizedBlock, Reduce, ReduceInit, ScalarOp, append, evaluate, map,
-};
 use proxima_tensor::test_support::Lcg;
+use proxima_tensor::{
+    DType, Extent, IndexMap, Keep, NodeId, Op, QuantizedBlock, Reduce, ReduceInit, ScalarOp,
+    append, evaluate, map,
+};
 
-const REAL_MIXTRAL_GGUF_PATH: &str =
-    "/Users/brianbruggeman/.lmstudio/models/NousResearch/Nous-Hermes-2-Mixtral-8x7B-DPO-GGUF/Nous-Hermes-2-Mixtral-8x7B-DPO.Q4_K_S.gguf";
+const REAL_MIXTRAL_GGUF_PATH: &str = "/Users/brianbruggeman/.lmstudio/models/NousResearch/Nous-Hermes-2-Mixtral-8x7B-DPO-GGUF/Nous-Hermes-2-Mixtral-8x7B-DPO.Q4_K_S.gguf";
 
 fn real_gguf_header(path: &std::path::Path) -> Option<(ParsedGguf, u64, std::fs::File)> {
     let mut file = std::fs::File::open(path).ok()?;
@@ -53,10 +53,16 @@ fn real_gguf_header(path: &std::path::Path) -> Option<(ParsedGguf, u64, std::fs:
             let mut completion = None;
             for event in events {
                 match event {
-                    GgufEvent::Header { version: version_value, .. } => version = Some(version_value),
+                    GgufEvent::Header {
+                        version: version_value,
+                        ..
+                    } => version = Some(version_value),
                     GgufEvent::Metadata { key, value } => metadata.push((key, value)),
                     GgufEvent::Tensor(tensor) => tensors.push(tensor),
-                    GgufEvent::Complete { data_offset, alignment } => {
+                    GgufEvent::Complete {
+                        data_offset,
+                        alignment,
+                    } => {
                         completion = Some((data_offset, alignment));
                     }
                 }
@@ -89,7 +95,10 @@ fn real_tensor_bytes(
     name: &str,
     expect_type: GgmlType,
 ) -> Option<(Vec<u8>, usize, usize)> {
-    let tensor = parsed.tensors.iter().find(|candidate| candidate.name == name)?;
+    let tensor = parsed
+        .tensors
+        .iter()
+        .find(|candidate| candidate.name == name)?;
     if tensor.ggml_type != expect_type {
         eprintln!(
             "real_tensor_bytes: {name} is {:?} in this file, not {expect_type:?} -- test skipped, not faked",
@@ -99,10 +108,14 @@ fn real_tensor_bytes(
     }
     let in_dim = tensor.dims[0] as usize;
     let out_dim = tensor.dims[1] as usize;
-    let range = parsed.tensor_data_range(tensor, file_len).expect("tensor byte range within file bounds");
+    let range = parsed
+        .tensor_data_range(tensor, file_len)
+        .expect("tensor byte range within file bounds");
     let mut buf = vec![0u8; (range.end - range.start) as usize];
-    file.seek(SeekFrom::Start(range.start)).expect("seek to tensor data");
-    file.read_exact(&mut buf).expect("read exact tensor byte range");
+    file.seek(SeekFrom::Start(range.start))
+        .expect("seek to tensor data");
+    file.read_exact(&mut buf)
+        .expect("read exact tensor byte range");
     Some((buf, in_dim, out_dim))
 }
 
@@ -163,36 +176,53 @@ fn metal_matmul_on_real_ffn_gate_inp_f16_bytes_matches_the_dequantized_f32_cpu_p
         eprintln!("real gguf file not found at {REAL_MIXTRAL_GGUF_PATH}; test skipped");
         return;
     };
-    let Some((weight_bytes, in_dim, out_dim)) =
-        real_tensor_bytes(&mut file, &parsed, file_len, "blk.0.ffn_gate_inp.weight", GgmlType::F16)
-    else {
+    let Some((weight_bytes, in_dim, out_dim)) = real_tensor_bytes(
+        &mut file,
+        &parsed,
+        file_len,
+        "blk.0.ffn_gate_inp.weight",
+        GgmlType::F16,
+    ) else {
         return;
     };
 
-    assert_eq!(weight_bytes.len(), in_dim * out_dim * 2, "blk.0.ffn_gate_inp.weight byte length matches its declared f16 shape");
+    assert_eq!(
+        weight_bytes.len(),
+        in_dim * out_dim * 2,
+        "blk.0.ffn_gate_inp.weight byte length matches its declared f16 shape"
+    );
 
     let mut lcg = Lcg(2026);
     let activation: Vec<f32> = (0..in_dim).map(|_| lcg.next_unit() * 4.0 - 2.0).collect();
 
     let mut dequantized = vec![0.0f32; out_dim * in_dim];
-    f16::dequantize(&weight_bytes, &mut dequantized).expect("blk.0.ffn_gate_inp.weight decodes as a whole run of f16 elements");
+    f16::dequantize(&weight_bytes, &mut dequantized)
+        .expect("blk.0.ffn_gate_inp.weight decodes as a whole run of f16 elements");
 
-    let (packed_program, packed_sum) = matmul_program(out_dim as u32, in_dim as u32, DType::Float16);
+    let (packed_program, packed_sum) =
+        matmul_program(out_dim as u32, in_dim as u32, DType::Float16);
     let metal = omega::execute(
         &packed_program,
         &[],
-        &[QuantizedBlock::Float16(&weight_bytes), QuantizedBlock::Float32(&activation)],
+        &[
+            QuantizedBlock::Float16(&weight_bytes),
+            QuantizedBlock::Float32(&activation),
+        ],
         &[packed_sum],
     )
     .expect("metal executes an f16 matmul on real blk.0.ffn_gate_inp.weight bytes");
 
     let (f32_program, f32_sum) = matmul_program(out_dim as u32, in_dim as u32, DType::Float32);
-    let cpu =
-        evaluate(&f32_program, &[], &[&dequantized, &activation], &[f32_sum]).expect("dequantized f32 cpu matmul evaluates");
+    let cpu = evaluate(&f32_program, &[], &[&dequantized, &activation], &[f32_sum])
+        .expect("dequantized f32 cpu matmul evaluates");
 
     let actual = metal.root();
     let expected = cpu.root();
-    assert_eq!(actual.len(), out_dim, "degenerate gate: no outputs compared");
+    assert_eq!(
+        actual.len(),
+        out_dim,
+        "degenerate gate: no outputs compared"
+    );
     assert_eq!(actual.len(), expected.len());
 
     let mut max_diff = 0.0f32;
@@ -200,8 +230,15 @@ fn metal_matmul_on_real_ffn_gate_inp_f16_bytes_matches_the_dequantized_f32_cpu_p
         assert!(got.is_finite(), "metal produced a non-finite value: {got}");
         max_diff = max_diff.max((got - want).abs());
     }
-    let max_magnitude = expected.iter().map(|value| value.abs()).fold(0.0f32, f32::max);
-    let relative = if max_magnitude > 0.0 { max_diff / max_magnitude } else { max_diff };
+    let max_magnitude = expected
+        .iter()
+        .map(|value| value.abs())
+        .fold(0.0f32, f32::max);
+    let relative = if max_magnitude > 0.0 {
+        max_diff / max_magnitude
+    } else {
+        max_diff
+    };
     eprintln!(
         "real blk.0.ffn_gate_inp.weight (F16, {out_dim}x{in_dim}) metal vs dequantized-f32 cpu: \
          max_diff={max_diff} max_magnitude={max_magnitude} relative={relative}"

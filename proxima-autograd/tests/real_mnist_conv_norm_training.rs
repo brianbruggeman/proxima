@@ -88,8 +88,18 @@ struct TestConfig {
 /// exact same numbers as that file's own default for a fair, equal-budget
 /// comparison (see [`BASELINE_ACCURACY`]).
 fn test_config() -> TestConfig {
-    let env_or = |name: &str, default: u32| -> u32 { std::env::var(name).ok().and_then(|value| value.parse().ok()).unwrap_or(default) };
-    let env_or_f32 = |name: &str, default: f32| -> f32 { std::env::var(name).ok().and_then(|value| value.parse().ok()).unwrap_or(default) };
+    let env_or = |name: &str, default: u32| -> u32 {
+        std::env::var(name)
+            .ok()
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(default)
+    };
+    let env_or_f32 = |name: &str, default: f32| -> f32 {
+        std::env::var(name)
+            .ok()
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(default)
+    };
     TestConfig {
         train_examples: env_or("NORMCONV_TRAIN_EXAMPLES", 256) as usize,
         epochs: env_or("NORMCONV_EPOCHS", 2),
@@ -100,7 +110,10 @@ fn test_config() -> TestConfig {
 }
 
 fn checkpoint_present() -> bool {
-    train_images_path().exists() && train_labels_path().exists() && test_images_path().exists() && test_labels_path().exists()
+    train_images_path().exists()
+        && train_labels_path().exists()
+        && test_images_path().exists()
+        && test_labels_path().exists()
 }
 
 fn train_images_path() -> std::path::PathBuf {
@@ -122,7 +135,12 @@ fn idx_header(bytes: &[u8]) -> (usize, Vec<usize>) {
     let mut extents = Vec::with_capacity(dimension_count - 1);
     for axis in 1..dimension_count {
         let offset = 4 + axis * 4;
-        extents.push(u32::from_be_bytes([bytes[offset], bytes[offset + 1], bytes[offset + 2], bytes[offset + 3]]) as usize);
+        extents.push(u32::from_be_bytes([
+            bytes[offset],
+            bytes[offset + 1],
+            bytes[offset + 2],
+            bytes[offset + 3],
+        ]) as usize);
     }
     (item_count, extents)
 }
@@ -133,7 +151,10 @@ fn load_normalized_images(path: &std::path::Path, limit: usize) -> Vec<f32> {
     let pixel_count = extents.iter().product::<usize>();
     let take = item_count.min(limit);
     let header_length = 4 + extents.len() * 4 + 4;
-    bytes[header_length..header_length + take * pixel_count].iter().map(|&pixel| ((pixel as f32 / 255.0) - 0.1307) / 0.3081).collect()
+    bytes[header_length..header_length + take * pixel_count]
+        .iter()
+        .map(|&pixel| ((pixel as f32 / 255.0) - 0.1307) / 0.3081)
+        .collect()
 }
 
 fn load_one_hot_labels(path: &std::path::Path, limit: usize) -> (Vec<f32>, Vec<u8>) {
@@ -149,17 +170,46 @@ fn load_one_hot_labels(path: &std::path::Path, limit: usize) -> (Vec<f32>, Vec<u
 }
 
 fn leaf(program: &mut Vec<Op>, name: &str, shape: Vec<Extent>) -> NodeId {
-    op::append(program, Op::Input { dtype: DType::Float32, shape, name: Some(name.into()) })
+    op::append(
+        program,
+        Op::Input {
+            dtype: DType::Float32,
+            shape,
+            name: Some(name.into()),
+        },
+    )
 }
 
 fn elementwise(program: &mut Vec<Op>, body: ScalarOp, operands: Vec<(NodeId, IndexMap)>) -> NodeId {
-    op::append(program, Op::Elementwise { dtype: DType::Float32, body, operands, name: None })
-}
-
-fn reduce_add(program: &mut Vec<Op>, operand: NodeId, in_map: IndexMap, out_map: IndexMap) -> NodeId {
     op::append(
         program,
-        Op::Reduce(op::Reduce { dtype: DType::Float32, body: ScalarOp::Add, init: ReduceInit::Zero, operand, in_map, out_map, keep: op::Keep::Reduce, name: None }),
+        Op::Elementwise {
+            dtype: DType::Float32,
+            body,
+            operands,
+            name: None,
+        },
+    )
+}
+
+fn reduce_add(
+    program: &mut Vec<Op>,
+    operand: NodeId,
+    in_map: IndexMap,
+    out_map: IndexMap,
+) -> NodeId {
+    op::append(
+        program,
+        Op::Reduce(op::Reduce {
+            dtype: DType::Float32,
+            body: ScalarOp::Add,
+            init: ReduceInit::Zero,
+            operand,
+            in_map,
+            out_map,
+            keep: op::Keep::Reduce,
+            name: None,
+        }),
     )
 }
 
@@ -170,9 +220,25 @@ fn identity(rank: u16) -> IndexMap {
 fn fc_layer(program: &mut Vec<Op>, conv_out: NodeId, fc_weight: NodeId, fc_bias: NodeId) -> NodeId {
     let conv_out_pattern = IndexMap::Affine(map::projection(5, &[0, 1, 2, 3]));
     let weight_pattern = IndexMap::Affine(map::projection(5, &[1, 2, 3, 4]));
-    let product = elementwise(program, ScalarOp::Multiply, alloc::vec![(conv_out, conv_out_pattern), (fc_weight, weight_pattern)]);
-    let reduced = reduce_add(program, product, identity(5), IndexMap::Affine(map::projection(5, &[0, 4])));
-    elementwise(program, ScalarOp::Add, alloc::vec![(reduced, identity(2)), (fc_bias, IndexMap::Affine(map::projection(2, &[1])))])
+    let product = elementwise(
+        program,
+        ScalarOp::Multiply,
+        alloc::vec![(conv_out, conv_out_pattern), (fc_weight, weight_pattern)],
+    );
+    let reduced = reduce_add(
+        program,
+        product,
+        identity(5),
+        IndexMap::Affine(map::projection(5, &[0, 4])),
+    );
+    elementwise(
+        program,
+        ScalarOp::Add,
+        alloc::vec![
+            (reduced, identity(2)),
+            (fc_bias, IndexMap::Affine(map::projection(2, &[1])))
+        ],
+    )
 }
 
 struct Network {
@@ -202,50 +268,206 @@ struct Network {
 /// shape").
 fn build_network(batch: usize) -> Network {
     let mut program = Vec::new();
-    let x = leaf(&mut program, "x", alloc::vec![Extent::Static(batch as u32), Extent::Static(1), Extent::Static(IMAGE_SIDE as u32), Extent::Static(IMAGE_SIDE as u32)]);
-    let y = leaf(&mut program, "y", alloc::vec![Extent::Static(batch as u32), Extent::Static(OUT_DIM as u32)]);
+    let x = leaf(
+        &mut program,
+        "x",
+        alloc::vec![
+            Extent::Static(batch as u32),
+            Extent::Static(1),
+            Extent::Static(IMAGE_SIDE as u32),
+            Extent::Static(IMAGE_SIDE as u32)
+        ],
+    );
+    let y = leaf(
+        &mut program,
+        "y",
+        alloc::vec![Extent::Static(batch as u32), Extent::Static(OUT_DIM as u32)],
+    );
 
-    let conv1_weight = leaf(&mut program, "conv1_weight", alloc::vec![Extent::Static(CONV1_OUT_CHANNELS as u32), Extent::Static(1), Extent::Static(KERNEL as u32), Extent::Static(KERNEL as u32)]);
-    let conv1_bias = leaf(&mut program, "conv1_bias", alloc::vec![Extent::Static(CONV1_OUT_CHANNELS as u32)]);
-    let conv1_out_shape = conv2d_output_shape((batch as u64, 1, IMAGE_SIDE as u64, IMAGE_SIDE as u64), (CONV1_OUT_CHANNELS as u64, 1, KERNEL, KERNEL), STRIDE, STRIDE)
-        .expect("conv1 kernel fits a 28x28 image at stride 2");
-    let conv1_pre = conv2d(&mut program, DType::Float32, x, (batch as u64, 1, IMAGE_SIDE as u64, IMAGE_SIDE as u64), conv1_weight, (CONV1_OUT_CHANNELS as u64, 1, KERNEL, KERNEL), Some(conv1_bias), STRIDE, STRIDE)
-        .expect("conv1 lowers");
+    let conv1_weight = leaf(
+        &mut program,
+        "conv1_weight",
+        alloc::vec![
+            Extent::Static(CONV1_OUT_CHANNELS as u32),
+            Extent::Static(1),
+            Extent::Static(KERNEL as u32),
+            Extent::Static(KERNEL as u32)
+        ],
+    );
+    let conv1_bias = leaf(
+        &mut program,
+        "conv1_bias",
+        alloc::vec![Extent::Static(CONV1_OUT_CHANNELS as u32)],
+    );
+    let conv1_out_shape = conv2d_output_shape(
+        (batch as u64, 1, IMAGE_SIDE as u64, IMAGE_SIDE as u64),
+        (CONV1_OUT_CHANNELS as u64, 1, KERNEL, KERNEL),
+        STRIDE,
+        STRIDE,
+    )
+    .expect("conv1 kernel fits a 28x28 image at stride 2");
+    let conv1_pre = conv2d(
+        &mut program,
+        DType::Float32,
+        x,
+        (batch as u64, 1, IMAGE_SIDE as u64, IMAGE_SIDE as u64),
+        conv1_weight,
+        (CONV1_OUT_CHANNELS as u64, 1, KERNEL, KERNEL),
+        Some(conv1_bias),
+        STRIDE,
+        STRIDE,
+    )
+    .expect("conv1 lowers");
 
     let (_, conv1_out_channels, conv1_out_h, conv1_out_w) = conv1_out_shape;
-    let bn1_gamma = leaf(&mut program, "bn1_gamma", alloc::vec![Extent::Static(conv1_out_channels as u32)]);
-    let bn1_beta = leaf(&mut program, "bn1_beta", alloc::vec![Extent::Static(conv1_out_channels as u32)]);
+    let bn1_gamma = leaf(
+        &mut program,
+        "bn1_gamma",
+        alloc::vec![Extent::Static(conv1_out_channels as u32)],
+    );
+    let bn1_beta = leaf(
+        &mut program,
+        "bn1_beta",
+        alloc::vec![Extent::Static(conv1_out_channels as u32)],
+    );
     let elements_per_channel1 = batch as u64 * conv1_out_h * conv1_out_w;
-    let (bn1_out, batch_mean1, batch_var1) = batchnorm2d_train(&mut program, DType::Float32, conv1_pre, bn1_gamma, bn1_beta, 4, elements_per_channel1, BN_EPS);
+    let (bn1_out, batch_mean1, batch_var1) = batchnorm2d_train(
+        &mut program,
+        DType::Float32,
+        conv1_pre,
+        bn1_gamma,
+        bn1_beta,
+        4,
+        elements_per_channel1,
+        BN_EPS,
+    );
     let conv1_out = relu(&mut program, DType::Float32, bn1_out, 4);
 
-    let running_mean1 = leaf(&mut program, "running_mean1", alloc::vec![Extent::Static(conv1_out_channels as u32)]);
-    let running_var1 = leaf(&mut program, "running_var1", alloc::vec![Extent::Static(conv1_out_channels as u32)]);
+    let running_mean1 = leaf(
+        &mut program,
+        "running_mean1",
+        alloc::vec![Extent::Static(conv1_out_channels as u32)],
+    );
+    let running_var1 = leaf(
+        &mut program,
+        "running_var1",
+        alloc::vec![Extent::Static(conv1_out_channels as u32)],
+    );
 
     let conv2_weight = leaf(
         &mut program,
         "conv2_weight",
-        alloc::vec![Extent::Static(CONV2_OUT_CHANNELS as u32), Extent::Static(CONV1_OUT_CHANNELS as u32), Extent::Static(KERNEL as u32), Extent::Static(KERNEL as u32)],
+        alloc::vec![
+            Extent::Static(CONV2_OUT_CHANNELS as u32),
+            Extent::Static(CONV1_OUT_CHANNELS as u32),
+            Extent::Static(KERNEL as u32),
+            Extent::Static(KERNEL as u32)
+        ],
     );
-    let conv2_bias = leaf(&mut program, "conv2_bias", alloc::vec![Extent::Static(CONV2_OUT_CHANNELS as u32)]);
-    let conv2_out_shape = conv2d_output_shape(conv1_out_shape, (CONV2_OUT_CHANNELS as u64, CONV1_OUT_CHANNELS as u64, KERNEL, KERNEL), STRIDE, STRIDE).expect("conv2 kernel fits conv1's output at stride 2");
-    let conv2_pre = conv2d(&mut program, DType::Float32, conv1_out, conv1_out_shape, conv2_weight, (CONV2_OUT_CHANNELS as u64, CONV1_OUT_CHANNELS as u64, KERNEL, KERNEL), Some(conv2_bias), STRIDE, STRIDE)
-        .expect("conv2 lowers");
+    let conv2_bias = leaf(
+        &mut program,
+        "conv2_bias",
+        alloc::vec![Extent::Static(CONV2_OUT_CHANNELS as u32)],
+    );
+    let conv2_out_shape = conv2d_output_shape(
+        conv1_out_shape,
+        (
+            CONV2_OUT_CHANNELS as u64,
+            CONV1_OUT_CHANNELS as u64,
+            KERNEL,
+            KERNEL,
+        ),
+        STRIDE,
+        STRIDE,
+    )
+    .expect("conv2 kernel fits conv1's output at stride 2");
+    let conv2_pre = conv2d(
+        &mut program,
+        DType::Float32,
+        conv1_out,
+        conv1_out_shape,
+        conv2_weight,
+        (
+            CONV2_OUT_CHANNELS as u64,
+            CONV1_OUT_CHANNELS as u64,
+            KERNEL,
+            KERNEL,
+        ),
+        Some(conv2_bias),
+        STRIDE,
+        STRIDE,
+    )
+    .expect("conv2 lowers");
     let conv2_relu = relu(&mut program, DType::Float32, conv2_pre, 4);
 
     let (_, out_channels, out_h, out_w) = conv2_out_shape;
-    let mask = leaf(&mut program, "mask", alloc::vec![Extent::Static(batch as u32), Extent::Static(out_channels as u32), Extent::Static(out_h as u32), Extent::Static(out_w as u32)]);
-    let conv2_out = dropout(&mut program, DType::Float32, conv2_relu, mask, 4, DROPOUT_KEEP_PROB);
+    let mask = leaf(
+        &mut program,
+        "mask",
+        alloc::vec![
+            Extent::Static(batch as u32),
+            Extent::Static(out_channels as u32),
+            Extent::Static(out_h as u32),
+            Extent::Static(out_w as u32)
+        ],
+    );
+    let conv2_out = dropout(
+        &mut program,
+        DType::Float32,
+        conv2_relu,
+        mask,
+        4,
+        DROPOUT_KEEP_PROB,
+    );
 
-    let fc_weight = leaf(&mut program, "fc_weight", alloc::vec![Extent::Static(out_channels as u32), Extent::Static(out_h as u32), Extent::Static(out_w as u32), Extent::Static(OUT_DIM as u32)]);
-    let fc_bias = leaf(&mut program, "fc_bias", alloc::vec![Extent::Static(OUT_DIM as u32)]);
+    let fc_weight = leaf(
+        &mut program,
+        "fc_weight",
+        alloc::vec![
+            Extent::Static(out_channels as u32),
+            Extent::Static(out_h as u32),
+            Extent::Static(out_w as u32),
+            Extent::Static(OUT_DIM as u32)
+        ],
+    );
+    let fc_bias = leaf(
+        &mut program,
+        "fc_bias",
+        alloc::vec![Extent::Static(OUT_DIM as u32)],
+    );
     let logits = fc_layer(&mut program, conv2_out, fc_weight, fc_bias);
 
     let summed_loss = softmax_cross_entropy(&mut program, DType::Float32, logits, y, 2, 1);
-    let inverse_batch = op::append(&mut program, Op::Constant { dtype: DType::Float32, shape: Vec::new(), value: 1.0 / batch as f32 });
-    let loss = elementwise(&mut program, ScalarOp::Multiply, alloc::vec![(summed_loss, identity(0)), (inverse_batch, identity(0))]);
+    let inverse_batch = op::append(
+        &mut program,
+        Op::Constant {
+            dtype: DType::Float32,
+            shape: Vec::new(),
+            value: 1.0 / batch as f32,
+        },
+    );
+    let loss = elementwise(
+        &mut program,
+        ScalarOp::Multiply,
+        alloc::vec![(summed_loss, identity(0)), (inverse_batch, identity(0))],
+    );
 
-    Network { program, conv1_weight, conv1_bias, bn1_gamma, bn1_beta, running_mean1, running_var1, conv2_weight, conv2_bias, fc_weight, fc_bias, batch_mean1, batch_var1, loss }
+    Network {
+        program,
+        conv1_weight,
+        conv1_bias,
+        bn1_gamma,
+        bn1_beta,
+        running_mean1,
+        running_var1,
+        conv2_weight,
+        conv2_bias,
+        fc_weight,
+        fc_bias,
+        batch_mean1,
+        batch_var1,
+        loss,
+    }
 }
 
 /// `Conv1 -> BatchNorm(eval, running stats) -> ReLU -> Conv2 -> ReLU -> FC`
@@ -255,33 +477,147 @@ fn build_network(batch: usize) -> Network {
 /// statistics.
 fn build_eval_network(test_count: usize) -> (Vec<Op>, NodeId, NodeId) {
     let mut program = Vec::new();
-    let x = leaf(&mut program, "x", alloc::vec![Extent::Static(test_count as u32), Extent::Static(1), Extent::Static(IMAGE_SIDE as u32), Extent::Static(IMAGE_SIDE as u32)]);
-    let conv1_weight = leaf(&mut program, "conv1_weight", alloc::vec![Extent::Static(CONV1_OUT_CHANNELS as u32), Extent::Static(1), Extent::Static(KERNEL as u32), Extent::Static(KERNEL as u32)]);
-    let conv1_bias = leaf(&mut program, "conv1_bias", alloc::vec![Extent::Static(CONV1_OUT_CHANNELS as u32)]);
-    let conv1_out_shape = conv2d_output_shape((test_count as u64, 1, IMAGE_SIDE as u64, IMAGE_SIDE as u64), (CONV1_OUT_CHANNELS as u64, 1, KERNEL, KERNEL), STRIDE, STRIDE).expect("conv1 shape");
-    let conv1_pre = conv2d(&mut program, DType::Float32, x, (test_count as u64, 1, IMAGE_SIDE as u64, IMAGE_SIDE as u64), conv1_weight, (CONV1_OUT_CHANNELS as u64, 1, KERNEL, KERNEL), Some(conv1_bias), STRIDE, STRIDE).expect("conv1 lowers");
+    let x = leaf(
+        &mut program,
+        "x",
+        alloc::vec![
+            Extent::Static(test_count as u32),
+            Extent::Static(1),
+            Extent::Static(IMAGE_SIDE as u32),
+            Extent::Static(IMAGE_SIDE as u32)
+        ],
+    );
+    let conv1_weight = leaf(
+        &mut program,
+        "conv1_weight",
+        alloc::vec![
+            Extent::Static(CONV1_OUT_CHANNELS as u32),
+            Extent::Static(1),
+            Extent::Static(KERNEL as u32),
+            Extent::Static(KERNEL as u32)
+        ],
+    );
+    let conv1_bias = leaf(
+        &mut program,
+        "conv1_bias",
+        alloc::vec![Extent::Static(CONV1_OUT_CHANNELS as u32)],
+    );
+    let conv1_out_shape = conv2d_output_shape(
+        (test_count as u64, 1, IMAGE_SIDE as u64, IMAGE_SIDE as u64),
+        (CONV1_OUT_CHANNELS as u64, 1, KERNEL, KERNEL),
+        STRIDE,
+        STRIDE,
+    )
+    .expect("conv1 shape");
+    let conv1_pre = conv2d(
+        &mut program,
+        DType::Float32,
+        x,
+        (test_count as u64, 1, IMAGE_SIDE as u64, IMAGE_SIDE as u64),
+        conv1_weight,
+        (CONV1_OUT_CHANNELS as u64, 1, KERNEL, KERNEL),
+        Some(conv1_bias),
+        STRIDE,
+        STRIDE,
+    )
+    .expect("conv1 lowers");
 
     let (_, conv1_out_channels, _conv1_out_h, _conv1_out_w) = conv1_out_shape;
-    let bn1_gamma = leaf(&mut program, "bn1_gamma", alloc::vec![Extent::Static(conv1_out_channels as u32)]);
-    let bn1_beta = leaf(&mut program, "bn1_beta", alloc::vec![Extent::Static(conv1_out_channels as u32)]);
-    let running_mean1 = leaf(&mut program, "running_mean1", alloc::vec![Extent::Static(conv1_out_channels as u32)]);
-    let running_var1 = leaf(&mut program, "running_var1", alloc::vec![Extent::Static(conv1_out_channels as u32)]);
-    let bn1_out = batchnorm2d_eval(&mut program, DType::Float32, conv1_pre, bn1_gamma, bn1_beta, running_mean1, running_var1, 4, BN_EPS);
+    let bn1_gamma = leaf(
+        &mut program,
+        "bn1_gamma",
+        alloc::vec![Extent::Static(conv1_out_channels as u32)],
+    );
+    let bn1_beta = leaf(
+        &mut program,
+        "bn1_beta",
+        alloc::vec![Extent::Static(conv1_out_channels as u32)],
+    );
+    let running_mean1 = leaf(
+        &mut program,
+        "running_mean1",
+        alloc::vec![Extent::Static(conv1_out_channels as u32)],
+    );
+    let running_var1 = leaf(
+        &mut program,
+        "running_var1",
+        alloc::vec![Extent::Static(conv1_out_channels as u32)],
+    );
+    let bn1_out = batchnorm2d_eval(
+        &mut program,
+        DType::Float32,
+        conv1_pre,
+        bn1_gamma,
+        bn1_beta,
+        running_mean1,
+        running_var1,
+        4,
+        BN_EPS,
+    );
     let conv1_out = relu(&mut program, DType::Float32, bn1_out, 4);
 
     let conv2_weight = leaf(
         &mut program,
         "conv2_weight",
-        alloc::vec![Extent::Static(CONV2_OUT_CHANNELS as u32), Extent::Static(CONV1_OUT_CHANNELS as u32), Extent::Static(KERNEL as u32), Extent::Static(KERNEL as u32)],
+        alloc::vec![
+            Extent::Static(CONV2_OUT_CHANNELS as u32),
+            Extent::Static(CONV1_OUT_CHANNELS as u32),
+            Extent::Static(KERNEL as u32),
+            Extent::Static(KERNEL as u32)
+        ],
     );
-    let conv2_bias = leaf(&mut program, "conv2_bias", alloc::vec![Extent::Static(CONV2_OUT_CHANNELS as u32)]);
-    let conv2_out_shape = conv2d_output_shape(conv1_out_shape, (CONV2_OUT_CHANNELS as u64, CONV1_OUT_CHANNELS as u64, KERNEL, KERNEL), STRIDE, STRIDE).expect("conv2 shape");
-    let conv2_pre = conv2d(&mut program, DType::Float32, conv1_out, conv1_out_shape, conv2_weight, (CONV2_OUT_CHANNELS as u64, CONV1_OUT_CHANNELS as u64, KERNEL, KERNEL), Some(conv2_bias), STRIDE, STRIDE).expect("conv2 lowers");
+    let conv2_bias = leaf(
+        &mut program,
+        "conv2_bias",
+        alloc::vec![Extent::Static(CONV2_OUT_CHANNELS as u32)],
+    );
+    let conv2_out_shape = conv2d_output_shape(
+        conv1_out_shape,
+        (
+            CONV2_OUT_CHANNELS as u64,
+            CONV1_OUT_CHANNELS as u64,
+            KERNEL,
+            KERNEL,
+        ),
+        STRIDE,
+        STRIDE,
+    )
+    .expect("conv2 shape");
+    let conv2_pre = conv2d(
+        &mut program,
+        DType::Float32,
+        conv1_out,
+        conv1_out_shape,
+        conv2_weight,
+        (
+            CONV2_OUT_CHANNELS as u64,
+            CONV1_OUT_CHANNELS as u64,
+            KERNEL,
+            KERNEL,
+        ),
+        Some(conv2_bias),
+        STRIDE,
+        STRIDE,
+    )
+    .expect("conv2 lowers");
     let conv2_out = relu(&mut program, DType::Float32, conv2_pre, 4);
 
     let (_, out_channels, out_h, out_w) = conv2_out_shape;
-    let fc_weight = leaf(&mut program, "fc_weight", alloc::vec![Extent::Static(out_channels as u32), Extent::Static(out_h as u32), Extent::Static(out_w as u32), Extent::Static(OUT_DIM as u32)]);
-    let fc_bias = leaf(&mut program, "fc_bias", alloc::vec![Extent::Static(OUT_DIM as u32)]);
+    let fc_weight = leaf(
+        &mut program,
+        "fc_weight",
+        alloc::vec![
+            Extent::Static(out_channels as u32),
+            Extent::Static(out_h as u32),
+            Extent::Static(out_w as u32),
+            Extent::Static(OUT_DIM as u32)
+        ],
+    );
+    let fc_bias = leaf(
+        &mut program,
+        "fc_bias",
+        alloc::vec![Extent::Static(OUT_DIM as u32)],
+    );
     let logits = fc_layer(&mut program, conv2_out, fc_weight, fc_bias);
 
     (program, x, logits)
@@ -310,7 +646,12 @@ fn ones(count: usize) -> Vec<f32> {
 }
 
 fn argmax(values: &[f32]) -> usize {
-    values.iter().enumerate().max_by(|left, right| left.1.total_cmp(right.1)).map(|(index, _)| index).expect("nonempty logits")
+    values
+        .iter()
+        .enumerate()
+        .max_by(|left, right| left.1.total_cmp(right.1))
+        .map(|(index, _)| index)
+        .expect("nonempty logits")
 }
 
 /// Trains [`build_network`] (batchnorm after conv1, dropout before the fc
@@ -328,78 +669,235 @@ fn real_mnist_conv_norm_trains_and_classifies() {
 
     let config = test_config();
     let network = build_network(config.batch);
-    let differentiated = differentiate(&network.program, network.loss).expect("scalar loss differentiates");
-    let grad_conv1_weight = differentiated.gradient_of_named("conv1_weight").expect("conv1_weight feeds the loss");
-    let grad_conv1_bias = differentiated.gradient_of_named("conv1_bias").expect("conv1_bias feeds the loss");
-    let grad_bn1_gamma = differentiated.gradient_of_named("bn1_gamma").expect("bn1_gamma feeds the loss");
-    let grad_bn1_beta = differentiated.gradient_of_named("bn1_beta").expect("bn1_beta feeds the loss");
-    let grad_conv2_weight = differentiated.gradient_of_named("conv2_weight").expect("conv2_weight feeds the loss");
-    let grad_conv2_bias = differentiated.gradient_of_named("conv2_bias").expect("conv2_bias feeds the loss");
-    let grad_fc_weight = differentiated.gradient_of_named("fc_weight").expect("fc_weight feeds the loss");
-    let grad_fc_bias = differentiated.gradient_of_named("fc_bias").expect("fc_bias feeds the loss");
+    let differentiated =
+        differentiate(&network.program, network.loss).expect("scalar loss differentiates");
+    let grad_conv1_weight = differentiated
+        .gradient_of_named("conv1_weight")
+        .expect("conv1_weight feeds the loss");
+    let grad_conv1_bias = differentiated
+        .gradient_of_named("conv1_bias")
+        .expect("conv1_bias feeds the loss");
+    let grad_bn1_gamma = differentiated
+        .gradient_of_named("bn1_gamma")
+        .expect("bn1_gamma feeds the loss");
+    let grad_bn1_beta = differentiated
+        .gradient_of_named("bn1_beta")
+        .expect("bn1_beta feeds the loss");
+    let grad_conv2_weight = differentiated
+        .gradient_of_named("conv2_weight")
+        .expect("conv2_weight feeds the loss");
+    let grad_conv2_bias = differentiated
+        .gradient_of_named("conv2_bias")
+        .expect("conv2_bias feeds the loss");
+    let grad_fc_weight = differentiated
+        .gradient_of_named("fc_weight")
+        .expect("fc_weight feeds the loss");
+    let grad_fc_bias = differentiated
+        .gradient_of_named("fc_bias")
+        .expect("fc_bias feeds the loss");
 
     let mut program = differentiated.program;
-    let adam_config = AdamConfig { learning_rate: config.learning_rate, ..AdamConfig::default() };
+    let adam_config = AdamConfig {
+        learning_rate: config.learning_rate,
+        ..AdamConfig::default()
+    };
     let step_node = step_input(&mut program, "step");
 
     // running_mean1/running_var1's own per-step update: `update_running_stats`
     // (a graph-side composition, `norm.rs`'s own doc) folded into the same
     // program the Adam updates already grow -- one more pair of rebound
     // named `Op::Input`s, no separate host-side loop.
-    let new_running_mean1 = update_running_stats(&mut program, DType::Float32, network.running_mean1, network.batch_mean1, BN_MOMENTUM);
-    let new_running_var1 = update_running_stats(&mut program, DType::Float32, network.running_var1, network.batch_var1, BN_MOMENTUM);
+    let new_running_mean1 = update_running_stats(
+        &mut program,
+        DType::Float32,
+        network.running_mean1,
+        network.batch_mean1,
+        BN_MOMENTUM,
+    );
+    let new_running_var1 = update_running_stats(
+        &mut program,
+        DType::Float32,
+        network.running_var1,
+        network.batch_var1,
+        BN_MOMENTUM,
+    );
 
     let conv1_weight_count = CONV1_OUT_CHANNELS * (KERNEL * KERNEL) as usize;
     let conv2_weight_count = CONV2_OUT_CHANNELS * CONV1_OUT_CHANNELS * (KERNEL * KERNEL) as usize;
-    let conv1_out_shape = conv2d_output_shape((1, 1, IMAGE_SIDE as u64, IMAGE_SIDE as u64), (CONV1_OUT_CHANNELS as u64, 1, KERNEL, KERNEL), STRIDE, STRIDE).expect("conv1 shape");
-    let conv2_out_shape = conv2d_output_shape(conv1_out_shape, (CONV2_OUT_CHANNELS as u64, CONV1_OUT_CHANNELS as u64, KERNEL, KERNEL), STRIDE, STRIDE).expect("conv2 shape");
+    let conv1_out_shape = conv2d_output_shape(
+        (1, 1, IMAGE_SIDE as u64, IMAGE_SIDE as u64),
+        (CONV1_OUT_CHANNELS as u64, 1, KERNEL, KERNEL),
+        STRIDE,
+        STRIDE,
+    )
+    .expect("conv1 shape");
+    let conv2_out_shape = conv2d_output_shape(
+        conv1_out_shape,
+        (
+            CONV2_OUT_CHANNELS as u64,
+            CONV1_OUT_CHANNELS as u64,
+            KERNEL,
+            KERNEL,
+        ),
+        STRIDE,
+        STRIDE,
+    )
+    .expect("conv2 shape");
     let (_, fc_out_channels, fc_out_h, fc_out_w) = conv2_out_shape;
-    let fc_weight_count = fc_out_channels as usize * fc_out_h as usize * fc_out_w as usize * OUT_DIM;
+    let fc_weight_count =
+        fc_out_channels as usize * fc_out_h as usize * fc_out_w as usize * OUT_DIM;
 
-    let mut make_state = |name: &str, shape: Vec<Extent>| -> (NodeId, NodeId, [(String, Vec<f32>); 2]) {
-        let count = shape.iter().map(|extent| match extent {
-            Extent::Static(value) => *value as usize,
-            Extent::Symbolic(_) => 0,
-        }).product::<usize>();
-        let m = leaf(&mut program, &alloc::format!("m_{name}"), shape.clone());
-        let v = leaf(&mut program, &alloc::format!("v_{name}"), shape);
-        (m, v, [(alloc::format!("m_{name}"), zeros(count)), (alloc::format!("v_{name}"), zeros(count))])
-    };
+    let mut make_state =
+        |name: &str, shape: Vec<Extent>| -> (NodeId, NodeId, [(String, Vec<f32>); 2]) {
+            let count = shape
+                .iter()
+                .map(|extent| match extent {
+                    Extent::Static(value) => *value as usize,
+                    Extent::Symbolic(_) => 0,
+                })
+                .product::<usize>();
+            let m = leaf(&mut program, &alloc::format!("m_{name}"), shape.clone());
+            let v = leaf(&mut program, &alloc::format!("v_{name}"), shape);
+            (
+                m,
+                v,
+                [
+                    (alloc::format!("m_{name}"), zeros(count)),
+                    (alloc::format!("v_{name}"), zeros(count)),
+                ],
+            )
+        };
 
-    let conv1_weight_shape = alloc::vec![Extent::Static(CONV1_OUT_CHANNELS as u32), Extent::Static(1), Extent::Static(KERNEL as u32), Extent::Static(KERNEL as u32)];
+    let conv1_weight_shape = alloc::vec![
+        Extent::Static(CONV1_OUT_CHANNELS as u32),
+        Extent::Static(1),
+        Extent::Static(KERNEL as u32),
+        Extent::Static(KERNEL as u32)
+    ];
     let conv1_bias_shape = alloc::vec![Extent::Static(CONV1_OUT_CHANNELS as u32)];
     let bn1_shape = alloc::vec![Extent::Static(CONV1_OUT_CHANNELS as u32)];
-    let conv2_weight_shape =
-        alloc::vec![Extent::Static(CONV2_OUT_CHANNELS as u32), Extent::Static(CONV1_OUT_CHANNELS as u32), Extent::Static(KERNEL as u32), Extent::Static(KERNEL as u32)];
+    let conv2_weight_shape = alloc::vec![
+        Extent::Static(CONV2_OUT_CHANNELS as u32),
+        Extent::Static(CONV1_OUT_CHANNELS as u32),
+        Extent::Static(KERNEL as u32),
+        Extent::Static(KERNEL as u32)
+    ];
     let conv2_bias_shape = alloc::vec![Extent::Static(CONV2_OUT_CHANNELS as u32)];
-    let fc_weight_shape = alloc::vec![Extent::Static(fc_out_channels as u32), Extent::Static(fc_out_h as u32), Extent::Static(fc_out_w as u32), Extent::Static(OUT_DIM as u32)];
+    let fc_weight_shape = alloc::vec![
+        Extent::Static(fc_out_channels as u32),
+        Extent::Static(fc_out_h as u32),
+        Extent::Static(fc_out_w as u32),
+        Extent::Static(OUT_DIM as u32)
+    ];
     let fc_bias_shape = alloc::vec![Extent::Static(OUT_DIM as u32)];
 
-    let (m_conv1_weight, v_conv1_weight, conv1_weight_state) = make_state("conv1_weight", conv1_weight_shape);
+    let (m_conv1_weight, v_conv1_weight, conv1_weight_state) =
+        make_state("conv1_weight", conv1_weight_shape);
     let (m_conv1_bias, v_conv1_bias, conv1_bias_state) = make_state("conv1_bias", conv1_bias_shape);
     let (m_bn1_gamma, v_bn1_gamma, bn1_gamma_state) = make_state("bn1_gamma", bn1_shape.clone());
     let (m_bn1_beta, v_bn1_beta, bn1_beta_state) = make_state("bn1_beta", bn1_shape);
-    let (m_conv2_weight, v_conv2_weight, conv2_weight_state) = make_state("conv2_weight", conv2_weight_shape);
+    let (m_conv2_weight, v_conv2_weight, conv2_weight_state) =
+        make_state("conv2_weight", conv2_weight_shape);
     let (m_conv2_bias, v_conv2_bias, conv2_bias_state) = make_state("conv2_bias", conv2_bias_shape);
     let (m_fc_weight, v_fc_weight, fc_weight_state) = make_state("fc_weight", fc_weight_shape);
     let (m_fc_bias, v_fc_bias, fc_bias_state) = make_state("fc_bias", fc_bias_shape);
 
-    let (new_conv1_weight, new_m_conv1_weight, new_v_conv1_weight) =
-        adam_step(&mut program, &adam_config, 4, AdamOperands { param: network.conv1_weight, grad: grad_conv1_weight, m: m_conv1_weight, v: v_conv1_weight }, step_node);
-    let (new_conv1_bias, new_m_conv1_bias, new_v_conv1_bias) =
-        adam_step(&mut program, &adam_config, 1, AdamOperands { param: network.conv1_bias, grad: grad_conv1_bias, m: m_conv1_bias, v: v_conv1_bias }, step_node);
-    let (new_bn1_gamma, new_m_bn1_gamma, new_v_bn1_gamma) =
-        adam_step(&mut program, &adam_config, 1, AdamOperands { param: network.bn1_gamma, grad: grad_bn1_gamma, m: m_bn1_gamma, v: v_bn1_gamma }, step_node);
-    let (new_bn1_beta, new_m_bn1_beta, new_v_bn1_beta) =
-        adam_step(&mut program, &adam_config, 1, AdamOperands { param: network.bn1_beta, grad: grad_bn1_beta, m: m_bn1_beta, v: v_bn1_beta }, step_node);
-    let (new_conv2_weight, new_m_conv2_weight, new_v_conv2_weight) =
-        adam_step(&mut program, &adam_config, 4, AdamOperands { param: network.conv2_weight, grad: grad_conv2_weight, m: m_conv2_weight, v: v_conv2_weight }, step_node);
-    let (new_conv2_bias, new_m_conv2_bias, new_v_conv2_bias) =
-        adam_step(&mut program, &adam_config, 1, AdamOperands { param: network.conv2_bias, grad: grad_conv2_bias, m: m_conv2_bias, v: v_conv2_bias }, step_node);
-    let (new_fc_weight, new_m_fc_weight, new_v_fc_weight) =
-        adam_step(&mut program, &adam_config, 4, AdamOperands { param: network.fc_weight, grad: grad_fc_weight, m: m_fc_weight, v: v_fc_weight }, step_node);
-    let (new_fc_bias, new_m_fc_bias, new_v_fc_bias) =
-        adam_step(&mut program, &adam_config, 1, AdamOperands { param: network.fc_bias, grad: grad_fc_bias, m: m_fc_bias, v: v_fc_bias }, step_node);
+    let (new_conv1_weight, new_m_conv1_weight, new_v_conv1_weight) = adam_step(
+        &mut program,
+        &adam_config,
+        4,
+        AdamOperands {
+            param: network.conv1_weight,
+            grad: grad_conv1_weight,
+            m: m_conv1_weight,
+            v: v_conv1_weight,
+        },
+        step_node,
+    );
+    let (new_conv1_bias, new_m_conv1_bias, new_v_conv1_bias) = adam_step(
+        &mut program,
+        &adam_config,
+        1,
+        AdamOperands {
+            param: network.conv1_bias,
+            grad: grad_conv1_bias,
+            m: m_conv1_bias,
+            v: v_conv1_bias,
+        },
+        step_node,
+    );
+    let (new_bn1_gamma, new_m_bn1_gamma, new_v_bn1_gamma) = adam_step(
+        &mut program,
+        &adam_config,
+        1,
+        AdamOperands {
+            param: network.bn1_gamma,
+            grad: grad_bn1_gamma,
+            m: m_bn1_gamma,
+            v: v_bn1_gamma,
+        },
+        step_node,
+    );
+    let (new_bn1_beta, new_m_bn1_beta, new_v_bn1_beta) = adam_step(
+        &mut program,
+        &adam_config,
+        1,
+        AdamOperands {
+            param: network.bn1_beta,
+            grad: grad_bn1_beta,
+            m: m_bn1_beta,
+            v: v_bn1_beta,
+        },
+        step_node,
+    );
+    let (new_conv2_weight, new_m_conv2_weight, new_v_conv2_weight) = adam_step(
+        &mut program,
+        &adam_config,
+        4,
+        AdamOperands {
+            param: network.conv2_weight,
+            grad: grad_conv2_weight,
+            m: m_conv2_weight,
+            v: v_conv2_weight,
+        },
+        step_node,
+    );
+    let (new_conv2_bias, new_m_conv2_bias, new_v_conv2_bias) = adam_step(
+        &mut program,
+        &adam_config,
+        1,
+        AdamOperands {
+            param: network.conv2_bias,
+            grad: grad_conv2_bias,
+            m: m_conv2_bias,
+            v: v_conv2_bias,
+        },
+        step_node,
+    );
+    let (new_fc_weight, new_m_fc_weight, new_v_fc_weight) = adam_step(
+        &mut program,
+        &adam_config,
+        4,
+        AdamOperands {
+            param: network.fc_weight,
+            grad: grad_fc_weight,
+            m: m_fc_weight,
+            v: v_fc_weight,
+        },
+        step_node,
+    );
+    let (new_fc_bias, new_m_fc_bias, new_v_fc_bias) = adam_step(
+        &mut program,
+        &adam_config,
+        1,
+        AdamOperands {
+            param: network.fc_bias,
+            grad: grad_fc_bias,
+            m: m_fc_bias,
+            v: v_fc_bias,
+        },
+        step_node,
+    );
 
     let rebind: Vec<(NodeId, &str)> = alloc::vec![
         (new_conv1_weight, "conv1_weight"),
@@ -431,15 +929,28 @@ fn real_mnist_conv_norm_trains_and_classifies() {
     ];
 
     let mut initial_state: Vec<(String, Vec<f32>)> = alloc::vec![
-        ("conv1_weight".into(), he_init(0x9E37_79B9, conv1_weight_count, 9)),
+        (
+            "conv1_weight".into(),
+            he_init(0x9E37_79B9, conv1_weight_count, 9)
+        ),
         ("conv1_bias".into(), zeros(CONV1_OUT_CHANNELS)),
         ("bn1_gamma".into(), ones(CONV1_OUT_CHANNELS)),
         ("bn1_beta".into(), zeros(CONV1_OUT_CHANNELS)),
         ("running_mean1".into(), zeros(CONV1_OUT_CHANNELS)),
         ("running_var1".into(), ones(CONV1_OUT_CHANNELS)),
-        ("conv2_weight".into(), he_init(0x8542_D2C3, conv2_weight_count, CONV1_OUT_CHANNELS * 9)),
+        (
+            "conv2_weight".into(),
+            he_init(0x8542_D2C3, conv2_weight_count, CONV1_OUT_CHANNELS * 9)
+        ),
         ("conv2_bias".into(), zeros(CONV2_OUT_CHANNELS)),
-        ("fc_weight".into(), he_init(0xC2B2_AE3D, fc_weight_count, fc_out_channels as usize * fc_out_h as usize * fc_out_w as usize)),
+        (
+            "fc_weight".into(),
+            he_init(
+                0xC2B2_AE3D,
+                fc_weight_count,
+                fc_out_channels as usize * fc_out_h as usize * fc_out_w as usize
+            )
+        ),
         ("fc_bias".into(), zeros(OUT_DIM)),
     ];
     initial_state.extend(conv1_weight_state);
@@ -452,7 +963,8 @@ fn real_mnist_conv_norm_trains_and_classifies() {
     initial_state.extend(fc_bias_state);
 
     let train_images = load_normalized_images(&train_images_path(), config.train_examples);
-    let (train_one_hot, _train_labels) = load_one_hot_labels(&train_labels_path(), config.train_examples);
+    let (train_one_hot, _train_labels) =
+        load_one_hot_labels(&train_labels_path(), config.train_examples);
     let example_count = config.train_examples - (config.train_examples % config.batch);
     let batch_count = example_count / config.batch;
     let pixels_per_image = IMAGE_SIDE * IMAGE_SIDE;
@@ -463,17 +975,35 @@ fn real_mnist_conv_norm_trains_and_classifies() {
     let mask_elements = CONV2_OUT_CHANNELS * fc_out_h as usize * fc_out_w as usize * config.batch;
     let mut mask_rng = Lcg(0xD1B5_4A32);
     let masks: Vec<Vec<f32>> = (0..batch_count)
-        .map(|_| (0..mask_elements).map(|_| if mask_rng.next_unit() >= 0.0 { 1.0f32 } else { 0.0f32 }).collect())
+        .map(|_| {
+            (0..mask_elements)
+                .map(|_| {
+                    if mask_rng.next_unit() >= 0.0 {
+                        1.0f32
+                    } else {
+                        0.0f32
+                    }
+                })
+                .collect()
+        })
         .collect();
 
-    let steps: Vec<[f32; 1]> = (1..=batch_count as u32).map(|value| [value as f32]).collect();
+    let steps: Vec<[f32; 1]> = (1..=batch_count as u32)
+        .map(|value| [value as f32])
+        .collect();
     let batches: Vec<Vec<(&str, &[f32])>> = (0..batch_count)
         .map(|batch_index| {
             let image_start = batch_index * config.batch * pixels_per_image;
             let label_start = batch_index * config.batch * OUT_DIM;
             alloc::vec![
-                ("x", &train_images[image_start..image_start + config.batch * pixels_per_image]),
-                ("y", &train_one_hot[label_start..label_start + config.batch * OUT_DIM]),
+                (
+                    "x",
+                    &train_images[image_start..image_start + config.batch * pixels_per_image]
+                ),
+                (
+                    "y",
+                    &train_one_hot[label_start..label_start + config.batch * OUT_DIM]
+                ),
                 ("step", steps[batch_index].as_slice()),
                 ("mask", masks[batch_index].as_slice()),
             ]
@@ -487,40 +1017,107 @@ fn real_mnist_conv_norm_trains_and_classifies() {
         config.learning_rate
     );
     let start = std::time::Instant::now();
-    let (final_state, loss_curve) = fit(&program, network.loss, &rebind, initial_state, config.epochs, &batches).expect("fit runs to completion on real mnist data");
+    let (final_state, loss_curve) = fit(
+        &program,
+        network.loss,
+        &rebind,
+        initial_state,
+        config.epochs,
+        &batches,
+    )
+    .expect("fit runs to completion on real mnist data");
     let elapsed = start.elapsed();
 
     for epoch in 0..config.epochs as usize {
         let epoch_slice = &loss_curve[epoch * batch_count..(epoch + 1) * batch_count];
         let epoch_average = epoch_slice.iter().sum::<f32>() / batch_count as f32;
-        std::eprintln!("real_mnist_conv_norm_training: epoch {epoch} average loss {epoch_average:.4}");
+        std::eprintln!(
+            "real_mnist_conv_norm_training: epoch {epoch} average loss {epoch_average:.4}"
+        );
     }
     let first_epoch_average = loss_curve[..batch_count].iter().sum::<f32>() / batch_count as f32;
-    let last_epoch_average = loss_curve[loss_curve.len() - batch_count..].iter().sum::<f32>() / batch_count as f32;
-    std::eprintln!("real_mnist_conv_norm_training loss curve: first-epoch-avg={first_epoch_average:.4} last-epoch-avg={last_epoch_average:.4} wall_clock={elapsed:?}");
-    assert!(loss_curve.iter().all(|value| value.is_finite()), "loss went non-finite: first 10 = {:?}", &loss_curve[..10.min(loss_curve.len())]);
+    let last_epoch_average = loss_curve[loss_curve.len() - batch_count..]
+        .iter()
+        .sum::<f32>()
+        / batch_count as f32;
+    std::eprintln!(
+        "real_mnist_conv_norm_training loss curve: first-epoch-avg={first_epoch_average:.4} last-epoch-avg={last_epoch_average:.4} wall_clock={elapsed:?}"
+    );
+    assert!(
+        loss_curve.iter().all(|value| value.is_finite()),
+        "loss went non-finite: first 10 = {:?}",
+        &loss_curve[..10.min(loss_curve.len())]
+    );
     assert!(
         last_epoch_average < first_epoch_average,
         "expected batchnorm+dropout conv training loss to drop over {} epochs, got {first_epoch_average:.4} -> {last_epoch_average:.4}",
         config.epochs
     );
 
-    let final_conv1_weight = &final_state.iter().find(|(name, _)| name == "conv1_weight").expect("trained conv1_weight present").1;
-    let final_conv1_bias = &final_state.iter().find(|(name, _)| name == "conv1_bias").expect("trained conv1_bias present").1;
-    let final_bn1_gamma = &final_state.iter().find(|(name, _)| name == "bn1_gamma").expect("trained bn1_gamma present").1;
-    let final_bn1_beta = &final_state.iter().find(|(name, _)| name == "bn1_beta").expect("trained bn1_beta present").1;
-    let final_running_mean1 = &final_state.iter().find(|(name, _)| name == "running_mean1").expect("trained running_mean1 present").1;
-    let final_running_var1 = &final_state.iter().find(|(name, _)| name == "running_var1").expect("trained running_var1 present").1;
-    let final_conv2_weight = &final_state.iter().find(|(name, _)| name == "conv2_weight").expect("trained conv2_weight present").1;
-    let final_conv2_bias = &final_state.iter().find(|(name, _)| name == "conv2_bias").expect("trained conv2_bias present").1;
-    let final_fc_weight = &final_state.iter().find(|(name, _)| name == "fc_weight").expect("trained fc_weight present").1;
-    let final_fc_bias = &final_state.iter().find(|(name, _)| name == "fc_bias").expect("trained fc_bias present").1;
+    let final_conv1_weight = &final_state
+        .iter()
+        .find(|(name, _)| name == "conv1_weight")
+        .expect("trained conv1_weight present")
+        .1;
+    let final_conv1_bias = &final_state
+        .iter()
+        .find(|(name, _)| name == "conv1_bias")
+        .expect("trained conv1_bias present")
+        .1;
+    let final_bn1_gamma = &final_state
+        .iter()
+        .find(|(name, _)| name == "bn1_gamma")
+        .expect("trained bn1_gamma present")
+        .1;
+    let final_bn1_beta = &final_state
+        .iter()
+        .find(|(name, _)| name == "bn1_beta")
+        .expect("trained bn1_beta present")
+        .1;
+    let final_running_mean1 = &final_state
+        .iter()
+        .find(|(name, _)| name == "running_mean1")
+        .expect("trained running_mean1 present")
+        .1;
+    let final_running_var1 = &final_state
+        .iter()
+        .find(|(name, _)| name == "running_var1")
+        .expect("trained running_var1 present")
+        .1;
+    let final_conv2_weight = &final_state
+        .iter()
+        .find(|(name, _)| name == "conv2_weight")
+        .expect("trained conv2_weight present")
+        .1;
+    let final_conv2_bias = &final_state
+        .iter()
+        .find(|(name, _)| name == "conv2_bias")
+        .expect("trained conv2_bias present")
+        .1;
+    let final_fc_weight = &final_state
+        .iter()
+        .find(|(name, _)| name == "fc_weight")
+        .expect("trained fc_weight present")
+        .1;
+    let final_fc_bias = &final_state
+        .iter()
+        .find(|(name, _)| name == "fc_bias")
+        .expect("trained fc_bias present")
+        .1;
 
-    assert!(final_running_var1.iter().all(|value| *value > 0.0), "running_var1 must stay strictly positive after training, got {final_running_var1:?}");
-    assert!(final_running_mean1.iter().all(|value| value.is_finite()) && final_running_var1.iter().all(|value| value.is_finite()), "running statistics must stay finite");
+    assert!(
+        final_running_var1.iter().all(|value| *value > 0.0),
+        "running_var1 must stay strictly positive after training, got {final_running_var1:?}"
+    );
+    assert!(
+        final_running_mean1.iter().all(|value| value.is_finite())
+            && final_running_var1.iter().all(|value| value.is_finite()),
+        "running statistics must stay finite"
+    );
 
     let test_images = load_normalized_images(&test_images_path(), config.test_examples);
-    let (_test_one_hot, test_labels) = load_one_hot_labels(&test_labels_path(), config.test_examples);
+    let (_test_one_hot, test_labels) =
+        load_one_hot_labels(&test_labels_path(), config.test_examples);
     let test_count = test_labels.len();
 
     let (eval_program, eval_x, eval_logits) = build_eval_network(test_count);
@@ -538,9 +1135,17 @@ fn real_mnist_conv_norm_trains_and_classifies() {
         ("fc_bias", final_fc_bias.as_slice()),
     ];
     let _ = eval_x;
-    let evaluated = proxima_tensor::cpu::evaluate_named(&eval_program, &[], &eval_named, &[eval_logits]).expect("evaluate the trained batchnorm+dropout convnet on real held-out mnist test images");
+    let evaluated =
+        proxima_tensor::cpu::evaluate_named(&eval_program, &[], &eval_named, &[eval_logits])
+            .expect(
+                "evaluate the trained batchnorm+dropout convnet on real held-out mnist test images",
+            );
     let (logits, shape) = evaluated.get(eval_logits).expect("eval logits present");
-    assert_eq!(shape, &alloc::vec![test_count as u64, OUT_DIM as u64], "one 10-way logit row per test image");
+    assert_eq!(
+        shape,
+        &alloc::vec![test_count as u64, OUT_DIM as u64],
+        "one 10-way logit row per test image"
+    );
 
     let mut correct = 0_usize;
     for (index, &label) in test_labels.iter().enumerate() {
@@ -566,5 +1171,8 @@ fn real_mnist_conv_norm_trains_and_classifies() {
     // barely moves `running_mean1`/`running_var1` off their `zeros`/`ones`
     // initial values in only 8 steps), so a same-budget comparison against
     // the no-norm baseline is not expected to favor batchnorm+dropout here.
-    assert!(accuracy > 0.05, "expected the trained batchnorm+dropout convnet to classify above pure chance (0.10) by a wide margin on {test_count} real held-out mnist test images, got {accuracy:.4}");
+    assert!(
+        accuracy > 0.05,
+        "expected the trained batchnorm+dropout convnet to classify above pure chance (0.10) by a wide margin on {test_count} real held-out mnist test images, got {accuracy:.4}"
+    );
 }

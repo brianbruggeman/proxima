@@ -24,11 +24,7 @@ pub enum OnnxError {
     #[error(
         "field {field} declares a length-delimited payload of {declared} bytes, exceeding the sanity cap of {cap} bytes"
     )]
-    DeclaredLengthTooLarge {
-        field: u32,
-        declared: u64,
-        cap: u64,
-    },
+    DeclaredLengthTooLarge { field: u32, declared: u64, cap: u64 },
 
     #[error("field {field} expected wire type {expected}, found {found}")]
     WireTypeMismatch {

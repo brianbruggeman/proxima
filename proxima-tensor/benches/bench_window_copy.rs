@@ -39,7 +39,9 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use criterion::Criterion;
-use proxima_tensor::{DType, Extent, IndexMap, NodeId, Op, ScalarOp, TypedBuffer, append, evaluate_typed, map};
+use proxima_tensor::{
+    DType, Extent, IndexMap, NodeId, Op, ScalarOp, TypedBuffer, append, evaluate_typed, map,
+};
 
 /// One `Conv` layer's window-materialize shape: `c` input channels, `oh`/`ow`
 /// output spatial extent, `kh`/`kw` kernel extent (stride/dilation fixed at
@@ -57,10 +59,38 @@ struct WindowShape {
 /// mnist's 3 real `Conv` fold window shapes (`docs/discipline.md` ROW 149's
 /// measured `extents`) plus one larger square shape past all three.
 const SHAPES: [WindowShape; 4] = [
-    WindowShape { label: "mnist_layer1_c1_26x26_k3", channels: 1, out_h: 26, out_w: 26, kernel_h: 3, kernel_w: 3 },
-    WindowShape { label: "mnist_layer2_c8_24x24_k3", channels: 8, out_h: 24, out_w: 24, kernel_h: 3, kernel_w: 3 },
-    WindowShape { label: "mnist_layer3_c16_22x22_k3", channels: 16, out_h: 22, out_w: 22, kernel_h: 3, kernel_w: 3 },
-    WindowShape { label: "larger_square_c32_32x32_k3", channels: 32, out_h: 32, out_w: 32, kernel_h: 3, kernel_w: 3 },
+    WindowShape {
+        label: "mnist_layer1_c1_26x26_k3",
+        channels: 1,
+        out_h: 26,
+        out_w: 26,
+        kernel_h: 3,
+        kernel_w: 3,
+    },
+    WindowShape {
+        label: "mnist_layer2_c8_24x24_k3",
+        channels: 8,
+        out_h: 24,
+        out_w: 24,
+        kernel_h: 3,
+        kernel_w: 3,
+    },
+    WindowShape {
+        label: "mnist_layer3_c16_22x22_k3",
+        channels: 16,
+        out_h: 22,
+        out_w: 22,
+        kernel_h: 3,
+        kernel_w: 3,
+    },
+    WindowShape {
+        label: "larger_square_c32_32x32_k3",
+        channels: 32,
+        out_h: 32,
+        out_w: 32,
+        kernel_h: 3,
+        kernel_w: 3,
+    },
 ];
 
 fn input(program: &mut Vec<Op>, shape: &[u32]) -> NodeId {
@@ -91,17 +121,32 @@ fn window_copy_program(shape: &WindowShape, extra_step: bool) -> (Vec<Op>, NodeI
     let image_pattern = map::IndexPattern {
         iter_rank: 6,
         axes: vec![
-            map::AxisIndex { terms: core::iter::once(map::AxisTerm::projection(0)).collect(), offset: 0 },
-            map::AxisIndex { terms: core::iter::once(map::AxisTerm::projection(1)).collect(), offset: 0 },
-            map::AxisIndex { terms: vec![map::AxisTerm::projection(2), map::AxisTerm::projection(4)].into(), offset: 0 },
-            map::AxisIndex { terms: vec![map::AxisTerm::projection(3), map::AxisTerm::projection(5)].into(), offset: 0 },
+            map::AxisIndex {
+                terms: core::iter::once(map::AxisTerm::projection(0)).collect(),
+                offset: 0,
+            },
+            map::AxisIndex {
+                terms: core::iter::once(map::AxisTerm::projection(1)).collect(),
+                offset: 0,
+            },
+            map::AxisIndex {
+                terms: vec![map::AxisTerm::projection(2), map::AxisTerm::projection(4)].into(),
+                offset: 0,
+            },
+            map::AxisIndex {
+                terms: vec![map::AxisTerm::projection(3), map::AxisTerm::projection(5)].into(),
+                offset: 0,
+            },
         ],
     };
     let stamp = append(
         &mut program,
         Op::Constant {
             dtype: DType::Float32,
-            shape: [shape.out_h, shape.out_w, shape.kernel_h, shape.kernel_w].iter().map(|&extent| Extent::Static(extent)).collect(),
+            shape: [shape.out_h, shape.out_w, shape.kernel_h, shape.kernel_w]
+                .iter()
+                .map(|&extent| Extent::Static(extent))
+                .collect(),
             value: 1.0,
         },
     );
@@ -111,7 +156,10 @@ fn window_copy_program(shape: &WindowShape, extra_step: bool) -> (Vec<Op>, NodeI
         Op::Elementwise {
             dtype: DType::Float32,
             body: ScalarOp::Multiply,
-            operands: vec![(image, IndexMap::Affine(image_pattern)), (stamp, IndexMap::Affine(stamp_pattern))],
+            operands: vec![
+                (image, IndexMap::Affine(image_pattern)),
+                (stamp, IndexMap::Affine(stamp_pattern)),
+            ],
             name: None,
         },
     );
@@ -121,7 +169,14 @@ fn window_copy_program(shape: &WindowShape, extra_step: bool) -> (Vec<Op>, NodeI
             &mut program,
             Op::Constant {
                 dtype: DType::Float32,
-                shape: vec![Extent::Static(1), Extent::Static(shape.channels), Extent::Static(shape.out_h), Extent::Static(shape.out_w), Extent::Static(shape.kernel_h), Extent::Static(shape.kernel_w)],
+                shape: vec![
+                    Extent::Static(1),
+                    Extent::Static(shape.channels),
+                    Extent::Static(shape.out_h),
+                    Extent::Static(shape.out_w),
+                    Extent::Static(shape.kernel_h),
+                    Extent::Static(shape.kernel_w),
+                ],
                 value: 0.0,
             },
         );
@@ -130,7 +185,16 @@ fn window_copy_program(shape: &WindowShape, extra_step: bool) -> (Vec<Op>, NodeI
             Op::Elementwise {
                 dtype: DType::Float32,
                 body: ScalarOp::Add,
-                operands: vec![(windowed, IndexMap::Affine(map::projection(6, &[0, 1, 2, 3, 4, 5]))), (zero, IndexMap::Affine(map::projection(6, &[0, 1, 2, 3, 4, 5])))],
+                operands: vec![
+                    (
+                        windowed,
+                        IndexMap::Affine(map::projection(6, &[0, 1, 2, 3, 4, 5])),
+                    ),
+                    (
+                        zero,
+                        IndexMap::Affine(map::projection(6, &[0, 1, 2, 3, 4, 5])),
+                    ),
+                ],
                 name: None,
             },
         );
@@ -147,7 +211,8 @@ fn run(program: &[Op], image: NodeId, output: NodeId, image_data: &[f32]) -> Vec
     let _ = image;
     let blocks = [TypedBuffer::Float32(image_data.to_vec())];
     let rows = evaluate_typed(program, &[], &blocks, &[output]).expect("evaluate_typed");
-    let (_, _, TypedBuffer::Float32(data)) = rows.into_iter().next().expect("one output row") else {
+    let (_, _, TypedBuffer::Float32(data)) = rows.into_iter().next().expect("one output row")
+    else {
         panic!("window-copy output was not f32");
     };
     data
@@ -164,28 +229,64 @@ fn main() {
         let image_len = (shape.channels * source_h * source_w) as usize;
         let image_data = deterministic_data(image_len, 0.0137);
 
-        let (specialized_program, specialized_image, specialized_output) = window_copy_program(shape, false);
-        let (block_loop_program, block_loop_image, block_loop_output) = window_copy_program(shape, true);
+        let (specialized_program, specialized_image, specialized_output) =
+            window_copy_program(shape, false);
+        let (block_loop_program, block_loop_image, block_loop_output) =
+            window_copy_program(shape, true);
 
         // correctness self-check, once per shape, outside the timed loop:
         // the extra `+ 0.0` step changes ONLY which executor path runs,
         // never the numeric result.
-        let specialized_result = run(&specialized_program, specialized_image, specialized_output, &image_data);
-        let block_loop_result = run(&block_loop_program, block_loop_image, block_loop_output, &image_data);
-        assert_eq!(specialized_result.len(), block_loop_result.len(), "{}: output length mismatch", shape.label);
-        for (index, (&specialized_value, &block_loop_value)) in specialized_result.iter().zip(&block_loop_result).enumerate() {
+        let specialized_result = run(
+            &specialized_program,
+            specialized_image,
+            specialized_output,
+            &image_data,
+        );
+        let block_loop_result = run(
+            &block_loop_program,
+            block_loop_image,
+            block_loop_output,
+            &image_data,
+        );
+        assert_eq!(
+            specialized_result.len(),
+            block_loop_result.len(),
+            "{}: output length mismatch",
+            shape.label
+        );
+        for (index, (&specialized_value, &block_loop_value)) in specialized_result
+            .iter()
+            .zip(&block_loop_result)
+            .enumerate()
+        {
             assert!(
-                (specialized_value - block_loop_value).abs() <= specialized_value.abs() * 1e-5 + 1e-6,
+                (specialized_value - block_loop_value).abs()
+                    <= specialized_value.abs() * 1e-5 + 1e-6,
                 "{}: element {index} diverged: window_copy={specialized_value} block_loop={block_loop_value}",
                 shape.label,
             );
         }
 
         group.bench_function(format!("{}/window_copy", shape.label), |bencher| {
-            bencher.iter(|| run(&specialized_program, specialized_image, specialized_output, &image_data));
+            bencher.iter(|| {
+                run(
+                    &specialized_program,
+                    specialized_image,
+                    specialized_output,
+                    &image_data,
+                )
+            });
         });
         group.bench_function(format!("{}/block_loop_incumbent", shape.label), |bencher| {
-            bencher.iter(|| run(&block_loop_program, block_loop_image, block_loop_output, &image_data));
+            bencher.iter(|| {
+                run(
+                    &block_loop_program,
+                    block_loop_image,
+                    block_loop_output,
+                    &image_data,
+                )
+            });
         });
     }
 

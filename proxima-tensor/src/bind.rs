@@ -587,11 +587,19 @@ impl BoundOpBuilder {
         self.position.set(self.position.get() + 1);
         let empty = Vec::new();
         let retires = self.retires.get(node.0 as usize).unwrap_or(&empty);
-        self.ones.borrow_mut().push(matches!(expr, Op::Constant { value, .. } if *value == 1.0));
-        self.is_iota.borrow_mut().push(matches!(expr, Op::Iota { .. }));
+        self.ones
+            .borrow_mut()
+            .push(matches!(expr, Op::Constant { value, .. } if *value == 1.0));
+        self.is_iota
+            .borrow_mut()
+            .push(matches!(expr, Op::Iota { .. }));
         self.constant_value
             .borrow_mut()
-            .push(if let Op::Constant { value, .. } = expr { Some(*value) } else { None });
+            .push(if let Op::Constant { value, .. } = expr {
+                Some(*value)
+            } else {
+                None
+            });
 
         let mut emitted = ReadyBatch::new();
 
@@ -691,15 +699,22 @@ impl BoundOpBuilder {
                     && self.held.borrow().contains_key(&reduce.operand);
 
                 let (element_body, operands) = if fuses {
-                    let reduce_extent: u64 =
-                        shape::fold_iteration_extents(reduce, shapes).iter().product();
+                    let reduce_extent: u64 = shape::fold_iteration_extents(reduce, shapes)
+                        .iter()
+                        .product();
                     self.quarantine_broadcast_operands(
                         reduce.operand,
                         reduce_extent,
                         shapes,
                         &mut emitted,
                     )?;
-                    compose_fused_operands(shapes, &self.held, reduce.operand, &reduce.in_map, &self.ones.borrow())
+                    compose_fused_operands(
+                        shapes,
+                        &self.held,
+                        reduce.operand,
+                        &reduce.in_map,
+                        &self.ones.borrow(),
+                    )
                 } else {
                     self.materialize_if_held(reduce.operand, shapes, &mut emitted)?;
                     self.materialize_computed_indices(&reduce.in_map, shapes, &mut emitted)?;
@@ -828,7 +843,11 @@ impl BoundOpBuilder {
         shapes: &Shapes,
         emitted: &mut ReadyBatch,
     ) -> Result<(), TensorError> {
-        let children = self.held.borrow().get(&node).map(|held| held.operands.clone());
+        let children = self
+            .held
+            .borrow()
+            .get(&node)
+            .map(|held| held.operands.clone());
         let Some(children) = children else {
             return Ok(());
         };
@@ -989,7 +1008,11 @@ fn build_reduce_op(
 /// address. Skipping the axis entirely is correct either way, since the
 /// scattered axis's real address only ever comes from the fetched index at
 /// evaluation time — see [`BoundOpKind::Reduce`]'s `out_scatter` field doc.
-fn build_scatter_out_layout(base: &IndexPattern, gathered_dim: u16, output_shape: &[u64]) -> Layout {
+fn build_scatter_out_layout(
+    base: &IndexPattern,
+    gathered_dim: u16,
+    output_shape: &[u64],
+) -> Layout {
     let element_strides = row_major_strides(output_shape);
     let mut strides = SmallVec::<[i64; MAX_INLINE_RANK]>::from_elem(0, base.iter_rank as usize);
     let mut layout_base = 0i64;
@@ -1073,10 +1096,17 @@ fn compose_fused_operands(
     let mut steps = Vec::new();
     let mut operands = Vec::new();
     let mut absorbed = Vec::new();
-    let mut state = ComposeState { steps: &mut steps, operands: &mut operands, absorbed: &mut absorbed };
+    let mut state = ComposeState {
+        steps: &mut steps,
+        operands: &mut operands,
+        absorbed: &mut absorbed,
+    };
     let arg = compose_operand(shapes, held, &mut state, node, map, ones);
     if steps.is_empty() {
-        steps.push(BodyStep { op: ScalarOp::Identity, args: alloc::vec![arg] });
+        steps.push(BodyStep {
+            op: ScalarOp::Identity,
+            args: alloc::vec![arg],
+        });
     }
     drop_absorbed(held, absorbed);
     (ComposedBody { steps }, operands)
@@ -1109,13 +1139,22 @@ fn compose(
     let mut steps = Vec::new();
     let mut resolved_operands = Vec::new();
     let mut absorbed = Vec::new();
-    let mut state = ComposeState { steps: &mut steps, operands: &mut resolved_operands, absorbed: &mut absorbed };
+    let mut state = ComposeState {
+        steps: &mut steps,
+        operands: &mut resolved_operands,
+        absorbed: &mut absorbed,
+    };
     let arg = match eliminate_identity_multiply(body, operands, ones) {
-        Some((survivor_node, survivor_map)) => compose_operand(shapes, held, &mut state, survivor_node, survivor_map, ones),
+        Some((survivor_node, survivor_map)) => {
+            compose_operand(shapes, held, &mut state, survivor_node, survivor_map, ones)
+        }
         None => StepArg::Step(compose_body(shapes, held, &mut state, body, operands, ones)),
     };
     if steps.is_empty() {
-        steps.push(BodyStep { op: ScalarOp::Identity, args: alloc::vec![arg] });
+        steps.push(BodyStep {
+            op: ScalarOp::Identity,
+            args: alloc::vec![arg],
+        });
     }
     drop_absorbed(held, absorbed);
     (ComposedBody { steps }, resolved_operands)
@@ -1169,8 +1208,13 @@ fn eliminate_identity_multiply<'a>(
 /// needed here because [`eliminate_masked_window_reduce`] walks three levels
 /// of `held` chain while [`held`] itself may need a `borrow_mut` later (to
 /// drop the matched nodes), and an outstanding `Ref` would collide with that.
-fn held_snapshot(held: &RefCell<BTreeMap<NodeId, HeldElementwise>>, node: NodeId) -> Option<(ScalarOp, Vec<(NodeId, IndexMap)>)> {
-    held.borrow().get(&node).map(|entry| (entry.body, entry.operands.clone()))
+fn held_snapshot(
+    held: &RefCell<BTreeMap<NodeId, HeldElementwise>>,
+    node: NodeId,
+) -> Option<(ScalarOp, Vec<(NodeId, IndexMap)>)> {
+    held.borrow()
+        .get(&node)
+        .map(|entry| (entry.body, entry.operands.clone()))
 }
 
 /// One axis is a plain, unshifted single-term projection — the per-axis
@@ -1210,16 +1254,21 @@ fn window_mask_match(
     constant_value: &[Option<f32>],
     shapes: &Shapes,
 ) -> Option<WindowMatch> {
-    let is_iota_node = |candidate: NodeId| is_iota.get(candidate.0 as usize).copied().unwrap_or(false);
+    let is_iota_node =
+        |candidate: NodeId| is_iota.get(candidate.0 as usize).copied().unwrap_or(false);
 
     let (equal_body, equal_operands) = held_snapshot(held, node)?;
     if equal_body != ScalarOp::Equal {
         return None;
     }
-    let [(source_iota, source_map), (combined_node, combined_map)] = equal_operands.as_slice() else {
+    let [(source_iota, source_map), (combined_node, combined_map)] = equal_operands.as_slice()
+    else {
         return None;
     };
-    if !is_iota_node(*source_iota) || !is_identity_projection(source_map) || !is_identity_projection(combined_map) {
+    if !is_iota_node(*source_iota)
+        || !is_identity_projection(source_map)
+        || !is_identity_projection(combined_map)
+    {
         return None;
     }
 
@@ -1230,7 +1279,10 @@ fn window_mask_match(
     let [(scaled_out_node, scaled_map), (kernel_iota, kernel_map)] = add_operands.as_slice() else {
         return None;
     };
-    if !is_iota_node(*kernel_iota) || !is_identity_projection(scaled_map) || !is_identity_projection(kernel_map) {
+    if !is_iota_node(*kernel_iota)
+        || !is_identity_projection(scaled_map)
+        || !is_identity_projection(kernel_map)
+    {
         return None;
     }
 
@@ -1241,14 +1293,20 @@ fn window_mask_match(
     let [(out_iota, out_map), (stride_node, stride_map)] = mul_operands.as_slice() else {
         return None;
     };
-    if !is_iota_node(*out_iota) || !is_identity_projection(out_map) || !is_identity_projection(stride_map) {
+    if !is_iota_node(*out_iota)
+        || !is_identity_projection(out_map)
+        || !is_identity_projection(stride_map)
+    {
         return None;
     }
     // `f32::fract`/`round` need `std`'s libm; this crate's alloc tier does
     // not carry a libm dependency, so an exact round-trip through the
     // integer this node's own `stride as f32` construction produced is the
     // no_std-clean way to confirm `stride_value` is a nonnegative integer.
-    let stride_value = constant_value.get(stride_node.0 as usize).copied().flatten()?;
+    let stride_value = constant_value
+        .get(stride_node.0 as usize)
+        .copied()
+        .flatten()?;
     if stride_value < 0.0 {
         return None;
     }
@@ -1292,7 +1350,10 @@ fn eliminate_masked_window_reduce(
     constant_value: &[Option<f32>],
     shapes: &Shapes,
 ) -> Option<(NodeId, IndexMap)> {
-    if reduce.body != ScalarOp::Add || reduce.init != ReduceInit::Zero || reduce.keep != Keep::Reduce {
+    if reduce.body != ScalarOp::Add
+        || reduce.init != ReduceInit::Zero
+        || reduce.keep != Keep::Reduce
+    {
         return None;
     }
     if !is_identity_projection(&reduce.in_map) {
@@ -1307,13 +1368,26 @@ fn eliminate_masked_window_reduce(
         return None;
     };
 
-    let (source_node, source_map, mask_node, mask_map, window) =
-        if let Some(window) = window_mask_match(held, *second_node, is_iota, constant_value, shapes) {
-            (*first_node, first_map.clone(), *second_node, second_map.clone(), window)
-        } else {
-            let window = window_mask_match(held, *first_node, is_iota, constant_value, shapes)?;
-            (*second_node, second_map.clone(), *first_node, first_map.clone(), window)
-        };
+    let (source_node, source_map, mask_node, mask_map, window) = if let Some(window) =
+        window_mask_match(held, *second_node, is_iota, constant_value, shapes)
+    {
+        (
+            *first_node,
+            first_map.clone(),
+            *second_node,
+            second_map.clone(),
+            window,
+        )
+    } else {
+        let window = window_mask_match(held, *first_node, is_iota, constant_value, shapes)?;
+        (
+            *second_node,
+            second_map.clone(),
+            *first_node,
+            first_map.clone(),
+            window,
+        )
+    };
 
     if !is_identity_projection(&source_map) {
         return None;
@@ -1331,7 +1405,10 @@ fn eliminate_masked_window_reduce(
 
     let last_out = window.out_extent.checked_sub(1)?;
     let last_kernel = window.kernel_extent.checked_sub(1)?;
-    let last_read = window.stride.checked_mul(last_out)?.checked_add(last_kernel)?;
+    let last_read = window
+        .stride
+        .checked_mul(last_out)?
+        .checked_add(last_kernel)?;
     if last_read >= window.source_extent {
         return None;
     }
@@ -1353,14 +1430,20 @@ fn eliminate_masked_window_reduce(
         let widened = axis.terms[0].axis;
         let new_axis = if widened == windowed_axis {
             AxisIndex {
-                terms: [AxisTerm::scaled(new_out_position, stride_coeff), AxisTerm::scaled(new_kernel_position, 1)]
-                    .into_iter()
-                    .collect(),
+                terms: [
+                    AxisTerm::scaled(new_out_position, stride_coeff),
+                    AxisTerm::scaled(new_kernel_position, 1),
+                ]
+                .into_iter()
+                .collect(),
                 offset: 0,
             }
         } else {
             let position = keep_axes.iter().position(|&kept| kept == widened)? as u16;
-            AxisIndex { terms: core::iter::once(AxisTerm::projection(position)).collect(), offset: 0 }
+            AxisIndex {
+                terms: core::iter::once(AxisTerm::projection(position)).collect(),
+                offset: 0,
+            }
         };
         new_axes.push(new_axis);
     }
@@ -1370,7 +1453,13 @@ fn eliminate_masked_window_reduce(
     held.borrow_mut().remove(&window.combined_node);
     held.borrow_mut().remove(&window.scaled_out_node);
 
-    Some((source_node, IndexMap::Affine(IndexPattern { iter_rank: keep_axes.len() as u16, axes: new_axes })))
+    Some((
+        source_node,
+        IndexMap::Affine(IndexPattern {
+            iter_rank: keep_axes.len() as u16,
+            axes: new_axes,
+        }),
+    ))
 }
 
 /// Appends one [`BodyStep`] for `body` applied over `body_operands`
@@ -1424,7 +1513,8 @@ fn compose_operand(
     state.absorbed.push(node);
     let remapped = remap_sub_operands(&sub_operands, map);
 
-    if let Some((survivor_node, survivor_map)) = eliminate_identity_multiply(body, &remapped, ones) {
+    if let Some((survivor_node, survivor_map)) = eliminate_identity_multiply(body, &remapped, ones)
+    {
         return compose_operand(shapes, held, state, survivor_node, survivor_map, ones);
     }
 
@@ -1559,7 +1649,9 @@ pub fn correct_packed_matmul_layouts(resolved: &mut [BoundOp], packed_operands: 
     for bound in resolved.iter_mut() {
         let extents = bound.extents.clone();
         let BoundOpKind::Reduce {
-            operands, output_axes, ..
+            operands,
+            output_axes,
+            ..
         } = &mut bound.kind
         else {
             continue;
@@ -2182,7 +2274,11 @@ mod tests {
             &mut program,
             Op::Input {
                 dtype: DType::UInt8,
-                shape: alloc::vec![Extent::Static(IN_DIM as u32), Extent::Static(HEADS as u32), Extent::Static(HEAD_DIM as u32)],
+                shape: alloc::vec![
+                    Extent::Static(IN_DIM as u32),
+                    Extent::Static(HEADS as u32),
+                    Extent::Static(HEAD_DIM as u32)
+                ],
                 name: None,
             },
         );
@@ -2227,7 +2323,10 @@ mod tests {
         let packed: BTreeSet<NodeId> = core::iter::once(weight).collect();
         correct_packed_matmul_layouts(&mut built, &packed);
 
-        let reduce = built.iter().find(|op| op.node == sum).expect("reduce emitted");
+        let reduce = built
+            .iter()
+            .find(|op| op.node == sum)
+            .expect("reduce emitted");
         let weight_layout = &reduce
             .operands()
             .iter()
@@ -2710,7 +2809,9 @@ mod tests {
         let built = bind(&program, &shapes, &[output]).expect("binding itself never errors");
         let indices_position = built
             .iter()
-            .position(|op| matches!(op.kind, BoundOpKind::Elementwise { .. }) && op.dtype == DType::Int32)
+            .position(|op| {
+                matches!(op.kind, BoundOpKind::Elementwise { .. }) && op.dtype == DType::Int32
+            })
             .expect("the indices node must appear as its own BoundOp");
         let gather_position = built
             .iter()
@@ -2753,18 +2854,51 @@ mod tests {
 
         let source_shape: Vec<Extent> = (0..source_rank)
             .map(|axis| {
-                Extent::Static(if u64::from(axis) == windowed_axis as u64 { source_extent as u32 } else { 4 })
+                Extent::Static(if u64::from(axis) == windowed_axis as u64 {
+                    source_extent as u32
+                } else {
+                    4
+                })
             })
             .collect();
         let source = append(
             &mut program,
-            Op::Input { dtype: DType::Float32, shape: source_shape, name: None },
+            Op::Input {
+                dtype: DType::Float32,
+                shape: source_shape,
+                name: None,
+            },
         );
 
-        let source_position = append(&mut program, Op::Iota { dtype: DType::Float32, extent: Extent::Static(source_extent as u32) });
-        let out_position = append(&mut program, Op::Iota { dtype: DType::Float32, extent: Extent::Static(out_extent as u32) });
-        let kernel_position = append(&mut program, Op::Iota { dtype: DType::Float32, extent: Extent::Static(kernel_extent as u32) });
-        let stride_const = append(&mut program, Op::Constant { dtype: DType::Float32, shape: Vec::new(), value: stride as f32 });
+        let source_position = append(
+            &mut program,
+            Op::Iota {
+                dtype: DType::Float32,
+                extent: Extent::Static(source_extent as u32),
+            },
+        );
+        let out_position = append(
+            &mut program,
+            Op::Iota {
+                dtype: DType::Float32,
+                extent: Extent::Static(out_extent as u32),
+            },
+        );
+        let kernel_position = append(
+            &mut program,
+            Op::Iota {
+                dtype: DType::Float32,
+                extent: Extent::Static(kernel_extent as u32),
+            },
+        );
+        let stride_const = append(
+            &mut program,
+            Op::Constant {
+                dtype: DType::Float32,
+                shape: Vec::new(),
+                value: stride as f32,
+            },
+        );
 
         let identity1 = IndexMap::Affine(map::projection(1, &[0]));
         let broadcast1 = IndexMap::Affine(map::projection(1, &[]));
@@ -2806,7 +2940,10 @@ mod tests {
 
         let source_axes: Vec<u16> = (0..source_rank).collect();
         let source_pattern = IndexMap::Affine(map::projection(widened_rank, &source_axes));
-        let mask_pattern = IndexMap::Affine(map::projection(widened_rank, &[windowed_axis, out_position_axis, kernel_position_axis]));
+        let mask_pattern = IndexMap::Affine(map::projection(
+            widened_rank,
+            &[windowed_axis, out_position_axis, kernel_position_axis],
+        ));
 
         let masked = append(
             &mut program,
@@ -2818,9 +2955,14 @@ mod tests {
             },
         );
 
-        let keep_axes: Vec<u16> = (0..widened_rank).filter(|&axis| axis != windowed_axis).collect();
+        let keep_axes: Vec<u16> = (0..widened_rank)
+            .filter(|&axis| axis != windowed_axis)
+            .collect();
         let out_map = IndexMap::Affine(map::projection(widened_rank, &keep_axes));
-        let identity_widened = IndexMap::Affine(map::projection(widened_rank, &(0..widened_rank).collect::<Vec<u16>>()));
+        let identity_widened = IndexMap::Affine(map::projection(
+            widened_rank,
+            &(0..widened_rank).collect::<Vec<u16>>(),
+        ));
         let reduced = append(
             &mut program,
             Op::Reduce(Reduce {
@@ -2854,7 +2996,11 @@ mod tests {
             "a proven in-bounds window read becomes a plain elementwise gather, not a Reduce, got {:?}",
             folded.kind
         );
-        assert_eq!(folded.operands().len(), 1, "the fold reads only source, the mask chain is gone");
+        assert_eq!(
+            folded.operands().len(),
+            1,
+            "the fold reads only source, the mask chain is gone"
+        );
         assert_eq!(folded.operands()[0].0, source);
         assert_eq!(
             folded.operands()[0].1.strides.len(),
@@ -2862,7 +3008,11 @@ mod tests {
             "the source's one windowed axis now derives from two output axes"
         );
         assert!(
-            folded.operands()[0].1.strides.iter().all(|&stride| stride != 0),
+            folded.operands()[0]
+                .1
+                .strides
+                .iter()
+                .all(|&stride| stride != 0),
             "both the out_position and kernel_position axes must contribute to the source address"
         );
         assert_eq!(folded.element_body().steps.len(), 1);
@@ -2897,7 +3047,9 @@ mod tests {
         let source_data: Vec<f32> = (0..4 * 5).map(|index| index as f32 + 1.0).collect();
         let evaluated = crate::cpu::evaluate(&program, &[], &[&source_data], &[reduced])
             .expect("masked-window program evaluates");
-        let (windowed, _shape) = evaluated.get(reduced).expect("reduce node's output buffer is present");
+        let (windowed, _shape) = evaluated
+            .get(reduced)
+            .expect("reduce node's output buffer is present");
 
         // expected[channel, out_position, kernel_position] = source[channel, out_position + kernel_position]
         let mut expected = alloc::vec![0.0f32; 4 * 3 * 3];
@@ -2910,7 +3062,11 @@ mod tests {
                 }
             }
         }
-        assert_eq!(windowed, expected.as_slice(), "the folded read must match the direct window gather exactly");
+        assert_eq!(
+            windowed,
+            expected.as_slice(),
+            "the folded read must match the direct window gather exactly"
+        );
     }
 
     #[test]

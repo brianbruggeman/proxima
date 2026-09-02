@@ -267,7 +267,11 @@ impl GgufParser {
         }))
     }
 
-    fn poll_kv(&mut self, tensor_count: u64, remaining: u64) -> Result<Option<GgufEvent>, GgufError> {
+    fn poll_kv(
+        &mut self,
+        tensor_count: u64,
+        remaining: u64,
+    ) -> Result<Option<GgufEvent>, GgufError> {
         if remaining == 0 {
             let alignment = self.resolved_alignment.unwrap_or(self.default_alignment);
             if alignment == 0 || !alignment.is_power_of_two() {
@@ -290,12 +294,11 @@ impl GgufParser {
         let Some(raw_type) = reader.u32() else {
             return Ok(None);
         };
-        let metadata_type = MetadataType::from_wire(raw_type).ok_or_else(|| {
-            GgufError::InvalidMetadataType {
+        let metadata_type =
+            MetadataType::from_wire(raw_type).ok_or_else(|| GgufError::InvalidMetadataType {
                 key: key.clone(),
                 raw: raw_type,
-            }
-        })?;
+            })?;
 
         let value = if metadata_type == MetadataType::Array {
             let Some(raw_element_type) = reader.u32() else {
@@ -335,9 +338,7 @@ impl GgufParser {
         self.commit(consumed);
 
         if key == "general.alignment" {
-            let alignment = value
-                .as_u32()
-                .ok_or(GgufError::InvalidAlignmentType)?;
+            let alignment = value.as_u32().ok_or(GgufError::InvalidAlignmentType)?;
             self.resolved_alignment = Some(alignment);
         }
         self.seen_keys.push(key.clone());
@@ -394,10 +395,11 @@ impl GgufParser {
         let Some(raw_type) = reader.i32() else {
             return Ok(None);
         };
-        let ggml_type = GgmlType::from_wire(raw_type).ok_or_else(|| GgufError::InvalidGgmlType {
-            tensor: name.clone(),
-            raw: raw_type,
-        })?;
+        let ggml_type =
+            GgmlType::from_wire(raw_type).ok_or_else(|| GgufError::InvalidGgmlType {
+                tensor: name.clone(),
+                raw: raw_type,
+            })?;
 
         let Some(offset) = reader.u64() else {
             return Ok(None);

@@ -347,7 +347,17 @@ pub unsafe extern "C" fn proxima_vm_dispatch_hypercall(
 /// during the run (`mmio_trap_count` — an auxiliary number, NOT a stage-2
 /// RAM-fault count; see `backend_macos.c`'s `dispatch_trampoline.h` doc for
 /// why HVF has no per-page stage-2 fault index to report instead).
-pub type DispatchLoopOutput = (Vec<ChildRequest>, Vec<u8>, Vec<u8>, Vec<u8>, Vec<u8>, Vec<u8>, u64, u64, u64);
+pub type DispatchLoopOutput = (
+    Vec<ChildRequest>,
+    Vec<u8>,
+    Vec<u8>,
+    Vec<u8>,
+    Vec<u8>,
+    Vec<u8>,
+    u64,
+    u64,
+    u64,
+);
 
 #[cfg(all(
     feature = "std",

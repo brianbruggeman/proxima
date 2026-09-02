@@ -48,9 +48,18 @@ const MEASURED_CALLS: usize = 60;
 
 fn sentences() -> [(&'static str, Vec<i64>); 3] {
     [
-        ("the cat sat on the mat", vec![101, 1996, 4937, 2938, 2006, 1996, 13523, 102]),
-        ("a cat is sitting on a mat", vec![101, 1037, 4937, 2003, 3564, 2006, 1037, 13523, 102]),
-        ("quantum physics explains atomic energy", vec![101, 8559, 5584, 7607, 9593, 2943, 102]),
+        (
+            "the cat sat on the mat",
+            vec![101, 1996, 4937, 2938, 2006, 1996, 13523, 102],
+        ),
+        (
+            "a cat is sitting on a mat",
+            vec![101, 1037, 4937, 2003, 3564, 2006, 1037, 13523, 102],
+        ),
+        (
+            "quantum physics explains atomic energy",
+            vec![101, 8559, 5584, 7607, 9593, 2943, 102],
+        ),
     ]
 }
 
@@ -60,7 +69,11 @@ fn named_inputs<'a>(
     attention_mask: &'a [f32],
     token_type_ids: &'a [f32],
 ) -> Vec<(&'a str, &'a [f32])> {
-    let mut named: Vec<(&str, &[f32])> = lowered.initializers.iter().map(|(name, data)| (name.as_str(), data.as_slice())).collect();
+    let mut named: Vec<(&str, &[f32])> = lowered
+        .initializers
+        .iter()
+        .map(|(name, data)| (name.as_str(), data.as_slice()))
+        .collect();
     for name in &lowered.graph_inputs {
         let data: &[f32] = match name.as_str() {
             "input_ids" => input_ids,
@@ -79,7 +92,8 @@ fn run_one(lowered: &proxima_onnx::lower::Lowered, output: proxima_tensor::NodeI
     let attention_mask = vec![1.0f32; sequence_length];
     let token_type_ids = vec![0.0f32; sequence_length];
     let named = named_inputs(lowered, &input_ids, &attention_mask, &token_type_ids);
-    let evaluated = cpu::evaluate_named(&lowered.program, &[], &named, &[output]).expect("evaluate BGE-small on the generic executor");
+    let evaluated = cpu::evaluate_named(&lowered.program, &[], &named, &[output])
+        .expect("evaluate BGE-small on the generic executor");
     std::hint::black_box(&evaluated);
 }
 
@@ -93,7 +107,9 @@ fn percent(nanos: u64, total_nanos: u64) -> f64 {
 
 fn main() {
     let Ok(model_path) = env::var(MODEL_PATH_ENV) else {
-        eprintln!("skipping: set {MODEL_PATH_ENV} to a local BGE-small-en-v1.5 model.onnx checkout");
+        eprintln!(
+            "skipping: set {MODEL_PATH_ENV} to a local BGE-small-en-v1.5 model.onnx checkout"
+        );
         return;
     };
     if !FsPath::new(&model_path).exists() {
@@ -111,13 +127,20 @@ fn main() {
             let mut pins = std::collections::BTreeMap::new();
             pins.insert("batch_size", 1u64);
             pins.insert("sequence_length", tokens.len() as u64);
-            let lowered = proxima_onnx::lower::lower_graph_pinned(graph, &pins).expect("lower BGE-small with pinned symbolic axes");
-            let output = lowered.graph_outputs.first().expect("last_hidden_state output").1;
+            let lowered = proxima_onnx::lower::lower_graph_pinned(graph, &pins)
+                .expect("lower BGE-small with pinned symbolic axes");
+            let output = lowered
+                .graph_outputs
+                .first()
+                .expect("last_hidden_state output")
+                .1;
             (lowered, output)
         })
         .collect();
 
-    println!("bge_route_census: per-sentence, {WARMUP_CALLS}-call warm-up excluded, {MEASURED_CALLS} measured calls/sentence");
+    println!(
+        "bge_route_census: per-sentence, {WARMUP_CALLS}-call warm-up excluded, {MEASURED_CALLS} measured calls/sentence"
+    );
     println!("route | node-calls | ns total | % of gemm time | ns/call\n");
 
     let mut combined_dot_fast = (0u64, 0u64);
@@ -144,9 +167,18 @@ fn main() {
             run_one(lowered, *output, tokens);
         }
 
-        let (reduce_gemm_nanos, reduce_gemm_calls, _, _) = cpu::epilogue_profile_reduce_split_totals();
-        let (dot_fast_calls, dot_fast_ticks, width_fast_calls, width_fast_ticks, conv_tile_calls, conv_tile_ticks, generic_calls, generic_ticks) =
-            proxima_tensor::instrument::reduce_gemm_path_totals();
+        let (reduce_gemm_nanos, reduce_gemm_calls, _, _) =
+            cpu::epilogue_profile_reduce_split_totals();
+        let (
+            dot_fast_calls,
+            dot_fast_ticks,
+            width_fast_calls,
+            width_fast_ticks,
+            conv_tile_calls,
+            conv_tile_ticks,
+            generic_calls,
+            generic_ticks,
+        ) = proxima_tensor::instrument::reduce_gemm_path_totals();
         let dot_fast_nanos = proxima_tensor::instrument::ticks_to_nanos(dot_fast_ticks);
         let width_fast_nanos = proxima_tensor::instrument::ticks_to_nanos(width_fast_ticks);
         let conv_tile_nanos = proxima_tensor::instrument::ticks_to_nanos(conv_tile_ticks);
@@ -166,7 +198,11 @@ fn main() {
         );
         println!(
             "  route census (gemm-restricted, {route_total_calls} of {reduce_gemm_calls} classified, sum-check {})",
-            if route_total_calls == reduce_gemm_calls { "OK" } else { "MISMATCH" }
+            if route_total_calls == reduce_gemm_calls {
+                "OK"
+            } else {
+                "MISMATCH"
+            }
         );
         println!(
             "    dot_fast    : {dot_fast_calls:>8} calls, {dot_fast_nanos:>12} ns, {:6.2}%, {:.1} ns/call",
@@ -197,11 +233,19 @@ fn main() {
             let neon_invocations_delta = neon_invocations_after - neon_invocations_before;
             println!(
                 "  width_tile_plan gate: {width_gate_delta} of {width_fast_calls} WidthFast-classified calls actually resolved Some ({width_invocations_delta} tile invocations) -- {} the finer per-shape gate never declines a WidthFast node",
-                if width_gate_delta == width_fast_calls { "confirms" } else { "REFUTES" }
+                if width_gate_delta == width_fast_calls {
+                    "confirms"
+                } else {
+                    "REFUTES"
+                }
             );
             println!(
                 "  neon_tile_plan gate : {neon_gate_delta} of {dot_fast_calls} DotFast-classified calls actually resolved Some ({neon_invocations_delta} tile invocations) -- {} the finer per-shape gate never declines a DotFast node",
-                if neon_gate_delta == dot_fast_calls { "confirms" } else { "REFUTES" }
+                if neon_gate_delta == dot_fast_calls {
+                    "confirms"
+                } else {
+                    "REFUTES"
+                }
             );
         }
 
@@ -212,15 +256,21 @@ fn main() {
         // fell through to the untiled scalar loop", both commit the same
         // label (see `instrument::WidthDeclineReason`'s own doc).
         let declines = proxima_tensor::instrument::width_tile_decline_snapshot();
-        println!("\n  width_tile_plan declines ({} distinct node/reason pairs):", declines.len());
+        println!(
+            "\n  width_tile_plan declines ({} distinct node/reason pairs):",
+            declines.len()
+        );
         println!("  node | onnx matmul name | reason | calls | m | k | n | stride_a | stride_b");
-        for (node_id, reason, calls, matmul_m, matmul_k, matmul_n, stride_a, stride_b) in &declines {
+        for (node_id, reason, calls, matmul_m, matmul_k, matmul_n, stride_a, stride_b) in &declines
+        {
             let onnx_name = lowered
                 .matmul_names
                 .iter()
                 .find(|(node, _)| node.0 == *node_id)
                 .map_or("<not-a-matmul-output>", |(_, name)| name.as_str());
-            println!("    %{node_id:<4} | {onnx_name:<55} | {reason:?} | {calls:>3} | {matmul_m:>4} | {matmul_k:>4} | {matmul_n:>4} | {stride_a:>2} | {stride_b:>2}");
+            println!(
+                "    %{node_id:<4} | {onnx_name:<55} | {reason:?} | {calls:>3} | {matmul_m:>4} | {matmul_k:>4} | {matmul_n:>4} | {stride_a:>2} | {stride_b:>2}"
+            );
         }
 
         combined_dot_fast.0 += dot_fast_calls;
@@ -233,9 +283,14 @@ fn main() {
         combined_generic.1 += generic_nanos;
     }
 
-    let combined_total_nanos = combined_dot_fast.1 + combined_width_fast.1 + combined_conv_tile.1 + combined_generic.1;
-    let combined_total_calls = combined_dot_fast.0 + combined_width_fast.0 + combined_conv_tile.0 + combined_generic.0;
-    println!("\n=== combined across {} sentences, {combined_total_calls} gemm-shaped calls ===", items.len());
+    let combined_total_nanos =
+        combined_dot_fast.1 + combined_width_fast.1 + combined_conv_tile.1 + combined_generic.1;
+    let combined_total_calls =
+        combined_dot_fast.0 + combined_width_fast.0 + combined_conv_tile.0 + combined_generic.0;
+    println!(
+        "\n=== combined across {} sentences, {combined_total_calls} gemm-shaped calls ===",
+        items.len()
+    );
     println!(
         "  dot_fast    : {:>8} calls ({:5.2}% of 96), {:>12} ns, {:6.2}% of gemm time, {:.1} ns/call",
         combined_dot_fast.0,
@@ -278,7 +333,9 @@ fn main() {
     // `run_reduce` call including that overhead, so it upper-bounds but
     // does not isolate H2's own share. Named here as the residual, not
     // measured (see report).
-    println!("\nH2/H3 note: no existing counter times ns strictly inside gemm_width_tile_neon alone (vs the rest of run_width_tile_neon) -- REDUCE_GEMM_PATH_WIDTH_FAST_TICKS above is the whole run_reduce call for width_fast-routed nodes, an upper bound on the kernel's own share, not an isolation of it.");
+    println!(
+        "\nH2/H3 note: no existing counter times ns strictly inside gemm_width_tile_neon alone (vs the rest of run_width_tile_neon) -- REDUCE_GEMM_PATH_WIDTH_FAST_TICKS above is the whole run_reduce call for width_fast-routed nodes, an upper bound on the kernel's own share, not an isolation of it."
+    );
 
     // H4 sizing: evaluate_named (bind + shape::infer + per-node alloc EVERY
     // call, per that function's own doc, cpu.rs:464-479) versus a pre-bound
@@ -287,7 +344,9 @@ fn main() {
     // exactly the per-call cost evaluate_named pays that the arena path
     // does not, for RANKING ONLY per this task's own instruction not to
     // build a fix.
-    println!("\n=== H4 sizing: evaluate_named (bind+infer+alloc per call) vs pre-bound StaticArena ===");
+    println!(
+        "\n=== H4 sizing: evaluate_named (bind+infer+alloc per call) vs pre-bound StaticArena ==="
+    );
     for ((lowered, output), (name, tokens)) in lowered_per_sentence.iter().zip(items.iter()) {
         let sequence_length = tokens.len();
         let input_ids: Vec<f32> = tokens.iter().map(|&id| id as f32).collect();
@@ -296,24 +355,29 @@ fn main() {
         let named = named_inputs(lowered, &input_ids, &attention_mask, &token_type_ids);
 
         for _ in 0..WARMUP_CALLS {
-            let evaluated = cpu::evaluate_named(&lowered.program, &[], &named, &[*output]).expect("warm up evaluate_named");
+            let evaluated = cpu::evaluate_named(&lowered.program, &[], &named, &[*output])
+                .expect("warm up evaluate_named");
             std::hint::black_box(&evaluated);
         }
         let named_start = Instant::now();
         for _ in 0..MEASURED_CALLS {
-            let evaluated = cpu::evaluate_named(&lowered.program, &[], &named, &[*output]).expect("evaluate_named");
+            let evaluated = cpu::evaluate_named(&lowered.program, &[], &named, &[*output])
+                .expect("evaluate_named");
             std::hint::black_box(&evaluated);
         }
         let named_elapsed = named_start.elapsed();
 
-        let mut arena = cpu::build_static_arena(&lowered.program, &[], &[*output]).expect("build_static_arena");
+        let mut arena =
+            cpu::build_static_arena(&lowered.program, &[], &[*output]).expect("build_static_arena");
         for _ in 0..WARMUP_CALLS {
-            let evaluated = cpu::evaluate_named_with_arena(&mut arena, &named).expect("warm up evaluate_named_with_arena");
+            let evaluated = cpu::evaluate_named_with_arena(&mut arena, &named)
+                .expect("warm up evaluate_named_with_arena");
             std::hint::black_box(&evaluated);
         }
         let arena_start = Instant::now();
         for _ in 0..MEASURED_CALLS {
-            let evaluated = cpu::evaluate_named_with_arena(&mut arena, &named).expect("evaluate_named_with_arena");
+            let evaluated = cpu::evaluate_named_with_arena(&mut arena, &named)
+                .expect("evaluate_named_with_arena");
             std::hint::black_box(&evaluated);
         }
         let arena_elapsed = arena_start.elapsed();

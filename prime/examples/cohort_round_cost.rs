@@ -99,8 +99,11 @@ fn median(values: &mut [f64]) -> f64 {
 
 fn coefficient_of_variation(values: &[f64]) -> f64 {
     let mean = values.iter().sum::<f64>() / values.len() as f64;
-    let variance =
-        values.iter().map(|value| (value - mean).powi(2)).sum::<f64>() / values.len() as f64;
+    let variance = values
+        .iter()
+        .map(|value| (value - mean).powi(2))
+        .sum::<f64>()
+        / values.len() as f64;
     variance.sqrt() / mean
 }
 

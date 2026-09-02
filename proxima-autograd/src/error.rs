@@ -38,9 +38,7 @@ pub enum AutogradError {
     )]
     UnsupportedReduceBody { node: NodeId, body: ScalarOp },
 
-    #[error(
-        "node {node} elementwise-computes {body:?}, which has no local adjoint rule here"
-    )]
+    #[error("node {node} elementwise-computes {body:?}, which has no local adjoint rule here")]
     UnsupportedElementwiseBody { node: NodeId, body: ScalarOp },
 
     #[error(

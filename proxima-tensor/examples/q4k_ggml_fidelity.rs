@@ -96,8 +96,13 @@ fn ours(ggml_type: GgmlType, data: &[u8], out: &mut [f32]) -> Result<(), String>
 }
 
 fn main() {
-    let model = env::args().nth(1).map(PathBuf::from).expect("usage: <model.gguf> [log-path]");
-    let log_path = env::args().nth(2).unwrap_or_else(|| "fidelity.jsonl".to_string());
+    let model = env::args()
+        .nth(1)
+        .map(PathBuf::from)
+        .expect("usage: <model.gguf> [log-path]");
+    let log_path = env::args()
+        .nth(2)
+        .unwrap_or_else(|| "fidelity.jsonl".to_string());
 
     let recorder = Recorder::builder()
         .export(Exporter::file(&log_path).format(Formatter::Text))
@@ -112,7 +117,11 @@ fn main() {
     file.read_exact(&mut prefix).expect("read prefix");
     let parsed = parse_complete(&prefix).expect("parse gguf metadata");
 
-    println!("tensors={} data_offset={}", parsed.tensors.len(), parsed.data_offset);
+    println!(
+        "tensors={} data_offset={}",
+        parsed.tensors.len(),
+        parsed.data_offset
+    );
 
     let mut compared_tensors = 0usize;
     let mut compared_blocks = 0usize;
@@ -125,12 +134,18 @@ fn main() {
         let element_count = tensor.element_count() as usize;
 
         let Some(code) = ggml_type_code(tensor.ggml_type) else {
-            skipped.push((tensor.name.clone(), format!("{:?} unmapped", tensor.ggml_type)));
+            skipped.push((
+                tensor.name.clone(),
+                format!("{:?} unmapped", tensor.ggml_type),
+            ));
             continue;
         };
         let traits = unsafe { &*ggml_get_type_traits(code) };
         let Some(to_float) = traits.to_float else {
-            skipped.push((tensor.name.clone(), format!("{:?} has no ggml to_float", tensor.ggml_type)));
+            skipped.push((
+                tensor.name.clone(),
+                format!("{:?} has no ggml to_float", tensor.ggml_type),
+            ));
             continue;
         };
 
@@ -145,7 +160,13 @@ fn main() {
         }
 
         let mut theirs = vec![0f32; element_count];
-        unsafe { to_float(data.as_ptr().cast(), theirs.as_mut_ptr(), element_count as i64) };
+        unsafe {
+            to_float(
+                data.as_ptr().cast(),
+                theirs.as_mut_ptr(),
+                element_count as i64,
+            )
+        };
 
         let mut max_diff = 0f32;
         let mut worst = 0usize;
@@ -213,7 +234,9 @@ fn main() {
     while recorder.drain() > 0 {}
 
     rows.sort_by(|a, b| {
-        b.max_abs_diff.total_cmp(&a.max_abs_diff).then_with(|| a.tensor_name.cmp(&b.tensor_name))
+        b.max_abs_diff
+            .total_cmp(&a.max_abs_diff)
+            .then_with(|| a.tensor_name.cmp(&b.tensor_name))
     });
     println!("\nname dtype blocks max_abs_diff worst_block worst_index ours ggml");
     for row in &rows {

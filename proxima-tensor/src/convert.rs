@@ -65,7 +65,9 @@ pub struct Convert<From, To> {
 impl<From, To> Convert<From, To> {
     #[must_use]
     pub const fn new() -> Self {
-        Self { marker: PhantomData }
+        Self {
+            marker: PhantomData,
+        }
     }
 }
 
@@ -242,10 +244,10 @@ pub trait SimdConvert: Pipe {
 mod neon {
     use core::arch::aarch64::{
         vcvtq_f32_s32, vcvtq_f32_u32, vcvtq_s32_f32, vcvtq_u32_f32, vget_high_s16, vget_high_s32,
-        vget_high_u16, vget_high_u32, vget_low_s16, vget_low_s32, vget_low_u16, vget_low_u32, vld1_s8,
-        vld1_u8, vld1q_f32, vld1q_s16, vld1q_s32, vld1q_u16, vld1q_u32, vmovl_s8, vmovl_s16, vmovl_s32,
-        vmovl_u8, vmovl_u16, vmovl_u32, vst1q_f32, vst1q_s16, vst1q_s32, vst1q_s64, vst1q_u16, vst1q_u32,
-        vst1q_u64,
+        vget_high_u16, vget_high_u32, vget_low_s16, vget_low_s32, vget_low_u16, vget_low_u32,
+        vld1_s8, vld1_u8, vld1q_f32, vld1q_s16, vld1q_s32, vld1q_u16, vld1q_u32, vmovl_s8,
+        vmovl_s16, vmovl_s32, vmovl_u8, vmovl_u16, vmovl_u32, vst1q_f32, vst1q_s16, vst1q_s32,
+        vst1q_s64, vst1q_u16, vst1q_u32, vst1q_u64,
     };
 
     /// # Safety
@@ -330,7 +332,10 @@ mod neon {
     /// `input` and `output` must both be exactly 4 elements.
     pub unsafe fn i32_to_f32(input: &[i32], output: &mut [f32]) {
         unsafe {
-            vst1q_f32(output.as_mut_ptr(), vcvtq_f32_s32(vld1q_s32(input.as_ptr())));
+            vst1q_f32(
+                output.as_mut_ptr(),
+                vcvtq_f32_s32(vld1q_s32(input.as_ptr())),
+            );
         }
     }
 
@@ -338,7 +343,10 @@ mod neon {
     /// `input` and `output` must both be exactly 4 elements.
     pub unsafe fn u32_to_f32(input: &[u32], output: &mut [f32]) {
         unsafe {
-            vst1q_f32(output.as_mut_ptr(), vcvtq_f32_u32(vld1q_u32(input.as_ptr())));
+            vst1q_f32(
+                output.as_mut_ptr(),
+                vcvtq_f32_u32(vld1q_u32(input.as_ptr())),
+            );
         }
     }
 
@@ -346,7 +354,10 @@ mod neon {
     /// `input` and `output` must both be exactly 4 elements.
     pub unsafe fn f32_to_i32(input: &[f32], output: &mut [i32]) {
         unsafe {
-            vst1q_s32(output.as_mut_ptr(), vcvtq_s32_f32(vld1q_f32(input.as_ptr())));
+            vst1q_s32(
+                output.as_mut_ptr(),
+                vcvtq_s32_f32(vld1q_f32(input.as_ptr())),
+            );
         }
     }
 
@@ -354,7 +365,10 @@ mod neon {
     /// `input` and `output` must both be exactly 4 elements.
     pub unsafe fn f32_to_u32(input: &[f32], output: &mut [u32]) {
         unsafe {
-            vst1q_u32(output.as_mut_ptr(), vcvtq_u32_f32(vld1q_f32(input.as_ptr())));
+            vst1q_u32(
+                output.as_mut_ptr(),
+                vcvtq_u32_f32(vld1q_f32(input.as_ptr())),
+            );
         }
     }
 }
@@ -561,7 +575,10 @@ mod tests {
     async fn f16_round_trips_representable_values(#[case] value: f32) {
         let narrowed: f16 = block_on(Convert::<f32, f16>::new().call(value)).unwrap();
         let widened: f32 = block_on(Convert::<f16, f32>::new().call(narrowed)).unwrap();
-        assert_eq!(widened, value, "every value in this table is exactly representable in f16");
+        assert_eq!(
+            widened, value,
+            "every value in this table is exactly representable in f16"
+        );
     }
 
     #[test]

@@ -270,7 +270,10 @@ async fn main() -> Result<(), ProximaError> {
     // (or a config file) selects it — set and forget, then conflaguration it.
     let configured = BoundaryConfig::from_env()
         .map_err(|error| ProximaError::Config(format!("boundary config: {error}")))?;
-    println!("configured boundary mode (PROXIMA_BOUNDARY_MODE): {:?}\n", configured.mode);
+    println!(
+        "configured boundary mode (PROXIMA_BOUNDARY_MODE): {:?}\n",
+        configured.mode
+    );
 
     section_off(&cassette, &runtime).await?;
     section_record(&cassette, &runtime).await?;
@@ -298,7 +301,10 @@ async fn section_off(cassette: &Path, runtime: &Arc<dyn Runtime>) -> Result<(), 
     let (boundary, _) = wire_boundary(BoundaryMode::Off, deps(cassette, runtime)).await?;
     let served = body_of(SendPipe::call(&boundary, chat_request()).await?).await;
     println!("  served: {served:?}");
-    assert_eq!(served, "served by ours", "Off returns the inner handle unchanged");
+    assert_eq!(
+        served, "served by ours",
+        "Off returns the inner handle unchanged"
+    );
     Ok(())
 }
 
@@ -312,12 +318,18 @@ async fn section_record(cassette: &Path, runtime: &Arc<dyn Runtime>) -> Result<(
     assert_eq!(served, "served by theirs", "Record's inner is theirs");
 
     // await the flush signal, then confirm the cassette actually captured it.
-    terminal.expect("Record yields a drain signal").drained().await;
+    terminal
+        .expect("Record yields a drain signal")
+        .drained()
+        .await;
     let events = read_cassette(cassette, Arc::clone(runtime)).await;
     let captured = events
         .iter()
         .any(|event| matches!(event.event, ProtocolEvent::Http(HttpEvent::Ended { .. })));
-    println!("  cassette events: {} (terminal captured: {captured})", events.len());
+    println!(
+        "  cassette events: {} (terminal captured: {captured})",
+        events.len()
+    );
     assert!(captured, "the interaction reached the cassette");
     Ok(())
 }
@@ -329,7 +341,10 @@ async fn section_replay(cassette: &Path, runtime: &Arc<dyn Runtime>) -> Result<(
     let (boundary, _) = wire_boundary(BoundaryMode::Replay, deps(cassette, runtime)).await?;
     let served = body_of(SendPipe::call(&boundary, chat_request()).await?).await;
     println!("  served (off disk): {served:?}");
-    assert_eq!(served, "served by theirs", "replay reproduces theirs' recorded bytes");
+    assert_eq!(
+        served, "served by theirs",
+        "replay reproduces theirs' recorded bytes"
+    );
 
     // the flip side of byte-identical: an uncaptured request is a typed miss.
     let unrecorded = Request::builder()
@@ -389,19 +404,21 @@ async fn section_extend_with_a_composed_strategy() -> Result<(), ProximaError> {
     // is an existing SendPipe combinator (proxima::Transform); wrapping
     // `theirs()` in it and erasing with `into_handle` is composition, not a
     // new type.
-    let tagged = into_handle(Transform::new(theirs()).with_response_op(ResponseOp::SetHeader {
-        name: "x-served-by".into(),
-        value: "theirs (boundary canary)".into(),
-    }));
+    let tagged = into_handle(
+        Transform::new(theirs()).with_response_op(ResponseOp::SetHeader {
+            name: "x-served-by".into(),
+            value: "theirs (boundary canary)".into(),
+        }),
+    );
 
     let response = SendPipe::call(&tagged, chat_request()).await?;
-    let marker = response
-        .metadata
-        .get_str("x-served-by")
-        .map(str::to_owned);
+    let marker = response.metadata.get_str("x-served-by").map(str::to_owned);
     let served = body_of(response).await;
     println!("  theirs, tagged -> {served:?} (x-served-by: {marker:?})");
-    assert_eq!(served, "served by theirs", "Transform's inner still answers");
+    assert_eq!(
+        served, "served by theirs",
+        "Transform's inner still answers"
+    );
     assert_eq!(
         marker.as_deref(),
         Some("theirs (boundary canary)"),

@@ -135,10 +135,16 @@ pub struct Differentiated {
 
 impl Differentiated {
     fn input_named(&self, name: &str) -> Option<NodeId> {
-        self.program.iter().enumerate().find_map(|(index, op)| match op {
-            Op::Input { name: Some(candidate), .. } if candidate == name => Some(NodeId(index as u32)),
-            _ => None,
-        })
+        self.program
+            .iter()
+            .enumerate()
+            .find_map(|(index, op)| match op {
+                Op::Input {
+                    name: Some(candidate),
+                    ..
+                } if candidate == name => Some(NodeId(index as u32)),
+                _ => None,
+            })
     }
 
     /// The dense gradient node for `node`, if the loss depends on it
@@ -161,7 +167,8 @@ impl Differentiated {
     /// is a lookup over that same name, not a second tree structure.
     #[must_use]
     pub fn gradient_of_named(&self, name: &str) -> Option<NodeId> {
-        self.input_named(name).and_then(|node| self.gradient_of(node))
+        self.input_named(name)
+            .and_then(|node| self.gradient_of(node))
     }
 
     /// Every [`GatheredContribution`] recorded for `node` — one per forward
@@ -170,7 +177,10 @@ impl Differentiated {
     /// single-element iterator, but nothing here assumes that: a table read
     /// by two separate gathers yields two contributions, both legitimate,
     /// neither one silently dropped.
-    pub fn gathered_gradients_of(&self, node: NodeId) -> impl Iterator<Item = GatheredContribution> + '_ {
+    pub fn gathered_gradients_of(
+        &self,
+        node: NodeId,
+    ) -> impl Iterator<Item = GatheredContribution> + '_ {
         self.gathered
             .iter()
             .filter(move |(candidate, _)| *candidate == node)
@@ -180,7 +190,10 @@ impl Differentiated {
     /// [`Self::gathered_gradients_of`], looked up by the operand's
     /// [`Op::Input::name`] instead of its [`NodeId`] — the same convenience
     /// [`Self::gradient_of_named`] gives the dense case.
-    pub fn gathered_gradients_of_named(&self, name: &str) -> impl Iterator<Item = GatheredContribution> + '_ {
+    pub fn gathered_gradients_of_named(
+        &self,
+        name: &str,
+    ) -> impl Iterator<Item = GatheredContribution> + '_ {
         let node = self.input_named(name);
         self.gathered
             .iter()
@@ -224,12 +237,20 @@ pub fn differentiate(program: &[Op], loss: NodeId) -> Result<Differentiated, Aut
 ///
 /// Same as [`differentiate`].
 #[must_use = "Result must be checked"]
-pub fn differentiate_wanted(program: &[Op], loss: NodeId, wanted: &[NodeId]) -> Result<Differentiated, AutogradError> {
+pub fn differentiate_wanted(
+    program: &[Op],
+    loss: NodeId,
+    wanted: &[NodeId],
+) -> Result<Differentiated, AutogradError> {
     let wanted: BTreeSet<NodeId> = wanted.iter().copied().collect();
     differentiate_core(program, loss, Some(&wanted))
 }
 
-fn differentiate_core(program: &[Op], loss: NodeId, wanted: Option<&BTreeSet<NodeId>>) -> Result<Differentiated, AutogradError> {
+fn differentiate_core(
+    program: &[Op],
+    loss: NodeId,
+    wanted: Option<&BTreeSet<NodeId>>,
+) -> Result<Differentiated, AutogradError> {
     let loss_index = loss.0 as usize;
     if loss_index >= program.len() {
         return Err(AutogradError::UnknownLoss(loss));
@@ -238,7 +259,10 @@ fn differentiate_core(program: &[Op], loss: NodeId, wanted: Option<&BTreeSet<Nod
     let shapes = shape::infer(program, &[])?;
     let loss_rank = shapes.of(loss).len();
     if loss_rank != 0 {
-        return Err(AutogradError::LossNotScalar { node: loss, rank: loss_rank });
+        return Err(AutogradError::LossNotScalar {
+            node: loss,
+            rank: loss_rank,
+        });
     }
 
     let mut new_program: Vec<Op> = program[..=loss_index].to_vec();
@@ -247,11 +271,18 @@ fn differentiate_core(program: &[Op], loss: NodeId, wanted: Option<&BTreeSet<Nod
     grad_of[loss_index] = Some(expr::constant(&mut new_program, DType::Float32, 1.0));
 
     for index in (0..=loss_index).rev() {
-        let Some(gradient) = grad_of[index] else { continue };
+        let Some(gradient) = grad_of[index] else {
+            continue;
+        };
         let node = NodeId(index as u32);
         match &program[index] {
             Op::Input { .. } | Op::Iota { .. } | Op::Constant { .. } => {}
-            Op::Elementwise { dtype, body, operands, .. } => differentiate_elementwise(
+            Op::Elementwise {
+                dtype,
+                body,
+                operands,
+                ..
+            } => differentiate_elementwise(
                 &mut new_program,
                 &mut grad_of,
                 &mut gathered_of,
@@ -297,11 +328,18 @@ fn differentiate_core(program: &[Op], loss: NodeId, wanted: Option<&BTreeSet<Nod
         .into_iter()
         .enumerate()
         .flat_map(|(index, contributions)| {
-            contributions.into_iter().map(move |contribution| (NodeId(index as u32), contribution))
+            contributions
+                .into_iter()
+                .map(move |contribution| (NodeId(index as u32), contribution))
         })
         .collect();
 
-    Ok(Differentiated { program: new_program, loss, gradients, gathered })
+    Ok(Differentiated {
+        program: new_program,
+        loss,
+        gradients,
+        gathered,
+    })
 }
 
 fn accumulate(
@@ -316,7 +354,13 @@ fn accumulate(
         None => contribution,
         Some(existing) => {
             let full = expr::identity(rank);
-            expr::binary(program, dtype, ScalarOp::Add, (existing, full.clone()), (contribution, full))
+            expr::binary(
+                program,
+                dtype,
+                ScalarOp::Add,
+                (existing, full.clone()),
+                (contribution, full),
+            )
         }
     });
 }
@@ -342,7 +386,12 @@ fn differentiate_elementwise(
     let contributions: Vec<Option<NodeId>> = match body {
         ScalarOp::Identity => vec![Some(gradient)],
         ScalarOp::Negate => {
-            vec![Some(expr::unary(program, dtype, ScalarOp::Negate, (gradient, full)))]
+            vec![Some(expr::unary(
+                program,
+                dtype,
+                ScalarOp::Negate,
+                (gradient, full),
+            ))]
         }
         ScalarOp::Add => vec![Some(gradient), Some(gradient)],
         ScalarOp::Subtract => {
@@ -352,57 +401,191 @@ fn differentiate_elementwise(
         ScalarOp::Multiply => {
             let (a, map_a) = operands[0].clone();
             let (b, map_b) = operands[1].clone();
-            let grad_a = expr::binary(program, dtype, ScalarOp::Multiply, (gradient, full.clone()), (b, map_b));
-            let grad_b = expr::binary(program, dtype, ScalarOp::Multiply, (gradient, full), (a, map_a));
+            let grad_a = expr::binary(
+                program,
+                dtype,
+                ScalarOp::Multiply,
+                (gradient, full.clone()),
+                (b, map_b),
+            );
+            let grad_b = expr::binary(
+                program,
+                dtype,
+                ScalarOp::Multiply,
+                (gradient, full),
+                (a, map_a),
+            );
             vec![Some(grad_a), Some(grad_b)]
         }
         ScalarOp::Divide => {
             let (a, map_a) = operands[0].clone();
             let (b, map_b) = operands[1].clone();
             let recip_b = expr::unary(program, dtype, ScalarOp::Reciprocal, (b, map_b.clone()));
-            let grad_a = expr::binary(program, dtype, ScalarOp::Multiply, (gradient, full.clone()), (recip_b, full.clone()));
-            let b_squared = expr::binary(program, dtype, ScalarOp::Multiply, (b, map_b.clone()), (b, map_b));
+            let grad_a = expr::binary(
+                program,
+                dtype,
+                ScalarOp::Multiply,
+                (gradient, full.clone()),
+                (recip_b, full.clone()),
+            );
+            let b_squared = expr::binary(
+                program,
+                dtype,
+                ScalarOp::Multiply,
+                (b, map_b.clone()),
+                (b, map_b),
+            );
             let neg_a = expr::unary(program, dtype, ScalarOp::Negate, (a, map_a));
-            let recip_b_squared = expr::unary(program, dtype, ScalarOp::Reciprocal, (b_squared, full.clone()));
-            let slope = expr::binary(program, dtype, ScalarOp::Multiply, (neg_a, full.clone()), (recip_b_squared, full.clone()));
-            let grad_b = expr::binary(program, dtype, ScalarOp::Multiply, (gradient, full.clone()), (slope, full));
+            let recip_b_squared = expr::unary(
+                program,
+                dtype,
+                ScalarOp::Reciprocal,
+                (b_squared, full.clone()),
+            );
+            let slope = expr::binary(
+                program,
+                dtype,
+                ScalarOp::Multiply,
+                (neg_a, full.clone()),
+                (recip_b_squared, full.clone()),
+            );
+            let grad_b = expr::binary(
+                program,
+                dtype,
+                ScalarOp::Multiply,
+                (gradient, full.clone()),
+                (slope, full),
+            );
             vec![Some(grad_a), Some(grad_b)]
         }
-        ScalarOp::Maximum => maximum_minimum_grads(program, dtype, operands, gradient, &full, &broadcast, true),
-        ScalarOp::Minimum => maximum_minimum_grads(program, dtype, operands, gradient, &full, &broadcast, false),
+        ScalarOp::Maximum => {
+            maximum_minimum_grads(program, dtype, operands, gradient, &full, &broadcast, true)
+        }
+        ScalarOp::Minimum => {
+            maximum_minimum_grads(program, dtype, operands, gradient, &full, &broadcast, false)
+        }
         ScalarOp::Reciprocal => {
-            let out_squared = expr::binary(program, dtype, ScalarOp::Multiply, (node, full.clone()), (node, full.clone()));
-            let neg_out_squared = expr::unary(program, dtype, ScalarOp::Negate, (out_squared, full.clone()));
-            vec![Some(expr::binary(program, dtype, ScalarOp::Multiply, (gradient, full.clone()), (neg_out_squared, full)))]
+            let out_squared = expr::binary(
+                program,
+                dtype,
+                ScalarOp::Multiply,
+                (node, full.clone()),
+                (node, full.clone()),
+            );
+            let neg_out_squared = expr::unary(
+                program,
+                dtype,
+                ScalarOp::Negate,
+                (out_squared, full.clone()),
+            );
+            vec![Some(expr::binary(
+                program,
+                dtype,
+                ScalarOp::Multiply,
+                (gradient, full.clone()),
+                (neg_out_squared, full),
+            ))]
         }
         ScalarOp::Exponential => {
-            vec![Some(expr::binary(program, dtype, ScalarOp::Multiply, (gradient, full.clone()), (node, full)))]
+            vec![Some(expr::binary(
+                program,
+                dtype,
+                ScalarOp::Multiply,
+                (gradient, full.clone()),
+                (node, full),
+            ))]
         }
         ScalarOp::Logarithm => {
             let (x, map_x) = operands[0].clone();
             let recip = expr::unary(program, dtype, ScalarOp::Reciprocal, (x, map_x));
-            vec![Some(expr::binary(program, dtype, ScalarOp::Multiply, (gradient, full.clone()), (recip, full)))]
+            vec![Some(expr::binary(
+                program,
+                dtype,
+                ScalarOp::Multiply,
+                (gradient, full.clone()),
+                (recip, full),
+            ))]
         }
         ScalarOp::SquareRoot => {
             let two = expr::constant(program, dtype, 2.0);
-            let denominator = expr::binary(program, dtype, ScalarOp::Multiply, (two, broadcast), (node, full.clone()));
-            let recip = expr::unary(program, dtype, ScalarOp::Reciprocal, (denominator, full.clone()));
-            vec![Some(expr::binary(program, dtype, ScalarOp::Multiply, (gradient, full.clone()), (recip, full)))]
+            let denominator = expr::binary(
+                program,
+                dtype,
+                ScalarOp::Multiply,
+                (two, broadcast),
+                (node, full.clone()),
+            );
+            let recip = expr::unary(
+                program,
+                dtype,
+                ScalarOp::Reciprocal,
+                (denominator, full.clone()),
+            );
+            vec![Some(expr::binary(
+                program,
+                dtype,
+                ScalarOp::Multiply,
+                (gradient, full.clone()),
+                (recip, full),
+            ))]
         }
         ScalarOp::Tanh => {
-            let squared = expr::binary(program, dtype, ScalarOp::Multiply, (node, full.clone()), (node, full.clone()));
+            let squared = expr::binary(
+                program,
+                dtype,
+                ScalarOp::Multiply,
+                (node, full.clone()),
+                (node, full.clone()),
+            );
             let one = expr::constant(program, dtype, 1.0);
-            let slope = expr::binary(program, dtype, ScalarOp::Subtract, (one, broadcast), (squared, full.clone()));
-            vec![Some(expr::binary(program, dtype, ScalarOp::Multiply, (gradient, full.clone()), (slope, full)))]
+            let slope = expr::binary(
+                program,
+                dtype,
+                ScalarOp::Subtract,
+                (one, broadcast),
+                (squared, full.clone()),
+            );
+            vec![Some(expr::binary(
+                program,
+                dtype,
+                ScalarOp::Multiply,
+                (gradient, full.clone()),
+                (slope, full),
+            ))]
         }
         ScalarOp::Erf => {
             let (x, map_x) = operands[0].clone();
-            let coefficient = expr::constant(program, dtype, 2.0 / libm::sqrtf(core::f32::consts::PI));
-            let x_squared = expr::binary(program, dtype, ScalarOp::Multiply, (x, map_x.clone()), (x, map_x));
-            let neg_x_squared = expr::unary(program, dtype, ScalarOp::Negate, (x_squared, full.clone()));
-            let exponentiated = expr::unary(program, dtype, ScalarOp::Exponential, (neg_x_squared, full.clone()));
-            let slope = expr::binary(program, dtype, ScalarOp::Multiply, (coefficient, broadcast), (exponentiated, full.clone()));
-            vec![Some(expr::binary(program, dtype, ScalarOp::Multiply, (gradient, full.clone()), (slope, full)))]
+            let coefficient =
+                expr::constant(program, dtype, 2.0 / libm::sqrtf(core::f32::consts::PI));
+            let x_squared = expr::binary(
+                program,
+                dtype,
+                ScalarOp::Multiply,
+                (x, map_x.clone()),
+                (x, map_x),
+            );
+            let neg_x_squared =
+                expr::unary(program, dtype, ScalarOp::Negate, (x_squared, full.clone()));
+            let exponentiated = expr::unary(
+                program,
+                dtype,
+                ScalarOp::Exponential,
+                (neg_x_squared, full.clone()),
+            );
+            let slope = expr::binary(
+                program,
+                dtype,
+                ScalarOp::Multiply,
+                (coefficient, broadcast),
+                (exponentiated, full.clone()),
+            );
+            vec![Some(expr::binary(
+                program,
+                dtype,
+                ScalarOp::Multiply,
+                (gradient, full.clone()),
+                (slope, full),
+            ))]
         }
         ScalarOp::Greater | ScalarOp::Equal => operands.iter().map(|_| None).collect(),
         ScalarOp::Select => {
@@ -421,17 +604,40 @@ fn differentiate_elementwise(
             // forward `Select` itself lowered fine (`scaled`'s full-rank
             // operand covered it there) -- see `broadcast_anchor`'s own doc.
             let one = expr::broadcast_anchor(program, dtype, shapes.of(node), 1.0);
-            let inverse_condition =
-                expr::binary(program, dtype, ScalarOp::Subtract, (one, full.clone()), (condition, condition_map));
-            let false_mask =
-                expr::binary(program, dtype, ScalarOp::Multiply, (gradient, full.clone()), (inverse_condition, full));
+            let inverse_condition = expr::binary(
+                program,
+                dtype,
+                ScalarOp::Subtract,
+                (one, full.clone()),
+                (condition, condition_map),
+            );
+            let false_mask = expr::binary(
+                program,
+                dtype,
+                ScalarOp::Multiply,
+                (gradient, full.clone()),
+                (inverse_condition, full),
+            );
             vec![None, Some(true_mask), Some(false_mask)]
         }
     };
 
     for (operand, contribution) in operands.iter().zip(contributions) {
-        let Some(contribution) = contribution else { continue };
-        route_contribution(program, grad_of, gathered_of, original_program, shapes, node, operand, contribution, iter_rank, wanted)?;
+        let Some(contribution) = contribution else {
+            continue;
+        };
+        route_contribution(
+            program,
+            grad_of,
+            gathered_of,
+            original_program,
+            shapes,
+            node,
+            operand,
+            contribution,
+            iter_rank,
+            wanted,
+        )?;
     }
     Ok(())
 }
@@ -440,7 +646,11 @@ fn differentiate_elementwise(
 /// asked for — the only case a leaf-routing site may skip. `wanted == None`
 /// (plain [`differentiate`]) never skips anything, matching its documented
 /// "backprop through every reachable `Op::Input`" contract.
-fn is_unwanted_input(original_program: &[Op], wanted: Option<&BTreeSet<NodeId>>, node: NodeId) -> bool {
+fn is_unwanted_input(
+    original_program: &[Op],
+    wanted: Option<&BTreeSet<NodeId>>,
+    node: NodeId,
+) -> bool {
     let Some(wanted) = wanted else { return false };
     matches!(original_program[node.0 as usize], Op::Input { .. }) && !wanted.contains(&node)
 }
@@ -475,8 +685,20 @@ fn maximum_minimum_grads(
         (second_operand_wins, full.clone()),
     );
 
-    let grad_a = expr::binary(program, dtype, ScalarOp::Multiply, (gradient, full.clone()), (first_operand_wins, full.clone()));
-    let grad_b = expr::binary(program, dtype, ScalarOp::Multiply, (gradient, full.clone()), (second_operand_wins, full.clone()));
+    let grad_a = expr::binary(
+        program,
+        dtype,
+        ScalarOp::Multiply,
+        (gradient, full.clone()),
+        (first_operand_wins, full.clone()),
+    );
+    let grad_b = expr::binary(
+        program,
+        dtype,
+        ScalarOp::Multiply,
+        (gradient, full.clone()),
+        (second_operand_wins, full.clone()),
+    );
     vec![Some(grad_a), Some(grad_b)]
 }
 
@@ -497,7 +719,10 @@ fn route_contribution(
     wanted: Option<&BTreeSet<NodeId>>,
 ) -> Result<(), AutogradError> {
     let (operand_node, operand_map) = operand;
-    if matches!(original_program[operand_node.0 as usize], Op::Constant { .. } | Op::Iota { .. }) {
+    if matches!(
+        original_program[operand_node.0 as usize],
+        Op::Constant { .. } | Op::Iota { .. }
+    ) {
         return Ok(());
     }
     if is_unwanted_input(original_program, wanted, *operand_node) {
@@ -509,7 +734,10 @@ fn route_contribution(
     match operand_map {
         IndexMap::Affine(pattern) => {
             if !expr::is_pure_projection(pattern) {
-                return Err(AutogradError::NonProjectionOperandMap { node: consumer, operand: *operand_node });
+                return Err(AutogradError::NonProjectionOperandMap {
+                    node: consumer,
+                    operand: *operand_node,
+                });
             }
             let operand_rank = shapes.of(*operand_node).len() as u16;
             let routed = expr::reduce(
@@ -521,11 +749,26 @@ fn route_contribution(
                 expr::identity(iter_rank),
                 IndexMap::Affine(pattern.clone()),
             );
-            accumulate(program, grad_of, dtype, operand_rank, operand_node.0 as usize, routed);
+            accumulate(
+                program,
+                grad_of,
+                dtype,
+                operand_rank,
+                operand_node.0 as usize,
+                routed,
+            );
         }
-        IndexMap::Computed { indices, index_map, gathered_dim, .. } => {
+        IndexMap::Computed {
+            indices,
+            index_map,
+            gathered_dim,
+            ..
+        } => {
             if !expr::is_pure_projection(index_map) {
-                return Err(AutogradError::NonProjectionIndexMap { node: consumer, operand: *operand_node });
+                return Err(AutogradError::NonProjectionIndexMap {
+                    node: consumer,
+                    operand: *operand_node,
+                });
             }
             gathered_of[operand_node.0 as usize].push(GatheredContribution {
                 values: contribution,
@@ -549,20 +792,44 @@ fn differentiate_reduce(
     wanted: Option<&BTreeSet<NodeId>>,
 ) -> Result<(), AutogradError> {
     if matches!(reduce.keep, Keep::Scan) {
-        return differentiate_scan(program, grad_of, original_program, shapes, node, reduce, gradient, wanted);
+        return differentiate_scan(
+            program,
+            grad_of,
+            original_program,
+            shapes,
+            node,
+            reduce,
+            gradient,
+            wanted,
+        );
     }
     if reduce.out_map.is_data_dependent() {
-        return differentiate_scatter(program, grad_of, original_program, shapes, node, reduce, gradient, wanted);
+        return differentiate_scatter(
+            program,
+            grad_of,
+            original_program,
+            shapes,
+            node,
+            reduce,
+            gradient,
+            wanted,
+        );
     }
     if reduce.in_map.is_data_dependent() {
-        return Err(AutogradError::ReduceOverGatherUnsupported { node, operand: reduce.operand });
+        return Err(AutogradError::ReduceOverGatherUnsupported {
+            node,
+            operand: reduce.operand,
+        });
     }
     if is_unwanted_input(original_program, wanted, reduce.operand) {
         return Ok(());
     }
     let in_pattern = reduce.in_map.affine();
     if !expr::is_pure_projection(in_pattern) {
-        return Err(AutogradError::NonProjectionOperandMap { node, operand: reduce.operand });
+        return Err(AutogradError::NonProjectionOperandMap {
+            node,
+            operand: reduce.operand,
+        });
     }
     let full = expr::identity(in_pattern.iter_rank);
     let out_map_as_operand = IndexMap::Affine(reduce.out_map.affine().clone());
@@ -600,7 +867,13 @@ fn differentiate_reduce(
                 (gradient, out_map_as_operand),
                 (anchor, full.clone()),
             );
-            expr::binary(program, reduce.dtype, ScalarOp::Multiply, (mask, full.clone()), (gradient_broadcast, full.clone()))
+            expr::binary(
+                program,
+                reduce.dtype,
+                ScalarOp::Multiply,
+                (mask, full.clone()),
+                (gradient_broadcast, full.clone()),
+            )
         }
         // The standard divide-form product-reduction adjoint:
         // `d(prod x)/dx_i = (prod x) / x_i`, so `grad_i = gradient *
@@ -631,10 +904,26 @@ fn differentiate_reduce(
                 (gradient, out_map_as_operand),
                 (anchor, full.clone()),
             );
-            let numerator =
-                expr::binary(program, reduce.dtype, ScalarOp::Multiply, (gradient_broadcast, full.clone()), (output_broadcast, full.clone()));
-            let recip_operand = expr::unary(program, reduce.dtype, ScalarOp::Reciprocal, (reduce.operand, reduce.in_map.clone()));
-            expr::binary(program, reduce.dtype, ScalarOp::Multiply, (numerator, full.clone()), (recip_operand, full.clone()))
+            let numerator = expr::binary(
+                program,
+                reduce.dtype,
+                ScalarOp::Multiply,
+                (gradient_broadcast, full.clone()),
+                (output_broadcast, full.clone()),
+            );
+            let recip_operand = expr::unary(
+                program,
+                reduce.dtype,
+                ScalarOp::Reciprocal,
+                (reduce.operand, reduce.in_map.clone()),
+            );
+            expr::binary(
+                program,
+                reduce.dtype,
+                ScalarOp::Multiply,
+                (numerator, full.clone()),
+                (recip_operand, full.clone()),
+            )
         }
         other => return Err(AutogradError::UnsupportedReduceBody { node, body: other }),
     };
@@ -664,7 +953,14 @@ fn differentiate_reduce(
         )
     };
     let operand_rank = shapes.of(reduce.operand).len() as u16;
-    accumulate(program, grad_of, operand_dtype, operand_rank, reduce.operand.0 as usize, routed);
+    accumulate(
+        program,
+        grad_of,
+        operand_dtype,
+        operand_rank,
+        reduce.operand.0 as usize,
+        routed,
+    );
     Ok(())
 }
 
@@ -715,24 +1011,36 @@ fn differentiate_scatter(
         });
     }
     if reduce.in_map.is_data_dependent() {
-        return Err(AutogradError::ReduceOverGatherUnsupported { node, operand: reduce.operand });
+        return Err(AutogradError::ReduceOverGatherUnsupported {
+            node,
+            operand: reduce.operand,
+        });
     }
     if is_unwanted_input(original_program, wanted, reduce.operand) {
         return Ok(());
     }
     let in_pattern = reduce.in_map.affine();
     if !expr::is_pure_projection(in_pattern) {
-        return Err(AutogradError::NonProjectionOperandMap { node, operand: reduce.operand });
+        return Err(AutogradError::NonProjectionOperandMap {
+            node,
+            operand: reduce.operand,
+        });
     }
     let full = expr::identity(in_pattern.iter_rank);
-    let gather_map = reduce
-        .out_map
-        .as_gather_from_output()
-        .ok_or(AutogradError::ScatterOutputUnsupported {
-            node,
-            body: reduce.body,
-        })?;
-    let contribution = expr::unary(program, reduce.dtype, ScalarOp::Identity, (gradient, gather_map));
+    let gather_map =
+        reduce
+            .out_map
+            .as_gather_from_output()
+            .ok_or(AutogradError::ScatterOutputUnsupported {
+                node,
+                body: reduce.body,
+            })?;
+    let contribution = expr::unary(
+        program,
+        reduce.dtype,
+        ScalarOp::Identity,
+        (gradient, gather_map),
+    );
 
     let operand_dtype = original_program[reduce.operand.0 as usize].dtype();
     // Same "skip the reduce wrapper for a one-to-one map" shortcut
@@ -753,7 +1061,14 @@ fn differentiate_scatter(
         )
     };
     let operand_rank = shapes.of(reduce.operand).len() as u16;
-    accumulate(program, grad_of, operand_dtype, operand_rank, reduce.operand.0 as usize, routed);
+    accumulate(
+        program,
+        grad_of,
+        operand_dtype,
+        operand_rank,
+        reduce.operand.0 as usize,
+        routed,
+    );
     Ok(())
 }
 
@@ -810,16 +1125,44 @@ fn differentiate_scan(
     if extent == 0 {
         return Ok(());
     }
-    let reversed = expr::reverse_1d(extent).ok_or(AutogradError::ScanAdjointUnsupported { node })?;
+    let reversed =
+        expr::reverse_1d(extent).ok_or(AutogradError::ScanAdjointUnsupported { node })?;
     let anchor = expr::broadcast_anchor(program, reduce.dtype, &[extent], 0.0);
 
-    let reversed_gradient = expr::binary(program, reduce.dtype, ScalarOp::Add, (gradient, reversed.clone()), (anchor, full.clone()));
-    let suffix_reversed = expr::scan(program, reduce.dtype, ScalarOp::Add, ReduceInit::Zero, reversed_gradient, full.clone(), full.clone());
-    let routed = expr::binary(program, reduce.dtype, ScalarOp::Add, (suffix_reversed, reversed), (anchor, full));
+    let reversed_gradient = expr::binary(
+        program,
+        reduce.dtype,
+        ScalarOp::Add,
+        (gradient, reversed.clone()),
+        (anchor, full.clone()),
+    );
+    let suffix_reversed = expr::scan(
+        program,
+        reduce.dtype,
+        ScalarOp::Add,
+        ReduceInit::Zero,
+        reversed_gradient,
+        full.clone(),
+        full.clone(),
+    );
+    let routed = expr::binary(
+        program,
+        reduce.dtype,
+        ScalarOp::Add,
+        (suffix_reversed, reversed),
+        (anchor, full),
+    );
 
     let operand_dtype = original_program[reduce.operand.0 as usize].dtype();
     let operand_rank = shapes.of(reduce.operand).len() as u16;
-    accumulate(program, grad_of, operand_dtype, operand_rank, reduce.operand.0 as usize, routed);
+    accumulate(
+        program,
+        grad_of,
+        operand_dtype,
+        operand_rank,
+        reduce.operand.0 as usize,
+        routed,
+    );
     Ok(())
 }
 
@@ -920,11 +1263,21 @@ mod differentiate_wanted_tests {
     use super::*;
 
     fn leaf(program: &mut Vec<Op>, name: &str, shape: Vec<Extent>) -> NodeId {
-        proxima_tensor::op::append(program, Op::Input { dtype: DType::Float32, shape, name: Some(name.into()) })
+        proxima_tensor::op::append(
+            program,
+            Op::Input {
+                dtype: DType::Float32,
+                shape,
+                name: Some(name.into()),
+            },
+        )
     }
 
     fn identity(rank: u16) -> IndexMap {
-        IndexMap::Affine(proxima_tensor::map::projection(rank, &(0..rank).collect::<Vec<u16>>()))
+        IndexMap::Affine(proxima_tensor::map::projection(
+            rank,
+            &(0..rank).collect::<Vec<u16>>(),
+        ))
     }
 
     fn axes(rank: u16, selected: &[u16]) -> IndexMap {
@@ -943,8 +1296,16 @@ mod differentiate_wanted_tests {
     /// constraint calls out.
     fn build_matmul_loss() -> (Vec<Op>, NodeId, NodeId, NodeId) {
         let mut program = Vec::new();
-        let x = leaf(&mut program, "x", vec![Extent::Static(2), Extent::Static(3)]);
-        let w = leaf(&mut program, "w", vec![Extent::Static(3), Extent::Static(4)]);
+        let x = leaf(
+            &mut program,
+            "x",
+            vec![Extent::Static(2), Extent::Static(3)],
+        );
+        let w = leaf(
+            &mut program,
+            "w",
+            vec![Extent::Static(3), Extent::Static(4)],
+        );
         let product = proxima_tensor::op::append(
             &mut program,
             Op::Elementwise {
@@ -954,8 +1315,24 @@ mod differentiate_wanted_tests {
                 name: None,
             },
         );
-        let matmul = expr::reduce(&mut program, DType::Float32, ScalarOp::Add, ReduceInit::Zero, product, identity(3), axes(3, &[0, 2]));
-        let loss = expr::reduce(&mut program, DType::Float32, ScalarOp::Add, ReduceInit::Zero, matmul, identity(2), axes(2, &[]));
+        let matmul = expr::reduce(
+            &mut program,
+            DType::Float32,
+            ScalarOp::Add,
+            ReduceInit::Zero,
+            product,
+            identity(3),
+            axes(3, &[0, 2]),
+        );
+        let loss = expr::reduce(
+            &mut program,
+            DType::Float32,
+            ScalarOp::Add,
+            ReduceInit::Zero,
+            matmul,
+            identity(2),
+            axes(2, &[]),
+        );
         (program, x, w, loss)
     }
 
@@ -968,26 +1345,46 @@ mod differentiate_wanted_tests {
     async fn wanted_scoped_gradient_is_bit_identical_to_the_full_differentiate() {
         let (program, _x, w, loss) = build_matmul_loss();
         let x_values = [1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0];
-        let w_values = [0.5f32, -1.0, 2.0, 0.25, 1.5, -0.75, 3.0, 0.1, -2.0, 4.0, 0.0, 1.0];
+        let w_values = [
+            0.5f32, -1.0, 2.0, 0.25, 1.5, -0.75, 3.0, 0.1, -2.0, 4.0, 0.0, 1.0,
+        ];
 
         let full = differentiate(&program, loss).expect("full differentiate");
         let grad_w_full = full.gradient_of_named("w").expect("w feeds the loss");
-        let full_evaluated =
-            proxima_tensor::cpu::evaluate_named(&full.program, &[], &[("x", &x_values), ("w", &w_values)], &[grad_w_full])
-                .expect("full adjoint program evaluates");
+        let full_evaluated = proxima_tensor::cpu::evaluate_named(
+            &full.program,
+            &[],
+            &[("x", &x_values), ("w", &w_values)],
+            &[grad_w_full],
+        )
+        .expect("full adjoint program evaluates");
         let full_grad_w = full_evaluated.get(grad_w_full).expect("requested").0;
 
-        let wanted = differentiate_wanted(&program, loss, &[w]).expect("wanted-scoped differentiate");
+        let wanted =
+            differentiate_wanted(&program, loss, &[w]).expect("wanted-scoped differentiate");
         let grad_w_wanted = wanted.gradient_of_named("w").expect("w feeds the loss");
-        let wanted_evaluated =
-            proxima_tensor::cpu::evaluate_named(&wanted.program, &[], &[("x", &x_values), ("w", &w_values)], &[grad_w_wanted])
-                .expect("wanted-scoped adjoint program evaluates");
+        let wanted_evaluated = proxima_tensor::cpu::evaluate_named(
+            &wanted.program,
+            &[],
+            &[("x", &x_values), ("w", &w_values)],
+            &[grad_w_wanted],
+        )
+        .expect("wanted-scoped adjoint program evaluates");
         let wanted_grad_w = wanted_evaluated.get(grad_w_wanted).expect("requested").0;
 
-        assert_eq!(full_grad_w, wanted_grad_w, "wanted-scoped grad_w must be bit-identical to the full differentiate's own grad_w");
+        assert_eq!(
+            full_grad_w, wanted_grad_w,
+            "wanted-scoped grad_w must be bit-identical to the full differentiate's own grad_w"
+        );
 
-        assert!(wanted.gradient_of_named("x").is_none(), "x was not in `wanted`, so its gradient must not be routed at all");
-        assert!(full.gradient_of_named("x").is_some(), "sanity: plain differentiate still computes grad_x, unaffected by the wanted-scoped path");
+        assert!(
+            wanted.gradient_of_named("x").is_none(),
+            "x was not in `wanted`, so its gradient must not be routed at all"
+        );
+        assert!(
+            full.gradient_of_named("x").is_some(),
+            "sanity: plain differentiate still computes grad_x, unaffected by the wanted-scoped path"
+        );
         assert!(
             wanted.program.len() < full.program.len(),
             "the wanted-scoped program must be strictly smaller: it never emits x's own final routing/un-reduce node ({} vs {})",
@@ -1004,7 +1401,8 @@ mod differentiate_wanted_tests {
     #[proxima::test]
     async fn unwanted_gradient_of_named_is_none_on_the_wanted_scoped_path() {
         let (program, _x, w, loss) = build_matmul_loss();
-        let wanted = differentiate_wanted(&program, loss, &[w]).expect("wanted-scoped differentiate");
+        let wanted =
+            differentiate_wanted(&program, loss, &[w]).expect("wanted-scoped differentiate");
         assert!(wanted.gradient_of_named("x").is_none());
         assert!(wanted.gradient_of_named("w").is_some());
     }
@@ -1020,11 +1418,30 @@ mod select_broadcast_condition_tests {
     use super::*;
 
     fn leaf(program: &mut Vec<Op>, name: &str, shape: Vec<Extent>) -> NodeId {
-        proxima_tensor::op::append(program, Op::Input { dtype: DType::Float32, shape, name: Some(name.into()) })
+        proxima_tensor::op::append(
+            program,
+            Op::Input {
+                dtype: DType::Float32,
+                shape,
+                name: Some(name.into()),
+            },
+        )
     }
 
-    fn elementwise(program: &mut Vec<Op>, body: ScalarOp, operands: Vec<(NodeId, IndexMap)>) -> NodeId {
-        proxima_tensor::op::append(program, Op::Elementwise { dtype: DType::Float32, body, operands, name: None })
+    fn elementwise(
+        program: &mut Vec<Op>,
+        body: ScalarOp,
+        operands: Vec<(NodeId, IndexMap)>,
+    ) -> NodeId {
+        proxima_tensor::op::append(
+            program,
+            Op::Elementwise {
+                dtype: DType::Float32,
+                body,
+                operands,
+                name: None,
+            },
+        )
     }
 
     fn relative_error(analytic: f32, numeric: f32) -> f32 {
@@ -1042,18 +1459,44 @@ mod select_broadcast_condition_tests {
     /// program is the oracle: it does not know or care that `condition`
     /// broadcasts, so it is a correct check for this shape regardless.
     #[proxima::test]
-    async fn select_with_a_condition_broadcast_over_an_axis_the_branches_do_not_share_gradient_checks() {
+    async fn select_with_a_condition_broadcast_over_an_axis_the_branches_do_not_share_gradient_checks()
+     {
         let mut program = Vec::new();
-        let a = leaf(&mut program, "a", vec![Extent::Static(2), Extent::Static(3)]);
-        let b = leaf(&mut program, "b", vec![Extent::Static(2), Extent::Static(3)]);
-        let condition = elementwise(&mut program, ScalarOp::Greater, vec![(a, expr::identity(2)), (b, expr::identity(2))]);
-        let true_branch = leaf(&mut program, "true_branch", vec![Extent::Static(2), Extent::Static(3), Extent::Static(2)]);
-        let false_branch = leaf(&mut program, "false_branch", vec![Extent::Static(2), Extent::Static(3), Extent::Static(2)]);
-        let condition_broadcast_over_h = IndexMap::Affine(proxima_tensor::map::projection(3, &[0, 1]));
+        let a = leaf(
+            &mut program,
+            "a",
+            vec![Extent::Static(2), Extent::Static(3)],
+        );
+        let b = leaf(
+            &mut program,
+            "b",
+            vec![Extent::Static(2), Extent::Static(3)],
+        );
+        let condition = elementwise(
+            &mut program,
+            ScalarOp::Greater,
+            vec![(a, expr::identity(2)), (b, expr::identity(2))],
+        );
+        let true_branch = leaf(
+            &mut program,
+            "true_branch",
+            vec![Extent::Static(2), Extent::Static(3), Extent::Static(2)],
+        );
+        let false_branch = leaf(
+            &mut program,
+            "false_branch",
+            vec![Extent::Static(2), Extent::Static(3), Extent::Static(2)],
+        );
+        let condition_broadcast_over_h =
+            IndexMap::Affine(proxima_tensor::map::projection(3, &[0, 1]));
         let selected = elementwise(
             &mut program,
             ScalarOp::Select,
-            vec![(condition, condition_broadcast_over_h), (true_branch, expr::identity(3)), (false_branch, expr::identity(3))],
+            vec![
+                (condition, condition_broadcast_over_h),
+                (true_branch, expr::identity(3)),
+                (false_branch, expr::identity(3)),
+            ],
         );
         let loss = proxima_tensor::op::append(
             &mut program,
@@ -1072,18 +1515,30 @@ mod select_broadcast_condition_tests {
         let differentiated = differentiate(&program, loss).expect(
             "differentiates without TensorError::UnconstrainedDim -- this is the regression this test guards",
         );
-        let grad_true = differentiated.gradient_of_named("true_branch").expect("true_branch feeds the loss");
-        let grad_false = differentiated.gradient_of_named("false_branch").expect("false_branch feeds the loss");
+        let grad_true = differentiated
+            .gradient_of_named("true_branch")
+            .expect("true_branch feeds the loss");
+        let grad_false = differentiated
+            .gradient_of_named("false_branch")
+            .expect("false_branch feeds the loss");
 
         let a_values = [3.0f32, 1.0, 5.0, 0.0, 2.0, 4.0];
         let b_values = [1.0f32, 1.0, 2.0, 2.0, 2.0, 1.0];
-        let true_values: alloc::vec::Vec<f32> = (0..12).map(|index| (index as f32 - 5.0) / 2.0).collect();
-        let false_values: alloc::vec::Vec<f32> = (0..12).map(|index| (index as f32 * 2.0 - 3.0) / 3.0).collect();
+        let true_values: alloc::vec::Vec<f32> =
+            (0..12).map(|index| (index as f32 - 5.0) / 2.0).collect();
+        let false_values: alloc::vec::Vec<f32> = (0..12)
+            .map(|index| (index as f32 * 2.0 - 3.0) / 3.0)
+            .collect();
 
         let evaluated = proxima_tensor::cpu::evaluate_named(
             &differentiated.program,
             &[],
-            &[("a", &a_values), ("b", &b_values), ("true_branch", &true_values), ("false_branch", &false_values)],
+            &[
+                ("a", &a_values),
+                ("b", &b_values),
+                ("true_branch", &true_values),
+                ("false_branch", &false_values),
+            ],
             &[grad_true, grad_false],
         )
         .expect("adjoint program lowers and evaluates");
@@ -1092,9 +1547,10 @@ mod select_broadcast_condition_tests {
 
         let step = 1e-3f32;
         let mut worst = (0.0f32, "", 0usize);
-        for (label, values, analytic) in
-            [("true_branch", true_values.clone(), &analytic_true), ("false_branch", false_values.clone(), &analytic_false)]
-        {
+        for (label, values, analytic) in [
+            ("true_branch", true_values.clone(), &analytic_true),
+            ("false_branch", false_values.clone(), &analytic_false),
+        ] {
             let mut perturbed = values;
             for index in 0..perturbed.len() {
                 let original = perturbed[index];
@@ -1107,7 +1563,12 @@ mod select_broadcast_condition_tests {
                     proxima_tensor::cpu::evaluate_named(
                         &program,
                         &[],
-                        &[("a", &a_values), ("b", &b_values), ("true_branch", true_input), ("false_branch", false_input)],
+                        &[
+                            ("a", &a_values),
+                            ("b", &b_values),
+                            ("true_branch", true_input),
+                            ("false_branch", false_input),
+                        ],
                         &[loss],
                     )
                     .expect("forward program lowers and evaluates")
@@ -1128,7 +1589,10 @@ mod select_broadcast_condition_tests {
                 }
             }
         }
-        assert!(worst.0 < 5e-3, "select adjoint disagreed with central difference: {worst:?}");
+        assert!(
+            worst.0 < 5e-3,
+            "select adjoint disagreed with central difference: {worst:?}"
+        );
     }
 }
 
@@ -1144,7 +1608,11 @@ mod reduce_multiply_tests {
     fn leaf(program: &mut Vec<Op>, name: &str, extent: usize) -> NodeId {
         proxima_tensor::op::append(
             program,
-            Op::Input { dtype: DType::Float32, shape: vec![Extent::Static(extent as u32)], name: Some(name.into()) },
+            Op::Input {
+                dtype: DType::Float32,
+                shape: vec![Extent::Static(extent as u32)],
+                name: Some(name.into()),
+            },
         )
     }
 
@@ -1173,10 +1641,18 @@ mod reduce_multiply_tests {
             }),
         );
 
-        let differentiated = differentiate(&program, loss).expect("Reduce(Multiply) differentiates");
-        let grad_x = differentiated.gradient_of_named("x").expect("x feeds the loss");
-        let evaluated = proxima_tensor::cpu::evaluate_named(&differentiated.program, &[], &[("x", &x_values)], &[grad_x])
-            .expect("adjoint program lowers and evaluates");
+        let differentiated =
+            differentiate(&program, loss).expect("Reduce(Multiply) differentiates");
+        let grad_x = differentiated
+            .gradient_of_named("x")
+            .expect("x feeds the loss");
+        let evaluated = proxima_tensor::cpu::evaluate_named(
+            &differentiated.program,
+            &[],
+            &[("x", &x_values)],
+            &[grad_x],
+        )
+        .expect("adjoint program lowers and evaluates");
         let analytic = evaluated.get(grad_x).expect("grad_x requested").0;
 
         let loss_at = |perturbed: &[f32]| {
@@ -1198,8 +1674,13 @@ mod reduce_multiply_tests {
             perturbed[index] = original;
 
             let numeric = (plus - minus) / (2.0 * step);
-            let relative = (analytic[index] - numeric).abs() / (analytic[index].abs().max(numeric.abs()) + 1e-6);
-            assert!(relative < 5e-3, "index {index}: analytic={} numeric={numeric}", analytic[index]);
+            let relative = (analytic[index] - numeric).abs()
+                / (analytic[index].abs().max(numeric.abs()) + 1e-6);
+            assert!(
+                relative < 5e-3,
+                "index {index}: analytic={} numeric={numeric}",
+                analytic[index]
+            );
         }
     }
 
@@ -1227,10 +1708,18 @@ mod reduce_multiply_tests {
             }),
         );
 
-        let differentiated = differentiate(&program, loss).expect("Reduce(Multiply) differentiates");
-        let grad_x = differentiated.gradient_of_named("x").expect("x feeds the loss");
-        let evaluated = proxima_tensor::cpu::evaluate_named(&differentiated.program, &[], &[("x", &x_values)], &[grad_x])
-            .expect("adjoint program lowers and evaluates");
+        let differentiated =
+            differentiate(&program, loss).expect("Reduce(Multiply) differentiates");
+        let grad_x = differentiated
+            .gradient_of_named("x")
+            .expect("x feeds the loss");
+        let evaluated = proxima_tensor::cpu::evaluate_named(
+            &differentiated.program,
+            &[],
+            &[("x", &x_values)],
+            &[grad_x],
+        )
+        .expect("adjoint program lowers and evaluates");
         let analytic = evaluated.get(grad_x).expect("grad_x requested").0;
 
         assert!((analytic[0] - 5.0).abs() < 1e-5, "got {analytic:?}");
@@ -1251,14 +1740,22 @@ mod scatter_tests {
     fn f32_leaf(program: &mut Vec<Op>, name: &str, extent: usize) -> NodeId {
         proxima_tensor::op::append(
             program,
-            Op::Input { dtype: DType::Float32, shape: vec![Extent::Static(extent as u32)], name: Some(name.into()) },
+            Op::Input {
+                dtype: DType::Float32,
+                shape: vec![Extent::Static(extent as u32)],
+                name: Some(name.into()),
+            },
         )
     }
 
     fn int_leaf(program: &mut Vec<Op>, name: &str, extent: usize) -> NodeId {
         proxima_tensor::op::append(
             program,
-            Op::Input { dtype: DType::Int32, shape: vec![Extent::Static(extent as u32)], name: Some(name.into()) },
+            Op::Input {
+                dtype: DType::Int32,
+                shape: vec![Extent::Static(extent as u32)],
+                name: Some(name.into()),
+            },
         )
     }
 
@@ -1312,8 +1809,11 @@ mod scatter_tests {
         let (program, _x, _idx, loss, idx_values) = scatter_sum_program([2.0, 0.0, 2.0, 1.0]);
         let x_values = [10.0f32, 20.0, 30.0, 40.0];
 
-        let differentiated = differentiate(&program, loss).expect("scatter-add (Add body) differentiates");
-        let grad_x = differentiated.gradient_of_named("x").expect("x feeds the loss");
+        let differentiated =
+            differentiate(&program, loss).expect("scatter-add (Add body) differentiates");
+        let grad_x = differentiated
+            .gradient_of_named("x")
+            .expect("x feeds the loss");
         let evaluated = proxima_tensor::cpu::evaluate_named(
             &differentiated.program,
             &[],
@@ -1341,7 +1841,9 @@ mod scatter_tests {
         let x_values = [10.0f32, 20.0, 30.0, 40.0];
 
         let differentiated = differentiate(&program, loss).expect("scatter-add differentiates");
-        let grad_x = differentiated.gradient_of_named("x").expect("x feeds the loss");
+        let grad_x = differentiated
+            .gradient_of_named("x")
+            .expect("x feeds the loss");
         let evaluated = proxima_tensor::cpu::evaluate_named(
             &differentiated.program,
             &[],
@@ -1352,11 +1854,16 @@ mod scatter_tests {
         let analytic = evaluated.get(grad_x).expect("grad_x requested").0;
 
         let loss_at = |perturbed: &[f32]| {
-            proxima_tensor::cpu::evaluate_named(&program, &[], &[("x", perturbed), ("idx", &idx_values)], &[loss])
-                .expect("forward program lowers and evaluates")
-                .get(loss)
-                .expect("loss requested")
-                .0[0]
+            proxima_tensor::cpu::evaluate_named(
+                &program,
+                &[],
+                &[("x", perturbed), ("idx", &idx_values)],
+                &[loss],
+            )
+            .expect("forward program lowers and evaluates")
+            .get(loss)
+            .expect("loss requested")
+            .0[0]
         };
 
         let step = 1e-3f32;
@@ -1370,8 +1877,13 @@ mod scatter_tests {
             perturbed[index] = original;
 
             let numeric = (plus - minus) / (2.0 * step);
-            let relative = (analytic[index] - numeric).abs() / (analytic[index].abs().max(numeric.abs()) + 1e-6);
-            assert!(relative < 5e-3, "index {index}: analytic={} numeric={numeric}", analytic[index]);
+            let relative = (analytic[index] - numeric).abs()
+                / (analytic[index].abs().max(numeric.abs()) + 1e-6);
+            assert!(
+                relative < 5e-3,
+                "index {index}: analytic={} numeric={numeric}",
+                analytic[index]
+            );
         }
     }
 
@@ -1384,7 +1896,8 @@ mod scatter_tests {
         // drop the `sum` wrapper `scatter_sum_program` appended and rebuild
         // the scatter node itself with `body: Maximum`.
         program.pop();
-        let scattered_maximum_out_map = IndexMap::scatter(idx, map::projection(1, &[0]), 1, &[], 0, 3);
+        let scattered_maximum_out_map =
+            IndexMap::scatter(idx, map::projection(1, &[0]), 1, &[], 0, 3);
         let scattered_maximum = proxima_tensor::op::append(
             &mut program,
             Op::Reduce(Reduce {
@@ -1418,7 +1931,10 @@ mod scatter_tests {
         assert!(
             matches!(
                 error,
-                AutogradError::ScatterOutputUnsupported { body: ScalarOp::Maximum, .. }
+                AutogradError::ScatterOutputUnsupported {
+                    body: ScalarOp::Maximum,
+                    ..
+                }
             ),
             "{error:?}"
         );
@@ -1437,7 +1953,11 @@ mod scan_add_tests {
     fn leaf(program: &mut Vec<Op>, name: &str, extent: usize) -> NodeId {
         proxima_tensor::op::append(
             program,
-            Op::Input { dtype: DType::Float32, shape: vec![Extent::Static(extent as u32)], name: Some(name.into()) },
+            Op::Input {
+                dtype: DType::Float32,
+                shape: vec![Extent::Static(extent as u32)],
+                name: Some(name.into()),
+            },
         )
     }
 
@@ -1491,7 +2011,15 @@ mod scan_add_tests {
                 name: None,
             },
         );
-        let loss = expr::reduce(&mut program, DType::Float32, ScalarOp::Add, ReduceInit::Zero, product, expr::identity(1), expr::broadcast(1));
+        let loss = expr::reduce(
+            &mut program,
+            DType::Float32,
+            ScalarOp::Add,
+            ReduceInit::Zero,
+            product,
+            expr::identity(1),
+            expr::broadcast(1),
+        );
         (program, x, w, loss)
     }
 
@@ -1502,15 +2030,24 @@ mod scan_add_tests {
         let w_values = [5.0f32, -2.0, 3.0, 0.5];
 
         let differentiated = differentiate(&program, loss).expect("Keep::Scan(Add) differentiates");
-        let grad_x = differentiated.gradient_of(x).expect("x feeds the loss through the scan");
-        let evaluated =
-            proxima_tensor::cpu::evaluate_named(&differentiated.program, &[], &[("x", &x_values), ("w", &w_values)], &[grad_x])
-                .expect("scan adjoint program lowers and evaluates");
+        let grad_x = differentiated
+            .gradient_of(x)
+            .expect("x feeds the loss through the scan");
+        let evaluated = proxima_tensor::cpu::evaluate_named(
+            &differentiated.program,
+            &[],
+            &[("x", &x_values), ("w", &w_values)],
+            &[grad_x],
+        )
+        .expect("scan adjoint program lowers and evaluates");
         let analytic = evaluated.get(grad_x).expect("grad_x requested").0;
 
         let expected = [6.5f32, 1.5, 3.5, 0.5];
         for (index, (&found, &wanted)) in analytic.iter().zip(expected.iter()).enumerate() {
-            assert!((found - wanted).abs() < 1e-5, "index {index}: got {found}, hand-derived {wanted}");
+            assert!(
+                (found - wanted).abs() < 1e-5,
+                "index {index}: got {found}, hand-derived {wanted}"
+            );
         }
     }
 
@@ -1525,18 +2062,29 @@ mod scan_add_tests {
         let w_values = [5.0f32, -2.0, 3.0, 0.5];
 
         let differentiated = differentiate(&program, loss).expect("Keep::Scan(Add) differentiates");
-        let grad_x = differentiated.gradient_of_named("x").expect("x feeds the loss");
-        let evaluated =
-            proxima_tensor::cpu::evaluate_named(&differentiated.program, &[], &[("x", &x_values), ("w", &w_values)], &[grad_x])
-                .expect("scan adjoint program lowers and evaluates");
+        let grad_x = differentiated
+            .gradient_of_named("x")
+            .expect("x feeds the loss");
+        let evaluated = proxima_tensor::cpu::evaluate_named(
+            &differentiated.program,
+            &[],
+            &[("x", &x_values), ("w", &w_values)],
+            &[grad_x],
+        )
+        .expect("scan adjoint program lowers and evaluates");
         let analytic = evaluated.get(grad_x).expect("grad_x requested").0;
 
         let loss_at = |perturbed: &[f32]| {
-            proxima_tensor::cpu::evaluate_named(&program, &[], &[("x", perturbed), ("w", &w_values)], &[loss])
-                .expect("forward program lowers and evaluates")
-                .get(loss)
-                .expect("loss requested")
-                .0[0]
+            proxima_tensor::cpu::evaluate_named(
+                &program,
+                &[],
+                &[("x", perturbed), ("w", &w_values)],
+                &[loss],
+            )
+            .expect("forward program lowers and evaluates")
+            .get(loss)
+            .expect("loss requested")
+            .0[0]
         };
 
         let step = 1e-3f32;
@@ -1550,8 +2098,13 @@ mod scan_add_tests {
             perturbed[index] = original;
 
             let numeric = (plus - minus) / (2.0 * step);
-            let relative = (analytic[index] - numeric).abs() / (analytic[index].abs().max(numeric.abs()) + 1e-6);
-            assert!(relative < 5e-3, "index {index}: analytic={} numeric={numeric}", analytic[index]);
+            let relative = (analytic[index] - numeric).abs()
+                / (analytic[index].abs().max(numeric.abs()) + 1e-6);
+            assert!(
+                relative < 5e-3,
+                "index {index}: analytic={} numeric={numeric}",
+                analytic[index]
+            );
         }
     }
 
@@ -1575,10 +2128,22 @@ mod scan_add_tests {
                 name: None,
             }),
         );
-        let loss =
-            expr::reduce(&mut program, DType::Float32, ScalarOp::Add, ReduceInit::Zero, running_max, expr::identity(1), expr::broadcast(1));
+        let loss = expr::reduce(
+            &mut program,
+            DType::Float32,
+            ScalarOp::Add,
+            ReduceInit::Zero,
+            running_max,
+            expr::identity(1),
+            expr::broadcast(1),
+        );
 
-        let error = differentiate(&program, loss).err().expect("running-max scan has no adjoint rule here");
-        assert!(matches!(error, AutogradError::ScanAdjointUnsupported { .. }), "{error:?}");
+        let error = differentiate(&program, loss)
+            .err()
+            .expect("running-max scan has no adjoint rule here");
+        assert!(
+            matches!(error, AutogradError::ScanAdjointUnsupported { .. }),
+            "{error:?}"
+        );
     }
 }

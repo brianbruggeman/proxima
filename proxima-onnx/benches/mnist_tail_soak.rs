@@ -86,7 +86,8 @@ unsafe impl GlobalAlloc for CountingAllocator {
 #[global_allocator]
 static ALLOCATOR: CountingAllocator = CountingAllocator;
 
-const MODEL_PATH: &str = "/Users/brianbruggeman/repos/others/burn/examples/onnx-inference/src/model/mnist.onnx";
+const MODEL_PATH: &str =
+    "/Users/brianbruggeman/repos/others/burn/examples/onnx-inference/src/model/mnist.onnx";
 const DATASET_DIR: &str = "/Users/brianbruggeman/.cache/burn-dataset/mnist";
 /// Real t10k split has 10,000 images; the task floor is >=5,000. We use the
 /// whole split once for the TAIL arm (no recycling needed there) and recycle
@@ -134,7 +135,12 @@ fn idx_header(bytes: &[u8]) -> (usize, Vec<usize>) {
     let mut extents = Vec::with_capacity(dimension_count - 1);
     for axis in 1..dimension_count {
         let offset = 4 + axis * 4;
-        extents.push(u32::from_be_bytes([bytes[offset], bytes[offset + 1], bytes[offset + 2], bytes[offset + 3]]) as usize);
+        extents.push(u32::from_be_bytes([
+            bytes[offset],
+            bytes[offset + 1],
+            bytes[offset + 2],
+            bytes[offset + 3],
+        ]) as usize);
     }
     (item_count, extents)
 }
@@ -148,13 +154,19 @@ fn load_normalized_images(path: &Path, limit: usize) -> Vec<Vec<f32>> {
     (0..take)
         .map(|image_index| {
             let start = header_length + image_index * pixel_count;
-            bytes[start..start + pixel_count].iter().map(|&pixel| ((pixel as f32 / 255.0) - 0.1307) / 0.3081).collect()
+            bytes[start..start + pixel_count]
+                .iter()
+                .map(|&pixel| ((pixel as f32 / 255.0) - 0.1307) / 0.3081)
+                .collect()
         })
         .collect()
 }
 
 fn soak_minutes_from_env() -> u64 {
-    std::env::var("MNIST_SOAK_MINUTES").ok().and_then(|value| value.parse().ok()).unwrap_or(5)
+    std::env::var("MNIST_SOAK_MINUTES")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(5)
 }
 
 fn fresh_minute_histogram() -> Histogram<u64> {
@@ -173,14 +185,25 @@ fn print_p95(arm: &str, phase: &str, hist: &Histogram<u64>) {
         println!("arm={arm} phase={phase} p95=0ns");
         return;
     }
-    println!("arm={arm} phase={phase} p95={}ns", hist.value_at_quantile(0.95));
+    println!(
+        "arm={arm} phase={phase} p95={}ns",
+        hist.value_at_quantile(0.95)
+    );
 }
 
 fn mean_stdev_cov(values: &[f64]) -> (f64, f64, f64) {
     let mean = values.iter().sum::<f64>() / values.len() as f64;
-    let variance = values.iter().map(|value| (value - mean).powi(2)).sum::<f64>() / values.len() as f64;
+    let variance = values
+        .iter()
+        .map(|value| (value - mean).powi(2))
+        .sum::<f64>()
+        / values.len() as f64;
     let stdev = variance.sqrt();
-    let cov = if mean > 0.0 { stdev / mean * 100.0 } else { 0.0 };
+    let cov = if mean > 0.0 {
+        stdev / mean * 100.0
+    } else {
+        0.0
+    };
     (mean, stdev, cov)
 }
 
@@ -195,30 +218,55 @@ fn main() {
     }
 
     let bytes = fs::read(MODEL_PATH).expect("read the real mnist.onnx checkpoint");
-    let model = proxima_onnx::pipe::parse_complete(&bytes).expect("parse the real mnist.onnx checkpoint");
+    let model =
+        proxima_onnx::pipe::parse_complete(&bytes).expect("parse the real mnist.onnx checkpoint");
     let graph = model.graph.as_ref().expect("real mnist model has a graph");
-    let lowered = proxima_onnx::lower::lower_graph(graph).expect("lower the real mnist.onnx graph to Op");
+    let lowered =
+        proxima_onnx::lower::lower_graph(graph).expect("lower the real mnist.onnx graph to Op");
 
-    let graph_input_name = lowered.graph_inputs.first().expect("real mnist model declares at least one input").clone();
-    let output_node = lowered.graph_outputs.first().expect("real mnist model declares at least one output").1;
-    let initializers: Vec<(&str, &[f32])> = lowered.initializers.iter().map(|(name, data)| (name.as_str(), data.as_slice())).collect();
+    let graph_input_name = lowered
+        .graph_inputs
+        .first()
+        .expect("real mnist model declares at least one input")
+        .clone();
+    let output_node = lowered
+        .graph_outputs
+        .first()
+        .expect("real mnist model declares at least one output")
+        .1;
+    let initializers: Vec<(&str, &[f32])> = lowered
+        .initializers
+        .iter()
+        .map(|(name, data)| (name.as_str(), data.as_slice()))
+        .collect();
 
     let images = load_normalized_images(&test_images_path(), TAIL_IMAGE_COUNT);
-    assert!(images.len() >= 5_000, "task floor is >=5,000 images, got {}", images.len());
+    assert!(
+        images.len() >= 5_000,
+        "task floor is >=5,000 images, got {}",
+        images.len()
+    );
 
     let evaluate = |image: &[f32]| {
         let mut named = initializers.clone();
         named.push((graph_input_name.as_str(), image));
-        proxima_tensor::cpu::evaluate_named(&lowered.program, &[], &named, &[output_node]).expect("evaluate real mnist image")
+        proxima_tensor::cpu::evaluate_named(&lowered.program, &[], &named, &[output_node])
+            .expect("evaluate real mnist image")
     };
 
     // pre-registration: stated BEFORE any measurement, from ROW 194's own
     // sealed NEON-default arm (mean 1.007274ms/image, CoV 13.04%, this same
     // default generic-executor path). A p999/max far above these bands is a
     // FINDING to mechanism-trace, not to hide.
-    println!("mnist_tail_soak: PRE-REGISTERED bands (from ROW 194, sealed mean=1.007ms/image, CoV=13.04%):");
-    println!("  expected p50 ~0.85-1.15ms, expected p99 ~1.5-3.0ms (2-3x mean, wide CoV precedent)");
-    println!("  p999/max: no prior citation exists at this percentile depth -- any value >5ms is flagged as a FINDING below, not hidden");
+    println!(
+        "mnist_tail_soak: PRE-REGISTERED bands (from ROW 194, sealed mean=1.007ms/image, CoV=13.04%):"
+    );
+    println!(
+        "  expected p50 ~0.85-1.15ms, expected p99 ~1.5-3.0ms (2-3x mean, wide CoV precedent)"
+    );
+    println!(
+        "  p999/max: no prior citation exists at this percentile depth -- any value >5ms is flagged as a FINDING below, not hidden"
+    );
     println!();
 
     // one uncounted warm-up call, same placement as mnist_f32_lane.rs /
@@ -247,12 +295,16 @@ fn main() {
     print_p95("tail_default_generic", "steady", &quartet.steady);
     print_p95("tail_default_generic", "spike", &quartet.spike);
     print_p95("tail_default_generic", "spindown", &quartet.spindown);
-    println!("tail_default_generic: true_max={true_max_ns}ns (independent of the 1s HdrQuartet histogram bound), samples_over_1s_bound={over_bound_count}");
+    println!(
+        "tail_default_generic: true_max={true_max_ns}ns (independent of the 1s HdrQuartet histogram bound), samples_over_1s_bound={over_bound_count}"
+    );
     println!();
 
     // ---- SOAK arm ----
     let soak_minutes = soak_minutes_from_env();
-    println!("mnist_tail_soak: SOAK arm, target_rate={SOAK_TARGET_RATE_PER_SEC}/s, requested_minutes={soak_minutes}");
+    println!(
+        "mnist_tail_soak: SOAK arm, target_rate={SOAK_TARGET_RATE_PER_SEC}/s, requested_minutes={soak_minutes}"
+    );
     let target_period = Duration::from_secs_f64(1.0 / SOAK_TARGET_RATE_PER_SEC);
     let mut next_deadline = Instant::now();
     let mut image_cursor: usize = 0;
@@ -285,7 +337,11 @@ fn main() {
         let alloc_after = ALLOCATIONS.with(Cell::get);
         let alloc_delta = alloc_after - alloc_before;
         let count = histogram.len();
-        let per_image_alloc = if count > 0 { alloc_delta as f64 / count as f64 } else { 0.0 };
+        let per_image_alloc = if count > 0 {
+            alloc_delta as f64 / count as f64
+        } else {
+            0.0
+        };
         let p50 = histogram.value_at_quantile(0.50);
         let p90 = histogram.value_at_quantile(0.90);
         let p95 = histogram.value_at_quantile(0.95);
@@ -300,12 +356,20 @@ fn main() {
     }
 
     let soak_wall_elapsed = soak_wall_start.elapsed();
-    println!("mnist_tail_soak: SOAK arm actually ran {:.2}s wall ({} of {} requested minutes fully completed)", soak_wall_elapsed.as_secs_f64(), per_minute_p99_ns.len(), soak_minutes);
+    println!(
+        "mnist_tail_soak: SOAK arm actually ran {:.2}s wall ({} of {} requested minutes fully completed)",
+        soak_wall_elapsed.as_secs_f64(),
+        per_minute_p99_ns.len(),
+        soak_minutes
+    );
     println!();
 
     if per_minute_p99_ns.len() >= 2 {
         let (mean, stdev, cov) = mean_stdev_cov(&per_minute_p99_ns);
-        println!("mnist_tail_soak: per-minute p99 across {} minutes: mean={mean:.0}ns stdev={stdev:.0}ns CoV={cov:.2}%", per_minute_p99_ns.len());
+        println!(
+            "mnist_tail_soak: per-minute p99 across {} minutes: mean={mean:.0}ns stdev={stdev:.0}ns CoV={cov:.2}%",
+            per_minute_p99_ns.len()
+        );
 
         let first_p99 = per_minute_p99_ns[0];
         let mut worst_drift_pct: f64 = 0.0;
@@ -317,7 +381,11 @@ fn main() {
                 worst_drift_minute = minute;
             }
         }
-        let drift_verdict = if worst_drift_pct.abs() <= DRIFT_BAND_PCT { "PASS" } else { "FAIL" };
+        let drift_verdict = if worst_drift_pct.abs() <= DRIFT_BAND_PCT {
+            "PASS"
+        } else {
+            "FAIL"
+        };
         println!(
             "mnist_tail_soak: DRIFT CHECK ({drift_verdict}): worst deviation is minute {worst_drift_minute} at {worst_drift_pct:+.2}% vs minute 0's p99 ({first_p99:.0}ns), band=+/-{DRIFT_BAND_PCT}%"
         );
@@ -326,17 +394,27 @@ fn main() {
         let mut worst_alloc_drift_pct: f64 = 0.0;
         let mut worst_alloc_minute: usize = 0;
         for (minute, &per_image) in per_minute_alloc_per_image.iter().enumerate().skip(1) {
-            let drift_pct = if first_alloc > 0.0 { (per_image - first_alloc) / first_alloc * 100.0 } else { 0.0 };
+            let drift_pct = if first_alloc > 0.0 {
+                (per_image - first_alloc) / first_alloc * 100.0
+            } else {
+                0.0
+            };
             if drift_pct.abs() > worst_alloc_drift_pct.abs() {
                 worst_alloc_drift_pct = drift_pct;
                 worst_alloc_minute = minute;
             }
         }
-        let alloc_verdict = if worst_alloc_drift_pct.abs() <= ALLOC_BAND_PCT { "PASS" } else { "FAIL" };
+        let alloc_verdict = if worst_alloc_drift_pct.abs() <= ALLOC_BAND_PCT {
+            "PASS"
+        } else {
+            "FAIL"
+        };
         println!(
             "mnist_tail_soak: ALLOCATION-GROWTH CHECK ({alloc_verdict}): worst deviation is minute {worst_alloc_minute} at {worst_alloc_drift_pct:+.2}% vs minute 0's alloc/image ({first_alloc:.4}), band=+/-{ALLOC_BAND_PCT}%"
         );
     } else {
-        println!("mnist_tail_soak: fewer than 2 full minutes completed -- drift and allocation-growth checks require >=2 minutes and were NOT run; reporting single-minute data only, honestly, per the task's own budget-permitting clause");
+        println!(
+            "mnist_tail_soak: fewer than 2 full minutes completed -- drift and allocation-growth checks require >=2 minutes and were NOT run; reporting single-minute data only, honestly, per the task's own budget-permitting clause"
+        );
     }
 }

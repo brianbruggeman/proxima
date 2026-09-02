@@ -116,7 +116,10 @@ fn build_xdp_sized() {
     );
     let rx_queue_cap = xdp_require_usize(
         "app.rx_queue_cap",
-        xdp_require_nonzero("app.rx_queue_cap", xdp_resolve(&table, "app", "rx_queue_cap")),
+        xdp_require_nonzero(
+            "app.rx_queue_cap",
+            xdp_resolve(&table, "app", "rx_queue_cap"),
+        ),
     );
 
     let out_dir =

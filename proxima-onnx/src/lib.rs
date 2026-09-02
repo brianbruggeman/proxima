@@ -75,7 +75,7 @@ pub mod writer;
 pub use decode::{ModelField, decode_model_field, decode_model_proto};
 pub use error::OnnxError;
 pub use lift::{LiftError, LiftInput, lift_graph, lift_model};
-pub use lower::{Lowered, LowerError, lower_graph};
+pub use lower::{LowerError, Lowered, lower_graph};
 pub use messages::{
     AttributeProto, Dimension, DimensionValue, GraphProto, ModelProto, NodeProto,
     OperatorSetIdProto, TensorProto, TensorShapeProto, TypeProto, TypeProtoMap, TypeProtoTensor,

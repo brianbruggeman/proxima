@@ -44,7 +44,11 @@ pub fn escape(text: &str) -> String {
     let mut escaped = String::with_capacity(text.len() + SPACE_MARKER.len_utf8());
     escaped.push(SPACE_MARKER);
     for character in text.chars() {
-        escaped.push(if character == ' ' { SPACE_MARKER } else { character });
+        escaped.push(if character == ' ' {
+            SPACE_MARKER
+        } else {
+            character
+        });
     }
     escaped
 }
@@ -56,7 +60,11 @@ pub fn escape(text: &str) -> String {
 pub fn unescape(text: &str) -> String {
     let mut unescaped = String::with_capacity(text.len());
     for character in text.chars() {
-        unescaped.push(if character == SPACE_MARKER { ' ' } else { character });
+        unescaped.push(if character == SPACE_MARKER {
+            ' '
+        } else {
+            character
+        });
     }
     if unescaped.starts_with(' ') {
         unescaped.remove(0);
@@ -87,15 +95,21 @@ pub fn unescape(text: &str) -> String {
 /// cannot fail. Returns `Result` to match this crate's other encode
 /// functions and leave room for a future non-byte-fallback vocab shape.
 pub fn encode_fragment(text: &str, vocab: &Vocab) -> Result<Vec<u32>, TokenizerError> {
-    let mut symbols: Vec<Range<usize>> =
-        text.char_indices().map(|(offset, character)| offset..offset + character.len_utf8()).collect();
+    let mut symbols: Vec<Range<usize>> = text
+        .char_indices()
+        .map(|(offset, character)| offset..offset + character.len_utf8())
+        .collect();
 
     loop {
         let mut best: Option<(usize, f32, u32)> = None; // (position, score, merged_id)
         for position in 0..symbols.len().saturating_sub(1) {
             let span = symbols[position].start..symbols[position + 1].end;
-            let Some(token_id) = vocab.token_id(&text[span]) else { continue };
-            let Some(score) = vocab.token_score(token_id) else { continue };
+            let Some(token_id) = vocab.token_id(&text[span]) else {
+                continue;
+            };
+            let Some(score) = vocab.token_score(token_id) else {
+                continue;
+            };
             if best.is_none_or(|(_, best_score, _)| score > best_score) {
                 best = Some((position, score, token_id));
             }
@@ -145,7 +159,11 @@ mod tests {
         let normalized = escape("hi");
         let ids = encode_fragment(&normalized, &vocab).expect("encodes");
         let hi_id = vocab.token_id("\u{2581}hi").expect("merged piece exists");
-        assert_eq!(ids, [hi_id], "should chain through the highest-score bigram at every step");
+        assert_eq!(
+            ids,
+            [hi_id],
+            "should chain through the highest-score bigram at every step"
+        );
     }
 
     #[test]
@@ -154,7 +172,11 @@ mod tests {
         let normalized = escape("xz"); // no piece for "x", "z", or "xz" in the tiny vocab
         let ids = encode_fragment(&normalized, &vocab).expect("encodes");
         // "▁" resolves as its own piece, "x" and "z" fall back to base bytes.
-        assert_eq!(ids.len(), 3, "▁ as one piece, x and z as individual byte fallbacks");
+        assert_eq!(
+            ids.len(),
+            3,
+            "▁ as one piece, x and z as individual byte fallbacks"
+        );
     }
 
     #[test]

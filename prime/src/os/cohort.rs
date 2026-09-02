@@ -160,7 +160,13 @@ pub mod diag {
         SLOT_ROUNDS[slot].fetch_add(1, Ordering::Relaxed);
     }
 
-    pub fn record_slot_done(slot: usize, chunks: u64, compute_nanos: u64, kernel_nanos: u64, at_nanos: u64) {
+    pub fn record_slot_done(
+        slot: usize,
+        chunks: u64,
+        compute_nanos: u64,
+        kernel_nanos: u64,
+        at_nanos: u64,
+    ) {
         if slot >= MAX_SLOTS {
             return;
         }
@@ -636,7 +642,8 @@ impl<Error: Send + 'static> CohortSession<'_, Error> {
         // which stays hard-coded to `members` regardless of policy — this
         // is the re-established soundness argument the completion dial was
         // required to preserve by construction, not weaken.
-        let erased_static: NonNull<dyn CohortRound<Error> + 'static> = unsafe { std::mem::transmute(erased) };
+        let erased_static: NonNull<dyn CohortRound<Error> + 'static> =
+            unsafe { std::mem::transmute(erased) };
         let completion_static: Option<NonNull<dyn FanInCompletion + 'static>> =
             completion_erased.map(|pointer| unsafe { std::mem::transmute(pointer) });
         // SAFETY: single-writer (this session, per its `!Send + !Sync`
@@ -671,8 +678,10 @@ impl<Error: Send + 'static> CohortSession<'_, Error> {
             #[cfg(feature = "cohort-instrument")]
             {
                 diag::UNPARK_ROUNDS.fetch_add(1, Ordering::Relaxed);
-                diag::UNPARK_NANOS
-                    .fetch_add(diag::now_nanos().saturating_sub(unpark_started), Ordering::Relaxed);
+                diag::UNPARK_NANOS.fetch_add(
+                    diag::now_nanos().saturating_sub(unpark_started),
+                    Ordering::Relaxed,
+                );
             }
         }
 
@@ -747,7 +756,12 @@ impl<Error> Drop for CohortSession<'_, Error> {
 /// per-member thread body. loops forever: wait for the round counter to
 /// advance (spin then park), run every chunk it can claim, report done,
 /// repeat. returns only on `shutdown`.
-fn member_loop<Error>(control: &Control<Error>, member_index: usize, parker: &Parker, spin_polls: u32) {
+fn member_loop<Error>(
+    control: &Control<Error>,
+    member_index: usize,
+    parker: &Parker,
+    spin_polls: u32,
+) {
     let mut local_round = 0_u64;
     loop {
         let Some(new_round) = wait_for_round(control, local_round, parker, spin_polls) else {
@@ -854,7 +868,8 @@ fn run_round<Error>(control: &Control<Error>, slot: usize) {
         // documents below.
         let completion_ref = unsafe { *control.completion_ptr.get() };
         if let Some(completion_ref) = completion_ref {
-            let retired = control.completed.load(Ordering::Relaxed) + control.lost.load(Ordering::Relaxed);
+            let retired =
+                control.completed.load(Ordering::Relaxed) + control.lost.load(Ordering::Relaxed);
             // SAFETY: same publication/lifetime argument as `round_ptr`'s
             // dereference below — the round (and hence its completion
             // policy) stays valid until every member reports `done`.
@@ -949,7 +964,11 @@ fn run_round<Error>(control: &Control<Error>, slot: usize) {
     #[cfg(feature = "cohort-instrument")]
     {
         let at = diag::now_nanos();
-        let compute = if claimed == 0 { 0 } else { at.saturating_sub(compute_started) };
+        let compute = if claimed == 0 {
+            0
+        } else {
+            at.saturating_sub(compute_started)
+        };
         diag::record_slot_done(slot, claimed, compute, kernel_nanos_total, at);
     }
     control.done.fetch_add(1, Ordering::Release);
@@ -1152,16 +1171,29 @@ mod tests {
 
         let round = CountingRound::new(10);
         let report = session.run_with_completion(&round, Some(&Quorum(3)));
-        assert_eq!(report.completed, 3, "quorum should stop dispatch after 3 retirements");
+        assert_eq!(
+            report.completed, 3,
+            "quorum should stop dispatch after 3 retirements"
+        );
         assert_eq!(report.abandoned, 0);
-        let claimed: usize = round.seen.iter().map(|count| count.load(Ordering::Relaxed)).sum();
-        assert_eq!(claimed, 3, "only the quorum's worth of chunks should ever have been claimed");
+        let claimed: usize = round
+            .seen
+            .iter()
+            .map(|count| count.load(Ordering::Relaxed))
+            .sum();
+        assert_eq!(
+            claimed, 3,
+            "only the quorum's worth of chunks should ever have been claimed"
+        );
 
         // the dial is per-call, not per-cohort: the same session, unforced,
         // still runs every chunk by default.
         let full_round = CountingRound::new(10);
         let full_report = session.run(&full_round);
-        assert_eq!(full_report.completed, 10, "run() without a dial must still run every chunk");
+        assert_eq!(
+            full_report.completed, 10,
+            "run() without a dial must still run every chunk"
+        );
     }
 
     #[test]
@@ -1187,7 +1219,8 @@ mod tests {
         }
         let after = ALLOC_COUNT.load(Ordering::Relaxed);
         assert_eq!(
-            after, before,
+            after,
+            before,
             "expected zero allocations across 200 rounds, saw {}",
             after - before
         );
@@ -1333,7 +1366,10 @@ mod tests {
 
         let leader_compute = diag::SLOT_COMPUTE_NANOS[0].load(Ordering::Relaxed);
         let leader_kernel = diag::SLOT_KERNEL_NANOS[0].load(Ordering::Relaxed);
-        assert!(leader_kernel > 0, "leader should have claimed and run at least one chunk");
+        assert!(
+            leader_kernel > 0,
+            "leader should have claimed and run at least one chunk"
+        );
         assert!(
             leader_kernel <= leader_compute,
             "kernel-only ticks ({leader_kernel}) must never exceed the compute bucket containing them ({leader_compute})"
@@ -1341,7 +1377,10 @@ mod tests {
 
         let setup = diag::LEADER_SETUP_NANOS.load(Ordering::Relaxed);
         let spin = diag::LEADER_SPIN_NANOS.load(Ordering::Relaxed);
-        assert!(setup > 0, "round setup/unpark should cost measurable time over 25 rounds");
+        assert!(
+            setup > 0,
+            "round setup/unpark should cost measurable time over 25 rounds"
+        );
         // spin can legitimately be 0 on a quiet box if the leader is always
         // the last to finish its own claim loop — not asserted > 0, only
         // that it is a well-formed accumulator.

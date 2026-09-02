@@ -322,7 +322,10 @@ mod tests {
             tensor("blk.0.ffn_gate_inp.weight", GgmlType::F32),
             tensor("output.weight", GgmlType::F32),
         ];
-        let targets: alloc::vec::Vec<GgmlType> = tensors.iter().map(|tensor| policy.target_for(tensor)).collect();
+        let targets: alloc::vec::Vec<GgmlType> = tensors
+            .iter()
+            .map(|tensor| policy.target_for(tensor))
+            .collect();
         assert_eq!(
             targets,
             alloc::vec![GgmlType::Q4_K, GgmlType::F32, GgmlType::F16, GgmlType::Q6_K]
@@ -359,8 +362,7 @@ mod real_file {
     use super::{PrecisionPolicy, TensorRole};
 
     const MIXTRAL_PATH: &str = "/Users/brianbruggeman/.lmstudio/models/NousResearch/Nous-Hermes-2-Mixtral-8x7B-DPO-GGUF/Nous-Hermes-2-Mixtral-8x7B-DPO.Q4_K_S.gguf";
-    const OPENCHAT_PATH: &str =
-        "/Users/brianbruggeman/.lmstudio/models/TheBloke/openchat-3.5-1210-GGUF/openchat-3.5-1210.Q4_K_S.gguf";
+    const OPENCHAT_PATH: &str = "/Users/brianbruggeman/.lmstudio/models/TheBloke/openchat-3.5-1210-GGUF/openchat-3.5-1210.Q4_K_S.gguf";
 
     fn parse_metadata(path: &str, caps: &[usize]) -> Option<crate::pipe::ParsedGguf> {
         let path = std::path::Path::new(path);
@@ -379,7 +381,10 @@ mod real_file {
                 return Some(parsed);
             }
         }
-        panic!("gguf metadata region for {} did not fit in the largest cap", path.display());
+        panic!(
+            "gguf metadata region for {} did not fit in the largest cap",
+            path.display()
+        );
     }
 
     /// Applies [`PrecisionPolicy::llama_cpp_q4_k_s_moe_8_expert`] to every
@@ -399,8 +404,10 @@ mod real_file {
         };
         let policy = PrecisionPolicy::llama_cpp_q4_k_s_moe_8_expert();
 
-        let mut role_total: alloc::collections::BTreeMap<TensorRole, u32> = alloc::collections::BTreeMap::new();
-        let mut role_match: alloc::collections::BTreeMap<TensorRole, u32> = alloc::collections::BTreeMap::new();
+        let mut role_total: alloc::collections::BTreeMap<TensorRole, u32> =
+            alloc::collections::BTreeMap::new();
+        let mut role_match: alloc::collections::BTreeMap<TensorRole, u32> =
+            alloc::collections::BTreeMap::new();
 
         for tensor in &parsed.tensors {
             let role = TensorRole::classify(&tensor.name);
@@ -429,12 +436,18 @@ mod real_file {
         for role in uniform_roles {
             let total = role_total.get(&role).copied().unwrap_or(0);
             let matched = role_match.get(&role).copied().unwrap_or(0);
-            assert_eq!(matched, total, "role {role:?} expected 100% policy match, got {matched}/{total}");
+            assert_eq!(
+                matched, total,
+                "role {role:?} expected 100% policy match, got {matched}/{total}"
+            );
         }
 
         let ffn_down_total = role_total.get(&TensorRole::FfnDown).copied().unwrap_or(0);
         let ffn_down_matched = role_match.get(&TensorRole::FfnDown).copied().unwrap_or(0);
-        assert_eq!(ffn_down_total, 256, "mixtral has 32 layers x 8 experts of ffn_down");
+        assert_eq!(
+            ffn_down_total, 256,
+            "mixtral has 32 layers x 8 experts of ffn_down"
+        );
         assert_eq!(
             ffn_down_matched, 224,
             "ffn_down policy match should be exactly the non-bumped majority (224/256), got {ffn_down_matched}"
@@ -452,8 +465,10 @@ mod real_file {
         };
         let policy = PrecisionPolicy::llama_cpp_q4_k_s();
 
-        let mut role_total: alloc::collections::BTreeMap<TensorRole, u32> = alloc::collections::BTreeMap::new();
-        let mut role_match: alloc::collections::BTreeMap<TensorRole, u32> = alloc::collections::BTreeMap::new();
+        let mut role_total: alloc::collections::BTreeMap<TensorRole, u32> =
+            alloc::collections::BTreeMap::new();
+        let mut role_match: alloc::collections::BTreeMap<TensorRole, u32> =
+            alloc::collections::BTreeMap::new();
         for tensor in &parsed.tensors {
             let role = TensorRole::classify(&tensor.name);
             *role_total.entry(role).or_default() += 1;
@@ -476,8 +491,14 @@ mod real_file {
             role_total.get(&TensorRole::AttnNorm).copied().unwrap_or(0)
         );
         assert_eq!(
-            role_match.get(&TensorRole::OutputWeight).copied().unwrap_or(0),
-            role_total.get(&TensorRole::OutputWeight).copied().unwrap_or(0),
+            role_match
+                .get(&TensorRole::OutputWeight)
+                .copied()
+                .unwrap_or(0),
+            role_total
+                .get(&TensorRole::OutputWeight)
+                .copied()
+                .unwrap_or(0),
             "output.weight is Q6_K in both checkpoints"
         );
 
@@ -496,6 +517,9 @@ mod real_file {
         let moe = PrecisionPolicy::llama_cpp_q4_k_s_moe_8_expert();
         assert_eq!(dense.output_weight, GgmlType::Q6_K);
         assert_eq!(moe.output_weight, GgmlType::Q6_K);
-        assert_eq!(dense.target_for_role(TensorRole::OutputWeight), GgmlType::Q6_K);
+        assert_eq!(
+            dense.target_for_role(TensorRole::OutputWeight),
+            GgmlType::Q6_K
+        );
     }
 }

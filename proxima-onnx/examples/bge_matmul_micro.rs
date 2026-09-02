@@ -29,7 +29,13 @@ fn deterministic_data(len: usize, salt: u32) -> Vec<f32> {
 }
 
 fn f32_initializer(name: &'static str, dims: Vec<i64>, data: Vec<f32>) -> TensorProto<'static> {
-    TensorProto { dims, data_type: 1, float_data: data, name, ..TensorProto::default() }
+    TensorProto {
+        dims,
+        data_type: 1,
+        float_data: data,
+        name,
+        ..TensorProto::default()
+    }
 }
 
 fn matmul_shape_gmac_s(m: usize, k: usize, n: usize) -> f64 {
@@ -53,20 +59,34 @@ fn run_arm(k: usize, n: usize, arm: &Arm) -> (f64, f64) {
 
     let lhs = f32_initializer("lhs", arm.lhs_dims.clone(), lhs_data);
     let rhs = f32_initializer("rhs", vec![k as i64, n as i64], rhs_data);
-    let node = NodeProto { input: vec!["lhs", "rhs"], output: vec!["y"], op_type: "MatMul", name: "matmul", ..NodeProto::default() };
+    let node = NodeProto {
+        input: vec!["lhs", "rhs"],
+        output: vec!["y"],
+        op_type: "MatMul",
+        name: "matmul",
+        ..NodeProto::default()
+    };
     let graph = GraphProto {
         node: vec![node],
         name: "micro_matmul_graph",
         initializer: vec![lhs, rhs],
-        output: vec![ValueInfoProto { name: "y", ..ValueInfoProto::default() }],
+        output: vec![ValueInfoProto {
+            name: "y",
+            ..ValueInfoProto::default()
+        }],
         ..GraphProto::default()
     };
     let lowered = lower_graph(&graph).expect("lower synthetic MatMul");
-    let named: Vec<(&str, &[f32])> = lowered.initializers.iter().map(|(name, data)| (name.as_str(), data.as_slice())).collect();
+    let named: Vec<(&str, &[f32])> = lowered
+        .initializers
+        .iter()
+        .map(|(name, data)| (name.as_str(), data.as_slice()))
+        .collect();
     let output = lowered.graph_outputs[0].1;
 
     for _ in 0..50 {
-        let evaluated = evaluate_named(&lowered.program, &[], &named, &[output]).expect("warm-up eval");
+        let evaluated =
+            evaluate_named(&lowered.program, &[], &named, &[output]).expect("warm-up eval");
         std::hint::black_box(&evaluated);
     }
 
@@ -75,7 +95,8 @@ fn run_arm(k: usize, n: usize, arm: &Arm) -> (f64, f64) {
     for _ in 0..5 {
         let start = std::time::Instant::now();
         for _ in 0..calls_per_repeat {
-            let evaluated = evaluate_named(&lowered.program, &[], &named, &[output]).expect("timed eval");
+            let evaluated =
+                evaluate_named(&lowered.program, &[], &named, &[output]).expect("timed eval");
             std::hint::black_box(&evaluated);
         }
         let elapsed = start.elapsed();
@@ -83,12 +104,19 @@ fn run_arm(k: usize, n: usize, arm: &Arm) -> (f64, f64) {
     }
 
     let mean = ns_per_call_per_repeat.iter().sum::<f64>() / ns_per_call_per_repeat.len() as f64;
-    let variance = ns_per_call_per_repeat.iter().map(|value| (value - mean).powi(2)).sum::<f64>() / ns_per_call_per_repeat.len() as f64;
+    let variance = ns_per_call_per_repeat
+        .iter()
+        .map(|value| (value - mean).powi(2))
+        .sum::<f64>()
+        / ns_per_call_per_repeat.len() as f64;
     let cov = variance.sqrt() / mean * 100.0;
     println!(
         "  {:<28} ns/call(mean of 5x{calls_per_repeat}) = {mean:>10.1}  CoV={cov:>5.2}%  samples={:?}",
         arm.label,
-        ns_per_call_per_repeat.iter().map(|value| format!("{value:.0}")).collect::<Vec<_>>()
+        ns_per_call_per_repeat
+            .iter()
+            .map(|value| format!("{value:.0}"))
+            .collect::<Vec<_>>()
     );
     (mean, cov)
 }
@@ -96,16 +124,35 @@ fn run_arm(k: usize, n: usize, arm: &Arm) -> (f64, f64) {
 fn shape_block(name: &str, m: usize, k: usize, n: usize) {
     let macs = (m * k * n) as f64;
     let gmac_s_from_ns = |ns_per_call: f64| macs / (ns_per_call / 1e9) / 1e9;
-    println!("\n=== {name}: M={m} K={k} N={n} ({:.4} GMAC total) ===", matmul_shape_gmac_s(m, k, n));
+    println!(
+        "\n=== {name}: M={m} K={k} N={n} ({:.4} GMAC total) ===",
+        matmul_shape_gmac_s(m, k, n)
+    );
 
     let arms = [
-        Arm { label: "batched [1,M,K] (BGE real shape, defect present)", lhs_dims: vec![1, m as i64, k as i64], accelerate: false },
-        Arm { label: "unbatched [M,K] (leading_axes=1, gate fires)", lhs_dims: vec![m as i64, k as i64], accelerate: false },
-        Arm { label: "batched + PROXIMA_ACCELERATE_GEMM=1", lhs_dims: vec![1, m as i64, k as i64], accelerate: true },
+        Arm {
+            label: "batched [1,M,K] (BGE real shape, defect present)",
+            lhs_dims: vec![1, m as i64, k as i64],
+            accelerate: false,
+        },
+        Arm {
+            label: "unbatched [M,K] (leading_axes=1, gate fires)",
+            lhs_dims: vec![m as i64, k as i64],
+            accelerate: false,
+        },
+        Arm {
+            label: "batched + PROXIMA_ACCELERATE_GEMM=1",
+            lhs_dims: vec![1, m as i64, k as i64],
+            accelerate: true,
+        },
     ];
     for arm in &arms {
         let (mean_ns, cov) = run_arm(k, n, arm);
-        println!("    -> {:.3} GMAC/s (CoV {:.2}%)", gmac_s_from_ns(mean_ns), cov);
+        println!(
+            "    -> {:.3} GMAC/s (CoV {:.2}%)",
+            gmac_s_from_ns(mean_ns),
+            cov
+        );
     }
 }
 
@@ -122,10 +169,18 @@ fn shape_block(name: &str, m: usize, k: usize, n: usize) {
 /// branch for the mechanism), so `M=1`'s number here is the "unbatched"
 /// arm's rate through whichever path DOES run, not through a 1-row tile.
 fn main() {
-    println!("bge_matmul_micro: ROW 200 sweep -- M in {{1, 7, 8, 9}} (BGE's own real sentence lengths, plus M=1 the mnist-fc shape), unbatched [M,K] arm only (batched-vs-unbatched already answered by ROW 198)");
-    println!("  M=8 (clean multiple of WIDTH_TILE_ROWS=4): the row-remainder-free ceiling reference");
-    println!("  M=7, M=9: exercise the greedy 2-then-1 (M=7) / 1-row-only (M=9) row-remainder NEON variants this row adds");
-    println!("  M=1: PRE-REGISTERED to also reach the width tile via the unbatched [M,K] shape -- if it does NOT, that is itself the reported finding (see doc comment above)");
+    println!(
+        "bge_matmul_micro: ROW 200 sweep -- M in {{1, 7, 8, 9}} (BGE's own real sentence lengths, plus M=1 the mnist-fc shape), unbatched [M,K] arm only (batched-vs-unbatched already answered by ROW 198)"
+    );
+    println!(
+        "  M=8 (clean multiple of WIDTH_TILE_ROWS=4): the row-remainder-free ceiling reference"
+    );
+    println!(
+        "  M=7, M=9: exercise the greedy 2-then-1 (M=7) / 1-row-only (M=9) row-remainder NEON variants this row adds"
+    );
+    println!(
+        "  M=1: PRE-REGISTERED to also reach the width tile via the unbatched [M,K] shape -- if it does NOT, that is itself the reported finding (see doc comment above)"
+    );
 
     for &m in &[1usize, 7, 8, 9] {
         shape_block("QKVO", m, 384, 384);

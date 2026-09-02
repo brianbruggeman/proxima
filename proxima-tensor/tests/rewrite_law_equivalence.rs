@@ -18,8 +18,12 @@
 
 use proptest::prelude::*;
 use proxima_tensor::bind::{self, BoundOpKind};
-use proxima_tensor::cpu::{self, evaluate, evaluate_named, evaluate_named_with_arena, build_static_arena};
-use proxima_tensor::{DType, Extent, IndexMap, NodeId, Op, Reduce, ReduceInit, ScalarOp, Keep, append, map, shape};
+use proxima_tensor::cpu::{
+    self, build_static_arena, evaluate, evaluate_named, evaluate_named_with_arena,
+};
+use proxima_tensor::{
+    DType, Extent, IndexMap, Keep, NodeId, Op, Reduce, ReduceInit, ScalarOp, append, map, shape,
+};
 use std::sync::Mutex;
 
 /// `EPILOGUE_FUSE_ENABLED` (`cpu.rs`) is one process-wide `AtomicBool` --
@@ -40,7 +44,11 @@ fn identity(rank: u16) -> IndexMap {
 fn input(program: &mut Vec<Op>, shape: &[Extent], name: &str) -> NodeId {
     append(
         program,
-        Op::Input { dtype: DType::Float32, shape: shape.to_vec(), name: Some(name.to_string()) },
+        Op::Input {
+            dtype: DType::Float32,
+            shape: shape.to_vec(),
+            name: Some(name.to_string()),
+        },
     )
 }
 
@@ -75,7 +83,10 @@ fn clip_epilogue_program(m: u32, k: u32, n: u32) -> (Vec<Op>, NodeId) {
         Op::Elementwise {
             dtype: DType::Float32,
             body: ScalarOp::Multiply,
-            operands: vec![(lhs, IndexMap::Affine(map::projection(3, &[0, 2]))), (rhs, IndexMap::Affine(map::projection(3, &[2, 1])))],
+            operands: vec![
+                (lhs, IndexMap::Affine(map::projection(3, &[0, 2]))),
+                (rhs, IndexMap::Affine(map::projection(3, &[2, 1]))),
+            ],
             name: None,
         },
     );
@@ -92,14 +103,37 @@ fn clip_epilogue_program(m: u32, k: u32, n: u32) -> (Vec<Op>, NodeId) {
             name: Some("matmul".into()),
         }),
     );
-    let zero = append(&mut program, Op::Constant { dtype: DType::Float32, shape: vec![], value: 0.0 });
+    let zero = append(
+        &mut program,
+        Op::Constant {
+            dtype: DType::Float32,
+            shape: vec![],
+            value: 0.0,
+        },
+    );
     let biased = append(
         &mut program,
-        Op::Elementwise { dtype: DType::Float32, body: ScalarOp::Add, operands: vec![(reduce, identity(2)), (bias, IndexMap::Affine(map::projection(2, &[1])))], name: None },
+        Op::Elementwise {
+            dtype: DType::Float32,
+            body: ScalarOp::Add,
+            operands: vec![
+                (reduce, identity(2)),
+                (bias, IndexMap::Affine(map::projection(2, &[1]))),
+            ],
+            name: None,
+        },
     );
     let clipped = append(
         &mut program,
-        Op::Elementwise { dtype: DType::Float32, body: ScalarOp::Maximum, operands: vec![(biased, identity(2)), (zero, IndexMap::Affine(map::projection(2, &[])))], name: None },
+        Op::Elementwise {
+            dtype: DType::Float32,
+            body: ScalarOp::Maximum,
+            operands: vec![
+                (biased, identity(2)),
+                (zero, IndexMap::Affine(map::projection(2, &[]))),
+            ],
+            name: None,
+        },
     );
     (program, clipped)
 }
@@ -184,11 +218,29 @@ proptest! {
 /// `LayerNormalization` export lowers to (`rewrite-algebra.md` law 2).
 fn layer_norm_cluster_program(rows: u32, hidden: u32) -> (Vec<Op>, NodeId) {
     let mut program = Vec::new();
-    let x = input(&mut program, &[Extent::Static(rows), Extent::Static(hidden)], "x");
+    let x = input(
+        &mut program,
+        &[Extent::Static(rows), Extent::Static(hidden)],
+        "x",
+    );
     let gamma = input(&mut program, &[Extent::Static(hidden)], "gamma");
     let beta = input(&mut program, &[Extent::Static(hidden)], "beta");
-    let reciprocal_n = append(&mut program, Op::Constant { dtype: DType::Float32, shape: vec![], value: 1.0 / hidden as f32 });
-    let epsilon = append(&mut program, Op::Constant { dtype: DType::Float32, shape: vec![], value: 1e-5 });
+    let reciprocal_n = append(
+        &mut program,
+        Op::Constant {
+            dtype: DType::Float32,
+            shape: vec![],
+            value: 1.0 / hidden as f32,
+        },
+    );
+    let epsilon = append(
+        &mut program,
+        Op::Constant {
+            dtype: DType::Float32,
+            shape: vec![],
+            value: 1e-5,
+        },
+    );
 
     // `r1`/`mean`/`r2`/`variance`/`denom_sq`/`denom` are all genuinely
     // rank-1 (`[rows]`) -- the row-statistic itself never varies over
@@ -219,15 +271,33 @@ fn layer_norm_cluster_program(rows: u32, hidden: u32) -> (Vec<Op>, NodeId) {
     );
     let mean = append(
         &mut program,
-        Op::Elementwise { dtype: DType::Float32, body: ScalarOp::Multiply, operands: vec![(r1, identity(1)), (reciprocal_n, scalar_broadcast_rank1.clone())], name: None },
+        Op::Elementwise {
+            dtype: DType::Float32,
+            body: ScalarOp::Multiply,
+            operands: vec![
+                (r1, identity(1)),
+                (reciprocal_n, scalar_broadcast_rank1.clone()),
+            ],
+            name: None,
+        },
     );
     let centered = append(
         &mut program,
-        Op::Elementwise { dtype: DType::Float32, body: ScalarOp::Subtract, operands: vec![(x, identity(2)), (mean, row_broadcast.clone())], name: None },
+        Op::Elementwise {
+            dtype: DType::Float32,
+            body: ScalarOp::Subtract,
+            operands: vec![(x, identity(2)), (mean, row_broadcast.clone())],
+            name: None,
+        },
     );
     let squared = append(
         &mut program,
-        Op::Elementwise { dtype: DType::Float32, body: ScalarOp::Multiply, operands: vec![(centered, identity(2)), (centered, identity(2))], name: None },
+        Op::Elementwise {
+            dtype: DType::Float32,
+            body: ScalarOp::Multiply,
+            operands: vec![(centered, identity(2)), (centered, identity(2))],
+            name: None,
+        },
     );
     let r2 = append(
         &mut program,
@@ -244,21 +314,60 @@ fn layer_norm_cluster_program(rows: u32, hidden: u32) -> (Vec<Op>, NodeId) {
     );
     let variance = append(
         &mut program,
-        Op::Elementwise { dtype: DType::Float32, body: ScalarOp::Multiply, operands: vec![(r2, identity(1)), (reciprocal_n, scalar_broadcast_rank1.clone())], name: None },
+        Op::Elementwise {
+            dtype: DType::Float32,
+            body: ScalarOp::Multiply,
+            operands: vec![
+                (r2, identity(1)),
+                (reciprocal_n, scalar_broadcast_rank1.clone()),
+            ],
+            name: None,
+        },
     );
     let denom_sq = append(
         &mut program,
-        Op::Elementwise { dtype: DType::Float32, body: ScalarOp::Add, operands: vec![(variance, identity(1)), (epsilon, scalar_broadcast_rank1)], name: None },
+        Op::Elementwise {
+            dtype: DType::Float32,
+            body: ScalarOp::Add,
+            operands: vec![(variance, identity(1)), (epsilon, scalar_broadcast_rank1)],
+            name: None,
+        },
     );
-    let denom = append(&mut program, Op::Elementwise { dtype: DType::Float32, body: ScalarOp::SquareRoot, operands: vec![(denom_sq, identity(1))], name: None });
-    let normalized = append(&mut program, Op::Elementwise { dtype: DType::Float32, body: ScalarOp::Divide, operands: vec![(centered, identity(2)), (denom, row_broadcast.clone())], name: None });
+    let denom = append(
+        &mut program,
+        Op::Elementwise {
+            dtype: DType::Float32,
+            body: ScalarOp::SquareRoot,
+            operands: vec![(denom_sq, identity(1))],
+            name: None,
+        },
+    );
+    let normalized = append(
+        &mut program,
+        Op::Elementwise {
+            dtype: DType::Float32,
+            body: ScalarOp::Divide,
+            operands: vec![(centered, identity(2)), (denom, row_broadcast.clone())],
+            name: None,
+        },
+    );
     let scaled = append(
         &mut program,
-        Op::Elementwise { dtype: DType::Float32, body: ScalarOp::Multiply, operands: vec![(normalized, identity(2)), (gamma, last_broadcast.clone())], name: None },
+        Op::Elementwise {
+            dtype: DType::Float32,
+            body: ScalarOp::Multiply,
+            operands: vec![(normalized, identity(2)), (gamma, last_broadcast.clone())],
+            name: None,
+        },
     );
     let tail = append(
         &mut program,
-        Op::Elementwise { dtype: DType::Float32, body: ScalarOp::Add, operands: vec![(scaled, identity(2)), (beta, last_broadcast)], name: None },
+        Op::Elementwise {
+            dtype: DType::Float32,
+            body: ScalarOp::Add,
+            operands: vec![(scaled, identity(2)), (beta, last_broadcast)],
+            name: None,
+        },
     );
     (program, tail)
 }
@@ -373,8 +482,24 @@ fn weighted_dot_program(length: u32) -> (Vec<Op>, NodeId) {
     let a = input(&mut program, &[Extent::Static(length)], "a");
     let b = input(&mut program, &[Extent::Static(length)], "b");
     let c = input(&mut program, &[Extent::Static(length)], "c");
-    let product = append(&mut program, Op::Elementwise { dtype: DType::Float32, body: ScalarOp::Multiply, operands: vec![(a, identity(1)), (b, identity(1))], name: None });
-    let scaled = append(&mut program, Op::Elementwise { dtype: DType::Float32, body: ScalarOp::Multiply, operands: vec![(product, identity(1)), (c, identity(1))], name: None });
+    let product = append(
+        &mut program,
+        Op::Elementwise {
+            dtype: DType::Float32,
+            body: ScalarOp::Multiply,
+            operands: vec![(a, identity(1)), (b, identity(1))],
+            name: None,
+        },
+    );
+    let scaled = append(
+        &mut program,
+        Op::Elementwise {
+            dtype: DType::Float32,
+            body: ScalarOp::Multiply,
+            operands: vec![(product, identity(1)), (c, identity(1))],
+            name: None,
+        },
+    );
     let sum = append(
         &mut program,
         Op::Reduce(Reduce {
@@ -457,7 +582,15 @@ fn matmul_program_unbatched(m: u32, k: u32, n: u32) -> (Vec<Op>, NodeId) {
     let rhs = input(&mut program, &[Extent::Static(k), Extent::Static(n)], "rhs");
     let product = append(
         &mut program,
-        Op::Elementwise { dtype: DType::Float32, body: ScalarOp::Multiply, operands: vec![(lhs, IndexMap::Affine(map::projection(3, &[0, 2]))), (rhs, IndexMap::Affine(map::projection(3, &[2, 1])))], name: None },
+        Op::Elementwise {
+            dtype: DType::Float32,
+            body: ScalarOp::Multiply,
+            operands: vec![
+                (lhs, IndexMap::Affine(map::projection(3, &[0, 2]))),
+                (rhs, IndexMap::Affine(map::projection(3, &[2, 1]))),
+            ],
+            name: None,
+        },
     );
     let sum = append(
         &mut program,
@@ -480,11 +613,23 @@ fn matmul_program_unbatched(m: u32, k: u32, n: u32) -> (Vec<Op>, NodeId) {
 /// `leading_unit_axis_tile_engagement.rs`'s own `matmul_program_batched`.
 fn matmul_program_batched(m: u32, k: u32, n: u32) -> (Vec<Op>, NodeId) {
     let mut program = Vec::new();
-    let lhs = input(&mut program, &[Extent::Static(1), Extent::Static(m), Extent::Static(k)], "lhs");
+    let lhs = input(
+        &mut program,
+        &[Extent::Static(1), Extent::Static(m), Extent::Static(k)],
+        "lhs",
+    );
     let rhs = input(&mut program, &[Extent::Static(k), Extent::Static(n)], "rhs");
     let product = append(
         &mut program,
-        Op::Elementwise { dtype: DType::Float32, body: ScalarOp::Multiply, operands: vec![(lhs, IndexMap::Affine(map::projection(4, &[0, 1, 3]))), (rhs, IndexMap::Affine(map::projection(4, &[3, 2])))], name: None },
+        Op::Elementwise {
+            dtype: DType::Float32,
+            body: ScalarOp::Multiply,
+            operands: vec![
+                (lhs, IndexMap::Affine(map::projection(4, &[0, 1, 3]))),
+                (rhs, IndexMap::Affine(map::projection(4, &[3, 2]))),
+            ],
+            name: None,
+        },
     );
     let sum = append(
         &mut program,
@@ -573,12 +718,57 @@ proptest! {
 fn constant_subgraph_program(length: u32, c1: f32, c2: f32, c3: f32) -> (Vec<Op>, NodeId) {
     let mut program = Vec::new();
     let x = input(&mut program, &[Extent::Static(length)], "x");
-    let constant_one = append(&mut program, Op::Constant { dtype: DType::Float32, shape: vec![Extent::Static(length)], value: c1 });
-    let constant_two = append(&mut program, Op::Constant { dtype: DType::Float32, shape: vec![Extent::Static(length)], value: c2 });
-    let constant_three = append(&mut program, Op::Constant { dtype: DType::Float32, shape: vec![Extent::Static(length)], value: c3 });
-    let product = append(&mut program, Op::Elementwise { dtype: DType::Float32, body: ScalarOp::Multiply, operands: vec![(constant_one, identity(1)), (constant_two, identity(1))], name: None });
-    let with_x = append(&mut program, Op::Elementwise { dtype: DType::Float32, body: ScalarOp::Add, operands: vec![(x, identity(1)), (product, identity(1))], name: None });
-    let result = append(&mut program, Op::Elementwise { dtype: DType::Float32, body: ScalarOp::Subtract, operands: vec![(with_x, identity(1)), (constant_three, identity(1))], name: None });
+    let constant_one = append(
+        &mut program,
+        Op::Constant {
+            dtype: DType::Float32,
+            shape: vec![Extent::Static(length)],
+            value: c1,
+        },
+    );
+    let constant_two = append(
+        &mut program,
+        Op::Constant {
+            dtype: DType::Float32,
+            shape: vec![Extent::Static(length)],
+            value: c2,
+        },
+    );
+    let constant_three = append(
+        &mut program,
+        Op::Constant {
+            dtype: DType::Float32,
+            shape: vec![Extent::Static(length)],
+            value: c3,
+        },
+    );
+    let product = append(
+        &mut program,
+        Op::Elementwise {
+            dtype: DType::Float32,
+            body: ScalarOp::Multiply,
+            operands: vec![(constant_one, identity(1)), (constant_two, identity(1))],
+            name: None,
+        },
+    );
+    let with_x = append(
+        &mut program,
+        Op::Elementwise {
+            dtype: DType::Float32,
+            body: ScalarOp::Add,
+            operands: vec![(x, identity(1)), (product, identity(1))],
+            name: None,
+        },
+    );
+    let result = append(
+        &mut program,
+        Op::Elementwise {
+            dtype: DType::Float32,
+            body: ScalarOp::Subtract,
+            operands: vec![(with_x, identity(1)), (constant_three, identity(1))],
+            name: None,
+        },
+    );
     (program, result)
 }
 
@@ -635,5 +825,7 @@ proptest! {
 #[test]
 #[ignore = "PROPOSED, not landed: docs/rewrite-algebra.md law 4 (same-input widening) has no admission test or fusion mechanism anywhere in proxima-tensor -- grepped qkv/QKV, only disk-layout hits, zero plan-level widening. Nothing to equivalence-test yet; this stub names the obligation."]
 fn law4_same_input_widening_is_proposed_not_landed() {
-    unreachable!("law 4 has no landed instance -- see docs/rewrite-algebra.md, this test is a documentation stub only");
+    unreachable!(
+        "law 4 has no landed instance -- see docs/rewrite-algebra.md, this test is a documentation stub only"
+    );
 }

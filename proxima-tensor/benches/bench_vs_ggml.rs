@@ -27,13 +27,13 @@ use std::os::raw::c_int;
 use std::time::Duration;
 
 use criterion::Criterion;
-use std::hint::black_box;
 use ggml_ffi::*;
 use proxima_tensor::test_support::Lcg;
 use proxima_tensor::{
-    append, evaluate, evaluate_parallel, map, AxisIndex, AxisTerm, DType, Extent, IndexMap, Keep,
-    NodeId, Op, Reduce, ReduceInit, ScalarOp,
+    AxisIndex, AxisTerm, DType, Extent, IndexMap, Keep, NodeId, Op, Reduce, ReduceInit, ScalarOp,
+    append, evaluate, evaluate_parallel, map,
 };
+use std::hint::black_box;
 
 fn random_vec(seed: u64, n: usize, scale: f32) -> Vec<f32> {
     let mut lcg = Lcg(seed);
@@ -41,7 +41,13 @@ fn random_vec(seed: u64, n: usize, scale: f32) -> Vec<f32> {
 }
 
 fn max_abs_diff(a: &[f32], b: &[f32]) -> f32 {
-    assert_eq!(a.len(), b.len(), "shape mismatch: {} vs {}", a.len(), b.len());
+    assert_eq!(
+        a.len(),
+        b.len(),
+        "shape mismatch: {} vs {}",
+        a.len(),
+        b.len()
+    );
     a.iter()
         .zip(b)
         .map(|(x, y)| (x - y).abs())
@@ -107,7 +113,15 @@ unsafe fn quantize(ty: c_int, src: &[f32], nrows: i64, n_per_row: i64) -> Vec<u8
     unsafe {
         let cap = src.len() * 8; // generous upper bound, quantized types are always <= f32 size
         let mut dst = vec![0u8; cap];
-        let written = ggml_quantize_chunk(ty, src.as_ptr(), dst.as_mut_ptr().cast::<c_void>(), 0, nrows, n_per_row, std::ptr::null());
+        let written = ggml_quantize_chunk(
+            ty,
+            src.as_ptr(),
+            dst.as_mut_ptr().cast::<c_void>(),
+            0,
+            nrows,
+            n_per_row,
+            std::ptr::null(),
+        );
         dst.truncate(written);
         dst
     }
@@ -163,12 +177,7 @@ unsafe fn compute_plan(graph: *mut ggml_cgraph, plan: &mut Plan) {
 // the identical byte buffer feeds both engines with no copy.
 // ---------------------------------------------------------------------
 
-fn matmul_program(
-    program: &mut Vec<Op>,
-    m: u32,
-    k: u32,
-    n: u32,
-) -> (NodeId, NodeId, NodeId) {
+fn matmul_program(program: &mut Vec<Op>, m: u32, k: u32, n: u32) -> (NodeId, NodeId, NodeId) {
     let lhs = append(
         program,
         Op::Input {
@@ -263,7 +272,13 @@ fn binary(program: &mut Vec<Op>, body: ScalarOp, left: NodeId, right: NodeId, ra
     )
 }
 
-fn binary_broadcast_const(program: &mut Vec<Op>, body: ScalarOp, left: NodeId, constant: NodeId, rank: u16) -> NodeId {
+fn binary_broadcast_const(
+    program: &mut Vec<Op>,
+    body: ScalarOp,
+    left: NodeId,
+    constant: NodeId,
+    rank: u16,
+) -> NodeId {
     let axes: Vec<u16> = (0..rank).collect();
     append(
         program,
@@ -289,10 +304,12 @@ fn binary_broadcast_const(program: &mut Vec<Op>, body: ScalarOp, left: NodeId, c
 fn row_a_home_turf_quantized_gemv(c: &mut Criterion) {
     println!("\n=== ROW A (HOME TURF): quantized GEMV, weight [4096x4096], batch=1 ===");
     println!("ggml SHA 2d191b5dee1a591c41ee8a653ce42bfcd9c8716d");
-    println!("proxima-tensor: BLOCKED. no quantized dtype exists in this crate (DType is \
+    println!(
+        "proxima-tensor: BLOCKED. no quantized dtype exists in this crate (DType is \
         Float32/Int32 only, cpu.rs is explicitly f32-only in v1). This is not attempted, \
         faked, or approximated below. ggml's number alone is reported so the target this \
-        architecture has not yet reached is on the record.");
+        architecture has not yet reached is on the record."
+    );
 
     let (out_dim, in_dim) = (4096usize, 4096usize);
     let weight_f32 = random_vec(1, out_dim * in_dim, 0.05);
@@ -346,7 +363,9 @@ fn row_a_home_turf_quantized_gemv(c: &mut Criterion) {
 // ---------------------------------------------------------------------
 
 fn row_b_f32_gemv(c: &mut Criterion) {
-    println!("\n=== ROW B: f32 GEMV, weight [4096x4096], batch=1 (approximation of row A, not row A) ===");
+    println!(
+        "\n=== ROW B: f32 GEMV, weight [4096x4096], batch=1 (approximation of row A, not row A) ==="
+    );
     let (m, k, n) = (4096u32, 4096u32, 1u32);
     let lhs_data = random_vec(3, (m * k) as usize, 0.05); // weight [out=4096, in=4096]
     let rhs_t_data = random_vec(4, (n * k) as usize, 0.5); // activation, [1,4096]-transposed == [4096]
@@ -355,7 +374,8 @@ fn row_b_f32_gemv(c: &mut Criterion) {
     let (lhs, rhs_t, sum) = matmul_program(&mut program, m, k, n);
     let _ = (lhs, rhs_t, sum);
 
-    let proxima_out = evaluate(&program, &[], &[&lhs_data, &rhs_t_data], &[]).expect("row b evaluates");
+    let proxima_out =
+        evaluate(&program, &[], &[&lhs_data, &rhs_t_data], &[]).expect("row b evaluates");
     let shapes_b = proxima_tensor::infer(&program, &[]).expect("row b infers");
     let resolved_b = proxima_tensor::bind(&program, &shapes_b, &[]).expect("row b binds");
     println!(
@@ -405,13 +425,17 @@ fn row_b_f32_gemv(c: &mut Criterion) {
         c.bench_function("row_b_proxima_f32_gemv_4096x4096_evaluate", |b| {
             b.iter(|| black_box(evaluate(&program, &[], &[&lhs_data, &rhs_t_data], &[]).unwrap()))
         });
-        c.bench_function("row_b_proxima_f32_gemv_4096x4096_evaluate_parallel_w8", |b| {
-            b.iter(|| {
-                black_box(
-                    evaluate_parallel(&program, &[], &[&lhs_data, &rhs_t_data], &[], workers).unwrap(),
-                )
-            })
-        });
+        c.bench_function(
+            "row_b_proxima_f32_gemv_4096x4096_evaluate_parallel_w8",
+            |b| {
+                b.iter(|| {
+                    black_box(
+                        evaluate_parallel(&program, &[], &[&lhs_data, &rhs_t_data], &[], workers)
+                            .unwrap(),
+                    )
+                })
+            },
+        );
     }
 }
 
@@ -522,9 +546,16 @@ fn row_c_gather_fused_reduce(c: &mut Criterion) {
         println!("row C max abs diff (ggml vs proxima evaluate): {diff:e}");
         println!(
             "ggml materialized intermediates: get_rows [{}x{}]={} bytes, mul [same]={} bytes, sum_rows output={} bytes = 3 buffers",
-            dim, seq, dim as usize * seq as usize * 4, dim as usize * seq as usize * 4, seq as usize * 4
+            dim,
+            seq,
+            dim as usize * seq as usize * 4,
+            dim as usize * seq as usize * 4,
+            seq as usize * 4
         );
-        println!("proxima materialized buffers for this chain: 1 (the final reduce output, {} bytes)", seq as usize * 4);
+        println!(
+            "proxima materialized buffers for this chain: 1 (the final reduce output, {} bytes)",
+            seq as usize * 4
+        );
         assert!(diff < 1e-2, "row C numerical mismatch: {diff}");
 
         let workers = NonZeroUsize::new(8).unwrap();
@@ -543,16 +574,29 @@ fn row_c_gather_fused_reduce(c: &mut Criterion) {
             })
         });
         c.bench_function("row_c_proxima_gather_fused_reduce_evaluate", |b| {
-            b.iter(|| black_box(evaluate(&program, &[], &[&table_data, &ids_f32, &weight_data], &[]).unwrap()))
-        });
-        c.bench_function("row_c_proxima_gather_fused_reduce_evaluate_parallel_w8", |b| {
             b.iter(|| {
                 black_box(
-                    evaluate_parallel(&program, &[], &[&table_data, &ids_f32, &weight_data], &[], workers)
-                        .unwrap(),
+                    evaluate(&program, &[], &[&table_data, &ids_f32, &weight_data], &[]).unwrap(),
                 )
             })
         });
+        c.bench_function(
+            "row_c_proxima_gather_fused_reduce_evaluate_parallel_w8",
+            |b| {
+                b.iter(|| {
+                    black_box(
+                        evaluate_parallel(
+                            &program,
+                            &[],
+                            &[&table_data, &ids_f32, &weight_data],
+                            &[],
+                            workers,
+                        )
+                        .unwrap(),
+                    )
+                })
+            },
+        );
     }
 }
 
@@ -626,7 +670,8 @@ fn row_d_deep_chain(c: &mut Criterion) {
         resolved.len()
     );
 
-    let proxima_out = evaluate(&program, &[], &[&x_data, &bias_data], &[]).expect("row d evaluates");
+    let proxima_out =
+        evaluate(&program, &[], &[&x_data, &bias_data], &[]).expect("row d evaluates");
 
     unsafe {
         let ctx = ggml_ctx(128);
@@ -671,7 +716,9 @@ fn row_d_deep_chain(c: &mut Criterion) {
         });
         c.bench_function("row_d_proxima_deep_chain_evaluate_parallel_w8", |b| {
             b.iter(|| {
-                black_box(evaluate_parallel(&program, &[], &[&x_data, &bias_data], &[], workers).unwrap())
+                black_box(
+                    evaluate_parallel(&program, &[], &[&x_data, &bias_data], &[], workers).unwrap(),
+                )
             })
         });
     }
@@ -688,10 +735,14 @@ fn row_d_deep_chain(c: &mut Criterion) {
 // ---------------------------------------------------------------------
 
 fn row_e_locally_connected_window(c: &mut Criterion) {
-    println!("\n=== ROW E: locally connected windowed reduce, stride=2 dilation=2 (proxima only) ===");
-    println!("ggml: BLOCKED. no unshared-weight conv primitive exists in ggml's op list; \
+    println!(
+        "\n=== ROW E: locally connected windowed reduce, stride=2 dilation=2 (proxima only) ==="
+    );
+    println!(
+        "ggml: BLOCKED. no unshared-weight conv primitive exists in ggml's op list; \
         every ggml conv op shares one kernel across all output positions. A per-position loop \
-        of matmuls would not be a fair single-kernel comparison and is not attempted.");
+        of matmuls would not be a fair single-kernel comparison and is not attempted."
+    );
 
     let (h, r, stride, dilation) = (2048u32, 3u32, 2u32, 2u32);
     let signal_len = (h - 1) * stride + (r - 1) * dilation + 1;
@@ -703,7 +754,13 @@ fn row_e_locally_connected_window(c: &mut Criterion) {
     let signal = f32_input(&mut program, &[Extent::Static(signal_len)]);
     let window = IndexMap::Affine(map::affine(
         2,
-        &[(&[AxisTerm::scaled(0, stride as i32), AxisTerm::scaled(1, dilation as i32)], 0)],
+        &[(
+            &[
+                AxisTerm::scaled(0, stride as i32),
+                AxisTerm::scaled(1, dilation as i32),
+            ],
+            0,
+        )],
     ));
     let product = append(
         &mut program,
@@ -743,13 +800,17 @@ fn row_e_locally_connected_window(c: &mut Criterion) {
     c.bench_function("row_e_proxima_locally_connected_evaluate", |b| {
         b.iter(|| black_box(evaluate(&program, &[], &[&kernel_data, &signal_data], &[]).unwrap()))
     });
-    c.bench_function("row_e_proxima_locally_connected_evaluate_parallel_w8", |b| {
-        b.iter(|| {
-            black_box(
-                evaluate_parallel(&program, &[], &[&kernel_data, &signal_data], &[], workers).unwrap(),
-            )
-        })
-    });
+    c.bench_function(
+        "row_e_proxima_locally_connected_evaluate_parallel_w8",
+        |b| {
+            b.iter(|| {
+                black_box(
+                    evaluate_parallel(&program, &[], &[&kernel_data, &signal_data], &[], workers)
+                        .unwrap(),
+                )
+            })
+        },
+    );
 }
 
 // ---------------------------------------------------------------------
@@ -770,9 +831,12 @@ fn row_f_control_bare_gemm(c: &mut Criterion) {
 
         let mut program = Vec::new();
         let (_lhs, _rhs_t, _sum) = matmul_program(&mut program, m, k, n);
-        let proxima_out = evaluate(&program, &[], &[&lhs_data, &rhs_t_data], &[]).expect("gemm evaluates");
+        let proxima_out =
+            evaluate(&program, &[], &[&lhs_data, &rhs_t_data], &[]).expect("gemm evaluates");
 
-        let mem_mb = (m as usize * k as usize * 4 + n as usize * k as usize * 4 + m as usize * n as usize * 4)
+        let mem_mb = (m as usize * k as usize * 4
+            + n as usize * k as usize * 4
+            + m as usize * n as usize * 4)
             / (1024 * 1024)
             + 64;
         unsafe {
@@ -818,13 +882,17 @@ fn row_f_control_bare_gemm(c: &mut Criterion) {
             #[cfg(all(target_arch = "aarch64", feature = "instrument"))]
             let row_remainder_before = proxima_tensor::cpu::neon_tile_row_remainder_invocations();
             c.bench_function(&format!("row_f_proxima_gemm_{size}_evaluate"), |b| {
-                b.iter(|| black_box(evaluate(&program, &[], &[&lhs_data, &rhs_t_data], &[]).unwrap()))
+                b.iter(|| {
+                    black_box(evaluate(&program, &[], &[&lhs_data, &rhs_t_data], &[]).unwrap())
+                })
             });
             #[cfg(all(target_arch = "aarch64", feature = "instrument"))]
             {
-                let (gate_after, invocations_after, fallback_after) = proxima_tensor::cpu::neon_tile_counters();
+                let (gate_after, invocations_after, fallback_after) =
+                    proxima_tensor::cpu::neon_tile_counters();
                 let (gate_before, invocations_before, fallback_before) = tile_counters_before;
-                let row_remainder_after = proxima_tensor::cpu::neon_tile_row_remainder_invocations();
+                let row_remainder_after =
+                    proxima_tensor::cpu::neon_tile_row_remainder_invocations();
                 println!(
                     "row F size={size} neon_tile delta (single-threaded evaluate only): \
                      gate_passes={} invocations={} row_remainder_invocations={} fallback_elements={}",
@@ -837,19 +905,33 @@ fn row_f_control_bare_gemm(c: &mut Criterion) {
             #[cfg(all(target_arch = "aarch64", feature = "instrument"))]
             let tile_counters_before_parallel = proxima_tensor::cpu::neon_tile_counters();
             #[cfg(all(target_arch = "aarch64", feature = "instrument"))]
-            let row_remainder_before_parallel = proxima_tensor::cpu::neon_tile_row_remainder_invocations();
-            c.bench_function(&format!("row_f_proxima_gemm_{size}_evaluate_parallel_w8"), |b| {
-                b.iter(|| {
-                    black_box(
-                        evaluate_parallel(&program, &[], &[&lhs_data, &rhs_t_data], &[], workers).unwrap(),
-                    )
-                })
-            });
+            let row_remainder_before_parallel =
+                proxima_tensor::cpu::neon_tile_row_remainder_invocations();
+            c.bench_function(
+                &format!("row_f_proxima_gemm_{size}_evaluate_parallel_w8"),
+                |b| {
+                    b.iter(|| {
+                        black_box(
+                            evaluate_parallel(
+                                &program,
+                                &[],
+                                &[&lhs_data, &rhs_t_data],
+                                &[],
+                                workers,
+                            )
+                            .unwrap(),
+                        )
+                    })
+                },
+            );
             #[cfg(all(target_arch = "aarch64", feature = "instrument"))]
             {
-                let (gate_after, invocations_after, fallback_after) = proxima_tensor::cpu::neon_tile_counters();
-                let (gate_before, invocations_before, fallback_before) = tile_counters_before_parallel;
-                let row_remainder_after = proxima_tensor::cpu::neon_tile_row_remainder_invocations();
+                let (gate_after, invocations_after, fallback_after) =
+                    proxima_tensor::cpu::neon_tile_counters();
+                let (gate_before, invocations_before, fallback_before) =
+                    tile_counters_before_parallel;
+                let row_remainder_after =
+                    proxima_tensor::cpu::neon_tile_row_remainder_invocations();
                 println!(
                     "row F size={size} neon_tile delta (evaluate_parallel_w8 only): \
                      gate_passes={} invocations={} row_remainder_invocations={} fallback_elements={}",
@@ -872,7 +954,9 @@ fn row_f_control_bare_gemm(c: &mut Criterion) {
 // ---------------------------------------------------------------------
 
 fn row_g_mlp_chain(c: &mut Criterion) {
-    println!("\n=== ROW G (HYPOTHESIS): rmsnorm -> matmul -> silu -> residual add, seq=512 d_model=2048 d_ff=8192 ===");
+    println!(
+        "\n=== ROW G (HYPOTHESIS): rmsnorm -> matmul -> silu -> residual add, seq=512 d_model=2048 d_ff=8192 ==="
+    );
     let (seq, d_model, d_ff) = (512u32, 2048u32, 8192u32);
     let eps = 1e-5f32;
 
@@ -884,7 +968,10 @@ fn row_g_mlp_chain(c: &mut Criterion) {
     let one_const = [1.0f32];
 
     let mut program = Vec::new();
-    let x = f32_input(&mut program, &[Extent::Static(seq), Extent::Static(d_model)]);
+    let x = f32_input(
+        &mut program,
+        &[Extent::Static(seq), Extent::Static(d_model)],
+    );
     let dmodel_node = f32_input(&mut program, &[Extent::Static(1)]);
     let eps_node = f32_input(&mut program, &[Extent::Static(1)]);
 
@@ -918,7 +1005,10 @@ fn row_g_mlp_chain(c: &mut Criterion) {
         },
     );
 
-    let weight_t = f32_input(&mut program, &[Extent::Static(d_ff), Extent::Static(d_model)]);
+    let weight_t = f32_input(
+        &mut program,
+        &[Extent::Static(d_ff), Extent::Static(d_model)],
+    );
     let product = append(
         &mut program,
         Op::Elementwise {
@@ -1035,10 +1125,12 @@ fn row_g_mlp_chain(c: &mut Criterion) {
 
 fn row_h_elementwise_chain(c: &mut Criterion) {
     println!("\n=== ROW H: pure elementwise chain (no reduce), 64M elements, 7 ops ===");
-    println!("MECHANISM NOTE: this crate's fusion is Reduce-absorbs-its-immediate-Elementwise- \
+    println!(
+        "MECHANISM NOTE: this crate's fusion is Reduce-absorbs-its-immediate-Elementwise- \
         producer ONLY (see bind.rs's own module doc). A chain of elementwise ops with no \
         reduce at the end does not fuse at all — every op materializes on both engines. \
-        Expect parity or a loss here; that is the honest result this row exists to surface.");
+        Expect parity or a loss here; that is the honest result this row exists to surface."
+    );
 
     let n = 64 * 1024 * 1024usize;
     let x_data = random_vec(50, n, 0.2);
@@ -1062,7 +1154,9 @@ fn row_h_elementwise_chain(c: &mut Criterion) {
         resolved.len(),
         n * 4 / (1024 * 1024)
     );
-    println!("ggml materializes all 7 of its op nodes too (neg, exp, add, sqrt, mul, tanh, neg) — no fusion on either side for this row");
+    println!(
+        "ggml materializes all 7 of its op nodes too (neg, exp, add, sqrt, mul, tanh, neg) — no fusion on either side for this row"
+    );
 
     let proxima_out = evaluate(&program, &[], &[&x_data], &[]).expect("row h evaluates");
 
@@ -1103,9 +1197,14 @@ fn row_h_elementwise_chain(c: &mut Criterion) {
         c.bench_function("row_h_proxima_elementwise_chain_64m_evaluate", |b| {
             b.iter(|| black_box(evaluate(&program, &[], &[&x_data], &[]).unwrap()))
         });
-        c.bench_function("row_h_proxima_elementwise_chain_64m_evaluate_parallel_w8", |b| {
-            b.iter(|| black_box(evaluate_parallel(&program, &[], &[&x_data], &[], workers).unwrap()))
-        });
+        c.bench_function(
+            "row_h_proxima_elementwise_chain_64m_evaluate_parallel_w8",
+            |b| {
+                b.iter(|| {
+                    black_box(evaluate_parallel(&program, &[], &[&x_data], &[], workers).unwrap())
+                })
+            },
+        );
     }
 }
 

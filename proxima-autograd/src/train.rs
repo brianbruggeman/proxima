@@ -36,7 +36,10 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use proxima_tensor::TensorError;
-use proxima_tensor::cpu::{StaticArena, arena_named_input, build_static_arena, evaluate_named, evaluate_named_with_arena_in_place};
+use proxima_tensor::cpu::{
+    StaticArena, arena_named_input, build_static_arena, evaluate_named,
+    evaluate_named_with_arena_in_place,
+};
 use proxima_tensor::op::{NodeId, Op};
 
 /// Every `rebind` name's freshly evaluated buffer -- a type alias, not a
@@ -74,11 +77,16 @@ pub fn train_step(
     outputs.extend(rebind.iter().map(|(node, _)| *node));
 
     let evaluated = evaluate_named(program, &[], named, &outputs)?;
-    let loss_value = evaluated.get(loss).and_then(|(data, _)| data.first().copied()).unwrap_or(0.0);
+    let loss_value = evaluated
+        .get(loss)
+        .and_then(|(data, _)| data.first().copied())
+        .unwrap_or(0.0);
     let next_state = rebind
         .iter()
         .map(|(node, name)| {
-            let values = evaluated.get(*node).map_or_else(Vec::new, |(data, _)| data.to_vec());
+            let values = evaluated
+                .get(*node)
+                .map_or_else(Vec::new, |(data, _)| data.to_vec());
             (String::from(*name), values)
         })
         .collect();
@@ -106,11 +114,16 @@ pub fn train_step_with_arena(
     named: &[(&str, &[f32])],
 ) -> Result<(f32, State), TensorError> {
     let evaluated = proxima_tensor::cpu::evaluate_named_with_arena(arena, named)?;
-    let loss_value = evaluated.get(loss).and_then(|(data, _)| data.first().copied()).unwrap_or(0.0);
+    let loss_value = evaluated
+        .get(loss)
+        .and_then(|(data, _)| data.first().copied())
+        .unwrap_or(0.0);
     let next_state = rebind
         .iter()
         .map(|(node, name)| {
-            let values = evaluated.get(*node).map_or_else(Vec::new, |(data, _)| data.to_vec());
+            let values = evaluated
+                .get(*node)
+                .map_or_else(Vec::new, |(data, _)| data.to_vec());
             (String::from(*name), values)
         })
         .collect();
@@ -171,7 +184,15 @@ pub fn fit<'a>(
     for _epoch in 0..epochs {
         for batch in batches {
             let named: Vec<(&str, &[f32])> = if is_first_step {
-                batch.iter().copied().chain(state.iter().map(|(name, values)| (name.as_str(), values.as_slice()))).collect()
+                batch
+                    .iter()
+                    .copied()
+                    .chain(
+                        state
+                            .iter()
+                            .map(|(name, values)| (name.as_str(), values.as_slice())),
+                    )
+                    .collect()
             } else {
                 batch.clone()
             };
@@ -183,7 +204,14 @@ pub fn fit<'a>(
 
     let final_state: State = rebind
         .iter()
-        .map(|(_, name)| (String::from(*name), arena_named_input(&arena, name).map(<[f32]>::to_vec).unwrap_or_default()))
+        .map(|(_, name)| {
+            (
+                String::from(*name),
+                arena_named_input(&arena, name)
+                    .map(<[f32]>::to_vec)
+                    .unwrap_or_default(),
+            )
+        })
         .collect();
     Ok((final_state, loss_curve))
 }
@@ -202,7 +230,11 @@ mod tests {
     fn leaf(program: &mut Vec<Op>, name: &str, extent: u32) -> NodeId {
         proxima_tensor::op::append(
             program,
-            Op::Input { dtype: DType::Float32, shape: vec![Extent::Static(extent)], name: Some(name.into()) },
+            Op::Input {
+                dtype: DType::Float32,
+                shape: vec![Extent::Static(extent)],
+                name: Some(name.into()),
+            },
         )
     }
 
@@ -219,7 +251,10 @@ mod tests {
             Op::Elementwise {
                 dtype: DType::Float32,
                 body: proxima_tensor::op::ScalarOp::Subtract,
-                operands: vec![(x, crate::expr::identity(1)), (target, crate::expr::identity(1))],
+                operands: vec![
+                    (x, crate::expr::identity(1)),
+                    (target, crate::expr::identity(1)),
+                ],
                 name: None,
             },
         );
@@ -228,7 +263,10 @@ mod tests {
             Op::Elementwise {
                 dtype: DType::Float32,
                 body: proxima_tensor::op::ScalarOp::Multiply,
-                operands: vec![(diff, crate::expr::identity(1)), (diff, crate::expr::identity(1))],
+                operands: vec![
+                    (diff, crate::expr::identity(1)),
+                    (diff, crate::expr::identity(1)),
+                ],
                 name: None,
             },
         );
@@ -247,7 +285,9 @@ mod tests {
         );
 
         let differentiated = differentiate(&program, loss).expect("scalar loss differentiates");
-        let grad_x = differentiated.gradient_of_named("x").expect("x feeds the loss");
+        let grad_x = differentiated
+            .gradient_of_named("x")
+            .expect("x feeds the loss");
         let mut trained_program = differentiated.program;
         let config = crate::optimizer::SgdConfig { learning_rate: 0.1 };
         let new_x = crate::optimizer::sgd_step(&mut trained_program, &config, 1, x, grad_x);
@@ -262,11 +302,17 @@ mod tests {
         )
         .expect("train_step evaluates");
 
-        assert!((loss_value - 4.0).abs() < 1e-5, "loss = (2-0)^2 = 4, got {loss_value}");
+        assert!(
+            (loss_value - 4.0).abs() < 1e-5,
+            "loss = (2-0)^2 = 4, got {loss_value}"
+        );
         assert_eq!(next_state.len(), 1);
         assert_eq!(next_state[0].0, "x");
         // grad = 2*(2-0) = 4, x' = 2 - 0.1*4 = 1.6
-        assert!((next_state[0].1[0] - 1.6).abs() < 1e-5, "got {next_state:?}");
+        assert!(
+            (next_state[0].1[0] - 1.6).abs() < 1e-5,
+            "got {next_state:?}"
+        );
     }
 
     #[proxima::test]
@@ -279,7 +325,10 @@ mod tests {
             Op::Elementwise {
                 dtype: DType::Float32,
                 body: proxima_tensor::op::ScalarOp::Subtract,
-                operands: vec![(x, crate::expr::identity(1)), (target, crate::expr::identity(1))],
+                operands: vec![
+                    (x, crate::expr::identity(1)),
+                    (target, crate::expr::identity(1)),
+                ],
                 name: None,
             },
         );
@@ -288,7 +337,10 @@ mod tests {
             Op::Elementwise {
                 dtype: DType::Float32,
                 body: proxima_tensor::op::ScalarOp::Multiply,
-                operands: vec![(diff, crate::expr::identity(1)), (diff, crate::expr::identity(1))],
+                operands: vec![
+                    (diff, crate::expr::identity(1)),
+                    (diff, crate::expr::identity(1)),
+                ],
                 name: None,
             },
         );
@@ -307,7 +359,9 @@ mod tests {
         );
 
         let differentiated = differentiate(&program, loss).expect("scalar loss differentiates");
-        let grad_x = differentiated.gradient_of_named("x").expect("x feeds the loss");
+        let grad_x = differentiated
+            .gradient_of_named("x")
+            .expect("x feeds the loss");
         let mut trained_program = differentiated.program;
         let config = crate::optimizer::SgdConfig { learning_rate: 0.1 };
         let new_x = crate::optimizer::sgd_step(&mut trained_program, &config, 1, x, grad_x);
@@ -316,14 +370,24 @@ mod tests {
         let batches = vec![vec![("target", target_values.as_slice())]];
         let initial_state = vec![(String::from("x"), vec![2.0f32])];
 
-        let (_final_state, loss_curve) =
-            fit(&trained_program, loss, &[(new_x, "x")], initial_state, 20, &batches).expect("fit runs to completion");
+        let (_final_state, loss_curve) = fit(
+            &trained_program,
+            loss,
+            &[(new_x, "x")],
+            initial_state,
+            20,
+            &batches,
+        )
+        .expect("fit runs to completion");
 
         assert_eq!(loss_curve.len(), 20);
         assert!(
             loss_curve.last().expect("at least one step ran") < &loss_curve[0],
             "loss must decrease over training, got {loss_curve:?}"
         );
-        assert!(loss_curve.iter().all(|value| value.is_finite()), "loss went non-finite: {loss_curve:?}");
+        assert!(
+            loss_curve.iter().all(|value| value.is_finite()),
+            "loss went non-finite: {loss_curve:?}"
+        );
     }
 }

@@ -103,7 +103,10 @@ fn main() {
     }
 
     let failed: usize = failures.values().sum();
-    println!("emit: {emitted} ok, {failed} failed, of {} bound ops", bound.len());
+    println!(
+        "emit: {emitted} ok, {failed} failed, of {} bound ops",
+        bound.len()
+    );
     println!(
         "source_len avg={:.1} max={} entry_len avg={:.1} (over {emitted} emitted kernels)",
         source_len_total as f64 / emitted.max(1) as f64,
@@ -123,9 +126,16 @@ fn main() {
     for (position, op) in program.iter().enumerate() {
         if let proxima_tensor::Op::Input { name, .. } = op {
             let node = proxima_tensor::NodeId(position as u32);
-            let count: usize = shapes.of(node).iter().map(|extent| *extent as usize).product();
+            let count: usize = shapes
+                .of(node)
+                .iter()
+                .map(|extent| *extent as usize)
+                .product();
             total_elements += count;
-            inputs.push((name.clone().unwrap_or_else(|| format!("<{position}>")), count));
+            inputs.push((
+                name.clone().unwrap_or_else(|| format!("<{position}>")),
+                count,
+            ));
         }
     }
     inputs.sort_by_key(|(_, count)| core::cmp::Reverse(*count));
@@ -142,7 +152,8 @@ fn main() {
 
     assert_ne!(bound.len(), 0, "degenerate probe: nothing bound");
     assert_eq!(
-        failed, 0,
+        failed,
+        0,
         "omega cannot emit {failed} of the real forward's {} ops",
         bound.len()
     );

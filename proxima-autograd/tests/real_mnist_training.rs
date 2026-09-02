@@ -72,7 +72,10 @@ const TEST_EXAMPLES: usize = 1000;
 const EPOCHS: u32 = 4;
 
 fn checkpoint_present() -> bool {
-    train_images_path().exists() && train_labels_path().exists() && test_images_path().exists() && test_labels_path().exists()
+    train_images_path().exists()
+        && train_labels_path().exists()
+        && test_images_path().exists()
+        && test_labels_path().exists()
 }
 
 fn train_images_path() -> std::path::PathBuf {
@@ -98,7 +101,12 @@ fn idx_header(bytes: &[u8]) -> (usize, Vec<usize>) {
     let mut extents = Vec::with_capacity(dimension_count - 1);
     for axis in 1..dimension_count {
         let offset = 4 + axis * 4;
-        extents.push(u32::from_be_bytes([bytes[offset], bytes[offset + 1], bytes[offset + 2], bytes[offset + 3]]) as usize);
+        extents.push(u32::from_be_bytes([
+            bytes[offset],
+            bytes[offset + 1],
+            bytes[offset + 2],
+            bytes[offset + 3],
+        ]) as usize);
     }
     (item_count, extents)
 }
@@ -109,7 +117,10 @@ fn load_normalized_images(path: &std::path::Path, limit: usize) -> Vec<f32> {
     let pixel_count = extents.iter().product::<usize>();
     let take = item_count.min(limit);
     let header_length = 4 + extents.len() * 4 + 4;
-    bytes[header_length..header_length + take * pixel_count].iter().map(|&pixel| ((pixel as f32 / 255.0) - 0.1307) / 0.3081).collect()
+    bytes[header_length..header_length + take * pixel_count]
+        .iter()
+        .map(|&pixel| ((pixel as f32 / 255.0) - 0.1307) / 0.3081)
+        .collect()
 }
 
 fn load_one_hot_labels(path: &std::path::Path, limit: usize) -> (Vec<f32>, Vec<u8>) {
@@ -125,7 +136,14 @@ fn load_one_hot_labels(path: &std::path::Path, limit: usize) -> (Vec<f32>, Vec<u
 }
 
 fn leaf(program: &mut Vec<Op>, name: &str, shape: Vec<Extent>) -> NodeId {
-    op::append(program, Op::Input { dtype: DType::Float32, shape, name: Some(name.into()) })
+    op::append(
+        program,
+        Op::Input {
+            dtype: DType::Float32,
+            shape,
+            name: Some(name.into()),
+        },
+    )
 }
 
 fn identity(rank: u16) -> IndexMap {
@@ -137,10 +155,23 @@ fn axes(rank: u16, selected: &[u16]) -> IndexMap {
 }
 
 fn elementwise(program: &mut Vec<Op>, body: ScalarOp, operands: Vec<(NodeId, IndexMap)>) -> NodeId {
-    op::append(program, Op::Elementwise { dtype: DType::Float32, body, operands, name: None })
+    op::append(
+        program,
+        Op::Elementwise {
+            dtype: DType::Float32,
+            body,
+            operands,
+            name: None,
+        },
+    )
 }
 
-fn reduce_add(program: &mut Vec<Op>, operand: NodeId, in_map: IndexMap, out_map: IndexMap) -> NodeId {
+fn reduce_add(
+    program: &mut Vec<Op>,
+    operand: NodeId,
+    in_map: IndexMap,
+    out_map: IndexMap,
+) -> NodeId {
     op::append(
         program,
         Op::Reduce(op::Reduce {
@@ -166,9 +197,17 @@ fn reduce_add(program: &mut Vec<Op>, operand: NodeId, in_map: IndexMap, out_map:
 /// already generalizes, spelled out here since this integration test
 /// cannot reach that `pub(crate)` module.
 fn batched_dense(program: &mut Vec<Op>, x: NodeId, w: NodeId, b: NodeId) -> NodeId {
-    let product = elementwise(program, ScalarOp::Multiply, alloc::vec![(w, axes(3, &[1, 2])), (x, axes(3, &[0, 1]))]);
+    let product = elementwise(
+        program,
+        ScalarOp::Multiply,
+        alloc::vec![(w, axes(3, &[1, 2])), (x, axes(3, &[0, 1]))],
+    );
     let matmul = reduce_add(program, product, identity(3), axes(3, &[0, 2]));
-    elementwise(program, ScalarOp::Add, alloc::vec![(matmul, identity(2)), (b, axes(2, &[1]))])
+    elementwise(
+        program,
+        ScalarOp::Add,
+        alloc::vec![(matmul, identity(2)), (b, axes(2, &[1]))],
+    )
 }
 
 struct Network {
@@ -182,22 +221,70 @@ struct Network {
 
 fn build_network() -> Network {
     let mut program = Vec::new();
-    let x = leaf(&mut program, "x", alloc::vec![Extent::Static(BATCH as u32), Extent::Static(IN_DIM as u32)]);
-    let y = leaf(&mut program, "y", alloc::vec![Extent::Static(BATCH as u32), Extent::Static(OUT_DIM as u32)]);
-    let w1 = leaf(&mut program, "w1", alloc::vec![Extent::Static(IN_DIM as u32), Extent::Static(HIDDEN_DIM as u32)]);
-    let b1 = leaf(&mut program, "b1", alloc::vec![Extent::Static(HIDDEN_DIM as u32)]);
-    let w2 = leaf(&mut program, "w2", alloc::vec![Extent::Static(HIDDEN_DIM as u32), Extent::Static(OUT_DIM as u32)]);
-    let b2 = leaf(&mut program, "b2", alloc::vec![Extent::Static(OUT_DIM as u32)]);
+    let x = leaf(
+        &mut program,
+        "x",
+        alloc::vec![Extent::Static(BATCH as u32), Extent::Static(IN_DIM as u32)],
+    );
+    let y = leaf(
+        &mut program,
+        "y",
+        alloc::vec![Extent::Static(BATCH as u32), Extent::Static(OUT_DIM as u32)],
+    );
+    let w1 = leaf(
+        &mut program,
+        "w1",
+        alloc::vec![
+            Extent::Static(IN_DIM as u32),
+            Extent::Static(HIDDEN_DIM as u32)
+        ],
+    );
+    let b1 = leaf(
+        &mut program,
+        "b1",
+        alloc::vec![Extent::Static(HIDDEN_DIM as u32)],
+    );
+    let w2 = leaf(
+        &mut program,
+        "w2",
+        alloc::vec![
+            Extent::Static(HIDDEN_DIM as u32),
+            Extent::Static(OUT_DIM as u32)
+        ],
+    );
+    let b2 = leaf(
+        &mut program,
+        "b2",
+        alloc::vec![Extent::Static(OUT_DIM as u32)],
+    );
 
     let h_pre = batched_dense(&mut program, x, w1, b1);
     let h = relu(&mut program, DType::Float32, h_pre, 2);
     let logits = batched_dense(&mut program, h, w2, b2);
     let summed_loss = softmax_cross_entropy(&mut program, DType::Float32, logits, y, 2, 1);
 
-    let inverse_batch = op::append(&mut program, Op::Constant { dtype: DType::Float32, shape: Vec::new(), value: 1.0 / BATCH as f32 });
-    let loss = elementwise(&mut program, ScalarOp::Multiply, alloc::vec![(summed_loss, identity(0)), (inverse_batch, identity(0))]);
+    let inverse_batch = op::append(
+        &mut program,
+        Op::Constant {
+            dtype: DType::Float32,
+            shape: Vec::new(),
+            value: 1.0 / BATCH as f32,
+        },
+    );
+    let loss = elementwise(
+        &mut program,
+        ScalarOp::Multiply,
+        alloc::vec![(summed_loss, identity(0)), (inverse_batch, identity(0))],
+    );
 
-    Network { program, w1, b1, w2, b2, loss }
+    Network {
+        program,
+        w1,
+        b1,
+        w2,
+        b2,
+        loss,
+    }
 }
 
 /// He-scaled pseudo-random init from a splitmix-style counter (no external
@@ -222,7 +309,12 @@ fn zeros(count: usize) -> Vec<f32> {
 }
 
 fn argmax(values: &[f32]) -> usize {
-    values.iter().enumerate().max_by(|left, right| left.1.total_cmp(right.1)).map(|(index, _)| index).expect("nonempty logits")
+    values
+        .iter()
+        .enumerate()
+        .max_by(|left, right| left.1.total_cmp(right.1))
+        .map(|(index, _)| index)
+        .expect("nonempty logits")
 }
 
 /// Trains [`build_network`] on real MNIST digits through
@@ -240,28 +332,128 @@ fn real_mnist_mlp_trains_and_classifies_at_reference_accuracy() {
 
     let network = build_network();
     let wanted = [network.w1, network.b1, network.w2, network.b2];
-    let differentiated = differentiate_wanted(&network.program, network.loss, &wanted).expect("scalar loss differentiates");
-    let grad_w1 = differentiated.gradient_of_named("w1").expect("w1 feeds the loss");
-    let grad_b1 = differentiated.gradient_of_named("b1").expect("b1 feeds the loss");
-    let grad_w2 = differentiated.gradient_of_named("w2").expect("w2 feeds the loss");
-    let grad_b2 = differentiated.gradient_of_named("b2").expect("b2 feeds the loss");
+    let differentiated = differentiate_wanted(&network.program, network.loss, &wanted)
+        .expect("scalar loss differentiates");
+    let grad_w1 = differentiated
+        .gradient_of_named("w1")
+        .expect("w1 feeds the loss");
+    let grad_b1 = differentiated
+        .gradient_of_named("b1")
+        .expect("b1 feeds the loss");
+    let grad_w2 = differentiated
+        .gradient_of_named("w2")
+        .expect("w2 feeds the loss");
+    let grad_b2 = differentiated
+        .gradient_of_named("b2")
+        .expect("b2 feeds the loss");
     let mut program = differentiated.program;
-    let config = AdamConfig { learning_rate: 0.001, ..AdamConfig::default() };
+    let config = AdamConfig {
+        learning_rate: 0.001,
+        ..AdamConfig::default()
+    };
     let step_node = step_input(&mut program, "step");
 
-    let m_w1 = leaf(&mut program, "m_w1", alloc::vec![Extent::Static(IN_DIM as u32), Extent::Static(HIDDEN_DIM as u32)]);
-    let v_w1 = leaf(&mut program, "v_w1", alloc::vec![Extent::Static(IN_DIM as u32), Extent::Static(HIDDEN_DIM as u32)]);
-    let m_b1 = leaf(&mut program, "m_b1", alloc::vec![Extent::Static(HIDDEN_DIM as u32)]);
-    let v_b1 = leaf(&mut program, "v_b1", alloc::vec![Extent::Static(HIDDEN_DIM as u32)]);
-    let m_w2 = leaf(&mut program, "m_w2", alloc::vec![Extent::Static(HIDDEN_DIM as u32), Extent::Static(OUT_DIM as u32)]);
-    let v_w2 = leaf(&mut program, "v_w2", alloc::vec![Extent::Static(HIDDEN_DIM as u32), Extent::Static(OUT_DIM as u32)]);
-    let m_b2 = leaf(&mut program, "m_b2", alloc::vec![Extent::Static(OUT_DIM as u32)]);
-    let v_b2 = leaf(&mut program, "v_b2", alloc::vec![Extent::Static(OUT_DIM as u32)]);
+    let m_w1 = leaf(
+        &mut program,
+        "m_w1",
+        alloc::vec![
+            Extent::Static(IN_DIM as u32),
+            Extent::Static(HIDDEN_DIM as u32)
+        ],
+    );
+    let v_w1 = leaf(
+        &mut program,
+        "v_w1",
+        alloc::vec![
+            Extent::Static(IN_DIM as u32),
+            Extent::Static(HIDDEN_DIM as u32)
+        ],
+    );
+    let m_b1 = leaf(
+        &mut program,
+        "m_b1",
+        alloc::vec![Extent::Static(HIDDEN_DIM as u32)],
+    );
+    let v_b1 = leaf(
+        &mut program,
+        "v_b1",
+        alloc::vec![Extent::Static(HIDDEN_DIM as u32)],
+    );
+    let m_w2 = leaf(
+        &mut program,
+        "m_w2",
+        alloc::vec![
+            Extent::Static(HIDDEN_DIM as u32),
+            Extent::Static(OUT_DIM as u32)
+        ],
+    );
+    let v_w2 = leaf(
+        &mut program,
+        "v_w2",
+        alloc::vec![
+            Extent::Static(HIDDEN_DIM as u32),
+            Extent::Static(OUT_DIM as u32)
+        ],
+    );
+    let m_b2 = leaf(
+        &mut program,
+        "m_b2",
+        alloc::vec![Extent::Static(OUT_DIM as u32)],
+    );
+    let v_b2 = leaf(
+        &mut program,
+        "v_b2",
+        alloc::vec![Extent::Static(OUT_DIM as u32)],
+    );
 
-    let (new_w1, new_m_w1, new_v_w1) = adam_step(&mut program, &config, 2, AdamOperands { param: network.w1, grad: grad_w1, m: m_w1, v: v_w1 }, step_node);
-    let (new_b1, new_m_b1, new_v_b1) = adam_step(&mut program, &config, 1, AdamOperands { param: network.b1, grad: grad_b1, m: m_b1, v: v_b1 }, step_node);
-    let (new_w2, new_m_w2, new_v_w2) = adam_step(&mut program, &config, 2, AdamOperands { param: network.w2, grad: grad_w2, m: m_w2, v: v_w2 }, step_node);
-    let (new_b2, new_m_b2, new_v_b2) = adam_step(&mut program, &config, 1, AdamOperands { param: network.b2, grad: grad_b2, m: m_b2, v: v_b2 }, step_node);
+    let (new_w1, new_m_w1, new_v_w1) = adam_step(
+        &mut program,
+        &config,
+        2,
+        AdamOperands {
+            param: network.w1,
+            grad: grad_w1,
+            m: m_w1,
+            v: v_w1,
+        },
+        step_node,
+    );
+    let (new_b1, new_m_b1, new_v_b1) = adam_step(
+        &mut program,
+        &config,
+        1,
+        AdamOperands {
+            param: network.b1,
+            grad: grad_b1,
+            m: m_b1,
+            v: v_b1,
+        },
+        step_node,
+    );
+    let (new_w2, new_m_w2, new_v_w2) = adam_step(
+        &mut program,
+        &config,
+        2,
+        AdamOperands {
+            param: network.w2,
+            grad: grad_w2,
+            m: m_w2,
+            v: v_w2,
+        },
+        step_node,
+    );
+    let (new_b2, new_m_b2, new_v_b2) = adam_step(
+        &mut program,
+        &config,
+        1,
+        AdamOperands {
+            param: network.b2,
+            grad: grad_b2,
+            m: m_b2,
+            v: v_b2,
+        },
+        step_node,
+    );
 
     let rebind: Vec<(NodeId, &str)> = alloc::vec![
         (new_w1, "w1"),
@@ -279,13 +471,19 @@ fn real_mnist_mlp_trains_and_classifies_at_reference_accuracy() {
     ];
 
     let initial_state: Vec<(String, Vec<f32>)> = alloc::vec![
-        ("w1".into(), he_init(0x9E37_79B9, IN_DIM * HIDDEN_DIM, IN_DIM)),
+        (
+            "w1".into(),
+            he_init(0x9E37_79B9, IN_DIM * HIDDEN_DIM, IN_DIM)
+        ),
         ("m_w1".into(), zeros(IN_DIM * HIDDEN_DIM)),
         ("v_w1".into(), zeros(IN_DIM * HIDDEN_DIM)),
         ("b1".into(), zeros(HIDDEN_DIM)),
         ("m_b1".into(), zeros(HIDDEN_DIM)),
         ("v_b1".into(), zeros(HIDDEN_DIM)),
-        ("w2".into(), he_init(0x8542_D2C3, HIDDEN_DIM * OUT_DIM, HIDDEN_DIM)),
+        (
+            "w2".into(),
+            he_init(0x8542_D2C3, HIDDEN_DIM * OUT_DIM, HIDDEN_DIM)
+        ),
         ("m_w2".into(), zeros(HIDDEN_DIM * OUT_DIM)),
         ("v_w2".into(), zeros(HIDDEN_DIM * OUT_DIM)),
         ("b2".into(), zeros(OUT_DIM)),
@@ -298,39 +496,80 @@ fn real_mnist_mlp_trains_and_classifies_at_reference_accuracy() {
     let example_count = TRAIN_EXAMPLES - (TRAIN_EXAMPLES % BATCH);
     let batch_count = example_count / BATCH;
 
-    let steps: Vec<[f32; 1]> = (1..=batch_count as u32).map(|value| [value as f32]).collect();
+    let steps: Vec<[f32; 1]> = (1..=batch_count as u32)
+        .map(|value| [value as f32])
+        .collect();
     let batches: Vec<Vec<(&str, &[f32])>> = (0..batch_count)
         .map(|batch_index| {
             let image_start = batch_index * BATCH * IN_DIM;
             let label_start = batch_index * BATCH * OUT_DIM;
             alloc::vec![
-                ("x", &train_images[image_start..image_start + BATCH * IN_DIM]),
-                ("y", &train_one_hot[label_start..label_start + BATCH * OUT_DIM]),
+                (
+                    "x",
+                    &train_images[image_start..image_start + BATCH * IN_DIM]
+                ),
+                (
+                    "y",
+                    &train_one_hot[label_start..label_start + BATCH * OUT_DIM]
+                ),
                 ("step", steps[batch_index].as_slice()),
             ]
         })
         .collect();
 
-    std::eprintln!("real_mnist_training: {batch_count} batches/epoch x {EPOCHS} epochs, batch={BATCH}, train_examples={example_count}");
+    std::eprintln!(
+        "real_mnist_training: {batch_count} batches/epoch x {EPOCHS} epochs, batch={BATCH}, train_examples={example_count}"
+    );
     let start = std::time::Instant::now();
-    let (final_state, loss_curve) = fit(&program, network.loss, &rebind, initial_state, EPOCHS, &batches).expect("fit runs to completion on real mnist data");
+    let (final_state, loss_curve) = fit(
+        &program,
+        network.loss,
+        &rebind,
+        initial_state,
+        EPOCHS,
+        &batches,
+    )
+    .expect("fit runs to completion on real mnist data");
     let elapsed = start.elapsed();
 
     let first_epoch_average = loss_curve[..batch_count].iter().sum::<f32>() / batch_count as f32;
-    let last_epoch_average = loss_curve[loss_curve.len() - batch_count..].iter().sum::<f32>() / batch_count as f32;
+    let last_epoch_average = loss_curve[loss_curve.len() - batch_count..]
+        .iter()
+        .sum::<f32>()
+        / batch_count as f32;
     std::eprintln!(
         "real_mnist_training loss curve: first-epoch-avg={first_epoch_average:.4} last-epoch-avg={last_epoch_average:.4} wall_clock={elapsed:?}"
     );
-    assert!(loss_curve.iter().all(|value| value.is_finite()), "loss went non-finite: first 10 = {:?}", &loss_curve[..10.min(loss_curve.len())]);
+    assert!(
+        loss_curve.iter().all(|value| value.is_finite()),
+        "loss went non-finite: first 10 = {:?}",
+        &loss_curve[..10.min(loss_curve.len())]
+    );
     assert!(
         last_epoch_average < first_epoch_average * 0.5,
         "expected training loss to more than halve over {EPOCHS} epochs, got {first_epoch_average:.4} -> {last_epoch_average:.4}"
     );
 
-    let final_w1 = &final_state.iter().find(|(name, _)| name == "w1").expect("trained w1 present").1;
-    let final_b1 = &final_state.iter().find(|(name, _)| name == "b1").expect("trained b1 present").1;
-    let final_w2 = &final_state.iter().find(|(name, _)| name == "w2").expect("trained w2 present").1;
-    let final_b2 = &final_state.iter().find(|(name, _)| name == "b2").expect("trained b2 present").1;
+    let final_w1 = &final_state
+        .iter()
+        .find(|(name, _)| name == "w1")
+        .expect("trained w1 present")
+        .1;
+    let final_b1 = &final_state
+        .iter()
+        .find(|(name, _)| name == "b1")
+        .expect("trained b1 present")
+        .1;
+    let final_w2 = &final_state
+        .iter()
+        .find(|(name, _)| name == "w2")
+        .expect("trained w2 present")
+        .1;
+    let final_b2 = &final_state
+        .iter()
+        .find(|(name, _)| name == "b2")
+        .expect("trained b2 present")
+        .1;
 
     let test_images = load_normalized_images(&test_images_path(), TEST_EXAMPLES);
     let (_test_one_hot, test_labels) = load_one_hot_labels(&test_labels_path(), TEST_EXAMPLES);
@@ -344,11 +583,40 @@ fn real_mnist_mlp_trains_and_classifies_at_reference_accuracy() {
     // so a training-sized `x` left dangling in a cloned program fails to
     // evaluate even when the eval subgraph never reads it.
     let mut eval_program = Vec::new();
-    let eval_x = leaf(&mut eval_program, "x", alloc::vec![Extent::Static(test_count as u32), Extent::Static(IN_DIM as u32)]);
-    let eval_w1 = leaf(&mut eval_program, "w1", alloc::vec![Extent::Static(IN_DIM as u32), Extent::Static(HIDDEN_DIM as u32)]);
-    let eval_b1 = leaf(&mut eval_program, "b1", alloc::vec![Extent::Static(HIDDEN_DIM as u32)]);
-    let eval_w2 = leaf(&mut eval_program, "w2", alloc::vec![Extent::Static(HIDDEN_DIM as u32), Extent::Static(OUT_DIM as u32)]);
-    let eval_b2 = leaf(&mut eval_program, "b2", alloc::vec![Extent::Static(OUT_DIM as u32)]);
+    let eval_x = leaf(
+        &mut eval_program,
+        "x",
+        alloc::vec![
+            Extent::Static(test_count as u32),
+            Extent::Static(IN_DIM as u32)
+        ],
+    );
+    let eval_w1 = leaf(
+        &mut eval_program,
+        "w1",
+        alloc::vec![
+            Extent::Static(IN_DIM as u32),
+            Extent::Static(HIDDEN_DIM as u32)
+        ],
+    );
+    let eval_b1 = leaf(
+        &mut eval_program,
+        "b1",
+        alloc::vec![Extent::Static(HIDDEN_DIM as u32)],
+    );
+    let eval_w2 = leaf(
+        &mut eval_program,
+        "w2",
+        alloc::vec![
+            Extent::Static(HIDDEN_DIM as u32),
+            Extent::Static(OUT_DIM as u32)
+        ],
+    );
+    let eval_b2 = leaf(
+        &mut eval_program,
+        "b2",
+        alloc::vec![Extent::Static(OUT_DIM as u32)],
+    );
     let eval_h_pre = batched_dense(&mut eval_program, eval_x, eval_w1, eval_b1);
     let eval_h = relu(&mut eval_program, DType::Float32, eval_h_pre, 2);
     let eval_logits = batched_dense(&mut eval_program, eval_h, eval_w2, eval_b2);
@@ -360,9 +628,15 @@ fn real_mnist_mlp_trains_and_classifies_at_reference_accuracy() {
         ("w2", final_w2.as_slice()),
         ("b2", final_b2.as_slice()),
     ];
-    let evaluated = proxima_tensor::cpu::evaluate_named(&eval_program, &[], &eval_named, &[eval_logits]).expect("evaluate the trained mlp on real held-out mnist test images");
+    let evaluated =
+        proxima_tensor::cpu::evaluate_named(&eval_program, &[], &eval_named, &[eval_logits])
+            .expect("evaluate the trained mlp on real held-out mnist test images");
     let (logits, shape) = evaluated.get(eval_logits).expect("eval logits present");
-    assert_eq!(shape, &alloc::vec![test_count as u64, OUT_DIM as u64], "one 10-way logit row per test image");
+    assert_eq!(
+        shape,
+        &alloc::vec![test_count as u64, OUT_DIM as u64],
+        "one 10-way logit row per test image"
+    );
 
     let mut correct = 0_usize;
     for (index, &label) in test_labels.iter().enumerate() {
@@ -372,7 +646,13 @@ fn real_mnist_mlp_trains_and_classifies_at_reference_accuracy() {
         }
     }
     let accuracy = correct as f64 / test_count as f64;
-    std::eprintln!("real_mnist_training test accuracy: {accuracy:.4} ({correct}/{test_count} images), total wall_clock={:?}", start.elapsed());
+    std::eprintln!(
+        "real_mnist_training test accuracy: {accuracy:.4} ({correct}/{test_count} images), total wall_clock={:?}",
+        start.elapsed()
+    );
 
-    assert!(accuracy >= 0.90, "expected the trained mlp to classify at least 90% of {test_count} real held-out mnist test images, got {accuracy:.4}");
+    assert!(
+        accuracy >= 0.90,
+        "expected the trained mlp to classify at least 90% of {test_count} real held-out mnist test images, got {accuracy:.4}"
+    );
 }

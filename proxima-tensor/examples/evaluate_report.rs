@@ -16,7 +16,9 @@ use std::time::Instant;
 
 use proxima_tensor::instrument;
 use proxima_tensor::test_support::Lcg;
-use proxima_tensor::{Extent, IndexMap, NodeId, Op, ReduceInit, ScalarOp, append, evaluate_parallel, map};
+use proxima_tensor::{
+    Extent, IndexMap, NodeId, Op, ReduceInit, ScalarOp, append, evaluate_parallel, map,
+};
 
 /// Wraps the system allocator to count every allocation the process makes
 /// (unconditionally — a call-site counter inside the crate would only ever
@@ -149,8 +151,16 @@ fn report_for_threads(program: &[Op], lhs: &[f32], rhs_t: &[f32], threads: usize
     let bookkeeping_nanos = instrument::ticks_to_nanos(serial.bookkeeping_ticks);
     let sequential_compute_nanos = instrument::ticks_to_nanos(serial.sequential_compute_ticks);
 
-    let imbalance = if chunk_min_nanos == 0 { 0.0 } else { chunk_max_nanos as f64 / chunk_min_nanos as f64 };
-    let spawn_percent = if node_nanos == 0 { 0.0 } else { spawn_nanos as f64 / node_nanos as f64 * 100.0 };
+    let imbalance = if chunk_min_nanos == 0 {
+        0.0
+    } else {
+        chunk_max_nanos as f64 / chunk_min_nanos as f64
+    };
+    let spawn_percent = if node_nanos == 0 {
+        0.0
+    } else {
+        spawn_nanos as f64 / node_nanos as f64 * 100.0
+    };
 
     let stage_sum_ns = prepare_nanos
         + alloc_nanos
@@ -189,8 +199,10 @@ fn report_for_threads(program: &[Op], lhs: &[f32], rhs_t: &[f32], threads: usize
     );
     #[cfg(target_arch = "aarch64")]
     {
-        let (neon_gate_passes, neon_invocations, neon_fallback) = proxima_tensor::cpu::neon_tile_counters();
-        let (width_gate_passes, width_invocations, width_fallback) = proxima_tensor::cpu::width_tile_counters();
+        let (neon_gate_passes, neon_invocations, neon_fallback) =
+            proxima_tensor::cpu::neon_tile_counters();
+        let (width_gate_passes, width_invocations, width_fallback) =
+            proxima_tensor::cpu::width_tile_counters();
         println!(
             "neon_dot_tile: gate_passes={neon_gate_passes} main_invocations={neon_invocations} \
              row_remainder_invocations={} row_remainder_elements={} fallback_elements={neon_fallback} \
@@ -212,7 +224,11 @@ fn report_for_threads(program: &[Op], lhs: &[f32], rhs_t: &[f32], threads: usize
         parallel.chunk_count,
         chunk_min_nanos,
         chunk_max_nanos,
-        if parallel.chunk_count == 0 { 0.0 } else { chunk_sum_nanos as f64 / parallel.chunk_count as f64 },
+        if parallel.chunk_count == 0 {
+            0.0
+        } else {
+            chunk_sum_nanos as f64 / parallel.chunk_count as f64
+        },
         spawn_nanos,
         join_nanos,
         node_nanos,
@@ -234,7 +250,14 @@ fn report_for_threads(program: &[Op], lhs: &[f32], rhs_t: &[f32], threads: usize
 fn main() {
     let args: Vec<String> = env::args().collect();
     let thread_counts: Vec<usize> = if args.len() > 1 {
-        args[1..].iter().map(|value| value.parse().expect("thread count must be a positive integer")).collect()
+        args[1..]
+            .iter()
+            .map(|value| {
+                value
+                    .parse()
+                    .expect("thread count must be a positive integer")
+            })
+            .collect()
     } else {
         vec![1, 2, 4, 8]
     };
@@ -247,7 +270,8 @@ fn main() {
     // one untimed warm-up so allocator free-lists/page tables are already
     // warm before the first measured run.
     let workers = NonZeroUsize::new(1).expect("nonzero");
-    let _ = evaluate_parallel(&program, &[], &[&lhs, &rhs_t], &[], workers).expect("warmup gemm evaluates");
+    let _ = evaluate_parallel(&program, &[], &[&lhs, &rhs_t], &[], workers)
+        .expect("warmup gemm evaluates");
 
     for threads in thread_counts {
         report_for_threads(&program, &lhs, &rhs_t, threads);

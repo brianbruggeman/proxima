@@ -35,7 +35,10 @@
 
 use proxima_onnx::lower::{Lowered, lower_graph};
 use proxima_onnx::messages::{GraphProto, NodeProto, TensorProto, ValueInfoProto};
-use proxima_tensor::cpu::{self, StaticArena, build_static_arena, build_static_arena_with_constants, evaluate_named_with_arena};
+use proxima_tensor::cpu::{
+    self, StaticArena, build_static_arena, build_static_arena_with_constants,
+    evaluate_named_with_arena,
+};
 
 const CALLS_PER_REPEAT: usize = 300;
 const REPEATS: usize = 5;
@@ -50,7 +53,13 @@ fn deterministic_data(len: usize, salt: u32) -> Vec<f32> {
 }
 
 fn f32_initializer(name: &'static str, dims: Vec<i64>, data: Vec<f32>) -> TensorProto<'static> {
-    TensorProto { dims, data_type: 1, float_data: data, name, ..TensorProto::default() }
+    TensorProto {
+        dims,
+        data_type: 1,
+        float_data: data,
+        name,
+        ..TensorProto::default()
+    }
 }
 
 fn build_instance(m: usize, k: usize, n: usize, salt: u32) -> Lowered {
@@ -58,12 +67,21 @@ fn build_instance(m: usize, k: usize, n: usize, salt: u32) -> Lowered {
     let rhs_data = deterministic_data(k * n, salt.wrapping_add(0x1111_1111));
     let lhs = f32_initializer("lhs", vec![m as i64, k as i64], lhs_data);
     let rhs = f32_initializer("rhs", vec![k as i64, n as i64], rhs_data);
-    let node = NodeProto { input: vec!["lhs", "rhs"], output: vec!["y"], op_type: "MatMul", name: "matmul", ..NodeProto::default() };
+    let node = NodeProto {
+        input: vec!["lhs", "rhs"],
+        output: vec!["y"],
+        op_type: "MatMul",
+        name: "matmul",
+        ..NodeProto::default()
+    };
     let graph = GraphProto {
         node: vec![node],
         name: "ceiling_graph",
         initializer: vec![lhs, rhs],
-        output: vec![ValueInfoProto { name: "y", ..ValueInfoProto::default() }],
+        output: vec![ValueInfoProto {
+            name: "y",
+            ..ValueInfoProto::default()
+        }],
         ..GraphProto::default()
     };
     lower_graph(&graph).expect("lower synthetic MatMul")
@@ -93,9 +111,17 @@ fn time_calls(arena: &mut StaticArena, named: &NamedInputs<'_>) -> Timed {
         ns_per_call_per_repeat.push(elapsed.as_nanos() as f64 / CALLS_PER_REPEAT as f64);
     }
     let mean = ns_per_call_per_repeat.iter().sum::<f64>() / ns_per_call_per_repeat.len() as f64;
-    let variance = ns_per_call_per_repeat.iter().map(|value| (value - mean).powi(2)).sum::<f64>() / ns_per_call_per_repeat.len() as f64;
+    let variance = ns_per_call_per_repeat
+        .iter()
+        .map(|value| (value - mean).powi(2))
+        .sum::<f64>()
+        / ns_per_call_per_repeat.len() as f64;
     let cov = variance.sqrt() / mean * 100.0;
-    Timed { mean_ns: mean, cov_pct: cov, samples: ns_per_call_per_repeat }
+    Timed {
+        mean_ns: mean,
+        cov_pct: cov,
+        samples: ns_per_call_per_repeat,
+    }
 }
 
 fn packed_neon_arm(m: usize, k: usize, n: usize) -> Timed {
@@ -103,9 +129,20 @@ fn packed_neon_arm(m: usize, k: usize, n: usize) -> Timed {
     cpu::set_accelerate_gemm_enabled(false);
     let lowered = build_instance(m, k, n, 0x6000_0000);
     let output = lowered.graph_outputs[0].1;
-    let rhs_data = lowered.initializers.iter().find(|(name, _)| name == "rhs").map(|(_, data)| data.as_slice()).expect("rhs initializer present");
-    let mut arena = build_static_arena_with_constants(&lowered.program, &[], &[output], &[("rhs", rhs_data)]).expect("build packed arena");
-    let named: NamedInputs<'_> = lowered.initializers.iter().map(|(name, data)| (name.as_str(), data.as_slice())).collect();
+    let rhs_data = lowered
+        .initializers
+        .iter()
+        .find(|(name, _)| name == "rhs")
+        .map(|(_, data)| data.as_slice())
+        .expect("rhs initializer present");
+    let mut arena =
+        build_static_arena_with_constants(&lowered.program, &[], &[output], &[("rhs", rhs_data)])
+            .expect("build packed arena");
+    let named: NamedInputs<'_> = lowered
+        .initializers
+        .iter()
+        .map(|(name, data)| (name.as_str(), data.as_slice()))
+        .collect();
     time_calls(&mut arena, &named)
 }
 
@@ -114,8 +151,13 @@ fn accelerate_arm(m: usize, k: usize, n: usize) -> Timed {
     cpu::set_accelerate_gemm_enabled(true);
     let lowered = build_instance(m, k, n, 0x7000_0000);
     let output = lowered.graph_outputs[0].1;
-    let mut arena = build_static_arena(&lowered.program, &[], &[output]).expect("build unpacked arena");
-    let named: NamedInputs<'_> = lowered.initializers.iter().map(|(name, data)| (name.as_str(), data.as_slice())).collect();
+    let mut arena =
+        build_static_arena(&lowered.program, &[], &[output]).expect("build unpacked arena");
+    let named: NamedInputs<'_> = lowered
+        .initializers
+        .iter()
+        .map(|(name, data)| (name.as_str(), data.as_slice()))
+        .collect();
     time_calls(&mut arena, &named)
 }
 
@@ -127,7 +169,11 @@ fn report(label: &str, m: usize, k: usize, n: usize, timed: &Timed) -> f64 {
         timed.mean_ns,
         timed.cov_pct,
         gmac_s,
-        timed.samples.iter().map(|value| format!("{value:.0}")).collect::<Vec<_>>()
+        timed
+            .samples
+            .iter()
+            .map(|value| format!("{value:.0}"))
+            .collect::<Vec<_>>()
     );
     gmac_s
 }
@@ -140,7 +186,9 @@ fn shape_block(name: &str, m: usize, k: usize, n: usize) {
     let accelerate = accelerate_arm(m, k, n);
     let accelerate_gmac = report("accelerate", m, k, n, &accelerate);
     let ratio = accelerate_gmac / packed_gmac;
-    println!("    -> accelerate/packed-neon GMAC/s ratio: {ratio:.3}x (>1 = accelerate beats the packed ceiling)");
+    println!(
+        "    -> accelerate/packed-neon GMAC/s ratio: {ratio:.3}x (>1 = accelerate beats the packed ceiling)"
+    );
     #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
     {
         let (hits, declined) = cpu::accelerate_gemm_totals();
@@ -151,8 +199,12 @@ fn shape_block(name: &str, m: usize, k: usize, n: usize) {
 }
 
 fn main() {
-    println!("bge_width_tile_accelerate_vs_packed_ceiling: re-anchor probe -- packed NEON (sibling's own ~48.0-48.8 GMAC/s ceiling shape) vs this session's Accelerate route (unpacked raw read), BGE real shapes, M in {{7,8,9}}");
-    println!("RE-ANCHORED PRE-REGISTRATION (see file doc comment): predict Accelerate/packed-NEON ratio > 1.0x at every cell.");
+    println!(
+        "bge_width_tile_accelerate_vs_packed_ceiling: re-anchor probe -- packed NEON (sibling's own ~48.0-48.8 GMAC/s ceiling shape) vs this session's Accelerate route (unpacked raw read), BGE real shapes, M in {{7,8,9}}"
+    );
+    println!(
+        "RE-ANCHORED PRE-REGISTRATION (see file doc comment): predict Accelerate/packed-NEON ratio > 1.0x at every cell."
+    );
     for &m in &[7usize, 8, 9] {
         shape_block("QKVO", m, 384, 384);
         shape_block("FFN-up", m, 384, 1536);

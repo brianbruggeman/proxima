@@ -37,7 +37,10 @@ pub const QK4_0: usize = 32;
 /// at `ggml-common.h:172`.
 pub const BLOCK_BYTES: usize = {
     let layout = GgmlType::Q4_0.block_layout();
-    assert!(layout.block_elements as usize == QK4_0, "GgmlType::Q4_0 block_elements drifted from QK4_0");
+    assert!(
+        layout.block_elements as usize == QK4_0,
+        "GgmlType::Q4_0 block_elements drifted from QK4_0"
+    );
     layout.block_bytes as usize
 };
 
@@ -118,7 +121,12 @@ pub fn dequantize(data: &[u8], output: &mut [f32]) -> Result<(), QuantError> {
             expected,
         });
     }
-    for (block, out_chunk) in data.as_chunks::<BLOCK_BYTES>().0.iter().zip(output.as_chunks_mut::<QK4_0>().0) {
+    for (block, out_chunk) in data
+        .as_chunks::<BLOCK_BYTES>()
+        .0
+        .iter()
+        .zip(output.as_chunks_mut::<QK4_0>().0)
+    {
         dequantize_block(block, out_chunk);
     }
     Ok(())
@@ -184,7 +192,12 @@ pub fn quantize(input: &[f32], output: &mut [u8]) -> Result<(), QuantError> {
             expected,
         });
     }
-    for (chunk, out_block) in input.as_chunks::<QK4_0>().0.iter().zip(output.as_chunks_mut::<BLOCK_BYTES>().0) {
+    for (chunk, out_block) in input
+        .as_chunks::<QK4_0>()
+        .0
+        .iter()
+        .zip(output.as_chunks_mut::<BLOCK_BYTES>().0)
+    {
         quantize_block(chunk, out_block);
     }
     Ok(())
@@ -199,7 +212,9 @@ mod tests {
 
     use proxima_telemetry::debug;
 
-    use super::{BLOCK_BYTES, CODEC, HALF_BLOCK, QK4_0, QS_OFFSET, QuantError, dequantize, quantize};
+    use super::{
+        BLOCK_BYTES, CODEC, HALF_BLOCK, QK4_0, QS_OFFSET, QuantError, dequantize, quantize,
+    };
 
     /// One block, hand-packed and hand-decoded, checked against the
     /// `x = (nibble - 8) * d` formula computed by hand -- not by calling
@@ -290,13 +305,19 @@ mod tests {
         let mut max_error = 0.0f32;
         let mut sum_sq_error = 0.0f64;
         for (got, want) in output.iter().zip(input.iter()) {
-            assert!(got.is_finite(), "dequantized value must be finite, got {got}");
+            assert!(
+                got.is_finite(),
+                "dequantized value must be finite, got {got}"
+            );
             let diff = (got - want).abs();
             max_error = max_error.max(diff);
             sum_sq_error += f64::from(diff) * f64::from(diff);
         }
         let rms_error = (sum_sq_error / elements as f64).sqrt();
-        debug!(max_error, rms_error, analytic_max_error, "quant.q4_0 smooth-signal round trip");
+        debug!(
+            max_error,
+            rms_error, analytic_max_error, "quant.q4_0 smooth-signal round trip"
+        );
         assert!(
             max_error <= analytic_max_error,
             "max_error={max_error} exceeds the format's own analytic bound {analytic_max_error}"

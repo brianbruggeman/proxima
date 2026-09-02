@@ -119,7 +119,9 @@ impl Spec {
         }
         for capability in &self.present {
             if !self.capabilities.contains(capability) {
-                return Err(SpecError::UndeclaredPresence { capability: capability.clone() });
+                return Err(SpecError::UndeclaredPresence {
+                    capability: capability.clone(),
+                });
             }
         }
         Ok(())
@@ -128,7 +130,10 @@ impl Spec {
     /// Computed, never hardcoded: every one of `output.requires` must be in
     /// `present`.
     fn satisfiable(&self, output: &OutputSpec) -> bool {
-        output.requires.iter().all(|capability| self.present.contains(capability))
+        output
+            .requires
+            .iter()
+            .all(|capability| self.present.contains(capability))
     }
 }
 
@@ -152,7 +157,9 @@ fn scalar_map() -> IndexMap {
 /// it, and which source feeds it -- no RNG, no clock, so re-deriving the
 /// same spec twice always emits bit-identical `Op::Constant` values.
 fn seeded_weight(layer_tag: u64, unit_index: usize, source_index: usize) -> f32 {
-    let raw = layer_tag.wrapping_mul(97).wrapping_add(unit_index as u64 * 13 + source_index as u64 * 5 + 3);
+    let raw = layer_tag
+        .wrapping_mul(97)
+        .wrapping_add(unit_index as u64 * 13 + source_index as u64 * 5 + 3);
     (((raw % 19) as f32) - 9.0) / 11.0
 }
 
@@ -168,11 +175,23 @@ const OUTPUT_LAYER_TAG: u64 = 2;
 /// below keeps at least one input and the sensor-loss test only drops one
 /// of five), but a spec is data a caller could still hand in with zero
 /// active inputs, and this function must not panic on it.
-fn accumulate(program: &mut alloc::vec::Vec<Op>, layer_tag: u64, unit_index: usize, sources: &[NodeId]) -> NodeId {
+fn accumulate(
+    program: &mut alloc::vec::Vec<Op>,
+    layer_tag: u64,
+    unit_index: usize,
+    sources: &[NodeId],
+) -> NodeId {
     let mut accumulator: Option<NodeId> = None;
     for (source_index, &source) in sources.iter().enumerate() {
         let weight = seeded_weight(layer_tag, unit_index, source_index);
-        let weight_node = op::append(program, Op::Constant { dtype: DType::Float32, shape: alloc::vec::Vec::new(), value: weight });
+        let weight_node = op::append(
+            program,
+            Op::Constant {
+                dtype: DType::Float32,
+                shape: alloc::vec::Vec::new(),
+                value: weight,
+            },
+        );
         let term = op::append(
             program,
             Op::Elementwise {
@@ -195,7 +214,16 @@ fn accumulate(program: &mut alloc::vec::Vec<Op>, layer_tag: u64, unit_index: usi
             ),
         });
     }
-    accumulator.unwrap_or_else(|| op::append(program, Op::Constant { dtype: DType::Float32, shape: alloc::vec::Vec::new(), value: 0.0 }))
+    accumulator.unwrap_or_else(|| {
+        op::append(
+            program,
+            Op::Constant {
+                dtype: DType::Float32,
+                shape: alloc::vec::Vec::new(),
+                value: 0.0,
+            },
+        )
+    })
 }
 
 /// `spec -> Vec<Op>`. Input width is `spec.inputs.len()`; output width is
@@ -210,15 +238,24 @@ fn derive_program(spec: &Spec) -> Result<Derived, SpecError> {
         .inputs
         .iter()
         .map(|id| {
-            let node = op::append(&mut program, Op::Input { dtype: DType::Float32, shape: alloc::vec::Vec::new(), name: Some(id.clone()) });
+            let node = op::append(
+                &mut program,
+                Op::Input {
+                    dtype: DType::Float32,
+                    shape: alloc::vec::Vec::new(),
+                    name: Some(id.clone()),
+                },
+            );
             (id.clone(), node)
         })
         .collect();
-    let input_node_ids: alloc::vec::Vec<NodeId> = input_nodes.iter().map(|(_, node)| *node).collect();
+    let input_node_ids: alloc::vec::Vec<NodeId> =
+        input_nodes.iter().map(|(_, node)| *node).collect();
 
     let hidden_nodes: alloc::vec::Vec<NodeId> = (0..spec.hidden_width)
         .map(|unit_index| {
-            let pre_activation = accumulate(&mut program, HIDDEN_LAYER_TAG, unit_index, &input_node_ids);
+            let pre_activation =
+                accumulate(&mut program, HIDDEN_LAYER_TAG, unit_index, &input_node_ids);
             activation::relu(&mut program, DType::Float32, pre_activation, 0)
         })
         .collect();
@@ -226,7 +263,12 @@ fn derive_program(spec: &Spec) -> Result<Derived, SpecError> {
     let mut output_nodes = alloc::vec::Vec::new();
     for output in &spec.outputs {
         if spec.satisfiable(output) {
-            let logit = accumulate(&mut program, OUTPUT_LAYER_TAG, output_nodes.len(), &hidden_nodes);
+            let logit = accumulate(
+                &mut program,
+                OUTPUT_LAYER_TAG,
+                output_nodes.len(),
+                &hidden_nodes,
+            );
             let named = op::append(
                 &mut program,
                 Op::Elementwise {
@@ -240,7 +282,11 @@ fn derive_program(spec: &Spec) -> Result<Derived, SpecError> {
         }
     }
 
-    Ok(Derived { program, input_nodes, output_nodes })
+    Ok(Derived {
+        program,
+        input_nodes,
+        output_nodes,
+    })
 }
 
 /// The absence proof: search the emitted `Vec<Op>` itself (not `Derived`'s
@@ -260,7 +306,18 @@ fn find_named_node<'program>(program: &'program [Op], name: &str) -> Option<&'pr
 /// iteration space), this needs no `shape::infer` call at all -- every node
 /// here is rank 0, so "one Multiply node" and "one MAC" already coincide.
 fn total_macs(program: &[Op]) -> u64 {
-    program.iter().filter(|op| matches!(op, Op::Elementwise { body: ScalarOp::Multiply, .. })).count() as u64
+    program
+        .iter()
+        .filter(|op| {
+            matches!(
+                op,
+                Op::Elementwise {
+                    body: ScalarOp::Multiply,
+                    ..
+                }
+            )
+        })
+        .count() as u64
 }
 
 /// How many ops in `left` and `right` are literally `Op::PartialEq`-equal,
@@ -287,7 +344,13 @@ fn shared_op_count(left: &[Op], right: &[Op]) -> usize {
 }
 
 fn output(id: &str, requires: &[&str]) -> OutputSpec {
-    OutputSpec { id: id.into(), requires: requires.iter().map(|capability| (*capability).into()).collect() }
+    OutputSpec {
+        id: id.into(),
+        requires: requires
+            .iter()
+            .map(|capability| (*capability).into())
+            .collect(),
+    }
 }
 
 fn strings(values: &[&str]) -> alloc::vec::Vec<alloc::string::String> {
@@ -405,10 +468,15 @@ async fn output_satisfiability_matches_the_declared_requirement(
 #[proxima::test]
 async fn an_output_requiring_an_undeclared_capability_is_rejected_as_ill_formed() {
     let spec = ill_formed_body_unknown_capability();
-    let error = spec.validate().expect_err("cap99 is not in the manifest, this must be rejected");
+    let error = spec
+        .validate()
+        .expect_err("cap99 is not in the manifest, this must be rejected");
     assert_eq!(
         error,
-        SpecError::UnknownCapability { output: "gamma".into(), capability: "cap99".into() },
+        SpecError::UnknownCapability {
+            output: "gamma".into(),
+            capability: "cap99".into()
+        },
         "the error must name the offending output and capability, not just fail"
     );
 }
@@ -416,8 +484,15 @@ async fn an_output_requiring_an_undeclared_capability_is_rejected_as_ill_formed(
 #[proxima::test]
 async fn a_capability_marked_present_but_never_declared_is_rejected_as_ill_formed() {
     let spec = ill_formed_body_undeclared_presence();
-    let error = spec.validate().expect_err("cap_ghost is not in the manifest, this must be rejected");
-    assert_eq!(error, SpecError::UndeclaredPresence { capability: "cap_ghost".into() });
+    let error = spec
+        .validate()
+        .expect_err("cap_ghost is not in the manifest, this must be rejected");
+    assert_eq!(
+        error,
+        SpecError::UndeclaredPresence {
+            capability: "cap_ghost".into()
+        }
+    );
 }
 
 /// A well-formed body must derive cleanly: proves `validate` is not
@@ -431,7 +506,8 @@ async fn a_well_formed_body_validates_and_derives() {
         damaged_body_missing_sensor(),
         augmented_body_added_capability(),
     ] {
-        spec.validate().expect("every body variant in this file is well-formed");
+        spec.validate()
+            .expect("every body variant in this file is well-formed");
         derive_program(&spec).expect("a well-formed spec must derive");
     }
 }
@@ -441,8 +517,16 @@ async fn removing_a_capability_strictly_shrinks_the_derived_program_and_its_mac_
     let full = derive_program(&full_body()).expect("full body derives");
     let damaged = derive_program(&damaged_body_missing_capability()).expect("damaged body derives");
 
-    assert_eq!(full.output_nodes.len(), 6, "every output is satisfiable when every capability is present");
-    assert_eq!(damaged.output_nodes.len(), 4, "delta and epsilon both need cap4, now absent");
+    assert_eq!(
+        full.output_nodes.len(),
+        6,
+        "every output is satisfiable when every capability is present"
+    );
+    assert_eq!(
+        damaged.output_nodes.len(),
+        4,
+        "delta and epsilon both need cap4, now absent"
+    );
 
     let full_macs = total_macs(&full.program);
     let damaged_macs = total_macs(&damaged.program);
@@ -451,18 +535,30 @@ async fn removing_a_capability_strictly_shrinks_the_derived_program_and_its_mac_
         full.program.len(),
         damaged.program.len()
     );
-    assert!(damaged.program.len() < full.program.len(), "removing a capability must strictly shrink the program");
-    assert!(damaged_macs < full_macs, "removing a capability must strictly shrink the MAC count");
+    assert!(
+        damaged.program.len() < full.program.len(),
+        "removing a capability must strictly shrink the program"
+    );
+    assert!(
+        damaged_macs < full_macs,
+        "removing a capability must strictly shrink the MAC count"
+    );
 
     for absent in ["delta", "epsilon"] {
         assert!(
             find_named_node(&damaged.program, absent).is_none(),
             "{absent} must have NO node at all once cap4 is gone, not a zeroed one"
         );
-        assert!(find_named_node(&full.program, absent).is_some(), "{absent} must exist in the undamaged body");
+        assert!(
+            find_named_node(&full.program, absent).is_some(),
+            "{absent} must exist in the undamaged body"
+        );
     }
     for still_present in ["rest", "alpha", "beta", "gamma"] {
-        assert!(find_named_node(&damaged.program, still_present).is_some(), "{still_present} does not depend on cap4");
+        assert!(
+            find_named_node(&damaged.program, still_present).is_some(),
+            "{still_present} does not depend on cap4"
+        );
     }
 }
 
@@ -484,9 +580,14 @@ async fn program_size_claim_is_falsifiable_a_wrong_op_delta_is_not_matched() {
 #[proxima::test]
 async fn adding_a_capability_strictly_grows_the_derived_program_and_its_mac_count() {
     let full = derive_program(&full_body()).expect("full body derives");
-    let augmented = derive_program(&augmented_body_added_capability()).expect("augmented body derives");
+    let augmented =
+        derive_program(&augmented_body_added_capability()).expect("augmented body derives");
 
-    assert_eq!(augmented.output_nodes.len(), 7, "zeta joins the six already-satisfiable outputs");
+    assert_eq!(
+        augmented.output_nodes.len(),
+        7,
+        "zeta joins the six already-satisfiable outputs"
+    );
     let full_macs = total_macs(&full.program);
     let augmented_macs = total_macs(&augmented.program);
     std::eprintln!(
@@ -494,10 +595,22 @@ async fn adding_a_capability_strictly_grows_the_derived_program_and_its_mac_coun
         full.program.len(),
         augmented.program.len()
     );
-    assert!(augmented.program.len() > full.program.len(), "adding a capability must strictly grow the program");
-    assert!(augmented_macs > full_macs, "adding a capability must strictly grow the MAC count");
-    assert!(find_named_node(&full.program, "zeta").is_none(), "zeta cannot exist before cap5 is added");
-    assert!(find_named_node(&augmented.program, "zeta").is_some(), "zeta must exist once cap5 is added");
+    assert!(
+        augmented.program.len() > full.program.len(),
+        "adding a capability must strictly grow the program"
+    );
+    assert!(
+        augmented_macs > full_macs,
+        "adding a capability must strictly grow the MAC count"
+    );
+    assert!(
+        find_named_node(&full.program, "zeta").is_none(),
+        "zeta cannot exist before cap5 is added"
+    );
+    assert!(
+        find_named_node(&augmented.program, "zeta").is_some(),
+        "zeta must exist once cap5 is added"
+    );
 }
 
 #[proxima::test]
@@ -508,8 +621,15 @@ async fn removing_a_sensor_shrinks_input_width_and_costs_exactly_hidden_width_ma
     let reduced = derive_program(&reduced_spec).expect("sensor-reduced body derives");
 
     assert_eq!(full.input_nodes.len(), 5);
-    assert_eq!(reduced.input_nodes.len(), 4, "s4 is gone, input width must shrink by exactly one");
-    assert!(reduced.input_nodes.iter().all(|(id, _)| id != "s4"), "s4 must not appear among the reduced body's inputs");
+    assert_eq!(
+        reduced.input_nodes.len(),
+        4,
+        "s4 is gone, input width must shrink by exactly one"
+    );
+    assert!(
+        reduced.input_nodes.iter().all(|(id, _)| id != "s4"),
+        "s4 must not appear among the reduced body's inputs"
+    );
 
     let full_macs = total_macs(&full.program);
     let reduced_macs = total_macs(&reduced.program);
@@ -518,8 +638,14 @@ async fn removing_a_sensor_shrinks_input_width_and_costs_exactly_hidden_width_ma
         full.program.len(),
         reduced.program.len()
     );
-    assert!(reduced.program.len() < full.program.len(), "removing a sensor must strictly shrink the program");
-    assert!(reduced_macs < full_macs, "removing a sensor must strictly shrink the MAC count");
+    assert!(
+        reduced.program.len() < full.program.len(),
+        "removing a sensor must strictly shrink the program"
+    );
+    assert!(
+        reduced_macs < full_macs,
+        "removing a sensor must strictly shrink the MAC count"
+    );
     assert_eq!(
         full_macs - reduced_macs,
         full_spec.hidden_width as u64,
@@ -540,19 +666,40 @@ async fn each_derived_body_program_evaluates_to_an_action_distribution_of_the_ri
     let derived = derive_program(&spec).expect("well-formed body derives");
     assert_eq!(derived.output_nodes.len(), expected_width);
 
-    let bindings: alloc::vec::Vec<(&str, alloc::vec::Vec<f32>)> =
-        derived.input_nodes.iter().map(|(id, _)| (id.as_str(), alloc::vec![sensor_value(id)])).collect();
-    let named_bindings: alloc::vec::Vec<(&str, &[f32])> = bindings.iter().map(|(id, values)| (*id, values.as_slice())).collect();
-    let output_ids: alloc::vec::Vec<NodeId> = derived.output_nodes.iter().map(|(_, node)| *node).collect();
+    let bindings: alloc::vec::Vec<(&str, alloc::vec::Vec<f32>)> = derived
+        .input_nodes
+        .iter()
+        .map(|(id, _)| (id.as_str(), alloc::vec![sensor_value(id)]))
+        .collect();
+    let named_bindings: alloc::vec::Vec<(&str, &[f32])> = bindings
+        .iter()
+        .map(|(id, values)| (*id, values.as_slice()))
+        .collect();
+    let output_ids: alloc::vec::Vec<NodeId> =
+        derived.output_nodes.iter().map(|(_, node)| *node).collect();
 
-    let evaluated = evaluate_named(&derived.program, &[], &named_bindings, &output_ids).expect("derived program lowers and evaluates");
-    assert_eq!(output_ids.len(), expected_width, "the number of requested outputs IS the action distribution's width");
+    let evaluated = evaluate_named(&derived.program, &[], &named_bindings, &output_ids)
+        .expect("derived program lowers and evaluates");
+    assert_eq!(
+        output_ids.len(),
+        expected_width,
+        "the number of requested outputs IS the action distribution's width"
+    );
     let expected_shape: alloc::vec::Vec<u64> = alloc::vec::Vec::new();
     for (label, node) in &derived.output_nodes {
-        let (values, shape) = evaluated.get(*node).unwrap_or_else(|| panic!("{label} was requested but not returned"));
-        assert_eq!(shape, expected_shape.as_slice(), "each action's readout is a scalar logit, rank 0");
+        let (values, shape) = evaluated
+            .get(*node)
+            .unwrap_or_else(|| panic!("{label} was requested but not returned"));
+        assert_eq!(
+            shape,
+            expected_shape.as_slice(),
+            "each action's readout is a scalar logit, rank 0"
+        );
         assert_eq!(values.len(), 1, "{label} must produce exactly one value");
-        assert!(values[0].is_finite(), "{label} produced a non-finite logit: {values:?}");
+        assert!(
+            values[0].is_finite(),
+            "{label} produced a non-finite logit: {values:?}"
+        );
     }
 }
 
@@ -561,7 +708,10 @@ async fn body_round_trips_through_toml() {
     let spec = augmented_body_added_capability();
     let text = toml::to_string(&spec).expect("a well-formed spec serializes to TOML");
     let parsed: Spec = toml::from_str(&text).expect("the serialized TOML parses back");
-    assert_eq!(parsed, spec, "a body must round-trip through TOML unchanged");
+    assert_eq!(
+        parsed, spec,
+        "a body must round-trip through TOML unchanged"
+    );
 
     let direct_program = derive_program(&spec).expect("the in-memory spec derives");
     let round_tripped_program = derive_program(&parsed).expect("the round-tripped spec derives");
@@ -599,10 +749,20 @@ async fn per_body_op_and_mac_report_and_cross_body_op_sharing() {
         ("missing_capability", damaged_body_missing_capability()),
         ("missing_sensor", damaged_body_missing_sensor()),
         ("added_capability", augmented_body_added_capability()),
-        ("missing_early_capability", damaged_body_missing_early_capability()),
+        (
+            "missing_early_capability",
+            damaged_body_missing_early_capability()
+        ),
     ];
-    let derived: alloc::vec::Vec<(&str, Derived)> =
-        bodies.iter().map(|(label, spec)| (*label, derive_program(spec).expect("every body in this sweep is well-formed"))).collect();
+    let derived: alloc::vec::Vec<(&str, Derived)> = bodies
+        .iter()
+        .map(|(label, spec)| {
+            (
+                *label,
+                derive_program(spec).expect("every body in this sweep is well-formed"),
+            )
+        })
+        .collect();
 
     for (label, body) in &derived {
         std::eprintln!(
@@ -627,7 +787,13 @@ async fn per_body_op_and_mac_report_and_cross_body_op_sharing() {
         }
     }
 
-    let find = |label: &str| -> &Derived { &derived.iter().find(|(candidate, _)| *candidate == label).expect("label is in the sweep").1 };
+    let find = |label: &str| -> &Derived {
+        &derived
+            .iter()
+            .find(|(candidate, _)| *candidate == label)
+            .expect("label is in the sweep")
+            .1
+    };
     let full = find("full");
     let missing_capability = find("missing_capability");
     let added_capability = find("added_capability");

@@ -510,8 +510,13 @@ fn matmul_parity_is_exact_for_integer_valued_inputs() {
     let rhs: Vec<f32> = (0..k * n).map(|value| value as f32).collect();
 
     let cpu = evaluate(&program, &[], &[&lhs, &rhs], &[]).expect("cpu matmul evaluates");
-    let metal = omega::execute(&program, &[], &[QuantizedBlock::Float32(&lhs), QuantizedBlock::Float32(&rhs)], &[])
-        .expect("metal matmul executes on a real device");
+    let metal = omega::execute(
+        &program,
+        &[],
+        &[QuantizedBlock::Float32(&lhs), QuantizedBlock::Float32(&rhs)],
+        &[],
+    )
+    .expect("metal matmul executes on a real device");
 
     let max_abs_diff = assert_parity("matmul", cpu.root(), metal.root());
     assert_eq!(
@@ -575,8 +580,16 @@ fn multiply_sqrt_reciprocal_chain_matches_cpu_on_a_real_device() {
 
     let cpu = evaluate(&program, &[], &[&a_data, &scale_data], &[])
         .expect("cpu multiply/sqrt/reciprocal chain evaluates");
-    let metal = omega::execute(&program, &[], &[QuantizedBlock::Float32(&a_data), QuantizedBlock::Float32(&scale_data)], &[])
-        .expect("metal multiply/sqrt/reciprocal chain executes on a real device");
+    let metal = omega::execute(
+        &program,
+        &[],
+        &[
+            QuantizedBlock::Float32(&a_data),
+            QuantizedBlock::Float32(&scale_data),
+        ],
+        &[],
+    )
+    .expect("metal multiply/sqrt/reciprocal chain executes on a real device");
 
     assert_parity("multiply_sqrt_reciprocal_chain", cpu.root(), metal.root());
 }
@@ -741,8 +754,17 @@ fn a_multi_operand_elementwise_fusion_chain_matches_cpu_on_a_real_device() {
 
     let cpu = evaluate(&program, &[], &[&a_data, &scale_data, &bias_data], &[])
         .expect("cpu elementwise chain evaluates");
-    let metal = omega::execute(&program, &[], &[QuantizedBlock::Float32(&a_data), QuantizedBlock::Float32(&scale_data), QuantizedBlock::Float32(&bias_data)], &[])
-        .expect("metal elementwise chain executes on a real device");
+    let metal = omega::execute(
+        &program,
+        &[],
+        &[
+            QuantizedBlock::Float32(&a_data),
+            QuantizedBlock::Float32(&scale_data),
+            QuantizedBlock::Float32(&bias_data),
+        ],
+        &[],
+    )
+    .expect("metal elementwise chain executes on a real device");
 
     assert_parity("elementwise_fusion_chain", cpu.root(), metal.root());
 }
@@ -779,8 +801,16 @@ fn conv_window_parity_matches_within_epsilon() {
 
     let cpu =
         evaluate(&program, &[], &[&kernel_data, &signal_data], &[]).expect("cpu conv evaluates");
-    let metal = omega::execute(&program, &[], &[QuantizedBlock::Float32(&kernel_data), QuantizedBlock::Float32(&signal_data)], &[])
-        .expect("metal conv executes on a real device");
+    let metal = omega::execute(
+        &program,
+        &[],
+        &[
+            QuantizedBlock::Float32(&kernel_data),
+            QuantizedBlock::Float32(&signal_data),
+        ],
+        &[],
+    )
+    .expect("metal conv executes on a real device");
 
     assert_parity("conv_window", cpu.root(), metal.root());
 }
@@ -794,8 +824,16 @@ fn embedding_lookup_parity_is_exact_for_integer_valued_inputs() {
 
     let cpu = evaluate(&program, &[], &[&table_data, &ids_data], &[])
         .expect("cpu embedding lookup evaluates");
-    let metal = omega::execute(&program, &[], &[QuantizedBlock::Float32(&table_data), QuantizedBlock::Float32(&ids_data)], &[])
-        .expect("metal embedding lookup executes on a real device");
+    let metal = omega::execute(
+        &program,
+        &[],
+        &[
+            QuantizedBlock::Float32(&table_data),
+            QuantizedBlock::Float32(&ids_data),
+        ],
+        &[],
+    )
+    .expect("metal embedding lookup executes on a real device");
 
     let max_abs_diff = assert_parity("embedding_lookup", cpu.root(), metal.root());
     assert_eq!(
@@ -820,8 +858,17 @@ fn embedding_matmul_parity_matches_within_epsilon() {
 
     let cpu = evaluate(&program, &[], &[&table_data, &ids_data, &weight_data], &[])
         .expect("cpu embedding matmul evaluates");
-    let metal = omega::execute(&program, &[], &[QuantizedBlock::Float32(&table_data), QuantizedBlock::Float32(&ids_data), QuantizedBlock::Float32(&weight_data)], &[])
-        .expect("metal embedding matmul executes on a real device");
+    let metal = omega::execute(
+        &program,
+        &[],
+        &[
+            QuantizedBlock::Float32(&table_data),
+            QuantizedBlock::Float32(&ids_data),
+            QuantizedBlock::Float32(&weight_data),
+        ],
+        &[],
+    )
+    .expect("metal embedding matmul executes on a real device");
 
     assert_parity("embedding_matmul", cpu.root(), metal.root());
 }
@@ -839,8 +886,16 @@ fn out_of_range_gather_index_produces_the_same_error_on_cpu_and_metal() {
 
     let cpu_error = evaluate(&program, &[], &[&table_data, &ids_data], &[])
         .expect_err("cpu rejects the out-of-range gather");
-    let metal_error = omega::execute(&program, &[], &[QuantizedBlock::Float32(&table_data), QuantizedBlock::Float32(&ids_data)], &[])
-        .expect_err("metal rejects the out-of-range gather too, not clamping it away");
+    let metal_error = omega::execute(
+        &program,
+        &[],
+        &[
+            QuantizedBlock::Float32(&table_data),
+            QuantizedBlock::Float32(&ids_data),
+        ],
+        &[],
+    )
+    .expect_err("metal rejects the out-of-range gather too, not clamping it away");
 
     assert!(
         matches!(cpu_error, TensorError::GatherIndexOutOfRange { .. }),
@@ -886,8 +941,13 @@ fn multi_output_parity_covers_both_an_intermediate_and_the_root() {
 
     let cpu =
         evaluate(&program, &[], &[&input], &[midpoint, root]).expect("cpu multi-output evaluates");
-    let metal = omega::execute(&program, &[], &[QuantizedBlock::Float32(&input)], &[midpoint, root])
-        .expect("metal multi-output executes on a real device");
+    let metal = omega::execute(
+        &program,
+        &[],
+        &[QuantizedBlock::Float32(&input)],
+        &[midpoint, root],
+    )
+    .expect("metal multi-output executes on a real device");
 
     let (cpu_mid, _) = cpu.get(midpoint).expect("cpu midpoint present");
     let (metal_mid, _) = metal.get(midpoint).expect("metal midpoint present");
@@ -908,8 +968,13 @@ fn symbolic_extent_parity_holds_across_two_different_bindings() {
 
         let cpu = evaluate(&program, &[m as u64], &[&lhs, &rhs], &[])
             .expect("cpu symbolic matmul evaluates");
-        let metal = omega::execute(&program, &[m as u64], &[QuantizedBlock::Float32(&lhs), QuantizedBlock::Float32(&rhs)], &[])
-            .expect("metal symbolic matmul executes on a real device, uniforms not baked");
+        let metal = omega::execute(
+            &program,
+            &[m as u64],
+            &[QuantizedBlock::Float32(&lhs), QuantizedBlock::Float32(&rhs)],
+            &[],
+        )
+        .expect("metal symbolic matmul executes on a real device, uniforms not baked");
 
         assert_parity(&format!("symbolic_matmul_m{m}"), cpu.root(), metal.root());
     }
@@ -976,8 +1041,13 @@ fn matmul_parity_holds_over_a_contraction_spanning_multiple_simd_lanes() {
     let rhs = random_vec(0x1234_5678_9abc_def0, k * n);
 
     let cpu = evaluate(&program, &[], &[&lhs, &rhs], &[]).expect("cpu matmul evaluates");
-    let metal = omega::execute(&program, &[], &[QuantizedBlock::Float32(&lhs), QuantizedBlock::Float32(&rhs)], &[])
-        .expect("metal matmul executes on a real device");
+    let metal = omega::execute(
+        &program,
+        &[],
+        &[QuantizedBlock::Float32(&lhs), QuantizedBlock::Float32(&rhs)],
+        &[],
+    )
+    .expect("metal matmul executes on a real device");
 
     // observed worst-case diff on this host: 7.629395e-6 (k=97 lanes
     // reassociated) — a real, expected float-reassociation cost, not a
@@ -997,9 +1067,24 @@ fn axis_reduce_parity_holds_for_every_cooperative_reduce_body() {
     let data_near_one = random_vec_near_one(0xbf58_476d_1ce4_e5b9, (rows * cols) as usize);
 
     let cases = [
-        ("axis_max", ScalarOp::Maximum, ReduceInit::NegativeInfinity, &data),
-        ("axis_min", ScalarOp::Minimum, ReduceInit::PositiveInfinity, &data),
-        ("axis_multiply", ScalarOp::Multiply, ReduceInit::One, &data_near_one),
+        (
+            "axis_max",
+            ScalarOp::Maximum,
+            ReduceInit::NegativeInfinity,
+            &data,
+        ),
+        (
+            "axis_min",
+            ScalarOp::Minimum,
+            ReduceInit::PositiveInfinity,
+            &data,
+        ),
+        (
+            "axis_multiply",
+            ScalarOp::Multiply,
+            ReduceInit::One,
+            &data_near_one,
+        ),
     ];
 
     for (case, body, init, input) in cases {
@@ -1007,9 +1092,10 @@ fn axis_reduce_parity_holds_for_every_cooperative_reduce_body() {
         let cpu = evaluate(&program, &[], &[input], &[]).unwrap_or_else(|error| {
             panic!("{case}: cpu axis reduce evaluates: {error}");
         });
-        let metal = omega::execute(&program, &[], &[QuantizedBlock::Float32(input)], &[]).unwrap_or_else(|error| {
-            panic!("{case}: metal axis reduce executes on a real device: {error}");
-        });
+        let metal = omega::execute(&program, &[], &[QuantizedBlock::Float32(input)], &[])
+            .unwrap_or_else(|error| {
+                panic!("{case}: metal axis reduce executes on a real device: {error}");
+            });
         assert_parity(case, cpu.root(), metal.root());
     }
 }
@@ -1111,8 +1197,13 @@ fn matmul_parity_is_within_f16_epsilon_of_the_f32_cpu_oracle() {
 
     let cpu =
         evaluate(&f32_program, &[], &[&lhs, &rhs], &[]).expect("f32 cpu oracle matmul evaluates");
-    let metal = omega::execute(&f16_program, &[], &[QuantizedBlock::Float32(&lhs), QuantizedBlock::Float32(&rhs)], &[])
-        .expect("f16 metal matmul executes on a real device");
+    let metal = omega::execute(
+        &f16_program,
+        &[],
+        &[QuantizedBlock::Float32(&lhs), QuantizedBlock::Float32(&rhs)],
+        &[],
+    )
+    .expect("f16 metal matmul executes on a real device");
 
     assert!(
         !cpu.root().is_empty(),
@@ -1178,8 +1269,9 @@ fn page_aligned_input_takes_the_no_copy_metal_upload_path() {
         },
     );
 
-    let mut aligned = proxima_tensor::AlignedBuffer::new(page_elements as usize, omega::page_size())
-        .expect("small aligned request never fails");
+    let mut aligned =
+        proxima_tensor::AlignedBuffer::new(page_elements as usize, omega::page_size())
+            .expect("small aligned request never fails");
     for (index, value) in aligned.iter_mut().enumerate() {
         *value = (index % 7) as f32 * 0.1;
     }
@@ -1305,7 +1397,11 @@ fn metal_matmul_on_packed_q4k_weights_matches_the_dequantized_f32_cpu_path() {
 
     let actual = metal.root();
     let expected = cpu.root();
-    assert_eq!(actual.len(), rows as usize, "degenerate gate: no outputs compared");
+    assert_eq!(
+        actual.len(),
+        rows as usize,
+        "degenerate gate: no outputs compared"
+    );
     assert_eq!(actual.len(), expected.len());
 
     let mut max_diff = 0.0f32;
@@ -1313,7 +1409,10 @@ fn metal_matmul_on_packed_q4k_weights_matches_the_dequantized_f32_cpu_path() {
         assert!(got.is_finite(), "metal produced a non-finite value: {got}");
         max_diff = max_diff.max((got - want).abs());
     }
-    let max_magnitude = expected.iter().map(|value| value.abs()).fold(0.0f32, f32::max);
+    let max_magnitude = expected
+        .iter()
+        .map(|value| value.abs())
+        .fold(0.0f32, f32::max);
     let relative = max_diff / max_magnitude;
     eprintln!(
         "packed-q4k metal vs dequantized-f32 cpu: rows={rows} k={k} \
@@ -1392,7 +1491,11 @@ fn metal_matmul_on_packed_q4k_weights_matches_the_dequantized_f32_cpu_path_at_ti
     let actual = metal.root();
     let expected = cpu.root();
     let element_count = rows as usize * tokens as usize;
-    assert_eq!(actual.len(), element_count, "degenerate gate: no outputs compared");
+    assert_eq!(
+        actual.len(),
+        element_count,
+        "degenerate gate: no outputs compared"
+    );
     assert_eq!(actual.len(), expected.len());
 
     let mut max_diff = 0.0f32;
@@ -1400,7 +1503,10 @@ fn metal_matmul_on_packed_q4k_weights_matches_the_dequantized_f32_cpu_path_at_ti
         assert!(got.is_finite(), "metal produced a non-finite value: {got}");
         max_diff = max_diff.max((got - want).abs());
     }
-    let max_magnitude = expected.iter().map(|value| value.abs()).fold(0.0f32, f32::max);
+    let max_magnitude = expected
+        .iter()
+        .map(|value| value.abs())
+        .fold(0.0f32, f32::max);
     let relative = max_diff / max_magnitude;
     eprintln!(
         "tiled-gemm packed-q4k metal vs dequantized-f32 cpu: rows={rows} k={k} tokens={tokens} \
@@ -1427,7 +1533,12 @@ fn metal_matmul_on_packed_q4k_weights_matches_the_dequantized_f32_cpu_path_at_ti
 /// [`classify_tiled_gemm`](omega::msl) gates the tiled `simdgroup_matrix`
 /// path on.
 #[cfg(feature = "metal-tiled-gemm")]
-fn q4k_tiled_gemm_program(rows: u32, k: u32, tokens: u32, weight_dtype: DType) -> (Vec<Op>, NodeId) {
+fn q4k_tiled_gemm_program(
+    rows: u32,
+    k: u32,
+    tokens: u32,
+    weight_dtype: DType,
+) -> (Vec<Op>, NodeId) {
     let mut program = Vec::new();
     let weight = append(
         &mut program,
@@ -1536,7 +1647,11 @@ fn metal_matmul_on_packed_q6k_weights_matches_the_dequantized_f32_cpu_path() {
 
     let actual = metal.root();
     let expected = cpu.root();
-    assert_eq!(actual.len(), rows as usize, "degenerate gate: no outputs compared");
+    assert_eq!(
+        actual.len(),
+        rows as usize,
+        "degenerate gate: no outputs compared"
+    );
     assert_eq!(actual.len(), expected.len());
 
     let mut max_diff = 0.0f32;
@@ -1544,7 +1659,10 @@ fn metal_matmul_on_packed_q6k_weights_matches_the_dequantized_f32_cpu_path() {
         assert!(got.is_finite(), "metal produced a non-finite value: {got}");
         max_diff = max_diff.max((got - want).abs());
     }
-    let max_magnitude = expected.iter().map(|value| value.abs()).fold(0.0f32, f32::max);
+    let max_magnitude = expected
+        .iter()
+        .map(|value| value.abs())
+        .fold(0.0f32, f32::max);
     let relative = max_diff / max_magnitude;
     eprintln!(
         "packed-q6k metal vs dequantized-f32 cpu: rows={rows} k={k} \
@@ -1614,7 +1732,11 @@ fn metal_matmul_on_packed_q5k_weights_matches_the_dequantized_f32_cpu_path() {
 
     let actual = metal.root();
     let expected = cpu.root();
-    assert_eq!(actual.len(), rows as usize, "degenerate gate: no outputs compared");
+    assert_eq!(
+        actual.len(),
+        rows as usize,
+        "degenerate gate: no outputs compared"
+    );
     assert_eq!(actual.len(), expected.len());
 
     let mut max_diff = 0.0f32;
@@ -1622,7 +1744,10 @@ fn metal_matmul_on_packed_q5k_weights_matches_the_dequantized_f32_cpu_path() {
         assert!(got.is_finite(), "metal produced a non-finite value: {got}");
         max_diff = max_diff.max((got - want).abs());
     }
-    let max_magnitude = expected.iter().map(|value| value.abs()).fold(0.0f32, f32::max);
+    let max_magnitude = expected
+        .iter()
+        .map(|value| value.abs())
+        .fold(0.0f32, f32::max);
     let relative = max_diff / max_magnitude;
     eprintln!(
         "packed-q5k metal vs dequantized-f32 cpu: rows={rows} k={k} \
@@ -1691,7 +1816,12 @@ fn q4k_matmul_program(rows: u32, k: u32, weight_dtype: DType) -> (Vec<Op>, NodeI
 /// (`DType::UInt8`) for every packed codec regardless of `compute_dtype`,
 /// the same way `reject_unsupported_gpu_dtype` treats it, and is
 /// `DType::Float32` only for the plain (unpacked) `float32` cell.
-fn codec_matmul_program(rows: u32, k: u32, weight_dtype: DType, compute_dtype: DType) -> (Vec<Op>, NodeId) {
+fn codec_matmul_program(
+    rows: u32,
+    k: u32,
+    weight_dtype: DType,
+    compute_dtype: DType,
+) -> (Vec<Op>, NodeId) {
     let mut program = Vec::new();
     let weight = append(
         &mut program,
@@ -1770,7 +1900,11 @@ fn codec_matmul_program(rows: u32, k: u32, weight_dtype: DType, compute_dtype: D
 #[case::q8_0_at_float16("q8_0", DType::Float16, 1e-2)]
 #[case::q4_0_at_float32("q4_0", DType::Float32, 1e-5)]
 #[case::q4_0_at_float16("q4_0", DType::Float16, 1e-2)]
-async fn metal_matmul_parity_across_codec_and_dtype(#[case] codec: &str, #[case] compute_dtype: DType, #[case] epsilon: f32) {
+async fn metal_matmul_parity_across_codec_and_dtype(
+    #[case] codec: &str,
+    #[case] compute_dtype: DType,
+    #[case] epsilon: f32,
+) {
     use proxima_gguf::quant::q4_0;
     use proxima_gguf::quant::q4_k;
     use proxima_gguf::quant::q5_k;
@@ -1801,7 +1935,8 @@ async fn metal_matmul_parity_across_codec_and_dtype(#[case] codec: &str, #[case]
                 .chunks_exact(k as usize)
                 .zip(weight_blocks.chunks_exact_mut(blocks_per_row * q4_k::BLOCK_BYTES))
             {
-                q4_k::quantize(row_f32, row_blocks).expect("row length is a whole multiple of QK_K");
+                q4_k::quantize(row_f32, row_blocks)
+                    .expect("row length is a whole multiple of QK_K");
             }
             Some(weight_blocks)
         }
@@ -1811,7 +1946,8 @@ async fn metal_matmul_parity_across_codec_and_dtype(#[case] codec: &str, #[case]
                 .chunks_exact(k as usize)
                 .zip(weight_blocks.chunks_exact_mut(blocks_per_row * q5_k::BLOCK_BYTES))
             {
-                q5_k::quantize(row_f32, row_blocks).expect("row length is a whole multiple of QK_K");
+                q5_k::quantize(row_f32, row_blocks)
+                    .expect("row length is a whole multiple of QK_K");
             }
             Some(weight_blocks)
         }
@@ -1821,7 +1957,8 @@ async fn metal_matmul_parity_across_codec_and_dtype(#[case] codec: &str, #[case]
                 .chunks_exact(k as usize)
                 .zip(weight_blocks.chunks_exact_mut(blocks_per_row * q6_k::BLOCK_BYTES))
             {
-                q6_k::quantize(row_f32, row_blocks).expect("row length is a whole multiple of QK_K");
+                q6_k::quantize(row_f32, row_blocks)
+                    .expect("row length is a whole multiple of QK_K");
             }
             Some(weight_blocks)
         }
@@ -1830,12 +1967,14 @@ async fn metal_matmul_parity_across_codec_and_dtype(#[case] codec: &str, #[case]
             // `blocks_per_row` above counts K-quant super-blocks, so this
             // codec's own per-row block count is `k / QK8_0` instead.
             let q8_blocks_per_row = k as usize / q8_0::QK8_0;
-            let mut weight_blocks = vec![0u8; rows as usize * q8_blocks_per_row * q8_0::BLOCK_BYTES];
+            let mut weight_blocks =
+                vec![0u8; rows as usize * q8_blocks_per_row * q8_0::BLOCK_BYTES];
             for (row_f32, row_blocks) in weight_f32
                 .chunks_exact(k as usize)
                 .zip(weight_blocks.chunks_exact_mut(q8_blocks_per_row * q8_0::BLOCK_BYTES))
             {
-                q8_0::quantize(row_f32, row_blocks).expect("row length is a whole multiple of QK8_0");
+                q8_0::quantize(row_f32, row_blocks)
+                    .expect("row length is a whole multiple of QK8_0");
             }
             Some(weight_blocks)
         }
@@ -1844,19 +1983,25 @@ async fn metal_matmul_parity_across_codec_and_dtype(#[case] codec: &str, #[case]
             // `q8_0` above, its own per-row block count, not the K-quant
             // `blocks_per_row`.
             let q4_0_blocks_per_row = k as usize / q4_0::QK4_0;
-            let mut weight_blocks = vec![0u8; rows as usize * q4_0_blocks_per_row * q4_0::BLOCK_BYTES];
+            let mut weight_blocks =
+                vec![0u8; rows as usize * q4_0_blocks_per_row * q4_0::BLOCK_BYTES];
             for (row_f32, row_blocks) in weight_f32
                 .chunks_exact(k as usize)
                 .zip(weight_blocks.chunks_exact_mut(q4_0_blocks_per_row * q4_0::BLOCK_BYTES))
             {
-                q4_0::quantize(row_f32, row_blocks).expect("row length is a whole multiple of QK4_0");
+                q4_0::quantize(row_f32, row_blocks)
+                    .expect("row length is a whole multiple of QK4_0");
             }
             Some(weight_blocks)
         }
         other => panic!("unhandled codec case in this matrix: {other}"),
     };
 
-    let weight_dtype = if packed_weight_blocks.is_some() { DType::UInt8 } else { DType::Float32 };
+    let weight_dtype = if packed_weight_blocks.is_some() {
+        DType::UInt8
+    } else {
+        DType::Float32
+    };
     let (program, sum) = codec_matmul_program(rows, k, weight_dtype, compute_dtype);
     let weight_block = match (&packed_weight_blocks, codec) {
         (Some(bytes), "q4_k") => QuantizedBlock::Q4K(bytes),
@@ -1867,8 +2012,15 @@ async fn metal_matmul_parity_across_codec_and_dtype(#[case] codec: &str, #[case]
         (Some(_), other) => panic!("unhandled codec case in this matrix: {other}"),
         (None, _) => QuantizedBlock::Float32(&weight_f32),
     };
-    let metal = omega::execute(&program, &[], &[weight_block, QuantizedBlock::Float32(&activation)], &[sum])
-        .unwrap_or_else(|error| panic!("{codec}@{compute_dtype:?}: metal executes on a real device: {error}"));
+    let metal = omega::execute(
+        &program,
+        &[],
+        &[weight_block, QuantizedBlock::Float32(&activation)],
+        &[sum],
+    )
+    .unwrap_or_else(|error| {
+        panic!("{codec}@{compute_dtype:?}: metal executes on a real device: {error}")
+    });
 
     let cpu_weight: Vec<f32> = match (&packed_weight_blocks, codec) {
         (None, _) => weight_f32.clone(),
@@ -1927,17 +2079,31 @@ async fn metal_matmul_parity_across_codec_and_dtype(#[case] codec: &str, #[case]
         (Some(_), other) => panic!("unhandled codec case in this matrix: {other}"),
     };
     let (f32_program, f32_sum) = codec_matmul_program(rows, k, DType::Float32, DType::Float32);
-    let cpu = evaluate(&f32_program, &[], &[&cpu_weight, &activation], &[f32_sum]).expect("f32 cpu oracle evaluates");
+    let cpu = evaluate(&f32_program, &[], &[&cpu_weight, &activation], &[f32_sum])
+        .expect("f32 cpu oracle evaluates");
 
     let actual = metal.root();
     let expected = cpu.root();
-    assert_eq!(actual.len(), rows as usize, "degenerate gate: no outputs compared");
+    assert_eq!(
+        actual.len(),
+        rows as usize,
+        "degenerate gate: no outputs compared"
+    );
     assert_eq!(actual.len(), expected.len());
 
-    let max_diff = actual.iter().zip(expected.iter()).map(|(&got, &want)| (got - want).abs()).fold(0.0f32, f32::max);
-    let max_magnitude = expected.iter().map(|value| value.abs()).fold(0.0f32, f32::max);
+    let max_diff = actual
+        .iter()
+        .zip(expected.iter())
+        .map(|(&got, &want)| (got - want).abs())
+        .fold(0.0f32, f32::max);
+    let max_magnitude = expected
+        .iter()
+        .map(|value| value.abs())
+        .fold(0.0f32, f32::max);
     let relative = max_diff / max_magnitude;
-    eprintln!("{codec}@{compute_dtype:?}: relative={relative} epsilon={epsilon} (max_diff={max_diff} max_magnitude={max_magnitude})");
+    eprintln!(
+        "{codec}@{compute_dtype:?}: relative={relative} epsilon={epsilon} (max_diff={max_diff} max_magnitude={max_magnitude})"
+    );
     assert!(
         relative <= epsilon,
         "{codec}@{compute_dtype:?}: relative diff {relative} exceeds {epsilon} -- max_diff={max_diff} \

@@ -56,13 +56,17 @@ pub fn vocab_from_tokenizer_json(
     eos_token_id: Option<u32>,
     unknown_token_id: Option<u32>,
 ) -> Result<Vocab, TokenizerError> {
-    let root: Value = serde_json::from_slice(bytes).map_err(|error| TokenizerError::MalformedHfTokenizerJson {
-        reason: error.to_string(),
+    let root: Value = serde_json::from_slice(bytes).map_err(|error| {
+        TokenizerError::MalformedHfTokenizerJson {
+            reason: error.to_string(),
+        }
     })?;
 
-    let model = root.get("model").ok_or_else(|| TokenizerError::MalformedHfTokenizerJson {
-        reason: String::from("no top-level 'model' key"),
-    })?;
+    let model = root
+        .get("model")
+        .ok_or_else(|| TokenizerError::MalformedHfTokenizerJson {
+            reason: String::from("no top-level 'model' key"),
+        })?;
     let vocab_object = model
         .get("vocab")
         .and_then(Value::as_object)
@@ -79,7 +83,13 @@ pub fn vocab_from_tokenizer_json(
     let tokens = tokens_by_id(vocab_object)?;
     let merges = string_array(merges_array, "model.merges")?;
 
-    Vocab::new(tokens, &merges, bos_token_id, eos_token_id, unknown_token_id)
+    Vocab::new(
+        tokens,
+        &merges,
+        bos_token_id,
+        eos_token_id,
+        unknown_token_id,
+    )
 }
 
 /// `model.vocab`'s `{token: id}` json object, re-indexed to an id-ordered
@@ -90,17 +100,24 @@ pub fn vocab_from_tokenizer_json(
 /// this dense (verified against the real SmolLM2 fixture in this module's
 /// own doc), so a gap or duplicate here means the file is malformed rather
 /// than something this reader should silently paper over.
-fn tokens_by_id(vocab_object: &serde_json::Map<String, Value>) -> Result<Vec<String>, TokenizerError> {
+fn tokens_by_id(
+    vocab_object: &serde_json::Map<String, Value>,
+) -> Result<Vec<String>, TokenizerError> {
     let mut tokens: Vec<Option<String>> = alloc::vec![None; vocab_object.len()];
     for (token, id_value) in vocab_object {
-        let id = id_value.as_u64().ok_or_else(|| TokenizerError::MalformedHfTokenizerJson {
-            reason: alloc::format!("model.vocab[{token:?}] is not an integer id"),
-        })?;
-        let slot = tokens
-            .get_mut(id as usize)
+        let id = id_value
+            .as_u64()
             .ok_or_else(|| TokenizerError::MalformedHfTokenizerJson {
-                reason: alloc::format!("model.vocab[{token:?}] = {id}, outside 0..{} (vocab is not id-contiguous)", vocab_object.len()),
+                reason: alloc::format!("model.vocab[{token:?}] is not an integer id"),
             })?;
+        let slot = tokens.get_mut(id as usize).ok_or_else(|| {
+            TokenizerError::MalformedHfTokenizerJson {
+                reason: alloc::format!(
+                    "model.vocab[{token:?}] = {id}, outside 0..{} (vocab is not id-contiguous)",
+                    vocab_object.len()
+                ),
+            }
+        })?;
         if slot.replace(token.clone()).is_some() {
             return Err(TokenizerError::MalformedHfTokenizerJson {
                 reason: alloc::format!("model.vocab id {id} is assigned to more than one token"),
@@ -110,9 +127,13 @@ fn tokens_by_id(vocab_object: &serde_json::Map<String, Value>) -> Result<Vec<Str
     tokens
         .into_iter()
         .enumerate()
-        .map(|(id, token)| token.ok_or_else(|| TokenizerError::MalformedHfTokenizerJson {
-            reason: alloc::format!("model.vocab has no token for id {id} (vocab is not id-contiguous)"),
-        }))
+        .map(|(id, token)| {
+            token.ok_or_else(|| TokenizerError::MalformedHfTokenizerJson {
+                reason: alloc::format!(
+                    "model.vocab has no token for id {id} (vocab is not id-contiguous)"
+                ),
+            })
+        })
         .collect()
 }
 
@@ -134,9 +155,13 @@ fn tokens_by_id(vocab_object: &serde_json::Map<String, Value>) -> Result<Vec<Str
 /// [`TokenizerError::MalformedHfTokenizerJson`] if `bytes` is not valid
 /// JSON, or a present `add_bos_token`/`add_eos_token` key is not a JSON
 /// boolean.
-pub fn bos_eos_policy_from_tokenizer_config(bytes: &[u8]) -> Result<(Option<bool>, Option<bool>), TokenizerError> {
-    let root: Value = serde_json::from_slice(bytes).map_err(|error| TokenizerError::MalformedHfTokenizerJson {
-        reason: error.to_string(),
+pub fn bos_eos_policy_from_tokenizer_config(
+    bytes: &[u8],
+) -> Result<(Option<bool>, Option<bool>), TokenizerError> {
+    let root: Value = serde_json::from_slice(bytes).map_err(|error| {
+        TokenizerError::MalformedHfTokenizerJson {
+            reason: error.to_string(),
+        }
     })?;
     Ok((
         bool_field(&root, "add_bos_token")?,
@@ -160,8 +185,10 @@ fn string_array(values: &[Value], field: &'static str) -> Result<Vec<String>, To
     values
         .iter()
         .map(|value| {
-            value.as_str().map(String::from).ok_or_else(|| TokenizerError::MalformedHfTokenizerJson {
-                reason: alloc::format!("{field} contains a non-string entry"),
+            value.as_str().map(String::from).ok_or_else(|| {
+                TokenizerError::MalformedHfTokenizerJson {
+                    reason: alloc::format!("{field} contains a non-string entry"),
+                }
             })
         })
         .collect()
@@ -213,48 +240,73 @@ mod tests {
     #[test]
     fn malformed_json_is_a_typed_error_not_a_panic() {
         let outcome = vocab_from_tokenizer_json(b"not json at all", None, None, None);
-        assert!(matches!(outcome, Err(TokenizerError::MalformedHfTokenizerJson { .. })));
+        assert!(matches!(
+            outcome,
+            Err(TokenizerError::MalformedHfTokenizerJson { .. })
+        ));
     }
 
     #[test]
     fn missing_model_vocab_is_a_typed_error_not_a_panic() {
         let outcome = vocab_from_tokenizer_json(br#"{"model": {"merges": []}}"#, None, None, None);
-        assert!(matches!(outcome, Err(TokenizerError::MalformedHfTokenizerJson { .. })));
+        assert!(matches!(
+            outcome,
+            Err(TokenizerError::MalformedHfTokenizerJson { .. })
+        ));
     }
 
     #[test]
     fn non_contiguous_vocab_ids_are_a_typed_error_not_a_panic() {
-        let outcome = vocab_from_tokenizer_json(br#"{"model": {"vocab": {"a": 0, "b": 5}, "merges": []}}"#, None, None, None);
-        assert!(matches!(outcome, Err(TokenizerError::MalformedHfTokenizerJson { .. })));
+        let outcome = vocab_from_tokenizer_json(
+            br#"{"model": {"vocab": {"a": 0, "b": 5}, "merges": []}}"#,
+            None,
+            None,
+            None,
+        );
+        assert!(matches!(
+            outcome,
+            Err(TokenizerError::MalformedHfTokenizerJson { .. })
+        ));
     }
 
     #[test]
     fn present_add_bos_and_add_eos_keys_read_as_some() {
-        let (add_bos, add_eos) =
-            bos_eos_policy_from_tokenizer_config(br#"{"add_bos_token": true, "add_eos_token": false}"#)
-                .expect("well-formed tokenizer_config.json parses");
+        let (add_bos, add_eos) = bos_eos_policy_from_tokenizer_config(
+            br#"{"add_bos_token": true, "add_eos_token": false}"#,
+        )
+        .expect("well-formed tokenizer_config.json parses");
         assert_eq!(add_bos, Some(true));
         assert_eq!(add_eos, Some(false));
     }
 
     #[test]
     fn absent_add_bos_and_add_eos_keys_read_as_none_not_false() {
-        let (add_bos, add_eos) = bos_eos_policy_from_tokenizer_config(br#"{"bos_token": "<|im_start|>"}"#)
-            .expect("tokenizer_config.json missing the keys still parses");
-        assert_eq!(add_bos, None, "an absent key must not be reported as Some(false)");
+        let (add_bos, add_eos) =
+            bos_eos_policy_from_tokenizer_config(br#"{"bos_token": "<|im_start|>"}"#)
+                .expect("tokenizer_config.json missing the keys still parses");
+        assert_eq!(
+            add_bos, None,
+            "an absent key must not be reported as Some(false)"
+        );
         assert_eq!(add_eos, None);
     }
 
     #[test]
     fn non_boolean_add_bos_token_is_a_typed_error_not_a_panic() {
         let outcome = bos_eos_policy_from_tokenizer_config(br#"{"add_bos_token": "yes"}"#);
-        assert!(matches!(outcome, Err(TokenizerError::MalformedHfTokenizerJson { .. })));
+        assert!(matches!(
+            outcome,
+            Err(TokenizerError::MalformedHfTokenizerJson { .. })
+        ));
     }
 
     #[test]
     fn malformed_tokenizer_config_json_is_a_typed_error_not_a_panic() {
         let outcome = bos_eos_policy_from_tokenizer_config(b"not json at all");
-        assert!(matches!(outcome, Err(TokenizerError::MalformedHfTokenizerJson { .. })));
+        assert!(matches!(
+            outcome,
+            Err(TokenizerError::MalformedHfTokenizerJson { .. })
+        ));
     }
 
     /// The real, on-disk `tokenizer_config.json` this crate's `add_bos_eos`
@@ -274,12 +326,22 @@ mod tests {
             return;
         }
         let bytes = std::fs::read(path).expect("read real smollm2 tokenizer_config.json");
-        assert_eq!(bytes.len(), 3764, "the real file's own byte length -- confirms this isn't a stale copy");
+        assert_eq!(
+            bytes.len(),
+            3764,
+            "the real file's own byte length -- confirms this isn't a stale copy"
+        );
 
         let (add_bos, add_eos) = bos_eos_policy_from_tokenizer_config(&bytes)
             .expect("real smollm2 tokenizer_config.json parses as json");
-        assert_eq!(add_bos, None, "smollm2's real tokenizer_config.json has no add_bos_token key at all");
-        assert_eq!(add_eos, None, "smollm2's real tokenizer_config.json has no add_eos_token key at all");
+        assert_eq!(
+            add_bos, None,
+            "smollm2's real tokenizer_config.json has no add_bos_token key at all"
+        );
+        assert_eq!(
+            add_eos, None,
+            "smollm2's real tokenizer_config.json has no add_eos_token key at all"
+        );
 
         let root: Value = serde_json::from_slice(&bytes).expect("real file is valid json");
         assert!(

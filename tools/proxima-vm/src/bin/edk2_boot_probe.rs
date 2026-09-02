@@ -28,8 +28,9 @@ const PL011_CAPACITY: usize = 65_536;
 
 fn main() -> Result<(), Box<dyn Error>> {
     let mut arguments = env::args().skip(1);
-    let firmware_path =
-        arguments.next().ok_or("usage: edk2_boot_probe <path-to-edk2-aarch64-code.fd>")?;
+    let firmware_path = arguments
+        .next()
+        .ok_or("usage: edk2_boot_probe <path-to-edk2-aarch64-code.fd>")?;
 
     let firmware = fs::read(&firmware_path)?;
     let (pl011_emitted, stats, loop_outcome) =

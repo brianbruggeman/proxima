@@ -62,7 +62,8 @@ use proxima_model_interop::{LoadedModel, architecture_from_hf_config, parse_hf_c
 use proxima_primitives::pipe::Pipe;
 use proxima_tokenizer::Vocab;
 
-const MODEL_DIR: &str = "/Users/brianbruggeman/.lmstudio/models/HuggingFaceTB/SmolLM2-135M-Instruct";
+const MODEL_DIR: &str =
+    "/Users/brianbruggeman/.lmstudio/models/HuggingFaceTB/SmolLM2-135M-Instruct";
 
 /// Drives a leaf [`Pipe::call`] future to completion -- the same shape
 /// `bind.rs::real_openchat_file::block_on` uses, copied rather than reused
@@ -76,22 +77,34 @@ fn block_on<Fut: Future>(future: Fut) -> Fut::Output {
     let mut context = Context::from_waker(waker);
     match future.as_mut().poll(&mut context) {
         Poll::Ready(output) => output,
-        Poll::Pending => unreachable!("proxima-model-interop pipes never yield: no internal .await"),
+        Poll::Pending => {
+            unreachable!("proxima-model-interop pipes never yield: no internal .await")
+        }
     }
 }
 
 fn checkpoint_present() -> bool {
-    std::path::Path::new(MODEL_DIR).join("model.safetensors").exists()
+    std::path::Path::new(MODEL_DIR)
+        .join("model.safetensors")
+        .exists()
 }
 
 /// `generation_config.json`'s own `bos_token_id`/`eos_token_id` -- read as
 /// plain JSON rather than adding a dedicated struct for two integers this
 /// crate has no other use for.
 fn read_generation_config_ids() -> (Option<u32>, Option<u32>) {
-    let bytes = std::fs::read(alloc_format(MODEL_DIR, "generation_config.json")).expect("read generation_config.json");
-    let value: serde_json::Value = serde_json::from_slice(&bytes).expect("generation_config.json parses");
-    let bos = value.get("bos_token_id").and_then(serde_json::Value::as_u64).map(|id| id as u32);
-    let eos = value.get("eos_token_id").and_then(serde_json::Value::as_u64).map(|id| id as u32);
+    let bytes = std::fs::read(alloc_format(MODEL_DIR, "generation_config.json"))
+        .expect("read generation_config.json");
+    let value: serde_json::Value =
+        serde_json::from_slice(&bytes).expect("generation_config.json parses");
+    let bos = value
+        .get("bos_token_id")
+        .and_then(serde_json::Value::as_u64)
+        .map(|id| id as u32);
+    let eos = value
+        .get("eos_token_id")
+        .and_then(serde_json::Value::as_u64)
+        .map(|id| id as u32);
     (bos, eos)
 }
 
@@ -109,17 +122,28 @@ fn safetensors_data_start(file_bytes: &[u8]) -> u64 {
 }
 
 fn load_real_model(file_bytes: &[u8]) -> LoadedModel<'_> {
-    let config_bytes = std::fs::read(alloc_format(MODEL_DIR, "config.json")).expect("read config.json");
+    let config_bytes =
+        std::fs::read(alloc_format(MODEL_DIR, "config.json")).expect("read config.json");
     let hf_config = parse_hf_config(&config_bytes).expect("parse real smollm2 config.json");
     let architecture = architecture_from_hf_config(&hf_config);
-    assert!(architecture.tied_embeddings, "real smollm2 config.json declares tie_word_embeddings: true");
+    assert!(
+        architecture.tied_embeddings,
+        "real smollm2 config.json declares tie_word_embeddings: true"
+    );
 
-    let tokenizer_bytes = std::fs::read(alloc_format(MODEL_DIR, "tokenizer.json")).expect("read tokenizer.json");
+    let tokenizer_bytes =
+        std::fs::read(alloc_format(MODEL_DIR, "tokenizer.json")).expect("read tokenizer.json");
     let (bos_token_id, eos_token_id) = read_generation_config_ids();
-    let vocab: Vocab = proxima_tokenizer::hf::vocab_from_tokenizer_json(&tokenizer_bytes, bos_token_id, eos_token_id, None)
-        .expect("build a vocab from the real tokenizer.json");
+    let vocab: Vocab = proxima_tokenizer::hf::vocab_from_tokenizer_json(
+        &tokenizer_bytes,
+        bos_token_id,
+        eos_token_id,
+        None,
+    )
+    .expect("build a vocab from the real tokenizer.json");
 
-    let manifest = proxima_safetensors::parse_complete(file_bytes).expect("parse real model.safetensors");
+    let manifest =
+        proxima_safetensors::parse_complete(file_bytes).expect("parse real model.safetensors");
     let data_start = safetensors_data_start(file_bytes);
 
     LoadedModel::load_from_safetensors(&manifest, file_bytes, data_start, architecture, vocab)
@@ -153,12 +177,13 @@ fn runs_one_real_forward_pass_and_greedy_picks_a_real_token() {
         eprintln!("skipping: no host-local smollm2 safetensors checkpoint at {MODEL_DIR}");
         return;
     }
-    let file_bytes = std::fs::read(alloc_format(MODEL_DIR, "model.safetensors")).expect("read real model.safetensors");
+    let file_bytes = std::fs::read(alloc_format(MODEL_DIR, "model.safetensors"))
+        .expect("read real model.safetensors");
     let model = load_real_model(&file_bytes);
 
     let prompt = "The capital of France is";
-    let (ids, text, _stopped_by_eos) =
-        block_on(Pipe::call(&model, (prompt.to_string(), 1))).expect("generate through the public Pipe path");
+    let (ids, text, _stopped_by_eos) = block_on(Pipe::call(&model, (prompt.to_string(), 1)))
+        .expect("generate through the public Pipe path");
 
     std::println!("prompt={prompt:?} token_id={} token={text:?}", ids[0]);
 
@@ -182,21 +207,28 @@ fn greedy_decode_is_deterministic_across_two_independent_loads() {
         eprintln!("skipping: no host-local smollm2 safetensors checkpoint at {MODEL_DIR}");
         return;
     }
-    let file_bytes = std::fs::read(alloc_format(MODEL_DIR, "model.safetensors")).expect("read real model.safetensors");
+    let file_bytes = std::fs::read(alloc_format(MODEL_DIR, "model.safetensors"))
+        .expect("read real model.safetensors");
     let prompt = "The capital of France is";
 
     let first_model = load_real_model(&file_bytes);
-    let (first_ids, first_text, _) =
-        block_on(Pipe::call(&first_model, (prompt.to_string(), 8))).expect("first generation succeeds");
+    let (first_ids, first_text, _) = block_on(Pipe::call(&first_model, (prompt.to_string(), 8)))
+        .expect("first generation succeeds");
 
     let second_model = load_real_model(&file_bytes);
-    let (second_ids, second_text, _) =
-        block_on(Pipe::call(&second_model, (prompt.to_string(), 8))).expect("second generation succeeds");
+    let (second_ids, second_text, _) = block_on(Pipe::call(&second_model, (prompt.to_string(), 8)))
+        .expect("second generation succeeds");
 
     std::println!("prompt={prompt:?} ids={first_ids:?} text={first_text:?}");
 
-    assert_eq!(first_ids, second_ids, "greedy decode must be byte-identical across independent loads");
-    assert_eq!(first_text, second_text, "decoded text must be byte-identical across independent loads");
+    assert_eq!(
+        first_ids, second_ids,
+        "greedy decode must be byte-identical across independent loads"
+    );
+    assert_eq!(
+        first_text, second_text,
+        "decoded text must be byte-identical across independent loads"
+    );
     assert_eq!(
         first_text, " the city of Paris, a city of",
         "must match both real GGUF oracles' own 8-token greedy continuation, not just token 1"
@@ -219,11 +251,18 @@ fn one_shot_prefill_after_the_matches_the_cached_decode_step_and_the_real_oracle
         eprintln!("skipping: no host-local smollm2 safetensors checkpoint at {MODEL_DIR}");
         return;
     }
-    let file_bytes = std::fs::read(alloc_format(MODEL_DIR, "model.safetensors")).expect("read real model.safetensors");
+    let file_bytes = std::fs::read(alloc_format(MODEL_DIR, "model.safetensors"))
+        .expect("read real model.safetensors");
     let model = load_real_model(&file_bytes);
-    let (ids, text, _) =
-        block_on(Pipe::call(&model, ("The capital of France is the".to_string(), 1))).expect("one-shot prefill succeeds");
-    std::println!("one_shot_prefill_after_the token_id={} token={text:?}", ids[0]);
+    let (ids, text, _) = block_on(Pipe::call(
+        &model,
+        ("The capital of France is the".to_string(), 1),
+    ))
+    .expect("one-shot prefill succeeds");
+    std::println!(
+        "one_shot_prefill_after_the token_id={} token={text:?}",
+        ids[0]
+    );
 
     assert_eq!(
         text, " city",

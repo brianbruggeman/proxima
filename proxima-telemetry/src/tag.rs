@@ -288,7 +288,7 @@ mod tests {
     use alloc::vec::Vec;
 
     use bytes::Bytes;
-    
+
     use super::{NestedValue, ScalarValue, Tag};
 
     // 1. Tag::Scalar with ScalarValue::I64 constructs and fields are readable

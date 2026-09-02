@@ -206,17 +206,29 @@ fn write_array(buf: &mut Vec<u8>, array: &MetadataArray) {
     match array {
         MetadataArray::U8(values) => buf.extend_from_slice(values),
         MetadataArray::I8(values) => values.iter().for_each(|v| buf.push(*v as u8)),
-        MetadataArray::U16(values) => values.iter().for_each(|v| buf.extend_from_slice(&v.to_le_bytes())),
-        MetadataArray::I16(values) => values.iter().for_each(|v| buf.extend_from_slice(&v.to_le_bytes())),
-        MetadataArray::U32(values) => values.iter().for_each(|v| buf.extend_from_slice(&v.to_le_bytes())),
-        MetadataArray::I32(values) => values.iter().for_each(|v| buf.extend_from_slice(&v.to_le_bytes())),
+        MetadataArray::U16(values) => values
+            .iter()
+            .for_each(|v| buf.extend_from_slice(&v.to_le_bytes())),
+        MetadataArray::I16(values) => values
+            .iter()
+            .for_each(|v| buf.extend_from_slice(&v.to_le_bytes())),
+        MetadataArray::U32(values) => values
+            .iter()
+            .for_each(|v| buf.extend_from_slice(&v.to_le_bytes())),
+        MetadataArray::I32(values) => values
+            .iter()
+            .for_each(|v| buf.extend_from_slice(&v.to_le_bytes())),
         MetadataArray::F32(values) => values
             .iter()
             .for_each(|v| buf.extend_from_slice(&v.to_bits().to_le_bytes())),
         MetadataArray::Bool(values) => values.iter().for_each(|v| buf.push(u8::from(*v))),
         MetadataArray::String(values) => values.iter().for_each(|v| write_string(buf, v)),
-        MetadataArray::U64(values) => values.iter().for_each(|v| buf.extend_from_slice(&v.to_le_bytes())),
-        MetadataArray::I64(values) => values.iter().for_each(|v| buf.extend_from_slice(&v.to_le_bytes())),
+        MetadataArray::U64(values) => values
+            .iter()
+            .for_each(|v| buf.extend_from_slice(&v.to_le_bytes())),
+        MetadataArray::I64(values) => values
+            .iter()
+            .for_each(|v| buf.extend_from_slice(&v.to_le_bytes())),
         MetadataArray::F64(values) => values
             .iter()
             .for_each(|v| buf.extend_from_slice(&v.to_bits().to_le_bytes())),
@@ -265,7 +277,11 @@ mod tests {
             .iter()
             .map(|tensor| pattern_bytes(tensor.nbytes().expect("computable nbytes") as usize))
             .collect();
-        assert_eq!(payloads[1].len(), 72, "tensor 1 must be a non-multiple-of-16 byte length");
+        assert_eq!(
+            payloads[1].len(),
+            72,
+            "tensor 1 must be a non-multiple-of-16 byte length"
+        );
 
         let model = GgufModel {
             version: reference.version,
@@ -294,11 +310,20 @@ mod tests {
         assert_eq!(parsed_back.data_offset, reference.data_offset);
         assert_eq!(parsed_back.tensors.len(), reference.tensors.len());
 
-        for (index, (parsed_tensor, reference_tensor)) in
-            parsed_back.tensors.iter().zip(&reference.tensors).enumerate()
+        for (index, (parsed_tensor, reference_tensor)) in parsed_back
+            .tensors
+            .iter()
+            .zip(&reference.tensors)
+            .enumerate()
         {
-            assert_eq!(parsed_tensor.name, reference_tensor.name, "tensor {index} name");
-            assert_eq!(parsed_tensor.dims, reference_tensor.dims, "tensor {index} dims");
+            assert_eq!(
+                parsed_tensor.name, reference_tensor.name,
+                "tensor {index} name"
+            );
+            assert_eq!(
+                parsed_tensor.dims, reference_tensor.dims,
+                "tensor {index} dims"
+            );
             assert_eq!(
                 parsed_tensor.ggml_type, reference_tensor.ggml_type,
                 "tensor {index} ggml_type"
@@ -312,7 +337,11 @@ mod tests {
                 .tensor_data_range(parsed_tensor, written.len() as u64)
                 .expect("range within written buffer");
             let actual = &written[range.start as usize..range.end as usize];
-            assert_eq!(actual, payloads[index].as_slice(), "tensor {index} payload bytes");
+            assert_eq!(
+                actual,
+                payloads[index].as_slice(),
+                "tensor {index} payload bytes"
+            );
         }
     }
 
@@ -325,7 +354,10 @@ mod tests {
         let data = pattern_bytes(12); // 3 * F32 = 12 bytes, not a multiple of 32
         let model = GgufModel {
             version: 3,
-            metadata: vec![("general.architecture".to_string(), MetadataValue::String("test".to_string()))],
+            metadata: vec![(
+                "general.architecture".to_string(),
+                MetadataValue::String("test".to_string()),
+            )],
             tensors: vec![TensorPayload {
                 name: "weight".to_string(),
                 dims: dims(&[3]),
@@ -343,7 +375,10 @@ mod tests {
         let range = parsed
             .tensor_data_range(tensor, written.len() as u64)
             .expect("range within written buffer");
-        assert_eq!(&written[range.start as usize..range.end as usize], data.as_slice());
+        assert_eq!(
+            &written[range.start as usize..range.end as usize],
+            data.as_slice()
+        );
     }
 
     #[test]

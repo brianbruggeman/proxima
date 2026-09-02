@@ -138,10 +138,18 @@ fn cast_through_the_pipe_costs_nothing_over_the_bare_loop() {
 
     // correctness first: a byte-identical-instructions claim is worthless if
     // the two paths do not compute the same answer.
-    let run = Command::new(&binary_path).output().expect("run the probe binary");
+    let run = Command::new(&binary_path)
+        .output()
+        .expect("run the probe binary");
     let stdout = String::from_utf8_lossy(&run.stdout);
-    assert!(run.status.success(), "probe binary exited nonzero: {stdout}");
-    assert!(stdout.contains("equal=true"), "bare and pipe paths disagreed: {stdout}");
+    assert!(
+        run.status.success(),
+        "probe binary exited nonzero: {stdout}"
+    );
+    assert!(
+        stdout.contains("equal=true"),
+        "bare and pipe paths disagreed: {stdout}"
+    );
 
     let disassembly_output = Command::new("otool")
         .arg("-tV")
@@ -162,7 +170,8 @@ fn cast_through_the_pipe_costs_nothing_over_the_bare_loop() {
     let symbol_table = String::from_utf8_lossy(&symbols.stdout);
     let pipe_symbol_survived = symbol_table.contains("pipe_i32_to_f32");
 
-    let bare_body = function_body(&disassembly, "bare_i32_to_f32").expect("bare_i32_to_f32 in disassembly");
+    let bare_body =
+        function_body(&disassembly, "bare_i32_to_f32").expect("bare_i32_to_f32 in disassembly");
     let has_vectorized_main_loop = bare_body.iter().any(|line| line.contains("scvtf.4s"));
     assert!(
         has_vectorized_main_loop,
@@ -173,7 +182,8 @@ fn cast_through_the_pipe_costs_nothing_over_the_bare_loop() {
 
     if pipe_symbol_survived {
         // distinct symbol survived linking: compare instruction counts directly.
-        let pipe_body = function_body(&disassembly, "pipe_i32_to_f32").expect("pipe_i32_to_f32 in disassembly");
+        let pipe_body =
+            function_body(&disassembly, "pipe_i32_to_f32").expect("pipe_i32_to_f32 in disassembly");
         println!(
             "bare_i32_to_f32: {} instructions, pipe_i32_to_f32: {} instructions",
             bare_body.len(),

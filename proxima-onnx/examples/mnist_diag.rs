@@ -18,7 +18,8 @@ use std::time::Instant;
 
 use proxima_tensor::{Keep, bind, infer, instrument};
 
-const MODEL_PATH: &str = "/Users/brianbruggeman/repos/others/burn/examples/onnx-inference/src/model/mnist.onnx";
+const MODEL_PATH: &str =
+    "/Users/brianbruggeman/repos/others/burn/examples/onnx-inference/src/model/mnist.onnx";
 
 /// Sum of `BoundOp::extents` over every `Keep::Reduce` fold in the bound
 /// program -- exactly the pre-reduction iteration space each such node
@@ -36,7 +37,9 @@ fn analytic_mac_count(program: &[proxima_tensor::Op], output: proxima_tensor::No
     bound
         .iter()
         .filter_map(|op| match &op.kind {
-            proxima_tensor::BoundOpKind::Reduce { keep: Keep::Reduce, .. } => Some(op.extents.iter().product::<u64>()),
+            proxima_tensor::BoundOpKind::Reduce {
+                keep: Keep::Reduce, ..
+            } => Some(op.extents.iter().product::<u64>()),
             _ => None,
         })
         .sum()
@@ -54,7 +57,11 @@ fn main() {
 
     let graph_input_name = lowered.graph_inputs.first().expect("input").clone();
     let output_node = lowered.graph_outputs.first().expect("output").1;
-    let initializers: Vec<(&str, &[f32])> = lowered.initializers.iter().map(|(name, data)| (name.as_str(), data.as_slice())).collect();
+    let initializers: Vec<(&str, &[f32])> = lowered
+        .initializers
+        .iter()
+        .map(|(name, data)| (name.as_str(), data.as_slice()))
+        .collect();
     let image = vec![0.0f32; 28 * 28];
 
     let analytic_macs = analytic_mac_count(&lowered.program, output_node);
@@ -81,10 +88,14 @@ fn main() {
     for _ in 0..IMAGES {
         let mut named = initializers.clone();
         named.push((graph_input_name.as_str(), image.as_slice()));
-        proxima_tensor::cpu::evaluate_named(&lowered.program, &[], &named, &[output_node]).expect("eval");
+        proxima_tensor::cpu::evaluate_named(&lowered.program, &[], &named, &[output_node])
+            .expect("eval");
     }
     let elapsed = start.elapsed();
-    println!("{IMAGES} evals in {elapsed:?} = {:?}/image (instrument feature ON: this timing is NOT the clean number)", elapsed / IMAGES as u32);
+    println!(
+        "{IMAGES} evals in {elapsed:?} = {:?}/image (instrument feature ON: this timing is NOT the clean number)",
+        elapsed / IMAGES as u32
+    );
 
     let totals = instrument::totals();
     println!(

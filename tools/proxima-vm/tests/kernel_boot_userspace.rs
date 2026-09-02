@@ -109,7 +109,10 @@ async fn init_alive_marker_arrives_through_the_pl011_byte_channel() {
     let console_text = String::from_utf8_lossy(&probe.pl011_bytes);
 
     eprintln!("probe stderr:\n{}", probe.stderr);
-    eprintln!("full pl011 console text ({} bytes):\n{console_text}", probe.pl011_bytes.len());
+    eprintln!(
+        "full pl011 console text ({} bytes):\n{console_text}",
+        probe.pl011_bytes.len()
+    );
 
     // A panic AFTER the marker crossed the channel is a pass -- this file's
     // own module doc names the exit criterion as the marker, not a clean

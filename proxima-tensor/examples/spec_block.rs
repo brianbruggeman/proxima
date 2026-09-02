@@ -59,17 +59,31 @@ fn main() {
     // naming any output at all narrows the retained set, so the root has to
     // be asked for explicitly once anything else is
     let root = NodeId(program.len() as u32 - 1);
-    let evaluated =
-        evaluate_parallel(&program, &symbols, &borrowed, &[root, probabilities], workers)
-            .expect("program evaluates");
+    let evaluated = evaluate_parallel(
+        &program,
+        &symbols,
+        &borrowed,
+        &[root, probabilities],
+        workers,
+    )
+    .expect("program evaluates");
 
     let output = evaluated.root();
-    assert!(!output.is_empty(), "a zero-element output is a vacuous pass");
+    assert!(
+        !output.is_empty(),
+        "a zero-element output is a vacuous pass"
+    );
     let finite = output.iter().filter(|value| value.is_finite()).count();
     assert_eq!(finite, output.len(), "every output element must be finite");
 
-    let (rows, _) = evaluated.get(probabilities).expect("probabilities were requested");
-    assert_eq!(rows.len(), sequence * sequence, "softmax is (sequence x sequence)");
+    let (rows, _) = evaluated
+        .get(probabilities)
+        .expect("probabilities were requested");
+    assert_eq!(
+        rows.len(),
+        sequence * sequence,
+        "softmax is (sequence x sequence)"
+    );
     for (index, row) in rows.chunks_exact(sequence).enumerate() {
         let total: f32 = row.iter().sum();
         assert!(

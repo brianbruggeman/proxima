@@ -18,7 +18,9 @@ use std::num::NonZeroUsize;
 use std::time::Instant;
 
 use proxima_tensor::test_support::Lcg;
-use proxima_tensor::{Extent, IndexMap, NodeId, Op, ReduceInit, ScalarOp, append, evaluate_parallel, map};
+use proxima_tensor::{
+    Extent, IndexMap, NodeId, Op, ReduceInit, ScalarOp, append, evaluate_parallel, map,
+};
 
 fn random_vec(seed: u64, n: usize, scale: f32) -> Vec<f32> {
     let mut lcg = Lcg(seed);
@@ -97,12 +99,14 @@ fn main() {
     let workers = NonZeroUsize::new(threads).expect("threads must be nonzero");
 
     // one untimed warm-up
-    let _ = evaluate_parallel(&program, &[], &[&lhs, &rhs_t], &[], workers).expect("warmup gemm evaluates");
+    let _ = evaluate_parallel(&program, &[], &[&lhs, &rhs_t], &[], workers)
+        .expect("warmup gemm evaluates");
 
     let mut checksum = 0.0f32;
     let start = Instant::now();
     for _ in 0..iters {
-        let evaluated = evaluate_parallel(&program, &[], &[&lhs, &rhs_t], &[], workers).expect("gemm evaluates");
+        let evaluated = evaluate_parallel(&program, &[], &[&lhs, &rhs_t], &[], workers)
+            .expect("gemm evaluates");
         checksum = evaluated.root()[0];
     }
     let elapsed = start.elapsed();

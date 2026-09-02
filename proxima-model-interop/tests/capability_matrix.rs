@@ -31,24 +31,50 @@ const PROMPT: &str = "The capital of France is";
 /// One token id per step of an unbounded budget is never produced: the
 /// generic invariant `run_decode_loop`'s own doc encodes, verified through
 /// the public `Pipe` boundary rather than the crate-private loop.
-fn assert_respects_budget_and_range(ids: &[u32], text: &str, stopped_by_eos: bool, max_tokens: usize) {
-    assert!(ids.len() <= max_tokens, "must never exceed the requested token budget: {ids:?}");
+fn assert_respects_budget_and_range(
+    ids: &[u32],
+    text: &str,
+    stopped_by_eos: bool,
+    max_tokens: usize,
+) {
+    assert!(
+        ids.len() <= max_tokens,
+        "must never exceed the requested token budget: {ids:?}"
+    );
     if stopped_by_eos {
-        assert!(ids.len() < max_tokens, "an eos stop must produce strictly fewer ids than the full budget");
+        assert!(
+            ids.len() < max_tokens,
+            "an eos stop must produce strictly fewer ids than the full budget"
+        );
     } else {
-        assert_eq!(ids.len(), max_tokens, "budget exhaustion must produce exactly one id per step");
+        assert_eq!(
+            ids.len(),
+            max_tokens,
+            "budget exhaustion must produce exactly one id per step"
+        );
     }
     for &id in ids {
-        assert!(id < support::VOCAB, "token id {id} must be inside the fixture's own {}-token vocab", support::VOCAB);
+        assert!(
+            id < support::VOCAB,
+            "token id {id} must be inside the fixture's own {}-token vocab",
+            support::VOCAB
+        );
     }
     if !ids.is_empty() {
-        assert!(!text.is_empty(), "a non-empty id sequence must decode to non-empty text");
+        assert!(
+            !text.is_empty(),
+            "a non-empty id sequence must decode to non-empty text"
+        );
     }
 }
 
-async fn run_cpu(codec: GgmlType, max_tokens: usize) -> Result<(Vec<u32>, String, bool), InteropError> {
+async fn run_cpu(
+    codec: GgmlType,
+    max_tokens: usize,
+) -> Result<(Vec<u32>, String, bool), InteropError> {
     let file_bytes = support::checkpoint_bytes(codec);
-    let parsed = proxima_gguf::parse_complete(&file_bytes).expect("parses the synthetic checkpoint");
+    let parsed =
+        proxima_gguf::parse_complete(&file_bytes).expect("parses the synthetic checkpoint");
     let model = LoadedModel::load(&parsed, &file_bytes).expect("loads the synthetic checkpoint");
     Pipe::call(&model, (PROMPT.to_string(), max_tokens)).await
 }
@@ -59,54 +85,79 @@ async fn run_cpu(codec: GgmlType, max_tokens: usize) -> Result<(Vec<u32>, String
 #[case::prefill_only(1)]
 #[case::prefill_then_decode(2)]
 async fn dense_cpu_f32_forward_produces_a_deterministic_token_sequence(#[case] max_tokens: usize) {
-    let (ids, text, stopped_by_eos) = run_cpu(GgmlType::F32, max_tokens).await.expect("f32 forward runs on cpu");
+    let (ids, text, stopped_by_eos) = run_cpu(GgmlType::F32, max_tokens)
+        .await
+        .expect("f32 forward runs on cpu");
     assert_respects_budget_and_range(&ids, &text, stopped_by_eos, max_tokens);
     // real-value determinism, not just "did not panic": the fixture's LCG
     // weight data is fixed, so greedy decode against it must reproduce the
     // exact same ids on every run -- captured from a real run of this test
     // (see this crate's task report for the perturb-and-fail proof).
     let expected: &[u32] = if max_tokens == 1 { &[0] } else { &[0, 0] };
-    assert_eq!(ids, expected, "greedy decode must reproduce the fixture's own deterministic output");
+    assert_eq!(
+        ids, expected,
+        "greedy decode must reproduce the fixture's own deterministic output"
+    );
 }
 
 #[proxima::test]
 #[case::prefill_only(1)]
 #[case::prefill_then_decode(2)]
 async fn dense_cpu_q8_0_forward_produces_a_deterministic_token_sequence(#[case] max_tokens: usize) {
-    let (ids, text, stopped_by_eos) = run_cpu(GgmlType::Q8_0, max_tokens).await.expect("q8_0 forward runs on cpu");
+    let (ids, text, stopped_by_eos) = run_cpu(GgmlType::Q8_0, max_tokens)
+        .await
+        .expect("q8_0 forward runs on cpu");
     assert_respects_budget_and_range(&ids, &text, stopped_by_eos, max_tokens);
     let expected: &[u32] = if max_tokens == 1 { &[0] } else { &[0, 0] };
-    assert_eq!(ids, expected, "greedy decode must reproduce the fixture's own deterministic output");
+    assert_eq!(
+        ids, expected,
+        "greedy decode must reproduce the fixture's own deterministic output"
+    );
 }
 
 #[proxima::test]
 #[case::prefill_only(1)]
 #[case::prefill_then_decode(2)]
 async fn dense_cpu_q4_k_forward_produces_a_deterministic_token_sequence(#[case] max_tokens: usize) {
-    let (ids, text, stopped_by_eos) = run_cpu(GgmlType::Q4_K, max_tokens).await.expect("q4_k forward runs on cpu");
+    let (ids, text, stopped_by_eos) = run_cpu(GgmlType::Q4_K, max_tokens)
+        .await
+        .expect("q4_k forward runs on cpu");
     assert_respects_budget_and_range(&ids, &text, stopped_by_eos, max_tokens);
     let expected: &[u32] = if max_tokens == 1 { &[0] } else { &[0, 0] };
-    assert_eq!(ids, expected, "greedy decode must reproduce the fixture's own deterministic output");
+    assert_eq!(
+        ids, expected,
+        "greedy decode must reproduce the fixture's own deterministic output"
+    );
 }
 
 #[proxima::test]
 #[case::prefill_only(1)]
 #[case::prefill_then_decode(2)]
 async fn dense_cpu_q5_k_forward_produces_a_deterministic_token_sequence(#[case] max_tokens: usize) {
-    let (ids, text, stopped_by_eos) = run_cpu(GgmlType::Q5_K, max_tokens).await.expect("q5_k forward runs on cpu");
+    let (ids, text, stopped_by_eos) = run_cpu(GgmlType::Q5_K, max_tokens)
+        .await
+        .expect("q5_k forward runs on cpu");
     assert_respects_budget_and_range(&ids, &text, stopped_by_eos, max_tokens);
     let expected: &[u32] = if max_tokens == 1 { &[0] } else { &[0, 0] };
-    assert_eq!(ids, expected, "greedy decode must reproduce the fixture's own deterministic output");
+    assert_eq!(
+        ids, expected,
+        "greedy decode must reproduce the fixture's own deterministic output"
+    );
 }
 
 #[proxima::test]
 #[case::prefill_only(1)]
 #[case::prefill_then_decode(2)]
 async fn dense_cpu_q6_k_forward_produces_a_deterministic_token_sequence(#[case] max_tokens: usize) {
-    let (ids, text, stopped_by_eos) = run_cpu(GgmlType::Q6_K, max_tokens).await.expect("q6_k forward runs on cpu");
+    let (ids, text, stopped_by_eos) = run_cpu(GgmlType::Q6_K, max_tokens)
+        .await
+        .expect("q6_k forward runs on cpu");
     assert_respects_budget_and_range(&ids, &text, stopped_by_eos, max_tokens);
     let expected: &[u32] = if max_tokens == 1 { &[0] } else { &[0, 0] };
-    assert_eq!(ids, expected, "greedy decode must reproduce the fixture's own deterministic output");
+    assert_eq!(
+        ids, expected,
+        "greedy decode must reproduce the fixture's own deterministic output"
+    );
 }
 
 // --- the codecs this crate's bind path cannot run at all ---
@@ -127,9 +178,12 @@ async fn dense_cpu_q6_k_forward_produces_a_deterministic_token_sequence(#[case] 
 #[case::q3_k(GgmlType::Q3_K)]
 async fn dense_cpu_unrepresentable_codec_load_returns_a_typed_error(#[case] codec: GgmlType) {
     let file_bytes = support::checkpoint_bytes(codec);
-    let parsed = proxima_gguf::parse_complete(&file_bytes).expect("parses the synthetic checkpoint");
+    let parsed =
+        proxima_gguf::parse_complete(&file_bytes).expect("parses the synthetic checkpoint");
     let outcome = LoadedModel::load(&parsed, &file_bytes);
-    let error = outcome.err().expect("loading an unrepresentable codec must return Err, not Ok");
+    let error = outcome
+        .err()
+        .expect("loading an unrepresentable codec must return Err, not Ok");
     assert!(
         matches!(error, InteropError::UnrepresentableGgmlType { ggml_type, .. } if ggml_type == codec),
         "a {codec:?} checkpoint's load must fail with UnrepresentableGgmlType naming {codec:?}: {error:?}"
@@ -140,28 +194,36 @@ async fn dense_cpu_unrepresentable_codec_load_returns_a_typed_error(#[case] code
 #[ignore = "no Q4_0 codec in proxima_gguf::quant (only q4_k/q5_k/q6_k/q8_0 exist); \
             bind::gguf_tensor_as_f32 rejects Q4_0 with UnrepresentableGgmlType before a forward pass can run"]
 async fn dense_cpu_q4_0_forward_prefill_and_decode() {
-    let (_ids, _text, _stopped) = run_cpu(GgmlType::Q4_0, 2).await.expect("q4_0 forward runs on cpu");
+    let (_ids, _text, _stopped) = run_cpu(GgmlType::Q4_0, 2)
+        .await
+        .expect("q4_0 forward runs on cpu");
 }
 
 #[proxima::test]
 #[ignore = "no Q5_0 codec in proxima_gguf::quant (only q4_k/q5_k/q6_k/q8_0 exist); \
             bind::gguf_tensor_as_f32 rejects Q5_0 with UnrepresentableGgmlType before a forward pass can run"]
 async fn dense_cpu_q5_0_forward_prefill_and_decode() {
-    let (_ids, _text, _stopped) = run_cpu(GgmlType::Q5_0, 2).await.expect("q5_0 forward runs on cpu");
+    let (_ids, _text, _stopped) = run_cpu(GgmlType::Q5_0, 2)
+        .await
+        .expect("q5_0 forward runs on cpu");
 }
 
 #[proxima::test]
 #[ignore = "no Q2_K codec in proxima_gguf::quant (only q4_k/q5_k/q6_k/q8_0 exist); \
             bind::gguf_tensor_as_f32 rejects Q2_K with UnrepresentableGgmlType before a forward pass can run"]
 async fn dense_cpu_q2_k_forward_prefill_and_decode() {
-    let (_ids, _text, _stopped) = run_cpu(GgmlType::Q2_K, 2).await.expect("q2_k forward runs on cpu");
+    let (_ids, _text, _stopped) = run_cpu(GgmlType::Q2_K, 2)
+        .await
+        .expect("q2_k forward runs on cpu");
 }
 
 #[proxima::test]
 #[ignore = "no Q3_K codec in proxima_gguf::quant (only q4_k/q5_k/q6_k/q8_0 exist); \
             bind::gguf_tensor_as_f32 rejects Q3_K with UnrepresentableGgmlType before a forward pass can run"]
 async fn dense_cpu_q3_k_forward_prefill_and_decode() {
-    let (_ids, _text, _stopped) = run_cpu(GgmlType::Q3_K, 2).await.expect("q3_k forward runs on cpu");
+    let (_ids, _text, _stopped) = run_cpu(GgmlType::Q3_K, 2)
+        .await
+        .expect("q3_k forward runs on cpu");
 }
 
 // --- float width: this crate's forward path is f32-only ---
@@ -172,7 +234,9 @@ async fn dense_cpu_q3_k_forward_prefill_and_decode() {
             elementwise node outright, and mistral_cached_forward_program has no f16-typed variant; a \
             non-float32 program must instead route through evaluate_typed, which generate.rs never calls"]
 async fn dense_cpu_f16_activation_forward_prefill_and_decode() {
-    let (_ids, _text, _stopped) = run_cpu(GgmlType::F16, 2).await.expect("f16-activation forward runs on cpu");
+    let (_ids, _text, _stopped) = run_cpu(GgmlType::F16, 2)
+        .await
+        .expect("f16-activation forward runs on cpu");
 }
 
 // --- architecture: MoE, routed through the same public LoadedModel::load path ---
@@ -182,10 +246,16 @@ async fn dense_cpu_f16_activation_forward_prefill_and_decode() {
 /// reaches `LoadedModel::load`'s routed branch
 /// (`proxima_tensor::spec::mistral_cached_forward_program_with_experts`)
 /// instead of the dense one.
-async fn run_cpu_moe(codec: GgmlType, max_tokens: usize) -> Result<(Vec<u32>, String, bool), InteropError> {
-    let file_bytes = support::checkpoint_bytes_moe(codec, support::EXPERT_COUNT, support::EXPERT_USED_COUNT);
-    let parsed = proxima_gguf::parse_complete(&file_bytes).expect("parses the synthetic MoE checkpoint");
-    let model = LoadedModel::load(&parsed, &file_bytes).expect("loads the synthetic MoE checkpoint");
+async fn run_cpu_moe(
+    codec: GgmlType,
+    max_tokens: usize,
+) -> Result<(Vec<u32>, String, bool), InteropError> {
+    let file_bytes =
+        support::checkpoint_bytes_moe(codec, support::EXPERT_COUNT, support::EXPERT_USED_COUNT);
+    let parsed =
+        proxima_gguf::parse_complete(&file_bytes).expect("parses the synthetic MoE checkpoint");
+    let model =
+        LoadedModel::load(&parsed, &file_bytes).expect("loads the synthetic MoE checkpoint");
     Pipe::call(&model, (PROMPT.to_string(), max_tokens)).await
 }
 
@@ -202,10 +272,15 @@ async fn run_cpu_moe(codec: GgmlType, max_tokens: usize) -> Result<(Vec<u32>, St
 #[case::prefill_only(1)]
 #[case::prefill_then_decode(2)]
 async fn moe_architecture_cpu_forward_prefill_and_decode(#[case] max_tokens: usize) {
-    let (ids, text, stopped_by_eos) = run_cpu_moe(GgmlType::F32, max_tokens).await.expect("moe f32 forward runs on cpu");
+    let (ids, text, stopped_by_eos) = run_cpu_moe(GgmlType::F32, max_tokens)
+        .await
+        .expect("moe f32 forward runs on cpu");
     assert_respects_budget_and_range(&ids, &text, stopped_by_eos, max_tokens);
     let expected: &[u32] = if max_tokens == 1 { &[0] } else { &[0, 0] };
-    assert_eq!(ids, expected, "greedy decode must reproduce the fixture's own deterministic output through the routed path");
+    assert_eq!(
+        ids, expected,
+        "greedy decode must reproduce the fixture's own deterministic output through the routed path"
+    );
 }
 
 // --- backend: Metal parity against the same fixture, same codecs CPU runs ---
@@ -245,8 +320,10 @@ mod metal_backend {
     /// (`omega/tests/metal_real_forward.rs`), lifted to the loader boundary.
     async fn assert_metal_matches_cpu(codec: GgmlType, max_tokens: usize) {
         let file_bytes = super::support::checkpoint_bytes(codec);
-        let parsed = proxima_gguf::parse_complete(&file_bytes).expect("parses the synthetic checkpoint");
-        let model = LoadedModel::load(&parsed, &file_bytes).expect("loads the synthetic checkpoint");
+        let parsed =
+            proxima_gguf::parse_complete(&file_bytes).expect("parses the synthetic checkpoint");
+        let model =
+            LoadedModel::load(&parsed, &file_bytes).expect("loads the synthetic checkpoint");
 
         let cpu = model
             .generate_with_serving_config(PROMPT, max_tokens, serving_config(0))
@@ -256,8 +333,14 @@ mod metal_backend {
             .expect("metal forward runs on a real device");
 
         assert_respects_budget_and_range(&metal.0, &metal.1, metal.2, max_tokens);
-        assert_eq!(metal.0, cpu.0, "metal must reproduce the cpu's own greedy token ids for {codec:?}");
-        assert_eq!(metal.1, cpu.1, "metal must reproduce the cpu's own decoded text for {codec:?}");
+        assert_eq!(
+            metal.0, cpu.0,
+            "metal must reproduce the cpu's own greedy token ids for {codec:?}"
+        );
+        assert_eq!(
+            metal.1, cpu.1,
+            "metal must reproduce the cpu's own decoded text for {codec:?}"
+        );
     }
 
     #[proxima::test]

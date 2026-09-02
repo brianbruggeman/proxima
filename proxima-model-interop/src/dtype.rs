@@ -68,14 +68,24 @@ mod tests {
             GgmlType::F64,
         ];
         for ggml_type in types {
-            let dtype = ggml_to_dtype(ggml_type).unwrap_or_else(|| panic!("{ggml_type:?} should map"));
-            assert_eq!(dtype_to_ggml(dtype), Some(ggml_type), "{ggml_type:?} round trip");
+            let dtype =
+                ggml_to_dtype(ggml_type).unwrap_or_else(|| panic!("{ggml_type:?} should map"));
+            assert_eq!(
+                dtype_to_ggml(dtype),
+                Some(ggml_type),
+                "{ggml_type:?} round trip"
+            );
         }
     }
 
     #[test]
     fn quantized_ggml_types_have_no_dtype_counterpart() {
-        for ggml_type in [GgmlType::Q4_0, GgmlType::Q4_K, GgmlType::Q6_K, GgmlType::Iq2Xxs] {
+        for ggml_type in [
+            GgmlType::Q4_0,
+            GgmlType::Q4_K,
+            GgmlType::Q6_K,
+            GgmlType::Iq2Xxs,
+        ] {
             assert_eq!(ggml_to_dtype(ggml_type), None, "{ggml_type:?}");
         }
     }

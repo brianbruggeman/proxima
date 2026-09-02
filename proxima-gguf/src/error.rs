@@ -44,23 +44,25 @@ pub enum GgufError {
     #[error("tensor '{tensor}' has {found} dimensions, at most 4 are supported")]
     TooManyDimensions { tensor: String, found: u32 },
 
-    #[error("tensor '{tensor}' row size (ne[0]={ne0}) is not a multiple of block size {block_size}")]
+    #[error(
+        "tensor '{tensor}' row size (ne[0]={ne0}) is not a multiple of block size {block_size}"
+    )]
     RowSizeNotBlockMultiple {
         tensor: String,
         ne0: u64,
         block_size: u64,
     },
 
-    #[error("tensor '{tensor}' has offset {found}, expected {expected} (data section must be contiguous)")]
+    #[error(
+        "tensor '{tensor}' has offset {found}, expected {expected} (data section must be contiguous)"
+    )]
     TensorOffsetMismatch {
         tensor: String,
         expected: u64,
         found: u64,
     },
 
-    #[error(
-        "tensor '{tensor}' data range [{start}, {end}) exceeds file length {file_len}"
-    )]
+    #[error("tensor '{tensor}' data range [{start}, {end}) exceeds file length {file_len}")]
     TensorDataOutOfRange {
         tensor: String,
         start: u64,

@@ -21,7 +21,10 @@ impl Lcg {
     /// `[-1, 0)`, silently halving both the mean and the variance every
     /// caller of this function assumed.
     pub fn next_unit(&mut self) -> f32 {
-        self.0 = self.0.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1);
+        self.0 = self
+            .0
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1);
         let bits = (self.0 >> 32) as u32;
         (bits as f32 / u32::MAX as f32) * 2.0 - 1.0
     }

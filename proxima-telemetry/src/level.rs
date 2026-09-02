@@ -155,7 +155,7 @@ mod tests {
     use alloc::string::ToString;
     use alloc::vec;
     use alloc::vec::Vec;
-    
+
     use super::Level;
     use crate::error::Error;
 

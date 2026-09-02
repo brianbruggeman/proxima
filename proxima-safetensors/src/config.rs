@@ -111,7 +111,9 @@ mod tests {
 
     #[test]
     fn zero_max_header_bytes_rejected() {
-        let config = SafetensorsParserConfig::builder().max_header_bytes(0).build();
+        let config = SafetensorsParserConfig::builder()
+            .max_header_bytes(0)
+            .build();
         let err = config
             .validate()
             .expect_err("validate must reject max_header_bytes = 0");
@@ -123,7 +125,9 @@ mod tests {
     // sized-floor default would have accepted.
     #[test]
     fn with_config_lowers_max_header_bytes_and_rejects_larger_headers() {
-        let config = SafetensorsParserConfig::builder().max_header_bytes(4).build();
+        let config = SafetensorsParserConfig::builder()
+            .max_header_bytes(4)
+            .build();
         let json = br#"{"t":{"dtype":"F32","shape":[1],"data_offsets":[0,4]}}"#;
         let mut wire = alloc::vec::Vec::new();
         wire.extend_from_slice(&(json.len() as u64).to_le_bytes());

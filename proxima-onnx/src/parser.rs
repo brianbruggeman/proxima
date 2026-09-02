@@ -179,13 +179,21 @@ fn try_read_field(
             }
             Ok(_) => {}
             Err(WireError::Short) => return Ok(None),
-            Err(source) => return Err(OnnxError::Wire { field: field_number, source }),
+            Err(source) => {
+                return Err(OnnxError::Wire {
+                    field: field_number,
+                    source,
+                });
+            }
         }
     }
 
     match parse_field(buf) {
         Ok((field, consumed)) => Ok(Some((field, consumed))),
         Err(WireError::Short) => Ok(None),
-        Err(source) => Err(OnnxError::Wire { field: field_number, source }),
+        Err(source) => Err(OnnxError::Wire {
+            field: field_number,
+            source,
+        }),
     }
 }

@@ -32,9 +32,18 @@ const MEASURED_CALLS: usize = 60;
 
 fn sentences() -> [(&'static str, Vec<i64>); 3] {
     [
-        ("the cat sat on the mat", vec![101, 1996, 4937, 2938, 2006, 1996, 13523, 102]),
-        ("a cat is sitting on a mat", vec![101, 1037, 4937, 2003, 3564, 2006, 1037, 13523, 102]),
-        ("quantum physics explains atomic energy", vec![101, 8559, 5584, 7607, 9593, 2943, 102]),
+        (
+            "the cat sat on the mat",
+            vec![101, 1996, 4937, 2938, 2006, 1996, 13523, 102],
+        ),
+        (
+            "a cat is sitting on a mat",
+            vec![101, 1037, 4937, 2003, 3564, 2006, 1037, 13523, 102],
+        ),
+        (
+            "quantum physics explains atomic energy",
+            vec![101, 8559, 5584, 7607, 9593, 2943, 102],
+        ),
     ]
 }
 
@@ -44,7 +53,11 @@ fn run_one(lowered: &proxima_onnx::lower::Lowered, output: proxima_tensor::NodeI
     let attention_mask = vec![1.0f32; sequence_length];
     let token_type_ids = vec![0.0f32; sequence_length];
 
-    let mut named: Vec<(&str, &[f32])> = lowered.initializers.iter().map(|(name, data)| (name.as_str(), data.as_slice())).collect();
+    let mut named: Vec<(&str, &[f32])> = lowered
+        .initializers
+        .iter()
+        .map(|(name, data)| (name.as_str(), data.as_slice()))
+        .collect();
     for name in &lowered.graph_inputs {
         let data: &[f32] = match name.as_str() {
             "input_ids" => &input_ids,
@@ -54,13 +67,16 @@ fn run_one(lowered: &proxima_onnx::lower::Lowered, output: proxima_tensor::NodeI
         };
         named.push((name.as_str(), data));
     }
-    let evaluated = cpu::evaluate_named(&lowered.program, &[], &named, &[output]).expect("evaluate BGE-small on the generic executor");
+    let evaluated = cpu::evaluate_named(&lowered.program, &[], &named, &[output])
+        .expect("evaluate BGE-small on the generic executor");
     std::hint::black_box(&evaluated);
 }
 
 fn main() {
     let Ok(model_path) = env::var(MODEL_PATH_ENV) else {
-        eprintln!("skipping: set {MODEL_PATH_ENV} to a local BGE-small-en-v1.5 model.onnx checkout");
+        eprintln!(
+            "skipping: set {MODEL_PATH_ENV} to a local BGE-small-en-v1.5 model.onnx checkout"
+        );
         return;
     };
     if !Path::new(&model_path).exists() {
@@ -80,8 +96,13 @@ fn main() {
             let mut pins = std::collections::BTreeMap::new();
             pins.insert("batch_size", 1u64);
             pins.insert("sequence_length", tokens.len() as u64);
-            let lowered = proxima_onnx::lower::lower_graph_pinned(graph, &pins).expect("lower BGE-small with pinned symbolic axes");
-            let output = lowered.graph_outputs.first().expect("last_hidden_state output").1;
+            let lowered = proxima_onnx::lower::lower_graph_pinned(graph, &pins)
+                .expect("lower BGE-small with pinned symbolic axes");
+            let output = lowered
+                .graph_outputs
+                .first()
+                .expect("last_hidden_state output")
+                .1;
             (lowered, output)
         })
         .collect();
@@ -119,8 +140,10 @@ fn main() {
         }
         let elapsed = start.elapsed();
 
-        let (reduce_nanos, reduce_calls, epilogue_nanos, epilogue_calls, other_nanos, other_calls) = cpu::epilogue_profile_totals();
-        let (reduce_gemm_nanos, reduce_gemm_calls, reduce_small_nanos, reduce_small_calls) = cpu::epilogue_profile_reduce_split_totals();
+        let (reduce_nanos, reduce_calls, epilogue_nanos, epilogue_calls, other_nanos, other_calls) =
+            cpu::epilogue_profile_totals();
+        let (reduce_gemm_nanos, reduce_gemm_calls, reduce_small_nanos, reduce_small_calls) =
+            cpu::epilogue_profile_reduce_split_totals();
         let total_nanos = reduce_nanos + epilogue_nanos + other_nanos;
         let total_calls = reduce_calls + epilogue_calls + other_calls;
 
@@ -175,7 +198,10 @@ fn main() {
     }
 
     let sentences_run = MEASURED_CALLS * items.len();
-    println!("=== combined across {} sentences, {sentences_run} total calls ===", items.len());
+    println!(
+        "=== combined across {} sentences, {sentences_run} total calls ===",
+        items.len()
+    );
     println!(
         "  total attributed: {combined_calls} calls, {combined_total_nanos} ns ({:.4} ms/sentence attributed mean)",
         combined_total_nanos as f64 / sentences_run as f64 / 1e6

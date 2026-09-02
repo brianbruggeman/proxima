@@ -12,7 +12,9 @@ use std::time::Instant;
 
 use proxima_tensor::instrument;
 use proxima_tensor::test_support::Lcg;
-use proxima_tensor::{Extent, IndexMap, NodeId, Op, ReduceInit, ScalarOp, append, evaluate_parallel, map};
+use proxima_tensor::{
+    Extent, IndexMap, NodeId, Op, ReduceInit, ScalarOp, append, evaluate_parallel, map,
+};
 
 fn random_vec(seed: u64, n: usize, scale: f32) -> Vec<f32> {
     let mut lcg = Lcg(seed);
@@ -86,7 +88,8 @@ fn main() {
     let workers = NonZeroUsize::new(threads).expect("threads must be nonzero");
 
     // one untimed warm-up
-    let _ = evaluate_parallel(&program, &[], &[&lhs, &rhs_t], &[], workers).expect("warmup gemm evaluates");
+    let _ = evaluate_parallel(&program, &[], &[&lhs, &rhs_t], &[], workers)
+        .expect("warmup gemm evaluates");
 
     for iter in 0..iters {
         instrument::reset_parallel();
@@ -94,7 +97,8 @@ fn main() {
         instrument::reset_worker_busy();
         instrument::reset();
         let start = Instant::now();
-        let evaluated = evaluate_parallel(&program, &[], &[&lhs, &rhs_t], &[], workers).expect("gemm evaluates");
+        let evaluated = evaluate_parallel(&program, &[], &[&lhs, &rhs_t], &[], workers)
+            .expect("gemm evaluates");
         let wall_ns = start.elapsed().as_nanos() as u64;
         let checksum = evaluated.root()[0];
         let totals = instrument::parallel_totals();
@@ -107,20 +111,33 @@ fn main() {
         };
         // `worker_busy_snapshot` returns raw tick deltas (`instrument.rs`'s
         // own doc) -- converted to nanoseconds once here, not per element.
-        let busy: Vec<u64> =
-            instrument::worker_busy_snapshot().into_iter().map(instrument::ticks_to_nanos).collect();
+        let busy: Vec<u64> = instrument::worker_busy_snapshot()
+            .into_iter()
+            .map(instrument::ticks_to_nanos)
+            .collect();
         let busy_count = busy.len();
         let busy_sum: u64 = busy.iter().sum();
         let busy_min = busy.iter().copied().min().unwrap_or(0);
         let busy_max = busy.iter().copied().max().unwrap_or(0);
-        let busy_mean = if busy_count == 0 { 0.0 } else { busy_sum as f64 / busy_count as f64 };
+        let busy_mean = if busy_count == 0 {
+            0.0
+        } else {
+            busy_sum as f64 / busy_count as f64
+        };
         let busy_variance = if busy_count == 0 {
             0.0
         } else {
-            busy.iter().map(|value| (*value as f64 - busy_mean).powi(2)).sum::<f64>() / busy_count as f64
+            busy.iter()
+                .map(|value| (*value as f64 - busy_mean).powi(2))
+                .sum::<f64>()
+                / busy_count as f64
         };
         let busy_stddev = busy_variance.sqrt();
-        let busy_spread = if busy_min == 0 { 0.0 } else { busy_max as f64 / busy_min as f64 };
+        let busy_spread = if busy_min == 0 {
+            0.0
+        } else {
+            busy_max as f64 / busy_min as f64
+        };
         // utilization: summed busy time versus the region wall clock stretched
         // across every worker that claimed a chunk — 1.0 means every worker was
         // busy for the entire parallel region, no idling.
@@ -130,7 +147,11 @@ fn main() {
         } else {
             busy_sum as f64 / (node_nanos as f64 * busy_count as f64)
         };
-        let busy_per_mac = if kernel.mac_ops == 0 { 0.0 } else { busy_sum as f64 / kernel.mac_ops as f64 };
+        let busy_per_mac = if kernel.mac_ops == 0 {
+            0.0
+        } else {
+            busy_sum as f64 / kernel.mac_ops as f64
+        };
         println!(
             "size={size} threads={threads} iter={iter} checksum={checksum:.5} wall_ns={wall_ns} \
              parallel_nodes={} node_ns={} spawn_ns={} join_ns={} chunk_count={} \

@@ -209,7 +209,9 @@ impl IndexMap {
     pub fn scatter_extent(&self) -> Option<i32> {
         match self {
             Self::Affine(_) => None,
-            Self::Computed { base, gathered_dim, .. } => {
+            Self::Computed {
+                base, gathered_dim, ..
+            } => {
                 if (*gathered_dim as usize) < base.axes.len() {
                     Some(base.axes[*gathered_dim as usize].offset)
                 } else {

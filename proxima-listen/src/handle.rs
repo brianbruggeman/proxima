@@ -220,8 +220,7 @@ impl Listener {
                 "listener shutdown bridge spawn failed: {err}"
             )));
         }
-        let (ready_tx, ready_rx) =
-            std::sync::mpsc::channel::<Result<(), ProximaError>>();
+        let (ready_tx, ready_rx) = std::sync::mpsc::channel::<Result<(), ProximaError>>();
         for core_index in 0..num_lanes {
             let protocol_for_lane = protocol.clone();
             let dispatch_for_lane = dispatch.clone();

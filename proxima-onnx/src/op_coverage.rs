@@ -32,9 +32,13 @@ const END_MARKER: &str = "other => Err(LowerError::UnsupportedOp";
 /// runtime input the caller supplied wrongly.
 #[derive(Debug, Error)]
 pub enum OpCoverageParseError {
-    #[error("lower.rs no longer defines `{START_MARKER}` -- op_coverage.rs's parser is out of date")]
+    #[error(
+        "lower.rs no longer defines `{START_MARKER}` -- op_coverage.rs's parser is out of date"
+    )]
     MissingStartMarker,
-    #[error("lower.rs's lower_node no longer ends its match on `{END_MARKER}` -- op_coverage.rs's parser is out of date")]
+    #[error(
+        "lower.rs's lower_node no longer ends its match on `{END_MARKER}` -- op_coverage.rs's parser is out of date"
+    )]
     MissingEndMarker,
 }
 
@@ -43,8 +47,14 @@ pub enum OpCoverageParseError {
 /// `fn lower_node(` marker and the `other => Err(LowerError::UnsupportedOp`
 /// arm that closes its match.
 pub fn parse_supported_ops(lower_rs_source: &str) -> Result<Vec<&str>, OpCoverageParseError> {
-    let after_start = lower_rs_source.split_once(START_MARKER).map(|(_, rest)| rest).ok_or(OpCoverageParseError::MissingStartMarker)?;
-    let body = after_start.split_once(END_MARKER).map(|(body, _)| body).ok_or(OpCoverageParseError::MissingEndMarker)?;
+    let after_start = lower_rs_source
+        .split_once(START_MARKER)
+        .map(|(_, rest)| rest)
+        .ok_or(OpCoverageParseError::MissingStartMarker)?;
+    let body = after_start
+        .split_once(END_MARKER)
+        .map(|(body, _)| body)
+        .ok_or(OpCoverageParseError::MissingEndMarker)?;
 
     Ok(body
         .lines()
@@ -76,7 +86,11 @@ pub fn render_markdown(lower_rs_source: &str) -> Result<String, OpCoverageParseE
          generate_op_coverage_doc`. `tests/op_coverage_doc_drift.rs` fails \
          the build if this file falls out of sync.\n"
     );
-    let _ = writeln!(out, "{} ops lower today; any ONNX op not in this list hits `LowerError::UnsupportedOp`.\n", ops.len());
+    let _ = writeln!(
+        out,
+        "{} ops lower today; any ONNX op not in this list hits `LowerError::UnsupportedOp`.\n",
+        ops.len()
+    );
     out.push_str("| onnx op |\n");
     out.push_str("| --- |\n");
     for op in ops {
@@ -94,13 +108,20 @@ mod tests {
 
     #[test]
     fn parses_every_quoted_arm_between_the_two_markers() {
-        assert_eq!(parse_supported_ops(SAMPLE).expect("sample source has both markers"), alloc::vec!["Add", "Sub"]);
+        assert_eq!(
+            parse_supported_ops(SAMPLE).expect("sample source has both markers"),
+            alloc::vec!["Add", "Sub"]
+        );
     }
 
     #[test]
     fn parses_the_real_lower_rs_and_finds_at_least_the_forty_one_documented_ops() {
         let real_source = include_str!("lower.rs");
         let ops = parse_supported_ops(real_source).expect("real lower.rs has both markers");
-        assert!(ops.len() >= 41, "expected at least 41 supported ops in lower_node's match, found {}: {ops:?}", ops.len());
+        assert!(
+            ops.len() >= 41,
+            "expected at least 41 supported ops in lower_node's match, found {}: {ops:?}",
+            ops.len()
+        );
     }
 }
