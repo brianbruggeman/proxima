@@ -612,8 +612,9 @@ fn identity_pattern(rank: usize) -> IndexPattern {
 }
 
 /// A rank-0 operand's pattern against an `out_rank`-dimensional iteration
-/// space -- the spelling [`proxima_tensor::spec`] calls `"->s"`/`"->sd"`:
-/// no axes, so the same scalar reads at every iteration position.
+/// space -- the spelling `proxima_tensor::spec` (its `config` feature is
+/// not enabled here) calls `"->s"`/`"->sd"`: no axes, so the same scalar
+/// reads at every iteration position.
 fn scalar_broadcast_pattern(out_rank: usize) -> IndexPattern {
     projection(out_rank as u16, &[])
 }
