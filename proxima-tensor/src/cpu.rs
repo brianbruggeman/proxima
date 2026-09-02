@@ -158,7 +158,7 @@ use core::sync::atomic::{
 use std::borrow::Cow;
 use std::sync::atomic::AtomicUsize;
 use std::sync::mpsc::{SyncSender, sync_channel};
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
 use std::thread;
 
 use prime::os::background::ProximaBackgroundPool;
@@ -435,23 +435,29 @@ pub fn evaluate(
 /// gone by the time a consumer half receives its inputs, and only `name`
 /// survives the cut.
 ///
-/// This does not change `evaluate`'s signature or behaviour: every `named`
-/// entry is wrapped as [`QuantizedBlock::Float32`] and handed to
-/// [`evaluate_quantized_named`], the one name-resolution loop this and
-/// [`evaluate_quantized_named`] both share — see that function's doc for
-/// why `evaluate_quantized`'s gate is a no-op for an all-`Float32` caller
-/// like this one, so routing through it changes nothing observable here.
+/// Every `named` entry here is float32 by construction (this function's own
+/// signature), so this is [`evaluate_named_via_arena`] — [`StaticArena`]'s
+/// buffer reuse, law 6∘5 weight packing, and dead/static-node skip, all
+/// reached through a bounded process-wide cache
+/// ([`ARENA_CACHE`]/[`checkout_arena`]) rather than a caller-owned handle.
+/// `evaluate_quantized_named`/[`evaluate_quantized_with_scratch`] remain the
+/// entry point for a caller that mixes in real quantized weight blocks — a
+/// capability [`StaticArena`] does not carry — but this function never
+/// reaches that loop, since it never has anything but `Float32` blocks to
+/// hand it.
+///
+/// `peak_live_buffers()` on the result is always `None` here (see
+/// [`Evaluated`]'s own doc): [`StaticArena`]'s buffers persist across calls
+/// rather than being freed and recounted per call, so there is no
+/// per-call high-water mark to report, the same reason
+/// [`evaluate_named_with_arena`] itself reports `None`.
 pub fn evaluate_named(
     program: &[Op],
     symbols: &[u64],
     named: &[(&str, &[f32])],
     outputs: &[NodeId],
 ) -> Result<Evaluated, TensorError> {
-    let wrapped: Vec<(&str, QuantizedBlock)> = named
-        .iter()
-        .map(|(name, data)| (*name, QuantizedBlock::Float32(data)))
-        .collect();
-    evaluate_quantized_named(program, symbols, &wrapped, outputs)
+    evaluate_named_via_arena(program, symbols, named, outputs)
 }
 
 /// Same contract as [`evaluate`], plus one capability a caller cannot get
@@ -479,17 +485,25 @@ pub fn evaluate_with_scratch(
 /// A [`bind::bind`]-shaped execution plan whose per-node output storage is
 /// allocated exactly once and reused, unchanged in size, across every call
 /// to [`evaluate_named_with_arena`] against the SAME `program` — the
-/// static-arena counterpart to [`evaluate_named`], for a caller (a training
-/// loop, per `docs/discipline.md` ROW 164) that runs an identically-shaped
-/// program hundreds of times in a row and today pays `evaluate_named`'s own
-/// `shape::infer` + `bind::bind` + a fresh `vec![0.0; n]` per node on every
-/// single call even though every one of those calls resolves to the
-/// identical shapes.
+/// static-arena counterpart to [`evaluate_named`]. [`evaluate_named`] itself
+/// now reaches this SAME machinery by default, through a bounded process
+/// cache (`ARENA_CACHE`) rather than a caller-held handle — see that
+/// function's own doc. What a caller still gets ONLY by holding a
+/// `StaticArena` directly: a GUARANTEED warm arena regardless of how many
+/// OTHER distinct `(program, symbols, outputs)` shapes the process is
+/// currently evaluating (the cache's own bound, `ARENA_CACHE_CAPACITY`,
+/// can evict a shape `evaluate_named` alone would otherwise have to rebuild
+/// on the next call), no mutex checkout/checkin per call, and the
+/// in-place rebind lever ([`evaluate_named_with_arena_in_place`]) a shared
+/// cache cannot offer since a rebind aliases buffers the caller alone
+/// still owns identity of.
 ///
-/// What a caller can do with this that [`evaluate_named`] alone cannot:
-/// amortize bind + per-node allocation across every step of a loop instead
-/// of repeating both on every call — the ONLY thing this type exists to
-/// buy, per this crate's own binary-question gate (`AGENTS.md`,
+/// A caller running an identically-shaped program hundreds of times in a
+/// row (a training loop, per `docs/discipline.md` ROW 164) that wants that
+/// guarantee, rather than betting on the shared cache staying warm, still
+/// builds and holds its own arena — the ONLY thing THIS type exists to buy
+/// beyond what `evaluate_named` already does for free, per this crate's own
+/// binary-question gate (`AGENTS.md`,
 /// guiding-principles §1: "what can a caller do that they could not
 /// before").
 pub struct StaticArena {
@@ -1025,6 +1039,204 @@ fn run_resolved_nodes_in_arena(arena: &mut StaticArena) -> Result<(), TensorErro
         }
     }
     Ok(())
+}
+
+/// One [`evaluate_named`] call's worth of graph identity: the SAME
+/// `(program, symbols, outputs)` triple [`build_static_arena`] itself
+/// binds. `program`/`symbols`/`outputs` are cloned once, at
+/// [`checkin_arena`] time, so a later [`checkout_arena`] call can prove a
+/// hit by FULL VALUE equality (`Op` and `NodeId` both derive `PartialEq`)
+/// rather than by pointer identity alone — a freed-and-reallocated
+/// `Vec<Op>` could otherwise alias a stale entry's address and hand back
+/// the wrong arena for a same-address, different-graph call.
+struct CachedArena {
+    program: Vec<Op>,
+    symbols: Vec<u64>,
+    outputs: Vec<NodeId>,
+    arena: StaticArena,
+}
+
+/// [`ARENA_CACHE`]'s own bound: the most distinct `(program, symbols,
+/// outputs)` shapes this process keeps a warm [`StaticArena`] for at once.
+/// A caller cycling through more distinct shapes than this evicts the
+/// least-recently-checked-in entry (index 0, a FIFO queue) rather than
+/// growing without limit — see [`checkin_arena`].
+const ARENA_CACHE_CAPACITY: usize = 8;
+
+/// Bounded, process-wide memoization of a [`StaticArena`] by graph
+/// identity, so [`evaluate_named`]'s own default path reaches
+/// [`run_resolved_nodes_in_arena`] — this module's ONE loop over a resolved
+/// graph — without a caller ever building or owning an arena itself. Owned
+/// by this ONE static, bounded by [`ARENA_CACHE_CAPACITY`] entries (never
+/// an unbounded map keyed by pointer identity).
+///
+/// Guarded by a plain `std::sync::Mutex`, matching this workspace's own
+/// established pattern for exactly this shape of state (`proxima-http`,
+/// `proxima-intercept`, `proxima-net` all guard synchronous shared state
+/// the same way; there is no separate lock-tier crate in this workspace to
+/// route through instead). The lock is held only for a checkout/checkin —
+/// a linear scan plus a `Vec::remove`/`push` over at most
+/// [`ARENA_CACHE_CAPACITY`] entries — NEVER across the run itself: an
+/// arena's buffers are mutated in place across a call, so sharing one
+/// arena INSTANCE between two overlapping callers would be unsound
+/// regardless of locking, and [`checkout_arena`] instead hands out
+/// exclusive ownership for the call's duration. Two callers racing the
+/// SAME key each get their own private arena and duplicate one build; both
+/// check back in afterward, so the cache is warm again for the next call —
+/// wasted work under first-use concurrency, never a data race or a wrong
+/// answer.
+static ARENA_CACHE: Mutex<Vec<CachedArena>> = Mutex::new(Vec::new());
+
+/// [`ARENA_CACHE`]'s own lock, recovered rather than propagated on
+/// poisoning (`instrument::worker_busy_snapshot`'s own established
+/// pattern in this crate): a panic while another caller held the lock
+/// leaves the `Vec<CachedArena>` in whatever state that caller's own
+/// operation reached, never a torn/half-written entry (every mutation
+/// under this lock is a whole-`Vec` `remove`/`push`), so recovering and
+/// continuing is safe and matches this crate's own "no unwrap/expect
+/// outside tests" discipline better than propagating a poison panic would.
+fn lock_arena_cache() -> MutexGuard<'static, Vec<CachedArena>> {
+    ARENA_CACHE
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+}
+
+/// Engagement evidence for the cache above: how many [`checkout_arena`]
+/// calls built a fresh [`StaticArena`] (a miss) versus reused a checked-in
+/// one (a hit) — same "a gate that cannot report its N is not a gate" shape
+/// [`epilogue_fuse_totals`] already serves for the fusion laws. Read via
+/// [`arena_cache_totals`].
+static ARENA_CACHE_BUILDS: EpilogueFuseAtomicU64 = EpilogueFuseAtomicU64::new(0);
+static ARENA_CACHE_HITS: EpilogueFuseAtomicU64 = EpilogueFuseAtomicU64::new(0);
+
+/// `(builds, hits)` since process start or the last [`arena_cache_reset`].
+#[must_use]
+pub fn arena_cache_totals() -> (u64, u64) {
+    (
+        ARENA_CACHE_BUILDS.load(EpilogueFuseOrdering::Relaxed),
+        ARENA_CACHE_HITS.load(EpilogueFuseOrdering::Relaxed),
+    )
+}
+
+/// Test/bench-only reset: empties [`ARENA_CACHE`] and zeroes
+/// [`arena_cache_totals`], so a re-prove command measuring "N arenas built
+/// over M calls" gets a clean process-relative count instead of whatever
+/// an earlier pass in the same process already warmed.
+#[doc(hidden)]
+pub fn arena_cache_reset() {
+    lock_arena_cache().clear();
+    ARENA_CACHE_BUILDS.store(0, EpilogueFuseOrdering::Relaxed);
+    ARENA_CACHE_HITS.store(0, EpilogueFuseOrdering::Relaxed);
+}
+
+/// [`arena_packed_node_count`], summed over every [`StaticArena`] currently
+/// checked into [`ARENA_CACHE`] — the engagement number law 6∘5 packing
+/// promises on [`evaluate_named`]'s own default path, readable without a
+/// caller holding any arena itself.
+#[doc(hidden)]
+#[must_use]
+pub fn arena_cache_packed_node_count() -> usize {
+    lock_arena_cache()
+        .iter()
+        .map(|entry| arena_packed_node_count(&entry.arena))
+        .sum()
+}
+
+/// Checks a [`StaticArena`] matching `(program, symbols, outputs)` out of
+/// [`ARENA_CACHE`], building one via [`build_static_arena`] on a miss. See
+/// [`ARENA_CACHE`]'s own doc for the lock discipline and the concurrent-miss
+/// case.
+fn checkout_arena(
+    program: &[Op],
+    symbols: &[u64],
+    outputs: &[NodeId],
+) -> Result<StaticArena, TensorError> {
+    {
+        let mut cache = lock_arena_cache();
+        if let Some(index) = cache.iter().position(|entry| {
+            entry.program == program && entry.symbols == symbols && entry.outputs == outputs
+        }) {
+            ARENA_CACHE_HITS.fetch_add(1, EpilogueFuseOrdering::Relaxed);
+            return Ok(cache.remove(index).arena);
+        }
+    }
+    ARENA_CACHE_BUILDS.fetch_add(1, EpilogueFuseOrdering::Relaxed);
+    build_static_arena(program, symbols, outputs)
+}
+
+/// Returns `arena` to [`ARENA_CACHE`] for the next [`checkout_arena`] call
+/// against the same `(program, symbols, outputs)` key. Never called after a
+/// failed bind/run: an arena `run_resolved_nodes_in_arena` errored out of
+/// partway through may hold a `take()`n slot that was never restored, and
+/// re-offering that arena for reuse would turn one call's failure into every
+/// later call's — dropping it and rebuilding fresh on the next miss is the
+/// safe, self-healing choice (see [`checkout_arena`]'s own callers).
+fn checkin_arena(program: &[Op], symbols: &[u64], outputs: &[NodeId], arena: StaticArena) {
+    let mut cache = lock_arena_cache();
+    if cache.len() >= ARENA_CACHE_CAPACITY {
+        cache.remove(0);
+    }
+    cache.push(CachedArena {
+        program: program.to_vec(),
+        symbols: symbols.to_vec(),
+        outputs: outputs.to_vec(),
+        arena,
+    });
+}
+
+/// [`evaluate_named`]'s own body: binds `named` into a cached
+/// [`StaticArena`] (see [`checkout_arena`]/[`checkin_arena`]) and runs it
+/// through [`run_resolved_nodes_in_arena`] — this module's one loop over a
+/// resolved graph. A caller gets arena buffer reuse, law 6∘5 weight packing
+/// ([`StaticArena::packed_width_panels`]), and the dead/static-node skip
+/// that loop already carries, without ever building or owning an arena
+/// itself, and without [`evaluate_named`]'s own signature changing to carry
+/// one.
+fn evaluate_named_via_arena(
+    program: &[Op],
+    symbols: &[u64],
+    named: &[(&str, &[f32])],
+    outputs: &[NodeId],
+) -> Result<Evaluated, TensorError> {
+    let root = program
+        .len()
+        .checked_sub(1)
+        .map(|last| NodeId(last as u32))
+        .ok_or(TensorError::Empty)?;
+    for output in outputs {
+        if output.0 as usize >= program.len() {
+            return Err(TensorError::UnknownOutput(*output));
+        }
+    }
+    let effective_outputs: Vec<NodeId> = if outputs.is_empty() {
+        vec![root]
+    } else {
+        outputs.to_vec()
+    };
+
+    let mut arena = checkout_arena(program, symbols, &effective_outputs)?;
+    let run = bind_named_inputs_into_arena(&mut arena, named, true)
+        .and_then(|()| run_resolved_nodes_in_arena(&mut arena));
+    match run {
+        Ok(()) => {
+            let results = arena
+                .effective_outputs
+                .iter()
+                .map(|node| {
+                    let shape = arena.shapes.of(*node).to_vec();
+                    let data = arena.buffers[node.0 as usize]
+                        .as_deref()
+                        .unwrap_or(&[])
+                        .to_vec();
+                    (*node, shape, data)
+                })
+                .collect();
+            let evaluated = Evaluated::from_parts(arena.root, results, None);
+            checkin_arena(program, symbols, &effective_outputs, arena);
+            Ok(evaluated)
+        }
+        Err(error) => Err(error),
+    }
 }
 
 /// `docs/discipline.md` ROW 181's profile-gate probe: a flat bitmap over
@@ -2930,12 +3142,12 @@ pub fn evaluate_quantized_with_scratch(
 
     let resolved = bind::bind(program, &shapes, &effective_outputs)?;
     let retires = node_retirement(&resolved, &effective_outputs);
-    // ROW 181 profile-gate probe: this loop, not `run_resolved_nodes_in_arena`,
-    // is what `evaluate_named`/`evaluate_quantized_named` actually walks
-    // (`evaluate_named` wraps every operand as `QuantizedBlock::Float32` and
-    // calls straight into `evaluate_quantized_named` -> here) -- the arena
-    // API's own loop is a separate entry point this probe also instruments,
-    // but is not what `benches/mnist_f32_lane.rs` exercises.
+    // ROW 181 profile-gate probe: `evaluate_named` no longer reaches this
+    // loop (it routes through `evaluate_named_via_arena` ->
+    // `run_resolved_nodes_in_arena` instead, see that function's own doc)
+    // -- what still walks HERE is `evaluate_quantized_named`/`evaluate_quantized`/
+    // `evaluate` whenever a real quantized (non-`Float32`) block is present,
+    // `StaticArena` carrying no quantized-weight support today.
     #[cfg(feature = "epilogue-profile-probe")]
     let epilogue_profile_reduce_nodes = epilogue_profile_reduce_flags(&resolved, program.len());
     // `docs/discipline.md` ROW 183 Phase 2 / ROW 204, now driven through
@@ -3317,13 +3529,15 @@ pub fn evaluate_quantized_with_scratch(
 }
 
 /// [`evaluate_quantized`]'s counterpart for binding by name instead of
-/// position — the same relationship [`evaluate_named`] has to [`evaluate`],
-/// and the same resolution loop: walk `program`'s [`Op::Input`] nodes in
-/// order, look each one's name up in `named`, and hand the resolved
-/// positional `blocks: &[QuantizedBlock]` straight to [`evaluate_quantized`].
-/// [`evaluate_named`] is now this function plus one wrapping step
-/// (`QuantizedBlock::Float32`), rather than a second copy of this loop —
-/// there is exactly one name-to-[`Op::Input`] resolution in this module.
+/// position — the same resolution loop: walk `program`'s [`Op::Input`]
+/// nodes in order, look each one's name up in `named`, and hand the
+/// resolved positional `blocks: &[QuantizedBlock]` straight to
+/// [`evaluate_quantized`]. [`evaluate_named`] no longer routes through
+/// here (see that function's own doc: it reaches
+/// [`evaluate_named_via_arena`] directly, since it only ever has
+/// `Float32` blocks to hand this loop) — this function remains the entry
+/// point for a caller mixing in a real quantized (non-`Float32`) weight
+/// block, a capability [`StaticArena`] does not carry.
 pub fn evaluate_quantized_named<'block>(
     program: &[Op],
     symbols: &[u64],
@@ -19642,8 +19856,11 @@ mod tests {
     }
 
     /// [`build_static_arena`] + [`evaluate_named_with_arena`] run TWICE
-    /// against the same arena, on two different `named` bindings, and must
-    /// each match [`evaluate_named`]'s own fresh-alloc result bit for bit --
+    /// against a CALLER-OWNED arena, on two different `named` bindings, and
+    /// must each match [`evaluate_named`]'s own result bit for bit --
+    /// [`evaluate_named`] now reaches the identical machinery through its
+    /// OWN, separately-cached arena (`ARENA_CACHE`), so this proves the two
+    /// independent arena instances (caller-owned vs. process-cached) agree,
     /// the same correctness bar `train_step_lane.rs`'s own bench-level
     /// `assert_arena_bit_identical_to_baseline` holds the arena to, proved
     /// here at the library-unit level instead.
@@ -19739,11 +19956,11 @@ mod tests {
 
     /// [`build_static_arena`] finds `dead` (zero consumers, not requested)
     /// dead and elides it -- `run_resolved_nodes_in_arena` never runs it --
-    /// while `live` still evaluates bit-identically to
-    /// [`evaluate_named`]'s own fresh-alloc, non-eliding path. `dead`'s
-    /// pre-sized buffer stays whatever [`build_static_arena`] initialized
-    /// it to (zeros), proving the skip is real rather than a coincidence of
-    /// the two ops sharing a body shape.
+    /// while `live` still evaluates bit-identically to [`evaluate_named`]'s
+    /// own result (which elides the identical way through its own
+    /// separately-cached arena). `dead`'s pre-sized buffer stays whatever
+    /// [`build_static_arena`] initialized it to (zeros), proving the skip is
+    /// real rather than a coincidence of the two ops sharing a body shape.
     #[test]
     fn build_static_arena_elides_a_node_with_zero_consumers() {
         let (program, dead, live) = dead_node_program();
