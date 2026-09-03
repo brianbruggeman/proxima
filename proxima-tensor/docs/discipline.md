@@ -19227,3 +19227,28 @@ existing dependency relation was indexed once and the existing bind rewrite
 consumed it. The next kernel cell remains the packed GEMV dispatch geometry;
 the current source/profile evidence identifies 225 packed row-blocked ops as
 the dominant GPU family, while this row closes the CPU-side bind scan.
+
+## ROW 249 -- packed GEMV width-64 dispatch negative
+
+Following the incumbent-derived two-SIMD-group hypothesis, the existing
+packed row-blocked reductions were dispatched with `threadgroup_width=64`
+for one cell. The kernel's lane ownership, output grouping, and total grid
+threads were unchanged; this tested dispatch geometry only. The candidate was
+rolled back after the measurement.
+
+| arm | mean wall ms | CoV | mean GPU ms | CoV | output |
+| --- | ---: | ---: | ---: | ---: | --- |
+| width 32, consumer-index baseline | 69.263 | 0.105% | 50.788 | 0.159% | `Here is` |
+| width 64 candidate | 71.029 | 0.624% | 52.230 | 1.005% | `Here is` |
+
+The width-64 candidate was `1.025x` slower on wall time and `1.028x` slower
+on GPU time over three independent full-checkpoint runs. The negative is
+consistent with the source: `push_packed_row_blocked_body` uses each SIMD
+group's `lane` independently and has no threadgroup-shared activation tile,
+so adding a second SIMD group changes scheduling without sharing the packed
+decode work. The next packed-GEMV experiment must change shared work ownership
+inside the existing kernel, not only its dispatch width.
+
+Raw records are `/tmp/proxima-metal-width64-two-run{1,2,3}.txt`. The source
+candidate was reverted before this row was committed; the worktree contains
+the width-32 baseline implementation.
