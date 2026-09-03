@@ -19515,6 +19515,24 @@ llama.cpp/ggml measured `17.467 ms/token` in ROW 250, so the clean Proxima
 spot-check ratio is `51.779 / 17.467 = 2.964x` slower. No GPU multiplier is
 derived because llama's GPU execution time is unreported.
 
+## ROW 261 -- repeated clean-host candidate cell remains noisy
+
+Three additional post-worker repetitions of the corrected row-blocked
+full-model harness recorded step-1 GPU times `76.422`, `71.571`, and `60.881 ms`
+(mean `69.625 ms`, sample CoV `11.42%`, median `71.571 ms`) and wall times
+`89.422`, `89.810`, and `74.976 ms` (mean `84.736 ms`, sample CoV `9.98%`).
+All three emitted the same observed prefix `Here is a simple Python function
+that returns`, reported finite logits, and used 1194 operations with
+`plan_misses=2` at step 1. The corresponding GPU fields were `76.422`,
+`71.571`, and `60.881 ms`; the variation is therefore in execution timing, not
+an output-quality flip. These samples are not pooled with ROW 258's isolated
+spot checks because their CoV is above the 5% measurement trust threshold.
+
+This row leaves the production timing cell unready for a stable multiplier
+claim. The matched llama wall record remains `17.467 ms/token`; the current
+candidate observations are all slower, but their spread must be resolved before
+using a single Proxima number in the comparison headline.
+
 ## ROW 259 -- existing tiled GEMM feature does not reduce this decode cell
 
 The existing `metal-tiled-gemm` path was enabled as a bounded control against
