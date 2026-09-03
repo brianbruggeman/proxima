@@ -19493,3 +19493,24 @@ Post-commit spot check: the same release full-model harness with
 pooled into the earlier three-run candidate mean, because its GPU time is
 outside that cell's observed range. The output remained unchanged; the timing
 spread is an unclosed measurement residual, not an explanation for the gap.
+
+## ROW 258 -- production timing contamination separated from clean spot check
+
+Three post-commit repetitions taken while a concurrent Sol fork was running
+another `proxima_model_interop` benchmark measured step-1 GPU times of `63.528`,
+`69.868`, and `82.580 ms`; the process list showed that worker at `169.6%`
+CPU. Those samples are excluded from the candidate aggregate because the
+execution environment was not isolated. After the worker was shut down, the
+same harness measured `51.779 ms` wall and `38.994 ms` GPU, with
+`device_allocated_bytes=4,155,228,160`, finite logits, and the unchanged output
+prefix `Here is a simple Python function that returns`. The immediately prior
+post-commit spot check was `51.692 ms` wall and `39.127 ms` GPU.
+
+This narrows the current clean production observation to approximately `39 ms`
+GPU and `52 ms` wall for this workload, but it is not a new multi-run aggregate.
+The earlier `33.862 ms` three-run candidate cell remains a separately labelled
+measurement; it must not be presented as the stable current mean until it is
+reproduced under an isolated host. The incumbent comparison remains wall-only:
+llama.cpp/ggml measured `17.467 ms/token` in ROW 250, so the clean Proxima
+spot-check ratio is `51.779 / 17.467 = 2.964x` slower. No GPU multiplier is
+derived because llama's GPU execution time is unreported.
