@@ -160,13 +160,27 @@ fn supported_serving_config(model_path: &str) -> ServingConfig<'_> {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let gguf_path = args.get(1).expect("argv[1]: path to a .gguf checkpoint");
-    let prompt = args.get(2).expect("argv[2]: prompt string");
-    let max_tokens: usize = args
-        .get(3)
-        .expect("argv[3]: max token count")
-        .parse()
-        .expect("argv[3] must be a non-negative integer");
+    let Some(gguf_path) = args.get(1) else {
+        eprintln!("argv[1]: path to a .gguf checkpoint");
+        std::process::exit(1);
+    };
+    let Some(prompt) = args.get(2) else {
+        eprintln!("argv[2]: prompt string");
+        std::process::exit(1);
+    };
+    let max_tokens: usize = match args.get(3) {
+        Some(value) => match value.parse() {
+            Ok(max_tokens) => max_tokens,
+            Err(error) => {
+                eprintln!("argv[3] must be a non-negative integer: {error}");
+                std::process::exit(1);
+            }
+        },
+        None => {
+            eprintln!("argv[3]: max token count");
+            std::process::exit(1);
+        }
+    };
 
     println!("gguf_path = {gguf_path}");
     println!("prompt = {prompt:?}");
@@ -175,15 +189,27 @@ fn main() {
     // bind.rs's gguf_tensor_as_packed_block borrows quantized weights straight out of
     // this buffer for the model's whole lifetime, so it must stay file-backed and
     // kernel-reclaimable rather than a private anonymous heap copy.
-    let gguf_file = std::fs::File::open(gguf_path).expect("open the gguf file");
+    let gguf_file = match std::fs::File::open(gguf_path) {
+        Ok(gguf_file) => gguf_file,
+        Err(error) => {
+            eprintln!("open the gguf file: {error}");
+            std::process::exit(1);
+        }
+    };
     // SAFETY: the checkpoint file is not written or truncated by any process while this
     // mapping is alive for the duration of this run, so the mapped bytes stay valid.
-    let file_map = unsafe { memmap2::Mmap::map(&gguf_file).expect("mmap the gguf file") };
+    let file_map = match unsafe { memmap2::Mmap::map(&gguf_file) } {
+        Ok(file_map) => file_map,
+        Err(error) => {
+            eprintln!("mmap the gguf file: {error}");
+            std::process::exit(1);
+        }
+    };
     let file_bytes: &[u8] = &file_map;
     println!("file_bytes = {} bytes", file_bytes.len());
 
     let parse_started = Instant::now();
-    let parsed = match parse_complete(&file_bytes) {
+    let parsed = match parse_complete(file_bytes) {
         Ok(parsed) => parsed,
         Err(error) => {
             println!("GGUF PARSE FAILED: {error}");
@@ -197,7 +223,7 @@ fn main() {
     print_architecture_metadata(&parsed);
 
     let load_started = Instant::now();
-    let model = match LoadedModel::load(&parsed, &file_bytes) {
+    let model = match LoadedModel::load(&parsed, file_bytes) {
         Ok(model) => model,
         Err(error) => {
             println!("WEIGHT LOAD FAILED: {error}");
@@ -302,4 +328,5 @@ fn main() {
         "device_current_allocated_size = {:?}",
         omega::metal::current_allocated_size()
     );
+    println!("nocopy_cache_len = {}", omega::metal::nocopy_cache_len());
 }
