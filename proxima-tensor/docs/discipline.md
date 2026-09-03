@@ -19151,3 +19151,33 @@ re-prove command is the ROW 243 two-token Proxima command with the current
 `omega/src/msl.rs:1520-1527`, `omega/src/msl.rs:2166-2177`, and
 `omega/src/msl.rs:4749-4759`; parity evidence is
 `omega/tests/metal_real_forward.rs:148-181`.
+
+## ROW 247 -- acceleration attribution correction: plan preparation dominates wall gap
+
+The latest real-checkpoint diagnostic is a correction to the earlier
+interpretation of the cached-attention change. `cached_attention_ops=0` in
+the model-loop attribution line is not a Metal execution counter: the
+counter is recorded by the CPU evaluator, while Metal's per-op profile
+classifies the actual bound operations independently. The Metal profile for
+the real decode step recorded `kind=cached-attention op_count=32` and
+`gpu_ms=9.288`, so the SIMD-group candidate is on the measured Metal graph.
+
+The same profile recorded `kind=reduce-packed-row-blocked op_count=225`
+and `gpu_ms=124.479` in diagnostic per-op mode. A production batched step
+recorded `gpu_exec_ms=56.439` and `prepare_ms=148.177`; the latter is paid
+before the one-command-buffer GPU execution for that step. The source path
+is `omega/src/metal.rs:947-1033`: `prepare` re-runs inference, input shape
+validation, binding, dead-node pruning, packed-layout correction, retirement
+calculation, and index discovery. The caller's cache explicitly rebuilds a
+fresh concrete plan for each increasing `(new_count, cached_len)` shape at
+`proxima-model-interop/src/generate.rs:883-904` and `:958-975`.
+
+This explains the observed “GPU is not accelerated” symptom as two measured
+terms rather than one: the current steady decode candidate is `220.937 ms`
+wall with `56.970 ms` GPU execution (ROW 246), while the incumbent's matched
+decode wall cell is `17.354 ms` (ROW 243). The source and timing records
+support a plan-preparation/shape-specialization experiment next; they do not
+support claiming that the cached-attention SIMD change closes the full-model
+gap. No implementation change is made in this row.
+
+Raw profile record: `/tmp/proxima-metal-simd-profile-complete.txt`.
