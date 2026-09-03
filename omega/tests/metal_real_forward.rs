@@ -15,7 +15,7 @@
 #![cfg(all(feature = "metal", target_os = "macos"))]
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-use proxima_tensor::NodeId;
+use proxima_tensor::{BoundOpKind, NodeId, bind, infer};
 use proxima_tensor::cpu::evaluate_quantized_named_with_scratch;
 
 mod support;
@@ -143,4 +143,40 @@ fn metal_agrees_with_cpu_on_a_nonempty_kv_cache() {
             "metal first diverges from cpu at node {node:?} op={op:?}: metal={got} cpu={want} relative={relative}"
         );
     }
+}
+
+#[test]
+fn fused_cached_attention_root_agrees_between_cpu_and_metal() {
+    let (program, symbols, roots, owned) = real_forward_fixture_with_cached_len(5);
+    let output_roots = [roots[0]];
+    let named = as_named_blocks(&owned);
+    let shapes = infer(&program, &symbols).expect("cached fixture infers");
+    let resolved = bind(&program, &shapes, &output_roots).expect("cached fixture binds");
+    assert!(resolved
+        .iter()
+        .any(|bound| matches!(bound.kind, BoundOpKind::CachedAttention { .. })));
+
+    let mut free_buffers = Vec::new();
+    let mut validated = None;
+    let cpu = evaluate_quantized_named_with_scratch(
+        &program,
+        &symbols,
+        &named,
+        &output_roots,
+        &mut free_buffers,
+        &mut validated,
+    )
+    .expect("cpu runs the fused cached root");
+    let plan = omega::plan_named(&program, &symbols, &named, &output_roots)
+        .expect("metal plans the fused cached root");
+    let metal = omega::execute_plan_named(&plan, &named)
+        .expect("metal runs the fused cached root");
+    let max_diff = cpu
+        .root()
+        .iter()
+        .zip(metal.root())
+        .map(|(expected, actual)| (expected - actual).abs())
+        .fold(0.0f32, f32::max);
+    eprintln!("fused cached root: max_diff={max_diff}");
+    assert!(max_diff < 1e-4, "fused cached root max_diff={max_diff}");
 }
