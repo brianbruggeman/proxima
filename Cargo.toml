@@ -373,6 +373,7 @@ proxima-recording = { version = "0.1.0", path = "proxima-recording", features = 
 proxima-vm = { version = "0.1.0", path = "tools/proxima-vm", default-features = false, features = ["std"], optional = true }
 proxima-onnx = { workspace = true, features = ["std"], optional = true }
 proxima-tensor = { workspace = true, features = ["std"], optional = true }
+proxima-tokenizer = { version = "0.1.0", path = "proxima-tokenizer", features = ["gguf"] }
 
 [dependencies.tracing-subscriber]
 workspace = true
