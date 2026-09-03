@@ -810,6 +810,41 @@ mod tests {
         }
     }
 
+    /// [`tiny_dense_architecture`]'s `head_dim = 2` gives [`permute_rope_rows`]
+    /// exactly one pair per head (`half = 1`), where the interleaved
+    /// destination indices `2*i`/`2*i+1` and the split-half source indices
+    /// `i`/`half+i` both reduce to `0`/`1` -- the permutation is the
+    /// identity either way, so no fixture built on that architecture can
+    /// tell a correct interleave apart from a regression that dropped the
+    /// permutation entirely. `head_dim = 4` (two pairs per head) breaks that
+    /// coincidence: the interleaved layout `[x1[0], x2[0], x1[1], x2[1]]` is
+    /// a real transposition of the split-half input `[x1[0], x1[1], x2[0],
+    /// x2[1]]`, so a wrong-convention regression (skipping the permutation,
+    /// or swapping which half each destination slot reads) changes the
+    /// asserted output.
+    #[test]
+    fn permute_rope_rows_interleaves_split_half_pairs_when_two_pairs_exist() {
+        const HEAD_COUNT: usize = 2;
+        const HEAD_DIM: usize = 4;
+        const IN_DIM: usize = 1;
+
+        // per head, split-half layout: [x1[0], x1[1], x2[0], x2[1]].
+        let original: Vec<f32> = (0..HEAD_COUNT * HEAD_DIM).map(|index| index as f32).collect();
+
+        let permuted = permute_rope_rows(&original, HEAD_COUNT, HEAD_DIM, IN_DIM);
+
+        // per head, interleaved layout: [x1[0], x2[0], x1[1], x2[1]].
+        let expected: Vec<f32> = vec![0.0, 2.0, 1.0, 3.0, 4.0, 6.0, 5.0, 7.0];
+        assert_eq!(
+            permuted, expected,
+            "two pairs per head must interleave x1/x2, not pass the split-half layout through"
+        );
+        assert_ne!(
+            permuted, original,
+            "a wrong convention that no-ops the permutation must be distinguishable at two pairs per head"
+        );
+    }
+
     /// A real bf16 embedding table must bind as an OWNED f32 buffer, never
     /// packed -- the exact defect this row's own fix closes, reproduced
     /// directly rather than only through the full multi-tensor pipeline:

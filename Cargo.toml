@@ -102,7 +102,6 @@ proxima-config = { path = "proxima-config", default-features = false }
 proxima-core = { path = "proxima-core", default-features = false }
 proxima-dns = { path = "proxima-dns", default-features = false }
 proxima-gguf = { path = "proxima-gguf", default-features = false }
-proxima-tokenizer = { path = "proxima-tokenizer", default-features = false }
 proxima-http = { path = "proxima-http", default-features = false }
 proxima-kafka = { path = "proxima-kafka", default-features = false }
 proxima-listen = { path = "proxima-listen" }
@@ -473,6 +472,9 @@ proc-macro2.workspace = true
 syn = { workspace = true, features = ["full"] }
 quote.workspace = true
 proc-macro-crate = "3.5.0"
+proxima-model-interop = { path = "proxima-model-interop", features = ["std", "metal", "instrument"] }
+proxima-gguf = { path = "proxima-gguf" }
+memmap2 = "0.9.11"
 
 [lints]
 workspace = true
@@ -1950,6 +1952,16 @@ required-features = ["runtime-prime-executor", "runtime-prime-inbox-alloc", "run
 name = "integration"
 path = "examples/integration/main.rs"
 required-features = ["runtime-prime-executor", "runtime-prime-inbox-alloc", "runtime-prime-reactor", "runtime-prime-bgpool", "http-prime-deps", "http1-native", "macros"]
+
+# gate experiment: does proxima's own tensor stack load an arbitrary GGUF
+# checkpoint (proxima_gguf::pipe::parse_complete) and generate text end to
+# end (proxima_model_interop::LoadedModel::load +
+# generate_with_serving_config)? examples/gguf_generate.rs's own doc names
+# the exact seam this is testing. No required-features: proxima-model-interop
+# is a dev-dependency here with its "std" feature already on unconditionally.
+[[example]]
+name = "gguf_generate"
+path = "examples/gguf_generate.rs"
 
 # the `units` binary bundles 15 test modules into one link target (see
 # tests/units.rs); 3 of them (scenario_smoke, settings_to_app,

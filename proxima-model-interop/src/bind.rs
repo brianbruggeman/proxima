@@ -82,12 +82,20 @@ pub fn gguf_tensor_as_f32(
 /// dequantizing (or copying) into an owned `Vec<f32>` first. No copy, no
 /// allocation -- exactly the bytes GGUF already stored.
 ///
-/// One function over `Q4_K`/`Q5_K`/`Q6_K` rather than three near-identical
-/// ones: the three differ only in which variant carries the byte range, and
-/// every k-quant super-block is stored the same way -- a contiguous
-/// row-major `[out, in]` byte run whose per-row period is a function of the
-/// type alone. A per-type entry point would be that `match` arm rewritten as
-/// a signature, three times over.
+/// One function over `Q4_K`/`Q5_K`/`Q6_K`/`Q8_0` rather than four
+/// near-identical ones: the four differ only in which variant carries the
+/// byte range, and every block-quantized codec here is stored the same way
+/// -- a contiguous row-major `[out, in]` byte run whose per-row period is a
+/// function of the type alone. A per-type entry point would be that `match`
+/// arm rewritten as a signature, four times over.
+///
+/// `Q8_0` routes packed here rather than only through
+/// [`gguf_tensor_as_f32`]'s dequantize path: `proxima_tensor::cpu`'s own
+/// `matmul_q8_0_f32` walks `QuantizedBlock::Q8_0`'s raw bytes directly (same
+/// per-row contiguous layout the k-quant matmul family assumes), and the GPU
+/// emitters (`omega::msl`/`omega::wgsl`/`omega::cuda`) already carry a
+/// `PackedCodec::Q8_0` arm -- the packed kernel has always supported this
+/// codec, only this bind-time decode arm was missing.
 ///
 /// `F16`/`Bf16` route through the same packed path rather than through
 /// [`gguf_tensor_as_f32`]: unlike a block-quantized codec, a half-precision
@@ -132,10 +140,10 @@ pub fn gguf_tensor_as_f32(
 /// `file_bytes`; [`InteropError::MisalignedFloat32Tensor`] if `name`'s
 /// tensor is `F32` but `file_bytes`'s base pointer leaves its byte range
 /// unaligned for `&[f32]`; [`InteropError::UnrepresentableGgmlType`] if
-/// `name`'s tensor is none of `F32`/`Q4_K`/`Q5_K`/`Q6_K`/`F16`/`Bf16` -- a
-/// block-quantized type this crate has no dequantizer for at all, since
-/// every codec this function decodes packed is also the only route
-/// [`gguf_tensor_as_f32`] does not independently cover for `F16`/`Bf16`.
+/// `name`'s tensor is none of `F32`/`Q4_K`/`Q5_K`/`Q6_K`/`Q8_0`/`F16`/`Bf16`
+/// -- a block-quantized type this crate has no dequantizer for at all, since
+/// `F16`/`Bf16` are the only codecs this function decodes packed that
+/// [`gguf_tensor_as_f32`] does not independently cover.
 #[cfg(feature = "std")]
 pub fn gguf_tensor_as_packed_block<'a>(
     parsed: &ParsedGguf,
@@ -154,6 +162,7 @@ pub fn gguf_tensor_as_packed_block<'a>(
         GgmlType::Q4_K => Ok(proxima_tensor::cpu::QuantizedBlock::Q4K(bytes)),
         GgmlType::Q5_K => Ok(proxima_tensor::cpu::QuantizedBlock::Q5K(bytes)),
         GgmlType::Q6_K => Ok(proxima_tensor::cpu::QuantizedBlock::Q6K(bytes)),
+        GgmlType::Q8_0 => Ok(proxima_tensor::cpu::QuantizedBlock::Q8_0(bytes)),
         GgmlType::F16 => Ok(proxima_tensor::cpu::QuantizedBlock::Float16(bytes)),
         GgmlType::Bf16 => Ok(proxima_tensor::cpu::QuantizedBlock::BFloat16(bytes)),
         other => Err(InteropError::UnrepresentableGgmlType {
@@ -253,15 +262,14 @@ pub struct ModelArchitecture {
     /// cannot represent "8 for these layers, 0 for those" and silently
     /// picking one value would be architecturally wrong, not just imprecise.
     pub kv_heads: u32,
-    /// `{architecture}.rope.dimension_count`. Optional on the wire:
-    /// confirmed absent on a real checkpoint (LFM2.5-8B-A1B, which has no
-    /// rotary attention key its writer needed at all) where `embedding_length
-    /// / attention.head_count` (2048/32 = 64) matches the real per-head
-    /// dimension independently (`attn_q_norm.weight`'s own declared shape,
-    /// `[64]`, on that same file). [`architecture_from_metadata`] falls back
-    /// to that derived quotient when the key is absent, the same "derive
-    /// when the format allows it" shape [`crate::hf_config::HfConfig::head_dim`]
-    /// already uses for HF's identically-optional `head_dim` key.
+    /// The real per-head projection width -- [`head_dim_from_metadata`]'s own
+    /// doc walks the three-way priority
+    /// (`attention.key_length`/`rope.dimension_count`/derived quotient) this
+    /// field is read through, and why a real checkpoint (Qwen3) needs the
+    /// first of those: `embedding / query_heads` (1024/16 = 64) silently
+    /// disagrees with the checkpoint's own declared `128`
+    /// (`attn_q.weight`'s on-disk shape, `[1024, 2048] = [embedding,
+    /// query_heads * 128]`, proves it).
     pub head_dim: u32,
     pub block_count: u32,
     /// `{architecture}.expert_count` (llama.cpp's own key for a sparse
@@ -330,6 +338,46 @@ pub struct ModelArchitecture {
 /// is a [`proxima_gguf::MetadataArray`] whose entries are not all equal;
 /// [`InteropError::VocabShapeMismatch`] if `token_embd.weight`'s element
 /// count does not divide evenly by `embedding_length`.
+/// [`ModelArchitecture::head_dim`]'s three-way derivation, in priority
+/// order: `{architecture}.attention.key_length` first (the real per-head
+/// projection width GGUF's own writer declares -- present and authoritative
+/// on Qwen3, whose `embedding / query_heads` quotient (1024/16 = 64)
+/// disagrees with its real head width, 128, confirmed against `attn_q`'s own
+/// on-disk shape); `{architecture}.rope.dimension_count` next (a
+/// full-rotation architecture's rotary width already equals its head width,
+/// confirmed on openchat-3.5, which has neither key and falls through to the
+/// quotient); the derived quotient last, for a checkpoint with neither key
+/// (LFM2.5-8B-A1B, confirmed via [`ModelArchitecture::head_dim`]'s own
+/// original doc).
+fn head_dim_from_metadata(
+    parsed: &ParsedGguf,
+    architecture: &str,
+    embedding: u32,
+    query_heads: u32,
+) -> u32 {
+    let key_length = metadata_u32_optional(parsed, &alloc::format!("{architecture}.attention.key_length"));
+    if key_length != 0 {
+        return key_length;
+    }
+    metadata_u32_optional_or(
+        parsed,
+        &alloc::format!("{architecture}.rope.dimension_count"),
+        embedding / query_heads.max(1),
+    )
+}
+
+/// Whether `parsed`'s checkpoint carries per-head QK-norm weights
+/// (`blk.0.attn_q_norm.weight`) -- Qwen3's own `q_norm`/`k_norm`
+/// (`modeling_qwen3.py`'s `Qwen3Attention`), applied to `q`/`k` right after
+/// projection and before RoPE. Presence, not the architecture name, decides
+/// this -- the same "read the file, don't assume the shape" move
+/// [`bind_all_weights`]'s tied-embeddings check already makes -- so a future
+/// checkpoint that also carries these tensors under a different
+/// `general.architecture` value is handled without a name-based dispatch.
+pub(crate) fn checkpoint_has_qk_norm(parsed: &ParsedGguf) -> bool {
+    find_tensor(parsed, "blk.0.attn_q_norm.weight").is_ok()
+}
+
 pub fn architecture_from_metadata(parsed: &ParsedGguf) -> Result<ModelArchitecture, InteropError> {
     let architecture = metadata_str(parsed, "general.architecture")?;
     let embedding = metadata_u32(parsed, &alloc::format!("{architecture}.embedding_length"))?;
@@ -346,11 +394,7 @@ pub fn architecture_from_metadata(parsed: &ParsedGguf) -> Result<ModelArchitectu
         &alloc::format!("{architecture}.attention.head_count_kv"),
     )?;
     let block_count = metadata_u32(parsed, &alloc::format!("{architecture}.block_count"))?;
-    let head_dim = metadata_u32_optional_or(
-        parsed,
-        &alloc::format!("{architecture}.rope.dimension_count"),
-        embedding / query_heads.max(1),
-    );
+    let head_dim = head_dim_from_metadata(parsed, architecture, embedding, query_heads);
     let vocab = vocab_from_token_embedding(parsed, embedding)?;
     let expert_count =
         metadata_u32_optional(parsed, &alloc::format!("{architecture}.expert_count"));
@@ -645,7 +689,7 @@ pub(crate) fn bind_dense_as<'file>(
 
 /// A 2-D projection weight the cached forward program uses as one
 /// `Multiply`-then-`Add`-reduce (matmul) operand. Tries
-/// [`gguf_tensor_as_packed_block`] first: a `Q4_K`/`Q5_K`/`Q6_K`/`F16`/`Bf16`
+/// [`gguf_tensor_as_packed_block`] first: a `Q4_K`/`Q5_K`/`Q6_K`/`Q8_0`/`F16`/`Bf16`
 /// tensor binds packed, zero-copy, straight out of the mmap's bytes, because
 /// every one of those codecs reaches the interpreter through a path that
 /// either walks its own physical row-major bytes directly
@@ -1005,9 +1049,17 @@ pub(crate) fn bind_all_weights<'file>(
     };
 
     let embedding = architecture.embedding as usize;
+    // `query_heads * head_dim`, NOT `embedding` -- the two agree only when
+    // `head_dim == embedding / query_heads` (Mistral's own shape). Qwen3
+    // declares `head_dim` independently (`attention.key_length`), and its
+    // real checkpoint has `query_heads * head_dim = 16 * 128 = 2048 !=
+    // embedding (1024)`; binding `attn_q`/`attn_output` at `embedding` there
+    // silently mis-shapes both tensors by 2x.
+    let q_dim = architecture.query_heads as usize * architecture.head_dim as usize;
     let kv_dim = architecture.kv_heads as usize * architecture.head_dim as usize;
     let feed_forward = architecture.feed_forward as usize;
     let vocab = architecture.vocab as usize;
+    let qk_norm = checkpoint_has_qk_norm(parsed);
 
     bind_dense(parsed, file_bytes, "token_embd.weight".into(), &mut state)?;
 
@@ -1028,7 +1080,7 @@ pub(crate) fn bind_all_weights<'file>(
             parsed,
             file_bytes,
             alloc::format!("blk.{layer}.attn_q.weight"),
-            embedding,
+            q_dim,
             embedding,
             &mut state,
         )?;
@@ -1053,9 +1105,24 @@ pub(crate) fn bind_all_weights<'file>(
             file_bytes,
             alloc::format!("blk.{layer}.attn_output.weight"),
             embedding,
-            embedding,
+            q_dim,
             &mut state,
         )?;
+
+        if qk_norm {
+            bind_dense(
+                parsed,
+                file_bytes,
+                alloc::format!("blk.{layer}.attn_q_norm.weight"),
+                &mut state,
+            )?;
+            bind_dense(
+                parsed,
+                file_bytes,
+                alloc::format!("blk.{layer}.attn_k_norm.weight"),
+                &mut state,
+            )?;
+        }
 
         if architecture.expert_count == 0 {
             bind_matmul_weight(
@@ -1112,14 +1179,33 @@ pub(crate) fn bind_all_weights<'file>(
     }
 
     bind_dense(parsed, file_bytes, "output_norm.weight".into(), &mut state)?;
-    bind_matmul_weight(
-        parsed,
-        file_bytes,
-        "output.weight".into(),
-        vocab,
-        embedding,
-        &mut state,
-    )?;
+    // tied embeddings (`general.tie_word_embeddings=true`, e.g. the real
+    // SmolLM2-135M checkpoint's own GGUF export): no standalone
+    // `output.weight` tensor exists on disk at all, only `token_embd.weight`
+    // reused for both the input embedding lookup and the output projection.
+    // `bind_matmul_weight_as` is the same alias mechanism `crate::lfm2`'s own
+    // tied output projection already uses (`lfm2.rs:544-545`) -- not a new
+    // bind path, just reached from the plain dense/MoE loop too.
+    if find_tensor(parsed, "output.weight").is_ok() {
+        bind_matmul_weight(
+            parsed,
+            file_bytes,
+            "output.weight".into(),
+            vocab,
+            embedding,
+            &mut state,
+        )?;
+    } else {
+        bind_matmul_weight_as(
+            parsed,
+            file_bytes,
+            "token_embd.weight",
+            "output.weight".into(),
+            vocab,
+            embedding,
+            &mut state,
+        )?;
+    }
     Ok(state)
 }
 
@@ -1368,6 +1454,311 @@ mod tests {
                 "output {out_index}: found={found} wanted={wanted} diff={diff}"
             );
         }
+    }
+
+    /// `[rows, k]` for [`q8_0_matmul_weight_binds_packed_and_matches_a_dequantized_oracle`]
+    /// and its mutation companion below -- `k` a multiple of
+    /// [`q8_0::QK8_0`] (32) so every row's own blocks stay row-aligned (no
+    /// block straddles two rows), matching [`proxima_tensor::cpu::matmul_q8_0_f32`]'s
+    /// own per-row block assumption. `rows != k` for the same
+    /// axis-order-detection reason the `F32` test above documents.
+    #[cfg(feature = "std")]
+    const Q8_0_TEST_ROWS: usize = 3;
+    #[cfg(feature = "std")]
+    const Q8_0_TEST_K: usize = 64;
+
+    /// Row-major `[rows, k]` weight bytes, real `Q8_0` blocks (never a
+    /// hand-built buffer) via [`q8_0::quantize`] -- deterministic,
+    /// non-degenerate per-element values so no two elements collide.
+    #[cfg(feature = "std")]
+    fn quantized_q8_0_weight_bytes() -> (alloc::vec::Vec<f32>, alloc::vec::Vec<u8>) {
+        let on_disk: alloc::vec::Vec<f32> = (0..Q8_0_TEST_ROWS * Q8_0_TEST_K)
+            .map(|index| ((index % 41) as f32 - 20.0) / 8.0)
+            .collect();
+        let mut bytes =
+            alloc::vec![0u8; (on_disk.len() / q8_0::QK8_0) * q8_0::BLOCK_BYTES];
+        q8_0::quantize(&on_disk, &mut bytes).expect("real q8_0 encoder quantizes this fixture");
+        (on_disk, bytes)
+    }
+
+    /// Builds the `[rows, 1] x [rows, k] -> [rows, 1]` quantized-matmul
+    /// program [`proxima_tensor::cpu::run_reduce_quantized`]'s own packed
+    /// dispatch recognizes -- the same op shape `proxima_tensor::cpu`'s own
+    /// `quantized_matmul_program` test helper builds (that helper is
+    /// private to `cpu.rs`'s own test module, so this is a same-shape,
+    /// independently written copy, not a shared function), rebuilt here
+    /// through the named-`Op::Input` [`gguf_tensor_as_packed_block`]'s own
+    /// callers actually use.
+    #[cfg(feature = "std")]
+    fn q8_0_matmul_program() -> (Vec<proxima_tensor::op::Op>, proxima_tensor::op::NodeId) {
+        let mut program: Vec<proxima_tensor::op::Op> = Vec::new();
+        let weight_node = proxima_tensor::op::append(
+            &mut program,
+            proxima_tensor::op::Op::Input {
+                dtype: proxima_tensor::dtype::DType::UInt8,
+                shape: alloc::vec![
+                    proxima_tensor::op::Extent::Static(Q8_0_TEST_ROWS as u32),
+                    proxima_tensor::op::Extent::Static(Q8_0_TEST_K as u32)
+                ],
+                name: Some("weight".to_string()),
+            },
+        );
+        let activation_node = proxima_tensor::op::append(
+            &mut program,
+            proxima_tensor::op::Op::Input {
+                dtype: proxima_tensor::dtype::DType::Float32,
+                shape: alloc::vec![
+                    proxima_tensor::op::Extent::Static(Q8_0_TEST_K as u32),
+                    proxima_tensor::op::Extent::Static(1)
+                ],
+                name: Some("activation".to_string()),
+            },
+        );
+        let product = proxima_tensor::op::append(
+            &mut program,
+            proxima_tensor::op::Op::Elementwise {
+                dtype: proxima_tensor::dtype::DType::Float32,
+                body: proxima_tensor::op::ScalarOp::Multiply,
+                operands: alloc::vec![
+                    (
+                        weight_node,
+                        proxima_tensor::map::IndexMap::Affine(proxima_tensor::map::projection(
+                            3,
+                            &[0, 2]
+                        ))
+                    ),
+                    (
+                        activation_node,
+                        proxima_tensor::map::IndexMap::Affine(proxima_tensor::map::projection(
+                            3,
+                            &[2, 1]
+                        ))
+                    ),
+                ],
+                name: None,
+            },
+        );
+        let sum = proxima_tensor::op::append(
+            &mut program,
+            proxima_tensor::op::Op::Reduce(proxima_tensor::op::Reduce {
+                dtype: proxima_tensor::dtype::DType::Float32,
+                body: proxima_tensor::op::ScalarOp::Add,
+                init: proxima_tensor::op::ReduceInit::Zero,
+                operand: product,
+                in_map: proxima_tensor::map::IndexMap::Affine(proxima_tensor::map::projection(
+                    3,
+                    &[0, 1, 2],
+                )),
+                out_map: proxima_tensor::map::IndexMap::Affine(proxima_tensor::map::projection(
+                    3,
+                    &[0, 1],
+                )),
+                keep: proxima_tensor::op::Keep::Reduce,
+                name: Some("q8_0_matmul".to_string()),
+            }),
+        );
+        (program, sum)
+    }
+
+    /// This module's fix, proved directly: a `Q8_0` matmul weight must bind
+    /// through [`gguf_tensor_as_packed_block`] into [`BoundWeights::packed`]
+    /// zero-copy -- never fall through to [`gguf_tensor_as_f32`]'s owned
+    /// dequantize path -- and the real
+    /// [`proxima_tensor::cpu::matmul_q8_0_f32`] kernel driven off that
+    /// packed buffer must produce the exact same output as an independent
+    /// oracle: [`q8_0::dequantize`] applied to the SAME packed bytes,
+    /// matmul'd by hand. The oracle dequantizes the packed bytes rather than
+    /// the pre-quantization `f32` source, because `Q8_0` quantization is
+    /// itself lossy -- comparing against the pre-quantization values would
+    /// conflate this bind wiring's own correctness with `Q8_0`'s codec
+    /// accuracy (already proved in `proxima_gguf::quant::q8_0`'s own tests).
+    #[cfg(feature = "std")]
+    #[test]
+    fn q8_0_matmul_weight_binds_packed_and_matches_a_dequantized_oracle() {
+        let (_on_disk, packed_bytes) = quantized_q8_0_weight_bytes();
+
+        let model = GgufModel {
+            version: 3,
+            metadata: Vec::new(),
+            tensors: vec![TensorPayload {
+                name: "blk.0.attn_q.weight".to_string(),
+                dims: dims(&[Q8_0_TEST_K as u64, Q8_0_TEST_ROWS as u64]),
+                ggml_type: WireType::Q8_0,
+                data: &packed_bytes,
+            }],
+        };
+        let file_bytes = write_complete(&model).expect("writes gguf with a real q8_0 weight");
+        let parsed =
+            proxima_gguf::pipe::parse_complete(&file_bytes).expect("parses q8_0 weight gguf");
+
+        let mut state = BoundWeights {
+            resident_bytes: 0,
+            owned: Vec::new(),
+            packed: Vec::new(),
+            packed_owned: Vec::new(),
+        };
+        bind_matmul_weight_as(
+            &parsed,
+            &file_bytes,
+            "blk.0.attn_q.weight",
+            "weight".to_string(),
+            Q8_0_TEST_ROWS,
+            Q8_0_TEST_K,
+            &mut state,
+        )
+        .expect("binds the q8_0 matmul weight");
+        assert!(
+            state.owned.is_empty(),
+            "a q8_0 matmul weight must take the zero-copy packed path, never the owned dequantize \
+             fallback -- this is the exact defect this change fixes"
+        );
+        assert_eq!(state.packed.len(), 1, "exactly one packed weight bound");
+        let bound_bytes = match &state.packed[0].1 {
+            proxima_tensor::cpu::QuantizedBlock::Q8_0(bytes) => *bytes,
+            other => panic!("expected a QuantizedBlock::Q8_0, found {other:?}"),
+        };
+        assert_eq!(
+            bound_bytes, packed_bytes.as_slice(),
+            "the packed path must borrow the exact on-disk q8_0 bytes, no copy"
+        );
+
+        let activation: Vec<f32> = (0..Q8_0_TEST_K).map(|index| (index as f32) - 32.0).collect();
+        let (program, sum) = q8_0_matmul_program();
+        let named = [
+            ("weight", proxima_tensor::cpu::QuantizedBlock::Q8_0(bound_bytes)),
+            (
+                "activation",
+                proxima_tensor::cpu::QuantizedBlock::Float32(activation.as_slice()),
+            ),
+        ];
+        let evaluated =
+            proxima_tensor::cpu::evaluate_quantized_named(&program, &[], &named, &[sum])
+                .expect("evaluate the bound q8_0 packed weight through the real interpreter");
+        let ours = evaluated.root();
+
+        let mut dequantized_weight = alloc::vec![0.0f32; Q8_0_TEST_ROWS * Q8_0_TEST_K];
+        q8_0::dequantize(&packed_bytes, &mut dequantized_weight)
+            .expect("dequantize the same packed bytes for the oracle");
+        let mut oracle = alloc::vec![0.0f32; Q8_0_TEST_ROWS];
+        for (row, logit) in oracle.iter_mut().enumerate() {
+            let mut accumulator = 0.0f32;
+            for column in 0..Q8_0_TEST_K {
+                accumulator +=
+                    activation[column] * dequantized_weight[row * Q8_0_TEST_K + column];
+            }
+            *logit = accumulator;
+        }
+
+        std::println!("q8_0_matmul ours={ours:?} oracle={oracle:?}");
+        for (row, (found, wanted)) in ours.iter().zip(&oracle).enumerate() {
+            let diff = (found - wanted).abs();
+            assert!(
+                diff < 1e-2,
+                "row {row}: found={found} wanted={wanted} diff={diff}"
+            );
+        }
+    }
+
+    /// Mutation companion to
+    /// [`q8_0_matmul_weight_binds_packed_and_matches_a_dequantized_oracle`]:
+    /// runs the exact same bind-then-evaluate pipeline, but flips one packed
+    /// byte (inside a block's `qs` region, not its `d` scale header) before
+    /// binding, so the packed path decodes a deliberately wrong value. Then
+    /// asserts the real kernel's output on the corrupted bytes diverges from
+    /// the clean oracle beyond the previous test's own `1e-2` tolerance --
+    /// proving that tolerance is tight enough to actually catch a wrong
+    /// decode, not so loose the equivalence check above is vacuous.
+    #[cfg(feature = "std")]
+    #[test]
+    fn q8_0_matmul_weight_packed_path_is_sensitive_to_a_corrupted_byte() {
+        let (_on_disk, clean_bytes) = quantized_q8_0_weight_bytes();
+        let mut corrupted_bytes = clean_bytes.clone();
+        // second block's 9th `qs` byte -- decoded element 40, whose
+        // activation coefficient (`40 - 32 = 8`) is far from zero, unlike
+        // element 32 (the second block's first element), whose activation
+        // coefficient is exactly zero and would mask any corruption there.
+        let corrupted_index = q8_0::BLOCK_BYTES + 2 + 8;
+        // flips the signed byte's sign bit -- guarantees a large jump in the
+        // decoded value regardless of what the original byte happened to be,
+        // unlike a smaller XOR mask that can land near the original value.
+        corrupted_bytes[corrupted_index] = corrupted_bytes[corrupted_index].wrapping_add(128);
+
+        let mut clean_weight = alloc::vec![0.0f32; Q8_0_TEST_ROWS * Q8_0_TEST_K];
+        q8_0::dequantize(&clean_bytes, &mut clean_weight)
+            .expect("dequantize the clean packed bytes for the oracle");
+        let activation: Vec<f32> = (0..Q8_0_TEST_K).map(|index| (index as f32) - 32.0).collect();
+        let mut clean_oracle = alloc::vec![0.0f32; Q8_0_TEST_ROWS];
+        for (row, logit) in clean_oracle.iter_mut().enumerate() {
+            let mut accumulator = 0.0f32;
+            for column in 0..Q8_0_TEST_K {
+                accumulator += activation[column] * clean_weight[row * Q8_0_TEST_K + column];
+            }
+            *logit = accumulator;
+        }
+
+        let model = GgufModel {
+            version: 3,
+            metadata: Vec::new(),
+            tensors: vec![TensorPayload {
+                name: "blk.0.attn_q.weight".to_string(),
+                dims: dims(&[Q8_0_TEST_K as u64, Q8_0_TEST_ROWS as u64]),
+                ggml_type: WireType::Q8_0,
+                data: &corrupted_bytes,
+            }],
+        };
+        let file_bytes =
+            write_complete(&model).expect("writes gguf with a corrupted q8_0 weight");
+        let parsed = proxima_gguf::pipe::parse_complete(&file_bytes)
+            .expect("parses corrupted q8_0 weight gguf");
+
+        let mut state = BoundWeights {
+            resident_bytes: 0,
+            owned: Vec::new(),
+            packed: Vec::new(),
+            packed_owned: Vec::new(),
+        };
+        bind_matmul_weight_as(
+            &parsed,
+            &file_bytes,
+            "blk.0.attn_q.weight",
+            "weight".to_string(),
+            Q8_0_TEST_ROWS,
+            Q8_0_TEST_K,
+            &mut state,
+        )
+        .expect("binds the corrupted q8_0 matmul weight");
+        let bound_bytes = match &state.packed[0].1 {
+            proxima_tensor::cpu::QuantizedBlock::Q8_0(bytes) => *bytes,
+            other => panic!("expected a QuantizedBlock::Q8_0, found {other:?}"),
+        };
+
+        let (program, sum) = q8_0_matmul_program();
+        let named = [
+            ("weight", proxima_tensor::cpu::QuantizedBlock::Q8_0(bound_bytes)),
+            (
+                "activation",
+                proxima_tensor::cpu::QuantizedBlock::Float32(activation.as_slice()),
+            ),
+        ];
+        let evaluated =
+            proxima_tensor::cpu::evaluate_quantized_named(&program, &[], &named, &[sum])
+                .expect("evaluate the corrupted q8_0 packed weight through the real interpreter");
+        let corrupted_result = evaluated.root();
+
+        std::println!(
+            "q8_0_corrupted corrupted={corrupted_result:?} clean_oracle={clean_oracle:?}"
+        );
+        let max_diff = corrupted_result
+            .iter()
+            .zip(&clean_oracle)
+            .map(|(found, wanted)| (found - wanted).abs())
+            .fold(0.0f32, f32::max);
+        assert!(
+            max_diff > 1e-2,
+            "a corrupted qs byte must move the decoded matmul output past the equivalence \
+             test's own 1e-2 tolerance, or that tolerance cannot detect a wrong decode: \
+             max_diff={max_diff}"
+        );
     }
 
     /// The defect this signature change fixes, proved directly: a decoded

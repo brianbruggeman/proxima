@@ -730,14 +730,20 @@ fn rmsnorm(
 /// same way the SmolLM2 RoPE-ordering bug did. `head` distinguishes Q's
 /// query-head axis (`h`, [`append_attention_mixer`]'s own letter) from K's
 /// kv-head axis (`u`) so this one function serves both call sites without
-/// two copies of the same six ops.
+/// two copies of the same six ops. `head` is a format-interpolated string
+/// rather than a single letter so the same six ops also serve a head space
+/// that is genuinely two axes -- [`append_qwen35_ssm_mixer`]'s own `u,g`
+/// (kv-head, group) split, which [`repeat_kv_heads`]'s own doc proves this
+/// algebra cannot merge into one physical axis -- since every interpolation
+/// site here (`s{head}d`, `s{head}`) treats `head` as an opaque run of
+/// letters, not a single character.
 fn rmsnorm_per_head(
     program: &mut Vec<Op>,
     x: NodeId,
     gamma: NodeId,
     inv_head_dim: NodeId,
     eps: NodeId,
-    head: char,
+    head: &str,
 ) -> Result<NodeId, TensorError> {
     let full = alloc::format!("s{head}d->s{head}d");
     let identity = alloc::format!("s{head}->s{head}");
@@ -2284,6 +2290,16 @@ pub fn mistral_forward_program(
 /// nothing more.
 pub type CachedLayerRoots = (NodeId, NodeId, NodeId);
 
+/// [`append_qwen35_dense_attention_layer`]'s own per-position cache roots --
+/// [`CachedLayerRoots`]'s 4-wide counterpart, one extra [`NodeId`] for the
+/// partial-rotary remainder [`CachedLayerRoots`] has no room for: `k_first`/
+/// `k_second` are this checkpoint's split-half (NEOX/IMROPE-style) RoPE
+/// halves of the rotated prefix (`k[..., :rotary_dim]`,
+/// `modeling_qwen3_next.py:205-210`), `k_pass` is the untouched remainder
+/// (`k[..., rotary_dim:]`, `modeling_qwen3_next.py:206`, concatenated back
+/// in the oracle, never dropped), `v` the un-rotated projected value.
+pub type Qwen35DenseAttentionRoots = (NodeId, NodeId, NodeId, NodeId);
+
 /// [`append_mistral_layer`]'s key/value-cached counterpart: `x` carries only
 /// the `new` positions this call introduces (`s`, sized by symbol 0), and
 /// attention blends two disjoint key/value sources instead of one —
@@ -2305,6 +2321,17 @@ pub type CachedLayerRoots = (NodeId, NodeId, NodeId);
 /// Returns `(x_next, k_new_even, k_new_odd, v_new)` — `x_next` feeds the next
 /// layer (or the final RMSNorm/LM head after the last one), and the other
 /// three are this layer's [`CachedLayerRoots`] for the caller to append.
+///
+/// `qk_norm`, when `Some((q_norm_weight, k_norm_weight, inv_head_dim))`, runs
+/// [`rmsnorm_per_head`] on `q`/`k_new` right after their projection and
+/// strictly BEFORE RoPE -- Qwen3's own per-head QK-norm
+/// (`Qwen3Attention.q_norm`/`.k_norm`, `modeling_qwen3.py`, applied to
+/// `query_states`/`key_states` before `apply_rotary_pos_emb`). `None` skips
+/// both calls entirely, leaving `q`/`k_new` exactly as
+/// [`mistral_cached_forward_program`]'s own dense checkpoints have always
+/// computed them -- this one flag is what lets a single layer builder serve
+/// both architectures rather than forking a parallel copy for the two extra
+/// ops Qwen3 needs.
 #[allow(clippy::too_many_arguments)]
 fn append_mistral_cached_layer(
     program: &mut Vec<Op>,
@@ -2318,6 +2345,7 @@ fn append_mistral_cached_layer(
     group_ones: NodeId,
     is_future: NodeId,
     group: u32,
+    head_dim: u32,
     attn_norm_weight: NodeId,
     ffn_norm_weight: NodeId,
     wq: NodeId,
@@ -2330,6 +2358,7 @@ fn append_mistral_cached_layer(
     k_even_cache: NodeId,
     k_odd_cache: NodeId,
     v_cache: NodeId,
+    qk_norm: Option<(NodeId, NodeId, NodeId)>,
 ) -> Result<(NodeId, CachedLayerRoots), TensorError> {
     let normed = rmsnorm(program, x, attn_norm_weight, inv_dim, eps)?;
 
@@ -2339,7 +2368,7 @@ fn append_mistral_cached_layer(
         ScalarOp::Multiply,
         &[(normed, "si->shdi"), (wq, "ihd->shdi")],
     )?;
-    let q = reduce(
+    let q_raw = reduce(
         program,
         DType::Float32,
         ScalarOp::Add,
@@ -2355,7 +2384,7 @@ fn append_mistral_cached_layer(
         ScalarOp::Multiply,
         &[(normed, "si->sudi"), (wk, "iud->sudi")],
     )?;
-    let k_new = reduce(
+    let k_new_raw = reduce(
         program,
         DType::Float32,
         ScalarOp::Add,
@@ -2364,6 +2393,15 @@ fn append_mistral_cached_layer(
         "sudi->sudi",
         "sud->sudi",
     )?;
+
+    let (q, k_new) = match qk_norm {
+        Some((q_norm_weight, k_norm_weight, inv_head_dim)) => {
+            let q = rmsnorm_per_head(program, q_raw, q_norm_weight, inv_head_dim, eps, "h")?;
+            let k_new = rmsnorm_per_head(program, k_new_raw, k_norm_weight, inv_head_dim, eps, "u")?;
+            (q, k_new)
+        }
+        None => (q_raw, k_new_raw),
+    };
 
     let v_product = elementwise(
         program,
@@ -2381,79 +2419,61 @@ fn append_mistral_cached_layer(
         "sud->sudi",
     )?;
 
-    let q_even_cos = elementwise(
-        program,
-        DType::Float32,
-        ScalarOp::Multiply,
-        &[(q, "s,h,2*i->shi"), (cos_new, "si->shi")],
-    )?;
-    let q_odd_sin = elementwise(
-        program,
-        DType::Float32,
-        ScalarOp::Multiply,
-        &[(q, "s,h,2*i+1->shi"), (sin_new, "si->shi")],
-    )?;
-    let rotated_q_even = elementwise(
-        program,
-        DType::Float32,
-        ScalarOp::Subtract,
-        &[(q_even_cos, "shi->shi"), (q_odd_sin, "shi->shi")],
-    )?;
-    let q_even_sin = elementwise(
-        program,
-        DType::Float32,
-        ScalarOp::Multiply,
-        &[(q, "s,h,2*i->shi"), (sin_new, "si->shi")],
-    )?;
-    let q_odd_cos = elementwise(
-        program,
-        DType::Float32,
-        ScalarOp::Multiply,
-        &[(q, "s,h,2*i+1->shi"), (cos_new, "si->shi")],
-    )?;
-    let rotated_q_odd = elementwise(
-        program,
-        DType::Float32,
-        ScalarOp::Add,
-        &[(q_even_sin, "shi->shi"), (q_odd_cos, "shi->shi")],
-    )?;
+    // Two incompatible RoPE pairings live behind `qk_norm.is_some()`, not a
+    // separate flag: llama.cpp's own GGUF converter permutes a "normal"
+    // (interleaved, `(2*i, 2*i+1)`) architecture's on-disk Q/K rows into
+    // that pairing at conversion time (Mistral/LLaMA), but never touches a
+    // NEOX-style architecture's rows (Qwen -- `LLM_ARCH_QWEN3`'s own
+    // `rope_type = LLAMA_ROPE_TYPE_NEOX`), which stay in HF's native
+    // split-half layout (`x[..half]`/`x[half..]`) on disk. Every checkpoint
+    // this crate has bound with `attn_q_norm.weight` present is exactly the
+    // NEOX family, so the same presence check that gates QK-norm also
+    // selects the matching RoPE pairing -- see
+    // [`append_qwen35_dense_attention_layer`]'s own split-half section,
+    // which this mirrors at `pass_dim = 0` (Qwen3's rotary width equals its
+    // full head width, so there is no untouched remainder).
+    let (rotated_q_even, rotated_q_odd, rotated_k_new_even, rotated_k_new_odd) = match qk_norm {
+        Some(_) => {
+            let pairs = head_dim / 2;
+            let q_first = per_head_channel_range(program, q, "h", head_dim, 0, pairs)?;
+            let q_second = per_head_channel_range(program, q, "h", head_dim, pairs, pairs)?;
+            let k_first = per_head_channel_range(program, k_new, "u", head_dim, 0, pairs)?;
+            let k_second = per_head_channel_range(program, k_new, "u", head_dim, pairs, pairs)?;
 
-    let k_new_even_cos = elementwise(
-        program,
-        DType::Float32,
-        ScalarOp::Multiply,
-        &[(k_new, "s,u,2*i->sui"), (cos_new, "si->sui")],
-    )?;
-    let k_new_odd_sin = elementwise(
-        program,
-        DType::Float32,
-        ScalarOp::Multiply,
-        &[(k_new, "s,u,2*i+1->sui"), (sin_new, "si->sui")],
-    )?;
-    let rotated_k_new_even = elementwise(
-        program,
-        DType::Float32,
-        ScalarOp::Subtract,
-        &[(k_new_even_cos, "sui->sui"), (k_new_odd_sin, "sui->sui")],
-    )?;
-    let k_new_even_sin = elementwise(
-        program,
-        DType::Float32,
-        ScalarOp::Multiply,
-        &[(k_new, "s,u,2*i->sui"), (sin_new, "si->sui")],
-    )?;
-    let k_new_odd_cos = elementwise(
-        program,
-        DType::Float32,
-        ScalarOp::Multiply,
-        &[(k_new, "s,u,2*i+1->sui"), (cos_new, "si->sui")],
-    )?;
-    let rotated_k_new_odd = elementwise(
-        program,
-        DType::Float32,
-        ScalarOp::Add,
-        &[(k_new_even_sin, "sui->sui"), (k_new_odd_cos, "sui->sui")],
-    )?;
+            let q_first_cos = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(q_first, "shi->shi"), (cos_new, "si->shi")])?;
+            let q_second_sin = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(q_second, "shi->shi"), (sin_new, "si->shi")])?;
+            let rotated_q_first = elementwise(program, DType::Float32, ScalarOp::Subtract, &[(q_first_cos, "shi->shi"), (q_second_sin, "shi->shi")])?;
+            let q_second_cos = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(q_second, "shi->shi"), (cos_new, "si->shi")])?;
+            let q_first_sin = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(q_first, "shi->shi"), (sin_new, "si->shi")])?;
+            let rotated_q_second = elementwise(program, DType::Float32, ScalarOp::Add, &[(q_second_cos, "shi->shi"), (q_first_sin, "shi->shi")])?;
+
+            let k_first_cos = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(k_first, "sui->sui"), (cos_new, "si->sui")])?;
+            let k_second_sin = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(k_second, "sui->sui"), (sin_new, "si->sui")])?;
+            let rotated_k_first = elementwise(program, DType::Float32, ScalarOp::Subtract, &[(k_first_cos, "sui->sui"), (k_second_sin, "sui->sui")])?;
+            let k_second_cos = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(k_second, "sui->sui"), (cos_new, "si->sui")])?;
+            let k_first_sin = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(k_first, "sui->sui"), (sin_new, "si->sui")])?;
+            let rotated_k_second = elementwise(program, DType::Float32, ScalarOp::Add, &[(k_second_cos, "sui->sui"), (k_first_sin, "sui->sui")])?;
+
+            (rotated_q_first, rotated_q_second, rotated_k_first, rotated_k_second)
+        }
+        None => {
+            let q_even_cos = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(q, "s,h,2*i->shi"), (cos_new, "si->shi")])?;
+            let q_odd_sin = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(q, "s,h,2*i+1->shi"), (sin_new, "si->shi")])?;
+            let rotated_q_even = elementwise(program, DType::Float32, ScalarOp::Subtract, &[(q_even_cos, "shi->shi"), (q_odd_sin, "shi->shi")])?;
+            let q_even_sin = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(q, "s,h,2*i->shi"), (sin_new, "si->shi")])?;
+            let q_odd_cos = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(q, "s,h,2*i+1->shi"), (cos_new, "si->shi")])?;
+            let rotated_q_odd = elementwise(program, DType::Float32, ScalarOp::Add, &[(q_even_sin, "shi->shi"), (q_odd_cos, "shi->shi")])?;
+
+            let k_new_even_cos = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(k_new, "s,u,2*i->sui"), (cos_new, "si->sui")])?;
+            let k_new_odd_sin = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(k_new, "s,u,2*i+1->sui"), (sin_new, "si->sui")])?;
+            let rotated_k_new_even = elementwise(program, DType::Float32, ScalarOp::Subtract, &[(k_new_even_cos, "sui->sui"), (k_new_odd_sin, "sui->sui")])?;
+            let k_new_even_sin = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(k_new, "s,u,2*i->sui"), (sin_new, "si->sui")])?;
+            let k_new_odd_cos = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(k_new, "s,u,2*i+1->sui"), (cos_new, "si->sui")])?;
+            let rotated_k_new_odd = elementwise(program, DType::Float32, ScalarOp::Add, &[(k_new_even_sin, "sui->sui"), (k_new_odd_cos, "sui->sui")])?;
+
+            (rotated_q_even, rotated_q_odd, rotated_k_new_even, rotated_k_new_odd)
+        }
+    };
 
     let group_map = alloc::format!("s,{group}*u+g,i->sugi");
     let q_even_grouped = elementwise(
@@ -2842,6 +2862,584 @@ fn append_mistral_cached_layer(
     )?;
 
     Ok((x_next, (rotated_k_new_even, rotated_k_new_odd, v_new)))
+}
+
+/// [`append_mistral_cached_layer`]'s Qwen3.5 dense-attention counterpart --
+/// same cached-attention/online-softmax shape, three real differences from
+/// the oracle (`modeling_qwen3_next.py`'s `Qwen3NextAttention.forward`,
+/// `apply_rotary_pos_emb`; cross-checked against `qwen35.cpp`'s own
+/// `build_layer_attn`) `append_mistral_cached_layer` has no room for:
+///
+/// 1. Q/K carry a real per-head width (`attn_head_dim`, this checkpoint's
+///    own `attention.key_length`) wider than the rotary width (`rotary_dim`,
+///    `rope.dimension_count`) -- RoPE only touches the first `rotary_dim`
+///    columns, the remaining `attn_head_dim - rotary_dim` ("pass") columns
+///    are concatenated back untouched (`modeling_qwen3_next.py:204-214`,
+///    `q_rot, q_pass = q[..., :rotary_dim], q[..., rotary_dim:]` ... `q_embed
+///    = torch.cat([q_embed, q_pass], dim=-1)`). This module has no
+///    concatenation primitive, so the "pass" half is never physically
+///    rejoined to the "rot" half -- instead every dot product that would
+///    read the concatenated vector (the attention score) is split into a
+///    rot-range term plus a pass-range term and summed, which is
+///    mathematically identical (`(a‖b)·(c‖d) = a·c + b·d` for disjoint
+///    ranges) and is exactly the same disjoint-sum trick this function's
+///    own `score_cached_even + score_cached_odd` already uses one level
+///    down, one level up.
+/// 2. RoPE itself is split-half (NEOX/IMROPE style, `x_rot -> (x[..d/2],
+///    x[d/2..])`, GGML_ROPE_TYPE_IMROPE's own `rotate_pairs(n_dims,
+///    n_dims/2, ...)`, `ggml/src/ggml-cpu/ops.cpp:6210-6211`), not
+///    [`append_mistral_cached_layer`]'s interleaved `(2*i, 2*i+1)` pairing.
+///    The checkpoint's declared 3-section MRoPE (`rope.dimension_sections`)
+///    collapses to this same plain single-section schedule for text-only
+///    input: `ggml_mrope_cache_init`'s own `theta_t`/`theta_h`/`theta_w`
+///    tracks are initialized from the SAME position (`llama-graph.cpp`'s
+///    `llm_graph_input_pos::set_input`, "the 3 first dims are the same" for
+///    a text ubatch) and advance by the identical `theta_scale` every pair
+///    index, so `theta_h`/`theta_w` are byte-identical to `theta_t` at
+///    every pair regardless of which section claims that pair
+///    (`ggml_mrope_cache_init`, `ops.cpp:6027-6037`) -- the declared
+///    `[11, 11, 10, 0]` split is real machinery for image/video position
+///    streams this checkpoint's text-only forward program never feeds.
+/// 3. Q's own projection is `q_proj` fused with a same-width sigmoid gate
+///    (`attn_q.weight`'s on-disk width is `2 * query_heads * attn_head_dim`,
+///    `modeling_qwen3_next.py:267-268`, `torch.chunk(..., 2, dim=-1)` on the
+///    LAST axis of each head's own block, `:295-298`), applied to the
+///    attention output right before `o_proj`
+///    (`attn_output = attn_output * torch.sigmoid(gate)`,
+///    `:325-328`; `qwen35.cpp:322-328` runs the identical
+///    `ggml_mul(cur, ggml_sigmoid(gate))` before `wo`).
+#[allow(clippy::too_many_arguments)]
+fn append_qwen35_dense_attention_layer(
+    program: &mut Vec<Op>,
+    x: NodeId,
+    inv_dim: NodeId,
+    eps: NodeId,
+    ones: NodeId,
+    inv_sqrt_attn_head_dim: NodeId,
+    inv_attn_head_dim: NodeId,
+    cos_new: NodeId,
+    sin_new: NodeId,
+    group_ones: NodeId,
+    is_future: NodeId,
+    group: u32,
+    rotary_dim: u32,
+    attn_head_dim: u32,
+    attn_norm_weight: NodeId,
+    ffn_norm_weight: NodeId,
+    q_norm_weight: NodeId,
+    k_norm_weight: NodeId,
+    wq: NodeId,
+    w_gate_q: NodeId,
+    wk: NodeId,
+    wv: NodeId,
+    wo: NodeId,
+    w_gate: NodeId,
+    w_up: NodeId,
+    w_down: NodeId,
+    k_first_cache: NodeId,
+    k_second_cache: NodeId,
+    k_pass_cache: NodeId,
+    v_cache: NodeId,
+) -> Result<(NodeId, Qwen35DenseAttentionRoots), TensorError> {
+    let pairs = rotary_dim / 2;
+    let pass_dim = attn_head_dim - rotary_dim;
+
+    let normed = rmsnorm(program, x, attn_norm_weight, inv_dim, eps)?;
+
+    let q_product = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Multiply,
+        &[(normed, "si->shdi"), (wq, "ihd->shdi")],
+    )?;
+    let q_raw = reduce(
+        program,
+        DType::Float32,
+        ScalarOp::Add,
+        ReduceInit::Zero,
+        q_product,
+        "shdi->shdi",
+        "shd->shdi",
+    )?;
+
+    let gate_product = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Multiply,
+        &[(normed, "si->shdi"), (w_gate_q, "ihd->shdi")],
+    )?;
+    let gate_raw = reduce(
+        program,
+        DType::Float32,
+        ScalarOp::Add,
+        ReduceInit::Zero,
+        gate_product,
+        "shdi->shdi",
+        "shd->shdi",
+    )?;
+
+    let k_product = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Multiply,
+        &[(normed, "si->sudi"), (wk, "iud->sudi")],
+    )?;
+    let k_raw = reduce(
+        program,
+        DType::Float32,
+        ScalarOp::Add,
+        ReduceInit::Zero,
+        k_product,
+        "sudi->sudi",
+        "sud->sudi",
+    )?;
+
+    let v_product = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Multiply,
+        &[(normed, "si->sudi"), (wv, "iud->sudi")],
+    )?;
+    let v_new = reduce(
+        program,
+        DType::Float32,
+        ScalarOp::Add,
+        ReduceInit::Zero,
+        v_product,
+        "sudi->sudi",
+        "sud->sudi",
+    )?;
+
+    // `q_norm`/`k_norm` run on the FULL `attn_head_dim` width, before RoPE
+    // ever splits it (`modeling_qwen3_next.py:300-301`,
+    // `self.q_norm(query_states.view(hidden_shape))` where `hidden_shape`'s
+    // last dim is `self.head_dim` = `attn_head_dim`; `qwen35.cpp:308-317`
+    // normalizes `Qcur`/`Kcur` before `ggml_rope_multi` runs).
+    let q = rmsnorm_per_head(program, q_raw, q_norm_weight, inv_attn_head_dim, eps, "h")?;
+    let k = rmsnorm_per_head(program, k_raw, k_norm_weight, inv_attn_head_dim, eps, "u")?;
+
+    let q_first = per_head_channel_range(program, q, "h", attn_head_dim, 0, pairs)?;
+    let q_second = per_head_channel_range(program, q, "h", attn_head_dim, pairs, pairs)?;
+    let q_pass = per_head_channel_range(program, q, "h", attn_head_dim, rotary_dim, pass_dim)?;
+
+    let k_first = per_head_channel_range(program, k, "u", attn_head_dim, 0, pairs)?;
+    let k_second = per_head_channel_range(program, k, "u", attn_head_dim, pairs, pairs)?;
+    let k_pass = per_head_channel_range(program, k, "u", attn_head_dim, rotary_dim, pass_dim)?;
+
+    // split-half RoPE (`ggml_compute_forward_rope_flt`'s
+    // `GGML_ROPE_TYPE_IMROPE` arm, `rotate_pairs(n_dims, n_dims/2, ...)`):
+    // `out[i] = x[i]*cos[i] - x[i+pairs]*sin[i]`,
+    // `out[i+pairs] = x[i+pairs]*cos[i] + x[i]*sin[i]`.
+    let q_first_cos = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(q_first, "shi->shi"), (cos_new, "si->shi")])?;
+    let q_second_sin = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(q_second, "shi->shi"), (sin_new, "si->shi")])?;
+    let rotated_q_first = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Subtract,
+        &[(q_first_cos, "shi->shi"), (q_second_sin, "shi->shi")],
+    )?;
+    let q_second_cos = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(q_second, "shi->shi"), (cos_new, "si->shi")])?;
+    let q_first_sin = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(q_first, "shi->shi"), (sin_new, "si->shi")])?;
+    let rotated_q_second = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Add,
+        &[(q_second_cos, "shi->shi"), (q_first_sin, "shi->shi")],
+    )?;
+    let k_first_cos = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(k_first, "sui->sui"), (cos_new, "si->sui")])?;
+    let k_second_sin = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(k_second, "sui->sui"), (sin_new, "si->sui")])?;
+    let rotated_k_new_first = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Subtract,
+        &[(k_first_cos, "sui->sui"), (k_second_sin, "sui->sui")],
+    )?;
+    let k_second_cos = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(k_second, "sui->sui"), (cos_new, "si->sui")])?;
+    let k_first_sin = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(k_first, "sui->sui"), (sin_new, "si->sui")])?;
+    let rotated_k_new_second = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Add,
+        &[(k_second_cos, "sui->sui"), (k_first_sin, "sui->sui")],
+    )?;
+
+    let group_map_i = alloc::format!("s,{group}*u+g,i->sugi");
+    let q_first_grouped = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Multiply,
+        &[(rotated_q_first, group_map_i.as_str()), (group_ones, "ug->sugi")],
+    )?;
+    let q_second_grouped = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Multiply,
+        &[(rotated_q_second, group_map_i.as_str()), (group_ones, "ug->sugi")],
+    )?;
+    let group_map_p = alloc::format!("s,{group}*u+g,p->sugp");
+    let q_pass_grouped = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Multiply,
+        &[(q_pass, group_map_p.as_str()), (group_ones, "ug->sugp")],
+    )?;
+
+    let score_cached_first_product = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(q_first_grouped, "sugi->stugi"), (k_first_cache, "tui->stugi")])?;
+    let score_cached_first = reduce(
+        program,
+        DType::Float32,
+        ScalarOp::Add,
+        ReduceInit::Zero,
+        score_cached_first_product,
+        "stugi->stugi",
+        "stug->stugi",
+    )?;
+    let score_cached_second_product = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(q_second_grouped, "sugi->stugi"), (k_second_cache, "tui->stugi")])?;
+    let score_cached_second = reduce(
+        program,
+        DType::Float32,
+        ScalarOp::Add,
+        ReduceInit::Zero,
+        score_cached_second_product,
+        "stugi->stugi",
+        "stug->stugi",
+    )?;
+    let score_cached_pass_product = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(q_pass_grouped, "sugp->stugp"), (k_pass_cache, "tup->stugp")])?;
+    let score_cached_pass = reduce(
+        program,
+        DType::Float32,
+        ScalarOp::Add,
+        ReduceInit::Zero,
+        score_cached_pass_product,
+        "stugp->stugp",
+        "stug->stugp",
+    )?;
+    let score_cached_rotated = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Add,
+        &[(score_cached_first, "stug->stug"), (score_cached_second, "stug->stug")],
+    )?;
+    let score_cached = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Add,
+        &[
+            (score_cached_rotated, "stug->stug"),
+            (score_cached_pass, "stug->stug"),
+        ],
+    )?;
+    let score_cached_scaled = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Multiply,
+        &[(score_cached, "stug->stug"), (inv_sqrt_attn_head_dim, "->stug")],
+    )?;
+
+    let score_new_first_product = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(q_first_grouped, "sugi->swugi"), (rotated_k_new_first, "wui->swugi")])?;
+    let score_new_first = reduce(
+        program,
+        DType::Float32,
+        ScalarOp::Add,
+        ReduceInit::Zero,
+        score_new_first_product,
+        "swugi->swugi",
+        "swug->swugi",
+    )?;
+    let score_new_second_product = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(q_second_grouped, "sugi->swugi"), (rotated_k_new_second, "wui->swugi")])?;
+    let score_new_second = reduce(
+        program,
+        DType::Float32,
+        ScalarOp::Add,
+        ReduceInit::Zero,
+        score_new_second_product,
+        "swugi->swugi",
+        "swug->swugi",
+    )?;
+    let score_new_pass_product = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(q_pass_grouped, "sugp->swugp"), (k_pass, "wup->swugp")])?;
+    let score_new_pass = reduce(
+        program,
+        DType::Float32,
+        ScalarOp::Add,
+        ReduceInit::Zero,
+        score_new_pass_product,
+        "swugp->swugp",
+        "swug->swugp",
+    )?;
+    let score_new_rotated = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Add,
+        &[(score_new_first, "swug->swug"), (score_new_second, "swug->swug")],
+    )?;
+    let score_new = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Add,
+        &[
+            (score_new_rotated, "swug->swug"),
+            (score_new_pass, "swug->swug"),
+        ],
+    )?;
+    let score_new_scaled = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Multiply,
+        &[(score_new, "swug->swug"), (inv_sqrt_attn_head_dim, "->swug")],
+    )?;
+    let neg_infinity = scalar_constant(program, f32::NEG_INFINITY);
+    let score_new_masked = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Select,
+        &[
+            (is_future, "sw->swug"),
+            (neg_infinity, "->swug"),
+            (score_new_scaled, "swug->swug"),
+        ],
+    )?;
+
+    let score_max_cached = reduce(
+        program,
+        DType::Float32,
+        ScalarOp::Maximum,
+        ReduceInit::NegativeInfinity,
+        score_cached_scaled,
+        "stug->stug",
+        "sug->stug",
+    )?;
+    let score_max_new = reduce(
+        program,
+        DType::Float32,
+        ScalarOp::Maximum,
+        ReduceInit::NegativeInfinity,
+        score_new_masked,
+        "swug->swug",
+        "sug->swug",
+    )?;
+    let global_max = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Maximum,
+        &[(score_max_cached, "sug->sug"), (score_max_new, "sug->sug")],
+    )?;
+
+    let shifted_cached = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Subtract,
+        &[(score_cached_scaled, "stug->stug"), (global_max, "sug->stug")],
+    )?;
+    let weights_cached = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Exponential,
+        &[(shifted_cached, "stug->stug")],
+    )?;
+    let shifted_new = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Subtract,
+        &[(score_new_masked, "swug->swug"), (global_max, "sug->swug")],
+    )?;
+    let weights_new = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Exponential,
+        &[(shifted_new, "swug->swug")],
+    )?;
+
+    let sum_cached = reduce(
+        program,
+        DType::Float32,
+        ScalarOp::Add,
+        ReduceInit::Zero,
+        weights_cached,
+        "stug->stug",
+        "sug->stug",
+    )?;
+    let sum_new = reduce(
+        program,
+        DType::Float32,
+        ScalarOp::Add,
+        ReduceInit::Zero,
+        weights_new,
+        "swug->swug",
+        "sug->swug",
+    )?;
+    let weight_sum = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Add,
+        &[(sum_cached, "sug->sug"), (sum_new, "sug->sug")],
+    )?;
+    let inv_weight_sum = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Reciprocal,
+        &[(weight_sum, "sug->sug")],
+    )?;
+
+    let attended_cached_product = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(weights_cached, "stug->stugd"), (v_cache, "tud->stugd")])?;
+    let attended_cached = reduce(
+        program,
+        DType::Float32,
+        ScalarOp::Add,
+        ReduceInit::Zero,
+        attended_cached_product,
+        "stugd->stugd",
+        "sugd->stugd",
+    )?;
+    let attended_new_product = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(weights_new, "swug->swugd"), (v_new, "wud->swugd")])?;
+    let attended_new = reduce(
+        program,
+        DType::Float32,
+        ScalarOp::Add,
+        ReduceInit::Zero,
+        attended_new_product,
+        "swugd->swugd",
+        "sugd->swugd",
+    )?;
+    let attended_sum = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Add,
+        &[(attended_cached, "sugd->sugd"), (attended_new, "sugd->sugd")],
+    )?;
+    let attended = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Multiply,
+        &[(attended_sum, "sugd->sugd"), (inv_weight_sum, "sug->sugd")],
+    )?;
+
+    // per-head sigmoid gate, applied to the attention output before `o_proj`
+    // (`modeling_qwen3_next.py:325-328`, `qwen35.cpp:322-328`).
+    let group_map_d = alloc::format!("s,{group}*u+g,d->sugd");
+    let gate_grouped = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Multiply,
+        &[(gate_raw, group_map_d.as_str()), (group_ones, "ug->sugd")],
+    )?;
+    let neg_attn_gate = elementwise(program, DType::Float32, ScalarOp::Negate, &[(gate_grouped, "sugd->sugd")])?;
+    let exp_neg_attn_gate = elementwise(program, DType::Float32, ScalarOp::Exponential, &[(neg_attn_gate, "sugd->sugd")])?;
+    let one_plus_exp_attn_gate = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Add,
+        &[(exp_neg_attn_gate, "sugd->sugd"), (ones, "->sugd")],
+    )?;
+    let sigmoid_attn_gate = elementwise(program, DType::Float32, ScalarOp::Reciprocal, &[(one_plus_exp_attn_gate, "sugd->sugd")])?;
+    let gated_attended = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Multiply,
+        &[(attended, "sugd->sugd"), (sigmoid_attn_gate, "sugd->sugd")],
+    )?;
+
+    let wo_product = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Multiply,
+        &[(gated_attended, "sugd->sugdo"), (wo, "ugdo->sugdo")],
+    )?;
+    let attn_out = reduce(
+        program,
+        DType::Float32,
+        ScalarOp::Add,
+        ReduceInit::Zero,
+        wo_product,
+        "sugdo->sugdo",
+        "so->sugdo",
+    )?;
+
+    let residual1 = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Add,
+        &[(attn_out, "sd->sd"), (x, "sd->sd")],
+    )?;
+
+    let normed2 = rmsnorm(program, residual1, ffn_norm_weight, inv_dim, eps)?;
+
+    let gate_product2 = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Multiply,
+        &[(normed2, "sd->sdg"), (w_gate, "dg->sdg")],
+    )?;
+    let ffn_gate = reduce(
+        program,
+        DType::Float32,
+        ScalarOp::Add,
+        ReduceInit::Zero,
+        gate_product2,
+        "sdg->sdg",
+        "sg->sdg",
+    )?;
+    let up_product = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Multiply,
+        &[(normed2, "sd->sdg"), (w_up, "dg->sdg")],
+    )?;
+    let up = reduce(
+        program,
+        DType::Float32,
+        ScalarOp::Add,
+        ReduceInit::Zero,
+        up_product,
+        "sdg->sdg",
+        "sg->sdg",
+    )?;
+
+    let neg_ffn_gate = elementwise(program, DType::Float32, ScalarOp::Negate, &[(ffn_gate, "sg->sg")])?;
+    let exp_neg_ffn_gate = elementwise(program, DType::Float32, ScalarOp::Exponential, &[(neg_ffn_gate, "sg->sg")])?;
+    let one_plus_exp_ffn_gate = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Add,
+        &[(exp_neg_ffn_gate, "sg->sg"), (ones, "->sg")],
+    )?;
+    let sigmoid_ffn_gate = elementwise(program, DType::Float32, ScalarOp::Reciprocal, &[(one_plus_exp_ffn_gate, "sg->sg")])?;
+    let silu_gate = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Multiply,
+        &[(ffn_gate, "sg->sg"), (sigmoid_ffn_gate, "sg->sg")],
+    )?;
+    let ffn_hidden = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Multiply,
+        &[(silu_gate, "sg->sg"), (up, "sg->sg")],
+    )?;
+
+    let down_product = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Multiply,
+        &[(ffn_hidden, "sg->sgd"), (w_down, "gd->sgd")],
+    )?;
+    let ffn_out = reduce(
+        program,
+        DType::Float32,
+        ScalarOp::Add,
+        ReduceInit::Zero,
+        down_product,
+        "sgd->sgd",
+        "sd->sgd",
+    )?;
+
+    let x_next = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Add,
+        &[(ffn_out, "sd->sd"), (residual1, "sd->sd")],
+    )?;
+
+    Ok((x_next, (rotated_k_new_first, rotated_k_new_second, k_pass, v_new)))
 }
 
 /// [`append_mistral_cached_layer`]'s mixture-of-experts counterpart, the
@@ -3708,6 +4306,934 @@ fn append_lfm2_conv_mixer(
     )
 }
 
+/// One token's worth of the gated-DeltaNet recurrence Qwen3.5's linear
+/// attention (SSM) layers run -- llama.cpp's own reference,
+/// `llm_build_delta_net_base::build_delta_net_autoregressive`
+/// (`src/models/delta-net-base.cpp`, the `n_tokens == 1` path
+/// `llm_build_delta_net_base::build_delta_net` dispatches to), transcribed
+/// op-for-op onto this crate's existing `Elementwise`/`Reduce` vocabulary --
+/// no new [`Op`] variant, per this crate's own reuse-first rule: a
+/// state-carrying IIR recurrence over a caller-owned `[key_dim, value_dim,
+/// head]` matrix is exactly what an `Input`/`Output` pair already expresses
+/// for [`append_mistral_cached_layer`]'s own KV cache, so the persistent
+/// state here is a caller-provided `state_in` node returned again as
+/// `state_out`, not a new stateful primitive.
+///
+/// Per head `h`, key axis `i`, value axis `j` (`state[i,j,h]`, `q`/`k`
+/// share `i`, `v` shares `j` with `state`'s second axis): `state = state *
+/// exp(gate)` (`decay`), `v_pred[j] = sum_i state[i,j] * k[i]`
+/// (`llama.cpp:305-306`, `sk = sum_rows(state * k)`), `delta[j] = beta *
+/// (v[j] - v_pred[j])` (`:309-311`), `state[i,j] += k[i] * delta[j]`
+/// (`:313-317`, the outer-product update), `out[j] = sum_i state[i,j] *
+/// q_scaled[i]` (`:322-323`, read-out uses the UPDATED state) -- `q_scaled
+/// = q / sqrt(key_dim)` is applied by the caller (`llama.cpp:295`,
+/// `q = ggml_scale(ctx0, q, scale)`), matching every other pre-scaled `q`
+/// this crate's own attention mixers already take.
+///
+/// `gate` and `beta` arrive already reduced to one scalar per head per
+/// token (`llama.cpp`'s own `softplus(alpha + dt_bias) * ssm_a` and
+/// `sigmoid(beta_proj)` respectively) -- this function only runs the
+/// recurrence, never the projections that produce its inputs.
+///
+/// `head` is a format-interpolated run of letters, not a single character,
+/// the same widening [`rmsnorm_per_head`] already makes: [`repeat_kv_heads`]'s
+/// own doc proves this algebra cannot merge a `u,g` (kv-head, group) split
+/// back into one physical head axis, so [`append_qwen35_ssm_mixer`] calls
+/// this with `head = "ug"` and every map below (`i{head}`, `{head}`,
+/// `ij{head}`) carries both letters through unchanged -- the recurrence
+/// itself is per-head and never mixes heads, so nothing in its math depends
+/// on the head space being one physical axis.
+#[allow(clippy::too_many_arguments)]
+fn append_qwen35_delta_net_step(
+    program: &mut Vec<Op>,
+    query: NodeId,
+    key: NodeId,
+    value: NodeId,
+    gate: NodeId,
+    beta: NodeId,
+    state_in: NodeId,
+    inv_sqrt_key_dim: NodeId,
+    head: &str,
+) -> Result<(NodeId, NodeId), TensorError> {
+    let i_head = alloc::format!("i{head}->i{head}");
+    let i_head_bcast = alloc::format!("->i{head}");
+    let head_head = alloc::format!("{head}->{head}");
+    let ij_head = alloc::format!("ij{head}->ij{head}");
+    let head_to_ij_head = alloc::format!("{head}->ij{head}");
+    let j_head = alloc::format!("j{head}->j{head}");
+    let head_to_j_head = alloc::format!("{head}->j{head}");
+    let i_head_to_ij_head = alloc::format!("i{head}->ij{head}");
+    let j_head_to_ij_head = alloc::format!("j{head}->ij{head}");
+    let ij_head_reduce_in = alloc::format!("ij{head}->ij{head}");
+    let ij_head_reduce_out = alloc::format!("j{head}->ij{head}");
+
+    let query_scaled = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Multiply,
+        &[(query, i_head.as_str()), (inv_sqrt_key_dim, i_head_bcast.as_str())],
+    )?;
+    let decay = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Exponential,
+        &[(gate, head_head.as_str())],
+    )?;
+    let state_decayed = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Multiply,
+        &[(state_in, ij_head.as_str()), (decay, head_to_ij_head.as_str())],
+    )?;
+
+    let value_pred_product = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Multiply,
+        &[(state_decayed, ij_head.as_str()), (key, i_head_to_ij_head.as_str())],
+    )?;
+    let value_pred = reduce(
+        program,
+        DType::Float32,
+        ScalarOp::Add,
+        ReduceInit::Zero,
+        value_pred_product,
+        ij_head_reduce_in.as_str(),
+        ij_head_reduce_out.as_str(),
+    )?;
+
+    let residual = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Subtract,
+        &[(value, j_head.as_str()), (value_pred, j_head.as_str())],
+    )?;
+    let delta = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Multiply,
+        &[(residual, j_head.as_str()), (beta, head_to_j_head.as_str())],
+    )?;
+
+    let update = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Multiply,
+        &[(key, i_head_to_ij_head.as_str()), (delta, j_head_to_ij_head.as_str())],
+    )?;
+    let state_out = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Add,
+        &[(state_decayed, ij_head.as_str()), (update, ij_head.as_str())],
+    )?;
+
+    let out_product = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Multiply,
+        &[(state_out, ij_head.as_str()), (query_scaled, i_head_to_ij_head.as_str())],
+    )?;
+    let out = reduce(
+        program,
+        DType::Float32,
+        ScalarOp::Add,
+        ReduceInit::Zero,
+        out_product,
+        ij_head_reduce_in.as_str(),
+        ij_head_reduce_out.as_str(),
+    )?;
+
+    Ok((out, state_out))
+}
+
+/// `log(1 + exp(x))`, Qwen3.5's own `alpha_softplus` gate input
+/// (`llama.cpp:370`, `ggml_softplus`) -- not a [`ScalarOp`] primitive, so
+/// composed from the two that are: [`ScalarOp::Exponential`] then
+/// [`ScalarOp::Add`] against a `one` constant then [`ScalarOp::Logarithm`],
+/// the same compose-not-mint move [`ExpertGatingFunc::Sigmoid`]'s own
+/// `neg -> exp -> +1 -> reciprocal` chain already makes for a activation this
+/// crate has no dedicated variant for.
+fn softplus(program: &mut Vec<Op>, x: NodeId, one: NodeId, map: &str) -> Result<NodeId, TensorError> {
+    let target = map.rsplit("->").next().unwrap_or(map);
+    let one_map = alloc::format!("->{target}");
+    let exp_x = elementwise(program, DType::Float32, ScalarOp::Exponential, &[(x, map)])?;
+    let one_plus_exp = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Add,
+        &[(exp_x, map), (one, one_map.as_str())],
+    )?;
+    elementwise(program, DType::Float32, ScalarOp::Logarithm, &[(one_plus_exp, map)])
+}
+
+/// [`rmsnorm`]'s L2-normalize variant: `x / sqrt(sum(x^2) + eps)`, no
+/// mean-divide and no learnable `gamma` -- `ggml_l2_norm`
+/// (`qwen35.cpp:428-429`, applied to `q_conv`/`k_conv` with no weight
+/// tensor), unlike [`rmsnorm`]'s `mean_square = sum_squares / dim` and its
+/// trailing `gamma` multiply. `map`/`sum_map` follow [`rmsnorm_per_head`]'s
+/// own per-axis convention so the same function serves whichever axis (head
+/// dim here, embedding elsewhere) is being normalized.
+fn l2norm(
+    program: &mut Vec<Op>,
+    x: NodeId,
+    eps: NodeId,
+    map: &str,
+    sum_map: &str,
+) -> Result<NodeId, TensorError> {
+    let reduced = sum_map.split("->").next().unwrap_or(sum_map);
+    let reduced_map = alloc::format!("{reduced}->{reduced}");
+
+    let squared = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(x, map), (x, map)])?;
+    let sum_squares = reduce(
+        program,
+        DType::Float32,
+        ScalarOp::Add,
+        ReduceInit::Zero,
+        squared,
+        map,
+        sum_map,
+    )?;
+    let sum_squares_eps = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Add,
+        &[(sum_squares, reduced_map.as_str()), (eps, reduced_map.as_str())],
+    )?;
+    let norm = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::SquareRoot,
+        &[(sum_squares_eps, reduced_map.as_str())],
+    )?;
+    let inv_norm = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Reciprocal,
+        &[(norm, reduced_map.as_str())],
+    )?;
+    elementwise(program, DType::Float32, ScalarOp::Multiply, &[(x, map), (inv_norm, sum_map)])
+}
+
+/// `x * sigmoid(x)`, `ggml_silu`'s own contract (`qwen35.cpp:391-392`, run on
+/// `conv_output_proper` before the q/k/v split) -- composed from
+/// [`ScalarOp::Negate`]/[`Exponential`]/[`Add`]/[`Reciprocal`], the same
+/// `1/(1+e^-x)` chain [`ExpertGatingFunc::Sigmoid`] already builds, then one
+/// more [`ScalarOp::Multiply`] against the un-gated input. No dedicated
+/// `Sigmoid`/`Silu` [`ScalarOp`] exists, matching that chain's own precedent
+/// for an activation this crate composes rather than mints.
+fn silu(program: &mut Vec<Op>, x: NodeId, one: NodeId, map: &str) -> Result<NodeId, TensorError> {
+    let target = map.rsplit("->").next().unwrap_or(map);
+    let one_map = alloc::format!("->{target}");
+    let neg_x = elementwise(program, DType::Float32, ScalarOp::Negate, &[(x, map)])?;
+    let exp_neg_x = elementwise(program, DType::Float32, ScalarOp::Exponential, &[(neg_x, map)])?;
+    let one_plus_exp = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Add,
+        &[(exp_neg_x, map), (one, one_map.as_str())],
+    )?;
+    let gate = elementwise(program, DType::Float32, ScalarOp::Reciprocal, &[(one_plus_exp, map)])?;
+    elementwise(program, DType::Float32, ScalarOp::Multiply, &[(x, map), (gate, map)])
+}
+
+/// Reads `width` contiguous channels of `x` (`[s, total_channels]`) starting
+/// at `offset`, as a fresh `[s, width]` node -- the piece
+/// [`append_qwen35_conv_branch`] needs three times (`q`/`k`/`v` out of one
+/// fused conv output) that a plain offset [`AxisIndex`] slice cannot give it:
+/// [`append_lfm2_conv_mixer`]'s own doc already proves a *nonzero*-offset
+/// slice of a wider operand needs a same-width "donor" operand to escape
+/// [`shape::unify_iteration_space`]'s pure-projection extent rule, and
+/// `shape.rs`'s own
+/// `an_offset_zero_slice_narrower_than_its_operand_is_still_ambiguous` test
+/// proves the donor trick still fails at *zero* offset (`q`'s own case here,
+/// `qkv_dim`'s first channel) -- there is no bit in `AxisIndex` that
+/// disambiguates "the whole axis" from "a same-origin narrower window".
+///
+/// This sidesteps offset addressing entirely: `channel_index` (an
+/// [`Op::Iota`] over `total_channels`) and `target = within + offset`
+/// (`within` a second `Iota` over `width`) feed [`ScalarOp::Equal`] to build
+/// a one-hot mask, `x` is multiplied against it and reduced over the
+/// channel axis -- the same select-then-reduce shape [`causal_conv1d`]'s own
+/// `is_raw_slot`/`masked_tap` already use for a data-computed position,
+/// applied here to a compile-time-constant one. Zero offset costs nothing
+/// extra by this route, unlike the donor slice which cannot express it at
+/// all.
+fn channel_slice(
+    program: &mut Vec<Op>,
+    x: NodeId,
+    total_channels: u32,
+    offset: u32,
+    width: u32,
+) -> Result<NodeId, TensorError> {
+    let channel_index = op::append(
+        program,
+        Op::Iota {
+            dtype: DType::Float32,
+            extent: Extent::Static(total_channels),
+        },
+    );
+    let within_index = op::append(
+        program,
+        Op::Iota {
+            dtype: DType::Float32,
+            extent: Extent::Static(width),
+        },
+    );
+    let offset_const = scalar_constant(program, offset as f32);
+    let target = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Add,
+        &[(within_index, "w->w"), (offset_const, "->w")],
+    )?;
+    let mask = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Equal,
+        &[(channel_index, "d->dw"), (target, "w->dw")],
+    )?;
+    let selected = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Multiply,
+        &[(x, "sd->sdw"), (mask, "dw->sdw")],
+    )?;
+    reduce(
+        program,
+        DType::Float32,
+        ScalarOp::Add,
+        ReduceInit::Zero,
+        selected,
+        "sdw->sdw",
+        "sw->sdw",
+    )
+}
+
+/// [`channel_slice`]'s own technique, generalized over a leading per-head
+/// axis: `x` is `[s, heads, total_channels]` (`heads` contiguous blocks of
+/// `total_channels`, e.g. a fused dense-attention `q`/`gate` chunk pair
+/// repeated per head, `qwen3_next`'s own `q_proj(x).view(..., heads,
+/// 2 * head_dim)` before its `torch.chunk(2, dim=-1)`), and this reads
+/// `width` channels at `offset` within every head's own block
+/// independently -- `channel_slice`'s single `(s, d)` mask can only carve
+/// one contiguous window out of ONE flat channel axis, which is wrong here
+/// because each head's window sits at a different flat offset (`head *
+/// total_channels + offset`); the extra `Iota` over `heads` folds that
+/// per-head stride into the same `target` the mask compares against, one
+/// mask covering every head's window in a single select-then-reduce pass.
+fn per_head_channel_slice(
+    program: &mut Vec<Op>,
+    x: NodeId,
+    heads: u32,
+    total_channels: u32,
+    offset: u32,
+    width: u32,
+) -> Result<NodeId, TensorError> {
+    let channel_index = op::append(
+        program,
+        Op::Iota {
+            dtype: DType::Float32,
+            extent: Extent::Static(heads * total_channels),
+        },
+    );
+    let within_index = op::append(
+        program,
+        Op::Iota {
+            dtype: DType::Float32,
+            extent: Extent::Static(width),
+        },
+    );
+    let head_index = op::append(program, Op::Iota { dtype: DType::Float32, extent: Extent::Static(heads) });
+    let period_const = scalar_constant(program, total_channels as f32);
+    let offset_const = scalar_constant(program, offset as f32);
+    let head_base = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Multiply,
+        &[(head_index, "h->h"), (period_const, "->h")],
+    )?;
+    let head_start = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Add,
+        &[(head_base, "h->h"), (offset_const, "->h")],
+    )?;
+    let target = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Add,
+        &[(head_start, "h->hw"), (within_index, "w->hw")],
+    )?;
+    let mask = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Equal,
+        &[(channel_index, "d->dhw"), (target, "hw->dhw")],
+    )?;
+    let selected = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Multiply,
+        &[(x, "sd->sdhw"), (mask, "dhw->sdhw")],
+    )?;
+    reduce(
+        program,
+        DType::Float32,
+        ScalarOp::Add,
+        ReduceInit::Zero,
+        selected,
+        "sdhw->sdhw",
+        "shw->sdhw",
+    )
+}
+
+/// [`channel_slice`]'s own select-then-reduce technique, generalized over an
+/// ALREADY-split leading per-head axis: `x` is `[s, head, total_channels]`
+/// (a head axis of its own, not [`per_head_channel_slice`]'s flat
+/// `heads*total_channels` an activation like [`append_qwen35_dense_attention_layer`]'s
+/// own `q`/`k` never has after `rmsnorm_per_head`), and this reads `width`
+/// channels at the SAME `offset` uniformly across every head (unlike
+/// [`per_head_channel_slice`]'s per-head-varying stride, there needed only
+/// because the input axis was still flat). A plain affine projection
+/// (`"s,h,i+64->shi"`) cannot express this narrowing on its own -- shape
+/// inference unifies every operand touching iteration letter `i` to the
+/// SAME extent, so a bare projection off `x`'s own `total_channels`-wide
+/// axis pins `i` at `total_channels`, not `width`; only the mask-then-reduce
+/// route can produce a genuinely narrower output.
+fn per_head_channel_range(
+    program: &mut Vec<Op>,
+    x: NodeId,
+    head: &str,
+    total_channels: u32,
+    offset: u32,
+    width: u32,
+) -> Result<NodeId, TensorError> {
+    let channel_index = op::append(
+        program,
+        Op::Iota {
+            dtype: DType::Float32,
+            extent: Extent::Static(total_channels),
+        },
+    );
+    let within_index = op::append(
+        program,
+        Op::Iota {
+            dtype: DType::Float32,
+            extent: Extent::Static(width),
+        },
+    );
+    let offset_const = scalar_constant(program, offset as f32);
+    let target = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Add,
+        &[(within_index, "w->w"), (offset_const, "->w")],
+    )?;
+    let mask = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Equal,
+        &[(channel_index, "d->dw"), (target, "w->dw")],
+    )?;
+    let x_map = alloc::format!("s{head}d->s{head}dw");
+    let mask_map = alloc::format!("dw->s{head}dw");
+    let selected = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Multiply,
+        &[(x, x_map.as_str()), (mask, mask_map.as_str())],
+    )?;
+    let in_map = alloc::format!("s{head}dw->s{head}dw");
+    let out_map = alloc::format!("s{head}w->s{head}dw");
+    reduce(
+        program,
+        DType::Float32,
+        ScalarOp::Add,
+        ReduceInit::Zero,
+        selected,
+        in_map.as_str(),
+        out_map.as_str(),
+    )
+}
+
+/// Qwen3.5's `q|k|v` conv branch -- llama.cpp's own
+/// `build_layer_attn_linear` (`qwen35.cpp:385-431`): `causal_conv1d` over
+/// the fused `qkv_mixed` (`conv_input`, `:385`), [`silu`] (`:391-392`), a
+/// three-way [`channel_slice`] split at `qkv_dim = 2*key_dim + value_dim`
+/// (`q` at offset `0`, `k` at `key_dim`, `v` at `2*key_dim` --
+/// `q_conv`/`k_conv`/`v_conv`'s own `ggml_view_4d` offsets, `:399-419`),
+/// then [`l2norm`] on `q`/`k` only (`:428-429`, `v` is never normalized).
+/// The GQA head repeat (`:437-440`) is a separate, independently-testable
+/// step -- see [`repeat_kv_heads`].
+// unwired: this one specifically, not the whole mixer -- `causal_conv1d`
+// windows a whole in-graph sequence with zero-boundary padding, which fits
+// a prefill call but not a decode step against a persisted history cache,
+// so `append_qwen35_ssm_mixer` reimplements this function's own
+// silu/channel_slice/l2norm body against the additive cached-conv split its
+// own doc describes, rather than calling this. A prefill-only qwen35
+// program (mirroring `lfm2_forward_program_with_experts`'s own prefill-only
+// scope) is this function's real caller, not built this session.
+#[allow(dead_code, clippy::too_many_arguments)]
+fn append_qwen35_conv_branch(
+    program: &mut Vec<Op>,
+    qkv_mixed: NodeId,
+    conv_weight: NodeId,
+    eps: NodeId,
+    one: NodeId,
+    key_dim: u32,
+    value_dim: u32,
+    l_cache: u32,
+) -> Result<(NodeId, NodeId, NodeId), TensorError> {
+    let qkv_dim = 2 * key_dim + value_dim;
+    let convolved = causal_conv1d(program, qkv_mixed, conv_weight, l_cache)?;
+    let activated = silu(program, convolved, one, "sd->sd")?;
+
+    let q_raw = channel_slice(program, activated, qkv_dim, 0, key_dim)?;
+    let k_raw = channel_slice(program, activated, qkv_dim, key_dim, key_dim)?;
+    let v_conv = channel_slice(program, activated, qkv_dim, 2 * key_dim, value_dim)?;
+
+    let q_conv = l2norm(program, q_raw, eps, "sw->sw", "s->sw")?;
+    let k_conv = l2norm(program, k_raw, eps, "sw->sw", "s->sw")?;
+
+    Ok((q_conv, k_conv, v_conv))
+}
+
+/// The GQA head repeat `q_conv`/`k_conv` need before
+/// [`append_qwen35_delta_net_step`] (`qwen35.cpp:437-440`,
+/// `ggml_repeat_4d(.., num_v_heads, ..)`): `num_k_heads` (16) real kv heads
+/// broadcast to `num_v_heads` (48) query/value heads, 3-wide groups.
+///
+/// [`append_attention_mixer`]'s own `group_map`/`group_ones` pair already
+/// proves the technique this reuses: reading an operand's real axis while a
+/// *new* iteration letter is simply absent from that operand's own map
+/// broadcasts across it for free (`rotated_k`'s `"tui->stugi"` there never
+/// mentions `g`), and multiplying against an all-ones donor of the new
+/// letters' shape (`group_ones`, `"ug->sugi"`) is what makes
+/// [`shape::unify_iteration_space`] resolve `g`'s extent at all -- `x` alone
+/// (real axis `u`, no `g` term) leaves `g` unconstrained.
+///
+/// This never merges `u`/`g` back into one physical `h = group*u+g` axis:
+/// [`shape::project_output_shape`] rejects any `Reduce` `out_map` axis that
+/// is not a pure single-term projection ("reduce output maps must be pure
+/// projections in v1"), and a plain [`Op::Elementwise`]'s output shape *is*
+/// its iteration space, so two loop letters cannot collapse into one output
+/// letter in this algebra's current grammar -- the same reason
+/// [`append_attention_mixer`] itself never merges them either, keeping every
+/// downstream op split as `u,g` through to its own final output. A
+/// genuinely single-axis repeat would need a scatter with a data-computed
+/// `h = group*u+g` destination (the same [`IndexMap::Computed`] shape
+/// [`causal_conv1d`]'s own `clamped_position` gather already uses for a
+/// data-computed *source*); not built this session.
+fn repeat_kv_heads(
+    program: &mut Vec<Op>,
+    x: NodeId,
+    kv_heads: u32,
+    group: u32,
+) -> Result<NodeId, TensorError> {
+    let group_ones = op::append(
+        program,
+        Op::Constant {
+            dtype: DType::Float32,
+            shape: alloc::vec![Extent::Static(kv_heads), Extent::Static(group)],
+            value: 1.0,
+        },
+    );
+    elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Multiply,
+        &[(x, "sud->sugd"), (group_ones, "ug->sugd")],
+    )
+}
+
+/// `1/(1+e^-x)` -- the exact `negate -> exp -> +1 -> reciprocal` chain
+/// [`ExpertGatingFunc::Sigmoid`] already composes inline, factored out once
+/// [`append_qwen35_ssm_mixer`] needs it twice (`beta`, the attention gate),
+/// the same "worth naming at two callers" threshold [`silu`]/[`softplus`]
+/// already crossed for their own chains.
+fn sigmoid(program: &mut Vec<Op>, x: NodeId, one: NodeId, map: &str) -> Result<NodeId, TensorError> {
+    let target = map.rsplit("->").next().unwrap_or(map);
+    let one_map = alloc::format!("->{target}");
+    let neg_x = elementwise(program, DType::Float32, ScalarOp::Negate, &[(x, map)])?;
+    let exp_neg_x = elementwise(program, DType::Float32, ScalarOp::Exponential, &[(neg_x, map)])?;
+    let one_plus_exp = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Add,
+        &[(exp_neg_x, map), (one, one_map.as_str())],
+    )?;
+    elementwise(program, DType::Float32, ScalarOp::Reciprocal, &[(one_plus_exp, map)])
+}
+
+/// Qwen3.5's gated-DeltaNet mixer, one decode step (`n_tokens == 1`, the same
+/// scope [`append_qwen35_delta_net_step`]'s own doc already commits to) --
+/// llama.cpp's own `build_layer_attn_linear` (`qwen35.cpp:335-466`) run
+/// op-for-op: `build_qkvz` (`:353-356`, `qkv_mixed`/`z`), `beta`/`gate`
+/// (`:358-376`, `sigmoid(ssm_beta @ x)` / `ssm_a * softplus(ssm_alpha @ x +
+/// ssm_dt)`), the causal conv + [`silu`] + channel split + [`l2norm`]
+/// ([`append_qwen35_conv_branch`]'s own body, `:391-429`, reproduced here
+/// against a persisted history window instead of [`causal_conv1d`]'s own
+/// zero-boundary window -- see the conv step below), the GQA repeat
+/// ([`repeat_kv_heads`], `:437-440`), the recurrence itself
+/// ([`append_qwen35_delta_net_step`], `build_delta_net_autoregressive`,
+/// `delta-net-base.cpp:289-370`), gated RMSNorm (`build_norm_gated`,
+/// `qwen35.cpp:243-250`: `rmsnorm(out) * silu(z)`), and the output
+/// projection + residual (`:456-464`, folded into the block-level
+/// `ggml_add(cur, inpSA)` at `:180`) -- the pre-mixer `rmsnorm` and the
+/// post-mixer residual add both happen INSIDE this function, the same
+/// choice [`append_lfm2_conv_mixer`] already makes for its own block.
+///
+/// The `u,g` seam: [`repeat_kv_heads`]'s own doc proves this algebra can
+/// never merge a `u` (kv-head)/`g` (group) split back into one physical head
+/// axis -- [`shape::project_output_shape`] rejects any `Reduce` `out_map`
+/// axis that is not a pure single-term projection, and a plain
+/// `Elementwise`'s output shape IS its iteration space, so two loop letters
+/// cannot collapse into one output letter. [`append_qwen35_delta_net_step`]'s
+/// own maps are all per-head (nothing in the recurrence mixes heads), so
+/// widening its `head` parameter from one letter to `"ug"` costs nothing but
+/// string interpolation -- verified by reading its maps before relying on
+/// it, not assumed. `value`/`gate`/`beta` all decompose from their real flat
+/// `num_v_heads` axis via the identical `group*u+g` computed read
+/// [`append_attention_mixer`]'s own `group_map` already proves; `value`
+/// folds the within-head axis `j` into the same expression
+/// (`(group*head_v_dim)*u + head_v_dim*g + j`, still one `Affine` axis
+/// expression -- `parse_axis_expr` sums an arbitrary run of `+`-joined
+/// terms, not just two, confirmed by reading it before relying on it).
+///
+/// State threading mirrors [`append_mistral_cached_layer`]: both caches
+/// (`state_in`/`state_out`, [`append_qwen35_delta_net_step`]'s own contract,
+/// and `conv_history_in`, the `l_cache - 1` previous raw `qkv_mixed` rows)
+/// are caller-persisted [`Op::Input`]s/return values, never concatenated
+/// in-graph -- [`causal_conv1d`]'s own doc already establishes this op set
+/// has no concat primitive. Instead of windowing (which would need a real
+/// concat), the cached conv is a plain additive split: `conv_out = sum_w
+/// weight[.., w] * history[w] + weight[.., l_cache - 1] * qkv_mixed_new`,
+/// the same disjoint-source blend [`append_mistral_cached_layer`]'s own
+/// `score_cached` + `score_new` split already uses for attention, minus the
+/// online-softmax combine step (a linear conv sum splits for free; attention
+/// only splits after `Maximum`/`Add` recombine it). The caller is
+/// responsible for trimming/appending `qkv_mixed` (this function's second
+/// return) into its own persisted history buffer, exactly as
+/// [`append_mistral_cached_layer`]'s own [`CachedLayerRoots`] callers manage
+/// their KV cache outside the graph -- shift-and-trim lives on the host, not
+/// in the graph.
+///
+/// Returns `(x_next, qkv_mixed, state_out)`.
+#[allow(clippy::too_many_arguments)]
+fn append_qwen35_ssm_mixer(
+    program: &mut Vec<Op>,
+    x: NodeId,
+    inv_dim: NodeId,
+    eps: NodeId,
+    head_eps: NodeId,
+    one: NodeId,
+    inv_sqrt_key_dim: NodeId,
+    inv_head_v_dim: NodeId,
+    attn_norm_weight: NodeId,
+    wqkv: NodeId,
+    wqkv_gate: NodeId,
+    conv_weight: NodeId,
+    conv_history_in: NodeId,
+    ssm_beta: NodeId,
+    ssm_alpha: NodeId,
+    ssm_dt_bias: NodeId,
+    ssm_a: NodeId,
+    ssm_norm_weight: NodeId,
+    ssm_out: NodeId,
+    state_in: NodeId,
+    key_dim: u32,
+    value_dim: u32,
+    kv_heads: u32,
+    group: u32,
+    l_cache: u32,
+) -> Result<(NodeId, NodeId, NodeId), TensorError> {
+    let head_k_dim = key_dim / kv_heads;
+    let num_v_heads = kv_heads * group;
+    let head_v_dim = value_dim / num_v_heads;
+
+    let normed = rmsnorm(program, x, attn_norm_weight, inv_dim, eps)?;
+
+    let qkv_product = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Multiply,
+        &[(normed, "si->siq"), (wqkv, "iq->siq")],
+    )?;
+    let qkv_mixed = reduce(
+        program,
+        DType::Float32,
+        ScalarOp::Add,
+        ReduceInit::Zero,
+        qkv_product,
+        "siq->siq",
+        "sq->siq",
+    )?;
+
+    let z_product = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Multiply,
+        &[(normed, "si->siz"), (wqkv_gate, "iz->siz")],
+    )?;
+    let z = reduce(
+        program,
+        DType::Float32,
+        ScalarOp::Add,
+        ReduceInit::Zero,
+        z_product,
+        "siz->siz",
+        "sz->siz",
+    )?;
+    let z_silu = silu(program, z, one, "sz->sz")?;
+
+    let beta_product = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Multiply,
+        &[(normed, "si->sin"), (ssm_beta, "in->sin")],
+    )?;
+    let beta_flat = reduce(
+        program,
+        DType::Float32,
+        ScalarOp::Add,
+        ReduceInit::Zero,
+        beta_product,
+        "sin->sin",
+        "sn->sin",
+    )?;
+    let beta_sigmoid = sigmoid(program, beta_flat, one, "sn->sn")?;
+
+    let alpha_product = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Multiply,
+        &[(normed, "si->sin"), (ssm_alpha, "in->sin")],
+    )?;
+    let alpha_flat = reduce(
+        program,
+        DType::Float32,
+        ScalarOp::Add,
+        ReduceInit::Zero,
+        alpha_product,
+        "sin->sin",
+        "sn->sin",
+    )?;
+    let alpha_biased = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Add,
+        &[(alpha_flat, "sn->sn"), (ssm_dt_bias, "n->sn")],
+    )?;
+    let alpha_softplus = softplus(program, alpha_biased, one, "sn->sn")?;
+    let gate_flat = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Multiply,
+        &[(alpha_softplus, "sn->sn"), (ssm_a, "n->sn")],
+    )?;
+
+    // cached causal conv: `weight`'s declared `[q, l_cache]` layout matches
+    // `causal_conv1d`'s own (`l_cache` fastest/contiguous per channel) --
+    // history (real axis `w`, no `s`) and this call's own new token (real
+    // axis `s`) blend additively, no concat.
+    let weight_history = channel_slice(program, conv_weight, l_cache, 0, l_cache - 1)?;
+    let weight_new_wide = channel_slice(program, conv_weight, l_cache, l_cache - 1, 1)?;
+    let weight_new = reduce(
+        program,
+        DType::Float32,
+        ScalarOp::Add,
+        ReduceInit::Zero,
+        weight_new_wide,
+        "qw->qw",
+        "q->qw",
+    )?;
+
+    let history_product = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Multiply,
+        &[(conv_history_in, "wq->wq"), (weight_history, "qw->wq")],
+    )?;
+    let history_term = reduce(
+        program,
+        DType::Float32,
+        ScalarOp::Add,
+        ReduceInit::Zero,
+        history_product,
+        "wq->wq",
+        "q->wq",
+    )?;
+
+    let new_product = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Multiply,
+        &[(qkv_mixed, "sq->sq"), (weight_new, "q->sq")],
+    )?;
+    let conv_raw = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Add,
+        &[(new_product, "sq->sq"), (history_term, "q->sq")],
+    )?;
+
+    let activated = silu(program, conv_raw, one, "sq->sq")?;
+    let qkv_dim = 2 * key_dim + value_dim;
+    let q_raw = channel_slice(program, activated, qkv_dim, 0, key_dim)?;
+    let k_raw = channel_slice(program, activated, qkv_dim, key_dim, key_dim)?;
+    let v_conv = channel_slice(program, activated, qkv_dim, 2 * key_dim, value_dim)?;
+
+    let q_conv = l2norm(program, q_raw, eps, "sw->sw", "s->sw")?;
+    let k_conv = l2norm(program, k_raw, eps, "sw->sw", "s->sw")?;
+
+    // A read-side multi-term decomposition (`{coeff}*u+i`) constrains the
+    // COMBINED axis, never `u`/`i` individually -- `shape::infer` cannot
+    // solve one affine equation for two unknown extents, exactly the reason
+    // [`repeat_kv_heads`]'s own `group_ones`/`ug->sugd` donor exists. Each
+    // decomposition below pairs with the identical all-ones-donor technique,
+    // scoped to whichever letters that decomposition introduces.
+    let key_head_ones = op::append(
+        program,
+        Op::Constant {
+            dtype: DType::Float32,
+            shape: alloc::vec![Extent::Static(kv_heads), Extent::Static(head_k_dim)],
+            value: 1.0,
+        },
+    );
+    let q_split_map = alloc::format!("s,{head_k_dim}*u+i->sui");
+    let q_split = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Multiply,
+        &[(q_conv, q_split_map.as_str()), (key_head_ones, "ui->sui")],
+    )?;
+    let k_split = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Multiply,
+        &[(k_conv, q_split_map.as_str()), (key_head_ones, "ui->sui")],
+    )?;
+
+    let q_repeated = repeat_kv_heads(program, q_split, kv_heads, group)?;
+    let k_repeated = repeat_kv_heads(program, k_split, kv_heads, group)?;
+
+    let value_head_ones = op::append(
+        program,
+        Op::Constant {
+            dtype: DType::Float32,
+            shape: alloc::vec![Extent::Static(kv_heads), Extent::Static(group), Extent::Static(head_v_dim)],
+            value: 1.0,
+        },
+    );
+    let v_split_map = alloc::format!("s,{}*u+{head_v_dim}*g+j->sugj", group * head_v_dim);
+    let v_split = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Multiply,
+        &[(v_conv, v_split_map.as_str()), (value_head_ones, "ugj->sugj")],
+    )?;
+
+    let group_ones = op::append(
+        program,
+        Op::Constant {
+            dtype: DType::Float32,
+            shape: alloc::vec![Extent::Static(kv_heads), Extent::Static(group)],
+            value: 1.0,
+        },
+    );
+    let head_split_map = alloc::format!("s,{group}*u+g->sug");
+    let beta_split = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Multiply,
+        &[(beta_sigmoid, head_split_map.as_str()), (group_ones, "ug->sug")],
+    )?;
+    let gate_split = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Multiply,
+        &[(gate_flat, head_split_map.as_str()), (group_ones, "ug->sug")],
+    )?;
+    let z_split = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Multiply,
+        &[(z_silu, v_split_map.as_str()), (value_head_ones, "ugj->sugj")],
+    )?;
+
+    // squeeze the size-1 decode-step `s` axis away -- `append_qwen35_delta_net_step`
+    // has no `s` letter at all (a single already-selected token per its own
+    // doc), and reordering the surviving letters here (`dug`, not `ugd`)
+    // doubles as the transpose `append_qwen35_delta_net_step`'s own
+    // `i{head}`/`j{head}` maps expect.
+    let query = reduce(program, DType::Float32, ScalarOp::Add, ReduceInit::Zero, q_repeated, "sugd->sugd", "dug->sugd")?;
+    let key = reduce(program, DType::Float32, ScalarOp::Add, ReduceInit::Zero, k_repeated, "sugd->sugd", "dug->sugd")?;
+    let value = reduce(program, DType::Float32, ScalarOp::Add, ReduceInit::Zero, v_split, "sugj->sugj", "jug->sugj")?;
+    let beta = reduce(program, DType::Float32, ScalarOp::Add, ReduceInit::Zero, beta_split, "sug->sug", "ug->sug")?;
+    let gate = reduce(program, DType::Float32, ScalarOp::Add, ReduceInit::Zero, gate_split, "sug->sug", "ug->sug")?;
+    let z_head = reduce(program, DType::Float32, ScalarOp::Add, ReduceInit::Zero, z_split, "sugj->sugj", "ugj->sugj")?;
+
+    let (delta_out, state_out) =
+        append_qwen35_delta_net_step(program, query, key, value, gate, beta, state_in, inv_sqrt_key_dim, "ug")?;
+
+    // gated RMSNorm over the per-head value axis `j`, `head_eps`/`inv_head_v_dim`
+    // matched to the surviving `u,g` head space -- `build_norm_gated`
+    // (`qwen35.cpp:243-250`): `rmsnorm(out, weight) * silu(z)`.
+    let squared = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(delta_out, "jug->jug"), (delta_out, "jug->jug")])?;
+    let sum_squares = reduce(program, DType::Float32, ScalarOp::Add, ReduceInit::Zero, squared, "jug->jug", "ug->jug")?;
+    let mean_square = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(sum_squares, "ug->ug"), (inv_head_v_dim, "->ug")])?;
+    let mean_square_eps = elementwise(program, DType::Float32, ScalarOp::Add, &[(mean_square, "ug->ug"), (head_eps, "ug->ug")])?;
+    let rms = elementwise(program, DType::Float32, ScalarOp::SquareRoot, &[(mean_square_eps, "ug->ug")])?;
+    let inv_rms = elementwise(program, DType::Float32, ScalarOp::Reciprocal, &[(rms, "ug->ug")])?;
+    let normed_out = elementwise(program, DType::Float32, ScalarOp::Multiply, &[(delta_out, "jug->jug"), (inv_rms, "ug->jug")])?;
+    let normed_out_gamma = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Multiply,
+        &[(normed_out, "jug->jug"), (ssm_norm_weight, "j->jug")],
+    )?;
+    let gated_out = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Multiply,
+        &[(normed_out_gamma, "jug->jug"), (z_head, "ugj->jug")],
+    )?;
+
+    // output projection: `ssm_out`'s declared `[value_dim, n_embd]` layout
+    // decomposed the same read-side way `q_split_map`/`v_split_map` already
+    // decompose a flat checkpoint axis -- never a write-side merge.
+    let out_weight_split_map = alloc::format!("{}*u+{head_v_dim}*g+j,d->ugjd", group * head_v_dim);
+    let ssm_out_split = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Multiply,
+        &[
+            (ssm_out, out_weight_split_map.as_str()),
+            (value_head_ones, "ugj->ugjd"),
+        ],
+    )?;
+    let cur_product = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Multiply,
+        &[(gated_out, "jug->jugd"), (ssm_out_split, "ugjd->jugd")],
+    )?;
+    let cur = reduce(
+        program,
+        DType::Float32,
+        ScalarOp::Add,
+        ReduceInit::Zero,
+        cur_product,
+        "jugd->jugd",
+        "d->jugd",
+    )?;
+
+    let mixer_out = elementwise(program, DType::Float32, ScalarOp::Add, &[(x, "sd->sd"), (cur, "d->sd")])?;
+
+    Ok((mixer_out, qkv_mixed, state_out))
+}
+
 /// [`append_mistral_layer`]'s attention sub-block in isolation (RoPE + GQA +
 /// causal mask + residual, no FFN) -- the piece [`lfm2_forward_program_with_experts`]
 /// needs on its own, since an attention block there sits beside
@@ -3759,7 +5285,7 @@ fn append_attention_mixer(
     // [`Lfm2MoeAttention.q_layernorm`]'s own placement
     // (`modeling_lfm2_moe.py:331`): normalizes right after the head
     // reshape, BEFORE `apply_rotary_pos_emb` -- never after.
-    let q = rmsnorm_per_head(program, q_raw, q_norm_weight, inv_head_dim, eps, 'h')?;
+    let q = rmsnorm_per_head(program, q_raw, q_norm_weight, inv_head_dim, eps, "h")?;
 
     let k_product = elementwise(
         program,
@@ -3776,7 +5302,7 @@ fn append_attention_mixer(
         "sudi->sudi",
         "sud->sudi",
     )?;
-    let k = rmsnorm_per_head(program, k_raw, k_norm_weight, inv_head_dim, eps, 'u')?;
+    let k = rmsnorm_per_head(program, k_raw, k_norm_weight, inv_head_dim, eps, "u")?;
 
     let v_product = elementwise(
         program,
@@ -4520,6 +6046,40 @@ pub fn mistral_cached_forward_program(
         block_count,
         0,
         0,
+        false,
+    )
+}
+
+/// [`mistral_cached_forward_program`]'s Qwen3 dense-attention counterpart:
+/// the identical interleaved-RoPE cached layer, plus per-head QK-norm
+/// (Qwen3's own `q_norm`/`k_norm`, `modeling_qwen3.py`'s `Qwen3Attention`)
+/// applied to `q`/`k_new` before RoPE -- see
+/// [`append_mistral_cached_layer`]'s `qk_norm` parameter doc for the exact
+/// two ops this adds over the plain Mistral layer. Qwen3 has no
+/// mixture-of-experts variant this crate has bound yet, so this takes no
+/// `expert_count`/`expert_used_count`, the same dense-only shape
+/// [`mistral_cached_forward_program`] itself uses.
+#[allow(clippy::too_many_arguments)]
+pub fn qwen3_cached_forward_program(
+    vocab: u32,
+    embedding: u32,
+    feed_forward: u32,
+    query_heads: u32,
+    kv_heads: u32,
+    head_dim: u32,
+    block_count: u32,
+) -> Result<(Vec<Op>, NodeId, Vec<CachedLayerRoots>), TensorError> {
+    mistral_cached_forward_program_with_experts(
+        vocab,
+        embedding,
+        feed_forward,
+        query_heads,
+        kv_heads,
+        head_dim,
+        block_count,
+        0,
+        0,
+        true,
     )
 }
 
@@ -4546,6 +6106,7 @@ pub fn mistral_cached_forward_program_with_experts(
     block_count: u32,
     expert_count: u32,
     expert_used_count: u32,
+    qk_norm: bool,
 ) -> Result<(Vec<Op>, NodeId, Vec<CachedLayerRoots>), TensorError> {
     let group = query_heads / kv_heads;
     let pairs = head_dim / 2;
@@ -4570,6 +6131,10 @@ pub fn mistral_cached_forward_program_with_experts(
     let eps = symbolic_leaf(&mut program, DType::Float32, "eps");
     let ones = scalar_constant(&mut program, 1.0);
     let inv_sqrt_head_dim = scalar_constant(&mut program, 1.0 / (head_dim as f32).sqrt());
+    // only materialized when a layer actually consumes it (`qk_norm`), so a
+    // dense checkpoint with no QK-norm keeps the identical node count this
+    // function has always emitted.
+    let inv_head_dim = qk_norm.then(|| scalar_constant(&mut program, 1.0 / head_dim as f32));
     let cos_new = input_leaf(
         &mut program,
         DType::Float32,
@@ -4698,6 +6263,21 @@ pub fn mistral_cached_forward_program_with_experts(
                 alloc::vec![Extent::Static(feed_forward), Extent::Static(embedding)],
                 &alloc::format!("blk.{layer}.ffn_down.weight"),
             );
+            let qk_norm_weights = inv_head_dim.map(|inv_head_dim| {
+                let q_norm_weight = input_leaf(
+                    &mut program,
+                    DType::Float32,
+                    alloc::vec![Extent::Static(head_dim)],
+                    &alloc::format!("blk.{layer}.attn_q_norm.weight"),
+                );
+                let k_norm_weight = input_leaf(
+                    &mut program,
+                    DType::Float32,
+                    alloc::vec![Extent::Static(head_dim)],
+                    &alloc::format!("blk.{layer}.attn_k_norm.weight"),
+                );
+                (q_norm_weight, k_norm_weight, inv_head_dim)
+            });
 
             append_mistral_cached_layer(
                 &mut program,
@@ -4711,6 +6291,7 @@ pub fn mistral_cached_forward_program_with_experts(
                 group_ones,
                 is_future,
                 group,
+                head_dim,
                 attn_norm_weight,
                 ffn_norm_weight,
                 wq,
@@ -4723,6 +6304,7 @@ pub fn mistral_cached_forward_program_with_experts(
                 k_even_cache,
                 k_odd_cache,
                 v_cache,
+                qk_norm_weights,
             )?
         } else {
             let gate_inp = input_leaf(
@@ -4826,6 +6408,626 @@ pub fn mistral_cached_forward_program_with_experts(
     )?;
 
     Ok((program, logits, cache_roots))
+}
+
+/// Per-layer roots [`qwen35_forward_program`]'s own caller threads back in
+/// as next-call cache [`Op::Input`]s -- [`Qwen35DenseAttentionRoots`]'s own
+/// 4-wide KV-cache shape for a dense-attention layer
+/// ([`append_qwen35_dense_attention_layer`]'s own doc walks through why it
+/// is 4-wide, not [`CachedLayerRoots`]'s 3), or [`append_qwen35_ssm_mixer`]'s
+/// own `(qkv_mixed, state_out)` return for an SSM layer. A discriminated
+/// enum, not a bool flag riding alongside a fixed-shape tuple: the layer
+/// kinds carry genuinely different cache shapes, the same reason
+/// [`LayerKind`] exists as its own type rather than a boolean.
+///
+/// `Attention(CachedLayerRoots)` is [`mistral_cached_forward_program_with_experts`]'s
+/// own 3-wide shape, still constructed by that program's caller
+/// (`crate::generate::LoadedModel::load`) for every non-qwen35 checkpoint --
+/// kept as its own variant rather than folded into `DenseAttention` so that
+/// caller's cache-threading loop, and its `LayerCache`, are unaffected by
+/// this checkpoint's own partial-rotary gap.
+#[derive(Debug, Clone, Copy)]
+pub enum Qwen35LayerRoots {
+    Attention(CachedLayerRoots),
+    DenseAttention(Qwen35DenseAttentionRoots),
+    Ssm { qkv_mixed: NodeId, state_out: NodeId },
+}
+
+/// Qwen3.5's whole-model incremental forward program: `full_attention_interval`
+/// dense-attention layers ([`append_mistral_cached_layer`], the same KV-cache
+/// pattern [`mistral_cached_forward_program_with_experts`] already runs)
+/// interleaved with gated-DeltaNet layers ([`append_qwen35_ssm_mixer`]),
+/// following llama.cpp's own `hparams.is_recr_impl[i] = (i < n_layer) &&
+/// ((i + 1) % full_attention_interval != 0)` (`qwen35.cpp:19-20`) -- layer
+/// `full_attention_interval - 1`, `2 * full_attention_interval - 1`, ... are
+/// dense attention, every other layer is SSM. Qwen3.5 never routes FFN
+/// through experts (`qwen35.cpp:471`, `GGML_ASSERT(model.layers[il].ffn_gate_inp
+/// == nullptr)`), so every layer's FFN is the plain dense triple
+/// [`mistral_cached_forward_program_with_experts`]'s own `expert_count == 0`
+/// branch already builds -- reused here rather than reconstructed.
+///
+/// `ssm_d_state`/`ssm_dt_rank`/`ssm_n_group`/`ssm_d_inner`/`ssm_d_conv` name
+/// the same five hyperparameters `qwen35.cpp:335-343`'s own
+/// `build_layer_attn_linear` reads off `hparams`, unpacked into
+/// [`append_qwen35_ssm_mixer`]'s own `key_dim = ssm_d_state * ssm_n_group`,
+/// `value_dim = ssm_d_inner`, `kv_heads = ssm_n_group`, `group = ssm_dt_rank
+/// / ssm_n_group`, `l_cache = ssm_d_conv` (`head_v_dim = ssm_d_inner /
+/// ssm_dt_rank` falls out inside the mixer itself, matching the oracle's own
+/// `head_v_dim = d_inner / num_v_heads`). `rms_eps` is
+/// `hparams.f_norm_rms_eps` baked as a graph-build-time constant, the same
+/// choice this module already makes for `inv_dim`/`inv_sqrt_head_dim`
+/// (Rust-side config values, not runtime-bound `Input`s) rather than a fresh
+/// runtime-bound tensor shaped to [`append_qwen35_ssm_mixer`]'s own
+/// `head_eps` (`[kv_heads, group]`) -- there is exactly one epsilon value
+/// per checkpoint, known at program-build time.
+///
+/// Dense attention's own layers ([`append_qwen35_dense_attention_layer`],
+/// not [`append_mistral_cached_layer`]) run split-half RoPE over the
+/// checkpoint's PARTIAL rotary width plus a concatenated-by-sum pass-through
+/// remainder, and a per-head sigmoid gate on the attention output --
+/// [`append_qwen35_dense_attention_layer`]'s own doc walks through why the
+/// declared 3-section MRoPE (`rope.dimension_sections`) collapses to plain
+/// single-section RoPE for this checkpoint's text-only forward program.
+#[allow(clippy::too_many_arguments)]
+pub fn qwen35_forward_program(
+    vocab: u32,
+    embedding: u32,
+    feed_forward: u32,
+    query_heads: u32,
+    kv_heads: u32,
+    head_dim: u32,
+    attn_head_dim: u32,
+    block_count: u32,
+    full_attention_interval: u32,
+    ssm_d_state: u32,
+    ssm_dt_rank: u32,
+    ssm_n_group: u32,
+    ssm_d_inner: u32,
+    ssm_d_conv: u32,
+    rms_eps: f32,
+) -> Result<(Vec<Op>, NodeId, Vec<Qwen35LayerRoots>), TensorError> {
+    if full_attention_interval == 0 {
+        return Err(TensorError::InvalidFullAttentionInterval { full_attention_interval });
+    }
+
+    let group = query_heads / kv_heads;
+    let pairs = head_dim / 2;
+    let ssm_group = ssm_dt_rank / ssm_n_group;
+    let ssm_key_dim = ssm_d_state * ssm_n_group;
+
+    let mut program = Vec::new();
+
+    let ids = input_leaf(&mut program, DType::Int32, alloc::vec![Extent::Symbolic(0)], "ids");
+    let table = input_leaf(
+        &mut program,
+        DType::Float32,
+        alloc::vec![Extent::Static(vocab), Extent::Static(embedding)],
+        "token_embd.weight",
+    );
+    let mut x = embedding_lookup(&mut program, table, ids);
+
+    let inv_dim = scalar_constant(&mut program, 1.0 / embedding as f32);
+    let eps = symbolic_leaf(&mut program, DType::Float32, "eps");
+    let ones = scalar_constant(&mut program, 1.0);
+    let one = ones;
+    // `head_dim` here is `rope.dimension_count` -- this checkpoint's
+    // PARTIAL-rotary width (`rotary_dim`), never the real per-head width.
+    // Dense attention's own score scale is `attn_head_dim`-based
+    // (`self.scaling = self.head_dim**-0.5` where `self.head_dim` is the
+    // real width, `modeling_qwen3_next.py:262,264`), not
+    // `rotary_dim`-based.
+    let inv_sqrt_attn_head_dim = scalar_constant(&mut program, 1.0 / (attn_head_dim as f32).sqrt());
+    let inv_attn_head_dim = scalar_constant(&mut program, 1.0 / attn_head_dim as f32);
+    let inv_sqrt_key_dim = scalar_constant(&mut program, 1.0 / (ssm_d_state as f32).sqrt());
+    let head_v_dim = ssm_d_inner / ssm_dt_rank;
+    let inv_head_v_dim = scalar_constant(&mut program, 1.0 / head_v_dim as f32);
+    let cos_new = input_leaf(
+        &mut program,
+        DType::Float32,
+        alloc::vec![Extent::Symbolic(0), Extent::Static(pairs)],
+        "rope_cos",
+    );
+    let sin_new = input_leaf(
+        &mut program,
+        DType::Float32,
+        alloc::vec![Extent::Symbolic(0), Extent::Static(pairs)],
+        "rope_sin",
+    );
+    let group_ones = op::append(
+        &mut program,
+        Op::Constant {
+            dtype: DType::Float32,
+            shape: alloc::vec![Extent::Static(kv_heads), Extent::Static(group)],
+            value: 1.0,
+        },
+    );
+    let head_eps = op::append(
+        &mut program,
+        Op::Constant {
+            dtype: DType::Float32,
+            shape: alloc::vec![Extent::Static(ssm_n_group), Extent::Static(ssm_group)],
+            value: rms_eps,
+        },
+    );
+    let (is_future, _neg_infinity) = causal_mask(&mut program)?;
+
+    let mut layer_roots: Vec<Qwen35LayerRoots> = Vec::with_capacity(block_count as usize);
+
+    for layer in 0..block_count {
+        let attn_norm_weight = input_leaf(
+            &mut program,
+            DType::Float32,
+            alloc::vec![Extent::Static(embedding)],
+            &alloc::format!("blk.{layer}.attn_norm.weight"),
+        );
+        // Named `post_attention_norm.weight` on disk, not `ffn_norm.weight`
+        // -- this checkpoint's own GGUF writer names this tensor
+        // differently from every other architecture this crate binds
+        // (`proxima_model_interop::qwen35`'s own module doc, confirmed via
+        // `strings` on the real file: no `blk.N.ffn_norm.weight` key
+        // exists anywhere), on both layer kinds.
+        let ffn_norm_weight = input_leaf(
+            &mut program,
+            DType::Float32,
+            alloc::vec![Extent::Static(embedding)],
+            &alloc::format!("blk.{layer}.post_attention_norm.weight"),
+        );
+
+        // `hparams.is_recr_impl[i] = (i + 1) % full_attention_interval != 0`
+        // (`qwen35.cpp:19-20`) is TRUE for SSM layers -- dense attention is
+        // its negation, `(i + 1) % full_attention_interval == 0`.
+        let is_dense_attention = (layer + 1) % full_attention_interval == 0;
+
+        let (x_next, roots) = if is_dense_attention {
+            // real per-head width read off metadata (`attention.key_length`,
+            // `attn_head_dim` param) rather than `embedding / query_heads`
+            // -- the latter is not even an integer on the 27B checkpoint
+            // (`5120 / 24 = 213.33`), confirmed wrong against the real file
+            // by [`crate::qwen35::qwen35_architecture_from_metadata`]'s own
+            // caller-side doc.
+            let wq_flat = input_leaf(
+                &mut program,
+                DType::Float32,
+                alloc::vec![
+                    Extent::Static(embedding),
+                    Extent::Static(query_heads * attn_head_dim * 2)
+                ],
+                &alloc::format!("blk.{layer}.attn_q.weight"),
+            );
+            let wq = per_head_channel_slice(
+                &mut program,
+                wq_flat,
+                query_heads,
+                attn_head_dim * 2,
+                0,
+                attn_head_dim,
+            )?;
+            let w_gate_q = per_head_channel_slice(
+                &mut program,
+                wq_flat,
+                query_heads,
+                attn_head_dim * 2,
+                attn_head_dim,
+                attn_head_dim,
+            )?;
+            let wk_flat = input_leaf(
+                &mut program,
+                DType::Float32,
+                alloc::vec![Extent::Static(embedding), Extent::Static(kv_heads * attn_head_dim)],
+                &alloc::format!("blk.{layer}.attn_k.weight"),
+            );
+            // `k` carries no gate and no partial-rotary truncation at the
+            // weight level (the split into rotated/pass halves happens on
+            // the ACTIVATION inside [`append_qwen35_dense_attention_layer`]
+            // now that `q_norm`/`k_norm` need the full width first) -- the
+            // same lossless-reshape donor trick `v`/`o` already use below.
+            let k_head_ones = op::append(
+                &mut program,
+                Op::Constant {
+                    dtype: DType::Float32,
+                    shape: alloc::vec![Extent::Static(kv_heads), Extent::Static(attn_head_dim)],
+                    value: 1.0,
+                },
+            );
+            let wk = elementwise(
+                &mut program,
+                DType::Float32,
+                ScalarOp::Multiply,
+                &[
+                    (wk_flat, alloc::format!("i,{attn_head_dim}*u+d->iud").as_str()),
+                    (k_head_ones, "ud->iud"),
+                ],
+            )?;
+            let v_head_ones = op::append(
+                &mut program,
+                Op::Constant {
+                    dtype: DType::Float32,
+                    shape: alloc::vec![Extent::Static(kv_heads), Extent::Static(attn_head_dim)],
+                    value: 1.0,
+                },
+            );
+            let o_head_ones = op::append(
+                &mut program,
+                Op::Constant {
+                    dtype: DType::Float32,
+                    shape: alloc::vec![
+                        Extent::Static(kv_heads),
+                        Extent::Static(group),
+                        Extent::Static(attn_head_dim)
+                    ],
+                    value: 1.0,
+                },
+            );
+            let wv_flat = input_leaf(
+                &mut program,
+                DType::Float32,
+                alloc::vec![Extent::Static(embedding), Extent::Static(kv_heads * attn_head_dim)],
+                &alloc::format!("blk.{layer}.attn_v.weight"),
+            );
+            let wv = elementwise(
+                &mut program,
+                DType::Float32,
+                ScalarOp::Multiply,
+                &[
+                    (wv_flat, alloc::format!("i,{attn_head_dim}*u+d->iud").as_str()),
+                    (v_head_ones, "ud->iud"),
+                ],
+            )?;
+            let wo_flat = input_leaf(
+                &mut program,
+                DType::Float32,
+                alloc::vec![
+                    Extent::Static(query_heads * attn_head_dim),
+                    Extent::Static(embedding)
+                ],
+                &alloc::format!("blk.{layer}.attn_output.weight"),
+            );
+            let wo = elementwise(
+                &mut program,
+                DType::Float32,
+                ScalarOp::Multiply,
+                &[
+                    (
+                        wo_flat,
+                        alloc::format!(
+                            "{}*u+{attn_head_dim}*g+d,e->ugde",
+                            attn_head_dim * group
+                        )
+                        .as_str(),
+                    ),
+                    (o_head_ones, "ugd->ugde"),
+                ],
+            )?;
+            let w_gate = input_leaf(
+                &mut program,
+                DType::Float32,
+                alloc::vec![Extent::Static(embedding), Extent::Static(feed_forward)],
+                &alloc::format!("blk.{layer}.ffn_gate.weight"),
+            );
+            let w_up = input_leaf(
+                &mut program,
+                DType::Float32,
+                alloc::vec![Extent::Static(embedding), Extent::Static(feed_forward)],
+                &alloc::format!("blk.{layer}.ffn_up.weight"),
+            );
+            let w_down = input_leaf(
+                &mut program,
+                DType::Float32,
+                alloc::vec![Extent::Static(feed_forward), Extent::Static(embedding)],
+                &alloc::format!("blk.{layer}.ffn_down.weight"),
+            );
+            let q_norm_weight = input_leaf(
+                &mut program,
+                DType::Float32,
+                alloc::vec![Extent::Static(attn_head_dim)],
+                &alloc::format!("blk.{layer}.attn_q_norm.weight"),
+            );
+            let k_norm_weight = input_leaf(
+                &mut program,
+                DType::Float32,
+                alloc::vec![Extent::Static(attn_head_dim)],
+                &alloc::format!("blk.{layer}.attn_k_norm.weight"),
+            );
+            let pass_dim = attn_head_dim - head_dim;
+            let k_first_cache = input_leaf(
+                &mut program,
+                DType::Float32,
+                alloc::vec![
+                    Extent::Symbolic(1),
+                    Extent::Static(kv_heads),
+                    Extent::Static(pairs)
+                ],
+                &alloc::format!("kv_cache.{layer}.k_first"),
+            );
+            let k_second_cache = input_leaf(
+                &mut program,
+                DType::Float32,
+                alloc::vec![
+                    Extent::Symbolic(1),
+                    Extent::Static(kv_heads),
+                    Extent::Static(pairs)
+                ],
+                &alloc::format!("kv_cache.{layer}.k_second"),
+            );
+            let k_pass_cache = input_leaf(
+                &mut program,
+                DType::Float32,
+                alloc::vec![
+                    Extent::Symbolic(1),
+                    Extent::Static(kv_heads),
+                    Extent::Static(pass_dim)
+                ],
+                &alloc::format!("kv_cache.{layer}.k_pass"),
+            );
+            let v_cache = input_leaf(
+                &mut program,
+                DType::Float32,
+                alloc::vec![
+                    Extent::Symbolic(1),
+                    Extent::Static(kv_heads),
+                    Extent::Static(attn_head_dim)
+                ],
+                &alloc::format!("kv_cache.{layer}.v"),
+            );
+
+            let (x_next, dense_attention_roots) = append_qwen35_dense_attention_layer(
+                &mut program,
+                x,
+                inv_dim,
+                eps,
+                ones,
+                inv_sqrt_attn_head_dim,
+                inv_attn_head_dim,
+                cos_new,
+                sin_new,
+                group_ones,
+                is_future,
+                group,
+                head_dim,
+                attn_head_dim,
+                attn_norm_weight,
+                ffn_norm_weight,
+                q_norm_weight,
+                k_norm_weight,
+                wq,
+                w_gate_q,
+                wk,
+                wv,
+                wo,
+                w_gate,
+                w_up,
+                w_down,
+                k_first_cache,
+                k_second_cache,
+                k_pass_cache,
+                v_cache,
+            )?;
+            (x_next, Qwen35LayerRoots::DenseAttention(dense_attention_roots))
+        } else {
+            let qkv_dim = 2 * ssm_key_dim + ssm_d_inner;
+            let wqkv = input_leaf(
+                &mut program,
+                DType::Float32,
+                alloc::vec![Extent::Static(embedding), Extent::Static(qkv_dim)],
+                &alloc::format!("blk.{layer}.ssm_in.weight"),
+            );
+            let wqkv_gate = input_leaf(
+                &mut program,
+                DType::Float32,
+                alloc::vec![Extent::Static(embedding), Extent::Static(ssm_d_inner)],
+                &alloc::format!("blk.{layer}.ssm_gate.weight"),
+            );
+            let conv_weight = input_leaf(
+                &mut program,
+                DType::Float32,
+                alloc::vec![Extent::Static(qkv_dim), Extent::Static(ssm_d_conv)],
+                &alloc::format!("blk.{layer}.ssm_conv1d.weight"),
+            );
+            let conv_history_in = input_leaf(
+                &mut program,
+                DType::Float32,
+                alloc::vec![Extent::Static(ssm_d_conv - 1), Extent::Static(qkv_dim)],
+                &alloc::format!("ssm_cache.{layer}.conv_history"),
+            );
+            let ssm_beta = input_leaf(
+                &mut program,
+                DType::Float32,
+                alloc::vec![Extent::Static(embedding), Extent::Static(ssm_dt_rank)],
+                &alloc::format!("blk.{layer}.ssm_beta.weight"),
+            );
+            let ssm_alpha = input_leaf(
+                &mut program,
+                DType::Float32,
+                alloc::vec![Extent::Static(embedding), Extent::Static(ssm_dt_rank)],
+                &alloc::format!("blk.{layer}.ssm_alpha.weight"),
+            );
+            let ssm_dt_bias = input_leaf(
+                &mut program,
+                DType::Float32,
+                alloc::vec![Extent::Static(ssm_dt_rank)],
+                &alloc::format!("blk.{layer}.ssm_dt.bias"),
+            );
+            let ssm_a = input_leaf(
+                &mut program,
+                DType::Float32,
+                alloc::vec![Extent::Static(ssm_dt_rank)],
+                &alloc::format!("blk.{layer}.ssm_a"),
+            );
+            let ssm_norm_weight = input_leaf(
+                &mut program,
+                DType::Float32,
+                alloc::vec![Extent::Static(head_v_dim)],
+                &alloc::format!("blk.{layer}.ssm_norm.weight"),
+            );
+            let ssm_out = input_leaf(
+                &mut program,
+                DType::Float32,
+                alloc::vec![Extent::Static(ssm_d_inner), Extent::Static(embedding)],
+                &alloc::format!("blk.{layer}.ssm_out.weight"),
+            );
+            let state_in = input_leaf(
+                &mut program,
+                DType::Float32,
+                alloc::vec![
+                    Extent::Static(ssm_d_state),
+                    Extent::Static(head_v_dim),
+                    Extent::Static(ssm_n_group),
+                    Extent::Static(ssm_group)
+                ],
+                &alloc::format!("ssm_cache.{layer}.state"),
+            );
+
+            let (mixer_out, qkv_mixed, state_out) = append_qwen35_ssm_mixer(
+                &mut program,
+                x,
+                inv_dim,
+                eps,
+                head_eps,
+                one,
+                inv_sqrt_key_dim,
+                inv_head_v_dim,
+                attn_norm_weight,
+                wqkv,
+                wqkv_gate,
+                conv_weight,
+                conv_history_in,
+                ssm_beta,
+                ssm_alpha,
+                ssm_dt_bias,
+                ssm_a,
+                ssm_norm_weight,
+                ssm_out,
+                state_in,
+                ssm_key_dim,
+                ssm_d_inner,
+                ssm_n_group,
+                ssm_group,
+                ssm_d_conv,
+            )?;
+
+            // Unlike `append_mistral_cached_layer` (bundles FFN internally),
+            // `append_qwen35_ssm_mixer` is mixer-plus-residual only -- the
+            // same scope `append_lfm2_conv_mixer` has -- so the SSM branch
+            // runs its own dense FFN pass here, matching
+            // `mistral_cached_forward_program_with_experts`'s own
+            // `expert_count == 0` FFN math exactly (Qwen3.5 never routes FFN
+            // through experts, `qwen35.cpp:471`).
+            let normed2 = rmsnorm(&mut program, mixer_out, ffn_norm_weight, inv_dim, eps)?;
+            let w_gate = input_leaf(
+                &mut program,
+                DType::Float32,
+                alloc::vec![Extent::Static(embedding), Extent::Static(feed_forward)],
+                &alloc::format!("blk.{layer}.ffn_gate.weight"),
+            );
+            let w_up = input_leaf(
+                &mut program,
+                DType::Float32,
+                alloc::vec![Extent::Static(embedding), Extent::Static(feed_forward)],
+                &alloc::format!("blk.{layer}.ffn_up.weight"),
+            );
+            let w_down = input_leaf(
+                &mut program,
+                DType::Float32,
+                alloc::vec![Extent::Static(feed_forward), Extent::Static(embedding)],
+                &alloc::format!("blk.{layer}.ffn_down.weight"),
+            );
+            let gate_product = elementwise(
+                &mut program,
+                DType::Float32,
+                ScalarOp::Multiply,
+                &[(normed2, "sd->sdg"), (w_gate, "dg->sdg")],
+            )?;
+            let gate = reduce(
+                &mut program,
+                DType::Float32,
+                ScalarOp::Add,
+                ReduceInit::Zero,
+                gate_product,
+                "sdg->sdg",
+                "sg->sdg",
+            )?;
+            let up_product = elementwise(
+                &mut program,
+                DType::Float32,
+                ScalarOp::Multiply,
+                &[(normed2, "sd->sdg"), (w_up, "dg->sdg")],
+            )?;
+            let up = reduce(
+                &mut program,
+                DType::Float32,
+                ScalarOp::Add,
+                ReduceInit::Zero,
+                up_product,
+                "sdg->sdg",
+                "sg->sdg",
+            )?;
+            let silu_gate = silu(&mut program, gate, one, "sg->sg")?;
+            let ffn_hidden = elementwise(
+                &mut program,
+                DType::Float32,
+                ScalarOp::Multiply,
+                &[(silu_gate, "sg->sg"), (up, "sg->sg")],
+            )?;
+            let down_product = elementwise(
+                &mut program,
+                DType::Float32,
+                ScalarOp::Multiply,
+                &[(ffn_hidden, "sg->sgd"), (w_down, "gd->sgd")],
+            )?;
+            let ffn_out = reduce(
+                &mut program,
+                DType::Float32,
+                ScalarOp::Add,
+                ReduceInit::Zero,
+                down_product,
+                "sgd->sgd",
+                "sd->sgd",
+            )?;
+            let x_after_ffn = elementwise(
+                &mut program,
+                DType::Float32,
+                ScalarOp::Add,
+                &[(ffn_out, "sd->sd"), (mixer_out, "sd->sd")],
+            )?;
+
+            (x_after_ffn, Qwen35LayerRoots::Ssm { qkv_mixed, state_out })
+        };
+
+        x = x_next;
+        layer_roots.push(roots);
+    }
+
+    let output_norm_weight = input_leaf(
+        &mut program,
+        DType::Float32,
+        alloc::vec![Extent::Static(embedding)],
+        "output_norm.weight",
+    );
+    let normed_final = rmsnorm(&mut program, x, output_norm_weight, inv_dim, eps)?;
+
+    let lm_head = input_leaf(
+        &mut program,
+        DType::Float32,
+        alloc::vec![Extent::Static(embedding), Extent::Static(vocab)],
+        "output.weight",
+    );
+    let logits_product = elementwise(
+        &mut program,
+        DType::Float32,
+        ScalarOp::Multiply,
+        &[(normed_final, "sd->sdv"), (lm_head, "dv->sdv")],
+    )?;
+    let logits = reduce(
+        &mut program,
+        DType::Float32,
+        ScalarOp::Add,
+        ReduceInit::Zero,
+        logits_product,
+        "sdv->sdv",
+        "sv->sdv",
+    )?;
+
+    Ok((program, logits, layer_roots))
 }
 
 #[cfg(test)]
@@ -8566,7 +10768,7 @@ value = 1.0
             },
         );
         let inv_head_dim = scalar_constant(&mut program, 0.5);
-        let output = rmsnorm_per_head(&mut program, x, gamma, inv_head_dim, eps, 'h')
+        let output = rmsnorm_per_head(&mut program, x, gamma, inv_head_dim, eps, "h")
             .expect("per-head rmsnorm lowers");
 
         let x_data = [3.0f32, 4.0, 1.0, 1.0];
@@ -8622,7 +10824,7 @@ value = 1.0
             },
         );
         let inv_head_dim = scalar_constant(&mut program, 0.5);
-        let output = rmsnorm_per_head(&mut program, x, gamma, inv_head_dim, eps, 'h')
+        let output = rmsnorm_per_head(&mut program, x, gamma, inv_head_dim, eps, "h")
             .expect("per-head rmsnorm lowers");
 
         let x_data = [3.0f32, 4.0, 1.0, 1.0];
@@ -8791,6 +10993,1031 @@ value = 1.0
         assert!(
             matches!(error, TensorError::InvalidConvConfig { l_cache: 0 }),
             "got {error:?}"
+        );
+    }
+
+    /// [`append_qwen35_delta_net_step`] against a hand-computed single-head,
+    /// `key_dim = value_dim = 2` delta-rule step -- llama.cpp's own
+    /// `build_delta_net_autoregressive` traced by hand: `decay = exp(0) =
+    /// 1`, `state_decayed = state_in` (`[[1,2],[3,4]]`), `v_pred = [1,2]`
+    /// (`state_decayed^T @ k` with `k = [1,0]`), `residual = v - v_pred =
+    /// [4,4]` (`v = [5,6]`), `delta = residual * beta = [4,4]` (`beta = 1`),
+    /// `state_out = state_decayed + k(outer)delta = [[5,6],[3,4]]`,
+    /// `out = state_out^T @ q_scaled` with `q_scaled = q * 1 = [1,0]` gives
+    /// `[5,6]`.
+    #[proxima::test]
+    async fn qwen35_delta_net_step_matches_a_hand_computed_recurrence() {
+        let mut program = Vec::new();
+        let shape_ih = alloc::vec![Extent::Static(2), Extent::Static(1)];
+        let shape_jh = alloc::vec![Extent::Static(2), Extent::Static(1)];
+        let shape_h = alloc::vec![Extent::Static(1)];
+        let shape_ijh = alloc::vec![Extent::Static(2), Extent::Static(2), Extent::Static(1)];
+
+        let query = input_leaf(&mut program, DType::Float32, shape_ih.clone(), "query");
+        let key = input_leaf(&mut program, DType::Float32, shape_ih, "key");
+        let value = input_leaf(&mut program, DType::Float32, shape_jh, "value");
+        let gate = input_leaf(&mut program, DType::Float32, shape_h.clone(), "gate");
+        let beta = input_leaf(&mut program, DType::Float32, shape_h, "beta");
+        let state_in = input_leaf(&mut program, DType::Float32, shape_ijh, "state_in");
+        let inv_sqrt_key_dim = scalar_constant(&mut program, 1.0);
+
+        let (out, state_out) = append_qwen35_delta_net_step(
+            &mut program,
+            query,
+            key,
+            value,
+            gate,
+            beta,
+            state_in,
+            inv_sqrt_key_dim,
+            "h",
+        )
+        .expect("delta net step lowers");
+
+        let query_data = [1.0f32, 0.0];
+        let key_data = [1.0f32, 0.0];
+        let value_data = [5.0f32, 6.0];
+        let gate_data = [0.0f32];
+        let beta_data = [1.0f32];
+        let state_in_data = [1.0f32, 2.0, 3.0, 4.0];
+
+        let evaluated = crate::cpu::evaluate_named(
+            &program,
+            &[],
+            &[
+                ("query", &query_data),
+                ("key", &key_data),
+                ("value", &value_data),
+                ("gate", &gate_data),
+                ("beta", &beta_data),
+                ("state_in", &state_in_data),
+            ],
+            &[out, state_out],
+        )
+        .expect("delta net step evaluates");
+
+        let (out_values, _) = evaluated.get(out).expect("out present");
+        let (state_out_values, _) = evaluated.get(state_out).expect("state_out present");
+
+        assert_eq!(out_values, [5.0, 6.0], "read-out uses the UPDATED state");
+        assert_eq!(
+            state_out_values,
+            [5.0, 6.0, 3.0, 4.0],
+            "state_out = state_decayed + k(outer)delta"
+        );
+    }
+
+    /// Proof the hand-computed test can fail: a nonzero `beta` on a
+    /// perturbed run must move both `out` and `state_out` away from the
+    /// `beta = 0` (no update at all) reference.
+    #[proxima::test]
+    async fn qwen35_delta_net_step_hand_computed_check_actually_detects_a_wrong_beta() {
+        let mut program = Vec::new();
+        let shape_ih = alloc::vec![Extent::Static(2), Extent::Static(1)];
+        let shape_jh = alloc::vec![Extent::Static(2), Extent::Static(1)];
+        let shape_h = alloc::vec![Extent::Static(1)];
+        let shape_ijh = alloc::vec![Extent::Static(2), Extent::Static(2), Extent::Static(1)];
+
+        let query = input_leaf(&mut program, DType::Float32, shape_ih.clone(), "query");
+        let key = input_leaf(&mut program, DType::Float32, shape_ih, "key");
+        let value = input_leaf(&mut program, DType::Float32, shape_jh, "value");
+        let gate = input_leaf(&mut program, DType::Float32, shape_h.clone(), "gate");
+        let beta = input_leaf(&mut program, DType::Float32, shape_h, "beta");
+        let state_in = input_leaf(&mut program, DType::Float32, shape_ijh, "state_in");
+        let inv_sqrt_key_dim = scalar_constant(&mut program, 1.0);
+
+        let (out, state_out) = append_qwen35_delta_net_step(
+            &mut program,
+            query,
+            key,
+            value,
+            gate,
+            beta,
+            state_in,
+            inv_sqrt_key_dim,
+            "h",
+        )
+        .expect("delta net step lowers");
+
+        let query_data = [1.0f32, 0.0];
+        let key_data = [1.0f32, 0.0];
+        let value_data = [5.0f32, 6.0];
+        let gate_data = [0.0f32];
+        let beta_data = [0.0f32];
+        let state_in_data = [1.0f32, 2.0, 3.0, 4.0];
+
+        let evaluated = crate::cpu::evaluate_named(
+            &program,
+            &[],
+            &[
+                ("query", &query_data),
+                ("key", &key_data),
+                ("value", &value_data),
+                ("gate", &gate_data),
+                ("beta", &beta_data),
+                ("state_in", &state_in_data),
+            ],
+            &[out, state_out],
+        )
+        .expect("delta net step evaluates");
+
+        let (out_values, _) = evaluated.get(out).expect("out present");
+        let (state_out_values, _) = evaluated.get(state_out).expect("state_out present");
+
+        assert_ne!(
+            out_values,
+            [5.0, 6.0],
+            "beta=0 must move out away from the beta=1 reference"
+        );
+        assert_ne!(
+            state_out_values,
+            [5.0, 6.0, 3.0, 4.0],
+            "beta=0 must move state_out away from the beta=1 reference"
+        );
+    }
+
+    /// [`softplus`] against `log(1 + exp(x))` hand-computed at `x = 0` and
+    /// `x = 1`: `softplus(0) = ln(2) ≈ 0.6931`, `softplus(1) = ln(1 + e) ≈
+    /// 1.3133` -- llama.cpp's own `ggml_softplus` input to Qwen3.5's
+    /// `alpha_softplus` (`qwen35.cpp:370`).
+    #[proxima::test]
+    async fn softplus_matches_log_one_plus_exp() {
+        let mut program = Vec::new();
+        let shape_h = alloc::vec![Extent::Static(2)];
+        let x = input_leaf(&mut program, DType::Float32, shape_h, "x");
+        let one = scalar_constant(&mut program, 1.0);
+
+        let out = softplus(&mut program, x, one, "h->h").expect("softplus lowers");
+
+        let x_data = [0.0f32, 1.0];
+        let evaluated = crate::cpu::evaluate_named(&program, &[], &[("x", &x_data)], &[out])
+            .expect("softplus evaluates");
+        let (out_values, _) = evaluated.get(out).expect("out present");
+
+        assert!(
+            (out_values[0] - core::f32::consts::LN_2).abs() < 1e-4,
+            "softplus(0) = ln(2), got {}",
+            out_values[0]
+        );
+        assert!(
+            (out_values[1] - 1.313_262).abs() < 1e-4,
+            "softplus(1) = ln(1+e), got {}",
+            out_values[1]
+        );
+    }
+
+    /// [`l2norm`] against a hand-computed `[3, 4]` vector: `norm = sqrt(9 +
+    /// 16) = 5`, so the normalized output is `[0.6, 0.8]` -- `ggml_l2_norm`'s
+    /// own contract (`qwen35.cpp:428-429`), no learnable weight and no
+    /// mean-divide, unlike [`rmsnorm`].
+    #[proxima::test]
+    async fn l2norm_matches_a_hand_computed_unit_vector() {
+        let mut program = Vec::new();
+        let shape_d = alloc::vec![Extent::Static(1), Extent::Static(2)];
+        let x = input_leaf(&mut program, DType::Float32, shape_d, "x");
+        let eps = input_leaf(&mut program, DType::Float32, alloc::vec![Extent::Static(1)], "eps");
+
+        let out = l2norm(&mut program, x, eps, "sd->sd", "s->sd").expect("l2norm lowers");
+
+        let x_data = [3.0f32, 4.0];
+        let eps_data = [0.0f32];
+        let evaluated = crate::cpu::evaluate_named(
+            &program,
+            &[],
+            &[("x", &x_data), ("eps", &eps_data)],
+            &[out],
+        )
+        .expect("l2norm evaluates");
+        let (out_values, _) = evaluated.get(out).expect("out present");
+
+        assert!((out_values[0] - 0.6).abs() < 1e-5, "got {}", out_values[0]);
+        assert!((out_values[1] - 0.8).abs() < 1e-5, "got {}", out_values[1]);
+    }
+
+    /// [`append_qwen35_conv_branch`] against a hand-computed depthwise causal
+    /// conv (kernel 4, three channels `q|k|v` at `key_dim = value_dim = 1`,
+    /// two steps): `causal_conv1d`'s own doc gives `out[s,d] = sum_l
+    /// weight[d,l] * x[s+l-3, d]` (zero where the index is negative), so with
+    /// only taps `l=2,3` ever landing in range for a 2-step sequence:
+    /// `out[0,d] = weight[d,3]*x[0,d]`, `out[1,d] = weight[d,2]*x[0,d] +
+    /// weight[d,3]*x[1,d]`. With `x[0] = [1,2,3]`, `x[1] = [4,5,6]` and
+    /// `weight[.,2..4] = [[0.5,1.0], [1.0,-1.0], [2.0,0.5]]` (q,k,v):
+    /// `out[0] = [1.0, -2.0, 1.5]`, `out[1] = [4.5, -3.0, 9.0]`. `v_conv`
+    /// (never normalized) is checked against `silu` of those exactly;
+    /// `q_conv`/`k_conv` are l2-normalized at width 1, which degenerates to
+    /// `sign(x)` (`x / sqrt(x^2 + 0) = x / |x|`) -- `q`'s raw values are both
+    /// positive, `k`'s both negative.
+    #[proxima::test]
+    async fn append_qwen35_conv_branch_matches_a_hand_computed_conv_silu_split_and_norm() {
+        let key_dim = 1u32;
+        let value_dim = 1u32;
+        let l_cache = 4u32;
+        let qkv_dim = 2 * key_dim + value_dim;
+
+        let mut program = Vec::new();
+        let qkv_mixed = input_leaf(
+            &mut program,
+            DType::Float32,
+            alloc::vec![Extent::Symbolic(0), Extent::Static(qkv_dim)],
+            "qkv_mixed",
+        );
+        let conv_weight = input_leaf(
+            &mut program,
+            DType::Float32,
+            alloc::vec![Extent::Static(qkv_dim), Extent::Static(l_cache)],
+            "conv_weight",
+        );
+        let eps = input_leaf(&mut program, DType::Float32, alloc::vec![Extent::Symbolic(0)], "eps");
+        let one = scalar_constant(&mut program, 1.0);
+
+        let (q_conv, k_conv, v_conv) = append_qwen35_conv_branch(
+            &mut program,
+            qkv_mixed,
+            conv_weight,
+            eps,
+            one,
+            key_dim,
+            value_dim,
+            l_cache,
+        )
+        .expect("conv branch lowers");
+
+        // sequence-major, channel-fastest: `[s0_q, s0_k, s0_v, s1_q, s1_k, s1_v]`.
+        let x_data = [1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0];
+        // channel-major, tap-fastest: taps 0,1 are unreachable at seq=2, so
+        // only taps 2,3 (per channel) carry real weight.
+        let weight_data = [
+            0.0f32, 0.0, 0.5, 1.0, // q
+            0.0, 0.0, 1.0, -1.0, // k
+            0.0, 0.0, 2.0, 0.5, // v
+        ];
+        let eps_data = [0.0f32, 0.0];
+
+        let evaluated = crate::cpu::evaluate_named(
+            &program,
+            &[2],
+            &[
+                ("qkv_mixed", &x_data),
+                ("conv_weight", &weight_data),
+                ("eps", &eps_data),
+            ],
+            &[q_conv, k_conv, v_conv],
+        )
+        .expect("conv branch evaluates");
+
+        let (q_values, _) = evaluated.get(q_conv).expect("q_conv present");
+        let (k_values, _) = evaluated.get(k_conv).expect("k_conv present");
+        let (v_values, v_shape) = evaluated.get(v_conv).expect("v_conv present");
+
+        assert_eq!(v_shape, [2u64, 1u64]);
+        assert!((v_values[0] - 1.226_362).abs() < 1e-4, "got {}", v_values[0]);
+        assert!((v_values[1] - 8.998_89).abs() < 1e-4, "got {}", v_values[1]);
+        assert_eq!(
+            q_values, [1.0, 1.0],
+            "silu(q_raw) is positive at both steps, so l2norm at width 1 is +1"
+        );
+        assert_eq!(
+            k_values, [-1.0, -1.0],
+            "silu(k_raw) is negative at both steps, so l2norm at width 1 is -1"
+        );
+    }
+
+    /// Proof the conv-branch reference above can fail: perturbing one `v`
+    /// tap weight must move `v_conv` away from the hand-computed reference.
+    #[proxima::test]
+    async fn append_qwen35_conv_branch_hand_computed_check_actually_detects_a_wrong_weight() {
+        let key_dim = 1u32;
+        let value_dim = 1u32;
+        let l_cache = 4u32;
+        let qkv_dim = 2 * key_dim + value_dim;
+
+        let mut program = Vec::new();
+        let qkv_mixed = input_leaf(
+            &mut program,
+            DType::Float32,
+            alloc::vec![Extent::Symbolic(0), Extent::Static(qkv_dim)],
+            "qkv_mixed",
+        );
+        let conv_weight = input_leaf(
+            &mut program,
+            DType::Float32,
+            alloc::vec![Extent::Static(qkv_dim), Extent::Static(l_cache)],
+            "conv_weight",
+        );
+        let eps = input_leaf(&mut program, DType::Float32, alloc::vec![Extent::Symbolic(0)], "eps");
+        let one = scalar_constant(&mut program, 1.0);
+
+        let (_, _, v_conv) = append_qwen35_conv_branch(
+            &mut program,
+            qkv_mixed,
+            conv_weight,
+            eps,
+            one,
+            key_dim,
+            value_dim,
+            l_cache,
+        )
+        .expect("conv branch lowers");
+
+        let x_data = [1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0];
+        // v's tap l=3 perturbed from 0.5 to 0.4 -- moves both v_conv positions,
+        // since out[0] and out[1] both read tap l=3.
+        let perturbed_weight_data = [
+            0.0f32, 0.0, 0.5, 1.0, // q
+            0.0, 0.0, 1.0, -1.0, // k
+            0.0, 0.0, 2.0, 0.4, // v
+        ];
+        let eps_data = [0.0f32, 0.0];
+
+        let evaluated = crate::cpu::evaluate_named(
+            &program,
+            &[2],
+            &[
+                ("qkv_mixed", &x_data),
+                ("conv_weight", &perturbed_weight_data),
+                ("eps", &eps_data),
+            ],
+            &[v_conv],
+        )
+        .expect("conv branch evaluates");
+        let (v_values, _) = evaluated.get(v_conv).expect("v_conv present");
+
+        assert!(
+            (v_values[0] - 1.226_362).abs() > 1e-4 || (v_values[1] - 8.998_89).abs() > 1e-4,
+            "a perturbed v tap weight must move v_conv away from the hand-computed reference \
+             (if this assertion cannot fail, the test above proves nothing), got {v_values:?}"
+        );
+    }
+
+    /// [`repeat_kv_heads`] against a hand-computed 2-kv-head, group-3 repeat
+    /// (`num_v_heads = kv_heads * group = 6`, standing in for the real
+    /// checkpoint's `16 * 3 = 48`): one token, `head_dim = 1`, kv head 0
+    /// carries `10.0`, kv head 1 carries `20.0`. Every one of kv head 0's
+    /// three query-head copies must read `10.0` and every one of kv head 1's
+    /// three must read `20.0`, in `u`-major, `g`-minor order (`sugd`) --
+    /// `[10,10,10,20,20,20]`, not interleaved (`[10,20,10,20,10,20]`, the
+    /// shape a `u`/`g` axis swap would produce) and not collapsed onto one
+    /// head (`[10,10,10,10,10,10]`, the shape a broadcast-only-`u`
+    /// -- forgetting to size `g` from `group_ones` -- would produce).
+    #[proxima::test]
+    async fn repeat_kv_heads_maps_each_kv_head_to_its_own_three_query_heads() {
+        let kv_heads = 2u32;
+        let group = 3u32;
+
+        let mut program = Vec::new();
+        let x = input_leaf(
+            &mut program,
+            DType::Float32,
+            alloc::vec![Extent::Symbolic(0), Extent::Static(kv_heads), Extent::Static(1)],
+            "x",
+        );
+        let repeated = repeat_kv_heads(&mut program, x, kv_heads, group).expect("repeat lowers");
+
+        let x_data = [10.0f32, 20.0];
+        let evaluated = crate::cpu::evaluate_named(&program, &[1], &[("x", &x_data)], &[repeated])
+            .expect("repeat evaluates");
+        let (values, shape) = evaluated.get(repeated).expect("repeated present");
+
+        assert_eq!(shape, [1u64, 2u64, 3u64, 1u64]);
+        assert_eq!(values, [10.0, 10.0, 10.0, 20.0, 20.0, 20.0]);
+    }
+
+    /// Proof the repeat reference above can fail: swapping which kv head
+    /// carries which value must move the repeated output away from the
+    /// hand-computed reference.
+    #[proxima::test]
+    async fn repeat_kv_heads_hand_computed_check_actually_detects_a_swapped_head() {
+        let kv_heads = 2u32;
+        let group = 3u32;
+
+        let mut program = Vec::new();
+        let x = input_leaf(
+            &mut program,
+            DType::Float32,
+            alloc::vec![Extent::Symbolic(0), Extent::Static(kv_heads), Extent::Static(1)],
+            "x",
+        );
+        let repeated = repeat_kv_heads(&mut program, x, kv_heads, group).expect("repeat lowers");
+
+        // kv head 0 and kv head 1's values swapped relative to the reference.
+        let swapped_x_data = [20.0f32, 10.0];
+        let evaluated =
+            crate::cpu::evaluate_named(&program, &[1], &[("x", &swapped_x_data)], &[repeated])
+                .expect("repeat evaluates");
+        let (values, _) = evaluated.get(repeated).expect("repeated present");
+
+        assert_ne!(
+            values,
+            [10.0, 10.0, 10.0, 20.0, 20.0, 20.0],
+            "a swapped kv head must move the repeated output away from the hand-computed \
+             reference (if this assertion cannot fail, the test above proves nothing)"
+        );
+    }
+
+    /// Builds one [`append_qwen35_ssm_mixer`] decode step at `kv_heads = 1`,
+    /// `group = 2` (the `u,g` seam, degenerate on `u` but real on `g`),
+    /// `key_dim = value_dim_per_head = 1`, `l_cache = 2` -- every weight
+    /// chosen to make the pipeline hand-traceable: `wqkv = 0` and the conv's
+    /// new-token tap contributes nothing, so the whole conv branch reads
+    /// straight off `conv_history_v0` (the one value this function
+    /// parameterizes, for the mutation companion below); `attn_norm_weight
+    /// = 1`, `x = 1`, `eps = 0` make `rmsnorm(x) = 1` exactly, so every
+    /// downstream projection equals its own raw weight row; `ssm_beta =
+    /// ssm_alpha = ssm_dt_bias = ssm_a = 0` collapse `beta` to `sigmoid(0) =
+    /// 0.5` and `gate` (hence `decay`) to `0`/`1`, reusing
+    /// [`append_qwen35_delta_net_step`]'s own already-proven `decay = 1`
+    /// path; `head_v_dim = 1` degenerates the gated RMSNorm's own
+    /// mean-square to `delta_out^2`, so `normed_out = sign(delta_out)`
+    /// exactly, the same width-1-l2norm-is-sign identity
+    /// [`append_qwen35_conv_branch`]'s own test already exploits.
+    fn build_ssm_mixer_test_program() -> (Vec<Op>, NodeId, NodeId, NodeId) {
+        let mut program = Vec::new();
+        let key_dim = 1u32;
+        let value_dim = 2u32;
+        let kv_heads = 1u32;
+        let group = 2u32;
+        let l_cache = 2u32;
+        let qkv_dim = 2 * key_dim + value_dim;
+
+        let x = input_leaf(&mut program, DType::Float32, alloc::vec![Extent::Symbolic(0), Extent::Static(1)], "x");
+        let inv_dim = scalar_constant(&mut program, 1.0);
+        let eps = input_leaf(&mut program, DType::Float32, alloc::vec![Extent::Symbolic(0)], "eps");
+        let head_eps = input_leaf(
+            &mut program,
+            DType::Float32,
+            alloc::vec![Extent::Static(kv_heads), Extent::Static(group)],
+            "head_eps",
+        );
+        let one = scalar_constant(&mut program, 1.0);
+        let inv_sqrt_key_dim = scalar_constant(&mut program, 1.0);
+        let inv_head_v_dim = scalar_constant(&mut program, 1.0);
+        let attn_norm_weight = input_leaf(&mut program, DType::Float32, alloc::vec![Extent::Static(1)], "attn_norm_weight");
+        let wqkv = input_leaf(
+            &mut program,
+            DType::Float32,
+            alloc::vec![Extent::Static(1), Extent::Static(qkv_dim)],
+            "wqkv",
+        );
+        let wqkv_gate = input_leaf(
+            &mut program,
+            DType::Float32,
+            alloc::vec![Extent::Static(1), Extent::Static(value_dim)],
+            "wqkv_gate",
+        );
+        let conv_weight = input_leaf(
+            &mut program,
+            DType::Float32,
+            alloc::vec![Extent::Static(qkv_dim), Extent::Static(l_cache)],
+            "conv_weight",
+        );
+        let conv_history_in = input_leaf(
+            &mut program,
+            DType::Float32,
+            alloc::vec![Extent::Static(l_cache - 1), Extent::Static(qkv_dim)],
+            "conv_history_in",
+        );
+        let ssm_beta = input_leaf(
+            &mut program,
+            DType::Float32,
+            alloc::vec![Extent::Static(1), Extent::Static(kv_heads * group)],
+            "ssm_beta",
+        );
+        let ssm_alpha = input_leaf(
+            &mut program,
+            DType::Float32,
+            alloc::vec![Extent::Static(1), Extent::Static(kv_heads * group)],
+            "ssm_alpha",
+        );
+        let ssm_dt_bias = input_leaf(
+            &mut program,
+            DType::Float32,
+            alloc::vec![Extent::Static(kv_heads * group)],
+            "ssm_dt_bias",
+        );
+        let ssm_a = input_leaf(
+            &mut program,
+            DType::Float32,
+            alloc::vec![Extent::Static(kv_heads * group)],
+            "ssm_a",
+        );
+        let ssm_norm_weight = input_leaf(&mut program, DType::Float32, alloc::vec![Extent::Static(1)], "ssm_norm_weight");
+        let ssm_out = input_leaf(
+            &mut program,
+            DType::Float32,
+            alloc::vec![Extent::Static(value_dim), Extent::Static(1)],
+            "ssm_out",
+        );
+        let state_in = input_leaf(
+            &mut program,
+            DType::Float32,
+            alloc::vec![
+                Extent::Static(1),
+                Extent::Static(1),
+                Extent::Static(kv_heads),
+                Extent::Static(group)
+            ],
+            "state_in",
+        );
+
+        let (mixer_out, qkv_mixed, state_out) = append_qwen35_ssm_mixer(
+            &mut program,
+            x,
+            inv_dim,
+            eps,
+            head_eps,
+            one,
+            inv_sqrt_key_dim,
+            inv_head_v_dim,
+            attn_norm_weight,
+            wqkv,
+            wqkv_gate,
+            conv_weight,
+            conv_history_in,
+            ssm_beta,
+            ssm_alpha,
+            ssm_dt_bias,
+            ssm_a,
+            ssm_norm_weight,
+            ssm_out,
+            state_in,
+            key_dim,
+            value_dim,
+            kv_heads,
+            group,
+            l_cache,
+        )
+        .expect("ssm mixer lowers");
+
+        (program, mixer_out, qkv_mixed, state_out)
+    }
+
+    /// Builds one call into [`append_qwen35_dense_attention_layer`] at the
+    /// smallest non-degenerate dims that still separate all three fixed
+    /// defects: `embedding = 1` (so every matmul is a scalar identity,
+    /// `wq`/`wk`/`wv`/`w_gate_q`/`wo` ARE the per-dim activation), `rotary_dim
+    /// = 2` (`pairs = 1`, exercises the split-half pairing) with `attn_head_dim
+    /// = 4` (`pass_dim = 2`, exercises the concatenated-by-sum remainder),
+    /// `kv_heads = query_heads = 1` (`group = 1`, no GQA broadcast to track
+    /// by hand), `cached_len = 0` (only the "new" self-attention block).
+    ///
+    /// Hand computation: `x = [2.0]`, `attn_norm_weight = [1.0]`, `eps = 0`
+    /// gives `normed = 2 / sqrt(4) = 1`, so every `w*` weight IS its own raw
+    /// projection. `wq = wk = wv = [1,1,1,1]`, `q_norm_weight =
+    /// k_norm_weight = [1,1,1,1]` -- `rmsnorm_per_head` of `[1,1,1,1]` is a
+    /// no-op (`mean_square = 1`), keeping `q = k = [1,1,1,1]` exactly.
+    /// `cos = [0]`, `sin = [1]` (`theta = pi/2` spelled as literals, no
+    /// transcendental arithmetic needed): split-half RoPE gives
+    /// `rotated_first = q[0]*0 - q[1]*1 = -1`, `rotated_second = q[1]*0 +
+    /// q[0]*1 = 1` for both Q and K -- the ROTATED prefix is `[-1, 1]`, the
+    /// PASS remainder stays `[1, 1]` (defect 2's own fix: dropped in the old
+    /// code, present here as `score_..._pass`'s own nonzero contribution).
+    /// `score = (-1)(-1) + (1)(1) + (1)(1) + (1)(1) = 4`, scaled by
+    /// `inv_sqrt_attn_head_dim = 0.5` gives `2.0`; one key only (self), so
+    /// softmax weight is `1.0` and `attended = v = [1,1,1,1]`.
+    /// `w_gate_q = [0,0,0,0]` gives `sigmoid(gate) = 0.5` uniformly (defect
+    /// 1's own fix: dropped in the old code, present here as the factor of
+    /// `2` between `attended` and `attn_out` below): `gated_attended =
+    /// [0.5,0.5,0.5,0.5]`. `wo = [1,1,1,1]` gives `attn_out = 0.5*4 = 2.0`,
+    /// `residual1 = 2.0 + 2.0 = 4.0`. `normed2 = 4/|4| = 1` (`d=1` again),
+    /// `feed_forward = 1`, `w_gate = w_up = w_down = [1]`: `silu(1) =
+    /// 1 * sigmoid(1) ≈ 0.7310586`, `ffn_hidden = 0.7310586 * 1`,
+    /// `ffn_out = 0.7310586`, `x_next = 0.7310586 + 4.0 ≈ 4.7310586`.
+    #[test]
+    fn append_qwen35_dense_attention_layer_matches_a_hand_computed_gate_and_partial_rotary_concat() {
+        let (x_next, ..) =
+            evaluate_dense_attention_test_program(0.0, [0.0f32, 0.0, 0.0, 0.0]);
+
+        assert!(
+            (x_next - 4.731_058_6).abs() < 1e-4,
+            "x_next = ffn_out + residual1, hand-computed 4.7310586, got {x_next}"
+        );
+    }
+
+    /// Proof the hand-computed test above can fail: a nonzero `w_gate_q`
+    /// (the sigmoid gate this session's own defect 1 fix applies) MUST move
+    /// `x_next` away from the `w_gate_q = [0,0,0,0]` reference above --
+    /// `w_gate_q = [10,10,10,10]` pushes `sigmoid(gate)` from `0.5` toward
+    /// `1.0`, doubling `attended`'s own contribution to `attn_out` before
+    /// `wo`. A test that could not fail here would not have caught the old
+    /// code's dropped gate either.
+    #[test]
+    fn append_qwen35_dense_attention_layer_hand_computed_check_actually_detects_a_dropped_gate() {
+        let (x_next_no_gate, ..) =
+            evaluate_dense_attention_test_program(0.0, [0.0f32, 0.0, 0.0, 0.0]);
+        let (x_next_gated, ..) =
+            evaluate_dense_attention_test_program(0.0, [10.0f32, 10.0, 10.0, 10.0]);
+
+        assert!(
+            (x_next_no_gate - x_next_gated).abs() > 0.1,
+            "w_gate_q=[0,0,0,0] (sigmoid=0.5) vs [10,10,10,10] (sigmoid~1.0) must move x_next: \
+             {x_next_no_gate} vs {x_next_gated}"
+        );
+    }
+
+    /// One call into [`append_qwen35_dense_attention_layer`] at the fixed
+    /// small dims the two tests above hand-compute against -- `gate_data`
+    /// is the only knob a caller varies (`w_gate_q`'s own 4 values), so the
+    /// mutation test above and the base test share every other weight byte
+    /// for byte.
+    fn evaluate_dense_attention_test_program(
+        eps_value: f32,
+        gate_data: [f32; 4],
+    ) -> (f32, f32, f32, f32, f32) {
+        let mut program = Vec::new();
+        let scalar_shape = alloc::vec![Extent::Symbolic(0), Extent::Static(1)];
+        let rotary_shape = alloc::vec![Extent::Symbolic(0), Extent::Static(1)];
+        let head4_shape = alloc::vec![Extent::Static(1), Extent::Static(1), Extent::Static(4)];
+        let cache4_shape = alloc::vec![Extent::Symbolic(1), Extent::Static(1), Extent::Static(1)];
+        let cache_pass_shape = alloc::vec![Extent::Symbolic(1), Extent::Static(1), Extent::Static(2)];
+        let cache_v_shape = alloc::vec![Extent::Symbolic(1), Extent::Static(1), Extent::Static(4)];
+        let norm_shape = alloc::vec![Extent::Static(4)];
+        let ffn_shape = alloc::vec![Extent::Static(1), Extent::Static(1)];
+
+        let x = input_leaf(&mut program, DType::Float32, scalar_shape.clone(), "x");
+        let inv_dim = scalar_constant(&mut program, 1.0);
+        let eps = input_leaf(&mut program, DType::Float32, alloc::vec![Extent::Symbolic(0)], "eps");
+        let ones = scalar_constant(&mut program, 1.0);
+        let inv_sqrt_attn_head_dim = scalar_constant(&mut program, 0.5);
+        let inv_attn_head_dim = scalar_constant(&mut program, 0.25);
+        let cos_new = input_leaf(&mut program, DType::Float32, rotary_shape.clone(), "cos");
+        let sin_new = input_leaf(&mut program, DType::Float32, rotary_shape, "sin");
+        let group_ones = op::append(
+            &mut program,
+            Op::Constant {
+                dtype: DType::Float32,
+                shape: alloc::vec![Extent::Static(1), Extent::Static(1)],
+                value: 1.0,
+            },
+        );
+        let (is_future, _neg_infinity) = causal_mask(&mut program).expect("causal mask lowers");
+
+        let attn_norm_weight = input_leaf(&mut program, DType::Float32, alloc::vec![Extent::Static(1)], "attn_norm_weight");
+        let ffn_norm_weight = input_leaf(&mut program, DType::Float32, alloc::vec![Extent::Static(1)], "ffn_norm_weight");
+        let q_norm_weight = input_leaf(&mut program, DType::Float32, norm_shape.clone(), "q_norm_weight");
+        let k_norm_weight = input_leaf(&mut program, DType::Float32, norm_shape, "k_norm_weight");
+        let wq = input_leaf(&mut program, DType::Float32, head4_shape.clone(), "wq");
+        let w_gate_q = input_leaf(&mut program, DType::Float32, head4_shape.clone(), "w_gate_q");
+        let wk = input_leaf(&mut program, DType::Float32, head4_shape.clone(), "wk");
+        let wv = input_leaf(&mut program, DType::Float32, head4_shape.clone(), "wv");
+        let wo = input_leaf(&mut program, DType::Float32, alloc::vec![Extent::Static(1), Extent::Static(1), Extent::Static(4), Extent::Static(1)], "wo");
+        let w_gate = input_leaf(&mut program, DType::Float32, ffn_shape.clone(), "w_gate");
+        let w_up = input_leaf(&mut program, DType::Float32, ffn_shape.clone(), "w_up");
+        let w_down = input_leaf(&mut program, DType::Float32, ffn_shape, "w_down");
+        let k_first_cache = input_leaf(&mut program, DType::Float32, cache4_shape.clone(), "k_first_cache");
+        let k_second_cache = input_leaf(&mut program, DType::Float32, cache4_shape, "k_second_cache");
+        let k_pass_cache = input_leaf(&mut program, DType::Float32, cache_pass_shape, "k_pass_cache");
+        let v_cache = input_leaf(&mut program, DType::Float32, cache_v_shape, "v_cache");
+
+        let (x_next, (rotated_k_first, rotated_k_second, k_pass, v_new)) = append_qwen35_dense_attention_layer(
+            &mut program,
+            x,
+            inv_dim,
+            eps,
+            ones,
+            inv_sqrt_attn_head_dim,
+            inv_attn_head_dim,
+            cos_new,
+            sin_new,
+            group_ones,
+            is_future,
+            1,
+            2,
+            4,
+            attn_norm_weight,
+            ffn_norm_weight,
+            q_norm_weight,
+            k_norm_weight,
+            wq,
+            w_gate_q,
+            wk,
+            wv,
+            wo,
+            w_gate,
+            w_up,
+            w_down,
+            k_first_cache,
+            k_second_cache,
+            k_pass_cache,
+            v_cache,
+        )
+        .expect("dense attention layer lowers");
+
+        let x_data = [2.0f32];
+        let eps_data = [eps_value];
+        let cos_data = [0.0f32];
+        let sin_data = [1.0f32];
+        let attn_norm_data = [1.0f32];
+        let ffn_norm_data = [1.0f32];
+        let q_norm_data = [1.0f32, 1.0, 1.0, 1.0];
+        let k_norm_data = [1.0f32, 1.0, 1.0, 1.0];
+        let wq_data = [1.0f32, 1.0, 1.0, 1.0];
+        let wk_data = [1.0f32, 1.0, 1.0, 1.0];
+        let wv_data = [1.0f32, 1.0, 1.0, 1.0];
+        let wo_data = [1.0f32, 1.0, 1.0, 1.0];
+        let w_gate_data = [1.0f32];
+        let w_up_data = [1.0f32];
+        let w_down_data = [1.0f32];
+        let empty: [f32; 0] = [];
+
+        let evaluated = crate::cpu::evaluate_named(
+            &program,
+            &[1, 0],
+            &[
+                ("x", &x_data),
+                ("eps", &eps_data),
+                ("cos", &cos_data),
+                ("sin", &sin_data),
+                ("attn_norm_weight", &attn_norm_data),
+                ("ffn_norm_weight", &ffn_norm_data),
+                ("q_norm_weight", &q_norm_data),
+                ("k_norm_weight", &k_norm_data),
+                ("wq", &wq_data),
+                ("w_gate_q", &gate_data),
+                ("wk", &wk_data),
+                ("wv", &wv_data),
+                ("wo", &wo_data),
+                ("w_gate", &w_gate_data),
+                ("w_up", &w_up_data),
+                ("w_down", &w_down_data),
+                ("k_first_cache", &empty),
+                ("k_second_cache", &empty),
+                ("k_pass_cache", &empty),
+                ("v_cache", &empty),
+            ],
+            &[x_next, rotated_k_first, rotated_k_second, k_pass, v_new],
+        )
+        .expect("dense attention layer evaluates");
+
+        let (x_next_values, _) = evaluated.get(x_next).expect("x_next present");
+        let (k_first_values, _) = evaluated.get(rotated_k_first).expect("k_first present");
+        let (k_second_values, _) = evaluated.get(rotated_k_second).expect("k_second present");
+        let (k_pass_values, _) = evaluated.get(k_pass).expect("k_pass present");
+        let (v_new_values, _) = evaluated.get(v_new).expect("v_new present");
+
+        (
+            x_next_values[0],
+            k_first_values[0],
+            k_second_values[0],
+            k_pass_values[0],
+            v_new_values[0],
+        )
+    }
+
+    /// [`qwen35_forward_program`]'s whole-program wiring, both layer kinds
+    /// in one small stack (`block_count = 4`, `full_attention_interval =
+    /// 2`, so layers 0,2 are SSM and layers 1,3 are dense attention, per
+    /// its own `(layer + 1) % full_attention_interval == 0` doc) --
+    /// mirroring [`the_whole_mistral_forward_pass_infers_at_real_dimensions`]'s
+    /// own "lowers, then `shape::infer` succeeds" scope, not a numeric
+    /// check (the mixer's own hand-computed test below already owns that).
+    /// `symbols = [1, 0]`: one new decode-step token, an empty dense-attention
+    /// KV cache -- [`append_mistral_cached_layer`]'s own doc already proves
+    /// `cached_len == 0` degenerates to plain self-attention with no special
+    /// case.
+    #[test]
+    fn the_whole_qwen35_forward_pass_infers_at_real_dimensions() {
+        let (program, logits, roots) =
+            qwen35_forward_program(100, 8, 16, 2, 1, 4, 8, 4, 2, 2, 2, 1, 4, 3, 1e-5)
+                .expect("the whole qwen35 forward pass lowers to a program");
+
+        assert_eq!(roots.len(), 4, "one root set per block");
+        assert!(
+            matches!(roots[0], Qwen35LayerRoots::Ssm { .. }),
+            "layer 0 is SSM: (0 + 1) % 2 != 0"
+        );
+        assert!(
+            matches!(roots[1], Qwen35LayerRoots::DenseAttention(_)),
+            "layer 1 is dense attention: (1 + 1) % 2 == 0"
+        );
+        assert!(
+            matches!(roots[2], Qwen35LayerRoots::Ssm { .. }),
+            "layer 2 is SSM: (2 + 1) % 2 != 0"
+        );
+        assert!(
+            matches!(roots[3], Qwen35LayerRoots::DenseAttention(_)),
+            "layer 3 is dense attention: (3 + 1) % 2 == 0"
+        );
+
+        crate::shape::infer(&program, &[1, 0])
+            .expect("the whole qwen35 forward pass infers at a real decode step");
+        let _ = logits;
+    }
+
+    /// [`the_whole_qwen35_forward_pass_infers_at_real_dimensions`]'s own
+    /// `(100, 8, 16, 2, 1, 4, 4, 2, 2, 2, 1, 4, 3, 1e-5)` never caught the
+    /// `attn_q`/`attn_k`/`attn_v`/`attn_output` shape defect this test is
+    /// named for -- ROOT CAUSE, proved by direct comparison against the
+    /// real Qwen3.5-2B-Q4_K_M checkpoint's own on-disk tensor dims
+    /// (`proxima_model_interop::qwen35`'s own
+    /// `scratch_debug_real_attn_q_dims`-shaped probe, run against the real
+    /// file): every dense-attention weight was declared using `head_dim`
+    /// (`rope.dimension_count`, this checkpoint's PARTIAL-rotary width, `64`)
+    /// as the per-head PROJECTION width too, but the real per-head
+    /// projection width is `embedding / query_heads` (`256` on the 2B,
+    /// matching `attn_q_norm.weight`'s/`attn_k_norm.weight`'s own on-disk
+    /// width exactly, and `qwen3_next`'s own `Qwen3NextAttention.__init__`,
+    /// `self.head_dim = hidden_size // num_attention_heads`) -- and
+    /// `attn_q.weight`'s own on-disk width is DOUBLE that again
+    /// (`query_heads * 256 * 2 = 4096`, not `query_heads * 64 = 512`): a
+    /// same-width sigmoid gate fused per head
+    /// (`modeling_qwen3_next.py:293-326`, `torch.chunk(2, dim=-1)` on each
+    /// head's own `2 * head_dim`-wide block after `.view(..., heads, 2 *
+    /// head_dim)`), which this program drops (never applies) rather than
+    /// implements, an accepted extension of this program's existing
+    /// single-section-RoPE gap.
+    ///
+    /// The toy test's own `query_heads = 2`, `embedding = 8` degenerate
+    /// case makes `embedding / query_heads == 4 == head_dim` BY
+    /// COINCIDENCE (the toy dims were never chosen to keep those two
+    /// quantities apart), so the toy program's `attn_q`/`attn_k`/`attn_v`
+    /// declared shapes matched what [`shape::infer`] expected regardless of
+    /// which formula built them -- the defect is invisible at any dimension
+    /// set where `embedding / query_heads == head_dim`, which is every toy
+    /// dimension set this module's own tests use and no real checkpoint's
+    /// own numbers. This test is the fix for THAT gap: real per-head
+    /// dimensions, not toy ones that happen to collide.
+    #[test]
+    fn the_whole_qwen35_forward_pass_infers_at_the_2b_checkpoints_real_dimensions() {
+        // Qwen3.5-2B-Q4_K_M's own metadata: vocab=151936, embedding=2048,
+        // feed_forward=6144, query_heads=8, kv_heads=2, head_dim=64
+        // (rope.dimension_count), block_count=24, full_attention_interval=4,
+        // ssm_state_size=128, ssm_time_step_rank=16, ssm_group_count=16,
+        // ssm_inner_size=2048, ssm_conv_kernel=4, rms_epsilon=1e-6.
+        let (program, _logits, roots) = qwen35_forward_program(
+            151936, 2048, 6144, 8, 2, 64, 256, 24, 4, 128, 16, 16, 2048, 4, 1e-6,
+        )
+        .expect("the real 2b's own dimensions lower to a program");
+
+        assert_eq!(roots.len(), 24, "one root set per block");
+        assert!(
+            matches!(roots[3], Qwen35LayerRoots::DenseAttention(_)),
+            "layer 3 is dense attention: (3 + 1) % 4 == 0"
+        );
+        assert!(
+            matches!(roots[0], Qwen35LayerRoots::Ssm { .. }),
+            "layer 0 is SSM: (0 + 1) % 4 != 0"
+        );
+
+        // prefill (6 new tokens, empty cache) and three decode steps against
+        // a growing cache -- the shapes this program actually runs under
+        // `proxima_model_interop::generate`, not just a single decode step.
+        for (new_count, cached_len) in [(6u64, 0u64), (1, 6), (1, 7), (1, 8)] {
+            crate::shape::infer(&program, &[new_count, cached_len]).unwrap_or_else(|err| {
+                panic!(
+                    "the real 2b's own dimensions infer at new_count={new_count} \
+                     cached_len={cached_len}: {err:?}"
+                )
+            });
+        }
+    }
+
+    /// [`append_qwen35_ssm_mixer`] against the hand-derivation in
+    /// [`build_ssm_mixer_test_program`]'s own doc: `history = [q=3, k=-2,
+    /// v0=1, v1=2]` conv-blends straight through (new-token tap weighted by
+    /// a zero `qkv_mixed`), `silu` gives `q_raw = 2.85772238`, `k_raw =
+    /// -0.23840584`, `v_conv = [0.73105858, 1.76159416]`; width-1 `l2norm`
+    /// collapses `q_conv = 1`, `k_conv = -1`; the recurrence (`decay = 1`,
+    /// `beta = 0.5`, zero `state_in`) gives `state_out = out = [-0.36552929,
+    /// -0.88079708]` per group; the gated RMSNorm's width-1 mean-square
+    /// gives `normed_out = sign(out) = -1` for both groups, so
+    /// `normed_out_gamma = -2`, `gated_out = normed_out_gamma * silu(z)`
+    /// with `z = [1, 2]` (same `silu` values as `v`) gives `[-1.46211716,
+    /// -3.52318831]`, and the `[1, 1]` output weight sums those into `cur =
+    /// -4.98530547`, `mixer_out = x + cur = -3.98530547`.
+    #[proxima::test]
+    async fn qwen35_ssm_mixer_matches_a_hand_computed_decode_step() {
+        let (program, mixer_out, qkv_mixed, state_out) = build_ssm_mixer_test_program();
+
+        let x_data = [1.0f32];
+        let eps_data = [0.0f32];
+        let head_eps_data = [0.0f32, 0.0];
+        let attn_norm_weight_data = [1.0f32];
+        let wqkv_data = [0.0f32, 0.0, 0.0, 0.0];
+        let wqkv_gate_data = [1.0f32, 2.0];
+        let conv_weight_data = [1.0f32, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0];
+        let conv_history_in_data = [3.0f32, -2.0, 1.0, 2.0];
+        let ssm_beta_data = [0.0f32, 0.0];
+        let ssm_alpha_data = [0.0f32, 0.0];
+        let ssm_dt_bias_data = [0.0f32, 0.0];
+        let ssm_a_data = [0.0f32, 0.0];
+        let ssm_norm_weight_data = [2.0f32];
+        let ssm_out_data = [1.0f32, 1.0];
+        let state_in_data = [0.0f32, 0.0];
+
+        let evaluated = crate::cpu::evaluate_named(
+            &program,
+            &[1],
+            &[
+                ("x", &x_data),
+                ("eps", &eps_data),
+                ("head_eps", &head_eps_data),
+                ("attn_norm_weight", &attn_norm_weight_data),
+                ("wqkv", &wqkv_data),
+                ("wqkv_gate", &wqkv_gate_data),
+                ("conv_weight", &conv_weight_data),
+                ("conv_history_in", &conv_history_in_data),
+                ("ssm_beta", &ssm_beta_data),
+                ("ssm_alpha", &ssm_alpha_data),
+                ("ssm_dt_bias", &ssm_dt_bias_data),
+                ("ssm_a", &ssm_a_data),
+                ("ssm_norm_weight", &ssm_norm_weight_data),
+                ("ssm_out", &ssm_out_data),
+                ("state_in", &state_in_data),
+            ],
+            &[mixer_out, qkv_mixed, state_out],
+        )
+        .expect("ssm mixer evaluates");
+
+        let (mixer_out_values, _) = evaluated.get(mixer_out).expect("mixer_out present");
+        let (qkv_mixed_values, _) = evaluated.get(qkv_mixed).expect("qkv_mixed present");
+        let (state_out_values, _) = evaluated.get(state_out).expect("state_out present");
+
+        assert!(
+            (mixer_out_values[0] - (-3.985_305_5)).abs() < 1e-4,
+            "got {}",
+            mixer_out_values[0]
+        );
+        assert_eq!(qkv_mixed_values, [0.0, 0.0, 0.0, 0.0], "wqkv is zero, so qkv_mixed is zero");
+        assert!(
+            (state_out_values[0] - (-0.365_529_3)).abs() < 1e-4,
+            "got {}",
+            state_out_values[0]
+        );
+        assert!(
+            (state_out_values[1] - (-0.880_797_1)).abs() < 1e-4,
+            "got {}",
+            state_out_values[1]
+        );
+    }
+
+    /// Proof the mixer reference above can fail: perturbing the conv
+    /// history's `v0` channel (`1.0 -> -3.0`, a sign flip -- see the data
+    /// comment below for why a same-sign perturbation alone cannot move this
+    /// particular degenerate configuration) must move `mixer_out` away from
+    /// the hand-computed reference -- `v0` feeds `v_split`'s `g = 0` group
+    /// straight into the recurrence's `value` operand and back out through
+    /// the gated norm and output projection, so a wrong history value is
+    /// never silently absorbed.
+    #[proxima::test]
+    async fn qwen35_ssm_mixer_hand_computed_check_actually_detects_a_wrong_history_value() {
+        let (program, mixer_out, _, _) = build_ssm_mixer_test_program();
+
+        let x_data = [1.0f32];
+        let eps_data = [0.0f32];
+        let head_eps_data = [0.0f32, 0.0];
+        let attn_norm_weight_data = [1.0f32];
+        let wqkv_data = [0.0f32, 0.0, 0.0, 0.0];
+        let wqkv_gate_data = [1.0f32, 2.0];
+        let conv_weight_data = [1.0f32, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0];
+        // v0 perturbed from the reference's 1.0 to -3.0 -- a SIGN flip, not
+        // just a magnitude change: `head_v_dim = 1` degenerates the gated
+        // RMSNorm's own normalize step to `sign(delta_out)` (the same
+        // width-1-l2norm-is-sign identity `q_conv`/`k_conv` already exploit),
+        // so a same-sign magnitude perturbation alone never moves
+        // `mixer_out` at this degenerate width -- confirmed empirically (a
+        // first version of this test perturbed v0 to 2.0 and the assertion
+        // could not fail, exactly the failure mode this test's own doc
+        // warns against).
+        let conv_history_in_data = [3.0f32, -2.0, -3.0, 2.0];
+        let ssm_beta_data = [0.0f32, 0.0];
+        let ssm_alpha_data = [0.0f32, 0.0];
+        let ssm_dt_bias_data = [0.0f32, 0.0];
+        let ssm_a_data = [0.0f32, 0.0];
+        let ssm_norm_weight_data = [2.0f32];
+        let ssm_out_data = [1.0f32, 1.0];
+        let state_in_data = [0.0f32, 0.0];
+
+        let evaluated = crate::cpu::evaluate_named(
+            &program,
+            &[1],
+            &[
+                ("x", &x_data),
+                ("eps", &eps_data),
+                ("head_eps", &head_eps_data),
+                ("attn_norm_weight", &attn_norm_weight_data),
+                ("wqkv", &wqkv_data),
+                ("wqkv_gate", &wqkv_gate_data),
+                ("conv_weight", &conv_weight_data),
+                ("conv_history_in", &conv_history_in_data),
+                ("ssm_beta", &ssm_beta_data),
+                ("ssm_alpha", &ssm_alpha_data),
+                ("ssm_dt_bias", &ssm_dt_bias_data),
+                ("ssm_a", &ssm_a_data),
+                ("ssm_norm_weight", &ssm_norm_weight_data),
+                ("ssm_out", &ssm_out_data),
+                ("state_in", &state_in_data),
+            ],
+            &[mixer_out],
+        )
+        .expect("ssm mixer evaluates");
+
+        let (mixer_out_values, _) = evaluated.get(mixer_out).expect("mixer_out present");
+
+        assert!(
+            (mixer_out_values[0] - (-3.985_305_5)).abs() > 1e-3,
+            "a perturbed history v0 must move mixer_out away from the hand-computed reference \
+             (if this assertion cannot fail, the test above proves nothing), got {}",
+            mixer_out_values[0]
         );
     }
 }

@@ -264,4 +264,35 @@ pub enum InteropError {
         "gguf metadata key {key:?} has {distinct_values} distinct nonzero per-layer values; Lfm2Architecture cannot represent per-layer variation"
     )]
     HeterogeneousNonzeroMetadataArray { key: String, distinct_values: usize },
+
+    /// `crate::qwen35::bind_qwen35_attn_qkv_split`'s fused
+    /// `blk.{layer}.attn_qkv.weight` did not have exactly
+    /// `embedding * (2 * key_dim + value_dim)` elements -- the real
+    /// checkpoint's own declared shape disagrees with the row boundaries
+    /// this call derived from `qwen35.ssm.state_size` /
+    /// `qwen35.ssm.group_count` / `qwen35.ssm.inner_size`.
+    #[error(
+        "blk.{layer}.attn_qkv.weight has {elements} elements, but embedding={embedding}, key_dim={key_dim}, value_dim={value_dim} needs {expected} (embedding * (2 * key_dim + value_dim))"
+    )]
+    QwenQkvShapeMismatch {
+        layer: u32,
+        elements: u64,
+        embedding: u32,
+        key_dim: u32,
+        value_dim: u32,
+        expected: u64,
+    },
+
+    /// `crate::qwen35::bind_qwen35_attn_qkv_split`'s row-split precondition:
+    /// `embedding` (the row width, GGUF's `in_dim` axis) is not a whole
+    /// multiple of the fused tensor's own codec `block_elements` -- a
+    /// row-boundary split is only provably block-aligned when this holds.
+    #[error(
+        "blk.{layer}.attn_qkv.weight has ggml type {ggml_type:?}, whose block size does not evenly divide embedding={embedding}"
+    )]
+    QwenQkvNotBlockAligned {
+        layer: u32,
+        ggml_type: GgmlType,
+        embedding: u32,
+    },
 }
