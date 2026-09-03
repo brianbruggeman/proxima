@@ -10021,6 +10021,148 @@ value = 1.0
         );
     }
 
+    /// Classifies every [`crate::bind::BoundOp`] a real decode step binds as
+    /// VARIANT (its resolved shape/layout/body changes when `cached_len`
+    /// changes) or INVARIANT (it does not), by binding the SAME program
+    /// twice against two different `cached_len` values and comparing the
+    /// two `Vec<BoundOp>` positionally. `BoundOp: PartialEq`
+    /// (`crate::bind::BoundOp`'s own derive) makes this an exact structural
+    /// diff, not an inference about which ops "should" depend on the cache:
+    /// any op whose extents, operand layouts, or fused body differ between
+    /// the two binds is exactly the set a per-step re-resolve exists to
+    /// recompute; anything unchanged was resolved for nothing.
+    ///
+    /// This is the count `docs/discipline.md`'s resolve-once row rests on --
+    /// see that row for the paper estimate (~15%) this either confirms or
+    /// refutes.
+    #[test]
+    fn bound_ops_are_classified_variant_or_invariant_in_cached_len() {
+        const VOCAB: u32 = 32_002;
+        const EMBEDDING: u32 = 4096;
+        const FEED_FORWARD: u32 = 14336;
+        const QUERY_HEADS: u32 = 32;
+        const KV_HEADS: u32 = 8;
+        const HEAD_DIM: u32 = 128;
+        const BLOCK_COUNT: u32 = 2;
+        const NEW_COUNT: u64 = 1;
+        const CACHED_LEN_A: u64 = 50;
+        const CACHED_LEN_B: u64 = 51;
+
+        let header_nodes = mistral_cached_forward_program(
+            VOCAB,
+            EMBEDDING,
+            FEED_FORWARD,
+            QUERY_HEADS,
+            KV_HEADS,
+            HEAD_DIM,
+            0,
+        )
+        .expect("a zero-layer program still lowers (embedding lookup plus final norm/lm-head)")
+        .0
+        .len();
+        let one_layer_nodes = mistral_cached_forward_program(
+            VOCAB,
+            EMBEDDING,
+            FEED_FORWARD,
+            QUERY_HEADS,
+            KV_HEADS,
+            HEAD_DIM,
+            1,
+        )
+        .expect("a one-layer program lowers")
+        .0
+        .len();
+        let per_layer_program_nodes = one_layer_nodes - header_nodes;
+
+        let (program, logits_root, cache_roots) = mistral_cached_forward_program(
+            VOCAB,
+            EMBEDDING,
+            FEED_FORWARD,
+            QUERY_HEADS,
+            KV_HEADS,
+            HEAD_DIM,
+            BLOCK_COUNT,
+        )
+        .expect("the two-layer cached forward pass lowers to a program");
+        let mut outputs = alloc::vec![logits_root];
+        for (even, odd, value) in &cache_roots {
+            outputs.extend_from_slice(&[*even, *odd, *value]);
+        }
+
+        let shapes_a = crate::shape::infer(&program, &[NEW_COUNT, CACHED_LEN_A])
+            .expect("cached_len=50 infers");
+        let resolved_a =
+            crate::bind::bind(&program, &shapes_a, &outputs).expect("cached_len=50 binds");
+        let shapes_b = crate::shape::infer(&program, &[NEW_COUNT, CACHED_LEN_B])
+            .expect("cached_len=51 infers");
+        let resolved_b =
+            crate::bind::bind(&program, &shapes_b, &outputs).expect("cached_len=51 binds");
+
+        assert_eq!(
+            resolved_a.len(),
+            resolved_b.len(),
+            "the same program topology must bind to the same bound-op count regardless of cached_len"
+        );
+
+        let mut variant_total = 0usize;
+        let mut invariant_total = 0usize;
+        // layer index -> (variant, invariant); usize::MAX buckets header/lm-head nodes
+        let mut per_layer: std::collections::BTreeMap<usize, (usize, usize)> =
+            std::collections::BTreeMap::new();
+
+        for (bound_a, bound_b) in resolved_a.iter().zip(resolved_b.iter()) {
+            let variant = bound_a != bound_b;
+            if variant {
+                variant_total += 1;
+            } else {
+                invariant_total += 1;
+            }
+            let node_index = bound_a.node.0 as usize;
+            let layer = if node_index >= header_nodes {
+                let offset = node_index - header_nodes;
+                let layer = offset / per_layer_program_nodes;
+                if layer < BLOCK_COUNT as usize {
+                    layer
+                } else {
+                    usize::MAX
+                }
+            } else {
+                usize::MAX
+            };
+            let entry = per_layer.entry(layer).or_insert((0, 0));
+            if variant {
+                entry.0 += 1;
+            } else {
+                entry.1 += 1;
+            }
+        }
+
+        std::println!(
+            "bound_op_classification total_bound_ops={} variant={variant_total} invariant={invariant_total} variant_pct={:.1}",
+            resolved_a.len(),
+            100.0 * variant_total as f64 / resolved_a.len() as f64
+        );
+        for (layer, (variant, invariant)) in &per_layer {
+            let label = if *layer == usize::MAX {
+                "header_or_lm_head".to_string()
+            } else {
+                alloc::format!("layer_{layer}")
+            };
+            std::println!(
+                "bound_op_classification bucket={label} variant={variant} invariant={invariant}"
+            );
+        }
+
+        assert!(
+            variant_total > 0,
+            "the cache-reading ops must be classified variant, or this test cannot distinguish anything"
+        );
+        assert!(
+            invariant_total > 0,
+            "if every bound op is variant the resolve-once split has nothing to cache -- report this, do not build the split"
+        );
+    }
+
     /// The interpreter's per-node dispatch floor: how long a node costs
     /// when the node does essentially no arithmetic. This is the number the
     /// chunked-cache node budget above has to be multiplied by, because a
