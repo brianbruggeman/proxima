@@ -18764,3 +18764,201 @@ All 9 cells CoV < 1.2%. **Against AMX f32 at the same shapes (62.2-88.0 GMAC/s, 
 **Three-regime map, each measured, none interchangeable:** LLM decode (M=1, large aligned K) -> Q4_K, 5-22x over AMX. LLM prefill (M >~ 8-16) -> per-tile dequant + `cblas_sgemm`. BGE embed (k=384 misaligned) -> AMX f32, what already ships. **GGUF->ONNX->f32->Accelerate is the wrong shape in both directions**: it pays dequant once per LOAD rather than per TILE, so it never sees the M-amortization ROW 232 measured, while materializing 4096x4096x4 = 67 MB per matrix across ~225 matmul weights versus the 9.4-33 MB packed Q4_K.
 
 **Gates:** `proxima-tensor-gate.sh` 21/0; `proxima-gguf --all-features` **116 passed** / 3 skipped; clippy clean. Branch `probe/onnx-to-gguf`, `a480fda`.
+
+## ROW 234 -- cached decode baseline for fused-attention experiment
+
+**Payload:** `/Users/brianbruggeman/.lmstudio/models/TheBloke/openchat-3.5-1210-GGUF/openchat-3.5-1210.Q4_K_S.gguf`, prompt from `proxima-model-interop/src/bind.rs:2829`, one generated token, CPU path, debug test build, `PROXIMA_PREFAULT=1`, `PROXIMA_MATMUL_WORKERS=1`, feature set `std,instrument,metal`.
+
+**Observed execution:** `tokens_generated=1`, generated text `Here`,
+`total_wall_clock_ms=366515.137`, `evaluate_ms=366373.337`,
+`reduce_quantized_calls=225`, `q4k_macs=208557572096`,
+`q4k_ms=327951.152`, `q4k_ns_per_mac=1.57247`,
+`dispatch_calls=0`, `position_loop_iters=0`, `workers_calls=385`,
+`workers_none=385`. The real per-layer value payloads were finite and nonzero;
+the emitted diagnostic records report length 31744 for each of 32 layers, with
+layer-0 min/max `-0.33564827/0.2812844` and layer-31 min/max
+`-7.8226066/5.9439807`.
+
+**Mechanism:** this call exercised the CPU quantized path; the printed Metal
+execution counters stayed zero because the selected test calls the CPU
+`Pipe` path. The 225 reduction calls and the per-layer payload records identify
+the current reference workload for the cached-attention experiment; they do not
+isolate attention-only work yet. Status: measured baseline, not a verdict.
+
+## ROW 235 -- RISC bound-step seam and no-alloc floor check
+
+The duplicate `PhysicalPlan`/`ExecutionStep` schedule was removed from the
+cached-attention prototype. The surviving representation is the existing
+`BoundOpKind` item carried by `BoundOpBuilder -> ReadyBatch -> Interpreter`;
+the attention fields are inline on that enum, so retirement remains derived
+from `BoundOp::operands()` rather than a second `fire_position` table. Sol's
+rereview grounded this choice in `bind.rs:194-267`, `bind.rs:145`,
+`cpu.rs:4788`, `omega/src/metal.rs:530`, and `omega/src/msl.rs:673`.
+
+The command `cargo check -p proxima-tensor --no-default-features` now passes,
+as does `cargo check -p proxima-primitives --no-default-features`. The
+symbolic program and bound builder remain alloc-gated in `lib.rs:195-246`,
+while the existing `convert` and `dtype` floor compiles without them. The
+inline CPU `BoundOpKind::CachedAttention` arm is exercised by
+`cpu.rs:19141-19190`, and the attention oracle uses no heap state in its inner
+loop. The full graph no-alloc tier remains unmeasured. Status: measured
+boundary, residual unmeasured.
+
+## ROW 236 -- fused emitter and real CPU follow-up
+
+The fused bound step now reaches both executor surfaces: `omega/src/msl.rs`
+emits an eight-input online-softmax kernel and `omega/src/metal.rs` packs its
+single `total_elements` uniform; the unit test records 10 bindings and 4
+threads for a one-head, four-wide output. The CPU and MSL focused tests passed
+on the dedicated branch, and the physical stream passed four executable
+tests with
+`--no-default-features --features alloc`.
+On the one-layer synthetic Mistral-shaped payload, the actual bound list was
+48 operations before the rewrite and 26 after it, with node 84 carrying the
+eight source buffers; this is a graph-work observation, not a CPU/GPU runtime
+speed claim.
+
+The real OpenChat one-token CPU run used the same payload and environment as
+ROW 234. Its records were `tokens_generated=1`, generated text `Here`,
+`evaluate_ms=369242.886`, `reduce_quantized_calls=225`,
+`q4k_macs=208557572096`, `q4k_ms=330250.385`, and `dispatch_calls=0`.
+The 32 layer value payload records remained finite and nonzero; layer 0 was
+`[-0.33564827, 0.2812844]` and layer 31 was `[-7.8226066, 5.9439807]`.
+
+The 225 quantized reduction calls did not change in this run because the
+instrumented counter covers quantized weight reductions, while this rewrite
+targets the dense cached-attention subgraph. Attention-only work and a
+baseline-vs-rewrite output delta were not isolated by this run. Status:
+measured implementation surface, residual unmeasured.
+
+## ROW 237 -- adversarial rereview corrections
+
+Sol's rereview found that the first MSL kernel used the relative cached bound
+as a physical array index, used full-value strides for split Q/K rows, repeated
+the score and softmax recurrence once per output dimension, and produced `0/0`
+for an empty admitted range. The emitter now iterates physical rows from zero,
+computes cached/new relative positions separately, uses half-width Q/K bases,
+accumulates a caller-independent local value vector, dispatches one query-head
+unit, and guards an empty sum. The Metal compile gate was rerun after these
+changes.
+
+The same rereview found matcher omissions in map/reduction proof and complete
+shape validation. The matcher now requires the eight exact affine layouts,
+checks both key/value ranges and the final output shape, uses checked head
+dimension doubling, and admits zero cached rows. The remaining evidence gap is
+runtime CPU-vs-unfused and runtime Metal-vs-CPU output comparison over
+multi-row/GQA and empty-cache payloads; source compilation and focused CPU
+stream tests do not establish those records. Status: corrected implementation
+surface, residual runtime parity unmeasured.
+
+The scaled production Metal fixture rejected the fused-root assertion before
+layout extraction, so that assertion was removed rather than treating a
+non-fused run as evidence. Its existing non-empty-cache test still compares
+CPU and Metal with all intermediate nodes materialized; it does not exercise
+the rewrite. Status: production-topology engagement unmeasured.
+
+## ROW 238 -- post-liveness real checkpoint record
+
+The OpenChat one-token CPU run was repeated after shared-dependency retention
+was added. The payload was unchanged: `tokens_generated=1`, generated text
+`Here`, 32 finite/nonzero layer-value records, layer 0
+`[-0.33564827, 0.2812844]`, and layer 31 `[-7.8226066, 5.9439807]`.
+Execution recorded `evaluate_ms=367469.964`,
+`q4k_macs=208557572096`, `q4k_ms=329011.988`,
+`reduce_quantized_calls=225`, and `dispatch_calls=0`.
+
+The quantized-reduction count is unchanged because it does not count the
+dense cached-attention bound step. The isolated scaled two-layer fixture does
+exercise that step and reports CPU/Metal `max_diff=0.0000047683716`; the full
+checkpoint run does not yet emit an attention-specific operation/work counter.
+Status: real payload preserved, attention-work attribution unmeasured.
+
+The rewrite is now behind the default-off `cached-attention-streaming` feature
+in `proxima-tensor/Cargo.toml`, forwarded by `omega/Cargo.toml`; feature-off
+Metal compile and tensor builds were rerun. Feature-on tests include the
+two-layer cached-length-5 CPU/Metal root comparison, whose observed maximum
+absolute difference was `0.0000047683716`. Full-checkpoint attention-specific
+work attribution remains unmeasured; the existing quantized counter is not its
+counter.
+
+## ROW 239 -- production-shaped fused-root parity checkpoint
+
+The cached-length-5 production-shaped fixture now binds a
+`BoundOpKind::CachedAttention` root when only the final root is requested;
+the feature-on binder tests also retain the two-layer fixture's reduced bound
+operation set. The real Metal forward test runs that fused root on CPU and
+Metal and records `max_diff=0.0000047683716`. The same test file's
+all-intermediate non-empty-cache path remains separate, so its node-by-node
+comparison continues to exercise the unfused materialized graph.
+
+Feature-off and feature-on Metal source compilation both passed, and the
+feature-off tensor check plus the physical stream tests passed. These records
+establish structural admission and output comparison for the scaled
+production-shaped fixture. The OpenChat checkpoint record still has no
+attention-specific CPU/GPU work counter, so no full-checkpoint work reduction
+number is recorded here. Status: measured fixture parity and graph reduction;
+full-checkpoint attention-work attribution unmeasured. The production interop
+crate now forwards the same feature to its optional omega dependency, keeping
+the serving/decode integration default-off.
+
+## ROW 240 -- full OpenChat CPU engagement control
+
+Using the host-local OpenChat Q4_K_S payload, prompt `The capital of France is`,
+`PROXIMA_MAX_TOKENS=1`, `PROXIMA_PREFAULT=1`, and
+`PROXIMA_MATMUL_WORKERS=1`, the feature-on forward emitted finite logits and
+layer payloads, selected token id `2651` (`known`), and recorded
+`cached_attention_ops=32`, `token_quantize_calls=225`,
+`evaluate_ms=1203.354`, `kernel_ms=654.658`, and `dispatch_ms=0.024`.
+The matched feature-off control selected the same token and recorded
+`cached_attention_ops=0`, `token_quantize_calls=225`, `evaluate_ms=1081.402`,
+`kernel_ms=664.482`, and `dispatch_ms=0.030`.
+
+The 32-versus-zero operation count is direct execution data for the dense
+attention arm; the unchanged 225 count is the separate quantized-weight
+matmul population. The single-run wall times are not promoted as a speed
+result because this pair has no repeated-run variance estimate. Status:
+full-checkpoint CPU engagement measured; timing improvement unmeasured.
+
+## ROW 241 -- full OpenChat Metal dispatch control
+
+Using the same host-local OpenChat checkpoint and one-token cached decode
+harness with `PROXIMA_PREFAULT=1` and `PROXIMA_MAX_TOKENS=1`, the feature-on
+Metal run selected 'Here' and recorded `emit_calls=616`,
+`encode_dispatch_calls=616`, `gpu_exec_ms=2007.791`,
+`device_allocated_bytes=4141056000`, and `phys_footprint_bytes=202106816`.
+The matched feature-off run selected the same text and recorded
+`emit_calls=1194`, `encode_dispatch_calls=1194`, `gpu_exec_ms=2136.198`,
+`device_allocated_bytes=4295278592`, and `phys_footprint_bytes=310863872`.
+
+The direct dispatch records differ by 578 encoded operations, while the
+feature-on plan still uses one command-buffer execution. The GPU timing and
+memory values are single-run observations without variance estimates, so this
+row records work and allocation deltas rather than a speed verdict. Status:
+full-checkpoint GPU dispatch/work reduction measured; timing variance
+unmeasured.
+
+## ROW 242 -- cached-attention CPU microbench sweep
+
+The committed bench is
+`proxima-tensor/benches/bench_cached_attention.rs`, with the physical stream
+and a caller-buffered materialized reference over cache lengths 0, 1, 16, and
+128. Each point uses 30 Criterion samples, one-second warmup, two-second
+measurement, and validates maximum output difference below `1e-5` before
+timing. Host payload: `MacBookPro18,2`, 10 CPUs, load averages
+`8.68/4.92/4.66`.
+
+Observed median ranges, stream versus materialized, were:
+
+| cached rows | stream | materialized | observed ratio |
+| ---: | ---: | ---: | ---: |
+| 0 | 1.5544 us | 4.7723 us | 3.07x |
+| 1 | 3.3017 us | 7.1536 us | 2.17x |
+| 16 | 23.322 us | 48.059 us | 2.06x |
+| 128 | 181.03 us | 394.24 us | 2.18x |
+
+Outlier counts were stream/materialized `17/7`, `19/4`, `1/1`, and `3/3`
+for cache lengths `0`, `1`, `16`, and `128`. The host load is high, so these
+are bench observations rather than a low-noise timing conclusion. The named
+reference is the materialized attention path this physical stream replaces;
+the full OpenChat CPU and Metal controls remain the end-to-end evidence.
+Status: microbench measured, timing confidence limited by load.
