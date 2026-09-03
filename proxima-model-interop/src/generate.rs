@@ -131,16 +131,37 @@ fn report_op_timings(step: usize, timings: &[OpGpuTiming]) {
         );
     }
 
+    let mut by_codec: alloc::collections::BTreeMap<String, (u64, u64)> =
+        alloc::collections::BTreeMap::new();
+    for timing in timings {
+        let codec = timing
+            .packed_codec
+            .map(|value| format!("{value:?}"))
+            .unwrap_or_else(|| String::from("none"));
+        let entry = by_codec.entry(codec).or_insert((0, 0));
+        entry.0 += 1;
+        entry.1 += timing.gpu_ns;
+    }
+    for (codec, (count, ns)) in &by_codec {
+        std::println!(
+            "op_profile_codec step={step} codec={codec} op_count={count} gpu_ms={:.3} \
+             gpu_ns_per_op={:.1}",
+            *ns as f64 / 1e6,
+            *ns as f64 / *count as f64,
+        );
+    }
+
     let mut ranked: Vec<&OpGpuTiming> = timings.iter().collect();
     ranked.sort_by_key(|timing| core::cmp::Reverse(timing.gpu_ns));
     for (rank, timing) in ranked.iter().take(OP_PROFILE_TOP_N).enumerate() {
         std::println!(
             "op_profile_top step={step} rank={} node={} kind={} weight_name={:?} \
-             operand_bytes={} operand_count={} gpu_ns={} gpu_ns_per_byte={:.6}",
+             packed_codec={:?} operand_bytes={} operand_count={} gpu_ns={} gpu_ns_per_byte={:.6}",
             rank + 1,
             timing.node.0,
             timing.kind,
             timing.weight_name,
+            timing.packed_codec,
             timing.operand_bytes,
             timing.operand_count,
             timing.gpu_ns,
