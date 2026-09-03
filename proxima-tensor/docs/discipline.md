@@ -19163,8 +19163,8 @@ the real decode step recorded `kind=cached-attention op_count=32` and
 `gpu_ms=9.288`, so the SIMD-group candidate is on the measured Metal graph.
 
 The same profile recorded `kind=reduce-packed-row-blocked op_count=225`
-and `gpu_ms=124.479` in diagnostic per-op mode. A production batched step
-recorded `gpu_exec_ms=56.439` and `prepare_ms=148.177`; the latter is paid
+and `gpu_ms=116.419` in diagnostic per-op mode. A production batched step
+recorded `gpu_exec_ms=56.804` and `prepare_ms=150.718`; the latter is paid
 before the one-command-buffer GPU execution for that step. The source path
 is `omega/src/metal.rs:947-1033`: `prepare` re-runs inference, input shape
 validation, binding, dead-node pruning, packed-layout correction, retirement
@@ -19181,3 +19181,49 @@ support claiming that the cached-attention SIMD change closes the full-model
 gap. No implementation change is made in this row.
 
 Raw profile record: `/tmp/proxima-metal-simd-profile-complete.txt`.
+
+## ROW 248 -- cached-attention consumer index reduces repeated bind work
+
+The bind rewrite's `removable_attention_dependencies` previously rescanned
+every program operation for every dependency. The change in
+`proxima-tensor/src/bind.rs` builds one dependency-to-consumer index for the
+current bind and reuses it for those checks. It changes no graph semantics,
+kernel, weight layout, or output representation. The consumer index is a
+local bind-time table; it does not enter the CPU/GPU execution path.
+
+This is the measured full-checkpoint cell after the change, using the same
+OpenChat Q4_K_S Metal harness and controls as ROW 246: `new_count=31`, one
+steady cached decode token, three independent process runs. All runs selected
+`Here is`, reported finite logits, and reported no errors.
+
+| arm | run 1 | run 2 | run 3 | mean | CoV |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| prior SIMD candidate step-1 wall ms | 233.864 | 214.538 | 214.409 | 220.937 | 5.067% |
+| consumer-index step-1 wall ms | 69.294 | 69.311 | 69.183 | 69.263 | 0.105% |
+| prior SIMD candidate step-1 GPU ms | 54.715 | 57.598 | 58.597 | 56.970 | 3.538% |
+| consumer-index step-1 GPU ms | 50.769 | 50.878 | 50.716 | 50.788 | 0.159% |
+| consumer-index prepare ms | 11.505 | 11.877 | 11.515 | 11.632 | 1.820% |
+
+The bind-time change reduced observed wall time by `3.189x` and GPU time by
+`1.122x` relative to ROW 246. The direct mechanism is the preparation stage:
+`prepare_ms` fell from the prior `150.718 ms` single run to a mean of
+`11.632 ms` while the production GPU execution remained a separate
+`50.788 ms` mean. The profile sample that motivated this change showed
+`cached_attention_candidates`/`removable_attention_dependencies` as the
+dominant CPU stack in `resolve_plan`; the before and after records are
+`/tmp/proxima-metal-regular.sample.txt` and
+`/tmp/proxima-metal-bind-index-two-run{1,2,3}.txt`.
+
+This does not yet beat the incumbent's separately measured empty-cache
+`17.354 ms` cell in ROW 243, and that cell is not a valid cached-decode
+comparison. The matched incumbent must use an exact prompt followed by
+generation timing; `llama-bench -pg 31,1` only reports the combined sample
+(`avg_ns`), so its `266.143 t/s` record is not a decode-only value. This row
+records the Proxima reduction and the measurement-fairness correction without
+claiming a GPU winner.
+
+The guiding constraints ruled out a new graph or worker abstraction: the
+existing dependency relation was indexed once and the existing bind rewrite
+consumed it. The next kernel cell remains the packed GEMV dispatch geometry;
+the current source/profile evidence identifies 225 packed row-blocked ops as
+the dominant GPU family, while this row closes the CPU-side bind scan.
