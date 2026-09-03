@@ -785,6 +785,7 @@ pub fn execute_plan_named_op_timed(
 #[cfg(feature = "instrument")]
 fn classify_kind(bound: &BoundOp, packed_operands: &PackedOperands) -> &'static str {
     match &bound.kind {
+        BoundOpKind::CachedAttention { .. } => "cached-attention",
         BoundOpKind::Elementwise { .. } => "elementwise",
         BoundOpKind::Iota => "iota",
         BoundOpKind::Constant { .. } => "constant",
@@ -1229,6 +1230,7 @@ fn push_gather_uniforms(bytes: &mut Vec<u8>, bound: &BoundOp, rank_len: usize) {
 
 fn pack_uniforms(bound: &BoundOp) -> Vec<u8> {
     match &bound.kind {
+        BoundOpKind::CachedAttention { .. } => pack_cached_attention_uniforms(bound),
         BoundOpKind::Elementwise { .. } => pack_elementwise_uniforms(bound),
         BoundOpKind::Reduce {
             keep: Keep::Reduce, ..
@@ -1238,6 +1240,17 @@ fn pack_uniforms(bound: &BoundOp) -> Vec<u8> {
         } => pack_scan_uniforms(bound),
         BoundOpKind::Iota | BoundOpKind::Constant { .. } => pack_leaf_uniforms(bound),
     }
+}
+
+fn pack_cached_attention_uniforms(bound: &BoundOp) -> Vec<u8> {
+    let BoundOpKind::CachedAttention { head_dim, .. } = &bound.kind else {
+        unreachable!("cached attention uniform packer only receives cached attention")
+    };
+    let total: i64 = bound.extents.iter().map(|extent| *extent as i64).product::<i64>()
+        / *head_dim as i64;
+    let mut bytes = Vec::new();
+    push_i64(&mut bytes, total);
+    bytes
 }
 
 /// Mirrors the `Uniforms` struct `crate::msl::render_iota` and

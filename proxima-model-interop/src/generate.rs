@@ -1695,13 +1695,14 @@ impl<'file> LoadedModel<'file> {
                     std::println!(
                         "token_attribution step={_step} evaluate_ms={:.3} kernel_ms={:.3} dispatch_ms={:.3} \
                      park_spin_wake_ms={:.3} residual_ms={:.3} residual_underflow={residual_underflow} \
-                     named_plus_residual_ms={:.3}",
+                     named_plus_residual_ms={:.3} cached_attention_ops={}",
                         evaluate_ns as f64 / 1e6,
                         attribution.kernel_nanos as f64 / 1e6,
                         attribution.dispatch_nanos as f64 / 1e6,
                         attribution.park_spin_wake_nanos as f64 / 1e6,
                         residual_ns as f64 / 1e6,
                         (named_ns + residual_ns) as f64 / 1e6,
+                        proxima_tensor::instrument::path_totals().op_kind_cached_attention,
                     );
                     // ROW 140's own redundant-activation-quantize hypothesis
                     // check: `total_calls` vs `distinct_nodes` across every

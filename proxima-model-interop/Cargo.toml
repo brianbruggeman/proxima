@@ -60,6 +60,12 @@ instrument = ["proxima-tensor/instrument", "omega?/instrument", "dep:proxima-tel
 # must additionally gate on `target_os = "macos"` directly, matching how
 # `omega` gates its own re-exports.
 metal = ["dep:omega", "std"]
+# opt-in cached-attention physical step for the real serving/decode harness.
+cached-attention-streaming = [
+    "dep:omega",
+    "proxima-tensor/cached-attention-streaming",
+    "omega?/cached-attention-streaming",
+]
 # passthrough to `omega/metal-tiled-gemm` (default-off there, ROW `eeadc2d`)
 # so this crate's own op-timed profiling tests can compare the row-blocked
 # and tiled-GEMM paths' operand-byte traffic without a second harness.
