@@ -175,7 +175,8 @@ type MatmulSession<'a> = CohortSession<'a, TensorError>;
 use half::{bf16, f16};
 
 use crate::bind::{
-    self, BoundOp, BoundOpKind, ComposedBody, ReadyBatch, StepArg, dead_resolved_nodes,
+    self, BoundOp, BoundOpKind, ComposedBody, ReadyBatch, StepArg, block_node_ids,
+    dead_resolved_nodes, index_node_ids, node_retirement, push_indices_node,
 };
 use crate::convert::{Convert, SimdConvert};
 use crate::dtype::DType;
@@ -184,7 +185,6 @@ use crate::error::TensorError;
 use crate::instrument;
 #[cfg(feature = "instrument")]
 use crate::instrument::{KernelCounters, Path};
-use crate::map::IndexMap;
 use crate::op::{Keep, NodeId, Op, ReduceInit, ScalarOp};
 use crate::shape;
 use crate::sized::COHORT_SPIN_POLLS;
@@ -4449,41 +4449,6 @@ fn live_count<B>(buffers: &[Option<B>]) -> usize {
     buffers.iter().filter(|entry| entry.is_some()).count()
 }
 
-/// Per-node retire sets over the *emitted* node sequence: `result[p]` is
-/// every node whose last read is `resolved[p]`. This mirrors
-/// [`live::annotate`](crate::live::annotate) in shape but is a different
-/// computation over a different timeline — the resolved sequence, after
-/// fusion has already decided which zips never materialize at all.
-fn node_retirement(resolved: &[BoundOp], outputs: &[NodeId]) -> Vec<Vec<NodeId>> {
-    let outputs: BTreeSet<NodeId> = outputs.iter().copied().collect();
-    let mut last_use: BTreeMap<NodeId, usize> = BTreeMap::new();
-    for (position, node) in resolved.iter().enumerate() {
-        for (source, _, gather) in node.operands() {
-            last_use.insert(*source, position);
-            if let Some(gather_access) = gather {
-                last_use.insert(gather_access.indices, position);
-            }
-        }
-    }
-
-    let mut retires = vec![Vec::new(); resolved.len()];
-    for (node, position) in last_use {
-        if !outputs.contains(&node) {
-            retires[position].push(node);
-        }
-    }
-    retires
-}
-
-fn block_node_ids(program: &[Op]) -> Vec<NodeId> {
-    program
-        .iter()
-        .enumerate()
-        .filter(|(_, expr)| matches!(expr, Op::Input { .. }))
-        .map(|(position, _)| NodeId(position as u32))
-        .collect()
-}
-
 // `shape::infer` (called before this) already rejects a scatter (a
 // data-dependent fold output), any gather whose indices are not an integer
 // dtype, and any gathered dim past 2^24 (an f32 index cannot represent a
@@ -4666,33 +4631,6 @@ fn is_quantized_matmul_operand(program: &[Op], node: NodeId) -> bool {
         }
     }
     used_as_matmul_operand
-}
-
-/// Every node referenced as a gather's `indices` anywhere in `program` —
-/// the one class of non-float32 node [`reject_non_float32`] tolerates.
-fn index_node_ids(program: &[Op]) -> BTreeSet<NodeId> {
-    let mut nodes = BTreeSet::new();
-    for expr in program {
-        match expr {
-            Op::Input { .. } | Op::Iota { .. } | Op::Constant { .. } => {}
-            Op::Elementwise { operands, .. } => {
-                for (_, map) in operands {
-                    push_indices_node(map, &mut nodes);
-                }
-            }
-            Op::Reduce(fold) => {
-                push_indices_node(&fold.in_map, &mut nodes);
-                push_indices_node(&fold.out_map, &mut nodes);
-            }
-        }
-    }
-    nodes
-}
-
-fn push_indices_node(map: &IndexMap, nodes: &mut BTreeSet<NodeId>) {
-    if let IndexMap::Computed { indices, .. } = map {
-        nodes.insert(*indices);
-    }
 }
 
 fn buffer_of<T, B: Deref<Target = [T]>>(

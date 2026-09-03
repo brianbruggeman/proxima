@@ -10,7 +10,8 @@
 //! [`proxima_tensor::infer`] resolves shapes and symbols, [`proxima_tensor::bind()`]
 //! produces the flat [`BoundOp`] sequence (with `Reduce(Elementwise)` fusion already
 //! decided), and per-nest buffer retirement is recomputed from that sequence
-//! the same way `cpu::evaluate`'s own `bound_op_retirement` does — a node's
+//! the same way `cpu::evaluate` itself does, through the shared
+//! [`proxima_tensor::node_retirement`] — a node's
 //! device buffer is freed the moment nothing later in the sequence reads it.
 //! What differs is only the last mile: instead of interpreting a `BoundOp` with
 //! nested loops, each one is emitted to MSL, compiled (or reused from cache),
@@ -57,7 +58,7 @@
 //! encoders in the *same* command buffer whenever the later one reads what
 //! the earlier one wrote. That guarantee composes with [`execute`] encoding
 //! `prepared.resolved` strictly in program order (the same order
-//! `prepare`'s `bound_op_retirement` already relies on for liveness), so
+//! `prepare`'s own [`proxima_tensor::node_retirement`] call already relies on for liveness), so
 //! sequential encode order plus default hazard tracking is the mechanism —
 //! not an assumption that the GPU happens to serialize. This holds equally
 //! for the no-copy buffers `upload_block` hands out (see "Host buffer
@@ -187,9 +188,9 @@ use proxima_telemetry::metric::Counter;
 #[cfg(feature = "instrument")]
 use proxima_tensor::instrument::{elapsed_ticks, read_ticks};
 use proxima_tensor::{
-    BoundOp, BoundOpKind, DType, Evaluated, IndexMap, Keep, Lookup, NodeId, Op, QuantizedBlock,
-    Shapes, TensorError, bind, correct_packed_matmul_layouts, infer, prune_dead,
-    resolve_named_blocks,
+    BoundOp, BoundOpKind, DType, Evaluated, Keep, Lookup, NodeId, Op, QuantizedBlock, Shapes,
+    TensorError, bind, block_node_ids, correct_packed_matmul_layouts, index_node_ids, infer,
+    node_retirement, prune_dead, resolve_named_blocks,
 };
 
 use crate::error::EmitError;
@@ -1052,7 +1053,7 @@ fn prepare(
     // stride -- see `correct_packed_matmul_layouts`'s own doc (already
     // codec-agnostic: it takes any `packed_operands` node set).
     correct_packed_matmul_layouts(&mut resolved, &packed_operands.keys().copied().collect());
-    let retires = bound_op_retirement(&resolved, &effective_outputs);
+    let retires = node_retirement(&resolved, &effective_outputs);
     let index_nodes = index_node_ids(program);
 
     Ok(Prepared {
@@ -1122,69 +1123,8 @@ fn gpu_dtype(program: &[Op], index_nodes: &BTreeSet<NodeId>, node: NodeId) -> DT
     }
 }
 
-/// Every node referenced as a gather's `indices` anywhere in `program` —
-/// mirrors `proxima_tensor::cpu::index_node_ids`.
-fn index_node_ids(program: &[Op]) -> BTreeSet<NodeId> {
-    let mut nodes = BTreeSet::new();
-    for expr in program {
-        match expr {
-            Op::Input { .. } | Op::Iota { .. } | Op::Constant { .. } => {}
-            Op::Elementwise { operands, .. } => {
-                for (_, map) in operands {
-                    push_indices_node(map, &mut nodes);
-                }
-            }
-            Op::Reduce(reduce) => {
-                push_indices_node(&reduce.in_map, &mut nodes);
-                push_indices_node(&reduce.out_map, &mut nodes);
-            }
-        }
-    }
-    nodes
-}
-
-fn push_indices_node(map: &IndexMap, nodes: &mut BTreeSet<NodeId>) {
-    if let IndexMap::Computed { indices, .. } = map {
-        nodes.insert(*indices);
-    }
-}
-
-fn block_node_ids(program: &[Op]) -> Vec<NodeId> {
-    program
-        .iter()
-        .enumerate()
-        .filter(|(_, expr)| matches!(expr, Op::Input { .. }))
-        .map(|(position, _)| NodeId(position as u32))
-        .collect()
-}
-
 fn element_count(shape: &[u64]) -> usize {
     shape.iter().product::<u64>() as usize
-}
-
-/// Per-op retire sets over the emitted op sequence: `result[p]` is every
-/// node whose last read is `resolved[p]`. Mirrors `cpu::evaluate`'s own
-/// (private) `bound_op_retirement` exactly, over the same public
-/// `BoundOp::operands` accessor.
-fn bound_op_retirement(resolved: &[BoundOp], outputs: &[NodeId]) -> Vec<Vec<NodeId>> {
-    let outputs: BTreeSet<NodeId> = outputs.iter().copied().collect();
-    let mut last_use: BTreeMap<NodeId, usize> = BTreeMap::new();
-    for (position, bound) in resolved.iter().enumerate() {
-        for (source, _, gather) in bound.operands() {
-            last_use.insert(*source, position);
-            if let Some(lookup) = gather {
-                last_use.insert(lookup.indices, position);
-            }
-        }
-    }
-
-    let mut retires = alloc::vec![Vec::new(); resolved.len()];
-    for (node, position) in last_use {
-        if !outputs.contains(&node) {
-            retires[position].push(node);
-        }
-    }
-    retires
 }
 
 /// The output length an op needs allocated: the reduced (product of

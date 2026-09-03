@@ -2342,6 +2342,91 @@ fn bind_plain(
     Ok(built)
 }
 
+/// Every `program` position holding an [`Op::Input`] — the block-input node
+/// order [`bind`]'s own caller binds real data against. Backend-neutral (a
+/// pure scan over `&[Op]`), so any executor consuming this module's
+/// [`BoundOp`]s reads the SAME node order [`crate::cpu`]'s own evaluators do
+/// rather than re-deriving it — before this function was `pub`, `cpu.rs` and
+/// `omega/src/metal.rs` each carried a byte-identical private copy (the
+/// exact "second, parallel emitter" [`BoundOp::dtype`]'s own doc says this
+/// module exists to avoid).
+#[must_use]
+pub fn block_node_ids(program: &[Op]) -> Vec<NodeId> {
+    program
+        .iter()
+        .enumerate()
+        .filter(|(_, expr)| matches!(expr, Op::Input { .. }))
+        .map(|(position, _)| NodeId(position as u32))
+        .collect()
+}
+
+/// Every node referenced as a gather's `indices` anywhere in `program` — the
+/// one class of non-float32 node a float-only executor's own dtype gate must
+/// exempt (an index value is an exact integer carried in a float buffer, per
+/// [`crate::map::IndexMap::Computed`]'s own doc). Same reuse argument as
+/// [`block_node_ids`]: this was a byte-identical private copy in both
+/// `cpu.rs` and `omega/src/metal.rs`.
+#[must_use]
+pub fn index_node_ids(program: &[Op]) -> BTreeSet<NodeId> {
+    let mut nodes = BTreeSet::new();
+    for expr in program {
+        match expr {
+            Op::Input { .. } | Op::Iota { .. } | Op::Constant { .. } => {}
+            Op::Elementwise { operands, .. } => {
+                for (_, map) in operands {
+                    push_indices_node(map, &mut nodes);
+                }
+            }
+            Op::Reduce(reduce) => {
+                push_indices_node(&reduce.in_map, &mut nodes);
+                push_indices_node(&reduce.out_map, &mut nodes);
+            }
+        }
+    }
+    nodes
+}
+
+/// `pub(crate)`, not private: [`crate::cpu`]'s own `referenced_node_ids`
+/// walks the identical `Elementwise`/`Reduce` operand-map shape as
+/// [`index_node_ids`] above, over a different node set, so it shares this
+/// helper rather than carrying a third copy.
+pub(crate) fn push_indices_node(map: &IndexMap, nodes: &mut BTreeSet<NodeId>) {
+    if let IndexMap::Computed { indices, .. } = map {
+        nodes.insert(*indices);
+    }
+}
+
+/// Per-node retire sets over the *emitted* (post-fusion) node sequence:
+/// `result[p]` is every node whose last read is `resolved[p]`. Distinct from
+/// [`live::annotate`], which computes liveness over the PROGRAM's own
+/// timeline before fusion has decided which zips never materialize at all —
+/// this one runs after [`bind`], over [`BoundOp::operands`] directly, so it
+/// sees the fused shape an executor actually walks. Same reuse argument as
+/// [`block_node_ids`]/[`index_node_ids`]: `cpu.rs`'s private `node_retirement`
+/// and `omega/src/metal.rs`'s private `bound_op_retirement` were the
+/// identical computation under two names.
+#[must_use]
+pub fn node_retirement(resolved: &[BoundOp], outputs: &[NodeId]) -> Vec<Vec<NodeId>> {
+    let outputs: BTreeSet<NodeId> = outputs.iter().copied().collect();
+    let mut last_use: BTreeMap<NodeId, usize> = BTreeMap::new();
+    for (position, node) in resolved.iter().enumerate() {
+        for (source, _, gather) in node.operands() {
+            last_use.insert(*source, position);
+            if let Some(gather_access) = gather {
+                last_use.insert(gather_access.indices, position);
+            }
+        }
+    }
+
+    let mut retires = vec![Vec::new(); resolved.len()];
+    for (node, position) in last_use {
+        if !outputs.contains(&node) {
+            retires[position].push(node);
+        }
+    }
+    retires
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
