@@ -5010,6 +5010,7 @@ dependencies = [
  "criterion",
  "half",
  "libc",
+ "libm",
  "prime",
  "proptest",
  "proxima",

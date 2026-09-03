@@ -67,6 +67,8 @@ use smallvec::SmallVec;
 use crate::dtype::DType;
 use crate::error::TensorError;
 use crate::live;
+#[cfg(feature = "cached-attention-streaming")]
+use crate::map;
 use crate::map::{AxisIndex, AxisTerm, IndexMap, IndexPattern};
 use crate::op::{Keep, NodeId, Op, Reduce, ReduceInit, ScalarOp};
 use crate::shape::{self, Shapes};
@@ -219,6 +221,20 @@ pub struct BoundOp {
 /// resolve.
 #[derive(Debug, Clone, PartialEq)]
 pub enum BoundOpKind {
+    /// One backend-neutral cached-attention step. The operands are the
+    /// already-bound Q/K/V sources; CPU and GPU own only the kernel body.
+    CachedAttention {
+        operands: BoundOperands,
+        query_rows: u64,
+        cached_key_rows: u64,
+        new_key_rows: u64,
+        kv_heads: u64,
+        query_groups: u64,
+        head_dim: u64,
+        scale: f32,
+        cached_lower_inclusive: i64,
+        new_upper_inclusive: i64,
+    },
     Elementwise {
         body: ComposedBody,
         operands: BoundOperands,
@@ -276,7 +292,9 @@ impl BoundOp {
     #[must_use]
     pub fn operands(&self) -> &[(NodeId, Layout, Option<Lookup>)] {
         match &self.kind {
-            BoundOpKind::Elementwise { operands, .. } | BoundOpKind::Reduce { operands, .. } => {
+            BoundOpKind::CachedAttention { operands, .. }
+            | BoundOpKind::Elementwise { operands, .. }
+            | BoundOpKind::Reduce { operands, .. } => {
                 operands
             }
             BoundOpKind::Iota | BoundOpKind::Constant { .. } => &[],
@@ -291,6 +309,7 @@ impl BoundOp {
     #[must_use]
     pub fn element_body(&self) -> &ComposedBody {
         match &self.kind {
+            BoundOpKind::CachedAttention { .. } => &EMPTY_BODY,
             BoundOpKind::Elementwise { body, .. } => body,
             BoundOpKind::Reduce { element_body, .. } => element_body,
             BoundOpKind::Iota | BoundOpKind::Constant { .. } => &EMPTY_BODY,
@@ -373,6 +392,7 @@ impl BoundOp {
 
     fn split_axis(&self) -> Option<u16> {
         match &self.kind {
+            BoundOpKind::CachedAttention { .. } => None,
             BoundOpKind::Elementwise { .. } => (!self.extents.is_empty()).then_some(0),
             // `out_scatter: Some(_)` is a scatter: conservatively
             // ineligible for splitting. A chunked run would need
@@ -415,6 +435,29 @@ impl BoundOp {
         extents[split_axis as usize] = chunk_len;
 
         let kind = match &self.kind {
+            BoundOpKind::CachedAttention {
+                operands,
+                query_rows,
+                cached_key_rows,
+                new_key_rows,
+                kv_heads,
+                query_groups,
+                head_dim,
+                scale,
+                cached_lower_inclusive,
+                new_upper_inclusive,
+            } => BoundOpKind::CachedAttention {
+                operands: rebase_operands(operands, split_axis, chunk_start),
+                query_rows: *query_rows,
+                cached_key_rows: *cached_key_rows,
+                new_key_rows: *new_key_rows,
+                kv_heads: *kv_heads,
+                query_groups: *query_groups,
+                head_dim: *head_dim,
+                scale: *scale,
+                cached_lower_inclusive: *cached_lower_inclusive,
+                new_upper_inclusive: *new_upper_inclusive,
+            },
             BoundOpKind::Elementwise { body, operands } => BoundOpKind::Elementwise {
                 body: body.clone(),
                 operands: rebase_operands(operands, split_axis, chunk_start),
@@ -1774,7 +1817,500 @@ pub fn prune_dead(resolved: Vec<BoundOp>, effective_outputs: &[NodeId]) -> Vec<B
         .collect()
 }
 
+#[cfg(feature = "cached-attention-streaming")]
+fn elementwise_operands(
+    program: &[Op],
+    node: NodeId,
+    body: ScalarOp,
+) -> Option<&[(NodeId, IndexMap)]> {
+    match program.get(node.0 as usize)? {
+        Op::Elementwise {
+            body: actual_body,
+            operands,
+            ..
+        } if *actual_body == body => Some(operands),
+        _ => None,
+    }
+}
+
+#[cfg(feature = "cached-attention-streaming")]
+fn binary_elementwise(
+    program: &[Op],
+    node: NodeId,
+    body: ScalarOp,
+) -> Option<[NodeId; 2]> {
+    let operands = elementwise_operands(program, node, body)?;
+    let [(left, _), (right, _)] = operands else {
+        return None;
+    };
+    Some([*left, *right])
+}
+
+#[cfg(feature = "cached-attention-streaming")]
+fn unary_elementwise(program: &[Op], node: NodeId, body: ScalarOp) -> Option<NodeId> {
+    let operands = elementwise_operands(program, node, body)?;
+    let [(source, _)] = operands else {
+        return None;
+    };
+    Some(*source)
+}
+
+#[cfg(feature = "cached-attention-streaming")]
+fn reduced_source(
+    program: &[Op],
+    node: NodeId,
+    body: ScalarOp,
+    init: ReduceInit,
+) -> Option<NodeId> {
+    match program.get(node.0 as usize)? {
+        Op::Reduce(reduce)
+            if reduce.body == body
+                && reduce.init == init
+                && reduce.keep == Keep::Reduce =>
+        {
+            Some(reduce.operand)
+        }
+        _ => None,
+    }
+}
+
+#[cfg(feature = "cached-attention-streaming")]
+fn constant_value(program: &[Op], node: NodeId) -> Option<f32> {
+    match program.get(node.0 as usize)? {
+        Op::Constant { value, .. } => Some(*value),
+        _ => None,
+    }
+}
+
+#[cfg(feature = "cached-attention-streaming")]
+fn attention_score_sources(
+    program: &[Op],
+    score: NodeId,
+    scale: NodeId,
+) -> Option<(NodeId, NodeId, NodeId, NodeId)> {
+    let scaled = binary_elementwise(program, score, ScalarOp::Multiply)?;
+    if constant_value(program, scaled[1]) != constant_value(program, scale)
+        || constant_value(program, scaled[1]).is_none()
+    {
+        return None;
+    }
+    let score_sum = binary_elementwise(program, scaled[0], ScalarOp::Add)?;
+    let even_product = reduced_source(program, score_sum[0], ScalarOp::Add, ReduceInit::Zero)?;
+    let odd_product = reduced_source(program, score_sum[1], ScalarOp::Add, ReduceInit::Zero)?;
+    let even_operands = binary_elementwise(program, even_product, ScalarOp::Multiply)?;
+    let odd_operands = binary_elementwise(program, odd_product, ScalarOp::Multiply)?;
+    Some((
+        even_operands[0],
+        odd_operands[0],
+        even_operands[1],
+        odd_operands[1],
+    ))
+}
+
+#[cfg(feature = "cached-attention-streaming")]
+fn is_exact_causal_mask(program: &[Op], node: NodeId) -> bool {
+    let Some(operands) = elementwise_operands(program, node, ScalarOp::Greater) else {
+        return false;
+    };
+    let [(key, key_map), (query, query_map)] = operands else {
+        return false;
+    };
+    if *key_map != IndexMap::Affine(map::projection(2, &[1]))
+        || *query_map != IndexMap::Affine(map::projection(2, &[0]))
+    {
+        return false;
+    }
+    matches!(
+        (program.get(key.0 as usize), program.get(query.0 as usize)),
+        (
+            Some(Op::Iota { .. }),
+            Some(Op::Iota { .. }),
+        )
+    )
+}
+
+#[cfg(feature = "cached-attention-streaming")]
+fn cached_attention_candidates(
+    program: &[Op],
+    shapes: &Shapes,
+    resolved: &[BoundOp],
+    effective_outputs: &[NodeId],
+) -> Vec<(BoundOp, BTreeSet<NodeId>)> {
+    let mut candidates = Vec::new();
+    for output_position in (0..program.len()).rev() {
+        let output = NodeId(output_position as u32);
+        let Some(attended_sum) = binary_elementwise(program, output, ScalarOp::Multiply) else {
+            continue;
+        };
+        let Some(attended_parts) = binary_elementwise(program, attended_sum[0], ScalarOp::Add) else {
+            continue;
+        };
+        let Some(inverse_sum) = unary_elementwise(program, attended_sum[1], ScalarOp::Reciprocal) else {
+            continue;
+        };
+        let Some(sum_parts) = binary_elementwise(program, inverse_sum, ScalarOp::Add) else {
+            continue;
+        };
+        let Some(cached_weights) = reduced_source(program, sum_parts[0], ScalarOp::Add, ReduceInit::Zero) else {
+            continue;
+        };
+        let Some(new_weights) = reduced_source(program, sum_parts[1], ScalarOp::Add, ReduceInit::Zero) else {
+            continue;
+        };
+        let Some(cached_shift) = unary_elementwise(program, cached_weights, ScalarOp::Exponential) else {
+            continue;
+        };
+        let Some(new_shift) = unary_elementwise(program, new_weights, ScalarOp::Exponential) else {
+            continue;
+        };
+        let Some(cached_score_parts) = binary_elementwise(program, cached_shift, ScalarOp::Subtract) else {
+            continue;
+        };
+        let Some(new_score_parts) = binary_elementwise(program, new_shift, ScalarOp::Subtract) else {
+            continue;
+        };
+        if cached_score_parts[1] != new_score_parts[1] {
+            continue;
+        }
+        let new_masked = new_score_parts[0];
+        let Some(mask_parts) = elementwise_operands(program, new_masked, ScalarOp::Select) else {
+            continue;
+        };
+        let [(mask, _), (negative_infinity, _), (new_scaled, _)] = mask_parts else {
+            continue;
+        };
+        if !is_exact_causal_mask(program, *mask)
+            || constant_value(program, *negative_infinity) != Some(f32::NEG_INFINITY)
+        {
+            continue;
+        }
+        let Some(cached_scaled_parts) =
+            binary_elementwise(program, cached_score_parts[0], ScalarOp::Multiply)
+        else {
+            continue;
+        };
+        let scale = cached_scaled_parts[1];
+        let Some(new_scaled_parts) = binary_elementwise(program, *new_scaled, ScalarOp::Multiply) else {
+            continue;
+        };
+        if new_scaled_parts[1] != scale {
+            continue;
+        }
+        let Some((query_even_grouped, query_odd_grouped, cached_key_even, cached_key_odd)) =
+            attention_score_sources(program, cached_score_parts[0], scale)
+        else {
+            continue;
+        };
+        let Some((new_query_even_grouped, new_query_odd_grouped, new_key_even, new_key_odd)) =
+            attention_score_sources(program, *new_scaled, scale)
+        else {
+            continue;
+        };
+        if new_query_even_grouped != query_even_grouped || new_query_odd_grouped != query_odd_grouped {
+            continue;
+        }
+        let Some(query_even_parts) = binary_elementwise(program, query_even_grouped, ScalarOp::Multiply)
+        else {
+            continue;
+        };
+        let Some(query_odd_parts) = binary_elementwise(program, query_odd_grouped, ScalarOp::Multiply)
+        else {
+            continue;
+        };
+        if query_even_parts[1] != query_odd_parts[1] {
+            continue;
+        }
+        let query_even = query_even_parts[0];
+        let query_odd = query_odd_parts[0];
+        let Some(cached_value_source) =
+            reduced_source(program, attended_parts[0], ScalarOp::Add, ReduceInit::Zero)
+        else {
+            continue;
+        };
+        let Some(new_value_source) =
+            reduced_source(program, attended_parts[1], ScalarOp::Add, ReduceInit::Zero)
+        else {
+            continue;
+        };
+        let Some(cached_value_product) =
+            binary_elementwise(program, cached_value_source, ScalarOp::Multiply)
+        else {
+            continue;
+        };
+        let Some(new_value_product) =
+            binary_elementwise(program, new_value_source, ScalarOp::Multiply)
+        else {
+            continue;
+        };
+        let cached_value = cached_value_product[1];
+        let new_value = new_value_product[1];
+        if cached_value_product[0] != cached_weights || new_value_product[0] != new_weights {
+            continue;
+        }
+        let source_nodes = [
+            query_even,
+            query_odd,
+            cached_key_even,
+            cached_key_odd,
+            new_key_even,
+            new_key_odd,
+            cached_value,
+            new_value,
+        ];
+        let mut operands = Vec::with_capacity(source_nodes.len());
+        for source in source_nodes {
+            let Some((_, layout, lookup)) = resolved
+                .iter()
+                .flat_map(|bound| bound.operands().iter())
+                .find(|(node, _, _)| *node == source)
+            else {
+                operands.clear();
+                break;
+            };
+            if lookup.is_some() || layout.strides.iter().any(|stride| *stride < 0) {
+                continue;
+            }
+            operands.push((source, layout.clone(), None));
+        }
+        if operands.len() != source_nodes.len() {
+            continue;
+        }
+        let Some(scale_value) = constant_value(program, scale) else {
+            continue;
+        };
+        let query_shape = shapes.of(query_even_grouped);
+        let cached_key_shape = shapes.of(cached_key_even);
+        let new_key_shape = shapes.of(new_key_even);
+        let cached_value_shape = shapes.of(cached_value);
+        let new_value_shape = shapes.of(new_value);
+        let Some(head_dim) = query_shape[3].checked_mul(2) else {
+            continue;
+        };
+        if query_shape.len() != 4
+            || cached_key_shape.len() != 3
+            || new_key_shape.len() != 3
+            || cached_value_shape.len() != 3
+            || new_value_shape.len() != 3
+            || query_shape[1] != cached_key_shape[1]
+            || query_shape[1] != new_key_shape[1]
+            || cached_key_shape[1] != cached_value_shape[1]
+            || new_key_shape[1] != new_value_shape[1]
+            || cached_key_shape[0] != cached_value_shape[0]
+            || new_key_shape[0] != new_value_shape[0]
+            || cached_value_shape[2] != head_dim
+            || new_value_shape[2] != head_dim
+            || shapes.of(output)
+                != [query_shape[0], query_shape[1], query_shape[2], head_dim]
+        {
+            continue;
+        }
+        let pair_dim = query_shape[3];
+        let query_strides = [
+            (query_shape[1] * query_shape[2] * pair_dim) as i64,
+            (query_shape[2] * pair_dim) as i64,
+            pair_dim as i64,
+            1i64,
+        ];
+        let key_strides = [0i64, (query_shape[1] * pair_dim) as i64, pair_dim as i64, 0, 1];
+        let value_strides = [
+            0i64,
+            (query_shape[1] * query_shape[3] * 2) as i64,
+            (query_shape[3] * 2) as i64,
+            0,
+            1,
+        ];
+        if operands[0].1.strides.as_slice() != query_strides
+            || operands[1].1.strides.as_slice() != query_strides
+            || operands[2].1.strides.as_slice() != key_strides
+            || operands[3].1.strides.as_slice() != key_strides
+            || operands[4].1.strides.as_slice() != key_strides
+            || operands[5].1.strides.as_slice() != key_strides
+            || operands[6].1.strides.as_slice() != value_strides
+            || operands[7].1.strides.as_slice() != value_strides
+        {
+            continue;
+        }
+        let dependencies = attention_dependencies(program, output, &source_nodes);
+        let dependencies = dependencies
+            .difference(&source_nodes.into_iter().collect())
+            .copied()
+            .collect::<BTreeSet<_>>();
+        if dependencies.iter().any(|node| effective_outputs.contains(node)) {
+            continue;
+        }
+        let absorbed = removable_attention_dependencies(program, &dependencies, output);
+        if absorbed.is_empty() {
+            continue;
+        }
+        if !resolved.iter().any(|bound| bound.node == output) {
+            continue;
+        }
+        let fused = BoundOp {
+            node: output,
+            dtype: DType::Float32,
+            extents: shapes.of(output).to_vec(),
+            kind: BoundOpKind::CachedAttention {
+                operands,
+                query_rows: query_shape[0],
+                cached_key_rows: cached_key_shape[0],
+                new_key_rows: new_key_shape[0],
+                kv_heads: query_shape[1],
+                query_groups: query_shape[2],
+                head_dim,
+                scale: scale_value,
+                cached_lower_inclusive: i64::MIN,
+                new_upper_inclusive: 0,
+            },
+        };
+        candidates.push((fused, absorbed));
+    }
+    candidates
+}
+
+#[cfg(feature = "cached-attention-streaming")]
+fn attention_dependencies(
+    program: &[Op],
+    output: NodeId,
+    sources: &[NodeId; 8],
+) -> BTreeSet<NodeId> {
+    let source_set: BTreeSet<NodeId> = sources.iter().copied().collect();
+    let mut visited = BTreeSet::new();
+    let mut pending = vec![output];
+    while let Some(node) = pending.pop() {
+        if !visited.insert(node) || source_set.contains(&node) {
+            continue;
+        }
+        match program.get(node.0 as usize) {
+            Some(Op::Elementwise { operands, .. }) => {
+                pending.extend(operands.iter().map(|(source, _)| *source));
+            }
+            Some(Op::Reduce(reduce)) => pending.push(reduce.operand),
+            Some(Op::Input { .. }) | Some(Op::Iota { .. }) | Some(Op::Constant { .. }) | None => {}
+        }
+    }
+    visited.remove(&output);
+    visited
+}
+
+#[cfg(feature = "cached-attention-streaming")]
+fn has_external_attention_consumer(
+    program: &[Op],
+    dependencies: &BTreeSet<NodeId>,
+    dependency: NodeId,
+    output: NodeId,
+) -> bool {
+    for (position, operation) in program.iter().enumerate() {
+        let consumer = NodeId(position as u32);
+        if dependencies.contains(&consumer) || consumer == output {
+            continue;
+        }
+        let references = match operation {
+            Op::Elementwise { operands, .. } => operands.iter().map(|(node, _)| *node).collect(),
+            Op::Reduce(reduce) => alloc::vec![reduce.operand],
+            Op::Input { .. } | Op::Iota { .. } | Op::Constant { .. } => Vec::new(),
+        };
+        if references.contains(&dependency) {
+            return true;
+        }
+    }
+    false
+}
+
+#[cfg(feature = "cached-attention-streaming")]
+fn removable_attention_dependencies(
+    program: &[Op],
+    dependencies: &BTreeSet<NodeId>,
+    output: NodeId,
+) -> BTreeSet<NodeId> {
+    let mut retained = dependencies
+        .iter()
+        .copied()
+        .filter(|node| has_external_attention_consumer(program, dependencies, *node, output))
+        .collect::<BTreeSet<_>>();
+    let mut changed = true;
+    while changed {
+        changed = false;
+        for node in retained.clone() {
+            let ancestors = match program.get(node.0 as usize) {
+                Some(Op::Elementwise { operands, .. }) => {
+                    operands.iter().map(|(source, _)| *source).collect()
+                }
+                Some(Op::Reduce(reduce)) => alloc::vec![reduce.operand],
+                Some(Op::Input { .. })
+                | Some(Op::Iota { .. })
+                | Some(Op::Constant { .. })
+                | None => Vec::new(),
+            };
+            for ancestor in ancestors {
+                if dependencies.contains(&ancestor) && retained.insert(ancestor) {
+                    changed = true;
+                }
+            }
+        }
+    }
+    dependencies.difference(&retained).copied().collect()
+}
+
 pub fn bind(
+    program: &[Op],
+    shapes: &Shapes,
+    outputs: &[NodeId],
+) -> Result<Vec<BoundOp>, TensorError> {
+    let built = bind_plain(program, shapes, outputs)?;
+    #[cfg(not(feature = "cached-attention-streaming"))]
+    return Ok(built);
+
+    #[cfg(feature = "cached-attention-streaming")]
+    {
+    let initial_candidates = cached_attention_candidates(program, shapes, &built, outputs);
+    if initial_candidates.is_empty() {
+        return Ok(built);
+    }
+    let mut planning_outputs = outputs.to_vec();
+    if planning_outputs.is_empty() {
+        let root = program
+            .len()
+            .checked_sub(1)
+            .map(|position| NodeId(position as u32))
+            .ok_or(TensorError::Empty)?;
+        planning_outputs.push(root);
+    }
+    for (fused, _) in &initial_candidates {
+        let BoundOpKind::CachedAttention { operands, .. } = &fused.kind else {
+            continue;
+        };
+        for (source, _, _) in operands {
+            if !planning_outputs.contains(source) {
+                planning_outputs.push(*source);
+            }
+        }
+    }
+    let rebuilt = bind_plain(program, shapes, &planning_outputs)?;
+    let candidates = cached_attention_candidates(program, shapes, &rebuilt, outputs);
+    if candidates.is_empty() {
+        return Ok(built);
+    }
+    let fused_by_node = candidates
+        .iter()
+        .map(|(fused, _)| (fused.node, fused))
+        .collect::<BTreeMap<_, _>>();
+    let absorbed = candidates
+        .iter()
+        .flat_map(|(_, absorbed)| absorbed.iter().copied())
+        .collect::<BTreeSet<_>>();
+    let mut rewritten = Vec::with_capacity(rebuilt.len());
+    for bound in rebuilt {
+        if let Some(fused) = fused_by_node.get(&bound.node) {
+            rewritten.push((*fused).clone());
+        } else if !absorbed.contains(&bound.node) {
+            rewritten.push(bound);
+        }
+    }
+    Ok(rewritten)
+    }
+}
+
+fn bind_plain(
     program: &[Op],
     shapes: &Shapes,
     outputs: &[NodeId],
@@ -1793,6 +2329,58 @@ pub fn bind(
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[cfg(feature = "cached-attention-streaming")]
+    fn cached_attention_rewrite_replaces_the_bound_attention_subgraph() {
+        let (program, _, _) = crate::spec::mistral_cached_forward_program(32, 16, 24, 4, 2, 4, 1)
+            .expect("cached attention fixture builds");
+        let shapes = crate::shape::infer(&program, &[1, 1]).expect("cached attention infers");
+        let plain = bind_plain(&program, &shapes, &[]).expect("plain bind succeeds");
+        let rewritten = bind(&program, &shapes, &[]).expect("rewritten bind succeeds");
+
+        assert_eq!(plain.len(), 48, "fixture baseline bound operation count");
+        assert_eq!(rewritten.len(), 26, "fixture fused bound operation count");
+        assert_eq!(
+            rewritten
+                .iter()
+                .filter(|bound| matches!(bound.kind, BoundOpKind::CachedAttention { .. }))
+                .count(),
+            1,
+            "one-layer fixture must receive one fused step"
+        );
+        assert!(rewritten
+            .iter()
+            .any(|bound| matches!(bound.kind, BoundOpKind::CachedAttention { .. })));
+    }
+
+    #[test]
+    #[cfg(feature = "cached-attention-streaming")]
+    fn cached_attention_rewrite_accepts_the_omega_nonempty_cache_fixture() {
+        let (program, logits, cache_roots) =
+            crate::spec::mistral_cached_forward_program(64, 64, 128, 4, 2, 16, 2)
+                .expect("omega cached attention fixture builds");
+        let mut outputs = alloc::vec![logits];
+        for (even, odd, value) in cache_roots {
+            outputs.extend_from_slice(&[even, odd, value]);
+        }
+        let shapes = crate::shape::infer(&program, &[1, 5])
+            .expect("omega cached attention fixture infers");
+        let rewritten = bind(&program, &shapes, &outputs)
+            .expect("omega cached attention fixture binds");
+
+        assert_eq!(
+            rewritten
+                .iter()
+                .filter(|bound| matches!(bound.kind, BoundOpKind::CachedAttention { .. }))
+                .count(),
+            2,
+            "each production-shaped layer must receive its own fused step"
+        );
+        assert!(rewritten
+            .iter()
+            .any(|bound| matches!(bound.kind, BoundOpKind::CachedAttention { .. })));
+    }
     use crate::dtype::DType;
     use crate::map;
     use crate::op::{Extent, append};

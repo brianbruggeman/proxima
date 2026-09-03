@@ -174,25 +174,12 @@
 
 #![cfg_attr(not(feature = "std"), no_std)]
 
-// `Op` (op.rs), `Shapes` (shape.rs), and `BoundOpBuilder` (bind.rs) are all
-// `alloc::vec::Vec`/`BTreeMap`-backed today, so the `alloc` feature is not
-// yet optional — this is a gap to close, not a permanent boundary. See the
-// itemized no-alloc blocker list carried alongside this change for what a
-// fixed-capacity/caller-provided-storage version of each would need.
-#[cfg(not(any(feature = "std", feature = "alloc")))]
-compile_error!(
-    "proxima-tensor currently requires the `alloc` feature (or `std`, which implies \
-     it); a no-alloc tier is on the roadmap but not yet implemented"
-);
-
 #[cfg(feature = "alloc")]
 extern crate alloc;
 
-// bind/live/map/op/shape are the `Vec`/`BTreeMap`-backed core (see the
-// blocker list); dtype and error stand alone and would compile with neither
-// `std` nor `alloc`, but there is nothing useful to build without the core,
-// so the whole crate body is gated on the same condition as the
-// `compile_error!` above rather than leaving a half-populated crate root.
+// bind/live/map/op/shape remain alloc-backed and are gated below. The
+// no-alloc floor intentionally exposes the existing core arithmetic and dtype
+// surfaces rather than minting a parallel graph representation.
 #[cfg(any(feature = "std", feature = "alloc"))]
 pub mod align;
 #[cfg(any(feature = "std", feature = "alloc"))]
@@ -218,6 +205,7 @@ pub mod live;
 pub mod map;
 #[cfg(any(feature = "std", feature = "alloc"))]
 pub mod op;
+pub mod physical;
 // pure over `&[Op]`/`NodeId`/`shape::infer`, so it lives at the same tier as
 // both — see the module's own doc for what it produces and why no new type
 // hosts it.

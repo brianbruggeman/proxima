@@ -18,6 +18,7 @@ readme.workspace = true
 default = ["std", "metal", "cpu"]
 std = ["alloc", "thiserror/std"]
 alloc = []
+cached-attention-streaming = ["proxima-tensor/cached-attention-streaming"]
 # Backends are MIX-AND-MATCH, the same shape `runtime-prime` and
 # `runtime-tokio` take at the workspace root (`Cargo.toml`): both may be
 # compiled in at once and the choice made at runtime, rather than one

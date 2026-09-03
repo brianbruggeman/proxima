@@ -675,6 +675,7 @@ pub fn emit(resolved: &BoundOp, packed_operands: &PackedOperands) -> Result<Kern
     let entry = entry_name(resolved);
     let quantized = operand_codecs(resolved, packed_operands);
     let source = match &resolved.kind {
+        BoundOpKind::CachedAttention { .. } => render_cached_attention(resolved, &entry),
         BoundOpKind::Elementwise { .. } => render_elementwise(resolved, &entry, &quantized),
         BoundOpKind::Reduce {
             keep: Keep::Reduce, ..
@@ -1516,6 +1517,12 @@ fn tiled_gemm_threadgroups(feature_extent: u64, token_extent: u64) -> u64 {
 
 fn grid_threads(resolved: &BoundOp, quantized: &[Option<PackedCodec>]) -> u64 {
     match &resolved.kind {
+        BoundOpKind::CachedAttention { head_dim, .. } => resolved
+            .extents
+            .iter()
+            .product::<u64>()
+            .checked_div(*head_dim)
+            .unwrap_or(0),
         BoundOpKind::Elementwise { .. } => resolved.extents.iter().product(),
         BoundOpKind::Reduce {
             keep: Keep::Reduce,
@@ -1691,6 +1698,23 @@ fn entry_name(resolved: &BoundOp) -> String {
     let rank = resolved.extents.len();
     let operand_count = resolved.operands().len();
     let base = match &resolved.kind {
+        BoundOpKind::CachedAttention {
+            query_rows,
+            cached_key_rows,
+            new_key_rows,
+            kv_heads,
+            query_groups,
+            head_dim,
+            scale,
+            cached_lower_inclusive,
+            new_upper_inclusive,
+            ..
+        } => format!(
+            "omega_cached_attention_q{query_rows}_c{cached_key_rows}_n{new_key_rows}_h{kv_heads}_g{query_groups}_d{head_dim}_s{:08x}_l{}_u{}",
+            scale.to_bits(),
+            signed_name_part(*cached_lower_inclusive),
+            signed_name_part(*new_upper_inclusive),
+        ),
         BoundOpKind::Elementwise { .. } => {
             let body = body_token(resolved.element_body());
             format!("omega_elementwise_r{rank}_n{operand_count}_{body}")
@@ -1741,6 +1765,14 @@ fn entry_name(resolved: &BoundOp) -> String {
         format!("{base}_g{gather_bits}")
     } else {
         base
+    }
+}
+
+fn signed_name_part(value: i64) -> String {
+    if value < 0 {
+        format!("n{}", value.unsigned_abs())
+    } else {
+        format!("p{value}")
     }
 }
 
@@ -2099,6 +2131,50 @@ fn msl_literal(value: f32) -> String {
         };
     }
     format!("{value:?}")
+}
+
+fn render_cached_attention(resolved: &BoundOp, entry: &str) -> Result<String, EmitError> {
+    let BoundOpKind::CachedAttention {
+        query_rows,
+        cached_key_rows,
+        new_key_rows,
+        kv_heads,
+        query_groups,
+        head_dim,
+        scale,
+        cached_lower_inclusive,
+        new_upper_inclusive,
+        ..
+    } = &resolved.kind
+    else {
+        unreachable!("cached attention renderer only receives cached attention")
+    };
+    let element_type = type_token(resolved.node, resolved.dtype)?;
+    let cached_lower = if *cached_lower_inclusive == i64::MIN {
+        "-9223372036854775807L".to_string()
+    } else {
+        format!("{cached_lower_inclusive}L")
+    };
+    let new_upper = format!("{new_upper_inclusive}L");
+    let mut source = String::new();
+    preamble(&mut source);
+    source.push_str("struct Uniforms { long total_elements; };\n\n");
+    source.push_str(&format!(
+        "kernel void {entry}(device const {element_type}* in0 [[buffer(0)]], device const {element_type}* in1 [[buffer(1)]], device const {element_type}* in2 [[buffer(2)]], device const {element_type}* in3 [[buffer(3)]], device const {element_type}* in4 [[buffer(4)]], device const {element_type}* in5 [[buffer(5)]], device const {element_type}* in6 [[buffer(6)]], device const {element_type}* in7 [[buffer(7)]], device {element_type}* out [[buffer(8)]], constant Uniforms& u [[buffer(9)]], uint gid [[thread_position_in_grid]]) {{\n"
+    ));
+    source.push_str("    if ((long)gid >= u.total_elements) { return; }\n");
+    source.push_str(&format!(
+        "    constexpr long cached_key_rows = {cached_key_rows}; constexpr long new_key_rows = {new_key_rows}; constexpr long kv_heads = {kv_heads}; constexpr long query_groups = {query_groups}; constexpr long head_dim = {head_dim}; constexpr float scale = {}; constexpr long cached_lower = {cached_lower}; constexpr long new_upper = {new_upper};\n",
+        msl_literal(*scale),
+    ));
+    source.push_str("    long query_index = (long)gid;\n    long query_row = query_index / (kv_heads * query_groups);\n    long remainder = query_index % (kv_heads * query_groups);\n    long kv_head = remainder / query_groups;\n    long group = remainder % query_groups;\n    long query_head = kv_head * query_groups + group;\n    long qbase = query_row * (kv_heads * query_groups * (head_dim / 2)) + query_head * (head_dim / 2);\n    float maximum = -INFINITY; float sum = 0.0f; float weighted[head_dim];\n    for (long dimension = 0; dimension < head_dim; dimension++) { weighted[dimension] = 0.0f; }\n");
+    source.push_str("    for (long key = 0; key < cached_key_rows + new_key_rows; key++) {\n        bool cached = key < cached_key_rows; long new_index = key - cached_key_rows;\n        long relative = (cached ? key - cached_key_rows : new_index) - query_row;\n        if (cached && relative < cached_lower) { continue; }\n        if (!cached && relative > new_upper) { continue; }\n        long kbase = (cached ? key : new_index) * (kv_heads * (head_dim / 2)) + kv_head * (head_dim / 2);\n        float score = 0.0f;\n        for (long pair = 0; pair < head_dim / 2; pair++) {\n            score += in0[qbase + pair] * (cached ? in2[kbase + pair] : in4[kbase + pair]);\n            score += in1[qbase + pair] * (cached ? in3[kbase + pair] : in5[kbase + pair]);\n        }\n        score *= scale; float next_max = max(maximum, score);\n        float weight = exp(score - next_max); float rescale = (maximum == -INFINITY) ? 0.0f : exp(maximum - next_max);\n        sum = sum * rescale + weight;\n        for (long dimension = 0; dimension < head_dim; dimension++) { weighted[dimension] = weighted[dimension] * rescale + weight * (cached ? in6[kbase * 2 + dimension] : in7[kbase * 2 + dimension]); }\n        maximum = next_max;\n    }\n");
+    source.push_str("    for (long dimension = 0; dimension < head_dim; dimension++) { out[gid * head_dim + dimension] = (" );
+    source.push_str(element_type);
+    source.push_str(")(sum == 0.0f ? 0.0f : weighted[dimension] / sum); }\n}\n");
+    let _ = query_rows;
+    let _ = new_key_rows;
+    Ok(source)
 }
 
 fn render_elementwise(
@@ -3700,6 +3776,38 @@ mod tests {
             .expect("one fused bound emitted")
     }
 
+    fn cached_attention_op() -> BoundOp {
+        let operands = (0..8)
+            .map(|index| {
+                (
+                    NodeId(index),
+                    Layout {
+                        base: 0,
+                        strides: vec![1].into(),
+                    },
+                    None,
+                )
+            })
+            .collect();
+        BoundOp {
+            node: NodeId(8),
+            dtype: DType::Float32,
+            extents: vec![1, 1, 1, 4],
+            kind: BoundOpKind::CachedAttention {
+                operands,
+                query_rows: 1,
+                cached_key_rows: 1,
+                new_key_rows: 1,
+                kv_heads: 1,
+                query_groups: 1,
+                head_dim: 4,
+                scale: 0.5,
+                cached_lower_inclusive: i64::MIN,
+                new_upper_inclusive: 0,
+            },
+        }
+    }
+
     /// Same shape as [`matmul_op`] but with a caller-chosen reduce op, so a
     /// test can hold the fused `weight * activation` body fixed and vary only
     /// `reduce_op` — the one axis [`is_plain_product_reduce`] gates on beyond
@@ -4636,6 +4744,18 @@ mod tests {
             Some(32),
             "the driver must dispatch exactly one SIMD-group per threadgroup"
         );
+    }
+
+    #[test]
+    fn cached_attention_emits_one_online_softmax_dispatch() {
+        let bound = cached_attention_op();
+        let kernel = emit(&bound, &BTreeMap::new()).expect("cached attention emits");
+
+        assert!(kernel.source.contains("long relative ="));
+        assert!(kernel.source.contains("weighted[dimension] / sum"));
+        assert_eq!(kernel.bindings.len(), 10, "eight inputs, output, uniforms");
+        assert_eq!(kernel.grid.threads, 1);
+        assert_eq!(kernel.grid.threadgroup_width, None);
     }
 
     #[test]

@@ -4793,6 +4793,13 @@ fn run_node_into<B: Deref<Target = [f32]> + Sync>(
     output: &mut [f32],
 ) -> Result<(), TensorError> {
     match &resolved.kind {
+        BoundOpKind::CachedAttention {
+            ..
+        } => {
+            #[cfg(feature = "instrument")]
+            instrument::record_op_kind(instrument::OpKind::CachedAttention);
+            run_cached_attention(resolved, buffers, output)
+        }
         BoundOpKind::Elementwise { .. } => {
             #[cfg(feature = "instrument")]
             instrument::record_op_kind(instrument::OpKind::Elementwise);
@@ -4846,6 +4853,113 @@ fn run_node_into<B: Deref<Target = [f32]> + Sync>(
     }
 }
 
+fn run_cached_attention<B: Deref<Target = [f32]> + Sync>(
+    resolved: &BoundOp,
+    buffers: &[Option<B>],
+    output: &mut [f32],
+) -> Result<(), TensorError> {
+    let BoundOpKind::CachedAttention {
+        operands,
+        query_rows,
+        cached_key_rows,
+        new_key_rows,
+        kv_heads,
+        query_groups,
+        head_dim,
+        scale,
+        cached_lower_inclusive,
+        new_upper_inclusive,
+    } = &resolved.kind else {
+        return Err(TensorError::NotLowerable {
+            node: resolved.node,
+            reason: "cached attention runner received another bound operation",
+        });
+    };
+    if operands.len() != 8 || operands.iter().any(|(_, _, lookup)| lookup.is_some()) {
+        return Err(TensorError::NotLowerable {
+            node: resolved.node,
+            reason: "cached attention requires eight affine, gather-free operands",
+        });
+    }
+    let mut sources = operands.iter().map(|(node, layout, _)| {
+        if layout.base != 0 || layout.strides.last().copied() != Some(1) {
+            return Err(TensorError::NotLowerable {
+                node: resolved.node,
+                reason: "cached attention requires zero-based contiguous source tails",
+            });
+        }
+        buffer_of(buffers, *node)
+    });
+    let query_even = sources.next().ok_or(TensorError::NotLowerable {
+        node: resolved.node,
+        reason: "cached attention query source is missing",
+    })??;
+    let query_odd = sources.next().ok_or(TensorError::NotLowerable {
+        node: resolved.node,
+        reason: "cached attention query source is missing",
+    })??;
+    let cached_key_even = sources.next().ok_or(TensorError::NotLowerable {
+        node: resolved.node,
+        reason: "cached attention cached-key source is missing",
+    })??;
+    let cached_key_odd = sources.next().ok_or(TensorError::NotLowerable {
+        node: resolved.node,
+        reason: "cached attention cached-key source is missing",
+    })??;
+    let new_key_even = sources.next().ok_or(TensorError::NotLowerable {
+        node: resolved.node,
+        reason: "cached attention new-key source is missing",
+    })??;
+    let new_key_odd = sources.next().ok_or(TensorError::NotLowerable {
+        node: resolved.node,
+        reason: "cached attention new-key source is missing",
+    })??;
+    let cached_value = sources.next().ok_or(TensorError::NotLowerable {
+        node: resolved.node,
+        reason: "cached attention cached-value source is missing",
+    })??;
+    let new_value = sources.next().ok_or(TensorError::NotLowerable {
+        node: resolved.node,
+        reason: "cached attention new-value source is missing",
+    })??;
+    let streamed = crate::physical::stream_cached_attention_split_gqa(
+        [query_even, query_odd],
+        [
+            [cached_key_even, cached_key_odd],
+            [new_key_even, new_key_odd],
+        ],
+        [cached_value, new_value],
+        output,
+        crate::physical::AttentionExtents {
+            query_rows: *query_rows,
+            cached_key_rows: *cached_key_rows,
+            new_key_rows: *new_key_rows,
+            kv_heads: *kv_heads,
+            query_groups: *query_groups,
+            head_dim: *head_dim,
+        },
+        *scale,
+        [
+            crate::physical::CausalBand {
+                lower_inclusive: *cached_lower_inclusive,
+                upper_inclusive: i64::MAX,
+            },
+            crate::physical::CausalBand {
+                lower_inclusive: i64::MIN,
+                upper_inclusive: *new_upper_inclusive,
+            },
+        ],
+    );
+    if streamed {
+        Ok(())
+    } else {
+        Err(TensorError::NotLowerable {
+            node: resolved.node,
+            reason: "cached attention source or output extents do not match its bound domain",
+        })
+    }
+}
+
 /// [`BoundOpKind::Constant`]'s whole computation: every element is the same
 /// literal. Even simpler than [`run_iota`] — no operand reads, no body, and
 /// not even a dependence on position.
@@ -4871,6 +4985,19 @@ fn run_iota(output: &mut [f32]) -> Result<(), TensorError> {
 /// `Keep::Reduce` fold.
 fn node_output_len(resolved: &BoundOp) -> usize {
     match &resolved.kind {
+        BoundOpKind::CachedAttention { .. } => {
+            let (query_rows, kv_heads, query_groups, head_dim) = match &resolved.kind {
+                BoundOpKind::CachedAttention {
+                    query_rows,
+                    kv_heads,
+                    query_groups,
+                    head_dim,
+                    ..
+                } => (*query_rows, *kv_heads, *query_groups, *head_dim),
+                _ => unreachable!("cached-attention output shape match is exhaustive"),
+            };
+            query_rows as usize * kv_heads as usize * query_groups as usize * head_dim as usize
+        }
         // `output_axes` excludes the scattered axis entirely (its position
         // is data-dependent, never a pure projection — see
         // `bind::pure_projection_axes`), so the ordinary leading/width
@@ -17813,6 +17940,12 @@ fn run_typed_program<T: Element>(
     for (position, node) in resolved.iter().enumerate() {
         let mut output = typed_take_or_allocate(&mut free_buffers, node_output_len(node));
         match &node.kind {
+            BoundOpKind::CachedAttention { .. } => {
+                return Err(TensorError::NotLowerable {
+                    node: node.node,
+                    reason: "cached attention binding is not wired into the typed executor",
+                });
+            }
             BoundOpKind::Elementwise { .. } => {
                 run_elementwise_typed(node, &buffers, &index_buffers, &mut output)?
             }
@@ -17955,6 +18088,12 @@ where
         if node.dtype == TIn::DTYPE {
             let mut output = typed_take_or_allocate(&mut free_in, node_output_len(node));
             match &node.kind {
+                BoundOpKind::CachedAttention { .. } => {
+                    return Err(TensorError::NotLowerable {
+                        node: node.node,
+                        reason: "cached attention binding is not wired into the widened executor",
+                    });
+                }
                 BoundOpKind::Elementwise { .. } => {
                     run_elementwise_typed(node, &buffers_in, &index_buffers, &mut output)?;
                 }
@@ -17990,6 +18129,12 @@ where
             }
             let mut output = typed_take_or_allocate(&mut free_out, node_output_len(node));
             match &node.kind {
+                BoundOpKind::CachedAttention { .. } => {
+                    return Err(TensorError::NotLowerable {
+                        node: node.node,
+                        reason: "cached attention binding is not wired into the widened executor",
+                    });
+                }
                 BoundOpKind::Elementwise { .. } => {
                     run_elementwise_typed(node, &buffers_out, &index_buffers, &mut output)?;
                 }
@@ -18984,6 +19129,61 @@ mod tests {
     /// [`run_scan`] directly, rather than through [`evaluate`]'s shape
     /// inference — a single scaled operand with no plain-projection sibling
     /// leaves iteration axis 0's extent unconstrained for inference to solve.
+    #[test]
+    fn cached_attention_bound_step_runs_online_softmax() {
+        let mut buffers = vec![None; 9];
+        let inputs = [
+            vec![1.0],
+            vec![0.0],
+            vec![1.0],
+            vec![0.0],
+            vec![0.0],
+            vec![1.0],
+            vec![2.0, 3.0],
+            vec![4.0, 5.0],
+        ];
+        for (index, input) in inputs.iter().enumerate() {
+            buffers[index] = Some(input.as_slice());
+        }
+        let operands = inputs
+            .iter()
+            .enumerate()
+            .map(|(index, _)| {
+                (
+                    NodeId(index as u32),
+                    bind::Layout {
+                        base: 0,
+                        strides: smallvec::smallvec![1],
+                    },
+                    None,
+                )
+            })
+            .collect();
+        let resolved = BoundOp {
+            node: NodeId(8),
+            dtype: DType::Float32,
+            extents: vec![1, 1, 1, 2],
+            kind: BoundOpKind::CachedAttention {
+                operands,
+                query_rows: 1,
+                cached_key_rows: 1,
+                new_key_rows: 1,
+                kv_heads: 1,
+                query_groups: 1,
+                head_dim: 2,
+                scale: 1.0,
+                cached_lower_inclusive: -1,
+                new_upper_inclusive: 0,
+            },
+        };
+        let mut output = vec![0.0; 2];
+        run_node_into(&resolved, &buffers, None, None, &mut output)
+            .expect("cached attention bound step runs");
+        let cached_weight = 1.0f32.exp() / (1.0f32.exp() + 1.0);
+        assert!((output[0] - (2.0 * cached_weight + 4.0 * (1.0 - cached_weight))).abs() < 1e-6);
+        assert!((output[1] - (3.0 * cached_weight + 5.0 * (1.0 - cached_weight))).abs() < 1e-6);
+    }
+
     #[test]
     fn scan_width_unary_stride_two_matches_a_running_sum_reference() {
         let k = 6usize;

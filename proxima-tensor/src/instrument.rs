@@ -1235,6 +1235,8 @@ pub fn reset_serial() {
 pub static OP_KIND_ELEMENTWISE: Counter = Counter::new("proxima_tensor.op_kind.elementwise");
 pub static OP_KIND_REDUCE: Counter = Counter::new("proxima_tensor.op_kind.reduce");
 pub static OP_KIND_SCAN: Counter = Counter::new("proxima_tensor.op_kind.scan");
+pub static OP_KIND_CACHED_ATTENTION: Counter =
+    Counter::new("proxima_tensor.op_kind.cached_attention");
 
 /// Which `run_node_into` arm this bound op's `BoundOpKind`/`Keep` resolved
 /// to — set once per call from the match already driving dispatch, never
@@ -1244,6 +1246,7 @@ pub enum OpKind {
     Elementwise,
     Reduce,
     Scan,
+    CachedAttention,
 }
 
 pub fn record_op_kind(kind: OpKind) {
@@ -1251,6 +1254,7 @@ pub fn record_op_kind(kind: OpKind) {
         OpKind::Elementwise => counter!(OP_KIND_ELEMENTWISE, 1),
         OpKind::Reduce => counter!(OP_KIND_REDUCE, 1),
         OpKind::Scan => counter!(OP_KIND_SCAN, 1),
+        OpKind::CachedAttention => counter!(OP_KIND_CACHED_ATTENTION, 1),
     }
 }
 
@@ -1274,6 +1278,7 @@ pub struct PathTotals {
     pub op_kind_elementwise: u64,
     pub op_kind_reduce: u64,
     pub op_kind_scan: u64,
+    pub op_kind_cached_attention: u64,
     pub dispatch_parallel: u64,
     pub dispatch_sequential_below_threshold: u64,
     pub dispatch_sequential_split_unavailable: u64,
@@ -1285,6 +1290,7 @@ pub fn path_totals() -> PathTotals {
         op_kind_elementwise: OP_KIND_ELEMENTWISE.get(),
         op_kind_reduce: OP_KIND_REDUCE.get(),
         op_kind_scan: OP_KIND_SCAN.get(),
+        op_kind_cached_attention: OP_KIND_CACHED_ATTENTION.get(),
         dispatch_parallel: PARALLEL_NODES.get(),
         dispatch_sequential_below_threshold: DISPATCH_SEQUENTIAL_BELOW_THRESHOLD.get(),
         dispatch_sequential_split_unavailable: DISPATCH_SEQUENTIAL_SPLIT_UNAVAILABLE.get(),
@@ -1297,6 +1303,7 @@ pub fn reset_path() {
     let _ = OP_KIND_ELEMENTWISE.snapshot_and_reset();
     let _ = OP_KIND_REDUCE.snapshot_and_reset();
     let _ = OP_KIND_SCAN.snapshot_and_reset();
+    let _ = OP_KIND_CACHED_ATTENTION.snapshot_and_reset();
     let _ = DISPATCH_SEQUENTIAL_BELOW_THRESHOLD.snapshot_and_reset();
     let _ = DISPATCH_SEQUENTIAL_SPLIT_UNAVAILABLE.snapshot_and_reset();
 }

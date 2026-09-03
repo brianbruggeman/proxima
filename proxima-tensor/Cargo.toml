@@ -25,6 +25,9 @@ default = ["std", "config", "q4k-int8-dot", "q5k-int8-dot", "q6k-int8-dot"]
 # (~1.03x combined noise, i.e. a tie, not a regression).
 std = ["alloc", "thiserror/std", "tensor-bgpool", "tensor-cohort", "cohort-staged-graph", "dep:libc"]
 alloc = []
+# Cached-attention graph rewrite. Default-off until the real checkpoint work
+# and CPU/Metal differential records are accepted.
+cached-attention-streaming = ["std"]
 # Std composition boundary for graph specs (guiding-principle 4): bon builder +
 # conflaguration Settings/Validate + serde. The alloc-tier core (Graph/Node/
 # AffineMap/validate) never sees this feature.
@@ -153,6 +156,7 @@ half = { version = "2.7.1", default-features = false }
 # — already audited, workspace-standard bindings (see `prime/src/os/reactor.rs`)
 # rather than a hand-rolled `extern "C"` + `#[repr(C)] struct Timespec`.
 libc = { workspace = true, optional = true }
+libm = { version = "0.2.16", default-features = false }
 prime = { version = "0.1.0", path = "../prime", features = ["runtime-prime-bgpool-par", "runtime-prime-cohort"], optional = true }
 proxima-clock = { version = "0.1.0", path = "../proxima-clock", default-features = false, optional = true }
 # Q4_K block layout/dequant primitives for the quantized GEMM row source
@@ -228,6 +232,10 @@ harness = false
 name = "bench_dynamic_elision"
 harness = false
 required-features = ["dynamic-elision-probe"]
+
+[[bench]]
+name = "bench_cached_attention"
+harness = false
 
 [[example]]
 name = "q4k_ggml_fidelity"
