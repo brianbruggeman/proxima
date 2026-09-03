@@ -19533,6 +19533,25 @@ claim. The matched llama wall record remains `17.467 ms/token`; the current
 candidate observations are all slower, but their spread must be resolved before
 using a single Proxima number in the comparison headline.
 
+## ROW 262 -- 24-token steady decode cell supplies the current candidate baseline
+
+A single post-commit full-model run with `PROXIMA_MAX_TOKENS=24` produced 23
+steady decode records (`step=1..23`) after the 31-token prompt prefill. The
+within-process means were `51.535 ms` wall per token (sample CoV `2.16%`) and
+`39.841 ms` GPU execution per token (sample CoV `0.98%`). The run reported
+`plan_hits=0`, `plan_misses=24`, finite logits, `stopped_by_eos=false`, and
+generated the observed escaped text:
+`Here is a simple Python function that returns the nth Fibonacci number using recursion:\n\n\`\`\``
+This provides a
+stable current candidate cell without pooling across processes or startup
+conditions.
+
+The exact llama.cpp/ggml wall record remains `17.467 ms/token` from ROW 250.
+The current within-process candidate wall ratio is `51.535 / 17.467 = 2.950x`
+slower. llama's GPU execution field remains unreported, so no GPU multiplier
+is derived. Device allocation was `4,167,090,176 B` at the final recorded
+step; this remains incomparable with llama's process RSS memory scope.
+
 ## ROW 259 -- existing tiled GEMM feature does not reduce this decode cell
 
 The existing `metal-tiled-gemm` path was enabled as a bounded control against
