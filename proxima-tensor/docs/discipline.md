@@ -19514,3 +19514,21 @@ reproduced under an isolated host. The incumbent comparison remains wall-only:
 llama.cpp/ggml measured `17.467 ms/token` in ROW 250, so the clean Proxima
 spot-check ratio is `51.779 / 17.467 = 2.964x` slower. No GPU multiplier is
 derived because llama's GPU execution time is unreported.
+
+## ROW 259 -- existing tiled GEMM feature does not reduce this decode cell
+
+The existing `metal-tiled-gemm` path was enabled as a bounded control against
+the corrected Q4_K row-blocked path. It changed no source or graph structure
+in this cell. On the same OpenChat Q4_K_S full-model harness, one 8-token run
+reported step 1 at `52.904 ms` wall and `40.283 ms` GPU, with
+`device_allocated_bytes=4,156,850,176`, finite logits, and output
+`Here is a simple Python function that returns`. The corrected row-blocked
+control immediately before it reported `51.779 ms` wall and `38.994 ms` GPU.
+
+The existing tiled path therefore measured `1.022x` slower on wall and
+`1.033x` slower on GPU in this single control run. This is not a quality loss,
+but it is a negative performance observation; the feature is not evidence that
+the missing acceleration has been found. The remaining work stays in the
+cooperative-reduction family identified by the per-op trace, and its next
+change requires an instrumented operation-level comparison rather than a new
+type or graph rule.
