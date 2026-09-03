@@ -19658,3 +19658,41 @@ retained scalar helper's `39.841 ms` GPU and `51.535 ms` wall in ROW 262. GPU
 time was `1.008x` slower, so the annotation was rolled back. The wall movement
 does not establish a GPU win and supplies no basis for changing the helper's
 arithmetic shape.
+
+## ROW 267 -- ggml's two-SIMD-group Q4_K geometry is a small retained cell, not the incumbent match
+
+The packed row-blocked dispatch was changed to mirror the checked-in ggml
+Metal geometry: two 32-lane SIMD groups per 64-thread threadgroup, with four
+output rows owned by each group (`others/llama.cpp/ggml/src/ggml-metal/ggml-metal-impl.h:32-33`;
+`ggml-metal.metal:5111-5127`). The existing paired Q4_K body, buffers, graph,
+and weight representation were unchanged. The source test now checks the
+64-thread shape and the real Q4_K checkpoint parity remained at maximum
+absolute difference `0.0000030994415`, relative `0.0000020013174`; the fused
+cached root remained at `0.0000044107437`.
+
+The isolated 24-token steady decode cell recorded 23 post-prefill steps:
+
+| arm | wall ms/token | GPU ms/token | CoV | output / quality |
+| --- | ---: | ---: | ---: | --- |
+| two-SIMD-group candidate | 50.991 | 39.781 | wall 1.49%, GPU 1.07% | `Here is ...`; finite logits |
+| retained one-group cell, ROW 262 | 51.535 | 39.841 | wall 2.16%, GPU 0.98% | `Here is ...`; finite logits |
+| llama.cpp / ggml, ROW 250 | 17.467 | unreported | 0.363% | matched prompt; output record |
+
+The candidate's device allocation at the final recorded step was
+`4,167,565,312 B`; the candidate and ROW 262 use the same Proxima device
+allocation scope, while the llama row is process RSS and remains a different
+memory scope. The candidate wall ratio against the llama record is
+`50.991 / 17.467 = 2.920x` slower. GPU time cannot be compared to llama's
+because the incumbent row has no GPU execution timer. The candidate is a small
+within-Proxima wall movement, but it does not close the incumbent gap and is
+not an incumbent performance result.
+
+The mechanism is dispatch amortization only: the number of packed output
+threadgroups is halved while each SIMD group's Q4_K arithmetic and memory
+traffic remain unchanged. `prepare_ms` remained about `2.0 ms`, `op_setup_ms`
+about `3.4--5.1 ms`, and production GPU execution remained about `39--40 ms`
+per step in the same run, so this geometry cannot account for the missing
+approximately `33.5 ms` of wall time. The retained source test and real
+forward tests passed with `metal,cached-attention-streaming`; the observed
+output stayed unchanged. This cell is retained as a measured incremental
+change, while the meet-or-beat objective remains open.
