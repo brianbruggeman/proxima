@@ -29,7 +29,17 @@
 //! assume it.
 //!
 //! Run: `cargo run --example gguf_generate -- <gguf-path> <prompt>
-//! <max-tokens>`
+//! <max-tokens> [cpu|gpu]`
+//!
+//! The 4th positional argument picks the backend and defaults to `gpu`.
+//! `cpu` sets `gpu_layers = 0` and runs CPU-only, no Metal attempt, no
+//! fallback. `gpu` sets `gpu_layers = GPU_LAYERS_ALL`
+//! (`proxima-model-interop/src/generate.rs:856`'s `select_backend` reads
+//! that exact sentinel); on a non-metal build or a build with no working
+//! Metal device, `apply_serving_config`'s own rejection
+//! (`proxima-model-interop/src/serving.rs:270-276`) or the runtime Metal
+//! failure surfaces as an explicit, unambiguous CPU fallback below -- never
+//! a silent one.
 
 use std::env;
 use std::time::Instant;
@@ -141,7 +151,7 @@ fn print_architecture_metadata(parsed: &proxima_gguf::pipe::ParsedGguf) {
     }
 }
 
-fn supported_serving_config(model_path: &str) -> ServingConfig<'_> {
+fn supported_serving_config(model_path: &str, gpu_layers: i32) -> ServingConfig<'_> {
     ServingConfig {
         model_path,
         kv_cache_key_quant: proxima_gguf::types::GgmlType::F32,
@@ -149,12 +159,38 @@ fn supported_serving_config(model_path: &str) -> ServingConfig<'_> {
         flash_attention: false,
         batch_size: 0,
         ubatch_size: 0,
-        // `-ngl all` (`serving.rs:55`): whole-model offload onto
-        // `omega::backend::Backend::Metal` -- `generate.rs:544-551`'s
-        // `select_backend` reads this exact sentinel.
-        gpu_layers: GPU_LAYERS_ALL,
+        // caller-selected: 0 (cpu-only) or `GPU_LAYERS_ALL` (`-ngl all`,
+        // whole-model offload onto `omega::backend::Backend::Metal` --
+        // `generate.rs:856`'s `select_backend` reads this exact sentinel).
+        gpu_layers,
         reasoning_budget: 0,
         ..ServingConfig::default()
+    }
+}
+
+#[derive(Clone, Copy)]
+enum RequestedBackend {
+    Cpu,
+    Gpu,
+}
+
+impl RequestedBackend {
+    fn gpu_layers(self) -> i32 {
+        match self {
+            RequestedBackend::Cpu => 0,
+            RequestedBackend::Gpu => GPU_LAYERS_ALL,
+        }
+    }
+}
+
+fn parse_requested_backend(argument: Option<&String>) -> RequestedBackend {
+    match argument.map(String::as_str) {
+        None | Some("gpu") => RequestedBackend::Gpu,
+        Some("cpu") => RequestedBackend::Cpu,
+        Some(other) => {
+            eprintln!("argv[4] must be 'cpu' or 'gpu', got {other:?}");
+            std::process::exit(1);
+        }
     }
 }
 
@@ -182,9 +218,18 @@ fn main() {
         }
     };
 
+    let requested_backend = parse_requested_backend(args.get(4));
+
     println!("gguf_path = {gguf_path}");
     println!("prompt = {prompt:?}");
     println!("max_tokens = {max_tokens}");
+    println!(
+        "requested_backend = {}",
+        match requested_backend {
+            RequestedBackend::Cpu => "cpu",
+            RequestedBackend::Gpu => "gpu",
+        }
+    );
 
     // bind.rs's gguf_tensor_as_packed_block borrows quantized weights straight out of
     // this buffer for the model's whole lifetime, so it must stay file-backed and
@@ -259,18 +304,31 @@ fn main() {
         Err(error) => println!("PROBE forward_logits FAILED: {error:?}"),
     }
     let generate_started = Instant::now();
-    let mut outcome =
-        model.generate_with_serving_config(prompt, max_tokens, supported_serving_config(gguf_path));
-    let mut backend_label = "METAL (gpu_layers = GPU_LAYERS_ALL)";
-
-    if let Err(error) = &outcome {
-        println!("METAL RUN FAILED: {error}");
-        println!("falling back to CPU (gpu_layers = 0), labeled explicitly below");
-        let mut cpu_config = supported_serving_config(gguf_path);
-        cpu_config.gpu_layers = 0;
-        outcome = model.generate_with_serving_config(prompt, max_tokens, cpu_config);
-        backend_label = "CPU (fallback: metal run failed, see METAL RUN FAILED above)";
-    }
+    let (outcome, backend_label) = match requested_backend {
+        RequestedBackend::Cpu => {
+            // requested CPU: never attempts Metal, so there is nothing to
+            // fall back from -- a CPU request always produces a CPU run.
+            let config = supported_serving_config(gguf_path, RequestedBackend::Cpu.gpu_layers());
+            let outcome = model.generate_with_serving_config(prompt, max_tokens, config);
+            (outcome, "CPU (requested)")
+        }
+        RequestedBackend::Gpu => {
+            let config = supported_serving_config(gguf_path, RequestedBackend::Gpu.gpu_layers());
+            let mut outcome = model.generate_with_serving_config(prompt, max_tokens, config);
+            let mut backend_label = "GPU/METAL (requested, gpu_layers = GPU_LAYERS_ALL)";
+            if let Err(error) = &outcome {
+                println!("METAL RUN FAILED: {error}");
+                println!("falling back to CPU (gpu_layers = 0), labeled explicitly below");
+                let cpu_config =
+                    supported_serving_config(gguf_path, RequestedBackend::Cpu.gpu_layers());
+                outcome = model.generate_with_serving_config(prompt, max_tokens, cpu_config);
+                backend_label = "CPU (fallback: gpu was requested but the metal run failed, \
+                                  see METAL RUN FAILED above -- gpu_exec_calls below is the \
+                                  mechanical proof this did NOT run on gpu)";
+            }
+            (outcome, backend_label)
+        }
+    };
     let generate_ms = generate_started.elapsed().as_secs_f64() * 1000.0;
     println!("backend_requested = {backend_label}");
 
