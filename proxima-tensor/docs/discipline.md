@@ -19081,3 +19081,23 @@ incumbent. The exact re-prove command is the ROW 243 Proxima command with the
 additional feature `metal-tiled-gemm`; raw outputs were captured in
 `/tmp/proxima-metal-tiled-prefill.txt` and
 `/tmp/proxima-metal-tiled-prefill-{2,3}.txt`.
+
+## ROW 245 -- tiled-GEMM decode threshold negative
+
+The existing build-time `OMEGA_TILED_GEMM_MIN_TOKENS` seam was forced from its
+default `8` to `1` for the one-token cached decode arm. This tests whether the
+prefill improvement in ROW 244 transfers to decode; no source or graph shape
+was changed.
+
+| arm | step-1 wall ms | step-1 GPU ms | max RSS B | output |
+| --- | ---: | ---: | ---: | --- |
+| default threshold, row-blocked | 248.757 mean, 11.926% CoV | 70.438 mean, 4.690% CoV | 4169138176 mean | `Here is` |
+| forced threshold `min_tokens=1`, tiled | 481.648 (one run) | 331.730 (one run) | 4167221248 | `Here is` |
+
+Forcing the tiled path increased the observed decode wall time by 1.937x and
+GPU time by 4.708x while preserving the selected text. This is a measured
+negative for the one-token decode regime, so the threshold remains `8` and
+the tiled candidate stays prefill-only. The raw record is
+`/tmp/proxima-metal-tiled-decode-min1.txt`; the re-prove command is the ROW
+243 two-token Proxima command with
+`OMEGA_TILED_GEMM_MIN_TOKENS=1` and `metal-tiled-gemm` added.
