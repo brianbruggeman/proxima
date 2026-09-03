@@ -25,15 +25,13 @@
 //!   - [`Stdio::Piped`] — `pipe(2)` allocated in the parent before fork;
 //!     child dup2s its end, parent keeps the other in [`Child`]
 //!
-//! # Hazard
+//! # Spawn path
 //!
-//! `fork(2)` from a multi-threaded parent is unsafe (held mutexes
-//! survive into the child with no thread to release them). Direct
-//! callers of `spawn` should route through
-//! [`ForkServer`](super::fork_server::ForkServer) when the parent
-//! is multi-threaded. The fork-server is single-threaded by
-//! construction so its `spawn` is safe; multi-threaded direct
-//! callers risk deadlocks.
+//! Linux's ordinary external-command path uses `posix_spawnp(3)`, so it is
+//! safe when callers resolve several children from a multi-threaded parent.
+//! The existing `fork(2)` path remains for dispatch sockets, controlling
+//! terminals, umasks, and platforms without the native spawn primitive; those
+//! callers still need the single-threaded fork-server boundary.
 
 use std::ffi::CString;
 use std::os::fd::{AsRawFd, OwnedFd, RawFd};
@@ -270,6 +268,133 @@ pub struct SpawnOptions {
 /// itself stays pure data; anything that varies per spawn site
 /// rides in [`SpawnOptions`].
 pub fn spawn(command: &CommandDescriptor, options: SpawnOptions) -> Result<Child, ProximaError> {
+    #[cfg(target_os = "linux")]
+    if options.dispatch_fd.is_none() && !options.controlling_tty && options.umask.is_none() && command.current_dir.is_none() {
+        return spawn_posix(command);
+    }
+
+    spawn_fork(command, options)
+}
+
+#[cfg(target_os = "linux")]
+fn spawn_posix(command: &CommandDescriptor) -> Result<Child, ProximaError> {
+    let mut piped_pairs: Vec<PipedPair> = Vec::new();
+    for slot in [Slot::Input, Slot::Output, Slot::Error] {
+        if matches!(slot_io(command, slot), Stdio::Piped) {
+            piped_pairs.push(allocate_piped_pair(slot)?);
+        }
+    }
+
+    let mut argv_storage: Vec<&std::ffi::CStr> = Vec::with_capacity(command.args.len() + 1);
+    argv_storage.push(&command.program);
+    for argument in &command.args {
+        argv_storage.push(argument);
+    }
+    let argv_pointers: Vec<*mut libc::c_char> = argv_storage
+        .iter()
+        .map(|value| value.as_ptr() as *mut libc::c_char)
+        .chain(std::iter::once(ptr::null_mut()))
+        .collect();
+    let envp = build_envp(&command.env);
+    let mut actions = unsafe { std::mem::zeroed::<libc::posix_spawn_file_actions_t>() };
+    let initialized = unsafe { libc::posix_spawn_file_actions_init(&mut actions) };
+    if initialized != 0 {
+        return Err(posix_spawn_error("file-actions init", initialized));
+    }
+
+    let action_result = add_posix_stdio_actions(&mut actions, command, &piped_pairs);
+    if let Err(error) = action_result {
+        unsafe { libc::posix_spawn_file_actions_destroy(&mut actions) };
+        return Err(error);
+    }
+
+    let mut pid = 0;
+    let spawned = unsafe {
+        libc::posix_spawnp(
+            &mut pid,
+            command.program.as_ptr(),
+            &actions,
+            ptr::null(),
+            argv_pointers.as_ptr(),
+            envp.pointers.as_ptr(),
+        )
+    };
+    let destroyed = unsafe { libc::posix_spawn_file_actions_destroy(&mut actions) };
+    if spawned != 0 {
+        return Err(posix_spawn_error("spawn", spawned));
+    }
+    if destroyed != 0 {
+        return Err(posix_spawn_error("file-actions destroy", destroyed));
+    }
+
+    Ok(parent_after_fork(pid, piped_pairs))
+}
+
+#[cfg(target_os = "linux")]
+fn add_posix_stdio_actions(
+    actions: &mut libc::posix_spawn_file_actions_t,
+    command: &CommandDescriptor,
+    piped_pairs: &[PipedPair],
+) -> Result<(), ProximaError> {
+    for slot in [Slot::Input, Slot::Output, Slot::Error] {
+        let target = slot.child_fd();
+        match slot_io(command, slot) {
+            Stdio::Inherit => {}
+            Stdio::Null => {
+                let result = unsafe {
+                    libc::posix_spawn_file_actions_addopen(actions, target, c"/dev/null".as_ptr(), libc::O_RDWR, 0)
+                };
+                if result != 0 {
+                    return Err(posix_spawn_error("null stdio action", result));
+                }
+            }
+            Stdio::Fd(source) => add_dup_action(actions, source, target)?,
+            Stdio::Piped => {
+                let pair = piped_pairs
+                    .iter()
+                    .find(|pair| pair.slot.child_fd() == target)
+                    .ok_or_else(|| ProximaError::Body(format!("missing pipe for child fd {target}")))?;
+                let source = pair.child_end.as_raw_fd();
+                add_dup_action(actions, source, target)?;
+                add_close_action(actions, pair.parent_end.as_raw_fd())?;
+                if source != target {
+                    add_close_action(actions, source)?;
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn add_dup_action(actions: &mut libc::posix_spawn_file_actions_t, source: RawFd, target: libc::c_int) -> Result<(), ProximaError> {
+    if source == target {
+        return Ok(());
+    }
+    let result = unsafe { libc::posix_spawn_file_actions_adddup2(actions, source, target) };
+    if result == 0 {
+        Ok(())
+    } else {
+        Err(posix_spawn_error("dup stdio action", result))
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn add_close_action(actions: &mut libc::posix_spawn_file_actions_t, fd: RawFd) -> Result<(), ProximaError> {
+    let result = unsafe { libc::posix_spawn_file_actions_addclose(actions, fd) };
+    if result == 0 {
+        Ok(())
+    } else {
+        Err(posix_spawn_error("close stdio action", result))
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn posix_spawn_error(operation: &str, code: libc::c_int) -> ProximaError {
+    ProximaError::Body(format!("posix_spawn {operation} failed: {}", std::io::Error::from_raw_os_error(code)))
+}
+
+fn spawn_fork(command: &CommandDescriptor, options: SpawnOptions) -> Result<Child, ProximaError> {
     let mut piped_pairs: Vec<PipedPair> = Vec::new();
     for slot in [Slot::Input, Slot::Output, Slot::Error] {
         if matches!(slot_io(command, slot), Stdio::Piped) {
@@ -566,6 +691,27 @@ mod tests {
         let captured = drain_to_string(output_fd);
         assert_eq!(captured, "hello via spawn\n");
         wait_child(spawned.pid);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn posix_spawn_supports_concurrent_external_children() {
+        let workers: Vec<_> = (0..8)
+            .map(|worker| {
+                thread::spawn(move || {
+                    let mut command = CommandDescriptor::new(cstr("/bin/echo"));
+                    command.arg(cstr(&format!("worker {worker}"))).stdout(Stdio::Piped);
+                    let mut spawned = spawn(&command, SpawnOptions::default()).expect("posix_spawn");
+                    let output = drain_to_string(spawned.stdout.take().expect("piped output"));
+                    assert_eq!(output, format!("worker {worker}\n"));
+                    let status = wait_child(spawned.pid);
+                    assert!(libc::WIFEXITED(status) && libc::WEXITSTATUS(status) == 0);
+                })
+            })
+            .collect();
+        for worker in workers {
+            worker.join().expect("concurrent child worker");
+        }
     }
 
     #[test]
