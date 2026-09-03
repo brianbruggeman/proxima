@@ -19410,3 +19410,72 @@ The profile recorded `225` packed-row-blocked operations and `41.083 ms` of
 `49.998 ms` total per-op GPU time at its diagnostic step. Its byte totals remain
 backing-buffer lengths, not accessed ranges, and are not used as a bandwidth
 conclusion. The temporary layout print was removed after the trace.
+
+## ROW 257 -- Q4_K paired-nibble mapping corrected and retained pending full comparison
+
+The plain-product Q4_K path now uses the packed layout's paired low/high nibble
+mapping inside the existing width-32 row-blocked kernel. The critical offset is
+explicit: ggml's q1/q2 pointers are `uint16_t*`, so its `+32` pointer movement
+is 64 bytes; the MSL helper uses `byte_base = 32 * iq + 8 * ir`, then reads the
+two 64-byte nibble halves and the four corresponding scale/minimum headers. No
+graph node, Rust struct, allocation, dispatch shape, weight representation, or
+non-Q4_K fused body changed. The earlier implementation was rejected in ROW
+255 because it used the wrong mapping and emitted `Print Print`; this corrected
+implementation is a separate cell.
+
+The real-checkpoint parity fixture reported finite output and maximum absolute
+difference `0.0000030994415` against dequantized-f32 CPU for 64 rows of
+`blk.0.attn_q.weight` (`Q4_K`, `k=4096`). The production CPU/Metal fixture also
+reported maximum absolute difference `0.0000044107437`. A 24-token full-model
+greedy run emitted:
+`Here is a simple Python function that returns the nth Fibonacci number using recursion:`
+and did not stop by EOS. The shorter max-8 run emitted the same prefix through
+`returns`. These are output observations, not a logit-equality claim against
+llama.cpp; llama-cli does not expose logits in the matched harness.
+
+| cell | step-1 wall ms | step-1 GPU ms | output / quality |
+| --- | ---: | ---: | --- |
+| retained float4 Q4_K control, 3 runs | 66.986 mean | 47.824 mean | `Here is`; CPU/Metal max diff `0.0000044107437` |
+| corrected paired-nibble candidate, 3 runs | 55.712 mean* | 33.862 mean | `Here is`; real Q4_K max diff `0.0000030994415` |
+
+The candidate GPU samples were `33.735`, `34.207`, and `33.643 ms`, with sample
+CoV `0.894%`. The candidate wall samples were `63.600`, `51.430`, and
+`52.107 ms`; the first included a pipeline compile, so the table's wall mean
+is reported with that condition visible rather than silently removed. The four
+First-token observations across max-2, max-8, and max-24 runs were `63.600`,
+`51.398`, `51.430`, and `52.574 ms`; the first included pipeline compilation.
+The three post-compile observations have mean `51.801 ms` and sample CoV
+`1.29%`; this wall cell is not pooled with the three-run GPU cell. The retained
+control/candidate ratios are `1.412x` for the measured GPU samples and `1.293x`
+for the three post-compile wall observations. Neither ratio is an incumbent
+comparison.
+
+The per-op diagnostic attribution after the change recorded 9
+`reduce-packed-row-blocked` operations at `3.135 ms` and 601
+`reduce-cooperative` operations at `66.545 ms`. The diagnostic mode isolates
+operations in separate command buffers, so those absolute family totals are
+not production step time; they identify the remaining work family only. The
+production max-24 trace still showed approximately 34--36 ms GPU execution per
+steady decode step, while the full step wall remained about 50--62 ms. This
+leaves CPU-side orchestration and the unmodified cooperative reduction family
+as measured work; it does not establish that Proxima beats llama.cpp.
+
+| incumbent/control | matched wall | GPU | memory | CoV | status |
+| --- | ---: | ---: | ---: | ---: | --- |
+| Proxima corrected Q4_K Metal | 51.801 ms* | 33.862 ms | 4,149,067,776 B device allocation in one trace | wall 1.29%, GPU 0.894% | measured candidate |
+| Proxima retained Q4_K Metal | 66.986 ms | 47.824 ms | 4,153,218,389 B device allocation | wall 0.312%, GPU 0.489% | measured control |
+| llama.cpp / ggml Metal | 17.467 ms/token | GPU unreported | 4,778,273,451 B max RSS | 0.363% | measured incumbent; memory scope differs |
+| ORT | unmeasured | unmeasured | unmeasured | unmeasured | unavailable in this host cell |
+| PyTorch | unmeasured | unmeasured | unmeasured | unmeasured | unavailable in this host cell |
+
+The llama row is the exact-prompt max-8 generation cell from ROW 250. Its
+reported 17.467 ms is a llama-cli wall/eval figure, not a GPU execution timer;
+therefore the candidate's `33.862 ms` GPU value cannot be compared to it as a
+GPU winner. Against the matched llama wall cell, the corrected candidate's
+post-compile wall mean is `2.966x` slower. Proxima device allocation and llama
+process RSS are different memory scopes and are not a memory winner claim.
+
+Source evidence: `omega/src/msl.rs` Q4_K helper and plain-product branch;
+`omega/tests/q4k_real_checkpoint_parity.rs` real checkpoint fixture;
+`omega/tests/metal_real_forward.rs` CPU/Metal fixture; per-op record from the
+release `profiles_one_real_decode_step_by_per_op_gpu_time` run in this session.
