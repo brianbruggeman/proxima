@@ -151,6 +151,24 @@ fn report_op_timings(step: usize, timings: &[OpGpuTiming]) {
         );
     }
 
+    let mut by_variant: alloc::collections::BTreeMap<&'static str, (u64, u64)> =
+        alloc::collections::BTreeMap::new();
+    for timing in timings {
+        let entry = by_variant
+            .entry(timing.packed_kernel_variant)
+            .or_insert((0, 0));
+        entry.0 += 1;
+        entry.1 += timing.gpu_ns;
+    }
+    for (variant, (count, ns)) in &by_variant {
+        std::println!(
+            "op_profile_variant step={step} variant={variant} op_count={count} gpu_ms={:.3} \
+             gpu_ns_per_op={:.1}",
+            *ns as f64 / 1e6,
+            *ns as f64 / *count as f64,
+        );
+    }
+
     let mut ranked: Vec<&OpGpuTiming> = timings.iter().collect();
     ranked.sort_by_key(|timing| core::cmp::Reverse(timing.gpu_ns));
     for (rank, timing) in ranked.iter().take(OP_PROFILE_TOP_N).enumerate() {
