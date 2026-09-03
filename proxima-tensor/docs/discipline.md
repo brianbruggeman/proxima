@@ -19270,12 +19270,12 @@ fixture remained at maximum absolute difference `0.0000044107437`.
 | arm | run 1 | run 2 | run 3 | mean | CoV |
 | --- | ---: | ---: | ---: | ---: | ---: |
 | prior scalar Q4_K step-1 wall ms | 69.294 | 69.311 | 69.183 | 69.263 | 0.105% |
-| float4 Q4_K step-1 wall ms | 66.821 | 67.221 | 66.916 | 66.853 | 0.316% |
+| float4 Q4_K step-1 wall ms | 66.821 | 67.221 | 66.916 | 66.986 | 0.312% |
 | prior scalar Q4_K step-1 GPU ms | 50.769 | 50.878 | 50.716 | 50.788 | 0.159% |
-| float4 Q4_K step-1 GPU ms | 48.072 | 47.608 | 47.792 | 47.957 | 0.493% |
+| float4 Q4_K step-1 GPU ms | 48.072 | 47.608 | 47.792 | 47.824 | 0.489% |
 
-The observed candidate/control ratios are `1.036x` lower wall time and
-`1.059x` lower GPU time. The exact-prompt llama.cpp/ggml comparison remains
+The observed candidate/control ratios are `1.034x` lower wall time and
+`1.062x` lower GPU time. The exact-prompt llama.cpp/ggml comparison remains
 `17.467 ms/token` from ROW 250, so the candidate remains `3.829x` slower by
 wall time. This is a measured kernel reduction, not an incumbent win.
 
@@ -19292,7 +19292,7 @@ was reverted after the full-checkpoint cell.
 
 | arm | mean wall ms | CoV | mean GPU ms | CoV | output |
 | --- | ---: | ---: | ---: | ---: | --- |
-| float4 accumulation baseline | 66.853 | 0.316% | 47.957 | 0.493% | `Here is` |
+| float4 accumulation baseline | 66.986 | 0.312% | 47.824 | 0.489% | `Here is` |
 | float4 activation-sum candidate | 66.888 | 1.383% | 48.121 | 0.204% | `Here is` |
 
 The candidate was `1.001x` slower on wall time and `1.003x` slower on GPU
@@ -19311,9 +19311,9 @@ was not faster and was rolled back.
 
 | arm | run 1 | run 2 | run 3 | mean | CoV |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| retained float4 accumulation wall ms | 66.821 | 67.221 | 66.916 | 66.853 | 0.316% |
+| retained float4 accumulation wall ms | 66.821 | 67.221 | 66.916 | 66.986 | 0.312% |
 | direct vector unpack wall ms | 76.404 | 67.375 | 64.951 | 69.577 | 9.224% |
-| retained float4 accumulation GPU ms | 48.072 | 47.608 | 47.792 | 47.957 | 0.493% |
+| retained float4 accumulation GPU ms | 48.072 | 47.608 | 47.792 | 47.824 | 0.489% |
 | direct vector unpack GPU ms | 48.050 | 48.335 | 47.786 | 48.057 | 0.593% |
 
 The direct-unpack candidate was `1.041x` slower on wall time and `1.002x`
@@ -19360,10 +19360,10 @@ changed. The source was reverted after the full-checkpoint cell.
 
 | arm | wall ms | GPU ms | output |
 | --- | ---: | ---: | --- |
-| retained four-row batch | 69.263 | 50.788 | `Here is` |
+| retained four-row batch | 66.986 | 47.824 | `Here is` |
 | eight-row candidate | 71.006 | 53.269 | `Here is` |
 
-The eight-row candidate measured `1.025x` slower wall time and `1.049x` slower
+The eight-row candidate measured `1.060x` slower wall time and `1.114x` slower
 GPU time in the single recorded candidate run. This rejects wider register
 ownership as the next packed-kernel change. The retained four-row baseline is
 the three-run cell in ROW 248; the candidate values are the direct stdout
