@@ -256,6 +256,31 @@ static inline float q4k_value(device const uchar *block, uint index, q4k_header 
     return header.scale * (float)nibble - header.minimum;
 }
 
+static inline float q4k_pair_dot(device const uchar *block, uint iq, uint ir, thread const float *yl, thread const float *yh) {
+    device const uchar *qs = block + 16;
+    // ggml's q1/q2 pointers are uint16_t, so its +32 offset advances 64 bytes.
+    uint byte_base = 32u * iq + 8u * ir;
+    uint low_index = 64u * iq + 8u * ir;
+    q4k_header h0 = q4k_header_for(block, low_index);
+    q4k_header h1 = q4k_header_for(block, low_index + 32u);
+    q4k_header h2 = q4k_header_for(block, low_index + 128u);
+    q4k_header h3 = q4k_header_for(block, low_index + 160u);
+    float result = 0.0f;
+    for (uint i = 0u; i < 4u; ++i) {
+        uint word1 = (uint)qs[byte_base + 2u * i] | ((uint)qs[byte_base + 2u * i + 1u] << 8);
+        uint word2 = (uint)qs[byte_base + 64u + 2u * i] | ((uint)qs[byte_base + 64u + 2u * i + 1u] << 8);
+        result += (h0.scale * (float)(word1 & 0x0Fu) - h0.minimum) * yl[2u * i + 0u];
+        result += (h0.scale * (float)((word1 >> 8) & 0x0Fu) - h0.minimum) * yl[2u * i + 1u];
+        result += (h1.scale * (float)((word1 >> 4) & 0x0Fu) - h1.minimum) * yl[2u * i + 8u];
+        result += (h1.scale * (float)((word1 >> 12) & 0x0Fu) - h1.minimum) * yl[2u * i + 9u];
+        result += (h2.scale * (float)(word2 & 0x0Fu) - h2.minimum) * yh[2u * i + 0u];
+        result += (h2.scale * (float)((word2 >> 8) & 0x0Fu) - h2.minimum) * yh[2u * i + 1u];
+        result += (h3.scale * (float)((word2 >> 4) & 0x0Fu) - h3.minimum) * yh[2u * i + 8u];
+        result += (h3.scale * (float)((word2 >> 12) & 0x0Fu) - h3.minimum) * yh[2u * i + 9u];
+    }
+    return result;
+}
+
 // Eight consecutive levels from TWO 32-bit loads instead of eight byte
 // loads. A lane's run is `slot .. slot+7` and never crosses a 32-element
 // sub-block boundary, so all eight share a group and a nibble half, and
@@ -2592,10 +2617,18 @@ fn push_packed_row_blocked_body(
         // 32-element sub-block — the granularity the header is constant over.
         let lanes_per_block = 8;
         let sub = Q4K_BLOCK_ELEMENTS / lanes_per_block;
+        let plain_product = matches!(codec, PackedCodec::Q4K)
+            && is_plain_product_reduce(resolved, reduce_op, weight, other);
         source.push_str(&format!("    uint ix = (uint)lane / {lanes_per_block}u;\n"));
         source.push_str(&format!("    uint it = (uint)lane % {lanes_per_block}u;\n"));
         source.push_str(&format!("    uint slot = it * {sub}u;\n"));
-        source.push_str(&format!("    {element_type} acts[{sub}];\n"));
+        if plain_product {
+            source.push_str(
+                "    uint iq = it / 4u; uint ir = it % 4u;\n    float yl[16]; float yh[16];\n",
+            );
+        } else {
+            source.push_str(&format!("    {element_type} acts[{sub}];\n"));
+        }
         source.push_str(&format!(
             "    int super_blocks = (int)u.reduction_total / {Q4K_BLOCK_ELEMENTS};\n"
         ));
@@ -2606,19 +2639,28 @@ fn push_packed_row_blocked_body(
         source.push_str(&format!(
             "        int elem0 = ib * {Q4K_BLOCK_ELEMENTS} + (int)slot;\n"
         ));
-        source.push_str(&format!("        for (int j = 0; j < {sub}; ++j) {{\n"));
-        source.push_str(&format!(
-            "            acts[j] = in{other}[other_base[0] + (long)(elem0 + j) * other_stride];\n"
-        ));
-        source.push_str("        }\n");
+        if plain_product {
+            source.push_str(&format!("        device const float *y4 = in{other} + other_base[0] + (long)ib * {Q4K_BLOCK_ELEMENTS} * other_stride + (long)(64u * iq + 8u * ir) * other_stride;\n"));
+            source.push_str("        for (uint i = 0u; i < 8u; ++i) { yl[i] = y4[i]; yl[i + 8u] = y4[i + 32u]; yh[i] = y4[i + 128u]; yh[i + 8u] = y4[i + 160u]; }\n");
+        } else {
+            source.push_str(&format!("        for (int j = 0; j < {sub}; ++j) {{\n"));
+            source.push_str(&format!(
+                "            acts[j] = in{other}[other_base[0] + (long)(elem0 + j) * other_stride];\n"
+            ));
+            source.push_str("        }\n");
+        }
         source.push_str(&format!("        for (int q = 0; q < {rows}; ++q) {{\n"));
         source.push_str(&format!(
             "            device const uchar *blk = in{weight} + ((int)weight_base[q] / {Q4K_BLOCK_ELEMENTS} + ib) * {block_bytes};\n"
         ));
         match codec {
             PackedCodec::Q4K => {
-                source.push_str("            q4k_header hdr = q4k_header_for(blk, slot);\n");
-                if is_plain_product_reduce(resolved, reduce_op, weight, other) {
+                if plain_product {
+                    source.push_str(
+                        "            sumf[q] = sumf[q] + q4k_pair_dot(blk, iq, ir, yl, yh);\n",
+                    );
+                } else if is_plain_product_reduce(resolved, reduce_op, weight, other) {
+                    source.push_str("            q4k_header hdr = q4k_header_for(blk, slot);\n");
                     // SCALE-DEFERRED PATH (`docs/discipline.md` ROW 106).
                     // Accumulate the raw nibble x activation product and the
                     // activation sum UNSCALED across the whole sub-block, then
