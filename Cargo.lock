@@ -4028,6 +4028,7 @@ dependencies = [
  "proxima-tensor",
  "proxima-test",
  "proxima-tls",
+ "proxima-tokenizer",
  "proxima-vm",
  "quick-xml",
  "quinn",

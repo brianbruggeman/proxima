@@ -153,8 +153,8 @@ impl SendPipe for ChatCompletions {
 
             let prompt_tokens = proxima_tokenizer::encode_with_bos_eos(
                 &prompt,
-                self.served.model.vocab(),
-                self.served.model.vocab().add_bos_token().unwrap_or(true),
+                &self.served.vocab,
+                self.served.vocab.add_bos_token().unwrap_or(true),
                 false,
             )
             .map(|ids| ids.len())
@@ -219,8 +219,17 @@ fn main() -> Result<(), Box<dyn Error>> {
     let load_ms = load_started.elapsed().as_secs_f64() * 1000.0;
     println!("weight_load_ms = {load_ms:.3}");
 
+    // `LoadedModel` borrows the checkpoint bytes and keeps its own `vocab`
+    // private (`generate.rs`'s own doc: the crate owns tokenization
+    // internally for `generate_with_serving_config`), so this server builds
+    // its own copy from the same parsed metadata to compute `prompt_tokens`
+    // for the response's `usage` block.
+    let vocab = proxima_tokenizer::gguf::vocab_from_metadata(&parsed)
+        .map_err(|error| format!("vocab build failed: {error}"))?;
+
     let served = Arc::new(ServedModel {
         model,
+        vocab,
         has_chat_template,
         max_tokens,
     });
