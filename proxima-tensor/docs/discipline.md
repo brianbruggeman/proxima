@@ -19395,3 +19395,18 @@ means the lane-to-activation or scale mapping is not yet proven against the
 real Q4_K checkpoint; the small fixture did not exercise that mapping. The
 candidate stdout is the direct release-harness record from this session, and
 the source is clean at the retained float4 implementation.
+
+## ROW 256 -- packed layout stride trace
+
+The diagnostic profile printed bound layouts for every production packed-row-
+blocked op. Main FFN cells exposed activation layouts `[0, 1, 4096]` for
+extents `[1, 4096, 14336]` and `[0, 1, 14336]` for extents
+`[1, 14336, 4096]`; their reduction axis has stride `1`. Attention projection
+cells likewise exposed contiguous reduction stride. This rules out non-unit
+activation reduction stride as the explanation for ROW 255's output change;
+the candidate altered Q4_K value ordering or scale association.
+
+The profile recorded `225` packed-row-blocked operations and `41.083 ms` of
+`49.998 ms` total per-op GPU time at its diagnostic step. Its byte totals remain
+backing-buffer lengths, not accessed ranges, and are not used as a bandwidth
+conclusion. The temporary layout print was removed after the trace.
