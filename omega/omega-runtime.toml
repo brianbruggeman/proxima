@@ -10,6 +10,20 @@
 # const's doc comment in src/sized.rs, not here — this file carries only the
 # number and a one-line pointer.
 
+[packed_row_block]
+# number of independent 32-lane SIMD-groups Metal packs into one threadgroup
+# for the row-blocked packed-Q4_K/Q5_K/Q6_K matmul kernel
+# (`push_packed_row_blocked_body`). Each simdgroup folds its own
+# PACKED_ROWS_PER_GROUP(4) output rows entirely independently -- no
+# threadgroup-shared memory, no barrier, no dependency on
+# `thread_position_in_threadgroup` -- so raising this is purely a dispatch
+# occupancy change; see sized::PACKED_ROW_BLOCK_SIMDGROUPS. Must be a power
+# of two so `simdgroups * SIMD_WIDTH` stays a clean divisor/multiple
+# relationship with the grid (`msl.rs`'s `grid_threads` row-block arm), and
+# `<= 32` so `simdgroups * SIMD_WIDTH` never exceeds the 1024-thread
+# per-threadgroup ceiling every Apple GPU family this crate targets enforces.
+simdgroups = 1
+
 [tiled_gemm]
 # below this many activation rows (tokens) in one dispatch, the row-blocked
 # packed-matmul kernel (`push_packed_row_blocked_body`) runs instead of the

@@ -19702,3 +19702,122 @@ repeated pipeline compilation, so the geometry is rejected and the source is
 restored to one 32-lane group per four rows. The real Q4 parity and fused-root
 tests passed during the candidate run; the candidate is not retained. The
 meet-or-beat objective remains open.
+## ROW 268 -- omega packed row-block matmul occupancy sweep: a measured NEGATIVE, not a win
+
+Repo: `/Users/brianbruggeman/repos/slot-0/proxima-wt-geo`, branch `perf/matmul-geometry`.
+CARGO_TARGET_DIR pinned to scratchpad `geo-target` for every command below (never `export`).
+Host: Apple Silicon (macOS), load average 9-12.5 during the run (2 other agents' worktrees
+present, plus 2 idle-but-resident `ollama` `llama-server` processes at ~0.1% CPU holding the
+same 0.6B blob's memory — noted, not killed, since neither was actively generating).
+
+**Target:** `reduce-packed-row-blocked` (`omega/src/msl.rs`'s `push_packed_row_blocked_body`),
+169 ops/token, measured 32.7% of `gpu_exec_ms` in the prior session's numbers, ~6x above its
+own bandwidth floor. Hypothesis under test: the row-blocked matmul dispatches exactly one
+32-lane SIMD-group per threadgroup (`GridSpec::threadgroup_width = Some(SIMD_WIDTH)` via
+`tiled_gemm_threadgroup_width`, confirmed by reading `omega/src/metal.rs:2137-2166`'s
+`dispatch` — `threadgroup_width` is honored exactly, never folded into a driver-picked
+occupancy hint), the minimum occupancy Apple GPUs allow, and raising it might hide dispatch
+latency behind more resident work per threadgroup.
+
+**Verified before changing anything (`msl.rs`):** the row-blocked kernel body
+(`push_packed_row_blocked_body`, called from `push_cooperative_reduce_body` at `msl.rs:3172`)
+indexes only off `gid` (`[[thread_position_in_grid]]`, confirmed at `msl.rs:1863` — a GLOBAL
+id under Metal's `dispatchThreads:threadsPerThreadgroup:`, the API `dispatch` always calls),
+never off `thread_position_in_threadgroup`, and uses no `threadgroup`-shared memory and no
+`threadgroup_barrier`/`simdgroup_barrier` (grepped; those exist only in `push_tiled_gemm_body`,
+lines 2907-3060, an unrelated path). So each simdgroup folds its own `PACKED_ROWS_PER_GROUP`
+(4) output rows entirely independently of every other simdgroup in the same threadgroup —
+raising simdgroups-per-threadgroup is dispatch-geometry-only, never a kernel-body change, as
+long as `threadgroup_width` stays a whole multiple of `SIMD_WIDTH` (both `grid.threads` and
+`threadgroup_width` are always multiples of 32 by construction, so the boundary/remainder
+threadgroup is always a whole number of complete simdgroups, never a partial one).
+
+**Fix landed:** a new build-time-configurable axis, `PACKED_ROW_BLOCK_SIMDGROUPS`
+(`omega/src/sized.rs`, `omega-runtime.toml`'s `[packed_row_block]` section,
+`OMEGA_PACKED_ROW_BLOCK_SIMDGROUPS` env override, `build.rs`'s
+`require_power_of_two_le_32` cross-axis rule), threaded into
+`msl.rs::tiled_gemm_threadgroup_width`'s packed-row-block arm as
+`Some(PACKED_ROW_BLOCK_SIMDGROUPS * SIMD_WIDTH)`. Default TOML value: 1 (unchanged behavior).
+Compile-time only — no `Box`, no new library type; a pure dispatch-geometry knob per the
+existing sizing-config mechanism `TILED_GEMM_MIN_TOKENS` already uses.
+
+**Correctness (HARD GATE, checked first):** 0.6B and 4B, N=16, N=1 (baseline) vs N=2
+binaries, byte-identical `generated_ids`/`generated_text` on both. 0.6B:
+`"... Also, explain how a hash table works in one paragraph. Also, explain how"` — identical.
+4B: `"... Also, explain the difference between a hash map and a hash table. Additionally,"` —
+identical. PASS.
+
+**Sweep — 0.6B, N=64 tokens, release, production single-command-buffer path (`token_breakdown_metal`,
+steady-state = last 30 of 64 steps), 2 reps/arm (budget-constrained, not the full 3-5):**
+
+| simdgroups/tg | rep1 avg_total_ms/tok | rep2 avg_total_ms/tok | mean | spread | rep1 avg_gpu_exec_ms/tok | rep2 | mean |
+|---|---|---|---|---|---|---|---|
+| 1 (baseline) | 31.450 | 31.560 | 31.505 | 0.35% | 21.133 | 21.295 | 21.214 |
+| 2 | 30.697 | 31.233 | 30.965 | 1.73% | 20.239 | 20.618 | 20.429 |
+| 4 | 30.667 | 31.232 | 30.950 | 1.83% | 20.911 | 21.415 | 21.163 |
+| 8 | 30.973 | 31.176 | 31.075 | 0.65% | 21.008 | 21.174 | 21.091 |
+
+**Honest read: every arm's mean falls within ~2% of baseline, well inside a single arm's own
+run-to-run spread. No distinguishable win from widening simdgroups-per-threadgroup in the
+production path.** N=2/N=4 look marginally faster by eye; that margin is smaller than the
+noise already present between two back-to-back runs of the SAME binary.
+
+**Op-profile path (`PROXIMA_METAL_OP_PROFILE_STEP=40`, per-op command buffers — a DIFFERENT,
+slower diagnostic path, not the production one) told a more encouraging but ultimately
+unreliable story:** `reduce-packed-row-blocked` gpu_ns/op fell 51838 (N=1) -> 40796 (N=2,
+-21%) -> 44056 (N=4) -> 45385 (N=8) — non-monotonic, and buckets I never touched
+(`elementwise`, `reduce-cooperative`) moved by comparable percentages run-to-run on this same
+diagnostic path (e.g. `elementwise` 9.582ms at N=1 -> 7.535ms at N=2, a kernel this change
+never runs through), proving the op-profile path itself carries ~20-30% measurement noise
+independent of the change under test. **This is why the production path's own number is the
+one that gates the verdict, not the op-profile path's.**
+
+**4B, N=16 (correctness-gate runs doubled as the 4B timing arm, n=8 steady steps — small
+sample):** N=1 baseline 63.984 ms/token avg_total, 49.546 avg_gpu_exec. N=2: **75.068
+ms/token (+17.3%), 53.873 avg_gpu_exec (+8.7%) — a REGRESSION, not the hoped-for
+scaling-with-weight-count win.** Directionally opposite the target hypothesis. Small n (8
+steps), not re-run for CoV under the time budget — flagged as a finding needing a wider
+sweep before anyone builds on it, not a settled negative.
+
+**metal-tiled-gemm arm — ENGAGEMENT ASSERTED WITH A COUNT, and it is ZERO.** Built with
+`--features omega/metal-tiled-gemm` (simdgroups left at TOML default 1). `op_profile_bucket`
+at step=40 shows **zero** ops classified `reduce-tiled-gemm`; all 169 matmul ops still show
+`reduce-packed-row-blocked`. Mechanism: `TILED_GEMM_MIN_TOKENS` (default 8, `omega-runtime.toml`)
+gates tiled-GEMM eligibility on the token/batch extent of one dispatch, and single-token
+autoregressive decode never meets it — the tiled path exists only for prefill/batched
+dispatch, never for decode. **The flag did nothing for this workload; its first-run timing
+(44.703 ms/token) was a rebuild-warmup outlier — a second back-to-back run (31.734 ms/token)
+matched baseline within noise, confirming zero engagement means zero effect, not a hidden
+cost.** This is the same trap named in the brief (BGE packing 0 times, AMX 0 times) firing a
+fourth time; the count is what caught it, not the flag.
+
+**Conclusion: occupancy is not the limiter for this kernel's 6x-above-bandwidth cost.**
+Raising simdgroups-per-threadgroup is dispatch-only and provably correctness-preserving
+(verified from the kernel body, confirmed by byte-identical output at two model sizes), but
+moves the production number by less than run-to-run noise at 0.6B and makes it measurably
+worse at 4B. The 6x gap is not a dispatch-geometry problem; it lives somewhere else in the
+kernel (per-element compute cost, memory access pattern, or something not touched by this
+experiment) — redirecting further effort away from occupancy tuning.
+
+**Left at TOML default `simdgroups = 1` (no behavior change from main).** The new
+`OMEGA_PACKED_ROW_BLOCK_SIMDGROUPS` build-time axis stays in the tree as a now-measured,
+now-negative dial — future work does not need to re-derive whether this lever works.
+
+**Gates:** `cargo build -p omega --release` clean (default and `--features metal-tiled-gemm`);
+`cargo clippy -p omega --all-targets` clean, exit 0; `cargo nextest run -p omega -p
+proxima-tensor -p proxima-model-interop`: **629 tests run, 629 passed, 8 skipped**, exit 0.
+Re-prove: `CARGO_TARGET_DIR=<scratch> cargo nextest run -p omega -p proxima-tensor -p
+proxima-model-interop` from `proxima-wt-geo`.
+
+**Re-prove the sweep:** `OMEGA_PACKED_ROW_BLOCK_SIMDGROUPS=<N> cargo build --release --example
+gguf_generate` then run against the 0.6B/4B blobs named in the task brief; steady-state
+numbers come from grepping `token_breakdown_metal` lines (last 30 of a 64-token run) in the
+example's stdout. Raw numbers: `packed_row_block_simdgroup_sweep.csv` (session scratchpad,
+not vendored into the repo — a genuinely re-provable CI gate for this row would need the
+sweep script and CSV landed as a bench artifact; that packaging is NOT done, flagged as the
+gap between "I ran this" and "CI can re-run this").
+
+**Residual / what would still make this stronger:** 3-5 reps/arm instead of 2 (time-boxed);
+a wider N sweep at 4B to confirm the regression outside n=8; an actual profiler (Instruments/
+`perf-events`-equivalent) on the row-blocked kernel to find where the 6x really lives, since
+occupancy is now ruled out by measurement rather than assumed.
