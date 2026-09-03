@@ -19253,6 +19253,36 @@ Raw records are `/tmp/proxima-metal-width64-two-run{1,2,3}.txt`. The source
 candidate was reverted before this row was committed; the worktree contains
 the width-32 baseline implementation.
 
+## ROW 251 -- Q4_K plain-product float4 accumulation
+
+The existing packed row-blocked Q4_K path now accumulates its proven plain
+`weight * activation` body through two `float4` dot products per eight-level
+run. The scale/minimum deferred identity is unchanged; non-plain fused bodies
+still use the prior scalar path. No graph, dispatch count, weight layout,
+quantization, or output type changed.
+
+The candidate used the same full OpenChat Q4_K_S Metal harness as ROW 248:
+`new_count=31`, one steady cached decode token, three independent processes,
+all layers, and one matmul worker. All runs selected `Here is`, reported
+finite logits, and reported no errors. The production-shaped CPU/Metal
+fixture remained at maximum absolute difference `0.0000044107437`.
+
+| arm | run 1 | run 2 | run 3 | mean | CoV |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| prior scalar Q4_K step-1 wall ms | 69.294 | 69.311 | 69.183 | 69.263 | 0.105% |
+| float4 Q4_K step-1 wall ms | 66.821 | 67.221 | 66.916 | 66.853 | 0.316% |
+| prior scalar Q4_K step-1 GPU ms | 50.769 | 50.878 | 50.716 | 50.788 | 0.159% |
+| float4 Q4_K step-1 GPU ms | 48.072 | 47.608 | 47.792 | 47.957 | 0.493% |
+
+The observed candidate/control ratios are `1.036x` lower wall time and
+`1.059x` lower GPU time. The exact-prompt llama.cpp/ggml comparison remains
+`17.467 ms/token` from ROW 250, so the candidate remains `3.829x` slower by
+wall time. This is a measured kernel reduction, not an incumbent win.
+
+Raw records are `/tmp/proxima-metal-q4k-float4-two-run{1,2,3}.txt`. The
+source candidate is `omega/src/msl.rs:2642-2650`; the existing parity control
+is `omega/tests/metal_real_forward.rs:148-181`.
+
 ## ROW 250 -- exact-prompt GPU decode comparison
 
 ROW 243's llama-bench `tg1` cell was empty-cache and is not a cached decode
