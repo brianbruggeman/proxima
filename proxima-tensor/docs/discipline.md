@@ -19659,7 +19659,7 @@ time was `1.008x` slower, so the annotation was rolled back. The wall movement
 does not establish a GPU win and supplies no basis for changing the helper's
 arithmetic shape.
 
-## ROW 267 -- ggml's two-SIMD-group Q4_K geometry is a small retained cell, not the incumbent match
+## ROW 267 -- ggml's two-SIMD-group Q4_K geometry regresses the cached-feature wall cell
 
 The packed row-blocked dispatch was changed to mirror the checked-in ggml
 Metal geometry: two 32-lane SIMD groups per 64-thread threadgroup, with four
@@ -19670,29 +19670,35 @@ and weight representation were unchanged. The source test now checks the
 absolute difference `0.0000030994415`, relative `0.0000020013174`; the fused
 cached root remained at `0.0000044107437`.
 
-The isolated 24-token steady decode cell recorded 23 post-prefill steps:
+The first isolated 24-token run in this experiment was accidentally built
+without `cached-attention-streaming`; its 23 post-prefill steps are retained
+below as a feature-off record only and are not the cached-attention comparison:
 
 | arm | wall ms/token | GPU ms/token | CoV | output / quality |
 | --- | ---: | ---: | ---: | --- |
-| two-SIMD-group candidate | 50.991 | 39.781 | wall 1.49%, GPU 1.07% | `Here is ...`; finite logits |
-| retained one-group cell, ROW 262 | 51.535 | 39.841 | wall 2.16%, GPU 0.98% | `Here is ...`; finite logits |
+| two-SIMD-group candidate, feature off | 50.991 | 39.781 | wall 1.49%, GPU 1.07% | `Here is ...`; finite logits |
+| one-group control, feature off | 51.571 | 35.117 | wall 1.75%, GPU 2.00% | `Here is ...`; finite logits |
 | llama.cpp / ggml, ROW 250 | 17.467 | unreported | 0.363% | matched prompt; output record |
 
-The candidate's device allocation at the final recorded step was
+The feature-off candidate's device allocation at the final recorded step was
 `4,167,565,312 B`; the candidate and ROW 262 use the same Proxima device
 allocation scope, while the llama row is process RSS and remains a different
-memory scope. The candidate wall ratio against the llama record is
+memory scope. The feature-off candidate wall ratio against the llama record is
 `50.991 / 17.467 = 2.920x` slower. GPU time cannot be compared to llama's
 because the incumbent row has no GPU execution timer. The candidate is a small
 within-Proxima wall movement, but it does not close the incumbent gap and is
 not an incumbent performance result.
 
-The mechanism is dispatch amortization only: the number of packed output
-threadgroups is halved while each SIMD group's Q4_K arithmetic and memory
-traffic remain unchanged. `prepare_ms` remained about `2.0 ms`, `op_setup_ms`
-about `3.4--5.1 ms`, and production GPU execution remained about `39--40 ms`
-per step in the same run, so this geometry cannot account for the missing
-approximately `33.5 ms` of wall time. The retained source test and real
-forward tests passed with `metal,cached-attention-streaming`; the observed
-output stayed unchanged. This cell is retained as a measured incremental
-change, while the meet-or-beat objective remains open.
+The matched feature-on rerun used the same 24-token protocol and recorded:
+
+| arm | wall ms/token | GPU ms/token | CoV | pipeline behavior | output / quality |
+| --- | ---: | ---: | ---: | --- | --- |
+| two-SIMD-group candidate | 64.958 | 34.936 | wall 1.66%, GPU 1.94% | one pipeline compile per step, about 12 ms | unchanged; finite logits |
+| one-SIMD-group control | 51.571 | 35.117 | wall 1.75%, GPU 2.00% | cached after initial compile | unchanged; finite logits |
+
+The feature-on candidate was `1.260x` slower on wall and `0.995x` on GPU
+relative to the exact control. Its tiny GPU movement does not offset the
+repeated pipeline compilation, so the geometry is rejected and the source is
+restored to one 32-lane group per four rows. The real Q4 parity and fused-root
+tests passed during the candidate run; the candidate is not retained. The
+meet-or-beat objective remains open.
