@@ -4820,7 +4820,16 @@ fn run_node_into<B: Deref<Target = [f32]> + Sync>(
         BoundOpKind::Elementwise { .. } => {
             #[cfg(feature = "instrument")]
             instrument::record_op_kind(instrument::OpKind::Elementwise);
-            run_elementwise_dispatch(resolved, buffers, session, output)
+            let gather_block = quantized_gather_operand(resolved)
+                .and_then(|(source, lookup)| {
+                    quantized_weights.and_then(|weights| weights.get(&source).map(|block| (lookup, block)))
+                });
+            match gather_block {
+                Some((lookup, block)) => {
+                    run_embedding_gather_quantized(resolved, buffers, &lookup, block, output)
+                }
+                None => run_elementwise_dispatch(resolved, buffers, session, output),
+            }
         }
         BoundOpKind::Reduce {
             keep: Keep::Reduce,
@@ -5295,6 +5304,120 @@ fn fill_running_offsets(resolved: &BoundOp, coordinate: &[u64], running: &mut [i
 /// this axis. Falls straight through to [`run_elementwise`] whenever any
 /// gate fails: no session, too few elements, or too few outer positions to
 /// clear even a one-chunk-per-worker split.
+///
+/// Whether `resolved` is a whole-row gather over a single operand with an
+/// `Identity` body — the exact shape `proxima-tensor/src/spec.rs`'s
+/// `embedding_lookup` emits (`table[ids[s], d]`), and the only
+/// [`BoundOpKind::Elementwise`] shape a packed, non-`Float32` operand can
+/// answer without dequantizing anything but the rows actually read. A
+/// second operand, or any body step beyond a bare passthrough, falls back
+/// to the ordinary f32 [`run_elementwise_dispatch`] path.
+fn quantized_gather_operand(resolved: &BoundOp) -> Option<(NodeId, bind::Lookup)> {
+    if !matches!(resolved.kind, BoundOpKind::Elementwise { .. }) {
+        return None;
+    }
+    let body = resolved.element_body();
+    if body.steps.len() != 1 || body.steps[0].op != ScalarOp::Identity {
+        return None;
+    }
+    let [(source, _layout, Some(lookup))] = resolved.operands() else {
+        return None;
+    };
+    Some((*source, lookup.clone()))
+}
+
+/// [`quantized_gather_operand`]'s executor: one embedding row per output
+/// row, decoded straight out of `block`'s own packed bytes into `output`'s
+/// row slice — [`dequantize_row`] never sees, and never allocates, anything
+/// but the [`bind::Lookup::element_stride`]-wide row a given index selects.
+/// This is what keeps `token_embd.weight` off the owned-`Vec<f32>` path
+/// `proxima_model_interop::bind::bind_dense_as`'s own doc used to require:
+/// the full table stays exactly as packed as every other `Q4_K`/`Q5_K`/
+/// `Q6_K`/`Q8_0` weight this crate already keeps resident, and only the rows
+/// a real decode step actually asks for are ever turned into f32.
+fn run_embedding_gather_quantized<B: Deref<Target = [f32]>>(
+    resolved: &BoundOp,
+    buffers: &[Option<B>],
+    lookup: &bind::Lookup,
+    block: &QuantizedBlock<'_>,
+    output: &mut [f32],
+) -> Result<(), TensorError> {
+    let shape_error = || TensorError::NotLowerable {
+        node: resolved.node,
+        reason: "quantized embedding gather row width does not divide the output buffer evenly",
+    };
+    let dim = usize::try_from(lookup.element_stride).map_err(|_| shape_error())?;
+    if dim == 0 || !output.len().is_multiple_of(dim) {
+        return Err(shape_error());
+    }
+    let indices = buffer_of(buffers, lookup.indices)?;
+    let mut coordinate = vec![0u64; resolved.extents.len().max(1)];
+    for (row, out_row) in output.chunks_exact_mut(dim).enumerate() {
+        coordinate[0] = row as u64;
+        let index_offset = usize::try_from(lookup.index_layout.offset_of(&coordinate))
+            .map_err(|_| shape_error())?;
+        let raw_index = *indices.get(index_offset).ok_or_else(shape_error)?;
+        let row_index = raw_index as i64;
+        if row_index < 0 || row_index as u64 >= lookup.extent {
+            return Err(TensorError::GatherIndexOutOfRange {
+                node: resolved.node,
+                index: row_index,
+                extent: lookup.extent,
+            });
+        }
+        dequantize_row(resolved.node, block, row_index as usize, dim, out_row)
+            .map_err(|_| shape_error())?;
+    }
+    Ok(())
+}
+
+/// One row's worth of dequantized elements, decoded directly from `block`'s
+/// packed bytes at `row_index`'s byte offset — no allocation, no table-wide
+/// pass. `dim` must be a multiple of the codec's own block width (`QK_K`
+/// for the K-quant family, `QK8_0` for `Q8_0`); every real GGUF embedding
+/// width this crate has bound (Qwen3's 1024 and 2560, both multiples of
+/// 256) satisfies this, and a checkpoint whose embedding width does not is
+/// reported here rather than silently mis-decoded.
+fn dequantize_row(
+    node: NodeId,
+    block: &QuantizedBlock<'_>,
+    row_index: usize,
+    dim: usize,
+    output: &mut [f32],
+) -> Result<(), TensorError> {
+    use proxima_gguf::quant::{q4_k, q5_k, q6_k, q8_0};
+    let unaligned_row = || TensorError::NotLowerable {
+        node,
+        reason: "quantized embedding row width does not divide the codec's own block width",
+    };
+    let (data, block_bytes, block_elements): (&[u8], usize, usize) = match block {
+        QuantizedBlock::Q4K(data) => (data, q4_k::BLOCK_BYTES, q4_k::QK_K),
+        QuantizedBlock::Q5K(data) => (data, q5_k::BLOCK_BYTES, q5_k::QK_K),
+        QuantizedBlock::Q6K(data) => (data, q6_k::BLOCK_BYTES, q6_k::QK_K),
+        QuantizedBlock::Q8_0(data) => (data, q8_0::BLOCK_BYTES, q8_0::QK8_0),
+        QuantizedBlock::Float32(_)
+        | QuantizedBlock::Q4_0(_)
+        | QuantizedBlock::Float16(_)
+        | QuantizedBlock::BFloat16(_) => {
+            return Err(unaligned_row());
+        }
+    };
+    if !dim.is_multiple_of(block_elements) {
+        return Err(unaligned_row());
+    }
+    let row_bytes = (dim / block_elements) * block_bytes;
+    let start = row_index * row_bytes;
+    let row_bytes_slice = data.get(start..start + row_bytes).ok_or_else(unaligned_row)?;
+    match block {
+        QuantizedBlock::Q4K(_) => q4_k::dequantize(row_bytes_slice, output),
+        QuantizedBlock::Q5K(_) => q5_k::dequantize(row_bytes_slice, output),
+        QuantizedBlock::Q6K(_) => q6_k::dequantize(row_bytes_slice, output),
+        QuantizedBlock::Q8_0(_) => q8_0::dequantize(row_bytes_slice, output),
+        _ => unreachable!("codec already matched above"),
+    }
+    .map_err(|_| unaligned_row())
+}
+
 fn run_elementwise_dispatch<B: Deref<Target = [f32]> + Sync>(
     resolved: &BoundOp,
     buffers: &[Option<B>],

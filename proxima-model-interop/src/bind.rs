@@ -630,12 +630,19 @@ impl PackedOwnedKind {
 }
 
 /// A learned 1-D scale (RMSNorm weight) or `token_embd.weight` (indexed by
-/// row via `embedding_lookup`, never projected; never a packed path even
-/// when quantized, since a quantized matmul operand requires feeding a
-/// `Multiply`-then-`Add` reduce, which a gather is not). Falls back to
+/// row via `embedding_lookup`, never projected). `Q4_K`/`Q5_K`/`Q6_K`/`Q8_0`
+/// bind packed and zero-copy here too, exactly like [`bind_matmul_weight_as`]'s
+/// own packed arm -- `proxima_tensor::cpu`'s private `run_embedding_gather_quantized`
+/// (the CPU evaluator's `BoundOpKind::Elementwise` counterpart to that
+/// module's `run_reduce_with_quantized_weights`) and `omega::msl`'s
+/// already-codec-generic `render_elementwise`/`operand_read` decode one row
+/// at a time, straight out of the packed bytes, at whichever row a real
+/// token id selects -- never the whole table. Falls back to
 /// [`gguf_tensor_as_f32`]'s owned copy only if the zero-copy borrow is
 /// refused (misaligned base pointer) or the tensor is some other
-/// decodable-but-not-borrowable `GgmlType`.
+/// decodable-but-not-borrowable `GgmlType` (`Q4_0`/`F16`/`BF16`: no CPU
+/// row-gather decoder exists for those yet, so they still take the eager
+/// dequantize path rather than silently mis-decoding).
 ///
 /// # Errors
 ///
@@ -676,6 +683,18 @@ pub(crate) fn bind_dense_as<'file>(
     match gguf_tensor_as_packed_block(parsed, file_bytes, source_name) {
         Ok(block @ proxima_tensor::cpu::QuantizedBlock::Float32(borrowed)) => {
             state.resident_bytes += core::mem::size_of_val(borrowed);
+            state.packed.push((target_name, block));
+        }
+        // A packed block whose codec `proxima_tensor::cpu::run_embedding_gather_quantized`
+        // can decode one row at a time -- stays packed, same as `bind_matmul_weight_as`'s
+        // own packed arm, instead of dequantizing the whole table up front.
+        Ok(
+            block @ (proxima_tensor::cpu::QuantizedBlock::Q4K(bytes)
+            | proxima_tensor::cpu::QuantizedBlock::Q5K(bytes)
+            | proxima_tensor::cpu::QuantizedBlock::Q6K(bytes)
+            | proxima_tensor::cpu::QuantizedBlock::Q8_0(bytes)),
+        ) => {
+            state.resident_bytes += bytes.len();
             state.packed.push((target_name, block));
         }
         Ok(_) | Err(_) => {
