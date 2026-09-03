@@ -2194,26 +2194,42 @@ fn attention_dependencies(
 
 #[cfg(feature = "cached-attention-streaming")]
 fn has_external_attention_consumer(
-    program: &[Op],
+    consumers: &BTreeMap<NodeId, BTreeSet<NodeId>>,
     dependencies: &BTreeSet<NodeId>,
     dependency: NodeId,
     output: NodeId,
 ) -> bool {
+    consumers
+        .get(&dependency)
+        .into_iter()
+        .flatten()
+        .any(|consumer| !dependencies.contains(consumer) && *consumer != output)
+}
+
+#[cfg(feature = "cached-attention-streaming")]
+fn attention_consumers(
+    program: &[Op],
+    dependencies: &BTreeSet<NodeId>,
+) -> BTreeMap<NodeId, BTreeSet<NodeId>> {
+    let mut consumers = BTreeMap::new();
     for (position, operation) in program.iter().enumerate() {
         let consumer = NodeId(position as u32);
-        if dependencies.contains(&consumer) || consumer == output {
-            continue;
+        let mut references = Vec::new();
+        match operation {
+            Op::Elementwise { operands, .. } => {
+                references.extend(operands.iter().map(|(node, _)| *node));
+            }
+            Op::Reduce(reduce) => references.push(reduce.operand),
+            Op::Input { .. } | Op::Iota { .. } | Op::Constant { .. } => {}
         }
-        let references = match operation {
-            Op::Elementwise { operands, .. } => operands.iter().map(|(node, _)| *node).collect(),
-            Op::Reduce(reduce) => alloc::vec![reduce.operand],
-            Op::Input { .. } | Op::Iota { .. } | Op::Constant { .. } => Vec::new(),
-        };
-        if references.contains(&dependency) {
-            return true;
+        for dependency in references
+            .into_iter()
+            .filter(|node| dependencies.contains(node))
+        {
+            consumers.entry(dependency).or_insert_with(BTreeSet::new).insert(consumer);
         }
     }
-    false
+    consumers
 }
 
 #[cfg(feature = "cached-attention-streaming")]
@@ -2222,10 +2238,11 @@ fn removable_attention_dependencies(
     dependencies: &BTreeSet<NodeId>,
     output: NodeId,
 ) -> BTreeSet<NodeId> {
+    let consumers = attention_consumers(program, dependencies);
     let mut retained = dependencies
         .iter()
         .copied()
-        .filter(|node| has_external_attention_consumer(program, dependencies, *node, output))
+        .filter(|node| has_external_attention_consumer(&consumers, dependencies, *node, output))
         .collect::<BTreeSet<_>>();
     let mut changed = true;
     while changed {
