@@ -19628,3 +19628,19 @@ cooperative-family total. The next experiment must explain the remaining
 production gap between approximately `39--40 ms` GPU and the llama wall cell
 at `17.467 ms/token`; no new struct or graph abstraction is justified by this
 measurement.
+
+## ROW 265 -- float4 accumulation inside the paired Q4_K helper is a GPU negative
+
+The existing `q4k_pair_dot` helper was temporarily changed to accumulate four
+`float4` dot products instead of its scalar multiply-add sequence. It changed
+no mapping, graph, dispatch, allocation, or output representation. The real
+checkpoint parity fixture remained finite and within the existing error range,
+and the full 24-token run emitted the same observed text.
+
+The 23-step within-process cell measured `39.929 ms` GPU per token (CoV
+`1.08%`) and `51.183 ms` wall per token (CoV `2.35%`), versus the retained
+scalar helper's `39.841 ms` GPU and `51.535 ms` wall in ROW 262. GPU time was
+`1.002x` slower; the small wall difference is not an attributable GPU win.
+The float4 body was rolled back. The scalar paired helper remains the measured
+implementation, and this experiment supplies no basis for another vector
+type or accumulator abstraction.
