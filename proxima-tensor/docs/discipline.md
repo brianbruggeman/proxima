@@ -19423,6 +19423,12 @@ non-Q4_K fused body changed. The earlier implementation was rejected in ROW
 255 because it used the wrong mapping and emitted `Print Print`; this corrected
 implementation is a separate cell.
 
+The helper is gated to Float32 activation bodies. Q4_K x Float16 keeps the
+existing path; this boundary was exercised after the initial cell exposed a
+compile-time type mismatch in the generated MSL. The isolated Q4_K x Float16
+parity case and the full serial Metal parity suite (36 active cases) then ran
+successfully.
+
 The real-checkpoint parity fixture reported finite output and maximum absolute
 difference `0.0000030994415` against dequantized-f32 CPU for 64 rows of
 `blk.0.attn_q.weight` (`Q4_K`, `k=4096`). The production CPU/Metal fixture also
