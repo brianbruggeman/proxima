@@ -374,6 +374,7 @@ fn head_dim_from_metadata(
 /// [`bind_all_weights`]'s tied-embeddings check already makes -- so a future
 /// checkpoint that also carries these tensors under a different
 /// `general.architecture` value is handled without a name-based dispatch.
+#[cfg(feature = "std")]
 pub(crate) fn checkpoint_has_qk_norm(parsed: &ParsedGguf) -> bool {
     find_tensor(parsed, "blk.0.attn_q_norm.weight").is_ok()
 }
