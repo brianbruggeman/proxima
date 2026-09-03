@@ -14,6 +14,8 @@ use proxima_tensor::{
     AxisTerm, DType, Extent, IndexMap, Keep, Op, Reduce, ReduceInit, ScalarOp, append, bind, infer,
     map,
 };
+#[cfg(feature = "cached-attention-streaming")]
+use proxima_tensor::{BoundOp, BoundOpKind, Layout, NodeId};
 
 fn elementwise_tanh_kernel() -> omega::Kernel {
     let mut program = Vec::new();
@@ -345,6 +347,40 @@ fn iota_kernel() -> omega::Kernel {
     omega::emit(&nests[0], &std::collections::BTreeMap::new()).expect("iota emits")
 }
 
+#[cfg(feature = "cached-attention-streaming")]
+fn cached_attention_kernel() -> omega::Kernel {
+    let operands = (0..8)
+        .map(|index| {
+            (
+                NodeId(index),
+                Layout {
+                    base: 0,
+                    strides: vec![1].into(),
+                },
+                None,
+            )
+        })
+        .collect();
+    let bound = BoundOp {
+        node: NodeId(8),
+        dtype: DType::Float32,
+        extents: vec![1, 1, 1, 4],
+        kind: BoundOpKind::CachedAttention {
+            operands,
+            query_rows: 1,
+            cached_key_rows: 1,
+            new_key_rows: 1,
+            kv_heads: 1,
+            query_groups: 1,
+            head_dim: 4,
+            scale: 0.5,
+            cached_lower_inclusive: i64::MIN,
+            new_upper_inclusive: 0,
+        },
+    };
+    omega::emit(&bound, &std::collections::BTreeMap::new()).expect("cached attention emits")
+}
+
 #[test]
 fn emitted_source_compiles_with_the_metal_toolchain() {
     #[allow(unused_mut)]
@@ -352,6 +388,8 @@ fn emitted_source_compiles_with_the_metal_toolchain() {
         elementwise_tanh_kernel(),
         elementwise_erf_kernel(),
         fused_matmul_kernel(),
+        #[cfg(feature = "cached-attention-streaming")]
+        cached_attention_kernel(),
         cumsum_kernel(),
         embedding_lookup_kernel(),
         embedding_matmul_kernel(),
@@ -393,9 +431,17 @@ fn emitted_source_compiles_with_the_metal_toolchain() {
     }
 
     let expected = if cfg!(feature = "metal-tiled-gemm") {
-        8
+        if cfg!(feature = "cached-attention-streaming") {
+            9
+        } else {
+            8
+        }
     } else {
-        7
+        if cfg!(feature = "cached-attention-streaming") {
+            8
+        } else {
+            7
+        }
     };
     assert_eq!(
         compiled, expected,
