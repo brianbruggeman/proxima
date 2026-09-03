@@ -19349,3 +19349,22 @@ the Proxima value is device allocation, while the incumbent value is process
 max RSS from `/usr/bin/time -l`. The raw records are
 `/tmp/llama-metal-exact-prompt8-run{1,2,3}.txt` and
 `/tmp/proxima-metal-bind-index-two-run{1,2,3}.txt`.
+
+## ROW 254 -- packed row batch eight negative
+
+The existing packed Q4_K row-blocked kernel was tested with
+`PACKED_ROWS_PER_GROUP=8` instead of the retained value `4`. This reused the
+same row-blocked dispatch and widened only the number of output rows folded by
+one SIMD group; no graph, struct, allocation, weight layout, or output type
+changed. The source was reverted after the full-checkpoint cell.
+
+| arm | wall ms | GPU ms | output |
+| --- | ---: | ---: | --- |
+| retained four-row batch | 69.263 | 50.788 | `Here is` |
+| eight-row candidate | 71.006 | 53.269 | `Here is` |
+
+The eight-row candidate measured `1.025x` slower wall time and `1.049x` slower
+GPU time in the single recorded candidate run. This rejects wider register
+ownership as the next packed-kernel change. The retained four-row baseline is
+the three-run cell in ROW 248; the candidate values are the direct stdout
+record from the release harness run in this session.
