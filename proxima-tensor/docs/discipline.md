@@ -19368,3 +19368,30 @@ GPU time in the single recorded candidate run. This rejects wider register
 ownership as the next packed-kernel change. The retained four-row baseline is
 the three-run cell in ROW 248; the candidate values are the direct stdout
 record from the release harness run in this session.
+
+## ROW 255 -- paired Q4_K nibble mapping quality regression
+
+The existing plain-product Q4_K branch was temporarily changed to mirror
+ggml's `iq`/`ir` lane mapping: each lane loaded paired low/high nibbles from
+the same packed bytes and used the corresponding four activation runs. The
+candidate reused `sumf[4]`, width 32, `PackedRowBlock`, and all existing
+buffers; it added no graph node, Rust type, allocation, or alternate weight
+representation. The source was reverted after the real checkpoint cell.
+
+The candidate compiled after its Q4_K-only gate was corrected. The existing
+CPU/Metal fixture still reported maximum absolute difference
+`0.0000044107437`, but the full OpenChat decode emitted `Print Print` instead
+of the retained baseline's `Here is`. That is an output-quality regression,
+so the timing is not an admissible performance result:
+
+| arm | step-1 wall ms | step-1 GPU ms | finite logits | generated output |
+| --- | ---: | ---: | --- | --- |
+| retained baseline | 65.808 mean | 47.518 mean | yes | `Here is` |
+| paired-nibble candidate | 64.818 | 35.149 | yes | `Print Print` |
+
+The candidate's apparent `1.015x` wall and `1.352x` GPU reductions cannot be
+carried forward because the end-to-end greedy output changed. The failure
+means the lane-to-activation or scale mapping is not yet proven against the
+real Q4_K checkpoint; the small fixture did not exercise that mapping. The
+candidate stdout is the direct release-harness record from this session, and
+the source is clean at the retained float4 implementation.
