@@ -2643,15 +2643,9 @@ fn push_packed_row_blocked_body(
                     source.push_str(&format!(
                         "                q4k_run8(blk, slot + (uint)(c * {run}), levels);\n"
                     ));
-                    source.push_str(&format!(
-                        "                for (int j = 0; j < {run}; ++j) {{\n"
-                    ));
-                    source.push_str(&format!(
-                        "                    {element_type} act = acts[c * {run} + j];\n"
-                    ));
-                    source.push_str("                    raw_acc += levels[j] * act;\n");
-                    source.push_str("                    act_sum += act;\n");
-                    source.push_str("                }\n");
+                    source.push_str("                raw_acc += dot(float4(levels[0], levels[1], levels[2], levels[3]), float4(acts[c * 8 + 0], acts[c * 8 + 1], acts[c * 8 + 2], acts[c * 8 + 3]));\n");
+                    source.push_str("                raw_acc += dot(float4(levels[4], levels[5], levels[6], levels[7]), float4(acts[c * 8 + 4], acts[c * 8 + 5], acts[c * 8 + 6], acts[c * 8 + 7]));\n");
+                    source.push_str("                act_sum += acts[c * 8 + 0] + acts[c * 8 + 1] + acts[c * 8 + 2] + acts[c * 8 + 3] + acts[c * 8 + 4] + acts[c * 8 + 5] + acts[c * 8 + 6] + acts[c * 8 + 7];\n");
                     source.push_str("            }\n");
                     source.push_str(
                         "            sumf[q] = sumf[q] + hdr.scale * raw_acc - hdr.minimum * act_sum;\n",
