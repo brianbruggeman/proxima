@@ -231,6 +231,67 @@ fn report_op_timings(step: usize, timings: &[OpGpuTiming]) {
     }
 }
 
+/// `TASK_VM_INFO`'s `phys_footprint` field (`mach/task_info.h`) -- macOS's
+/// own accounting of this process's compressed+resident memory charge, the
+/// same number Activity Monitor's "Memory" column and `footprint(1)` read.
+/// Read directly via `task_info` rather than `/usr/bin/time`'s whole-process
+/// peak RSS because this is sampled PER DECODE STEP, from inside the
+/// process, so growth can be attributed to a step boundary instead of only
+/// a start/end delta. Declares its own `task_info`/`mach_task_self` FFI
+/// rather than pulling in `mach2`/`mach` (neither is otherwise in this
+/// workspace's dependency graph) for a struct that is a stable, versioned,
+/// public part of the mach ABI (rev1, `TASK_VM_INFO_REV1_COUNT`) -- the
+/// struct here mirrors the header exactly up to (and including)
+/// `phys_footprint` and stops there, matching REV1's word count so the
+/// kernel fills exactly the fields declared.
+#[cfg(all(feature = "instrument", feature = "metal", target_os = "macos"))]
+fn phys_footprint_bytes() -> u64 {
+    #[repr(C)]
+    #[derive(Default)]
+    struct TaskVmInfo {
+        virtual_size: u64,
+        region_count: i32,
+        page_size: i32,
+        resident_size: u64,
+        resident_size_peak: u64,
+        device: u64,
+        device_peak: u64,
+        internal: u64,
+        internal_peak: u64,
+        external: u64,
+        external_peak: u64,
+        reusable: u64,
+        reusable_peak: u64,
+        purgeable_volatile_pmap: u64,
+        purgeable_volatile_resident: u64,
+        purgeable_volatile_virtual: u64,
+        compressed: u64,
+        compressed_peak: u64,
+        compressed_lifetime: u64,
+        phys_footprint: u64,
+    }
+
+    const TASK_VM_INFO: i32 = 22;
+
+    unsafe extern "C" {
+        fn mach_task_self() -> u32;
+        fn task_info(
+            target_task: u32,
+            flavor: i32,
+            task_info_out: *mut TaskVmInfo,
+            task_info_out_count: *mut u32,
+        ) -> i32;
+    }
+
+    let mut info = TaskVmInfo::default();
+    let mut count = (core::mem::size_of::<TaskVmInfo>() / core::mem::size_of::<u32>()) as u32;
+    let result = unsafe { task_info(mach_task_self(), TASK_VM_INFO, &mut info, &mut count) };
+    if result != 0 {
+        return 0;
+    }
+    info.phys_footprint
+}
+
 #[cfg(all(feature = "instrument", feature = "metal", target_os = "macos"))]
 fn stats_pass(entry: &mut FamilyGpuStats, gpu_ns: u64, operand_bytes: u64) {
     entry.row_blocked_count += 1;
@@ -828,8 +889,18 @@ pub(crate) struct BackendRuntime {
     /// this cache exists for the shape that DOES repeat (a caller replaying
     /// the same partial length twice), not for ordinary autoregressive
     /// decode, which visits a strictly increasing `cached_len` and so never
-    /// hits it within one call. See this crate's own task report for the
-    /// measured hit/miss count on a real 24-token decode.
+    /// hits it within one call.
+    ///
+    /// [`Self::resolve_plan`] clears this on every miss instead of
+    /// accumulating entries: measured on a real decode (`plan_cache_len` /
+    /// `plan_misses` in `token_breakdown_metal`) this map grew 1:1 with the
+    /// step index and `plan_hits` never left 0, so every step but the first
+    /// was retaining a `Plan` that could never be looked up again for the
+    /// rest of the call -- a Rust-heap leak (`phys_footprint_bytes` climbed
+    /// while `omega::metal::current_allocated_size()` stayed flat over the
+    /// same steps, proving the growth was not GPU-side). Clearing on miss
+    /// keeps exactly the one entry the field's own rationale above says is
+    /// worth keeping.
     plans: alloc::collections::BTreeMap<(usize, usize), Plan>,
     pub(crate) plan_hits: usize,
     pub(crate) plan_misses: usize,
@@ -861,6 +932,37 @@ impl BackendRuntime {
         outputs: &[NodeId],
         resident_names: &BTreeSet<&str>,
     ) -> Result<Evaluated, InteropError> {
+        let shape = self.resolve_plan(program, symbols, named, outputs, resident_names)?;
+        let plan = self
+            .plans
+            .get_mut(&shape)
+            .ok_or(InteropError::PlanCacheEntryVanished { shape })?;
+        Ok(execute_plan_named(plan, named)?)
+    }
+
+    /// [`Self::evaluate`]/[`Self::evaluate_op_timed`]'s shared cache-lookup
+    /// step, split out so the eviction policy lives in exactly one place.
+    ///
+    /// This struct's own [`Self::plans`] field comment already proved
+    /// ordinary autoregressive decode's `cached_len` strictly increases, so
+    /// a `Plan` keyed on it is NEVER looked up again once superseded --
+    /// measured directly: `plan_cache_len`/`plan_misses` both grew 1:1 with
+    /// the step index (`plan_hits` stayed 0) across a real decode, while
+    /// `phys_footprint_bytes` climbed and `omega::metal::current_allocated_size()`
+    /// stayed flat over the same steps -- the growth is a Rust-heap leak of
+    /// superseded `Plan`s, not a Metal-driver allocation. Clearing the map on
+    /// every miss keeps the one entry the doc's own rationale says is worth
+    /// keeping (an immediate same-shape replay lands as a hit BEFORE the
+    /// next miss would evict it) while making superseded entries collectible
+    /// instead of retained for the rest of the call.
+    fn resolve_plan(
+        &mut self,
+        program: &[Op],
+        symbols: &[u64],
+        named: &[(&str, QuantizedBlock<'_>)],
+        outputs: &[NodeId],
+        resident_names: &BTreeSet<&str>,
+    ) -> Result<(usize, usize), InteropError> {
         let shape = (symbols[0] as usize, symbols[1] as usize);
         if self.plans.contains_key(&shape) {
             self.plan_hits += 1;
@@ -868,13 +970,21 @@ impl BackendRuntime {
             self.plan_misses += 1;
             let mut plan = plan_named(self.backend, program, symbols, named, outputs)?;
             mark_resident(&mut plan, resident_names);
+            self.plans.clear();
             self.plans.insert(shape, plan);
         }
-        let plan = self
-            .plans
-            .get_mut(&shape)
-            .ok_or(InteropError::PlanCacheEntryVanished { shape })?;
-        Ok(execute_plan_named(plan, named)?)
+        Ok(shape)
+    }
+
+    /// Live entry count in [`Self::plans`] -- the direct witness that
+    /// [`Self::resolve_plan`]'s clear-on-miss policy keeps this bounded at 1
+    /// through ordinary autoregressive decode's strictly increasing
+    /// `cached_len`, rather than growing 1:1 with the step index as it did
+    /// before that policy landed. See `token_breakdown_metal`'s
+    /// `plan_cache_len` field.
+    #[cfg(feature = "instrument")]
+    pub(crate) fn plans_len(&self) -> usize {
+        self.plans.len()
     }
 
     /// Diagnostic counterpart of [`Self::evaluate`]: same plan-cache lookup,
@@ -895,15 +1005,7 @@ impl BackendRuntime {
         outputs: &[NodeId],
         resident_names: &BTreeSet<&str>,
     ) -> Result<(Evaluated, Vec<OpGpuTiming>), InteropError> {
-        let shape = (symbols[0] as usize, symbols[1] as usize);
-        if self.plans.contains_key(&shape) {
-            self.plan_hits += 1;
-        } else {
-            self.plan_misses += 1;
-            let mut plan = plan_named(self.backend, program, symbols, named, outputs)?;
-            mark_resident(&mut plan, resident_names);
-            self.plans.insert(shape, plan);
-        }
+        let shape = self.resolve_plan(program, symbols, named, outputs, resident_names)?;
         let plan = self
             .plans
             .get_mut(&shape)
@@ -1625,7 +1727,9 @@ impl<'file> LoadedModel<'file> {
                      gpu_exec_calls={} gpu_exec_ms={:.3} \
                      readback_calls={} readback_ms={:.3} readback_bytes={} \
                      nocopy_uploads={} copying_uploads={} nocopy_reuses={} \
-                     resident_uploads={} resident_reuses={} mapping_offset_uploads={}",
+                     resident_uploads={} resident_reuses={} mapping_offset_uploads={} \
+                     nocopy_cache_len={} phys_footprint_bytes={} device_allocated_bytes={} \
+                     plan_cache_len={} plan_hits={} plan_misses={}",
                         metal_stage.prepare_calls,
                         ms(metal_stage.prepare_ticks),
                         metal_stage.emit_calls,
@@ -1653,6 +1757,12 @@ impl<'file> LoadedModel<'file> {
                         metal_stage.resident_uploads,
                         metal_stage.resident_reuses,
                         metal_stage.mapping_offset_uploads,
+                        omega::metal::nocopy_cache_len(),
+                        phys_footprint_bytes(),
+                        omega::metal::current_allocated_size().unwrap_or(0),
+                        runtime.plans_len(),
+                        runtime.plan_hits,
+                        runtime.plan_misses,
                     );
                 }
 
