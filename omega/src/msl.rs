@@ -2618,6 +2618,7 @@ fn push_packed_row_blocked_body(
         let lanes_per_block = 8;
         let sub = Q4K_BLOCK_ELEMENTS / lanes_per_block;
         let plain_product = matches!(codec, PackedCodec::Q4K)
+            && element_type == "float"
             && is_plain_product_reduce(resolved, reduce_op, weight, other);
         source.push_str(&format!("    uint ix = (uint)lane / {lanes_per_block}u;\n"));
         source.push_str(&format!("    uint it = (uint)lane % {lanes_per_block}u;\n"));
@@ -3901,10 +3902,10 @@ mod tests {
     }
 
     #[test]
-    fn q4k_row_blocked_matmul_defers_scale_to_once_per_sub_block() {
+    fn q4k_row_blocked_matmul_uses_paired_nibble_decode() {
         // 256 == Q4K_BLOCK_ELEMENTS exactly: one super-block, so
         // packed_row_block matches and this is the real matmul shape the
-        // scale-deferred path exists for (`docs/discipline.md` ROW 106).
+        // the paired decode path exists for (`docs/discipline.md` ROW 257).
         let bound = matmul_op(4, 256, 5);
         let weight_node = bound.operands()[0].0;
         let mut q4k = BTreeMap::new();
@@ -3917,8 +3918,8 @@ mod tests {
 
         let source = emit(&bound, &q4k).expect("emits").source;
         assert!(
-            source.contains("raw_acc"),
-            "Add-reduce over a plain weight*activation body must take the scale-deferred path:\n{source}"
+            source.contains("q4k_pair_dot"),
+            "Add-reduce over a plain weight*activation body must take the paired decode path:\n{source}"
         );
         assert!(
             !source.contains("hdr.scale * levels[j] - hdr.minimum"),
