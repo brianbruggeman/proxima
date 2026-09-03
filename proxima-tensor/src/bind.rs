@@ -1715,6 +1715,65 @@ fn native_packed_layout(extents: &[u64], output_axes: &[u16], declared: &Layout)
 
 /// Batch driver: computes liveness once, then streams every expression
 /// through a fresh [`BoundOpBuilder`], flushing whatever remains held at the end.
+/// Every node `resolved` physically reads, straight off [`BoundOp::operands()`]
+/// plus each gathered operand's own [`Lookup::indices`] — the same walk
+/// [`crate::cpu`]'s own execution-time dead-node analysis performs, relocated
+/// here so a GPU backend (which has no persistent arena to skip a slot
+/// inside) can reuse it too, via [`prune_dead`] below.
+fn consumed_by_resolved_nodes(resolved: &[BoundOp]) -> BTreeSet<NodeId> {
+    let mut consumed = BTreeSet::new();
+    for computed in resolved {
+        for (operand, _layout, lookup) in computed.operands() {
+            consumed.insert(*operand);
+            if let Some(lookup) = lookup {
+                consumed.insert(lookup.indices);
+            }
+        }
+    }
+    consumed
+}
+
+/// Every `resolved` node neither consumed by another resolved node's own
+/// operands nor named in `effective_outputs` — dead weight [`bind`]'s own
+/// fusion can leave behind ([`eliminate_identity_multiply`] dropping a
+/// [`BoundOpKind::Constant`] from a fused body once its last reader absorbed
+/// it is one source; a fused-away [`BoundOpKind::Elementwise`] chain is
+/// another). [`crate::cpu::StaticArena`] computes this same set today purely
+/// to build its own execution-time skip list — see that type's own `dead`
+/// field doc — which hides a real cost from every OTHER backend: a driver
+/// with no persistent arena (every GPU backend today) has no skip list to
+/// consult, so it dispatches a kernel for a node this function would already
+/// tell it nobody reads.
+#[must_use]
+pub fn dead_resolved_nodes(resolved: &[BoundOp], effective_outputs: &[NodeId]) -> BTreeSet<NodeId> {
+    let consumed = consumed_by_resolved_nodes(resolved);
+    resolved
+        .iter()
+        .map(|computed| computed.node)
+        .filter(|node| !consumed.contains(node) && !effective_outputs.contains(node))
+        .collect()
+}
+
+/// Drops every [`dead_resolved_nodes`] entry from `resolved` — the one
+/// GPU-facing counterpart [`crate::cpu::StaticArena`]'s own skip-at-execution
+/// trick has no analogue for. A stateless driver (Metal/CUDA/wgpu today) has
+/// no persistent arena to skip a slot inside between calls, so the only way
+/// to avoid dispatching a dead node's kernel is to never hand it to the
+/// driver's own dispatch list at all. A no-op (identity on `resolved`,
+/// zero-cost when nothing is dead) unless [`dead_resolved_nodes`] finds
+/// something to drop.
+#[must_use]
+pub fn prune_dead(resolved: Vec<BoundOp>, effective_outputs: &[NodeId]) -> Vec<BoundOp> {
+    let dead = dead_resolved_nodes(&resolved, effective_outputs);
+    if dead.is_empty() {
+        return resolved;
+    }
+    resolved
+        .into_iter()
+        .filter(|computed| !dead.contains(&computed.node))
+        .collect()
+}
+
 pub fn bind(
     program: &[Op],
     shapes: &Shapes,

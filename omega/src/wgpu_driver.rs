@@ -39,7 +39,7 @@ use std::sync::mpsc;
 
 use proxima_tensor::{
     BoundOp, BoundOpKind, DType, Evaluated, Keep, Lookup, NodeId, Op, QuantizedBlock, Shapes,
-    TensorError, bind, infer, resolve_named_blocks,
+    TensorError, bind, infer, prune_dead, resolve_named_blocks,
 };
 
 use crate::error::EmitError;
@@ -281,7 +281,9 @@ pub fn plan(
     } else {
         outputs.to_vec()
     };
-    let resolved = bind(program, &shapes, &effective_outputs)?;
+    // no persistent arena to skip a dead slot inside between calls -- see
+    // `proxima_tensor::prune_dead`'s own doc.
+    let resolved = prune_dead(bind(program, &shapes, &effective_outputs)?, &effective_outputs);
     let block_nodes = block_node_ids(program);
     let packed_operands = packed_operands_of(&block_nodes, blocks);
     let (device, queue, caps) = acquire_device()?;
