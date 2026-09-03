@@ -19048,3 +19048,36 @@ The current Proxima feature reduces Metal encoded operations from 1194 to 616
 and preserves the observed selected text, but that work reduction has not yet
 closed the kernel execution gap. The next optimization must move the measured
 GPU execution row, not only the graph or dispatch count.
+
+## ROW 244 -- existing tiled-GEMM candidate recheck on the real checkpoint
+
+The existing default-off `metal-tiled-gemm` candidate was re-run against ROW
+243's real OpenChat prefill control before considering any new kernel. This is
+not a new representation: it selects `omega/src/msl.rs`'s existing
+`push_tiled_gemm_body` over the existing packed row-blocked body when the
+activation-row gate is met. The older record at `discipline.md:9843` measured
+that candidate as 4.27x slower on its earlier synthetic prefill shape; this
+row tests whether that result transfers to the current full-checkpoint shape.
+
+| arm | run 1 | run 2 | run 3 | mean | CoV |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| fused row-blocked wall ms | 2258.687 | 2253.314 | 2303.780 | 2271.927 | 0.996% |
+| fused row-blocked GPU ms | 2035.051 | 2030.457 | 2079.712 | 2048.407 | 1.085% |
+| tiled-GEMM wall ms | 1551.763 | 1372.165 | 1417.727 | 1447.218 | 5.267% |
+| tiled-GEMM GPU ms | 1209.203 | 1144.982 | 1191.970 | 1182.052 | 2.296% |
+| tiled-GEMM max RSS B | 4170432512 | 4168253440 | 4169138176 | 4169274709 | 0.021% |
+
+The real-checkpoint observation is 1.570x lower wall time and 1.733x lower
+GPU time than the row-blocked control, with the tiled wall cell just over the
+5% CoV trust line and the GPU cell below it. It selected `Here` and produced
+finite logits in all three runs. This does not beat llama.cpp/ggml: against
+llama.cpp's 102.572 ms equivalent pp31 wall, the tiled mean is still 14.108x
+slower. The older synthetic negative and this real-checkpoint positive are
+both kept because the candidate is shape/regime-sensitive.
+
+The candidate remains default-off until its full e2e cost, memory scope,
+quality comparison, and quiet-host variance are sealed alongside the
+incumbent. The exact re-prove command is the ROW 243 Proxima command with the
+additional feature `metal-tiled-gemm`; raw outputs were captured in
+`/tmp/proxima-metal-tiled-prefill.txt` and
+`/tmp/proxima-metal-tiled-prefill-{2,3}.txt`.
