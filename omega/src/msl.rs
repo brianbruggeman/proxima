@@ -1517,12 +1517,15 @@ fn tiled_gemm_threadgroups(feature_extent: u64, token_extent: u64) -> u64 {
 
 fn grid_threads(resolved: &BoundOp, quantized: &[Option<PackedCodec>]) -> u64 {
     match &resolved.kind {
-        BoundOpKind::CachedAttention { head_dim, .. } => resolved
-            .extents
-            .iter()
-            .product::<u64>()
-            .checked_div(*head_dim)
-            .unwrap_or(0),
+        BoundOpKind::CachedAttention { head_dim, .. } => {
+            resolved
+                .extents
+                .iter()
+                .product::<u64>()
+                .checked_div(*head_dim)
+                .unwrap_or(0)
+                * SIMD_WIDTH
+        }
         BoundOpKind::Elementwise { .. } => resolved.extents.iter().product(),
         BoundOpKind::Reduce {
             keep: Keep::Reduce,
@@ -2162,16 +2165,14 @@ fn render_cached_attention(resolved: &BoundOp, entry: &str) -> Result<String, Em
     source.push_str(&format!(
         "kernel void {entry}(device const {element_type}* in0 [[buffer(0)]], device const {element_type}* in1 [[buffer(1)]], device const {element_type}* in2 [[buffer(2)]], device const {element_type}* in3 [[buffer(3)]], device const {element_type}* in4 [[buffer(4)]], device const {element_type}* in5 [[buffer(5)]], device const {element_type}* in6 [[buffer(6)]], device const {element_type}* in7 [[buffer(7)]], device {element_type}* out [[buffer(8)]], constant Uniforms& u [[buffer(9)]], uint gid [[thread_position_in_grid]]) {{\n"
     ));
-    source.push_str("    if ((long)gid >= u.total_elements) { return; }\n");
+    source.push_str("    if ((long)gid >= u.total_elements * 32L) { return; }\n");
     source.push_str(&format!(
         "    constexpr long cached_key_rows = {cached_key_rows}; constexpr long new_key_rows = {new_key_rows}; constexpr long kv_heads = {kv_heads}; constexpr long query_groups = {query_groups}; constexpr long head_dim = {head_dim}; constexpr float scale = {}; constexpr long cached_lower = {cached_lower}; constexpr long new_upper = {new_upper};\n",
         msl_literal(*scale),
     ));
-    source.push_str("    long query_index = (long)gid;\n    long query_row = query_index / (kv_heads * query_groups);\n    long remainder = query_index % (kv_heads * query_groups);\n    long kv_head = remainder / query_groups;\n    long group = remainder % query_groups;\n    long query_head = kv_head * query_groups + group;\n    long qbase = query_row * (kv_heads * query_groups * (head_dim / 2)) + query_head * (head_dim / 2);\n    float maximum = -INFINITY; float sum = 0.0f; float weighted[head_dim];\n    for (long dimension = 0; dimension < head_dim; dimension++) { weighted[dimension] = 0.0f; }\n");
-    source.push_str("    for (long key = 0; key < cached_key_rows + new_key_rows; key++) {\n        bool cached = key < cached_key_rows; long new_index = key - cached_key_rows;\n        long relative = (cached ? key - cached_key_rows : new_index) - query_row;\n        if (cached && relative < cached_lower) { continue; }\n        if (!cached && relative > new_upper) { continue; }\n        long kbase = (cached ? key : new_index) * (kv_heads * (head_dim / 2)) + kv_head * (head_dim / 2);\n        float score = 0.0f;\n        for (long pair = 0; pair < head_dim / 2; pair++) {\n            score += in0[qbase + pair] * (cached ? in2[kbase + pair] : in4[kbase + pair]);\n            score += in1[qbase + pair] * (cached ? in3[kbase + pair] : in5[kbase + pair]);\n        }\n        score *= scale; float next_max = max(maximum, score);\n        float weight = exp(score - next_max); float rescale = (maximum == -INFINITY) ? 0.0f : exp(maximum - next_max);\n        sum = sum * rescale + weight;\n        for (long dimension = 0; dimension < head_dim; dimension++) { weighted[dimension] = weighted[dimension] * rescale + weight * (cached ? in6[kbase * 2 + dimension] : in7[kbase * 2 + dimension]); }\n        maximum = next_max;\n    }\n");
-    source.push_str("    for (long dimension = 0; dimension < head_dim; dimension++) { out[gid * head_dim + dimension] = (" );
-    source.push_str(element_type);
-    source.push_str(")(sum == 0.0f ? 0.0f : weighted[dimension] / sum); }\n}\n");
+    source.push_str("    long vector_index = (long)gid / 32L; uint lane = gid % 32u;\n    if (vector_index >= u.total_elements) { return; }\n    long query_index = vector_index;\n    long query_row = query_index / (kv_heads * query_groups);\n    long remainder = query_index % (kv_heads * query_groups);\n    long kv_head = remainder / query_groups;\n    long group = remainder % query_groups;\n    long query_head = kv_head * query_groups + group;\n    long qbase = query_row * (kv_heads * query_groups * (head_dim / 2)) + query_head * (head_dim / 2);\n    float maximum = -INFINITY; float sum = 0.0f; float weighted[(head_dim + 31) / 32];\n    for (long dimension = 0; dimension < (head_dim + 31) / 32; dimension++) { weighted[dimension] = 0.0f; }\n");
+    source.push_str("    for (long key = 0; key < cached_key_rows + new_key_rows; key++) {\n        bool cached = key < cached_key_rows; long new_index = key - cached_key_rows;\n        long relative = (cached ? key - cached_key_rows : new_index) - query_row;\n        if (cached && relative < cached_lower) { continue; }\n        if (!cached && relative > new_upper) { continue; }\n        long kbase = (cached ? key : new_index) * (kv_heads * (head_dim / 2)) + kv_head * (head_dim / 2);\n        float partial_score = 0.0f;\n        for (long pair = (long)lane; pair < head_dim / 2; pair += 32L) {\n            partial_score += in0[qbase + pair] * (cached ? in2[kbase + pair] : in4[kbase + pair]);\n            partial_score += in1[qbase + pair] * (cached ? in3[kbase + pair] : in5[kbase + pair]);\n        }\n        float score = simd_broadcast_first(simd_sum(partial_score)) * scale;\n        float next_max = max(maximum, score);\n        float weight = exp(score - next_max); float rescale = (maximum == -INFINITY) ? 0.0f : exp(maximum - next_max);\n        sum = sum * rescale + weight;\n        for (long dimension = (long)lane; dimension < head_dim; dimension += 32L) {\n            long local_dimension = dimension / 32L;\n            weighted[local_dimension] = weighted[local_dimension] * rescale + weight * (cached ? in6[kbase * 2 + dimension] : in7[kbase * 2 + dimension]);\n        }\n        maximum = next_max;\n    }\n");
+    source.push_str(&format!("    for (long dimension = (long)lane; dimension < head_dim; dimension += 32L) {{ long local_dimension = dimension / 32L; out[query_index * head_dim + dimension] = ({element_type})(sum == 0.0f ? 0.0f : weighted[local_dimension] / sum); }}\n}}\n"));
     let _ = query_rows;
     let _ = new_key_rows;
     Ok(source)
@@ -4752,9 +4753,11 @@ mod tests {
         let kernel = emit(&bound, &BTreeMap::new()).expect("cached attention emits");
 
         assert!(kernel.source.contains("long relative ="));
-        assert!(kernel.source.contains("weighted[dimension] / sum"));
+        assert!(kernel.source.contains("simd_sum(partial_score)"));
+        assert!(kernel.source.contains("vector_index = (long)gid / 32L"));
+        assert!(kernel.source.contains("weighted[local_dimension] / sum"));
         assert_eq!(kernel.bindings.len(), 10, "eight inputs, output, uniforms");
-        assert_eq!(kernel.grid.threads, 1);
+        assert_eq!(kernel.grid.threads, 32);
         assert_eq!(kernel.grid.threadgroup_width, None);
     }
 
