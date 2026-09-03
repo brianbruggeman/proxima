@@ -19301,6 +19301,27 @@ win is therefore limited to the raw nibble accumulation; the activation-sum
 rewrite was not retained. Raw records are
 `/tmp/proxima-metal-q4k-act-sum-two-run{1,2,3}.txt`.
 
+## ROW 253 -- direct Q4_K vector unpack negative
+
+The retained float4 accumulation was tested again with a helper that writes
+the two `float4` level vectors directly, removing the temporary eight-scalar
+level array from the generated plain-product body. The helper and call-site
+change passed the same CPU/Metal parity fixture, but the full-checkpoint cell
+was not faster and was rolled back.
+
+| arm | run 1 | run 2 | run 3 | mean | CoV |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| retained float4 accumulation wall ms | 66.821 | 67.221 | 66.916 | 66.853 | 0.316% |
+| direct vector unpack wall ms | 76.404 | 67.375 | 64.951 | 69.577 | 9.224% |
+| retained float4 accumulation GPU ms | 48.072 | 47.608 | 47.792 | 47.957 | 0.493% |
+| direct vector unpack GPU ms | 48.050 | 48.335 | 47.786 | 48.057 | 0.593% |
+
+The direct-unpack candidate was `1.041x` slower on wall time and `1.002x`
+slower on GPU time; the wall CoV includes an observed first-run pipeline
+compile. The retained scalar unpack helper plus float4 accumulation remains
+the measured baseline. Raw records are
+`/tmp/proxima-metal-q4k-vec-unpack-two-run{1,2,3}.txt`.
+
 ## ROW 250 -- exact-prompt GPU decode comparison
 
 ROW 243's llama-bench `tg1` cell was empty-cache and is not a cached decode
