@@ -19264,14 +19264,16 @@ one CPU thread for orchestration.
 
 | workload | implementation | wall / GPU time | CoV | memory | output |
 | --- | --- | ---: | ---: | ---: | --- |
-| exact prompt, steady generation | Proxima consumer-index Metal | 69.263 ms/token | 0.105% | 4,153,218,389 B mean device allocation; process RSS unmeasured | `Here is a simple...`; finite logits |
+| exact prompt, first cached decode token | Proxima consumer-index Metal | 69.263 ms/token | 0.105% | 4,153,218,389 B mean device allocation; process RSS unmeasured | `Here is`; finite logits |
 | exact prompt, steady generation | **llama.cpp / ggml Metal** | **17.467 ms/token** / GPU unreported | **0.363%** | 4,778,273,451 B mean max RSS | **`Here is a simple...`** |
 
 The exact raw incumbent eval times were `17.54`, `17.43`, and `17.43 ms`
-per token; the Proxima values are ROW 248's three independent step-1 wall
-records. The measured wall multiplier is `3.965x` for Proxima relative to
-llama.cpp/ggml. The incumbent's output prefix matches Proxima's output prefix;
-logit equality remains unmeasured because llama-cli does not emit logits.
+per token; the Proxima values are ROW 248's three independent first cached
+decode-step wall records. The measured wall multiplier is `3.965x` for
+Proxima relative to llama.cpp/ggml. The two runs used different generation
+lengths for stability, so their output strings are not a cross-length quality
+parity test; logit equality remains unmeasured because llama-cli does not emit
+logits.
 
 The memory cells are intentionally not promoted to a like-for-like winner:
 the Proxima value is device allocation, while the incumbent value is process
