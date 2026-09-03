@@ -19252,3 +19252,29 @@ inside the existing kernel, not only its dispatch width.
 Raw records are `/tmp/proxima-metal-width64-two-run{1,2,3}.txt`. The source
 candidate was reverted before this row was committed; the worktree contains
 the width-32 baseline implementation.
+
+## ROW 250 -- exact-prompt GPU decode comparison
+
+ROW 243's llama-bench `tg1` cell was empty-cache and is not a cached decode
+comparison. The incumbent was rerun with `llama-cli`, the exact 31-token
+prompt rendered by the Proxima harness, and eight generated tokens so the
+timed generation contains seven steady generated-token intervals. Both arms
+used the same OpenChat Q4_K_S checkpoint, Apple M1 Max Metal, all layers, and
+one CPU thread for orchestration.
+
+| workload | implementation | wall / GPU time | CoV | memory | output |
+| --- | --- | ---: | ---: | ---: | --- |
+| exact prompt, steady generation | Proxima consumer-index Metal | 69.263 ms/token | 0.105% | 4,153,218,389 B mean device allocation; process RSS unmeasured | `Here is a simple...`; finite logits |
+| exact prompt, steady generation | **llama.cpp / ggml Metal** | **17.467 ms/token** / GPU unreported | **0.363%** | 4,778,273,451 B mean max RSS | **`Here is a simple...`** |
+
+The exact raw incumbent eval times were `17.54`, `17.43`, and `17.43 ms`
+per token; the Proxima values are ROW 248's three independent step-1 wall
+records. The measured wall multiplier is `3.965x` for Proxima relative to
+llama.cpp/ggml. The incumbent's output prefix matches Proxima's output prefix;
+logit equality remains unmeasured because llama-cli does not emit logits.
+
+The memory cells are intentionally not promoted to a like-for-like winner:
+the Proxima value is device allocation, while the incumbent value is process
+max RSS from `/usr/bin/time -l`. The raw records are
+`/tmp/llama-metal-exact-prompt8-run{1,2,3}.txt` and
+`/tmp/proxima-metal-bind-index-two-run{1,2,3}.txt`.
