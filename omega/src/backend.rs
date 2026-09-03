@@ -399,6 +399,20 @@ pub fn mark_resident(plan: &mut Plan, _resident_names: &std::collections::BTreeS
     }
 }
 
+/// Registers the page-aligned, process-lifetime mapping backing a loaded
+/// checkpoint's tensor bytes -- see `metal::register_checkpoint_mapping`'s
+/// own doc for the mechanism this feeds. A no-op unless the Metal backend is
+/// compiled in: the CPU evaluator has no device buffer to address by offset,
+/// and v1's wgpu driver re-uploads every block every call regardless (see
+/// [`mark_resident`]'s own doc for that same scoping).
+#[cfg(all(feature = "metal", target_os = "macos"))]
+pub fn register_checkpoint_mapping(bytes: &[u8]) {
+    metal::register_checkpoint_mapping(bytes);
+}
+
+#[cfg(not(all(feature = "metal", target_os = "macos")))]
+pub fn register_checkpoint_mapping(_bytes: &[u8]) {}
+
 #[cfg(feature = "cpu")]
 fn plan_named_cpu(
     program: &[Op],

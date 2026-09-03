@@ -269,4 +269,37 @@ fn main() {
             println!("GENERATION FAILED (debug): {error:?}");
         }
     }
+
+    // device-byte census by upload path -- proves the checkpoint-mapping
+    // no-copy path (`omega::metal::checkpoint_mapping_offset`) is what
+    // replaced `upload_resident_copy`'s per-tensor device copy, not merely
+    // a relabeling of the same bytes.
+    println!(
+        "nocopy_buffer_uploads = {}",
+        omega::metal::NOCOPY_BUFFER_UPLOADS.get()
+    );
+    println!(
+        "nocopy_buffer_reuses = {}",
+        omega::metal::NOCOPY_BUFFER_REUSES.get()
+    );
+    println!(
+        "mapping_offset_uploads = {}",
+        omega::metal::MAPPING_OFFSET_UPLOADS.get()
+    );
+    println!(
+        "resident_buffer_uploads = {}",
+        omega::metal::RESIDENT_BUFFER_UPLOADS.get()
+    );
+    println!(
+        "resident_buffer_reuses = {}",
+        omega::metal::RESIDENT_BUFFER_REUSES.get()
+    );
+    println!(
+        "copying_buffer_uploads = {}",
+        omega::metal::COPYING_BUFFER_UPLOADS.get()
+    );
+    println!(
+        "device_current_allocated_size = {:?}",
+        omega::metal::current_allocated_size()
+    );
 }
