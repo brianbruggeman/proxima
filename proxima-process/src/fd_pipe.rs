@@ -42,6 +42,9 @@ use proxima_primitives::sync::mpsc;
 /// Allocate a `pipe(2)` and return `(read_end, write_end)`.
 pub(super) fn make_pipe() -> Result<(OwnedFd, OwnedFd), ProximaError> {
     let mut raw_fds: [libc::c_int; 2] = [0, 0];
+    #[cfg(target_os = "linux")]
+    let result = unsafe { libc::pipe2(raw_fds.as_mut_ptr(), libc::O_CLOEXEC) };
+    #[cfg(not(target_os = "linux"))]
     let result = unsafe { libc::pipe(raw_fds.as_mut_ptr()) };
     if result < 0 {
         return Err(ProximaError::Body(format!(
