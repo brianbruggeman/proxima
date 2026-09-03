@@ -622,6 +622,8 @@ pub struct OpGpuTiming {
     pub operand_count: usize,
     /// The packed codec carried by this op's named operand, when present.
     pub packed_codec: Option<PackedCodec>,
+    /// The emitted packed-kernel body, kept separate from the broad op kind.
+    pub packed_kernel_variant: &'static str,
     /// [`crate::msl::diagnose_packed_row_block`]'s own verdict on THIS op,
     /// against a REAL bound program rather than a synthetic symbolic one --
     /// `None` when the op is not a `Reduce { keep: Keep::Reduce, .. }` at
@@ -710,6 +712,7 @@ pub fn execute_plan_op_timed(
             .find_map(|(source, _, _)| plan.program[source.0 as usize].name())
             .map(ToString::to_string);
         let kind = classify_kind(bound, packed_operands);
+        let packed_kernel_variant = classify_packed_kernel_variant(bound, packed_operands);
         let packed_row_block_rejection = diagnose_kind(bound, packed_operands);
         let packed_codec = bound
             .operands()
@@ -753,6 +756,7 @@ pub fn execute_plan_op_timed(
             weight_name,
             operand_count: bound.operands().len(),
             packed_codec,
+            packed_kernel_variant,
             packed_row_block_rejection,
         });
     }
@@ -832,6 +836,27 @@ fn classify_kind(bound: &BoundOp, packed_operands: &PackedOperands) -> &'static 
             Ok(_) => "reduce-generic-scalar",
             Err(_) => "reduce-unclassified",
         },
+    }
+}
+
+#[cfg(feature = "instrument")]
+fn classify_packed_kernel_variant(
+    bound: &BoundOp,
+    packed_operands: &PackedOperands,
+) -> &'static str {
+    let Ok(kernel) = emit(bound, packed_operands) else {
+        return "unclassified";
+    };
+    if kernel.source.contains("q4k_pair_dot(blk") {
+        "q4k-paired"
+    } else if kernel.source.contains("q4k_run8(blk") {
+        "q4k-run8"
+    } else if kernel.source.contains("q5k_value(blk") {
+        "q5k-scalar"
+    } else if kernel.source.contains("q6k_value(blk") {
+        "q6k-scalar"
+    } else {
+        "other"
     }
 }
 
