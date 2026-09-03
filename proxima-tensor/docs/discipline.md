@@ -18962,3 +18962,89 @@ are bench observations rather than a low-noise timing conclusion. The named
 reference is the materialized attention path this physical stream replaces;
 the full OpenChat CPU and Metal controls remain the end-to-end evidence.
 Status: microbench measured, timing confidence limited by load.
+
+## ROW 243 -- GPU home-turf comparison: OpenChat Q4_K_S cached decode
+
+This row compares the same host-local OpenChat 3.5 Q4_K_S checkpoint on the
+Apple M1 Max Metal path. Proxima uses the real cached decode harness with the
+default-off `cached-attention-streaming` feature enabled; llama.cpp uses its
+own `llama-bench` Metal path, which is also ggml's Metal implementation. The
+two are therefore one incumbent implementation under two names, not
+independent incumbent datapoints. ORT and PyTorch were checked on this host;
+`python3` has neither `onnxruntime` nor `torch` installed, so those cells are
+unmeasured rather than omitted.
+
+**Matched workload and controls:** model
+`/Users/brianbruggeman/.lmstudio/models/TheBloke/openchat-3.5-1210-GGUF/openchat-3.5-1210.Q4_K_S.gguf`, Proxima prompt payload with
+`new_count=31`, one steady decode token at `step=1`, `PROXIMA_PREFAULT=1`,
+`PROXIMA_MATMUL_WORKERS=1`, Metal all layers, and three independent Proxima
+process runs. The llama.cpp arms use `-p 31 -n 1 -ngl 99 -fa 0 -t 1 -r 5`
+and three independent process runs. Proxima's `step=0` is the 31-token
+prefill; its `step=1` is the one-token cached decode. llama-bench reports
+prefill and generation separately, so the conversion is `31 / pp31_tps` and
+`1000 / tg1_tps`, respectively.
+
+| workload | implementation | wall / GPU time | CoV | memory record | output / errors |
+| --- | --- | ---: | ---: | ---: | --- |
+| pp31 prefill | Proxima fused Metal | 2271.927 ms wall / 2048.407 ms GPU | 0.996% / 1.085% (n=3) | 4,168,985,259 B max RSS; 4,141,056,000 B device allocation | `Here`; finite logits; 0 errors |
+| pp31 prefill | **llama.cpp / ggml Metal** | **102.572 ms equivalent wall** (`302.228 t/s`) | **0.014%** (n=3) | 4,267,376,640 B max RSS | output text not produced by llama-bench; 0 errors |
+| tg1 cached decode | Proxima fused Metal | 248.757 ms wall / 70.438 ms GPU | 11.926% / 4.690% (n=3) | 4,169,138,176 B max RSS; 4,154,638,336 B device allocation on run 1 | `Here is`; finite logits; 0 errors |
+| tg1 cached decode | **llama.cpp / ggml Metal** | **17.354 ms equivalent wall** (`57.624 t/s`) | **0.454%** (n=3) | 4,267,376,640 B max RSS | output text not produced by llama-bench; 0 errors |
+| pp31 / tg1 | ORT Metal/CoreML | unmeasured | unmeasured | unmeasured | `onnxruntime` unavailable in host `python3` |
+| pp31 / tg1 | PyTorch MPS | unmeasured | unmeasured | unmeasured | `torch` unavailable in host `python3` |
+
+**Raw measured cells used for the means:**
+
+| implementation | run 1 | run 2 | run 3 |
+| --- | ---: | ---: | ---: |
+| Proxima pp31 wall ms | 2258.687 | 2253.314 | 2303.780 |
+| Proxima pp31 GPU ms | 2035.051 | 2030.457 | 2079.712 |
+| Proxima tg1 wall ms | 290.405 | 232.328 | 223.539 |
+| Proxima tg1 GPU ms | 67.877 | 75.102 | 68.334 |
+| Proxima max RSS B | 4169711616 | 4168024064 | 4169678848 |
+| llama pp31 t/s | 302.189659 | 302.285522 | 302.209187 |
+| llama tg1 t/s | 57.578863 | 57.328217 | 57.963968 |
+| llama max RSS B | 4267556864 | 4266377216 | 4268195840 |
+
+**Measured multipliers:** against llama.cpp/ggml's equivalent prefill wall
+time, Proxima is `22.150x` slower; against its one-token decode wall time,
+Proxima is `14.334x` slower. Comparing only GPU execution time gives
+`19.971x` for prefill and `4.059x` for decode. The decode wall row is above
+the 5% noise line because Proxima's first step compiled one new pipeline
+(`pipeline_compile_ms=67.051`); the GPU-only row remains below that line.
+These are measured gaps, not a component verdict.
+
+**Memory interpretation:** the Proxima and llama.cpp numbers are not the same
+allocator scope: Proxima reports Metal device allocation plus process max RSS,
+while `/usr/bin/time -l` reports llama.cpp process max RSS. The observed
+Proxima max RSS is 0.977x the llama.cpp max RSS, but this is not a like-for-like
+device-memory comparison. Proxima's device allocation was 4,141,056,000 B at
+prefill and 4,154,638,336 B during the two-token run; llama.cpp's binary
+reports its 4,267,376,640 B process max RSS.
+
+**Quality control:** the feature-on and feature-off Proxima full-checkpoint
+controls both selected `Here` for the one-token run; the two-token feature-on
+run selected `Here is`. The fused production-shaped CPU/Metal fixture recorded
+maximum absolute difference `0.0000047683716`. llama-bench does not emit
+logits or generated text, so cross-implementation output equality is not
+measured by this row.
+
+**Raw records:** Proxima runs were captured in `/tmp/proxima-metal-cattn-run2.txt`,
+`/tmp/proxima-metal-cattn-run3.txt`, and
+`/tmp/proxima-metal-cattn-two-run{1,2,3}.txt`; the llama.cpp records were
+captured in `/tmp/llama-metal-cattn-run{1,2,3}.txt`. The exact re-prove
+commands are the commands in this row's workload paragraph with
+`cargo test -p proxima-model-interop --release --features
+std,metal,instrument,cached-attention-streaming
+runs_the_cached_decode_loop_on_the_metal_backend_and_reports_the_plan_cache
+-- --ignored --nocapture` for Proxima and the documented `llama-bench`
+invocation for the incumbent. ORT/PyTorch require installing the pinned
+external environment described by `scripts/onnx_reference/README.md` before
+their cells can become measured.
+
+**Discipline read:** the incumbent home-turf arm is present for both prefill
+and cached decode, and both measured wall-clock cells favor llama.cpp/ggml.
+The current Proxima feature reduces Metal encoded operations from 1194 to 616
+and preserves the observed selected text, but that work reduction has not yet
+closed the kernel execution gap. The next optimization must move the measured
+GPU execution row, not only the graph or dispatch count.
