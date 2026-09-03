@@ -491,7 +491,8 @@ impl Command {
     }
 
     /// Mirrors [`std::process::Command::spawn`] in shape. Lowers
-    /// to the descriptor, applies [`SpawnOptions`], fork+execs.
+    /// to the descriptor, applies [`SpawnOptions`], and uses the platform's
+    /// safe external-command spawn path when the options permit it.
     /// Returns a [`Child`] with the parent-side fds for any
     /// `Stdio::Piped` slots — no chain/dispatch wiring here
     /// (use [`Pipe::call`] for that — it handles the dispatch
