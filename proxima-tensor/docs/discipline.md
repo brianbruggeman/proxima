@@ -19532,3 +19532,22 @@ the missing acceleration has been found. The remaining work stays in the
 cooperative-reduction family identified by the per-op trace, and its next
 change requires an instrumented operation-level comparison rather than a new
 type or graph rule.
+
+## ROW 260 -- tiled per-op attribution shifts the family but does not improve production time
+
+The tiled control's isolated per-op profile recorded `reduce-cooperative`
+`601` ops at `32.582 ms`, versus the corrected row-blocked profile's
+`66.545 ms`; `reduce-packed-row-blocked` measured `2.355 ms` versus `3.135 ms`.
+The total isolated profile was `42.329 ms` across `1194` operations, while the
+same run's production step-2 GPU time was `39.767 ms`. The family shift is a
+mechanism observation only: isolated profiling uses separate command buffers
+and is not a production timing cell. The full-model tiled production cell in
+ROW 259 remained `1.033x` slower than the corrected control on GPU. Both cells
+generated the same observed prefix and finite logits.
+
+This rules out the existing tiled feature as the missing end-to-end
+acceleration for this workload, even though it reduces the isolated
+cooperative-family total. The next experiment must explain the remaining
+production gap between approximately `39--40 ms` GPU and the llama wall cell
+at `17.467 ms/token`; no new struct or graph abstraction is justified by this
+measurement.
