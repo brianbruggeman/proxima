@@ -799,15 +799,16 @@ fn classify_kind(bound: &BoundOp, packed_operands: &PackedOperands) -> &'static 
             // weight-staging fix made `push_tiled_gemm_body` call
             // `q4k_run8`/`q4k_header_for` too (the same amortized decode
             // `push_packed_row_blocked_body` already used), so the row-blocked
-            // arm's own `"q4k_run8(blk"` substring match now fires on BOTH
-            // kernel bodies -- `simdgroup_multiply_accumulate` only ever
-            // appears in [`crate::msl::push_tiled_gemm_body`]'s emitted
-            // source, so it is the one marker that still disambiguates them.
+            // arm's own source markers must include both packed bodies --
+            // `simdgroup_multiply_accumulate` only ever appears in
+            // [`crate::msl::push_tiled_gemm_body`]'s emitted source, so it is
+            // the one marker that still disambiguates tiled from packed.
             Ok(kernel) if kernel.source.contains("simdgroup_multiply_accumulate") => {
                 "reduce-tiled-gemm"
             }
             Ok(kernel)
-                if kernel.source.contains("q4k_run8(blk")
+                if kernel.source.contains("q4k_pair_dot(blk")
+                    || kernel.source.contains("q4k_run8(blk")
                     || kernel.source.contains("q5k_value(blk")
                     || kernel.source.contains("q6k_value(blk") =>
             {
