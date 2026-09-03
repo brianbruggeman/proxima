@@ -200,6 +200,13 @@ use crate::{Binding, GridSpec, Kernel, PackedCodec, PackedOperands, emit};
 /// A live Metal buffer handle — the shape every device-buffer table and
 /// return value in this file traffics in.
 type MetalBuffer = Retained<ProtocolObject<dyn MTLBuffer>>;
+/// A device buffer plus this node's byte OFFSET into it -- most nodes own
+/// their whole buffer (offset 0), but a tensor served by
+/// [`checkpoint_mapping_offset`] shares one buffer across many nodes, each
+/// at its own offset. Carrying the pair through `device_buffers` is what
+/// lets [`bind_buffers`] bind the right slice with `setBuffer:offset:atIndex:`
+/// instead of every binding assuming offset 0.
+type DeviceBuffer = (MetalBuffer, usize);
 
 /// One gathering op's deferred fault check: the op it came from, its fault
 /// buffer, and how many gather slots that buffer holds. [`encode_op`]
@@ -252,6 +259,17 @@ thread_local! {
     /// is not free, and nothing about either depends on the program being
     /// run.
     static DEVICE_AND_QUEUE: RefCell<Option<DeviceAndQueue>> = const { RefCell::new(None) };
+}
+
+/// This thread's `MTLDevice::currentAllocatedSize` -- Metal's own count of
+/// bytes it has allocated for every buffer, texture and heap this device
+/// owns, read directly rather than summed from this driver's own caches, so
+/// it also catches anything the caches under- or over-count. `None` before
+/// any Metal call on this thread has created a device.
+#[must_use]
+pub fn current_allocated_size() -> Option<u64> {
+    let (device, _queue) = device_and_queue().ok()?;
+    Some(device.currentAllocatedSize() as u64)
 }
 
 /// This thread's Metal device and command queue, created on first use.
@@ -434,7 +452,7 @@ pub fn execute_plan(plan: &Plan, blocks: &[QuantizedBlock<'_>]) -> Result<Evalua
 
     let (device, queue) = device_and_queue()?;
 
-    let mut device_buffers: BTreeMap<NodeId, MetalBuffer> = BTreeMap::new();
+    let mut device_buffers: BTreeMap<NodeId, DeviceBuffer> = BTreeMap::new();
     #[cfg(feature = "instrument")]
     let block_upload_started = read_ticks();
     for ((node, block), dtype) in prepared
@@ -642,7 +660,7 @@ pub fn execute_plan_op_timed(
 
     let (device, queue) = device_and_queue()?;
 
-    let mut device_buffers: BTreeMap<NodeId, MetalBuffer> = BTreeMap::new();
+    let mut device_buffers: BTreeMap<NodeId, DeviceBuffer> = BTreeMap::new();
     for ((node, block), dtype) in prepared
         .block_nodes
         .iter()
@@ -679,7 +697,7 @@ pub fn execute_plan_op_timed(
             .map(|(source, _, _)| {
                 device_buffers
                     .get(source)
-                    .map(|buffer| buffer.length() as u64)
+                    .map(|(buffer, _offset)| buffer.length() as u64)
                     .unwrap_or(0)
             })
             .sum();
@@ -1526,6 +1544,14 @@ pub struct MetalStageTotals {
     /// ROW 82 measured moved exactly once, not every step.
     pub resident_uploads: u64,
     pub resident_reuses: u64,
+    /// How many of `block_upload_calls` were served by
+    /// [`checkpoint_mapping_offset`] -- addressed by offset into the ONE
+    /// no-copy buffer spanning the whole checkpoint mapping, instead of
+    /// falling to `resident_uploads`' per-tensor copy. `resident_uploads`
+    /// staying at 0 while this climbs to the packed-weight count is the
+    /// direct witness the 429,173,760-byte per-tensor copy this counter
+    /// replaces never happens.
+    pub mapping_offset_uploads: u64,
 }
 
 /// Reads and resets every split-4019 counter in one call — see
@@ -1560,6 +1586,7 @@ pub fn metal_stage_totals() -> MetalStageTotals {
         nocopy_reuses: NOCOPY_BUFFER_REUSES.snapshot_and_reset(),
         resident_uploads: RESIDENT_BUFFER_UPLOADS.snapshot_and_reset(),
         resident_reuses: RESIDENT_BUFFER_REUSES.snapshot_and_reset(),
+        mapping_offset_uploads: MAPPING_OFFSET_UPLOADS.snapshot_and_reset(),
     }
 }
 
@@ -1606,14 +1633,14 @@ fn upload_block(
     node: NodeId,
     dtype: DType,
     resident: bool,
-) -> Result<MetalBuffer, MetalError> {
+) -> Result<(MetalBuffer, usize), MetalError> {
     match dtype {
         // unreached by every program this driver compiles today (none
         // declares a `Float16` block input -- `proxima-tensor/src/spec.rs`'s
         // `mistral_cached_forward_program` is `Float32` throughout), so it is
         // not worth the residency cache's extra bookkeeping: the narrowed
         // `Vec<f16>` this allocates is dropped every call regardless.
-        DType::Float16 => upload_block_as_half(device, data),
+        DType::Float16 => upload_block_as_half(device, data).map(|buffer| (buffer, 0)),
         DType::Float32
         | DType::BFloat16
         | DType::Bool
@@ -1645,21 +1672,24 @@ fn upload_block_as_float(
     device: &ProtocolObject<dyn MTLDevice>,
     data: &[f32],
     resident: bool,
-) -> Result<MetalBuffer, MetalError> {
+) -> Result<(MetalBuffer, usize), MetalError> {
     if data.is_empty() {
-        return allocate_buffer(device, 0, DType::Float32);
+        return allocate_buffer(device, 0, DType::Float32).map(|buffer| (buffer, 0));
     }
     let byte_length = size_of_val(data);
     let pointer = data.as_ptr().cast::<c_void>();
     if is_page_aligned(pointer, byte_length) {
         counter!(NOCOPY_BUFFER_UPLOADS, 1);
-        return upload_block_no_copy(device, pointer, byte_length);
+        return upload_block_no_copy(device, pointer, byte_length).map(|buffer| (buffer, 0));
+    }
+    if let Some(result) = checkpoint_mapping_offset(device, pointer, byte_length) {
+        return result;
     }
     if resident {
-        return upload_resident_copy(device, pointer, byte_length);
+        return upload_resident_copy(device, pointer, byte_length).map(|buffer| (buffer, 0));
     }
     counter!(COPYING_BUFFER_UPLOADS, 1);
-    upload_block_copy(device, pointer, byte_length)
+    upload_block_copy(device, pointer, byte_length).map(|buffer| (buffer, 0))
 }
 
 /// Uploads a packed quantized weight buffer as raw BYTES — no dequantize on
@@ -1674,21 +1704,97 @@ fn upload_packed_bytes(
     device: &ProtocolObject<dyn MTLDevice>,
     bytes: &[u8],
     resident: bool,
-) -> Result<MetalBuffer, MetalError> {
+) -> Result<(MetalBuffer, usize), MetalError> {
     if bytes.is_empty() {
-        return allocate_buffer(device, 0, DType::Float32);
+        return allocate_buffer(device, 0, DType::Float32).map(|buffer| (buffer, 0));
     }
     let byte_length = bytes.len();
     let pointer = bytes.as_ptr().cast::<c_void>();
     if is_page_aligned(pointer, byte_length) {
         counter!(NOCOPY_BUFFER_UPLOADS, 1);
-        return upload_block_no_copy(device, pointer, byte_length);
+        return upload_block_no_copy(device, pointer, byte_length).map(|buffer| (buffer, 0));
+    }
+    if let Some(result) = checkpoint_mapping_offset(device, pointer, byte_length) {
+        return result;
     }
     if resident {
-        return upload_resident_copy(device, pointer, byte_length);
+        return upload_resident_copy(device, pointer, byte_length).map(|buffer| (buffer, 0));
     }
     counter!(COPYING_BUFFER_UPLOADS, 1);
-    upload_block_copy(device, pointer, byte_length)
+    upload_block_copy(device, pointer, byte_length).map(|buffer| (buffer, 0))
+}
+
+thread_local! {
+    /// The page-aligned, process-lifetime checkpoint mapping registered by
+    /// [`register_checkpoint_mapping`] -- `(base_pointer, byte_length)` of the
+    /// caller's own mmap. `None` until a loader calls it. A tensor whose byte
+    /// range falls entirely inside this span never needs its own device
+    /// buffer: see [`checkpoint_mapping_offset`].
+    static CHECKPOINT_MAPPING: RefCell<Option<(usize, usize)>> = const { RefCell::new(None) };
+}
+
+/// Registers the whole-checkpoint memory mapping backing every packed
+/// tensor's borrowed bytes, so a tensor whose own byte offset inside that
+/// mapping is misaligned for [`is_page_aligned`] can still reach the GPU
+/// without a copy -- by address, into ONE no-copy buffer spanning the whole
+/// mapping, instead of one buffer per tensor. See [`checkpoint_mapping_offset`]
+/// for the containment check and [`upload_packed_bytes`]'s doc for why the
+/// per-tensor page-alignment test this replaces fails for every packed
+/// tensor in a real GGUF layout (tensors are packed back-to-back at their
+/// natural sizes; only the mapping's OWN base is page-aligned).
+///
+/// `bytes` must stay mapped, unchanged, at this address for the rest of the
+/// process -- the same precondition [`NOCOPY_BUFFERS`] already rests on for
+/// a single tensor, extended here to the whole file. Calling this again
+/// replaces the previous registration; callers load one checkpoint mapping
+/// per process in every reachable path today.
+pub fn register_checkpoint_mapping(bytes: &[u8]) {
+    if bytes.is_empty() {
+        return;
+    }
+    let base = bytes.as_ptr() as usize;
+    CHECKPOINT_MAPPING.with(|mapping| *mapping.borrow_mut() = Some((base, bytes.len())));
+}
+
+/// Counts uploads served by addressing the shared checkpoint-mapping buffer
+/// at an offset, instead of copying the tensor into its own buffer -- the
+/// direct witness for the census this mechanism is meant to zero out.
+pub static MAPPING_OFFSET_UPLOADS: Counter =
+    Counter::new("omega.metal.upload_block.mapping_offset");
+
+/// If `pointer..pointer+byte_length` falls entirely inside the registered
+/// checkpoint mapping, returns the whole-mapping no-copy buffer (created
+/// once, reused after) plus this tensor's byte OFFSET into it. `None` when
+/// no mapping is registered or the range falls outside it -- the scratch and
+/// KV-cache buffers `upload_block_as_float`'s `Float32` arm also uploads
+/// through never live inside the checkpoint's own mmap, so they fall
+/// through unchanged.
+///
+/// The mapping's total length is rounded UP to a page boundary before
+/// `newBufferWithBytesNoCopy` sees it, since that call requires a
+/// page-aligned length; that rounding is sound because `mmap` only ever
+/// backs a file with whole pages, so every byte up to the next page
+/// boundary past the file's own length is already resident, zero-filled,
+/// mapped memory (never past the region the OS mapped for this file) --
+/// reading it is safe, and no kernel this driver emits ever reads past a
+/// tensor's own declared byte length regardless.
+fn checkpoint_mapping_offset(
+    device: &ProtocolObject<dyn MTLDevice>,
+    pointer: *const c_void,
+    byte_length: usize,
+) -> Option<Result<(MetalBuffer, usize), MetalError>> {
+    let (base, mapping_length) = CHECKPOINT_MAPPING.with(|mapping| *mapping.borrow())?;
+    let address = pointer as usize;
+    if address < base || address + byte_length > base + mapping_length {
+        return None;
+    }
+    let page = page_size();
+    let rounded_length = mapping_length.div_ceil(page) * page;
+    counter!(MAPPING_OFFSET_UPLOADS, 1);
+    Some(
+        upload_block_no_copy(device, base as *const c_void, rounded_length)
+            .map(|buffer| (buffer, address - base)),
+    )
 }
 
 thread_local! {
@@ -1920,10 +2026,7 @@ fn upload_uniforms(
     Ok(buffer)
 }
 
-fn buffer_for(
-    device_buffers: &BTreeMap<NodeId, Retained<ProtocolObject<dyn MTLBuffer>>>,
-    node: NodeId,
-) -> Result<Retained<ProtocolObject<dyn MTLBuffer>>, MetalError> {
+fn buffer_for(device_buffers: &BTreeMap<NodeId, DeviceBuffer>, node: NodeId) -> Result<DeviceBuffer, MetalError> {
     device_buffers.get(&node).cloned().ok_or_else(|| {
         TensorError::NotLowerable {
             node,
@@ -1936,24 +2039,30 @@ fn buffer_for(
 fn bind_buffers(
     encoder: &ProtocolObject<dyn MTLComputeCommandEncoder>,
     bindings: &[Binding],
-    device_buffers: &BTreeMap<NodeId, Retained<ProtocolObject<dyn MTLBuffer>>>,
+    device_buffers: &BTreeMap<NodeId, DeviceBuffer>,
     output: &Retained<ProtocolObject<dyn MTLBuffer>>,
     uniforms: &Retained<ProtocolObject<dyn MTLBuffer>>,
     fault: Option<&Retained<ProtocolObject<dyn MTLBuffer>>>,
 ) -> Result<(), MetalError> {
     for (index, binding) in bindings.iter().enumerate() {
-        let buffer = match binding {
+        let (buffer, offset) = match binding {
             Binding::Input(node) | Binding::Indices(node) => buffer_for(device_buffers, *node)?,
-            Binding::Output(_) => output.clone(),
-            Binding::Uniforms => uniforms.clone(),
-            Binding::Fault => fault.cloned().ok_or_else(|| MetalError::CompileFailed {
-                log: "kernel binds a fault buffer but none was allocated".to_string(),
-            })?,
+            Binding::Output(_) => (output.clone(), 0),
+            Binding::Uniforms => (uniforms.clone(), 0),
+            Binding::Fault => (
+                fault.cloned().ok_or_else(|| MetalError::CompileFailed {
+                    log: "kernel binds a fault buffer but none was allocated".to_string(),
+                })?,
+                0,
+            ),
         };
         // SAFETY: `buffer`'s length was sized from the same op this
         // kernel was emitted from, so every byte the kernel indexes through
-        // this binding is in bounds.
-        unsafe { encoder.setBuffer_offset_atIndex(Some(&buffer), 0, index) };
+        // this binding is in bounds, starting at `offset` -- 0 for every
+        // binding except a tensor `checkpoint_mapping_offset` addressed into
+        // the shared checkpoint buffer, whose OWN byte range is what was
+        // validated against that buffer's length.
+        unsafe { encoder.setBuffer_offset_atIndex(Some(&buffer), offset, index) };
     }
     Ok(())
 }
@@ -2003,7 +2112,7 @@ fn dispatch(
 fn encode_op(
     device: &ProtocolObject<dyn MTLDevice>,
     encoder: &ProtocolObject<dyn MTLComputeCommandEncoder>,
-    device_buffers: &mut BTreeMap<NodeId, MetalBuffer>,
+    device_buffers: &mut BTreeMap<NodeId, DeviceBuffer>,
     bound: &BoundOp,
     packed_operands: &PackedOperands,
 ) -> Result<Option<(MetalBuffer, usize)>, MetalError> {
@@ -2071,7 +2180,7 @@ fn encode_op(
         );
     }
 
-    device_buffers.insert(bound.node, output);
+    device_buffers.insert(bound.node, (output, 0));
     Ok(fault.map(|fault_buffer| (fault_buffer, gathers)))
 }
 
@@ -2174,7 +2283,7 @@ fn finish(
     index_nodes: &BTreeSet<NodeId>,
     shapes: &Shapes,
     effective_outputs: &[NodeId],
-    device_buffers: &BTreeMap<NodeId, Retained<ProtocolObject<dyn MTLBuffer>>>,
+    device_buffers: &BTreeMap<NodeId, DeviceBuffer>,
     root: NodeId,
 ) -> Result<Evaluated, MetalError> {
     let mut results = Vec::with_capacity(effective_outputs.len());
@@ -2184,7 +2293,11 @@ fn finish(
         let shape = shapes.of(*node).to_vec();
         let dtype = gpu_dtype(program, index_nodes, *node);
         let data = match device_buffers.get(node) {
-            Some(buffer) => read_back(buffer, element_count(&shape), *node, dtype)?,
+            // an output node's buffer is always freshly allocated by
+            // `encode_op` at offset 0 -- only a weight INPUT can carry a
+            // nonzero offset, and a weight is never a program output -- so
+            // reading from the buffer's own start is always correct here.
+            Some((buffer, _offset)) => read_back(buffer, element_count(&shape), *node, dtype)?,
             None => Vec::new(),
         };
         #[cfg(feature = "instrument")]

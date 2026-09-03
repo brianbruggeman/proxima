@@ -3983,6 +3983,7 @@ dependencies = [
  "metrics",
  "mqttbytes",
  "num_cpus",
+ "omega",
  "once_cell",
  "opentelemetry",
  "opentelemetry-proto",

@@ -475,6 +475,7 @@ proc-macro-crate = "3.5.0"
 proxima-model-interop = { path = "proxima-model-interop", features = ["std", "metal", "instrument"] }
 proxima-gguf = { path = "proxima-gguf" }
 memmap2 = "0.9.11"
+omega = { path = "omega", features = ["metal", "instrument"] }
 
 [lints]
 workspace = true

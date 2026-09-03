@@ -381,6 +381,13 @@ impl<'file> LoadedModel<'file> {
     /// [`proxima_tensor::spec::mistral_cached_forward_program_with_experts`]
     /// can fail with.
     pub fn load(parsed: &ParsedGguf, file_bytes: &'file [u8]) -> Result<Self, InteropError> {
+        // registers `file_bytes` -- the checkpoint's own mmap, page-aligned
+        // at its base by construction -- as the single mapping every packed
+        // tensor's borrowed slice can be addressed into by OFFSET instead of
+        // copied into its own device buffer; see
+        // `omega::metal::register_checkpoint_mapping`'s own doc. A no-op
+        // when the Metal backend is not compiled in.
+        omega::backend::register_checkpoint_mapping(file_bytes);
         // `general.architecture` read directly, before `architecture_from_metadata`
         // (which assumes the dense per-layer shape every other checkpoint this
         // crate binds has) -- qwen35's hybrid attention+state-space layers
@@ -1618,7 +1625,7 @@ impl<'file> LoadedModel<'file> {
                      gpu_exec_calls={} gpu_exec_ms={:.3} \
                      readback_calls={} readback_ms={:.3} readback_bytes={} \
                      nocopy_uploads={} copying_uploads={} nocopy_reuses={} \
-                     resident_uploads={} resident_reuses={}",
+                     resident_uploads={} resident_reuses={} mapping_offset_uploads={}",
                         metal_stage.prepare_calls,
                         ms(metal_stage.prepare_ticks),
                         metal_stage.emit_calls,
@@ -1645,6 +1652,7 @@ impl<'file> LoadedModel<'file> {
                         metal_stage.nocopy_reuses,
                         metal_stage.resident_uploads,
                         metal_stage.resident_reuses,
+                        metal_stage.mapping_offset_uploads,
                     );
                 }
 
