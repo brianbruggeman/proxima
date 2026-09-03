@@ -174,7 +174,9 @@ type MatmulSession<'a> = CohortSession<'a, TensorError>;
 
 use half::{bf16, f16};
 
-use crate::bind::{self, BoundOp, BoundOpKind, ComposedBody, ReadyBatch, StepArg};
+use crate::bind::{
+    self, BoundOp, BoundOpKind, ComposedBody, ReadyBatch, StepArg, dead_resolved_nodes,
+};
 use crate::convert::{Convert, SimdConvert};
 use crate::dtype::DType;
 use crate::error::TensorError;
@@ -604,39 +606,13 @@ pub struct StaticArena {
     layer_norm_cluster_fire_at: BTreeMap<usize, Vec<NodeId>>,
 }
 
-/// Every node `resolved` physically reads, straight off [`BoundOp::operands()`]
-/// plus each gathered operand's own [`bind::Lookup::indices`] (a second,
-/// separate `NodeId` reference `operands()`'s own `(NodeId, Layout,
-/// Option<Lookup>)` tuple does not fold into its leading field — missing it
-/// would silently mark a live index-table node dead). `operands()` already
-/// carries every source a fused/composed body absorbed (`bind.rs`'s own doc:
-/// fusion moves a source node into the fusing op's physical operand list
-/// rather than leaving a separate graph edge behind), so this is a scan over
-/// `BoundOp` structure, never the pre-bind graph.
-fn consumed_by_resolved_nodes(resolved: &[BoundOp]) -> BTreeSet<NodeId> {
-    let mut consumed = BTreeSet::new();
-    for computed in resolved {
-        for (operand, _layout, lookup) in computed.operands() {
-            consumed.insert(*operand);
-            if let Some(lookup) = lookup {
-                consumed.insert(lookup.indices);
-            }
-        }
-    }
-    consumed
-}
-
-/// The dead-set `StaticArena::dead` documents: every `resolved` node neither
-/// consumed by another resolved node nor named in `effective_outputs`. See
-/// `docs/discipline.md` ROW 166/167.
-fn dead_resolved_nodes(resolved: &[BoundOp], effective_outputs: &[NodeId]) -> BTreeSet<NodeId> {
-    let consumed = consumed_by_resolved_nodes(resolved);
-    resolved
-        .iter()
-        .map(|computed| computed.node)
-        .filter(|node| !consumed.contains(node) && !effective_outputs.contains(node))
-        .collect()
-}
+// `StaticArena::dead`'s own computation -- every `resolved` node neither
+// consumed by another resolved node nor named in `effective_outputs`
+// (`docs/discipline.md` ROW 166/167) -- now lives at
+// [`bind::dead_resolved_nodes`] so a stateless GPU backend can reuse the
+// identical scan to drop a dead node from its own dispatch list outright,
+// instead of this arena's own execution-time skip path (which a driver with
+// no persistent arena has no analogue for).
 
 /// `StaticArena::static_nodes` documents: every LIVE `resolved` node whose
 /// [`BoundOpKind`] is `Constant` or `Iota` — excludes anything already in

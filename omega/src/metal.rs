@@ -188,7 +188,8 @@ use proxima_telemetry::metric::Counter;
 use proxima_tensor::instrument::{elapsed_ticks, read_ticks};
 use proxima_tensor::{
     BoundOp, BoundOpKind, DType, Evaluated, IndexMap, Keep, Lookup, NodeId, Op, QuantizedBlock,
-    Shapes, TensorError, bind, correct_packed_matmul_layouts, infer, resolve_named_blocks,
+    Shapes, TensorError, bind, correct_packed_matmul_layouts, infer, prune_dead,
+    resolve_named_blocks,
 };
 
 use crate::error::EmitError;
@@ -1002,6 +1003,12 @@ fn prepare(
     }
 
     let mut resolved = bind(program, &shapes, &effective_outputs)?;
+    // A stateless driver has no persistent arena to skip a dead slot inside
+    // between calls (unlike `proxima_tensor::cpu::StaticArena`'s own
+    // execution-time skip set) -- the only way to avoid dispatching a kernel
+    // nobody reads is to drop it from `resolved` before it ever reaches a
+    // dispatch list. See `prune_dead`'s own doc.
+    resolved = prune_dead(resolved, &effective_outputs);
     // `bind`'s own `layout_of` assumes every operand is stored row-major in
     // its DECLARED axis order -- true for every f32 buffer this driver reads
     // (bound-time-transposed to match, `bind_matmul_weight`'s own doc), but
