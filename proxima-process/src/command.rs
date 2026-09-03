@@ -103,7 +103,7 @@ use super::fd_pipe::FdPairPipe;
 use super::libc_shim;
 use super::protocol::{ChildRequest, ChildResponse};
 #[cfg(unix)]
-use super::spawn::{Child, SpawnOptions, spawn};
+use super::spawn::{Child, SpawnOptions, spawn, spawn_external};
 
 /// Drop-in mirror of [`std::process::Command`].
 ///
@@ -567,6 +567,15 @@ impl Command {
     pub fn spawn(&mut self) -> Result<Child, ProximaError> {
         let descriptor = self.to_descriptor()?;
         spawn(&descriptor, self.spawn_options(None))
+    }
+
+    /// Mirrors [`Self::spawn`] for an ordinary external executable while
+    /// remaining safe after the parent has created runtime threads. The
+    /// external route rejects options that require child-side setup before
+    /// `exec`; use [`Self::spawn`] for those legacy cases.
+    pub fn spawn_external(&mut self) -> Result<Child, ProximaError> {
+        let descriptor = self.to_descriptor()?;
+        spawn_external(&descriptor, self.spawn_options(None))
     }
 
     /// Mirrors [`std::process::Command::output`] in shape. Spawns
