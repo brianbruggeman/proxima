@@ -37,6 +37,8 @@ mod hf_config;
 mod lfm2;
 #[cfg(feature = "std")]
 mod loader;
+#[cfg(feature = "std")]
+mod qwen35;
 mod serving;
 mod transform;
 
@@ -54,6 +56,8 @@ pub use lfm2::{
 };
 #[cfg(feature = "std")]
 pub use loader::{PREFAULT_OVERSUBSCRIBE, PREFAULT_STRIDE_BYTES, prefault};
+#[cfg(feature = "std")]
+pub use qwen35::{Qwen35Architecture, Qwen35LayerKind, bind_qwen35_checkpoint};
 pub use serving::{
     DEFAULT_MODEL_PATH, GPU_LAYERS_ALL, REASONING_BUDGET_UNBOUNDED, ServingConfig,
     apply_serving_config,

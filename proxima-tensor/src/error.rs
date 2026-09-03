@@ -223,4 +223,11 @@ pub enum TensorError {
     /// must name exactly one [`crate::spec::LayerKind`] per block.
     #[error("layer_kinds has {found} entries but block_count is {expected}")]
     LayerKindCountMismatch { expected: u32, found: usize },
+
+    /// [`crate::spec::qwen35_forward_program`]'s own dense/SSM layer split
+    /// (`(layer + 1) % full_attention_interval != 0`, `qwen35.cpp`'s own
+    /// `load_arch_hparams` default) divides by this value; zero has no
+    /// meaningful modulus.
+    #[error("full_attention_interval must be >= 1, got {full_attention_interval}")]
+    InvalidFullAttentionInterval { full_attention_interval: u32 },
 }

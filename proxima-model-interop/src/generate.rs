@@ -64,7 +64,7 @@ use proxima_primitives::pipe::Pipe;
 use proxima_tensor::cpu::evaluate_quantized_named_with_scratch;
 use proxima_tensor::cpu::{Evaluated, QuantizedBlock};
 use proxima_tensor::op::{NodeId, Op};
-use proxima_tensor::spec::{CachedLayerRoots, mistral_cached_forward_program_with_experts};
+use proxima_tensor::spec::{Qwen35LayerRoots, mistral_cached_forward_program_with_experts};
 use proxima_tokenizer::{SamplingConfig, Vocab, sample_next_token};
 
 #[cfg(all(feature = "instrument", feature = "metal", target_os = "macos"))]
@@ -327,7 +327,42 @@ pub struct LoadedModel<'file> {
     vocab: Vocab,
     program: Vec<Op>,
     logits_root: NodeId,
-    cache_roots: Vec<CachedLayerRoots>,
+    /// One entry per forward-program layer, in layer order --
+    /// [`Qwen35LayerRoots::Attention`] for every layer on the dense path
+    /// (`Self::load`/`Self::load_from_safetensors` wrap
+    /// `mistral_cached_forward_program_with_experts`'s own
+    /// [`CachedLayerRoots`] in that variant so both checkpoint families
+    /// share one cache-threading loop, [`Self::run_decode_loop`]), and a mix
+    /// of [`Qwen35LayerRoots::Attention`]/[`Qwen35LayerRoots::Ssm`] on the
+    /// qwen35 path (`crate::qwen35::qwen35_forward_program`'s own return).
+    layer_roots: Vec<Qwen35LayerRoots>,
+    /// [`Some`] only for a qwen35-architecture checkpoint -- the SSM cache
+    /// shapes [`SsmLayerCache::new`] needs (`Self::run_decode_loop`'s own
+    /// per-layer state-space cache), derived once at load time rather than
+    /// recomputed every decode step. `None` on the dense path, which never
+    /// has an [`Qwen35LayerRoots::Ssm`] entry to size.
+    qwen35_ssm_shape: Option<Qwen35SsmShape>,
+}
+
+/// [`SsmLayerCache`]'s own fixed sizes, all derived from
+/// [`crate::qwen35::Qwen35Architecture`]'s ssm hyperparameters at load time
+/// -- `qwen35.cpp:57-60`'s same derivation
+/// `crate::qwen35::bind_qwen35_attn_qkv_split`'s own doc already walks
+/// through for the fused `attn_qkv.weight` split.
+#[derive(Debug, Clone, Copy)]
+struct Qwen35SsmShape {
+    /// `2 * ssm_key_dim + ssm_d_inner` -- one `qkv_mixed` row's width,
+    /// matching `proxima_tensor::spec::qwen35_forward_program`'s own
+    /// `ssm_cache.{layer}.conv_history` leaf shape's second axis.
+    qkv_dim: usize,
+    /// `ssm_d_conv - 1` -- the rolling conv-history window's fixed row
+    /// count [`append_qwen35_ssm_mixer`]'s doc names (the causal conv1d
+    /// kernel's own left-context width).
+    conv_rows: usize,
+    /// `ssm_d_state * head_v_dim * ssm_n_group * ssm_group` -- the gated
+    /// DeltaNet recurrent state's flat element count, matching
+    /// `qwen35_forward_program`'s own `ssm_cache.{layer}.state` leaf shape.
+    state_len: usize,
 }
 
 impl<'file> LoadedModel<'file> {
@@ -346,6 +381,49 @@ impl<'file> LoadedModel<'file> {
     /// [`proxima_tensor::spec::mistral_cached_forward_program_with_experts`]
     /// can fail with.
     pub fn load(parsed: &ParsedGguf, file_bytes: &'file [u8]) -> Result<Self, InteropError> {
+        // `general.architecture` read directly, before `architecture_from_metadata`
+        // (which assumes the dense per-layer shape every other checkpoint this
+        // crate binds has) -- qwen35's hybrid attention+state-space layers
+        // (`crate::qwen35`'s own module doc) are not that shape, so this
+        // checkpoint gets its own bind + forward-program seam instead of being
+        // handed to the dense path, which would either fail bind on an SSM
+        // layer's tensors or, worse, silently misbind them as dense attention.
+        if crate::bind::metadata_str(parsed, "general.architecture")? == "qwen35" {
+            let qwen_architecture = crate::qwen35::qwen35_architecture_from_metadata(parsed)?;
+            let weights = crate::qwen35::bind_qwen35_weights(parsed, file_bytes, &qwen_architecture)?;
+            let vocab = proxima_tokenizer::gguf::vocab_from_metadata(parsed)?;
+            let (program, logits_root, layer_roots) =
+                crate::qwen35::qwen35_forward_program(&qwen_architecture)?;
+            let ssm_shape = qwen35_ssm_shape(&qwen_architecture);
+            let architecture = ModelArchitecture {
+                vocab: qwen_architecture.vocab,
+                embedding: qwen_architecture.embedding,
+                feed_forward: qwen_architecture.feed_forward,
+                query_heads: qwen_architecture.query_heads,
+                kv_heads: qwen_architecture.kv_heads,
+                head_dim: qwen_architecture.head_dim,
+                block_count: qwen_architecture.block_count,
+                // Qwen3.5 never routes FFN through experts
+                // (`crate::qwen35::qwen35_forward_program`'s own doc,
+                // `qwen35.cpp:471`), so this checkpoint reads the same
+                // `expert_count == 0` dense-FFN branch every other checkpoint
+                // without a `{architecture}.expert_count` key does.
+                expert_count: 0,
+                expert_used_count: 0,
+                rope_freq_base: qwen_architecture.rope_freq_base,
+                tied_embeddings: false,
+            };
+            return Ok(Self {
+                weights,
+                architecture,
+                vocab,
+                program,
+                logits_root,
+                layer_roots,
+                qwen35_ssm_shape: Some(ssm_shape),
+            });
+        }
+
         let architecture = architecture_from_metadata(parsed)?;
         let vocab = proxima_tokenizer::gguf::vocab_from_metadata(parsed)?;
         let weights = bind_all_weights(parsed, file_bytes, &architecture)?;
@@ -353,7 +431,12 @@ impl<'file> LoadedModel<'file> {
         // dense checkpoint (`ModelArchitecture`'s own doc), which selects
         // exactly the dense program this crate has always built -- a
         // mixture-of-experts checkpoint (`expert_count > 0`) is the only case
-        // that changes which program gets compiled here.
+        // that changes which program gets compiled here. `qk_norm` is Qwen3's
+        // own per-head QK-norm (`crate::bind::checkpoint_has_qk_norm`'s own
+        // doc) -- `false` reproduces the identical program this call has
+        // always compiled for a checkpoint that carries no
+        // `attn_q_norm.weight` tensor.
+        let qk_norm = crate::bind::checkpoint_has_qk_norm(parsed);
         let (program, logits_root, cache_roots) = mistral_cached_forward_program_with_experts(
             architecture.vocab,
             architecture.embedding,
@@ -364,6 +447,7 @@ impl<'file> LoadedModel<'file> {
             architecture.block_count,
             architecture.expert_count,
             architecture.expert_used_count,
+            qk_norm,
         )?;
         Ok(Self {
             weights,
@@ -371,7 +455,8 @@ impl<'file> LoadedModel<'file> {
             vocab,
             program,
             logits_root,
-            cache_roots,
+            layer_roots: cache_roots.into_iter().map(Qwen35LayerRoots::Attention).collect(),
+            qwen35_ssm_shape: None,
         })
     }
 
@@ -409,6 +494,10 @@ impl<'file> LoadedModel<'file> {
     ) -> Result<Self, InteropError> {
         let weights =
             bind_all_weights_from_safetensors(manifest, file_bytes, data_start, &architecture)?;
+        // safetensors carries no GGUF tensor directory to probe for
+        // `attn_q_norm.weight`, and no HF/safetensors checkpoint this crate
+        // binds today needs QK-norm -- see [`Self::load`]'s own `qk_norm` for
+        // the GGUF path that does.
         let (program, logits_root, cache_roots) = mistral_cached_forward_program_with_experts(
             architecture.vocab,
             architecture.embedding,
@@ -419,6 +508,7 @@ impl<'file> LoadedModel<'file> {
             architecture.block_count,
             architecture.expert_count,
             architecture.expert_used_count,
+            false,
         )?;
         Ok(Self {
             weights,
@@ -426,8 +516,30 @@ impl<'file> LoadedModel<'file> {
             vocab,
             program,
             logits_root,
-            cache_roots,
+            layer_roots: cache_roots.into_iter().map(Qwen35LayerRoots::Attention).collect(),
+            qwen35_ssm_shape: None,
         })
+    }
+}
+
+/// [`Qwen35SsmShape`]'s own derivation off a real checkpoint's ssm
+/// hyperparameters -- `qwen35.cpp:57-60`'s same arithmetic
+/// `crate::qwen35::Qwen35Architecture::ssm_key_dim`/`ssm_value_dim` already
+/// use for the fused `attn_qkv.weight` row split, plus `head_v_dim =
+/// ssm_inner_size / ssm_time_step_rank` and `ssm_group = ssm_time_step_rank
+/// / ssm_group_count` (`proxima_tensor::spec::qwen35_forward_program`'s own
+/// `head_v_dim`/`ssm_group` locals).
+fn qwen35_ssm_shape(architecture: &crate::qwen35::Qwen35Architecture) -> Qwen35SsmShape {
+    let ssm_key_dim = architecture.ssm_state_size * architecture.ssm_group_count;
+    let head_v_dim = architecture.ssm_inner_size / architecture.ssm_time_step_rank;
+    let ssm_group = architecture.ssm_time_step_rank / architecture.ssm_group_count;
+    Qwen35SsmShape {
+        qkv_dim: (2 * ssm_key_dim + architecture.ssm_inner_size) as usize,
+        conv_rows: (architecture.ssm_conv_kernel.saturating_sub(1)) as usize,
+        state_len: (architecture.ssm_state_size
+            * head_v_dim
+            * architecture.ssm_group_count
+            * ssm_group) as usize,
     }
 }
 
@@ -471,6 +583,136 @@ impl LayerCache {
             (v_name, QuantizedBlock::Float32(self.v.as_slice())),
         ]
     }
+}
+
+/// [`LayerCache`]'s 4-wide counterpart for a
+/// [`Qwen35LayerRoots::DenseAttention`] layer -- this checkpoint's own
+/// partial-rotary gap (`proxima_tensor::spec::append_qwen35_dense_attention_layer`'s
+/// own doc) needs a third K component (`k_pass`, the untouched
+/// `rotary_dim..attn_head_dim` remainder) alongside the rotated
+/// `k_first`/`k_second` halves [`LayerCache`]'s `k_even`/`k_odd` already
+/// name for the plain single-section-RoPE checkpoints.
+struct Qwen35DenseAttentionCache {
+    k_first: Vec<f32>,
+    k_second: Vec<f32>,
+    k_pass: Vec<f32>,
+    v: Vec<f32>,
+}
+
+impl Qwen35DenseAttentionCache {
+    fn new() -> Self {
+        Self {
+            k_first: Vec::new(),
+            k_second: Vec::new(),
+            k_pass: Vec::new(),
+            v: Vec::new(),
+        }
+    }
+
+    fn append(&mut self, first: &[f32], second: &[f32], pass: &[f32], value: &[f32]) {
+        self.k_first.extend_from_slice(first);
+        self.k_second.extend_from_slice(second);
+        self.k_pass.extend_from_slice(pass);
+        self.v.extend_from_slice(value);
+    }
+
+    fn named_blocks<'cache>(
+        &'cache self,
+        k_first_name: &'cache str,
+        k_second_name: &'cache str,
+        k_pass_name: &'cache str,
+        v_name: &'cache str,
+    ) -> [(&'cache str, QuantizedBlock<'cache>); 4] {
+        [
+            (k_first_name, QuantizedBlock::Float32(self.k_first.as_slice())),
+            (k_second_name, QuantizedBlock::Float32(self.k_second.as_slice())),
+            (k_pass_name, QuantizedBlock::Float32(self.k_pass.as_slice())),
+            (v_name, QuantizedBlock::Float32(self.v.as_slice())),
+        ]
+    }
+}
+
+/// [`LayerCache`]'s counterpart for a [`Qwen35LayerRoots::Ssm`] layer --
+/// `conv_history` is a fixed-size rolling window (the causal conv1d
+/// kernel's own left context, `Qwen35SsmShape::conv_rows` rows of
+/// `Qwen35SsmShape::qkv_dim` elements each, oldest row dropped as each new
+/// one is appended) rather than [`LayerCache`]'s unbounded grow-forever
+/// history; `state` is the gated DeltaNet recurrent state, fully replaced
+/// every step (never appended to) because the mixer already folds every
+/// past position into it.
+struct SsmLayerCache {
+    conv_history: Vec<f32>,
+    state: Vec<f32>,
+}
+
+impl SsmLayerCache {
+    fn new(shape: Qwen35SsmShape) -> Self {
+        Self {
+            conv_history: alloc::vec![0.0f32; shape.conv_rows * shape.qkv_dim],
+            state: alloc::vec![0.0f32; shape.state_len],
+        }
+    }
+
+    /// `qkv_mixed_new` is this step's own `new_count`-many freshly computed
+    /// `qkv_mixed` rows (`shape.qkv_dim` elements each); `state_new` is the
+    /// mixer's full replacement state. Keeps only `shape.conv_rows`' worth
+    /// of the most recent `qkv_mixed` rows -- older rows fall out of the
+    /// causal conv1d kernel's left context and are never read again.
+    fn advance(&mut self, qkv_mixed_new: &[f32], state_new: &[f32], shape: Qwen35SsmShape) {
+        self.conv_history.extend_from_slice(qkv_mixed_new);
+        let keep = shape.conv_rows * shape.qkv_dim;
+        let drop = self.conv_history.len().saturating_sub(keep);
+        self.conv_history.drain(0..drop);
+        self.state.clear();
+        self.state.extend_from_slice(state_new);
+    }
+
+    fn named_blocks<'cache>(
+        &'cache self,
+        conv_history_name: &'cache str,
+        state_name: &'cache str,
+    ) -> [(&'cache str, QuantizedBlock<'cache>); 2] {
+        [
+            (
+                conv_history_name,
+                QuantizedBlock::Float32(self.conv_history.as_slice()),
+            ),
+            (state_name, QuantizedBlock::Float32(self.state.as_slice())),
+        ]
+    }
+}
+
+/// [`LayerCache::new`]/[`SsmLayerCache::new`] threaded per forward-program
+/// layer, matching [`LoadedModel::layer_roots`]'s own per-layer discriminant
+/// -- an attention layer's cache append/readback shape genuinely differs
+/// from an ssm layer's, the same reason [`Qwen35LayerRoots`] itself is an
+/// enum rather than a fixed-shape tuple.
+enum LayerCacheState {
+    Attention(LayerCache),
+    DenseAttention(Qwen35DenseAttentionCache),
+    Ssm(SsmLayerCache),
+}
+
+/// This call's own [`Op::Input`] names for one layer's cache, matching
+/// [`LayerCacheState`]'s discriminant one-to-one -- built once per
+/// [`LoadedModel::run_decode_loop`] call (never per step) since layer kind
+/// and layer index never change within a call.
+enum LayerCacheNames {
+    Attention {
+        k_even: String,
+        k_odd: String,
+        v: String,
+    },
+    DenseAttention {
+        k_first: String,
+        k_second: String,
+        k_pass: String,
+        v: String,
+    },
+    Ssm {
+        conv_history: String,
+        state: String,
+    },
 }
 
 /// Every per-call input the cached forward program needs beyond the model
@@ -755,6 +997,26 @@ fn decode_until_stop_or_budget(
     Ok((generated_ids, stopped_by_eos))
 }
 
+/// [`Vocab::add_bos_token`]'s own fallback when the checkpoint's metadata
+/// carries no `tokenizer.ggml.add_bos_token` opinion at all: default to
+/// requesting BOS only when the vocab actually HAS a
+/// [`Vocab::bos_token_id`] to add. Every dense checkpoint this crate has
+/// bound so far declares one (openchat-3.5, SmolLM2), so this reproduces
+/// this crate's pre-existing unconditional `true` default for them
+/// byte-for-byte; the real Qwen3.5 checkpoint declares neither the policy
+/// key nor a `tokenizer.ggml.bos_token_id` key at all (confirmed via
+/// `strings` on the real file -- Qwen's own tokenizer has no BOS token,
+/// chat turns open on `<|im_start|>` instead), so defaulting to `true`
+/// there would ask [`proxima_tokenizer::encode_with_bos_eos`] to prepend an
+/// id that does not exist, surfacing
+/// [`proxima_tokenizer::TokenizerError::MissingMetadataKey`] on every
+/// prompt rather than the tokenizer's own real, silent policy.
+fn wants_bos(vocab: &Vocab) -> bool {
+    vocab
+        .add_bos_token()
+        .unwrap_or_else(|| vocab.bos_token_id().is_some())
+}
+
 impl<'file> LoadedModel<'file> {
     /// [`Self::generate_with_serving_config`] against
     /// [`supported_serving_config`] -- the reachable path every existing
@@ -811,7 +1073,7 @@ impl<'file> LoadedModel<'file> {
         let ids = proxima_tokenizer::encode_with_bos_eos(
             prompt,
             &self.vocab,
-            self.vocab.add_bos_token().unwrap_or(true),
+            wants_bos(&self.vocab),
             self.vocab.add_eos_token().unwrap_or(false),
         )?;
         // The repetition-penalty filter's own window: prompt tokens included,
@@ -836,18 +1098,45 @@ impl<'file> LoadedModel<'file> {
         };
         let mut rng = fastrand::Rng::with_seed(serving_config.seed);
 
-        let block_count = self.architecture.block_count as usize;
-        let kv_cache_names: Vec<(String, String, String)> = (0..block_count)
-            .map(|layer| {
-                (
-                    alloc::format!("kv_cache.{layer}.k_even"),
-                    alloc::format!("kv_cache.{layer}.k_odd"),
-                    alloc::format!("kv_cache.{layer}.v"),
-                )
+        let cache_names: Vec<LayerCacheNames> = self
+            .layer_roots
+            .iter()
+            .enumerate()
+            .map(|(layer, roots)| match roots {
+                Qwen35LayerRoots::Attention(_) => LayerCacheNames::Attention {
+                    k_even: alloc::format!("kv_cache.{layer}.k_even"),
+                    k_odd: alloc::format!("kv_cache.{layer}.k_odd"),
+                    v: alloc::format!("kv_cache.{layer}.v"),
+                },
+                Qwen35LayerRoots::DenseAttention(_) => LayerCacheNames::DenseAttention {
+                    k_first: alloc::format!("kv_cache.{layer}.k_first"),
+                    k_second: alloc::format!("kv_cache.{layer}.k_second"),
+                    k_pass: alloc::format!("kv_cache.{layer}.k_pass"),
+                    v: alloc::format!("kv_cache.{layer}.v"),
+                },
+                Qwen35LayerRoots::Ssm { .. } => LayerCacheNames::Ssm {
+                    conv_history: alloc::format!("ssm_cache.{layer}.conv_history"),
+                    state: alloc::format!("ssm_cache.{layer}.state"),
+                },
             })
             .collect();
-        let mut layer_caches: Vec<LayerCache> =
-            (0..block_count).map(|_| LayerCache::new()).collect();
+        let mut layer_caches: Vec<LayerCacheState> = self
+            .layer_roots
+            .iter()
+            .map(|roots| match roots {
+                Qwen35LayerRoots::Attention(_) => LayerCacheState::Attention(LayerCache::new()),
+                Qwen35LayerRoots::DenseAttention(_) => {
+                    LayerCacheState::DenseAttention(Qwen35DenseAttentionCache::new())
+                }
+                Qwen35LayerRoots::Ssm { .. } => LayerCacheState::Ssm(SsmLayerCache::new(
+                    self.qwen35_ssm_shape.unwrap_or(Qwen35SsmShape {
+                        qkv_dim: 0,
+                        conv_rows: 0,
+                        state_len: 0,
+                    }),
+                )),
+            })
+            .collect();
 
         // The caller's own knowledge of which named blocks are STATIC --
         // bound once in `LoadedModel::load` and never mutated again -- fixed
@@ -947,28 +1236,72 @@ impl<'file> LoadedModel<'file> {
                 #[cfg(feature = "instrument")]
                 let kv_cache_upload_elements: u64 = layer_caches
                     .iter()
-                    .map(|cache| (cache.k_even.len() + cache.k_odd.len() + cache.v.len()) as u64)
+                    .map(|cache| match cache {
+                        LayerCacheState::Attention(cache) => {
+                            (cache.k_even.len() + cache.k_odd.len() + cache.v.len()) as u64
+                        }
+                        LayerCacheState::DenseAttention(cache) => {
+                            (cache.k_first.len()
+                                + cache.k_second.len()
+                                + cache.k_pass.len()
+                                + cache.v.len()) as u64
+                        }
+                        LayerCacheState::Ssm(cache) => {
+                            (cache.conv_history.len() + cache.state.len()) as u64
+                        }
+                    })
                     .sum();
                 #[cfg(feature = "instrument")]
                 let named_blocks_kv_started = read_ticks();
-                for (layer, (k_even_name, k_odd_name, v_name)) in kv_cache_names.iter().enumerate()
-                {
-                    named_blocks.extend(layer_caches[layer].named_blocks(
-                        k_even_name,
-                        k_odd_name,
-                        v_name,
-                    ));
+                for (layer, names) in cache_names.iter().enumerate() {
+                    match (names, &layer_caches[layer]) {
+                        (
+                            LayerCacheNames::Attention { k_even, k_odd, v },
+                            LayerCacheState::Attention(cache),
+                        ) => {
+                            named_blocks.extend(cache.named_blocks(k_even, k_odd, v));
+                        }
+                        (
+                            LayerCacheNames::DenseAttention { k_first, k_second, k_pass, v },
+                            LayerCacheState::DenseAttention(cache),
+                        ) => {
+                            named_blocks.extend(cache.named_blocks(k_first, k_second, k_pass, v));
+                        }
+                        (
+                            LayerCacheNames::Ssm { conv_history, state },
+                            LayerCacheState::Ssm(cache),
+                        ) => {
+                            named_blocks.extend(cache.named_blocks(conv_history, state));
+                        }
+                        _ => unreachable!(
+                            "cache_names/layer_caches built from the same layer_roots, in lockstep"
+                        ),
+                    }
                 }
                 #[cfg(feature = "instrument")]
                 let named_blocks_kv_ticks = elapsed_ticks(named_blocks_kv_started);
 
                 let symbols = [new_count as u64, cached_len as u64];
-                let mut roots: Vec<NodeId> = Vec::with_capacity(1 + self.cache_roots.len() * 3);
+                let mut roots: Vec<NodeId> = Vec::with_capacity(1 + self.layer_roots.len() * 3);
                 roots.push(self.logits_root);
-                for (even, odd, value) in &self.cache_roots {
-                    roots.push(*even);
-                    roots.push(*odd);
-                    roots.push(*value);
+                for roots_for_layer in &self.layer_roots {
+                    match roots_for_layer {
+                        Qwen35LayerRoots::Attention((even, odd, value)) => {
+                            roots.push(*even);
+                            roots.push(*odd);
+                            roots.push(*value);
+                        }
+                        Qwen35LayerRoots::DenseAttention((first, second, pass, value)) => {
+                            roots.push(*first);
+                            roots.push(*second);
+                            roots.push(*pass);
+                            roots.push(*value);
+                        }
+                        Qwen35LayerRoots::Ssm { qkv_mixed, state_out } => {
+                            roots.push(*qkv_mixed);
+                            roots.push(*state_out);
+                        }
+                    }
                 }
 
                 #[cfg(feature = "instrument")]
@@ -1032,22 +1365,85 @@ impl<'file> LoadedModel<'file> {
                 let layer_cache_append_started = read_ticks();
                 #[cfg(feature = "instrument")]
                 let mut layer_cache_append_elements: u64 = 0;
-                for (layer, (even, odd, value)) in self.cache_roots.iter().enumerate() {
-                    let (even_data, _) = evaluated
-                        .get(*even)
-                        .ok_or(InteropError::MissingEvaluatedNode { node: *even })?;
-                    let (odd_data, _) = evaluated
-                        .get(*odd)
-                        .ok_or(InteropError::MissingEvaluatedNode { node: *odd })?;
-                    let (value_data, _) = evaluated
-                        .get(*value)
-                        .ok_or(InteropError::MissingEvaluatedNode { node: *value })?;
-                    #[cfg(feature = "instrument")]
-                    {
-                        layer_cache_append_elements +=
-                            (even_data.len() + odd_data.len() + value_data.len()) as u64;
+                for (layer, roots_for_layer) in self.layer_roots.iter().enumerate() {
+                    match (roots_for_layer, &mut layer_caches[layer]) {
+                        (
+                            Qwen35LayerRoots::Attention((even, odd, value)),
+                            LayerCacheState::Attention(cache),
+                        ) => {
+                            let (even_data, _) = evaluated
+                                .get(*even)
+                                .ok_or(InteropError::MissingEvaluatedNode { node: *even })?;
+                            let (odd_data, _) = evaluated
+                                .get(*odd)
+                                .ok_or(InteropError::MissingEvaluatedNode { node: *odd })?;
+                            let (value_data, _) = evaluated
+                                .get(*value)
+                                .ok_or(InteropError::MissingEvaluatedNode { node: *value })?;
+                            #[cfg(feature = "instrument")]
+                            {
+                                layer_cache_append_elements +=
+                                    (even_data.len() + odd_data.len() + value_data.len()) as u64;
+                            }
+                            cache.append(even_data, odd_data, value_data);
+                        }
+                        (
+                            Qwen35LayerRoots::DenseAttention((first, second, pass, value)),
+                            LayerCacheState::DenseAttention(cache),
+                        ) => {
+                            let (first_data, _) = evaluated
+                                .get(*first)
+                                .ok_or(InteropError::MissingEvaluatedNode { node: *first })?;
+                            let (second_data, _) = evaluated
+                                .get(*second)
+                                .ok_or(InteropError::MissingEvaluatedNode { node: *second })?;
+                            let (pass_data, _) = evaluated
+                                .get(*pass)
+                                .ok_or(InteropError::MissingEvaluatedNode { node: *pass })?;
+                            let (value_data, _) = evaluated
+                                .get(*value)
+                                .ok_or(InteropError::MissingEvaluatedNode { node: *value })?;
+                            #[cfg(feature = "instrument")]
+                            {
+                                layer_cache_append_elements += (first_data.len()
+                                    + second_data.len()
+                                    + pass_data.len()
+                                    + value_data.len())
+                                    as u64;
+                            }
+                            cache.append(first_data, second_data, pass_data, value_data);
+                        }
+                        (
+                            Qwen35LayerRoots::Ssm { qkv_mixed, state_out },
+                            LayerCacheState::Ssm(cache),
+                        ) => {
+                            let (qkv_mixed_data, _) = evaluated.get(*qkv_mixed).ok_or(
+                                InteropError::MissingEvaluatedNode { node: *qkv_mixed },
+                            )?;
+                            let (state_out_data, _) = evaluated.get(*state_out).ok_or(
+                                InteropError::MissingEvaluatedNode { node: *state_out },
+                            )?;
+                            #[cfg(feature = "instrument")]
+                            {
+                                layer_cache_append_elements +=
+                                    (qkv_mixed_data.len() + state_out_data.len()) as u64;
+                            }
+                            // `Self::load`'s own invariant: an `Ssm` entry in
+                            // `layer_roots` exists only when `qwen35_ssm_shape`
+                            // was derived alongside it (both come from the same
+                            // `crate::qwen35::Qwen35Architecture`), so this
+                            // fallback shape is never actually read.
+                            let shape = self.qwen35_ssm_shape.unwrap_or(Qwen35SsmShape {
+                                qkv_dim: 0,
+                                conv_rows: 0,
+                                state_len: 0,
+                            });
+                            cache.advance(qkv_mixed_data, state_out_data, shape);
+                        }
+                        _ => unreachable!(
+                            "layer_roots/layer_caches built from the same layer_roots, in lockstep"
+                        ),
                     }
-                    layer_caches[layer].append(even_data, odd_data, value_data);
                 }
                 #[cfg(feature = "instrument")]
                 let layer_cache_append_ticks = elapsed_ticks(layer_cache_append_started);
@@ -1060,6 +1456,76 @@ impl<'file> LoadedModel<'file> {
                             node: self.logits_root,
                         })?;
                 let last_position = &logits[(new_count - 1) * vocab_size..new_count * vocab_size];
+
+                if _step == 0 {
+                    let stats = |data: &[f32]| {
+                        let len = data.len();
+                        let nan_count = data.iter().filter(|value| value.is_nan()).count();
+                        let inf_count = data.iter().filter(|value| value.is_infinite()).count();
+                        let min = data.iter().cloned().fold(f32::INFINITY, f32::min);
+                        let max = data.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+                        let all_zero = data.iter().all(|value| *value == 0.0);
+                        (len, nan_count, inf_count, min, max, all_zero)
+                    };
+                    let (len, nan_count, inf_count, min, max, all_zero) = stats(last_position);
+                    std::println!(
+                        "DIAG_PROBE logits len={len} nan_count={nan_count} inf_count={inf_count} min={min} max={max} all_zero={all_zero}"
+                    );
+                    for (layer_index, roots_for_layer) in self.layer_roots.iter().enumerate() {
+                        match roots_for_layer {
+                            Qwen35LayerRoots::Attention((_even, _odd, value)) => {
+                                match evaluated.get(*value) {
+                                    Some((data, _shape)) => {
+                                        let (len, nan_count, inf_count, min, max, all_zero) = stats(data);
+                                        std::println!(
+                                            "DIAG_PROBE layer={layer_index} kind=Attention node=value len={len} nan_count={nan_count} inf_count={inf_count} min={min} max={max} all_zero={all_zero}"
+                                        );
+                                    }
+                                    None => std::println!(
+                                        "DIAG_PROBE layer={layer_index} kind=Attention node=value MISSING"
+                                    ),
+                                }
+                            }
+                            Qwen35LayerRoots::DenseAttention((_first, _second, _pass, value)) => {
+                                match evaluated.get(*value) {
+                                    Some((data, _shape)) => {
+                                        let (len, nan_count, inf_count, min, max, all_zero) = stats(data);
+                                        std::println!(
+                                            "DIAG_PROBE layer={layer_index} kind=DenseAttention node=value len={len} nan_count={nan_count} inf_count={inf_count} min={min} max={max} all_zero={all_zero}"
+                                        );
+                                    }
+                                    None => std::println!(
+                                        "DIAG_PROBE layer={layer_index} kind=DenseAttention node=value MISSING"
+                                    ),
+                                }
+                            }
+                            Qwen35LayerRoots::Ssm { qkv_mixed, state_out } => {
+                                match evaluated.get(*qkv_mixed) {
+                                    Some((qkv_data, _shape)) => {
+                                        let (qkv_len, qkv_nan, qkv_inf, qkv_min, qkv_max, qkv_all_zero) = stats(qkv_data);
+                                        std::println!(
+                                            "DIAG_PROBE layer={layer_index} kind=Ssm node=qkv_mixed len={qkv_len} nan_count={qkv_nan} inf_count={qkv_inf} min={qkv_min} max={qkv_max} all_zero={qkv_all_zero}"
+                                        );
+                                    }
+                                    None => std::println!(
+                                        "DIAG_PROBE layer={layer_index} kind=Ssm node=qkv_mixed MISSING"
+                                    ),
+                                }
+                                match evaluated.get(*state_out) {
+                                    Some((state_data, _shape)) => {
+                                        let (state_len, state_nan, state_inf, state_min, state_max, state_all_zero) = stats(state_data);
+                                        std::println!(
+                                            "DIAG_PROBE layer={layer_index} kind=Ssm node=state_out len={state_len} nan_count={state_nan} inf_count={state_inf} min={state_min} max={state_max} all_zero={state_all_zero}"
+                                        );
+                                    }
+                                    None => std::println!(
+                                        "DIAG_PROBE layer={layer_index} kind=Ssm node=state_out MISSING"
+                                    ),
+                                }
+                            }
+                        }
+                    }
+                }
 
                 #[cfg(feature = "instrument")]
                 let greedy_pick_started = read_ticks();
@@ -1228,7 +1694,7 @@ impl<'file> LoadedModel<'file> {
         let ids = proxima_tokenizer::encode_with_bos_eos(
             prompt,
             &self.vocab,
-            self.vocab.add_bos_token().unwrap_or(true),
+            wants_bos(&self.vocab),
             self.vocab.add_eos_token().unwrap_or(false),
         )?;
         apply_serving_config(&serving_config, ids.len())?;
@@ -1323,7 +1789,7 @@ impl<'file> LoadedModel<'file> {
         let ids = proxima_tokenizer::encode_with_bos_eos(
             prompt,
             &self.vocab,
-            self.vocab.add_bos_token().unwrap_or(true),
+            wants_bos(&self.vocab),
             self.vocab.add_eos_token().unwrap_or(false),
         )?;
         let mut values = self.forward_node_values(prompt, &[self.logits_root])?;
