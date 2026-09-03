@@ -19283,6 +19283,24 @@ Raw records are `/tmp/proxima-metal-q4k-float4-two-run{1,2,3}.txt`. The
 source candidate is `omega/src/msl.rs:2642-2650`; the existing parity control
 is `omega/tests/metal_real_forward.rs:148-181`.
 
+## ROW 252 -- Q4_K activation-sum float4 negative
+
+The Q4_K scale/minimum-deferred branch was tested with the eight activation
+values accumulated as two `float4` dot products instead of eight scalar
+additions. The candidate changed no semantics outside that inner loop and
+was reverted after the full-checkpoint cell.
+
+| arm | mean wall ms | CoV | mean GPU ms | CoV | output |
+| --- | ---: | ---: | ---: | ---: | --- |
+| float4 accumulation baseline | 66.853 | 0.316% | 47.957 | 0.493% | `Here is` |
+| float4 activation-sum candidate | 66.888 | 1.383% | 48.121 | 0.204% | `Here is` |
+
+The candidate was `1.001x` slower on wall time and `1.003x` slower on GPU
+time over three independent full-checkpoint runs. The float4 dot-product
+win is therefore limited to the raw nibble accumulation; the activation-sum
+rewrite was not retained. Raw records are
+`/tmp/proxima-metal-q4k-act-sum-two-run{1,2,3}.txt`.
+
 ## ROW 250 -- exact-prompt GPU decode comparison
 
 ROW 243's llama-bench `tg1` cell was empty-cache and is not a cached decode
