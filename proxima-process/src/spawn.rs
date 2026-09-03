@@ -27,11 +27,11 @@
 //!
 //! # Spawn path
 //!
-//! Linux's ordinary external-command path uses `posix_spawnp(3)`, so it is
-//! safe when callers resolve several children from a multi-threaded parent.
-//! The existing `fork(2)` path remains for dispatch sockets, controlling
-//! terminals, umasks, and platforms without the native spawn primitive; those
-//! callers still need the single-threaded fork-server boundary.
+//! [`spawn_external`] uses Linux `posix_spawnp(3)`, so ordinary external
+//! commands are safe when callers resolve several children from a
+//! multi-threaded parent. [`spawn`] remains the full pre-exec `fork(2)` path
+//! for dispatch sockets, controlling terminals, umasks, and legacy callers;
+//! those callers still need the single-threaded fork-server boundary.
 
 use std::ffi::CString;
 use std::os::fd::{AsRawFd, OwnedFd, RawFd};
@@ -268,12 +268,24 @@ pub struct SpawnOptions {
 /// itself stays pure data; anything that varies per spawn site
 /// rides in [`SpawnOptions`].
 pub fn spawn(command: &CommandDescriptor, options: SpawnOptions) -> Result<Child, ProximaError> {
-    #[cfg(target_os = "linux")]
-    if options.dispatch_fd.is_none() && !options.controlling_tty && options.umask.is_none() && command.current_dir.is_none() {
-        return spawn_posix(command);
-    }
-
     spawn_fork(command, options)
+}
+
+/// Spawn an ordinary external executable without entering the raw `fork(2)`
+/// path. This is the safe route for callers that may already have runtime
+/// threads. Options requiring child-side code before `exec` are rejected;
+/// they must use [`spawn`] through a single-threaded boundary.
+#[cfg(target_os = "linux")]
+pub fn spawn_external(command: &CommandDescriptor, options: SpawnOptions) -> Result<Child, ProximaError> {
+    if options.dispatch_fd.is_some() || options.controlling_tty || options.umask.is_some() {
+        return Err(ProximaError::Body("posix_spawn external route does not support dispatch fd, controlling tty, or umask".to_owned()));
+    }
+    spawn_posix(command)
+}
+
+#[cfg(not(target_os = "linux"))]
+pub fn spawn_external(_command: &CommandDescriptor, _options: SpawnOptions) -> Result<Child, ProximaError> {
+    Err(ProximaError::Body("posix_spawn external route is unavailable on this platform".to_owned()))
 }
 
 #[cfg(target_os = "linux")]
@@ -361,6 +373,12 @@ fn add_posix_stdio_actions(
                     add_close_action(actions, source)?;
                 }
             }
+        }
+    }
+    if let Some(directory) = command.current_dir.as_ref() {
+        let result = unsafe { libc::posix_spawn_file_actions_addchdir_np(actions, directory.as_ptr()) };
+        if result != 0 {
+            return Err(posix_spawn_error("working-directory action", result));
         }
     }
     Ok(())
@@ -701,7 +719,7 @@ mod tests {
                 thread::spawn(move || {
                     let mut command = CommandDescriptor::new(cstr("/bin/echo"));
                     command.arg(cstr(&format!("worker {worker}"))).stdout(Stdio::Piped);
-                    let mut spawned = spawn(&command, SpawnOptions::default()).expect("posix_spawn");
+                    let mut spawned = spawn_external(&command, SpawnOptions::default()).expect("posix_spawn");
                     let output = drain_to_string(spawned.stdout.take().expect("piped output"));
                     assert_eq!(output, format!("worker {worker}\n"));
                     let status = wait_child(spawned.pid);
