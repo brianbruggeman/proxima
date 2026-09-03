@@ -1668,6 +1668,15 @@ fn upload_block(
 /// this block's own node -- see the module doc's "Resident blocks" section
 /// for why a misaligned RESIDENT block still gets a cache, just a different
 /// one than the no-copy path's.
+///
+/// CACHING the wrapper this creates is gated on `resident`, not on
+/// `is_page_aligned` alone: page alignment is a property of an ADDRESS, not
+/// of a LIFETIME, and `(pointer, byte_length)` is exactly the key an
+/// ephemeral, growing buffer (a KV-cache row, say) can reuse after a
+/// realloc moves a DIFFERENT allocation onto the same range. Only
+/// `mark_resident`'s "this address holds a model weight nothing overwrites
+/// again" proof licenses remembering the wrapper past this one call -- see
+/// `proxima-tensor/docs/discipline.md` ROW 70.
 fn upload_block_as_float(
     device: &ProtocolObject<dyn MTLDevice>,
     data: &[f32],
@@ -1680,7 +1689,11 @@ fn upload_block_as_float(
     let pointer = data.as_ptr().cast::<c_void>();
     if is_page_aligned(pointer, byte_length) {
         counter!(NOCOPY_BUFFER_UPLOADS, 1);
-        return upload_block_no_copy(device, pointer, byte_length).map(|buffer| (buffer, 0));
+        if resident {
+            return upload_block_no_copy(device, pointer, byte_length).map(|buffer| (buffer, 0));
+        }
+        return upload_block_no_copy_uncached(device, pointer, byte_length)
+            .map(|buffer| (buffer, 0));
     }
     if let Some(result) = checkpoint_mapping_offset(device, pointer, byte_length) {
         return result;
@@ -1712,7 +1725,11 @@ fn upload_packed_bytes(
     let pointer = bytes.as_ptr().cast::<c_void>();
     if is_page_aligned(pointer, byte_length) {
         counter!(NOCOPY_BUFFER_UPLOADS, 1);
-        return upload_block_no_copy(device, pointer, byte_length).map(|buffer| (buffer, 0));
+        if resident {
+            return upload_block_no_copy(device, pointer, byte_length).map(|buffer| (buffer, 0));
+        }
+        return upload_block_no_copy_uncached(device, pointer, byte_length)
+            .map(|buffer| (buffer, 0));
     }
     if let Some(result) = checkpoint_mapping_offset(device, pointer, byte_length) {
         return result;
@@ -1807,14 +1824,21 @@ thread_local! {
     /// that scales with BYTES, which is exactly what made it invisible in a
     /// bytes-normalized probe.
     ///
-    /// CALLER PRECONDITION, not yet enforced by a type: a cached wrapper
-    /// aliases the caller's pages and Metal does NOT own them, so the host
-    /// range `(pointer, len)` must stay mapped for as long as this thread
-    /// keeps using omega. That holds for mmap'd GGUF weights, which is the
-    /// case this exists for; it does NOT hold for a `Vec` the caller drops
-    /// between calls, where the wrapper would alias freed pages. The sound
-    /// version of this is a resident-blocks handle whose lifetime borrows
-    /// the caller's data — see `proxima-tensor/docs/discipline.md` ROW 70.
+    /// CALLER PRECONDITION, enforced at the call site via `resident`, not
+    /// (yet) a type: a cached wrapper aliases the caller's pages and Metal
+    /// does NOT own them, so the host range `(pointer, len)` must stay
+    /// mapped, and must never be reused by a DIFFERENT allocation, for as
+    /// long as this thread keeps using omega. `upload_block_as_float` and
+    /// `upload_packed_bytes` only route into this cache when
+    /// [`Plan::mark_resident`] already proved that for the node's own
+    /// address -- true for mmap'd GGUF weights, false for an ephemeral,
+    /// growing buffer (a KV-cache row, say) whose page-aligned address is a
+    /// coincidence of a page-boundary crossing, not a lifetime proof. A
+    /// page-aligned but non-resident block takes
+    /// `upload_block_no_copy_uncached` instead: still zero-copy for this one
+    /// `execute` call (sound for the same `waitUntilCompleted` reason), just
+    /// never remembered past it. See `proxima-tensor/docs/discipline.md`
+    /// ROW 70.
     ///
     /// Reuse is otherwise safe on the data-freshness axis precisely BECAUSE
     /// it is no-copy: writes through the caller's own slice are visible to
@@ -1823,6 +1847,15 @@ thread_local! {
     /// serve a stale snapshot.
     static NOCOPY_BUFFERS: RefCell<BTreeMap<(usize, usize), MetalBuffer>> =
         RefCell::new(BTreeMap::new());
+}
+
+/// Counts entries [`NOCOPY_BUFFERS`] actually holds right now — the direct
+/// witness that gating the cache on `resident` stops it growing without
+/// bound. A non-resident page-aligned block (a KV-cache row that happened to
+/// cross a page boundary) never reaches this map at all.
+#[must_use]
+pub fn nocopy_cache_len() -> usize {
+    NOCOPY_BUFFERS.with(|cache| cache.borrow().len())
 }
 
 /// Counts the no-copy wrappers this thread reused instead of recreating —
@@ -1837,7 +1870,48 @@ pub static NOCOPY_BUFFER_REUSES: Counter = Counter::new("omega.metal.upload_bloc
 /// and because [`execute`] `waitUntilCompleted`s the one command buffer
 /// every op (including this buffer's reads) is encoded into before
 /// [`upload_block_as_float`]'s caller-owned slice's borrow can end.
+///
+/// Cached in [`NOCOPY_BUFFERS`] — reachable ONLY when the caller already
+/// classified this address `resident` (see the call sites in
+/// [`upload_block_as_float`]/[`upload_packed_bytes`]); a non-resident
+/// page-aligned block takes [`upload_block_no_copy_uncached`] instead, which
+/// shares this function's Metal call but never remembers the wrapper.
 fn upload_block_no_copy(
+    device: &ProtocolObject<dyn MTLDevice>,
+    pointer: *const c_void,
+    byte_length: usize,
+) -> Result<MetalBuffer, MetalError> {
+    let key = (pointer as usize, byte_length);
+    if let Some(existing) = NOCOPY_BUFFERS.with(|cache| cache.borrow().get(&key).cloned()) {
+        counter!(NOCOPY_BUFFER_REUSES, 1);
+        return Ok(existing);
+    }
+    let buffer = create_no_copy_buffer(device, pointer, byte_length)?;
+    NOCOPY_BUFFERS.with(|cache| cache.borrow_mut().insert(key, buffer.clone()));
+    Ok(buffer)
+}
+
+/// The uncached counterpart to [`upload_block_no_copy`]: still hands Metal
+/// the caller's own pointer directly (zero-copy, sound for this one
+/// `execute` call for the exact reason [`upload_block_no_copy`]'s doc
+/// gives), but never inserts the wrapper into [`NOCOPY_BUFFERS`]. Taken
+/// whenever a page-aligned block's node is NOT [`Plan::mark_resident`]-classified
+/// static — an ephemeral, growing buffer (a KV-cache row that crossed a page
+/// boundary) can cross that same alignment by coincidence on every call, and
+/// caching it would key a permanent entry off an address whose CONTENTS,
+/// and even whose owning allocation, changes underneath it.
+fn upload_block_no_copy_uncached(
+    device: &ProtocolObject<dyn MTLDevice>,
+    pointer: *const c_void,
+    byte_length: usize,
+) -> Result<MetalBuffer, MetalError> {
+    create_no_copy_buffer(device, pointer, byte_length)
+}
+
+/// The `newBufferWithBytesNoCopy` FFI call itself, shared by
+/// [`upload_block_no_copy`] and [`upload_block_no_copy_uncached`] — caching
+/// is entirely the callers' concern, not this function's.
+fn create_no_copy_buffer(
     device: &ProtocolObject<dyn MTLDevice>,
     pointer: *const c_void,
     byte_length: usize,
@@ -1847,13 +1921,8 @@ fn upload_block_no_copy(
     // — `newBufferWithBytesNoCopy`'s documented precondition. Passing `None`
     // as the deallocator tells Metal it never owns this memory, so it is
     // never freed or written out from under the caller.
-    let key = (pointer as usize, byte_length);
-    if let Some(existing) = NOCOPY_BUFFERS.with(|cache| cache.borrow().get(&key).cloned()) {
-        counter!(NOCOPY_BUFFER_REUSES, 1);
-        return Ok(existing);
-    }
     let pointer = unsafe { NonNull::new_unchecked(pointer as *mut c_void) };
-    let buffer = unsafe {
+    unsafe {
         device.newBufferWithBytesNoCopy_length_options_deallocator(
             pointer,
             byte_length,
@@ -1863,9 +1932,7 @@ fn upload_block_no_copy(
     }
     .ok_or_else(|| MetalError::CompileFailed {
         log: "device refused a no-copy shared buffer for a page-aligned block input".to_string(),
-    })?;
-    NOCOPY_BUFFERS.with(|cache| cache.borrow_mut().insert(key, buffer.clone()));
-    Ok(buffer)
+    })
 }
 
 fn upload_block_copy(
