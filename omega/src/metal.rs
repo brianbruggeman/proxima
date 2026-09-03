@@ -620,6 +620,8 @@ pub struct OpGpuTiming {
     /// of a down-projection), which disqualifies the row-blocked kernel via
     /// that same function's `quantized.len() != 2` check.
     pub operand_count: usize,
+    /// The packed codec carried by this op's named operand, when present.
+    pub packed_codec: Option<PackedCodec>,
     /// [`crate::msl::diagnose_packed_row_block`]'s own verdict on THIS op,
     /// against a REAL bound program rather than a synthetic symbolic one --
     /// `None` when the op is not a `Reduce { keep: Keep::Reduce, .. }` at
@@ -709,6 +711,10 @@ pub fn execute_plan_op_timed(
             .map(ToString::to_string);
         let kind = classify_kind(bound, packed_operands);
         let packed_row_block_rejection = diagnose_kind(bound, packed_operands);
+        let packed_codec = bound
+            .operands()
+            .iter()
+            .find_map(|(source, _, _)| packed_operands.get(source).copied());
 
         let command_buffer = queue
             .commandBuffer()
@@ -746,6 +752,7 @@ pub fn execute_plan_op_timed(
             gpu_ns,
             weight_name,
             operand_count: bound.operands().len(),
+            packed_codec,
             packed_row_block_rejection,
         });
     }
