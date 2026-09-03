@@ -2477,8 +2477,17 @@ fn push_serial_reduce_body(
 /// seeds from [`cooperative_identity_token`] so the true seed is folded into
 /// the group exactly once (see that function's doc). `gid / SIMD_WIDTH` is a
 /// valid output index, and `gid % SIMD_WIDTH` a valid lane-within-group
-/// index, only because [`GridSpec::threadgroup_width`] pins the dispatched
-/// threadgroup width to exactly `SIMD_WIDTH` — see `crate::metal::dispatch`.
+/// index, because [`GridSpec::threadgroup_width`] always pins the dispatched
+/// threadgroup width to a whole multiple of `SIMD_WIDTH` — see
+/// `crate::metal::dispatch` — and Metal's `dispatchThreads:
+/// threadsPerThreadgroup:` (the API `dispatch` always calls) defines
+/// `[[thread_position_in_grid]]` as `threadgroup_position_in_grid *
+/// threadgroup_width + thread_position_in_threadgroup` even in the boundary
+/// (non-full) threadgroup, so `gid` stays a flat global index unaffected by
+/// how many `SIMD_WIDTH`-lane simdgroups the driver packs into one
+/// threadgroup. The row-blocked packed path widens this multiple via
+/// [`crate::sized::PACKED_ROW_BLOCK_SIMDGROUPS`]; every other cooperative
+/// reduce stays at exactly one simdgroup per threadgroup.
 /// Gather is out of scope here: [`reduce_is_cooperative`] never selects this
 /// path when the op gathers, so operand offsets are read straight off
 /// `operand_base`/`operand_strides` with no fetch/fault machinery.
@@ -3229,6 +3238,12 @@ fn push_tiled_gemm_body(
 /// `None` otherwise. Single source of truth both dispatch-shape functions
 /// read, so they cannot drift the way two independent copies of this
 /// `if`/`else` could.
+/// [`crate::sized::PACKED_ROW_BLOCK_SIMDGROUPS`] widens the packed row-block
+/// arm's threadgroup beyond one simdgroup — see that constant's doc for why
+/// this is dispatch-only and never touches the kernel body. Ordered after
+/// the tiled-GEMM check and before the generic cooperative-reduce fallback,
+/// matching [`grid_threads`]' own priority (the two paths are mutually
+/// exclusive by construction — [`kernel_cache_key`]'s doc).
 fn tiled_gemm_threadgroup_width(
     resolved: &BoundOp,
     quantized: &[Option<PackedCodec>],
@@ -3243,6 +3258,9 @@ fn tiled_gemm_threadgroup_width(
         && tiled_gemm_block(resolved, quantized, *reduce_op, *init, output_axes).is_some()
     {
         return Some((TILED_GEMM_NSG as u64) * SIMD_WIDTH);
+    }
+    if packed_row_block(resolved, quantized).is_some() {
+        return Some(crate::sized::PACKED_ROW_BLOCK_SIMDGROUPS * SIMD_WIDTH);
     }
     reduce_is_cooperative(resolved).then_some(SIMD_WIDTH)
 }

@@ -10,11 +10,12 @@
 //!   no `config.rs` alongside it: a runtime override would let a caller ask
 //!   for a value the hardware does not have, which is not configurability,
 //!   it is a footgun.
-//! - **Execution policy, build-time-configurable**: `TILED_GEMM_MIN_TOKENS`,
-//!   `TILED_GEMM_BLOCK_M`, `TILED_GEMM_BLOCK_N`, `TILED_GEMM_BLOCK_K`
-//!   (`metal-tiled-gemm`-only, ROW 109's multi-simdgroup redesign — ports
-//!   `ggml-metal.metal:6487-6489`'s `BLOCK_SIZE_M`/`BLOCK_SIZE_N`/
-//!   `BLOCK_SIZE_K`). These trace to `omega-runtime.toml` via `build.rs`'s
+//! - **Execution policy, build-time-configurable**: [`PACKED_ROW_BLOCK_SIMDGROUPS`]
+//!   (always compiled — the row-blocked packed path has no feature gate),
+//!   `TILED_GEMM_MIN_TOKENS`, `TILED_GEMM_BLOCK_M`, `TILED_GEMM_BLOCK_N`,
+//!   `TILED_GEMM_BLOCK_K` (`metal-tiled-gemm`-only, ROW 109's multi-simdgroup
+//!   redesign — ports `ggml-metal.metal:6487-6489`'s `BLOCK_SIZE_M`/
+//!   `BLOCK_SIZE_N`/`BLOCK_SIZE_K`). These trace to `omega-runtime.toml` via `build.rs`'s
 //!   `emit_sizing_consts` (mirrors `proxima-tensor/build.rs`'s function of
 //!   the same name over `proxima-tensor-runtime.toml`) and can be
 //!   overridden per-build via an `OMEGA_<SECTION>_<KEY>` env var
@@ -43,3 +44,20 @@ include!(concat!(env!("OUT_DIR"), "/omega_sized.rs"));
 /// other than 32 would not match the hardware `dispatch` actually runs
 /// on.
 pub const SIMD_WIDTH: u64 = 32;
+
+// `PACKED_ROW_BLOCK_SIMDGROUPS` comes in through the `include!` above --
+// number of independent `SIMD_WIDTH`-lane SIMD-groups Metal packs into one
+// threadgroup for the row-blocked packed-Q4_K/Q5_K/Q6_K matmul kernel
+// (`crate::msl::push_packed_row_blocked_body`). Raising it changes only
+// occupancy, never the kernel body: each simdgroup indexes off
+// `[[thread_position_in_grid]]` alone (`gid / SIMD_WIDTH` as its output
+// group, `gid % SIMD_WIDTH` as its lane) with no threadgroup-shared memory
+// and no barrier, so `dispatchThreads:threadsPerThreadgroup:`'s documented
+// global-id semantics keep the math correct at any multiple of
+// `SIMD_WIDTH` -- see `crate::msl::tiled_gemm_threadgroup_width`'s doc for
+// the specific invariant this constant must preserve. Measured sweep:
+// `proxima-tensor/docs/discipline.md` ROW 234 -- measured NEGATIVE: no
+// distinguishable win in the production single-command-buffer decode path
+// at any of N in {1,2,4,8} on 0.6B (30.6-31.6 ms/token, all within ~2%
+// noise), and a directional REGRESSION on 4B at N=2 (75.1 vs 63.98 ms/token,
+// n=8 steady steps). Left at the TOML default of 1.
