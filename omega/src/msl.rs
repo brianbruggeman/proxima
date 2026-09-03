@@ -1042,11 +1042,6 @@ pub(crate) fn gather_count(resolved: &BoundOp) -> usize {
 /// the per-row work becomes one header decode plus the nibble extracts.
 const PACKED_ROWS_PER_GROUP: usize = 4;
 
-/// Number of SIMD groups in the packed Q4_K row block. This matches ggml's
-/// `N_SG_Q4_K` so each 64-thread threadgroup owns eight output rows while
-/// each SIMD group keeps the existing four-row register shape.
-const PACKED_SIMDGROUPS: usize = 2;
-
 /// Edge length of the `simdgroup_matrix` tile `push_tiled_gemm_body` uses —
 /// `simdgroup_float8x8`/`simdgroup_half8x8` are fixed 8x8 by the MSL type
 /// itself on every Apple GPU family that supports them, the same "hardware
@@ -1589,10 +1584,8 @@ fn grid_threads(resolved: &BoundOp, quantized: &[Option<PackedCodec>]) -> u64 {
                         .product(),
                 )
             } else if packed_row_block(resolved, quantized).is_some() {
-                // two SIMD groups per packed row block, matching ggml's
-                // N_SG_Q4_K=2 and retaining four rows per SIMD group
-                output_total.div_ceil((PACKED_ROWS_PER_GROUP * PACKED_SIMDGROUPS) as u64)
-                    * (SIMD_WIDTH as u64 * PACKED_SIMDGROUPS as u64)
+                // one SIMD group per PACKED_ROWS_PER_GROUP outputs
+                output_total.div_ceil(PACKED_ROWS_PER_GROUP as u64) * SIMD_WIDTH
             } else if reduce_is_cooperative(resolved) {
                 // one SIMD-group (SIMD_WIDTH lanes) per output element, not
                 // one thread — see `reduce_is_cooperative`'s doc.
@@ -2558,21 +2551,16 @@ fn push_packed_row_blocked_body(
     // algebraic identity, so `simd_*` can combine them unconditionally.
     let (init_expr, _) = fold_init_tokens(init);
     let identity = cooperative_identity_token(reduce_op);
-    // ROW-BLOCKED PACKED PATH. Each SIMD group folds PACKED_ROWS_PER_GROUP
+    // ROW-BLOCKED PACKED PATH. One SIMD group folds PACKED_ROWS_PER_GROUP
     // output rows at once so the activation's run of 8 values is loaded into
     // registers ONCE and reused across all of them — ggml's `float
-    // sumf[nr0]` with `N_R0_Q4_K 4`. Two groups share a threadgroup, matching
-    // ggml's `N_SG_Q4_K 2`, while retaining the same per-group register shape.
-    // Combined with the super-block header amortization below, the per-element
-    // cost becomes one byte load, one mask, one fma (`docs/discipline.md` ROW
-    // 74).
+    // sumf[nr0]` with `N_R0_Q4_K 4`. Combined with the super-block header
+    // amortization below, the per-element cost becomes one byte load, one
+    // mask, one fma (`docs/discipline.md` ROW 74).
     {
         let run = Q4K_BLOCK_ELEMENTS / SIMD_WIDTH as usize;
         let rows = PACKED_ROWS_PER_GROUP;
-        source.push_str(&format!(
-            "    long group_first = output_index * {} + ((gid / {SIMD_WIDTH}u) % {PACKED_SIMDGROUPS}u) * {rows};\n",
-            rows * PACKED_SIMDGROUPS
-        ));
+        source.push_str(&format!("    long group_first = output_index * {rows};\n"));
         source.push_str(&format!("    {element_type} sumf[{rows}];\n"));
         source.push_str(&format!(
             "    for (int q = 0; q < {rows}; ++q) {{ sumf[q] = (lane == 0u) ? ({init_expr}) : ({identity}); }}\n"
@@ -3256,13 +3244,6 @@ fn tiled_gemm_threadgroup_width(
     {
         return Some((TILED_GEMM_NSG as u64) * SIMD_WIDTH);
     }
-    if let BoundOpKind::Reduce {
-        keep: Keep::Reduce, ..
-    } = &resolved.kind
-        && packed_row_block(resolved, quantized).is_some()
-    {
-        return Some((PACKED_SIMDGROUPS as u64) * SIMD_WIDTH);
-    }
     reduce_is_cooperative(resolved).then_some(SIMD_WIDTH)
 }
 
@@ -3300,12 +3281,11 @@ fn push_cooperative_reduce_body(
     }
 
     // the row-blocked packed path owns its own preamble: `output_index` is a
-    // threadgroup index there, not an output index, so the guard below would
-    // be wrong for it.
+    // GROUP index there, not an output index, so the guard below would be
+    // wrong for it.
     if packed_row_block(resolved, quantized).is_some() {
         source.push_str(&format!(
-            "    long output_index = (long)gid / {};\n",
-            SIMD_WIDTH as usize * PACKED_SIMDGROUPS
+            "    long output_index = (long)gid / {SIMD_WIDTH};\n"
         ));
         source.push_str(&format!("    uint lane = gid % {SIMD_WIDTH}u;\n"));
         push_packed_row_blocked_body(
@@ -3945,10 +3925,6 @@ mod tests {
             !source.contains("hdr.scale * levels[j] - hdr.minimum"),
             "the per-element dequant expression must not remain once the scale-deferred path is taken:\n{source}"
         );
-        let kernel = emit(&bound, &q4k).expect("emits");
-        assert_eq!(kernel.grid.threads, 192);
-        assert_eq!(kernel.grid.threadgroup_width, Some(64));
-        assert!(kernel.source.contains("gid / 64;"));
     }
 
     /// The landmine `Q8_0`'s own landing closed (`PackedRowBlockRejection::
