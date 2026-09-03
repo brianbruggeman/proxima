@@ -19644,3 +19644,17 @@ scalar helper's `39.841 ms` GPU and `51.535 ms` wall in ROW 262. GPU time was
 The float4 body was rolled back. The scalar paired helper remains the measured
 implementation, and this experiment supplies no basis for another vector
 type or accumulator abstraction.
+
+## ROW 266 -- explicit unrolling of the paired Q4_K loop is a GPU negative
+
+The fixed four-iteration loop in `q4k_pair_dot` was temporarily annotated with
+`#pragma unroll`. The change preserved the same nibble mapping and arithmetic;
+the real Q4_K checkpoint parity fixture remained within the existing error
+range, and the 24-token run emitted the same observed text.
+
+The 23-step within-process cell measured `40.165 ms` GPU per token (CoV
+`1.48%`) and `50.055 ms` wall per token (CoV `1.74%`), compared with the
+retained scalar helper's `39.841 ms` GPU and `51.535 ms` wall in ROW 262. GPU
+time was `1.008x` slower, so the annotation was rolled back. The wall movement
+does not establish a GPU win and supplies no basis for changing the helper's
+arithmetic shape.
