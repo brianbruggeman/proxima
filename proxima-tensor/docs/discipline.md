@@ -5867,6 +5867,27 @@ per-`execute` round trip ROW 73, and now plan rebuild). The pattern is not that
 the guesses were unlucky; it is that a total divided by a count is not a
 measurement.
 
+## ROW 263 -- corrected per-op classifier restores packed-row-blocked attribution
+
+The per-op classifier initially recognized packed Q4_K kernels only through
+`q4k_run8`. After ROW 257 introduced `q4k_pair_dot`, those Q4_K operations
+were labelled `reduce-cooperative` even though the emitted body was the
+packed-row-blocked body. `omega/src/metal.rs` now recognizes both markers.
+
+The corrected real profile recorded `225` packed-row-blocked operations at
+`47.982 ms` and `385` cooperative operations at `15.587 ms`, out of `1194`
+operations and `75.746 ms` isolated GPU time. The previous `9` packed /
+`601` cooperative split is retracted as a classifier result, not a kernel
+result. The source mechanism is the marker mismatch at the classifier and the
+new marker at `omega/src/metal.rs`; no serving or kernel dispatch changed in
+this correction.
+
+This changes the next optimization target: the measured dominant family is
+packed-row-blocked, so the next experiment must inspect the remaining packed
+codec/body variants (including Q5_K/Q6_K and non-paired paths) rather than
+altering the cooperative reduction. The corrected profile's absolute total
+remains diagnostic-only because it uses one command buffer per operation.
+
 ### Mechanism for block_upload — a named cause, not a share
 
 `nocopy_uploads=10, copying_uploads=381, nocopy_reuses=10`, identical every
