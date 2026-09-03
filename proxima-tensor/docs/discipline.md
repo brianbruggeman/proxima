@@ -19101,3 +19101,53 @@ the tiled candidate stays prefill-only. The raw record is
 `/tmp/proxima-metal-tiled-decode-min1.txt`; the re-prove command is the ROW
 243 two-token Proxima command with
 `OMEGA_TILED_GEMM_MIN_TOKENS=1` and `metal-tiled-gemm` added.
+
+## ROW 246 -- cached-attention SIMD-group candidate
+
+The existing default-off `cached-attention-streaming` Metal kernel was
+changed in `omega/src/msl.rs` so one SIMD group owns one query vector. The
+existing uniform still carries the query-vector count; the dispatch grid is
+now that count times the existing `SIMD_WIDTH` constant. Each lane owns its
+strided query/key dot-product terms and output dimensions, while the existing
+online-softmax recurrence remains in the kernel. No new struct, graph node,
+allocation, or storage representation was added.
+
+The candidate first exposed a dispatch-bound defect: the grid guard still
+used the vector count instead of the lane-expanded count. The real fixture
+failed with `max_diff=8.678383`; changing the guard to
+`gid >= total_elements * 32` produced `max_diff=0.0000044107437` on the same
+fixture, below its existing `1e-4` assertion. This is why the guard change is
+part of the candidate rather than an incidental cleanup.
+
+**Matched workload and controls:** the ROW 243 OpenChat Q4_K_S checkpoint,
+Metal all layers, `new_count=31`, then one steady cached decode token,
+`PROXIMA_PREFAULT=1`, `PROXIMA_MATMUL_WORKERS=1`, three independent process
+runs. All three runs selected `Here is`, with finite logits and no reported
+errors.
+
+| arm | run 1 | run 2 | run 3 | mean | CoV |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| prior row-blocked step-1 wall ms | 290.405 | 232.328 | 223.539 | 248.757 | 11.926% |
+| SIMD-group step-1 wall ms | 233.864 | 214.538 | 214.409 | 220.937 | 5.067% |
+| prior row-blocked step-1 GPU ms | 67.877 | 75.102 | 68.334 | 70.438 | 4.690% |
+| SIMD-group step-1 GPU ms | 54.715 | 57.598 | 58.597 | 56.970 | 3.538% |
+
+The observed candidate/control ratios are `1.126x` lower wall time and
+`1.236x` lower GPU time. Against ROW 243's llama.cpp/ggml equivalent
+`17.354 ms` decode wall cell, the candidate remains `12.731x` slower. The
+candidate therefore moves the measured decode GPU row but does not reach the
+incumbent cell. The prefill row is unchanged because this candidate only
+dispatches the cached-attention operation.
+
+The constraints changed the design in two ways: SIMD work is expressed by
+lane ownership inside the existing kernel, and the existing fixed-width
+dispatch scalar is reused. A new attention worker struct, graph node, sparse
+weight format, and heap-backed work list were ruled out because none is
+needed to express this pipe-shaped operation or its ownership.
+
+Raw records are `/tmp/proxima-metal-simd-two-run{1,2,3}.txt`. The exact
+re-prove command is the ROW 243 two-token Proxima command with the current
+`cached-attention-streaming` feature. Source and test evidence are
+`omega/src/msl.rs:1520-1527`, `omega/src/msl.rs:2166-2177`, and
+`omega/src/msl.rs:4749-4759`; parity evidence is
+`omega/tests/metal_real_forward.rs:148-181`.
