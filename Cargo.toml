@@ -477,6 +477,13 @@ proxima-model-interop = { path = "proxima-model-interop", features = ["std", "me
 proxima-gguf = { path = "proxima-gguf" }
 memmap2 = "0.9.11"
 omega = { path = "omega", features = ["metal", "instrument"] }
+# examples/openai_serve_gguf.rs builds its own Vocab from the parsed GGUF
+# metadata (proxima_tokenizer::gguf::vocab_from_metadata, the same call
+# LoadedModel::load makes internally) to count prompt tokens for the
+# OpenAI usage block -- LoadedModel keeps its vocab private, so this
+# mirrors bind.rs's own real_openchat_file test rather than adding an
+# accessor to the in-flight generate.rs surface.
+proxima-tokenizer = { path = "proxima-tokenizer", default-features = false, features = ["gguf"] }
 
 [lints]
 workspace = true
