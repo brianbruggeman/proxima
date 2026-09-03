@@ -5888,6 +5888,25 @@ codec/body variants (including Q5_K/Q6_K and non-paired paths) rather than
 altering the cooperative reduction. The corrected profile's absolute total
 remains diagnostic-only because it uses one command buffer per operation.
 
+## ROW 264 -- codec and emitted-variant attribution identifies the active Q4_K path
+
+With the corrected classifier and variant instrumentation, the real step-3
+profile recorded `217` Q4_K ops at `42.630 ms`, `8` Q5_K ops at `1.608 ms`,
+and `1` Q6_K op at `2.385 ms`. The emitted-variant split was `216`
+`q4k-paired` ops at `42.612 ms`, `8` `q5k-scalar` ops at `1.608 ms`, `1`
+`q6k-scalar` op at `2.385 ms`, and `969` other ops at `27.280 ms`. The one-op
+Q4_K versus paired difference is an unclassified marker residual, not silently
+assigned to another kernel.
+
+This establishes that the landed paired helper covers nearly the entire Q4_K
+profiled population; the original nine-op interpretation was caused by the
+classifier marker defect corrected in ROW 263. The Q4_K paired body remains the
+largest measured packed family, while Q5_K/Q6_K are too small in this exact
+checkpoint cell to explain the full wall gap by themselves. Any next kernel
+change must therefore reduce work inside the existing paired Q4_K body or
+reduce its per-dispatch overhead, with output parity rechecked against the real
+checkpoint.
+
 ### Mechanism for block_upload — a named cause, not a share
 
 `nocopy_uploads=10, copying_uploads=381, nocopy_reuses=10`, identical every
