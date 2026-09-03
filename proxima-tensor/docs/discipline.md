@@ -19485,3 +19485,11 @@ Source evidence: `omega/src/msl.rs` Q4_K helper and plain-product branch;
 `omega/tests/q4k_real_checkpoint_parity.rs` real checkpoint fixture;
 `omega/tests/metal_real_forward.rs` CPU/Metal fixture; per-op record from the
 release `profiles_one_real_decode_step_by_per_op_gpu_time` run in this session.
+
+Post-commit spot check: the same release full-model harness with
+`PROXIMA_MAX_TOKENS=8` reported step 1 at `51.692 ms` wall and `39.127 ms` GPU,
+`device_allocated_bytes=4,155,539,456`, finite logits, and output
+`Here is a simple Python function that returns`. This is a separate record, not
+pooled into the earlier three-run candidate mean, because its GPU time is
+outside that cell's observed range. The output remained unchanged; the timing
+spread is an unclosed measurement residual, not an explanation for the gap.
