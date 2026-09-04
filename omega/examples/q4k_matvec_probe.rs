@@ -303,4 +303,21 @@ fn run() {
         omega::metal::COPYING_BUFFER_UPLOADS.get()
     );
     println!("  bar: llama.cpp Metal on 7B Q4_K_S = 214.7 GB/s (3.784 GB in 17.62 ms/token)");
+
+    // named production shapes, single-size wall time (no marginal
+    // cancellation): what a `metal-q4k-ggml-port` bake-off needs to compare
+    // arm-vs-arm at the two real projections the openchat checkpoint's
+    // default decode graph actually dispatches -- `attn_q.weight`
+    // (embedding x embedding) and `ffn_up.weight` (embedding x
+    // intermediate), read straight off the checkpoint's own tensor shapes
+    // rather than approximated by the small/large sweep above.
+    const NAMED_RUNS: usize = 21;
+    let (attn_q_ms, _) = measure(4096, 4096, NAMED_RUNS);
+    let (ffn_up_ms, _) = measure(14336, 4096, NAMED_RUNS);
+    println!(
+        "  named attn_q  [4096x4096]  runs={NAMED_RUNS} median={attn_q_ms:.4} ms"
+    );
+    println!(
+        "  named ffn_up [14336x4096]  runs={NAMED_RUNS} median={ffn_up_ms:.4} ms"
+    );
 }

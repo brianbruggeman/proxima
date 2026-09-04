@@ -115,6 +115,8 @@ kv-capacity-bucket = [
     "proxima-tensor/kv-capacity-bucket",
     "omega?/kv-capacity-bucket",
 ]
+# passthrough to `omega/metal-q4k-ggml-port` so the decode harness can measure that arm.
+metal-q4k-ggml-port = ["omega?/metal-q4k-ggml-port"]
 
 [dependencies]
 arrayvec.workspace = true
