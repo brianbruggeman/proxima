@@ -1007,6 +1007,103 @@ pub struct OpGpuTiming {
     pub packed_row_block_rejection: Option<String>,
 }
 
+/// Shared per-op timing dispatch: [`execute_plan_op_timed`] and
+/// [`execute_plan_with_placements_op_timed`] both need to encode ONE
+/// `BoundOp` on its own command buffer, commit, wait, and read back
+/// `GPUStartTime`/`GPUEndTime` -- factored here so the two op-timed
+/// executors cannot drift on the [`OpGpuTiming`] fields or the format
+/// `proxima-model-interop/src/generate.rs`'s `report_op_timings` prints
+/// from them. `placement` mirrors [`encode_op`]'s own parameter -- `None`
+/// for the plain (unplaced) op-timed path, `Some((buffer, offset))` for
+/// the placed one. `always_live` names every node THIS call's own
+/// placement maps hold (input- or output-placed): those are excluded from
+/// this op's own retire sweep the same way
+/// [`execute_plan_with_placements`]'s own loop excludes them, so the
+/// unplaced caller passes an empty set and every `prepared.retires` entry
+/// is dropped exactly as it always was.
+#[cfg(feature = "instrument")]
+#[allow(clippy::too_many_arguments)]
+fn execute_op_timed(
+    device: &ProtocolObject<dyn MTLDevice>,
+    queue: &ProtocolObject<dyn MTLCommandQueue>,
+    device_buffers: &mut BTreeMap<NodeId, DeviceBuffer>,
+    prepared: &Prepared,
+    packed_operands: &PackedOperands,
+    program: &[Op],
+    position: usize,
+    bound: &BoundOp,
+    placement: Option<(&MetalBuffer, usize)>,
+    always_live: &BTreeSet<NodeId>,
+) -> Result<OpGpuTiming, MetalError> {
+    let operand_bytes: u64 = bound
+        .operands()
+        .iter()
+        .map(|(source, _, _)| {
+            device_buffers
+                .get(source)
+                .map(|(buffer, _offset)| buffer.length() as u64)
+                .unwrap_or(0)
+        })
+        .sum();
+    let weight_name = bound
+        .operands()
+        .iter()
+        .find_map(|(source, _, _)| program[source.0 as usize].name())
+        .map(ToString::to_string);
+    let kind = classify_kind(bound, packed_operands);
+    let packed_kernel_variant = classify_packed_kernel_variant(bound, packed_operands);
+    let packed_row_block_rejection = diagnose_kind(bound, packed_operands);
+    let packed_codec = bound
+        .operands()
+        .iter()
+        .find_map(|(source, _, _)| packed_operands.get(source).copied());
+
+    let command_buffer = queue
+        .commandBuffer()
+        .ok_or_else(|| MetalError::CompileFailed {
+            log: "command queue refused to hand out a command buffer".to_string(),
+        })?;
+    let encoder =
+        command_buffer
+            .computeCommandEncoder()
+            .ok_or_else(|| MetalError::CompileFailed {
+                log: "command buffer refused to hand out a compute encoder".to_string(),
+            })?;
+    let fault = encode_op(
+        device,
+        &encoder,
+        device_buffers,
+        bound,
+        packed_operands,
+        placement,
+    )?;
+    encoder.endEncoding();
+    command_buffer.commit();
+    command_buffer.waitUntilCompleted();
+    let gpu_ns =
+        ((command_buffer.GPUEndTime() - command_buffer.GPUStartTime()) * 1e9).max(0.0) as u64;
+    if let Some((fault_buffer, gathers)) = fault {
+        check_gather_fault(bound, &fault_buffer, gathers)?;
+    }
+    for retired in &prepared.retires[position] {
+        if always_live.contains(retired) {
+            continue;
+        }
+        device_buffers.remove(retired);
+    }
+    Ok(OpGpuTiming {
+        node: bound.node,
+        kind,
+        operand_bytes,
+        gpu_ns,
+        weight_name,
+        operand_count: bound.operands().len(),
+        packed_codec,
+        packed_kernel_variant,
+        packed_row_block_rejection,
+    })
+}
+
 /// Diagnostic-only counterpart of [`execute_plan`]: instead of sharing ONE
 /// command buffer across the whole program and `commit`/`waitUntilCompleted`ing
 /// it exactly once (see the module doc's "Execution model"), this commits
@@ -1064,72 +1161,22 @@ pub fn execute_plan_op_timed(
         device_buffers.insert(*node, buffer);
     }
 
+    let no_placements: BTreeSet<NodeId> = BTreeSet::new();
     let mut timings: Vec<OpGpuTiming> = Vec::with_capacity(prepared.resolved.len());
     for (position, bound) in prepared.resolved.iter().enumerate() {
-        let operand_bytes: u64 = bound
-            .operands()
-            .iter()
-            .map(|(source, _, _)| {
-                device_buffers
-                    .get(source)
-                    .map(|(buffer, _offset)| buffer.length() as u64)
-                    .unwrap_or(0)
-            })
-            .sum();
-        let weight_name = bound
-            .operands()
-            .iter()
-            .find_map(|(source, _, _)| plan.program[source.0 as usize].name())
-            .map(ToString::to_string);
-        let kind = classify_kind(bound, packed_operands);
-        let packed_kernel_variant = classify_packed_kernel_variant(bound, packed_operands);
-        let packed_row_block_rejection = diagnose_kind(bound, packed_operands);
-        let packed_codec = bound
-            .operands()
-            .iter()
-            .find_map(|(source, _, _)| packed_operands.get(source).copied());
-
-        let command_buffer = queue
-            .commandBuffer()
-            .ok_or_else(|| MetalError::CompileFailed {
-                log: "command queue refused to hand out a command buffer".to_string(),
-            })?;
-        let encoder =
-            command_buffer
-                .computeCommandEncoder()
-                .ok_or_else(|| MetalError::CompileFailed {
-                    log: "command buffer refused to hand out a compute encoder".to_string(),
-                })?;
-        let fault = encode_op(
+        let timing = execute_op_timed(
             &device,
-            &encoder,
+            &queue,
             &mut device_buffers,
-            bound,
+            prepared,
             packed_operands,
+            &plan.program,
+            position,
+            bound,
             None,
+            &no_placements,
         )?;
-        encoder.endEncoding();
-        command_buffer.commit();
-        command_buffer.waitUntilCompleted();
-        let gpu_ns =
-            ((command_buffer.GPUEndTime() - command_buffer.GPUStartTime()) * 1e9).max(0.0) as u64;
-        if let Some((fault_buffer, gathers)) = fault {
-            check_gather_fault(bound, &fault_buffer, gathers)?;
-        }
-        for retired in &prepared.retires[position] {
-            device_buffers.remove(retired);
-        }
-        timings.push(OpGpuTiming {
-            node: bound.node,
-            kind,
-            operand_bytes,
-            gpu_ns,
-            weight_name,
-            operand_count: bound.operands().len(),
-            packed_codec,
-            packed_kernel_variant,
-            packed_row_block_rejection,
-        });
+        timings.push(timing);
     }
 
     let evaluated = finish(
@@ -1155,6 +1202,117 @@ pub fn execute_plan_named_op_timed(
 ) -> Result<(Evaluated, Vec<OpGpuTiming>), MetalError> {
     let blocks = resolve_named_blocks(&plan.program, named)?;
     execute_plan_op_timed(plan, &blocks)
+}
+
+/// [`execute_plan_with_placements`]'s op-timed twin -- the default decode
+/// path (`run_decode_loop_placed_kv` in
+/// `proxima-model-interop/src/generate.rs`) routes through
+/// `execute_plan_with_placements`, never `execute_plan`, so
+/// [`execute_plan_op_timed`] alone cannot attribute GPU time on that path:
+/// it always builds fresh output buffers (`placement: None` at its own call
+/// site above) and so never exercises the placed-KV write/read shape at
+/// all. This shares every input/output-placement resolution step
+/// `execute_plan_with_placements` itself performs (input-placed nodes skip
+/// the host upload identically; `always_live` reproduces that function's
+/// own retirement exclusion) and swaps only its single shared-command-buffer
+/// submission for [`execute_op_timed`]'s per-op one, same relationship
+/// [`execute_plan_op_timed`] already has to [`execute_plan`].
+///
+/// # Errors
+/// Same as [`execute_plan_with_placements`].
+#[cfg(all(feature = "metal-output-placement", feature = "instrument"))]
+pub fn execute_plan_with_placements_op_timed(
+    plan: &Plan,
+    blocks: &[QuantizedBlock<'_>],
+    input_placements: &[(NodeId, &PlacedBuffer, usize)],
+    output_placements: &[(NodeId, &PlacedBuffer, usize)],
+) -> Result<(Evaluated, Vec<OpGpuTiming>), MetalError> {
+    let prepared = &plan.prepared;
+    let packed_operands = &plan.packed_operands;
+    let input_placed: BTreeMap<NodeId, (&PlacedBuffer, usize)> = input_placements
+        .iter()
+        .map(|(node, buffer, offset)| (*node, (*buffer, *offset)))
+        .collect();
+    let output_placed: BTreeMap<NodeId, (&PlacedBuffer, usize)> = output_placements
+        .iter()
+        .map(|(node, buffer, offset)| (*node, (*buffer, *offset)))
+        .collect();
+    let always_live: BTreeSet<NodeId> = input_placed
+        .keys()
+        .chain(output_placed.keys())
+        .copied()
+        .collect();
+    let (device, queue) = device_and_queue()?;
+
+    let mut device_buffers: BTreeMap<NodeId, DeviceBuffer> = BTreeMap::new();
+    for ((node, block), dtype) in prepared
+        .block_nodes
+        .iter()
+        .zip(blocks.iter())
+        .zip(plan.block_dtypes.iter())
+    {
+        if let Some((buffer, offset)) = input_placed.get(node) {
+            device_buffers.insert(*node, ((*buffer).clone(), *offset));
+            continue;
+        }
+        let resident = plan.resident_nodes.contains(node);
+        let buffer = match block {
+            QuantizedBlock::Float32(data) => upload_block(&device, data, *node, *dtype, resident)?,
+            QuantizedBlock::Q4K(bytes)
+            | QuantizedBlock::Q5K(bytes)
+            | QuantizedBlock::Q6K(bytes)
+            | QuantizedBlock::Q8_0(bytes)
+            | QuantizedBlock::Q4_0(bytes)
+            | QuantizedBlock::Float16(bytes)
+            | QuantizedBlock::BFloat16(bytes) => upload_packed_bytes(&device, bytes, resident)?,
+        };
+        device_buffers.insert(*node, buffer);
+    }
+
+    let mut timings: Vec<OpGpuTiming> = Vec::with_capacity(prepared.resolved.len());
+    for (position, bound) in prepared.resolved.iter().enumerate() {
+        let placement = output_placed.get(&bound.node).copied();
+        let timing = execute_op_timed(
+            &device,
+            &queue,
+            &mut device_buffers,
+            prepared,
+            packed_operands,
+            &plan.program,
+            position,
+            bound,
+            placement,
+            &always_live,
+        )?;
+        timings.push(timing);
+    }
+
+    let evaluated = finish(
+        &plan.program,
+        &prepared.index_nodes,
+        &prepared.shapes,
+        &prepared.effective_outputs,
+        &device_buffers,
+        prepared.root,
+    )?;
+    Ok((evaluated, timings))
+}
+
+/// [`execute_plan_with_placements_op_timed`] against a name-keyed block
+/// set, mirroring [`execute_plan_named_with_placements`]'s own name
+/// resolution.
+///
+/// # Errors
+/// Propagates name-resolution and Metal driver failures.
+#[cfg(all(feature = "metal-output-placement", feature = "instrument"))]
+pub fn execute_plan_named_with_placements_op_timed(
+    plan: &Plan,
+    named: &[(&str, QuantizedBlock<'_>)],
+    input_placements: &[(NodeId, &PlacedBuffer, usize)],
+    output_placements: &[(NodeId, &PlacedBuffer, usize)],
+) -> Result<(Evaluated, Vec<OpGpuTiming>), MetalError> {
+    let blocks = resolve_named_blocks(&plan.program, named)?;
+    execute_plan_with_placements_op_timed(plan, &blocks, input_placements, output_placements)
 }
 
 /// Classifies one [`BoundOp`]'s emitted kernel body the same way
