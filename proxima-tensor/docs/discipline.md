@@ -20960,3 +20960,63 @@ Confirm `barriers=419` and `emit_calls=616` on every steady step, `device_alloca
 | Date | Change | Δ vs prior | CoV / runs | Host loadout |
 | --- | --- | --- | --- | --- |
 | 2026-09-04 | `metal-concurrent-dispatch` (`Concurrent` encoder dispatch type + `HazardTracker`-gated barriers) folds into `metal`'s default feature list | `gpu_exec_ms` mean 29.267 -> 27.258 ms (-6.9%, beyond both arms' CoV); `step_wall_ms` mean 36.556 -> 34.725 ms (ON <= OFF + CoV every round); `barriers` 0 -> 419/step; `device_allocated_bytes` unchanged; `generated_text` identical across 9 runs (3 OFF, 6 ON) | 3 interleaved rounds + 3 extra ON determinism runs; OFF CoV 8.32% (wall) / 0.84% (`gpu_exec_ms`), ON CoV 8.24% (wall) / 1.05% (`gpu_exec_ms`) | quiet box confirmed via `pgrep -fl 'cargo\|rustc\|nextest\|llama-bench\|proxima_model_interop-'` (excluding cdb-daemon/sccache/llama-server/Ollama) immediately before and throughout the bake-off; no other worker's process observed |
+
+## ROW 286 -- campaign scoreboard 2026-09-04: default metal decode vs llama.cpp
+
+**Card:** none (measurement row, no feature change). **Worktrees:** `proxima-wt-land-score` (`land/score`, from `main` at `af918bb`, DEFAULT arm, `--features metal,instrument`, `target-default`), `proxima-wt-land-score-start` (detached at `4be2f3a`, the campaign's opening commit before this campaign's three waves, same features, `target`). `metal-concurrent-dispatch` is default-on as of ROW 285, so the CONCURRENT arm from the original bake-off plan is dropped -- DEFAULT already includes it.
+
+**Purpose.** Close the third wave with one quiet-box number replacing the "in flight, row 285 when measured" placeholder in `docs/bench-campaigns/2026-09-03-gpu-one-risc/plan.md` -- what is `main`'s decode step cost against `llama-bench`'s incumbent reference, now that `metal-concurrent-dispatch` is folded in, and how far has the campaign moved the needle since its `4be2f3a` starting point.
+
+**START arm harness.** At `4be2f3a` the harness test is the same name as `main`'s: `bind::real_openchat_file::runs_the_cached_decode_loop_on_the_metal_backend_and_reports_the_plan_cache` (`proxima-model-interop/src/bind.rs:3002`, `4be2f3a`'s copy at the same line). Feature surface (`std`/`interop-bgpool`/`instrument` passthrough) is unchanged between the two commits, so the same invocation ran against both binaries -- no arm was dropped.
+
+**Protocol.** 3 interleaved rounds, each round `llama-bench` (`-n 32 -p 0 -r 5 -t 8 -ngl 99`, `openchat-3.5-1210.Q4_K_S.gguf`) then DEFAULT then START (round 2 order swapped: START then DEFAULT), release, `PROXIMA_MAX_TOKENS=8`, `/usr/bin/time -l` wrapping each proxima run for RSS. `step_wall_ms`/`gpu_exec_ms` averaged over steady steps 1..7 (step 0 is cold: pipeline compile + full-prompt prefill). Quiet gate: `pgrep -fl 'cargo|rustc|nextest|llama-bench|proxima_model_interop-'` (excluding cdb-daemon/sccache/llama-server/Ollama) checked immediately before the bake-off and again after round 1, when a scheduling accident briefly ran START-r2 and DEFAULT-r2 concurrently -- both were discarded and re-run serially before recording; no foreign process was observed at any check.
+
+**Per-round table, steady decode step (`step` 1..7), release, `metal,instrument`:**
+
+| | DEFAULT (`main` `af918bb`) | START (`4be2f3a`) | llama-bench (incumbent) |
+| --- | --- | --- | --- |
+| `step_wall_ms` mean (r1/r2/r3) | 32.865 / 32.963 / 33.268 | 69.071 / 68.295 / 68.131 | n/a (see t/s row) |
+| `step_wall_ms` mean across rounds (CoV) | 33.032 (0.52%) | 68.499 (0.60%) | n/a |
+| `gpu_exec_ms` mean (r1/r2/r3) | 27.127 / 26.889 / 27.543 | 57.398 / 57.027 / 57.051 | n/a |
+| `gpu_exec_ms` mean across rounds (CoV) | 27.186 (0.99%) | 57.159 (0.30%) | n/a |
+| `llama-bench` tg32 t/s (r1/r2/r3) | n/a | n/a | 57.60 ± 0.19 / 57.49 ± 0.49 / 56.88 ± 0.46 |
+| `llama-bench` ms/token mean across rounds (CoV) | n/a | n/a | 17.445 (0.55%) |
+| ratio vs `llama-bench`, per round (`step_wall_ms` / ms-per-token) | 1.8930 / 1.8951 / 1.8923 | 3.9785 / 3.9263 / 3.8753 | 1.0 (reference) |
+| ratio vs `llama-bench`, mean (CoV) | **1.8935x (0.06%)** | 3.9267x (1.07%) | -- |
+| `barriers`/step | 419 | field absent (predates `HazardTracker`) | n/a |
+| `emit_calls`/step | 616 | 1196 | n/a |
+| `readback_calls`/step (steady) | 1 | 97 | n/a |
+| `readback_bytes`/step (steady) | 128,008 | 390,152 | n/a |
+| `plan_hits` at step=7 | 5 | 0 (`plan_misses`=8 every step) | n/a |
+| `device_allocated_bytes` (steady) | 4,152,442,880 | 4,163,141,632 (r1/r2), 4,163,059,712 (r3) | n/a |
+| RSS, `/usr/bin/time -l` max resident (r1/r2/r3, bytes) | 52,510,720 / 52,592,640 / 53,624,832 | 71,352,320 / 70,762,496 / 71,172,096 | n/a |
+| `generated_text` | `"Here is a simple Python function that returns"`, identical all 3 rounds | identical, all 3 rounds | n/a |
+
+**Per-op profile of DEFAULT** (`PROXIMA_METAL_OP_PROFILE_STEP=3`, `bind::real_openchat_file::profiles_one_real_decode_step_by_per_op_gpu_time`):
+
+```
+op_profile_bucket step=3 kind=cached-attention op_count=32 gpu_ms=2.140 gpu_ns_per_op=66878.4 operand_bytes=19398784
+op_profile_bucket step=3 kind=constant op_count=2 gpu_ms=0.008 gpu_ns_per_op=3916.5 operand_bytes=0
+op_profile_bucket step=3 kind=elementwise op_count=290 gpu_ms=2.763 gpu_ns_per_op=9528.2 operand_bytes=86152588
+op_profile_bucket step=3 kind=iota op_count=2 gpu_ms=0.007 gpu_ns_per_op=3687.0 operand_bytes=0
+op_profile_bucket step=3 kind=reduce-cooperative op_count=65 gpu_ms=0.783 gpu_ns_per_op=12052.2 operand_bytes=2129920
+op_profile_bucket step=3 kind=reduce-packed-row-blocked op_count=225 gpu_ms=24.792 gpu_ns_per_op=110186.9 operand_bytes=4069849664
+```
+
+`reduce-packed-row-blocked` (the Q4_K matvec body) is 24.792 of the step's 24.792+2.763+2.140+0.783+0.008+0.007 = 30.493 ms bucketed total (81.3%) -- the dominant remaining cost, consistent with the plan's standing read ("the remaining gap to llama.cpp is the Q4_K body").
+
+**Honest read.** DEFAULT (`main`, `metal-concurrent-dispatch` folded in per ROW 285) sits at 1.8935x llama.cpp's per-token cost on this shape (`n=32`, single-batch decode, 8-thread CPU reference, `-ngl 99`), down from the 2.15x this same table replaces in `plan.md` -- a change attributable to ROW 285 alone since no other feature changed between the two measurements. START (`4be2f3a`, the campaign's opening commit, predating every one of the three waves' landings) sits at 3.9267x, close to the campaign's own recorded starting point (67.9 ms/token in the progression line) -- 68.499 here vs 67.9 there is within a plausible re-run band on a different day's host, not a discrepancy large enough to doubt either number. The campaign narrowed the gap from ~3.93x to ~1.89x, roughly halving proxima's per-token cost relative to the incumbent, while `generated_text` stayed byte-identical across every arm and round. This is a measurement and a ratio, not a verdict on whether 1.89x is an acceptable place to stop -- that is the owner's call.
+
+**Re-prove:**
+```sh
+cd /Users/brianbruggeman/repos/slot-0/proxima
+CARGO_TARGET_DIR=<own target dir> CARGO_TERM_COLOR=never PROXIMA_MAX_TOKENS=8 cargo test --release -p proxima-model-interop --features metal,instrument --lib -- --exact --nocapture --ignored \
+  bind::real_openchat_file::runs_the_cached_decode_loop_on_the_metal_backend_and_reports_the_plan_cache
+/Users/brianbruggeman/repos/others/llama.cpp/build/bin/llama-bench -m /Users/brianbruggeman/.lmstudio/models/TheBloke/openchat-3.5-1210-GGUF/openchat-3.5-1210.Q4_K_S.gguf -n 32 -p 0 -r 5 -t 8 -ngl 99
+```
+Confirm `barriers=419`, `emit_calls=616`, `device_allocated_bytes=4152442880` on every steady step, and `generated_text="Here is a simple Python function that returns"`. The START arm requires checking out `4be2f3a` in a separate worktree; its harness name and feature surface are unchanged from `main`.
+
+### Changelog
+| Date | Change | Δ vs prior | CoV / runs | Host loadout |
+| --- | --- | --- | --- | --- |
+| 2026-09-04 | scoreboard measurement only, no feature change; closes ROW 285's "in flight" placeholder in `plan.md` §1.2 | DEFAULT 1.8935x llama.cpp (down from the 2.15x this replaces); START (`4be2f3a`) 3.9267x llama.cpp, consistent with the campaign's recorded 67.9 ms/token starting point | 3 interleaved rounds; DEFAULT wall CoV 0.52%, gpu_exec CoV 0.99%; START wall CoV 0.60%, gpu_exec CoV 0.30%; llama-bench ms/token CoV 0.55%; ratio CoV 0.06% (DEFAULT), 1.07% (START) | quiet box confirmed via `pgrep -fl 'cargo\|rustc\|nextest\|llama-bench\|proxima_model_interop-'` (excluding cdb-daemon/sccache/llama-server/Ollama) before the bake-off; round 2's START/DEFAULT pair was accidentally launched concurrently, discarded, and re-run serially before being recorded -- no other worker's process observed in either check |
