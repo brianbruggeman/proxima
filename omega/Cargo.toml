@@ -165,6 +165,23 @@ metal-wide-cooperative-reduce = ["metal"]
 # decode-profile bench (tracked separately) shows the win. Depends on
 # `metal`, not just `std`: the pool lives entirely inside `metal.rs`.
 metal-buffer-pool = ["metal"]
+# CARD 6.5: a `BufferArena` hung off the cached `Plan` (built once in `plan()`,
+# from `node_retirement`'s own liveness ranges over `prepared.resolved` --
+# whole `MetalBuffer`s only, size-class free-list reuse, never sub-allocated,
+# `effective_outputs` excluded from the free list by the same exclusion
+# `node_retirement` already applies) plus a `PlanUniforms` vector (one uniform
+# buffer per plan position, written in place by `encode_op`, bypassing the
+# content-keyed `UNIFORM_BUFFERS` cache entirely on this path). Unlike
+# `metal-buffer-pool` above -- a per-call, per-op thread-local hashmap pop/push
+# that measured a LOSS (+3.6 ms/token) because it still pays runtime
+# bookkeeping on every hit -- this feature pays its allocation cost ONCE, at
+# plan-build time (a plan-cache miss), so a plan-cache HIT touches neither
+# `allocate_buffer` nor `upload_uniforms` at all. `execute_plan_with_placements`
+# (the default decode path) is the one this targets; `execute_plan` (no
+# placements) is untouched. Default-off: unproven against the production
+# default until the e2e decode-step bench lands. Depends on `metal`, not just
+# `std`: both new types are `objc2-metal` buffer handles.
+metal-plan-stable-buffers = ["metal"]
 # Split-K for the row-blocked packed Q4_K/Q5_K/Q6_K matvec
 # (`msl.rs`'s `push_packed_row_blocked_body`): below a target simdgroup count
 # (`sized::PACKED_ROW_SPLIT_K_TARGET_SIMDGROUPS`) a row-group's reduction axis

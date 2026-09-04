@@ -97,6 +97,8 @@ metal-tiled-gemm = ["omega?/metal-tiled-gemm"]
 metal-output-placement = ["omega?/metal-output-placement"]
 # passthrough to `omega/metal-buffer-pool` so the decode harness can measure that arm.
 metal-buffer-pool = ["omega?/metal-buffer-pool"]
+# passthrough to `omega/metal-plan-stable-buffers` so the decode harness can measure that arm.
+metal-plan-stable-buffers = ["omega?/metal-plan-stable-buffers"]
 # passthrough to `omega/metal-wide-cooperative-reduce` so the decode harness can measure that arm.
 metal-wide-cooperative-reduce = ["omega?/metal-wide-cooperative-reduce"]
 # passthrough to `omega/metal-q4k-mask-fma` so the decode harness can measure that arm.

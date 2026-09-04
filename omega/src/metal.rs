@@ -332,6 +332,17 @@ pub struct Plan {
     /// calls -- empty until that method runs, since [`plan`] itself has no
     /// way to know a caller's residency intent from codecs/shapes alone.
     resident_nodes: BTreeSet<NodeId>,
+    /// CARD 6.5: whole-buffer, size-class-reused device output buffers for
+    /// every position in `prepared.resolved`, built once here rather than by
+    /// `encode_op`'s `allocate_buffer` on every call. See [`BufferArena`]'s
+    /// own doc.
+    #[cfg(feature = "metal-plan-stable-buffers")]
+    arena: BufferArena,
+    /// CARD 6.5: one uniform buffer per plan position, written in place by
+    /// `encode_op` instead of going through the content-keyed
+    /// `UNIFORM_BUFFERS` cache. See [`PlanUniforms`]'s own doc.
+    #[cfg(feature = "metal-plan-stable-buffers")]
+    uniforms: PlanUniforms,
 }
 
 impl Plan {
@@ -369,6 +380,53 @@ impl Plan {
             })
             .copied()
             .collect();
+    }
+
+    /// The arena's live-bytes high-water mark reached while `plan()` built
+    /// it -- the direct witness `build_buffer_arena`'s own `eprintln!`
+    /// already prints before allocating, kept queryable afterward for a
+    /// census line. `None` when this feature is off.
+    #[must_use]
+    pub fn arena_peak_bytes(&self) -> Option<usize> {
+        #[cfg(feature = "metal-plan-stable-buffers")]
+        {
+            Some(self.arena.peak_bytes)
+        }
+        #[cfg(not(feature = "metal-plan-stable-buffers"))]
+        {
+            None
+        }
+    }
+
+    /// Physical device buffers the arena actually holds -- `< op_count`
+    /// whenever `build_buffer_arena`'s free list reused a slot across two
+    /// or more non-overlapping positions. `None` when this feature is off.
+    #[must_use]
+    pub fn arena_slot_count(&self) -> Option<usize> {
+        #[cfg(feature = "metal-plan-stable-buffers")]
+        {
+            Some(self.arena.slot_count())
+        }
+        #[cfg(not(feature = "metal-plan-stable-buffers"))]
+        {
+            None
+        }
+    }
+
+    /// The byte length of the physical slot backing `position`'s output --
+    /// `None` when this feature is off or `position` is out of range.
+    #[must_use]
+    pub fn arena_position_byte_len(&self, position: usize) -> Option<usize> {
+        #[cfg(feature = "metal-plan-stable-buffers")]
+        {
+            let slot = *self.arena.position_slot.get(position)?;
+            Some(self.arena.slot_byte_len(slot))
+        }
+        #[cfg(not(feature = "metal-plan-stable-buffers"))]
+        {
+            let _ = position;
+            None
+        }
     }
 }
 
@@ -425,12 +483,28 @@ pub fn plan(
         .iter()
         .map(|node| gpu_dtype(program, &prepared.index_nodes, *node))
         .collect();
+    #[cfg(feature = "metal-plan-stable-buffers")]
+    let (arena, uniforms) = {
+        let (device, _queue) = device_and_queue()?;
+        let arena = build_buffer_arena(
+            &device,
+            &prepared.resolved,
+            &prepared.retires,
+            &prepared.effective_outputs,
+        )?;
+        let uniforms = build_plan_uniforms(&device, &prepared.resolved)?;
+        (arena, uniforms)
+    };
     Ok(Plan {
         program: program.to_vec(),
         prepared,
         packed_operands,
         block_dtypes,
         resident_nodes: BTreeSet::new(),
+        #[cfg(feature = "metal-plan-stable-buffers")]
+        arena,
+        #[cfg(feature = "metal-plan-stable-buffers")]
+        uniforms,
     })
 }
 
@@ -570,6 +644,7 @@ pub fn execute_plan(plan: &Plan, blocks: &[QuantizedBlock<'_>]) -> Result<Evalua
             &mut device_buffers,
             bound,
             packed_operands,
+            None,
             None,
         )?;
         if let Some((fault_buffer, gathers)) = fault {
@@ -918,7 +993,10 @@ pub fn execute_plan_with_placements(
                 }
             }
         }
-        let placement = output_placed.get(&bound.node).copied();
+        let placement = output_placed
+            .get(&bound.node)
+            .copied()
+            .or_else(|| arena_placement(plan, position));
         let fault = encode_op(
             &device,
             &encoder,
@@ -926,6 +1004,7 @@ pub fn execute_plan_with_placements(
             bound,
             packed_operands,
             placement,
+            plan_uniform_buffer(plan, position),
         )?;
         if let Some((fault_buffer, gathers)) = fault {
             pending_faults.push((bound, fault_buffer, gathers));
@@ -1097,6 +1176,7 @@ fn execute_op_timed(
     position: usize,
     bound: &BoundOp,
     placement: Option<(&MetalBuffer, usize)>,
+    plan_uniform: Option<&MetalBuffer>,
     always_live: &BTreeSet<NodeId>,
 ) -> Result<OpGpuTiming, MetalError> {
     // this operand's own TENSOR bytes, not the shared buffer's `length()` --
@@ -1158,6 +1238,7 @@ fn execute_op_timed(
         bound,
         packed_operands,
         placement,
+        plan_uniform,
     )?;
     encoder.endEncoding();
     command_buffer.commit();
@@ -1256,6 +1337,7 @@ pub fn execute_plan_op_timed(
             &plan.program,
             position,
             bound,
+            None,
             None,
             &no_placements,
         )?;
@@ -1368,7 +1450,10 @@ pub fn execute_plan_with_placements_op_timed(
 
     let mut timings: Vec<OpGpuTiming> = Vec::with_capacity(prepared.resolved.len());
     for (position, bound) in prepared.resolved.iter().enumerate() {
-        let placement = output_placed.get(&bound.node).copied();
+        let placement = output_placed
+            .get(&bound.node)
+            .copied()
+            .or_else(|| arena_placement(plan, position));
         let timing = execute_op_timed(
             &device,
             &queue,
@@ -1379,6 +1464,7 @@ pub fn execute_plan_with_placements_op_timed(
             position,
             bound,
             placement,
+            plan_uniform_buffer(plan, position),
             &always_live,
         )?;
         timings.push(timing);
@@ -2198,6 +2284,7 @@ fn allocate_buffer(
     dtype: DType,
 ) -> Result<Retained<ProtocolObject<dyn MTLBuffer>>, MetalError> {
     let byte_length = element_count.max(1) * dtype.size_bytes();
+    counter!(OUTPUT_BUFFER_ALLOCATIONS, 1);
     device
         .newBufferWithLength_options(byte_length, MTLResourceOptions::StorageModeShared)
         .ok_or_else(|| MetalError::CompileFailed {
@@ -2229,6 +2316,7 @@ fn allocate_buffer(
         counter!(OUTPUT_BUFFER_POOL_REUSES, 1);
         return Ok(buffer);
     }
+    counter!(OUTPUT_BUFFER_ALLOCATIONS, 1);
     device
         .newBufferWithLength_options(bucket, MTLResourceOptions::StorageModeShared)
         .ok_or_else(|| MetalError::CompileFailed {
@@ -2485,6 +2573,16 @@ pub struct MetalStageTotals {
     /// direct witness the 429,173,760-byte per-tensor copy this counter
     /// replaces never happens.
     pub mapping_offset_uploads: u64,
+    /// CARD 6.5 census: [`OUTPUT_BUFFER_ALLOCATIONS`]'s own per-step delta --
+    /// `op_count` every step with `metal-plan-stable-buffers` off, `op_count`
+    /// only on the step that builds a plan (a plan-cache miss) and 0 on
+    /// every following plan-cache-hit step with it on.
+    pub output_buffer_allocations: u64,
+    /// CARD 6.5 census: [`PLAN_UNIFORM_WRITES`]'s own per-step delta --
+    /// `op_count` every step on the `metal-plan-stable-buffers` path
+    /// (`encode_op` writes every position's uniforms in place every call),
+    /// 0 always with the feature off.
+    pub plan_uniform_writes: u64,
 }
 
 /// Reads and resets every split-4019 counter in one call — see
@@ -2523,6 +2621,8 @@ pub fn metal_stage_totals() -> MetalStageTotals {
         resident_uploads: RESIDENT_BUFFER_UPLOADS.snapshot_and_reset(),
         resident_reuses: RESIDENT_BUFFER_REUSES.snapshot_and_reset(),
         mapping_offset_uploads: MAPPING_OFFSET_UPLOADS.snapshot_and_reset(),
+        output_buffer_allocations: OUTPUT_BUFFER_ALLOCATIONS.snapshot_and_reset(),
+        plan_uniform_writes: PLAN_UNIFORM_WRITES.snapshot_and_reset(),
     }
 }
 
@@ -3041,6 +3141,22 @@ thread_local! {
 /// Counts uniform buffers served from cache rather than allocated.
 pub static UNIFORM_BUFFER_REUSES: Counter = Counter::new("omega.metal.uniforms.reuse");
 
+/// CARD 6.5's census counter: every genuinely fresh device buffer
+/// `allocate_buffer` hands out, on ANY path (the classic per-op-per-call
+/// path below, or `build_buffer_arena`'s own size-class-miss path). Not
+/// gated behind `metal-plan-stable-buffers` -- this counter's whole point is
+/// to read the SAME number on both arms of the bake-off: `op_count` every
+/// step with the feature off, `op_count` once (at the plan-cache miss that
+/// builds the arena) and 0 on every following plan-cache-hit step with it on.
+pub static OUTPUT_BUFFER_ALLOCATIONS: Counter = Counter::new("omega.metal.output_buffer.allocations");
+
+/// CARD 6.5's census counter: every in-place write `encode_op` makes into a
+/// `PlanUniforms` buffer, bypassing `upload_uniforms`/`UNIFORM_BUFFERS`
+/// entirely. Fires only on the `metal-plan-stable-buffers` path; stays 0 with
+/// the feature off (or on any position `execute_plan`'s non-placed path
+/// dispatches, which never receives a plan-owned uniform buffer).
+pub static PLAN_UNIFORM_WRITES: Counter = Counter::new("omega.metal.plan_uniforms.write");
+
 /// Entries `UNIFORM_BUFFERS` holds right now -- the direct witness for D6
 /// (round-4 synth S2): a caller that wants to know whether the cache grows
 /// across a decode run reads this once per step rather than inferring
@@ -3217,6 +3333,262 @@ fn dispatch(
     encoder.dispatchThreads_threadsPerThreadgroup(grid_size, threadgroup);
 }
 
+/// CARD 6.5's memory gate (MG-3): the plan's own transient-buffer cap, in
+/// bytes. DERIVED, not measured against a live sizing config -- like
+/// [`OUTPUT_POOL_MAX_PER_BUCKET`] above, this is a plain constant, not yet
+/// wired through the project's build-time sizing-config mechanism (see the
+/// guiding-principles "no magic numbers" rule), a gap named explicitly here
+/// rather than hidden. [`build_buffer_arena`] prints its own peak against
+/// this BEFORE returning, and a peak above it is this card's own KILL
+/// condition regardless of the `op_setup` win.
+#[cfg(feature = "metal-plan-stable-buffers")]
+const ARENA_TRANSIENT_CAP: usize = 172_812_125;
+
+/// CARD 6.5: whole-`MetalBuffer` device output arena, hung off the cached
+/// [`Plan`] and built exactly once, in [`plan`], from
+/// [`proxima_tensor::node_retirement`]'s own liveness ranges over
+/// `prepared.resolved` -- never lazily, never per `execute_plan_with_placements`
+/// call. `slots` holds one physical buffer per size class actually needed;
+/// `position_slot` says which slot backs each plan POSITION's output.
+///
+/// # Whole-buffer sharing only (crit RS-3)
+///
+/// A slot is reused across two positions only when [`build_buffer_arena`]'s
+/// single retirement-ordered pass has seen the first position's node retired
+/// before assigning the slot to a later position needing the SAME byte
+/// length -- never a sub-range of a larger slot. Sub-allocating would make
+/// `encode_op`'s `device_buffers.insert(bound.node, (output, 0))` a lie, and
+/// [`finish`]'s readback invariant ("an output node's buffer is always
+/// freshly allocated ... at offset 0") would then read a co-resident node's
+/// bytes instead of its own.
+///
+/// # Outputs are pinned by construction
+///
+/// `node_retirement` already excludes every `effective_outputs` node from
+/// every position's retire list, so an output's slot is never handed back to
+/// `free_by_size` by this struct's own build loop -- no separate output
+/// check is needed here, only the `debug_assert!` in [`build_buffer_arena`]
+/// that keeps that upstream invariant honest if it ever changes.
+#[cfg(feature = "metal-plan-stable-buffers")]
+struct BufferArena {
+    slots: Vec<MetalBuffer>,
+    slot_bytes: Vec<usize>,
+    /// Parallel to `prepared.resolved`.
+    position_slot: Vec<usize>,
+    /// Live-bytes high-water mark reached while building -- MG-3's own
+    /// witness against [`ARENA_TRANSIENT_CAP`].
+    peak_bytes: usize,
+}
+
+#[cfg(feature = "metal-plan-stable-buffers")]
+impl BufferArena {
+    /// The `(buffer, offset)` pair [`encode_op`] binds a position's output
+    /// to when the caller has not output-placed that position's node.
+    /// Offset is always 0: see this struct's own "whole-buffer sharing
+    /// only" doc.
+    fn placement_for(&self, position: usize) -> (&MetalBuffer, usize) {
+        (&self.slots[self.position_slot[position]], 0)
+    }
+
+    /// Physical slot count -- the direct witness of how much reuse
+    /// [`build_buffer_arena`]'s free list actually achieved: `slots.len() <
+    /// position_slot.len()` whenever two or more positions shared a slot.
+    fn slot_count(&self) -> usize {
+        self.slots.len()
+    }
+
+    /// A slot's own allocated byte length -- test/diagnostic surface for
+    /// asserting a growing extent forces a genuinely new slot rather than
+    /// silently reusing an undersized one.
+    fn slot_byte_len(&self, slot: usize) -> usize {
+        self.slot_bytes[slot]
+    }
+}
+
+/// Builds [`BufferArena`] in one pass over `resolved`, in program order,
+/// mirroring the retirement ordering [`execute_plan_with_placements`]'s own
+/// dispatch loop already uses: assign THIS position's slot first (against
+/// the free list as of every EARLIER position's retirements only), then
+/// free whatever `retires[position]` names. `effective_outputs` is passed
+/// through only for the `debug_assert!` below -- `node_retirement` itself is
+/// what actually keeps an output out of `retires`.
+///
+/// Prints the naive (no-reuse) transient sum against [`ARENA_TRANSIENT_CAP`]
+/// before allocating anything, per this card's memory gate.
+#[cfg(feature = "metal-plan-stable-buffers")]
+fn build_buffer_arena(
+    device: &ProtocolObject<dyn MTLDevice>,
+    resolved: &[BoundOp],
+    retires: &[Vec<NodeId>],
+    effective_outputs: &[NodeId],
+) -> Result<BufferArena, MetalError> {
+    let outputs: BTreeSet<NodeId> = effective_outputs.iter().copied().collect();
+    let naive_transient_bytes: usize = resolved
+        .iter()
+        .map(|bound| bound_output_len(bound).max(1) * bound.dtype.size_bytes())
+        .sum();
+    let uniform_bytes: usize = resolved.iter().map(|bound| pack_uniforms(bound).len()).sum();
+    std::eprintln!(
+        "arena_arithmetic naive_transient_bytes={naive_transient_bytes} \
+         uniform_bytes={uniform_bytes} op_count={} arena_transient_cap={ARENA_TRANSIENT_CAP}",
+        resolved.len()
+    );
+
+    let mut free_by_size: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
+    let mut slots: Vec<MetalBuffer> = Vec::new();
+    let mut slot_bytes: Vec<usize> = Vec::new();
+    let mut position_slot: Vec<usize> = Vec::with_capacity(resolved.len());
+    let mut node_slot: BTreeMap<NodeId, usize> = BTreeMap::new();
+    let mut live_bytes: usize = 0;
+    let mut peak_bytes: usize = 0;
+
+    for (position, bound) in resolved.iter().enumerate() {
+        let byte_length = bound_output_len(bound).max(1) * bound.dtype.size_bytes();
+        let slot = match free_by_size.get_mut(&byte_length).and_then(Vec::pop) {
+            Some(reused) => reused,
+            None => {
+                let index = slots.len();
+                slots.push(allocate_buffer(device, bound_output_len(bound), bound.dtype)?);
+                slot_bytes.push(byte_length);
+                index
+            }
+        };
+        // every slot assignment re-occupies `byte_length` bytes, whether the
+        // slot is freshly allocated or pulled back from the free list -- a
+        // reused slot was subtracted out of `live_bytes` when its PREVIOUS
+        // occupant retired, so skipping this on the reuse arm would double-
+        // count that subtraction the next time this new occupant retires.
+        live_bytes += byte_length;
+        peak_bytes = peak_bytes.max(live_bytes);
+        position_slot.push(slot);
+        node_slot.insert(bound.node, slot);
+
+        for retired in &retires[position] {
+            debug_assert!(
+                !outputs.contains(retired),
+                "node_retirement must never retire an effective output"
+            );
+            if let Some(retired_slot) = node_slot.remove(retired) {
+                live_bytes -= slot_bytes[retired_slot];
+                free_by_size
+                    .entry(slot_bytes[retired_slot])
+                    .or_default()
+                    .push(retired_slot);
+            }
+        }
+    }
+
+    std::eprintln!(
+        "arena_arithmetic peak_bytes={peak_bytes} reuse_factor={:.3}",
+        naive_transient_bytes as f64 / peak_bytes.max(1) as f64
+    );
+    if peak_bytes > ARENA_TRANSIENT_CAP {
+        std::eprintln!(
+            "arena_arithmetic WARNING peak_bytes={peak_bytes} exceeds \
+             arena_transient_cap={ARENA_TRANSIENT_CAP} -- MG-3 KILL"
+        );
+    }
+
+    Ok(BufferArena {
+        slots,
+        slot_bytes,
+        position_slot,
+        peak_bytes,
+    })
+}
+
+/// CARD 6.5: one uniform buffer per plan position, allocated once in
+/// [`plan`] and written IN PLACE by [`encode_op`] on every call thereafter --
+/// never through the content-keyed `UNIFORM_BUFFERS` cache. That cache is a
+/// dedup map shared by BYTES across every op with identical uniform bytes
+/// (see `UNIFORM_BUFFERS`'s own doc); writing through it in place would
+/// corrupt every other op sharing the same key. A plan-owned buffer per
+/// POSITION has no such sharing hazard: each position's buffer is used by
+/// exactly that position, forever, for this plan's lifetime.
+#[cfg(feature = "metal-plan-stable-buffers")]
+struct PlanUniforms {
+    /// Parallel to `prepared.resolved`.
+    buffers: Vec<MetalBuffer>,
+}
+
+#[cfg(feature = "metal-plan-stable-buffers")]
+fn build_plan_uniforms(
+    device: &ProtocolObject<dyn MTLDevice>,
+    resolved: &[BoundOp],
+) -> Result<PlanUniforms, MetalError> {
+    let mut buffers = Vec::with_capacity(resolved.len());
+    for bound in resolved {
+        let bytes = pack_uniforms(bound);
+        let buffer = device
+            .newBufferWithLength_options(bytes.len().max(1), MTLResourceOptions::StorageModeShared)
+            .ok_or_else(|| MetalError::CompileFailed {
+                log: "device refused to allocate a plan uniform buffer".to_string(),
+            })?;
+        write_plan_uniform_bytes(&buffer, &bytes);
+        buffers.push(buffer);
+    }
+    Ok(PlanUniforms { buffers })
+}
+
+/// Overwrites `buffer`'s whole CPU-visible range with `bytes` -- the
+/// in-place counterpart to `upload_uniforms`'s allocate-or-cache-hit path,
+/// used only when a [`PlanUniforms`] buffer already exists for this
+/// position and only its VALUES (never its identity or its byte length --
+/// see [`PlanUniforms`]'s own doc) change from one call to the next. Does
+/// NOT fire [`PLAN_UNIFORM_WRITES`] -- that counter is the PER-CALL census
+/// [`encode_op`] owns; [`build_plan_uniforms`]'s own one-time seed write
+/// uses this raw form so the first real step's count still reads exactly
+/// `op_count`, not `2 * op_count`.
+#[cfg(feature = "metal-plan-stable-buffers")]
+fn write_plan_uniform_bytes(buffer: &ProtocolObject<dyn MTLBuffer>, bytes: &[u8]) {
+    let pointer = buffer.contents();
+    // SAFETY: `buffer` was allocated by `build_plan_uniforms` at exactly
+    // `bytes.len().max(1)` bytes and is `storageModeShared`, so this is a
+    // valid, CPU-visible, mutable byte range for the duration of this write;
+    // `bytes.len()` never exceeds the buffer's own allocated length because
+    // `pack_uniforms(bound)` is a pure function of `bound`'s own static
+    // extents/rank/gather-count, unchanged across calls against the SAME
+    // plan position.
+    let destination =
+        unsafe { core::slice::from_raw_parts_mut(pointer.as_ptr().cast::<u8>(), bytes.len()) };
+    destination.copy_from_slice(bytes);
+}
+
+/// [`write_plan_uniform_bytes`]'s read-back counterpart -- test surface only,
+/// proving a write actually landed rather than trusting the copy above.
+#[cfg(all(test, feature = "metal-plan-stable-buffers"))]
+fn read_back_uniform_bytes(buffer: &ProtocolObject<dyn MTLBuffer>, byte_len: usize) -> Vec<u8> {
+    let pointer = buffer.contents();
+    // SAFETY: same CPU-visible, `storageModeShared` argument as
+    // `write_plan_uniform_bytes` above, read rather than written.
+    let source = unsafe { core::slice::from_raw_parts(pointer.as_ptr().cast::<u8>(), byte_len) };
+    source.to_vec()
+}
+
+/// [`encode_op`]'s arena lookup, split out so the call site reads the same
+/// three lines regardless of whether `metal-plan-stable-buffers` is
+/// compiled in -- `None` with the feature off, matching `encode_op`'s
+/// pre-existing "no placement, fresh `allocate_buffer`" behavior exactly.
+#[cfg(feature = "metal-plan-stable-buffers")]
+fn arena_placement(plan: &Plan, position: usize) -> Option<(&MetalBuffer, usize)> {
+    Some(plan.arena.placement_for(position))
+}
+#[cfg(not(feature = "metal-plan-stable-buffers"))]
+fn arena_placement(_plan: &Plan, _position: usize) -> Option<(&MetalBuffer, usize)> {
+    None
+}
+
+/// [`encode_op`]'s plan-owned-uniform lookup -- see [`arena_placement`]'s
+/// own doc for why this is a free function rather than an inline `#[cfg]`.
+#[cfg(feature = "metal-plan-stable-buffers")]
+fn plan_uniform_buffer(plan: &Plan, position: usize) -> Option<&MetalBuffer> {
+    Some(&plan.uniforms.buffers[position])
+}
+#[cfg(not(feature = "metal-plan-stable-buffers"))]
+fn plan_uniform_buffer(_plan: &Plan, _position: usize) -> Option<&MetalBuffer> {
+    None
+}
+
 /// Encodes one `BoundOp` as a compute dispatch into the CALLER's already-open
 /// `encoder` — neither opened nor `endEncoding()`d here. [`execute_plan`]
 /// opens exactly one `MTLComputeCommandEncoder` for the whole program and
@@ -3237,6 +3609,14 @@ fn dispatch(
 /// carried forward in `device_buffers`' own [`DeviceBuffer`] entry for this
 /// node, so a later op reading it back through
 /// [`bind_buffers`]/[`buffer_for`] needs no separate offset map.
+///
+/// `plan_uniform` is `None` on every call site that predates
+/// `metal-plan-stable-buffers` (byte-identical to before: `upload_uniforms`'s
+/// allocate-or-content-cache-hit path). `Some(buffer)` skips that call
+/// entirely and writes this call's fresh uniform bytes straight into the
+/// plan-owned `buffer` in place instead -- see [`PlanUniforms`]'s own doc for
+/// why that is sound only because the buffer is keyed by PLAN POSITION, never
+/// by content.
 fn encode_op(
     device: &ProtocolObject<dyn MTLDevice>,
     encoder: &ProtocolObject<dyn MTLComputeCommandEncoder>,
@@ -3244,6 +3624,7 @@ fn encode_op(
     bound: &BoundOp,
     packed_operands: &PackedOperands,
     placement: Option<(&MetalBuffer, usize)>,
+    plan_uniform: Option<&MetalBuffer>,
 ) -> Result<Option<(MetalBuffer, usize)>, MetalError> {
     #[cfg(feature = "instrument")]
     let emit_started = read_ticks();
@@ -3276,7 +3657,17 @@ fn encode_op(
             0,
         ),
     };
-    let uniforms = upload_uniforms(device, &pack_uniforms(bound))?;
+    let uniforms = match plan_uniform {
+        Some(buffer) => {
+            #[cfg(feature = "metal-plan-stable-buffers")]
+            {
+                write_plan_uniform_bytes(buffer, &pack_uniforms(bound));
+                counter!(PLAN_UNIFORM_WRITES, 1);
+            }
+            buffer.clone()
+        }
+        None => upload_uniforms(device, &pack_uniforms(bound))?,
+    };
     let gathers = gather_count(bound);
     let fault = (gathers > 0)
         .then(|| allocate_fault_buffer(device, gathers))
@@ -3735,6 +4126,411 @@ mod uniform_cache_tests {
             super::UNIFORM_BUFFER_REUSES.get(),
             reuses_before + 1,
             "re-uploading identical bytes must count exactly one reuse"
+        );
+    }
+}
+
+/// CARD 6.5's own soundness tests: [`BufferArena`]/[`PlanUniforms`] built by
+/// [`plan`] and bound (never allocated) by [`encode_op`] on every call
+/// against a plan already in the plan cache.
+#[cfg(all(test, feature = "metal-plan-stable-buffers"))]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod arena_tests {
+    use alloc::vec;
+
+    use objc2_metal::MTLDevice;
+    use proxima_tensor::{DType, Extent, IndexMap, NodeId, Op, QuantizedBlock, ScalarOp, append, cpu, projection};
+
+    use super::{device_and_queue, execute_plan_with_placements, plan};
+
+    /// `Input(a, extent) -> Identity -> Identity -> Input(b, extent) ->
+    /// Identity` -- three dispatched (non-`Input`) elementwise ops, `node[0]`
+    /// consumed only by `node[1]` so it retires right after `node[1]` runs,
+    /// freeing a slot a same-size later op COULD reuse. Returns the program
+    /// and the three dispatched nodes in position order.
+    fn three_stage_chain(extent_a: u32, extent_b: u32) -> (Vec<Op>, [NodeId; 3]) {
+        let mut program = Vec::new();
+        let input_a = append(
+            &mut program,
+            Op::Input {
+                dtype: DType::Float32,
+                shape: vec![Extent::Static(extent_a)],
+                name: None,
+            },
+        );
+        let stage_zero = append(
+            &mut program,
+            Op::Elementwise {
+                dtype: DType::Float32,
+                body: ScalarOp::Identity,
+                operands: vec![(input_a, IndexMap::Affine(projection(1, &[0])))],
+                name: None,
+            },
+        );
+        let stage_one = append(
+            &mut program,
+            Op::Elementwise {
+                dtype: DType::Float32,
+                body: ScalarOp::Identity,
+                operands: vec![(stage_zero, IndexMap::Affine(projection(1, &[0])))],
+                name: None,
+            },
+        );
+        let input_b = append(
+            &mut program,
+            Op::Input {
+                dtype: DType::Float32,
+                shape: vec![Extent::Static(extent_b)],
+                name: None,
+            },
+        );
+        let stage_two = append(
+            &mut program,
+            Op::Elementwise {
+                dtype: DType::Float32,
+                body: ScalarOp::Identity,
+                operands: vec![(input_b, IndexMap::Affine(projection(1, &[0])))],
+                name: None,
+            },
+        );
+        (program, [stage_zero, stage_one, stage_two])
+    }
+
+    /// A ten-stage `Identity` chain, every stage the same `extent`, only the
+    /// LAST stage declared reachable by any test that wants a real forward
+    /// -- the shape [`live_buffer_count_bounded_in_steady_state`] and
+    /// [`a_pooled_slot_is_never_rebound_before_its_last_consumers_position`]
+    /// both need: whatever the binder's own elementwise-fusion pass leaves
+    /// dispatched, over a long enough chain to force at least one real
+    /// arena slot reuse if reuse is happening at all.
+    fn ten_stage_chain(extent: u32) -> (Vec<Op>, Vec<NodeId>) {
+        let mut program = Vec::new();
+        let mut previous = append(
+            &mut program,
+            Op::Input {
+                dtype: DType::Float32,
+                shape: vec![Extent::Static(extent)],
+                name: None,
+            },
+        );
+        let mut nodes = Vec::new();
+        for _ in 0..10 {
+            previous = append(
+                &mut program,
+                Op::Elementwise {
+                    dtype: DType::Float32,
+                    body: ScalarOp::Identity,
+                    operands: vec![(previous, IndexMap::Affine(projection(1, &[0])))],
+                    name: None,
+                },
+            );
+            nodes.push(previous);
+        }
+        (program, nodes)
+    }
+
+    /// `shared = Negate(input)` fed to TWO consumers -- fan-out the
+    /// binder's own single-consumer elementwise fusion cannot collapse
+    /// (inlining `shared` into either consumer alone would still leave the
+    /// other needing a materialized read, so `shared` stays its own
+    /// dispatched `BoundOp`). Neither consumer is declared an output, so
+    /// `shared` genuinely retires once both have run -- unlike a plain
+    /// linear `Identity` chain (see `ten_stage_chain`'s own doc), which
+    /// fuses down to a single dispatch and never exercises retirement at
+    /// all. Appends onto the CALLER's `program` so several diamonds can
+    /// share one program (and one plan), each with its own `shared` node of
+    /// the SAME extent -- the shape this test needs to prove reuse across
+    /// independent diamonds, not just within one.
+    fn append_diamond(program: &mut Vec<Op>, extent: u32) -> (NodeId, NodeId, NodeId) {
+        let input = append(
+            program,
+            Op::Input {
+                dtype: DType::Float32,
+                shape: vec![Extent::Static(extent)],
+                name: None,
+            },
+        );
+        let shared = append(
+            program,
+            Op::Elementwise {
+                dtype: DType::Float32,
+                body: ScalarOp::Negate,
+                operands: vec![(input, IndexMap::Affine(projection(1, &[0])))],
+                name: None,
+            },
+        );
+        let consumer_a = append(
+            program,
+            Op::Elementwise {
+                dtype: DType::Float32,
+                body: ScalarOp::Identity,
+                operands: vec![(shared, IndexMap::Affine(projection(1, &[0])))],
+                name: None,
+            },
+        );
+        let consumer_b = append(
+            program,
+            Op::Elementwise {
+                dtype: DType::Float32,
+                body: ScalarOp::Negate,
+                operands: vec![(shared, IndexMap::Affine(projection(1, &[0])))],
+                name: None,
+            },
+        );
+        (shared, consumer_a, consumer_b)
+    }
+
+    #[test]
+    fn pooled_output_equals_the_cpu_oracle_on_a_real_forward() {
+        let (program, [stage_zero, stage_one, stage_two]) = three_stage_chain(4, 4);
+        let a = [1.0f32, 2.0, 3.0, 4.0];
+        let b = [10.0f32, 20.0, 30.0, 40.0];
+        let outputs = [stage_zero, stage_one, stage_two];
+
+        let cpu_oracle = cpu::evaluate(&program, &[], &[&a, &b], &outputs)
+            .expect("the CPU oracle evaluates the same chain");
+
+        let resolved_plan = plan(
+            &program,
+            &[],
+            &[QuantizedBlock::Float32(&a), QuantizedBlock::Float32(&b)],
+            &outputs,
+        )
+        .expect("plans the chain once, with its arena and plan uniforms built");
+        let pooled = execute_plan_with_placements(
+            &resolved_plan,
+            &[QuantizedBlock::Float32(&a), QuantizedBlock::Float32(&b)],
+            &[],
+            &[],
+        )
+        .expect("runs the chain against the arena-bound, plan-owned-uniform path");
+
+        for node in outputs {
+            let (expected, _shape) = cpu_oracle.get(node).expect("oracle has this output");
+            let (actual, _shape) = pooled.get(node).expect("pooled run has this output");
+            assert_eq!(
+                actual, expected,
+                "arena-bound output for {node:?} must equal the CPU oracle's -- \
+                 pooled and unpooled must agree on the real forward"
+            );
+        }
+    }
+
+    #[test]
+    fn a_pooled_slot_is_never_rebound_before_its_last_consumers_position() {
+        // five independent diamonds, same extent -- each diamond's `shared`
+        // node is a genuine intermediate (never declared an output) that
+        // retires once both its consumers have run, and every diamond
+        // requests the SAME byte length, so the free list has every
+        // opportunity to hand an earlier diamond's freed slot to a later
+        // one.
+        let mut program = Vec::new();
+        let mut outputs = Vec::new();
+        for _ in 0..5 {
+            let (_shared, consumer_a, consumer_b) = append_diamond(&mut program, 4);
+            outputs.push(consumer_a);
+            outputs.push(consumer_b);
+        }
+        let a = [1.0f32; 4];
+        let blocks: Vec<QuantizedBlock<'_>> =
+            core::iter::repeat_n(QuantizedBlock::Float32(a.as_slice()), 5).collect();
+        let resolved_plan =
+            plan(&program, &[], &blocks, &outputs).expect("plans the five-diamond program");
+
+        let arena = &resolved_plan.arena;
+        let retires = &resolved_plan.prepared.retires;
+        let resolved = &resolved_plan.prepared.resolved;
+
+        // group every position by which physical slot it was bound to --
+        // any slot with 2+ positions is a real reuse event `node_retirement`
+        // must have authorized.
+        let mut positions_by_slot: alloc::collections::BTreeMap<usize, Vec<usize>> =
+            alloc::collections::BTreeMap::new();
+        for (position, &slot) in arena.position_slot.iter().enumerate() {
+            positions_by_slot.entry(slot).or_default().push(position);
+        }
+
+        let mut reuse_events_checked = 0;
+        for occupants in positions_by_slot.values() {
+            for window in occupants.windows(2) {
+                let (earlier, later) = (window[0], window[1]);
+                let earlier_node = resolved[earlier].node;
+                let freed_before_reassignment = retires[..later]
+                    .iter()
+                    .any(|freed_here| freed_here.contains(&earlier_node));
+                assert!(
+                    freed_before_reassignment,
+                    "slot reused at position {later} before its earlier occupant \
+                     (position {earlier}, node {earlier_node:?}) was retired -- a pooled \
+                     buffer must never be rebound before its last consumer's position"
+                );
+                reuse_events_checked += 1;
+            }
+        }
+        assert!(
+            reuse_events_checked > 0,
+            "degenerate gate: five same-extent diamonds must produce at least one real \
+             slot reuse, or this test proves nothing"
+        );
+    }
+
+    #[test]
+    fn a_programs_output_buffer_is_never_in_the_free_list() {
+        // stage_zero (position 0, 4 elements) retires right after stage_one
+        // consumes it (position 1). stage_two (position 2) requests the
+        // SAME 4-element extent -- if stage_zero's own OUTPUT were ever
+        // freed, this arm would prove nothing; declaring it a program
+        // OUTPUT is what pins it, per `node_retirement`'s own exclusion.
+        let (program, [stage_zero, stage_one, stage_two]) = three_stage_chain(4, 4);
+        let a = [1.0f32; 4];
+        let b = [2.0f32; 4];
+        // stage_zero declared as an output pins it -- node_retirement never
+        // retires a declared output, so its slot can never reach the free
+        // list stage_two's identical-sized request would otherwise pull from.
+        let outputs = [stage_zero, stage_one, stage_two];
+        let blocks = [QuantizedBlock::Float32(&a), QuantizedBlock::Float32(&b)];
+        let resolved_plan =
+            plan(&program, &[], &blocks, &outputs).expect("plans the pinned-output chain");
+
+        let position_of = |node: NodeId| {
+            resolved_plan
+                .prepared
+                .resolved
+                .iter()
+                .position(|bound| bound.node == node)
+                .expect("node is dispatched")
+        };
+        let stage_zero_slot = resolved_plan.arena.position_slot[position_of(stage_zero)];
+        let stage_two_slot = resolved_plan.arena.position_slot[position_of(stage_two)];
+        assert_ne!(
+            stage_zero_slot, stage_two_slot,
+            "a pinned program output's slot must never be handed to a later same-size op"
+        );
+    }
+
+    #[test]
+    fn an_extent_change_forces_a_documented_realloc() {
+        // stage_zero (4 elements, 16 bytes) and stage_two (8 elements, 32
+        // bytes) are both declared outputs -- independent single-op leaves,
+        // immune to elementwise fusion -- so this test isolates exactly one
+        // thing: two differently-sized requests in the SAME plan must never
+        // be conflated by the arena's size-class bookkeeping.
+        let (program, [stage_zero, _stage_one, stage_two]) = three_stage_chain(4, 8);
+        let a = [1.0f32; 4];
+        let b = [2.0f32; 8];
+        let outputs = [stage_zero, stage_two];
+        let blocks = [QuantizedBlock::Float32(&a), QuantizedBlock::Float32(&b)];
+        let resolved_plan =
+            plan(&program, &[], &blocks, &outputs).expect("plans the size-mismatched chain");
+
+        let position_of = |node: NodeId| {
+            resolved_plan
+                .prepared
+                .resolved
+                .iter()
+                .position(|bound| bound.node == node)
+                .expect("node is dispatched")
+        };
+        let stage_zero_slot = resolved_plan.arena.position_slot[position_of(stage_zero)];
+        let stage_two_slot = resolved_plan.arena.position_slot[position_of(stage_two)];
+        assert_ne!(
+            stage_zero_slot, stage_two_slot,
+            "a byte-length mismatch must force a genuinely new slot, never a reused one"
+        );
+        assert_eq!(
+            resolved_plan.arena.slot_byte_len(stage_two_slot),
+            8 * size_of::<f32>(),
+            "the new slot must be sized to the LARGER extent's own byte length"
+        );
+    }
+
+    #[test]
+    fn uniform_contents_change_per_step_while_the_buffer_identity_does_not() {
+        let (device, _queue) = match device_and_queue() {
+            Ok(pair) => pair,
+            Err(_) => return,
+        };
+        let buffer = device
+            .newBufferWithLength_options(8, objc2_metal::MTLResourceOptions::StorageModeShared)
+            .expect("allocates an 8-byte plan-uniform-shaped buffer");
+        let identity_before = objc2::rc::Retained::as_ptr(&buffer);
+
+        super::write_plan_uniform_bytes(&buffer, &[1, 2, 3, 4, 5, 6, 7, 8]);
+        let first_write = super::read_back_uniform_bytes(&buffer, 8);
+        super::write_plan_uniform_bytes(&buffer, &[9, 8, 7, 6, 5, 4, 3, 2]);
+        let second_write = super::read_back_uniform_bytes(&buffer, 8);
+        let identity_after = objc2::rc::Retained::as_ptr(&buffer);
+
+        assert_ne!(
+            first_write, second_write,
+            "successive writes into the SAME plan-owned uniform buffer must change its contents"
+        );
+        assert_eq!(
+            identity_before, identity_after,
+            "the buffer's own identity must never change across writes -- only its bytes do"
+        );
+    }
+
+    #[test]
+    fn live_buffer_count_bounded_in_steady_state() {
+        // A ten-stage chain, every stage the SAME extent, so every stage
+        // after the first two retires its predecessor and the free list can
+        // fully reuse a small, bounded set of slots instead of growing one
+        // slot per stage.
+        let (program, nodes) = ten_stage_chain(4);
+        let a = [1.0f32; 4];
+        let outputs = [*nodes.last().expect("ten stages were pushed")];
+        let blocks = [QuantizedBlock::Float32(&a)];
+        let resolved_plan =
+            plan(&program, &[], &blocks, &outputs).expect("plans the ten-stage chain");
+
+        let slot_count = resolved_plan.arena.slot_count();
+        assert!(
+            slot_count <= 3,
+            "ten same-size stages must reuse down to a small, bounded slot count via the \
+             free list, not grow one slot per stage (got {slot_count})"
+        );
+    }
+
+    #[test]
+    fn two_ops_with_identical_uniform_bytes_get_distinct_plan_owned_buffers() {
+        // stage_zero and stage_two are two INDEPENDENT, identically-shaped
+        // Identity ops -- `pack_uniforms` packs the same bytes (rank,
+        // extents, operand base/strides) for both, since a fresh `Input`'s
+        // own operand base is 0 either way. The content-keyed
+        // `UNIFORM_BUFFERS` cache would hand both the SAME buffer; plan-
+        // owned uniforms must not.
+        let (program, [stage_zero, _stage_one, stage_two]) = three_stage_chain(4, 4);
+        let a = [1.0f32; 4];
+        let b = [2.0f32; 4];
+        let outputs = [stage_zero, stage_two];
+        let blocks = [QuantizedBlock::Float32(&a), QuantizedBlock::Float32(&b)];
+        let resolved_plan =
+            plan(&program, &[], &blocks, &outputs).expect("plans the identical-uniform chain");
+
+        let position_of = |node: NodeId| {
+            resolved_plan
+                .prepared
+                .resolved
+                .iter()
+                .position(|bound| bound.node == node)
+                .expect("node is dispatched")
+        };
+        let stage_zero_bound = &resolved_plan.prepared.resolved[position_of(stage_zero)];
+        let stage_two_bound = &resolved_plan.prepared.resolved[position_of(stage_two)];
+        assert_eq!(
+            super::pack_uniforms(stage_zero_bound),
+            super::pack_uniforms(stage_two_bound),
+            "degenerate gate: the two ops must genuinely pack identical uniform bytes"
+        );
+
+        let stage_zero_uniform =
+            objc2::rc::Retained::as_ptr(&resolved_plan.uniforms.buffers[position_of(stage_zero)]);
+        let stage_two_uniform =
+            objc2::rc::Retained::as_ptr(&resolved_plan.uniforms.buffers[position_of(stage_two)]);
+        assert_ne!(
+            stage_zero_uniform, stage_two_uniform,
+            "two ops with identical uniform bytes must still get DISTINCT plan-owned buffers"
         );
     }
 }

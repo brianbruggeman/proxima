@@ -445,6 +445,7 @@ fn print_token_breakdown_metal(
      nocopy_uploads={} copying_uploads={} nocopy_reuses={} \
      resident_uploads={} resident_reuses={} mapping_offset_uploads={} \
      nocopy_cache_len={} uniform_cache_len={} phys_footprint_bytes={} device_allocated_bytes={} \
+     output_buffer_allocations={} plan_uniform_writes={} \
      plan_cache_len={plan_cache_len} plan_hits={plan_hits} plan_misses={plan_misses}",
         metal_stage.prepare_calls,
         ms(metal_stage.prepare_ticks),
@@ -480,6 +481,8 @@ fn print_token_breakdown_metal(
         omega::metal::uniform_cache_len(),
         phys_footprint_bytes(),
         omega::metal::current_allocated_size().unwrap_or(0),
+        metal_stage.output_buffer_allocations,
+        metal_stage.plan_uniform_writes,
     );
 }
 
