@@ -84,6 +84,22 @@ instrument = ["metal", "proxima-tensor/instrument"]
 # eligibility gate and kernel body live in `msl.rs`, which is alloc-tier, but
 # the const it reads only has meaning for a Metal dispatch.
 metal-tiled-gemm = ["metal"]
+# Widens the cooperative-reduce (`msl.rs`'s `push_cooperative_reduce_body`)
+# threadgroup dispatch from a hardcoded `SIMD_WIDTH` (32) to
+# `cooperative_reduce_width`'s reduction-extent-scaled width, plus the
+# two-level `simd_sum`-then-`threadgroup`-fold tail that width requires
+# (`push_cooperative_reduce_tail`). Measured defect this closes:
+# `docs/discipline.md`'s row for this initiative — a 4096-element RMS-norm
+# sum dispatched 32 threads, each looping 128 times serially, 5.4x the
+# ~4us dispatch floor. Default-off: this is a second, riskier dispatch
+# shape for the reduce family (same framing `metal-tiled-gemm` above
+# carries for the GEMM family) and does not earn the production default
+# until an e2e bench shows the full stack wins with it on. Depends on
+# `metal` only (not `metal-tiled-gemm`): the two features touch disjoint
+# arms of `push_cooperative_reduce_body` (this one skips
+# `q4k_super_block_tiled`'s arm entirely, by construction) and compose
+# independently.
+metal-wide-cooperative-reduce = ["metal"]
 # Portable GPU execution driver (src/wgsl.rs, src/wgpu_driver.rs) — the
 # wgpu/WGSL counterpart of `metal` above, one abstraction layer over: same
 # `BoundOp` descriptor, same emit-then-drive split, different target ISA
@@ -221,5 +237,10 @@ toml.workspace = true
 
 [[bench]]
 name = "metal_vs_cpu"
+harness = false
+required-features = ["metal"]
+
+[[bench]]
+name = "wide_cooperative_reduce"
 harness = false
 required-features = ["metal"]
