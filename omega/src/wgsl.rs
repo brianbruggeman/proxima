@@ -206,6 +206,12 @@ pub fn emit_wgsl(
         } => render_scan(resolved, &entry, element_type),
         BoundOpKind::Iota => render_iota(resolved, &entry),
         BoundOpKind::Constant { value } => render_constant(resolved, &entry, *value),
+        BoundOpKind::CachedAttention { .. } => {
+            return Err(EmitError::UnsupportedOpKind {
+                node: resolved.node,
+                kind: "cached_attention",
+            });
+        }
     };
     let (threads, workgroup_size) = match cooperative_width {
         Some(width) => (grid_threads(resolved) * u64::from(width), width),
@@ -455,7 +461,14 @@ fn grid_threads(resolved: &BoundOp) -> u64 {
         BoundOpKind::Reduce {
             keep: Keep::Scan, ..
         } => 1,
-        BoundOpKind::Iota | BoundOpKind::Constant { .. } => resolved.extents.iter().product(),
+        // `CachedAttention` never reaches this function in practice --
+        // `emit_wgsl`'s own kind-match returns `EmitError::UnsupportedOpKind`
+        // for it before `grid_threads` is called. Grouped with
+        // `Iota`/`Constant` only to satisfy exhaustiveness with a harmless
+        // value, never a real dispatch shape.
+        BoundOpKind::Iota | BoundOpKind::Constant { .. } | BoundOpKind::CachedAttention { .. } => {
+            resolved.extents.iter().product()
+        }
     }
 }
 
@@ -579,6 +592,12 @@ fn entry_name(resolved: &BoundOp) -> String {
         BoundOpKind::Constant { value } => {
             format!("omega_wgsl_constant_r{rank}_v{:08x}", value.to_bits())
         }
+        // Never actually rendered: `emit_wgsl`'s own kind-match returns
+        // `EmitError::UnsupportedOpKind` for `CachedAttention` before this
+        // name is used for anything. A name is still produced (not
+        // `unreachable!()`) because this function runs before that later
+        // match, purely to satisfy exhaustiveness with a harmless value.
+        BoundOpKind::CachedAttention { .. } => format!("omega_wgsl_cached_attention_r{rank}"),
     }
 }
 

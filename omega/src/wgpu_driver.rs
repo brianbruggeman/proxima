@@ -518,7 +518,15 @@ fn pack_uniforms(bound: &BoundOp) -> Vec<u8> {
         BoundOpKind::Reduce {
             keep: Keep::Scan, ..
         } => pack_scan_uniforms(bound),
-        BoundOpKind::Iota | BoundOpKind::Constant { .. } => pack_leaf_uniforms(bound),
+        // `CachedAttention` never reaches this function in practice --
+        // `crate::wgsl::emit_wgsl` (called before a `BoundOp` is ever
+        // dispatched through this driver) already returns
+        // `EmitError::UnsupportedOpKind` for it. Grouped with
+        // `Iota`/`Constant` only to satisfy exhaustiveness with a harmless
+        // value, never a real uniform layout.
+        BoundOpKind::Iota | BoundOpKind::Constant { .. } | BoundOpKind::CachedAttention { .. } => {
+            pack_leaf_uniforms(bound)
+        }
     }
 }
 
