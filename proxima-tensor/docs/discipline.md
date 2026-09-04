@@ -20540,3 +20540,76 @@ PROXIMA_MAX_TOKENS=8 <binary> --exact --nocapture --ignored \
   bind::real_openchat_file::runs_the_cached_decode_loop_on_the_metal_backend_and_reports_the_plan_cache
 ```
 Rebuilding at `min_len=0` (the shipped default, no env override needed) reproduces the cooperative-only row above; the env override rebuilds a distinct binary (the constant is compile-time) to reproduce any of the other rows.
+
+## ROW 277 -- verbatim ggml q4_k kernel port measured on a quiet box: a net loss, landed default-off and selectable
+
+**Card:** `perf/q4k-ggml-port`. **Worktree/branch/commit:** `proxima-wt-land-q4kport`/`land/q4kport` (landed to `main`). **Feature:** `metal-q4k-ggml-port`, default: OFF.
+
+**The port.** `push_q4k_ggml_port_body` (`omega/src/msl.rs`) transcribes ggml's `kernel_mul_mv_q4_K_f32_impl<nr0=4, nsg=2, nw=32>` (`ggml-metal.metal:5086-5193`, MIT) line-for-line instead of re-deriving pieces of it through this crate's own `q4k_header`/`q4k_run8` decode abstractions, the way every prior landing on this path did. Per-thread split is unchanged from this crate's existing row-blocked preamble (`ix = lane/8` selects one of 4 super-blocks, `it = lane%8` splits into `iq = it/4` (`q1` vs `q2`'s 64-byte `qs` half) and `ir = it%4` (a 4-`uint16` stride)). Scale/min extraction uses three fixed masks with no runtime shift -- `kmask1 = 0x3f3f`, `kmask2 = 0x0f0f`, `kmask3 = 0xc0c0` -- against ggml's own `sc16`/`sc8` byte layout. Nibble extraction is four fixed bit-position masks (`0x000F`/`0x0F00`/`0x00F0`/`0xF000`) with the resulting 256x/16x-too-large residuals folded into the final combine (`1.0f/256.0f`, `1.0f/16.0f`) rather than corrected per element -- the "mask-without-shift" technique. Dispatch geometry is ggml's own `nsg=2`/`nr0=4` (64-thread threadgroups): this landing reconciled that widening through main's own `packed_row_nsg_factor()` (main had independently fixed `metal-packed-row-nsg2`'s identical dead-arm bug, ROW 275, while this branch was in flight) rather than a second, competing `Q4K_GGML_PORT_NSG` constant -- `PACKED_ROW_NSG` and `packed_row_nsg_factor()` now gate on `any(metal-packed-row-nsg2, metal-q4k-ggml-port)`, one mechanism both features widen from, proven by a new reachability test (`ggml_port_doubles_the_threadgroup_width_for_a_packed_row_blocked_matmul`) alongside the pre-existing `metal-packed-row-nsg2` one and their shared feature-off twin.
+
+**Bug found and fixed in the same landing:** the `#[cfg(feature = "instrument")]` op-profiler's `classify_kind` (`omega/src/metal.rs`) labels a `Reduce` kernel `"reduce-packed-row-blocked"` by grepping its emitted source for this crate's own decode-helper call sites (`q4k_pair_dot(blk`, `q4k_run8(blk`, `q5k_value(blk`, `q6k_value(blk`); `push_q4k_ggml_port_body` calls none of them (transcribing ggml's math directly is the entire point of the port) and, like every other row-blocked body, ends in a `simd_sum(` combine, so it fell through to the `"reduce-cooperative"` arm below. Found by this landing's own bake-off: the per-op profile showed `reduce-packed-row-blocked` op_count drop from 225 (default) to 9 (port) and `reduce-cooperative` grow from 225 to 441, while every packed family's own `row_blocked_count` (the `packed_row_block` classifier's independent per-family counter) stayed at 32 on both arms -- proving dispatch was always correct and only this profiler label was wrong. Fixed by adding an `acc1_0` marker check (unique to this body's accumulator naming) to both `classify_kind` and `classify_packed_kernel_variant` (which named the same kernels `"other"`). Instrument-only; no effect on emitted kernel source, dispatch geometry, or any non-instrumented build.
+
+**Gates (own `CARGO_TARGET_DIR`, `CARGO_TERM_COLOR=never`):** `cargo build --workspace --lib` EXIT=0. `cargo nextest run -p omega --features metal`: 113 passed, 1 skipped. `cargo nextest run -p omega --features metal,metal-q4k-ggml-port`: 116 passed, 1 skipped (includes the new `ggml_port_doubles_the_threadgroup_width...` reachability test and the two `q4k_ggml_port_parity` real-checkpoint parity tests). `cargo nextest run -p omega --all-features`: 171 passed, 1 skipped. `cargo nextest run -p proxima-tensor --features std,instrument`: 513 passed, 7 skipped. `cargo nextest run -p proxima-model-interop --features metal,instrument`: 95 passed, 25 skipped. `cargo clippy --workspace --all-targets -- -D warnings`: EXIT=0. `bash scripts/omega-gate.sh`: all 6 steps pass, `[3/6]` asserts 171 tests run/171 passed non-zero, `[6/6]` asserts 2 doctests passed non-zero, `== omega gate: PASS ==`.
+
+**Bake-off (quiet box, M1 Max, 10 cores, macOS 15.8, release; `pgrep -fl 'cargo|rustc|nextest'` confirmed empty of non-self processes before the run and re-checked before each measurement phase):** two release test binaries (`cargo test --release --no-run -p proxima-model-interop --lib`), own `CARGO_TARGET_DIR`s (`target-default`, `target-port`) -- `default` = `metal,instrument`; `port` = `metal,instrument,metal-q4k-ggml-port`. 3 interleaved rounds (llama-bench, then default, then port, repeated 3x), plus one per-op profile run per arm after the `classify_kind` fix landed (both binaries rebuilt). `generated_text` identical across every arm/round ("Here is a simple Python function that returns").
+
+**llama.cpp incumbent** (`llama-bench -m openchat-3.5-1210.Q4_K_S.gguf -n 32 -p 0 -r 5 -t 8 -ngl 99`):
+
+| round | t/s |
+| --- | --- |
+| 1 | 56.81 ± 0.34 |
+| 2 | 56.73 ± 0.47 |
+| 3 | 57.09 ± 0.50 |
+
+mean 56.88 t/s, CoV 0.27% across rounds.
+
+**Our decode loop, steady state** (`PROXIMA_MAX_TOKENS=8`, `runs_the_cached_decode_loop_on_the_metal_backend_and_reports_the_plan_cache`, `step_wall_ms` mean over steps 1..7 ONLY -- never step 0, which folds in the first-run pipeline compile and averaged 1.02-1.41 s on both arms; the nsg2 row's own ROW 275 already names this as the wrong column for a steady-state read):
+
+| arm | round1 (ms) | round2 (ms) | round3 (ms) | mean step_wall_ms | CoV (n=3) | mean gpu_exec_ms | CoV (n=3) | device_allocated_bytes | text == default |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| default | 41.339 | 41.621 | 41.282 | 41.414 | 0.36% | 34.726 | 1.21% | ~4.1637 GB every round | yes (identity) |
+| ggml-port | 45.137 | 45.573 | 45.992 | 45.567 | 0.77% | 38.765 | 0.72% | ~4.1635 GB every round | yes |
+
+ggml-port is **10.0% slower** on steady-state `step_wall_ms` and **11.6% slower** on `gpu_exec_ms` -- both well outside either arm's own CoV (0.36-1.21%), so this is signal, not noise. `device_allocated_bytes` is flat between arms (both ~4.1636 GB, dominated by the mmap'd model weights, matching ROW 274/275's own finding).
+
+**Per-family GPU time, one profile run per arm after the `classify_kind` fix** (`profiles_one_real_decode_step_by_per_op_gpu_time`, step=3, `op_profile_family` lines, `gpu_ms`):
+
+| family | default gpu_ms | ggml-port gpu_ms | delta |
+| --- | --- | --- | --- |
+| ffn_down | 6.331 | 8.342 | +31.8% |
+| ffn_gate | 5.734 | 6.287 | +9.6% |
+| ffn_up | 5.651 | 6.014 | +6.4% |
+| attn_q | 2.822 | 3.082 | +9.2% |
+| attn_output | 2.183 | 2.434 | +11.5% |
+| attn_v | 1.218 | 1.314 | +7.9% |
+| attn_k | 1.097 | 1.237 | +12.8% |
+| output.weight | 0.737 | 0.739 | +0.3% (single row-blocked call, not a Q4_K weight in this checkpoint) |
+| kv_cache.v / k_even / k_odd (NOT row-blocked, control) | 1.604 / 0.875 / 0.868 | 1.612 / 0.916 / 0.903 | +0.5% / +4.7% / +4.0% (flat within single-run noise) |
+| rope_sin / rope_cos / eps (NOT row-blocked, control) | 0.788 / 0.768 / 0.618 | 0.805 / 0.803 / 0.639 | flat within single-run noise |
+
+`op_profile_bucket kind=reduce-packed-row-blocked` (the aggregate bucket this feature actually targets, all 225 packed row-blocked ops summed, both arms correctly bucketed post-fix): default `gpu_ms=25.773`, ggml-port `gpu_ms=29.769` -- **+15.5%**, single-run, no CoV, but every individual Q4_K-weight family above moved the same direction by a consistent double-digit percentage while every non-row-blocked control family stayed flat, so this is not measurement noise.
+
+**Loaded-box first measurement, for provenance:** this branch's own original bake-off (contended box, other cargo/nextest activity present) measured `gpu_exec_ms` **+16%** for the ggml-port arm -- the quiet-box aggregate bucket number above (+15.5%) lands within a point of that original reading, so the loaded-box result was not a load artifact; it was the same real regression, just measured on a noisier floor.
+
+**Mechanism, traced.** ggml's `kernel_mul_mv_q4_K_f32_impl<4,2,32>` is tuned for ggml's own memory layout and dispatch harness; this crate's per-axis `operand_base`/`operand_strides` addressing (`weight_base[q]`, `other_base[0]`, `other_stride`) replaces ggml's raw `nb01`-stride pointer walk, and that address computation is the ONLY thing this port changes from the upstream source (the doc on `push_q4k_ggml_port_body` names this explicitly). The consistent per-family loss (every real Q4_K weight family: +6% to +32%) with zero regression on any non-row-blocked control family localizes the cost to the strided-read substitution itself, not to nsg=2 geometry (ROW 275 already measured nsg=2 alone as flat-to-slightly-negative on this box, not a 10-16% loss) and not to orchestration noise (CoV on both arms is under 1.3%, an order of magnitude below the measured gap). ggml's own pointer-walk `q1 += args.nb01/2` assumes a contiguous row stride baked into the pointer increment; this crate's per-element `long` multiply-and-add through `operand_stride` on every one of the 16 `yl`/`yh` loads and every one of the 4-iteration `word1`/`word2` reads is doing real per-access address arithmetic ggml's simpler pointer increment does not pay for at this shape. `ffn_down` (the largest single-family loss, +31.8%, also the largest operand_bytes among the packed families) is consistent with this being a per-access address-computation cost that scales with element count, not a fixed per-dispatch overhead.
+
+**Decision.** Land the port default-off and selectable (`metal-q4k-ggml-port`), same posture as `metal-packed-row-nsg2` (ROW 275) and the split-K row gate (ROW 274): a real, reconciled, individually-tested feature that this evidence does not clear for a production default. The verbatim-port hypothesis (re-deriving through this crate's own header-decode abstractions was costing something the literal ggml math would not) is REFUTED by this measurement -- the literal math is measurably slower here, because this crate's addressing substrate is not the same shape ggml's pointer-walk assumes, and porting only the arithmetic while leaving the addressing crate-native does not inherit ggml's own performance characteristic. The `classify_kind`/`classify_packed_kernel_variant` fix ships regardless of this feature's default state -- it is a real profiler bug independent of whether `metal-q4k-ggml-port` ever becomes a production default, and every future landing on this same op-profile instrumentation benefits from the corrected bucket counts.
+
+**Re-prove:**
+```sh
+cd /Users/brianbruggeman/repos/slot-0/proxima
+CARGO_TARGET_DIR=<own target dir> cargo nextest run -p omega --features metal,metal-q4k-ggml-port
+CARGO_TARGET_DIR=<own target dir>-default cargo test --release --no-run -p proxima-model-interop --lib --features metal,instrument
+CARGO_TARGET_DIR=<own target dir>-port cargo test --release --no-run -p proxima-model-interop --lib --features metal,instrument,metal-q4k-ggml-port
+PROXIMA_MAX_TOKENS=8 <binary> --exact --nocapture --ignored \
+  bind::real_openchat_file::runs_the_cached_decode_loop_on_the_metal_backend_and_reports_the_plan_cache
+PROXIMA_MAX_TOKENS=8 PROXIMA_METAL_OP_PROFILE_STEP=3 <binary> --exact --nocapture --ignored \
+  bind::real_openchat_file::profiles_one_real_decode_step_by_per_op_gpu_time
+```
+Compare `step_wall_ms` (steps 1..7 mean) and the `reduce-packed-row-blocked` `op_profile_bucket` line between the two binaries to reproduce the regression; `generated_text` should stay identical across both.
+
+### Changelog
+| Date | Change | Δ vs prior | CoV / runs | Host loadout |
+| --- | --- | --- | --- | --- |
+| 2026-09-04 | verbatim ggml Q4_K matvec kernel port (`metal-q4k-ggml-port`), reconciled onto main's `packed_row_nsg_factor()` | -10.0% step_wall_ms, -11.6% gpu_exec_ms, -15.5% on the isolated packed-row-blocked bucket (all LOSSES vs default); consistent +6% to +32% loss across every real Q4_K weight family, flat on every non-row-blocked control family | step_wall CoV 0.36%/0.77% default/port; gpu_exec CoV 1.21%/0.72%; llama-bench CoV 0.27%; per-family profile single-run per arm, no CoV | quiet at bake-off start and re-checked before each phase (pgrep-confirmed); M1 Max, 10 cores, macOS 15.8, release build |
+| 2026-09-04 | fixed `classify_kind`/`classify_packed_kernel_variant` op-profiler mislabeling the ggml-port body as `reduce-cooperative`/`"other"` (missing `acc1_0` source marker) | `reduce-packed-row-blocked` op_count corrected from 9 back to 225 (matches default and the independent `row_blocked_count=32`-per-family classifier); instrument-only, no effect on dispatch or emitted kernel source | n/a (compile-time classifier fix, not a perf change) | same session |
