@@ -20434,3 +20434,63 @@ bake-off binaries, and are the mechanically-CI-able part of this row.
 | Date | Change | Δ vs prior | CoV / runs | Host loadout |
 | --- | --- | --- | --- | --- |
 | 2026-09-04 | add `packed_row_block.split_k_max_rows` row-count gate to `metal-q4k-split-k` | **NEGATIVE on every measured axis** vs default (wall clock ~+30% rounds 2-3, gpu_exec_ms ~+11%, attn_k/attn_v GB/s ~-56%/-60%); gate itself proven reachable/causal (attn_q/output correctly exempted at cap=1024) | wall-clock CoV (sample, n=3) 29.4%/14.0%/0.5%/7.6% across default/splitk-4096/splitk-1024/splitk-0; llama-bench CoV 0.7% (5 runs/round internal + 3 rounds); profile GB/s single-run per arm, no CoV | quiet at every round start (pgrep-confirmed, logged); M1 Max, 10 cores, macOS 15.8, release build |
+
+## ROW 275 -- packed-row nsg2 geometry measured for the first time on this tree
+
+**Card:** dispatch reachability audit (found by the `perf/q4k-ggml-port` worker, landed here). **Worktree/branch/commit:** `proxima-wt-land-nsg2`/`land/nsg2` (landed to `main`). **Feature:** `metal-packed-row-nsg2`, default: OFF.
+
+**The arm was dead code before this row.** `tiled_gemm_threadgroup_width`'s `Keep::Reduce` `if let` block returned unconditionally whenever `packed_row_block(..)` matched (`omega/src/msl.rs`), and every `packed_row_block` match IS a `Keep::Reduce` op by construction (`classify_packed_row_block`'s own `NotReduceKeepReduce` rejection) -- so the `#[cfg(feature = "metal-packed-row-nsg2")]` arm sitting AFTER that `if let` block could never execute for any op reaching this function. The prior `docs/discipline.md` ROW 270 "nsg=2 negative" measured nothing on THIS tree: the geometry it thought it was benching was never dispatched. Wiring fix: the nsg=2 override now lives inside the `if let` block itself, applied via `packed_row_nsg_factor()` (feature on AND `metal-q4k-split-k` off -- mirrors `perf/q4k-ggml-port`'s own guard for the same hazard: split-K's combine already picks a cooperating `split` simdgroup count for a real reason, and doubling the dispatched width again on top of that would desync the combine's own `split` from the width the driver actually dispatches). Reachability proven by two new unit tests, `msl::tests::packed_row_nsg2_doubles_the_threadgroup_width_for_a_packed_row_blocked_matmul` (feature on, asserts `tiled_gemm_threadgroup_width` returns `SIMD_WIDTH * 2` for a packed row-blocked matmul fixture) and its feature-off twin `packed_row_nsg2_off_leaves_the_threadgroup_width_unchanged` (asserts `SIMD_WIDTH`, unchanged from the pre-fix default).
+
+**Re-prove (unit tests):**
+```sh
+cd /Users/brianbruggeman/repos/slot-0/proxima-wt-land-nsg2
+CARGO_TARGET_DIR=/Users/brianbruggeman/repos/slot-0/proxima-wt-land-nsg2/target \
+cargo nextest run -p omega --features metal,metal-packed-row-nsg2 -E 'test(packed_row_nsg2)'
+```
+Result: 1 test run: 1 passed (`packed_row_nsg2_doubles_the_threadgroup_width_for_a_packed_row_blocked_matmul`). Feature-off twin passes under plain `--features metal` (1 passed, 107 skipped). Full `-p omega --features metal,metal-packed-row-nsg2`: 107 tests run, 107 passed, 1 skipped. `--all-features` (nsg2 + split-K compiled in together, `packed_row_nsg_factor` correctly falls back to `1`): 162 tests run, 162 passed, 1 skipped. `cargo clippy -p omega --all-targets --features metal,metal-packed-row-nsg2 -- -D warnings` and `--all-features`: both EXIT=0, zero warnings. `bash scripts/omega-gate.sh`: `== omega gate: PASS ==`, EXIT=0.
+
+**Bake-off (quiet box, M1 Max, 10 cores, macOS 15.8, release; `pgrep -fl 'cargo|rustc|nextest'` confirmed empty of non-self processes before the run):** two release test binaries (`cargo test --release --no-run -p proxima-model-interop`), own `CARGO_TARGET_DIR`s (`target-default`, `target-nsg2`) -- `default` = `metal,instrument`; `nsg2` = `metal,instrument,metal-packed-row-nsg2` (passthrough added to `proxima-model-interop/Cargo.toml`, own commit, same style as its `metal-q4k-*` neighbours). 3 interleaved rounds (llama-bench, then default, then nsg2, repeated 3x), plus one per-op profile run per arm (`profiles_one_real_decode_step_by_per_op_gpu_time`, `PROXIMA_METAL_OP_PROFILE_STEP=3` set internally by that test). `generated_text` identical across every arm/round ("Here is a simple Python function that returns").
+
+**llama.cpp incumbent** (`llama-bench -m openchat-3.5-1210.Q4_K_S.gguf -n 32 -p 0 -r 5 -t 8 -ngl 99`):
+
+| round | t/s |
+| --- | --- |
+| 1 | 56.78 ± 0.49 |
+| 2 | 56.92 ± 0.33 |
+| 3 | 56.80 ± 0.32 |
+
+mean 56.83 t/s, CoV 0.13% across rounds.
+
+**Our decode loop** (`PROXIMA_MAX_TOKENS=8`, `runs_the_cached_decode_loop_on_the_metal_backend_and_reports_the_plan_cache`, `total_wall_clock_ms / 8`, full per-process wall clock including prefill step 0 -- NOT the same design point llama-bench measures, reported for completeness only):
+
+| arm | round1 (ms) | round2 (ms) | round3 (ms) | mean ms/token | CoV (n=3) | gpu_exec_ms (step7, last decode) | device_allocated_bytes (step7) | text == default |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| default | 2112.995 | 1478.195 | 1396.305 | 207.81 | 23.6% | 34.964 / 35.185 / 34.742 (mean 34.96) | ~4.163 GB every round | yes (identity) |
+| nsg2 | 2009.884 | 1762.336 | 1766.730 | 230.79 | 7.7% | 34.031 / 34.144 / 33.889 (mean 34.02) | ~4.163 GB every round | yes |
+
+Round 1 is a cold-process outlier for both arms (each round re-execs the binary). Rounds 2-3 alone: default mean 179.66 ms/token, nsg2 mean 220.57 ms/token -- nsg2 is ~23% SLOWER on end-to-end wall clock, opposite the direction a real win would show, though this wall-clock number is dominated by CPU-side `op_setup`/orchestration cost (~40ms/step total vs ~35ms gpu_exec), not the packed-matvec dispatch geometry this feature targets -- see the op-profile table below for the isolated signal.
+
+**Per-family GPU time, one profile run per arm** (`profiles_one_real_decode_step_by_per_op_gpu_time`, step=3, `op_profile_family` lines, `gpu_ms`):
+
+| family | default gpu_ms | nsg2 gpu_ms | delta |
+| --- | --- | --- | --- |
+| ffn_down | 6.273 | 6.278 | +0.1% |
+| ffn_gate | 5.782 | 5.721 | -1.1% |
+| ffn_up | 5.693 | 5.670 | -0.4% |
+| attn_q | 2.795 | 2.841 | +1.6% |
+| attn_output | 2.165 | 2.165 | 0.0% |
+| attn_v | 1.171 | 1.159 | -1.0% |
+| attn_k | 1.024 | 0.991 | -3.2% |
+
+`op_profile_bucket kind=reduce-packed-row-blocked` (the aggregate bucket nsg2 actually targets, all 225 packed row-blocked ops summed): default `gpu_ms=25.642`, nsg2 `gpu_ms=25.561` -- a 0.3% difference, single-run, no CoV; flat within noise. `device_allocated_bytes` and `phys_footprint_bytes` show no measurable delta between arms at any step (both ~4.163 GB device / 47-53 MB RSS, dominated by the mmap'd model weights, matching ROW 274's own finding for a different feature).
+
+**Mechanism, traced (guiding-principles evidence ladder):** nsg=2 widens the packed row-blocked kernel's threadgroup from 1 to 2 simdgroups (fewer, larger threadgroups for the same `grid.threads`, per ggml's `N_SG_Q4_K`), and the per-family gpu_ms table shows this changes NOTHING outside single-run measurement noise (largest magnitude move is attn_k at -3.2%, on an op that takes 1.0ms out of a ~26ms total packed-matvec budget) -- this box's occupancy is not threadgroup-count-bound at the shapes this checkpoint's decode graph produces, so halving threadgroup count buys nothing to recover. The end-to-end wall-clock REGRESSION (rounds 2-3, +23%) is not explained by gpu_exec_ms (flat, -2.7% if anything) or by the per-family table (flat) -- it is orchestration/CPU-side noise on this run (op_setup/pipeline_lookup dominate the step_wall_ms budget at ~40ms vs ~35ms gpu_exec, and this session did not isolate their per-arm variance beyond what's in the raw log), not a causal effect of the nsg2 geometry itself.
+
+**Honest read:** the dispatch arm is now reachable and reachability is proven by a unit test (not merely a hoped-for compile-out), but the wiring fix is NOT accompanied by a win -- per-family GPU time is flat (largest single-family move -3.2%, well under any CoV threshold that would count as signal from a single run), the aggregate packed-row-blocked bucket is flat (+0.3%/-0.3% depending on direction), text and device bytes are unchanged, and end-to-end wall clock is worse, not better. This does NOT clear the "wins by more than 2x its CoV" bar this landing's own brief set for a flip recommendation. **Recommendation: land the wiring fix and this row default-off; do not flip `metal-packed-row-nsg2` to a production default on this evidence.**
+
+**Re-prove (bake-off):** rebuild each arm's release test binary (`cargo test --release --no-run -p proxima-model-interop --features <arm's features>` under its own `CARGO_TARGET_DIR`), then run `PROXIMA_MAX_TOKENS=8 <binary> --exact --nocapture --ignored bind::real_openchat_file::runs_the_cached_decode_loop_on_the_metal_backend_and_reports_the_plan_cache` for each arm and diff `total_wall_clock_ms`/`generated_text`; the binary hash changes per rebuild so no single command pins one.
+
+### Changelog
+| Date | Change | Δ vs prior | CoV / runs | Host loadout |
+| --- | --- | --- | --- | --- |
+| 2026-09-04 | make `metal-packed-row-nsg2`'s dispatch arm reachable (was dead code) | FLAT on every measured axis vs default (per-family gpu_ms -3.2% to +1.6%, aggregate packed-row-blocked bucket +0.3%, device bytes unchanged, text identical); end-to-end wall clock +23% (rounds 2-3, likely orchestration noise, not isolated to the geometry change) | wall-clock CoV (n=3) 23.6%/7.7% default/nsg2; llama-bench CoV 0.13%; per-family profile single-run per arm, no CoV | quiet at bake-off start (pgrep-confirmed); M1 Max, 10 cores, macOS 15.8, release build |
