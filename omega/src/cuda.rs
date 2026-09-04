@@ -170,6 +170,12 @@ pub fn emit_cuda(
                 kind: "constant",
             });
         }
+        BoundOpKind::CachedAttention { .. } => {
+            return Err(EmitError::CudaUnsupportedOpKind {
+                node: resolved.node,
+                kind: "cached_attention",
+            });
+        }
     };
     Ok(CudaKernel {
         source,
@@ -331,7 +337,14 @@ fn grid_threads(resolved: &BoundOp) -> u64 {
             let rank = resolved.extents.len();
             resolved.extents[..rank.saturating_sub(1)].iter().product()
         }
-        BoundOpKind::Iota | BoundOpKind::Constant { .. } => resolved.extents.iter().product(),
+        // `CachedAttention` never reaches this function in practice --
+        // `emit_cuda`'s own match on `resolved.kind` returns
+        // `EmitError::CudaUnsupportedOpKind` for it before `grid_threads` is
+        // ever called. Grouped with `Iota`/`Constant` only to satisfy
+        // exhaustiveness with a harmless value, never a real dispatch shape.
+        BoundOpKind::Iota | BoundOpKind::Constant { .. } | BoundOpKind::CachedAttention { .. } => {
+            resolved.extents.iter().product()
+        }
     }
 }
 
@@ -489,6 +502,12 @@ fn entry_name(resolved: &BoundOp) -> String {
         BoundOpKind::Constant { value } => {
             format!("omega_cuda_constant_r{rank}_v{:08x}", value.to_bits())
         }
+        // Never actually rendered: `emit_cuda`'s own kind-match returns
+        // `EmitError::CudaUnsupportedOpKind` for `CachedAttention` before
+        // this name is used for anything. A name is still produced (not
+        // `unreachable!()`) because this function runs before that later
+        // match, purely to satisfy exhaustiveness with a harmless value.
+        BoundOpKind::CachedAttention { .. } => format!("omega_cuda_cached_attention_r{rank}"),
     };
     let gather_bits: String = resolved
         .operands()
