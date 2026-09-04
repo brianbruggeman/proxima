@@ -4844,13 +4844,35 @@ fn run_cached_attention<B: Deref<Target = [f32]> + Sync>(
             reason: "cached attention runner received another bound operation",
         });
     };
-    if operands.len() != 8 || operands.iter().any(|(_, _, lookup)| lookup.is_some()) {
+    if !matches!(operands.len(), 8 | 9) || operands.iter().any(|(_, _, lookup)| lookup.is_some()) {
         return Err(TensorError::NotLowerable {
             node: resolved.node,
-            reason: "cached attention requires eight affine, gather-free operands",
+            reason: "cached attention requires eight or nine affine, gather-free operands",
         });
     }
-    let mut sources = operands.iter().map(|(node, layout, _)| {
+    // The optional ninth operand is the single-range fusion's runtime
+    // `cached_len` scalar (see `BoundOpKind::CachedAttention`'s own doc) --
+    // read here, not looped over with the eight Q/K/V sources below, since
+    // it is a bare rank-0 value rather than a contiguous tensor tail.
+    let dynamic_new_upper_inclusive = match operands.get(8) {
+        Some((node, layout, _)) => {
+            if layout.base != 0 || !layout.strides.is_empty() {
+                return Err(TensorError::NotLowerable {
+                    node: resolved.node,
+                    reason: "cached attention's cached_len operand must be a bare scalar",
+                });
+            }
+            let cached_len_buffer = buffer_of(buffers, *node)?;
+            let cached_len_value = *cached_len_buffer.first().ok_or(TensorError::NotLowerable {
+                node: resolved.node,
+                reason: "cached attention's cached_len operand is empty",
+            })?;
+            Some(cached_len_value as i64)
+        }
+        None => None,
+    };
+    let new_upper_inclusive = dynamic_new_upper_inclusive.unwrap_or(*new_upper_inclusive);
+    let mut sources = operands.iter().take(8).map(|(node, layout, _)| {
         if layout.base != 0 || layout.strides.last().copied() != Some(1) {
             return Err(TensorError::NotLowerable {
                 node: resolved.node,
@@ -4915,7 +4937,7 @@ fn run_cached_attention<B: Deref<Target = [f32]> + Sync>(
             },
             crate::physical::CausalBand {
                 lower_inclusive: i64::MIN,
-                upper_inclusive: *new_upper_inclusive,
+                upper_inclusive: new_upper_inclusive,
             },
         ],
     );

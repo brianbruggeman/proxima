@@ -2014,12 +2014,24 @@ fn entry_name(resolved: &BoundOp) -> String {
             cached_lower_inclusive,
             new_upper_inclusive,
             ..
-        } => format!(
-            "omega_cached_attention_q{query_rows}_c{cached_key_rows}_n{new_key_rows}_h{kv_heads}_g{query_groups}_d{head_dim}_s{:08x}_l{}_u{}",
-            scale.to_bits(),
-            signed_name_part(*cached_lower_inclusive),
-            signed_name_part(*new_upper_inclusive),
-        ),
+        } => {
+            // `operand_count == 9` means the ninth operand carries the real
+            // `new_upper_inclusive` at run time (see `BoundOpKind::
+            // CachedAttention`'s own doc) -- the static field here is unused
+            // filler in that case, so the plan-cache key names the STRUCTURE
+            // ("dyn") rather than that filler value, which must never appear
+            // to vary the key across calls whose real bound differs.
+            let upper_token = if operand_count == 9 {
+                "dyn".to_string()
+            } else {
+                signed_name_part(*new_upper_inclusive)
+            };
+            format!(
+                "omega_cached_attention_q{query_rows}_c{cached_key_rows}_n{new_key_rows}_h{kv_heads}_g{query_groups}_d{head_dim}_s{:08x}_l{}_u{upper_token}",
+                scale.to_bits(),
+                signed_name_part(*cached_lower_inclusive),
+            )
+        }
         BoundOpKind::Elementwise { .. } => {
             let body = body_token(resolved.element_body());
             format!("omega_elementwise_r{rank}_n{operand_count}_{body}")
@@ -2495,16 +2507,36 @@ fn render_cached_attention(resolved: &BoundOp, entry: &str) -> Result<String, Em
     } else {
         format!("{cached_lower_inclusive}L")
     };
-    let new_upper = format!("{new_upper_inclusive}L");
+    // A single-range fusion's ninth operand carries the true `cached_len` at
+    // run time (`BoundOpKind::CachedAttention`'s own doc) -- `new_upper`
+    // reads that buffer instead of baking the (unused-in-that-case) static
+    // field as a `constexpr`, so the band tracks the real cache length under
+    // `kv-capacity-bucket` padding rather than a value fixed when this
+    // kernel was compiled and cached by structure (`entry_name`'s own "dyn"
+    // marker is what lets one compiled kernel serve every `cached_len`).
+    let dynamic_cached_len = resolved.operands().len() == 9;
+    let (cached_len_param, new_upper_decl) = if dynamic_cached_len {
+        (
+            format!(", device const {element_type}* in8 [[buffer(8)]]"),
+            "long new_upper = (long)in8[0];".to_string(),
+        )
+    } else {
+        (
+            String::new(),
+            format!("constexpr long new_upper = {new_upper_inclusive}L;"),
+        )
+    };
+    let (out_buffer_index, uniforms_buffer_index) =
+        if dynamic_cached_len { (9, 10) } else { (8, 9) };
     let mut source = String::new();
     preamble(&mut source);
     source.push_str("struct Uniforms { long total_elements; };\n\n");
     source.push_str(&format!(
-        "kernel void {entry}(device const {element_type}* in0 [[buffer(0)]], device const {element_type}* in1 [[buffer(1)]], device const {element_type}* in2 [[buffer(2)]], device const {element_type}* in3 [[buffer(3)]], device const {element_type}* in4 [[buffer(4)]], device const {element_type}* in5 [[buffer(5)]], device const {element_type}* in6 [[buffer(6)]], device const {element_type}* in7 [[buffer(7)]], device {element_type}* out [[buffer(8)]], constant Uniforms& u [[buffer(9)]], uint gid [[thread_position_in_grid]]) {{\n"
+        "kernel void {entry}(device const {element_type}* in0 [[buffer(0)]], device const {element_type}* in1 [[buffer(1)]], device const {element_type}* in2 [[buffer(2)]], device const {element_type}* in3 [[buffer(3)]], device const {element_type}* in4 [[buffer(4)]], device const {element_type}* in5 [[buffer(5)]], device const {element_type}* in6 [[buffer(6)]], device const {element_type}* in7 [[buffer(7)]]{cached_len_param}, device {element_type}* out [[buffer({out_buffer_index})]], constant Uniforms& u [[buffer({uniforms_buffer_index})]], uint gid [[thread_position_in_grid]]) {{\n"
     ));
     source.push_str("    if ((long)gid >= u.total_elements * 32L) { return; }\n");
     source.push_str(&format!(
-        "    constexpr long cached_key_rows = {cached_key_rows}; constexpr long new_key_rows = {new_key_rows}; constexpr long kv_heads = {kv_heads}; constexpr long query_groups = {query_groups}; constexpr long head_dim = {head_dim}; constexpr float scale = {}; constexpr long cached_lower = {cached_lower}; constexpr long new_upper = {new_upper};\n",
+        "    constexpr long cached_key_rows = {cached_key_rows}; constexpr long new_key_rows = {new_key_rows}; constexpr long kv_heads = {kv_heads}; constexpr long query_groups = {query_groups}; constexpr long head_dim = {head_dim}; constexpr float scale = {}; constexpr long cached_lower = {cached_lower}; {new_upper_decl}\n",
         msl_literal(*scale),
     ));
     source.push_str("    long vector_index = (long)gid / 32L; uint lane = gid % 32u;\n    if (vector_index >= u.total_elements) { return; }\n    long query_index = vector_index;\n    long query_row = query_index / (kv_heads * query_groups);\n    long remainder = query_index % (kv_heads * query_groups);\n    long kv_head = remainder / query_groups;\n    long group = remainder % query_groups;\n    long query_head = kv_head * query_groups + group;\n    long qbase = query_row * (kv_heads * query_groups * (head_dim / 2)) + query_head * (head_dim / 2);\n    float maximum = -INFINITY; float sum = 0.0f; float weighted[(head_dim + 31) / 32];\n    for (long dimension = 0; dimension < (head_dim + 31) / 32; dimension++) { weighted[dimension] = 0.0f; }\n");

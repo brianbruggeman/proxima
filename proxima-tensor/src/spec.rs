@@ -11172,7 +11172,7 @@ value = 1.0
         const BLOCK_COUNT: u32 = 2;
         const CACHED_LEN: usize = 3;
         const NEW_COUNT: usize = 2;
-        const SEQUENCE: usize = CACHED_LEN + NEW_COUNT;
+        const MERGED_LEN: usize = CACHED_LEN + NEW_COUNT;
 
         fn run_resolved(program_len: usize, resolved: &[BoundOp], inputs: Vec<(NodeId, Vec<f32>)>) -> Vec<Option<Vec<f32>>> {
             let mut buffers: Vec<Option<Vec<f32>>> = alloc::vec![None; program_len];
@@ -11193,8 +11193,140 @@ value = 1.0
             buffers
         }
 
-        let pairs = (HEAD_DIM / 2) as usize;
-        let group = (QUERY_HEADS / KV_HEADS) as usize;
+        // `bucket_padding` reproduces `kv-capacity-bucket`'s KV extent
+        // rounding directly on this fixture: the KV leaves grow by
+        // `bucket_padding` zero-filled rows past `MERGED_LEN` (exactly what
+        // `[merged_len, bucket)` looks like at runtime) while `cached_len`'s
+        // own `Op::Input` value never moves, so any divergence this
+        // introduces is the fused op reading the wrong band, never a
+        // different cache content.
+        fn max_error_for_padding(padding: usize, program: &[Op], root: NodeId) -> f32 {
+            let pairs = (HEAD_DIM / 2) as usize;
+            let group = (QUERY_HEADS / KV_HEADS) as usize;
+            let sequence = MERGED_LEN + padding;
+
+            let table = random_vec(1, VOCAB as usize * EMBEDDING as usize);
+            let ids: Vec<f32> = (0..NEW_COUNT as u32).map(|id| 1.0 + (id % 3) as f32).collect();
+            let eps = alloc::vec![1e-5f32; NEW_COUNT];
+            let (cos_new, sin_new) = rope_angles(CACHED_LEN, NEW_COUNT, pairs, HEAD_DIM as usize);
+            let cached_len_scalar = alloc::vec![CACHED_LEN as f32];
+
+            let mut owned: Vec<(String, Vec<f32>)> = alloc::vec![
+                (String::from("token_embd.weight"), table),
+                (String::from("ids"), ids),
+                (String::from("eps"), eps),
+                (String::from("rope_cos"), cos_new),
+                (String::from("rope_sin"), sin_new),
+                (String::from("cached_len"), cached_len_scalar),
+            ];
+            let mut seed = 900u64;
+            for layer in 0..BLOCK_COUNT as usize {
+                owned.push((alloc::format!("blk.{layer}.attn_norm.weight"), alloc::vec![1.0f32; EMBEDDING as usize]));
+                owned.push((alloc::format!("blk.{layer}.ffn_norm.weight"), alloc::vec![1.0f32; EMBEDDING as usize]));
+                owned.push((
+                    alloc::format!("blk.{layer}.attn_q.weight"),
+                    random_vec(seed, EMBEDDING as usize * QUERY_HEADS as usize * HEAD_DIM as usize),
+                ));
+                owned.push((
+                    alloc::format!("blk.{layer}.attn_k.weight"),
+                    random_vec(seed + 1, EMBEDDING as usize * KV_HEADS as usize * HEAD_DIM as usize),
+                ));
+                owned.push((
+                    alloc::format!("blk.{layer}.attn_v.weight"),
+                    random_vec(seed + 2, EMBEDDING as usize * KV_HEADS as usize * HEAD_DIM as usize),
+                ));
+                owned.push((
+                    alloc::format!("blk.{layer}.attn_output.weight"),
+                    random_vec(seed + 3, KV_HEADS as usize * group * HEAD_DIM as usize * EMBEDDING as usize),
+                ));
+                owned.push((
+                    alloc::format!("blk.{layer}.ffn_gate.weight"),
+                    random_vec(seed + 4, EMBEDDING as usize * FEED_FORWARD as usize),
+                ));
+                owned.push((
+                    alloc::format!("blk.{layer}.ffn_up.weight"),
+                    random_vec(seed + 5, EMBEDDING as usize * FEED_FORWARD as usize),
+                ));
+                owned.push((
+                    alloc::format!("blk.{layer}.ffn_down.weight"),
+                    random_vec(seed + 6, FEED_FORWARD as usize * EMBEDDING as usize),
+                ));
+                let mut k_even = random_vec(seed + 7, MERGED_LEN * KV_HEADS as usize * pairs);
+                k_even.resize(sequence * KV_HEADS as usize * pairs, 0.0);
+                let mut k_odd = random_vec(seed + 8, MERGED_LEN * KV_HEADS as usize * pairs);
+                k_odd.resize(sequence * KV_HEADS as usize * pairs, 0.0);
+                let mut v = random_vec(seed + 9, MERGED_LEN * KV_HEADS as usize * HEAD_DIM as usize);
+                v.resize(sequence * KV_HEADS as usize * HEAD_DIM as usize, 0.0);
+                owned.push((alloc::format!("kv_cache.{layer}.k_even"), k_even));
+                owned.push((alloc::format!("kv_cache.{layer}.k_odd"), k_odd));
+                owned.push((alloc::format!("kv_cache.{layer}.v"), v));
+                seed += 10;
+            }
+            owned.push((String::from("output_norm.weight"), alloc::vec![1.0f32; EMBEDDING as usize]));
+            owned.push((String::from("output.weight"), random_vec(seed, EMBEDDING as usize * VOCAB as usize)));
+
+            let shapes = crate::shape::infer(program, &[NEW_COUNT as u64, sequence as u64])
+                .expect("single-range fused-vs-unfused fixture infers");
+
+            let inputs_for = |resolved: &[BoundOp]| -> Vec<(NodeId, Vec<f32>)> {
+                let _ = resolved;
+                block_node_ids(program)
+                    .into_iter()
+                    .map(|node| {
+                        let name = match &program[node.0 as usize] {
+                            Op::Input { name: Some(name), .. } => name.clone(),
+                            _ => unreachable!("block_node_ids only ever returns Op::Input nodes"),
+                        };
+                        let data = owned
+                            .iter()
+                            .find(|(candidate, _)| *candidate == name)
+                            .unwrap_or_else(|| panic!("missing named input {name}"))
+                            .1
+                            .clone();
+                        (node, data)
+                    })
+                    .collect()
+            };
+
+            let fused = bind_with_fusion(program, &shapes, &[root], true)
+                .expect("fused single-range bind succeeds");
+            let unfused = bind_with_fusion(program, &shapes, &[root], false)
+                .expect("unfused single-range bind succeeds");
+
+            assert!(
+                fused
+                    .iter()
+                    .any(|bound| matches!(bound.kind, BoundOpKind::CachedAttention { .. })),
+                "fused bind must produce at least one cached-attention step"
+            );
+            assert!(
+                !unfused
+                    .iter()
+                    .any(|bound| matches!(bound.kind, BoundOpKind::CachedAttention { .. })),
+                "unfused bind must never produce a cached-attention step"
+            );
+
+            let fused_buffers = run_resolved(program.len(), &fused, inputs_for(&fused));
+            let unfused_buffers = run_resolved(program.len(), &unfused, inputs_for(&unfused));
+
+            let fused_logits = fused_buffers[root.0 as usize]
+                .as_ref()
+                .expect("fused logits present");
+            let unfused_logits = unfused_buffers[root.0 as usize]
+                .as_ref()
+                .expect("unfused logits present");
+
+            assert_eq!(fused_logits.len(), unfused_logits.len());
+            let max_error = fused_logits
+                .iter()
+                .zip(unfused_logits.iter())
+                .map(|(fused, unfused)| (fused - unfused).abs())
+                .fold(0.0f32, f32::max);
+            std::println!(
+                "single_range_fused_vs_unfused bucket_padding={padding} max_error={max_error} fused={fused_logits:?} unfused={unfused_logits:?}"
+            );
+            max_error
+        }
 
         let (program, root, _) = mistral_single_range_cached_forward_program(
             VOCAB,
@@ -11207,133 +11339,13 @@ value = 1.0
         )
         .expect("single-range cached forward pass lowers");
 
-        let table = random_vec(1, VOCAB as usize * EMBEDDING as usize);
-        let ids: Vec<f32> = (0..NEW_COUNT as u32).map(|id| 1.0 + (id % 3) as f32).collect();
-        let eps = alloc::vec![1e-5f32; NEW_COUNT];
-        let (cos_new, sin_new) = rope_angles(CACHED_LEN, NEW_COUNT, pairs, HEAD_DIM as usize);
-        let cached_len_scalar = alloc::vec![CACHED_LEN as f32];
-
-        let mut owned: Vec<(String, Vec<f32>)> = alloc::vec![
-            (String::from("token_embd.weight"), table),
-            (String::from("ids"), ids),
-            (String::from("eps"), eps),
-            (String::from("rope_cos"), cos_new),
-            (String::from("rope_sin"), sin_new),
-            (String::from("cached_len"), cached_len_scalar),
-        ];
-        let mut seed = 900u64;
-        for layer in 0..BLOCK_COUNT as usize {
-            owned.push((alloc::format!("blk.{layer}.attn_norm.weight"), alloc::vec![1.0f32; EMBEDDING as usize]));
-            owned.push((alloc::format!("blk.{layer}.ffn_norm.weight"), alloc::vec![1.0f32; EMBEDDING as usize]));
-            owned.push((
-                alloc::format!("blk.{layer}.attn_q.weight"),
-                random_vec(seed, EMBEDDING as usize * QUERY_HEADS as usize * HEAD_DIM as usize),
-            ));
-            owned.push((
-                alloc::format!("blk.{layer}.attn_k.weight"),
-                random_vec(seed + 1, EMBEDDING as usize * KV_HEADS as usize * HEAD_DIM as usize),
-            ));
-            owned.push((
-                alloc::format!("blk.{layer}.attn_v.weight"),
-                random_vec(seed + 2, EMBEDDING as usize * KV_HEADS as usize * HEAD_DIM as usize),
-            ));
-            owned.push((
-                alloc::format!("blk.{layer}.attn_output.weight"),
-                random_vec(seed + 3, KV_HEADS as usize * group * HEAD_DIM as usize * EMBEDDING as usize),
-            ));
-            owned.push((
-                alloc::format!("blk.{layer}.ffn_gate.weight"),
-                random_vec(seed + 4, EMBEDDING as usize * FEED_FORWARD as usize),
-            ));
-            owned.push((
-                alloc::format!("blk.{layer}.ffn_up.weight"),
-                random_vec(seed + 5, EMBEDDING as usize * FEED_FORWARD as usize),
-            ));
-            owned.push((
-                alloc::format!("blk.{layer}.ffn_down.weight"),
-                random_vec(seed + 6, FEED_FORWARD as usize * EMBEDDING as usize),
-            ));
-            owned.push((
-                alloc::format!("kv_cache.{layer}.k_even"),
-                random_vec(seed + 7, SEQUENCE * KV_HEADS as usize * pairs),
-            ));
-            owned.push((
-                alloc::format!("kv_cache.{layer}.k_odd"),
-                random_vec(seed + 8, SEQUENCE * KV_HEADS as usize * pairs),
-            ));
-            owned.push((
-                alloc::format!("kv_cache.{layer}.v"),
-                random_vec(seed + 9, SEQUENCE * KV_HEADS as usize * HEAD_DIM as usize),
-            ));
-            seed += 10;
+        for bucket_padding in [0usize, 1, 5] {
+            let max_error = max_error_for_padding(bucket_padding, &program, root);
+            assert!(
+                max_error <= 1e-5,
+                "fused single-range cached attention diverged from the unfused program at bucket_padding={bucket_padding}: max_error={max_error}"
+            );
         }
-        owned.push((String::from("output_norm.weight"), alloc::vec![1.0f32; EMBEDDING as usize]));
-        owned.push((String::from("output.weight"), random_vec(seed, EMBEDDING as usize * VOCAB as usize)));
-
-        let shapes = crate::shape::infer(&program, &[NEW_COUNT as u64, SEQUENCE as u64])
-            .expect("single-range fused-vs-unfused fixture infers");
-
-        let inputs_for = |resolved: &[BoundOp]| -> Vec<(NodeId, Vec<f32>)> {
-            let _ = resolved;
-            block_node_ids(&program)
-                .into_iter()
-                .map(|node| {
-                    let name = match &program[node.0 as usize] {
-                        Op::Input { name: Some(name), .. } => name.clone(),
-                        _ => unreachable!("block_node_ids only ever returns Op::Input nodes"),
-                    };
-                    let data = owned
-                        .iter()
-                        .find(|(candidate, _)| *candidate == name)
-                        .unwrap_or_else(|| panic!("missing named input {name}"))
-                        .1
-                        .clone();
-                    (node, data)
-                })
-                .collect()
-        };
-
-        let fused = bind_with_fusion(&program, &shapes, &[root], true)
-            .expect("fused single-range bind succeeds");
-        let unfused = bind_with_fusion(&program, &shapes, &[root], false)
-            .expect("unfused single-range bind succeeds");
-
-        assert!(
-            fused
-                .iter()
-                .any(|bound| matches!(bound.kind, BoundOpKind::CachedAttention { .. })),
-            "fused bind must produce at least one cached-attention step"
-        );
-        assert!(
-            !unfused
-                .iter()
-                .any(|bound| matches!(bound.kind, BoundOpKind::CachedAttention { .. })),
-            "unfused bind must never produce a cached-attention step"
-        );
-
-        let fused_buffers = run_resolved(program.len(), &fused, inputs_for(&fused));
-        let unfused_buffers = run_resolved(program.len(), &unfused, inputs_for(&unfused));
-
-        let fused_logits = fused_buffers[root.0 as usize]
-            .as_ref()
-            .expect("fused logits present");
-        let unfused_logits = unfused_buffers[root.0 as usize]
-            .as_ref()
-            .expect("unfused logits present");
-
-        assert_eq!(fused_logits.len(), unfused_logits.len());
-        let max_error = fused_logits
-            .iter()
-            .zip(unfused_logits.iter())
-            .map(|(fused, unfused)| (fused - unfused).abs())
-            .fold(0.0f32, f32::max);
-        std::println!(
-            "single_range_fused_vs_unfused max_error={max_error} fused={fused_logits:?} unfused={unfused_logits:?}"
-        );
-        assert!(
-            max_error <= 1e-5,
-            "fused single-range cached attention diverged from the unfused program: max_error={max_error}"
-        );
     }
 
     /// CARD 6.1's falsifiable claim: `proxima-model-interop`'s

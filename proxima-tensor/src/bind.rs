@@ -225,6 +225,18 @@ pub struct BoundOp {
 pub enum BoundOpKind {
     /// One backend-neutral cached-attention step. The operands are the
     /// already-bound Q/K/V sources; CPU and GPU own only the kernel body.
+    ///
+    /// `operands` carries exactly eight Q/K/V sources for a two-range fusion
+    /// (`cached_attention_candidates`) and a ninth, rank-0 `cached_len`
+    /// scalar for a single-range fusion
+    /// (`cached_attention_single_range_candidates`): that call's
+    /// `causal_mask_merged` band depends on the true `cached_len` VALUE, not
+    /// on any shape the bind-time extents alone determine (`kv-capacity-
+    /// bucket` widens the key extent past the merged length, so a shape
+    /// difference silently overstates it). `new_upper_inclusive` is the
+    /// bound an executor uses only when `operands.len() == 8`; when it is 9,
+    /// every executor reads the real bound from `operands[8]`'s buffer at
+    /// run time instead, and `new_upper_inclusive` here is unused filler.
     CachedAttention {
         operands: BoundOperands,
         query_rows: u64,
@@ -1991,27 +2003,35 @@ fn is_exact_causal_mask(program: &[Op], node: NodeId) -> bool {
 /// doc), never structurally checked here — only that the query side is a
 /// shift of an `Iota`, which is what makes the mask exact causal rather than
 /// an arbitrary comparison.
+/// Returns the `cached_len` [`Op::Input`] node the mask's query side shifts
+/// an `Iota` by, when `node` is exactly
+/// [`crate::spec::causal_mask_merged`]'s shape — `None` for anything else.
+/// The caller needs this NodeId, not just a bool: `cached_len` is a per-call
+/// runtime scalar (see this function's own doc below), and the fused
+/// [`BoundOpKind::CachedAttention`] this feeds must read the band bound from
+/// that scalar at execution time rather than baking a value derived from
+/// bound EXTENTS, which drifts from the true `cached_len` whenever the KV
+/// extent is padded past the merged length (`kv-capacity-bucket`).
 #[cfg(feature = "cached-attention-streaming")]
-fn is_exact_merged_causal_mask(program: &[Op], node: NodeId) -> bool {
-    let Some(operands) = elementwise_operands(program, node, ScalarOp::Greater) else {
-        return false;
-    };
+fn exact_merged_causal_mask_cached_len(program: &[Op], node: NodeId) -> Option<NodeId> {
+    let operands = elementwise_operands(program, node, ScalarOp::Greater)?;
     let [(key, key_map), (query_absolute, query_map)] = operands else {
-        return false;
+        return None;
     };
     if *key_map != IndexMap::Affine(map::projection(2, &[1]))
         || *query_map != IndexMap::Affine(map::projection(2, &[0]))
         || !matches!(program.get(key.0 as usize), Some(Op::Iota { .. }))
     {
-        return false;
+        return None;
     }
-    let Some(shift_operands) = elementwise_operands(program, *query_absolute, ScalarOp::Add) else {
-        return false;
+    let shift_operands = elementwise_operands(program, *query_absolute, ScalarOp::Add)?;
+    let [(query_index, _), (cached_len, _)] = shift_operands else {
+        return None;
     };
-    let [(query_index, _), (_, _)] = shift_operands else {
-        return false;
-    };
-    matches!(program.get(query_index.0 as usize), Some(Op::Iota { .. }))
+    if !matches!(program.get(query_index.0 as usize), Some(Op::Iota { .. })) {
+        return None;
+    }
+    matches!(program.get(cached_len.0 as usize), Some(Op::Input { .. })).then_some(*cached_len)
 }
 
 #[cfg(feature = "cached-attention-streaming")]
@@ -2329,9 +2349,10 @@ fn cached_attention_single_range_candidates(
         let [(mask, _), (negative_infinity, _), (scores_scaled, _)] = mask_parts else {
             continue;
         };
-        if !is_exact_merged_causal_mask(program, *mask)
-            || constant_value(program, *negative_infinity) != Some(f32::NEG_INFINITY)
-        {
+        let Some(cached_len_node) = exact_merged_causal_mask_cached_len(program, *mask) else {
+            continue;
+        };
+        if constant_value(program, *negative_infinity) != Some(f32::NEG_INFINITY) {
             continue;
         }
         let Some(scaled_operands) = binary_elementwise(program, *scores_scaled, ScalarOp::Multiply)
@@ -2409,16 +2430,21 @@ fn cached_attention_single_range_candidates(
             continue;
         }
         // `key_shape[0]` (`t`, the whole merged range) minus `query_shape[0]`
-        // (`s`, this call's own new positions) is exactly `cached_len` --
-        // derivable from bound EXTENTS alone because `causal_mask_merged`
-        // builds the "t" domain as `cached_len + new_count` positions
-        // (`crate::spec::causal_mask_merged`'s own doc), never from the
-        // `cached_len` VALUE the graph also carries as a separate per-call
-        // `Op::Input` for the mask arithmetic itself. Reading the value
-        // would require the fused op to depend on a runtime scalar this
-        // `BoundOpKind` has no field for; reading the shape difference
-        // needs nothing new.
-        let cached_len = key_shape[0] - query_shape[0];
+        // (`s`, this call's own new positions) equals `cached_len` only when
+        // `t` is exactly the merged length -- true for a plain evaluate, but
+        // `kv-capacity-bucket` widens `t` to `ceil(merged_len /
+        // bucket_tokens) * bucket_tokens`, so this difference silently
+        // becomes `bucket - new_count`, larger than the real `cached_len` by
+        // the padding. The band this feeds must therefore come from the
+        // `cached_len` VALUE itself -- the same per-call `Op::Input`
+        // `causal_mask_merged`'s query side already adds
+        // (`exact_merged_causal_mask_cached_len` captured it above as
+        // `cached_len_node`) -- carried through as this op's ninth operand
+        // and read at execution time, never baked from a shape difference.
+        if !shapes.of(cached_len_node).is_empty() {
+            continue;
+        }
+        let cached_len_operand = (cached_len_node, Layout { base: 0, strides: SmallVec::new() }, None);
         let pair_dim = query_shape[3];
         let query_strides = [
             (query_shape[1] * query_shape[2] * pair_dim) as i64,
@@ -2446,9 +2472,14 @@ fn cached_attention_single_range_candidates(
             continue;
         }
         let dependencies = attention_dependencies(program, output, &source_nodes);
+        // `cached_len_node` sits on the same mask-chain path `source_nodes`
+        // already gets excluded from -- it is about to become this op's own
+        // ninth operand, so it must never be classified as absorbed
+        // (removed) the way the rest of the mask arithmetic is.
         let dependencies = dependencies
             .difference(&source_nodes.into_iter().collect())
             .copied()
+            .filter(|node| *node != cached_len_node)
             .collect::<BTreeSet<_>>();
         if dependencies.iter().any(|node| effective_outputs.contains(node)) {
             continue;
@@ -2460,6 +2491,7 @@ fn cached_attention_single_range_candidates(
         if !resolved.iter().any(|bound| bound.node == output) {
             continue;
         }
+        operands.push(cached_len_operand);
         let fused = BoundOp {
             node: output,
             dtype: DType::Float32,
@@ -2474,7 +2506,7 @@ fn cached_attention_single_range_candidates(
                 head_dim,
                 scale: scale_value,
                 cached_lower_inclusive: i64::MAX,
-                new_upper_inclusive: cached_len as i64,
+                new_upper_inclusive: 0,
             },
         };
         candidates.push((fused, absorbed));
