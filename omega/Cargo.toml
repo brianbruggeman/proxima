@@ -200,8 +200,12 @@ proxima-onnx = { path = "../proxima-onnx" }
 proxima-safetensors = { path = "../proxima-safetensors" }
 # `test-support` pulls in `proxima_tensor::test_support::Lcg`, the same
 # deterministic PRNG proxima-tensor's own examples share — see that crate's
-# Cargo.toml for why this is a feature, not a default.
-proxima-tensor = { path = "../proxima-tensor", features = ["config", "test-support"] }
+# Cargo.toml for why this is a feature, not a default. `cached-attention-streaming`
+# is on here (test-only, never in the `metal` feature production consumers
+# build against) so `omega/tests/metal_real_forward.rs` can produce and check
+# the CPU/Metal differential record that feature's own doc says is the
+# condition for turning it on by default.
+proxima-tensor = { path = "../proxima-tensor", features = ["config", "test-support", "cached-attention-streaming"] }
 tempfile.workspace = true
 toml.workspace = true
 
