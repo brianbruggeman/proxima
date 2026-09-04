@@ -569,6 +569,11 @@ name = "redis_realredis_corpus"
 path = "tests/redis_realredis_corpus.rs"
 required-features = ["redis"]
 
+[[test]]
+name = "ndjson_delimiter_frame_pipe"
+path = "tests/ndjson_delimiter_frame_pipe.rs"
+required-features = ["codec-pipe"]
+
 [[bench]]
 name = "quic_bench_c1_varint"
 harness = false
