@@ -318,12 +318,14 @@ three features flipped the default forward.
 | uniform buffer cache bounded with LRU (ROW 279) | not a perf change | `UNIFORM_BUFFERS` grew unbounded on varying uniform bytes; bounded at `[spans].uniform_cache_entries=4096`; `uniform_cache_len` plateaus at 50 on the default decode |
 | plan-stable device buffers, default flip (ROW 280) | quiet 3-round table: OFF 40.827/40.090/41.107 vs ON 39.688/37.476/40.780 (ON ≤ OFF every round) | `op_setup` fell 3.94-5.42 → 0.39-0.60 ms/step; `OUTPUT_BUFFER_ALLOCATIONS` 842/step → 0 on plan-cache hits; device bytes flat (~4.163 GB OFF, ~4.153 GB ON); becomes the default |
 | fused `CachedAttention` reaches the single-range program (ROW 281, `2f6f12d`/`15c469b`/`563fc0c`/`a943390`); flipped default-on (ROW 282, `land/fattn-on`) | quiet bake-off, 3 rounds: unfused 37.096/37.506/38.786 vs fused 39.796/36.363/37.154 (means 37.796 vs 37.771, CoV 2.33%/4.76%) | delta is inside both arms' noise, not a confirmed wall win; `emit_calls` 938→616/step, per-op GPU sum 35.266→32.356 ms (-8.2%) localized to the fused bucket, device bytes -131,072 B, text identical; ROW 282 flips the feature into `metal`'s default per the owner's less-work rule (output identical, work down, wall not worse beyond CoV) even without a confirmed wall win |
+| cooperative K/V loads inside the fused attention kernel, default-on (ROW 283, `4d5bb08`/`7b7defe`) | quiet bake-off, 3 interleaved rounds, contended box, no overlap: `gpu_exec_ms` 30.643 → 29.300 (-4.4%, `discipline.md:20857`) | one threadgroup per `(query_row, kv_head)`, K/V rows loaded once into threadgroup memory (`discipline.md:20836`); wall neutral within CoV (`discipline.md:20857`); parity `relative=5.29e-7` at kv-capacity-bucket paddings 0/1/5 (`discipline.md:20838`); text identical; landed default under the owner's less-work rule (`discipline.md:20867`) |
+| placed outputs skip post-wait readback, default (ROW 284, `aa7905d`/`04360a3`/`65c2117`) | not a decode-time perf change; no bake-off run | a latent buffer-offset bug fixed first (`discipline.md:20891`); `readback_calls` 97 → 1 and `readback_bytes` 390,152 → 128,008 per steady step (step 0: 12,094,712 → 3,968,248, `discipline.md:20897-20898`); text identical; landed default -- post-wait memcpy removal makes a wall-clock regression structurally impossible (`discipline.md:20903`) |
 
 `generated_text` identical on every arm across every row above; device bytes stayed within the
 ~4.15-4.17 GB band on every measured arm.
 
-Cooperative K/V-load rewrite of the fused kernel: in flight on `perf/fused-attention-coop-loads`,
-row 282 when measured.
+Concurrent dispatch with dataflow barriers (`metal-concurrent-dispatch`): in flight, row 285 when
+measured.
 
 What is left after the third wave, per token on the default at main `e7fe6b6`: quiet-box
 `step_wall_ms` 37.1-38.8 ms/token against `llama-bench` 56.6-57.2 t/s (17.5-17.7 ms/token) —
@@ -333,7 +335,9 @@ on top of this same tree by the owner's less-work rule -- `emit_calls` 938 → 6
 wall unchanged within CoV -- so the default's feature set as of `land/fattn-on` is `metal`'s
 full list (`metal-output-placement`, `metal-wide-cooperative-reduce`, `kv-capacity-bucket`,
 `metal-q5k-pair-dot`, `metal-plan-stable-buffers`, `cached-attention-streaming`), not just the
-subset named above.
+subset named above. Two more work metrics drop on the same tree without a numbers change here
+(quiet re-measure pending): `gpu_exec_ms` 30.643 → 29.300/step (ROW 283) and readback 97 → 1
+copies/token (ROW 284, `discipline.md:20897`).
 
 ## 2. The diagnosis, built formally (V0-V8)
 
