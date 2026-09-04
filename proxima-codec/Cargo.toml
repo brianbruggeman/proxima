@@ -22,9 +22,10 @@ memchr.workspace = true
 [features]
 default = ["std"]
 # Tier-1: no_std + alloc. The FrameCodec/MessageCodec/Datagram traits,
-# Addressed, FrameLimits, LengthDelimitedCodec (alloc-free hot path), and
-# BytesPassthrough live here. Proven on thumbv7m-none-eabi by the
-# `proxima-codec` cell in scripts/_floor-crate-matrix.sh.
+# Addressed, FrameLimits, LengthDelimitedCodec, DelimiterCodec (both
+# alloc-free hot paths), and BytesPassthrough live here. Proven on
+# thumbv7m-none-eabi by the `proxima-codec` cell in
+# scripts/_floor-crate-matrix.sh.
 alloc = ["proxima-core/alloc"]
 # Tier-2: std. Adds JsonCodec (serde + simd-json) and the codec
 # registry/factory (proxima-core's FactoryRegistry, serde_json, base64).
