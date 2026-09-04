@@ -24,6 +24,24 @@
 # per-threadgroup ceiling every Apple GPU family this crate targets enforces.
 simdgroups = 1
 
+# `metal-q4k-split-k`-only ceiling on the row-blocked packed matmul's OUTPUT
+# row count (`output_total` in `msl.rs`'s `packed_row_dispatch`) above which
+# split-K never engages, regardless of what `[packed_row_split_k]`'s
+# `target_simdgroups`/`max_split` would otherwise compute -- see
+# `msl.rs`'s `packed_row_split_factor` and sized::PACKED_ROW_SPLIT_K_MAX_ROWS.
+# `target_simdgroups`(2048) alone already lets a shape's own base-simdgroup
+# count push its factor to 1 once `base_simdgroups >= target_simdgroups`, but
+# integer division means that fall-off is gradual (a 4096-row op still gets
+# factor=2 through this landing's own measured decode-graph table, even
+# though its GB/s was already close to the `ffn_*` rate at 1024 base
+# simdgroups) -- this key is the hard, row-count-scoped cutoff a caller can
+# tune independently of the simdgroup-target arithmetic, per the sweep in
+# `docs/discipline.md`'s row for this landing. 0 disables the ceiling
+# (split-K then engages purely off `target_simdgroups`/`max_split`, i.e. this
+# landing's pre-existing behaviour). Overridable per-build via
+# `OMEGA_PACKED_ROW_BLOCK_SPLIT_K_MAX_ROWS`.
+split_k_max_rows = 4096
+
 [tiled_gemm]
 # below this many activation rows (tokens) in one dispatch, the row-blocked
 # packed-matmul kernel (`push_packed_row_blocked_body`) runs instead of the

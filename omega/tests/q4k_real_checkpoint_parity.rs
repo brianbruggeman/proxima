@@ -191,8 +191,26 @@ fn matmul_program(rows: u32, k: u32, weight_dtype: DType) -> (Vec<Op>, NodeId) {
 /// slice is exactly a row-count prefix).
 const ROWS_TO_CHECK: usize = 64;
 
-#[test]
-fn metal_matmul_on_real_attn_q_q4k_bytes_matches_the_dequantized_f32_cpu_path() {
+/// `attn_k`/`attn_v`'s real output row count in this checkpoint
+/// (`blk.0.attn_k.weight` is 4096 x 1024, `q8_0_real_checkpoint_parity.rs`'s
+/// own doc) -- the split-K-eligible "starved" shape
+/// [`crate::sized::PACKED_ROW_SPLIT_K_MAX_ROWS`]'s default (4096) and
+/// `[packed_row_split_k].target_simdgroups` both engage split-K for. Run
+/// here against `attn_q`'s own `Q4_K` bytes (real checkpoint data, sliced to
+/// this row count) rather than `attn_k`'s bytes, since `attn_k` is `Q8_0` in
+/// this checkpoint and the packed row-blocked kernel this landing gates is
+/// `Q4_K`/`Q5_K`/`Q6_K`-only -- the row COUNT is what the split-K gate keys
+/// off, not which tensor it came from, and slicing a real quantized weight
+/// to a row count is exactly [`ROWS_TO_CHECK`]'s own established pattern.
+const SPLIT_K_STARVED_ROWS: usize = 1024;
+
+/// `attn_q`/`attn_output`'s full real output row count in this checkpoint --
+/// the boundary shape [`crate::sized::PACKED_ROW_SPLIT_K_MAX_ROWS`]'s
+/// default (4096) still includes (`rows <= max_rows`), so split-K engages
+/// here too, not just at [`SPLIT_K_STARVED_ROWS`].
+const SPLIT_K_BOUNDARY_ROWS: usize = 4096;
+
+fn run_real_attn_q_parity(rows_to_check: usize) {
     let path_string = real_gguf_path();
     let path = std::path::Path::new(&path_string);
     let Some((parsed, file_len, mut file)) = real_gguf_header(path) else {
@@ -222,7 +240,7 @@ fn metal_matmul_on_real_attn_q_q4k_bytes_matches_the_dequantized_f32_cpu_path() 
         "blk.0.attn_q.weight byte length matches its declared shape"
     );
 
-    let rows = ROWS_TO_CHECK.min(out_dim);
+    let rows = rows_to_check.min(out_dim);
     let sliced_weight = &weight_bytes[..rows * row_bytes];
 
     let mut lcg = Lcg(2026);
@@ -276,4 +294,40 @@ fn metal_matmul_on_real_attn_q_q4k_bytes_matches_the_dequantized_f32_cpu_path() 
         "packed unpack disagrees with the dequantized reference on REAL checkpoint bytes: \
          relative={relative} max_diff={max_diff}"
     );
+}
+
+#[test]
+fn metal_matmul_on_real_attn_q_q4k_bytes_matches_the_dequantized_f32_cpu_path() {
+    run_real_attn_q_parity(ROWS_TO_CHECK);
+}
+
+/// Device parity at the `attn_k`/`attn_v` row count (1024) -- the shape
+/// [`crate::sized::PACKED_ROW_SPLIT_K_MAX_ROWS`]'s default row ceiling and
+/// `[packed_row_split_k].target_simdgroups` both put well inside split-K's
+/// engaged range (`msl.rs`'s `split_k_engages_for_a_1024_row_op_and_
+/// declines_for_a_14336_row_op` unit test proves the factor itself; this
+/// test proves the SPLIT kernel body still agrees with the dequantized f32
+/// CPU oracle on real bytes, not just that a factor was chosen). Only
+/// compiled when `metal-q4k-split-k` is active -- with the feature off,
+/// `packed_row_split_factor` is always `1` and this row count adds no
+/// coverage `ROWS_TO_CHECK`(64) does not already have.
+#[cfg(feature = "metal-q4k-split-k")]
+#[test]
+fn metal_matmul_on_real_attn_q_q4k_bytes_at_the_split_k_starved_row_count_matches_the_dequantized_f32_cpu_path()
+ {
+    run_real_attn_q_parity(SPLIT_K_STARVED_ROWS);
+}
+
+/// Device parity at the `attn_q`/`attn_output` full row count (4096) -- the
+/// boundary [`crate::sized::PACKED_ROW_SPLIT_K_MAX_ROWS`]'s default (4096)
+/// still includes (`rows <= max_rows`), so this exercises split-K's kernel
+/// body at the top edge of its default-configured eligible range, not just
+/// deep inside it like [`SPLIT_K_STARVED_ROWS`]. Only compiled when
+/// `metal-q4k-split-k` is active, same rationale as the starved-row twin
+/// above.
+#[cfg(feature = "metal-q4k-split-k")]
+#[test]
+fn metal_matmul_on_real_attn_q_q4k_bytes_at_the_split_k_boundary_row_count_matches_the_dequantized_f32_cpu_path()
+ {
+    run_real_attn_q_parity(SPLIT_K_BOUNDARY_ROWS);
 }
