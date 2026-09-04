@@ -266,6 +266,32 @@ fn emit_sizing_consts() {
         ));
     }
 
+    // `KV_BUCKET_TOKENS` is `kv-capacity-bucket`-only in `src/sized.rs`
+    // (the constant has no meaning without that feature's plan-cache-key
+    // rounding), so this only emits the line when Cargo reports the
+    // feature active for THIS build, same shape as the aarch64 and
+    // `cohort-staged-graph` branches above. The sanity ceiling below is
+    // the 34 GB trap's build-time close: this constant sizes a plan-cache
+    // KEY bucket, never a device allocation, so a value large enough to
+    // suggest it was conflated with `ServingConfig::context_length`
+    // (whose own default is 131_072) is a build failure, not a runtime
+    // one.
+    if env::var_os("CARGO_FEATURE_KV_CAPACITY_BUCKET").is_some() {
+        let bucket_tokens = require_nonzero(
+            "kv.bucket_tokens",
+            resolve_int(&root, "kv", "bucket_tokens"),
+        );
+        assert!(
+            bucket_tokens <= 65_536,
+            "kv.bucket_tokens={bucket_tokens} exceeds the 65,536-token sanity ceiling -- \
+             this constant sizes a plan-cache KEY bucket, never a device allocation; a \
+             value this large suggests it was conflated with ServingConfig::context_length"
+        );
+        out.push_str(&format!(
+            "pub const KV_BUCKET_TOKENS: usize = {bucket_tokens};\n"
+        ));
+    }
+
     let out_dir = PathBuf::from(env::var("OUT_DIR").expect("OUT_DIR set by cargo"));
     let out_path = out_dir.join("proxima_tensor_sized.rs");
     fs::write(&out_path, out).unwrap_or_else(|err| panic!("write {}: {err}", out_path.display()));

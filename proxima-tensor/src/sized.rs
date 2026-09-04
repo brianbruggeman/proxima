@@ -316,6 +316,15 @@ pub const NEON_COLUMN_PANEL_BUDGET_BYTES: usize = generated::NEON_COLUMN_PANEL_B
 #[cfg(all(feature = "std", feature = "cohort-staged-graph"))]
 pub const STAGED_BATCH_MIN_LEN: usize = generated::STAGED_BATCH_MIN_LEN;
 
+/// Plan-cache key bucket for `proxima-model-interop`'s placed-KV Metal
+/// decode path -- see `proxima-tensor-runtime.toml`'s `[kv]` section and
+/// `Cargo.toml`'s `kv-capacity-bucket` feature doc for the mechanism and
+/// the padding-vs-orchestration trade it tunes (CARD 6.3). Execution
+/// policy (see this module's doc), `kv-capacity-bucket`-only -- the
+/// constant has no meaning without that feature's plan-cache-key rounding.
+#[cfg(all(feature = "std", feature = "kv-capacity-bucket"))]
+pub const KV_BUCKET_TOKENS: usize = generated::KV_BUCKET_TOKENS;
+
 /// Fallback RoPE frequency base ("theta") a checkpoint's cached forward
 /// program uses when the checkpoint's own `{architecture}.rope.freq_base`
 /// GGUF metadata key is absent -- `proxima-model-interop`'s
@@ -373,5 +382,11 @@ mod tests {
     #[test]
     fn staged_batch_min_len_matches_the_measurement_record() {
         assert_eq!(STAGED_BATCH_MIN_LEN, 2);
+    }
+
+    #[cfg(feature = "kv-capacity-bucket")]
+    #[test]
+    fn kv_bucket_tokens_matches_the_runtime_toml() {
+        assert_eq!(KV_BUCKET_TOKENS, 256);
     }
 }
