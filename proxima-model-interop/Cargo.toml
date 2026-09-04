@@ -97,6 +97,18 @@ metal-q4k-mask-fma = ["omega?/metal-q4k-mask-fma"]
 metal-q4k-split-k = ["omega?/metal-q4k-split-k"]
 # passthrough to `omega/metal-q4k-single-fetch` so the decode harness can measure that arm.
 metal-q4k-single-fetch = ["omega?/metal-q4k-single-fetch"]
+# Buckets `generate.rs`'s placed-KV decode loop's growing KV extent
+# (`merged_len`) up to `proxima_tensor::sized::KV_BUCKET_TOKENS` before
+# binding it as the Metal plan's `Extent::Symbolic(1)`/plan-cache key, so
+# the plan (and the `omega::metal` Metal pipeline it selects) is reused
+# across a whole bucket of decode steps instead of re-planning every
+# token. `metal-output-placement` must also be on -- this feature has no
+# effect without the placed-KV decode path it modifies. See CARD 6.1-6.3
+# and `proxima-tensor/Cargo.toml`'s own `kv-capacity-bucket` doc.
+kv-capacity-bucket = [
+    "proxima-tensor/kv-capacity-bucket",
+    "omega?/kv-capacity-bucket",
+]
 
 [dependencies]
 arrayvec.workspace = true
