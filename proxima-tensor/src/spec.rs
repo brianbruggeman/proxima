@@ -845,6 +845,46 @@ fn causal_mask(program: &mut Vec<Op>) -> Result<(NodeId, NodeId), TensorError> {
     Ok((is_future, neg_infinity))
 }
 
+/// [`causal_mask`]'s single-range-attention counterpart:
+/// [`append_mistral_single_range_cached_layer`]'s key axis (`t`) is no
+/// longer this call's own new positions (symbol 0) but the *whole* merged
+/// context (symbol 1) -- everything a growing KV cache holds once this
+/// call's own freshly rotated keys are folded into it. A query at local
+/// position `s` sits at absolute position `cached_len + s`, so causality is
+/// `key_index > cached_len + s` rather than the block-local `key_index >
+/// query_index` [`causal_mask`] builds. `cached_len` is a rank-0
+/// [`Op::Input`], the same precedent `eps`/`rope_cos`/`rope_sin` set: a
+/// value the host supplies per call, not a build-time constant, because it
+/// grows every decode step without the graph being rebuilt.
+fn causal_mask_merged(program: &mut Vec<Op>, cached_len: NodeId) -> Result<NodeId, TensorError> {
+    let query_index = op::append(
+        program,
+        Op::Iota {
+            dtype: DType::Float32,
+            extent: Extent::Symbolic(0),
+        },
+    );
+    let key_index = op::append(
+        program,
+        Op::Iota {
+            dtype: DType::Float32,
+            extent: Extent::Symbolic(1),
+        },
+    );
+    let query_absolute = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Add,
+        &[(query_index, "s->s"), (cached_len, "->s")],
+    )?;
+    elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Greater,
+        &[(key_index, "t->st"), (query_absolute, "s->st")],
+    )
+}
+
 /// One transformer layer, node-for-node the same graph
 /// `specs/mistral_layer.toml` spells — attention (RoPE + GQA + causal mask)
 /// then the SwiGLU feed-forward, each wrapped in its own residual. `x` in,
@@ -3440,6 +3480,673 @@ fn append_qwen35_dense_attention_layer(
     )?;
 
     Ok((x_next, (rotated_k_new_first, rotated_k_new_second, k_pass, v_new)))
+}
+
+/// [`append_mistral_cached_layer`]'s single-range counterpart: the SAME
+/// function -- same RoPE, same GQA grouping, same `CachedLayerRoots`
+/// return -- but scored through ONE softmax over ONE key axis instead of
+/// two disjoint ranges combined by hand. `k_even_cache`/`k_odd_cache`/
+/// `v_cache` are no longer "everything before this call"; they are the
+/// WHOLE merged context this call attends to, prior positions AND this
+/// call's own freshly rotated keys already folded in by the caller between
+/// calls (`kv_cache.{layer}.*`'s own shape grows from `cached_len` to
+/// `cached_len + new_count`, same [`Extent::Symbolic`] slot, no new op).
+/// `rotated_k_new_even`/`rotated_k_new_odd`/`v_new` are STILL computed
+/// in-graph from `x`, unchanged from [`append_mistral_cached_layer`] --
+/// this call's own [`CachedLayerRoots`] the caller folds into next call's
+/// merged cache -- they are simply no longer read for THIS call's own
+/// score, since this call's own keys are not yet part of the merged range
+/// it attends over (a query never attends a key that does not exist until
+/// after it is computed).
+///
+/// Score/softmax/attended here are node-for-node
+/// [`append_mistral_layer`]'s own single-range pattern (`score`,
+/// `score_max`, `shifted`, `weights`, `weight_sum`, `inv_weight_sum`,
+/// `probabilities`, `attended_product`, `attended`) rather than
+/// [`append_mistral_cached_layer`]'s two-block online-softmax combine --
+/// the entire point of this function existing next to that one.
+/// `is_future` here must come from [`causal_mask_merged`], not
+/// [`causal_mask`]: shape `[s, t]` with `t` sized by [`Extent::Symbolic`]
+/// slot 1 (the merged range), not slot 0.
+#[allow(clippy::too_many_arguments)]
+fn append_mistral_single_range_cached_layer(
+    program: &mut Vec<Op>,
+    x: NodeId,
+    inv_dim: NodeId,
+    eps: NodeId,
+    ones: NodeId,
+    inv_sqrt_head_dim: NodeId,
+    cos_new: NodeId,
+    sin_new: NodeId,
+    group_ones: NodeId,
+    is_future: NodeId,
+    group: u32,
+    attn_norm_weight: NodeId,
+    ffn_norm_weight: NodeId,
+    wq: NodeId,
+    wk: NodeId,
+    wv: NodeId,
+    wo: NodeId,
+    w_gate: NodeId,
+    w_up: NodeId,
+    w_down: NodeId,
+    k_even_cache: NodeId,
+    k_odd_cache: NodeId,
+    v_cache: NodeId,
+) -> Result<(NodeId, CachedLayerRoots), TensorError> {
+    let normed = rmsnorm(program, x, attn_norm_weight, inv_dim, eps)?;
+
+    let q_product = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Multiply,
+        &[(normed, "si->shdi"), (wq, "ihd->shdi")],
+    )?;
+    let q = reduce(
+        program,
+        DType::Float32,
+        ScalarOp::Add,
+        ReduceInit::Zero,
+        q_product,
+        "shdi->shdi",
+        "shd->shdi",
+    )?;
+
+    let k_new_product = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Multiply,
+        &[(normed, "si->sudi"), (wk, "iud->sudi")],
+    )?;
+    let k_new = reduce(
+        program,
+        DType::Float32,
+        ScalarOp::Add,
+        ReduceInit::Zero,
+        k_new_product,
+        "sudi->sudi",
+        "sud->sudi",
+    )?;
+
+    let v_product = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Multiply,
+        &[(normed, "si->sudi"), (wv, "iud->sudi")],
+    )?;
+    let v_new = reduce(
+        program,
+        DType::Float32,
+        ScalarOp::Add,
+        ReduceInit::Zero,
+        v_product,
+        "sudi->sudi",
+        "sud->sudi",
+    )?;
+
+    let q_even_cos = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Multiply,
+        &[(q, "s,h,2*i->shi"), (cos_new, "si->shi")],
+    )?;
+    let q_odd_sin = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Multiply,
+        &[(q, "s,h,2*i+1->shi"), (sin_new, "si->shi")],
+    )?;
+    let rotated_q_even = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Subtract,
+        &[(q_even_cos, "shi->shi"), (q_odd_sin, "shi->shi")],
+    )?;
+    let q_even_sin = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Multiply,
+        &[(q, "s,h,2*i->shi"), (sin_new, "si->shi")],
+    )?;
+    let q_odd_cos = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Multiply,
+        &[(q, "s,h,2*i+1->shi"), (cos_new, "si->shi")],
+    )?;
+    let rotated_q_odd = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Add,
+        &[(q_even_sin, "shi->shi"), (q_odd_cos, "shi->shi")],
+    )?;
+
+    let k_new_even_cos = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Multiply,
+        &[(k_new, "s,u,2*i->sui"), (cos_new, "si->sui")],
+    )?;
+    let k_new_odd_sin = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Multiply,
+        &[(k_new, "s,u,2*i+1->sui"), (sin_new, "si->sui")],
+    )?;
+    let rotated_k_new_even = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Subtract,
+        &[(k_new_even_cos, "sui->sui"), (k_new_odd_sin, "sui->sui")],
+    )?;
+    let k_new_even_sin = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Multiply,
+        &[(k_new, "s,u,2*i->sui"), (sin_new, "si->sui")],
+    )?;
+    let k_new_odd_cos = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Multiply,
+        &[(k_new, "s,u,2*i+1->sui"), (cos_new, "si->sui")],
+    )?;
+    let rotated_k_new_odd = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Add,
+        &[(k_new_even_sin, "sui->sui"), (k_new_odd_cos, "sui->sui")],
+    )?;
+
+    let group_map = alloc::format!("s,{group}*u+g,i->sugi");
+    let q_even_grouped = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Multiply,
+        &[
+            (rotated_q_even, group_map.as_str()),
+            (group_ones, "ug->sugi"),
+        ],
+    )?;
+    let q_odd_grouped = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Multiply,
+        &[
+            (rotated_q_odd, group_map.as_str()),
+            (group_ones, "ug->sugi"),
+        ],
+    )?;
+
+    // single range: query `s` against the WHOLE merged key range `t`
+    // (symbol 1's extent), `k_even_cache`/`k_odd_cache` already carrying
+    // every position this query may attend -- no second source, no combine.
+    let score_even_product = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Multiply,
+        &[
+            (q_even_grouped, "sugi->stugi"),
+            (k_even_cache, "tui->stugi"),
+        ],
+    )?;
+    let score_even = reduce(
+        program,
+        DType::Float32,
+        ScalarOp::Add,
+        ReduceInit::Zero,
+        score_even_product,
+        "stugi->stugi",
+        "stug->stugi",
+    )?;
+    let score_odd_product = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Multiply,
+        &[(q_odd_grouped, "sugi->stugi"), (k_odd_cache, "tui->stugi")],
+    )?;
+    let score_odd = reduce(
+        program,
+        DType::Float32,
+        ScalarOp::Add,
+        ReduceInit::Zero,
+        score_odd_product,
+        "stugi->stugi",
+        "stug->stugi",
+    )?;
+    let scores = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Add,
+        &[(score_even, "stug->stug"), (score_odd, "stug->stug")],
+    )?;
+    let scores_scaled = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Multiply,
+        &[(scores, "stug->stug"), (inv_sqrt_head_dim, "->stug")],
+    )?;
+    let neg_infinity = scalar_constant(program, f32::NEG_INFINITY);
+    let scores_masked = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Select,
+        &[
+            (is_future, "st->stug"),
+            (neg_infinity, "->stug"),
+            (scores_scaled, "stug->stug"),
+        ],
+    )?;
+
+    let score_max = reduce(
+        program,
+        DType::Float32,
+        ScalarOp::Maximum,
+        ReduceInit::NegativeInfinity,
+        scores_masked,
+        "stug->stug",
+        "sug->stug",
+    )?;
+    let shifted = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Subtract,
+        &[(scores_masked, "stug->stug"), (score_max, "sug->stug")],
+    )?;
+    let weights = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Exponential,
+        &[(shifted, "stug->stug")],
+    )?;
+    let weight_sum = reduce(
+        program,
+        DType::Float32,
+        ScalarOp::Add,
+        ReduceInit::Zero,
+        weights,
+        "stug->stug",
+        "sug->stug",
+    )?;
+    let inv_weight_sum = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Reciprocal,
+        &[(weight_sum, "sug->sug")],
+    )?;
+    let probabilities = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Multiply,
+        &[(weights, "stug->stug"), (inv_weight_sum, "sug->stug")],
+    )?;
+
+    let attended_product = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Multiply,
+        &[(probabilities, "stug->stugd"), (v_cache, "tud->stugd")],
+    )?;
+    let attended = reduce(
+        program,
+        DType::Float32,
+        ScalarOp::Add,
+        ReduceInit::Zero,
+        attended_product,
+        "stugd->stugd",
+        "sugd->stugd",
+    )?;
+
+    let wo_product = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Multiply,
+        &[(attended, "sugd->sugdo"), (wo, "ugdo->sugdo")],
+    )?;
+    let attn_out = reduce(
+        program,
+        DType::Float32,
+        ScalarOp::Add,
+        ReduceInit::Zero,
+        wo_product,
+        "sugdo->sugdo",
+        "so->sugdo",
+    )?;
+
+    let residual1 = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Add,
+        &[(attn_out, "sd->sd"), (x, "sd->sd")],
+    )?;
+
+    let normed2 = rmsnorm(program, residual1, ffn_norm_weight, inv_dim, eps)?;
+
+    let gate_product = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Multiply,
+        &[(normed2, "sd->sdg"), (w_gate, "dg->sdg")],
+    )?;
+    let gate = reduce(
+        program,
+        DType::Float32,
+        ScalarOp::Add,
+        ReduceInit::Zero,
+        gate_product,
+        "sdg->sdg",
+        "sg->sdg",
+    )?;
+    let up_product = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Multiply,
+        &[(normed2, "sd->sdg"), (w_up, "dg->sdg")],
+    )?;
+    let up = reduce(
+        program,
+        DType::Float32,
+        ScalarOp::Add,
+        ReduceInit::Zero,
+        up_product,
+        "sdg->sdg",
+        "sg->sdg",
+    )?;
+
+    let neg_gate = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Negate,
+        &[(gate, "sg->sg")],
+    )?;
+    let exp_neg_gate = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Exponential,
+        &[(neg_gate, "sg->sg")],
+    )?;
+    let one_plus_exp = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Add,
+        &[(exp_neg_gate, "sg->sg"), (ones, "->sg")],
+    )?;
+    let sigmoid_gate = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Reciprocal,
+        &[(one_plus_exp, "sg->sg")],
+    )?;
+    let silu_gate = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Multiply,
+        &[(gate, "sg->sg"), (sigmoid_gate, "sg->sg")],
+    )?;
+    let ffn_hidden = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Multiply,
+        &[(silu_gate, "sg->sg"), (up, "sg->sg")],
+    )?;
+
+    let down_product = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Multiply,
+        &[(ffn_hidden, "sg->sgd"), (w_down, "gd->sgd")],
+    )?;
+    let ffn_out = reduce(
+        program,
+        DType::Float32,
+        ScalarOp::Add,
+        ReduceInit::Zero,
+        down_product,
+        "sgd->sgd",
+        "sd->sgd",
+    )?;
+
+    let x_next = elementwise(
+        program,
+        DType::Float32,
+        ScalarOp::Add,
+        &[(ffn_out, "sd->sd"), (residual1, "sd->sd")],
+    )?;
+
+    Ok((x_next, (rotated_k_new_even, rotated_k_new_odd, v_new)))
+}
+
+
+/// [`mistral_single_range_cached_forward_program`] is
+/// [`mistral_cached_forward_program`]'s single-range counterpart: same
+/// per-layer weight inputs, same [`CachedLayerRoots`] contract, one
+/// difference -- [`causal_mask_merged`] in place of [`causal_mask`]
+/// (needs a `cached_len` scalar the plain cache mask does not), and
+/// [`append_mistral_single_range_cached_layer`] in place of
+/// [`append_mistral_cached_layer`] for every layer. Dense-only (no MoE
+/// branch): the mixture-of-experts FFN this function's counterpart also
+/// supports is orthogonal to the attention-merge this function exists to
+/// prove, and duplicating that branch here would test nothing new.
+pub fn mistral_single_range_cached_forward_program(
+    vocab: u32,
+    embedding: u32,
+    feed_forward: u32,
+    query_heads: u32,
+    kv_heads: u32,
+    head_dim: u32,
+    block_count: u32,
+) -> Result<(Vec<Op>, NodeId, Vec<CachedLayerRoots>), TensorError> {
+    let group = query_heads / kv_heads;
+    let pairs = head_dim / 2;
+
+    let mut program = Vec::new();
+
+    let ids = input_leaf(
+        &mut program,
+        DType::Int32,
+        alloc::vec![Extent::Symbolic(0)],
+        "ids",
+    );
+    let table = input_leaf(
+        &mut program,
+        DType::Float32,
+        alloc::vec![Extent::Static(vocab), Extent::Static(embedding)],
+        "token_embd.weight",
+    );
+    let mut x = embedding_lookup(&mut program, table, ids);
+
+    let inv_dim = scalar_constant(&mut program, 1.0 / embedding as f32);
+    let eps = symbolic_leaf(&mut program, DType::Float32, "eps");
+    let ones = scalar_constant(&mut program, 1.0);
+    let inv_sqrt_head_dim = scalar_constant(&mut program, 1.0 / (head_dim as f32).sqrt());
+    let cos_new = input_leaf(
+        &mut program,
+        DType::Float32,
+        alloc::vec![Extent::Symbolic(0), Extent::Static(pairs)],
+        "rope_cos",
+    );
+    let sin_new = input_leaf(
+        &mut program,
+        DType::Float32,
+        alloc::vec![Extent::Symbolic(0), Extent::Static(pairs)],
+        "rope_sin",
+    );
+    let group_ones = op::append(
+        &mut program,
+        Op::Constant {
+            dtype: DType::Float32,
+            shape: alloc::vec![Extent::Static(kv_heads), Extent::Static(group)],
+            value: 1.0,
+        },
+    );
+    let cached_len = input_leaf(&mut program, DType::Float32, Vec::new(), "cached_len");
+    let is_future = causal_mask_merged(&mut program, cached_len)?;
+
+    let mut cache_roots: Vec<CachedLayerRoots> = Vec::with_capacity(block_count as usize);
+
+    for layer in 0..block_count {
+        let attn_norm_weight = input_leaf(
+            &mut program,
+            DType::Float32,
+            alloc::vec![Extent::Static(embedding)],
+            &alloc::format!("blk.{layer}.attn_norm.weight"),
+        );
+        let ffn_norm_weight = input_leaf(
+            &mut program,
+            DType::Float32,
+            alloc::vec![Extent::Static(embedding)],
+            &alloc::format!("blk.{layer}.ffn_norm.weight"),
+        );
+        let wq = input_leaf(
+            &mut program,
+            DType::Float32,
+            alloc::vec![
+                Extent::Static(embedding),
+                Extent::Static(query_heads),
+                Extent::Static(head_dim)
+            ],
+            &alloc::format!("blk.{layer}.attn_q.weight"),
+        );
+        let wk = input_leaf(
+            &mut program,
+            DType::Float32,
+            alloc::vec![
+                Extent::Static(embedding),
+                Extent::Static(kv_heads),
+                Extent::Static(head_dim)
+            ],
+            &alloc::format!("blk.{layer}.attn_k.weight"),
+        );
+        let wv = input_leaf(
+            &mut program,
+            DType::Float32,
+            alloc::vec![
+                Extent::Static(embedding),
+                Extent::Static(kv_heads),
+                Extent::Static(head_dim)
+            ],
+            &alloc::format!("blk.{layer}.attn_v.weight"),
+        );
+        let wo = input_leaf(
+            &mut program,
+            DType::Float32,
+            alloc::vec![
+                Extent::Static(kv_heads),
+                Extent::Static(group),
+                Extent::Static(head_dim),
+                Extent::Static(embedding),
+            ],
+            &alloc::format!("blk.{layer}.attn_output.weight"),
+        );
+        let k_even_cache = input_leaf(
+            &mut program,
+            DType::Float32,
+            alloc::vec![
+                Extent::Symbolic(1),
+                Extent::Static(kv_heads),
+                Extent::Static(pairs)
+            ],
+            &alloc::format!("kv_cache.{layer}.k_even"),
+        );
+        let k_odd_cache = input_leaf(
+            &mut program,
+            DType::Float32,
+            alloc::vec![
+                Extent::Symbolic(1),
+                Extent::Static(kv_heads),
+                Extent::Static(pairs)
+            ],
+            &alloc::format!("kv_cache.{layer}.k_odd"),
+        );
+        let v_cache = input_leaf(
+            &mut program,
+            DType::Float32,
+            alloc::vec![
+                Extent::Symbolic(1),
+                Extent::Static(kv_heads),
+                Extent::Static(head_dim)
+            ],
+            &alloc::format!("kv_cache.{layer}.v"),
+        );
+        let w_gate = input_leaf(
+            &mut program,
+            DType::Float32,
+            alloc::vec![Extent::Static(embedding), Extent::Static(feed_forward)],
+            &alloc::format!("blk.{layer}.ffn_gate.weight"),
+        );
+        let w_up = input_leaf(
+            &mut program,
+            DType::Float32,
+            alloc::vec![Extent::Static(embedding), Extent::Static(feed_forward)],
+            &alloc::format!("blk.{layer}.ffn_up.weight"),
+        );
+        let w_down = input_leaf(
+            &mut program,
+            DType::Float32,
+            alloc::vec![Extent::Static(feed_forward), Extent::Static(embedding)],
+            &alloc::format!("blk.{layer}.ffn_down.weight"),
+        );
+
+        let (x_next, layer_roots) = append_mistral_single_range_cached_layer(
+            &mut program,
+            x,
+            inv_dim,
+            eps,
+            ones,
+            inv_sqrt_head_dim,
+            cos_new,
+            sin_new,
+            group_ones,
+            is_future,
+            group,
+            attn_norm_weight,
+            ffn_norm_weight,
+            wq,
+            wk,
+            wv,
+            wo,
+            w_gate,
+            w_up,
+            w_down,
+            k_even_cache,
+            k_odd_cache,
+            v_cache,
+        )?;
+        x = x_next;
+        cache_roots.push(layer_roots);
+    }
+
+    let output_norm_weight = input_leaf(
+        &mut program,
+        DType::Float32,
+        alloc::vec![Extent::Static(embedding)],
+        "output_norm.weight",
+    );
+    let normed_final = rmsnorm(&mut program, x, output_norm_weight, inv_dim, eps)?;
+
+    let lm_head = input_leaf(
+        &mut program,
+        DType::Float32,
+        alloc::vec![Extent::Static(embedding), Extent::Static(vocab)],
+        "output.weight",
+    );
+    let logits_product = elementwise(
+        &mut program,
+        DType::Float32,
+        ScalarOp::Multiply,
+        &[(normed_final, "sd->sdv"), (lm_head, "dv->sdv")],
+    )?;
+    let logits = reduce(
+        &mut program,
+        DType::Float32,
+        ScalarOp::Add,
+        ReduceInit::Zero,
+        logits_product,
+        "sdv->sdv",
+        "sv->sdv",
+    )?;
+
+    Ok((program, logits, cache_roots))
 }
 
 /// [`append_mistral_cached_layer`]'s mixture-of-experts counterpart, the
@@ -10019,6 +10726,399 @@ value = 1.0
             PER_CHUNK_PER_LAYER < per_layer,
             "a chunk replicates only the cache-reading part of a layer, never the whole {per_layer}-node layer"
         );
+    }
+
+    /// [`the_chunked_cache_fold_node_budget_is_measured_before_it_is_built`]'s
+    /// single-range counterpart: [`append_mistral_single_range_cached_layer`]
+    /// deletes the eighteen cache-reading nodes that test documents
+    /// (`CACHE_READING_NODES=12` plus three combine nodes counted
+    /// separately there) and replaces them with nothing -- there is no
+    /// second block left to combine, so the eighteen-node-per-chunk cost
+    /// this budget exists to warn about does not apply to the single-range
+    /// path at all. Old->new, per layer: 83 raw `Op`s (baseline, matching
+    /// [`append_mistral_cached_layer`]'s own doc) -> whatever `per_layer`
+    /// prints below, deleting the 6-op cached score block
+    /// (`score_cached_even_product`..`score_cached_scaled`) and the
+    /// 17-op online-softmax combine (`score_max_cached`..`attended`),
+    /// adding back an 8-op single-pass softmax
+    /// (`score_max`,`shifted`,`weights`,`weight_sum`,`inv_weight_sum`,
+    /// `probabilities`,`attended_product`,`attended`) node-for-node
+    /// [`append_mistral_layer`]'s own pattern.
+    #[test]
+    fn the_single_range_cache_fold_node_budget_is_measured_against_the_two_range_baseline() {
+        let two_range_nodes_of = |block_count: u32| {
+            mistral_cached_forward_program(32_002, 4096, 14336, 32, 8, 128, block_count)
+                .expect("the two-range cached forward pass lowers to a program")
+                .0
+                .len()
+        };
+        let single_range_nodes_of = |block_count: u32| {
+            mistral_single_range_cached_forward_program(32_002, 4096, 14336, 32, 8, 128, block_count)
+                .expect("the single-range cached forward pass lowers to a program")
+                .0
+                .len()
+        };
+        let two_range_per_layer = two_range_nodes_of(2) - two_range_nodes_of(1);
+        let single_range_per_layer = single_range_nodes_of(2) - single_range_nodes_of(1);
+
+        let (two_range_program, two_range_logits, two_range_roots) =
+            mistral_cached_forward_program(32_002, 4096, 14336, 32, 8, 128, 32)
+                .expect("the two-range cached forward pass lowers to a program");
+        let mut two_range_outputs = alloc::vec![two_range_logits];
+        for (even, odd, value) in &two_range_roots {
+            two_range_outputs.extend_from_slice(&[*even, *odd, *value]);
+        }
+        let two_range_shapes = crate::shape::infer(&two_range_program, &[1, 71])
+            .expect("one new position against a 71-position cache infers");
+        let two_range_bound =
+            crate::bind::bind(&two_range_program, &two_range_shapes, &two_range_outputs)
+                .expect("the two-range cached program binds")
+                .len();
+
+        let (single_range_program, single_range_logits, single_range_roots) =
+            mistral_single_range_cached_forward_program(32_002, 4096, 14336, 32, 8, 128, 32)
+                .expect("the single-range cached forward pass lowers to a program");
+        let mut single_range_outputs = alloc::vec![single_range_logits];
+        for (even, odd, value) in &single_range_roots {
+            single_range_outputs.extend_from_slice(&[*even, *odd, *value]);
+        }
+        // symbol 1 here is the MERGED length -- 71 total context, matching
+        // the two-range baseline's 71-position existing cache plus its own
+        // one new position folded in, so both measurements are read at the
+        // same total context depth.
+        let single_range_shapes = crate::shape::infer(&single_range_program, &[1, 71])
+            .expect("one new position against a 71-position merged range infers");
+        let single_range_bound = crate::bind::bind(
+            &single_range_program,
+            &single_range_shapes,
+            &single_range_outputs,
+        )
+        .expect("the single-range cached program binds")
+        .len();
+
+        std::println!(
+            "single_range_vs_two_range raw_ops_per_layer: before={two_range_per_layer} after={single_range_per_layer} bound_ops_at_ctx71: before={two_range_bound} after={single_range_bound}"
+        );
+
+        assert!(
+            single_range_per_layer < two_range_per_layer,
+            "single-range must emit fewer raw ops per layer than the two-range baseline: before={two_range_per_layer} after={single_range_per_layer}"
+        );
+        assert!(
+            single_range_bound < two_range_bound,
+            "single-range must bind fewer ops at ctx71 than the two-range baseline: before={two_range_bound} after={single_range_bound}"
+        );
+    }
+
+    /// The falsifiable claim under test: for the SAME weights and the SAME
+    /// `cached_len`, [`append_mistral_single_range_cached_layer`] must
+    /// produce the SAME decode-step logits [`append_mistral_cached_layer`]'s
+    /// own two-range online-softmax combine produces -- PROVIDED its cache
+    /// input holds what write-placement (`proxima-wt-place`'s
+    /// `execute_plan_with_placements`) actually hands it at runtime: the
+    /// `cached_len` prior positions PLUS this call's OWN rotated K/V
+    /// appended at the tail, sized `cached_len + new_count`. This is not a
+    /// calling-convention change to the single-range graph -- it is the
+    /// single-range graph's documented contract
+    /// (`append_mistral_single_range_cached_layer`'s own doc: "the WHOLE
+    /// merged context this call attends to ... already folded in by the
+    /// caller between calls"). `cpu::evaluate` has no write-placement, so
+    /// this test builds that merged cache by hand: run the two-range oracle
+    /// first, read this call's own `CachedLayerRoots` back out of its
+    /// `Evaluated`, and concatenate them onto the prior cache before
+    /// evaluating the single-range arm -- exactly what write-placement
+    /// would have left resident. Error is normalized against the two-range
+    /// oracle's own BATCH PEAK magnitude (never per-row: a per-row relative
+    /// error explodes at zero crossings and produced a false 872% "bug"
+    /// report on this codebase before). `cached_len = 0` is covered first
+    /// because it is the case most likely to be silently wrong -- with no
+    /// prior cache the merged range is exactly this call's own new key(s),
+    /// so a query must attend only itself.
+    type PerLayerCacheColumns = (Vec<Vec<f32>>, Vec<Vec<f32>>, Vec<Vec<f32>>);
+
+    #[test]
+    fn a_single_range_decode_step_matches_the_two_range_decode_step() {
+        const VOCAB: usize = 5;
+        const EMBEDDING: usize = 4;
+        const FEED_FORWARD: usize = 4;
+        const QUERY_HEADS: usize = 2;
+        const KV_HEADS: usize = 1;
+        const HEAD_DIM: usize = 2;
+        const PAIRS: usize = HEAD_DIM / 2;
+        const GROUP: usize = QUERY_HEADS / KV_HEADS;
+        const BLOCK_COUNT: u32 = 2;
+
+        struct LayerWeights {
+            attn_norm: Vec<f32>,
+            ffn_norm: Vec<f32>,
+            wq: Vec<f32>,
+            wk: Vec<f32>,
+            wv: Vec<f32>,
+            wo: Vec<f32>,
+            w_gate: Vec<f32>,
+            w_up: Vec<f32>,
+            w_down: Vec<f32>,
+        }
+
+        fn max_error_at(cached_len: usize, new_count: usize) -> (f32, f32) {
+            let sequence = cached_len + new_count;
+            let ids: Vec<u32> = (0..sequence as u32).map(|id| 1 + id % 3).collect();
+            let ids_f32: Vec<f32> = ids.iter().map(|&id| id as f32).collect();
+
+            let table = random_vec(10, VOCAB * EMBEDDING);
+            let eps_cached = alloc::vec![1e-5f32; cached_len.max(1)];
+            let eps_new = alloc::vec![1e-5f32; new_count];
+            let (cos_cached, sin_cached) = rope_angles(0, cached_len.max(1), PAIRS, HEAD_DIM);
+            let (cos_new, sin_new) = rope_angles(cached_len, new_count, PAIRS, HEAD_DIM);
+
+            let mut layers = Vec::new();
+            let mut seed = 200u64;
+            for _ in 0..BLOCK_COUNT {
+                layers.push(LayerWeights {
+                    attn_norm: alloc::vec![1.0f32; EMBEDDING],
+                    ffn_norm: alloc::vec![1.0f32; EMBEDDING],
+                    wq: random_vec(seed, EMBEDDING * QUERY_HEADS * HEAD_DIM),
+                    wk: random_vec(seed + 1, EMBEDDING * KV_HEADS * HEAD_DIM),
+                    wv: random_vec(seed + 2, EMBEDDING * KV_HEADS * HEAD_DIM),
+                    wo: random_vec(seed + 3, KV_HEADS * GROUP * HEAD_DIM * EMBEDDING),
+                    w_gate: random_vec(seed + 4, EMBEDDING * FEED_FORWARD),
+                    w_up: random_vec(seed + 5, EMBEDDING * FEED_FORWARD),
+                    w_down: random_vec(seed + 6, FEED_FORWARD * EMBEDDING),
+                });
+                seed += 7;
+            }
+            let output_norm = alloc::vec![1.0f32; EMBEDDING];
+            let lm_head = random_vec(seed, EMBEDDING * VOCAB);
+
+            let layer_names: Vec<[alloc::string::String; 9]> = (0..BLOCK_COUNT as usize)
+                .map(|layer| {
+                    [
+                        alloc::format!("blk.{layer}.attn_norm.weight"),
+                        alloc::format!("blk.{layer}.ffn_norm.weight"),
+                        alloc::format!("blk.{layer}.attn_q.weight"),
+                        alloc::format!("blk.{layer}.attn_k.weight"),
+                        alloc::format!("blk.{layer}.attn_v.weight"),
+                        alloc::format!("blk.{layer}.attn_output.weight"),
+                        alloc::format!("blk.{layer}.ffn_gate.weight"),
+                        alloc::format!("blk.{layer}.ffn_up.weight"),
+                        alloc::format!("blk.{layer}.ffn_down.weight"),
+                    ]
+                })
+                .collect();
+            let kv_cache_names: Vec<[alloc::string::String; 3]> = (0..BLOCK_COUNT as usize)
+                .map(|layer| {
+                    [
+                        alloc::format!("kv_cache.{layer}.k_even"),
+                        alloc::format!("kv_cache.{layer}.k_odd"),
+                        alloc::format!("kv_cache.{layer}.v"),
+                    ]
+                })
+                .collect();
+
+            let mut common_named: Vec<(&str, &[f32])> =
+                alloc::vec![("token_embd.weight", table.as_slice())];
+            for (layer_index, weights) in layers.iter().enumerate() {
+                let names = &layer_names[layer_index];
+                common_named.push((names[0].as_str(), weights.attn_norm.as_slice()));
+                common_named.push((names[1].as_str(), weights.ffn_norm.as_slice()));
+                common_named.push((names[2].as_str(), weights.wq.as_slice()));
+                common_named.push((names[3].as_str(), weights.wk.as_slice()));
+                common_named.push((names[4].as_str(), weights.wv.as_slice()));
+                common_named.push((names[5].as_str(), weights.wo.as_slice()));
+                common_named.push((names[6].as_str(), weights.w_gate.as_slice()));
+                common_named.push((names[7].as_str(), weights.w_up.as_slice()));
+                common_named.push((names[8].as_str(), weights.w_down.as_slice()));
+            }
+            common_named.push(("output_norm.weight", output_norm.as_slice()));
+            common_named.push(("output.weight", lm_head.as_slice()));
+
+            // -- fold the cache up to `cached_len` via the two-range
+            // program's own prefill path, the same mechanism
+            // `a_cached_decode_step_matches_the_uncached_forward_pass_exactly`
+            // already trusts.
+            let (cached_program, _, cache_roots) = mistral_cached_forward_program(
+                VOCAB as u32,
+                EMBEDDING as u32,
+                FEED_FORWARD as u32,
+                QUERY_HEADS as u32,
+                KV_HEADS as u32,
+                HEAD_DIM as u32,
+                BLOCK_COUNT,
+            )
+            .expect("cached forward pass lowers");
+
+            let (k_even_cache, k_odd_cache, v_cache): PerLayerCacheColumns = if cached_len == 0 {
+                    (
+                        alloc::vec![Vec::new(); BLOCK_COUNT as usize],
+                        alloc::vec![Vec::new(); BLOCK_COUNT as usize],
+                        alloc::vec![Vec::new(); BLOCK_COUNT as usize],
+                    )
+                } else {
+                    let mut prefill_named = common_named.clone();
+                    prefill_named.push(("ids", &ids_f32[..cached_len]));
+                    prefill_named.push(("eps", eps_cached.as_slice()));
+                    prefill_named.push(("rope_cos", cos_cached.as_slice()));
+                    prefill_named.push(("rope_sin", sin_cached.as_slice()));
+                    let empty = Vec::<f32>::new();
+                    for names in &kv_cache_names {
+                        prefill_named.push((names[0].as_str(), empty.as_slice()));
+                        prefill_named.push((names[1].as_str(), empty.as_slice()));
+                        prefill_named.push((names[2].as_str(), empty.as_slice()));
+                    }
+                    let mut prefill_roots = Vec::new();
+                    for (even, odd, value) in &cache_roots {
+                        prefill_roots.push(*even);
+                        prefill_roots.push(*odd);
+                        prefill_roots.push(*value);
+                    }
+                    let prefill_symbols = [cached_len as u64, 0u64];
+                    let prefill_evaluated = crate::cpu::evaluate_named(
+                        &cached_program,
+                        &prefill_symbols,
+                        &prefill_named,
+                        &prefill_roots,
+                    )
+                    .expect("prefill call evaluates");
+                    let mut even_out = Vec::with_capacity(BLOCK_COUNT as usize);
+                    let mut odd_out = Vec::with_capacity(BLOCK_COUNT as usize);
+                    let mut value_out = Vec::with_capacity(BLOCK_COUNT as usize);
+                    for (even, odd, value) in &cache_roots {
+                        even_out.push(prefill_evaluated.get(*even).expect("k_even").0.to_vec());
+                        odd_out.push(prefill_evaluated.get(*odd).expect("k_odd").0.to_vec());
+                        value_out.push(prefill_evaluated.get(*value).expect("v").0.to_vec());
+                    }
+                    (even_out, odd_out, value_out)
+                };
+
+            // -- two-range decode step: the trusted incumbent.
+            let mut two_range_named = common_named.clone();
+            two_range_named.push(("ids", &ids_f32[cached_len..]));
+            two_range_named.push(("eps", eps_new.as_slice()));
+            two_range_named.push(("rope_cos", cos_new.as_slice()));
+            two_range_named.push(("rope_sin", sin_new.as_slice()));
+            for (layer_index, names) in kv_cache_names.iter().enumerate() {
+                two_range_named.push((names[0].as_str(), k_even_cache[layer_index].as_slice()));
+                two_range_named.push((names[1].as_str(), k_odd_cache[layer_index].as_slice()));
+                two_range_named.push((names[2].as_str(), v_cache[layer_index].as_slice()));
+            }
+            let two_range_root = NodeId(cached_program.len() as u32 - 1);
+            let two_range_symbols = [new_count as u64, cached_len as u64];
+            let mut two_range_roots: Vec<NodeId> = Vec::with_capacity(cache_roots.len() * 3 + 1);
+            for (even, odd, value) in &cache_roots {
+                two_range_roots.push(*even);
+                two_range_roots.push(*odd);
+                two_range_roots.push(*value);
+            }
+            two_range_roots.push(two_range_root);
+            let two_range_evaluated = crate::cpu::evaluate_named(
+                &cached_program,
+                &two_range_symbols,
+                &two_range_named,
+                &two_range_roots,
+            )
+            .expect("two-range decode call evaluates");
+            let (two_range_logits, two_range_shape) = two_range_evaluated
+                .get(two_range_root)
+                .expect("two-range logits present");
+            assert_eq!(two_range_shape, [new_count as u64, VOCAB as u64]);
+
+            // -- this decode call's own rotated K/V, per layer: exactly
+            // what write-placement would leave resident at the cache's
+            // tail for the NEXT call. Concatenated onto the prior cache
+            // below to build the single-range arm's merged input.
+            let mut merged_k_even_cache = k_even_cache.clone();
+            let mut merged_k_odd_cache = k_odd_cache.clone();
+            let mut merged_v_cache = v_cache.clone();
+            for (layer_index, (even, odd, value)) in cache_roots.iter().enumerate() {
+                let new_even = two_range_evaluated.get(*even).expect("k_new_even").0;
+                let new_odd = two_range_evaluated.get(*odd).expect("k_new_odd").0;
+                let new_value = two_range_evaluated.get(*value).expect("v_new").0;
+                merged_k_even_cache[layer_index].extend_from_slice(new_even);
+                merged_k_odd_cache[layer_index].extend_from_slice(new_odd);
+                merged_v_cache[layer_index].extend_from_slice(new_value);
+            }
+
+            // -- single-range decode step: the graph under test, fed the
+            // MERGED cache (prior positions plus this call's own, folded
+            // in by hand the way write-placement would fold them in at
+            // runtime).
+            let (single_range_program, single_range_root, _) =
+                mistral_single_range_cached_forward_program(
+                    VOCAB as u32,
+                    EMBEDDING as u32,
+                    FEED_FORWARD as u32,
+                    QUERY_HEADS as u32,
+                    KV_HEADS as u32,
+                    HEAD_DIM as u32,
+                    BLOCK_COUNT,
+                )
+                .expect("single-range cached forward pass lowers");
+            let cached_len_scalar = alloc::vec![cached_len as f32];
+            let mut single_range_named = common_named.clone();
+            single_range_named.push(("ids", &ids_f32[cached_len..]));
+            single_range_named.push(("eps", eps_new.as_slice()));
+            single_range_named.push(("rope_cos", cos_new.as_slice()));
+            single_range_named.push(("rope_sin", sin_new.as_slice()));
+            single_range_named.push(("cached_len", cached_len_scalar.as_slice()));
+            for (layer_index, names) in kv_cache_names.iter().enumerate() {
+                single_range_named.push((
+                    names[0].as_str(),
+                    merged_k_even_cache[layer_index].as_slice(),
+                ));
+                single_range_named.push((
+                    names[1].as_str(),
+                    merged_k_odd_cache[layer_index].as_slice(),
+                ));
+                single_range_named.push((names[2].as_str(), merged_v_cache[layer_index].as_slice()));
+            }
+            let single_range_symbols = [new_count as u64, sequence as u64];
+            let single_range_evaluated = crate::cpu::evaluate_named(
+                &single_range_program,
+                &single_range_symbols,
+                &single_range_named,
+                &[single_range_root],
+            )
+            .expect("single-range decode call evaluates");
+            let (single_range_logits, single_range_shape) = single_range_evaluated
+                .get(single_range_root)
+                .expect("single-range logits present");
+            assert_eq!(single_range_shape, [new_count as u64, VOCAB as u64]);
+
+            let batch_peak = two_range_logits
+                .iter()
+                .fold(0.0f32, |peak, value| peak.max(value.abs()));
+            let max_error = two_range_logits
+                .iter()
+                .zip(single_range_logits.iter())
+                .map(|(oracle, candidate)| (oracle - candidate).abs())
+                .fold(0.0f32, f32::max);
+            let normalized_error = if batch_peak > 0.0 {
+                max_error / batch_peak
+            } else {
+                max_error
+            };
+            std::println!(
+                "single_range_vs_two_range_decode cached_len={cached_len} new_count={new_count} batch_peak={batch_peak} max_error={max_error} normalized_error={normalized_error} two_range={two_range_logits:?} single_range={single_range_logits:?}"
+            );
+            (max_error, normalized_error)
+        }
+
+        let cases = [(0usize, 1usize), (1usize, 1usize), (6usize, 2usize)];
+        let results: Vec<((usize, usize), (f32, f32))> = cases
+            .iter()
+            .map(|&(cached_len, new_count)| ((cached_len, new_count), max_error_at(cached_len, new_count)))
+            .collect();
+        for (cached_len, new_count) in cases {
+            let (max_error, normalized_error) = results
+                .iter()
+                .find(|(case, _)| *case == (cached_len, new_count))
+                .expect("case present")
+                .1;
+            assert!(
+                normalized_error < 1e-4,
+                "single-range decode diverged from the two-range decode at cached_len={cached_len} new_count={new_count}: max_error={max_error} normalized_error={normalized_error}"
+            );
+        }
     }
 
     /// Classifies every [`crate::bind::BoundOp`] a real decode step binds as
