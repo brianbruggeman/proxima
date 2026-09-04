@@ -474,7 +474,15 @@ pub fn execute_plan(plan: &Plan, blocks: &[QuantizedBlock<'_>]) -> Result<Evalua
         #[cfg(feature = "instrument")]
         {
             counter!(BLOCK_UPLOAD_CALLS, 1);
-            counter!(BLOCK_UPLOAD_BYTES, block_byte_len(block) as u64);
+            // fires unconditionally, before the upload-path match below --
+            // this is what a block was OFFERED for upload, regardless of
+            // which terminal path (no-copy bind, checkpoint-offset bind, or
+            // a real copy) actually served it. See `BLOCK_COPIED_BYTES` /
+            // `BLOCK_NOCOPY_BOUND_BYTES` / `BLOCK_OFFSET_BOUND_BYTES` for the
+            // per-path split; `BLOCK_COPIED + BLOCK_NOCOPY_BOUND +
+            // BLOCK_OFFSET_BOUND == BLOCK_OFFERED` on every step is the
+            // partition identity that proves no path is uninstrumented.
+            counter!(BLOCK_OFFERED_BYTES, block_byte_len(block) as u64);
         }
         let resident = plan.resident_nodes.contains(node);
         let buffer = match block {
@@ -817,6 +825,18 @@ pub fn execute_plan_with_placements(
             device_buffers.insert(*node, ((*buffer).clone(), *offset));
             continue;
         }
+        // an input-placed node above never reaches here, so `BLOCK_OFFERED_BYTES`
+        // fires only for a block that genuinely takes the host round trip
+        // below -- the same "offered for upload" meaning `execute_plan`'s own
+        // fire site carries, extended to this placed-buffer entry point so
+        // the partition identity (`BLOCK_COPIED_BYTES + BLOCK_NOCOPY_BOUND_BYTES
+        // + BLOCK_OFFSET_BOUND_BYTES == BLOCK_OFFERED_BYTES`) holds on this
+        // loop too, not just `execute_plan`'s.
+        #[cfg(feature = "instrument")]
+        {
+            counter!(BLOCK_UPLOAD_CALLS, 1);
+            counter!(BLOCK_OFFERED_BYTES, block_byte_len(block) as u64);
+        }
         let resident = plan.resident_nodes.contains(node);
         let buffer = match block {
             QuantizedBlock::Float32(data) => upload_block(&device, data, *node, *dtype, resident)?,
@@ -980,7 +1000,21 @@ pub fn execute_plan_named_with_placements(
 pub struct OpGpuTiming {
     pub node: NodeId,
     pub kind: &'static str,
+    /// This operand's TENSOR bytes -- `element_count(shape) * bytes_per_element`,
+    /// where `bytes_per_element` is the operand's own dtype width for a plain
+    /// buffer, or its `PackedCodec::block_bytes`/block-elements ratio for a
+    /// packed one. See `operand_tensor_bytes`. Distinct from
+    /// [`Self::bound_buffer_bytes`]: since a checkpoint mapping upload binds
+    /// ONE buffer spanning the whole mmap (`checkpoint_mapping_offset`), that
+    /// buffer's own `length()` overstates every individual operand sharing it
+    /// -- this field is what a per-tensor byte-share table needs instead.
     pub operand_bytes: u64,
+    /// The device buffer's own `length()` this operand was bound against --
+    /// the value `operand_bytes` used to report before it was corrected to
+    /// the tensor's own byte count. Kept so a checkpoint-mapping-offset bind
+    /// (one shared buffer, `bound_buffer_bytes` far larger than
+    /// `operand_bytes`) stays observable rather than silently disappearing.
+    pub bound_buffer_bytes: u64,
     pub gpu_ns: u64,
     pub weight_name: Option<String>,
     /// `bound.operands().len()` -- surfaced so a diagnostic caller can tell
@@ -1035,7 +1069,25 @@ fn execute_op_timed(
     placement: Option<(&MetalBuffer, usize)>,
     always_live: &BTreeSet<NodeId>,
 ) -> Result<OpGpuTiming, MetalError> {
+    // this operand's own TENSOR bytes, not the shared buffer's `length()` --
+    // see `operand_tensor_bytes`'s own doc: a checkpoint-mapping-offset bind
+    // shares ONE buffer across every packed weight, so `buffer.length()`
+    // (kept below as `bound_buffer_bytes`) overstates every individual
+    // operand sharing it.
     let operand_bytes: u64 = bound
+        .operands()
+        .iter()
+        .map(|(source, _, _)| {
+            operand_tensor_bytes(
+                program,
+                &prepared.index_nodes,
+                &prepared.shapes,
+                packed_operands,
+                *source,
+            )
+        })
+        .sum();
+    let bound_buffer_bytes: u64 = bound
         .operands()
         .iter()
         .map(|(source, _, _)| {
@@ -1095,6 +1147,7 @@ fn execute_op_timed(
         node: bound.node,
         kind,
         operand_bytes,
+        bound_buffer_bytes,
         gpu_ns,
         weight_name,
         operand_count: bound.operands().len(),
@@ -1678,6 +1731,29 @@ fn element_count(shape: &[u64]) -> usize {
     shape.iter().product::<u64>() as usize
 }
 
+/// `source`'s own TENSOR byte count -- `element_count(shape) *
+/// bytes_per_element`, where `bytes_per_element` is exact for a plain buffer
+/// ([`DType::size_bytes`]) and a `block_bytes / block_elements` ratio for a
+/// packed operand ([`PackedCodec::block_bytes`]/`block_elements`). This is
+/// the value a per-operand byte-share table needs -- NOT
+/// `device_buffers[source].0.length()`, which reports the shared checkpoint-
+/// mapping buffer's own size for every tensor `checkpoint_mapping_offset`
+/// binds into it (see [`OpGpuTiming::bound_buffer_bytes`]'s own doc).
+#[cfg(feature = "instrument")]
+fn operand_tensor_bytes(
+    program: &[Op],
+    index_nodes: &BTreeSet<NodeId>,
+    shapes: &Shapes,
+    packed_operands: &PackedOperands,
+    source: NodeId,
+) -> u64 {
+    let elements = element_count(shapes.of(source)) as u64;
+    match packed_operands.get(&source) {
+        Some(codec) => elements * codec.block_bytes() as u64 / codec.block_elements() as u64,
+        None => elements * gpu_dtype(program, index_nodes, source).size_bytes() as u64,
+    }
+}
+
 /// Moves every node named in `effective_outputs` to just after the latest
 /// position its own operands already occupy in `resolved` -- see this
 /// function's own call site in [`prepare`] for why. A no-op for any node
@@ -2239,7 +2315,7 @@ pub static BLOCK_UPLOAD_CALLS: Counter = Counter::new("omega.metal.block_upload_
 #[cfg(feature = "instrument")]
 pub static BLOCK_UPLOAD_TICKS: Counter = Counter::new("omega.metal.block_upload_ticks");
 #[cfg(feature = "instrument")]
-pub static BLOCK_UPLOAD_BYTES: Counter = Counter::new("omega.metal.block_upload_bytes");
+pub static BLOCK_OFFERED_BYTES: Counter = Counter::new("omega.metal.block_offered_bytes");
 #[cfg(feature = "instrument")]
 pub static OP_SETUP_CALLS: Counter = Counter::new("omega.metal.op_setup_calls");
 #[cfg(feature = "instrument")]
@@ -2286,7 +2362,21 @@ pub struct MetalStageTotals {
     pub pipeline_compile_ticks: u64,
     pub block_upload_calls: u64,
     pub block_upload_ticks: u64,
-    pub block_upload_bytes: u64,
+    /// Every block's own declared byte length, summed regardless of which
+    /// terminal upload path served it -- see [`BLOCK_OFFERED_BYTES`]'s own
+    /// doc. `block_copied_bytes + block_nocopy_bound_bytes +
+    /// block_offset_bound_bytes == block_offered_bytes` on every step is the
+    /// partition identity this card exists to prove.
+    pub block_offered_bytes: u64,
+    /// Bytes bound through a real host->device copy this step -- see
+    /// [`BLOCK_COPIED_BYTES`]'s own doc.
+    pub block_copied_bytes: u64,
+    /// Bytes bound zero-copy (no-copy path, cached or uncached) this step --
+    /// see [`BLOCK_NOCOPY_BOUND_BYTES`]'s own doc.
+    pub block_nocopy_bound_bytes: u64,
+    /// Bytes bound at an offset into the shared checkpoint-mapping buffer
+    /// this step -- see [`BLOCK_OFFSET_BOUND_BYTES`]'s own doc.
+    pub block_offset_bound_bytes: u64,
     pub op_setup_calls: u64,
     pub op_setup_ticks: u64,
     pub pipeline_lookup_calls: u64,
@@ -2344,7 +2434,10 @@ pub fn metal_stage_totals() -> MetalStageTotals {
         pipeline_compile_ticks: PIPELINE_COMPILE_TICKS.snapshot_and_reset(),
         block_upload_calls: BLOCK_UPLOAD_CALLS.snapshot_and_reset(),
         block_upload_ticks: BLOCK_UPLOAD_TICKS.snapshot_and_reset(),
-        block_upload_bytes: BLOCK_UPLOAD_BYTES.snapshot_and_reset(),
+        block_offered_bytes: BLOCK_OFFERED_BYTES.snapshot_and_reset(),
+        block_copied_bytes: BLOCK_COPIED_BYTES.snapshot_and_reset(),
+        block_nocopy_bound_bytes: BLOCK_NOCOPY_BOUND_BYTES.snapshot_and_reset(),
+        block_offset_bound_bytes: BLOCK_OFFSET_BOUND_BYTES.snapshot_and_reset(),
         op_setup_calls: OP_SETUP_CALLS.snapshot_and_reset(),
         op_setup_ticks: OP_SETUP_TICKS.snapshot_and_reset(),
         pipeline_lookup_calls: PIPELINE_LOOKUP_CALLS.snapshot_and_reset(),
@@ -2371,6 +2464,27 @@ pub fn metal_stage_totals() -> MetalStageTotals {
 /// module doc's "Host buffer upload" section.
 pub static NOCOPY_BUFFER_UPLOADS: Counter = Counter::new("omega.metal.upload_block.nocopy");
 pub static COPYING_BUFFER_UPLOADS: Counter = Counter::new("omega.metal.upload_block.copy");
+
+/// Bytes bound through a real host->device copy this call
+/// (`upload_block_copy` or `upload_resident_copy`) — the terminal-path
+/// byte split of [`BLOCK_OFFERED_BYTES`], fired at the same granularity (once
+/// per block, every call, cache hit or miss) so the three counters below sum
+/// to `BLOCK_OFFERED_BYTES` on every step. See the module doc's "Host buffer
+/// upload" section for why most weight bytes never reach this counter --
+/// only a misaligned, non-resident block (the KV cache, which is deliberately
+/// never cached: see `upload_block_copy`'s own doc) pays a real copy every
+/// token.
+pub static BLOCK_COPIED_BYTES: Counter = Counter::new("omega.metal.block_copied_bytes");
+/// Bytes bound zero-copy, either `upload_block_no_copy` (cached, resident)
+/// or `upload_block_no_copy_uncached` (uncached) — the other terminal-path
+/// byte split of [`BLOCK_OFFERED_BYTES`].
+pub static BLOCK_NOCOPY_BOUND_BYTES: Counter = Counter::new("omega.metal.block_nocopy_bound_bytes");
+/// Bytes bound at an offset into the single whole-checkpoint no-copy buffer
+/// (`checkpoint_mapping_offset`) — the third terminal-path byte split of
+/// [`BLOCK_OFFERED_BYTES`], and the one that carries the bulk of a real
+/// model's weight bytes once `register_checkpoint_mapping` is in effect.
+pub static BLOCK_OFFSET_BOUND_BYTES: Counter =
+    Counter::new("omega.metal.block_offset_bound_bytes");
 
 /// The host's page size, queried once and cached — the alignment unit
 /// `newBufferWithBytesNoCopy` requires for both the pointer and the length
@@ -2464,6 +2578,7 @@ fn upload_block_as_float(
     let pointer = data.as_ptr().cast::<c_void>();
     if is_page_aligned(pointer, byte_length) {
         counter!(NOCOPY_BUFFER_UPLOADS, 1);
+        counter!(BLOCK_NOCOPY_BOUND_BYTES, byte_length as u64);
         if resident {
             return upload_block_no_copy(device, pointer, byte_length).map(|buffer| (buffer, 0));
         }
@@ -2473,6 +2588,7 @@ fn upload_block_as_float(
     if let Some(result) = checkpoint_mapping_offset(device, pointer, byte_length) {
         return result;
     }
+    counter!(BLOCK_COPIED_BYTES, byte_length as u64);
     if resident {
         return upload_resident_copy(device, pointer, byte_length).map(|buffer| (buffer, 0));
     }
@@ -2500,6 +2616,7 @@ fn upload_packed_bytes(
     let pointer = bytes.as_ptr().cast::<c_void>();
     if is_page_aligned(pointer, byte_length) {
         counter!(NOCOPY_BUFFER_UPLOADS, 1);
+        counter!(BLOCK_NOCOPY_BOUND_BYTES, byte_length as u64);
         if resident {
             return upload_block_no_copy(device, pointer, byte_length).map(|buffer| (buffer, 0));
         }
@@ -2509,6 +2626,7 @@ fn upload_packed_bytes(
     if let Some(result) = checkpoint_mapping_offset(device, pointer, byte_length) {
         return result;
     }
+    counter!(BLOCK_COPIED_BYTES, byte_length as u64);
     if resident {
         return upload_resident_copy(device, pointer, byte_length).map(|buffer| (buffer, 0));
     }
@@ -2583,6 +2701,7 @@ fn checkpoint_mapping_offset(
     let page = page_size();
     let rounded_length = mapping_length.div_ceil(page) * page;
     counter!(MAPPING_OFFSET_UPLOADS, 1);
+    counter!(BLOCK_OFFSET_BOUND_BYTES, byte_length as u64);
     Some(
         upload_block_no_copy(device, base as *const c_void, rounded_length)
             .map(|buffer| (buffer, address - base)),
@@ -2842,6 +2961,19 @@ thread_local! {
 
 /// Counts uniform buffers served from cache rather than allocated.
 pub static UNIFORM_BUFFER_REUSES: Counter = Counter::new("omega.metal.uniforms.reuse");
+
+/// Entries `UNIFORM_BUFFERS` holds right now -- the direct witness for D6
+/// (round-4 synth S2): the cache is content-keyed and unbounded, so a caller
+/// that wants to know whether it grows without bound across a decode run
+/// reads this once per step rather than inferring growth from `nocopy_cache_len`'s
+/// unrelated bound. Growing after the plan-cache warms (roughly `op_count`
+/// per distinct token position, since every `Uniforms` blob carries
+/// `reduction_total`, itself a function of `cached_len`) is the pre-
+/// registered prediction this counter exists to check.
+#[must_use]
+pub fn uniform_cache_len() -> usize {
+    UNIFORM_BUFFERS.with(|cache| cache.borrow().len())
+}
 fn upload_uniforms(
     device: &ProtocolObject<dyn MTLDevice>,
     bytes: &[u8],
@@ -3191,4 +3323,172 @@ fn finish(
     // here — see `Evaluated`'s own doc for why `None` is the honest answer
     // rather than a number that would not mean the same thing.
     Ok(Evaluated::from_parts(root, results, None))
+}
+
+#[cfg(all(test, feature = "instrument"))]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod operand_tensor_bytes_tests {
+    //! CARD 0.2's own tests: `operand_tensor_bytes` is the fix for the
+    //! defect verified verbatim in the card's `opens` -- `operand_bytes`
+    //! summing `device_buffers[source].0.length()`, which reports the
+    //! shared checkpoint-mapping buffer's own size for EVERY tensor that
+    //! buffer serves, rather than that tensor's own byte count. Every case
+    //! here is a real GGUF codec's declared block shape, read from
+    //! `crate::msl`'s own block constants rather than hand-computed, so a
+    //! constant drifting there fails this test instead of silently
+    //! agreeing with a stale hand-copy.
+
+    use alloc::string::String;
+    use alloc::vec;
+    use core::slice;
+
+    use objc2_metal::MTLBuffer;
+    use proxima_tensor::{AlignedBuffer, DType, Extent, Op, infer};
+
+    use super::{
+        BTreeSet, NodeId, PackedCodec, PackedOperands, device_and_queue, element_count,
+        operand_tensor_bytes, page_size, register_checkpoint_mapping, upload_packed_bytes,
+    };
+    use crate::msl::{Q4K_BLOCK_BYTES, Q5K_BLOCK_BYTES};
+
+    /// One `Op::Input` program, so `operand_tensor_bytes` can be exercised
+    /// against a real [`proxima_tensor::Shapes`] the same way [`plan`]
+    /// builds one, rather than a hand-rolled shape table `Shapes`'s own
+    /// module keeps private.
+    fn single_input_shapes(elements: u32) -> (Vec<Op>, proxima_tensor::Shapes) {
+        let program = vec![Op::Input {
+            dtype: DType::Float32,
+            shape: vec![Extent::Static(elements)],
+            name: Some(String::from("w")),
+        }];
+        let shapes = infer(&program, &[]).expect("a single Input node always infers");
+        (program, shapes)
+    }
+
+    #[test]
+    fn q4k_operand_reports_rows_times_k_times_144_over_256() {
+        let (program, shapes) = single_input_shapes(2 * 256);
+        let mut packed_operands = PackedOperands::new();
+        packed_operands.insert(NodeId(0), PackedCodec::Q4K);
+
+        let bytes = operand_tensor_bytes(
+            &program,
+            &BTreeSet::new(),
+            &shapes,
+            &packed_operands,
+            NodeId(0),
+        );
+
+        assert_eq!(bytes, 2 * Q4K_BLOCK_BYTES as u64);
+    }
+
+    #[test]
+    fn q5k_operand_reports_rows_times_k_times_176_over_256() {
+        let (program, shapes) = single_input_shapes(3 * 256);
+        let mut packed_operands = PackedOperands::new();
+        packed_operands.insert(NodeId(0), PackedCodec::Q5K);
+
+        let bytes = operand_tensor_bytes(
+            &program,
+            &BTreeSet::new(),
+            &shapes,
+            &packed_operands,
+            NodeId(0),
+        );
+
+        assert_eq!(bytes, 3 * Q5K_BLOCK_BYTES as u64);
+    }
+
+    #[test]
+    fn f32_operand_reports_element_count_times_4() {
+        let (program, shapes) = single_input_shapes(4096);
+        let packed_operands = PackedOperands::new();
+
+        let bytes = operand_tensor_bytes(
+            &program,
+            &BTreeSet::new(),
+            &shapes,
+            &packed_operands,
+            NodeId(0),
+        );
+
+        assert_eq!(bytes, 4096 * 4);
+    }
+
+    /// The mechanism-level counterpart to the three pure-function cases
+    /// above: a tensor served by [`checkpoint_mapping_offset`] binds a
+    /// buffer spanning the WHOLE registered mapping (several pages here),
+    /// at a nonzero byte offset -- `bound_buffer_bytes` (the old,
+    /// defective `operand_bytes`) reports that whole-mapping length for
+    /// every tensor sharing it, while `operand_tensor_bytes` reports only
+    /// this one tensor's own declared byte length, unaffected by which
+    /// buffer or offset backs it.
+    #[test]
+    fn operand_bound_at_a_nonzero_mapping_offset_reports_the_tensor_length_not_the_shared_buffer() {
+        let Ok((device, _queue)) = device_and_queue() else {
+            // no Metal device on this host (e.g. a headless CI runner) --
+            // every other Metal-gated test in this crate skips the same
+            // way, so this one does too rather than failing spuriously.
+            return;
+        };
+        let page = page_size();
+        // two pages of f32 headroom -- comfortably larger than the single
+        // Q4_K block this test carves a sub-slice out of, so the mapping's
+        // own length is provably larger than the tensor's.
+        let mapping = AlignedBuffer::new(page / 4 * 2, page).expect("page-aligned test mapping");
+        // SAFETY: `mapping` owns `mapping.len()` initialized `f32`s; a byte
+        // view of the exact same live range is valid for as long as
+        // `mapping` is (it outlives every use of `mapping_bytes` below).
+        let mapping_bytes: &[u8] =
+            unsafe { slice::from_raw_parts(mapping.as_ptr().cast::<u8>(), mapping.len() * 4) };
+        register_checkpoint_mapping(mapping_bytes);
+
+        // a one-block Q4_K tensor starting at byte 144 (one block in) --
+        // nonzero AND not page-aligned, so it can only reach the GPU
+        // through `checkpoint_mapping_offset`, never the plain no-copy path.
+        let tensor_offset = Q4K_BLOCK_BYTES;
+        let tensor_bytes = &mapping_bytes[tensor_offset..tensor_offset + Q4K_BLOCK_BYTES];
+
+        let (buffer, bound_offset) =
+            upload_packed_bytes(&device, tensor_bytes, false).expect("checkpoint-mapping upload");
+
+        assert_eq!(
+            bound_offset, tensor_offset,
+            "checkpoint_mapping_offset must report this tensor's own byte offset"
+        );
+        let bound_buffer_bytes = buffer.length();
+        assert!(
+            bound_buffer_bytes > tensor_bytes.len(),
+            "the bound buffer spans the whole mapping ({bound_buffer_bytes} bytes), \
+             not this one tensor ({} bytes) -- this IS defect 1",
+            tensor_bytes.len()
+        );
+
+        let (program, shapes) = single_input_shapes(256);
+        let mut packed_operands = PackedOperands::new();
+        packed_operands.insert(NodeId(0), PackedCodec::Q4K);
+        let operand_bytes = operand_tensor_bytes(
+            &program,
+            &BTreeSet::new(),
+            &shapes,
+            &packed_operands,
+            NodeId(0),
+        );
+        assert_eq!(
+            operand_bytes,
+            tensor_bytes.len() as u64,
+            "operand_tensor_bytes must report the TENSOR's own length regardless of \
+             which shared buffer or offset backs it"
+        );
+        assert_ne!(
+            operand_bytes, bound_buffer_bytes as u64,
+            "the fix's whole point: operand bytes and bound buffer bytes now differ"
+        );
+
+        // leave no mapping registered for whichever test this thread runs
+        // next -- `CHECKPOINT_MAPPING` is thread-local, but the default
+        // std test harness reuses threads across tests in the same binary.
+        super::CHECKPOINT_MAPPING.with(|cell| *cell.borrow_mut() = None);
+        let _ = element_count(shapes.of(NodeId(0)));
+    }
 }

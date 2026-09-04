@@ -198,13 +198,15 @@ fn report_op_timings(step: usize, timings: &[OpGpuTiming]) {
     for (rank, timing) in ranked.iter().take(OP_PROFILE_TOP_N).enumerate() {
         std::println!(
             "op_profile_top step={step} rank={} node={} kind={} weight_name={:?} \
-             packed_codec={:?} operand_bytes={} operand_count={} gpu_ns={} gpu_ns_per_byte={:.6}",
+             packed_codec={:?} operand_bytes={} bound_buffer_bytes={} operand_count={} gpu_ns={} \
+             gpu_ns_per_byte={:.6}",
             rank + 1,
             timing.node.0,
             timing.kind,
             timing.weight_name,
             timing.packed_codec,
             timing.operand_bytes,
+            timing.bound_buffer_bytes,
             timing.operand_count,
             timing.gpu_ns,
             if timing.operand_bytes == 0 {
@@ -433,7 +435,8 @@ fn print_token_breakdown_metal(
     std::println!(
         "token_breakdown_metal step={step} prepare_calls={} prepare_ms={:.3} \
      emit_calls={} emit_ms={:.3} pipeline_hits={} pipeline_misses={} pipeline_compile_ms={:.3} \
-     block_upload_calls={} block_upload_ms={:.3} block_upload_bytes={} \
+     block_upload_calls={} block_upload_ms={:.3} block_offered_bytes={} \
+     block_copied_bytes={} block_nocopy_bound_bytes={} block_offset_bound_bytes={} \
      op_setup_calls={} op_setup_ms={:.3} \
      pipeline_lookup_calls={} pipeline_lookup_ms={:.3} \
      encode_dispatch_calls={} encode_dispatch_ms={:.3} \
@@ -441,7 +444,7 @@ fn print_token_breakdown_metal(
      readback_calls={} readback_ms={:.3} readback_bytes={} \
      nocopy_uploads={} copying_uploads={} nocopy_reuses={} \
      resident_uploads={} resident_reuses={} mapping_offset_uploads={} \
-     nocopy_cache_len={} phys_footprint_bytes={} device_allocated_bytes={} \
+     nocopy_cache_len={} uniform_cache_len={} phys_footprint_bytes={} device_allocated_bytes={} \
      plan_cache_len={plan_cache_len} plan_hits={plan_hits} plan_misses={plan_misses}",
         metal_stage.prepare_calls,
         ms(metal_stage.prepare_ticks),
@@ -452,7 +455,10 @@ fn print_token_breakdown_metal(
         ms(metal_stage.pipeline_compile_ticks),
         metal_stage.block_upload_calls,
         ms(metal_stage.block_upload_ticks),
-        metal_stage.block_upload_bytes,
+        metal_stage.block_offered_bytes,
+        metal_stage.block_copied_bytes,
+        metal_stage.block_nocopy_bound_bytes,
+        metal_stage.block_offset_bound_bytes,
         metal_stage.op_setup_calls,
         ms(metal_stage.op_setup_ticks),
         metal_stage.pipeline_lookup_calls,
@@ -471,6 +477,7 @@ fn print_token_breakdown_metal(
         metal_stage.resident_reuses,
         metal_stage.mapping_offset_uploads,
         omega::metal::nocopy_cache_len(),
+        omega::metal::uniform_cache_len(),
         phys_footprint_bytes(),
         omega::metal::current_allocated_size().unwrap_or(0),
     );
@@ -2451,7 +2458,7 @@ impl<'file> LoadedModel<'file> {
                 // Snapshot-and-reset (`metal_stage_totals`'s own doc), so this
                 // read must happen exactly once per step, immediately after
                 // this step's own `evaluate_with_placements` call --
-                // `block_upload_bytes` below is this step's REAL device
+                // `block_offered_bytes` below is this step's REAL device
                 // upload byte count: the three `kv_cache.{layer}.*` scratch
                 // blocks pushed above never actually upload (they are
                 // `input_placements` entries, which `execute_plan_with_placements`
@@ -2499,10 +2506,10 @@ impl<'file> LoadedModel<'file> {
                         // No host-side KV cache exists on this arm (the cache
                         // lives entirely in `k_even_buffers`/`k_odd_buffers`/
                         // `v_buffers`, device-resident for the whole call) --
-                        // `block_upload_bytes` is the real device-side upload
+                        // `block_offered_bytes` is the real device-side upload
                         // counter, not a stand-in host element count.
                         #[cfg(all(feature = "metal", target_os = "macos"))]
-                        kv_cache_upload_bytes: metal_stage.block_upload_bytes,
+                        kv_cache_upload_bytes: metal_stage.block_offered_bytes,
                         #[cfg(not(all(feature = "metal", target_os = "macos")))]
                         kv_cache_upload_bytes: 0,
                         evaluate_ticks,
