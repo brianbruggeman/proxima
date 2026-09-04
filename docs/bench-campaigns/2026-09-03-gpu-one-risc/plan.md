@@ -324,12 +324,16 @@ three features flipped the default forward.
 `generated_text` identical on every arm across every row above; device bytes stayed within the
 ~4.15-4.17 GB band on every measured arm.
 
-Concurrent dispatch with dataflow barriers (`metal-concurrent-dispatch`): in flight, row 285 when
-measured.
+Concurrent dispatch with dataflow barriers (`metal-concurrent-dispatch`, ROW 285): quiet 3-round
+bake-off, `gpu_exec_ms` mean 29.267 → 27.258 ms (-6.9%), `step_wall_ms` mean 36.556 → 34.725 ms
+(CoV 8.3%/8.2%), 419 barriers over 616 ops/step, `generated_text` identical across 6 ON + 3 OFF
+runs; flips `metal`'s default feature list on (owner's less-work rule: work down, wall not worse
+beyond CoV).
 
-What is left after the third wave, per token on the default at main `e7fe6b6`: quiet-box
-`step_wall_ms` 37.1-38.8 ms/token against `llama-bench` 56.6-57.2 t/s (17.5-17.7 ms/token) —
-**2.15x**. Progression across all three waves, ms/token: 67.9 → 52.7 → 43.0 → 40.9 → 40.5 → ~37.8.
+What is left after the third wave, per token on the default at main `af918bb` (ROW 286, includes
+`metal-concurrent-dispatch`): quiet-box `step_wall_ms` 33.032 ms/token (CoV 0.52%) against
+`llama-bench` 57.32 t/s mean (17.445 ms/token, CoV 0.55%) — **1.89x**. Progression across all
+three waves, ms/token: 67.9 → 52.7 → 43.0 → 40.9 → 40.5 → ~37.8 → 33.0.
 `cached-attention-streaming` joins the `metal` default feature list (ROW 282, `land/fattn-on`)
 on top of this same tree by the owner's less-work rule -- `emit_calls` 938 → 616/step, text and
 wall unchanged within CoV -- so the default's feature set as of `land/fattn-on` is `metal`'s
