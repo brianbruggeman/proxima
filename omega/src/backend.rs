@@ -201,6 +201,18 @@ pub enum BackendError {
     Wgpu(#[from] WgpuError),
 }
 
+/// [`Plan::Metal`]'s own payload type. Boxed only under
+/// `metal-plan-stable-buffers`: that feature's `BufferArena`/`PlanUniforms`
+/// fields grow `metal::Plan` well past [`CpuPlan`]'s size, tripping
+/// `clippy::large_enum_variant` on this enum regardless of which arm is
+/// active. Unboxed with the feature off, matching this enum's behavior
+/// before the card existed -- the indirection is the exception the arena
+/// earns, not a cost every build pays.
+#[cfg(all(feature = "metal", target_os = "macos", feature = "metal-plan-stable-buffers"))]
+type MetalPlanHandle = alloc::boxed::Box<metal::Plan>;
+#[cfg(all(feature = "metal", target_os = "macos", not(feature = "metal-plan-stable-buffers")))]
+type MetalPlanHandle = metal::Plan;
+
 /// A resolved, reusable program for exactly one [`Backend`] — never a
 /// cross-backend union. A future scheduler that wants to hold a CPU plan and
 /// a Metal plan for the same program side by side holds two `Plan`s, one per
@@ -210,7 +222,7 @@ pub enum Plan {
     #[cfg(feature = "cpu")]
     Cpu(CpuPlan),
     #[cfg(all(feature = "metal", target_os = "macos"))]
-    Metal(metal::Plan),
+    Metal(MetalPlanHandle),
     #[cfg(feature = "wgpu-backend")]
     Wgpu(wgpu_driver::WgpuPlan),
 }
@@ -458,7 +470,10 @@ fn plan_named_metal(
     outputs: &[NodeId],
 ) -> Result<Plan, BackendError> {
     let plan = metal::plan_named(program, symbols, named, outputs)?;
-    Ok(Plan::Metal(plan))
+    // `.into()` covers both `MetalPlanHandle` shapes: identity when it is
+    // `metal::Plan` itself, `Box::from` (`impl<T> From<T> for Box<T>`) when
+    // `metal-plan-stable-buffers` makes it `Box<metal::Plan>`.
+    Ok(Plan::Metal(plan.into()))
 }
 
 #[cfg(all(feature = "metal", target_os = "macos"))]
