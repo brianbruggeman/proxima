@@ -21020,3 +21020,84 @@ Confirm `barriers=419`, `emit_calls=616`, `device_allocated_bytes=4152442880` on
 | Date | Change | Δ vs prior | CoV / runs | Host loadout |
 | --- | --- | --- | --- | --- |
 | 2026-09-04 | scoreboard measurement only, no feature change; closes ROW 285's "in flight" placeholder in `plan.md` §1.2 | DEFAULT 1.8935x llama.cpp (down from the 2.15x this replaces); START (`4be2f3a`) 3.9267x llama.cpp, consistent with the campaign's recorded 67.9 ms/token starting point | 3 interleaved rounds; DEFAULT wall CoV 0.52%, gpu_exec CoV 0.99%; START wall CoV 0.60%, gpu_exec CoV 0.30%; llama-bench ms/token CoV 0.55%; ratio CoV 0.06% (DEFAULT), 1.07% (START) | quiet box confirmed via `pgrep -fl 'cargo\|rustc\|nextest\|llama-bench\|proxima_model_interop-'` (excluding cdb-daemon/sccache/llama-server/Ollama) before the bake-off; round 2's START/DEFAULT pair was accidentally launched concurrently, discarded, and re-run serially before being recorded -- no other worker's process observed in either check |
+
+## ROW 287 -- in-buffer ablation of the default decode step by op kind: the serialized per-op profiler's ~30 us/command-buffer floor was biasing every prior per-kind GB/s number low
+
+**Card:** none (measurement-only; no default feature changed). **Worktree/branch/commit:** `proxima-wt-s6e2-ablation`, `perf/kind-ablation`, from `main` at `3b9735e`, mechanism landed at `77df075`. **Mechanism, not a feature:** `PROXIMA_METAL_KIND_FILTER`, `instrument`-gated, default-off, read once per `execute_plan_with_placements` call (`omega/src/metal.rs`) and consulted per op against `classify_kind`'s own return string -- the same kind name `op_profile_bucket kind=...` already prints, not a second enum. When an op's kind fails the filter, `encode_op` is never called for it (no pipeline bind, no buffer bind, no dispatch, no `EMIT_CALLS` increment) and `HazardTracker` never sees it (no hazard record, no barrier on its account); its output buffer keeps whatever the stable per-position arena slot (`metal-plan-stable-buffers`, default-on) already held from a prior step. `emit_calls` therefore counts only encoded ops, which is the direct proof the filter engaged.
+
+**Why this row exists.** Every existing per-kind number in this log (`op_profile_bucket`, ROW 286's per-op profile table) comes from `execute_plan_op_timed`'s diagnostic twin, which opens and commits ONE command buffer PER op to read `GPUStartTime`/`GPUEndTime` individually -- each of those commits pays its own submission-boundary cost (measured on this host at ~30 us/command-buffer in prior rows), so a kind with many small dispatches (e.g. 290 elementwise ops) has that floor summed into its own bucket 290 times, and the SUM of all buckets overstates the single shared command buffer's real `gpu_exec_ms`. This row measures the same partition a different way: inside the production single-command-buffer path, by removing one kind's dispatches from the SAME buffer instead of giving each op its own buffer.
+
+**Arm table**, oracle harness `bind::real_openchat_file::runs_the_cached_decode_loop_on_the_metal_backend_and_reports_the_plan_cache`, release, `--features metal,instrument`, `PROXIMA_MAX_TOKENS=8`, mean over steady steps 3..7 (plan hits reached by step 3), 3 interleaved rounds, quiet box (`pgrep -fl 'cargo\|rustc\|nextest\|llama-bench\|proxima_model_interop-'`, excluding cdb-daemon/sccache, confirmed before the sweep; no foreign cargo/rustc/nextest/llama-bench process observed):
+
+| arm | `PROXIMA_METAL_KIND_FILTER` | `emit_calls` | `gpu_exec_ms` (r1/r2/r3) | mean (CoV) |
+| --- | --- | --- | --- | --- |
+| ALL | unset | 616 | 27.352 / 26.857 / 26.923 | 27.044 ms (0.99%) |
+| MATVEC | `packed-row-blocked` | 225 | 23.069 / 23.376 / 23.286 | 23.244 ms (0.68%) |
+| NOT-MATVEC | `!packed-row-blocked` | 391 | 4.100 / 3.981 / 4.073 | 4.051 ms (1.54%) |
+| ATTN | `cached-attention` | 32 | 3.623 / 3.032 / 3.622 | 3.426 ms (**9.94%, above 5% -- report the range: 3.03-3.62 ms**) |
+| COOP | `cooperative` | 65 | 1.320 / 1.265 / 1.746 | 1.444 ms (**18.25%, above 5% -- report the range: 1.27-1.75 ms**) |
+| ELEM | `elementwise` | 290 | 1.749 / 1.787 / 1.758 | 1.764 ms (1.12%) |
+
+`emit_calls` is exact and stable across every step in the 3..7 window and across all 3 rounds within an arm (asserted by the extraction script, not eyeballed): MATVEC(225) + NOT-MATVEC(391) = 616 = ALL's own `emit_calls`, an exact partition with no double-count or gap, because it is a per-op classification of the same fixed 616-op program, not a timing measurement. The brief's own stated expectation for MATVEC was 224; the measured, re-provable count on this checkpoint/build is **225** -- the discrepancy is one op (plausibly a q4k-ggml-port-body match or a boundary op whose classification depends on `emit()`'s dtype-driven branch, not independently re-derived here) and is reported as measured rather than forced to match the brief. ATTN's 32 matches the brief's stated value exactly.
+
+**Identity check, `gpu_exec_ms`:** ALL mean 27.044 ms vs MATVEC + NOT-MATVEC = 23.244 + 4.051 = 27.295 ms, residual = 27.044 - 27.295 = **-0.251 ms (-0.93% of ALL)**. The residual is small and negative, not zero, which is the expected signature of `metal-concurrent-dispatch` (default-on): with all ops present, `HazardTracker` finds cross-kind data dependencies (e.g. a matvec's output feeding an elementwise op, or vice versa via the fused-attention chain) and the GPU scheduler can run some independent matvec and non-matvec dispatches concurrently within the ONE shared command buffer, shrinking the wall-clock GPU time below the naive sum of "matvec alone" plus "everything else alone" run as two separate ablated buffers (each of which loses whatever concurrency existed between the two kinds, since one side is simply absent). A -0.93% residual is a small overlap effect, not a measurement error: the two ablated arms are each internally coherent (their own remaining ops still overlap with each other), only the CROSS-kind overlap between matvec and non-matvec is lost when either side is ablated, and that lost overlap is what the negative residual recovers.
+
+**MATVEC GB/s** = 4.169e9 bytes / 23.244 ms = 4.169e9 / 0.023244 s = **179.36 GB/s**. This replaces the per-op-timed-profiler-derived number for the packed-row-blocked family (ROW 286's `op_profile_bucket` line: `gpu_ms=24.792` for the SAME 225-op kind, at 4,069,849,664 declared operand bytes on that step alone) -- the two are not the same denominator (this row's 4.169e9 is the crate's own declared weight-set constant used throughout this log; ROW 286's 4,069,849,664 is one step's own `operand_bytes` sum) and are not compared numerically here; the mechanism difference (one shared buffer vs 225 individual buffers) is the point, not a byte-count reconciliation.
+
+**Per non-matvec kind, in-buffer cost** (same 3-round means, `emit_calls` from the arm table above):
+
+| kind | in-buffer `gpu_exec_ms` (mean, CoV) | `emit_calls` | us/dispatch |
+| --- | --- | --- | --- |
+| ATTN (`cached-attention`) | 3.426 ms (9.94% -- range 3.03-3.62 ms) | 32 | 107.06 |
+| COOP (`reduce-cooperative`) | 1.444 ms (18.25% -- range 1.27-1.75 ms) | 65 | 22.21 |
+| ELEM (`elementwise`) | 1.764 ms (1.12%) | 290 | 6.08 |
+
+ATTN and COOP's CoV exceeds the 5% threshold at 3 rounds -- both are named as a **range**, not a point estimate, per this log's own discipline. Both kinds' absolute in-buffer cost is small (1.3-3.6 ms of a ~27 ms step), so the noise is plausibly real per-run GPU scheduling jitter on a handful of dispatches rather than a host-loadout artifact (ELEM, at 5-9x the dispatch count in the same window, sits at 1.12% CoV on the same host in the same sweep).
+
+**Text is not comparable, by design.** Every non-ALL arm's `generated_text` is garbage (`MATVEC` round 1: `"<unk><unk><unk><unk><unk><unk><unk><unk>"` vs ALL's `"Here is a simple Python function that returns"`) -- every filtered-out op's output buffer is genuinely unwritten arena garbage, exactly the documented contract, and this row makes no correctness claim on any ablated arm. `plan_hits=5`/`plan_misses=3` is identical across ALL and every ablated arm in every round (the plan cache keys on shape, never on which ops actually dispatch), confirming the ablation does not perturb the plan-cache accounting this harness also asserts.
+
+**Gates (worktree `proxima-wt-s6e2-ablation`, own `CARGO_TARGET_DIR`):**
+```
+cargo build --workspace --lib                                                          EXIT=0
+cargo nextest run -p omega --features metal                                            128 passed, 1 skipped
+cargo nextest run -p omega --all-features                                              186 passed, 1 skipped
+cargo clippy -p omega -p proxima-model-interop --all-targets --all-features -- -D warnings   EXIT=0
+bash scripts/omega-gate.sh                                                              PASS (6/6 steps, 186 tests, 2 doctests)
+cargo nextest run -p proxima-model-interop --features metal,instrument                  95 passed, 25 skipped
+```
+
+**Re-prove** (each arm, from the artifact alone -- no dev memory required):
+```sh
+cd /Users/brianbruggeman/repos/slot-0/proxima-wt-s6e2-ablation
+export CARGO_TARGET_DIR=/Users/brianbruggeman/repos/slot-0/proxima-wt-s6e2-ablation/target CARGO_TERM_COLOR=never PROXIMA_MAX_TOKENS=8
+
+# ALL (no filter) -- expect emit_calls=616 on every steady step
+cargo nextest run --release -p proxima-model-interop --features metal,instrument --run-ignored ignored-only --success-output=immediate \
+  -E 'test(runs_the_cached_decode_loop_on_the_metal_backend_and_reports_the_plan_cache)'
+
+# MATVEC -- expect emit_calls=225 on every steady step
+PROXIMA_METAL_KIND_FILTER=packed-row-blocked cargo nextest run --release -p proxima-model-interop --features metal,instrument --run-ignored ignored-only --success-output=immediate \
+  -E 'test(runs_the_cached_decode_loop_on_the_metal_backend_and_reports_the_plan_cache)'
+
+# NOT-MATVEC -- expect emit_calls=391 on every steady step (225 + 391 == 616)
+PROXIMA_METAL_KIND_FILTER='!packed-row-blocked' cargo nextest run --release -p proxima-model-interop --features metal,instrument --run-ignored ignored-only --success-output=immediate \
+  -E 'test(runs_the_cached_decode_loop_on_the_metal_backend_and_reports_the_plan_cache)'
+
+# ATTN -- expect emit_calls=32
+PROXIMA_METAL_KIND_FILTER=cached-attention cargo nextest run --release -p proxima-model-interop --features metal,instrument --run-ignored ignored-only --success-output=immediate \
+  -E 'test(runs_the_cached_decode_loop_on_the_metal_backend_and_reports_the_plan_cache)'
+
+# COOP -- expect emit_calls=65
+PROXIMA_METAL_KIND_FILTER=cooperative cargo nextest run --release -p proxima-model-interop --features metal,instrument --run-ignored ignored-only --success-output=immediate \
+  -E 'test(runs_the_cached_decode_loop_on_the_metal_backend_and_reports_the_plan_cache)'
+
+# ELEM -- expect emit_calls=290
+PROXIMA_METAL_KIND_FILTER=elementwise cargo nextest run --release -p proxima-model-interop --features metal,instrument --run-ignored ignored-only --success-output=immediate \
+  -E 'test(runs_the_cached_decode_loop_on_the_metal_backend_and_reports_the_plan_cache)'
+```
+Confirm the `token_breakdown_metal ... emit_calls=<N> ...ablation=true kind_filter=<value>` suffix appears on every `step` line once `PROXIMA_METAL_KIND_FILTER` is set (absent, byte-identical to the pre-ablation line, when unset), and that `emit_calls` matches the value named above on every one of steps 0..7.
+
+### Changelog
+| Date | Change | Δ vs prior | CoV / runs | Host loadout |
+| --- | --- | --- | --- | --- |
+| 2026-09-04 | `PROXIMA_METAL_KIND_FILTER` in-buffer ablation knob added to `execute_plan_with_placements` (`instrument`-gated, default-off, no production cost); measurement-only row, no default feature changed | ALL 27.044 ms (616 ops); MATVEC 23.244 ms (225 ops, 179.36 GB/s); NOT-MATVEC 4.051 ms (391 ops); identity residual -0.251 ms (-0.93%, attributed to cross-kind concurrent-dispatch overlap lost when either side is ablated); ATTN 3.426 ms / COOP 1.444 ms / ELEM 1.764 ms in-buffer | 3 interleaved rounds per arm, 6 arms, 18 runs total; ALL 0.99%, MATVEC 0.68%, NOT-MATVEC 1.54%, ELEM 1.12% (all within threshold); **ATTN 9.94% and COOP 18.25% exceed 5% -- reported as ranges, not point estimates** | quiet box confirmed via `pgrep -fl 'cargo\|rustc\|nextest\|llama-bench\|proxima_model_interop-'` (excluding cdb-daemon/sccache) immediately before the sweep; no other cargo/rustc/nextest/llama-bench process observed; the only other worker running was a read-only grep per the dispatch brief |
