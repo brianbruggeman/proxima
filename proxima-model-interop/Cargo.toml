@@ -69,6 +69,12 @@ instrument = ["proxima-tensor/instrument", "omega?/instrument", "dep:proxima-tel
 # per the 2026-09-04 per-op profile: paired-nibble Q5_K body 202,083 ->
 # 124,265 ns/op (1.63x) on the 8 Q5_K ops, family 6.275 -> 5.725 ms, decode
 # wall flat within noise, text identical, parity < 1e-4 (ROW 278).
+# `metal-plan-stable-buffers` joins per CARD 6.5: plan-owned `BufferArena` +
+# `PlanUniforms` take a plan-cache hit from 842 allocations/step to 0;
+# op_setup 3.94-5.42 -> 0.39-0.60 ms/step, arena peak 13,967,368 B prefill
+# (26.56x reuse over a naive 370,941,308 B), 450,568 B steady, text
+# identical. `backend::Plan::Metal` is boxed under this feature, which is
+# now the default `metal` shape.
 metal = [
     "dep:omega",
     "std",
@@ -76,6 +82,7 @@ metal = [
     "metal-wide-cooperative-reduce",
     "kv-capacity-bucket",
     "metal-q5k-pair-dot",
+    "metal-plan-stable-buffers",
 ]
 # opt-in cached-attention physical step for the real serving/decode harness.
 cached-attention-streaming = [

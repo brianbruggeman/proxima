@@ -46,6 +46,16 @@ cpu = ["std", "proxima-tensor/std"]
 # 5.725 ms), decode wall flat within noise (41.32/41.63/42.01 vs
 # 41.35/41.15/41.32 ms over 3 rounds; the 8 ops are ~1.6 ms of the step),
 # text identical, parity < 1e-4 against the scalar oracle.
+# `metal-plan-stable-buffers` joins them per CARD 6.5: a plan-owned
+# `BufferArena` (whole buffers, liveness-partitioned, outputs pinned) plus
+# `PlanUniforms` (one uniform buffer per plan position) turn a plan-cache hit
+# from 842 allocations/step into 0; op_setup fell 3.94-5.42 -> 0.39-0.60
+# ms/step, arena peak 13,967,368 B at prefill vs a naive 370,941,308 B
+# (26.56x reuse), steady-state peak 450,568 B, text identical. Wall clock on
+# a noisy box: OFF [40.2, 69.9] ms/token, ON [37.7, 44.3] ms/token, ON <= OFF
+# every round. This also makes `backend::Plan::Metal`'s `Box` (added to keep
+# clippy::large_enum_variant clean once `metal::Plan` carries the arena and
+# uniform state) part of the default build; no other public signature moves.
 metal = [
     "std",
     "dep:objc2",
@@ -60,6 +70,7 @@ metal = [
     "metal-output-placement",
     "metal-wide-cooperative-reduce",
     "metal-q5k-pair-dot",
+    "metal-plan-stable-buffers",
 ]
 # Name reservations for `Backend`'s remaining variants (`src/backend.rs`) —
 # every variant exists regardless of which of these are on, so a caller can
