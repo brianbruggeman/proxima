@@ -20073,3 +20073,50 @@ Timing numbers will differ from the table above on a different box load -- the c
 **Falsifier restated against the corrected target, and evaluated honestly on the data this session actually has:** "if `nsg` is the mechanism, `nsg=2` moves nano kernel GB/s measurably above 70.76 TOWARD 228.9." Neither arm's absolute GB/s in this row's own table (15.18-27.90 baseline, 21.66-26.91 nsg=2) clears even the OLD 70.76 floor, let alone approaches 228.9 -- **on that literal reading, the answer is KILL: no movement toward the corrected target was observed.** But this call is qualified, not clean, and the qualification is named rather than smoothed over: **every cell in this row's nano table was taken on a CONTENDED box (load 3.71-4.25, another agent's `-C linker-plugin-lto -C codegen-units=1` build actively compiling during the earlier polling window), while the corrected 228.9 figure came from a QUIET box (load 2.51-3.42).** This session tried, and failed within its budget, to get a quiet-box rerun of the SAME nano probe after this correction landed: the box-lock (`scratchpad/boxlock/held`) stayed held by higher-priority agents (`train-lane` then re-acquired by `train-lane` again) through every poll in the remaining budget (four more 25-30s polling rounds, load oscillating 6.20-12.31 throughout, never below 5.0 again). **Residual, named not guessed: this row cannot distinguish "the nsg=2 mechanism is real but far too small to close a 3.24x gap" from "the mechanism is further swamped by this session's box contention" -- both are consistent with the same loaded-box data.** The paired, same-load-window SHAPE of the result (real win at the fewest-threadgroups shape, flat/negative at the other two) is unaffected by contention (contention scales both arms together), and stands as reported above; only the ABSOLUTE-floor comparison against 228.9 is what contention makes untrustworthy.
 
 **Verdict, honestly bounded: KILL is the defensible call from the data in hand, but it is a contended-box KILL, not a quiet-box KILL, and the row says so rather than upgrading its own confidence.** Per the ladder's own instruction ("if nano shows no movement, KILL IT there ... do not buy a bigger measurement of a dead mechanism"), no milli/decode-step rung was attempted (already true above, unchanged by this correction) and the secondary shift-elimination axis (ggml's no-shift-for-3-of-4-nibble-positions optimization, `ggml-metal.metal:5157-5175` vs `q4k_run8`'s unconditional variable shift, `msl.rs:274-285`) was NOT reached within this session's exhausted budget -- named as the next lever for a future session, not attempted here. **A quiet-box rerun of `examples/q4k_matvec_nsg_probe.rs` (command in the re-prove section above, unchanged) is the single blocking prerequisite before this row's KILL call can be sealed with confidence** rather than reported as the best available reading under contention.
+
+## ROW 271 -- default metal decode path flipped to `metal-output-placement` + `metal-wide-cooperative-reduce` on sweep evidence
+
+**Decision.** Every GPU decode feature landed default-off up through ROW 270 (`metal-buffer-pool`, `metal-wide-cooperative-reduce`, `metal-q4k-mask-fma`, `metal-q4k-split-k`, `metal-q4k-single-fetch`, `metal-output-placement`). Two 2026-09-04 sweeps, both against the same `openchat-3.5-1210.Q4_K_S.gguf` real decode harness (`bind::real_openchat_file::runs_the_cached_decode_loop_on_the_metal_backend_and_reports_the_plan_cache`, `PROXIMA_MAX_TOKENS=8`, 3 rounds x 7 decode steps, arms interleaved) and the same `llama-bench -n 32 -p 0 -r 5 -t 8 -ngl 99` incumbent, name the combination `metal-output-placement` + `metal-wide-cooperative-reduce` (sweep 3 arm B1: **43.052 ms/token, CoV 0.56%, 2.443x vs llama.cpp 17.621 ms/token; op_count 938; text identical**) as the winner across both sweeps. `proxima-model-interop`'s `metal` feature and `omega`'s own `metal` feature now both carry these two as passthrough defaults; every feature stays individually selectable, nothing deleted.
+
+**Sweep 2** (2026-09-04, main `f2d5094`, M1 Max, box quiet -- only `cdb-daemon`/`sccache`/`llama-server` daemons, loadavg 4-30 residual; llama.cpp incumbent L = 17.615 ms/token):
+
+| arm | ms/token | CoV | gpu_exec_ms | op_count | ratio to L |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| A0 default | 52.660 | 0.31% | 40.43 | 1194 | 2.99x |
+| +metal-buffer-pool | 56.237 | 0.57% | 40.28 | 1194 | 3.19x (LOSS) |
+| +metal-wide-cooperative-reduce | 49.743 | 0.48% | 37.64 | 1194 | 2.82x |
+| +metal-q4k-mask-fma | 52.287 | 1.24% | 39.82 | 1194 | 2.97x |
+| +metal-q4k-split-k | 56.496 | 0.73% | 43.96 | 1194 | 3.21x (LOSS) |
+| +metal-q4k-single-fetch | 52.166 | 0.58% | 40.02 | 1194 | 2.96x |
+| +metal-output-placement | 45.315 | 0.46% | 36.79 | 938 | 2.57x |
+| union(pool,wide,mask-fma,split-k,placement) | 47.172 | 0.28% | 38.79 | 938 | 2.68x |
+| single-fetch+placement | 45.209 | 0.40% | 36.55 | 938 | 2.57x |
+
+Text identical on all arms; device bytes at step 7 = 3970.4-3977.2 MiB; kv/block upload bytes at step 7 = 0 on the placement arms, 9,699,328 / 4,149,349,960 otherwise (raw logs: `sweep-logs/sweep2-*`).
+
+**Sweep 3** (same box/date, llama.cpp incumbent L = 17.621 ms/token), narrowing on placement combinations:
+
+| arm | ms/token | CoV | ratio to L |
+| --- | ---: | ---: | ---: |
+| B0 placement | 45.158 | 0.13% | 2.563x |
+| B1 placement+wide | 43.052 | 0.56% | 2.443x |
+| B2 B1+single-fetch | 43.058 | 0.50% | 2.444x |
+| B3 B1+mask-fma | 43.324 | 0.50% | 2.459x |
+
+`op_count`=938 on all arms; text identical; device bytes 3970.1-3970.6 MiB; RSS 53.7-55.9 MiB (raw logs: `sweep-logs/sweep3-*`). B1 is the winner: lowest ms/token, CoV inside the 5% bound, no device-byte regression beyond +150 MB, text bit-identical to the control on every arm.
+
+**Box loadout** (`pgrep -fl 'cargo|rustc|llama|criterion|nextest'; sysctl -n vm.loadavg`, sweep 2 round 1): `cdb-daemon`, `sccache` only as daemons; loadavg `{ 25.35 51.64 39.33 }` at round 1, settling to `{ 7.58 28.79 32.02 }` by round 3 -- residual background load from unrelated agents on the shared box, not this harness.
+
+**What was NOT flipped, and why.** `metal-buffer-pool` and `metal-q4k-split-k` are net LOSSES in sweep 2 (3.19x and 3.21x vs A0's 2.99x) and stay default-off. `metal-q4k-mask-fma` and `metal-q4k-single-fetch` are flat-to-marginal on top of B1 in sweep 3 (B2/B3 both slightly worse than B1) and stay default-off per the brief's instruction not to default anything sweep 3 did not name as part of the winning arm.
+
+**Gates** (`CARGO_TARGET_DIR=/Users/brianbruggeman/repos/slot-0/proxima-wt-land-flip/target CARGO_TERM_COLOR=never`): see the commit's own gate log for exit codes and pass counts, run against this row's flipped defaults.
+
+**Re-prove command:**
+```sh
+cd /Users/brianbruggeman/repos/slot-0/proxima-wt-land-flip
+CARGO_TARGET_DIR=/Users/brianbruggeman/repos/slot-0/proxima-wt-land-flip/target \
+PROXIMA_MAX_TOKENS=8 cargo test --release -p proxima-model-interop --features metal,instrument --lib -- \
+  --exact --nocapture --ignored \
+  bind::real_openchat_file::runs_the_cached_decode_loop_on_the_metal_backend_and_reports_the_plan_cache
+```
+With default `metal` features now carrying the two winners, this command's own step timings should reproduce sweep 3 arm B1's ~43 ms/token, not sweep 2 A0's 52.660 -- the re-prove IS the flip's own falsifier.

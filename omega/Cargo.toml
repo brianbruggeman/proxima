@@ -35,6 +35,11 @@ cpu = ["std", "proxima-tensor/std"]
 # on here because the parity test binary links proxima-tensor's
 # `cpu::evaluate` as its oracle — the driver's own prepare pipeline
 # (infer/annotate/lower) is alloc-tier already and needs no such thing.
+# winners of the 2026-09-04 sweep 3 arm B1 (43.052 ms/token, CoV 0.56%,
+# 2.443x vs llama.cpp; op_count 938; text identical): `metal-output-placement`
+# and `metal-wide-cooperative-reduce` fold in here too, so `cargo nextest run
+# -p omega --features metal` exercises the same default decode path as
+# proxima-model-interop's `metal` feature.
 metal = [
     "std",
     "dep:objc2",
@@ -46,6 +51,8 @@ metal = [
     "dep:libc",
     "dep:block2",
     "proxima-tensor/std",
+    "metal-output-placement",
+    "metal-wide-cooperative-reduce",
 ]
 # Name reservations for `Backend`'s remaining variants (`src/backend.rs`) —
 # every variant exists regardless of which of these are on, so a caller can

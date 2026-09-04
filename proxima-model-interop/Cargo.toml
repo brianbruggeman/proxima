@@ -59,7 +59,16 @@ instrument = ["proxima-tensor/instrument", "omega?/instrument", "dep:proxima-tel
 # framework off Apple hardware; any future call site into `omega::metal`
 # must additionally gate on `target_os = "macos"` directly, matching how
 # `omega` gates its own re-exports.
-metal = ["dep:omega", "std"]
+# winners of the 2026-09-04 sweep 3 arm B1 (43.052 ms/token, CoV 0.56%,
+# 2.443x vs llama.cpp; op_count 938; text identical): `metal-output-placement`
+# and `metal-wide-cooperative-reduce` fold into the default decode path here,
+# `proxima-tensor/docs/discipline.md` ROW recorded.
+metal = [
+    "dep:omega",
+    "std",
+    "metal-output-placement",
+    "metal-wide-cooperative-reduce",
+]
 # opt-in cached-attention physical step for the real serving/decode harness.
 cached-attention-streaming = [
     "dep:omega",
