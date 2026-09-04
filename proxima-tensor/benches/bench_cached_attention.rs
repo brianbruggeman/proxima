@@ -25,6 +25,11 @@ fn data(length: usize, width: usize, seed: f32) -> Vec<f32> {
         .collect()
 }
 
+struct MaterializedScratch<'buffer> {
+    scores: &'buffer mut [f32],
+    weights: &'buffer mut [f32],
+}
+
 fn materialized_attention(
     queries: [&[f32]; 2],
     keys: [[&[f32]; 2]; 2],
@@ -32,9 +37,9 @@ fn materialized_attention(
     output: &mut [f32],
     cached_key_rows: usize,
     new_key_rows: usize,
-    scores: &mut [f32],
-    weights: &mut [f32],
+    scratch: MaterializedScratch<'_>,
 ) {
+    let MaterializedScratch { scores, weights } = scratch;
     for query_row in 0..QUERY_ROWS {
         for kv_head in 0..KV_HEADS {
             for query_group in 0..QUERY_GROUPS {
@@ -94,8 +99,8 @@ fn bench_cached_attention(c: &mut Criterion) {
         let query_odd = data(QUERY_ROWS * KV_HEADS * QUERY_GROUPS, HEAD_DIM / 2, 2.0);
         let cached_key_even = data(cached_key_rows * KV_HEADS, HEAD_DIM / 2, 3.0);
         let cached_key_odd = data(cached_key_rows * KV_HEADS, HEAD_DIM / 2, 4.0);
-        let new_key_even = data(1 * KV_HEADS, HEAD_DIM / 2, 5.0);
-        let new_key_odd = data(1 * KV_HEADS, HEAD_DIM / 2, 6.0);
+        let new_key_even = data(KV_HEADS, HEAD_DIM / 2, 5.0);
+        let new_key_odd = data(KV_HEADS, HEAD_DIM / 2, 6.0);
         let cached_value = data(cached_key_rows * KV_HEADS, HEAD_DIM, 7.0);
         let new_value = data(KV_HEADS, HEAD_DIM, 8.0);
         let mut streamed_output = vec![0.0; QUERY_ROWS * KV_HEADS * QUERY_GROUPS * HEAD_DIM];
@@ -141,8 +146,10 @@ fn bench_cached_attention(c: &mut Criterion) {
             &mut materialized_output,
             cached_key_rows,
             1,
-            &mut scores,
-            &mut weights,
+            MaterializedScratch {
+                scores: &mut scores,
+                weights: &mut weights,
+            },
         );
         let maximum_difference = streamed_output
             .iter()
@@ -197,8 +204,10 @@ fn bench_cached_attention(c: &mut Criterion) {
                         &mut materialized_output,
                         cached_key_rows,
                         1,
-                        &mut scores,
-                        &mut weights,
+                        MaterializedScratch {
+                            scores: &mut scores,
+                            weights: &mut weights,
+                        },
                     );
                     black_box(&materialized_output);
                 });
