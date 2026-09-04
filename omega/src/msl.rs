@@ -3166,7 +3166,20 @@ fn push_packed_row_blocked_body(
             && !plain_product
             && cfg!(feature = "metal-q4k-single-fetch")
             && !cfg!(feature = "metal-q4k-split-k");
-        if use_single_fetch {
+        // `metal-q4k-ggml-port` (default-off): the verbatim ggml transcription,
+        // see [`push_q4k_ggml_port_body`]'s own doc. Requires `plain_product`
+        // (float-only scale-deferred shape, the same gate `q4k_pair_dot`'s own
+        // arm below needs) and takes priority over it -- both target the exact
+        // same design point, and when this feature is on it is the one under
+        // test. Not `metal-q4k-split-k`-aware, same posture as
+        // `push_q4k_single_fetch_body` above and for the identical reason: its
+        // `ib` loop has no `sgitg`/`split` stride of its own.
+        let use_ggml_port = plain_product
+            && cfg!(feature = "metal-q4k-ggml-port")
+            && !cfg!(feature = "metal-q4k-split-k");
+        if use_ggml_port {
+            push_q4k_ggml_port_body(source, weight, other, rows, block_bytes);
+        } else if use_single_fetch {
             push_q4k_single_fetch_body(
                 source,
                 resolved,
@@ -3557,6 +3570,160 @@ fn push_q4k_single_fetch_body(
         source.push_str("                }\n");
         source.push_str("            }\n");
     }
+    source.push_str("        }\n");
+    source.push_str("    }\n");
+}
+
+// ggml (llama.cpp, MIT license: https://github.com/ggml-org/llama.cpp/blob/
+// master/LICENSE) `kernel_mul_mv_q4_K_f32_impl<4,2,32>`
+// (ggml-metal.metal:5086-5193), transcribed line-for-line onto this crate's
+// operand-base/stride addressing. See `push_q4k_ggml_port_body`'s own doc for
+// what is and is not identical to the upstream source.
+//
+/// `metal-q4k-ggml-port` (default-off): a VERBATIM port of ggml's
+/// `kernel_mul_mv_q4_K_f32_impl<nr0=4, nsg=2, nw=32>`
+/// (`ggml-metal.metal:5086-5193`) -- every prior landing on this path
+/// (`q4k_pair_dot`'s `plain_product` arm above, `metal-q4k-mask-fma`,
+/// `metal-q4k-single-fetch`) is this crate's own RE-DERIVATION of pieces of
+/// ggml's technique through its `q4k_header`/`q4k_run8` abstractions; this
+/// function instead transcribes ggml's actual per-thread math with no
+/// intermediate abstraction, so the only remaining difference from upstream
+/// is address computation (`weight_base[q]`/`other_base[0]`/`other_stride`,
+/// this crate's per-axis strided reads, instead of ggml's raw `nb01` pointer
+/// walk -- ggml's own `q1 += args.nb01/2` row-advance is behaviorally
+/// identical to this function's per-row `blk` recompute for the contiguous
+/// packed-row layout this crate always uses).
+///
+/// Per-thread split (ggml-metal.metal:5100-5103), unchanged from the
+/// existing row-blocked preamble's own lane assignment: `ix = lane/8`
+/// (0..3, which of 4 super-blocks in today's `ib` stride this lane owns),
+/// `it = lane%8` (0..7), `iq = it/4` (0 or 1, selects `q1` vs `q2`'s 64-byte
+/// `qs` half), `ir = it%4` (0..3, a 4-uint16 stride within that half).
+///
+/// Super-block iteration (ggml-metal.metal:5132,5182): `for (ib = ix; ib <
+/// nb; ib += 4)`, `nb = reduction_total / 256`; `y4` (the activation gather
+/// base) advances by `4 * QK_K` (1024) elements per iteration, matching
+/// ggml's `y4 += 4 * QK_K`.
+///
+/// Scale/min extraction (ggml-metal.metal:5096-5098,5142-5150): three fixed
+/// masks, `kmask1 = 0x3f3f` (two 6-bit scale/min fields), `kmask2 = 0x0f0f`
+/// (two 4-bit high-scale/high-min fields), `kmask3 = 0xc0c0` (the two
+/// leftover high bits of the LOW fields, shifted into place with `>> 2`) --
+/// no shift-then-branch the way this file's own `q4k_scale_min` reads it.
+/// `sc16[0..3]` (aliased as 8 bytes `sc8[0..7]`) hold, in order: low-group
+/// low-half scale, low-group low-half min, low-group high-half scale,
+/// low-group high-half min, high-group low-half scale, high-group low-half
+/// min, high-group high-half scale, high-group high-half min.
+///
+/// Nibble extraction (ggml-metal.metal:5157-5166): FOUR fixed bit-position
+/// masks off each raw `uint16_t` word -- `& 0x000F`, `& 0x0F00`, `& 0x00F0`,
+/// `& 0xF000` -- no runtime shift at all. The `0x0F00`/`0xF000` masks leave
+/// their nibble sitting at bit 8/12, so the corresponding accumulator lane
+/// (`acc1[1]`/`acc1[3]`/`acc2[1]`/`acc2[3]`) is 256x too large; `0x00F0`
+/// leaves its nibble at bit 4, 16x too large. Both residuals are folded into
+/// the FINAL per-sub-block combine below (ggml-metal.metal:5171-5175)
+/// rather than corrected per element -- `1.0f/256.0f` on the odd
+/// accumulator lanes, `1.0f/16.0f` on the whole second scale/min term --
+/// this is the "mask-without-shift" technique `metal-q4k-mask-fma`'s own doc
+/// names but only ports for the header decode, not this accumulate.
+///
+/// SIMD reduction (ggml-metal.metal:5187-5192): unchanged from every other
+/// row-blocked arm -- `simd_sum(sumf[row])` combines the 32 lanes of one
+/// simdgroup, lane 0 alone writes -- handled by the shared
+/// `push_packed_row_combine_and_write` tail this function's caller still
+/// invokes after it returns.
+///
+/// Dispatch geometry: `nr0 = 4` is already this crate's own
+/// `PACKED_ROWS_PER_GROUP`; `nsg = 2` is wired separately, in
+/// `tiled_gemm_threadgroup_width`'s own `metal-q4k-ggml-port` arm.
+#[allow(clippy::too_many_arguments)]
+fn push_q4k_ggml_port_body(
+    source: &mut String,
+    weight: usize,
+    other: usize,
+    rows: usize,
+    block_bytes: usize,
+) {
+    source.push_str("    uint ix = (uint)lane / 8u;\n");
+    source.push_str("    uint it = (uint)lane % 8u;\n");
+    source.push_str("    uint iq = it / 4u;\n");
+    source.push_str("    uint ir = it % 4u;\n");
+    source.push_str(&format!(
+        "    int super_blocks = (int)u.reduction_total / {Q4K_BLOCK_ELEMENTS};\n"
+    ));
+    source.push_str("    float yl[16];\n");
+    source.push_str("    float yh[16];\n");
+    source.push_str("    for (int ib = (int)ix; ib < super_blocks; ib += 4) {\n");
+    source.push_str(&format!(
+        "        long y4_base = other_base[0] + (long)ib * {Q4K_BLOCK_ELEMENTS} * other_stride + (long)(64u * iq + 8u * ir) * other_stride;\n"
+    ));
+    source.push_str("        float sumy0 = 0.0f; float sumy1 = 0.0f; float sumy2 = 0.0f; float sumy3 = 0.0f;\n");
+    source.push_str(&format!("        for (uint i = 0u; i < 8u; ++i) {{\n            yl[i] = in{other}[y4_base + (long)i * other_stride]; sumy0 += yl[i];\n"));
+    source.push_str(&format!(
+        "            yl[i + 8u] = in{other}[y4_base + (long)(i + 32u) * other_stride]; sumy1 += yl[i + 8u];\n"
+    ));
+    source.push_str(&format!(
+        "            yh[i] = in{other}[y4_base + (long)(i + 128u) * other_stride]; sumy2 += yh[i];\n"
+    ));
+    source.push_str(&format!(
+        "            yh[i + 8u] = in{other}[y4_base + (long)(i + 160u) * other_stride]; sumy3 += yh[i + 8u];\n"
+    ));
+    source.push_str("        }\n");
+    source.push_str(&format!("        for (int q = 0; q < {rows}; ++q) {{\n"));
+    source.push_str(&format!(
+        "            device const uchar *blk = in{weight} + ((int)weight_base[q] / {Q4K_BLOCK_ELEMENTS} + ib) * {block_bytes};\n"
+    ));
+    source.push_str("            device const ushort *sc = (device const ushort *)(blk + 4) + iq;\n");
+    source.push_str("            device const ushort *q1 = (device const ushort *)(blk + 16) + 16u * iq + 4u * ir;\n");
+    source.push_str("            device const ushort *q2 = q1 + 32;\n");
+    source.push_str("            device const half *dh = (device const half *)blk;\n");
+    source.push_str("            ushort sc16_0 = sc[0] & (ushort)0x3f3fu;\n");
+    source.push_str("            ushort sc16_1 = sc[2] & (ushort)0x3f3fu;\n");
+    source.push_str(
+        "            ushort sc16_2 = (ushort)(((sc[4] >> 0) & (ushort)0x0f0fu) | ((sc[0] & (ushort)0xc0c0u) >> 2));\n",
+    );
+    source.push_str(
+        "            ushort sc16_3 = (ushort)(((sc[4] >> 4) & (ushort)0x0f0fu) | ((sc[2] & (ushort)0xc0c0u) >> 2));\n",
+    );
+    source.push_str("            uchar sc8_0 = (uchar)(sc16_0 & 0xffu); uchar sc8_1 = (uchar)(sc16_0 >> 8);\n");
+    source.push_str("            uchar sc8_2 = (uchar)(sc16_1 & 0xffu); uchar sc8_3 = (uchar)(sc16_1 >> 8);\n");
+    source.push_str("            uchar sc8_4 = (uchar)(sc16_2 & 0xffu); uchar sc8_5 = (uchar)(sc16_2 >> 8);\n");
+    source.push_str("            uchar sc8_6 = (uchar)(sc16_3 & 0xffu); uchar sc8_7 = (uchar)(sc16_3 >> 8);\n");
+    source.push_str(
+        "            float acc1_0 = 0.0f; float acc1_1 = 0.0f; float acc1_2 = 0.0f; float acc1_3 = 0.0f;\n",
+    );
+    source.push_str(
+        "            float acc2_0 = 0.0f; float acc2_1 = 0.0f; float acc2_2 = 0.0f; float acc2_3 = 0.0f;\n",
+    );
+    source.push_str("            for (uint i = 0u; i < 4u; ++i) {\n");
+    source.push_str("                ushort word1 = q1[i];\n");
+    source.push_str("                ushort word2 = q2[i];\n");
+    source.push_str("                acc1_0 += yl[2u * i + 0u] * (float)(word1 & (ushort)0x000Fu);\n");
+    source.push_str("                acc1_1 += yl[2u * i + 1u] * (float)(word1 & (ushort)0x0F00u);\n");
+    source.push_str("                acc1_2 += yl[2u * i + 8u] * (float)(word1 & (ushort)0x00F0u);\n");
+    source.push_str("                acc1_3 += yl[2u * i + 9u] * (float)(word1 & (ushort)0xF000u);\n");
+    source.push_str("                acc2_0 += yh[2u * i + 0u] * (float)(word2 & (ushort)0x000Fu);\n");
+    source.push_str("                acc2_1 += yh[2u * i + 1u] * (float)(word2 & (ushort)0x0F00u);\n");
+    source.push_str("                acc2_2 += yh[2u * i + 8u] * (float)(word2 & (ushort)0x00F0u);\n");
+    source.push_str("                acc2_3 += yh[2u * i + 9u] * (float)(word2 & (ushort)0xF000u);\n");
+    source.push_str("            }\n");
+    source.push_str("            float dall = (float)dh[0];\n");
+    source.push_str("            float dmin = (float)dh[1];\n");
+    source.push_str(
+        "            sumf[q] = sumf[q] + dall * ((acc1_0 + (1.0f/256.0f) * acc1_1) * (float)sc8_0 +\n",
+    );
+    source.push_str(
+        "                                       (acc1_2 + (1.0f/256.0f) * acc1_3) * (float)sc8_1 * (1.0f/16.0f) +\n",
+    );
+    source.push_str(
+        "                                       (acc2_0 + (1.0f/256.0f) * acc2_1) * (float)sc8_4 +\n",
+    );
+    source.push_str(
+        "                                       (acc2_2 + (1.0f/256.0f) * acc2_3) * (float)sc8_5 * (1.0f/16.0f)) -\n",
+    );
+    source.push_str(
+        "                      dmin * (sumy0 * (float)sc8_2 + sumy1 * (float)sc8_3 + sumy2 * (float)sc8_6 + sumy3 * (float)sc8_7);\n",
+    );
     source.push_str("        }\n");
     source.push_str("    }\n");
 }
@@ -3969,6 +4136,10 @@ fn tiled_gemm_threadgroup_width(
             // is unreachable dead code for `Keep::Reduce` ops (every
             // `packed_row_block` match IS a `Keep::Reduce` op by
             // construction -- see `PackedRowBlock`'s own classification).
+            // `metal-q4k-ggml-port` needs the identical nsg=2 width (its own
+            // kernel body is ggml's, dispatched at ggml's own `N_SG_Q4_K`) --
+            // [`packed_row_nsg_factor`] is the one place both features widen
+            // from, so they cannot drift into two competing nsg constants.
             // `!metal-q4k-split-k` too: split-K's own combine (`push_packed_
             // row_combine_and_write`'s split-K arm) already picks a
             // cooperating `split` simdgroup count for a REAL reason -- a
@@ -3976,8 +4147,10 @@ fn tiled_gemm_threadgroup_width(
             // `sgitg`/`threadgroup` memory/a barrier -- and doubling the
             // dispatched width again on top of that here, unconditionally,
             // would desync the combine's own `split` from the width the
-            // driver actually dispatches. Every row-blocked body variant
-            // addresses its output group purely from `gid / SIMD_WIDTH`
+            // driver actually dispatches (confirmed: `--all-features`,
+            // ggml-port + split-K together, broke Q4_K parity outright,
+            // relative=1). Every row-blocked body variant addresses its
+            // output group purely from `gid / SIMD_WIDTH`
             // (`metal-packed-row-nsg2`'s own doc, still true here), so nsg=2
             // is correctness-neutral whenever split-K is off, regardless of
             // which body actually runs.
@@ -4085,29 +4258,41 @@ fn cooperative_reduce_width(
 }
 
 /// Simdgroups per threadgroup for the row-blocked packed path, mirroring
-/// ggml's `N_SG_Q4_K` (`ggml-metal-impl.h:33`). Feature-gated
-/// (`metal-packed-row-nsg2`), default-off until the nano bench in
-/// `docs/discipline.md` ROW 270 clears the compile-out-clean + e2e gates a
-/// production default requires.
-#[cfg(all(feature = "metal-packed-row-nsg2", not(feature = "metal-q4k-split-k")))]
+/// ggml's `N_SG_Q4_K` (`ggml-metal-impl.h:33`). Feature-gated -- either
+/// `metal-packed-row-nsg2` (this crate's own body, widened experimentally) or
+/// `metal-q4k-ggml-port` (ggml's own body, dispatched at ggml's own nsg=2)
+/// wants it, and both want the identical `2`, so one constant serves both
+/// rather than each feature minting its own copy. Default-off until the nano
+/// bench in `docs/discipline.md` ROW 270 clears the compile-out-clean + e2e
+/// gates a production default requires.
+#[cfg(all(
+    any(feature = "metal-packed-row-nsg2", feature = "metal-q4k-ggml-port"),
+    not(feature = "metal-q4k-split-k")
+))]
 const PACKED_ROW_NSG: usize = 2;
 
 /// [`tiled_gemm_threadgroup_width`]'s own nsg multiplier for the packed
-/// row-blocked path -- `PACKED_ROW_NSG` with `metal-packed-row-nsg2` on and
+/// row-blocked path -- `PACKED_ROW_NSG` with either nsg2 feature on and
 /// `metal-q4k-split-k` off (see that call site's own doc for why split-K
 /// must win when both are compiled in), `1` otherwise. Two functions, not a
 /// `cfg!()` branch inline, so a feature-off build never references
 /// `PACKED_ROW_NSG` from code it does not generate (mirrors
 /// [`packed_row_split_factor`]'s own on/off pair).
-#[cfg(all(feature = "metal-packed-row-nsg2", not(feature = "metal-q4k-split-k")))]
+#[cfg(all(
+    any(feature = "metal-packed-row-nsg2", feature = "metal-q4k-ggml-port"),
+    not(feature = "metal-q4k-split-k")
+))]
 fn packed_row_nsg_factor() -> u64 {
     PACKED_ROW_NSG as u64
 }
 
-/// The `metal-packed-row-nsg2`-off (or `metal-q4k-split-k`-on) arm: nsg
-/// widening never engages, so the factor is always `1` -- see
-/// [`packed_row_nsg_factor`]'s feature-on twin for the real policy.
-#[cfg(not(all(feature = "metal-packed-row-nsg2", not(feature = "metal-q4k-split-k"))))]
+/// The nsg2-features-off (or `metal-q4k-split-k`-on) arm: nsg widening never
+/// engages, so the factor is always `1` -- see [`packed_row_nsg_factor`]'s
+/// feature-on twin for the real policy.
+#[cfg(not(all(
+    any(feature = "metal-packed-row-nsg2", feature = "metal-q4k-ggml-port"),
+    not(feature = "metal-q4k-split-k")
+)))]
 fn packed_row_nsg_factor() -> u64 {
     1
 }
@@ -6075,7 +6260,10 @@ mod tests {
     /// on (and `metal-q4k-split-k` off, so `split == 1`), the packed
     /// row-blocked matmul's threadgroup width must be exactly double the
     /// one-simdgroup default.
-    #[cfg(all(feature = "metal-packed-row-nsg2", not(feature = "metal-q4k-split-k")))]
+    #[cfg(all(
+        feature = "metal-packed-row-nsg2",
+        not(feature = "metal-q4k-split-k")
+    ))]
     #[test]
     fn packed_row_nsg2_doubles_the_threadgroup_width_for_a_packed_row_blocked_matmul() {
         let bound = matmul_op(4, 256, 5);
@@ -6100,11 +6288,45 @@ mod tests {
     }
 
     /// [`packed_row_nsg2_doubles_the_threadgroup_width_for_a_packed_row_blocked_matmul`]'s
-    /// feature-off twin: without `metal-packed-row-nsg2` compiled in, the
+    /// own twin for the OTHER feature that shares [`packed_row_nsg_factor`]:
+    /// `metal-q4k-ggml-port` dispatches ggml's own body at ggml's own
+    /// nsg=2, so it must double the threadgroup width the identical way
+    /// `metal-packed-row-nsg2` does -- same assertion, different feature,
+    /// proving the two features compose through one factor rather than two
+    /// competing nsg constants.
+    #[cfg(all(
+        feature = "metal-q4k-ggml-port",
+        not(feature = "metal-q4k-split-k")
+    ))]
+    #[test]
+    fn ggml_port_doubles_the_threadgroup_width_for_a_packed_row_blocked_matmul() {
+        let bound = matmul_op(4, 256, 5);
+        let weight_node = bound.operands()[0].0;
+        let mut q4k = BTreeMap::new();
+        q4k.insert(weight_node, PackedCodec::Q4K);
+        let quantized = operand_codecs(&bound, &q4k);
+
+        assert!(
+            packed_row_block(&bound, &quantized).is_some(),
+            "test fixture must actually take the row-blocked path for this assertion to mean anything"
+        );
+
+        let width = tiled_gemm_threadgroup_width(&bound, &quantized)
+            .expect("a packed row-blocked reduce always has a threadgroup width");
+        assert_eq!(
+            width,
+            SIMD_WIDTH * 2,
+            "metal-q4k-ggml-port must double the one-simdgroup default width to 2 \
+             simdgroups (PACKED_ROW_NSG); got {width}"
+        );
+    }
+
+    /// [`packed_row_nsg2_doubles_the_threadgroup_width_for_a_packed_row_blocked_matmul`]'s
+    /// feature-off twin: without EITHER nsg2 feature compiled in, the
     /// same fixture's threadgroup width must stay at the pre-existing
     /// one-simdgroup shape -- proves the fix is additive, not a change to
     /// the default dispatch geometry.
-    #[cfg(not(feature = "metal-packed-row-nsg2"))]
+    #[cfg(not(any(feature = "metal-packed-row-nsg2", feature = "metal-q4k-ggml-port")))]
     #[test]
     fn packed_row_nsg2_off_leaves_the_threadgroup_width_unchanged() {
         let bound = matmul_op(4, 256, 5);

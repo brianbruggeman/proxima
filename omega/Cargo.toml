@@ -204,6 +204,27 @@ metal-output-placement = ["metal"]
 # `zero_placed_buffer` helper below through one dependency edge, mirroring
 # every other `proxima-tensor/*` passthrough in this file.
 kv-capacity-bucket = ["proxima-tensor/kv-capacity-bucket"]
+# Line-for-line port of ggml's `kernel_mul_mv_q4_K_f32_impl<4,2,32>`
+# (`ggml-metal.metal:5086-5193`, MIT-licensed, upstream:
+# https://github.com/ggml-org/llama.cpp/blob/master/ggml/src/ggml-metal/ggml-metal.metal)
+# for the row-blocked packed `Q4_K` matvec (`msl.rs`'s `push_q4k_ggml_port_body`).
+# Every prior landing on this path (`q4k_pair_dot`'s `plain_product` arm,
+# `metal-q4k-mask-fma`, `metal-q4k-single-fetch`) is a RE-DERIVATION of pieces
+# of ggml's technique through this crate's own header-decode/`q4k_run8`
+# abstractions -- this feature instead transcribes ggml's `sc16`/`kmask1..3`
+# scale extraction and `acc1`/`acc2` masked-word accumulation verbatim, so the
+# only difference left from the incumbent is address computation (this
+# crate's per-axis `operand_base`/`operand_strides` reads instead of ggml's
+# raw `nb01` pointer walk). Also sets the dispatch geometry to ggml's own
+# `nsg=2`/`nr0=4` (64-thread threadgroups, `tiled_gemm_threadgroup_width`)
+# under this feature specifically, since ggml's nsg=2 threadgroup was
+# measured a FOUR-time negative every time it was tried on OUR body
+# (`metal-packed-row-nsg2`, ledger ROWs 249,251-254,259-260,265-267) --
+# untested until now is nsg=2 paired with ggml's OWN math rather than ours.
+# Default-off per the same discipline as `metal-tiled-gemm` above: a kernel
+# body rewrite earns the production default only after a quiet-box
+# decode-step seal, not on the "verbatim port" argument alone.
+metal-q4k-ggml-port = ["metal"]
 
 [dependencies]
 bytemuck = { version = "1.25.2", optional = true }
