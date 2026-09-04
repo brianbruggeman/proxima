@@ -1,16 +1,28 @@
 //! The real cached-forward graph fixture, shared by `metal_real_forward.rs`
-//! (CPU vs the raw Metal driver) and `backend_parity.rs` (CPU vs Metal
-//! through `omega::backend`'s wrapper) — lifted out of the former so the
-//! SAME program, roots and named block data feed both gates rather than two
-//! copies that can drift on which named block gets which random seed.
+//! (CPU vs the raw Metal driver), `backend_parity.rs` (CPU vs Metal through
+//! `omega::backend`'s wrapper), `wgpu_parity.rs`, and
+//! `cached_attention_coop_load_parity.rs` (the single-range fused kind) —
+//! lifted out of the first so the SAME program, roots and named block data
+//! feed every gate rather than a copy per binary that can drift on which
+//! named block gets which random seed.
 
 // fixture construction is hand-built to succeed; an expect failure here IS
 // the fixture being broken, same convention as every other `omega/tests/*.rs` file.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
+// each `omega/tests/*.rs` file is its own separate binary crate that `mod
+// support`s this file wholesale, and no single binary calls every builder
+// here (e.g. `cached_attention_coop_load_parity.rs` only ever needs the
+// single-range builder, never the two-range one `metal_real_forward.rs`
+// exercises) -- `-D dead-code` is workspace-wide (`Cargo.toml`'s `[lints]`),
+// so whichever builder a given binary does not reach reads as genuinely
+// dead FROM THAT BINARY's isolated compilation, even though a sibling
+// binary calls it. A per-binary `#[cfg(test)]`-style split would only
+// re-create the very duplication this shared module exists to avoid.
+#![allow(dead_code)]
 
-use proxima_tensor::spec::mistral_cached_forward_program;
+use proxima_tensor::spec::{mistral_cached_forward_program, mistral_single_range_cached_forward_program};
 use proxima_tensor::test_support::Lcg;
-use proxima_tensor::{NodeId, Op, QuantizedBlock, infer};
+use proxima_tensor::{NodeId, Op, QuantizedBlock, block_node_ids, infer};
 
 fn random_vec(seed: u64, count: usize) -> Vec<f32> {
     let mut lcg = Lcg(seed);
@@ -92,6 +104,94 @@ pub fn real_forward_fixture_with_cached_len(cached_len: u64) -> RealForwardFixtu
             vec![1e-5f32; count]
         } else {
             random_vec(position as u64 + 1, count)
+        };
+        named.push((name, data));
+    }
+
+    (program, symbols, roots, named)
+}
+
+/// The single-range counterpart of [`real_forward_fixture_with_cached_len`]:
+/// same real op set and shape family (2-layer, 64-wide GQA), built from
+/// [`mistral_single_range_cached_forward_program`] instead, whose
+/// `causal_mask_merged` band `bind`'s `cached_attention_single_range_
+/// candidates` pattern-matches into the NINE-operand dynamic-`cached_len`
+/// [`proxima_tensor::BoundOpKind::CachedAttention`] (`omega/src/msl.rs`'s
+/// `render_cached_attention` doc) rather than the eight-operand two-range
+/// kind [`real_forward_fixture_with_cached_len`] exercises.
+///
+/// `padding` reproduces `kv-capacity-bucket`'s KV-extent rounding directly:
+/// every `kv_cache.*` named block gets `cached_len + new_count` real random
+/// rows followed by `padding` zero-filled rows (`sequence = cached_len +
+/// new_count + padding` total, fed as symbol 1 — the buffer's own shape),
+/// while the `cached_len` named scalar input carries the true band bound
+/// unchanged — exactly the shape a real KV-capacity bucket one step ahead of
+/// the true cache length looks like at runtime, and the divergence this is
+/// built to catch: a kernel that mis-sizes its cooperative-load stride
+/// against the padded shape instead of the real band would read past
+/// `merged_len` into the zero-filled tail.
+pub fn real_single_range_forward_fixture_with_padding(
+    cached_len: u64,
+    new_count: u64,
+    padding: u64,
+) -> RealForwardFixture {
+    const VOCAB: u32 = 64;
+    const EMBEDDING: u32 = 64;
+    const FEED_FORWARD: u32 = 128;
+    const QUERY_HEADS: u32 = 4;
+    const KV_HEADS: u32 = 2;
+    const HEAD_DIM: u32 = 16;
+    const LAYERS: u32 = 2;
+
+    let (program, logits_root, cache_roots) = mistral_single_range_cached_forward_program(
+        VOCAB,
+        EMBEDDING,
+        FEED_FORWARD,
+        QUERY_HEADS,
+        KV_HEADS,
+        HEAD_DIM,
+        LAYERS,
+    )
+    .expect("the single-range forward program builds");
+
+    let mut roots = vec![logits_root];
+    for (even, odd, value) in &cache_roots {
+        roots.push(*even);
+        roots.push(*odd);
+        roots.push(*value);
+    }
+
+    let merged_len = cached_len + new_count;
+    let sequence = merged_len + padding;
+    let symbols = vec![new_count, sequence];
+    let shapes = infer(&program, &symbols).expect("the single-range forward infers");
+
+    let mut named: Vec<(String, Vec<f32>)> = Vec::new();
+    for node in block_node_ids(&program) {
+        let Op::Input { name, .. } = &program[node.0 as usize] else {
+            unreachable!("block_node_ids only ever returns Op::Input nodes")
+        };
+        let name = name
+            .clone()
+            .expect("every block input in this program is named");
+        let count: usize = shapes
+            .of(node)
+            .iter()
+            .map(|extent| *extent as usize)
+            .product();
+        let data = if name == "ids" {
+            vec![3.0f32; count]
+        } else if name == "eps" {
+            vec![1e-5f32; count]
+        } else if name == "cached_len" {
+            vec![cached_len as f32]
+        } else if name.starts_with("kv_cache.") {
+            let per_row = count / sequence as usize;
+            let mut data = random_vec(node.0 as u64 + 1, merged_len as usize * per_row);
+            data.resize(count, 0.0);
+            data
+        } else {
+            random_vec(node.0 as u64 + 1, count)
         };
         named.push((name, data));
     }
