@@ -202,12 +202,14 @@ const ROWS_TO_CHECK: usize = 64;
 /// `Q4_K`/`Q5_K`/`Q6_K`-only -- the row COUNT is what the split-K gate keys
 /// off, not which tensor it came from, and slicing a real quantized weight
 /// to a row count is exactly [`ROWS_TO_CHECK`]'s own established pattern.
+#[cfg(feature = "metal-q4k-split-k")]
 const SPLIT_K_STARVED_ROWS: usize = 1024;
 
 /// `attn_q`/`attn_output`'s full real output row count in this checkpoint --
 /// the boundary shape [`crate::sized::PACKED_ROW_SPLIT_K_MAX_ROWS`]'s
 /// default (4096) still includes (`rows <= max_rows`), so split-K engages
 /// here too, not just at [`SPLIT_K_STARVED_ROWS`].
+#[cfg(feature = "metal-q4k-split-k")]
 const SPLIT_K_BOUNDARY_ROWS: usize = 4096;
 
 fn run_real_attn_q_parity(rows_to_check: usize) {
