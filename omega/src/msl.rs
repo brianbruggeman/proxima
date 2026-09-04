@@ -3916,21 +3916,28 @@ fn tiled_gemm_threadgroup_width(
         }
         if packed_row_block(resolved, quantized).is_some() {
             let (_base, split) = packed_row_dispatch(output_axes, &resolved.extents);
-            return Some(SIMD_WIDTH * split);
+            // `metal-packed-row-nsg2`'s own `nsg=2` geometry (ggml's
+            // `N_SG_Q4_K`, `ggml-metal-impl.h:33`) has to be applied HERE,
+            // not in the `#[cfg(feature = "metal-packed-row-nsg2")]` arm
+            // below -- this `if let` block's own `packed_row_block` check
+            // returns unconditionally whenever it matches, so that arm below
+            // is unreachable dead code for `Keep::Reduce` ops (every
+            // `packed_row_block` match IS a `Keep::Reduce` op by
+            // construction -- see `PackedRowBlock`'s own classification).
+            // `!metal-q4k-split-k` too: split-K's own combine (`push_packed_
+            // row_combine_and_write`'s split-K arm) already picks a
+            // cooperating `split` simdgroup count for a REAL reason -- a
+            // starved shape's simdgroups share one output group via
+            // `sgitg`/`threadgroup` memory/a barrier -- and doubling the
+            // dispatched width again on top of that here, unconditionally,
+            // would desync the combine's own `split` from the width the
+            // driver actually dispatches. Every row-blocked body variant
+            // addresses its output group purely from `gid / SIMD_WIDTH`
+            // (`metal-packed-row-nsg2`'s own doc, still true here), so nsg=2
+            // is correctness-neutral whenever split-K is off, regardless of
+            // which body actually runs.
+            return Some(SIMD_WIDTH * split * packed_row_nsg_factor());
         }
-    }
-    #[cfg(feature = "metal-packed-row-nsg2")]
-    if packed_row_block(resolved, quantized).is_some() {
-        // ggml's `N_SG_Q4_K` (`ggml-metal-impl.h:33`): PACKED_ROW_NSG
-        // simdgroups cooperate in one threadgroup instead of one, halving
-        // threadgroup count for the same `grid.threads` -- `push_packed_row_
-        // blocked_body` addresses its output group purely from
-        // `gid / SIMD_WIDTH` (`thread_position_in_grid`), which
-        // `dispatchThreads:threadsPerThreadgroup:` assigns identically
-        // regardless of how threads are grouped into threadgroups, so
-        // widening here needs no `sgitg`/row-indexing change in the kernel
-        // body itself (`docs/discipline.md` ROW 270).
-        return Some((PACKED_ROW_NSG as u64) * SIMD_WIDTH);
     }
     if packed_row_block(resolved, quantized).is_some() {
         return Some(crate::sized::PACKED_ROW_BLOCK_SIMDGROUPS * SIMD_WIDTH);
@@ -4037,8 +4044,28 @@ fn cooperative_reduce_width(
 /// (`metal-packed-row-nsg2`), default-off until the nano bench in
 /// `docs/discipline.md` ROW 270 clears the compile-out-clean + e2e gates a
 /// production default requires.
-#[cfg(feature = "metal-packed-row-nsg2")]
+#[cfg(all(feature = "metal-packed-row-nsg2", not(feature = "metal-q4k-split-k")))]
 const PACKED_ROW_NSG: usize = 2;
+
+/// [`tiled_gemm_threadgroup_width`]'s own nsg multiplier for the packed
+/// row-blocked path -- `PACKED_ROW_NSG` with `metal-packed-row-nsg2` on and
+/// `metal-q4k-split-k` off (see that call site's own doc for why split-K
+/// must win when both are compiled in), `1` otherwise. Two functions, not a
+/// `cfg!()` branch inline, so a feature-off build never references
+/// `PACKED_ROW_NSG` from code it does not generate (mirrors
+/// [`packed_row_split_factor`]'s own on/off pair).
+#[cfg(all(feature = "metal-packed-row-nsg2", not(feature = "metal-q4k-split-k")))]
+fn packed_row_nsg_factor() -> u64 {
+    PACKED_ROW_NSG as u64
+}
+
+/// The `metal-packed-row-nsg2`-off (or `metal-q4k-split-k`-on) arm: nsg
+/// widening never engages, so the factor is always `1` -- see
+/// [`packed_row_nsg_factor`]'s feature-on twin for the real policy.
+#[cfg(not(all(feature = "metal-packed-row-nsg2", not(feature = "metal-q4k-split-k"))))]
+fn packed_row_nsg_factor() -> u64 {
+    1
+}
 
 // the emitter threads a bound op's full shape (rank, axes, reduce op, init,
 // element type, codec flags) into one kernel body; splitting that into a
@@ -5922,4 +5949,65 @@ mod tests {
         );
     }
 
+    /// Reachability proof for [`packed_row_nsg_factor`] (found dead: the
+    /// `#[cfg(feature = "metal-packed-row-nsg2")]` arm in
+    /// `tiled_gemm_threadgroup_width` sat AFTER an unconditional
+    /// `packed_row_block` return in the `Keep::Reduce` `if let` above it, so
+    /// it could never run for any op that reaches this function -- every
+    /// `packed_row_block` match IS a `Keep::Reduce` op by construction, see
+    /// `PackedRowBlock`'s own classification). With `metal-packed-row-nsg2`
+    /// on (and `metal-q4k-split-k` off, so `split == 1`), the packed
+    /// row-blocked matmul's threadgroup width must be exactly double the
+    /// one-simdgroup default.
+    #[cfg(all(feature = "metal-packed-row-nsg2", not(feature = "metal-q4k-split-k")))]
+    #[test]
+    fn packed_row_nsg2_doubles_the_threadgroup_width_for_a_packed_row_blocked_matmul() {
+        let bound = matmul_op(4, 256, 5);
+        let weight_node = bound.operands()[0].0;
+        let mut q4k = BTreeMap::new();
+        q4k.insert(weight_node, PackedCodec::Q4K);
+        let quantized = operand_codecs(&bound, &q4k);
+
+        assert!(
+            packed_row_block(&bound, &quantized).is_some(),
+            "test fixture must actually take the row-blocked path for this assertion to mean anything"
+        );
+
+        let width = tiled_gemm_threadgroup_width(&bound, &quantized)
+            .expect("a packed row-blocked reduce always has a threadgroup width");
+        assert_eq!(
+            width,
+            SIMD_WIDTH * 2,
+            "metal-packed-row-nsg2 must double the one-simdgroup default width to 2 \
+             simdgroups (PACKED_ROW_NSG); got {width}"
+        );
+    }
+
+    /// [`packed_row_nsg2_doubles_the_threadgroup_width_for_a_packed_row_blocked_matmul`]'s
+    /// feature-off twin: without `metal-packed-row-nsg2` compiled in, the
+    /// same fixture's threadgroup width must stay at the pre-existing
+    /// one-simdgroup shape -- proves the fix is additive, not a change to
+    /// the default dispatch geometry.
+    #[cfg(not(feature = "metal-packed-row-nsg2"))]
+    #[test]
+    fn packed_row_nsg2_off_leaves_the_threadgroup_width_unchanged() {
+        let bound = matmul_op(4, 256, 5);
+        let weight_node = bound.operands()[0].0;
+        let mut q4k = BTreeMap::new();
+        q4k.insert(weight_node, PackedCodec::Q4K);
+        let quantized = operand_codecs(&bound, &q4k);
+
+        assert!(
+            packed_row_block(&bound, &quantized).is_some(),
+            "test fixture must actually take the row-blocked path for this assertion to mean anything"
+        );
+
+        let width = tiled_gemm_threadgroup_width(&bound, &quantized)
+            .expect("a packed row-blocked reduce always has a threadgroup width");
+        assert_eq!(
+            width, SIMD_WIDTH,
+            "without metal-packed-row-nsg2 the packed row-blocked path must stay at one \
+             simdgroup; got {width}"
+        );
+    }
 }
