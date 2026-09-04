@@ -196,6 +196,14 @@ wgpu-backend = ["std", "dep:wgpu", "dep:pollster", "dep:bytemuck", "proxima-tens
 # Depends on `metal`, not just `std`: `PlacedBuffer` is an `objc2-metal`
 # buffer handle, meaningless off that backend.
 metal-output-placement = ["metal"]
+# passthrough to `proxima-tensor/kv-capacity-bucket` -- omega itself has no
+# plan cache and nothing here changes; `proxima-model-interop`'s
+# `BackendRuntime` is the only plan-cache owner this feature affects. Wired
+# through this crate purely so `proxima-model-interop`'s own
+# `kv-capacity-bucket` feature can reach `sized::KV_BUCKET_TOKENS` and the
+# `zero_placed_buffer` helper below through one dependency edge, mirroring
+# every other `proxima-tensor/*` passthrough in this file.
+kv-capacity-bucket = ["proxima-tensor/kv-capacity-bucket"]
 
 [dependencies]
 bytemuck = { version = "1.25.2", optional = true }

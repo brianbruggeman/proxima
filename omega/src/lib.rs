@@ -59,7 +59,7 @@ pub use metal::{
 #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
 pub use metal::{
     PlacedBuffer, allocate_placed_buffer, execute_plan_named_with_placements,
-    execute_plan_with_placements, read_placed_buffer_f32,
+    execute_plan_with_placements, read_placed_buffer_f32, zero_placed_buffer,
 };
 #[cfg(all(
     feature = "metal-output-placement",

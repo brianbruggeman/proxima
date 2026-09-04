@@ -681,6 +681,36 @@ pub fn allocate_placed_buffer(byte_len: usize) -> Result<PlacedBuffer, MetalErro
         })
 }
 
+/// Zero-fills the first `byte_len` bytes of `buffer`. A freshly allocated
+/// `MTLBuffer`'s contents are undefined (`allocate_fault_buffer`'s own
+/// doc), and [`allocate_placed_buffer`] never zero-fills -- most callers
+/// only ever read positions they themselves already wrote. The
+/// `kv-capacity-bucket` padded-tail read is the exception: a decode step
+/// binds the KV `Op::Input` leaf to `bucket` rows (`bucket > merged_len`),
+/// so `[merged_len, bucket)` is read even though this call never wrote it.
+/// `causal_mask_merged` masks that range's attention SCORE to `-inf`
+/// exactly (`ScalarOp::Select` picks the constant without reading the
+/// garbage key), but the softmax weight it produces (`0.0`) still
+/// multiplies the corresponding V row -- `0.0 * garbage` is `0.0` only if
+/// the garbage is a normal float; an uninitialized `NaN`/`Inf` bit pattern
+/// survives that multiply. `proxima-model-interop`'s
+/// `run_decode_loop_placed_kv` calls this once per KV buffer at
+/// allocation (not per token): every row a later step ever reads was
+/// either zeroed here or overwritten by a REAL rotated key/value this same
+/// call wrote first, since `cached_len` only grows.
+#[cfg(feature = "metal-output-placement")]
+pub fn zero_placed_buffer(buffer: &PlacedBuffer, byte_len: usize) {
+    let pointer = buffer.contents();
+    // SAFETY: `buffer` is `storageModeShared` (`allocate_placed_buffer`'s
+    // own contract) and `byte_len` is the caller's own allocated length
+    // for it (mirrors `read_placed_buffer_f32`'s own SAFETY comment), so
+    // this is a valid, CPU-visible, mutable byte slice for the duration of
+    // this call.
+    let slots =
+        unsafe { core::slice::from_raw_parts_mut(pointer.as_ptr().cast::<u8>(), byte_len) };
+    slots.fill(0);
+}
+
 /// Reads `element_count` `f32`s back from `buffer` starting at `byte_offset`
 /// — the read-back counterpart to a placed write, for a caller that wants to
 /// inspect what an [`execute_plan_with_placements`] call wrote without going
