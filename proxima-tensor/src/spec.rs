@@ -11126,6 +11126,208 @@ value = 1.0
         }
     }
 
+    /// CARD 6.1's falsifiable claim: `proxima-model-interop`'s
+    /// `kv-capacity-bucket` feature rounds the single-range KV extent
+    /// (`Extent::Symbolic(1)`, bound via `symbols[1]`) up from the true,
+    /// strictly-increasing `merged_len` to `bucket = ceil(merged_len /
+    /// KV_BUCKET_TOKENS) * KV_BUCKET_TOKENS`, so the Metal plan-cache key
+    /// (`(new_count, symbols[1])`) stays constant across a whole bucket of
+    /// decode steps. This must not move a single bit of the decode step's
+    /// logits, PROVIDED the padded tail `[merged_len, bucket)` reads as
+    /// exactly zero: [`causal_mask_merged`]'s existing `key_index >
+    /// query_absolute` comparison already masks every key index
+    /// `>= merged_len` as "future" for every query in this call (no
+    /// query's own absolute position ever reaches a padded key's index,
+    /// since the last query sits at `merged_len - 1`), so
+    /// `ScalarOp::Select` picks the constant `neg_infinity` for the whole
+    /// padded tail without ever reading it -- zero new `Op`/`BoundOpKind`/
+    /// `ScalarOp`/`IndexMap` variant, exactly `Cargo.toml`'s
+    /// `kv-capacity-bucket` doc states. Covers the three bucket sizes CARD
+    /// 6.1 names (8, 32, 256) with `cached_len` set to span each bucket's
+    /// own boundary (one merged_len below it, exactly on it, one above
+    /// it) against a one-new-token decode step -- 9 cases.
+    #[cfg(feature = "kv-capacity-bucket")]
+    #[test]
+    fn cpu_mask_zero_ulp() {
+        const VOCAB: usize = 5;
+        const EMBEDDING: usize = 4;
+        const FEED_FORWARD: usize = 4;
+        const QUERY_HEADS: usize = 2;
+        const KV_HEADS: usize = 1;
+        const HEAD_DIM: usize = 2;
+        const PAIRS: usize = HEAD_DIM / 2;
+        const GROUP: usize = QUERY_HEADS / KV_HEADS;
+        const BLOCK_COUNT: u32 = 2;
+        const NEW_COUNT: usize = 1;
+
+        fn bucket_of(merged_len: usize, bucket_tokens: usize) -> usize {
+            merged_len.div_ceil(bucket_tokens) * bucket_tokens
+        }
+
+        // tight (unbucketed, `symbols[1] == merged_len`) vs padded
+        // (`symbols[1] == bucket`) logits for the SAME weights, SAME
+        // `cached_len`, SAME real KV content in `[0, merged_len)` --
+        // built once and sliced/extended, never regenerated per arm, so
+        // any divergence is the mask, not a different random draw.
+        fn logits_at(cached_len: usize, bucket_tokens: usize) -> (Vec<f32>, Vec<f32>) {
+            let merged_len = cached_len + NEW_COUNT;
+            let bucket = bucket_of(merged_len, bucket_tokens);
+            let ids_f32: Vec<f32> = (0..merged_len as u32).map(|id| (1 + id % 3) as f32).collect();
+
+            let table = random_vec(10, VOCAB * EMBEDDING);
+            let eps_new = alloc::vec![1e-5f32; NEW_COUNT];
+            let (cos_new, sin_new) = rope_angles(cached_len, NEW_COUNT, PAIRS, HEAD_DIM);
+
+            let layer_names: Vec<[alloc::string::String; 9]> = (0..BLOCK_COUNT as usize)
+                .map(|layer| {
+                    [
+                        alloc::format!("blk.{layer}.attn_norm.weight"),
+                        alloc::format!("blk.{layer}.ffn_norm.weight"),
+                        alloc::format!("blk.{layer}.attn_q.weight"),
+                        alloc::format!("blk.{layer}.attn_k.weight"),
+                        alloc::format!("blk.{layer}.attn_v.weight"),
+                        alloc::format!("blk.{layer}.attn_output.weight"),
+                        alloc::format!("blk.{layer}.ffn_gate.weight"),
+                        alloc::format!("blk.{layer}.ffn_up.weight"),
+                        alloc::format!("blk.{layer}.ffn_down.weight"),
+                    ]
+                })
+                .collect();
+            let kv_cache_names: Vec<[alloc::string::String; 3]> = (0..BLOCK_COUNT as usize)
+                .map(|layer| {
+                    [
+                        alloc::format!("kv_cache.{layer}.k_even"),
+                        alloc::format!("kv_cache.{layer}.k_odd"),
+                        alloc::format!("kv_cache.{layer}.v"),
+                    ]
+                })
+                .collect();
+
+            let mut common_named: Vec<(&str, &[f32])> =
+                alloc::vec![("token_embd.weight", table.as_slice())];
+            let mut layer_weights: Vec<[Vec<f32>; 9]> = Vec::with_capacity(BLOCK_COUNT as usize);
+            let mut seed = 900u64;
+            for _ in 0..BLOCK_COUNT {
+                layer_weights.push([
+                    alloc::vec![1.0f32; EMBEDDING],
+                    alloc::vec![1.0f32; EMBEDDING],
+                    random_vec(seed, EMBEDDING * QUERY_HEADS * HEAD_DIM),
+                    random_vec(seed + 1, EMBEDDING * KV_HEADS * HEAD_DIM),
+                    random_vec(seed + 2, EMBEDDING * KV_HEADS * HEAD_DIM),
+                    random_vec(seed + 3, KV_HEADS * GROUP * HEAD_DIM * EMBEDDING),
+                    random_vec(seed + 4, EMBEDDING * FEED_FORWARD),
+                    random_vec(seed + 5, EMBEDDING * FEED_FORWARD),
+                    random_vec(seed + 6, FEED_FORWARD * EMBEDDING),
+                ]);
+                seed += 7;
+            }
+            for (layer_index, weights) in layer_weights.iter().enumerate() {
+                let names = &layer_names[layer_index];
+                for (name, data) in names.iter().zip(weights.iter()) {
+                    common_named.push((name.as_str(), data.as_slice()));
+                }
+            }
+            let output_norm = alloc::vec![1.0f32; EMBEDDING];
+            let lm_head = random_vec(seed, EMBEDDING * VOCAB);
+            common_named.push(("output_norm.weight", output_norm.as_slice()));
+            common_named.push(("output.weight", lm_head.as_slice()));
+
+            // per-layer KV cache, `bucket`-long, real random content in
+            // `[0, merged_len)`, EXACT zero in the padded tail
+            // `[merged_len, bucket)` -- the tail-zero invariant
+            // `run_decode_loop_placed_kv`'s own one-time buffer zero-fill
+            // provides at runtime (`omega::metal::zero_placed_buffer`).
+            let mut k_even_padded: Vec<Vec<f32>> = Vec::with_capacity(BLOCK_COUNT as usize);
+            let mut k_odd_padded: Vec<Vec<f32>> = Vec::with_capacity(BLOCK_COUNT as usize);
+            let mut v_padded: Vec<Vec<f32>> = Vec::with_capacity(BLOCK_COUNT as usize);
+            let mut kv_seed = 5000u64;
+            for _ in 0..BLOCK_COUNT {
+                let mut k_even = random_vec(kv_seed, merged_len * KV_HEADS * PAIRS);
+                k_even.resize(bucket * KV_HEADS * PAIRS, 0.0);
+                let mut k_odd = random_vec(kv_seed + 1, merged_len * KV_HEADS * PAIRS);
+                k_odd.resize(bucket * KV_HEADS * PAIRS, 0.0);
+                let mut v = random_vec(kv_seed + 2, merged_len * KV_HEADS * HEAD_DIM);
+                v.resize(bucket * KV_HEADS * HEAD_DIM, 0.0);
+                k_even_padded.push(k_even);
+                k_odd_padded.push(k_odd);
+                v_padded.push(v);
+                kv_seed += 3;
+            }
+
+            let (program, root, _) = mistral_single_range_cached_forward_program(
+                VOCAB as u32,
+                EMBEDDING as u32,
+                FEED_FORWARD as u32,
+                QUERY_HEADS as u32,
+                KV_HEADS as u32,
+                HEAD_DIM as u32,
+                BLOCK_COUNT,
+            )
+            .expect("single-range cached forward pass lowers");
+
+            let cached_len_scalar = alloc::vec![cached_len as f32];
+            let run = |extent: usize, k_even: &[Vec<f32>], k_odd: &[Vec<f32>], v: &[Vec<f32>]| {
+                let mut named = common_named.clone();
+                named.push(("ids", ids_f32[cached_len..].as_ref()));
+                named.push(("eps", eps_new.as_slice()));
+                named.push(("rope_cos", cos_new.as_slice()));
+                named.push(("rope_sin", sin_new.as_slice()));
+                named.push(("cached_len", cached_len_scalar.as_slice()));
+                for (layer_index, names) in kv_cache_names.iter().enumerate() {
+                    named.push((names[0].as_str(), k_even[layer_index].as_slice()));
+                    named.push((names[1].as_str(), k_odd[layer_index].as_slice()));
+                    named.push((names[2].as_str(), v[layer_index].as_slice()));
+                }
+                let symbols = [NEW_COUNT as u64, extent as u64];
+                let evaluated = crate::cpu::evaluate_named(&program, &symbols, &named, &[root])
+                    .expect("single-range decode call evaluates");
+                evaluated.get(root).expect("logits present").0.to_vec()
+            };
+
+            let tight_k_even: Vec<Vec<f32>> = k_even_padded
+                .iter()
+                .map(|column| column[..merged_len * KV_HEADS * PAIRS].to_vec())
+                .collect();
+            let tight_k_odd: Vec<Vec<f32>> = k_odd_padded
+                .iter()
+                .map(|column| column[..merged_len * KV_HEADS * PAIRS].to_vec())
+                .collect();
+            let tight_v: Vec<Vec<f32>> = v_padded
+                .iter()
+                .map(|column| column[..merged_len * KV_HEADS * HEAD_DIM].to_vec())
+                .collect();
+
+            let tight_logits = run(merged_len, &tight_k_even, &tight_k_odd, &tight_v);
+            let padded_logits = run(bucket, &k_even_padded, &k_odd_padded, &v_padded);
+            (tight_logits, padded_logits)
+        }
+
+        let cases: Vec<(usize, usize)> = [8usize, 32, 256]
+            .into_iter()
+            .flat_map(|bucket_tokens| {
+                [
+                    bucket_tokens.saturating_sub(2),
+                    bucket_tokens.saturating_sub(1),
+                    bucket_tokens,
+                ]
+                .into_iter()
+                .map(move |cached_len| (bucket_tokens, cached_len))
+            })
+            .collect();
+        assert_eq!(cases.len(), 9, "3 bucket sizes x 3 boundary-spanning cached_len values");
+
+        for (bucket_tokens, cached_len) in cases {
+            let (tight, padded) = logits_at(cached_len, bucket_tokens);
+            std::println!(
+                "cpu_mask_zero_ulp bucket_tokens={bucket_tokens} cached_len={cached_len} tight={tight:?} padded={padded:?}"
+            );
+            assert_eq!(
+                tight, padded,
+                "bucket_tokens={bucket_tokens} cached_len={cached_len}: bucketed KV extent diverged from the tight extent, 0-ULP required"
+            );
+        }
+    }
+
     /// Classifies every [`crate::bind::BoundOp`] a real decode step binds as
     /// VARIANT (its resolved shape/layout/body changes when `cached_len`
     /// changes) or INVARIANT (it does not), by binding the SAME program
