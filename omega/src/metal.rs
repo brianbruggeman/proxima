@@ -894,8 +894,15 @@ pub fn execute_plan_with_placements(
     }
     encoder.endEncoding();
 
+    #[cfg(feature = "instrument")]
+    let gpu_exec_started = read_ticks();
     command_buffer.commit();
     command_buffer.waitUntilCompleted();
+    #[cfg(feature = "instrument")]
+    {
+        counter!(GPU_EXEC_CALLS, 1);
+        counter!(GPU_EXEC_TICKS, elapsed_ticks(gpu_exec_started));
+    }
 
     for (bound, fault_buffer, gathers) in &pending_faults {
         check_gather_fault(bound, fault_buffer, *gathers)?;
