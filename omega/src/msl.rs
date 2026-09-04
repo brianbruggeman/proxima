@@ -956,22 +956,67 @@ pub(crate) fn kernel_dispatch_shape(
 
 /// Whether `resolved` is a `Keep::Reduce` fold whose `reduce_op` is
 /// associative and commutative (`Add`, `Multiply`, `Maximum`, `Minimum`) with
-/// no gathered operand — the set [`render_reduce`] emits a SIMD-group
-/// cooperative loop for instead of the one-thread-per-output serial fold.
-/// `Subtract`/`Divide` are not associative, so reordering their combination
-/// across lanes is not imprecise, it is wrong — they and every other
-/// `ScalarOp` stay on the serial path. Gather is excluded too: cooperative
-/// striding would need each lane recording its own fault-slot contribution,
-/// which this pass does not implement — default to serial when unsure.
+/// no gathered operand, AND whose reduced-axis extent meets
+/// [`crate::sized::COOPERATIVE_REDUCE_MIN_LEN`] — the set [`render_reduce`]
+/// emits a SIMD-group cooperative loop for instead of the one-thread-per-
+/// output serial fold. `Subtract`/`Divide` are not associative, so
+/// reordering their combination across lanes is not imprecise, it is wrong —
+/// they and every other `ScalarOp` stay on the serial path. Gather is
+/// excluded too: cooperative striding would need each lane recording its own
+/// fault-slot contribution, which this pass does not implement — default to
+/// serial when unsure.
+///
+/// The length gate exists because a cooperative reduce always launches
+/// `SIMD_WIDTH`(32) lanes per output regardless of how many elements each
+/// output folds — a 34-long attention reduce pays a full `simd_sum` combine
+/// for 34 elements of real work across 32 mostly-idle lanes. `min_len == 0`
+/// (the sentinel, not a real length any reduce can be shorter than) makes
+/// this check vacuous, so every op that clears the op/gather gate above
+/// stays cooperative — the routing every build before this key existed used,
+/// and the `omega-runtime.toml` default: that "mostly-idle lanes" framing
+/// turned out to predict the wrong direction on real hardware (that file's
+/// own `[cooperative_reduce]` doc has the measured numbers) — these
+/// reduces are memory-latency-bound, and the serial route's 32x-fewer
+/// threads hides less load latency than the idle lanes cost, so routing
+/// short reduces off cooperative made them slower, not faster.
 fn reduce_is_cooperative(resolved: &BoundOp) -> bool {
     match &resolved.kind {
         BoundOpKind::Reduce {
             keep: Keep::Reduce,
             reduce_op,
+            output_axes,
             ..
-        } => gather_count(resolved) == 0 && is_cooperative_reduce_op(*reduce_op),
+        } => {
+            gather_count(resolved) == 0
+                && is_cooperative_reduce_op(*reduce_op)
+                && meets_cooperative_min_len(reduction_len(resolved, output_axes))
+        }
         _ => false,
     }
+}
+
+/// `length >= COOPERATIVE_REDUCE_MIN_LEN`, factored out so clippy's
+/// `absurd_extreme_comparisons` lint has one site to allow rather than every
+/// call site: at the `omega-runtime.toml` default (0, `u64::MIN`) the
+/// comparison IS always true, and that is the intended behavior (see
+/// `reduce_is_cooperative`'s own doc) -- a config-driven threshold cannot be
+/// assumed non-degenerate by the linter, but `OMEGA_COOPERATIVE_REDUCE_MIN_
+/// LEN` overriding it to a real value at build time makes this a genuine
+/// runtime-varying comparison, not dead code.
+#[allow(clippy::absurd_extreme_comparisons)]
+fn meets_cooperative_min_len(length: u64) -> bool {
+    length >= crate::sized::COOPERATIVE_REDUCE_MIN_LEN
+}
+
+/// Total element count one output folds over: the product of the extents of
+/// every dim [`reduction_dims`] names. Zero-rank (a scalar operand reduced
+/// over nothing) has no `reduce_dims`, so `product()` over the empty
+/// iterator correctly yields `1` — one element, itself.
+fn reduction_len(resolved: &BoundOp, output_axes: &[u16]) -> u64 {
+    reduction_dims(resolved, output_axes)
+        .iter()
+        .map(|&dim| resolved.extents[dim as usize])
+        .product()
 }
 
 fn is_cooperative_reduce_op(op: ScalarOp) -> bool {
@@ -5799,6 +5844,77 @@ mod tests {
             kernel.grid.threadgroup_width,
             Some(32),
             "the driver must dispatch exactly one SIMD-group per threadgroup"
+        );
+    }
+
+    /// A single 1-D input folded fully to a scalar via `Add` — the plain
+    /// shape [`reduce_is_cooperative`]'s length gate reasons about, without
+    /// `matmul_op`'s fused elementwise-multiply step muddying which reduce
+    /// length is under test.
+    fn single_axis_sum_op(reduce_len: u32) -> BoundOp {
+        let mut program = Vec::new();
+        let source = append(
+            &mut program,
+            Op::Input {
+                dtype: DType::Float32,
+                shape: vec![Extent::Static(reduce_len)],
+                name: None,
+            },
+        );
+        append(
+            &mut program,
+            Op::Reduce(Reduce {
+                dtype: DType::Float32,
+                body: ScalarOp::Add,
+                init: ReduceInit::Zero,
+                operand: source,
+                in_map: IndexMap::Affine(map::projection(1, &[0])),
+                out_map: IndexMap::Affine(map::projection(1, &[])),
+                keep: Keep::Reduce,
+                name: None,
+            }),
+        );
+        let shapes = infer(&program, &[]).expect("single-axis sum infers");
+        bind(&program, &shapes, &[])
+            .expect("single-axis sum lowers")
+            .into_iter()
+            .next()
+            .expect("one bound emitted")
+    }
+
+    /// Proven against the COMPILED `COOPERATIVE_REDUCE_MIN_LEN` constant,
+    /// not a hardcoded 128 — this same test body is the re-prove artifact for
+    /// BOTH claims the short-reduce initiative makes: at the
+    /// `omega-runtime.toml` default (128) it covers the exact shapes that
+    /// motivated the threshold (34 `attended`, 64 `score_even`/`score_odd`
+    /// now serial; 127/128 the boundary; 4096 `sum_squares` staying
+    /// cooperative), and re-run under `OMEGA_COOPERATIVE_REDUCE_MIN_LEN=0`
+    /// (a distinct build — the constant is compile-time) it proves 0
+    /// restores every-qualifying-reduce-stays-cooperative, the routing every
+    /// build before this key existed used, because `>= 0` is vacuously true
+    /// for every case including the 34-length one.
+    #[proxima::test]
+    #[case::attended_34(34)]
+    #[case::score_even_odd_64(64)]
+    #[case::one_below_threshold_127(127)]
+    #[case::at_threshold_128(128)]
+    #[case::sum_squares_4096(4096)]
+    async fn reduce_routes_on_reduced_axis_length_against_min_len(#[case] reduce_len: u32) {
+        let bound = single_axis_sum_op(reduce_len);
+        let expected_cooperative = meets_cooperative_min_len(u64::from(reduce_len));
+
+        assert_eq!(
+            reduce_is_cooperative(&bound),
+            expected_cooperative,
+            "reduce_len={reduce_len} vs COOPERATIVE_REDUCE_MIN_LEN={}",
+            crate::sized::COOPERATIVE_REDUCE_MIN_LEN
+        );
+
+        let kernel = emit(&bound, &BTreeMap::new()).expect("single-axis sum emits");
+        assert_eq!(
+            kernel.source.contains("simd_sum(accumulator)"),
+            expected_cooperative,
+            "emitted kernel source must agree with reduce_is_cooperative's own routing decision"
         );
     }
 
