@@ -28,6 +28,28 @@ Purpose:
   Huffman behavior.
 - Not part of Proxima's production protocol path.
 
+### ggml/llama.cpp q4_K Metal kernel port
+
+Location:
+
+- `omega/src/msl.rs` — `push_q4k_ggml_port_body`
+
+Source:
+
+- `ggml` (vendored inside `llama.cpp`), `kernel_mul_mv_q4_K_f32_impl<4,2,32>`
+- Original file: https://github.com/ggml-org/llama.cpp/blob/master/ggml/src/ggml-metal/ggml-metal.metal
+  (lines 5086-5193 at the time of porting; no upstream commit hash is named in
+  the in-tree comment)
+- License: MIT — https://github.com/ggml-org/llama.cpp/blob/master/LICENSE
+- Copyright notice retained in the ported file (see comment above
+  `push_q4k_ggml_port_body`).
+
+Purpose:
+
+- `metal-q4k-ggml-port` (default-off): a verbatim transcription of ggml's
+  per-thread q4_K matvec math, used as a home-turf comparison arm against this
+  crate's own `q4k_header`/`q4k_run8` re-derivation of the same technique.
+
 ### tracing-subscriber benchmark shape
 
 Location:

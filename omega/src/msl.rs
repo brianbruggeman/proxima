@@ -4284,6 +4284,8 @@ fn push_q4k_single_fetch_body(
 // operand-base/stride addressing. See `push_q4k_ggml_port_body`'s own doc for
 // what is and is not identical to the upstream source.
 //
+// Copyright (c) 2023-2024 The ggml authors. MIT-licensed; see THIRD_PARTY.md.
+//
 /// `metal-q4k-ggml-port` (default-off): a VERBATIM port of ggml's
 /// `kernel_mul_mv_q4_K_f32_impl<nr0=4, nsg=2, nw=32>`
 /// (`ggml-metal.metal:5086-5193`) -- every prior landing on this path
