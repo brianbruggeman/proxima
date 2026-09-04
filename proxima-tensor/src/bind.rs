@@ -2173,7 +2173,8 @@ fn cached_attention_candidates(
                 break;
             };
             if lookup.is_some() || layout.strides.iter().any(|stride| *stride < 0) {
-                continue;
+                operands.clear();
+                break;
             }
             operands.push((source, layout.clone(), None));
         }
@@ -2401,7 +2402,8 @@ fn cached_attention_single_range_candidates(
                 break;
             };
             if lookup.is_some() || layout.strides.iter().any(|stride| *stride < 0) {
-                continue;
+                operands.clear();
+                break;
             }
             operands.push((source, layout.clone(), None));
         }
@@ -2910,6 +2912,67 @@ mod tests {
             "one fused cached-attention step per layer on the real openchat shape"
         );
     }
+
+    /// A gathered (or negative-strided) source must abort the candidate
+    /// outright rather than merely skip its own push -- the `continue`
+    /// this test guards against left `operands` one entry short of
+    /// `source_nodes`, relying on the length check further down to reject
+    /// the misaligned vector rather than aborting where the defect is
+    /// found. Reproduces the real single-range fixture, then patches one
+    /// of `cached_attention_single_range_candidates`' own eight source
+    /// nodes -- read straight off the baseline candidate's fused operand
+    /// list, never guessed -- to carry a `Lookup` in `resolved`, the exact
+    /// shape a dynamic KV-cache-page gather would leave behind.
+    #[test]
+    #[cfg(feature = "cached-attention-streaming")]
+    fn a_gathered_source_aborts_the_single_range_candidate_entirely() {
+        let (program, logits, cache_roots) =
+            crate::spec::mistral_single_range_cached_forward_program(32, 16, 24, 4, 2, 4, 1)
+                .expect("single-range fixture builds");
+        let mut outputs = alloc::vec![logits];
+        for (even, odd, value) in &cache_roots {
+            outputs.extend_from_slice(&[*even, *odd, *value]);
+        }
+        let shapes =
+            crate::shape::infer(&program, &[1, 5]).expect("single-range fixture infers");
+        let mut resolved = bind_plain(&program, &shapes, &outputs).expect("plain bind succeeds");
+
+        let baseline = cached_attention_single_range_candidates(&program, &shapes, &resolved, &outputs);
+        assert!(
+            !baseline.is_empty(),
+            "the unpatched fixture must still produce a fusable candidate"
+        );
+        let BoundOpKind::CachedAttention { operands, .. } = &baseline[0].0.kind else {
+            panic!("single-range candidate must carry CachedAttention operands");
+        };
+        let gathered_source = operands[0].0;
+
+        for bound in &mut resolved {
+            let operands = match &mut bound.kind {
+                BoundOpKind::CachedAttention { operands, .. }
+                | BoundOpKind::Elementwise { operands, .. }
+                | BoundOpKind::Reduce { operands, .. } => operands,
+                BoundOpKind::Iota | BoundOpKind::Constant { .. } => continue,
+            };
+            for (node, layout, lookup) in operands.iter_mut() {
+                if *node == gathered_source {
+                    *lookup = Some(Lookup {
+                        indices: gathered_source,
+                        index_layout: layout.clone(),
+                        element_stride: 1,
+                        extent: 1,
+                    });
+                }
+            }
+        }
+
+        let patched = cached_attention_single_range_candidates(&program, &shapes, &resolved, &outputs);
+        assert!(
+            patched.is_empty(),
+            "a gathered source must abort the candidate, not just shrink its operand list"
+        );
+    }
+
     use crate::dtype::DType;
     use crate::map;
     use crate::op::{Extent, append};
