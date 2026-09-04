@@ -260,7 +260,41 @@ discipline row that carries the tables is the one the flip commit adds after ROW
 | `metal-buffer-pool` / `metal-q4k-split-k` | 56.24 / 56.50 | | 1194 | losses, stay default-off |
 
 `generated_text` identical on every arm; device bytes 3970-3977 MiB and RSS 54-77 MiB on every
-arm (the memory rule held). What the sweeps refute in this document: the buffer pool (§5 card
+arm (the memory rule held).
+
+Second wave, same day, each on the then-current default and each landed or recorded:
+
+| change | ms/token (default oracle) | what the measurement says |
+|---|---|---|
+| KV extent bucketed to 32 tokens (cards 6.1-6.3; ROW 273) | **40.88** (2.32x), `plan_hits` 5 of 8, text identical | prepare 3.7 → 1.1 ms on hit steps; bucket 256 is a loss (+5.6 ms) because `op_setup` scales with the padded extent; the placed path already carried a `cached_len` leaf and its causal mask masks padded keys, so ZERO new ops were needed (938 on every arm) |
+| byte counters (card 0.2; ROW 272) | unchanged | per-family bytes are tensor bytes (ffn_up 33.05 MB, output.weight 107.5 MB, 4.17 GB/token); `uniform_cache_len` = 57, which REFUTES the D6 candidate mechanism for the device slope |
+| op-timed executor for the placed path (main `80c526a`) | unchanged | per-op attribution restored on the default: packed Q4_K 225 ops 25.8 ms, cooperative 225 ops 4.4, elementwise 451 ops 5.8; ffn families stream at 172-186 GB/s vs the incumbent's 229, attn_k/v at 66-78 |
+| verbatim port of ggml's `kernel_mul_mv_q4_K_f32_impl<4,2,32>` (`metal-q4k-ggml-port`) | +16% `gpu_exec` on a contended box, direction confirmed twice at the ffn_up shape | a fifth negative for the incumbent's geometry on our tree; and it exposed that the `metal-packed-row-nsg2` arm was unreachable dead code, so every earlier nsg=2 "negative" here measured nothing |
+| split-K gated to rows ≤ N (card 10.2's entry-gated form) | loss on every arm | attn_k/v go 79 → 31 GB/s under any cap; compiling the feature in taxes every packed matvec ~5% (a runtime division at `split == 1`) |
+| fused `CachedAttention` on the placed path | no signal (42.80 vs 42.88) | its matcher returns zero candidates on the single-range program; the kernel §8.1 rejected and the owner merged is dead code on the default |
+| removing the 64 `Identity` regroup copies and fusing the RoPE halves (graph) | not landable | blocked by the algebra: `unify_iteration_space` (`shape.rs:225-229`) pins an axis only from a single-term coefficient-1 operand, `Multiply` is arity 2 (`op.rs:95-103`), and `CachedLayerRoots = (even, odd, value)` is consumed at 15+ sites — a design decision for the owner, not a card |
+
+| serial route for reductions shorter than `[cooperative_reduce] min_len` | +10% wall; the 64-long score reduces 3x slower, `eps` control flat | these reductions are memory-LATENCY-bound: 32 lanes per output hide DRAM latency, one thread per output does not; the knob lands inert at 0 |
+
+What is left after the second wave, per token on the default: matvec ≈23.5 ms at ≈170 GB/s
+aggregate against the incumbent's 229 (≈6 ms), attention in latency-bound ops ≈8 ms (a
+34-long and a 64-long reduction per head; more threads per output helped, fewer hurt), RoPE and
+regroup copies ≈3.5 ms (algebra-blocked), orchestration ≈6 ms after bucketing.
+
+Two decisions only the owner can make, because each changes the algebra or adds a kernel the
+RISC does not currently express:
+1. **Attention.** The measured facts point at one fused per-layer attention kernel (Q·K over the
+   cached range, softmax, ·V) with threadgroup-cooperative K/V row loads — the incumbent's
+   flash-attention-vector shape — replacing 7 launch-bound ops per layer (≈8 ms/token). The
+   merged `CachedAttention` kernel is not that kernel: its matcher never fires on the
+   single-range program and, where it did fire on the old tree, its GPU time was worse. Doing
+   this right is a new emitter body for an existing `Reduce` shape (one bound kind, no new `Op`),
+   plus the graph writing attention as that shape.
+2. **Extent inference and arity.** The 64 `Identity` regroup copies and the four RoPE ops per
+   layer exist because `unify_iteration_space` pins an axis only from a single-term
+   coefficient-1 operand axis and elementwise bodies have arity 2. Relaxing either is an IR
+   change (`shape.rs:225-229`, `op.rs:95-103`) with a workspace-wide blast radius; the gain is
+   ≈3.5 ms/token. What the sweeps refute in this document: the buffer pool (§5 card
 6.5's premise) is a measured loss on the current tree, and split-K (card 10.2) is a measured
 loss at this shape; both stay selectable and recorded. What they confirm: the wide cooperative
 reduce (card 7.2, −2.9 ms alone, −2.1 ms on top of placement) and device-resident KV with

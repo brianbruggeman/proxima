@@ -20470,6 +20470,8 @@ mean 56.83 t/s, CoV 0.13% across rounds.
 
 Round 1 is a cold-process outlier for both arms (each round re-execs the binary). Rounds 2-3 alone: default mean 179.66 ms/token, nsg2 mean 220.57 ms/token -- nsg2 is ~23% SLOWER on end-to-end wall clock, opposite the direction a real win would show, though this wall-clock number is dominated by CPU-side `op_setup`/orchestration cost (~40ms/step total vs ~35ms gpu_exec), not the packed-matvec dispatch geometry this feature targets -- see the op-profile table below for the isolated signal.
 
+**Correction (same day, main `d34e2f9`):** the wall-clock column above is `total_wall_clock_ms / 8`, which averages step 0 (prefill plus the first-run pipeline compile, 1.4-3.0 s) into every token; it is not the steady-state number and its "~23% slower" read is an artefact of that. The steady-state default on the same tree, `step_wall_ms` over steps 1..7 only, two runs at load 6: **41.09 and 41.29 ms/token**, `plan_hits=5`, text identical (`sweep-logs/verify-*.log`). The per-family and `gpu_exec` columns, which are per-step, stand: nsg2 is flat on every family.
+
 **Per-family GPU time, one profile run per arm** (`profiles_one_real_decode_step_by_per_op_gpu_time`, step=3, `op_profile_family` lines, `gpu_ms`):
 
 | family | default gpu_ms | nsg2 gpu_ms | delta |
