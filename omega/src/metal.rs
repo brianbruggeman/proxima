@@ -171,6 +171,8 @@ use core::cell::RefCell;
 use core::ffi::c_void;
 use core::mem::{size_of, size_of_val};
 use core::ptr::NonNull;
+#[cfg(feature = "metal-buffer-pool")]
+use std::collections::HashMap;
 use std::sync::OnceLock;
 
 use half::f16;
@@ -521,6 +523,26 @@ pub fn execute_plan(plan: &Plan, blocks: &[QuantizedBlock<'_>]) -> Result<Evalua
                 log: "command buffer refused to hand out a compute encoder".to_string(),
             })?;
 
+    // `metal-buffer-pool` reclaim bookkeeping: which node ids are op OUTPUTS
+    // (never block inputs) and their `(bucket, dtype)` pool key -- built once,
+    // off `prepared.resolved`'s own node ids and the same `bound_output_len`/
+    // `dtype` `allocate_buffer` sizes from inside `encode_op`, run through the
+    // IDENTICAL `pool_bucket` function `allocate_buffer` itself uses. That
+    // identity is what keeps a reclaimed buffer's stored key equal to its own
+    // real Metal capacity -- see `OUTPUT_BUFFER_POOL`'s doc for the full
+    // invariant and the liveness argument this feeds.
+    #[cfg(feature = "metal-buffer-pool")]
+    let output_meta: BTreeMap<NodeId, (usize, DType)> = prepared
+        .resolved
+        .iter()
+        .map(|bound| {
+            let byte_length = bound_output_len(bound).max(1) * bound.dtype.size_bytes();
+            (bound.node, (pool_bucket(byte_length), bound.dtype))
+        })
+        .collect();
+    #[cfg(feature = "metal-buffer-pool")]
+    let mut reclaim_stash: Vec<(MetalBuffer, usize, DType)> = Vec::new();
+
     // pipelines live in this thread's `PIPELINE_CACHE`, not here: see that
     // static's own doc for why per-call was the defect.
     // (bound op, its fault buffer, gather count) for every op that gathered —
@@ -540,8 +562,24 @@ pub fn execute_plan(plan: &Plan, blocks: &[QuantizedBlock<'_>]) -> Result<Evalua
         if let Some((fault_buffer, gathers)) = fault {
             pending_faults.push((bound, fault_buffer, gathers));
         }
+        // `metal-buffer-pool` off: identical to this function before the
+        // feature existed -- a retired buffer is looked up once and dropped.
+        // `metal-buffer-pool` on: same lookup-and-remove, but an op-OUTPUT
+        // buffer (per `output_meta`) is ALSO cloned into `reclaim_stash`
+        // rather than only dropped -- the clone is not pushed into the pool
+        // until after this call's `waitUntilCompleted` below, so nothing here
+        // hands a still-pending buffer back out early.
+        #[cfg(not(feature = "metal-buffer-pool"))]
         for retired in &prepared.retires[position] {
             device_buffers.remove(retired);
+        }
+        #[cfg(feature = "metal-buffer-pool")]
+        for retired in &prepared.retires[position] {
+            if let Some((buffer, _offset)) = device_buffers.remove(retired)
+                && let Some(&(bucket, dtype)) = output_meta.get(retired)
+            {
+                reclaim_stash.push((buffer, bucket, dtype));
+            }
         }
     }
     encoder.endEncoding();
@@ -560,14 +598,45 @@ pub fn execute_plan(plan: &Plan, blocks: &[QuantizedBlock<'_>]) -> Result<Evalua
         check_gather_fault(bound, fault_buffer, *gathers)?;
     }
 
-    finish(
+    // Everything still in `device_buffers` at this point (never removed by
+    // the retirement loop above -- e.g. the root output and any other
+    // `effective_outputs` node) is now also safe to reclaim: the single
+    // command buffer this whole program ran in has already completed via
+    // `waitUntilCompleted` above. Cloned, not moved, so `finish` below still
+    // reads the same buffers to copy their bytes out.
+    #[cfg(feature = "metal-buffer-pool")]
+    for (node, (buffer, _offset)) in &device_buffers {
+        if let Some(&(bucket, dtype)) = output_meta.get(node) {
+            reclaim_stash.push((buffer.clone(), bucket, dtype));
+        }
+    }
+
+    let evaluated = finish(
         &plan.program,
         &prepared.index_nodes,
         &prepared.shapes,
         &prepared.effective_outputs,
         &device_buffers,
         prepared.root,
-    )
+    )?;
+
+    // `OUTPUT_POOL_MAX_PER_BUCKET`: a buffer beyond the cap for its
+    // `(bucket, dtype)` slot is dropped here (ordinary `Retained` drop, same
+    // as the `metal-buffer-pool`-off arm always did for every buffer) rather
+    // than retained -- see `OUTPUT_POOL_MAX_PER_BUCKET`'s own doc for why
+    // this is a safety net, not the primary bound.
+    #[cfg(feature = "metal-buffer-pool")]
+    OUTPUT_BUFFER_POOL.with(|pool| {
+        let mut pool = pool.borrow_mut();
+        for (buffer, bucket, dtype) in reclaim_stash {
+            let slot = pool.entry((bucket, dtype)).or_default();
+            if slot.len() < OUTPUT_POOL_MAX_PER_BUCKET {
+                slot.push(buffer);
+            }
+        }
+    });
+
+    Ok(evaluated)
 }
 
 /// A device buffer a CALLER allocates, owns, and keeps alive across multiple
@@ -1808,6 +1877,7 @@ fn pipeline_for(
     Ok(pipeline)
 }
 
+#[cfg(not(feature = "metal-buffer-pool"))]
 fn allocate_buffer(
     device: &ProtocolObject<dyn MTLDevice>,
     element_count: usize,
@@ -1819,6 +1889,160 @@ fn allocate_buffer(
         .ok_or_else(|| MetalError::CompileFailed {
             log: "device refused to allocate a shared buffer".to_string(),
         })
+}
+
+/// Pool-backed counterpart of the `metal-buffer-pool`-off `allocate_buffer`
+/// above -- identical contract (a buffer sized to hold `element_count`
+/// `dtype` elements), but the ACTUAL Metal allocation, on both the pool-hit
+/// and pool-miss paths, is always sized to `pool_bucket(byte_length)`, never
+/// to the tight `byte_length`. See `pool_bucket`'s doc for why that is what
+/// makes a bucketed pop sound, and `OUTPUT_BUFFER_POOL`'s doc for the
+/// invariant this maintains across the pool's whole lifetime.
+#[cfg(feature = "metal-buffer-pool")]
+fn allocate_buffer(
+    device: &ProtocolObject<dyn MTLDevice>,
+    element_count: usize,
+    dtype: DType,
+) -> Result<Retained<ProtocolObject<dyn MTLBuffer>>, MetalError> {
+    let byte_length = element_count.max(1) * dtype.size_bytes();
+    let bucket = pool_bucket(byte_length);
+    let pooled = OUTPUT_BUFFER_POOL.with(|pool| {
+        pool.borrow_mut()
+            .get_mut(&(bucket, dtype))
+            .and_then(Vec::pop)
+    });
+    if let Some(buffer) = pooled {
+        counter!(OUTPUT_BUFFER_POOL_REUSES, 1);
+        return Ok(buffer);
+    }
+    device
+        .newBufferWithLength_options(bucket, MTLResourceOptions::StorageModeShared)
+        .ok_or_else(|| MetalError::CompileFailed {
+            log: "device refused to allocate a shared buffer".to_string(),
+        })
+}
+
+/// Rounds `byte_length` up to the next power of two -- the pool's bucket
+/// function. A pool entry's KEY is always this bucket, and by
+/// [`allocate_buffer`]'s own invariant (every fresh allocation under this
+/// feature is sized to exactly `pool_bucket(request)` bytes, never to the
+/// tight request), a buffer stored under bucket `B` always has REAL Metal
+/// capacity `>= B` -- in fact exactly `B`, since nothing ever shrinks a
+/// buffer once allocated. So a pop from bucket `B` is sound for any request
+/// whose own bucket is `B`, i.e. any request in `(B/2, B]` bytes: never
+/// smaller than what was asked for.
+#[cfg(feature = "metal-buffer-pool")]
+fn pool_bucket(byte_length: usize) -> usize {
+    byte_length.next_power_of_two()
+}
+
+/// Per-bucket cap on retained buffers: [`execute_plan`]'s reclaim drain drops
+/// (never pools) any buffer beyond this many already resident in its
+/// `(bucket, dtype)` slot. Population is already naturally bounded by the
+/// program's peak CONCURRENT live-output count at that bucket -- steady
+/// decode does not exceed a handful -- so this is a safety net against a
+/// pathological program shape (many parallel same-size branches), not the
+/// primary bound. `8` is a plain constant here, not yet wired through the
+/// project's build-time sizing-config mechanism (see the guiding-principles
+/// "no magic numbers" rule) -- a gap named explicitly, not hidden, and one
+/// more reason this feature is not yet a default-on candidate.
+#[cfg(feature = "metal-buffer-pool")]
+const OUTPUT_POOL_MAX_PER_BUCKET: usize = 8;
+
+#[cfg(feature = "metal-buffer-pool")]
+thread_local! {
+    /// Op-OUTPUT device buffers, reused across [`execute_plan`] calls instead
+    /// of a fresh `newBufferWithLength_options` per op per token
+    /// (`allocate_buffer` pops from here first). Keyed on `(bucket, dtype)`
+    /// where `bucket` is [`pool_bucket`]'s power-of-two rounding of the
+    /// requested byte length -- NOT the tight byte length itself. See
+    /// `pool_bucket`'s doc for the size invariant this relies on: every
+    /// buffer stored under bucket `B` has REAL Metal capacity exactly `B`,
+    /// because [`allocate_buffer`] allocates fresh buffers at `B` too, never
+    /// at the tight request. `dtype` stays part of the key alongside the
+    /// bucket so the guarantee reads directly off the type at every call
+    /// site.
+    ///
+    /// # Why bucketing (not exact-size keying)
+    ///
+    /// Decode's cached-attention extent grows every token, so an op whose
+    /// output size tracks it (`bound_output_len` scales with the KV extent)
+    /// would get a NEW exact key every token under exact-size keying, which
+    /// (a) never gets reused again -- an unbounded, one-orphaned-buffer-per-
+    /// token leak over a long decode session -- and (b) MISSES every time on
+    /// exactly those ops, so they keep paying `newBufferWithLength` per token
+    /// regardless. Bucketing by power of two means a growing extent walks
+    /// through a BOUNDED number of buckets (`log2(max_extent_bytes)`, not one
+    /// per token) and hits the bucket it shared with the previous token's
+    /// request whenever the two requests round to the same power of two.
+    ///
+    /// # Liveness: why this cannot alias two live tensors
+    ///
+    /// A buffer is pushed back here ONLY by [`execute_plan`], and only after
+    /// that call's single `command_buffer.waitUntilCompleted()` has returned
+    /// -- i.e. after every dispatch that could read or write it has finished
+    /// running on the GPU. Nothing is ever returned mid-program:
+    /// `prepared.retires` still drives `device_buffers` removal exactly as
+    /// before this feature existed (see the `metal-buffer-pool`-off arm right
+    /// below the retirement loop in `execute_plan`), the retired buffer is
+    /// simply ALSO cloned into a same-call `reclaim_stash` rather than only
+    /// dropped, and that stash is not drained into this pool until after the
+    /// wait. So within one `execute_plan` call, every buffer this pool hands
+    /// out via `allocate_buffer` was either freshly allocated or was a buffer
+    /// whose prior GPU work is already complete -- it can never be a buffer
+    /// some still-pending dispatch in the SAME command buffer is about to
+    /// read or write, because nothing enters this pool until that command
+    /// buffer no longer exists to have pending dispatches. This is the "pool
+    /// only across calls" fallback, chosen over intra-program reuse (which
+    /// would need to reason about `MTLDispatchTypeSerial` hazard-tracked
+    /// ordering across a retired buffer's last read and a later op's first
+    /// write) to keep the liveness argument this simple.
+    ///
+    /// # Never touches block-input caching
+    ///
+    /// Only buffers `encode_op` allocated for an op's OUTPUT are ever pushed
+    /// here -- `execute_plan` filters by `output_meta`, built from
+    /// `prepared.resolved`'s own node ids, before cloning anything into
+    /// `reclaim_stash`. `NOCOPY_BUFFERS` and the resident-copy cache (block
+    /// INPUTS, wrapping the caller's own weight memory) are untouched by this
+    /// feature; a block-input buffer removed by the same retirement loop is
+    /// dropped exactly as it always was, never reaching this map.
+    ///
+    /// # An over-sized buffer is only ever consulted through the bound op's
+    /// own shape, never through its own `.length()`
+    ///
+    /// The one hazard bucketing introduces: a popped buffer can be LARGER
+    /// than the op that requested it strictly needs. Every dispatch-affecting
+    /// consumer -- `dispatch`, `bind_buffers`, `read_back` -- sizes its work
+    /// from the bound op's own shape/uniforms, never from buffer capacity, so
+    /// bucketing carries no dispatch/readback correctness hazard.
+    ///
+    /// # Bounded, not unbounded: worst-case memory overhead
+    ///
+    /// A power-of-two bucket wastes strictly less than 2x the tight request
+    /// (a request just over `B/2` rounds up to `B`, the worst case; a request
+    /// of exactly a power of two wastes nothing). DERIVED, not measured.
+    /// [`OUTPUT_POOL_MAX_PER_BUCKET`] caps retained-buffer growth per bucket
+    /// on top of that.
+    static OUTPUT_BUFFER_POOL: RefCell<HashMap<(usize, DType), Vec<MetalBuffer>>> =
+        RefCell::new(HashMap::new());
+}
+
+/// Counts op-output buffers served from `OUTPUT_BUFFER_POOL` rather than
+/// freshly allocated.
+#[cfg(feature = "metal-buffer-pool")]
+pub static OUTPUT_BUFFER_POOL_REUSES: Counter = Counter::new("omega.metal.output_pool.reuse");
+
+/// Total buffers currently retained across every `(bucket, dtype)` slot in
+/// `OUTPUT_BUFFER_POOL` on THIS thread. Test/diagnostic surface: proves
+/// bucketing keeps the pool's retained-buffer count BOUNDED across many
+/// distinct historical output sizes (a growing cached-attention extent)
+/// rather than growing once per distinct size an exact-size-keyed pool
+/// would.
+#[cfg(feature = "metal-buffer-pool")]
+#[must_use]
+pub fn output_buffer_pool_len() -> usize {
+    OUTPUT_BUFFER_POOL.with(|pool| pool.borrow().values().map(Vec::len).sum())
 }
 
 /// split-4019 per-token attribution counters — each is a (`_CALLS`, `_TICKS`)

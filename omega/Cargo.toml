@@ -116,6 +116,16 @@ metal-q4k-mask-fma = ["metal"]
 # `q4k_super_block_tiled`'s arm entirely, by construction) and compose
 # independently.
 metal-wide-cooperative-reduce = ["metal"]
+# Thread-local pool for op-OUTPUT device buffers (`allocate_buffer`'s callers
+# in `encode_op`) reused ACROSS `execute_plan` calls -- see `metal.rs`'s
+# `OUTPUT_BUFFER_POOL` doc for the liveness argument (buffers are reclaimed
+# only after the single per-call `waitUntilCompleted`, never mid-program) and
+# `proxima-tensor/docs/discipline.md` for the measured `op_setup` cost this
+# targets. Default-off: this is a new allocation-lifetime policy on top of
+# the production `execute_plan` path and does not earn the default until a
+# decode-profile bench (tracked separately) shows the win. Depends on
+# `metal`, not just `std`: the pool lives entirely inside `metal.rs`.
+metal-buffer-pool = ["metal"]
 # Portable GPU execution driver (src/wgsl.rs, src/wgpu_driver.rs) — the
 # wgpu/WGSL counterpart of `metal` above, one abstraction layer over: same
 # `BoundOp` descriptor, same emit-then-drive split, different target ISA
