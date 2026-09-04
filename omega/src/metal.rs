@@ -572,7 +572,7 @@ pub fn execute_plan(plan: &Plan, blocks: &[QuantizedBlock<'_>]) -> Result<Evalua
 
 /// A device buffer a CALLER allocates, owns, and keeps alive across multiple
 /// [`execute_plan_with_placements`] calls — the type this module's other
-/// buffers ([`MetalBuffer`], private) never had to be public for, since
+/// buffers (`MetalBuffer`, private) never had to be public for, since
 /// `execute_plan`/`execute_plan_op_timed` allocate and own every buffer
 /// themselves. Get one from [`allocate_placed_buffer`]; read one back with
 /// [`read_placed_buffer_f32`].
@@ -582,7 +582,7 @@ pub type PlacedBuffer = Retained<ProtocolObject<dyn MTLBuffer>>;
 /// Allocates a `storageModeShared` buffer of `byte_len` bytes that OUTLIVES
 /// any one [`execute_plan_with_placements`] call — the caller holds it,
 /// passes `&buffer` into as many calls as it likes, and only it decides when
-/// the buffer is dropped. Mirrors [`allocate_buffer`]'s own device call,
+/// the buffer is dropped. Mirrors `allocate_buffer`'s own device call,
 /// public and un-sized-to-an-op because a placed buffer's size is the
 /// caller's own layout decision (e.g. a whole KV-cache page), not one op's
 /// `bound_output_len`.
@@ -633,7 +633,7 @@ pub fn read_placed_buffer_f32(
 
 /// [`execute_plan`], plus the ability to route one or more nodes' outputs
 /// into a buffer the CALLER owns (`output_placements`), and to bind one or
-/// more [`Op::Input`](proxima_tensor::Op::Input) nodes DIRECTLY to a buffer
+/// more [`Op::Input`] nodes DIRECTLY to a buffer
 /// the caller already owns on the device (`input_placements`), skipping the
 /// per-call `upload_block`/`upload_packed_bytes` host round trip entirely.
 /// Both are `&[(node, buffer, byte_offset)]` — deliberately plain tuples
@@ -665,7 +665,7 @@ pub fn read_placed_buffer_f32(
 ///
 /// Three hazards this signature exists to name explicitly, not paper over:
 ///
-/// - **Cross-invocation liveness.** [`Prepared::retires`] computes per-
+/// - **Cross-invocation liveness.** `Prepared::retires` computes per-
 ///   program liveness only (`bound_op_retirement`'s own doc) — it has no
 ///   notion of a buffer surviving into the NEXT `execute_plan_with_placements`
 ///   call. Every placed node (input or output) is therefore excluded from
@@ -1926,7 +1926,7 @@ pub struct MetalStageTotals {
     pub resident_uploads: u64,
     pub resident_reuses: u64,
     /// How many of `block_upload_calls` were served by
-    /// [`checkpoint_mapping_offset`] -- addressed by offset into the ONE
+    /// `checkpoint_mapping_offset` -- addressed by offset into the ONE
     /// no-copy buffer spanning the whole checkpoint mapping, instead of
     /// falling to `resident_uploads`' per-tensor copy. `resident_uploads`
     /// staying at 0 while this climbs to the packed-weight count is the
@@ -2133,16 +2133,16 @@ thread_local! {
 
 /// Registers the whole-checkpoint memory mapping backing every packed
 /// tensor's borrowed bytes, so a tensor whose own byte offset inside that
-/// mapping is misaligned for [`is_page_aligned`] can still reach the GPU
+/// mapping is misaligned for `is_page_aligned` can still reach the GPU
 /// without a copy -- by address, into ONE no-copy buffer spanning the whole
-/// mapping, instead of one buffer per tensor. See [`checkpoint_mapping_offset`]
-/// for the containment check and [`upload_packed_bytes`]'s doc for why the
+/// mapping, instead of one buffer per tensor. See `checkpoint_mapping_offset`
+/// for the containment check and `upload_packed_bytes`'s doc for why the
 /// per-tensor page-alignment test this replaces fails for every packed
 /// tensor in a real GGUF layout (tensors are packed back-to-back at their
 /// natural sizes; only the mapping's OWN base is page-aligned).
 ///
 /// `bytes` must stay mapped, unchanged, at this address for the rest of the
-/// process -- the same precondition [`NOCOPY_BUFFERS`] already rests on for
+/// process -- the same precondition `NOCOPY_BUFFERS` already rests on for
 /// a single tensor, extended here to the whole file. Calling this again
 /// replaces the previous registration; callers load one checkpoint mapping
 /// per process in every reachable path today.
@@ -2230,7 +2230,7 @@ thread_local! {
         RefCell::new(BTreeMap::new());
 }
 
-/// Counts entries [`NOCOPY_BUFFERS`] actually holds right now — the direct
+/// Counts entries `NOCOPY_BUFFERS` actually holds right now — the direct
 /// witness that gating the cache on `resident` stops it growing without
 /// bound. A non-resident page-aligned block (a KV-cache row that happened to
 /// cross a page boundary) never reaches this map at all.
