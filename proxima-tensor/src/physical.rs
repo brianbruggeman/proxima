@@ -5,6 +5,13 @@
 //! describe the operands and scalar domain needed when one bound step absorbs
 //! the attention subgraph.
 
+/// One key/value range (cached or new) for [`stream_cached_attention`].
+#[cfg(test)]
+pub struct AttentionRange<'buffer> {
+    key: &'buffer [f32],
+    value: &'buffer [f32],
+}
+
 /// Computes causal cached/new attention into a caller-owned output buffer.
 ///
 /// The key ranges are streamed independently; no score, softmax, or
@@ -18,15 +25,21 @@
 #[cfg(test)]
 pub fn stream_cached_attention(
     query: &[f32],
-    cached_key: &[f32],
-    new_key: &[f32],
-    cached_value: &[f32],
-    new_value: &[f32],
+    cached: AttentionRange<'_>,
+    new: AttentionRange<'_>,
     output: &mut [f32],
     extents: AttentionExtents,
     scale: f32,
     causal_band: CausalBand,
 ) -> bool {
+    let AttentionRange {
+        key: cached_key,
+        value: cached_value,
+    } = cached;
+    let AttentionRange {
+        key: new_key,
+        value: new_value,
+    } = new;
     let query_width = extents.query_rows.checked_mul(extents.head_dim);
     let cached_key_width = extents.cached_key_rows.checked_mul(extents.head_dim);
     let new_key_width = extents.new_key_rows.checked_mul(extents.head_dim);
@@ -108,6 +121,22 @@ pub fn stream_cached_attention(
     true
 }
 
+/// The even/odd query halves for [`stream_cached_attention_split`].
+#[cfg(test)]
+pub struct SplitQuery<'buffer> {
+    even: &'buffer [f32],
+    odd: &'buffer [f32],
+}
+
+/// One key/value range (cached or new) for [`stream_cached_attention_split`],
+/// with the even/odd key halves kept separate the way RoPE leaves them.
+#[cfg(test)]
+pub struct SplitAttentionRange<'buffer> {
+    key_even: &'buffer [f32],
+    key_odd: &'buffer [f32],
+    value: &'buffer [f32],
+}
+
 /// Computes the same streaming attention while consuming the split even/odd
 /// RoPE operands used by the cached Mistral/Qwen3 graph. The key/value rows
 /// remain contiguous in `head_dim`; the query/key halves are contiguous in
@@ -116,19 +145,28 @@ pub fn stream_cached_attention(
 #[must_use]
 #[cfg(test)]
 pub fn stream_cached_attention_split(
-    query_even: &[f32],
-    query_odd: &[f32],
-    cached_key_even: &[f32],
-    cached_key_odd: &[f32],
-    new_key_even: &[f32],
-    new_key_odd: &[f32],
-    cached_value: &[f32],
-    new_value: &[f32],
+    query: SplitQuery<'_>,
+    cached: SplitAttentionRange<'_>,
+    new: SplitAttentionRange<'_>,
     output: &mut [f32],
     extents: AttentionExtents,
     scale: f32,
     causal_band: CausalBand,
 ) -> bool {
+    let SplitQuery {
+        even: query_even,
+        odd: query_odd,
+    } = query;
+    let SplitAttentionRange {
+        key_even: cached_key_even,
+        key_odd: cached_key_odd,
+        value: cached_value,
+    } = cached;
+    let SplitAttentionRange {
+        key_even: new_key_even,
+        key_odd: new_key_odd,
+        value: new_value,
+    } = new;
     if extents.head_dim == 0 || !extents.head_dim.is_multiple_of(2) {
         return false;
     }
@@ -441,10 +479,14 @@ mod tests {
         let mut output = [0.0; 2];
         assert!(stream_cached_attention(
             &[1.0, 0.0],
-            &[1.0, 0.0],
-            &[0.0, 1.0],
-            &[2.0, 4.0],
-            &[6.0, 8.0],
+            AttentionRange {
+                key: &[1.0, 0.0],
+                value: &[2.0, 4.0],
+            },
+            AttentionRange {
+                key: &[0.0, 1.0],
+                value: &[6.0, 8.0],
+            },
             &mut output,
             extents,
             1.0,
@@ -466,10 +508,14 @@ mod tests {
         let mut output = [0.0; 2];
         assert!(!stream_cached_attention(
             &[1.0],
-            &[],
-            &[],
-            &[],
-            &[],
+            AttentionRange {
+                key: &[],
+                value: &[],
+            },
+            AttentionRange {
+                key: &[],
+                value: &[],
+            },
             &mut output,
             AttentionExtents {
                 query_rows: 1,
@@ -504,14 +550,20 @@ mod tests {
             upper_inclusive: 0,
         };
         assert!(stream_cached_attention_split(
-            &[1.0],
-            &[0.0],
-            &[1.0],
-            &[0.0],
-            &[0.0],
-            &[1.0],
-            &[2.0, 4.0],
-            &[6.0, 8.0],
+            SplitQuery {
+                even: &[1.0],
+                odd: &[0.0],
+            },
+            SplitAttentionRange {
+                key_even: &[1.0],
+                key_odd: &[0.0],
+                value: &[2.0, 4.0],
+            },
+            SplitAttentionRange {
+                key_even: &[0.0],
+                key_odd: &[1.0],
+                value: &[6.0, 8.0],
+            },
             &mut split_output,
             extents.clone(),
             1.0,
@@ -519,10 +571,14 @@ mod tests {
         ));
         assert!(stream_cached_attention(
             &[1.0, 0.0],
-            &[1.0, 0.0],
-            &[0.0, 1.0],
-            &[2.0, 4.0],
-            &[6.0, 8.0],
+            AttentionRange {
+                key: &[1.0, 0.0],
+                value: &[2.0, 4.0],
+            },
+            AttentionRange {
+                key: &[0.0, 1.0],
+                value: &[6.0, 8.0],
+            },
             &mut full_output,
             extents,
             1.0,
