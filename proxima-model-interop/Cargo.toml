@@ -65,13 +65,17 @@ instrument = ["proxima-tensor/instrument", "omega?/instrument", "dep:proxima-tel
 # `proxima-tensor/docs/discipline.md` ROW recorded. `kv-capacity-bucket`
 # joined on the 2026-09-04 quiet round 1 sweep (bucket 32: wall 40.89 vs
 # off 42.54 ms/token, hits 5/8; bucket 64: 41.18, hits 6/8; bucket 256:
-# 48.18, loss) -- ROW 273 has the full table.
+# 48.18, loss) -- ROW 273 has the full table. `metal-q5k-pair-dot` joined
+# per the 2026-09-04 per-op profile: paired-nibble Q5_K body 202,083 ->
+# 124,265 ns/op (1.63x) on the 8 Q5_K ops, family 6.275 -> 5.725 ms, decode
+# wall flat within noise, text identical, parity < 1e-4 (ROW 278).
 metal = [
     "dep:omega",
     "std",
     "metal-output-placement",
     "metal-wide-cooperative-reduce",
     "kv-capacity-bucket",
+    "metal-q5k-pair-dot",
 ]
 # opt-in cached-attention physical step for the real serving/decode harness.
 cached-attention-streaming = [

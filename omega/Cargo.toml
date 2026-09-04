@@ -40,6 +40,12 @@ cpu = ["std", "proxima-tensor/std"]
 # and `metal-wide-cooperative-reduce` fold in here too, so `cargo nextest run
 # -p omega --features metal` exercises the same default decode path as
 # proxima-model-interop's `metal` feature.
+# `metal-q5k-pair-dot` joins them per the 2026-09-04 per-op profile: the
+# paired-nibble Q5_K body measured 202,083 ns/op -> 124,265 ns/op (1.63x) on
+# the 8 Q5_K ops in the real `blk.{0..3}.ffn_down.weight` family (6.275 ->
+# 5.725 ms), decode wall flat within noise (41.32/41.63/42.01 vs
+# 41.35/41.15/41.32 ms over 3 rounds; the 8 ops are ~1.6 ms of the step),
+# text identical, parity < 1e-4 against the scalar oracle.
 metal = [
     "std",
     "dep:objc2",
@@ -53,6 +59,7 @@ metal = [
     "proxima-tensor/std",
     "metal-output-placement",
     "metal-wide-cooperative-reduce",
+    "metal-q5k-pair-dot",
 ]
 # Name reservations for `Backend`'s remaining variants (`src/backend.rs`) —
 # every variant exists regardless of which of these are on, so a caller can
@@ -187,14 +194,14 @@ metal-packed-row-nsg2 = ["metal"]
 # per-op profile measured: `Q5_K`'s row-blocked arm still falls back to the
 # fully scalar per-element `q5k_value` loop (`push_packed_row_blocked_body`'s
 # `PackedCodec::Q5K` arm), ~1.85x slower per op than `Q4_K`'s paired body on
-# the same 34 MB tensor shape (`blk.{0..3}.ffn_down.weight`). Default-off per
-# the same discipline as `metal-q4k-mask-fma`/`metal-tiled-gemm` above -- a
-# second, riskier kernel body for the hottest decode-time weights and does
-# not earn the production default until a quiet-box decode-step seal, not on
-# the mechanism argument alone (see `docs/discipline.md`, row assigned
-# centrally). Depends on `metal` for the same reason every sibling feature in
-# this file does: `msl.rs` is alloc-tier codegen, but the alternate kernel
-# body only has meaning for a Metal dispatch.
+# the same 34 MB tensor shape (`blk.{0..3}.ffn_down.weight`). Landed as
+# default via the `metal` feature above per the 2026-09-04 decode-step seal:
+# 202,083 -> 124,265 ns/op (1.63x) on the 8 Q5_K ops, family 6.275 -> 5.725 ms,
+# decode wall flat within noise, text identical, parity < 1e-4
+# (`proxima-tensor/docs/discipline.md` ROW 278). Depends on `metal` for the
+# same reason every sibling feature in this file does: `msl.rs` is alloc-tier
+# codegen, but the alternate kernel body only has meaning for a Metal
+# dispatch.
 metal-q5k-pair-dot = ["metal"]
 # Portable GPU execution driver (src/wgsl.rs, src/wgpu_driver.rs) — the
 # wgpu/WGSL counterpart of `metal` above, one abstraction layer over: same
