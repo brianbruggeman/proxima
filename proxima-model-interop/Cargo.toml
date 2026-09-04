@@ -101,6 +101,8 @@ metal-q4k-mask-fma = ["omega?/metal-q4k-mask-fma"]
 metal-q4k-split-k = ["omega?/metal-q4k-split-k"]
 # passthrough to `omega/metal-q4k-single-fetch` so the decode harness can measure that arm.
 metal-q4k-single-fetch = ["omega?/metal-q4k-single-fetch"]
+# passthrough to `omega/metal-packed-row-nsg2` so the decode harness can measure that arm.
+metal-packed-row-nsg2 = ["omega?/metal-packed-row-nsg2"]
 # Buckets `generate.rs`'s placed-KV decode loop's growing KV extent
 # (`merged_len`) up to `proxima_tensor::sized::KV_BUCKET_TOKENS` before
 # binding it as the Metal plan's `Extent::Symbolic(1)`/plan-cache key, so
