@@ -29,6 +29,11 @@
 //!   knobs; see `msl.rs`'s `packed_row_split_factor` and
 //!   `omega-runtime.toml`'s `[packed_row_split_k]` for the measured
 //!   rationale.
+//! - `PACKED_ROW_SPLIT_K_MAX_ROWS` (`metal-q4k-split-k`-only) — the hard
+//!   row-count ceiling above which split-K never engages regardless of the
+//!   simdgroup-target arithmetic above; see `msl.rs`'s
+//!   `packed_row_split_factor` and `omega-runtime.toml`'s
+//!   `[packed_row_block].split_k_max_rows`.
 //!
 //! `msl` (this module's own crate) is alloc-tier and target-independent --
 //! emission never touches a device -- so [`SIMD_WIDTH`] is visible at every

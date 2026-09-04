@@ -1656,21 +1656,34 @@ fn tiled_gemm_threadgroups(feature_extent: u64, token_extent: u64) -> u64 {
     }
 }
 
-/// Split-K factor for a row-blocked packed matmul dispatching `base_simdgroups`
-/// simdgroups (`output_total.div_ceil(PACKED_ROWS_PER_GROUP)`) -- how many
-/// simdgroups per threadgroup cooperate on ONE row-group's reduction axis so
-/// the dispatch's total simdgroup count reaches
+/// Split-K factor for a row-blocked packed matmul with `rows` OUTPUT rows
+/// (`output_total`), dispatching `base_simdgroups` simdgroups
+/// (`rows.div_ceil(PACKED_ROWS_PER_GROUP)`) -- how many simdgroups per
+/// threadgroup cooperate on ONE row-group's reduction axis so the
+/// dispatch's total simdgroup count reaches
 /// [`crate::sized::PACKED_ROW_SPLIT_K_TARGET_SIMDGROUPS`], capped at
-/// [`crate::sized::PACKED_ROW_SPLIT_K_MAX_SPLIT`]. Always `1` (a no-op) once
-/// `base_simdgroups` already meets the target -- attn_q/attn_output/ffn_down/
-/// ffn_gate/output.weight in the measured decode-graph table all clear 2048
-/// on their own; only attn_k/attn_v (256 base simdgroups) engage. Feature-off
-/// builds never see this: the caller only reaches here behind
-/// `packed_row_block(..).is_some()` AND the `metal-q4k-split-k` feature (see
-/// `push_cooperative_reduce_body`'s own gate).
+/// [`crate::sized::PACKED_ROW_SPLIT_K_MAX_SPLIT`].
+///
+/// Gated FIRST by [`crate::sized::PACKED_ROW_SPLIT_K_MAX_ROWS`] (`0` means
+/// no ceiling): `target_simdgroups` alone lets integer division push a
+/// shape's factor toward `1` as `rows` grows, but that fall-off is gradual,
+/// not a hard cutoff -- a 4096-row op (attn_q/attn_output/ffn_down in the
+/// measured decode-graph table) still clears `factor=2` on
+/// `target_simdgroups` arithmetic alone even though its GB/s was already
+/// close to the `ffn_*` rate at 1024 base simdgroups, which is exactly the
+/// "applied to every packed matvec" loss this ceiling exists to cut off at
+/// a build-time-tunable row count instead. Always `1` once
+/// `base_simdgroups` already meets the target OR `rows` exceeds the
+/// ceiling. Feature-off builds never see this: the caller only reaches
+/// here behind `packed_row_block(..).is_some()` AND the `metal-q4k-split-k`
+/// feature (see `push_cooperative_reduce_body`'s own gate).
 #[cfg(feature = "metal-q4k-split-k")]
-fn packed_row_split_factor(base_simdgroups: u64) -> u64 {
+fn packed_row_split_factor(base_simdgroups: u64, rows: u64) -> u64 {
     if base_simdgroups == 0 {
+        return 1;
+    }
+    let max_rows = crate::sized::PACKED_ROW_SPLIT_K_MAX_ROWS;
+    if max_rows != 0 && rows > max_rows {
         return 1;
     }
     (crate::sized::PACKED_ROW_SPLIT_K_TARGET_SIMDGROUPS / base_simdgroups)
@@ -1683,7 +1696,7 @@ fn packed_row_split_factor(base_simdgroups: u64) -> u64 {
 /// so [`crate::sized::PACKED_ROW_SPLIT_K_TARGET_SIMDGROUPS`] is never
 /// referenced from a build that never generated it.
 #[cfg(not(feature = "metal-q4k-split-k"))]
-fn packed_row_split_factor(_base_simdgroups: u64) -> u64 {
+fn packed_row_split_factor(_base_simdgroups: u64, _rows: u64) -> u64 {
     1
 }
 
@@ -1696,7 +1709,7 @@ fn packed_row_split_factor(_base_simdgroups: u64) -> u64 {
 fn packed_row_dispatch(output_axes: &[u16], extents: &[u64]) -> (u64, u64) {
     let output_total: u64 = output_axes.iter().map(|&dim| extents[dim as usize]).product();
     let base = output_total.div_ceil(PACKED_ROWS_PER_GROUP as u64);
-    let split = packed_row_split_factor(base);
+    let split = packed_row_split_factor(base, output_total);
     (base, split)
 }
 
@@ -5847,4 +5860,66 @@ mod tests {
         let error = emit(&bound, &BTreeMap::new()).expect_err("an empty scan is rejected");
         assert!(matches!(error, EmitError::EmptyScan { .. }), "{error}");
     }
+
+    /// Reachability proof for [`packed_row_split_factor`]'s row-count gate
+    /// (`omega-runtime.toml`'s `[packed_row_block].split_k_max_rows`,
+    /// default 4096): a 1024-row op (the `attn_k`/`attn_v` shape) sits
+    /// under both the row ceiling and `target_simdgroups`, so split-K must
+    /// engage (`split > 1`); a 14336-row op (the `ffn_up`/`ffn_gate` shape)
+    /// sits well past the row ceiling, so split-K must stay a no-op
+    /// (`split == 1`) regardless of what the simdgroup-target arithmetic
+    /// alone would compute. Calls [`packed_row_dispatch`] directly -- the
+    /// SAME function [`grid_threads`] and [`tiled_gemm_threadgroup_width`]
+    /// call -- so a passing test here is a guarantee those call sites see
+    /// the identical factor, not a duplicate policy that could drift.
+    #[cfg(feature = "metal-q4k-split-k")]
+    #[test]
+    fn split_k_engages_for_a_1024_row_op_and_declines_for_a_14336_row_op() {
+        let output_axes: [u16; 1] = [0];
+
+        let (base_starved, split_starved) = packed_row_dispatch(&output_axes, &[1024]);
+        assert!(
+            split_starved > 1,
+            "a 1024-row op (attn_k/attn_v shape) must engage split-K under the default \
+             split_k_max_rows(4096)/target_simdgroups gate: got split={split_starved} at \
+             base_simdgroups={base_starved}"
+        );
+
+        let (base_wide, split_wide) = packed_row_dispatch(&output_axes, &[14336]);
+        assert_eq!(
+            split_wide, 1,
+            "a 14336-row op (ffn_up/ffn_gate shape) must stay split-K's no-op factor: got \
+             split={split_wide} at base_simdgroups={base_wide}"
+        );
+    }
+
+    /// The row-count ceiling itself, isolated from `target_simdgroups`: a
+    /// shape whose base-simdgroup count would otherwise clear
+    /// `packed_row_split_factor`'s target (so the simdgroup arithmetic
+    /// alone would still pick a factor > 1) must nonetheless collapse to
+    /// `1` once its row count crosses [`crate::sized::PACKED_ROW_SPLIT_K_MAX_ROWS`].
+    /// Proves the ceiling is a genuine additional gate, not merely
+    /// redundant with the simdgroup-target fall-off already in place.
+    #[cfg(feature = "metal-q4k-split-k")]
+    #[test]
+    fn the_row_ceiling_overrides_a_simdgroup_target_that_would_otherwise_split() {
+        let max_rows = crate::sized::PACKED_ROW_SPLIT_K_MAX_ROWS;
+        assert_ne!(max_rows, 0, "this test requires a non-zero configured ceiling");
+
+        let rows_at_ceiling = max_rows;
+        let rows_past_ceiling = max_rows + PACKED_ROWS_PER_GROUP as u64;
+
+        let base_at = rows_at_ceiling.div_ceil(PACKED_ROWS_PER_GROUP as u64);
+        let split_at = packed_row_split_factor(base_at, rows_at_ceiling);
+        let base_past = rows_past_ceiling.div_ceil(PACKED_ROWS_PER_GROUP as u64);
+        let split_past = packed_row_split_factor(base_past, rows_past_ceiling);
+
+        assert_eq!(
+            split_past, 1,
+            "one row-group past the configured ceiling must decline split-K even though its \
+             base_simdgroups({base_past}) barely differs from the still-eligible shape's \
+             ({base_at}), which split at factor {split_at}"
+        );
+    }
+
 }

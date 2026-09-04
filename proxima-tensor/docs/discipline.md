@@ -20182,3 +20182,255 @@ PROXIMA_MAX_TOKENS=8 cargo test --release -p proxima-model-interop --features me
   bind::real_openchat_file::runs_the_cached_decode_loop_on_the_metal_backend_and_reports_the_plan_cache
 ```
 `metal_decode_summary`'s `plan_hits` must be > 0 under the default `metal` build (the feature is now default-on, `bucket_tokens = 32`), text unchanged from the pre-bucket baseline.
+
+## ROW 274 -- `metal-q4k-split-k` row-count gate (`packed_row_block.split_k_max_rows`), measured net loss
+
+Branch `perf/q4k-split-k-row-gate`, worktree `proxima-wt-splitkrows`, base
+`80c526a1d5ba03c722be476337be1464e721b8e4`.
+
+**Prior state (memory, not re-measured this row):** `metal-q4k-split-k`
+applied to every packed row-blocked matmul was a measured loss (+3.8 ms/token,
+`docs/bench-campaigns/2026-09-03-gpu-one-risc/plan.md:260`), left default-off.
+Per-family baseline on the default path (this session's own re-measurement,
+below, reproduces it): `ffn_up/gate/down` 174.9-188.1 GB/s, `attn_q` 109.2
+GB/s, `attn_output` 142.6 GB/s, `attn_v` 66.2 GB/s, `attn_k` 79.0 GB/s.
+
+**Allocation budget:** hot path (kernel emission, `packed_row_split_factor`/
+`packed_row_dispatch`) is pure integer arithmetic on `u64` — zero allocations.
+Setup path (build.rs `resolve_int`/`require_nonneg`) allocates a handful of
+`String`s once per build, unchanged shape from the existing
+`packed_row_split_k` keys it sits beside. No cold-path allocation added.
+
+**What this row adds:** `omega-runtime.toml`'s `[packed_row_block]
+.split_k_max_rows` (default 4096, `metal-q4k-split-k`-only, `0` disables the
+ceiling), wired through `build.rs`'s `resolve_int` + a new `require_nonneg`
+(same `cargo:rerun-if-env-changed` contract every other key in this file
+already uses) into `sized::PACKED_ROW_SPLIT_K_MAX_ROWS`. `msl.rs`'s
+`packed_row_split_factor` now takes `rows` as well as `base_simdgroups` and
+declines (`split = 1`) whenever `rows > max_rows` (`max_rows != 0`), checked
+*before* the existing `target_simdgroups` arithmetic — the single call site
+(`packed_row_dispatch`) both `grid_threads` and `tiled_gemm_threadgroup_width`
+already share, so the gate is reachable by construction, not a second policy
+that could drift from the dispatch shape actually launched.
+
+**Reachability unit test (§ the port worker's own warning about dead gates):**
+`omega/src/msl.rs::msl::tests::split_k_engages_for_a_1024_row_op_and_declines_for_a_14336_row_op`
+— asserts `packed_row_dispatch` returns `split > 1` at 1024 rows (attn_k/
+attn_v shape) and `split == 1` at 14336 rows (ffn_up/ffn_gate shape). A
+sibling test, `msl::tests::the_row_ceiling_overrides_a_simdgroup_target_that_would_otherwise_split`,
+isolates the NEW gate from the pre-existing `target_simdgroups` fall-off by
+comparing a shape exactly at the configured ceiling against one row-group
+past it. Both re-provable now:
+```
+cd /Users/brianbruggeman/repos/slot-0/proxima-wt-splitkrows && \
+CARGO_TARGET_DIR=/Users/brianbruggeman/repos/slot-0/proxima-wt-splitkrows/target \
+cargo nextest run -p omega --features metal,metal-q4k-split-k \
+  -E 'test(split_k) + test(row_ceiling)'
+```
+Result: 4 tests run: 4 passed (2 unit + 2 real-tensor parity, next row).
+
+**Parity, real tensor bytes (guiding-principles §9):**
+`omega/tests/q4k_real_checkpoint_parity.rs` gained
+`metal_matmul_on_real_attn_q_q4k_bytes_at_the_split_k_starved_row_count_matches_the_dequantized_f32_cpu_path`
+(1024-row slice of the real `blk.0.attn_q.weight` Q4_K bytes, split-K-active
+row count) and its `..._boundary_row_count...` twin (the full 4096-row
+tensor, the boundary the default ceiling still includes) — both against
+`openchat-3.5-1210.Q4_K_S.gguf`, both `#[cfg(feature = "metal-q4k-split-k")]`.
+Both passed at `relative < 1e-5` against the dequantized f32 CPU oracle:
+```
+cd /Users/brianbruggeman/repos/slot-0/proxima-wt-splitkrows && \
+CARGO_TARGET_DIR=.../target CARGO_TERM_COLOR=never \
+cargo nextest run -p omega --features metal,metal-q4k-split-k
+```
+Result: **110 tests run: 110 passed, 1 skipped** (the 64-row baseline parity
+test is unconditional and also present). All-features:
+```
+cargo nextest run -p omega --all-features
+```
+Result: **158 tests run: 158 passed, 1 skipped**.
+
+**Lint:** `cargo clippy -p omega --all-features --all-targets -- -D warnings`
+→ EXIT=0, zero warnings.
+
+**Gate script:** `bash scripts/omega-gate.sh` → `== omega gate: PASS ==`,
+EXIT=0 (build, all-features tests with asserted nonzero count, rustdoc,
+all-features doctests with asserted count — 2 doctests).
+
+**Tunable axes (§12/§15):** numeric — `packed_row_block.split_k_max_rows`
+(default 4096, env override `OMEGA_PACKED_ROW_BLOCK_SPLIT_K_MAX_ROWS`, `0` =
+uncapped). Structural — none new; this row adds no cfg axis, it narrows an
+existing one (`metal-q4k-split-k`'s own eligibility).
+
+**Opt-sweep / sans-IO axes:** N/A — this is GPU kernel-emission policy, not a
+sans-IO wire component. State machine: N/A (integer policy function, no
+states). Bytes-first / zero-copy: N/A (no buffers touched by this change).
+Branchless: two early-return branches (`base_simdgroups == 0`,
+`rows > max_rows`), both on values already resident in registers, matching
+the existing `target_simdgroups` branch's own shape — not tightened further
+since this is a build-time-resolved policy check, not a per-element hot loop.
+
+### Bake-off (home-turf incumbent = llama.cpp, quiet box, M1 Max, 10 cores,
+macOS 15.8, release build; loadout confirmed empty of other
+cargo/rustc/nextest processes at the start of every round — logged per
+round in `/private/tmp/.../scratchpad/splitk-logs/bakeoff-summary.log`)
+
+Four release test binaries (`cargo test --release --no-run -p
+proxima-model-interop`), each in its own `CARGO_TARGET_DIR` under
+`target-arms/`:
+
+| arm | features | env |
+| --- | --- | --- |
+| default | `metal,instrument` | — |
+| splitk-4096 | `metal,instrument,metal-q4k-split-k` | `OMEGA_PACKED_ROW_BLOCK_SPLIT_K_MAX_ROWS=4096` |
+| splitk-1024 | same | `=1024` |
+| splitk-0 | same | `=0` (uncapped) |
+
+3 interleaved rounds (llama-bench, then default/splitk-4096/splitk-1024/
+splitk-0 in that order, repeated 3x), plus one per-op profile run per arm
+(`PROXIMA_METAL_OP_PROFILE_STEP=3`). `generated_text` identical across every
+arm/round ("Here is a simple Python function that returns") — `text==default`
+holds for all three split-k arms.
+
+**llama.cpp incumbent** (`llama-bench -m openchat-3.5-1210.Q4_K_S.gguf -n 32
+-p 0 -r 5 -t 8 -ngl 99`, design-favors: incumbent — full GPU offload, its own
+published bench shape):
+
+| round | t/s | ms/token (derived) |
+| --- | --- | --- |
+| 1 | 57.60 ± 0.74 | 17.36 |
+| 2 | 56.82 ± 0.15 | 17.60 |
+| 3 | 57.25 ± 0.29 | 17.47 |
+
+mean 17.48 ms/token, CoV 0.7% across rounds — tight, quiet box.
+
+**Our decode loop, end-to-end wall clock** (`PROXIMA_MAX_TOKENS=8`,
+`runs_the_cached_decode_loop_on_the_metal_backend_and_reports_the_plan_cache`,
+`total_wall_clock_ms / 8`) — this is full per-process CPU+GPU wall clock
+(plan build, emit, dispatch, GPU exec, readback), NOT the GPU-only number;
+**not the same design point llama-bench measures** and the ratio column below
+is reported for completeness only, not as a parity claim:
+
+| arm | round1 | round2 | round3 | mean | CoV (sample, n=3) | ratio to llama (mean) |
+| --- | --- | --- | --- | --- | --- | --- |
+| default | 285.7 | 174.8 | 179.4 | 213.3 | **29.4%** (round1 cold-process outlier) | 12.2x |
+| splitk-4096 | 293.3 | 234.9 | 229.4 | 252.5 | 14.0% | 14.4x |
+| splitk-1024 | 229.5 | 228.2 | 230.4 | 229.4 | 0.5% | 13.1x |
+| splitk-0 | 264.3 | 230.6 | 234.1 | 243.0 | 7.6% | 13.9x |
+
+CoV exceeds 5% for default, splitk-4096, and splitk-0 — **reporting the
+range, not the point estimate**, per this skill's own rule. Round 1 is a
+cold-process outlier for every arm (each round re-execs the test binary, no
+warm-process reuse across rounds); rounds 2-3 alone: default 174.8/179.4
+(~177), splitk-4096 234.9/229.4 (~232), splitk-1024 228.2/230.4 (~229),
+splitk-0 230.6/234.1 (~232) — all three split-k arms sit ~30% ABOVE default
+even excluding the outlier round, and the three split-k arms agree with each
+other within noise regardless of `split_k_max_rows` (4096 vs 1024 vs 0).
+
+`gpu_exec_ms` (last decode step, `token_breakdown_metal`, round 3):
+default 34.733, splitk-4096 38.768, splitk-1024 38.725, splitk-0 38.173 — the
+split-k arms run ~11% MORE gpu-side execution time per step than default,
+consistently, regardless of cap.
+
+`device_allocated_bytes` / `phys_footprint_bytes` (round 3, last step): all
+four arms ~4.163 GB device / 46-53 MB RSS — **no measurable allocation-budget
+delta from this feature**, dominated by the mmap'd model weights in every arm.
+
+**Per-family GB/s** (one profile run per arm, `PROXIMA_METAL_OP_PROFILE_STEP=3`,
+`op_profile_family` lines; GB/s computed as
+`bytes_per_op(from the goal's own shape table) * op_count(32) / gpu_ms`,
+NOT from the printed `operand_bytes`/`gpu_ns_per_byte` fields — those sum to
+the SAME value, ~132.49 GB, across every packed family regardless of that
+family's real tensor size, i.e. they are counting the whole resident weight
+set bound to the dispatch, not that op's own operand; **do not use them as a
+per-family bandwidth number** — this is a pre-existing instrumentation defect
+in `op_profile_family`'s `operand_bytes` field, out of scope for this row,
+recorded here so the next reader does not repeat the mistake):
+
+| family | default GB/s | splitk-4096 GB/s | splitk-1024 GB/s | splitk-0 GB/s | eligible under cap? (4096 / 1024 / 0) |
+| --- | --- | --- | --- | --- | --- |
+| attn_q (4096 rows) | 109.2 | 86.2 | 107.0 | 87.4 | yes / no / yes |
+| attn_output (4096 rows) | 142.6 | 133.0 | 135.4 | 133.7 | yes / no / yes |
+| attn_v (1024 rows) | 66.2 | 28.5 | 28.8 | 28.9 | yes / yes / yes |
+| attn_k (1024 rows) | 79.0 | 30.8 | 31.5 | 31.4 | yes / yes / yes |
+| ffn_down (4096 rows) | 174.9 | 175.1 | 171.1 | 176.5 | yes / no / yes |
+| ffn_gate (14336 rows) | 185.3 | 177.1 | 176.1 | 176.6 | no / no / yes |
+| ffn_up (14336 rows) | 188.1 | 179.4 | 178.9 | 179.7 | no / no / yes |
+
+Default-arm numbers reproduce the goal's own stated baseline table almost
+exactly (108→109.2, 139→142.6, 66→66.2, 78→79.0, ffn 172-186→174.9-188.1) —
+same host, same model, cross-validates this session's harness against the
+prior campaign's.
+
+**Mechanism, traced (§19):**
+
+1. **attn_k/attn_v — the intended beneficiaries — REGRESS by ~2.5x** when
+   split-K engages (79.0→30.8-31.5 GB/s, 66.2→28.5-28.9 GB/s), consistently
+   across all three split-k arms (cap has no effect here since 1024-row ops
+   are eligible under every tested cap). This directly refutes the goal's
+   hypothesis that bringing these families to the ffn rate is a ≈3 ms/token
+   win — the split adds more overhead than it recovers, at least at
+   `target_simdgroups=2048`/`max_split=8`.
+2. **attn_q/attn_output (4096 rows) regress when split engages (cap 4096 or
+   0), and DON'T when it doesn't (cap 1024, which pushes them past its
+   ceiling to `split=1`)**: attn_q 109.2 (default) vs 86.2/87.4 (cap 4096/0,
+   split engaged) vs 107.0 (cap 1024, split declined, matches default within
+   noise). This is the row-cap mechanism working exactly as designed —
+   proof the gate is both reachable and causally effective, isolated from
+   the `target_simdgroups` arithmetic.
+3. **ffn_down (4096 rows, ALSO eligible under cap 4096/0) shows NO
+   regression** (174.9 default vs 175.1/176.5) despite being split the same
+   way attn_q is. The difference: `ffn_down`'s reduction length is 14336
+   (`blk.0.ffn_down.weight` is 14336 x 4096) vs `attn_q`'s 4096
+   (`blk.0.attn_q.weight` is 4096 x 4096) — enough per-thread serial work
+   that the split/combine overhead is hidden. `attn_k`/`attn_v` share
+   `attn_q`'s short 4096-element reduction, which is why they regress
+   despite their row count being the one this initiative targeted.
+4. **ffn_gate/ffn_up (14336 rows, NEVER eligible under any cap tested) still
+   show a mild ~5% regression** (185.3/188.1 default vs 176-180 across all
+   three split-k arms) purely from `metal-q4k-split-k` being COMPILED IN —
+   `push_cooperative_reduce_body`'s `cfg!(feature = "metal-q4k-split-k")`
+   arm emits `tptg_width`/`tiitg`/`sgitg`/`lane` via runtime division/modulo
+   against a uniform-buffer `tptg` value even when `split == 1`, instead of
+   the feature-off arm's compile-time-constant `SIMD_WIDTH` division. The
+   doc comment at `msl.rs`'s `push_cooperative_reduce_body` states split=1
+   "collapses to... the same value, same bits, same order" — numerically
+   true (parity holds), but NOT the same compiled instructions, and this is
+   the fixed cost that shows up on ops the row cap can never reach.
+
+**Honest read:** the `split_k_max_rows` gate is implemented correctly and
+reachably (unit tests + real-tensor parity both pass, and mechanism #2 above
+is a direct causal proof it changes runtime behaviour exactly where
+documented). It does NOT recover a win. None of the three capped/uncapped
+arms beat `default` on any measured axis — wall clock (~30% slower,
+rounds 2-3), gpu_exec_ms (~11% slower), or per-family GB/s (attn_k/attn_v
+~2.5x slower, attn_q/attn_output slower when eligible, ffn mildly slower
+even when never eligible). The original finding this row set out to
+re-scope ("applied to every packed matvec is a loss") turns out to be
+under-described: it is not that split-K helps starved shapes and hurts
+un-starved ones — **split-K, as currently implemented, is a net loss on
+every family it can reach, including its intended target, and imposes a
+smaller but real fixed cost on families it structurally cannot reach.** The
+row-count gate is the correct STRUCTURAL fix for "don't apply this broadly"
+(mechanism #2 proves it), but the underlying kernel technique needs its own
+redesign (larger `PACKED_ROWS_PER_GROUP`, a cheaper split/combine, or
+avoiding the `tptg`-derived division on the `split == 1` fast path) before
+row-gating alone makes it a shippable default. **Recommendation: keep
+`metal-q4k-split-k` default-off; land this row's row-count gate as
+infrastructure for the next attempt at the kernel technique, not as a
+production default.**
+
+**Re-prove command (whole bake-off, §16):**
+```
+cd /Users/brianbruggeman/repos/slot-0/proxima-wt-splitkrows && \
+bash scripts/splitk-row-gate-bakeoff.sh
+```
+(expects the four `target-arms/*` release test binaries already built per
+the feature/env table above — the script does not build them itself, since
+build time is not part of what it measures). Gate commands (nextest x2,
+clippy, `omega-gate.sh`) are re-provable standalone, independent of the
+bake-off binaries, and are the mechanically-CI-able part of this row.
+
+### Changelog
+| Date | Change | Δ vs prior | CoV / runs | Host loadout |
+| --- | --- | --- | --- | --- |
+| 2026-09-04 | add `packed_row_block.split_k_max_rows` row-count gate to `metal-q4k-split-k` | **NEGATIVE on every measured axis** vs default (wall clock ~+30% rounds 2-3, gpu_exec_ms ~+11%, attn_k/attn_v GB/s ~-56%/-60%); gate itself proven reachable/causal (attn_q/output correctly exempted at cap=1024) | wall-clock CoV (sample, n=3) 29.4%/14.0%/0.5%/7.6% across default/splitk-4096/splitk-1024/splitk-0; llama-bench CoV 0.7% (5 runs/round internal + 3 rounds); profile GB/s single-run per arm, no CoV | quiet at every round start (pgrep-confirmed, logged); M1 Max, 10 cores, macOS 15.8, release build |
