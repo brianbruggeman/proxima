@@ -20916,3 +20916,47 @@ Confirm `readback_calls=1` and `readback_bytes=128008` on every steady step (`re
 | Date | Change | Δ vs prior | CoV / runs | Host loadout |
 | --- | --- | --- | --- | --- |
 | 2026-09-04 | `read_back` honors a placed output's byte offset; `finish` skips copying a caller-owned placed output back into `Evaluated` (root always still read back) | `readback_calls` 97 -> 1/step; `readback_bytes` 390,152 -> 128,008 steady-state (12,094,712 -> 3,968,248 at step 0); `generated_text` identical | single oracle run, no bake-off (mechanism makes a wall-clock regression structurally impossible -- work strictly subtracted from the critical path) | quiet box, single measurer per the standing discipline; no llama-bench, no other worker's process touched |
+
+## ROW 285 -- concurrent metal dispatch with dataflow barriers: flips default-on
+
+**Card:** `perf/metal-concurrent-dispatch`. **Worktree/branch/commit:** `proxima-wt-s6e2-concurrent` (source) landed via `proxima-wt-land-conc`/`land/conc`, source commit `2277ac2`. **Feature:** `metal-concurrent-dispatch` (default-off on the source branch); this row flips it into `metal`'s default feature list in both `omega/Cargo.toml` and `proxima-model-interop/Cargo.toml`, mirroring the `metal`-folding pattern of commit `9631661`.
+
+**The mechanism.** `execute_plan_with_placements`'s compute encoder was opened with the plain `computeCommandEncoder()`, whose Metal semantics serialize every dispatch against the one before it -- an implicit memory barrier between every pair of encoded ops, whether or not either op's buffers actually overlap. This row opens the encoder instead with `computeCommandEncoderWithDispatchType(Concurrent)` (`metal.rs:865-886`), which drops that implicit ordering and hands the GPU scheduler license to run independent dispatches (for example the three matmuls producing Q/K/V from one shared normed input) concurrently. A private `HazardTracker<Id>` walks each op immediately before it is encoded and inserts `memoryBarrierWithScope(Buffers)` only where a genuine hazard exists on buffer identity (`Retained::as_ptr`):
+
+> RAW (an input was written since the last barrier), WAW (the output buffer was written since the last barrier), or WAR (the output buffer was read since the last barrier -- arena slot reuse).
+
+Per steady decode step this emitted 419 explicit barriers for 616 total ops -- fewer synchronization points than the serial encoder's implicit one-per-dispatch-pair, concentrated only where a real data dependency exists, letting everything else run concurrently.
+
+**Counter table, per steady decode step (`step` 1..7), oracle default features except as noted, release, `PROXIMA_MAX_TOKENS=8`, 3 interleaved rounds:**
+
+| | OFF (`metal,instrument`) | ON (`metal,instrument,metal-concurrent-dispatch`) |
+| --- | --- | --- |
+| `step_wall_ms` mean (r1/r2/r3) | 40.065 / 34.869 / 34.733 | 38.022 / 33.253 / 32.901 |
+| `step_wall_ms` mean across rounds (CoV) | 36.556 (8.32%) | 34.725 (8.24%) |
+| `gpu_exec_ms` mean (r1/r2/r3) | 29.462 / 29.350 / 28.990 | 27.152 / 27.583 / 27.040 |
+| `gpu_exec_ms` mean across rounds (CoV) | 29.267 (0.84%) | 27.258 (1.05%) |
+| `barriers`/step | 0 | 419 |
+| `emit_calls`/step | 616 | 616 (unchanged) |
+| `device_allocated_bytes` | 4,152,442,880 | 4,152,442,880 (unchanged) |
+| `phys_footprint_bytes` (informational, single sample) | 39,356,160 | 41,518,720 |
+| `generated_text` | `"Here is a simple Python function that returns"` | identical, all 3 rounds |
+| `llama-bench` tg32 t/s (incumbent reference, r1/r2/r3) | 56.21 ± 2.02 / 56.87 ± 0.42 / 57.33 ± 0.67 | n/a (proxima arms only) |
+
+**Determinism tripwire (missed-hazard check):** 3 extra ON runs, back to back, beyond the 3 bake-off rounds -- all 6 ON runs and all 3 OFF runs produced byte-identical `generated_text`, and every ON run reported `barriers=419`, `emit_calls=616` on every steady step. No divergence, so no missed hazard surfaced at this sample size.
+
+**Decision, under the owner's rule (ROW 282):** `generated_text` is identical across every OFF and ON run; the work metric this row is decided on, `gpu_exec_ms` (the single command buffer's commit-to-completed GPU time), fell 29.267 -> 27.258 ms (-6.9%), a gap far larger than either arm's CoV (0.84% / 1.05% of their own means, i.e. ~0.25-0.29 ms bands) -- ON beats OFF in every one of 3 rounds with no overlap. Wall clock (`step_wall_ms`) is not worse beyond CoV: ON's mean (34.725) sits below OFF's mean plus OFF's own CoV band (36.556 + 3.04 = 39.60), and ON beats OFF outright in all 3 rounds. Both conditions of the owner's rule hold (`gpu_exec_ms` down beyond both CoVs, wall not worse beyond CoV), so `metal-concurrent-dispatch` flips into `metal`'s default feature list.
+
+**Correctness (post-flip, `metal` now implies `metal-concurrent-dispatch`):** `cargo build --workspace --lib` EXIT=0; `cargo nextest run -p omega --features metal`: 128 passed, 1 skipped; `cargo nextest run -p proxima-tensor --features std,instrument`: 513 passed, 7 skipped; `cargo nextest run -p proxima-model-interop --features metal,instrument`: 95 passed, 25 skipped; `cargo nextest run -p proxima-model-interop --features std`: 82 passed, 22 skipped; `cargo clippy --workspace --all-targets -- -D warnings`: EXIT=0 (same pre-existing `proc-macro-error2` future-incompat note as prior rows); `cargo nextest run -p omega --all-features`: 186 passed, 1 skipped; `bash scripts/omega-gate.sh`: all 6 steps pass, `[3/6]` 186 tests run/186 passed, `[6/6]` 2 doctests passed; `cargo nextest run -p proxima-model-interop --features metal,instrument,metal-concurrent-dispatch`: 95 passed, 25 skipped.
+
+**Re-prove:**
+```sh
+cd /Users/brianbruggeman/repos/slot-0/proxima
+CARGO_TARGET_DIR=<own target dir> CARGO_TERM_COLOR=never PROXIMA_MAX_TOKENS=8 cargo test --release -p proxima-model-interop --features metal,instrument --lib -- --exact --nocapture --ignored \
+  bind::real_openchat_file::runs_the_cached_decode_loop_on_the_metal_backend_and_reports_the_plan_cache
+```
+Confirm `barriers=419` and `emit_calls=616` on every steady step, `device_allocated_bytes=4152442880`, and `generated_text="Here is a simple Python function that returns"` (the `metal` feature now pulls in `metal-concurrent-dispatch` by default, so no extra feature flag is needed to reproduce the ON arm).
+
+### Changelog
+| Date | Change | Δ vs prior | CoV / runs | Host loadout |
+| --- | --- | --- | --- | --- |
+| 2026-09-04 | `metal-concurrent-dispatch` (`Concurrent` encoder dispatch type + `HazardTracker`-gated barriers) folds into `metal`'s default feature list | `gpu_exec_ms` mean 29.267 -> 27.258 ms (-6.9%, beyond both arms' CoV); `step_wall_ms` mean 36.556 -> 34.725 ms (ON <= OFF + CoV every round); `barriers` 0 -> 419/step; `device_allocated_bytes` unchanged; `generated_text` identical across 9 runs (3 OFF, 6 ON) | 3 interleaved rounds + 3 extra ON determinism runs; OFF CoV 8.32% (wall) / 0.84% (`gpu_exec_ms`), ON CoV 8.24% (wall) / 1.05% (`gpu_exec_ms`) | quiet box confirmed via `pgrep -fl 'cargo\|rustc\|nextest\|llama-bench\|proxima_model_interop-'` (excluding cdb-daemon/sccache/llama-server/Ollama) immediately before and throughout the bake-off; no other worker's process observed |
