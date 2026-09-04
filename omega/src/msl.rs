@@ -590,6 +590,58 @@ static inline float q5k_element(device const uchar *block, uint index) {
 /// `omega/tests/q5k_unpack.rs`, same posture as [`Q4K_BLOCK_BYTES`].
 pub const Q5K_BLOCK_BYTES: usize = 176;
 
+/// `metal-q5k-pair-dot` (default-off): the same paired-nibble, two-word-load
+/// body `q4k_pair_dot` gives `Q4_K`'s `plain_product` arm
+/// (`push_packed_row_blocked_body`), extended with `Q5_K`'s `qh` high-bit
+/// plane -- ONE extra byte load and mask-select per pair of levels, no shift,
+/// mirroring llama.cpp's own `kernel_mul_mv_q5_K_f32_impl`
+/// (`ggml-metal.metal:5209-5324`) lane assignment (`tid = tiisg/4`,
+/// `ix = tiisg%4`, `iq = tid/4`, `ir = tid%4`, `l0 = 8*ir`) exactly: `iq`/`ir`
+/// select the same `qs` byte range `q4k_pair_dot` reads (`32*iq + 8*ir`), and
+/// `qh` is indexed by `8*ir + l` alone -- independent of `iq` -- with the
+/// high bit selected by one of four fixed masks (`1<<2*iq`, that value
+/// shifted left by 1 for the low sub-block's high nibble, and both again
+/// shifted left by 4 for the "second half" pair of sub-blocks 128/160
+/// elements on), matching this crate's own `q5k_header_for`'s `mask`
+/// derivation (`low ? 1<<(2*chunk) : 2<<(2*chunk)`) rather than deferring the
+/// scale the way ggml's `acc1`/`acc2` split does: each level's nibble and
+/// high bit are folded into one `scale*(nibble+high)-minimum` term per
+/// element, immediately, the same non-deferred style `q4k_pair_dot` itself
+/// already uses (see `q5k_header_for`, restated per-pair here rather than
+/// shared -- same posture as `q5k_scale_min` restating `q4k_scale_min`).
+#[cfg(feature = "metal-q5k-pair-dot")]
+pub const Q5K_PAIR_DOT_MSL: &str = r#"
+static inline float q5k_pair_dot(device const uchar *block, uint iq, uint ir, thread const float *yl, thread const float *yh) {
+    device const uchar *qh = block + 16;
+    device const uchar *qs = block + 48;
+    uint byte_base = 32u * iq + 8u * ir;
+    uint low_index = 64u * iq + 8u * ir;
+    q5k_header h0 = q5k_header_for(block, low_index);
+    q5k_header h1 = q5k_header_for(block, low_index + 32u);
+    q5k_header h2 = q5k_header_for(block, low_index + 128u);
+    q5k_header h3 = q5k_header_for(block, low_index + 160u);
+    uchar hm1 = (uchar)(1u << (2u * iq));
+    uchar hm2 = (uchar)(hm1 << 1u);
+    uchar hm3 = (uchar)(hm1 << 4u);
+    uchar hm4 = (uchar)(hm2 << 4u);
+    float result = 0.0f;
+    for (uint l = 0u; l < 8u; ++l) {
+        uchar q1 = qs[byte_base + l];
+        uchar q2 = qs[byte_base + 64u + l];
+        uchar h = qh[8u * ir + l];
+        float low0 = (float)(q1 & 0x0Fu) + ((h & hm1) != 0u ? 16.0f : 0.0f);
+        float low1 = (float)(q1 >> 4u) + ((h & hm2) != 0u ? 16.0f : 0.0f);
+        float high0 = (float)(q2 & 0x0Fu) + ((h & hm3) != 0u ? 16.0f : 0.0f);
+        float high1 = (float)(q2 >> 4u) + ((h & hm4) != 0u ? 16.0f : 0.0f);
+        result += (h0.scale * low0 - h0.minimum) * yl[l];
+        result += (h1.scale * low1 - h1.minimum) * yl[l + 8u];
+        result += (h2.scale * high0 - h2.minimum) * yh[l];
+        result += (h3.scale * high1 - h3.minimum) * yh[l + 8u];
+    }
+    return result;
+}
+"#;
+
 /// `Q8_0`: a flat 32-element block, one `f16` scale, no sub-block scale/min
 /// pair and no bit-packing at all -- genuinely a different SHAPE from the
 /// K-quant family above (no super-block; each level is already a full signed
@@ -2291,6 +2343,14 @@ fn preamble(source: &mut String) {
     }
     source.push_str(Q5K_UNPACK_MSL);
     source.push('\n');
+    // feature-gated, same posture as `Q4K_MASK_FMA_MSL` above:
+    // `Q5K_PAIR_DOT_MSL` does not exist as a Rust symbol without
+    // `metal-q5k-pair-dot`.
+    #[cfg(feature = "metal-q5k-pair-dot")]
+    {
+        source.push_str(Q5K_PAIR_DOT_MSL);
+        source.push('\n');
+    }
     source.push_str(Q6K_UNPACK_MSL);
     source.push('\n');
     source.push_str(Q8_0_UNPACK_MSL);
@@ -3136,7 +3196,8 @@ fn push_packed_row_blocked_body(
         // 32-element sub-block — the granularity the header is constant over.
         let lanes_per_block = 8;
         let sub = Q4K_BLOCK_ELEMENTS / lanes_per_block;
-        let plain_product = matches!(codec, PackedCodec::Q4K)
+        let plain_product = (matches!(codec, PackedCodec::Q4K)
+            || (matches!(codec, PackedCodec::Q5K) && cfg!(feature = "metal-q5k-pair-dot")))
             && element_type == "float"
             && is_plain_product_reduce(resolved, reduce_op, weight, other);
         // `metal-q4k-single-fetch` (default-off): eliminates the redundant
@@ -3303,6 +3364,18 @@ fn push_packed_row_blocked_body(
                     source.push_str("            }\n");
                 }
             }
+            PackedCodec::Q5K if plain_product => {
+                // `metal-q5k-pair-dot` (default-off, see [`Q5K_PAIR_DOT_MSL`]):
+                // the same `yl`/`yh` two-word-load pairing `Q4_K`'s own
+                // `plain_product` arm above uses, extended with `Q5_K`'s `qh`
+                // high-bit plane. Reads the SAME `yl`/`yh` activation gather
+                // this preamble already built for `Q4_K` (`plain_product`
+                // is codec-agnostic there), so no separate activation load
+                // path is needed for this codec.
+                source.push_str(
+                    "            sumf[q] = sumf[q] + q5k_pair_dot(blk, iq, ir, yl, yh);\n",
+                );
+            }
             PackedCodec::Q5K => {
                 // No `q5k_run8`-style batched unpack yet — `Q5_K`'s `qh`
                 // high-bit plane means each element needs a `qs` nibble AND
@@ -3312,7 +3385,10 @@ fn push_packed_row_blocked_body(
                 // `q5k_header_for` (the same granularity `q4k_header_for`
                 // amortizes over) — a follow-up optimization, not a
                 // correctness gap; see this landing's discipline row (ROW
-                // 92) for the measured cost of skipping it.
+                // 92) for the measured cost of skipping it. `metal-q5k-pair-dot`
+                // (default-off) replaces this whole per-element loop with the
+                // paired-nibble body when the reduce is a plain product --
+                // see the `plain_product` arm above.
                 source.push_str("            q5k_header hdr = q5k_header_for(blk, slot);\n");
                 source.push_str(&format!("            for (int e = 0; e < {sub}; ++e) {{\n"));
                 source.push_str(&format!(
@@ -5104,6 +5180,63 @@ mod tests {
         assert!(
             !source.contains("hdr.scale * levels[j] - hdr.minimum"),
             "the per-element dequant expression must not remain once the scale-deferred path is taken:\n{source}"
+        );
+    }
+
+    /// `Q5_K` sibling of the test above, gated on `metal-q5k-pair-dot`: the
+    /// same Add-reduce-over-plain-product shape must select `q5k_pair_dot`
+    /// (this feature's own paired-nibble body) rather than the scalar
+    /// per-element `q5k_value` loop `push_packed_row_blocked_body`'s
+    /// `PackedCodec::Q5K` arm falls back to when the feature is off.
+    #[cfg(feature = "metal-q5k-pair-dot")]
+    #[test]
+    fn q5k_row_blocked_matmul_uses_paired_nibble_decode() {
+        let bound = matmul_op(4, 256, 5);
+        let weight_node = bound.operands()[0].0;
+        let mut q5k = BTreeMap::new();
+        q5k.insert(weight_node, PackedCodec::Q5K);
+
+        assert!(
+            packed_row_block(&bound, &operand_codecs(&bound, &q5k)).is_some(),
+            "test fixture must actually take the row-blocked path for this assertion to mean anything"
+        );
+
+        let source = emit(&bound, &q5k).expect("emits").source;
+        assert!(
+            source.contains("q5k_pair_dot"),
+            "Add-reduce over a plain weight*activation body must take the paired decode path with metal-q5k-pair-dot on:\n{source}"
+        );
+        assert!(
+            !source.contains("q5k_value(blk"),
+            "the scalar per-element q5k_value dequant expression must not remain once the paired path is taken:\n{source}"
+        );
+    }
+
+    /// Feature-off default: the SAME matmul shape must still take the
+    /// scalar `q5k_value` per-element path -- `metal-q5k-pair-dot` is
+    /// default-off and must not change production behavior until it earns
+    /// the default (see the feature's own `Cargo.toml` doc).
+    #[cfg(not(feature = "metal-q5k-pair-dot"))]
+    #[test]
+    fn q5k_row_blocked_matmul_uses_scalar_decode_by_default() {
+        let bound = matmul_op(4, 256, 5);
+        let weight_node = bound.operands()[0].0;
+        let mut q5k = BTreeMap::new();
+        q5k.insert(weight_node, PackedCodec::Q5K);
+
+        assert!(
+            packed_row_block(&bound, &operand_codecs(&bound, &q5k)).is_some(),
+            "test fixture must actually take the row-blocked path for this assertion to mean anything"
+        );
+
+        let source = emit(&bound, &q5k).expect("emits").source;
+        assert!(
+            source.contains("q5k_value(blk"),
+            "without metal-q5k-pair-dot, Q5_K must fall back to the scalar per-element path:\n{source}"
+        );
+        assert!(
+            !source.contains("q5k_pair_dot"),
+            "the paired decode path must not appear without metal-q5k-pair-dot enabled:\n{source}"
         );
     }
 

@@ -179,6 +179,23 @@ metal-q4k-split-k = ["metal"]
 # ROW 270) and a decode-step seal on a quiet box, not on the mechanism
 # argument alone.
 metal-packed-row-nsg2 = ["metal"]
+# `Q5_K`'s counterpart to `q4k_pair_dot` (`msl.rs`'s `Q5K_PAIR_DOT_MSL`): the
+# same paired-nibble, two-word-load body `Q4_K`'s `plain_product` arm uses,
+# extended with `Q5_K`'s `qh` high-bit plane (one extra byte load, mask
+# select, no shift), mirroring ggml's own `kernel_mul_mv_q5_K_f32_impl`
+# (`ggml-metal.metal:5209-5324`) lane assignment. Closes the gap the
+# per-op profile measured: `Q5_K`'s row-blocked arm still falls back to the
+# fully scalar per-element `q5k_value` loop (`push_packed_row_blocked_body`'s
+# `PackedCodec::Q5K` arm), ~1.85x slower per op than `Q4_K`'s paired body on
+# the same 34 MB tensor shape (`blk.{0..3}.ffn_down.weight`). Default-off per
+# the same discipline as `metal-q4k-mask-fma`/`metal-tiled-gemm` above -- a
+# second, riskier kernel body for the hottest decode-time weights and does
+# not earn the production default until a quiet-box decode-step seal, not on
+# the mechanism argument alone (see `docs/discipline.md`, row assigned
+# centrally). Depends on `metal` for the same reason every sibling feature in
+# this file does: `msl.rs` is alloc-tier codegen, but the alternate kernel
+# body only has meaning for a Metal dispatch.
+metal-q5k-pair-dot = ["metal"]
 # Portable GPU execution driver (src/wgsl.rs, src/wgpu_driver.rs) — the
 # wgpu/WGSL counterpart of `metal` above, one abstraction layer over: same
 # `BoundOp` descriptor, same emit-then-drive split, different target ISA

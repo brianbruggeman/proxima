@@ -1446,6 +1446,7 @@ fn classify_kind(bound: &BoundOp, packed_operands: &PackedOperands) -> &'static 
             Ok(kernel)
                 if kernel.source.contains("q4k_pair_dot(blk")
                     || kernel.source.contains("q4k_run8(blk")
+                    || kernel.source.contains("q5k_pair_dot(blk")
                     || kernel.source.contains("q5k_value(blk")
                     || kernel.source.contains("q6k_value(blk")
                     // `metal-q4k-ggml-port`'s own body (`push_q4k_ggml_port_body`)
@@ -1493,6 +1494,8 @@ fn classify_packed_kernel_variant(
         "q4k-paired"
     } else if kernel.source.contains("q4k_run8(blk") {
         "q4k-run8"
+    } else if kernel.source.contains("q5k_pair_dot(blk") {
+        "q5k-paired"
     } else if kernel.source.contains("q5k_value(blk") {
         "q5k-scalar"
     } else if kernel.source.contains("q6k_value(blk") {
