@@ -29,7 +29,6 @@ use bytes::Bytes;
 use proxima_codec::DelimiterCodec;
 use proxima_primitives::pipe::Pipe;
 use proxima_protocols::codec_pipe::FrameCodecPipe;
-use rstest::rstest;
 
 fn fixture() -> Vec<u8> {
     let path =
@@ -83,13 +82,13 @@ fn feed_uniform(bytes: &[u8], chunk_len: usize) -> (Vec<Bytes>, usize) {
     drive(&chunks)
 }
 
-#[rstest]
+#[proxima::test]
 #[case::pathological_small_chunk_3(3)]
 #[case::pathological_small_chunk_7(7)]
 #[case::transport_read_4096(4096)]
 #[case::transport_read_8192(8192)]
 #[case::transport_read_65536(65536)]
-fn misaligned_chunk_sizes_match_a_single_whole_buffer_feed(#[case] chunk_len: usize) {
+async fn misaligned_chunk_sizes_match_a_single_whole_buffer_feed(#[case] chunk_len: usize) {
     let bytes = fixture();
     let (expected_frames, expected_consumed) = feed_uniform(&bytes, bytes.len());
     let (frames, consumed) = feed_uniform(&bytes, chunk_len);
@@ -109,11 +108,11 @@ fn misaligned_chunk_sizes_match_a_single_whole_buffer_feed(#[case] chunk_len: us
 // on / one-before / one-after the delimiter itself.
 const FIRST_DELIMITER_OFFSET: usize = 1434;
 
-#[rstest]
+#[proxima::test]
 #[case::split_immediately_before_the_delimiter(FIRST_DELIMITER_OFFSET)]
 #[case::split_exactly_on_the_delimiter(FIRST_DELIMITER_OFFSET + 1)]
 #[case::split_immediately_after_the_delimiter(FIRST_DELIMITER_OFFSET + 2)]
-fn split_at_a_delimiter_boundary_matches_a_single_whole_buffer_feed(
+async fn split_at_a_delimiter_boundary_matches_a_single_whole_buffer_feed(
     #[case] first_chunk_len: usize,
 ) {
     let bytes = fixture();
