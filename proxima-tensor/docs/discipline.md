@@ -20656,3 +20656,37 @@ Confirm `q5k-paired` appears in the `op_profile_variant` lines and `q5k-scalar` 
 | Date | Change | Δ vs prior | CoV / runs | Host loadout |
 | --- | --- | --- | --- | --- |
 | 2026-09-04 | paired-nibble `Q5_K` matvec body (`metal-q5k-pair-dot`) landed as the default, folded into `metal` in both `omega` and `proxima-model-interop` | 202,083 -> 124,265 ns/op (1.63x) on the 8 `Q5_K` ops; family 6.275 -> 5.725 ms; decode wall flat within noise (0.6 ms, inside the cell's own noise band) | per-op measurement single reading per arm; decode wall 3 rounds each arm | not separately re-verified quiet on this pass; numbers as measured on the source branch and reconfirmed by this landing's own gate run |
+
+## ROW 279 -- the uniform buffer cache is bounded: lru at 4096 entries, plateau 50 on the default decode
+
+**Card:** `fix/uniform-cache-bound`. **Worktree/branch/commit:** `proxima-wt-s6e2-ucache`/`fix/uniform-cache-bound` @ `6a74077`, landed via `proxima-wt-land-ucache`/`land/ucache`.
+
+**The mechanism.** `metal::UNIFORM_BUFFERS` (`omega/src/metal.rs`) is the content-keyed cache of uploaded uniform-blob `MTLBuffer`s that `upload_uniforms` reads and writes on every op that binds a `constant` uniform buffer. Before this landing it had exactly two operations -- lookup-by-content-bytes on a hit, insert-on-a-miss -- and **no eviction**: any workload whose uniform bytes vary per call (different shapes, different `cached_len` without bucketing) grew the `BTreeMap<Vec<u8>, MetalBuffer>` without bound, one `MTLBuffer` retained forever per distinct blob ever seen. This landing adds a third operation, LRU eviction, keyed by a monotonic per-entry use-tick (`UNIFORM_CACHE_CLOCK`) alongside each buffer: a hit refreshes the tick, and an insert past `crate::sized::UNIFORM_CACHE_ENTRIES` capacity evicts the entry with the smallest tick (`evict_least_recently_used`, a linear scan -- cheap at this map's bounded size, no ordered secondary index needed). The capacity is a new `[spans].uniform_cache_entries = 4096` key in `omega-runtime.toml`, threaded through `build.rs`'s `emit_sizing_consts` into `sized::UNIFORM_CACHE_ENTRIES`, overridable per-build via `OMEGA_SPANS_UNIFORM_CACHE_ENTRIES` (principle 12: no hard-coded tunable). `uniform_cache_len()`'s doc comment is updated from "content-keyed and unbounded" to state it never exceeds the new capacity.
+
+**Divergence at landing time.** Main was unchanged since the branch's merge-base (`23c70f8`, same commit both sides); `git rebase main` was a no-op ("Current branch land/ucache is up to date"). No conflict to reconcile -- the branch's single commit applies directly on top of main's tip.
+
+**The tests.** `omega/src/metal.rs`'s `uniform_cache_tests` module (real-Metal-device gated, skips headless): `filling_past_capacity_evicts_the_least_recently_used_entry` fills to `UNIFORM_CACHE_ENTRIES`, touches key 0 (refreshing its tick), inserts one more distinct blob to force an eviction, then asserts key 0 survived (cache hit) and key 1 (the actual LRU victim) missed. `a_cache_hit_refreshes_the_use_tick` asserts a hit's tick strictly increases. `uniform_buffer_reuses_still_counts_hits` asserts the pre-existing `UNIFORM_BUFFER_REUSES` counter semantics (miss on first upload, hit on re-upload of identical bytes) are unchanged by the eviction path. A `#[cfg(test)]` `reset_uniform_cache_for_test` clears both the map and the clock between tests since the std test harness reuses threads and both are thread-locals.
+
+**Gates (own `CARGO_TARGET_DIR=/Users/brianbruggeman/repos/slot-0/proxima-wt-land-ucache/target`, `CARGO_TERM_COLOR=never`):**
+- `cargo nextest run -p omega --features metal`: EXIT=0, 118 passed, 1 skipped.
+- `cargo nextest run -p omega --all-features`: EXIT=0, 176 passed, 1 skipped.
+- `cargo nextest run -p omega --features metal -E 'test(uniform_cache_tests)'`: EXIT=0, 3 passed, 116 skipped (the three tests named above).
+- `bash scripts/omega-gate.sh`: EXIT=0, `== omega gate: PASS ==` (6/6 steps incl. doctests: 2 passed).
+- Default decode oracle (`PROXIMA_MAX_TOKENS=8`, release, `metal,instrument`, `bind::real_openchat_file::runs_the_cached_decode_loop_on_the_metal_backend_and_reports_the_plan_cache`): EXIT=0, `generated_text="Here is a simple Python function that returns"` (unchanged from ROW 278's oracle text). Per-step `uniform_cache_len`: step0=23, step1=43, step2=50, step3=50, step4=50, step5=50, step6=50, step7=50 -- **plateaus at 50**, well under the 4096 cap, confirming the growth this cache exhibits on a plan-stable decode is bounded far below the new eviction threshold; the bound is a leak-prevention fix for workloads with varying uniform shapes, not a change to this default workload's behavior.
+
+**Decision.** Land the LRU bound as-is: it closes an unbounded-growth defect with zero behavioral change on the measured default decode (identical text, identical cache-length trajectory to what an unbounded map would have produced at this token count, since 50 << 4096 means no eviction ever fires on this workload) and a capacity that is build-time tunable per principle 12.
+
+**Re-prove:**
+```sh
+cd /Users/brianbruggeman/repos/slot-0/proxima
+CARGO_TARGET_DIR=<own target dir> cargo nextest run -p omega --features metal
+CARGO_TARGET_DIR=<own target dir> cargo nextest run -p omega --features metal -E 'test(uniform_cache_tests)'
+CARGO_TARGET_DIR=<own target dir> PROXIMA_MAX_TOKENS=8 cargo test --release -p proxima-model-interop --features metal,instrument --lib -- --exact --nocapture --ignored \
+  bind::real_openchat_file::runs_the_cached_decode_loop_on_the_metal_backend_and_reports_the_plan_cache
+```
+Confirm all 3 `uniform_cache_tests` pass and `uniform_cache_len` never exceeds `sized::UNIFORM_CACHE_ENTRIES` (4096 by default) across the run.
+
+### Changelog
+| Date | Change | Δ vs prior | CoV / runs | Host loadout |
+| --- | --- | --- | --- | --- |
+| 2026-09-04 | `metal::UNIFORM_BUFFERS` bounded to `[spans].uniform_cache_entries = 4096` with LRU eviction | unbounded content-keyed map -> capped at 4096 entries; measured plateau 50 on the default decode (steps 0-7: 23, 43, 50, 50, 50, 50, 50, 50) | single decode run, 8 tokens, deterministic (greedy) | landed with no conflicting main-side change; gate run on this landing's own worktree target dir |
