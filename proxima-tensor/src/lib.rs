@@ -229,8 +229,8 @@ pub use align::AlignedBuffer;
 #[cfg(any(feature = "std", feature = "alloc"))]
 pub use bind::{
     BodyStep, BoundOp, BoundOpBuilder, BoundOpKind, ComposedBody, Layout, Lookup, StepArg, bind,
-    block_node_ids, correct_packed_matmul_layouts, dead_resolved_nodes, index_node_ids,
-    node_retirement, prune_dead,
+    bind_with_fusion, block_node_ids, correct_packed_matmul_layouts, dead_resolved_nodes,
+    index_node_ids, node_retirement, prune_dead,
 };
 pub use convert::{Convert, SimdConvert};
 #[cfg(any(
