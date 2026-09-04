@@ -70,6 +70,14 @@ cached-attention-streaming = [
 # so this crate's own op-timed profiling tests can compare the row-blocked
 # and tiled-GEMM paths' operand-byte traffic without a second harness.
 metal-tiled-gemm = ["omega?/metal-tiled-gemm"]
+# passthrough to `omega/metal-output-placement` (default-off there): turns
+# on `generate.rs`'s persistent device-resident KV decode path (per-layer
+# `PlacedBuffer`s allocated once at this call's own reachable position
+# count, `mistral_single_range_cached_forward_program` in place of the
+# two-range online-softmax program) in place of the always-on
+# `LayerCache`-growing path. `metal` must also be enabled -- this feature
+# has no effect without it, since `PlacedBuffer` is Metal-only.
+metal-output-placement = ["omega?/metal-output-placement"]
 
 [dependencies]
 arrayvec.workspace = true

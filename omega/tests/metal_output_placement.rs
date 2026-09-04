@@ -178,6 +178,13 @@ fn a_program_reads_a_placed_write_from_a_later_op_in_the_same_call() {
          to prove anything about within-call write-then-read ordering"
     );
 
+    // `row_out` must be a declared output too, not just a
+    // `output_placements` entry: `omega::metal::prepare`'s `prune_dead`
+    // pass drops any node unreachable from the plan's own declared
+    // `outputs`, and a placed output has no graph edge to `cache_out` at
+    // all (the two are only aliased through the shared `PlacedBuffer`,
+    // invisible to the tensor graph) -- see
+    // `execute_plan_with_placements`'s own doc.
     let plan = omega::plan(
         &program,
         &[],
@@ -185,7 +192,7 @@ fn a_program_reads_a_placed_write_from_a_later_op_in_the_same_call() {
             QuantizedBlock::Float32(&[0.0; ROW_LEN as usize]),
             QuantizedBlock::Float32(&[0.0; TOTAL_LEN as usize]),
         ],
-        &[cache_out],
+        &[row_out, cache_out],
     )
     .expect("plans the read-after-placed-write program");
 

@@ -64,7 +64,9 @@ use proxima_primitives::pipe::Pipe;
 use proxima_tensor::cpu::evaluate_quantized_named_with_scratch;
 use proxima_tensor::cpu::{Evaluated, QuantizedBlock};
 use proxima_tensor::op::{NodeId, Op};
-use proxima_tensor::spec::{Qwen35LayerRoots, mistral_cached_forward_program_with_experts};
+use proxima_tensor::spec::{
+    CachedLayerRoots, Qwen35LayerRoots, mistral_cached_forward_program_with_experts,
+};
 use proxima_tokenizer::{SamplingConfig, Vocab, sample_next_token};
 
 #[cfg(all(feature = "instrument", feature = "metal", target_os = "macos"))]
@@ -75,6 +77,26 @@ use omega::backend::{Backend, Plan, execute_plan_named, mark_resident, plan_name
 use omega::metal::OpGpuTiming;
 #[cfg(all(feature = "instrument", feature = "metal", target_os = "macos"))]
 use omega::metal::metal_stage_totals;
+// Persistent device-resident KV: `PlacedBuffer`/`allocate_placed_buffer`/
+// `execute_plan_named_with_placements` are `omega`'s own default-off
+// `metal-output-placement` surface (`omega/src/metal.rs`'s own doc on
+// `execute_plan_with_placements`) -- this crate's identically-named,
+// identically default-off feature is a straight passthrough
+// (`Cargo.toml`'s `metal-output-placement` entry), never a second gate.
+// `plan_named` here is `omega::metal`'s own (the Metal-`Plan`-typed one,
+// aliased to avoid colliding with `omega::backend::plan_named` above,
+// which returns the backend-polymorphic `omega::backend::Plan` enum
+// `PlacedBuffer` placement has no arm for) --
+// `mistral_single_range_cached_forward_program` is this call's program
+// builder, `proxima-tensor/src/spec.rs`'s own single-range counterpart to
+// `mistral_cached_forward_program_with_experts`.
+#[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
+use omega::{
+    PlacedBuffer, allocate_placed_buffer, execute_plan_named_with_placements,
+    plan_named as plan_named_placed,
+};
+#[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
+use proxima_tensor::spec::mistral_single_range_cached_forward_program;
 #[cfg(feature = "instrument")]
 use proxima_telemetry::debug;
 #[cfg(feature = "instrument")]
@@ -442,6 +464,93 @@ pub struct LoadedModel<'file> {
     /// recomputed every decode step. `None` on the dense path, which never
     /// has an [`Qwen35LayerRoots::Ssm`] entry to size.
     qwen35_ssm_shape: Option<Qwen35SsmShape>,
+    /// The single-range, device-resident-KV counterpart of `program`/
+    /// `logits_root`/`layer_roots` above -- `None` unless this build was
+    /// compiled with `metal-output-placement` AND this checkpoint took the
+    /// dense, non-qwen35, non-MoE path (the single-range program is
+    /// dense-only, see [`mistral_single_range_cached_forward_program`]'s
+    /// own doc). CPU decode, any MoE checkpoint, and the qwen35 hybrid path
+    /// always run the two-range `program`/`layer_roots` fields instead;
+    /// [`Self::run_decode_loop`] picks whichever this field's presence and
+    /// the runtime backend selection together allow.
+    #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
+    single_range: Option<SingleRangeProgram>,
+}
+
+/// [`mistral_single_range_cached_forward_program`]'s compiled output, plus
+/// the one thing that function's own signature does not return: the
+/// per-layer `kv_cache.{layer}.{k_even,k_odd,v}` [`Op::Input`] node ids
+/// (`cache_input_nodes`) that a placed *read* targets -- [`CachedLayerRoots`]
+/// already names the OUTPUT (freshly rotated key/value) nodes a placed
+/// *write* targets, but the input side has no equivalent public return, so
+/// [`locate_cache_input_nodes`] resolves them by the same
+/// `kv_cache.{layer}.*` name `LayerCache`'s own two-range binding already
+/// uses.
+#[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
+struct SingleRangeProgram {
+    program: Vec<Op>,
+    logits_root: NodeId,
+    cache_roots: Vec<CachedLayerRoots>,
+    cache_input_nodes: Vec<(NodeId, NodeId, NodeId)>,
+}
+
+/// Scans `program` for the [`Op::Input`] node named `name` -- the input-side
+/// counterpart [`SingleRangeProgram::cache_input_nodes`] needs and
+/// [`CachedLayerRoots`] does not carry (see that field's own doc). O(program
+/// length) per call, paid `block_count * 3` times, once at
+/// [`LoadedModel::load`] time, never per decode step.
+#[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
+fn find_input_node(program: &[Op], name: &str) -> Result<NodeId, InteropError> {
+    program
+        .iter()
+        .enumerate()
+        .find(|(_, op)| op.name() == Some(name))
+        .map(|(index, _)| NodeId(index as u32))
+        .ok_or_else(|| InteropError::UnboundInputName(String::from(name)))
+}
+
+/// Builds [`SingleRangeProgram`] for a checkpoint whose
+/// `architecture.expert_count == 0` -- `None` for any mixture-of-experts
+/// checkpoint, since [`mistral_single_range_cached_forward_program`] is
+/// dense-only (that function's own doc). Never called for a qwen35
+/// checkpoint: [`LoadedModel::load`]'s qwen35 branch returns before this
+/// function's own call site is reached.
+///
+/// # Errors
+/// Whatever [`mistral_single_range_cached_forward_program`] can fail with,
+/// or [`InteropError::UnboundInputName`] if a `kv_cache.{layer}.*` name this
+/// function expects the program to declare is somehow absent (would mean
+/// the program builder and this lookup have drifted out of sync).
+#[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
+fn build_single_range_program(
+    architecture: &ModelArchitecture,
+) -> Result<Option<SingleRangeProgram>, InteropError> {
+    if architecture.expert_count != 0 {
+        return Ok(None);
+    }
+    let (program, logits_root, cache_roots) = mistral_single_range_cached_forward_program(
+        architecture.vocab,
+        architecture.embedding,
+        architecture.feed_forward,
+        architecture.query_heads,
+        architecture.kv_heads,
+        architecture.head_dim,
+        architecture.block_count,
+    )?;
+    let block_count = architecture.block_count as usize;
+    let mut cache_input_nodes = Vec::with_capacity(block_count);
+    for layer in 0..block_count {
+        let even = find_input_node(&program, &alloc::format!("kv_cache.{layer}.k_even"))?;
+        let odd = find_input_node(&program, &alloc::format!("kv_cache.{layer}.k_odd"))?;
+        let value = find_input_node(&program, &alloc::format!("kv_cache.{layer}.v"))?;
+        cache_input_nodes.push((even, odd, value));
+    }
+    Ok(Some(SingleRangeProgram {
+        program,
+        logits_root,
+        cache_roots,
+        cache_input_nodes,
+    }))
 }
 
 /// [`SsmLayerCache`]'s own fixed sizes, all derived from
@@ -530,6 +639,11 @@ impl<'file> LoadedModel<'file> {
                 logits_root,
                 layer_roots,
                 qwen35_ssm_shape: Some(ssm_shape),
+                // The single-range program is dense-Mistral-only
+                // (`SingleRangeProgram`'s own field doc); qwen35's hybrid
+                // attention+state-space layers are never that shape.
+                #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
+                single_range: None,
             });
         }
 
@@ -558,6 +672,8 @@ impl<'file> LoadedModel<'file> {
             architecture.expert_used_count,
             qk_norm,
         )?;
+        #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
+        let single_range = build_single_range_program(&architecture)?;
         Ok(Self {
             weights,
             architecture,
@@ -566,6 +682,8 @@ impl<'file> LoadedModel<'file> {
             logits_root,
             layer_roots: cache_roots.into_iter().map(Qwen35LayerRoots::Attention).collect(),
             qwen35_ssm_shape: None,
+            #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
+            single_range,
         })
     }
 
@@ -619,6 +737,8 @@ impl<'file> LoadedModel<'file> {
             architecture.expert_used_count,
             false,
         )?;
+        #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
+        let single_range = build_single_range_program(&architecture)?;
         Ok(Self {
             weights,
             architecture,
@@ -627,6 +747,8 @@ impl<'file> LoadedModel<'file> {
             logits_root,
             layer_roots: cache_roots.into_iter().map(Qwen35LayerRoots::Attention).collect(),
             qwen35_ssm_shape: None,
+            #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
+            single_range,
         })
     }
 }
@@ -943,6 +1065,18 @@ pub(crate) struct BackendRuntime {
     /// keeps exactly the one entry the field's own rationale above says is
     /// worth keeping.
     plans: alloc::collections::BTreeMap<(usize, usize), Plan>,
+    /// [`Self::evaluate_with_placements`]'s own plan cache -- same
+    /// `(new_count, merged_len)` keying as `plans` above, but holding
+    /// `omega::metal::Plan` directly rather than the backend-polymorphic
+    /// `omega::backend::Plan` enum, since [`PlacedBuffer`] placement has no
+    /// arm for CPU/wgpu and only ever runs against the Metal backend. A
+    /// second map rather than a second variant on `plans`'s own `Plan`
+    /// enum because the two plan types come from executing two entirely
+    /// different programs (two-range vs. single-range) against the same
+    /// `(new_count, merged_len)` shape space -- sharing one map would let a
+    /// single-range plan satisfy a two-range lookup by coincidence of key.
+    #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
+    placed_plans: alloc::collections::BTreeMap<(usize, usize), omega::metal::Plan>,
     pub(crate) plan_hits: usize,
     pub(crate) plan_misses: usize,
 }
@@ -953,9 +1087,21 @@ impl BackendRuntime {
         Self {
             backend: select_backend(config),
             plans: alloc::collections::BTreeMap::new(),
+            #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
+            placed_plans: alloc::collections::BTreeMap::new(),
             plan_hits: 0,
             plan_misses: 0,
         }
+    }
+
+    /// Whether this call's [`ServingConfig`] selected the Metal backend --
+    /// [`Self::backend`] is private (this struct's whole job is hiding which
+    /// arm was picked), so [`Self::run_decode_loop`]'s own choice of the
+    /// placed-KV decode path against [`LoadedModel::single_range`] needs
+    /// this accessor rather than reading the field directly.
+    #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
+    pub(crate) fn is_metal(&self) -> bool {
+        matches!(self.backend, Backend::Metal)
     }
 
     /// `resident_names` -- the caller's own model-weight names, fixed for
@@ -979,6 +1125,54 @@ impl BackendRuntime {
             .get_mut(&shape)
             .ok_or(InteropError::PlanCacheEntryVanished { shape })?;
         Ok(execute_plan_named(plan, named)?)
+    }
+
+    /// [`Self::evaluate`]'s placed-KV counterpart: same `(new_count,
+    /// merged_len)` plan-cache bookkeeping (`plan_hits`/`plan_misses` stay
+    /// meaningful across both paths -- a caller reading them after the loop
+    /// cannot tell which one ran), but plans and executes directly against
+    /// `omega::metal` (`plan_named_placed`/[`execute_plan_named_with_placements`])
+    /// rather than through `omega::backend`'s polymorphic entry point, and
+    /// routes `input_placements`/`output_placements` into the execute call
+    /// -- the whole reason this method exists next to [`Self::evaluate`]
+    /// rather than adding a placement parameter there, since every other
+    /// backend arm has no such parameter to accept. Clears `placed_plans`
+    /// on every miss, same as `plans`/[`Self::resolve_plan`] -- the
+    /// identical superseded-`Plan` leak that clearing fixed there applies
+    /// here unchanged: ordinary decode's `merged_len` strictly increases,
+    /// so a miss means the previous entry can never be looked up again.
+    #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
+    #[allow(clippy::too_many_arguments)]
+    fn evaluate_with_placements(
+        &mut self,
+        program: &[Op],
+        symbols: &[u64],
+        named: &[(&str, QuantizedBlock<'_>)],
+        outputs: &[NodeId],
+        resident_names: &BTreeSet<&str>,
+        input_placements: &[(NodeId, &PlacedBuffer, usize)],
+        output_placements: &[(NodeId, &PlacedBuffer, usize)],
+    ) -> Result<Evaluated, InteropError> {
+        let shape = (symbols[0] as usize, symbols[1] as usize);
+        if self.placed_plans.contains_key(&shape) {
+            self.plan_hits += 1;
+        } else {
+            self.plan_misses += 1;
+            let mut plan = plan_named_placed(program, symbols, named, outputs)?;
+            plan.mark_resident(resident_names);
+            self.placed_plans.clear();
+            self.placed_plans.insert(shape, plan);
+        }
+        let plan = self
+            .placed_plans
+            .get_mut(&shape)
+            .ok_or(InteropError::PlanCacheEntryVanished { shape })?;
+        Ok(execute_plan_named_with_placements(
+            plan,
+            named,
+            input_placements,
+            output_placements,
+        )?)
     }
 
     /// [`Self::evaluate`]/[`Self::evaluate_op_timed`]'s shared cache-lookup
@@ -1247,6 +1441,31 @@ impl<'file> LoadedModel<'file> {
             presence_penalty: serving_config.presence_penalty,
         };
         let mut rng = fastrand::Rng::with_seed(serving_config.seed);
+
+        // Persistent device-resident KV: only reachable when this build was
+        // compiled with `metal-output-placement`, this checkpoint built a
+        // single-range program (`LoadedModel::single_range`'s own doc --
+        // `None` for any mixture-of-experts or qwen35 checkpoint), AND this
+        // call's own `ServingConfig` selected the Metal backend
+        // (`runtime.is_metal()`). CPU decode, any MoE checkpoint, and the
+        // qwen35 hybrid path always fall through to the two-range
+        // `layer_roots` path below, byte-for-byte unchanged.
+        #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
+        if runtime.is_metal()
+            && let Some(single_range) = &self.single_range
+        {
+            return self.run_decode_loop_placed_kv(
+                single_range,
+                ids.clone(),
+                token_history.clone(),
+                repeat_window,
+                sample_config,
+                rng.clone(),
+                max_tokens,
+                serving_config,
+                runtime,
+            );
+        }
 
         let cache_names: Vec<LayerCacheNames> = self
             .layer_roots
@@ -1805,6 +2024,276 @@ impl<'file> LoadedModel<'file> {
                         runtime.plans_len(),
                         runtime.plan_hits,
                         runtime.plan_misses,
+                    );
+                }
+
+                Ok(token_id)
+            },
+        )?;
+
+        let text = proxima_tokenizer::decode(&generated_ids, &self.vocab)?;
+        Ok((generated_ids, text, stopped_by_eos))
+    }
+
+    /// [`Self::run_decode_loop`]'s persistent-device-resident-KV arm:
+    /// [`SingleRangeProgram`] in place of the two-range `program`, one
+    /// [`PlacedBuffer`] triple per layer (`k_even`/`k_odd`/`v`) allocated
+    /// ONCE, at `(prompt_len + max_tokens).min(context_length)` capacity
+    /// (this call's actual reachable position count, never
+    /// `context_length` itself -- see the sizing comment in the body) and
+    /// held for this whole call, in place of `LayerCache`'s per-step
+    /// `extend_from_slice` growth. Each step places this step's own
+    /// freshly rotated key/value (`single_range.cache_roots[layer]`, the
+    /// OUTPUT side) into the buffer's tail at `cached_len * row_bytes`, and
+    /// reads the SAME buffer back as this step's `kv_cache.{layer}.*`
+    /// input (`single_range.cache_input_nodes[layer]`) covering `[0,
+    /// cached_len + new_count)` -- one program, one command buffer, the
+    /// write visible to the later read through Metal's own whole-resource
+    /// hazard tracking (`omega::metal::execute_plan_with_placements`'s own
+    /// doc, "Within-call aliasing"). No host round trip either direction:
+    /// the cache never leaves the device, and the per-layer cache roots
+    /// are not requested as `Evaluated` outputs at all (only
+    /// `single_range.logits_root` is).
+    ///
+    /// `ids`/`token_history`/`sample_config`/`rng` arrive already built by
+    /// [`Self::run_decode_loop`]'s shared prefix -- this method's own body
+    /// starts exactly where that function's two-range arm does.
+    #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
+    #[allow(clippy::too_many_arguments)]
+    fn run_decode_loop_placed_kv(
+        &self,
+        single_range: &SingleRangeProgram,
+        ids: Vec<u32>,
+        mut token_history: Vec<u32>,
+        repeat_window: usize,
+        sample_config: SamplingConfig,
+        mut rng: fastrand::Rng,
+        max_tokens: usize,
+        serving_config: &ServingConfig,
+        runtime: &mut BackendRuntime,
+    ) -> Result<(Vec<u32>, String, bool), InteropError> {
+        let block_count = self.architecture.block_count as usize;
+        let kv_heads = self.architecture.kv_heads as usize;
+        let head_dim = self.architecture.head_dim as usize;
+        let pairs = head_dim / 2;
+        let context_length = serving_config.context_length as usize;
+
+        // Sized from what THIS call can actually reach (`prompt_len +
+        // max_tokens`), not `context_length` (default 131_072). Capping the
+        // allocation at `positions_needed` (never more than
+        // `context_length`) cannot admit a step this call could not already
+        // reach -- `apply_serving_config` below still rejects any step whose
+        // `merged_len` would exceed `context_length`.
+        let positions_needed = (ids.len() + max_tokens).min(context_length);
+
+        let row_bytes_even_odd = kv_heads * pairs * core::mem::size_of::<f32>();
+        let row_bytes_v = kv_heads * head_dim * core::mem::size_of::<f32>();
+        let capacity_even_odd = positions_needed * row_bytes_even_odd;
+        let capacity_v = positions_needed * row_bytes_v;
+
+        let mut k_even_buffers = Vec::with_capacity(block_count);
+        let mut k_odd_buffers = Vec::with_capacity(block_count);
+        let mut v_buffers = Vec::with_capacity(block_count);
+        for _ in 0..block_count {
+            k_even_buffers.push(allocate_placed_buffer(capacity_even_odd)?);
+            k_odd_buffers.push(allocate_placed_buffer(capacity_even_odd)?);
+            v_buffers.push(allocate_placed_buffer(capacity_v)?);
+        }
+
+        let kv_cache_names: Vec<(String, String, String)> = (0..block_count)
+            .map(|layer| {
+                (
+                    alloc::format!("kv_cache.{layer}.k_even"),
+                    alloc::format!("kv_cache.{layer}.k_odd"),
+                    alloc::format!("kv_cache.{layer}.v"),
+                )
+            })
+            .collect();
+
+        // `prepare`'s own element-count check (`omega::metal::prepare`,
+        // `found != expected`) runs against EVERY named block, placed or
+        // not -- these three names are always input-placed below, so their
+        // data is never read, only their LENGTH, which must match this
+        // step's `merged_len * elements_per_position`. `resize` only grows
+        // when `merged_len` grows past the previous step's value, the same
+        // amortized cost `LayerCache::append`'s `extend_from_slice` paid,
+        // minus the real data this scratch never holds and the device
+        // upload `execute_plan_with_placements` skips for a placed input.
+        let mut cache_length_scratch_even_odd: Vec<f32> = Vec::new();
+        let mut cache_length_scratch_v: Vec<f32> = Vec::new();
+
+        let resident_names: BTreeSet<&str> = self
+            .weights
+            .owned
+            .iter()
+            .map(|(name, _)| name.as_str())
+            .chain(self.weights.packed.iter().map(|(name, _)| name.as_str()))
+            .chain(
+                self.weights
+                    .packed_owned
+                    .iter()
+                    .map(|(name, _, _)| name.as_str()),
+            )
+            .collect();
+
+        let mut cached_len = 0usize;
+        let mut next_ids = ids;
+        let vocab_size = self.architecture.vocab as usize;
+
+        let (generated_ids, stopped_by_eos) = decode_until_stop_or_budget(
+            &self.vocab,
+            max_tokens,
+            |_step| {
+                #[cfg(feature = "instrument")]
+                proxima_tensor::instrument::reset_step();
+                #[cfg(feature = "instrument")]
+                let step_started = read_ticks();
+
+                let new_count = next_ids.len();
+                let merged_len = cached_len + new_count;
+                apply_serving_config(serving_config, merged_len)?;
+
+                let inputs = build_position_inputs(
+                    &next_ids,
+                    cached_len,
+                    self.architecture.head_dim,
+                    self.architecture.rope_freq_base,
+                );
+
+                let mut named_blocks: Vec<(&str, QuantizedBlock)> = Vec::with_capacity(
+                    self.weights.owned.len()
+                        + self.weights.packed.len()
+                        + self.weights.packed_owned.len()
+                        + 4
+                        + block_count * 3,
+                );
+                named_blocks.push(("ids", QuantizedBlock::Float32(inputs.ids_f32.as_slice())));
+                for (name, data) in &self.weights.owned {
+                    named_blocks.push((name.as_str(), QuantizedBlock::Float32(data.as_slice())));
+                }
+                for (name, block) in &self.weights.packed {
+                    named_blocks.push((name.as_str(), *block));
+                }
+                for (name, bytes, kind) in &self.weights.packed_owned {
+                    named_blocks.push((name.as_str(), kind.as_block(bytes)));
+                }
+                named_blocks.push(("eps", QuantizedBlock::Float32(inputs.epsilon.as_slice())));
+                named_blocks.push(("rope_cos", QuantizedBlock::Float32(inputs.cos.as_slice())));
+                named_blocks.push(("rope_sin", QuantizedBlock::Float32(inputs.sin.as_slice())));
+                let cached_len_scalar = [cached_len as f32];
+                named_blocks.push(("cached_len", QuantizedBlock::Float32(&cached_len_scalar)));
+
+                // This step's `kv_cache.{layer}.*` `named_blocks` entries are
+                // placeholder scratch, not the real KV cache -- see this
+                // arm's own doc on why `execute_plan_with_placements` never
+                // uploads them.
+                let even_odd_len = merged_len * kv_heads * pairs;
+                let v_len = merged_len * kv_heads * head_dim;
+                if cache_length_scratch_even_odd.len() < even_odd_len {
+                    cache_length_scratch_even_odd.resize(even_odd_len, 0.0);
+                }
+                if cache_length_scratch_v.len() < v_len {
+                    cache_length_scratch_v.resize(v_len, 0.0);
+                }
+                for names in &kv_cache_names {
+                    named_blocks.push((
+                        names.0.as_str(),
+                        QuantizedBlock::Float32(&cache_length_scratch_even_odd[..even_odd_len]),
+                    ));
+                    named_blocks.push((
+                        names.1.as_str(),
+                        QuantizedBlock::Float32(&cache_length_scratch_even_odd[..even_odd_len]),
+                    ));
+                    named_blocks.push((
+                        names.2.as_str(),
+                        QuantizedBlock::Float32(&cache_length_scratch_v[..v_len]),
+                    ));
+                }
+
+                let mut input_placements: Vec<(NodeId, &PlacedBuffer, usize)> =
+                    Vec::with_capacity(block_count * 3);
+                let mut output_placements: Vec<(NodeId, &PlacedBuffer, usize)> =
+                    Vec::with_capacity(block_count * 3);
+                for layer in 0..block_count {
+                    let (even_input, odd_input, value_input) =
+                        single_range.cache_input_nodes[layer];
+                    let (even_output, odd_output, value_output) = single_range.cache_roots[layer];
+                    input_placements.push((even_input, &k_even_buffers[layer], 0));
+                    input_placements.push((odd_input, &k_odd_buffers[layer], 0));
+                    input_placements.push((value_input, &v_buffers[layer], 0));
+                    output_placements.push((
+                        even_output,
+                        &k_even_buffers[layer],
+                        cached_len * row_bytes_even_odd,
+                    ));
+                    output_placements.push((
+                        odd_output,
+                        &k_odd_buffers[layer],
+                        cached_len * row_bytes_even_odd,
+                    ));
+                    output_placements.push((value_output, &v_buffers[layer], cached_len * row_bytes_v));
+                }
+
+                let symbols = [new_count as u64, merged_len as u64];
+                // Every placed-output node must also be a `roots` entry, or
+                // `prepare`'s `BoundOpBuilder::finish` (`proxima-tensor`'s
+                // `bind.rs`) never force-materializes it and its write lands
+                // wherever `held`'s end-of-walk flush happens to fall --
+                // AFTER every layer's score already read the buffer, and
+                // `omega::metal::prepare`'s own `prune_dead` pass drops it
+                // from `resolved` entirely (see
+                // `omega::metal::execute_plan_with_placements`'s own doc).
+                // The two-range path above (`roots.push` for each
+                // `cache_roots` entry) already relies on this; this arm was
+                // missing it.
+                let mut roots: Vec<NodeId> =
+                    Vec::with_capacity(1 + single_range.cache_roots.len() * 3);
+                roots.push(single_range.logits_root);
+                for (even, odd, value) in &single_range.cache_roots {
+                    roots.push(*even);
+                    roots.push(*odd);
+                    roots.push(*value);
+                }
+                let evaluated = runtime.evaluate_with_placements(
+                    &single_range.program,
+                    &symbols,
+                    &named_blocks,
+                    &roots,
+                    &resident_names,
+                    &input_placements,
+                    &output_placements,
+                )?;
+                cached_len = merged_len;
+
+                let (logits, _shape) =
+                    evaluated
+                        .get(single_range.logits_root)
+                        .ok_or(InteropError::MissingEvaluatedNode {
+                            node: single_range.logits_root,
+                        })?;
+                let last_position = &logits[(new_count - 1) * vocab_size..new_count * vocab_size];
+
+                let recent_window_start = token_history.len().saturating_sub(repeat_window);
+                let recent_tokens = &token_history[recent_window_start..];
+                let token_id =
+                    sample_next_token(last_position, recent_tokens, sample_config, &mut rng)
+                        .ok_or(InteropError::EmptyLogits)?;
+                token_history.push(token_id);
+                next_ids = alloc::vec![token_id];
+
+                #[cfg(feature = "instrument")]
+                {
+                    let ms = |ticks: u64| ticks_to_nanos(ticks) as f64 / 1e6;
+                    std::println!(
+                        "token_breakdown step={_step} new_count={new_count} cached_len_before={} \
+                     step_wall_ms={:.3} kv_cache_upload_bytes={} evaluate_ms={:.3} \
+                     layer_cache_append_ms={:.3} layer_cache_append_bytes={}",
+                        cached_len - new_count,
+                        ms(elapsed_ticks(step_started)),
+                        0,
+                        0.0,
+                        0.0,
+                        0,
                     );
                 }
 
