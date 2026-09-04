@@ -10775,10 +10775,21 @@ value = 1.0
         }
         let two_range_shapes = crate::shape::infer(&two_range_program, &[1, 71])
             .expect("one new position against a 71-position cache infers");
-        let two_range_bound =
-            crate::bind::bind(&two_range_program, &two_range_shapes, &two_range_outputs)
-                .expect("the two-range cached program binds")
-                .len();
+        // fusion held explicitly off: `bind`'s default `fuse_cached_attention
+        // = true` (under `cached-attention-streaming`) collapses the
+        // two-range baseline's online-softmax combine into `CachedAttention`
+        // BoundOps but has no candidate to fuse on the single-range path
+        // below, so an unpinned `bind` call here compares a fused count
+        // against an unfused one instead of the structural raw-bind
+        // difference this test names.
+        let two_range_bound = crate::bind::bind_with_fusion(
+            &two_range_program,
+            &two_range_shapes,
+            &two_range_outputs,
+            false,
+        )
+        .expect("the two-range cached program binds")
+        .len();
 
         let (single_range_program, single_range_logits, single_range_roots) =
             mistral_single_range_cached_forward_program(32_002, 4096, 14336, 32, 8, 128, 32)
@@ -10793,10 +10804,11 @@ value = 1.0
         // same total context depth.
         let single_range_shapes = crate::shape::infer(&single_range_program, &[1, 71])
             .expect("one new position against a 71-position merged range infers");
-        let single_range_bound = crate::bind::bind(
+        let single_range_bound = crate::bind::bind_with_fusion(
             &single_range_program,
             &single_range_shapes,
             &single_range_outputs,
+            false,
         )
         .expect("the single-range cached program binds")
         .len();
