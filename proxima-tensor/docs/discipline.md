@@ -20676,17 +20676,56 @@ Confirm `q5k-paired` appears in the `op_profile_variant` lines and `q5k-scalar` 
 
 **Decision.** Land the LRU bound as-is: it closes an unbounded-growth defect with zero behavioral change on the measured default decode (identical text, identical cache-length trajectory to what an unbounded map would have produced at this token count, since 50 << 4096 means no eviction ever fires on this workload) and a capacity that is build-time tunable per principle 12.
 
+## ROW 280 -- plan-stable buffers land as the default: 842 allocations per step become zero on plan-cache hits
+
+**Card:** CARD 6.5, `perf/plan-stable-buffers`. **Worktree/branch/commit:** `proxima-wt-s6e2-arena`/`perf/plan-stable-buffers` @ `376a5a6`, landed via `proxima-wt-land-arena`/`land/arena`. **Feature:** `metal-plan-stable-buffers`, default: ON (folded into the `metal` feature in both `omega/Cargo.toml` and `proxima-model-interop/Cargo.toml`, mirroring ROW-273/`9f6a878` and ROW-278's flips).
+
+**The body.** A plan-owned `BufferArena` (`omega/src/metal.rs`) hangs off the cached `Plan`: whole device buffers sized by size class, partitioned by `node_retirement`'s liveness ranges and built once per plan, with every plan output pinned so it is never returned to the free list. `PlanUniforms` gives each plan position its own uniform buffer, written in place on every step, bypassing the content-keyed uniform cache entirely on a plan-cache hit. Together these take a cache hit from paying `allocate_buffer`/`upload_uniforms` per op per token to paying neither. New counters `OUTPUT_BUFFER_ALLOCATIONS` and `PLAN_UNIFORM_WRITES` make the effect directly observable per step. `backend::Plan::Metal` is boxed under this feature (now the default shape) to keep `clippy::large_enum_variant` clean once `metal::Plan` carries the arena and uniform state -- no other public signature moves.
+
+**Arena arithmetic.** A naive per-op allocation strategy for this plan's op graph would need 370,941,308 B of device buffers (938 ops/step, no reuse). The liveness-partitioned arena instead peaks at 13,967,368 B during prefill (the one step with the largest working set) and settles to 450,568 B steady-state once decode is running one new token at a time -- a **26.56x** reuse ratio at the prefill peak, well under the plan's own computed capacity bound of 172,812,125 B.
+
+**Correctness fix found by the parity suite.** The full omega parity run turned up a `live_bytes` underflow in the arena's free-list bookkeeping (a buffer being retired twice against the same liveness range); fixed in this landing before any measurement below was taken.
+
+**7 arena tests** (`omega::metal::arena_tests`, all pass under `cargo nextest run -p omega --features metal`, reachable without any extra flag since the feature is in the default set): `a_programs_output_buffer_is_never_in_the_free_list`, `live_buffer_count_bounded_in_steady_state`, `an_extent_change_forces_a_documented_realloc`, `a_pooled_slot_is_never_rebound_before_its_last_consumers_position`, `uniform_contents_change_per_step_while_the_buffer_identity_does_not`, `two_ops_with_identical_uniform_bytes_get_distinct_plan_owned_buffers`, `pooled_output_equals_the_cpu_oracle_on_a_real_forward`.
+
+**Noisy-box decode wall** (measured on the source branch before this landing; `PROXIMA_MAX_TOKENS=8`, `runs_the_cached_decode_loop_on_the_metal_backend_and_reports_the_plan_cache`, `step_wall_ms` mean over steps 1..7, ms/token):
+
+| arm | range (ms/token) |
+| --- | --- |
+| OFF (default-off, pre-flip) | [40.2, 69.9] |
+| ON (`metal-plan-stable-buffers`) | [37.7, 44.3] |
+
+ON <= OFF in every round on this box; `op_setup` fell 3.94-5.42 -> 0.39-0.60 ms/step; `OUTPUT_BUFFER_ALLOCATIONS` 842/step -> 0 on every plan-cache-hit step.
+
+**Quiet-box confirmation, 3 interleaved rounds** (this landing's own release build, `metal,instrument`, OFF = detached `main`@`23c70f8` pre-flip, ON = this landing's flipped tree; `llama-bench -m openchat-3.5-1210.Q4_K_S.gguf -n 32 -p 0 -r 5 -t 8 -ngl 99` run between each pair as an independent host-load witness; `step_wall_ms` mean over steps 1..7 only):
+
+| round | llama-bench (t/s) | OFF (ms/token) | ON (ms/token) |
+| --- | --- | --- | --- |
+| 1 | 55.99 ± 1.36 | 40.827 | 39.688 |
+| 2 | 54.51 ± 2.32 | 40.090 | 37.476 |
+| 3 (retry, see below) | 54.48 ± 0.65 | 41.107 | 40.780 |
+
+CoV across the 3 rounds: OFF 1.05%, ON 3.5%. ON <= OFF every round. Round 3's first attempt was voided and rerun: a second agent's `cargo nextest -p proxima-tensor --all-features` build started mid-round on this shared box (confirmed via `pgrep`), producing a 63.4 ms outlier on ON step 1; the 30-minute quiet-box wait budget was exhausted with one `cargo nextest -p proxima-tensor` process still resident (recorded in `arena-loadout-round3-retry.log`), so round 3 was re-run under that residual load per the brief rather than discarded -- the table above is the retry. `output_buffer_allocations` in the ON logs is 0 on every plan-cache-hit step (3-7) in all three rounds; the OFF binary predates the counter and does not emit the field at all. `device_allocated_bytes` is flat within each arm (OFF ~4.163 GB, ON ~4.153 GB) across all steps and rounds. Text identical in every round, both arms: `generated_text="Here is a simple Python function that returns"`.
+
+**Correctness:** all 7 arena tests pass; the parity-suite-found `live_bytes` underflow is fixed; `pooled_output_equals_the_cpu_oracle_on_a_real_forward` holds the pooled path to the CPU oracle.
+
+**Gates (own `CARGO_TARGET_DIR=/Users/brianbruggeman/repos/slot-0/proxima-wt-land-arena/target`, `CARGO_TERM_COLOR=never`, re-run after a same-day rebase onto a newer `main`):** `cargo build --workspace --lib` EXIT=0. `cargo nextest run -p omega --features metal`: 122 passed, 1 skipped (includes all 7 `arena_tests`, reachable under `metal` alone). `cargo nextest run -p proxima-tensor --features std,instrument`: 513 passed, 7 skipped. `cargo nextest run -p proxima-model-interop --features metal,instrument`: 95 passed, 25 skipped. `cargo nextest run -p proxima-model-interop --features std`: 82 passed, 22 skipped. `cargo clippy --workspace --all-targets -- -D warnings`: EXIT=0 (only an unrelated `proc-macro-error2` future-incompat note). `cargo nextest run -p omega --all-features`: 180 passed, 1 skipped. `bash scripts/omega-gate.sh`: all 6 steps pass, `[3/6]` 180 tests run/180 passed, `[6/6]` 2 doctests passed.
+
+**Not done.** This landing's source branch was cut before ROW 279's uniform-cache LRU bound existed; the two land independently of each other (this row touches `BufferArena`/`PlanUniforms`, ROW 279 touches `UNIFORM_BUFFERS`) and the merge conflict between them (both added a `#[cfg(test)]` module at the same point in `omega/src/metal.rs`) was resolved by keeping both test modules intact side by side -- `uniform_cache_tests` (ROW 279) and `arena_tests` (this row). No further uniform-cache work is open after this row lands.
+
+**Decision.** Land plan-stable buffers as the default: the arena and per-position uniforms take a plan-cache hit from 842 allocations/step to 0, `op_setup` falls roughly an order of magnitude, arena peak is 26.56x under the naive bound, all 7 arena tests plus the full omega/interop gate suite pass, and the quiet-box confirmation shows ON <= OFF in every round with identical text. `backend::Plan::Metal`'s `Box` becomes part of the default build; no other public signature changes.
+
 **Re-prove:**
 ```sh
 cd /Users/brianbruggeman/repos/slot-0/proxima
 CARGO_TARGET_DIR=<own target dir> cargo nextest run -p omega --features metal
-CARGO_TARGET_DIR=<own target dir> cargo nextest run -p omega --features metal -E 'test(uniform_cache_tests)'
 CARGO_TARGET_DIR=<own target dir> PROXIMA_MAX_TOKENS=8 cargo test --release -p proxima-model-interop --features metal,instrument --lib -- --exact --nocapture --ignored \
   bind::real_openchat_file::runs_the_cached_decode_loop_on_the_metal_backend_and_reports_the_plan_cache
 ```
-Confirm all 3 `uniform_cache_tests` pass and `uniform_cache_len` never exceeds `sized::UNIFORM_CACHE_ENTRIES` (4096 by default) across the run.
+Confirm `output_buffer_allocations=0` on every step after the first plan-cache hit and `generated_text` stays identical across runs.
 
 ### Changelog
 | Date | Change | Δ vs prior | CoV / runs | Host loadout |
 | --- | --- | --- | --- | --- |
 | 2026-09-04 | `metal::UNIFORM_BUFFERS` bounded to `[spans].uniform_cache_entries = 4096` with LRU eviction | unbounded content-keyed map -> capped at 4096 entries; measured plateau 50 on the default decode (steps 0-7: 23, 43, 50, 50, 50, 50, 50, 50) | single decode run, 8 tokens, deterministic (greedy) | landed with no conflicting main-side change; gate run on this landing's own worktree target dir |
+| 2026-09-04 | plan-stable buffers (`metal-plan-stable-buffers`) landed as the default, folded into `metal` in both `omega` and `proxima-model-interop`; fixed a `live_bytes` underflow found by the full parity suite | `OUTPUT_BUFFER_ALLOCATIONS` 842/step -> 0 on plan-cache hits; op_setup 3.94-5.42 -> 0.39-0.60 ms/step; arena peak 13,967,368 B vs naive 370,941,308 B (26.56x) | 3 interleaved rounds each arm, CoV 1.05% (OFF) / 3.5% (ON) | round 3 re-run under residual load after the 30-minute quiet-box budget was exhausted with one other agent's `cargo nextest -p proxima-tensor` process still resident |
