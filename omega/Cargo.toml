@@ -56,6 +56,14 @@ cpu = ["std", "proxima-tensor/std"]
 # every round. This also makes `backend::Plan::Metal`'s `Box` (added to keep
 # clippy::large_enum_variant clean once `metal::Plan` carries the arena and
 # uniform state) part of the default build; no other public signature moves.
+# `cached-attention-streaming` joins per the owner's less-work rule (ROW 282):
+# ROW 281's bake-off found no confirmed wall win (delta 0.07% of the OFF mean,
+# inside both arms' CoV) but a real, measured reduction in work -- emit_calls
+# 938 -> 616 per decode step, GPU-side `total_gpu_ms` 35.266 -> 32.356
+# (-8.2%), `device_allocated_bytes` -131,072 B -- with `generated_text`
+# identical across all 3 bake-off rounds. The owner's rule: keep a
+# less-work change when output is identical and wall clock is not worse
+# beyond noise, even if wall clock does not visibly move.
 metal = [
     "std",
     "dep:objc2",
@@ -71,6 +79,7 @@ metal = [
     "metal-wide-cooperative-reduce",
     "metal-q5k-pair-dot",
     "metal-plan-stable-buffers",
+    "cached-attention-streaming",
 ]
 # Name reservations for `Backend`'s remaining variants (`src/backend.rs`) —
 # every variant exists regardless of which of these are on, so a caller can
@@ -387,10 +396,9 @@ proxima-safetensors = { path = "../proxima-safetensors" }
 # `test-support` pulls in `proxima_tensor::test_support::Lcg`, the same
 # deterministic PRNG proxima-tensor's own examples share — see that crate's
 # Cargo.toml for why this is a feature, not a default. `cached-attention-streaming`
-# is on here (test-only, never in the `metal` feature production consumers
-# build against) so `omega/tests/metal_real_forward.rs` can produce and check
-# the CPU/Metal differential record that feature's own doc says is the
-# condition for turning it on by default.
+# is named explicitly here too, now redundant with `metal`'s own default per
+# ROW 282 but kept so `omega/tests/metal_real_forward.rs` still builds under
+# any feature set that drops `metal` but keeps `test-support`.
 proxima-tensor = { path = "../proxima-tensor", features = ["config", "test-support", "cached-attention-streaming"] }
 tempfile.workspace = true
 toml.workspace = true

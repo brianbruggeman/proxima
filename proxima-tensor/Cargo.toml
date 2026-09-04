@@ -25,8 +25,11 @@ default = ["std", "config", "q4k-int8-dot", "q5k-int8-dot", "q6k-int8-dot"]
 # (~1.03x combined noise, i.e. a tie, not a regression).
 std = ["alloc", "thiserror/std", "tensor-bgpool", "tensor-cohort", "cohort-staged-graph", "dep:libc"]
 alloc = []
-# Cached-attention graph rewrite. Default-off until the real checkpoint work
-# and CPU/Metal differential records are accepted.
+# Cached-attention graph rewrite. Default-off in this crate's own `default`
+# (no checkpoint/differential harness lives here), but ROW 282 folds it into
+# `metal`'s default shape one level up (`omega`, `proxima-model-interop`) now
+# that the real checkpoint work and CPU/Metal differential records are
+# accepted -- this feature stays selectable standalone for CPU-only callers.
 cached-attention-streaming = ["std"]
 # Std composition boundary for graph specs (guiding-principle 4): bon builder +
 # conflaguration Settings/Validate + serde. The alloc-tier core (Graph/Node/
