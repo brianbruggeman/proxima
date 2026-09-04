@@ -3276,6 +3276,93 @@ fn tiled_gemm_threadgroup_width(
     Some(cooperative_reduce_width(resolved, quantized, &reduce_dims))
 }
 
+/// Whether `resolved` takes [`push_cooperative_reduce_body`]'s "SUPER-BLOCK
+/// TILED PACKED READ" arm -- exactly one Q4_K-packed operand, contiguous
+/// along the single reduction dim, whose extent is a whole number of
+/// super-blocks. That arm's lane math (`Q4K_BLOCK_ELEMENTS / SIMD_WIDTH`
+/// contiguous elements per lane, `slot = lane * run`) is fixed to
+/// `SIMD_WIDTH` lanes by construction -- widening the dispatch would push
+/// `slot` past the super-block it is meant to stay inside. Extracted so
+/// [`cooperative_reduce_width`] and the body can never disagree on which
+/// shape a given op takes (mirrors [`tiled_gemm_threadgroup_width`]'s own
+/// "single source of truth" doc).
+fn q4k_super_block_tiled(
+    resolved: &BoundOp,
+    quantized: &[Option<PackedCodec>],
+    reduce_dims: &[u16],
+) -> bool {
+    if reduce_dims.len() != 1 {
+        return false;
+    }
+    let reduce_dim = reduce_dims[0];
+    let packed: Vec<usize> = quantized
+        .iter()
+        .enumerate()
+        .filter_map(|(index, codec)| matches!(codec, Some(PackedCodec::Q4K)).then_some(index))
+        .collect();
+    packed.len() == 1
+        && resolved.operands()[packed[0]].1.stride(reduce_dim) == 1
+        && (resolved.extents[reduce_dim as usize] as usize).is_multiple_of(Q4K_BLOCK_ELEMENTS)
+}
+
+/// Cooperative-reduce threadgroup width -- `SIMD_WIDTH` (32) with this
+/// feature off, matching the byte-identical prior behaviour every existing
+/// gate baselines against. With `metal-wide-cooperative-reduce` on, scales
+/// with the reduction extent instead of pinning every cooperative reduce to
+/// one simdgroup regardless of size (the measured defect:
+/// `docs/discipline.md`'s row for this initiative -- a 4096-element
+/// RMS-norm sum launches 32 threads and each lane loops 128 times
+/// serially). `reduction_total / 4` rounded up to the next multiple of
+/// `SIMD_WIDTH`, clamped to `[SIMD_WIDTH,
+/// WIDE_COOPERATIVE_REDUCE_MAX_WIDTH]` -- four elements of serial work per
+/// lane keeps a short reduction (64, 128) from over-launching (more
+/// threadgroup-barrier / partial-fold overhead than the serial work it
+/// removes) while a long one (4096+) saturates the cap. Never applied to
+/// [`q4k_super_block_tiled`]'s arm: that lane math is fixed to `SIMD_WIDTH`
+/// by construction, not a policy choice this scaling could touch.
+///
+/// `WIDE_COOPERATIVE_REDUCE_MAX_WIDTH` is a build-time-configured cap
+/// (`omega-runtime.toml`'s `[wide_cooperative_reduce]` section,
+/// `crate::sized`), NOT a query of the device's real
+/// `maxTotalThreadsPerThreadgroup` -- emission has no device handle
+/// (`crate::sized::SIMD_WIDTH`'s own doc states the same constraint for the
+/// hardware-fixed 32). `crate::metal::dispatch` already clamps
+/// `grid.threadgroup_width` to the pipeline's real cap before dispatching,
+/// so an emit-time cap above the true hardware limit is a wasted grid, not
+/// a correctness hazard -- 256 (8 simdgroups) is conservative against every
+/// Apple GPU family this crate targets.
+#[cfg(feature = "metal-wide-cooperative-reduce")]
+fn cooperative_reduce_width(
+    resolved: &BoundOp,
+    quantized: &[Option<PackedCodec>],
+    reduce_dims: &[u16],
+) -> u64 {
+    if q4k_super_block_tiled(resolved, quantized, reduce_dims) {
+        return SIMD_WIDTH;
+    }
+    let reduction_total: u64 = reduce_dims
+        .iter()
+        .map(|&dim| resolved.extents[dim as usize])
+        .product();
+    let quarter = reduction_total.div_ceil(4).max(1);
+    quarter
+        .next_multiple_of(SIMD_WIDTH)
+        .clamp(SIMD_WIDTH, crate::sized::WIDE_COOPERATIVE_REDUCE_MAX_WIDTH)
+}
+
+/// Feature off: always `SIMD_WIDTH`, the byte-identical prior dispatch
+/// shape -- see [`cooperative_reduce_width`]'s doc (the `metal-wide-
+/// cooperative-reduce` arm) for the scaling this default-off build never
+/// takes.
+#[cfg(not(feature = "metal-wide-cooperative-reduce"))]
+fn cooperative_reduce_width(
+    _resolved: &BoundOp,
+    _quantized: &[Option<PackedCodec>],
+    _reduce_dims: &[u16],
+) -> u64 {
+    SIMD_WIDTH
+}
+
 // the emitter threads a bound op's full shape (rank, axes, reduce op, init,
 // element type, codec flags) into one kernel body; splitting that into a
 // struct would relocate the arguments, not remove them.
