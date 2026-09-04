@@ -706,6 +706,7 @@ pub fn execute_plan(plan: &Plan, blocks: &[QuantizedBlock<'_>]) -> Result<Evalua
         &prepared.effective_outputs,
         &device_buffers,
         prepared.root,
+        &BTreeSet::new(),
     )?;
 
     // `OUTPUT_POOL_MAX_PER_BUCKET`: a buffer beyond the cap for its
@@ -1037,6 +1038,7 @@ pub fn execute_plan_with_placements(
         check_gather_fault(bound, fault_buffer, *gathers)?;
     }
 
+    let placed_output_nodes: BTreeSet<NodeId> = output_placed.keys().copied().collect();
     finish(
         &plan.program,
         &prepared.index_nodes,
@@ -1044,6 +1046,7 @@ pub fn execute_plan_with_placements(
         &prepared.effective_outputs,
         &device_buffers,
         prepared.root,
+        &placed_output_nodes,
     )
 }
 
@@ -1351,6 +1354,7 @@ pub fn execute_plan_op_timed(
         &prepared.effective_outputs,
         &device_buffers,
         prepared.root,
+        &BTreeSet::new(),
     )?;
     Ok((evaluated, timings))
 }
@@ -1470,6 +1474,7 @@ pub fn execute_plan_with_placements_op_timed(
         timings.push(timing);
     }
 
+    let placed_output_nodes: BTreeSet<NodeId> = output_placed.keys().copied().collect();
     let evaluated = finish(
         &plan.program,
         &prepared.index_nodes,
@@ -1477,6 +1482,7 @@ pub fn execute_plan_with_placements_op_timed(
         &prepared.effective_outputs,
         &device_buffers,
         prepared.root,
+        &placed_output_nodes,
     )?;
     Ok((evaluated, timings))
 }
@@ -3833,11 +3839,24 @@ fn finish(
     effective_outputs: &[NodeId],
     device_buffers: &BTreeMap<NodeId, DeviceBuffer>,
     root: NodeId,
+    caller_owned: &BTreeSet<NodeId>,
 ) -> Result<Evaluated, MetalError> {
     let mut results = Vec::with_capacity(effective_outputs.len());
     #[cfg(feature = "instrument")]
     let readback_started = read_ticks();
     for node in effective_outputs {
+        // A caller-owned (placed) output's bytes already live in the
+        // caller's own `PlacedBuffer` (`execute_plan_with_placements`'s own
+        // doc) -- the KV-cache shape this exists for never reads them back
+        // through `Evaluated` at all, it reads the placed buffer directly.
+        // Copying them into a fresh `Vec` here would be dead work on the
+        // decode critical path (a memcpy plus an allocation per node, after
+        // `waitUntilCompleted`, for bytes nothing downstream consumes) --
+        // `root` is the one exception: a caller always expects `.root()` to
+        // resolve, so it is read back even if it happens to be placed.
+        if *node != root && caller_owned.contains(node) {
+            continue;
+        }
         let shape = shapes.of(*node).to_vec();
         let dtype = gpu_dtype(program, index_nodes, *node);
         let data = match device_buffers.get(node) {

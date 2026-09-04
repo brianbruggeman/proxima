@@ -221,4 +221,17 @@ fn a_program_reads_a_placed_write_from_a_later_op_in_the_same_call() {
         actual, expected,
         "op B must see the pre-existing prefix AND op A's fresh write, in the same call"
     );
+    assert!(
+        evaluated.get(row_out).is_none(),
+        "row_out is a placed output that is NOT this plan's root (cache_out, the last \
+         program node, is) -- its bytes already live in the caller's own PlacedBuffer, so \
+         `finish` must not copy them into `Evaluated` too; a `Some` here would mean the \
+         skip-placed-readback optimization regressed"
+    );
+    let placed_bytes = omega::read_placed_buffer_f32(&buffer, ROW_OFFSET, ROW_LEN as usize);
+    assert_eq!(
+        placed_bytes, new_row,
+        "the placed write itself must still have happened -- only the redundant \
+         Evaluated copy of row_out is skipped, not the GPU dispatch that produced it"
+    );
 }
