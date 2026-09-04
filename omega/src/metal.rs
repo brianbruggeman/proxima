@@ -1215,7 +1215,7 @@ pub fn execute_plan_named_op_timed(
 /// `execute_plan_with_placements` itself performs (input-placed nodes skip
 /// the host upload identically; `always_live` reproduces that function's
 /// own retirement exclusion) and swaps only its single shared-command-buffer
-/// submission for [`execute_op_timed`]'s per-op one, same relationship
+/// submission for this module's own shared per-op dispatch helper, same relationship
 /// [`execute_plan_op_timed`] already has to [`execute_plan`].
 ///
 /// # Errors
