@@ -3023,30 +3023,72 @@ thread_local! {
     /// kernel binds them `constant` and never writes through them, and two
     /// ops with identical uniform bytes want identical contents by
     /// definition.
-    static UNIFORM_BUFFERS: RefCell<BTreeMap<Vec<u8>, MetalBuffer>> =
+    ///
+    /// Bounded to `crate::sized::UNIFORM_CACHE_ENTRIES` with least-recently-
+    /// used eviction (the `u64` tick alongside each buffer) rather than left
+    /// to grow forever: a workload whose uniform bytes vary per call
+    /// (different shapes, different `cached_len` without bucketing) would
+    /// otherwise retain one `MTLBuffer` per distinct blob ever seen.
+    static UNIFORM_BUFFERS: RefCell<BTreeMap<Vec<u8>, (MetalBuffer, u64)>> =
         RefCell::new(BTreeMap::new());
+
+    /// Monotonic use counter driving LRU eviction -- incremented on every
+    /// hit and every insert, so the entry with the smallest stored tick is
+    /// always the one least recently touched.
+    static UNIFORM_CACHE_CLOCK: RefCell<u64> = const { RefCell::new(0) };
 }
 
 /// Counts uniform buffers served from cache rather than allocated.
 pub static UNIFORM_BUFFER_REUSES: Counter = Counter::new("omega.metal.uniforms.reuse");
 
 /// Entries `UNIFORM_BUFFERS` holds right now -- the direct witness for D6
-/// (round-4 synth S2): the cache is content-keyed and unbounded, so a caller
-/// that wants to know whether it grows without bound across a decode run
-/// reads this once per step rather than inferring growth from `nocopy_cache_len`'s
-/// unrelated bound. Growing after the plan-cache warms (roughly `op_count`
-/// per distinct token position, since every `Uniforms` blob carries
-/// `reduction_total`, itself a function of `cached_len`) is the pre-
-/// registered prediction this counter exists to check.
+/// (round-4 synth S2): a caller that wants to know whether the cache grows
+/// across a decode run reads this once per step rather than inferring
+/// growth from `nocopy_cache_len`'s unrelated bound. Growing after the
+/// plan-cache warms (roughly `op_count` per distinct token position, since
+/// every `Uniforms` blob carries `reduction_total`, itself a function of
+/// `cached_len`) up to `crate::sized::UNIFORM_CACHE_ENTRIES` is the
+/// pre-registered prediction this counter exists to check; it never exceeds
+/// that capacity.
 #[must_use]
 pub fn uniform_cache_len() -> usize {
     UNIFORM_BUFFERS.with(|cache| cache.borrow().len())
 }
+
+/// Evicts the entry with the smallest use-tick, making room for one more
+/// insert. The map is bounded to `crate::sized::UNIFORM_CACHE_ENTRIES`
+/// entries by construction, so a linear scan over its current contents to
+/// find the minimum tick is cheap -- no ordered secondary index is needed
+/// for a map this small.
+fn evict_least_recently_used(cache: &mut BTreeMap<Vec<u8>, (MetalBuffer, u64)>) {
+    let Some(oldest_key) = cache
+        .iter()
+        .min_by_key(|(_, (_, tick))| *tick)
+        .map(|(key, _)| key.clone())
+    else {
+        return;
+    };
+    cache.remove(&oldest_key);
+}
+
 fn upload_uniforms(
     device: &ProtocolObject<dyn MTLDevice>,
     bytes: &[u8],
 ) -> Result<Retained<ProtocolObject<dyn MTLBuffer>>, MetalError> {
-    if let Some(existing) = UNIFORM_BUFFERS.with(|cache| cache.borrow().get(bytes).cloned()) {
+    let next_tick = UNIFORM_CACHE_CLOCK.with(|clock| {
+        let mut clock = clock.borrow_mut();
+        *clock += 1;
+        *clock
+    });
+
+    if let Some(existing) = UNIFORM_BUFFERS.with(|cache| {
+        let mut cache = cache.borrow_mut();
+        let hit = cache.get(bytes).map(|(buffer, _)| buffer.clone());
+        if let Some(buffer) = &hit {
+            cache.insert(bytes.to_vec(), (buffer.clone(), next_tick));
+        }
+        hit
+    }) {
         counter!(UNIFORM_BUFFER_REUSES, 1);
         return Ok(existing);
     }
@@ -3064,8 +3106,25 @@ fn upload_uniforms(
     .ok_or_else(|| MetalError::CompileFailed {
         log: "device refused to allocate the uniforms buffer".to_string(),
     })?;
-    UNIFORM_BUFFERS.with(|cache| cache.borrow_mut().insert(bytes.to_vec(), buffer.clone()));
+    UNIFORM_BUFFERS.with(|cache| {
+        let mut cache = cache.borrow_mut();
+        let capacity = crate::sized::UNIFORM_CACHE_ENTRIES as usize;
+        if cache.len() >= capacity && !cache.contains_key(bytes) {
+            evict_least_recently_used(&mut cache);
+        }
+        cache.insert(bytes.to_vec(), (buffer.clone(), next_tick));
+    });
     Ok(buffer)
+}
+
+/// Test-only reset -- the default std test harness reuses threads across
+/// tests in the same binary, and `UNIFORM_BUFFERS`/`UNIFORM_CACHE_CLOCK` are
+/// thread-local, so a prior test's entries would otherwise leak into the
+/// next one's capacity accounting.
+#[cfg(test)]
+fn reset_uniform_cache_for_test() {
+    UNIFORM_BUFFERS.with(|cache| cache.borrow_mut().clear());
+    UNIFORM_CACHE_CLOCK.with(|clock| *clock.borrow_mut() = 0);
 }
 
 fn buffer_for(device_buffers: &BTreeMap<NodeId, DeviceBuffer>, node: NodeId) -> Result<DeviceBuffer, MetalError> {
@@ -3558,5 +3617,124 @@ mod operand_tensor_bytes_tests {
         // std test harness reuses threads across tests in the same binary.
         super::CHECKPOINT_MAPPING.with(|cell| *cell.borrow_mut() = None);
         let _ = element_count(shapes.of(NodeId(0)));
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod uniform_cache_tests {
+    //! `metal::UNIFORM_BUFFERS`'s LRU bound: no eviction meant a workload
+    //! whose uniform bytes vary per call grew the cache without bound (a
+    //! leak by construction). These tests exercise the real
+    //! `upload_uniforms` upload path against a real Metal device, so they
+    //! skip (rather than fail) on a headless host with no GPU -- the same
+    //! convention every other Metal-gated test in this module follows.
+
+    use super::{device_and_queue, reset_uniform_cache_for_test, uniform_cache_len, upload_uniforms};
+    use crate::sized::UNIFORM_CACHE_ENTRIES;
+
+    /// A distinct, non-empty uniform blob per `index` -- `upload_uniforms`
+    /// requires non-empty bytes (every real `Uniforms` struct has at least
+    /// two `long` fields), and content-keying means two different indices
+    /// must produce byte-distinct blobs.
+    fn blob(index: u64) -> Vec<u8> {
+        index.to_le_bytes().to_vec()
+    }
+
+    #[test]
+    fn filling_past_capacity_evicts_the_least_recently_used_entry() {
+        let Ok((device, _queue)) = device_and_queue() else {
+            return;
+        };
+        reset_uniform_cache_for_test();
+        let capacity = UNIFORM_CACHE_ENTRIES as usize;
+
+        for index in 0..capacity as u64 {
+            upload_uniforms(&device, &blob(index)).expect("upload within capacity");
+        }
+        assert_eq!(uniform_cache_len(), capacity);
+
+        // touch key 0 -- a cache hit that must refresh its tick, protecting
+        // it from the eviction the next insert triggers.
+        let reuses_before_touch = super::UNIFORM_BUFFER_REUSES.get();
+        upload_uniforms(&device, &blob(0)).expect("touch key 0");
+        assert_eq!(
+            super::UNIFORM_BUFFER_REUSES.get(),
+            reuses_before_touch + 1,
+            "touching key 0 must be a cache hit"
+        );
+
+        // one more distinct blob forces an eviction; key 1 is now the
+        // least recently used (key 0 was just touched, keys 2.. were
+        // inserted after key 1).
+        upload_uniforms(&device, &blob(capacity as u64)).expect("upload past capacity");
+        assert_eq!(
+            uniform_cache_len(),
+            capacity,
+            "cache must stay bounded at capacity after eviction"
+        );
+
+        let reuses_before_key_zero = super::UNIFORM_BUFFER_REUSES.get();
+        upload_uniforms(&device, &blob(0)).expect("key 0 must still be resident");
+        assert_eq!(
+            super::UNIFORM_BUFFER_REUSES.get(),
+            reuses_before_key_zero + 1,
+            "key 0 (touched) must have survived the eviction"
+        );
+
+        let reuses_before_key_one = super::UNIFORM_BUFFER_REUSES.get();
+        upload_uniforms(&device, &blob(1)).expect("key 1 re-upload after eviction");
+        assert_eq!(
+            super::UNIFORM_BUFFER_REUSES.get(),
+            reuses_before_key_one,
+            "key 1 was the least recently used entry and must have missed the cache"
+        );
+    }
+
+    #[test]
+    fn a_cache_hit_refreshes_the_use_tick() {
+        let Ok((device, _queue)) = device_and_queue() else {
+            return;
+        };
+        reset_uniform_cache_for_test();
+
+        upload_uniforms(&device, &blob(0)).expect("insert key 0");
+        upload_uniforms(&device, &blob(1)).expect("insert key 1");
+
+        let tick_of_key = |bytes: &[u8]| -> u64 {
+            super::UNIFORM_BUFFERS.with(|cache| cache.borrow().get(bytes).expect("key present").1)
+        };
+        let tick_before = tick_of_key(&blob(0));
+
+        upload_uniforms(&device, &blob(0)).expect("touch key 0 again");
+        let tick_after = tick_of_key(&blob(0));
+
+        assert!(
+            tick_after > tick_before,
+            "a cache hit must advance key 0's use-tick ({tick_before} -> {tick_after})"
+        );
+    }
+
+    #[test]
+    fn uniform_buffer_reuses_still_counts_hits() {
+        let Ok((device, _queue)) = device_and_queue() else {
+            return;
+        };
+        reset_uniform_cache_for_test();
+
+        let reuses_before = super::UNIFORM_BUFFER_REUSES.get();
+        upload_uniforms(&device, &blob(0)).expect("first upload is a miss");
+        assert_eq!(
+            super::UNIFORM_BUFFER_REUSES.get(),
+            reuses_before,
+            "a fresh blob must not count as a reuse"
+        );
+
+        upload_uniforms(&device, &blob(0)).expect("second upload of the same bytes is a hit");
+        assert_eq!(
+            super::UNIFORM_BUFFER_REUSES.get(),
+            reuses_before + 1,
+            "re-uploading identical bytes must count exactly one reuse"
+        );
     }
 }

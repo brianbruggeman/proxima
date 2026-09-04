@@ -35,6 +35,10 @@
 //!   simdgroup-target arithmetic above; see `msl.rs`'s
 //!   `packed_row_split_factor` and `omega-runtime.toml`'s
 //!   `[packed_row_block].split_k_max_rows`.
+//! - [`UNIFORM_CACHE_ENTRIES`] (always compiled) — capacity of
+//!   `metal::UNIFORM_BUFFERS`, the content-keyed uploaded-uniform-buffer
+//!   cache; see `omega-runtime.toml`'s `[spans].uniform_cache_entries` for
+//!   the measured default and eviction-cost rationale.
 //!
 //! `msl` (this module's own crate) is alloc-tier and target-independent --
 //! emission never touches a device -- so [`SIMD_WIDTH`] is visible at every
@@ -72,6 +76,12 @@ pub const SIMD_WIDTH: u64 = 32;
 // `OMEGA_COOPERATIVE_REDUCE_MIN_LEN=<n>` exercises a non-zero threshold
 // per-build without editing the TOML -- the mechanism that same discipline
 // row's bake-off used.
+
+// `UNIFORM_CACHE_ENTRIES` comes in through the `include!` above -- LRU
+// capacity of `crate::metal::UNIFORM_BUFFERS`. See
+// `omega-runtime.toml`'s `[spans]` doc for the measured default (57 entries
+// on a plan-stable decode, well under 4096) and the eviction-cost
+// rationale.
 
 // `PACKED_ROW_BLOCK_SIMDGROUPS` comes in through the `include!` above --
 // number of independent `SIMD_WIDTH`-lane SIMD-groups Metal packs into one
