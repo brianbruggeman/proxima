@@ -78,6 +78,16 @@ metal-tiled-gemm = ["omega?/metal-tiled-gemm"]
 # `LayerCache`-growing path. `metal` must also be enabled -- this feature
 # has no effect without it, since `PlacedBuffer` is Metal-only.
 metal-output-placement = ["omega?/metal-output-placement"]
+# passthrough to `omega/metal-buffer-pool` so the decode harness can measure that arm.
+metal-buffer-pool = ["omega?/metal-buffer-pool"]
+# passthrough to `omega/metal-wide-cooperative-reduce` so the decode harness can measure that arm.
+metal-wide-cooperative-reduce = ["omega?/metal-wide-cooperative-reduce"]
+# passthrough to `omega/metal-q4k-mask-fma` so the decode harness can measure that arm.
+metal-q4k-mask-fma = ["omega?/metal-q4k-mask-fma"]
+# passthrough to `omega/metal-q4k-split-k` so the decode harness can measure that arm.
+metal-q4k-split-k = ["omega?/metal-q4k-split-k"]
+# passthrough to `omega/metal-q4k-single-fetch` so the decode harness can measure that arm.
+metal-q4k-single-fetch = ["omega?/metal-q4k-single-fetch"]
 
 [dependencies]
 arrayvec.workspace = true
