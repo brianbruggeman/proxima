@@ -66,6 +66,8 @@ use smallvec::SmallVec;
 
 use crate::dtype::DType;
 use crate::error::TensorError;
+#[cfg(feature = "instrument")]
+use crate::instrument;
 use crate::live;
 #[cfg(feature = "cached-attention-streaming")]
 use crate::map;
@@ -681,9 +683,27 @@ impl BoundOpBuilder {
                 ..
             } => {
                 for (operand_node, map) in operands {
-                    let fuses = retires.contains(operand_node)
-                        && is_identity_projection(map)
-                        && self.held.borrow().contains_key(operand_node);
+                    let still_live = !retires.contains(operand_node);
+                    let non_identity = !is_identity_projection(map);
+                    let not_held = !self.held.borrow().contains_key(operand_node);
+                    let fuses = !still_live && !non_identity && !not_held;
+                    #[cfg(feature = "instrument")]
+                    {
+                        let outcome = if fuses {
+                            Ok(())
+                        } else if still_live {
+                            Err(instrument::FuseDeclineReason::StillLive)
+                        } else if non_identity {
+                            Err(instrument::FuseDeclineReason::NonIdentityProjection)
+                        } else {
+                            Err(instrument::FuseDeclineReason::NotHeld)
+                        };
+                        instrument::record_fuse_attempt(
+                            *operand_node,
+                            instrument::FuseSite::ElementwiseOperand,
+                            outcome,
+                        );
+                    }
                     if !fuses {
                         self.materialize_if_held(*operand_node, shapes, &mut emitted)?;
                     }
@@ -699,13 +719,16 @@ impl BoundOpBuilder {
                 );
             }
             Op::Reduce(reduce) => {
-                if let Some((source_node, source_map)) = eliminate_masked_window_reduce(
+                let window_elimination = eliminate_masked_window_reduce(
                     reduce,
                     &self.held,
                     &self.is_iota.borrow(),
                     &self.constant_value.borrow(),
                     shapes,
-                ) {
+                );
+                #[cfg(feature = "instrument")]
+                instrument::record_window_reduce_attempt(window_elimination.is_some());
+                if let Some((source_node, source_map)) = window_elimination {
                     // `source_map`'s windowed axis is a genuine two-term
                     // affine index (`stride*out + kernel`), not the plain
                     // single-term projection `compose_operand`'s own fusion
@@ -737,9 +760,27 @@ impl BoundOpBuilder {
                     return Ok(emitted);
                 }
 
-                let fuses = retires.contains(&reduce.operand)
-                    && is_identity_projection(&reduce.in_map)
-                    && self.held.borrow().contains_key(&reduce.operand);
+                let still_live = !retires.contains(&reduce.operand);
+                let non_identity = !is_identity_projection(&reduce.in_map);
+                let not_held = !self.held.borrow().contains_key(&reduce.operand);
+                let fuses = !still_live && !non_identity && !not_held;
+                #[cfg(feature = "instrument")]
+                {
+                    let outcome = if fuses {
+                        Ok(())
+                    } else if still_live {
+                        Err(instrument::FuseDeclineReason::StillLive)
+                    } else if non_identity {
+                        Err(instrument::FuseDeclineReason::NonIdentityProjection)
+                    } else {
+                        Err(instrument::FuseDeclineReason::NotHeld)
+                    };
+                    instrument::record_fuse_attempt(
+                        reduce.operand,
+                        instrument::FuseSite::ReduceOperand,
+                        outcome,
+                    );
+                }
 
                 let (element_body, operands) = if fuses {
                     let reduce_extent: u64 = shape::fold_iteration_extents(reduce, shapes)
@@ -899,7 +940,18 @@ impl BoundOpBuilder {
                 continue;
             }
             let child_extent: u64 = shapes.of(child).iter().product();
-            if child_extent < reduce_extent {
+            let quarantined = child_extent < reduce_extent;
+            #[cfg(feature = "instrument")]
+            instrument::record_fuse_attempt(
+                child,
+                instrument::FuseSite::QuarantineBroadcast,
+                if quarantined {
+                    Err(instrument::FuseDeclineReason::BroadcastQuarantined)
+                } else {
+                    Ok(())
+                },
+            );
+            if quarantined {
                 self.materialize_if_held(child, shapes, emitted)?;
             } else {
                 self.quarantine_broadcast_operands(child, reduce_extent, shapes, emitted)?;

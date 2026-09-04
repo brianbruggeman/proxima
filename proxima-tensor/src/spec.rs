@@ -58,6 +58,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::dtype::DType;
 use crate::error::TensorError;
+#[cfg(feature = "instrument")]
+use crate::instrument;
 use crate::map::{self, AxisIndex, AxisTerm, IndexMap, IndexPattern};
 use crate::op::{self, Extent, Keep, NodeId, Op, Reduce, ReduceInit, ScalarOp};
 
@@ -2784,6 +2786,9 @@ fn append_mistral_cached_layer(
         ScalarOp::Multiply,
         &[(attended_sum, "sugd->sugd"), (inv_weight_sum, "sug->sugd")],
     )?;
+
+    #[cfg(feature = "instrument")]
+    instrument::record_online_softmax_block_range(score_max_cached, attended);
 
     let wo_product = elementwise(
         program,
@@ -11865,6 +11870,623 @@ value = 1.0
         assert_eq!(shape, [4u64, 1u64]);
         assert_eq!(result, [100.0, 210.0, 321.0, 432.0]);
     }
+
+    /// **The rule census.** For the real Mistral/OpenChat cached-forward
+    /// program, names every rewrite [`crate::bind::bind`] actually applies
+    /// and counts how many times each fired, reconciling against
+    /// `docs/discipline.md`'s own measured split (ROW at line 4780): 1196
+    /// `BoundOp`s, 225 `reduce_matmul_quantized`, 385 `reduce_f32_dense`,
+    /// 547 `elementwise`, 37 `constant`, 2 `iota`.
+    ///
+    /// The 225/385 split within `docs/discipline.md`'s own figure is a
+    /// RUNTIME classification (`cpu::is_quantized_matmul_operand`'s own
+    /// discriminator: whether a bound weight buffer's byte length matches
+    /// its declared `Float32` element count, or is smaller because the
+    /// checkpoint actually stored it `Q4_K`/`Q5_K`/`Q6_K` packed) -- it is
+    /// not recoverable from this symbolic program alone, which declares
+    /// every weight `DType::Float32` (`mistral_cached_forward_program_with_
+    /// experts`, `spec.rs:4561-4646` and onward: every `input_leaf` weight
+    /// call passes `DType::Float32`, never a quantized tag). Reproducing it
+    /// here would require binding the real `openchat-3.5-1210.Q4_K_S.gguf`
+    /// checkpoint's own weight bytes, out of this round's scope. What IS a
+    /// structural (graph-topology) property, checked below by an inline
+    /// mirror of `cpu::reduce_is_gemm_shaped`'s own distinct-operand-count
+    /// discriminator (a `#[cfg]`-gated private fn, not reachable across this
+    /// module boundary without changing its visibility): whether a reduce
+    /// reads one operand (LayerNorm mean/variance, softmax max/sum) or two
+    /// (every matmul-shaped fold, weight-projection AND attention-score
+    /// alike) -- a DIFFERENT, coarser partition than quantized/dense, since
+    /// attention's own `Q@K^T`/`softmax@V`/cached-score folds are also
+    /// two-operand but never weight-quantized. Measured 417 two-operand /
+    /// 193 one-operand, summing to the same 610 total the 225+385 figure
+    /// does -- the total reconciles exactly; the sub-split names a
+    /// different, real distinction, not the same one.
+    ///
+    /// Also reads back the two elementwise-fusion decisions inline inside
+    /// `BoundOpBuilder::push` (`bind.rs:641`, `bind.rs:697`) and the
+    /// masked-window-reduce elimination (`bind.rs:659`) under the
+    /// `instrument` feature -- fired/declined, never a bare bool, so a rule
+    /// that fires zero times on this program is visibly distinct from a
+    /// rule that does not exist.
+    #[cfg(feature = "instrument")]
+    #[test]
+    fn the_rule_census_reconciles_against_the_measured_mistral_forward_split() {
+        crate::instrument::reset_fuse_decline();
+        crate::instrument::reset_window_reduce();
+        crate::instrument::reset_online_softmax_block_range();
+
+        let (program, logits, roots) =
+            mistral_cached_forward_program(32_002, 4096, 14336, 32, 8, 128, 32)
+                .expect("the cached forward pass lowers to a program");
+        let mut outputs = alloc::vec![logits];
+        for (even, odd, value) in &roots {
+            outputs.extend_from_slice(&[*even, *odd, *value]);
+        }
+        let shapes = crate::shape::infer(&program, &[1, 71])
+            .expect("one new position against a 71-position cache infers");
+        let bound = crate::bind::bind(&program, &shapes, &outputs).expect("the program binds");
+
+        let mut elementwise = 0_usize;
+        let mut reduce_two_operand = 0_usize;
+        let mut reduce_one_operand = 0_usize;
+        let mut constant = 0_usize;
+        let mut iota = 0_usize;
+        // `BoundOpKind::CachedAttention` (landed after this census's own
+        // baseline figures were measured) is a bind-time fusion this
+        // program never reaches without `cached-attention-streaming`,
+        // which this test's own feature set does not enable -- counted
+        // separately so a future landing that DOES turn it on here fails
+        // loudly (`cached_attention == 0` asserted below) instead of
+        // silently drifting the four-bucket reconciliation.
+        let mut cached_attention = 0_usize;
+        for op in &bound {
+            match &op.kind {
+                crate::bind::BoundOpKind::CachedAttention { .. } => cached_attention += 1,
+                crate::bind::BoundOpKind::Elementwise { .. } => elementwise += 1,
+                crate::bind::BoundOpKind::Reduce { .. } => {
+                    let operands = op.operands();
+                    let is_two_operand = operands
+                        .first()
+                        .is_some_and(|(first, _, _)| operands.iter().any(|(node, _, _)| node != first));
+                    if is_two_operand {
+                        reduce_two_operand += 1;
+                    } else {
+                        reduce_one_operand += 1;
+                    }
+                }
+                crate::bind::BoundOpKind::Constant { .. } => constant += 1,
+                crate::bind::BoundOpKind::Iota => iota += 1,
+            }
+        }
+        assert_eq!(
+            cached_attention, 0,
+            "this program/feature-set was expected to never fuse a CachedAttention BoundOp -- \
+             the census's four-bucket reconciliation below needs updating if that changed"
+        );
+        let total = bound.len();
+        let reduce_total = reduce_two_operand + reduce_one_operand;
+
+        let (fuse_elementwise_fired, fuse_reduce_fired, fuse_distinct_declines) =
+            crate::instrument::fuse_totals();
+        let (window_reduce_fired, window_reduce_declined) =
+            crate::instrument::window_reduce_totals();
+
+        std::println!(
+            "rule_census total={total} reduce_total={reduce_total} reduce_two_operand={reduce_two_operand} reduce_one_operand={reduce_one_operand} elementwise={elementwise} constant={constant} iota={iota}"
+        );
+        std::println!(
+            "rule_census fuse_elementwise_operand_fired={fuse_elementwise_fired} fuse_reduce_operand_fired={fuse_reduce_fired} fuse_distinct_declines={fuse_distinct_declines} window_reduce_fired={window_reduce_fired} window_reduce_declined={window_reduce_declined}"
+        );
+
+        // costing-vs-free split (2026-09-02 correction, verified against
+        // source): `Op::Input` (`bind.rs:607`, `push`'s own match arm)
+        // emits NOTHING -- no `BoundOp`, no dispatch, confirmed by this
+        // module's own doc ("`Op::Input` never does -- it is where data
+        // enters"). `Op::Constant`/`Op::Iota` DO have a real `push` arm
+        // (`bind.rs:621`, and the `Iota` arm above it) and this census's
+        // own total already proves both dispatch: `constant=37 iota=2` are
+        // real `BoundOp`s. So FREE is `Op::Input` alone; COSTING is
+        // `Elementwise`, `Reduce`, `Constant`, or `Iota` -- a decline whose
+        // operand is any of those corresponds to a materialized, dispatched
+        // buffer, exactly like an `Elementwise` decline does.
+        let is_free_operand = |node: u32| matches!(program[node as usize], Op::Input { .. });
+
+        let mut still_live_costing = 0_u64;
+        let mut still_live_free = 0_u64;
+        let mut non_identity_costing = 0_u64;
+        let mut non_identity_free = 0_u64;
+        let mut not_held_costing = 0_u64;
+        let mut not_held_free = 0_u64;
+        for (node, _site, reason, calls) in crate::instrument::fuse_decline_snapshot() {
+            let free = is_free_operand(node);
+            match (reason, free) {
+                (crate::instrument::FuseDeclineReason::StillLive, true) => still_live_free += calls,
+                (crate::instrument::FuseDeclineReason::StillLive, false) => {
+                    still_live_costing += calls;
+                }
+                (crate::instrument::FuseDeclineReason::NonIdentityProjection, true) => {
+                    non_identity_free += calls;
+                }
+                (crate::instrument::FuseDeclineReason::NonIdentityProjection, false) => {
+                    non_identity_costing += calls;
+                }
+                (crate::instrument::FuseDeclineReason::NotHeld, true) => not_held_free += calls,
+                (crate::instrument::FuseDeclineReason::NotHeld, false) => {
+                    not_held_costing += calls;
+                }
+                // `quarantine_broadcast_operands` only ever walks children
+                // still `held` (`bind.rs:895`'s own `contains_key` guard),
+                // and a `held` node is by construction an `Op::Elementwise`
+                // chain, never an `Op::Input` leaf -- so this reason is
+                // always costing, counted separately below rather than
+                // folded into the free/costing split above.
+                (crate::instrument::FuseDeclineReason::BroadcastQuarantined, _) => {}
+            }
+        }
+        let still_live_total = still_live_costing + still_live_free;
+        let non_identity_total = non_identity_costing + non_identity_free;
+        let not_held_total = not_held_costing + not_held_free;
+        std::println!(
+            "rule_census fuse_decline_still_live={still_live_total} costing={still_live_costing} free={still_live_free}"
+        );
+        std::println!(
+            "rule_census fuse_decline_non_identity_projection={non_identity_total} costing={non_identity_costing} free={non_identity_free}"
+        );
+        std::println!(
+            "rule_census fuse_decline_not_held={not_held_total} costing={not_held_costing} free={not_held_free}"
+        );
+
+        // quarantine-broadcast census (this round's task): `bind.rs:901`'s
+        // `quarantine_broadcast_operands` is a genuine fuse/no-fuse decision
+        // invisible to the counters above -- a decline here looks identical
+        // to a rule that never ran without its own site. `N == 0` is a red
+        // gate the same way `total > 0` below is.
+        let mut quarantine_broadcast_declines = 0_u64;
+        for (_node, site, reason, calls) in crate::instrument::fuse_decline_snapshot() {
+            if site == crate::instrument::FuseSite::QuarantineBroadcast
+                && reason == crate::instrument::FuseDeclineReason::BroadcastQuarantined
+            {
+                quarantine_broadcast_declines += calls;
+            }
+        }
+        std::println!(
+            "rule_census quarantine_broadcast_declines={quarantine_broadcast_declines}"
+        );
+        assert!(
+            quarantine_broadcast_declines > 0,
+            "rule census recorded zero quarantine-broadcast declines -- the site is wired to nothing"
+        );
+        assert_eq!(
+            quarantine_broadcast_declines, 65,
+            "quarantine-broadcast declines drifted off the measured Mistral cached-forward count"
+        );
+
+        // rope_cos/rope_sin named check: both are `Op::Input` (node 7, 8),
+        // so under the corrected rule they must land 100% free, on every
+        // reason, not just `StillLive`.
+        for (node, label) in [(7_u32, "rope_cos"), (8, "rope_sin")] {
+            let mut costing = 0_u64;
+            let mut free = 0_u64;
+            for (decline_node, _site, _reason, calls) in crate::instrument::fuse_decline_snapshot() {
+                if decline_node != node {
+                    continue;
+                }
+                if is_free_operand(decline_node) {
+                    free += calls;
+                } else {
+                    costing += calls;
+                }
+            }
+            std::println!(
+                "rule_census named_node_check node={node} label={label} costing={costing} free={free}"
+            );
+            assert_eq!(costing, 0, "{label} (node {node}) is an Op::Input leaf -- every one of its declines must be free");
+        }
+
+        // deliverable #4: is `non_identity_projection=129` here the SAME
+        // shape class as `width_tile_plan`'s `AxesShape=129` on node 90 in
+        // the CPU train lane (`cpu.rs:9940`), or a bare numeric coincidence?
+        // These are declines from THIS test's own bind-time fusion check
+        // (`bind.rs:641`/`:697`), a different mechanism on a different
+        // program (Mistral cached-forward here, BGE there) -- print which
+        // node(s)/op(s) actually produce the 129 here so the comparison can
+        // be made on evidence, not on the number alone.
+        let mut non_identity_nodes: alloc::vec::Vec<(u32, u64)> = alloc::vec::Vec::new();
+        for (node, _site, reason, calls) in crate::instrument::fuse_decline_snapshot() {
+            if reason == crate::instrument::FuseDeclineReason::NonIdentityProjection {
+                non_identity_nodes.push((node, calls));
+            }
+        }
+        non_identity_nodes.sort_by_key(|entry| core::cmp::Reverse(entry.1));
+        for (node, calls) in non_identity_nodes.iter().take(5) {
+            let op = &program[*node as usize];
+            std::println!(
+                "rule_census non_identity_projection_node node={node} calls={calls} op={op:?}"
+            );
+        }
+        std::println!(
+            "rule_census non_identity_projection_distinct_nodes={}",
+            non_identity_nodes.len()
+        );
+
+        // WHICH ops, not just how many (2026-09-02 follow-up): `fuse_decline_
+        // snapshot` is now keyed by the STILL-LIVE OPERAND's own `NodeId`
+        // (bind.rs's own fix -- it previously keyed by the consuming node,
+        // which names WHERE a decline was checked, not WHAT had to
+        // materialize). `online_softmax_block_ranges` brackets the combine
+        // block (`spec.rs:2596-2726`) by construction -- `score_max_cached`
+        // and `attended`, the block's own first/last emitted `NodeId`s,
+        // recorded once per `append_mistral_cached_layer` call, never
+        // assumed from reading the source alone.
+        let block_ranges = crate::instrument::online_softmax_block_ranges();
+        assert_eq!(
+            block_ranges.len(),
+            32,
+            "one online-softmax block range per layer on a 32-layer forward"
+        );
+        let stride = block_ranges[1].0 - block_ranges[0].0;
+        for window in block_ranges.windows(2) {
+            assert_eq!(
+                window[1].0 - window[0].0,
+                stride,
+                "every layer's block must start the same distance from the \
+                 previous layer's -- confirms structural periodicity by \
+                 measurement rather than assuming it from the source"
+            );
+            assert_eq!(
+                window[0].1 - window[0].0,
+                window[1].1 - window[1].0,
+                "every layer's block must span the same number of nodes"
+            );
+        }
+        let block_span = block_ranges[0].1 - block_ranges[0].0;
+        std::println!(
+            "rule_census online_softmax_block layers=32 stride={stride} block_span_nodes={} first_layer_range=[{},{}]",
+            block_span + 1,
+            block_ranges[0].0,
+            block_ranges[0].1
+        );
+
+        let in_any_block = |node: u32| {
+            block_ranges
+                .iter()
+                .any(|&(first, last)| node >= first && node <= last)
+        };
+
+        let mut still_live_costing_in_block = 0_u64;
+        let mut still_live_costing_out_of_block = 0_u64;
+        let mut still_live_free_in_block = 0_u64;
+        let mut still_live_free_out_of_block = 0_u64;
+        // phase = this operand's `NodeId` distance from ITS OWN layer's
+        // block start, `rem_euclid(stride)` folding every layer onto one
+        // canonical 0..stride ruler -- the "position within a layer" the
+        // task asked for, measured against the real per-layer stride rather
+        // than the raw-Op approximation. Split costing/free so a free
+        // (`Op::Input`) repeat-offender like `rope_cos`/`rope_sin` cannot
+        // hide inside the same ranking as a real materialize cost.
+        let mut costing_phase_totals: alloc::collections::BTreeMap<u32, u64> =
+            alloc::collections::BTreeMap::new();
+        let mut costing_phase_example_node: alloc::collections::BTreeMap<u32, u32> =
+            alloc::collections::BTreeMap::new();
+        for (node, _site, reason, calls) in crate::instrument::fuse_decline_snapshot() {
+            if reason != crate::instrument::FuseDeclineReason::StillLive {
+                continue;
+            }
+            let free = is_free_operand(node);
+            let inside = in_any_block(node);
+            match (free, inside) {
+                (true, true) => still_live_free_in_block += calls,
+                (true, false) => still_live_free_out_of_block += calls,
+                (false, true) => still_live_costing_in_block += calls,
+                (false, false) => still_live_costing_out_of_block += calls,
+            }
+            if !free {
+                let phase = (node.wrapping_sub(block_ranges[0].0)).rem_euclid(stride);
+                *costing_phase_totals.entry(phase).or_insert(0) += calls;
+                costing_phase_example_node.entry(phase).or_insert(node);
+            }
+        }
+        let still_live_costing_total = still_live_costing_in_block + still_live_costing_out_of_block;
+        std::println!(
+            "rule_census still_live_costing_in_block={still_live_costing_in_block} still_live_costing_outside_block={still_live_costing_out_of_block} still_live_costing_total={still_live_costing_total}"
+        );
+        let still_live_costing_per_layer = still_live_costing_total as f64 / 32.0;
+        std::println!(
+            "rule_census still_live_costing_per_layer={still_live_costing_per_layer:.2} layers=32 program_wide={still_live_costing_total}"
+        );
+        std::println!(
+            "rule_census still_live_free_in_block={still_live_free_in_block} still_live_free_outside_block={still_live_free_out_of_block}"
+        );
+        assert!(
+            still_live_costing_total > 0,
+            "rule census recorded zero costing still-live declines -- the split is wired to nothing"
+        );
+        // deliverable answer: what fraction of the COSTING total is the
+        // online-softmax block's 96 (all three of global_max/weights_cached/
+        // weights_new are Elementwise, so all 96 are costing by construction
+        // -- confirmed below, not assumed).
+        let block_fraction_permille =
+            still_live_costing_in_block * 1000 / still_live_costing_total;
+        std::println!(
+            "rule_census online_softmax_block_share_of_costing calls={still_live_costing_in_block} of={still_live_costing_total} permille={block_fraction_permille}"
+        );
+
+        // named by construction order within the block (score_max_cached is
+        // phase 0, the block's own first node): global_max is the 3rd node
+        // emitted (phase 2), weights_cached the 5th (phase 4), weights_new
+        // the 7th (phase 6) -- `spec.rs:2616,2632,2644`, read directly off
+        // this test's own doc trace of the block, not guessed. All three
+        // are `Op::Elementwise`, so they land in `costing_phase_totals`.
+        for (phase, label) in [(2_u32, "global_max"), (4, "weights_cached"), (6, "weights_new")] {
+            let calls = costing_phase_totals.get(&phase).copied().unwrap_or(0);
+            std::println!("rule_census still_live_costing_phase={phase} label={label} calls={calls}");
+        }
+
+        let mut ranked_costing_phases: alloc::vec::Vec<(u32, u64)> =
+            costing_phase_totals.into_iter().collect();
+        ranked_costing_phases.sort_by_key(|entry| core::cmp::Reverse(entry.1));
+        for (phase, calls) in ranked_costing_phases.iter().take(10) {
+            std::println!("rule_census still_live_costing_top_phase phase={phase} calls={calls}");
+        }
+        for (phase, calls) in ranked_costing_phases.iter().take(6) {
+            let node = costing_phase_example_node.get(phase).copied().unwrap_or(0);
+            let op = &program[node as usize];
+            std::println!(
+                "rule_census still_live_costing_top_phase_op phase={phase} calls={calls} node={node} op={op:?}"
+            );
+        }
+
+        // sanity check: 1196 = 610 reduce + 547 elementwise + 37 constant +
+        // 2 iota. A costing decline whose operand is `Op::Elementwise`
+        // corresponds to a node that either fuses away for free (never a
+        // `BoundOp`) or is forced to materialize as one of the 547
+        // elementwise `BoundOp`s -- the distinct count of Elementwise-kind
+        // nodes that appear ANYWHERE in the decline snapshot (any of the
+        // three reasons) is the direct witness for "forced to materialize
+        // at least once", checked against 547 rather than assumed to agree
+        // with it.
+        let mut raw_elementwise_total = 0_u64;
+        let mut raw_reduce_total = 0_u64;
+        let mut raw_constant_total = 0_u64;
+        let mut raw_iota_total = 0_u64;
+        let mut raw_input_total = 0_u64;
+        for op in &program {
+            match op {
+                Op::Elementwise { .. } => raw_elementwise_total += 1,
+                Op::Reduce(_) => raw_reduce_total += 1,
+                Op::Constant { .. } => raw_constant_total += 1,
+                Op::Iota { .. } => raw_iota_total += 1,
+                Op::Input { .. } => raw_input_total += 1,
+            }
+        }
+        std::println!(
+            "rule_census raw_op_totals elementwise={raw_elementwise_total} reduce={raw_reduce_total} constant={raw_constant_total} iota={raw_iota_total} input={raw_input_total} program_len={}",
+            program.len()
+        );
+        assert_eq!(
+            raw_reduce_total, 610,
+            "reduces never fuse (build_reduce_op always yields exactly one BoundOp), \
+             so the raw Op::Reduce count must equal the bound reduce_total exactly"
+        );
+
+        let mut elementwise_declined_nodes: alloc::collections::BTreeSet<u32> =
+            alloc::collections::BTreeSet::new();
+        for (node, _site, _reason, _calls) in crate::instrument::fuse_decline_snapshot() {
+            if matches!(program[node as usize], Op::Elementwise { .. }) {
+                elementwise_declined_nodes.insert(node);
+            }
+        }
+        std::println!(
+            "rule_census elementwise_declined_distinct_nodes={} elementwise_bound_ops=547 raw_elementwise_total={raw_elementwise_total}",
+            elementwise_declined_nodes.len()
+        );
+
+        // REMATERIALIZATION sizing (2026-09-02, coordinator's rule -- NOT
+        // implemented this round, only sized). Consumer count is computed
+        // by a full scan of `program` (every place a NodeId is read as an
+        // operand), independent of the decline snapshot -- the snapshot
+        // only records DECLINE events, not total readers, so it cannot
+        // answer "how many consumers" on its own.
+        let mut consumer_count: alloc::collections::BTreeMap<u32, u64> =
+            alloc::collections::BTreeMap::new();
+        let count_map_indices = |map: &IndexMap, counts: &mut alloc::collections::BTreeMap<u32, u64>| {
+            if let IndexMap::Computed { indices, .. } = map {
+                *counts.entry(indices.0).or_insert(0) += 1;
+            }
+        };
+        for op in &program {
+            match op {
+                Op::Elementwise { operands, .. } => {
+                    for (operand_node, map) in operands {
+                        *consumer_count.entry(operand_node.0).or_insert(0) += 1;
+                        count_map_indices(map, &mut consumer_count);
+                    }
+                }
+                Op::Reduce(reduce) => {
+                    *consumer_count.entry(reduce.operand.0).or_insert(0) += 1;
+                    count_map_indices(&reduce.in_map, &mut consumer_count);
+                    count_map_indices(&reduce.out_map, &mut consumer_count);
+                }
+                Op::Input { .. } | Op::Constant { .. } | Op::Iota { .. } => {}
+            }
+        }
+
+        // deliverable #1: of the 1086 costing still_live declines, how many
+        // have an Op::Elementwise operand (the only rematerialization
+        // candidate -- a Reduce always dispatches regardless of fusion, so
+        // recomputing one buys nothing). A node that is ITSELF a named
+        // graph output is excluded: `live::annotate` never retires an
+        // output (it must persist to the end regardless of any single
+        // consumer), so it declines StillLive even with as few as one
+        // real consumer -- and rematerializing it into that consumer would
+        // still leave the required output buffer unmaterialized, so it is
+        // not a real candidate, not an undercounted one.
+        let output_node_set: alloc::collections::BTreeSet<u32> =
+            outputs.iter().map(|node| node.0).collect();
+        let mut still_live_elementwise_candidates: alloc::collections::BTreeSet<u32> =
+            alloc::collections::BTreeSet::new();
+        let mut still_live_elementwise_calls = 0_u64;
+        let mut still_live_non_elementwise_costing_calls = 0_u64;
+        let mut still_live_output_pinned_calls = 0_u64;
+        for (node, _site, reason, calls) in crate::instrument::fuse_decline_snapshot() {
+            if reason != crate::instrument::FuseDeclineReason::StillLive || is_free_operand(node) {
+                continue;
+            }
+            if !matches!(program[node as usize], Op::Elementwise { .. }) {
+                still_live_non_elementwise_costing_calls += calls;
+                continue;
+            }
+            if output_node_set.contains(&node) {
+                still_live_output_pinned_calls += calls;
+                continue;
+            }
+            still_live_elementwise_candidates.insert(node);
+            still_live_elementwise_calls += calls;
+        }
+        std::println!(
+            "rule_census rematerialize_candidates distinct_nodes={} decline_calls={still_live_elementwise_calls} non_elementwise_costing_calls={still_live_non_elementwise_costing_calls} output_pinned_calls={still_live_output_pinned_calls} of_costing_still_live={still_live_costing_total}",
+            still_live_elementwise_candidates.len()
+        );
+        assert!(
+            !still_live_elementwise_candidates.is_empty(),
+            "rule census found zero rematerialization candidates -- either the rule genuinely \
+             does not apply here or the measurement is wired to nothing"
+        );
+
+        // deliverable #2: consumer-count histogram over the candidates.
+        let mut consumer_histogram: alloc::collections::BTreeMap<u64, u64> =
+            alloc::collections::BTreeMap::new();
+        for &node in &still_live_elementwise_candidates {
+            let count = consumer_count.get(&node).copied().unwrap_or(0);
+            *consumer_histogram.entry(count).or_insert(0) += 1;
+        }
+        for (consumers, nodes) in &consumer_histogram {
+            std::println!("rule_census rematerialize_histogram consumers={consumers} nodes={nodes}");
+        }
+        assert!(
+            consumer_histogram.keys().all(|&count| count >= 2),
+            "a StillLive decline means another consumer exists later -- every candidate must \
+             show at least 2 total consumers, or the consumer-count scan disagrees with the \
+             decline mechanism itself"
+        );
+
+        // deliverable #3: projected dispatch saving at three thresholds.
+        for threshold in [2_u64, 3, 4] {
+            let saved = still_live_elementwise_candidates
+                .iter()
+                .filter(|&&node| consumer_count.get(&node).copied().unwrap_or(0) <= threshold)
+                .count();
+            let projected_elementwise = elementwise - saved;
+            let projected_total = total - saved;
+            std::println!(
+                "rule_census rematerialize_projection threshold={threshold} saved_dispatches={saved} elementwise_547_to={projected_elementwise} total_1196_to={projected_total} fraction_of_1196={:.4}",
+                saved as f64 / total as f64
+            );
+        }
+
+        // deliverable #4: the ALU cost side, honest and unrounded. Element
+        // counts come from `shapes` (the same `Shapes` table `bind::bind`
+        // itself resolved against), never guessed from rank alone.
+        let mut recompute_elements_total = 0_u128;
+        let mut saved_dispatches_at_2 = 0_u64;
+        for &node in &still_live_elementwise_candidates {
+            let consumers = consumer_count.get(&node).copied().unwrap_or(0);
+            if consumers > 2 {
+                continue;
+            }
+            saved_dispatches_at_2 += 1;
+            let extents = shapes.of(crate::op::NodeId(node));
+            let element_count: u128 = extents.iter().map(|&extent| extent as u128).product();
+            recompute_elements_total += element_count * u128::from(consumers - 1);
+        }
+        let dispatch_floor_ns = 4_000_u128; // coordinator's own cited ~4us floor
+        let dispatch_saving_ns = u128::from(saved_dispatches_at_2) * dispatch_floor_ns;
+        // MEASURED range from `docs/discipline.md`'s own instrument-counter
+        // table (elementwise Generic fast=2.31 ns/element, slow=16.18
+        // ns/element, a real decode step) -- reported as a range, not a
+        // single assumed constant, because which arm a rematerialized body
+        // would hit is not measured by this census.
+        let alu_cost_fast_ns = recompute_elements_total * 231 / 100;
+        let alu_cost_slow_ns = recompute_elements_total * 1618 / 100;
+        std::println!(
+            "rule_census rematerialize_alu_cost threshold=2 saved_dispatches={saved_dispatches_at_2} dispatch_saving_ns={dispatch_saving_ns} recompute_elements={recompute_elements_total} alu_cost_ns_fast_path={alu_cost_fast_ns} alu_cost_ns_slow_path={alu_cost_slow_ns}"
+        );
+        assert!(
+            recompute_elements_total > 0,
+            "rule census found rematerialization candidates but zero recompute-element cost -- \
+             the shape lookup is wired to nothing"
+        );
+
+        // deliverable #5: verify the 547-482=65 gap is exactly the
+        // elementwise-kind nodes in `effective_outputs` (never read as an
+        // operand by anything else in `push`, so no decline event exists
+        // for them, yet they still materialize as named outputs).
+        let materialized_elementwise_nodes: alloc::collections::BTreeSet<u32> = bound
+            .iter()
+            .filter(|op| matches!(op.kind, crate::bind::BoundOpKind::Elementwise { .. }))
+            .map(|op| op.node.0)
+            .collect();
+        assert_eq!(
+            materialized_elementwise_nodes.len(),
+            547,
+            "the materialized-elementwise set must have exactly 547 members, matching the bound count"
+        );
+        let unexplained_nodes: alloc::vec::Vec<u32> = materialized_elementwise_nodes
+            .difference(&elementwise_declined_nodes)
+            .copied()
+            .collect();
+        let output_node_set: alloc::collections::BTreeSet<u32> =
+            outputs.iter().map(|node| node.0).collect();
+        let unexplained_that_are_outputs = unexplained_nodes
+            .iter()
+            .filter(|node| output_node_set.contains(node))
+            .count();
+        let unexplained_that_are_not_outputs: alloc::vec::Vec<u32> = unexplained_nodes
+            .iter()
+            .filter(|node| !output_node_set.contains(node))
+            .copied()
+            .collect();
+        std::println!(
+            "rule_census unexplained_gap total={} outputs={unexplained_that_are_outputs} not_outputs={}",
+            unexplained_nodes.len(),
+            unexplained_that_are_not_outputs.len()
+        );
+        for node in unexplained_that_are_not_outputs.iter().take(5) {
+            let op = &program[*node as usize];
+            std::println!("rule_census unexplained_gap_node node={node} op={op:?}");
+        }
+
+        // N == 0 is a red gate, not a quiet pass: every rule this census
+        // names either fired or declined at least once on a real 32-layer
+        // forward, or the census measured nothing and must fail loudly.
+        assert!(total > 0, "rule census processed zero bound ops");
+        assert!(
+            fuse_elementwise_fired + fuse_reduce_fired > 0,
+            "rule census recorded zero fusion firings -- the counters are wired to nothing"
+        );
+        assert!(
+            window_reduce_fired + window_reduce_declined > 0,
+            "rule census recorded zero window-reduce attempts -- the counter is wired to nothing"
+        );
+
+        assert_eq!(total, 1196, "total BoundOps must match the measured forward");
+        assert_eq!(
+            reduce_total,
+            225 + 385,
+            "total reduces must match the measured reduce_matmul_quantized + \
+             reduce_f32_dense population, even though this test's own two-operand \
+             split is a different partition of that same 610 (see this test's own doc)"
+        );
+        assert_eq!(elementwise, 547, "elementwise BoundOps must match the measured forward");
+        assert_eq!(constant, 37, "constant BoundOps must match the measured forward");
+        assert_eq!(iota, 2, "iota BoundOps must match the measured forward");
+        assert_eq!(
+            reduce_total + elementwise + constant + iota,
+            total,
+            "the four BoundOpKind buckets must exhaust the total with no remainder"
+        );
+    }
+
 
     /// Proof the new test can fail: perturbing one tap weight must move the
     /// affected output positions away from the hand-computed reference.

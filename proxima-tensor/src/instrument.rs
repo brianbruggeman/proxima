@@ -970,6 +970,180 @@ pub fn reset_width_tile_decline() {
     buckets.clear();
 }
 
+// rule-census task (2026-09-02): the elementwise-into-elementwise and
+// elementwise-into-reduce fusion decisions inline inside
+// `BoundOpBuilder::push` (`bind.rs:641`, `bind.rs:697`) were, before this,
+// uncounted rewrites -- a fold that declined and a fold that never existed
+// were indistinguishable. Same `(NodeId, reason) -> calls` shape
+// `WIDTH_TILE_DECLINE` above uses, applied to the two call sites the fusion
+// check actually has, rather than a new mechanism.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum FuseSite {
+    /// `bind.rs:641` — inside `Op::Elementwise`'s own operand loop.
+    ElementwiseOperand,
+    /// `bind.rs:697` — `Op::Reduce`'s own `operand`.
+    ReduceOperand,
+    /// `bind.rs:901` — `quarantine_broadcast_operands`'s own per-child walk.
+    /// A distinct site from the two above: `fuses` above is a binary
+    /// still-live/projection/held check made once per operand; this one
+    /// runs only after that check already said `fuses`, and re-decides per
+    /// held descendant, recursively, purely on relative iteration extent.
+    QuarantineBroadcast,
+}
+
+/// Why one operand's `fuses` check (`bind.rs:641`/`:697`) came back false —
+/// the three terms of that `&&` chain, checked in the order they appear.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum FuseDeclineReason {
+    /// `!retires.contains(operand_node)` — a later node still reads this
+    /// value, so it cannot be folded away here.
+    StillLive,
+    /// `!is_identity_projection(map)` — the access pattern is a gather,
+    /// window, or other non-identity map the fused body cannot absorb.
+    NonIdentityProjection,
+    /// `operand_node` is not itself a currently-held elementwise chain
+    /// (an `Input` leaf, a materialized `Reduce`, or already flushed).
+    NotHeld,
+    /// `quarantine_broadcast_operands`'s own condition: `child_extent <
+    /// reduce_extent` — this held child's own iteration space is smaller
+    /// than the reduce it would fuse into, so composing it through would
+    /// run its body once per `reduce_extent` element instead of once per
+    /// its own; it is forced to materialize as a standalone dispatch
+    /// instead. Never returned from the `StillLive`/`NonIdentityProjection`
+    /// / `NotHeld` check above — that check has already passed by the time
+    /// this one runs.
+    BroadcastQuarantined,
+}
+
+pub static FUSE_ELEMENTWISE_OPERAND_FIRED: Counter =
+    Counter::new("proxima_tensor.fuse.elementwise_operand_fired");
+pub static FUSE_REDUCE_OPERAND_FIRED: Counter =
+    Counter::new("proxima_tensor.fuse.reduce_operand_fired");
+pub static FUSE_QUARANTINE_BROADCAST_FIRED: Counter =
+    Counter::new("proxima_tensor.fuse.quarantine_broadcast_fired");
+
+static FUSE_DECLINE: Mutex<BTreeMap<(u32, FuseSite, FuseDeclineReason), u64>> =
+    Mutex::new(BTreeMap::new());
+
+/// Records one fusion attempt at `site` for `node` — `Ok` on fire (bumps
+/// that site's own fired counter), `Err(reason)` on decline (bumps that
+/// `(node, site, reason)` tally). Called once per operand, from the exact
+/// `let fuses = ...` sites in `bind.rs`, never re-derived after the fact.
+pub fn record_fuse_attempt(node: NodeId, site: FuseSite, outcome: Result<(), FuseDeclineReason>) {
+    match outcome {
+        Ok(()) => match site {
+            FuseSite::ElementwiseOperand => counter!(FUSE_ELEMENTWISE_OPERAND_FIRED, 1),
+            FuseSite::ReduceOperand => counter!(FUSE_REDUCE_OPERAND_FIRED, 1),
+            FuseSite::QuarantineBroadcast => counter!(FUSE_QUARANTINE_BROADCAST_FIRED, 1),
+        },
+        Err(reason) => {
+            let mut buckets = FUSE_DECLINE.lock().unwrap_or_else(PoisonError::into_inner);
+            *buckets.entry((node.0, site, reason)).or_insert(0) += 1;
+        }
+    }
+}
+
+/// Every distinct `(NodeId, site, reason)` decline recorded since the last
+/// [`reset_fuse_decline`], as `(node, site, reason, calls)` — sorted by key.
+#[must_use]
+pub fn fuse_decline_snapshot() -> Vec<(u32, FuseSite, FuseDeclineReason, u64)> {
+    let buckets = FUSE_DECLINE.lock().unwrap_or_else(PoisonError::into_inner);
+    buckets
+        .iter()
+        .map(|(&(node, site, reason), &calls)| (node, site, reason, calls))
+        .collect()
+}
+
+/// `(elementwise_operand_fired, reduce_operand_fired, distinct_declines)`.
+#[must_use]
+pub fn fuse_totals() -> (u64, u64, usize) {
+    let buckets = FUSE_DECLINE.lock().unwrap_or_else(PoisonError::into_inner);
+    (
+        FUSE_ELEMENTWISE_OPERAND_FIRED.get(),
+        FUSE_REDUCE_OPERAND_FIRED.get(),
+        buckets.len(),
+    )
+}
+
+pub fn reset_fuse_decline() {
+    let mut buckets = FUSE_DECLINE.lock().unwrap_or_else(PoisonError::into_inner);
+    buckets.clear();
+    let _ = FUSE_ELEMENTWISE_OPERAND_FIRED.snapshot_and_reset();
+    let _ = FUSE_REDUCE_OPERAND_FIRED.snapshot_and_reset();
+    let _ = FUSE_QUARANTINE_BROADCAST_FIRED.snapshot_and_reset();
+}
+
+// masked-window-reduce elimination (`bind.rs:659`,
+// `eliminate_masked_window_reduce`) -- minimal honest form
+// (`accelerate_gemm_totals`'s own shape): the function has eight internal
+// decline points; a full per-reason breakdown is future work beyond this
+// round's measurement-only scope. This pair is the fired/declined witness
+// that the rule exists and its hit rate on a real program.
+pub static WINDOW_REDUCE_ELIMINATED: Counter =
+    Counter::new("proxima_tensor.window_reduce.eliminated");
+pub static WINDOW_REDUCE_DECLINED: Counter = Counter::new("proxima_tensor.window_reduce.declined");
+
+/// Records one `eliminate_masked_window_reduce` call's outcome — called
+/// once per `Op::Reduce`, from `bind.rs:659`, from whichever of `Some`/
+/// `None` the call actually returns.
+pub fn record_window_reduce_attempt(fired: bool) {
+    if fired {
+        counter!(WINDOW_REDUCE_ELIMINATED, 1);
+    } else {
+        counter!(WINDOW_REDUCE_DECLINED, 1);
+    }
+}
+
+/// `(eliminated, declined)`.
+#[must_use]
+pub fn window_reduce_totals() -> (u64, u64) {
+    (WINDOW_REDUCE_ELIMINATED.get(), WINDOW_REDUCE_DECLINED.get())
+}
+
+pub fn reset_window_reduce() {
+    let _ = WINDOW_REDUCE_ELIMINATED.snapshot_and_reset();
+    let _ = WINDOW_REDUCE_DECLINED.snapshot_and_reset();
+}
+
+// combine-block-locate task (2026-09-02): brackets the online-softmax
+// combine block (`spec.rs:2596-2726`) by construction rather than by name
+// -- a symbolic program has none. Recorded once per `append_mistral_cached_
+// layer` call (32 times for the real forward), so the census can both
+// locate the block's `NodeId` range AND verify by measurement that every
+// layer's block sits at the same relative offset (structural periodicity),
+// rather than assuming it from reading the source once.
+static ONLINE_SOFTMAX_BLOCK_RANGE: Mutex<Vec<(u32, u32)>> = Mutex::new(Vec::new());
+
+/// Records one layer's `[first_node, last_node]` inclusive `NodeId` bracket
+/// for the online-softmax combine block, called once per
+/// `append_mistral_cached_layer` invocation from `spec.rs`, with the two
+/// `NodeId`s the block's own first and last emitted nodes already are --
+/// never re-derived from `program.len()` after the fact.
+pub fn record_online_softmax_block_range(first_node: NodeId, last_node: NodeId) {
+    let mut ranges = ONLINE_SOFTMAX_BLOCK_RANGE
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
+    ranges.push((first_node.0, last_node.0));
+}
+
+/// Every recorded `(first_node, last_node)` bracket, in call order (one per
+/// layer for a real forward) -- since layer 0 pushed first, this Vec's
+/// order IS layer order, so no separate layer index need be carried.
+#[must_use]
+pub fn online_softmax_block_ranges() -> Vec<(u32, u32)> {
+    let ranges = ONLINE_SOFTMAX_BLOCK_RANGE
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
+    ranges.clone()
+}
+
+pub fn reset_online_softmax_block_range() {
+    let mut ranges = ONLINE_SOFTMAX_BLOCK_RANGE
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
+    ranges.clear();
+}
+
 /// One process run's worth of [`matmul_rows_threaded`](crate::cpu)'s own
 /// dispatch-overhead breakdown, read back the same way [`parallel_totals`]
 /// is.
