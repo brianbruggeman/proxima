@@ -2273,12 +2273,34 @@ pub fn bind(
     shapes: &Shapes,
     outputs: &[NodeId],
 ) -> Result<Vec<BoundOp>, TensorError> {
+    bind_with_fusion(program, shapes, outputs, true)
+}
+
+/// Same as [`bind`], but `fuse_cached_attention` states whether the caller's
+/// backend can render [`BoundOpKind::CachedAttention`] at all. `cpu.rs` and
+/// `omega/src/metal.rs` render the fused kind, so they (via [`bind`]) pass
+/// `true`; `omega`'s wgpu and cuda drivers have no renderer for it yet, so
+/// they call this directly with `false` — the fused rewrite never fires for
+/// them, and the plain elementwise/reduce chain [`bind_plain`] already
+/// produces is what they emit.
+pub fn bind_with_fusion(
+    program: &[Op],
+    shapes: &Shapes,
+    outputs: &[NodeId],
+    fuse_cached_attention: bool,
+) -> Result<Vec<BoundOp>, TensorError> {
     let built = bind_plain(program, shapes, outputs)?;
     #[cfg(not(feature = "cached-attention-streaming"))]
-    return Ok(built);
+    {
+        let _ = fuse_cached_attention;
+        Ok(built)
+    }
 
     #[cfg(feature = "cached-attention-streaming")]
     {
+    if !fuse_cached_attention {
+        return Ok(built);
+    }
     let initial_candidates = cached_attention_candidates(program, shapes, &built, outputs);
     if initial_candidates.is_empty() {
         return Ok(built);
