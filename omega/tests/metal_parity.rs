@@ -1428,6 +1428,118 @@ fn metal_matmul_on_packed_q4k_weights_matches_the_dequantized_f32_cpu_path() {
     );
 }
 
+/// `metal-q4k-single-fetch` correctness gate: exactly ONE `Q4_K`
+/// super-block (`k = QK_K = 256`), the minimum shape that exercises every
+/// one of the 8 sub-blocks and BOTH nibble halves of every `qs` byte on
+/// every output row — the exact granularity `push_q4k_single_fetch_body`'s
+/// lane remap touches (`sf_region` selects one of the super-block's 4
+/// 64-element groups = 2 sub-blocks each, `sf_half` selects which 16-byte
+/// half of that group's `qs` range a lane owns). The oracle is a
+/// hand-rolled dequantize-then-dot in this test, NOT
+/// `proxima_tensor::evaluate` — a real second implementation of the sum,
+/// independent of both the GPU kernel AND the CPU tensor-graph evaluator
+/// [`metal_matmul_on_packed_q4k_weights_matches_the_dequantized_f32_cpu_path`]
+/// already checks against, so a bug shared between the two `evaluate` calls
+/// (a shared `Q4_K` dequantize routine, a shared reduction order) cannot
+/// hide from this test the way it could hide from that one.
+///
+/// Error is reported relative to the BATCH's peak magnitude, not per output
+/// row: a per-row relative error explodes near a row's own zero crossing
+/// and reads as a false multi-hundred-percent "bug" that is actually a
+/// metric artifact (`docs/discipline.md`'s own note on this exact trap).
+#[cfg(all(feature = "metal-q4k-single-fetch", not(feature = "metal-q4k-split-k")))]
+#[test]
+fn metal_matmul_on_one_q4k_super_block_matches_a_hand_rolled_dequantize_then_dot_oracle() {
+    use proxima_gguf::quant::q4_k::{BLOCK_BYTES, QK_K, dequantize, quantize};
+
+    let rows: u32 = 6;
+    let k = QK_K as u32;
+
+    let activation: Vec<f32> = random_vec(101, k as usize)
+        .into_iter()
+        .map(|value| value * 4.0 - 2.0)
+        .collect();
+    let weight_f32: Vec<f32> = random_vec(103, rows as usize * k as usize)
+        .into_iter()
+        .map(|value| value * 4.0 - 2.0)
+        .collect();
+
+    let mut weight_blocks = vec![0u8; rows as usize * BLOCK_BYTES];
+    for (row_f32, row_blocks) in weight_f32
+        .chunks_exact(k as usize)
+        .zip(weight_blocks.as_chunks_mut::<BLOCK_BYTES>().0)
+    {
+        quantize(row_f32, row_blocks).expect("row length is exactly one q4_k super-block");
+    }
+
+    // independent oracle: dequantize each row's one super-block by hand and
+    // dot it against the activation in plain `f64` accumulation — no shared
+    // machinery with either `omega::execute` or `proxima_tensor::evaluate`.
+    let mut expected = vec![0.0f64; rows as usize];
+    for (row_index, row_blocks) in weight_blocks
+        .as_chunks::<BLOCK_BYTES>()
+        .0
+        .iter()
+        .enumerate()
+    {
+        let mut row_dequantized = vec![0.0f32; k as usize];
+        dequantize(row_blocks, &mut row_dequantized).expect("one q4_k super-block");
+        let mut sum = 0.0f64;
+        for (weight_value, activation_value) in row_dequantized.iter().zip(activation.iter()) {
+            sum += f64::from(*weight_value) * f64::from(*activation_value);
+        }
+        expected[row_index] = sum;
+    }
+
+    let (packed_program, packed_sum) = q4k_matmul_program(rows, k, DType::UInt8);
+    let metal = omega::execute(
+        &packed_program,
+        &[],
+        &[
+            QuantizedBlock::Q4K(&weight_blocks),
+            QuantizedBlock::Float32(&activation),
+        ],
+        &[packed_sum],
+    )
+    .expect("metal executes a packed q4_k matmul on a real device");
+
+    let actual = metal.root();
+    assert_eq!(
+        actual.len(),
+        rows as usize,
+        "degenerate gate: no outputs compared"
+    );
+
+    let peak_magnitude = expected
+        .iter()
+        .map(|value| value.abs())
+        .fold(0.0f64, f64::max);
+    assert!(
+        peak_magnitude > 0.0,
+        "degenerate fixture: every expected row is exactly zero"
+    );
+
+    let mut max_diff = 0.0f64;
+    for (row_index, (&got, &want)) in actual.iter().zip(expected.iter()).enumerate() {
+        assert!(
+            got.is_finite(),
+            "row {row_index}: metal produced a non-finite value: {got}"
+        );
+        let diff = (f64::from(got) - want).abs();
+        max_diff = max_diff.max(diff);
+    }
+    let relative_to_batch_peak = max_diff / peak_magnitude;
+    eprintln!(
+        "single-fetch q4k metal vs hand-rolled dequantize-then-dot oracle: rows={rows} k={k} \
+         max_diff={max_diff} batch_peak_magnitude={peak_magnitude} relative_to_batch_peak={relative_to_batch_peak}"
+    );
+    assert!(
+        relative_to_batch_peak < 1e-5,
+        "single-fetch unpack disagrees with the hand-rolled oracle: \
+         relative_to_batch_peak={relative_to_batch_peak} max_diff={max_diff}"
+    );
+}
+
 /// Same claim as [`metal_matmul_on_packed_q4k_weights_matches_the_dequantized_f32_cpu_path`],
 /// but with a MANY-token activation ([`q4k_tiled_gemm_program`]'s `[k,
 /// tokens]` shape) instead of that test's single-column `[k, 1]` one, so
