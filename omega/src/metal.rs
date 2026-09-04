@@ -3754,9 +3754,14 @@ fn read_fault_slots(buffer: &ProtocolObject<dyn MTLBuffer>, gather_count: usize)
 /// mirroring the narrowing [`upload_block`] does on the way in. `node`
 /// names the output this read-back is for, used only to point an
 /// [`EmitError::UnsupportedDType`] at the right place — same totality-guard
-/// stance as [`upload_block`]'s `node` parameter.
+/// stance as [`upload_block`]'s `node` parameter. `byte_offset` honors a
+/// placed output's own non-zero start ([`execute_plan_with_placements`]'s
+/// `output_placements`): an ordinary, non-placed node's buffer is still
+/// always freshly allocated at offset `0`, so passing `0` here for that case
+/// is unchanged behavior, not a special case this function has to know about.
 fn read_back(
     buffer: &ProtocolObject<dyn MTLBuffer>,
+    byte_offset: usize,
     element_count: usize,
     node: NodeId,
     dtype: DType,
@@ -3765,14 +3770,14 @@ fn read_back(
         return Ok(Vec::new());
     }
     match dtype {
-        DType::Float16 => Ok(read_back_half(buffer, element_count)),
+        DType::Float16 => Ok(read_back_half(buffer, byte_offset, element_count)),
         DType::Float32
         | DType::BFloat16
         | DType::Bool
         | DType::Int8
         | DType::UInt8
         | DType::Int32
-        | DType::UInt32 => Ok(read_back_float(buffer, element_count)),
+        | DType::UInt32 => Ok(read_back_float(buffer, byte_offset, element_count)),
         DType::Int16
         | DType::UInt16
         | DType::Int64
@@ -3783,24 +3788,41 @@ fn read_back(
     }
 }
 
-fn read_back_float(buffer: &ProtocolObject<dyn MTLBuffer>, element_count: usize) -> Vec<f32> {
+fn read_back_float(
+    buffer: &ProtocolObject<dyn MTLBuffer>,
+    byte_offset: usize,
+    element_count: usize,
+) -> Vec<f32> {
     let pointer = buffer.contents();
     // SAFETY: `buffer` is `storageModeShared`, so `contents()` is a
-    // CPU-visible pointer to at least `element_count` initialized `f32`s —
-    // every output buffer this driver allocates is sized to at least that
-    // many elements (see `allocate_buffer`'s caller, `dispatch_op`) before
-    // this point is reached.
-    unsafe { core::slice::from_raw_parts(pointer.as_ptr().cast::<f32>(), element_count) }.to_vec()
+    // CPU-visible pointer to at least `byte_offset + element_count * 4`
+    // initialized bytes — every output buffer this driver allocates is
+    // sized to at least that many bytes past a placed node's own offset
+    // (see `allocate_buffer`'s caller, `dispatch_op`, and
+    // `execute_plan_with_placements`'s caller contract for a placed one)
+    // before this point is reached.
+    unsafe {
+        let base = pointer.as_ptr().cast::<u8>().add(byte_offset).cast::<f32>();
+        core::slice::from_raw_parts(base, element_count)
+    }
+    .to_vec()
 }
 
-fn read_back_half(buffer: &ProtocolObject<dyn MTLBuffer>, element_count: usize) -> Vec<f32> {
+fn read_back_half(
+    buffer: &ProtocolObject<dyn MTLBuffer>,
+    byte_offset: usize,
+    element_count: usize,
+) -> Vec<f32> {
     let pointer = buffer.contents();
     // SAFETY: `buffer` is `storageModeShared`, so `contents()` is a
-    // CPU-visible pointer to at least `element_count` initialized `f16`s —
-    // the same sizing guarantee `read_back_float` relies on, just over the
-    // narrower element width `allocate_buffer` used for a `Float16` node.
-    let narrow =
-        unsafe { core::slice::from_raw_parts(pointer.as_ptr().cast::<f16>(), element_count) };
+    // CPU-visible pointer to at least `byte_offset + element_count * 2`
+    // initialized bytes — the same sizing guarantee `read_back_float`
+    // relies on, just over the narrower element width `allocate_buffer`
+    // used for a `Float16` node.
+    let narrow = unsafe {
+        let base = pointer.as_ptr().cast::<u8>().add(byte_offset).cast::<f16>();
+        core::slice::from_raw_parts(base, element_count)
+    };
     narrow.iter().map(|value| value.to_f32()).collect()
 }
 
@@ -3819,11 +3841,14 @@ fn finish(
         let shape = shapes.of(*node).to_vec();
         let dtype = gpu_dtype(program, index_nodes, *node);
         let data = match device_buffers.get(node) {
-            // an output node's buffer is always freshly allocated by
-            // `encode_op` at offset 0 -- only a weight INPUT can carry a
-            // nonzero offset, and a weight is never a program output -- so
-            // reading from the buffer's own start is always correct here.
-            Some((buffer, _offset)) => read_back(buffer, element_count(&shape), *node, dtype)?,
+            // a plain [`execute_plan`] output's buffer is freshly allocated
+            // by `encode_op` at offset 0, but an [`execute_plan_with_placements`]
+            // output lands in the CALLER's own buffer at whatever byte offset
+            // that call chose (`output_placements`) -- so `offset` here is
+            // read, never assumed to be `0`, or a placed node's read-back
+            // would silently return its buffer's UNRELATED leading bytes
+            // instead of the bytes this node actually wrote.
+            Some((buffer, offset)) => read_back(buffer, *offset, element_count(&shape), *node, dtype)?,
             None => Vec::new(),
         };
         #[cfg(feature = "instrument")]
