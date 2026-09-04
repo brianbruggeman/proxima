@@ -1,0 +1,74 @@
+    Finished `release` profile [optimized] target(s) in 0.42s
+     Running unittests src/lib.rs (/tmp/cargo_target/release/deps/proxima_model_interop-e4466c9c09a81aba)
+
+running 1 test
+DIAG_PROBE logits len=32002 nan_count=0 inf_count=0 min=-9.61463 max=18.458706 all_zero=false
+DIAG_PROBE layer=0 kind=Attention node=value len=31744 nan_count=0 inf_count=0 min=-0.33601898 max=0.28121215 all_zero=false
+DIAG_PROBE layer=1 kind=Attention node=value len=31744 nan_count=0 inf_count=0 min=-0.77369857 max=0.6925938 all_zero=false
+DIAG_PROBE layer=2 kind=Attention node=value len=31744 nan_count=0 inf_count=0 min=-2.7492023 max=1.5326254 all_zero=false
+DIAG_PROBE layer=3 kind=Attention node=value len=31744 nan_count=0 inf_count=0 min=-1.2229614 max=1.5246265 all_zero=false
+DIAG_PROBE layer=4 kind=Attention node=value len=31744 nan_count=0 inf_count=0 min=-1.5714939 max=1.7604684 all_zero=false
+DIAG_PROBE layer=5 kind=Attention node=value len=31744 nan_count=0 inf_count=0 min=-1.8971962 max=2.460125 all_zero=false
+DIAG_PROBE layer=6 kind=Attention node=value len=31744 nan_count=0 inf_count=0 min=-1.6881378 max=2.3584583 all_zero=false
+DIAG_PROBE layer=7 kind=Attention node=value len=31744 nan_count=0 inf_count=0 min=-1.9688835 max=2.1774883 all_zero=false
+DIAG_PROBE layer=8 kind=Attention node=value len=31744 nan_count=0 inf_count=0 min=-2.0666342 max=1.8219128 all_zero=false
+DIAG_PROBE layer=9 kind=Attention node=value len=31744 nan_count=0 inf_count=0 min=-2.6078517 max=2.1182756 all_zero=false
+DIAG_PROBE layer=10 kind=Attention node=value len=31744 nan_count=0 inf_count=0 min=-2.312305 max=2.8261838 all_zero=false
+DIAG_PROBE layer=11 kind=Attention node=value len=31744 nan_count=0 inf_count=0 min=-2.0798635 max=2.2011154 all_zero=false
+DIAG_PROBE layer=12 kind=Attention node=value len=31744 nan_count=0 inf_count=0 min=-3.2996497 max=3.6989064 all_zero=false
+DIAG_PROBE layer=13 kind=Attention node=value len=31744 nan_count=0 inf_count=0 min=-4.556215 max=3.893065 all_zero=false
+DIAG_PROBE layer=14 kind=Attention node=value len=31744 nan_count=0 inf_count=0 min=-4.010816 max=4.02348 all_zero=false
+DIAG_PROBE layer=15 kind=Attention node=value len=31744 nan_count=0 inf_count=0 min=-3.007463 max=2.703396 all_zero=false
+DIAG_PROBE layer=16 kind=Attention node=value len=31744 nan_count=0 inf_count=0 min=-2.316328 max=2.4590323 all_zero=false
+DIAG_PROBE layer=17 kind=Attention node=value len=31744 nan_count=0 inf_count=0 min=-3.00523 max=2.4313939 all_zero=false
+DIAG_PROBE layer=18 kind=Attention node=value len=31744 nan_count=0 inf_count=0 min=-2.7609434 max=3.147246 all_zero=false
+DIAG_PROBE layer=19 kind=Attention node=value len=31744 nan_count=0 inf_count=0 min=-3.368654 max=2.6800227 all_zero=false
+DIAG_PROBE layer=20 kind=Attention node=value len=31744 nan_count=0 inf_count=0 min=-4.8453097 max=2.7220263 all_zero=false
+DIAG_PROBE layer=21 kind=Attention node=value len=31744 nan_count=0 inf_count=0 min=-3.1667953 max=2.9829345 all_zero=false
+DIAG_PROBE layer=22 kind=Attention node=value len=31744 nan_count=0 inf_count=0 min=-3.0480812 max=3.4142752 all_zero=false
+DIAG_PROBE layer=23 kind=Attention node=value len=31744 nan_count=0 inf_count=0 min=-3.2927475 max=4.6633277 all_zero=false
+DIAG_PROBE layer=24 kind=Attention node=value len=31744 nan_count=0 inf_count=0 min=-3.3136206 max=2.9833035 all_zero=false
+DIAG_PROBE layer=25 kind=Attention node=value len=31744 nan_count=0 inf_count=0 min=-3.3302782 max=4.929023 all_zero=false
+DIAG_PROBE layer=26 kind=Attention node=value len=31744 nan_count=0 inf_count=0 min=-3.415325 max=3.887958 all_zero=false
+DIAG_PROBE layer=27 kind=Attention node=value len=31744 nan_count=0 inf_count=0 min=-5.2287464 max=3.548323 all_zero=false
+DIAG_PROBE layer=28 kind=Attention node=value len=31744 nan_count=0 inf_count=0 min=-5.5373883 max=4.2805448 all_zero=false
+DIAG_PROBE layer=29 kind=Attention node=value len=31744 nan_count=0 inf_count=0 min=-6.0436254 max=4.511464 all_zero=false
+DIAG_PROBE layer=30 kind=Attention node=value len=31744 nan_count=0 inf_count=0 min=-5.4452124 max=6.583667 all_zero=false
+DIAG_PROBE layer=31 kind=Attention node=value len=31744 nan_count=0 inf_count=0 min=-7.865906 max=5.8966274 all_zero=false
+token_breakdown step=0 new_count=31 cached_len_before=31 step_wall_ms=2315.932 apply_serving_config_ms=0.000 build_position_inputs_ms=0.024 named_blocks_weights_ms=0.002 named_blocks_kv_ms=0.000 kv_cache_upload_bytes=0 evaluate_ms=2314.216 layer_cache_append_ms=1.007 layer_cache_append_bytes=8126464 greedy_pick_ms=0.074
+token_attribution step=0 evaluate_ms=2314.216 kernel_ms=0.000 dispatch_ms=0.000 park_spin_wake_ms=0.000 residual_ms=2314.216 residual_underflow=false named_plus_residual_ms=2314.216
+token_quantize_calls step=0 total_calls=0 distinct_nodes=0 cache_hits=0
+token_breakdown_metal step=0 prepare_calls=1 prepare_ms=1.928 emit_calls=1196 emit_ms=0.914 pipeline_hits=1166 pipeline_misses=30 pipeline_compile_ms=3.862 block_upload_calls=391 block_upload_ms=0.379 block_upload_bytes=4139666232 op_setup_calls=1196 op_setup_ms=4.721 pipeline_lookup_calls=1196 pipeline_lookup_ms=3.917 encode_dispatch_calls=1196 encode_dispatch_ms=0.477 gpu_exec_calls=1 gpu_exec_ms=2237.949 readback_calls=97 readback_ms=2.782 readback_bytes=12094712 nocopy_uploads=0 copying_uploads=4 nocopy_reuses=290 resident_uploads=0 resident_reuses=0 mapping_offset_uploads=291 nocopy_cache_len=1 phys_footprint_bytes=356755328 device_allocated_bytes=4299358208 plan_cache_len=1 plan_hits=0 plan_misses=1
+token_breakdown step=1 new_count=1 cached_len_before=32 step_wall_ms=71.643 apply_serving_config_ms=0.000 build_position_inputs_ms=0.002 named_blocks_weights_ms=0.002 named_blocks_kv_ms=0.005 kv_cache_upload_bytes=8126464 evaluate_ms=70.272 layer_cache_append_ms=1.279 layer_cache_append_bytes=262144 greedy_pick_ms=0.080
+token_attribution step=1 evaluate_ms=70.272 kernel_ms=0.000 dispatch_ms=0.000 park_spin_wake_ms=0.000 residual_ms=70.272 residual_underflow=false named_plus_residual_ms=70.272
+token_quantize_calls step=1 total_calls=0 distinct_nodes=0 cache_hits=0
+token_breakdown_metal step=1 prepare_calls=1 prepare_ms=2.066 emit_calls=1196 emit_ms=0.784 pipeline_hits=1196 pipeline_misses=0 pipeline_compile_ms=0.000 block_upload_calls=391 block_upload_ms=2.178 block_upload_bytes=4147777096 op_setup_calls=1196 op_setup_ms=4.896 pipeline_lookup_calls=1196 pipeline_lookup_ms=0.037 encode_dispatch_calls=1196 encode_dispatch_ms=0.468 gpu_exec_calls=1 gpu_exec_ms=58.288 readback_calls=97 readback_ms=0.247 readback_bytes=390152 nocopy_uploads=0 copying_uploads=100 nocopy_reuses=291 resident_uploads=0 resident_reuses=0 mapping_offset_uploads=291 nocopy_cache_len=1 phys_footprint_bytes=48571968 device_allocated_bytes=4152934400 plan_cache_len=1 plan_hits=0 plan_misses=2
+token_breakdown step=2 new_count=1 cached_len_before=33 step_wall_ms=66.073 apply_serving_config_ms=0.000 build_position_inputs_ms=0.002 named_blocks_weights_ms=0.001 named_blocks_kv_ms=0.001 kv_cache_upload_bytes=8388608 evaluate_ms=65.749 layer_cache_append_ms=0.235 layer_cache_append_bytes=262144 greedy_pick_ms=0.082
+token_attribution step=2 evaluate_ms=65.749 kernel_ms=0.000 dispatch_ms=0.000 park_spin_wake_ms=0.000 residual_ms=65.749 residual_underflow=false named_plus_residual_ms=65.749
+token_quantize_calls step=2 total_calls=0 distinct_nodes=0 cache_hits=0
+token_breakdown_metal step=2 prepare_calls=1 prepare_ms=1.866 emit_calls=1196 emit_ms=0.756 pipeline_hits=1196 pipeline_misses=0 pipeline_compile_ms=0.000 block_upload_calls=391 block_upload_ms=0.435 block_upload_bytes=4148039240 op_setup_calls=1196 op_setup_ms=3.429 pipeline_lookup_calls=1196 pipeline_lookup_ms=0.034 encode_dispatch_calls=1196 encode_dispatch_ms=0.430 gpu_exec_calls=1 gpu_exec_ms=57.222 readback_calls=97 readback_ms=0.295 readback_bytes=390152 nocopy_uploads=96 copying_uploads=4 nocopy_reuses=291 resident_uploads=0 resident_reuses=0 mapping_offset_uploads=291 nocopy_cache_len=1 phys_footprint_bytes=50128512 device_allocated_bytes=4159586304 plan_cache_len=1 plan_hits=0 plan_misses=3
+token_breakdown step=3 new_count=1 cached_len_before=34 step_wall_ms=67.890 apply_serving_config_ms=0.000 build_position_inputs_ms=0.002 named_blocks_weights_ms=0.001 named_blocks_kv_ms=0.002 kv_cache_upload_bytes=8650752 evaluate_ms=67.757 layer_cache_append_ms=0.037 layer_cache_append_bytes=262144 greedy_pick_ms=0.089
+token_attribution step=3 evaluate_ms=67.757 kernel_ms=0.000 dispatch_ms=0.000 park_spin_wake_ms=0.000 residual_ms=67.757 residual_underflow=false named_plus_residual_ms=67.757
+token_quantize_calls step=3 total_calls=0 distinct_nodes=0 cache_hits=0
+token_breakdown_metal step=3 prepare_calls=1 prepare_ms=2.105 emit_calls=1196 emit_ms=0.818 pipeline_hits=1196 pipeline_misses=0 pipeline_compile_ms=0.000 block_upload_calls=391 block_upload_ms=2.550 block_upload_bytes=4148301384 op_setup_calls=1196 op_setup_ms=3.433 pipeline_lookup_calls=1196 pipeline_lookup_ms=0.039 encode_dispatch_calls=1196 encode_dispatch_ms=0.457 gpu_exec_calls=1 gpu_exec_ms=56.633 readback_calls=97 readback_ms=0.306 readback_bytes=390152 nocopy_uploads=0 copying_uploads=100 nocopy_reuses=291 resident_uploads=0 resident_reuses=0 mapping_offset_uploads=291 nocopy_cache_len=1 phys_footprint_bytes=62629568 device_allocated_bytes=4162404352 plan_cache_len=1 plan_hits=0 plan_misses=4
+token_breakdown step=4 new_count=1 cached_len_before=35 step_wall_ms=68.942 apply_serving_config_ms=0.000 build_position_inputs_ms=0.002 named_blocks_weights_ms=0.001 named_blocks_kv_ms=0.001 kv_cache_upload_bytes=8912896 evaluate_ms=68.828 layer_cache_append_ms=0.038 layer_cache_append_bytes=262144 greedy_pick_ms=0.070
+token_attribution step=4 evaluate_ms=68.828 kernel_ms=0.000 dispatch_ms=0.000 park_spin_wake_ms=0.000 residual_ms=68.828 residual_underflow=false named_plus_residual_ms=68.828
+token_quantize_calls step=4 total_calls=0 distinct_nodes=0 cache_hits=0
+token_breakdown_metal step=4 prepare_calls=1 prepare_ms=2.060 emit_calls=1196 emit_ms=0.840 pipeline_hits=1196 pipeline_misses=0 pipeline_compile_ms=0.000 block_upload_calls=391 block_upload_ms=3.492 block_upload_bytes=4148563528 op_setup_calls=1196 op_setup_ms=3.787 pipeline_lookup_calls=1196 pipeline_lookup_ms=0.036 encode_dispatch_calls=1196 encode_dispatch_ms=0.444 gpu_exec_calls=1 gpu_exec_ms=56.615 readback_calls=97 readback_ms=0.181 readback_bytes=390152 nocopy_uploads=0 copying_uploads=100 nocopy_reuses=291 resident_uploads=0 resident_reuses=0 mapping_offset_uploads=291 nocopy_cache_len=1 phys_footprint_bytes=63530688 device_allocated_bytes=4162748416 plan_cache_len=1 plan_hits=0 plan_misses=5
+token_breakdown step=5 new_count=1 cached_len_before=36 step_wall_ms=67.889 apply_serving_config_ms=0.000 build_position_inputs_ms=0.003 named_blocks_weights_ms=0.001 named_blocks_kv_ms=0.001 kv_cache_upload_bytes=9175040 evaluate_ms=67.798 layer_cache_append_ms=0.035 layer_cache_append_bytes=262144 greedy_pick_ms=0.049
+token_attribution step=5 evaluate_ms=67.798 kernel_ms=0.000 dispatch_ms=0.000 park_spin_wake_ms=0.000 residual_ms=67.798 residual_underflow=false named_plus_residual_ms=67.798
+token_quantize_calls step=5 total_calls=0 distinct_nodes=0 cache_hits=0
+token_breakdown_metal step=5 prepare_calls=1 prepare_ms=1.931 emit_calls=1196 emit_ms=0.790 pipeline_hits=1196 pipeline_misses=0 pipeline_compile_ms=0.000 block_upload_calls=391 block_upload_ms=2.268 block_upload_bytes=4148825672 op_setup_calls=1196 op_setup_ms=3.729 pipeline_lookup_calls=1196 pipeline_lookup_ms=0.037 encode_dispatch_calls=1196 encode_dispatch_ms=0.460 gpu_exec_calls=1 gpu_exec_ms=57.130 readback_calls=97 readback_ms=0.231 readback_bytes=390152 nocopy_uploads=0 copying_uploads=100 nocopy_reuses=291 resident_uploads=0 resident_reuses=0 mapping_offset_uploads=291 nocopy_cache_len=1 phys_footprint_bytes=63301312 device_allocated_bytes=4162387968 plan_cache_len=1 plan_hits=0 plan_misses=6
+token_breakdown step=6 new_count=1 cached_len_before=37 step_wall_ms=67.428 apply_serving_config_ms=0.000 build_position_inputs_ms=0.002 named_blocks_weights_ms=0.001 named_blocks_kv_ms=0.004 kv_cache_upload_bytes=9437184 evaluate_ms=67.301 layer_cache_append_ms=0.071 layer_cache_append_bytes=262144 greedy_pick_ms=0.047
+token_attribution step=6 evaluate_ms=67.301 kernel_ms=0.000 dispatch_ms=0.000 park_spin_wake_ms=0.000 residual_ms=67.301 residual_underflow=false named_plus_residual_ms=67.301
+token_quantize_calls step=6 total_calls=0 distinct_nodes=0 cache_hits=0
+token_breakdown_metal step=6 prepare_calls=1 prepare_ms=1.912 emit_calls=1196 emit_ms=0.791 pipeline_hits=1196 pipeline_misses=0 pipeline_compile_ms=0.000 block_upload_calls=391 block_upload_ms=1.678 block_upload_bytes=4149087816 op_setup_calls=1196 op_setup_ms=4.102 pipeline_lookup_calls=1196 pipeline_lookup_ms=0.039 encode_dispatch_calls=1196 encode_dispatch_ms=0.466 gpu_exec_calls=1 gpu_exec_ms=57.022 readback_calls=97 readback_ms=0.191 readback_bytes=390152 nocopy_uploads=32 copying_uploads=68 nocopy_reuses=291 resident_uploads=0 resident_reuses=0 mapping_offset_uploads=291 nocopy_cache_len=1 phys_footprint_bytes=59106944 device_allocated_bytes=4162584576 plan_cache_len=1 plan_hits=0 plan_misses=7
+token_breakdown step=7 new_count=1 cached_len_before=38 step_wall_ms=67.867 apply_serving_config_ms=0.000 build_position_inputs_ms=0.003 named_blocks_weights_ms=0.001 named_blocks_kv_ms=0.002 kv_cache_upload_bytes=9699328 evaluate_ms=67.735 layer_cache_append_ms=0.037 layer_cache_append_bytes=262144 greedy_pick_ms=0.087
+token_attribution step=7 evaluate_ms=67.735 kernel_ms=0.000 dispatch_ms=0.000 park_spin_wake_ms=0.000 residual_ms=67.735 residual_underflow=false named_plus_residual_ms=67.735
+token_quantize_calls step=7 total_calls=0 distinct_nodes=0 cache_hits=0
+token_breakdown_metal step=7 prepare_calls=1 prepare_ms=1.818 emit_calls=1196 emit_ms=0.754 pipeline_hits=1196 pipeline_misses=0 pipeline_compile_ms=0.000 block_upload_calls=391 block_upload_ms=2.350 block_upload_bytes=4149349960 op_setup_calls=1196 op_setup_ms=3.320 pipeline_lookup_calls=1196 pipeline_lookup_ms=0.035 encode_dispatch_calls=1196 encode_dispatch_ms=0.424 gpu_exec_calls=1 gpu_exec_ms=57.657 readback_calls=97 readback_ms=0.228 readback_bytes=390152 nocopy_uploads=0 copying_uploads=100 nocopy_reuses=291 resident_uploads=0 resident_reuses=0 mapping_offset_uploads=291 nocopy_cache_len=1 phys_footprint_bytes=62613184 device_allocated_bytes=4162600960 plan_cache_len=1 plan_hits=0 plan_misses=8
+metal_decode_summary tokens_generated=8 stopped_by_eos=false total_wall_clock_ms=2795.074 plan_hits=0 plan_misses=8 generated_text="Here is a simple Python function that returns"
+test bind::real_openchat_file::runs_the_cached_decode_loop_on_the_metal_backend_and_reports_the_plan_cache ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 79 filtered out; finished in 3.03s
+
