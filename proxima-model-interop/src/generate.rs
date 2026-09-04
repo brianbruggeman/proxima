@@ -683,6 +683,41 @@ fn build_single_range_program(
     }))
 }
 
+/// The KV extent [`run_decode_loop_placed_kv`] binds as this step's
+/// `Extent::Symbolic(1)` (the KV `Op::Input` leaves' shape, and half the
+/// Metal plan-cache key alongside `new_count`) -- `merged_len` unchanged
+/// with `kv-capacity-bucket` off, so the plan-cache key is untouched from
+/// its pre-feature shape; with it on, `merged_len` rounded up to
+/// [`proxima_tensor::sized::KV_BUCKET_TOKENS`] and capped at `capacity`
+/// (this call's own per-layer buffer row count, never exceeded regardless
+/// of rounding). `causal_mask_merged`'s existing `key_index >
+/// query_absolute` comparison already masks every row in
+/// `[merged_len, extent)` as "future" for every query this call issues
+/// (`spec.rs`'s `cpu_mask_zero_ulp` test is the 0-ULP proof), so no other
+/// call site needs to know which arm is compiled in.
+#[cfg(all(
+    feature = "metal-output-placement",
+    feature = "kv-capacity-bucket",
+    target_os = "macos"
+))]
+fn kv_extent(merged_len: usize, capacity: usize) -> usize {
+    merged_len
+        .div_ceil(proxima_tensor::sized::KV_BUCKET_TOKENS)
+        .saturating_mul(proxima_tensor::sized::KV_BUCKET_TOKENS)
+        .min(capacity)
+}
+
+/// [`kv_extent`]'s feature-off twin -- the plan-cache key stays
+/// `merged_len` exactly, unchanged from the pre-`kv-capacity-bucket` shape.
+#[cfg(all(
+    feature = "metal-output-placement",
+    not(feature = "kv-capacity-bucket"),
+    target_os = "macos"
+))]
+fn kv_extent(merged_len: usize, _capacity: usize) -> usize {
+    merged_len
+}
+
 /// [`SsmLayerCache`]'s own fixed sizes, all derived from
 /// [`crate::qwen35::Qwen35Architecture`]'s ssm hyperparameters at load time
 /// -- `qwen35.cpp:57-60`'s same derivation
@@ -1395,6 +1430,22 @@ impl BackendRuntime {
     #[cfg(feature = "instrument")]
     pub(crate) fn plans_len(&self) -> usize {
         self.plans.len()
+    }
+
+    /// [`Self::plans_len`]'s placed-KV counterpart -- [`Self::plans`] and
+    /// [`Self::placed_plans`] are two SEPARATE maps
+    /// ([`Self::evaluate_with_placements`] never touches [`Self::plans`] at
+    /// all), so a caller on [`LoadedModel::run_decode_loop_placed_kv`]'s
+    /// own arm reading [`Self::plans_len`] was always reading a map that
+    /// stayed empty for the whole call, regardless of how many placed
+    /// plans were actually cached.
+    #[cfg(all(
+        feature = "instrument",
+        feature = "metal-output-placement",
+        target_os = "macos"
+    ))]
+    pub(crate) fn placed_plans_len(&self) -> usize {
+        self.placed_plans.len()
     }
 
     /// Diagnostic counterpart of [`Self::evaluate`]: same plan-cache lookup,
@@ -2230,6 +2281,20 @@ impl<'file> LoadedModel<'file> {
             k_odd_buffers.push(allocate_placed_buffer(capacity_even_odd)?);
             v_buffers.push(allocate_placed_buffer(capacity_v)?);
         }
+        // `kv-capacity-bucket` reads `bucket` rows per step, `bucket >
+        // merged_len` -- the tail `[merged_len, bucket)` was never written
+        // by this call yet. A freshly allocated `MTLBuffer`'s contents are
+        // undefined (`omega::metal::zero_placed_buffer`'s own doc), so
+        // that tail is zeroed ONCE here, at allocation, rather than paying
+        // a per-step re-zero: any row a later step reads was either
+        // zeroed here or overwritten by a real rotated key/value this
+        // same call already wrote, since `cached_len` only grows.
+        #[cfg(feature = "kv-capacity-bucket")]
+        for layer in 0..block_count {
+            omega::metal::zero_placed_buffer(&k_even_buffers[layer], capacity_even_odd);
+            omega::metal::zero_placed_buffer(&k_odd_buffers[layer], capacity_even_odd);
+            omega::metal::zero_placed_buffer(&v_buffers[layer], capacity_v);
+        }
 
         let kv_cache_names: Vec<(String, String, String)> = (0..block_count)
             .map(|layer| {
@@ -2332,8 +2397,19 @@ impl<'file> LoadedModel<'file> {
                 // uploads them.
                 #[cfg(feature = "instrument")]
                 let named_blocks_kv_started = read_ticks();
-                let even_odd_len = merged_len * kv_heads * pairs;
-                let v_len = merged_len * kv_heads * head_dim;
+                // `kv-capacity-bucket` off: `kv_bound_extent == merged_len`,
+                // unchanged from this arm's pre-feature shape. On: rounded
+                // up to `sized::KV_BUCKET_TOKENS` and capped at
+                // `positions_needed` (this call's own per-layer buffer row
+                // count) -- see `kv_extent`'s own doc. This is BOTH the
+                // scratch named-block length below (the strict
+                // `found == expected` validator checks it against the
+                // SAME extent the KV `Op::Input` leaves bind to) and
+                // `symbols[1]` a few lines down, so the two can never
+                // disagree.
+                let kv_bound_extent = kv_extent(merged_len, positions_needed);
+                let even_odd_len = kv_bound_extent * kv_heads * pairs;
+                let v_len = kv_bound_extent * kv_heads * head_dim;
                 if cache_length_scratch_even_odd.len() < even_odd_len {
                     cache_length_scratch_even_odd.resize(even_odd_len, 0.0);
                 }
@@ -2381,7 +2457,7 @@ impl<'file> LoadedModel<'file> {
                     output_placements.push((value_output, &v_buffers[layer], cached_len * row_bytes_v));
                 }
 
-                let symbols = [new_count as u64, merged_len as u64];
+                let symbols = [new_count as u64, kv_bound_extent as u64];
                 // Every placed-output node must also be a `roots` entry, or
                 // `prepare`'s `BoundOpBuilder::finish` (`proxima-tensor`'s
                 // `bind.rs`) never force-materializes it and its write lands
@@ -2527,7 +2603,7 @@ impl<'file> LoadedModel<'file> {
                     print_token_breakdown_metal(
                         _step,
                         &metal_stage,
-                        runtime.plans_len(),
+                        runtime.placed_plans_len(),
                         runtime.plan_hits,
                         runtime.plan_misses,
                     );

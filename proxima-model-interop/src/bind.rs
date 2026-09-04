@@ -3049,13 +3049,51 @@ mod real_openchat_file {
         );
 
         let forward_calls_taken = generated.0.len() + usize::from(generated.2);
+        // `#[cfg]`-paired with `kv-capacity-bucket` below: that feature's
+        // whole point is making `(new_count, symbols[1])` stop changing
+        // every step (`generate.rs`'s `kv_extent` rounds `symbols[1]` up
+        // to a shared bucket instead of binding the strictly-increasing
+        // `merged_len` directly), so a build with it on that still saw
+        // `plan_hits == 0` would mean the feature had no effect on THIS
+        // arm -- inverting only this assertion and leaving the one below
+        // red would make that exact failure mode pass.
+        #[cfg(not(feature = "kv-capacity-bucket"))]
         assert_eq!(
             runtime.plan_hits, 0,
             "cached_len grows every decode step, so no (new_count, cached_len) shape can repeat within one call"
         );
+        #[cfg(not(feature = "kv-capacity-bucket"))]
         assert_eq!(
             runtime.plan_misses, forward_calls_taken,
             "every forward step builds exactly one new plan when none can ever be reused"
+        );
+        // `plan_hits + plan_misses == forward_calls_taken` is the runtime's
+        // own accounting invariant (`BackendRuntime::evaluate_with_placements`
+        // increments exactly one of the two per step) and holds
+        // REGARDLESS of bucketing -- restated here as a sanity gate, not
+        // the behavioral claim. `plan_hits > 0` is the actual claim this
+        // feature must earn: `generate.rs:966`'s cache holds exactly one
+        // entry, cleared on every miss, so a hit needs the IMMEDIATELY
+        // PRECEDING step's key to match -- which only happens when two
+        // consecutive steps round to the same bucket. `plan_misses <
+        // forward_calls_taken` is the same claim from the other counter:
+        // if every step still misses, bucketing bought nothing on this
+        // arm and the row must say so without softening.
+        #[cfg(feature = "kv-capacity-bucket")]
+        assert_eq!(
+            runtime.plan_hits + runtime.plan_misses,
+            forward_calls_taken,
+            "every forward step is exactly one plan-cache hit or miss"
+        );
+        #[cfg(feature = "kv-capacity-bucket")]
+        assert!(
+            runtime.plan_hits > 0,
+            "a bucketed extent that never hits is the null result, not a pass"
+        );
+        #[cfg(feature = "kv-capacity-bucket")]
+        assert!(
+            runtime.plan_misses < forward_calls_taken,
+            "kv-capacity-bucket must reduce plan_misses below one-per-step, or bucketing bought nothing"
         );
         assert!(
             !generated.1.is_empty(),
