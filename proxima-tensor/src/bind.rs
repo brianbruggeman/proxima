@@ -1981,6 +1981,39 @@ fn is_exact_causal_mask(program: &[Op], node: NodeId) -> bool {
     )
 }
 
+/// [`is_exact_causal_mask`]'s counterpart for
+/// [`crate::spec::causal_mask_merged`]'s shape: the key side is still a bare
+/// `Iota`, but the query side is `query_index + cached_len` (an
+/// [`ScalarOp::Add`]) rather than a bare `Iota`, because a single-range
+/// query at local position `s` sits at absolute position `cached_len + s`
+/// once its own new keys are folded into the one merged range. `cached_len`
+/// itself is a per-call [`crate::op::Op::Input`] (`causal_mask_merged`'s own
+/// doc), never structurally checked here — only that the query side is a
+/// shift of an `Iota`, which is what makes the mask exact causal rather than
+/// an arbitrary comparison.
+#[cfg(feature = "cached-attention-streaming")]
+fn is_exact_merged_causal_mask(program: &[Op], node: NodeId) -> bool {
+    let Some(operands) = elementwise_operands(program, node, ScalarOp::Greater) else {
+        return false;
+    };
+    let [(key, key_map), (query_absolute, query_map)] = operands else {
+        return false;
+    };
+    if *key_map != IndexMap::Affine(map::projection(2, &[1]))
+        || *query_map != IndexMap::Affine(map::projection(2, &[0]))
+        || !matches!(program.get(key.0 as usize), Some(Op::Iota { .. }))
+    {
+        return false;
+    }
+    let Some(shift_operands) = elementwise_operands(program, *query_absolute, ScalarOp::Add) else {
+        return false;
+    };
+    let [(query_index, _), (_, _)] = shift_operands else {
+        return false;
+    };
+    matches!(program.get(query_index.0 as usize), Some(Op::Iota { .. }))
+}
+
 #[cfg(feature = "cached-attention-streaming")]
 fn cached_attention_candidates(
     program: &[Op],
@@ -2219,6 +2252,236 @@ fn cached_attention_candidates(
     candidates
 }
 
+/// [`cached_attention_candidates`]'s counterpart for
+/// [`crate::spec::append_mistral_single_range_cached_layer`]'s output shape:
+/// one merged key/value range instead of a cached/new pair, so there is no
+/// online-softmax combine to unwind — `attended` is a plain single-pass
+/// softmax over one masked score matrix
+/// (`score_even+score_odd` -> mask -> max -> sub+exp -> sum -> reciprocal ->
+/// multiply -> weight the one value range), the same eight-step chain
+/// [`crate::spec::append_mistral_layer`] emits for a from-scratch (no cache)
+/// forward pass. The fused [`BoundOpKind::CachedAttention`] still declares
+/// two key/value ranges (its only shape today, per this module's own
+/// `no new BoundOpKind` constraint): the single merged range is placed in
+/// the "new" slot, which already carries the causal band restricting it to
+/// non-future positions, and duplicated into the "cached" slot with a band
+/// pinned to the unreachable `[i64::MAX, i64::MAX]` singleton so that slot's
+/// pass over the same rows contributes nothing — [`crate::physical::
+/// stream_cached_attention_split_gqa`]'s existing per-range loop already
+/// skips every row a dead band rejects, so this needs no new runtime
+/// branch, only the right scalar arguments.
+#[cfg(feature = "cached-attention-streaming")]
+fn cached_attention_single_range_candidates(
+    program: &[Op],
+    shapes: &Shapes,
+    resolved: &[BoundOp],
+    effective_outputs: &[NodeId],
+) -> Vec<(BoundOp, BTreeSet<NodeId>)> {
+    let mut candidates = Vec::new();
+    for output_position in (0..program.len()).rev() {
+        let output = NodeId(output_position as u32);
+        let Some(attended_product) = reduced_source(program, output, ScalarOp::Add, ReduceInit::Zero)
+        else {
+            continue;
+        };
+        let Some(attended_parts) = binary_elementwise(program, attended_product, ScalarOp::Multiply)
+        else {
+            continue;
+        };
+        let Some(probabilities_parts) =
+            binary_elementwise(program, attended_parts[0], ScalarOp::Multiply)
+        else {
+            continue;
+        };
+        let Some(weight_sum) =
+            unary_elementwise(program, probabilities_parts[1], ScalarOp::Reciprocal)
+        else {
+            continue;
+        };
+        let Some(weights) = reduced_source(program, weight_sum, ScalarOp::Add, ReduceInit::Zero)
+        else {
+            continue;
+        };
+        if weights != probabilities_parts[0] {
+            continue;
+        }
+        let Some(shifted) = unary_elementwise(program, weights, ScalarOp::Exponential) else {
+            continue;
+        };
+        let Some(shifted_parts) = binary_elementwise(program, shifted, ScalarOp::Subtract) else {
+            continue;
+        };
+        let Some(scores_masked_from_max) = reduced_source(
+            program,
+            shifted_parts[1],
+            ScalarOp::Maximum,
+            ReduceInit::NegativeInfinity,
+        ) else {
+            continue;
+        };
+        if scores_masked_from_max != shifted_parts[0] {
+            continue;
+        }
+        let scores_masked = shifted_parts[0];
+        let Some(mask_parts) = elementwise_operands(program, scores_masked, ScalarOp::Select) else {
+            continue;
+        };
+        let [(mask, _), (negative_infinity, _), (scores_scaled, _)] = mask_parts else {
+            continue;
+        };
+        if !is_exact_merged_causal_mask(program, *mask)
+            || constant_value(program, *negative_infinity) != Some(f32::NEG_INFINITY)
+        {
+            continue;
+        }
+        let Some(scaled_operands) = binary_elementwise(program, *scores_scaled, ScalarOp::Multiply)
+        else {
+            continue;
+        };
+        let scale = scaled_operands[1];
+        let Some((query_even_grouped, query_odd_grouped, key_even, key_odd)) =
+            attention_score_sources(program, *scores_scaled, scale)
+        else {
+            continue;
+        };
+        let Some(query_even_parts) =
+            binary_elementwise(program, query_even_grouped, ScalarOp::Multiply)
+        else {
+            continue;
+        };
+        let Some(query_odd_parts) = binary_elementwise(program, query_odd_grouped, ScalarOp::Multiply)
+        else {
+            continue;
+        };
+        if query_even_parts[1] != query_odd_parts[1] {
+            continue;
+        }
+        let query_even = query_even_parts[0];
+        let query_odd = query_odd_parts[0];
+        let value = attended_parts[1];
+        let source_nodes = [
+            query_even,
+            query_odd,
+            key_even,
+            key_odd,
+            key_even,
+            key_odd,
+            value,
+            value,
+        ];
+        let mut operands = Vec::with_capacity(source_nodes.len());
+        for source in source_nodes {
+            let Some((_, layout, lookup)) = resolved
+                .iter()
+                .flat_map(|bound| bound.operands().iter())
+                .find(|(node, _, _)| *node == source)
+            else {
+                operands.clear();
+                break;
+            };
+            if lookup.is_some() || layout.strides.iter().any(|stride| *stride < 0) {
+                continue;
+            }
+            operands.push((source, layout.clone(), None));
+        }
+        if operands.len() != source_nodes.len() {
+            continue;
+        }
+        let Some(scale_value) = constant_value(program, scale) else {
+            continue;
+        };
+        let query_shape = shapes.of(query_even_grouped);
+        let key_shape = shapes.of(key_even);
+        let value_shape = shapes.of(value);
+        let Some(head_dim) = query_shape[3].checked_mul(2) else {
+            continue;
+        };
+        if query_shape.len() != 4
+            || key_shape.len() != 3
+            || value_shape.len() != 3
+            || query_shape[1] != key_shape[1]
+            || key_shape[1] != value_shape[1]
+            || key_shape[0] != value_shape[0]
+            || value_shape[2] != head_dim
+            || shapes.of(output) != [query_shape[0], query_shape[1], query_shape[2], head_dim]
+            || key_shape[0] < query_shape[0]
+        {
+            continue;
+        }
+        // `key_shape[0]` (`t`, the whole merged range) minus `query_shape[0]`
+        // (`s`, this call's own new positions) is exactly `cached_len` --
+        // derivable from bound EXTENTS alone because `causal_mask_merged`
+        // builds the "t" domain as `cached_len + new_count` positions
+        // (`crate::spec::causal_mask_merged`'s own doc), never from the
+        // `cached_len` VALUE the graph also carries as a separate per-call
+        // `Op::Input` for the mask arithmetic itself. Reading the value
+        // would require the fused op to depend on a runtime scalar this
+        // `BoundOpKind` has no field for; reading the shape difference
+        // needs nothing new.
+        let cached_len = key_shape[0] - query_shape[0];
+        let pair_dim = query_shape[3];
+        let query_strides = [
+            (query_shape[1] * query_shape[2] * pair_dim) as i64,
+            (query_shape[2] * pair_dim) as i64,
+            pair_dim as i64,
+            1i64,
+        ];
+        let key_strides = [0i64, (query_shape[1] * pair_dim) as i64, pair_dim as i64, 0, 1];
+        let value_strides = [
+            0i64,
+            (query_shape[1] * query_shape[3] * 2) as i64,
+            (query_shape[3] * 2) as i64,
+            0,
+            1,
+        ];
+        if operands[0].1.strides.as_slice() != query_strides
+            || operands[1].1.strides.as_slice() != query_strides
+            || operands[2].1.strides.as_slice() != key_strides
+            || operands[3].1.strides.as_slice() != key_strides
+            || operands[4].1.strides.as_slice() != key_strides
+            || operands[5].1.strides.as_slice() != key_strides
+            || operands[6].1.strides.as_slice() != value_strides
+            || operands[7].1.strides.as_slice() != value_strides
+        {
+            continue;
+        }
+        let dependencies = attention_dependencies(program, output, &source_nodes);
+        let dependencies = dependencies
+            .difference(&source_nodes.into_iter().collect())
+            .copied()
+            .collect::<BTreeSet<_>>();
+        if dependencies.iter().any(|node| effective_outputs.contains(node)) {
+            continue;
+        }
+        let absorbed = removable_attention_dependencies(program, &dependencies, output);
+        if absorbed.is_empty() {
+            continue;
+        }
+        if !resolved.iter().any(|bound| bound.node == output) {
+            continue;
+        }
+        let fused = BoundOp {
+            node: output,
+            dtype: DType::Float32,
+            extents: shapes.of(output).to_vec(),
+            kind: BoundOpKind::CachedAttention {
+                operands,
+                query_rows: query_shape[0],
+                cached_key_rows: key_shape[0],
+                new_key_rows: key_shape[0],
+                kv_heads: query_shape[1],
+                query_groups: query_shape[2],
+                head_dim,
+                scale: scale_value,
+                cached_lower_inclusive: i64::MAX,
+                new_upper_inclusive: cached_len as i64,
+            },
+        };
+        candidates.push((fused, absorbed));
+    }
+    candidates
+}
+
 #[cfg(feature = "cached-attention-streaming")]
 fn attention_dependencies(
     program: &[Op],
@@ -2353,7 +2616,9 @@ pub fn bind_with_fusion(
     if !fuse_cached_attention {
         return Ok(built);
     }
-    let initial_candidates = cached_attention_candidates(program, shapes, &built, outputs);
+    let mut initial_candidates = cached_attention_candidates(program, shapes, &built, outputs);
+    initial_candidates
+        .extend(cached_attention_single_range_candidates(program, shapes, &built, outputs));
     if initial_candidates.is_empty() {
         return Ok(built);
     }
@@ -2377,7 +2642,10 @@ pub fn bind_with_fusion(
         }
     }
     let rebuilt = bind_plain(program, shapes, &planning_outputs)?;
-    let candidates = cached_attention_candidates(program, shapes, &rebuilt, outputs);
+    let mut candidates = cached_attention_candidates(program, shapes, &rebuilt, outputs);
+    candidates.extend(cached_attention_single_range_candidates(
+        program, shapes, &rebuilt, outputs,
+    ));
     if candidates.is_empty() {
         return Ok(built);
     }
@@ -2556,6 +2824,59 @@ mod tests {
         assert!(rewritten
             .iter()
             .any(|bound| matches!(bound.kind, BoundOpKind::CachedAttention { .. })));
+    }
+
+    /// The real openchat-3.5/Mistral-7B shape (`vocab=32_002`,
+    /// `hidden=4096`, `ffn=14336`, `32` query heads, `8` KV heads,
+    /// `head_dim=128`, `32` layers) bound at one new token against a
+    /// 71-position merged range — the same fixture
+    /// `spec::tests::the_single_range_cache_fold_node_budget_is_measured_
+    /// against_the_two_range_baseline` measures raw numbers for, asserted
+    /// here as a hard regression gate rather than a printed `println!`.
+    /// MEASURED, not derived from a dispatch-count census: `plain.len()`
+    /// (`939`) is this exact fixture's own baseline bound-op count with the
+    /// fusion matcher returning zero candidates (`cached_attention_single_
+    /// range_candidates` never firing is exactly the pre-existing defect
+    /// this row fixes); `rewritten.len()` (`619`) is what fusing one
+    /// `BoundOpKind::CachedAttention` per layer actually removes -- 320
+    /// bound ops over 32 layers (10/layer), not the 6/layer a raw-`Op`
+    /// count would suggest, because `BoundOpBuilder` already fuses several
+    /// of the unfused chain's `Elementwise` nodes into their consuming
+    /// `Reduce` before this matcher ever runs.
+    #[test]
+    #[cfg(feature = "cached-attention-streaming")]
+    fn single_range_cached_attention_fuses_one_step_per_layer_on_the_real_openchat_shape() {
+        let (program, logits, cache_roots) = crate::spec::mistral_single_range_cached_forward_program(
+            32_002, 4096, 14336, 32, 8, 128, 32,
+        )
+        .expect("openchat-shaped single-range forward pass lowers to a program");
+        let mut outputs = alloc::vec![logits];
+        for (even, odd, value) in &cache_roots {
+            outputs.extend_from_slice(&[*even, *odd, *value]);
+        }
+        let shapes = crate::shape::infer(&program, &[1, 71])
+            .expect("one new position against a 71-position merged range infers");
+        let plain = bind_plain(&program, &shapes, &outputs).expect("plain bind succeeds");
+        let rewritten = bind(&program, &shapes, &outputs).expect("fused bind succeeds");
+
+        assert_eq!(
+            plain.len(),
+            939,
+            "openchat-shaped single-range baseline bound operation count"
+        );
+        assert_eq!(
+            rewritten.len(),
+            619,
+            "openchat-shaped single-range fused bound operation count"
+        );
+        assert_eq!(
+            rewritten
+                .iter()
+                .filter(|bound| matches!(bound.kind, BoundOpKind::CachedAttention { .. }))
+                .count(),
+            32,
+            "one fused cached-attention step per layer on the real openchat shape"
+        );
     }
     use crate::dtype::DType;
     use crate::map;
