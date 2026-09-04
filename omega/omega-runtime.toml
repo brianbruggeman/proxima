@@ -134,3 +134,18 @@ target_simdgroups = 2048
 # `require_split_k_headroom` enforces `max_split * 32 <= 1024` at build
 # time) — see sized::PACKED_ROW_SPLIT_K_MAX_SPLIT.
 max_split = 8
+
+[spans]
+# capacity of `metal::UNIFORM_BUFFERS`, the content-keyed cache of uploaded
+# uniform-blob `MTLBuffer`s (see `metal.rs`'s `upload_uniforms` and
+# sized::UNIFORM_CACHE_ENTRIES). The cache has no eviction below this
+# landing, so any workload whose uniform bytes vary per call (different
+# shapes, different `cached_len` without bucketing) grows it without bound —
+# a plan-stable decode holds 57 entries after 3 steps (measured,
+# `uniform_cache_len`), well under this default. Cost of raising it: one
+# `MTLBuffer` per additional distinct uniform blob retained. Cost of
+# lowering it below a plan's real distinct-blob count: LRU evicts entries
+# still in rotation, turning cache hits into misses (a correctness-neutral,
+# perf-only regression -- `upload_uniforms` re-uploads on a miss).
+# Overridable per-build via `OMEGA_SPANS_UNIFORM_CACHE_ENTRIES`.
+uniform_cache_entries = 4096

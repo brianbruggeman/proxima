@@ -199,6 +199,14 @@ fn emit_sizing_consts() {
         "pub const COOPERATIVE_REDUCE_MIN_LEN: u64 = {cooperative_reduce_min_len};\n"
     ));
 
+    let uniform_cache_entries = require_nonzero(
+        "spans.uniform_cache_entries",
+        resolve_int(&root, "spans", "uniform_cache_entries"),
+    );
+    out.push_str(&format!(
+        "pub const UNIFORM_CACHE_ENTRIES: u64 = {uniform_cache_entries};\n"
+    ));
+
     if env::var_os("CARGO_FEATURE_METAL_TILED_GEMM").is_some() {
         let min_tokens = require_nonzero(
             "tiled_gemm.min_tokens",
