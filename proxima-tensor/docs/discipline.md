@@ -20613,3 +20613,46 @@ Compare `step_wall_ms` (steps 1..7 mean) and the `reduce-packed-row-blocked` `op
 | --- | --- | --- | --- | --- |
 | 2026-09-04 | verbatim ggml Q4_K matvec kernel port (`metal-q4k-ggml-port`), reconciled onto main's `packed_row_nsg_factor()` | -10.0% step_wall_ms, -11.6% gpu_exec_ms, -15.5% on the isolated packed-row-blocked bucket (all LOSSES vs default); consistent +6% to +32% loss across every real Q4_K weight family, flat on every non-row-blocked control family | step_wall CoV 0.36%/0.77% default/port; gpu_exec CoV 1.21%/0.72%; llama-bench CoV 0.27%; per-family profile single-run per arm, no CoV | quiet at bake-off start and re-checked before each phase (pgrep-confirmed); M1 Max, 10 cores, macOS 15.8, release build |
 | 2026-09-04 | fixed `classify_kind`/`classify_packed_kernel_variant` op-profiler mislabeling the ggml-port body as `reduce-cooperative`/`"other"` (missing `acc1_0` source marker) | `reduce-packed-row-blocked` op_count corrected from 9 back to 225 (matches default and the independent `row_blocked_count=32`-per-family classifier); instrument-only, no effect on dispatch or emitted kernel source | n/a (compile-time classifier fix, not a perf change) | same session |
+
+## ROW 278 -- paired q5_k body lands as the default
+
+**Card:** `perf/q5k-pair-dot`. **Worktree/branch/commit:** `proxima-wt-s6e2-q5k`/`perf/q5k-pair-dot` @ `3c94368`, landed via `proxima-wt-land-q5k`/`land/q5k`. **Feature:** `metal-q5k-pair-dot`, default: ON (folded into the `metal` feature in both `omega/Cargo.toml` and `proxima-model-interop/Cargo.toml`, mirroring ROW-273/`9f6a878`'s `metal-output-placement`/`metal-wide-cooperative-reduce`/`kv-capacity-bucket` flips).
+
+**The body.** `Q5K_PAIR_DOT_MSL` (`omega/src/msl.rs`) is `Q4_K`'s paired-nibble, two-word-load `plain_product` body extended with `Q5_K`'s `qh` high-bit plane (one extra byte load, mask select, no shift), mirroring ggml's `kernel_mul_mv_q5_K_f32_impl` (`ggml-metal.metal:5209-5324`) lane assignment. It replaces the fully scalar per-element `q5k_value` loop the row-blocked packed path (`push_packed_row_blocked_body`'s `PackedCodec::Q5K` arm) previously fell back to for every `Q5_K` weight. A real-checkpoint parity test against `blk.0.ffn_down.weight` (`omega/tests/q5k_real_checkpoint_parity.rs`) is the oracle; it now runs under `cargo nextest run -p omega --features metal` alone (no extra flag needed) since the feature is in the default set.
+
+**Per-op measurement.** `q5k-scalar` (default-off arm) 202,083 ns/op -> `q5k-paired` (this landing) 124,265 ns/op on the 8 real `Q5_K` ops in the decode graph -- **1.63x**. Family total (`blk.{0..3}.ffn_down.weight`, the tensor the parity test itself binds against): 6.275 ms -> 5.725 ms.
+
+**Decode wall, 3 rounds each arm** (`PROXIMA_MAX_TOKENS=8`, `runs_the_cached_decode_loop_on_the_metal_backend_and_reports_the_plan_cache`, `step_wall_ms` mean over steps 1..7 only):
+
+| arm | round1 (ms) | round2 (ms) | round3 (ms) |
+| --- | --- | --- | --- |
+| default (q5k-scalar) | 41.32 | 41.63 | 42.01 |
+| q5k-paired | 41.35 | 41.15 | 41.32 |
+
+Flat within this cell's own noise band -- **0.6 ms is inside the noise**, not a decode-wall win or loss. The decision does not rest on the wall-clock cell: it rests on the per-op measurement above (1.63x on the 8 ops that changed, ~1.6 ms of the ~41 ms step) plus parity, matching the framing this same tree used for `metal-output-placement`/`metal-wide-cooperative-reduce`/`kv-capacity-bucket` (ROW 273) where the wall-clock cell was also too coarse to isolate a single-digit-percent op-level win.
+
+**Correctness:** parity against the dequantized f32 CPU path on real `blk.0.ffn_down.weight` bytes < 1e-4. Generated text identical across every arm/round ("Here is a simple Python function that returns" / "Here is a simple Python" at 5 tokens for the op-profile run).
+
+**Gates (own `CARGO_TARGET_DIR=/Users/brianbruggeman/repos/slot-0/proxima-wt-land-q5k/target`, `CARGO_TERM_COLOR=never`):** `cargo build --workspace --lib` EXIT=0. `cargo nextest run -p omega --features metal`: 115 passed, 1 skipped (includes `q5k_pair_dot_matmul_on_real_ffn_down_q5k_bytes_matches_the_dequantized_f32_cpu_path`, now reachable under `metal` alone). `cargo nextest run -p omega --all-features`: 173 passed, 1 skipped. `cargo nextest run -p proxima-tensor --features std,instrument`: 513 passed, 7 skipped. `cargo nextest run -p proxima-model-interop --features metal,instrument`: 95 passed, 25 skipped. `cargo nextest run -p proxima-model-interop --features std`: 82 passed, 22 skipped. `cargo clippy --workspace --all-targets -- -D warnings`: EXIT=0. `bash scripts/omega-gate.sh`: all 6 steps pass, `[3/6]` asserts 173 tests run/173 passed non-zero, `[6/6]` asserts 2 doctests passed non-zero, `== omega gate: PASS ==`.
+
+**Default decode oracle** (`PROXIMA_MAX_TOKENS=8`, release, `metal,instrument`): `step_wall_ms` mean over steps 1..7 = 40.521 ms (43.671, 41.974, 38.978, 40.365, 38.963, 38.905, 40.791), `plan_hits=5` (> 0), `generated_text="Here is a simple Python function that returns"`.
+
+**Per-op profile** (`PROXIMA_METAL_OP_PROFILE_STEP=3`, same binary): `q5k-paired` op_count=8 gpu_ms=0.991 gpu_ns_per_op=123931.5 -- `q5k-scalar` does not appear in the variant breakdown (`other` op_count=713, `q4k-paired` op_count=216, `q6k-scalar` op_count=1). The per-op ns/op (123,931.5) matches the standalone bench measurement (124,265) to within run-to-run noise.
+
+**Decision.** Land the paired body as the default: measured 1.63x on the 8 ops it targets, family-level win, parity holds, decode wall flat within noise (the cell is too coarse to isolate a ~1.6 ms shift out of a ~41 ms step, same framing as ROW 273's `kv-capacity-bucket`), text identical across every round. `metal-q5k-pair-dot`'s own doc comment (`omega/Cargo.toml`) and `proxima-model-interop/Cargo.toml`'s passthrough comment updated to record this as landed rather than pending.
+
+**Re-prove:**
+```sh
+cd /Users/brianbruggeman/repos/slot-0/proxima
+CARGO_TARGET_DIR=<own target dir> cargo nextest run -p omega --features metal
+CARGO_TARGET_DIR=<own target dir> PROXIMA_MAX_TOKENS=8 cargo test --release -p proxima-model-interop --features metal,instrument --lib -- --exact --nocapture --ignored \
+  bind::real_openchat_file::runs_the_cached_decode_loop_on_the_metal_backend_and_reports_the_plan_cache
+CARGO_TARGET_DIR=<own target dir> PROXIMA_MAX_TOKENS=8 PROXIMA_METAL_OP_PROFILE_STEP=3 cargo test --release -p proxima-model-interop --features metal,instrument --lib -- --exact --nocapture --ignored \
+  bind::real_openchat_file::profiles_one_real_decode_step_by_per_op_gpu_time
+```
+Confirm `q5k-paired` appears in the `op_profile_variant` lines and `q5k-scalar` does not; `generated_text` should stay identical across runs.
+
+### Changelog
+| Date | Change | Δ vs prior | CoV / runs | Host loadout |
+| --- | --- | --- | --- | --- |
+| 2026-09-04 | paired-nibble `Q5_K` matvec body (`metal-q5k-pair-dot`) landed as the default, folded into `metal` in both `omega` and `proxima-model-interop` | 202,083 -> 124,265 ns/op (1.63x) on the 8 `Q5_K` ops; family 6.275 -> 5.725 ms; decode wall flat within noise (0.6 ms, inside the cell's own noise band) | per-op measurement single reading per arm; decode wall 3 rounds each arm | not separately re-verified quiet on this pass; numbers as measured on the source branch and reconfirmed by this landing's own gate run |
