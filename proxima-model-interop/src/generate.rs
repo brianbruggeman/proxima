@@ -64,9 +64,9 @@ use proxima_primitives::pipe::Pipe;
 use proxima_tensor::cpu::evaluate_quantized_named_with_scratch;
 use proxima_tensor::cpu::{Evaluated, QuantizedBlock};
 use proxima_tensor::op::{NodeId, Op};
-use proxima_tensor::spec::{
-    CachedLayerRoots, Qwen35LayerRoots, mistral_cached_forward_program_with_experts,
-};
+#[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
+use proxima_tensor::spec::CachedLayerRoots;
+use proxima_tensor::spec::{Qwen35LayerRoots, mistral_cached_forward_program_with_experts};
 use proxima_tokenizer::{SamplingConfig, Vocab, sample_next_token};
 
 #[cfg(all(feature = "instrument", feature = "metal", target_os = "macos"))]
