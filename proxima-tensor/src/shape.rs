@@ -35,10 +35,9 @@ use crate::map::{AxisIndex, IndexMap, IndexPattern};
 use crate::op::{Keep, NodeId, Op, Reduce, ReduceInit, ScalarOp};
 
 /// The largest integer an f32 can represent exactly — its 24-bit mantissa's
-/// width. Gather indices ride in f32 buffers (see
-/// [`IndexMap::Computed`](crate::map::IndexMap::Computed) and `cpu.rs`'s
-/// module docs), so a gathered axis wider than this could silently address
-/// the wrong row once an index value loses precision.
+/// width. Gather indices ride in f32 buffers (see `IndexMap::Computed` and
+/// `cpu.rs`'s module docs), so a gathered axis wider than this could
+/// silently address the wrong row once an index value loses precision.
 pub use crate::sized::GATHER_EXTENT_EXACT_FLOAT_LIMIT;
 
 /// Every node's resolved output extents, in `u64` regardless of how the
