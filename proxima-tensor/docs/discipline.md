@@ -20494,3 +20494,47 @@ Round 1 is a cold-process outlier for both arms (each round re-execs the binary)
 | Date | Change | Δ vs prior | CoV / runs | Host loadout |
 | --- | --- | --- | --- | --- |
 | 2026-09-04 | make `metal-packed-row-nsg2`'s dispatch arm reachable (was dead code) | FLAT on every measured axis vs default (per-family gpu_ms -3.2% to +1.6%, aggregate packed-row-blocked bucket +0.3%, device bytes unchanged, text identical); end-to-end wall clock +23% (rounds 2-3, likely orchestration noise, not isolated to the geometry change) | wall-clock CoV (n=3) 23.6%/7.7% default/nsg2; llama-bench CoV 0.13%; per-family profile single-run per arm, no CoV | quiet at bake-off start (pgrep-confirmed); M1 Max, 10 cores, macOS 15.8, release build |
+
+## ROW 276 -- `cooperative_reduce.min_len` short-reduce serial route, measured net loss
+
+**Card:** `perf/short-reduce-serial-route`. **Worktree/branch/commit:** `proxima-wt-land-shortred`/`land/shortred` (landed to `main`). **Feature:** build-time `[cooperative_reduce].min_len` sizing key (`omega-runtime.toml`, `OMEGA_COOPERATIVE_REDUCE_MIN_LEN` override), default `0`.
+
+**Hypothesis.** `msl::render_reduce` always emits the `SIMD_WIDTH`(32)-lane cooperative fold for a `Keep::Reduce` op that clears the op/gather gate (`reduce_is_cooperative`), regardless of how many elements each output actually folds over. Attention's short reduces -- `attended` (34-long), `score_even`/`score_odd` (64-long) -- launch 32 lanes per output to do 34 or 64 elements of real work, most lanes mostly idle. Routing those below a length threshold to the one-thread-per-output serial fold (`push_serial_reduce_body`) instead should cut the wasted-lane overhead and win.
+
+**Arms.** `min_len` in `{0, 64, 128, 256}` (0 = today's routing, every qualifying reduce stays cooperative), 3 interleaved rounds each, quiet box (`pgrep -fl 'cargo|rustc|nextest'` confirmed empty of non-self processes before the run), M1 Max. llama.cpp incumbent: `llama-bench -m openchat-3.5-1210.Q4_K_S.gguf -n 32 -p 0 -r 5 -t 8 -ngl 99` = 57.01 t/s (17.54 ms/token).
+
+**Real decode step** (openchat-3.5-1210 Q4_K_S, 3 rounds x 7 decode steps each):
+
+| arm | mean ms/token | CoV | gpu_exec_ms (mean) |
+| --- | --- | --- | --- |
+| min_len=0 (cooperative-only) | 41.920 | 5.53% | 34.791 |
+| min_len=64 | 43.315 | 3.78% | 36.535 |
+| min_len=128 | 46.164 | 3.45% | 39.636 |
+| min_len=256 | 46.020 | 3.12% | 39.143 |
+
+`generated_text` identical across every arm/round. `device_allocated_bytes` flat at ~4.163 GB across every arm.
+
+**Per-family GPU time** (op-profile buckets that actually change route as `min_len` crosses their reduce length -- `kv_cache.k_even`/`k_odd` are the 64-long `score_even`/`score_odd` reduces, `kv_cache.v` and the eps control are shown for contrast):
+
+| family | min_len=0 | min_len=128 |
+| --- | --- | --- |
+| `kv_cache.k_even` | 1.146 ms | 3.39-3.54 ms |
+| `kv_cache.k_odd` | 1.178 ms | 3.37-3.51 ms |
+| `kv_cache.v` (not gated by this threshold at these shapes) | 2.141 ms | 2.32-2.37 ms |
+| eps control (unaffected family) | 0.718 ms | 0.73 ms (flat) |
+
+`kv_cache.k_even`/`k_odd` are ~3x SLOWER once routed off cooperative -- the opposite of the hypothesis. The eps control family, which this threshold does not touch, stays flat, confirming the regression is specific to the reduces the routing change actually moved, not a measurement artifact of the box.
+
+**Mechanism, traced.** The cooperative kernel dispatches `output_total * SIMD_WIDTH` threads; the serial kernel dispatches exactly `output_total` threads -- 32x fewer. These reduces are memory-latency-bound, not compute-bound: each thread's real work is a handful of loads and an add, and the limiting resource is DRAM/cache load latency, not ALU cycles. The cooperative route's 32x-more threads in flight give the GPU far more concurrent memory traffic to hide load latency behind; the serial route's far-fewer threads leave most of that latency exposed, which costs more than the idle-lane compute waste the cooperative route pays. The 64-long reduces (`score_even`/`score_odd`, min_len=64 arm) degrade harder in relative terms than a hypothetical shorter one would, and the 34-long `attended` reduce (not broken out separately above, folded into the same decode step) tracks the same direction -- shorter reduces have proportionally less real work per thread to amortize the now-exposed latency against, so the routing change hurts most exactly where the hypothesis predicted it would help most.
+
+**Decision.** Default `min_len` stays `0` -- today's routing is unchanged, this knob ships build-time-configurable and inert. The mechanism (a config-driven length threshold routing `Keep::Reduce` folds between two kernel bodies) stays landed for a future genuinely compute-bound short reduce, or a different GPU family's occupancy model, but production does not move off of what already shipped.
+
+**Re-prove:**
+```sh
+cd /Users/brianbruggeman/repos/slot-0/proxima
+OMEGA_COOPERATIVE_REDUCE_MIN_LEN=128 CARGO_TARGET_DIR=<own target dir> \
+cargo test --release --no-run -p proxima-model-interop --features metal,instrument
+PROXIMA_MAX_TOKENS=8 <binary> --exact --nocapture --ignored \
+  bind::real_openchat_file::runs_the_cached_decode_loop_on_the_metal_backend_and_reports_the_plan_cache
+```
+Rebuilding at `min_len=0` (the shipped default, no env override needed) reproduces the cooperative-only row above; the env override rebuilds a distinct binary (the constant is compile-time) to reproduce any of the other rows.
