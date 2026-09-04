@@ -1,0 +1,8 @@
+   Compiling proxima-tensor v0.1.0 (/Users/brianbruggeman/repos/slot-0/proxima/proxima-tensor)
+   Compiling proxima-process v0.1.0 (/Users/brianbruggeman/repos/slot-0/proxima/proxima-process)
+   Compiling omega v0.1.0 (/Users/brianbruggeman/repos/slot-0/proxima/omega)
+   Compiling proxima v0.1.0 (/Users/brianbruggeman/repos/slot-0/proxima)
+   Compiling proxima-safetensors v0.1.0 (/Users/brianbruggeman/repos/slot-0/proxima/proxima-safetensors)
+   Compiling proxima-model-interop v0.1.0 (/Users/brianbruggeman/repos/slot-0/proxima/proxima-model-interop)
+    Finished `release` profile [optimized] target(s) in 53.38s
+  Executable unittests src/lib.rs (/tmp/cargo_target/release/deps/proxima_model_interop-e4466c9c09a81aba)
