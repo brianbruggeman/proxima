@@ -117,8 +117,13 @@ pub struct GridSpec {
     /// the driver must dispatch threadgroups exactly this wide so every
     /// SIMD-group boundary lands on an output-element boundary (`gid / SIMD_WIDTH`
     /// is only a valid output index under that alignment — see
-    /// `push_cooperative_reduce_body`'s doc). `None` for every other kernel,
-    /// which keeps the occupancy-driven width the driver already picks.
+    /// `push_cooperative_reduce_body`'s doc). `Some(query_groups * SIMD_WIDTH)`
+    /// for `CachedAttention`: the kernel body cooperatively loads each K/V row
+    /// into `threadgroup` memory once per threadgroup rather than once per
+    /// simdgroup (`render_cached_attention`'s own doc), which only stays
+    /// correct if every simdgroup sharing a kv_head lands in the same
+    /// threadgroup. `None` for every other kernel, which keeps the
+    /// occupancy-driven width the driver already picks.
     pub threadgroup_width: Option<u64>,
 }
 
@@ -2485,6 +2490,26 @@ fn msl_literal(value: f32) -> String {
     format!("{value:?}")
 }
 
+/// `BoundOpKind::CachedAttention`'s Metal kernel: online (running max/sum,
+/// register-resident weighted-value accumulator) softmax attention over a
+/// cached range plus a new range, one 32-lane simdgroup per `(query_row,
+/// kv_head, group)` triple. `query_groups` simdgroups share one kv_head under
+/// GQA, so `tiled_gemm_threadgroup_width`'s `CachedAttention` arm dispatches
+/// `query_groups` simdgroups (`query_groups * SIMD_WIDTH` threads) into ONE
+/// threadgroup per `(query_row, kv_head)` pair, and each key's K row
+/// (`in2`/`in3` cached, `in4`/`in5` new, RoPE even/odd halves) and V row
+/// (`in6` cached, `in7` new) is loaded into `threadgroup` memory ONCE by the
+/// whole threadgroup cooperatively, instead of once per simdgroup — the four
+/// query heads sharing a kv_head no longer each re-read the same bytes from
+/// device memory. Every simdgroup still computes its own dot product,
+/// softmax rescale, and accumulation independently, purely from that shared
+/// memory, so the numerics are byte-identical to the un-cooperative kernel;
+/// only the K/V read traffic changes. A `threadgroup_barrier` after the
+/// cooperative load (visibility) and one after the per-simdgroup use (guards
+/// the next key's load against a write-after-read hazard) bound each loop
+/// iteration; both are safe because the masking decision that can `continue`
+/// past them depends only on `query_row`/`key`, never on `kv_head`/`group`,
+/// so it is uniform across the whole threadgroup.
 fn render_cached_attention(resolved: &BoundOp, entry: &str) -> Result<String, EmitError> {
     let BoundOpKind::CachedAttention {
         query_rows,
@@ -2539,8 +2564,26 @@ fn render_cached_attention(resolved: &BoundOp, entry: &str) -> Result<String, Em
         "    constexpr long cached_key_rows = {cached_key_rows}; constexpr long new_key_rows = {new_key_rows}; constexpr long kv_heads = {kv_heads}; constexpr long query_groups = {query_groups}; constexpr long head_dim = {head_dim}; constexpr float scale = {}; constexpr long cached_lower = {cached_lower}; {new_upper_decl}\n",
         msl_literal(*scale),
     ));
-    source.push_str("    long vector_index = (long)gid / 32L; uint lane = gid % 32u;\n    if (vector_index >= u.total_elements) { return; }\n    long query_index = vector_index;\n    long query_row = query_index / (kv_heads * query_groups);\n    long remainder = query_index % (kv_heads * query_groups);\n    long kv_head = remainder / query_groups;\n    long group = remainder % query_groups;\n    long query_head = kv_head * query_groups + group;\n    long qbase = query_row * (kv_heads * query_groups * (head_dim / 2)) + query_head * (head_dim / 2);\n    float maximum = -INFINITY; float sum = 0.0f; float weighted[(head_dim + 31) / 32];\n    for (long dimension = 0; dimension < (head_dim + 31) / 32; dimension++) { weighted[dimension] = 0.0f; }\n");
-    source.push_str("    for (long key = 0; key < cached_key_rows + new_key_rows; key++) {\n        bool cached = key < cached_key_rows; long new_index = key - cached_key_rows;\n        long relative = (cached ? key - cached_key_rows : new_index) - query_row;\n        if (cached && relative < cached_lower) { continue; }\n        if (!cached && relative > new_upper) { continue; }\n        long kbase = (cached ? key : new_index) * (kv_heads * (head_dim / 2)) + kv_head * (head_dim / 2);\n        float partial_score = 0.0f;\n        for (long pair = (long)lane; pair < head_dim / 2; pair += 32L) {\n            partial_score += in0[qbase + pair] * (cached ? in2[kbase + pair] : in4[kbase + pair]);\n            partial_score += in1[qbase + pair] * (cached ? in3[kbase + pair] : in5[kbase + pair]);\n        }\n        float score = simd_broadcast_first(simd_sum(partial_score)) * scale;\n        float next_max = max(maximum, score);\n        float weight = exp(score - next_max); float rescale = (maximum == -INFINITY) ? 0.0f : exp(maximum - next_max);\n        sum = sum * rescale + weight;\n        for (long dimension = (long)lane; dimension < head_dim; dimension += 32L) {\n            long local_dimension = dimension / 32L;\n            weighted[local_dimension] = weighted[local_dimension] * rescale + weight * (cached ? in6[kbase * 2 + dimension] : in7[kbase * 2 + dimension]);\n        }\n        maximum = next_max;\n    }\n");
+    // One threadgroup per (query_row, kv_head) pair -- `tiled_gemm_
+    // threadgroup_width`'s `CachedAttention` arm dispatches exactly
+    // `query_groups * SIMD_WIDTH` threads per threadgroup, and `dispatchThreads_
+    // threadsPerThreadgroup`'s linear grouping (`thread_position_in_grid =
+    // threadgroup_position_in_grid * width + thread_position_in_threadgroup`)
+    // lands every one of `query_groups` simdgroups (one per query head sharing
+    // this kv_head) in the SAME threadgroup, because `vector_index`'s own
+    // encoding already cycles `group` fastest, then `kv_head`, then
+    // `query_row` -- see this function's doc. `tid`/`group_width` below are
+    // therefore derivable from the existing `group`/`lane` split without a
+    // new `[[thread_position_in_threadgroup]]` kernel parameter.
+    source.push_str("    long vector_index = (long)gid / 32L; uint lane = gid % 32u;\n    if (vector_index >= u.total_elements) { return; }\n    long query_index = vector_index;\n    long query_row = query_index / (kv_heads * query_groups);\n    long remainder = query_index % (kv_heads * query_groups);\n    long kv_head = remainder / query_groups;\n    long group = remainder % query_groups;\n    long query_head = kv_head * query_groups + group;\n    long qbase = query_row * (kv_heads * query_groups * (head_dim / 2)) + query_head * (head_dim / 2);\n    uint tid = (uint)group * 32u + lane; uint group_width = (uint)query_groups * 32u;\n    threadgroup float shared_k_even[head_dim / 2]; threadgroup float shared_k_odd[head_dim / 2]; threadgroup float shared_v[head_dim];\n    float maximum = -INFINITY; float sum = 0.0f; float weighted[(head_dim + 31) / 32];\n    for (long dimension = 0; dimension < (head_dim + 31) / 32; dimension++) { weighted[dimension] = 0.0f; }\n");
+    // Every masking decision below (`cached`, `relative`, the two `continue`s)
+    // depends only on `key`/`query_row`/`cached_lower`/`new_upper` -- never on
+    // `kv_head`/`group`/`lane` -- so it is uniform across the WHOLE
+    // threadgroup, and a `continue` taken there is taken by every thread in
+    // the group alike. That is what makes the two `threadgroup_barrier` calls
+    // inside the loop body safe: no thread ever reaches one while a sibling
+    // skipped past it via the masked-out `continue`.
+    source.push_str("    for (long key = 0; key < cached_key_rows + new_key_rows; key++) {\n        bool cached = key < cached_key_rows; long new_index = key - cached_key_rows;\n        long relative = (cached ? key - cached_key_rows : new_index) - query_row;\n        if (cached && relative < cached_lower) { continue; }\n        if (!cached && relative > new_upper) { continue; }\n        long kbase = (cached ? key : new_index) * (kv_heads * (head_dim / 2)) + kv_head * (head_dim / 2);\n        for (long pair = (long)tid; pair < head_dim / 2; pair += (long)group_width) {\n            shared_k_even[pair] = cached ? in2[kbase + pair] : in4[kbase + pair];\n            shared_k_odd[pair] = cached ? in3[kbase + pair] : in5[kbase + pair];\n        }\n        for (long dimension = (long)tid; dimension < head_dim; dimension += (long)group_width) {\n            shared_v[dimension] = cached ? in6[kbase * 2 + dimension] : in7[kbase * 2 + dimension];\n        }\n        threadgroup_barrier(mem_flags::mem_threadgroup);\n        float partial_score = 0.0f;\n        for (long pair = (long)lane; pair < head_dim / 2; pair += 32L) {\n            partial_score += in0[qbase + pair] * shared_k_even[pair];\n            partial_score += in1[qbase + pair] * shared_k_odd[pair];\n        }\n        float score = simd_broadcast_first(simd_sum(partial_score)) * scale;\n        float next_max = max(maximum, score);\n        float weight = exp(score - next_max); float rescale = (maximum == -INFINITY) ? 0.0f : exp(maximum - next_max);\n        sum = sum * rescale + weight;\n        for (long dimension = (long)lane; dimension < head_dim; dimension += 32L) {\n            long local_dimension = dimension / 32L;\n            weighted[local_dimension] = weighted[local_dimension] * rescale + weight * shared_v[dimension];\n        }\n        maximum = next_max;\n        threadgroup_barrier(mem_flags::mem_threadgroup);\n    }\n");
     source.push_str(&format!("    for (long dimension = (long)lane; dimension < head_dim; dimension += 32L) {{ long local_dimension = dimension / 32L; out[query_index * head_dim + dimension] = ({element_type})(sum == 0.0f ? 0.0f : weighted[local_dimension] / sum); }}\n}}\n"));
     let _ = query_rows;
     let _ = new_key_rows;
@@ -4223,6 +4266,16 @@ fn tiled_gemm_threadgroup_width(
     resolved: &BoundOp,
     quantized: &[Option<PackedCodec>],
 ) -> Option<u64> {
+    // `query_groups * SIMD_WIDTH` threads per threadgroup -- one simdgroup
+    // per query head sharing this kv_head, cooperatively loading that
+    // kv_head's K/V row once per key into `threadgroup` memory instead of
+    // each of the `query_groups` simdgroups re-reading it from device memory
+    // (`render_cached_attention`'s own doc). Correctness-load-bearing, not an
+    // occupancy hint: the body's `tid`/`group_width` split assumes exactly
+    // this many threads land in the same threadgroup.
+    if let BoundOpKind::CachedAttention { query_groups, .. } = &resolved.kind {
+        return Some(*query_groups * SIMD_WIDTH);
+    }
     if let BoundOpKind::Reduce {
         keep: Keep::Reduce,
         reduce_op,
@@ -6279,7 +6332,14 @@ mod tests {
         assert!(kernel.source.contains("weighted[local_dimension] / sum"));
         assert_eq!(kernel.bindings.len(), 10, "eight inputs, output, uniforms");
         assert_eq!(kernel.grid.threads, 32);
-        assert_eq!(kernel.grid.threadgroup_width, None);
+        assert_eq!(
+            kernel.grid.threadgroup_width,
+            Some(32),
+            "query_groups=1 -- one simdgroup per threadgroup, same width the \
+             cooperative K/V load needs every other query_groups value"
+        );
+        assert!(kernel.source.contains("threadgroup float shared_k_even"));
+        assert!(kernel.source.contains("threadgroup_barrier(mem_flags::mem_threadgroup)"));
     }
 
     #[test]
