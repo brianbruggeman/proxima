@@ -432,6 +432,20 @@ fn print_token_breakdown_metal(
     plan_misses: usize,
 ) {
     let ms = |ticks: u64| ticks_to_nanos(ticks) as f64 / 1e6;
+    // `PROXIMA_METAL_KIND_FILTER` -- `omega::metal::execute_plan_with_placements`'s
+    // own in-buffer ablation knob (that function's own `KindFilter` doc has
+    // the full contract). Read here, at this line's own print site, rather
+    // than threaded back from `omega::metal` through `MetalStageTotals`: it
+    // is a per-call, caller-supplied env value, not a device-side
+    // measurement, and every other diagnostic env knob on this decode path
+    // (`PROXIMA_METAL_OP_PROFILE_STEP`, `PROXIMA_PLACEMENT_POSITION_DUMP`) is
+    // likewise read directly at its own print site rather than plumbed
+    // through the stage-totals struct. Empty (no suffix) when unset, so a
+    // production run's line is byte-identical to before this ablation
+    // existed.
+    let ablation_suffix = std::env::var("PROXIMA_METAL_KIND_FILTER")
+        .map(|kind_filter| format!(" ablation=true kind_filter={kind_filter}"))
+        .unwrap_or_default();
     std::println!(
         "token_breakdown_metal step={step} prepare_calls={} prepare_ms={:.3} \
      emit_calls={} emit_ms={:.3} pipeline_hits={} pipeline_misses={} pipeline_compile_ms={:.3} \
@@ -446,7 +460,7 @@ fn print_token_breakdown_metal(
      resident_uploads={} resident_reuses={} mapping_offset_uploads={} \
      nocopy_cache_len={} uniform_cache_len={} phys_footprint_bytes={} device_allocated_bytes={} \
      output_buffer_allocations={} plan_uniform_writes={} barriers={} \
-     plan_cache_len={plan_cache_len} plan_hits={plan_hits} plan_misses={plan_misses}",
+     plan_cache_len={plan_cache_len} plan_hits={plan_hits} plan_misses={plan_misses}{ablation_suffix}",
         metal_stage.prepare_calls,
         ms(metal_stage.prepare_ticks),
         metal_stage.emit_calls,

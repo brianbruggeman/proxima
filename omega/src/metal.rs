@@ -972,6 +972,77 @@ impl<Id: Eq + core::hash::Hash + Copy> HazardTracker<Id> {
 /// (RAW/WAW/WAR) it covers, and
 /// [`MTLBarrierScope::Buffers`] is emitted only where the tracker finds one.
 ///
+/// `PROXIMA_METAL_KIND_FILTER=<kind-substring>[,<kind-substring>]` (or
+/// `!<kind-substring>[,<kind-substring>]` for the complement) --
+/// `instrument`-gated, default-off, parsed once per
+/// [`execute_plan_with_placements`] call by [`KindFilter::from_env`] and
+/// consulted per op against [`classify_kind`]'s own return value: the same
+/// string a caller already sees in `op_profile_bucket kind=...`, not a
+/// second enum this module would have to keep in lockstep with
+/// `classify_kind`'s match arms. Unset (`None`) in every production run,
+/// which is the ROW's in-buffer ablation harness's own arm-selection knob --
+/// see that row for the arm table.
+#[cfg(feature = "instrument")]
+struct KindFilter {
+    substrings: Vec<String>,
+    negate: bool,
+}
+
+#[cfg(feature = "instrument")]
+impl KindFilter {
+    fn from_env() -> Option<Self> {
+        let raw = std::env::var("PROXIMA_METAL_KIND_FILTER").ok()?;
+        let (negate, body) = match raw.strip_prefix('!') {
+            Some(rest) => (true, rest),
+            None => (false, raw.as_str()),
+        };
+        let substrings: Vec<String> = body
+            .split(',')
+            .map(str::trim)
+            .filter(|substring| !substring.is_empty())
+            .map(String::from)
+            .collect();
+        Some(Self { substrings, negate })
+    }
+
+    fn matches(&self, kind: &str) -> bool {
+        let any = self
+            .substrings
+            .iter()
+            .any(|substring| kind.contains(substring.as_str()));
+        any != self.negate
+    }
+}
+
+/// [`KindFilter`]-excluded counterpart of [`encode_op`]'s output-buffer half:
+/// called INSTEAD of [`encode_op`] for an op the filter drops, so no
+/// pipeline is bound, no buffer is bound to the encoder, and no dispatch is
+/// issued -- this op's output buffer keeps whatever bytes it already held (a
+/// prior decode step's write, under `metal-plan-stable-buffers`'s stable
+/// per-position arena slot; an uninitialized fresh allocation otherwise).
+/// `device_buffers` still needs an entry for `bound.node` regardless, or
+/// every downstream op that reads it as an operand fails `buffer_for`'s
+/// `NotLowerable` lookup before `gpu_exec_ms` is ever read -- the ablation
+/// is measuring dispatch time with this op removed, not producing a correct
+/// result, but the OTHER ops in the same buffer still need to run.
+#[cfg(feature = "instrument")]
+fn register_skipped_output(
+    device: &ProtocolObject<dyn MTLDevice>,
+    device_buffers: &mut BTreeMap<NodeId, DeviceBuffer>,
+    bound: &BoundOp,
+    placement: Option<(&MetalBuffer, usize)>,
+) -> Result<(), MetalError> {
+    let (buffer, offset) = match placement {
+        Some((buffer, offset)) => (buffer.clone(), offset),
+        None => (
+            allocate_buffer(device, bound_output_len(bound), bound.dtype)?,
+            0,
+        ),
+    };
+    device_buffers.insert(bound.node, (buffer, offset));
+    Ok(())
+}
+
 /// # Errors
 /// Propagates block-codec and Metal driver failures, same as [`execute_plan`].
 #[cfg(feature = "metal-output-placement")]
@@ -1070,6 +1141,8 @@ pub fn execute_plan_with_placements(
     // doc, "Within-call aliasing"). Unset in every production run.
     #[cfg(feature = "instrument")]
     let placement_dump = std::env::var("PROXIMA_PLACEMENT_POSITION_DUMP").is_ok();
+    #[cfg(feature = "instrument")]
+    let kind_filter = KindFilter::from_env();
     let mut pending_faults: Vec<PendingFault<'_>> = Vec::new();
     for (position, bound) in prepared.resolved.iter().enumerate() {
         #[cfg(feature = "instrument")]
@@ -1091,40 +1164,70 @@ pub fn execute_plan_with_placements(
             .get(&bound.node)
             .copied()
             .or_else(|| arena_placement(plan, position));
-        #[cfg(feature = "metal-concurrent-dispatch")]
-        let hazard_inputs: Vec<*const ProtocolObject<dyn MTLBuffer>> = bound
-            .operands()
-            .iter()
-            .filter_map(|(operand, _, _)| device_buffers.get(operand))
-            .map(|(buffer, _offset)| Retained::as_ptr(buffer))
-            .collect();
-        #[cfg(feature = "metal-concurrent-dispatch")]
-        {
-            let hazard_output = placement.map(|(buffer, _offset)| Retained::as_ptr(buffer));
-            if hazards.needs_barrier(&hazard_inputs, hazard_output) {
-                encoder.memoryBarrierWithScope(MTLBarrierScope::Buffers);
-                hazards.reset();
-                counter!(BARRIERS_EMITTED, 1);
+        // `ablation_skip` is `false` on every non-`instrument` build (the
+        // `match` folds to the literal at compile time, so this costs
+        // nothing in production) and `false` on every `instrument` build
+        // where `PROXIMA_METAL_KIND_FILTER` is unset -- the only way into
+        // the `register_skipped_output` arm below is an operator explicitly
+        // setting that env var, which never happens outside this ablation's
+        // own harness.
+        #[cfg(feature = "instrument")]
+        let ablation_skip = match &kind_filter {
+            Some(filter) => !filter.matches(classify_kind(bound, packed_operands)),
+            None => false,
+        };
+        #[cfg(not(feature = "instrument"))]
+        let ablation_skip = false;
+
+        if ablation_skip {
+            // `ablation_skip` is always `false` on a non-`instrument` build
+            // (see its own binding above), so this arm never runs there --
+            // `register_skipped_output` itself is `instrument`-gated and
+            // does not exist to call outside it.
+            #[cfg(feature = "instrument")]
+            register_skipped_output(&device, &mut device_buffers, bound, placement)?;
+        } else {
+            // A skipped op above never reaches this hazard tracking either
+            // -- it neither reads nor writes a buffer THIS command buffer
+            // touches, so the tracker must see it as absent: no
+            // `hazard_inputs`/`hazard_output` collected, no
+            // `needs_barrier`/`record` call, no barrier emitted on its
+            // account.
+            #[cfg(feature = "metal-concurrent-dispatch")]
+            let hazard_inputs: Vec<*const ProtocolObject<dyn MTLBuffer>> = bound
+                .operands()
+                .iter()
+                .filter_map(|(operand, _, _)| device_buffers.get(operand))
+                .map(|(buffer, _offset)| Retained::as_ptr(buffer))
+                .collect();
+            #[cfg(feature = "metal-concurrent-dispatch")]
+            {
+                let hazard_output = placement.map(|(buffer, _offset)| Retained::as_ptr(buffer));
+                if hazards.needs_barrier(&hazard_inputs, hazard_output) {
+                    encoder.memoryBarrierWithScope(MTLBarrierScope::Buffers);
+                    hazards.reset();
+                    counter!(BARRIERS_EMITTED, 1);
+                }
             }
-        }
-        let fault = encode_op(
-            &device,
-            &encoder,
-            &mut device_buffers,
-            bound,
-            packed_operands,
-            placement,
-            plan_uniform_buffer(plan, position),
-        )?;
-        #[cfg(feature = "metal-concurrent-dispatch")]
-        {
-            let hazard_output = device_buffers
-                .get(&bound.node)
-                .map(|(buffer, _offset)| Retained::as_ptr(buffer));
-            hazards.record(&hazard_inputs, hazard_output);
-        }
-        if let Some((fault_buffer, gathers)) = fault {
-            pending_faults.push((bound, fault_buffer, gathers));
+            let fault = encode_op(
+                &device,
+                &encoder,
+                &mut device_buffers,
+                bound,
+                packed_operands,
+                placement,
+                plan_uniform_buffer(plan, position),
+            )?;
+            #[cfg(feature = "metal-concurrent-dispatch")]
+            {
+                let hazard_output = device_buffers
+                    .get(&bound.node)
+                    .map(|(buffer, _offset)| Retained::as_ptr(buffer));
+                hazards.record(&hazard_inputs, hazard_output);
+            }
+            if let Some((fault_buffer, gathers)) = fault {
+                pending_faults.push((bound, fault_buffer, gathers));
+            }
         }
         // explicit liveness exclusion (see this function's doc): a placed
         // node, input or output, is externally owned and always live, so it
