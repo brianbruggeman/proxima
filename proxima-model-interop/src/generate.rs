@@ -95,6 +95,8 @@ use omega::{
     PlacedBuffer, allocate_placed_buffer, execute_plan_named_with_placements,
     plan_named as plan_named_placed,
 };
+#[cfg(all(feature = "metal-output-placement", feature = "instrument", target_os = "macos"))]
+use omega::execute_plan_named_with_placements_op_timed;
 #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
 use proxima_tensor::spec::mistral_single_range_cached_forward_program;
 #[cfg(feature = "instrument")]
@@ -1296,6 +1298,51 @@ impl BackendRuntime {
         )?)
     }
 
+    /// [`Self::evaluate_with_placements`]'s diagnostic counterpart, same
+    /// relationship [`Self::evaluate_op_timed`] already has to
+    /// [`Self::evaluate`]: identical plan-cache lookup against
+    /// [`Self::placed_plans`], but
+    /// [`omega::metal::execute_plan_named_with_placements_op_timed`] commits
+    /// and waits on ITS OWN command buffer per op instead of the whole
+    /// program's one, so [`OpGpuTiming`] comes back for the default decode
+    /// path's placed-KV shape the same way [`Self::evaluate_op_timed`]
+    /// already does for the two-range path. Reachable only behind the
+    /// `instrument` feature and only from `run_decode_loop_placed_kv`'s own
+    /// `PROXIMA_METAL_OP_PROFILE_STEP` branch.
+    #[cfg(all(feature = "metal-output-placement", feature = "instrument", target_os = "macos"))]
+    #[allow(clippy::too_many_arguments)]
+    fn evaluate_op_timed_with_placements(
+        &mut self,
+        program: &[Op],
+        symbols: &[u64],
+        named: &[(&str, QuantizedBlock<'_>)],
+        outputs: &[NodeId],
+        resident_names: &BTreeSet<&str>,
+        input_placements: &[(NodeId, &PlacedBuffer, usize)],
+        output_placements: &[(NodeId, &PlacedBuffer, usize)],
+    ) -> Result<(Evaluated, Vec<OpGpuTiming>), InteropError> {
+        let shape = (symbols[0] as usize, symbols[1] as usize);
+        if self.placed_plans.contains_key(&shape) {
+            self.plan_hits += 1;
+        } else {
+            self.plan_misses += 1;
+            let mut plan = plan_named_placed(program, symbols, named, outputs)?;
+            plan.mark_resident(resident_names);
+            self.placed_plans.clear();
+            self.placed_plans.insert(shape, plan);
+        }
+        let plan = self
+            .placed_plans
+            .get_mut(&shape)
+            .ok_or(InteropError::PlanCacheEntryVanished { shape })?;
+        Ok(execute_plan_named_with_placements_op_timed(
+            plan,
+            named,
+            input_placements,
+            output_placements,
+        )?)
+    }
+
     /// [`Self::evaluate`]/[`Self::evaluate_op_timed`]'s shared cache-lookup
     /// step, split out so the eviction policy lives in exactly one place.
     ///
@@ -2349,6 +2396,47 @@ impl<'file> LoadedModel<'file> {
                 }
                 #[cfg(feature = "instrument")]
                 let evaluate_started = read_ticks();
+                // `PROXIMA_METAL_OP_PROFILE_STEP` -- same diagnostic-only,
+                // `instrument`-gated, default-off convention as
+                // `run_decode_loop`'s own branch above (that one's doc has
+                // the full rationale): unset in every production run, so
+                // `evaluate_with_placements` is the only path a caller
+                // without this env var ever takes on the default decode
+                // path too. When set to this step's own index, this ONE
+                // step instead runs `evaluate_op_timed_with_placements`
+                // (per-op command buffers against the SAME placed-KV
+                // shape) and prints the per-op GPU attribution through the
+                // identical `report_op_timings` the two-range path already
+                // uses.
+                #[cfg(all(feature = "instrument", feature = "metal", target_os = "macos"))]
+                let evaluated = match std::env::var("PROXIMA_METAL_OP_PROFILE_STEP")
+                    .ok()
+                    .and_then(|value| value.parse::<usize>().ok())
+                {
+                    Some(target) if target == _step => {
+                        let (evaluated, timings) = runtime.evaluate_op_timed_with_placements(
+                            &single_range.program,
+                            &symbols,
+                            &named_blocks,
+                            &roots,
+                            &resident_names,
+                            &input_placements,
+                            &output_placements,
+                        )?;
+                        report_op_timings(_step, &timings);
+                        evaluated
+                    }
+                    _ => runtime.evaluate_with_placements(
+                        &single_range.program,
+                        &symbols,
+                        &named_blocks,
+                        &roots,
+                        &resident_names,
+                        &input_placements,
+                        &output_placements,
+                    )?,
+                };
+                #[cfg(not(all(feature = "instrument", feature = "metal", target_os = "macos")))]
                 let evaluated = runtime.evaluate_with_placements(
                     &single_range.program,
                     &symbols,
