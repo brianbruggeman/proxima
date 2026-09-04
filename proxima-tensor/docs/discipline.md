@@ -20120,3 +20120,36 @@ PROXIMA_MAX_TOKENS=8 cargo test --release -p proxima-model-interop --features me
   bind::real_openchat_file::runs_the_cached_decode_loop_on_the_metal_backend_and_reports_the_plan_cache
 ```
 With default `metal` features now carrying the two winners, this command's own step timings should reproduce sweep 3 arm B1's ~43 ms/token, not sweep 2 A0's 52.660 -- the re-prove IS the flip's own falsifier.
+
+## ROW 272 -- two byte counters measured the wrong thing in two loops: `operand_bytes` was the checkpoint mapping, `block_upload_bytes` was the binding, and the placed-buffer loop had its own copy of both gaps
+
+**Card:** 0.2. **Worktree/branch/commit:** `proxima-wt-land-bytes`/`land/bytes` (landed to `main`). **Feature:** none (instrument-gated only), default: n/a.
+**Allocation budget (hot/setup/cold):** MG-3, six `AtomicU64` statics (+336 B static: `BLOCK_OFFERED_BYTES`, `BLOCK_COPIED_BYTES`, `BLOCK_NOCOPY_BOUND_BYTES`, `BLOCK_OFFSET_BOUND_BYTES`, plus `bound_buffer_bytes`/`operand_bytes` fields on `OpGpuTiming`), zero heap.
+**Predict (one rung ahead, written before running):** `step_wall_ms` unchanged within R13's CoV, mean in [42.14, 43.86] (2% of the 43.0 accounting-only band). **Observed:** steps 1..7 mean 43.401 ms (45.925, 42.243, 43.257, 43.137, 43.126, 42.933, 43.185) -- inside the band. **Miss category + work item:** none.
+
+Defect 1 (`omega/src/metal.rs`'s `execute_plan_op_timed`): `operand_bytes` summed `device_buffers[source].0.length()` -- the shared checkpoint-mapping buffer's own size, reported for EVERY tensor that buffer serves since `register_checkpoint_mapping` landed. Fixed by `operand_tensor_bytes(program, index_nodes, shapes, packed_operands, source)`: `element_count(shapes.of(source))` times the operand's own bytes-per-element (`DType::size_bytes` for a plain buffer, `PackedCodec::block_bytes() / block_elements()` for a packed one, `block_elements` ungated from `wgpu-backend`-only to `any(wgpu-backend, instrument)` since `operand_tensor_bytes` is its second caller). The old value survives as a distinct `bound_buffer_bytes` field, never silently dropped.
+
+Defect 2 (`BLOCK_UPLOAD_BYTES`, fired unconditionally before the upload-path match in `execute_plan`'s own block-upload loop): renamed `BLOCK_OFFERED_BYTES` at the same site, and three new terminal-path counters -- `BLOCK_COPIED_BYTES`, `BLOCK_NOCOPY_BOUND_BYTES`, `BLOCK_OFFSET_BOUND_BYTES` -- added inside `upload_block_as_float`/`upload_packed_bytes`'s own branches and `checkpoint_mapping_offset`, which every one of `execute_plan`'s, `execute_plan_op_timed`'s, AND `execute_plan_with_placements`'s upload loops call through, so the split covers all three without duplicated match arms. `execute_plan_with_placements` had NO `BLOCK_UPLOAD_CALLS`/`BLOCK_OFFERED_BYTES` fire at all before this row (silently always 0) -- since openchat's own single-range checkpoint takes exactly this loop by default (`metal` now carries `metal-output-placement`, ROW 271), the identity below was untestable on the actual welded harness until this row added the matching fire there too.
+
+`UNIFORM_CACHE_LEN` (D6, round-4 synth S2): `uniform_cache_len()` reads `UNIFORM_BUFFERS`'s live entry count, printed per step in `token_breakdown_metal`. Observed step 3: `uniform_cache_len=57`, growing by 7 per step across steps 1..7 (43, 50, 57, ...) -- roughly `op_count`-independent, growing by a small per-step constant instead (new uniform blobs per NEW step position, not per op), so D6's "grows roughly `op_count` per token" prediction is WRONG as stated; the cache genuinely is unbounded (never evicts) but its growth rate is the new-position count, not the op count. 6.5/9.2 re-scope: unbounded confirmed, rate corrected.
+
+| arm | cell | n | CoV | load before/after |
+|---|---|---|---|---|
+| ours | MILLI (op-profile step 3, `profiles_one_real_decode_step_by_per_op_gpu_time`) | 938 ops, 8 families | n/a (single real-device run) | quiet |
+| ours | BENCH (cached decode loop, `runs_the_cached_decode_loop...`) | 8 steps | n/a (single real-device run) | quiet |
+
+**Gates:** `cargo build --workspace --lib` PASS; `cargo nextest run -p omega --features metal` 106/106 passed, 1 skipped; `cargo nextest run -p proxima-tensor --features std,instrument` 513/513 passed, 7 skipped; `cargo nextest run -p proxima-model-interop --features metal,instrument` 95/95 passed, 25 skipped; `cargo clippy --workspace --all-targets -- -D warnings` PASS; `cargo nextest run -p omega --all-features` 158/158 passed, 1 skipped (includes the 4 new `operand_tensor_bytes_tests`); `bash scripts/omega-gate.sh` PASS, `tests run: 158`, doctests 2/2.
+**Parity:** n/a -- instrument-only change; no oracle drift asserted here. `dense_metal_*` capability-matrix parity tests (which exercise `run_decode_loop_placed_kv`, the loop this row also added a `PROXIMA_METAL_OP_PROFILE_STEP` branch to) stayed green.
+**Census:** N1 partition identity `BLOCK_COPIED_BYTES + BLOCK_NOCOPY_BOUND_BYTES + BLOCK_OFFSET_BOUND_BYTES == BLOCK_OFFERED_BYTES` held on every one of 8 steps in the welded harness, e.g. step 3: `524 + 0 + 4139650112 = 4139650636` (exact). N3: 8-of-8 named families present in the per-op profile at step 3, `ffn_up` 33.05 MB/layer (`1057488896/32`), `ffn_down` 34.00 MB/layer (`1088159744/32`), `attn_q` 9.45 MB/layer (`302514176/32`), `output.weight` 107.54 MB (`107543104`) -- all within 1% of R13's shape-derived column, and NOT 4.14 GB. N4: `total_operand_bytes=4169081436` (4.169 GB), within 2.4% of the ~4.07 GB/step prediction (< 5% kill threshold).
+**Home-turf arm:** none -- this card is accounting-only, no llama.cpp cell.
+**Principles engaged and what each changed:** §I.2 D1 (both instrument defects, now fixed in three loops, not two); §III G12 (provenance -- no GB/s row was valid until this card closed; `output.weight`'s corrected 107.5 MB replaces the old 4.14 GB artifact everywhere it was printed). **Abandoned:** a per-loop duplicated match arm for the three new byte counters (rejected: `upload_block_as_float`/`upload_packed_bytes`/`checkpoint_mapping_offset` are the true terminal paths, shared by all three loops -- duplicating the match would have let the loops disagree on which path a given block took).
+**Re-prove:** the welded MILLI cell (`profiles_one_real_decode_step_by_per_op_gpu_time`, `PROXIMA_METAL_OP_PROFILE_STEP=3`) and the welded BENCH cell (`runs_the_cached_decode_loop_on_the_metal_backend_and_reports_the_plan_cache`), both reproduced above.
+
+```sh
+cd /Users/brianbruggeman/repos/slot-0/proxima-wt-land-bytes
+CARGO_TARGET_DIR=/Users/brianbruggeman/repos/slot-0/proxima-wt-land-bytes/target \
+PROXIMA_MAX_TOKENS=8 cargo test --release -p proxima-model-interop --features metal,instrument --lib -- \
+  --exact --nocapture --ignored \
+  bind::real_openchat_file::runs_the_cached_decode_loop_on_the_metal_backend_and_reports_the_plan_cache
+```
+Step 3's `token_breakdown_metal` line must show `block_offered_bytes`, `block_copied_bytes`, `block_nocopy_bound_bytes`, `block_offset_bound_bytes`, and `uniform_cache_len` fields, with `block_copied_bytes + block_nocopy_bound_bytes + block_offset_bound_bytes == block_offered_bytes` exactly.
