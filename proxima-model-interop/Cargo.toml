@@ -83,6 +83,14 @@ instrument = ["proxima-tensor/instrument", "omega?/instrument", "dep:proxima-tel
 # `generated_text` identical across all 3 bake-off rounds. The owner's rule:
 # keep a less-work change when output is identical and wall clock is not
 # worse beyond noise, even if wall clock does not visibly move.
+# `metal-concurrent-dispatch` joins per ROW 285's bake-off: the serial
+# encoder implies a barrier between every pair of dispatches; the
+# `HazardTracker` emits `memoryBarrierWithScope(Buffers)` only at a genuine
+# RAW/WAW/WAR hazard, 419 of 616 ops/step. `gpu_exec_ms` mean over 3
+# interleaved rounds fell 29.267 -> 27.258 ms (beyond both arms' CoV,
+# 0.84%/1.05%), wall mean 36.556 -> 34.725 ms (ON <= OFF + CoV every round),
+# `device_allocated_bytes` unchanged, `generated_text` identical across all
+# 3 bake-off rounds plus 3 extra determinism runs.
 metal = [
     "dep:omega",
     "std",
@@ -92,6 +100,7 @@ metal = [
     "metal-q5k-pair-dot",
     "metal-plan-stable-buffers",
     "cached-attention-streaming",
+    "metal-concurrent-dispatch",
 ]
 # cached-attention physical step for the real serving/decode harness; folded
 # into `metal`'s default shape per ROW 282 but kept individually selectable
