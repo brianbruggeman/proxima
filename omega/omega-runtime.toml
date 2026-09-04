@@ -59,3 +59,27 @@ block_k = 32
 # Apple GPU family this crate targets. Must be a multiple of 32
 # (SIMD_WIDTH) — see sized::WIDE_COOPERATIVE_REDUCE_MAX_WIDTH.
 max_width = 256
+
+[packed_row_split_k]
+# below this many simdgroups (`output_rows / PACKED_ROWS_PER_GROUP`), the
+# row-blocked packed-matmul kernel splits the reduction (k) axis across
+# multiple simdgroups per threadgroup instead of leaving parallelism pinned
+# to `rows / 4` — see `msl.rs`'s `packed_row_split_factor` and
+# sized::PACKED_ROW_SPLIT_K_TARGET_SIMDGROUPS. The measured decode-graph
+# table (this landing's own discipline row) shows GB/s rising monotonically
+# with simdgroup count through at least 1024 (attn_q/attn_output/ffn_down);
+# 2048 sits one step past that observed range, low enough that
+# `max_split`(8) keeps every real starved shape (attn_k/attn_v at 256 base
+# simdgroups) inside its cap rather than saturating it, high enough to move
+# the two families the measured mechanism actually names as starved.
+# `feature = "metal-q4k-split-k"`-only; emitted only when that feature is
+# active.
+target_simdgroups = 2048
+# ceiling on the split factor — bounds the per-threadgroup thread count to
+# `max_split * SIMD_WIDTH`(32) so `crate::metal::dispatch`'s
+# `.min(max_threadgroup)` clamp (typically 1024 threads) never engages and
+# silently shrinks the threadgroup out from under the grid-thread count
+# `grid_threads` already committed to (`omega-runtime.toml`'s own
+# `require_split_k_headroom` enforces `max_split * 32 <= 1024` at build
+# time) — see sized::PACKED_ROW_SPLIT_K_MAX_SPLIT.
+max_split = 8
