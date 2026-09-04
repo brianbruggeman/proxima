@@ -190,6 +190,8 @@ use objc2_metal::{
     MTLComputeCommandEncoder, MTLComputePipelineState, MTLCreateSystemDefaultDevice, MTLDevice,
     MTLLibrary, MTLMathMode, MTLResourceOptions, MTLSize,
 };
+#[cfg(feature = "metal-concurrent-dispatch")]
+use objc2_metal::{MTLBarrierScope, MTLDispatchType};
 use proxima_telemetry::counter;
 use proxima_telemetry::metric::Counter;
 
@@ -819,6 +821,71 @@ pub fn read_placed_buffer_f32(
     .to_vec()
 }
 
+/// `metal-concurrent-dispatch`'s dataflow-hazard set, generic over the
+/// identity type so this logic is testable without a real Metal device
+/// (`Id = usize`/`&str` in tests, `Id = *const ProtocolObject<dyn MTLBuffer>`
+/// — pointer identity from [`Retained::as_ptr`] — on the real driver path).
+/// Tracks two sets since the same buffer position is bound differently on
+/// each side of a hazard: `written` names every buffer some op since the
+/// last barrier has WRITTEN (a RAW or WAW hazard for a later op that reads
+/// or writes it); `read` names every buffer READ since the last barrier (a
+/// WAR hazard for a later op that writes it — real here because
+/// [`BufferArena`] reuses a whole retired slot's buffer object for a later
+/// position). A fresh, never-before-seen buffer (this op's own freshly
+/// [`allocate_buffer`]d output) triggers neither: nothing else has touched
+/// that pointer yet.
+#[cfg(feature = "metal-concurrent-dispatch")]
+#[derive(Debug)]
+struct HazardTracker<Id: Eq + core::hash::Hash + Copy> {
+    written: std::collections::HashSet<Id>,
+    read: std::collections::HashSet<Id>,
+}
+
+// hand-written rather than `#[derive(Default)]`: the derive would require
+// `Id: Default` too (an empty `HashSet` needs no such bound on its element
+// type), which the real driver's `Id = *const ProtocolObject<dyn MTLBuffer>`
+// has no reason to carry.
+#[cfg(feature = "metal-concurrent-dispatch")]
+impl<Id: Eq + core::hash::Hash + Copy> Default for HazardTracker<Id> {
+    fn default() -> Self {
+        Self {
+            written: std::collections::HashSet::new(),
+            read: std::collections::HashSet::new(),
+        }
+    }
+}
+
+#[cfg(feature = "metal-concurrent-dispatch")]
+impl<Id: Eq + core::hash::Hash + Copy> HazardTracker<Id> {
+    /// True when encoding the next op without a barrier first would let a
+    /// concurrent-dispatch-scheduled GPU thread race a still-in-flight one:
+    /// RAW (an input was written since the last barrier), WAW (the output
+    /// buffer was written since the last barrier), or WAR (the output
+    /// buffer was read since the last barrier — arena slot reuse).
+    fn needs_barrier(&self, inputs: &[Id], output: Option<Id>) -> bool {
+        inputs.iter().any(|input| self.written.contains(input))
+            || output.is_some_and(|out| self.written.contains(&out) || self.read.contains(&out))
+    }
+
+    /// Clears both sets — called immediately after a barrier is actually
+    /// emitted, since the barrier is exactly the guarantee that every
+    /// dispatch encoded before it has completed and is visible to every
+    /// dispatch encoded after.
+    fn reset(&mut self) {
+        self.written.clear();
+        self.read.clear();
+    }
+
+    /// Records this op's own effect, called once per op regardless of
+    /// whether a barrier fired for it.
+    fn record(&mut self, inputs: &[Id], output: Option<Id>) {
+        if let Some(out) = output {
+            self.written.insert(out);
+        }
+        self.read.extend(inputs.iter().copied());
+    }
+}
+
 /// [`execute_plan`], plus the ability to route one or more nodes' outputs
 /// into a buffer the CALLER owns (`output_placements`), and to bind one or
 /// more [`Op::Input`] nodes DIRECTLY to a buffer
@@ -892,6 +959,19 @@ pub fn read_placed_buffer_f32(
 ///   if hazard tracking did not cover this, that test would read stale
 ///   (pre-write) bytes instead of the fresh write, and it does not.
 ///
+/// With `metal-concurrent-dispatch` on, the paragraph above no longer
+/// applies as written: the encoder is opened with
+/// `computeCommandEncoderWithDispatchType(Concurrent)` instead of the
+/// dispatch-type-less `computeCommandEncoder()`, which turns OFF the
+/// automatic whole-resource barrier between every pair of dispatches — two
+/// independent ops (e.g. Q/K/V projected from one normed input) now execute
+/// with no ordering between them at all unless something inserts one. This
+/// function inserts that "something" itself, explicitly, via a private
+/// `HazardTracker` walked once per op before it is encoded — see that
+/// type's own doc, right above this function, for the three hazards
+/// (RAW/WAW/WAR) it covers, and
+/// [`MTLBarrierScope::Buffers`] is emitted only where the tracker finds one.
+///
 /// # Errors
 /// Propagates block-codec and Metal driver failures, same as [`execute_plan`].
 #[cfg(feature = "metal-output-placement")]
@@ -962,12 +1042,25 @@ pub fn execute_plan_with_placements(
         .ok_or_else(|| MetalError::CompileFailed {
             log: "command queue refused to hand out a command buffer".to_string(),
         })?;
+    #[cfg(not(feature = "metal-concurrent-dispatch"))]
     let encoder =
         command_buffer
             .computeCommandEncoder()
             .ok_or_else(|| MetalError::CompileFailed {
                 log: "command buffer refused to hand out a compute encoder".to_string(),
             })?;
+    // `Concurrent` lets independent dispatches (e.g. Q/K/V from one normed
+    // input) overlap instead of draining the pipeline between every op --
+    // see this function's own doc for why that requires [`HazardTracker`]
+    // below to insert the barriers the `Serial` type used to give for free.
+    #[cfg(feature = "metal-concurrent-dispatch")]
+    let encoder = command_buffer
+        .computeCommandEncoderWithDispatchType(MTLDispatchType::Concurrent)
+        .ok_or_else(|| MetalError::CompileFailed {
+            log: "command buffer refused to hand out a concurrent compute encoder".to_string(),
+        })?;
+    #[cfg(feature = "metal-concurrent-dispatch")]
+    let mut hazards: HazardTracker<*const ProtocolObject<dyn MTLBuffer>> = HazardTracker::default();
 
     // `PROXIMA_PLACEMENT_POSITION_DUMP` -- diagnostic-only, `instrument`-gated,
     // default-off, same convention as `PROXIMA_METAL_OP_PROFILE_STEP`
@@ -998,6 +1091,22 @@ pub fn execute_plan_with_placements(
             .get(&bound.node)
             .copied()
             .or_else(|| arena_placement(plan, position));
+        #[cfg(feature = "metal-concurrent-dispatch")]
+        let hazard_inputs: Vec<*const ProtocolObject<dyn MTLBuffer>> = bound
+            .operands()
+            .iter()
+            .filter_map(|(operand, _, _)| device_buffers.get(operand))
+            .map(|(buffer, _offset)| Retained::as_ptr(buffer))
+            .collect();
+        #[cfg(feature = "metal-concurrent-dispatch")]
+        {
+            let hazard_output = placement.map(|(buffer, _offset)| Retained::as_ptr(buffer));
+            if hazards.needs_barrier(&hazard_inputs, hazard_output) {
+                encoder.memoryBarrierWithScope(MTLBarrierScope::Buffers);
+                hazards.reset();
+                counter!(BARRIERS_EMITTED, 1);
+            }
+        }
         let fault = encode_op(
             &device,
             &encoder,
@@ -1007,6 +1116,13 @@ pub fn execute_plan_with_placements(
             placement,
             plan_uniform_buffer(plan, position),
         )?;
+        #[cfg(feature = "metal-concurrent-dispatch")]
+        {
+            let hazard_output = device_buffers
+                .get(&bound.node)
+                .map(|(buffer, _offset)| Retained::as_ptr(buffer));
+            hazards.record(&hazard_inputs, hazard_output);
+        }
         if let Some((fault_buffer, gathers)) = fault {
             pending_faults.push((bound, fault_buffer, gathers));
         }
@@ -2589,6 +2705,11 @@ pub struct MetalStageTotals {
     /// (`encode_op` writes every position's uniforms in place every call),
     /// 0 always with the feature off.
     pub plan_uniform_writes: u64,
+    /// [`BARRIERS_EMITTED`]'s own per-step delta -- 0 on the serial-dispatch
+    /// arm (`metal-concurrent-dispatch` off), the count of dataflow hazards
+    /// the private `HazardTracker` actually found on the concurrent-dispatch
+    /// arm.
+    pub barriers_emitted: u64,
 }
 
 /// Reads and resets every split-4019 counter in one call — see
@@ -2629,6 +2750,7 @@ pub fn metal_stage_totals() -> MetalStageTotals {
         mapping_offset_uploads: MAPPING_OFFSET_UPLOADS.snapshot_and_reset(),
         output_buffer_allocations: OUTPUT_BUFFER_ALLOCATIONS.snapshot_and_reset(),
         plan_uniform_writes: PLAN_UNIFORM_WRITES.snapshot_and_reset(),
+        barriers_emitted: BARRIERS_EMITTED.snapshot_and_reset(),
     }
 }
 
@@ -3162,6 +3284,14 @@ pub static OUTPUT_BUFFER_ALLOCATIONS: Counter = Counter::new("omega.metal.output
 /// the feature off (or on any position `execute_plan`'s non-placed path
 /// dispatches, which never receives a plan-owned uniform buffer).
 pub static PLAN_UNIFORM_WRITES: Counter = Counter::new("omega.metal.plan_uniforms.write");
+
+/// `metal-concurrent-dispatch`'s own census: every
+/// `memoryBarrierWithScope(Buffers)` the private `HazardTracker` actually
+/// emitted this step. Not gated behind that feature at declaration -- same
+/// convention as
+/// [`OUTPUT_BUFFER_ALLOCATIONS`] above -- so it reads a stable 0 on the
+/// serial-dispatch arm rather than not existing at all.
+pub static BARRIERS_EMITTED: Counter = Counter::new("omega.metal.concurrent.barriers_emitted");
 
 /// Entries `UNIFORM_BUFFERS` holds right now -- the direct witness for D6
 /// (round-4 synth S2): a caller that wants to know whether the cache grows
@@ -4576,5 +4706,91 @@ mod arena_tests {
             stage_zero_uniform, stage_two_uniform,
             "two ops with identical uniform bytes must still get DISTINCT plan-owned buffers"
         );
+    }
+}
+
+/// [`HazardTracker`]'s pure dataflow logic, tested with plain `&str`
+/// identities so no real Metal device is required -- the real driver path
+/// (`execute_plan_with_placements`) instantiates the same type with
+/// `Id = *const ProtocolObject<dyn MTLBuffer>`.
+#[cfg(all(test, feature = "metal-concurrent-dispatch"))]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod hazard_tracker_tests {
+    use super::HazardTracker;
+
+    /// `a -> b`, `a -> c` (independent, both only read `a`), then `b, c ->
+    /// d` -- the shape this whole feature exists for (Q/K/V from one normed
+    /// input, then a later op that needs all three). `b` and `c` share no
+    /// hazard with each other (neither reads nor writes the other), so
+    /// encoding `c` right after `b` must NOT barrier; `d` reads both `b` and
+    /// `c`, both written since the last barrier, so encoding `d` MUST.
+    #[test]
+    fn independent_producers_share_no_barrier_but_their_joint_consumer_does() {
+        let mut hazards: HazardTracker<&str> = HazardTracker::default();
+        let mut barriers = 0;
+
+        // encode `b = f(a)`: `a` is a fresh input, never written -> no hazard.
+        assert!(!hazards.needs_barrier(&["a"], Some("b")));
+        hazards.record(&["a"], Some("b"));
+
+        // encode `c = g(a)`: `a` was only READ (by `b`'s own encode), never
+        // WRITTEN, and `c` is a fresh output nothing has touched -> no hazard.
+        assert!(!hazards.needs_barrier(&["a"], Some("c")));
+        hazards.record(&["a"], Some("c"));
+
+        // encode `d = h(b, c)`: both inputs were WRITTEN since the last
+        // barrier (by the two steps above) -> a barrier is required.
+        assert!(hazards.needs_barrier(&["b", "c"], Some("d")));
+        encode_with_barrier_bookkeeping(&mut hazards, &mut barriers, &["b", "c"], Some("d"));
+
+        assert_eq!(
+            barriers, 1,
+            "exactly one barrier is required, immediately before encoding d"
+        );
+    }
+
+    /// `BufferArena` reuses a retired slot's whole buffer for a later
+    /// position (`metal-plan-stable-buffers`' own doc) -- `x` writes buffer
+    /// `slot0`, `y` (independent of `x`) reads `slot0` as `p`'s arena-chosen
+    /// output buffer... modeled here directly: `p` reads buffer `slot0` (a
+    /// WAR-eligible read), then a LATER op `q` is placed by the arena into
+    /// that SAME `slot0` identity. Writing `q` into a buffer just READ from
+    /// is a WAR hazard and must barrier even though `q` shares no operand
+    /// with `p`.
+    #[test]
+    fn arena_slot_reuse_after_a_read_emits_a_war_barrier() {
+        let mut hazards: HazardTracker<&str> = HazardTracker::default();
+        let mut barriers = 0;
+
+        // encode `p`, which reads `slot0` (some earlier op's live output).
+        assert!(!hazards.needs_barrier(&["slot0"], Some("p_out")));
+        hazards.record(&["slot0"], Some("p_out"));
+
+        // encode `q`, whose output the arena has placed into `slot0` itself
+        // -- the exact retired-slot-reuse shape `BufferArena::assign_slot`
+        // produces. `q` has no operand overlap with `p` at all; the hazard
+        // is purely WAR on the output identity.
+        assert!(
+            hazards.needs_barrier(&[], Some("slot0")),
+            "writing into a buffer read since the last barrier must be flagged WAR"
+        );
+        encode_with_barrier_bookkeeping(&mut hazards, &mut barriers, &[], Some("slot0"));
+
+        assert_eq!(barriers, 1, "the WAR reuse must emit exactly one barrier");
+    }
+
+    /// Mirrors the real driver's loop body: check, barrier-and-reset only on
+    /// a hazard, then always record.
+    fn encode_with_barrier_bookkeeping<Id: Eq + core::hash::Hash + Copy>(
+        hazards: &mut HazardTracker<Id>,
+        barriers: &mut u32,
+        inputs: &[Id],
+        output: Option<Id>,
+    ) {
+        if hazards.needs_barrier(inputs, output) {
+            hazards.reset();
+            *barriers += 1;
+        }
+        hazards.record(inputs, output);
     }
 }

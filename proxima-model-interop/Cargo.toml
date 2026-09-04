@@ -118,6 +118,8 @@ metal-output-placement = ["omega?/metal-output-placement"]
 metal-buffer-pool = ["omega?/metal-buffer-pool"]
 # passthrough to `omega/metal-plan-stable-buffers` so the decode harness can measure that arm.
 metal-plan-stable-buffers = ["omega?/metal-plan-stable-buffers"]
+# passthrough to `omega/metal-concurrent-dispatch` so the decode harness can measure that arm.
+metal-concurrent-dispatch = ["omega?/metal-concurrent-dispatch"]
 # passthrough to `omega/metal-wide-cooperative-reduce` so the decode harness can measure that arm.
 metal-wide-cooperative-reduce = ["omega?/metal-wide-cooperative-reduce"]
 # passthrough to `omega/metal-q4k-mask-fma` so the decode harness can measure that arm.
