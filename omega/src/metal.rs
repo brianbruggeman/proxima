@@ -769,8 +769,31 @@ pub fn execute_plan_with_placements(
                 log: "command buffer refused to hand out a compute encoder".to_string(),
             })?;
 
+    // `PROXIMA_PLACEMENT_POSITION_DUMP` -- diagnostic-only, `instrument`-gated,
+    // default-off, same convention as `PROXIMA_METAL_OP_PROFILE_STEP`
+    // (`generate.rs`'s own doc): prints each output-placed node's WRITE
+    // position and each of its aliased readers' own position, the direct
+    // evidence a write-before-read ordering claim needs (this function's own
+    // doc, "Within-call aliasing"). Unset in every production run.
+    #[cfg(feature = "instrument")]
+    let placement_dump = std::env::var("PROXIMA_PLACEMENT_POSITION_DUMP").is_ok();
     let mut pending_faults: Vec<PendingFault<'_>> = Vec::new();
     for (position, bound) in prepared.resolved.iter().enumerate() {
+        #[cfg(feature = "instrument")]
+        if placement_dump {
+            if output_placed.contains_key(&bound.node) {
+                std::eprintln!("write position={position} node={:?}", bound.node);
+            }
+            for (operand, _, _) in bound.operands() {
+                if input_placed.contains_key(operand) {
+                    std::eprintln!(
+                        "read  position={position} node={:?} reads={:?}",
+                        bound.node,
+                        operand
+                    );
+                }
+            }
+        }
         let placement = output_placed.get(&bound.node).copied();
         let fault = encode_op(
             &device,
@@ -843,6 +866,26 @@ pub fn execute_plan_named(
 ) -> Result<Evaluated, MetalError> {
     let blocks = resolve_named_blocks(&plan.program, named)?;
     execute_plan(plan, &blocks)
+}
+
+/// [`execute_plan_with_placements`] against a name-keyed block set -- the
+/// name-resolving sibling of [`execute_plan_named`], mirroring how that
+/// function wraps [`execute_plan`]. `blocks` (positional, for the per-node
+/// upload path) is resolved once via [`resolve_named_blocks`], then handed
+/// to `execute_plan_with_placements` unchanged; input-placed nodes skip that
+/// resolved entry's upload just as they do in the positional call.
+///
+/// # Errors
+/// Propagates name-resolution and Metal driver failures.
+#[cfg(feature = "metal-output-placement")]
+pub fn execute_plan_named_with_placements(
+    plan: &Plan,
+    named: &[(&str, QuantizedBlock<'_>)],
+    input_placements: &[(NodeId, &PlacedBuffer, usize)],
+    output_placements: &[(NodeId, &PlacedBuffer, usize)],
+) -> Result<Evaluated, MetalError> {
+    let blocks = resolve_named_blocks(&plan.program, named)?;
+    execute_plan_with_placements(plan, &blocks, input_placements, output_placements)
 }
 
 /// One [`BoundOp`]'s GPU-only execution time and the operand bytes it read,
@@ -1290,6 +1333,29 @@ fn prepare(
     // nobody reads is to drop it from `resolved` before it ever reaches a
     // dispatch list. See `prune_dead`'s own doc.
     resolved = prune_dead(resolved, &effective_outputs);
+    // `BoundOpBuilder::finish` (`proxima-tensor`'s `bind.rs`) flushes every
+    // held elementwise op -- requested output or not -- at the very END of
+    // the walk, ascending by `NodeId` among themselves, regardless of where
+    // its dependencies or its own program position sit. That is correct for
+    // a plain [`execute_plan`] call, where "when a value is computed" never
+    // matters to a caller that only reads it back after the whole command
+    // buffer completes. It is WRONG for a placed *output*
+    // ([`execute_plan_with_placements`]'s own doc) this same call also
+    // aliases as a placed *input* elsewhere in the SAME program (the
+    // KV-cache shape that doc's "Within-call aliasing" section describes):
+    // Metal's hazard tracking only orders two dispatches by ENCODE order, so
+    // a deferred write encoded after a consumer that reads the SAME buffer
+    // through its aliased `Op::Input` leaves that consumer reading stale
+    // bytes. This promotes every `effective_outputs` node forward to right
+    // after the latest position its own real operands already occupy -- the
+    // position it would have held had `finish` never deferred it -- without
+    // touching `BoundOpBuilder`'s own push/finish policy, which stays
+    // correct for ordinary (non-aliased) outputs and is unchanged here. A
+    // node this call means to output-place but never declared as an
+    // `outputs` entry is invisible to this pass AND to `prune_dead` above --
+    // see [`execute_plan_with_placements`]'s own doc for why every placed
+    // output must be a declared output.
+    promote_output_placed_nodes(&mut resolved, &effective_outputs);
     // `bind`'s own `layout_of` assumes every operand is stored row-major in
     // its DECLARED axis order -- true for every f32 buffer this driver reads
     // (bound-time-transposed to match, `bind_matmul_weight`'s own doc), but
@@ -1371,6 +1437,82 @@ fn gpu_dtype(program: &[Op], index_nodes: &BTreeSet<NodeId>, node: NodeId) -> DT
 
 fn element_count(shape: &[u64]) -> usize {
     shape.iter().product::<u64>() as usize
+}
+
+/// Moves every node named in `effective_outputs` to just after the latest
+/// position its own operands already occupy in `resolved` -- see this
+/// function's own call site in [`prepare`] for why. A no-op for any node
+/// already there (every `Reduce` root: `BoundOpBuilder::push` emits those
+/// immediately, never defers them).
+///
+/// A node with NO operand present in `resolved` at all (every real operand
+/// is an `Op::Input` leaf) is left exactly where `finish` put it, not
+/// pulled to the front: this function only sees the declared tensor-graph
+/// operands, never the OTHER kind of ordering constraint this whole module
+/// exists for -- one node's placed OUTPUT and a different node's placed
+/// INPUT aliasing the SAME `PlacedBuffer`, which is invisible to
+/// `proxima-tensor`'s graph entirely (the caller supplies that aliasing at
+/// execute time, not plan time). A zero-real-operand output can be the
+/// aliased READER half of exactly that pair
+/// (`omega/tests/metal_output_placement.rs`'s
+/// `a_program_reads_a_placed_write_from_a_later_op_in_the_same_call` is
+/// this shape), and moving it to position `0` would place it BEFORE the
+/// write it depends on for correctness, the same bug class this function
+/// exists to fix, just on the other node. Leaving it at `finish`'s own
+/// position is always safe for this shape: every node `finish` flushes is
+/// already in ascending `NodeId` order relative to every OTHER flushed
+/// node (its own doc), so two zero-real-operand outputs still come out in
+/// their aliasing-write-then-read order as long as neither is promoted.
+///
+/// `resolved` is already a valid topological order before this call
+/// (`BoundOpBuilder`'s own invariant: a reference only ever points
+/// backwards), so every candidate with a real dependency has a target
+/// position provably `<=` its current one -- this only ever pulls a node
+/// EARLIER, never later, so it cannot itself introduce a forward reference.
+fn promote_output_placed_nodes(resolved: &mut Vec<BoundOp>, effective_outputs: &[NodeId]) {
+    let outputs: BTreeSet<NodeId> = effective_outputs.iter().copied().collect();
+    if outputs.is_empty() {
+        return;
+    }
+    let candidates: Vec<NodeId> = resolved
+        .iter()
+        .filter(|bound| outputs.contains(&bound.node))
+        .map(|bound| bound.node)
+        .collect();
+
+    for node in candidates {
+        // Recomputed fresh every iteration, not cached across the loop: an
+        // earlier candidate's own move can shift this node's (and its
+        // operands') position by one, and `resolved`'s exact current order
+        // is the only thing this function is allowed to trust.
+        let index_of: BTreeMap<NodeId, usize> = resolved
+            .iter()
+            .enumerate()
+            .map(|(index, bound)| (bound.node, index))
+            .collect();
+        let Some(current_index) = index_of.get(&node).copied() else {
+            continue;
+        };
+        let dependency_index = resolved[current_index]
+            .operands()
+            .iter()
+            .filter_map(|(source, _, gather)| {
+                let mut latest = index_of.get(source).copied();
+                if let Some(lookup) = gather {
+                    latest = latest.max(index_of.get(&lookup.indices).copied());
+                }
+                latest
+            })
+            .max();
+        let Some(dependency) = dependency_index else {
+            continue;
+        };
+        let target_index = dependency + 1;
+        if target_index < current_index {
+            let bound = resolved.remove(current_index);
+            resolved.insert(target_index, bound);
+        }
+    }
 }
 
 /// The output length an op needs allocated: the reduced (product of

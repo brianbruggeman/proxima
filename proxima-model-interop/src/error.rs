@@ -141,6 +141,24 @@ pub enum InteropError {
     #[error("plan cache for shape {shape:?} is missing the entry inserted moments earlier")]
     PlanCacheEntryVanished { shape: (usize, usize) },
 
+    /// [`crate::generate::find_input_node`] scanned the single-range
+    /// program for an [`proxima_tensor::Op::Input`] named `name` and found
+    /// none -- would mean [`crate::generate::build_single_range_program`]'s
+    /// own `kv_cache.{layer}.*` naming has drifted out of sync with
+    /// [`proxima_tensor::spec::mistral_single_range_cached_forward_program`]'s.
+    #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
+    #[error("single-range program has no input node named {0:?}")]
+    UnboundInputName(String),
+
+    /// [`crate::generate::BackendRuntime::evaluate_with_placements`]'s
+    /// direct `omega::metal` plan/execute call (bypassing the
+    /// backend-polymorphic `omega::backend` entry point, since
+    /// [`omega::PlacedBuffer`] is Metal-only) failed -- propagated from
+    /// `omega::metal` rather than re-derived.
+    #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
+    #[error(transparent)]
+    Metal(#[from] omega::metal::MetalError),
+
     /// [`crate::serving::apply_serving_config`]'s prompt-length precondition:
     /// `sequence` (the tokenized prompt length) exceeds the caller's own
     /// configured `context_length` (`-c`).
