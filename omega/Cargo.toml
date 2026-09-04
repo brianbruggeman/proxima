@@ -100,6 +100,31 @@ metal-tiled-gemm = ["metal"]
 # mechanism argument alone (see `docs/discipline.md`, row assigned
 # centrally).
 metal-q4k-mask-fma = ["metal"]
+# Row-blocked packed-`Q4_K` matvec lane remap (`msl.rs`'s
+# `push_q4k_single_fetch_body`): eliminates the redundant paired-lane load
+# in `push_packed_row_blocked_body`'s default `Q4_K` lane assignment, where
+# lanes `2r`/`2r+1` issue the SAME 32-byte `qs` load and differ only in
+# which nibble half they keep. Default-off, same posture as
+# `metal-tiled-gemm` above: a second, riskier lane-index scheme for the
+# hottest decode kernel, and does not earn the production default until an
+# e2e bench on the real decode graph shows it wins. Depends on `metal` for
+# the same reason `metal-tiled-gemm` does: the codegen itself is alloc-tier
+# `msl.rs`, but the alternate lane math only has meaning for a Metal
+# dispatch. NOTE: `q4k_pair_dot`'s own `plain_product` arm (float-only,
+# `element_type == "float"` AND the scale-deferred shape) takes priority over
+# this feature -- see `push_packed_row_blocked_body`'s own arm ordering --
+# since `push_q4k_single_fetch_body` is a fully self-contained kernel body
+# (its own dispatch loop, not routed through the shared lane-spread
+# preamble/match), it is checked BEFORE `metal-q4k-mask-fma`'s masked header
+# decode and wins over it whenever both are enabled: `metal-q4k-mask-fma`'s
+# masked extraction has no effect on the single-fetch body, a separate,
+# self-contained kernel verified correct against its own oracle test
+# independent of `push_q4k_product_reduce_body`. Not invented to compose
+# with `metal-q4k-split-k` either: `push_q4k_single_fetch_body` has no
+# split-aware dispatch loop of its own, so enabling both together simply
+# runs the single-fetch body without split-K's extra parallelism -- correct,
+# not combined.
+metal-q4k-single-fetch = ["metal"]
 # Widens the cooperative-reduce (`msl.rs`'s `push_cooperative_reduce_body`)
 # threadgroup dispatch from a hardcoded `SIMD_WIDTH` (32) to
 # `cooperative_reduce_width`'s reduction-extent-scaled width, plus the

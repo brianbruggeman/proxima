@@ -322,6 +322,47 @@ static inline void q4k_run8(device const uchar *block, uint index, thread float 
     out[6] = (float)((w1 >> (shift + 16u)) & 0xFu);
     out[7] = (float)((w1 >> (shift + 24u)) & 0xFu);
 }
+
+// `metal-q4k-single-fetch` (opt-in, see `push_q4k_single_fetch_body`): ONE
+// 8-byte (two-word) load, BOTH nibble halves of it -- eight low-nibble
+// levels (elements `low_index .. low_index+8`) AND the eight high-nibble
+// levels of the SAME bytes (elements `low_index+32 .. low_index+40`, ggml's
+// and `dequantize_row_q4_K`'s own "32 elements apart, same byte" pairing —
+// see `q4_k.rs::dequantize_block`'s doc). `q4k_run8` above issues this exact
+// load TWICE for the pair of lanes that owns a byte range (once per nibble
+// half); this issues it ONCE and reads out both halves, which is the whole
+// point of the feature. `low_index` must be a "low" index (`index % 64 <
+// 32`) — callers only ever pass one of `sf_low_base + c*8`.
+static inline void q4k_run8_dual(
+    device const uchar *block,
+    uint low_index,
+    thread float *out_low,
+    thread float *out_high
+) {
+    device const uchar *qs = block + 16;
+    uint group = low_index / 64u;
+    uint within = low_index % 64u;
+    uint byte_index = group * 32u + within;
+    device const uint *words = (device const uint *)(qs + byte_index);
+    uint w0 = words[0];
+    uint w1 = words[1];
+    out_low[0] = (float)((w0 >>  0u) & 0xFu);
+    out_low[1] = (float)((w0 >>  8u) & 0xFu);
+    out_low[2] = (float)((w0 >> 16u) & 0xFu);
+    out_low[3] = (float)((w0 >> 24u) & 0xFu);
+    out_low[4] = (float)((w1 >>  0u) & 0xFu);
+    out_low[5] = (float)((w1 >>  8u) & 0xFu);
+    out_low[6] = (float)((w1 >> 16u) & 0xFu);
+    out_low[7] = (float)((w1 >> 24u) & 0xFu);
+    out_high[0] = (float)((w0 >>  4u) & 0xFu);
+    out_high[1] = (float)((w0 >> 12u) & 0xFu);
+    out_high[2] = (float)((w0 >> 20u) & 0xFu);
+    out_high[3] = (float)((w0 >> 28u) & 0xFu);
+    out_high[4] = (float)((w1 >>  4u) & 0xFu);
+    out_high[5] = (float)((w1 >> 12u) & 0xFu);
+    out_high[6] = (float)((w1 >> 20u) & 0xFu);
+    out_high[7] = (float)((w1 >> 28u) & 0xFu);
+}
 "#;
 
 /// `metal-q4k-mask-fma` (default-off): mask-without-shift ports of
@@ -3039,6 +3080,46 @@ fn push_packed_row_blocked_body(
         let plain_product = matches!(codec, PackedCodec::Q4K)
             && element_type == "float"
             && is_plain_product_reduce(resolved, reduce_op, weight, other);
+        // `metal-q4k-single-fetch` (default-off): eliminates the redundant
+        // paired-lane load the default `Q4_K` lane assignment below makes --
+        // see `push_q4k_single_fetch_body`'s own doc. Checked after
+        // `plain_product` (`q4k_pair_dot`'s float-only arm keeps priority --
+        // neither is a self-contained kernel body the way this one is, so
+        // `q4k_pair_dot` stays the fastest-known path where it applies) and
+        // takes priority over everything else below it (the scale-deferred/
+        // mask-fma arm, the per-element fallback): `push_q4k_single_fetch_body`
+        // is fully self-contained (its own dispatch loop, not routed through
+        // the lane-spread preamble this `else` arm builds), so it replaces
+        // that whole preamble+match rather than plugging into one arm of it.
+        // ALSO requires `metal-q4k-split-k` off: `emit`'s own dispatch-geometry
+        // setup (`kernel_dispatch_shape`) computes `sgitg`/`split` purely off
+        // that feature flag, unconditionally, for every row-blocked op --
+        // `push_q4k_single_fetch_body`'s `ib` loop has no `sgitg`/`split`
+        // awareness of its own (measured: under `--all-features` its sum came
+        // out ~7x too large, consistent with every one of `split` simdgroups
+        // redundantly summing the SAME full reduction instead of a disjoint
+        // 1/split slice). Correct fix, not a silent one: `plain_product`/the
+        // default/mask-fma `else` arm are already split-K-aware (they read
+        // `sgitg`/`split` when the feature is on), so gating single-fetch off
+        // here just means split-K wins whenever BOTH features are compiled
+        // in, same "not invented to compose" posture as its other arms.
+        let use_single_fetch = matches!(codec, PackedCodec::Q4K)
+            && !plain_product
+            && cfg!(feature = "metal-q4k-single-fetch")
+            && !cfg!(feature = "metal-q4k-split-k");
+        if use_single_fetch {
+            push_q4k_single_fetch_body(
+                source,
+                resolved,
+                reduce_op,
+                weight,
+                other,
+                element_type,
+                operand_count,
+                rows,
+                block_bytes,
+            );
+        } else {
         source.push_str(&format!("    uint ix = (uint)lane / {lanes_per_block}u;\n"));
         source.push_str(&format!("    uint it = (uint)lane % {lanes_per_block}u;\n"));
         source.push_str(&format!("    uint slot = it * {sub}u;\n"));
@@ -3243,6 +3324,7 @@ fn push_packed_row_blocked_body(
         }
         source.push_str("        }\n");
         source.push_str("    }\n");
+        }
         push_packed_row_combine_and_write(
             source,
             reduce_op,
@@ -3253,6 +3335,171 @@ fn push_packed_row_blocked_body(
             element_type,
         );
     }
+}
+
+/// `metal-q4k-single-fetch` (default-off): the row-blocked packed-`Q4_K`
+/// path's `it`/`slot` lane assignment, above, gives lanes `2r` and `2r+1`
+/// (`r` = one of the super-block's 4 64-element groups) the SAME 32-byte
+/// `qs` range — `q4k_run8` loads it twice, once per lane, differing only in
+/// which nibble half each keeps (`shift` 0 vs 4). This function replaces
+/// that pairing: `sf_half` (still `it % 2`) now selects a DISTINCT 16-byte
+/// half of the group's 32 bytes, and `q4k_run8_dual`
+/// extracts BOTH nibble halves from each byte it loads, so the pair's two
+/// lanes together read the group's 32 bytes exactly once instead of twice.
+///
+/// Dispatch geometry is untouched: `ix = lane/8` and the `ib += 4` stride
+/// are identical to the duplicate-fetch path, so this is a change to which
+/// BYTES a lane owns and what it does with them, not to thread count,
+/// simdgroups-per-threadgroup, or `PACKED_ROWS_PER_GROUP`. Not `split-K`
+/// aware -- this function owns its own complete dispatch loop rather than
+/// plugging into the shared lane-spread preamble `metal-q4k-split-k`
+/// modifies, so the two features do not compose (see this feature's own
+/// Cargo.toml doc).
+///
+/// Correctness hazard this function exists to get right: a `qs` byte's low
+/// nibble and high nibble belong to DIFFERENT 32-element sub-blocks with
+/// DIFFERENT 6-bit `(scale, min)` pairs (`q4_k.rs::dequantize_block`'s own
+/// doc — elements land "32 output elements apart", not adjacent). A lane
+/// that decodes both nibbles of a byte therefore needs BOTH sub-blocks'
+/// headers (`hdr_low`/`hdr_high`), never one. `q4k_header_for(blk,
+/// sf_low_base)` and `q4k_header_for(blk, sf_high_base)` resolve to the
+/// same two sub-block indices for `sf_half == 0` and `sf_half == 1` alike
+/// (`sf_low_base % 64` is `0` or `16`, both `< 32`; `sf_high_base % 64` is
+/// `32` or `48`, both `>= 32`), so both this lane's low-half partial sum and
+/// its pair-partner's low-half partial sum are scaled by the IDENTICAL
+/// `hdr_low`, and summing them via `simd_sum` after the `ib` loop
+/// reconstructs the same per-sub-block total the duplicate-fetch path
+/// computes — see this function's own algebra note on the scale-deferred
+/// arm below.
+#[allow(clippy::too_many_arguments)]
+fn push_q4k_single_fetch_body(
+    source: &mut String,
+    resolved: &BoundOp,
+    reduce_op: ScalarOp,
+    weight: usize,
+    other: usize,
+    element_type: &str,
+    operand_count: usize,
+    rows: usize,
+    block_bytes: usize,
+) {
+    source.push_str("    uint ix = (uint)lane / 8u;\n");
+    source.push_str("    uint it = (uint)lane % 8u;\n");
+    source.push_str("    uint sf_region = it / 2u;\n");
+    source.push_str("    uint sf_half = it % 2u;\n");
+    source.push_str("    uint sf_low_base = sf_region * 64u + sf_half * 16u;\n");
+    source.push_str("    uint sf_high_base = sf_low_base + 32u;\n");
+    source.push_str(&format!(
+        "    int super_blocks = (int)u.reduction_total / {Q4K_BLOCK_ELEMENTS};\n"
+    ));
+    source.push_str("    for (int ib = (int)ix; ib < super_blocks; ib += 4) {\n");
+    source.push_str("        int elem0_low = ib * 256 + (int)sf_low_base;\n");
+    source.push_str("        int elem0_high = ib * 256 + (int)sf_high_base;\n");
+    source.push_str(&format!("        for (int q = 0; q < {rows}; ++q) {{\n"));
+    source.push_str(&format!(
+        "            device const uchar *blk = in{weight} + ((int)weight_base[q] / {Q4K_BLOCK_ELEMENTS} + ib) * {block_bytes};\n"
+    ));
+    source.push_str("            q4k_header hdr_low = q4k_header_for(blk, sf_low_base);\n");
+    source.push_str("            q4k_header hdr_high = q4k_header_for(blk, sf_high_base);\n");
+    if is_plain_product_reduce(resolved, reduce_op, weight, other) {
+        // SCALE-DEFERRED, split across TWO sub-blocks instead of one: this
+        // lane covers 16 of sub-block-A's 32 elements (`raw_low`/`act_low`)
+        // and 16 of sub-block-B's 32 (`raw_high`/`act_high`) — its pair
+        // partner (`sf_half` flipped, same `sf_region`) covers the other 16
+        // of each. `sum_j (scale*nibble_j - min)*act_j == scale*sum(nibble_j
+        // *act_j) - min*sum(act_j)` (the same identity
+        // `is_plain_product_reduce`'s caller already proved licenses) holds
+        // per HALF exactly as it holds per whole sub-block, and addition
+        // distributes over the two halves, so `simd_sum` over both lanes in
+        // a pair reconstructs the identical two sub-block totals the
+        // duplicate-fetch path computes in one lane each.
+        source.push_str(&format!("            {element_type} raw_low = 0;\n"));
+        source.push_str(&format!("            {element_type} act_low = 0;\n"));
+        source.push_str(&format!("            {element_type} raw_high = 0;\n"));
+        source.push_str(&format!("            {element_type} act_high = 0;\n"));
+        source.push_str("            for (int c = 0; c < 2; ++c) {\n");
+        source.push_str("                float low_levels[8];\n");
+        source.push_str("                float high_levels[8];\n");
+        source.push_str(
+            "                q4k_run8_dual(blk, sf_low_base + (uint)(c * 8), low_levels, high_levels);\n",
+        );
+        source.push_str("                for (int j = 0; j < 8; ++j) {\n");
+        source.push_str(&format!(
+            "                    {element_type} act_l = in{other}[other_base[0] + (long)(elem0_low + c * 8 + j) * other_stride];\n"
+        ));
+        source.push_str(&format!(
+            "                    {element_type} act_h = in{other}[other_base[0] + (long)(elem0_high + c * 8 + j) * other_stride];\n"
+        ));
+        source.push_str("                    raw_low += low_levels[j] * act_l;\n");
+        source.push_str("                    act_low += act_l;\n");
+        source.push_str("                    raw_high += high_levels[j] * act_h;\n");
+        source.push_str("                    act_high += act_h;\n");
+        source.push_str("                }\n");
+        source.push_str("            }\n");
+        source.push_str(
+            "            sumf[q] = sumf[q] + hdr_low.scale * raw_low - hdr_low.minimum * act_low + hdr_high.scale * raw_high - hdr_high.minimum * act_high;\n",
+        );
+    } else {
+        source.push_str("            for (int c = 0; c < 2; ++c) {\n");
+        source.push_str("                float low_levels[8];\n");
+        source.push_str("                float high_levels[8];\n");
+        source.push_str(
+            "                q4k_run8_dual(blk, sf_low_base + (uint)(c * 8), low_levels, high_levels);\n",
+        );
+        source.push_str("                for (int j = 0; j < 8; ++j) {\n");
+        source.push_str(&format!(
+            "                    {element_type} scratch[{}];\n",
+            operand_count.max(1)
+        ));
+        source.push_str(&format!(
+            "                    scratch[{weight}] = hdr_low.scale * low_levels[j] - hdr_low.minimum;\n"
+        ));
+        source.push_str(&format!(
+            "                    scratch[{other}] = in{other}[other_base[0] + (long)(elem0_low + c * 8 + j) * other_stride];\n"
+        ));
+        let low_value_expr = push_body_steps(
+            source,
+            resolved.element_body(),
+            "                    ",
+            element_type,
+        );
+        source.push_str(&format!(
+            "                    {element_type} value = {low_value_expr};\n"
+        ));
+        let low_combine_expr = scalar_op_expr(reduce_op, &["sumf[q]", "value"]);
+        source.push_str(&format!(
+            "                    sumf[q] = {low_combine_expr};\n"
+        ));
+        source.push_str("                }\n");
+        source.push_str("                for (int j = 0; j < 8; ++j) {\n");
+        source.push_str(&format!(
+            "                    {element_type} scratch[{}];\n",
+            operand_count.max(1)
+        ));
+        source.push_str(&format!(
+            "                    scratch[{weight}] = hdr_high.scale * high_levels[j] - hdr_high.minimum;\n"
+        ));
+        source.push_str(&format!(
+            "                    scratch[{other}] = in{other}[other_base[0] + (long)(elem0_high + c * 8 + j) * other_stride];\n"
+        ));
+        let high_value_expr = push_body_steps(
+            source,
+            resolved.element_body(),
+            "                    ",
+            element_type,
+        );
+        source.push_str(&format!(
+            "                    {element_type} value = {high_value_expr};\n"
+        ));
+        let high_combine_expr = scalar_op_expr(reduce_op, &["sumf[q]", "value"]);
+        source.push_str(&format!(
+            "                    sumf[q] = {high_combine_expr};\n"
+        ));
+        source.push_str("                }\n");
+        source.push_str("            }\n");
+    }
+    source.push_str("        }\n");
+    source.push_str("    }\n");
 }
 
 /// `simdgroup_matrix`-tiled Q4_K x F32 GEMM (`docs/discipline.md` ROW 109,
@@ -4485,6 +4732,63 @@ mod tests {
             .expect("one fused bound emitted")
     }
 
+    /// [`matmul_op`]'s `Float16` counterpart -- `q4k_pair_dot`'s own
+    /// `plain_product` arm (`push_packed_row_blocked_body`'s own gate) is
+    /// `element_type == "float"`-only, so a fixture that needs to reach a
+    /// DIFFERENT row-blocked Q4_K arm (mask-fma's, single-fetch's) must NOT
+    /// be plain-`Float32`-shaped, or `q4k_pair_dot` wins over it every time.
+    #[cfg(all(feature = "metal-q4k-single-fetch", not(feature = "metal-q4k-split-k")))]
+    fn matmul_op_f16(m: u32, k: u32, n: u32) -> BoundOp {
+        let mut program = Vec::new();
+        let lhs = append(
+            &mut program,
+            Op::Input {
+                dtype: DType::Float16,
+                shape: vec![Extent::Static(m), Extent::Static(k)],
+                name: None,
+            },
+        );
+        let rhs = append(
+            &mut program,
+            Op::Input {
+                dtype: DType::Float16,
+                shape: vec![Extent::Static(k), Extent::Static(n)],
+                name: None,
+            },
+        );
+        let product = append(
+            &mut program,
+            Op::Elementwise {
+                dtype: DType::Float16,
+                body: ScalarOp::Multiply,
+                operands: vec![
+                    (lhs, IndexMap::Affine(map::projection(3, &[0, 2]))),
+                    (rhs, IndexMap::Affine(map::projection(3, &[2, 1]))),
+                ],
+                name: None,
+            },
+        );
+        append(
+            &mut program,
+            Op::Reduce(Reduce {
+                dtype: DType::Float16,
+                body: ScalarOp::Add,
+                init: ReduceInit::Zero,
+                operand: product,
+                in_map: IndexMap::Affine(map::projection(3, &[0, 1, 2])),
+                out_map: IndexMap::Affine(map::projection(3, &[0, 1])),
+                keep: Keep::Reduce,
+                name: Some("matmul_f16".into()),
+            }),
+        );
+        let shapes = infer(&program, &[]).expect("f16 matmul infers");
+        bind(&program, &shapes, &[])
+            .expect("f16 matmul lowers")
+            .into_iter()
+            .next()
+            .expect("one fused bound emitted")
+    }
+
     #[test]
     fn q4k_row_blocked_matmul_uses_paired_nibble_decode() {
         // 256 == Q4K_BLOCK_ELEMENTS exactly: one super-block, so
@@ -4507,6 +4811,42 @@ mod tests {
         );
         assert!(
             !source.contains("hdr.scale * levels[j] - hdr.minimum"),
+            "the per-element dequant expression must not remain once the scale-deferred path is taken:\n{source}"
+        );
+    }
+
+    /// `metal-q4k-single-fetch` sibling of the test above: the lane remap
+    /// renames the scale-deferred accumulators (`raw_low`/`raw_high` in
+    /// place of `q4k_pair_dot`, one pair per sub-block half — see
+    /// `push_q4k_single_fetch_body`'s own algebra note) but the SAME
+    /// dichotomy holds — Add-reduce over a plain product still defers the
+    /// scale, never falls back to per-element dequant. `matmul_op_f16`, not
+    /// `matmul_op`: `q4k_pair_dot`'s own `plain_product` arm is
+    /// `element_type == "float"`-only and takes priority over this feature
+    /// (see `metal-q4k-single-fetch`'s own Cargo.toml doc), so a `Float32`
+    /// fixture would silently exercise `q4k_pair_dot` instead and this
+    /// test would assert nothing about single-fetch at all.
+    #[cfg(all(feature = "metal-q4k-single-fetch", not(feature = "metal-q4k-split-k")))]
+    #[test]
+    fn q4k_row_blocked_matmul_defers_scale_to_once_per_sub_block_single_fetch() {
+        let bound = matmul_op_f16(4, 256, 5);
+        let weight_node = bound.operands()[0].0;
+        let mut q4k = BTreeMap::new();
+        q4k.insert(weight_node, PackedCodec::Q4K);
+
+        assert!(
+            packed_row_block(&bound, &operand_codecs(&bound, &q4k)).is_some(),
+            "test fixture must actually take the row-blocked path for this assertion to mean anything"
+        );
+
+        let source = emit(&bound, &q4k).expect("emits").source;
+        assert!(
+            source.contains("raw_low") && source.contains("raw_high"),
+            "Add-reduce over a plain weight*activation body must take the scale-deferred path, split across both sub-block halves:\n{source}"
+        );
+        assert!(
+            !source.contains("hdr_low.scale * low_levels[j] - hdr_low.minimum")
+                && !source.contains("hdr_high.scale * high_levels[j] - hdr_high.minimum"),
             "the per-element dequant expression must not remain once the scale-deferred path is taken:\n{source}"
         );
     }
@@ -4590,6 +4930,7 @@ mod tests {
         );
     }
 
+    #[cfg(not(all(feature = "metal-q4k-single-fetch", not(feature = "metal-q4k-split-k"))))]
     #[test]
     fn q4k_row_blocked_non_add_reduce_keeps_the_per_element_path() {
         // Same fused `weight * activation` body as the matmul shape above,
@@ -4615,6 +4956,37 @@ mod tests {
         assert!(
             source.contains("hdr.scale * levels[j] - hdr.minimum"),
             "a Maximum reduce must keep dequantizing per element:\n{source}"
+        );
+    }
+
+    /// `metal-q4k-single-fetch` sibling of the test above: the lane remap
+    /// renames the per-element dequant expression (`hdr_low`/`hdr_high` in
+    /// place of `hdr`, one pair per sub-block half — see
+    /// `push_q4k_single_fetch_body`'s own doc) but the SAME dichotomy holds
+    /// — a Maximum reduce still falls back to dequantizing per element,
+    /// never the scale-deferred accumulators either arm uses for Add.
+    #[cfg(all(feature = "metal-q4k-single-fetch", not(feature = "metal-q4k-split-k")))]
+    #[test]
+    fn q4k_row_blocked_non_add_reduce_keeps_the_per_element_path_single_fetch() {
+        let bound = matmul_op_with_reduce(4, 256, 5, ScalarOp::Maximum);
+        let weight_node = bound.operands()[0].0;
+        let mut q4k = BTreeMap::new();
+        q4k.insert(weight_node, PackedCodec::Q4K);
+
+        assert!(
+            packed_row_block(&bound, &operand_codecs(&bound, &q4k)).is_some(),
+            "test fixture must actually take the row-blocked path for this assertion to mean anything"
+        );
+
+        let source = emit(&bound, &q4k).expect("emits").source;
+        assert!(
+            !source.contains("raw_low") && !source.contains("raw_high"),
+            "a Maximum reduce must never take the scale-deferred path, its identity does not hold under max:\n{source}"
+        );
+        assert!(
+            source.contains("hdr_low.scale * low_levels[j] - hdr_low.minimum")
+                && source.contains("hdr_high.scale * high_levels[j] - hdr_high.minimum"),
+            "a Maximum reduce must keep dequantizing per element, both sub-block halves:\n{source}"
         );
     }
 
