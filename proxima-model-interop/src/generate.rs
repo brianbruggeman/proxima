@@ -353,6 +353,127 @@ fn phys_footprint_bytes() -> u64 {
     info.phys_footprint
 }
 
+/// Every field [`print_token_breakdown`] needs to print one `token_breakdown`
+/// line -- shared by [`LoadedModel::run_decode_loop`]'s default two-range
+/// arm and [`LoadedModel::run_decode_loop_placed_kv`]'s device-resident arm
+/// so the two paths print the identical line shape from ONE format string
+/// rather than each hand-rolling `std::println!` with its own field list
+/// (the placed-KV arm used to hardcode `kv_cache_upload_bytes`/`evaluate_ms`/
+/// `layer_cache_append_ms` as literal zeros here -- a real regression, since
+/// the placed arm's evaluate call is the same cost the two-range arm times).
+#[cfg(feature = "instrument")]
+struct TokenBreakdown {
+    step: usize,
+    new_count: usize,
+    cached_len_before: usize,
+    step_wall_ticks: u64,
+    apply_serving_config_ticks: u64,
+    build_position_inputs_ticks: u64,
+    named_blocks_weights_ticks: u64,
+    named_blocks_kv_ticks: u64,
+    kv_cache_upload_bytes: u64,
+    evaluate_ticks: u64,
+    layer_cache_append_ticks: u64,
+    layer_cache_append_bytes: u64,
+    greedy_pick_ticks: u64,
+}
+
+#[cfg(feature = "instrument")]
+fn print_token_breakdown(breakdown: &TokenBreakdown) {
+    let ms = |ticks: u64| ticks_to_nanos(ticks) as f64 / 1e6;
+    let TokenBreakdown {
+        step,
+        new_count,
+        cached_len_before,
+        step_wall_ticks,
+        apply_serving_config_ticks,
+        build_position_inputs_ticks,
+        named_blocks_weights_ticks,
+        named_blocks_kv_ticks,
+        kv_cache_upload_bytes,
+        evaluate_ticks,
+        layer_cache_append_ticks,
+        layer_cache_append_bytes,
+        greedy_pick_ticks,
+    } = *breakdown;
+    std::println!(
+        "token_breakdown step={step} new_count={new_count} cached_len_before={cached_len_before} \
+     step_wall_ms={:.3} apply_serving_config_ms={:.3} build_position_inputs_ms={:.3} \
+     named_blocks_weights_ms={:.3} named_blocks_kv_ms={:.3} kv_cache_upload_bytes={kv_cache_upload_bytes} \
+     evaluate_ms={:.3} layer_cache_append_ms={:.3} layer_cache_append_bytes={layer_cache_append_bytes} \
+     greedy_pick_ms={:.3}",
+        ms(step_wall_ticks),
+        ms(apply_serving_config_ticks),
+        ms(build_position_inputs_ticks),
+        ms(named_blocks_weights_ticks),
+        ms(named_blocks_kv_ticks),
+        ms(evaluate_ticks),
+        ms(layer_cache_append_ticks),
+        ms(greedy_pick_ticks),
+    );
+}
+
+/// [`print_token_breakdown`]'s Metal-stage counterpart -- same sharing
+/// rationale, same two call sites. `metal_stage` is this step's own
+/// snapshot-and-reset delta ([`metal_stage_totals`]'s own doc), so it is
+/// correct to call from either decode arm as long as it is read exactly
+/// once per step, immediately after that step's `evaluate`/
+/// `evaluate_with_placements` call.
+#[cfg(all(feature = "instrument", feature = "metal", target_os = "macos"))]
+fn print_token_breakdown_metal(
+    step: usize,
+    metal_stage: &omega::metal::MetalStageTotals,
+    plan_cache_len: usize,
+    plan_hits: usize,
+    plan_misses: usize,
+) {
+    let ms = |ticks: u64| ticks_to_nanos(ticks) as f64 / 1e6;
+    std::println!(
+        "token_breakdown_metal step={step} prepare_calls={} prepare_ms={:.3} \
+     emit_calls={} emit_ms={:.3} pipeline_hits={} pipeline_misses={} pipeline_compile_ms={:.3} \
+     block_upload_calls={} block_upload_ms={:.3} block_upload_bytes={} \
+     op_setup_calls={} op_setup_ms={:.3} \
+     pipeline_lookup_calls={} pipeline_lookup_ms={:.3} \
+     encode_dispatch_calls={} encode_dispatch_ms={:.3} \
+     gpu_exec_calls={} gpu_exec_ms={:.3} \
+     readback_calls={} readback_ms={:.3} readback_bytes={} \
+     nocopy_uploads={} copying_uploads={} nocopy_reuses={} \
+     resident_uploads={} resident_reuses={} mapping_offset_uploads={} \
+     nocopy_cache_len={} phys_footprint_bytes={} device_allocated_bytes={} \
+     plan_cache_len={plan_cache_len} plan_hits={plan_hits} plan_misses={plan_misses}",
+        metal_stage.prepare_calls,
+        ms(metal_stage.prepare_ticks),
+        metal_stage.emit_calls,
+        ms(metal_stage.emit_ticks),
+        metal_stage.pipeline_hits,
+        metal_stage.pipeline_misses,
+        ms(metal_stage.pipeline_compile_ticks),
+        metal_stage.block_upload_calls,
+        ms(metal_stage.block_upload_ticks),
+        metal_stage.block_upload_bytes,
+        metal_stage.op_setup_calls,
+        ms(metal_stage.op_setup_ticks),
+        metal_stage.pipeline_lookup_calls,
+        ms(metal_stage.pipeline_lookup_ticks),
+        metal_stage.encode_dispatch_calls,
+        ms(metal_stage.encode_dispatch_ticks),
+        metal_stage.gpu_exec_calls,
+        ms(metal_stage.gpu_exec_ticks),
+        metal_stage.readback_calls,
+        ms(metal_stage.readback_ticks),
+        metal_stage.readback_bytes,
+        metal_stage.nocopy_uploads,
+        metal_stage.copying_uploads,
+        metal_stage.nocopy_reuses,
+        metal_stage.resident_uploads,
+        metal_stage.resident_reuses,
+        metal_stage.mapping_offset_uploads,
+        omega::metal::nocopy_cache_len(),
+        phys_footprint_bytes(),
+        omega::metal::current_allocated_size().unwrap_or(0),
+    );
+}
+
 #[cfg(all(feature = "instrument", feature = "metal", target_os = "macos"))]
 fn stats_pass(entry: &mut FamilyGpuStats, gpu_ns: u64, operand_bytes: u64) {
     entry.row_blocked_count += 1;
@@ -1910,25 +2031,21 @@ impl<'file> LoadedModel<'file> {
 
                 #[cfg(feature = "instrument")]
                 {
-                    let ms = |ticks: u64| ticks_to_nanos(ticks) as f64 / 1e6;
-                    std::println!(
-                        "token_breakdown step={_step} new_count={new_count} cached_len_before={} \
-                     step_wall_ms={:.3} apply_serving_config_ms={:.3} build_position_inputs_ms={:.3} \
-                     named_blocks_weights_ms={:.3} named_blocks_kv_ms={:.3} kv_cache_upload_bytes={} \
-                     evaluate_ms={:.3} layer_cache_append_ms={:.3} layer_cache_append_bytes={} \
-                     greedy_pick_ms={:.3}",
-                        cached_len,
-                        ms(elapsed_ticks(step_started)),
-                        ms(apply_serving_config_ticks),
-                        ms(build_position_inputs_ticks),
-                        ms(named_blocks_weights_ticks),
-                        ms(named_blocks_kv_ticks),
-                        kv_cache_upload_elements * 4,
-                        ms(evaluate_ticks),
-                        ms(layer_cache_append_ticks),
-                        layer_cache_append_elements * 4,
-                        ms(greedy_pick_ticks),
-                    );
+                    print_token_breakdown(&TokenBreakdown {
+                        step: _step,
+                        new_count,
+                        cached_len_before: cached_len,
+                        step_wall_ticks: elapsed_ticks(step_started),
+                        apply_serving_config_ticks,
+                        build_position_inputs_ticks,
+                        named_blocks_weights_ticks,
+                        named_blocks_kv_ticks,
+                        kv_cache_upload_bytes: kv_cache_upload_elements * 4,
+                        evaluate_ticks,
+                        layer_cache_append_ticks,
+                        layer_cache_append_bytes: layer_cache_append_elements * 4,
+                        greedy_pick_ticks,
+                    });
                     // ROW 130's per-step-reset attribution: kernel / dispatch+
                     // setup / park+spin+wake, all on the CALLING thread's own
                     // wall clock (never summed across the cohort's other worker
@@ -1978,49 +2095,9 @@ impl<'file> LoadedModel<'file> {
                      cache_hits={quantize_cache_hits}"
                     );
                     #[cfg(all(feature = "metal", target_os = "macos"))]
-                    std::println!(
-                        "token_breakdown_metal step={_step} prepare_calls={} prepare_ms={:.3} \
-                     emit_calls={} emit_ms={:.3} pipeline_hits={} pipeline_misses={} pipeline_compile_ms={:.3} \
-                     block_upload_calls={} block_upload_ms={:.3} block_upload_bytes={} \
-                     op_setup_calls={} op_setup_ms={:.3} \
-                     pipeline_lookup_calls={} pipeline_lookup_ms={:.3} \
-                     encode_dispatch_calls={} encode_dispatch_ms={:.3} \
-                     gpu_exec_calls={} gpu_exec_ms={:.3} \
-                     readback_calls={} readback_ms={:.3} readback_bytes={} \
-                     nocopy_uploads={} copying_uploads={} nocopy_reuses={} \
-                     resident_uploads={} resident_reuses={} mapping_offset_uploads={} \
-                     nocopy_cache_len={} phys_footprint_bytes={} device_allocated_bytes={} \
-                     plan_cache_len={} plan_hits={} plan_misses={}",
-                        metal_stage.prepare_calls,
-                        ms(metal_stage.prepare_ticks),
-                        metal_stage.emit_calls,
-                        ms(metal_stage.emit_ticks),
-                        metal_stage.pipeline_hits,
-                        metal_stage.pipeline_misses,
-                        ms(metal_stage.pipeline_compile_ticks),
-                        metal_stage.block_upload_calls,
-                        ms(metal_stage.block_upload_ticks),
-                        metal_stage.block_upload_bytes,
-                        metal_stage.op_setup_calls,
-                        ms(metal_stage.op_setup_ticks),
-                        metal_stage.pipeline_lookup_calls,
-                        ms(metal_stage.pipeline_lookup_ticks),
-                        metal_stage.encode_dispatch_calls,
-                        ms(metal_stage.encode_dispatch_ticks),
-                        metal_stage.gpu_exec_calls,
-                        ms(metal_stage.gpu_exec_ticks),
-                        metal_stage.readback_calls,
-                        ms(metal_stage.readback_ticks),
-                        metal_stage.readback_bytes,
-                        metal_stage.nocopy_uploads,
-                        metal_stage.copying_uploads,
-                        metal_stage.nocopy_reuses,
-                        metal_stage.resident_uploads,
-                        metal_stage.resident_reuses,
-                        metal_stage.mapping_offset_uploads,
-                        omega::metal::nocopy_cache_len(),
-                        phys_footprint_bytes(),
-                        omega::metal::current_allocated_size().unwrap_or(0),
+                    print_token_breakdown_metal(
+                        _step,
+                        &metal_stage,
                         runtime.plans_len(),
                         runtime.plan_hits,
                         runtime.plan_misses,
@@ -2151,14 +2228,22 @@ impl<'file> LoadedModel<'file> {
 
                 let new_count = next_ids.len();
                 let merged_len = cached_len + new_count;
+                #[cfg(feature = "instrument")]
+                let apply_serving_config_started = read_ticks();
                 apply_serving_config(serving_config, merged_len)?;
+                #[cfg(feature = "instrument")]
+                let apply_serving_config_ticks = elapsed_ticks(apply_serving_config_started);
 
+                #[cfg(feature = "instrument")]
+                let build_position_inputs_started = read_ticks();
                 let inputs = build_position_inputs(
                     &next_ids,
                     cached_len,
                     self.architecture.head_dim,
                     self.architecture.rope_freq_base,
                 );
+                #[cfg(feature = "instrument")]
+                let build_position_inputs_ticks = elapsed_ticks(build_position_inputs_started);
 
                 let mut named_blocks: Vec<(&str, QuantizedBlock)> = Vec::with_capacity(
                     self.weights.owned.len()
@@ -2168,6 +2253,8 @@ impl<'file> LoadedModel<'file> {
                         + block_count * 3,
                 );
                 named_blocks.push(("ids", QuantizedBlock::Float32(inputs.ids_f32.as_slice())));
+                #[cfg(feature = "instrument")]
+                let named_blocks_weights_started = read_ticks();
                 for (name, data) in &self.weights.owned {
                     named_blocks.push((name.as_str(), QuantizedBlock::Float32(data.as_slice())));
                 }
@@ -2182,11 +2269,15 @@ impl<'file> LoadedModel<'file> {
                 named_blocks.push(("rope_sin", QuantizedBlock::Float32(inputs.sin.as_slice())));
                 let cached_len_scalar = [cached_len as f32];
                 named_blocks.push(("cached_len", QuantizedBlock::Float32(&cached_len_scalar)));
+                #[cfg(feature = "instrument")]
+                let named_blocks_weights_ticks = elapsed_ticks(named_blocks_weights_started);
 
                 // This step's `kv_cache.{layer}.*` `named_blocks` entries are
                 // placeholder scratch, not the real KV cache -- see this
                 // arm's own doc on why `execute_plan_with_placements` never
                 // uploads them.
+                #[cfg(feature = "instrument")]
+                let named_blocks_kv_started = read_ticks();
                 let even_odd_len = merged_len * kv_heads * pairs;
                 let v_len = merged_len * kv_heads * head_dim;
                 if cache_length_scratch_even_odd.len() < even_odd_len {
@@ -2209,6 +2300,8 @@ impl<'file> LoadedModel<'file> {
                         QuantizedBlock::Float32(&cache_length_scratch_v[..v_len]),
                     ));
                 }
+                #[cfg(feature = "instrument")]
+                let named_blocks_kv_ticks = elapsed_ticks(named_blocks_kv_started);
 
                 let mut input_placements: Vec<(NodeId, &PlacedBuffer, usize)> =
                     Vec::with_capacity(block_count * 3);
@@ -2254,6 +2347,8 @@ impl<'file> LoadedModel<'file> {
                     roots.push(*odd);
                     roots.push(*value);
                 }
+                #[cfg(feature = "instrument")]
+                let evaluate_started = read_ticks();
                 let evaluated = runtime.evaluate_with_placements(
                     &single_range.program,
                     &symbols,
@@ -2263,6 +2358,23 @@ impl<'file> LoadedModel<'file> {
                     &input_placements,
                     &output_placements,
                 )?;
+                #[cfg(feature = "instrument")]
+                let evaluate_ticks = elapsed_ticks(evaluate_started);
+                // Snapshot-and-reset (`metal_stage_totals`'s own doc), so this
+                // read must happen exactly once per step, immediately after
+                // this step's own `evaluate_with_placements` call --
+                // `block_upload_bytes` below is this step's REAL device
+                // upload byte count: the three `kv_cache.{layer}.*` scratch
+                // blocks pushed above never actually upload (they are
+                // `input_placements` entries, which `execute_plan_with_placements`
+                // binds directly to the caller's own device buffer instead of
+                // staging through `upload_block` -- see that function's own
+                // doc, "skipping the per-call `upload_block`/
+                // `upload_packed_bytes` host round trip entirely"), so this
+                // count legitimately falls to just the resident weights'
+                // one-time cost after step 0, never a hardcoded zero.
+                #[cfg(all(feature = "instrument", feature = "metal", target_os = "macos"))]
+                let metal_stage = metal_stage_totals();
                 cached_len = merged_len;
 
                 let (logits, _shape) =
@@ -2273,27 +2385,56 @@ impl<'file> LoadedModel<'file> {
                         })?;
                 let last_position = &logits[(new_count - 1) * vocab_size..new_count * vocab_size];
 
+                #[cfg(feature = "instrument")]
+                let greedy_pick_started = read_ticks();
                 let recent_window_start = token_history.len().saturating_sub(repeat_window);
                 let recent_tokens = &token_history[recent_window_start..];
                 let token_id =
                     sample_next_token(last_position, recent_tokens, sample_config, &mut rng)
                         .ok_or(InteropError::EmptyLogits)?;
                 token_history.push(token_id);
+                #[cfg(feature = "instrument")]
+                let greedy_pick_ticks = elapsed_ticks(greedy_pick_started);
                 next_ids = alloc::vec![token_id];
 
                 #[cfg(feature = "instrument")]
                 {
-                    let ms = |ticks: u64| ticks_to_nanos(ticks) as f64 / 1e6;
-                    std::println!(
-                        "token_breakdown step={_step} new_count={new_count} cached_len_before={} \
-                     step_wall_ms={:.3} kv_cache_upload_bytes={} evaluate_ms={:.3} \
-                     layer_cache_append_ms={:.3} layer_cache_append_bytes={}",
-                        cached_len - new_count,
-                        ms(elapsed_ticks(step_started)),
-                        0,
-                        0.0,
-                        0.0,
-                        0,
+                    print_token_breakdown(&TokenBreakdown {
+                        step: _step,
+                        new_count,
+                        cached_len_before: cached_len,
+                        step_wall_ticks: elapsed_ticks(step_started),
+                        apply_serving_config_ticks,
+                        build_position_inputs_ticks,
+                        named_blocks_weights_ticks,
+                        named_blocks_kv_ticks,
+                        // No host-side KV cache exists on this arm (the cache
+                        // lives entirely in `k_even_buffers`/`k_odd_buffers`/
+                        // `v_buffers`, device-resident for the whole call) --
+                        // `block_upload_bytes` is the real device-side upload
+                        // counter, not a stand-in host element count.
+                        #[cfg(all(feature = "metal", target_os = "macos"))]
+                        kv_cache_upload_bytes: metal_stage.block_upload_bytes,
+                        #[cfg(not(all(feature = "metal", target_os = "macos")))]
+                        kv_cache_upload_bytes: 0,
+                        evaluate_ticks,
+                        // No separate host layer-cache append step on this
+                        // arm -- `output_placements` above writes each
+                        // layer's freshly rotated key/value straight into its
+                        // `PlacedBuffer` as part of the SAME evaluate call
+                        // `evaluate_ticks` already timed, so there is no
+                        // second cost to attribute here.
+                        layer_cache_append_ticks: 0,
+                        layer_cache_append_bytes: 0,
+                        greedy_pick_ticks,
+                    });
+                    #[cfg(all(feature = "metal", target_os = "macos"))]
+                    print_token_breakdown_metal(
+                        _step,
+                        &metal_stage,
+                        runtime.plans_len(),
+                        runtime.plan_hits,
+                        runtime.plan_misses,
                     );
                 }
 
