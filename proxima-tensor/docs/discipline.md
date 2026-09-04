@@ -20790,3 +20790,41 @@ Confirm the `cached-attention` `op_profile_bucket` line shows `op_count=32` and 
 | Date | Change | Δ vs prior | CoV / runs | Host loadout |
 | --- | --- | --- | --- | --- |
 | 2026-09-04 | `cached_attention_single_range_candidates` fuses the single-range decode chain (default-off, `cached-attention-streaming`); fixed a `kv-capacity-bucket` band-derivation drift; hardened the shared operand-collection loop to abort on a gathered/negative-stride source | bound ops 939 -> 619 (32-layer openchat fixture, unfused vs fused); `total_gpu_ms` 35.266 -> 32.356 (-8.2%) at decode step 1; `step_wall_ms` delta 0.07% of OFF mean, inside both arms' CoV -- not a confirmed wall win | 3 interleaved rounds each arm, CoV 2.33% (OFF) / 4.76% (ON) | quiet box confirmed via `pgrep -fl 'cargo\|rustc\|nextest\|llama-bench\|proxima_model_interop-'` before the bake-off; no other agent's process observed during the timed rounds |
+
+## ROW 282 -- fused cached attention flips default-on: the owner's less-work rule, not a wall-clock win
+
+**Card:** ROW 281's direct follow-on; no new card. **Worktree/branch/commit:** `proxima-wt-land-fattn-on`/`land/fattn-on`. **Feature:** `cached-attention-streaming`, default: **ON** (folded into `metal` in both `proxima-model-interop/Cargo.toml` and `omega/Cargo.toml`, mirroring how `17d4f09` folded in `metal-plan-stable-buffers`).
+
+**The owner's rule, verbatim (2026-09-04):** "if we reduce the amount of work, even if that doesn't seem to move the wall clock, we should keep it assuming the quality is the same."
+
+**The numbers this rule is applied to, from ROW 281's own bake-off (3 interleaved rounds, `metal,instrument` release, `PROXIMA_MAX_TOKENS=8`, `step_wall_ms` mean over steps 1..7):**
+- `emit_calls` (ops dispatched per decode step): OFF 938 -> ON 616.
+- GPU-side `total_gpu_ms` at decode step 1: OFF 35.266 -> ON 32.356 (-8.2%).
+- `device_allocated_bytes`: OFF 4,152,573,952 -> ON 4,152,442,880 (-131,072 B).
+- `generated_text`: identical in every round, both arms -- `"Here is a simple Python function that returns"`.
+- Wall clock: mean OFF 37.796 ms/token (CoV 2.33%), mean ON 37.771 ms/token (CoV 4.76%); delta -0.025 ms is 0.07% of the OFF mean, an order of magnitude below either arm's own CoV -- not a distinguishable wall-clock win, and not a loss either.
+
+**The default-flip rule this row applies (new, generalizing ROW 281's own decision text):** flip a feature to default-on when (1) output is bit-for-bit/text identical between OFF and ON, AND (2) a work metric (dispatch count, GPU-side op time, bytes moved) measurably drops, AND (3) wall clock is not worse beyond the combined CoV of the two arms (a tie or better, never a regression hidden inside noise). All three held for `cached-attention-streaming` at ROW 281; this row is the flip ROW 281 itself declined to make because its own decision text required a *confirmed* wall win, a stricter bar than the owner's rule as now stated.
+
+**Oracle re-proof on the default (`metal,instrument`, release, this landing's rebased tree, `PROXIMA_MAX_TOKENS=8`):**
+```
+metal_decode_summary tokens_generated=8 stopped_by_eos=false total_wall_clock_ms=1765.847 plan_hits=5 plan_misses=3 generated_text="Here is a simple Python function that returns"
+```
+`emit_calls=616` on every step (steps 0-7, not 938); `plan_hits=5` (steps 3-7 hit the plan cache); `step_wall_ms` for steps 1..7 (step 0 is prefill and excluded, matching ROW 281's own convention): 52.454, 50.938, 32.548, 35.799, 33.541, 37.815, 34.966 -- mean 39.723 ms/token. This single run is informational only (no bake-off re-run; ROW 281's 3-round bake-off is the standing evidence for the wall-clock claim), consistent with ROW 281's ON arm.
+
+**Correctness:** all five gates plus the two extra (`omega --all-features`, `bash scripts/omega-gate.sh`, `bash scripts/proxima-tensor-gate.sh`) pass unchanged in test count from ROW 281's own baseline, now exercised as the *default* build rather than an opt-in feature: `cargo build --workspace --lib` EXIT=0; `cargo nextest run -p omega --features metal`: 125 passed, 1 skipped; `cargo nextest run -p proxima-tensor --features std,instrument`: 513 passed, 7 skipped; `cargo nextest run -p proxima-model-interop --features metal,instrument`: 95 passed, 25 skipped; `cargo nextest run -p proxima-model-interop --features std`: 82 passed, 22 skipped; `cargo clippy --workspace --all-targets -- -D warnings`: EXIT=0 (same pre-existing `proc-macro-error2` future-incompat note as ROW 281); `cargo nextest run -p omega --all-features`: 183 passed, 1 skipped; `bash scripts/omega-gate.sh`: all 6 steps pass, `[3/6]` 183 tests run/183 passed, `[6/6]` 2 doctests passed; `bash scripts/proxima-tensor-gate.sh`: 21 cells green, 504 tests passed/7 skipped on the plain feature-matrix cell. No test in either crate was pinned to the unfused 938/939 op count under default features -- `bind::tests`' 939/619 regression gate calls `bind_with_fusion(.., false)` explicitly (`proxima-tensor/src/bind.rs:2625,2898,2903`) and is therefore independent of this flip.
+
+**Decision.** Flip `cached-attention-streaming` into the default `metal` feature list in both `omega/Cargo.toml` and `proxima-model-interop/Cargo.toml`, and note the now-redundant explicit mention in `omega`'s dev-dependency feature list and `proxima-tensor/Cargo.toml`'s own feature doc comment. The feature stays individually selectable in every crate that exposes it.
+
+**Re-prove:**
+```sh
+cd /Users/brianbruggeman/repos/slot-0/proxima
+CARGO_TARGET_DIR=<own target dir> CARGO_TERM_COLOR=never PROXIMA_MAX_TOKENS=8 cargo test --release -p proxima-model-interop --features metal,instrument --lib -- --exact --nocapture --ignored \
+  bind::real_openchat_file::runs_the_cached_decode_loop_on_the_metal_backend_and_reports_the_plan_cache
+```
+Confirm `emit_calls=616` (not 938), `plan_hits=5`, and `generated_text="Here is a simple Python function that returns"` -- `--features metal,instrument` alone now carries the fused path, no `cached-attention-streaming` needed on the command line.
+
+### Changelog
+| Date | Change | Δ vs prior | CoV / runs | Host loadout |
+| --- | --- | --- | --- | --- |
+| 2026-09-04 | `cached-attention-streaming` flips default-on in `metal` (both `omega` and `proxima-model-interop`) per the owner's less-work rule | `emit_calls` 938 -> 616/step; `device_allocated_bytes` -131,072 B; wall clock unchanged within CoV (mean 37.796 -> 37.771 ms/token, delta 0.07% of OFF mean); `generated_text` identical | reuses ROW 281's 3-round bake-off; no new bake-off run for this row | same quiet-box discipline as ROW 281; this row's own oracle run is a single-shot re-proof, not a fresh bake-off |
