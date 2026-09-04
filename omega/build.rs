@@ -22,7 +22,9 @@ fn require_nonzero(name: &str, value: i64) -> usize {
 
 /// Like [`require_nonzero`], but `0` is a legal value -- for keys where `0`
 /// is a documented sentinel (`packed_row_block.split_k_max_rows`: `0`
-/// disables the row ceiling) rather than a degenerate configuration.
+/// disables the row ceiling; `cooperative_reduce.min_len`: `0` disables the
+/// serial-route threshold, restoring the routing every build before that key
+/// existed used) rather than a degenerate configuration.
 fn require_nonneg(name: &str, value: i64) -> usize {
     usize::try_from(value)
         .unwrap_or_else(|_| panic!("{name} must be a non-negative integer; got {value}"))
@@ -153,7 +155,9 @@ fn resolve_int(table: &Value, section: &str, key: &str) -> i64 {
 /// Reads `omega-runtime.toml`, emits `OUT_DIR/omega_sized.rs`. A new
 /// execution-policy key follows the same `resolve_int` + `require_nonzero` +
 /// generated-`pub const` shape `packed_row_block.simdgroups` and
-/// `tiled_gemm.min_tokens` already do.
+/// `tiled_gemm.min_tokens` already do (`cooperative_reduce.min_len` and
+/// `packed_row_block.split_k_max_rows` are the exceptions that need
+/// `require_nonneg` instead: 0 is a legal, meaningful value for both).
 /// `TILED_GEMM_MIN_TOKENS` is `feature = "metal-tiled-gemm"`-only in
 /// `src/sized.rs` (the tiled path has no meaning without it), so this only
 /// emits the line when Cargo reports the feature active for THIS build — on
@@ -185,6 +189,14 @@ fn emit_sizing_consts() {
     );
     out.push_str(&format!(
         "pub const PACKED_ROW_BLOCK_SIMDGROUPS: u64 = {packed_row_block_simdgroups};\n"
+    ));
+
+    let cooperative_reduce_min_len = require_nonneg(
+        "cooperative_reduce.min_len",
+        resolve_int(&root, "cooperative_reduce", "min_len"),
+    );
+    out.push_str(&format!(
+        "pub const COOPERATIVE_REDUCE_MIN_LEN: u64 = {cooperative_reduce_min_len};\n"
     ));
 
     if env::var_os("CARGO_FEATURE_METAL_TILED_GEMM").is_some() {

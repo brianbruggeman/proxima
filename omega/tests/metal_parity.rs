@@ -1100,6 +1100,46 @@ fn axis_reduce_parity_holds_for_every_cooperative_reduce_body() {
     }
 }
 
+/// The short-reduce initiative's own re-prove artifact: an `Add` axis-reduce
+/// at every length either side of a real `[cooperative_reduce].min_len`
+/// (0 at the `omega-runtime.toml` default — see that file's own doc for the
+/// measured NEGATIVE result that kept it there; `OMEGA_COOPERATIVE_REDUCE_
+/// MIN_LEN` still exercises a non-zero threshold per-build) — 34 and 64 the
+/// real `attended`/`score_even`/`score_odd` decode shapes, 127/128 the
+/// boundary a non-zero threshold would draw, 4096 the `sum_squares` shape
+/// that stays cooperative regardless. Whichever route
+/// `msl::reduce_is_cooperative` picks for a given length (serial below a
+/// non-zero threshold, cooperative otherwise — this crate compiles ONE
+/// routing per build, so this test cannot see both at once, only whichever
+/// the current binary was built with), the CPU oracle must agree with it —
+/// the parity gate does not get to know or care which kernel body ran.
+///
+/// `1e-4`, not [`assert_parity`]'s default `1e-6`: measured max abs diff
+/// climbs with reduction length regardless of which route ran (34: 4.8e-7,
+/// 64: 2.9e-6, 127: 3.8e-6, 128: 1.9e-6, 4096: 9.2e-5 on this host) — real
+/// float-reassociation cost from GPU-vs-CPU summing the same values in a
+/// different order, the same class of drift
+/// `matmul_parity_holds_over_a_contraction_spanning_multiple_simd_lanes`
+/// above widens to `1e-5` for a 97-wide contraction. `1e-4` covers the
+/// worst observed case (4096) with headroom.
+#[test]
+fn axis_reduce_parity_holds_across_the_cooperative_serial_length_boundary() {
+    let rows = 3u32;
+
+    for cols in [34u32, 64, 127, 128, 4096] {
+        let case = format!("axis_add_len_{cols}");
+        let data = random_vec(0x2545_f491_4f6c_dd1d, (rows * cols) as usize);
+        let program = axis_reduce_program(rows, cols, ScalarOp::Add, ReduceInit::Zero);
+
+        let cpu = evaluate(&program, &[], &[&data], &[])
+            .unwrap_or_else(|error| panic!("{case}: cpu axis reduce evaluates: {error}"));
+        let metal = omega::execute(&program, &[], &[QuantizedBlock::Float32(&data)], &[])
+            .unwrap_or_else(|error| panic!("{case}: metal axis reduce executes on a real device: {error}"));
+
+        assert_parity_within(&case, cpu.root(), metal.root(), 1e-4);
+    }
+}
+
 /// Same shape [`matmul_program`] builds, parameterized over `dtype` instead
 /// of hardcoding `Float32` — the f16 parity gate below builds the identical
 /// structure twice, once per dtype, so a divergence in the comparison can

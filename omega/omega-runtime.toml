@@ -78,6 +78,39 @@ block_k = 32
 # (SIMD_WIDTH) — see sized::WIDE_COOPERATIVE_REDUCE_MAX_WIDTH.
 max_width = 256
 
+[cooperative_reduce]
+# below this many elements in the reduced axis, `msl::reduce_is_cooperative`
+# routes to the one-thread-per-output serial fold (`push_serial_reduce_body`)
+# instead of the `SIMD_WIDTH`(32)-lane cooperative fold
+# (`push_cooperative_reduce_body`) -- see sized::COOPERATIVE_REDUCE_MIN_LEN.
+# 0 disables the threshold entirely -- every reduce that qualifies otherwise
+# (see `reduce_is_cooperative`'s own doc: no gather, an
+# associative/commutative `ScalarOp`) stays cooperative, the routing every
+# build before this key existed used.
+#
+# MEASURED NEGATIVE, kept at 0 -- the hypothesis this key was built to test
+# (a cooperative reduce always launches 32 lanes per output regardless of
+# reduction length, so a short reduce like attention's `attended`(34-long)
+# or `score_even`/`score_odd`(64-long) wastes most of those lanes, and
+# routing it to the serial one-thread-per-output kernel instead should win)
+# measured the OPPOSITE on a real decode step, `perf/short-reduce-serial-
+# route`'s own discipline row: raising `min_len` from 0 to 128 (moving those
+# two families off cooperative) made `kv_cache.k_even`/`k_odd`(score) ~3x
+# SLOWER per op-profile bucket (1.146ms cooperative -> 3.393-3.544ms serial,
+# same real step) and the mean per-token decode step ~10% slower overall
+# (41.92ms cooperative-only vs 45.95-46.16ms at min_len in {128, 256}, 3
+# rounds x 7 decode steps each, CoV 3-6%). Mechanism: the serial kernel
+# dispatches exactly `output_total` threads; the cooperative kernel
+# dispatches `output_total * SIMD_WIDTH`(32) -- these reduces are memory-
+# latency-bound on real hardware, not compute-bound, so the serial route's
+# 32x-fewer threads leaves the GPU with far less concurrent memory traffic
+# to hide load latency behind, which costs more than the idle-lane waste
+# the cooperative route pays. The mechanism stays landed and
+# build-time-configurable (a future genuinely compute-bound short reduce, or
+# a different GPU family's occupancy model, could still want it) but the
+# production default does not move off of what already shipped.
+min_len = 0
+
 [packed_row_split_k]
 # below this many simdgroups (`output_rows / PACKED_ROWS_PER_GROUP`), the
 # row-blocked packed-matmul kernel splits the reduction (k) axis across

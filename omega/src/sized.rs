@@ -11,8 +11,9 @@
 //!   for a value the hardware does not have, which is not configurability,
 //!   it is a footgun.
 //! - **Execution policy, build-time-configurable**: [`PACKED_ROW_BLOCK_SIMDGROUPS`]
-//!   (always compiled — the row-blocked packed path has no feature gate),
-//!   `TILED_GEMM_MIN_TOKENS`, `TILED_GEMM_BLOCK_M`, `TILED_GEMM_BLOCK_N`,
+//!   and [`COOPERATIVE_REDUCE_MIN_LEN`] (both always compiled — the
+//!   row-blocked packed path and the cooperative/serial reduce split have no
+//!   feature gate), `TILED_GEMM_MIN_TOKENS`, `TILED_GEMM_BLOCK_M`, `TILED_GEMM_BLOCK_N`,
 //!   `TILED_GEMM_BLOCK_K` (`metal-tiled-gemm`-only, ROW 109's multi-simdgroup
 //!   redesign — ports `ggml-metal.metal:6487-6489`'s `BLOCK_SIZE_M`/
 //!   `BLOCK_SIZE_N`/`BLOCK_SIZE_K`). These trace to `omega-runtime.toml` via `build.rs`'s
@@ -54,6 +55,23 @@ include!(concat!(env!("OUT_DIR"), "/omega_sized.rs"));
 /// other than 32 would not match the hardware `dispatch` actually runs
 /// on.
 pub const SIMD_WIDTH: u64 = 32;
+
+// `COOPERATIVE_REDUCE_MIN_LEN` comes in through the `include!` above --
+// `msl::reduce_is_cooperative`'s routing threshold: a `Keep::Reduce` fold
+// whose reduced-axis extent is below this many elements takes the serial
+// one-thread-per-output route instead of the SIMD-group cooperative fold,
+// regardless of whether it would otherwise qualify (no gather, an
+// associative/commutative `ScalarOp`). 0 at the `omega-runtime.toml`
+// default: every reduce that qualifies otherwise stays cooperative, the
+// routing every build before this key existed used. NOT 128 -- see that
+// file's `[cooperative_reduce]` doc for the measured NEGATIVE result
+// (`perf/short-reduce-serial-route`'s own discipline row) that kept it at
+// 0: routing attention's short reduces (34/64-long) to serial made them
+// ~3x slower on real hardware, memory-latency-bound kernels losing more
+// from 32x-fewer threads in flight than they gained from fewer idle lanes.
+// `OMEGA_COOPERATIVE_REDUCE_MIN_LEN=<n>` exercises a non-zero threshold
+// per-build without editing the TOML -- the mechanism that same discipline
+// row's bake-off used.
 
 // `PACKED_ROW_BLOCK_SIMDGROUPS` comes in through the `include!` above --
 // number of independent `SIMD_WIDTH`-lane SIMD-groups Metal packs into one
