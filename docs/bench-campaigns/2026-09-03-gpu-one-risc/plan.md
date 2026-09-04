@@ -317,7 +317,7 @@ three features flipped the default forward.
 | paired-nibble Q5_K matvec, default flip (ROW 278) | per-op 202,083 → 124,265 ns/op (1.63x) on the 8 real Q5_K ops; decode wall flat within noise | text identical every arm/round; default oracle at this point: 40.521 ms/token |
 | uniform buffer cache bounded with LRU (ROW 279) | not a perf change | `UNIFORM_BUFFERS` grew unbounded on varying uniform bytes; bounded at `[spans].uniform_cache_entries=4096`; `uniform_cache_len` plateaus at 50 on the default decode |
 | plan-stable device buffers, default flip (ROW 280) | quiet 3-round table: OFF 40.827/40.090/41.107 vs ON 39.688/37.476/40.780 (ON ≤ OFF every round) | `op_setup` fell 3.94-5.42 → 0.39-0.60 ms/step; `OUTPUT_BUFFER_ALLOCATIONS` 842/step → 0 on plan-cache hits; device bytes flat (~4.163 GB OFF, ~4.153 GB ON); becomes the default |
-| fused `CachedAttention` reaches the single-range program (ROW 281, `2f6f12d`/`15c469b`/`563fc0c`/`a943390`) | quiet bake-off, 3 rounds: unfused 37.096/37.506/38.786 vs fused 39.796/36.363/37.154 (means 37.796 vs 37.771, CoV 2.33%/4.76%) | delta is inside both arms' noise, not a confirmed wall win; `emit_calls` 938→616/step, per-op GPU sum 35.266→32.356 ms (-8.2%) localized to the fused bucket, device bytes -131,072 B, text identical; lands correctness/capability only, feature stays default-off |
+| fused `CachedAttention` reaches the single-range program (ROW 281, `2f6f12d`/`15c469b`/`563fc0c`/`a943390`); flipped default-on (ROW 282, `land/fattn-on`) | quiet bake-off, 3 rounds: unfused 37.096/37.506/38.786 vs fused 39.796/36.363/37.154 (means 37.796 vs 37.771, CoV 2.33%/4.76%) | delta is inside both arms' noise, not a confirmed wall win; `emit_calls` 938→616/step, per-op GPU sum 35.266→32.356 ms (-8.2%) localized to the fused bucket, device bytes -131,072 B, text identical; ROW 282 flips the feature into `metal`'s default per the owner's less-work rule (output identical, work down, wall not worse beyond CoV) even without a confirmed wall win |
 
 `generated_text` identical on every arm across every row above; device bytes stayed within the
 ~4.15-4.17 GB band on every measured arm.
@@ -328,6 +328,12 @@ row 282 when measured.
 What is left after the third wave, per token on the default at main `e7fe6b6`: quiet-box
 `step_wall_ms` 37.1-38.8 ms/token against `llama-bench` 56.6-57.2 t/s (17.5-17.7 ms/token) —
 **2.15x**. Progression across all three waves, ms/token: 67.9 → 52.7 → 43.0 → 40.9 → 40.5 → ~37.8.
+`cached-attention-streaming` joins the `metal` default feature list (ROW 282, `land/fattn-on`)
+on top of this same tree by the owner's less-work rule -- `emit_calls` 938 → 616/step, text and
+wall unchanged within CoV -- so the default's feature set as of `land/fattn-on` is `metal`'s
+full list (`metal-output-placement`, `metal-wide-cooperative-reduce`, `kv-capacity-bucket`,
+`metal-q5k-pair-dot`, `metal-plan-stable-buffers`, `cached-attention-streaming`), not just the
+subset named above.
 
 ## 2. The diagnosis, built formally (V0-V8)
 
