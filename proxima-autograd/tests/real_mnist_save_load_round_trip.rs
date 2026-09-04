@@ -768,7 +768,7 @@ fn trained_mlp_survives_a_save_load_round_trip_at_identical_accuracy() {
     let manifest = proxima_safetensors::SafetensorsParser::new()
         .push(&written_bytes)
         .expect("parser accepts the written checkpoint")
-        .finish()
+        .into_manifest()
         .expect("checkpoint parses as a well-formed safetensors manifest");
 
     for (name, shape) in [

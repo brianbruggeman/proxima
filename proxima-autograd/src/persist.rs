@@ -170,7 +170,7 @@ pub fn save_state(program: &[Op], state: &State, path: &Path) -> Result<(), Pers
 pub fn load_state(program: &[Op], path: &Path) -> Result<State, PersistError> {
     let path_display = path.display().to_string();
     let bytes = std::fs::read(path)?;
-    let manifest = SafetensorsParser::new().push(&bytes)?.finish()?;
+    let manifest = SafetensorsParser::new().push(&bytes)?.into_manifest()?;
     manifest.format_version()?;
 
     let header_len_start = HEADER_LEN_BYTES;
@@ -356,7 +356,7 @@ mod tests {
         let manifest = SafetensorsParser::new()
             .push(&bytes)
             .expect("parser accepts the bytes")
-            .finish()
+            .into_manifest()
             .expect("manifest parses");
 
         let w_entry = manifest.tensor("w").expect("w present in the manifest");
