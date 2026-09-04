@@ -91,6 +91,16 @@ metal-tiled-gemm = ["metal"]
 # Non-default and std-only: `wgpu`'s `Instance`/`Device`/`Queue` are platform
 # objects, not something an alloc-tier build can construct.
 wgpu-backend = ["std", "dep:wgpu", "dep:pollster", "dep:bytemuck", "proxima-tensor/std"]
+# Lets a caller hand `execute_plan_with_placements` a buffer IT owns and a
+# byte offset, so one op's output lands directly in that buffer instead of a
+# fresh `allocate_buffer` every dispatch (`metal.rs`'s own module doc,
+# "dispatch_op ... allocate_buffer ... always"). Default-off and additive
+# only: every new item is `#[cfg(feature = "metal-output-placement")]`, so an
+# off build never compiles the placement map or the retire-exclusion check
+# and `execute_plan`'s own dispatch loop is untouched source and behavior.
+# Depends on `metal`, not just `std`: `PlacedBuffer` is an `objc2-metal`
+# buffer handle, meaningless off that backend.
+metal-output-placement = ["metal"]
 
 [dependencies]
 bytemuck = { version = "1.25.2", optional = true }

@@ -535,6 +535,7 @@ pub fn execute_plan(plan: &Plan, blocks: &[QuantizedBlock<'_>]) -> Result<Evalua
             &mut device_buffers,
             bound,
             packed_operands,
+            None,
         )?;
         if let Some((fault_buffer, gathers)) = fault {
             pending_faults.push((bound, fault_buffer, gathers));
@@ -554,6 +555,250 @@ pub fn execute_plan(plan: &Plan, blocks: &[QuantizedBlock<'_>]) -> Result<Evalua
         counter!(GPU_EXEC_CALLS, 1);
         counter!(GPU_EXEC_TICKS, elapsed_ticks(gpu_exec_started));
     }
+
+    for (bound, fault_buffer, gathers) in &pending_faults {
+        check_gather_fault(bound, fault_buffer, *gathers)?;
+    }
+
+    finish(
+        &plan.program,
+        &prepared.index_nodes,
+        &prepared.shapes,
+        &prepared.effective_outputs,
+        &device_buffers,
+        prepared.root,
+    )
+}
+
+/// A device buffer a CALLER allocates, owns, and keeps alive across multiple
+/// [`execute_plan_with_placements`] calls — the type this module's other
+/// buffers ([`MetalBuffer`], private) never had to be public for, since
+/// `execute_plan`/`execute_plan_op_timed` allocate and own every buffer
+/// themselves. Get one from [`allocate_placed_buffer`]; read one back with
+/// [`read_placed_buffer_f32`].
+#[cfg(feature = "metal-output-placement")]
+pub type PlacedBuffer = Retained<ProtocolObject<dyn MTLBuffer>>;
+
+/// Allocates a `storageModeShared` buffer of `byte_len` bytes that OUTLIVES
+/// any one [`execute_plan_with_placements`] call — the caller holds it,
+/// passes `&buffer` into as many calls as it likes, and only it decides when
+/// the buffer is dropped. Mirrors [`allocate_buffer`]'s own device call,
+/// public and un-sized-to-an-op because a placed buffer's size is the
+/// caller's own layout decision (e.g. a whole KV-cache page), not one op's
+/// `bound_output_len`.
+///
+/// # Errors
+/// Propagates a Metal device/driver failure to allocate.
+#[cfg(feature = "metal-output-placement")]
+pub fn allocate_placed_buffer(byte_len: usize) -> Result<PlacedBuffer, MetalError> {
+    let (device, _queue) = device_and_queue()?;
+    device
+        .newBufferWithLength_options(byte_len.max(1), MTLResourceOptions::StorageModeShared)
+        .ok_or_else(|| MetalError::CompileFailed {
+            log: "device refused to allocate a placed buffer".to_string(),
+        })
+}
+
+/// Reads `element_count` `f32`s back from `buffer` starting at `byte_offset`
+/// — the read-back counterpart to a placed write, for a caller that wants to
+/// inspect what an [`execute_plan_with_placements`] call wrote without going
+/// through [`Evaluated`]'s own output set (a placed node need not be a named
+/// output at all).
+///
+/// # Panics
+/// Never panics; an out-of-bounds `byte_offset`/`element_count` pair is the
+/// caller's own contract to keep (documented on [`execute_plan_with_placements`]),
+/// the same trust boundary `bind_buffers`' SAFETY comment already states for
+/// every kernel-side binding.
+#[cfg(feature = "metal-output-placement")]
+#[must_use]
+pub fn read_placed_buffer_f32(
+    buffer: &PlacedBuffer,
+    byte_offset: usize,
+    element_count: usize,
+) -> Vec<f32> {
+    let pointer = buffer.contents();
+    // SAFETY: `storageModeShared` is CPU-visible once the command buffer
+    // that wrote it has completed, and `execute_plan_with_placements` always
+    // `waitUntilCompleted`s before returning. `byte_offset`/`element_count`
+    // staying inside `buffer`'s allocated length is the caller's contract —
+    // this function has no independent way to learn that length's meaning
+    // (a caller-owned buffer may hold several placed nodes at once).
+    unsafe {
+        let base = pointer.as_ptr().cast::<u8>().add(byte_offset).cast::<f32>();
+        core::slice::from_raw_parts(base, element_count)
+    }
+    .to_vec()
+}
+
+/// [`execute_plan`], plus the ability to route one or more nodes' outputs
+/// into a buffer the CALLER owns (`output_placements`), and to bind one or
+/// more [`Op::Input`](proxima_tensor::Op::Input) nodes DIRECTLY to a buffer
+/// the caller already owns on the device (`input_placements`), skipping the
+/// per-call `upload_block`/`upload_packed_bytes` host round trip entirely.
+/// Both are `&[(node, buffer, byte_offset)]` — deliberately plain tuples
+/// over a named struct or a single slice with a direction field: the call
+/// site destructures each triple positionally either way (`for (node,
+/// buffer, offset) in placements`), and TWO plain slices already carry the
+/// direction in which parameter a placement is passed to, at zero added
+/// type cost. Compare both shapes, written out, for one KV-cache-shaped
+/// call (`kv` bound as this program's growing history, `row` the freshly
+/// computed token this call is adding to it, both backed by ONE buffer):
+///
+/// ```text
+/// // two plain slices (chosen) — no new type, direction = which parameter
+/// execute_plan_with_placements(
+///     &plan, &blocks,
+///     &[(kv_input_node, &kv_buffer, 0)],
+///     &[(row_output_node, &kv_buffer, cached_len * row_bytes)],
+/// )?;
+///
+/// // one slice + a direction field (rejected) — an enum earns its keep only
+/// // if some caller needs to build a MIXED, order-independent placement
+/// // list at runtime; no caller here does, so it is a type with nothing to
+/// // do beyond what two parameter names already say for free.
+/// execute_plan_with_placements(&plan, &blocks, &[
+///     Placement { node: kv_input_node, buffer: &kv_buffer, offset: 0, direction: Direction::Input },
+///     Placement { node: row_output_node, buffer: &kv_buffer, offset: cached_len * row_bytes, direction: Direction::Output },
+/// ])?;
+/// ```
+///
+/// Three hazards this signature exists to name explicitly, not paper over:
+///
+/// - **Cross-invocation liveness.** [`Prepared::retires`] computes per-
+///   program liveness only (`bound_op_retirement`'s own doc) — it has no
+///   notion of a buffer surviving into the NEXT `execute_plan_with_placements`
+///   call. Every placed node (input or output) is therefore excluded from
+///   this call's own retire sweep below: even if something inside THIS
+///   program reads or writes it after its nominal last use, this function
+///   will not drop this call's reference to it. The caller's own
+///   `PlacedBuffer` handle is what actually keeps the GPU allocation alive
+///   across calls; this exclusion just stops this function's bookkeeping
+///   map from disagreeing with that fact.
+/// - **Cross-invocation aliasing.** A placed buffer written by one call may
+///   be read (as an input placement) by a LATER call. That is safe because
+///   every call `commit`s and `waitUntilCompleted`s its own command buffer
+///   before returning (this function, like [`execute_plan`], never overlaps
+///   two command buffers) — the next call's encoder cannot begin recording
+///   real GPU work against the buffer until this call's write has completed
+///   and is CPU/GPU-visible: a strict happens-before, stronger than same-
+///   encoder hazard tracking needs to be.
+/// - **Within-call aliasing: one op writes a placed buffer, a LATER op in
+///   the SAME program reads it — the KV-cache shape this exists for.** This
+///   is covered by the SAME mechanism [`execute_plan`]'s own opening comment
+///   already establishes for two dispatches sharing one serial encoder:
+///   `MTLDispatchTypeSerial` guarantees encode order is execution order, and
+///   every buffer here is device-allocated `storageModeShared` (never
+///   `HazardTrackingModeUntracked`), so Metal's automatic hazard tracking
+///   inserts an implicit barrier before the later dispatch. That tracking
+///   operates at whole-`MTLResource` granularity, not the sub-range named by
+///   `setBuffer:offset:atIndex:` — a write at one offset and a read at a
+///   DIFFERENT offset of the SAME `MTLBuffer` object are still the same
+///   resource to the tracker, so the barrier applies regardless of which
+///   byte ranges the two dispatches actually touch. Nothing here is new
+///   relative to what every existing multi-op program already relies on
+///   (op N's freshly allocated output, read by op N+1) — placement changes
+///   WHERE the write lands, not whether ordering holds. The proof, not just
+///   the argument, is `metal_output_placement.rs`'s
+///   `a_program_reads_a_placed_write_from_a_later_op_in_the_same_call` test:
+///   if hazard tracking did not cover this, that test would read stale
+///   (pre-write) bytes instead of the fresh write, and it does not.
+///
+/// # Errors
+/// Propagates block-codec and Metal driver failures, same as [`execute_plan`].
+#[cfg(feature = "metal-output-placement")]
+pub fn execute_plan_with_placements(
+    plan: &Plan,
+    blocks: &[QuantizedBlock<'_>],
+    input_placements: &[(NodeId, &PlacedBuffer, usize)],
+    output_placements: &[(NodeId, &PlacedBuffer, usize)],
+) -> Result<Evaluated, MetalError> {
+    let prepared = &plan.prepared;
+    let packed_operands = &plan.packed_operands;
+    let input_placed: BTreeMap<NodeId, (&PlacedBuffer, usize)> = input_placements
+        .iter()
+        .map(|(node, buffer, offset)| (*node, (*buffer, *offset)))
+        .collect();
+    let output_placed: BTreeMap<NodeId, (&PlacedBuffer, usize)> = output_placements
+        .iter()
+        .map(|(node, buffer, offset)| (*node, (*buffer, *offset)))
+        .collect();
+    let (device, queue) = device_and_queue()?;
+
+    let mut device_buffers: BTreeMap<NodeId, DeviceBuffer> = BTreeMap::new();
+    for ((node, block), dtype) in prepared
+        .block_nodes
+        .iter()
+        .zip(blocks.iter())
+        .zip(plan.block_dtypes.iter())
+    {
+        // an input-placed node skips the host round trip entirely: its
+        // buffer is already on the device, owned by the caller, and this
+        // call's own `block` entry for it (still required, positionally, to
+        // keep `block_nodes.iter().zip(blocks.iter())` aligned) is unused.
+        // The caller's own offset travels in the same `DeviceBuffer` tuple
+        // every other node's buffer carries -- `buffer_for`/`bind_buffers`
+        // read it generically, with no separate offset map required.
+        if let Some((buffer, offset)) = input_placed.get(node) {
+            device_buffers.insert(*node, ((*buffer).clone(), *offset));
+            continue;
+        }
+        let resident = plan.resident_nodes.contains(node);
+        let buffer = match block {
+            QuantizedBlock::Float32(data) => upload_block(&device, data, *node, *dtype, resident)?,
+            QuantizedBlock::Q4K(bytes)
+            | QuantizedBlock::Q5K(bytes)
+            | QuantizedBlock::Q6K(bytes)
+            | QuantizedBlock::Q8_0(bytes)
+            | QuantizedBlock::Q4_0(bytes)
+            | QuantizedBlock::Float16(bytes)
+            | QuantizedBlock::BFloat16(bytes) => upload_packed_bytes(&device, bytes, resident)?,
+        };
+        device_buffers.insert(*node, buffer);
+    }
+
+    let command_buffer = queue
+        .commandBuffer()
+        .ok_or_else(|| MetalError::CompileFailed {
+            log: "command queue refused to hand out a command buffer".to_string(),
+        })?;
+    let encoder =
+        command_buffer
+            .computeCommandEncoder()
+            .ok_or_else(|| MetalError::CompileFailed {
+                log: "command buffer refused to hand out a compute encoder".to_string(),
+            })?;
+
+    let mut pending_faults: Vec<PendingFault<'_>> = Vec::new();
+    for (position, bound) in prepared.resolved.iter().enumerate() {
+        let placement = output_placed.get(&bound.node).copied();
+        let fault = encode_op(
+            &device,
+            &encoder,
+            &mut device_buffers,
+            bound,
+            packed_operands,
+            placement,
+        )?;
+        if let Some((fault_buffer, gathers)) = fault {
+            pending_faults.push((bound, fault_buffer, gathers));
+        }
+        // explicit liveness exclusion (see this function's doc): a placed
+        // node, input or output, is externally owned and always live, so it
+        // is never dropped from this call's own bookkeeping map, regardless
+        // of what `prepared.retires` (a per-program-only liveness sweep)
+        // says.
+        for retired in &prepared.retires[position] {
+            if input_placed.contains_key(retired) || output_placed.contains_key(retired) {
+                continue;
+            }
+            device_buffers.remove(retired);
+        }
+    }
+    encoder.endEncoding();
+
+    command_buffer.commit();
+    command_buffer.waitUntilCompleted();
 
     for (bound, fault_buffer, gathers) in &pending_faults {
         check_gather_fault(bound, fault_buffer, *gathers)?;
@@ -737,6 +982,7 @@ pub fn execute_plan_op_timed(
             &mut device_buffers,
             bound,
             packed_operands,
+            None,
         )?;
         encoder.endEncoding();
         command_buffer.commit();
@@ -2096,18 +2342,34 @@ fn buffer_for(device_buffers: &BTreeMap<NodeId, DeviceBuffer>, node: NodeId) -> 
     })
 }
 
+/// `output` is `(buffer, byte_offset)` rather than two separate parameters
+/// so this function stays under clippy's argument-count lint without a
+/// `#[allow]` — the pair is always passed and used together, never
+/// independently. `byte_offset` is always `0` for a fresh, op-sized buffer
+/// (the shape every call site used before `metal-output-placement`
+/// existed); it is non-zero only when `buffer` is a caller-owned
+/// [`PlacedBuffer`] the op is writing into at an offset (see
+/// [`execute_plan_with_placements`]). An `Input`/`Indices` binding's own
+/// offset travels with it already, in `device_buffers`' own
+/// [`DeviceBuffer`] pair -- the same tuple `checkpoint_mapping_offset`
+/// (an input-only placement predating this feature) already relied on, so
+/// an input-placed node needs no separate offset map: its offset is
+/// whatever [`execute_plan_with_placements`] inserted into `device_buffers`
+/// for it. Uniforms and the fault buffer are always read from their own
+/// start — neither is ever placed.
 fn bind_buffers(
     encoder: &ProtocolObject<dyn MTLComputeCommandEncoder>,
     bindings: &[Binding],
     device_buffers: &BTreeMap<NodeId, DeviceBuffer>,
-    output: &Retained<ProtocolObject<dyn MTLBuffer>>,
+    output: (&Retained<ProtocolObject<dyn MTLBuffer>>, usize),
     uniforms: &Retained<ProtocolObject<dyn MTLBuffer>>,
     fault: Option<&Retained<ProtocolObject<dyn MTLBuffer>>>,
 ) -> Result<(), MetalError> {
+    let (output_buffer, output_offset) = output;
     for (index, binding) in bindings.iter().enumerate() {
         let (buffer, offset) = match binding {
             Binding::Input(node) | Binding::Indices(node) => buffer_for(device_buffers, *node)?,
-            Binding::Output(_) => (output.clone(), 0),
+            Binding::Output(_) => (output_buffer.clone(), output_offset),
             Binding::Uniforms => (uniforms.clone(), 0),
             Binding::Fault => (
                 fault.cloned().ok_or_else(|| MetalError::CompileFailed {
@@ -2116,12 +2378,14 @@ fn bind_buffers(
                 0,
             ),
         };
-        // SAFETY: `buffer`'s length was sized from the same op this
-        // kernel was emitted from, so every byte the kernel indexes through
-        // this binding is in bounds, starting at `offset` -- 0 for every
-        // binding except a tensor `checkpoint_mapping_offset` addressed into
-        // the shared checkpoint buffer, whose OWN byte range is what was
-        // validated against that buffer's length.
+        // SAFETY: `buffer`'s length was sized from the same op this kernel
+        // was emitted from (or, for a placed input/output, the caller
+        // guaranteed `offset + <this binding's own element count> *
+        // dtype.size_bytes()` fits inside it — see
+        // `execute_plan_with_placements`'s own doc), so every byte the
+        // kernel indexes through this binding is in bounds, starting at
+        // `offset` -- 0 for every binding except a tensor
+        // `checkpoint_mapping_offset` or `metal-output-placement` address.
         unsafe { encoder.setBuffer_offset_atIndex(Some(&buffer), offset, index) };
     }
     Ok(())
@@ -2169,12 +2433,22 @@ fn dispatch(
 /// encoder it was handed. Returns the op's fault buffer and gather count
 /// when it gathers, so the caller can check it after its own wait instead
 /// of here, where the buffer is not yet CPU-visible.
+///
+/// `placement` is `None` on every call site that predates
+/// `metal-output-placement` (byte-identical to before: a fresh
+/// `allocate_buffer` sized to this op's own iteration space). `Some((buffer,
+/// offset))` skips that allocation and binds `bound`'s output straight into
+/// the caller-owned `buffer` at `offset` instead -- that offset is then
+/// carried forward in `device_buffers`' own [`DeviceBuffer`] entry for this
+/// node, so a later op reading it back through
+/// [`bind_buffers`]/[`buffer_for`] needs no separate offset map.
 fn encode_op(
     device: &ProtocolObject<dyn MTLDevice>,
     encoder: &ProtocolObject<dyn MTLComputeCommandEncoder>,
     device_buffers: &mut BTreeMap<NodeId, DeviceBuffer>,
     bound: &BoundOp,
     packed_operands: &PackedOperands,
+    placement: Option<(&MetalBuffer, usize)>,
 ) -> Result<Option<(MetalBuffer, usize)>, MetalError> {
     #[cfg(feature = "instrument")]
     let emit_started = read_ticks();
@@ -2200,7 +2474,13 @@ fn encode_op(
     }
     #[cfg(feature = "instrument")]
     let op_setup_started = read_ticks();
-    let output = allocate_buffer(device, bound_output_len(bound), bound.dtype)?;
+    let (output, output_offset) = match placement {
+        Some((buffer, offset)) => (buffer.clone(), offset),
+        None => (
+            allocate_buffer(device, bound_output_len(bound), bound.dtype)?,
+            0,
+        ),
+    };
     let uniforms = upload_uniforms(device, &pack_uniforms(bound))?;
     let gathers = gather_count(bound);
     let fault = (gathers > 0)
@@ -2226,7 +2506,7 @@ fn encode_op(
         encoder,
         &bindings,
         device_buffers,
-        &output,
+        (&output, output_offset),
         &uniforms,
         fault.as_ref(),
     )?;
@@ -2240,7 +2520,7 @@ fn encode_op(
         );
     }
 
-    device_buffers.insert(bound.node, (output, 0));
+    device_buffers.insert(bound.node, (output, output_offset));
     Ok(fault.map(|fault_buffer| (fault_buffer, gathers)))
 }
 
