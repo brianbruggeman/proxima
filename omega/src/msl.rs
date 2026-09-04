@@ -1587,9 +1587,13 @@ fn grid_threads(resolved: &BoundOp, quantized: &[Option<PackedCodec>]) -> u64 {
                 // one SIMD group per PACKED_ROWS_PER_GROUP outputs
                 output_total.div_ceil(PACKED_ROWS_PER_GROUP as u64) * SIMD_WIDTH
             } else if reduce_is_cooperative(resolved) {
-                // one SIMD-group (SIMD_WIDTH lanes) per output element, not
-                // one thread — see `reduce_is_cooperative`'s doc.
-                output_total * SIMD_WIDTH
+                // one cooperative-reduce threadgroup per output element,
+                // `cooperative_reduce_width` lanes wide (SIMD_WIDTH with
+                // `metal-wide-cooperative-reduce` off, matching
+                // `reduce_is_cooperative`'s prior doc byte-for-byte) — see
+                // that function's own doc for the scaling policy.
+                let reduce_dims = reduction_dims(resolved, output_axes);
+                output_total * cooperative_reduce_width(resolved, quantized, &reduce_dims)
             } else {
                 output_total
             }
@@ -3234,10 +3238,10 @@ fn push_tiled_gemm_body(
 /// [`push_tiled_gemm_body`]'s multi-simdgroup path (its coordinate math
 /// depends on exactly this many threads per threadgroup, the same
 /// correctness requirement `crate::metal::dispatch`'s own doc states for
-/// `SIMD_WIDTH`), `SIMD_WIDTH` for every other cooperative-reduce kernel,
-/// `None` otherwise. Single source of truth both dispatch-shape functions
-/// read, so they cannot drift the way two independent copies of this
-/// `if`/`else` could.
+/// `SIMD_WIDTH`), [`cooperative_reduce_width`] for every other
+/// cooperative-reduce kernel, `None` otherwise. Single source of truth both
+/// dispatch-shape functions read, so they cannot drift the way two
+/// independent copies of this `if`/`else` could.
 /// [`crate::sized::PACKED_ROW_BLOCK_SIMDGROUPS`] widens the packed row-block
 /// arm's threadgroup beyond one simdgroup — see that constant's doc for why
 /// this is dispatch-only and never touches the kernel body. Ordered after
@@ -3262,7 +3266,14 @@ fn tiled_gemm_threadgroup_width(
     if packed_row_block(resolved, quantized).is_some() {
         return Some(crate::sized::PACKED_ROW_BLOCK_SIMDGROUPS * SIMD_WIDTH);
     }
-    reduce_is_cooperative(resolved).then_some(SIMD_WIDTH)
+    if !reduce_is_cooperative(resolved) {
+        return None;
+    }
+    let BoundOpKind::Reduce { output_axes, .. } = &resolved.kind else {
+        unreachable!("reduce_is_cooperative only returns true for a Keep::Reduce fold")
+    };
+    let reduce_dims = reduction_dims(resolved, output_axes);
+    Some(cooperative_reduce_width(resolved, quantized, &reduce_dims))
 }
 
 // the emitter threads a bound op's full shape (rank, axes, reduce op, init,
@@ -3300,7 +3311,10 @@ fn push_cooperative_reduce_body(
 
     // the row-blocked packed path owns its own preamble: `output_index` is a
     // GROUP index there, not an output index, so the guard below would be
-    // wrong for it.
+    // wrong for it. It always dispatches at SIMD_WIDTH regardless of
+    // `metal-wide-cooperative-reduce` -- ROW-BLOCKED is a separate,
+    // untouched investigation (see this file's own history), not the
+    // reduction-extent-driven scaling below.
     if packed_row_block(resolved, quantized).is_some() {
         source.push_str(&format!(
             "    long output_index = (long)gid / {SIMD_WIDTH};\n"
@@ -3319,11 +3333,14 @@ fn push_cooperative_reduce_body(
         return;
     }
 
-    source.push_str(&format!(
-        "    long output_index = (long)gid / {SIMD_WIDTH};\n"
-    ));
+    // Single source of truth with the dispatch shape `grid_threads`/
+    // `tiled_gemm_threadgroup_width` compute -- `width` here MUST equal
+    // `cooperative_reduce_width`'s return for this exact op, or the grid
+    // launched and the lane math emitted below disagree.
+    let width = cooperative_reduce_width(resolved, quantized, reduce_dims);
+    source.push_str(&format!("    long output_index = (long)gid / {width};\n"));
     source.push_str("    if (output_index >= u.output_total) { return; }\n");
-    source.push_str(&format!("    uint lane = gid % {SIMD_WIDTH}u;\n"));
+    source.push_str(&format!("    uint lane = gid % {width}u;\n"));
 
     source.push_str(&format!("    long full_coord[{rank_len}];\n"));
     for dim in 0..rank {
@@ -3399,11 +3416,8 @@ fn push_cooperative_reduce_body(
             .enumerate()
             .filter_map(|(index, codec)| matches!(codec, Some(PackedCodec::Q4K)).then_some(index))
             .collect();
-        let reduce_extent = resolved.extents[reduce_dim] as usize;
         let run = Q4K_BLOCK_ELEMENTS / SIMD_WIDTH as usize;
-        let tiled = packed.len() == 1
-            && resolved.operands()[packed[0]].1.stride(reduce_dims[0]) == 1
-            && reduce_extent.is_multiple_of(Q4K_BLOCK_ELEMENTS);
+        let tiled = q4k_super_block_tiled(resolved, quantized, reduce_dims);
         if tiled {
             let weight = packed[0];
             for index in 0..operand_count {
@@ -3464,7 +3478,7 @@ fn push_cooperative_reduce_body(
             source.push_str("            seeded = true;\n");
             source.push_str("        }\n");
             source.push_str("    }\n");
-            push_cooperative_reduce_tail(source, resolved, reduce_op, rank, element_type);
+            push_cooperative_reduce_tail(source, reduce_op, rank, width, element_type);
             return;
         }
 
@@ -3490,11 +3504,11 @@ fn push_cooperative_reduce_body(
             // `int`, the 64-bit walk below runs instead.
             source.push_str(&format!("    int walk{index} = (int)off{index};\n"));
             source.push_str(&format!(
-                "    int advance{index} = (int)(stride{index} * {SIMD_WIDTH});\n"
+                "    int advance{index} = (int)(stride{index} * {width});\n"
             ));
         }
         source.push_str(&format!(
-            "    for (int r = (int)lane; r < (int)u.reduction_total; r += {SIMD_WIDTH}) {{\n"
+            "    for (int r = (int)lane; r < (int)u.reduction_total; r += {width}) {{\n"
         ));
         source.push_str(&format!(
             "        {element_type} scratch[{}];\n",
@@ -3517,12 +3531,12 @@ fn push_cooperative_reduce_body(
             source.push_str(&format!("        walk{index} += advance{index};\n"));
         }
         source.push_str("    }\n");
-        push_cooperative_reduce_tail(source, resolved, reduce_op, rank, element_type);
+        push_cooperative_reduce_tail(source, reduce_op, rank, width, element_type);
         return;
     }
 
     source.push_str(&format!(
-        "    for (long r = (long)lane; r < u.reduction_total; r += {SIMD_WIDTH}) {{\n"
+        "    for (long r = (long)lane; r < u.reduction_total; r += {width}) {{\n"
     ));
     if reduce_rank > 0 {
         source.push_str(&format!(
@@ -3571,24 +3585,77 @@ fn push_cooperative_reduce_body(
     source.push_str("        seeded = true;\n");
     source.push_str("    }\n");
 
-    push_cooperative_reduce_tail(source, resolved, reduce_op, rank, element_type);
+    push_cooperative_reduce_tail(source, reduce_op, rank, width, element_type);
 }
 
-/// The `simd_sum` fold and the lane-0 store both cooperative loop shapes
-/// end with — shared so the strength-reduced single-reduction-dim path and
-/// the general path cannot drift on how the result is written out.
+/// The per-lane `simd_sum` fold and the final store both cooperative loop
+/// shapes end with — shared so the strength-reduced single-reduction-dim
+/// path, the general path, and the Q4_K super-block-tiled path (which
+/// always calls this with `width == SIMD_WIDTH`, see
+/// [`q4k_super_block_tiled`]) cannot drift on how the result is written
+/// out.
+///
+/// `width == SIMD_WIDTH` (32, one simdgroup, the byte-identical prior
+/// shape): a single `simd_sum`-class fold and a lane-0 store, unchanged.
+///
+/// `width > SIMD_WIDTH` (`metal-wide-cooperative-reduce` only --
+/// [`cooperative_reduce_width`] never returns a wider value with the
+/// feature off): a two-level fold. Each simdgroup folds its own 32 lanes
+/// with `simd_combine_fn`, its lane 0 stores that partial into a
+/// `threadgroup` array sized to the EXACT simdgroup count this kernel
+/// dispatches (`width / SIMD_WIDTH`, baked into the source as a literal --
+/// not a uniform, so there is no way to index it out of bounds or read an
+/// element no lane wrote). A barrier orders the writes before thread 0
+/// folds the partials serially and stores the result. Every lane in every
+/// simdgroup of a `width`-wide threadgroup is real (the grid this pairs
+/// with is always an exact multiple of `width`, `grid_threads`' own
+/// invariant), so every partial slot is written before the fold reads it —
+/// there is no ragged-tail case here to guard, unlike the per-lane
+/// accumulator seed above (which already handles `reduction_total < width`
+/// via `cooperative_identity_token`, both before and after this feature).
 fn push_cooperative_reduce_tail(
     source: &mut String,
-    _resolved: &BoundOp,
     reduce_op: ScalarOp,
     rank: usize,
+    width: u64,
     element_type: &str,
 ) {
     let combine_fn = simd_combine_fn(reduce_op);
+    let simdgroups = width / SIMD_WIDTH;
+    if simdgroups <= 1 {
+        source.push_str(&format!(
+            "    {element_type} reduced = {combine_fn}(accumulator);\n"
+        ));
+        source.push_str("    if (lane == 0u) {\n");
+        source.push_str("        long out_offset = u.out_base;\n");
+        for dim in 0..rank {
+            source.push_str(&format!(
+                "        out_offset += full_coord[{dim}] * u.out_strides[{dim}];\n"
+            ));
+        }
+        source.push_str("        out[out_offset] = reduced;\n");
+        source.push_str("    }\n");
+        return;
+    }
+
     source.push_str(&format!(
-        "    {element_type} reduced = {combine_fn}(accumulator);\n"
+        "    {element_type} partial = {combine_fn}(accumulator);\n"
     ));
+    source.push_str(&format!(
+        "    threadgroup {element_type} partials[{simdgroups}];\n"
+    ));
+    source.push_str(&format!(
+        "    if (lane % {SIMD_WIDTH}u == 0u) {{ partials[lane / {SIMD_WIDTH}u] = partial; }}\n"
+    ));
+    source.push_str("    threadgroup_barrier(mem_flags::mem_threadgroup);\n");
     source.push_str("    if (lane == 0u) {\n");
+    source.push_str(&format!("        {element_type} reduced = partials[0];\n"));
+    source.push_str(&format!(
+        "        for (uint fold_index = 1u; fold_index < {simdgroups}u; ++fold_index) {{\n"
+    ));
+    let fold_expr = scalar_op_expr(reduce_op, &["reduced", "partials[fold_index]"]);
+    source.push_str(&format!("            reduced = {fold_expr};\n"));
+    source.push_str("        }\n");
     source.push_str("        long out_offset = u.out_base;\n");
     for dim in 0..rank {
         source.push_str(&format!(

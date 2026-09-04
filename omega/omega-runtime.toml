@@ -46,3 +46,16 @@ block_n = 32
 # AND must be a multiple of 8 (ROW 113's `q4k_run8`-batched weight-staging
 # loop) — see sized::TILED_GEMM_BLOCK_K.
 block_k = 32
+
+[wide_cooperative_reduce]
+# upper bound on the threadgroup width `msl::cooperative_reduce_width` picks
+# for a cooperative reduce (`feature = "metal-wide-cooperative-reduce"` only)
+# — NOT a query of the device's real `maxTotalThreadsPerThreadgroup`, which
+# emission has no handle to (see sized::SIMD_WIDTH's own doc for the same
+# constraint on the hardware-fixed 32). `crate::metal::dispatch` clamps
+# `grid.threadgroup_width` to the pipeline's real cap before dispatching, so
+# a value above the true hardware limit only wastes grid, never a
+# correctness hazard — 256 (8 simdgroups) is conservative against every
+# Apple GPU family this crate targets. Must be a multiple of 32
+# (SIMD_WIDTH) — see sized::WIDE_COOPERATIVE_REDUCE_MAX_WIDTH.
+max_width = 256

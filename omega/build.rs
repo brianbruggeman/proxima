@@ -79,6 +79,21 @@ fn require_power_of_two_le_32(name: &str, value: usize) -> usize {
     value
 }
 
+/// [`crate::sized::WIDE_COOPERATIVE_REDUCE_MAX_WIDTH`] must stay a whole
+/// number of simdgroups: `msl::push_cooperative_reduce_tail`'s two-level
+/// fold divides the chosen width by `SIMD_WIDTH` to size its `threadgroup`
+/// partials array, and `msl::cooperative_reduce_width` only ever rounds UP
+/// to a multiple of 32 before clamping against this cap — a cap that is not
+/// itself a multiple of 32 would silently clamp a wide reduce down to a
+/// width its own preceding `next_multiple_of(32)` never produces.
+fn require_multiple_of_thirty_two(name: &str, value: usize) -> usize {
+    assert!(
+        value.is_multiple_of(32),
+        "{name} must be a multiple of 32 (SIMD_WIDTH); got {value}"
+    );
+    value
+}
+
 fn get_int(table: &Value, section: &str, key: &str) -> i64 {
     table
         .get(section)
@@ -179,6 +194,19 @@ fn emit_sizing_consts() {
         out.push_str(&format!("pub const TILED_GEMM_BLOCK_M: u64 = {block_m};\n"));
         out.push_str(&format!("pub const TILED_GEMM_BLOCK_N: u64 = {block_n};\n"));
         out.push_str(&format!("pub const TILED_GEMM_BLOCK_K: u64 = {block_k};\n"));
+    }
+
+    if env::var_os("CARGO_FEATURE_METAL_WIDE_COOPERATIVE_REDUCE").is_some() {
+        let max_width = require_multiple_of_thirty_two(
+            "wide_cooperative_reduce.max_width",
+            require_nonzero(
+                "wide_cooperative_reduce.max_width",
+                resolve_int(&root, "wide_cooperative_reduce", "max_width"),
+            ),
+        );
+        out.push_str(&format!(
+            "pub const WIDE_COOPERATIVE_REDUCE_MAX_WIDTH: u64 = {max_width};\n"
+        ));
     }
 
     let out_dir = PathBuf::from(env::var("OUT_DIR").expect("OUT_DIR set by cargo"));
