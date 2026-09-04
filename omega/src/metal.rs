@@ -1308,6 +1308,20 @@ pub fn execute_plan_with_placements_op_timed(
             device_buffers.insert(*node, ((*buffer).clone(), *offset));
             continue;
         }
+        // same `BLOCK_OFFERED_BYTES`/`BLOCK_UPLOAD_CALLS` fire
+        // `execute_plan_with_placements`'s own loop carries -- this
+        // diagnostic op-timed twin duplicates that loop's upload shape, so
+        // it must duplicate the census fire too, or the partition identity
+        // (`BLOCK_COPIED_BYTES + BLOCK_NOCOPY_BOUND_BYTES +
+        // BLOCK_OFFSET_BOUND_BYTES == BLOCK_OFFERED_BYTES`) goes untested on
+        // this path even though the three per-path counters (fired inside
+        // `upload_block_as_float`/`upload_packed_bytes` themselves) still
+        // increment here regardless.
+        #[cfg(feature = "instrument")]
+        {
+            counter!(BLOCK_UPLOAD_CALLS, 1);
+            counter!(BLOCK_OFFERED_BYTES, block_byte_len(block) as u64);
+        }
         let resident = plan.resident_nodes.contains(node);
         let buffer = match block {
             QuantizedBlock::Float32(data) => upload_block(&device, data, *node, *dtype, resident)?,
