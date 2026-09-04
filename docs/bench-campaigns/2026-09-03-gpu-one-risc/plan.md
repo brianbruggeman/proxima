@@ -302,6 +302,33 @@ in-graph placement (cards 5.2/9.2, −7.3 ms). The remaining 25 ms to llama.cpp 
 (`gpu_exec` ≈36 ms on the placed path against the incumbent's 17.6 total) and ≈6 ms of
 orchestration — Phases 3, 4 and 6 of §5, in that order.
 
+Third wave, 2026-09-04, continuing on the then-current default (KV-bucket-32, ROW 273): three
+negatives already named in the second wave (split-K, serial-reduce, ggml-port) got their formal
+discipline.md rows and quiet-box numbers, one dispatch-reachability bug was found and fixed, and
+three features flipped the default forward.
+
+| change | ms/token (default oracle) | what the measurement says |
+|---|---|---|
+| operand-byte accounting corrected (ROW 272 correction, `c05bf1e`) | unchanged (instrument-only) | `operand_bytes` summed the shared checkpoint buffer's own length per operand instead of `element_count × dtype size`; replaced with `operand_tensor_bytes`; `total_operand_bytes` now 4.169 GB/step, within 2.4% of the ~4.07 GB/step prediction |
+| split-K row-count gate, formal numbers (ROW 274) | quiet `gpu_exec_ms`: default 34.733 vs split-K 38.17-38.77 (~11% slower); loaded box (host under concurrent load, same rounds), end-to-end wall: default ~177 vs split-K ~229-232 ms/token | gate is reachable and causal but recovers no win on any family it reaches, including its intended target; stays default-off, landed as infrastructure for a future kernel redesign |
+| packed-row nsg2 dispatch made reachable (ROW 275) | corrected steady-state read: default 41.09 vs nsg2 41.29 ms/token (flat) | the earlier +23% reading averaged the cold pipeline-compile step into the mean; per-family GB/s flat on every family — the second wave's nsg=2 negative had measured unreachable dead code |
+| short-reduce serial route, formal numbers (ROW 276) | min_len=0 (default) 41.920 vs min_len=64/128/256 43.315/46.164/46.020 ms/token | confirms the second wave's read: these reduces are memory-latency-bound, not compute-bound; the knob lands inert at 0 |
+| verbatim ggml Q4_K port, formal numbers (ROW 277) | steady-state default 41.414 vs ggml-port 45.567 ms/token (+10.0%); packed-row-blocked bucket 25.773 vs 29.769 ms (+15.5%) | confirms the second wave's read as a fifth negative for the incumbent's geometry on this tree; the same commit exposed nsg2 as unreachable dead code |
+| paired-nibble Q5_K matvec, default flip (ROW 278) | per-op 202,083 → 124,265 ns/op (1.63x) on the 8 real Q5_K ops; decode wall flat within noise | text identical every arm/round; default oracle at this point: 40.521 ms/token |
+| uniform buffer cache bounded with LRU (ROW 279) | not a perf change | `UNIFORM_BUFFERS` grew unbounded on varying uniform bytes; bounded at `[spans].uniform_cache_entries=4096`; `uniform_cache_len` plateaus at 50 on the default decode |
+| plan-stable device buffers, default flip (ROW 280) | quiet 3-round table: OFF 40.827/40.090/41.107 vs ON 39.688/37.476/40.780 (ON ≤ OFF every round) | `op_setup` fell 3.94-5.42 → 0.39-0.60 ms/step; `OUTPUT_BUFFER_ALLOCATIONS` 842/step → 0 on plan-cache hits; device bytes flat (~4.163 GB OFF, ~4.153 GB ON); becomes the default |
+| fused `CachedAttention` reaches the single-range program (ROW 281, `2f6f12d`/`15c469b`/`563fc0c`/`a943390`) | quiet bake-off, 3 rounds: unfused 37.096/37.506/38.786 vs fused 39.796/36.363/37.154 (means 37.796 vs 37.771, CoV 2.33%/4.76%) | delta is inside both arms' noise, not a confirmed wall win; `emit_calls` 938→616/step, per-op GPU sum 35.266→32.356 ms (-8.2%) localized to the fused bucket, device bytes -131,072 B, text identical; lands correctness/capability only, feature stays default-off |
+
+`generated_text` identical on every arm across every row above; device bytes stayed within the
+~4.15-4.17 GB band on every measured arm.
+
+Cooperative K/V-load rewrite of the fused kernel: in flight on `perf/fused-attention-coop-loads`,
+row 282 when measured.
+
+What is left after the third wave, per token on the default at main `e7fe6b6`: quiet-box
+`step_wall_ms` 37.1-38.8 ms/token against `llama-bench` 56.6-57.2 t/s (17.5-17.7 ms/token) —
+**2.15x**. Progression across all three waves, ms/token: 67.9 → 52.7 → 43.0 → 40.9 → 40.5 → ~37.8.
+
 ## 2. The diagnosis, built formally (V0-V8)
 
 The default is no verdict. What follows is a proposal built by the admissibility procedure so
