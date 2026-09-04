@@ -1447,7 +1447,23 @@ fn classify_kind(bound: &BoundOp, packed_operands: &PackedOperands) -> &'static 
                 if kernel.source.contains("q4k_pair_dot(blk")
                     || kernel.source.contains("q4k_run8(blk")
                     || kernel.source.contains("q5k_value(blk")
-                    || kernel.source.contains("q6k_value(blk") =>
+                    || kernel.source.contains("q6k_value(blk")
+                    // `metal-q4k-ggml-port`'s own body (`push_q4k_ggml_port_body`)
+                    // has none of the above markers -- it never calls this
+                    // crate's own decode helpers, that is the whole point of
+                    // the port -- and it DOES end in a `simd_sum(` combine
+                    // like every other cooperative-reduce kernel, so without
+                    // this arm it fell through to "reduce-cooperative" below
+                    // and the op-profile bucket undercounted packed-row-blocked
+                    // ops by exactly the ggml-port op count (found bake-off
+                    // measuring this landing: `reduce-packed-row-blocked`
+                    // dropped from 225 to 9 ops, `reduce-cooperative` grew by
+                    // the same 216, with `packed_row_block`'s own per-family
+                    // `row_blocked_count` unchanged at 32 per family --
+                    // dispatch was always correct, only this profiler label
+                    // was wrong). `acc1_0` is unique to that body's per-thread
+                    // accumulator naming.
+                    || kernel.source.contains("acc1_0") =>
             {
                 "reduce-packed-row-blocked"
             }
@@ -1481,6 +1497,11 @@ fn classify_packed_kernel_variant(
         "q5k-scalar"
     } else if kernel.source.contains("q6k_value(blk") {
         "q6k-scalar"
+    } else if kernel.source.contains("acc1_0") {
+        // `metal-q4k-ggml-port`'s own body -- same marker and same reason
+        // as `classify_kind`'s own arm above, so this variant name does not
+        // fall into "other" alongside genuinely unclassified kernels.
+        "q4k-ggml-port"
     } else {
         "other"
     }
