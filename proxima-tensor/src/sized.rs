@@ -387,6 +387,6 @@ mod tests {
     #[cfg(feature = "kv-capacity-bucket")]
     #[test]
     fn kv_bucket_tokens_matches_the_runtime_toml() {
-        assert_eq!(KV_BUCKET_TOKENS, 256);
+        assert_eq!(KV_BUCKET_TOKENS, 32);
     }
 }

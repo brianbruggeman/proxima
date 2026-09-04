@@ -20153,3 +20153,32 @@ PROXIMA_MAX_TOKENS=8 cargo test --release -p proxima-model-interop --features me
   bind::real_openchat_file::runs_the_cached_decode_loop_on_the_metal_backend_and_reports_the_plan_cache
 ```
 Step 3's `token_breakdown_metal` line must show `block_offered_bytes`, `block_copied_bytes`, `block_nocopy_bound_bytes`, `block_offset_bound_bytes`, and `uniform_cache_len` fields, with `block_copied_bytes + block_nocopy_bound_bytes + block_offset_bound_bytes == block_offered_bytes` exactly.
+
+## ROW 273 -- `kv-capacity-bucket` bucketed the placed-KV plan-cache key, cutting prepare+op-setup enough to win at 32 and 64 tokens, lose at 256
+
+**Card:** 6.1-6.3. **Worktree/branch/commit:** `proxima-wt-land-bucket`/`land/bucket` (landed to `main`). **Feature:** `kv-capacity-bucket`, default: ON (folded into `metal`, `bucket_tokens = 32`).
+**Allocation budget (hot/setup/cold):** hot path unchanged (the KV `Op::Input` leaves' extent and the plan-cache key both round up to a compile-time-configured constant, no new allocation); setup path adds one `zero_placed_buffer` pass per KV buffer at allocation (once per call, not per step).
+**Predict (one rung ahead, written before running):** a bucketed plan-cache key collapses `prepare` (Metal pipeline build) from once-per-step to once-per-bucket, so `step_wall_ms` should fall by roughly `Δ(prepare_ms + op_setup_ms)` minus the padded-tail attention cost the wider KV extent adds, and the trade flips negative once the padding cost outgrows the orchestration saved. **Observed:** confirmed -- 32 and 64 tokens win, 256 loses. **Miss category + work item:** none.
+
+Quiet round 1, 2026-09-04, PROXIMA_MAX_TOKENS=8, steps 1..7 mean unless noted:
+
+| arm | step_wall_ms | gpu_exec_ms | prepare_ms | op_setup_ms | plan_hits/misses | device_allocated_bytes step7 | phys_footprint step7 |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| OFF | 42.544 | 33.891 | 3.715 | 2.711 | 0/8 | 4,162,437,120 | 48,023,424 |
+| bucket 32 | 40.890 | 34.340 | 1.118 | 3.607 | 5/3 | 4,163,321,856 | 49,301,248 |
+| bucket 64 | 41.181 | 35.298 | 0.569 | 3.748 | 6/2 | 4,163,436,544 | 47,547,968 |
+| bucket 256 | 48.183 | 37.266 | 2.064 | 6.074 | 6/2 | 4,164,157,440 | 53,741,440 |
+
+Δgpu_exec_ms vs Δ(prepare_ms + op_setup_ms) saved, both relative to OFF: bucket 32 -- gpu +0.449 vs 1.700 saved (net win); bucket 64 -- gpu +1.407 vs 2.109 saved (net win); bucket 256 -- gpu +3.375 vs −1.712 saved (net loss, op-setup itself grew since the wider padded extent means more scratch to bind per step).
+
+Mechanism: `generate.rs`'s `kv_extent(merged_len, capacity)` rounds `merged_len` up to `sized::KV_BUCKET_TOKENS` (capped at the call's own KV buffer capacity) before it becomes `symbols[1]`, which is both the KV `Op::Input` leaves' bound `Extent::Symbolic(1)` and half the Metal plan-cache key (`new_count` is the other half) -- so a run of decode steps whose `merged_len` climbs within one bucket all hash to the SAME plan-cache key, and `prepare` (pipeline construction) runs once per bucket instead of once per step. `causal_mask_merged`'s existing `key_index > query_absolute` comparison already masks every row in `[merged_len, bucket)` as future for every query the step issues, verified 0-ULP by `spec.rs`'s `cpu_mask_zero_ulp` test across the 8/32/256 boundary cases -- so the padded tail costs real GPU cycles (wider matmul/softmax) but never a wrong logit. `plan_cache_len=1` on hit steps (`placed_plans_len()`, ROW-fixed alongside this feature since it was reading the wrong map, `Cargo.toml`'s own `feat(model-interop)` commit doc), `prepare_calls=0` on hit steps, `emit_calls=938` identical across every arm (op-graph shape never changes), decode text identical across every arm.
+
+Re-prove:
+```sh
+cd /Users/brianbruggeman/repos/slot-0/proxima-wt-land-bucket
+CARGO_TARGET_DIR=/Users/brianbruggeman/repos/slot-0/proxima-wt-land-bucket/target \
+PROXIMA_MAX_TOKENS=8 cargo test --release -p proxima-model-interop --features metal,instrument --lib -- \
+  --exact --nocapture --ignored \
+  bind::real_openchat_file::runs_the_cached_decode_loop_on_the_metal_backend_and_reports_the_plan_cache
+```
+`metal_decode_summary`'s `plan_hits` must be > 0 under the default `metal` build (the feature is now default-on, `bucket_tokens = 32`), text unchanged from the pre-bucket baseline.
