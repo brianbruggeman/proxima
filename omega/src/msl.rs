@@ -1614,6 +1614,50 @@ fn tiled_gemm_threadgroups(feature_extent: u64, token_extent: u64) -> u64 {
     }
 }
 
+/// Split-K factor for a row-blocked packed matmul dispatching `base_simdgroups`
+/// simdgroups (`output_total.div_ceil(PACKED_ROWS_PER_GROUP)`) -- how many
+/// simdgroups per threadgroup cooperate on ONE row-group's reduction axis so
+/// the dispatch's total simdgroup count reaches
+/// [`crate::sized::PACKED_ROW_SPLIT_K_TARGET_SIMDGROUPS`], capped at
+/// [`crate::sized::PACKED_ROW_SPLIT_K_MAX_SPLIT`]. Always `1` (a no-op) once
+/// `base_simdgroups` already meets the target -- attn_q/attn_output/ffn_down/
+/// ffn_gate/output.weight in the measured decode-graph table all clear 2048
+/// on their own; only attn_k/attn_v (256 base simdgroups) engage. Feature-off
+/// builds never see this: the caller only reaches here behind
+/// `packed_row_block(..).is_some()` AND the `metal-q4k-split-k` feature (see
+/// `push_cooperative_reduce_body`'s own gate).
+#[cfg(feature = "metal-q4k-split-k")]
+fn packed_row_split_factor(base_simdgroups: u64) -> u64 {
+    if base_simdgroups == 0 {
+        return 1;
+    }
+    (crate::sized::PACKED_ROW_SPLIT_K_TARGET_SIMDGROUPS / base_simdgroups)
+        .clamp(1, crate::sized::PACKED_ROW_SPLIT_K_MAX_SPLIT)
+}
+
+/// The `metal-q4k-split-k`-off arm: split-K never engages, so the factor is
+/// always `1` -- see [`packed_row_split_factor`]'s feature-on twin for the
+/// real policy. Kept as a separate function (not a `cfg!()` branch inline)
+/// so [`crate::sized::PACKED_ROW_SPLIT_K_TARGET_SIMDGROUPS`] is never
+/// referenced from a build that never generated it.
+#[cfg(not(feature = "metal-q4k-split-k"))]
+fn packed_row_split_factor(_base_simdgroups: u64) -> u64 {
+    1
+}
+
+/// Single source of truth for the row-blocked packed path's base simdgroup
+/// count (one per [`PACKED_ROWS_PER_GROUP`] output rows) and its derived
+/// split-K factor -- both [`grid_threads`] and
+/// [`tiled_gemm_threadgroup_width`] need the SAME pair, and
+/// [`PackedRowBlock`]'s own doc already names the hazard of two independent
+/// call sites silently disagreeing.
+fn packed_row_dispatch(output_axes: &[u16], extents: &[u64]) -> (u64, u64) {
+    let output_total: u64 = output_axes.iter().map(|&dim| extents[dim as usize]).product();
+    let base = output_total.div_ceil(PACKED_ROWS_PER_GROUP as u64);
+    let split = packed_row_split_factor(base);
+    (base, split)
+}
+
 fn grid_threads(resolved: &BoundOp, quantized: &[Option<PackedCodec>]) -> u64 {
     match &resolved.kind {
         BoundOpKind::CachedAttention { head_dim, .. } => {
@@ -1658,8 +1702,11 @@ fn grid_threads(resolved: &BoundOp, quantized: &[Option<PackedCodec>]) -> u64 {
                         .product(),
                 )
             } else if packed_row_block(resolved, quantized).is_some() {
-                // one SIMD group per PACKED_ROWS_PER_GROUP outputs
-                output_total.div_ceil(PACKED_ROWS_PER_GROUP as u64) * SIMD_WIDTH
+                // one SIMD group per PACKED_ROWS_PER_GROUP outputs, times the
+                // split-K factor (1 = no-op unless `metal-q4k-split-k` is
+                // active AND this shape is below the target simdgroup count).
+                let (base, split) = packed_row_dispatch(output_axes, &resolved.extents);
+                base * SIMD_WIDTH * split
             } else if reduce_is_cooperative(resolved) {
                 // one cooperative-reduce threadgroup per output element,
                 // `cooperative_reduce_width` lanes wide (SIMD_WIDTH with
@@ -1947,12 +1994,17 @@ fn push_body_steps(
     format!("step{}", body.steps.len().saturating_sub(1))
 }
 
+// only the row-blocked packed-matmul path's caller ever passes `true` --
+// every other kernel keeps the same signature it always has, so this stays
+// off by construction wherever split-K does not engage (see
+// `push_cooperative_reduce_body`'s own call site for the gate).
 fn kernel_signature(
     source: &mut String,
     quantized: &[Option<PackedCodec>],
     gather_count: usize,
     entry: &str,
     element_type: &str,
+    include_threadgroup_width: bool,
 ) {
     let operand_count = quantized.len();
     source.push_str(&format!("kernel void {entry}(\n"));
@@ -1998,7 +2050,19 @@ fn kernel_signature(
             operand_count + gather_count + 2
         ));
     }
-    source.push_str("    uint gid [[thread_position_in_grid]])\n{\n");
+    source.push_str("    uint gid [[thread_position_in_grid]]");
+    if include_threadgroup_width {
+        // the actual per-dispatch threadgroup width -- `crate::metal::dispatch`
+        // sets this from `GridSpec::threadgroup_width`, which
+        // `tiled_gemm_threadgroup_width` computes FRESH per concrete dispatch
+        // (unlike `Kernel::source`, cached and shared across every dispatch
+        // with the same structural `kernel_cache_key`). Reading it back here
+        // is what lets one compiled kernel body serve both a starved shape
+        // (split > 1) and a saturated one (split == 1) without two kernel
+        // bodies existing per structural shape.
+        source.push_str(",\n    uint tptg [[threads_per_threadgroup]]");
+    }
+    source.push_str(")\n{\n");
 }
 
 /// Declares the `Uniforms` fields a gather needs — `index_base`/`index_strides`
@@ -2199,7 +2263,7 @@ fn render_iota(resolved: &BoundOp, entry: &str) -> Result<String, EmitError> {
     source.push_str("    long total_elements;\n");
     source.push_str("};\n\n");
 
-    kernel_signature(&mut source, &[], 0, entry, element_type);
+    kernel_signature(&mut source, &[], 0, entry, element_type, false);
     source.push_str("    if ((long)gid >= u.total_elements) { return; }\n");
     source.push_str(&format!("    out[gid] = ({element_type})gid;\n"));
     source.push_str("}\n");
@@ -2222,7 +2286,7 @@ fn render_constant(resolved: &BoundOp, entry: &str, value: f32) -> Result<String
     source.push_str("    long total_elements;\n");
     source.push_str("};\n\n");
 
-    kernel_signature(&mut source, &[], 0, entry, element_type);
+    kernel_signature(&mut source, &[], 0, entry, element_type, false);
     source.push_str("    if ((long)gid >= u.total_elements) { return; }\n");
     source.push_str(&format!(
         "    out[gid] = ({element_type}){};\n",
@@ -2316,7 +2380,7 @@ fn render_elementwise(
     push_gather_uniform_fields(&mut source, gather_count, rank_len);
     source.push_str("};\n\n");
 
-    kernel_signature(&mut source, quantized, gather_count, entry, element_type);
+    kernel_signature(&mut source, quantized, gather_count, entry, element_type, false);
     source.push_str("    if ((long)gid >= u.total_elements) { return; }\n");
 
     if rank > 0 {
@@ -2408,7 +2472,22 @@ fn render_reduce(
     push_gather_uniform_fields(&mut source, gather_count, rank_len);
     source.push_str("};\n\n");
 
-    kernel_signature(&mut source, quantized, gather_count, entry, element_type);
+    // split-K needs the actual per-dispatch threadgroup width back
+    // (`kernel_signature`'s `tptg` param) ONLY on the row-blocked packed
+    // path -- every other reduce kernel keeps its signature untouched, and
+    // with the feature off this is always `false`, which is what makes
+    // "split == 1 reproduces the current kernel exactly" hold at the source
+    // level, not just numerically.
+    let include_threadgroup_width =
+        cfg!(feature = "metal-q4k-split-k") && packed_row_block(resolved, quantized).is_some();
+    kernel_signature(
+        &mut source,
+        quantized,
+        gather_count,
+        entry,
+        element_type,
+        include_threadgroup_width,
+    );
 
     if reduce_is_cooperative(resolved) {
         push_cooperative_reduce_body(
@@ -2736,6 +2815,123 @@ fn push_q4k_product_reduce_body(source: &mut String, sub: usize, run: usize, ele
     );
 }
 
+/// The row-blocked packed path's tail: combine each simdgroup's per-row
+/// `sumf[q]` and write the output. `metal-q4k-split-k`-off arm -- exactly
+/// [`push_packed_row_blocked_body`]'s original tail, one simdgroup per
+/// row-group, lane 0 writes straight from the SIMD combine.
+#[cfg(not(feature = "metal-q4k-split-k"))]
+#[allow(clippy::too_many_arguments)]
+fn push_packed_row_combine_and_write(
+    source: &mut String,
+    reduce_op: ScalarOp,
+    rows: usize,
+    rank: usize,
+    rank_len: usize,
+    output_axes: &[u16],
+    element_type: &str,
+) {
+    let combine_fn = simd_combine_fn(reduce_op);
+    source.push_str(&format!("    for (int q = 0; q < {rows}; ++q) {{\n"));
+    source.push_str(&format!(
+        "        {element_type} reduced = {combine_fn}(sumf[q]);\n"
+    ));
+    source.push_str("        long flat = group_first + q;\n");
+    source.push_str("        if (lane == 0u && flat < u.output_total) {\n");
+    source.push_str("            long remaining_q = flat;\n");
+    source.push_str(&format!("            long coord_q[{rank_len}];\n"));
+    source.push_str(&format!(
+        "            for (int d = 0; d < {rank}; ++d) {{ coord_q[d] = 0; }}\n"
+    ));
+    for (index, dim) in output_axes.iter().enumerate().rev() {
+        source.push_str(&format!(
+            "            coord_q[{dim}] = remaining_q % u.output_extents[{index}]; remaining_q /= u.output_extents[{index}];\n"
+        ));
+    }
+    source.push_str("            long out_offset = u.out_base;\n");
+    for dim in 0..rank {
+        source.push_str(&format!(
+            "            out_offset += coord_q[{dim}] * u.out_strides[{dim}];\n"
+        ));
+    }
+    source.push_str("            out[out_offset] = reduced;\n");
+    source.push_str("        }\n");
+    source.push_str("    }\n");
+}
+
+/// The row-blocked packed path's tail: combine each simdgroup's per-row
+/// `sumf[q]` and write the output. `metal-q4k-split-k`-on arm -- SPLIT-K
+/// COMBINE, option 1 from this landing's brief (multiple simdgroups in ONE
+/// threadgroup, threadgroup memory + a barrier, one final fold), over the
+/// second-choice atomic-accumulate (the output dtype can be `half`, which
+/// Metal has no `atomic<half>` for) and the third-choice second-dispatch
+/// partials pass (would double the kernel-launch and uniform-upload cost
+/// this landing exists to avoid paying on the STARVED shapes specifically).
+///
+/// Each simdgroup already SIMD-folds its own interleaved slice of
+/// super-blocks (`push_packed_row_blocked_body`'s `ib` loop, strided by
+/// `4 * split` when split-K is active); this only combines the (at most
+/// [`crate::sized::PACKED_ROW_SPLIT_K_MAX_SPLIT`]) per-simdgroup partials
+/// left behind. At `split == 1` (`sgitg` always `0`) this degenerates to
+/// exactly the feature-off tail: the loop over `s` never runs, so
+/// `total == partial_sums[q][0] == reduced`, written by the SAME thread that
+/// computed it -- same value, same order, only the intermediate trip through
+/// `threadgroup` memory differs.
+#[cfg(feature = "metal-q4k-split-k")]
+#[allow(clippy::too_many_arguments)]
+fn push_packed_row_combine_and_write(
+    source: &mut String,
+    reduce_op: ScalarOp,
+    rows: usize,
+    rank: usize,
+    rank_len: usize,
+    output_axes: &[u16],
+    element_type: &str,
+) {
+    let combine_fn = simd_combine_fn(reduce_op);
+    let max_split = crate::sized::PACKED_ROW_SPLIT_K_MAX_SPLIT;
+    source.push_str(&format!(
+        "    threadgroup {element_type} partial_sums[{rows}][{max_split}];\n"
+    ));
+    source.push_str(&format!("    for (int q = 0; q < {rows}; ++q) {{\n"));
+    source.push_str(&format!(
+        "        {element_type} reduced = {combine_fn}(sumf[q]);\n"
+    ));
+    source.push_str("        if (lane == 0u) { partial_sums[q][sgitg] = reduced; }\n");
+    source.push_str("    }\n");
+    source.push_str("    threadgroup_barrier(mem_flags::mem_threadgroup);\n");
+    source.push_str("    if (sgitg == 0u && lane == 0u) {\n");
+    source.push_str(&format!("        for (int q = 0; q < {rows}; ++q) {{\n"));
+    source.push_str(&format!(
+        "            {element_type} total = partial_sums[q][0];\n"
+    ));
+    source.push_str("            for (uint s = 1u; s < split; ++s) {\n");
+    let combine_expr = scalar_op_expr(reduce_op, &["total", "partial_sums[q][s]"]);
+    source.push_str(&format!("                total = {combine_expr};\n"));
+    source.push_str("            }\n");
+    source.push_str("            long flat = group_first + q;\n");
+    source.push_str("            if (flat < u.output_total) {\n");
+    source.push_str("                long remaining_q = flat;\n");
+    source.push_str(&format!("                long coord_q[{rank_len}];\n"));
+    source.push_str(&format!(
+        "                for (int d = 0; d < {rank}; ++d) {{ coord_q[d] = 0; }}\n"
+    ));
+    for (index, dim) in output_axes.iter().enumerate().rev() {
+        source.push_str(&format!(
+            "                coord_q[{dim}] = remaining_q % u.output_extents[{index}]; remaining_q /= u.output_extents[{index}];\n"
+        ));
+    }
+    source.push_str("                long out_offset = u.out_base;\n");
+    for dim in 0..rank {
+        source.push_str(&format!(
+            "                out_offset += coord_q[{dim}] * u.out_strides[{dim}];\n"
+        ));
+    }
+    source.push_str("                out[out_offset] = total;\n");
+    source.push_str("            }\n");
+    source.push_str("        }\n");
+    source.push_str("    }\n");
+}
+
 #[allow(clippy::too_many_arguments)]
 fn push_packed_row_blocked_body(
     source: &mut String,
@@ -2775,9 +2971,19 @@ fn push_packed_row_blocked_body(
         let rows = PACKED_ROWS_PER_GROUP;
         source.push_str(&format!("    long group_first = output_index * {rows};\n"));
         source.push_str(&format!("    {element_type} sumf[{rows}];\n"));
-        source.push_str(&format!(
-            "    for (int q = 0; q < {rows}; ++q) {{ sumf[q] = (lane == 0u) ? ({init_expr}) : ({identity}); }}\n"
-        ));
+        if cfg!(feature = "metal-q4k-split-k") {
+            // the true seed folds in exactly ONCE across the WHOLE
+            // threadgroup, not once per simdgroup -- at split == 1 `sgitg`
+            // is always `0`, so this collapses to the feature-off condition
+            // (`lane == 0u`) exactly.
+            source.push_str(&format!(
+                "    for (int q = 0; q < {rows}; ++q) {{ sumf[q] = (lane == 0u && sgitg == 0u) ? ({init_expr}) : ({identity}); }}\n"
+            ));
+        } else {
+            source.push_str(&format!(
+                "    for (int q = 0; q < {rows}; ++q) {{ sumf[q] = (lane == 0u) ? ({init_expr}) : ({identity}); }}\n"
+            ));
+        }
         source.push_str(&format!("    long weight_base[{rows}];\n"));
         source.push_str(&format!("    long other_base[{rows}];\n"));
         source.push_str(&format!("    for (int q = 0; q < {rows}; ++q) {{\n"));
@@ -2846,10 +3052,21 @@ fn push_packed_row_blocked_body(
         source.push_str(&format!(
             "    int super_blocks = (int)u.reduction_total / {Q4K_BLOCK_ELEMENTS};\n"
         ));
-        source.push_str(&format!(
-            "    for (int ib = (int)ix; ib < super_blocks; ib += {}) {{\n",
-            SIMD_WIDTH as usize / lanes_per_block
-        ));
+        let ix_stride = SIMD_WIDTH as usize / lanes_per_block;
+        if cfg!(feature = "metal-q4k-split-k") {
+            // each simdgroup (`sgitg`, 0 at split == 1) owns a disjoint
+            // interleaved slice of super-blocks -- a plain strided loop, so a
+            // `super_blocks` not evenly divisible by `split` is handled by
+            // construction (some simdgroups simply run one fewer iteration),
+            // never a separate ragged-tail branch.
+            source.push_str(&format!(
+                "    for (int ib = (int)(ix + sgitg * {ix_stride}u); ib < super_blocks; ib += (int)({ix_stride}u * split)) {{\n"
+            ));
+        } else {
+            source.push_str(&format!(
+                "    for (int ib = (int)ix; ib < super_blocks; ib += {ix_stride}) {{\n"
+            ));
+        }
         source.push_str(&format!(
             "        int elem0 = ib * {Q4K_BLOCK_ELEMENTS} + (int)slot;\n"
         ));
@@ -3026,32 +3243,15 @@ fn push_packed_row_blocked_body(
         }
         source.push_str("        }\n");
         source.push_str("    }\n");
-        let combine_fn = simd_combine_fn(reduce_op);
-        source.push_str(&format!("    for (int q = 0; q < {rows}; ++q) {{\n"));
-        source.push_str(&format!(
-            "        {element_type} reduced = {combine_fn}(sumf[q]);\n"
-        ));
-        source.push_str("        long flat = group_first + q;\n");
-        source.push_str("        if (lane == 0u && flat < u.output_total) {\n");
-        source.push_str("            long remaining_q = flat;\n");
-        source.push_str(&format!("            long coord_q[{rank_len}];\n"));
-        source.push_str(&format!(
-            "            for (int d = 0; d < {rank}; ++d) {{ coord_q[d] = 0; }}\n"
-        ));
-        for (index, dim) in output_axes.iter().enumerate().rev() {
-            source.push_str(&format!(
-                "            coord_q[{dim}] = remaining_q % u.output_extents[{index}]; remaining_q /= u.output_extents[{index}];\n"
-            ));
-        }
-        source.push_str("            long out_offset = u.out_base;\n");
-        for dim in 0..rank {
-            source.push_str(&format!(
-                "            out_offset += coord_q[{dim}] * u.out_strides[{dim}];\n"
-            ));
-        }
-        source.push_str("            out[out_offset] = reduced;\n");
-        source.push_str("        }\n");
-        source.push_str("    }\n");
+        push_packed_row_combine_and_write(
+            source,
+            reduce_op,
+            rows,
+            rank,
+            rank_len,
+            output_axes,
+            element_type,
+        );
     }
 }
 
@@ -3423,16 +3623,21 @@ fn push_tiled_gemm_body(
 /// [`push_tiled_gemm_body`]'s multi-simdgroup path (its coordinate math
 /// depends on exactly this many threads per threadgroup, the same
 /// correctness requirement `crate::metal::dispatch`'s own doc states for
-/// `SIMD_WIDTH`), [`cooperative_reduce_width`] for every other
-/// cooperative-reduce kernel, `None` otherwise. Single source of truth both
-/// dispatch-shape functions read, so they cannot drift the way two
-/// independent copies of this `if`/`else` could.
-/// [`crate::sized::PACKED_ROW_BLOCK_SIMDGROUPS`] widens the packed row-block
-/// arm's threadgroup beyond one simdgroup — see that constant's doc for why
-/// this is dispatch-only and never touches the kernel body. Ordered after
-/// the tiled-GEMM check and before the generic cooperative-reduce fallback,
-/// matching [`grid_threads`]' own priority (the two paths are mutually
-/// exclusive by construction — [`kernel_cache_key`]'s doc).
+/// `SIMD_WIDTH`), `SIMD_WIDTH * split` for the row-blocked packed path when a
+/// `Reduce`'s own shape carries `reduce_op`/`init`/`output_axes` (see
+/// [`packed_row_dispatch`] -- `split` is `1`, i.e. plain `SIMD_WIDTH`, unless
+/// `metal-q4k-split-k` is active and this shape is below the target
+/// simdgroup count), [`crate::sized::PACKED_ROW_BLOCK_SIMDGROUPS`] *
+/// `SIMD_WIDTH` for a packed row-block reached outside that match (widens the
+/// packed row-block arm's threadgroup beyond one simdgroup — see that
+/// constant's doc for why this is dispatch-only and never touches the kernel
+/// body), [`cooperative_reduce_width`] for every other cooperative-reduce
+/// kernel, `None` otherwise. Single source of truth both dispatch-shape
+/// functions read, so they cannot drift the way two independent copies of
+/// this `if`/`else` could. Ordered after the tiled-GEMM check and before the
+/// generic cooperative-reduce fallback, matching [`grid_threads`]' own
+/// priority (the two paths are mutually exclusive by construction —
+/// [`kernel_cache_key`]'s doc).
 fn tiled_gemm_threadgroup_width(
     resolved: &BoundOp,
     quantized: &[Option<PackedCodec>],
@@ -3444,9 +3649,14 @@ fn tiled_gemm_threadgroup_width(
         output_axes,
         ..
     } = &resolved.kind
-        && tiled_gemm_block(resolved, quantized, *reduce_op, *init, output_axes).is_some()
     {
-        return Some((TILED_GEMM_NSG as u64) * SIMD_WIDTH);
+        if tiled_gemm_block(resolved, quantized, *reduce_op, *init, output_axes).is_some() {
+            return Some((TILED_GEMM_NSG as u64) * SIMD_WIDTH);
+        }
+        if packed_row_block(resolved, quantized).is_some() {
+            let (_base, split) = packed_row_dispatch(output_axes, &resolved.extents);
+            return Some(SIMD_WIDTH * split);
+        }
     }
     if packed_row_block(resolved, quantized).is_some() {
         return Some(crate::sized::PACKED_ROW_BLOCK_SIMDGROUPS * SIMD_WIDTH);
@@ -3588,10 +3798,27 @@ fn push_cooperative_reduce_body(
     // untouched investigation (see this file's own history), not the
     // reduction-extent-driven scaling below.
     if packed_row_block(resolved, quantized).is_some() {
-        source.push_str(&format!(
-            "    long output_index = (long)gid / {SIMD_WIDTH};\n"
-        ));
-        source.push_str(&format!("    uint lane = gid % {SIMD_WIDTH}u;\n"));
+        if cfg!(feature = "metal-q4k-split-k") {
+            // `tptg` is the ACTUAL per-dispatch threadgroup width
+            // (`kernel_signature`'s new param, wired on for this exact
+            // path -- see its call site's own gate). `split == 1` (the
+            // feature-off-equivalent case) makes every line below collapse
+            // to the plain `output_index`/`lane` pair the non-split-K arm
+            // emits: `tptg_width == SIMD_WIDTH`, so `tiitg == gid % SIMD_WIDTH`
+            // (today's `lane`), `sgitg == 0`, and `lane == tiitg` -- the same
+            // value, same bits, same order.
+            source.push_str("    uint tptg_width = tptg;\n");
+            source.push_str("    long output_index = (long)gid / (long)tptg_width;\n");
+            source.push_str("    uint tiitg = (uint)((long)gid % (long)tptg_width);\n");
+            source.push_str(&format!("    uint sgitg = tiitg / {SIMD_WIDTH}u;\n"));
+            source.push_str(&format!("    uint lane = tiitg % {SIMD_WIDTH}u;\n"));
+            source.push_str(&format!("    uint split = tptg_width / {SIMD_WIDTH}u;\n"));
+        } else {
+            source.push_str(&format!(
+                "    long output_index = (long)gid / {SIMD_WIDTH};\n"
+            ));
+            source.push_str(&format!("    uint lane = gid % {SIMD_WIDTH}u;\n"));
+        }
         push_packed_row_blocked_body(
             source,
             resolved,
@@ -3975,7 +4202,7 @@ fn render_scan(
     push_gather_uniform_fields(&mut source, gather_count, rank_len);
     source.push_str("};\n\n");
 
-    kernel_signature(&mut source, quantized, gather_count, entry, element_type);
+    kernel_signature(&mut source, quantized, gather_count, entry, element_type, false);
     source.push_str("    if ((long)gid >= u.outer_total) { return; }\n");
 
     if outer_rank > 0 {

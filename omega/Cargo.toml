@@ -126,6 +126,18 @@ metal-wide-cooperative-reduce = ["metal"]
 # decode-profile bench (tracked separately) shows the win. Depends on
 # `metal`, not just `std`: the pool lives entirely inside `metal.rs`.
 metal-buffer-pool = ["metal"]
+# Split-K for the row-blocked packed Q4_K/Q5_K/Q6_K matvec
+# (`msl.rs`'s `push_packed_row_blocked_body`): below a target simdgroup count
+# (`sized::PACKED_ROW_SPLIT_K_TARGET_SIMDGROUPS`) a row-group's reduction axis
+# is split across multiple simdgroups per threadgroup instead of pinning
+# parallelism to `rows / PACKED_ROWS_PER_GROUP` -- see
+# `docs/discipline.md`'s split-K row for the measured mechanism (simdgroup
+# count, not threadgroup width, is what starves attn_k/attn_v). Default-off:
+# unproven against the tiled-GEMM path and the plain row-blocked path until an
+# e2e bench lands. Depends on `metal` for the same reason `metal-tiled-gemm`
+# does: the eligibility gate and kernel body live in `msl.rs` (alloc-tier),
+# but the dispatch geometry only has meaning for a Metal dispatch.
+metal-q4k-split-k = ["metal"]
 # Portable GPU execution driver (src/wgsl.rs, src/wgpu_driver.rs) — the
 # wgpu/WGSL counterpart of `metal` above, one abstraction layer over: same
 # `BoundOp` descriptor, same emit-then-drive split, different target ISA
