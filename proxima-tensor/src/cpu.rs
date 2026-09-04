@@ -979,6 +979,7 @@ fn arena_node_kind_label(kind: &BoundOpKind) -> &'static str {
         BoundOpKind::Reduce { .. } => "reduce",
         BoundOpKind::Iota => "iota",
         BoundOpKind::Constant { .. } => "constant",
+        BoundOpKind::CachedAttention { .. } => "cached_attention",
     }
 }
 
