@@ -485,8 +485,10 @@ impl<'file> LoadedModel<'file> {
         // at its base by construction -- as the single mapping every packed
         // tensor's borrowed slice can be addressed into by OFFSET instead of
         // copied into its own device buffer; see
-        // `omega::metal::register_checkpoint_mapping`'s own doc. A no-op
-        // when the Metal backend is not compiled in.
+        // `omega::metal::register_checkpoint_mapping`'s own doc. `omega` is
+        // an optional dependency gated behind the `metal` feature, so this
+        // registration is a no-op (compiled out) when that feature is off.
+        #[cfg(feature = "metal")]
         omega::backend::register_checkpoint_mapping(file_bytes);
         // `general.architecture` read directly, before `architecture_from_metadata`
         // (which assumes the dense per-layer shape every other checkpoint this
