@@ -288,9 +288,22 @@ static inline float q4k_pair_dot(device const uchar *block, uint iq, uint ir, th
 // {0,8,16,24} and a super-block is 144 bytes (a multiple of 16), so the
 // address is 4-byte aligned and the `uint` cast is sound.
 //
-// ggml does the same thing one width down (`q1[i] & 0x000F / 0x0F00 /
-// 0x00F0 / 0xF000` off a `uint16_t`), for the same reason: the nibble
-// extract is cheap and the LOAD is what costs.
+// CORRECTION (perf/metal-q4k-mask-fma): the claim this comment used to make
+// here -- "ggml does the same thing one width down ... the nibble extract is
+// cheap and the LOAD is what costs" -- is FALSE, verified against
+// `ggml-metal.metal:5157-5165` (`kernel_mul_mv_q4_K_f32_impl`). ggml does NOT
+// shift at all: it masks four FIXED bit positions (`q1[i] & 0x000F/0x0F00/
+// 0x00F0/0xF000`) straight off a `uint16_t` load and folds the resulting
+// 1x/16x/256x residual scale into the per-sub-block combine
+// (`ggml-metal.metal:5171-5175`). This function instead computes a RUNTIME
+// `shift` (0 or 4, not known at compile time) and adds it into every one of
+// the eight extractions below, which ggml's masked form has no equivalent
+// of. See `push_q4k_product_reduce_body`'s `metal-q4k-mask-fma` arm (Rust,
+// not MSL -- it generates the masked loop inline so it stays generic over
+// this kernel's `element_type`) for the mask-without-shift port of ggml's
+// actual technique, adapted to this function's one-nibble-per-byte layout
+// (ggml's is two-nibbles-per-byte interleaved across two sub-blocks per
+// load, a different packing this file's lane mapping does not share).
 static inline void q4k_run8(device const uchar *block, uint index, thread float *out) {
     device const uchar *qs = block + 16;
     uint group = index / 64u;
@@ -308,6 +321,67 @@ static inline void q4k_run8(device const uchar *block, uint index, thread float 
     out[5] = (float)((w1 >> (shift +  8u)) & 0xFu);
     out[6] = (float)((w1 >> (shift + 16u)) & 0xFu);
     out[7] = (float)((w1 >> (shift + 24u)) & 0xFu);
+}
+"#;
+
+/// `metal-q4k-mask-fma` (default-off): mask-without-shift ports of
+/// `q4k_scale_min` and `q4k_run8`, onto ggml's actual technique
+/// (`ggml-metal.metal:5096-5098,5157-5175`) rather than the shift-then-mask
+/// scheme those two functions use. See the correction on `q4k_run8`'s own
+/// doc comment for why that scheme was previously (falsely) attributed to
+/// ggml, and `push_q4k_product_reduce_body`'s feature-gated arm (Rust, the
+/// caller) for where the masked accumulate itself is generated -- inlined
+/// directly rather than through a shared MSL function, so it can stay typed
+/// to the kernel's own `element_type` (`half` or `float`) the way
+/// `q4k_run8`'s callers already do.
+///
+/// Only the two functions used OUTSIDE the row-blocked accumulate loop live
+/// here as shared MSL text: `q4k_scale_min_bf` (called once per header
+/// decode, fixed `float`/`uchar` types regardless of kernel element type)
+/// and `q4k_header_for_bf` (its caller, `push_q4k_header_decode`'s
+/// feature-gated arm). Everything type-dependent is generated inline by
+/// `push_q4k_product_reduce_body` itself.
+#[cfg(feature = "metal-q4k-mask-fma")]
+pub const Q4K_MASK_FMA_MSL: &str = r#"
+// Branch-free port of ggml's kmask1/kmask2/kmask3 scale/min unpack
+// (`ggml-metal.metal:5096-5098`), adapted to `scales` being indexed per
+// BYTE here (`q4k_scale_min`'s own layout) rather than per `uint16_t` pair
+// the way ggml reads it. `sub_block & 3u` is the SAME index
+// `q4k_scale_min` reads whether `sub_block` names the low half (0..3, used
+// directly) or the high half (4..7, used as `sub_block - 4`) --
+// `x & 3u == x` for `x < 4` and `== x - 4` for `4 <= x < 8`. Both the
+// low-half and high-half formulas are computed UNCONDITIONALLY and the
+// result selected, never branched on -- `q4k_scale_min`'s
+// `if (sub_block < 4u) { return ...; }` compiles to a real divergent
+// branch taken by 4 of every 8 lanes, every call; this compiles to a
+// `select`.
+static inline uchar2 q4k_scale_min_bf(device const uchar *scales, uint sub_block) {
+    uint low4 = sub_block & 3u;
+    uchar byte_a = scales[low4];
+    uchar byte_b = scales[low4 + 4u];
+    uchar byte_c = scales[sub_block + 4u];
+    bool hi = sub_block >= 4u;
+    uchar lo_scale = byte_a & 63u;
+    uchar lo_min = byte_b & 63u;
+    uchar hi_scale = (byte_c & 0x0Fu) | ((byte_a >> 6u) << 4u);
+    uchar hi_min = (byte_c >> 4u) | ((byte_b >> 6u) << 4u);
+    return uchar2(hi ? hi_scale : lo_scale, hi ? hi_min : lo_min);
+}
+
+// same per-sub-block amortization `q4k_header_for` makes, over
+// `q4k_scale_min_bf` instead of the branchy `q4k_scale_min`.
+static inline q4k_header q4k_header_for_bf(device const uchar *block, uint index) {
+    ushort d_bits = (ushort)((uint)block[0] | ((uint)block[1] << 8));
+    ushort dmin_bits = (ushort)((uint)block[2] | ((uint)block[3] << 8));
+    device const uchar *scales = block + 4;
+    uint group = index / 64u;
+    uint within = index % 64u;
+    uint sub_block = 2u * group + (within < 32u ? 0u : 1u);
+    uchar2 scale_min = q4k_scale_min_bf(scales, sub_block);
+    q4k_header header;
+    header.scale = (float)as_type<half>(d_bits) * (float)scale_min.x;
+    header.minimum = (float)as_type<half>(dmin_bits) * (float)scale_min.y;
+    return header;
 }
 "#;
 
@@ -2041,6 +2115,16 @@ fn preamble(source: &mut String) {
     // read a packed operand" into the preamble for no gain.
     source.push_str(Q4K_UNPACK_MSL);
     source.push('\n');
+    // feature-gated, unlike the constants around it: `Q4K_MASK_FMA_MSL`
+    // does not exist as a Rust symbol at all without `metal-q4k-mask-fma`
+    // (see its own doc), so this splice is the one place in `preamble`
+    // that must itself be `#[cfg]`'d rather than relying on "unused static
+    // inline costs nothing" the way the codec preambles around it do.
+    #[cfg(feature = "metal-q4k-mask-fma")]
+    {
+        source.push_str(Q4K_MASK_FMA_MSL);
+        source.push('\n');
+    }
     source.push_str(Q5K_UNPACK_MSL);
     source.push('\n');
     source.push_str(Q6K_UNPACK_MSL);
@@ -2536,6 +2620,122 @@ fn is_plain_product_reduce(
     )
 }
 
+/// The row-blocked Q4_K header decode, one call site feature-gated between
+/// `q4k_header_for` (the shift-then-branch original) and `q4k_header_for_bf`
+/// (`metal-q4k-mask-fma`'s branch-free port, see [`Q4K_MASK_FMA_MSL`]).
+/// Split out of [`push_packed_row_blocked_body`]'s `PackedCodec::Q4K` arm so
+/// the two `#[cfg]` bodies stay next to each other rather than interleaved
+/// with the surrounding match.
+#[cfg(not(feature = "metal-q4k-mask-fma"))]
+fn push_q4k_header_decode(source: &mut String) {
+    source.push_str("            q4k_header hdr = q4k_header_for(blk, slot);\n");
+}
+
+#[cfg(feature = "metal-q4k-mask-fma")]
+fn push_q4k_header_decode(source: &mut String) {
+    source.push_str("            q4k_header hdr = q4k_header_for_bf(blk, slot);\n");
+}
+
+/// The Q4_K SCALE-DEFERRED matvec body (`docs/discipline.md` ROW 106):
+/// accumulate the raw nibble x activation product and the activation sum
+/// UNSCALED across the whole sub-block, then apply `hdr.scale`/`hdr.minimum`
+/// ONCE at the end instead of once per element — legal because this
+/// function is only reached when `is_plain_product_reduce` has already
+/// proved `reduce_op` is `Add` and the body is exactly `weight * other`, so
+/// `sum_j (scale*nibble_j - min)*act_j == scale*sum(nibble_j*act_j) -
+/// min*sum(act_j)`.
+///
+/// Two bodies behind `metal-q4k-mask-fma`, same shape as
+/// [`push_q4k_header_decode`]:
+///
+/// Without the feature: `q4k_run8`'s shift-then-mask extraction into a
+/// `levels[8]` scratch array, then a `dot`-reduce into `raw_acc`/`act_sum` —
+/// mirrors `ggml-metal.metal:5157-5175`'s `acc1`/`dall` split at the ALGEBRA
+/// level (defer the scale) but not at the EXTRACTION level (ggml never
+/// shifts; see `q4k_run8`'s own corrected doc).
+///
+/// With the feature: extraction and accumulate are ONE fused loop, masked
+/// without any shift, ported from ggml's ACTUAL technique
+/// (`ggml-metal.metal:5157-5165`) onto this file's one-nibble-per-byte
+/// layout (every element in a lane's 32-element sub-block occupies its own
+/// byte, unlike ggml's two-nibbles-per-byte interleave across two
+/// sub-blocks — see `q4k_run8`'s doc for why that is a different packing,
+/// not a narrower ggml). A `ushort` load of one byte pair yields both
+/// nibbles this lane wants at two residual scales — 1x/256x for the low
+/// nibble half, 16x/4096x for the high half — inlined directly against
+/// `element_type` (not through a shared MSL function typed to `float`) so
+/// this stays exactly as generic over `half`/`float` as `q4k_run8`'s own
+/// callers are. The residual scale is IDENTICAL for all four `c` iterations
+/// a lane makes (`within < 32u` cannot change within one lane's 32-element
+/// run, `q4k_run8`'s own doc establishes why), so `q4k_corr` is computed
+/// ONCE, outside the loop, and folded into `hdr.scale` at the same combine
+/// point the deferred-scale algebra above already uses.
+#[cfg(not(feature = "metal-q4k-mask-fma"))]
+fn push_q4k_product_reduce_body(source: &mut String, sub: usize, run: usize, element_type: &str) {
+    source.push_str(&format!("            {element_type} raw_acc = 0;\n"));
+    source.push_str(&format!("            {element_type} act_sum = 0;\n"));
+    source.push_str(&format!("            for (int c = 0; c < {}; ++c) {{\n", sub / run));
+    // raw 4-bit levels (0..15) are exact in float regardless of the
+    // kernel's element type; q4k_run8 takes `thread float *out`, narrowed
+    // to element_type at the multiply below, same as the per-element path.
+    source.push_str(&format!("                float levels[{run}];\n"));
+    source.push_str(&format!(
+        "                q4k_run8(blk, slot + (uint)(c * {run}), levels);\n"
+    ));
+    source.push_str("                raw_acc += dot(float4(levels[0], levels[1], levels[2], levels[3]), float4(acts[c * 8 + 0], acts[c * 8 + 1], acts[c * 8 + 2], acts[c * 8 + 3]));\n");
+    source.push_str("                raw_acc += dot(float4(levels[4], levels[5], levels[6], levels[7]), float4(acts[c * 8 + 4], acts[c * 8 + 5], acts[c * 8 + 6], acts[c * 8 + 7]));\n");
+    source.push_str("                act_sum += acts[c * 8 + 0] + acts[c * 8 + 1] + acts[c * 8 + 2] + acts[c * 8 + 3] + acts[c * 8 + 4] + acts[c * 8 + 5] + acts[c * 8 + 6] + acts[c * 8 + 7];\n");
+    source.push_str("            }\n");
+    source.push_str(
+        "            sumf[q] = sumf[q] + hdr.scale * raw_acc - hdr.minimum * act_sum;\n",
+    );
+}
+
+#[cfg(feature = "metal-q4k-mask-fma")]
+fn push_q4k_product_reduce_body(source: &mut String, sub: usize, run: usize, element_type: &str) {
+    source.push_str(&format!("            {element_type} raw_acc = 0;\n"));
+    source.push_str(&format!("            {element_type} act_sum = 0;\n"));
+    source.push_str("            bool q4k_hi = (slot % 64u) >= 32u;\n");
+    source.push_str("            ushort q4k_mask_a = q4k_hi ? 0x00F0u : 0x000Fu;\n");
+    source.push_str("            ushort q4k_mask_b = q4k_hi ? 0xF000u : 0x0F00u;\n");
+    source.push_str("            float q4k_corr = q4k_hi ? (1.0f / 16.0f) : 1.0f;\n");
+    source.push_str(&format!("            for (int c = 0; c < {}; ++c) {{\n", sub / run));
+    source.push_str(&format!(
+        "                uint q4k_index = slot + (uint)(c * {run});\n"
+    ));
+    source.push_str("                uint q4k_group = q4k_index / 64u;\n");
+    source.push_str("                uint q4k_within = q4k_index % 64u;\n");
+    source.push_str(
+        "                uint q4k_byte = q4k_group * 32u + (q4k_within % 32u);\n",
+    );
+    source.push_str(
+        "                device const ushort *q4k_pairs = (device const ushort *)(blk + 16 + q4k_byte);\n",
+    );
+    source.push_str(&format!("                for (int p = 0; p < {}; ++p) {{\n", run / 2));
+    source.push_str("                    ushort q4k_word = q4k_pairs[p];\n");
+    source.push_str(
+        "                    float q4k_level_a = (float)(q4k_word & q4k_mask_a);\n",
+    );
+    source.push_str(
+        "                    float q4k_level_b = (float)(q4k_word & q4k_mask_b) * (1.0f / 256.0f);\n",
+    );
+    source.push_str(&format!(
+        "                    {element_type} act_a = acts[c * {run} + 2 * p];\n"
+    ));
+    source.push_str(&format!(
+        "                    {element_type} act_b = acts[c * {run} + 2 * p + 1];\n"
+    ));
+    source.push_str(&format!(
+        "                    raw_acc += ({element_type})(q4k_level_a * (float)act_a + q4k_level_b * (float)act_b);\n"
+    ));
+    source.push_str("                    act_sum += act_a + act_b;\n");
+    source.push_str("                }\n");
+    source.push_str("            }\n");
+    source.push_str(
+        "            sumf[q] = sumf[q] + hdr.scale * q4k_corr * raw_acc - hdr.minimum * act_sum;\n",
+    );
+}
+
 #[allow(clippy::too_many_arguments)]
 fn push_packed_row_blocked_body(
     source: &mut String,
@@ -2674,7 +2874,6 @@ fn push_packed_row_blocked_body(
                         "            sumf[q] = sumf[q] + q4k_pair_dot(blk, iq, ir, yl, yh);\n",
                     );
                 } else if is_plain_product_reduce(resolved, reduce_op, weight, other) {
-                    source.push_str("            q4k_header hdr = q4k_header_for(blk, slot);\n");
                     // SCALE-DEFERRED PATH (`docs/discipline.md` ROW 106).
                     // Accumulate the raw nibble x activation product and the
                     // activation sum UNSCALED across the whole sub-block, then
@@ -2685,27 +2884,13 @@ fn push_packed_row_blocked_body(
                     // `sum_j (scale*nibble_j - min)*act_j == scale*sum(nibble_j
                     // *act_j) - min*sum(act_j)`. Mirrors
                     // `ggml-metal.metal:5157-5175`'s `acc1`/`dall` split.
-                    source.push_str(&format!("            {element_type} raw_acc = 0;\n"));
-                    source.push_str(&format!("            {element_type} act_sum = 0;\n"));
-                    source.push_str(&format!(
-                        "            for (int c = 0; c < {}; ++c) {{\n",
-                        sub / run
-                    ));
-                    // raw 4-bit levels (0..15) are exact in float regardless
-                    // of the kernel's element type; q4k_run8 takes `thread
-                    // float *out`, narrowed to element_type at the multiply
-                    // below, same as the per-element path.
-                    source.push_str(&format!("                float levels[{run}];\n"));
-                    source.push_str(&format!(
-                        "                q4k_run8(blk, slot + (uint)(c * {run}), levels);\n"
-                    ));
-                    source.push_str("                raw_acc += dot(float4(levels[0], levels[1], levels[2], levels[3]), float4(acts[c * 8 + 0], acts[c * 8 + 1], acts[c * 8 + 2], acts[c * 8 + 3]));\n");
-                    source.push_str("                raw_acc += dot(float4(levels[4], levels[5], levels[6], levels[7]), float4(acts[c * 8 + 4], acts[c * 8 + 5], acts[c * 8 + 6], acts[c * 8 + 7]));\n");
-                    source.push_str("                act_sum += acts[c * 8 + 0] + acts[c * 8 + 1] + acts[c * 8 + 2] + acts[c * 8 + 3] + acts[c * 8 + 4] + acts[c * 8 + 5] + acts[c * 8 + 6] + acts[c * 8 + 7];\n");
-                    source.push_str("            }\n");
-                    source.push_str(
-                        "            sumf[q] = sumf[q] + hdr.scale * raw_acc - hdr.minimum * act_sum;\n",
-                    );
+                    // Two bodies behind `metal-q4k-mask-fma`: off, the
+                    // shift-then-mask `q4k_run8` extraction into a `dot`
+                    // reduce; on, ggml's actual mask-without-shift technique,
+                    // fused with the accumulate -- see
+                    // `push_q4k_product_reduce_body`'s own doc.
+                    push_q4k_header_decode(source);
+                    push_q4k_product_reduce_body(source, sub, run, element_type);
                 } else {
                     source.push_str(&format!(
                         "            for (int c = 0; c < {}; ++c) {{\n",

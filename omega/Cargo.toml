@@ -84,6 +84,22 @@ instrument = ["metal", "proxima-tensor/instrument"]
 # eligibility gate and kernel body live in `msl.rs`, which is alloc-tier, but
 # the const it reads only has meaning for a Metal dispatch.
 metal-tiled-gemm = ["metal"]
+# Mask-without-shift/branch-free Q4_K matvec body for the row-blocked packed
+# path's SCALE-DEFERRED (`is_plain_product_reduce`) arm (`msl.rs`'s
+# `push_q4k_header_decode`/`push_q4k_product_reduce_body`), porting ggml's
+# ACTUAL `kernel_mul_mv_q4_K_f32_impl` technique (`ggml-metal.metal:5096-
+# 5098,5157-5175`: mask four fixed bit positions off a `uint16_t` load, no
+# shift at all, fold the 1x/16x/256x residual scale into the per-sub-block
+# combine) onto this crate's one-nibble-per-byte lane layout, plus a
+# branch-free port of `q4k_scale_min`'s `if (sub_block < 4u)` scale/min
+# unpack. `msl.rs`'s own `q4k_run8` doc previously (incorrectly) claimed
+# ggml did "the same thing one width down" -- it does not; that claim is
+# corrected in-tree as part of this feature landing. Default-off per the
+# same discipline as `metal-tiled-gemm` above -- a kernel-body rewrite earns
+# the production default only after a quiet-box decode-step seal, not on the
+# mechanism argument alone (see `docs/discipline.md`, row assigned
+# centrally).
+metal-q4k-mask-fma = ["metal"]
 # Widens the cooperative-reduce (`msl.rs`'s `push_cooperative_reduce_body`)
 # threadgroup dispatch from a hardcoded `SIMD_WIDTH` (32) to
 # `cooperative_reduce_width`'s reduction-extent-scaled width, plus the
