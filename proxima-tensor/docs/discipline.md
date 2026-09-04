@@ -20729,3 +20729,64 @@ Confirm `output_buffer_allocations=0` on every step after the first plan-cache h
 | --- | --- | --- | --- | --- |
 | 2026-09-04 | `metal::UNIFORM_BUFFERS` bounded to `[spans].uniform_cache_entries = 4096` with LRU eviction | unbounded content-keyed map -> capped at 4096 entries; measured plateau 50 on the default decode (steps 0-7: 23, 43, 50, 50, 50, 50, 50, 50) | single decode run, 8 tokens, deterministic (greedy) | landed with no conflicting main-side change; gate run on this landing's own worktree target dir |
 | 2026-09-04 | plan-stable buffers (`metal-plan-stable-buffers`) landed as the default, folded into `metal` in both `omega` and `proxima-model-interop`; fixed a `live_bytes` underflow found by the full parity suite | `OUTPUT_BUFFER_ALLOCATIONS` 842/step -> 0 on plan-cache hits; op_setup 3.94-5.42 -> 0.39-0.60 ms/step; arena peak 13,967,368 B vs naive 370,941,308 B (26.56x) | 3 interleaved rounds each arm, CoV 1.05% (OFF) / 3.5% (ON) | round 3 re-run under residual load after the 30-minute quiet-box budget was exhausted with one other agent's `cargo nextest -p proxima-tensor` process still resident |
+
+## ROW 281 -- fused cached attention reaches the single-range program: default-off, no confirmed wall win
+
+**Card:** CARD 6.1's single-range counterpart. **Worktree/branch/commit:** `proxima-wt-s6e2-fattn`/`perf/fused-attention-single-range` @ `2f6f12d`/`15c469b`/`563fc0c`, landed via `proxima-wt-land-fattn`/`land/fattn` @ `a943390`. **Feature:** `cached-attention-streaming`, default: **OFF** (unchanged from main; not folded into `metal` this landing).
+
+**The body.** `cached_attention_candidates` only recognized the two-range online-softmax combine, so `bind_with_fusion` never fired `BoundOpKind::CachedAttention` on `append_mistral_single_range_cached_layer`'s simpler single-pass softmax -- the matcher's causal-mask check also assumed a bare `Iota` query side, which `causal_mask_merged`'s `cached_len`-shifted query never satisfies. This landing adds `cached_attention_single_range_candidates` plus `is_exact_merged_causal_mask`, mapping the one merged key/value range into `CachedAttention`'s existing cached/new slots (`new_upper_inclusive` derived from `cached_len = key_rows - query_rows` at bind time, cached slot pinned to a dead band) so no new `Op`/`BoundOpKind` is needed. `bind::tests::single_range_cached_attention_fuses_one_step_per_layer_on_the_real_openchat_shape` pins the real openchat-3.5/Mistral-7B shape (32 layers) at 939 (unfused) -> 619 (fused) bound ops, one `CachedAttention` per layer.
+
+**Bucketing band defect, found and fixed before this landing's gates were trusted.** `kv-capacity-bucket` pads the single-range KV extent past the true merged length (`ceil(merged_len / bucket_tokens) * bucket_tokens`), so deriving `new_upper_inclusive` from `key_shape[0] - query_rows` (a bind-time shape difference) overstated `cached_len` by the padding, and every query attended into the zero-filled tail. Fixed by carrying the mask chain's own `cached_len` `Op::Input` through as the fused op's ninth operand and reading the band bound from its runtime VALUE on both CPU and Metal instead of baking a shape difference. MEASURED post-fix (`cached_attention_single_range_fused_matches_the_unfused_program`, `bucket_padding` in `{0, 1, 5}`, temporary `eprintln!` added and reverted for this row): `max_error=0.0000013113022` (~1.31e-6) identically at every padding, well under the test's own `1e-5` gate. The pre-fix drift magnitude this fix corrects is not independently re-measured in this session (the padding-loop harness itself was introduced by the same fix commit, so reproducing the pre-fix number would require grafting a new test harness onto old `bind.rs`/`cpu.rs`/`msl.rs` -- not attempted; reported here only as the qualitative defect the commit message states, not as a re-verified number).
+
+**This landing's own fix.** `cached_attention_candidates`'s and `cached_attention_single_range_candidates`'s shared operand-collection loop treated a gathered or negative-strided source with a bare `continue` (skip the push, keep scanning `source_nodes`), relying on the trailing `operands.len() != source_nodes.len()` check to reject the resulting short vector rather than aborting the candidate at the point the defect is found. Changed both occurrences to `operands.clear(); break;`, matching the adjacent "node not found" branch's existing abort shape. New test `bind::tests::a_gathered_source_aborts_the_single_range_candidate_entirely` reproduces the real single-range fixture, reads the baseline candidate's own fused operand list to identify one of its eight source nodes (never guessed), patches that node's `resolved` entry to carry a `Lookup`, and asserts the patched candidate list is empty. **Self-critique, stated plainly:** for this loop's fixed 8-iteration shape (source_nodes.len() is constant, one push attempt per iteration), a skip can only ever shrink `operands.len()` below `source_nodes.len()`, never leave it positionally misaligned at equal length -- so the trailing length check already rejected every case tested, both before and after this fix (verified by temporarily reverting the fix and re-running the new test: it still passed). The fix is correct, minimal, and matches the letter of the assigned defect (abort where found, not two calls later), but it is not a behavior change on any input exercised in this session; it is defensive/explicit hardening against a future refactor of the trailing length check, not a proven regression fix.
+
+**Quiet-box bake-off, 3 interleaved rounds** (OFF = detached `main`@`e3bfee8` release build, `metal,instrument`; ON = this landing's rebased tree release build, `metal,instrument,cached-attention-streaming`; `llama-bench -m openchat-3.5-1210.Q4_K_S.gguf -n 32 -p 0 -r 5 -t 8 -ngl 99` run between each pair as an independent host-load witness; `PROXIMA_MAX_TOKENS=8`, `runs_the_cached_decode_loop_on_the_metal_backend_and_reports_the_plan_cache`, `step_wall_ms` mean over steps 1..7 only, ms/token):
+
+| round | llama-bench (t/s) | OFF (ms/token) | ON (ms/token) |
+| --- | --- | --- | --- |
+| 1 | 56.60 ± 0.59 | 37.096 | 39.796 |
+| 2 | 57.18 ± 0.36 | 37.506 | 36.363 |
+| 3 | 56.79 ± 0.79 | 38.786 | 37.154 |
+
+Mean OFF = 37.796 ms/token (sample sd 0.882, CoV 2.33%). Mean ON = 37.771 ms/token (sample sd 1.798, CoV 4.76%). Delta (ON - OFF) = -0.025 ms, 0.07% of the OFF mean -- an order of magnitude smaller than either arm's own CoV, so ON is not distinguishably faster than OFF on this box; the two are noise-indistinguishable. `emit_calls` (op count actually dispatched per decode step in this live run, distinct from the 939/619 unit-fixture count above): OFF 938, ON 616, per step 1-7. `device_allocated_bytes`: OFF 4,152,573,952; ON 4,152,442,880 (ON 131,072 B lower, well inside +150 MB). `generated_text` identical in every round, both arms: `"Here is a simple Python function that returns"`. One per-op profile per arm (`PROXIMA_METAL_OP_PROFILE_STEP=1`, decode step 1, `/usr/bin/time -l`):
+
+```
+OFF op_profile step=1 op_count=938 total_gpu_ns=35265630 total_gpu_ms=35.266
+OFF op_profile_bucket kind=constant                 op_count=35  gpu_ms=0.150
+OFF op_profile_bucket kind=elementwise              op_count=451 gpu_ms=5.826
+OFF op_profile_bucket kind=iota                     op_count=2   gpu_ms=0.009
+OFF op_profile_bucket kind=reduce-cooperative        op_count=225 gpu_ms=4.397
+OFF op_profile_bucket kind=reduce-packed-row-blocked op_count=225 gpu_ms=24.883
+OFF maximum resident set size = 59,047,936 B
+
+ON  op_profile step=1 op_count=616 total_gpu_ns=32355987 total_gpu_ms=32.356
+ON  op_profile_bucket kind=cached-attention          op_count=32  gpu_ms=3.515
+ON  op_profile_bucket kind=constant                  op_count=2   gpu_ms=0.012
+ON  op_profile_bucket kind=elementwise               op_count=290 gpu_ms=2.978
+ON  op_profile_bucket kind=iota                      op_count=2   gpu_ms=0.008
+ON  op_profile_bucket kind=reduce-cooperative        op_count=65  gpu_ms=0.851
+ON  op_profile_bucket kind=reduce-packed-row-blocked op_count=225 gpu_ms=24.991
+ON  maximum resident set size = 58,376,192 B
+```
+
+ON's `cached-attention` bucket carries exactly 32 ops (one fused step per layer, matching the 32-layer openchat checkpoint), replacing 322 of OFF's `elementwise`/`reduce-cooperative` ops (`451+225=676` -> `290+65=355`, a 321-op reduction consistent with `939 -> 619`'s per-layer 10-op delta at 32 layers). `total_gpu_ms` is lower on ON (32.356 vs 35.266, -8.2%) and `reduce-packed-row-blocked` (the Q4_K/Q5_K/Q6_K weight matmuls, unaffected by this fusion) is flat between arms (24.883 vs 24.991 ms) as expected -- the GPU-side saving is real and localized to the fused attention path, but it does not surface as a measurable `step_wall_ms` win at this box's noise floor (CPU-side submission/lookup overhead dominates the wall-clock delta between rounds more than the ~3 ms/step GPU saving does).
+
+**Correctness:** `bind::tests` 31/31 pass under `cached-attention-streaming` (includes the new gathered-source-abort test and the openchat 939/619/32 regression gate); `cached_attention_single_range_fused_matches_the_unfused_program` holds `max_error <= 1e-5` at all three bucket paddings tested; `generated_text` identical between OFF and ON across all 3 bake-off rounds.
+
+**Gates (own `CARGO_TARGET_DIR=/Users/brianbruggeman/repos/slot-0/proxima-wt-land-fattn/target`, `CARGO_TERM_COLOR=never`):** `cargo build --workspace --lib` EXIT=0. `cargo nextest run -p omega --features metal`: 125 passed, 1 skipped. `cargo nextest run -p proxima-tensor --features std,instrument`: 513 passed, 7 skipped. `cargo nextest run -p proxima-model-interop --features metal,instrument`: 95 passed, 25 skipped. `cargo clippy --workspace --all-targets -- -D warnings`: EXIT=0 (only an unrelated `proc-macro-error2` future-incompat note). `cargo nextest run -p proxima-tensor --features std,instrument,cached-attention-streaming`: 518 passed, 7 skipped. `cargo nextest run -p omega --features metal,cached-attention-streaming`: 125 passed, 1 skipped. `cargo nextest run -p omega --all-features`: 183 passed, 1 skipped. `bash scripts/omega-gate.sh`: all 6 steps pass, `[3/6]` 183 tests run/183 passed, `[6/6]` 2 doctests passed. `bash scripts/proxima-tensor-gate.sh`: 21 cells green (504 tests passed/7 skipped on the plain feature-matrix cell, examples ran, 1 doctest asserted). `cargo nextest run -p proxima-model-interop --features metal,instrument,cached-attention-streaming`: 95 passed, 25 skipped.
+
+**Decision.** Land the matcher and the band fix (both are pure correctness/capability additions, gated behind the still-default-off `cached-attention-streaming` feature, so main's default build is untouched by them). Do **not** flip `cached-attention-streaming` into the `metal` feature list: the bake-off's own decision rule required ON <= OFF beyond both arms' CoVs, and the measured delta (0.07% of the OFF mean) is an order of magnitude smaller than either arm's CoV (2.33% / 4.76%) -- a real GPU-side saving exists (`total_gpu_ms` -8.2% in the per-op profile) but it does not clear the wall-clock noise floor on this box across 3 rounds, so this landing keeps the feature default-off per the stated rule rather than claiming a win the wall-clock data does not support.
+
+**Re-prove:**
+```sh
+cd /Users/brianbruggeman/repos/slot-0/proxima
+CARGO_TARGET_DIR=<own target dir> cargo nextest run -p proxima-tensor --features std,instrument,cached-attention-streaming bind::tests
+CARGO_TARGET_DIR=<own target dir> PROXIMA_MAX_TOKENS=8 PROXIMA_METAL_OP_PROFILE_STEP=1 cargo test --release -p proxima-model-interop --features metal,instrument,cached-attention-streaming --lib -- --exact --nocapture --ignored \
+  bind::real_openchat_file::runs_the_cached_decode_loop_on_the_metal_backend_and_reports_the_plan_cache
+```
+Confirm the `cached-attention` `op_profile_bucket` line shows `op_count=32` and `generated_text` matches the OFF arm exactly.
+
+### Changelog
+| Date | Change | Δ vs prior | CoV / runs | Host loadout |
+| --- | --- | --- | --- | --- |
+| 2026-09-04 | `cached_attention_single_range_candidates` fuses the single-range decode chain (default-off, `cached-attention-streaming`); fixed a `kv-capacity-bucket` band-derivation drift; hardened the shared operand-collection loop to abort on a gathered/negative-stride source | bound ops 939 -> 619 (32-layer openchat fixture, unfused vs fused); `total_gpu_ms` 35.266 -> 32.356 (-8.2%) at decode step 1; `step_wall_ms` delta 0.07% of OFF mean, inside both arms' CoV -- not a confirmed wall win | 3 interleaved rounds each arm, CoV 2.33% (OFF) / 4.76% (ON) | quiet box confirmed via `pgrep -fl 'cargo\|rustc\|nextest\|llama-bench\|proxima_model_interop-'` before the bake-off; no other agent's process observed during the timed rounds |
