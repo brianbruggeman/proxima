@@ -1830,7 +1830,7 @@ fn consumed_by_resolved_nodes(resolved: &[BoundOp]) -> BTreeSet<NodeId> {
 
 /// Every `resolved` node neither consumed by another resolved node's own
 /// operands nor named in `effective_outputs` — dead weight [`bind`]'s own
-/// fusion can leave behind ([`eliminate_identity_multiply`] dropping a
+/// fusion can leave behind (`eliminate_identity_multiply` dropping a
 /// [`BoundOpKind::Constant`] from a fused body once its last reader absorbed
 /// it is one source; a fused-away [`BoundOpKind::Elementwise`] chain is
 /// another). [`crate::cpu::StaticArena`] computes this same set today purely
@@ -2333,7 +2333,7 @@ pub fn bind(
 /// `omega/src/metal.rs` render the fused kind, so they (via [`bind`]) pass
 /// `true`; `omega`'s wgpu and cuda drivers have no renderer for it yet, so
 /// they call this directly with `false` — the fused rewrite never fires for
-/// them, and the plain elementwise/reduce chain [`bind_plain`] already
+/// them, and the plain elementwise/reduce chain `bind_plain` already
 /// produces is what they emit.
 pub fn bind_with_fusion(
     program: &[Op],

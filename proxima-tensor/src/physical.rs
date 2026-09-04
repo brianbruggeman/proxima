@@ -278,7 +278,7 @@ pub fn stream_cached_attention_split(
     true
 }
 
-/// GQA form of [`stream_cached_attention_split`]. Each query row contains
+/// GQA form of `stream_cached_attention_split`. Each query row contains
 /// `kv_heads * query_groups` heads, while each key/value row contains one
 /// vector per KV head. The output is laid out as `[query, kv_head, group,
 /// head_dim]`, matching the cached layer's `sugd` domain.
