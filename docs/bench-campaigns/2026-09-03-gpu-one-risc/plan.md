@@ -240,6 +240,34 @@ tensor's byte length before any GB/s row is written from it.
 
 ---
 
+### 1.2 What landed on 2026-09-04 (after this plan was written; supersedes §8.1's rejection)
+
+The owner overrode §8.1 and ordered every unmerged branch and dirty worktree merged. Ninety
+commits landed on main between `4be2f3a` and `f2d5094`, every one behind the five gates plus
+`cargo nextest run -p omega --all-features` and the six-step `scripts/omega-gate.sh`; every perf
+feature landed default-off, then two interleaved sweeps against `llama-bench` on a quiet box
+decided the defaults. Raw logs: `tournament/../sweep-logs` in the session scratchpad; the
+discipline row that carries the tables is the one the flip commit adds after ROW 270.
+
+| arm (main `f2d5094`, 3 rounds × 7 decode steps, `PROXIMA_MAX_TOKENS=8`) | ms/token | CoV | ops | ratio vs llama.cpp 17.62 |
+|---|---|---|---|---|
+| this morning's seal, `4be2f3a` | 67.92 | 0.5% | 1196 | 3.88x |
+| default after the cached-attention merge (`18d4ab0`+) | 52.66 | 0.31% | 1194 | 2.99x |
+| `metal-wide-cooperative-reduce` | 49.74 | 0.48% | 1194 | 2.82x |
+| `metal-output-placement` (device-resident KV, zero KV upload) | 45.32 | 0.46% | 938 | 2.57x |
+| **placement + wide reduce (the new default)** | **43.05** | 0.56% | 938 | **2.44x** |
+| + single-fetch / + mask-fma on top | 43.06 / 43.32 | 0.5% | 938 | no further gain |
+| `metal-buffer-pool` / `metal-q4k-split-k` | 56.24 / 56.50 | | 1194 | losses, stay default-off |
+
+`generated_text` identical on every arm; device bytes 3970-3977 MiB and RSS 54-77 MiB on every
+arm (the memory rule held). What the sweeps refute in this document: the buffer pool (§5 card
+6.5's premise) is a measured loss on the current tree, and split-K (card 10.2) is a measured
+loss at this shape; both stay selectable and recorded. What they confirm: the wide cooperative
+reduce (card 7.2, −2.9 ms alone, −2.1 ms on top of placement) and device-resident KV with
+in-graph placement (cards 5.2/9.2, −7.3 ms). The remaining 25 ms to llama.cpp is the Q4_K body
+(`gpu_exec` ≈36 ms on the placed path against the incumbent's 17.6 total) and ≈6 ms of
+orchestration — Phases 3, 4 and 6 of §5, in that order.
+
 ## 2. The diagnosis, built formally (V0-V8)
 
 The default is no verdict. What follows is a proposal built by the admissibility procedure so
