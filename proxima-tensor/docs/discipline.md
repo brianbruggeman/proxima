@@ -20828,3 +20828,36 @@ Confirm `emit_calls=616` (not 938), `plan_hits=5`, and `generated_text="Here is 
 | Date | Change | Δ vs prior | CoV / runs | Host loadout |
 | --- | --- | --- | --- | --- |
 | 2026-09-04 | `cached-attention-streaming` flips default-on in `metal` (both `omega` and `proxima-model-interop`) per the owner's less-work rule | `emit_calls` 938 -> 616/step; `device_allocated_bytes` -131,072 B; wall clock unchanged within CoV (mean 37.796 -> 37.771 ms/token, delta 0.07% of OFF mean); `generated_text` identical | reuses ROW 281's 3-round bake-off; no new bake-off run for this row | same quiet-box discipline as ROW 281; this row's own oracle run is a single-shot re-proof, not a fresh bake-off |
+
+## ROW 284 -- placed outputs are no longer read back after a metal step: 97 -> 1 copies per token
+
+**Card:** `perf/skip-placed-output-readback`. **Worktree/branch/commit:** `proxima-wt-land-readback`/`land/readback`, landed as `aa7905d` + `04360a3` (rebase onto main was a no-op -- merge-base already equalled main's tip). **Feature:** no new feature gate; both commits are unconditional correctness/perf fixes on the existing placed-output path (`execute_plan_with_placements`).
+
+**The defect, both halves.** `finish` copied every one of the 96 placed KV roots (already written in place into the caller's own buffers by the metal step) into fresh `Vec`s after `waitUntilCompleted`, on the CPU critical path, even though the KV-cache decode shape never reads them back through `Evaluated` -- it reads the placed buffer directly. Fixing that first required a second, independent bug: `read_back`/`read_back_float`/`read_back_half` always read from a placed buffer's byte offset `0`, ignoring the placed output's own non-zero `byte_offset` (`execute_plan_with_placements`'s `output_placements`) -- a latent wrong-slice read with no consumer on the placed path (the unplaced Qwen35 two-range path reads roots from `Evaluated` but passes no placements, so it was never affected), which had to be corrected (`aa7905d`) before the dead copies could be safely skipped (`04360a3`) rather than skipped over a read that was already wrong.
+
+**Counter table, per steady decode step (`step >= 1`), oracle default features, release, `PROXIMA_MAX_TOKENS=8`:**
+
+| | before (main) | after (this landing) |
+| --- | --- | --- |
+| `readback_calls` (step 0 / steady step) | 97 / 97 | 1 / 1 |
+| `readback_bytes` (step 0 / steady step) | 12,094,712 / 390,152 | 3,968,248 / 128,008 |
+| `generated_text` | `"Here is a simple Python function that returns"` | identical |
+| `plan_hits` (steps 3-7) | 5 | 5 |
+| `emit_calls`/step | 616 (fused attention default per ROW 282) | 616 (unchanged) |
+
+**Decision, under the owner's less-work rule (ROW 282):** output is text-identical between before and after; the work metric drops sharply (readback bytes -67.2% at step 0, -67.2% steady-state; readback calls 97 -> 1, a 96-copy-and-allocation reduction per token on the CPU critical path after `waitUntilCompleted`); wall clock cannot rise from removing post-wait memcpys that nothing downstream consumed, so no bake-off was run to confirm a wall-clock win -- the mechanism (fewer allocations and copies strictly subtracted from the critical path, nothing added) makes a regression structurally impossible, which is the case the owner's rule is for. This landing keeps `step_wall_ms` from this single oracle run as informational only, matching ROW 282's own convention for changes it does not re-bake-off.
+
+**Correctness:** `cargo build --workspace --lib` EXIT=0; `cargo nextest run -p omega --features metal`: 125 passed, 1 skipped; `cargo nextest run -p proxima-tensor --features std,instrument`: 513 passed, 7 skipped; `cargo nextest run -p proxima-model-interop --features metal,instrument`: 95 passed, 25 skipped; `cargo nextest run -p proxima-model-interop --features std`: 82 passed, 22 skipped; `cargo clippy --workspace --all-targets -- -D warnings`: EXIT=0 (same pre-existing `proc-macro-error2` future-incompat note as ROW 281/282); `cargo nextest run -p omega --all-features`: 183 passed, 1 skipped; `bash scripts/omega-gate.sh`: all 6 steps pass, `[3/6]` 183 tests run/183 passed, `[6/6]` 2 doctests passed.
+
+**Re-prove:**
+```sh
+cd /Users/brianbruggeman/repos/slot-0/proxima
+CARGO_TARGET_DIR=<own target dir> CARGO_TERM_COLOR=never PROXIMA_MAX_TOKENS=8 cargo test --release -p proxima-model-interop --features metal,instrument --lib -- --exact --nocapture --ignored \
+  bind::real_openchat_file::runs_the_cached_decode_loop_on_the_metal_backend_and_reports_the_plan_cache
+```
+Confirm `readback_calls=1` and `readback_bytes=128008` on every steady step (`readback_bytes=3968248` at step 0), `plan_hits=5`, and `generated_text="Here is a simple Python function that returns"`.
+
+### Changelog
+| Date | Change | Δ vs prior | CoV / runs | Host loadout |
+| --- | --- | --- | --- | --- |
+| 2026-09-04 | `read_back` honors a placed output's byte offset; `finish` skips copying a caller-owned placed output back into `Evaluated` (root always still read back) | `readback_calls` 97 -> 1/step; `readback_bytes` 390,152 -> 128,008 steady-state (12,094,712 -> 3,968,248 at step 0); `generated_text` identical | single oracle run, no bake-off (mechanism makes a wall-clock regression structurally impossible -- work strictly subtracted from the critical path) | quiet box, single measurer per the standing discipline; no llama-bench, no other worker's process touched |
