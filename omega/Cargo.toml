@@ -202,6 +202,23 @@ metal-buffer-pool = ["metal"]
 # default until the e2e decode-step bench lands. Depends on `metal`, not just
 # `std`: both new types are `objc2-metal` buffer handles.
 metal-plan-stable-buffers = ["metal"]
+# `execute_plan_with_placements` opens its one compute encoder with
+# `computeCommandEncoderWithDispatchType(Concurrent)` instead of
+# `computeCommandEncoder()` (which implies `Serial`), so two independent
+# dispatches (e.g. Q/K/V projected from one normed input, or gate+up from one
+# input) no longer pay an implicit whole-resource barrier and pipeline drain
+# between them. `metal.rs`'s own `HazardTracker` walks `prepared.resolved`
+# once per op, tracking which buffers were written/read since the last
+# barrier (identity = `Retained::as_ptr`, matching Metal's own automatic
+# tracker's whole-`MTLResource` granularity per this function's doc, not a
+# sub-range), and emits `memoryBarrierWithScope(Buffers)` only at a genuine
+# RAW/WAW/WAR hazard -- uniform and gather-fault buffers are excluded, never
+# hazards. Default-off: unproven against the production default until the
+# e2e decode-step bench lands. Depends on `metal`, not just `std`: both new
+# Metal API calls (`computeCommandEncoderWithDispatchType`,
+# `memoryBarrierWithScope`) live behind `objc2-metal` features `metal` already
+# enables.
+metal-concurrent-dispatch = ["metal"]
 # Split-K for the row-blocked packed Q4_K/Q5_K/Q6_K matvec
 # (`msl.rs`'s `push_packed_row_blocked_body`): below a target simdgroup count
 # (`sized::PACKED_ROW_SPLIT_K_TARGET_SIMDGROUPS`) a row-group's reduction axis
