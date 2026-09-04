@@ -12126,7 +12126,14 @@ value = 1.0
         }
         let shapes = crate::shape::infer(&program, &[1, 71])
             .expect("one new position against a 71-position cache infers");
-        let bound = crate::bind::bind(&program, &shapes, &outputs).expect("the program binds");
+        // fusion held explicitly off: this census documents the UNFUSED
+        // split, so it must bind that way under every feature combination,
+        // including `cached-attention-streaming`, where `bind`'s own
+        // default (`bind_with_fusion(.., true)`) would otherwise fuse 32
+        // attention chains into `BoundOpKind::CachedAttention` and silently
+        // invalidate every count below.
+        let bound = crate::bind::bind_with_fusion(&program, &shapes, &outputs, false)
+            .expect("the program binds");
 
         let mut elementwise = 0_usize;
         let mut reduce_two_operand = 0_usize;
@@ -12134,12 +12141,13 @@ value = 1.0
         let mut constant = 0_usize;
         let mut iota = 0_usize;
         // `BoundOpKind::CachedAttention` (landed after this census's own
-        // baseline figures were measured) is a bind-time fusion this
-        // program never reaches without `cached-attention-streaming`,
-        // which this test's own feature set does not enable -- counted
-        // separately so a future landing that DOES turn it on here fails
-        // loudly (`cached_attention == 0` asserted below) instead of
-        // silently drifting the four-bucket reconciliation.
+        // baseline figures were measured) is a bind-time fusion held off
+        // explicitly above via `bind_with_fusion(.., false)` -- this
+        // program never reaches it here regardless of feature set, so it
+        // is counted separately as a proof the unfused bind stayed
+        // unfused, not merely a side effect of a feature flag being off.
+        // The feature-gated block below re-binds WITH fusion on to assert
+        // the fused count directly.
         let mut cached_attention = 0_usize;
         for op in &bound {
             match &op.kind {
@@ -12687,6 +12695,41 @@ value = 1.0
             total,
             "the four BoundOpKind buckets must exhaust the total with no remainder"
         );
+
+        // fused count, measured directly rather than assumed: re-bind the
+        // SAME program WITH `cached_attention_candidates` fusion turned on
+        // (`bind_with_fusion(.., true)`, `bind.rs:2338`) so this census also
+        // states what the fused split looks like under
+        // `cached-attention-streaming`, instead of only proving the unfused
+        // split held.
+        #[cfg(feature = "cached-attention-streaming")]
+        {
+            let fused = crate::bind::bind_with_fusion(&program, &shapes, &outputs, true)
+                .expect("the program binds with fusion enabled");
+            let fused_cached_attention = fused
+                .iter()
+                .filter(|op| matches!(op.kind, crate::bind::BoundOpKind::CachedAttention { .. }))
+                .count();
+            std::println!(
+                "rule_census fused_total={} fused_cached_attention={fused_cached_attention}",
+                fused.len()
+            );
+            assert_eq!(
+                fused_cached_attention, 32,
+                "one CachedAttention BoundOp fusion per layer on this 32-layer forward"
+            );
+            // MEASURED (`rule_census fused_total=620 fused_cached_attention=32`):
+            // 1196 unfused - 620 fused = 576 BoundOps absorbed into the 32
+            // CachedAttention fusions, 18 per fusion.
+            assert_eq!(
+                fused.len(),
+                620,
+                "fused total must be 620 on this program -- 1196 unfused minus 576 BoundOps \
+                 absorbed across the 32 CachedAttention fusions (18 each); re-measure via the \
+                 `rule_census fused_total=` println above if the fusion rewrite's own \
+                 absorption count changes"
+            );
+        }
     }
 
 
