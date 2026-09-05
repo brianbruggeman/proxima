@@ -66,7 +66,8 @@ use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
 use proxima_tensor::{
-    BoundOp, BoundOpKind, ComposedBody, DType, Keep, Layout, NodeId, ReduceInit, ScalarOp, StepArg,
+    BoundOp, BoundOpKind, ComposedBody, DType, Keep, Layout, Lookup, NodeId, ReduceInit, ScalarOp,
+    StepArg,
 };
 
 use crate::error::EmitError;
@@ -1532,9 +1533,12 @@ pub(crate) fn reduction_dims(resolved: &BoundOp, output_axes: &[u16]) -> Vec<u16
 }
 
 fn bindings(resolved: &BoundOp) -> Vec<Binding> {
+    // `all_read_sources`, not `operands` -- a `BoundOpKind::Reduce` with a
+    // fused epilogue reads its `epilogue_operands` too, and those need a
+    // buffer bound at the exact index `kernel_signature`'s `epi{index}`
+    // params claim (see that function's own doc).
     let mut bindings: Vec<Binding> = resolved
-        .operands()
-        .iter()
+        .all_read_sources()
         .map(|(node, _, _)| Binding::Input(*node))
         .collect();
     for (_, _, gather) in resolved.operands() {
@@ -2471,6 +2475,8 @@ fn entry_name(resolved: &BoundOp) -> String {
             init,
             keep,
             output_axes,
+            epilogue_body,
+            epilogue_operands,
             ..
         } => {
             let body = body_token(resolved.element_body());
@@ -2485,8 +2491,22 @@ fn entry_name(resolved: &BoundOp) -> String {
             // here, two such ops would share this name despite emitting
             // different source -- see `distinct_output_rank_at_same_total_rank_yields_distinct_entry_names`.
             let output_rank = output_axes.len();
+            // A fused epilogue changes both the `Uniforms` layout (the extra
+            // `epilogue_operand_base`/`_strides` fields) and the body text
+            // (`push_reduce_epilogue_write`'s emitted tail) -- the untouched
+            // identity default contributes nothing here, so a program with
+            // no fused epilogue anywhere names exactly what it always did.
+            let epilogue = if reduce_epilogue_is_identity(epilogue_body, epilogue_operands) {
+                String::new()
+            } else {
+                format!(
+                    "_epi{}_{}",
+                    epilogue_operands.len(),
+                    body_token(epilogue_body)
+                )
+            };
             format!(
-                "omega_{kind}_r{rank}_o{output_rank}_n{operand_count}_{body}_{reduce_body}_{init}"
+                "omega_{kind}_r{rank}_o{output_rank}_n{operand_count}_{body}_{reduce_body}_{init}{epilogue}"
             )
         }
         // no operand count, no body: an `Iota`'s whole structure is its
@@ -2595,6 +2615,7 @@ fn push_body_steps(
 fn kernel_signature(
     source: &mut String,
     quantized: &[Option<PackedCodec>],
+    epilogue_operand_count: usize,
     gather_count: usize,
     entry: &str,
     element_type: &str,
@@ -2620,6 +2641,18 @@ fn kernel_signature(
             "    device const {binding_type}* in{index} [[buffer({index})]],\n"
         ));
     }
+    // A [`BoundOpKind::Reduce::epilogue_operands`] entry is always a plain,
+    // un-gathered, un-packed `element_type` buffer -- the same restriction
+    // `cpu::apply_reduce_epilogue` already enforces (`operand_read` there has
+    // no codec branch) -- so each gets one flat device buffer, positioned
+    // right after the fold's own operands and before anything gather adds.
+    for index in 0..epilogue_operand_count {
+        source.push_str(&format!(
+            "    device const {element_type}* epi{index} [[buffer({})]],\n",
+            operand_count + index
+        ));
+    }
+    let base = operand_count + epilogue_operand_count;
     for slot in 0..gather_count {
         // a gather's fetched index is always carried as an exact-integer
         // `float`, independent of the op's own element type — see this
@@ -2627,21 +2660,21 @@ fn kernel_signature(
         // note on indices being the one deliberate non-dtype exception.
         source.push_str(&format!(
             "    device const float* gather_idx{slot} [[buffer({})]],\n",
-            operand_count + slot
+            base + slot
         ));
     }
     source.push_str(&format!(
         "    device {element_type}* out [[buffer({})]],\n",
-        operand_count + gather_count
+        base + gather_count
     ));
     source.push_str(&format!(
         "    constant Uniforms& u [[buffer({})]],\n",
-        operand_count + gather_count + 1
+        base + gather_count + 1
     ));
     if gather_count > 0 {
         source.push_str(&format!(
             "    device atomic_uint* fault [[buffer({})]],\n",
-            operand_count + gather_count + 2
+            base + gather_count + 2
         ));
     }
     source.push_str("    uint gid [[thread_position_in_grid]]");
@@ -2877,7 +2910,7 @@ fn render_iota(resolved: &BoundOp, entry: &str) -> Result<String, EmitError> {
     source.push_str("    long total_elements;\n");
     source.push_str("};\n\n");
 
-    kernel_signature(&mut source, &[], 0, entry, element_type, false);
+    kernel_signature(&mut source, &[], 0, 0, entry, element_type, false);
     source.push_str("    if ((long)gid >= u.total_elements) { return; }\n");
     source.push_str(&format!("    out[gid] = ({element_type})gid;\n"));
     source.push_str("}\n");
@@ -2900,7 +2933,7 @@ fn render_constant(resolved: &BoundOp, entry: &str, value: f32) -> Result<String
     source.push_str("    long total_elements;\n");
     source.push_str("};\n\n");
 
-    kernel_signature(&mut source, &[], 0, entry, element_type, false);
+    kernel_signature(&mut source, &[], 0, 0, entry, element_type, false);
     source.push_str("    if ((long)gid >= u.total_elements) { return; }\n");
     source.push_str(&format!(
         "    out[gid] = ({element_type}){};\n",
@@ -3052,7 +3085,15 @@ fn render_elementwise(
     push_gather_uniform_fields(&mut source, gather_count, rank_len);
     source.push_str("};\n\n");
 
-    kernel_signature(&mut source, quantized, gather_count, entry, element_type, false);
+    kernel_signature(
+        &mut source,
+        quantized,
+        0,
+        gather_count,
+        entry,
+        element_type,
+        false,
+    );
     source.push_str("    if ((long)gid >= u.total_elements) { return; }\n");
 
     if rank > 0 {
@@ -3110,6 +3151,8 @@ fn render_reduce(
         reduce_op,
         init,
         output_axes,
+        epilogue_body,
+        epilogue_operands,
         ..
     } = &resolved.kind
     else {
@@ -3126,6 +3169,24 @@ fn render_reduce(
     let gather_count = gather_count(resolved);
     let gather_slots = gather_slots(resolved);
     let element_type = type_token(resolved.node, resolved.dtype)?;
+    let epilogue_operand_count = epilogue_operands.len();
+    // The tiled `simdgroup_matrix` GEMM path (`push_tiled_gemm_body`) writes
+    // its output through cooperative per-tile stores this module has no
+    // single output-coordinate hook to splice an epilogue tail into -- every
+    // other reduce renderer funnels its write through one of
+    // `push_serial_reduce_body`/`push_cooperative_reduce_tail`/
+    // `push_packed_row_combine_and_write`, which `push_reduce_epilogue_write`
+    // now covers, so this is the one shape a fused epilogue is rejected for
+    // rather than rendered, the same "no renderer, reject" contract
+    // `BoundOpKind::Reduce::epilogue_body`'s own doc names.
+    if !reduce_epilogue_is_identity(epilogue_body, epilogue_operands)
+        && tiled_gemm_block(resolved, quantized, *reduce_op, *init, output_axes).is_some()
+    {
+        return Err(EmitError::EpilogueNotSupported {
+            node: resolved.node,
+            reason: "the tiled simdgroup_matrix GEMM kernel has no epilogue tail yet",
+        });
+    }
 
     let mut source = String::new();
     preamble(&mut source);
@@ -3141,6 +3202,14 @@ fn render_reduce(
     ));
     source.push_str("    long out_base;\n");
     source.push_str(&format!("    long out_strides[{rank_len}];\n"));
+    if epilogue_operand_count > 0 {
+        source.push_str(&format!(
+            "    long epilogue_operand_base[{epilogue_operand_count}];\n"
+        ));
+        source.push_str(&format!(
+            "    long epilogue_operand_strides[{epilogue_operand_count}][{output_rank_len}];\n"
+        ));
+    }
     push_gather_uniform_fields(&mut source, gather_count, rank_len);
     source.push_str("};\n\n");
 
@@ -3155,6 +3224,7 @@ fn render_reduce(
     kernel_signature(
         &mut source,
         quantized,
+        epilogue_operand_count,
         gather_count,
         entry,
         element_type,
@@ -3172,6 +3242,8 @@ fn render_reduce(
             rank,
             quantized,
             element_type,
+            epilogue_body,
+            epilogue_operands,
         );
     } else {
         push_serial_reduce_body(
@@ -3191,10 +3263,116 @@ fn render_reduce(
             &gather_slots,
             quantized,
             element_type,
+            epilogue_body,
+            epilogue_operands,
         );
     }
     source.push_str("}\n");
     Ok(source)
+}
+
+/// Shared write tail for every reduce renderer -- [`push_serial_reduce_body`],
+/// [`push_cooperative_reduce_tail`], and [`push_packed_row_combine_and_write`]
+/// -- so a fused [`BoundOpKind::Reduce::epilogue_body`] renders identically
+/// regardless of which fold produced the value being written. `coord` gives
+/// the OUTPUT-axis-order coordinate expression for axis `dim` (an
+/// `output_coord[dim]`-style array read, or a plain `"0"` for a rank-0
+/// output where no such array exists) -- [`BoundOpKind::Reduce::
+/// epilogue_operands`]'s own doc is why that space, not `full_coord`'s full
+/// iteration rank, is what `epilogue_operand_strides` is declared over.
+/// When the epilogue is the untouched identity default
+/// ([`reduce_epilogue_is_identity`]), this emits exactly the one-line
+/// `out[...] = accumulator;` every caller emitted before epilogue fusion
+/// existed -- byte-for-byte, so a program with no fused epilogue anywhere
+/// renders the same kernel source it always did.
+#[allow(clippy::too_many_arguments)]
+fn push_reduce_epilogue_write(
+    source: &mut String,
+    epilogue_body: &ComposedBody,
+    epilogue_operands: &[(NodeId, Layout, Option<Lookup>)],
+    output_rank: usize,
+    element_type: &str,
+    indent: &str,
+    coord: impl Fn(usize) -> String,
+    accumulator_expr: &str,
+    out_offset_expr: &str,
+) {
+    if reduce_epilogue_is_identity(epilogue_body, epilogue_operands) {
+        source.push_str(&format!(
+            "{indent}out[{out_offset_expr}] = {accumulator_expr};\n"
+        ));
+        return;
+    }
+    let epilogue_operand_count = epilogue_operands.len();
+    source.push_str(&format!(
+        "{indent}{element_type} epi_scratch[{}];\n",
+        epilogue_operand_count + 1
+    ));
+    for index in 0..epilogue_operand_count {
+        source.push_str(&format!(
+            "{indent}long epi_off{index} = u.epilogue_operand_base[{index}];\n"
+        ));
+        for dim in 0..output_rank {
+            source.push_str(&format!(
+                "{indent}epi_off{index} += {} * u.epilogue_operand_strides[{index}][{dim}];\n",
+                coord(dim)
+            ));
+        }
+        source.push_str(&format!(
+            "{indent}epi_scratch[{index}] = epi{index}[epi_off{index}];\n"
+        ));
+    }
+    source.push_str(&format!(
+        "{indent}epi_scratch[{epilogue_operand_count}] = {accumulator_expr};\n"
+    ));
+    let epi_value = push_epilogue_body_steps(source, epilogue_body, indent, element_type);
+    source.push_str(&format!("{indent}out[{out_offset_expr}] = {epi_value};\n"));
+}
+
+/// [`push_body_steps`]'s counterpart for [`BoundOpKind::Reduce::
+/// epilogue_body`]: identical step-emission shape over the same
+/// [`scalar_op_expr`] table, reading `epi_scratch[i]`/`epi_step{k}` instead
+/// of `push_body_steps`'s `scratch[i]`/`step{k}` -- the epilogue's operand
+/// table is a SEPARATE array from the fold's own per-step `scratch`
+/// (`push_reduce_epilogue_write`'s own doc), so the two never share a slot
+/// even when a real operand index collides.
+fn push_epilogue_body_steps(
+    source: &mut String,
+    body: &ComposedBody,
+    indent: &str,
+    element_type: &str,
+) -> String {
+    for (index, step) in body.steps.iter().enumerate() {
+        let args: Vec<String> = step
+            .args
+            .iter()
+            .map(|arg| match arg {
+                StepArg::Operand(operand_index) => format!("epi_scratch[{operand_index}]"),
+                StepArg::Step(step_index) => format!("epi_step{step_index}"),
+            })
+            .collect();
+        let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
+        let expr = scalar_op_expr(step.op, &arg_refs);
+        source.push_str(&format!(
+            "{indent}{element_type} epi_step{index} = {expr};\n"
+        ));
+    }
+    format!("epi_step{}", body.steps.len().saturating_sub(1))
+}
+
+/// The untouched-epilogue convention [`BoundOpKind::Reduce::epilogue_body`]'s
+/// own doc names: a leaf [`ScalarOp::Identity`] reading its own sole implicit
+/// slot, over zero real operands. Mirrors `proxima_tensor::cpu`'s own
+/// private `reduce_epilogue_is_identity`, restated here because this crate
+/// cannot reach that CPU-evaluator-internal helper.
+fn reduce_epilogue_is_identity(
+    body: &ComposedBody,
+    operands: &[(NodeId, Layout, Option<Lookup>)],
+) -> bool {
+    operands.is_empty()
+        && body.steps.len() == 1
+        && body.steps[0].op == ScalarOp::Identity
+        && body.steps[0].args == [StepArg::Operand(0)]
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -3215,6 +3393,8 @@ fn push_serial_reduce_body(
     gather_slots: &[Option<usize>],
     quantized: &[Option<PackedCodec>],
     element_type: &str,
+    epilogue_body: &ComposedBody,
+    epilogue_operands: &[(NodeId, Layout, Option<Lookup>)],
 ) {
     source.push_str("    if ((long)gid >= u.output_total) { return; }\n");
 
@@ -3305,7 +3485,23 @@ fn push_serial_reduce_body(
             "    out_offset += full_coord[{dim}] * u.out_strides[{dim}];\n"
         ));
     }
-    source.push_str("    out[out_offset] = accumulator;\n");
+    push_reduce_epilogue_write(
+        source,
+        epilogue_body,
+        epilogue_operands,
+        output_rank,
+        element_type,
+        "    ",
+        |dim| {
+            if output_rank > 0 {
+                format!("output_coord[{dim}]")
+            } else {
+                "0".to_string()
+            }
+        },
+        "accumulator",
+        "out_offset",
+    );
 }
 
 /// The SIMD-group cooperative fold: `SIMD_WIDTH` lanes split one output
@@ -3425,7 +3621,10 @@ fn push_q4k_header_decode(source: &mut String) {
 fn push_q4k_product_reduce_body(source: &mut String, sub: usize, run: usize, element_type: &str) {
     source.push_str(&format!("            {element_type} raw_acc = 0;\n"));
     source.push_str(&format!("            {element_type} act_sum = 0;\n"));
-    source.push_str(&format!("            for (int c = 0; c < {}; ++c) {{\n", sub / run));
+    source.push_str(&format!(
+        "            for (int c = 0; c < {}; ++c) {{\n",
+        sub / run
+    ));
     // raw 4-bit levels (0..15) are exact in float regardless of the
     // kernel's element type; q4k_run8 takes `thread float *out`, narrowed
     // to element_type at the multiply below, same as the per-element path.
@@ -3437,9 +3636,8 @@ fn push_q4k_product_reduce_body(source: &mut String, sub: usize, run: usize, ele
     source.push_str("                raw_acc += dot(float4(levels[4], levels[5], levels[6], levels[7]), float4(acts[c * 8 + 4], acts[c * 8 + 5], acts[c * 8 + 6], acts[c * 8 + 7]));\n");
     source.push_str("                act_sum += acts[c * 8 + 0] + acts[c * 8 + 1] + acts[c * 8 + 2] + acts[c * 8 + 3] + acts[c * 8 + 4] + acts[c * 8 + 5] + acts[c * 8 + 6] + acts[c * 8 + 7];\n");
     source.push_str("            }\n");
-    source.push_str(
-        "            sumf[q] = sumf[q] + hdr.scale * raw_acc - hdr.minimum * act_sum;\n",
-    );
+    source
+        .push_str("            sumf[q] = sumf[q] + hdr.scale * raw_acc - hdr.minimum * act_sum;\n");
 }
 
 #[cfg(feature = "metal-q4k-mask-fma")]
@@ -3450,23 +3648,25 @@ fn push_q4k_product_reduce_body(source: &mut String, sub: usize, run: usize, ele
     source.push_str("            ushort q4k_mask_a = q4k_hi ? 0x00F0u : 0x000Fu;\n");
     source.push_str("            ushort q4k_mask_b = q4k_hi ? 0xF000u : 0x0F00u;\n");
     source.push_str("            float q4k_corr = q4k_hi ? (1.0f / 16.0f) : 1.0f;\n");
-    source.push_str(&format!("            for (int c = 0; c < {}; ++c) {{\n", sub / run));
+    source.push_str(&format!(
+        "            for (int c = 0; c < {}; ++c) {{\n",
+        sub / run
+    ));
     source.push_str(&format!(
         "                uint q4k_index = slot + (uint)(c * {run});\n"
     ));
     source.push_str("                uint q4k_group = q4k_index / 64u;\n");
     source.push_str("                uint q4k_within = q4k_index % 64u;\n");
-    source.push_str(
-        "                uint q4k_byte = q4k_group * 32u + (q4k_within % 32u);\n",
-    );
+    source.push_str("                uint q4k_byte = q4k_group * 32u + (q4k_within % 32u);\n");
     source.push_str(
         "                device const ushort *q4k_pairs = (device const ushort *)(blk + 16 + q4k_byte);\n",
     );
-    source.push_str(&format!("                for (int p = 0; p < {}; ++p) {{\n", run / 2));
+    source.push_str(&format!(
+        "                for (int p = 0; p < {}; ++p) {{\n",
+        run / 2
+    ));
     source.push_str("                    ushort q4k_word = q4k_pairs[p];\n");
-    source.push_str(
-        "                    float q4k_level_a = (float)(q4k_word & q4k_mask_a);\n",
-    );
+    source.push_str("                    float q4k_level_a = (float)(q4k_word & q4k_mask_a);\n");
     source.push_str(
         "                    float q4k_level_b = (float)(q4k_word & q4k_mask_b) * (1.0f / 256.0f);\n",
     );
@@ -3501,6 +3701,8 @@ fn push_packed_row_combine_and_write(
     rank_len: usize,
     output_axes: &[u16],
     element_type: &str,
+    epilogue_body: &ComposedBody,
+    epilogue_operands: &[(NodeId, Layout, Option<Lookup>)],
 ) {
     let combine_fn = simd_combine_fn(reduce_op);
     source.push_str(&format!("    for (int q = 0; q < {rows}; ++q) {{\n"));
@@ -3525,7 +3727,17 @@ fn push_packed_row_combine_and_write(
             "            out_offset += coord_q[{dim}] * u.out_strides[{dim}];\n"
         ));
     }
-    source.push_str("            out[out_offset] = reduced;\n");
+    push_reduce_epilogue_write(
+        source,
+        epilogue_body,
+        epilogue_operands,
+        output_axes.len(),
+        element_type,
+        "            ",
+        |dim| format!("coord_q[{}]", output_axes[dim]),
+        "reduced",
+        "out_offset",
+    );
     source.push_str("        }\n");
     source.push_str("    }\n");
 }
@@ -3558,6 +3770,8 @@ fn push_packed_row_combine_and_write(
     rank_len: usize,
     output_axes: &[u16],
     element_type: &str,
+    epilogue_body: &ComposedBody,
+    epilogue_operands: &[(NodeId, Layout, Option<Lookup>)],
 ) {
     let combine_fn = simd_combine_fn(reduce_op);
     let max_split = crate::sized::PACKED_ROW_SPLIT_K_MAX_SPLIT;
@@ -3598,7 +3812,17 @@ fn push_packed_row_combine_and_write(
             "                out_offset += coord_q[{dim}] * u.out_strides[{dim}];\n"
         ));
     }
-    source.push_str("                out[out_offset] = total;\n");
+    push_reduce_epilogue_write(
+        source,
+        epilogue_body,
+        epilogue_operands,
+        output_axes.len(),
+        element_type,
+        "                ",
+        |dim| format!("coord_q[{}]", output_axes[dim]),
+        "total",
+        "out_offset",
+    );
     source.push_str("            }\n");
     source.push_str("        }\n");
     source.push_str("    }\n");
@@ -3622,6 +3846,7 @@ fn push_packed_row_combine_and_write(
 /// element, same as the generic serial path, just reused across `s` instead
 /// of the reduce dim alone.
 #[allow(clippy::too_many_arguments, clippy::similar_names)]
+#[allow(clippy::too_many_arguments)]
 fn push_packed_row_multi_row_body(
     source: &mut String,
     resolved: &BoundOp,
@@ -3631,6 +3856,8 @@ fn push_packed_row_multi_row_body(
     quantized: &[Option<PackedCodec>],
     element_type: &str,
     block: &PackedRowBlock,
+    epilogue_body: &ComposedBody,
+    epilogue_operands: &[(NodeId, Layout, Option<Lookup>)],
 ) {
     let weight = block.weight;
     let other = block.other;
@@ -3767,7 +3994,24 @@ fn push_packed_row_multi_row_body(
             "                    out_offset += token_coord[s][{dim}] * u.out_strides[{dim}];\n"
         ));
     }
-    source.push_str("                    out[out_offset] = reduced;\n");
+    let output_rank = token_axes.len() + feature_axes.len();
+    push_reduce_epilogue_write(
+        source,
+        epilogue_body,
+        epilogue_operands,
+        output_rank,
+        element_type,
+        "                    ",
+        |dim| {
+            if dim < token_axes.len() {
+                format!("token_coord[s][{}]", token_axes[dim])
+            } else {
+                format!("feature_coord[q][{}]", feature_axes[dim - token_axes.len()])
+            }
+        },
+        "reduced",
+        "out_offset",
+    );
     source.push_str("                }\n");
     source.push_str("            }\n");
     source.push_str("        }\n");
@@ -3784,6 +4028,8 @@ fn push_packed_row_blocked_body(
     rank: usize,
     quantized: &[Option<PackedCodec>],
     element_type: &str,
+    epilogue_body: &ComposedBody,
+    epilogue_operands: &[(NodeId, Layout, Option<Lookup>)],
 ) {
     let Some(block) = packed_row_block(resolved, quantized) else {
         unreachable!("push_packed_row_blocked_body is only called when packed_row_block matched")
@@ -3798,6 +4044,8 @@ fn push_packed_row_blocked_body(
             quantized,
             element_type,
             &block,
+            epilogue_body,
+            epilogue_operands,
         );
         return;
     }
@@ -4328,6 +4576,8 @@ fn push_packed_row_blocked_body(
             rank_len,
             output_axes,
             element_type,
+            epilogue_body,
+            epilogue_operands,
         );
     }
 }
@@ -5273,6 +5523,8 @@ fn push_cooperative_reduce_body(
     rank: usize,
     quantized: &[Option<PackedCodec>],
     element_type: &str,
+    epilogue_body: &ComposedBody,
+    epilogue_operands: &[(NodeId, Layout, Option<Lookup>)],
 ) {
     let rank_len = rank.max(1);
     let output_rank = output_axes.len();
@@ -5334,6 +5586,8 @@ fn push_cooperative_reduce_body(
             rank,
             quantized,
             element_type,
+            epilogue_body,
+            epilogue_operands,
         );
         return;
     }
@@ -5483,7 +5737,16 @@ fn push_cooperative_reduce_body(
             source.push_str("            seeded = true;\n");
             source.push_str("        }\n");
             source.push_str("    }\n");
-            push_cooperative_reduce_tail(source, reduce_op, rank, width, element_type);
+            push_cooperative_reduce_tail(
+                source,
+                reduce_op,
+                rank,
+                width,
+                element_type,
+                output_rank,
+                epilogue_body,
+                epilogue_operands,
+            );
             return;
         }
 
@@ -5536,7 +5799,16 @@ fn push_cooperative_reduce_body(
             source.push_str(&format!("        walk{index} += advance{index};\n"));
         }
         source.push_str("    }\n");
-        push_cooperative_reduce_tail(source, reduce_op, rank, width, element_type);
+        push_cooperative_reduce_tail(
+            source,
+            reduce_op,
+            rank,
+            width,
+            element_type,
+            output_rank,
+            epilogue_body,
+            epilogue_operands,
+        );
         return;
     }
 
@@ -5590,7 +5862,16 @@ fn push_cooperative_reduce_body(
     source.push_str("        seeded = true;\n");
     source.push_str("    }\n");
 
-    push_cooperative_reduce_tail(source, reduce_op, rank, width, element_type);
+    push_cooperative_reduce_tail(
+        source,
+        reduce_op,
+        rank,
+        width,
+        element_type,
+        output_rank,
+        epilogue_body,
+        epilogue_operands,
+    );
 }
 
 /// The per-lane `simd_sum` fold and the final store both cooperative loop
@@ -5618,15 +5899,26 @@ fn push_cooperative_reduce_body(
 /// there is no ragged-tail case here to guard, unlike the per-lane
 /// accumulator seed above (which already handles `reduction_total < width`
 /// via `cooperative_identity_token`, both before and after this feature).
+#[allow(clippy::too_many_arguments)]
 fn push_cooperative_reduce_tail(
     source: &mut String,
     reduce_op: ScalarOp,
     rank: usize,
     width: u64,
     element_type: &str,
+    output_rank: usize,
+    epilogue_body: &ComposedBody,
+    epilogue_operands: &[(NodeId, Layout, Option<Lookup>)],
 ) {
     let combine_fn = simd_combine_fn(reduce_op);
     let simdgroups = width / SIMD_WIDTH;
+    let coord = |dim: usize| {
+        if output_rank > 0 {
+            format!("output_coord[{dim}]")
+        } else {
+            "0".to_string()
+        }
+    };
     if simdgroups <= 1 {
         source.push_str(&format!(
             "    {element_type} reduced = {combine_fn}(accumulator);\n"
@@ -5638,7 +5930,17 @@ fn push_cooperative_reduce_tail(
                 "        out_offset += full_coord[{dim}] * u.out_strides[{dim}];\n"
             ));
         }
-        source.push_str("        out[out_offset] = reduced;\n");
+        push_reduce_epilogue_write(
+            source,
+            epilogue_body,
+            epilogue_operands,
+            output_rank,
+            element_type,
+            "        ",
+            coord,
+            "reduced",
+            "out_offset",
+        );
         source.push_str("    }\n");
         return;
     }
@@ -5667,7 +5969,17 @@ fn push_cooperative_reduce_tail(
             "        out_offset += full_coord[{dim}] * u.out_strides[{dim}];\n"
         ));
     }
-    source.push_str("        out[out_offset] = reduced;\n");
+    push_reduce_epilogue_write(
+        source,
+        epilogue_body,
+        epilogue_operands,
+        output_rank,
+        element_type,
+        "        ",
+        coord,
+        "reduced",
+        "out_offset",
+    );
     source.push_str("    }\n");
 }
 
@@ -5708,7 +6020,15 @@ fn render_scan(
     push_gather_uniform_fields(&mut source, gather_count, rank_len);
     source.push_str("};\n\n");
 
-    kernel_signature(&mut source, quantized, gather_count, entry, element_type, false);
+    kernel_signature(
+        &mut source,
+        quantized,
+        0,
+        gather_count,
+        entry,
+        element_type,
+        false,
+    );
     source.push_str("    if ((long)gid >= u.outer_total) { return; }\n");
 
     if outer_rank > 0 {
@@ -7150,7 +7470,11 @@ mod tests {
              cooperative K/V load needs every other query_groups value"
         );
         assert!(kernel.source.contains("threadgroup float shared_k_even"));
-        assert!(kernel.source.contains("threadgroup_barrier(mem_flags::mem_threadgroup)"));
+        assert!(
+            kernel
+                .source
+                .contains("threadgroup_barrier(mem_flags::mem_threadgroup)")
+        );
     }
 
     #[test]
@@ -7266,7 +7590,10 @@ mod tests {
     #[test]
     fn the_row_ceiling_overrides_a_simdgroup_target_that_would_otherwise_split() {
         let max_rows = crate::sized::PACKED_ROW_SPLIT_K_MAX_ROWS;
-        assert_ne!(max_rows, 0, "this test requires a non-zero configured ceiling");
+        assert_ne!(
+            max_rows, 0,
+            "this test requires a non-zero configured ceiling"
+        );
 
         let rows_at_ceiling = max_rows;
         let rows_past_ceiling = max_rows + PACKED_ROWS_PER_GROUP as u64;
@@ -7294,10 +7621,7 @@ mod tests {
     /// on (and `metal-q4k-split-k` off, so `split == 1`), the packed
     /// row-blocked matmul's threadgroup width must be exactly double the
     /// one-simdgroup default.
-    #[cfg(all(
-        feature = "metal-packed-row-nsg2",
-        not(feature = "metal-q4k-split-k")
-    ))]
+    #[cfg(all(feature = "metal-packed-row-nsg2", not(feature = "metal-q4k-split-k")))]
     #[test]
     fn packed_row_nsg2_doubles_the_threadgroup_width_for_a_packed_row_blocked_matmul() {
         let bound = matmul_op(4, 256, 5);
@@ -7328,10 +7652,7 @@ mod tests {
     /// `metal-packed-row-nsg2` does -- same assertion, different feature,
     /// proving the two features compose through one factor rather than two
     /// competing nsg constants.
-    #[cfg(all(
-        feature = "metal-q4k-ggml-port",
-        not(feature = "metal-q4k-split-k")
-    ))]
+    #[cfg(all(feature = "metal-q4k-ggml-port", not(feature = "metal-q4k-split-k")))]
     #[test]
     fn ggml_port_doubles_the_threadgroup_width_for_a_packed_row_blocked_matmul() {
         let bound = matmul_op(4, 256, 5);

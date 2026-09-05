@@ -98,4 +98,14 @@ pub enum EmitError {
     #[cfg(feature = "cuda")]
     #[error("node {node} reads a Q3_K operand, which the cuda emitter does not support yet")]
     CudaUnsupportedPackedCodec { node: NodeId },
+
+    /// `crate::msl::render_reduce`'s own gate: every reduce renderer except
+    /// the tiled `simdgroup_matrix` GEMM path funnels its output write
+    /// through `push_reduce_epilogue_write`, so a fused
+    /// `proxima_tensor::BoundOpKind::Reduce::epilogue_body` renders there;
+    /// the tiled path has no such hook yet, so a non-identity epilogue on a
+    /// shape that would otherwise take it is rejected here, named, rather
+    /// than silently dropping the fused work.
+    #[error("node {node} cannot render its fused reduce epilogue: {reason}")]
+    EpilogueNotSupported { node: NodeId, reason: &'static str },
 }

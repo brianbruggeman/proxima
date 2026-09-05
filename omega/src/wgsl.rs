@@ -99,7 +99,9 @@ use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use proxima_tensor::{BoundOp, BoundOpKind, ComposedBody, DType, Keep, NodeId, ScalarOp, StepArg};
+use proxima_tensor::{
+    BoundOp, BoundOpKind, ComposedBody, DType, Keep, Layout, Lookup, NodeId, ScalarOp, StepArg,
+};
 
 use crate::error::EmitError;
 use crate::msl::{Binding, PackedCodec, PackedOperands, gather_count, gather_slots};
@@ -362,12 +364,29 @@ fn validate_body(node: NodeId, body: &ComposedBody) -> Result<(), EmitError> {
     Ok(())
 }
 
+/// The untouched-epilogue convention [`proxima_tensor::BoundOpKind::
+/// Reduce::epilogue_body`]'s own doc names: a leaf [`ScalarOp::Identity`]
+/// reading its own sole implicit slot, over zero real operands. Restated per
+/// backend module (`crate::msl` carries its own copy) because
+/// `proxima_tensor::cpu`'s private original is not reachable from here.
+fn reduce_epilogue_is_identity(
+    body: &ComposedBody,
+    operands: &[(NodeId, Layout, Option<Lookup>)],
+) -> bool {
+    operands.is_empty()
+        && body.steps.len() == 1
+        && body.steps[0].op == ScalarOp::Identity
+        && body.steps[0].args == [StepArg::Operand(0)]
+}
+
 fn validate(resolved: &BoundOp, packed_operands: &PackedOperands) -> Result<(), EmitError> {
     validate_body(resolved.node, resolved.element_body())?;
     if let BoundOpKind::Reduce {
         reduce_op,
         keep,
         out_scatter,
+        epilogue_body,
+        epilogue_operands,
         ..
     } = &resolved.kind
     {
@@ -379,6 +398,16 @@ fn validate(resolved: &BoundOp, packed_operands: &PackedOperands) -> Result<(), 
         if matches!(reduce_op, ScalarOp::Select) {
             return Err(EmitError::ReductionBodyIsSelect {
                 node: resolved.node,
+            });
+        }
+        // No wgsl reduce renderer folds `BoundOpKind::Reduce::epilogue_body`
+        // into its output write yet -- `crate::msl::push_reduce_epilogue_write`
+        // is the Metal-only counterpart. Reject, named, rather than silently
+        // dropping the fused elementwise tail.
+        if !reduce_epilogue_is_identity(epilogue_body, epilogue_operands) {
+            return Err(EmitError::UnsupportedOpKind {
+                node: resolved.node,
+                kind: "reduce with a fused epilogue",
             });
         }
         if *keep == Keep::Scan {
