@@ -22039,3 +22039,68 @@ against a worktree detached at `837011c` for the C arm, and
 | Date | Change | Δ vs prior | CoV / runs | Host loadout |
 | --- | --- | --- | --- | --- |
 | 2026-09-05 | doc-only: reconciled ROW 288 (28.54, `Safe`-only build) against ROW 297 (`Safe` 33.82 / `Relaxed` 28.19) via a 4-arm interleaved bake-off on one box; no code change | main default (`Relaxed`) unregressed (28.343 vs ROW 288's 28.625 on the same box, <1% apart); main's `Safe` mode is regressed 5.532 ms/token (19.3%) vs ROW 288's binary's `Safe`, traced to `gpu_exec_ms` (5.455 ms of the 5.532, 98.6%) despite fewer dispatches (520 vs 616) | A 0.11%, B 0.47%, C 0.67%, D 0.10% CoV across 3 interleaved rounds each; B-C per-round delta CoV 2.03% | pgrep quiet-gate empty before every arm; `uptime` load-1 8.82 falling to 3.07-3.93 across the run, single measurer |
+
+## ROW 299 -- bisected ROW 298's Safe-mode regression to one commit: `e142f51`, the q4_K/q5_K packed-word kernel-body load
+
+`git bisect start 26d5ced 837011c` in a detached worktree, `Safe` mode selected the ROW 298 way
+(`PROXIMA_METAL_MATH_MODE=safe` at and after `6c30473`; the only mode before it), one release build +
+one `PROXIMA_MAX_TOKENS=8` run of `bind::real_openchat_file::runs_the_cached_decode_loop_on_the_metal_backend_and_reports_the_plan_cache`
+per commit, mean of steps 3-7 `step_wall_ms` classifying good (<=30.5) / bad (>=32.0); no step landed
+in the 30.5-32.0 ambiguous band, so one run per commit was sufficient per the bisect's own rule.
+
+| commit | subject | steps 3-7 mean ms/token | emit_calls | barriers | gpu_exec_ms mean (3-7) | good/bad |
+| --- | --- | --- | --- | --- | --- | --- |
+| `ba38c00` | refactor(omega): two engines, cpu and gpu, with the driver a property of gpu | 28.831 | 616 | 419 | 27.454 | good |
+| `989ab13` | perf(omega): hoist packed-row addressing out of the block loop | 28.686 | 616 | 419 | 27.303 | good |
+| `e142f51` | perf(omega): load q4_k and q5_k weight words as native u16 | 35.310 | 616 | 419 | 33.791 | **bad -- first bad** |
+| `0aea0d0` | perf(omega): q6_k pair-dot body for the packed-row reduce | 35.637 | 616 | 419 | 34.186 | bad |
+| `416cb86` | feat(omega): fold s activation rows per streamed weight row (nr1) | 33.746 | 616 | 419 | 32.294 | bad |
+| `bd81e4f` | docs: attribute the ggml q4_K kernel port in third_party | 33.574 | 616 | 419 | 32.111 | bad |
+| `2d3008c` | feat(tensor): fuse an elementwise consumer into its reduce as an epilogue | 33.648 | 616 | 419 | 31.846 | bad |
+
+`989ab13` (parent of the first bad commit) and `e142f51` (first bad) are a direct parent/child pair --
+no commit sits between them. `emit_calls` and `barriers` are identical (616 / 419) across every row in
+this table, including across the good/bad boundary; the regression is not a dispatch-count change, it
+is inside the per-dispatch `gpu_exec_ms` the same 616 dispatches take.
+
+**First bad commit:**
+
+```
+commit e142f5162a0f65e98f96b7c8bad0e1fc73c385e5
+Author: Brian Bruggeman <1350114+brianbruggeman@users.noreply.github.com>
+Date:   Fri Sep 4 19:32:28 2026 -0500
+
+    perf(omega): load q4_k and q5_k weight words as native u16
+
+ omega/src/msl.rs | 30 ++++++++++++++++++++++--------
+ 1 file changed, 22 insertions(+), 8 deletions(-)
+```
+
+Parent's numbers (`989ab13`, good): 28.686 ms/token, `gpu_exec_ms` 27.303. First-bad's numbers
+(`e142f51`): 35.310 ms/token, `gpu_exec_ms` 33.791 -- a 6.624 ms/token jump, 6.488 ms of it (97.9%)
+inside `gpu_exec_ms`, at the exact commit boundary, on the same box in the same bisect run.
+
+**Mechanism.** The diff replaces per-byte scalar `uchar` loads in `q4k_pair_dot` and `q5k_pair_dot`
+(`omega/src/msl.rs`) with wider `ushort`/`ulong` word loads over the same `qs`/`qh` byte ranges --
+those two functions are the packed-row-blocked reduce body every one of the 616 dispatches in this
+decode program runs; mechanism beyond "the kernel body that dominates `gpu_exec_ms` changed at this
+commit" -- specifically why a `Safe`-mode compile of the wider loads costs more than the byte-wise
+form did, while `Relaxed`/`Fast` do not show the same jump (ROW 297) -- is unresolved by bisect.
+
+**Loadout.** pgrep quiet-gate (`llama-bench\|llama-cli\|proxima_model_i\|device_streamin\|matvec_roofline\|omega-\|^cargo$\|^rustc$\|nextest\|cargo-nextest`)
+empty before every timed run in this table; single measurer, one release build + one run per commit,
+worktree detached, never the source `main` checkout.
+
+**Re-prove:**
+```sh
+git -C /Users/brianbruggeman/repos/slot-0/proxima worktree add --detach <wt> e142f5162a0f65e98f96b7c8bad0e1fc73c385e5
+cd <wt> && CARGO_TARGET_DIR=./target CARGO_TERM_COLOR=never PROXIMA_METAL_MATH_MODE=safe PROXIMA_MAX_TOKENS=8 \
+  cargo test --release -p proxima-model-interop --features metal,instrument --lib -- --exact --nocapture --ignored \
+  bind::real_openchat_file::runs_the_cached_decode_loop_on_the_metal_backend_and_reports_the_plan_cache
+```
+against the same worktree detached one commit earlier at `989ab131f3d0fcae855da15d0b062f8f02185f43`.
+
+### Changelog
+| Date | Change | Δ vs prior | CoV / runs | Host loadout |
+| --- | --- | --- | --- | --- |
+| 2026-09-05 | doc-only: `git bisect` of ROW 298's Safe-mode regression across the `837011c..26d5ced` range, one build+run per candidate; no code change | first bad commit `e142f51` (q4_K/q5_K packed-word kernel-body load): parent `989ab13` 28.686 ms/token -> `e142f51` 35.310 ms/token, +6.624 ms/token (23.1%), 6.488 of it in `gpu_exec_ms`; every subsequent commit through `26d5ced` stays bad, consistent with a single-commit regression that persists | single run per commit (no step landed in the 30.5-32.0 ambiguous band across 7 candidates); `emit_calls`=616, `barriers`=419 identical across all 7 rows | pgrep quiet-gate empty before every run; single measurer, one bisect session |
