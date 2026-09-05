@@ -79,10 +79,14 @@ epilogue-profile-probe = ["std"]
 # `epilogue_operands` (`bind::BoundOpKind::Reduce`'s own doc states the exact
 # three conditions). Alloc-tier only — the whole rewrite is a structural
 # `Op`/`IndexMap` walk plus a `BTreeMap`/`BTreeSet` rebuild, no platform
-# dependency anywhere in it. Default-off: no renderer accepts a non-default
-# epilogue yet outside the gate that also turns this on for it (`omega`'s own
-# `reduce-epilogue-fusion` feature), so this stays off in `default` until a
-# bake-off earns the switch the way `cached-attention-streaming` did.
+# dependency anywhere in it. Default-off in this crate's own `default`, same
+# shape as `cached-attention-streaming` above (no checkpoint/differential
+# harness lives in this crate) -- but the oracle bake-off earned the switch
+# one level up: `emit_calls` 616 -> 520, `barriers` 419 -> 323, text
+# identical, so `omega`'s and `proxima-model-interop`'s own
+# `reduce-epilogue-fusion` features now fold into those crates' `metal`
+# default shape. This feature stays selectable standalone for CPU-only
+# callers.
 reduce-epilogue-fusion = []
 # real execution-witness counters (elements/bytes/gather-vs-affine) plus
 # per-bound-op spans over `proxima-telemetry`'s legacy Metrics/Telemetry

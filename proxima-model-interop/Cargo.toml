@@ -90,6 +90,12 @@ instrument = ["proxima-tensor/instrument", "omega?/instrument", "dep:proxima-tel
 # 0.84%/1.05%), wall mean 36.556 -> 34.725 ms (ON <= OFF + CoV every round),
 # `device_allocated_bytes` unchanged, `generated_text` identical across all
 # 3 bake-off rounds plus 3 extra determinism runs.
+# `reduce-epilogue-fusion` joins per the owner's less-work rule: on the real
+# openchat cached-decode oracle, `emit_calls` 616 -> 520, `barriers` 419 ->
+# 323 (3 of 4 epilogued reduces per layer fuse into their reduce),
+# `generated_text` identical ("Here is a simple Python function that
+# returns"), `plan_hits` unchanged at 5. Same rule as `cached-attention-streaming`
+# above: real reduction in work, output identical, ships default-on.
 metal = [
     "dep:omega",
     "std",
@@ -99,6 +105,7 @@ metal = [
     "metal-plan-stable-buffers",
     "cached-attention-streaming",
     "metal-concurrent-dispatch",
+    "reduce-epilogue-fusion",
 ]
 # cached-attention physical step for the real serving/decode harness; folded
 # into `metal`'s default shape per ROW 282 but kept individually selectable
@@ -109,10 +116,10 @@ cached-attention-streaming = [
     "proxima-tensor/cached-attention-streaming",
     "omega?/cached-attention-streaming",
 ]
-# Default-off passthrough to `proxima-tensor/reduce-epilogue-fusion` and
-# `omega/reduce-epilogue-fusion` -- same shape as `cached-attention-streaming`
-# above, kept individually selectable so this crate's own harness can
-# exercise the fused-epilogue reduce on CPU (`proxima-tensor` alone) without
+# Passthrough to `proxima-tensor/reduce-epilogue-fusion` and
+# `omega/reduce-epilogue-fusion` -- folded into `metal`'s default shape above
+# but kept individually selectable so this crate's own harness can exercise
+# the fused-epilogue reduce on CPU (`proxima-tensor` alone) without
 # requiring `metal`.
 reduce-epilogue-fusion = [
     "proxima-tensor/reduce-epilogue-fusion",
