@@ -265,6 +265,11 @@ static inline float q4k_pair_dot(device const uchar *block, uint iq, uint ir, th
     device const uchar *qs = block + 16;
     // ggml's q1/q2 pointers are uint16_t, so its +32 offset advances 64 bytes.
     uint byte_base = 32u * iq + 8u * ir;
+    // `qs` sits at offset 16 in a 144-byte block (both even), and `byte_base`
+    // is always a multiple of 8, so every `ushort` word below is 2-byte
+    // aligned -- matches ggml's `(device const uint16_t *)qs + 16*iq + 4*ir`.
+    device const ushort *word_low = (device const ushort *)(qs + byte_base);
+    device const ushort *word_high = (device const ushort *)(qs + byte_base + 64u);
     uint low_index = 64u * iq + 8u * ir;
     q4k_header h0 = q4k_header_for(block, low_index);
     q4k_header h1 = q4k_header_for(block, low_index + 32u);
@@ -272,8 +277,8 @@ static inline float q4k_pair_dot(device const uchar *block, uint iq, uint ir, th
     q4k_header h3 = q4k_header_for(block, low_index + 160u);
     float result = 0.0f;
     for (uint i = 0u; i < 4u; ++i) {
-        uint word1 = (uint)qs[byte_base + 2u * i] | ((uint)qs[byte_base + 2u * i + 1u] << 8);
-        uint word2 = (uint)qs[byte_base + 64u + 2u * i] | ((uint)qs[byte_base + 64u + 2u * i + 1u] << 8);
+        uint word1 = (uint)word_low[i];
+        uint word2 = (uint)word_high[i];
         result += (h0.scale * (float)(word1 & 0x0Fu) - h0.minimum) * yl[2u * i + 0u];
         result += (h0.scale * (float)((word1 >> 8) & 0x0Fu) - h0.minimum) * yl[2u * i + 1u];
         result += (h1.scale * (float)((word1 >> 4) & 0x0Fu) - h1.minimum) * yl[2u * i + 8u];
@@ -595,10 +600,12 @@ static inline float q5k_element(device const uchar *block, uint index) {
 /// `omega/tests/q5k_unpack.rs`, same posture as [`Q4K_BLOCK_BYTES`].
 pub const Q5K_BLOCK_BYTES: usize = 176;
 
-/// `metal-q5k-pair-dot` (default-off): the same paired-nibble, two-word-load
+/// `metal-q5k-pair-dot` (default-off): the same paired-nibble, packed-word-load
 /// body `q4k_pair_dot` gives `Q4_K`'s `plain_product` arm
-/// (`push_packed_row_blocked_body`), extended with `Q5_K`'s `qh` high-bit
-/// plane -- ONE extra byte load and mask-select per pair of levels, no shift,
+/// (`push_packed_row_blocked_body`) -- one `ulong` load per 8-byte `qs`/`qh`
+/// run, byte-extracted by shift rather than eight scalar `uchar` loads --
+/// extended with `Q5_K`'s `qh` high-bit plane -- ONE extra mask-select per
+/// pair of levels, no shift on the nibble itself,
 /// mirroring llama.cpp's own `kernel_mul_mv_q5_K_f32_impl`
 /// (`ggml-metal.metal:5209-5324`) lane assignment (`tid = tiisg/4`,
 /// `ix = tiisg%4`, `iq = tid/4`, `ir = tid%4`, `l0 = 8*ir`) exactly: `iq`/`ir`
@@ -620,6 +627,13 @@ static inline float q5k_pair_dot(device const uchar *block, uint iq, uint ir, th
     device const uchar *qh = block + 16;
     device const uchar *qs = block + 48;
     uint byte_base = 32u * iq + 8u * ir;
+    // `qs`/`qh` start at offsets 48/16 in a 176-byte block (all multiples of
+    // 8), and `byte_base`/`8*ir` are themselves multiples of 8, so each
+    // `ulong` below reads its 8-byte run of `l` in one 8-byte-aligned load
+    // instead of eight scalar `uchar` loads.
+    ulong q1_word = *(device const ulong *)(qs + byte_base);
+    ulong q2_word = *(device const ulong *)(qs + byte_base + 64u);
+    ulong h_word = *(device const ulong *)(qh + 8u * ir);
     uint low_index = 64u * iq + 8u * ir;
     q5k_header h0 = q5k_header_for(block, low_index);
     q5k_header h1 = q5k_header_for(block, low_index + 32u);
@@ -631,9 +645,9 @@ static inline float q5k_pair_dot(device const uchar *block, uint iq, uint ir, th
     uchar hm4 = (uchar)(hm2 << 4u);
     float result = 0.0f;
     for (uint l = 0u; l < 8u; ++l) {
-        uchar q1 = qs[byte_base + l];
-        uchar q2 = qs[byte_base + 64u + l];
-        uchar h = qh[8u * ir + l];
+        uchar q1 = (uchar)((q1_word >> (8u * l)) & 0xFFu);
+        uchar q2 = (uchar)((q2_word >> (8u * l)) & 0xFFu);
+        uchar h = (uchar)((h_word >> (8u * l)) & 0xFFu);
         float low0 = (float)(q1 & 0x0Fu) + ((h & hm1) != 0u ? 16.0f : 0.0f);
         float low1 = (float)(q1 >> 4u) + ((h & hm2) != 0u ? 16.0f : 0.0f);
         float high0 = (float)(q2 & 0x0Fu) + ((h & hm3) != 0u ? 16.0f : 0.0f);
