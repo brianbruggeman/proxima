@@ -2254,15 +2254,22 @@ impl<'file> LoadedModel<'file> {
             k_odd_buffers.push(allocate_placed_buffer(capacity_even_odd)?);
             v_buffers.push(allocate_placed_buffer(capacity_v)?);
         }
-        // `kv-capacity-bucket` reads `bucket` rows per step, `bucket >
-        // merged_len` -- the tail `[merged_len, bucket)` was never written
-        // by this call yet. A freshly allocated `MTLBuffer`'s contents are
-        // undefined (`omega::metal::zero_placed_buffer`'s own doc), so
-        // that tail is zeroed ONCE here, at allocation, rather than paying
-        // a per-step re-zero: any row a later step reads was either
-        // zeroed here or overwritten by a real rotated key/value this
-        // same call already wrote, since `cached_len` only grows.
-        #[cfg(feature = "kv-capacity-bucket")]
+        // `kv_extent` (unconditional, keyed off
+        // `ServingConfig::kv_bucket_tokens`, see that field's own doc)
+        // reads `bucket` rows per step whenever `bucket_tokens > 1`,
+        // `bucket > merged_len` -- the tail `[merged_len, bucket)` was
+        // never written by this call yet. A freshly allocated
+        // `MTLBuffer`'s contents are undefined
+        // (`omega::metal::zero_placed_buffer`'s own doc), so that tail is
+        // zeroed ONCE here, at allocation, rather than paying a per-step
+        // re-zero: any row a later step reads was either zeroed here or
+        // overwritten by a real rotated key/value this same call already
+        // wrote, since `cached_len` only grows. Unconditional (not gated
+        // on the `kv-capacity-bucket` cargo feature, which only pulls in
+        // `proxima-tensor`'s CPU-side correctness proof and no longer
+        // controls this runtime behaviour) because
+        // `ServingConfig::default`'s `kv_bucket_tokens: 32` buckets on
+        // every build regardless of which cargo features are enabled.
         for layer in 0..block_count {
             omega::metal::zero_placed_buffer(&k_even_buffers[layer], capacity_even_odd);
             omega::metal::zero_placed_buffer(&k_odd_buffers[layer], capacity_even_odd);
