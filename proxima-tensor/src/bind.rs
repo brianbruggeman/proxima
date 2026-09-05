@@ -281,6 +281,49 @@ pub enum BoundOpKind {
         /// generic reduce path (`crate::cpu`'s own `run_reduce`). `None` for
         /// an ordinary (affine) reduce/scan.
         out_scatter: Option<Lookup>,
+        /// An elementwise chain fused onto the OUTPUT side of this fold —
+        /// `element_body`'s mirror image. `element_body` combines `operands`
+        /// once per PRE-reduction step, before the fold; `epilogue_body` runs
+        /// once per OUTPUT element, after it, reading `epilogue_operands`
+        /// (addressed in output-axis order, the same order [`output_axes`]
+        /// itself uses) plus one more implicit argument: this fold's own
+        /// just-computed result at that output position. That result is
+        /// [`StepArg::Operand`]`(epilogue_operands.len())` — one slot past
+        /// the real operands, so `Identity` applied to the sole slot of an
+        /// EMPTY `epilogue_operands` (index `0`) already reads it with no
+        /// special case, which is exactly [`ComposedBody::leaf`]'s own shape
+        /// for [`ScalarOp::Identity`]. "No epilogue" is that leaf body over
+        /// zero real operands — not an `Option` — the same convention
+        /// `element_body` already uses for "nothing fused into the prologue
+        /// either" ([`build_reduce_op`]'s own default).
+        ///
+        /// [`crate::bind`]'s own fusion rule (`reduce-epilogue-fusion`,
+        /// default-off): an `Elementwise` consumer of this fold absorbs into
+        /// `epilogue_body`/`epilogue_operands` — and the fold's own `node`
+        /// is REPLACED by the consumer's `NodeId` (the fused op now answers
+        /// for the consumer's own identity, which is exactly what "a
+        /// required-output consumer still fuses" needs) — when: (a) the
+        /// consumer's own iteration space equals this fold's `output_axes`
+        /// shape, with the fold's output read through a genuine identity
+        /// projection (every axis, offset `0`, coefficient `1` — see
+        /// `is_identity_projection`) and every OTHER consumer operand read
+        /// through an identity-or-broadcast projection (the same predicate;
+        /// broadcast is a projection over fewer axes, still admitted by
+        /// `is_identity_projection`'s own per-axis walk); (b) this fold's
+        /// output has no other consumer anywhere in the program and is not
+        /// itself a requested output (so retiring it here loses nothing);
+        /// (c) `out_scatter` is `None` (a scatter's destination is
+        /// data-dependent, never a plain identity projection a consumer
+        /// could read through). A backend with no epilogue renderer rejects
+        /// at bind time (the same capability path `bind_with_fusion` already
+        /// runs `fuse_cached_attention` through) rather than silently
+        /// dropping the extra work.
+        epilogue_body: ComposedBody,
+        /// The epilogue's own real operands, in the SAME output-axis-order
+        /// coordinate space `out_layout`/`output_axes` write in — see
+        /// `epilogue_body`'s own doc for why the fold's result is an
+        /// implicit, un-listed argument rather than an entry here.
+        epilogue_operands: BoundOperands,
     },
     /// The resolved counterpart of [`Op::Iota`]: no operands, no body — an
     /// executor derives every output value straight from its own position
@@ -485,6 +528,8 @@ impl BoundOp {
                 output_axes,
                 out_layout,
                 out_scatter,
+                epilogue_body,
+                epilogue_operands,
             } => BoundOpKind::Reduce {
                 element_body: element_body.clone(),
                 reduce_op: *reduce_op,
@@ -501,6 +546,18 @@ impl BoundOp {
                 // None` in practice; cloned rather than asserted so a future
                 // relaxation of that gate does not silently drop it.
                 out_scatter: out_scatter.clone(),
+                epilogue_body: epilogue_body.clone(),
+                // `epilogue_operands` lives in OUTPUT-axis-order local
+                // coordinates (`epilogue_body`'s own doc), not `self.extents`'
+                // full-iteration numbering `split_axis` is expressed in —
+                // but `split_axis` is always `output_axes[0]` (`split_axis`
+                // above never returns anything else for a `Reduce`), and
+                // `output_axes[0]` is ALWAYS local position `0` in that
+                // output-axis-order space by construction. So the chunk
+                // boundary this whole call is rebasing for is local axis `0`
+                // here, regardless of which full-space axis `split_axis`
+                // itself names.
+                epilogue_operands: rebase_operands(epilogue_operands, 0, chunk_start),
             },
             // unreachable in practice: `split_axis` returns `None` for
             // `Iota`, so `split`/`split_aligned` never call this for one —
@@ -1100,6 +1157,12 @@ fn build_reduce_op(
             output_axes,
             out_layout,
             out_scatter,
+            // no epilogue at push time — `reduce_epilogue_fusion` (the
+            // `reduce-epilogue-fusion` post-pass) is the only writer of a
+            // non-default value for either field, and it runs after every
+            // `BoundOp` here already exists.
+            epilogue_body: ComposedBody::leaf(ScalarOp::Identity),
+            epilogue_operands: Vec::new(),
         },
     }
 }
@@ -2632,7 +2695,31 @@ pub fn bind(
 /// they call this directly with `false` — the fused rewrite never fires for
 /// them, and the plain elementwise/reduce chain `bind_plain` already
 /// produces is what they emit.
+///
+/// `reduce-epilogue-fusion` (the `BoundOpKind::Reduce::epilogue_body`/
+/// `epilogue_operands` rewrite) runs unconditionally after this, gated only
+/// by the crate feature — it has no per-call capability bool of its own
+/// because, unlike cached-attention, every renderer this crate ships either
+/// renders the epilogue or rejects it at bind time (see
+/// [`reduce_epilogue_fusion`]'s own doc); there is no third "silently ignore
+/// it" caller to protect the way `fuse_cached_attention: false` protects
+/// wgpu/cuda from a fused kind they cannot render at all.
 pub fn bind_with_fusion(
+    program: &[Op],
+    shapes: &Shapes,
+    outputs: &[NodeId],
+    fuse_cached_attention: bool,
+) -> Result<Vec<BoundOp>, TensorError> {
+    let built = bind_cached_attention_fusion(program, shapes, outputs, fuse_cached_attention)?;
+    #[cfg(feature = "reduce-epilogue-fusion")]
+    {
+        return reduce_epilogue_fusion(program, shapes, built, outputs);
+    }
+    #[cfg(not(feature = "reduce-epilogue-fusion"))]
+    Ok(built)
+}
+
+fn bind_cached_attention_fusion(
     program: &[Op],
     shapes: &Shapes,
     outputs: &[NodeId],
@@ -2701,6 +2788,264 @@ pub fn bind_with_fusion(
     }
     Ok(rewritten)
     }
+}
+
+/// Every node `expr` reads, counting `IndexMap::Computed`'s own `indices`
+/// operand alongside the ordinary operand it rides with — the same walk
+/// [`live::annotate`]'s own private `uses` does, duplicated rather than
+/// exported because [`reduce_epilogue_reference_counts`] wants a plain
+/// per-node COUNT over the whole program rather than a last-use POSITION,
+/// a different enough reduction over the same walk that sharing one
+/// function would need an extra closure parameter for no real reuse.
+#[cfg(feature = "reduce-epilogue-fusion")]
+fn push_op_references(expr: &Op, into: &mut Vec<NodeId>) {
+    match expr {
+        Op::Input { .. } | Op::Iota { .. } | Op::Constant { .. } => {}
+        Op::Elementwise { operands, .. } => {
+            for (node, map) in operands {
+                into.push(*node);
+                push_indices_node_ref(map, into);
+            }
+        }
+        Op::Reduce(reduce) => {
+            into.push(reduce.operand);
+            push_indices_node_ref(&reduce.in_map, into);
+            push_indices_node_ref(&reduce.out_map, into);
+        }
+    }
+}
+
+#[cfg(feature = "reduce-epilogue-fusion")]
+fn push_indices_node_ref(map: &IndexMap, into: &mut Vec<NodeId>) {
+    if let IndexMap::Computed { indices, .. } = map {
+        into.push(*indices);
+    }
+}
+
+/// How many times each program position is read anywhere else in `program`
+/// — [`reduce_epilogue_fusion`]'s own liveness gate needs a plain count
+/// (condition (b): "no OTHER consumer"), which is a different question from
+/// [`live::annotate`]'s "which position is the LAST use" (a node referenced
+/// twice still has exactly one last-use position, but is not sole-consumed).
+#[cfg(feature = "reduce-epilogue-fusion")]
+fn reduce_epilogue_reference_counts(program: &[Op]) -> Vec<u32> {
+    let mut counts = vec![0u32; program.len()];
+    let mut references = Vec::new();
+    for expr in program {
+        references.clear();
+        push_op_references(expr, &mut references);
+        for node in &references {
+            counts[node.0 as usize] += 1;
+        }
+    }
+    counts
+}
+
+/// One (consumer, reduce) pair [`reduce_epilogue_fusion`] will merge:
+/// `consumer` is an [`Op::Elementwise`] whose sole `Op::Reduce` operand is
+/// `reduce`, satisfying every condition [`BoundOpKind::Reduce::epilogue_body`]'s
+/// own doc states. Structural over `Op`/`ScalarOp`/`IndexMap` only — no
+/// model-specific shape or name ever enters this match, so any program with
+/// this exact algebraic shape fuses, real openchat layer or synthetic test
+/// fixture alike.
+#[cfg(feature = "reduce-epilogue-fusion")]
+fn reduce_epilogue_candidates(
+    program: &[Op],
+    shapes: &Shapes,
+    outputs: &[NodeId],
+) -> Vec<(NodeId, NodeId)> {
+    let reference_counts = reduce_epilogue_reference_counts(program);
+    let mut candidates = Vec::new();
+    for (position, expr) in program.iter().enumerate() {
+        let Op::Elementwise { operands, .. } = expr else {
+            continue;
+        };
+        let consumer = NodeId(position as u32);
+        let mut reduce_source = None;
+        for (operand_node, map) in operands {
+            let Some(Op::Reduce(reduce)) = program.get(operand_node.0 as usize) else {
+                continue;
+            };
+            if reduce.out_map.is_data_dependent() {
+                continue; // (c): a scatter's destination is data-dependent.
+            }
+            if reference_counts[operand_node.0 as usize] != 1 {
+                continue; // (b): some OTHER op still reads this fold's output.
+            }
+            if outputs.contains(operand_node) {
+                continue; // (b): a requested output must still materialize on its own.
+            }
+            if shapes.of(consumer) != shapes.of(*operand_node) {
+                continue; // (a): iteration space must equal the fold's output space.
+            }
+            if !is_identity_projection(map) || map.affine().axes.len() != shapes.of(*operand_node).len()
+            {
+                continue; // (a): the fold's own output must be read at full identity, no broadcast.
+            }
+            reduce_source = Some(*operand_node);
+            break;
+        }
+        let Some(source) = reduce_source else {
+            continue;
+        };
+        // (a): every OTHER operand (bias, residual, gate — full-rank or
+        // broadcast alike) must also be identity-or-broadcast; a gathered or
+        // strided operand forces the whole consumer to materialize normally
+        // instead of becoming an epilogue.
+        let every_operand_identity = operands
+            .iter()
+            .all(|(_, map)| !map.is_data_dependent() && is_identity_projection(map));
+        if !every_operand_identity {
+            continue;
+        }
+        candidates.push((consumer, source));
+    }
+    candidates
+}
+
+/// The bind-time rewrite [`bind_with_fusion`] runs whenever
+/// `reduce-epilogue-fusion` is compiled in: every
+/// [`reduce_epilogue_candidates`] match becomes one merged [`BoundOp`] whose
+/// `node` is the CONSUMER's id (see [`BoundOpKind::Reduce::epilogue_body`]'s
+/// own doc for why), replacing both the standalone reduce and the standalone
+/// consumer `resolved` already held. A backend with no epilogue renderer
+/// must reject a non-default `epilogue_body`/`epilogue_operands` at bind
+/// time rather than call this at all with the feature compiled in against
+/// data it cannot render — the same capability contract `fuse_cached_
+/// attention: false` already gives wgpu/cuda for `CachedAttention`.
+#[cfg(feature = "reduce-epilogue-fusion")]
+fn reduce_epilogue_fusion(
+    program: &[Op],
+    shapes: &Shapes,
+    resolved: Vec<BoundOp>,
+    outputs: &[NodeId],
+) -> Result<Vec<BoundOp>, TensorError> {
+    let candidates = reduce_epilogue_candidates(program, shapes, outputs);
+    if candidates.is_empty() {
+        return Ok(resolved);
+    }
+    let by_node: BTreeMap<NodeId, &BoundOp> =
+        resolved.iter().map(|bound| (bound.node, bound)).collect();
+    let mut fused_by_consumer: BTreeMap<NodeId, BoundOp> = BTreeMap::new();
+    let mut absorbed: BTreeSet<NodeId> = BTreeSet::new();
+    for (consumer, source) in candidates {
+        let Some(reduce_bound) = by_node.get(&source) else {
+            continue;
+        };
+        let Some(consumer_bound) = by_node.get(&consumer) else {
+            continue;
+        };
+        let BoundOpKind::Reduce {
+            element_body,
+            reduce_op,
+            init,
+            keep,
+            operands,
+            output_axes,
+            out_layout,
+            out_scatter: None,
+            ..
+        } = &reduce_bound.kind
+        else {
+            continue; // window-elimination or a prior pass already rewrote this reduce away.
+        };
+        let BoundOpKind::Elementwise {
+            body: consumer_body,
+            operands: consumer_operands,
+        } = &consumer_bound.kind
+        else {
+            continue;
+        };
+        let Some((epilogue_body, epilogue_operands)) =
+            fold_epilogue_operand(consumer_body, consumer_operands, source)
+        else {
+            continue;
+        };
+        let fused = BoundOp {
+            node: consumer,
+            dtype: consumer_bound.dtype,
+            extents: reduce_bound.extents.clone(),
+            kind: BoundOpKind::Reduce {
+                element_body: element_body.clone(),
+                reduce_op: *reduce_op,
+                init: *init,
+                keep: *keep,
+                operands: operands.clone(),
+                output_axes: output_axes.clone(),
+                out_layout: out_layout.clone(),
+                out_scatter: None,
+                epilogue_body,
+                epilogue_operands,
+            },
+        };
+        fused_by_consumer.insert(consumer, fused);
+        absorbed.insert(source);
+    }
+    if fused_by_consumer.is_empty() {
+        return Ok(resolved);
+    }
+    let mut rewritten = Vec::with_capacity(resolved.len());
+    for bound in resolved {
+        if let Some(fused) = fused_by_consumer.remove(&bound.node) {
+            rewritten.push(fused);
+        } else if !absorbed.contains(&bound.node) {
+            rewritten.push(bound);
+        }
+    }
+    Ok(rewritten)
+}
+
+/// Removes `source`'s own operand slot from `consumer_operands`, renumbers
+/// every [`StepArg::Operand`] in `consumer_body` to match the shrunk operand
+/// list, and points whatever referenced the removed slot at the new
+/// sentinel index (`consumer_operands.len() - 1`, i.e. one past the end of
+/// the RESULT list) — [`BoundOpKind::Reduce::epilogue_body`]'s own
+/// "implicit fold-result argument" convention. Returns `None` if `source`
+/// does not appear in `consumer_operands` at all (should not happen for a
+/// [`reduce_epilogue_candidates`] match, but this stays a checked rewrite
+/// rather than an indexing panic).
+#[cfg(feature = "reduce-epilogue-fusion")]
+fn fold_epilogue_operand(
+    consumer_body: &ComposedBody,
+    consumer_operands: &BoundOperands,
+    source: NodeId,
+) -> Option<(ComposedBody, BoundOperands)> {
+    let source_index = consumer_operands
+        .iter()
+        .position(|(node, _, _)| *node == source)?;
+    let mut new_operands = BoundOperands::new();
+    let mut remap: Vec<u16> = vec![0; consumer_operands.len()];
+    for (index, operand) in consumer_operands.iter().enumerate() {
+        if index == source_index {
+            continue; // never read back through `remap` — the match arm below special-cases it.
+        }
+        remap[index] = new_operands.len() as u16;
+        new_operands.push(operand.clone());
+    }
+    let fold_result_index = new_operands.len() as u16;
+    let steps = consumer_body
+        .steps
+        .iter()
+        .map(|step| BodyStep {
+            op: step.op,
+            args: step
+                .args
+                .iter()
+                .map(|arg| match arg {
+                    StepArg::Operand(index) => {
+                        let old = *index as usize;
+                        if old == source_index {
+                            StepArg::Operand(fold_result_index)
+                        } else {
+                            StepArg::Operand(remap[old])
+                        }
+                    }
+                    StepArg::Step(step_index) => StepArg::Step(*step_index),
+                })
+                .collect(),
+        })
+        .collect();
+    Some((ComposedBody { steps }, new_operands))
 }
 
 fn bind_plain(
@@ -4324,5 +4669,282 @@ mod tests {
             "a mask chain that is not the exact Equal/Iota shape must decline the fold, got {:?}",
             folded.kind
         );
+    }
+
+    #[cfg(feature = "reduce-epilogue-fusion")]
+    mod reduce_epilogue_fusion_tests {
+        use super::*;
+
+        /// `weights: [K, N]` folded over `K` into `reduced: [N]`, then a
+        /// plain `x: [N]` residual add — the exact `residual1 = Add(attn_out,
+        /// x)` shape `docs/dispatch-census.md` names. `y = Negate(x)` gives
+        /// `x` a SECOND, independent use so this test also proves the rule
+        /// only cares about the REDUCE's own liveness, not any other
+        /// operand's.
+        fn reduce_then_residual_add_program() -> (Vec<Op>, NodeId, NodeId, NodeId, NodeId) {
+            let mut program = Vec::new();
+            let weights = append(
+                &mut program,
+                Op::Input {
+                    dtype: DType::Float32,
+                    shape: alloc::vec![Extent::Static(8), Extent::Static(4)],
+                    name: None,
+                },
+            );
+            let reduced = append(
+                &mut program,
+                Op::Reduce(Reduce {
+                    dtype: DType::Float32,
+                    body: ScalarOp::Add,
+                    init: ReduceInit::Zero,
+                    operand: weights,
+                    in_map: IndexMap::Affine(map::projection(2, &[0, 1])),
+                    out_map: IndexMap::Affine(map::projection(2, &[1])),
+                    keep: Keep::Reduce,
+                    name: None,
+                }),
+            );
+            let x = append(
+                &mut program,
+                Op::Input {
+                    dtype: DType::Float32,
+                    shape: alloc::vec![Extent::Static(4)],
+                    name: None,
+                },
+            );
+            let identity = || IndexMap::Affine(map::projection(1, &[0]));
+            let consumer = append(
+                &mut program,
+                Op::Elementwise {
+                    dtype: DType::Float32,
+                    body: ScalarOp::Add,
+                    operands: alloc::vec![(reduced, identity()), (x, identity())],
+                    name: None,
+                },
+            );
+            let extra_x_use = append(
+                &mut program,
+                Op::Elementwise {
+                    dtype: DType::Float32,
+                    body: ScalarOp::Negate,
+                    operands: alloc::vec![(x, identity())],
+                    name: None,
+                },
+            );
+            (program, reduced, consumer, x, extra_x_use)
+        }
+
+        /// The one non-default field this whole rule adds — a real
+        /// `epilogue_operands` entry — is the test's own positive signal
+        /// that fusion actually happened, not merely that the op count
+        /// dropped (a count-only assertion can't distinguish this rule
+        /// firing from some unrelated node going dead).
+        fn has_real_epilogue(kind: &BoundOpKind) -> bool {
+            matches!(kind, BoundOpKind::Reduce { epilogue_operands, .. } if !epilogue_operands.is_empty())
+        }
+
+        #[test]
+        fn reduce_then_residual_add_fuses_into_one_epilogued_reduce() {
+            let (program, reduced, consumer, _x, extra_x_use) = reduce_then_residual_add_program();
+            let shapes = shape::infer(&program, &[]).expect("residual-add program infers");
+            let plain = bind_plain(&program, &shapes, &[extra_x_use])
+                .expect("plain bind succeeds");
+            let fused = bind(&program, &shapes, &[extra_x_use]).expect("fused bind succeeds");
+
+            assert_eq!(
+                fused.len(),
+                plain.len() - 1,
+                "the standalone reduce disappears into the consumer's epilogue"
+            );
+            assert!(
+                !fused.iter().any(|bound| bound.node == reduced),
+                "the reduce's own NodeId no longer names a standalone BoundOp"
+            );
+            let merged = fused
+                .iter()
+                .find(|bound| bound.node == consumer)
+                .expect("the consumer's NodeId now names the fused reduce+epilogue op");
+            assert!(
+                has_real_epilogue(&merged.kind),
+                "the fused op must carry a real epilogue, got {:?}",
+                merged.kind
+            );
+        }
+
+        #[test]
+        fn a_reduce_with_two_consumers_does_not_fuse() {
+            let (program, reduced, consumer, _x, extra_x_use) = reduce_then_residual_add_program();
+            let identity = || IndexMap::Affine(map::projection(1, &[0]));
+            let mut program = program;
+            let second_consumer = append(
+                &mut program,
+                Op::Elementwise {
+                    dtype: DType::Float32,
+                    body: ScalarOp::Negate,
+                    operands: alloc::vec![(reduced, identity())],
+                    name: None,
+                },
+            );
+            let shapes = shape::infer(&program, &[]).expect("two-consumer program infers");
+            let fused = bind(&program, &shapes, &[extra_x_use, second_consumer])
+                .expect("two-consumer program still binds");
+
+            assert!(
+                fused.iter().any(|bound| bound.node == reduced),
+                "a reduce with a second consumer must still materialize standalone"
+            );
+            let consumer_bound = fused
+                .iter()
+                .find(|bound| bound.node == consumer)
+                .expect("the first consumer's own BoundOp is still present");
+            assert!(
+                !has_real_epilogue(&consumer_bound.kind),
+                "a sole-consumer requirement violation must never carry an epilogue"
+            );
+        }
+
+        #[test]
+        fn a_strided_consumer_map_does_not_fuse() {
+            let (mut program, reduced, _consumer, x, extra_x_use) =
+                reduce_then_residual_add_program();
+            // overwrite the last-appended node (the ordinary-identity
+            // consumer) with a build that reads `reduced` REVERSED
+            // (`coeff: -1, offset: 3` over a 4-element axis walks indices
+            // 3,2,1,0) instead of through a genuine identity projection —
+            // `is_identity_projection` rejects any `coeff != 1` regardless
+            // of how the offset keeps it in-bounds, so this consumer must
+            // decline the fold and materialize both nodes normally.
+            let consumer_index = program
+                .iter()
+                .position(|expr| {
+                    matches!(
+                        expr,
+                        Op::Elementwise { body: ScalarOp::Add, operands, .. }
+                            if operands.iter().any(|(node, _)| *node == reduced)
+                    )
+                })
+                .expect("the residual-add consumer is present in the program");
+            let strided_map = IndexMap::Affine(IndexPattern {
+                iter_rank: 1,
+                axes: alloc::vec![AxisIndex {
+                    terms: SmallVec::from_slice(&[AxisTerm { axis: 0, coeff: -1 }]),
+                    offset: 3,
+                }],
+            });
+            program[consumer_index] = Op::Elementwise {
+                dtype: DType::Float32,
+                body: ScalarOp::Add,
+                operands: alloc::vec![
+                    (reduced, strided_map),
+                    (x, IndexMap::Affine(map::projection(1, &[0]))),
+                ],
+                name: None,
+            };
+            let consumer = NodeId(consumer_index as u32);
+            let shapes = shape::infer(&program, &[]).expect("strided-consumer program infers");
+            let fused = bind(&program, &shapes, &[extra_x_use, consumer])
+                .expect("strided-consumer program still binds");
+
+            assert!(
+                fused.iter().any(|bound| bound.node == reduced),
+                "a non-identity consumer map must leave the reduce standalone"
+            );
+            let consumer_bound = fused
+                .iter()
+                .find(|bound| bound.node == consumer)
+                .expect("the strided consumer's own BoundOp is still present");
+            assert!(
+                !has_real_epilogue(&consumer_bound.kind),
+                "a non-identity projection must never carry an epilogue"
+            );
+        }
+
+        #[test]
+        fn a_required_output_consumer_still_fuses() {
+            let (program, reduced, consumer, _x, extra_x_use) = reduce_then_residual_add_program();
+            let shapes = shape::infer(&program, &[]).expect("residual-add program infers");
+            // `consumer` itself is now a REQUESTED output — condition (b)
+            // only forbids the REDUCE from being a requested output; the
+            // consumer becoming one is exactly the case the fused op's own
+            // `node == consumer` convention exists for for (the epilogue
+            // output IS the output, so nothing needs to keep the reduce
+            // materialized separately).
+            let fused = bind(&program, &shapes, &[consumer, extra_x_use])
+                .expect("fused bind with the consumer as a required output succeeds");
+
+            assert!(
+                !fused.iter().any(|bound| bound.node == reduced),
+                "the reduce still disappears even though its consumer is a required output"
+            );
+            let merged = fused
+                .iter()
+                .find(|bound| bound.node == consumer)
+                .expect("the required-output consumer's NodeId still names a BoundOp");
+            assert!(
+                has_real_epilogue(&merged.kind),
+                "a required-output consumer must still fuse, got {:?}",
+                merged.kind
+            );
+        }
+
+        /// The real openchat-3.5/Mistral-7B single-range fixture (same
+        /// shape as `single_range_cached_attention_fuses_one_step_per_
+        /// layer_on_the_real_openchat_shape` above) with BOTH
+        /// `cached-attention-streaming` and `reduce-epilogue-fusion` on.
+        /// MEASURED, not derived: printed once via the per-kind buckets
+        /// below so a future re-run can diff against this row's own
+        /// numbers without re-deriving them from the dispatch census.
+        #[test]
+        fn reduce_epilogue_fusion_shrinks_the_real_openchat_single_range_program() {
+            let (program, logits, cache_roots) =
+                crate::spec::mistral_single_range_cached_forward_program(
+                    32_002, 4096, 14336, 32, 8, 128, 32,
+                )
+                .expect("openchat-shaped single-range forward pass lowers to a program");
+            let mut outputs = alloc::vec![logits];
+            for (even, odd, value) in &cache_roots {
+                outputs.extend_from_slice(&[*even, *odd, *value]);
+            }
+            let shapes = crate::shape::infer(&program, &[1, 71])
+                .expect("one new position against a 71-position merged range infers");
+            let attention_only = bind_cached_attention_fusion(&program, &shapes, &outputs, true)
+                .expect("cached-attention-only bind succeeds");
+            let with_epilogue = bind(&program, &shapes, &outputs).expect("fused bind succeeds");
+
+            let epilogue_count = with_epilogue
+                .iter()
+                .filter(|bound| has_real_epilogue(&bound.kind))
+                .count();
+            let reduce_count = with_epilogue
+                .iter()
+                .filter(|bound| matches!(bound.kind, BoundOpKind::Reduce { .. }))
+                .count();
+            let elementwise_count = with_epilogue
+                .iter()
+                .filter(|bound| matches!(bound.kind, BoundOpKind::Elementwise { .. }))
+                .count();
+            let cached_attention_count = with_epilogue
+                .iter()
+                .filter(|bound| matches!(bound.kind, BoundOpKind::CachedAttention { .. }))
+                .count();
+            std::eprintln!(
+                "cached-attention-only={} with-epilogue={} epilogued-reduces={} \
+                 reduce={} elementwise={} cached-attention={}",
+                attention_only.len(),
+                with_epilogue.len(),
+                epilogue_count,
+                reduce_count,
+                elementwise_count,
+                cached_attention_count,
+            );
+            assert!(
+                with_epilogue.len() < attention_only.len(),
+                "reduce-epilogue-fusion must remove at least one bound op vs cached-attention alone"
+            );
+            assert!(
+                epilogue_count > 0,
+                "the real openchat shape must produce at least one epilogued reduce"
+            );
+        }
     }
 }
