@@ -185,13 +185,13 @@ use half::f16;
 use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
 use objc2_foundation::{NSError, NSString};
+#[cfg(feature = "metal-concurrent-dispatch")]
+use objc2_metal::{MTLBarrierScope, MTLDispatchType};
 use objc2_metal::{
     MTLBuffer, MTLCommandBuffer, MTLCommandEncoder, MTLCommandQueue, MTLCompileOptions,
     MTLComputeCommandEncoder, MTLComputePipelineState, MTLCreateSystemDefaultDevice, MTLDevice,
     MTLLibrary, MTLMathMode, MTLResourceOptions, MTLSize,
 };
-#[cfg(feature = "metal-concurrent-dispatch")]
-use objc2_metal::{MTLBarrierScope, MTLDispatchType};
 use proxima_telemetry::counter;
 use proxima_telemetry::debug;
 use proxima_telemetry::metric::Counter;
@@ -797,8 +797,7 @@ pub fn zero_placed_buffer(buffer: &PlacedBuffer, byte_len: usize) {
     // for it (mirrors `read_placed_buffer_f32`'s own SAFETY comment), so
     // this is a valid, CPU-visible, mutable byte slice for the duration of
     // this call.
-    let slots =
-        unsafe { core::slice::from_raw_parts_mut(pointer.as_ptr().cast::<u8>(), byte_len) };
+    let slots = unsafe { core::slice::from_raw_parts_mut(pointer.as_ptr().cast::<u8>(), byte_len) };
     slots.fill(0);
 }
 
@@ -2413,16 +2412,23 @@ fn pack_uniforms_byte_len(bound: &BoundOp) -> usize {
         BoundOpKind::Reduce {
             keep: Keep::Reduce,
             output_axes,
+            epilogue_operands,
             ..
         } => {
             let output_rank_len = output_axes.len().max(1);
             let reduce_rank_len = reduction_dims(bound, output_axes).len().max(1);
+            let epilogue_len = if epilogue_operands.is_empty() {
+                0
+            } else {
+                epilogue_operands.len() * (1 + output_rank_len)
+            };
             (2 + output_rank_len
                 + reduce_rank_len
                 + operand_count
                 + operand_count * rank_len
                 + 1
-                + rank_len)
+                + rank_len
+                + epilogue_len)
                 * WORD
                 + gather_uniform_byte_len(gather, rank_len)
         }
@@ -2590,7 +2596,11 @@ fn pack_cached_attention_uniforms(bound: &BoundOp) -> Vec<u8> {
     let BoundOpKind::CachedAttention { head_dim, .. } = &bound.kind else {
         unreachable!("cached attention uniform packer only receives cached attention")
     };
-    let total: i64 = bound.extents.iter().map(|extent| *extent as i64).product::<i64>()
+    let total: i64 = bound
+        .extents
+        .iter()
+        .map(|extent| *extent as i64)
+        .product::<i64>()
         / *head_dim as i64;
     let mut bytes = Vec::new();
     push_i64(&mut bytes, total);
@@ -2645,6 +2655,7 @@ fn pack_reduce_uniforms(bound: &BoundOp) -> Vec<u8> {
     let BoundOpKind::Reduce {
         output_axes,
         out_layout,
+        epilogue_operands,
         ..
     } = &bound.kind
     else {
@@ -2677,6 +2688,18 @@ fn pack_reduce_uniforms(bound: &BoundOp) -> Vec<u8> {
     }
     push_i64(&mut bytes, out_layout.base);
     push_i64_row(&mut bytes, &out_layout.strides, rank_len);
+    // `crate::msl::render_reduce`'s own `Uniforms` struct declares these
+    // fields ONLY when `epilogue_operands` is non-empty (byte-identical to
+    // before epilogue fusion existed otherwise), so this must stay
+    // conditional on the exact same test.
+    if !epilogue_operands.is_empty() {
+        for (_, layout, _) in epilogue_operands {
+            push_i64(&mut bytes, layout.base);
+        }
+        for (_, layout, _) in epilogue_operands {
+            push_i64_row(&mut bytes, &layout.strides, output_rank_len);
+        }
+    }
     push_gather_uniforms(&mut bytes, bound, rank_len);
     bytes
 }
@@ -3173,8 +3196,7 @@ pub static BLOCK_NOCOPY_BOUND_BYTES: Counter = Counter::new("omega.metal.block_n
 /// (`checkpoint_mapping_offset`) — the third terminal-path byte split of
 /// [`BLOCK_OFFERED_BYTES`], and the one that carries the bulk of a real
 /// model's weight bytes once `register_checkpoint_mapping` is in effect.
-pub static BLOCK_OFFSET_BOUND_BYTES: Counter =
-    Counter::new("omega.metal.block_offset_bound_bytes");
+pub static BLOCK_OFFSET_BOUND_BYTES: Counter = Counter::new("omega.metal.block_offset_bound_bytes");
 
 /// The host's page size, queried once and cached — the alignment unit
 /// `newBufferWithBytesNoCopy` requires for both the pointer and the length
@@ -3670,7 +3692,8 @@ pub static UNIFORM_BUFFER_REUSES: Counter = Counter::new("omega.metal.uniforms.r
 /// to read the SAME number on both arms of the bake-off: `op_count` every
 /// step with the feature off, `op_count` once (at the plan-cache miss that
 /// builds the arena) and 0 on every following plan-cache-hit step with it on.
-pub static OUTPUT_BUFFER_ALLOCATIONS: Counter = Counter::new("omega.metal.output_buffer.allocations");
+pub static OUTPUT_BUFFER_ALLOCATIONS: Counter =
+    Counter::new("omega.metal.output_buffer.allocations");
 
 /// CARD 6.5's census counter: every in-place write `encode_op` makes into a
 /// `PlanUniforms` buffer, bypassing `upload_uniforms`/`UNIFORM_BUFFERS`
@@ -3773,7 +3796,10 @@ fn reset_uniform_cache_for_test() {
     UNIFORM_CACHE_CLOCK.with(|clock| *clock.borrow_mut() = 0);
 }
 
-fn buffer_for(device_buffers: &BTreeMap<NodeId, DeviceBuffer>, node: NodeId) -> Result<DeviceBuffer, MetalError> {
+fn buffer_for(
+    device_buffers: &BTreeMap<NodeId, DeviceBuffer>,
+    node: NodeId,
+) -> Result<DeviceBuffer, MetalError> {
     device_buffers.get(&node).cloned().ok_or_else(|| {
         TensorError::NotLowerable {
             node,
@@ -3980,7 +4006,11 @@ fn build_buffer_arena(
             Some(reused) => reused,
             None => {
                 let index = slots.len();
-                slots.push(allocate_buffer(device, bound_output_len(bound), bound.dtype)?);
+                slots.push(allocate_buffer(
+                    device,
+                    bound_output_len(bound),
+                    bound.dtype,
+                )?);
                 slot_bytes.push(byte_length);
                 index
             }
@@ -4424,7 +4454,9 @@ fn finish(
             // read, never assumed to be `0`, or a placed node's read-back
             // would silently return its buffer's UNRELATED leading bytes
             // instead of the bytes this node actually wrote.
-            Some((buffer, offset)) => read_back(buffer, *offset, element_count(&shape), *node, dtype)?,
+            Some((buffer, offset)) => {
+                read_back(buffer, *offset, element_count(&shape), *node, dtype)?
+            }
             None => Vec::new(),
         };
         #[cfg(feature = "instrument")]
@@ -4622,7 +4654,9 @@ mod uniform_cache_tests {
     //! skip (rather than fail) on a headless host with no GPU -- the same
     //! convention every other Metal-gated test in this module follows.
 
-    use super::{device_and_queue, reset_uniform_cache_for_test, uniform_cache_len, upload_uniforms};
+    use super::{
+        device_and_queue, reset_uniform_cache_for_test, uniform_cache_len, upload_uniforms,
+    };
     use crate::sized::UNIFORM_CACHE_ENTRIES;
 
     /// A distinct, non-empty uniform blob per `index` -- `upload_uniforms`
@@ -4740,7 +4774,9 @@ mod arena_tests {
     use alloc::vec;
 
     use objc2_metal::MTLDevice;
-    use proxima_tensor::{DType, Extent, IndexMap, NodeId, Op, QuantizedBlock, ScalarOp, append, cpu, projection};
+    use proxima_tensor::{
+        DType, Extent, IndexMap, NodeId, Op, QuantizedBlock, ScalarOp, append, cpu, projection,
+    };
 
     use super::{
         arena_placement, device_and_queue, execute_plan, execute_plan_with_placements, plan,

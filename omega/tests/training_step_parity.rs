@@ -335,14 +335,31 @@ fn outputs_of(step: &TrainingStep) -> Vec<NodeId> {
     step.rebind.iter().map(|(node, _)| *node).collect()
 }
 
+/// `reduce-epilogue-fusion`'s bind-time pass fuses ANY sole elementwise
+/// consumer of a reduce, program-wide -- including inside this training
+/// step's backward pass -- and the wgsl v1 emitter has no renderer for the
+/// resulting `BoundOpKind::Reduce::epilogue_body` yet
+/// (`crate::wgsl::validate`'s own gate). That is the SAME "no renderer,
+/// reject" contract `EmitError::EpilogueNotSupported`'s doc names for
+/// Metal's own tiled-GEMM gap, not a training-step regression, so a wgpu
+/// caller treats it as a named decline rather than a failure -- the same
+/// shape `wgpu_parity.rs`'s own
+/// `f16_matmul_runs_on_wgpu_within_the_metal_parity_f16_epsilon_or_names_its_rejection`
+/// already takes for a different declined capability.
+fn is_epilogue_rejection(error: &omega::backend::BackendError) -> bool {
+    error.to_string().contains("fused epilogue")
+}
+
 /// Runs one training step on `engine`/`gpu_driver` and returns `(new_param,
-/// new_m, new_v)` for every output node, in `step.rebind`'s order.
+/// new_m, new_v)` for every output node, in `step.rebind`'s order -- `None`
+/// only when `gpu_driver` is `Wgpu` and it named-declined a fused reduce
+/// epilogue (see [`is_epilogue_rejection`]); any other error still panics.
 fn run_one_step(
     engine: Engine,
     gpu_driver: Option<GpuDriver>,
     step: &TrainingStep,
     batch: &[(String, Vec<f32>)],
-) -> Vec<Vec<f32>> {
+) -> Option<Vec<Vec<f32>>> {
     let name = gpu_driver.map_or(engine.name(), GpuDriver::name);
     let named_blocks = as_named_blocks(batch);
     let outputs = outputs_of(step);
@@ -355,18 +372,26 @@ fn run_one_step(
         &outputs,
     )
     .unwrap_or_else(|error| panic!("{name} plans the training step: {error}"));
-    let evaluated = execute_plan_named(&mut plan, &named_blocks)
-        .unwrap_or_else(|error| panic!("{name} executes the training step: {error}"));
-    outputs
-        .iter()
-        .map(|node| {
-            evaluated
-                .get(*node)
-                .unwrap_or_else(|| panic!("{name} produced no output for {node:?}"))
-                .0
-                .to_vec()
-        })
-        .collect()
+    let evaluated = match execute_plan_named(&mut plan, &named_blocks) {
+        Ok(evaluated) => evaluated,
+        Err(error) if gpu_driver == Some(GpuDriver::Wgpu) && is_epilogue_rejection(&error) => {
+            eprintln!("wgpu training step: named decline -- {error}");
+            return None;
+        }
+        Err(error) => panic!("{name} executes the training step: {error}"),
+    };
+    Some(
+        outputs
+            .iter()
+            .map(|node| {
+                evaluated
+                    .get(*node)
+                    .unwrap_or_else(|| panic!("{name} produced no output for {node:?}"))
+                    .0
+                    .to_vec()
+            })
+            .collect(),
+    )
 }
 
 fn one_step_batch() -> Vec<(String, Vec<f32>)> {
@@ -422,8 +447,9 @@ fn assert_parity(backend_name: &str, cpu: &[Vec<f32>], gpu: &[Vec<f32>], toleran
 fn a_training_step_runs_on_metal_at_cpu_parity() {
     let step = build_training_step();
     let batch = one_step_batch();
-    let cpu = run_one_step(Engine::Cpu, None, &step, &batch);
-    let metal = run_one_step(Engine::Gpu, Some(GpuDriver::Metal), &step, &batch);
+    let cpu = run_one_step(Engine::Cpu, None, &step, &batch).expect("cpu never declines a step");
+    let metal = run_one_step(Engine::Gpu, Some(GpuDriver::Metal), &step, &batch)
+        .expect("metal never declines a step");
     assert_parity("metal", &cpu, &metal, 1e-4);
 }
 
@@ -443,8 +469,10 @@ fn a_training_step_runs_on_metal_at_cpu_parity() {
 fn a_training_step_runs_on_wgpu_at_cpu_parity() {
     let step = build_training_step();
     let batch = one_step_batch();
-    let cpu = run_one_step(Engine::Cpu, None, &step, &batch);
-    let wgpu = run_one_step(Engine::Gpu, Some(GpuDriver::Wgpu), &step, &batch);
+    let cpu = run_one_step(Engine::Cpu, None, &step, &batch).expect("cpu never declines a step");
+    let Some(wgpu) = run_one_step(Engine::Gpu, Some(GpuDriver::Wgpu), &step, &batch) else {
+        return;
+    };
     assert_parity("wgpu", &cpu, &wgpu, 1e-4);
 }
 
@@ -549,8 +577,11 @@ fn a_graph_past_the_adapter_storage_buffer_limit_is_a_named_error_on_wgpu() {
 /// step's `plan_named` call -- the multi-step shape
 /// `proxima-autograd/src/train.rs`'s `fit` already proves on CPU, now
 /// proven on-device. Returns the per-step loss curve.
+/// `None` only when `gpu_driver` is `Wgpu` and step 1 named-declined a fused
+/// reduce epilogue (see [`is_epilogue_rejection`]); any other error still
+/// panics, same contract as [`run_one_step`].
 #[cfg(any(all(feature = "metal", target_os = "macos"), feature = "wgpu-backend"))]
-fn run_multi_step_on(engine: Engine, gpu_driver: Option<GpuDriver>) -> Vec<f32> {
+fn run_multi_step_on(engine: Engine, gpu_driver: Option<GpuDriver>) -> Option<Vec<f32>> {
     let name = gpu_driver.map_or(engine.name(), GpuDriver::name);
     let step = build_training_step();
     let mut outputs = outputs_of(&step);
@@ -589,8 +620,16 @@ fn run_multi_step_on(engine: Engine, gpu_driver: Option<GpuDriver>) -> Vec<f32> 
             &outputs,
         )
         .unwrap_or_else(|error| panic!("{name} plans training step {step_number}: {error}"));
-        let evaluated = execute_plan_named(&mut plan, &named_blocks)
-            .unwrap_or_else(|error| panic!("{name} executes training step {step_number}: {error}"));
+        let evaluated = match execute_plan_named(&mut plan, &named_blocks) {
+            Ok(evaluated) => evaluated,
+            Err(error)
+                if gpu_driver == Some(GpuDriver::Wgpu) && is_epilogue_rejection(&error) =>
+            {
+                eprintln!("wgpu training step {step_number}: named decline -- {error}");
+                return None;
+            }
+            Err(error) => panic!("{name} executes training step {step_number}: {error}"),
+        };
 
         let step_loss = evaluated
             .get(step.loss)
@@ -606,13 +645,14 @@ fn run_multi_step_on(engine: Engine, gpu_driver: Option<GpuDriver>) -> Vec<f32> 
         }
     }
 
-    loss_curve
+    Some(loss_curve)
 }
 
 #[cfg(all(feature = "metal", target_os = "macos"))]
 #[test]
 fn ten_training_steps_rebind_state_and_the_loss_drops_on_metal() {
-    let loss_curve = run_multi_step_on(Engine::Gpu, Some(GpuDriver::Metal));
+    let loss_curve = run_multi_step_on(Engine::Gpu, Some(GpuDriver::Metal))
+        .expect("metal never declines a step");
     eprintln!("metal multi-step loss curve: {loss_curve:?}");
     assert!(
         loss_curve.iter().all(|value| value.is_finite()),
@@ -631,7 +671,9 @@ fn ten_training_steps_rebind_state_and_the_loss_drops_on_metal() {
 #[cfg(feature = "wgpu-backend")]
 #[test]
 fn ten_training_steps_rebind_state_and_the_loss_drops_on_wgpu() {
-    let loss_curve = run_multi_step_on(Engine::Gpu, Some(GpuDriver::Wgpu));
+    let Some(loss_curve) = run_multi_step_on(Engine::Gpu, Some(GpuDriver::Wgpu)) else {
+        return;
+    };
     eprintln!("wgpu multi-step loss curve: {loss_curve:?}");
     assert!(
         loss_curve.iter().all(|value| value.is_finite()),

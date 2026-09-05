@@ -109,6 +109,15 @@ cached-attention-streaming = [
     "proxima-tensor/cached-attention-streaming",
     "omega?/cached-attention-streaming",
 ]
+# Default-off passthrough to `proxima-tensor/reduce-epilogue-fusion` and
+# `omega/reduce-epilogue-fusion` -- same shape as `cached-attention-streaming`
+# above, kept individually selectable so this crate's own harness can
+# exercise the fused-epilogue reduce on CPU (`proxima-tensor` alone) without
+# requiring `metal`.
+reduce-epilogue-fusion = [
+    "proxima-tensor/reduce-epilogue-fusion",
+    "omega?/reduce-epilogue-fusion",
+]
 # passthrough to `omega/metal-tiled-gemm` (default-off there, ROW `eeadc2d`)
 # so this crate's own op-timed profiling tests can compare the row-blocked
 # and tiled-GEMM paths' operand-byte traffic without a second harness.

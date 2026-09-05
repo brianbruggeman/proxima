@@ -19,6 +19,15 @@ default = ["std", "metal", "cpu"]
 std = ["alloc", "thiserror/std", "proxima-tensor/std"]
 alloc = []
 cached-attention-streaming = ["proxima-tensor/cached-attention-streaming"]
+# Default-off passthrough to `proxima-tensor/reduce-epilogue-fusion` (the
+# `BoundOpKind::Reduce::epilogue_body`/`epilogue_operands` bind-time fusion
+# pass) -- same shape as `cached-attention-streaming` above. `crate::msl`'s
+# reduce renderers read `epilogue_body`/`epilogue_operands` unconditionally
+# (those fields exist on `BoundOpKind::Reduce` regardless of this feature),
+# so this flag's only effect is whether `proxima-tensor::bind` ever produces
+# a non-identity one; `wgsl`/`cuda` reject a non-identity epilogue with
+# `EmitError::UnsupportedOpKind`/`CudaUnsupportedOpKind` until they render it.
+reduce-epilogue-fusion = ["proxima-tensor/reduce-epilogue-fusion"]
 # Backends are MIX-AND-MATCH, the same shape `runtime-prime` and
 # `runtime-tokio` take at the workspace root (`Cargo.toml`): both may be
 # compiled in at once and the choice made at runtime, rather than one
