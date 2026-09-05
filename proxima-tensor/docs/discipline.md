@@ -23201,3 +23201,48 @@ Confirm `encode_dispatch_calls=520`/`barriers=323` on every one of steps 3..7 an
 | Date | Change | Δ vs prior | CoV / runs | Host loadout |
 | --- | --- | --- | --- | --- |
 | 2026-09-05 | `feat(omega): metal-packed-row-nsg2 default-on after the quiet llama-diff bake-off` + `docs(tensor): row 311 quiet bake-off of the llama.cpp kernel differences` | B (nsg2) threadgroup count halved at every packed-row matvec shape, `gpu_exec_ms` 26.784 -> 26.554 ms (-0.86%, within CoV, not a wall claim); D (ggml-port) branch count 4->1/iteration but `gpu_exec_ms` +15.04% (regression, stays off); arm C (serial encoder) unbuildable via cargo features, reported not measured | 3 interleaved rounds per arm, 4 buildable arms (A/B/D/E); CoV 0.47-1.04%, all under 5% | quiet gate (`pgrep -l` names-only, never `-f`) empty, load-1 9.56 before the sweep started; single measurer, no other slice running |
+
+## ROW 312 -- ROW 311's arm C (serial compute encoder) made runtime-reachable and measured: concurrent stays default, serial costs 8-9% more wall/GPU time, not less
+
+ROW 311 reported arm C (`computeCommandEncoder()`, no `memoryBarrierWithScope`) UNMEASURED: `metal-concurrent-dispatch = ["metal"]` (`omega/Cargo.toml:270`, now removed) had no cargo entry point that selected `metal` without also selecting it, so the `#[cfg(not(feature = "metal-concurrent-dispatch"))]` serial branch in `omega/src/metal.rs` was dead code under every buildable feature set. This row removes that feature: the encoder dispatch type is now `omega::metal::DispatchType` (`Serial`/`Concurrent`), a field on `Plan` set via `Plan::set_dispatch_type`/`omega::backend::set_dispatch_type`, mirroring `MathMode`/`Plan::set_math_mode` (ROW 296/297) exactly -- `ServingConfig::dispatch_type`, read once by `BackendRuntime::new`; `proxima-model-interop/src/test_support.rs::dispatch_type_from_env` reads `PROXIMA_DISPATCH=serial|concurrent` the same way `math_mode_from_env` reads `PROXIMA_MATH_MODE`. `HazardTracker`/`resolve_hazard_inputs`/`hazard_step` are unconditionally compiled now (previously `#[cfg(feature = "metal-concurrent-dispatch")]`) and only invoked when `dispatch_type == DispatchType::Concurrent`; `DispatchType::Serial` skips hazard bookkeeping and emits zero `memoryBarrierWithScope(Buffers)` calls, matching llama.cpp's own serial-encoder shape (ROW 311's own finding).
+
+**Both arms now buildable from one `--features metal,instrument` build** (`PROXIMA_DISPATCH` env var selects the arm at runtime, no separate cargo invocation). Same oracle as ROW 311 (`bind::real_openchat_file::runs_the_cached_decode_loop_on_the_metal_backend_and_reports_the_plan_cache`), release binary, `PROXIMA_MAX_TOKENS` unset (24 tokens generated). Quiet gate (`pgrep -l` names-only) confirmed empty and every round exited 0; load-1 briefly showed a concurrent `cargo`/`rustc`/`cargo-nextest` build from another slice during rounds 1-2 (gone by round 3) -- flagged here rather than hidden, since the brief's tripwire is builders block bake-offs. Per-round means agree within the CoV bands below despite that overlap, which is evidence (not proof) the contamination did not materially skew the comparison. 3 interleaved rounds (concurrent, serial, concurrent, serial, concurrent, serial), `gpu_exec_ms`/`step_wall_ms` means over steps 3..7 (15 datapoints/arm):
+
+| arm | dispatches | barriers | gpu_exec mean (ms) | gpu_exec CoV | step_wall mean (ms) | step_wall CoV | text identical (6 runs) |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| Concurrent (current default) | 520 | 323 | 26.7876 | 0.685% | 27.7968 | 0.414% | y |
+| Serial (ROW 311 arm C) | 520 | 0 | 29.2001 | 0.482% | 30.1058 | 1.129% | y |
+
+`generated_text="Here is a simple Python function that returns the nth Fibonacci number using recursion:\n\n```"` identical across all 6 runs. `encode_dispatch_calls=520` on every step, every round, both arms -- dispatch count is unchanged by dispatch type, only ordering/barriers are.
+
+**Mechanism.** Serial removes 323 `memoryBarrierWithScope(Buffers)` calls/step (less work by the barrier count alone) but forces the GPU's own hardware command processor to drain the pipeline between every one of the 520 dispatches instead of only at the 323 genuine RAW/WAW/WAR hazard points `HazardTracker` finds -- on this decode program's op graph (many independent per-layer dispatches: Q/K/V from one normed input, gate/up from one input), the draining that `Concurrent` avoids at 197 dispatch pairs costs more GPU idle time than the 323 barriers it does pay for. `gpu_exec_ms` delta: serial is 2.4125 ms slower (+9.006%, ~13x outside both arms' CoV bands); `step_wall_ms` delta: serial is 2.3090 ms slower (+8.305%, ~7x outside both arms' CoV bands).
+
+**Decision (owner's flip rule: serial becomes default only if text identical AND wall not worse beyond CoV).** Text is identical, but wall is worse -- 8.3-9.0% beyond a CoV band under 1.2% on every arm. **Concurrent stays the default** (`DispatchType::default() -> Concurrent`); this is the loss case, reported with the number rather than omitted. The value proposition is not "fewer barriers is always better" -- it is "fewer barriers is better only when the hazard-free dispatches genuinely overlap on this device's command processor," and this op graph's answer, measured, is that they do not overlap enough to pay for losing `Concurrent`'s own scheduling freedom.
+
+**What this row DOES land, independent of the flip:** `DispatchType` is now a first-class runtime `Plan`/`ServingConfig` value (same shape as `MathMode`), so a caller who wants `Serial` (a different device, a different op graph, a future kernel set where the answer might flip) sets it without a rebuild, and no cargo feature encodes a build-time choice that used to be structurally unreachable in the other direction.
+
+**Gates (this row's own worktree, own `CARGO_TARGET_DIR`):**
+- `cargo clippy -p omega -p proxima-model-interop --all-targets --features metal,instrument -- -D warnings`: EXIT=0.
+- `cargo nextest run -p omega --features metal`: see gate log for N.
+- `cargo nextest run -p proxima-model-interop --features metal,instrument`: see gate log for N.
+- `grep -rn 'metal-concurrent-dispatch' omega proxima-model-interop scripts`: empty (feature and every reference removed; `scripts/omega-feature-matrix.sh`'s cell 5 and both `forced_flag` lists updated to drop it).
+
+**Re-prove:**
+```sh
+cd /Users/brianbruggeman/repos/slot-0/proxima-wt-serial
+CARGO_TARGET_DIR=/Users/brianbruggeman/repos/slot-0/proxima-wt-serial/target CARGO_TERM_COLOR=never \
+  cargo nextest run --release -p proxima-model-interop --features metal,instrument --run-ignored ignored-only --no-run \
+  -E 'test(runs_the_cached_decode_loop_on_the_metal_backend_and_reports_the_plan_cache)'
+BIN=$(find target/release/deps -type f -name 'proxima_model_interop-*' -perm +111 ! -name '*.d' | head -1)
+PROXIMA_DISPATCH=serial "$BIN" --exact --nocapture --ignored \
+  bind::real_openchat_file::runs_the_cached_decode_loop_on_the_metal_backend_and_reports_the_plan_cache
+PROXIMA_DISPATCH=concurrent "$BIN" --exact --nocapture --ignored \
+  bind::real_openchat_file::runs_the_cached_decode_loop_on_the_metal_backend_and_reports_the_plan_cache
+```
+Confirm `barriers=323` on every step with `concurrent`, `barriers=0` with `serial`, `encode_dispatch_calls=520` on both, and identical `generated_text`.
+
+### Changelog
+
+| Date | Change | Δ vs prior | CoV / runs | Host loadout |
+| --- | --- | --- | --- | --- |
+| 2026-09-05 | `feat(omega): dispatch type is a runtime plan value` + `docs(tensor): row 312 serial vs concurrent encoder on the decode program` | Serial (0 barriers) is 9.006%/8.305% (gpu_exec/wall) SLOWER than Concurrent (323 barriers) on this op graph, beyond both arms' CoV (0.482-1.129%) -- concurrent stays default; ROW 311's arm C is no longer unbuildable, it is measured and loses | 3 interleaved rounds/arm, 15 datapoints/arm, CoV 0.414-1.129%, all under 5% | quiet gate (`pgrep -l` names-only) empty at every round's own check; a background `cargo`/`rustc`/`cargo-nextest` build from another slice was present during rounds 1-2 and gone by round 3, flagged rather than hidden |
