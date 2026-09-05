@@ -208,6 +208,60 @@ attention `gpu_exec_ms` worse than 3.6 + 9.9% CoV kills the `Loop` attention car
 clear 5% CoV on a quiet box retracts the ceiling range and re-prices every column above** (it has not
 cleared it yet: 35 of 36 measured cells exceed the 5% trust line).
 
+## D.4a addendum — repriced at the quiet ceiling (2026-09-05, `discipline.md` ROW 302)
+
+D0's own kill criterion above has now fired the other way: `proxima-tensor/docs/discipline.md` ROW
+302 clears 5% CoV on every WIDE-grid cell across two quiet runs (0.44-0.81% CoV), retiring the loud
+237.79-264.29 GB/s range in favour of **381.24 GB/s** (worst quiet WIDE cell, `private_blit`, 4 GB)
+to **381.88 GB/s** (best, same shape). Every ratio above computed against the loud range is
+recomputed here against the quiet one; nothing above is edited in place, this addendum supersedes it.
+
+- **Naive full budget.** 3.5 ms x 381.24 GB/s = **1.334 GB/token** (worst quiet cell) to 3.5 x
+  381.88 = 1.336 GB/token (best) — previously priced at 3.5 x 237.79 = 0.832 GB/token to 3.5 x
+  264.29 = 0.925 GB/token against the loud range. This is the naive figure (all 3.5 ms to the matvec
+  stream, host and non-matvec residuals ignored); the B_w-solved figures below carry the real
+  requirement.
+- **The "933 GB/s needed" ratio (line 160, A=1.36).** 932.8 GB/s was "3.53-3.92x above the measured
+  237.79-264.29 GB/s ceiling"; against the quiet ceiling, 932.8 / 381.24 = **2.446x**, 932.8 /
+  381.88 = 2.443x — **2.44-2.45x above the quiet ceiling**, not 3.53-3.92x.
+- **The A=1.49 figure (line 162).** 757.1 GB/s was "2.86-3.18x above the measured ceiling"; against
+  the quiet ceiling, 757.1 / 381.24 = 1.986x, 757.1 / 381.88 = 1.983x — **1.98-1.99x above the quiet
+  ceiling**.
+- **The ASSUMED-A=2.18 figure (line 176).** 379.5 GB/s was "1.44-1.60x above the measured ceiling";
+  against the quiet ceiling, 379.5 / 381.24 = 0.9954x, 379.5 / 381.88 = 0.9938x — **within 0.5-0.6%
+  of the quiet ceiling, not above it**. This bandwidth requirement (the ASSUMED-A branch only, not
+  the MEASURED-k' branch above it, which stays far above every ceiling measured) is now inside the
+  device's own quiet streaming envelope.
+
+**Reachable floor, re-derived term by term, each term naming the lever that attacks it (no lever
+combined, no adjective, every number cites a ROW):**
+
+```
+reachable_floor_ms = bytes/ceiling + host_residual + non_matvec_residual
+                    = 10.92         + 1.30           + 11.4
+                    = 23.62 ms/token
+```
+
+- **bytes/ceiling = 10.92 ms** — ROW 302's own floor arithmetic at the best solo GPU cells (381.77
+  GB/s run 1, 381.88 GB/s run 2: floor_ms 10.920/10.917). Attacked by closing the matvec kernel to
+  the device's own measured streaming ceiling — the D1/D1b/D1c/D1d cards (packed-row addressing,
+  s-fold, per-codec pair-dot bodies), already 65.7-73.0% there per the in-buffer figure (`discipline.md`
+  ROW 296, 247.26 GB/s of 381.24).
+- **host_residual = 1.30 ms** — `dispatch-census.md:27` / ROW 288's own steady-state decomposition
+  (`step_wall_ms` 28.82 = `gpu_exec_ms` 27.52 + host 1.30). Attacked by the host-side dispatch/session
+  cards (B2c one command-buffer owner, B3 thread-local collapse, H0 the `KernelKey` POD struct).
+- **non_matvec_residual = 11.4 ms** — measured today as the gap between the full decode-program wall
+  clock and what the matvec stream alone would cost at its own already-achieved in-buffer rate:
+  28.3 ms (`discipline.md` ROW 298 A / ROW 300 M-R, 28.25-28.34 mean) minus 4.169 GB / 0.247 GB/ms
+  (ROW 296's Relaxed in-buffer peak, 247.26 GB/s) = 28.3 - 16.9 = **11.4 ms**. Attacked by the
+  dispatch-fusion cards (A5 epilogue 616->520 MEASURED, A6 prologue 520->264 MEASURED) and the
+  attention-arm byte-floor card (A0-attn, ~2.5 ms above its own floor per §D.1).
+
+23.62 ms/token is still **1.35x slower than llama.cpp's 17.53** (`discipline.md` ROW 298 D) — the
+11.4 ms non-matvec/host residual, not the matvec stream, is now the larger of the two gaps to close
+against llama, and dispatch fusion (already landed 616->520, ROW 294) plus the attention-arm fix are
+what the ordering in §E below prices next.
+
 ---
 
 # A. Algebra — `Loop`, a declared `Domain`, rules as pipes
@@ -471,6 +525,13 @@ pub enum SlotKind { Weight, KeyValue, Activation, Uniform, Output }
 | `Budget` (AB) | a stop policy. `AcceptedRun.halt` states why a run ended; the iteration bound is the caller's `while`. Nothing a caller could not already write. |
 
 ## B.4 Placement: two engines, a driver that is a property of one of them, a rule that is a pipe
+
+**KILLED 2026-09-05 by ROW 302** (`proxima-tensor/docs/discipline.md`): concurrent CPU+GPU streaming
+measured 291.85 GB/s, GPU-alone measured 381.88 GB/s — concurrent is 23.6% below solo-GPU, not
+above it, and card D0c's own gate ("this card kills or admits §B.4's placement work outright")
+answers NO. The mixed-engine placement work below does not land on this host; the section is left
+as written because the algebra (`Engine::{Cpu, Gpu}`, `ScheduledOp.engine`, `BandwidthTable`) is
+still correct, it simply has no bandwidth-bound placement case left to serve.
 
 <!-- r2-fix (owner, verbatim): "omega should support cpu, gpu and _mixed_ backends" and
      "how is there any more than 2 backends?" — `Backend` collapses to `Engine::{Cpu, Gpu}`. -->
@@ -786,7 +847,7 @@ card except the one that is also a *correctness* fix (H0, the wrong-kernel-serve
 |---|---|---|---|
 | **D0a** | device streaming ceiling, **quiet-box repeat** — branch `perf/device-streaming-ceiling`, harness `omega/tests/device_streaming_ceiling.rs` exists (a8d9c06); run it with `pgrep -c 'cargo|rustc|nextest' == 0` asserted in the log | the best cell (`nocopy_resident`, wide, 4 GB) re-measured under 5% CoV | **X**: GB/s + CoV + N. 35 of 36 landed cells exceed the 5% line (`discipline.md:21208-21252`); if the quiet box still cannot clear it, the **range 237.79-264.29 stands as a range** and §D.4's ceiling columns stay a range, not a point |
 | **D0b** | ceiling at the **Q4_K superblock stride** — add one arm reading 144 B / 256 elt strided (`msl.rs:439`, `:444`) beside the shipped `float4`/`uint4` arms | GB/s for the access shape decode actually uses | **X**; if it is materially below the `float4` arm, the matvec shortfall is partly *access shape*, and D1b's arms are re-ordered on it |
-| **D0c** | **hybrid ceiling** — branch `test/cpu-gpu-streaming-ceiling` (today at 5d801d7, no hybrid arm yet): add a CPU-only streaming arm (`PROXIMA_MATMUL_WORKERS` threads over the same mapped GGUF) and a **concurrent CPU+GPU** arm | aggregate GB/s of the concurrent arm vs the GPU-alone ceiling | **X**. **This card kills or admits §B.4's placement work outright**: if concurrent < GPU-alone x 1.05, both engines are contending for one memory controller, hybrid placement is zero-sum for bandwidth-bound ops, and the only surviving placement case is compute-bound or codec-mismatched ops |
+| **D0c** | **hybrid ceiling** — branch `test/cpu-gpu-streaming-ceiling` (today at 5d801d7, no hybrid arm yet): add a CPU-only streaming arm (`PROXIMA_MATMUL_WORKERS` threads over the same mapped GGUF) and a **concurrent CPU+GPU** arm | aggregate GB/s of the concurrent arm vs the GPU-alone ceiling | **X**. **This card kills or admits §B.4's placement work outright**: if concurrent < GPU-alone x 1.05, both engines are contending for one memory controller, hybrid placement is zero-sum for bandwidth-bound ops, and the only surviving placement case is compute-bound or codec-mismatched ops. **KILLED 2026-09-05 by ROW 302: 291.85 GB/s concurrent < 381.88 GB/s GPU-alone (23.6% below, not the >=1.05x admission threshold) — hybrid placement does not clear this card** |
 | **D1** | matvec roofline ladder — branch `perf/matvec-roofline-ladder` (aa99186 hoists packed-row addressing out of the block loop; 5053e59 loads Q4_K/Q5_K weight words as native `u16`) | achieved GB/s per landed change vs D0's ceiling, at 1/2/4/8 rows per activation | **X**: GB/s per arm + CoV; a mechanism named for any arm below 0.85x the ceiling (a measurement without a mechanism is rung 1, not a result) |
 | **D1b** | packed-row addressing arms — branch `perf/packed-row-addressing` (a3eef89 adds a Q6_K pair-dot body on top of D1's two commits) | ns/element and GB/s per addressing arm | **X**: which arm, if any, moves 173.6 toward the ceiling; **M** unchanged on the production program |
 | **D1c** | **s-fold reshaped into the ONE packed-row body** — branch `perf/packed-row-multi-activation` today adds `push_packed_row_multi_activation_body` as a SECOND body behind `metal-packed-row-multi-activation` (`omega/Cargo.toml:315-330`). Fold it into `push_packed_row_blocked_body` with `s = 1` as the degenerate case; the feature disappears, `sized::PACKED_ROW_ACTIVATION_GROUP` (`omega/omega-runtime.toml:138-158`, group = 8) stays as the P12 build const | one body, no flag; `grep -c 'metal-packed-row-multi-activation' omega/` == 0 | **B** byte-identical at s = 1 (the degenerate case must reproduce today's kernel exactly), **P** at s = 4, **M**. Rationale is this design's own RISC lint: two bodies for one traversal is the `Elementwise`/`Reduce` split one level down |
@@ -806,7 +867,7 @@ card except the one that is also a *correctness* fix (H0, the wrong-kernel-serve
 | **B4** | `Step` FSM + `Session` pipe in interop (after T1) | the four typestates | **A** with N = 128 asserted, **T** |
 | **B5** | `BarrierPoint` with `resources` + `cause`; `memoryBarrierWithResources` replaces scope-wide barriers | per-point barriers | **P**, **M** (expect a gain; CoV-gated), barrier count logged |
 | **B6a** | `Backend`(7) -> `Engine::{Cpu, Gpu}` + `GpuDriver::{Metal, Wgpu}` resolved once by `for_target()`; `Vulkan`/`Cuda`/`Npu`/`Ane` deleted (`backend.rs:265-375` returns `NotImplemented` for all four, `lowering-audit.md:51`) | 7 variants -> 2 + 2 | **B** byte-identical; `grep -c 'BackendError::NotImplemented' omega/src/backend.rs` == 0 |
-| **B6b** | placement: `ScheduledOp.engine` field + identity composition | schedules carry an engine; GPU-only path byte-identical | **B**; **only if D0c admitted the work** |
+| **B6b** | placement: `ScheduledOp.engine` field + identity composition | schedules carry an engine; GPU-only path byte-identical | **B**; **only if D0c admitted the work**. **KILLED 2026-09-05 by ROW 302 (D0c did not admit)** |
 | **B7** | placement rule pipes + `BandwidthTable`; layer-split experiment (last N layers on `Engine::Cpu`) | ms/token and text for N in {2, 4, 8} | **T** text-identical **and** **X** steady-state ms/token vs GPU-only; a regression halts placement |
 | **B8** | cross-engine `Hazard::CrossEngine` + the `waitUntilCompleted` join, CPU sink on `matmul_worker_count()` threads | one barrier list across two engines | **P**, **M**; a control with the join removed **must** produce wrong logits |
 | **A4** | `ShareAxis` + cooperative staging **in one card** — `msl.rs:2586` already implements rescaled online softmax with threadgroup staging; landing a generic emitter first regresses the 3.0-3.6 ms arm (P14, the incumbent wins) | fused attention through `Loop` | `assert_close 1e-6` + EM-at-64 >= 0.99, **M** against attn CoV 9.9% |
