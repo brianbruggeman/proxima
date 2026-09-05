@@ -701,41 +701,24 @@ fn build_single_range_program(
 
 /// The KV extent [`run_decode_loop_placed_kv`] binds as this step's
 /// `Extent::Symbolic(1)` (the KV `Op::Input` leaves' shape, and half the
-/// Metal plan-cache key alongside `new_count`) -- `merged_len` unchanged
-/// with `kv-capacity-bucket` off, so the plan-cache key is untouched from
-/// its pre-feature shape; with it on, `merged_len` rounded up to
-/// [`crate::sized::KV_BUCKET_TOKENS`] and capped at `capacity`
-/// (this call's own per-layer buffer row count, never exceeded regardless
-/// of rounding). `causal_mask_merged`'s existing `key_index >
-/// query_absolute` comparison already masks every row in
-/// `[merged_len, extent)` as "future" for every query this call issues
-/// (`proxima-tensor`'s `spec.rs`'s `cpu_mask_zero_ulp` test proves the
-/// mechanism 0-ULP-safe for any bucket size), so no other call site needs
-/// to know which arm is compiled in. This is the driver's own plan-cache
-/// rounding policy (this crate owns the Metal decode loop that consumes
-/// it), not a tensor-execution concern -- see
-/// [`crate::sized`]'s own doc.
-#[cfg(all(
-    feature = "metal-output-placement",
-    feature = "kv-capacity-bucket",
-    target_os = "macos"
-))]
-fn kv_extent(merged_len: usize, capacity: usize) -> usize {
+/// Metal plan-cache key alongside `new_count`) -- `merged_len` rounded up
+/// to `bucket_tokens` (`ServingConfig::kv_bucket_tokens`) and capped at
+/// `capacity` (this call's own per-layer buffer row count, never exceeded
+/// regardless of rounding). `bucket_tokens == 1` reduces to `merged_len`
+/// unchanged: `div_ceil(1) * 1` is the identity, so the plan-cache key is
+/// untouched from its pre-bucketing shape whenever a caller disables
+/// bucketing. `causal_mask_merged`'s existing `key_index > query_absolute`
+/// comparison already masks every row in `[merged_len, extent)` as
+/// "future" for every query this call issues (`proxima-tensor`'s
+/// `spec.rs`'s `cpu_mask_zero_ulp` test proves the mechanism 0-ULP-safe
+/// for any bucket size), so no other call site needs to know which bucket
+/// size is configured.
+#[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
+fn kv_extent(merged_len: usize, capacity: usize, bucket_tokens: usize) -> usize {
     merged_len
-        .div_ceil(crate::sized::KV_BUCKET_TOKENS)
-        .saturating_mul(crate::sized::KV_BUCKET_TOKENS)
+        .div_ceil(bucket_tokens)
+        .saturating_mul(bucket_tokens)
         .min(capacity)
-}
-
-/// [`kv_extent`]'s feature-off twin -- the plan-cache key stays
-/// `merged_len` exactly, unchanged from the pre-`kv-capacity-bucket` shape.
-#[cfg(all(
-    feature = "metal-output-placement",
-    not(feature = "kv-capacity-bucket"),
-    target_os = "macos"
-))]
-fn kv_extent(merged_len: usize, _capacity: usize) -> usize {
-    merged_len
 }
 
 /// [`SsmLayerCache`]'s own fixed sizes, all derived from
@@ -2388,9 +2371,9 @@ impl<'file> LoadedModel<'file> {
                 // uploads them.
                 #[cfg(feature = "instrument")]
                 let named_blocks_kv_started = read_ticks();
-                // `kv-capacity-bucket` off: `kv_bound_extent == merged_len`,
-                // unchanged from this arm's pre-feature shape. On: rounded
-                // up to `sized::KV_BUCKET_TOKENS` and capped at
+                // `serving_config.kv_bucket_tokens == 1`: `kv_bound_extent
+                // == merged_len`, unchanged from the pre-bucketing shape.
+                // Otherwise rounded up to that many tokens and capped at
                 // `positions_needed` (this call's own per-layer buffer row
                 // count) -- see `kv_extent`'s own doc. This is BOTH the
                 // scratch named-block length below (the strict
@@ -2398,7 +2381,8 @@ impl<'file> LoadedModel<'file> {
                 // SAME extent the KV `Op::Input` leaves bind to) and
                 // `symbols[1]` a few lines down, so the two can never
                 // disagree.
-                let kv_bound_extent = kv_extent(merged_len, positions_needed);
+                let kv_bound_extent =
+                    kv_extent(merged_len, positions_needed, serving_config.kv_bucket_tokens);
                 let even_odd_len = kv_bound_extent * kv_heads * pairs;
                 let v_len = kv_bound_extent * kv_heads * head_dim;
                 if cache_length_scratch_even_odd.len() < even_odd_len {
