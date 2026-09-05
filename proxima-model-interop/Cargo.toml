@@ -96,6 +96,9 @@ instrument = ["proxima-tensor/instrument", "omega?/instrument", "dep:proxima-tel
 # `generated_text` identical ("Here is a simple Python function that
 # returns"), `plan_hits` unchanged at 5. Same rule as `cached-attention-streaming`
 # above: real reduction in work, output identical, ships default-on.
+# `metal-packed-row-nsg2` joins per ROW 311: halves the packed-row matvec
+# threadgroup count (`omega/Cargo.toml`'s own comment carries the mechanism),
+# output identical, ships default-on per the less-work rule.
 metal = [
     "dep:omega",
     "std",
@@ -106,6 +109,7 @@ metal = [
     "cached-attention-streaming",
     "metal-concurrent-dispatch",
     "reduce-epilogue-fusion",
+    "metal-packed-row-nsg2",
 ]
 # cached-attention physical step for the real serving/decode harness; folded
 # into `metal`'s default shape per ROW 282 but kept individually selectable
