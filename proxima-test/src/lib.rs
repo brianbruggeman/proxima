@@ -21,6 +21,9 @@ mod harness;
 #[cfg(any(feature = "tokio-driver", feature = "test-prime"))]
 pub use harness::*;
 
+#[cfg(feature = "alloc-count")]
+pub mod alloc_count;
+
 /// Backs `#[proxima::fixture(once)]`: a value computed once per process and
 /// shared as `&'static T`. `async_lock::OnceCell::new()` is `const`, so the
 /// cell can be a `static` with no runtime coupling — unlike

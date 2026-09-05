@@ -16,7 +16,6 @@
 //! deterministic per-call allocation count for each arm before the timing run.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-use std::alloc::{GlobalAlloc, Layout, System};
 use std::future::Future;
 use std::hint::black_box;
 use std::sync::Arc;
@@ -27,26 +26,17 @@ use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use futures::executor::block_on;
 use proxima_primitives::pipe::SendPipe;
 use proxima_primitives::pipe::{AllOrNothing, FanOut, IgnoreErrors};
+use proxima_test::alloc_count::{CountingAllocator, allocations};
 use smallvec::{SmallVec, smallvec};
 
 // ── counting allocator (deterministic alloc-count truth, not timing) ──────────
 
-struct Counting;
-
-static ALLOCS: AtomicUsize = AtomicUsize::new(0);
-
-unsafe impl GlobalAlloc for Counting {
-    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        ALLOCS.fetch_add(1, Relaxed);
-        unsafe { System.alloc(layout) }
-    }
-    unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
-        unsafe { System.dealloc(ptr, layout) }
-    }
-}
-
 #[global_allocator]
-static GLOBAL: Counting = Counting;
+static GLOBAL: CountingAllocator = CountingAllocator;
+
+fn allocs() -> usize {
+    allocations()
+}
 
 // ── a trivial sink: counts calls, never fails ────────────────────────────────
 
@@ -118,9 +108,9 @@ fn payload() -> Bytes {
 
 fn alloc_count_for<Fut: Future>(call: impl Fn() -> Fut) -> usize {
     drop(block_on(call())); // warm any one-time lazy alloc; allocator reads are the observable effect
-    let before = ALLOCS.load(Relaxed);
+    let before = allocs();
     drop(block_on(call()));
-    ALLOCS.load(Relaxed) - before
+    allocs() - before
 }
 
 fn report_alloc_parity() {

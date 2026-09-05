@@ -13,26 +13,18 @@
 //! frames → one consumer.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-use std::alloc::{GlobalAlloc, Layout, System};
 use std::hint::black_box;
-use std::sync::atomic::{AtomicUsize, Ordering::Relaxed};
 
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use proxima_primitives::pipe::{DrainSink, RingSink};
+use proxima_test::alloc_count::{CountingAllocator, allocations};
 
-struct Counting;
-static ALLOCS: AtomicUsize = AtomicUsize::new(0);
-unsafe impl GlobalAlloc for Counting {
-    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        ALLOCS.fetch_add(1, Relaxed);
-        unsafe { System.alloc(layout) }
-    }
-    unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
-        unsafe { System.dealloc(ptr, layout) }
-    }
-}
 #[global_allocator]
-static GLOBAL: Counting = Counting;
+static GLOBAL: CountingAllocator = CountingAllocator;
+
+fn allocs() -> usize {
+    allocations()
+}
 
 const FRAMES: usize = 256;
 const SLOT: usize = 256;
@@ -108,12 +100,12 @@ fn report_alloc(buf: &[u8], lens: &[usize; FRAMES]) {
     let _ = black_box(zerocopy_push(buf, lens, &mut zc));
     let _ = black_box(owned_push(buf, lens, &mut owned));
     let mut zc2: RingSink<FRAMES, SLOT> = RingSink::new();
-    let before = ALLOCS.load(Relaxed);
+    let before = allocs();
     let _ = black_box(zerocopy_push(buf, lens, &mut zc2));
-    let zc_a = ALLOCS.load(Relaxed) - before;
-    let before = ALLOCS.load(Relaxed);
+    let zc_a = allocs() - before;
+    let before = allocs();
     let _ = black_box(owned_push(buf, lens, &mut owned));
-    let owned_a = ALLOCS.load(Relaxed) - before;
+    let owned_a = allocs() - before;
     eprintln!("alloc/push (256 variable frames): zerocopy={zc_a} owned_vec={owned_a}");
 }
 

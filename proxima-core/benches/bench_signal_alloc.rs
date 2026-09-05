@@ -16,36 +16,10 @@
 //! Not a criterion bench — direct allocator-counter access at the
 //! construction boundary is the point, so this crate drives its own loop.
 
-use std::alloc::{GlobalAlloc, Layout, System};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::task::{Context, Poll, Waker};
 
 use proxima_core::signal::Signal;
-
-static ALLOCATIONS: AtomicU64 = AtomicU64::new(0);
-
-struct CountingAllocator;
-
-unsafe impl GlobalAlloc for CountingAllocator {
-    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        ALLOCATIONS.fetch_add(1, Ordering::Relaxed);
-        unsafe { System.alloc(layout) }
-    }
-
-    unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
-        unsafe { System.dealloc(ptr, layout) }
-    }
-
-    unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
-        ALLOCATIONS.fetch_add(1, Ordering::Relaxed);
-        unsafe { System.alloc_zeroed(layout) }
-    }
-
-    unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
-        ALLOCATIONS.fetch_add(1, Ordering::Relaxed);
-        unsafe { System.realloc(ptr, layout, new_size) }
-    }
-}
+use proxima_test::alloc_count::{CountingAllocator, allocations};
 
 #[global_allocator]
 static ALLOCATOR: CountingAllocator = CountingAllocator;
@@ -54,11 +28,11 @@ const ITERATIONS: u64 = 1000;
 
 fn allocs_per_op(label: &str, mut workload: impl FnMut()) {
     workload();
-    let before = ALLOCATIONS.load(Ordering::Relaxed);
+    let before = allocations() as u64;
     for _ in 0..ITERATIONS {
         workload();
     }
-    let after = ALLOCATIONS.load(Ordering::Relaxed);
+    let after = allocations() as u64;
     let total = after - before;
     #[allow(clippy::cast_precision_loss)]
     let per_op = total as f64 / ITERATIONS as f64;

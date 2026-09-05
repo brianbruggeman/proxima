@@ -14,7 +14,6 @@
 //! the telemetry-drain / *DK shape.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-use std::alloc::{GlobalAlloc, Layout, System};
 use std::future::Future;
 use std::hint::black_box;
 use std::ops::ControlFlow;
@@ -27,20 +26,14 @@ use futures::stream::{self, StreamExt};
 use proxima_primitives::pipe::{
     DrainFanIn, DrainSource, DrainState, Exhausted, FanIn, Pipe, Select, UnpinPipe,
 };
+use proxima_test::alloc_count::{CountingAllocator, allocations};
 
-struct Counting;
-static ALLOCS: AtomicUsize = AtomicUsize::new(0);
-unsafe impl GlobalAlloc for Counting {
-    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        ALLOCS.fetch_add(1, Relaxed);
-        unsafe { System.alloc(layout) }
-    }
-    unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
-        unsafe { System.dealloc(ptr, layout) }
-    }
-}
 #[global_allocator]
-static GLOBAL: Counting = Counting;
+static GLOBAL: CountingAllocator = CountingAllocator;
+
+fn allocs() -> usize {
+    allocations()
+}
 
 const SOURCES: usize = 8;
 const FRAMES: usize = 64;
@@ -149,9 +142,9 @@ fn select_all_merge<const S: usize>(arena: &[[u8; S]; FRAMES]) -> u64 {
 fn report_allocs<const S: usize>(arena: &[[u8; S]; FRAMES], label: &str) {
     let snap = |f: &dyn Fn() -> u64| {
         let _ = black_box(f()); // warm
-        let before = ALLOCS.load(Relaxed);
+        let before = allocs();
         let _ = black_box(f());
-        ALLOCS.load(Relaxed) - before
+        allocs() - before
     };
     let drain = snap(&|| drain_merge(arena));
     let owned = snap(&|| owned_merge(arena));

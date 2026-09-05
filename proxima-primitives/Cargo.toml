@@ -178,6 +178,7 @@ arrayvec.workspace = true
 async-lock = { workspace = true }
 futures = { workspace = true, features = ["std", "executor", "thread-pool"] }
 proxima-macros.workspace = true
+proxima-test = { path = "../proxima-test", features = ["alloc-count"] }
 
 [target."cfg(loom)".dependencies]
 async-lock = { workspace = true, features = ["loom"] }

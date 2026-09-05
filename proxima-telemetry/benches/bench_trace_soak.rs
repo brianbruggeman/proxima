@@ -16,11 +16,10 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-use std::alloc::{GlobalAlloc, Layout, System};
 use std::hint::black_box;
 use std::io;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -31,36 +30,19 @@ use proxima_telemetry::config::{OverflowPolicy, RecordSharing};
 use proxima_telemetry::out::native::{FrameSink, NATIVE_FRAME_SIZE};
 use proxima_telemetry::pipes::NativePipe;
 use proxima_telemetry::recorder::Recorder;
+use proxima_test::alloc_count::{self, CountingAllocator};
 use tracing_subscriber::fmt::format::FmtSpan;
 
 // ---- counting global allocator -------------------------------------------
 
-struct Counting;
-static ALLOC_CALLS: AtomicU64 = AtomicU64::new(0);
-static LIVE_BYTES: AtomicI64 = AtomicI64::new(0);
-
-unsafe impl GlobalAlloc for Counting {
-    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        ALLOC_CALLS.fetch_add(1, Ordering::Relaxed);
-        LIVE_BYTES.fetch_add(layout.size() as i64, Ordering::Relaxed);
-        // SAFETY: forwarding to the system allocator with the same layout.
-        unsafe { System.alloc(layout) }
-    }
-    unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
-        LIVE_BYTES.fetch_sub(layout.size() as i64, Ordering::Relaxed);
-        // SAFETY: ptr came from System.alloc with this layout.
-        unsafe { System.dealloc(ptr, layout) }
-    }
-}
-
 #[global_allocator]
-static GLOBAL: Counting = Counting;
+static GLOBAL: CountingAllocator = CountingAllocator;
 
 fn alloc_calls() -> u64 {
-    ALLOC_CALLS.load(Ordering::Relaxed)
+    alloc_count::allocations() as u64
 }
 fn live_bytes() -> i64 {
-    LIVE_BYTES.load(Ordering::Relaxed)
+    alloc_count::live_bytes()
 }
 
 // drain target: real native encode to a discarding sink (production export work).

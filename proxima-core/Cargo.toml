@@ -99,6 +99,7 @@ loom = { workspace = true }
 # time/mod.rs tests use futures::executor::block_on (folded from proxima-time)
 futures = { workspace = true, features = ["std", "executor"] }
 proxima = { workspace = true, features = ["test-support"] }
+proxima-test = { path = "../proxima-test", features = ["alloc-count"] }
 
 [lints]
 workspace = true

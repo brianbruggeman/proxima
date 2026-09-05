@@ -28,6 +28,10 @@ temp-env = { workspace = true }
 
 [features]
 default = []
+# the counting `#[global_allocator]` gate for zero-allocation hot-path proofs
+# (`alloc_count::CountingAllocator`). std-only, no extra dependency — gated so
+# crates that never assert zero-allocation don't carry the module.
+alloc-count = []
 # the explicit `#[proxima::test(runtime = "tokio")]` driver + `run_tokio*`
 # entry points. The adaptive default driver (no explicit `runtime = ...`)
 # does not need this — it prefers `test-prime` when linked.
