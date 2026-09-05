@@ -526,8 +526,9 @@ closed against the shipped source at `HEAD ce05362`.
 
 The first five cards, ordered on the measured gap (`design-final.md` §E): D0a repeats the device
 streaming ceiling on a quiet box; D0b adds a ceiling arm at the Q4_K superblock stride; D0c measures
-concurrent CPU+GPU streaming against the GPU-alone ceiling; D1 is the matvec roofline ladder; D1b is
-the packed-row addressing arms.
+concurrent CPU+GPU streaming against the GPU-alone ceiling (**KILLED 2026-09-05, ROW 302**:
+concurrent CPU+GPU 291.85 GB/s < GPU-alone 381.88 GB/s — the mixed-engine placement card does not
+land); D1 is the matvec roofline ladder; D1b is the packed-row addressing arms.
 
 `Backend`'s seven variants collapse to `Engine::{Cpu, Gpu}` plus a `GpuDriver` resolved once per
 target; there is no `Backend::Mixed` variant — mixing is a placement field on the scheduled op, not
@@ -604,6 +605,71 @@ k')` -- at the two measured `k'` values for `k=4` (ROW 292, `discipline.md:21395
 **927 GB/s** (`k'=1.2848`, ngram 3-6) to **876 GB/s** (`k'=1.3609`, ngram 2-4): DERIVED, above
 every ceiling measured on this host so far, and the reason draft/verify alone does not close the
 gap to the owner's stated target at this drafter's measured acceptance rate.
+
+## 1.6 Fourth-wave results (2026-09-05): repriced on the quiet device streaming ceiling
+
+`discipline.md` ROW 296-302 (quiet-box re-runs, `pgrep`-quiesced, all cited by ROW number below)
+retire every ratio in §1.3/§1.4/§1.5 that was computed against the loud 237.79-264.29 GB/s ceiling
+(ROW 291) or the 400 GB/s ASSUMED spec figure. The worst quiet WIDE-grid cell, **381.24 GB/s**
+(`private_blit`, 4 GB, ROW 302), is now the scoreboard's denominator; the best quiet cell,
+**381.88 GB/s**, is what ROW 302's own floor arithmetic (10.917-10.920 ms) uses.
+
+**Scoreboard, at 381.24 GB/s (worst quiet WIDE cell, ROW 302):**
+
+| lane | ms/token | GB/s | % of 381.24 GB/s (quiet ceiling) | provenance |
+|---|---|---|---|---|
+| floor (4.169 GB/token at the quiet device ceiling) | 10.92 | 381.24-381.88 | 100% | MEASURED, ROW 302 (`floor_ms` 10.917-10.920 at the best solo cells 381.77/381.88 GB/s) |
+| ours, decode program (main, `Relaxed` default) | 28.25-28.34 | 147 | 39% | MEASURED, ROW 298 (A, 28.343 mean) / ROW 300 (M-R, 28.249 mean); 4.169 GB / 28.3 ms = 147.3 GB/s |
+| llama.cpp b25346221 | 17.53 | 238 | 62% — **not at the ceiling** | MEASURED, ROW 298 (D, 17.532 mean, CoV 0.10%); 4.169 GB / 17.53 ms = 237.8 GB/s |
+| matvec kernel alone, in-buffer, `Relaxed` | — | 247 | 65% | MEASURED, ROW 296 (shape-sweep peak, `relaxed`/4sg/`dispatchThreads`, 247.26 GB/s) |
+
+**No sentence in §1.3/§1.4/§1.5 asserts llama.cpp sits at a measured device ceiling** — this section's
+own search (`grep -n` over §1.3-§1.5) found none; the one adjacent claim is §1.3.1's table
+(line 374 above), which prices llama.cpp at 60% of the **400 GB/s ASSUMED spec figure**, never a
+measured ceiling, and that framing stands unedited. What changes is the denominator available for a
+llama-vs-ceiling comparison at all: before ROW 302, no quiet device ceiling existed to compare llama
+against; now there is one, and llama's 238 GB/s sits at 62% of it, 38% of the quiet ceiling unused —
+the same distance (in ratio terms) llama.cpp has always carried against a hardware bandwidth figure,
+now measured rather than assumed.
+
+**Math-mode finding (ROW 297/298).** `MTLMathMode::Safe` was hardcoded for parity; `Relaxed`
+(inf/nan-preserving, `Fast` buys nothing over it per ROW 296) is now the runtime default. Full
+decode-program steady state: `Safe` 33.82 ms/token -> `Relaxed` 28.19 ms/token (ROW 297), 1.200x
+faster wall-clock, `generated_text` and quality metrics (exact_match/top1/kl_mean/kl_max) identical
+between modes at every N measured. `Safe` stays reachable via one field or one env var.
+
+**Process finding: a loud oracle landed a 23% Safe-path loss (ROW 298-300).** ROW 298 bisected a
+regression between ROW 288's binary (`837011c`, Safe-only, 28.625 ms/token) and current main's
+`Safe` mode (34.157 ms/token, +19.3%) to one commit, `e142f51` (ROW 299: q4_K/q5_K weight words
+loaded as native `u16`, +6.624 ms/token at Safe, 97.9% of it inside `gpu_exec_ms`). A quiet-box
+bake-off reverting exactly those loads (ROW 300) found the revert measurably **slower**, not
+faster, at `Relaxed` (the shipped default): 28.789 ms/token reverted vs 28.249 ms/token as landed
+(+1.9%) — the u16 loads were kept, not reverted. ROW 300's own correction further found that its
+`Safe`-labelled arms had silently run `Relaxed` throughout (a stale env-var name,
+`PROXIMA_METAL_MATH_MODE`, that the oracle never read), so the only trustworthy content of that
+row is the `Relaxed`-vs-`Relaxed` comparison above; main's `Safe` regression (ROW 298/299's ~34
+ms/token figure) is unrevised and unexplained (`gpu_exec_ms` mechanism residual, ROW 298/299) —
+this is a process finding, not a code correction: the oracle silently answered a different question
+than the one being asked, and it took three rows to notice.
+
+**The envelope answer (ROW 301).** `llama-bench -t {1,2,4,8,10}` at `-ngl 99` (Metal-offloaded) does
+not move tg32 outside CoV (57.13-57.26 t/s, CoV 0.033-0.197%); `%CPU` sits at 3.9-5.3% regardless of
+`-t`, versus 785.6-972.9% at `-ngl 0` — `-t` is a live knob only when compute is on the CPU. Ours has
+no CPU thread knob on its Metal decode path at all (confirmed by a zero-match grep for
+`matmul_worker_count`/`PROXIMA_MATMUL_WORKERS` in the oracle's own log). ROW 289's earlier
+non-monotonic 33.45-43.79 t/s sweep was a loud-box artifact and does not reproduce quiet.
+
+**D0c NO — the mixed-engine placement card is KILLED (ROW 302).** Best concurrent CPU+GPU streaming
+aggregate across two quiet runs and three splits: **291.85 GB/s** (70/30, run 2, CoV 1.55%). Best
+solo GPU-alone ceiling: **381.88 GB/s**. Concurrent is **23.6% below** solo-GPU, far outside the
+<=3.7% CoV every trusted concurrent cell carries — a CPU reader on a disjoint byte range takes a
+share of one shared memory-controller ceiling the GPU alone already saturates more efficiently, it
+does not add bandwidth. Per `design-final.md` §E's own gate ("this card kills or admits §B.4's
+placement work outright"), D0c does not admit it: `design-final.md` §B.4 (mixed engines) and cards
+D0c/B6b/B7/B8 are marked **KILLED 2026-09-05 by ROW 302**, not deleted — the algebra (`Engine::{Cpu,
+Gpu}`, `ScheduledOp.engine`, `BandwidthTable`) stays correct as written, it simply has no placement
+case left to serve on this host beyond compute-bound or codec-mismatched ops, which no card here
+measures.
 
 ## 2. The diagnosis, built formally (V0-V8)
 
