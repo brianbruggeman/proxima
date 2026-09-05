@@ -46,7 +46,7 @@
 use alloc::format;
 
 #[cfg(all(feature = "metal", target_os = "macos"))]
-use omega::MathMode;
+use omega::{DispatchType, MathMode};
 use proxima_gguf::types::GgmlType;
 
 use crate::error::InteropError;
@@ -168,6 +168,15 @@ pub struct ServingConfig<'model> {
     /// stays reachable as an explicit override, not the default.
     #[cfg(all(feature = "metal", target_os = "macos"))]
     pub math_mode: MathMode,
+    /// Not an upstream llama-server flag -- `omega::metal::DispatchType` for
+    /// the one compute encoder every call's `Plan`s dispatch through on the
+    /// Metal backend (`generate.rs`'s `BackendRuntime::new` reads this once
+    /// per call and sets it via `Plan::set_dispatch_type`). No effect when
+    /// `gpu_layers` selects the Cpu engine. `Concurrent` (this field's
+    /// default) is the measured winner as of ROW 285/312: see
+    /// `omega::metal::DispatchType`'s own doc.
+    #[cfg(all(feature = "metal", target_os = "macos"))]
+    pub dispatch_type: DispatchType,
 }
 
 impl Default for ServingConfig<'static> {
@@ -210,6 +219,8 @@ impl Default for ServingConfig<'static> {
             kv_bucket_tokens: 32,
             #[cfg(all(feature = "metal", target_os = "macos"))]
             math_mode: MathMode::Relaxed,
+            #[cfg(all(feature = "metal", target_os = "macos"))]
+            dispatch_type: DispatchType::Concurrent,
         }
     }
 }
@@ -476,6 +487,8 @@ mod tests {
             kv_bucket_tokens: 32,
             #[cfg(all(feature = "metal", target_os = "macos"))]
             math_mode: MathMode::Relaxed,
+            #[cfg(all(feature = "metal", target_os = "macos"))]
+            dispatch_type: DispatchType::Concurrent,
         };
         apply_serving_config(&config, 6).expect("fully supported config must apply cleanly");
     }
@@ -609,6 +622,8 @@ mod tests {
             kv_bucket_tokens: 64,
             #[cfg(all(feature = "metal", target_os = "macos"))]
             math_mode: MathMode::Relaxed,
+            #[cfg(all(feature = "metal", target_os = "macos"))]
+            dispatch_type: DispatchType::Concurrent,
         };
         assert_eq!(via_default_override, via_full_literal);
         assert_eq!(via_default_override.kv_bucket_tokens, 64);

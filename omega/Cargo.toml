@@ -79,14 +79,13 @@ cpu = ["std", "proxima-tensor/std"]
 # identical across all 3 bake-off rounds. The owner's rule: keep a
 # less-work change when output is identical and wall clock is not worse
 # beyond noise, even if wall clock does not visibly move.
-# `metal-concurrent-dispatch` joins per ROW 285's bake-off: the serial
-# encoder implies a barrier between every pair of dispatches; the
-# `HazardTracker` emits `memoryBarrierWithScope(Buffers)` only at a genuine
-# RAW/WAW/WAR hazard, 419 of 616 ops/step. `gpu_exec_ms` mean over 3
-# interleaved rounds fell 29.267 -> 27.258 ms (beyond both arms' CoV,
-# 0.84%/1.05%), wall mean 36.556 -> 34.725 ms (ON <= OFF + CoV every round),
-# `device_allocated_bytes` unchanged, `generated_text` identical across all
-# 3 bake-off rounds plus 3 extra determinism runs.
+# ROW 285's bake-off found `computeCommandEncoderWithDispatchType(Concurrent)`
+# plus a `HazardTracker` inserting `memoryBarrierWithScope(Buffers)` only at a
+# genuine RAW/WAW/WAR hazard beat a plain `Serial` encoder. ROW 312 made that
+# choice a runtime `Plan::set_dispatch_type`/`metal::DispatchType` value
+# instead of a build-time feature (cargo could not express "metal without
+# it"), so both arms are reachable from one build -- see that type's own doc
+# for the current default and rationale.
 # `reduce-epilogue-fusion` joins per the owner's less-work rule: the fusion
 # rewrite folds 3 of the 4 epilogued reduces per layer into their reduce
 # (`BoundOpKind::Reduce::epilogue_body`) on the real openchat cached-decode
@@ -118,7 +117,6 @@ metal = [
     "metal-wide-cooperative-reduce",
     "metal-plan-stable-buffers",
     "cached-attention-streaming",
-    "metal-concurrent-dispatch",
     "reduce-epilogue-fusion",
     "metal-packed-row-nsg2",
 ]
@@ -251,23 +249,6 @@ metal-buffer-pool = ["metal"]
 # default until the e2e decode-step bench lands. Depends on `metal`, not just
 # `std`: both new types are `objc2-metal` buffer handles.
 metal-plan-stable-buffers = ["metal"]
-# `execute_plan_with_placements` opens its one compute encoder with
-# `computeCommandEncoderWithDispatchType(Concurrent)` instead of
-# `computeCommandEncoder()` (which implies `Serial`), so two independent
-# dispatches (e.g. Q/K/V projected from one normed input, or gate+up from one
-# input) no longer pay an implicit whole-resource barrier and pipeline drain
-# between them. `metal.rs`'s own `HazardTracker` walks `prepared.resolved`
-# once per op, tracking which buffers were written/read since the last
-# barrier (identity = `Retained::as_ptr`, matching Metal's own automatic
-# tracker's whole-`MTLResource` granularity per this function's doc, not a
-# sub-range), and emits `memoryBarrierWithScope(Buffers)` only at a genuine
-# RAW/WAW/WAR hazard -- uniform and gather-fault buffers are excluded, never
-# hazards. Default-off: unproven against the production default until the
-# e2e decode-step bench lands. Depends on `metal`, not just `std`: both new
-# Metal API calls (`computeCommandEncoderWithDispatchType`,
-# `memoryBarrierWithScope`) live behind `objc2-metal` features `metal` already
-# enables.
-metal-concurrent-dispatch = ["metal"]
 # Split-K for the row-blocked packed Q4_K/Q5_K/Q6_K matvec
 # (`msl.rs`'s `push_packed_row_blocked_body`): below a target simdgroup count
 # (`sized::PACKED_ROW_SPLIT_K_TARGET_SIMDGROUPS`) a row-group's reduction axis

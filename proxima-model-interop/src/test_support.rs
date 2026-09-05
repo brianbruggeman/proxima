@@ -18,6 +18,21 @@ pub(crate) fn math_mode_from_env() -> omega::MathMode {
     }
 }
 
+/// `PROXIMA_DISPATCH` read the same way [`math_mode_from_env`] reads
+/// `PROXIMA_MATH_MODE`: `"serial"` selects [`omega::DispatchType::Serial`],
+/// unset or `"concurrent"` selects [`omega::DispatchType::Concurrent`]
+/// (`ServingConfig::default`'s own `Concurrent` remains the default so a
+/// test that never sets this env var keeps behaving exactly as it did before
+/// this knob existed), and any other value panics naming what it saw rather
+/// than silently falling back to a mode the caller did not ask for.
+pub(crate) fn dispatch_type_from_env() -> omega::DispatchType {
+    match std::env::var("PROXIMA_DISPATCH").as_deref() {
+        Ok("serial") => omega::DispatchType::Serial,
+        Ok("concurrent") | Err(_) => omega::DispatchType::Concurrent,
+        Ok(other) => panic!("PROXIMA_DISPATCH={other}: expected `serial` or `concurrent`"),
+    }
+}
+
 /// `PROXIMA_OPENCHAT_GGUF` read the same way `omega/tests/device_streaming_ceiling.rs`
 /// already reads it: unset keeps every caller pointed at
 /// [`crate::serving::ServingConfig::default`]'s own `model_path`

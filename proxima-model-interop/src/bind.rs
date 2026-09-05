@@ -2671,7 +2671,7 @@ mod real_openchat_file {
     use crate::loader::prefault;
     use crate::serving::ServingConfig;
     #[cfg(all(feature = "metal", target_os = "macos"))]
-    use crate::test_support::math_mode_from_env;
+    use crate::test_support::{dispatch_type_from_env, math_mode_from_env};
 
     use super::{architecture_from_metadata, bind_all_weights, gguf_tensor_as_f32};
 
@@ -3150,6 +3150,8 @@ mod real_openchat_file {
 
         #[cfg(target_os = "macos")]
         let math_mode = math_mode_from_env();
+        #[cfg(target_os = "macos")]
+        let dispatch_type = dispatch_type_from_env();
         let serving_config = ServingConfig {
             kv_cache_key_quant: GgmlType::F32,
             kv_cache_value_quant: GgmlType::F32,
@@ -3160,6 +3162,8 @@ mod real_openchat_file {
             reasoning_budget: 0,
             #[cfg(target_os = "macos")]
             math_mode,
+            #[cfg(target_os = "macos")]
+            dispatch_type,
             ..ServingConfig::default()
         };
 

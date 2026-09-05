@@ -57,8 +57,8 @@ pub use cuda::{CudaGridSpec, CudaKernel, WARP_SIZE, emit_cuda};
 pub use error::EmitError;
 #[cfg(all(feature = "metal", target_os = "macos"))]
 pub use metal::{
-    MathMode, MetalError, Plan, execute, execute_plan, execute_plan_named, page_size, plan,
-    plan_named,
+    DispatchType, MathMode, MetalError, Plan, execute, execute_plan, execute_plan_named,
+    page_size, plan, plan_named,
 };
 #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
 pub use metal::{
