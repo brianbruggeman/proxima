@@ -853,4 +853,73 @@ mod real_openchat_file {
         assert!(report.kl_max.is_finite(), "kl_max must be a real number");
         assert!(report.max_abs_logit_delta.is_finite(), "max_abs_logit_delta must be a real number");
     }
+
+    /// `PROXIMA_OPENCHAT_GGUF_VARIANT` names a second, differently-quantized
+    /// checkpoint to score as [`quality_report`]'s `variant` -- the same
+    /// env-override shape [`ServingConfig::default`]'s own `model_path`
+    /// would use if it read one (it does not; that field is a fixed
+    /// constant), so this is a new, test-edge-only knob rather than a reuse
+    /// of an existing one. Defaults to the Q3_K_M checkpoint this slice's
+    /// own task fixture ships, so the test still runs unconfigured on a
+    /// host that has it staged at that path.
+    fn variant_model_path() -> String {
+        std::env::var("PROXIMA_OPENCHAT_GGUF_VARIANT").unwrap_or_else(|_| {
+            "/private/tmp/claude-501/-Users-brianbruggeman-repos-slot-0/\
+             6e203711-bd50-48cc-9ade-409668bdafdd/scratchpad/models/\
+             openchat-3.5-1210.Q3_K_M.gguf"
+                .to_string()
+        })
+    }
+
+    /// The real cross-CHECKPOINT comparison this slice adds: `reference` is
+    /// [`ServingConfig::default`]'s Q4_K_S checkpoint, `variant` is
+    /// [`variant_model_path`]'s Q3_K_M checkpoint, BOTH forced through the
+    /// Metal backend ([`GPU_LAYERS_ALL`]) -- distinct from
+    /// [`metal_vs_cpu_reports_real_drift`]'s single-checkpoint,
+    /// cross-backend comparison above: here the backend is held fixed and
+    /// the checkpoint's own quantization is the variable, so this
+    /// `quality_summary` isolates a codec's drift from a device's. No
+    /// pass/fail on a specific number for the same reason
+    /// `metal_vs_cpu_reports_real_drift` has none -- the printed
+    /// `quality_summary` line is the result this slice reports.
+    #[test]
+    #[ignore = "depends on two host-local openchat gguf checkouts outside this repo, and a real Metal device"]
+    fn q3_k_m_variant_against_q4_k_s_reference_reports_real_drift() {
+        let reference_path = std::path::Path::new(ServingConfig::default().model_path);
+        let variant_path_string = variant_model_path();
+        let variant_path = std::path::Path::new(&variant_path_string);
+        if !reference_path.exists() {
+            eprintln!(
+                "skipping: no host-local openchat Q4_K_S fixture at {}",
+                ServingConfig::default().model_path
+            );
+            return;
+        }
+        if !variant_path.exists() {
+            eprintln!("skipping: no host-local openchat Q3_K_M fixture at {variant_path_string}");
+            return;
+        }
+
+        let mapped_reference =
+            MappedGguf::open(reference_path).expect("mmap host-local openchat Q4_K_S fixture");
+        let mapped_variant =
+            MappedGguf::open(variant_path).expect("mmap host-local openchat Q3_K_M fixture");
+        let reference = open_model(&mapped_reference);
+        let variant = open_model(&mapped_variant);
+        let prompts = load_quality_prompts();
+        let max_tokens = quality_max_tokens();
+
+        let report = quality_report(&reference, GPU_LAYERS_ALL, &variant, GPU_LAYERS_ALL, &prompts, max_tokens)
+            .expect("quality_report against a Q4_K_S reference and a Q3_K_M variant");
+
+        #[cfg(feature = "instrument")]
+        print_quality_report(&report);
+
+        assert_eq!(report.prompts, prompts.len(), "every prompt in the set must produce a row");
+        assert!(report.exact_match_rate.is_finite(), "exact_match_rate must be a real number");
+        assert!(report.top1_agreement_rate.is_finite(), "top1_agreement_rate must be a real number");
+        assert!(report.kl_mean.is_finite(), "kl_mean must be a real number");
+        assert!(report.kl_max.is_finite(), "kl_max must be a real number");
+        assert!(report.max_abs_logit_delta.is_finite(), "max_abs_logit_delta must be a real number");
+    }
 }
