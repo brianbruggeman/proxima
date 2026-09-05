@@ -704,13 +704,17 @@ fn build_single_range_program(
 /// Metal plan-cache key alongside `new_count`) -- `merged_len` unchanged
 /// with `kv-capacity-bucket` off, so the plan-cache key is untouched from
 /// its pre-feature shape; with it on, `merged_len` rounded up to
-/// [`proxima_tensor::sized::KV_BUCKET_TOKENS`] and capped at `capacity`
+/// [`crate::sized::KV_BUCKET_TOKENS`] and capped at `capacity`
 /// (this call's own per-layer buffer row count, never exceeded regardless
 /// of rounding). `causal_mask_merged`'s existing `key_index >
 /// query_absolute` comparison already masks every row in
 /// `[merged_len, extent)` as "future" for every query this call issues
-/// (`spec.rs`'s `cpu_mask_zero_ulp` test is the 0-ULP proof), so no other
-/// call site needs to know which arm is compiled in.
+/// (`proxima-tensor`'s `spec.rs`'s `cpu_mask_zero_ulp` test proves the
+/// mechanism 0-ULP-safe for any bucket size), so no other call site needs
+/// to know which arm is compiled in. This is the driver's own plan-cache
+/// rounding policy (this crate owns the Metal decode loop that consumes
+/// it), not a tensor-execution concern -- see
+/// [`crate::sized`]'s own doc.
 #[cfg(all(
     feature = "metal-output-placement",
     feature = "kv-capacity-bucket",
@@ -718,8 +722,8 @@ fn build_single_range_program(
 ))]
 fn kv_extent(merged_len: usize, capacity: usize) -> usize {
     merged_len
-        .div_ceil(proxima_tensor::sized::KV_BUCKET_TOKENS)
-        .saturating_mul(proxima_tensor::sized::KV_BUCKET_TOKENS)
+        .div_ceil(crate::sized::KV_BUCKET_TOKENS)
+        .saturating_mul(crate::sized::KV_BUCKET_TOKENS)
         .min(capacity)
 }
 

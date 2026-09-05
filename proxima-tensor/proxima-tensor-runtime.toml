@@ -72,23 +72,6 @@ column_panel_budget_bytes = 2621440
 # value is a definitional default, not a measured tuning knob.
 freq_base_default = 10000.0
 
-[kv]
-# plan-cache key bucket for the KV extent on the placed-KV Metal decode path
-# (`proxima-model-interop::generate::run_decode_loop_placed_kv`). The true
-# `merged_len` (cached_len + new_count) strictly increases every decode
-# step, so keying the Metal plan cache on it directly forces a re-plan
-# (prepare + op-setup) on EVERY step; rounding up to this many tokens keeps
-# the plan-cache key -- and the KV `Op::Input` leaves' `Extent::Symbolic(1)`
-# extent they bind against -- constant across a whole bucket of steps, at
-# the cost of computing attention over `bucket - merged_len` padded
-# (always-masked) key positions per step. `kv-capacity-bucket`-only: never
-# emitted, and `sized::KV_BUCKET_TOKENS` never referenced, unless that
-# feature is on. See `sized::KV_BUCKET_TOKENS` and CARD 6.3's sweep for the
-# padding-vs-orchestration trade this value tunes. 32 is the 2026-09-04
-# quiet round 1 winner: wall 40.89 vs off 42.54 ms/token, hits 5/8 (64 also
-# wins at 41.18/hits 6/8; 256 loses at 48.18 -- ROW 273 has the full table).
-bucket_tokens = 32
-
 [staged_batch]
 # below this many consecutive is_staged_batch_eligible nodes,
 # run_staged_batch is not worth calling -- a run of one node has nothing to

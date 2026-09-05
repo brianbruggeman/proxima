@@ -41,6 +41,8 @@ mod loader;
 mod qwen35;
 #[cfg(feature = "std")]
 mod quality;
+#[cfg(feature = "kv-capacity-bucket")]
+mod sized;
 mod serving;
 mod transform;
 

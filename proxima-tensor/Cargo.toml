@@ -35,19 +35,24 @@ cached-attention-streaming = ["std"]
 # conflaguration Settings/Validate + serde. The alloc-tier core (Graph/Node/
 # AffineMap/validate) never sees this feature.
 config = ["std", "dep:bon", "dep:conflaguration", "dep:serde", "smallvec/serde"]
-# Plan-cache key bucket for `proxima-model-interop`'s placed-KV Metal decode
-# path: the growing KV extent (`Extent::Symbolic(1)` in
-# `spec::mistral_single_range_cached_forward_program`) rounds up to
-# `sized::KV_BUCKET_TOKENS` instead of binding the true, strictly-increasing
-# `merged_len` directly, so the plan cache key (`(new_count, extent)`) stays
-# constant across a whole bucket of decode steps instead of missing every
-# step. Default-off: this is a orchestration-vs-padding trade (CARD 6.3),
-# not a strict win at every bucket size. No new `Op`/`BoundOpKind`/
-# `ScalarOp` variant -- `spec::causal_mask_merged`'s existing
+# Correctness proof (`spec.rs`'s `cpu_mask_zero_ulp`) for the general
+# bucketing mechanism `proxima-model-interop`'s placed-KV Metal decode path
+# relies on: rounding the growing KV extent (`Extent::Symbolic(1)` in
+# `spec::mistral_single_range_cached_forward_program`) up to a bucket
+# instead of binding the true, strictly-increasing `merged_len` directly
+# keeps the plan cache key (`(new_count, extent)`) constant across a whole
+# bucket of decode steps instead of missing every step, PROVIDED the
+# padded tail reads as exactly zero. No new `Op`/`BoundOpKind`/`ScalarOp`
+# variant -- `spec::causal_mask_merged`'s existing
 # `key_index > query_absolute` comparison already masks every padded key
 # position past `merged_len` as "future" for every real query in the call,
 # since no query's absolute position ever reaches a padded key's index; see
-# `spec.rs`'s `cpu_mask_zero_ulp` test for the 0-ULP proof.
+# `spec.rs`'s `cpu_mask_zero_ulp` test for the 0-ULP proof over the three
+# bucket sizes it covers. The bucket-size policy itself (the actual
+# `KV_BUCKET_TOKENS` value the decode loop binds) lives in
+# `proxima-model-interop`'s own `sized.rs`/`<crate>-runtime.toml` -- this
+# feature only gates the CPU-side correctness test proving the mechanism is
+# safe for ANY bucket size, not a specific one.
 kv-capacity-bucket = ["std"]
 # gates the ggml FFI comparison bench: default-off so a normal build never
 # needs a statically-linked ggml checkout on disk. build.rs is a no-op
