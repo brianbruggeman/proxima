@@ -1,0 +1,32 @@
+{"id":"code-01","category":"code","source":"authored","text":"Write a Python function that returns the nth Fibonacci number using recursion."}
+{"id":"code-02","category":"code","source":"authored","text":"Write a SQL query that selects the top 5 customers by total order amount from an `orders` table."}
+{"id":"code-03","category":"code","source":"authored","text":"Explain the difference between a list and a tuple in Python."}
+{"id":"code-04","category":"code","source":"authored","text":"Write a Rust function that reverses a singly linked list in place."}
+{"id":"code-05","category":"code","source":"authored","text":"Write a bash one-liner that finds all files larger than 100MB in the current directory."}
+{"id":"code-06","category":"code","source":"authored","text":"Fix the bug in this JavaScript function: function add(a, b) { return a - b; }"}
+{"id":"math-01","category":"math","source":"authored","text":"What is 17 multiplied by 23?"}
+{"id":"math-02","category":"math","source":"authored","text":"Solve for x: 3x + 7 = 22."}
+{"id":"math-03","category":"math","source":"authored","text":"What is the derivative of f(x) = x^3 - 4x^2 + 2x with respect to x?"}
+{"id":"math-04","category":"math","source":"authored","text":"A train travels 240 miles in 4 hours. What is its average speed in miles per hour?"}
+{"id":"math-05","category":"math","source":"authored","text":"What is the probability of rolling a sum of 7 with two standard six-sided dice?"}
+{"id":"math-06","category":"math","source":"authored","text":"Convert 0.375 to a fraction in simplest form."}
+{"id":"summarization-01","category":"summarization","source":"authored","text":"Summarize the following in one sentence: The Great Barrier Reef, located off the coast of Queensland, Australia, is the world's largest coral reef system, composed of over 2,900 individual reefs and 900 islands stretching for over 2,300 kilometers."}
+{"id":"summarization-02","category":"summarization","source":"authored","text":"Summarize the plot of Romeo and Juliet in two sentences."}
+{"id":"summarization-03","category":"summarization","source":"authored","text":"Summarize the main idea of the water cycle for a fifth-grade student."}
+{"id":"summarization-04","category":"summarization","source":"authored","text":"Summarize this paragraph in one sentence: Photosynthesis is the process by which green plants, algae, and some bacteria convert light energy, usually from the sun, into chemical energy stored in glucose, releasing oxygen as a byproduct."}
+{"id":"summarization-05","category":"summarization","source":"authored","text":"Give a one-sentence summary of the causes of World War I."}
+{"id":"summarization-06","category":"summarization","source":"authored","text":"Summarize the key benefits of regular exercise in three bullet points."}
+{"id":"factual_qa-01","category":"factual_qa","source":"authored","text":"What is the capital of France?"}
+{"id":"factual_qa-02","category":"factual_qa","source":"authored","text":"Who wrote the play Hamlet?"}
+{"id":"factual_qa-03","category":"factual_qa","source":"authored","text":"What is the chemical symbol for gold?"}
+{"id":"factual_qa-04","category":"factual_qa","source":"authored","text":"In what year did the Berlin Wall fall?"}
+{"id":"factual_qa-05","category":"factual_qa","source":"authored","text":"What is the largest planet in our solar system?"}
+{"id":"factual_qa-06","category":"factual_qa","source":"authored","text":"Who painted the Mona Lisa?"}
+{"id":"factual_qa-07","category":"factual_qa","source":"authored","text":"What is the boiling point of water in Celsius at sea level?"}
+{"id":"factual_qa-08","category":"factual_qa","source":"authored","text":"Which ocean is the largest by surface area?"}
+{"id":"multilingual-01","category":"multilingual","source":"authored","text":"Translate the following sentence into French: \"The weather is beautiful today.\""}
+{"id":"multilingual-02","category":"multilingual","source":"authored","text":"Translate the following sentence into Spanish: \"I would like a cup of coffee, please.\""}
+{"id":"multilingual-03","category":"multilingual","source":"authored","text":"Translate the following sentence into German: \"Where is the nearest train station?\""}
+{"id":"multilingual-04","category":"multilingual","source":"authored","text":"Translate the following sentence into Japanese: \"Thank you very much for your help.\""}
+{"id":"multilingual-05","category":"multilingual","source":"authored","text":"Translate the following sentence into Mandarin Chinese: \"My favorite season is autumn.\""}
+{"id":"multilingual-06","category":"multilingual","source":"authored","text":"Translate the following sentence into Italian: \"Can you recommend a good restaurant nearby?\""}
