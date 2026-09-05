@@ -3513,6 +3513,17 @@ fn append_qwen35_dense_attention_layer(
 /// `is_future` here must come from [`causal_mask_merged`], not
 /// [`causal_mask`]: shape `[s, t]` with `t` sized by [`Extent::Symbolic`]
 /// slot 1 (the merged range), not slot 0.
+///
+/// `gate_before_up` decides only which of the FFN's two independent matvecs
+/// (`ffn_gate.weight`, `ffn_up.weight` -- both read `normed2`, neither reads
+/// the other's output) is PUSHED into `program` first; `gate`/`up` are
+/// returned bound the same way either way, so every downstream op
+/// (`silu_gate`, `ffn_hidden`) is byte-identical regardless of this flag.
+/// This exists to measure whether ROW 310/311's `ffn_gate`/`ffn_up`
+/// bandwidth asymmetry is positional (first-vs-second in a barrier-free
+/// sibling pair, see `omega/src/metal.rs`'s `HazardTracker`) rather than
+/// per-kernel -- see this module's own
+/// `swapping_gate_and_up_order_keeps_dataflow_identical` test.
 #[allow(clippy::too_many_arguments)]
 fn append_mistral_single_range_cached_layer(
     program: &mut Vec<Op>,
@@ -3538,6 +3549,7 @@ fn append_mistral_single_range_cached_layer(
     k_even_cache: NodeId,
     k_odd_cache: NodeId,
     v_cache: NodeId,
+    gate_before_up: bool,
 ) -> Result<(NodeId, CachedLayerRoots), TensorError> {
     let normed = rmsnorm(program, x, attn_norm_weight, inv_dim, eps)?;
 
@@ -3827,36 +3839,53 @@ fn append_mistral_single_range_cached_layer(
 
     let normed2 = rmsnorm(program, residual1, ffn_norm_weight, inv_dim, eps)?;
 
-    let gate_product = elementwise(
-        program,
-        DType::Float32,
-        ScalarOp::Multiply,
-        &[(normed2, "sd->sdg"), (w_gate, "dg->sdg")],
-    )?;
-    let gate = reduce(
-        program,
-        DType::Float32,
-        ScalarOp::Add,
-        ReduceInit::Zero,
-        gate_product,
-        "sdg->sdg",
-        "sg->sdg",
-    )?;
-    let up_product = elementwise(
-        program,
-        DType::Float32,
-        ScalarOp::Multiply,
-        &[(normed2, "sd->sdg"), (w_up, "dg->sdg")],
-    )?;
-    let up = reduce(
-        program,
-        DType::Float32,
-        ScalarOp::Add,
-        ReduceInit::Zero,
-        up_product,
-        "sdg->sdg",
-        "sg->sdg",
-    )?;
+    let append_gate = |program: &mut Vec<Op>| -> Result<NodeId, TensorError> {
+        let gate_product = elementwise(
+            program,
+            DType::Float32,
+            ScalarOp::Multiply,
+            &[(normed2, "sd->sdg"), (w_gate, "dg->sdg")],
+        )?;
+        reduce(
+            program,
+            DType::Float32,
+            ScalarOp::Add,
+            ReduceInit::Zero,
+            gate_product,
+            "sdg->sdg",
+            "sg->sdg",
+        )
+    };
+    let append_up = |program: &mut Vec<Op>| -> Result<NodeId, TensorError> {
+        let up_product = elementwise(
+            program,
+            DType::Float32,
+            ScalarOp::Multiply,
+            &[(normed2, "sd->sdg"), (w_up, "dg->sdg")],
+        )?;
+        reduce(
+            program,
+            DType::Float32,
+            ScalarOp::Add,
+            ReduceInit::Zero,
+            up_product,
+            "sdg->sdg",
+            "sg->sdg",
+        )
+    };
+    // `gate_before_up` only decides encode ORDER of these two independent
+    // matvecs (both read `normed2`, neither reads the other's output) --
+    // `gate`/`up` bind identically either way, so every op below is
+    // unaffected by which branch ran.
+    let (gate, up) = if gate_before_up {
+        let gate = append_gate(program)?;
+        let up = append_up(program)?;
+        (gate, up)
+    } else {
+        let up = append_up(program)?;
+        let gate = append_gate(program)?;
+        (gate, up)
+    };
 
     let neg_gate = elementwise(
         program,
@@ -4116,6 +4145,7 @@ pub fn mistral_single_range_cached_forward_program(
             k_even_cache,
             k_odd_cache,
             v_cache,
+            true,
         )?;
         x = x_next;
         cache_roots.push(layer_roots);
@@ -14439,6 +14469,259 @@ value = 1.0
             "a perturbed history v0 must move mixer_out away from the hand-computed reference \
              (if this assertion cannot fail, the test above proves nothing), got {}",
             mixer_out_values[0]
+        );
+    }
+
+    /// One `append_mistral_single_range_cached_layer` invocation, minus the
+    /// `gate_before_up` flag under test -- the minimal single-layer preamble
+    /// [`mistral_single_range_cached_forward_program`]'s own loop body builds
+    /// for `block_count = 1`, `query_heads = kv_heads = 1`, `head_dim = 2`,
+    /// `embedding = feed_forward = 2` (small enough to read by eye, large
+    /// enough that `w_gate`/`w_up`'s shapes are distinguishable from every
+    /// other node's).
+    fn single_range_layer_with_order(gate_before_up: bool) -> (Vec<Op>, NodeId, NodeId) {
+        let embedding = 2_u32;
+        let feed_forward = 2_u32;
+        let head_dim = 2_u32;
+        let pairs = head_dim / 2;
+        let group = 1_u32;
+
+        let mut program = Vec::new();
+        let x = input_leaf(
+            &mut program,
+            DType::Float32,
+            alloc::vec![Extent::Symbolic(0), Extent::Static(embedding)],
+            "x",
+        );
+        let inv_dim = scalar_constant(&mut program, 1.0 / embedding as f32);
+        let eps = symbolic_leaf(&mut program, DType::Float32, "eps");
+        let ones = scalar_constant(&mut program, 1.0);
+        let inv_sqrt_head_dim = scalar_constant(&mut program, 1.0 / (head_dim as f32).sqrt());
+        let cos_new = input_leaf(
+            &mut program,
+            DType::Float32,
+            alloc::vec![Extent::Symbolic(0), Extent::Static(pairs)],
+            "rope_cos",
+        );
+        let sin_new = input_leaf(
+            &mut program,
+            DType::Float32,
+            alloc::vec![Extent::Symbolic(0), Extent::Static(pairs)],
+            "rope_sin",
+        );
+        let group_ones = op::append(
+            &mut program,
+            Op::Constant {
+                dtype: DType::Float32,
+                shape: alloc::vec![Extent::Static(1), Extent::Static(group)],
+                value: 1.0,
+            },
+        );
+        let cached_len = input_leaf(&mut program, DType::Float32, Vec::new(), "cached_len");
+        let is_future = causal_mask_merged(&mut program, cached_len).expect("causal mask builds");
+        let attn_norm_weight = input_leaf(
+            &mut program,
+            DType::Float32,
+            alloc::vec![Extent::Static(embedding)],
+            "attn_norm.weight",
+        );
+        let ffn_norm_weight = input_leaf(
+            &mut program,
+            DType::Float32,
+            alloc::vec![Extent::Static(embedding)],
+            "ffn_norm.weight",
+        );
+        let wq = input_leaf(
+            &mut program,
+            DType::Float32,
+            alloc::vec![
+                Extent::Static(embedding),
+                Extent::Static(1),
+                Extent::Static(head_dim)
+            ],
+            "attn_q.weight",
+        );
+        let wk = input_leaf(
+            &mut program,
+            DType::Float32,
+            alloc::vec![
+                Extent::Static(embedding),
+                Extent::Static(1),
+                Extent::Static(head_dim)
+            ],
+            "attn_k.weight",
+        );
+        let wv = input_leaf(
+            &mut program,
+            DType::Float32,
+            alloc::vec![
+                Extent::Static(embedding),
+                Extent::Static(1),
+                Extent::Static(head_dim)
+            ],
+            "attn_v.weight",
+        );
+        let wo = input_leaf(
+            &mut program,
+            DType::Float32,
+            alloc::vec![
+                Extent::Static(1),
+                Extent::Static(group),
+                Extent::Static(head_dim),
+                Extent::Static(embedding),
+            ],
+            "attn_output.weight",
+        );
+        let k_even_cache = input_leaf(
+            &mut program,
+            DType::Float32,
+            alloc::vec![Extent::Symbolic(1), Extent::Static(1), Extent::Static(pairs)],
+            "kv_cache.k_even",
+        );
+        let k_odd_cache = input_leaf(
+            &mut program,
+            DType::Float32,
+            alloc::vec![Extent::Symbolic(1), Extent::Static(1), Extent::Static(pairs)],
+            "kv_cache.k_odd",
+        );
+        let v_cache = input_leaf(
+            &mut program,
+            DType::Float32,
+            alloc::vec![
+                Extent::Symbolic(1),
+                Extent::Static(1),
+                Extent::Static(head_dim)
+            ],
+            "kv_cache.v",
+        );
+        let w_gate = input_leaf(
+            &mut program,
+            DType::Float32,
+            alloc::vec![Extent::Static(embedding), Extent::Static(feed_forward)],
+            "ffn_gate.weight",
+        );
+        let w_up = input_leaf(
+            &mut program,
+            DType::Float32,
+            alloc::vec![Extent::Static(embedding), Extent::Static(feed_forward)],
+            "ffn_up.weight",
+        );
+        let w_down = input_leaf(
+            &mut program,
+            DType::Float32,
+            alloc::vec![Extent::Static(feed_forward), Extent::Static(embedding)],
+            "ffn_down.weight",
+        );
+
+        let (_, _) = append_mistral_single_range_cached_layer(
+            &mut program,
+            x,
+            inv_dim,
+            eps,
+            ones,
+            inv_sqrt_head_dim,
+            cos_new,
+            sin_new,
+            group_ones,
+            is_future,
+            group,
+            attn_norm_weight,
+            ffn_norm_weight,
+            wq,
+            wk,
+            wv,
+            wo,
+            w_gate,
+            w_up,
+            w_down,
+            k_even_cache,
+            k_odd_cache,
+            v_cache,
+            gate_before_up,
+        )
+        .expect("single-range layer builds under either encode order");
+
+        (program, w_gate, w_up)
+    }
+
+    /// The `PROXIMA_ENCODE_ORDER=gate_first|up_first` order-swap knob
+    /// (`test_support::encode_order_from_env` in
+    /// `proxima-model-interop`) is honored here at the program-builder
+    /// level: `append_mistral_single_range_cached_layer`'s `gate_before_up`
+    /// flag decides only which of the two independent FFN matvecs (both
+    /// read `normed2`, neither reads the other) is PUSHED first — the node
+    /// SET and every dependency is unchanged, only their relative order.
+    #[test]
+    fn swapping_gate_and_up_order_keeps_dataflow_identical() {
+        let (gate_first, w_gate_a, w_up_a) = single_range_layer_with_order(true);
+        let (up_first, w_gate_b, w_up_b) = single_range_layer_with_order(false);
+
+        assert_eq!(
+            gate_first.len(),
+            up_first.len(),
+            "swapping encode order must not add or drop a single node"
+        );
+
+        let reads_operand = |op: &Op, operand: NodeId| -> bool {
+            matches!(op, Op::Elementwise { operands, .. }
+                if operands.iter().any(|(id, _)| *id == operand))
+        };
+        let gate_position = |program: &[Op], w_gate: NodeId| -> usize {
+            program
+                .iter()
+                .position(|op| reads_operand(op, w_gate))
+                .expect("a ffn_gate.weight-reading elementwise node must exist")
+        };
+        let up_position = |program: &[Op], w_up: NodeId| -> usize {
+            program
+                .iter()
+                .position(|op| reads_operand(op, w_up))
+                .expect("a ffn_up.weight-reading elementwise node must exist")
+        };
+
+        let gate_before_gate_first = gate_position(&gate_first, w_gate_a);
+        let up_before_gate_first = up_position(&gate_first, w_up_a);
+        assert!(
+            gate_before_gate_first < up_before_gate_first,
+            "gate_before_up=true must encode ffn_gate ({gate_before_gate_first}) before \
+             ffn_up ({up_before_gate_first})"
+        );
+
+        let gate_before_up_first = gate_position(&up_first, w_gate_b);
+        let up_before_up_first = up_position(&up_first, w_up_b);
+        assert!(
+            up_before_up_first < gate_before_up_first,
+            "gate_before_up=false must encode ffn_up ({up_before_up_first}) before \
+             ffn_gate ({gate_before_up_first})"
+        );
+
+        // same node SET, different order: every op kind/shape present in one
+        // program appears the same number of times in the other, just at a
+        // different index -- a multiset comparison over each op's discriminant
+        // plus its dtype (position-independent, unlike operand `NodeId`s,
+        // which legitimately renumber when the gate/up pair swaps).
+        let signature = |op: &Op| -> (core::mem::Discriminant<Op>, DType) {
+            let dtype = match op {
+                Op::Input { dtype, .. }
+                | Op::Elementwise { dtype, .. }
+                | Op::Constant { dtype, .. }
+                | Op::Iota { dtype, .. } => *dtype,
+                Op::Reduce(reduce) => reduce.dtype,
+            };
+            (core::mem::discriminant(op), dtype)
+        };
+        let mut gate_first_signatures: Vec<_> = gate_first.iter().map(signature).collect();
+        let mut up_first_signatures: Vec<_> = up_first.iter().map(signature).collect();
+        gate_first_signatures.sort_by_key(|(discriminant, dtype)| {
+            (format!("{discriminant:?}"), format!("{dtype:?}"))
+        });
+        up_first_signatures.sort_by_key(|(discriminant, dtype)| {
+            (format!("{discriminant:?}"), format!("{dtype:?}"))
+        });
+        assert_eq!(
+            gate_first_signatures, up_first_signatures,
+            "the two programs must carry the identical multiset of op kinds -- \
+             the swap must reorder nodes, never add, drop, or retype one"
         );
     }
 }
