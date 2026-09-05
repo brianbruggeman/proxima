@@ -411,12 +411,17 @@ fn is_cooperative_reduce_op(op: ScalarOp) -> bool {
 /// `simd_max`, so the combine is a five-step butterfly reduction over
 /// `__shfl_down_sync` instead of one call; see [`push_cooperative_reduce_body`]
 /// for where this is spliced.
-fn shuffle_combine_expr(op: ScalarOp, accumulator: &str, shuffled: &str) -> String {
+fn shuffle_combine_expr(
+    node: NodeId,
+    op: ScalarOp,
+    accumulator: &str,
+    shuffled: &str,
+) -> Result<String, EmitError> {
     match op {
-        ScalarOp::Add => format!("{accumulator} + {shuffled}"),
-        ScalarOp::Multiply => format!("{accumulator} * {shuffled}"),
-        ScalarOp::Maximum => format!("fmaxf({accumulator}, {shuffled})"),
-        ScalarOp::Minimum => format!("fminf({accumulator}, {shuffled})"),
+        ScalarOp::Add => Ok(format!("{accumulator} + {shuffled}")),
+        ScalarOp::Multiply => Ok(format!("{accumulator} * {shuffled}")),
+        ScalarOp::Maximum => Ok(format!("fmaxf({accumulator}, {shuffled})")),
+        ScalarOp::Minimum => Ok(format!("fminf({accumulator}, {shuffled})")),
         ScalarOp::Identity
         | ScalarOp::Subtract
         | ScalarOp::Divide
@@ -429,9 +434,10 @@ fn shuffle_combine_expr(op: ScalarOp, accumulator: &str, shuffled: &str) -> Stri
         | ScalarOp::Erf
         | ScalarOp::Greater
         | ScalarOp::Equal
-        | ScalarOp::Select => {
-            unreachable!("shuffle_combine_expr is only called for a cooperative reduce_op")
-        }
+        | ScalarOp::Select => Err(EmitError::NonCooperativeReduceOp {
+            node,
+            op: op_token(op),
+        }),
     }
 }
 
@@ -539,8 +545,8 @@ fn entry_name(resolved: &BoundOp) -> String {
         }
         // Never actually rendered: `emit_cuda`'s own kind-match returns
         // `EmitError::CudaUnsupportedOpKind` for `CachedAttention` before
-        // this name is used for anything. A name is still produced (not
-        // `unreachable!()`) because this function runs before that later
+        // this name is used for anything. A name is still produced (rather
+        // than panicking here) because this function runs before that later
         // match, purely to satisfy exhaustiveness with a harmless value.
         BoundOpKind::CachedAttention { .. } => format!("omega_cuda_cached_attention_r{rank}"),
     };
@@ -598,12 +604,12 @@ fn fold_init_tokens(init: ReduceInit) -> (&'static str, &'static str) {
 /// 0 seeds its private accumulator with this rather than the `BoundOp`'s own
 /// `ReduceInit`, so folding it into the final `__shfl_down_sync` combine can
 /// never perturb the result.
-fn cooperative_identity_token(op: ScalarOp) -> &'static str {
+fn cooperative_identity_token(node: NodeId, op: ScalarOp) -> Result<&'static str, EmitError> {
     match op {
-        ScalarOp::Add => "0.0f",
-        ScalarOp::Multiply => "1.0f",
-        ScalarOp::Maximum => "-INFINITY",
-        ScalarOp::Minimum => "INFINITY",
+        ScalarOp::Add => Ok("0.0f"),
+        ScalarOp::Multiply => Ok("1.0f"),
+        ScalarOp::Maximum => Ok("-INFINITY"),
+        ScalarOp::Minimum => Ok("INFINITY"),
         ScalarOp::Identity
         | ScalarOp::Subtract
         | ScalarOp::Divide
@@ -616,9 +622,10 @@ fn cooperative_identity_token(op: ScalarOp) -> &'static str {
         | ScalarOp::Erf
         | ScalarOp::Greater
         | ScalarOp::Equal
-        | ScalarOp::Select => {
-            unreachable!("cooperative_identity_token is only called for a cooperative reduce_op")
-        }
+        | ScalarOp::Select => Err(EmitError::NonCooperativeReduceOp {
+            node,
+            op: op_token(op),
+        }),
     }
 }
 
@@ -788,35 +795,36 @@ fn push_gather_fetch(
 /// caller already computed — the CUDA counterpart of
 /// `crate::msl::operand_read`, same per-element-only scope (no row-blocked
 /// header amortization; see the module doc).
-fn operand_read(index: usize, offset: &str, codec: Option<PackedCodec>) -> String {
+fn operand_read(
+    node: NodeId,
+    index: usize,
+    offset: &str,
+    codec: Option<PackedCodec>,
+) -> Result<String, EmitError> {
     match codec {
-        None => format!("in{index}[{offset}]"),
-        // `emit_cuda` rejects `Q3_K` via `EmitError::CudaUnsupportedPackedCodec`
-        // before rendering ever reaches this function.
-        Some(PackedCodec::Q3K) => {
-            unreachable!("emit_cuda rejects PackedCodec::Q3K before operand_read runs")
-        }
-        Some(PackedCodec::Q4K) => format!(
+        None => Ok(format!("in{index}[{offset}]")),
+        Some(PackedCodec::Q3K) => Err(EmitError::CudaUnsupportedPackedCodec { node }),
+        Some(PackedCodec::Q4K) => Ok(format!(
             "q4k_element(in{index} + ({offset} / {Q4K_BLOCK_ELEMENTS}) * {Q4K_BLOCK_BYTES}, (unsigned int)({offset} % {Q4K_BLOCK_ELEMENTS}))"
-        ),
-        Some(PackedCodec::Q5K) => format!(
+        )),
+        Some(PackedCodec::Q5K) => Ok(format!(
             "q5k_element(in{index} + ({offset} / {Q4K_BLOCK_ELEMENTS}) * {Q5K_BLOCK_BYTES}, (unsigned int)({offset} % {Q4K_BLOCK_ELEMENTS}))"
-        ),
-        Some(PackedCodec::Q6K) => format!(
+        )),
+        Some(PackedCodec::Q6K) => Ok(format!(
             "q6k_element(in{index} + ({offset} / {Q4K_BLOCK_ELEMENTS}) * {Q6K_BLOCK_BYTES}, (unsigned int)({offset} % {Q4K_BLOCK_ELEMENTS}))"
-        ),
-        Some(PackedCodec::Q8_0) => format!(
+        )),
+        Some(PackedCodec::Q8_0) => Ok(format!(
             "q8_0_element(in{index} + ({offset} / {Q8_0_BLOCK_ELEMENTS}) * {Q8_0_BLOCK_BYTES}, (unsigned int)({offset} % {Q8_0_BLOCK_ELEMENTS}))"
-        ),
-        Some(PackedCodec::Q4_0) => format!(
+        )),
+        Some(PackedCodec::Q4_0) => Ok(format!(
             "q4_0_element(in{index} + ({offset} / {Q4_0_BLOCK_ELEMENTS}) * {Q4_0_BLOCK_BYTES}, (unsigned int)({offset} % {Q4_0_BLOCK_ELEMENTS}))"
-        ),
+        )),
         // `__half` converts implicitly to `float` in CUDA C++, the same
         // "already a valid narrow-float buffer" shape MSL's `half` takes.
-        Some(PackedCodec::Float16) => format!("in{index}[{offset}]"),
-        Some(PackedCodec::BFloat16) => format!(
+        Some(PackedCodec::Float16) => Ok(format!("in{index}[{offset}]")),
+        Some(PackedCodec::BFloat16) => Ok(format!(
             "bf16_element(in{index} + ({offset} / {BFLOAT16_BLOCK_ELEMENTS}) * {BFLOAT16_BLOCK_BYTES}, (unsigned int)({offset} % {BFLOAT16_BLOCK_ELEMENTS}))"
-        ),
+        )),
     }
 }
 
@@ -884,7 +892,7 @@ fn render_elementwise(
     for (index, &codec) in quantized.iter().enumerate() {
         source.push_str(&format!(
             "    scratch[{index}] = {};\n",
-            operand_read(index, &format!("off{index}"), codec)
+            operand_read(resolved.node, index, &format!("off{index}"), codec)?
         ));
     }
 
@@ -912,7 +920,7 @@ fn push_serial_reduce_body(
     gather_slots: &[Option<usize>],
     quantized: &[Option<PackedCodec>],
     element_type: &str,
-) {
+) -> Result<(), EmitError> {
     source.push_str("    if (gid >= u.output_total) { return; }\n");
 
     source.push_str(&format!("    long full_coord[{rank_len}];\n"));
@@ -984,7 +992,7 @@ fn push_serial_reduce_body(
     for (index, &codec) in quantized.iter().enumerate() {
         source.push_str(&format!(
             "        scratch[{index}] = {};\n",
-            operand_read(index, &format!("off{index}"), codec)
+            operand_read(resolved.node, index, &format!("off{index}"), codec)?
         ));
     }
     let value_expr = push_body_steps(source, resolved.element_body(), "        ", element_type);
@@ -1003,6 +1011,7 @@ fn push_serial_reduce_body(
         ));
     }
     source.push_str("    out[out_offset] = accumulator;\n");
+    Ok(())
 }
 
 /// The warp-shuffle cooperative fold — the CUDA counterpart of
@@ -1024,7 +1033,7 @@ fn push_cooperative_reduce_body(
     rank: usize,
     quantized: &[Option<PackedCodec>],
     element_type: &str,
-) {
+) -> Result<(), EmitError> {
     let rank_len = rank.max(1);
     let output_rank = output_axes.len();
     let output_rank_len = output_rank.max(1);
@@ -1058,7 +1067,7 @@ fn push_cooperative_reduce_body(
     }
 
     let (init_expr, seeded_init) = fold_init_tokens(init);
-    let identity = cooperative_identity_token(reduce_op);
+    let identity = cooperative_identity_token(resolved.node, reduce_op)?;
     source.push_str(&format!("    {element_type} accumulator;\n"));
     source.push_str("    bool seeded;\n");
     source.push_str("    if (lane == 0u) {\n");
@@ -1108,7 +1117,7 @@ fn push_cooperative_reduce_body(
     for (index, &codec) in quantized.iter().enumerate() {
         source.push_str(&format!(
             "        scratch[{index}] = {};\n",
-            operand_read(index, &format!("off{index}"), codec)
+            operand_read(resolved.node, index, &format!("off{index}"), codec)?
         ));
     }
     let value_expr = push_body_steps(source, resolved.element_body(), "        ", element_type);
@@ -1128,7 +1137,7 @@ fn push_cooperative_reduce_body(
     source.push_str(&format!(
         "        {element_type} shuffled = __shfl_down_sync(0xffffffffu, accumulator, shift);\n"
     ));
-    let shuffle_expr = shuffle_combine_expr(reduce_op, "accumulator", "shuffled");
+    let shuffle_expr = shuffle_combine_expr(resolved.node, reduce_op, "accumulator", "shuffled")?;
     source.push_str(&format!("        accumulator = {shuffle_expr};\n"));
     source.push_str("    }\n");
 
@@ -1140,6 +1149,27 @@ fn push_cooperative_reduce_body(
         ));
     }
     source.push_str("    out[out_offset] = accumulator;\n");
+    Ok(())
+}
+
+/// Names `kind`'s own discriminant for [`EmitError::RenderKindMismatch`] --
+/// restated per backend module (`crate::wgsl` carries its own copy) the same
+/// way `reduce_epilogue_is_identity`'s doc explains this crate restates
+/// small per-module helpers rather than exposing `proxima_tensor`'s private
+/// original.
+fn bound_op_kind_name(kind: &BoundOpKind) -> &'static str {
+    match kind {
+        BoundOpKind::CachedAttention { .. } => "cached_attention",
+        BoundOpKind::Elementwise { .. } => "elementwise",
+        BoundOpKind::Reduce {
+            keep: Keep::Reduce, ..
+        } => "keep::reduce fold",
+        BoundOpKind::Reduce {
+            keep: Keep::Scan, ..
+        } => "keep::scan fold",
+        BoundOpKind::Iota => "iota",
+        BoundOpKind::Constant { .. } => "constant",
+    }
 }
 
 fn render_reduce(
@@ -1154,7 +1184,11 @@ fn render_reduce(
         ..
     } = &resolved.kind
     else {
-        unreachable!("render_reduce is only called for a Keep::Reduce fold")
+        return Err(EmitError::RenderKindMismatch {
+            node: resolved.node,
+            expected: "keep::reduce fold",
+            found: bound_op_kind_name(&resolved.kind),
+        });
     };
     let rank = resolved.extents.len();
     let rank_len = rank.max(1);
@@ -1198,7 +1232,7 @@ fn render_reduce(
             rank,
             quantized,
             element_type,
-        );
+        )?;
     } else {
         push_serial_reduce_body(
             &mut source,
@@ -1217,7 +1251,7 @@ fn render_reduce(
             &gather_slots,
             quantized,
             element_type,
-        );
+        )?;
     }
     source.push_str("}\n");
     Ok(source)
@@ -1232,7 +1266,11 @@ fn render_scan(
         reduce_op, init, ..
     } = &resolved.kind
     else {
-        unreachable!("render_scan is only called for a Keep::Scan fold")
+        return Err(EmitError::RenderKindMismatch {
+            node: resolved.node,
+            expected: "keep::scan fold",
+            found: bound_op_kind_name(&resolved.kind),
+        });
     };
     let rank = resolved.extents.len();
     let rank_len = rank.max(1);
@@ -1327,7 +1365,12 @@ fn render_scan(
             ));
             source.push_str(&format!(
                 "            scratch[{index}] = {};\n",
-                operand_read(index, &format!("read_off{index}"), quantized[index])
+                operand_read(
+                    resolved.node,
+                    index,
+                    &format!("read_off{index}"),
+                    quantized[index]
+                )?
             ));
             source.push_str(&format!(
                 "            gather_running{index} += u.gather_index_strides[{slot}][{last_dim}];\n"
@@ -1335,7 +1378,12 @@ fn render_scan(
         } else {
             source.push_str(&format!(
                 "            scratch[{index}] = {};\n",
-                operand_read(index, &format!("running{index}"), quantized[index])
+                operand_read(
+                    resolved.node,
+                    index,
+                    &format!("running{index}"),
+                    quantized[index]
+                )?
             ));
         }
         source.push_str(&format!(
@@ -1893,5 +1941,46 @@ mod tests {
         let bound = bound.into_iter().next().expect("one bound op");
         let error = emit_cuda(&bound, &no_packed()).expect_err("f64 is rejected");
         assert!(matches!(error, EmitError::UnsupportedDType { .. }));
+    }
+
+    #[test]
+    fn render_reduce_rejects_an_elementwise_bound_op() {
+        let bound = elementwise_tanh_op(8);
+        let error = render_reduce(&bound, "entry", &[None])
+            .expect_err("an elementwise chain is not a Reduce fold");
+        assert!(matches!(
+            error,
+            EmitError::RenderKindMismatch {
+                expected: "keep::reduce fold",
+                found: "elementwise",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn render_scan_rejects_an_elementwise_bound_op() {
+        let bound = elementwise_tanh_op(8);
+        let error = render_scan(&bound, "entry", &[None])
+            .expect_err("an elementwise chain is not a Reduce fold");
+        assert!(matches!(
+            error,
+            EmitError::RenderKindMismatch {
+                expected: "keep::scan fold",
+                found: "elementwise",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn shuffle_combine_expr_rejects_a_non_cooperative_reduce_op() {
+        let bound = matmul_reduce_op(4, 8, ScalarOp::Subtract);
+        let error = shuffle_combine_expr(bound.node, ScalarOp::Subtract, "accumulator", "shuffled")
+            .expect_err("subtract is not associative-commutative");
+        assert!(matches!(
+            error,
+            EmitError::NonCooperativeReduceOp { op: "subtract", .. }
+        ));
     }
 }

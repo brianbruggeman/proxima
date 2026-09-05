@@ -108,4 +108,32 @@ pub enum EmitError {
     /// than silently dropping the fused work.
     #[error("node {node} cannot render its fused reduce epilogue: {reason}")]
     EpilogueNotSupported { node: NodeId, reason: &'static str },
+
+    /// A keep-specific renderer (`render_reduce`/`render_scan`/
+    /// `pack_reduce_uniforms`/`pack_scan_uniforms` and their wgpu/wgsl/cuda
+    /// counterparts) re-destructures a `resolved.kind` its own caller already
+    /// narrowed to one `Keep` variant -- this fires only if that upstream
+    /// guarantee itself broke, so it names an internal contract break rather
+    /// than a caller-supplied program's shape. No existing variant describes
+    /// that class: `UnsupportedOpKind`/`CudaUnsupportedOpKind` reject a
+    /// caller's `BoundOpKind`, not a renderer's own precondition.
+    #[error("node {node} reached a {expected} renderer with kind {found}")]
+    RenderKindMismatch {
+        node: NodeId,
+        expected: &'static str,
+        found: &'static str,
+    },
+
+    /// A cooperative-reduce combine helper (`shuffle_combine_expr`/
+    /// `cooperative_identity_token`/`subgroup_combine_fn` across the cuda and
+    /// wgsl backends) reached with a `reduce_op` its own caller's
+    /// `is_cooperative_reduce_op`/`reduce_is_cooperative` gate should have
+    /// excluded already -- the same internal-contract class as
+    /// [`Self::RenderKindMismatch`], scoped to the op axis instead of the
+    /// kind axis, so it earns its own variant rather than overloading that
+    /// one with an unrelated `found` field.
+    #[error(
+        "node {node} reached a cooperative-reduce combine with op {op}, which is not associative-commutative"
+    )]
+    NonCooperativeReduceOp { node: NodeId, op: &'static str },
 }
