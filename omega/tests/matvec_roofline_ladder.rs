@@ -6,7 +6,32 @@
 //! dispatch shape (32-thread threadgroups, 4 rows per simdgroup
 //! [`PACKED_ROW_ROWS_PER_GROUP`], `dispatchThreads`), so a rung-to-rung
 //! bandwidth drop can be attributed to the specific thing that rung added
-//! rather than guessed at:
+//! rather than guessed at.
+//!
+//! **Amortization fix (this landing).** ROW 289 ran this ladder's first cut
+//! -- ONE dispatch over ONE `blk.0.ffn_up.weight` (33 MB) per timed command
+//! buffer -- and found every arm's GB/s figure was noise: at production's own
+//! ~180 GB/s ceiling, 33 MB takes ~0.18 ms of GPU time, BELOW the ~0.5 ms
+//! empty-dispatch fixed cost that same row measured, so every timed buffer
+//! was fixed-cost-and-scheduling-noise-dominated, not bandwidth-dominated
+//! (CoV 35-120%, 4x run-to-run swings, no rung nameable as a limiter). The
+//! fix is the same one production itself relies on: batch many independent
+//! dispatches into ONE timed command buffer so the fixed per-dispatch cost
+//! amortizes across real bandwidth. Every arm below now encodes
+//! [`WEIGHT_TENSOR_COUNT`] dispatches of its kernel -- one per real,
+//! DISTINCT `blk.{layer}.{ffn_up,ffn_gate}.weight` tensor across all
+//! [`FFN_LAYERS`] layers of the SAME real checkpoint -- into a single
+//! `computeCommandEncoder`, `endEncoding`s once, and times only the
+//! `commit()`-`waitUntilCompleted()` span around all of them, moving
+//! [`TOTAL_TIMED_BYTES`] per timed buffer (`MIN_TIMED_BYTES`'s own doc: two
+//! full orders of magnitude past the fixed-cost floor). An `empty` arm
+//! (`WEIGHT_TENSOR_COUNT` no-op dispatches, same batching) reports that fixed
+//! per-dispatch cost directly, alongside every bandwidth number, rather than
+//! leaving it to be inferred. `ffn_down.weight` is deliberately excluded from
+//! the per-layer sweep -- see [`FFN_TENSOR_KINDS`]'s own doc for the two
+//! independent reasons (a transposed shape and a mixed real quant codec in
+//! this checkpoint) neither of which this ladder's kernels can absorb without
+//! a second dispatch geometry, which is out of scope for this fix.
 //!
 //! - **L0 (`q4k_matvec_l0_streaming`)** -- production's exact addressing
 //!   (`ix`/`it`/`iq`/`ir`/`byte_base`/`low_index`, the same lane-spread
@@ -28,7 +53,14 @@
 //!   entry point `q4k_real_checkpoint_parity.rs` uses), so its MSL text is
 //!   whatever [`omega::msl::emit`] renders today -- byte-identical to
 //!   production by construction, not by copy-paste. This is the ladder's
-//!   ground truth.
+//!   ground truth. [`multi_tensor_matmul_program`] appends
+//!   [`WEIGHT_TENSOR_COUNT`] independent multiply+reduce chains, all sharing
+//!   ONE `activation` input node, into a SINGLE program -- `plan`/
+//!   `execute_plan` already encode a whole program's ops into one command
+//!   buffer (`omega::metal::execute_plan`'s own doc, `omega/src/
+//!   metal.rs:2000-2145`: one `computeCommandEncoder`, `endEncoding`d once
+//!   after every op), so this is the SAME batching every hand-dispatched arm
+//!   below does, through the public API instead of a hand-rolled encoder.
 //! - **L3 shape-sweep (`q4k_matvec_l3_shape`)** -- calls the SAME
 //!   `q4k_pair_dot` MSL function (again lifted verbatim from
 //!   [`omega::msl::Q4K_UNPACK_MSL`], not restated), but through a
@@ -44,40 +76,51 @@
 //!   divergence between the two L3 paths reads as a bug in this harness, not
 //!   a shape effect.
 //!
-//! Real weight bytes only (guiding-principles §9): `blk.0.ffn_up.weight`
-//! (14336 x 4096, `Q4_K`) from the same openchat-3.5-1210 checkpoint
+//! Real weight bytes only (guiding-principles §9): every layer's
+//! `blk.{0..31}.ffn_up.weight` and `blk.{0..31}.ffn_gate.weight` (`Q4_K`,
+//! `[ROWS, IN_DIM]` each) from the same openchat-3.5-1210 checkpoint
 //! `q4k_real_checkpoint_parity.rs`/`device_streaming_ceiling.rs` use, bound
 //! with the SAME no-copy mapping technique
 //! (`newBufferWithBytesNoCopy_length_options_deallocator` over the whole
 //! page-rounded `mmap`, `StorageModeShared`, offset-addressed per tensor --
 //! `device_streaming_ceiling.rs`'s own doc on `checkpoint_mapping_offset`'s
 //! one-buffer-many-offsets shape) for every hand-dispatched arm (L0/L1/L2/L3
-//! shape-sweep); the L3 baseline arm borrows the identical mmap'd byte slice
-//! as a [`proxima_tensor::QuantizedBlock::Q4K`] operand, which
+//! shape-sweep); the L3 baseline arm borrows the identical mmap'd byte
+//! slices as [`proxima_tensor::QuantizedBlock::Q4K`] operands, which
 //! `omega::metal::upload_packed_bytes`'s own `checkpoint_mapping_offset` arm
-//! resolves to the same no-copy technique when the slice is not itself
+//! resolves to the same no-copy technique when a slice is not itself
 //! page-aligned (real GGUF tensor offsets never are).
 //!
-//! GB/s for every arm (including the L3 baseline) is the full row-major byte
-//! extent of the swept tensor (`ROWS * ROW_BYTES`, all 144 bytes per Q4_K
-//! super-block) divided by measured wall time -- the same accounting
+//! GB/s for every non-`empty` arm is [`TOTAL_TIMED_BYTES`] -- the full
+//! row-major byte extent of ALL [`WEIGHT_TENSOR_COUNT`] swept tensors, all
+//! 144 bytes per Q4_K super-block, `ROWS * ROW_BYTES` each -- divided by
+//! measured wall time; the same per-tensor-byte accounting
 //! `device_streaming_ceiling.rs` and production's own decode-throughput
-//! number use, NOT a per-lane distinct-byte count (a lane's OWN issued loads
-//! only cover a narrower slice of each 144-byte block; a per-lane count
-//! would read smaller and would not be comparable to production's own GB/s
-//! figures). This keeps every rung directly comparable on the same axis.
+//! number use, summed across every tensor a timed buffer actually moved, NOT
+//! a per-lane distinct-byte count (a lane's OWN issued loads only cover a
+//! narrower slice of each 144-byte block; a per-lane count would read
+//! smaller and would not be comparable to production's own GB/s figures).
+//! This keeps every rung directly comparable on the same axis. The `empty`
+//! arm reports ns/dispatch instead -- it moves no weight bytes by design, so
+//! a GB/s figure for it would be meaningless.
 //!
-//! Timed by `commit()` -> `waitUntilCompleted()` around exactly one dispatch
-//! per repeat, 5 repeats per arm (`REPEATS`), nothing subtracted -- same
-//! convention as `device_streaming_ceiling.rs`. The L3 baseline arm is the
-//! one exception: it times `omega::metal::execute_plan` end to end (upload
-//! resolution + dispatch + readback) because assembling the emitted kernel's
-//! general uniform buffer by hand would risk diverging from the exact bytes
-//! this arm exists to be faithful to; the plan is built once and marked
-//! resident so repeats amortize upload as much as the public API allows.
-//! This is a documented scope limitation, not an oversight -- refining it
-//! (an `instrument`-gated per-op GPU timestamp, `execute_plan_op_timed`) is
-//! a candidate for the measurement slice, not this build slice.
+//! Timed by `commit()` -> `waitUntilCompleted()` around exactly
+//! [`WEIGHT_TENSOR_COUNT`] dispatches per repeat (one dispatch per real,
+//! distinct weight tensor, all encoded into ONE command buffer before that
+//! buffer is ever committed), 5 repeats per arm (`REPEATS`), nothing
+//! subtracted -- the encode loop itself (binding each dispatch's own weight
+//! offset and output offset) happens entirely BEFORE the timer starts, same
+//! convention `device_streaming_ceiling.rs` uses around its own single
+//! dispatch. The L3 baseline arm is the one exception: it times
+//! `omega::metal::execute_plan` end to end (upload resolution + all
+//! [`WEIGHT_TENSOR_COUNT`] dispatches + readback of every requested output)
+//! because assembling the emitted kernel's general uniform buffer by hand
+//! would risk diverging from the exact bytes this arm exists to be faithful
+//! to; the plan is built once and marked resident so repeats amortize upload
+//! as much as the public API allows. This is a documented scope limitation,
+//! not an oversight -- refining it (an `instrument`-gated per-op GPU
+//! timestamp, `execute_plan_op_timed`) is a candidate for the measurement
+//! slice, not this build slice.
 //!
 //! `#[ignore]`d: depends on a host-local openchat GGUF checkout outside this
 //! repo, same convention as `q4k_real_checkpoint_parity.rs`/
@@ -88,7 +131,7 @@
 
 use core::ffi::c_void;
 use core::ptr::NonNull;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io::{Read, Seek, SeekFrom};
 use std::os::fd::AsFd;
 use std::path::Path;
@@ -184,7 +227,7 @@ fn round_up_to_page(value: usize, page: usize) -> usize {
 /// Byte size and shape of a real tensor located in the checkpoint's own
 /// header -- restated from `q4k_real_checkpoint_parity.rs`'s
 /// `real_tensor_bytes`, but returning the byte RANGE rather than a copied
-/// `Vec`: every hand-dispatched arm in this file binds the tensor no-copy
+/// `Vec`: every hand-dispatched arm in this file binds every tensor no-copy
 /// straight off the `mmap`, so copying its bytes here would defeat the
 /// point.
 struct RealTensor {
@@ -274,6 +317,23 @@ fn locate_real_tensor(
     })
 }
 
+/// Every real `blk.{layer}.{kind}.weight` tensor this ladder sweeps, in
+/// dispatch order (layer-major: `blk.0.ffn_up`, `blk.0.ffn_gate`,
+/// `blk.1.ffn_up`, ...) -- the SAME order every arm below encodes its
+/// dispatches in, so index 0 always names `blk.0.ffn_up.weight` (the tensor
+/// this file's parity checks are anchored to) in every arm.
+fn locate_ffn_weight_tensors(parsed: &ParsedGguf, file_len: u64) -> Option<Vec<(String, RealTensor)>> {
+    let mut tensors = Vec::with_capacity(WEIGHT_TENSOR_COUNT);
+    for layer in 0..FFN_LAYERS {
+        for kind in FFN_TENSOR_KINDS {
+            let name = format!("blk.{layer}.{kind}.weight");
+            let tensor = locate_real_tensor(parsed, file_len, &name, GgmlType::Q4_K)?;
+            tensors.push((name, tensor));
+        }
+    }
+    Some(tensors)
+}
+
 // ---- production shape constants, restated per the same posture
 // `omega::msl::Q4K_BLOCK_BYTES`'s own doc establishes (this crate's own
 // public consts pinned by a dedicated unpack test; the two private
@@ -290,8 +350,63 @@ const ROWS: usize = 14336;
 const IN_DIM: usize = 4096;
 const BLOCKS_PER_ROW: usize = IN_DIM / Q4K_BLOCK_ELEMENTS;
 const ROW_BYTES: usize = BLOCKS_PER_ROW * Q4K_BLOCK_BYTES;
+/// Bytes moved by dispatching one arm's kernel over ONE `[ROWS, IN_DIM]`
+/// `Q4_K` tensor.
 const TOTAL_WEIGHT_BYTES: u64 = (ROWS * ROW_BYTES) as u64;
 const TOTAL_SIMDGROUPS: usize = ROWS / PACKED_ROWS_PER_GROUP;
+
+/// This checkpoint's real layer count (`blk.0` through `blk.31`, confirmed
+/// against the real file: `strings` over its header lists exactly 32
+/// `blk.{n}.ffn_gate.weight` names) -- Mistral-7B shape, dense SwiGLU FFN
+/// per layer (`ffn_gate`/`ffn_up`/`ffn_down`), no MoE router.
+const FFN_LAYERS: usize = 32;
+
+/// `ffn_down.weight` is deliberately EXCLUDED from this ladder's per-layer
+/// sweep, for two independent reasons, either one sufficient on its own:
+///
+/// 1. **Transposed shape.** `blk.0.ffn_down.weight` is `in_dim=14336,
+///    out_dim=4096` in this checkpoint (`proxima-tensor/docs/discipline.md`
+///    ROW 63's own doc on that exact tensor) -- the reverse of `ffn_up`/
+///    `ffn_gate`'s `in_dim=4096, out_dim=14336` this ladder's `ROWS`/
+///    `IN_DIM`/`TOTAL_SIMDGROUPS` constants are sized for. Sweeping it would
+///    need a SECOND dispatch geometry (`ROWS=4096`, different
+///    `BLOCKS_PER_ROW`) this file's hand-written L0/L1/L2/L3-shape kernels
+///    do not carry.
+/// 2. **Mixed real quant codec.** 4 of this checkpoint's 32 `ffn_down`
+///    tensors are `Q5_K`, not `Q4_K` (same ROW 63 inventory: `Q4_K x217,
+///    F32 x65, Q5_K x8 [4 attn_v + 4 ffn_down], Q6_K x1`) -- and Metal has
+///    no `Q5_K` unpack kernel at all (`omega::metal`'s own `"metal has no
+///    q5_k/q6_k unpack kernel yet"` error string). Running those 4 layers'
+///    real bytes through this file's `Q4_K`-only kernels would silently
+///    mislabel their codec rather than measure real `Q4_K` bandwidth.
+///
+/// `ffn_up` + `ffn_gate` alone, both real, uniformly-shaped
+/// (`in_dim=4096, out_dim=14336`), uniformly-`Q4_K` across all 32 layers,
+/// already clear [`MIN_TIMED_BYTES`] -- the amortization floor this fix
+/// exists for -- without either compromise.
+const FFN_TENSOR_KINDS: [&str; 2] = ["ffn_up", "ffn_gate"];
+
+/// One real, distinct weight tensor swept per timed command buffer, per arm
+/// -- `FFN_LAYERS * FFN_TENSOR_KINDS.len()`.
+const WEIGHT_TENSOR_COUNT: usize = FFN_LAYERS * FFN_TENSOR_KINDS.len();
+
+/// Bytes moved by ONE timed command buffer once every [`WEIGHT_TENSOR_COUNT`]
+/// dispatch is encoded into it -- this is the number [`gbps_samples`]
+/// divides wall time by for every non-`empty` arm.
+const TOTAL_TIMED_BYTES: u64 = TOTAL_WEIGHT_BYTES * WEIGHT_TENSOR_COUNT as u64;
+
+/// The floor this whole fix exists to clear (ROW 289's own honest read): at
+/// production's own ~180 GB/s ceiling a buffer this large takes
+/// `MIN_TIMED_BYTES / 180e9` ~= 11.1 ms, two orders of magnitude past the
+/// ~0.5 ms empty-dispatch fixed cost that row measured -- GB/s is
+/// bandwidth-dominated, not fixed-cost-dominated, by construction. 2 GB
+/// decimal (`1e9`, this file's own [`gbps_samples`] unit), NOT 2 GiB.
+const MIN_TIMED_BYTES: u64 = 2_000_000_000;
+
+const _: () = assert!(
+    TOTAL_TIMED_BYTES >= MIN_TIMED_BYTES,
+    "WEIGHT_TENSOR_COUNT must move at least MIN_TIMED_BYTES per timed command buffer"
+);
 
 const REPEATS: usize = 5;
 const PARITY_ROWS: usize = 64;
@@ -543,6 +658,25 @@ kernel void q4k_matvec_l3_shape(
 }
 "#;
 
+/// The `empty` arm's kernel -- reads no weight bytes at all, writes one word
+/// so the dispatch is not dead-code-eliminated. Same 32-thread threadgroup
+/// convention every other arm uses. See this file's module doc for why this
+/// arm exists (reporting the fixed per-dispatch cost ROW 289's floor bug was
+/// hiding).
+const EMPTY_KERNEL_SOURCE: &str = r#"
+#include <metal_stdlib>
+using namespace metal;
+
+kernel void q4k_matvec_empty(
+    device uint* out [[buffer(0)]],
+    uint tid [[thread_position_in_grid]])
+{
+    if (tid == 0u) {
+        out[0] = 1u;
+    }
+}
+"#;
+
 /// same `#include`/`using namespace` preamble `omega::msl::emit` itself
 /// prepends before `Q4K_UNPACK_MSL` (`omega/src/msl.rs:2355-2356`) --
 /// `Q4K_UNPACK_MSL` is bare body text, not a compilable translation unit on
@@ -644,21 +778,23 @@ fn no_copy_buffer_over_whole_mapping(
     .expect("device wraps the real checkpoint mapping no-copy")
 }
 
-fn bind_buffers(
-    encoder: &ProtocolObject<dyn MTLComputeCommandEncoder>,
-    buffers: &[(&ProtocolObject<dyn MTLBuffer>, usize)],
-) {
-    for (index, (buffer, offset)) in buffers.iter().enumerate() {
-        unsafe {
-            encoder.setBuffer_offset_atIndex(Some(*buffer), *offset, index);
-        }
-    }
-}
-
-fn time_dispatch_threads(
+/// Encodes `weight_offsets.len()` dispatches of `pipeline` into ONE command
+/// buffer -- L0/L1/L2's buffer layout (`weight@0`, per-dispatch `output@1`
+/// at `dispatch_index * output_dispatch_stride_bytes`, fixed `uniform@2`) --
+/// then times exactly the `commit()`-`waitUntilCompleted()` span around all
+/// of them (module doc: the encode loop above it is never timed).
+// each argument is a distinct real Metal buffer/geometry parameter this
+// batched dispatch needs bound per-call; splitting them into a struct would
+// not reduce what a caller has to supply.
+#[allow(clippy::too_many_arguments)]
+fn time_batch_l0l1l2(
     queue: &ProtocolObject<dyn MTLCommandQueue>,
     pipeline: &ProtocolObject<dyn MTLComputePipelineState>,
-    buffers: &[(&ProtocolObject<dyn MTLBuffer>, usize)],
+    weight: &ProtocolObject<dyn MTLBuffer>,
+    weight_offsets: &[usize],
+    output: &ProtocolObject<dyn MTLBuffer>,
+    output_dispatch_stride_bytes: usize,
+    uniform: &ProtocolObject<dyn MTLBuffer>,
     grid_threads: usize,
     threadgroup_width: usize,
 ) -> Duration {
@@ -667,7 +803,6 @@ fn time_dispatch_threads(
         .computeCommandEncoder()
         .expect("command buffer refused to hand out a compute encoder");
     encoder.setComputePipelineState(pipeline);
-    bind_buffers(&encoder, buffers);
     let grid = MTLSize {
         width: grid_threads,
         height: 1,
@@ -678,7 +813,18 @@ fn time_dispatch_threads(
         height: 1,
         depth: 1,
     };
-    encoder.dispatchThreads_threadsPerThreadgroup(grid, threadgroup);
+    for (dispatch_index, &weight_offset) in weight_offsets.iter().enumerate() {
+        unsafe {
+            encoder.setBuffer_offset_atIndex(Some(weight), weight_offset, 0);
+            encoder.setBuffer_offset_atIndex(
+                Some(output),
+                dispatch_index * output_dispatch_stride_bytes,
+                1,
+            );
+            encoder.setBuffer_offset_atIndex(Some(uniform), 0, 2);
+        }
+        encoder.dispatchThreads_threadsPerThreadgroup(grid, threadgroup);
+    }
     encoder.endEncoding();
     let started = Instant::now();
     command_buffer.commit();
@@ -686,10 +832,74 @@ fn time_dispatch_threads(
     started.elapsed()
 }
 
-fn time_dispatch_threadgroups(
+/// L3 shape-sweep's buffer layout (`weight@0`, fixed `activation@1`,
+/// per-dispatch `output@2`, fixed `uniform@3`), `dispatchThreads` variant.
+// each argument is a distinct real Metal buffer/geometry parameter this
+// batched dispatch needs bound per-call; splitting them into a struct would
+// not reduce what a caller has to supply.
+#[allow(clippy::too_many_arguments)]
+fn time_batch_l3_shape_threads(
     queue: &ProtocolObject<dyn MTLCommandQueue>,
     pipeline: &ProtocolObject<dyn MTLComputePipelineState>,
-    buffers: &[(&ProtocolObject<dyn MTLBuffer>, usize)],
+    weight: &ProtocolObject<dyn MTLBuffer>,
+    weight_offsets: &[usize],
+    activation: &ProtocolObject<dyn MTLBuffer>,
+    output: &ProtocolObject<dyn MTLBuffer>,
+    output_dispatch_stride_bytes: usize,
+    uniform: &ProtocolObject<dyn MTLBuffer>,
+    grid_threads: usize,
+    threadgroup_width: usize,
+) -> Duration {
+    let command_buffer = queue.commandBuffer().expect("command buffer");
+    let encoder = command_buffer
+        .computeCommandEncoder()
+        .expect("command buffer refused to hand out a compute encoder");
+    encoder.setComputePipelineState(pipeline);
+    let grid = MTLSize {
+        width: grid_threads,
+        height: 1,
+        depth: 1,
+    };
+    let threadgroup = MTLSize {
+        width: threadgroup_width,
+        height: 1,
+        depth: 1,
+    };
+    for (dispatch_index, &weight_offset) in weight_offsets.iter().enumerate() {
+        unsafe {
+            encoder.setBuffer_offset_atIndex(Some(weight), weight_offset, 0);
+            encoder.setBuffer_offset_atIndex(Some(activation), 0, 1);
+            encoder.setBuffer_offset_atIndex(
+                Some(output),
+                dispatch_index * output_dispatch_stride_bytes,
+                2,
+            );
+            encoder.setBuffer_offset_atIndex(Some(uniform), 0, 3);
+        }
+        encoder.dispatchThreads_threadsPerThreadgroup(grid, threadgroup);
+    }
+    encoder.endEncoding();
+    let started = Instant::now();
+    command_buffer.commit();
+    command_buffer.waitUntilCompleted();
+    started.elapsed()
+}
+
+/// Same layout as [`time_batch_l3_shape_threads`], `dispatchThreadgroups`
+/// variant.
+// each argument is a distinct real Metal buffer/geometry parameter this
+// batched dispatch needs bound per-call; splitting them into a struct would
+// not reduce what a caller has to supply.
+#[allow(clippy::too_many_arguments)]
+fn time_batch_l3_shape_threadgroups(
+    queue: &ProtocolObject<dyn MTLCommandQueue>,
+    pipeline: &ProtocolObject<dyn MTLComputePipelineState>,
+    weight: &ProtocolObject<dyn MTLBuffer>,
+    weight_offsets: &[usize],
+    activation: &ProtocolObject<dyn MTLBuffer>,
+    output: &ProtocolObject<dyn MTLBuffer>,
+    output_dispatch_stride_bytes: usize,
+    uniform: &ProtocolObject<dyn MTLBuffer>,
     threadgroup_count: usize,
     threadgroup_width: usize,
 ) -> Duration {
@@ -698,7 +908,6 @@ fn time_dispatch_threadgroups(
         .computeCommandEncoder()
         .expect("command buffer refused to hand out a compute encoder");
     encoder.setComputePipelineState(pipeline);
-    bind_buffers(&encoder, buffers);
     let grid = MTLSize {
         width: threadgroup_count,
         height: 1,
@@ -709,7 +918,59 @@ fn time_dispatch_threadgroups(
         height: 1,
         depth: 1,
     };
-    encoder.dispatchThreadgroups_threadsPerThreadgroup(grid, threadgroup);
+    for (dispatch_index, &weight_offset) in weight_offsets.iter().enumerate() {
+        unsafe {
+            encoder.setBuffer_offset_atIndex(Some(weight), weight_offset, 0);
+            encoder.setBuffer_offset_atIndex(Some(activation), 0, 1);
+            encoder.setBuffer_offset_atIndex(
+                Some(output),
+                dispatch_index * output_dispatch_stride_bytes,
+                2,
+            );
+            encoder.setBuffer_offset_atIndex(Some(uniform), 0, 3);
+        }
+        encoder.dispatchThreadgroups_threadsPerThreadgroup(grid, threadgroup);
+    }
+    encoder.endEncoding();
+    let started = Instant::now();
+    command_buffer.commit();
+    command_buffer.waitUntilCompleted();
+    started.elapsed()
+}
+
+/// The `empty` arm: `count` dispatches of a kernel that reads no weight
+/// bytes at all, encoded into ONE command buffer the same way every other
+/// arm is -- reports the fixed per-dispatch floor ROW 289 found dominating
+/// every arm's GB/s before this fix (module doc).
+fn time_batch_empty(
+    queue: &ProtocolObject<dyn MTLCommandQueue>,
+    pipeline: &ProtocolObject<dyn MTLComputePipelineState>,
+    output: &ProtocolObject<dyn MTLBuffer>,
+    count: usize,
+    grid_threads: usize,
+    threadgroup_width: usize,
+) -> Duration {
+    let command_buffer = queue.commandBuffer().expect("command buffer");
+    let encoder = command_buffer
+        .computeCommandEncoder()
+        .expect("command buffer refused to hand out a compute encoder");
+    encoder.setComputePipelineState(pipeline);
+    let grid = MTLSize {
+        width: grid_threads,
+        height: 1,
+        depth: 1,
+    };
+    let threadgroup = MTLSize {
+        width: threadgroup_width,
+        height: 1,
+        depth: 1,
+    };
+    for dispatch_index in 0..count {
+        unsafe {
+            encoder.setBuffer_offset_atIndex(Some(output), dispatch_index * size_of::<u32>(), 0);
+        }
+        encoder.dispatchThreads_threadsPerThreadgroup(grid, threadgroup);
+    }
     encoder.endEncoding();
     let started = Instant::now();
     command_buffer.commit();
@@ -730,27 +991,49 @@ fn mean_and_cov(samples: &[f64]) -> (f64, f64) {
     (mean, cov)
 }
 
-fn gbps_samples(elapsed_samples: &[Duration]) -> Vec<f64> {
+fn gbps_samples(elapsed_samples: &[Duration], total_bytes: u64) -> Vec<f64> {
     elapsed_samples
         .iter()
-        .map(|elapsed| TOTAL_WEIGHT_BYTES as f64 / elapsed.as_secs_f64() / 1e9)
+        .map(|elapsed| total_bytes as f64 / elapsed.as_secs_f64() / 1e9)
         .collect()
 }
 
-/// `[rows, k] x [k, 1] -> [rows, 1]`, same shape
-/// `q4k_real_checkpoint_parity.rs`'s own `matmul_program` builds -- named
-/// inputs here (`mark_resident` matches by name) since this file's L3
-/// baseline arm reuses one [`omega::metal::Plan`] across repeats.
-fn matmul_program(rows: u32, k: u32, weight_dtype: DType) -> (Vec<Op>, NodeId) {
+fn ns_per_dispatch_samples(elapsed_samples: &[Duration], dispatch_count: usize) -> Vec<f64> {
+    elapsed_samples
+        .iter()
+        .map(|elapsed| elapsed.as_secs_f64() * 1e9 / dispatch_count as f64)
+        .collect()
+}
+
+/// The multi-tensor sibling of the single-tensor `[rows,k]x[k,1]->[rows,1]`
+/// program every prior real-checkpoint parity test in this crate builds
+/// (`q4k_real_checkpoint_parity.rs`'s own `matmul_program`):
+/// `weight_names.len()` independent `Op::Input`+multiply+reduce chains, ALL
+/// sharing the ONE `activation` `Op::Input` node, appended into a SINGLE
+/// program so `omega::metal::plan`/`execute_plan` encode every one of them
+/// into the SAME command buffer (this file's module doc). Named inputs here
+/// (`Plan::mark_resident` matches by name) so the caller can mark every
+/// weight AND the shared activation resident across repeats.
+fn multi_tensor_matmul_program(
+    weight_names: &[String],
+    rows: u32,
+    k: u32,
+    weight_dtype: DType,
+) -> (Vec<Op>, Vec<NodeId>) {
     let mut program = Vec::new();
-    let weight = append(
-        &mut program,
-        Op::Input {
-            dtype: weight_dtype,
-            shape: vec![Extent::Static(rows), Extent::Static(k)],
-            name: Some("weight".into()),
-        },
-    );
+    let weight_nodes: Vec<NodeId> = weight_names
+        .iter()
+        .map(|name| {
+            append(
+                &mut program,
+                Op::Input {
+                    dtype: weight_dtype,
+                    shape: vec![Extent::Static(rows), Extent::Static(k)],
+                    name: Some(name.clone()),
+                },
+            )
+        })
+        .collect();
     let activation = append(
         &mut program,
         Op::Input {
@@ -759,32 +1042,36 @@ fn matmul_program(rows: u32, k: u32, weight_dtype: DType) -> (Vec<Op>, NodeId) {
             name: Some("activation".into()),
         },
     );
-    let product = append(
-        &mut program,
-        Op::Elementwise {
-            dtype: DType::Float32,
-            body: ScalarOp::Multiply,
-            operands: vec![
-                (weight, IndexMap::Affine(map::projection(3, &[0, 2]))),
-                (activation, IndexMap::Affine(map::projection(3, &[2, 1]))),
-            ],
-            name: None,
-        },
-    );
-    let sum = append(
-        &mut program,
-        Op::Reduce(Reduce {
-            dtype: DType::Float32,
-            body: ScalarOp::Add,
-            init: ReduceInit::Zero,
-            operand: product,
-            in_map: IndexMap::Affine(map::projection(3, &[0, 1, 2])),
-            out_map: IndexMap::Affine(map::projection(3, &[0, 1])),
-            keep: Keep::Reduce,
-            name: Some("q4k_ladder_matmul".into()),
-        }),
-    );
-    (program, sum)
+    let mut sums = Vec::with_capacity(weight_nodes.len());
+    for (index, weight) in weight_nodes.into_iter().enumerate() {
+        let product = append(
+            &mut program,
+            Op::Elementwise {
+                dtype: DType::Float32,
+                body: ScalarOp::Multiply,
+                operands: vec![
+                    (weight, IndexMap::Affine(map::projection(3, &[0, 2]))),
+                    (activation, IndexMap::Affine(map::projection(3, &[2, 1]))),
+                ],
+                name: None,
+            },
+        );
+        let sum = append(
+            &mut program,
+            Op::Reduce(Reduce {
+                dtype: DType::Float32,
+                body: ScalarOp::Add,
+                init: ReduceInit::Zero,
+                operand: product,
+                in_map: IndexMap::Affine(map::projection(3, &[0, 1, 2])),
+                out_map: IndexMap::Affine(map::projection(3, &[0, 1])),
+                keep: Keep::Reduce,
+                name: Some(format!("q4k_ladder_matmul_{index}")),
+            }),
+        );
+        sums.push(sum);
+    }
+    (program, sums)
 }
 
 fn cpu_reference_first_rows(weight_bytes: &[u8], activation: &[f32]) -> Vec<f32> {
@@ -865,28 +1152,32 @@ fn matvec_roofline_ladder_l0_through_l3_and_shape_sweep() {
         eprintln!("real gguf file not found at {path_string}; test skipped");
         return;
     };
-    let Some(tensor) = locate_real_tensor(&parsed, file_len, "blk.0.ffn_up.weight", GgmlType::Q4_K)
-    else {
+    let Some(ffn_tensors) = locate_ffn_weight_tensors(&parsed, file_len) else {
         return;
     };
-    assert_eq!(
-        tensor.in_dim, IN_DIM,
-        "blk.0.ffn_up.weight in_dim must match the {IN_DIM} this ladder is sized for"
-    );
-    assert_eq!(
-        tensor.out_dim, ROWS,
-        "blk.0.ffn_up.weight out_dim must match the {ROWS} this ladder is sized for"
-    );
-    assert_eq!(
-        tensor.byte_len as usize,
-        ROWS * ROW_BYTES,
-        "declared tensor byte length matches rows*row_bytes"
-    );
+    assert_eq!(ffn_tensors.len(), WEIGHT_TENSOR_COUNT, "every layer's ffn_up/ffn_gate must resolve");
+    for (name, tensor) in &ffn_tensors {
+        assert_eq!(
+            tensor.in_dim, IN_DIM,
+            "{name} in_dim must match the {IN_DIM} this ladder is sized for"
+        );
+        assert_eq!(
+            tensor.out_dim, ROWS,
+            "{name} out_dim must match the {ROWS} this ladder is sized for"
+        );
+        assert_eq!(
+            tensor.byte_len as usize,
+            ROWS * ROW_BYTES,
+            "{name} declared tensor byte length matches rows*row_bytes"
+        );
+    }
+    let weight_names: Vec<String> = ffn_tensors.iter().map(|(name, _)| name.clone()).collect();
+    let weight_offsets: Vec<usize> = ffn_tensors.iter().map(|(_, tensor)| tensor.byte_offset as usize).collect();
 
     let mapped = MappedFile::open(path).expect("mmap the real openchat checkpoint");
-    let weight_offset = tensor.byte_offset as usize;
+    let parity_weight_offset = ffn_tensors[0].1.byte_offset as usize;
     let weight_bytes_for_cpu_reference =
-        &mapped.as_slice()[weight_offset..weight_offset + PARITY_ROWS * ROW_BYTES];
+        &mapped.as_slice()[parity_weight_offset..parity_weight_offset + PARITY_ROWS * ROW_BYTES];
 
     let device = MTLCreateSystemDefaultDevice().expect("a Metal device is available on this host");
     let queue = device.newCommandQueue().expect("device creates a command queue");
@@ -913,7 +1204,9 @@ fn matvec_roofline_ladder_l0_through_l3_and_shape_sweep() {
 
     println!(
         "=== bandwidth ladder: production dispatch shape ({default_threadgroup_width}-thread \
-         threadgroups, {PACKED_ROWS_PER_GROUP} rows/simdgroup, dispatchThreads) ==="
+         threadgroups, {PACKED_ROWS_PER_GROUP} rows/simdgroup, dispatchThreads), \
+         {WEIGHT_TENSOR_COUNT} real distinct tensors ({TOTAL_TIMED_BYTES} bytes) per timed \
+         command buffer ==="
     );
 
     let mut ladder_gbps: BTreeMap<&'static str, f64> = BTreeMap::new();
@@ -926,27 +1219,33 @@ fn matvec_roofline_ladder_l0_through_l3_and_shape_sweep() {
         MTLMathMode::Safe,
     );
     let l0_output = device
-        .newBufferWithLength_options(ROWS * size_of::<u32>(), MTLResourceOptions::StorageModeShared)
+        .newBufferWithLength_options(
+            WEIGHT_TENSOR_COUNT * ROWS * size_of::<u32>(),
+            MTLResourceOptions::StorageModeShared,
+        )
         .expect("device allocates L0's output buffer");
     {
         let mut elapsed_samples = Vec::with_capacity(REPEATS);
         for _ in 0..REPEATS {
-            let elapsed = time_dispatch_threads(
+            let elapsed = time_batch_l0l1l2(
                 &queue,
                 &l0_pipeline,
-                &[
-                    (&no_copy_weight, weight_offset),
-                    (&l0_output, 0),
-                    (&blocks_per_row_uniform, 0),
-                ],
+                &no_copy_weight,
+                &weight_offsets,
+                &l0_output,
+                ROWS * size_of::<u32>(),
+                &blocks_per_row_uniform,
                 default_grid_threads,
                 default_threadgroup_width,
             );
             elapsed_samples.push(elapsed);
         }
-        let samples = gbps_samples(&elapsed_samples);
+        let samples = gbps_samples(&elapsed_samples, TOTAL_TIMED_BYTES);
         let (mean, cov) = mean_and_cov(&samples);
-        println!("arm=L0_streaming mean_gbps={mean:.2} cov_pct={cov:.2} samples={samples:?}");
+        println!(
+            "arm=L0_streaming mean_gbps={mean:.2} cov_pct={cov:.2} samples={samples:?} \
+             dispatches={WEIGHT_TENSOR_COUNT} bytes={TOTAL_TIMED_BYTES}"
+        );
         ladder_gbps.insert("L0_streaming", mean);
     }
 
@@ -959,27 +1258,33 @@ fn matvec_roofline_ladder_l0_through_l3_and_shape_sweep() {
         MTLMathMode::Safe,
     );
     let l1_output = device
-        .newBufferWithLength_options(ROWS * size_of::<f32>(), MTLResourceOptions::StorageModeShared)
+        .newBufferWithLength_options(
+            WEIGHT_TENSOR_COUNT * ROWS * size_of::<f32>(),
+            MTLResourceOptions::StorageModeShared,
+        )
         .expect("device allocates L1's output buffer");
     {
         let mut elapsed_samples = Vec::with_capacity(REPEATS);
         for _ in 0..REPEATS {
-            let elapsed = time_dispatch_threads(
+            let elapsed = time_batch_l0l1l2(
                 &queue,
                 &l1_pipeline,
-                &[
-                    (&no_copy_weight, weight_offset),
-                    (&l1_output, 0),
-                    (&blocks_per_row_uniform, 0),
-                ],
+                &no_copy_weight,
+                &weight_offsets,
+                &l1_output,
+                ROWS * size_of::<f32>(),
+                &blocks_per_row_uniform,
                 default_grid_threads,
                 default_threadgroup_width,
             );
             elapsed_samples.push(elapsed);
         }
-        let samples = gbps_samples(&elapsed_samples);
+        let samples = gbps_samples(&elapsed_samples, TOTAL_TIMED_BYTES);
         let (mean, cov) = mean_and_cov(&samples);
-        println!("arm=L1_header_decode mean_gbps={mean:.2} cov_pct={cov:.2} samples={samples:?}");
+        println!(
+            "arm=L1_header_decode mean_gbps={mean:.2} cov_pct={cov:.2} samples={samples:?} \
+             dispatches={WEIGHT_TENSOR_COUNT} bytes={TOTAL_TIMED_BYTES}"
+        );
         ladder_gbps.insert("L1_header_decode", mean);
     }
 
@@ -992,78 +1297,100 @@ fn matvec_roofline_ladder_l0_through_l3_and_shape_sweep() {
         MTLMathMode::Safe,
     );
     let l2_output = device
-        .newBufferWithLength_options(ROWS * size_of::<f32>(), MTLResourceOptions::StorageModeShared)
+        .newBufferWithLength_options(
+            WEIGHT_TENSOR_COUNT * ROWS * size_of::<f32>(),
+            MTLResourceOptions::StorageModeShared,
+        )
         .expect("device allocates L2's output buffer");
     {
         let mut elapsed_samples = Vec::with_capacity(REPEATS);
         for _ in 0..REPEATS {
-            let elapsed = time_dispatch_threads(
+            let elapsed = time_batch_l0l1l2(
                 &queue,
                 &l2_pipeline,
-                &[
-                    (&no_copy_weight, weight_offset),
-                    (&l2_output, 0),
-                    (&blocks_per_row_uniform, 0),
-                ],
+                &no_copy_weight,
+                &weight_offsets,
+                &l2_output,
+                ROWS * size_of::<f32>(),
+                &blocks_per_row_uniform,
                 default_grid_threads,
                 default_threadgroup_width,
             );
             elapsed_samples.push(elapsed);
         }
-        let samples = gbps_samples(&elapsed_samples);
+        let samples = gbps_samples(&elapsed_samples, TOTAL_TIMED_BYTES);
         let (mean, cov) = mean_and_cov(&samples);
-        println!("arm=L2_dequant mean_gbps={mean:.2} cov_pct={cov:.2} samples={samples:?}");
+        println!(
+            "arm=L2_dequant mean_gbps={mean:.2} cov_pct={cov:.2} samples={samples:?} \
+             dispatches={WEIGHT_TENSOR_COUNT} bytes={TOTAL_TIMED_BYTES}"
+        );
         ladder_gbps.insert("L2_dequant", mean);
     }
 
     // ---- L3 baseline: the REAL production kernel, through the public
     // plan()/execute_plan() entry point -- byte-identical emitted MSL by
-    // construction. ----
-    let (program, sum) = matmul_program(ROWS as u32, IN_DIM as u32, DType::UInt8);
-    let weight_slice = &mapped.as_slice()[weight_offset..weight_offset + tensor.byte_len as usize];
-    let blocks = [
-        QuantizedBlock::Q4K(weight_slice),
-        QuantizedBlock::Float32(&activation),
-    ];
-    let mut plan = omega::metal::plan(&program, &[], &blocks, &[sum])
-        .expect("plan resolves the real production q4_k matmul");
-    let resident_names: std::collections::BTreeSet<&str> = ["weight", "activation"].into();
+    // construction, all WEIGHT_TENSOR_COUNT tensors in ONE program so
+    // execute_plan encodes all of them into ONE command buffer. ----
+    let (program, sums) = multi_tensor_matmul_program(&weight_names, ROWS as u32, IN_DIM as u32, DType::UInt8);
+    let weight_slices: Vec<&[u8]> = ffn_tensors
+        .iter()
+        .map(|(_, tensor)| {
+            let offset = tensor.byte_offset as usize;
+            &mapped.as_slice()[offset..offset + tensor.byte_len as usize]
+        })
+        .collect();
+    let mut blocks: Vec<QuantizedBlock<'_>> =
+        weight_slices.iter().map(|slice| QuantizedBlock::Q4K(slice)).collect();
+    blocks.push(QuantizedBlock::Float32(&activation));
+
+    let mut plan = omega::metal::plan(&program, &[], &blocks, &sums)
+        .expect("plan resolves the real production q4_k matmul over every ffn tensor");
+    let mut resident_names: BTreeSet<&str> = weight_names.iter().map(String::as_str).collect();
+    resident_names.insert("activation");
     plan.mark_resident(&resident_names);
 
-    let mut l3_baseline_output: Vec<f32> = Vec::new();
+    let mut l3_baseline_layer0_up: Vec<f32> = Vec::new();
     {
         let mut elapsed_samples = Vec::with_capacity(REPEATS);
         for _ in 0..REPEATS {
             let started = Instant::now();
             let evaluated = omega::metal::execute_plan(&plan, &blocks)
-                .expect("execute_plan runs the real production q4_k matmul");
+                .expect("execute_plan runs the real production q4_k matmul over every ffn tensor");
             elapsed_samples.push(started.elapsed());
-            l3_baseline_output = evaluated.root().to_vec();
+            l3_baseline_layer0_up = evaluated
+                .get(sums[0])
+                .map(|(data, _)| data.to_vec())
+                .expect("blk.0.ffn_up's own reduce node is a requested output");
         }
-        let samples = gbps_samples(&elapsed_samples);
+        let samples = gbps_samples(&elapsed_samples, TOTAL_TIMED_BYTES);
         let (mean, cov) = mean_and_cov(&samples);
         println!(
             "arm=L3_baseline_production_execute_plan mean_gbps={mean:.2} cov_pct={cov:.2} \
-             samples={samples:?} (end-to-end plan+dispatch+readback, see module doc)"
+             samples={samples:?} dispatches={WEIGHT_TENSOR_COUNT} bytes={TOTAL_TIMED_BYTES} \
+             (end-to-end plan+dispatch+readback, see module doc)"
         );
         ladder_gbps.insert("L3_baseline", mean);
     }
     assert_parity(
         "L3_baseline vs cpu_reference",
-        &l3_baseline_output[..PARITY_ROWS],
+        &l3_baseline_layer0_up[..PARITY_ROWS],
         &cpu_reference,
     );
 
     // ---- L3 shape sweep: same q4k_pair_dot body, hand-dispatched, varying
     // simdgroups/threadgroup, dispatchThreads vs dispatchThreadgroups, and
-    // MTLMathMode across three compiled libraries. ----
+    // MTLMathMode across three compiled libraries -- WEIGHT_TENSOR_COUNT
+    // dispatches per cell, one command buffer per cell. ----
     println!("=== L3 shape sweep (q4k_pair_dot, hand-dispatched) ===");
     let l3_shape_source_text = l3_shape_source();
     let l3_output = device
-        .newBufferWithLength_options(ROWS * size_of::<f32>(), MTLResourceOptions::StorageModeShared)
+        .newBufferWithLength_options(
+            WEIGHT_TENSOR_COUNT * ROWS * size_of::<f32>(),
+            MTLResourceOptions::StorageModeShared,
+        )
         .expect("device allocates the L3 shape-sweep output buffer");
 
-    let mut default_shape_output: Vec<f32> = Vec::new();
+    let mut default_shape_layer0_up: Vec<f32> = Vec::new();
     for math_arm in MATH_MODE_ARMS {
         let pipeline = compile_pipeline(
             &device,
@@ -1088,43 +1415,49 @@ fn matvec_roofline_ladder_l0_through_l3_and_shape_sweep() {
                 };
                 let mut elapsed_samples = Vec::with_capacity(REPEATS);
                 for _ in 0..REPEATS {
-                    let buffers: [(&ProtocolObject<dyn MTLBuffer>, usize); 4] = [
-                        (&no_copy_weight, weight_offset),
-                        (&activation_buffer, 0),
-                        (&l3_output, 0),
-                        (&blocks_per_row_uniform, 0),
-                    ];
                     let elapsed = match dispatch_mode {
-                        DispatchMode::Threads => time_dispatch_threads(
+                        DispatchMode::Threads => time_batch_l3_shape_threads(
                             &queue,
                             &pipeline,
-                            &buffers,
+                            &no_copy_weight,
+                            &weight_offsets,
+                            &activation_buffer,
+                            &l3_output,
+                            ROWS * size_of::<f32>(),
+                            &blocks_per_row_uniform,
                             grid_threads,
                             threadgroup_width,
                         ),
-                        DispatchMode::Threadgroups => time_dispatch_threadgroups(
+                        DispatchMode::Threadgroups => time_batch_l3_shape_threadgroups(
                             &queue,
                             &pipeline,
-                            &buffers,
+                            &no_copy_weight,
+                            &weight_offsets,
+                            &activation_buffer,
+                            &l3_output,
+                            ROWS * size_of::<f32>(),
+                            &blocks_per_row_uniform,
                             threadgroup_count,
                             threadgroup_width,
                         ),
                     };
                     elapsed_samples.push(elapsed);
                 }
-                let samples = gbps_samples(&elapsed_samples);
+                let samples = gbps_samples(&elapsed_samples, TOTAL_TIMED_BYTES);
                 let (mean, cov) = mean_and_cov(&samples);
                 println!(
                     "arm=L3_shape math_mode={:<8} simdgroups_per_tg={simdgroups_per_tg} \
                      dispatch={dispatch_name:<20} mean_gbps={mean:.2} cov_pct={cov:.2} \
-                     samples={samples:?}",
+                     samples={samples:?} dispatches={WEIGHT_TENSOR_COUNT} bytes={TOTAL_TIMED_BYTES}",
                     math_arm.name
                 );
 
-                let is_production_default =
-                    matches!(math_arm.name, "safe") && simdgroups_per_tg == 1 && matches!(dispatch_mode, DispatchMode::Threads);
+                let is_production_default = matches!(math_arm.name, "safe")
+                    && simdgroups_per_tg == 1
+                    && matches!(dispatch_mode, DispatchMode::Threads);
                 if is_production_default {
-                    default_shape_output = read_f32_buffer(&l3_output, ROWS);
+                    let full = read_f32_buffer(&l3_output, WEIGHT_TENSOR_COUNT * ROWS);
+                    default_shape_layer0_up = full[..ROWS].to_vec();
                     ladder_gbps.insert("L3_shape_default", mean);
                 }
             }
@@ -1132,14 +1465,39 @@ fn matvec_roofline_ladder_l0_through_l3_and_shape_sweep() {
     }
     assert_parity(
         "L3_shape default arm vs cpu_reference",
-        &default_shape_output[..PARITY_ROWS],
+        &default_shape_layer0_up[..PARITY_ROWS],
         &cpu_reference,
     );
     assert_parity(
         "L3_shape default arm vs L3_baseline",
-        &default_shape_output[..PARITY_ROWS],
-        &l3_baseline_output[..PARITY_ROWS],
+        &default_shape_layer0_up[..PARITY_ROWS],
+        &l3_baseline_layer0_up[..PARITY_ROWS],
     );
+
+    // ---- empty: WEIGHT_TENSOR_COUNT no-op dispatches, one command buffer
+    // -- the fixed per-dispatch cost every bandwidth arm above pays
+    // WEIGHT_TENSOR_COUNT times, reported directly instead of inferred. ----
+    println!("=== empty arm ({WEIGHT_TENSOR_COUNT} no-op dispatches, one command buffer) ===");
+    let empty_pipeline = compile_pipeline(&device, EMPTY_KERNEL_SOURCE, "q4k_matvec_empty", MTLMathMode::Safe);
+    let empty_output = device
+        .newBufferWithLength_options(
+            WEIGHT_TENSOR_COUNT * size_of::<u32>(),
+            MTLResourceOptions::StorageModeShared,
+        )
+        .expect("device allocates the empty arm's output buffer");
+    {
+        let mut elapsed_samples = Vec::with_capacity(REPEATS);
+        for _ in 0..REPEATS {
+            let elapsed = time_batch_empty(&queue, &empty_pipeline, &empty_output, WEIGHT_TENSOR_COUNT, 32, 32);
+            elapsed_samples.push(elapsed);
+        }
+        let ns_samples = ns_per_dispatch_samples(&elapsed_samples, WEIGHT_TENSOR_COUNT);
+        let (mean, cov) = mean_and_cov(&ns_samples);
+        println!(
+            "arm=empty mean_ns_per_dispatch={mean:.1} cov_pct={cov:.2} samples={ns_samples:?} \
+             dispatches={WEIGHT_TENSOR_COUNT}"
+        );
+    }
 
     println!("=== ladder ratios (limiter class = where the drop lands) ===");
     let l0 = ladder_gbps["L0_streaming"];
