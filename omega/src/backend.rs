@@ -429,16 +429,23 @@ pub fn execute_plan_named(
 /// [`metal::Plan::mark_resident`]'s own doc for the full mechanism and the
 /// soundness argument for why this needs a caller-supplied name set rather
 /// than being inferred from bytes alone. A no-op on [`Plan::Cpu`]: the CPU
-/// evaluator has no device buffer to cache.
-// leading underscore: only the metal arm below reads this, so a Linux
-// `cpu`-only build (metal cfg'd out) would otherwise warn on an unused
-// parameter -- the binding is still fully used wherever the metal arm exists.
-pub fn mark_resident(plan: &mut Plan, _resident_names: &std::collections::BTreeSet<&str>) {
+/// evaluator has no device buffer to cache — that no-op is the match arm
+/// below (`Plan::Cpu(_) => {}`), by construction, not this parameter being
+/// dropped at the signature.
+// `resident_names` is genuinely read by the metal arm below and genuinely
+// unread in a `cpu`-only build with `metal` cfg'd out (no such arm exists
+// there at all) -- the cfg_attr states that per-build fact directly instead
+// of leaving a permanent leading-underscore that reads as "always discarded".
+#[cfg_attr(
+    not(all(feature = "metal", target_os = "macos")),
+    allow(unused_variables, reason = "only the metal arm below reads this in this build")
+)]
+pub fn mark_resident(plan: &mut Plan, resident_names: &std::collections::BTreeSet<&str>) {
     match plan {
         #[cfg(feature = "cpu")]
         Plan::Cpu(_) => {}
         #[cfg(all(feature = "metal", target_os = "macos"))]
-        Plan::Metal(metal_plan) => metal_plan.mark_resident(_resident_names),
+        Plan::Metal(metal_plan) => metal_plan.mark_resident(resident_names),
         // v1's `wgpu_driver::WgpuPlan` re-uploads every block on every
         // `execute_plan` call -- see that module's own doc for why residency
         // caching is out of v1 scope.
