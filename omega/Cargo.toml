@@ -141,6 +141,14 @@ cuda = ["alloc"]
 # `#[cfg(feature = "instrument")]`, so an instrument-off build never pays the
 # `read_ticks()` call it would otherwise cost.
 instrument = ["metal", "proxima-tensor/instrument"]
+# Gates `omega/tests/plan_pipeline_alloc_count.rs`'s `#[global_allocator]`
+# proof that `execute_plan_with_placements` allocates zero times per step on
+# a plan-cache HIT. `proxima-test` (below, in `[dev-dependencies]`) is a
+# dev-only dependency regardless of this flag -- a `#[global_allocator]` is
+# process-wide, so `#[cfg(feature = "alloc-count")]` on the test file itself
+# is what keeps `CountingAllocator` out of every OTHER test binary in this
+# crate, not the dependency edge.
+alloc-count = ["metal"]
 # `simdgroup_matrix`-tiled Q4_K GEMM path (`msl.rs`'s `push_tiled_gemm_body`),
 # selected over the row-blocked packed path (`push_packed_row_blocked_body`)
 # only above `sized::TILED_GEMM_MIN_TOKENS` activation rows -- see that
@@ -439,6 +447,7 @@ proxima-telemetry = { workspace = true, features = ["alloc"] }
 # ROW 282 but kept so `omega/tests/metal_real_forward.rs` still builds under
 # any feature set that drops `metal` but keeps `test-support`.
 proxima-tensor = { path = "../proxima-tensor", features = ["config", "test-support", "cached-attention-streaming"] }
+proxima-test = { path = "../proxima-test", features = ["alloc-count"] }
 rustix.workspace = true
 tempfile.workspace = true
 toml.workspace = true
