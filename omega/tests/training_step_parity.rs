@@ -21,7 +21,18 @@
 //! like `backend_parity.rs`/`wgpu_parity.rs` gate them, so a build missing
 //! either feature or platform simply does not compile that arm's test.
 
-#![cfg(feature = "cpu")]
+// `cpu` is the oracle every arm compares against (module doc above), but an
+// oracle alone proves nothing: every #[test] in this file also needs `metal`
+// (on macOS) or `wgpu-backend` to have anything to compare it TO. Without
+// either GPU arm, every helper below (`build_training_step`, `run_one_step`,
+// ...) has no live caller -- `backend_parity.rs`/`wgpu_parity.rs` gate their
+// own single-backend files the identical way (`cpu` AND their one backend);
+// this file carries both arms, so the second half of the gate is an OR
+// across them instead of a single feature name.
+#![cfg(all(
+    feature = "cpu",
+    any(all(feature = "metal", target_os = "macos"), feature = "wgpu-backend")
+))]
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use std::collections::BTreeMap;
