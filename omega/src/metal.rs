@@ -1101,6 +1101,22 @@ fn hazard_step<Id: Eq + core::hash::Hash + Copy>(
 /// `classify_kind`'s match arms. Unset (`None`) in every production run,
 /// which is the ROW's in-buffer ablation harness's own arm-selection knob --
 /// see that row for the arm table.
+///
+/// `classify_kind`'s live return values, as of the `BoundOpKind::name()`
+/// delegation (`refactor(omega): classify_kind names the kind through the
+/// type`): `cached_attention`, `elementwise`, `iota`, `constant`,
+/// `keep::scan fold` (the four `BoundOpKind::name()`-delegated arms plus
+/// `Reduce { keep: Keep::Scan, .. }`), and `reduce-tiled-gemm` /
+/// `reduce-packed-row-blocked` / `reduce-cooperative` /
+/// `reduce-generic-scalar` / `reduce-unclassified` for `Reduce { keep:
+/// Keep::Reduce, .. }`. A stale substring (e.g. the pre-refactor
+/// `cached-attention` with a hyphen, which matches nothing today) is not
+/// rejected -- [`KindFilter::matches`] returns `false` for every op, so
+/// EVERY op is skipped and `encode_dispatch_calls` reads `0` for the whole
+/// run instead of isolating one kind. There is no separate accepted-values
+/// list to fall out of sync here; this list mirrors `classify_kind`'s match
+/// arms directly and must be re-read from there, not memorized, whenever
+/// `classify_kind` gains or renames an arm.
 #[cfg(feature = "instrument")]
 struct KindFilter {
     substrings: Vec<String>,
