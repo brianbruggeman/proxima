@@ -343,6 +343,166 @@ subset named above. Two more work metrics drop on the same tree without a number
 (quiet re-measure pending): `gpu_exec_ms` 30.643 → 29.300/step (ROW 283) and readback 97 → 1
 copies/token (ROW 284, `discipline.md:20897`).
 
+## 1.3 2026-09-04 reframing: the floor, the bytes, and the audit
+
+**Owner rules, verbatim, 2026-09-04** (session record; the less-work rule is already applied at
+ROWs 282/283/285):
+- "if we reduce the amount of work, even if that doesn't seem to move the wall clock, we should
+  keep it assuming the quality is the same"
+- "llama is not the floor"
+- "the hardware hit like 400GB/s"
+- "realistically, I'd love to 5x llama" / "that would require something insane and we'd need to
+  change the problem"
+- "pipe shaped, fsm x sansio + fsm x orchestration over pipes and also I want you to make sure
+  that we are using our risc architecture and algebra. it should be _generic_"
+  (`design-task.md:3-7`)
+
+These replace "close the gap to llama.cpp" as the standing target: llama.cpp is one measured
+incumbent, not the floor; the floor is bytes moved against the device's spec bandwidth.
+
+### 1.3.1 The floor
+
+| lane | ms/token | GB/s | % of 400 GB/s spec | provenance |
+|---|---|---|---|---|
+| hardware floor (4.169 GB/token at 400 GB/s spec) | 10.4 | 400 (spec) | 100% | DERIVED, `design-task.md:92`; bytes/token from the ROW 272 correction, `discipline.md:312` (`total_operand_bytes` 4.169 GB/step) |
+| llama.cpp b25346221 | 17.45 | 239 | 60% | MEASURED, `discipline.md:333-336` (17.445 ms/token, CoV 0.55%) |
+| default, main `af918bb` (ROW 286) | 33.0 | 126 | 32% | MEASURED, `discipline.md:333-334` (`step_wall_ms` 33.032 ms/token, CoV 0.52%) |
+| matvecs alone, in-buffer ablation (ROW 287, landing) | 23.24 | 179 | 45% | MEASURED, `audit-2026-09-04.md:22` pointer; ALL 27.04 ms / MATVEC 23.24 ms (225 ops) / NOT-MATVEC 4.05 ms, residual −0.25 ms |
+
+Owner target: "5x llama" = 3.5 ms/token. At the 400 GB/s spec that is ≤ 1.4 GB/token; at a
+realistic 300 GB/s ceiling, ≤ 1.0 GB/token (`design-task.md:90-93`). 3.5 ms is below the 10.4 ms
+hardware floor for the current 4.169 GB/token payload — the floor moves only if the payload
+does. This makes the standing work a bytes campaign, not a kernel campaign: multi-token passes
+(draft/verify amortizing the weight stream across k generated tokens), dynamic row elision /
+contextual sparsity on the FFN and projection matvecs, lower-bit codecs (Q4 → Q3/Q2/ternary), and
+`output.weight` (107.5 MB) top-k or tying. Each lever is lossy; `generated_text` byte-identical
+is not an available gate past this point. The gate becomes a quality metric (exact-match rate
+against the full model on a held-out prompt set) with a stated kill criterion, evaluated per
+lever, before the lever's bytes saved are counted (`design-task.md:103-106`).
+
+### 1.3.2 Dispatch census: 19 bound ops/layer, 616/token, why each stays separate
+
+Source: `proxima-tensor/src/spec.rs:3517-3921` (68 raw RISC ops/layer folded by
+`BoundOpBuilder`), reconciled to 616 on `af918bb` (`dispatch-census.md:1-3`).
+
+| # | node | kind | why separate |
+|---|---|---|---|
+| 1 | sum_squares (attn norm) | reduce-cooperative | reduce boundary, reduces never fuse (`spec.rs:12700`) |
+| 2 | normed | elementwise (6-op chain) | consumes a materialized reduce; broadcast s→sd |
+| 3-5 | q, k_new, v_new | reduce-packed-row-blocked | matvec |
+| 6-9 | rotated_{q,k}_{even,odd} | elementwise (3-op RoPE) | `is_identity_projection` fails on the 2i/2i+1 stride and the GQA group map `h=group*u+g` (`bind.rs:1153-1164`) |
+| 10 | attended | cached-attention | matcher `bind.rs:2295-2517` |
+| 11 | attn_out | reduce-packed-row-blocked | matvec |
+| 12 | residual1 | elementwise | `StillLive`: x read twice (`bind.rs:701,778`) |
+| 13 | sum_squares (ffn norm) | reduce-cooperative | as 1 |
+| 14 | normed2 | elementwise | as 2 |
+| 15-16 | gate, up | reduce-packed-row-blocked | matvec |
+| 17 | ffn_hidden (SwiGLU) | elementwise (6-op) | `quarantine_broadcast_operands`: child extent 14336 < reduce extent 14336x4096 (`bind.rs:935-973`) |
+| 18 | ffn_out | reduce-packed-row-blocked | matvec |
+| 19 | x_next | elementwise | `StillLive` |
+
+Tail: 2 iota, 1 mask elementwise, final norm (1 coop + 1 elementwise), lm_head matvec, 2
+constants. Totals per token: reduce-cooperative 65, packed-row 225, cached-attention 32,
+elementwise 290, constant 2, iota 2 (`dispatch-census.md:23`). Measured per-op profile (ROW
+281/282, serialized command buffers, biased high for small ops): cached-attention 3.515 ms,
+elementwise 2.978 ms, reduce-cooperative 0.851 ms, packed-row 24.991 ms (`dispatch-census.md:26-27`).
+
+llama.cpp b25346221 (zero fusion on ggml-Metal at this checkout): 23 ggml ops/layer × 32 + tail
+= 740 dispatches/token. We already dispatch fewer (616) with more work fused per dispatch
+(`dispatch-census.md:29-30`).
+
+Four fusion levers, stated as generic rules over the algebra, not model-specific matchers
+(`dispatch-census.md:32-49`):
+
+| lever | rule | removes/layer | removes/token | blocked by |
+|---|---|---|---|---|
+| epilogue fusion | an elementwise consumer of a Reduce whose iteration space equals the reduce's output space, with no other consumer, becomes the reduce's epilogue | 3 (residual1, x_next, ffn_hidden) | 96 | `BoundOpBuilder` only fuses elementwise INTO reduce operands (prologue), never out of them |
+| prologue-with-broadcast | relax `quarantine_broadcast_operands` for a per-row recompute cheaper than a materialization + dispatch | 2 (normed, normed2) | 64 | needs a cost bound comparing recompute against materialization |
+| RoPE fusion | fuse even/odd into one dispatch, then into the q/k matvec epilogue | 2 (one dispatch) / 4 (epilogue) | 64-128 | stride/group-map identity rule; `CachedLayerRoots` needs even/odd as separate outputs, consumed at 15+ sites (`spec.rs:2333`) |
+| reduce-with-broadcast epilogue | a two-phase threadgroup op: reduce then normalize in one dispatch | 2 (sum_squares ×2) | 64 | needs an IndexMap-aware epilogue, the same extension as epilogue fusion generalized |
+
+Ceiling if all four land: 19 → 8/layer (7 matvec + 1 attention) = 264/token (`dispatch-census.md:49`).
+
+### 1.3.3 MSL kernels against ggml: five structural differences, everything else identical
+
+Read on main `3b9735e`: dispatch shape, buffer binding, activation loads, uniform hoisting, and
+epilogue structure are structurally identical to ggml's Metal kernels. Five differences remain:
+
+1. per-iteration 64-bit address recompute inside the row loop, not hoisted (`omega/src/msl.rs:3363,3374`)
+2. two-`uchar` word loads where ggml loads one packed word (`omega/src/msl.rs:275-276`)
+3. no fast arm for Q6_K; every element goes through the general decode path (`omega/src/msl.rs:473-493`)
+4. `MTLMathMode::Safe` for parity (`omega/src/metal.rs:2339`) against ggml's fast-math default
+5. `other_stride` read at runtime per dispatch instead of baked into the generated source (`omega/src/msl.rs:3256`)
+
+### 1.3.4 Audit, main `3b9735e` (`audit-2026-09-04.md`, condensed, ranked by blast radius)
+
+Status column: FIX = a worker is fixing it on a named branch (§1.3.5); DESIGN = goes to the
+design tournament (§1.3.5); OWNER = the less-work rule already decides it.
+
+| # | finding | file:line | status |
+|---|---|---|---|
+| 1 | `BoundOpKind::CachedAttention` is a 10-field macro-op (attention semantics), not Op/ScalarOp/IndexMap structure; any other layout silently falls back | bind.rs:225-251 | DESIGN A |
+| 2 | `render_cached_attention` ignores operand `Layout.strides`; the matcher compensates with 8 literal stride tuples + rank gates | msl.rs:2578; bind.rs:2417-2474 | DESIGN A |
+| 3 | HazardTracker checks output identity from `placement` but records from `device_buffers` → WAW/WAR skipped when placement is None; `hazard_inputs` drops missing operands; stale pointers (ABA) after retire | metal.rs:1103 vs 1121; 1095-1100; 1131 | FIX fix/hazard-identity |
+| 4 | Hazard tests drive a hand-written copy of the loop (`encode_with_barrier_bookkeeping`) | metal.rs:4783-4795 | FIX fix/hazard-identity |
+| 5 | Single-range fused kernel runs 2t iterations for t of work (cached_lower=i64::MAX, duplicated operands 4/5/7) | bind.rs:2504-2510; msl.rs:2586 | DESIGN A |
+| 6 | `operands.len() == 8 \| 9` is a runtime state discriminator agreed across 4 files | bind.rs:237; cpu.rs:4847; msl.rs:2030,2543 | DESIGN A |
+| 7 | `classify_kind` substring-greps generated MSL to recover the emitter's routing; profiler groups by &str | metal.rs:1631-1727 | DESIGN B |
+| 8 | `RMS_EPSILON = 1e-5` hardcoded, ignores checkpoint metadata (qwen35/lfm2 read it) | generate.rs:115; bind.rs:3306 | FIX fix/decode-path-correctness |
+| 9 | Nine executor entry points = one driver × {named, placed, timed}; upload loop copy-pasted; none a Pipe | metal.rs:519..1613 | DESIGN B |
+| 10 | Per-token allocation storm in the decode closure; no allocation-counter test | generate.rs:2301-2306,2323,2361,2400,2504; metal.rs:1032,1073,1095 | DESIGN B |
+| 11 | `plan()` performs device IO (device_and_queue, arena, uniform buffers); `Plan` two-phase init via `mark_resident`; no builder/config surface | metal.rs:490-500, 373 | DESIGN B (arena scoping: FIX refactor/plan-cache-and-arena-scope) |
+| 12 | Arena built for every plan, used by 2 of 4 executors | metal.rs:490-500, 643-651 | FIX refactor/plan-cache-and-arena-scope |
+| 13 | Plan cache = one-entry map cleared on miss, copied ×3; `PlanCacheEntryVanished` is an impossible-state error | generate.rs:1417,1325,1373 | FIX refactor/plan-cache-and-arena-scope |
+| 14 | `cached_len_before` printed after the increment (both loops) | generate.rs:2049/2076, 2483/2510 | FIX fix/decode-path-correctness |
+| 15 | Op-timed profiler measures one-command-buffer-per-op, not production; decompositions built from it measure a different program | metal.rs:1509 | superseded by the in-buffer ablation (ROW 287) |
+| 16 | println!/eprintln! and per-step env reads in library code | metal.rs:1072-1082,3567,3617; generate.rs:135..2132 | FIX chore/metal-path-hygiene |
+| 17 | Arena cap prints "MG-3 KILL" and returns Ok | metal.rs:3617-3626 | FIX fix/decode-path-correctness |
+| 18 | ggml Q4_K port not in THIRD_PARTY.md | msl.rs:3728-3734 | FIX chore/metal-path-hygiene |
+| 19 | Bare tunables: ARENA_TRANSIENT_CAP, OUTPUT_POOL_MAX_PER_BUCKET, PACKED_ROWS_PER_GROUP, PACKED_ROW_NSG, TILED_GEMM_NSG, OP_PROFILE_TOP_N | metal.rs:3481,2474; msl.rs:1261,4433,1290; generate.rs:120 | FIX chore/metal-path-hygiene |
+| 20 | `KV_BUCKET_TOKENS` (Metal cache-key policy) lives in the IR crate | proxima-tensor/src/sized.rs | FIX refactor/plan-cache-and-arena-scope |
+| 21 | Seven `unreachable!` in production render/pack paths | metal.rs:2199,2259,2302; msl.rs:1110,1143,1378,2527 | FIX chore/metal-path-hygiene |
+| 22 | `fuse_cached_attention: bool` collapses "which fused kinds"; bind_plain + matchers run twice per plan | bind.rs:2635-2683 | DESIGN C |
+| 23 | Model-named program builders in library crates; TOML spec path exists and production ignores it; `CachedLayerRoots` positional; 23-arg builders; `cached_len` as Float32 | spec.rs:898..7184, 2333, 3517; generate.rs:624,731 | DESIGN C |
+| 24 | `finish` silently drops placed outputs from `Evaluated` | metal.rs:3985-3991 | FIX fix/decode-path-correctness |
+| 25 | Eight `thread_local! RefCell` globals + `register_checkpoint_mapping` side channel; counters' "exactly once per step" protocol unenforced | metal.rs:266..3266, 2957, 2719 | DESIGN B |
+| 26 | HazardTracker generic `Id` + hand `Default` exist only for the mirror test | metal.rs:839-857 | FIX fix/hazard-identity |
+| 27 | `metal` is a super-feature carrying 7 experiments; 13 `metal-*` flags with no matrix gate; cross-feature correctness in prose | omega/Cargo.toml; interop Cargo.toml:94-104 | OWNER (less-work rule keeps them default-on); matrix gate = open |
+| 28 | Positional/type-unsafe: `CachedLayerRoots` tuple, 23 NodeId params, 25+ `allow(too_many_arguments)` without why, `cached_len` Float32, per-token `zip` without re-validation | spec.rs:2333,3517; metal.rs:1039 | DESIGN C |
+| 29 | Barrier policy: reset both sets on any barrier, scope = all buffers; schedule is static per plan but recomputed per token; `memoryBarrierWithResources` exists | metal.rs:874-877, 1105 | measured card after the hazard fix lands |
+| 30 | `read_back` int dtypes reinterpreted as f32; `zero_placed_buffer` memsets full capacity on step 0; matcher operand lookup is a linear scan ×9 ×2 binds; `PlanUniforms` unsafe write invariant in prose only; `BufferArena::placement_for` parallel-array invariant in a comment | metal.rs:3898-3920, 3679-3694, 3525; generate.rs:2226 | FIX (read_back) fix/decode-path-correctness; rest DESIGN B |
+
+**Not a pipe** (central-claim lint, `audit-2026-09-04.md:39-43`): every
+executor/encode/finish/read_back/prepare/plan/arena/uniform/upload function, `bind_plain`/
+`bind_with_fusion` and both matchers, every `render_*`/`push_*_body`, `kernel_dispatch_shape`,
+`classify_kind`, `run_decode_loop*`, `decode_until_stop_or_budget`, `build_position_inputs`,
+`sample_next_token`, `report_op_timings`, `print_token_breakdown*`. The one `Pipe` impl on the
+path is `LoadedModel::call` (`generate.rs:1533`).
+
+**Hidden state machines, none an enum** (`audit-2026-09-04.md:45-49`): `HazardTracker`; the
+encode loop; `BufferArena` construction; `OUTPUT_BUFFER_POOL` lifecycle; `UNIFORM_BUFFERS` LRU;
+`Plan` two-phase init; the one-entry plan cache; the operand-count discriminator;
+`dynamic_cached_len`; band sentinels `{MIN, MAX, real}`; the decode step closure; the
+snapshot-and-reset counter protocol. Counter-example that the shape exists:
+`LayerCacheState`/`LayerCacheNames` (`generate.rs:1090,1100`) are enums.
+
+### 1.3.5 In flight
+
+Nine branches, each addressing one or more findings above: `fix/hazard-identity` (findings 3, 4,
+26), `fix/decode-path-correctness` (findings 8, 14, 17, 24, 30 read_back), `chore/metal-path-hygiene`
+(findings 16, 18, 19, 21), `refactor/plan-cache-and-arena-scope` (findings 11 arena scoping, 12,
+13, 20), `perf/reduce-epilogue-fusion`, `perf/packed-row-addressing`, `feat/decode-quality-harness`,
+`perf/device-streaming-ceiling`, `docs/thread-envelope`.
+
+The design tournament (`design-task.md`, sections A-E) covers what a branch cannot: A (attention
+as RISC algebra, replacing `BoundOpKind::CachedAttention`, findings 1, 2, 5, 6), B (the decode
+step as FSM × orchestration over pipes, collapsing nine executors to one driver, findings 7, 9,
+10, 25, 30 non-read_back), C (generic model programs off the TOML spec path, findings 22, 23,
+28), D — primary, per §1.3.1 — bytes (multi-token passes, dynamic row elision, lower-bit codecs,
+`output.weight` tricks, KV bytes), E (ordering, gates per card, and at least one design abandoned
+per constraint). Output: a stepwise plan with signatures, ≤ 1500 lines, every claim citing
+`file:line` opened this session, no adjectives, no verdict words (`design-task.md:71-114`).
+
 ## 2. The diagnosis, built formally (V0-V8)
 
 The default is no verdict. What follows is a proposal built by the admissibility procedure so
