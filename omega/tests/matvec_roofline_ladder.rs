@@ -543,16 +543,22 @@ kernel void q4k_matvec_l3_shape(
 }
 "#;
 
+/// same `#include`/`using namespace` preamble `omega::msl::emit` itself
+/// prepends before `Q4K_UNPACK_MSL` (`omega/src/msl.rs:2355-2356`) --
+/// `Q4K_UNPACK_MSL` is bare body text, not a compilable translation unit on
+/// its own, so every hand-assembled arm here restates the same preamble.
+const METAL_PREAMBLE: &str = "#include <metal_stdlib>\nusing namespace metal;\n\n";
+
 fn l1_source() -> String {
-    format!("{}\n{L1_KERNEL_BODY}", omega::msl::Q4K_UNPACK_MSL)
+    format!("{METAL_PREAMBLE}{}\n{L1_KERNEL_BODY}", omega::msl::Q4K_UNPACK_MSL)
 }
 
 fn l2_source() -> String {
-    format!("{}\n{L2_KERNEL_BODY}", omega::msl::Q4K_UNPACK_MSL)
+    format!("{METAL_PREAMBLE}{}\n{L2_KERNEL_BODY}", omega::msl::Q4K_UNPACK_MSL)
 }
 
 fn l3_shape_source() -> String {
-    format!("{}\n{L3_SHAPE_KERNEL_BODY}", omega::msl::Q4K_UNPACK_MSL)
+    format!("{METAL_PREAMBLE}{}\n{L3_SHAPE_KERNEL_BODY}", omega::msl::Q4K_UNPACK_MSL)
 }
 
 // ---- device plumbing (per-binary copies, same posture as
