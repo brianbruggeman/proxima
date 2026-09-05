@@ -22401,3 +22401,86 @@ Confirm the `pgrep -l` gate above is empty and `uptime` load-1 is under 10 immed
 | Date | Change | Δ vs prior | CoV / runs | Host loadout |
 | --- | --- | --- | --- | --- |
 | 2026-09-05 | `test(omega): amortize the dispatch floor in the streaming ceiling` (1 GB arm batched to 2 GB/timed-buffer, 4 GB arm unchanged); quiet re-run of ROW 291 (ceiling) + ROW 293 (C1/C2/C3), 2 runs | solo ceiling 381.24-381.88 GB/s (1.44-1.61x ROW 291's loud 237.79-264.29); CPU-only 1/4/8 threads 51-117 GB/s (thread=4 persistently >5% CoV both runs); concurrent 50/50-70/30 splits 118-292 GB/s, best 291.85 GB/s at 70/30 -- **23.6% below solo GPU ceiling, D0c = NO** | 2 full runs (protocol-mandated second run: `cpu_only thread_count=4` exceeded 5% CoV in both runs even after dropping the cold first repeat); all WIDE-grid GPU cells and 2 of 3 concurrent cells per run under 5% CoV | pgrep quiet-gate empty + load-1 <10 (peak observed 8.88, settled before each run) before both runs; single measurer |
+
+## ROW 304 -- quality reference scores through the cached decode loop: 8x8 real drift in both math modes, 2x3 reproduction confirms mechanism not regression
+
+**Card:** S6 `quality-harness-cached` (`proxima-model-interop/src/quality.rs`, `generate.rs`,
+new `test_support.rs`). Worktree `/Users/brianbruggeman/repos/slot-0/proxima-wt-qcached`, branch
+`fix/quality-reference-cached-loop`, off main `d2d2d20`.
+
+**What changed.** ROW 297's `quality_report` re-forwarded `reference`'s full context from scratch,
+uncached, every step (`LoadedModel::forward_logits_on_backend`), on top of ALSO calling
+`generate_with_serving_config` fresh per outer step to regenerate `reference`'s own trajectory --
+O(n^2) work that timed out past 5 minutes at 8x8 and forced ROW 297 to run 2x3 instead.
+`score_prompt` now drives BOTH sides through `LoadedModel::run_decode_loop_observed`, a new
+crate-internal sibling of the existing `run_decode_loop` (itself unchanged in behavior --
+`run_decode_loop` is now a one-line delegation to `run_decode_loop_observed` with a no-op sink
+and no forced continuation, so every pre-existing caller, including `generate_with_serving_config`
+and every `bind.rs`/real-checkpoint test, keeps its exact prior behavior byte-for-byte).
+`run_decode_loop_observed` adds two hooks threaded through BOTH of `run_decode_loop`'s existing
+arms (the two-range `LayerCache` path and the `metal-output-placement` placed-KV path):
+`token_override: Option<&[u32]>` (when `Some`, a step's emitted token is the override's own token
+instead of a fresh greedy sample -- teacher forcing) and `logits_sink: &mut dyn FnMut(usize, &[f32])`
+(called every step with that step's own last-position logits, the exact slice the loop already
+slices out of `evaluated` to sample from). `reference` runs unforced to read off its own real
+greedy trajectory and that trajectory's own per-step logits in one pass; `variant` then runs the
+identical loop forced onto `reference`'s emitted ids, so every compared step feeds both sides the
+same input tokens through the SAME cached loop -- one loop, two engines, no second loop, no copied
+scoring code (the KL/argmax/max-abs-delta scoring functions are untouched). No new type: the two
+new parameters are plain fn arguments on an existing `pub(crate)` method, not a struct.
+
+`PROXIMA_MATH_MODE`'s one existing reader, `bind.rs`'s private `math_mode_from_env`, moved to a new
+`#[cfg(all(test, feature = "metal", target_os = "macos"))]` module `test_support.rs` so
+`quality.rs`'s own `real_openchat_file` test module reads the SAME helper rather than a second
+private copy -- one definition, `bind.rs` now `use`s it.
+
+**Mechanism note on the numbers below.** The old path scored against a context built by
+detokenizing `reference`'s generated ids back to text and RE-tokenizing the concatenation
+(`format!("{prompt}{continuation}")` through `encode_with_bos_eos`) before the uncached forward;
+detokenize-then-retokenize is not guaranteed lossless across a BPE merge boundary. The new path
+feeds `reference`'s own token ids straight through the cached loop with no text round trip. The
+2x3 numbers below are close to ROW 297's but not bit-identical (kl_mean 0.001715 vs ROW 297's
+0.001551, kl_max 0.003487 vs 0.002951, max_abs_logit_delta 0.506356 vs 0.5047) -- same order of
+magnitude, same qualitative result (exact_match/top1 both 1.0), consistent with removing a lossy
+text round trip rather than a regression in the comparison itself. This is a measured difference,
+not a bug: no other variable changed between the two runs.
+
+**2x3 reproduction** (`PROXIMA_QUALITY_PROMPTS=2 PROXIMA_MAX_TOKENS=3 PROXIMA_MATH_MODE=relaxed`,
+release, `--features metal,instrument`, real openchat-3.5-1210.Q4_K_S.gguf):
+
+| | exact_match | top1 | kl_mean | kl_max | max_abs_logit_delta |
+| --- | --- | --- | --- | --- | --- |
+| ROW 297 (uncached reference, 2x3) | 1.000000 | 1.000000 | 0.001551 | 0.002951 | 0.5047 |
+| ROW 304 (cached-loop reference, 2x3) | 1.000000 | 1.000000 | 0.001715 | 0.003487 | 0.506356 |
+
+**8x8 real drift, both math modes** (`PROXIMA_QUALITY_PROMPTS=8 PROXIMA_MAX_TOKENS=8`, release,
+`--features metal,instrument`, reference CPU `gpu_layers=0` vs variant Metal `GPU_LAYERS_ALL`,
+same openchat-3.5-1210.Q4_K_S.gguf checkpoint both sides; quiet gate empty immediately before both
+runs, run as the raw release test binary, not `cargo test`):
+
+| math mode | exact_match | top1 | kl_mean | kl_max | max_abs_logit_delta | wall (s) |
+| --- | --- | --- | --- | --- | --- | --- |
+| Safe | 0.906250 | 0.968750 | 0.003043 | 0.040250 | 1.473014 | 78.51 |
+| Relaxed | 0.906250 | 0.968750 | 0.002110 | 0.032024 | 1.474228 | 78.59 |
+
+Both runs completed in under 79 seconds -- ROW 297's 8x8 attempt timed out past 5 minutes (300 s)
+on the old uncached path; this is better than a 3.8x speedup at the SAME prompt/token count. One
+prompt (`math-02`) diverges at step 2 in both math modes (`exact_match=0.25`, the only row below
+1.0 in either table); every other prompt's `exact_match`/`top1` are both `1.0`. Safe and Relaxed
+agree to within noise on every aggregate metric (kl_mean/kl_max/max_abs_logit_delta each differ by
+less than 30% relative, both orders of magnitude below the divergence math-02 alone contributes),
+consistent with ROW 296/297's own finding that Relaxed is not a quality regression versus Safe.
+
+**Gates:**
+- `cargo clippy -p proxima-model-interop --all-targets --features metal,instrument -- -D warnings`: EXIT=0, zero warnings.
+- `cargo nextest run -p proxima-model-interop --features metal,instrument`: 110 tests run, 110 passed, 27 skipped, EXIT=0.
+- `cargo nextest run -p proxima-model-interop --features std`: 96 tests run, 96 passed, 22 skipped, EXIT=0.
+- `bash scripts/omega-gate.sh`: 8/8 steps PASS, doctests 2 passed, EXIT=0.
+
+**Re-prove command:**
+```
+CARGO_TARGET_DIR=/tmp/proxima-row304-target CARGO_TERM_COLOR=never cargo build --release -p proxima-model-interop --features metal,instrument --tests
+PROXIMA_QUALITY_PROMPTS=8 PROXIMA_MAX_TOKENS=8 PROXIMA_MATH_MODE=safe /tmp/proxima-row304-target/release/deps/proxima_model_interop-* quality::real_openchat_file::metal_vs_cpu_reports_real_drift --exact --ignored --nocapture
+PROXIMA_QUALITY_PROMPTS=8 PROXIMA_MAX_TOKENS=8 PROXIMA_MATH_MODE=relaxed /tmp/proxima-row304-target/release/deps/proxima_model_interop-* quality::real_openchat_file::metal_vs_cpu_reports_real_drift --exact --ignored --nocapture
+```
+Confirm the `pgrep -l` quiet gate is empty immediately before each run.
