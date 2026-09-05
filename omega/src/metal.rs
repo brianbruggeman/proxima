@@ -83,8 +83,11 @@
 //! and 240.9-247.3 GB/s under `Relaxed`/`Fast`, with 0-1.9e-6 parity in
 //! every cell of the shape sweep either way — the "parity demands `Safe`"
 //! assumption this module carried until then does not hold on the
-//! evidence -- [`MathMode::default`] stays `Safe` for now, with `Relaxed`
-//! one call away, pending the whole-decode-program bake-off ROW 297 runs.
+//! evidence, and ROW 297's own bake-off (identical generated text and
+//! quality across three interleaved rounds, `Relaxed` 1.20x faster
+//! wall-clock steady-state) confirms it holds on the whole decode program,
+//! not just one kernel -- so [`MathMode::default`] is `Relaxed`, and
+//! `Safe` stays one call away for a program where it does not.
 //!
 //! # Gather fault reporting
 //!
@@ -2801,11 +2804,13 @@ pub enum MathMode {
     /// IEEE-safe float math -- bit-parity with
     /// [`proxima_tensor::cpu::evaluate`], at 179.2 GB/s on the ROW 296
     /// packed-row Q4_K matvec kernel.
-    #[default]
     Safe,
-    /// Metal's relaxed-math kernels. ROW 296 measured 240.9-247.3 GB/s on
-    /// the same kernel, with parity drift no worse than `Safe`'s own
-    /// run-to-run spread in every cell of that sweep.
+    /// Metal's relaxed-math kernels. ROW 296/297's measured default:
+    /// 240.9-247.3 GB/s on the ROW 296 kernel (1.34x `Safe`), 28.19 vs.
+    /// 33.82 ms/token steady-state on the whole ROW 297 decode program
+    /// (1.20x), with generated text and quality metrics identical to
+    /// `Safe`'s in both rows.
+    #[default]
     Relaxed,
 }
 
