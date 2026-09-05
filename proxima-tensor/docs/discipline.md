@@ -21298,6 +21298,85 @@ telemetry going forward, not just inferable from a wrong number.
 wide_cooperative_reduce_key_collision` (real Metal device required; both assertions -- distinct
 cache keys, and the narrow call's post-fix parity with the cpu oracle -- are in one test).
 
+## ROW 291 -- device streaming ceiling on this M1 Max: 237.79-264.29 GB/s (floor = 15.774-17.532 ms for 4.169 GB/token)
+
+**Card:** none (measurement-only; no default feature changed, no code landed beyond the harness itself). **Worktree/branch/commit:** `proxima-wt-s6e2-ceiling`, `perf/device-streaming-ceiling`, harness landed at `a8d9c06` (`test(omega): add the device streaming ceiling harness`, rebased onto `main` at this row's write time), own `CARGO_TARGET_DIR`.
+
+**What this measures.** The physical read-bandwidth ceiling for decode on this host, independent of any kernel's compute cost: a streaming reduce (`float4`/`uint4` strided loads, every load live -- the accumulator feeds a real per-threadgroup output write so the compiler cannot elide it) reading exactly one dispatch's worth of bytes out of each of the three buffer shapes decode's own upload paths use or could use (`omega/src/metal.rs::create_no_copy_buffer`/`upload_block_copy`): **no-copy resident** (`newBufferWithBytesNoCopy_length_options_deallocator` over the real openchat-3.5-1210 Q4_K_S GGUF's own `mmap`, page-aligned, `StorageModeShared`), **fresh shared** (`newBufferWithBytes_length_options`, copies once at creation into a brand-new `StorageModeShared` buffer, same real checkpoint bytes), and **private via blit** (`StorageModePrivate`, filled once untimed via `MTLBlitCommandEncoder`). Timed by `commit()` -> `waitUntilCompleted()` around exactly one dispatch, nothing subtracted. Grid width swept three ways (`low_4tg_per_core` = 4 threadgroups/core, `high_8tg_per_core` = 8 threadgroups/core, `wide_one_thread_per_16b` = one thread per 16B lane, no per-thread loop); the best grid per (source, size) is reported. Fixture: the real 4,140,385,376-byte openchat-3.5-1210.Q4_K_S.gguf at `~/.lmstudio/models/TheBloke/openchat-3.5-1210-GGUF/`.
+
+**Host loadout.** Apple M1 Max, 64 GB unified memory. `pgrep -l 'cargo|rustc|nextest' | wc -l`: **38 at session start**, **32 immediately before run 1**, **34 immediately before run 2**, **34 at session end** -- this box carried 30-47 builder processes (other workers' `cargo`/`rustc`/`nextest`) throughout, never quiet, per the task's own accepted protocol ("builders from other workers MAY be present"). GPU-measurement gate (`pgrep -l 'llama-bench|proxima_model_interop-'`) was confirmed EMPTY immediately before both timed runs; one real `llama-bench -ngl 0` process (PID 98448, a CPU-only bench, unrelated worker) was live between the two checks and was waited out (polled every 20s) rather than run through, clearing after ~12 minutes elapsed on that process.
+
+**Run 1** (`ceiling-logs/run1.log`), empty-dispatch fixed cost: mean **0.4763 ms**, CoV **62.06%** (samples ms: 1.160, 0.374, 0.280, 0.225, 0.278, 0.292, 0.377, 0.261, 0.709, 0.808) -- itself far above the 5% trust line, consistent with a genuinely contended host rather than a clean per-dispatch floor.
+
+| size | source | grid | mean GB/s | CoV | 5% trust |
+| --- | --- | --- | --- | --- | --- |
+| 1 GB | nocopy_resident | low_4tg | 221.38 | 50.04% | NO |
+| 1 GB | nocopy_resident | high_8tg | 234.90 | 16.85% | NO |
+| 1 GB | nocopy_resident | wide | 214.69 | 36.06% | NO |
+| 1 GB | fresh_shared | low_4tg | 205.72 | 47.28% | NO |
+| 1 GB | fresh_shared | high_8tg | 252.87 | 3.55% | **YES** |
+| 1 GB | fresh_shared | wide | 188.90 | 39.49% | NO |
+| 1 GB | private_blit | low_4tg | 189.79 | 50.48% | NO |
+| 1 GB | private_blit | high_8tg | 216.15 | 28.32% | NO |
+| 1 GB | private_blit | wide | 149.38 | 62.26% | NO |
+| 4 GB | nocopy_resident | low_4tg | 124.15 | 96.08% | NO |
+| 4 GB | nocopy_resident | high_8tg | 191.49 | 21.24% | NO |
+| 4 GB | nocopy_resident | wide | **264.29** | 26.84% | NO |
+| 4 GB | fresh_shared | low_4tg | 116.35 | 75.38% | NO |
+| 4 GB | fresh_shared | high_8tg | 191.12 | 23.15% | NO |
+| 4 GB | fresh_shared | wide | 247.55 | 9.10% | NO |
+| 4 GB | private_blit | low_4tg | 175.45 | 54.53% | NO |
+| 4 GB | private_blit | high_8tg | 222.85 | 18.53% | NO |
+| 4 GB | private_blit | wide | 248.07 | 25.01% | NO |
+
+Best per (source, size), run 1: 1GB nocopy=234.90 (high_8tg, 16.85%), 1GB fresh=252.87 (high_8tg, 3.55%), 1GB private=216.15 (high_8tg, 28.32%), 4GB nocopy=**264.29** (wide, 26.84%), 4GB fresh=247.55 (wide, 9.10%), 4GB private=248.07 (wide, 25.01%). Run 1 best ceiling: **264.29 GB/s** (nocopy_resident, wide grid, 4 GB) -> floor = 4.169e9 / (264.29e9) * 1e3 = **15.774 ms**.
+
+**Run 2** (`ceiling-logs/run2.log`, second run because run 1's best-arm CoV exceeded 5%), empty-dispatch fixed cost: mean **0.5303 ms**, CoV **64.57%** (samples ms: 0.729, 0.278, 0.221, 0.233, 0.211, 0.340, 0.353, 0.708, 1.126, 1.104).
+
+| size | source | grid | mean GB/s | CoV | 5% trust |
+| --- | --- | --- | --- | --- | --- |
+| 1 GB | nocopy_resident | low_4tg | 17.70 | 94.57% | NO |
+| 1 GB | nocopy_resident | high_8tg | 58.29 | 40.89% | NO |
+| 1 GB | nocopy_resident | wide | 79.70 | 45.75% | NO |
+| 1 GB | fresh_shared | low_4tg | 50.81 | 80.39% | NO |
+| 1 GB | fresh_shared | high_8tg | 49.60 | 45.26% | NO |
+| 1 GB | fresh_shared | wide | 91.90 | 43.98% | NO |
+| 1 GB | private_blit | low_4tg | 28.95 | 89.11% | NO |
+| 1 GB | private_blit | high_8tg | 80.14 | 38.47% | NO |
+| 1 GB | private_blit | wide | 106.48 | 90.32% | NO |
+| 4 GB | nocopy_resident | low_4tg | 160.40 | 64.88% | NO |
+| 4 GB | nocopy_resident | high_8tg | 212.97 | 12.75% | NO |
+| 4 GB | nocopy_resident | wide | **237.79** | 29.40% | NO |
+| 4 GB | fresh_shared | low_4tg | 180.38 | 74.54% | NO |
+| 4 GB | fresh_shared | high_8tg | 172.81 | 22.54% | NO |
+| 4 GB | fresh_shared | wide | 234.95 | 26.19% | NO |
+| 4 GB | private_blit | low_4tg | 181.40 | 64.94% | NO |
+| 4 GB | private_blit | high_8tg | 185.29 | 15.33% | NO |
+| 4 GB | private_blit | wide | 228.50 | 25.02% | NO |
+
+Best per (source, size), run 2: 1GB nocopy=79.70 (wide, 45.75%), 1GB fresh=91.90 (wide, 43.98%), 1GB private=106.48 (wide, 90.32%), 4GB nocopy=**237.79** (wide, 29.40%), 4GB fresh=234.95 (wide, 26.19%), 4GB private=228.50 (wide, 25.02%). Run 2 best ceiling: **237.79 GB/s** (nocopy_resident, wide grid, 4 GB) -> floor = 4.169e9 / (237.79e9) * 1e3 = **17.532 ms**.
+
+**Not one number -- a range, per this log's own 5% discipline.** Every one of 36 cells across both runs exceeds the 5% CoV trust line except one (run 1, 1GB fresh_shared, high_8tg, 3.55%). Both runs agree on WHICH cell is best (`nocopy_resident`, `wide` grid, 4 GB) but disagree on its magnitude by 10%: **run 1 = 264.29 GB/s, run 2 = 237.79 GB/s -> best ceiling reported as the range 237.79-264.29 GB/s**, floor range **15.774-17.532 ms** for 4.169 GB/token. This is reported as measured, not resolved to a point estimate, because a third run on an equally contended box would not be expected to converge tighter -- the noise floor here is set by the host's loadout (30-47 concurrent builder processes sharing this M1 Max's single unified-memory controller and bandwidth with the GPU dispatch being timed), not by sample count. The empty-dispatch fixed cost (0.48-0.53 ms mean, 62-65% CoV, both runs) shows the SAME contention signature on a dispatch that does almost no work at all, which is evidence the variance is submission/scheduling jitter from a shared, loaded host rather than a property of the streaming-reduce kernel or any one buffer shape.
+
+**No systematic winner among the three sources.** Across both runs' best-grid cells, `nocopy_resident` wins at 4 GB in both runs (264.29, 237.79) but `private_blit` and `fresh_shared` are both within 10% of it in run 1 (248.07, 247.55) and within 4% in run 2 (228.50, 234.95); at 1 GB the ranking flips entirely between runs (run 1: fresh > nocopy > private; run 2: private > fresh > nocopy). At this CoV, no source-shape claim ("no-copy mmap beats a fresh copy on this host") is supportable -- the three arms are statistically indistinguishable at the sample counts run here.
+
+**Ratios against the two named ceilings.**
+- **ROW 287's in-buffer MATVEC figure is 179.36 GB/s, not 173.6 GB/s** -- read directly from the artifact (`proxima-tensor/docs/discipline.md:21045`, `main` at `437e43b`): "MATVEC GB/s = 4.169e9 bytes / 23.244 ms = ... = 179.36 GB/s." The task brief's 173.6 GB/s does not match the row it cites; this row reports the number the artifact actually contains, per principle 6 (read the code, never work from memory). Ratio, best ceiling (this row) / 179.36: **1.326x (run 2) to 1.474x (run 1)**.
+- **llama.cpp aggregate, derived:** ROW 288 (unchanged from ROW 286 on this axis) measures `llama-bench` at 17.445 ms/token (CoV 0.55%, 3 rounds); 4.169e9 / 0.017445 s = **239.03 GB/s** (DERIVED from a MEASURED llama-bench number and this log's own 4.169 GB/token weight-set constant, not independently measured this session). Ratio, best ceiling (this row) / 239.03: **0.995x (run 2) to 1.106x (run 1)**.
+
+The honest read on the second ratio: this synthetic, compute-free streaming-reduce ceiling sits **at parity with, to about 10% above,** llama.cpp's own achieved aggregate bandwidth on this host -- it is not a wide-open headroom number. Read one direction, llama.cpp is already extracting most of what this raw-bandwidth probe can find on this box under today's contention; read the other, a synthetic microbenchmark with no compute and no cross-kernel scheduling overhead should have MORE headroom than a full production decode loop, and finding it within noise of parity (run 2) rather than clearly above (run 1) is itself informative about how contended this host was during measurement, not about llama.cpp's efficiency. Both readings are held open; resolving them needs a quiet box, which this session did not have.
+
+**Gates.** No code changed beyond the harness landed at `a8d9c06` (`test(omega): add the device streaming ceiling harness`), which the prior session's own commit message and this session's clean `--no-run` release build (`cargo test --release -p omega --features metal --test device_streaming_ceiling --no-run`, exit 0, `Finished release profile [optimized] target(s) in 8m 24s`) both confirm compiles clean under `metal` on this host; no `cargo build`/`clippy`/`nextest` re-run beyond that was performed this session since no source outside the already-gated test file changed.
+
+**Re-prove** (from the artifact alone):
+```sh
+cd /Users/brianbruggeman/repos/slot-0/proxima-wt-s6e2-ceiling
+CARGO_TARGET_DIR=/Users/brianbruggeman/repos/slot-0/proxima-wt-s6e2-ceiling/target CARGO_TERM_COLOR=never \
+cargo test --release -p omega --features metal --test device_streaming_ceiling -- --ignored --nocapture \
+  device_streaming_ceiling_across_three_sources_and_two_sizes
+```
+Confirm the gate `pgrep -l 'llama-bench|proxima_model_interop-'` is empty immediately before running; record `pgrep -l 'cargo|rustc|nextest' | wc -l` before and after regardless of its value. Re-run at least once and report the range if the best arm's CoV exceeds 5% (it did, both times, on this host).
+
 ### Changelog
 | Date | Change | Δ vs prior | CoV / runs | Host loadout |
 | --- | --- | --- | --- | --- |
@@ -21307,3 +21386,8 @@ cache keys, and the narrow call's post-fix parity with the cpu oracle -- are in 
 | Date | Change | Δ vs prior | CoV / runs | Host loadout |
 | --- | --- | --- | --- | --- |
 | 2026-09-04 | `kernel_cache_key` now includes `tiled_gemm_threadgroup_width`'s return as a `_w{width}` token; `pipeline_for` emits a `debug!` cache-lookup event on both hit and miss | narrow-extent cooperative reduce result: 1.46e32 (garbage, stale wide-kernel tail fold reading uninitialized `threadgroup` memory) -> parity with cpu oracle within 1e-4 | new regression test, 1 run (deterministic real-Metal-device repro, no timing claim) | real Metal device, `metal,metal-wide-cooperative-reduce` features |
+
+### Changelog
+| Date | Change | Δ vs prior | CoV / runs | Host loadout |
+| --- | --- | --- | --- | --- |
+| 2026-09-04 | new measurement-only row: device streaming ceiling harness (`a8d9c06`) run twice, no prior baseline in this log to delta against | best ceiling 237.79-264.29 GB/s (range, not point estimate); floor 15.774-17.532 ms/token at 4.169 GB/token; 1.326-1.474x ROW 287's 179.36 GB/s MATVEC figure; 0.995-1.106x llama.cpp's derived 239.03 GB/s aggregate | 2 full runs (18 cells each); best-arm CoV 26.84% (run 1) and 29.40% (run 2), both above 5% -- reported as a range per this log's own rule; 35/36 cells above 5% CoV | 30-47 concurrent `cargo`/`rustc`/`nextest` builder processes throughout (never quiet); one unrelated `llama-bench -ngl 0` process observed and waited out before each timed run, GPU-measurement gate confirmed empty immediately before both runs |
