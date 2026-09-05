@@ -3673,6 +3673,400 @@ mod real_openchat_file {
     }
 }
 
+// -- Sources speculative-decode's acceptance factor k' off a real greedy
+// token stream instead of assuming it: replays `draft_ngram_lookup` offline
+// against the ids `real_openchat_file`'s own decode loop actually produced,
+// with no second model call, and reports the mean tokens-per-verification-
+// pass a caller would have gotten had it drafted alongside that same
+// decode. `#[ignore]`d and skips cleanly when the host-local model cache is
+// absent, the same convention every other `real_*` module in this file
+// uses.
+#[cfg(all(test, feature = "std"))]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod draft_acceptance {
+    use core::future::Future;
+    use core::pin::pin;
+    use core::task::{Context, Poll, Waker};
+    use std::os::fd::AsFd;
+
+    use proxima_primitives::pipe::Pipe;
+    use proxima_tokenizer::Vocab;
+    use proxima_tokenizer::draft::draft_ngram_lookup;
+
+    use crate::generate::LoadedModel;
+    use crate::serving::ServingConfig;
+
+    /// Same read-only mmap technique as `real_openchat_file::MappedGguf` --
+    /// duplicated rather than shared because that struct is private to its
+    /// own module and this harness has no other reason to depend on it.
+    struct MappedGguf {
+        base: *mut u8,
+        len: usize,
+        _file: std::fs::File,
+    }
+
+    impl MappedGguf {
+        fn open(path: &std::path::Path) -> std::io::Result<Self> {
+            let file = std::fs::File::open(path)?;
+            let len =
+                usize::try_from(file.metadata()?.len()).expect("fixture file length fits in usize");
+            // SAFETY: `len` matches the just-opened file's own length; `file`
+            // is kept alive in `_file` for as long as `base` is used, and the
+            // mapping is read-only/private so no writer can observe or race it.
+            let base = unsafe {
+                rustix::mm::mmap(
+                    core::ptr::null_mut(),
+                    len,
+                    rustix::mm::ProtFlags::READ,
+                    rustix::mm::MapFlags::PRIVATE,
+                    file.as_fd(),
+                    0,
+                )
+            }
+            .expect("mmap host-local openchat gguf fixture")
+            .cast::<u8>();
+            Ok(Self {
+                base,
+                len,
+                _file: file,
+            })
+        }
+
+        fn as_slice(&self) -> &[u8] {
+            // SAFETY: `base` points at `len` bytes mapped for `self`'s whole
+            // lifetime; this borrows `self` immutably, so nothing can unmap
+            // the region while the returned slice is alive.
+            unsafe { core::slice::from_raw_parts(self.base, self.len) }
+        }
+    }
+
+    impl Drop for MappedGguf {
+        fn drop(&mut self) {
+            // SAFETY: `base`/`len` are exactly what `open`'s `mmap` call
+            // returned; nothing else unmaps this region.
+            let _ = unsafe { rustix::mm::munmap(self.base.cast::<core::ffi::c_void>(), self.len) };
+        }
+    }
+
+    /// Same leaf-future driver as `real_openchat_file::block_on`: every
+    /// `Pipe::call` this crate returns is `async move { <sync work> }` with
+    /// no internal `.await`, so the first poll is always `Poll::Ready`.
+    fn block_on<Fut: Future>(future: Fut) -> Fut::Output {
+        let mut future = pin!(future);
+        let waker = Waker::noop();
+        let mut context = Context::from_waker(waker);
+        match future.as_mut().poll(&mut context) {
+            Poll::Ready(output) => output,
+            Poll::Pending => {
+                unreachable!("proxima-model-interop pipes never yield: no internal .await")
+            }
+        }
+    }
+
+    /// [`crate::generate`]'s own private `wants_bos` fallback, duplicated
+    /// here because it is not part of this crate's public surface: BOS is
+    /// requested only when the checkpoint's own metadata carries no
+    /// explicit `tokenizer.ggml.add_bos_token` opinion AND the vocab has a
+    /// BOS token to add at all.
+    fn wants_bos(vocab: &Vocab) -> bool {
+        vocab
+            .add_bos_token()
+            .unwrap_or_else(|| vocab.bos_token_id().is_some())
+    }
+
+    /// `PROXIMA_MAX_TOKENS` overrides how many tokens the greedy stream this
+    /// harness sources its acceptance measurement from is generated for --
+    /// defaults to 64, distinct from `real_openchat_file::decode_loop_max_tokens`'s
+    /// own 24-token default, since this harness's own acceptance-rate
+    /// sweep wants enough tokens for a k=8 draft window to have room to
+    /// run more than a handful of times per prompt.
+    fn draft_acceptance_max_tokens() -> usize {
+        std::env::var("PROXIMA_MAX_TOKENS")
+            .ok()
+            .and_then(|value| value.parse::<usize>().ok())
+            .unwrap_or(64)
+    }
+
+    /// Eight prompts a real serving caller would plausibly send, four
+    /// categories (chat/code/prose/list) two prompts deep each -- real
+    /// enough that `draft_ngram_lookup`'s repeated-substring assumption
+    /// gets tested against genuinely different amounts of local
+    /// repetition (code and lists repeat structurally far more than
+    /// prose), not eight near-identical variations of one shape.
+    fn draft_acceptance_prompts() -> [(&'static str, &'static str); 8] {
+        [
+            (
+                "chat",
+                "GPT4 Correct User: Write a Python function that returns the nth Fibonacci number.<|end_of_turn|>GPT4 Correct Assistant:",
+            ),
+            (
+                "chat",
+                "GPT4 Correct User: What is the capital of France, and what river runs through it?<|end_of_turn|>GPT4 Correct Assistant:",
+            ),
+            (
+                "code",
+                "def fibonacci(n):\n    if n <= 1:\n        return n\n    return fibonacci(n - 1) + fibonacci(n - 2)\n\n# Now write a function that",
+            ),
+            (
+                "code",
+                "import numpy as np\n\ndef normalize(vector):\n    norm = np.linalg.norm(vector)\n    return vector / norm\n\n# Add a function that",
+            ),
+            (
+                "prose",
+                "The Industrial Revolution began in Britain in the late eighteenth century and transformed",
+            ),
+            (
+                "prose",
+                "The human brain contains roughly eighty-six billion neurons, each one connected to thousands of others, forming",
+            ),
+            (
+                "list",
+                "Here is a numbered list of the planets in our solar system in order from the sun:\n1. Mercury\n2. Venus\n3.",
+            ),
+            (
+                "list",
+                "Ingredients for a basic pancake batter:\n- 2 cups flour\n- 2 eggs\n- 1.5 cups milk\n-",
+            ),
+        ]
+    }
+
+    /// One (prompt, k, n-gram-range) sweep cell's tally: how many times
+    /// [`draft_ngram_lookup`] was asked to draft at all, how many of those
+    /// asks came back empty (no repeated n-gram anywhere in the history
+    /// yet), and how many drafted tokens in total matched the real stream.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+    struct DraftAcceptanceStats {
+        attempts: usize,
+        empty: usize,
+        accepted: usize,
+    }
+
+    impl DraftAcceptanceStats {
+        /// Mean tokens emitted per verification pass under the greedy rule
+        /// a real speculative-decode loop would apply: every pass emits at
+        /// least one token (the corrected or bonus token
+        /// [`proxima_tokenizer::draft::verify_greedy`] always returns),
+        /// plus however many drafted tokens matched ahead of it. `1.0` when
+        /// there were no attempts at all (nothing to measure, not a
+        /// rejection of every draft).
+        fn tokens_per_pass(&self) -> f64 {
+            if self.attempts == 0 {
+                return 1.0;
+            }
+            (self.accepted + self.attempts) as f64 / self.attempts as f64
+        }
+    }
+
+    /// Offline draft-and-verify replay over one already-generated token
+    /// stream, no second model call: at every position from `prompt_len` up
+    /// to (and including) `stream.len() - k`, drafts off everything seen so
+    /// far ([`draft_ngram_lookup`] over `stream[..position]`) and counts how
+    /// many leading drafted tokens equal the real stream's own continuation
+    /// at that position -- the greedy-verification rule
+    /// [`proxima_tokenizer::draft::verify_greedy`] applies against real
+    /// logits collapses to exactly this equality check when the stream
+    /// being replayed was itself produced by greedy decoding, since the
+    /// model's own argmax at every position is definitionally the token
+    /// that is actually there.
+    fn replay_draft_acceptance(
+        stream: &[u32],
+        prompt_len: usize,
+        k: usize,
+        min_ngram: usize,
+        max_ngram: usize,
+    ) -> DraftAcceptanceStats {
+        let mut stats = DraftAcceptanceStats::default();
+        if k == 0 || stream.len() < prompt_len + k {
+            return stats;
+        }
+        for position in prompt_len..=stream.len() - k {
+            stats.attempts += 1;
+            let draft = draft_ngram_lookup(&stream[..position], k, min_ngram, max_ngram);
+            if draft.is_empty() {
+                stats.empty += 1;
+                continue;
+            }
+            let remaining = &stream[position..];
+            stats.accepted += draft
+                .iter()
+                .zip(remaining.iter())
+                .take_while(|(drafted, actual)| drafted == actual)
+                .count();
+        }
+        stats
+    }
+
+    /// The (k, min_ngram, max_ngram) sweep this harness runs every prompt
+    /// through: `k` values from a small immediate draft up to a wide one,
+    /// crossed with a tight and a loose n-gram match window -- the same two
+    /// axes `transformers`' own `PromptLookupCandidateGenerator` exposes as
+    /// `num_output_tokens` and `max_matching_ngram_size`/`min_ngram_size`.
+    const SWEEP: [(usize, usize, usize); 6] = [
+        (2, 2, 4),
+        (2, 3, 6),
+        (4, 2, 4),
+        (4, 3, 6),
+        (8, 2, 4),
+        (8, 3, 6),
+    ];
+
+    /// Measures speculative-decode's acceptance factor k' off a real
+    /// greedy-decoded stream instead of assuming it (both prior design
+    /// critiques of this feature flagged k' as ASSUMED, never measured).
+    /// Per prompt: one real greedy forward through [`LoadedModel`]'s public
+    /// [`Pipe`] surface generates the token stream, then every (k, n-gram
+    /// range) cell in [`SWEEP`] replays [`draft_ngram_lookup`] against that
+    /// same stream with no further model call. Prints one
+    /// machine-parseable `draft_acceptance` line per (prompt, k, n-gram)
+    /// cell and one `draft_acceptance_aggregate` line per (k, n-gram) cell
+    /// with the mean k' across all 8 prompts plus each category's own mean.
+    #[test]
+    #[ignore = "depends on a host-local openchat gguf checkout outside this repo"]
+    fn ngram_draft_acceptance_rate_on_real_greedy_streams() {
+        let path = std::path::Path::new(ServingConfig::default().model_path);
+        if !path.exists() {
+            eprintln!(
+                "skipping: no host-local openchat gguf fixture at {}",
+                ServingConfig::default().model_path
+            );
+            return;
+        }
+
+        let mapped = MappedGguf::open(path).expect("mmap host-local openchat gguf fixture");
+        let file_bytes = mapped.as_slice();
+        let parsed = proxima_gguf::pipe::parse_complete(file_bytes)
+            .expect("parse host-local openchat gguf fixture");
+        let model = LoadedModel::load(&parsed, file_bytes)
+            .expect("load real openchat checkpoint through the public path");
+        let vocab = proxima_tokenizer::gguf::vocab_from_metadata(&parsed)
+            .expect("this checkpoint's own metadata carries a complete vocab");
+        let max_tokens = draft_acceptance_max_tokens();
+
+        // per-(k, ngram) accumulator across every prompt: (category, k').
+        let mut by_sweep_cell: [Vec<(&str, f64)>; SWEEP.len()] = Default::default();
+
+        for (prompt_index, (category, prompt)) in draft_acceptance_prompts().into_iter().enumerate()
+        {
+            let prompt_ids = proxima_tokenizer::encode_with_bos_eos(
+                prompt,
+                &vocab,
+                wants_bos(&vocab),
+                vocab.add_eos_token().unwrap_or(false),
+            )
+            .expect("tokenizes one of this harness's own authored prompts");
+            let generated = block_on(model.call((prompt.into(), max_tokens)))
+                .expect("generate through the public Pipe path");
+
+            let mut stream = prompt_ids.clone();
+            stream.extend_from_slice(&generated.0);
+            let prompt_len = prompt_ids.len();
+
+            for (cell_index, &(k, min_ngram, max_ngram)) in SWEEP.iter().enumerate() {
+                let stats = replay_draft_acceptance(&stream, prompt_len, k, min_ngram, max_ngram);
+                let k_prime = stats.tokens_per_pass();
+                std::println!(
+                    "draft_acceptance prompt={prompt_index} category={category} k={k} ngram={min_ngram}-{max_ngram} \
+                     attempts={} empty={} accepted={} k_prime={k_prime:.4}",
+                    stats.attempts,
+                    stats.empty,
+                    stats.accepted,
+                );
+                by_sweep_cell[cell_index].push((category, k_prime));
+            }
+        }
+
+        for (cell_index, &(k, min_ngram, max_ngram)) in SWEEP.iter().enumerate() {
+            let entries = &by_sweep_cell[cell_index];
+            let mean_k_prime =
+                entries.iter().map(|(_, k_prime)| k_prime).sum::<f64>() / entries.len() as f64;
+            let mut category_line = alloc::string::String::new();
+            for category in ["chat", "code", "prose", "list"] {
+                let values: Vec<f64> = entries
+                    .iter()
+                    .filter(|(entry_category, _)| *entry_category == category)
+                    .map(|(_, k_prime)| *k_prime)
+                    .collect();
+                let category_mean = values.iter().sum::<f64>() / values.len() as f64;
+                category_line.push_str(&alloc::format!(" category_{category}_mean={category_mean:.4}"));
+            }
+            std::println!(
+                "draft_acceptance_aggregate k={k} ngram={min_ngram}-{max_ngram} mean_k_prime={mean_k_prime:.4}{category_line}"
+            );
+        }
+    }
+
+    /// A minimal valid base-byte [`Vocab`] with no merges -- same
+    /// construction as `crate::generate`'s own `vocab_with_eos` test
+    /// fixture (byte-level BPE requires all 256 base-byte tokens present),
+    /// spelled with the public SentencePiece `"<0xXX>"` fallback form
+    /// rather than reaching into this crate's private `byte_to_char`. With
+    /// no merges, [`proxima_tokenizer::encode`] emits one token id per raw
+    /// input byte -- real BPE base-tier behavior, not a synthetic id
+    /// scheme.
+    fn base_byte_vocab() -> Vocab {
+        let tokens: Vec<alloc::string::String> = (0..=255u8)
+            .map(|byte| alloc::format!("<0x{byte:02X}>"))
+            .collect();
+        Vocab::new(tokens, &[], None, None, None).expect("base-byte vocab builds")
+    }
+
+    /// Real repeated-structure history (six copies of one real code line):
+    /// a caller drafting alongside this stream must get a mean k' strictly
+    /// above 1.0, since the repeated line gives every position past the
+    /// second repetition a genuine earlier n-gram to draft from.
+    #[test]
+    fn replay_draft_acceptance_on_a_repetitive_stream_beats_one_token_per_pass() {
+        let vocab = base_byte_vocab();
+        let line = "fn add(a, b) { a + b }\n";
+        let line_ids =
+            proxima_tokenizer::encode(line, &vocab).expect("encodes one real code line");
+
+        let mut stream = Vec::new();
+        for _ in 0..6 {
+            stream.extend_from_slice(&line_ids);
+        }
+
+        let stats = replay_draft_acceptance(&stream, 0, 4, 2, 4);
+        let k_prime = stats.tokens_per_pass();
+        assert!(
+            stats.attempts > 0,
+            "degenerate control: this stream must be long enough to attempt at least one draft"
+        );
+        assert!(
+            k_prime > 1.0,
+            "a repeated code line must draft real accepted continuations, got k_prime={k_prime}"
+        );
+    }
+
+    /// Degenerate control: a strictly increasing token stream can never
+    /// repeat an n-gram (every window is unique by construction, same
+    /// shape as `proxima_tokenizer::draft`'s own
+    /// `no_repeats_in_history_drafts_nothing`), so every draft attempt must
+    /// come back empty and k' must be exactly `1.0` -- one token per pass,
+    /// nothing gained from drafting.
+    #[test]
+    fn replay_draft_acceptance_on_a_stream_with_no_repeats_never_beats_one_token_per_pass() {
+        let stream: Vec<u32> = (0..256u32).collect();
+
+        let stats = replay_draft_acceptance(&stream, 0, 4, 2, 4);
+
+        assert!(
+            stats.attempts > 0,
+            "degenerate control: this stream must be long enough to attempt at least one draft"
+        );
+        assert_eq!(
+            stats.empty, stats.attempts,
+            "a stream with no repeated n-gram anywhere must draft empty every single time"
+        );
+        assert_eq!(stats.accepted, 0);
+        assert_eq!(
+            stats.tokens_per_pass(),
+            1.0,
+            "no accepted drafts means exactly one token per verification pass"
+        );
+    }
+}
+
 // -- Real-data proof for the MoE metadata + expert-discovery wiring this
 // change adds: a real Mixtral-8x7B checkpoint's own `general.architecture`
 // metadata and `blk.0.ffn_gate.{0..8}.weight` tensor directory, read through
