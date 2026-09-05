@@ -4767,7 +4767,7 @@ fn run_node_into<B: Deref<Target = [f32]> + Sync>(
     session: Option<&MatmulSession<'_>>,
     output: &mut [f32],
 ) -> Result<(), TensorError> {
-    match &resolved.kind {
+    let result = match &resolved.kind {
         BoundOpKind::CachedAttention {
             ..
         } => {
@@ -4825,7 +4825,92 @@ fn run_node_into<B: Deref<Target = [f32]> + Sync>(
         }
         BoundOpKind::Iota => run_iota(output),
         BoundOpKind::Constant { value } => run_constant(*value, output),
+    };
+    result?;
+    apply_reduce_epilogue(resolved, buffers, output)
+}
+
+/// Applies [`BoundOpKind::Reduce::epilogue_body`] over
+/// [`BoundOpKind::Reduce::epilogue_operands`] to each already-folded output
+/// element, once per element in [`BoundOpKind::Reduce::output_axes`]
+/// coordinate space — the mirror of how [`BoundOp::element_body`] combines
+/// operands once per PRE-reduction step (`element_body`'s own doc in
+/// `bind.rs`). Runs after every `Reduce` arm above regardless of which
+/// internal fast path wrote `output`, since every one of them writes through
+/// the same `out_layout` addressing this reads back. A no-op for every other
+/// `BoundOpKind` and for the untouched default epilogue (`ComposedBody::leaf
+/// (ScalarOp::Identity)` over zero operands — [`bind::BoundOpBuilder`]'s own
+/// convention when `reduce-epilogue-fusion` never fired or is not compiled
+/// in), so this never costs a scan over `output` on a plain reduce.
+fn apply_reduce_epilogue<B: Deref<Target = [f32]>>(
+    resolved: &BoundOp,
+    buffers: &[Option<B>],
+    output: &mut [f32],
+) -> Result<(), TensorError> {
+    let BoundOpKind::Reduce {
+        output_axes,
+        out_layout,
+        epilogue_body,
+        epilogue_operands,
+        ..
+    } = &resolved.kind
+    else {
+        return Ok(());
+    };
+    if reduce_epilogue_is_identity(epilogue_body, epilogue_operands) {
+        return Ok(());
     }
+    let operand_buffers: Vec<&[f32]> = epilogue_operands
+        .iter()
+        .map(|(node, _, lookup)| {
+            if lookup.is_some() {
+                return Err(TensorError::NotLowerable {
+                    node: resolved.node,
+                    reason: "reduce epilogue does not support a gathered operand",
+                });
+            }
+            buffer_of(buffers, *node)
+        })
+        .collect::<Result<_, _>>()?;
+
+    let extents_local: Vec<u64> = output_axes
+        .iter()
+        .map(|&axis| resolved.extents[axis as usize])
+        .collect();
+    let mut local_coordinate = vec![0u64; output_axes.len()];
+    let mut full_coordinate = vec![0u64; resolved.extents.len()];
+    let mut operand_values = vec![0.0f32; epilogue_operands.len() + 1];
+    let mut step_values = vec![0.0f32; epilogue_body.steps.len()];
+
+    for flat in 0..odometer_len(&extents_local) {
+        unflatten_into(flat, &extents_local, &mut local_coordinate);
+        full_coordinate.fill(0);
+        for (index, &axis) in output_axes.iter().enumerate() {
+            full_coordinate[axis as usize] = local_coordinate[index];
+        }
+        let offset = out_layout.offset_of(&full_coordinate) as usize;
+        for (slot, (_, layout, _)) in epilogue_operands.iter().enumerate() {
+            operand_values[slot] = operand_buffers[slot][layout.offset_of(&local_coordinate) as usize];
+        }
+        operand_values[epilogue_operands.len()] = output[offset];
+        output[offset] = apply_body(epilogue_body, &operand_values, &mut step_values);
+    }
+    Ok(())
+}
+
+/// The untouched default an executor must treat as "no epilogue": a leaf
+/// [`ScalarOp::Identity`] reading its own sole implicit slot, over zero real
+/// operands — [`BoundOpKind::Reduce::epilogue_body`]'s own doc names this the
+/// same convention `element_body` already uses for "nothing fused into the
+/// prologue either".
+fn reduce_epilogue_is_identity(
+    body: &ComposedBody,
+    operands: &[(NodeId, bind::Layout, Option<bind::Lookup>)],
+) -> bool {
+    operands.is_empty()
+        && body.steps.len() == 1
+        && body.steps[0].op == ScalarOp::Identity
+        && body.steps[0].args == [StepArg::Operand(0)]
 }
 
 fn run_cached_attention<B: Deref<Target = [f32]> + Sync>(
@@ -6478,6 +6563,29 @@ fn is_staged_batch_eligible(
     resolved: &BoundOp,
     quantized_weights: &BTreeMap<NodeId, QuantizedBlock>,
 ) -> bool {
+    // A reduce-epilogue-fused node reads its epilogue operand's buffer
+    // (`apply_reduce_epilogue`) at the SAME position it computes its own
+    // fold — but `run_staged_batch` commits every stage's output into
+    // `buffers` only after the whole round returns (this function's own
+    // doc), and `staged_batch_run_end`'s independence check walks
+    // `operands()` alone, never `epilogue_operands`. Grouping such a node
+    // into a round alongside the reduce its epilogue reads would either read
+    // an uncommitted buffer (`operand buffer missing at evaluation time`) or
+    // silently skip the epilogue if it lands in a round of its own — no
+    // staged renderer exists for `epilogue_body` at all, so this stays a
+    // capability rejection (same shape `bind::bind_with_fusion`'s own doc
+    // names for a backend with no epilogue renderer) rather than a silent
+    // wrong answer. Excluded here, it falls through to the always-correct
+    // `run_node_into` path below instead.
+    if let BoundOpKind::Reduce {
+        epilogue_body,
+        epilogue_operands,
+        ..
+    } = &resolved.kind
+        && !reduce_epilogue_is_identity(epilogue_body, epilogue_operands)
+    {
+        return false;
+    }
     match quantized_operand(resolved, quantized_weights) {
         None => false,
         Some(weight_node) => quantized_weights
@@ -6510,7 +6618,7 @@ fn staged_batch_run_end(
 ) -> usize {
     let mut end = start;
     while end < resolved.len() && is_staged_batch_eligible(&resolved[end], quantized_weights) {
-        let reads_from_this_run = resolved[end].operands().iter().any(|(operand, _, _)| {
+        let reads_from_this_run = resolved[end].all_read_sources().any(|(operand, _, _)| {
             resolved[start..end]
                 .iter()
                 .any(|produced| produced.node == *operand)
