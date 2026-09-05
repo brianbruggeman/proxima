@@ -22604,3 +22604,73 @@ CARGO_TARGET_DIR=/tmp/proxima-row305-target CARGO_TERM_COLOR=never PROXIMA_QUALI
 Confirm the `pgrep -l` quiet gate is empty immediately before the run; set
 `PROXIMA_OPENCHAT_GGUF_VARIANT=<path to a Q3_K_M gguf>` to override the default scratchpad fixture
 path.
+
+## ROW 306 -- omega sizing config census: 4 bare numeric tunables wired through the existing generator, none new
+
+**Card:** S2 `sizing-config` (omega/omega-runtime.toml, omega/build.rs, omega/src/sized.rs,
+omega/src/metal.rs, omega/src/msl.rs, omega/src/wgsl.rs). Worktree
+`/Users/brianbruggeman/repos/slot-0/proxima-wt-sizing`, branch `refactor/omega-sizing-config`,
+off main `7503899`.
+
+**Census** (`grep -n 'const [A-Z_]*: *\(u32\|usize\|u64\|f32\) *= *[0-9]' omega/src/*.rs`,
+main `7503899`):
+
+| site | value | class | disposition |
+| --- | --- | --- | --- |
+| `cuda.rs:80 WARP_SIZE` | 32 | invariant (CUDA warp width) | unchanged |
+| `sized.rs:61 SIMD_WIDTH` | 32 | invariant (Apple GPU SIMD-group width) | unchanged |
+| `metal.rs:3063 OUTPUT_POOL_MAX_PER_BUCKET` | 8 | tunable (own doc: "not yet wired") | -> `[output_pool].max_per_bucket` |
+| `metal.rs:4073 ARENA_TRANSIENT_CAP` | 172_812_125 | tunable (own doc: "not yet wired") | -> `[arena].transient_cap` |
+| `msl.rs:1590 PACKED_ROWS_PER_GROUP` | 4 | invariant (fixed lane math: `push_q4k_single_fetch_body`'s literal `lane % 8u` bakes in `2 * 4`) | unchanged |
+| `msl.rs:1603 TILE_DIM` | 8 | invariant (`simdgroup_float8x8` MSL type width) | unchanged |
+| `msl.rs:1619 TILED_GEMM_NSG` | 4 | invariant (own doc: pointer arithmetic needs a different kernel body for any other value) | unchanged |
+| `msl.rs:5506 PACKED_ROW_NSG` | 2 | tunable (own doc: "widened experimentally") | -> `[packed_row_nsg].width` |
+| `wgsl.rs:119 WORKGROUP_SIZE` | 64 | tunable (own doc: "a build-time policy knob") | -> `[wgsl].workgroup_size` |
+
+Two of the "brief's six" names (`tiled_gemm_threadgroup_width`'s own NSG and the kv-bucket
+default) are not bare tunables: `tiled_gemm_threadgroup_width` is a function, not a constant, and
+its own multiplier (`TILED_GEMM_NSG`) is the fixed-kernel-body invariant above; the kv bucket
+default already lives in `ServingConfig` per the brief's own note, left alone. "Cooperative lane
+width" and "packed-row block width" resolve to `PACKED_ROW_NSG` and `PACKED_ROWS_PER_GROUP`
+respectively -- the former is genuinely tunable (already documented as such), the latter is
+baked into fixed lane-index arithmetic in `push_q4k_single_fetch_body` and stays a named invariant.
+"Telemetry ring budget" names nothing in `omega/src`: no ring buffer exists there; the nearest
+built-time-sized structure already wired is `[spans].uniform_cache_entries`
+(`UNIFORM_CACHE_ENTRIES`), left untouched.
+
+**Mechanism: reused, not reinvented.** `omega/build.rs`'s `emit_sizing_consts`/`resolve_int` and
+`omega/omega-runtime.toml` already ARE the crate-agnostic generator this task's Step 2 asked to
+build -- `sized.rs`'s own module doc documents it as mirroring `proxima-tensor/build.rs`'s function
+of the same name over `proxima-tensor-runtime.toml`. Every one of the four sites above is a new
+`[section].key` in the existing TOML plus a `resolve_int`/`require_*` block in the existing
+`emit_sizing_consts`, feature-gated (`CARGO_FEATURE_METAL_BUFFER_POOL`,
+`CARGO_FEATURE_METAL_PLAN_STABLE_BUFFERS`, `CARGO_FEATURE_METAL_PACKED_ROW_NSG2 ||
+CARGO_FEATURE_METAL_Q4K_GGML_PORT`) the same way `TILED_GEMM_MIN_TOKENS` and
+`WIDE_COOPERATIVE_REDUCE_MAX_WIDTH` already are; `WORKGROUP_SIZE` is always emitted because
+`wgsl.rs` itself is not feature-gated (`lib.rs`'s `pub mod wgsl;`). No new type, no new build
+script, no second TOML.
+
+**Wiring.** `metal.rs`'s local `const OUTPUT_POOL_MAX_PER_BUCKET`/`const ARENA_TRANSIENT_CAP` and
+`msl.rs`'s local `const PACKED_ROW_NSG` are deleted; call sites reference the generated
+`crate::sized::*` constants via `use` (matching the existing `crate::sized::SIMD_WIDTH` import in
+`msl.rs`). `wgsl.rs`'s `pub const WORKGROUP_SIZE: u32 = 64` becomes `pub use
+crate::sized::WORKGROUP_SIZE;`, preserving `lib.rs`'s `pub use wgsl::{WORKGROUP_SIZE, ...}`
+re-export unchanged. Every generated default equals the value it replaced (`172_812_125`, `8`,
+`2`, `64`) -- confirmed by inspecting the generated `omega_sized.rs` after a clean build, not
+asserted.
+
+**Env-override proof.** `OMEGA_ARENA_TRANSIENT_CAP=99999999 cargo check -p omega --features
+metal-plan-stable-buffers` recompiles and the generated `omega_sized.rs` reads `pub const
+ARENA_TRANSIENT_CAP: usize = 99999999;`; unsetting the var and rebuilding reverts the same file to
+`pub const ARENA_TRANSIENT_CAP: usize = 172812125;` (byte-for-byte the TOML default) -- confirmed by
+reading both generated files, not inferred from exit codes.
+
+**Gates** (`CARGO_TARGET_DIR`/`CARGO_TERM_COLOR` per `land-brief.md`):
+`cargo build -p omega --no-default-features --features alloc` EXIT=0;
+`cargo build -p omega --features metal` EXIT=0;
+`cargo build -p omega --features metal,metal-buffer-pool,metal-plan-stable-buffers,metal-packed-row-nsg2,wgpu-backend` EXIT=0;
+`cargo clippy -p omega --all-targets --all-features -- -D warnings` EXIT=0;
+`cargo nextest run -p omega --features metal` EXIT=0, 172 passed, 3 skipped;
+`cargo nextest run -p omega --all-features` EXIT=0, 242 passed, 3 skipped;
+`bash scripts/omega-gate.sh` EXIT=0, all 8 steps PASS (242 tests, 2 doctests);
+`cargo nextest run -p proxima-model-interop --features metal` EXIT=0, 110 passed, 25 skipped.
