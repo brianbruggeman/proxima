@@ -7,6 +7,12 @@
 //! own `run_case` builds; this test re-emits the identical op today and
 //! diffs the source text.
 
+// `metal-q5k-pair-dot` is excluded from the `metal` default bundle here
+// deliberately -- it only gates the `PackedCodec::Q5K` body (`msl.rs`'s
+// `matches!(codec, PackedCodec::Q5K)` guard), never `Q4_K`, so it cannot
+// change this fixture's emitted text and must not be in the exclusion list
+// below: main bundled it into default `metal` (2026-09-04), and keeping it
+// excluded here made the whole cfg gate unsatisfiable under any real build.
 #![cfg(all(
     feature = "metal",
     target_os = "macos",
@@ -15,7 +21,6 @@
         feature = "metal-q4k-single-fetch",
         feature = "metal-q4k-ggml-port",
         feature = "metal-packed-row-nsg2",
-        feature = "metal-q5k-pair-dot",
     ))
 ))]
 #![allow(clippy::unwrap_used, clippy::expect_used)]
