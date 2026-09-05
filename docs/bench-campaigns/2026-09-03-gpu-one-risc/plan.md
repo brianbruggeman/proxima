@@ -671,6 +671,17 @@ Gpu}`, `ScheduledOp.engine`, `BandwidthTable`) stays correct as written, it simp
 case left to serve on this host beyond compute-bound or codec-mismatched ops, which no card here
 measures.
 
+**Codec-quality/timing finding (ROW 305/307): bytes levers need a codec kernel at the ceiling
+first.** Q3_K_M carries 85.0% of Q4_K_S's on-disk bytes (3,518,996,512 vs 4,140,385,376), so a
+bandwidth-bound decode step should run in ~0.85x the time. Measured instead: Q3_K_M costs 5 pp of
+exact-match against the same 8x8 harness (0.859375 vs Q4_K_S's 0.906250, ROW 305/304) and runs
+**6.5% SLOWER**, not faster (`gpu_exec_ms` 28.699 vs 26.955, ratio 1.065; `step_wall_ms` 29.542 vs
+27.762, ratio 1.064, ROW 307), despite the 15% fewer bytes. ROW 307 also found `nocopy_uploads=1`
+for Q3_K_M vs `0` for Q4_K_S every steady step and a 4.16x larger `phys_footprint_bytes` despite the
+smaller checkpoint — residual, not traced further. The 0.81x-if-bandwidth-holds hypothesis is
+REFUTED: a smaller-byte codec does not buy time until its dequant kernel itself reaches the device
+ceiling; bytes levers (Q3_K/elision) are gated on a codec kernel at the ceiling, not assumed free.
+
 ## 2. The diagnosis, built formally (V0-V8)
 
 The default is no verdict. What follows is a proposal built by the admissibility procedure so
