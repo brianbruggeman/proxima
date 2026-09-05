@@ -60,4 +60,5 @@ libm = { version = "0.2.16", default-features = false }
 workspace = true
 
 [dev-dependencies]
+proptest.workspace = true
 temp-env.workspace = true
