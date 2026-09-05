@@ -14,39 +14,13 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-use std::alloc::{GlobalAlloc, Layout, System};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::task::{Context, Poll};
 
 use futures::task::noop_waker_ref;
 use proxima_core::datagram_batch::{RecvSlab, SendBatch};
 use proxima_primitives::stream::{DatagramSocket, DatagramSocketBatchExt};
-
-static ALLOC_COUNT: AtomicUsize = AtomicUsize::new(0);
-
-struct CountingAllocator;
-
-unsafe impl GlobalAlloc for CountingAllocator {
-    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        ALLOC_COUNT.fetch_add(1, Ordering::Relaxed);
-        unsafe { System.alloc(layout) }
-    }
-
-    unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
-        unsafe { System.dealloc(ptr, layout) }
-    }
-
-    unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
-        ALLOC_COUNT.fetch_add(1, Ordering::Relaxed);
-        unsafe { System.alloc_zeroed(layout) }
-    }
-
-    unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
-        ALLOC_COUNT.fetch_add(1, Ordering::Relaxed);
-        unsafe { System.realloc(ptr, layout, new_size) }
-    }
-}
+use proxima_test::alloc_count::CountingAllocator;
 
 #[global_allocator]
 static ALLOCATOR: CountingAllocator = CountingAllocator;
@@ -138,9 +112,9 @@ fn alloc_delta_for(cycles: usize) -> usize {
     // warm-up grows the slab + arena to working size and primes the span Vec.
     run_cycles(&mut socket, &mut slab, &mut send, 64);
 
-    let before = ALLOC_COUNT.load(Ordering::Relaxed);
+    let before = proxima_test::alloc_count::allocations();
     run_cycles(&mut socket, &mut slab, &mut send, cycles);
-    ALLOC_COUNT.load(Ordering::Relaxed) - before
+    proxima_test::alloc_count::allocations() - before
 }
 
 #[test]

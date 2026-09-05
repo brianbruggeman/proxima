@@ -22,10 +22,9 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-use std::alloc::{GlobalAlloc, Layout, System};
 use std::hint::black_box;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -33,29 +32,12 @@ use proxima_telemetry::config::OverflowPolicy;
 use proxima_telemetry::out::native::{FrameSink, NATIVE_FRAME_SIZE};
 use proxima_telemetry::pipes::NativePipe;
 use proxima_telemetry::recorder::Recorder;
+use proxima_test::alloc_count::{CountingAllocator, live_bytes};
 
 // ---- counting global allocator (for the soak's leak check) ----------------
 
-struct Counting;
-static LIVE_BYTES: AtomicI64 = AtomicI64::new(0);
-
-unsafe impl GlobalAlloc for Counting {
-    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        LIVE_BYTES.fetch_add(layout.size() as i64, Ordering::Relaxed);
-        unsafe { System.alloc(layout) }
-    }
-    unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
-        LIVE_BYTES.fetch_sub(layout.size() as i64, Ordering::Relaxed);
-        unsafe { System.dealloc(ptr, layout) }
-    }
-}
-
 #[global_allocator]
-static GLOBAL: Counting = Counting;
-
-fn live_bytes() -> i64 {
-    LIVE_BYTES.load(Ordering::Relaxed)
-}
+static GLOBAL: CountingAllocator = CountingAllocator;
 
 // A sink that models per-record cost: busy-spin `spin_ns` per exported frame.
 // One native frame == one record, so this is the per-record sink latency. Spin

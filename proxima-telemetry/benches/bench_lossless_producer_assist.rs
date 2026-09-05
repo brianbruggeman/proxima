@@ -20,43 +20,18 @@
     clippy::cast_sign_loss
 )]
 
-use std::alloc::{GlobalAlloc, Layout, System};
 use std::hint::black_box;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread;
 
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group};
 use proxima_telemetry::config::OverflowPolicy;
 use proxima_telemetry::pipes::CountingPipe;
 use proxima_telemetry::recorder::{Recorder, RingCapacities};
+use proxima_test::alloc_count::{CountingAllocator, allocations};
 
 // ---- counting allocator (for alloc-count section, printed post-criterion) ---
-
-static ALLOC_COUNT: AtomicUsize = AtomicUsize::new(0);
-
-struct CountingAllocator;
-
-unsafe impl GlobalAlloc for CountingAllocator {
-    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        ALLOC_COUNT.fetch_add(1, Ordering::Relaxed);
-        unsafe { System.alloc(layout) }
-    }
-
-    unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
-        unsafe { System.dealloc(ptr, layout) }
-    }
-
-    unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
-        ALLOC_COUNT.fetch_add(1, Ordering::Relaxed);
-        unsafe { System.alloc_zeroed(layout) }
-    }
-
-    unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
-        ALLOC_COUNT.fetch_add(1, Ordering::Relaxed);
-        unsafe { System.realloc(ptr, layout, new_size) }
-    }
-}
 
 #[global_allocator]
 static ALLOCATOR: CountingAllocator = CountingAllocator;
@@ -64,7 +39,7 @@ static ALLOCATOR: CountingAllocator = CountingAllocator;
 // ---- helpers ----------------------------------------------------------------
 
 fn alloc_snap() -> usize {
-    ALLOC_COUNT.load(Ordering::Relaxed)
+    allocations()
 }
 
 // build a recorder backed by a fast no-latency sink under the given policy.

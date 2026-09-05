@@ -12,28 +12,21 @@
 //!     `mem::take`.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-use std::alloc::{GlobalAlloc, Layout, System};
 use std::hint::black_box;
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering::Relaxed};
+use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
 
 use criterion::{Criterion, criterion_group, criterion_main};
 use crossbeam_queue::ArrayQueue;
 use proxima_primitives::pipe::{Batch, BoundedQueue, EnqueueOutcome, FailMode};
+use proxima_test::alloc_count::{CountingAllocator, allocations};
 
-struct Counting;
-static ALLOCS: AtomicUsize = AtomicUsize::new(0);
-unsafe impl GlobalAlloc for Counting {
-    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        ALLOCS.fetch_add(1, Relaxed);
-        unsafe { System.alloc(layout) }
-    }
-    unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
-        unsafe { System.dealloc(ptr, layout) }
-    }
-}
 #[global_allocator]
-static GLOBAL: Counting = Counting;
+static GLOBAL: CountingAllocator = CountingAllocator;
+
+fn allocs() -> usize {
+    allocations()
+}
 
 // inline mirror of recording's enqueue-with-policy (the pre-extraction code).
 struct InlineBounded {
@@ -58,23 +51,23 @@ impl InlineBounded {
 fn report_alloc_parity() {
     let generic = BoundedQueue::<u64>::new(64, FailMode::DropOldest);
     let inline = InlineBounded::new(64);
-    let g_before = ALLOCS.load(Relaxed);
+    let g_before = allocs();
     assert_eq!(generic.enqueue(1), EnqueueOutcome::Enqueued);
     let _ = generic.dequeue();
-    let g = ALLOCS.load(Relaxed) - g_before;
-    let i_before = ALLOCS.load(Relaxed);
+    let g = allocs() - g_before;
+    let i_before = allocs();
     inline.enqueue_drop_oldest(1);
     let _ = inline.queue.pop();
-    let i = ALLOCS.load(Relaxed) - i_before;
+    let i = allocs() - i_before;
 
     let batch = Batch::<u64>::new(4);
     let mvec: Mutex<Vec<u64>> = Mutex::new(Vec::with_capacity(4));
-    let b_before = ALLOCS.load(Relaxed);
+    let b_before = allocs();
     let _ = batch.push(7);
-    let b = ALLOCS.load(Relaxed) - b_before;
-    let m_before = ALLOCS.load(Relaxed);
+    let b = allocs() - b_before;
+    let m_before = allocs();
     mvec.lock().unwrap().push(7);
-    let m = ALLOCS.load(Relaxed) - m_before;
+    let m = allocs() - m_before;
 
     eprintln!("alloc/op: bounded generic={g} inline={i} | batch generic={b} inline={m}");
 }
