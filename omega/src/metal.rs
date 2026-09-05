@@ -453,8 +453,8 @@ impl Plan {
 }
 
 /// Which of `block_nodes`' entries carry a codec [`crate::msl::emit`] has an
-/// unpack kernel for (`Q4_K`, `Q5_K`, `Q6_K`, `Q8_0`, `Q4_0`, `Float16`,
-/// `BFloat16`), keyed to its [`PackedCodec`] — the single place this crate
+/// unpack kernel for (`Q3_K`, `Q4_K`, `Q5_K`, `Q6_K`, `Q8_0`, `Q4_0`,
+/// `Float16`, `BFloat16`), keyed to its [`PackedCodec`] — the single place this crate
 /// decides "packed AND which codec," shared by [`plan`] and [`prepare`] so
 /// the two cannot drift on it. `Float16` earns a codec slot despite needing
 /// no unpack FUNCTION (see `msl::FLOAT16_BLOCK_BYTES`'s own doc) because its
@@ -467,6 +467,7 @@ fn packed_operands_of(block_nodes: &[NodeId], blocks: &[QuantizedBlock<'_>]) -> 
         .iter()
         .zip(blocks.iter())
         .filter_map(|(node, block)| match block {
+            QuantizedBlock::Q3K(_) => Some((*node, PackedCodec::Q3K)),
             QuantizedBlock::Q4K(_) => Some((*node, PackedCodec::Q4K)),
             QuantizedBlock::Q5K(_) => Some((*node, PackedCodec::Q5K)),
             QuantizedBlock::Q6K(_) => Some((*node, PackedCodec::Q6K)),
@@ -474,10 +475,7 @@ fn packed_operands_of(block_nodes: &[NodeId], blocks: &[QuantizedBlock<'_>]) -> 
             QuantizedBlock::Q4_0(_) => Some((*node, PackedCodec::Q4_0)),
             QuantizedBlock::Float16(_) => Some((*node, PackedCodec::Float16)),
             QuantizedBlock::BFloat16(_) => Some((*node, PackedCodec::BFloat16)),
-            // No `PackedCodec::Q3K` exists yet -- `prepare`'s own early
-            // rejection (this module) never lets a `Q3_K` block reach this
-            // function in practice; `None` here only satisfies exhaustiveness.
-            QuantizedBlock::Q3K(_) | QuantizedBlock::Float32(_) => None,
+            QuantizedBlock::Float32(_) => None,
         })
         .collect()
 }
@@ -582,9 +580,9 @@ pub fn execute_plan(plan: &Plan, blocks: &[QuantizedBlock<'_>]) -> Result<Evalua
             // `half`), and a `BFloat16` weight's bytes are widened entirely
             // on the GPU at the read (`msl::BF16_UNPACK_MSL`), never on the
             // host.
-            // `Q3_K` never reaches here -- `prepare` rejects it earlier in
-            // this module; included in this union only so the match stays
-            // exhaustive if that guard is ever bypassed by a direct caller.
+            // `Q3_K` uploads its raw super-block bytes unchanged, same as
+            // every other packed codec below -- `msl::PackedCodec::Q3K`'s
+            // own unpack kernel (`q3k_element`) reads them at the GPU side.
             QuantizedBlock::Q3K(bytes)
             | QuantizedBlock::Q4K(bytes)
             | QuantizedBlock::Q5K(bytes)
@@ -1159,9 +1157,9 @@ pub fn execute_plan_with_placements(
         let resident = plan.resident_nodes.contains(node);
         let buffer = match block {
             QuantizedBlock::Float32(data) => upload_block(&device, data, *node, *dtype, resident)?,
-            // `Q3_K` never reaches here -- `prepare` rejects it earlier in
-            // this module; included in this union only so the match stays
-            // exhaustive if that guard is ever bypassed by a direct caller.
+            // `Q3_K` uploads its raw super-block bytes unchanged, same as
+            // every other packed codec below -- `msl::PackedCodec::Q3K`'s
+            // own unpack kernel (`q3k_element`) reads them at the GPU side.
             QuantizedBlock::Q3K(bytes)
             | QuantizedBlock::Q4K(bytes)
             | QuantizedBlock::Q5K(bytes)
@@ -1613,9 +1611,9 @@ pub fn execute_plan_op_timed(
             // `half`), and a `BFloat16` weight's bytes are widened entirely
             // on the GPU at the read (`msl::BF16_UNPACK_MSL`), never on the
             // host.
-            // `Q3_K` never reaches here -- `prepare` rejects it earlier in
-            // this module; included in this union only so the match stays
-            // exhaustive if that guard is ever bypassed by a direct caller.
+            // `Q3_K` uploads its raw super-block bytes unchanged, same as
+            // every other packed codec below -- `msl::PackedCodec::Q3K`'s
+            // own unpack kernel (`q3k_element`) reads them at the GPU side.
             QuantizedBlock::Q3K(bytes)
             | QuantizedBlock::Q4K(bytes)
             | QuantizedBlock::Q5K(bytes)
@@ -1741,9 +1739,9 @@ pub fn execute_plan_with_placements_op_timed(
         let resident = plan.resident_nodes.contains(node);
         let buffer = match block {
             QuantizedBlock::Float32(data) => upload_block(&device, data, *node, *dtype, resident)?,
-            // `Q3_K` never reaches here -- `prepare` rejects it earlier in
-            // this module; included in this union only so the match stays
-            // exhaustive if that guard is ever bypassed by a direct caller.
+            // `Q3_K` uploads its raw super-block bytes unchanged, same as
+            // every other packed codec below -- `msl::PackedCodec::Q3K`'s
+            // own unpack kernel (`q3k_element`) reads them at the GPU side.
             QuantizedBlock::Q3K(bytes)
             | QuantizedBlock::Q4K(bytes)
             | QuantizedBlock::Q5K(bytes)
@@ -1957,13 +1955,19 @@ struct Prepared {
 /// evaluators cannot drift on what a block IS. A packed codec's element
 /// count is derived from its own block geometry, never from `data.len()` —
 /// packed bytes and elements are not the same unit. Infallible now that
-/// every `QuantizedBlock` variant has a real Metal path (`Float16`/
-/// `BFloat16` were the last two arms that could still fail here); kept
-/// returning a `Result` regardless, so a future codec added without an
-/// entry here is still a typed error rather than a silent miscount.
+/// every `QuantizedBlock` variant has a real Metal path (`Q3_K` was the
+/// last arm that could still fail here); kept returning a `Result`
+/// regardless, so a future codec added without an entry here is still a
+/// typed error rather than a silent miscount.
 fn block_element_count(block: &QuantizedBlock<'_>) -> Result<usize, MetalError> {
     match block {
         QuantizedBlock::Float32(data) => Ok(data.len()),
+        // `Q3_K`'s super-block is 110 bytes carrying the same 256-element
+        // count as the rest of the K-quant family (`Q4_K`/`Q5_K`/`Q6_K`) --
+        // see `crate::msl::Q4K_BLOCK_ELEMENTS`'s own doc.
+        QuantizedBlock::Q3K(bytes) => {
+            Ok((bytes.len() / crate::msl::Q3K_BLOCK_BYTES) * crate::msl::Q4K_BLOCK_ELEMENTS)
+        }
         // packed bytes and elements are NOT the same unit: a `Q4_K`
         // super-block is 144 bytes carrying 256 elements, so the count the
         // shape check compares against comes from block geometry, never
@@ -2003,15 +2007,6 @@ fn block_element_count(block: &QuantizedBlock<'_>) -> Result<usize, MetalError> 
             Ok((bytes.len() / crate::msl::BFLOAT16_BLOCK_BYTES)
                 * crate::msl::BFLOAT16_BLOCK_ELEMENTS)
         }
-        // `prepare` rejects a `Q3_K` block before this is ever called on
-        // one; a typed error here rather than a computed count is
-        // deliberate for the same reason this function's own doc gives for
-        // staying `Result`-shaped after every other variant went infallible.
-        QuantizedBlock::Q3K(_) => Err(TensorError::NotLowerable {
-            node: NodeId(0),
-            reason: "Q3_K has no Metal kernel yet -- CPU-only for now",
-        }
-        .into()),
     }
 }
 
@@ -2041,20 +2036,6 @@ fn prepare(
     outputs: &[NodeId],
 ) -> Result<Prepared, MetalError> {
     let shapes = infer(program, symbols)?;
-    // `Q3_K` has a CPU codec (`proxima_gguf::quant::q3_k`) but no Metal
-    // unpack kernel yet -- no `PackedCodec::Q3K` entry exists in
-    // `crate::msl` for `packed_operands_of` to select, so this rejects the
-    // node explicitly here rather than letting it fall through to
-    // `upload_packed_bytes` uninterpreted. Metal support is the next slice.
-    for (node, block) in block_node_ids(program).iter().zip(blocks.iter()) {
-        if let QuantizedBlock::Q3K(_) = block {
-            return Err(TensorError::NotLowerable {
-                node: *node,
-                reason: "Q3_K has no Metal kernel yet -- CPU-only for now",
-            }
-            .into());
-        }
-    }
     let packed_operands = packed_operands_of(&block_node_ids(program), blocks);
     // every packed codec's declared dtype is the "these are bytes" marker
     // `reject_unsupported_gpu_dtype`'s own doc already claims as its

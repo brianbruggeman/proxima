@@ -22,11 +22,13 @@ Generated from `src/capability.rs`'s own tables by `examples/generate_compatibil
 | Q4_K | dense | metal | supported |
 | Q5_K | dense | metal | supported |
 | Q6_K | dense | metal | supported |
+| Q3_K | dense | metal | supported |
 
 ## Quantized packed-format coverage
 
 | packed codec | cpu kernel | metal emitter | wgsl emitter | cuda emitter |
 | --- | --- | --- | --- | --- |
+| Q3_K | supported | supported | unsupported | unsupported |
 | Q4_K | supported | supported | supported | supported |
 | Q5_K | supported | supported | supported | supported |
 | Q6_K | supported | supported | supported | supported |

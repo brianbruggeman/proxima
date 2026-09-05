@@ -152,6 +152,11 @@ pub fn emit_cuda(
     validate(resolved)?;
     let entry = entry_name(resolved);
     let quantized = operand_codecs(resolved, packed_operands);
+    if quantized.contains(&Some(PackedCodec::Q3K)) {
+        return Err(EmitError::CudaUnsupportedPackedCodec {
+            node: resolved.node,
+        });
+    }
     let source = match &resolved.kind {
         BoundOpKind::Elementwise { .. } => render_elementwise(resolved, &entry, &quantized)?,
         BoundOpKind::Reduce {
@@ -758,6 +763,11 @@ fn push_gather_fetch(
 fn operand_read(index: usize, offset: &str, codec: Option<PackedCodec>) -> String {
     match codec {
         None => format!("in{index}[{offset}]"),
+        // `emit_cuda` rejects `Q3_K` via `EmitError::CudaUnsupportedPackedCodec`
+        // before rendering ever reaches this function.
+        Some(PackedCodec::Q3K) => {
+            unreachable!("emit_cuda rejects PackedCodec::Q3K before operand_read runs")
+        }
         Some(PackedCodec::Q4K) => format!(
             "q4k_element(in{index} + ({offset} / {Q4K_BLOCK_ELEMENTS}) * {Q4K_BLOCK_BYTES}, (unsigned int)({offset} % {Q4K_BLOCK_ELEMENTS}))"
         ),
