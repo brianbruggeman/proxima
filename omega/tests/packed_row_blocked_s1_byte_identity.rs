@@ -7,12 +7,13 @@
 //! own `run_case` builds; this test re-emits the identical op today and
 //! diffs the source text.
 
-// `metal-q5k-pair-dot` is excluded from the `metal` default bundle here
-// deliberately -- it only gates the `PackedCodec::Q5K` body (`msl.rs`'s
-// `matches!(codec, PackedCodec::Q5K)` guard), never `Q4_K`, so it cannot
-// change this fixture's emitted text and must not be in the exclusion list
-// below: main bundled it into default `metal` (2026-09-04), and keeping it
-// excluded here made the whole cfg gate unsatisfiable under any real build.
+// `metal-q5k-pair-dot` no longer exists as a cargo feature (`omega/Cargo.
+// toml`'s own doc): the paired-nibble body is now selected by
+// `PackedCodec::supports_pair_dot`, a structural fact of the codec, and only
+// ever applies to `Q5_K`/`Q6_K`, never `Q4_K` -- so it was never a legitimate
+// member of this exclusion list, and naming it here after its removal would
+// make the whole cfg gate unsatisfiable under any real build (unknown
+// `cfg(feature = ...)` just evaluates false, it does not error).
 #![cfg(all(
     feature = "metal",
     target_os = "macos",
