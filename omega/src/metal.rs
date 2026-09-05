@@ -2441,17 +2441,17 @@ fn pack_uniforms_byte_len(bound: &BoundOp) -> usize {
     }
 }
 
-fn pack_uniforms(bound: &BoundOp) -> Vec<u8> {
+fn pack_uniforms(bound: &BoundOp) -> Result<Vec<u8>, EmitError> {
     match &bound.kind {
         BoundOpKind::CachedAttention { .. } => pack_cached_attention_uniforms(bound),
-        BoundOpKind::Elementwise { .. } => pack_elementwise_uniforms(bound),
+        BoundOpKind::Elementwise { .. } => Ok(pack_elementwise_uniforms(bound)),
         BoundOpKind::Reduce {
             keep: Keep::Reduce, ..
         } => pack_reduce_uniforms(bound),
         BoundOpKind::Reduce {
             keep: Keep::Scan, ..
         } => pack_scan_uniforms(bound),
-        BoundOpKind::Iota | BoundOpKind::Constant { .. } => pack_leaf_uniforms(bound),
+        BoundOpKind::Iota | BoundOpKind::Constant { .. } => Ok(pack_leaf_uniforms(bound)),
     }
 }
 
@@ -2571,7 +2571,7 @@ mod pack_uniforms_byte_len_tests {
             matches!(bound.kind, BoundOpKind::Elementwise { .. }),
             "fixture must actually lower to an Elementwise BoundOp"
         );
-        assert_eq!(pack_uniforms_byte_len(&bound), pack_uniforms(&bound).len());
+        assert_eq!(pack_uniforms_byte_len(&bound), pack_uniforms(&bound).expect("packs uniforms").len());
     }
 
     #[test]
@@ -2587,13 +2587,17 @@ mod pack_uniforms_byte_len_tests {
             ),
             "fixture must actually lower to a Keep::Reduce BoundOp"
         );
-        assert_eq!(pack_uniforms_byte_len(&bound), pack_uniforms(&bound).len());
+        assert_eq!(pack_uniforms_byte_len(&bound), pack_uniforms(&bound).expect("packs uniforms").len());
     }
 }
 
-fn pack_cached_attention_uniforms(bound: &BoundOp) -> Vec<u8> {
+fn pack_cached_attention_uniforms(bound: &BoundOp) -> Result<Vec<u8>, EmitError> {
     let BoundOpKind::CachedAttention { head_dim, .. } = &bound.kind else {
-        unreachable!("cached attention uniform packer only receives cached attention")
+        return Err(EmitError::RenderKindMismatch {
+            node: bound.node,
+            expected: "cached_attention",
+            found: bound.kind.name(),
+        });
     };
     let total: i64 = bound
         .extents
@@ -2603,7 +2607,7 @@ fn pack_cached_attention_uniforms(bound: &BoundOp) -> Vec<u8> {
         / *head_dim as i64;
     let mut bytes = Vec::new();
     push_i64(&mut bytes, total);
-    bytes
+    Ok(bytes)
 }
 
 /// Mirrors the `Uniforms` struct `crate::msl::render_iota` and
@@ -2650,7 +2654,7 @@ fn pack_elementwise_uniforms(bound: &BoundOp) -> Vec<u8> {
 /// `operand_strides[operand_count][rank_len]`, `out_base`,
 /// `out_strides[rank_len]`, then the gather arrays (see
 /// [`pack_elementwise_uniforms`]'s doc), in that order.
-fn pack_reduce_uniforms(bound: &BoundOp) -> Vec<u8> {
+fn pack_reduce_uniforms(bound: &BoundOp) -> Result<Vec<u8>, EmitError> {
     let BoundOpKind::Reduce {
         output_axes,
         out_layout,
@@ -2658,7 +2662,11 @@ fn pack_reduce_uniforms(bound: &BoundOp) -> Vec<u8> {
         ..
     } = &bound.kind
     else {
-        unreachable!("pack_reduce_uniforms is only called for a Keep::Reduce reduce")
+        return Err(EmitError::RenderKindMismatch {
+            node: bound.node,
+            expected: "keep::reduce fold",
+            found: bound.kind.name(),
+        });
     };
     let rank_len = bound.extents.len().max(1);
     let output_rank_len = output_axes.len().max(1);
@@ -2700,7 +2708,7 @@ fn pack_reduce_uniforms(bound: &BoundOp) -> Vec<u8> {
         }
     }
     push_gather_uniforms(&mut bytes, bound, rank_len);
-    bytes
+    Ok(bytes)
 }
 
 /// Mirrors the `Uniforms` struct `crate::msl::render_scan` declares at
@@ -2711,9 +2719,13 @@ fn pack_reduce_uniforms(bound: &BoundOp) -> Vec<u8> {
 /// [`pack_elementwise_uniforms`]'s doc), in that order. `crate::msl::validate`
 /// already rejected a rank-0 scan before `emit` (and therefore this) ever
 /// runs, so `bound.extents` is never empty here.
-fn pack_scan_uniforms(bound: &BoundOp) -> Vec<u8> {
+fn pack_scan_uniforms(bound: &BoundOp) -> Result<Vec<u8>, EmitError> {
     let BoundOpKind::Reduce { out_layout, .. } = &bound.kind else {
-        unreachable!("pack_scan_uniforms is only called for a Keep::Scan reduce")
+        return Err(EmitError::RenderKindMismatch {
+            node: bound.node,
+            expected: "keep::scan fold",
+            found: bound.kind.name(),
+        });
     };
     let rank = bound.extents.len();
     let rank_len = rank.max(1);
@@ -2739,7 +2751,7 @@ fn pack_scan_uniforms(bound: &BoundOp) -> Vec<u8> {
     push_i64(&mut bytes, out_layout.base);
     push_i64_row(&mut bytes, &out_layout.strides, rank_len);
     push_gather_uniforms(&mut bytes, bound, rank_len);
-    bytes
+    Ok(bytes)
 }
 
 fn nserror_description(error: &NSError) -> String {
@@ -4085,7 +4097,7 @@ fn build_plan_uniforms(
 ) -> Result<PlanUniforms, MetalError> {
     let mut buffers = Vec::with_capacity(resolved.len());
     for bound in resolved {
-        let bytes = pack_uniforms(bound);
+        let bytes = pack_uniforms(bound)?;
         let buffer = device
             .newBufferWithLength_options(bytes.len().max(1), MTLResourceOptions::StorageModeShared)
             .ok_or_else(|| MetalError::CompileFailed {
@@ -4253,12 +4265,12 @@ fn encode_op(
         Some(buffer) => {
             #[cfg(feature = "metal-plan-stable-buffers")]
             {
-                write_plan_uniform_bytes(buffer, &pack_uniforms(bound));
+                write_plan_uniform_bytes(buffer, &pack_uniforms(bound)?);
                 counter!(PLAN_UNIFORM_WRITES, 1);
             }
             buffer.clone()
         }
-        None => upload_uniforms(device, &pack_uniforms(bound))?,
+        None => upload_uniforms(device, &pack_uniforms(bound)?)?,
     };
     let gathers = gather_count(bound);
     let fault = (gathers > 0)
@@ -5224,8 +5236,8 @@ mod arena_tests {
         let stage_zero_bound = &resolved_plan.prepared.resolved[position_of(stage_zero)];
         let stage_two_bound = &resolved_plan.prepared.resolved[position_of(stage_two)];
         assert_eq!(
-            super::pack_uniforms(stage_zero_bound),
-            super::pack_uniforms(stage_two_bound),
+            super::pack_uniforms(stage_zero_bound).expect("packs uniforms"),
+            super::pack_uniforms(stage_two_bound).expect("packs uniforms"),
             "degenerate gate: the two ops must genuinely pack identical uniform bytes"
         );
 
