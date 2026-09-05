@@ -4370,7 +4370,7 @@ fn read_back(
         | DType::Int8
         | DType::UInt8
         | DType::Int32
-        | DType::UInt32 => Ok(read_back_float(buffer, byte_offset, element_count)),
+        | DType::UInt32 => Ok(read_back_as_device_f32(buffer, byte_offset, element_count)),
         DType::Int16
         | DType::UInt16
         | DType::Int64
@@ -4381,11 +4381,26 @@ fn read_back(
     }
 }
 
-fn read_back_float(
+/// Reads back an output whose device buffer holds 4-byte `float` elements
+/// regardless of its logical [`DType`] — `msl::type_token` emits `"float"`
+/// (never a narrower or integer MSL type) for every one of `Float32`,
+/// `BFloat16`, `Bool`, `Int8`, `UInt8`, `Int32`, and `UInt32`, so the bytes
+/// this reads are always IEEE-754 binary32 on the device side no matter
+/// which of those logical dtypes the caller asked for. `Float16` is the one
+/// dtype this backend narrows on-device (`read_back_half`); every other
+/// dtype that reaches this function was upcast to `float` before dispatch
+/// and is downcast back to its logical dtype by the caller after this
+/// returns, not by this function.
+fn read_back_as_device_f32(
     buffer: &ProtocolObject<dyn MTLBuffer>,
     byte_offset: usize,
     element_count: usize,
 ) -> Vec<f32> {
+    debug_assert!(
+        buffer.length() >= byte_offset + element_count * size_of::<f32>(),
+        "device buffer too small for a device-f32 read-back: buffer.length()={}, byte_offset={byte_offset}, element_count={element_count}",
+        buffer.length(),
+    );
     let pointer = buffer.contents();
     // SAFETY: `buffer` is `storageModeShared`, so `contents()` is a
     // CPU-visible pointer to at least `byte_offset + element_count * 4`
@@ -4409,7 +4424,7 @@ fn read_back_half(
     let pointer = buffer.contents();
     // SAFETY: `buffer` is `storageModeShared`, so `contents()` is a
     // CPU-visible pointer to at least `byte_offset + element_count * 2`
-    // initialized bytes — the same sizing guarantee `read_back_float`
+    // initialized bytes — the same sizing guarantee `read_back_as_device_f32`
     // relies on, just over the narrower element width `allocate_buffer`
     // used for a `Float16` node.
     let narrow = unsafe {
