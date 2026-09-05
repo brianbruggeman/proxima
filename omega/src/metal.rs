@@ -241,6 +241,8 @@ pub enum MetalError {
     Tensor(#[from] TensorError),
     #[error(transparent)]
     Emit(#[from] EmitError),
+    #[error("hazard tracking: operand {node} has no resolved device buffer")]
+    UnresolvedHazardOperand { node: NodeId },
 }
 /// This thread's Metal device paired with its command queue — both created
 /// once per thread rather than per [`execute`] call.
@@ -886,6 +888,27 @@ impl<Id: Eq + core::hash::Hash + Copy> HazardTracker<Id> {
     }
 }
 
+/// Resolves every hazard-tracked identity for a bound op's operands from
+/// `device_buffers`, erroring on the first operand with none instead of
+/// silently dropping it from the hazard set (the previous `filter_map`
+/// behavior) — an operand missing from `device_buffers` means the encode
+/// this identity feeds is already wrong, so hiding it from the hazard check
+/// only hides a real bug behind a missing barrier.
+#[cfg(feature = "metal-concurrent-dispatch")]
+fn resolve_hazard_inputs(
+    operands: impl Iterator<Item = NodeId>,
+    device_buffers: &BTreeMap<NodeId, DeviceBuffer>,
+) -> Result<Vec<*const ProtocolObject<dyn MTLBuffer>>, MetalError> {
+    operands
+        .map(|operand| {
+            device_buffers
+                .get(&operand)
+                .map(|(buffer, _offset)| Retained::as_ptr(buffer))
+                .ok_or(MetalError::UnresolvedHazardOperand { node: operand })
+        })
+        .collect()
+}
+
 /// [`execute_plan`], plus the ability to route one or more nodes' outputs
 /// into a buffer the CALLER owns (`output_placements`), and to bind one or
 /// more [`Op::Input`] nodes DIRECTLY to a buffer
@@ -1194,12 +1217,10 @@ pub fn execute_plan_with_placements(
             // `needs_barrier`/`record` call, no barrier emitted on its
             // account.
             #[cfg(feature = "metal-concurrent-dispatch")]
-            let hazard_inputs: Vec<*const ProtocolObject<dyn MTLBuffer>> = bound
-                .operands()
-                .iter()
-                .filter_map(|(operand, _, _)| device_buffers.get(operand))
-                .map(|(buffer, _offset)| Retained::as_ptr(buffer))
-                .collect();
+            let hazard_inputs = resolve_hazard_inputs(
+                bound.operands().iter().map(|(operand, _, _)| *operand),
+                &device_buffers,
+            )?;
             // resolved ONCE, before the hazard check, from the exact same
             // placement -> arena -> fresh-allocation chain `encode_op` would
             // otherwise pick independently below: `needs_barrier` and
@@ -4830,7 +4851,9 @@ mod arena_tests {
 #[cfg(all(test, feature = "metal-concurrent-dispatch"))]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod hazard_tracker_tests {
-    use super::HazardTracker;
+    use std::collections::BTreeMap;
+
+    use super::{DeviceBuffer, HazardTracker, MetalError, NodeId, resolve_hazard_inputs};
 
     /// `a -> b`, `a -> c` (independent, both only read `a`), then `b, c ->
     /// d` -- the shape this whole feature exists for (Q/K/V from one normed
@@ -4906,5 +4929,21 @@ mod hazard_tracker_tests {
             *barriers += 1;
         }
         hazards.record(inputs, output);
+    }
+
+    /// An operand missing from `device_buffers` is a driver bug -- the
+    /// encode it feeds is already wrong -- so [`resolve_hazard_inputs`] must
+    /// error, never silently drop it from the hazard set.
+    #[test]
+    fn a_missing_operand_buffer_is_an_error_not_a_dropped_hazard() {
+        let device_buffers: BTreeMap<NodeId, DeviceBuffer> = BTreeMap::new();
+        let missing = NodeId(7);
+
+        let result = resolve_hazard_inputs(core::iter::once(missing), &device_buffers);
+
+        match result {
+            Err(MetalError::UnresolvedHazardOperand { node }) => assert_eq!(node, missing),
+            other => panic!("expected UnresolvedHazardOperand, got {other:?}"),
+        }
     }
 }
