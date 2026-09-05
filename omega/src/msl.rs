@@ -3377,18 +3377,45 @@ fn push_packed_row_blocked_body(
             // construction (some simdgroups simply run one fewer iteration),
             // never a separate ragged-tail branch.
             source.push_str(&format!(
-                "    for (int ib = (int)(ix + sgitg * {ix_stride}u); ib < super_blocks; ib += (int)({ix_stride}u * split)) {{\n"
+                "    int ib_first = (int)(ix + sgitg * {ix_stride}u);\n    int ib_step = (int)({ix_stride}u * split);\n"
             ));
         } else {
             source.push_str(&format!(
-                "    for (int ib = (int)ix; ib < super_blocks; ib += {ix_stride}) {{\n"
+                "    int ib_first = (int)ix;\n    int ib_step = {ix_stride};\n"
             ));
         }
+        // HOIST + POINTER INCREMENT (`docs/discipline.md` perf/packed-row-
+        // addressing row): `weight_base[q]/Q4K_BLOCK_ELEMENTS` and the y4
+        // lane offset (`64*iq + 8*ir`) are invariant across every `ib` this
+        // thread visits -- only `ib` itself varies. The prior form
+        // recomputed `(weight_base[q]/256 + ib) * block_bytes` and
+        // `ib*256*other_stride` from scratch every iteration (a 64-bit
+        // multiply-add per row per iteration); ggml's own row/`y4` pointers
+        // instead advance by a CONSTANT per iteration
+        // (`ggml-metal.metal:5132,5182`'s `q1 += nb01/2`, `y4 += 4*QK_K`).
+        // This computes each row's starting byte pointer and the
+        // per-iteration byte step ONCE before the loop, then the loop body
+        // only adds.
+        source.push_str(&format!(
+            "    long blk_step = (long)ib_step * {block_bytes};\n"
+        ));
+        source.push_str(&format!("    device const uchar *blk_ptr[{rows}];\n"));
+        source.push_str(&format!("    for (int q = 0; q < {rows}; ++q) {{\n"));
+        source.push_str(&format!(
+            "        blk_ptr[q] = in{weight} + ((long)((int)weight_base[q] / {Q4K_BLOCK_ELEMENTS}) + (long)ib_first) * {block_bytes};\n"
+        ));
+        source.push_str("    }\n");
+        if plain_product {
+            source.push_str(&format!(
+                "    long y4_step = (long)ib_step * {Q4K_BLOCK_ELEMENTS} * other_stride;\n"
+            ));
+            source.push_str(&format!("    device const float *y4 = in{other} + other_base[0] + (long)ib_first * {Q4K_BLOCK_ELEMENTS} * other_stride + (long)(64u * iq + 8u * ir) * other_stride;\n"));
+        }
+        source.push_str("    for (int ib = ib_first; ib < super_blocks; ib += ib_step) {\n");
         source.push_str(&format!(
             "        int elem0 = ib * {Q4K_BLOCK_ELEMENTS} + (int)slot;\n"
         ));
         if plain_product {
-            source.push_str(&format!("        device const float *y4 = in{other} + other_base[0] + (long)ib * {Q4K_BLOCK_ELEMENTS} * other_stride + (long)(64u * iq + 8u * ir) * other_stride;\n"));
             source.push_str("        for (uint i = 0u; i < 8u; ++i) { yl[i] = y4[i]; yl[i + 8u] = y4[i + 32u]; yh[i] = y4[i + 128u]; yh[i + 8u] = y4[i + 160u]; }\n");
         } else {
             source.push_str(&format!("        for (int j = 0; j < {sub}; ++j) {{\n"));
@@ -3398,9 +3425,7 @@ fn push_packed_row_blocked_body(
             source.push_str("        }\n");
         }
         source.push_str(&format!("        for (int q = 0; q < {rows}; ++q) {{\n"));
-        source.push_str(&format!(
-            "            device const uchar *blk = in{weight} + ((int)weight_base[q] / {Q4K_BLOCK_ELEMENTS} + ib) * {block_bytes};\n"
-        ));
+        source.push_str("            device const uchar *blk = blk_ptr[q];\n");
         match codec {
             PackedCodec::Q4K => {
                 if plain_product {
@@ -3574,6 +3599,12 @@ fn push_packed_row_blocked_body(
             }
         }
         source.push_str("        }\n");
+        source.push_str(&format!(
+            "        for (int q = 0; q < {rows}; ++q) {{ blk_ptr[q] += blk_step; }}\n"
+        ));
+        if plain_product {
+            source.push_str("        y4 += y4_step;\n");
+        }
         source.push_str("    }\n");
         }
         push_packed_row_combine_and_write(
@@ -3832,10 +3863,29 @@ fn push_q4k_ggml_port_body(
     ));
     source.push_str("    float yl[16];\n");
     source.push_str("    float yh[16];\n");
-    source.push_str("    for (int ib = (int)ix; ib < super_blocks; ib += 4) {\n");
+    // HOIST + POINTER INCREMENT, same as `push_packed_row_blocked_body`'s
+    // own arm above and for the identical reason: `weight_base[q]/
+    // Q4K_BLOCK_ELEMENTS` and the y4 lane offset are invariant across every
+    // `ib` this thread visits (`ix` alone selects the starting super-block,
+    // the loop always steps by the fixed `4`), so both this row's byte
+    // pointer and the activation base are computed ONCE and advanced by a
+    // constant per iteration instead of rebuilt from `ib` every time.
     source.push_str(&format!(
-        "        long y4_base = other_base[0] + (long)ib * {Q4K_BLOCK_ELEMENTS} * other_stride + (long)(64u * iq + 8u * ir) * other_stride;\n"
+        "    long blk_step = (long)4 * {block_bytes};\n"
     ));
+    source.push_str(&format!("    device const uchar *blk_ptr[{rows}];\n"));
+    source.push_str(&format!("    for (int q = 0; q < {rows}; ++q) {{\n"));
+    source.push_str(&format!(
+        "        blk_ptr[q] = in{weight} + ((long)((int)weight_base[q] / {Q4K_BLOCK_ELEMENTS}) + (long)ix) * {block_bytes};\n"
+    ));
+    source.push_str("    }\n");
+    source.push_str(&format!(
+        "    long y4_step = (long)4 * {Q4K_BLOCK_ELEMENTS} * other_stride;\n"
+    ));
+    source.push_str(&format!(
+        "    long y4_base = other_base[0] + (long)ix * {Q4K_BLOCK_ELEMENTS} * other_stride + (long)(64u * iq + 8u * ir) * other_stride;\n"
+    ));
+    source.push_str("    for (int ib = (int)ix; ib < super_blocks; ib += 4) {\n");
     source.push_str("        float sumy0 = 0.0f; float sumy1 = 0.0f; float sumy2 = 0.0f; float sumy3 = 0.0f;\n");
     source.push_str(&format!("        for (uint i = 0u; i < 8u; ++i) {{\n            yl[i] = in{other}[y4_base + (long)i * other_stride]; sumy0 += yl[i];\n"));
     source.push_str(&format!(
@@ -3849,9 +3899,7 @@ fn push_q4k_ggml_port_body(
     ));
     source.push_str("        }\n");
     source.push_str(&format!("        for (int q = 0; q < {rows}; ++q) {{\n"));
-    source.push_str(&format!(
-        "            device const uchar *blk = in{weight} + ((int)weight_base[q] / {Q4K_BLOCK_ELEMENTS} + ib) * {block_bytes};\n"
-    ));
+    source.push_str("            device const uchar *blk = blk_ptr[q];\n");
     source.push_str("            device const ushort *sc = (device const ushort *)(blk + 4) + iq;\n");
     source.push_str("            device const ushort *q1 = (device const ushort *)(blk + 16) + 16u * iq + 4u * ir;\n");
     source.push_str("            device const ushort *q2 = q1 + 32;\n");
@@ -3904,6 +3952,10 @@ fn push_q4k_ggml_port_body(
         "                      dmin * (sumy0 * (float)sc8_2 + sumy1 * (float)sc8_3 + sumy2 * (float)sc8_6 + sumy3 * (float)sc8_7);\n",
     );
     source.push_str("        }\n");
+    source.push_str(&format!(
+        "        for (int q = 0; q < {rows}; ++q) {{ blk_ptr[q] += blk_step; }}\n"
+    ));
+    source.push_str("        y4_base += y4_step;\n");
     source.push_str("    }\n");
 }
 
