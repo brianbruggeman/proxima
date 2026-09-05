@@ -1167,7 +1167,7 @@ pub fn emit(resolved: &BoundOp, packed_operands: &PackedOperands) -> Result<Kern
         entry,
         bindings: bindings(resolved),
         grid: GridSpec {
-            threads: grid_threads(resolved, &quantized),
+            threads: grid_threads(resolved, &quantized)?,
             threadgroup_width: tiled_gemm_threadgroup_width(resolved, &quantized),
         },
     })
@@ -1332,7 +1332,7 @@ pub(crate) fn kernel_dispatch_shape(
     Ok((
         bindings(resolved),
         GridSpec {
-            threads: grid_threads(resolved, &quantized),
+            threads: grid_threads(resolved, &quantized)?,
             threadgroup_width: tiled_gemm_threadgroup_width(resolved, &quantized),
         },
     ))
@@ -1418,12 +1418,12 @@ fn is_cooperative_reduce_op(op: ScalarOp) -> bool {
 /// [`is_cooperative_reduce_op`] body, so the non-cooperative arms below are
 /// enumerated rather than wildcarded — adding a `ScalarOp` variant forces a
 /// decision here instead of silently panicking.
-fn simd_combine_fn(op: ScalarOp) -> &'static str {
+fn simd_combine_fn(node: NodeId, op: ScalarOp) -> Result<&'static str, EmitError> {
     match op {
-        ScalarOp::Add => "simd_sum",
-        ScalarOp::Multiply => "simd_product",
-        ScalarOp::Maximum => "simd_max",
-        ScalarOp::Minimum => "simd_min",
+        ScalarOp::Add => Ok("simd_sum"),
+        ScalarOp::Multiply => Ok("simd_product"),
+        ScalarOp::Maximum => Ok("simd_max"),
+        ScalarOp::Minimum => Ok("simd_min"),
         ScalarOp::Identity
         | ScalarOp::Subtract
         | ScalarOp::Divide
@@ -1436,9 +1436,7 @@ fn simd_combine_fn(op: ScalarOp) -> &'static str {
         | ScalarOp::Erf
         | ScalarOp::Greater
         | ScalarOp::Equal
-        | ScalarOp::Select => {
-            unreachable!("simd_combine_fn is only called for a cooperative reduce_op")
-        }
+        | ScalarOp::Select => Err(EmitError::NonCooperativeReduceOp { node, op: op_token(op) }),
     }
 }
 
@@ -1451,12 +1449,12 @@ fn simd_combine_fn(op: ScalarOp) -> &'static str {
 /// 0 alone carries the real seed, so it is folded into the group exactly
 /// once, matching `cpu::run_reduce`'s single-seed semantics regardless of
 /// how many idle lanes there are.
-fn cooperative_identity_token(op: ScalarOp) -> &'static str {
+fn cooperative_identity_token(node: NodeId, op: ScalarOp) -> Result<&'static str, EmitError> {
     match op {
-        ScalarOp::Add => "0.0f",
-        ScalarOp::Multiply => "1.0f",
-        ScalarOp::Maximum => "-INFINITY",
-        ScalarOp::Minimum => "INFINITY",
+        ScalarOp::Add => Ok("0.0f"),
+        ScalarOp::Multiply => Ok("1.0f"),
+        ScalarOp::Maximum => Ok("-INFINITY"),
+        ScalarOp::Minimum => Ok("INFINITY"),
         ScalarOp::Identity
         | ScalarOp::Subtract
         | ScalarOp::Divide
@@ -1469,9 +1467,7 @@ fn cooperative_identity_token(op: ScalarOp) -> &'static str {
         | ScalarOp::Erf
         | ScalarOp::Greater
         | ScalarOp::Equal
-        | ScalarOp::Select => {
-            unreachable!("cooperative_identity_token is only called for a cooperative reduce_op")
-        }
+        | ScalarOp::Select => Err(EmitError::NonCooperativeReduceOp { node, op: op_token(op) }),
     }
 }
 
@@ -1771,7 +1767,7 @@ pub enum PackedRowBlockRejection {
 fn axes_fold_contiguously(dims: &[u16], extents: &[u64], layout: &Layout) -> bool {
     dims.windows(2).all(|window| {
         let [outer, inner] = window else {
-            unreachable!("windows(2) always yields a two-element slice")
+            return false;
         };
         let inner_extent = extents[*inner as usize] as i64;
         layout.stride(*outer) == inner_extent * layout.stride(*inner)
@@ -1792,6 +1788,7 @@ fn classify_packed_row_block(
     let BoundOpKind::Reduce {
         keep: Keep::Reduce,
         output_axes,
+        out_layout,
         ..
     } = &resolved.kind
     else {
@@ -1800,16 +1797,13 @@ fn classify_packed_row_block(
     if quantized.len() != 2 {
         return Err(PackedRowBlockRejection::OperandCountNotTwo);
     }
-    let packed: Vec<usize> = quantized
+    let packed: Vec<(usize, PackedCodec)> = quantized
         .iter()
         .enumerate()
-        .filter_map(|(index, codec)| codec.is_some().then_some(index))
+        .filter_map(|(index, codec)| codec.map(|codec| (index, codec)))
         .collect();
-    let [weight] = packed[..] else {
+    let [(weight, codec)] = packed[..] else {
         return Err(PackedRowBlockRejection::NotExactlyOnePackedOperand);
-    };
-    let Some(codec) = quantized[weight] else {
-        unreachable!("weight index came from the is_some() filter above")
     };
     // Whitelist the K-quant family explicitly rather than blacklisting one
     // non-K-quant codec by `==` -- an equality check against `Q8_0` alone
@@ -1864,10 +1858,6 @@ fn classify_packed_row_block(
     if !(extent as usize).is_multiple_of(Q4K_BLOCK_ELEMENTS) {
         return Err(PackedRowBlockRejection::ExtentNotBlockMultiple { extent });
     }
-    let out_layout = match &resolved.kind {
-        BoundOpKind::Reduce { out_layout, .. } => out_layout,
-        _ => unreachable!("the Keep::Reduce match above already narrowed resolved.kind"),
-    };
     let weight_layout = &resolved.operands()[weight].1;
     let other_layout = &resolved.operands()[other].1;
     let (token_axes, feature_axes) = split_token_feature_axes(
@@ -2072,9 +2062,10 @@ fn classify_tiled_gemm(
         // uniformly zero across the group, trivially "contiguous") AND for
         // the op's own output layout, since the tile write-back below also
         // walks the flattened group with one stride.
-        let out_layout = match &resolved.kind {
-            BoundOpKind::Reduce { out_layout, .. } => out_layout,
-            _ => unreachable!("classify_packed_row_block above only matches Keep::Reduce"),
+        let BoundOpKind::Reduce { out_layout, .. } = &resolved.kind else {
+            return Err(TiledGemmRejection::NotPackedRowBlock(
+                PackedRowBlockRejection::NotReduceKeepReduce,
+            ));
         };
         let groups_contiguous =
             axes_fold_contiguously(&token_axes, &resolved.extents, other_layout)
@@ -2157,17 +2148,22 @@ pub fn diagnose_packed_row_block(
 /// [`classify_tiled_gemm`]'s doc) -- the `#[cfg(not(..))]` arm is therefore
 /// as unreachable as [`push_tiled_gemm_body`]'s own stub, for the same
 /// reason.
-fn tiled_gemm_threadgroups(feature_extent: u64, token_extent: u64) -> u64 {
+fn tiled_gemm_threadgroups(
+    node: NodeId,
+    feature_extent: u64,
+    token_extent: u64,
+) -> Result<u64, EmitError> {
     #[cfg(not(feature = "metal-tiled-gemm"))]
     {
         let _ = (feature_extent, token_extent);
-        unreachable!("only called when tiled_gemm_block returned Some, which requires the feature")
+        Err(EmitError::TiledGemmFeatureDisabled { node })
     }
     #[cfg(feature = "metal-tiled-gemm")]
     {
+        let _ = node;
         let row_tiles = feature_extent.div_ceil(crate::sized::TILED_GEMM_BLOCK_M);
         let col_tiles = token_extent.div_ceil(crate::sized::TILED_GEMM_BLOCK_N);
-        row_tiles * col_tiles * (TILED_GEMM_NSG as u64) * SIMD_WIDTH
+        Ok(row_tiles * col_tiles * (TILED_GEMM_NSG as u64) * SIMD_WIDTH)
     }
 }
 
@@ -2233,8 +2229,8 @@ fn packed_row_dispatch(feature_total: u64, token_total: u64) -> (u64, u64) {
     (base * token_groups, split)
 }
 
-fn grid_threads(resolved: &BoundOp, quantized: &[Option<PackedCodec>]) -> u64 {
-    match &resolved.kind {
+fn grid_threads(resolved: &BoundOp, quantized: &[Option<PackedCodec>]) -> Result<u64, EmitError> {
+    let threads = match &resolved.kind {
         BoundOpKind::CachedAttention { head_dim, .. } => {
             resolved
                 .extents
@@ -2265,6 +2261,7 @@ fn grid_threads(resolved: &BoundOp, quantized: &[Option<PackedCodec>]) -> u64 {
                 // tiles the feature axis alone; see `push_tiled_gemm_body`'s
                 // doc).
                 tiled_gemm_threadgroups(
+                    resolved.node,
                     block
                         .feature_axes
                         .iter()
@@ -2275,7 +2272,7 @@ fn grid_threads(resolved: &BoundOp, quantized: &[Option<PackedCodec>]) -> u64 {
                         .iter()
                         .map(|&axis| resolved.extents[axis as usize])
                         .product(),
-                )
+                )?
             } else if let Some(block) = packed_row_block(resolved, quantized) {
                 // one simdgroup per PACKED_ROWS_PER_GROUP feature rows,
                 // times the split-K factor (1 = no-op unless
@@ -2312,7 +2309,8 @@ fn grid_threads(resolved: &BoundOp, quantized: &[Option<PackedCodec>]) -> u64 {
             resolved.extents[..rank.saturating_sub(1)].iter().product()
         }
         BoundOpKind::Iota | BoundOpKind::Constant { .. } => resolved.extents.iter().product(),
-    }
+    };
+    Ok(threads)
 }
 
 fn op_token(op: ScalarOp) -> &'static str {
@@ -2994,7 +2992,11 @@ fn render_cached_attention(resolved: &BoundOp, entry: &str) -> Result<String, Em
         ..
     } = &resolved.kind
     else {
-        unreachable!("cached attention renderer only receives cached attention")
+        return Err(EmitError::RenderKindMismatch {
+            node: resolved.node,
+            expected: "cached_attention",
+            found: resolved.kind.name(),
+        });
     };
     let element_type = type_token(resolved.node, resolved.dtype)?;
     let cached_lower = if *cached_lower_inclusive == i64::MIN {
@@ -3156,7 +3158,11 @@ fn render_reduce(
         ..
     } = &resolved.kind
     else {
-        unreachable!("render_reduce is only called for a Keep::Reduce fold")
+        return Err(EmitError::RenderKindMismatch {
+            node: resolved.node,
+            expected: "keep::reduce fold",
+            found: resolved.kind.name(),
+        });
     };
     let rank = resolved.extents.len();
     let rank_len = rank.max(1);
@@ -3244,7 +3250,7 @@ fn render_reduce(
             element_type,
             epilogue_body,
             epilogue_operands,
-        );
+        )?;
     } else {
         push_serial_reduce_body(
             &mut source,
@@ -3695,6 +3701,7 @@ fn push_q4k_product_reduce_body(source: &mut String, sub: usize, run: usize, ele
 #[allow(clippy::too_many_arguments)]
 fn push_packed_row_combine_and_write(
     source: &mut String,
+    node: NodeId,
     reduce_op: ScalarOp,
     rows: usize,
     rank: usize,
@@ -3703,8 +3710,8 @@ fn push_packed_row_combine_and_write(
     element_type: &str,
     epilogue_body: &ComposedBody,
     epilogue_operands: &[(NodeId, Layout, Option<Lookup>)],
-) {
-    let combine_fn = simd_combine_fn(reduce_op);
+) -> Result<(), EmitError> {
+    let combine_fn = simd_combine_fn(node, reduce_op)?;
     source.push_str(&format!("    for (int q = 0; q < {rows}; ++q) {{\n"));
     source.push_str(&format!(
         "        {element_type} reduced = {combine_fn}(sumf[q]);\n"
@@ -3740,6 +3747,7 @@ fn push_packed_row_combine_and_write(
     );
     source.push_str("        }\n");
     source.push_str("    }\n");
+    Ok(())
 }
 
 /// The row-blocked packed path's tail: combine each simdgroup's per-row
@@ -3764,6 +3772,7 @@ fn push_packed_row_combine_and_write(
 #[allow(clippy::too_many_arguments)]
 fn push_packed_row_combine_and_write(
     source: &mut String,
+    node: NodeId,
     reduce_op: ScalarOp,
     rows: usize,
     rank: usize,
@@ -3772,8 +3781,8 @@ fn push_packed_row_combine_and_write(
     element_type: &str,
     epilogue_body: &ComposedBody,
     epilogue_operands: &[(NodeId, Layout, Option<Lookup>)],
-) {
-    let combine_fn = simd_combine_fn(reduce_op);
+) -> Result<(), EmitError> {
+    let combine_fn = simd_combine_fn(node, reduce_op)?;
     let max_split = crate::sized::PACKED_ROW_SPLIT_K_MAX_SPLIT;
     source.push_str(&format!(
         "    threadgroup {element_type} partial_sums[{rows}][{max_split}];\n"
@@ -3826,6 +3835,7 @@ fn push_packed_row_combine_and_write(
     source.push_str("            }\n");
     source.push_str("        }\n");
     source.push_str("    }\n");
+    Ok(())
 }
 
 /// [`push_packed_row_blocked_body`]'s `token_total > 1` branch: `s <=
@@ -3857,7 +3867,7 @@ fn push_packed_row_multi_row_body(
     block: &PackedRowBlock,
     epilogue_body: &ComposedBody,
     epilogue_operands: &[(NodeId, Layout, Option<Lookup>)],
-) {
+) -> Result<(), EmitError> {
     let weight = block.weight;
     let other = block.other;
     let reduce_dim = block.reduce_dim;
@@ -3868,8 +3878,8 @@ fn push_packed_row_multi_row_body(
     let rows = PACKED_ROWS_PER_GROUP;
     let cap = crate::sized::PACKED_ROW_ACTIVATION_GROUP as usize;
     let (init_expr, _) = fold_init_tokens(init);
-    let identity = cooperative_identity_token(reduce_op);
-    let combine_fn = simd_combine_fn(reduce_op);
+    let identity = cooperative_identity_token(resolved.node, reduce_op)?;
+    let combine_fn = simd_combine_fn(resolved.node, reduce_op)?;
 
     source.push_str("    long feature_total = 1;\n");
     for index in 0..feature_axes.len() {
@@ -4015,6 +4025,7 @@ fn push_packed_row_multi_row_body(
     source.push_str("            }\n");
     source.push_str("        }\n");
     source.push_str("    }\n");
+    Ok(())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -4027,13 +4038,11 @@ fn push_packed_row_blocked_body(
     rank: usize,
     quantized: &[Option<PackedCodec>],
     element_type: &str,
+    block: &PackedRowBlock,
     epilogue_body: &ComposedBody,
     epilogue_operands: &[(NodeId, Layout, Option<Lookup>)],
-) {
-    let Some(block) = packed_row_block(resolved, quantized) else {
-        unreachable!("push_packed_row_blocked_body is only called when packed_row_block matched")
-    };
-    if packed_row_block_token_total(&block, &resolved.extents) > 1 {
+) -> Result<(), EmitError> {
+    if packed_row_block_token_total(block, &resolved.extents) > 1 {
         push_packed_row_multi_row_body(
             source,
             resolved,
@@ -4042,11 +4051,11 @@ fn push_packed_row_blocked_body(
             rank,
             quantized,
             element_type,
-            &block,
+            block,
             epilogue_body,
             epilogue_operands,
-        );
-        return;
+        )?;
+        return Ok(());
     }
     let PackedRowBlock {
         weight,
@@ -4054,7 +4063,7 @@ fn push_packed_row_blocked_body(
         reduce_dim,
         codec,
         ..
-    } = block;
+    } = *block;
     let block_bytes = codec.block_bytes();
     let rank_len = rank.max(1);
     let operand_count = resolved.operands().len();
@@ -4062,7 +4071,7 @@ fn push_packed_row_blocked_body(
     // the true seed folds in once and every other lane starts at the
     // algebraic identity, so `simd_*` can combine them unconditionally.
     let (init_expr, _) = fold_init_tokens(init);
-    let identity = cooperative_identity_token(reduce_op);
+    let identity = cooperative_identity_token(resolved.node, reduce_op)?;
     // ROW-BLOCKED PACKED PATH. One SIMD group folds PACKED_ROWS_PER_GROUP
     // output rows at once so the activation's run of 8 values is loaded into
     // registers ONCE and reused across all of them — ggml's `float
@@ -4532,28 +4541,28 @@ fn push_packed_row_blocked_body(
                 source.push_str("            }\n");
             }
             PackedCodec::Q8_0 => {
-                unreachable!(
-                    "classify_packed_row_block rejects PackedCodec::Q8_0 via NotKQuantCodec \
-                     before packed_row_block can ever return Some for it"
-                )
+                return Err(EmitError::NonKQuantPackedCodec {
+                    node: resolved.node,
+                    codec: "q8_0",
+                });
             }
             PackedCodec::Q4_0 => {
-                unreachable!(
-                    "classify_packed_row_block rejects PackedCodec::Q4_0 via NotKQuantCodec \
-                     before packed_row_block can ever return Some for it"
-                )
+                return Err(EmitError::NonKQuantPackedCodec {
+                    node: resolved.node,
+                    codec: "q4_0",
+                });
             }
             PackedCodec::Float16 => {
-                unreachable!(
-                    "classify_packed_row_block rejects PackedCodec::Float16 via NotKQuantCodec \
-                     before packed_row_block can ever return Some for it"
-                )
+                return Err(EmitError::NonKQuantPackedCodec {
+                    node: resolved.node,
+                    codec: "float16",
+                });
             }
             PackedCodec::BFloat16 => {
-                unreachable!(
-                    "classify_packed_row_block rejects PackedCodec::BFloat16 via NotKQuantCodec \
-                     before packed_row_block can ever return Some for it"
-                )
+                return Err(EmitError::NonKQuantPackedCodec {
+                    node: resolved.node,
+                    codec: "bfloat16",
+                });
             }
         }
         source.push_str("        }\n");
@@ -4569,6 +4578,7 @@ fn push_packed_row_blocked_body(
         }
         push_packed_row_combine_and_write(
             source,
+            resolved.node,
             reduce_op,
             rows,
             rank,
@@ -4577,8 +4587,9 @@ fn push_packed_row_blocked_body(
             element_type,
             epilogue_body,
             epilogue_operands,
-        );
+        )?;
     }
+    Ok(())
 }
 
 /// `metal-q4k-single-fetch` (default-off): the row-blocked packed-`Q4_K`
@@ -5004,11 +5015,12 @@ fn push_q4k_ggml_port_body(
 #[cfg(feature = "metal-tiled-gemm")]
 fn push_tiled_gemm_body(
     source: &mut String,
+    node: NodeId,
     output_axes: &[u16],
     rank: usize,
     block: &TiledGemmBlock,
     element_type: &str,
-) {
+) -> Result<(), EmitError> {
     let TiledGemmBlock {
         weight,
         other,
@@ -5019,10 +5031,16 @@ fn push_tiled_gemm_body(
     // innermost (fastest, last-listed) of each group -- the single stride
     // the per-element reads below use; see `TiledGemmBlock`'s own doc.
     let Some(&token_axis) = token_axes.last() else {
-        unreachable!("classify_tiled_gemm never builds an empty token group")
+        return Err(EmitError::EmptyAxisGroup {
+            node,
+            group: "token",
+        });
     };
     let Some(&feature_axis) = feature_axes.last() else {
-        unreachable!("classify_tiled_gemm never builds an empty feature group")
+        return Err(EmitError::EmptyAxisGroup {
+            node,
+            group: "feature",
+        });
     };
     let rank_len = rank.max(1);
 
@@ -5049,26 +5067,24 @@ fn push_tiled_gemm_body(
     // concrete shapes; see `TiledGemmBlock`'s own doc). Every real matmul
     // this path has measured keeps `token_axes` a single axis, but the
     // product generalizes to that case for free (one factor, no-op).
-    let group_extent_expr = |group: &[u16]| -> String {
-        group
-            .iter()
-            .map(|&dim| {
-                let Some(index) = output_axes.iter().position(|&candidate| candidate == dim) else {
-                    unreachable!("every token/feature axis is one of output_axes by construction")
-                };
-                format!("u.output_extents[{index}]")
-            })
-            .collect::<Vec<_>>()
-            .join(" * ")
+    let group_extent_expr = |group: &[u16]| -> Result<String, EmitError> {
+        let mut terms = Vec::with_capacity(group.len());
+        for &dim in group {
+            let Some(index) = output_axes.iter().position(|&candidate| candidate == dim) else {
+                return Err(EmitError::AxisNotInOutputAxes { node, axis: dim });
+            };
+            terms.push(format!("u.output_extents[{index}]"));
+        }
+        Ok(terms.join(" * "))
     };
 
     source.push_str(&format!(
         "    long feature_extent = {};\n",
-        group_extent_expr(feature_axes)
+        group_extent_expr(feature_axes)?
     ));
     source.push_str(&format!(
         "    long token_extent = {};\n",
-        group_extent_expr(token_axes)
+        group_extent_expr(token_axes)?
     ));
     source.push_str(&format!(
         "    long num_col_tiles = (token_extent + {}) / {block_n};\n",
@@ -5267,6 +5283,7 @@ fn push_tiled_gemm_body(
     ));
     source.push_str("        }\n");
     source.push_str("    }\n");
+    Ok(())
 }
 
 /// Never actually invoked: [`classify_tiled_gemm`]'s own `#[cfg(not(feature
@@ -5277,13 +5294,14 @@ fn push_tiled_gemm_body(
 #[cfg(not(feature = "metal-tiled-gemm"))]
 fn push_tiled_gemm_body(
     source: &mut String,
+    node: NodeId,
     output_axes: &[u16],
     rank: usize,
     block: &TiledGemmBlock,
     element_type: &str,
-) {
+) -> Result<(), EmitError> {
     let _ = (source, output_axes, rank, block, element_type);
-    unreachable!("classify_tiled_gemm only ever returns Some behind feature = \"metal-tiled-gemm\"")
+    Err(EmitError::TiledGemmFeatureDisabled { node })
 }
 
 /// The threadgroup width [`emit`]/[`kernel_dispatch_shape`] must dispatch
@@ -5374,8 +5392,13 @@ fn tiled_gemm_threadgroup_width(
     if !reduce_is_cooperative(resolved) {
         return None;
     }
-    let BoundOpKind::Reduce { output_axes, .. } = &resolved.kind else {
-        unreachable!("reduce_is_cooperative only returns true for a Keep::Reduce fold")
+    let BoundOpKind::Reduce {
+        keep: Keep::Reduce,
+        output_axes,
+        ..
+    } = &resolved.kind
+    else {
+        return None;
     };
     let reduce_dims = reduction_dims(resolved, output_axes);
     Some(cooperative_reduce_width(resolved, quantized, &reduce_dims))
@@ -5524,7 +5547,7 @@ fn push_cooperative_reduce_body(
     element_type: &str,
     epilogue_body: &ComposedBody,
     epilogue_operands: &[(NodeId, Layout, Option<Lookup>)],
-) {
+) -> Result<(), EmitError> {
     let rank_len = rank.max(1);
     let output_rank = output_axes.len();
     let output_rank_len = output_rank.max(1);
@@ -5539,8 +5562,8 @@ fn push_cooperative_reduce_body(
     // `kernel_cache_key`'s own comment for why the two are mutually
     // exclusive by construction.
     if let Some(block) = tiled_gemm_block(resolved, quantized, reduce_op, init, output_axes) {
-        push_tiled_gemm_body(source, output_axes, rank, &block, element_type);
-        return;
+        push_tiled_gemm_body(source, resolved.node, output_axes, rank, &block, element_type)?;
+        return Ok(());
     }
 
     // the row-blocked packed path owns its own preamble: `output_index` is a
@@ -5554,7 +5577,7 @@ fn push_cooperative_reduce_body(
     // -- one preamble, since both branches dispatch the identical
     // `output_index`/`lane` pair at `SIMD_WIDTH` (`metal-q4k-split-k`'s own
     // `tptg`-derived preamble below is the only variant on this pair).
-    if packed_row_block(resolved, quantized).is_some() {
+    if let Some(block) = packed_row_block(resolved, quantized) {
         if cfg!(feature = "metal-q4k-split-k") {
             // `tptg` is the ACTUAL per-dispatch threadgroup width
             // (`kernel_signature`'s new param, wired on for this exact
@@ -5585,10 +5608,11 @@ fn push_cooperative_reduce_body(
             rank,
             quantized,
             element_type,
+            &block,
             epilogue_body,
             epilogue_operands,
-        );
-        return;
+        )?;
+        return Ok(());
     }
 
     // Single source of truth with the dispatch shape `grid_threads`/
@@ -5620,7 +5644,7 @@ fn push_cooperative_reduce_body(
     }
 
     let (init_expr, seeded_init) = fold_init_tokens(init);
-    let identity = cooperative_identity_token(reduce_op);
+    let identity = cooperative_identity_token(resolved.node, reduce_op)?;
     source.push_str(&format!("    {element_type} accumulator;\n"));
     source.push_str("    bool seeded;\n");
     source.push_str("    if (lane == 0u) {\n");
@@ -5738,6 +5762,7 @@ fn push_cooperative_reduce_body(
             source.push_str("    }\n");
             push_cooperative_reduce_tail(
                 source,
+                resolved.node,
                 reduce_op,
                 rank,
                 width,
@@ -5745,8 +5770,8 @@ fn push_cooperative_reduce_body(
                 output_rank,
                 epilogue_body,
                 epilogue_operands,
-            );
-            return;
+            )?;
+            return Ok(());
         }
 
         for index in 0..operand_count {
@@ -5800,6 +5825,7 @@ fn push_cooperative_reduce_body(
         source.push_str("    }\n");
         push_cooperative_reduce_tail(
             source,
+            resolved.node,
             reduce_op,
             rank,
             width,
@@ -5807,8 +5833,8 @@ fn push_cooperative_reduce_body(
             output_rank,
             epilogue_body,
             epilogue_operands,
-        );
-        return;
+        )?;
+        return Ok(());
     }
 
     source.push_str(&format!(
@@ -5863,6 +5889,7 @@ fn push_cooperative_reduce_body(
 
     push_cooperative_reduce_tail(
         source,
+        resolved.node,
         reduce_op,
         rank,
         width,
@@ -5870,7 +5897,8 @@ fn push_cooperative_reduce_body(
         output_rank,
         epilogue_body,
         epilogue_operands,
-    );
+    )?;
+    Ok(())
 }
 
 /// The per-lane `simd_sum` fold and the final store both cooperative loop
@@ -5901,6 +5929,7 @@ fn push_cooperative_reduce_body(
 #[allow(clippy::too_many_arguments)]
 fn push_cooperative_reduce_tail(
     source: &mut String,
+    node: NodeId,
     reduce_op: ScalarOp,
     rank: usize,
     width: u64,
@@ -5908,8 +5937,8 @@ fn push_cooperative_reduce_tail(
     output_rank: usize,
     epilogue_body: &ComposedBody,
     epilogue_operands: &[(NodeId, Layout, Option<Lookup>)],
-) {
-    let combine_fn = simd_combine_fn(reduce_op);
+) -> Result<(), EmitError> {
+    let combine_fn = simd_combine_fn(node, reduce_op)?;
     let simdgroups = width / SIMD_WIDTH;
     let coord = |dim: usize| {
         if output_rank > 0 {
@@ -5941,7 +5970,7 @@ fn push_cooperative_reduce_tail(
             "out_offset",
         );
         source.push_str("    }\n");
-        return;
+        return Ok(());
     }
 
     source.push_str(&format!(
@@ -5980,6 +6009,7 @@ fn push_cooperative_reduce_tail(
         "out_offset",
     );
     source.push_str("    }\n");
+    Ok(())
 }
 
 fn render_scan(
@@ -5991,7 +6021,11 @@ fn render_scan(
         reduce_op, init, ..
     } = &resolved.kind
     else {
-        unreachable!("render_scan is only called for a Keep::Scan fold")
+        return Err(EmitError::RenderKindMismatch {
+            node: resolved.node,
+            expected: "keep::scan fold",
+            found: resolved.kind.name(),
+        });
     };
     let rank = resolved.extents.len();
     let rank_len = rank.max(1);
@@ -6754,6 +6788,77 @@ mod tests {
             .into_iter()
             .next()
             .expect("one fused bound emitted")
+    }
+
+    /// [`push_tiled_gemm_body`]'s empty-group guard, driven with a hand-built
+    /// [`TiledGemmBlock`] -- [`classify_tiled_gemm`]'s own `is_empty()` gate
+    /// never lets a real caller build one of these, so this drives the
+    /// emitter's internal contract directly.
+    #[cfg(feature = "metal-tiled-gemm")]
+    #[test]
+    fn push_tiled_gemm_body_rejects_an_empty_token_axis_group() {
+        let bound = tiled_gemm_op(16, 256, 4);
+        let block = TiledGemmBlock {
+            weight: 0,
+            other: 1,
+            reduce_dim: 1,
+            token_axes: Vec::new(),
+            feature_axes: vec![0],
+        };
+        let mut source = String::new();
+        let error = push_tiled_gemm_body(&mut source, bound.node, &[0], 2, &block, "float")
+            .expect_err("an empty token axis group is never built by classify_tiled_gemm");
+        assert!(matches!(
+            error,
+            EmitError::EmptyAxisGroup { group: "token", .. }
+        ));
+    }
+
+    /// [`push_tiled_gemm_body`]'s axis-lookup guard: a hand-built
+    /// [`TiledGemmBlock`] naming an axis outside `output_axes` --
+    /// [`classify_tiled_gemm`] only ever builds `token_axes`/`feature_axes`
+    /// as a subset of `output_axes`, so this too drives the internal
+    /// contract directly.
+    #[cfg(feature = "metal-tiled-gemm")]
+    #[test]
+    fn push_tiled_gemm_body_rejects_an_axis_not_in_output_axes() {
+        let bound = tiled_gemm_op(16, 256, 4);
+        let block = TiledGemmBlock {
+            weight: 0,
+            other: 1,
+            reduce_dim: 1,
+            token_axes: vec![5],
+            feature_axes: vec![0],
+        };
+        let mut source = String::new();
+        let error = push_tiled_gemm_body(&mut source, bound.node, &[0], 2, &block, "float")
+            .expect_err("axis 5 is never in output_axes [0]");
+        assert!(matches!(
+            error,
+            EmitError::AxisNotInOutputAxes { axis: 5, .. }
+        ));
+    }
+
+    /// [`push_tiled_gemm_body`]'s `#[cfg(not(feature = "metal-tiled-gemm"))]`
+    /// stub and [`tiled_gemm_threadgroups`]'s own non-feature arm both
+    /// name this exact state: the tiled path reached without the feature
+    /// that alone can build a real `TiledGemmBlock`.
+    #[cfg(not(feature = "metal-tiled-gemm"))]
+    #[test]
+    fn push_tiled_gemm_body_is_disabled_without_the_metal_tiled_gemm_feature() {
+        let bound = tiled_gemm_op(16, 256, 4);
+        let block = TiledGemmBlock {
+            token_axes: Vec::new(),
+            feature_axes: Vec::new(),
+        };
+        let mut source = String::new();
+        let error = push_tiled_gemm_body(&mut source, bound.node, &[0], 2, &block, "float")
+            .expect_err("the tiled path never exists without metal-tiled-gemm");
+        assert!(matches!(error, EmitError::TiledGemmFeatureDisabled { .. }));
+
+        let error = tiled_gemm_threadgroups(bound.node, 4, 16)
+            .expect_err("the tiled path never exists without metal-tiled-gemm");
+        assert!(matches!(error, EmitError::TiledGemmFeatureDisabled { .. }));
     }
 
     #[cfg(not(feature = "metal-tiled-gemm"))]
@@ -7546,6 +7651,110 @@ mod tests {
 
         let error = emit(&bound, &BTreeMap::new()).expect_err("an empty scan is rejected");
         assert!(matches!(error, EmitError::EmptyScan { .. }), "{error}");
+    }
+
+    #[test]
+    fn render_reduce_rejects_an_elementwise_bound_op() {
+        let bound = elementwise_tanh_op(8);
+        let error = render_reduce(&bound, "entry", &[None])
+            .expect_err("an elementwise chain is not a Reduce fold");
+        assert!(matches!(
+            error,
+            EmitError::RenderKindMismatch {
+                expected: "keep::reduce fold",
+                found: "elementwise",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn render_scan_rejects_an_elementwise_bound_op() {
+        let bound = elementwise_tanh_op(8);
+        let error = render_scan(&bound, "entry", &[None])
+            .expect_err("an elementwise chain is not a Reduce fold");
+        assert!(matches!(
+            error,
+            EmitError::RenderKindMismatch {
+                expected: "keep::scan fold",
+                found: "elementwise",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn render_cached_attention_rejects_an_elementwise_bound_op() {
+        let bound = elementwise_tanh_op(8);
+        let error = render_cached_attention(&bound, "entry")
+            .expect_err("an elementwise chain is not a CachedAttention op");
+        assert!(matches!(
+            error,
+            EmitError::RenderKindMismatch {
+                expected: "cached_attention",
+                found: "elementwise",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn simd_combine_fn_rejects_a_non_cooperative_reduce_op() {
+        let bound = matmul_op_with_reduce(4, 8, 3, ScalarOp::Subtract);
+        let error = simd_combine_fn(bound.node, ScalarOp::Subtract)
+            .expect_err("subtract is not associative-commutative");
+        assert!(matches!(
+            error,
+            EmitError::NonCooperativeReduceOp { op: "subtract", .. }
+        ));
+    }
+
+    #[test]
+    fn cooperative_identity_token_rejects_a_non_cooperative_reduce_op() {
+        let bound = matmul_op_with_reduce(4, 8, 3, ScalarOp::Subtract);
+        let error = cooperative_identity_token(bound.node, ScalarOp::Subtract)
+            .expect_err("subtract has no cooperative SIMD-group identity");
+        assert!(matches!(
+            error,
+            EmitError::NonCooperativeReduceOp { op: "subtract", .. }
+        ));
+    }
+
+    /// [`push_packed_row_blocked_body`]'s per-codec match, reached with a
+    /// hand-built [`PackedRowBlock`] naming a non-K-quant codec --
+    /// [`classify_packed_row_block`]'s own `NotKQuantCodec` gate never
+    /// builds one of these in practice, so this drives the emitter's
+    /// internal contract directly rather than through [`emit`].
+    #[test]
+    fn push_packed_row_blocked_body_rejects_a_non_k_quant_codec() {
+        let bound = matmul_op(4, 256, 3);
+        let block = PackedRowBlock {
+            weight: 0,
+            other: 1,
+            reduce_dim: 1,
+            codec: PackedCodec::Q8_0,
+            token_axes: Vec::new(),
+            feature_axes: vec![0, 1],
+        };
+        let mut source = String::new();
+        let error = push_packed_row_blocked_body(
+            &mut source,
+            &bound,
+            ScalarOp::Add,
+            ReduceInit::Zero,
+            &[0, 1],
+            2,
+            &[Some(PackedCodec::Q8_0), None],
+            "float",
+            &block,
+            &ComposedBody::leaf(ScalarOp::Identity),
+            &[],
+        )
+        .expect_err("Q8_0 never reaches the row-blocked path");
+        assert!(matches!(
+            error,
+            EmitError::NonKQuantPackedCodec { codec: "q8_0", .. }
+        ));
     }
 
     /// Reachability proof for [`packed_row_split_factor`]'s row-count gate
