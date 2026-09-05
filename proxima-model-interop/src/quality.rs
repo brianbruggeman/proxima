@@ -41,7 +41,7 @@ use alloc::vec::Vec;
 use serde::Deserialize;
 
 use crate::error::InteropError;
-use crate::generate::{BackendRuntime, LoadedModel, supported_serving_config};
+use crate::generate::{BackendRuntime, LoadedModel, LogitsSink, supported_serving_config};
 
 /// One held-out prompt the quality harness scores a variant decode
 /// configuration against. `source` names where `text` came from --
@@ -255,7 +255,7 @@ fn score_prompt(
             &reference_config,
             &mut reference_runtime,
             None,
-            &mut |_step, logits| reference_logits.push(logits.to_vec()),
+            &mut LogitsSink::Collect(&mut reference_logits),
         )?;
 
     // `reference_logits.len()` already includes the eos-triggering step's
@@ -276,7 +276,7 @@ fn score_prompt(
             &variant_config,
             &mut variant_runtime,
             Some(&reference_ids[..tokens_compared]),
-            &mut |_step, logits| variant_logits.push(logits.to_vec()),
+            &mut LogitsSink::Collect(&mut variant_logits),
         )?;
     }
 

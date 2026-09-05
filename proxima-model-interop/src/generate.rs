@@ -977,6 +977,19 @@ fn qwen35_ssm_shape(architecture: &crate::qwen35::Qwen35Architecture) -> Qwen35S
     }
 }
 
+pub(crate) enum LogitsSink<'sink> {
+    Discard,
+    Collect(&'sink mut Vec<Vec<f32>>),
+}
+
+impl LogitsSink<'_> {
+    fn observe(&mut self, logits: &[f32]) {
+        if let Self::Collect(buffer) = self {
+            buffer.push(logits.to_vec());
+        }
+    }
+}
+
 /// This call's growable per-layer key/value cache -- `F32` only:
 /// [`apply_serving_config`]'s own gate rejects any other
 /// `kv_cache_key_quant`/`kv_cache_value_quant` before [`LoadedModel::call`]
@@ -1741,7 +1754,14 @@ impl<'file> LoadedModel<'file> {
         serving_config: &ServingConfig,
         runtime: &mut BackendRuntime,
     ) -> Result<(Vec<u32>, String, bool), InteropError> {
-        self.run_decode_loop_observed(prompt, max_tokens, serving_config, runtime, None, &mut |_, _| {})
+        self.run_decode_loop_observed(
+            prompt,
+            max_tokens,
+            serving_config,
+            runtime,
+            None,
+            &mut LogitsSink::Discard,
+        )
     }
 
     /// [`Self::run_decode_loop`]'s own body, plus the two hooks
@@ -1764,7 +1784,7 @@ impl<'file> LoadedModel<'file> {
         serving_config: &ServingConfig,
         runtime: &mut BackendRuntime,
         token_override: Option<&[u32]>,
-        logits_sink: &mut dyn FnMut(usize, &[f32]),
+        logits_sink: &mut LogitsSink,
     ) -> Result<(Vec<u32>, String, bool), InteropError> {
         let ids = proxima_tokenizer::encode_with_bos_eos(
             prompt,
@@ -2196,7 +2216,7 @@ impl<'file> LoadedModel<'file> {
                             node: self.logits_root,
                         })?;
                 let last_position = &logits[(new_count - 1) * vocab_size..new_count * vocab_size];
-                logits_sink(_step, last_position);
+                logits_sink.observe(last_position);
 
                 #[cfg(feature = "instrument")]
                 let greedy_pick_started = read_ticks();
@@ -2338,7 +2358,7 @@ impl<'file> LoadedModel<'file> {
         serving_config: &ServingConfig,
         runtime: &mut BackendRuntime,
         token_override: Option<&[u32]>,
-        logits_sink: &mut dyn FnMut(usize, &[f32]),
+        logits_sink: &mut LogitsSink,
     ) -> Result<(Vec<u32>, String, bool), InteropError> {
         let block_count = self.architecture.block_count as usize;
         let kv_heads = self.architecture.kv_heads as usize;
@@ -2653,7 +2673,7 @@ impl<'file> LoadedModel<'file> {
                     },
                 )?;
                 let last_position = &logits[(new_count - 1) * vocab_size..new_count * vocab_size];
-                logits_sink(_step, last_position);
+                logits_sink.observe(last_position);
 
                 #[cfg(feature = "instrument")]
                 let greedy_pick_started = read_ticks();
