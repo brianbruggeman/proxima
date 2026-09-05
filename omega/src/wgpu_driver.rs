@@ -164,10 +164,14 @@ fn element_count(shape: &[u64]) -> usize {
 /// variant — every one of them wraps a `&[u8]` (see that type's own doc), so
 /// this is a match, not a computation.
 ///
-/// # Panics
-/// If `block` is [`QuantizedBlock::Float32`] — every caller here already
-/// branched on that case first.
-fn packed_block_bytes_slice<'a>(block: &QuantizedBlock<'a>) -> &'a [u8] {
+/// # Errors
+/// [`EmitError::RenderKindMismatch`] if `block` is [`QuantizedBlock::Float32`]
+/// — every caller here already branched on that case first, so this fires
+/// only if that upstream guarantee itself broke.
+fn packed_block_bytes_slice<'a>(
+    node: NodeId,
+    block: &QuantizedBlock<'a>,
+) -> Result<&'a [u8], EmitError> {
     match block {
         QuantizedBlock::Q3K(bytes)
         | QuantizedBlock::Q4K(bytes)
@@ -176,10 +180,12 @@ fn packed_block_bytes_slice<'a>(block: &QuantizedBlock<'a>) -> &'a [u8] {
         | QuantizedBlock::Q8_0(bytes)
         | QuantizedBlock::Q4_0(bytes)
         | QuantizedBlock::Float16(bytes)
-        | QuantizedBlock::BFloat16(bytes) => bytes,
-        QuantizedBlock::Float32(_) => {
-            unreachable!("packed_block_bytes_slice is never called for a Float32 block")
-        }
+        | QuantizedBlock::BFloat16(bytes) => Ok(bytes),
+        QuantizedBlock::Float32(_) => Err(EmitError::RenderKindMismatch {
+            node,
+            expected: "a packed (non-float32) block",
+            found: "float32",
+        }),
     }
 }
 
@@ -441,14 +447,36 @@ fn pack_elementwise_uniforms(bound: &BoundOp) -> Vec<u8> {
     bytes
 }
 
-fn pack_reduce_uniforms(bound: &BoundOp) -> Vec<u8> {
+/// Names `kind`'s own discriminant for [`EmitError::RenderKindMismatch`] --
+/// restated per backend module, the same "private original is not reachable
+/// from here" reasoning `crate::cuda`'s and `crate::wgsl`'s own copies carry.
+fn bound_op_kind_name(kind: &BoundOpKind) -> &'static str {
+    match kind {
+        BoundOpKind::CachedAttention { .. } => "cached_attention",
+        BoundOpKind::Elementwise { .. } => "elementwise",
+        BoundOpKind::Reduce {
+            keep: Keep::Reduce, ..
+        } => "keep::reduce fold",
+        BoundOpKind::Reduce {
+            keep: Keep::Scan, ..
+        } => "keep::scan fold",
+        BoundOpKind::Iota => "iota",
+        BoundOpKind::Constant { .. } => "constant",
+    }
+}
+
+fn pack_reduce_uniforms(bound: &BoundOp) -> Result<Vec<u8>, EmitError> {
     let BoundOpKind::Reduce {
         output_axes,
         out_layout,
         ..
     } = &bound.kind
     else {
-        unreachable!("pack_reduce_uniforms is only called for a Keep::Reduce reduce")
+        return Err(EmitError::RenderKindMismatch {
+            node: bound.node,
+            expected: "keep::reduce fold",
+            found: bound_op_kind_name(&bound.kind),
+        });
     };
     let rank_len = bound.extents.len().max(1);
     let output_rank_len = output_axes.len().max(1);
@@ -478,12 +506,16 @@ fn pack_reduce_uniforms(bound: &BoundOp) -> Vec<u8> {
     push_i32(&mut bytes, out_layout.base as i32);
     push_i32_row(&mut bytes, &out_layout.strides, rank_len);
     push_gather_uniforms(&mut bytes, bound, rank_len);
-    bytes
+    Ok(bytes)
 }
 
-fn pack_scan_uniforms(bound: &BoundOp) -> Vec<u8> {
+fn pack_scan_uniforms(bound: &BoundOp) -> Result<Vec<u8>, EmitError> {
     let BoundOpKind::Reduce { out_layout, .. } = &bound.kind else {
-        unreachable!("pack_scan_uniforms is only called for a Keep::Scan reduce")
+        return Err(EmitError::RenderKindMismatch {
+            node: bound.node,
+            expected: "keep::scan fold",
+            found: bound_op_kind_name(&bound.kind),
+        });
     };
     let rank = bound.extents.len();
     let rank_len = rank.max(1);
@@ -508,7 +540,7 @@ fn pack_scan_uniforms(bound: &BoundOp) -> Vec<u8> {
     }
     push_i32(&mut bytes, out_layout.base as i32);
     push_i32_row(&mut bytes, &out_layout.strides, rank_len);
-    bytes
+    Ok(bytes)
 }
 
 /// Mirrors `crate::metal::pack_leaf_uniforms`, narrowed to `i32` the same
@@ -524,9 +556,9 @@ fn pack_leaf_uniforms(bound: &BoundOp) -> Vec<u8> {
     bytes
 }
 
-fn pack_uniforms(bound: &BoundOp) -> Vec<u8> {
+fn pack_uniforms(bound: &BoundOp) -> Result<Vec<u8>, EmitError> {
     match &bound.kind {
-        BoundOpKind::Elementwise { .. } => pack_elementwise_uniforms(bound),
+        BoundOpKind::Elementwise { .. } => Ok(pack_elementwise_uniforms(bound)),
         BoundOpKind::Reduce {
             keep: Keep::Reduce, ..
         } => pack_reduce_uniforms(bound),
@@ -540,7 +572,7 @@ fn pack_uniforms(bound: &BoundOp) -> Vec<u8> {
         // `Iota`/`Constant` only to satisfy exhaustiveness with a harmless
         // value, never a real uniform layout.
         BoundOpKind::Iota | BoundOpKind::Constant { .. } | BoundOpKind::CachedAttention { .. } => {
-            pack_leaf_uniforms(bound)
+            Ok(pack_leaf_uniforms(bound))
         }
     }
 }
@@ -644,7 +676,7 @@ pub fn execute_plan(
                     });
                 };
                 (
-                    packed_block_bytes_slice(block).len(),
+                    packed_block_bytes_slice(*node, block)?.len(),
                     packed_expected_bytes(codec, elements),
                 )
             }
@@ -674,7 +706,7 @@ pub fn execute_plan(
                 buffer
             }
             _ => {
-                let bytes = packed_block_bytes_slice(block);
+                let bytes = packed_block_bytes_slice(*node, block)?;
                 let buffer = storage_buffer(
                     &plan.device,
                     "omega-wgpu-packed-input",
@@ -734,7 +766,7 @@ pub fn execute_plan(
                 limit: storage_buffer_limit,
             });
         }
-        let uniform_bytes = pack_uniforms(bound);
+        let uniform_bytes = pack_uniforms(bound)?;
         let uniform_buffer = plan.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("omega-wgpu-uniforms"),
             size: uniform_bytes.len().max(4) as u64,
@@ -894,4 +926,84 @@ pub fn execute_plan_named(
 ) -> Result<Evaluated, WgpuError> {
     let blocks = resolve_named_blocks(&plan.program, named)?;
     execute_plan(plan, &blocks)
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod tests {
+    use alloc::vec;
+
+    use proxima_tensor::{DType, Extent, IndexMap, ScalarOp, append, bind, map};
+
+    use super::*;
+
+    fn elementwise_tanh_op(extent: u32) -> BoundOp {
+        let mut program = Vec::new();
+        let source = append(
+            &mut program,
+            Op::Input {
+                dtype: DType::Float32,
+                shape: vec![Extent::Static(extent)],
+                name: None,
+            },
+        );
+        append(
+            &mut program,
+            Op::Elementwise {
+                dtype: DType::Float32,
+                body: ScalarOp::Tanh,
+                operands: vec![(source, IndexMap::Affine(map::projection(1, &[0])))],
+                name: None,
+            },
+        );
+        let shapes = infer(&program, &[]).expect("infer succeeds");
+        let bound = bind(&program, &shapes, &[]).expect("bind succeeds");
+        bound.into_iter().next().expect("one bound op")
+    }
+
+    #[test]
+    fn pack_reduce_uniforms_rejects_an_elementwise_bound_op() {
+        let bound = elementwise_tanh_op(8);
+        let error = pack_reduce_uniforms(&bound)
+            .expect_err("an elementwise chain is not a Reduce fold");
+        assert!(matches!(
+            error,
+            EmitError::RenderKindMismatch {
+                expected: "keep::reduce fold",
+                found: "elementwise",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn pack_scan_uniforms_rejects_an_elementwise_bound_op() {
+        let bound = elementwise_tanh_op(8);
+        let error =
+            pack_scan_uniforms(&bound).expect_err("an elementwise chain is not a Reduce fold");
+        assert!(matches!(
+            error,
+            EmitError::RenderKindMismatch {
+                expected: "keep::scan fold",
+                found: "elementwise",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn packed_block_bytes_slice_rejects_a_float32_block() {
+        let data = [1.0f32, 2.0, 3.0];
+        let block = QuantizedBlock::Float32(&data);
+        let error = packed_block_bytes_slice(NodeId(0), &block)
+            .expect_err("a float32 block has no packed byte slice");
+        assert!(matches!(
+            error,
+            EmitError::RenderKindMismatch {
+                expected: "a packed (non-float32) block",
+                found: "float32",
+                ..
+            }
+        ));
+    }
 }
