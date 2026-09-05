@@ -2670,6 +2670,8 @@ mod real_openchat_file {
     use crate::generate::LoadedModel;
     use crate::loader::prefault;
     use crate::serving::ServingConfig;
+    #[cfg(all(feature = "metal", target_os = "macos"))]
+    use crate::test_support::math_mode_from_env;
 
     use super::{architecture_from_metadata, bind_all_weights, gguf_tensor_as_f32};
 
@@ -2765,23 +2767,6 @@ mod real_openchat_file {
             .ok()
             .and_then(|value| value.parse::<usize>().ok())
             .unwrap_or(24)
-    }
-
-    /// `PROXIMA_MATH_MODE=safe|relaxed` -- the one place this crate reads
-    /// this knob (never in library code; `proxima-model-interop/src/
-    /// generate.rs` used to shadow it under a second name,
-    /// `PROXIMA_METAL_MATH_MODE`, which is why `proxima-tensor/docs/
-    /// discipline.md` ROW 299/300's harness scripts, which only ever set
-    /// the old name, silently ran every "Safe" arm at this test's own
-    /// `Relaxed` default). Unset keeps `ServingConfig::default()`'s own
-    /// `Relaxed` (ROW 296/297's measured winner).
-    #[cfg(all(feature = "metal", target_os = "macos"))]
-    fn math_mode_from_env() -> omega::MathMode {
-        match std::env::var("PROXIMA_MATH_MODE").as_deref() {
-            Ok("safe") => omega::MathMode::Safe,
-            Ok("relaxed") | Err(_) => omega::MathMode::Relaxed,
-            Ok(other) => panic!("PROXIMA_MATH_MODE={other}: expected `safe` or `relaxed`"),
-        }
     }
 
     /// [`install_stdout_telemetry`]'s handle: the installed recorder plus a
