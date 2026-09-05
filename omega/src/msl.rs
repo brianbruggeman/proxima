@@ -900,7 +900,7 @@ pub fn emit(resolved: &BoundOp, packed_operands: &PackedOperands) -> Result<Kern
 /// can decide whether a pipeline compile is needed before paying for one.
 /// Must distinguish anything [`emit`]'s `source` could differ on:
 /// [`entry_name`] already carries rank / output-rank / operand-count / body /
-/// reduce-op / keep / init / gather shape; this adds three axes `entry_name`
+/// reduce-op / keep / init / gather shape; this adds four axes `entry_name`
 /// does NOT cover:
 ///
 /// - [`type_token`]'s "half" vs "float" split — every dtype `emit` accepts
@@ -919,6 +919,17 @@ pub fn emit(resolved: &BoundOp, packed_operands: &PackedOperands) -> Result<Kern
 ///   `reduce_dims` needs no separate entry: it is `(0..rank)` minus
 ///   `output_axes` as a SET, always ascending, so `rank` + this exact
 ///   sequence already pins it down.
+/// - [`tiled_gemm_threadgroup_width`]'s return for this exact op — the
+///   dispatch-width single source of truth it documents itself as being. For
+///   a cooperative reduce (`metal-wide-cooperative-reduce`'s scaling arm)
+///   this is a function of CONCRETE reduce extents, not just structure
+///   (`cooperative_reduce_width`'s own doc), and that width is baked
+///   LITERALLY into `render_reduce`'s lane-index / stride / tail-fold source
+///   text. Two reduces sharing every field above but picking a different
+///   width therefore emit different source and MUST NOT share a cache entry
+///   — a stale narrower kernel silently drops reduction terms, and a stale
+///   wider one reads uninitialized `threadgroup` memory in the multi-
+///   simdgroup tail fold when too few simdgroups are actually dispatched.
 ///
 /// # Errors
 /// Propagates [`type_token`]'s unsupported-dtype rejection — the same gate
@@ -975,6 +986,23 @@ pub(crate) fn kernel_cache_key(
         for axis in output_axes {
             key.push('_');
             key.push_str(&axis.to_string());
+        }
+        // `tiled_gemm_threadgroup_width` is the single source of truth
+        // `render_reduce`/`push_cooperative_reduce_tail` read for the lane
+        // width baked LITERALLY into the source text (`cooperative_reduce_
+        // width`'s own doc) -- two reduces agreeing on every field above can
+        // still pick a different width purely from CONCRETE reduce extents
+        // (`metal-wide-cooperative-reduce` scales it from `reduction_total`),
+        // and a stale cached pipeline compiled for one width silently
+        // mis-dispatches a later call needing another (missing reduction
+        // terms, or reading uninitialized `threadgroup` memory in the
+        // multi-simdgroup tail fold) -- see
+        // `wide_cooperative_reduce_key_collision.rs`'s repro. `None` (the
+        // fully serial one-thread-per-output path) needs no extra token: its
+        // body has no lane math to disagree on.
+        if let Some(width) = tiled_gemm_threadgroup_width(resolved, &quantized) {
+            key.push_str("_w");
+            key.push_str(&width.to_string());
         }
     }
     Ok(key)

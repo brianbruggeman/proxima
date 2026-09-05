@@ -193,6 +193,7 @@ use objc2_metal::{
 #[cfg(feature = "metal-concurrent-dispatch")]
 use objc2_metal::{MTLBarrierScope, MTLDispatchType};
 use proxima_telemetry::counter;
+use proxima_telemetry::debug;
 use proxima_telemetry::metric::Counter;
 
 #[cfg(feature = "instrument")]
@@ -2545,10 +2546,12 @@ fn pipeline_for(
     cache_key: &str,
 ) -> Result<Retained<ProtocolObject<dyn MTLComputePipelineState>>, MetalError> {
     if let Some(pipeline) = PIPELINE_CACHE.with(|cache| cache.borrow().get(cache_key).cloned()) {
+        debug!(cache_key = %cache_key, hit = true, "pipeline cache lookup");
         #[cfg(feature = "instrument")]
         counter!(PIPELINE_HITS, 1);
         return Ok(pipeline);
     }
+    debug!(cache_key = %cache_key, hit = false, "pipeline cache lookup");
     #[cfg(feature = "instrument")]
     let compile_started = read_ticks();
     let kernel = emit(bound, packed_operands)?;

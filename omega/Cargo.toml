@@ -423,6 +423,7 @@ proxima-autograd = { path = "../proxima-autograd" }
 proxima-gguf = { path = "../proxima-gguf", features = ["std"] }
 proxima-onnx = { path = "../proxima-onnx" }
 proxima-safetensors = { path = "../proxima-safetensors" }
+proxima-telemetry = { workspace = true, features = ["alloc"] }
 # `test-support` pulls in `proxima_tensor::test_support::Lcg`, the same
 # deterministic PRNG proxima-tensor's own examples share — see that crate's
 # Cargo.toml for why this is a feature, not a default. `cached-attention-streaming`
