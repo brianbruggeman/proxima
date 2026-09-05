@@ -4429,6 +4429,7 @@ fn finish(
     caller_owned: &BTreeSet<NodeId>,
 ) -> Result<Evaluated, MetalError> {
     let mut results = Vec::with_capacity(effective_outputs.len());
+    let mut placed = BTreeSet::new();
     #[cfg(feature = "instrument")]
     let readback_started = read_ticks();
     for node in effective_outputs {
@@ -4441,7 +4442,12 @@ fn finish(
         // `waitUntilCompleted`, for bytes nothing downstream consumes) --
         // `root` is the one exception: a caller always expects `.root()` to
         // resolve, so it is read back even if it happens to be placed.
+        //
+        // `placed` records the skip explicitly so `Evaluated::is_placed`
+        // can tell a caller "this was placed, not missing" — see
+        // `Evaluated::from_parts_with_placed`'s own doc.
         if *node != root && caller_owned.contains(node) {
+            placed.insert(*node);
             continue;
         }
         let shape = shapes.of(*node).to_vec();
@@ -4473,7 +4479,7 @@ fn finish(
     // `Vec<Option<Vec<f32>>>` table, so peak_live_buffers is not tracked
     // here — see `Evaluated`'s own doc for why `None` is the honest answer
     // rather than a number that would not mean the same thing.
-    Ok(Evaluated::from_parts(root, results, None))
+    Ok(Evaluated::from_parts_with_placed(root, results, None, placed))
 }
 
 #[cfg(all(test, feature = "instrument"))]
