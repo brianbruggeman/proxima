@@ -107,11 +107,14 @@ impl Backend {
         }
     }
 
-    /// Reads `OMEGA_BACKEND` once per process into a `OnceLock`, mirroring
-    /// `proxima_tensor::cpu::matmul_worker_count`'s own idiom for
+    /// Reads `OMEGA_BACKEND` once per process into a `OnceLock<String>`,
+    /// mirroring `proxima_tensor::cpu::matmul_worker_count`'s own idiom for
     /// `PROXIMA_MATMUL_WORKERS` — a per-call `std::env::var` would allocate a
     /// `String` on every plan for a value that cannot change once the
-    /// process has started.
+    /// process has started. Only the raw string is cached; [`core::str::FromStr`]
+    /// re-parses it on every call, which is cheap (a match over a handful of
+    /// short literals) and lets an unrecognized name surface as a fresh
+    /// [`BackendError::UnknownName`] instead of being memoized away.
     ///
     /// This is a DEFAULT a caller may use to compute the `backend` argument
     /// [`plan_named`] takes; it is never read by [`plan_named`] or
@@ -120,19 +123,24 @@ impl Backend {
     /// line runs that program on whichever backend was passed, not on
     /// whatever this returned.
     ///
-    /// Unset, empty, or a name [`core::str::FromStr`] does not recognize all
-    /// fall back to whichever of [`Backend::Metal`]/[`Backend::Cpu`] is
-    /// actually compiled in, preferring Metal when both are (the backend a
-    /// GPU-capable caller actually wants by default).
-    #[must_use]
-    pub fn from_env() -> Backend {
-        static SELECTED: OnceLock<Backend> = OnceLock::new();
-        *SELECTED.get_or_init(|| {
-            std::env::var("OMEGA_BACKEND")
-                .ok()
-                .and_then(|value| value.parse::<Backend>().ok())
-                .unwrap_or_else(Backend::default_compiled)
-        })
+    /// Unset or empty falls back to whichever of [`Backend::Metal`]/
+    /// [`Backend::Cpu`] is actually compiled in, preferring Metal when both
+    /// are (the backend a GPU-capable caller actually wants by default). A
+    /// name [`core::str::FromStr`] does not recognize is an error, not a
+    /// silent fallback — a typo in `OMEGA_BACKEND` must not be free to run on
+    /// whatever backend happened to be compiled in instead.
+    ///
+    /// # Errors
+    /// [`BackendError::UnknownName`] when `OMEGA_BACKEND` is set to a name
+    /// [`core::str::FromStr`] does not recognize.
+    pub fn from_env() -> Result<Backend, BackendError> {
+        static RAW: OnceLock<String> = OnceLock::new();
+        let raw = RAW.get_or_init(|| std::env::var("OMEGA_BACKEND").unwrap_or_default());
+        if raw.is_empty() {
+            return Ok(Backend::default_compiled());
+        }
+        raw.parse::<Backend>()
+            .inspect_err(|error| warn_unknown_backend_env(raw, error))
     }
 
     fn default_compiled() -> Backend {
@@ -143,6 +151,19 @@ impl Backend {
         }
     }
 }
+
+/// Emits the telemetry event for an unrecognized `OMEGA_BACKEND` value.
+/// `proxima-telemetry` is only pulled in by the `metal` feature
+/// (`omega/Cargo.toml`'s `dep:proxima-telemetry` line lives on that
+/// feature's dependency list), so a `cpu`-only build without `metal` gets a
+/// no-op here rather than a missing-dependency compile error.
+#[cfg(feature = "metal")]
+fn warn_unknown_backend_env(value: &str, error: &BackendError) {
+    proxima_telemetry::warn!(%value, %error, "OMEGA_BACKEND names no known backend");
+}
+
+#[cfg(not(feature = "metal"))]
+fn warn_unknown_backend_env(_value: &str, _error: &BackendError) {}
 
 impl core::str::FromStr for Backend {
     type Err = BackendError;
@@ -634,6 +655,46 @@ mod tests {
                 feature: "metal"
             }
         ));
+    }
+
+    // `Backend::from_env` caches `OMEGA_BACKEND` in a process-lifetime
+    // `OnceLock`, so these three tests each need their own process to see
+    // their own env var -- nextest's default one-test-per-process isolation
+    // gives them that; running them under plain `cargo test` in the same
+    // binary would let whichever runs first pin the value for the rest.
+    #[test]
+    fn from_env_with_a_known_name_resolves_to_its_variant() {
+        // SAFETY: this test owns `OMEGA_BACKEND` for its own process; nextest
+        // runs each test in a separate process, so no concurrent reader.
+        unsafe {
+            std::env::set_var("OMEGA_BACKEND", "cpu");
+        }
+        let backend = super::Backend::from_env().expect("cpu is a known backend name");
+        assert_eq!(backend, super::Backend::Cpu);
+    }
+
+    #[test]
+    fn from_env_with_an_unknown_name_errors_without_falling_back() {
+        // SAFETY: see `from_env_with_a_known_name_resolves_to_its_variant`.
+        unsafe {
+            std::env::set_var("OMEGA_BACKEND", "quantum");
+        }
+        let error = super::Backend::from_env().expect_err("quantum names no backend");
+        assert!(matches!(
+            error,
+            BackendError::UnknownName { name } if name == "quantum"
+        ));
+    }
+
+    #[test]
+    fn from_env_unset_falls_back_to_the_compiled_default() {
+        // SAFETY: see `from_env_with_a_known_name_resolves_to_its_variant`;
+        // this test also relies on `OMEGA_BACKEND` starting unset in its own
+        // fresh process rather than removing it, since removal races nothing
+        // else in this process but is unsafe for the same reason `set_var`
+        // is.
+        let backend = super::Backend::from_env().expect("unset falls back, never errors");
+        assert_eq!(backend, super::Backend::default_compiled());
     }
 
     #[test]
