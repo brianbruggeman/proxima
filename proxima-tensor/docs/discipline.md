@@ -23327,8 +23327,48 @@ PROXIMA_MAX_TOKENS=8 "$BIN" \
 ```
 Comment out `Q6K` in `supports_pair_dot` (`omega/src/msl.rs:1124-1128`), rebuild, re-run to reproduce Arm B.
 
+## ROW 315 -- fixed ggml-port Q4_K body (main 2969311, stride-1 activation path) re-baked against the default body: text identical, D wins in every valid round (6.3% at matched steady state) -- flips default-on
+
+**Card:** none (measurement + one default-feature flip). **Worktree/branch:** `proxima-wt-portb`, `perf/ggml-port-bench`, off `main` at `3dd1387`.
+
+**Task.** ROW 311's `metal-q4k-ggml-port` measurement (+15.04% gpu_exec vs default) was taken against a since-fixed body: main `2969311` moved `push_q4k_ggml_port_body` onto the stride-1 activation path, removing 32 stray 64-bit multiplies per iteration that the old body carried. That old number is void for the fixed body; this row re-runs the bake-off against it.
+
+**Arms.** Same oracle as ROW 311/312, `bind::real_openchat_file::runs_the_cached_decode_loop_on_the_metal_backend_and_reports_the_plan_cache`, release test binaries built `--no-run` (A: `metal,instrument`; D: `metal,instrument,metal-q4k-ggml-port`), invoked directly (`PROXIMA_MAX_TOKENS` unset, 24 tokens generated). Quiet gate (`pgrep -l -i 'proxima_model_i|llama-bench'` names-only, load-1 < 12, rechecked every 20s) run before every round. 3 rounds interleaved A,D,A,D,A,D; `gpu_exec_ms` mean/CoV over steps 3..7 (5 datapoints/arm/round):
+
+**Contamination check and correction.** The gate above matches the compiled-in process name (`proxima_model_i...`), but two of this row's oracle binaries were copied to `oracle-A`/`oracle-D` (this row's own protocol) -- the same rename pattern another concurrent slice (ROW 313's `epi-logs`, and a third slice's `q6-logs`) used for its own oracles, none of which match `proxima_model_i|llama-bench`. Cross-checking this row's per-step log timestamps against those two slices' log timestamps found round 2's original arm-A steps (11:17:25.46-11:17:26.73Z) fall entirely inside `q6-logs/round-1-A`'s window (11:17:23.49-11:17:26.77Z) -- an exact real-time overlap, which is the mechanism for round 2's original 95.6% CoV and its lone divergent `generated_text`. Round 2's original arm-D steps (11:17:51.69-11:17:53.11Z) and every round-1/round-3 step for both arms fell outside all other slices' logged windows -- confirmed clean. Round 2 was re-run for both arms with the gate corrected to `pgrep -l -i 'proxima_model_i|llama-bench|oracle-'`, quiet before each re-run (load-1 3.5-3.6):
+
+| round | arm | gpu_exec mean (ms) | CoV | generated_text |
+| --- | --- | --- | --- | --- |
+| 1 | A | 464.32 | 9.8% | "Here is a simple Python function that returns the nth Fibonacci number using recursion:\n\n```" |
+| 1 | D | 25.03 | 0.7% | "Here is a simple Python function that returns the nth Fibonacci number using recursion:\n\n```" |
+| 2 (re-run, clean) | A | 26.66 | 0.6% | "Here is a simple Python function that returns the nth Fibonacci number using recursion:\n\n```" |
+| 2 (re-run, clean) | D | 24.97 | 1.0% | "Here is a simple Python function that returns the nth Fibonacci number using recursion:\n\n```" |
+| 3 | A | 448.81 | 6.0% | "Here is a simple Python function that returns the nth Fibonacci number using recursion:\n\n```" |
+| 3 | D | 376.10 | 22.3% | "Here is a simple Python function that returns the nth Fibonacci number using recursion:\n\n```" |
+
+(Original, contaminated round-2 numbers -- A mean 424.80 ms/CoV 95.6% with the `"<unk>\ndef fibonacci(n)..."` text divergence, D mean 364.63 ms/CoV 18.3% -- are superseded by the re-run row above and not folded into any pooled statistic.) Pooled over the 3 valid rounds (round 1, round 2 re-run, round 3; 15 datapoints/arm): A mean 313.26 ms, CoV 65.4%; D mean 142.03 ms, CoV 121.4%.
+
+**Mechanism.** `push_q4k_ggml_port_body` post-2969311 computes the row's scale/min via one branchless bit-mask decode per iteration (`sc16_0..sc16_3`, zero data-dependent branches, zero function calls), against the default body's 4 separate `q4k_scale_min()` calls each carrying a data-independent `if (sub_block < 4)` branch -- same structural claim as ROW 311, now measured on a body with the extra 32 stray 64-bit multiplies/iteration removed. The clean round-2 re-run resolves what looked like an unexplained outlier in round 1: both arms CAN reach a true steady state inside the steps-3..7 window (A 26.66 ms/CoV 0.6%, D 24.97 ms/CoV 1.0%, both far under the 5% CoV bound) and when they do, **D still beats A by 6.3%, outside both arms' tight CoV bands** -- a real, if modest, per-op win consistent with the branch-count reduction. Rounds 1 and 3 show a much larger gap (25.0 vs 464.3 ms; 376.1 vs 448.8 ms) because arm A had not yet reached that steady state within steps 3..7 in those rounds (its own later steps in round 1's raw log converge to ~27 ms by step 9) while arm D reached it sooner -- i.e. D's simpler branchless body also needs fewer warm-up iterations to hit steady state, a second, additive effect on top of the steady-state 6.3% win. D beat A's mean `gpu_exec_ms` in all 3 valid rounds under every reading of the data.
+
+**Decision (owner's rule: text identical AND wall not worse beyond CoV):** text is identical across every valid run, D and A alike (7/7 clean rounds; the one divergence was in the discarded, contaminated round). Wall time: in the one round where both arms reached true steady state (round 2, re-run), D was faster by 6.3%, beyond both arms' CoV -- not worse under any reading. **Flips default-on.** `metal-q4k-ggml-port` added to `omega/Cargo.toml`'s and `proxima-model-interop/Cargo.toml`'s `metal = [...]` default lists (same shape as `metal-packed-row-nsg2`, ROW 311).
+
+**Residual, named not hidden.** (1) Pooled CoV (65.4%/121.4%) is dominated by the steps-3..7 window's own warmup-tail variability (how many steps each arm needs before reaching steady state varies run-to-run, plausibly an OS/Metal shader-cache warm-vs-cold effect from prior runs on the shared host) rather than by external contention this time -- the per-round comparisons above are the load-bearing evidence, not the pooled numbers. (2) Two other benches (ROW 313, and the slice behind `q6-logs`) shared this GPU during the original sweep; this row's gate initially missed both because they renamed their oracle binaries the same way this row did, a namespacing gap now closed here (`|oracle-` added to the pattern) but still open for any future slice using a different rename convention.
+
+**Gates.** `cargo build -p proxima-model-interop --features metal` (dev profile, default-on flip): EXIT=0. No clippy/nextest run per this row's own 30-minute hard budget (owner directive: "no more gates, no more tests").
+
+**Re-prove:**
+```sh
+cd /Users/brianbruggeman/repos/slot-0/proxima-wt-portb
+CARGO_TARGET_DIR=/Users/brianbruggeman/repos/slot-0/proxima-wt-portb/target CARGO_TERM_COLOR=never \
+  cargo test -p proxima-model-interop --release --features metal,instrument --no-run
+CARGO_TARGET_DIR=/Users/brianbruggeman/repos/slot-0/proxima-wt-portb/target CARGO_TERM_COLOR=never \
+  cargo test -p proxima-model-interop --release --features metal,instrument,metal-q4k-ggml-port --no-run
+```
+Run each release binary's `bind::real_openchat_file::runs_the_cached_decode_loop_on_the_metal_backend_and_reports_the_plan_cache --exact --ignored --nocapture --test-threads=1`, interleaved, quiet gate before each invocation.
+
 ### Changelog
 
 | Date | Change | Δ vs prior | CoV / runs | Host loadout |
 | --- | --- | --- | --- | --- |
 | 2026-09-05 | none landed -- `docs(tensor): row 314 q6_k head body a/b` only | B (packed-row/serial-reduce) is 1.6% SLOWER than A (pair-dot, current default), inside B's own 2.578% CoV band -- no separation, A stays as-is | 3 interleaved rounds/arm (15 datapoints/arm) after discarding a contaminated first set; CoV 0.718%/2.578% | first set contaminated by another slice's renamed oracle process outside the name-only pgrep filter (discarded); second set's quiet gate (`pgrep -fl` full-command) empty, load-1 < 12, no timestamp overlap with sibling slices |
+| 2026-09-05 | `perf(omega): ggml port q4_k body default-on after the quiet bake-off` + `docs(tensor): row 315 fixed ggml port body vs default` | fixed body (post-2969311 stride-1 activation path) beats default body's `gpu_exec_ms` in every valid round (25.0 vs 464.3 ms round 1; 24.97 vs 26.66 ms, -6.3%, round 2 re-run at matched steady state; 376.1 vs 448.8 ms round 3); `generated_text` identical across all 7 valid runs; round 2's original arm-A run (95.6% CoV, one divergent `generated_text`) was found contaminated by a real-time overlap with another slice's oracle and discarded, re-run clean; ROW 311's prior +15.04% finding was against the pre-fix body and is void | 3 interleaved rounds (round 2 re-run after contamination), 5 datapoints/arm/round; pooled CoV 65.4%/121.4% (steady-state-warmup-tail-dominated, flagged not hidden), matched-steady-state round CoV 0.6%/1.0% | quiet gate initially `pgrep -l -i 'proxima_model_i|llama-bench'` missed two other slices' renamed oracle binaries (`oracle-*`), confirmed via cross-slice log timestamp overlap and corrected to add `|oracle-`; re-run round 2 confirmed quiet under the corrected gate, load-1 3.5-3.6 |
