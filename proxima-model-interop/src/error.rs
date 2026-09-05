@@ -313,4 +313,11 @@ pub enum InteropError {
         ggml_type: GgmlType,
         embedding: u32,
     },
+
+    /// [`crate::quality::parse_prompts_jsonl`]'s line `line_number` (1-based)
+    /// was not valid JSON, or was valid JSON missing/mis-typing one of
+    /// [`crate::quality::Prompt`]'s required fields.
+    #[cfg(feature = "std")]
+    #[error("quality prompt fixture line {line_number}: {reason}")]
+    MalformedQualityPrompt { line_number: usize, reason: String },
 }

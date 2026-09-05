@@ -39,6 +39,8 @@ mod lfm2;
 mod loader;
 #[cfg(feature = "std")]
 mod qwen35;
+#[cfg(feature = "std")]
+mod quality;
 mod serving;
 mod transform;
 
@@ -58,6 +60,10 @@ pub use lfm2::{
 pub use loader::{PREFAULT_OVERSUBSCRIBE, PREFAULT_STRIDE_BYTES, prefault};
 #[cfg(feature = "std")]
 pub use qwen35::{Qwen35Architecture, Qwen35LayerKind, bind_qwen35_checkpoint};
+#[cfg(feature = "std")]
+pub use quality::{Prompt, PromptQuality, QualityReport, parse_prompts_jsonl, quality_report};
+#[cfg(all(feature = "std", feature = "instrument"))]
+pub use quality::print_quality_report;
 pub use serving::{
     DEFAULT_MODEL_PATH, GPU_LAYERS_ALL, REASONING_BUDGET_UNBOUNDED, ServingConfig,
     apply_serving_config,

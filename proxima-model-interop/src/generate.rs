@@ -1177,14 +1177,23 @@ fn build_position_inputs(
 /// cached-attention reduce's shared `kv_heads` axis can cross -- see
 /// `bind.rs`'s own `q8_0_quantized_key_value_cache_cannot_cross_the_weight_matmul_quantized_seam`
 /// for the gap this sidesteps by construction rather than by luck).
-fn supported_serving_config() -> ServingConfig<'static> {
+///
+/// `gpu_layers` is the caller's own backend pick threaded straight through
+/// to [`ServingConfig::gpu_layers`]/[`select_backend`] -- `0` for CPU,
+/// [`GPU_LAYERS_ALL`] for Metal (only valid on a `metal`-featured build,
+/// `apply_serving_config`'s own gate). `pub(crate)` rather than private:
+/// `crate::quality`'s reference/variant harness needs the identical
+/// fully-supported knob set [`Self::generate`] runs, with only the backend
+/// choice left open, so it reuses this function instead of hand-copying its
+/// field list.
+pub(crate) fn supported_serving_config(gpu_layers: i32) -> ServingConfig<'static> {
     ServingConfig {
         kv_cache_key_quant: GgmlType::F32,
         kv_cache_value_quant: GgmlType::F32,
         flash_attention: false,
         batch_size: 0,
         ubatch_size: 0,
-        gpu_layers: 0,
+        gpu_layers,
         reasoning_budget: 0,
         ..ServingConfig::default()
     }
@@ -1617,7 +1626,7 @@ impl<'file> LoadedModel<'file> {
         prompt: &str,
         max_tokens: usize,
     ) -> Result<(Vec<u32>, String, bool), InteropError> {
-        self.generate_with_serving_config(prompt, max_tokens, supported_serving_config())
+        self.generate_with_serving_config(prompt, max_tokens, supported_serving_config(0))
     }
 
     /// The greedy decode loop itself: `max_tokens` steps, each one call
@@ -2597,7 +2606,35 @@ impl<'file> LoadedModel<'file> {
         prompt: &str,
         node_ids: &[NodeId],
     ) -> Result<Vec<Vec<f32>>, InteropError> {
-        let serving_config = supported_serving_config();
+        self.forward_node_values_on_backend(prompt, node_ids, 0)
+    }
+
+    /// [`Self::forward_node_values`] with the backend left open --
+    /// `gpu_layers` reaches [`BackendRuntime::new`]/[`select_backend`] the
+    /// same way [`Self::generate_with_serving_config`]'s own
+    /// `serving_config.gpu_layers` already does, so this one-shot forward
+    /// can be pinned to CPU (`0`) or Metal ([`crate::serving::GPU_LAYERS_ALL`],
+    /// `metal`-featured builds only) instead of always running CPU the way
+    /// [`Self::forward_node_values`] does today. `crate::quality`'s
+    /// reference-vs-variant harness is the reason this exists: comparing
+    /// Metal's own decode path against the CPU reference needs the SAME
+    /// one-shot forward run on each backend in turn, not two different
+    /// programs.
+    ///
+    /// # Errors
+    ///
+    /// Whatever [`Self::forward_node_values`] can fail with, plus
+    /// [`InteropError::UnsupportedServingConfig`] if `gpu_layers` requests a
+    /// backend [`apply_serving_config`] does not accept (`0` and
+    /// [`crate::serving::GPU_LAYERS_ALL`] on a `metal`-featured build are the
+    /// only two).
+    pub fn forward_node_values_on_backend(
+        &self,
+        prompt: &str,
+        node_ids: &[NodeId],
+        gpu_layers: i32,
+    ) -> Result<Vec<Vec<f32>>, InteropError> {
+        let serving_config = supported_serving_config(gpu_layers);
         let mut runtime = BackendRuntime::new(&serving_config);
 
         let ids = proxima_tokenizer::encode_with_bos_eos(
@@ -2695,13 +2732,31 @@ impl<'file> LoadedModel<'file> {
     ///
     /// Whatever [`Self::forward_node_values`] can fail with.
     pub fn forward_logits(&self, prompt: &str) -> Result<Vec<f32>, InteropError> {
+        self.forward_logits_on_backend(prompt, 0)
+    }
+
+    /// [`Self::forward_logits`] with the backend left open, same
+    /// [`Self::forward_node_values_on_backend`]-vs-[`Self::forward_node_values`]
+    /// relationship: [`Self::forward_logits`] always pins `gpu_layers: 0`
+    /// (CPU), this lets a caller ask for the Metal backend's own one-shot
+    /// logits instead.
+    ///
+    /// # Errors
+    ///
+    /// Whatever [`Self::forward_node_values_on_backend`] can fail with.
+    pub fn forward_logits_on_backend(
+        &self,
+        prompt: &str,
+        gpu_layers: i32,
+    ) -> Result<Vec<f32>, InteropError> {
         let ids = proxima_tokenizer::encode_with_bos_eos(
             prompt,
             &self.vocab,
             wants_bos(&self.vocab),
             self.vocab.add_eos_token().unwrap_or(false),
         )?;
-        let mut values = self.forward_node_values(prompt, &[self.logits_root])?;
+        let mut values =
+            self.forward_node_values_on_backend(prompt, &[self.logits_root], gpu_layers)?;
         let logits = values.remove(0);
         let vocab_size = self.architecture.vocab as usize;
         let new_count = ids.len();
