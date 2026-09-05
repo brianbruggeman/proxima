@@ -1135,24 +1135,6 @@ fn render_elementwise(
     Ok(source)
 }
 
-/// Names `kind`'s own discriminant for [`EmitError::RenderKindMismatch`] --
-/// restated per backend module, the same "private original is not reachable
-/// from here" reasoning `crate::cuda`'s own copy carries.
-fn bound_op_kind_name(kind: &BoundOpKind) -> &'static str {
-    match kind {
-        BoundOpKind::CachedAttention { .. } => "cached_attention",
-        BoundOpKind::Elementwise { .. } => "elementwise",
-        BoundOpKind::Reduce {
-            keep: Keep::Reduce, ..
-        } => "keep::reduce fold",
-        BoundOpKind::Reduce {
-            keep: Keep::Scan, ..
-        } => "keep::scan fold",
-        BoundOpKind::Iota => "iota",
-        BoundOpKind::Constant { .. } => "constant",
-    }
-}
-
 fn render_reduce(
     resolved: &BoundOp,
     entry: &str,
@@ -1169,7 +1151,7 @@ fn render_reduce(
         return Err(EmitError::RenderKindMismatch {
             node: resolved.node,
             expected: "keep::reduce fold",
-            found: bound_op_kind_name(&resolved.kind),
+            found: resolved.kind.name(),
         });
     };
     let rank = resolved.extents.len();
@@ -1346,7 +1328,7 @@ fn render_reduce_cooperative(
         return Err(EmitError::RenderKindMismatch {
             node: resolved.node,
             expected: "keep::reduce fold",
-            found: bound_op_kind_name(&resolved.kind),
+            found: resolved.kind.name(),
         });
     };
     let rank = resolved.extents.len();
@@ -1568,7 +1550,7 @@ fn render_scan(resolved: &BoundOp, entry: &str, element_type: &str) -> Result<St
         return Err(EmitError::RenderKindMismatch {
             node: resolved.node,
             expected: "keep::scan fold",
-            found: bound_op_kind_name(&resolved.kind),
+            found: resolved.kind.name(),
         });
     };
     let rank = resolved.extents.len();

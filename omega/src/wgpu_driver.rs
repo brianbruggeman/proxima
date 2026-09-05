@@ -447,24 +447,6 @@ fn pack_elementwise_uniforms(bound: &BoundOp) -> Vec<u8> {
     bytes
 }
 
-/// Names `kind`'s own discriminant for [`EmitError::RenderKindMismatch`] --
-/// restated per backend module, the same "private original is not reachable
-/// from here" reasoning `crate::cuda`'s and `crate::wgsl`'s own copies carry.
-fn bound_op_kind_name(kind: &BoundOpKind) -> &'static str {
-    match kind {
-        BoundOpKind::CachedAttention { .. } => "cached_attention",
-        BoundOpKind::Elementwise { .. } => "elementwise",
-        BoundOpKind::Reduce {
-            keep: Keep::Reduce, ..
-        } => "keep::reduce fold",
-        BoundOpKind::Reduce {
-            keep: Keep::Scan, ..
-        } => "keep::scan fold",
-        BoundOpKind::Iota => "iota",
-        BoundOpKind::Constant { .. } => "constant",
-    }
-}
-
 fn pack_reduce_uniforms(bound: &BoundOp) -> Result<Vec<u8>, EmitError> {
     let BoundOpKind::Reduce {
         output_axes,
@@ -475,7 +457,7 @@ fn pack_reduce_uniforms(bound: &BoundOp) -> Result<Vec<u8>, EmitError> {
         return Err(EmitError::RenderKindMismatch {
             node: bound.node,
             expected: "keep::reduce fold",
-            found: bound_op_kind_name(&bound.kind),
+            found: bound.kind.name(),
         });
     };
     let rank_len = bound.extents.len().max(1);
@@ -514,7 +496,7 @@ fn pack_scan_uniforms(bound: &BoundOp) -> Result<Vec<u8>, EmitError> {
         return Err(EmitError::RenderKindMismatch {
             node: bound.node,
             expected: "keep::scan fold",
-            found: bound_op_kind_name(&bound.kind),
+            found: bound.kind.name(),
         });
     };
     let rank = bound.extents.len();
