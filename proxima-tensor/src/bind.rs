@@ -336,6 +336,30 @@ pub enum BoundOpKind {
     Constant { value: f32 },
 }
 
+impl BoundOpKind {
+    /// This variant's own discriminant name, used by every backend renderer
+    /// (`omega::cuda`, `omega::wgsl`, `omega::wgpu_driver`) to report
+    /// `EmitError::RenderKindMismatch { expected, found }` — the one place a
+    /// backend needs to name what it actually got instead of what it matched
+    /// on. Kept here, on the type itself, rather than restated per backend
+    /// module.
+    #[must_use]
+    pub fn name(&self) -> &'static str {
+        match self {
+            BoundOpKind::CachedAttention { .. } => "cached_attention",
+            BoundOpKind::Elementwise { .. } => "elementwise",
+            BoundOpKind::Reduce {
+                keep: Keep::Reduce, ..
+            } => "keep::reduce fold",
+            BoundOpKind::Reduce {
+                keep: Keep::Scan, ..
+            } => "keep::scan fold",
+            BoundOpKind::Iota => "iota",
+            BoundOpKind::Constant { .. } => "constant",
+        }
+    }
+}
+
 /// A fused body with zero steps — [`BoundOp::element_body`]'s answer for
 /// [`BoundOpKind::Iota`], which has no combining body at all. Every real
 /// caller (`cpu::run_elementwise`/`run_reduce`/`run_scan`,
@@ -3182,6 +3206,63 @@ pub fn node_retirement(resolved: &[BoundOp], outputs: &[NodeId]) -> Vec<Vec<Node
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn name_reports_the_variant_backends_render_error_messages_with() {
+        let cached_attention = BoundOpKind::CachedAttention {
+            operands: Vec::new(),
+            query_rows: 0,
+            cached_key_rows: 0,
+            new_key_rows: 0,
+            kv_heads: 0,
+            query_groups: 0,
+            head_dim: 0,
+            scale: 0.0,
+            cached_lower_inclusive: 0,
+            new_upper_inclusive: 0,
+        };
+        let elementwise = BoundOpKind::Elementwise {
+            body: ComposedBody::leaf(ScalarOp::Identity),
+            operands: Vec::new(),
+        };
+        let reduce_fold = BoundOpKind::Reduce {
+            element_body: ComposedBody::leaf(ScalarOp::Identity),
+            reduce_op: ScalarOp::Add,
+            init: ReduceInit::Zero,
+            keep: Keep::Reduce,
+            operands: Vec::new(),
+            output_axes: SmallVec::new(),
+            out_layout: Layout {
+                base: 0,
+                strides: SmallVec::new(),
+            },
+            out_scatter: None,
+            epilogue_body: ComposedBody::leaf(ScalarOp::Identity),
+            epilogue_operands: Vec::new(),
+        };
+        let reduce_scan = BoundOpKind::Reduce {
+            element_body: ComposedBody::leaf(ScalarOp::Identity),
+            reduce_op: ScalarOp::Add,
+            init: ReduceInit::Zero,
+            keep: Keep::Scan,
+            operands: Vec::new(),
+            output_axes: SmallVec::new(),
+            out_layout: Layout {
+                base: 0,
+                strides: SmallVec::new(),
+            },
+            out_scatter: None,
+            epilogue_body: ComposedBody::leaf(ScalarOp::Identity),
+            epilogue_operands: Vec::new(),
+        };
+
+        assert_eq!(cached_attention.name(), "cached_attention");
+        assert_eq!(elementwise.name(), "elementwise");
+        assert_eq!(reduce_fold.name(), "keep::reduce fold");
+        assert_eq!(reduce_scan.name(), "keep::scan fold");
+        assert_eq!(BoundOpKind::Iota.name(), "iota");
+        assert_eq!(BoundOpKind::Constant { value: 0.0 }.name(), "constant");
+    }
 
     #[test]
     #[cfg(feature = "cached-attention-streaming")]
