@@ -142,13 +142,18 @@ metal-packed-row-nsg2 = ["omega?/metal-packed-row-nsg2"]
 # passthrough to `omega/metal-q5k-pair-dot` so the decode harness can measure that arm.
 metal-q5k-pair-dot = ["omega?/metal-q5k-pair-dot"]
 # Buckets `generate.rs`'s placed-KV decode loop's growing KV extent
-# (`merged_len`) up to `proxima_tensor::sized::KV_BUCKET_TOKENS` before
-# binding it as the Metal plan's `Extent::Symbolic(1)`/plan-cache key, so
-# the plan (and the `omega::metal` Metal pipeline it selects) is reused
-# across a whole bucket of decode steps instead of re-planning every
-# token. `metal-output-placement` must also be on -- this feature has no
-# effect without the placed-KV decode path it modifies. See CARD 6.1-6.3
-# and `proxima-tensor/Cargo.toml`'s own `kv-capacity-bucket` doc.
+# (`merged_len`) up to `sized::KV_BUCKET_TOKENS` (this crate's own
+# `sized.rs`/`proxima-model-interop-runtime.toml`, guiding-principle 12)
+# before binding it as the Metal plan's `Extent::Symbolic(1)`/plan-cache
+# key, so the plan (and the `omega::metal` Metal pipeline it selects) is
+# reused across a whole bucket of decode steps instead of re-planning
+# every token. `metal-output-placement` must also be on -- this feature
+# has no effect without the placed-KV decode path it modifies. See CARD
+# 6.1-6.3. `proxima-tensor/kv-capacity-bucket` stays selected here too:
+# that crate's own `spec.rs`'s `cpu_mask_zero_ulp` proves the general
+# bucketing mechanism 0-ULP-safe for any bucket size, a correctness proof
+# this feature's own production path depends on even though the bucket
+# SIZE policy now lives entirely in this crate.
 kv-capacity-bucket = [
     "proxima-tensor/kv-capacity-bucket",
     "omega?/kv-capacity-bucket",
@@ -253,3 +258,6 @@ required-features = ["std"]
 [[example]]
 name = "mixtral_architecture_dump"
 required-features = ["std"]
+
+[build-dependencies]
+toml.workspace = true
