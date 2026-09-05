@@ -12454,7 +12454,7 @@ fn dot_q3k_f32(weight_row: &[u8], activation: &[f32]) -> Result<f32, TensorError
 
 /// A full `Q3_K`-quantized weight matrix (`rows` x `k`) times one `f32`
 /// activation vector — `dot_q3k_f32`'s per-row kernel through the shared
-/// [`matmul_quantized_dispatch`] pool dispatch, same shape as
+/// `matmul_quantized_dispatch` pool dispatch, same shape as
 /// [`matmul_q5k_f32`].
 ///
 /// # Errors
