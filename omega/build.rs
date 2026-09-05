@@ -294,6 +294,47 @@ fn emit_sizing_consts() {
         "pub const PACKED_ROW_ACTIVATION_GROUP: u64 = {group};\n"
     ));
 
+    if env::var_os("CARGO_FEATURE_METAL_BUFFER_POOL").is_some() {
+        let max_per_bucket = require_nonzero(
+            "output_pool.max_per_bucket",
+            resolve_int(&root, "output_pool", "max_per_bucket"),
+        );
+        out.push_str(&format!(
+            "pub const OUTPUT_POOL_MAX_PER_BUCKET: usize = {max_per_bucket};\n"
+        ));
+    }
+
+    if env::var_os("CARGO_FEATURE_METAL_PLAN_STABLE_BUFFERS").is_some() {
+        let transient_cap = require_nonzero(
+            "arena.transient_cap",
+            resolve_int(&root, "arena", "transient_cap"),
+        );
+        out.push_str(&format!(
+            "pub const ARENA_TRANSIENT_CAP: usize = {transient_cap};\n"
+        ));
+    }
+
+    let workgroup_size = require_nonzero(
+        "wgsl.workgroup_size",
+        resolve_int(&root, "wgsl", "workgroup_size"),
+    );
+    out.push_str(&format!(
+        "pub const WORKGROUP_SIZE: u32 = {workgroup_size};\n"
+    ));
+
+    if env::var_os("CARGO_FEATURE_METAL_PACKED_ROW_NSG2").is_some()
+        || env::var_os("CARGO_FEATURE_METAL_Q4K_GGML_PORT").is_some()
+    {
+        let width = require_power_of_two_le_32(
+            "packed_row_nsg.width",
+            require_nonzero(
+                "packed_row_nsg.width",
+                resolve_int(&root, "packed_row_nsg", "width"),
+            ),
+        );
+        out.push_str(&format!("pub const PACKED_ROW_NSG: usize = {width};\n"));
+    }
+
     let out_dir = PathBuf::from(env::var("OUT_DIR").expect("OUT_DIR set by cargo"));
     let out_path = out_dir.join("omega_sized.rs");
     fs::write(&out_path, out).unwrap_or_else(|err| panic!("write {}: {err}", out_path.display()));

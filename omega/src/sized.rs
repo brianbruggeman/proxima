@@ -39,6 +39,17 @@
 //!   `metal::UNIFORM_BUFFERS`, the content-keyed uploaded-uniform-buffer
 //!   cache; see `omega-runtime.toml`'s `[spans].uniform_cache_entries` for
 //!   the measured default and eviction-cost rationale.
+//! - `OUTPUT_POOL_MAX_PER_BUCKET` (`metal-buffer-pool`-only) — per-bucket
+//!   cap on `metal::OUTPUT_BUFFER_POOL`'s retained buffers; see
+//!   `omega-runtime.toml`'s `[output_pool]`.
+//! - `ARENA_TRANSIENT_CAP` (`metal-plan-stable-buffers`-only) — CARD 6.5's
+//!   MG-3 kill-condition budget, in bytes; see `omega-runtime.toml`'s
+//!   `[arena]`.
+//! - [`WORKGROUP_SIZE`] (always compiled) — threads per workgroup every
+//!   v1 WGSL kernel dispatches with; see `omega-runtime.toml`'s `[wgsl]`.
+//! - `PACKED_ROW_NSG` (`metal-packed-row-nsg2`/`metal-q4k-ggml-port`-only)
+//!   — simdgroups per threadgroup for the row-blocked packed path; see
+//!   `omega-runtime.toml`'s `[packed_row_nsg]`.
 //!
 //! `msl` (this module's own crate) is alloc-tier and target-independent --
 //! emission never touches a device -- so [`SIMD_WIDTH`] is visible at every
