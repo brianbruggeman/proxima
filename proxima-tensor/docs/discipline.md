@@ -22530,3 +22530,77 @@ PROXIMA_QUALITY_PROMPTS=8 PROXIMA_MAX_TOKENS=8 PROXIMA_MATH_MODE=safe /tmp/proxi
 PROXIMA_QUALITY_PROMPTS=8 PROXIMA_MAX_TOKENS=8 PROXIMA_MATH_MODE=relaxed /tmp/proxima-row304-target/release/deps/proxima_model_interop-* quality::real_openchat_file::metal_vs_cpu_reports_real_drift --exact --ignored --nocapture
 ```
 Confirm the `pgrep -l` quiet gate is empty immediately before each run.
+
+## ROW 305 -- Q3_K_M variant against the Q4_K_S reference through the same cached-loop harness: 85.9% exact match, top1 93.75%, kl_mean 0.215
+
+**Card:** M6 slice, `proxima-wt-m6`, branch `docs/m6-q3km-quality`, off main `7503899`.
+
+**What changed.** One new `#[ignore]` test in `proxima-model-interop/src/quality.rs`'s
+`real_openchat_file` module, beside `metal_vs_cpu_reports_real_drift`:
+`q3_k_m_variant_against_q4_k_s_reference_reports_real_drift`. It calls the same
+`quality_report` entry point ROW 304 landed, with `reference` = the host-local
+openchat-3.5-1210.Q4_K_S.gguf ( `ServingConfig::default().model_path`) and `variant` =
+openchat-3.5-1210.Q3_K_M.gguf, BOTH forced through the Metal backend (`GPU_LAYERS_ALL` on both
+sides) -- holding the backend fixed and varying only the checkpoint's own quantization, so this
+report isolates a codec's drift from a device's, distinct from ROW 304's fixed-checkpoint,
+cross-backend comparison. A new test-edge-only fn, `variant_model_path`, reads
+`PROXIMA_OPENCHAT_GGUF_VARIANT` (defaulting to this task's own scratchpad Q3_K_M fixture path) --
+this is a NEW env var, not a reuse of an existing one: `ServingConfig::default().model_path` is a
+fixed constant with no env override anywhere in `proxima-model-interop` (`serving.rs`, `bind.rs`),
+confirmed by grep; the only `PROXIMA_OPENCHAT_GGUF` reader in the whole workspace is `omega`'s
+unrelated `device_streaming_ceiling.rs` test. No other source changed.
+
+**Scope note -- `metal_vs_cpu_reports_real_drift` self-drift on Q3_K_M, NOT run.** The task asked
+to also run the EXISTING `metal_vs_cpu_reports_real_drift` with Q3_K_M as both reference and
+variant, "if the reference path env var lets you point it at Q3_K_M". It does not: that test's
+`reference`/`variant` both resolve through `ServingConfig::default().model_path`, a hardcoded
+constant, and this slice's scope is `quality.rs` test edge only -- redirecting that existing test's
+reference model would mean adding an env override to a test this slice was told to leave beside,
+not inside. Not run; reported per the brief's own "if not, say so".
+
+**Scope note -- Q3_K_M decode timing (oracle), NOT run.** The task also asked for the release
+oracle (`bind::real_openchat_file::runs_the_cached_decode_loop_on_the_metal_backend_and_reports_the_plan_cache`)
+against Q3_K_M via a `PROXIMA_.*GGUF` env var. Grepped `proxima-model-interop/src/serving.rs` and
+`src/bind.rs` for `PROXIMA_.*GGUF\|model_path`: the oracle's model path resolves through
+`ServingConfig::default().model_path` with no env-var indirection anywhere in this crate (`bind.rs`
+lines 3676-3679 read the constant directly). The workspace's one `PROXIMA_OPENCHAT_GGUF` reader
+lives in `omega/tests/device_streaming_ceiling.rs`, an unrelated harness. Redirecting the oracle to
+Q3_K_M would require editing `bind.rs`/`serving.rs`, outside this slice's owned surface
+(`quality.rs`, test edge only). Not run; no ratio to report against the expected 0.81x.
+
+**8x8 Q3_K_M-vs-Q4_K_S quality** (`PROXIMA_QUALITY_PROMPTS=8 PROXIMA_MAX_TOKENS=8`, release,
+`--features metal,instrument`, reference = openchat-3.5-1210.Q4_K_S.gguf `GPU_LAYERS_ALL`, variant
+= openchat-3.5-1210.Q3_K_M.gguf (3,518,996,512 bytes on disk) `GPU_LAYERS_ALL`; quiet gate empty
+immediately before the run, `pgrep -l` no match, `uptime` load 31.64/28.62/24.53 at start,
+3.23/15.21/19.72 at end -- no builder process matched the quiet-gate pattern before or after, so
+this run is MEASURED, not informational):
+
+| exact_match | top1 | kl_mean | kl_max | max_abs_logit_delta | wall (s) |
+| --- | --- | --- | --- | --- | --- |
+| 0.859375 | 0.937500 | 0.214878 | 10.301557 | 16.505457 | 144.27 |
+
+Per-prompt: 6 of 8 prompts hit `exact_match=1.000000`/`top1=1.000000` with `kl_mean` in the
+0.02-0.12 range; `code-03` diverges at step 6 (`exact_match=0.750000`); `code-04` diverges at step 1
+(`exact_match=0.125000`, `kl_max=10.301557`, `max_abs_logit_delta=16.505457` -- the single outlier
+carrying both aggregate maxima). This is a real, larger drift than ROW 304's same-checkpoint
+cross-backend comparison (kl_mean 0.0021-0.0030 there vs 0.214878 here): mechanism is the codec
+change itself (Q4_K_S -> Q3_K_M drops from 4-bit to 3-bit weight quantization), not a harness
+regression -- the harness's own degenerate control (`default_vs_default_is_the_degenerate_control`,
+unchanged by this slice) still passes at `kl_mean` near zero.
+
+**Q3_K_M self-drift table:** not run (see scope note above).
+
+**Timing table:** not run (see scope note above).
+
+**Gates:**
+- `cargo clippy -p proxima-model-interop --all-targets --features metal,instrument -- -D warnings`: EXIT=0, zero warnings.
+- `cargo nextest run -p proxima-model-interop --features metal,instrument`: 110 tests run, 110 passed, 28 skipped, EXIT=0.
+- `cargo nextest run -p proxima-model-interop --features std`: 96 tests run, 96 passed, 22 skipped, EXIT=0.
+
+**Re-prove command:**
+```
+CARGO_TARGET_DIR=/tmp/proxima-row305-target CARGO_TERM_COLOR=never PROXIMA_QUALITY_PROMPTS=8 PROXIMA_MAX_TOKENS=8 cargo test -p proxima-model-interop --release --features metal,instrument quality::real_openchat_file::q3_k_m_variant_against_q4_k_s_reference_reports_real_drift -- --ignored --nocapture
+```
+Confirm the `pgrep -l` quiet gate is empty immediately before the run; set
+`PROXIMA_OPENCHAT_GGUF_VARIANT=<path to a Q3_K_M gguf>` to override the default scratchpad fixture
+path.
