@@ -509,6 +509,30 @@ step as FSM × orchestration over pipes, collapsing nine executors to one driver
 per constraint). Output: a stepwise plan with signatures, ≤ 1500 lines, every claim citing
 `file:line` opened this session, no adjectives, no verdict words (`design-task.md:71-114`).
 
+## 1.4 Design of record (2026-09-04)
+
+Full trail and design of record: `design-2026-09-04/` in this directory (`README.md` indexes the
+round-1 and round-2 tournaments, the judge scores, and the stop decision).
+
+The tournament answers three owner rules, quoted verbatim: "pipe shaped, fsm x sansio + fsm x
+orchestration over pipes and also I want you to make sure that we are using our risc architecture
+and algebra. it should be _generic_"; "omega should support cpu, gpu and _mixed_ backends"; "how is
+there any more than 2 backends?"
+
+Round 1 (design-A, design-B, design-AB) selected design-AB, unanimous across three judges under
+three different anonymizations. Round 2 (design-AB, design-B2, design-AB2) selected design-AB2,
+unanimous across three judges. `design-final.md` is design-AB2 with the round-2 panel's named holes
+closed against the shipped source at `HEAD ce05362`.
+
+The first five cards, ordered on the measured gap (`design-final.md` §E): D0a repeats the device
+streaming ceiling on a quiet box; D0b adds a ceiling arm at the Q4_K superblock stride; D0c measures
+concurrent CPU+GPU streaming against the GPU-alone ceiling; D1 is the matvec roofline ladder; D1b is
+the packed-row addressing arms.
+
+`Backend`'s seven variants collapse to `Engine::{Cpu, Gpu}` plus a `GpuDriver` resolved once per
+target; there is no `Backend::Mixed` variant — mixing is a placement field on the scheduled op, not
+a third engine.
+
 ## 2. The diagnosis, built formally (V0-V8)
 
 The default is no verdict. What follows is a proposal built by the admissibility procedure so
