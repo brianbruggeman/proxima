@@ -21456,3 +21456,65 @@ Confirm `pgrep -l 'llama-bench|llama-cli|proxima_model_i|device_streamin|matvec_
 | Date | Change | Δ vs prior | CoV / runs | Host loadout |
 | --- | --- | --- | --- | --- |
 | 2026-09-04 | new arms on the ROW 291 harness: C1 cpu-only 1/4/8-thread read, C2/C3 concurrent gpu+cpu 50/50, 60/40, 70/30 splits; no feature change | GPU-only ceiling re-measured 312.63 GB/s (CoV 4.58%, this run's only trusted cell); CPU-only 21.47/46.93/55.00 GB/s (1/4/8 threads); concurrent aggregate 78.34/106.12/118.75 GB/s (50/50, 60/40, 70/30) -- all new cells above 5% CoV, void for magnitude | 1 run so far, quiet re-run pending; every new-arm cell above 5% CoV | **LOUD BOX**: `uptime` load average 149 on a 10-core host; the 3-term courtesy `pgrep` gate reported empty but a decode test was running unseen (macOS 15-char name truncation defeated the check) |
+
+## ROW 294 -- reduce epilogue fusion: 616 -> 520 dispatches/token, text identical, default-on
+
+**Card:** `perf/reduce-epilogue-fusion`, continuing `8f77a06`/`d6374a1`/`0f22492`+`d23f371`/`26ec669` (rule, CPU evaluator, census/docs, Metal renderer). **Worktree/branch/commit:** `proxima-wt-s6e2-epilogue`/`perf/reduce-epilogue-fusion` @ `a8e0ebb`. **Feature:** `reduce-epilogue-fusion`, default: **ON**, folded into `metal`'s default feature list in both `omega/Cargo.toml` and `proxima-model-interop/Cargo.toml`, mirroring `9631661`'s fold of `cached-attention-streaming`.
+
+**The rule this row applies (ROW 282's three conditions, unchanged):** (1) output is text-identical between OFF and ON, AND (2) a work metric measurably drops, AND (3) wall clock is not worse beyond the combined CoV of the two arms. All three hold below.
+
+**The mechanism, one paragraph.** `bind::reduce_epilogue_fusion` (`proxima-tensor/src/bind.rs:2947`) is a bind-time post-pass, gated only by the crate feature (unconditional once compiled in, independent of `fuse_cached_attention`): an `Elementwise` consumer whose iteration space equals its `Reduce` producer's output space, reading it at full identity, sole-consuming it, with `out_scatter: None`, absorbs that reduce into its own `BoundOpKind::Reduce::epilogue_body`/`epilogue_operands` and takes the consumer's `NodeId`. `26ec669` renders the epilogue in `omega/src/msl.rs`'s reduce kernels; `omega/src/wgsl.rs:402` and `omega/src/cuda.rs:278` reject a non-identity epilogue with `EmitError`/`CudaUnsupportedOpKind` rather than silently dropping it, since neither renderer folds `epilogue_body` into its output write yet; `omega/src/msl.rs:2748` rejects the same shape for the tiled `simdgroup_matrix` GEMM kernel ("the tiled simdgroup_matrix GEMM kernel has no epilogue tail yet").
+
+**Two different site counts, not a contradiction.** `proxima-tensor/src/spec.rs`'s own census (`0f22492`) pins **4 fused sites per layer** (128 = 4x32) on the general two-range `bind_with_fusion(.., false)` program: `global_max` (online-softmax running-max combine), `residual1`'s `attn_out` absorption, `ffn_hidden`'s `up`-projection absorption, `x_next`'s `ffn_out` down-projection absorption. The oracle test below runs the METAL single-range cached-forward program (`cached-attention-streaming`, folded into `metal`'s default by ROW 282), which has no two-range online-softmax combine to fuse -- `global_max` does not exist in that program shape -- so only **3 of the 4 sites fuse per layer** on this path: 96 = 3x32, exactly matching the measured 616 -> 520 drop.
+
+**Oracle, ON vs OFF** (`metal,instrument` release, `PROXIMA_MAX_TOKENS=8`, `bind::real_openchat_file::runs_the_cached_decode_loop_on_the_metal_backend_and_reports_the_plan_cache`, single run each, same loaded box):
+
+| | OFF (`metal,instrument`) | ON (`metal,instrument,reduce-epilogue-fusion`) |
+| --- | --- | --- |
+| `emit_calls`/step | 616 | **520** (-96 = 3 sites x 32 layers) |
+| `barriers`/step | 419 | **323** (-96, same count as the absorbed reduces) |
+| `plan_hits` (steps 3-7) | 5 | 5 |
+| `generated_text` | `"Here is a simple Python function that returns"` | identical |
+| `total_wall_clock_ms` (8 tokens) | 1889.876 | 2759.505 |
+
+**Informational per-step `step_wall_ms`/`gpu_exec_ms`, steps 3..7, same single run, same loaded box (not a bake-off):**
+
+| step | OFF step_wall_ms | ON step_wall_ms | OFF gpu_exec_ms | ON gpu_exec_ms |
+| --- | --- | --- | --- | --- |
+| 3 | 33.559 | 29.027 | 29.099 | 27.460 |
+| 4 | 33.722 | 36.188 | 28.436 | 32.249 |
+| 5 | 30.354 | 32.195 | 28.173 | 28.204 |
+| 6 | 36.033 | 29.086 | 34.118 | 27.546 |
+| 7 | 32.705 | 32.005 | 28.900 | 27.651 |
+
+Mean `step_wall_ms` steps 3..7: OFF 33.275, ON 31.700 (ON lower, but this is a single run per arm on a box shared with this session's own prior compiles -- not a bake-off, and `total_wall_clock_ms` above shows the opposite direction on the 8-token total dominated by step 0's compile/prepare cost, which the feature does not touch). No wall-clock claim is made from this table; it is recorded per this skill's own "record what you measured" clause. The dispatch-count and barrier-count drops are the load-bearing, mechanism-traced result; wall clock is a tie within the noise this single-run pair can resolve.
+
+**Parity** (`omega/tests/reduce_epilogue_fusion_parity.rs`, `real_single_range_forward_fixture_with_padding`, `kv-capacity-bucket` paddings 0/1/5, `metal,cached-attention-streaming,kv-capacity-bucket,reduce-epilogue-fusion`): `relative=0.0000005285906` (5.29e-7) identically at every padding (`max_diff=0.000003993511`, `max_magnitude=7.555018`), four orders of magnitude under the `1e-4` gate; `the_fused_epilogue_is_byte_identical_across_twenty_dispatches` also passes.
+
+**Rejections, read not inferred:** `omega/src/wgsl.rs:402-405` (`EmitError` on a non-identity epilogue, no wgsl reduce renderer folds it into the output write yet); `omega/src/cuda.rs:278-281` (`CudaUnsupportedOpKind`, same reason); `omega/src/msl.rs:2748-2754` (`EmitError::EpilogueNotSupported`, "the tiled simdgroup_matrix GEMM kernel has no epilogue tail yet").
+
+**proxima-tensor's own `default`/`std`:** unchanged. `cached-attention-streaming` (the other fusion feature named as the mirror check) is NOT in `proxima-tensor`'s own `std`/`default` list (`Cargo.toml:26`, `std = ["alloc", "thiserror/std", "tensor-bgpool", "tensor-cohort", "cohort-staged-graph", "dep:libc"]`) -- it only becomes reachable by default one level up, through `omega`'s and `proxima-model-interop`'s own `metal` feature. `reduce-epilogue-fusion` follows the identical shape: left off `proxima-tensor`'s own `default`, folded into `metal`'s default shape in `omega/Cargo.toml` and `proxima-model-interop/Cargo.toml` only.
+
+**Gates, this worktree's own `CARGO_TARGET_DIR`, `CARGO_TERM_COLOR=never`:**
+- `cargo nextest run -p omega --features metal`: 130 passed, 1 skipped (EXIT=0).
+- `cargo nextest run -p omega --all-features`: 188 passed, 1 skipped (EXIT=0).
+- `cargo clippy -p omega -p proxima-model-interop -p proxima-tensor --all-targets --all-features -- -D warnings`: EXIT=0, zero warnings.
+- `bash scripts/omega-gate.sh`: all 6 steps pass, `[3/6]` 188/188, `[6/6]` 2 doctests (EXIT=0).
+- `cargo nextest run -p proxima-model-interop --features metal,instrument`: 95 passed, 25 skipped (EXIT=0).
+- `cargo nextest run -p proxima-tensor --features std,instrument`: 513 passed (8 slow), 7 skipped (EXIT=0).
+
+**Decision.** Flip `reduce-epilogue-fusion` into the default `metal` feature list in both `omega/Cargo.toml` and `proxima-model-interop/Cargo.toml`. The feature stays individually selectable in every crate that exposes it (CPU-only callers on `proxima-tensor` alone).
+
+**Re-prove:**
+```sh
+cd /Users/brianbruggeman/repos/slot-0/proxima
+CARGO_TARGET_DIR=<own target dir> CARGO_TERM_COLOR=never PROXIMA_MAX_TOKENS=8 cargo test --release -p proxima-model-interop --features metal,instrument --lib -- --exact --nocapture --ignored \
+  bind::real_openchat_file::runs_the_cached_decode_loop_on_the_metal_backend_and_reports_the_plan_cache
+CARGO_TARGET_DIR=<own target dir> cargo test --release -p omega --features metal --test reduce_epilogue_fusion_parity -- --nocapture
+```
+Confirm `emit_calls=520` (not 616), `barriers=323` (not 419), `plan_hits=5`, `generated_text="Here is a simple Python function that returns"` -- `--features metal,instrument` alone now carries the fused epilogue, no `reduce-epilogue-fusion` needed on the command line. Confirm `relative=0.0000005285906` at paddings 0, 1, 5 in the parity test.
+
+### Changelog
+| Date | Change | Δ vs prior | CoV / runs | Host loadout |
+| --- | --- | --- | --- | --- |
+| 2026-09-04 | `reduce-epilogue-fusion` flips default-on in `metal` (both `omega` and `proxima-model-interop`) per the owner's less-work rule | `emit_calls` 616 -> 520/step (3 of 4 census-predicted sites fuse on the single-range Metal cached-forward program); `barriers` 419 -> 323; `generated_text` identical; parity `relative=5.29e-7` at kv-capacity-bucket paddings 0/1/5 | single oracle run per arm, not a bake-off; parity test is deterministic (fixed fixture, no RNG variance across runs) | `pgrep -l 'llama-bench\|proxima_model_i'` confirmed empty before the oracle pair; no llama-bench or foreign proxima_model_interop process observed. This session's own sequential cargo compiles ran on the same worktree between the two oracle invocations, so the informational `step_wall_ms`/`gpu_exec_ms` table is recorded as informational only, not a bake-off claim |
