@@ -172,15 +172,14 @@ fn matmul_program(rows: u32, k: u32, weight_dtype: DType) -> (Vec<Op>, NodeId) {
 /// row-count prefix).
 const ROWS_TO_CHECK: usize = 64;
 
-/// Shared body for both the default-scalar test below and the
-/// `metal-q5k-pair-dot` parity test in `q5k_pair_dot_matmul_on_real_
-/// ffn_down_q5k_bytes_matches_the_dequantized_f32_cpu_path` -- the only
-/// difference between the two is which kernel body `push_packed_row_
-/// blocked_body`'s `PackedCodec::Q5K` arm emits (compile-time, via the
-/// feature), and the tolerance: the paired body accumulates in a different
-/// order than the scalar per-element loop (four interleaved sub-block
-/// partials vs one running sum), so a slightly looser bound is expected
-/// floating-point behavior, not a correctness gap.
+/// Shared body for both tests below -- both exercise the same
+/// paired-nibble `q5k_pair_dot` body `push_packed_row_blocked_body` selects
+/// by structure (`PackedCodec::supports_pair_dot`) whenever the reduce is a
+/// plain `Float32` product, at two tolerances: the looser 1e-4 bound names
+/// the tolerance the paired body's four-interleaved-sub-block-partial
+/// accumulation order actually needs against the scalar-oracle CPU path,
+/// while the tighter 1e-5 bound is the regression floor this real
+/// checkpoint has measured under since before the paired body existed.
 fn run_real_ffn_down_parity(relative_tolerance: f32) {
     let path = std::path::Path::new(REAL_OPENCHAT_GGUF_PATH);
     let Some((parsed, file_len, mut file)) = real_gguf_header(path) else {
@@ -271,16 +270,14 @@ fn metal_matmul_on_real_ffn_down_q5k_bytes_matches_the_dequantized_f32_cpu_path(
     run_real_ffn_down_parity(1e-5);
 }
 
-/// `metal-q5k-pair-dot` parity, on the SAME real `blk.0.ffn_down.weight`
-/// bytes -- this is the `plain_product` paired-nibble body
-/// (`msl.rs`'s `Q5K_PAIR_DOT_MSL`/`q5k_pair_dot`) this landing adds, checked
-/// against `proxima_gguf::quant::q5_k::dequantize` + `evaluate` at the
-/// tolerance the task's own gate names (1e-4), one order of magnitude looser
-/// than the scalar path's 1e-5 above because the paired body accumulates
-/// across four interleaved sub-block partials rather than one running sum --
-/// a different but equally valid floating-point summation order, not a
+/// The `plain_product` paired-nibble body's own tolerance
+/// (`msl.rs`'s `Q5K_PAIR_DOT_MSL`/`q5k_pair_dot`), checked against
+/// `proxima_gguf::quant::q5_k::dequantize` + `evaluate` at the tolerance the
+/// task's own gate names (1e-4), one order of magnitude looser than the
+/// 1e-5 test above because the paired body accumulates across four
+/// interleaved sub-block partials rather than one running sum -- a
+/// different but equally valid floating-point summation order, not a
 /// correctness regression.
-#[cfg(feature = "metal-q5k-pair-dot")]
 #[test]
 fn q5k_pair_dot_matmul_on_real_ffn_down_q5k_bytes_matches_the_dequantized_f32_cpu_path() {
     run_real_ffn_down_parity(1e-4);

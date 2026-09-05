@@ -40,12 +40,18 @@ cpu = ["std", "proxima-tensor/std"]
 # and `metal-wide-cooperative-reduce` fold in here too, so `cargo nextest run
 # -p omega --features metal` exercises the same default decode path as
 # proxima-model-interop's `metal` feature.
-# `metal-q5k-pair-dot` joins them per the 2026-09-04 per-op profile: the
-# paired-nibble Q5_K body measured 202,083 ns/op -> 124,265 ns/op (1.63x) on
-# the 8 Q5_K ops in the real `blk.{0..3}.ffn_down.weight` family (6.275 ->
-# 5.725 ms), decode wall flat within noise (41.32/41.63/42.01 vs
-# 41.35/41.15/41.32 ms over 3 rounds; the 8 ops are ~1.6 ms of the step),
-# text identical, parity < 1e-4 against the scalar oracle.
+# The paired-nibble/paired-lane decode body (`msl.rs`'s `q4k_pair_dot`/
+# `q5k_pair_dot`/`q6k_pair_dot`) is selected for `Q4_K`/`Q5_K`/`Q6_K` by
+# `PackedCodec::supports_pair_dot` -- a structural fact of each codec's block
+# layout -- whenever the reduce is a plain `Float32` product, not by a
+# cargo feature (the former `metal-q5k-pair-dot`/`metal-q6k-pair-dot`
+# feature flags this comment used to name here). `Q5_K`'s body measured
+# 202,083 ns/op -> 124,265 ns/op (1.63x) on the 8 Q5_K ops in the real
+# `blk.{0..3}.ffn_down.weight` family (6.275 -> 5.725 ms), decode wall flat
+# within noise (41.32/41.63/42.01 vs 41.35/41.15/41.32 ms over 3 rounds),
+# text identical, parity < 1e-4 against the scalar oracle -- see
+# `proxima-tensor/docs/discipline.md` ROW 278 for the full table this
+# structural landing folded `Q6_K` into as well.
 # `metal-plan-stable-buffers` joins them per CARD 6.5: a plan-owned
 # `BufferArena` (whole buffers, liveness-partitioned, outputs pinned) plus
 # `PlanUniforms` (one uniform buffer per plan position) turn a plan-cache hit
@@ -85,7 +91,6 @@ metal = [
     "proxima-tensor/std",
     "metal-output-placement",
     "metal-wide-cooperative-reduce",
-    "metal-q5k-pair-dot",
     "metal-plan-stable-buffers",
     "cached-attention-streaming",
     "metal-concurrent-dispatch",
@@ -153,8 +158,8 @@ metal-q4k-mask-fma = ["metal"]
 # e2e bench on the real decode graph shows it wins. Depends on `metal` for
 # the same reason `metal-tiled-gemm` does: the codegen itself is alloc-tier
 # `msl.rs`, but the alternate lane math only has meaning for a Metal
-# dispatch. NOTE: `q4k_pair_dot`'s own `plain_product` arm (float-only,
-# `element_type == "float"` AND the scale-deferred shape) takes priority over
+# dispatch. NOTE: `q4k_pair_dot`'s own `plain_product` arm (`DType::Float32`
+# AND the scale-deferred shape) takes priority over
 # this feature -- see `push_packed_row_blocked_body`'s own arm ordering --
 # since `push_q4k_single_fetch_body` is a fully self-contained kernel body
 # (its own dispatch loop, not routed through the shared lane-spread
@@ -249,42 +254,6 @@ metal-q4k-split-k = ["metal"]
 # ROW 270) and a decode-step seal on a quiet box, not on the mechanism
 # argument alone.
 metal-packed-row-nsg2 = ["metal"]
-# `Q5_K`'s counterpart to `q4k_pair_dot` (`msl.rs`'s `Q5K_PAIR_DOT_MSL`): the
-# same paired-nibble, two-word-load body `Q4_K`'s `plain_product` arm uses,
-# extended with `Q5_K`'s `qh` high-bit plane (one extra byte load, mask
-# select, no shift), mirroring ggml's own `kernel_mul_mv_q5_K_f32_impl`
-# (`ggml-metal.metal:5209-5324`) lane assignment. Closes the gap the
-# per-op profile measured: `Q5_K`'s row-blocked arm still falls back to the
-# fully scalar per-element `q5k_value` loop (`push_packed_row_blocked_body`'s
-# `PackedCodec::Q5K` arm), ~1.85x slower per op than `Q4_K`'s paired body on
-# the same 34 MB tensor shape (`blk.{0..3}.ffn_down.weight`). Landed as
-# default via the `metal` feature above per the 2026-09-04 decode-step seal:
-# 202,083 -> 124,265 ns/op (1.63x) on the 8 Q5_K ops, family 6.275 -> 5.725 ms,
-# decode wall flat within noise, text identical, parity < 1e-4
-# (`proxima-tensor/docs/discipline.md` ROW 278). Depends on `metal` for the
-# same reason every sibling feature in this file does: `msl.rs` is alloc-tier
-# codegen, but the alternate kernel body only has meaning for a Metal
-# dispatch.
-metal-q5k-pair-dot = ["metal"]
-# `Q6_K`'s counterpart to `q4k_pair_dot`/`q5k_pair_dot` (`msl.rs`'s
-# `Q6K_PAIR_DOT_MSL`): the same paired-lane body, ported to `Q6_K`'s
-# `ql`/`qh`/signed-scale layout, mirroring ggml's own
-# `kernel_mul_mv_q6_K_f32_impl` (`ggml-metal.metal:5360-5420`) mask/shift
-# technique. Closes the gap `Q6_K`'s row-blocked arm otherwise has no fast
-# path for at all: `push_packed_row_blocked_body`'s `PackedCodec::Q6K` arm
-# falls back to the fully scalar per-element `q6k_value` loop, which
-# recomputes `half_index`/`local`/`lane`/`sub_block_in_half` and three
-# scalar byte loads per ELEMENT even though they are invariant across the
-# 32-element run a lane owns. Default-off per the same discipline as
-# `metal-q5k-pair-dot` above: a kernel body swap earns the production
-# default only after a measured decode-step seal, not on the mechanism
-# argument alone. `Q6_K`'s 210-byte block is not a multiple of 4 (unlike
-# `Q4_K`'s 144 and `Q5_K`'s 176, both multiples of 16), so this body's wide
-# loads are `ushort`, not `q5k_pair_dot`'s `ulong` -- see the constant's own
-# doc for the alignment argument. Depends on `metal` for the same reason
-# every sibling feature in this file does: `msl.rs` is alloc-tier codegen,
-# but the alternate kernel body only has meaning for a Metal dispatch.
-metal-q6k-pair-dot = ["metal"]
 # Portable GPU execution driver (src/wgsl.rs, src/wgpu_driver.rs) — the
 # wgpu/WGSL counterpart of `metal` above, one abstraction layer over: same
 # `BoundOp` descriptor, same emit-then-drive split, different target ISA
