@@ -21101,3 +21101,96 @@ Confirm the `token_breakdown_metal ... emit_calls=<N> ...ablation=true kind_filt
 | Date | Change | Δ vs prior | CoV / runs | Host loadout |
 | --- | --- | --- | --- | --- |
 | 2026-09-04 | `PROXIMA_METAL_KIND_FILTER` in-buffer ablation knob added to `execute_plan_with_placements` (`instrument`-gated, default-off, no production cost); measurement-only row, no default feature changed | ALL 27.044 ms (616 ops); MATVEC 23.244 ms (225 ops, 179.36 GB/s); NOT-MATVEC 4.051 ms (391 ops); identity residual -0.251 ms (-0.93%, attributed to cross-kind concurrent-dispatch overlap lost when either side is ablated); ATTN 3.426 ms / COOP 1.444 ms / ELEM 1.764 ms in-buffer | 3 interleaved rounds per arm, 6 arms, 18 runs total; ALL 0.99%, MATVEC 0.68%, NOT-MATVEC 1.54%, ELEM 1.12% (all within threshold); **ATTN 9.94% and COOP 18.25% exceed 5% -- reported as ranges, not point estimates** | quiet box confirmed via `pgrep -fl 'cargo\|rustc\|nextest\|llama-bench\|proxima_model_interop-'` (excluding cdb-daemon/sccache) immediately before the sweep; no other cargo/rustc/nextest/llama-bench process observed; the only other worker running was a read-only grep per the dispatch brief |
+
+## ROW 288 -- scoreboard metric correction: steady-state steps 3..7 = 28.82 ms/token (1.652x llama.cpp), not the steps 1..7 mean
+
+**Card:** none (doc-only correction to ROW 286 and `plan.md` §1.2/§1.3; no code or feature change).
+
+**Defect in ROW 286.** ROW 286's protocol line states `step_wall_ms`/`gpu_exec_ms` are "averaged over
+steady steps 1..7" and reports 33.032 ms/token as the DEFAULT scoreboard number. Steps 1 and 2 are
+not steady: `plan_hits`/`plan_misses` in the same round's raw log (`default-r3.log:9,13` in this
+correction's source bundle) show `plan_misses=2` at step 1 and `plan_misses=3` at step 2, each
+paying a fresh `pipeline_lookup`/`op_setup` walk (`prepare_calls=1`) that steps 3-7 skip entirely
+(`prepare_calls=0`, `plan_hits` climbing 1..5). Concretely, step 1 = 45.367 ms and step 2 = 43.390 ms
+against steps 3-7's 28.7-28.9 ms band -- step 1 alone is 58% higher than the steady band it was
+averaged into. `llama-bench`'s `tg32` test measures steady-state generation only (no analogous
+"first two tokens are slower" contribution), so the two sides were never measuring the same thing:
+33.032 ms/token blends two plan-miss tokens into a number compared against an incumbent that pays
+no equivalent tax.
+
+**Source of record.** `score-logs/default-r{1,2,3}.log` (3 interleaved DEFAULT rounds, same
+protocol as ROW 286: `main af918bb`, `metal,instrument`, `PROXIMA_MAX_TOKENS=8`,
+`bind::real_openchat_file::runs_the_cached_decode_loop_on_the_metal_backend_and_reports_the_plan_cache`),
+`score-logs/llama-bench-r{1,2,3}.log`, and `score-logs/start-r{1,2,3}.log` for the `4be2f3a`
+comparison arm -- the session-scratchpad bundle this row was corrected from.
+
+**Per-round steady-state (`step` 3..7 only, all steps `plan_hits`>=1, `prepare_calls`=0):**
+
+| round | `step_wall_ms` mean | `gpu_exec_ms` mean | host mean (`wall - gpu_exec`) |
+| --- | --- | --- | --- |
+| r1 | 28.421 | 26.962 | 1.459 |
+| r2 | 28.383 | 26.858 | 1.525 |
+| r3 | 28.823 | 27.522 | 1.301 |
+| mean of 3 rounds | 28.542 | 27.114 | 1.428 |
+
+r3 is this row's headline (matches the value already pinned as source of record before r1/r2 were
+pulled in): **28.82 ms/token** wall, **27.52 ms/token** GPU, **1.30 ms/token** host.
+
+**Host breakdown, r3 steady state** (steps 3-7 mean of each `token_breakdown_metal` field,
+`default-r3.log:16,18,20,22,24`), summing to the 1.30 ms host total above:
+
+| phase | ms/token |
+| --- | --- |
+| `emit_ms` | 0.418 |
+| `op_setup_ms` | 0.158 |
+| `encode_dispatch_ms` | 0.209 |
+| `pipeline_lookup_ms` | 0.013 |
+| `readback_ms` | 0.005 |
+| `greedy_pick_ms` | 0.044 |
+| `build_position_inputs_ms` | 0.002 |
+| unexplained (host total minus the above) | 0.453 |
+
+**START arm (`4be2f3a`), same correction applied.** START predates the plan-cache mechanism
+entirely -- `plan_hits=0`/`plan_misses=8` and `prepare_calls=1` on every step, including 3-7 --
+so there is no plan-miss cliff to exclude; steps 1-7 are already flat. Steady-state (steps 3-7,
+computed identically for consistency) is 68.346 ms/token mean of 3 rounds (r1 68.973, r2 68.338,
+r3 67.726), gpu_exec 57.326 ms/token (r1 57.639, r2 57.169, r3 57.171), host 11.019 ms/token --
+within noise of ROW 286's steps-1..7 read (68.499), because START has nothing for the
+steps-1..7 window to contaminate.
+
+**Corrected ratios.** `llama-bench` mean across the same 3 rounds: 57.60/57.49/56.88 t/s ->
+57.32 t/s -> **17.445 ms/token** (CoV 0.55%, unchanged from ROW 286 -- this correction touches
+only the proxima-side denominator window). DEFAULT r3 vs llama-bench: **28.82 / 17.445 = 1.652x**.
+DEFAULT mean-of-3-rounds vs llama-bench: 28.542 / 17.445 = 1.636x. Both replace ROW 286's 1.8935x;
+the gap between 1.89x and 1.65x is entirely the two plan-miss tokens averaged into the old number,
+not a code change -- `main` at `af918bb` is unchanged between ROW 286 and this row.
+
+**Rule going forward.** Every scoreboard entry reports `step_wall_ms`/`gpu_exec_ms` means over
+steps 3..7 only, with `plan_hits` asserted nonzero (and rising) at each of those steps as the
+admissibility check that the window is actually steady. The steps-1..7 mean is retired as a
+scoreboard metric: it is a valid diagnostic for total per-decode-call cost (useful when comparing
+against something that also pays a first-call warmup) but it is not comparable to `llama-bench`
+`tg32`, which never includes an equivalent warmup token, and it must not be quoted as "ms/token"
+against that baseline again.
+
+**Honest read.** This is a measurement-window correction, not a performance change: no commit
+between ROW 286 and this row touched `main`. The corrected ratio (1.65x, or 1.64x on the 3-round
+mean) is closer to llama.cpp than ROW 286's 1.89x, entirely because the comparison is now
+apples-to-apples rather than because the decode step got faster. Whether 1.65x is an acceptable
+place to stop is the owner's call, unchanged from ROW 286's framing.
+
+**Re-prove:**
+```sh
+cd /Users/brianbruggeman/repos/slot-0/proxima
+CARGO_TARGET_DIR=<own target dir> CARGO_TERM_COLOR=never PROXIMA_MAX_TOKENS=8 cargo test --release -p proxima-model-interop --features metal,instrument --lib -- --exact --nocapture --ignored \
+  bind::real_openchat_file::runs_the_cached_decode_loop_on_the_metal_backend_and_reports_the_plan_cache
+/Users/brianbruggeman/repos/others/llama.cpp/build/bin/llama-bench -m /Users/brianbruggeman/.lmstudio/models/TheBloke/openchat-3.5-1210-GGUF/openchat-3.5-1210.Q4_K_S.gguf -n 32 -p 0 -r 5 -t 8 -ngl 99
+```
+Average `step_wall_ms` and `gpu_exec_ms` over `step` 3..7 only (discard 0 as cold, discard 1-2 as
+plan-miss), and confirm `plan_hits` is nonzero and increasing across those same five steps before
+trusting the mean.
+
+### Changelog
+| Date | Change | Δ vs prior | CoV / runs | Host loadout |
+| --- | --- | --- | --- | --- |
+| 2026-09-04 | doc-only: ROW 286 and `plan.md` §1.2/§1.3 corrected from steps-1..7 mean (33.032 ms/token, 1.8935x) to steps-3..7 steady state (28.82 ms/token r3 / 28.542 mean-of-3, 1.652x / 1.636x); no code change | ratio 1.8935x -> 1.652x (r3) / 1.636x (3-round mean); host residual now reported per-phase (1.30 ms r3) instead of folded into a contaminated wall number | same 3-round data as ROW 286's DEFAULT arm, re-windowed; wall CoV within round 0.20-0.50%, mean-of-3 CoV 0.70% | re-derivation from already-recorded logs; no new bake-off run, no quiet-gate check needed |
