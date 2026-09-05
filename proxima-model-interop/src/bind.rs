@@ -2767,6 +2767,32 @@ mod real_openchat_file {
             .unwrap_or(24)
     }
 
+    /// [`install_stdout_telemetry`]'s handle: the installed recorder plus a
+    /// running total of records this probe's own background pump (or the
+    /// caller's own final [`Self::drain_and_total`] call) has drained,
+    /// immune to the race a single terminal `drain()` call has against that
+    /// pump (see [`install_stdout_telemetry`]'s own doc).
+    #[cfg(feature = "instrument")]
+    struct TelemetryProbe {
+        recorder: std::sync::Arc<Recorder>,
+        drained_total: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    #[cfg(feature = "instrument")]
+    impl TelemetryProbe {
+        /// Final catch-up drain plus the running pump total, so a step
+        /// emitted between the pump's last pass and this call is still
+        /// counted -- the ring is multi-consumer (`Recorder::drain`'s own
+        /// doc), so this and the pump thread never double-drain the same
+        /// record, only ever add disjoint counts.
+        fn drain_and_total(&self) -> usize {
+            let final_pass = self.recorder.drain();
+            self.drained_total
+                .fetch_add(final_pass, std::sync::atomic::Ordering::Relaxed)
+                + final_pass
+        }
+    }
+
     /// `generate.rs`'s `instrument`-gated `token_breakdown*`/`op_profile*`
     /// events are `info!`/`debug!` calls, not `println!` -- with no recorder
     /// installed they are no-ops (`crate::emit::global` default filter floor
@@ -2776,24 +2802,49 @@ mod real_openchat_file {
     /// `--nocapture` run of an `instrument`-gated test still shows every line
     /// this campaign's own harness reads by eye.
     ///
-    /// Deliberately does NOT use `proxima_telemetry::export::install_console_recorder`:
-    /// that spawns a background pump thread that drains the ring on its own
-    /// event-driven schedule, racing this test's own final `drain()` call --
-    /// the pump can empty the ring first, so `drain()`'s return (the count
-    /// each test asserts nonzero on) reports zero even though every event
-    /// already reached stdout. Building the recorder directly with no pump
-    /// makes the test's one explicit `drain()` the only drain pass, so it
-    /// always sees, counts, and prints everything the decode loop emitted.
+    /// Spawns its OWN background pump (5ms interval) rather than either of
+    /// the two broken shapes tried before it: no pump at all lets a real
+    /// decode step's several-hundred `debug!` per-op events (the pipeline
+    /// cache lookup lines `omega::metal`'s own kernel-key change added)
+    /// overflow the 4096-slot default log ring before the test's one final
+    /// `drain()` runs, silently dropping the very `token_breakdown` events
+    /// the test greps for (measured: 888 dropped, 512 flushed, over an
+    /// 8-step run) -- `Recorder::dropped()` is the direct witness. And
+    /// `install_console_recorder`'s OWN pump prevents that overflow but
+    /// races this test's own terminal `drain()` for the count it asserts
+    /// nonzero on: the pump can drain the last of the ring first, making
+    /// the test's own call return 0 even though everything printed. Pumping
+    /// here too (so nothing overflows) while accumulating into
+    /// [`TelemetryProbe::drained_total`] (so the count survives regardless
+    /// of which side drains any given batch) is the only shape that gets
+    /// both properties at once.
     #[cfg(feature = "instrument")]
-    fn install_stdout_telemetry() -> std::sync::Arc<Recorder> {
+    fn install_stdout_telemetry() -> TelemetryProbe {
         proxima_telemetry::emit::global::install(proxima_telemetry::emit::EnvFilter::parse(
             "debug",
         ));
-        Recorder::builder()
+        let recorder = Recorder::builder()
             .export(Exporter::std())
             .expect("console exporter installs for an instrument-gated test")
             .install()
-            .expect("stdout telemetry recorder installs for an instrument-gated test")
+            .expect("stdout telemetry recorder installs for an instrument-gated test");
+        let drained_total = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let pump_recorder = std::sync::Arc::clone(&recorder);
+        let pump_total = std::sync::Arc::clone(&drained_total);
+        std::thread::Builder::new()
+            .name("test-telemetry-console-drain".to_string())
+            .spawn(move || {
+                loop {
+                    let drained = pump_recorder.drain();
+                    pump_total.fetch_add(drained, std::sync::atomic::Ordering::Relaxed);
+                    std::thread::sleep(std::time::Duration::from_millis(5));
+                }
+            })
+            .expect("spawn the test-only telemetry drain thread");
+        TelemetryProbe {
+            recorder,
+            drained_total,
+        }
     }
 
     /// OpenChat-3.5's own chat template (`tokenizer.chat_template` in this
@@ -3117,7 +3168,7 @@ mod real_openchat_file {
 
         #[cfg(feature = "instrument")]
         {
-            let flushed = telemetry_recorder.drain();
+            let flushed = telemetry_recorder.drain_and_total();
             assert!(
                 flushed > 0,
                 "the decode loop emitted no token_breakdown/op_profile telemetry"
@@ -3244,7 +3295,7 @@ mod real_openchat_file {
             std::env::remove_var("PROXIMA_METAL_OP_PROFILE_STEP");
         }
 
-        let flushed = telemetry_recorder.drain();
+        let flushed = telemetry_recorder.drain_and_total();
         assert!(
             flushed > 0,
             "the op-profile step emitted no op_profile telemetry"
@@ -3327,7 +3378,7 @@ mod real_openchat_file {
             std::env::remove_var("PROXIMA_METAL_OP_PROFILE_STEP");
         }
 
-        let flushed = telemetry_recorder.drain();
+        let flushed = telemetry_recorder.drain_and_total();
         assert!(
             flushed > 0,
             "the op-profile step emitted no op_profile telemetry"
