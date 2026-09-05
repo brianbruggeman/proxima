@@ -332,6 +332,68 @@ fn time_streaming_reduce(
     started.elapsed()
 }
 
+/// Reads back the per-threadgroup partial sums a `streaming_reduce`
+/// dispatch wrote -- test-local twin of `omega::metal::read_back_float`
+/// (private to that module), same `contents()` -> cast -> `from_raw_parts`
+/// shape, scoped to exactly the `threadgroups` count that dispatch used.
+fn read_back_partial_sums(buffer: &ProtocolObject<dyn MTLBuffer>, threadgroups: usize) -> f32 {
+    let pointer = buffer.contents();
+    // SAFETY: `buffer` is `StorageModeShared` and was allocated by this
+    // file's own callers with at least `threadgroups * size_of::<f32>()`
+    // bytes; the compute dispatch that filled it has already completed
+    // (`waitUntilCompleted` returned before this is called).
+    let slice = unsafe { core::slice::from_raw_parts(pointer.as_ptr().cast::<f32>(), threadgroups) };
+    slice.iter().sum()
+}
+
+/// Same single `commit()` -> `waitUntilCompleted()` dispatch as
+/// [`time_streaming_reduce`], but also returns the wall-clock instants
+/// bracketing it and the per-threadgroup partial sums read back and summed
+/// into one `f32` -- used by the concurrent CPU+GPU arms (C2/C3) to bound
+/// "earlier start .. later finish" across both engines and to check the GPU
+/// side never silently drops or duplicates a byte range under concurrency.
+#[allow(clippy::too_many_arguments)]
+fn time_and_sum_streaming_reduce(
+    queue: &ProtocolObject<dyn MTLCommandQueue>,
+    pipeline: &ProtocolObject<dyn MTLComputePipelineState>,
+    data: &ProtocolObject<dyn MTLBuffer>,
+    partial_sums: &ProtocolObject<dyn MTLBuffer>,
+    uniforms: &ProtocolObject<dyn MTLBuffer>,
+    total_threads: usize,
+    threadgroups: usize,
+) -> (std::time::Instant, std::time::Instant, f32) {
+    let command_buffer = queue.commandBuffer().expect("command buffer");
+    let encoder = command_buffer
+        .computeCommandEncoder()
+        .expect("command buffer refused to hand out a compute encoder");
+    encoder.setComputePipelineState(pipeline);
+    unsafe {
+        encoder.setBuffer_offset_atIndex(Some(data), 0, 0);
+        encoder.setBuffer_offset_atIndex(Some(partial_sums), 0, 1);
+        encoder.setBuffer_offset_atIndex(Some(uniforms), 0, 2);
+        encoder.setBuffer_offset_atIndex(Some(uniforms), 8, 3);
+    }
+    let threadgroup_width = total_threads.clamp(1, 256);
+    let grid = MTLSize {
+        width: total_threads,
+        height: 1,
+        depth: 1,
+    };
+    let threadgroup = MTLSize {
+        width: threadgroup_width,
+        height: 1,
+        depth: 1,
+    };
+    encoder.dispatchThreads_threadsPerThreadgroup(grid, threadgroup);
+    encoder.endEncoding();
+    let started = std::time::Instant::now();
+    command_buffer.commit();
+    command_buffer.waitUntilCompleted();
+    let finished = std::time::Instant::now();
+    let sum = read_back_partial_sums(partial_sums, threadgroups);
+    (started, finished, sum)
+}
+
 fn time_empty_dispatch(
     queue: &ProtocolObject<dyn MTLCommandQueue>,
     pipeline: &ProtocolObject<dyn MTLComputePipelineState>,
@@ -473,6 +535,189 @@ fn sweep_one_size(
     results
 }
 
+/// Plain, single-threaded sum over `bytes` as `u64` words, wrapping on
+/// overflow -- the "single-engine" ground truth [`sum_u64_words_threaded`]'s
+/// parallel-split sum, and a solo GPU dispatch's own sum, are each checked
+/// against, so a range-splitting or scheduling bug (a skipped or
+/// double-counted byte range) shows up as a mismatch rather than silently
+/// producing a wrong bandwidth number.
+fn sum_u64_words_sequential(bytes: &[u8]) -> u64 {
+    assert_eq!(bytes.len() % 8, 0, "range must be a whole number of u64 words");
+    bytes
+        .as_chunks::<8>()
+        .0
+        .iter()
+        .fold(0u64, |accumulator, chunk| accumulator.wrapping_add(u64::from_ne_bytes(*chunk)))
+}
+
+/// Splits `[0, total_len)` into `thread_count` disjoint, contiguous,
+/// 8-byte-aligned ranges covering every byte exactly once -- the partition
+/// [`sum_u64_words_threaded`]'s `std::thread::scope` workers sum over.
+fn cpu_thread_ranges(total_len: usize, thread_count: usize) -> Vec<(usize, usize)> {
+    let words = total_len / 8;
+    let base_words = words / thread_count;
+    let remainder = words % thread_count;
+    let mut ranges = Vec::with_capacity(thread_count);
+    let mut start_word = 0usize;
+    for index in 0..thread_count {
+        let word_count = base_words + usize::from(index < remainder);
+        let start = start_word * 8;
+        let end = (start_word + word_count) * 8;
+        ranges.push((start, end));
+        start_word += word_count;
+    }
+    ranges
+}
+
+/// The CPU-side read arm (C1): a plain sum over `u64` words, split across
+/// `thread_count` OS threads each summing a disjoint range via
+/// `std::thread::scope`, mirroring how `proxima-tensor`'s CPU matmul path
+/// picks its worker count (`matmul_worker_count`, `proxima-tensor/src/
+/// cpu.rs:12933`) -- `PROXIMA_MATMUL_WORKERS`-style, but swept directly here
+/// (1/4/8) rather than read from the env var, since this harness measures
+/// the bandwidth ceiling at each count rather than production's chosen
+/// default.
+fn sum_u64_words_threaded(bytes: &[u8], thread_count: usize) -> u64 {
+    let ranges = cpu_thread_ranges(bytes.len(), thread_count);
+    std::thread::scope(|scope| {
+        ranges
+            .into_iter()
+            .map(|(start, end)| scope.spawn(move || sum_u64_words_sequential(&bytes[start..end])))
+            .collect::<Vec<_>>()
+            .into_iter()
+            .fold(0u64, |accumulator, handle| {
+                accumulator.wrapping_add(handle.join().expect("cpu sum worker thread does not panic"))
+            })
+    })
+}
+
+const CPU_THREAD_COUNTS: [usize; 3] = [1, 4, 8];
+
+/// C1's table: for each thread count, `REPEATS` timed runs of
+/// [`sum_u64_words_threaded`] over the full 4 GB no-copy mapping, each
+/// checked against the single-threaded reference sum over the same bytes so
+/// a range-splitting bug cannot silently under- or double-count.
+fn cpu_only_sweep(bytes: &[u8]) -> Vec<(usize, f64, f64)> {
+    let reference_sum = sum_u64_words_sequential(bytes);
+    let mut results = Vec::with_capacity(CPU_THREAD_COUNTS.len());
+    for thread_count in CPU_THREAD_COUNTS {
+        let mut samples = Vec::with_capacity(REPEATS);
+        for _repeat in 0..REPEATS {
+            let started = std::time::Instant::now();
+            let sum = sum_u64_words_threaded(bytes, thread_count);
+            let elapsed = started.elapsed();
+            assert_eq!(
+                sum, reference_sum,
+                "thread_count={thread_count} skipped or double-counted bytes"
+            );
+            samples.push(bytes.len() as f64 / elapsed.as_secs_f64() / 1e9);
+        }
+        let (mean, cov) = mean_and_cov(&samples);
+        println!(
+            "cpu_only thread_count={thread_count:<2} mean_gbps={mean:.2} cov_pct={cov:.2} samples={samples:?}"
+        );
+        results.push((thread_count, mean, cov));
+    }
+    results
+}
+
+/// Fixed CPU worker count for the concurrent arms (C2/C3): the top of C1's
+/// swept range, so the concurrent table isn't itself a second full 1/4/8
+/// sweep (that would triple C2/C3's runtime for a question -- does adding
+/// the CPU side add bandwidth -- that C1 already answers per-thread-count on
+/// its own).
+const CONCURRENT_CPU_THREADS: usize = 8;
+
+/// `(split name, gpu boundary in bytes)` -- GPU reads `no_copy_buffer[0,
+/// boundary)`, CPU reads `file_bytes[boundary, total)`. Boundaries are exact
+/// multiples of 16 so both the GPU kernel's whole-`uint4`-lane requirement
+/// and the CPU sum's whole-`u64`-word requirement hold on both sides of the
+/// split with no remainder.
+const CONCURRENT_SPLITS: [(&str, u64); 3] = [
+    ("50gpu_50cpu", 2_000_000_000),
+    ("60gpu_40cpu", 2_400_000_000),
+    ("70gpu_30cpu", 2_800_000_000),
+];
+
+/// One split of C2/C3: the GPU streaming-reduce kernel (WIDE grid, the
+/// shape this file's own ceiling row uses) over `no_copy_buffer[..
+/// gpu_boundary]`, running concurrently -- via `std::thread::scope`, with
+/// the GPU dispatch issued directly on the scope's own thread and only the
+/// CPU side spawned, since none of the Metal objects here need to cross a
+/// thread boundary -- with `CONCURRENT_CPU_THREADS` CPU threads summing
+/// `file_bytes[gpu_boundary..total_bytes]`. Aggregate GB/s is total bytes
+/// (both ranges) divided by the span from the earlier of the two engines'
+/// starts (approximated by `overall_start`, captured immediately before
+/// both are launched) to the later of their two finishes. Parity is not at
+/// stake -- both are read-only sums over disjoint byte ranges -- but each
+/// engine's concurrent-run sum is checked against its own solo
+/// (non-concurrent) sum over the identical range, so a scheduling bug that
+/// let one engine's range creep into the other's would show up as a
+/// mismatch rather than a silently wrong number.
+#[allow(clippy::too_many_arguments)]
+fn concurrent_sweep_one_split(
+    queue: &ProtocolObject<dyn MTLCommandQueue>,
+    pipeline: &ProtocolObject<dyn MTLComputePipelineState>,
+    no_copy_buffer: &ProtocolObject<dyn MTLBuffer>,
+    uniforms: &ProtocolObject<dyn MTLBuffer>,
+    partial_sums: &ProtocolObject<dyn MTLBuffer>,
+    file_bytes: &[u8],
+    total_bytes: u64,
+    gpu_boundary: u64,
+    gpu_total_threads: usize,
+    gpu_threadgroups: usize,
+) -> (f64, f64) {
+    let cpu_range = &file_bytes[usize::try_from(gpu_boundary).expect("fits usize")
+        ..usize::try_from(total_bytes).expect("fits usize")];
+
+    // solo (non-concurrent) baselines, untimed -- what each engine alone
+    // produces over its own range, checked against every concurrent repeat.
+    let cpu_solo_sum = sum_u64_words_sequential(cpu_range);
+    let (_, _, gpu_solo_sum) = time_and_sum_streaming_reduce(
+        queue,
+        pipeline,
+        no_copy_buffer,
+        partial_sums,
+        uniforms,
+        gpu_total_threads,
+        gpu_threadgroups,
+    );
+
+    let mut samples = Vec::with_capacity(REPEATS);
+    for _repeat in 0..REPEATS {
+        let overall_start = std::time::Instant::now();
+        let (cpu_sum, cpu_finished, gpu_finished) = std::thread::scope(|scope| {
+            let cpu_handle = scope.spawn(|| {
+                let sum = sum_u64_words_threaded(cpu_range, CONCURRENT_CPU_THREADS);
+                (sum, std::time::Instant::now())
+            });
+            let (_, gpu_finished, gpu_sum) = time_and_sum_streaming_reduce(
+                queue,
+                pipeline,
+                no_copy_buffer,
+                partial_sums,
+                uniforms,
+                gpu_total_threads,
+                gpu_threadgroups,
+            );
+            assert_eq!(
+                gpu_sum, gpu_solo_sum,
+                "gpu sum drifted between solo and concurrent runs over the same range"
+            );
+            let (cpu_sum, cpu_finished) =
+                cpu_handle.join().expect("cpu sum worker thread does not panic");
+            (cpu_sum, cpu_finished, gpu_finished)
+        });
+        assert_eq!(
+            cpu_sum, cpu_solo_sum,
+            "cpu sum drifted between solo and concurrent runs over the same range"
+        );
+        let elapsed = cpu_finished.max(gpu_finished) - overall_start;
+        samples.push(total_bytes as f64 / elapsed.as_secs_f64() / 1e9);
+    }
+    mean_and_cov(&samples)
+}
+
 #[test]
 #[ignore = "depends on a host-local openchat gguf checkout outside this repo"]
 fn device_streaming_ceiling_across_three_sources_and_two_sizes() {
@@ -575,4 +820,38 @@ fn device_streaming_ceiling_across_three_sources_and_two_sizes() {
     println!(
         "device streaming ceiling (best across all sources/sizes/grids): {best_ceiling_gbps:.2} GB/s -> floor_ms for 4.169 GB/token = {floor_ms:.3}"
     );
+
+    println!("=== C1: cpu-only read bandwidth (thread count sweep, 4 GB no-copy mapping) ===");
+    let cpu_read_range = &file_bytes[..usize::try_from(FOUR_GB_BYTES).expect("fits usize")];
+    let cpu_only_results = cpu_only_sweep(cpu_read_range);
+    for (thread_count, mean, cov) in &cpu_only_results {
+        println!("cpu_only thread_count={thread_count:<2} BEST mean_gbps={mean:.2} cov_pct={cov:.2}");
+    }
+
+    println!("=== C2/C3: concurrent gpu+cpu read bandwidth (split sweep, 4 GB total) ===");
+    for (split_name, gpu_boundary) in CONCURRENT_SPLITS {
+        let gpu_vec_count = gpu_boundary / 16;
+        let gpu_total_threads = wide_grid(gpu_vec_count);
+        let gpu_threadgroups = gpu_total_threads.div_ceil(THREADGROUP).max(1);
+        let split_uniforms = uniform_u64_pair(&device, gpu_vec_count, gpu_total_threads as u64);
+        let split_partial_sums = device
+            .newBufferWithLength_options(
+                gpu_threadgroups * size_of::<f32>(),
+                MTLResourceOptions::StorageModeShared,
+            )
+            .expect("device allocates the per-threadgroup output buffer for a concurrent split");
+        let (mean, cov) = concurrent_sweep_one_split(
+            &queue,
+            &reduce_pipeline,
+            &no_copy_buffer,
+            &split_uniforms,
+            &split_partial_sums,
+            file_bytes,
+            FOUR_GB_BYTES,
+            gpu_boundary,
+            gpu_total_threads,
+            gpu_threadgroups,
+        );
+        println!("concurrent split={split_name:<12} aggregate_mean_gbps={mean:.2} cov_pct={cov:.2}");
+    }
 }
