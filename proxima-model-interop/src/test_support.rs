@@ -17,3 +17,15 @@ pub(crate) fn math_mode_from_env() -> omega::MathMode {
         Ok(other) => panic!("PROXIMA_MATH_MODE={other}: expected `safe` or `relaxed`"),
     }
 }
+
+/// `PROXIMA_OPENCHAT_GGUF` read the same way `omega/tests/device_streaming_ceiling.rs`
+/// already reads it: unset keeps every caller pointed at
+/// [`crate::serving::ServingConfig::default`]'s own `model_path`
+/// (`serving.rs`'s `DEFAULT_MODEL_PATH`) exactly as before this knob
+/// existed, set swaps in a different host-local gguf checkout (a
+/// different quantization variant, most often) without touching
+/// `ServingConfig` or any non-test source.
+pub(crate) fn openchat_gguf_path() -> String {
+    std::env::var("PROXIMA_OPENCHAT_GGUF")
+        .unwrap_or_else(|_| crate::serving::ServingConfig::default().model_path.to_string())
+}

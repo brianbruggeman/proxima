@@ -642,7 +642,7 @@ mod real_openchat_file {
     use alloc::vec::Vec;
 
     use crate::generate::LoadedModel;
-    use crate::serving::{GPU_LAYERS_ALL, ServingConfig};
+    use crate::serving::GPU_LAYERS_ALL;
 
     use super::{Prompt, parse_prompts_jsonl, quality_report};
     #[cfg(feature = "instrument")]
@@ -769,12 +769,10 @@ mod real_openchat_file {
     #[test]
     #[ignore = "depends on a host-local openchat gguf checkout outside this repo, and a real Metal device"]
     fn default_vs_default_is_the_degenerate_control() {
-        let path = std::path::Path::new(ServingConfig::default().model_path);
+        let model_path = crate::test_support::openchat_gguf_path();
+        let path = std::path::Path::new(&model_path);
         if !path.exists() {
-            eprintln!(
-                "skipping: no host-local openchat gguf fixture at {}",
-                ServingConfig::default().model_path
-            );
+            eprintln!("skipping: no host-local openchat gguf fixture at {model_path}");
             return;
         }
 
@@ -826,12 +824,10 @@ mod real_openchat_file {
     #[test]
     #[ignore = "depends on a host-local openchat gguf checkout outside this repo, and a real Metal device"]
     fn metal_vs_cpu_reports_real_drift() {
-        let path = std::path::Path::new(ServingConfig::default().model_path);
+        let model_path = crate::test_support::openchat_gguf_path();
+        let path = std::path::Path::new(&model_path);
         if !path.exists() {
-            eprintln!(
-                "skipping: no host-local openchat gguf fixture at {}",
-                ServingConfig::default().model_path
-            );
+            eprintln!("skipping: no host-local openchat gguf fixture at {model_path}");
             return;
         }
 
@@ -885,14 +881,12 @@ mod real_openchat_file {
     #[test]
     #[ignore = "depends on two host-local openchat gguf checkouts outside this repo, and a real Metal device"]
     fn q3_k_m_variant_against_q4_k_s_reference_reports_real_drift() {
-        let reference_path = std::path::Path::new(ServingConfig::default().model_path);
+        let reference_path_string = crate::test_support::openchat_gguf_path();
+        let reference_path = std::path::Path::new(&reference_path_string);
         let variant_path_string = variant_model_path();
         let variant_path = std::path::Path::new(&variant_path_string);
         if !reference_path.exists() {
-            eprintln!(
-                "skipping: no host-local openchat Q4_K_S fixture at {}",
-                ServingConfig::default().model_path
-            );
+            eprintln!("skipping: no host-local openchat Q4_K_S fixture at {reference_path_string}");
             return;
         }
         if !variant_path.exists() {
