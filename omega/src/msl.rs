@@ -1101,6 +1101,9 @@ pub(crate) fn kernel_cache_key(
         {
             if tiled_gemm_block(resolved, &quantized, *reduce_op, *init, output_axes).is_some() {
                 'G'
+            } else if packed_row_multi_activation_block(resolved, &quantized, output_axes).is_some()
+            {
+                'M'
             } else if packed_row_block(resolved, &quantized).is_some() {
                 'B'
             } else {
@@ -1911,6 +1914,147 @@ pub fn diagnose_packed_row_block(
     classify_packed_row_block(resolved, quantized).map(drop)
 }
 
+/// `metal-packed-row-multi-activation`'s own narrowing on top of
+/// [`packed_row_block`]'s eligibility: the same axis-ownership split
+/// [`classify_tiled_gemm`] uses (feature axes the weight owns exclusively,
+/// token axes the activation owns exclusively), generalized off that
+/// function's Q4_K-only / plain-Add-from-Zero / `TILED_GEMM_MIN_TOKENS`
+/// gates so every codec [`packed_row_block`] admits (Q4_K/Q5_K/Q6_K) and
+/// every reduce shape it admits can fold `s` activation rows per streamed
+/// weight row, not only the `simdgroup_matrix`-eligible plain matmul.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum PackedRowMultiActivationRejection {
+    /// `classify_packed_row_block` itself rejected first.
+    NotPackedRowBlock(PackedRowBlockRejection),
+    /// The `metal-packed-row-multi-activation` feature is not compiled in.
+    FeatureDisabled,
+    /// An output axis is owned by neither operand, both operands, or the
+    /// token/feature groups interleave rather than reassembling
+    /// `output_axes` as token-group-then-feature-group.
+    AxisOwnershipAmbiguous,
+    /// A group with more than one axis does not nest contiguously.
+    AxisGroupNotContiguous,
+    /// The token group's flattened extent is `<= 1` -- there is only one
+    /// activation row, so there is nothing for this path to fold; the
+    /// plain row-blocked path already handles it.
+    SingleActivationRow,
+}
+
+struct PackedRowMultiActivationBlock {
+    // only `push_packed_row_multi_activation_body` reads these -- gated the
+    // same as that function (same split `TiledGemmBlock`'s own doc draws for
+    // its identical `weight`/`other`/`reduce_dim` trio), so the non-feature
+    // build does not carry never-read fields.
+    #[cfg(feature = "metal-packed-row-multi-activation")]
+    weight: usize,
+    #[cfg(feature = "metal-packed-row-multi-activation")]
+    other: usize,
+    #[cfg(feature = "metal-packed-row-multi-activation")]
+    reduce_dim: usize,
+    /// output axes the activation owns exclusively, outermost first --
+    /// `grid_threads` reads this unconditionally (its branch is only ever
+    /// reached when `packed_row_multi_activation_block` returns `Some`,
+    /// which itself requires the feature).
+    token_axes: Vec<u16>,
+    /// output axes the weight owns exclusively, outermost first.
+    feature_axes: Vec<u16>,
+}
+
+fn classify_packed_row_multi_activation(
+    resolved: &BoundOp,
+    quantized: &[Option<PackedCodec>],
+    output_axes: &[u16],
+) -> Result<PackedRowMultiActivationBlock, PackedRowMultiActivationRejection> {
+    #[cfg(not(feature = "metal-packed-row-multi-activation"))]
+    {
+        let _ = (resolved, quantized, output_axes);
+        Err(PackedRowMultiActivationRejection::FeatureDisabled)
+    }
+    #[cfg(feature = "metal-packed-row-multi-activation")]
+    {
+        let PackedRowBlock {
+            weight,
+            other,
+            reduce_dim,
+            codec: _,
+        } = classify_packed_row_block(resolved, quantized)
+            .map_err(PackedRowMultiActivationRejection::NotPackedRowBlock)?;
+        let weight_layout = &resolved.operands()[weight].1;
+        let other_layout = &resolved.operands()[other].1;
+        let mut token_axes: Vec<u16> = Vec::new();
+        let mut feature_axes: Vec<u16> = Vec::new();
+        for &axis in output_axes {
+            match (
+                weight_layout.stride(axis) == 0,
+                other_layout.stride(axis) == 0,
+            ) {
+                (true, false) => token_axes.push(axis),
+                (false, true) => feature_axes.push(axis),
+                _ => return Err(PackedRowMultiActivationRejection::AxisOwnershipAmbiguous),
+            }
+        }
+        if feature_axes.is_empty() {
+            return Err(PackedRowMultiActivationRejection::AxisOwnershipAmbiguous);
+        }
+        let reassembled: Vec<u16> = token_axes
+            .iter()
+            .chain(feature_axes.iter())
+            .copied()
+            .collect();
+        if reassembled != output_axes {
+            return Err(PackedRowMultiActivationRejection::AxisOwnershipAmbiguous);
+        }
+        let out_layout = match &resolved.kind {
+            BoundOpKind::Reduce { out_layout, .. } => out_layout,
+            _ => unreachable!("classify_packed_row_block above only matches Keep::Reduce"),
+        };
+        let groups_contiguous = axes_fold_contiguously(&token_axes, &resolved.extents, other_layout)
+            && axes_fold_contiguously(&feature_axes, &resolved.extents, weight_layout)
+            && axes_fold_contiguously(&token_axes, &resolved.extents, out_layout)
+            && axes_fold_contiguously(&feature_axes, &resolved.extents, out_layout);
+        if !groups_contiguous {
+            return Err(PackedRowMultiActivationRejection::AxisGroupNotContiguous);
+        }
+        let token_total: u64 = token_axes
+            .iter()
+            .map(|&axis| resolved.extents[axis as usize])
+            .product();
+        if token_total <= 1 {
+            return Err(PackedRowMultiActivationRejection::SingleActivationRow);
+        }
+        Ok(PackedRowMultiActivationBlock {
+            weight,
+            other,
+            reduce_dim,
+            token_axes,
+            feature_axes,
+        })
+    }
+}
+
+fn packed_row_multi_activation_block(
+    resolved: &BoundOp,
+    quantized: &[Option<PackedCodec>],
+    output_axes: &[u16],
+) -> Option<PackedRowMultiActivationBlock> {
+    classify_packed_row_multi_activation(resolved, quantized, output_axes).ok()
+}
+
+/// Public diagnostic seam, same shape as [`diagnose_packed_row_block`].
+///
+/// # Errors
+/// Returns the specific [`PackedRowMultiActivationRejection`] gate that
+/// rejected this op.
+#[cfg(feature = "instrument")]
+pub fn diagnose_packed_row_multi_activation(
+    resolved: &BoundOp,
+    quantized: &[Option<PackedCodec>],
+    output_axes: &[u16],
+) -> Result<(), PackedRowMultiActivationRejection> {
+    classify_packed_row_multi_activation(resolved, quantized, output_axes).map(drop)
+}
+
 /// Thread count [`grid_threads`]' tiled-GEMM arm dispatches -- one
 /// `TILED_GEMM_NSG * SIMD_WIDTH`-thread threadgroup per
 /// `crate::sized::TILED_GEMM_BLOCK_M x TILED_GEMM_BLOCK_N` output tile,
@@ -1931,6 +2075,29 @@ fn tiled_gemm_threadgroups(feature_extent: u64, token_extent: u64) -> u64 {
         let row_tiles = feature_extent.div_ceil(crate::sized::TILED_GEMM_BLOCK_M);
         let col_tiles = token_extent.div_ceil(crate::sized::TILED_GEMM_BLOCK_N);
         row_tiles * col_tiles * (TILED_GEMM_NSG as u64) * SIMD_WIDTH
+    }
+}
+
+/// Thread count [`grid_threads`]' multi-activation arm dispatches -- one
+/// `SIMD_WIDTH`-wide simdgroup per (`PACKED_ROWS_PER_GROUP` feature rows) x
+/// (`crate::sized::PACKED_ROW_ACTIVATION_GROUP` token rows) tile. Same split
+/// as [`tiled_gemm_threadgroups`]: only ever called from behind
+/// `packed_row_multi_activation_block(..).is_some()`, itself only `Some`
+/// behind `feature = "metal-packed-row-multi-activation"`, so the
+/// `#[cfg(not(..))]` arm is as unreachable as that function's own stub.
+fn packed_row_multi_activation_dispatch(feature_total: u64, token_total: u64) -> u64 {
+    #[cfg(not(feature = "metal-packed-row-multi-activation"))]
+    {
+        let _ = (feature_total, token_total);
+        unreachable!(
+            "only called when packed_row_multi_activation_block returned Some, which requires the feature"
+        )
+    }
+    #[cfg(feature = "metal-packed-row-multi-activation")]
+    {
+        let feature_base = feature_total.div_ceil(PACKED_ROWS_PER_GROUP as u64);
+        let token_groups = token_total.div_ceil(crate::sized::PACKED_ROW_ACTIVATION_GROUP);
+        feature_base * token_groups * SIMD_WIDTH
     }
 }
 
@@ -2034,6 +2201,35 @@ fn grid_threads(resolved: &BoundOp, quantized: &[Option<PackedCodec>]) -> u64 {
                         .map(|&axis| resolved.extents[axis as usize])
                         .product(),
                 )
+            } else if let Some(block) =
+                packed_row_multi_activation_block(resolved, quantized, output_axes)
+            {
+                // one simdgroup per (PACKED_ROWS_PER_GROUP feature rows) x
+                // (PACKED_ROW_ACTIVATION_GROUP token rows) tile -- the s-fold
+                // this feature exists to land: a streamed weight block is
+                // decoded once per feature-row group and folded against every
+                // token in its group, so token_total above the cap is TILED
+                // here rather than re-streaming the weight per extra token
+                // group. The field reads stay OUTSIDE the feature cfg (unlike
+                // `crate::sized::PACKED_ROW_ACTIVATION_GROUP`, which does not
+                // exist off-feature and is the one thing
+                // `packed_row_multi_activation_dispatch` gates internally,
+                // mirroring `tiled_gemm_threadgroups`'s own split) -- this
+                // branch can only be reached when `block` is `Some`, which
+                // itself requires the feature, so the reads are live either
+                // way and dead_code never fires on `PackedRowMultiActivationBlock`'s
+                // fields.
+                let feature_total: u64 = block
+                    .feature_axes
+                    .iter()
+                    .map(|&axis| resolved.extents[axis as usize])
+                    .product();
+                let token_total: u64 = block
+                    .token_axes
+                    .iter()
+                    .map(|&axis| resolved.extents[axis as usize])
+                    .product();
+                packed_row_multi_activation_dispatch(feature_total, token_total)
             } else if packed_row_block(resolved, quantized).is_some() {
                 // one SIMD group per PACKED_ROWS_PER_GROUP outputs, times the
                 // split-K factor (1 = no-op unless `metal-q4k-split-k` is
@@ -3338,6 +3534,195 @@ fn push_packed_row_combine_and_write(
         ));
     }
     source.push_str("                out[out_offset] = total;\n");
+    source.push_str("            }\n");
+    source.push_str("        }\n");
+    source.push_str("    }\n");
+}
+
+/// `metal-packed-row-multi-activation`'s kernel body: `s <=
+/// crate::sized::PACKED_ROW_ACTIVATION_GROUP` activation ("token") rows
+/// folded against ONE streamed weight row per accumulator group --
+/// [`grid_threads`]'s own tiling of `token_total` above the cap handles the
+/// rest by dispatching more groups, never by truncating `s`. Reuses the
+/// fully generic [`operand_read`]/[`push_body_steps`] machinery the plain
+/// cooperative/serial reduce paths already use, rather than
+/// [`push_packed_row_blocked_body`]'s hand-tuned per-codec lane-spread --
+/// this landing's gate is the s-fold itself (a weight element read from
+/// device memory ONCE per `(feature row, reduce-dim element)`, copied into
+/// `scratch[weight]` and reused `s` times, never re-read), so every codec
+/// and reduce body `packed_row_block` admits is covered by construction.
+/// The amortized per-codec header/nibble decode `push_packed_row_blocked_body`
+/// hand-tunes (`q4k_run8`, paired-lane loads) is a follow-up, not folded in
+/// here yet -- this body pays one `operand_read` per weight element, same as
+/// the generic serial path, just reused across `s` instead of the reduce
+/// dim alone.
+#[cfg(not(feature = "metal-packed-row-multi-activation"))]
+#[allow(clippy::too_many_arguments)]
+fn push_packed_row_multi_activation_body(
+    _source: &mut String,
+    _resolved: &BoundOp,
+    _reduce_op: ScalarOp,
+    _init: ReduceInit,
+    _rank: usize,
+    _quantized: &[Option<PackedCodec>],
+    _element_type: &str,
+    _block: &PackedRowMultiActivationBlock,
+) {
+    unreachable!(
+        "push_packed_row_multi_activation_body is only called behind \
+         packed_row_multi_activation_block, which requires the feature"
+    )
+}
+
+#[cfg(feature = "metal-packed-row-multi-activation")]
+#[allow(clippy::too_many_arguments, clippy::similar_names)]
+fn push_packed_row_multi_activation_body(
+    source: &mut String,
+    resolved: &BoundOp,
+    reduce_op: ScalarOp,
+    init: ReduceInit,
+    rank: usize,
+    quantized: &[Option<PackedCodec>],
+    element_type: &str,
+    block: &PackedRowMultiActivationBlock,
+) {
+    let weight = block.weight;
+    let other = block.other;
+    let reduce_dim = block.reduce_dim;
+    let token_axes = &block.token_axes;
+    let feature_axes = &block.feature_axes;
+    let rank_len = rank.max(1);
+    let operand_count = resolved.operands().len();
+    let rows = PACKED_ROWS_PER_GROUP;
+    let cap = crate::sized::PACKED_ROW_ACTIVATION_GROUP as usize;
+    let (init_expr, _) = fold_init_tokens(init);
+    let identity = cooperative_identity_token(reduce_op);
+    let combine_fn = simd_combine_fn(reduce_op);
+
+    source.push_str("    long feature_total = 1;\n");
+    for index in 0..feature_axes.len() {
+        source.push_str(&format!(
+            "    feature_total *= u.output_extents[{}];\n",
+            token_axes.len() + index
+        ));
+    }
+    source.push_str("    long token_total = 1;\n");
+    for index in 0..token_axes.len() {
+        source.push_str(&format!("    token_total *= u.output_extents[{index}];\n"));
+    }
+    source.push_str(&format!(
+        "    long feature_base = (feature_total + {rows} - 1) / {rows};\n"
+    ));
+    source.push_str("    long token_group = output_index / feature_base;\n");
+    source.push_str("    long feature_group = output_index % feature_base;\n");
+    source.push_str(&format!(
+        "    long feature_first = feature_group * {rows};\n"
+    ));
+    source.push_str(&format!("    long token_first = token_group * {cap};\n"));
+
+    source.push_str(&format!("    {element_type} sumf[{cap}][{rows}];\n"));
+    source.push_str(&format!("    for (int s = 0; s < {cap}; ++s) {{\n"));
+    source.push_str(&format!("        for (int q = 0; q < {rows}; ++q) {{\n"));
+    source.push_str(&format!(
+        "            sumf[s][q] = (lane == 0u) ? ({init_expr}) : ({identity});\n"
+    ));
+    source.push_str("        }\n    }\n");
+
+    source.push_str(&format!("    long weight_base[{rows}];\n"));
+    source.push_str(&format!("    long feature_coord[{rows}][{rank_len}];\n"));
+    source.push_str(&format!("    for (int q = 0; q < {rows}; ++q) {{\n"));
+    source.push_str("        long flat = feature_first + q;\n");
+    source.push_str("        long remaining = (flat < feature_total) ? flat : (feature_total - 1);\n");
+    for dim in 0..rank {
+        source.push_str(&format!("        feature_coord[q][{dim}] = 0;\n"));
+    }
+    for (index_from_end, &dim) in feature_axes.iter().enumerate().rev() {
+        let full_index = token_axes.len() + index_from_end;
+        source.push_str(&format!(
+            "        feature_coord[q][{dim}] = remaining % u.output_extents[{full_index}]; remaining /= u.output_extents[{full_index}];\n"
+        ));
+    }
+    source.push_str(&format!("        long wb = u.operand_base[{weight}];\n"));
+    for &dim in feature_axes {
+        source.push_str(&format!(
+            "        wb += feature_coord[q][{dim}] * u.operand_strides[{weight}][{dim}];\n"
+        ));
+    }
+    source.push_str("        weight_base[q] = wb;\n");
+    source.push_str("    }\n");
+
+    source.push_str(&format!("    long other_base[{cap}];\n"));
+    source.push_str(&format!("    long token_coord[{cap}][{rank_len}];\n"));
+    source.push_str(&format!("    for (int s = 0; s < {cap}; ++s) {{\n"));
+    source.push_str("        long flat = token_first + s;\n");
+    source.push_str("        long remaining = (flat < token_total) ? flat : (token_total - 1);\n");
+    for dim in 0..rank {
+        source.push_str(&format!("        token_coord[s][{dim}] = 0;\n"));
+    }
+    for (index, &dim) in token_axes.iter().enumerate().rev() {
+        source.push_str(&format!(
+            "        token_coord[s][{dim}] = remaining % u.output_extents[{index}]; remaining /= u.output_extents[{index}];\n"
+        ));
+    }
+    source.push_str(&format!("        long ob = u.operand_base[{other}];\n"));
+    for &dim in token_axes {
+        source.push_str(&format!(
+            "        ob += token_coord[s][{dim}] * u.operand_strides[{other}][{dim}];\n"
+        ));
+    }
+    source.push_str("        other_base[s] = ob;\n");
+    source.push_str("    }\n");
+
+    source.push_str(&format!(
+        "    long other_stride = u.operand_strides[{other}][{reduce_dim}];\n"
+    ));
+    source.push_str("    for (long k = (long)lane; k < u.reduction_total; k += 32L) {\n");
+    source.push_str(&format!("        for (int q = 0; q < {rows}; ++q) {{\n"));
+    source.push_str(&format!(
+        "            {element_type} scratch[{}];\n",
+        operand_count.max(1)
+    ));
+    source.push_str(&format!(
+        "            scratch[{weight}] = {};\n",
+        operand_read(weight, "(weight_base[q] + k)", quantized[weight])
+    ));
+    source.push_str(&format!("            for (int s = 0; s < {cap}; ++s) {{\n"));
+    source.push_str(&format!(
+        "                scratch[{other}] = {};\n",
+        operand_read(other, "(other_base[s] + k * other_stride)", quantized[other])
+    ));
+    let value_expr = push_body_steps(source, resolved.element_body(), "                ", element_type);
+    source.push_str(&format!(
+        "                {element_type} value = {value_expr};\n"
+    ));
+    let combine_expr = scalar_op_expr(reduce_op, &["sumf[s][q]", "value"]);
+    source.push_str(&format!("                sumf[s][q] = {combine_expr};\n"));
+    source.push_str("            }\n");
+    source.push_str("        }\n");
+    source.push_str("    }\n");
+
+    source.push_str(&format!("    for (int s = 0; s < {cap}; ++s) {{\n"));
+    source.push_str(&format!("        for (int q = 0; q < {rows}; ++q) {{\n"));
+    source.push_str(&format!(
+        "            {element_type} reduced = {combine_fn}(sumf[s][q]);\n"
+    ));
+    source.push_str("            if (lane == 0u) {\n");
+    source.push_str("                long token_flat = token_first + s;\n");
+    source.push_str("                long feature_flat = feature_first + q;\n");
+    source.push_str("                if (token_flat < token_total && feature_flat < feature_total) {\n");
+    source.push_str("                    long out_offset = u.out_base;\n");
+    for &dim in feature_axes {
+        source.push_str(&format!(
+            "                    out_offset += feature_coord[q][{dim}] * u.out_strides[{dim}];\n"
+        ));
+    }
+    for &dim in token_axes {
+        source.push_str(&format!(
+            "                    out_offset += token_coord[s][{dim}] * u.out_strides[{dim}];\n"
+        ));
+    }
+    source.push_str("                    out[out_offset] = reduced;\n");
+    source.push_str("                }\n");
     source.push_str("            }\n");
     source.push_str("        }\n");
     source.push_str("    }\n");
@@ -4787,6 +5172,24 @@ fn push_cooperative_reduce_body(
     // `metal-wide-cooperative-reduce` -- ROW-BLOCKED is a separate,
     // untouched investigation (see this file's own history), not the
     // reduction-extent-driven scaling below.
+    if let Some(block) = packed_row_multi_activation_block(resolved, quantized, output_axes) {
+        source.push_str(&format!(
+            "    long output_index = (long)gid / {SIMD_WIDTH};\n"
+        ));
+        source.push_str(&format!("    uint lane = gid % {SIMD_WIDTH}u;\n"));
+        push_packed_row_multi_activation_body(
+            source,
+            resolved,
+            reduce_op,
+            init,
+            rank,
+            quantized,
+            element_type,
+            &block,
+        );
+        return;
+    }
+
     if packed_row_block(resolved, quantized).is_some() {
         if cfg!(feature = "metal-q4k-split-k") {
             // `tptg` is the ACTUAL per-dispatch threadgroup width
