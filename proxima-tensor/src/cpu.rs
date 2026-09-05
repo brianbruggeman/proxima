@@ -19320,6 +19320,10 @@ mod tests {
                     strides: smallvec::smallvec![1],
                 },
                 out_scatter: None,
+                epilogue_body: ComposedBody {
+                    steps: alloc::vec![step(ScalarOp::Identity, &[StepArg::Operand(0)])],
+                },
+                epilogue_operands: Vec::new(),
             },
         };
 

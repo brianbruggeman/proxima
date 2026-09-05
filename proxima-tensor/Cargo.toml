@@ -72,6 +72,18 @@ dynamic-elision-probe = ["std"]
 # `bind::bind`. Default-off; exists to answer the profile gate before any
 # fusion mechanism is built, not to ship.
 epilogue-profile-probe = ["std"]
+# Bind-time reduce-epilogue fusion (dispatch-census fusion lever 1,
+# `docs/dispatch-census.md`): an `Elementwise` consumer of a `Reduce` whose
+# iteration space equals the reduce's output space, sole-consuming it with an
+# identity projection, fuses into that reduce as `epilogue_body`/
+# `epilogue_operands` (`bind::BoundOpKind::Reduce`'s own doc states the exact
+# three conditions). Alloc-tier only — the whole rewrite is a structural
+# `Op`/`IndexMap` walk plus a `BTreeMap`/`BTreeSet` rebuild, no platform
+# dependency anywhere in it. Default-off: no renderer accepts a non-default
+# epilogue yet outside the gate that also turns this on for it (`omega`'s own
+# `reduce-epilogue-fusion` feature), so this stays off in `default` until a
+# bake-off earns the switch the way `cached-attention-streaming` did.
+reduce-epilogue-fusion = []
 # real execution-witness counters (elements/bytes/gather-vs-affine) plus
 # per-bound-op spans over `proxima-telemetry`'s legacy Metrics/Telemetry
 # surface — default-off, no effect on the default build or the no_std+alloc
