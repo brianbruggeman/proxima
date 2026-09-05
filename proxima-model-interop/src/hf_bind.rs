@@ -690,6 +690,7 @@ mod tests {
             expert_count: 0,
             expert_used_count: 0,
             rope_freq_base: proxima_tensor::sized::ROPE_FREQ_BASE_DEFAULT,
+            rms_epsilon: 1e-5,
             tied_embeddings: false,
         }
     }

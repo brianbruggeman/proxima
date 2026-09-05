@@ -112,8 +112,6 @@ use crate::serving::GPU_LAYERS_ALL;
 use crate::serving::ServingConfig;
 use crate::serving::apply_serving_config;
 
-const RMS_EPSILON: f32 = 1e-5;
-
 /// How many of [`OpGpuTiming`]'s entries [`report_op_timings`] names
 /// individually -- the discipline log's own "top 20 ops by GPU time" ask.
 #[cfg(all(feature = "instrument", feature = "metal", target_os = "macos"))]
@@ -812,6 +810,7 @@ impl<'file> LoadedModel<'file> {
                 expert_count: 0,
                 expert_used_count: 0,
                 rope_freq_base: qwen_architecture.rope_freq_base,
+                rms_epsilon: qwen_architecture.rms_epsilon,
                 tied_embeddings: false,
             };
             return Ok(Self {
@@ -1147,11 +1146,12 @@ fn build_position_inputs(
     start_position: usize,
     head_dim: u32,
     rope_freq_base: f32,
+    rms_epsilon: f32,
 ) -> PositionInputs {
     let new_count = new_ids.len();
     let pairs = head_dim as usize / 2;
     let ids_f32: Vec<f32> = new_ids.iter().map(|&id| id as f32).collect();
-    let epsilon = alloc::vec![RMS_EPSILON; new_count];
+    let epsilon = alloc::vec![rms_epsilon; new_count];
 
     let mut cos = alloc::vec![0.0f32; new_count * pairs];
     let mut sin = alloc::vec![0.0f32; new_count * pairs];
@@ -1845,6 +1845,7 @@ impl<'file> LoadedModel<'file> {
                     cached_len,
                     self.architecture.head_dim,
                     self.architecture.rope_freq_base,
+                    self.architecture.rms_epsilon,
                 );
                 #[cfg(feature = "instrument")]
                 let build_position_inputs_ticks = elapsed_ticks(build_position_inputs_started);
@@ -2343,6 +2344,7 @@ impl<'file> LoadedModel<'file> {
                     cached_len,
                     self.architecture.head_dim,
                     self.architecture.rope_freq_base,
+                    self.architecture.rms_epsilon,
                 );
                 #[cfg(feature = "instrument")]
                 let build_position_inputs_ticks = elapsed_ticks(build_position_inputs_started);
@@ -2675,6 +2677,7 @@ impl<'file> LoadedModel<'file> {
             0,
             self.architecture.head_dim,
             self.architecture.rope_freq_base,
+            self.architecture.rms_epsilon,
         );
 
         let block_count = self.architecture.block_count as usize;
@@ -2816,9 +2819,80 @@ mod tests {
     use alloc::string::String;
     use alloc::vec::Vec;
 
+    use proxima_gguf::value::MetadataValue as Value;
+    use proxima_gguf::{GgmlType as WireType, GgufModel, TensorPayload, write_complete};
     use proxima_tokenizer::Vocab;
 
-    use super::decode_until_stop_or_budget;
+    use super::{build_position_inputs, decode_until_stop_or_budget};
+    use crate::bind::architecture_from_metadata;
+
+    fn dims(values: &[u64]) -> arrayvec::ArrayVec<u64, { proxima_gguf::tensor::MAX_DIMS }> {
+        values.iter().copied().collect()
+    }
+
+    /// A checkpoint that declares `llama.attention.layer_norm_rms_epsilon`
+    /// (Qwen3's own value, `1e-6`, chosen because it differs from
+    /// `crate::bind`'s own `RMS_EPSILON_DEFAULT` (`1e-5`) -- a test using
+    /// the default would pass even if the metadata read were wired to
+    /// nothing) must have that value flow all the way from
+    /// [`architecture_from_metadata`] through [`build_position_inputs`]'s
+    /// `epsilon` output, the exact vector `run_decode_loop` feeds every
+    /// layer norm on the Metal/CPU decode path.
+    #[test]
+    fn checkpoint_declared_rms_epsilon_flows_into_position_inputs() {
+        let embed_bytes = vec![0u8; 4 * 3 * 4]; // [embedding=4, vocab=3] f32
+        let model = GgufModel {
+            version: 3,
+            metadata: vec![
+                (
+                    "general.architecture".to_string(),
+                    Value::String("llama".to_string()),
+                ),
+                ("llama.embedding_length".to_string(), Value::U32(4)),
+                ("llama.feed_forward_length".to_string(), Value::U32(8)),
+                ("llama.attention.head_count".to_string(), Value::U32(2)),
+                ("llama.attention.head_count_kv".to_string(), Value::U32(1)),
+                ("llama.block_count".to_string(), Value::U32(1)),
+                ("llama.rope.dimension_count".to_string(), Value::U32(2)),
+                (
+                    "llama.attention.layer_norm_rms_epsilon".to_string(),
+                    Value::F32(1e-6),
+                ),
+            ],
+            tensors: vec![TensorPayload {
+                name: "token_embd.weight".to_string(),
+                dims: dims(&[4, 3]),
+                ggml_type: WireType::F32,
+                data: &embed_bytes,
+            }],
+        };
+        let file_bytes = write_complete(&model).expect("writes gguf with rms_epsilon metadata");
+        let parsed = proxima_gguf::parse_complete(&file_bytes)
+            .expect("parses gguf with rms_epsilon metadata");
+        let architecture = architecture_from_metadata(&parsed)
+            .expect("derive architecture from real metadata keys");
+
+        assert_eq!(
+            architecture.rms_epsilon, 1e-6,
+            "architecture_from_metadata must read the checkpoint's own \
+             layer_norm_rms_epsilon key, not a hard-coded default"
+        );
+
+        let inputs = build_position_inputs(
+            &[7, 9],
+            0,
+            architecture.head_dim,
+            architecture.rope_freq_base,
+            architecture.rms_epsilon,
+        );
+
+        assert_eq!(
+            inputs.epsilon,
+            alloc::vec![1e-6, 1e-6],
+            "build_position_inputs must feed the checkpoint's own epsilon into every \
+             position, not RMS_EPSILON_DEFAULT"
+        );
+    }
 
     /// A minimal valid [`Vocab`] (every byte-level BPE vocab needs all 256
     /// base-byte tokens present or [`Vocab::new`] rejects it) plus one

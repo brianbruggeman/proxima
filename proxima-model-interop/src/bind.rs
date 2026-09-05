@@ -295,6 +295,17 @@ pub struct ModelArchitecture {
     /// the key explicitly, so that fallback has not yet been exercised
     /// against a real load.
     pub rope_freq_base: f32,
+    /// `{architecture}.attention.layer_norm_rms_epsilon` (RMSNorm's epsilon,
+    /// added under the square root before the reciprocal) --
+    /// [`RMS_EPSILON_DEFAULT`] (llama.cpp's own default for a llama/mistral
+    /// checkpoint, matching openchat-3.5's own declared value) when the key
+    /// is absent. [`crate::qwen35::Qwen35Architecture::rms_epsilon`]/
+    /// [`crate::lfm2::Lfm2Architecture::rms_epsilon`] read the same metadata
+    /// key with their own architecture-specific defaults (`1e-6`) --
+    /// duplicated per architecture rather than shared because each
+    /// architecture module owns its own default, not because the key
+    /// differs.
+    pub rms_epsilon: f32,
     /// `true` when the checkpoint reuses its token-embedding table as the LM
     /// head instead of shipping a separate output-projection tensor (HF's
     /// `tie_word_embeddings`, e.g. SmolLM2-135M-Instruct's real
@@ -406,6 +417,11 @@ pub fn architecture_from_metadata(parsed: &ParsedGguf) -> Result<ModelArchitectu
         &alloc::format!("{architecture}.rope.freq_base"),
         proxima_tensor::sized::ROPE_FREQ_BASE_DEFAULT,
     );
+    let rms_epsilon = metadata_f32_optional(
+        parsed,
+        &alloc::format!("{architecture}.attention.layer_norm_rms_epsilon"),
+        RMS_EPSILON_DEFAULT,
+    );
     Ok(ModelArchitecture {
         vocab,
         embedding,
@@ -417,9 +433,18 @@ pub fn architecture_from_metadata(parsed: &ParsedGguf) -> Result<ModelArchitectu
         expert_count,
         expert_used_count,
         rope_freq_base,
+        rms_epsilon,
         tied_embeddings: false,
     })
 }
+
+/// llama.cpp's own RMSNorm epsilon default for a llama/mistral checkpoint
+/// (openchat-3.5 among them) -- used only when
+/// `{architecture}.attention.layer_norm_rms_epsilon` is absent from the
+/// checkpoint's own metadata. [`crate::qwen35::QWEN35_RMS_EPSILON_DEFAULT`]/
+/// [`crate::lfm2::LFM2_RMS_EPSILON_DEFAULT`] are the same fallback shape for
+/// their own architectures, whose real checkpoints declare `1e-6` instead.
+const RMS_EPSILON_DEFAULT: f32 = 1e-5;
 
 pub(crate) fn metadata_str<'parsed>(
     parsed: &'parsed ParsedGguf,
@@ -1984,10 +2009,12 @@ mod tests {
                 expert_count: 0,
                 expert_used_count: 0,
                 rope_freq_base: proxima_tensor::sized::ROPE_FREQ_BASE_DEFAULT,
+                rms_epsilon: RMS_EPSILON_DEFAULT,
                 tied_embeddings: false,
             },
             "a checkpoint with no expert_count/expert_used_count key is dense: both fields must read as 0, \
-             not error; a checkpoint with no rope.freq_base key must fall back to the sizing-config default"
+             not error; a checkpoint with no rope.freq_base/layer_norm_rms_epsilon key must fall back \
+             to the sizing-config default / RMS_EPSILON_DEFAULT"
         );
     }
 
@@ -3277,11 +3304,12 @@ mod real_openchat_file {
         start_position: usize,
         head_dim: u32,
         rope_freq_base: f32,
+        rms_epsilon: f32,
     ) -> CachedPositionInputs {
         let new_count = new_ids.len();
         let pairs = head_dim as usize / 2;
         let ids_f32: Vec<f32> = new_ids.iter().map(|&id| id as f32).collect();
-        let epsilon = alloc::vec![RMS_EPSILON; new_count];
+        let epsilon = alloc::vec![rms_epsilon; new_count];
 
         let mut cos = alloc::vec![0.0f32; new_count * pairs];
         let mut sin = alloc::vec![0.0f32; new_count * pairs];
@@ -3302,8 +3330,6 @@ mod real_openchat_file {
             sin,
         }
     }
-
-    const RMS_EPSILON: f32 = 1e-5;
 
     /// Every layer's growable key/value cache: `k_even`/`k_odd` are already
     /// RoPE-rotated, `v` is the un-rotated projected value. Two storage
@@ -3440,6 +3466,7 @@ mod real_openchat_file {
                 0,
                 architecture.head_dim,
                 architecture.rope_freq_base,
+                architecture.rms_epsilon,
             );
             let mut named_blocks: Vec<(&str, QuantizedBlock)> = Vec::with_capacity(
                 weights.owned.len()
