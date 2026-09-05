@@ -71,7 +71,8 @@ pub use metal::{
     target_os = "macos"
 ))]
 pub use metal::{
-    execute_plan_named_with_placements_op_timed, execute_plan_with_placements_op_timed,
+    execute_plan_named_with_placements_dispatch_timed, execute_plan_named_with_placements_op_timed,
+    execute_plan_with_placements_dispatch_timed, execute_plan_with_placements_op_timed,
 };
 #[cfg(feature = "alloc")]
 pub use msl::{

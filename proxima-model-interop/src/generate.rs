@@ -100,6 +100,12 @@ use omega::metal::metal_stage_totals;
     feature = "instrument",
     target_os = "macos"
 ))]
+use omega::execute_plan_named_with_placements_dispatch_timed;
+#[cfg(all(
+    feature = "metal-output-placement",
+    feature = "instrument",
+    target_os = "macos"
+))]
 use omega::execute_plan_named_with_placements_op_timed;
 #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
 use omega::{
@@ -1472,6 +1478,53 @@ impl BackendRuntime {
         )?)
     }
 
+    /// [`Self::evaluate_with_placements`]'s per-dispatch GPU-timestamp
+    /// counterpart -- same plan-cache lookup, but
+    /// [`omega::execute_plan_named_with_placements_dispatch_timed`] submits
+    /// the SAME single command buffer the production path does and reads
+    /// `MTLCounterSampleBuffer` timestamps bracketing every dispatch
+    /// instead of one command buffer per op
+    /// ([`Self::evaluate_op_timed_with_placements`]'s own shape, which ROW
+    /// 298's own finding says does not reproduce the batched buffer's
+    /// cost). Reachable only behind `instrument` and only from
+    /// `run_decode_loop_placed_kv`'s own `PROXIMA_METAL_DISPATCH_PROFILE_STEP`
+    /// branch.
+    #[cfg(all(
+        feature = "metal-output-placement",
+        feature = "instrument",
+        target_os = "macos"
+    ))]
+    #[allow(clippy::too_many_arguments)]
+    fn evaluate_dispatch_timed_with_placements(
+        &mut self,
+        program: &[Op],
+        symbols: &[u64],
+        named: &[(&str, QuantizedBlock<'_>)],
+        outputs: &[NodeId],
+        resident_names: &BTreeSet<&str>,
+        input_placements: &[(NodeId, &PlacedBuffer, usize)],
+        output_placements: &[(NodeId, &PlacedBuffer, usize)],
+    ) -> Result<(Evaluated, Vec<OpGpuTiming>, &'static str), InteropError> {
+        let shape = (symbols[0] as usize, symbols[1] as usize);
+        let plan = Self::resolve_cached_plan(
+            &mut self.placed_plans,
+            &mut self.plan_hits,
+            &mut self.plan_misses,
+            shape,
+            || {
+                let mut plan = plan_named_placed(program, symbols, named, outputs)?;
+                plan.mark_resident(resident_names);
+                Ok(plan)
+            },
+        )?;
+        Ok(execute_plan_named_with_placements_dispatch_timed(
+            plan,
+            named,
+            input_placements,
+            output_placements,
+        )?)
+    }
+
     /// [`Self::evaluate`]/[`Self::evaluate_op_timed`]/
     /// [`Self::evaluate_with_placements`]/
     /// [`Self::evaluate_op_timed_with_placements`]'s shared cache-lookup
@@ -2623,6 +2676,36 @@ impl<'file> LoadedModel<'file> {
                             &input_placements,
                             &output_placements,
                         )?;
+                        report_op_timings(_step, &timings);
+                        evaluated
+                    }
+                    // `PROXIMA_METAL_DISPATCH_PROFILE_STEP` -- this branch's
+                    // own per-dispatch-in-the-batched-buffer twin: same
+                    // default-off, `instrument`-gated, one-env-var-per-step
+                    // convention as `PROXIMA_METAL_OP_PROFILE_STEP` above,
+                    // reusing `report_op_timings` unchanged since
+                    // `evaluate_dispatch_timed_with_placements` returns the
+                    // same `Vec<OpGpuTiming>` shape.
+                    _ if std::env::var("PROXIMA_METAL_DISPATCH_PROFILE_STEP")
+                        .ok()
+                        .and_then(|value| value.parse::<usize>().ok())
+                        == Some(_step) =>
+                    {
+                        let (evaluated, timings, sampling_mode) = runtime
+                            .evaluate_dispatch_timed_with_placements(
+                                &single_range.program,
+                                &symbols,
+                                &named_blocks,
+                                &roots,
+                                &resident_names,
+                                &input_placements,
+                                &output_placements,
+                            )?;
+                        info!(
+                            step = _step as u64,
+                            sampling_mode,
+                            "dispatch_profile: per-dispatch gpu-timestamp sampling mode"
+                        );
                         report_op_timings(_step, &timings);
                         evaluated
                     }
