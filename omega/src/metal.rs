@@ -218,6 +218,10 @@ use crate::error::EmitError;
 #[cfg(feature = "instrument")]
 use crate::msl::diagnose_packed_row_block;
 use crate::msl::{gather_count, kernel_cache_key, kernel_dispatch_shape, reduction_dims};
+#[cfg(feature = "metal-plan-stable-buffers")]
+use crate::sized::ARENA_TRANSIENT_CAP;
+#[cfg(feature = "metal-buffer-pool")]
+use crate::sized::OUTPUT_POOL_MAX_PER_BUCKET;
 use crate::{Binding, GridSpec, Kernel, PackedCodec, PackedOperands, emit};
 
 /// A live Metal buffer handle — the shape every device-buffer table and
@@ -3049,19 +3053,6 @@ fn pool_bucket(byte_length: usize) -> usize {
     byte_length.next_power_of_two()
 }
 
-/// Per-bucket cap on retained buffers: [`execute_plan`]'s reclaim drain drops
-/// (never pools) any buffer beyond this many already resident in its
-/// `(bucket, dtype)` slot. Population is already naturally bounded by the
-/// program's peak CONCURRENT live-output count at that bucket -- steady
-/// decode does not exceed a handful -- so this is a safety net against a
-/// pathological program shape (many parallel same-size branches), not the
-/// primary bound. `8` is a plain constant here, not yet wired through the
-/// project's build-time sizing-config mechanism (see the guiding-principles
-/// "no magic numbers" rule) -- a gap named explicitly, not hidden, and one
-/// more reason this feature is not yet a default-on candidate.
-#[cfg(feature = "metal-buffer-pool")]
-const OUTPUT_POOL_MAX_PER_BUCKET: usize = 8;
-
 #[cfg(feature = "metal-buffer-pool")]
 thread_local! {
     /// Op-OUTPUT device buffers, reused across [`execute_plan`] calls instead
@@ -3135,7 +3126,7 @@ thread_local! {
     /// A power-of-two bucket wastes strictly less than 2x the tight request
     /// (a request just over `B/2` rounds up to `B`, the worst case; a request
     /// of exactly a power of two wastes nothing). DERIVED, not measured.
-    /// [`OUTPUT_POOL_MAX_PER_BUCKET`] caps retained-buffer growth per bucket
+    /// [`crate::sized::OUTPUT_POOL_MAX_PER_BUCKET`] caps retained-buffer growth per bucket
     /// on top of that.
     static OUTPUT_BUFFER_POOL: RefCell<HashMap<(usize, DType), Vec<MetalBuffer>>> =
         RefCell::new(HashMap::new());
@@ -4061,16 +4052,6 @@ fn dispatch(
     encoder.dispatchThreads_threadsPerThreadgroup(grid_size, threadgroup);
 }
 
-/// CARD 6.5's memory gate (MG-3): the plan's own transient-buffer cap, in
-/// bytes. DERIVED, not measured against a live sizing config -- like
-/// [`OUTPUT_POOL_MAX_PER_BUCKET`] above, this is a plain constant, not yet
-/// wired through the project's build-time sizing-config mechanism (see the
-/// guiding-principles "no magic numbers" rule), a gap named explicitly here
-/// rather than hidden. [`build_buffer_arena`] prints its own peak against
-/// this BEFORE returning, and a peak above it is this card's own KILL
-/// condition regardless of the `op_setup` win.
-#[cfg(feature = "metal-plan-stable-buffers")]
-const ARENA_TRANSIENT_CAP: usize = 172_812_125;
 
 /// CARD 6.5: whole-`MetalBuffer` device output arena, hung off the cached
 /// [`Plan`] and built exactly once, in [`plan`], from
