@@ -21425,7 +21425,34 @@ cd /Users/brianbruggeman/repos/slot-0/proxima-wt-s6e2-accept
 CARGO_TARGET_DIR=/Users/brianbruggeman/repos/slot-0/proxima-wt-s6e2-accept/target CARGO_TERM_COLOR=never cargo nextest run --release -p proxima-model-interop --features metal,instrument --run-ignored ignored-only -- bind::draft_acceptance::ngram_draft_acceptance_rate_on_real_greedy_streams --no-capture
 ```
 
+## ROW 293 -- cpu-only and concurrent cpu+gpu streaming arms added to the ceiling harness: LOUD BOX, void for magnitude, quiet re-run pending
+
+**Card:** none (measurement-only; no default feature changed). **Worktree/branch/commit:** `proxima-wt-s6e2-hybrid`, `test/cpu-gpu-streaming-ceiling` (`c81afb4` `test(omega): cpu and concurrent cpu+gpu streaming ceiling arms`, `2097417` `fix(omega): tolerate float32 drift in concurrent gpu sum check`), landed via `land/hybrid` rebased onto `main` at `8da22d2`, own `CARGO_TARGET_DIR`.
+
+**What this extends.** ROW 291's `device_streaming_ceiling_across_three_sources_and_two_sizes` test (`omega/tests/device_streaming_ceiling.rs`) gains three new arms on the same fixture and timing discipline (`commit()` -> `waitUntilCompleted()`, nothing subtracted): **C1** -- CPU-only sequential-word-sum reads of the 4 GB no-copy mapping, split across 1/4/8 `std::thread` workers (`sum_u64_words_threaded`/`cpu_thread_ranges`), no GPU dispatch in flight; **C2/C3** -- concurrent GPU streaming-reduce dispatch plus CPU-thread read racing on disjoint byte ranges of the same 4 GB mapping, split 50/50, 60/40, 70/30 GPU/CPU by byte count, aggregate GB/s over wall time to completion of both sides (`time_and_sum_streaming_reduce`, `concurrent_sweep_one_split`). The GPU-side partial-sum check tolerates float32 accumulation drift across concurrent dispatches (`assert_gpu_sums_close`, the `064968e` fix commit) rather than requiring bit-exact parity with the sequential CPU sum.
+
+**Host loadout -- LOUD, and the courtesy gate under-reported it.** `uptime` load average **149** at the time of the timed run (`run2.log`, this session). The `pgrep -l 'llama-bench|proxima_model_i|device_streamin'` courtesy check reported EMPTY immediately before the run, but macOS truncates process names to 15 characters and **a decode test was running unseen** during the measurement window -- its binary name did not match any of the checked prefixes at 15 characters, so the gate passed green while a real GPU/CPU consumer was live on the same box. This is reported as a gate defect discovered in the course of this measurement, not a property of the harness.
+
+**Run** (`hybrid-logs/run2.log`, the loud-box run; a quiet re-run is pending and not yet executed):
+
+- GPU-only ceiling (unchanged arms, re-measured this run): best **312.63 GB/s** at 4 GB, `fresh_shared`, wide grid, **CoV 4.58%** (the one cell in this run under the 5% trust line) -> floor 13.335 ms/token at 4.169 GB/token.
+- **C1 CPU-only**, 4 GB no-copy mapping, sequential word-sum, by thread count: 1 thread **21.47 GB/s** (CoV 60.53%), 4 threads **46.93 GB/s** (CoV 31.04%), 8 threads **55.00 GB/s** (CoV 35.54%) -- monotonically increasing with thread count on this run, but every cell is above the 5% trust line.
+- **C2/C3 concurrent GPU+CPU**, 4 GB total, aggregate GB/s by split: 50/50 **78.34 GB/s** (CoV 27.61%), 60/40 **106.12 GB/s** (CoV 15.90%), 70/30 **118.75 GB/s** (CoV 36.80%) -- aggregate rises as the GPU's larger, faster share of the split grows, consistent with the GPU arm's own ceiling (237-312 GB/s) dominating a mix against the much slower CPU arm (21-55 GB/s), but no cell clears 5% CoV so the direction is reported, not the magnitude.
+
+**Why this row is void for magnitude, not void entirely.** Every new cell in this run exceeds the 5% CoV trust threshold this log holds every other row to (principle 7/16); the load average of 149 on a 10-core host and the unseen decode test mean the host was not in a state this log would normally accept a point estimate from. The *qualitative* findings -- CPU-only bandwidth scales with thread count in the 21-55 GB/s range, and concurrent GPU+CPU aggregate bandwidth sits well below the GPU-only ceiling and rises toward it as the GPU's share increases -- are consistent with the mechanism (CPU threads and the GPU's unified-memory-controller path contend for the same bandwidth) but are not claimed as measured numbers until a quiet re-run confirms them under 5% CoV.
+
+**Re-prove command:**
+```
+cd /Users/brianbruggeman/repos/slot-0/proxima-wt-s6e2-hybrid && CARGO_TARGET_DIR=/Users/brianbruggeman/repos/slot-0/proxima-wt-s6e2-hybrid/target CARGO_TERM_COLOR=never cargo test --release -p omega --features metal --test device_streaming_ceiling -- --ignored --nocapture
+```
+Confirm `pgrep -l 'llama-bench|llama-cli|proxima_model_i|device_streamin|matvec_roofline|omega-|^cargo$|^rustc$|nextest|cargo-nextest'` is empty (not just the narrower three-term check that missed the decode test this run) and `uptime` load average is near the core count before running; re-run at least once and report the range if any arm's CoV exceeds 5%.
+
 ### Changelog
 | Date | Change | Δ vs prior | CoV / runs | Host loadout |
 | --- | --- | --- | --- | --- |
 | 2026-09-04 | measurement only, no feature change; n-gram draft-acceptance harness against a real greedy-decoded stream, 8 prompts x 6 (k, n-gram-range) sweep cells | no prior draft-acceptance row exists; baseline itself, refutes `design-AB.md`'s ASSUMED `k' = 2.18` | single deterministic run (greedy decode, no sampling noise), not repeated -- CoV not applicable to this measurement shape | not recorded for this run; see `real_run3.log` for the completed attempt (two prior attempts: `real_run.log` SIGTERM'd at 331.68s on the metal-instrumented path before reaching prompt 0's aggregate, `real_run2.log` panicked on `Tokenizer(InvalidUtf8)` at prompt 5 before the prose-prompt substitution) |
+
+### Changelog
+| Date | Change | Δ vs prior | CoV / runs | Host loadout |
+| --- | --- | --- | --- | --- |
+| 2026-09-04 | new arms on the ROW 291 harness: C1 cpu-only 1/4/8-thread read, C2/C3 concurrent gpu+cpu 50/50, 60/40, 70/30 splits; no feature change | GPU-only ceiling re-measured 312.63 GB/s (CoV 4.58%, this run's only trusted cell); CPU-only 21.47/46.93/55.00 GB/s (1/4/8 threads); concurrent aggregate 78.34/106.12/118.75 GB/s (50/50, 60/40, 70/30) -- all new cells above 5% CoV, void for magnitude | 1 run so far, quiet re-run pending; every new-arm cell above 5% CoV | **LOUD BOX**: `uptime` load average 149 on a 10-core host; the 3-term courtesy `pgrep` gate reported empty but a decode test was running unseen (macOS 15-char name truncation defeated the check) |
