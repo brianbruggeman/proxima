@@ -511,6 +511,106 @@ static inline float q6k_element(device const uchar *block, uint index) {
 /// `omega/tests/q6k_unpack.rs`, same posture as [`Q4K_BLOCK_BYTES`].
 pub const Q6K_BLOCK_BYTES: usize = 210;
 
+/// `metal-q6k-pair-dot` (default-off): `Q6_K`'s counterpart to
+/// `q4k_pair_dot`/`q5k_pair_dot` -- routed the same way, into the SAME
+/// codec-agnostic `yl`/`yh` activation gather `push_packed_row_blocked_body`'s
+/// `plain_product` preamble already builds for `Q4_K`/`Q5_K`. The lane
+/// assignment (`iq = it/4`, `ir = it%4`) is unchanged from those two, so a
+/// lane's 32 owned elements decompose into the same four 8-element groups
+/// (`base+[0..7]`, `base+32+[0..7]`, `base+128+[0..7]`, `base+160+[0..7]`
+/// with `base = 64*iq + 8*ir`) that feed `yl[0..7]`/`yl[8..15]`/
+/// `yh[0..7]`/`yh[8..15]` respectively -- verified against `q6k_value`'s own
+/// `half_index`/`local`/`l`/`lane`/`sub_block_in_half` derivation: group A
+/// (`base+i`) and group C (`base+128+i`) share `lane = 2*iq` and `l =
+/// 8*ir+i`, differing only in `half_index` (0 vs 1); group B/D share
+/// `lane = 2*iq+1` with the same `l`. That gives four fixed (`half_index`,
+/// `lane`) headers -- one signed `char` scale byte each, mirroring
+/// `q4k_pair_dot`'s four `q4k_header`s -- and `d` is decoded once per
+/// super-block, not per group, the same amortization `q4k_pair_dot`'s
+/// `q4k_header_for` calls give `Q4_K`.
+///
+/// UNLIKE `q4k_pair_dot` (144-byte block, mult of 16) and `q5k_pair_dot`
+/// (176-byte block, mult of 16, hence its `ulong` 8-byte loads), `Q6_K`'s
+/// 210-byte block is NOT a multiple of 4 -- consecutive super-blocks'
+/// addresses only preserve 2-byte alignment (`210` is even, so a `ql`/`qh`
+/// byte offset that is itself even keeps `ushort` loads sound; a `uint` or
+/// `ulong` load would straddle an odd 4-byte boundary on every other
+/// super-block). Every wide load below is a `ushort` for exactly this
+/// reason -- the same width `q4k_pair_dot` uses, but here it is the WIDEST
+/// safe load rather than a stylistic choice.
+///
+/// Mirrors ggml's `kernel_mul_mv_q6_K_f32_impl`
+/// (`ggml-metal.metal:5360-5420`, MIT-licensed) mask/shift technique
+/// (`kmask1..4`, `(q1[l] & 0xF) | ((qh[l] & kmask) << shift)`) rather than
+/// `q6k_value`'s own shift-then-mask-then-OR order, fused with the
+/// accumulate the same non-deferred way `q4k_pair_dot`/`q5k_pair_dot`
+/// already fold `scale*level` into each element's product immediately (no
+/// `Q4_K`-style `dmin` term to defer here at all -- `Q6_K` has none).
+#[cfg(feature = "metal-q6k-pair-dot")]
+pub const Q6K_PAIR_DOT_MSL: &str = r#"
+static inline float q6k_pair_dot(device const uchar *block, uint iq, uint ir, thread const float *yl, thread const float *yh) {
+    device const uchar *ql = block;
+    device const uchar *qh = block + 128u;
+    device const uchar *scales = block + 192u;
+    q6k_header hdr = q6k_header_for(block);
+
+    uint l_base = 8u * ir;
+    // `l_base` (0/8/16/24) and its +32/+64/+96 siblings are all even, and
+    // `block` itself always lands on an even byte (210-byte stride, always
+    // even) -- so every `ushort` load below is 2-byte aligned. A `uint`
+    // load would need `l_base` 4-byte aligned AND `block` 4-byte aligned;
+    // neither holds for every super-block index, so `ushort` is the
+    // widest load this layout can support unconditionally (see this
+    // constant's own doc).
+    device const ushort *ql_a = (device const ushort *)(ql + l_base);
+    device const ushort *ql_b = (device const ushort *)(ql + 32u + l_base);
+    device const ushort *ql_c = (device const ushort *)(ql + 64u + l_base);
+    device const ushort *ql_d = (device const ushort *)(ql + 96u + l_base);
+    device const ushort *qh_0 = (device const ushort *)(qh + l_base);
+    device const ushort *qh_1 = (device const ushort *)(qh + 32u + l_base);
+
+    uint sub = (l_base < 16u) ? 0u : 1u;
+    float scale_a = (float)(char)scales[sub + 4u * iq];
+    float scale_b = (float)(char)scales[sub + 4u * iq + 2u];
+    float scale_c = (float)(char)scales[8u + sub + 4u * iq];
+    float scale_d = (float)(char)scales[8u + sub + 4u * iq + 2u];
+
+    uint shift_lo = 4u * iq;
+    uint shift_hi = shift_lo + 2u;
+    uchar nibble_shift = (iq == 0u) ? 0u : 4u;
+
+    float result = 0.0f;
+    for (uint w = 0u; w < 4u; ++w) {
+        ushort ql_a_word = ql_a[w];
+        ushort ql_b_word = ql_b[w];
+        ushort ql_c_word = ql_c[w];
+        ushort ql_d_word = ql_d[w];
+        ushort qh_0_word = qh_0[w];
+        ushort qh_1_word = qh_1[w];
+        for (uint bshift = 0u; bshift < 16u; bshift += 8u) {
+            uint i = 2u * w + (bshift / 8u);
+            uchar ql_a_byte = (uchar)((ql_a_word >> bshift) & 0xFFu);
+            uchar ql_b_byte = (uchar)((ql_b_word >> bshift) & 0xFFu);
+            uchar ql_c_byte = (uchar)((ql_c_word >> bshift) & 0xFFu);
+            uchar ql_d_byte = (uchar)((ql_d_word >> bshift) & 0xFFu);
+            uchar qh_0_byte = (uchar)((qh_0_word >> bshift) & 0xFFu);
+            uchar qh_1_byte = (uchar)((qh_1_word >> bshift) & 0xFFu);
+
+            float level_a = (float)(((ql_a_byte >> nibble_shift) & 0x0Fu) | (((qh_0_byte >> shift_lo) & 0x03u) << 4u)) - 32.0f;
+            float level_b = (float)(((ql_b_byte >> nibble_shift) & 0x0Fu) | (((qh_0_byte >> shift_hi) & 0x03u) << 4u)) - 32.0f;
+            float level_c = (float)(((ql_c_byte >> nibble_shift) & 0x0Fu) | (((qh_1_byte >> shift_lo) & 0x03u) << 4u)) - 32.0f;
+            float level_d = (float)(((ql_d_byte >> nibble_shift) & 0x0Fu) | (((qh_1_byte >> shift_hi) & 0x03u) << 4u)) - 32.0f;
+
+            result += (hdr.d * scale_a * level_a) * yl[i];
+            result += (hdr.d * scale_b * level_b) * yl[i + 8u];
+            result += (hdr.d * scale_c * level_c) * yh[i];
+            result += (hdr.d * scale_d * level_d) * yh[i + 8u];
+        }
+    }
+    return result;
+}
+"#;
+
 /// MSL source for unpacking one element of a `Q5_K` super-block. Ports
 /// `proxima_gguf::quant::q5_k::dequantize_block`/`get_scale_min_k4`
 /// exactly: the SAME super-block/sub-block shape and SAME bit-interleaved
@@ -2412,6 +2512,14 @@ fn preamble(source: &mut String) {
     }
     source.push_str(Q6K_UNPACK_MSL);
     source.push('\n');
+    // feature-gated, same posture as `Q5K_PAIR_DOT_MSL` above:
+    // `Q6K_PAIR_DOT_MSL` does not exist as a Rust symbol without
+    // `metal-q6k-pair-dot`.
+    #[cfg(feature = "metal-q6k-pair-dot")]
+    {
+        source.push_str(Q6K_PAIR_DOT_MSL);
+        source.push('\n');
+    }
     source.push_str(Q8_0_UNPACK_MSL);
     source.push('\n');
     source.push_str(Q4_0_UNPACK_MSL);
@@ -3314,7 +3422,8 @@ fn push_packed_row_blocked_body(
         let lanes_per_block = 8;
         let sub = Q4K_BLOCK_ELEMENTS / lanes_per_block;
         let plain_product = (matches!(codec, PackedCodec::Q4K)
-            || (matches!(codec, PackedCodec::Q5K) && cfg!(feature = "metal-q5k-pair-dot")))
+            || (matches!(codec, PackedCodec::Q5K) && cfg!(feature = "metal-q5k-pair-dot"))
+            || (matches!(codec, PackedCodec::Q6K) && cfg!(feature = "metal-q6k-pair-dot")))
             && element_type == "float"
             && is_plain_product_reduce(resolved, reduce_op, weight, other);
         // `metal-q4k-single-fetch` (default-off): eliminates the redundant
@@ -3554,6 +3663,18 @@ fn push_packed_row_blocked_body(
                 source.push_str(&format!("                sumf[q] = {combine_expr};\n"));
                 source.push_str("            }\n");
             }
+            PackedCodec::Q6K if plain_product => {
+                // `metal-q6k-pair-dot` (default-off, see [`Q6K_PAIR_DOT_MSL`]):
+                // the same paired-lane body `Q4_K`/`Q5_K`'s own
+                // `plain_product` arms use above, ported to `Q6_K`'s
+                // ql/qh/signed-scale layout. Reads the SAME `yl`/`yh`
+                // activation gather this preamble already built for
+                // `Q4_K` (`plain_product` is codec-agnostic there), so no
+                // separate activation load path is needed for this codec.
+                source.push_str(
+                    "            sumf[q] = sumf[q] + q6k_pair_dot(blk, iq, ir, yl, yh);\n",
+                );
+            }
             PackedCodec::Q6K => {
                 // No `q6k_run8`-style batched unpack yet — `Q6_K`'s bit
                 // layout does not reduce to two word loads the way `Q4_K`'s
@@ -3561,9 +3682,10 @@ fn push_packed_row_blocked_body(
                 // sub-block scale byte, not one nibble out of an
                 // already-loaded word). Correct, one element at a time; `d`
                 // is still decoded ONCE per super-block via
-                // `q6k_header_for` rather than per element. A follow-up
-                // optimization, not a correctness gap — see this landing's
-                // discipline row for the measured cost of skipping it.
+                // `q6k_header_for` rather than per element. `metal-q6k-pair-dot`
+                // (default-off) replaces this whole per-element loop with the
+                // paired-lane body when the reduce is a plain product -- see
+                // the `plain_product` arm above.
                 source.push_str("            q6k_header hdr = q6k_header_for(blk);\n");
                 source.push_str(&format!("            for (int e = 0; e < {sub}; ++e) {{\n"));
                 source.push_str(&format!(
@@ -5416,6 +5538,64 @@ mod tests {
         assert!(
             !source.contains("q5k_pair_dot"),
             "the paired decode path must not appear without metal-q5k-pair-dot enabled:\n{source}"
+        );
+    }
+
+    /// `Q6_K` sibling of `q5k_row_blocked_matmul_uses_paired_nibble_decode`,
+    /// gated on `metal-q6k-pair-dot`: the same Add-reduce-over-plain-product
+    /// shape must select `q6k_pair_dot` (this feature's own paired-lane
+    /// body) rather than the scalar per-element `q6k_value` loop
+    /// `push_packed_row_blocked_body`'s `PackedCodec::Q6K` arm falls back to
+    /// when the feature is off.
+    #[cfg(feature = "metal-q6k-pair-dot")]
+    #[test]
+    fn q6k_row_blocked_matmul_uses_paired_nibble_decode() {
+        let bound = matmul_op(4, 256, 5);
+        let weight_node = bound.operands()[0].0;
+        let mut q6k = BTreeMap::new();
+        q6k.insert(weight_node, PackedCodec::Q6K);
+
+        assert!(
+            packed_row_block(&bound, &operand_codecs(&bound, &q6k)).is_some(),
+            "test fixture must actually take the row-blocked path for this assertion to mean anything"
+        );
+
+        let source = emit(&bound, &q6k).expect("emits").source;
+        assert!(
+            source.contains("q6k_pair_dot"),
+            "Add-reduce over a plain weight*activation body must take the paired decode path with metal-q6k-pair-dot on:\n{source}"
+        );
+        assert!(
+            !source.contains("q6k_value(blk"),
+            "the scalar per-element q6k_value dequant expression must not remain once the paired path is taken:\n{source}"
+        );
+    }
+
+    /// Feature-off default: the SAME matmul shape must still take the
+    /// scalar `q6k_value` per-element path -- `metal-q6k-pair-dot` is
+    /// default-off and must not change production behavior until it earns
+    /// the default (see the feature's own `Cargo.toml` doc).
+    #[cfg(not(feature = "metal-q6k-pair-dot"))]
+    #[test]
+    fn q6k_row_blocked_matmul_uses_scalar_decode_by_default() {
+        let bound = matmul_op(4, 256, 5);
+        let weight_node = bound.operands()[0].0;
+        let mut q6k = BTreeMap::new();
+        q6k.insert(weight_node, PackedCodec::Q6K);
+
+        assert!(
+            packed_row_block(&bound, &operand_codecs(&bound, &q6k)).is_some(),
+            "test fixture must actually take the row-blocked path for this assertion to mean anything"
+        );
+
+        let source = emit(&bound, &q6k).expect("emits").source;
+        assert!(
+            source.contains("q6k_value(blk"),
+            "without metal-q6k-pair-dot, Q6_K must fall back to the scalar per-element path:\n{source}"
+        );
+        assert!(
+            !source.contains("q6k_pair_dot"),
+            "the paired decode path must not appear without metal-q6k-pair-dot enabled:\n{source}"
         );
     }
 

@@ -266,6 +266,25 @@ metal-packed-row-nsg2 = ["metal"]
 # codegen, but the alternate kernel body only has meaning for a Metal
 # dispatch.
 metal-q5k-pair-dot = ["metal"]
+# `Q6_K`'s counterpart to `q4k_pair_dot`/`q5k_pair_dot` (`msl.rs`'s
+# `Q6K_PAIR_DOT_MSL`): the same paired-lane body, ported to `Q6_K`'s
+# `ql`/`qh`/signed-scale layout, mirroring ggml's own
+# `kernel_mul_mv_q6_K_f32_impl` (`ggml-metal.metal:5360-5420`) mask/shift
+# technique. Closes the gap `Q6_K`'s row-blocked arm otherwise has no fast
+# path for at all: `push_packed_row_blocked_body`'s `PackedCodec::Q6K` arm
+# falls back to the fully scalar per-element `q6k_value` loop, which
+# recomputes `half_index`/`local`/`lane`/`sub_block_in_half` and three
+# scalar byte loads per ELEMENT even though they are invariant across the
+# 32-element run a lane owns. Default-off per the same discipline as
+# `metal-q5k-pair-dot` above: a kernel body swap earns the production
+# default only after a measured decode-step seal, not on the mechanism
+# argument alone. `Q6_K`'s 210-byte block is not a multiple of 4 (unlike
+# `Q4_K`'s 144 and `Q5_K`'s 176, both multiples of 16), so this body's wide
+# loads are `ushort`, not `q5k_pair_dot`'s `ulong` -- see the constant's own
+# doc for the alignment argument. Depends on `metal` for the same reason
+# every sibling feature in this file does: `msl.rs` is alloc-tier codegen,
+# but the alternate kernel body only has meaning for a Metal dispatch.
+metal-q6k-pair-dot = ["metal"]
 # Portable GPU execution driver (src/wgsl.rs, src/wgpu_driver.rs) — the
 # wgpu/WGSL counterpart of `metal` above, one abstraction layer over: same
 # `BoundOp` descriptor, same emit-then-drive split, different target ISA
