@@ -106,17 +106,14 @@ use proxima_tensor::{
 use crate::error::EmitError;
 use crate::msl::{Binding, PackedCodec, PackedOperands, gather_count, gather_slots};
 
-/// Threads per workgroup every v1 WGSL kernel dispatches with. A build-time
-/// policy knob the way `crate::sized::SIMD_WIDTH` is a hardware fact — this
-/// is the other kind: any positive value is legal WGSL, `64` is chosen to
-/// match `crate::metal`'s own occupancy-driven default width for the
-/// non-cooperative (serial) kernels this module emits exclusively. Folded
-/// into [`WgslKernel::entry`] would be redundant (`entry_name` already keys
-/// the pipeline cache by structure) — it is instead folded into the pipeline
-/// CACHE KEY `crate::wgpu_driver` builds, since two kernels sharing a
-/// structural name but a different workgroup size would need different
-/// compiled pipelines.
-pub const WORKGROUP_SIZE: u32 = 64;
+/// Threads per workgroup every v1 WGSL kernel dispatches with. See
+/// [`crate::sized::WORKGROUP_SIZE`] and `omega-runtime.toml`'s `[wgsl]`.
+/// Folded into [`WgslKernel::entry`] would be redundant (`entry_name`
+/// already keys the pipeline cache by structure) — it is instead folded
+/// into the pipeline CACHE KEY `crate::wgpu_driver` builds, since two
+/// kernels sharing a structural name but a different workgroup size would
+/// need different compiled pipelines.
+pub use crate::sized::WORKGROUP_SIZE;
 
 /// One compiled WGSL kernel: source text, its `@compute` entry point, the
 /// buffer-index -> data mapping a driver needs to bind before dispatch (the

@@ -71,6 +71,11 @@ use proxima_tensor::{
 };
 
 use crate::error::EmitError;
+#[cfg(all(
+    any(feature = "metal-packed-row-nsg2", feature = "metal-q4k-ggml-port"),
+    not(feature = "metal-q4k-split-k")
+))]
+use crate::sized::PACKED_ROW_NSG;
 use crate::sized::SIMD_WIDTH;
 
 /// One compiled kernel: MSL source, its entry point, the buffer-index ->
@@ -5491,19 +5496,6 @@ fn cooperative_reduce_width(
     SIMD_WIDTH
 }
 
-/// Simdgroups per threadgroup for the row-blocked packed path, mirroring
-/// ggml's `N_SG_Q4_K` (`ggml-metal-impl.h:33`). Feature-gated -- either
-/// `metal-packed-row-nsg2` (this crate's own body, widened experimentally) or
-/// `metal-q4k-ggml-port` (ggml's own body, dispatched at ggml's own nsg=2)
-/// wants it, and both want the identical `2`, so one constant serves both
-/// rather than each feature minting its own copy. Default-off until the nano
-/// bench in `docs/discipline.md` ROW 270 clears the compile-out-clean + e2e
-/// gates a production default requires.
-#[cfg(all(
-    any(feature = "metal-packed-row-nsg2", feature = "metal-q4k-ggml-port"),
-    not(feature = "metal-q4k-split-k")
-))]
-const PACKED_ROW_NSG: usize = 2;
 
 /// [`tiled_gemm_threadgroup_width`]'s own nsg multiplier for the packed
 /// row-blocked path -- `PACKED_ROW_NSG` with either nsg2 feature on and
