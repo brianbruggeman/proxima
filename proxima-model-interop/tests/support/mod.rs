@@ -19,7 +19,7 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use arrayvec::ArrayVec;
-use proxima_gguf::quant::{QuantError, q4_k, q5_k, q6_k, q8_0};
+use proxima_gguf::quant::{QuantError, q3_k, q4_k, q5_k, q6_k, q8_0};
 use proxima_gguf::tensor::MAX_DIMS;
 use proxima_gguf::{
     GgmlType, GgufModel, MetadataArray, MetadataValue, TensorPayload, write_complete,
@@ -56,10 +56,10 @@ fn random_vec(seed: u64, count: usize) -> Vec<f32> {
     (0..count).map(|_| lcg.next_unit()).collect()
 }
 
-/// Encodes `values` through `codec`'s real quantizer for the four codecs
-/// `proxima_gguf::quant` ships (`Q4_K`/`Q5_K`/`Q6_K`/`Q8_0`); `F32` is a
+/// Encodes `values` through `codec`'s real quantizer for the five codecs
+/// `proxima_gguf::quant` ships (`Q4_K`/`Q5_K`/`Q3_K`/`Q6_K`/`Q8_0`); `F32` is a
 /// plain little-endian reinterpret. For a `GgmlType` this workspace has no
-/// encoder for at all (`Q4_0`/`Q5_0`/`Q2_K`/`Q3_K`), returns a
+/// encoder for at all (`Q4_0`/`Q5_0`/`Q2_K`), returns a
 /// correctly-*sized* buffer (`GgmlType::block_layout`, the same arithmetic
 /// `ggml_nbytes` uses) with no encoder run over it: `bind::gguf_tensor_as_f32`
 /// rejects those types by `GgmlType` alone before ever reading a byte
@@ -76,6 +76,7 @@ pub fn encode_weights(codec: GgmlType, values: &[f32]) -> Vec<u8> {
             .collect(),
         GgmlType::Q4_K => encode_with(byte_len, values, q4_k::quantize),
         GgmlType::Q5_K => encode_with(byte_len, values, q5_k::quantize),
+        GgmlType::Q3_K => encode_with(byte_len, values, q3_k::quantize),
         GgmlType::Q6_K => encode_with(byte_len, values, q6_k::quantize),
         GgmlType::Q8_0 => encode_with(byte_len, values, q8_0::quantize),
         _ => vec![0u8; byte_len],

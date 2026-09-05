@@ -30,7 +30,7 @@ use alloc::vec::Vec;
 
 use proxima_gguf::MetadataValue;
 use proxima_gguf::pipe::ParsedGguf;
-use proxima_gguf::quant::{q4_k, q5_k, q6_k, q8_0};
+use proxima_gguf::quant::{q3_k, q4_k, q5_k, q6_k, q8_0};
 #[cfg(feature = "std")]
 use proxima_gguf::restack::{discover_experts, plan_stack, restack_into};
 use proxima_gguf::tensor::TensorInfo;
@@ -40,8 +40,8 @@ use crate::error::InteropError;
 
 /// Looks `name` up in `parsed`'s tensor directory, slices its bytes out of
 /// `file_bytes`, and decodes them to an owned `f32` buffer -- copied
-/// as-is for `F32`, dequantized for `Q4_K`/`Q5_K`/`Q6_K`/`Q8_0` (the four
-/// codecs [`proxima_gguf::quant`] already ships). Every other `GgmlType`
+/// as-is for `F32`, dequantized for `Q4_K`/`Q5_K`/`Q3_K`/`Q6_K`/`Q8_0` (the
+/// five codecs [`proxima_gguf::quant`] already ships). Every other `GgmlType`
 /// (`F16`/`Bf16`/integer/any other quant family) has no decoder here yet
 /// and errors rather than misreading bytes.
 ///
@@ -66,6 +66,7 @@ pub fn gguf_tensor_as_f32(
         GgmlType::F32 => Ok(reinterpret_f32(data)),
         GgmlType::Q4_K => dequantize(data, element_count, q4_k::dequantize),
         GgmlType::Q5_K => dequantize(data, element_count, q5_k::dequantize),
+        GgmlType::Q3_K => dequantize(data, element_count, q3_k::dequantize),
         GgmlType::Q6_K => dequantize(data, element_count, q6_k::dequantize),
         GgmlType::Q8_0 => dequantize(data, element_count, q8_0::dequantize),
         other => Err(InteropError::UnrepresentableGgmlType {
@@ -140,7 +141,7 @@ pub fn gguf_tensor_as_f32(
 /// `file_bytes`; [`InteropError::MisalignedFloat32Tensor`] if `name`'s
 /// tensor is `F32` but `file_bytes`'s base pointer leaves its byte range
 /// unaligned for `&[f32]`; [`InteropError::UnrepresentableGgmlType`] if
-/// `name`'s tensor is none of `F32`/`Q4_K`/`Q5_K`/`Q6_K`/`Q8_0`/`F16`/`Bf16`
+/// `name`'s tensor is none of `F32`/`Q4_K`/`Q5_K`/`Q3_K`/`Q6_K`/`Q8_0`/`F16`/`Bf16`
 /// -- a block-quantized type this crate has no dequantizer for at all, since
 /// `F16`/`Bf16` are the only codecs this function decodes packed that
 /// [`gguf_tensor_as_f32`] does not independently cover.
@@ -161,6 +162,7 @@ pub fn gguf_tensor_as_packed_block<'a>(
             }),
         GgmlType::Q4_K => Ok(proxima_tensor::cpu::QuantizedBlock::Q4K(bytes)),
         GgmlType::Q5_K => Ok(proxima_tensor::cpu::QuantizedBlock::Q5K(bytes)),
+        GgmlType::Q3_K => Ok(proxima_tensor::cpu::QuantizedBlock::Q3K(bytes)),
         GgmlType::Q6_K => Ok(proxima_tensor::cpu::QuantizedBlock::Q6K(bytes)),
         GgmlType::Q8_0 => Ok(proxima_tensor::cpu::QuantizedBlock::Q8_0(bytes)),
         GgmlType::F16 => Ok(proxima_tensor::cpu::QuantizedBlock::Float16(bytes)),
