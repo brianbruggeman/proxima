@@ -22674,3 +22674,67 @@ reading both generated files, not inferred from exit codes.
 `cargo nextest run -p omega --all-features` EXIT=0, 242 passed, 3 skipped;
 `bash scripts/omega-gate.sh` EXIT=0, all 8 steps PASS (242 tests, 2 doctests);
 `cargo nextest run -p proxima-model-interop --features metal` EXIT=0, 110 passed, 25 skipped.
+
+## ROW 307 -- Q3_K_M decode timing against Q4_K_S through the oracle: measured SLOWER by 1.06x, not the expected 0.81x
+
+**Card:** M6b slice, `proxima-wt-m6b`, branch `test/oracle-model-path-override`, off main `92ab594`.
+
+**What changed.** ROW 305's own "Q3_K_M decode timing (oracle), NOT run" scope note is closed.
+One new fn, `openchat_gguf_path`, in `proxima-model-interop/src/test_support.rs` beside
+`math_mode_from_env`: reads `PROXIMA_OPENCHAT_GGUF` -- the SAME name `omega/tests/device_streaming_ceiling.rs`
+already reads (`grep -n PROXIMA_OPENCHAT_GGUF omega/tests/device_streaming_ceiling.rs`), not a new
+one -- unset falls back to `ServingConfig::default().model_path`. Four call sites switched from
+`ServingConfig::default().model_path` to `crate::test_support::openchat_gguf_path()`: the oracle
+`bind::real_openchat_file::runs_the_cached_decode_loop_on_the_metal_backend_and_reports_the_plan_cache`,
+and `quality.rs`'s `default_vs_default_is_the_degenerate_control`, `metal_vs_cpu_reports_real_drift`,
+and `q3_k_m_variant_against_q4_k_s_reference_reports_real_drift`'s `reference_path` (its
+`variant_path` stays on ROW 305's own `variant_model_path`/`PROXIMA_OPENCHAT_GGUF_VARIANT` --
+distinct knob, unchanged). `serving.rs` and `generate.rs` stay env-free, per the brief. Unset
+behavior is identical to before this commit (same default constant, same call shape).
+
+**Timing table** (`PROXIMA_MAX_TOKENS=8`, release, `--features metal,instrument`, oracle test
+`bind::real_openchat_file::runs_the_cached_decode_loop_on_the_metal_backend_and_reports_the_plan_cache`,
+3 rounds interleaved Q4_K_S/Q3_K_M/Q4_K_S/Q3_K_M/Q4_K_S/Q3_K_M; quiet gate (`pgrep -l` names-only,
+never `-f`) empty and load-1 5.58 immediately before round 1, re-checked empty/2.7-5.1 before every
+subsequent round -- MEASURED, not informational):
+
+| loadout | on-disk bytes | steps 3..7 step_wall_ms mean | steps 3..7 gpu_exec_ms mean | plan_hits | plan_misses | generated_text |
+| --- | --- | --- | --- | --- | --- | --- |
+| Q4_K_S (`ServingConfig::default().model_path`) | 4,140,385,376 | 27.762 (n=15, r1 27.730/r2 27.765/r3 27.792) | 26.955 (n=15, r1 26.938/r2 26.973/r3 26.955) | 5 | 3 | "Here is a simple Python function that returns" |
+| Q3_K_M (`PROXIMA_OPENCHAT_GGUF=.../openchat-3.5-1210.Q3_K_M.gguf`) | 3,518,996,512 | 29.542 (n=15, r1 29.415/r2 29.622/r3 29.590) | 28.699 (n=15, r1 28.515/r2 28.785/r3 28.798) | 5 | 3 | "Here is a simple Python function that returns" |
+
+`device_allocated_bytes` (step 7, steady state): Q4_K_S 4,152,246,272; Q3_K_M 4,056,219,648 --
+2.3% smaller, not the 15% the on-disk byte delta would predict. `phys_footprint_bytes` (step 7):
+Q4_K_S 165,218,112; Q3_K_M 686,852,992 -- Q3_K_M's resident set is 4.16x LARGER despite the smaller
+checkpoint; `nocopy_uploads` is 0 for Q4_K_S and 1 for Q3_K_M every steady-state step, so some part
+of Q3_K_M's weight path is taking a copying/resident route Q4_K_S's is not. That mechanism is not
+traced further here -- residual, not explained by this row.
+
+**Ratio.** On-disk bytes: 3,518,996,512 / 4,140,385,376 = 0.850 (Q3_K_M carries 85.0% of Q4_K_S's
+bytes, so a bandwidth-bound decode step should run in ~0.85x the time). Measured `gpu_exec_ms`
+ratio: 28.699 / 26.955 = 1.065 -- Q3_K_M is 6.5% SLOWER, not 15% faster. `step_wall_ms` ratio:
+29.542 / 27.762 = 1.064, same direction, same size. The 0.81x-if-bandwidth-holds hypothesis this
+slice's brief carried is REFUTED by this measurement: bandwidth did not hold as the dominant term:
+either the 3-bit unpack in the Q3_K dequant kernel costs more than the saved bytes buy back, or the
+`nocopy_uploads=1`/4.16x resident-footprint difference above is doing it, or both -- distinguishing
+those needs a per-op GPU time breakdown this row does not have (residual).
+
+**Text.** Both loadouts produced the identical 8-token greedy completion, "Here is a simple Python
+function that returns", across all 3 rounds each -- consistent with ROW 305's own quality finding
+that Q3_K_M vs Q4_K_S first diverges mid-generation (`code-04` at step 1 in an 8-prompt set, most
+prompts holding `exact_match=1.0` through several steps), not on token 0-7 of this row's single
+fixed prompt.
+
+**Gates:**
+- `cargo clippy -p proxima-model-interop --all-targets --features metal,instrument -- -D warnings`: EXIT=0, zero warnings (one intermediate EXIT=101 fixed in the same commit: `quality.rs`'s `use crate::serving::{GPU_LAYERS_ALL, ServingConfig}` lost its now-unused `ServingConfig` import once all three call sites in that module switched to `openchat_gguf_path()`).
+- `cargo nextest run -p proxima-model-interop --features metal,instrument`: 110 tests run, 110 passed, 28 skipped, EXIT=0.
+- `cargo nextest run -p proxima-model-interop --features std`: 96 tests run, 96 passed, 22 skipped, EXIT=0.
+
+**Re-prove command:**
+```
+CARGO_TARGET_DIR=/tmp/proxima-row307-target CARGO_TERM_COLOR=never cargo test -p proxima-model-interop --release --features metal,instrument --lib --no-run
+PROXIMA_MAX_TOKENS=8 <built-binary> --exact --nocapture --ignored bind::real_openchat_file::runs_the_cached_decode_loop_on_the_metal_backend_and_reports_the_plan_cache
+PROXIMA_MAX_TOKENS=8 PROXIMA_OPENCHAT_GGUF=<path to a Q3_K_M gguf> <built-binary> --exact --nocapture --ignored bind::real_openchat_file::runs_the_cached_decode_loop_on_the_metal_backend_and_reports_the_plan_cache
+```
+Confirm the `pgrep -l` quiet gate (names-only pattern in this row's own repo brief, never `-f`) is
+empty and load-1 under 10 immediately before each round.
