@@ -2767,6 +2767,23 @@ mod real_openchat_file {
             .unwrap_or(24)
     }
 
+    /// `PROXIMA_MATH_MODE=safe|relaxed` -- the one place this crate reads
+    /// this knob (never in library code; `proxima-model-interop/src/
+    /// generate.rs` used to shadow it under a second name,
+    /// `PROXIMA_METAL_MATH_MODE`, which is why `proxima-tensor/docs/
+    /// discipline.md` ROW 299/300's harness scripts, which only ever set
+    /// the old name, silently ran every "Safe" arm at this test's own
+    /// `Relaxed` default). Unset keeps `ServingConfig::default()`'s own
+    /// `Relaxed` (ROW 296/297's measured winner).
+    #[cfg(all(feature = "metal", target_os = "macos"))]
+    fn math_mode_from_env() -> omega::MathMode {
+        match std::env::var("PROXIMA_MATH_MODE").as_deref() {
+            Ok("safe") => omega::MathMode::Safe,
+            Ok("relaxed") | Err(_) => omega::MathMode::Relaxed,
+            Ok(other) => panic!("PROXIMA_MATH_MODE={other}: expected `safe` or `relaxed`"),
+        }
+    }
+
     /// [`install_stdout_telemetry`]'s handle: the installed recorder plus a
     /// running total of records this probe's own background pump (or the
     /// caller's own final [`Self::drain_and_total`] call) has drained,
@@ -3148,15 +3165,8 @@ mod real_openchat_file {
         let prompt = decode_loop_prompt();
         let max_tokens = decode_loop_max_tokens();
 
-        // `PROXIMA_MATH_MODE=safe|relaxed` -- test-edge only (never read in
-        // library code), ROW 296/297's own Safe-vs-Relaxed bake-off knob.
-        // Unset keeps `ServingConfig::default()`'s own `Relaxed` default.
         #[cfg(target_os = "macos")]
-        let math_mode = match std::env::var("PROXIMA_MATH_MODE").as_deref() {
-            Ok("safe") => omega::MathMode::Safe,
-            Ok("relaxed") | Err(_) => omega::MathMode::Relaxed,
-            Ok(other) => panic!("PROXIMA_MATH_MODE={other}: expected `safe` or `relaxed`"),
-        };
+        let math_mode = math_mode_from_env();
         let serving_config = ServingConfig {
             kv_cache_key_quant: GgmlType::F32,
             kv_cache_value_quant: GgmlType::F32,
