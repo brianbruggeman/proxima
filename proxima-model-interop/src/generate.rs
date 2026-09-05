@@ -603,16 +603,13 @@ impl Default for FamilyGpuStats {
     }
 }
 
-/// `blk.7.ffn_down.weight` -> `ffn_down.weight`: drops exactly one
-/// `.`-delimited numeric segment (the layer index every `blk.N.*` weight
-/// name carries) so [`report_op_timings`] can sum one matmul KIND across
-/// all 32 layers instead of reporting 32 near-identical lines.
+/// [`report_op_timings`]'s own alias for [`omega::metal::weight_family`] --
+/// `omega::metal::KindFilter`'s `family:` term reuses the SAME function, so
+/// there is exactly one place that strips a `blk.N.*` weight name's layer
+/// index, not a copy per caller.
 #[cfg(all(feature = "instrument", feature = "metal", target_os = "macos"))]
 fn strip_layer_index(name: &str) -> String {
-    name.split('.')
-        .filter(|segment| segment.parse::<u32>().is_err())
-        .collect::<Vec<&str>>()
-        .join(".")
+    omega::metal::weight_family(name)
 }
 
 /// A checkpoint's weights, bound once from a caller-owned byte view, plus
