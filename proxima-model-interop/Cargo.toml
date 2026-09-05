@@ -94,6 +94,9 @@ instrument = ["proxima-tensor/instrument", "omega?/instrument", "dep:proxima-tel
 # `metal-packed-row-nsg2` joins per ROW 311: halves the packed-row matvec
 # threadgroup count (`omega/Cargo.toml`'s own comment carries the mechanism),
 # output identical, ships default-on per the less-work rule.
+# `metal-q4k-ggml-port` joins per ROW 315 (`omega/Cargo.toml`'s own comment
+# carries the mechanism and the interleaved-bake-off numbers) -- the fixed
+# body is less work with identical output, default-on per the same rule.
 metal = [
     "dep:omega",
     "std",
@@ -104,6 +107,7 @@ metal = [
     "cached-attention-streaming",
     "reduce-epilogue-fusion",
     "metal-packed-row-nsg2",
+    "metal-q4k-ggml-port",
 ]
 # cached-attention physical step for the real serving/decode harness; folded
 # into `metal`'s default shape per ROW 282 but kept individually selectable
