@@ -331,9 +331,15 @@ runs; flips `metal`'s default feature list on (owner's less-work rule: work down
 beyond CoV).
 
 What is left after the third wave, per token on the default at main `af918bb` (ROW 286, includes
-`metal-concurrent-dispatch`): quiet-box `step_wall_ms` 33.032 ms/token (CoV 0.52%) against
-`llama-bench` 57.32 t/s mean (17.445 ms/token, CoV 0.55%) — **1.89x**. Progression across all
-three waves, ms/token: 67.9 → 52.7 → 43.0 → 40.9 → 40.5 → ~37.8 → 33.0.
+`metal-concurrent-dispatch`, corrected to steady state by ROW 288): steady-state `step_wall_ms`
+(steps 3..7 only, `plan_hits` nonzero and rising every step) 28.82 ms/token, mean of 3 rounds
+28.542 (CoV 0.70%), against `llama-bench` 57.32 t/s mean (17.445 ms/token, CoV 0.55%) —
+**1.652x** (1.636x on the 3-round mean). ROW 286's steps-1..7 mean (33.032 ms/token, 1.8935x) is
+retired: steps 1-2 are plan misses (bind + pipeline compile, ~45/43 ms) that `llama-bench`'s
+`tg32` never pays, so the two numbers were not measuring the same thing (`discipline.md`, ROW
+288). Progression across all three waves, ms/token (steps-1..7 convention, pre-correction; the
+final entry is superseded by the steady-state figure above): 67.9 → 52.7 → 43.0 → 40.9 → 40.5 →
+~37.8 → 33.0 (steps 1..7, retired) / 28.82 (steps 3..7 steady state, ROW 288).
 `cached-attention-streaming` joins the `metal` default feature list (ROW 282, `land/fattn-on`)
 on top of this same tree by the owner's less-work rule -- `emit_calls` 938 → 616/step, text and
 wall unchanged within CoV -- so the default's feature set as of `land/fattn-on` is `metal`'s
@@ -366,7 +372,7 @@ incumbent, not the floor; the floor is bytes moved against the device's spec ban
 |---|---|---|---|---|
 | hardware floor (4.169 GB/token at 400 GB/s spec) | 10.4 | 400 (spec) | 100% | DERIVED, `design-task.md:92`; bytes/token from the ROW 272 correction, `discipline.md:312` (`total_operand_bytes` 4.169 GB/step) |
 | llama.cpp b25346221 | 17.45 | 239 | 60% | MEASURED, `discipline.md:333-336` (17.445 ms/token, CoV 0.55%) |
-| default, main `af918bb` (ROW 286) | 33.0 | 126 | 32% | MEASURED, `discipline.md:333-334` (`step_wall_ms` 33.032 ms/token, CoV 0.52%) |
+| default, main `af918bb` (ROW 286, steady-state correction ROW 288) | 28.82 | 145 | 36% | MEASURED, ROW 288 (`step_wall_ms` steps 3..7 only, `plan_hits` nonzero every step, 28.82 ms/token r3 / 28.542 mean of 3 rounds); supersedes the steps-1..7 mean (33.032 ms/token, CoV 0.52%) previously cited at `discipline.md:333-334` |
 | matvecs alone, in-buffer ablation (ROW 287, landing) | 23.24 | 179 | 45% | MEASURED, `audit-2026-09-04.md:22` pointer; ALL 27.04 ms / MATVEC 23.24 ms (225 ops) / NOT-MATVEC 4.05 ms, residual −0.25 ms |
 
 Owner target: "5x llama" = 3.5 ms/token. At the 400 GB/s spec that is ≤ 1.4 GB/token; at a
