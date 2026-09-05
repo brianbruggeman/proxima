@@ -8,9 +8,11 @@
 # documented only in doc-comment prose on that block. `omega-gate.sh` proves
 # the default set and `--all-features`; nothing proves a `metal-*` flag
 # ALONE, nothing proves the default-minus-one combinations, and nothing
-# proves the one pairing the HazardTracker's own doc calls out as the
-# argument that must hold: `metal-concurrent-dispatch` reasons about hazards
-# over "the arena" (`metal-plan-stable-buffers`'s `BufferArena`).
+# proves the pairing `metal.rs`'s own `HazardTracker` doc calls out as the
+# argument that must hold: it reasons about hazards over "the arena"
+# (`metal-plan-stable-buffers`'s `BufferArena`) whenever a `Plan`'s runtime
+# `DispatchType` is `Concurrent` (ROW 312 made that choice a runtime value,
+# not a feature, so it is exercised by ordinary test runs, not this matrix).
 #
 # The feature list is NOT hardcoded here -- it is derived from
 # omega/Cargo.toml's `[features]` block at run time (see `all_features` and
@@ -22,13 +24,12 @@
 # reachable. Cargo features are a pure union: once anything in the resolved
 # graph requires a feature, it is on, and there is no subtraction operator.
 # Probed directly (`cargo build -p omega --no-default-features --features
-# metal-concurrent-dispatch -v`, grepped for `feature="..."` in rustc's
-# invocation): every one of the 6 flags `metal` folds in on its own line
-# (`metal-output-placement`, `metal-wide-cooperative-reduce`,
-# `metal-q5k-pair-dot`, `metal-plan-stable-buffers`,
-# `cached-attention-streaming`, `metal-concurrent-dispatch`) is UNREACHABLE
+# metal -v`, grepped for `feature="..."` in rustc's invocation): every one
+# of the 5 flags `metal` folds in on its own line (`metal-output-placement`,
+# `metal-wide-cooperative-reduce`, `metal-q5k-pair-dot`,
+# `metal-plan-stable-buffers`, `cached-attention-streaming`) is UNREACHABLE
 # to subtract while `metal` is selected -- `metal`'s own `[features]` entry
-# hardwires them, so any path that turns on `metal` turns on all six,
+# hardwires them, so any path that turns on `metal` turns on all five,
 # regardless of entry point. `std` is likewise unreachable to subtract:
 # both `metal` and `cpu` (the other two members of `default`) re-add it
 # unconditionally. Only `cpu` and `metal` themselves are subtractable from
@@ -36,17 +37,6 @@
 # `default`'s own list. This is a Cargo semantics fact, not a gap in this
 # script -- the unreachable rows are printed as SKIP with the reason, never
 # silently omitted.
-#
-# CELL 5 -- `metal-concurrent-dispatch` WITHOUT `metal-plan-stable-buffers`
-# -- is UNREACHABLE for the identical reason. `metal-concurrent-dispatch =
-# ["metal"]` has no path to `metal` other than through the umbrella
-# feature, and `metal`'s own list unconditionally includes
-# `metal-plan-stable-buffers`. Probed the same way as cell 3 above: building
-# `--no-default-features --features metal-concurrent-dispatch` resolves
-# `metal-plan-stable-buffers` into the same rustc invocation. There is
-# currently no cell that isolates the HazardTracker's WAR argument from the
-# arena it reasons about; that gap is reported, not hidden behind a passing
-# cell that never selected the combination it claims to.
 #
 # Usage: bash scripts/omega-feature-matrix.sh
 # Exits 0 if every reachable cell passes, non-zero (after running every
@@ -98,13 +88,11 @@ if [ "${1:-}" = "--list" ]; then
     printf '   [cell3] default minus cpu\n'
     printf '   [cell3] default minus metal\n'
     cell_count=$((cell_count + 2))
-    for forced_flag in std metal-output-placement metal-wide-cooperative-reduce metal-q5k-pair-dot metal-plan-stable-buffers cached-attention-streaming metal-concurrent-dispatch; do
+    for forced_flag in std metal-output-placement metal-wide-cooperative-reduce metal-q5k-pair-dot metal-plan-stable-buffers cached-attention-streaming; do
         printf '   [cell3] default minus %s -- SKIP (unreachable, additive features)\n' "${forced_flag}"
         cell_count=$((cell_count + 1))
     done
     printf '   [cell4] all-features\n'
-    cell_count=$((cell_count + 1))
-    printf '   [cell5] metal-concurrent-dispatch without metal-plan-stable-buffers -- SKIP (unreachable, additive features)\n'
     cell_count=$((cell_count + 1))
     printf '   [cell6] default clippy\n'
     printf '   [cell6] all-features clippy\n'
@@ -202,9 +190,9 @@ run_nextest_cell "cell3: default minus cpu" --no-default-features --features std
 run_nextest_cell "cell3: default minus metal" --no-default-features --features std,cpu
 skip_cell "cell3: default minus std" \
     "UNREACHABLE: both metal and cpu (the other two members of default) re-add std unconditionally (metal = [\"std\", ...], cpu = [\"std\", ...]); Cargo features are additive-only"
-for forced_flag in metal-output-placement metal-wide-cooperative-reduce metal-q5k-pair-dot metal-plan-stable-buffers cached-attention-streaming metal-concurrent-dispatch; do
+for forced_flag in metal-output-placement metal-wide-cooperative-reduce metal-q5k-pair-dot metal-plan-stable-buffers cached-attention-streaming; do
     skip_cell "cell3: default minus ${forced_flag}" \
-        "UNREACHABLE: metal's own [features] entry hardwires ${forced_flag} into every build that selects metal; probed via 'cargo build -p omega --no-default-features --features metal-concurrent-dispatch -v', ${forced_flag} appeared in the resolved feature set regardless of entry point"
+        "UNREACHABLE: metal's own [features] entry hardwires ${forced_flag} into every build that selects metal; probed via 'cargo build -p omega --no-default-features --features metal -v', ${forced_flag} appeared in the resolved feature set regardless of entry point"
 done
 
 # ---------------------------------------------------------------------
@@ -212,13 +200,6 @@ done
 # ---------------------------------------------------------------------
 printf '\n== [cell 4] --all-features ==\n'
 run_nextest_cell "cell4: all-features" --all-features
-
-# ---------------------------------------------------------------------
-# cell 5: metal-concurrent-dispatch WITHOUT metal-plan-stable-buffers
-# ---------------------------------------------------------------------
-printf '\n== [cell 5] metal-concurrent-dispatch without metal-plan-stable-buffers ==\n'
-skip_cell "cell5: metal-concurrent-dispatch without metal-plan-stable-buffers" \
-    "UNREACHABLE: metal-concurrent-dispatch = [\"metal\"] has no path to metal other than the umbrella feature, and metal's own [features] entry unconditionally includes metal-plan-stable-buffers; probed via 'cargo build -p omega --no-default-features --features metal-concurrent-dispatch -v', metal-plan-stable-buffers appeared in the resolved feature set. The HazardTracker's WAR argument over the arena is therefore exercised only jointly with the arena feature by every cell in this script, never in isolation -- reported as a real gap, not hidden."
 
 # ---------------------------------------------------------------------
 # cell 6: clippy on cells 2 and 4's feature sets

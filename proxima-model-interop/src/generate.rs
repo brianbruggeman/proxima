@@ -78,6 +78,11 @@ use omega::backend::{Engine, Plan, execute_plan_named, mark_resident, plan_named
 // `metal`+macos gate that type itself lives behind.
 #[cfg(all(feature = "metal", target_os = "macos"))]
 use omega::backend::set_math_mode;
+// `set_dispatch_type` (unlike `mark_resident` above) takes `metal::DispatchType`
+// in its own signature, so it needs the same `metal`+macos gate that type
+// itself lives behind -- same reasoning as `set_math_mode` above.
+#[cfg(all(feature = "metal", target_os = "macos"))]
+use omega::backend::set_dispatch_type;
 #[cfg(all(feature = "instrument", feature = "metal", target_os = "macos"))]
 use omega::metal::OpGpuTiming;
 #[cfg(all(feature = "instrument", feature = "metal", target_os = "macos"))]
@@ -1308,6 +1313,11 @@ pub(crate) struct BackendRuntime {
     /// as `resident_names`/`mark_resident` above.
     #[cfg(all(feature = "metal", target_os = "macos"))]
     math_mode: omega::metal::MathMode,
+    /// `ServingConfig::dispatch_type`, read once at construction and applied
+    /// to every freshly-built [`Plan`] below (`set_dispatch_type`'s own call
+    /// sites) -- same pattern as `math_mode` immediately above.
+    #[cfg(all(feature = "metal", target_os = "macos"))]
+    dispatch_type: omega::metal::DispatchType,
     /// [`Self::evaluate_with_placements`]'s own plan cache -- same
     /// `(new_count, merged_len)` keying as `plans` above, but holding
     /// `omega::metal::Plan` directly rather than the backend-polymorphic
@@ -1332,6 +1342,8 @@ impl BackendRuntime {
             plans: alloc::collections::BTreeMap::new(),
             #[cfg(all(feature = "metal", target_os = "macos"))]
             math_mode: config.math_mode,
+            #[cfg(all(feature = "metal", target_os = "macos"))]
+            dispatch_type: config.dispatch_type,
             #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
             placed_plans: alloc::collections::BTreeMap::new(),
             plan_hits: 0,
@@ -1374,7 +1386,10 @@ impl BackendRuntime {
                 let mut plan = plan_named(self.engine, None, program, symbols, named, outputs)?;
                 mark_resident(&mut plan, resident_names);
                 #[cfg(target_os = "macos")]
-                set_math_mode(&mut plan, self.math_mode);
+                {
+                    set_math_mode(&mut plan, self.math_mode);
+                    set_dispatch_type(&mut plan, self.dispatch_type);
+                }
                 Ok(plan)
             },
         )?;
@@ -1417,6 +1432,7 @@ impl BackendRuntime {
                 let mut plan = plan_named_placed(program, symbols, named, outputs)?;
                 plan.mark_resident(resident_names);
                 plan.set_math_mode(self.math_mode);
+                plan.set_dispatch_type(self.dispatch_type);
                 Ok(plan)
             },
         )?;
@@ -1629,6 +1645,7 @@ impl BackendRuntime {
                 let mut plan = plan_named(self.engine, None, program, symbols, named, outputs)?;
                 mark_resident(&mut plan, resident_names);
                 set_math_mode(&mut plan, self.math_mode);
+                set_dispatch_type(&mut plan, self.dispatch_type);
                 Ok(plan)
             },
         )?;

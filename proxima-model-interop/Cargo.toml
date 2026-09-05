@@ -82,14 +82,9 @@ instrument = ["proxima-tensor/instrument", "omega?/instrument", "dep:proxima-tel
 # `generated_text` identical across all 3 bake-off rounds. The owner's rule:
 # keep a less-work change when output is identical and wall clock is not
 # worse beyond noise, even if wall clock does not visibly move.
-# `metal-concurrent-dispatch` joins per ROW 285's bake-off: the serial
-# encoder implies a barrier between every pair of dispatches; the
-# `HazardTracker` emits `memoryBarrierWithScope(Buffers)` only at a genuine
-# RAW/WAW/WAR hazard, 419 of 616 ops/step. `gpu_exec_ms` mean over 3
-# interleaved rounds fell 29.267 -> 27.258 ms (beyond both arms' CoV,
-# 0.84%/1.05%), wall mean 36.556 -> 34.725 ms (ON <= OFF + CoV every round),
-# `device_allocated_bytes` unchanged, `generated_text` identical across all
-# 3 bake-off rounds plus 3 extra determinism runs.
+# The encoder dispatch type (ROW 285's bake-off, then ROW 312) is a runtime
+# `Plan::set_dispatch_type`/`omega::DispatchType` value, not a feature -- see
+# that type's own doc for the current default and rationale.
 # `reduce-epilogue-fusion` joins per the owner's less-work rule: on the real
 # openchat cached-decode oracle, `emit_calls` 616 -> 520, `barriers` 419 ->
 # 323 (3 of 4 epilogued reduces per layer fuse into their reduce),
@@ -107,7 +102,6 @@ metal = [
     "kv-capacity-bucket",
     "metal-plan-stable-buffers",
     "cached-attention-streaming",
-    "metal-concurrent-dispatch",
     "reduce-epilogue-fusion",
     "metal-packed-row-nsg2",
 ]
@@ -145,8 +139,6 @@ metal-output-placement = ["omega?/metal-output-placement"]
 metal-buffer-pool = ["omega?/metal-buffer-pool"]
 # passthrough to `omega/metal-plan-stable-buffers` so the decode harness can measure that arm.
 metal-plan-stable-buffers = ["omega?/metal-plan-stable-buffers"]
-# passthrough to `omega/metal-concurrent-dispatch` so the decode harness can measure that arm.
-metal-concurrent-dispatch = ["omega?/metal-concurrent-dispatch"]
 # passthrough to `omega/metal-wide-cooperative-reduce` so the decode harness can measure that arm.
 metal-wide-cooperative-reduce = ["omega?/metal-wide-cooperative-reduce"]
 # passthrough to `omega/metal-q4k-mask-fma` so the decode harness can measure that arm.

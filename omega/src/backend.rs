@@ -513,6 +513,30 @@ pub fn set_math_mode(plan: &mut Plan, math_mode: metal::MathMode) {
     }
 }
 
+/// Sets [`metal::DispatchType`] on [`Plan::Metal`] -- see that type's own
+/// doc for the measured rationale (`proxima-tensor/docs/discipline.md` ROW
+/// 311/312). A no-op on every other arm: `Plan::Cpu`'s interpreter has no
+/// compute encoder to open, and v1's `wgpu_driver::WgpuPlan` has no
+/// analogous knob. Gated on `metal`+macos (unlike [`mark_resident`]) because
+/// its own parameter, [`metal::DispatchType`], only exists in that build.
+#[cfg(all(feature = "metal", target_os = "macos"))]
+pub fn set_dispatch_type(plan: &mut Plan, dispatch_type: metal::DispatchType) {
+    match plan {
+        #[cfg(feature = "cpu")]
+        Plan::Cpu(_) => {}
+        #[cfg(all(feature = "metal", target_os = "macos"))]
+        Plan::Metal(metal_plan) => metal_plan.set_dispatch_type(dispatch_type),
+        #[cfg(feature = "wgpu-backend")]
+        Plan::Wgpu(_) => {}
+        #[cfg(not(any(
+            feature = "cpu",
+            all(feature = "metal", target_os = "macos"),
+            feature = "wgpu-backend"
+        )))]
+        _ => match *plan {},
+    }
+}
+
 /// Registers the page-aligned, process-lifetime mapping backing a loaded
 /// checkpoint's tensor bytes -- see `metal::register_checkpoint_mapping`'s
 /// own doc for the mechanism this feeds. A no-op unless the Metal backend is

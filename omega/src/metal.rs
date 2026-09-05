@@ -196,7 +196,6 @@ use objc2::runtime::ProtocolObject;
 use objc2_foundation::{NSError, NSString};
 #[cfg(feature = "instrument")]
 use objc2_foundation::NSUInteger;
-#[cfg(feature = "metal-concurrent-dispatch")]
 use objc2_metal::{MTLBarrierScope, MTLDispatchType};
 use objc2_metal::{
     MTLBuffer, MTLCommandBuffer, MTLCommandEncoder, MTLCommandQueue, MTLCompileOptions,
@@ -384,6 +383,11 @@ pub struct Plan {
     /// caller overrides it with [`Plan::set_math_mode`]. See [`MathMode`]'s
     /// own doc for the measured rationale.
     math_mode: MathMode,
+    /// Which [`MTLDispatchType`] [`execute_plan_with_placements`] opens its
+    /// compute encoder with -- [`DispatchType::default`] (`Concurrent`)
+    /// until a caller overrides it with [`Plan::set_dispatch_type`]. See
+    /// [`DispatchType`]'s own doc for the measured rationale (ROW 311/312).
+    dispatch_type: DispatchType,
     /// CARD 6.5: whole-buffer, size-class-reused device output buffers for
     /// every position in `prepared.resolved`. Built lazily, on the first
     /// call that actually consults a placement (`arena_placement`) --
@@ -475,6 +479,15 @@ impl Plan {
     /// other one.
     pub fn set_math_mode(&mut self, math_mode: MathMode) {
         self.math_mode = math_mode;
+    }
+
+    /// Overrides this plan's [`DispatchType`] from [`DispatchType::default`]
+    /// (`Concurrent`). Safe to call any time before an `execute_plan*` call
+    /// -- unlike [`Self::set_math_mode`], this never invalidates
+    /// `resolved_steps`: a plan's compiled pipelines are the same regardless
+    /// of which encoder dispatch mode runs them.
+    pub fn set_dispatch_type(&mut self, dispatch_type: DispatchType) {
+        self.dispatch_type = dispatch_type;
     }
 
     /// The arena's live-bytes high-water mark reached while it was built --
@@ -591,6 +604,7 @@ pub fn plan(
         block_dtypes,
         resident_nodes: BTreeSet::new(),
         math_mode: MathMode::default(),
+        dispatch_type: DispatchType::default(),
         #[cfg(feature = "metal-plan-stable-buffers")]
         arena: core::cell::OnceCell::new(),
         #[cfg(feature = "metal-plan-stable-buffers")]
@@ -915,7 +929,7 @@ pub fn read_placed_buffer_f32(
     .to_vec()
 }
 
-/// `metal-concurrent-dispatch`'s dataflow-hazard set, generic over the
+/// [`DispatchType::Concurrent`]'s dataflow-hazard set, generic over the
 /// identity type so this logic is testable without a real Metal device
 /// (`Id = usize`/`&str` in tests, `Id = *const ProtocolObject<dyn MTLBuffer>`
 /// — pointer identity from [`Retained::as_ptr`] — on the real driver path).
@@ -927,15 +941,15 @@ pub fn read_placed_buffer_f32(
 /// [`BufferArena`] reuses a whole retired slot's buffer object for a later
 /// position). A fresh, never-before-seen buffer (this op's own freshly
 /// [`allocate_buffer`]d output) triggers neither: nothing else has touched
-/// that pointer yet.
-#[cfg(feature = "metal-concurrent-dispatch")]
+/// that pointer yet. Only instantiated on [`DispatchType::Concurrent`]'s
+/// path -- [`DispatchType::Serial`] never allocates one, since a serial
+/// encoder already orders every dispatch for it.
 #[derive(Debug)]
 struct HazardTracker<Id: Eq + core::hash::Hash + Copy> {
     written: std::collections::HashSet<Id>,
     read: std::collections::HashSet<Id>,
 }
 
-#[cfg(feature = "metal-concurrent-dispatch")]
 impl<Id: Eq + core::hash::Hash + Copy> HazardTracker<Id> {
     fn new() -> Self {
         Self {
@@ -990,7 +1004,6 @@ impl<Id: Eq + core::hash::Hash + Copy> HazardTracker<Id> {
 /// behavior) — an operand missing from `device_buffers` means the encode
 /// this identity feeds is already wrong, so hiding it from the hazard check
 /// only hides a real bug behind a missing barrier.
-#[cfg(feature = "metal-concurrent-dispatch")]
 fn resolve_hazard_inputs(
     operands: impl Iterator<Item = NodeId>,
     device_buffers: &BTreeMap<NodeId, DeviceBuffer>,
@@ -1013,7 +1026,6 @@ fn resolve_hazard_inputs(
 /// (placement -> arena slot -> fresh allocation) by the caller before this
 /// runs, since every bound op writes exactly one device buffer. Returns
 /// whether the caller must emit a barrier before encoding this op.
-#[cfg(feature = "metal-concurrent-dispatch")]
 fn hazard_step<Id: Eq + core::hash::Hash + Copy>(
     tracker: &mut HazardTracker<Id>,
     inputs: &[Id],
@@ -1100,7 +1112,7 @@ fn hazard_step<Id: Eq + core::hash::Hash + Copy>(
 ///   if hazard tracking did not cover this, that test would read stale
 ///   (pre-write) bytes instead of the fresh write, and it does not.
 ///
-/// With `metal-concurrent-dispatch` on, the paragraph above no longer
+/// On [`DispatchType::Concurrent`], the paragraph above no longer
 /// applies as written: the encoder is opened with
 /// `computeCommandEncoderWithDispatchType(Concurrent)` instead of the
 /// dispatch-type-less `computeCommandEncoder()`, which turns OFF the
@@ -1410,24 +1422,17 @@ pub fn execute_plan_with_placements(
         .ok_or_else(|| MetalError::CompileFailed {
             log: "command queue refused to hand out a command buffer".to_string(),
         })?;
-    #[cfg(not(feature = "metal-concurrent-dispatch"))]
-    let encoder =
-        command_buffer
-            .computeCommandEncoder()
-            .ok_or_else(|| MetalError::CompileFailed {
-                log: "command buffer refused to hand out a compute encoder".to_string(),
-            })?;
     // `Concurrent` lets independent dispatches (e.g. Q/K/V from one normed
     // input) overlap instead of draining the pipeline between every op --
-    // see this function's own doc for why that requires [`HazardTracker`]
-    // below to insert the barriers the `Serial` type used to give for free.
-    #[cfg(feature = "metal-concurrent-dispatch")]
+    // see [`DispatchType`]'s own doc for why that requires [`HazardTracker`]
+    // below to insert the barriers `Serial` gives for free by never
+    // overlapping any two dispatches in the first place.
+    let dispatch_type = plan.dispatch_type;
     let encoder = command_buffer
-        .computeCommandEncoderWithDispatchType(MTLDispatchType::Concurrent)
+        .computeCommandEncoderWithDispatchType(dispatch_type.as_mtl())
         .ok_or_else(|| MetalError::CompileFailed {
-            log: "command buffer refused to hand out a concurrent compute encoder".to_string(),
+            log: "command buffer refused to hand out a compute encoder".to_string(),
         })?;
-    #[cfg(feature = "metal-concurrent-dispatch")]
     let mut hazards: HazardTracker<*const ProtocolObject<dyn MTLBuffer>> = HazardTracker::new();
 
     // diagnostic-only, `instrument`-gated, always emitted at `trace` level
@@ -1485,35 +1490,42 @@ pub fn execute_plan_with_placements(
             // `hazard_inputs`/`hazard_output` collected, no
             // `needs_barrier`/`record` call, no barrier emitted on its
             // account.
-            #[cfg(feature = "metal-concurrent-dispatch")]
-            let hazard_inputs = resolve_hazard_inputs(
-                bound.operands().iter().map(|(operand, _, _)| *operand),
-                &device_buffers,
-            )?;
-            // resolved ONCE, before the hazard check, from the exact same
-            // placement -> arena -> fresh-allocation chain `encode_op` would
-            // otherwise pick independently below: `needs_barrier` and
-            // `record` used to see two different identities for a fresh
-            // allocation (the check saw `None`, since nothing is known
-            // before `encode_op` allocates; the record afterward saw the
-            // real pointer), so a WAW/WAR hazard against an address Metal
-            // happens to reuse for that allocation could never be caught.
-            // Allocating here and handing the SAME buffer into `encode_op`
-            // via `placement` closes that gap.
-            #[cfg(feature = "metal-concurrent-dispatch")]
-            let resolved_output: DeviceBuffer = match placement {
-                Some((buffer, offset)) => (buffer.clone(), offset),
-                None => (allocate_buffer(&device, bound_output_len(bound), bound.dtype)?, 0),
+            // `Serial` never overlaps two dispatches, so no hazard this
+            // tracker catches could ever race -- skip it entirely rather
+            // than pay the resolve/record bookkeeping for barriers that
+            // would never fire.
+            let resolved_output: Option<DeviceBuffer> = if dispatch_type == DispatchType::Concurrent {
+                let hazard_inputs = resolve_hazard_inputs(
+                    bound.operands().iter().map(|(operand, _, _)| *operand),
+                    &device_buffers,
+                )?;
+                // resolved ONCE, before the hazard check, from the exact same
+                // placement -> arena -> fresh-allocation chain `encode_op`
+                // would otherwise pick independently below: `needs_barrier`
+                // and `record` used to see two different identities for a
+                // fresh allocation (the check saw `None`, since nothing is
+                // known before `encode_op` allocates; the record afterward
+                // saw the real pointer), so a WAW/WAR hazard against an
+                // address Metal happens to reuse for that allocation could
+                // never be caught. Allocating here and handing the SAME
+                // buffer into `encode_op` via `placement` closes that gap.
+                let resolved: DeviceBuffer = match placement {
+                    Some((buffer, offset)) => (buffer.clone(), offset),
+                    None => (allocate_buffer(&device, bound_output_len(bound), bound.dtype)?, 0),
+                };
+                let hazard_output = Retained::as_ptr(&resolved.0);
+                if hazard_step(&mut hazards, &hazard_inputs, hazard_output) {
+                    encoder.memoryBarrierWithScope(MTLBarrierScope::Buffers);
+                    counter!(BARRIERS_EMITTED, 1);
+                }
+                Some(resolved)
+            } else {
+                None
             };
-            #[cfg(feature = "metal-concurrent-dispatch")]
-            let hazard_output = Retained::as_ptr(&resolved_output.0);
-            #[cfg(feature = "metal-concurrent-dispatch")]
-            if hazard_step(&mut hazards, &hazard_inputs, hazard_output) {
-                encoder.memoryBarrierWithScope(MTLBarrierScope::Buffers);
-                counter!(BARRIERS_EMITTED, 1);
-            }
-            #[cfg(feature = "metal-concurrent-dispatch")]
-            let placement = Some((&resolved_output.0, resolved_output.1));
+            let placement = match &resolved_output {
+                Some((buffer, offset)) => Some((buffer, *offset)),
+                None => placement,
+            };
             let uniform_buffer = plan_uniform_buffer(plan, position)?;
             let resolved_step = resolved_steps
                 .as_ref()
@@ -1547,12 +1559,13 @@ pub fn execute_plan_with_placements(
             // hand this exact address back out to a later, unrelated
             // `allocate_buffer` call, and that later buffer must start with
             // no hazard history -- see `HazardTracker::forget`'s own doc.
-            #[cfg(feature = "metal-concurrent-dispatch")]
-            if let Some((buffer, _offset)) = device_buffers.remove(retired) {
-                hazards.forget(Retained::as_ptr(&buffer));
+            if dispatch_type == DispatchType::Concurrent {
+                if let Some((buffer, _offset)) = device_buffers.remove(retired) {
+                    hazards.forget(Retained::as_ptr(&buffer));
+                }
+            } else {
+                device_buffers.remove(retired);
             }
-            #[cfg(not(feature = "metal-concurrent-dispatch"))]
-            device_buffers.remove(retired);
         }
     }
     encoder.endEncoding();
@@ -3495,6 +3508,42 @@ impl MathMode {
     }
 }
 
+/// [`MTLComputeCommandEncoder`]'s dispatch-scheduling mode, narrowed to the
+/// two values [`objc2_metal::MTLDispatchType`] exposes to a compute encoder.
+/// A [`Plan`] carries one of these ([`Plan::set_dispatch_type`]); it decides
+/// which encoder [`execute_plan_with_placements`] opens and whether its loop
+/// runs [`HazardTracker`] at all.
+///
+/// ROW 311 (`proxima-tensor/docs/discipline.md`): llama.cpp encodes its whole
+/// token on a serial compute encoder with zero explicit barriers.
+/// `Concurrent` (this type's default) lets independent dispatches overlap
+/// instead of draining the pipeline between every op, at the cost of the 323
+/// per-token [`MTLBarrierScope::Buffers`] barriers [`HazardTracker`] inserts
+/// to keep that overlap correct; `Serial` orders every dispatch for free and
+/// emits none. See ROW 312 for the measured wall-clock comparison between
+/// the two on the decode program.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum DispatchType {
+    /// One dispatch completes before the next begins -- llama.cpp's own
+    /// encoding shape, and the same guarantee an unmodified
+    /// `computeCommandEncoder()` gives. No barrier is ever needed.
+    Serial,
+    /// Independent dispatches may overlap; [`HazardTracker`] inserts a
+    /// [`MTLBarrierScope::Buffers`] barrier wherever a RAW/WAW/WAR hazard
+    /// would otherwise let two overlapping dispatches race.
+    #[default]
+    Concurrent,
+}
+
+impl DispatchType {
+    const fn as_mtl(self) -> MTLDispatchType {
+        match self {
+            DispatchType::Serial => MTLDispatchType::Serial,
+            DispatchType::Concurrent => MTLDispatchType::Concurrent,
+        }
+    }
+}
+
 #[cfg(test)]
 mod math_mode_cache_key_tests {
     //! [`pipeline_for`]'s cache key is `format!("{cache_key}{}",
@@ -3893,10 +3942,9 @@ pub struct MetalStageTotals {
     /// (`encode_op` writes every position's uniforms in place every call),
     /// 0 always with the feature off.
     pub plan_uniform_writes: u64,
-    /// [`BARRIERS_EMITTED`]'s own per-step delta -- 0 on the serial-dispatch
-    /// arm (`metal-concurrent-dispatch` off), the count of dataflow hazards
-    /// the private `HazardTracker` actually found on the concurrent-dispatch
-    /// arm.
+    /// [`BARRIERS_EMITTED`]'s own per-step delta -- 0 on
+    /// [`DispatchType::Serial`], the count of dataflow hazards the private
+    /// `HazardTracker` actually found on [`DispatchType::Concurrent`].
     pub barriers_emitted: u64,
 }
 
@@ -4473,12 +4521,11 @@ pub static OUTPUT_BUFFER_ALLOCATIONS: Counter =
 /// dispatches, which never receives a plan-owned uniform buffer).
 pub static PLAN_UNIFORM_WRITES: Counter = Counter::new("omega.metal.plan_uniforms.write");
 
-/// `metal-concurrent-dispatch`'s own census: every
+/// [`DispatchType::Concurrent`]'s own census: every
 /// `memoryBarrierWithScope(Buffers)` the private `HazardTracker` actually
-/// emitted this step. Not gated behind that feature at declaration -- same
-/// convention as
-/// [`OUTPUT_BUFFER_ALLOCATIONS`] above -- so it reads a stable 0 on the
-/// serial-dispatch arm rather than not existing at all.
+/// emitted this step. Unconditional at declaration -- same convention as
+/// [`OUTPUT_BUFFER_ALLOCATIONS`] above -- so it reads a stable 0 on
+/// [`DispatchType::Serial`] rather than not existing at all.
 pub static BARRIERS_EMITTED: Counter = Counter::new("omega.metal.concurrent.barriers_emitted");
 
 /// Entries `UNIFORM_BUFFERS` holds right now -- the direct witness for D6
@@ -6068,7 +6115,7 @@ mod arena_tests {
 /// identities so no real Metal device is required -- the real driver path
 /// (`execute_plan_with_placements`) instantiates the same type with
 /// `Id = *const ProtocolObject<dyn MTLBuffer>`.
-#[cfg(all(test, feature = "metal-concurrent-dispatch"))]
+#[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod hazard_tracker_tests {
     use std::collections::BTreeMap;
