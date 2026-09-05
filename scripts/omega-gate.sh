@@ -28,13 +28,43 @@ crate="omega"
 
 printf '\n== %s gate ==\n' "${crate}"
 
-printf '\n[1/6] no_std + alloc floor compiles (no default features)\n'
-cargo build -p "${crate}" --no-default-features --features alloc
+# Prints the count of rustc invocations FOR THIS CRATE under the given
+# feature flags -- a tier build that compiles zero of the crate's own
+# modules (every module gated off) would still exit 0, which reads exactly
+# like a real build. N==0 here is the same false-green shape this script's
+# own module doc warns about for nextest/doctest counts.
+assert_tier_builds() {
+    local label="$1"
+    shift
+    # forces a real rustc invocation for THIS crate every run -- an
+    # incremental cache hit from a prior identical-flags build would leave
+    # zero "Running" lines below and read as a false N==0.
+    cargo clean -p "${crate}" > /dev/null 2>&1
+    local verbose_output
+    verbose_output="$(cargo build -p "${crate}" "$@" -v 2>&1)"
+    printf '%s\n' "${verbose_output}"
+    local rustc_count
+    rustc_count="$(printf '%s\n' "${verbose_output}" | grep -c "Running \`.*rustc.*${crate}")"
+    if [ "${rustc_count}" -eq 0 ]; then
+        printf 'ERROR: %s tier build compiled zero rustc invocations for %s\n' "${label}" "${crate}" >&2
+        exit 1
+    fi
+    printf '   %s tier: rustc invocations for %s = %s\n' "${label}" "${crate}" "${rustc_count}"
+}
 
-printf '\n[2/6] all-features (std + metal) build\n'
+printf '\n[1/8] bare tier compiles (no_std, no alloc -- error + sized only)\n'
+assert_tier_builds bare --no-default-features
+
+printf '\n[2/8] no_std + alloc tier compiles (adds msl emission)\n'
+assert_tier_builds alloc --no-default-features --features alloc
+
+printf '\n[3/8] std tier compiles (adds backend, no concrete driver)\n'
+assert_tier_builds std --no-default-features --features std
+
+printf '\n[4/8] all-features (std + metal) build\n'
 cargo build -p "${crate}" --all-targets --all-features
 
-printf '\n[3/6] all-features tests green, count asserted\n'
+printf '\n[5/8] all-features tests green, count asserted\n'
 nextest_output="$(cargo nextest run -p "${crate}" --all-features --no-fail-fast 2>&1)"
 printf '%s\n' "${nextest_output}"
 ran_count="$(printf '%s\n' "${nextest_output}" | grep -oE '[0-9]+ tests run:' | grep -oE '[0-9]+' | tail -1)"
@@ -44,7 +74,7 @@ if [ -z "${ran_count}" ] || [ "${ran_count}" -eq 0 ]; then
 fi
 printf '   tests run: %s\n' "${ran_count}"
 
-printf '\n[4/6] clippy pedantic clean (bare alloc + all-features)\n'
+printf '\n[6/8] clippy pedantic clean (bare alloc + all-features)\n'
 # --lib only for the bare-alloc arm: the integration tests under omega/tests/
 # exercise the Metal execution driver and assume `metal` is present (it is a
 # default feature -- see the note at the bottom of
@@ -56,13 +86,13 @@ printf '\n[4/6] clippy pedantic clean (bare alloc + all-features)\n'
 cargo clippy -p "${crate}" --lib --no-default-features --features alloc -- -D warnings
 cargo clippy -p "${crate}" --all-targets --all-features -- -D warnings
 
-printf '\n[5/6] rustdoc resolves (bare alloc + all-features)\n'
+printf '\n[7/8] rustdoc resolves (bare alloc + all-features)\n'
 cargo doc -p "${crate}" --no-deps --no-default-features --features alloc
 cargo doc -p "${crate}" --no-deps --all-features
 
 # `cargo test --doc` exits 0 on a vacuous "0 passed" run, so grep for a
 # nonzero count explicitly instead of trusting the exit code alone.
-printf '\n[6/6] doctests (all-features), count asserted\n'
+printf '\n[8/8] doctests (all-features), count asserted\n'
 doctest_output="$(cargo test --doc -p "${crate}" --all-features 2>&1)"
 printf '%s\n' "${doctest_output}"
 passed_count="$(printf '%s\n' "${doctest_output}" | grep -oE '^test result: ok\. [0-9]+ passed' | grep -oE '[0-9]+' | tail -1)"

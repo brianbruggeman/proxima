@@ -18,19 +18,21 @@
 //!
 //! # Tiers
 //!
-//! `alloc` (no_std + alloc): the whole crate — emission is pure string
-//! generation over an already-bound `BoundOp`, so it never needs
-//! floating-point transcendentals or an allocator beyond `alloc`. `std`
-//! (default) only adds `std::error::Error` on [`EmitError`].
+//! bare (no_std, no alloc): [`error`] and [`sized`] only -- [`EmitError`]'s
+//! variants and the build-time-configured constants a caller can inspect
+//! without pulling in an emitter at all. No allocator, no floating-point
+//! transcendentals.
+//!
+//! `alloc` (no_std + alloc): adds [`msl`] -- emission is pure string
+//! generation over an already-bound `BoundOp`, so it never needs anything
+//! beyond `alloc`'s `String`/`Vec`.
+//!
+//! `std` (default): adds `std::error::Error` on [`EmitError`] and
+//! `backend`, the backend-agnostic `plan_named`/`execute_plan_named` pair,
+//! which needs `proxima_tensor::cpu`'s std-gated `Evaluated`/`QuantizedBlock`
+//! even with every concrete backend (`cpu`/`metal`/`wgpu-backend`) off.
 
 #![cfg_attr(not(feature = "std"), no_std)]
-
-#[cfg(not(any(feature = "std", feature = "alloc")))]
-compile_error!(
-    "omega currently requires the `alloc` feature (or `std`, which implies \
-     it) -- the whole crate is alloc-tier msl emission over proxima-tensor's \
-     op/map/shape surface"
-);
 
 #[cfg(feature = "alloc")]
 extern crate alloc;
@@ -42,6 +44,7 @@ pub mod cuda;
 pub mod error;
 #[cfg(all(feature = "metal", target_os = "macos"))]
 pub mod metal;
+#[cfg(feature = "alloc")]
 pub mod msl;
 pub mod sized;
 #[cfg(feature = "wgpu-backend")]
@@ -69,6 +72,7 @@ pub use metal::{
 pub use metal::{
     execute_plan_named_with_placements_op_timed, execute_plan_with_placements_op_timed,
 };
+#[cfg(feature = "alloc")]
 pub use msl::{
     BF16_UNPACK_MSL, BFLOAT16_BLOCK_BYTES, BFLOAT16_BLOCK_ELEMENTS, Binding, FLOAT16_BLOCK_BYTES,
     FLOAT16_BLOCK_ELEMENTS, GridSpec, Kernel, PackedCodec, PackedOperands, Q4_0_BLOCK_BYTES,

@@ -255,18 +255,21 @@ pub struct CpuPlan {
 /// [`BackendError::NotImplemented`] if `backend` is reserved but has no
 /// driver yet, otherwise whatever the chosen evaluator itself rejects
 /// (unresolved names, shape mismatches, unsupported dtypes).
+// leading underscores: with every backend feature off (a bare `std`-only
+// build), no arm below reads these -- the same "unused unless a feature
+// reads it" shape `mark_resident`'s own `_resident_names` documents above.
 pub fn plan_named(
     backend: Backend,
-    program: &[Op],
-    symbols: &[u64],
-    named: &[(&str, QuantizedBlock<'_>)],
-    outputs: &[NodeId],
+    _program: &[Op],
+    _symbols: &[u64],
+    _named: &[(&str, QuantizedBlock<'_>)],
+    _outputs: &[NodeId],
 ) -> Result<Plan, BackendError> {
     match backend {
         Backend::Cpu => {
             #[cfg(feature = "cpu")]
             {
-                plan_named_cpu(program, symbols, named, outputs)
+                plan_named_cpu(_program, _symbols, _named, _outputs)
             }
             #[cfg(not(feature = "cpu"))]
             {
@@ -279,7 +282,7 @@ pub fn plan_named(
         Backend::Metal => {
             #[cfg(all(feature = "metal", target_os = "macos"))]
             {
-                plan_named_metal(program, symbols, named, outputs)
+                plan_named_metal(_program, _symbols, _named, _outputs)
             }
             #[cfg(not(all(feature = "metal", target_os = "macos")))]
             {
@@ -292,7 +295,7 @@ pub fn plan_named(
         Backend::Wgpu => {
             #[cfg(feature = "wgpu-backend")]
             {
-                plan_named_wgpu(program, symbols, named, outputs)
+                plan_named_wgpu(_program, _symbols, _named, _outputs)
             }
             #[cfg(not(feature = "wgpu-backend"))]
             {
@@ -373,17 +376,29 @@ pub fn plan_named(
 /// # Errors
 /// Whatever the chosen backend's own evaluator rejects (unresolved names,
 /// shape mismatches, device/driver failures).
+// leading underscore on `named`: with every backend feature off, `Plan` has
+// no variants and the match below reduces to its never-pattern arm alone,
+// which never reads it -- same shape `mark_resident`'s `_resident_names`
+// documents below.
 pub fn execute_plan_named(
     plan: &mut Plan,
-    named: &[(&str, QuantizedBlock<'_>)],
+    _named: &[(&str, QuantizedBlock<'_>)],
 ) -> Result<Evaluated, BackendError> {
     match plan {
         #[cfg(feature = "cpu")]
-        Plan::Cpu(cpu_plan) => execute_plan_named_cpu(cpu_plan, named),
+        Plan::Cpu(cpu_plan) => execute_plan_named_cpu(cpu_plan, _named),
         #[cfg(all(feature = "metal", target_os = "macos"))]
-        Plan::Metal(metal_plan) => execute_plan_named_metal(metal_plan, named),
+        Plan::Metal(metal_plan) => execute_plan_named_metal(metal_plan, _named),
         #[cfg(feature = "wgpu-backend")]
-        Plan::Wgpu(wgpu_plan) => execute_plan_named_wgpu(wgpu_plan, named),
+        Plan::Wgpu(wgpu_plan) => execute_plan_named_wgpu(wgpu_plan, _named),
+        // `Plan` is uninhabited with every backend feature off; `*plan {}`
+        // is the never-pattern proof of that rather than a runtime `todo!`.
+        #[cfg(not(any(
+            feature = "cpu",
+            all(feature = "metal", target_os = "macos"),
+            feature = "wgpu-backend"
+        )))]
+        _ => match *plan {},
     }
 }
 
@@ -408,6 +423,14 @@ pub fn mark_resident(plan: &mut Plan, _resident_names: &std::collections::BTreeS
         // caching is out of v1 scope.
         #[cfg(feature = "wgpu-backend")]
         Plan::Wgpu(_) => {}
+        // `Plan` is uninhabited with every backend feature off; `*plan {}`
+        // is the never-pattern proof of that rather than a runtime `todo!`.
+        #[cfg(not(any(
+            feature = "cpu",
+            all(feature = "metal", target_os = "macos"),
+            feature = "wgpu-backend"
+        )))]
+        _ => match *plan {},
     }
 }
 
