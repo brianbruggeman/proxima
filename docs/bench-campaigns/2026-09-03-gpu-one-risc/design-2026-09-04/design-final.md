@@ -52,7 +52,9 @@ they stay plain functions (AB's result, kept).
 (`crit #1`, `crit #2`): **wall 28.82 = gpu_exec 27.52 + host 1.30** on plan-HIT steps 3..7. There is no
 5.96 ms host residual — that number was `33.00 − 27.04` over a 7-step mean containing two plan-miss
 steps that pay bind+compile. AB's ordering rationale (`design-AB.md:1168-1170`) rested on it and is
-**void**; the card order below is rebuilt from "gap 11.4 ms is GPU-side".
+**void**; the card order below is rebuilt from the matvec-vs-ceiling gap (ROW 308: matvec's own
+in-buffer cost is 85.29% of `gpu_exec_ms`; this supersedes the earlier framing of an "11.4 ms
+non-matvec residual" that §D.4a below has since corrected against a measured, not derived, split).
 
 | term | ops | ms | provenance |
 |---|---:|---:|---|
@@ -234,33 +236,47 @@ recomputed here against the quiet one; nothing above is edited in place, this ad
   device's own quiet streaming envelope.
 
 **Reachable floor, re-derived term by term, each term naming the lever that attacks it (no lever
-combined, no adjective, every number cites a ROW):**
+combined, no adjective, every number cites a ROW). The `non_matvec` term below was DERIVED in the
+version of this section landed as `f9c394a` — it assumed the matvec stream runs in the program at
+the ladder's 247.26 GB/s figure (ROW 296, one shape). ROW 308 has since MEASURED the in-buffer
+split directly and supersedes that assumption:**
 
 ```
-reachable_floor_ms = bytes/ceiling + host_residual + non_matvec_residual
-                    = 10.92         + 1.30           + 11.4
-                    = 23.62 ms/token
+reachable_floor_ms = bytes/ceiling + non_matvec_measured + host_residual
+                    = 10.92         + 4.72                + 0.8-1.3
+                    = 16.4-16.9 ms/token (if the matvec stream alone reaches the ceiling)
 ```
 
 - **bytes/ceiling = 10.92 ms** — ROW 302's own floor arithmetic at the best solo GPU cells (381.77
   GB/s run 1, 381.88 GB/s run 2: floor_ms 10.920/10.917). Attacked by closing the matvec kernel to
   the device's own measured streaming ceiling — the D1/D1b/D1c/D1d cards (packed-row addressing,
-  s-fold, per-codec pair-dot bodies), already 65.7-73.0% there per the in-buffer figure (`discipline.md`
-  ROW 296, 247.26 GB/s of 381.24).
-- **host_residual = 1.30 ms** — `dispatch-census.md:27` / ROW 288's own steady-state decomposition
-  (`step_wall_ms` 28.82 = `gpu_exec_ms` 27.52 + host 1.30). Attacked by the host-side dispatch/session
-  cards (B2c one command-buffer owner, B3 thread-local collapse, H0 the `KernelKey` POD struct).
-- **non_matvec_residual = 11.4 ms** — measured today as the gap between the full decode-program wall
-  clock and what the matvec stream alone would cost at its own already-achieved in-buffer rate:
-  28.3 ms (`discipline.md` ROW 298 A / ROW 300 M-R, 28.25-28.34 mean) minus 4.169 GB / 0.247 GB/ms
-  (ROW 296's Relaxed in-buffer peak, 247.26 GB/s) = 28.3 - 16.9 = **11.4 ms**. Attacked by the
-  dispatch-fusion cards (A5 epilogue 616->520 MEASURED, A6 prologue 520->264 MEASURED) and the
-  attention-arm byte-floor card (A0-attn, ~2.5 ms above its own floor per §D.1).
+  s-fold, per-codec pair-dot bodies). ROW 308 MEASURED the matvec stream's own in-buffer cost in the
+  actual decode program at 22.640 ms (85.29% of `gpu_exec_ms` 26.545 ms) — 4.169 GB / 22.640 ms =
+  **184.1 GB/s effective in the program**, against 247.26 GB/s on one shape in the ladder (ROW 296)
+  and 381.24-381.88 GB/s at the quiet device ceiling (ROW 302). The matvec stream is the one term
+  still 11.72 ms above its own reachable floor (22.640 - 10.92); closing the per-shape bandwidth from
+  184 to 381 GB/s (ROW 309, pending) is the campaign's main remaining term.
+- **non_matvec_measured = 4.72 ms** — ROW 308's in-buffer per-kind cost census, MEASURED (not
+  derived): cached-attention 2.191 ms (8.26% of `gpu_exec_ms`), elementwise 1.034 ms (3.89%),
+  cooperative reduce 0.578 ms (2.18%), unexplained barrier/serialization residual 0.918 ms (3.46%);
+  sum 4.721 ms. Attacked by the dispatch-fusion cards (A5 epilogue 616->520 MEASURED, A6 prologue
+  520->264 MEASURED) and the attention-arm byte-floor card (A0-attn, ROW 308's own 2.191 ms).
+- **host_residual = 0.8-1.3 ms** — ROW 303/288's own steady-state decomposition (`step_wall_ms`
+  28.82 = `gpu_exec_ms` 27.52 + host 1.30; ROW 303 reads 0.8 on the current checkpoint). Attacked by
+  the host-side dispatch/session cards (B2c one command-buffer owner, B3 thread-local collapse, H0
+  the `KernelKey` POD struct).
 
-23.62 ms/token is still **1.35x slower than llama.cpp's 17.53** (`discipline.md` ROW 298 D) — the
-11.4 ms non-matvec/host residual, not the matvec stream, is now the larger of the two gaps to close
-against llama, and dispatch fusion (already landed 616->520, ROW 294) plus the attention-arm fix are
-what the ordering in §E below prices next.
+Reconciliation: matvec 22.640 + attention 2.191 + elementwise 1.034 + coop 0.578 + unexplained
+0.918 + host 0.8-1.3 = **28.16-28.66 ms**, reconciling with ROW 298/300/307's independently measured
+27.76-28.34 ms `gpu_exec_ms`/`step_wall_ms` figures.
+
+**16.4-16.9 ms/token (matvec alone at the ceiling, everything else held at its ROW 308 measured
+cost) would be *faster* than llama.cpp's 17.53 ms (`discipline.md` ROW 298 D)** — this reverses the
+prior (derived) conclusion that an "11.4 ms non-matvec/host residual" was the larger gap. Corrected:
+the matvec stream's own shortfall against its reachable floor (11.72 ms) now dwarfs the non-matvec +
+host total (5.52-6.02 ms measured), so closing the matvec stream's per-shape bandwidth (ROW 309,
+pending) is the campaign's main term; dispatch fusion (already landed 616->520, ROW 294) and the
+attention-arm fix remain worth their own ROW 308 measured costs but are no longer the larger gap.
 
 ---
 
@@ -835,10 +851,15 @@ counter == 0 with the **step count asserted** (zero work and successful work emi
 **G** bytes/token from the driver's own counters against §D.3's prediction, >5% disagreement halts;
 **X** the measurement is the deliverable, N and CoV reported.
 
-Ordering rationale, stated because AB's is void (`crit #2`): the gap is **11.4 ms GPU-side**, of which
-matvec bandwidth is the largest single term (23.24 ms at **65.7-73.0% of the measured ceiling**) and the
-attention arm is ~2.5 ms above its own byte floor. Host is 1.30 ms total, so no host card precedes a GPU
-card except the one that is also a *correctness* fix (H0, the wrong-kernel-served hole).
+Ordering rationale, stated because AB's is void (`crit #2`): matvec is the largest single term and
+the largest gap — ROW 308 measured its own in-buffer cost at **22.640 ms (85.29% of `gpu_exec_ms`
+26.545 ms)**, 4.169 GB / 22.640 ms = 184.1 GB/s effective, **48.3% of the quiet device ceiling**
+(381.24 GB/s, ROW 302) and 11.72 ms above its own reachable floor (10.92 ms). This supersedes the
+earlier "gap is 11.4 ms GPU-side" framing (§D.4a, corrected): that number was derived, not measured,
+and put the larger gap on the non-matvec/host residual, which ROW 308 measured at only 4.72 ms. The
+attention arm is the largest non-matvec term at 2.191 ms (ROW 308), ~2.5 ms above its own byte
+floor. Host is 0.8-1.3 ms total (ROW 303/288), so no host card precedes a GPU card except the one
+that is also a *correctness* fix (H0, the wrong-kernel-served hole).
 
 <!-- r2-fix: every card below is now a row with ONE gated deliverable and a 30-minute scope; the
      "then, in order:" prose paragraph AB2 ended with is expanded into rows 8-31. -->
