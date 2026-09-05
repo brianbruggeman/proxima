@@ -448,17 +448,7 @@ fn emit_token_breakdown_metal(
     plan_misses: usize,
 ) {
     let ms = |ticks: u64| ticks_to_nanos(ticks) as f64 / 1e6;
-    // `PROXIMA_METAL_KIND_FILTER` -- `omega::metal::execute_plan_with_placements`'s
-    // own in-buffer ablation knob (that function's own `KindFilter` doc has
-    // the full contract). Read here, at this line's own emit site, rather
-    // than threaded back from `omega::metal` through `MetalStageTotals`: it
-    // is a per-call, caller-supplied env value, not a device-side
-    // measurement, and every other diagnostic env knob on this decode path
-    // (`PROXIMA_METAL_OP_PROFILE_STEP`) is likewise read directly at its own
-    // emit site rather than plumbed through the stage-totals struct. Absent
-    // (`ablation=false`, `kind_filter=""`) when unset, so a production run's
-    // event is unchanged from before this ablation existed.
-    let kind_filter = std::env::var("PROXIMA_METAL_KIND_FILTER").ok();
+    let kind_filter = kind_filter_from_env();
     info!(
         step = step as u64,
         prepare_calls = metal_stage.prepare_calls,
@@ -501,10 +491,34 @@ fn emit_token_breakdown_metal(
         plan_cache_len = plan_cache_len as u64,
         plan_hits = plan_hits as u64,
         plan_misses = plan_misses as u64,
-        ablation = kind_filter.is_some(),
-        kind_filter = kind_filter.as_deref().unwrap_or(""),
+        ablation = !kind_filter.is_empty(),
+        kind_filter,
         "token_breakdown_metal: per-decode-step metal stage attribution"
     );
+}
+
+/// `PROXIMA_METAL_KIND_FILTER` -- `omega::metal::execute_plan_with_placements`'s
+/// own in-buffer ablation knob (that function's own `KindFilter` doc has the
+/// full contract). Read here, at [`emit_token_breakdown_metal`]'s own emit
+/// site, rather than threaded back from `omega::metal` through
+/// `MetalStageTotals`: it is a per-call, caller-supplied env value, not a
+/// device-side measurement, and every other diagnostic env knob on this
+/// decode path (`PROXIMA_METAL_OP_PROFILE_STEP`) is likewise read directly at
+/// its own emit site rather than plumbed through the stage-totals struct.
+///
+/// Cached in a `OnceLock` -- same idiom as
+/// `omega::backend::Backend::from_env` and
+/// `proxima_tensor::cpu::matmul_worker_count` -- because the telemetry tag
+/// type only accepts `&'static str` (no per-emit allocation on the hot
+/// path), and the env var cannot change once the process has started.
+/// Empty (`ablation=false`, `kind_filter=""`) when unset, so a production
+/// run's event is unchanged from before this ablation existed.
+#[cfg(all(feature = "instrument", feature = "metal", target_os = "macos"))]
+fn kind_filter_from_env() -> &'static str {
+    static KIND_FILTER: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    KIND_FILTER
+        .get_or_init(|| std::env::var("PROXIMA_METAL_KIND_FILTER").unwrap_or_default())
+        .as_str()
 }
 
 #[cfg(all(feature = "instrument", feature = "metal", target_os = "macos"))]
