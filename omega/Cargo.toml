@@ -354,6 +354,8 @@ objc2 = { version = "0.6.4", optional = true }
 # `MTLCommandBuffer::GPUStartTime`/`GPUEndTime` (`CFTimeInterval`), which the
 # `instrument`-gated per-op diagnostic timing in `metal.rs` reads back --
 # nothing on the production `execute`/`execute_plan` path calls either.
+# `MTLBlitCommandEncoder` is test-only (`omega/tests/device_streaming_ceiling.rs`'s
+# `storageModePrivate` arm needs a blit fill; no production call site uses it).
 objc2-metal = { version = "0.3.2", default-features = false, features = [
     "MTLDevice",
     "MTLLibrary",
@@ -366,16 +368,20 @@ objc2-metal = { version = "0.3.2", default-features = false, features = [
     "MTLComputeCommandEncoder",
     "MTLComputePipeline",
     "MTLTypes",
+    "MTLBlitCommandEncoder",
     "block2",
     "objc2-core-foundation",
 ], optional = true }
 # objc2-foundation: NSString (kernel source and entry name go in), NSError
 # (a compile failure's localizedDescription comes out) — the two Foundation
-# types the driver actually touches.
+# types the driver actually touches. `NSRange` is pulled in transitively by
+# `objc2-metal`'s `MTLBlitCommandEncoder` feature above; listed explicitly so
+# this file states what is actually used rather than relying on unification.
 objc2-foundation = { version = "0.3.2", default-features = false, features = [
     "NSString",
     "NSError",
     "NSObject",
+    "NSRange",
 ], optional = true }
 # half: real IEEE-754 binary16 <-> f32 conversion (round-to-nearest-even,
 # subnormal-correct) for `upload_block`/`read_back`'s device-buffer
@@ -431,6 +437,7 @@ proxima-telemetry = { workspace = true, features = ["alloc"] }
 # ROW 282 but kept so `omega/tests/metal_real_forward.rs` still builds under
 # any feature set that drops `metal` but keeps `test-support`.
 proxima-tensor = { path = "../proxima-tensor", features = ["config", "test-support", "cached-attention-streaming"] }
+rustix.workspace = true
 tempfile.workspace = true
 toml.workspace = true
 
