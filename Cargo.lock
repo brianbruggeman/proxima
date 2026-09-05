@@ -5073,6 +5073,7 @@ dependencies = [
  "conflaguration",
  "fastrand",
  "libm",
+ "proptest",
  "proxima-gguf",
  "proxima-primitives",
  "serde",

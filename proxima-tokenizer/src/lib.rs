@@ -55,7 +55,7 @@ pub mod sized;
 pub mod unigram;
 pub mod vocab;
 
-pub use draft::draft_ngram_lookup;
+pub use draft::{Verified, draft_ngram_lookup, verify_greedy};
 pub use error::TokenizerError;
 pub use pipe::{decode, encode, encode_with_bos_eos};
 pub use sample::{SamplingConfig, greedy_pick, sample_next_token};
