@@ -23246,3 +23246,48 @@ Confirm `barriers=323` on every step with `concurrent`, `barriers=0` with `seria
 | Date | Change | Δ vs prior | CoV / runs | Host loadout |
 | --- | --- | --- | --- | --- |
 | 2026-09-05 | `feat(omega): dispatch type is a runtime plan value` + `docs(tensor): row 312 serial vs concurrent encoder on the decode program` | Serial (0 barriers) is 9.006%/8.305% (gpu_exec/wall) SLOWER than Concurrent (323 barriers) on this op graph, beyond both arms' CoV (0.482-1.129%) -- concurrent stays default; ROW 311's arm C is no longer unbuildable, it is measured and loses | 3 interleaved rounds/arm, 15 datapoints/arm, CoV 0.414-1.129%, all under 5% | quiet gate (`pgrep -l` names-only) empty at every round's own check; a background `cargo`/`rustc`/`cargo-nextest` build from another slice was present during rounds 1-2 and gone by round 3, flagged rather than hidden |
+
+## ROW 313 -- reduce epilogue fusion quiet bake-off (ROW 294 revisited): ON stays default, only round 3 was actually quiet
+
+**Card:** `perf/epilogue-on-off`, worktree `proxima-wt-epi`, no source commit (measurement-only row; `omega/Cargo.toml` and `proxima-model-interop/Cargo.toml` were edited to build the OFF oracle -- dropping `reduce-epilogue-fusion` from `metal`'s feature list in both files, exactly as ROW 294 needed it before that row's own flip -- then reverted with `git checkout` before this row was written; `git status --porcelain` is clean). ROW 294 landed `reduce-epilogue-fusion` default-on off a single unpaired run per arm on a loud box. This row is the quiet pair ROW 294 itself said it did not have.
+
+**Feature under test:** `reduce-epilogue-fusion` (`omega/Cargo.toml:30`, `proxima-model-interop/Cargo.toml:122`), folded into both crates' `metal` default list. ON = current main (`--features metal,instrument`, `emit_calls`/`encode_dispatch_calls`=520, `barriers`=323). OFF = the same features with `reduce-epilogue-fusion` removed from both `metal` lists (no CLI spelling reaches this -- `metal` names it directly, and Cargo features are additive-only, so the only way to build OFF is the temporary edit described above); `encode_dispatch_calls`=616, `barriers`=419.
+
+**Oracle, harness, environment.** `bind::real_openchat_file::runs_the_cached_decode_loop_on_the_metal_backend_and_reports_the_plan_cache`, release binaries built `--no-run` ahead of the bake-off (`target/release/deps/proxima_model_interop-bb04691ddeb98054` for ON, `target-off/release/deps/proxima_model_interop-60a7ee409b6c92c2` for OFF), `PROXIMA_MAX_TOKENS=8`. Quiet gate (`pgrep -l 'llama-bench|llama-cli|proxima_model_i|device_streamin|matvec_roofline|omega-|^cargo$|^rustc$|nextest|cargo-nextest'`) was empty and load-1 was 7.40 before round 1 started, and empty at every round's own pre-check. 3 interleaved rounds: ON, OFF, ON, OFF, ON, OFF.
+
+**The gate that passed and the contamination it did not catch.** The named-process gate was clean at every check, but `gpu_exec_ms` (a GPU-side timer, not a CPU scheduling artifact) shows rounds 1-2 running 15-30x slower than round 3 on BOTH arms, and round 1's ON arm alone ran ~12x slower than its own paired OFF run seconds later. Something was consuming the same physical GPU without matching any name in the gate's pattern list -- most likely another agent's Metal workload on this shared box, since load-1 climbed back into the 20s-30s range between round 1 and round 3 even with zero matching process names. **Report this number first because it hurts the measurement, not because it hurts the feature**: two of three rounds are not usable as clean wall-clock evidence.
+
+**Per-round means, steps 3..7, `gpu_exec_ms`/`step_wall_ms` (5 datapoints/arm/round):**
+
+| round | arm | dispatches | barriers | gpu_exec mean (ms) | step_wall mean (ms) | text |
+| --- | --- | --- | --- | --- | --- | --- |
+| 1 | ON | 520 | 323 | 443.428 | 444.387 | `"Here is a simple Python function that returns"` |
+| 1 | OFF | 616 | 419 | 37.862 | 39.015 | identical |
+| 2 | ON | 520 | 323 | 651.9997 | 653.100 | **`"<unk>\n\ndef fibonacci("`** -- see finding below |
+| 2 | OFF | 616 | 419 | 54.187 | 55.326 | identical to round 1 |
+| 3 | ON | 520 | 323 | 26.683 | 27.627 | identical to round 1 |
+| 3 | OFF | 616 | 419 | 26.373 | 27.491 | identical to round 1 |
+
+Rounds 1 and 2's absolute numbers are 15-30x round 3's and are not treated as wall-clock evidence for either direction -- pooling them into one CoV, as ROW 312 pooled its own 3 rounds, would manufacture a false-precision number out of contaminated data. **Round 3 is the only pair drawn from a genuinely quiet box** (its own gpu_exec means, 26.4-26.7 ms, match ROW 294's original figures of 27.46-27.65 ms and ROW 311/312's 26.5-29.2 ms band).
+
+**Round 3 only (the clean comparison), gpu_exec/step_wall delta:** ON 26.683/27.627 ms vs OFF 26.373/27.491 ms -- ON is +1.18%/+0.50% slower. With one run per arm there are no repeats to compute a CoV band from, so this cannot be certified "within CoV" the way ROW 312 could; what it IS is an order of magnitude smaller than ROW 312's own confirmed 8.3-9.0% regression on the same harness, in the direction that would count against ON, and inside the sub-2% range ROW 294 itself reported as a tie.
+
+**Finding, not attributed to the feature: text diverged once, under the heaviest contamination.** Round 2's ON run produced `"<unk>\n\ndef fibonacci("` instead of the canonical `"Here is a simple Python function that returns"` -- the only text mismatch across all 6 runs. Round 1's ON run (also contended, though less severely) and round 3's ON run (clean) both reproduced the canonical text, and round 2's OFF run (run immediately after, same box state) also reproduced it. Dispatch/barrier counts matched their expected arm (520/323) even on the anomalous run, so this is not a build-configuration mistake. Nothing here implicates `reduce-epilogue-fusion` specifically -- OFF never diverged in this session, but it was also never run at round 2's contention level on the ON side to rule it out -- and `omega/tests/reduce_epilogue_fusion_parity.rs`'s `the_fused_epilogue_is_byte_identical_across_twenty_dispatches` is the existing correctness gate for the fused kernel's numerics. Flagged for the owner as a new, separate open question (decode-text stability under heavy host/GPU contention), not folded into this row's default-on/off decision.
+
+**Decision (owner's rule: ON is less-work and stays default unless OFF is faster beyond both arms' CoV).** `reduce-epilogue-fusion` stays default-on. The dispatch/barrier reduction (520/323 vs 616/419) held in every one of the 6 runs; text was identical in the 5 non-contaminated-beyond-usability runs; the one clean wall-clock pair (round 3) shows ON 0.5-1.2% slower, an order of magnitude under ROW 312's own confirmed-regression threshold on this same harness, and with no repeats to certify a CoV band, that delta is not evidence of a regression -- it is a tie recorded honestly. **No flip. No Cargo.toml change lands. No clippy/nextest gate required** (the brief's own rule: gates only fire if a flip happens).
+
+**Gates:** none run -- no default changed.
+
+**Re-prove:**
+```sh
+cd /Users/brianbruggeman/repos/slot-0/proxima
+CARGO_TARGET_DIR=<own target dir> CARGO_TERM_COLOR=never PROXIMA_MAX_TOKENS=8 \
+  cargo test --release -p proxima-model-interop --features metal,instrument --lib -- --exact --nocapture --ignored \
+  bind::real_openchat_file::runs_the_cached_decode_loop_on_the_metal_backend_and_reports_the_plan_cache
+```
+Confirm `encode_dispatch_calls=520`, `barriers=323` (ON, current default). To rebuild OFF, temporarily drop `"reduce-epilogue-fusion"` from `metal`'s list in both `omega/Cargo.toml` and `proxima-model-interop/Cargo.toml`, rebuild with `--features metal,metal-output-placement,instrument` (the explicit `metal-output-placement` is required -- passing only `metal,instrument` after a prior partial build in the same `CARGO_TARGET_DIR` produced a stale feature-unification failure, `E0599` on `BackendRuntime::is_metal`/`evaluate_with_placements`, resolved by naming the feature explicitly on the CLI), confirm `encode_dispatch_calls=616`, `barriers=419`, then `git checkout` both files back.
+
+### Changelog
+| Date | Change | Δ vs prior | CoV / runs | Host loadout |
+| --- | --- | --- | --- | --- |
+| 2026-09-05 | quiet bake-off of `reduce-epilogue-fusion` ON vs OFF, no default change | round 3 (only clean pair): ON +1.18%/+0.50% (gpu_exec/wall) vs OFF, an order of magnitude under ROW 312's confirmed 8-9% regression threshold on the same harness; dispatches/barriers 520/323 (ON) vs 616/419 (OFF) confirmed in all 6 runs | 3 interleaved rounds/arm, but only round 3 was quiet -- rounds 1-2 ran 15-30x slower than round 3 on gpu_exec_ms despite an empty named-process gate, so no cross-round CoV is reported | quiet gate (`pgrep -l` names-only) empty and load-1 7.40 before round 1; load-1 climbed to 20-36 during rounds 1-2 with no matching process name, then dropped for round 3 -- GPU contention from an unidentified process is the leading explanation and is reported, not hidden; round 2's ON run also produced the only non-canonical `generated_text` of the 6 runs, flagged as a separate open finding |
