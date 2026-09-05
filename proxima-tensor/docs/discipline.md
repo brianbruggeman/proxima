@@ -22872,3 +22872,131 @@ never `-f`) is empty with load-1 under 10 immediately before each round.
 | Date | Change | Δ vs prior | CoV / runs | Host loadout |
 | --- | --- | --- | --- | --- |
 | 2026-09-05 | doc-only: `KindFilter` doc comment now enumerates `classify_kind`'s live kind strings (`f89b7ac`); measurement-only row, no default feature changed | in-buffer per-kind cost: MATVEC 22.640 ms (85.29% of FULL), ATTN 2.191 ms (8.26%), ELEM 1.034 ms (3.89%), COOP 0.578 ms (2.18%), CONST/IOTA noise-negative; reconciliation residual 0.918 ms (3.46% of FULL); MATVEC's measured cost is 1.341x ROW 296's 16.879 ms streaming-bound estimate | 3 interleaved rounds per arm, 7 arms (FULL + 6 `!<kind>` exclusions); all arm CoV 0.15-1.87%, well under 5% | quiet box confirmed via `pgrep -l 'llama-bench\|llama-cli\|proxima_model_i\|device_streamin\|matvec_roofline\|omega-\|^cargo$\|^rustc$\|nextest\|cargo-nextest'` (names-only, never `-f`) empty and load-1 2.6-7.4 before each round; single measurer, no other slice running |
+
+## ROW 309 -- per-dispatch GPU-timestamp sampling inside the batched buffer: mechanism lands, but stage-boundary-per-encoder overhead (~46x) swamps this device's absolute per-shape numbers
+
+**Card:** `omega/src/metal.rs` (`execute_plan_with_placements_dispatch_timed` +
+`execute_plan_named_with_placements_dispatch_timed` + `counter_sampling_mode` +
+`timestamp_counter_set` + `sample_timestamps` + `read_timestamp`, all
+`instrument`-gated), `omega/Cargo.toml` (`objc2-metal` gains `MTLCounters`/
+`MTLComputePass`, `objc2-foundation` gains `NSData`/`NSArray`),
+`omega/tests/dispatch_timed_counter_sampling.rs` (new),
+`proxima-model-interop/src/generate.rs` (`evaluate_dispatch_timed_with_placements`
++ a `PROXIMA_METAL_DISPATCH_PROFILE_STEP` env-gated branch in
+`run_decode_loop_placed_kv`'s single-range arm, reusing `report_op_timings`
+unchanged). Worktree `proxima-wt-r5a`, branch
+`perf/per-dispatch-gpu-timestamps`, off `main` `e7e74d2`.
+
+**Mechanism.** Metal exposes GPU-side dispatch timing two ways:
+`sampleCountersInBuffer:atSampleIndex:withBarrier:` on a shared compute
+encoder (per-DISPATCH granularity, `MTLCounterSamplingPoint::AtDispatchBoundary`),
+or `MTLComputePassDescriptor`'s `sampleBufferAttachments` (per-ENCODER
+granularity, `AtStageBoundary`). A standalone Metal probe against this host's
+real device (`swift -e 'MTLCreateSystemDefaultDevice()!.supportsCounterSampling(...)'`)
+measured: `atDispatchBoundary: false`, `atStageBoundary: true`, one counter
+set (`"timestamp"`) -- an M1 Max does not expose dispatch-boundary sampling.
+`execute_plan_with_placements_dispatch_timed` therefore opens ONE compute
+encoder PER POSITION (the brief's own prescribed "one encoder per kind
+group" fallback, degenerated to size-1 groups since this program's
+dispatch sequence rarely repeats the same op kind AND shape twice in a
+row), samples `startOfEncoderSampleIndex`/`endOfEncoderSampleIndex`, and
+still submits every encoder into the SAME single command buffer/commit/wait
+the production path uses -- never a second command buffer per op (that is
+`execute_plan_with_placements_op_timed`'s own shape, which ROW 298 already
+showed does not reproduce batched-buffer costs). GPU ticks convert to
+nanoseconds by calibrating against this SAME call's own
+`sampleTimestamps:gpuTimestamp:` pair (CPU side in `ticks_to_nanos`'s own
+`mach_absolute_time` domain), never a fabricated constant. No new type was
+minted: the per-position record is `OpGpuTiming`, the same type
+`execute_plan_with_placements_op_timed` already returns; the only new
+tuple is a private `DispatchMeta` type ALIAS (not a struct) clippy's
+`type_complexity` lint required for readability. The `instrument`-off path
+is untouched (`cargo build -p omega --lib --features metal`: EXIT 0, no
+new field on `Plan`, no new code compiled in).
+
+**Finding, reported plainly because it is the number that hurts:** the
+mechanism reports REAL, device-sourced GPU counters (`sampling_mode` is
+measured, never guessed, and was `"stage-boundary"` on this run), but the
+per-position ENCODER overhead this fallback pays dominates the signal.
+Splitting the batched buffer's 520 dispatches into 520 separate encoders to
+get per-encoder stage-boundary samples cost 1230.918 ms total on step 5 --
+**46.3x** the SAME step's own batched-buffer `gpu_exec_ms` neighbors (step
+4: 26.849 ms, step 6: 26.494 ms, step 7: 26.536 ms -- step 5 itself has no
+`gpu_exec_ms` because it took this diagnostic path instead of the normal
+one). Averaged over 520 encoders that is ~2.37 ms of PURE per-encoder
+overhead, against a real per-matvec-dispatch cost of ~0.101 ms
+(ROW 308's 22.64 ms / 224 dispatches) -- the overhead is ~23x the thing
+being measured, so the derived per-shape GB/s figures below are NOT
+device-bandwidth numbers; they are `bytes / (real_time + ~2.37ms overhead)`,
+and are reported as such, not as a bandwidth claim.
+
+**Per-shape table** (weight family, `op_profile_family`'s own aggregation,
+sorted by `gpu_ms` descending -- `gpu_ms` here includes the ~2.37 ms/dispatch
+encoder-overhead floor, so the GB/s column is DERIVED and known to be biased
+low by roughly that floor, never a measured bandwidth):
+
+| family (shape) | count/token | bytes/token | ms/token (overhead-inflated) | GB/s (derived, overhead-biased) |
+| --- | --- | --- | --- | --- |
+| blk.ffn_up.weight (4096x14336, Q4K) | 32 | 1,057,488,896 | 252.929 | 4.18 |
+| blk.ffn_down.weight (14336x4096, Q5K/Q4K mixed) | 32 | 1,088,159,744 | 235.549 | 4.62 |
+| blk.ffn_gate.weight (4096x14336, Q4K) | 32 | 1,057,488,896 | 234.351 | 4.51 |
+| blk.attn_q.weight (4096x4096, Q4K) | 32 | 302,514,176 | 111.203 | 2.72 |
+| kv_cache.k_even (cached-attention, GQA) | 32 | 20,971,648 | 89.153 | 0.24 |
+| blk.attn_output.weight (4096x4096, Q4K) | 32 | 302,514,176 | 88.061 | 3.44 |
+| blk.attn_v.weight (4096x1024, GQA, Q4K) | 32 | 78,118,912 | 45.916 | 1.70 |
+| blk.attn_k.weight (4096x1024, GQA, Q4K) | 32 | 76,021,760 | 40.620 | 1.87 |
+| (no named operand, elementwise/rope glue) | 69 | 2,129,920 | 29.889 | 0.07 |
+| rope_cos | 64 | 1,343,488 | 29.545 | 0.05 |
+| rope_sin | 64 | 1,343,488 | 29.003 | 0.05 |
+| output.weight (4096x32000, Q6K) | 1 | 107,543,104 | 22.050 | 4.88 |
+| eps | 65 | 2,130,700 | 21.762 | 0.10 |
+| token_embd.weight (one-shot lookup, not a matvec) | 1 | 73,732,608 | 0.887 | 83.1 |
+| **sum** | **520** (matches `encode_dispatch_calls=520`) | **4,171,501,516** | **1230.918** | -- |
+
+**Reconciliation against ROW 308.** ROW 308's real (non-instrumented,
+1-encoder) batched-buffer matvec cost was 22.64 ms of 26.54 ms total
+(85%). This row's matvec families (`ffn_up`+`ffn_down`+`ffn_gate`+`attn_q`+
+`attn_output`+`attn_v`+`attn_k`+`output.weight`) sum to 1008.628 ms of
+1230.918 ms total (**81.9%**) under the SAME 46x-inflated measurement --
+the dominant-family SHARE cross-validates ROW 308's 85% within a few
+points despite the absolute scale being ~46x apart, which is exactly what
+"the overhead is roughly proportional per-dispatch, not concentrated in
+one kind" predicts. The absolute ms/token and derived GB/s columns above
+are NOT comparable to ROW 296/308's real streaming numbers (184-247 GB/s)
+-- they are reported to show the mechanism runs and calibrates, not as a
+bandwidth result.
+
+**Verdict on this device, stated plainly:** per-dispatch GPU-timestamp
+sampling INSIDE the batched buffer is not usable for absolute per-shape
+bandwidth on an M1 Max, because Apple does not expose
+`AtDispatchBoundary` sampling on this chip and the `AtStageBoundary`
+fallback's per-encoder fixed cost (~2.37 ms) is ~23x the real per-dispatch
+cost it would need to resolve. A device that DOES report
+`supportsCounterSampling(.atDispatchBoundary) == true` would use the
+OTHER branch this same function already implements (one shared encoder,
+`sampleCountersInBuffer` around each dispatch, no per-encoder overhead) --
+untested here for lack of such a device, compiled and gated identically.
+
+**Gates:**
+- `cargo build -p omega --lib --features metal,instrument`: EXIT=0.
+- `cargo build -p omega --lib --features metal` (instrument-off): EXIT=0.
+- `cargo clippy -p omega -p proxima-model-interop --all-targets --features metal,instrument -- -D warnings`: EXIT=0, zero warnings.
+- `cargo nextest run -p omega --features metal,instrument`: 177 tests run, 177 passed, 3 skipped, EXIT=0.
+- `cargo nextest run -p omega --features metal` (instrument-off): 172 tests run, 172 passed, 3 skipped, EXIT=0.
+- `cargo nextest run -p proxima-model-interop --features metal,instrument`: 110 tests run, 110 passed, 28 skipped, EXIT=0.
+- `bash scripts/omega-gate.sh`: 8/8 steps PASS, 243 tests run, 243 passed, 3 skipped, EXIT=0.
+
+**Re-prove command** (release oracle, one measurer, quiet gate confirmed
+empty and load-1 6.6-8.3 immediately before):
+```
+cd /Users/brianbruggeman/repos/slot-0/proxima-wt-r5a && CARGO_TARGET_DIR=/Users/brianbruggeman/repos/slot-0/proxima-wt-r5a/target CARGO_TERM_COLOR=never cargo test --release -p proxima-model-interop --lib --features metal,instrument --no-run
+BIN=$(find target/release/deps -type f -name 'proxima_model_interop-*' -perm +111 ! -name '*.d' | head -1)
+PROXIMA_MAX_TOKENS=8 PROXIMA_METAL_DISPATCH_PROFILE_STEP=5 "$BIN" --exact --nocapture --ignored \
+  bind::real_openchat_file::runs_the_cached_decode_loop_on_the_metal_backend_and_reports_the_plan_cache
+```
+
+### Changelog
+
+| Date | Change | Δ vs prior | CoV / runs | Host loadout |
+| --- | --- | --- | --- | --- |
+| 2026-09-05 | `feat(omega): per-dispatch gpu timestamps in the batched buffer under instrument` + `docs(tensor): row 309 per-shape matvec bandwidth inside the decode buffer` | mechanism lands (real device counters, `sampling_mode` measured not guessed); this device's stage-boundary-only fallback pays ~46x per-encoder overhead (1230.918 ms vs 26.5-26.8 ms neighbor steps), so per-shape GB/s here is overhead-biased, not a bandwidth result; dominant-family share (81.9%) cross-validates ROW 308's 85% within a few points | single run, single step (step 5), informational per this row's own 30-minute task brief -- not a bake-off | quiet gate (`pgrep -l` names-only) empty, load-1 6.6-8.3 immediately before the release-oracle run; other agents' background load on the shared host noted via `uptime` but not gated on since no measurement-binary name matched |
