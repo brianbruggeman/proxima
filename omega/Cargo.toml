@@ -16,7 +16,7 @@ readme.workspace = true
 # nextest's "0 skipped" reads exactly like "everything passed". They sat
 # broken and uncompiled behind that flag.
 default = ["std", "metal", "cpu"]
-std = ["alloc", "thiserror/std"]
+std = ["alloc", "thiserror/std", "proxima-tensor/std"]
 alloc = []
 cached-attention-streaming = ["proxima-tensor/cached-attention-streaming"]
 # Backends are MIX-AND-MATCH, the same shape `runtime-prime` and
@@ -106,7 +106,11 @@ vulkan = []
 # feature has no DRIVER yet (no `cudarc`/`cust`, no `cuModuleLoad`/
 # `cuLaunchKernel`), so nothing here can actually dispatch a kernel to a
 # device — only emit the source a future driver would compile and launch.
-cuda = []
+# Needs `alloc`: `cuda.rs` is pure string generation (`String`/`Vec`/
+# `format!`), the same alloc-tier shape `msl.rs` takes, and had no floor of
+# its own before this -- `--no-default-features --features cuda` failed to
+# resolve `alloc::string::String` until this line named the real dependency.
+cuda = ["alloc"]
 npu = []
 ane = []
 # Per-token wall-clock attribution for the Metal decode path (split-4019
