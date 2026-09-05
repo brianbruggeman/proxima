@@ -1915,11 +1915,11 @@ pub fn diagnose_packed_row_block(
 }
 
 /// `metal-packed-row-multi-activation`'s own narrowing on top of
-/// [`packed_row_block`]'s eligibility: the same axis-ownership split
-/// [`classify_tiled_gemm`] uses (feature axes the weight owns exclusively,
+/// `packed_row_block`'s eligibility: the same axis-ownership split
+/// `classify_tiled_gemm` uses (feature axes the weight owns exclusively,
 /// token axes the activation owns exclusively), generalized off that
 /// function's Q4_K-only / plain-Add-from-Zero / `TILED_GEMM_MIN_TOKENS`
-/// gates so every codec [`packed_row_block`] admits (Q4_K/Q5_K/Q6_K) and
+/// gates so every codec `packed_row_block` admits (Q4_K/Q5_K/Q6_K) and
 /// every reduce shape it admits can fold `s` activation rows per streamed
 /// weight row, not only the `simdgroup_matrix`-eligible plain matmul.
 #[derive(Debug, Clone, PartialEq, Eq)]
