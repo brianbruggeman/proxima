@@ -718,4 +718,196 @@ mod tests {
             }
         );
     }
+
+    // -- P14 incumbent-parity: llama.cpp's own `gguf-py` `dequantize_row_q3_K`
+    // (via `gguf.quants.dequantize`, numpy) is the oracle. `#[ignore]`d like
+    // the other real-checkpoint tests in this crate (`edge.rs`,
+    // `restack.rs`): host-local files outside this repo, opportunistic, never
+    // part of the standard gate. Only the header region and the compared
+    // tensor's own byte range are ever read off disk -- never the whole
+    // multi-gigabyte checkpoint.
+    #[cfg(feature = "std")]
+    mod q3_k_real {
+        use std::io::{Read, Seek, SeekFrom};
+        use std::path::Path;
+
+        use proxima_telemetry::debug;
+
+        use super::{BLOCK_BYTES, QK_K, dequantize};
+        use crate::pipe::parse_complete;
+        use crate::types::GgmlType;
+
+        /// Reads exactly the header region (KV block + tensor directory),
+        /// growing the read window until `parse_complete` stops reporting
+        /// truncation -- never the multi-gigabyte tensor payload behind it.
+        fn parse_header(file: &mut std::fs::File) -> crate::pipe::ParsedGguf {
+            let mut header_buf = Vec::new();
+            for cap in [4usize << 20, 16 << 20, 64 << 20, 128 << 20] {
+                header_buf.resize(cap, 0);
+                file.seek(SeekFrom::Start(0)).expect("seek to file start");
+                let read = file.read(&mut header_buf).expect("read gguf header region");
+                header_buf.truncate(read);
+                if let Ok(parsed) = parse_complete(&header_buf) {
+                    return parsed;
+                }
+            }
+            panic!("gguf metadata region did not fit in 128 MiB");
+        }
+
+        /// Reads bytes `range` directly off `file` via `seek`+`read` -- the
+        /// only tensor-payload bytes this test ever touches.
+        fn read_range(file: &mut std::fs::File, range: core::ops::Range<u64>) -> Vec<u8> {
+            let mut buffer = vec![0u8; (range.end - range.start) as usize];
+            file.seek(SeekFrom::Start(range.start))
+                .expect("seek to tensor data range start");
+            file.read_exact(&mut buffer)
+                .expect("read exact tensor data range");
+            buffer
+        }
+
+        /// Reinterprets a little-endian `f32` byte dump (as `numpy`'s
+        /// `ndarray.tofile` writes on this host's native little-endian
+        /// architecture) into owned `f32`s.
+        fn read_f32_dump(path: &Path) -> Vec<f32> {
+            let bytes = std::fs::read(path).expect("read oracle f32 dump");
+            assert!(
+                bytes.len().is_multiple_of(4),
+                "oracle dump {path:?} is not a whole number of f32s: {} bytes",
+                bytes.len()
+            );
+            bytes
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .map(|chunk| f32::from_le_bytes(*chunk))
+                .collect()
+        }
+
+        /// Prints the `GgmlType` census (tensor count per type) for the whole
+        /// file -- the header directory alone carries this, no payload read
+        /// needed.
+        fn print_codec_census(parsed: &crate::pipe::ParsedGguf) {
+            let mut counts: std::collections::BTreeMap<alloc::string::String, usize> =
+                std::collections::BTreeMap::new();
+            for tensor in &parsed.tensors {
+                *counts
+                    .entry(alloc::format!("{:?}", tensor.ggml_type))
+                    .or_insert(0) += 1;
+            }
+            println!("-- codec census ({} tensors) --", parsed.tensors.len());
+            for (codec, count) in &counts {
+                println!("  {codec}: {count}");
+            }
+        }
+
+        /// Compares this crate's `q3_k::dequantize` against llama.cpp's own
+        /// `gguf-py` dequantization (`gguf.quants.dequantize`, which calls
+        /// numpy's port of `dequantize_row_q3_K`) on the first 8 rows of
+        /// `blk.0.ffn_up.weight` from a real requantized `Q3_K_M` checkpoint.
+        ///
+        /// Oracle dump produced out-of-band (see
+        /// `scratchpad/q3k-logs/oracle_dump.py`, never committed) and pointed
+        /// to via `PROXIMA_Q3K_ORACLE`; the checkpoint itself via
+        /// `PROXIMA_Q3K_GGUF`. `f16` `d` decodes identically in both
+        /// implementations, so per-row max-abs-diff is held to
+        /// `1e-6 * row_max_abs` -- floating-point noise floor, not a fitted
+        /// tolerance.
+        #[test]
+        #[ignore = "depends on a host-local real gguf checkpoint and an out-of-band oracle dump"]
+        fn q3_k_real_dequantize_matches_llama_cpp_gguf_py_oracle() {
+            let Ok(gguf_path) = std::env::var("PROXIMA_Q3K_GGUF") else {
+                eprintln!("skipping: PROXIMA_Q3K_GGUF not set");
+                return;
+            };
+            let Ok(oracle_path) = std::env::var("PROXIMA_Q3K_ORACLE") else {
+                eprintln!("skipping: PROXIMA_Q3K_ORACLE not set");
+                return;
+            };
+            let gguf_path = Path::new(&gguf_path);
+            let oracle_path = Path::new(&oracle_path);
+            if !gguf_path.exists() || !oracle_path.exists() {
+                eprintln!(
+                    "skipping: gguf ({gguf_path:?}) or oracle ({oracle_path:?}) missing on this host"
+                );
+                return;
+            }
+
+            let mut file = std::fs::File::open(gguf_path).expect("open real gguf checkpoint");
+            let file_len = file.metadata().expect("stat real gguf checkpoint").len();
+            let parsed = parse_header(&mut file);
+            print_codec_census(&parsed);
+
+            let tensor_name = "blk.0.ffn_up.weight";
+            let tensor = parsed
+                .tensors
+                .iter()
+                .find(|candidate| candidate.name == tensor_name)
+                .unwrap_or_else(|| panic!("{tensor_name} not present in real checkpoint"));
+            assert_eq!(
+                tensor.ggml_type,
+                GgmlType::Q3_K,
+                "{tensor_name} must be Q3_K in this Q3_K_M checkpoint"
+            );
+
+            let row_elements = tensor.dims[0] as usize;
+            let rows_to_compare = 8usize;
+            let elements_to_compare = row_elements * rows_to_compare;
+            assert!(
+                elements_to_compare.is_multiple_of(QK_K),
+                "row width must divide the super-block size for this slice to align on block boundaries"
+            );
+            let blocks_to_compare = elements_to_compare / QK_K;
+            let bytes_to_compare = (blocks_to_compare * BLOCK_BYTES) as u64;
+
+            let full_range = parsed
+                .tensor_data_range(tensor, file_len)
+                .expect("tensor data range within real checkpoint");
+            let compare_range = full_range.start..full_range.start + bytes_to_compare;
+            let packed = read_range(&mut file, compare_range);
+
+            let mut decoded = vec![0.0f32; elements_to_compare];
+            dequantize(&packed, &mut decoded).expect("decode real Q3_K super-blocks");
+
+            let oracle = read_f32_dump(oracle_path);
+            assert_eq!(
+                oracle.len(),
+                elements_to_compare,
+                "oracle dump element count must match the compared slice"
+            );
+
+            let mut max_abs_diff = 0.0f32;
+            let mut max_row_abs = 0.0f32;
+            for row in 0..rows_to_compare {
+                let row_range = row * row_elements..(row + 1) * row_elements;
+                let row_max_abs = oracle[row_range.clone()]
+                    .iter()
+                    .fold(0.0f32, |accumulator, &value| accumulator.max(value.abs()));
+                let row_diff = decoded[row_range.clone()]
+                    .iter()
+                    .zip(&oracle[row_range])
+                    .map(|(got, want)| (got - want).abs())
+                    .fold(0.0f32, f32::max);
+                max_row_abs = max_row_abs.max(row_max_abs);
+                max_abs_diff = max_abs_diff.max(row_diff);
+                let tolerance = 1e-6 * row_max_abs;
+                assert!(
+                    row_diff <= tolerance,
+                    "row {row}: max_abs_diff={row_diff} exceeds tolerance={tolerance} (row_max_abs={row_max_abs})"
+                );
+            }
+
+            debug!(
+                tensor = tensor_name,
+                dims = ?tensor.dims,
+                rows_compared = rows_to_compare,
+                max_abs_diff,
+                max_row_abs,
+                "q3_k real-checkpoint parity against llama.cpp gguf-py oracle"
+            );
+            println!(
+                "tensor={tensor_name} dims={:?} rows_compared={rows_to_compare} max_abs_diff={max_abs_diff} max_row_abs={max_row_abs}",
+                tensor.dims
+            );
+        }
+    }
 }
