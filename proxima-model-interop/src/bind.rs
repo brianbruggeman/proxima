@@ -3127,12 +3127,10 @@ mod real_openchat_file {
     #[test]
     #[ignore = "depends on a host-local openchat gguf checkout outside this repo, and a real Metal device"]
     fn runs_the_cached_decode_loop_on_the_metal_backend_and_reports_the_plan_cache() {
-        let path = std::path::Path::new(ServingConfig::default().model_path);
+        let model_path = crate::test_support::openchat_gguf_path();
+        let path = std::path::Path::new(&model_path);
         if !path.exists() {
-            eprintln!(
-                "skipping: no host-local openchat gguf fixture at {}",
-                ServingConfig::default().model_path
-            );
+            eprintln!("skipping: no host-local openchat gguf fixture at {model_path}");
             return;
         }
 
