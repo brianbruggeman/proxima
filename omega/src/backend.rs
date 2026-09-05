@@ -1,5 +1,5 @@
 //! The backend-agnostic entry point: one `plan_named`/`execute_plan_named`
-//! pair that runs a named-block program on whichever [`Backend`] the caller
+//! pair that runs a named-block program on whichever [`Engine`] the caller
 //! names, without that caller ever writing `proxima_tensor::cpu` or
 //! `omega::metal` itself.
 //!
@@ -17,30 +17,43 @@
 //! (`#[cfg(feature = "cpu")]`, `#[cfg(feature = "metal")]`), never on
 //! whether `proxima_tensor::cpu` happens to be visible.
 //!
-//! # Six backends, two implemented
+//! # Two engines, two drivers for one of them
 //!
-//! [`Backend`] carries a variant for every backend this crate expects to
-//! grow into (`Cpu`, `Metal`, `Vulkan`, `Cuda`, `Npu`, `Ane`), not just the
-//! two implemented today — naming, parsing (`FromStr`) and error reporting
-//! all work for a backend with no driver behind it yet, so adding the next
-//! one is a variant, a feature, and one match arm, never a rewrite of the
-//! selection mechanism. It stays a plain discriminated enum matched at the
-//! dispatch point: the set of backends is closed and known ahead of time,
-//! which is exactly the case the workspace's box-free rule reserves for an
-//! enum instead of a `dyn Trait` (`dyn` is for an open, unbounded set; this
-//! is neither open nor unbounded).
+//! There are two places an op runs: a CPU core, or a GPU. [`Engine`] names
+//! exactly that, `{ Cpu, Gpu }`. `Metal`/`Wgpu`/`Vulkan`/`Cuda` were never
+//! peers of `Cpu` — `Metal` and `Wgpu` are two DRIVERS reaching the same Gpu
+//! engine (same `BoundOp` descriptor, same emit-then-drive split, an MSL vs
+//! a WGSL emitter), which [`GpuDriver`] now names; `Vulkan`/`Npu`/`Ane` were
+//! name reservations with no lowering and are deleted, not carried; `Cuda`
+//! remains only as `crate::cuda`'s source EMITTER (structural tests only, no
+//! driver) and is not a variant of either enum. See
+//! `docs/bench-campaigns/2026-09-03-gpu-one-risc/design-2026-09-04/design-final.md`
+//! §B.4 for the collapse this replaces (`Backend`'s prior seven variants,
+//! three of which executed).
+//!
+//! [`GpuDriver::for_target`] resolves the driver ONCE per compiled target
+//! from cargo features and `target_os`, mirroring the `cfg!` cascade this
+//! module always ran per call. [`plan_named`] additionally takes an
+//! `Option<GpuDriver>` override so a caller that has BOTH drivers compiled in
+//! (a parity harness measuring Metal against wgpu on the same host) can force
+//! one rather than accept whichever `for_target` prefers; production callers
+//! pass `None` and get the same per-target resolution [`GpuDriver::for_target`]
+//! always gave.
 //!
 //! # Selection is per-call, not process-wide
 //!
-//! [`plan_named`] takes `backend: Backend` as a plain argument — an explicit
+//! [`plan_named`] takes `engine: Engine` as a plain argument — an explicit
 //! choice made by the caller for THIS call, not a cached global one call
-//! reads and every later call inherits. [`Backend::from_env`] exists only as
+//! reads and every later call inherits. [`Engine::from_env`] exists only as
 //! a convenience a caller may use to *compute* that argument (the same
 //! env-var-into-`OnceLock` idiom [`proxima_tensor::cpu`]'s own
 //! `matmul_worker_count` uses for `PROXIMA_MATMUL_WORKERS`), never as
 //! something `plan_named`/`execute_plan_named` consult on their own — so one
-//! process can plan one program on [`Backend::Cpu`] and the next on
-//! [`Backend::Metal`] without touching an environment variable in between.
+//! process can plan one program on [`Engine::Cpu`] and the next on
+//! [`Engine::Gpu`] without touching an environment variable in between.
+//! `OMEGA_BACKEND` still accepts the legacy `metal`/`wgpu` names for one
+//! release, mapped to `Engine::Gpu` with a [`proxima_telemetry::warn!`]
+//! deprecation event — see [`Engine::from_env`]'s own doc.
 //!
 //! # Why plan/execute is not a `Pipe`
 //!
@@ -67,43 +80,28 @@ use crate::metal::{self, MetalError};
 #[cfg(feature = "wgpu-backend")]
 use crate::wgpu_driver::{self, WgpuError};
 
-/// Every backend `omega` expects to support, whether or not this build was
-/// compiled with the feature behind it. Both fields of a call
-/// (`plan_named`'s `backend` argument) and the compiled reality (which
-/// cargo features are on) are independent axes on purpose: a caller can
-/// still NAME `Backend::Vulkan` in a build that never turned the `vulkan`
-/// feature on, and get back an honest [`BackendError`] instead of a type
-/// that does not exist.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Backend {
+/// Where an op runs. Two variants, because there are two places: a CPU core
+/// and a GPU. `Metal`/`Wgpu`/`Vulkan`/`Cuda` are DRIVERS of the Gpu engine,
+/// not peers of the Cpu engine ([`GpuDriver`]), and `Npu`/`Ane` were name
+/// reservations with no lowering — deleted, not carried. A caller can still
+/// name `Engine::Gpu` in a build with neither GPU driver feature on and get
+/// back an honest [`BackendError::NoGpuDriver`] instead of a type that does
+/// not exist.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Engine {
     Cpu,
-    Metal,
-    /// The portable `wgpu`/WGSL driver (`crate::wgpu_driver`) — one
-    /// abstraction layer over [`Backend::Metal`]: same `BoundOp` descriptor,
-    /// same emit-then-drive split, a WGSL emitter and a `wgpu::Device`
-    /// instead of an MSL emitter and an `objc2-metal` device. See
-    /// `crate::wgsl`'s own doc for what its v1 op set covers.
-    Wgpu,
-    Vulkan,
-    Cuda,
-    Npu,
-    Ane,
+    Gpu,
 }
 
-impl Backend {
+impl Engine {
     /// The name [`core::str::FromStr`] parses back into this variant — used
-    /// for error messages and for [`Backend::from_env`]'s own parsing, so
-    /// the two never drift on what a backend is called.
+    /// for error messages and for [`Engine::from_env`]'s own parsing, so the
+    /// two never drift on what an engine is called.
     #[must_use]
     pub const fn name(self) -> &'static str {
         match self {
-            Backend::Cpu => "cpu",
-            Backend::Metal => "metal",
-            Backend::Wgpu => "wgpu",
-            Backend::Vulkan => "vulkan",
-            Backend::Cuda => "cuda",
-            Backend::Npu => "npu",
-            Backend::Ane => "ane",
+            Engine::Cpu => "cpu",
+            Engine::Gpu => "gpu",
         }
     }
 
@@ -111,43 +109,91 @@ impl Backend {
     /// mirroring `proxima_tensor::cpu::matmul_worker_count`'s own idiom for
     /// `PROXIMA_MATMUL_WORKERS` — a per-call `std::env::var` would allocate a
     /// `String` on every plan for a value that cannot change once the
-    /// process has started. Only the raw string is cached; [`core::str::FromStr`]
-    /// re-parses it on every call, which is cheap (a match over a handful of
-    /// short literals) and lets an unrecognized name surface as a fresh
+    /// process has started. Only the raw string is cached; parsing re-runs
+    /// on every call, which is cheap (a match over a handful of short
+    /// literals) and lets an unrecognized name surface as a fresh
     /// [`BackendError::UnknownName`] instead of being memoized away.
     ///
-    /// This is a DEFAULT a caller may use to compute the `backend` argument
+    /// Accepts `cpu`/`gpu`. For one release it also accepts the legacy
+    /// `metal`/`wgpu` names, mapped to [`Engine::Gpu`] with a
+    /// [`proxima_telemetry::warn!`] deprecation event — a caller that named a
+    /// driver instead of an engine gets the engine, once, loudly, rather than
+    /// a silent behavior change.
+    ///
+    /// This is a DEFAULT a caller may use to compute the `engine` argument
     /// [`plan_named`] takes; it is never read by [`plan_named`] or
     /// [`execute_plan_named`] themselves, so calling this once and then
-    /// calling `plan_named` with an explicit [`Backend`] on the very next
-    /// line runs that program on whichever backend was passed, not on
-    /// whatever this returned.
+    /// calling `plan_named` with an explicit [`Engine`] on the very next line
+    /// runs that program on whichever engine was passed, not on whatever
+    /// this returned.
     ///
-    /// Unset or empty falls back to whichever of [`Backend::Metal`]/
-    /// [`Backend::Cpu`] is actually compiled in, preferring Metal when both
-    /// are (the backend a GPU-capable caller actually wants by default). A
-    /// name [`core::str::FromStr`] does not recognize is an error, not a
-    /// silent fallback — a typo in `OMEGA_BACKEND` must not be free to run on
-    /// whatever backend happened to be compiled in instead.
+    /// Unset or empty falls back to [`Engine::Gpu`] when
+    /// [`GpuDriver::for_target`] resolves a driver, otherwise [`Engine::Cpu`].
+    /// A name nothing above recognizes is an error, not a silent fallback —
+    /// a typo in `OMEGA_BACKEND` must not be free to run on whatever engine
+    /// happened to be compiled in instead.
     ///
     /// # Errors
     /// [`BackendError::UnknownName`] when `OMEGA_BACKEND` is set to a name
-    /// [`core::str::FromStr`] does not recognize.
-    pub fn from_env() -> Result<Backend, BackendError> {
+    /// this does not recognize.
+    pub fn from_env() -> Result<Engine, BackendError> {
         static RAW: OnceLock<String> = OnceLock::new();
         let raw = RAW.get_or_init(|| std::env::var("OMEGA_BACKEND").unwrap_or_default());
         if raw.is_empty() {
-            return Ok(Backend::default_compiled());
+            return Ok(Engine::default_compiled());
         }
-        raw.parse::<Backend>()
-            .inspect_err(|error| warn_unknown_backend_env(raw, error))
+        match raw.as_str() {
+            "metal" | "wgpu" => {
+                warn_deprecated_driver_name(raw);
+                Ok(Engine::Gpu)
+            }
+            _ => raw
+                .parse::<Engine>()
+                .inspect_err(|error| warn_unknown_backend_env(raw, error)),
+        }
     }
 
-    fn default_compiled() -> Backend {
-        if cfg!(all(feature = "metal", target_os = "macos")) {
-            Backend::Metal
+    fn default_compiled() -> Engine {
+        if GpuDriver::for_target().is_some() {
+            Engine::Gpu
         } else {
-            Backend::Cpu
+            Engine::Cpu
+        }
+    }
+}
+
+/// Which driver renders the Gpu engine on this target. Resolved ONCE at
+/// plan/schedule time from the compiled features and `target_os`, never
+/// carried per op — every Gpu op on a host uses the same driver unless a
+/// caller of [`plan_named`] explicitly overrides it (a parity harness
+/// comparing both drivers on one host).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum GpuDriver {
+    Metal,
+    Wgpu,
+}
+
+impl GpuDriver {
+    /// The resolution this module's `cfg!` cascade always performed per
+    /// call, hoisted to one place instead of once per `match backend` arm.
+    /// Prefers Metal when both drivers are compiled (the driver a
+    /// GPU-capable macOS caller actually wants by default).
+    #[must_use]
+    pub const fn for_target() -> Option<Self> {
+        if cfg!(all(feature = "metal", target_os = "macos")) {
+            Some(Self::Metal)
+        } else if cfg!(feature = "wgpu-backend") {
+            Some(Self::Wgpu)
+        } else {
+            None
+        }
+    }
+
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            GpuDriver::Metal => "metal",
+            GpuDriver::Wgpu => "wgpu",
         }
     }
 }
@@ -165,18 +211,28 @@ fn warn_unknown_backend_env(value: &str, error: &BackendError) {
 #[cfg(not(feature = "metal"))]
 fn warn_unknown_backend_env(_value: &str, _error: &BackendError) {}
 
-impl core::str::FromStr for Backend {
+/// Emits the deprecation event for the legacy `metal`/`wgpu` `OMEGA_BACKEND`
+/// spelling — see [`Engine::from_env`]'s own doc for the one-release grace
+/// period this backs. Same cfg split as [`warn_unknown_backend_env`]: a
+/// `cpu`-only build without `metal` gets a no-op.
+#[cfg(feature = "metal")]
+fn warn_deprecated_driver_name(value: &str) {
+    proxima_telemetry::warn!(
+        %value,
+        "OMEGA_BACKEND names a GPU driver, not an engine; use `gpu` instead (this alias is removed next release)"
+    );
+}
+
+#[cfg(not(feature = "metal"))]
+fn warn_deprecated_driver_name(_value: &str) {}
+
+impl core::str::FromStr for Engine {
     type Err = BackendError;
 
-    fn from_str(value: &str) -> Result<Backend, BackendError> {
+    fn from_str(value: &str) -> Result<Engine, BackendError> {
         match value {
-            "cpu" => Ok(Backend::Cpu),
-            "metal" => Ok(Backend::Metal),
-            "wgpu" => Ok(Backend::Wgpu),
-            "vulkan" => Ok(Backend::Vulkan),
-            "cuda" => Ok(Backend::Cuda),
-            "npu" => Ok(Backend::Npu),
-            "ane" => Ok(Backend::Ane),
+            "cpu" => Ok(Engine::Cpu),
+            "gpu" => Ok(Engine::Gpu),
             other => Err(BackendError::UnknownName {
                 name: other.to_string(),
             }),
@@ -185,23 +241,27 @@ impl core::str::FromStr for Backend {
 }
 
 /// Everything the backend-agnostic wrapper can fail with: an unrecognized
-/// backend name, a named backend whose feature is not compiled in or that
-/// has no execution arm yet, or a failure the underlying evaluator itself
-/// (CPU or Metal) produced.
+/// engine name, an engine whose feature is not compiled in or that has no
+/// execution arm yet, a Gpu request with no compiled driver at all, or a
+/// failure the underlying evaluator itself (CPU, Metal, or wgpu) produced.
 #[derive(Debug, thiserror::Error)]
 pub enum BackendError {
-    #[error(
-        "unknown backend name `{name}`; known backends: cpu, metal, wgpu, vulkan, cuda, npu, ane"
-    )]
+    #[error("unknown engine name `{name}`; known engines: cpu, gpu")]
     UnknownName { name: String },
 
-    /// The named backend's cargo feature is off, so nothing behind it was
+    /// The named engine's cargo feature is off, so nothing behind it was
     /// compiled — never a fallback to whatever IS compiled.
     #[error("backend `{backend}` needs the `{feature}` cargo feature, which is not compiled in")]
     NotCompiled {
         backend: &'static str,
         feature: &'static str,
     },
+
+    /// [`Engine::Gpu`] was requested (directly, or via [`GpuDriver::for_target`]
+    /// falling through [`Engine::from_env`]'s default) but neither the
+    /// `metal` nor the `wgpu-backend` feature is compiled in.
+    #[error("engine `gpu` has no compiled driver; enable the `metal` or `wgpu-backend` feature")]
+    NoGpuDriver,
 
     /// The named backend's feature is on (its name is reserved,
     /// `Cargo.toml`), but `backend.rs` has no execution arm for it yet —
@@ -229,16 +289,25 @@ pub enum BackendError {
 /// active. Unboxed with the feature off, matching this enum's behavior
 /// before the card existed -- the indirection is the exception the arena
 /// earns, not a cost every build pays.
-#[cfg(all(feature = "metal", target_os = "macos", feature = "metal-plan-stable-buffers"))]
+#[cfg(all(
+    feature = "metal",
+    target_os = "macos",
+    feature = "metal-plan-stable-buffers"
+))]
 type MetalPlanHandle = alloc::boxed::Box<metal::Plan>;
-#[cfg(all(feature = "metal", target_os = "macos", not(feature = "metal-plan-stable-buffers")))]
+#[cfg(all(
+    feature = "metal",
+    target_os = "macos",
+    not(feature = "metal-plan-stable-buffers")
+))]
 type MetalPlanHandle = metal::Plan;
 
-/// A resolved, reusable program for exactly one [`Backend`] — never a
-/// cross-backend union. A future scheduler that wants to hold a CPU plan and
+/// A resolved, reusable program for exactly one engine+driver — never a
+/// cross-engine union. A future scheduler that wants to hold a CPU plan and
 /// a Metal plan for the same program side by side holds two `Plan`s, one per
-/// backend, and chooses between them per call; this type does not grow a
-/// variant that mixes them.
+/// engine, and chooses between them per call; this type does not grow a
+/// variant that mixes them. Placement of individual ops ACROSS engines in one
+/// pass is a later card (design §B.4) and is not this type's job.
 pub enum Plan {
     #[cfg(feature = "cpu")]
     Cpu(CpuPlan),
@@ -266,28 +335,36 @@ pub struct CpuPlan {
     validated_weight_nodes: Option<std::collections::BTreeSet<NodeId>>,
 }
 
-/// Resolves a program into a reusable [`Plan`] for `backend`, binding
-/// blocks by NAME through [`resolve_named_blocks`] — the same function the
-/// CPU evaluator and the Metal driver both already call, so this wrapper
-/// cannot introduce a second, drifting name-to-position mapping.
+/// Resolves a program into a reusable [`Plan`] for `engine`, binding blocks
+/// by NAME through [`resolve_named_blocks`] — the same function the CPU
+/// evaluator and the Metal driver both already call, so this wrapper cannot
+/// introduce a second, drifting name-to-position mapping.
+///
+/// `gpu_driver` is read only when `engine == Engine::Gpu`: `None` resolves
+/// through [`GpuDriver::for_target`] (the production default — one driver per
+/// compiled target); `Some(driver)` forces that driver regardless of which
+/// `for_target` would have preferred, for a caller with both GPU features
+/// compiled that wants to measure them against each other on one host. A
+/// `Cpu` engine ignores `gpu_driver` entirely.
 ///
 /// # Errors
-/// [`BackendError::NotCompiled`] if `backend`'s feature is off,
-/// [`BackendError::NotImplemented`] if `backend` is reserved but has no
-/// driver yet, otherwise whatever the chosen evaluator itself rejects
-/// (unresolved names, shape mismatches, unsupported dtypes).
+/// [`BackendError::NotCompiled`] if the resolved engine/driver's feature is
+/// off, [`BackendError::NoGpuDriver`] if `Engine::Gpu` resolves to no driver
+/// at all, otherwise whatever the chosen evaluator itself rejects (unresolved
+/// names, shape mismatches, unsupported dtypes).
 // leading underscores: with every backend feature off (a bare `std`-only
 // build), no arm below reads these -- the same "unused unless a feature
 // reads it" shape `mark_resident`'s own `_resident_names` documents above.
 pub fn plan_named(
-    backend: Backend,
+    engine: Engine,
+    gpu_driver: Option<GpuDriver>,
     _program: &[Op],
     _symbols: &[u64],
     _named: &[(&str, QuantizedBlock<'_>)],
     _outputs: &[NodeId],
 ) -> Result<Plan, BackendError> {
-    match backend {
-        Backend::Cpu => {
+    match engine {
+        Engine::Cpu => {
             #[cfg(feature = "cpu")]
             {
                 plan_named_cpu(_program, _symbols, _named, _outputs)
@@ -300,90 +377,37 @@ pub fn plan_named(
                 })
             }
         }
-        Backend::Metal => {
-            #[cfg(all(feature = "metal", target_os = "macos"))]
-            {
-                plan_named_metal(_program, _symbols, _named, _outputs)
-            }
-            #[cfg(not(all(feature = "metal", target_os = "macos")))]
-            {
-                Err(BackendError::NotCompiled {
-                    backend: "metal",
-                    feature: "metal",
-                })
-            }
-        }
-        Backend::Wgpu => {
-            #[cfg(feature = "wgpu-backend")]
-            {
-                plan_named_wgpu(_program, _symbols, _named, _outputs)
-            }
-            #[cfg(not(feature = "wgpu-backend"))]
-            {
-                Err(BackendError::NotCompiled {
-                    backend: "wgpu",
-                    feature: "wgpu-backend",
-                })
-            }
-        }
-        Backend::Vulkan => {
-            #[cfg(feature = "vulkan")]
-            {
-                Err(BackendError::NotImplemented { backend: "vulkan" })
-            }
-            #[cfg(not(feature = "vulkan"))]
-            {
-                Err(BackendError::NotCompiled {
-                    backend: "vulkan",
-                    feature: "vulkan",
-                })
-            }
-        }
-        Backend::Cuda => {
-            // `crate::cuda::emit_cuda` exists and is tested (structural
-            // golden tests over emitted CUDA C source — see that module's
-            // own doc for why numeric execution parity is not provable on a
-            // host with no NVIDIA GPU/toolchain). What is still missing is
-            // the DRIVER half: no `cudarc`/`cust` dependency, no
-            // `cuModuleLoad`/`cuLaunchKernel`, so a caller cannot actually
-            // run a program on this backend yet — same shape
-            // `Backend::Vulkan`'s stub takes.
-            #[cfg(feature = "cuda")]
-            {
-                Err(BackendError::NotImplemented { backend: "cuda" })
-            }
-            #[cfg(not(feature = "cuda"))]
-            {
-                Err(BackendError::NotCompiled {
-                    backend: "cuda",
-                    feature: "cuda",
-                })
-            }
-        }
-        Backend::Npu => {
-            #[cfg(feature = "npu")]
-            {
-                Err(BackendError::NotImplemented { backend: "npu" })
-            }
-            #[cfg(not(feature = "npu"))]
-            {
-                Err(BackendError::NotCompiled {
-                    backend: "npu",
-                    feature: "npu",
-                })
-            }
-        }
-        Backend::Ane => {
-            #[cfg(feature = "ane")]
-            {
-                Err(BackendError::NotImplemented { backend: "ane" })
-            }
-            #[cfg(not(feature = "ane"))]
-            {
-                Err(BackendError::NotCompiled {
-                    backend: "ane",
-                    feature: "ane",
-                })
+        Engine::Gpu => {
+            let driver = gpu_driver
+                .or_else(GpuDriver::for_target)
+                .ok_or(BackendError::NoGpuDriver)?;
+            match driver {
+                GpuDriver::Metal => {
+                    #[cfg(all(feature = "metal", target_os = "macos"))]
+                    {
+                        plan_named_metal(_program, _symbols, _named, _outputs)
+                    }
+                    #[cfg(not(all(feature = "metal", target_os = "macos")))]
+                    {
+                        Err(BackendError::NotCompiled {
+                            backend: "metal",
+                            feature: "metal",
+                        })
+                    }
+                }
+                GpuDriver::Wgpu => {
+                    #[cfg(feature = "wgpu-backend")]
+                    {
+                        plan_named_wgpu(_program, _symbols, _named, _outputs)
+                    }
+                    #[cfg(not(feature = "wgpu-backend"))]
+                    {
+                        Err(BackendError::NotCompiled {
+                            backend: "wgpu",
+                            feature: "wgpu-backend",
+                        })
+                    }
+                }
             }
         }
     }
@@ -438,7 +462,10 @@ pub fn execute_plan_named(
 // of leaving a permanent leading-underscore that reads as "always discarded".
 #[cfg_attr(
     not(all(feature = "metal", target_os = "macos")),
-    allow(unused_variables, reason = "only the metal arm below reads this in this build")
+    allow(
+        unused_variables,
+        reason = "only the metal arm below reads this in this build"
+    )
 )]
 pub fn mark_resident(plan: &mut Plan, resident_names: &std::collections::BTreeSet<&str>) {
     match plan {
@@ -585,35 +612,27 @@ pub fn execute_plan_named_metal_op_timed(
 // the test failing, same convention as every `omega/tests/*.rs` file.
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
-    use super::{Backend, BackendError};
+    use super::{BackendError, Engine};
 
     #[test]
-    fn every_backend_name_round_trips_through_from_str() {
-        for backend in [
-            Backend::Cpu,
-            Backend::Metal,
-            Backend::Wgpu,
-            Backend::Vulkan,
-            Backend::Cuda,
-            Backend::Npu,
-            Backend::Ane,
-        ] {
-            let parsed: Backend = backend
+    fn every_engine_name_round_trips_through_from_str() {
+        for engine in [Engine::Cpu, Engine::Gpu] {
+            let parsed: Engine = engine
                 .name()
                 .parse()
-                .expect("every backend's own name parses back");
-            assert_eq!(parsed, backend);
+                .expect("every engine's own name parses back");
+            assert_eq!(parsed, engine);
         }
     }
 
     #[test]
-    fn an_unknown_backend_name_lists_the_known_ones() {
+    fn an_unknown_engine_name_lists_the_known_ones() {
         let error = "quantum"
-            .parse::<Backend>()
-            .expect_err("quantum names no backend");
+            .parse::<Engine>()
+            .expect_err("quantum names no engine");
         let message = error.to_string();
         assert!(message.contains("quantum"));
-        for known in ["cpu", "metal", "wgpu", "vulkan", "cuda", "npu", "ane"] {
+        for known in ["cpu", "gpu"] {
             assert!(
                 message.contains(known),
                 "error should name {known}: {message}"
@@ -625,6 +644,9 @@ mod tests {
     // device-buffer handles it does not implement `Debug` for either), so
     // `expect_err`/`unwrap_err` cannot be called on `Result<Plan, _>`
     // directly -- this pulls the error out by hand instead.
+    // only feature-gated tests below call this, and no single cargo feature
+    // combination compiles all three of them at once.
+    #[allow(dead_code)]
     fn expect_plan_err(result: Result<super::Plan, BackendError>, message: &str) -> BackendError {
         match result {
             Ok(_) => panic!("{message}"),
@@ -636,8 +658,8 @@ mod tests {
     #[test]
     fn requesting_cpu_without_the_feature_errors_naming_it() {
         let error = expect_plan_err(
-            super::plan_named(Backend::Cpu, &[], &[], &[], &[]),
-            "cpu backend must not be selectable when its feature is off",
+            super::plan_named(Engine::Cpu, None, &[], &[], &[], &[]),
+            "cpu engine must not be selectable when its feature is off",
         );
         assert!(matches!(
             error,
@@ -652,8 +674,15 @@ mod tests {
     #[test]
     fn requesting_metal_without_the_feature_errors_naming_it() {
         let error = expect_plan_err(
-            super::plan_named(Backend::Metal, &[], &[], &[], &[]),
-            "metal backend must not be selectable when its feature is off",
+            super::plan_named(
+                Engine::Gpu,
+                Some(super::GpuDriver::Metal),
+                &[],
+                &[],
+                &[],
+                &[],
+            ),
+            "metal driver must not be selectable when its feature is off",
         );
         assert!(matches!(
             error,
@@ -664,7 +693,7 @@ mod tests {
         ));
     }
 
-    // `Backend::from_env` caches `OMEGA_BACKEND` in a process-lifetime
+    // `Engine::from_env` caches `OMEGA_BACKEND` in a process-lifetime
     // `OnceLock`, so these three tests each need their own process to see
     // their own env var -- nextest's default one-test-per-process isolation
     // gives them that; running them under plain `cargo test` in the same
@@ -676,8 +705,8 @@ mod tests {
         unsafe {
             std::env::set_var("OMEGA_BACKEND", "cpu");
         }
-        let backend = super::Backend::from_env().expect("cpu is a known backend name");
-        assert_eq!(backend, super::Backend::Cpu);
+        let engine = super::Engine::from_env().expect("cpu is a known engine name");
+        assert_eq!(engine, super::Engine::Cpu);
     }
 
     #[test]
@@ -686,7 +715,7 @@ mod tests {
         unsafe {
             std::env::set_var("OMEGA_BACKEND", "quantum");
         }
-        let error = super::Backend::from_env().expect_err("quantum names no backend");
+        let error = super::Engine::from_env().expect_err("quantum names no engine");
         assert!(matches!(
             error,
             BackendError::UnknownName { name } if name == "quantum"
@@ -700,22 +729,17 @@ mod tests {
         // fresh process rather than removing it, since removal races nothing
         // else in this process but is unsafe for the same reason `set_var`
         // is.
-        let backend = super::Backend::from_env().expect("unset falls back, never errors");
-        assert_eq!(backend, super::Backend::default_compiled());
+        let engine = super::Engine::from_env().expect("unset falls back, never errors");
+        assert_eq!(engine, super::Engine::default_compiled());
     }
 
+    #[cfg(not(any(all(feature = "metal", target_os = "macos"), feature = "wgpu-backend")))]
     #[test]
-    fn requesting_vulkan_never_falls_back_to_another_backend() {
+    fn requesting_gpu_with_no_compiled_driver_never_falls_back_to_cpu() {
         let error = expect_plan_err(
-            super::plan_named(Backend::Vulkan, &[], &[], &[], &[]),
-            "vulkan has no driver yet, compiled feature or not",
+            super::plan_named(Engine::Gpu, None, &[], &[], &[], &[]),
+            "gpu with no driver compiled must never silently run on cpu",
         );
-        assert!(matches!(
-            error,
-            BackendError::NotCompiled {
-                backend: "vulkan",
-                ..
-            } | BackendError::NotImplemented { backend: "vulkan" }
-        ));
+        assert!(matches!(error, BackendError::NoGpuDriver));
     }
 }

@@ -368,7 +368,10 @@ fn head_dim_from_metadata(
     embedding: u32,
     query_heads: u32,
 ) -> u32 {
-    let key_length = metadata_u32_optional(parsed, &alloc::format!("{architecture}.attention.key_length"));
+    let key_length = metadata_u32_optional(
+        parsed,
+        &alloc::format!("{architecture}.attention.key_length"),
+    );
     if key_length != 0 {
         return key_length;
     }
@@ -1522,8 +1525,7 @@ mod tests {
         let on_disk: alloc::vec::Vec<f32> = (0..Q8_0_TEST_ROWS * Q8_0_TEST_K)
             .map(|index| ((index % 41) as f32 - 20.0) / 8.0)
             .collect();
-        let mut bytes =
-            alloc::vec![0u8; (on_disk.len() / q8_0::QK8_0) * q8_0::BLOCK_BYTES];
+        let mut bytes = alloc::vec![0u8; (on_disk.len() / q8_0::QK8_0) * q8_0::BLOCK_BYTES];
         q8_0::quantize(&on_disk, &mut bytes).expect("real q8_0 encoder quantizes this fixture");
         (on_disk, bytes)
     }
@@ -1665,14 +1667,20 @@ mod tests {
             other => panic!("expected a QuantizedBlock::Q8_0, found {other:?}"),
         };
         assert_eq!(
-            bound_bytes, packed_bytes.as_slice(),
+            bound_bytes,
+            packed_bytes.as_slice(),
             "the packed path must borrow the exact on-disk q8_0 bytes, no copy"
         );
 
-        let activation: Vec<f32> = (0..Q8_0_TEST_K).map(|index| (index as f32) - 32.0).collect();
+        let activation: Vec<f32> = (0..Q8_0_TEST_K)
+            .map(|index| (index as f32) - 32.0)
+            .collect();
         let (program, sum) = q8_0_matmul_program();
         let named = [
-            ("weight", proxima_tensor::cpu::QuantizedBlock::Q8_0(bound_bytes)),
+            (
+                "weight",
+                proxima_tensor::cpu::QuantizedBlock::Q8_0(bound_bytes),
+            ),
             (
                 "activation",
                 proxima_tensor::cpu::QuantizedBlock::Float32(activation.as_slice()),
@@ -1690,8 +1698,7 @@ mod tests {
         for (row, logit) in oracle.iter_mut().enumerate() {
             let mut accumulator = 0.0f32;
             for column in 0..Q8_0_TEST_K {
-                accumulator +=
-                    activation[column] * dequantized_weight[row * Q8_0_TEST_K + column];
+                accumulator += activation[column] * dequantized_weight[row * Q8_0_TEST_K + column];
             }
             *logit = accumulator;
         }
@@ -1733,7 +1740,9 @@ mod tests {
         let mut clean_weight = alloc::vec![0.0f32; Q8_0_TEST_ROWS * Q8_0_TEST_K];
         q8_0::dequantize(&clean_bytes, &mut clean_weight)
             .expect("dequantize the clean packed bytes for the oracle");
-        let activation: Vec<f32> = (0..Q8_0_TEST_K).map(|index| (index as f32) - 32.0).collect();
+        let activation: Vec<f32> = (0..Q8_0_TEST_K)
+            .map(|index| (index as f32) - 32.0)
+            .collect();
         let mut clean_oracle = alloc::vec![0.0f32; Q8_0_TEST_ROWS];
         for (row, logit) in clean_oracle.iter_mut().enumerate() {
             let mut accumulator = 0.0f32;
@@ -1753,8 +1762,7 @@ mod tests {
                 data: &corrupted_bytes,
             }],
         };
-        let file_bytes =
-            write_complete(&model).expect("writes gguf with a corrupted q8_0 weight");
+        let file_bytes = write_complete(&model).expect("writes gguf with a corrupted q8_0 weight");
         let parsed = proxima_gguf::pipe::parse_complete(&file_bytes)
             .expect("parses corrupted q8_0 weight gguf");
 
@@ -1781,7 +1789,10 @@ mod tests {
 
         let (program, sum) = q8_0_matmul_program();
         let named = [
-            ("weight", proxima_tensor::cpu::QuantizedBlock::Q8_0(bound_bytes)),
+            (
+                "weight",
+                proxima_tensor::cpu::QuantizedBlock::Q8_0(bound_bytes),
+            ),
             (
                 "activation",
                 proxima_tensor::cpu::QuantizedBlock::Float32(activation.as_slice()),
@@ -3011,7 +3022,7 @@ mod real_openchat_file {
 
     /// Same cached decode loop, on the Metal backend instead of CPU:
     /// `gpu_layers: GPU_LAYERS_ALL` (`-ngl all`) makes `generate::select_backend`
-    /// resolve `Backend::Metal`, so `LoadedModel::run_decode_loop` (`pub(crate)`,
+    /// resolve `Engine::Gpu`, so `LoadedModel::run_decode_loop` (`pub(crate)`,
     /// same loop `LoadedModel::call` runs) drives `BackendRuntime`'s Metal arm.
     /// Called directly instead of through `Pipe::call` because this test also
     /// needs `runtime`'s plan-cache hit/miss counters, which

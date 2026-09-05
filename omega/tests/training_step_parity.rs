@@ -26,7 +26,7 @@
 
 use std::collections::BTreeMap;
 
-use omega::backend::{Backend, execute_plan_named, plan_named};
+use omega::backend::{Engine, GpuDriver, execute_plan_named, plan_named};
 use proxima_autograd::activation::relu;
 use proxima_autograd::adjoint::differentiate;
 use proxima_autograd::loss::softmax_cross_entropy;
@@ -324,25 +324,34 @@ fn outputs_of(step: &TrainingStep) -> Vec<NodeId> {
     step.rebind.iter().map(|(node, _)| *node).collect()
 }
 
-/// Runs one training step on `backend` and returns `(new_param, new_m,
-/// new_v)` for every output node, in `step.rebind`'s order.
+/// Runs one training step on `engine`/`gpu_driver` and returns `(new_param,
+/// new_m, new_v)` for every output node, in `step.rebind`'s order.
 fn run_one_step(
-    backend: Backend,
+    engine: Engine,
+    gpu_driver: Option<GpuDriver>,
     step: &TrainingStep,
     batch: &[(String, Vec<f32>)],
 ) -> Vec<Vec<f32>> {
+    let name = gpu_driver.map_or(engine.name(), GpuDriver::name);
     let named_blocks = as_named_blocks(batch);
     let outputs = outputs_of(step);
-    let mut plan = plan_named(backend, &step.program, &[], &named_blocks, &outputs)
-        .unwrap_or_else(|error| panic!("{} plans the training step: {error}", backend.name()));
+    let mut plan = plan_named(
+        engine,
+        gpu_driver,
+        &step.program,
+        &[],
+        &named_blocks,
+        &outputs,
+    )
+    .unwrap_or_else(|error| panic!("{name} plans the training step: {error}"));
     let evaluated = execute_plan_named(&mut plan, &named_blocks)
-        .unwrap_or_else(|error| panic!("{} executes the training step: {error}", backend.name()));
+        .unwrap_or_else(|error| panic!("{name} executes the training step: {error}"));
     outputs
         .iter()
         .map(|node| {
             evaluated
                 .get(*node)
-                .unwrap_or_else(|| panic!("{} produced no output for {node:?}", backend.name()))
+                .unwrap_or_else(|| panic!("{name} produced no output for {node:?}"))
                 .0
                 .to_vec()
         })
@@ -402,8 +411,8 @@ fn assert_parity(backend_name: &str, cpu: &[Vec<f32>], gpu: &[Vec<f32>], toleran
 fn a_training_step_runs_on_metal_at_cpu_parity() {
     let step = build_training_step();
     let batch = one_step_batch();
-    let cpu = run_one_step(Backend::Cpu, &step, &batch);
-    let metal = run_one_step(Backend::Metal, &step, &batch);
+    let cpu = run_one_step(Engine::Cpu, None, &step, &batch);
+    let metal = run_one_step(Engine::Gpu, Some(GpuDriver::Metal), &step, &batch);
     assert_parity("metal", &cpu, &metal, 1e-4);
 }
 
@@ -423,8 +432,8 @@ fn a_training_step_runs_on_metal_at_cpu_parity() {
 fn a_training_step_runs_on_wgpu_at_cpu_parity() {
     let step = build_training_step();
     let batch = one_step_batch();
-    let cpu = run_one_step(Backend::Cpu, &step, &batch);
-    let wgpu = run_one_step(Backend::Wgpu, &step, &batch);
+    let cpu = run_one_step(Engine::Cpu, None, &step, &batch);
+    let wgpu = run_one_step(Engine::Gpu, Some(GpuDriver::Wgpu), &step, &batch);
     assert_parity("wgpu", &cpu, &wgpu, 1e-4);
 }
 
@@ -492,8 +501,15 @@ fn a_graph_past_the_adapter_storage_buffer_limit_is_a_named_error_on_wgpu() {
         .collect();
     let named_blocks = as_named_blocks(&owned);
 
-    let mut plan = plan_named(Backend::Wgpu, &program, &[], &named_blocks, &[sum])
-        .expect("this program plans (limit is checked at dispatch, not plan)");
+    let mut plan = plan_named(
+        Engine::Gpu,
+        Some(GpuDriver::Wgpu),
+        &program,
+        &[],
+        &named_blocks,
+        &[sum],
+    )
+    .expect("this program plans (limit is checked at dispatch, not plan)");
     let error = execute_plan_named(&mut plan, &named_blocks).expect_err(
         "a graph past the adapter's storage-buffer limit is a named error, not a panic",
     );
@@ -523,7 +539,8 @@ fn a_graph_past_the_adapter_storage_buffer_limit_is_a_named_error_on_wgpu() {
 /// `proxima-autograd/src/train.rs`'s `fit` already proves on CPU, now
 /// proven on-device. Returns the per-step loss curve.
 #[cfg(any(all(feature = "metal", target_os = "macos"), feature = "wgpu-backend"))]
-fn run_multi_step_on(backend: Backend) -> Vec<f32> {
+fn run_multi_step_on(engine: Engine, gpu_driver: Option<GpuDriver>) -> Vec<f32> {
+    let name = gpu_driver.map_or(engine.name(), GpuDriver::name);
     let step = build_training_step();
     let mut outputs = outputs_of(&step);
     outputs.push(step.loss);
@@ -552,31 +569,29 @@ fn run_multi_step_on(backend: Backend) -> Vec<f32> {
             .collect();
         let named_blocks = as_named_blocks(&owned);
 
-        let mut plan = plan_named(backend, &step.program, &[], &named_blocks, &outputs)
-            .unwrap_or_else(|error| {
-                panic!(
-                    "{} plans training step {step_number}: {error}",
-                    backend.name()
-                )
-            });
-        let evaluated = execute_plan_named(&mut plan, &named_blocks).unwrap_or_else(|error| {
-            panic!(
-                "{} executes training step {step_number}: {error}",
-                backend.name()
-            )
-        });
+        let mut plan = plan_named(
+            engine,
+            gpu_driver,
+            &step.program,
+            &[],
+            &named_blocks,
+            &outputs,
+        )
+        .unwrap_or_else(|error| panic!("{name} plans training step {step_number}: {error}"));
+        let evaluated = execute_plan_named(&mut plan, &named_blocks)
+            .unwrap_or_else(|error| panic!("{name} executes training step {step_number}: {error}"));
 
         let step_loss = evaluated
             .get(step.loss)
-            .unwrap_or_else(|| panic!("{} produced no loss output", backend.name()))
+            .unwrap_or_else(|| panic!("{name} produced no loss output"))
             .0[0];
         loss_curve.push(step_loss);
 
-        for (node, name) in &step.rebind {
+        for (node, field_name) in &step.rebind {
             let (data, _shape) = evaluated
                 .get(*node)
-                .unwrap_or_else(|| panic!("{} produced no output for {node:?}", backend.name()));
-            state.insert((*name).into(), data.to_vec());
+                .unwrap_or_else(|| panic!("{name} produced no output for {node:?}"));
+            state.insert((*field_name).into(), data.to_vec());
         }
     }
 
@@ -586,7 +601,7 @@ fn run_multi_step_on(backend: Backend) -> Vec<f32> {
 #[cfg(all(feature = "metal", target_os = "macos"))]
 #[test]
 fn ten_training_steps_rebind_state_and_the_loss_drops_on_metal() {
-    let loss_curve = run_multi_step_on(Backend::Metal);
+    let loss_curve = run_multi_step_on(Engine::Gpu, Some(GpuDriver::Metal));
     eprintln!("metal multi-step loss curve: {loss_curve:?}");
     assert!(
         loss_curve.iter().all(|value| value.is_finite()),
@@ -605,7 +620,7 @@ fn ten_training_steps_rebind_state_and_the_loss_drops_on_metal() {
 #[cfg(feature = "wgpu-backend")]
 #[test]
 fn ten_training_steps_rebind_state_and_the_loss_drops_on_wgpu() {
-    let loss_curve = run_multi_step_on(Backend::Wgpu);
+    let loss_curve = run_multi_step_on(Engine::Gpu, Some(GpuDriver::Wgpu));
     eprintln!("wgpu multi-step loss curve: {loss_curve:?}");
     assert!(
         loss_curve.iter().all(|value| value.is_finite()),

@@ -160,7 +160,7 @@ fn supported_serving_config(model_path: &str, gpu_layers: i32) -> ServingConfig<
         batch_size: 0,
         ubatch_size: 0,
         // caller-selected: 0 (cpu-only) or `GPU_LAYERS_ALL` (`-ngl all`,
-        // whole-model offload onto `omega::backend::Backend::Metal` --
+        // whole-model offload onto `omega::backend::Engine::Gpu` --
         // `generate.rs:856`'s `select_backend` reads this exact sentinel).
         gpu_layers,
         reasoning_budget: 0,

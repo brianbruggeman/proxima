@@ -72,7 +72,7 @@ use proxima_tokenizer::{SamplingConfig, Vocab, sample_next_token};
 #[cfg(all(feature = "instrument", feature = "metal", target_os = "macos"))]
 use omega::backend::execute_plan_named_metal_op_timed;
 #[cfg(feature = "metal")]
-use omega::backend::{Backend, Plan, execute_plan_named, mark_resident, plan_named};
+use omega::backend::{Engine, Plan, execute_plan_named, mark_resident, plan_named};
 #[cfg(all(feature = "instrument", feature = "metal", target_os = "macos"))]
 use omega::metal::OpGpuTiming;
 #[cfg(all(feature = "instrument", feature = "metal", target_os = "macos"))]
@@ -90,19 +90,23 @@ use omega::metal::metal_stage_totals;
 // `mistral_single_range_cached_forward_program` is this call's program
 // builder, `proxima-tensor/src/spec.rs`'s own single-range counterpart to
 // `mistral_cached_forward_program_with_experts`.
+#[cfg(all(
+    feature = "metal-output-placement",
+    feature = "instrument",
+    target_os = "macos"
+))]
+use omega::execute_plan_named_with_placements_op_timed;
 #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
 use omega::{
     PlacedBuffer, allocate_placed_buffer, execute_plan_named_with_placements,
     plan_named as plan_named_placed,
 };
-#[cfg(all(feature = "metal-output-placement", feature = "instrument", target_os = "macos"))]
-use omega::execute_plan_named_with_placements_op_timed;
-#[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
-use proxima_tensor::spec::mistral_single_range_cached_forward_program;
 #[cfg(feature = "instrument")]
 use proxima_telemetry::debug;
 #[cfg(feature = "instrument")]
 use proxima_tensor::instrument::{elapsed_ticks, read_ticks, ticks_to_nanos};
+#[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
+use proxima_tensor::spec::mistral_single_range_cached_forward_program;
 
 use crate::bind::{BoundWeights, ModelArchitecture, architecture_from_metadata, bind_all_weights};
 use crate::error::InteropError;
@@ -776,7 +780,8 @@ impl<'file> LoadedModel<'file> {
         // layer's tensors or, worse, silently misbind them as dense attention.
         if crate::bind::metadata_str(parsed, "general.architecture")? == "qwen35" {
             let qwen_architecture = crate::qwen35::qwen35_architecture_from_metadata(parsed)?;
-            let weights = crate::qwen35::bind_qwen35_weights(parsed, file_bytes, &qwen_architecture)?;
+            let weights =
+                crate::qwen35::bind_qwen35_weights(parsed, file_bytes, &qwen_architecture)?;
             let vocab = proxima_tokenizer::gguf::vocab_from_metadata(parsed)?;
             let (program, logits_root, layer_roots) =
                 crate::qwen35::qwen35_forward_program(&qwen_architecture)?;
@@ -849,7 +854,10 @@ impl<'file> LoadedModel<'file> {
             vocab,
             program,
             logits_root,
-            layer_roots: cache_roots.into_iter().map(Qwen35LayerRoots::Attention).collect(),
+            layer_roots: cache_roots
+                .into_iter()
+                .map(Qwen35LayerRoots::Attention)
+                .collect(),
             qwen35_ssm_shape: None,
             #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
             single_range,
@@ -914,7 +922,10 @@ impl<'file> LoadedModel<'file> {
             vocab,
             program,
             logits_root,
-            layer_roots: cache_roots.into_iter().map(Qwen35LayerRoots::Attention).collect(),
+            layer_roots: cache_roots
+                .into_iter()
+                .map(Qwen35LayerRoots::Attention)
+                .collect(),
             qwen35_ssm_shape: None,
             #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
             single_range,
@@ -1024,8 +1035,14 @@ impl Qwen35DenseAttentionCache {
         v_name: &'cache str,
     ) -> [(&'cache str, QuantizedBlock<'cache>); 4] {
         [
-            (k_first_name, QuantizedBlock::Float32(self.k_first.as_slice())),
-            (k_second_name, QuantizedBlock::Float32(self.k_second.as_slice())),
+            (
+                k_first_name,
+                QuantizedBlock::Float32(self.k_first.as_slice()),
+            ),
+            (
+                k_second_name,
+                QuantizedBlock::Float32(self.k_second.as_slice()),
+            ),
             (k_pass_name, QuantizedBlock::Float32(self.k_pass.as_slice())),
             (v_name, QuantizedBlock::Float32(self.v.as_slice())),
         ]
@@ -1189,16 +1206,16 @@ pub(crate) fn supported_serving_config(gpu_layers: i32) -> ServingConfig<'static
 /// `ServingConfig::gpu_layers` (`-ngl`, `serving.rs`) is this crate's
 /// existing GPU-offload knob, so backend selection reads it rather than a
 /// second mechanism -- `0` (cpu-only, [`supported_serving_config`]'s own
-/// default) selects [`Backend::Cpu`]; [`GPU_LAYERS_ALL`] (`-ngl all`)
-/// selects [`Backend::Metal`]. `apply_serving_config` rejects every other
+/// default) selects [`Engine::Cpu`]; [`GPU_LAYERS_ALL`] (`-ngl all`)
+/// selects [`Engine::Gpu`]. `apply_serving_config` rejects every other
 /// value before a forward ever runs, so those are the only two this match
 /// needs to distinguish.
 #[cfg(feature = "metal")]
-fn select_backend(config: &ServingConfig) -> Backend {
+fn select_backend(config: &ServingConfig) -> Engine {
     if config.gpu_layers == GPU_LAYERS_ALL {
-        Backend::Metal
+        Engine::Gpu
     } else {
-        Backend::Cpu
+        Engine::Cpu
     }
 }
 
@@ -1213,15 +1230,17 @@ fn select_backend(config: &ServingConfig) -> Backend {
 // nothing to convert.
 
 /// Everything a decode step needs to actually run the program that is
-/// backend-specific: which [`Backend`] to run it on, and the reusable state
+/// backend-specific: which [`Engine`] to run it on, and the reusable state
 /// each call to [`Self::evaluate`] persists across steps. Owns the plan
-/// cache directly rather than through a trait object -- [`Backend`] is
+/// cache directly rather than through a trait object -- [`Engine`] is
 /// already a closed, non-`dyn` enum (`omega::backend`'s own doc), and this
 /// struct's whole job is picking one arm of it once per
-/// [`LoadedModel::generate_with_serving_config`] call.
+/// [`LoadedModel::generate_with_serving_config`] call. This crate never links
+/// `wgpu-backend`, so `Engine::Gpu` here always resolves to the Metal driver
+/// through [`omega::backend::GpuDriver::for_target`].
 #[cfg(feature = "metal")]
 pub(crate) struct BackendRuntime {
-    backend: Backend,
+    engine: Engine,
     /// Keyed by `(new_count, cached_len)` -- the two symbols
     /// `mistral_cached_forward_program`'s cached-attention read extent
     /// resolves against (`Extent::Symbolic(1) == cached_len`). A [`Plan`]
@@ -1264,7 +1283,7 @@ pub(crate) struct BackendRuntime {
 impl BackendRuntime {
     pub(crate) fn new(config: &ServingConfig) -> Self {
         Self {
-            backend: select_backend(config),
+            engine: select_backend(config),
             plans: alloc::collections::BTreeMap::new(),
             #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
             placed_plans: alloc::collections::BTreeMap::new(),
@@ -1273,14 +1292,14 @@ impl BackendRuntime {
         }
     }
 
-    /// Whether this call's [`ServingConfig`] selected the Metal backend --
-    /// [`Self::backend`] is private (this struct's whole job is hiding which
+    /// Whether this call's [`ServingConfig`] selected the Gpu engine --
+    /// [`Self::engine`] is private (this struct's whole job is hiding which
     /// arm was picked), so [`Self::run_decode_loop`]'s own choice of the
     /// placed-KV decode path against [`LoadedModel::single_range`] needs
     /// this accessor rather than reading the field directly.
     #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
     pub(crate) fn is_metal(&self) -> bool {
-        matches!(self.backend, Backend::Metal)
+        matches!(self.engine, Engine::Gpu)
     }
 
     /// `resident_names` -- the caller's own model-weight names, fixed for
@@ -1305,7 +1324,7 @@ impl BackendRuntime {
             &mut self.plan_misses,
             shape,
             || {
-                let mut plan = plan_named(self.backend, program, symbols, named, outputs)?;
+                let mut plan = plan_named(self.engine, None, program, symbols, named, outputs)?;
                 mark_resident(&mut plan, resident_names);
                 Ok(plan)
             },
@@ -1370,7 +1389,11 @@ impl BackendRuntime {
     /// already does for the two-range path. Reachable only behind the
     /// `instrument` feature and only from `run_decode_loop_placed_kv`'s own
     /// `PROXIMA_METAL_OP_PROFILE_STEP` branch.
-    #[cfg(all(feature = "metal-output-placement", feature = "instrument", target_os = "macos"))]
+    #[cfg(all(
+        feature = "metal-output-placement",
+        feature = "instrument",
+        target_os = "macos"
+    ))]
     #[allow(clippy::too_many_arguments)]
     fn evaluate_op_timed_with_placements(
         &mut self,
@@ -1506,7 +1529,7 @@ impl BackendRuntime {
             &mut self.plan_misses,
             shape,
             || {
-                let mut plan = plan_named(self.backend, program, symbols, named, outputs)?;
+                let mut plan = plan_named(self.engine, None, program, symbols, named, outputs)?;
                 mark_resident(&mut plan, resident_names);
                 Ok(plan)
             },
@@ -1898,13 +1921,21 @@ impl<'file> LoadedModel<'file> {
                             named_blocks.extend(cache.named_blocks(k_even, k_odd, v));
                         }
                         (
-                            LayerCacheNames::DenseAttention { k_first, k_second, k_pass, v },
+                            LayerCacheNames::DenseAttention {
+                                k_first,
+                                k_second,
+                                k_pass,
+                                v,
+                            },
                             LayerCacheState::DenseAttention(cache),
                         ) => {
                             named_blocks.extend(cache.named_blocks(k_first, k_second, k_pass, v));
                         }
                         (
-                            LayerCacheNames::Ssm { conv_history, state },
+                            LayerCacheNames::Ssm {
+                                conv_history,
+                                state,
+                            },
                             LayerCacheState::Ssm(cache),
                         ) => {
                             named_blocks.extend(cache.named_blocks(conv_history, state));
@@ -1933,7 +1964,10 @@ impl<'file> LoadedModel<'file> {
                             roots.push(*pass);
                             roots.push(*value);
                         }
-                        Qwen35LayerRoots::Ssm { qkv_mixed, state_out } => {
+                        Qwen35LayerRoots::Ssm {
+                            qkv_mixed,
+                            state_out,
+                        } => {
                             roots.push(*qkv_mixed);
                             roots.push(*state_out);
                         }
@@ -2050,15 +2084,18 @@ impl<'file> LoadedModel<'file> {
                             cache.append(first_data, second_data, pass_data, value_data);
                         }
                         (
-                            Qwen35LayerRoots::Ssm { qkv_mixed, state_out },
+                            Qwen35LayerRoots::Ssm {
+                                qkv_mixed,
+                                state_out,
+                            },
                             LayerCacheState::Ssm(cache),
                         ) => {
-                            let (qkv_mixed_data, _) = evaluated.get(*qkv_mixed).ok_or(
-                                InteropError::MissingEvaluatedNode { node: *qkv_mixed },
-                            )?;
-                            let (state_out_data, _) = evaluated.get(*state_out).ok_or(
-                                InteropError::MissingEvaluatedNode { node: *state_out },
-                            )?;
+                            let (qkv_mixed_data, _) = evaluated
+                                .get(*qkv_mixed)
+                                .ok_or(InteropError::MissingEvaluatedNode { node: *qkv_mixed })?;
+                            let (state_out_data, _) = evaluated
+                                .get(*state_out)
+                                .ok_or(InteropError::MissingEvaluatedNode { node: *state_out })?;
                             #[cfg(feature = "instrument")]
                             {
                                 layer_cache_append_elements +=
@@ -2316,10 +2353,8 @@ impl<'file> LoadedModel<'file> {
         let mut next_ids = ids;
         let vocab_size = self.architecture.vocab as usize;
 
-        let (generated_ids, stopped_by_eos) = decode_until_stop_or_budget(
-            &self.vocab,
-            max_tokens,
-            |_step| {
+        let (generated_ids, stopped_by_eos) =
+            decode_until_stop_or_budget(&self.vocab, max_tokens, |_step| {
                 #[cfg(feature = "instrument")]
                 proxima_tensor::instrument::reset_step();
                 #[cfg(feature = "instrument")]
@@ -2436,7 +2471,11 @@ impl<'file> LoadedModel<'file> {
                         &k_odd_buffers[layer],
                         cached_len * row_bytes_even_odd,
                     ));
-                    output_placements.push((value_output, &v_buffers[layer], cached_len * row_bytes_v));
+                    output_placements.push((
+                        value_output,
+                        &v_buffers[layer],
+                        cached_len * row_bytes_v,
+                    ));
                 }
 
                 let symbols = [new_count as u64, kv_bound_extent as u64];
@@ -2532,12 +2571,11 @@ impl<'file> LoadedModel<'file> {
                 let cached_len_before_step = cached_len;
                 cached_len = merged_len;
 
-                let (logits, _shape) =
-                    evaluated
-                        .get(single_range.logits_root)
-                        .ok_or(InteropError::MissingEvaluatedNode {
-                            node: single_range.logits_root,
-                        })?;
+                let (logits, _shape) = evaluated.get(single_range.logits_root).ok_or(
+                    InteropError::MissingEvaluatedNode {
+                        node: single_range.logits_root,
+                    },
+                )?;
                 let last_position = &logits[(new_count - 1) * vocab_size..new_count * vocab_size];
 
                 #[cfg(feature = "instrument")]
@@ -2594,8 +2632,7 @@ impl<'file> LoadedModel<'file> {
                 }
 
                 Ok(token_id)
-            },
-        )?;
+            })?;
 
         let text = proxima_tokenizer::decode(&generated_ids, &self.vocab)?;
         Ok((generated_ids, text, stopped_by_eos))
