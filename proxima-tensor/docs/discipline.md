@@ -22208,3 +22208,133 @@ env-name mislabeling is corrected.
 | Date | Change | Δ vs prior | CoV / runs | Host loadout |
 | --- | --- | --- | --- | --- |
 | 2026-09-05 | doc-only: byte-load revert of `e142f51`'s q4_K/q5_K word loads baked off against main at Safe and Relaxed, code NOT landed | B-R 28.789 vs M-R 28.249 ms/token (+0.540, 1.9%, revert is SLOWER); B-S 28.628 vs M-S 28.322 (+0.306, 1.1%, also slower); ROW 298/299's Safe-mode regression (~34 ms/token) does not reproduce on this box for either arm | 3 rounds x 4 arms = 12 runs, CoV 0.23-0.84% per arm; `omega` nextest 115 passed / 1 expected-fail (s1 byte-identity fixture, unrefreshed since not landed) | pgrep quiet-gate empty before every run; single measurer, one session |
+
+## ROW 301 -- quiet thread envelope: llama-bench `-t` does not move `-ngl 99` tg32 beyond CoV; `-ngl 0` proves `-t` is a live knob only when compute is on CPU
+
+**Question, verbatim from the owner.** "llama may also be using t=8 by default I
+am not sure what we're using, but we need to hit that whole envelope
+(t=1,2,4,8, etc)" and "we know that llama definitely improves performance on
+t>1, so if metal doesn't care about threads, then it must be leveraging cpu
+somehow or it's not using metal." ROW 289 attempted this sweep but ran on a
+loaded box (`uptime` load-1 131.33, 13x oversubscribed) and is void for
+magnitude; this row repeats it quiet, on the same host (M1 Max, `hw.ncpu`=10,
+`hw.perflevel0.physicalcpu`=8 P-cores, `hw.perflevel1.physicalcpu`=2 E-cores),
+same binary and model ROW 298 named
+(`/Users/brianbruggeman/repos/others/llama.cpp/build/bin/llama-bench`, build
+`b2534622`; `/Users/brianbruggeman/.lmstudio/models/TheBloke/openchat-3.5-1210-GGUF/openchat-3.5-1210.Q4_K_S.gguf`).
+
+**Arms.** `llama-bench -m <gguf> -n 32 -p 0 -r 5 -t {1,2,4,8,10} -ngl 99`, 3
+rounds interleaved (t1,t2,t4,t8,t10 x3, our oracle run once per round between
+llama rounds); `-ngl 0 -t 8` and `-ngl 0 -t 10` once each (CPU-only,
+informational); ours =
+`bind::real_openchat_file::runs_the_cached_decode_loop_on_the_metal_backend_and_reports_the_plan_cache`
+(release, `--features metal,instrument`, `PROXIMA_MAX_TOKENS=8`), steps 3..7
+mean (`plan_hits` >=1 and rising at every step, `prepare_calls=0` in all 3
+rounds -- confirmed post-plan-miss window). Each `llama-bench` invocation
+sampled once at `sleep 1.5` post-launch with `ps -o %cpu,rss -p $(pgrep -x
+llama-bench)` to answer whether `-t` is doing CPU work at `-ngl 99`.
+
+**`llama-bench` thread sweep, `-ngl 99` (Metal-offloaded), mean tg32 t/s and derived ms/token over 3 interleaved rounds:**
+
+| t | round 1 t/s | round 2 t/s | round 3 t/s | mean t/s | CoV | mean ms/token | %CPU sample (round 1) | RSS (round 1, KB) |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 1 | 57.26 | 57.19 | 57.29 | 57.2467 | 0.073% | 17.468 | 4.6 | 4,144,256 |
+| 2 | 57.30 | 57.23 | 57.22 | 57.2500 | 0.062% | 17.467 | 3.9 | 4,143,120 |
+| 4 | 57.21 | 57.34 | 57.24 | 57.2633 | 0.097% | 17.463 | 4.7 | 4,144,496 |
+| 8 | 57.14 | 57.14 | 57.10 | 57.1267 | 0.033% | 17.505 | 4.8 | 4,142,016 |
+| 10 | 57.29 | 57.03 | 57.24 | 57.1867 | 0.197% | 17.487 | 5.3 | 4,142,576 |
+
+**`-ngl 0` (CPU-only, informational, one run each, `-r 5` internal repeats):**
+
+| t | t/s (llama-bench's own r5 mean +/- stddev) | ms/token | %CPU sample |
+| --- | --- | --- | --- |
+| 8 | 23.82 +/- 0.55 | 41.982 | 785.6 |
+| 10 | 18.34 +/- 1.11 | 54.532 | 972.9 |
+
+**Ours (Metal decode path), steps 3..7 mean over 3 rounds, no thread knob exercised:**
+
+| round | steps 3..7 mean ms/token |
+| --- | --- |
+| 1 | 28.311 |
+| 2 | 28.500 |
+| 3 | 28.015 |
+
+Mean of 3 rounds = **28.275 ms/token**, CoV = **0.71%**. `generated_text` is
+byte-identical across all 3 rounds (`"Here is a simple Python function that
+returns"`). Grepping the oracle's own log output for `matmul_worker_count` /
+`PROXIMA_MATMUL_WORKERS` returns zero matches -- that knob belongs only to the
+CPU-only backend (`quantized_matmul_workers`, `proxima-tensor/src/cpu.rs`,
+per ROW 289's own citation) and is never consulted on the Metal decode path.
+The Metal path issues its 520 `emit_calls` from one host thread into one
+batched `MTLCommandBuffer` per token; there is no per-token CPU thread pool to
+have a count.
+
+**Ratio, ours/llama-bench, per `t` (all at `-ngl 99`):**
+
+| t | ratio (ours 28.275 / llama-bench mean) |
+| --- | --- |
+| 1 | 1.619 |
+| 2 | 1.619 |
+| 4 | 1.619 |
+| 8 | 1.615 |
+| 10 | 1.617 |
+
+**Observed facts, one sentence each, nothing evaluative.**
+- `tg32` mean t/s at `-ngl 99` does not move outside CoV across `t=1,2,4,8,10`
+  (57.13-57.26 t/s, CoV 0.033-0.197% -- every pair of `t` values overlaps
+  inside the others' CoV band).
+- `llama-bench`'s own `%CPU` sample at `-ngl 99` sits at 3.9-5.3% across all
+  five `t` values sampled, regardless of `t`.
+- `llama-bench`'s own `%CPU` sample at `-ngl 0` is 785.6% at `t=8` and 972.9%
+  at `t=10` -- both far above the `-ngl 99` band and roughly proportional to
+  `t`.
+- `-ngl 0` throughput (18.34-23.82 t/s) is 2.4-3.1x slower than `-ngl 99`
+  (57.13-57.26 t/s) at the same `t` values (8 and 10).
+- ours (28.275 ms/token mean, no thread knob) sits at 1.615-1.619x
+  `llama-bench`'s `-ngl 99` mean across every `t` sampled; the ratio itself
+  does not move with `t` because the denominator does not move with `t`.
+
+**Answer to the owner's question.** At `-ngl 99` this host's `llama-bench`
+build does not improve with more threads -- the ROW 289 result that showed
+apparent (noisy, non-monotonic, loud-box) movement does not reproduce quiet.
+The `%CPU` evidence resolves the owner's own fork directly: `-t` IS a live
+knob in this `llama-bench` build (the `-ngl 0` arms prove it drives 785-973%
+CPU utilization), but at `-ngl 99` the decode step is fully on the GPU and the
+host thread pool `-t` sizes sits mostly idle (3.9-5.3% CPU) waiting on Metal,
+so raising `-t` past 1 buys nothing measurable in this envelope. Ours has no
+CPU thread knob on its hot path at all (confirmed above) and is not compared
+against threads for that reason -- it is compared against the `-ngl 99` mean
+only, which is `t`-invariant by this row's own measurement.
+
+**Residual.** The `%CPU` sample is a single point at `sleep 1.5` post-launch
+(model load plus a slice of the `tg32` decode window) per run, not a
+time-averaged trace across the full `-r 5` invocation -- a transient spike
+inside the unsampled remainder is not ruled out, though the 5-point spread at
+`-ngl 99` (3.9-5.3%) leaves little room for one. No per-thread breakdown
+(how the reported `%CPU` decomposes across the `t` threads) was captured.
+
+**Loadouts.** `uptime` load-1 at sweep start 7.24, falling to 2.55-4.98 by the
+sweep's end (all runs, quiet gate re-checked before every arm: pgrep
+`llama-bench\|llama-cli\|proxima_model_i\|device_streamin\|matvec_roofline\|omega-\|^cargo$\|^rustc$\|nextest\|cargo-nextest`
+empty and load-1 <10 before every one of the 17 `llama-bench` invocations and
+3 oracle rounds); single measurer, one session, total sweep wall-clock under 3
+minutes.
+
+**Re-prove:**
+```sh
+cd /Users/brianbruggeman/repos/slot-0/proxima-wt-m2
+for t in 1 2 4 8 10; do
+  /Users/brianbruggeman/repos/others/llama.cpp/build/bin/llama-bench \
+    -m /Users/brianbruggeman/.lmstudio/models/TheBloke/openchat-3.5-1210-GGUF/openchat-3.5-1210.Q4_K_S.gguf \
+    -n 32 -p 0 -r 5 -t "$t" -ngl 99
+done
+/Users/brianbruggeman/repos/others/llama.cpp/build/bin/llama-bench -m <gguf> -n 32 -p 0 -r 5 -t 8 -ngl 0
+/Users/brianbruggeman/repos/others/llama.cpp/build/bin/llama-bench -m <gguf> -n 32 -p 0 -r 5 -t 10 -ngl 0
+CARGO_TARGET_DIR=./target CARGO_TERM_COLOR=never PROXIMA_MAX_TOKENS=8 cargo test --release -p proxima-model-interop --features metal,instrument --lib -- --exact --nocapture --ignored \
+  bind::real_openchat_file::runs_the_cached_decode_loop_on_the_metal_backend_and_reports_the_plan_cache
+```
+
+### Changelog
+| Date | Change | Δ vs prior | CoV / runs | Host loadout |
+| --- | --- | --- | --- | --- |
+| 2026-09-05 | doc-only: quiet re-run of ROW 289's thread envelope (`t=1,2,4,8,10` at `-ngl 99`, plus `-ngl 0` control), 3 interleaved rounds, `%CPU` sampled per run; no code change | tg32 t/s flat across `t` (57.13-57.26, all CoV <=0.2%), superseding ROW 289's loud-box non-monotonic 33.45-43.79 t/s; `%CPU` 3.9-5.3% at `-ngl 99` vs 785.6-972.9% at `-ngl 0` resolves the owner's CPU-vs-Metal fork | 15 `-ngl 99` runs (3 rounds x 5 `t` values) CoV 0.033-0.197%; ours 3 rounds CoV 0.71% | pgrep quiet-gate empty + load-1 <10 before every one of 17 llama-bench invocations and 3 oracle rounds; single measurer |
