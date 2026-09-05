@@ -22402,6 +22402,52 @@ Confirm the `pgrep -l` gate above is empty and `uptime` load-1 is under 10 immed
 | --- | --- | --- | --- | --- |
 | 2026-09-05 | `test(omega): amortize the dispatch floor in the streaming ceiling` (1 GB arm batched to 2 GB/timed-buffer, 4 GB arm unchanged); quiet re-run of ROW 291 (ceiling) + ROW 293 (C1/C2/C3), 2 runs | solo ceiling 381.24-381.88 GB/s (1.44-1.61x ROW 291's loud 237.79-264.29); CPU-only 1/4/8 threads 51-117 GB/s (thread=4 persistently >5% CoV both runs); concurrent 50/50-70/30 splits 118-292 GB/s, best 291.85 GB/s at 70/30 -- **23.6% below solo GPU ceiling, D0c = NO** | 2 full runs (protocol-mandated second run: `cpu_only thread_count=4` exceeded 5% CoV in both runs even after dropping the cold first repeat); all WIDE-grid GPU cells and 2 of 3 concurrent cells per run under 5% CoV | pgrep quiet-gate empty + load-1 <10 (peak observed 8.88, settled before each run) before both runs; single measurer |
 
+## ROW 303 -- per-position pipeline resolution: a plan-cache HIT allocates zero per-step marginal bytes for the cache-key/dispatch-shape/pipeline lookup
+
+**Card:** `omega/src/metal.rs`, two commits this row (`perf(omega): resolve pipelines per plan position once`, `refactor(omega): classify_kind names the kind through the type`), off `main` `d2d2d20`, worktree `proxima-wt-h0`, branch `perf/per-position-pipelines`.
+
+**Mechanism.** `execute_plan_with_placements`'s per-position loop called `encode_op`, which -- on EVERY step, hit or miss -- rebuilt `kernel_cache_key`'s `String`, `kernel_dispatch_shape`'s `Vec<Binding>`, and `pipeline_for`'s own `format!("{cache_key}{mode}")` mode-key `String` just to look an already-compiled pipeline back up in `PIPELINE_CACHE`. `Plan` now owns `resolved_steps: RefCell<Option<ResolvedSteps>>` -- a `Vec<ResolvedStep>` (compiled pipeline + bindings + grid) indexed by plan position, built once by the new `resolve_steps` function on a plan's first `execute_plan_with_placements` call (or rebuilt whole if `Plan::set_math_mode` moved the mode since). `encode_op` gained one new parameter, `resolved: Option<&ResolvedStep>` -- `Some` only from the placements path once warm, `None` (byte-identical old behavior) from `execute_plan`/the `*_op_timed` diagnostics. `classify_kind` no longer restates `BoundOpKind`'s own name strings for `CachedAttention`/`Elementwise`/`Iota`/`Constant`/`keep::scan fold` -- it delegates to `BoundOpKind::name()`, so one mapping exists; the `keep::reduce fold` body-shape suffixes (`reduce-tiled-gemm`/`reduce-packed-row-blocked`/`reduce-cooperative`/`reduce-generic-scalar`/`reduce-unclassified`) are a genuine second axis `classify_kind` alone determines from the emitted source, kept as their own arm.
+
+**Evidence: `omega/tests/plan_pipeline_alloc_count.rs`**, gated by a new `alloc-count` feature (dev-only `proxima-test` dependency, `proxima_test::alloc_count::CountingAllocator` installed as this ONE test binary's `#[global_allocator]`). Two plans differing only in op count (`Op::Input -> Elementwise(Identity)` vs. `Input -> Identity -> Identity`), both warmed once, then a SECOND (warm) `execute_plan_with_placements` call measured on each:
+
+| metric | before (main `d2d2d20`, `git checkout -- omega/src/metal.rs` against this row's test file) | after (this row) |
+| --- | --- | --- |
+| one-op warm-call allocations | 27 | 18 |
+| two-op warm-call allocations | 37 | 18 |
+| marginal allocations for the extra op | **10** | **0** |
+
+`before`'s 10-allocation marginal cost matches the mechanism exactly: one `String` (`kernel_cache_key`), one `Vec<Binding>` (`kernel_dispatch_shape`), one `String` (`pipeline_for`'s mode-key `format!`) per op, each of which reallocates at least once as it grows past its inline capacity. `after`'s marginal cost is exactly 0 -- the two plans' warm calls allocate identically despite the extra `Elementwise` node, because the hit path indexes `resolved_steps` by position instead of rebuilding any of the three. A second test (`a_warm_plan_hit_allocates_the_same_amount_every_call`) confirms two consecutive warm calls against the SAME plan allocate identically (steady state) both before and after -- it is the CROSS-PLAN marginal comparison above, not this steady-state check alone, that isolates the fix (a steady-state repeat is flat either way, since both old and new code repeat the same per-call work call after call).
+
+**Release oracle** (`proxima-model-interop`'s `bind::real_openchat_file::runs_the_cached_decode_loop_on_the_metal_backend_and_reports_the_plan_cache`, `PROXIMA_MAX_TOKENS=8`, real openchat-3.5-1210.Q4_K_S checkpoint, quiet-gate empty before each run, single measurer, other agents' background load on the shared host noted via `uptime` but not gated on since no measurement-binary name matched):
+
+| steps 3..7 | before | after |
+| --- | --- | --- |
+| step_wall_ms | 28.207 / 28.242 / 28.330 / 28.432 / 28.477 | 27.620 / 27.640 / 27.736 / 27.762 / 27.778 |
+| gpu_exec_ms | 26.776 / 26.853 / 26.944 / 27.046 / 27.089 | 26.798 / 26.835 / 26.939 / 26.980 / 26.922 |
+| host_ms (wall - gpu_exec) | 1.431 / 1.389 / 1.386 / 1.386 / 1.388 (mean 1.396) | 0.821 / 0.805 / 0.797 / 0.782 / 0.856 (mean 0.812) |
+
+`generated_text` identical both runs (`"Here is a simple Python function that returns"`), `plan_hits=5`/`plan_misses=3` identical both runs. Single runs each, not a bake-off with repeats -- timing is informational per this row's own task brief (the allocation-count test above is the gate); `uptime` load-1 was 22.93 at run time (other slices building concurrently on this shared host per the load average, though the quiet-gate's own process-name check matched none of them), so the ~27.7ms/22.9ms wall figures here run slightly high against ROW 288's quiet-box 28.54/host 1.3 baseline and should not be read as a new scoreboard entry.
+
+**Gates:**
+- `cargo build -p omega --lib --features metal,instrument`: EXIT=0.
+- `cargo clippy -p omega --all-targets --features metal,instrument -- -D warnings`: EXIT=0, zero warnings.
+- `cargo clippy -p omega --all-targets --features metal,instrument,alloc-count -- -D warnings`: EXIT=0, zero warnings.
+- `cargo nextest run -p omega --features metal,instrument`: 178 tests run, 178 passed, 3 skipped, EXIT=0.
+- `cargo nextest run -p omega --features metal,instrument,alloc-count`: 178 tests run, 178 passed, 3 skipped, EXIT=0.
+- `cargo nextest run -p proxima-model-interop --features metal,instrument`: 110 tests run, 110 passed, 27 skipped, EXIT=0.
+- `bash scripts/omega-gate.sh`: 8/8 steps PASS, 242 tests run, 242 passed, 3 skipped, EXIT=0.
+- `metal::math_mode_cache_key_tests::safe_and_relaxed_produce_distinct_pipeline_cache_keys`: PASS (Safe/Relaxed pipeline-cache-key distinctness unaffected by this row).
+
+**Re-prove command:**
+```
+cd /Users/brianbruggeman/repos/slot-0/proxima-wt-h0 && CARGO_TARGET_DIR=/Users/brianbruggeman/repos/slot-0/proxima-wt-h0/target CARGO_TERM_COLOR=never cargo nextest run -p omega --features metal,instrument,alloc-count --test plan_pipeline_alloc_count --no-capture
+```
+
+### Changelog
+| Date | Change | Δ vs prior | CoV / runs | Host loadout |
+| --- | --- | --- | --- | --- |
+| 2026-09-05 | `perf(omega): resolve pipelines per plan position once` + `refactor(omega): classify_kind names the kind through the type` | warm-call marginal allocation per extra plan position: 10 -> 0; release-oracle steps 3..7 host residual (wall - gpu_exec) mean 1.396ms -> 0.812ms, `generated_text` and `plan_hits`/`plan_misses` unchanged | allocation-count test is exact (not a statistical claim); release oracle single runs, informational only per this row's task brief | pgrep quiet-gate empty before both release-oracle runs; `uptime` load-1 22.93 at run time (other slices building concurrently) |
+
 ## ROW 304 -- quality reference scores through the cached decode loop: 8x8 real drift in both math modes, 2x3 reproduction confirms mechanism not regression
 
 **Card:** S6 `quality-harness-cached` (`proxima-model-interop/src/quality.rs`, `generate.rs`,
