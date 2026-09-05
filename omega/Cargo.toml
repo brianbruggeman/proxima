@@ -95,6 +95,13 @@ cpu = ["std", "proxima-tensor/std"]
 # unchanged at 5. Same less-work rule as `cached-attention-streaming` above:
 # output identical, real reduction in work, ships default-on without waiting
 # on a wall-clock delta.
+# `metal-packed-row-nsg2` joins per ROW 311's quiet llama-diff bake-off: 2
+# simdgroups/threadgroup (matching llama.cpp's `N_SG_Q4_K=2`) halves the
+# packed-row matvec threadgroup count at every shape (`packed_row_nsg_factor`
+# doubles `threadgroup_width`, `msl.rs:5391,5511-5524`) for identical total
+# simdgroup count -- less work, same output (`generated_text` identical
+# across 15 runs), `gpu_exec_ms` mean 26.784 -> 26.554 ms (within both arms'
+# CoV, 1.04%/0.79%, so not a wall win but not a regression either).
 metal = [
     "std",
     "dep:objc2",
@@ -113,6 +120,7 @@ metal = [
     "cached-attention-streaming",
     "metal-concurrent-dispatch",
     "reduce-epilogue-fusion",
+    "metal-packed-row-nsg2",
 ]
 # `Vulkan`/`Npu`/`Ane` name-reservation features were deleted with the
 # `Backend` variants they backed (design §B.4, 2026-09-04): no emitter and no
