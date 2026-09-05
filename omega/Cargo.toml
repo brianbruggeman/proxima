@@ -87,6 +87,14 @@ cpu = ["std", "proxima-tensor/std"]
 # 0.84%/1.05%), wall mean 36.556 -> 34.725 ms (ON <= OFF + CoV every round),
 # `device_allocated_bytes` unchanged, `generated_text` identical across all
 # 3 bake-off rounds plus 3 extra determinism runs.
+# `reduce-epilogue-fusion` joins per the owner's less-work rule: the fusion
+# rewrite folds 3 of the 4 epilogued reduces per layer into their reduce
+# (`BoundOpKind::Reduce::epilogue_body`) on the real openchat cached-decode
+# oracle -- `emit_calls` 616 -> 520, `barriers` 419 -> 323, `generated_text`
+# identical ("Here is a simple Python function that returns"), `plan_hits`
+# unchanged at 5. Same less-work rule as `cached-attention-streaming` above:
+# output identical, real reduction in work, ships default-on without waiting
+# on a wall-clock delta.
 metal = [
     "std",
     "dep:objc2",
@@ -104,6 +112,7 @@ metal = [
     "metal-plan-stable-buffers",
     "cached-attention-streaming",
     "metal-concurrent-dispatch",
+    "reduce-epilogue-fusion",
 ]
 # `Vulkan`/`Npu`/`Ane` name-reservation features were deleted with the
 # `Backend` variants they backed (design §B.4, 2026-09-04): no emitter and no
