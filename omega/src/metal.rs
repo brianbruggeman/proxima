@@ -1890,13 +1890,17 @@ pub fn execute_plan_named_with_placements_op_timed(
 #[cfg(feature = "instrument")]
 fn classify_kind(bound: &BoundOp, packed_operands: &PackedOperands) -> &'static str {
     match &bound.kind {
-        BoundOpKind::CachedAttention { .. } => "cached-attention",
-        BoundOpKind::Elementwise { .. } => "elementwise",
-        BoundOpKind::Iota => "iota",
-        BoundOpKind::Constant { .. } => "constant",
+        // `BoundOpKind::name()` is the one place these four (plus
+        // `keep::scan fold` below) are spelled -- this arm never restates
+        // its own copy, so a future variant or renamed arm cannot drift
+        // between this profiler label and `RenderKindMismatch`'s own.
+        BoundOpKind::CachedAttention { .. }
+        | BoundOpKind::Elementwise { .. }
+        | BoundOpKind::Iota
+        | BoundOpKind::Constant { .. } => bound.kind.name(),
         BoundOpKind::Reduce {
             keep: Keep::Scan, ..
-        } => "scan",
+        } => bound.kind.name(),
         BoundOpKind::Reduce {
             keep: Keep::Reduce, ..
         } => match emit(bound, packed_operands) {
