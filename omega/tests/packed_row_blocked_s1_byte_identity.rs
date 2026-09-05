@@ -22,6 +22,7 @@
         feature = "metal-q4k-single-fetch",
         feature = "metal-q4k-ggml-port",
         feature = "metal-packed-row-nsg2",
+        feature = "metal-q4k-mask-fma",
     ))
 ))]
 #![allow(clippy::unwrap_used, clippy::expect_used)]
