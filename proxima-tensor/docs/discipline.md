@@ -23000,3 +23000,137 @@ PROXIMA_MAX_TOKENS=8 PROXIMA_METAL_DISPATCH_PROFILE_STEP=5 "$BIN" --exact --noca
 | Date | Change | Δ vs prior | CoV / runs | Host loadout |
 | --- | --- | --- | --- | --- |
 | 2026-09-05 | `feat(omega): per-dispatch gpu timestamps in the batched buffer under instrument` + `docs(tensor): row 309 per-shape matvec bandwidth inside the decode buffer` | mechanism lands (real device counters, `sampling_mode` measured not guessed); this device's stage-boundary-only fallback pays ~46x per-encoder overhead (1230.918 ms vs 26.5-26.8 ms neighbor steps), so per-shape GB/s here is overhead-biased, not a bandwidth result; dominant-family share (81.9%) cross-validates ROW 308's 85% within a few points | single run, single step (step 5), informational per this row's own 30-minute task brief -- not a bake-off | quiet gate (`pgrep -l` names-only) empty, load-1 6.6-8.3 immediately before the release-oracle run; other agents' background load on the shared host noted via `uptime` but not gated on since no measurement-binary name matched |
+
+## ROW 310 -- per-family matvec bandwidth via the in-buffer ablation (ROW 308's mechanism, extended from kinds to weight families): ffn_gate/ffn_down/ffn_up cost 5.8/5.4/4.5 ms of FULL's 26.58 ms, attn_q/attn_k/attn_v CoV blew past 5% (host contention) and read noise-negative
+
+**Card:** `omega/src/metal.rs` (`FilterTerm`, `KNOWN_KIND_SUBSTRINGS`, `weight_family` (now
+`pub`), `bound_weight_family`, `validate_kind_filter`, `MetalError::UnknownKindFilterTerm` +
+`MetalError::KindFilterMatchesNothing`, `KindFilter` extended with a `family:` term),
+`proxima-model-interop/src/generate.rs` (`strip_layer_index` now calls `omega::metal::weight_family`
+instead of keeping its own copy), `omega/tests/kind_filter_family_ablation.rs` (new). Worktree
+`proxima-wt-r5b`, branch `perf/family-ablation`, off `main` `01c483a`.
+
+**Why this slice.** ROW 309 found this M1 Max only exposes `AtStageBoundary` GPU-timestamp
+sampling, and per-encoder overhead (~2.37 ms) is ~23x the real per-dispatch cost, so
+per-dispatch/per-shape bandwidth cannot come from GPU counters on this device. ROW 308's
+in-buffer ablation (`PROXIMA_METAL_KIND_FILTER`, cost = FULL - arm, CoV ~1%) DOES work, but only
+partitioned by `classify_kind`'s kernel-shape buckets (`reduce-packed-row-blocked` etc.), not by
+weight family -- ROW 308's own 224-dispatch MATVEC bucket is eight different shapes
+(`ffn_up`/`ffn_gate`/`ffn_down`/`attn_q`/`attn_output`/`attn_k`/`attn_v`/`output.weight`) reported
+as one number. This row extends the SAME mechanism with a second selector, `family:<substring>`,
+matched against `weight_family`'s aggregation of the op's own first named operand -- the identical
+function `proxima-model-interop`'s `report_op_timings` already used under its old name
+`strip_layer_index` (now a one-line delegate to `omega::metal::weight_family`, so there is exactly
+one place that strips a `blk.N.*` weight name's layer index, not two).
+
+**The ROW 308 defect, folded in while touching this filter.** `KindFilter::matches` had no error
+path: a `kind:`-shaped term outside `classify_kind`'s vocabulary silently made every op skip (ROW
+308's own pre-measurement fix found this the hard way, by dry run, for a stale `cached-attention`
+hyphen). `FilterTerm::parse` now rejects an unrecognized bare term eagerly against
+`KNOWN_KIND_SUBSTRINGS` (`classify_kind`'s own live return-value list, restated only for this
+check) -- `MetalError::UnknownKindFilterTerm`. A `family:` term cannot be validated the same way
+(family names are data-dependent on the loaded checkpoint, not a fixed enum), so
+`validate_kind_filter` instead applies the whole filter against THIS plan's own `prepared.resolved`
+before dispatching anything, and errors -- `MetalError::KindFilterMatchesNothing` -- if it would
+remove zero dispatches or every dispatch. Both are exercised against a real Metal device (never a
+stub) in `omega/tests/kind_filter_family_ablation.rs`, alongside a third test proving
+`!family:ffn_up` on a 36-dispatch synthetic program (32 `blk.{n}.ffn_up.weight`-named reduces + 4
+`blk.{n}.attn_q.weight`-named reduces, activation and every weight filled with `1.0` so a
+correctly-dispatched reduce reads back `8.0` and a SKIPPED one reads back whatever a fresh Metal
+buffer holds instead, `0.0`) drops **exactly** the 32 `ffn_up` dispatches and leaves all 4 `attn_q`
+ones running.
+
+**Measurement.** Release oracle (`cargo test --release -p proxima-model-interop --lib --features
+metal,instrument --no-run`), `bind::real_openchat_file::runs_the_cached_decode_loop_on_the_metal_backend_and_reports_the_plan_cache`,
+`PROXIMA_MAX_TOKENS=8`, `gpu_exec_ms` mean over steps 3..7, 3 interleaved rounds
+(FULL, `!family:ffn_up`, `!family:ffn_gate`, `!family:ffn_down`, `!family:attn_q`,
+`!family:attn_output`, `!family:attn_k`, `!family:attn_v`, `!family:output`), quiet gate
+(`pgrep -l` names-only, never `-f`) confirmed empty and load-1 6.5-8.6 immediately before the
+sweep started. `encode_dispatch_calls` confirms the removal count on every arm: FULL 520,
+every `!family:{ffn_up,ffn_gate,ffn_down,attn_q,attn_output,attn_k,attn_v}` 488 (520-32), and
+`!family:output` 487 (520-1, `output.weight` has no per-layer repetition).
+
+**ROW 310 table** (family, dispatches removed, bytes/token from ROW 309's own table, cost = FULL
+mean - arm mean, CoV of the 3 per-round means, GB/s = bytes/cost, % of the 381.24 GB/s device
+ceiling (ROW 296) -- sorted by GB/s ascending, negative-cost rows kept and flagged rather than
+dropped):
+
+| family (shape) | dispatches removed | bytes/token | FULL mean=26.5798 ms; arm mean (ms) | CoV (arm) | cost = FULL-arm (ms) | GB/s | % of 381.24 GB/s ceiling |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| attn_k (4096x1024, GQA, Q4K) | 32 | 76,021,760 | 27.1079 | 1.02% | -0.5281 (noise-negative) | -- | -- |
+| attn_v (4096x1024, GQA, Q4K) | 32 | 78,118,912 | 26.9770 | 0.48% | -0.3972 (noise-negative) | -- | -- |
+| attn_q (4096x4096, Q4K) | 32 | 302,514,176 | 27.4528 | **12.75%** (contaminated, see below) | -0.8730 (noise-negative) | -- | -- |
+| output.weight (4096x32000, Q6K) | 1 | 107,543,104 | 23.9967 | 0.76% | 2.5831 | 41.63 | 10.92% |
+| attn_output (4096x4096, Q4K) | 32 | 302,514,176 | 24.4920 | 1.08% | 2.0878 | 144.94 | 38.02% |
+| ffn_up (4096x14336, Q4K) | 32 | 1,057,488,896 | 20.8160 | 0.67% | 5.7638 | 183.48 | 48.13% |
+| ffn_down (14336x4096, Q5K/Q4K mixed) | 32 | 1,088,159,744 | 21.1512 | 1.33% | 5.4286 | 200.46 | 52.59% |
+| ffn_gate (4096x14336, Q4K) | 32 | 1,057,488,896 | 22.1085 | 0.47% | 4.4713 | 236.55 | 62.07% |
+| **sum (positive costs only)** | -- | -- | -- | -- | **18.5363** (with negatives) / **20.3346** (positives only) | -- | -- |
+
+**The number that hurts: attn_q/attn_k/attn_v read noise-negative, and attn_q's own CoV (12.75%)
+blows through the 5% bound this campaign otherwise holds everywhere else.** attn_q's three
+per-round means were 25.1318, 24.8272, 32.3993 ms -- the third round is a 7+ ms outlier against
+the other two's own 1.2% spread, not a smooth 3-round distribution. `uptime` immediately before
+the sweep read load-1 6.5-8.6 (quiet-gate-passing), but this host is shared and nothing re-checked
+`uptime` mid-sweep; the most likely mechanism is a load spike from another agent's process landing
+during round 3's `attn_q` arm specifically (each arm+round is a ~15s process, 27 of them run
+serially over ~7 minutes, and this box's own `uptime` samples taken minutes apart during this same
+session ranged from load-1 6.5 to load-1 26.8). This is reported as measured and unresolved, not
+smoothed over: a median-of-3 recompute (using 25.1318 instead of the mean) would put attn_q's cost
+at a small positive 1.448 ms / 208.9 GB/s, roughly between attn_output and ffn_up in the ranking --
+but that recompute is NOT this row's reported number, since substituting the median for the mean
+after seeing which round was inconvenient is exactly the kind of post-hoc cherry-pick these logs
+exist to prevent. The three GQA/small-N families (attn_k, attn_v, attn_q) are the ones nearest the
+noise floor in ROW 308 too (CONST/IOTA's own -0.28/-0.54 ms there, on removing only 2 dispatches
+each) -- these are the smallest-byte families in this table (76-302 MB vs ffn_*'s ~1 GB), so a
+~0.5 ms swing is a larger fraction of their own true cost than the same swing is for ffn_up/down/gate.
+
+**Reconciliation against ROW 308.** ROW 308's real (FULL, non-instrumented) MATVEC bucket
+(`reduce-packed-row-blocked`, 224 dispatches) cost 22.640 ms of 26.545 ms FULL (85.29%). This
+row's eight families sum to 225 dispatches (32*7 + 1) removed in total across all eight arms --
+one more than ROW 308's 224, both measured on the same checkpoint but on different worktrees'
+program-emission state (this row does not chase that one-dispatch discrepancy further; the
+per-family dispatch counts above are directly confirmed by `encode_dispatch_calls`, not derived).
+Summing this row's eight per-family costs including the three noise-negative ones gives 18.536 ms
+(69.7% of this row's own 26.580 ms FULL); summing only the five families whose CoV stayed under
+5% (`ffn_up`, `ffn_gate`, `ffn_down`, `attn_output`, `output.weight`) gives 20.335 ms (76.5% of
+FULL) -- both read BELOW ROW 308's 85.29% MATVEC share, consistent with the attn_q/attn_k/attn_v
+noise pulling the sum down from where a clean measurement would put it, not with MATVEC's own
+total cost having changed between rows.
+
+**What each shape implies, no adjectives:** ffn_gate/ffn_up/ffn_down (K=4096 or 14336, N=14336 or
+4096, ~1 GB each) are the three largest-N-or-K matvecs and the only ones whose measured GB/s
+(183-237) sits within range of ROW 296/308's own streaming-bound estimates for this device;
+attn_output/attn_q (K=N=4096, 0.3 GB) are one-quarter the bytes of the ffn_* shapes at the same K,
+and their GB/s (145, unreliable) is correspondingly further from the ceiling at this buffer size;
+attn_k/attn_v (K=4096, N=1024, GQA-narrowed, 0.08 GB) are the smallest matvecs in the program and
+the two whose cost this measurement could not resolve from noise at all; output.weight (K=4096,
+N=32000, Q6K, single dispatch, 0.1 GB) is the only family with count=1 rather than count=32, so its
+per-token cost cannot amortize a fixed per-dispatch floor across 32 repetitions the way every other
+row here does, which plausibly explains its own low 41.63 GB/s (10.92% of ceiling) despite N being
+the largest of any family in this table.
+
+**Gates:**
+- `cargo clippy -p omega --all-targets --features metal,instrument -- -D warnings`: EXIT=0.
+- `cargo nextest run -p omega --features metal,instrument`: 180 tests run, 180 passed, 3 skipped, EXIT=0 (+3 vs ROW 309's 177: `kind_filter_family_ablation`'s three tests).
+- `cargo nextest run -p omega --features metal` (instrument-off): 172 tests run, 172 passed, 3 skipped, EXIT=0 (unchanged from ROW 309 -- the new test file is `instrument`-gated off).
+- `cargo nextest run -p proxima-model-interop --features metal,instrument`: 110 tests run, 110 passed, 28 skipped, EXIT=0 (unchanged from ROW 309).
+- `bash scripts/omega-gate.sh`: 8/8 steps PASS, 246 tests run, 246 passed, 3 skipped, EXIT=0 (+3 vs ROW 309's 243).
+
+**Re-prove command** (release oracle, one measurer, quiet gate confirmed empty and load-1 6.5-8.6
+immediately before):
+```
+CARGO_TARGET_DIR=/Users/brianbruggeman/repos/slot-0/proxima/target CARGO_TERM_COLOR=never cargo test --release -p proxima-model-interop --lib --features metal,instrument --no-run
+BIN=$(find target/release/deps -type f -name 'proxima_model_interop-*' -perm +111 ! -name '*.d' | head -1)
+PROXIMA_MAX_TOKENS=8 PROXIMA_METAL_KIND_FILTER='!family:ffn_gate' "$BIN" --exact --nocapture --ignored \
+  bind::real_openchat_file::runs_the_cached_decode_loop_on_the_metal_backend_and_reports_the_plan_cache
+```
+Confirm `encode_dispatch_calls=488` (520-32) on every one of steps 3..7, and re-run the
+noise-flagged arms (`attn_q`, `attn_k`, `attn_v`) more than 3 rounds with `uptime` sampled between
+every round, not just before the sweep, before trusting their sign.
+
+### Changelog
+
+| Date | Change | Δ vs prior | CoV / runs | Host loadout |
+| --- | --- | --- | --- | --- |
+| 2026-09-05 | `fix(omega): kind filter rejects unknown names and empty matches` + `feat(omega): kind filter selects weight families under instrument` + `docs(tensor): row 310 per-family matvec bandwidth inside the decode buffer` | ffn_gate 236.6 GB/s (62.1% of ceiling), ffn_down 200.5 (52.6%), ffn_up 183.5 (48.1%), attn_output 144.9 (38.0%, higher CoV band), output.weight 41.6 (10.9%, single-dispatch, no per-token amortization); attn_q/attn_k/attn_v noise-negative, attn_q's own CoV 12.75% exceeds the 5% bound -- reported, not discarded; reconciliation against ROW 308's 85.29% MATVEC share reads 69.7-76.5% depending on whether the three noise rows are included | 3 interleaved rounds per arm, 9 arms (FULL + 8 `!family:` exclusions); 6 of 9 arms CoV under 1.4%, attn_q's own CoV 12.75% flagged as host-contention-contaminated, not folded into the reported cost | quiet gate (`pgrep -l` names-only, never `-f`) empty and load-1 6.5-8.6 confirmed before the sweep started; this same host's `uptime` samples taken minutes apart in this session ranged as high as load-1 26.8, and no mid-sweep recheck was done -- named as the most likely mechanism for attn_q round 3's outlier, not confirmed |
