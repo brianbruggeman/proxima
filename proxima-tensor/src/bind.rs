@@ -358,6 +358,37 @@ impl BoundOp {
         }
     }
 
+    /// Every node a liveness pass must count as READ by this op: [`operands`]
+    /// (`Self::operands`, what an executor's compute step reads) plus, for a
+    /// [`BoundOpKind::Reduce`], `epilogue_operands` too. Distinct from
+    /// `operands()` on purpose — `run_reduce`/`run_elementwise`'s own operand
+    /// tables must stay exactly the compute-step operands, nothing more, so
+    /// this stays a SEPARATE accessor rather than folding epilogue operands
+    /// into `operands()` itself and silently widening every existing caller's
+    /// operand table by one entry it never asked for. A liveness pass that
+    /// calls `operands()` alone treats an epilogue-only reader as no reader
+    /// at all: `dead_resolved_nodes`/`consumed_by_resolved_nodes` would mark
+    /// a reduce whose sole use is another fold's `epilogue_operands` entry as
+    /// dead weight to skip, and `node_retirement` would free its buffer at
+    /// its OWN position instead of the epilogue's later one — the exact
+    /// `operand buffer missing at evaluation time` a real two-quantized-layer
+    /// program (`cpu::tests::evaluate_quantized_two_layers_does_not_
+    /// underflow_live_now`) hit the moment the CPU evaluator started
+    /// actually reading `epilogue_operands` (`cpu::apply_reduce_epilogue`).
+    #[must_use]
+    pub fn all_read_sources(&self) -> impl Iterator<Item = &(NodeId, Layout, Option<Lookup>)> {
+        let epilogue: &[(NodeId, Layout, Option<Lookup>)] = match &self.kind {
+            BoundOpKind::Reduce {
+                epilogue_operands, ..
+            } => epilogue_operands,
+            BoundOpKind::CachedAttention { .. }
+            | BoundOpKind::Elementwise { .. }
+            | BoundOpKind::Iota
+            | BoundOpKind::Constant { .. } => &[],
+        };
+        self.operands().iter().chain(epilogue.iter())
+    }
+
     /// The composed body applied per step to build one combined value from
     /// `operands()`, before any reduction: an elementwise op's own
     /// (possibly fused) body, or a fused reduce's absorbed body (a one-step
@@ -1893,7 +1924,7 @@ fn native_packed_layout(extents: &[u64], output_axes: &[u16], declared: &Layout)
 fn consumed_by_resolved_nodes(resolved: &[BoundOp]) -> BTreeSet<NodeId> {
     let mut consumed = BTreeSet::new();
     for computed in resolved {
-        for (operand, _layout, lookup) in computed.operands() {
+        for (operand, _layout, lookup) in computed.all_read_sources() {
             consumed.insert(*operand);
             if let Some(lookup) = lookup {
                 consumed.insert(lookup.indices);
@@ -2713,7 +2744,7 @@ pub fn bind_with_fusion(
     let built = bind_cached_attention_fusion(program, shapes, outputs, fuse_cached_attention)?;
     #[cfg(feature = "reduce-epilogue-fusion")]
     {
-        return reduce_epilogue_fusion(program, shapes, built, outputs);
+        reduce_epilogue_fusion(program, shapes, built, outputs)
     }
     #[cfg(not(feature = "reduce-epilogue-fusion"))]
     Ok(built)
@@ -3131,7 +3162,7 @@ pub fn node_retirement(resolved: &[BoundOp], outputs: &[NodeId]) -> Vec<Vec<Node
     let outputs: BTreeSet<NodeId> = outputs.iter().copied().collect();
     let mut last_use: BTreeMap<NodeId, usize> = BTreeMap::new();
     for (position, node) in resolved.iter().enumerate() {
-        for (source, _, gather) in node.operands() {
+        for (source, _, gather) in node.all_read_sources() {
             last_use.insert(*source, position);
             if let Some(gather_access) = gather {
                 last_use.insert(gather_access.indices, position);
@@ -4673,7 +4704,12 @@ mod tests {
 
     #[cfg(feature = "reduce-epilogue-fusion")]
     mod reduce_epilogue_fusion_tests {
+        use core::pin::pin;
+        use core::task::{Context, Poll, Waker};
+
         use super::*;
+        use crate::cpu::Interpreter;
+        use crate::test_support::Lcg;
 
         /// `weights: [K, N]` folded over `K` into `reduced: [N]`, then a
         /// plain `x: [N]` residual add — the exact `residual1 = Add(attn_out,
@@ -4768,6 +4804,98 @@ mod tests {
                 has_real_epilogue(&merged.kind),
                 "the fused op must carry a real epilogue, got {:?}",
                 merged.kind
+            );
+        }
+
+        /// Runs an already-resolved `Vec<BoundOp>` through
+        /// [`crate::cpu::Interpreter`] the same way
+        /// `cached_attention_single_range_fused_matches_the_unfused_program`
+        /// (`spec.rs`) already does for its own fused-vs-unfused A/B — the
+        /// one entry point that accepts a caller's own bind result instead
+        /// of re-binding internally the way [`crate::cpu::evaluate`] does
+        /// ([`crate::cpu::evaluate`]'s own `prepare` calls `bind::bind`
+        /// unconditionally, so it can never produce the un-epilogued half of
+        /// this comparison once the `reduce-epilogue-fusion` feature is
+        /// compiled in).
+        fn run_resolved(
+            program_len: usize,
+            resolved: &[BoundOp],
+            inputs: Vec<(NodeId, Vec<f32>)>,
+        ) -> Vec<Option<Vec<f32>>> {
+            let mut buffers: Vec<Option<Vec<f32>>> = alloc::vec![None; program_len];
+            for (node, data) in inputs {
+                buffers[node.0 as usize] = Some(data);
+            }
+            let interpreter = Interpreter::new(&mut buffers);
+            for chunk in resolved.chunks(READY_BATCH_CAPACITY) {
+                let batch: ReadyBatch = chunk.iter().cloned().collect();
+                let waker = Waker::noop();
+                let mut context = Context::from_waker(waker);
+                let mut future = pin!(interpreter.call(batch));
+                match future.as_mut().poll(&mut context) {
+                    Poll::Ready(result) => {
+                        result.expect("resolved batch computes");
+                    }
+                    Poll::Pending => unreachable!("cpu pipes never yield: no internal .await"),
+                }
+            }
+            buffers
+        }
+
+        /// Hand-derivable ground truth over 8x4 weights and a length-4
+        /// residual: `reduced[n] = sum_k weights[k, n]`, `consumer[n] =
+        /// reduced[n] + x[n]` — exact values, not a tolerance band, because
+        /// every input is an exact `f32` the sum can reproduce bit-for-bit
+        /// with `Lcg`'s own small integer-ish range.
+        #[test]
+        fn reduce_epilogue_evaluator_matches_hand_derived_values() {
+            let (program, _reduced, consumer, _x, extra_x_use) = reduce_then_residual_add_program();
+            let outputs = alloc::vec![consumer, extra_x_use];
+            let shapes = shape::infer(&program, &[]).expect("residual-add program infers");
+
+            let mut lcg = Lcg(42);
+            let weights: Vec<f32> = (0..32).map(|_| lcg.next_unit()).collect();
+            let residual: Vec<f32> = (0..4).map(|_| lcg.next_unit()).collect();
+
+            let expected: Vec<f32> = (0..4)
+                .map(|column| {
+                    let sum: f32 = (0..8).map(|row| weights[row * 4 + column]).sum();
+                    sum + residual[column]
+                })
+                .collect();
+
+            let inputs = || -> Vec<(NodeId, Vec<f32>)> {
+                block_node_ids(&program)
+                    .into_iter()
+                    .map(|node| {
+                        let data = match &program[node.0 as usize] {
+                            Op::Input { shape, .. } if shape.len() == 2 => weights.clone(),
+                            _ => residual.clone(),
+                        };
+                        (node, data)
+                    })
+                    .collect()
+            };
+
+            let fused = bind(&program, &shapes, &outputs).expect("fused bind succeeds");
+            let fused_buffers = run_resolved(program.len(), &fused, inputs());
+            let fused_consumer = fused_buffers[consumer.0 as usize]
+                .as_ref()
+                .expect("fused consumer output present");
+
+            assert_eq!(
+                fused_consumer, &expected,
+                "epilogued reduce must match the hand-derived sum-plus-residual exactly"
+            );
+
+            let plain = bind_plain(&program, &shapes, &outputs).expect("plain bind succeeds");
+            let plain_buffers = run_resolved(program.len(), &plain, inputs());
+            let plain_consumer = plain_buffers[consumer.0 as usize]
+                .as_ref()
+                .expect("plain consumer output present");
+            assert_eq!(
+                fused_consumer, plain_consumer,
+                "the epilogue-fused evaluator must match the plain (unfused) evaluator exactly"
             );
         }
 
@@ -4945,6 +5073,216 @@ mod tests {
                 epilogue_count > 0,
                 "the real openchat shape must produce at least one epilogued reduce"
             );
+        }
+
+        /// The same `mistral_single_range_cached_forward_program` builder the
+        /// structural test above proves the bound-op COUNT for, run end to
+        /// end through [`Interpreter`]: `bind`'s own epilogue-fused resolve
+        /// against `bind_cached_attention_fusion`'s un-epilogued one, same
+        /// program, same weights, same cache — a divergence here can only be
+        /// the epilogue evaluator (`cpu::apply_reduce_epilogue`), never a
+        /// shape or binding difference. Scaled down from the structural
+        /// test's real `vocab=32_002, hidden=4096` shape to one a unit test
+        /// can actually execute; the structural test already measured the
+        /// full openchat shape's bound-op counts, so this only needs to
+        /// re-prove VALUES agree, at a shape small enough to run in
+        /// milliseconds.
+        #[test]
+        fn reduce_epilogue_fusion_matches_the_unfused_program_on_the_real_single_range_shape() {
+            const VOCAB: u32 = 5;
+            const EMBEDDING: u32 = 4;
+            const FEED_FORWARD: u32 = 4;
+            const QUERY_HEADS: u32 = 2;
+            const KV_HEADS: u32 = 1;
+            const HEAD_DIM: u32 = 2;
+            const BLOCK_COUNT: u32 = 1;
+            const CACHED_LEN: usize = 3;
+            const NEW_COUNT: usize = 2;
+            const MERGED_LEN: usize = CACHED_LEN + NEW_COUNT;
+            let pairs = (HEAD_DIM / 2) as usize;
+            let group = (QUERY_HEADS / KV_HEADS) as usize;
+
+            let (program, logits, cache_roots) =
+                crate::spec::mistral_single_range_cached_forward_program(
+                    VOCAB, EMBEDDING, FEED_FORWARD, QUERY_HEADS, KV_HEADS, HEAD_DIM, BLOCK_COUNT,
+                )
+                .expect("single-range cached forward pass lowers");
+            let mut outputs = alloc::vec![logits];
+            for (even, odd, value) in &cache_roots {
+                outputs.extend_from_slice(&[*even, *odd, *value]);
+            }
+            let shapes = shape::infer(&program, &[NEW_COUNT as u64, MERGED_LEN as u64])
+                .expect("single-range fixture infers");
+
+            let mut lcg = Lcg(7);
+            let mut named: Vec<(String, Vec<f32>)> = alloc::vec![
+                (
+                    String::from("token_embd.weight"),
+                    (0..VOCAB as usize * EMBEDDING as usize)
+                        .map(|_| lcg.next_unit())
+                        .collect()
+                ),
+                (
+                    String::from("ids"),
+                    (0..NEW_COUNT).map(|id| 1.0 + (id % 3) as f32).collect()
+                ),
+                (String::from("eps"), alloc::vec![1e-5f32; NEW_COUNT]),
+                (
+                    String::from("rope_cos"),
+                    (0..NEW_COUNT * pairs).map(|_| lcg.next_unit()).collect()
+                ),
+                (
+                    String::from("rope_sin"),
+                    (0..NEW_COUNT * pairs).map(|_| lcg.next_unit()).collect()
+                ),
+                (String::from("cached_len"), alloc::vec![CACHED_LEN as f32]),
+            ];
+            for layer in 0..BLOCK_COUNT as usize {
+                named.push((
+                    alloc::format!("blk.{layer}.attn_norm.weight"),
+                    alloc::vec![1.0f32; EMBEDDING as usize],
+                ));
+                named.push((
+                    alloc::format!("blk.{layer}.ffn_norm.weight"),
+                    alloc::vec![1.0f32; EMBEDDING as usize],
+                ));
+                named.push((
+                    alloc::format!("blk.{layer}.attn_q.weight"),
+                    (0..EMBEDDING as usize * QUERY_HEADS as usize * HEAD_DIM as usize)
+                        .map(|_| lcg.next_unit())
+                        .collect(),
+                ));
+                named.push((
+                    alloc::format!("blk.{layer}.attn_k.weight"),
+                    (0..EMBEDDING as usize * KV_HEADS as usize * HEAD_DIM as usize)
+                        .map(|_| lcg.next_unit())
+                        .collect(),
+                ));
+                named.push((
+                    alloc::format!("blk.{layer}.attn_v.weight"),
+                    (0..EMBEDDING as usize * KV_HEADS as usize * HEAD_DIM as usize)
+                        .map(|_| lcg.next_unit())
+                        .collect(),
+                ));
+                named.push((
+                    alloc::format!("blk.{layer}.attn_output.weight"),
+                    (0..KV_HEADS as usize * group * HEAD_DIM as usize * EMBEDDING as usize)
+                        .map(|_| lcg.next_unit())
+                        .collect(),
+                ));
+                named.push((
+                    alloc::format!("blk.{layer}.ffn_gate.weight"),
+                    (0..EMBEDDING as usize * FEED_FORWARD as usize)
+                        .map(|_| lcg.next_unit())
+                        .collect(),
+                ));
+                named.push((
+                    alloc::format!("blk.{layer}.ffn_up.weight"),
+                    (0..EMBEDDING as usize * FEED_FORWARD as usize)
+                        .map(|_| lcg.next_unit())
+                        .collect(),
+                ));
+                named.push((
+                    alloc::format!("blk.{layer}.ffn_down.weight"),
+                    (0..FEED_FORWARD as usize * EMBEDDING as usize)
+                        .map(|_| lcg.next_unit())
+                        .collect(),
+                ));
+                named.push((
+                    alloc::format!("kv_cache.{layer}.k_even"),
+                    (0..MERGED_LEN * KV_HEADS as usize * pairs)
+                        .map(|_| lcg.next_unit())
+                        .collect(),
+                ));
+                named.push((
+                    alloc::format!("kv_cache.{layer}.k_odd"),
+                    (0..MERGED_LEN * KV_HEADS as usize * pairs)
+                        .map(|_| lcg.next_unit())
+                        .collect(),
+                ));
+                named.push((
+                    alloc::format!("kv_cache.{layer}.v"),
+                    (0..MERGED_LEN * KV_HEADS as usize * HEAD_DIM as usize)
+                        .map(|_| lcg.next_unit())
+                        .collect(),
+                ));
+            }
+            named.push((
+                String::from("output_norm.weight"),
+                alloc::vec![1.0f32; EMBEDDING as usize],
+            ));
+            named.push((
+                String::from("output.weight"),
+                (0..EMBEDDING as usize * VOCAB as usize)
+                    .map(|_| lcg.next_unit())
+                    .collect(),
+            ));
+
+            let inputs = || -> Vec<(NodeId, Vec<f32>)> {
+                block_node_ids(&program)
+                    .into_iter()
+                    .map(|node| {
+                        let name = match &program[node.0 as usize] {
+                            Op::Input {
+                                name: Some(name), ..
+                            } => name.clone(),
+                            _ => unreachable!("block_node_ids only ever returns named Op::Input nodes"),
+                        };
+                        let data = named
+                            .iter()
+                            .find(|(candidate, _)| *candidate == name)
+                            .unwrap_or_else(|| panic!("missing named input {name}"))
+                            .1
+                            .clone();
+                        (node, data)
+                    })
+                    .collect()
+            };
+
+            let with_epilogue = bind(&program, &shapes, &outputs).expect("fused bind succeeds");
+            let attention_only = bind_cached_attention_fusion(&program, &shapes, &outputs, true)
+                .expect("cached-attention-only bind succeeds");
+            assert!(
+                with_epilogue
+                    .iter()
+                    .any(|bound| has_real_epilogue(&bound.kind)),
+                "this shape must still produce at least one epilogued reduce at the smaller scale"
+            );
+
+            let epilogue_buffers = run_resolved(program.len(), &with_epilogue, inputs());
+            let plain_buffers = run_resolved(program.len(), &attention_only, inputs());
+
+            for node in &outputs {
+                let epilogue_output = epilogue_buffers[node.0 as usize]
+                    .as_ref()
+                    .unwrap_or_else(|| panic!("epilogued output present for {node:?}"));
+                let plain_output = plain_buffers[node.0 as usize]
+                    .as_ref()
+                    .unwrap_or_else(|| panic!("unfused output present for {node:?}"));
+                assert_eq!(epilogue_output.len(), plain_output.len());
+                let peak = plain_output
+                    .iter()
+                    .fold(0.0f32, |peak, value| peak.max(value.abs()));
+                let max_abs_error = epilogue_output
+                    .iter()
+                    .zip(plain_output.iter())
+                    .map(|(fused, plain)| (fused - plain).abs())
+                    .fold(0.0f32, f32::max);
+                let max_rel_error = if peak > 0.0 {
+                    max_abs_error / peak
+                } else {
+                    max_abs_error
+                };
+                std::eprintln!(
+                    "reduce_epilogue_fusion_matches_the_unfused_program node={node:?} \
+                     max_abs_error={max_abs_error} max_rel_error={max_rel_error}"
+                );
+                assert!(
+                    max_abs_error <= 1e-6 && max_rel_error <= 1e-6,
+                    "epilogue-fused output diverged from the unfused program at node {node:?}: \
+                     max_abs_error={max_abs_error} max_rel_error={max_rel_error}"
+                );
+            }
         }
     }
 }
