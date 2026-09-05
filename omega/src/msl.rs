@@ -4144,9 +4144,7 @@ fn push_packed_row_blocked_body(
         // renders one op's kernel text once, not once per dispatch -- so
         // every activation address below drops the runtime `other_stride`
         // multiply entirely in the source text whenever the layout proves
-        // it would multiply by 1. `other_stride` itself stays unconditional
-        // (`push_q4k_ggml_port_body`/`push_q4k_single_fetch_body`, the two
-        // alternate bodies rendered instead of this one, both read it).
+        // it would multiply by 1.
         let other_stride_is_one = resolved.operands()[other].1.stride(reduce_dim as u16) == 1;
         source.push_str(&format!(
             "    long other_stride = u.operand_strides[{other}][{reduce_dim}];\n"
@@ -4231,7 +4229,7 @@ fn push_packed_row_blocked_body(
             && cfg!(feature = "metal-q4k-ggml-port")
             && !cfg!(feature = "metal-q4k-split-k");
         if use_ggml_port {
-            push_q4k_ggml_port_body(source, weight, other, rows, block_bytes);
+            push_q4k_ggml_port_body(source, weight, other, rows, block_bytes, other_stride_is_one);
         } else if use_single_fetch {
             push_q4k_single_fetch_body(
                 source,
@@ -4294,16 +4292,8 @@ fn push_packed_row_blocked_body(
             "        blk_ptr[q] = in{weight} + ((long)((int)weight_base[q] / {Q4K_BLOCK_ELEMENTS}) + (long)ib_first) * {block_bytes};\n"
         ));
         source.push_str("    }\n");
-        if plain_product && other_stride_is_one {
-            source.push_str(&format!(
-                "    long y4_step = (long)ib_step * {Q4K_BLOCK_ELEMENTS};\n"
-            ));
-            source.push_str(&format!("    device const float *y4 = in{other} + other_base[0] + (long)ib_first * {Q4K_BLOCK_ELEMENTS} + (long)(64u * iq + 8u * ir);\n"));
-        } else if plain_product {
-            source.push_str(&format!(
-                "    long y4_step = (long)ib_step * {Q4K_BLOCK_ELEMENTS} * other_stride;\n"
-            ));
-            source.push_str(&format!("    device const float *y4 = in{other} + other_base[0] + (long)ib_first * {Q4K_BLOCK_ELEMENTS} * other_stride + (long)(64u * iq + 8u * ir) * other_stride;\n"));
+        if plain_product {
+            push_q4k_plain_product_y4_address(source, other, other_stride_is_one);
         } else if other_stride_is_one {
             // SAME HOIST, generic (non-plain-product) arm: `elem0 = ib*256 +
             // slot` was rebuilt every `ib` purely to feed `(elem0+j)*
@@ -4762,6 +4752,29 @@ fn push_q4k_single_fetch_body(
     source.push_str("    }\n");
 }
 
+/// The plain-product row-blocked bodies' shared activation address: the
+/// `y4` pointer's base and per-iteration byte step. `push_packed_row_blocked_
+/// body`'s own `plain_product` arm and `push_q4k_ggml_port_body` both read
+/// `weight_base`/`other_base`/`other_stride`/`iq`/`ir` from the same
+/// preamble and must have already declared `ib_first`/`ib_step` in scope --
+/// this is the ONE place either renders the pointer, so the stride-free
+/// specialization (drop the runtime `other_stride` multiply when the layout
+/// proves it is 1, see the caller's own `other_stride_is_one` doc) applies
+/// identically to both instead of drifting.
+fn push_q4k_plain_product_y4_address(source: &mut String, other: usize, other_stride_is_one: bool) {
+    if other_stride_is_one {
+        source.push_str(&format!(
+            "    long y4_step = (long)ib_step * {Q4K_BLOCK_ELEMENTS};\n"
+        ));
+        source.push_str(&format!("    device const float *y4 = in{other} + other_base[0] + (long)ib_first * {Q4K_BLOCK_ELEMENTS} + (long)(64u * iq + 8u * ir);\n"));
+    } else {
+        source.push_str(&format!(
+            "    long y4_step = (long)ib_step * {Q4K_BLOCK_ELEMENTS} * other_stride;\n"
+        ));
+        source.push_str(&format!("    device const float *y4 = in{other} + other_base[0] + (long)ib_first * {Q4K_BLOCK_ELEMENTS} * other_stride + (long)(64u * iq + 8u * ir) * other_stride;\n"));
+    }
+}
+
 // ggml (llama.cpp, MIT license: https://github.com/ggml-org/llama.cpp/blob/
 // master/LICENSE) `kernel_mul_mv_q4_K_f32_impl<4,2,32>`
 // (ggml-metal.metal:5086-5193), transcribed line-for-line onto this crate's
@@ -4782,7 +4795,11 @@ fn push_q4k_single_fetch_body(
 /// this crate's per-axis strided reads, instead of ggml's raw `nb01` pointer
 /// walk -- ggml's own `q1 += args.nb01/2` row-advance is behaviorally
 /// identical to this function's per-row `blk` recompute for the contiguous
-/// packed-row layout this crate always uses).
+/// packed-row layout this crate always uses). The activation address itself
+/// shares `push_q4k_plain_product_y4_address` with
+/// `push_packed_row_blocked_body`'s own `plain_product` arm, so when the
+/// layout proves the reduce-axis stride is 1 this body drops the runtime
+/// multiply the same way ggml's raw pointer walk always did.
 ///
 /// Per-thread split (ggml-metal.metal:5100-5103), unchanged from the
 /// existing row-blocked preamble's own lane assignment: `ix = lane/8`
@@ -4833,6 +4850,7 @@ fn push_q4k_ggml_port_body(
     other: usize,
     rows: usize,
     block_bytes: usize,
+    other_stride_is_one: bool,
 ) {
     source.push_str("    uint ix = (uint)lane / 8u;\n");
     source.push_str("    uint it = (uint)lane % 8u;\n");
@@ -4850,33 +4868,44 @@ fn push_q4k_ggml_port_body(
     // the loop always steps by the fixed `4`), so both this row's byte
     // pointer and the activation base are computed ONCE and advanced by a
     // constant per iteration instead of rebuilt from `ib` every time.
+    // `ib_first`/`ib_step` (rather than `ix`/the literal `4`) are the same
+    // names `push_packed_row_blocked_body`'s own arm declares, so
+    // `push_q4k_plain_product_y4_address` renders identical text in both
+    // callers.
+    source.push_str("    int ib_first = (int)ix;\n    int ib_step = 4;\n");
     source.push_str(&format!(
-        "    long blk_step = (long)4 * {block_bytes};\n"
+        "    long blk_step = (long)ib_step * {block_bytes};\n"
     ));
     source.push_str(&format!("    device const uchar *blk_ptr[{rows}];\n"));
     source.push_str(&format!("    for (int q = 0; q < {rows}; ++q) {{\n"));
     source.push_str(&format!(
-        "        blk_ptr[q] = in{weight} + ((long)((int)weight_base[q] / {Q4K_BLOCK_ELEMENTS}) + (long)ix) * {block_bytes};\n"
+        "        blk_ptr[q] = in{weight} + ((long)((int)weight_base[q] / {Q4K_BLOCK_ELEMENTS}) + (long)ib_first) * {block_bytes};\n"
     ));
     source.push_str("    }\n");
-    source.push_str(&format!(
-        "    long y4_step = (long)4 * {Q4K_BLOCK_ELEMENTS} * other_stride;\n"
-    ));
-    source.push_str(&format!(
-        "    long y4_base = other_base[0] + (long)ix * {Q4K_BLOCK_ELEMENTS} * other_stride + (long)(64u * iq + 8u * ir) * other_stride;\n"
-    ));
-    source.push_str("    for (int ib = (int)ix; ib < super_blocks; ib += 4) {\n");
+    push_q4k_plain_product_y4_address(source, other, other_stride_is_one);
+    source.push_str("    for (int ib = ib_first; ib < super_blocks; ib += ib_step) {\n");
     source.push_str("        float sumy0 = 0.0f; float sumy1 = 0.0f; float sumy2 = 0.0f; float sumy3 = 0.0f;\n");
-    source.push_str(&format!("        for (uint i = 0u; i < 8u; ++i) {{\n            yl[i] = in{other}[y4_base + (long)i * other_stride]; sumy0 += yl[i];\n"));
-    source.push_str(&format!(
-        "            yl[i + 8u] = in{other}[y4_base + (long)(i + 32u) * other_stride]; sumy1 += yl[i + 8u];\n"
-    ));
-    source.push_str(&format!(
-        "            yh[i] = in{other}[y4_base + (long)(i + 128u) * other_stride]; sumy2 += yh[i];\n"
-    ));
-    source.push_str(&format!(
-        "            yh[i + 8u] = in{other}[y4_base + (long)(i + 160u) * other_stride]; sumy3 += yh[i + 8u];\n"
-    ));
+    if other_stride_is_one {
+        source.push_str(
+            "        for (uint i = 0u; i < 8u; ++i) {\n            yl[i] = y4[i]; sumy0 += yl[i];\n",
+        );
+        source.push_str("            yl[i + 8u] = y4[i + 32u]; sumy1 += yl[i + 8u];\n");
+        source.push_str("            yh[i] = y4[i + 128u]; sumy2 += yh[i];\n");
+        source.push_str("            yh[i + 8u] = y4[i + 160u]; sumy3 += yh[i + 8u];\n");
+    } else {
+        source.push_str(
+            "        for (uint i = 0u; i < 8u; ++i) {\n            yl[i] = y4[(long)i * other_stride]; sumy0 += yl[i];\n",
+        );
+        source.push_str(
+            "            yl[i + 8u] = y4[(long)(i + 32u) * other_stride]; sumy1 += yl[i + 8u];\n",
+        );
+        source.push_str(
+            "            yh[i] = y4[(long)(i + 128u) * other_stride]; sumy2 += yh[i];\n",
+        );
+        source.push_str(
+            "            yh[i + 8u] = y4[(long)(i + 160u) * other_stride]; sumy3 += yh[i + 8u];\n",
+        );
+    }
     source.push_str("        }\n");
     source.push_str(&format!("        for (int q = 0; q < {rows}; ++q) {{\n"));
     source.push_str("            device const uchar *blk = blk_ptr[q];\n");
@@ -4935,7 +4964,7 @@ fn push_q4k_ggml_port_body(
     source.push_str(&format!(
         "        for (int q = 0; q < {rows}; ++q) {{ blk_ptr[q] += blk_step; }}\n"
     ));
-    source.push_str("        y4_base += y4_step;\n");
+    source.push_str("        y4 += y4_step;\n");
     source.push_str("    }\n");
 }
 
