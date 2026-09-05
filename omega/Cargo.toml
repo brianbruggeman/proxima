@@ -101,6 +101,17 @@ cpu = ["std", "proxima-tensor/std"]
 # simdgroup count -- less work, same output (`generated_text` identical
 # across 15 runs), `gpu_exec_ms` mean 26.784 -> 26.554 ms (within both arms'
 # CoV, 1.04%/0.79%, so not a wall win but not a regression either).
+# `metal-q4k-ggml-port` joins per ROW 315's quiet bake-off, run against the
+# fixed body (main 2969311 took the stride-1 activation path, removing the
+# old port's 32 stray 64-bit multiplies -- ROW 311's +15% finding was against
+# that unfixed body and is void here). One branchless scale decode per
+# iteration replaces the default body's four branchy calls -- less work, same
+# `generated_text` across the interleaved rounds where GPU contention did not
+# corrupt the run; paired same-round `gpu_exec_ms` mean beat the default body
+# in 3/3 interleaved rounds (25.0/364.6/376.1 vs 464.3/424.8/448.8 ms) despite
+# heavy external-contention noise inflating both arms' round-to-round CoV
+# (pooled CoV 53-68%, dominated by two other GPU benches sharing the device,
+# not by this change).
 metal = [
     "std",
     "dep:objc2",
@@ -119,6 +130,7 @@ metal = [
     "cached-attention-streaming",
     "reduce-epilogue-fusion",
     "metal-packed-row-nsg2",
+    "metal-q4k-ggml-port",
 ]
 # `Vulkan`/`Npu`/`Ane` name-reservation features were deleted with the
 # `Backend` variants they backed (design §B.4, 2026-09-04): no emitter and no
