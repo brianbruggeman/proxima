@@ -198,19 +198,19 @@ pub fn emit_wgsl(
     };
     let source = match &resolved.kind {
         BoundOpKind::Elementwise { .. } => {
-            render_elementwise(resolved, &entry, element_type, &quantized)
+            render_elementwise(resolved, &entry, element_type, &quantized)?
         }
         BoundOpKind::Reduce {
             keep: Keep::Reduce, ..
         } => match cooperative_width {
             Some(width) => {
-                render_reduce_cooperative(resolved, &entry, element_type, &quantized, width)
+                render_reduce_cooperative(resolved, &entry, element_type, &quantized, width)?
             }
-            None => render_reduce(resolved, &entry, element_type, &quantized),
+            None => render_reduce(resolved, &entry, element_type, &quantized)?,
         },
         BoundOpKind::Reduce {
             keep: Keep::Scan, ..
-        } => render_scan(resolved, &entry, element_type),
+        } => render_scan(resolved, &entry, element_type)?,
         BoundOpKind::Iota => render_iota(resolved, &entry),
         BoundOpKind::Constant { value } => render_constant(resolved, &entry, *value),
         BoundOpKind::CachedAttention { .. } => {
@@ -263,12 +263,12 @@ fn reduce_is_cooperative(resolved: &BoundOp, caps: WgslCaps) -> bool {
 /// The WGSL subgroup builtin that combines one lane's private accumulator
 /// across the whole subgroup — the counterpart of `crate::msl::simd_combine_fn`.
 /// Only called for an [`is_cooperative_reduce_op`] body.
-fn subgroup_combine_fn(op: ScalarOp) -> &'static str {
+fn subgroup_combine_fn(node: NodeId, op: ScalarOp) -> Result<&'static str, EmitError> {
     match op {
-        ScalarOp::Add => "subgroupAdd",
-        ScalarOp::Multiply => "subgroupMul",
-        ScalarOp::Maximum => "subgroupMax",
-        ScalarOp::Minimum => "subgroupMin",
+        ScalarOp::Add => Ok("subgroupAdd"),
+        ScalarOp::Multiply => Ok("subgroupMul"),
+        ScalarOp::Maximum => Ok("subgroupMax"),
+        ScalarOp::Minimum => Ok("subgroupMin"),
         ScalarOp::Identity
         | ScalarOp::Subtract
         | ScalarOp::Divide
@@ -281,9 +281,10 @@ fn subgroup_combine_fn(op: ScalarOp) -> &'static str {
         | ScalarOp::Erf
         | ScalarOp::Greater
         | ScalarOp::Equal
-        | ScalarOp::Select => {
-            unreachable!("subgroup_combine_fn is only called for a cooperative reduce_op")
-        }
+        | ScalarOp::Select => Err(EmitError::NonCooperativeReduceOp {
+            node,
+            op: op_token(op),
+        }),
     }
 }
 
@@ -293,12 +294,12 @@ fn subgroup_combine_fn(op: ScalarOp) -> &'static str {
 /// own `ReduceInit`, which may be `FirstElement` or otherwise mismatched
 /// with `op`), so folding it into the final subgroup combine can never
 /// perturb the result.
-fn cooperative_identity_token(op: ScalarOp) -> &'static str {
+fn cooperative_identity_token(node: NodeId, op: ScalarOp) -> Result<&'static str, EmitError> {
     match op {
-        ScalarOp::Add => "0.0",
-        ScalarOp::Multiply => "1.0",
-        ScalarOp::Maximum => "bitcast<f32>(0xff800000u)",
-        ScalarOp::Minimum => "bitcast<f32>(0x7f800000u)",
+        ScalarOp::Add => Ok("0.0"),
+        ScalarOp::Multiply => Ok("1.0"),
+        ScalarOp::Maximum => Ok("bitcast<f32>(0xff800000u)"),
+        ScalarOp::Minimum => Ok("bitcast<f32>(0x7f800000u)"),
         ScalarOp::Identity
         | ScalarOp::Subtract
         | ScalarOp::Divide
@@ -311,9 +312,10 @@ fn cooperative_identity_token(op: ScalarOp) -> &'static str {
         | ScalarOp::Erf
         | ScalarOp::Greater
         | ScalarOp::Equal
-        | ScalarOp::Select => {
-            unreachable!("cooperative_identity_token is only called for a cooperative reduce_op")
-        }
+        | ScalarOp::Select => Err(EmitError::NonCooperativeReduceOp {
+            node,
+            op: op_token(op),
+        }),
     }
 }
 
@@ -628,8 +630,8 @@ fn entry_name(resolved: &BoundOp) -> String {
         }
         // Never actually rendered: `emit_wgsl`'s own kind-match returns
         // `EmitError::UnsupportedOpKind` for `CachedAttention` before this
-        // name is used for anything. A name is still produced (not
-        // `unreachable!()`) because this function runs before that later
+        // name is used for anything. A name is still produced (rather than
+        // panicking here) because this function runs before that later
         // match, purely to satisfy exhaustiveness with a harmless value.
         BoundOpKind::CachedAttention { .. } => format!("omega_wgsl_cached_attention_r{rank}"),
     }
@@ -1010,20 +1012,16 @@ fn cooperative_kernel_signature(source: &mut String, entry: &str, width: u32) {
     source.push_str("    let gid: i32 = i32(global_id.x);\n");
 }
 
-fn codec_function_name(codec: PackedCodec) -> &'static str {
+fn codec_function_name(node: NodeId, codec: PackedCodec) -> Result<&'static str, EmitError> {
     match codec {
-        // `emit_wgsl` rejects `Q3_K` via `EmitError::UnsupportedPackedCodec`
-        // before rendering ever reaches this function.
-        PackedCodec::Q3K => {
-            unreachable!("emit_wgsl rejects PackedCodec::Q3K before codec_function_name runs")
-        }
-        PackedCodec::Q4K => "q4k_element",
-        PackedCodec::Q5K => "q5k_element",
-        PackedCodec::Q6K => "q6k_element",
-        PackedCodec::Q8_0 => "q8_0_element",
-        PackedCodec::Q4_0 => "q4_0_element",
-        PackedCodec::Float16 => "f16_element",
-        PackedCodec::BFloat16 => "bf16_element",
+        PackedCodec::Q3K => Err(EmitError::UnsupportedPackedCodec { node }),
+        PackedCodec::Q4K => Ok("q4k_element"),
+        PackedCodec::Q5K => Ok("q5k_element"),
+        PackedCodec::Q6K => Ok("q6k_element"),
+        PackedCodec::Q8_0 => Ok("q8_0_element"),
+        PackedCodec::Q4_0 => Ok("q4_0_element"),
+        PackedCodec::Float16 => Ok("f16_element"),
+        PackedCodec::BFloat16 => Ok("bf16_element"),
     }
 }
 
@@ -1034,16 +1032,21 @@ fn codec_function_name(codec: PackedCodec) -> &'static str {
 /// offset by `block_bytes`) and a position inside it (`offset % block_elements`),
 /// the same split the `_{index}`-suffixed `*_element` function
 /// `packed_codec_functions_wgsl` generated for this operand expects.
-fn wgsl_operand_read(index: usize, offset_expr: &str, codec: Option<PackedCodec>) -> String {
+fn wgsl_operand_read(
+    node: NodeId,
+    index: usize,
+    offset_expr: &str,
+    codec: Option<PackedCodec>,
+) -> Result<String, EmitError> {
     match codec {
-        None => format!("in{index}[{offset_expr}]"),
+        None => Ok(format!("in{index}[{offset_expr}]")),
         Some(codec) => {
             let elements = codec.block_elements();
             let bytes = codec.block_bytes();
-            let function = codec_function_name(codec);
-            format!(
+            let function = codec_function_name(node, codec)?;
+            Ok(format!(
                 "{function}_{index}(({offset_expr} / {elements}) * {bytes}, {offset_expr} % {elements})"
-            )
+            ))
         }
     }
 }
@@ -1053,7 +1056,7 @@ fn render_elementwise(
     entry: &str,
     element_type: &str,
     quantized: &[Option<PackedCodec>],
-) -> String {
+) -> Result<String, EmitError> {
     let rank = resolved.extents.len();
     let rank_len = rank.max(1);
     let operand_count = resolved.operands().len();
@@ -1120,7 +1123,7 @@ fn render_elementwise(
     ));
     for index in 0..operand_count {
         let codec = quantized.get(index).copied().flatten();
-        let expr = wgsl_operand_read(index, &format!("off{index}"), codec);
+        let expr = wgsl_operand_read(resolved.node, index, &format!("off{index}"), codec)?;
         let read = read_cast(element_type, &expr);
         source.push_str(&format!("    scratch[{index}] = {read};\n"));
     }
@@ -1129,7 +1132,25 @@ fn render_elementwise(
     let stored = write_cast(element_type, &result);
     source.push_str(&format!("    out[gid] = {stored};\n"));
     source.push_str("}\n");
-    source
+    Ok(source)
+}
+
+/// Names `kind`'s own discriminant for [`EmitError::RenderKindMismatch`] --
+/// restated per backend module, the same "private original is not reachable
+/// from here" reasoning `crate::cuda`'s own copy carries.
+fn bound_op_kind_name(kind: &BoundOpKind) -> &'static str {
+    match kind {
+        BoundOpKind::CachedAttention { .. } => "cached_attention",
+        BoundOpKind::Elementwise { .. } => "elementwise",
+        BoundOpKind::Reduce {
+            keep: Keep::Reduce, ..
+        } => "keep::reduce fold",
+        BoundOpKind::Reduce {
+            keep: Keep::Scan, ..
+        } => "keep::scan fold",
+        BoundOpKind::Iota => "iota",
+        BoundOpKind::Constant { .. } => "constant",
+    }
 }
 
 fn render_reduce(
@@ -1137,7 +1158,7 @@ fn render_reduce(
     entry: &str,
     element_type: &str,
     quantized: &[Option<PackedCodec>],
-) -> String {
+) -> Result<String, EmitError> {
     let BoundOpKind::Reduce {
         reduce_op,
         init,
@@ -1145,7 +1166,11 @@ fn render_reduce(
         ..
     } = &resolved.kind
     else {
-        unreachable!("render_reduce is only called for a Keep::Reduce fold")
+        return Err(EmitError::RenderKindMismatch {
+            node: resolved.node,
+            expected: "keep::reduce fold",
+            found: bound_op_kind_name(&resolved.kind),
+        });
     };
     let rank = resolved.extents.len();
     let rank_len = rank.max(1);
@@ -1261,7 +1286,7 @@ fn render_reduce(
     ));
     for index in 0..operand_count {
         let codec = quantized.get(index).copied().flatten();
-        let expr = wgsl_operand_read(index, &format!("off{index}"), codec);
+        let expr = wgsl_operand_read(resolved.node, index, &format!("off{index}"), codec)?;
         let read = read_cast(element_type, &expr);
         source.push_str(&format!("        scratch[{index}] = {read};\n"));
     }
@@ -1290,7 +1315,7 @@ fn render_reduce(
     let stored = write_cast(element_type, "accumulator");
     source.push_str(&format!("    out[out_offset] = {stored};\n"));
     source.push_str("}\n");
-    source
+    Ok(source)
 }
 
 /// The SIMD-group-cooperative fold: `width` lanes (one whole workgroup, see
@@ -1310,7 +1335,7 @@ fn render_reduce_cooperative(
     element_type: &str,
     quantized: &[Option<PackedCodec>],
     width: u32,
-) -> String {
+) -> Result<String, EmitError> {
     let BoundOpKind::Reduce {
         reduce_op,
         init,
@@ -1318,7 +1343,11 @@ fn render_reduce_cooperative(
         ..
     } = &resolved.kind
     else {
-        unreachable!("render_reduce_cooperative is only called for a Keep::Reduce fold")
+        return Err(EmitError::RenderKindMismatch {
+            node: resolved.node,
+            expected: "keep::reduce fold",
+            found: bound_op_kind_name(&resolved.kind),
+        });
     };
     let rank = resolved.extents.len();
     let rank_len = rank.max(1);
@@ -1385,7 +1414,7 @@ fn render_reduce_cooperative(
     }
 
     let (init_expr, seeded_init) = fold_init_tokens(*init);
-    let identity = cooperative_identity_token(*reduce_op);
+    let identity = cooperative_identity_token(resolved.node, *reduce_op)?;
     source.push_str(&format!("    var accumulator: {element_type};\n"));
     source.push_str("    var seeded: bool;\n");
     source.push_str("    if (lane == 0u) {\n");
@@ -1433,7 +1462,7 @@ fn render_reduce_cooperative(
     ));
     for index in 0..operand_count {
         let codec = quantized.get(index).copied().flatten();
-        let expr = wgsl_operand_read(index, &format!("off{index}"), codec);
+        let expr = wgsl_operand_read(resolved.node, index, &format!("off{index}"), codec)?;
         let read = read_cast(element_type, &expr);
         source.push_str(&format!("        scratch[{index}] = {read};\n"));
     }
@@ -1453,7 +1482,7 @@ fn render_reduce_cooperative(
     source.push_str("        seeded = true;\n");
     source.push_str("    }\n");
 
-    let combine_fn = subgroup_combine_fn(*reduce_op);
+    let combine_fn = subgroup_combine_fn(resolved.node, *reduce_op)?;
     source.push_str(&format!(
         "    let reduced: {element_type} = {combine_fn}(accumulator);\n"
     ));
@@ -1468,7 +1497,7 @@ fn render_reduce_cooperative(
     source.push_str(&format!("        out[out_offset] = {stored};\n"));
     source.push_str("    }\n");
     source.push_str("}\n");
-    source
+    Ok(source)
 }
 
 /// WGSL spelling for a literal `f32` — the counterpart of
@@ -1531,12 +1560,16 @@ fn render_constant(resolved: &BoundOp, entry: &str, value: f32) -> String {
     source
 }
 
-fn render_scan(resolved: &BoundOp, entry: &str, element_type: &str) -> String {
+fn render_scan(resolved: &BoundOp, entry: &str, element_type: &str) -> Result<String, EmitError> {
     let BoundOpKind::Reduce {
         reduce_op, init, ..
     } = &resolved.kind
     else {
-        unreachable!("render_scan is only called for a Keep::Scan fold")
+        return Err(EmitError::RenderKindMismatch {
+            node: resolved.node,
+            expected: "keep::scan fold",
+            found: bound_op_kind_name(&resolved.kind),
+        });
     };
     let rank = resolved.extents.len();
     let rank_len = rank.max(1);
@@ -1649,7 +1682,7 @@ fn render_scan(resolved: &BoundOp, entry: &str, element_type: &str) -> String {
     source.push_str("        }\n");
     source.push_str("    }\n");
     source.push_str("}\n");
-    source
+    Ok(source)
 }
 
 #[cfg(test)]
@@ -1983,5 +2016,61 @@ mod tests {
         assert_eq!(wgsl_literal(f32::NAN), "bitcast<f32>(0x7fc00000u)");
         assert_eq!(wgsl_literal(f32::NEG_INFINITY), "bitcast<f32>(0xff800000u)");
         assert_eq!(wgsl_literal(f32::INFINITY), "bitcast<f32>(0x7f800000u)");
+    }
+
+    #[test]
+    fn render_reduce_rejects_an_elementwise_bound_op() {
+        let bound = elementwise_tanh_op(8);
+        let error = render_reduce(&bound, "entry", "f32", &[None])
+            .expect_err("an elementwise chain is not a Reduce fold");
+        assert!(matches!(
+            error,
+            EmitError::RenderKindMismatch {
+                expected: "keep::reduce fold",
+                found: "elementwise",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn render_reduce_cooperative_rejects_an_elementwise_bound_op() {
+        let bound = elementwise_tanh_op(8);
+        let error = render_reduce_cooperative(&bound, "entry", "f32", &[None], 32)
+            .expect_err("an elementwise chain is not a Reduce fold");
+        assert!(matches!(
+            error,
+            EmitError::RenderKindMismatch {
+                expected: "keep::reduce fold",
+                found: "elementwise",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn render_scan_rejects_an_elementwise_bound_op() {
+        let bound = elementwise_tanh_op(8);
+        let error = render_scan(&bound, "entry", "f32")
+            .expect_err("an elementwise chain is not a Reduce fold");
+        assert!(matches!(
+            error,
+            EmitError::RenderKindMismatch {
+                expected: "keep::scan fold",
+                found: "elementwise",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn subgroup_combine_fn_rejects_a_non_cooperative_reduce_op() {
+        let bound = elementwise_tanh_op(8);
+        let error = subgroup_combine_fn(bound.node, ScalarOp::Subtract)
+            .expect_err("subtract is not associative-commutative");
+        assert!(matches!(
+            error,
+            EmitError::NonCooperativeReduceOp { op: "subtract", .. }
+        ));
     }
 }
