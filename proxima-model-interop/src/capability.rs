@@ -203,6 +203,13 @@ pub const GGML_CAPABILITY_TABLE: &[GgmlCell] = &[
         backend: Backend::Metal,
         status: CellStatus::Supported,
     },
+    GgmlCell {
+        codec: GgmlType::Q3_K,
+        codec_name: "Q3_K",
+        topology: Topology::Dense,
+        backend: Backend::Metal,
+        status: CellStatus::Supported,
+    },
 ];
 
 fn write_row(out: &mut String, codec: &str, topology: &str, backend: &str, status: CellStatus) {
@@ -273,13 +280,17 @@ pub mod quant_format {
 
     use omega::msl::PackedCodec;
 
-    /// `(cpu kernel, metal emitter, wgsl emitter, cuda emitter)` -- every
-    /// packed format is `Supported` on all four today (verified by reading
-    /// the exhaustive `match` arms in `proxima-tensor/src/cpu.rs`,
-    /// `omega/src/msl.rs`, `omega/src/wgsl.rs`, `omega/src/cuda.rs`; none
-    /// carries a `todo!`/`unimplemented!` on any codec arm).
+    /// `(cpu kernel, metal emitter, wgsl emitter, cuda emitter)` -- `Q3_K`
+    /// is `metal`-only (`omega::wgsl::emit_wgsl`/`omega::cuda::emit_cuda`
+    /// both reject it via `EmitError::UnsupportedPackedCodec`/
+    /// `EmitError::CudaUnsupportedPackedCodec`); every other packed format
+    /// is `Supported` on all four (verified by reading the exhaustive
+    /// `match` arms in `proxima-tensor/src/cpu.rs`, `omega/src/msl.rs`,
+    /// `omega/src/wgsl.rs`, `omega/src/cuda.rs`; none carries a
+    /// `todo!`/`unimplemented!` on any other codec arm).
     const fn codec_name(codec: PackedCodec) -> &'static str {
         match codec {
+            PackedCodec::Q3K => "Q3_K",
             PackedCodec::Q4K => "Q4_K",
             PackedCodec::Q5K => "Q5_K",
             PackedCodec::Q6K => "Q6_K",
@@ -290,10 +301,11 @@ pub mod quant_format {
         }
     }
 
-    /// The 7 [`PackedCodec`] variants, exhaustively -- adding an 8th to
+    /// The 8 [`PackedCodec`] variants, exhaustively -- adding a 9th to
     /// `omega::msl::PackedCodec` without adding it here is a compile error,
     /// not a silently stale doc.
     const ALL_CODECS: &[PackedCodec] = &[
+        PackedCodec::Q3K,
         PackedCodec::Q4K,
         PackedCodec::Q5K,
         PackedCodec::Q6K,
@@ -303,6 +315,14 @@ pub mod quant_format {
         PackedCodec::BFloat16,
     ];
 
+    /// `Q3_K` is metal-only so far -- see [`codec_name`]'s own doc.
+    fn emitter_support_columns(codec: PackedCodec) -> (&'static str, &'static str, &'static str) {
+        match codec {
+            PackedCodec::Q3K => ("supported", "unsupported", "unsupported"),
+            _ => ("supported", "supported", "supported"),
+        }
+    }
+
     #[must_use]
     pub fn render_markdown() -> String {
         let mut out = String::new();
@@ -311,9 +331,10 @@ pub mod quant_format {
         );
         out.push_str("| --- | --- | --- | --- | --- |\n");
         for &codec in ALL_CODECS {
+            let (metal, wgsl, cuda) = emitter_support_columns(codec);
             let _ = writeln!(
                 out,
-                "| {} | supported | supported | supported | supported |",
+                "| {} | supported | {metal} | {wgsl} | {cuda} |",
                 codec_name(codec)
             );
         }
@@ -380,12 +401,23 @@ mod quant_format_tests {
     use super::quant_format::render_markdown;
 
     #[test]
-    fn renders_exactly_seven_packed_codec_rows_plus_the_header() {
+    fn renders_exactly_eight_packed_codec_rows_plus_the_header() {
         let rendered = render_markdown();
         assert_eq!(
             rendered.lines().count(),
-            9,
-            "7 PackedCodec variants, 1 header row, 1 separator row"
+            10,
+            "8 PackedCodec variants, 1 header row, 1 separator row"
+        );
+    }
+
+    #[test]
+    fn q3_k_row_is_metal_only() {
+        let rendered = render_markdown();
+        let q3k_row = rendered.lines().find(|line| line.starts_with("| Q3_K "));
+        assert_eq!(
+            q3k_row,
+            Some("| Q3_K | supported | supported | unsupported | unsupported |"),
+            "Q3_K has a metal kernel but no wgsl/cuda emitter yet"
         );
     }
 }

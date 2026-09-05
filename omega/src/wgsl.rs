@@ -181,6 +181,11 @@ pub fn emit_wgsl(
     let entry = entry_name(resolved);
     let element_type = type_token(resolved.node, resolved.dtype, caps)?;
     let quantized = operand_codecs(resolved, packed_operands);
+    if quantized.contains(&Some(PackedCodec::Q3K)) {
+        return Err(EmitError::UnsupportedPackedCodec {
+            node: resolved.node,
+        });
+    }
     // `reduce_is_cooperative` is true only when `caps.subgroup_size` is
     // `Some`, but re-deriving that rather than `.expect()`-ing it keeps this
     // call site panic-free.
@@ -978,6 +983,11 @@ fn cooperative_kernel_signature(source: &mut String, entry: &str, width: u32) {
 
 fn codec_function_name(codec: PackedCodec) -> &'static str {
     match codec {
+        // `emit_wgsl` rejects `Q3_K` via `EmitError::UnsupportedPackedCodec`
+        // before rendering ever reaches this function.
+        PackedCodec::Q3K => {
+            unreachable!("emit_wgsl rejects PackedCodec::Q3K before codec_function_name runs")
+        }
         PackedCodec::Q4K => "q4k_element",
         PackedCodec::Q5K => "q5k_element",
         PackedCodec::Q6K => "q6k_element",

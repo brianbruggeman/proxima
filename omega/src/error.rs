@@ -82,4 +82,20 @@ pub enum EmitError {
     #[cfg(feature = "cuda")]
     #[error("node {node} is a {kind} op, which the cuda emitter does not support yet")]
     CudaUnsupportedOpKind { node: NodeId, kind: &'static str },
+
+    /// `wgsl::emit_wgsl` has no `Q3_K` unpack function -- `crate::msl`'s own
+    /// `PackedCodec::Q3K` is metal-only so far (`wgpu_driver::packed_operands_of`
+    /// already routes a `QuantizedBlock::Q3K` node to `None` for this same
+    /// reason); this is the typed rejection a caller who somehow threads a
+    /// `Some(PackedCodec::Q3K)` through directly still hits, rather than a
+    /// generated `wgsl` calling a function that does not exist.
+    #[cfg(feature = "wgpu-backend")]
+    #[error("node {node} reads a Q3_K operand, which the wgsl emitter does not support yet")]
+    UnsupportedPackedCodec { node: NodeId },
+
+    /// The cuda counterpart of [`Self::UnsupportedPackedCodec`] -- same gap,
+    /// same reason.
+    #[cfg(feature = "cuda")]
+    #[error("node {node} reads a Q3_K operand, which the cuda emitter does not support yet")]
+    CudaUnsupportedPackedCodec { node: NodeId },
 }

@@ -10,6 +10,94 @@ inline float proxima_erf(float x) {
 }
 
 
+// ports proxima_gguf::quant::q3_k::unpack_scale -- the same bit-interleaved
+// 6-bit unpack q4k_scale_min/q5k_scale_min use for a (scale, min) pair,
+// restated here for a scale-only code (no min), same posture as
+// q5k_scale_min restating q4k_scale_min.
+static inline int q3k_unpack_scale(device const uchar *scales, uint sub_block) {
+    uchar low = (sub_block < 8u) ? (scales[sub_block] & 0x0Fu) : (scales[sub_block - 8u] >> 4u);
+    uchar high = (scales[8u + sub_block % 4u] >> (2u * (sub_block / 4u))) & 0x03u;
+    int combined = (int)(low | (high << 4u));
+    return combined - 32;
+}
+
+// one Q3_K super-block's per-sub-block (16-element) scale and high-bit
+// MASK, decoded ONCE for a run of elements sharing both -- same
+// amortization q4k_header_for/q5k_header_for make, at Q3_K's own 16-element
+// sub-block granularity rather than their 32-element one.
+struct q3k_header { float scale; uchar mask; };
+
+static inline q3k_header q3k_header_for(device const uchar *block, uint index) {
+    device const uchar *scales = block + 96;
+    ushort d_bits = (ushort)((uint)block[108] | ((uint)block[109] << 8));
+    float d = (float)as_type<half>(d_bits);
+
+    uint chunk = index / 128u;
+    uint rem = index % 128u;
+    uint j = rem / 32u;
+    uint local32 = rem % 32u;
+    bool low = local32 < 16u;
+    uint sub_block = 8u * chunk + 2u * j + (low ? 0u : 1u);
+
+    q3k_header header;
+    header.scale = d * (float)q3k_unpack_scale(scales, sub_block);
+    header.mask = (uchar)(1u << (4u * chunk + j));
+    return header;
+}
+
+// one element, given its sub-block's already-decoded header.
+static inline float q3k_value(device const uchar *block, uint index, q3k_header header) {
+    device const uchar *hmask = block;
+    device const uchar *qs = block + 32;
+
+    uint chunk = index / 128u;
+    uint rem = index % 128u;
+    uint j = rem / 32u;
+    uint local32 = rem % 32u;
+
+    uchar level = (qs[chunk * 32u + local32] >> (2u * j)) & 0x03u;
+    float correction = (hmask[local32] & header.mask) != 0u ? 0.0f : 4.0f;
+    return header.scale * ((float)level - correction);
+}
+
+// element `index` of one Q3_K super-block, decoding its own header first --
+// the generic per-element path (`operand_read`'s non-row-blocked callers)
+// has no amortized header to reuse across elements, same posture as
+// q5k_element/q6k_element.
+static inline float q3k_element(device const uchar *block, uint index) {
+    return q3k_value(block, index, q3k_header_for(block, index));
+}
+
+
+static inline float q3k_pair_dot(device const uchar *block, uint iq, uint ir, thread const float *yl, thread const float *yh) {
+    device const uchar *hmask = block;
+    device const uchar *qs = block + 32;
+    uint low_index = 64u * iq + 8u * ir;
+    q3k_header h0 = q3k_header_for(block, low_index);
+    q3k_header h1 = q3k_header_for(block, low_index + 32u);
+    q3k_header h2 = q3k_header_for(block, low_index + 128u);
+    q3k_header h3 = q3k_header_for(block, low_index + 160u);
+    uint shift0 = 4u * iq;
+    uint shift1 = shift0 + 2u;
+    uint byte_offset = 8u * ir;
+    float result = 0.0f;
+    for (uint l = 0u; l < 8u; ++l) {
+        uchar q1 = qs[byte_offset + l];
+        uchar q2 = qs[32u + byte_offset + l];
+        uchar hm = hmask[byte_offset + l];
+        float low0 = (float)((q1 >> shift0) & 0x03u) - ((hm & h0.mask) != 0u ? 0.0f : 4.0f);
+        float low1 = (float)((q1 >> shift1) & 0x03u) - ((hm & h1.mask) != 0u ? 0.0f : 4.0f);
+        float high0 = (float)((q2 >> shift0) & 0x03u) - ((hm & h2.mask) != 0u ? 0.0f : 4.0f);
+        float high1 = (float)((q2 >> shift1) & 0x03u) - ((hm & h3.mask) != 0u ? 0.0f : 4.0f);
+        result += h0.scale * low0 * yl[l];
+        result += h1.scale * low1 * yl[l + 8u];
+        result += h2.scale * high0 * yh[l];
+        result += h3.scale * high1 * yh[l + 8u];
+    }
+    return result;
+}
+
+
 // ports proxima_gguf::quant::q4_k::get_scale_min_k4
 static inline uchar2 q4k_scale_min(device const uchar *scales, uint sub_block) {
     if (sub_block < 4u) {

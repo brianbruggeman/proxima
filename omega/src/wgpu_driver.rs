@@ -135,11 +135,13 @@ fn packed_operands_of(block_nodes: &[NodeId], blocks: &[QuantizedBlock<'_>]) -> 
             QuantizedBlock::Q4_0(_) => Some((*node, PackedCodec::Q4_0)),
             QuantizedBlock::Float16(_) => Some((*node, PackedCodec::Float16)),
             QuantizedBlock::BFloat16(_) => Some((*node, PackedCodec::BFloat16)),
-            // No `PackedCodec::Q3K` exists yet -- `None` here routes a
-            // `Q3_K` node through `execute_plan`'s existing
+            // `PackedCodec::Q3K` exists (Metal has a real unpack kernel for
+            // it) but `crate::wgsl` does not -- `None` here routes a `Q3_K`
+            // node through `execute_plan`'s existing
             // `WgpuError::UnsupportedBlock` path, the same "codec has no
-            // wgpu entry" rejection `crate::metal::prepare` raises
-            // explicitly for the same codec.
+            // wgpu entry" rejection `emit_wgsl`'s own
+            // `EmitError::UnsupportedPackedCodec` raises for a caller who
+            // reaches it directly.
             QuantizedBlock::Q3K(_) | QuantizedBlock::Float32(_) => None,
         })
         .collect()
