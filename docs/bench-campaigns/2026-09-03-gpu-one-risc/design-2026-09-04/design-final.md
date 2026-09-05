@@ -116,7 +116,10 @@ leave an FFN budget of 250-377 MB/pass against 932.6 MB/pass in the most favoura
 FFN would have to shrink a further **2.5-3.7x beyond the favourable elision case**. This is the number
 that hurts and it is stated first.
 
-| route | MB/pass | MB/token (A=2.18) | @173.6 M (today's matvec) | @237.79 M (ceiling low) | @264.29 M (ceiling high) | vs 3.5 |
+<!-- measured 2026-09-04: k' --> The `A=2.18` column below was ASSUMED (~~struck~~); §D.4a recomputes
+every row at the two MEASURED k' values (1.36 at k=4, 1.49 at k=8).
+
+| route | MB/pass | MB/token (~~A=2.18~~ ASSUMED) | @173.6 M (today's matvec) | @237.79 M (ceiling low) | @264.29 M (ceiling high) | vs 3.5 |
 |---|---:|---:|---:|---:|---:|---|
 | today (A=1) | 4,167.6 | 4,167.6 | 23.24+4.05+1.30 = **28.59** | — | — | — |
 | R1 lossless+codecs (Q3_K FFN, out Q4_K, KV f16, no elision) | 3,318.4 | 1,522.2 | 8.77+1.86+0.60 = **11.23** | 6.40+1.86+0.60 = 8.86 | 5.76+1.86+0.60 = 8.22 | misses |
@@ -128,14 +131,63 @@ that hurts and it is stated first.
      favourable stack at the best ceiling ever observed is 4.46 ms — the target misses on every
      column of the table, and no column is assumed any more. -->
 
+## D.4a Recomputed at the measured k' (2026-09-04)
+
+<!-- measured 2026-09-04: k' --> Every cell below is §D.3's own formula, `MB/token(A) / B_w +
+non_matvec/A + host/A`, evaluated at MEASURED A in place of the ASSUMED 2.18. No bandwidth number is
+invented — `173.6`, `237.79`, `264.29` are the same three measured figures as the table above.
+
+**At A = 1.36 (mean k', k=4, ngram 2-4, `real_run3.log`):**
+
+| route | MB/pass | MB/token (A=1.36) | @173.6 M | @237.79 M | @264.29 M | vs 3.5 |
+|---|---:|---:|---:|---:|---:|---|
+| R1 lossless+codecs | 3,318.4 | 2,440.0 | 14.06+2.98+0.96 = **18.00** | 10.26+2.98+0.96 = 14.20 | 9.23+2.98+0.96 = 13.17 | misses |
+| R2 + elision at kill boundary | 2,434.1 | 1,789.8 | 10.31+2.98+0.96 = **14.25** | 7.53+2.98+0.96 = 11.47 | 6.77+2.98+0.96 = 10.71 | misses |
+| R2 favourable | 1,828.5 | 1,344.5 | 7.74+2.98+0.96 = **11.68** | 5.65+2.98+0.96 = 9.59 | 5.09+2.98+0.96 = 9.03 | misses |
+| R2 favourable + attention arm at its byte floor (non_matvec 1.5) | 1,828.5 | 1,344.5 | 7.74+1.10+0.96 = **9.80** | 5.65+1.10+0.96 = 7.71 | 5.09+1.10+0.96 = **7.15** | misses |
+
+**At A = 1.49 (mean k', k=8, ngram 2-4, `real_run3.log`):**
+
+| route | MB/pass | MB/token (A=1.49) | @173.6 M | @237.79 M | @264.29 M | vs 3.5 |
+|---|---:|---:|---:|---:|---:|---|
+| R1 lossless+codecs | 3,318.4 | 2,227.1 | 12.83+2.72+0.87 = **16.42** | 9.37+2.72+0.87 = 12.96 | 8.43+2.72+0.87 = 12.02 | misses |
+| R2 + elision at kill boundary | 2,434.1 | 1,633.6 | 9.41+2.72+0.87 = **13.00** | 6.87+2.72+0.87 = 10.46 | 6.18+2.72+0.87 = 9.77 | misses |
+| R2 favourable | 1,828.5 | 1,227.2 | 7.07+2.72+0.87 = **10.66** | 5.16+2.72+0.87 = 8.75 | 4.64+2.72+0.87 = 8.23 | misses |
+| R2 favourable + attention arm at its byte floor (non_matvec 1.5) | 1,828.5 | 1,227.2 | 7.07+1.01+0.87 = **8.95** | 5.16+1.01+0.87 = 7.04 | 4.64+1.01+0.87 = **6.52** | misses |
+
+Required bandwidth, same method as the ASSUMED-A calculation below (`favourable MB/token / (3.5 -
+non_matvec/A - host/A)`): at A=1.36 the budget is 3.5 - 1.10 - 0.96 = 1.44 ms, so B_w >= 1344.5/1.44 =
+**932.8 GB/s** — 3.53-3.92x above the measured 237.79-264.29 GB/s ceiling, not the 1.44-1.60x the
+ASSUMED A produced. At A=1.49 the budget is 3.5 - 1.01 - 0.87 = 1.62 ms, so B_w >= 1227.2/1.62 =
+**757.1 GB/s** — 2.86-3.18x above the ceiling.
+
+**Reachable floor, recomputed:** the design's own "4.46-4.82 ms" line below assumed A=2.18. At the
+measured A the same row (R2 favourable + attention arm at its byte floor) reads **7.15-9.80 ms/token
+at A=1.36** and **6.52-8.95 ms/token at A=1.49**, against llama.cpp's 17.45: 1.78-2.44x at A=1.36,
+1.95-2.68x at A=1.49 — not the 3.6-3.9x the ASSUMED A produced. R1 alone (no elision, no attention-arm
+fix) at A=1.36 and today's 173.6 GB/s reads 18.00 ms/token, which is slower than llama.cpp's 17.45; at
+A=1.49 it reads 16.42 ms/token, 1.06x llama.cpp, not the 1.55x the ASSUMED A produced.
+
+The design's own kill criterion below, unedited: `A < 1.5` at k=4 kills multi-token. Measured
+A(k=4) = 1.36 < 1.5 — the criterion is met on this corpus with n-gram drafting alone. Measured
+A(k=8) = 1.49 is also < 1.5.
+
 Solving for each requirement independently, holding the others at their favourable value:
 - **bandwidth B_w >= 379.5 GB/s** (838.8 MB/token / 2.21 ms) — **1.44-1.60x above the measured ceiling
   of 237.79-264.29 GB/s**. Not a tuning target; unreachable on this host. Previously stated as "95% of
   the M1 Max spec sheet", which was an ASSUMED spec-sheet number and is withdrawn.
-- **A (accepted tokens/pass) >= 2.18**, and the s-axis fold landed first, or the denominator is 1.0.
+- **A (accepted tokens/pass)**: design required ~~>= 2.18 ASSUMED~~. <!-- measured 2026-09-04: k' -->
+  MEASURED on real greedy Metal streams (8 prompts x 64 tokens, n-gram prompt-lookup drafting,
+  ngram 2-4, branch `test/draft-acceptance-harness`, `draft_acceptance_aggregate` lines in
+  `real_run3.log`): mean k' = 1.2330 (k=2), **1.3609 (k=4)**, 1.4850 (k=8). By category at k=4: code
+  1.93, chat 1.35, list 1.15, prose 1.01 — n-gram drafting tracks repetition in the prompt, not a
+  general property of the model. The s-axis fold must still land first, or the denominator is 1.0.
 - **d_u(k=4) <= 0.35 and g_u(k=4) <= 0.45** at the 256-group granularity.
 - **attention arm at its byte floor** (3.0-3.6 -> ~0.77 ms), which is not a byte lever at all.
 All four, simultaneously, plus a bandwidth the box does not have. 3.5 ms/token does not survive.
+
+<!-- measured 2026-09-04: k' --> The paragraph below is at the ASSUMED A=2.18; §D.4a recomputes it at
+the two MEASURED k' values.
 
 **Reachable floor under measured conditions:** R1 at **11.23 ms/token** — 2.55x today, and 1.55x
 *faster* than llama.cpp's 17.45 (today is 1.65x slower). With the elision stack clearing its quality
@@ -147,7 +199,8 @@ risk**, more than every lossy lever combined. That headroom is 1.37-1.52x, not t
 spec sheet implied — the cards below are ordered on the measured figure.
 
 **Kill criteria** (each halts its lever and the sensitivity row says whether the target survives):
-`d_u(4) > 0.6` or `g_u(4) > 0.75` kills the elision composition; `A < 1.5` at k=4 kills multi-token;
+`d_u(4) > 0.6` or `g_u(4) > 0.75` kills the elision composition; `A < 1.5` at k=4 kills multi-token
+<!-- measured 2026-09-04: k' --> (measured A(k=4) = 1.36 < 1.5: this criterion is met — §D.4a);
 gathered packed-row GB/s < 0.85x the ungathered kernel kills the elision *kernel* regardless of bytes
 (the landed CPU probe already measured the element-granular form at 0.20-0.29 ns/element vs 0.057 DRAM);
 attention `gpu_exec_ms` worse than 3.6 + 9.9% CoV kills the `Loop` attention card; exact-match-at-64
@@ -763,7 +816,7 @@ card except the one that is also a *correctness* fix (H0, the wrong-kernel-serve
 | **C2** | `LayerBindings` + typed `CachedLayerRoots`/`SplitRotaryRoots`; one `too_many_arguments` allow removed per card | that builder takes one struct | **B**; `grep -c too_many_arguments proxima-tensor/src/spec.rs` decrements |
 | **C3** | `cached_len` leaf + ninth operand + `exact_merged_causal_mask_cached_len` deleted; the domain reads `BoundOffset::Symbol` | three mechanisms become one | **B** byte-identical at every `cached_len`, including the bucketed extents `cpu_mask_zero_ulp` sweeps |
 | **C4** | `kv_bucket_tokens` moves to `ServingConfig`, default seeded from `sized::KV_BUCKET_TOKENS`; bucket enters `PlanKey` | a runtime knob, one source of truth | **B** at the seeded default; a parity test that two buckets do not share a plan entry; config<->builder round-trip asserted (P4) |
-| **D2** | s-axis fold enabled in the production decode path (after D1c) | A > 1 actually reached | **G**: weight bytes/pass **flat** in k |
+| **D2** | s-axis fold enabled in the production decode path (after D1c) | A > 1 actually reached | **G**: weight bytes/pass **flat** in k. <!-- measured 2026-09-04: k' --> MEASURED (n-gram drafting, `test/draft-acceptance-harness`, `real_run3.log`): mean k' = 1.36 (k=4), 1.49 (k=8), both < 1.5. **A draft MODEL is required for A > 1.5; its bytes must be priced.** Kill: draft-model bytes per accepted token >= the weight bytes it saves |
 | **D3** | union density + acceptance harness: `d_u(k)`, `g_u(k)`, `A(k)` for k in {2,4,8} on the 200-prompt set | the three measured curves | **X**; **kills the elision lever before any kernel is written** if `d_u(4) > 0.6` or `g_u(4) > 0.75` |
 | **E0** | exact-match harness with its degenerate control (full-model reference logits cached) | the harness | **X**: must read exact-match **1.000** against the full model, or the metric measures something else |
 | **Q1-Q5** | the codec and elision cards (Q3_K FFN, out Q4_K, KV f16, group elision kernel, router) — one lever per card, in §D.4's route order | that lever's measured MB/pass and ms/token | **G** within 5% of §D.3's prediction; **Q** EM-at-64 >= 0.98 (codecs) / >= 0.95 (elision), re-measured on the whole lossy **stack**, not the lever alone |
@@ -884,4 +937,6 @@ dispatch) needs one cell per new const, including the three added here
 (`PACKED_ROW_ACTIVATION_GROUP`, `MAX_INLINE_CONSTRAINTS`, `MAX_PLAN_SLOTS`); (3) the CPU sink's own
 allocation budget under `matmul_worker_count()` threads is not stated, and B8's **A** gate needs it;
 (4) `Q1-Q5` are one row for five levers — each needs its own row with its own MB/pass before D3
-reports>>
+reports; (5) <!-- measured 2026-09-04: k' --> the tokenizer raised `Tokenizer(InvalidUtf8)`
+(`proxima-model-interop/src/bind.rs:3931`) on a prose-category prompt during the draft-acceptance
+harness run — fix branch `fix/tokenizer-decode-split-utf8`, not yet landed>>
