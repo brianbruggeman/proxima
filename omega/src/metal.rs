@@ -1113,16 +1113,18 @@ fn hazard_step<Id: Eq + core::hash::Hash + Copy>(
 /// (RAW/WAW/WAR) it covers, and
 /// [`MTLBarrierScope::Buffers`] is emitted only where the tracker finds one.
 ///
-/// `PROXIMA_METAL_KIND_FILTER=<kind-substring>[,<kind-substring>]` (or
-/// `!<kind-substring>[,<kind-substring>]` for the complement) --
-/// `instrument`-gated, default-off, parsed once per
-/// [`execute_plan_with_placements`] call by [`KindFilter::from_env`] and
-/// consulted per op against [`classify_kind`]'s own return value: the same
-/// string a caller already sees in `op_profile_bucket kind=...`, not a
-/// second enum this module would have to keep in lockstep with
-/// `classify_kind`'s match arms. Unset (`None`) in every production run,
-/// which is the ROW's in-buffer ablation harness's own arm-selection knob --
-/// see that row for the arm table.
+/// `PROXIMA_METAL_KIND_FILTER=<term>[,<term>]` (or `!<term>[,<term>]` for
+/// the complement) -- `instrument`-gated, default-off, parsed once per
+/// [`execute_plan_with_placements`] call by [`KindFilter::from_env`]. Each
+/// `<term>` is either a bare substring, matched against [`classify_kind`]'s
+/// own return value (the same string a caller already sees in
+/// `op_profile_bucket kind=...`), or `family:<substring>`, matched against
+/// [`weight_family`]'s own return value for the op's first named operand
+/// (the same aggregation `proxima-model-interop`'s `report_op_timings`
+/// already reuses via that function, rather than each call site keeping its
+/// own copy of the layer-index-stripping rule). Unset (`None`) in every
+/// production run, which is the ROW's in-buffer ablation harness's own
+/// arm-selection knob -- see that row for the arm table.
 ///
 /// `classify_kind`'s live return values, as of the `BoundOpKind::name()`
 /// delegation (`refactor(omega): classify_kind names the kind through the
@@ -1131,33 +1133,47 @@ fn hazard_step<Id: Eq + core::hash::Hash + Copy>(
 /// `Reduce { keep: Keep::Scan, .. }`), and `reduce-tiled-gemm` /
 /// `reduce-packed-row-blocked` / `reduce-cooperative` /
 /// `reduce-generic-scalar` / `reduce-unclassified` for `Reduce { keep:
-/// Keep::Reduce, .. }`. A term outside this vocabulary is now rejected
-/// eagerly by [`KindFilter::from_env`] -- [`MetalError::UnknownKindFilterTerm`]
-/// -- and a filter that would remove zero ops or every op from THIS plan is
-/// rejected by [`validate_kind_filter`] -- [`MetalError::KindFilterMatchesNothing`].
-/// Before these two checks landed (ROW 308), a stale or misspelled term (the
-/// pre-refactor `cached-attention` with a hyphen, which matches nothing
-/// today) silently degenerated to "every op skipped" instead of failing
-/// loudly: `KindFilter::matches` returned `false` for every op, so
-/// `ablation_skip` was `true` for everything and `encode_dispatch_calls`
-/// read `0` for the whole run.
+/// Keep::Reduce, .. }`. A bare `kind:`-shaped term that matches none of
+/// those is rejected eagerly by [`KindFilter::from_env`] --
+/// [`MetalError::UnknownKindFilterTerm`]. A `family:` term cannot be
+/// validated the same way (family names are data-dependent on the loaded
+/// checkpoint, not a fixed enum), so instead [`validate_kind_filter`]
+/// checks, against THIS plan's own dispatch sequence, that the filter
+/// removes at least one op and not every op --
+/// [`MetalError::KindFilterMatchesNothing`] otherwise. Before these two
+/// checks landed (ROW 308), a stale or misspelled term silently degenerated
+/// to "every op skipped" or "no op skipped" instead of failing loudly.
 #[cfg(feature = "instrument")]
-struct FilterTerm(String);
+enum FilterTerm {
+    Kind(String),
+    Family(String),
+}
 
 #[cfg(feature = "instrument")]
 impl FilterTerm {
     fn parse(raw: &str) -> Result<Self, MetalError> {
-        if KNOWN_KIND_SUBSTRINGS.iter().any(|known| known.contains(raw)) {
-            Ok(Self(raw.to_string()))
-        } else {
-            Err(MetalError::UnknownKindFilterTerm {
-                term: raw.to_string(),
-            })
+        match raw.strip_prefix("family:") {
+            Some(family) => Ok(Self::Family(family.to_string())),
+            None => {
+                if KNOWN_KIND_SUBSTRINGS
+                    .iter()
+                    .any(|known| known.contains(raw))
+                {
+                    Ok(Self::Kind(raw.to_string()))
+                } else {
+                    Err(MetalError::UnknownKindFilterTerm {
+                        term: raw.to_string(),
+                    })
+                }
+            }
         }
     }
 
-    fn matches(&self, kind: &str) -> bool {
-        kind.contains(self.0.as_str())
+    fn matches(&self, kind: &str, family: Option<&str>) -> bool {
+        match self {
+            Self::Kind(substring) => kind.contains(substring.as_str()),
+            Self::Family(substring) => family.is_some_and(|name| name.contains(substring.as_str())),
+        }
     }
 }
 
@@ -1205,10 +1221,44 @@ impl KindFilter {
         Ok(Some(Self { raw, terms, negate }))
     }
 
-    fn matches(&self, kind: &str) -> bool {
-        let any = self.terms.iter().any(|term| term.matches(kind));
+    fn matches(&self, kind: &str, family: Option<&str>) -> bool {
+        let any = self
+            .terms
+            .iter()
+            .any(|term| term.matches(kind, family));
         any != self.negate
     }
+}
+
+/// `blk.7.ffn_down.weight` -> `ffn_down.weight`: drops exactly one
+/// `.`-delimited numeric segment (the layer index every `blk.N.*` weight
+/// name carries) so a caller can sum one matmul KIND across all layers
+/// instead of reporting one line per layer. The one place this transform is
+/// written -- `proxima-model-interop`'s `report_op_timings` calls this
+/// function rather than keeping its own copy, and `KindFilter`'s `family:`
+/// term reuses it too, so a layer-count change or a naming convention
+/// change only needs to land here.
+#[cfg(feature = "instrument")]
+#[must_use]
+pub fn weight_family(name: &str) -> String {
+    name.split('.')
+        .filter(|segment| segment.parse::<u32>().is_err())
+        .collect::<Vec<&str>>()
+        .join(".")
+}
+
+/// [`weight_family`] applied to `bound`'s own first named operand -- the
+/// same `find_map` [`execute_plan_op_timed`] already runs to populate
+/// [`OpGpuTiming::weight_name`], reused here rather than restated so
+/// [`KindFilter`]'s `family:` term and the op-timed profiler's family
+/// aggregation can never read two different operands as "the" weight.
+#[cfg(feature = "instrument")]
+fn bound_weight_family(bound: &BoundOp, program: &[Op]) -> Option<String> {
+    bound
+        .operands()
+        .iter()
+        .find_map(|(source, _, _)| program[source.0 as usize].name())
+        .map(weight_family)
 }
 
 /// Applies `filter` to every op in `prepared.resolved` the same way the
@@ -1221,12 +1271,18 @@ fn validate_kind_filter(
     filter: &KindFilter,
     prepared: &Prepared,
     packed_operands: &PackedOperands,
+    program: &[Op],
 ) -> Result<(), MetalError> {
     let total = prepared.resolved.len();
     let removed = prepared
         .resolved
         .iter()
-        .filter(|bound| !filter.matches(classify_kind(bound, packed_operands)))
+        .filter(|bound| {
+            !filter.matches(
+                classify_kind(bound, packed_operands),
+                bound_weight_family(bound, program).as_deref(),
+            )
+        })
         .count();
     if removed == 0 || removed == total {
         return Err(MetalError::KindFilterMatchesNothing {
@@ -1346,7 +1402,7 @@ pub fn execute_plan_with_placements(
     let kind_filter = KindFilter::from_env()?;
     #[cfg(feature = "instrument")]
     if let Some(filter) = &kind_filter {
-        validate_kind_filter(filter, prepared, packed_operands)?;
+        validate_kind_filter(filter, prepared, packed_operands, &plan.program)?;
     }
 
     let command_buffer = queue
@@ -1406,7 +1462,10 @@ pub fn execute_plan_with_placements(
         // own harness.
         #[cfg(feature = "instrument")]
         let ablation_skip = match &kind_filter {
-            Some(filter) => !filter.matches(classify_kind(bound, packed_operands)),
+            Some(filter) => !filter.matches(
+                classify_kind(bound, packed_operands),
+                bound_weight_family(bound, &plan.program).as_deref(),
+            ),
             None => false,
         };
         #[cfg(not(feature = "instrument"))]
