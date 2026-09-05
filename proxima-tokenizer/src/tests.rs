@@ -6,6 +6,7 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use alloc::string::{String, ToString};
+use alloc::vec;
 use alloc::vec::Vec;
 
 use crate::byte_level::byte_to_char;
