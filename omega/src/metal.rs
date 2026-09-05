@@ -195,6 +195,8 @@ use objc2_metal::{MTLBarrierScope, MTLDispatchType};
 use proxima_telemetry::counter;
 use proxima_telemetry::debug;
 use proxima_telemetry::metric::Counter;
+#[cfg(feature = "instrument")]
+use proxima_telemetry::trace;
 
 #[cfg(feature = "instrument")]
 use proxima_tensor::instrument::{elapsed_ticks, read_ticks};
@@ -1197,30 +1199,24 @@ pub fn execute_plan_with_placements(
     #[cfg(feature = "metal-concurrent-dispatch")]
     let mut hazards: HazardTracker<*const ProtocolObject<dyn MTLBuffer>> = HazardTracker::new();
 
-    // `PROXIMA_PLACEMENT_POSITION_DUMP` -- diagnostic-only, `instrument`-gated,
-    // default-off, same convention as `PROXIMA_METAL_OP_PROFILE_STEP`
-    // (`generate.rs`'s own doc): prints each output-placed node's WRITE
-    // position and each of its aliased readers' own position, the direct
-    // evidence a write-before-read ordering claim needs (this function's own
-    // doc, "Within-call aliasing"). Unset in every production run.
-    #[cfg(feature = "instrument")]
-    let placement_dump = std::env::var("PROXIMA_PLACEMENT_POSITION_DUMP").is_ok();
+    // diagnostic-only, `instrument`-gated, always emitted at `trace` level
+    // (default-off via the runtime filter, never a bespoke env var): each
+    // output-placed node's WRITE position and each of its aliased readers'
+    // own position, the direct evidence a write-before-read ordering claim
+    // needs (this function's own doc, "Within-call aliasing"). Silent unless
+    // a caller raises `RUST_LOG` to `trace` for this target.
     #[cfg(feature = "instrument")]
     let kind_filter = KindFilter::from_env();
     let mut pending_faults: Vec<PendingFault<'_>> = Vec::new();
     for (position, bound) in prepared.resolved.iter().enumerate() {
         #[cfg(feature = "instrument")]
-        if placement_dump {
+        {
             if output_placed.contains_key(&bound.node) {
-                std::eprintln!("write position={position} node={:?}", bound.node);
+                trace!(position, node = ?bound.node, "output-placed node write");
             }
             for (operand, _, _) in bound.operands() {
                 if input_placed.contains_key(operand) {
-                    std::eprintln!(
-                        "read  position={position} node={:?} reads={:?}",
-                        bound.node,
-                        operand
-                    );
+                    trace!(position, node = ?bound.node, reads = ?operand, "placed-input node read");
                 }
             }
         }
@@ -3981,10 +3977,12 @@ fn build_buffer_arena(
         .map(|bound| bound_output_len(bound).max(1) * bound.dtype.size_bytes())
         .sum();
     let uniform_bytes: usize = resolved.iter().map(pack_uniforms_byte_len).sum();
-    std::eprintln!(
-        "arena_arithmetic naive_transient_bytes={naive_transient_bytes} \
-         uniform_bytes={uniform_bytes} op_count={} arena_transient_cap={ARENA_TRANSIENT_CAP}",
-        resolved.len()
+    debug!(
+        naive_transient_bytes = naive_transient_bytes as u64,
+        uniform_bytes = uniform_bytes as u64,
+        op_count = resolved.len() as u64,
+        arena_transient_cap = ARENA_TRANSIENT_CAP as u64,
+        "buffer arena sized against the naive (no-reuse) transient sum"
     );
 
     let mut free_by_size: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
@@ -4031,9 +4029,10 @@ fn build_buffer_arena(
         }
     }
 
-    std::eprintln!(
-        "arena_arithmetic peak_bytes={peak_bytes} reuse_factor={:.3}",
-        naive_transient_bytes as f64 / peak_bytes.max(1) as f64
+    let reuse_factor = naive_transient_bytes as f64 / peak_bytes.max(1) as f64;
+    debug!(
+        peak_bytes = peak_bytes as u64,
+        reuse_factor, "buffer arena reached its steady-state peak"
     );
     if peak_bytes > ARENA_TRANSIENT_CAP {
         proxima_telemetry::error!(

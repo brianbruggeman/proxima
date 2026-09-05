@@ -102,7 +102,7 @@ use omega::{
     plan_named as plan_named_placed,
 };
 #[cfg(feature = "instrument")]
-use proxima_telemetry::debug;
+use proxima_telemetry::{debug, info};
 #[cfg(feature = "instrument")]
 use proxima_tensor::instrument::{elapsed_ticks, read_ticks, ticks_to_nanos};
 #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
@@ -134,10 +134,13 @@ fn report_op_timings(step: usize, timings: &[OpGpuTiming]) {
     let total_gpu_ns: u64 = timings.iter().map(|timing| timing.gpu_ns).sum();
     let total_operand_bytes: u64 = timings.iter().map(|timing| timing.operand_bytes).sum();
 
-    std::println!(
-        "op_profile step={step} op_count={op_count} total_gpu_ns={total_gpu_ns} \
-         total_gpu_ms={:.3} total_operand_bytes={total_operand_bytes}",
-        total_gpu_ns as f64 / 1e6,
+    info!(
+        step = step as u64,
+        op_count = op_count as u64,
+        total_gpu_ns,
+        total_gpu_ms = total_gpu_ns as f64 / 1e6,
+        total_operand_bytes,
+        "op_profile: gpu op-timing summary for one decode step"
     );
 
     let mut by_kind: alloc::collections::BTreeMap<&'static str, (u64, u64, u64)> =
@@ -149,11 +152,14 @@ fn report_op_timings(step: usize, timings: &[OpGpuTiming]) {
         entry.2 += timing.operand_bytes;
     }
     for (kind, (count, ns, bytes)) in &by_kind {
-        std::println!(
-            "op_profile_bucket step={step} kind={kind} op_count={count} gpu_ms={:.3} \
-             gpu_ns_per_op={:.1} operand_bytes={bytes}",
-            *ns as f64 / 1e6,
-            *ns as f64 / *count as f64,
+        info!(
+            step = step as u64,
+            kind = *kind,
+            op_count = *count,
+            gpu_ms = *ns as f64 / 1e6,
+            gpu_ns_per_op = *ns as f64 / *count as f64,
+            operand_bytes = *bytes,
+            "op_profile_bucket: gpu op-timing bucketed by op kind"
         );
     }
 
@@ -169,11 +175,13 @@ fn report_op_timings(step: usize, timings: &[OpGpuTiming]) {
         entry.1 += timing.gpu_ns;
     }
     for (codec, (count, ns)) in &by_codec {
-        std::println!(
-            "op_profile_codec step={step} codec={codec} op_count={count} gpu_ms={:.3} \
-             gpu_ns_per_op={:.1}",
-            *ns as f64 / 1e6,
-            *ns as f64 / *count as f64,
+        info!(
+            step = step as u64,
+            codec = %codec,
+            op_count = *count,
+            gpu_ms = *ns as f64 / 1e6,
+            gpu_ns_per_op = *ns as f64 / *count as f64,
+            "op_profile_codec: gpu op-timing bucketed by packed codec"
         );
     }
 
@@ -187,35 +195,37 @@ fn report_op_timings(step: usize, timings: &[OpGpuTiming]) {
         entry.1 += timing.gpu_ns;
     }
     for (variant, (count, ns)) in &by_variant {
-        std::println!(
-            "op_profile_variant step={step} variant={variant} op_count={count} gpu_ms={:.3} \
-             gpu_ns_per_op={:.1}",
-            *ns as f64 / 1e6,
-            *ns as f64 / *count as f64,
+        info!(
+            step = step as u64,
+            variant = *variant,
+            op_count = *count,
+            gpu_ms = *ns as f64 / 1e6,
+            gpu_ns_per_op = *ns as f64 / *count as f64,
+            "op_profile_variant: gpu op-timing bucketed by packed kernel variant"
         );
     }
 
     let mut ranked: Vec<&OpGpuTiming> = timings.iter().collect();
     ranked.sort_by_key(|timing| core::cmp::Reverse(timing.gpu_ns));
     for (rank, timing) in ranked.iter().take(OP_PROFILE_TOP_N).enumerate() {
-        std::println!(
-            "op_profile_top step={step} rank={} node={} kind={} weight_name={:?} \
-             packed_codec={:?} operand_bytes={} bound_buffer_bytes={} operand_count={} gpu_ns={} \
-             gpu_ns_per_byte={:.6}",
-            rank + 1,
-            timing.node.0,
-            timing.kind,
-            timing.weight_name,
-            timing.packed_codec,
-            timing.operand_bytes,
-            timing.bound_buffer_bytes,
-            timing.operand_count,
-            timing.gpu_ns,
-            if timing.operand_bytes == 0 {
-                0.0
-            } else {
-                timing.gpu_ns as f64 / timing.operand_bytes as f64
-            },
+        let gpu_ns_per_byte = if timing.operand_bytes == 0 {
+            0.0
+        } else {
+            timing.gpu_ns as f64 / timing.operand_bytes as f64
+        };
+        info!(
+            step = step as u64,
+            rank = (rank + 1) as u64,
+            node = timing.node.0,
+            kind = timing.kind,
+            weight_name = ?timing.weight_name,
+            packed_codec = ?timing.packed_codec,
+            operand_bytes = timing.operand_bytes,
+            bound_buffer_bytes = timing.bound_buffer_bytes,
+            operand_count = timing.operand_count as u64,
+            gpu_ns = timing.gpu_ns,
+            gpu_ns_per_byte,
+            "op_profile_top: top-N ops ranked by gpu time"
         );
     }
 
@@ -247,52 +257,55 @@ fn report_op_timings(step: usize, timings: &[OpGpuTiming]) {
     let mut family_ranked: Vec<(&String, &FamilyGpuStats)> = by_family.iter().collect();
     family_ranked.sort_by_key(|(_, stats)| core::cmp::Reverse(stats.gpu_ns));
     for (family, stats) in family_ranked {
-        std::println!(
-            "op_profile_family step={step} family={family:?} op_count={} gpu_ms={:.3} \
-             operand_bytes={} gpu_ns_per_byte={:.6} min_operand_count={} max_operand_count={} \
-             row_blocked_count={} rejected_count={} packed_row_block_gates={:?}",
-            stats.op_count,
-            stats.gpu_ns as f64 / 1e6,
-            stats.operand_bytes,
-            if stats.operand_bytes == 0 {
-                0.0
-            } else {
-                stats.gpu_ns as f64 / stats.operand_bytes as f64
-            },
-            stats.min_operand_count,
-            stats.max_operand_count,
-            stats.row_blocked_count,
-            stats.rejected_count,
-            stats.packed_row_block_gates,
+        let gpu_ns_per_byte = if stats.operand_bytes == 0 {
+            0.0
+        } else {
+            stats.gpu_ns as f64 / stats.operand_bytes as f64
+        };
+        info!(
+            step = step as u64,
+            family = %family,
+            op_count = stats.op_count,
+            gpu_ms = stats.gpu_ns as f64 / 1e6,
+            operand_bytes = stats.operand_bytes,
+            gpu_ns_per_byte,
+            min_operand_count = stats.min_operand_count as u64,
+            max_operand_count = stats.max_operand_count as u64,
+            row_blocked_count = stats.row_blocked_count,
+            rejected_count = stats.rejected_count,
+            packed_row_block_gates = ?stats.packed_row_block_gates,
+            "op_profile_family: gpu op-timing aggregated by weight family"
         );
         // A family with BOTH a row-blocked verdict AND a rejected verdict
         // (`ffn_down`/`attn_v`: 28 already-packed `Q4_K` ops PASS, 4
         // still-dequantized `Q5_K` ops reject) is exactly the case the
         // aggregate line above cannot answer on its own -- "how much of
-        // this family's cost is the codec gap, not the family" -- so print
+        // this family's cost is the codec gap, not the family" -- so emit
         // the split explicitly rather than making a reader subtract two
         // numbers from a set that does not carry counts.
         if stats.row_blocked_count > 0 && stats.rejected_count > 0 {
-            std::println!(
-                "op_profile_family_split step={step} family={family:?} \
-                 passed_op_count={} passed_gpu_ms={:.3} passed_operand_bytes={} passed_gpu_ns_per_byte={:.6} \
-                 rejected_op_count={} rejected_gpu_ms={:.3} rejected_operand_bytes={} rejected_gpu_ns_per_byte={:.6}",
-                stats.row_blocked_count,
-                stats.passed_gpu_ns as f64 / 1e6,
-                stats.passed_operand_bytes,
-                if stats.passed_operand_bytes == 0 {
-                    0.0
-                } else {
-                    stats.passed_gpu_ns as f64 / stats.passed_operand_bytes as f64
-                },
-                stats.rejected_count,
-                stats.rejected_gpu_ns as f64 / 1e6,
-                stats.rejected_operand_bytes,
-                if stats.rejected_operand_bytes == 0 {
-                    0.0
-                } else {
-                    stats.rejected_gpu_ns as f64 / stats.rejected_operand_bytes as f64
-                },
+            let passed_gpu_ns_per_byte = if stats.passed_operand_bytes == 0 {
+                0.0
+            } else {
+                stats.passed_gpu_ns as f64 / stats.passed_operand_bytes as f64
+            };
+            let rejected_gpu_ns_per_byte = if stats.rejected_operand_bytes == 0 {
+                0.0
+            } else {
+                stats.rejected_gpu_ns as f64 / stats.rejected_operand_bytes as f64
+            };
+            info!(
+                step = step as u64,
+                family = %family,
+                passed_op_count = stats.row_blocked_count,
+                passed_gpu_ms = stats.passed_gpu_ns as f64 / 1e6,
+                passed_operand_bytes = stats.passed_operand_bytes,
+                passed_gpu_ns_per_byte,
+                rejected_op_count = stats.rejected_count,
+                rejected_gpu_ms = stats.rejected_gpu_ns as f64 / 1e6,
+                rejected_operand_bytes = stats.rejected_operand_bytes,
+                rejected_gpu_ns_per_byte,
+                "op_profile_family_split: codec-gap cost isolated within a mixed family"
             );
         }
     }
@@ -359,14 +372,14 @@ fn phys_footprint_bytes() -> u64 {
     info.phys_footprint
 }
 
-/// Every field [`print_token_breakdown`] needs to print one `token_breakdown`
-/// line -- shared by [`LoadedModel::run_decode_loop`]'s default two-range
+/// Every field [`emit_token_breakdown`] needs to emit one `token_breakdown`
+/// event -- shared by [`LoadedModel::run_decode_loop`]'s default two-range
 /// arm and [`LoadedModel::run_decode_loop_placed_kv`]'s device-resident arm
-/// so the two paths print the identical line shape from ONE format string
-/// rather than each hand-rolling `std::println!` with its own field list
-/// (the placed-KV arm used to hardcode `kv_cache_upload_bytes`/`evaluate_ms`/
-/// `layer_cache_append_ms` as literal zeros here -- a real regression, since
-/// the placed arm's evaluate call is the same cost the two-range arm times).
+/// so the two paths emit the identical field shape from ONE `info!` call site
+/// rather than each hand-rolling its own field list (the placed-KV arm used
+/// to hardcode `kv_cache_upload_bytes`/`evaluate_ms`/`layer_cache_append_ms`
+/// as literal zeros here -- a real regression, since the placed arm's
+/// evaluate call is the same cost the two-range arm times).
 #[cfg(feature = "instrument")]
 struct TokenBreakdown {
     step: usize,
@@ -385,7 +398,7 @@ struct TokenBreakdown {
 }
 
 #[cfg(feature = "instrument")]
-fn print_token_breakdown(breakdown: &TokenBreakdown) {
+fn emit_token_breakdown(breakdown: &TokenBreakdown) {
     let ms = |ticks: u64| ticks_to_nanos(ticks) as f64 / 1e6;
     let TokenBreakdown {
         step,
@@ -402,31 +415,32 @@ fn print_token_breakdown(breakdown: &TokenBreakdown) {
         layer_cache_append_bytes,
         greedy_pick_ticks,
     } = *breakdown;
-    std::println!(
-        "token_breakdown step={step} new_count={new_count} cached_len_before={cached_len_before} \
-     step_wall_ms={:.3} apply_serving_config_ms={:.3} build_position_inputs_ms={:.3} \
-     named_blocks_weights_ms={:.3} named_blocks_kv_ms={:.3} kv_cache_upload_bytes={kv_cache_upload_bytes} \
-     evaluate_ms={:.3} layer_cache_append_ms={:.3} layer_cache_append_bytes={layer_cache_append_bytes} \
-     greedy_pick_ms={:.3}",
-        ms(step_wall_ticks),
-        ms(apply_serving_config_ticks),
-        ms(build_position_inputs_ticks),
-        ms(named_blocks_weights_ticks),
-        ms(named_blocks_kv_ticks),
-        ms(evaluate_ticks),
-        ms(layer_cache_append_ticks),
-        ms(greedy_pick_ticks),
+    info!(
+        step = step as u64,
+        new_count = new_count as u64,
+        cached_len_before = cached_len_before as u64,
+        step_wall_ms = ms(step_wall_ticks),
+        apply_serving_config_ms = ms(apply_serving_config_ticks),
+        build_position_inputs_ms = ms(build_position_inputs_ticks),
+        named_blocks_weights_ms = ms(named_blocks_weights_ticks),
+        named_blocks_kv_ms = ms(named_blocks_kv_ticks),
+        kv_cache_upload_bytes,
+        evaluate_ms = ms(evaluate_ticks),
+        layer_cache_append_ms = ms(layer_cache_append_ticks),
+        layer_cache_append_bytes,
+        greedy_pick_ms = ms(greedy_pick_ticks),
+        "token_breakdown: per-decode-step wall-clock attribution"
     );
 }
 
-/// [`print_token_breakdown`]'s Metal-stage counterpart -- same sharing
+/// [`emit_token_breakdown`]'s Metal-stage counterpart -- same sharing
 /// rationale, same two call sites. `metal_stage` is this step's own
 /// snapshot-and-reset delta ([`metal_stage_totals`]'s own doc), so it is
 /// correct to call from either decode arm as long as it is read exactly
 /// once per step, immediately after that step's `evaluate`/
 /// `evaluate_with_placements` call.
 #[cfg(all(feature = "instrument", feature = "metal", target_os = "macos"))]
-fn print_token_breakdown_metal(
+fn emit_token_breakdown_metal(
     step: usize,
     metal_stage: &omega::metal::MetalStageTotals,
     plan_cache_len: usize,
@@ -436,70 +450,60 @@ fn print_token_breakdown_metal(
     let ms = |ticks: u64| ticks_to_nanos(ticks) as f64 / 1e6;
     // `PROXIMA_METAL_KIND_FILTER` -- `omega::metal::execute_plan_with_placements`'s
     // own in-buffer ablation knob (that function's own `KindFilter` doc has
-    // the full contract). Read here, at this line's own print site, rather
+    // the full contract). Read here, at this line's own emit site, rather
     // than threaded back from `omega::metal` through `MetalStageTotals`: it
     // is a per-call, caller-supplied env value, not a device-side
     // measurement, and every other diagnostic env knob on this decode path
-    // (`PROXIMA_METAL_OP_PROFILE_STEP`, `PROXIMA_PLACEMENT_POSITION_DUMP`) is
-    // likewise read directly at its own print site rather than plumbed
-    // through the stage-totals struct. Empty (no suffix) when unset, so a
-    // production run's line is byte-identical to before this ablation
-    // existed.
-    let ablation_suffix = std::env::var("PROXIMA_METAL_KIND_FILTER")
-        .map(|kind_filter| format!(" ablation=true kind_filter={kind_filter}"))
-        .unwrap_or_default();
-    std::println!(
-        "token_breakdown_metal step={step} prepare_calls={} prepare_ms={:.3} \
-     emit_calls={} emit_ms={:.3} pipeline_hits={} pipeline_misses={} pipeline_compile_ms={:.3} \
-     block_upload_calls={} block_upload_ms={:.3} block_offered_bytes={} \
-     block_copied_bytes={} block_nocopy_bound_bytes={} block_offset_bound_bytes={} \
-     op_setup_calls={} op_setup_ms={:.3} \
-     pipeline_lookup_calls={} pipeline_lookup_ms={:.3} \
-     encode_dispatch_calls={} encode_dispatch_ms={:.3} \
-     gpu_exec_calls={} gpu_exec_ms={:.3} \
-     readback_calls={} readback_ms={:.3} readback_bytes={} \
-     nocopy_uploads={} copying_uploads={} nocopy_reuses={} \
-     resident_uploads={} resident_reuses={} mapping_offset_uploads={} \
-     nocopy_cache_len={} uniform_cache_len={} phys_footprint_bytes={} device_allocated_bytes={} \
-     output_buffer_allocations={} plan_uniform_writes={} barriers={} \
-     plan_cache_len={plan_cache_len} plan_hits={plan_hits} plan_misses={plan_misses}{ablation_suffix}",
-        metal_stage.prepare_calls,
-        ms(metal_stage.prepare_ticks),
-        metal_stage.emit_calls,
-        ms(metal_stage.emit_ticks),
-        metal_stage.pipeline_hits,
-        metal_stage.pipeline_misses,
-        ms(metal_stage.pipeline_compile_ticks),
-        metal_stage.block_upload_calls,
-        ms(metal_stage.block_upload_ticks),
-        metal_stage.block_offered_bytes,
-        metal_stage.block_copied_bytes,
-        metal_stage.block_nocopy_bound_bytes,
-        metal_stage.block_offset_bound_bytes,
-        metal_stage.op_setup_calls,
-        ms(metal_stage.op_setup_ticks),
-        metal_stage.pipeline_lookup_calls,
-        ms(metal_stage.pipeline_lookup_ticks),
-        metal_stage.encode_dispatch_calls,
-        ms(metal_stage.encode_dispatch_ticks),
-        metal_stage.gpu_exec_calls,
-        ms(metal_stage.gpu_exec_ticks),
-        metal_stage.readback_calls,
-        ms(metal_stage.readback_ticks),
-        metal_stage.readback_bytes,
-        metal_stage.nocopy_uploads,
-        metal_stage.copying_uploads,
-        metal_stage.nocopy_reuses,
-        metal_stage.resident_uploads,
-        metal_stage.resident_reuses,
-        metal_stage.mapping_offset_uploads,
-        omega::metal::nocopy_cache_len(),
-        omega::metal::uniform_cache_len(),
-        phys_footprint_bytes(),
-        omega::metal::current_allocated_size().unwrap_or(0),
-        metal_stage.output_buffer_allocations,
-        metal_stage.plan_uniform_writes,
-        metal_stage.barriers_emitted,
+    // (`PROXIMA_METAL_OP_PROFILE_STEP`) is likewise read directly at its own
+    // emit site rather than plumbed through the stage-totals struct. Absent
+    // (`ablation=false`, `kind_filter=""`) when unset, so a production run's
+    // event is unchanged from before this ablation existed.
+    let kind_filter = std::env::var("PROXIMA_METAL_KIND_FILTER").ok();
+    info!(
+        step = step as u64,
+        prepare_calls = metal_stage.prepare_calls,
+        prepare_ms = ms(metal_stage.prepare_ticks),
+        emit_calls = metal_stage.emit_calls,
+        emit_ms = ms(metal_stage.emit_ticks),
+        pipeline_hits = metal_stage.pipeline_hits,
+        pipeline_misses = metal_stage.pipeline_misses,
+        pipeline_compile_ms = ms(metal_stage.pipeline_compile_ticks),
+        block_upload_calls = metal_stage.block_upload_calls,
+        block_upload_ms = ms(metal_stage.block_upload_ticks),
+        block_offered_bytes = metal_stage.block_offered_bytes,
+        block_copied_bytes = metal_stage.block_copied_bytes,
+        block_nocopy_bound_bytes = metal_stage.block_nocopy_bound_bytes,
+        block_offset_bound_bytes = metal_stage.block_offset_bound_bytes,
+        op_setup_calls = metal_stage.op_setup_calls,
+        op_setup_ms = ms(metal_stage.op_setup_ticks),
+        pipeline_lookup_calls = metal_stage.pipeline_lookup_calls,
+        pipeline_lookup_ms = ms(metal_stage.pipeline_lookup_ticks),
+        encode_dispatch_calls = metal_stage.encode_dispatch_calls,
+        encode_dispatch_ms = ms(metal_stage.encode_dispatch_ticks),
+        gpu_exec_calls = metal_stage.gpu_exec_calls,
+        gpu_exec_ms = ms(metal_stage.gpu_exec_ticks),
+        readback_calls = metal_stage.readback_calls,
+        readback_ms = ms(metal_stage.readback_ticks),
+        readback_bytes = metal_stage.readback_bytes,
+        nocopy_uploads = metal_stage.nocopy_uploads,
+        copying_uploads = metal_stage.copying_uploads,
+        nocopy_reuses = metal_stage.nocopy_reuses,
+        resident_uploads = metal_stage.resident_uploads,
+        resident_reuses = metal_stage.resident_reuses,
+        mapping_offset_uploads = metal_stage.mapping_offset_uploads,
+        nocopy_cache_len = omega::metal::nocopy_cache_len() as u64,
+        uniform_cache_len = omega::metal::uniform_cache_len() as u64,
+        phys_footprint_bytes = phys_footprint_bytes(),
+        device_allocated_bytes = omega::metal::current_allocated_size().unwrap_or(0),
+        output_buffer_allocations = metal_stage.output_buffer_allocations,
+        plan_uniform_writes = metal_stage.plan_uniform_writes,
+        barriers = metal_stage.barriers_emitted,
+        plan_cache_len = plan_cache_len as u64,
+        plan_hits = plan_hits as u64,
+        plan_misses = plan_misses as u64,
+        ablation = kind_filter.is_some(),
+        kind_filter = kind_filter.as_deref().unwrap_or(""),
+        "token_breakdown_metal: per-decode-step metal stage attribution"
     );
 }
 
@@ -2146,7 +2150,7 @@ impl<'file> LoadedModel<'file> {
 
                 #[cfg(feature = "instrument")]
                 {
-                    print_token_breakdown(&TokenBreakdown {
+                    emit_token_breakdown(&TokenBreakdown {
                         step: _step,
                         new_count,
                         cached_len_before: cached_len_before_step,
@@ -2184,17 +2188,18 @@ impl<'file> LoadedModel<'file> {
                         + attribution.park_spin_wake_nanos;
                     let residual_underflow = named_ns > evaluate_ns;
                     let residual_ns = evaluate_ns.saturating_sub(named_ns);
-                    std::println!(
-                        "token_attribution step={_step} evaluate_ms={:.3} kernel_ms={:.3} dispatch_ms={:.3} \
-                     park_spin_wake_ms={:.3} residual_ms={:.3} residual_underflow={residual_underflow} \
-                     named_plus_residual_ms={:.3} cached_attention_ops={}",
-                        evaluate_ns as f64 / 1e6,
-                        attribution.kernel_nanos as f64 / 1e6,
-                        attribution.dispatch_nanos as f64 / 1e6,
-                        attribution.park_spin_wake_nanos as f64 / 1e6,
-                        residual_ns as f64 / 1e6,
-                        (named_ns + residual_ns) as f64 / 1e6,
-                        proxima_tensor::instrument::path_totals().op_kind_cached_attention,
+                    info!(
+                        step = _step as u64,
+                        evaluate_ms = evaluate_ns as f64 / 1e6,
+                        kernel_ms = attribution.kernel_nanos as f64 / 1e6,
+                        dispatch_ms = attribution.dispatch_nanos as f64 / 1e6,
+                        park_spin_wake_ms = attribution.park_spin_wake_nanos as f64 / 1e6,
+                        residual_ms = residual_ns as f64 / 1e6,
+                        residual_underflow,
+                        named_plus_residual_ms = (named_ns + residual_ns) as f64 / 1e6,
+                        cached_attention_ops =
+                            proxima_tensor::instrument::path_totals().op_kind_cached_attention,
+                        "token_attribution: per-step kernel/dispatch/park-spin-wake split"
                     );
                     // ROW 140's own redundant-activation-quantize hypothesis
                     // check: `total_calls` vs `distinct_nodes` across every
@@ -2205,12 +2210,15 @@ impl<'file> LoadedModel<'file> {
                         proxima_tensor::instrument::quantize_activation_call_stats();
                     let quantize_cache_hits =
                         proxima_tensor::instrument::QUANTIZE_ACTIVATION_CACHE_HITS.get();
-                    std::println!(
-                        "token_quantize_calls step={_step} total_calls={quantize_total_calls} distinct_nodes={quantize_distinct_nodes} \
-                     cache_hits={quantize_cache_hits}"
+                    info!(
+                        step = _step as u64,
+                        total_calls = quantize_total_calls,
+                        distinct_nodes = quantize_distinct_nodes,
+                        cache_hits = quantize_cache_hits,
+                        "token_quantize_calls: redundant-activation-quantize hypothesis check"
                     );
                     #[cfg(all(feature = "metal", target_os = "macos"))]
-                    print_token_breakdown_metal(
+                    emit_token_breakdown_metal(
                         _step,
                         &metal_stage,
                         runtime.plans_len(),
@@ -2592,7 +2600,7 @@ impl<'file> LoadedModel<'file> {
 
                 #[cfg(feature = "instrument")]
                 {
-                    print_token_breakdown(&TokenBreakdown {
+                    emit_token_breakdown(&TokenBreakdown {
                         step: _step,
                         new_count,
                         cached_len_before: cached_len_before_step,
@@ -2622,7 +2630,7 @@ impl<'file> LoadedModel<'file> {
                         greedy_pick_ticks,
                     });
                     #[cfg(all(feature = "metal", target_os = "macos"))]
-                    print_token_breakdown_metal(
+                    emit_token_breakdown_metal(
                         _step,
                         &metal_stage,
                         runtime.placed_plans_len(),

@@ -2762,6 +2762,26 @@ mod real_openchat_file {
             .unwrap_or(24)
     }
 
+    /// `generate.rs`'s `instrument`-gated `token_breakdown*`/`op_profile*`
+    /// events are `info!`/`debug!` calls, not `println!` -- with no recorder
+    /// installed they are no-ops (`crate::emit::global` default filter floor
+    /// is `error`, and an uninstalled recorder drops every emit). This
+    /// installs a console recorder (`Exporter::std()`: trace/debug/info to
+    /// stdout, warn/error to stderr) and raises the filter to `debug`, so a
+    /// `--nocapture` run of an `instrument`-gated test still shows every line
+    /// this campaign's own harness reads by eye. Returns the recorder so the
+    /// caller can `drain()` it before the test returns -- the background
+    /// drain thread `install_console_recorder` spawns is best-effort and must
+    /// not race process exit for the one, final flush a test needs.
+    #[cfg(feature = "instrument")]
+    fn install_stdout_telemetry() -> std::sync::Arc<proxima_telemetry::recorder::Recorder> {
+        proxima_telemetry::emit::global::install(proxima_telemetry::emit::EnvFilter::parse(
+            "debug",
+        ));
+        proxima_telemetry::export::install_console_recorder()
+            .expect("stdout telemetry recorder installs for an instrument-gated test")
+    }
+
     /// OpenChat-3.5's own chat template (`tokenizer.chat_template` in this
     /// checkpoint's own GGUF metadata) rendered for one user turn with no
     /// assistant reply yet. BOS comes from `encode_with_bos_eos`'s own
@@ -3049,6 +3069,9 @@ mod real_openchat_file {
             return;
         }
 
+        #[cfg(feature = "instrument")]
+        let telemetry_recorder = install_stdout_telemetry();
+
         let mapped = MappedGguf::open(path).expect("mmap host-local openchat gguf fixture");
         let file_bytes = mapped.as_slice();
         let parsed = proxima_gguf::pipe::parse_complete(file_bytes)
@@ -3077,6 +3100,15 @@ mod real_openchat_file {
             .run_decode_loop(&prompt, max_tokens, &serving_config, &mut runtime)
             .expect("generate through the metal backend");
         let total_elapsed = decode_start.elapsed();
+
+        #[cfg(feature = "instrument")]
+        {
+            let flushed = telemetry_recorder.drain();
+            assert!(
+                flushed > 0,
+                "the decode loop emitted no token_breakdown/op_profile telemetry"
+            );
+        }
 
         std::println!(
             "metal_decode_summary tokens_generated={} stopped_by_eos={} total_wall_clock_ms={:.3} plan_hits={} plan_misses={} generated_text={:?}",
@@ -3156,6 +3188,8 @@ mod real_openchat_file {
             return;
         }
 
+        let telemetry_recorder = install_stdout_telemetry();
+
         let mapped = MappedGguf::open(path).expect("mmap host-local openchat gguf fixture");
         let file_bytes = mapped.as_slice();
         let parsed = proxima_gguf::pipe::parse_complete(file_bytes)
@@ -3196,6 +3230,12 @@ mod real_openchat_file {
             std::env::remove_var("PROXIMA_METAL_OP_PROFILE_STEP");
         }
 
+        let flushed = telemetry_recorder.drain();
+        assert!(
+            flushed > 0,
+            "the op-profile step emitted no op_profile telemetry"
+        );
+
         std::println!(
             "op_profile_run tokens_generated={} stopped_by_eos={} generated_text={:?}",
             generated.0.len(),
@@ -3235,6 +3275,8 @@ mod real_openchat_file {
             return;
         }
 
+        let telemetry_recorder = install_stdout_telemetry();
+
         let mapped = MappedGguf::open(path).expect("mmap host-local openchat gguf fixture");
         let file_bytes = mapped.as_slice();
         let parsed = proxima_gguf::pipe::parse_complete(file_bytes)
@@ -3270,6 +3312,12 @@ mod real_openchat_file {
         unsafe {
             std::env::remove_var("PROXIMA_METAL_OP_PROFILE_STEP");
         }
+
+        let flushed = telemetry_recorder.drain();
+        assert!(
+            flushed > 0,
+            "the op-profile step emitted no op_profile telemetry"
+        );
 
         std::println!(
             "op_profile_run tokens_generated={} stopped_by_eos={} generated_text={:?}",
