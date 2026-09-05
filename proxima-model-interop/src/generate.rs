@@ -1246,7 +1246,7 @@ pub(crate) struct BackendRuntime {
     /// decode, which visits a strictly increasing `cached_len` and so never
     /// hits it within one call.
     ///
-    /// [`Self::resolve_plan`] clears this on every miss instead of
+    /// [`Self::resolve_cached_plan`] clears this on every miss instead of
     /// accumulating entries: measured on a real decode (`plan_cache_len` /
     /// `plan_misses` in `token_breakdown_metal`) this map grew 1:1 with the
     /// step index and `plan_hits` never left 0, so every step but the first
@@ -1311,11 +1311,18 @@ impl BackendRuntime {
         outputs: &[NodeId],
         resident_names: &BTreeSet<&str>,
     ) -> Result<Evaluated, InteropError> {
-        let shape = self.resolve_plan(program, symbols, named, outputs, resident_names)?;
-        let plan = self
-            .plans
-            .get_mut(&shape)
-            .ok_or(InteropError::PlanCacheEntryVanished { shape })?;
+        let shape = (symbols[0] as usize, symbols[1] as usize);
+        let plan = Self::resolve_cached_plan(
+            &mut self.plans,
+            &mut self.plan_hits,
+            &mut self.plan_misses,
+            shape,
+            || {
+                let mut plan = plan_named(self.backend, program, symbols, named, outputs)?;
+                mark_resident(&mut plan, resident_names);
+                Ok(plan)
+            },
+        )?;
         Ok(execute_plan_named(plan, named)?)
     }
 
@@ -1329,7 +1336,7 @@ impl BackendRuntime {
     /// -- the whole reason this method exists next to [`Self::evaluate`]
     /// rather than adding a placement parameter there, since every other
     /// backend arm has no such parameter to accept. Clears `placed_plans`
-    /// on every miss, same as `plans`/[`Self::resolve_plan`] -- the
+    /// on every miss, same as `plans`/[`Self::resolve_cached_plan`] -- the
     /// identical superseded-`Plan` leak that clearing fixed there applies
     /// here unchanged: ordinary decode's `merged_len` strictly increases,
     /// so a miss means the previous entry can never be looked up again.
@@ -1346,19 +1353,17 @@ impl BackendRuntime {
         output_placements: &[(NodeId, &PlacedBuffer, usize)],
     ) -> Result<Evaluated, InteropError> {
         let shape = (symbols[0] as usize, symbols[1] as usize);
-        if self.placed_plans.contains_key(&shape) {
-            self.plan_hits += 1;
-        } else {
-            self.plan_misses += 1;
-            let mut plan = plan_named_placed(program, symbols, named, outputs)?;
-            plan.mark_resident(resident_names);
-            self.placed_plans.clear();
-            self.placed_plans.insert(shape, plan);
-        }
-        let plan = self
-            .placed_plans
-            .get_mut(&shape)
-            .ok_or(InteropError::PlanCacheEntryVanished { shape })?;
+        let plan = Self::resolve_cached_plan(
+            &mut self.placed_plans,
+            &mut self.plan_hits,
+            &mut self.plan_misses,
+            shape,
+            || {
+                let mut plan = plan_named_placed(program, symbols, named, outputs)?;
+                plan.mark_resident(resident_names);
+                Ok(plan)
+            },
+        )?;
         Ok(execute_plan_named_with_placements(
             plan,
             named,
@@ -1391,19 +1396,17 @@ impl BackendRuntime {
         output_placements: &[(NodeId, &PlacedBuffer, usize)],
     ) -> Result<(Evaluated, Vec<OpGpuTiming>), InteropError> {
         let shape = (symbols[0] as usize, symbols[1] as usize);
-        if self.placed_plans.contains_key(&shape) {
-            self.plan_hits += 1;
-        } else {
-            self.plan_misses += 1;
-            let mut plan = plan_named_placed(program, symbols, named, outputs)?;
-            plan.mark_resident(resident_names);
-            self.placed_plans.clear();
-            self.placed_plans.insert(shape, plan);
-        }
-        let plan = self
-            .placed_plans
-            .get_mut(&shape)
-            .ok_or(InteropError::PlanCacheEntryVanished { shape })?;
+        let plan = Self::resolve_cached_plan(
+            &mut self.placed_plans,
+            &mut self.plan_hits,
+            &mut self.plan_misses,
+            shape,
+            || {
+                let mut plan = plan_named_placed(program, symbols, named, outputs)?;
+                plan.mark_resident(resident_names);
+                Ok(plan)
+            },
+        )?;
         Ok(execute_plan_named_with_placements_op_timed(
             plan,
             named,
@@ -1412,8 +1415,20 @@ impl BackendRuntime {
         )?)
     }
 
-    /// [`Self::evaluate`]/[`Self::evaluate_op_timed`]'s shared cache-lookup
-    /// step, split out so the eviction policy lives in exactly one place.
+    /// [`Self::evaluate`]/[`Self::evaluate_op_timed`]/
+    /// [`Self::evaluate_with_placements`]/
+    /// [`Self::evaluate_op_timed_with_placements`]'s shared cache-lookup
+    /// step, split out so the eviction policy lives in exactly one place and
+    /// so every caller gets back the `Plan` it just resolved rather than a
+    /// shape it must look up again -- the second lookup was the only reason
+    /// `InteropError::PlanCacheEntryVanished` (now deleted) existed, for a
+    /// state (a key missing immediately after this function inserted it)
+    /// that cannot occur: [`alloc::collections::btree_map::Entry`] proves it
+    /// at the type level instead.
+    ///
+    /// Generic over the cached `Plan` type because [`Self::plans`] and
+    /// [`Self::placed_plans`] key different `Plan` types under the same
+    /// `(usize, usize)` shape but share this exact hit/miss/evict policy.
     ///
     /// This struct's own [`Self::plans`] field comment already proved
     /// ordinary autoregressive decode's `cached_len` strictly increases, so
@@ -1427,29 +1442,33 @@ impl BackendRuntime {
     /// keeping (an immediate same-shape replay lands as a hit BEFORE the
     /// next miss would evict it) while making superseded entries collectible
     /// instead of retained for the rest of the call.
-    fn resolve_plan(
-        &mut self,
-        program: &[Op],
-        symbols: &[u64],
-        named: &[(&str, QuantizedBlock<'_>)],
-        outputs: &[NodeId],
-        resident_names: &BTreeSet<&str>,
-    ) -> Result<(usize, usize), InteropError> {
-        let shape = (symbols[0] as usize, symbols[1] as usize);
-        if self.plans.contains_key(&shape) {
-            self.plan_hits += 1;
-        } else {
-            self.plan_misses += 1;
-            let mut plan = plan_named(self.backend, program, symbols, named, outputs)?;
-            mark_resident(&mut plan, resident_names);
-            self.plans.clear();
-            self.plans.insert(shape, plan);
+    fn resolve_cached_plan<'cache, PlanType>(
+        cache: &'cache mut alloc::collections::BTreeMap<(usize, usize), PlanType>,
+        plan_hits: &mut usize,
+        plan_misses: &mut usize,
+        shape: (usize, usize),
+        build: impl FnOnce() -> Result<PlanType, InteropError>,
+    ) -> Result<&'cache mut PlanType, InteropError> {
+        use alloc::collections::btree_map::Entry;
+
+        if !cache.contains_key(&shape) {
+            cache.clear();
         }
-        Ok(shape)
+        match cache.entry(shape) {
+            Entry::Occupied(entry) => {
+                *plan_hits += 1;
+                Ok(entry.into_mut())
+            }
+            Entry::Vacant(entry) => {
+                *plan_misses += 1;
+                let plan = build()?;
+                Ok(entry.insert(plan))
+            }
+        }
     }
 
     /// Live entry count in [`Self::plans`] -- the direct witness that
-    /// [`Self::resolve_plan`]'s clear-on-miss policy keeps this bounded at 1
+    /// [`Self::resolve_cached_plan`]'s clear-on-miss policy keeps this bounded at 1
     /// through ordinary autoregressive decode's strictly increasing
     /// `cached_len`, rather than growing 1:1 with the step index as it did
     /// before that policy landed. See `token_breakdown_metal`'s
@@ -1493,11 +1512,18 @@ impl BackendRuntime {
         outputs: &[NodeId],
         resident_names: &BTreeSet<&str>,
     ) -> Result<(Evaluated, Vec<OpGpuTiming>), InteropError> {
-        let shape = self.resolve_plan(program, symbols, named, outputs, resident_names)?;
-        let plan = self
-            .plans
-            .get_mut(&shape)
-            .ok_or(InteropError::PlanCacheEntryVanished { shape })?;
+        let shape = (symbols[0] as usize, symbols[1] as usize);
+        let plan = Self::resolve_cached_plan(
+            &mut self.plans,
+            &mut self.plan_hits,
+            &mut self.plan_misses,
+            shape,
+            || {
+                let mut plan = plan_named(self.backend, program, symbols, named, outputs)?;
+                mark_resident(&mut plan, resident_names);
+                Ok(plan)
+            },
+        )?;
         Ok(execute_plan_named_metal_op_timed(plan, named)?)
     }
 }
