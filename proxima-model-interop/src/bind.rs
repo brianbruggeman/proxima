@@ -2662,6 +2662,11 @@ mod real_openchat_file {
     use proxima_tensor::map::{self, IndexMap};
     use proxima_tensor::op::{self, Extent, Keep, Op, Reduce, ReduceInit, ScalarOp, append};
 
+    #[cfg(feature = "instrument")]
+    use proxima_telemetry::export::Exporter;
+    #[cfg(feature = "instrument")]
+    use proxima_telemetry::recorder::Recorder;
+
     use crate::generate::LoadedModel;
     use crate::loader::prefault;
     use crate::serving::ServingConfig;
@@ -2769,16 +2774,25 @@ mod real_openchat_file {
     /// installs a console recorder (`Exporter::std()`: trace/debug/info to
     /// stdout, warn/error to stderr) and raises the filter to `debug`, so a
     /// `--nocapture` run of an `instrument`-gated test still shows every line
-    /// this campaign's own harness reads by eye. Returns the recorder so the
-    /// caller can `drain()` it before the test returns -- the background
-    /// drain thread `install_console_recorder` spawns is best-effort and must
-    /// not race process exit for the one, final flush a test needs.
+    /// this campaign's own harness reads by eye.
+    ///
+    /// Deliberately does NOT use `proxima_telemetry::export::install_console_recorder`:
+    /// that spawns a background pump thread that drains the ring on its own
+    /// event-driven schedule, racing this test's own final `drain()` call --
+    /// the pump can empty the ring first, so `drain()`'s return (the count
+    /// each test asserts nonzero on) reports zero even though every event
+    /// already reached stdout. Building the recorder directly with no pump
+    /// makes the test's one explicit `drain()` the only drain pass, so it
+    /// always sees, counts, and prints everything the decode loop emitted.
     #[cfg(feature = "instrument")]
-    fn install_stdout_telemetry() -> std::sync::Arc<proxima_telemetry::recorder::Recorder> {
+    fn install_stdout_telemetry() -> std::sync::Arc<Recorder> {
         proxima_telemetry::emit::global::install(proxima_telemetry::emit::EnvFilter::parse(
             "debug",
         ));
-        proxima_telemetry::export::install_console_recorder()
+        Recorder::builder()
+            .export(Exporter::std())
+            .expect("console exporter installs for an instrument-gated test")
+            .install()
             .expect("stdout telemetry recorder installs for an instrument-gated test")
     }
 
