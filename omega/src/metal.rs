@@ -400,8 +400,8 @@ impl Plan {
     }
 
     /// The arena's live-bytes high-water mark reached while it was built --
-    /// the direct witness `build_buffer_arena`'s own `eprintln!` already
-    /// prints before allocating, kept queryable afterward for a census
+    /// the direct witness `build_buffer_arena`'s own `debug!` event already
+    /// emits before allocating, kept queryable afterward for a census
     /// line. `None` when this feature is off, or when this plan has never
     /// executed a placed call and so never built its arena (see
     /// `Self::arena`'s own doc).
