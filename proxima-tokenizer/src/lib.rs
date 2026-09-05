@@ -42,6 +42,7 @@ pub mod bpe;
 pub mod byte_level;
 #[cfg(feature = "std")]
 pub mod config;
+pub mod draft;
 pub mod error;
 #[cfg(feature = "gguf")]
 pub mod gguf;
@@ -54,6 +55,7 @@ pub mod sized;
 pub mod unigram;
 pub mod vocab;
 
+pub use draft::draft_ngram_lookup;
 pub use error::TokenizerError;
 pub use pipe::{decode, encode, encode_with_bos_eos};
 pub use sample::{SamplingConfig, greedy_pick, sample_next_token};
