@@ -300,6 +300,22 @@ kv-capacity-bucket = ["proxima-tensor/kv-capacity-bucket"]
 # body rewrite earns the production default only after a quiet-box
 # decode-step seal, not on the "verbatim port" argument alone.
 metal-q4k-ggml-port = ["metal"]
+# ggml's `nr1` fold generalized off `metal-tiled-gemm`'s Q4_K-only /
+# plain-Add-from-Zero / `TILED_GEMM_MIN_TOKENS` restrictions: the row-blocked
+# packed matvec (`msl.rs`'s `push_packed_row_blocked_body`) streams every
+# weight row once PER activation ("token") row, so a pass over `s`
+# activations re-touches the whole weight `s` times. This feature's own
+# `push_packed_row_multi_activation_body` folds up to
+# `sized::PACKED_ROW_ACTIVATION_GROUP` activation rows per streamed weight
+# element instead, for every codec/reduce shape `packed_row_block` admits
+# (Q4_K/Q5_K/Q6_K) -- generic over the reduce's operand layouts, not tied to
+# one model's shapes. Default-off per the same discipline as
+# `metal-tiled-gemm` above: a new kernel body earns the production default
+# only after a measured decode/prefill seal, not on the mechanism argument
+# alone. Depends on `metal` for the same reason every sibling feature in this
+# file does: `msl.rs` is alloc-tier codegen, but the alternate dispatch
+# geometry only has meaning for a Metal dispatch.
+metal-packed-row-multi-activation = ["metal"]
 
 [dependencies]
 bytemuck = { version = "1.25.2", optional = true }
