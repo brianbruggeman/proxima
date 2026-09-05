@@ -21391,3 +21391,41 @@ Confirm the gate `pgrep -l 'llama-bench|proxima_model_interop-'` is empty immedi
 | Date | Change | Δ vs prior | CoV / runs | Host loadout |
 | --- | --- | --- | --- | --- |
 | 2026-09-04 | new measurement-only row: device streaming ceiling harness (`a8d9c06`) run twice, no prior baseline in this log to delta against | best ceiling 237.79-264.29 GB/s (range, not point estimate); floor 15.774-17.532 ms/token at 4.169 GB/token; 1.326-1.474x ROW 287's 179.36 GB/s MATVEC figure; 0.995-1.106x llama.cpp's derived 239.03 GB/s aggregate | 2 full runs (18 cells each); best-arm CoV 26.84% (run 1) and 29.40% (run 2), both above 5% -- reported as a range per this log's own rule; 35/36 cells above 5% CoV | 30-47 concurrent `cargo`/`rustc`/`nextest` builder processes throughout (never quiet); one unrelated `llama-bench -ngl 0` process observed and waited out before each timed run, GPU-measurement gate confirmed empty immediately before both runs |
+
+## ROW 292 -- n-gram draft acceptance on real greedy streams: design's assumed k' = 2.18 REFUTED, measured 1.36 at k=4
+
+**Card:** `docs/bench-campaigns/2026-09-03-gpu-one-risc/design-2026-09-04/design-AB.md` CARD D2, whose pre-registered kill criterion this row measures against: **k' >= 1.8 at k=4 on a held-out set stratified by class, reported as a histogram per class, not a mean; kill at k' < 1.5**. **Worktree:** `proxima-wt-s6e2-accept` (`test/draft-acceptance-harness`, off `main`). **Purpose:** replace the design's own ASSUMED acceptance factor -- `k' = 2.18` at `k = 4`, derived as `1 + alpha + alpha^2 + alpha^3` at `alpha = 0.6` (`design-AB.md:138-140`), never measured -- with a real number off a real greedy-decoded stream from an n-gram (prompt-lookup) drafter, the only drafter the design's own byte-lever table credits to L1.
+
+**Mechanism.** `bind::draft_acceptance::ngram_draft_acceptance_rate_on_real_greedy_streams` (`proxima-model-interop/src/bind.rs:3898`, `#[ignore]`d, host-local gguf only) loads a real OpenChat-3.5 GGUF checkpoint through `LoadedModel`'s public `Pipe`, greedy-generates one real token stream per prompt, then replays `proxima_tokenizer::draft::draft_ngram_lookup` offline against that exact stream at every position (`replay_draft_acceptance`, `bind.rs:3844`) -- no second model call, and the greedy-verification rule collapses to a plain equality check because the stream being replayed was itself produced by the model's own argmax. Two unit tests (`replay_draft_acceptance_on_a_repetitive_stream_beats_one_token_per_pass`, `replay_draft_acceptance_on_a_stream_with_no_repeats_never_beats_one_token_per_pass`) pin the harness's own degenerate controls: a 6x-repeated code line must draft real accepted continuations (k' > 1.0), a strictly increasing stream must never repeat an n-gram (k' == 1.0 exactly).
+
+**8 prompts, 4 categories, 2 each** (`draft_acceptance_prompts`, `bind.rs:3769`): **chat** -- OpenChat-templated "write a Fibonacci function" / "capital of France" turns; **code** -- a recursive Fibonacci function asking for a follow-on function, and a numpy `normalize` function asking for a follow-on function; **prose** -- the Industrial Revolution opening sentence, and a human-brain-neuron-count sentence; **list** -- a numbered planets list continuation, and a pancake-batter ingredients list continuation. The second prose prompt was substituted after the original triggered `Tokenizer(InvalidUtf8)` mid-decode (`real_run2.log:59-60`, panic at `bind.rs:3931`) -- a tokenizer decode defect on split multi-byte UTF-8 sequences, fix in flight on `fix/tokenizer-decode-split-utf8` -- with an ASCII-only prose prompt of the same category and length so the run could complete without depending on an unlanded fix.
+
+**Loadout, from the log:** release build, `Finished \`release\` profile [optimized] target(s) in 3m 01s`; checkpoint `/Users/brianbruggeman/.lmstudio/models/TheBloke/openchat-3.5-1210-GGUF/openchat-3.5-1210.Q4_K_S.gguf` (`ServingConfig::DEFAULT_MODEL_PATH`); `PROXIMA_MAX_TOKENS` unset, default 64 generated tokens per prompt; single test, 1 passed, 910.30s wall.
+
+**Aggregate table (6 `draft_acceptance_aggregate` lines, mean k' across all 8 prompts, per-category mean alongside):**
+
+| k | n-gram range | mean k' | chat | code | prose | list |
+| --- | --- | --- | --- | --- | --- | --- |
+| 2 | 2-4 | 1.2330 | 1.2176 | 1.5714 | 1.0079 | 1.1349 |
+| 2 | 3-6 | 1.1746 | 1.1429 | 1.5000 | 1.0000 | 1.0556 |
+| 4 | 2-4 | 1.3609 | 1.3536 | 1.9344 | 1.0082 | 1.1475 |
+| 4 | 3-6 | 1.2848 | 1.2541 | 1.8279 | 1.0000 | 1.0574 |
+| 8 | 2-4 | 1.4850 | 1.5016 | 2.2719 | 1.0088 | 1.1579 |
+| 8 | 3-6 | 1.3904 | 1.3860 | 2.1140 | 1.0000 | 1.0614 |
+
+Per-prompt code cells peak at k' = 2.7719 (`prompt=3 k=8 ngram=2-4`, `real_run3.log`); prose cells sit at 1.0000-1.0175 across every sweep cell -- the drafter accepts essentially nothing on prose.
+
+**Result.** Exact repeated n-grams fire on code identifiers and structural boilerplate (a function signature, an import line, a list marker recurring verbatim), not on prose: code's own n-gram distribution repeats far more of its literal token sequence than natural-language prose does, so `draft_ngram_lookup`'s exact-match assumption finds real continuations there and finds almost none in prose, where the same words rarely recur as an identical token sequence. This is not a bug in the drafter -- `no_repeats_in_history_drafts_nothing`'s degenerate control (mirrored here as `replay_draft_acceptance_on_a_stream_with_no_repeats_never_beats_one_token_per_pass`) already established that an n-gram drafter is definitionally blind to non-repeating text; this row is the first real-stream confirmation that ordinary prose is close enough to non-repeating for that blindness to bind in practice.
+
+**Consequence for the design.** CARD D2's pre-registered criterion is measured, not assumed: at `k = 4`, mean k' is **1.3609** (ngram 2-4) and **1.2848** (ngram 3-6) -- both **below the kill threshold of 1.5**, and nowhere near the design's own `k' = 2.18` ASSUMED figure or CARD D2's own `k' >= 1.8` pass bar. Only the code category alone clears 1.8 (1.9344 at ngram 2-4, still short of 2.18); chat, prose, and list all sit under 1.55 even at `k = 8`. **An n-gram (prompt-lookup) drafter does not repay its own per-pass verification cost on a mixed workload at this design's assumed k = 4** -- L1's byte-lever credit in `design-AB.md` is not supportable by this measurement on this prompt mix, though a code-only or code-heavy serving workload is a distinct, unmeasured case this row does not rule out.
+
+**Re-prove command:**
+```sh
+cd /Users/brianbruggeman/repos/slot-0/proxima-wt-s6e2-accept
+CARGO_TARGET_DIR=/Users/brianbruggeman/repos/slot-0/proxima-wt-s6e2-accept/target CARGO_TERM_COLOR=never cargo nextest run --release -p proxima-model-interop --features metal,instrument --run-ignored ignored-only -- bind::draft_acceptance::ngram_draft_acceptance_rate_on_real_greedy_streams --no-capture
+```
+
+### Changelog
+| Date | Change | Δ vs prior | CoV / runs | Host loadout |
+| --- | --- | --- | --- | --- |
+| 2026-09-04 | measurement only, no feature change; n-gram draft-acceptance harness against a real greedy-decoded stream, 8 prompts x 6 (k, n-gram-range) sweep cells | no prior draft-acceptance row exists; baseline itself, refutes `design-AB.md`'s ASSUMED `k' = 2.18` | single deterministic run (greedy decode, no sampling noise), not repeated -- CoV not applicable to this measurement shape | not recorded for this run; see `real_run3.log` for the completed attempt (two prior attempts: `real_run.log` SIGTERM'd at 331.68s on the metal-instrumented path before reaching prompt 0's aggregate, `real_run2.log` panicked on `Tokenizer(InvalidUtf8)` at prompt 5 before the prose-prompt substitution) |
