@@ -69,8 +69,9 @@ pub enum EmitError {
     #[error("node {node} gathers an operand, which the wgsl v1 emitter does not support yet")]
     GatherNotSupported { node: NodeId },
 
-    /// `wgsl::emit_wgsl`'s v1 op set is elementwise, `Keep::Reduce`, and
-    /// `Keep::Scan` only — `Iota`/`Constant` have no renderer yet.
+    /// `wgsl::emit_wgsl`'s v1 op set is elementwise, `Keep::Reduce`,
+    /// `Keep::Scan`, `Iota`, and `Constant` -- this variant is reachable for
+    /// whatever op kind is added next, not for either of those two.
     #[cfg(feature = "wgpu-backend")]
     #[error("node {node} is a {kind} op, which the wgsl v1 emitter does not support yet")]
     UnsupportedOpKind { node: NodeId, kind: &'static str },
