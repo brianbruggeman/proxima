@@ -7356,10 +7356,17 @@ mod tests {
     }
 
     /// [`packed_row_nsg2_doubles_the_threadgroup_width_for_a_packed_row_blocked_matmul`]'s
-    /// feature-off twin: without EITHER nsg2 feature compiled in, the
-    /// same fixture's threadgroup width must stay at the pre-existing
-    /// one-simdgroup shape -- proves the fix is additive, not a change to
-    /// the default dispatch geometry.
+    /// feature-off twin: without EITHER nsg2 feature compiled in, the NSG
+    /// factor itself must stay at one simdgroup -- proves the nsg2 fix is
+    /// additive, not a change to the default dispatch geometry. This cfg arm
+    /// is also the one `metal-q4k-split-k` alone reaches (neither nsg2
+    /// feature is on), and split-K widens the SAME threadgroup for an
+    /// unrelated, real reason (starved shapes get more simdgroups
+    /// cooperating on one reduction, [`packed_row_split_factor`]'s own doc),
+    /// so the expected width is derived from the SAME
+    /// [`packed_row_dispatch`]/[`packed_row_nsg_factor`] production reads
+    /// rather than a literal -- a hardcoded `SIMD_WIDTH` here is feature-blind
+    /// to split-K's own widening and fails every cell it does not predict.
     #[cfg(not(any(feature = "metal-packed-row-nsg2", feature = "metal-q4k-ggml-port")))]
     #[test]
     fn packed_row_nsg2_off_leaves_the_threadgroup_width_unchanged() {
@@ -7374,12 +7381,18 @@ mod tests {
             "test fixture must actually take the row-blocked path for this assertion to mean anything"
         );
 
+        let BoundOpKind::Reduce { output_axes, .. } = &bound.kind else {
+            unreachable!("matmul_op always builds a Keep::Reduce op")
+        };
+        let (_base, split) = packed_row_dispatch(output_axes, &bound.extents);
+        let expected_width = SIMD_WIDTH * split * packed_row_nsg_factor();
+
         let width = tiled_gemm_threadgroup_width(&bound, &quantized)
             .expect("a packed row-blocked reduce always has a threadgroup width");
         assert_eq!(
-            width, SIMD_WIDTH,
-            "without metal-packed-row-nsg2 the packed row-blocked path must stay at one \
-             simdgroup; got {width}"
+            width, expected_width,
+            "without either nsg2 feature the packed row-blocked path's width must match \
+             production's own SIMD_WIDTH * split * packed_row_nsg_factor() derivation; got {width}"
         );
     }
 }
