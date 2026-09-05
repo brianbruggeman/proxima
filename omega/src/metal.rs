@@ -244,6 +244,12 @@ pub enum MetalError {
     Emit(#[from] EmitError),
     #[error("hazard tracking: operand {node} has no resolved device buffer")]
     UnresolvedHazardOperand { node: NodeId },
+    /// `build_buffer_arena`'s own reuse pass still needed more transient
+    /// bytes live at once than `ARENA_TRANSIENT_CAP` budgets -- MG-3's
+    /// kill condition, now a typed error a caller can act on rather than a
+    /// stderr line beside a silently returned `Ok`.
+    #[error("arena peak_bytes={peak_bytes} exceeds arena_transient_cap={cap}")]
+    ArenaOverCap { peak_bytes: usize, cap: usize },
 }
 /// This thread's Metal device paired with its command queue — both created
 /// once per thread rather than per [`execute`] call.
@@ -2348,6 +2354,68 @@ fn push_gather_uniforms(bytes: &mut Vec<u8>, bound: &BoundOp, rank_len: usize) {
     }
 }
 
+/// Bytes [`push_gather_uniforms`] appends for `gather_count` gathered
+/// operands at `rank_len` — `0` operands write nothing (the early return in
+/// [`push_gather_uniforms`] itself), otherwise 3 scalar `i64` fields
+/// (`gather_index_base`/`gather_element_stride`/`gather_extent`) plus one
+/// `rank_len`-wide `i64` row (`gather_index_strides`) PER gathered operand.
+fn gather_uniform_byte_len(gather_count: usize, rank_len: usize) -> usize {
+    if gather_count == 0 {
+        0
+    } else {
+        gather_count * (rank_len + 3) * size_of::<i64>()
+    }
+}
+
+/// [`pack_uniforms`]'s own byte length, computed from `bound`'s static shape
+/// (extents, operand count, gather count) rather than by actually building
+/// the byte vector — every field [`pack_uniforms`]'s packers write is a
+/// scalar `i64` or an `i64` row of fixed width ([`push_i64`]/[`push_i64_row`]
+/// never branch on the VALUES, only on `rank_len`/`width`), so the total byte
+/// count is a pure function of shape. [`build_buffer_arena`]'s own
+/// `uniform_bytes` diagnostic sum used to call [`pack_uniforms`] once per op
+/// just to read `.len()` off the result, allocating and filling a real byte
+/// vector — for every op in the plan — purely to throw it away; this
+/// mirrors [`pack_uniforms`]'s own match arms field-for-field instead.
+fn pack_uniforms_byte_len(bound: &BoundOp) -> usize {
+    const WORD: usize = size_of::<i64>();
+    let rank_len = bound.extents.len().max(1);
+    let operand_count = bound.operands().len();
+    let gather = gather_count(bound);
+
+    match &bound.kind {
+        BoundOpKind::CachedAttention { .. } => WORD,
+        BoundOpKind::Iota | BoundOpKind::Constant { .. } => WORD,
+        BoundOpKind::Elementwise { .. } => {
+            (1 + rank_len + operand_count + operand_count * rank_len) * WORD
+                + gather_uniform_byte_len(gather, rank_len)
+        }
+        BoundOpKind::Reduce {
+            keep: Keep::Reduce,
+            output_axes,
+            ..
+        } => {
+            let output_rank_len = output_axes.len().max(1);
+            let reduce_rank_len = reduction_dims(bound, output_axes).len().max(1);
+            (2 + output_rank_len
+                + reduce_rank_len
+                + operand_count
+                + operand_count * rank_len
+                + 1
+                + rank_len)
+                * WORD
+                + gather_uniform_byte_len(gather, rank_len)
+        }
+        BoundOpKind::Reduce {
+            keep: Keep::Scan, ..
+        } => {
+            let outer_rank_len = bound.extents.len().saturating_sub(1).max(1);
+            (2 + outer_rank_len + operand_count + operand_count * rank_len + 1 + rank_len) * WORD
+                + gather_uniform_byte_len(gather, rank_len)
+        }
+    }
+}
+
 fn pack_uniforms(bound: &BoundOp) -> Vec<u8> {
     match &bound.kind {
         BoundOpKind::CachedAttention { .. } => pack_cached_attention_uniforms(bound),
@@ -2359,6 +2427,142 @@ fn pack_uniforms(bound: &BoundOp) -> Vec<u8> {
             keep: Keep::Scan, ..
         } => pack_scan_uniforms(bound),
         BoundOpKind::Iota | BoundOpKind::Constant { .. } => pack_leaf_uniforms(bound),
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod pack_uniforms_byte_len_tests {
+    //! [`super::pack_uniforms_byte_len`] mirrors [`super::pack_uniforms`]'s
+    //! match arms field-for-field rather than calling it -- these tests are
+    //! the parity proof: for a real elementwise op and a real `Keep::Reduce`
+    //! matmul-shaped op (the two arms `build_buffer_arena`'s hot loop
+    //! actually walks on every real forward), the analytically-computed
+    //! length must equal the real byte vector's `.len()` exactly.
+
+    use alloc::vec;
+    use alloc::vec::Vec;
+
+    use proxima_tensor::{
+        BoundOp, BoundOpKind, DType, Extent, IndexMap, Keep, Op, Reduce, ReduceInit, ScalarOp,
+        append, bind, infer, map,
+    };
+
+    use super::{pack_uniforms, pack_uniforms_byte_len};
+
+    fn elementwise_add_op(extent_a: u32, extent_b: u32) -> BoundOp {
+        let mut program = Vec::new();
+        let lhs = append(
+            &mut program,
+            Op::Input {
+                dtype: DType::Float32,
+                shape: vec![Extent::Static(extent_a), Extent::Static(extent_b)],
+                name: None,
+            },
+        );
+        let rhs = append(
+            &mut program,
+            Op::Input {
+                dtype: DType::Float32,
+                shape: vec![Extent::Static(extent_a), Extent::Static(extent_b)],
+                name: None,
+            },
+        );
+        append(
+            &mut program,
+            Op::Elementwise {
+                dtype: DType::Float32,
+                body: ScalarOp::Add,
+                operands: vec![
+                    (lhs, IndexMap::Affine(map::projection(2, &[0, 1]))),
+                    (rhs, IndexMap::Affine(map::projection(2, &[0, 1]))),
+                ],
+                name: None,
+            },
+        );
+        let shapes = infer(&program, &[]).expect("elementwise infers");
+        bind(&program, &shapes, &[])
+            .expect("elementwise lowers")
+            .into_iter()
+            .next_back()
+            .expect("one bound op emitted")
+    }
+
+    fn matmul_reduce_op(m: u32, k: u32, n: u32) -> BoundOp {
+        let mut program = Vec::new();
+        let lhs = append(
+            &mut program,
+            Op::Input {
+                dtype: DType::Float32,
+                shape: vec![Extent::Static(m), Extent::Static(k)],
+                name: None,
+            },
+        );
+        let rhs = append(
+            &mut program,
+            Op::Input {
+                dtype: DType::Float32,
+                shape: vec![Extent::Static(k), Extent::Static(n)],
+                name: None,
+            },
+        );
+        let product = append(
+            &mut program,
+            Op::Elementwise {
+                dtype: DType::Float32,
+                body: ScalarOp::Multiply,
+                operands: vec![
+                    (lhs, IndexMap::Affine(map::projection(3, &[0, 2]))),
+                    (rhs, IndexMap::Affine(map::projection(3, &[2, 1]))),
+                ],
+                name: None,
+            },
+        );
+        append(
+            &mut program,
+            Op::Reduce(Reduce {
+                dtype: DType::Float32,
+                body: ScalarOp::Add,
+                init: ReduceInit::Zero,
+                operand: product,
+                in_map: IndexMap::Affine(map::projection(3, &[0, 1, 2])),
+                out_map: IndexMap::Affine(map::projection(3, &[0, 1])),
+                keep: Keep::Reduce,
+                name: Some("matmul".into()),
+            }),
+        );
+        let shapes = infer(&program, &[]).expect("matmul infers");
+        bind(&program, &shapes, &[])
+            .expect("matmul lowers")
+            .into_iter()
+            .next_back()
+            .expect("one fused bound op emitted")
+    }
+
+    #[test]
+    fn elementwise_byte_len_matches_the_real_packed_bytes() {
+        let bound = elementwise_add_op(4, 3);
+        assert!(
+            matches!(bound.kind, BoundOpKind::Elementwise { .. }),
+            "fixture must actually lower to an Elementwise BoundOp"
+        );
+        assert_eq!(pack_uniforms_byte_len(&bound), pack_uniforms(&bound).len());
+    }
+
+    #[test]
+    fn reduce_byte_len_matches_the_real_packed_bytes() {
+        let bound = matmul_reduce_op(2, 5, 3);
+        assert!(
+            matches!(
+                bound.kind,
+                BoundOpKind::Reduce {
+                    keep: Keep::Reduce,
+                    ..
+                }
+            ),
+            "fixture must actually lower to a Keep::Reduce BoundOp"
+        );
+        assert_eq!(pack_uniforms_byte_len(&bound), pack_uniforms(&bound).len());
     }
 }
 
@@ -3733,7 +3937,7 @@ fn build_buffer_arena(
         .iter()
         .map(|bound| bound_output_len(bound).max(1) * bound.dtype.size_bytes())
         .sum();
-    let uniform_bytes: usize = resolved.iter().map(|bound| pack_uniforms(bound).len()).sum();
+    let uniform_bytes: usize = resolved.iter().map(pack_uniforms_byte_len).sum();
     std::eprintln!(
         "arena_arithmetic naive_transient_bytes={naive_transient_bytes} \
          uniform_bytes={uniform_bytes} op_count={} arena_transient_cap={ARENA_TRANSIENT_CAP}",
@@ -3789,10 +3993,15 @@ fn build_buffer_arena(
         naive_transient_bytes as f64 / peak_bytes.max(1) as f64
     );
     if peak_bytes > ARENA_TRANSIENT_CAP {
-        std::eprintln!(
-            "arena_arithmetic WARNING peak_bytes={peak_bytes} exceeds \
-             arena_transient_cap={ARENA_TRANSIENT_CAP} -- MG-3 KILL"
+        proxima_telemetry::error!(
+            peak_bytes,
+            cap = ARENA_TRANSIENT_CAP,
+            "arena peak_bytes exceeds arena_transient_cap -- MG-3 kill condition"
         );
+        return Err(MetalError::ArenaOverCap {
+            peak_bytes,
+            cap: ARENA_TRANSIENT_CAP,
+        });
     }
 
     Ok(BufferArena {
