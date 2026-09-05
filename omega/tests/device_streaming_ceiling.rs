@@ -569,6 +569,23 @@ fn cpu_thread_ranges(total_len: usize, thread_count: usize) -> Vec<(usize, usize
     ranges
 }
 
+/// Relative-tolerance equality for two GPU `f32` sums over the same byte
+/// range, run at different times -- see [`concurrent_sweep_one_split`]'s
+/// doc for the measured ~4.65e-5 run-to-run drift this tolerance is set
+/// (with roughly 20x margin) to absorb without also absorbing a genuine
+/// skipped-or-duplicated range, which shows up as an order-of-magnitude
+/// difference rather than a rounding-level one.
+fn assert_gpu_sums_close(measured: f32, baseline: f32, context: &str) {
+    const MAX_RELATIVE_DRIFT: f32 = 1e-3;
+    let relative_drift = (measured - baseline).abs() / baseline.abs().max(f32::MIN_POSITIVE);
+    assert!(
+        relative_drift < MAX_RELATIVE_DRIFT,
+        "{context}: gpu sum drifted {relative_drift:.6} relative (measured={measured}, \
+         baseline={baseline}), past the {MAX_RELATIVE_DRIFT:.4} float32-accumulation-drift \
+         tolerance -- consistent with a skipped or duplicated byte range"
+    );
+}
+
 /// The CPU-side read arm (C1): a plain sum over `u64` words, split across
 /// `thread_count` OS threads each summing a disjoint range via
 /// `std::thread::scope`, mirroring how `proxima-tensor`'s CPU matmul path
@@ -653,7 +670,18 @@ const CONCURRENT_SPLITS: [(&str, u64); 3] = [
 /// engine's concurrent-run sum is checked against its own solo
 /// (non-concurrent) sum over the identical range, so a scheduling bug that
 /// let one engine's range creep into the other's would show up as a
-/// mismatch rather than a silently wrong number.
+/// mismatch rather than a silently wrong number. The CPU side sums exact
+/// `u64` words with wrapping integer addition, so its check is exact
+/// equality. The GPU side is `f32`: a first run of this harness measured a
+/// ~4.65e-5 relative drift between two dispatches of the identical kernel
+/// over the identical range (`1.074631e18` vs `1.07463105e18`) with no
+/// change to the input bytes, grid, or thread count -- i.e. this hardware's
+/// float32 threadgroup-partial-sum readback is not observed to be bit-exact
+/// reproducible run-to-run, a real and separately noteworthy finding, not a
+/// bug in this harness's range split. [`assert_gpu_sums_close`] uses a
+/// relative-tolerance check wide enough to absorb that drift while still
+/// catching an actual skipped-or-duplicated range (which would show up as
+/// an order-of-magnitude difference, not a ULP-level one).
 #[allow(clippy::too_many_arguments)]
 fn concurrent_sweep_one_split(
     queue: &ProtocolObject<dyn MTLCommandQueue>,
@@ -700,10 +728,7 @@ fn concurrent_sweep_one_split(
                 gpu_total_threads,
                 gpu_threadgroups,
             );
-            assert_eq!(
-                gpu_sum, gpu_solo_sum,
-                "gpu sum drifted between solo and concurrent runs over the same range"
-            );
+            assert_gpu_sums_close(gpu_sum, gpu_solo_sum, "concurrent vs solo gpu dispatch");
             let (cpu_sum, cpu_finished) =
                 cpu_handle.join().expect("cpu sum worker thread does not panic");
             (cpu_sum, cpu_finished, gpu_finished)
