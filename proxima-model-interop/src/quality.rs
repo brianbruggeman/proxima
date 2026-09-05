@@ -6,20 +6,21 @@
 //! noise the moment either technique legitimately changes which near-tied
 //! token wins an argmax.
 //!
-//! Composes exactly two primitives this crate already has, through their
-//! existing public surface:
+//! Composes exactly one primitive this crate already has, run twice --
+//! once per side, through its existing crate-internal surface:
 //!
-//! - [`LoadedModel::generate_with_serving_config`] -- walked forward one
-//!   token at a time to read off the REFERENCE's own real greedy
-//!   trajectory, so every comparison below is made at a context the
-//!   reference model actually decided to reach (teacher forcing on the
-//!   reference's own path, not the variant's -- the standard way a decode
-//!   approximation's per-step drift is scored without a divergent variant
-//!   trajectory confounding the comparison with "wrong context" as well as
-//!   "wrong logits").
-//! - [`LoadedModel::forward_logits_on_backend`] -- called at each of those
-//!   contexts against BOTH `reference` and `variant`, so every metric below
-//!   compares two logit vectors computed over identical input tokens.
+//! - [`LoadedModel::run_decode_loop_observed`] -- the SAME cached decode
+//!   loop [`LoadedModel::generate_with_serving_config`] runs for real
+//!   generation. `reference` runs it unforced to read off its own real
+//!   greedy trajectory AND that trajectory's own per-step logits in one
+//!   pass (teacher forcing on the reference's own path, not the variant's
+//!   -- the standard way a decode approximation's per-step drift is scored
+//!   without a divergent variant trajectory confounding the comparison
+//!   with "wrong context" as well as "wrong logits"); `variant` then runs
+//!   the identical loop forced onto `reference`'s own emitted tokens, so
+//!   every metric below compares two logit vectors the SAME cached loop
+//!   computed over identical input tokens -- never a second, uncached
+//!   forward pass.
 //!
 //! [`quality_report`] is deliberately the only entry point: a future
 //! variant (a lower-bit codec, a different `gpu_layers` backend, a
@@ -34,14 +35,13 @@
 //! the same reason (a bench/acceptance-test-facing line, not a
 //! production log event).
 
-use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
 use serde::Deserialize;
 
 use crate::error::InteropError;
-use crate::generate::{LoadedModel, supported_serving_config};
+use crate::generate::{BackendRuntime, LoadedModel, supported_serving_config};
 
 /// One held-out prompt the quality harness scores a variant decode
 /// configuration against. `source` names where `text` came from --
@@ -218,13 +218,23 @@ fn max_abs_logit_delta(reference_logits: &[f32], variant_logits: &[f32]) -> f32 
         .fold(0.0, f32::max)
 }
 
-/// One prompt's teacher-forced comparison: `reference_gpu_layers`/
-/// `variant_gpu_layers` reach [`LoadedModel::forward_logits_on_backend`]
-/// directly (`0` for CPU, [`crate::serving::GPU_LAYERS_ALL`] for Metal on a
-/// `metal`-featured build) -- [`quality_report`]'s own doc names why this
-/// is a per-side knob rather than baked into `reference`/`variant`
-/// themselves ([`ServingConfig`] is call-time state, not part of a loaded
-/// checkpoint).
+/// One prompt's teacher-forced comparison, both sides driven through
+/// [`LoadedModel::run_decode_loop_observed`] -- the SAME cached decode loop
+/// [`LoadedModel::generate_with_serving_config`] runs for real generation,
+/// never a second, uncached forward. `reference` runs it unforced
+/// (`token_override: None`) to read off its own real greedy trajectory and
+/// that trajectory's own per-step logits in one pass; `variant` then runs
+/// the identical loop forced onto `reference`'s own emitted token ids
+/// (teacher forcing), so every compared step feeds both sides the exact
+/// same input tokens, and each side's `logits_sink` callback -- called
+/// with that step's own last-position logits, the same slice the loop
+/// already slices out to sample from -- is this module's only source of
+/// logits. `reference_gpu_layers`/`variant_gpu_layers` select each side's
+/// backend via [`supported_serving_config`] (`0` for CPU,
+/// [`crate::serving::GPU_LAYERS_ALL`] for Metal on a `metal`-featured
+/// build) -- [`quality_report`]'s own doc names why this is a per-side knob
+/// rather than baked into `reference`/`variant` themselves ([`ServingConfig`]
+/// is call-time state, not part of a loaded checkpoint).
 fn score_prompt(
     reference: &LoadedModel,
     reference_gpu_layers: i32,
@@ -234,47 +244,64 @@ fn score_prompt(
     max_tokens: usize,
 ) -> Result<PromptQuality, InteropError> {
     let reference_config = supported_serving_config(reference_gpu_layers);
+    let variant_config = supported_serving_config(variant_gpu_layers);
 
-    let mut tokens_compared = 0usize;
+    let mut reference_logits: Vec<Vec<f32>> = Vec::with_capacity(max_tokens);
+    let mut reference_runtime = BackendRuntime::new(&reference_config);
+    let (reference_ids, _reference_text, _reference_stopped_by_eos) = reference
+        .run_decode_loop_observed(
+            &prompt.text,
+            max_tokens,
+            &reference_config,
+            &mut reference_runtime,
+            None,
+            &mut |_step, logits| reference_logits.push(logits.to_vec()),
+        )?;
+
+    // `reference_logits.len()` already includes the eos-triggering step's
+    // own logits (`decode_until_stop_or_budget` runs the closure before
+    // deciding whether to push that step's token), but `reference_ids`
+    // never carries that token -- capping at `reference_ids.len()` drops
+    // that trailing row so `variant` is never teacher-forced onto a token
+    // that never entered `reference`'s own generated sequence.
+    let tokens_compared = reference_ids.len().min(reference_logits.len());
+    reference_logits.truncate(tokens_compared);
+
+    let mut variant_logits: Vec<Vec<f32>> = Vec::with_capacity(tokens_compared);
+    if tokens_compared > 0 {
+        let mut variant_runtime = BackendRuntime::new(&variant_config);
+        variant.run_decode_loop_observed(
+            &prompt.text,
+            tokens_compared,
+            &variant_config,
+            &mut variant_runtime,
+            Some(&reference_ids[..tokens_compared]),
+            &mut |_step, logits| variant_logits.push(logits.to_vec()),
+        )?;
+    }
+
     let mut first_divergence = None;
     let mut top1_matches = 0usize;
     let mut kl_sum = 0.0f64;
     let mut kl_max = 0.0f64;
     let mut logit_delta_max = 0.0f32;
 
-    for step in 0..max_tokens {
-        let context_text = if step == 0 {
-            prompt.text.clone()
-        } else {
-            let (reference_ids, continuation, _stopped_by_eos) =
-                reference.generate_with_serving_config(&prompt.text, step, reference_config)?;
-            if reference_ids.len() < step {
-                // `reference`'s own greedy decode already hit its eos token
-                // before reaching this step -- no further reference context
-                // exists to condition `variant` on, so this prompt's
-                // comparison stops here rather than manufacturing one.
-                break;
-            }
-            format!("{}{continuation}", prompt.text)
-        };
+    for step in 0..tokens_compared {
+        let step_reference_logits = &reference_logits[step];
+        let step_variant_logits = &variant_logits[step];
 
-        let reference_logits = reference.forward_logits_on_backend(&context_text, reference_gpu_layers)?;
-        let variant_logits = variant.forward_logits_on_backend(&context_text, variant_gpu_layers)?;
-
-        let reference_top1 = argmax(&reference_logits);
-        let variant_top1 = argmax(&variant_logits);
+        let reference_top1 = argmax(step_reference_logits);
+        let variant_top1 = argmax(step_variant_logits);
         if reference_top1 == variant_top1 {
             top1_matches += 1;
         } else if first_divergence.is_none() {
             first_divergence = Some(step);
         }
 
-        let step_kl = kl_divergence(&reference_logits, &variant_logits);
+        let step_kl = kl_divergence(step_reference_logits, step_variant_logits);
         kl_sum += step_kl;
         kl_max = kl_max.max(step_kl);
-        logit_delta_max = logit_delta_max.max(max_abs_logit_delta(&reference_logits, &variant_logits));
-
-        tokens_compared += 1;
+        logit_delta_max = logit_delta_max.max(max_abs_logit_delta(step_reference_logits, step_variant_logits));
     }
 
     let matched_leading_tokens = first_divergence.unwrap_or(tokens_compared);

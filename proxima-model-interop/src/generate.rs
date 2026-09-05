@@ -1731,12 +1731,40 @@ impl<'file> LoadedModel<'file> {
     /// own metal-path tests, which need to read `runtime`'s plan-cache
     /// hit/miss counters after the loop finishes -- a caller reachable
     /// only through the public method above never sees `runtime` at all.
+    /// Thin delegation to [`Self::run_decode_loop_observed`] with no forced
+    /// continuation and a no-op logits sink, so every existing call site
+    /// keeps its exact pre-existing behavior.
     pub(crate) fn run_decode_loop(
         &self,
         prompt: &str,
         max_tokens: usize,
         serving_config: &ServingConfig,
         runtime: &mut BackendRuntime,
+    ) -> Result<(Vec<u32>, String, bool), InteropError> {
+        self.run_decode_loop_observed(prompt, max_tokens, serving_config, runtime, None, &mut |_, _| {})
+    }
+
+    /// [`Self::run_decode_loop`]'s own body, plus the two hooks
+    /// [`crate::quality::quality_report`] needs to score a variant against
+    /// a reference through this SAME cached decode loop rather than a
+    /// second, uncached one: `token_override` -- when `Some`, step
+    /// `_step`'s emitted token is `token_override[_step]` instead of this
+    /// call's own greedy sample, so a second [`LoadedModel`] can be driven
+    /// through the identical token trajectory a first one already decided
+    /// on (teacher forcing) -- and `logits_sink`, called every step with
+    /// that step's own last-position logits (the same slice this loop
+    /// already slices out of `evaluated` to sample from), so a caller can
+    /// read off per-step logits without a parallel, uncached forward pass.
+    /// Both are no-ops for [`Self::run_decode_loop`]'s own callers.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn run_decode_loop_observed(
+        &self,
+        prompt: &str,
+        max_tokens: usize,
+        serving_config: &ServingConfig,
+        runtime: &mut BackendRuntime,
+        token_override: Option<&[u32]>,
+        logits_sink: &mut dyn FnMut(usize, &[f32]),
     ) -> Result<(Vec<u32>, String, bool), InteropError> {
         let ids = proxima_tokenizer::encode_with_bos_eos(
             prompt,
@@ -1788,6 +1816,8 @@ impl<'file> LoadedModel<'file> {
                 max_tokens,
                 serving_config,
                 runtime,
+                token_override,
+                logits_sink,
             );
         }
 
@@ -2166,14 +2196,19 @@ impl<'file> LoadedModel<'file> {
                             node: self.logits_root,
                         })?;
                 let last_position = &logits[(new_count - 1) * vocab_size..new_count * vocab_size];
+                logits_sink(_step, last_position);
 
                 #[cfg(feature = "instrument")]
                 let greedy_pick_started = read_ticks();
-                let recent_window_start = token_history.len().saturating_sub(repeat_window);
-                let recent_tokens = &token_history[recent_window_start..];
-                let token_id =
-                    sample_next_token(last_position, recent_tokens, sample_config, &mut rng)
-                        .ok_or(InteropError::EmptyLogits)?;
+                let token_id = match token_override.and_then(|forced| forced.get(_step)) {
+                    Some(&forced_token) => forced_token,
+                    None => {
+                        let recent_window_start = token_history.len().saturating_sub(repeat_window);
+                        let recent_tokens = &token_history[recent_window_start..];
+                        sample_next_token(last_position, recent_tokens, sample_config, &mut rng)
+                            .ok_or(InteropError::EmptyLogits)?
+                    }
+                };
                 token_history.push(token_id);
                 #[cfg(feature = "instrument")]
                 let greedy_pick_ticks = elapsed_ticks(greedy_pick_started);
@@ -2302,6 +2337,8 @@ impl<'file> LoadedModel<'file> {
         max_tokens: usize,
         serving_config: &ServingConfig,
         runtime: &mut BackendRuntime,
+        token_override: Option<&[u32]>,
+        logits_sink: &mut dyn FnMut(usize, &[f32]),
     ) -> Result<(Vec<u32>, String, bool), InteropError> {
         let block_count = self.architecture.block_count as usize;
         let kv_heads = self.architecture.kv_heads as usize;
@@ -2616,14 +2653,19 @@ impl<'file> LoadedModel<'file> {
                     },
                 )?;
                 let last_position = &logits[(new_count - 1) * vocab_size..new_count * vocab_size];
+                logits_sink(_step, last_position);
 
                 #[cfg(feature = "instrument")]
                 let greedy_pick_started = read_ticks();
-                let recent_window_start = token_history.len().saturating_sub(repeat_window);
-                let recent_tokens = &token_history[recent_window_start..];
-                let token_id =
-                    sample_next_token(last_position, recent_tokens, sample_config, &mut rng)
-                        .ok_or(InteropError::EmptyLogits)?;
+                let token_id = match token_override.and_then(|forced| forced.get(_step)) {
+                    Some(&forced_token) => forced_token,
+                    None => {
+                        let recent_window_start = token_history.len().saturating_sub(repeat_window);
+                        let recent_tokens = &token_history[recent_window_start..];
+                        sample_next_token(last_position, recent_tokens, sample_config, &mut rng)
+                            .ok_or(InteropError::EmptyLogits)?
+                    }
+                };
                 token_history.push(token_id);
                 #[cfg(feature = "instrument")]
                 let greedy_pick_ticks = elapsed_ticks(greedy_pick_started);
