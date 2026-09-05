@@ -395,7 +395,7 @@ impl Plan {
     /// prints before allocating, kept queryable afterward for a census
     /// line. `None` when this feature is off, or when this plan has never
     /// executed a placed call and so never built its arena (see
-    /// [`Self::arena`]'s own doc).
+    /// `Self::arena`'s own doc).
     #[must_use]
     pub fn arena_peak_bytes(&self) -> Option<usize> {
         #[cfg(feature = "metal-plan-stable-buffers")]
