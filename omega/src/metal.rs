@@ -843,22 +843,15 @@ struct HazardTracker<Id: Eq + core::hash::Hash + Copy> {
     read: std::collections::HashSet<Id>,
 }
 
-// hand-written rather than `#[derive(Default)]`: the derive would require
-// `Id: Default` too (an empty `HashSet` needs no such bound on its element
-// type), which the real driver's `Id = *const ProtocolObject<dyn MTLBuffer>`
-// has no reason to carry.
 #[cfg(feature = "metal-concurrent-dispatch")]
-impl<Id: Eq + core::hash::Hash + Copy> Default for HazardTracker<Id> {
-    fn default() -> Self {
+impl<Id: Eq + core::hash::Hash + Copy> HazardTracker<Id> {
+    fn new() -> Self {
         Self {
             written: std::collections::HashSet::new(),
             read: std::collections::HashSet::new(),
         }
     }
-}
 
-#[cfg(feature = "metal-concurrent-dispatch")]
-impl<Id: Eq + core::hash::Hash + Copy> HazardTracker<Id> {
     /// True when encoding the next op without a barrier first would let a
     /// concurrent-dispatch-scheduled GPU thread race a still-in-flight one:
     /// RAW (an input was written since the last barrier), WAW (the output
@@ -918,6 +911,28 @@ fn resolve_hazard_inputs(
                 .ok_or(MetalError::UnresolvedHazardOperand { node: operand })
         })
         .collect()
+}
+
+/// The exact per-op hazard step [`execute_plan_with_placements`]'s loop
+/// runs: check, barrier-and-reset only on a hazard, then always record —
+/// factored out so the tests drive THIS function instead of a hand-written
+/// mirror of the loop body that could silently drift from it. `output` is
+/// the identity of the buffer this op is about to write, already resolved
+/// (placement -> arena slot -> fresh allocation) by the caller before this
+/// runs, since every bound op writes exactly one device buffer. Returns
+/// whether the caller must emit a barrier before encoding this op.
+#[cfg(feature = "metal-concurrent-dispatch")]
+fn hazard_step<Id: Eq + core::hash::Hash + Copy>(
+    tracker: &mut HazardTracker<Id>,
+    inputs: &[Id],
+    output: Id,
+) -> bool {
+    let needs_barrier = tracker.needs_barrier(inputs, Some(output));
+    if needs_barrier {
+        tracker.reset();
+    }
+    tracker.record(inputs, Some(output));
+    needs_barrier
 }
 
 /// [`execute_plan`], plus the ability to route one or more nodes' outputs
@@ -1165,7 +1180,7 @@ pub fn execute_plan_with_placements(
             log: "command buffer refused to hand out a concurrent compute encoder".to_string(),
         })?;
     #[cfg(feature = "metal-concurrent-dispatch")]
-    let mut hazards: HazardTracker<*const ProtocolObject<dyn MTLBuffer>> = HazardTracker::default();
+    let mut hazards: HazardTracker<*const ProtocolObject<dyn MTLBuffer>> = HazardTracker::new();
 
     // `PROXIMA_PLACEMENT_POSITION_DUMP` -- diagnostic-only, `instrument`-gated,
     // default-off, same convention as `PROXIMA_METAL_OP_PROFILE_STEP`
@@ -1250,13 +1265,10 @@ pub fn execute_plan_with_placements(
             #[cfg(feature = "metal-concurrent-dispatch")]
             let hazard_output = Retained::as_ptr(&resolved_output.0);
             #[cfg(feature = "metal-concurrent-dispatch")]
-            if hazards.needs_barrier(&hazard_inputs, Some(hazard_output)) {
+            if hazard_step(&mut hazards, &hazard_inputs, hazard_output) {
                 encoder.memoryBarrierWithScope(MTLBarrierScope::Buffers);
-                hazards.reset();
                 counter!(BARRIERS_EMITTED, 1);
             }
-            #[cfg(feature = "metal-concurrent-dispatch")]
-            hazards.record(&hazard_inputs, Some(hazard_output));
             #[cfg(feature = "metal-concurrent-dispatch")]
             let placement = Some((&resolved_output.0, resolved_output.1));
             let fault = encode_op(
@@ -4874,35 +4886,32 @@ mod arena_tests {
 mod hazard_tracker_tests {
     use std::collections::BTreeMap;
 
-    use super::{DeviceBuffer, HazardTracker, MetalError, NodeId, resolve_hazard_inputs};
+    use super::{DeviceBuffer, HazardTracker, MetalError, NodeId, hazard_step, resolve_hazard_inputs};
 
     /// `a -> b`, `a -> c` (independent, both only read `a`), then `b, c ->
     /// d` -- the shape this whole feature exists for (Q/K/V from one normed
     /// input, then a later op that needs all three). `b` and `c` share no
     /// hazard with each other (neither reads nor writes the other), so
     /// encoding `c` right after `b` must NOT barrier; `d` reads both `b` and
-    /// `c`, both written since the last barrier, so encoding `d` MUST.
+    /// `c`, both written since the last barrier, so encoding `d` MUST. Driven
+    /// through [`hazard_step`] -- the exact function
+    /// [`execute_plan_with_placements`]'s own loop calls -- rather than a
+    /// hand-rolled mirror of it.
     #[test]
     fn independent_producers_share_no_barrier_but_their_joint_consumer_does() {
-        let mut hazards: HazardTracker<&str> = HazardTracker::default();
-        let mut barriers = 0;
+        let mut hazards: HazardTracker<&str> = HazardTracker::new();
 
         // encode `b = f(a)`: `a` is a fresh input, never written -> no hazard.
-        assert!(!hazards.needs_barrier(&["a"], Some("b")));
-        hazards.record(&["a"], Some("b"));
+        assert!(!hazard_step(&mut hazards, &["a"], "b"));
 
         // encode `c = g(a)`: `a` was only READ (by `b`'s own encode), never
         // WRITTEN, and `c` is a fresh output nothing has touched -> no hazard.
-        assert!(!hazards.needs_barrier(&["a"], Some("c")));
-        hazards.record(&["a"], Some("c"));
+        assert!(!hazard_step(&mut hazards, &["a"], "c"));
 
         // encode `d = h(b, c)`: both inputs were WRITTEN since the last
         // barrier (by the two steps above) -> a barrier is required.
-        assert!(hazards.needs_barrier(&["b", "c"], Some("d")));
-        encode_with_barrier_bookkeeping(&mut hazards, &mut barriers, &["b", "c"], Some("d"));
-
-        assert_eq!(
-            barriers, 1,
+        assert!(
+            hazard_step(&mut hazards, &["b", "c"], "d"),
             "exactly one barrier is required, immediately before encoding d"
         );
     }
@@ -4917,39 +4926,72 @@ mod hazard_tracker_tests {
     /// with `p`.
     #[test]
     fn arena_slot_reuse_after_a_read_emits_a_war_barrier() {
-        let mut hazards: HazardTracker<&str> = HazardTracker::default();
-        let mut barriers = 0;
+        let mut hazards: HazardTracker<&str> = HazardTracker::new();
 
         // encode `p`, which reads `slot0` (some earlier op's live output).
-        assert!(!hazards.needs_barrier(&["slot0"], Some("p_out")));
-        hazards.record(&["slot0"], Some("p_out"));
+        assert!(!hazard_step(&mut hazards, &["slot0"], "p_out"));
 
         // encode `q`, whose output the arena has placed into `slot0` itself
         // -- the exact retired-slot-reuse shape `BufferArena::assign_slot`
         // produces. `q` has no operand overlap with `p` at all; the hazard
         // is purely WAR on the output identity.
         assert!(
-            hazards.needs_barrier(&[], Some("slot0")),
+            hazard_step(&mut hazards, &[], "slot0"),
             "writing into a buffer read since the last barrier must be flagged WAR"
         );
-        encode_with_barrier_bookkeeping(&mut hazards, &mut barriers, &[], Some("slot0"));
-
-        assert_eq!(barriers, 1, "the WAR reuse must emit exactly one barrier");
     }
 
-    /// Mirrors the real driver's loop body: check, barrier-and-reset only on
-    /// a hazard, then always record.
-    fn encode_with_barrier_bookkeeping<Id: Eq + core::hash::Hash + Copy>(
-        hazards: &mut HazardTracker<Id>,
-        barriers: &mut u32,
-        inputs: &[Id],
-        output: Option<Id>,
-    ) {
-        if hazards.needs_barrier(inputs, output) {
-            hazards.reset();
-            *barriers += 1;
+    /// Mirrors [`execute_plan_with_placements`]'s own output-identity
+    /// resolution (placement -> arena slot -> fresh allocation) with plain
+    /// `usize` identities instead of a real Metal buffer, so a 4-op program
+    /// can be driven through [`hazard_step`] end to end with no device.
+    fn resolve_test_output(
+        node: usize,
+        placement_table: &BTreeMap<usize, usize>,
+        next_fresh: &mut usize,
+    ) -> usize {
+        if let Some(identity) = placement_table.get(&node) {
+            return *identity;
         }
-        hazards.record(inputs, output);
+        let fresh = *next_fresh;
+        *next_fresh += 1;
+        fresh
+    }
+
+    /// The exact production sequence for a 4-op program: op0 is a plain
+    /// fresh allocation with no operands, op1 does a RAW read of op0's own
+    /// output, op2 is an arena WAR reuse of op0's now-retired identity, and
+    /// op3 is a second fresh allocation with no overlap with anything the
+    /// tracker still holds (op2's own barrier reset it). Barriers must fire
+    /// immediately before op1 (RAW) and op2 (WAR), and nowhere else.
+    #[test]
+    fn production_sequence_barriers_before_the_raw_and_war_ops_only() {
+        let mut hazards: HazardTracker<usize> = HazardTracker::new();
+        let mut next_fresh = 100;
+        let output0 = resolve_test_output(0, &BTreeMap::new(), &mut next_fresh);
+        // op2's own output is arena-placed into op0's retired identity --
+        // `arena_slot_reuse_after_a_read_emits_a_war_barrier` covers that
+        // shape in isolation; here it sits inside a longer program alongside
+        // a RAW hazard (op1) and a genuinely fresh allocation (op3).
+        let placement_table = BTreeMap::from([(2, output0)]);
+
+        let barrier0 = hazard_step(&mut hazards, &[], output0);
+
+        let output1 = resolve_test_output(1, &placement_table, &mut next_fresh);
+        let barrier1 = hazard_step(&mut hazards, &[output0], output1);
+
+        let output2 = resolve_test_output(2, &placement_table, &mut next_fresh);
+        assert_eq!(output2, output0, "degenerate gate: op2 must reuse op0's own identity");
+        let barrier2 = hazard_step(&mut hazards, &[], output2);
+
+        let output3 = resolve_test_output(3, &placement_table, &mut next_fresh);
+        let barrier3 = hazard_step(&mut hazards, &[], output3);
+
+        assert_eq!(
+            [barrier0, barrier1, barrier2, barrier3],
+            [false, true, true, false],
+            "barriers fire before op1 (RAW) and op2 (WAR), never before op0 or op3"
+        );
     }
 
     /// An operand missing from `device_buffers` is a driver bug -- the
@@ -4976,7 +5018,7 @@ mod hazard_tracker_tests {
     /// address used to be.
     #[test]
     fn forgetting_a_retired_identity_clears_it_from_both_sets() {
-        let mut hazards: HazardTracker<&str> = HazardTracker::default();
+        let mut hazards: HazardTracker<&str> = HazardTracker::new();
         hazards.record(&["read_only"], Some("written_and_read"));
         hazards.record(&["written_and_read"], Some("also_written"));
 
