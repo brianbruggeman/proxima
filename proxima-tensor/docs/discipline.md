@@ -22100,6 +22100,17 @@ cd <wt> && CARGO_TARGET_DIR=./target CARGO_TERM_COLOR=never PROXIMA_METAL_MATH_M
 ```
 against the same worktree detached one commit earlier at `989ab131f3d0fcae855da15d0b062f8f02185f43`.
 
+**Correction (2026-09-05, one-math-mode-knob fix).** The oracle test
+(`bind::real_openchat_file::runs_the_cached_decode_loop_on_the_metal_backend_and_reports_the_plan_cache`)
+only ever read `PROXIMA_MATH_MODE`; this bisect's `run-step.sh` set
+`PROXIMA_METAL_MATH_MODE`, a second env name a since-deleted `generate.rs` helper
+read (`math_mode_from_env`, removed in `fix(interop): one math-mode knob, read at
+the test edge`). This bisect's own table is unaffected: every commit it walked
+(`ba38c00`..`2d3008c`) is **before** `6c30473`, the commit that introduced the
+knob at all -- before it, `Safe` was hard-coded in `ServingConfig::default()`
+with no env read of either name, so every row in this table's `Safe` column ran
+`Safe` exactly as recorded, and the bisect result (first bad `e142f51`) stands.
+
 ### Changelog
 | Date | Change | Δ vs prior | CoV / runs | Host loadout |
 | --- | --- | --- | --- | --- |
@@ -22177,6 +22188,21 @@ the residual is real and unclosed.
 
 **Loadout.** pgrep quiet-gate (`llama-bench\|llama-cli\|proxima_model_i\|device_streamin\|matvec_roofline\|omega-\|^cargo$\|^rustc$\|nextest\|cargo-nextest`)
 empty before every timed run; single measurer, one session, one box.
+
+**Correction (2026-09-05, one-math-mode-knob fix).** This row's M-S and B-S arms
+set `PROXIMA_METAL_MATH_MODE=safe`, which the oracle test never read -- it only
+ever read `PROXIMA_MATH_MODE` (`bind.rs`'s own test-edge parse). `generate.rs`'s
+`supported_serving_config` read the other name into a `OnceLock` and was the
+only place that name did anything; it has been deleted
+(`fix(interop): one math-mode knob, read at the test edge`), so `math_mode` in
+this row's arms was `ServingConfig::default()`'s own `Relaxed` in all four
+arms regardless of label. The valid content of this row is therefore the
+**M-R vs B-R** comparison only (both genuinely `Relaxed`, the shipped default):
+u16 word loads (M-R, 28.249) beat the byte-load revert (B-R, 28.789) by 0.540
+ms/token (1.9%) -- kept. "M-S"/"B-S" carry no Safe-mode information; main's
+`Safe` number of record remains ROW 298's 34.157 ms/token, unrevised by this
+row. Every number above is left as originally recorded; only this arm's
+env-name mislabeling is corrected.
 
 ### Changelog
 | Date | Change | Δ vs prior | CoV / runs | Host loadout |
