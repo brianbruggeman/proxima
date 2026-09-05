@@ -1222,30 +1222,7 @@ pub(crate) fn supported_serving_config(gpu_layers: i32) -> ServingConfig<'static
         ubatch_size: 0,
         gpu_layers,
         reasoning_budget: 0,
-        #[cfg(all(feature = "metal", target_os = "macos"))]
-        math_mode: math_mode_from_env(),
         ..ServingConfig::default()
-    }
-}
-
-/// `PROXIMA_METAL_MATH_MODE=safe|relaxed`, read once per process into a
-/// `OnceLock`, the identical idiom `omega::backend::Engine::from_env` uses
-/// for `OMEGA_BACKEND` and `proxima_tensor::cpu::matmul_worker_count` uses
-/// for `PROXIMA_MATMUL_WORKERS` -- a per-call `std::env::var` would read
-/// the same immutable-for-the-process value on every `supported_serving_config`
-/// call for no reason. Unset (the production default) keeps
-/// `ServingConfig::default()`'s own `Relaxed` (`proxima-tensor/docs/
-/// discipline.md` ROW 296/297's measured winner); the quality harness
-/// (`quality::real_openchat_file::metal_vs_cpu_reports_real_drift`) is the
-/// one caller that sets this today, to bake off `Safe` against `Relaxed`
-/// on the SAME decode program without a second code path.
-#[cfg(all(feature = "metal", target_os = "macos"))]
-fn math_mode_from_env() -> omega::MathMode {
-    static RAW: std::sync::OnceLock<String> = std::sync::OnceLock::new();
-    let raw = RAW.get_or_init(|| std::env::var("PROXIMA_METAL_MATH_MODE").unwrap_or_default());
-    match raw.as_str() {
-        "safe" => omega::MathMode::Safe,
-        _ => omega::MathMode::Relaxed,
     }
 }
 
