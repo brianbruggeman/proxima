@@ -171,3 +171,41 @@ group = 8
 # perf-only regression -- `upload_uniforms` re-uploads on a miss).
 # Overridable per-build via `OMEGA_SPANS_UNIFORM_CACHE_ENTRIES`.
 uniform_cache_entries = 4096
+
+[output_pool]
+# per-`(bucket, dtype)` cap on retained buffers in `metal::OUTPUT_BUFFER_POOL`
+# (`feature = "metal-buffer-pool"`-only) -- see sized::OUTPUT_POOL_MAX_PER_BUCKET
+# and `metal.rs`'s own doc on the const this replaces. A safety net against a
+# pathological program shape (many parallel same-size branches); steady
+# decode never approaches it. Overridable per-build via
+# `OMEGA_OUTPUT_POOL_MAX_PER_BUCKET`.
+max_per_bucket = 8
+
+[arena]
+# CARD 6.5's memory gate (MG-3): the plan-owned transient-buffer arena's
+# cap, in bytes (`feature = "metal-plan-stable-buffers"`-only) -- see
+# sized::ARENA_TRANSIENT_CAP and `metal.rs`'s `build_buffer_arena`, which
+# prints its own peak against this before returning; a peak above it is
+# this card's own kill condition. Overridable per-build via
+# `OMEGA_ARENA_TRANSIENT_CAP`.
+transient_cap = 172_812_125
+
+[wgsl]
+# threads per workgroup every v1 WGSL kernel dispatches with -- see
+# sized::WORKGROUP_SIZE and `wgsl.rs`'s own doc: any positive value is
+# legal WGSL, 64 matches `crate::metal`'s own occupancy-driven default
+# width for the non-cooperative (serial) kernels this module emits
+# exclusively. Always emitted -- `wgsl.rs` is not feature-gated, unlike the
+# `wgpu-backend`-only driver that consumes its output.
+# Overridable per-build via `OMEGA_WGSL_WORKGROUP_SIZE`.
+workgroup_size = 64
+
+[packed_row_nsg]
+# `tiled_gemm_threadgroup_width`'s nsg multiplier for the packed
+# row-blocked path, shared by `metal-packed-row-nsg2` and
+# `metal-q4k-ggml-port` (either feature emits this; both want the
+# identical value) -- see sized::PACKED_ROW_NSG and `msl.rs`'s
+# `packed_row_nsg_factor`. ggml's own `N_SG_Q4_K` is 2; must be a power of
+# two and `<= 32` for the same reason `packed_row_block.simdgroups` is.
+# Overridable per-build via `OMEGA_PACKED_ROW_NSG_WIDTH`.
+width = 2
