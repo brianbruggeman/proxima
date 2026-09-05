@@ -116,16 +116,38 @@ pub fn encode_with_bos_eos(
 /// Concatenates every token id's raw bytes ([`decode_ids`]) and interprets
 /// the result as UTF-8.
 ///
+/// Byte-level BPE has no obligation to keep a multibyte character inside
+/// one token -- a merge can land the split anywhere, and a greedy decode
+/// loop that stops at its own token budget can legitimately end mid
+/// character, one or two continuation bytes short of complete. That is
+/// not corruption: [`core::str::Utf8Error::error_len`] returning `None`
+/// means every byte up to `valid_up_to` is proven valid and the tail is
+/// merely unfinished, versus `Some(_)` meaning a byte in the buffer is
+/// never legal at that position. Only the latter is a real decode
+/// failure; the former keeps the valid prefix and marks the unfinished
+/// tail with U+FFFD, the same "flag, don't drop" contract this module's
+/// error type promises everywhere else.
+///
 /// # Errors
 ///
 /// [`TokenizerError::TokenIdOutOfRange`] for an id absent from `vocab`;
-/// [`TokenizerError::InvalidUtf8`] if the concatenated bytes are not
-/// valid UTF-8 (possible when `ids` did not come from this crate's own
-/// [`encode`] -- an arbitrary id sequence is not guaranteed to land on
-/// UTF-8 boundaries).
+/// [`TokenizerError::InvalidUtf8`] if the concatenated bytes contain a
+/// byte that is invalid UTF-8 at its position (not merely an incomplete
+/// trailing sequence) -- possible when `ids` did not come from this
+/// crate's own [`encode`].
 pub fn decode(ids: &[u32], vocab: &Vocab) -> Result<String, TokenizerError> {
     let bytes = decode_ids(ids, vocab)?;
-    let text = String::from_utf8(bytes).map_err(|_| TokenizerError::InvalidUtf8)?;
+    let text = match core::str::from_utf8(&bytes) {
+        Ok(text) => String::from(text),
+        Err(error) if error.error_len().is_none() => {
+            let valid_prefix = core::str::from_utf8(&bytes[..error.valid_up_to()])
+                .map_err(|_| TokenizerError::InvalidUtf8)?;
+            let mut text = String::from(valid_prefix);
+            text.push('\u{FFFD}');
+            text
+        }
+        Err(_) => return Err(TokenizerError::InvalidUtf8),
+    };
     if vocab.is_unigram() {
         return Ok(unigram::unescape(&text));
     }

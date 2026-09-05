@@ -230,6 +230,43 @@ fn decoding_bytes_that_are_not_valid_utf8_is_a_typed_error_not_a_panic() {
     assert_eq!(error, TokenizerError::InvalidUtf8);
 }
 
+#[test]
+fn decoding_a_truncated_multibyte_character_at_the_end_recovers_the_valid_prefix() {
+    let vocab = synthetic_vocab();
+    // "—" (U+2014 EM DASH) is a 3-byte UTF-8 sequence, 0xE2 0x80 0x94.
+    // Byte-level BPE emits one base-byte token per raw byte here (no merge
+    // rule joins them in `synthetic_vocab`), so a real greedy decode that
+    // hits its `max_tokens` budget exactly after the sequence's first two
+    // bytes leaves the generated id list ending on those two ids with no
+    // completing third byte -- this is not corruption, it is the model
+    // legitimately mid-character when the caller stopped asking for more.
+    let em_dash_lead_byte_id = 0xE2u32;
+    let em_dash_mid_byte_id = 0x80u32;
+    let em_dash_final_byte_id = 0x94u32;
+
+    let prefix_ids = encode("today, and its effects", &vocab).expect("encodes prefix");
+    let mut truncated_ids = prefix_ids.clone();
+    truncated_ids.push(em_dash_lead_byte_id);
+    truncated_ids.push(em_dash_mid_byte_id);
+
+    let decoded = decode(&truncated_ids, &vocab)
+        .expect("an incomplete trailing multibyte sequence must not fail the whole decode");
+    assert_eq!(
+        decoded, "today, and its effects\u{FFFD}",
+        "valid prefix must survive, with the incomplete tail marked by U+FFFD"
+    );
+
+    // Proves the recovery is specific to "ran out of bytes", not a general
+    // relaxation: completing the sequence with its real third byte must
+    // still decode to the exact reference character, not a replacement.
+    let mut complete_ids = prefix_ids;
+    complete_ids.push(em_dash_lead_byte_id);
+    complete_ids.push(em_dash_mid_byte_id);
+    complete_ids.push(em_dash_final_byte_id);
+    let complete = decode(&complete_ids, &vocab).expect("complete sequence decodes");
+    assert_eq!(complete, "today, and its effects\u{2014}");
+}
+
 #[cfg(feature = "gguf")]
 mod real_fixture {
     use std::path::Path;
