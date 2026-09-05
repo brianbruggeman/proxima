@@ -537,6 +537,74 @@ a third engine.
 (n-gram prompt-lookup, `test/draft-acceptance-harness`): mean k' = 1.36 at k=4 and 1.49 at k=8, both
 below the design's own `A < 1.5` multi-token kill criterion (`design-final.md` §D.4, §D.4a, card D2).
 
+## 1.5 Fourth wave (2026-09-04, late): correctness, shape, and codecs landed on main
+
+`4653a40` (end of §1.4) to `02dcafe` (current `main`), plus the audit-fix branches
+(`fix/hazard-identity`, `refactor/plan-cache-and-arena-scope`) that landed just before `4653a40`
+and never got their own writeup here. Every row below is one or more commits behind the same five
+gates `land/*` runs for every item; `discipline.md` row numbers are cited where a formal row
+exists, a commit sha otherwise.
+
+| commit | change | what it fixed or removed | evidence |
+|---|---|---|---|
+| `bd4b20b` (+`4e5e9ea`,`3b4192c`,`73b66c6`) | hazard identity | `execute_plan_with_placements` resolved a fresh allocation's hazard identity twice, independently, once before `encode_op` (saw no buffer yet) and once after (saw the real pointer) -- a WAW/WAR against an address Metal reuses for that allocation could never be caught; a missing operand was silently `filter_map`ped out of the hazard set instead of erroring; a retired buffer's identity outlived it in the tracker (ABA on reused addresses); the test suite drove a hand-written copy of the loop instead of the real per-op step | `omega/src/metal.rs:888-931,1200-1236,1281-1290` (audit findings 3/4/26, `plan.md:452-453,475`) |
+| `ebae49c` | omega tiers | `--no-default-features --features cuda` failed to resolve `alloc::string::String` (no floor of its own); `std` didn't pull `proxima-tensor/std`; `execute_plan_named`/`mark_resident` had no arm at all with every backend feature off, relying on unreachable-in-practice rather than a compile-time never-pattern | `omega/Cargo.toml`, `omega/src/backend.rs:255-440` |
+| `f47d15e` (+`fb7abbf`,`0071e74`) | backend surface | `Backend::from_env` silently fell back to the default backend on an unrecognized `OMEGA_BACKEND` name instead of erroring; `mark_resident`'s `resident_names` parameter was permanently underscore-prefixed and effectively unused reasoning, when the metal arm genuinely reads it | `omega/src/backend.rs:107-145,429-446` |
+| `a6deb26` (+`0bb3b0d`,`168c162`) | plan-cache + lazy arena | three decode paths each resolved the one-entry plan cache independently, with an `InteropError::PlanCacheEntryVanished` variant modeling an "impossible" race that a single shared resolve makes moot -- deleted; `BufferArena`/`PlanUniforms` were built eagerly by every `plan()` call even though the ordinary unplaced executors never read them -- now lazy `OnceCell` fields, built on first placement read | `proxima-model-interop/src/generate.rs`, `omega/src/metal.rs:337-350` (audit findings 11-13/20, `plan.md:460-462,469`) |
+| `bf4f13e` | alloc-count consolidation | one counting allocator (`proxima-test::alloc_count`) replaces a hand-rolled copy in every crate that gated an allocation-budget test, 17 files touched | `proxima-test/src/alloc_count.rs` |
+| `6fa9488` (+`f70142e`) | cache-key width, ROW 290 | `kernel_cache_key` keyed a cooperative reduce on every field `emit`'s source depends on except `tiled_gemm_threadgroup_width`, which is a function of the concrete extent, not structure; two reduces sharing every other field could collide on one compiled pipeline, and a narrow dispatch served the wide kernel's stale tail-fold reading uninitialized threadgroup memory -- measured **1.46e32** against the cpu oracle's -1.94, pre-fix | `discipline.md:21245-21299` |
+| `40149c2` (+`e9d7238`,`cdb3762`) | correctness A/B/C | RMS epsilon was hardcoded `1e-5`, ignoring checkpoint metadata (qwen35/lfm2 carry their own); `cached_len_before` was read after the increment on both loops; the arena cap overflow printed `"MG-3 KILL"` and returned `Ok` instead of erroring | `proxima-model-interop/src/{bind,generate,hf_bind,hf_config}.rs`, `omega/src/metal.rs` (audit findings 8/14/17, `plan.md:457,463,466`) |
+| `db153d9` | tokenizer split-UTF-8 | byte-level token decode panicked (`Tokenizer(InvalidUtf8)`) mid-decode when a multibyte character split across two tokens; surfaced by ROW 292's own prose prompt before the fix landed, which is why that row runs an ASCII substitute prompt instead | `proxima-tokenizer/src/pipe.rs`, `discipline.md:21401` |
+| `8da22d2` (+`562019c`) | ceiling harness, ROW 291 | new `device_streaming_ceiling` harness measures the physical read-bandwidth ceiling independent of any kernel's compute cost, swept over 3 buffer sources x 2 sizes x 3 grid shapes; best ceiling **237.79-264.29 GB/s** (range, not point estimate -- 35 of 36 cells over the 5% CoV trust line on a 30-47-builder-process host), floor **15.774-17.532 ms** at 4.169 GB/token | `discipline.md:21301-21393` |
+| `ce05362` + acceptance harness ROW 292 (`7dab33d`, +`4848ab7`,`7b7656b`,`e59a81d`) | draft/verify | n-gram prompt-lookup drafter (`proxima_tokenizer::draft::draft_ngram_lookup`) and batched greedy verification landed; the design's own **assumed** `k' = 2.18` at `k=4` (never measured, `design-AB.md:138-140`) is replaced by a real number off real greedy-decoded streams: mean **k' = 1.3609** (ngram 2-4) / **1.2848** (ngram 3-6) at `k=4` -- both below CARD D2's own `k' < 1.5` kill criterion; code prompts alone clear 1.9344, prose sits at 1.00-1.02 across every sweep cell (an n-gram drafter is definitionally blind to non-repeating text) | `discipline.md:21395-21427` |
+| `fa16f3f` (+`67ed243`,`9b7f16d`) | KV bucket as config field | `kv_bucket_tokens` moved out of the IR crate into `ServingConfig` as an unconditional runtime field (default 32, no longer gated by the `kv-capacity-bucket` cargo feature); the KV buffer tail zero-fill at allocation stayed feature-gated after that move, so a build without the now-inert feature still bucketed at runtime but skipped zeroing the unwritten tail rows -- undefined `MTLBuffer` memory a masked-attention read could reach | `proxima-model-interop/src/{bind,generate}.rs` |
+| `d52db0c` (+`7bdc972`,`506cb99`) | hybrid arms, ROW 293 | CPU-only (1/4/8-thread) and concurrent CPU+GPU (50/50, 60/40, 70/30 split) arms added to the ROW 291 harness; load average 149 on a 10-core host, and the 3-term courtesy `pgrep` gate missed a live decode test because macOS truncates process names to 15 characters -- every new cell void for magnitude except the GPU-only re-measure, **312.63 GB/s** (CoV 4.58%) | `discipline.md:21428-21458` |
+| `5e63a4d` (+`80b958d`,`a049fab`,`8d334ee`) | Q3_K decoder + CPU | `Q3_K` block decoder and CPU reduce-path matmul body, parity checked against llama.cpp on the real openchat checkpoint | `proxima-gguf/src/quant/`, `proxima-tensor/src/cpu.rs` |
+| `ba38c00` | two engines | `Backend`'s seven variants collapse to `Engine::{Cpu, Gpu}` plus a `GpuDriver` resolved once per target; no `Backend::Mixed` -- mixing is a placement field on the scheduled op, not a third engine (design-of-record, §1.4) | `omega/src/{backend,metal,wgpu_driver}.rs` |
+| `51b3c41` (five commits: `989ab13`,`e142f51`,`0aea0d0`,`32dba9d`,`51b3c41`) | matvec addressing | packed-row addressing hoisted out of the block loop (pointer increment per iteration instead of a 64-bit recompute, matching ggml's own row/`y4` pointer shape); q4_K/q5_K weight words loaded as native `u16`; q6_K gains a pair-dot body; the paired-nibble body is now chosen by codec layout, not a cargo feature. One of these (stride-free activation reads) fixed a real correctness bug: the plain-product `y4[i]`/`y4[i+32]`/... reads used pure element offsets regardless of `other_stride`, correct only by accident for callers whose activation happened to be contiguous | `omega/src/msl.rs:3337-3620` |
+| `7af64c1` (+`3a5fad4`,`63b711d`,`1b4f833`,`e92c6ea`,`416cb86`) | s-fold folded | activation-row loop folded into the packed-row body (fold `s` activation rows per streamed weight row, nr1); `metal-q5k-pair-dot` no longer excluded from the s=1 byte-identity gate; s=1 fixture refreshed after the addressing landings above | `omega/src/msl.rs` |
+| `02dcafe` (+`99be472`,`78d4ee0`,`3c684b0`,`4cc23c2`,`bd81e4f`) | telemetry hygiene + attribution | `println!`/`eprintln!` in omega/interop library code replaced with telemetry events (audit finding 16); `kind_filter` tag cached as a `&'static str`; a console-drain race that dropped test telemetry fixed; the test telemetry recorder pumped to stop ring-buffer overflow; the ported ggml Q4_K kernel attributed in `THIRD_PARTY.md` (audit finding 18) | `omega/src/metal.rs`, `proxima-model-interop/src/*` |
+| the four leftover items (`0e85a24`, +`e197a4e`,`1cdd9a5`,`af21d21`) | unrelated cleanup, not campaign-critical | Q4_K int8-dot test coverage at real forward `out_dim`; a cold-read latency probe that falsifies single-shape rotation as the width-tile gap's cause (cold lands within 0.90-1.22x of warm under a quiet host); `onnx_reference`'s torch/ORT incumbent arms isolated into separate subprocesses after process order was found contaminating the reading (torch 1.76x slower measured in isolation than after ORT in the same process -- ROW 195's torch cell retracted); a cut-boundary submit-floor probe example for omega | `proxima-tensor/src/cpu.rs`, `scripts/onnx_reference/`, `omega/examples/cut_boundary_submit_floor.rs` |
+| `0796e90`, `4653a40` | design of record + k' amendment | §1.4, above: design-AB2 unanimous across both tournament rounds; `Backend` collapses to `Engine::{Cpu, Gpu}`; draft acceptance measured, not assumed | §1.4 |
+| `35a139f` | feature-matrix gate | `scripts/omega-feature-matrix.sh` (243 lines) plus a CI job sweep every `metal-*` flag combination -- the mechanism that caught the ggml-port/Q5_K misroute below (audit finding 27's "no matrix gate" residual) | `.github/workflows/proxima-tensor.yml`, `scripts/omega-feature-matrix.sh` |
+| `837011c` (+`7237518`) | scoreboard correction, ROW 288 | ROW 286's steps-1..7 mean (33.032 ms/token, 1.8935x) blended two plan-miss tokens (steps 1-2, `prepare_calls=1`) into a number compared against `llama-bench`'s `tg32`, which never pays an equivalent warmup -- corrected to steady state (steps 3..7, `plan_hits` nonzero and rising): **28.82 ms/token** (r3) / **28.542** (mean of 3 rounds) = **1.652x** / **1.636x** llama.cpp | `discipline.md:21105-21196` |
+
+**Landing now** (in-flight sibling worktrees at write time, not yet on `main`): reduce epilogue
+fusion flips default-on in `metal` -- an elementwise consumer whose iteration space equals its
+reduce producer's output space, sole-consuming it, absorbs into the reduce's own epilogue;
+`emit_calls` 616 -> **520**/step, `barriers` 419 -> **323**/step, `generated_text` identical,
+parity `relative=5.29e-7` at kv-capacity-bucket paddings 0/1/5 (`land/epilogue` @ `97a5f60`,
+would-be `discipline.md` ROW 294). The feature-matrix gate above found a real red cell:
+`metal-q4k-ggml-port` silently routed every packed-row Q5_K matmul through the Q4_K-shaped body
+too (`plain_product` alone is not codec-specific) -- `relative=0.977`, essentially uncorrelated
+output, since the ggml-port body never reads Q5_K's `qh` high-bit plane; fixed by gating the port
+on `PackedCodec::Q4K` explicitly (`land/matrixred` @ `fcc21ea`). A Q3_K Metal packed-row body
+lands alongside the already-merged CPU path (`land/q3kmetal` @ `9922475`); per-op telemetry events
+moving from `debug!` to `trace!` is queued (`fix/per-op-events-at-trace`, no commits yet as of
+this write, tip == `main`).
+
+**Measured and void** (recorded, not trusted as a point estimate): ROW 289's thread-envelope
+sweep and ROW 293's hybrid CPU+GPU arms both ran on a loud box (load 131 and 149) and are reported
+as directional, not magnitude; the roofline ladder's first cut (one dispatch per timed command
+buffer) measured every arm as fixed-cost-and-scheduling-noise-dominated (33 MB of Q4_K weight at
+production's own ~180 GB/s ceiling is ~0.18 ms of GPU time, below the ~0.5 ms empty-dispatch fixed
+cost ROW 289 itself measured) -- the harness now batches every real, distinct `ffn_up`/`ffn_gate`
+tensor across all 32 layers into one timed command buffer (`perf/matvec-roofline-ladder` @
+`7acdd27`), quiet re-run pending.
+
+**The board today.** Steady state **28.54 ms/token** (mean of 3 rounds) = **1.64x** llama.cpp
+(ROW 288, `discipline.md:21105-21196`); `device_allocated_bytes` **4,152,442,880** (4.15 GB), RSS
+**52.5-53.6 MB** (`discipline.md:20964-20992`, ROW 286's own steady-state table, unchanged by
+ROW 288's window correction). GPU streaming ceiling **237.79-264.29 GB/s** on a loud box (ROW 291,
+`discipline.md:21301-21393`) / **312.63 GB/s** on the one CoV-trusted cell of a second loud-box run
+(ROW 293, `discipline.md:21438`). Matvec alone, in-buffer ablation: **179.36 GB/s**
+(`discipline.md:21045`). Owner target "5x llama" = 3.5 ms/token (§1.3.1); amortized across a
+verify pass covering `k'` tokens, the required device bandwidth is `(4.169 GB/token) / (3.5 ms *
+k')` -- at the two measured `k'` values for `k=4` (ROW 292, `discipline.md:21395-21427`), that is
+**927 GB/s** (`k'=1.2848`, ngram 3-6) to **876 GB/s** (`k'=1.3609`, ngram 2-4): DERIVED, above
+every ceiling measured on this host so far, and the reason draft/verify alone does not close the
+gap to the owner's stated target at this drafter's measured acceptance rate.
+
 ## 2. The diagnosis, built formally (V0-V8)
 
 The default is no verdict. What follows is a proposal built by the admissibility procedure so
