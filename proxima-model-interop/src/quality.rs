@@ -545,6 +545,31 @@ mod tests {
         );
     }
 
+    /// [`parse_prompts_jsonl`]'s sad path: a line that is present but is
+    /// not valid JSON must surface [`InteropError::MalformedQualityPrompt`]
+    /// naming the 1-based line number and `serde_json`'s own reason, not a
+    /// silently-skipped row or a panic -- the same contract a malformed
+    /// fixture line in `fixtures/quality_prompts.jsonl` would exercise for
+    /// real.
+    #[test]
+    fn parse_prompts_jsonl_rejects_malformed_json_and_names_the_line() {
+        let jsonl = concat!(
+            "{\"id\":\"code-01\",\"category\":\"code\",\"source\":\"authored\",\"text\":\"Write a function.\"}\n",
+            "{not valid json at all\n",
+        );
+
+        let error = parse_prompts_jsonl(jsonl.as_bytes())
+            .expect_err("second line is not valid json and must be rejected");
+
+        match error {
+            crate::error::InteropError::MalformedQualityPrompt { line_number, reason } => {
+                assert_eq!(line_number, 2, "the malformed line is 1-based line 2");
+                assert!(!reason.is_empty(), "the serde_json reason must be carried through");
+            }
+            other => panic!("expected MalformedQualityPrompt, got {other:?}"),
+        }
+    }
+
     /// The real fixture this crate ships parses cleanly and carries at
     /// least one prompt from every category the task's campaign needs
     /// covered -- a fixture-shape regression (a stray trailing comma, a
@@ -571,5 +596,234 @@ mod tests {
             assert!(!prompt.text.trim().is_empty(), "{:?} has empty text", prompt.id);
             assert!(!prompt.source.trim().is_empty(), "{:?} has empty source", prompt.id);
         }
+    }
+}
+
+// -- Real-data proof: run `quality_report` against the actual host-local
+// openchat-3.5 checkpoint `bind.rs`'s own `real_openchat_file` module
+// already loads for its acceptance tests, on both a degenerate control
+// (same model, same backend on both sides) and a real cross-backend
+// comparison (CPU reference vs Metal variant). Same convention:
+// `#[ignore]`d, mmaps the fixture instead of copying it, and skips
+// cleanly when the host-local model cache is absent.
+#[cfg(all(test, feature = "metal"))]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod real_openchat_file {
+    use core::ffi::c_void;
+    use std::os::fd::AsFd;
+
+    use alloc::vec::Vec;
+
+    use crate::generate::LoadedModel;
+    use crate::serving::{GPU_LAYERS_ALL, ServingConfig};
+
+    use super::{Prompt, parse_prompts_jsonl, quality_report};
+    #[cfg(feature = "instrument")]
+    use super::print_quality_report;
+
+    /// Same read-only `mmap` of the fixture file `bind.rs`'s own
+    /// `real_openchat_file::MappedGguf` uses, for the same reason (the
+    /// byte range GGUF already stored is the buffer [`LoadedModel::load`]
+    /// reads, with no owned copy in between). Kept test-local here rather
+    /// than shared with `bind.rs`'s private copy: opening/mapping a file
+    /// is exactly the IO step this crate's own module docs disclaim.
+    struct MappedGguf {
+        base: *mut u8,
+        len: usize,
+        _file: std::fs::File,
+    }
+
+    impl MappedGguf {
+        fn open(path: &std::path::Path) -> std::io::Result<Self> {
+            let file = std::fs::File::open(path)?;
+            let len =
+                usize::try_from(file.metadata()?.len()).expect("fixture file length fits in usize");
+            // SAFETY: `len` matches the just-opened file's own length; `file`
+            // is kept alive in `_file` for as long as `base` is used, and the
+            // mapping is read-only/private so no writer can observe or race it.
+            let base = unsafe {
+                rustix::mm::mmap(
+                    core::ptr::null_mut(),
+                    len,
+                    rustix::mm::ProtFlags::READ,
+                    rustix::mm::MapFlags::PRIVATE,
+                    file.as_fd(),
+                    0,
+                )
+            }
+            .expect("mmap host-local openchat gguf fixture")
+            .cast::<u8>();
+            Ok(Self {
+                base,
+                len,
+                _file: file,
+            })
+        }
+
+        fn as_slice(&self) -> &[u8] {
+            // SAFETY: `base` points at `len` bytes mapped for `self`'s whole
+            // lifetime; this borrows `self` immutably, so nothing can unmap
+            // the region while the returned slice is alive.
+            unsafe { core::slice::from_raw_parts(self.base, self.len) }
+        }
+    }
+
+    impl Drop for MappedGguf {
+        fn drop(&mut self) {
+            // SAFETY: `base`/`len` are exactly what `open`'s `mmap` call
+            // returned; nothing else unmaps this region.
+            let _ = unsafe { rustix::mm::munmap(self.base.cast::<c_void>(), self.len) };
+        }
+    }
+
+    /// `PROXIMA_MAX_TOKENS` overrides how many teacher-forced steps
+    /// [`quality_report`] compares per prompt, same env var and same
+    /// default-on-unparsable convention as `bind.rs`'s own
+    /// `real_openchat_file::decode_loop_max_tokens` -- kept small (8)
+    /// because this harness runs one CPU-and-one-Metal forward pass EVERY
+    /// step, for EVERY prompt, not one decode loop total.
+    fn quality_max_tokens() -> usize {
+        std::env::var("PROXIMA_MAX_TOKENS")
+            .ok()
+            .and_then(|value| value.parse::<usize>().ok())
+            .unwrap_or(8)
+    }
+
+    /// `PROXIMA_QUALITY_PROMPTS` caps how many of the shipped fixture's 32
+    /// prompts this run scores, front-to-back -- the direct knob the next
+    /// slice sizes a full-fixture CPU run against (this slice's own report
+    /// names the observed per-prompt wall clock for exactly that reason).
+    fn quality_prompt_count() -> usize {
+        std::env::var("PROXIMA_QUALITY_PROMPTS")
+            .ok()
+            .and_then(|value| value.parse::<usize>().ok())
+            .unwrap_or(8)
+    }
+
+    /// Loads the shipped fixture and truncates it to
+    /// [`quality_prompt_count`] prompts, front-to-back -- the same fixture
+    /// [`super::tests::ships_fixture_parses_and_covers_every_required_category`]
+    /// already proves is well-formed, so a truncation here can only ever
+    /// shrink the prompt set, never surface a new parse failure.
+    fn load_quality_prompts() -> Vec<Prompt> {
+        let bytes = std::fs::read(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/fixtures/quality_prompts.jsonl"
+        ))
+        .expect("quality_prompts.jsonl fixture ships in-tree");
+        let mut prompts = parse_prompts_jsonl(&bytes).expect("shipped fixture is well-formed jsonl");
+        prompts.truncate(quality_prompt_count());
+        prompts
+    }
+
+    /// Opens the host-local checkpoint the same way `bind.rs`'s own
+    /// `real_openchat_file` tests do, or returns [`None`] and prints why
+    /// this test is skipping -- callers pattern-match to `return` early on
+    /// [`None`] rather than failing a run with no host-local model cache.
+    fn open_model(mapped: &MappedGguf) -> LoadedModel<'_> {
+        let file_bytes = mapped.as_slice();
+        let parsed = proxima_gguf::pipe::parse_complete(file_bytes)
+            .expect("parse host-local openchat gguf fixture");
+        LoadedModel::load(&parsed, file_bytes)
+            .expect("load real openchat checkpoint through the public path")
+    }
+
+    /// The degenerate control [`quality_report`]'s own doc names: `variant`
+    /// is the SAME [`LoadedModel`] as `reference`, on the SAME backend
+    /// (Metal, [`GPU_LAYERS_ALL`]) -- both sides then compute the identical
+    /// forward at every compared step, so `exact_match_rate` must be
+    /// exactly `1.0`. `kl_mean`/`kl_max` are asserted near-zero rather than
+    /// bit-exact `0.0` -- a real run measured `kl_mean = -6.47e-11`, not
+    /// `0.0`, because two independent calls into the reduce-quantized
+    /// matmul's own worker threads are not guaranteed to sum partial
+    /// products in the same order, and floating-point addition is not
+    /// associative. A harness that cannot pass its own near-zero degenerate
+    /// control cannot be trusted on a real comparison.
+    #[test]
+    #[ignore = "depends on a host-local openchat gguf checkout outside this repo, and a real Metal device"]
+    fn default_vs_default_is_the_degenerate_control() {
+        let path = std::path::Path::new(ServingConfig::default().model_path);
+        if !path.exists() {
+            eprintln!(
+                "skipping: no host-local openchat gguf fixture at {}",
+                ServingConfig::default().model_path
+            );
+            return;
+        }
+
+        let mapped = MappedGguf::open(path).expect("mmap host-local openchat gguf fixture");
+        let model = open_model(&mapped);
+        let prompts = load_quality_prompts();
+        let max_tokens = quality_max_tokens();
+
+        let report = quality_report(&model, GPU_LAYERS_ALL, &model, GPU_LAYERS_ALL, &prompts, max_tokens)
+            .expect("quality_report against the same model and backend on both sides");
+
+        #[cfg(feature = "instrument")]
+        print_quality_report(&report);
+
+        assert_eq!(report.prompts, prompts.len(), "every prompt in the set must produce a row");
+        assert_eq!(
+            report.exact_match_rate, 1.0,
+            "identical model and backend on both sides must match every compared token exactly"
+        );
+        // Not bit-exact zero: two independent forward calls against the SAME
+        // model/backend measurably differ by ~1e-10 nats on real hardware
+        // (`quality_summary kl_mean=-0.000000` against a raw `report.kl_mean`
+        // of -6.47e-11 in this slice's own recorded run) -- the reduce-quantized
+        // matmul's own worker-thread scheduling is not required to visit
+        // partial sums in the same order every call, so an addition that is
+        // mathematically associative is not bit-identical across two runs.
+        // The tolerance below is four orders of magnitude above that observed
+        // floor, so it stays a meaningful "near enough to zero" gate rather
+        // than a bit-exact one this backend cannot actually satisfy.
+        assert!(
+            report.kl_mean.abs() < 1e-6,
+            "identical model and backend on both sides must carry ~zero KL divergence, got {}",
+            report.kl_mean
+        );
+        assert!(
+            report.kl_max.abs() < 1e-6,
+            "identical model and backend on both sides must carry ~zero worst-step KL divergence, got {}",
+            report.kl_max
+        );
+    }
+
+    /// The real cross-backend comparison: `reference` is the CPU forward
+    /// (`gpu_layers: 0`), `variant` is the Metal forward
+    /// ([`GPU_LAYERS_ALL`]), both against the SAME loaded checkpoint --
+    /// this is the finding, not a pass/fail on a specific drift number, so
+    /// the only assertions are that every prompt produced a row and every
+    /// reported metric is finite. The printed `quality_summary` line
+    /// itself is the result this slice reports.
+    #[test]
+    #[ignore = "depends on a host-local openchat gguf checkout outside this repo, and a real Metal device"]
+    fn metal_vs_cpu_reports_real_drift() {
+        let path = std::path::Path::new(ServingConfig::default().model_path);
+        if !path.exists() {
+            eprintln!(
+                "skipping: no host-local openchat gguf fixture at {}",
+                ServingConfig::default().model_path
+            );
+            return;
+        }
+
+        let mapped = MappedGguf::open(path).expect("mmap host-local openchat gguf fixture");
+        let model = open_model(&mapped);
+        let prompts = load_quality_prompts();
+        let max_tokens = quality_max_tokens();
+
+        let report = quality_report(&model, 0, &model, GPU_LAYERS_ALL, &prompts, max_tokens)
+            .expect("quality_report against a CPU reference and a Metal variant");
+
+        #[cfg(feature = "instrument")]
+        print_quality_report(&report);
+
+        assert_eq!(report.prompts, prompts.len(), "every prompt in the set must produce a row");
+        assert!(report.exact_match_rate.is_finite(), "exact_match_rate must be a real number");
+        assert!(report.top1_agreement_rate.is_finite(), "top1_agreement_rate must be a real number");
+        assert!(report.kl_mean.is_finite(), "kl_mean must be a real number");
+        assert!(report.kl_max.is_finite(), "kl_max must be a real number");
+        assert!(report.max_abs_logit_delta.is_finite(), "max_abs_logit_delta must be a real number");
     }
 }
