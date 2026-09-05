@@ -3846,7 +3846,6 @@ fn push_packed_row_combine_and_write(
 /// element, same as the generic serial path, just reused across `s` instead
 /// of the reduce dim alone.
 #[allow(clippy::too_many_arguments, clippy::similar_names)]
-#[allow(clippy::too_many_arguments)]
 fn push_packed_row_multi_row_body(
     source: &mut String,
     resolved: &BoundOp,
