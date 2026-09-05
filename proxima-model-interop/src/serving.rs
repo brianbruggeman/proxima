@@ -143,6 +143,18 @@ pub struct ServingConfig<'model> {
     /// every seed value, including this struct's own default, is always
     /// literal.
     pub seed: u64,
+    /// Not an upstream llama-server flag -- a plan-cache key rounding
+    /// policy for `generate.rs`'s placed-KV Metal decode loop
+    /// (`generate::kv_extent`). The true `merged_len` (cached_len +
+    /// new_count) strictly increases every decode step, so keying the
+    /// Metal plan cache on it directly forces a re-plan (prepare +
+    /// op-setup) on every step; rounding `merged_len` up to this many
+    /// tokens before binding it as the plan's `Extent::Symbolic(1)` keeps
+    /// the plan-cache key constant across a whole bucket of steps, at the
+    /// cost of computing attention over the padded (always-masked) tail.
+    /// `1` disables bucketing (`merged_len` unchanged). Must be `>= 1` --
+    /// [`apply_serving_config`] rejects `0`.
+    pub kv_bucket_tokens: usize,
 }
 
 impl Default for ServingConfig<'static> {
@@ -179,6 +191,10 @@ impl Default for ServingConfig<'static> {
             frequency_penalty: 0.0,
             presence_penalty: 0.0,
             seed: 0,
+            // 2026-09-04 quiet round 1 winner: wall 40.89 vs off (bucket
+            // 1) 42.54 ms/token, hits 5/8 (64 also wins at 41.18/hits
+            // 6/8; 256 loses at 48.18 -- CARD 6.3's full table).
+            kv_bucket_tokens: 32,
         }
     }
 }
@@ -336,6 +352,15 @@ pub fn apply_serving_config(config: &ServingConfig, sequence: usize) -> Result<(
         )));
     }
 
+    if config.kv_bucket_tokens < 1 {
+        return Err(InteropError::UnsupportedServingConfig(format!(
+            "kv_bucket_tokens={}: must be >= 1 -- `generate::kv_extent` divides `merged_len` \
+             by this value to compute the plan-cache-key bucket, so 0 would divide by zero; \
+             1 disables bucketing",
+            config.kv_bucket_tokens
+        )));
+    }
+
     Ok(())
 }
 
@@ -433,6 +458,7 @@ mod tests {
             frequency_penalty: 0.0,
             presence_penalty: 0.0,
             seed: 0,
+            kv_bucket_tokens: 32,
         };
         apply_serving_config(&config, 6).expect("fully supported config must apply cleanly");
     }
@@ -524,5 +550,71 @@ mod tests {
         let error =
             apply_serving_config(&config, 6).expect_err("negative repeat_last_n must be rejected");
         assert!(error.to_string().contains("repeat_last_n"));
+    }
+
+    /// Guiding-principle 4's config-as-mirror: a config built as a full
+    /// struct literal (the "data" surface) and one built by overriding a
+    /// single field on [`ServingConfig::default`] (the fluent-update
+    /// surface every call site in this crate actually uses) agree bit for
+    /// bit on `kv_bucket_tokens` -- there is no bespoke builder in this
+    /// crate (this module's own doc: no `bon`/`conflaguration` in this
+    /// crate's dependency graph), so `..Default::default()` struct-update
+    /// syntax is the fluent surface plain data interoperates with.
+    #[test]
+    fn kv_bucket_tokens_agrees_across_literal_and_default_override() {
+        let via_default_override = ServingConfig {
+            kv_bucket_tokens: 64,
+            ..ServingConfig::default()
+        };
+        let via_full_literal = ServingConfig {
+            model_path: DEFAULT_MODEL_PATH,
+            context_length: 131_072,
+            parallel_sequences: 1,
+            kv_cache_key_quant: GgmlType::Q8_0,
+            kv_cache_value_quant: GgmlType::Q8_0,
+            flash_attention: true,
+            batch_size: 32,
+            ubatch_size: 32,
+            gpu_layers: GPU_LAYERS_ALL,
+            gpu_memory_fit: false,
+            kv_offload: false,
+            multimodal_projector: false,
+            reasoning_budget: 1024,
+            temperature: 0.0,
+            top_k: 0,
+            top_p: 1.0,
+            min_p: 0.0,
+            repeat_last_n: 64,
+            repeat_penalty: 1.0,
+            frequency_penalty: 0.0,
+            presence_penalty: 0.0,
+            seed: 0,
+            kv_bucket_tokens: 64,
+        };
+        assert_eq!(via_default_override, via_full_literal);
+        assert_eq!(via_default_override.kv_bucket_tokens, 64);
+    }
+
+    #[test]
+    fn default_kv_bucket_tokens_is_the_measured_winner() {
+        assert_eq!(ServingConfig::default().kv_bucket_tokens, 32);
+    }
+
+    #[test]
+    fn zero_kv_bucket_tokens_reaches_its_error() {
+        let config = ServingConfig {
+            kv_cache_key_quant: GgmlType::F32,
+            kv_cache_value_quant: GgmlType::F32,
+            flash_attention: false,
+            batch_size: 0,
+            ubatch_size: 0,
+            gpu_layers: 0,
+            reasoning_budget: 0,
+            kv_bucket_tokens: 0,
+            ..ServingConfig::default()
+        };
+        let error =
+            apply_serving_config(&config, 6).expect_err("kv_bucket_tokens=0 must be rejected");
+        assert!(error.to_string().contains("kv_bucket_tokens"));
     }
 }

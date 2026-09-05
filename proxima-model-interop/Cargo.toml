@@ -141,19 +141,15 @@ metal-q4k-single-fetch = ["omega?/metal-q4k-single-fetch"]
 metal-packed-row-nsg2 = ["omega?/metal-packed-row-nsg2"]
 # passthrough to `omega/metal-q5k-pair-dot` so the decode harness can measure that arm.
 metal-q5k-pair-dot = ["omega?/metal-q5k-pair-dot"]
-# Buckets `generate.rs`'s placed-KV decode loop's growing KV extent
-# (`merged_len`) up to `sized::KV_BUCKET_TOKENS` (this crate's own
-# `sized.rs`/`proxima-model-interop-runtime.toml`, guiding-principle 12)
-# before binding it as the Metal plan's `Extent::Symbolic(1)`/plan-cache
-# key, so the plan (and the `omega::metal` Metal pipeline it selects) is
-# reused across a whole bucket of decode steps instead of re-planning
-# every token. `metal-output-placement` must also be on -- this feature
-# has no effect without the placed-KV decode path it modifies. See CARD
-# 6.1-6.3. `proxima-tensor/kv-capacity-bucket` stays selected here too:
-# that crate's own `spec.rs`'s `cpu_mask_zero_ulp` proves the general
-# bucketing mechanism 0-ULP-safe for any bucket size, a correctness proof
-# this feature's own production path depends on even though the bucket
-# SIZE policy now lives entirely in this crate.
+# Selects `proxima-tensor`'s `cpu_mask_zero_ulp` test, the correctness
+# proof that rounding the placed-KV decode loop's growing KV extent
+# (`merged_len`) up to `ServingConfig::kv_bucket_tokens` before binding it
+# as the Metal plan's `Extent::Symbolic(1)`/plan-cache key is 0-ULP-safe
+# for any bucket size (`spec.rs:11371`, CARD 6.1-6.3). The bucketing
+# itself is unconditional runtime behaviour gated by
+# `ServingConfig::kv_bucket_tokens` (see that field's own doc), not by
+# this feature -- a bucket of 1 reduces to no bucketing. This feature only
+# pulls in the CPU-side proof plus `omega`'s passthrough.
 kv-capacity-bucket = [
     "proxima-tensor/kv-capacity-bucket",
     "omega?/kv-capacity-bucket",
@@ -258,6 +254,3 @@ required-features = ["std"]
 [[example]]
 name = "mixtral_architecture_dump"
 required-features = ["std"]
-
-[build-dependencies]
-toml.workspace = true
