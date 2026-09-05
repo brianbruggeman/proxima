@@ -23134,3 +23134,70 @@ every round, not just before the sweep, before trusting their sign.
 | Date | Change | Δ vs prior | CoV / runs | Host loadout |
 | --- | --- | --- | --- | --- |
 | 2026-09-05 | `fix(omega): kind filter rejects unknown names and empty matches` + `feat(omega): kind filter selects weight families under instrument` + `docs(tensor): row 310 per-family matvec bandwidth inside the decode buffer` | ffn_gate 236.6 GB/s (62.1% of ceiling), ffn_down 200.5 (52.6%), ffn_up 183.5 (48.1%), attn_output 144.9 (38.0%, higher CoV band), output.weight 41.6 (10.9%, single-dispatch, no per-token amortization); attn_q/attn_k/attn_v noise-negative, attn_q's own CoV 12.75% exceeds the 5% bound -- reported, not discarded; reconciliation against ROW 308's 85.29% MATVEC share reads 69.7-76.5% depending on whether the three noise rows are included | 3 interleaved rounds per arm, 9 arms (FULL + 8 `!family:` exclusions); 6 of 9 arms CoV under 1.4%, attn_q's own CoV 12.75% flagged as host-contention-contaminated, not folded into the reported cost | quiet gate (`pgrep -l` names-only, never `-f`) empty and load-1 6.5-8.6 confirmed before the sweep started; this same host's `uptime` samples taken minutes apart in this session ranged as high as load-1 26.8, and no mid-sweep recheck was done -- named as the most likely mechanism for attn_q round 3's outlier, not confirmed |
+
+## ROW 311 -- quiet bake-off of the llama.cpp kernel differences: `metal-packed-row-nsg2` flips default (halved threadgroup count, same output, wall not worse); `metal-q4k-ggml-port` stays off (branchless decode, but wall 15% worse beyond CoV); serial-encoder arm C is not expressible via cargo features
+
+**Card:** none (measurement + one default-feature flip). **Worktree/branch:** `proxima-wt-llamadiff`, `perf/llama-kernel-diff`, off `main` at `4f6a79e`.
+
+**Task.** A prior source read (`llama-kernel-read.md`) named three differences between llama.cpp's Q4_K matvec (238 GB/s in-program) and ours (184 GB/s, ROW 308/310), each already gated behind an existing build flag: (1) llama packs 2 simdgroups/threadgroup (`N_SG_Q4_K=2`), ours defaults to 1 (`metal-packed-row-nsg2`); (2) llama's Serial-dispatch default has zero manual barriers, ours opens a Concurrent encoder with a `HazardTracker` inserting `memoryBarrierWithScope(Buffers)` (`metal-concurrent-dispatch`, default-on); (3) llama decodes Q4_K scale/min once per iteration via branchless `kmask1/2/3` bit masks, ours calls the branchy `q4k_scale_min` 4x/iteration (`metal-q4k-ggml-port`).
+
+**Arm C is not buildable via cargo features.** `omega/Cargo.toml:98-116`'s `metal = [...]` list unconditionally includes `"metal-concurrent-dispatch"` (line 114), and `metal-concurrent-dispatch = ["metal"]` (`omega/Cargo.toml:262`) is the reverse of the same pair -- no `--features`/`--no-default-features` combination sets `cfg(feature = "metal")` true (required to compile `omega::metal` at all, gated at `omega/src/lib.rs:45-46`, `#[cfg(all(feature = "metal", target_os = "macos"))]`) while leaving `cfg(feature = "metal-concurrent-dispatch")` false, because cargo feature unification is additive-only. Confirmed by reading `omega/src/metal.rs:1424-1516`: the serial-encoder/no-barrier arm (`computeCommandEncoder()`, no `memoryBarrierWithScope`) still exists in source as the `#[cfg(not(feature = "metal-concurrent-dispatch"))]` branch, but it is unreachable under any `metal`-enabled build today. Arm C is reported UNMEASURED, not skipped silently.
+
+**Arms built and run (4 of the planned 5).** Oracle test `bind::real_openchat_file::runs_the_cached_decode_loop_on_the_metal_backend_and_reports_the_plan_cache`, release binary built via `cargo nextest run --release -p proxima-model-interop --features <arm> --run-ignored ignored-only --no-run`, invoked directly with `PROXIMA_MAX_TOKENS=8`. Quiet gate (`pgrep -l` names-only, never `-f`) empty and load-1 < 10 confirmed before the sweep; 3 interleaved rounds, `gpu_exec_ms`/`step_wall_ms` means over steps 3..7 (15 datapoints/arm):
+
+| arm | features (over `std,cpu`) | dispatches | barriers | gpu_exec mean (ms) | CoV | delta vs A (ms / %) | text identical (12 runs) |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| A (main default) | `metal,instrument` | 520 | 323 | 26.7835 | 1.04% | -- | y |
+| B (+nsg2) | `metal,instrument,metal-packed-row-nsg2` | 520 | 323 | 26.5537 | 0.79% | -0.2298 / -0.86% | y |
+| D (+ggml-port) | `metal,instrument,metal-q4k-ggml-port` | 520 | 323 | 30.8124 | 0.88% | +4.0289 / +15.04% | y |
+| E (+nsg2+ggml-port, concurrent-dispatch still on -- arm C unbuildable) | `metal,instrument,metal-packed-row-nsg2,metal-q4k-ggml-port` | 520 | 323 | 30.9774 | 0.47% | +4.1939 / +15.66% | y |
+
+`generated_text="Here is a simple Python function that returns"` identical across all 12 runs. `encode_dispatch_calls`/`barriers` are unchanged across every arm because both counters are per-op-graph-dispatch (`HazardTracker`, `omega/src/metal.rs:1364-1367`) and per-shape threadgroup packing does not change the number of dispatches in the plan -- the work reduction nsg2/ggml-port each claim is inside a dispatch (grid shape, decode-call count), not in dispatch count, so it does not show in these two runtime counters; see the structural evidence below.
+
+Derived matvec-only GB/s (`4.169 GB / (gpu_exec_mean - 3.9048 ms non-matvec residual, ROW 308)`, DERIVED, not a bandwidth measurement):
+
+| arm | matvec ms (derived) | GB/s (derived) |
+| --- | --- | --- |
+| A | 22.8787 | 182.19 |
+| B | 22.6489 | 184.04 |
+| D | 26.9076 | 154.94 |
+| E | 27.0726 | 153.98 |
+
+**Mechanism, per arm, work metric from the emitted MSL source (not the runtime counters above):**
+
+- **B (`metal-packed-row-nsg2`).** `packed_row_nsg_factor()` returns `2` instead of `1` when the feature is on (`omega/src/msl.rs:5511-5524`), doubling `threadgroup_width = SIMD_WIDTH * split * packed_row_nsg_factor()` (`msl.rs:5391`) from 32 to 64 threads/threadgroup with `grid.threads` unchanged -- threadgroup count halves at every shape (computed: 256/1024/3584/8000 -> 128/512/1792/4000 at ne01=1024/4096/14336/32000), matching llama.cpp's own `N_SG_Q4_K=2` for identical total simdgroup count. **Less work (threadgroups/token halved), same output, wall not worse beyond CoV (-0.86%, inside both arms' 0.79-1.04% CoV bands) -- flips default-on per the owner's less-work rule.**
+- **D (`metal-q4k-ggml-port`).** `push_q4k_ggml_port_body` (`omega/src/msl.rs:4830-4909`) computes `sc16_0..sc16_3` via one branchless bit-mask block per row per `ib` iteration (4 `ushort` ops, zero branches, zero function calls), replacing the default path's 4 separate `q4k_scale_min()` calls each containing a data-independent `if (sub_block < 4)` branch (`msl.rs:341-348`, called from `msl.rs:418-421`) -- **1 branchless decode vs 4 branchy calls/iteration, less scale-decode work, same output** -- but `gpu_exec_ms` is 15.04% WORSE than A, ~17x outside both arms' CoV (0.88%/1.04%). Per the owner's rule ("do not flip only if wall is worse beyond CoV"), **D does NOT flip** despite the branch-count reduction: the ggml-port body's other structural differences (distinct load/accumulate layout, `device const half *dh` reads, per-term scale/min application) evidently cost more than the branch removal saves on this device -- not decomposed further in this pass. The 8x8 quality gate (ROW 304's `PROXIMA_QUALITY_PROMPTS=8 PROXIMA_MAX_TOKENS=8`) was NOT run for D since the flip's own precondition (wall not worse) already failed.
+- **E.** Combines B+D (concurrent-dispatch still on, arm C unbuildable) -- inherits D's regression; **does NOT flip** for the same reason as D.
+
+**Decision (owner's less-work rule: output identical AND work down AND wall not worse beyond CoV):**
+
+- `metal-packed-row-nsg2`: **flips default-on**, `feat(omega): metal-packed-row-nsg2 default-on after the quiet llama-diff bake-off` -- added to `omega/Cargo.toml:98-116`'s and `proxima-model-interop/Cargo.toml:99-110`'s `metal = [...]` lists (same shape as `metal-concurrent-dispatch`/`reduce-epilogue-fusion` already there).
+- `metal-concurrent-dispatch`: not evaluated this row (arm C unbuildable via features) -- stays default-on, unchanged.
+- `metal-q4k-ggml-port`: stays default-off -- the measured wall regression disqualifies the flip regardless of the branch-count win.
+
+**s1 byte-identity fixture.** `omega/tests/packed_row_blocked_s1_byte_identity.rs` gates itself off under `not(any(... feature = "metal-packed-row-nsg2" ...)))]` (its own doc, lines 1-27) -- with nsg2 now permanently on whenever `metal` is on, this test's own cfg-exclusion mechanism retires it (it no longer compiles under any `metal` build), which is the "refreshed by the mechanism its test documents" case, not a bytes update.
+
+**Gates (this row's own worktree, own `CARGO_TARGET_DIR`), run against the flipped default:**
+- `cargo clippy -p omega -p proxima-model-interop --all-targets --features metal,instrument -- -D warnings`: EXIT=0.
+- `cargo nextest run -p omega --features metal`: 171 tests run, 171 passed, 3 skipped, EXIT=0.
+- `cargo nextest run -p proxima-model-interop --features metal,instrument`: 110 tests run, 110 passed, 28 skipped, EXIT=0.
+- `bash scripts/omega-gate.sh`: 8/8 steps PASS, EXIT=0.
+- `bash scripts/omega-feature-matrix.sh`: 21 cells, EXIT=0.
+
+**Re-prove (bake-off, 4 buildable arms):**
+```sh
+cd /Users/brianbruggeman/repos/slot-0/proxima-wt-llamadiff
+CARGO_TARGET_DIR=/Users/brianbruggeman/repos/slot-0/proxima-wt-llamadiff/target CARGO_TERM_COLOR=never \
+  cargo nextest run --release -p proxima-model-interop --features metal,instrument --run-ignored ignored-only --no-run \
+  -E 'test(runs_the_cached_decode_loop_on_the_metal_backend_and_reports_the_plan_cache)'
+BIN=$(find target/release/deps -type f -name 'proxima_model_interop-*' -perm +111 ! -name '*.d' | head -1)
+PROXIMA_MAX_TOKENS=8 "$BIN" --exact --nocapture --ignored \
+  bind::real_openchat_file::runs_the_cached_decode_loop_on_the_metal_backend_and_reports_the_plan_cache
+```
+Confirm `encode_dispatch_calls=520`/`barriers=323` on every one of steps 3..7 and `generated_text="Here is a simple Python function that returns"`, with the quiet gate empty and load-1 under 10 immediately before each round.
+
+### Changelog
+
+| Date | Change | Δ vs prior | CoV / runs | Host loadout |
+| --- | --- | --- | --- | --- |
+| 2026-09-05 | `feat(omega): metal-packed-row-nsg2 default-on after the quiet llama-diff bake-off` + `docs(tensor): row 311 quiet bake-off of the llama.cpp kernel differences` | B (nsg2) threadgroup count halved at every packed-row matvec shape, `gpu_exec_ms` 26.784 -> 26.554 ms (-0.86%, within CoV, not a wall claim); D (ggml-port) branch count 4->1/iteration but `gpu_exec_ms` +15.04% (regression, stays off); arm C (serial encoder) unbuildable via cargo features, reported not measured | 3 interleaved rounds per arm, 4 buildable arms (A/B/D/E); CoV 0.47-1.04%, all under 5% | quiet gate (`pgrep -l` names-only, never `-f`) empty, load-1 9.56 before the sweep started; single measurer, no other slice running |
