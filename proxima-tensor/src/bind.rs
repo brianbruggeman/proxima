@@ -285,7 +285,7 @@ pub enum BoundOpKind {
         /// `element_body`'s mirror image. `element_body` combines `operands`
         /// once per PRE-reduction step, before the fold; `epilogue_body` runs
         /// once per OUTPUT element, after it, reading `epilogue_operands`
-        /// (addressed in output-axis order, the same order [`output_axes`]
+        /// (addressed in output-axis order, the same order `output_axes`
         /// itself uses) plus one more implicit argument: this fold's own
         /// just-computed result at that output position. That result is
         /// [`StepArg::Operand`]`(epilogue_operands.len())` — one slot past
@@ -295,9 +295,9 @@ pub enum BoundOpKind {
         /// for [`ScalarOp::Identity`]. "No epilogue" is that leaf body over
         /// zero real operands — not an `Option` — the same convention
         /// `element_body` already uses for "nothing fused into the prologue
-        /// either" ([`build_reduce_op`]'s own default).
+        /// either" (`build_reduce_op`'s own default).
         ///
-        /// [`crate::bind`]'s own fusion rule (`reduce-epilogue-fusion`,
+        /// This module's own fusion rule (`reduce-epilogue-fusion`,
         /// default-off): an `Elementwise` consumer of this fold absorbs into
         /// `epilogue_body`/`epilogue_operands` — and the fold's own `node`
         /// is REPLACED by the consumer's `NodeId` (the fused op now answers
@@ -358,8 +358,8 @@ impl BoundOp {
         }
     }
 
-    /// Every node a liveness pass must count as READ by this op: [`operands`]
-    /// (`Self::operands`, what an executor's compute step reads) plus, for a
+    /// Every node a liveness pass must count as READ by this op: [`Self::operands`]
+    /// (what an executor's compute step reads) plus, for a
     /// [`BoundOpKind::Reduce`], `epilogue_operands` too. Distinct from
     /// `operands()` on purpose — `run_reduce`/`run_elementwise`'s own operand
     /// tables must stay exactly the compute-step operands, nothing more, so
@@ -2730,10 +2730,10 @@ pub fn bind(
 /// `epilogue_operands` rewrite) runs unconditionally after this, gated only
 /// by the crate feature — it has no per-call capability bool of its own
 /// because, unlike cached-attention, every renderer this crate ships either
-/// renders the epilogue or rejects it at bind time (see
-/// [`reduce_epilogue_fusion`]'s own doc); there is no third "silently ignore
-/// it" caller to protect the way `fuse_cached_attention: false` protects
-/// wgpu/cuda from a fused kind they cannot render at all.
+/// renders the epilogue or rejects it at bind time (see this module's own
+/// `reduce_epilogue_fusion`, private and feature-gated); there is no third
+/// "silently ignore it" caller to protect the way `fuse_cached_attention: false`
+/// protects wgpu/cuda from a fused kind they cannot render at all.
 pub fn bind_with_fusion(
     program: &[Op],
     shapes: &Shapes,
