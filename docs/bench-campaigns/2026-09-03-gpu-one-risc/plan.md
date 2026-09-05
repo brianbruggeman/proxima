@@ -533,6 +533,10 @@ the packed-row addressing arms.
 target; there is no `Backend::Mixed` variant — mixing is a placement field on the scheduled op, not
 a third engine.
 
+<!-- measured 2026-09-04: k' --> Draft acceptance is now measured on real greedy Metal streams
+(n-gram prompt-lookup, `test/draft-acceptance-harness`): mean k' = 1.36 at k=4 and 1.49 at k=8, both
+below the design's own `A < 1.5` multi-token kill criterion (`design-final.md` §D.4, §D.4a, card D2).
+
 ## 2. The diagnosis, built formally (V0-V8)
 
 The default is no verdict. What follows is a proposal built by the admissibility procedure so
