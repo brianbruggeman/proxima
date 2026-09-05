@@ -1200,15 +1200,33 @@ pub fn execute_plan_with_placements(
                 .filter_map(|(operand, _, _)| device_buffers.get(operand))
                 .map(|(buffer, _offset)| Retained::as_ptr(buffer))
                 .collect();
+            // resolved ONCE, before the hazard check, from the exact same
+            // placement -> arena -> fresh-allocation chain `encode_op` would
+            // otherwise pick independently below: `needs_barrier` and
+            // `record` used to see two different identities for a fresh
+            // allocation (the check saw `None`, since nothing is known
+            // before `encode_op` allocates; the record afterward saw the
+            // real pointer), so a WAW/WAR hazard against an address Metal
+            // happens to reuse for that allocation could never be caught.
+            // Allocating here and handing the SAME buffer into `encode_op`
+            // via `placement` closes that gap.
             #[cfg(feature = "metal-concurrent-dispatch")]
-            {
-                let hazard_output = placement.map(|(buffer, _offset)| Retained::as_ptr(buffer));
-                if hazards.needs_barrier(&hazard_inputs, hazard_output) {
-                    encoder.memoryBarrierWithScope(MTLBarrierScope::Buffers);
-                    hazards.reset();
-                    counter!(BARRIERS_EMITTED, 1);
-                }
+            let resolved_output: DeviceBuffer = match placement {
+                Some((buffer, offset)) => (buffer.clone(), offset),
+                None => (allocate_buffer(&device, bound_output_len(bound), bound.dtype)?, 0),
+            };
+            #[cfg(feature = "metal-concurrent-dispatch")]
+            let hazard_output = Retained::as_ptr(&resolved_output.0);
+            #[cfg(feature = "metal-concurrent-dispatch")]
+            if hazards.needs_barrier(&hazard_inputs, Some(hazard_output)) {
+                encoder.memoryBarrierWithScope(MTLBarrierScope::Buffers);
+                hazards.reset();
+                counter!(BARRIERS_EMITTED, 1);
             }
+            #[cfg(feature = "metal-concurrent-dispatch")]
+            hazards.record(&hazard_inputs, Some(hazard_output));
+            #[cfg(feature = "metal-concurrent-dispatch")]
+            let placement = Some((&resolved_output.0, resolved_output.1));
             let fault = encode_op(
                 &device,
                 &encoder,
@@ -1218,13 +1236,6 @@ pub fn execute_plan_with_placements(
                 placement,
                 plan_uniform_buffer(plan, position),
             )?;
-            #[cfg(feature = "metal-concurrent-dispatch")]
-            {
-                let hazard_output = device_buffers
-                    .get(&bound.node)
-                    .map(|(buffer, _offset)| Retained::as_ptr(buffer));
-                hazards.record(&hazard_inputs, hazard_output);
-            }
             if let Some((fault_buffer, gathers)) = fault {
                 pending_faults.push((bound, fault_buffer, gathers));
             }
