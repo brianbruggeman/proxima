@@ -207,6 +207,7 @@ pub struct Evaluated {
     root: NodeId,
     results: Vec<(NodeId, Vec<u64>, Vec<f32>)>,
     peak_live_buffers: Option<usize>,
+    placed: BTreeSet<NodeId>,
 }
 
 impl Evaluated {
@@ -220,10 +221,29 @@ impl Evaluated {
         results: Vec<(NodeId, Vec<u64>, Vec<f32>)>,
         peak_live_buffers: Option<usize>,
     ) -> Self {
+        Self::from_parts_with_placed(root, results, peak_live_buffers, BTreeSet::new())
+    }
+
+    /// Same contract as [`Evaluated::from_parts`], plus `placed`: the set of
+    /// requested output nodes a backend deliberately skipped copying into
+    /// `results` because their bytes already live in the caller's own
+    /// buffer (`omega`'s `execute_plan_with_placements`) — [`Evaluated::get`]
+    /// still reports `None` for one of these (there is no owned data here to
+    /// hand back), but [`Evaluated::is_placed`] tells a caller that `None`
+    /// meant "ask the placement, not the evaluator" rather than "this node
+    /// was never computed at all".
+    #[must_use]
+    pub fn from_parts_with_placed(
+        root: NodeId,
+        results: Vec<(NodeId, Vec<u64>, Vec<f32>)>,
+        peak_live_buffers: Option<usize>,
+        placed: BTreeSet<NodeId>,
+    ) -> Self {
         Self {
             root,
             results,
             peak_live_buffers,
+            placed,
         }
     }
 
@@ -238,13 +258,27 @@ impl Evaluated {
     }
 
     /// The data and shape of a specific requested output, or `None` if
-    /// `node` was not in the `outputs` passed to [`evaluate`].
+    /// `node` was not in the `outputs` passed to [`evaluate`] — or, on a
+    /// backend that reports placements (see [`Evaluated::is_placed`]), if
+    /// `node`'s bytes were placed straight into a caller-owned buffer
+    /// instead of being copied here. Call [`Evaluated::is_placed`] first to
+    /// tell those two `None` cases apart.
     #[must_use]
     pub fn get(&self, node: NodeId) -> Option<(&[f32], &[u64])> {
         self.results
             .iter()
             .find(|(candidate, _, _)| *candidate == node)
             .map(|(_, shape, data)| (data.as_slice(), shape.as_slice()))
+    }
+
+    /// `true` if `node` was a requested output whose bytes a backend placed
+    /// directly into the caller's own buffer rather than copying into this
+    /// `Evaluated` — see [`Evaluated::from_parts_with_placed`]. A `false`
+    /// return means either `node` was copied normally (check [`Evaluated::get`])
+    /// or it was never a requested output at all.
+    #[must_use]
+    pub fn is_placed(&self, node: NodeId) -> bool {
+        self.placed.contains(&node)
     }
 
     /// The most buffers ([`Op::Input`] inputs and computed intermediates)
@@ -18852,6 +18886,30 @@ mod tests {
     use std::time::Instant;
 
     use crate::test_support::Lcg;
+
+    /// A placed output (`caller_owned` in `omega::metal::finish`) reports
+    /// `is_placed() == true` and `get() == None` -- distinct from a node
+    /// that was simply never requested, which reports `is_placed() ==
+    /// false` alongside the same `get() == None`. Before
+    /// `Evaluated::from_parts_with_placed` existed, both cases collapsed to
+    /// the same `None`, so a caller reading a placed node through
+    /// `Evaluated` instead of the placement it actually landed in saw
+    /// `MissingEvaluatedNode` with no way to tell that from a genuine bug.
+    #[test]
+    fn placed_output_reports_placed_not_missing() {
+        let requested = NodeId(1);
+        let never_requested = NodeId(2);
+        let mut placed = BTreeSet::new();
+        placed.insert(requested);
+
+        let evaluated =
+            Evaluated::from_parts_with_placed(requested, Vec::new(), None, placed);
+
+        assert!(evaluated.is_placed(requested));
+        assert!(evaluated.get(requested).is_none());
+        assert!(!evaluated.is_placed(never_requested));
+        assert!(evaluated.get(never_requested).is_none());
+    }
 
     /// `stage_offsets` for `stage_count` stages of a UNIFORM `chunks_per_stage`
     /// width -- the shape every pre-existing test used before `StagedRound`
