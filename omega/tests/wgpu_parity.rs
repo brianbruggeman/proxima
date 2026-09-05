@@ -25,7 +25,7 @@
 mod support;
 use support::{as_named_blocks, real_forward_fixture};
 
-use omega::backend::{Backend, execute_plan_named, plan_named};
+use omega::backend::{Engine, GpuDriver, execute_plan_named, plan_named};
 use proxima_tensor::test_support::Lcg;
 use proxima_tensor::{
     AxisIndex, AxisTerm, DType, Extent, IndexMap, IndexPattern, Keep, NodeId, Op, QuantizedBlock,
@@ -157,13 +157,20 @@ fn the_two_layer_mlp_runs_on_wgpu_at_cpu_parity() {
         ("w2", QuantizedBlock::Float32(&w2)),
     ];
 
-    let mut cpu_plan = plan_named(Backend::Cpu, &program, &[], &named, &[])
+    let mut cpu_plan = plan_named(Engine::Cpu, None, &program, &[], &named, &[])
         .expect("omega::backend plans the mlp on cpu");
     let cpu =
         execute_plan_named(&mut cpu_plan, &named).expect("omega::backend runs the mlp on cpu");
 
-    let mut wgpu_plan = plan_named(Backend::Wgpu, &program, &[], &named, &[])
-        .expect("omega::backend plans the mlp on wgpu");
+    let mut wgpu_plan = plan_named(
+        Engine::Gpu,
+        Some(GpuDriver::Wgpu),
+        &program,
+        &[],
+        &named,
+        &[],
+    )
+    .expect("omega::backend plans the mlp on wgpu");
     let wgpu = execute_plan_named(&mut wgpu_plan, &named)
         .expect("omega::backend runs the mlp on a real device");
 
@@ -258,13 +265,20 @@ fn embedding_lookup_runs_on_wgpu_at_cpu_parity_for_integer_valued_inputs() {
         ("ids", QuantizedBlock::Float32(&ids_data)),
     ];
 
-    let mut cpu_plan = plan_named(Backend::Cpu, &program, &[], &named, &[])
+    let mut cpu_plan = plan_named(Engine::Cpu, None, &program, &[], &named, &[])
         .expect("omega::backend plans the gather on cpu");
     let cpu =
         execute_plan_named(&mut cpu_plan, &named).expect("omega::backend runs the gather on cpu");
 
-    let mut wgpu_plan = plan_named(Backend::Wgpu, &program, &[], &named, &[])
-        .expect("omega::backend plans the gather on wgpu");
+    let mut wgpu_plan = plan_named(
+        Engine::Gpu,
+        Some(GpuDriver::Wgpu),
+        &program,
+        &[],
+        &named,
+        &[],
+    )
+    .expect("omega::backend plans the gather on wgpu");
     let wgpu = execute_plan_named(&mut wgpu_plan, &named)
         .expect("omega::backend runs the gather on a real device");
 
@@ -294,8 +308,15 @@ fn an_out_of_range_gather_index_faults_on_wgpu_the_same_way_it_faults_on_cpu() {
         ("ids", QuantizedBlock::Float32(&ids_data)),
     ];
 
-    let mut wgpu_plan = plan_named(Backend::Wgpu, &program, &[], &named, &[])
-        .expect("omega::backend plans the gather on wgpu");
+    let mut wgpu_plan = plan_named(
+        Engine::Gpu,
+        Some(GpuDriver::Wgpu),
+        &program,
+        &[],
+        &named,
+        &[],
+    )
+    .expect("omega::backend plans the gather on wgpu");
     let error = execute_plan_named(&mut wgpu_plan, &named)
         .expect_err("an out-of-range gather index must fault, not clamp silently");
     assert!(
@@ -404,13 +425,20 @@ fn f16_matmul_runs_on_wgpu_within_the_metal_parity_f16_epsilon_or_names_its_reje
         ("rhs", QuantizedBlock::Float32(&rhs)),
     ];
 
-    let mut cpu_plan = plan_named(Backend::Cpu, &f32_program, &[], &named, &[])
+    let mut cpu_plan = plan_named(Engine::Cpu, None, &f32_program, &[], &named, &[])
         .expect("omega::backend plans the f32 oracle on cpu");
     let cpu = execute_plan_named(&mut cpu_plan, &named)
         .expect("omega::backend runs the f32 oracle on cpu");
 
-    let mut wgpu_plan = plan_named(Backend::Wgpu, &f16_program, &[], &named, &[])
-        .expect("omega::backend plans the f16 matmul on wgpu");
+    let mut wgpu_plan = plan_named(
+        Engine::Gpu,
+        Some(GpuDriver::Wgpu),
+        &f16_program,
+        &[],
+        &named,
+        &[],
+    )
+    .expect("omega::backend plans the f16 matmul on wgpu");
     match execute_plan_named(&mut wgpu_plan, &named) {
         Ok(wgpu) => {
             eprintln!("wgpu f16 parity: adapter offers SHADER_F16, computed in half precision");
@@ -564,8 +592,15 @@ fn assert_packed_codec_parity(
         ("weight", to_block(&weight_blocks)),
         ("activation", QuantizedBlock::Float32(&activation)),
     ];
-    let mut wgpu_plan = plan_named(Backend::Wgpu, &packed_program, &[], &named, &[packed_sum])
-        .expect("omega::backend plans the packed matmul on wgpu");
+    let mut wgpu_plan = plan_named(
+        Engine::Gpu,
+        Some(GpuDriver::Wgpu),
+        &packed_program,
+        &[],
+        &named,
+        &[packed_sum],
+    )
+    .expect("omega::backend plans the packed matmul on wgpu");
     let wgpu = execute_plan_named(&mut wgpu_plan, &named)
         .expect("omega::backend runs the packed matmul on a real device");
 
@@ -574,7 +609,7 @@ fn assert_packed_codec_parity(
         ("weight", QuantizedBlock::Float32(&dequantized)),
         ("activation", QuantizedBlock::Float32(&activation)),
     ];
-    let mut cpu_plan = plan_named(Backend::Cpu, &f32_program, &[], &f32_named, &[f32_sum])
+    let mut cpu_plan = plan_named(Engine::Cpu, None, &f32_program, &[], &f32_named, &[f32_sum])
         .expect("omega::backend plans the dequantized oracle on cpu");
     let cpu = execute_plan_named(&mut cpu_plan, &f32_named)
         .expect("omega::backend runs the dequantized oracle on cpu");
@@ -721,7 +756,7 @@ fn matmul_runs_on_wgpu_at_cpu_parity_whichever_reduce_path_the_adapter_takes() {
     ];
 
     let mut cpu_plan =
-        plan_named(Backend::Cpu, &program, &[], &named, &[]).expect("cpu plans the matmul");
+        plan_named(Engine::Cpu, None, &program, &[], &named, &[]).expect("cpu plans the matmul");
     let cpu = execute_plan_named(&mut cpu_plan, &named).expect("cpu runs the matmul");
 
     let mut wgpu_plan = omega::wgpu_driver::plan_named(&program, &[], &named, &[])
@@ -796,15 +831,24 @@ fn the_full_mistral_cached_forward_runs_on_wgpu_at_cpu_parity() {
     let (program, symbols, roots, owned) = real_forward_fixture();
     let named = as_named_blocks(&owned);
 
-    let mut cpu_plan = plan_named(Backend::Cpu, &program, &symbols, &named, &roots)
+    let mut cpu_plan = plan_named(Engine::Cpu, None, &program, &symbols, &named, &roots)
         .expect("omega::backend plans the real forward on cpu");
     let cpu = execute_plan_named(&mut cpu_plan, &named)
         .expect("omega::backend runs the real forward on cpu");
 
-    let mut wgpu_plan = plan_named(Backend::Wgpu, &program, &symbols, &named, &roots)
-        .expect("omega::backend plans the real forward on wgpu");
+    let mut wgpu_plan = plan_named(
+        Engine::Gpu,
+        Some(GpuDriver::Wgpu),
+        &program,
+        &symbols,
+        &named,
+        &roots,
+    )
+    .expect("omega::backend plans the real forward on wgpu");
     let omega::backend::Plan::Wgpu(inner) = &wgpu_plan else {
-        unreachable!("plan_named(Backend::Wgpu, ..) always returns Plan::Wgpu");
+        unreachable!(
+            "plan_named(Engine::Gpu, Some(GpuDriver::Wgpu), ..) always returns Plan::Wgpu"
+        );
     };
     let limits = inner.limits();
     let needed = largest_named_block_bytes(&owned);

@@ -1,5 +1,5 @@
-//! Proves an ONNX-lowered program runs on `Backend::Metal` at parity with
-//! `Backend::Cpu`, through the SAME `omega::backend` wrapper
+//! Proves an ONNX-lowered program runs on `Engine::Gpu` at parity with
+//! `Engine::Cpu`, through the SAME `omega::backend` wrapper
 //! `backend_parity.rs` already proves is backend-agnostic — this file only
 //! changes where the `Vec<Op>` program comes from: `proxima_onnx::lower`
 //! instead of `proxima_tensor::spec`.
@@ -13,7 +13,7 @@
 //! `metal_parity.rs`'s `softmax_parity_matches_within_epsilon` and
 //! `embedding_matmul_parity_matches_within_epsilon` — this test is the first
 //! place an onnx-lowered program is the thing that reaches
-//! `omega::backend::execute_plan_named(.., Backend::Metal)`.
+//! `omega::backend::execute_plan_named(.., Engine::Gpu)`.
 
 #![cfg(all(feature = "cpu", feature = "metal", target_os = "macos"))]
 // every expect below runs against onnx bytes this test hand-encodes or a
@@ -21,7 +21,7 @@
 // recover.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-use omega::backend::{Backend, execute_plan_named, plan_named};
+use omega::backend::{Engine, GpuDriver, execute_plan_named, plan_named};
 use proxima_onnx::lower::lower_graph;
 use proxima_onnx::pipe::parse_complete;
 use proxima_tensor::QuantizedBlock;
@@ -284,13 +284,20 @@ fn an_onnx_lowered_mlp_runs_on_metal_at_cpu_parity_through_the_backend_wrapper()
         .1;
     let roots = [output_node];
 
-    let mut cpu_plan = plan_named(Backend::Cpu, &lowered.program, &[], &named, &roots)
+    let mut cpu_plan = plan_named(Engine::Cpu, None, &lowered.program, &[], &named, &roots)
         .expect("omega::backend plans the onnx-lowered mlp on cpu");
     let cpu = execute_plan_named(&mut cpu_plan, &named)
         .expect("omega::backend runs the onnx-lowered mlp on cpu");
 
-    let mut metal_plan = plan_named(Backend::Metal, &lowered.program, &[], &named, &roots)
-        .expect("omega::backend plans the onnx-lowered mlp on metal");
+    let mut metal_plan = plan_named(
+        Engine::Gpu,
+        Some(GpuDriver::Metal),
+        &lowered.program,
+        &[],
+        &named,
+        &roots,
+    )
+    .expect("omega::backend plans the onnx-lowered mlp on metal");
     let metal = execute_plan_named(&mut metal_plan, &named)
         .expect("omega::backend runs the onnx-lowered mlp on a real device");
 

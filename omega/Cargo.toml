@@ -90,29 +90,25 @@ metal = [
     "cached-attention-streaming",
     "metal-concurrent-dispatch",
 ]
-# Name reservations for `Backend`'s remaining variants (`src/backend.rs`) —
-# every variant exists regardless of which of these are on, so a caller can
-# name and select a backend that has no execution arm yet and get a real
-# "not implemented" error instead of the type not existing. No dependencies:
-# there is no driver behind any of these four yet, only the name and the
-# feature-gated branch in `backend::plan_named` that reports so.
-vulkan = []
+# `Vulkan`/`Npu`/`Ane` name-reservation features were deleted with the
+# `Backend` variants they backed (design §B.4, 2026-09-04): no emitter and no
+# driver ever existed behind any of the three, so there was nothing for a
+# feature flag to gate.
+#
 # `src/cuda.rs`: a real, tested CUDA C kernel emitter over the same BoundOp
 # descriptor `msl`/`wgsl` emit from (elementwise/reduce/scan, gather with an
 # atomicOr fault buffer, all five packed codecs, a warp-shuffle cooperative
 # reduce) — dependency-free, pure string generation, so it builds and its
 # tests run on any host including this crate's macOS CI gate with no NVIDIA
-# GPU present. `Backend::Cuda` stays `NotImplemented` in `backend.rs`: this
-# feature has no DRIVER yet (no `cudarc`/`cust`, no `cuModuleLoad`/
-# `cuLaunchKernel`), so nothing here can actually dispatch a kernel to a
-# device — only emit the source a future driver would compile and launch.
-# Needs `alloc`: `cuda.rs` is pure string generation (`String`/`Vec`/
+# GPU present. `cuda` names no `Engine`/`GpuDriver` variant: this is the
+# source EMITTER only, and has no DRIVER (no `cudarc`/`cust`, no
+# `cuModuleLoad`/`cuLaunchKernel`), so nothing here can actually dispatch a
+# kernel to a device — only emit the source a future driver would compile and
+# launch. Needs `alloc`: `cuda.rs` is pure string generation (`String`/`Vec`/
 # `format!`), the same alloc-tier shape `msl.rs` takes, and had no floor of
 # its own before this -- `--no-default-features --features cuda` failed to
 # resolve `alloc::string::String` until this line named the real dependency.
 cuda = ["alloc"]
-npu = []
-ane = []
 # Per-token wall-clock attribution for the Metal decode path (split-4019
 # initiative): tick counters over prepare (infer+bind), MSL emit, pipeline
 # cache hit/miss, block upload, per-op setup, GPU execute, and readback --

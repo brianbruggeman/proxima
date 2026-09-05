@@ -279,7 +279,7 @@ pub fn apply_serving_config(config: &ServingConfig, sequence: usize) -> Result<(
             "gpu_layers={} (-ngl): partial per-layer GPU offload needs a per-layer \
              placement decision this forward path does not make; only 0 (cpu-only) \
              and {GPU_LAYERS_ALL} (-ngl all, whole-model offload through \
-             `omega::backend::Backend::Metal`) are supported",
+             `omega::backend::Engine::Gpu`) are supported",
             config.gpu_layers
         )));
     }

@@ -22,8 +22,10 @@
 //! right control flow appear in the text — never numeric execution parity
 //! with a real device. A driver half (`cudarc`/`cust`, actual `cuModuleLoad`
 //! and `cuLaunchKernel`) is future work behind its own std-gated,
-//! dependency-bearing feature; `Backend::Cuda` stays `NotImplemented` until
-//! then (see `crate::backend`'s own doc).
+//! dependency-bearing feature. `crate::backend::Engine`/`GpuDriver` carry no
+//! `Cuda` variant at all -- this module is the source EMITTER only, never a
+//! third engine or a third driver (see `crate::backend`'s own doc, §B.4 of
+//! the 2026-09-04 design).
 //!
 //! # v1 scope
 //!
