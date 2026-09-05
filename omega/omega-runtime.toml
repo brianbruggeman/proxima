@@ -137,25 +137,24 @@ max_split = 8
 
 [packed_row_multi_activation]
 # maximum number of activation ("token") rows one simdgroup folds against a
-# streamed weight row in the row-blocked packed matmul kernel's
-# `metal-packed-row-multi-activation` path
-# (`msl.rs`'s `push_packed_row_multi_activation_body`) -- the register-tiling
-# cap on `s` from this landing's brief. Each streamed weight block's decode
-# (header + nibble extract) happens ONCE per block iteration and is folded
-# against every one of these activation rows in registers, so raising this
-# amortizes weight streaming over more tokens but grows live registers
-# roughly linearly: the activation gather alone is `group * 32` floats per
-# lane (`Q4K_BLOCK_ELEMENTS / lanes_per_block`(32) elements per sub-block),
-# plus `group * PACKED_ROWS_PER_GROUP`(4) accumulators. `token_total` above
-# this cap is TILED at the grid level (`ceil(token_total / group)`
-# simdgroup-groups along the token axis), not truncated -- see
-# sized::PACKED_ROW_ACTIVATION_GROUP. Must be a power of two, <= 32 (an
-# Apple GPU simdgroup's per-thread register file makes anything larger a
-# spill hazard, the same ceiling `packed_row_block.simdgroups` enforces for
-# occupancy). Overridable per-build via
-# `OMEGA_PACKED_ROW_MULTI_ACTIVATION_GROUP`. `feature =
-# "metal-packed-row-multi-activation"`-only; emitted only when that feature
-# is active.
+# streamed weight row in the row-blocked packed matmul kernel's multi-row
+# fold (`msl.rs`'s `push_packed_row_multi_row_body`, `push_packed_row_blocked_body`'s
+# own `token_total > 1` branch) -- the register-tiling cap on `s`. Each
+# streamed weight block's decode (header + nibble extract) happens ONCE per
+# block iteration and is folded against every one of these activation rows
+# in registers, so raising this amortizes weight streaming over more tokens
+# but grows live registers roughly linearly: the activation gather alone is
+# `group * 32` floats per lane (`Q4K_BLOCK_ELEMENTS / lanes_per_block`(32)
+# elements per sub-block), plus `group * PACKED_ROWS_PER_GROUP`(4)
+# accumulators. `token_total` above this cap is TILED at the grid level
+# (`ceil(token_total / group)` simdgroup-groups along the token axis), not
+# truncated -- see sized::PACKED_ROW_ACTIVATION_GROUP. Must be a power of
+# two, <= 32 (an Apple GPU simdgroup's per-thread register file makes
+# anything larger a spill hazard, the same ceiling
+# `packed_row_block.simdgroups` enforces for occupancy). Overridable
+# per-build via `OMEGA_PACKED_ROW_MULTI_ACTIVATION_GROUP`. Always emitted --
+# the multi-row fold is unconditional, keyed off the concrete token extent
+# `classify_packed_row_block` derives per op, not a compile feature.
 group = 8
 
 [spans]

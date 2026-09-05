@@ -1,0 +1,437 @@
+#include <metal_stdlib>
+using namespace metal;
+
+inline float proxima_erf(float x) {
+    float sign = x < 0.0f ? -1.0f : 1.0f;
+    float magnitude = fabs(x);
+    float t = 1.0f / fma(0.3275911f, magnitude, 1.0f);
+    float poly = t * fma(fma(fma(fma(1.061405429f, t, -1.453152027f), t, 1.421413741f), t, -0.284496736f), t, 0.254829592f);
+    return sign * fma(poly, -exp(-magnitude * magnitude), 1.0f);
+}
+
+
+// ports proxima_gguf::quant::q4_k::get_scale_min_k4
+static inline uchar2 q4k_scale_min(device const uchar *scales, uint sub_block) {
+    if (sub_block < 4u) {
+        return uchar2(scales[sub_block] & 63, scales[sub_block + 4u] & 63);
+    }
+    uchar scale = (scales[sub_block + 4u] & 0x0F) | ((scales[sub_block - 4u] >> 6) << 4);
+    uchar minimum = (scales[sub_block + 4u] >> 4) | ((scales[sub_block] >> 6) << 4);
+    return uchar2(scale, minimum);
+}
+
+// element `index` (0..256) of one Q4_K super-block, byte-for-byte the value
+// proxima_gguf::quant::q4_k::dequantize_block writes at the same index.
+static inline float q4k_element(device const uchar *block, uint index) {
+    ushort d_bits = (ushort)((uint)block[0] | ((uint)block[1] << 8));
+    ushort dmin_bits = (ushort)((uint)block[2] | ((uint)block[3] << 8));
+    float d = (float)as_type<half>(d_bits);
+    float dmin = (float)as_type<half>(dmin_bits);
+
+    device const uchar *scales = block + 4;
+    device const uchar *qs = block + 16;
+
+    uint group = index / 64u;
+    uint within = index % 64u;
+    bool low_nibble = within < 32u;
+    uint sub_block = 2u * group + (low_nibble ? 0u : 1u);
+    uint byte_index = group * 32u + (within % 32u);
+
+    uchar2 scale_min = q4k_scale_min(scales, sub_block);
+    float scale = d * (float)scale_min.x;
+    float minimum = dmin * (float)scale_min.y;
+    uchar nibble = low_nibble ? (qs[byte_index] & 0x0F) : (qs[byte_index] >> 4);
+    return scale * (float)nibble - minimum;
+}
+
+// A super-block's per-sub-block scale and min, decoded ONCE for a run of
+// elements inside that sub-block. `d`, `dmin` and the 6-bit scale/min pair
+// are constant across all 32 elements of a sub-block, so deriving them per
+// element (what `q4k_element` does) is 8-40x the arithmetic of the nibble
+// extract it feeds. ggml decodes once per super-block and spends ~1.6 ops
+// per weight; this is the same amortization.
+struct q4k_header { float scale; float minimum; };
+
+static inline q4k_header q4k_header_for(device const uchar *block, uint index) {
+    ushort d_bits = (ushort)((uint)block[0] | ((uint)block[1] << 8));
+    ushort dmin_bits = (ushort)((uint)block[2] | ((uint)block[3] << 8));
+    device const uchar *scales = block + 4;
+    uint group = index / 64u;
+    uint within = index % 64u;
+    uint sub_block = 2u * group + (within < 32u ? 0u : 1u);
+    uchar2 scale_min = q4k_scale_min(scales, sub_block);
+    q4k_header header;
+    header.scale = (float)as_type<half>(d_bits) * (float)scale_min.x;
+    header.minimum = (float)as_type<half>(dmin_bits) * (float)scale_min.y;
+    return header;
+}
+
+// one element, given its sub-block's already-decoded header. This is the
+// whole per-element cost in the tiled loop: one byte load, one mask or
+// shift, one fma.
+static inline float q4k_value(device const uchar *block, uint index, q4k_header header) {
+    device const uchar *qs = block + 16;
+    uint group = index / 64u;
+    uint within = index % 64u;
+    uint byte_index = group * 32u + (within % 32u);
+    uchar nibble = (within < 32u) ? (qs[byte_index] & 0x0F) : (qs[byte_index] >> 4);
+    return header.scale * (float)nibble - header.minimum;
+}
+
+static inline float q4k_pair_dot(device const uchar *block, uint iq, uint ir, thread const float *yl, thread const float *yh) {
+    device const uchar *qs = block + 16;
+    // ggml's q1/q2 pointers are uint16_t, so its +32 offset advances 64 bytes.
+    uint byte_base = 32u * iq + 8u * ir;
+    uint low_index = 64u * iq + 8u * ir;
+    q4k_header h0 = q4k_header_for(block, low_index);
+    q4k_header h1 = q4k_header_for(block, low_index + 32u);
+    q4k_header h2 = q4k_header_for(block, low_index + 128u);
+    q4k_header h3 = q4k_header_for(block, low_index + 160u);
+    float result = 0.0f;
+    for (uint i = 0u; i < 4u; ++i) {
+        uint word1 = (uint)qs[byte_base + 2u * i] | ((uint)qs[byte_base + 2u * i + 1u] << 8);
+        uint word2 = (uint)qs[byte_base + 64u + 2u * i] | ((uint)qs[byte_base + 64u + 2u * i + 1u] << 8);
+        result += (h0.scale * (float)(word1 & 0x0Fu) - h0.minimum) * yl[2u * i + 0u];
+        result += (h0.scale * (float)((word1 >> 8) & 0x0Fu) - h0.minimum) * yl[2u * i + 1u];
+        result += (h1.scale * (float)((word1 >> 4) & 0x0Fu) - h1.minimum) * yl[2u * i + 8u];
+        result += (h1.scale * (float)((word1 >> 12) & 0x0Fu) - h1.minimum) * yl[2u * i + 9u];
+        result += (h2.scale * (float)(word2 & 0x0Fu) - h2.minimum) * yh[2u * i + 0u];
+        result += (h2.scale * (float)((word2 >> 8) & 0x0Fu) - h2.minimum) * yh[2u * i + 1u];
+        result += (h3.scale * (float)((word2 >> 4) & 0x0Fu) - h3.minimum) * yh[2u * i + 8u];
+        result += (h3.scale * (float)((word2 >> 12) & 0x0Fu) - h3.minimum) * yh[2u * i + 9u];
+    }
+    return result;
+}
+
+// Eight consecutive levels from TWO 32-bit loads instead of eight byte
+// loads. A lane's run is `slot .. slot+7` and never crosses a 32-element
+// sub-block boundary, so all eight share a group and a nibble half, and
+// their bytes are eight CONSECUTIVE bytes of `qs`. `slot % 32` is one of
+// {0,8,16,24} and a super-block is 144 bytes (a multiple of 16), so the
+// address is 4-byte aligned and the `uint` cast is sound.
+//
+// CORRECTION (perf/metal-q4k-mask-fma): the claim this comment used to make
+// here -- "ggml does the same thing one width down ... the nibble extract is
+// cheap and the LOAD is what costs" -- is FALSE, verified against
+// `ggml-metal.metal:5157-5165` (`kernel_mul_mv_q4_K_f32_impl`). ggml does NOT
+// shift at all: it masks four FIXED bit positions (`q1[i] & 0x000F/0x0F00/
+// 0x00F0/0xF000`) straight off a `uint16_t` load and folds the resulting
+// 1x/16x/256x residual scale into the per-sub-block combine
+// (`ggml-metal.metal:5171-5175`). This function instead computes a RUNTIME
+// `shift` (0 or 4, not known at compile time) and adds it into every one of
+// the eight extractions below, which ggml's masked form has no equivalent
+// of. See `push_q4k_product_reduce_body`'s `metal-q4k-mask-fma` arm (Rust,
+// not MSL -- it generates the masked loop inline so it stays generic over
+// this kernel's `element_type`) for the mask-without-shift port of ggml's
+// actual technique, adapted to this function's one-nibble-per-byte layout
+// (ggml's is two-nibbles-per-byte interleaved across two sub-blocks per
+// load, a different packing this file's lane mapping does not share).
+static inline void q4k_run8(device const uchar *block, uint index, thread float *out) {
+    device const uchar *qs = block + 16;
+    uint group = index / 64u;
+    uint within = index % 64u;
+    uint byte_index = group * 32u + (within % 32u);
+    device const uint *words = (device const uint *)(qs + byte_index);
+    uint w0 = words[0];
+    uint w1 = words[1];
+    uint shift = (within < 32u) ? 0u : 4u;
+    out[0] = (float)((w0 >> (shift +  0u)) & 0xFu);
+    out[1] = (float)((w0 >> (shift +  8u)) & 0xFu);
+    out[2] = (float)((w0 >> (shift + 16u)) & 0xFu);
+    out[3] = (float)((w0 >> (shift + 24u)) & 0xFu);
+    out[4] = (float)((w1 >> (shift +  0u)) & 0xFu);
+    out[5] = (float)((w1 >> (shift +  8u)) & 0xFu);
+    out[6] = (float)((w1 >> (shift + 16u)) & 0xFu);
+    out[7] = (float)((w1 >> (shift + 24u)) & 0xFu);
+}
+
+// `metal-q4k-single-fetch` (opt-in, see `push_q4k_single_fetch_body`): ONE
+// 8-byte (two-word) load, BOTH nibble halves of it -- eight low-nibble
+// levels (elements `low_index .. low_index+8`) AND the eight high-nibble
+// levels of the SAME bytes (elements `low_index+32 .. low_index+40`, ggml's
+// and `dequantize_row_q4_K`'s own "32 elements apart, same byte" pairing —
+// see `q4_k.rs::dequantize_block`'s doc). `q4k_run8` above issues this exact
+// load TWICE for the pair of lanes that owns a byte range (once per nibble
+// half); this issues it ONCE and reads out both halves, which is the whole
+// point of the feature. `low_index` must be a "low" index (`index % 64 <
+// 32`) — callers only ever pass one of `sf_low_base + c*8`.
+static inline void q4k_run8_dual(
+    device const uchar *block,
+    uint low_index,
+    thread float *out_low,
+    thread float *out_high
+) {
+    device const uchar *qs = block + 16;
+    uint group = low_index / 64u;
+    uint within = low_index % 64u;
+    uint byte_index = group * 32u + within;
+    device const uint *words = (device const uint *)(qs + byte_index);
+    uint w0 = words[0];
+    uint w1 = words[1];
+    out_low[0] = (float)((w0 >>  0u) & 0xFu);
+    out_low[1] = (float)((w0 >>  8u) & 0xFu);
+    out_low[2] = (float)((w0 >> 16u) & 0xFu);
+    out_low[3] = (float)((w0 >> 24u) & 0xFu);
+    out_low[4] = (float)((w1 >>  0u) & 0xFu);
+    out_low[5] = (float)((w1 >>  8u) & 0xFu);
+    out_low[6] = (float)((w1 >> 16u) & 0xFu);
+    out_low[7] = (float)((w1 >> 24u) & 0xFu);
+    out_high[0] = (float)((w0 >>  4u) & 0xFu);
+    out_high[1] = (float)((w0 >> 12u) & 0xFu);
+    out_high[2] = (float)((w0 >> 20u) & 0xFu);
+    out_high[3] = (float)((w0 >> 28u) & 0xFu);
+    out_high[4] = (float)((w1 >>  4u) & 0xFu);
+    out_high[5] = (float)((w1 >> 12u) & 0xFu);
+    out_high[6] = (float)((w1 >> 20u) & 0xFu);
+    out_high[7] = (float)((w1 >> 28u) & 0xFu);
+}
+
+
+// ports proxima_gguf::quant::q5_k::get_scale_min_k4 -- byte-for-byte the
+// same function q4k_scale_min above computes, restated here rather than
+// shared (see this constant's own doc).
+static inline uchar2 q5k_scale_min(device const uchar *scales, uint sub_block) {
+    if (sub_block < 4u) {
+        return uchar2(scales[sub_block] & 63, scales[sub_block + 4u] & 63);
+    }
+    uchar scale = (scales[sub_block + 4u] & 0x0F) | ((scales[sub_block - 4u] >> 6) << 4);
+    uchar minimum = (scales[sub_block + 4u] >> 4) | ((scales[sub_block] >> 6) << 4);
+    return uchar2(scale, minimum);
+}
+
+// one Q5_K super-block's per-sub-block scale, min, and high-bit MASK,
+// decoded ONCE for a run of elements inside that sub-block -- the same
+// amortization q4k_header_for makes, widened to also carry which `qh` bit
+// this sub-block's elements read (constant across the whole 32-element
+// sub-block: `chunk` and "low or high half" are both fixed for it).
+struct q5k_header { float scale; float minimum; uchar mask; };
+
+static inline q5k_header q5k_header_for(device const uchar *block, uint index) {
+    ushort d_bits = (ushort)((uint)block[0] | ((uint)block[1] << 8));
+    ushort dmin_bits = (ushort)((uint)block[2] | ((uint)block[3] << 8));
+    device const uchar *scales = block + 4;
+
+    uint chunk = index / 64u;
+    uint within = index % 64u;
+    bool low = within < 32u;
+    uint sub_block = 2u * chunk + (low ? 0u : 1u);
+
+    uchar2 scale_min = q5k_scale_min(scales, sub_block);
+    q5k_header header;
+    header.scale = (float)as_type<half>(d_bits) * (float)scale_min.x;
+    header.minimum = (float)as_type<half>(dmin_bits) * (float)scale_min.y;
+    header.mask = low ? (uchar)(1u << (2u * chunk)) : (uchar)(2u << (2u * chunk));
+    return header;
+}
+
+// one element, given its sub-block's already-decoded header. `qh` is
+// indexed by `offset` (0..32) alone, never by `chunk` -- the same
+// within-sub-block-position indexing `dequantize_block`'s own doc calls
+// out as `Q5_K`'s "easiest to get silently wrong" trap: two elements in
+// DIFFERENT chunks but the SAME local offset read different BITS of the
+// SAME `qh` byte (the header's own `mask` is what picks the right bit).
+static inline float q5k_value(device const uchar *block, uint index, q5k_header header) {
+    device const uchar *qh = block + 16;
+    device const uchar *qs = block + 48;
+
+    uint chunk = index / 64u;
+    uint within = index % 64u;
+    bool low = within < 32u;
+    uint offset = within % 32u;
+
+    uchar qs_byte = qs[chunk * 32u + offset];
+    uchar nibble = low ? (qs_byte & 0x0Fu) : (qs_byte >> 4u);
+    float high = (qh[offset] & header.mask) != 0u ? 16.0f : 0.0f;
+    return header.scale * ((float)nibble + high) - header.minimum;
+}
+
+// element `index` of one Q5_K super-block, decoding its own header first --
+// the generic per-element path (`operand_read`'s non-row-blocked callers)
+// has no amortized header to reuse across elements, unlike the row-blocked
+// path's `q5k_header_for` decoded once per sub-block.
+static inline float q5k_element(device const uchar *block, uint index) {
+    return q5k_value(block, index, q5k_header_for(block, index));
+}
+
+
+static inline float q5k_pair_dot(device const uchar *block, uint iq, uint ir, thread const float *yl, thread const float *yh) {
+    device const uchar *qh = block + 16;
+    device const uchar *qs = block + 48;
+    uint byte_base = 32u * iq + 8u * ir;
+    uint low_index = 64u * iq + 8u * ir;
+    q5k_header h0 = q5k_header_for(block, low_index);
+    q5k_header h1 = q5k_header_for(block, low_index + 32u);
+    q5k_header h2 = q5k_header_for(block, low_index + 128u);
+    q5k_header h3 = q5k_header_for(block, low_index + 160u);
+    uchar hm1 = (uchar)(1u << (2u * iq));
+    uchar hm2 = (uchar)(hm1 << 1u);
+    uchar hm3 = (uchar)(hm1 << 4u);
+    uchar hm4 = (uchar)(hm2 << 4u);
+    float result = 0.0f;
+    for (uint l = 0u; l < 8u; ++l) {
+        uchar q1 = qs[byte_base + l];
+        uchar q2 = qs[byte_base + 64u + l];
+        uchar h = qh[8u * ir + l];
+        float low0 = (float)(q1 & 0x0Fu) + ((h & hm1) != 0u ? 16.0f : 0.0f);
+        float low1 = (float)(q1 >> 4u) + ((h & hm2) != 0u ? 16.0f : 0.0f);
+        float high0 = (float)(q2 & 0x0Fu) + ((h & hm3) != 0u ? 16.0f : 0.0f);
+        float high1 = (float)(q2 >> 4u) + ((h & hm4) != 0u ? 16.0f : 0.0f);
+        result += (h0.scale * low0 - h0.minimum) * yl[l];
+        result += (h1.scale * low1 - h1.minimum) * yl[l + 8u];
+        result += (h2.scale * high0 - h2.minimum) * yh[l];
+        result += (h3.scale * high1 - h3.minimum) * yh[l + 8u];
+    }
+    return result;
+}
+
+
+// one Q6_K super-block's scale `d` -- decoded ONCE per super-block by the
+// row-blocked path (see push_packed_row_blocked_body), since it is constant
+// across all 256 elements (unlike Q4_K's per-sub-block header).
+struct q6k_header { float d; };
+
+static inline q6k_header q6k_header_for(device const uchar *block) {
+    ushort d_bits = (ushort)((uint)block[208] | ((uint)block[209] << 8));
+    q6k_header header;
+    header.d = (float)as_type<half>(d_bits);
+    return header;
+}
+
+// element `index` (0..256) of one Q6_K super-block, given its super-block's
+// already-decoded `d` -- byte-for-byte the value
+// proxima_gguf::quant::q6_k::dequantize_block writes at the same index.
+static inline float q6k_value(device const uchar *block, uint index, q6k_header header) {
+    uint half_index = index / 128u;
+    uint local = index % 128u;
+    uint l = local % 32u;
+    uint lane = local / 32u;
+    uint sub_block_in_half = l / 16u;
+
+    device const uchar *ql = block + half_index * 64u;
+    device const uchar *qh = block + 128u + half_index * 32u;
+    device const uchar *scales = block + 192u;
+
+    uchar ql_byte = (lane % 2u == 0u) ? ql[l] : ql[l + 32u];
+    uchar nibble = (lane < 2u) ? (ql_byte & 0x0Fu) : (ql_byte >> 4u);
+    uchar high2 = (qh[l] >> (uchar)(lane * 2u)) & 0x03u;
+    uchar level = nibble | (high2 << 4u);
+
+    uchar scale_byte = scales[half_index * 8u + sub_block_in_half + lane * 2u];
+    float scale = (float)(char)scale_byte;
+    float quant = (float)level - 32.0f;
+    return header.d * scale * quant;
+}
+
+// element `index` of one Q6_K super-block, decoding its own header first --
+// the generic per-element path (`operand_read`'s non-row-blocked callers)
+// has no amortized header to reuse across elements, unlike the row-blocked
+// path's `q6k_header_for` decoded once per super-block.
+static inline float q6k_element(device const uchar *block, uint index) {
+    return q6k_value(block, index, q6k_header_for(block));
+}
+
+
+// element `index` (0..32) of one Q8_0 block, byte-for-byte the value
+// proxima_gguf::quant::q8_0::dequantize_block writes at the same index.
+static inline float q8_0_element(device const uchar *block, uint index) {
+    ushort d_bits = (ushort)((uint)block[0] | ((uint)block[1] << 8));
+    float d = (float)as_type<half>(d_bits);
+    char level = (char)block[2u + index];
+    return (float)level * d;
+}
+
+
+// element `index` (0..32) of one Q4_0 block, byte-for-byte the value
+// proxima_gguf::quant::q4_0::dequantize_block writes at the same index.
+static inline float q4_0_element(device const uchar *block, uint index) {
+    ushort d_bits = (ushort)((uint)block[0] | ((uint)block[1] << 8));
+    float d = (float)as_type<half>(d_bits);
+    uchar byte = block[2u + (index % 16u)];
+    int nibble = (index < 16u) ? (int)(byte & 0x0Fu) : (int)(byte >> 4u);
+    return (float)(nibble - 8) * d;
+}
+
+
+// element `index` (always 0 -- BFloat16 has no super-block) of one BFloat16
+// block: the top 16 bits of the f32 this pair of bytes came from,
+// reconstructed by shifting them back into place.
+static inline float bf16_element(device const uchar *block, uint index) {
+    (void)index;
+    uint bits = ((uint)block[0] | ((uint)block[1] << 8)) << 16u;
+    return as_type<float>(bits);
+}
+
+struct Uniforms {
+    long output_total;
+    long reduction_total;
+    long output_extents[2];
+    long reduction_extents[1];
+    long operand_base[2];
+    long operand_strides[2][3];
+    long out_base;
+    long out_strides[3];
+};
+
+kernel void omega_reduce_r3_o2_n2_multiply_add_zero(
+    device const uchar* in0 [[buffer(0)]],
+    device const float* in1 [[buffer(1)]],
+    device float* out [[buffer(2)]],
+    constant Uniforms& u [[buffer(3)]],
+    uint gid [[thread_position_in_grid]])
+{
+    long output_index = (long)gid / 32;
+    uint lane = gid % 32u;
+    long group_first = output_index * 4;
+    float sumf[4];
+    for (int q = 0; q < 4; ++q) { sumf[q] = (lane == 0u) ? (0.0f) : (0.0f); }
+    long weight_base[4];
+    long other_base[4];
+    for (int q = 0; q < 4; ++q) {
+        long flat = group_first + q;
+        long remaining_q = flat;
+        long coord_q[3];
+        for (int d = 0; d < 3; ++d) { coord_q[d] = 0; }
+        coord_q[1] = remaining_q % u.output_extents[1]; remaining_q /= u.output_extents[1];
+        coord_q[0] = remaining_q % u.output_extents[0]; remaining_q /= u.output_extents[0];
+        long wb = u.operand_base[0];
+        long ob = u.operand_base[1];
+        wb += coord_q[0] * u.operand_strides[0][0];
+        ob += coord_q[0] * u.operand_strides[1][0];
+        wb += coord_q[1] * u.operand_strides[0][1];
+        ob += coord_q[1] * u.operand_strides[1][1];
+        weight_base[q] = wb;
+        other_base[q] = ob;
+    }
+    long other_stride = u.operand_strides[1][2];
+    uint ix = (uint)lane / 8u;
+    uint it = (uint)lane % 8u;
+    uint slot = it * 32u;
+    uint iq = it / 4u; uint ir = it % 4u;
+    float yl[16]; float yh[16];
+    int super_blocks = (int)u.reduction_total / 256;
+    for (int ib = (int)ix; ib < super_blocks; ib += 4) {
+        int elem0 = ib * 256 + (int)slot;
+        device const float *y4 = in1 + other_base[0] + (long)ib * 256 * other_stride + (long)(64u * iq + 8u * ir) * other_stride;
+        for (uint i = 0u; i < 8u; ++i) { yl[i] = y4[i]; yl[i + 8u] = y4[i + 32u]; yh[i] = y4[i + 128u]; yh[i + 8u] = y4[i + 160u]; }
+        for (int q = 0; q < 4; ++q) {
+            device const uchar *blk = in0 + ((int)weight_base[q] / 256 + ib) * 144;
+            sumf[q] = sumf[q] + q4k_pair_dot(blk, iq, ir, yl, yh);
+        }
+    }
+    for (int q = 0; q < 4; ++q) {
+        float reduced = simd_sum(sumf[q]);
+        long flat = group_first + q;
+        if (lane == 0u && flat < u.output_total) {
+            long remaining_q = flat;
+            long coord_q[3];
+            for (int d = 0; d < 3; ++d) { coord_q[d] = 0; }
+            coord_q[1] = remaining_q % u.output_extents[1]; remaining_q /= u.output_extents[1];
+            coord_q[0] = remaining_q % u.output_extents[0]; remaining_q /= u.output_extents[0];
+            long out_offset = u.out_base;
+            out_offset += coord_q[0] * u.out_strides[0];
+            out_offset += coord_q[1] * u.out_strides[1];
+            out_offset += coord_q[2] * u.out_strides[2];
+            out[out_offset] = reduced;
+        }
+    }
+}
