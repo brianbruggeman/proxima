@@ -268,6 +268,24 @@ pub enum MetalError {
     /// stderr line beside a silently returned `Ok`.
     #[error("arena peak_bytes={peak_bytes} exceeds arena_transient_cap={cap}")]
     ArenaOverCap { peak_bytes: usize, cap: usize },
+    /// `PROXIMA_METAL_KIND_FILTER`'s `kind:` term named a string
+    /// `classify_kind` never returns -- ROW 308 found a stale or
+    /// misspelled substring silently dropped the WHOLE plan instead of
+    /// isolating one kind (`KindFilter::matches` returns `false` for every
+    /// op, so `ablation_skip` becomes `true` for everything). This is now a
+    /// typed error at the same point that env var is first consulted,
+    /// rather than a silently degenerate ablation run.
+    #[error("kind filter term {term:?} matches no classify_kind arm")]
+    UnknownKindFilterTerm { term: String },
+    /// A `PROXIMA_METAL_KIND_FILTER` value that, applied against THIS plan's
+    /// own dispatch sequence, removes zero ops -- the same silent-degenerate
+    /// failure [`UnknownKindFilterTerm`](Self::UnknownKindFilterTerm) covers
+    /// for a `kind:` term, extended to `family:` terms (a family name is
+    /// data-dependent on the loaded checkpoint, so it cannot be validated
+    /// against a static list the way a `kind:` term can -- a typo there
+    /// only ever shows up as "removed nothing").
+    #[error("kind filter {filter:?} matched zero dispatches in this plan")]
+    KindFilterMatchesNothing { filter: String },
 }
 /// This thread's Metal device paired with its command queue — both created
 /// once per thread rather than per [`execute`] call.
@@ -1113,44 +1131,109 @@ fn hazard_step<Id: Eq + core::hash::Hash + Copy>(
 /// `Reduce { keep: Keep::Scan, .. }`), and `reduce-tiled-gemm` /
 /// `reduce-packed-row-blocked` / `reduce-cooperative` /
 /// `reduce-generic-scalar` / `reduce-unclassified` for `Reduce { keep:
-/// Keep::Reduce, .. }`. A stale substring (e.g. the pre-refactor
-/// `cached-attention` with a hyphen, which matches nothing today) is not
-/// rejected -- [`KindFilter::matches`] returns `false` for every op, so
-/// EVERY op is skipped and `encode_dispatch_calls` reads `0` for the whole
-/// run instead of isolating one kind. There is no separate accepted-values
-/// list to fall out of sync here; this list mirrors `classify_kind`'s match
-/// arms directly and must be re-read from there, not memorized, whenever
-/// `classify_kind` gains or renames an arm.
+/// Keep::Reduce, .. }`. A term outside this vocabulary is now rejected
+/// eagerly by [`KindFilter::from_env`] -- [`MetalError::UnknownKindFilterTerm`]
+/// -- and a filter that would remove zero ops or every op from THIS plan is
+/// rejected by [`validate_kind_filter`] -- [`MetalError::KindFilterMatchesNothing`].
+/// Before these two checks landed (ROW 308), a stale or misspelled term (the
+/// pre-refactor `cached-attention` with a hyphen, which matches nothing
+/// today) silently degenerated to "every op skipped" instead of failing
+/// loudly: `KindFilter::matches` returned `false` for every op, so
+/// `ablation_skip` was `true` for everything and `encode_dispatch_calls`
+/// read `0` for the whole run.
+#[cfg(feature = "instrument")]
+struct FilterTerm(String);
+
+#[cfg(feature = "instrument")]
+impl FilterTerm {
+    fn parse(raw: &str) -> Result<Self, MetalError> {
+        if KNOWN_KIND_SUBSTRINGS.iter().any(|known| known.contains(raw)) {
+            Ok(Self(raw.to_string()))
+        } else {
+            Err(MetalError::UnknownKindFilterTerm {
+                term: raw.to_string(),
+            })
+        }
+    }
+
+    fn matches(&self, kind: &str) -> bool {
+        kind.contains(self.0.as_str())
+    }
+}
+
+/// [`classify_kind`]'s own live return-value vocabulary, restated here only
+/// for [`FilterTerm::parse`]'s eager validation -- see [`KindFilter`]'s own
+/// doc for why this list must be re-read from `classify_kind`, not
+/// memorized, whenever that function gains or renames an arm.
+#[cfg(feature = "instrument")]
+const KNOWN_KIND_SUBSTRINGS: &[&str] = &[
+    "cached_attention",
+    "elementwise",
+    "iota",
+    "constant",
+    "keep::scan fold",
+    "reduce-tiled-gemm",
+    "reduce-packed-row-blocked",
+    "reduce-cooperative",
+    "reduce-generic-scalar",
+    "reduce-unclassified",
+];
+
 #[cfg(feature = "instrument")]
 struct KindFilter {
-    substrings: Vec<String>,
+    raw: String,
+    terms: Vec<FilterTerm>,
     negate: bool,
 }
 
 #[cfg(feature = "instrument")]
 impl KindFilter {
-    fn from_env() -> Option<Self> {
-        let raw = std::env::var("PROXIMA_METAL_KIND_FILTER").ok()?;
+    fn from_env() -> Result<Option<Self>, MetalError> {
+        let Ok(raw) = std::env::var("PROXIMA_METAL_KIND_FILTER") else {
+            return Ok(None);
+        };
         let (negate, body) = match raw.strip_prefix('!') {
             Some(rest) => (true, rest),
             None => (false, raw.as_str()),
         };
-        let substrings: Vec<String> = body
+        let terms = body
             .split(',')
             .map(str::trim)
-            .filter(|substring| !substring.is_empty())
-            .map(String::from)
-            .collect();
-        Some(Self { substrings, negate })
+            .filter(|term| !term.is_empty())
+            .map(FilterTerm::parse)
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(Some(Self { raw, terms, negate }))
     }
 
     fn matches(&self, kind: &str) -> bool {
-        let any = self
-            .substrings
-            .iter()
-            .any(|substring| kind.contains(substring.as_str()));
+        let any = self.terms.iter().any(|term| term.matches(kind));
         any != self.negate
     }
+}
+
+/// Applies `filter` to every op in `prepared.resolved` the same way the
+/// main dispatch loop below will, and rejects a filter that would remove
+/// zero ops or every op -- either shape means the filter's own terms never
+/// isolated anything in THIS plan, the silent-degenerate failure ROW 308
+/// found (see [`KindFilter`]'s own doc).
+#[cfg(feature = "instrument")]
+fn validate_kind_filter(
+    filter: &KindFilter,
+    prepared: &Prepared,
+    packed_operands: &PackedOperands,
+) -> Result<(), MetalError> {
+    let total = prepared.resolved.len();
+    let removed = prepared
+        .resolved
+        .iter()
+        .filter(|bound| !filter.matches(classify_kind(bound, packed_operands)))
+        .count();
+    if removed == 0 || removed == total {
+        return Err(MetalError::KindFilterMatchesNothing {
+            filter: filter.raw.clone(),
+        });
+    }
+    Ok(())
 }
 
 /// [`KindFilter`]-excluded counterpart of [`encode_op`]'s output-buffer half:
@@ -1259,6 +1342,13 @@ pub fn execute_plan_with_placements(
         device_buffers.insert(*node, buffer);
     }
 
+    #[cfg(feature = "instrument")]
+    let kind_filter = KindFilter::from_env()?;
+    #[cfg(feature = "instrument")]
+    if let Some(filter) = &kind_filter {
+        validate_kind_filter(filter, prepared, packed_operands)?;
+    }
+
     let command_buffer = queue
         .commandBuffer()
         .ok_or_else(|| MetalError::CompileFailed {
@@ -1290,8 +1380,6 @@ pub fn execute_plan_with_placements(
     // own position, the direct evidence a write-before-read ordering claim
     // needs (this function's own doc, "Within-call aliasing"). Silent unless
     // a caller raises `RUST_LOG` to `trace` for this target.
-    #[cfg(feature = "instrument")]
-    let kind_filter = KindFilter::from_env();
     let mut pending_faults: Vec<PendingFault<'_>> = Vec::new();
     for (position, bound) in prepared.resolved.iter().enumerate() {
         #[cfg(feature = "instrument")]
