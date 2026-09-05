@@ -45,6 +45,8 @@
 
 use alloc::format;
 
+#[cfg(all(feature = "metal", target_os = "macos"))]
+use omega::MathMode;
 use proxima_gguf::types::GgmlType;
 
 use crate::error::InteropError;
@@ -155,6 +157,17 @@ pub struct ServingConfig<'model> {
     /// `1` disables bucketing (`merged_len` unchanged). Must be `>= 1` --
     /// [`apply_serving_config`] rejects `0`.
     pub kv_bucket_tokens: usize,
+    /// Not an upstream llama-server flag -- `omega::metal::MathMode` for
+    /// every kernel this call's `Plan`s compile on the Metal backend
+    /// (`generate.rs`'s `BackendRuntime::new` reads this once per call and
+    /// sets it via `Plan::set_math_mode`). No effect when `gpu_layers`
+    /// selects the Cpu engine. `Relaxed` (this field's default) is the
+    /// measured winner: `proxima-tensor/docs/discipline.md` ROW 296/297
+    /// found `Safe`'s 179.2 GB/s and `Relaxed`'s 240.9-247.3 GB/s produce
+    /// identical decode output on the ROW 297 acceptance loop, so `Safe`
+    /// stays reachable as an explicit override, not the default.
+    #[cfg(all(feature = "metal", target_os = "macos"))]
+    pub math_mode: MathMode,
 }
 
 impl Default for ServingConfig<'static> {
@@ -195,6 +208,8 @@ impl Default for ServingConfig<'static> {
             // 1) 42.54 ms/token, hits 5/8 (64 also wins at 41.18/hits
             // 6/8; 256 loses at 48.18 -- CARD 6.3's full table).
             kv_bucket_tokens: 32,
+            #[cfg(all(feature = "metal", target_os = "macos"))]
+            math_mode: MathMode::Relaxed,
         }
     }
 }
@@ -459,6 +474,8 @@ mod tests {
             presence_penalty: 0.0,
             seed: 0,
             kv_bucket_tokens: 32,
+            #[cfg(all(feature = "metal", target_os = "macos"))]
+            math_mode: MathMode::Relaxed,
         };
         apply_serving_config(&config, 6).expect("fully supported config must apply cleanly");
     }
@@ -590,6 +607,8 @@ mod tests {
             presence_penalty: 0.0,
             seed: 0,
             kv_bucket_tokens: 64,
+            #[cfg(all(feature = "metal", target_os = "macos"))]
+            math_mode: MathMode::Relaxed,
         };
         assert_eq!(via_default_override, via_full_literal);
         assert_eq!(via_default_override.kv_bucket_tokens, 64);

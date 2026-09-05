@@ -489,6 +489,30 @@ pub fn mark_resident(plan: &mut Plan, resident_names: &std::collections::BTreeSe
     }
 }
 
+/// Sets [`metal::MathMode`] on [`Plan::Metal`] -- see that type's own doc
+/// for the measured rationale (`proxima-tensor/docs/discipline.md` ROW
+/// 296/297). A no-op on every other arm: `Plan::Cpu`'s interpreter has no
+/// `MTLCompileOptions` to set, and v1's `wgpu_driver::WgpuPlan` has no
+/// analogous knob. Gated on `metal`+macos (unlike [`mark_resident`]) because
+/// its own parameter, [`metal::MathMode`], only exists in that build.
+#[cfg(all(feature = "metal", target_os = "macos"))]
+pub fn set_math_mode(plan: &mut Plan, math_mode: metal::MathMode) {
+    match plan {
+        #[cfg(feature = "cpu")]
+        Plan::Cpu(_) => {}
+        #[cfg(all(feature = "metal", target_os = "macos"))]
+        Plan::Metal(metal_plan) => metal_plan.set_math_mode(math_mode),
+        #[cfg(feature = "wgpu-backend")]
+        Plan::Wgpu(_) => {}
+        #[cfg(not(any(
+            feature = "cpu",
+            all(feature = "metal", target_os = "macos"),
+            feature = "wgpu-backend"
+        )))]
+        _ => match *plan {},
+    }
+}
+
 /// Registers the page-aligned, process-lifetime mapping backing a loaded
 /// checkpoint's tensor bytes -- see `metal::register_checkpoint_mapping`'s
 /// own doc for the mechanism this feeds. A no-op unless the Metal backend is

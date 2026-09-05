@@ -3148,6 +3148,15 @@ mod real_openchat_file {
         let prompt = decode_loop_prompt();
         let max_tokens = decode_loop_max_tokens();
 
+        // `PROXIMA_MATH_MODE=safe|relaxed` -- test-edge only (never read in
+        // library code), ROW 296/297's own Safe-vs-Relaxed bake-off knob.
+        // Unset keeps `ServingConfig::default()`'s own `Relaxed` default.
+        #[cfg(target_os = "macos")]
+        let math_mode = match std::env::var("PROXIMA_MATH_MODE").as_deref() {
+            Ok("safe") => omega::MathMode::Safe,
+            Ok("relaxed") | Err(_) => omega::MathMode::Relaxed,
+            Ok(other) => panic!("PROXIMA_MATH_MODE={other}: expected `safe` or `relaxed`"),
+        };
         let serving_config = ServingConfig {
             kv_cache_key_quant: GgmlType::F32,
             kv_cache_value_quant: GgmlType::F32,
@@ -3156,6 +3165,8 @@ mod real_openchat_file {
             ubatch_size: 0,
             gpu_layers: crate::serving::GPU_LAYERS_ALL,
             reasoning_budget: 0,
+            #[cfg(target_os = "macos")]
+            math_mode,
             ..ServingConfig::default()
         };
 
