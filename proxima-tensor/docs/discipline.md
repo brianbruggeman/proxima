@@ -21242,7 +21242,68 @@ grep -n 'pub ' /Users/brianbruggeman/repos/slot-0/proxima-wt-s6e2-envelope/proxi
 grep -rn 'std::thread::spawn\|rayon::' /Users/brianbruggeman/repos/slot-0/proxima-wt-s6e2-envelope/proxima-model-interop/src /Users/brianbruggeman/repos/slot-0/proxima-wt-s6e2-envelope/omega/src
 ```
 
+## ROW 290 -- wrong kernel served from the pipeline cache: key omitted the cooperative lane width
+
+**Card:** `omega::msl::kernel_cache_key` / `omega::metal::pipeline_for` (`omega/src/msl.rs`,
+`omega/src/metal.rs`).
+
+**Defect.** `kernel_cache_key` keyed a cooperative `Reduce`'s compiled `MTLComputePipelineState`
+on rank, output rank, operand count, body, reduce op, init, dtype, packed codecs, and output-axis
+order -- every axis `emit`'s `source` differs on EXCEPT one:
+`tiled_gemm_threadgroup_width`'s return for that exact op, which (for the
+`metal-wide-cooperative-reduce` scaling arm) is a function of the CONCRETE reduce extent, not
+just structure. That width is baked LITERALLY into `render_reduce`'s lane-index / stride /
+tail-fold source text via `cooperative_reduce_width`. Two `Reduce`s sharing every field above but
+differing only in extent could therefore collide on one `PIPELINE_CACHE` entry
+(`metal::pipeline_for`), silently reusing whichever width compiled first.
+
+**Reproduction (`omega/tests/wide_cooperative_reduce_key_collision.rs`).** A `(1, cols)` row
+reduce, run twice in the same thread (one shared thread-local `PIPELINE_CACHE`):
+
+| call | `cols` (reduction extent) | `cooperative_reduce_width` | simdgroups |
+| --- | --- | --- | --- |
+| wide | 385 | `next_mul_32(ceil(385/4)) = 128` | 4 |
+| narrow | 17 | `next_mul_32(ceil(17/4)) = 32` | 1 |
+
+Pre-fix, both calls produced the same `kernel_cache_key` (every keyed field above matched), so the
+narrow call's dispatch hit the wide call's cached 128-wide, 4-simdgroup pipeline. Measured
+pre-fix: narrow result **1.46e32** (garbage) vs the cpu oracle's **-1.94**. Post-fix (key now
+carries the width, `_w32` vs `_w128`, distinct cache entries): narrow result matches the cpu
+oracle within `1e-4`.
+
+**Mechanism.** The wide kernel's source declares `threadgroup float partials[4]` and a
+multi-simdgroup tail fold that reads all 4 slots. When the STALE wide pipeline is dispatched for
+the narrow call's 32-thread (1-simdgroup) grid, only `partials[0]` is ever written by the single
+dispatched simdgroup; `partials[1..4]` are uninitialized `threadgroup` memory, and the tail fold
+sums them anyway -- the source of the 1e32-scale garbage, not a NaN or a clean zero, because
+uninitialized GPU threadgroup memory is neither.
+
+**Why the production decode path never showed it.** Every cooperative reduce
+`bind::real_openchat_file::runs_the_cached_decode_loop_on_the_metal_backend_and_reports_the_plan_cache`
+drives shares the SAME model dimensions across every decode step and every layer -- one fixed
+hidden size, one fixed head count -- so `tiled_gemm_threadgroup_width` returns the identical width
+for every cooperative reduce the whole run ever compiles. The collision needs two DIFFERENT
+concrete extents landing on the exact same `kernel_cache_key` modulo width, which a single model's
+fixed-shape forward pass never produces; it only surfaces when the pipeline cache is shared across
+requests with genuinely different reduce extents (the scenario this row's reproduction test
+constructs directly rather than waiting to hit incidentally).
+
+**Fix.** `kernel_cache_key` now appends `_w{width}` when `tiled_gemm_threadgroup_width` returns
+`Some` (the fully serial one-thread-per-output path, `None`, needs no extra token: its body has
+no lane math to disagree on). `metal::pipeline_for` gained a `debug!(cache_key, hit, "pipeline
+cache lookup")` event on both the hit and miss branches so a collision's cache key is visible in
+telemetry going forward, not just inferable from a wrong number.
+
+**Re-prove:** `cargo nextest run -p omega --features metal,metal-wide-cooperative-reduce
+wide_cooperative_reduce_key_collision` (real Metal device required; both assertions -- distinct
+cache keys, and the narrow call's post-fix parity with the cpu oracle -- are in one test).
+
 ### Changelog
 | Date | Change | Δ vs prior | CoV / runs | Host loadout |
 | --- | --- | --- | --- | --- |
 | 2026-09-04 | measurement only, no feature change; llama-bench `-t` sweep (1/2/4/8/10) at `-ngl 99`; CPU-only reference and both proxima harnesses NOT run, cut by 30-minute measurement cap | no prior thread-envelope row exists; baseline itself | sweep CoV 4.5-16.0% per point (above 5% trust threshold on 4 of 5 points); non-monotonic across `-t`, mechanism not traced | **LOUD BOX**: `uptime` load averages 131.33/105.47/100.14 at 19:54 CDT, 10-core host 13x oversubscribed; 3 sibling worktrees (`proxima-wt-s6e2-ablation`, `-ceiling`, `-backend`) running concurrent `cargo`/`rustc` builds during this window; CPU-only llama-bench run starved at 71-244% CPU despite `-t 8` |
+
+### Changelog
+| Date | Change | Δ vs prior | CoV / runs | Host loadout |
+| --- | --- | --- | --- | --- |
+| 2026-09-04 | `kernel_cache_key` now includes `tiled_gemm_threadgroup_width`'s return as a `_w{width}` token; `pipeline_for` emits a `debug!` cache-lookup event on both hit and miss | narrow-extent cooperative reduce result: 1.46e32 (garbage, stale wide-kernel tail fold reading uninitialized `threadgroup` memory) -> parity with cpu oracle within 1e-4 | new regression test, 1 run (deterministic real-Metal-device repro, no timing claim) | real Metal device, `metal,metal-wide-cooperative-reduce` features |
