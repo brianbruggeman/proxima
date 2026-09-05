@@ -886,6 +886,17 @@ impl<Id: Eq + core::hash::Hash + Copy> HazardTracker<Id> {
         }
         self.read.extend(inputs.iter().copied());
     }
+
+    /// Drops a retired buffer's identity from both sets. Metal's allocator
+    /// (and, more aggressively, `metal-buffer-pool`'s own reuse) can hand a
+    /// freed address straight back out to a later, unrelated `allocate_buffer`
+    /// call — without this, that later buffer would inherit hazard state that
+    /// belongs to whatever this address used to be (an ABA on the pointer
+    /// identity), not to itself.
+    fn forget(&mut self, id: Id) {
+        self.written.remove(&id);
+        self.read.remove(&id);
+    }
 }
 
 /// Resolves every hazard-tracked identity for a bound op's operands from
@@ -1270,6 +1281,16 @@ pub fn execute_plan_with_placements(
             if input_placed.contains_key(retired) || output_placed.contains_key(retired) {
                 continue;
             }
+            // a retired buffer's identity must not outlive it in the
+            // tracker: Metal (and `metal-buffer-pool` more aggressively) can
+            // hand this exact address back out to a later, unrelated
+            // `allocate_buffer` call, and that later buffer must start with
+            // no hazard history -- see `HazardTracker::forget`'s own doc.
+            #[cfg(feature = "metal-concurrent-dispatch")]
+            if let Some((buffer, _offset)) = device_buffers.remove(retired) {
+                hazards.forget(Retained::as_ptr(&buffer));
+            }
+            #[cfg(not(feature = "metal-concurrent-dispatch"))]
             device_buffers.remove(retired);
         }
     }
@@ -4945,5 +4966,25 @@ mod hazard_tracker_tests {
             Err(MetalError::UnresolvedHazardOperand { node }) => assert_eq!(node, missing),
             other => panic!("expected UnresolvedHazardOperand, got {other:?}"),
         }
+    }
+
+    /// A retired buffer's address can come back from a later, unrelated
+    /// `allocate_buffer` call (Metal's own allocator, or `metal-buffer-pool`
+    /// reuse more aggressively) -- `forget` must erase that address's hazard
+    /// history so the new buffer at the same address starts clean, not
+    /// inheriting a stale WRITTEN/READ mark that belonged to whatever this
+    /// address used to be.
+    #[test]
+    fn forgetting_a_retired_identity_clears_it_from_both_sets() {
+        let mut hazards: HazardTracker<&str> = HazardTracker::default();
+        hazards.record(&["read_only"], Some("written_and_read"));
+        hazards.record(&["written_and_read"], Some("also_written"));
+
+        hazards.forget("written_and_read");
+
+        assert!(
+            !hazards.needs_barrier(&[], Some("written_and_read")),
+            "a forgotten identity must carry no hazard history for a later allocation"
+        );
     }
 }
