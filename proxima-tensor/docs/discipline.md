@@ -21194,3 +21194,55 @@ trusting the mean.
 | Date | Change | Δ vs prior | CoV / runs | Host loadout |
 | --- | --- | --- | --- | --- |
 | 2026-09-04 | doc-only: ROW 286 and `plan.md` §1.2/§1.3 corrected from steps-1..7 mean (33.032 ms/token, 1.8935x) to steps-3..7 steady state (28.82 ms/token r3 / 28.542 mean-of-3, 1.652x / 1.636x); no code change | ratio 1.8935x -> 1.652x (r3) / 1.636x (3-round mean); host residual now reported per-phase (1.30 ms r3) instead of folded into a contaminated wall number | same 3-round data as ROW 286's DEFAULT arm, re-windowed; wall CoV within round 0.20-0.50%, mean-of-3 CoV 0.70% | re-derivation from already-recorded logs; no new bake-off run, no quiet-gate check needed |
+
+## ROW 289 -- thread envelope: llama.cpp `-t` sweep vs proxima's Metal decode path's absent CPU-thread knob (LOADED BOX (load 131), results void for magnitude; quiet re-run pending)
+
+**Card:** none (measurement row, no feature change). **Worktree:** `proxima-wt-s6e2-envelope` (`docs/thread-envelope`, off `main`, rebased onto `35a139f` before this commit). **Purpose:** characterize `llama-bench`'s own thread-count envelope on this host (M1 Max, 8P+2E, `sysctl hw.ncpu`=10 `hw.perflevel0.physicalcpu`=8 `hw.perflevel1.physicalcpu`=2) at `-ngl 99`, and determine what proxima's default Metal decode path uses for CPU threads on its own hot per-token path.
+
+**Threading finding (artifact-backed, no bench required for this part).** proxima's default Metal decode path has **no CPU thread-count knob at all** on its hot per-token path. `ServingConfig`'s complete field list (`proxima-model-interop/src/serving.rs:69-146`) contains no thread/worker field. An exhaustive grep for `std::thread::spawn`/`rayon::` across `proxima-model-interop/src` and `omega/src` (the whole Metal decode call path: position-input build, plan lookup, op setup, encode dispatch, greedy sampling) returned **zero matches** -- that CPU-side work runs on exactly one thread regardless of host core count. `omega/src/metal.rs`'s `thread_local!` blocks (e.g. lines 245-287, 2477, 2933, 3007, 3150, 3246) are per-calling-thread caches for the Metal device/command-queue/buffer pools, not a worker pool; GPU-side `dispatchThreads` grids (`metal.rs:3441-3469`) are the GPU's own compute grid, orthogonal to CPU thread count. `proxima_tokenizer::sample_next_token` (`proxima-tokenizer/src/sample.rs`) has no threading either. **Contrast:** a CPU-thread knob DOES exist, but only on proxima's separate CPU-only backend: `PROXIMA_MATMUL_WORKERS` (`proxima-tensor/src/cpu.rs:12927-12949`, consulted by `quantized_matmul_workers`, `cpu.rs:12951-12983`), defaulting to `performance_core_count()` = 8 P-cores when unset (matches the `sysctl` figure above). The CPU-only decode harness `runs_a_cached_greedy_decode_loop_and_reports_per_token_wall_clock` (`proxima-model-interop/src/bind.rs:2818`) calls `LoadedModel::generate` -> `supported_serving_config()` (`generate.rs:1166-1177`, hardcodes `gpu_layers: 0`) -> `Backend::Cpu` (`generate.rs:1594-1607`), confirming it is the CPU-only reference point and that it is the ONLY proxima decode path with a CPU-thread knob at all.
+
+**`llama-bench` thread sweep, `-ngl 99` (Metal, GPU-offloaded), `-n 32 -p 0 -r 5`, release, host-built binary `/Users/brianbruggeman/repos/others/llama.cpp/build/bin/llama-bench`, `openchat-3.5-1210.Q4_K_S.gguf` -- COMPLETED, all 5 points, back-to-back 19:46:26-19:47:13 CDT:**
+
+| `-t` | `tg32` t/s (mean +/- llama-bench's own stddev, `-r 5`) | CoV | derived ms/token |
+| --- | --- | --- | --- |
+| 1 | 33.45 +/- 3.97 | 11.9% | 29.895 |
+| 2 | 37.26 +/- 5.63 | 15.1% | 26.838 |
+| 4 | 31.17 +/- 1.39 | 4.5% | 32.082 |
+| 8 | 43.79 +/- 3.09 | 7.1% | 22.836 |
+| 10 | 28.02 +/- 4.48 | 16.0% | 35.689 |
+
+**Honest read of the sweep.** Every point except `t=4` exceeds the 5% CoV trust threshold (11.9-16.0%), and the t/s values are **non-monotonic** in thread count (33.45 -> 37.26 -> 31.17 -> 43.79 -> 28.02) -- not a clean scaling curve. This is a measurement, not yet a result: the mechanism has NOT been traced (no CPU%/profile capture was completed before the cap), so whether the non-monotonicity is (a) genuine noise from CPU thread count being largely irrelevant to a GPU-offloaded decode step (consistent with the working premise that decode at `-ngl 99` is GPU/bandwidth-bound, so `-t` mostly perturbs CPU-side dispatch/orchestration scheduling rather than the matmul itself), or (b) an artifact of the host contention documented below, **cannot be distinguished from these 5 points alone**. Both are plausible; neither is proven. The `t=4` point's low CoV (4.5%) sitting in the middle of an otherwise-noisy sweep is itself unexplained and flagged as a residual, not smoothed over.
+
+**Host loadout -- LOUD BOX, recorded because it directly bears on every CoV number above and below.** `uptime` at 19:54 CDT (7 minutes after the sweep started) showed **load averages 131.33 105.47 100.14** on a 10-core machine -- over 13x oversubscribed. `ps aux` at that time showed, beyond this session's own `proxima-wt-s6e2-ablation`/`proxima-wt-s6e2-ceiling` gate conditions, a **third** sibling worktree, `proxima-wt-s6e2-backend`, running concurrent `rustc`/`cargo` builds. No `uptime` sample was taken during the sweep itself (19:46:26-19:47:13); the load-average buildup was first observed 7 minutes after the sweep completed, so whether the sweep itself ran on a quiet or already-loud box is **unmeasured** -- the sweep's own CoV (4.5-16.0%) is circumstantial evidence of some contention even then, not proof. Per the coordinator's explicit instruction, sibling `cargo`/`rustc` builds do not gate this work, so this measurement proceeded through the load rather than waiting for a quiet box.
+
+**`-ngl 0 -t 8` (CPU-only reference, both engines) -- NOT COMPLETED.** `llama-bench -m <gguf> -n 32 -p 0 -r 5 -t 8 -ngl 0` was launched at 19:47:24 CDT and ran for **over 20 minutes producing zero output** (not even the first of 5 repetitions completed) before being killed under the coordinator's 30-minute measurement cap. `ps aux` samples during the run showed CPU utilization pinned at 71-244% despite `-t 8` (expected ~700-800% on a quiet box) while `uptime` load average held at 100-133 throughout -- the CPU-only path is fully memory-bandwidth-bound per-thread AND thread-starved by the host's other tenants simultaneously, so this point could not be measured on this box in this window. **Marked NOT RUN, not a data point of "0".**
+
+**proxima Metal decode harness (`bind::real_openchat_file::runs_the_cached_decode_loop_on_the_metal_backend_and_reports_the_plan_cache`, 3 rounds) -- NOT RUN.** The measurement batch was cut by the 30-minute cap before this harness was reached. No `step_wall_ms`/`gpu_exec_ms` numbers for this row; ROW 288's own steps-3..7 steady-state numbers (28.82 ms/token r3, 1.652x llama.cpp) remain the last-recorded values for this harness and are NOT re-confirmed by this row.
+
+**proxima CPU-only decode harness (`runs_a_cached_greedy_decode_loop_and_reports_per_token_wall_clock`, 1 round) -- NOT RUN.** Same cause; not reached before the cap.
+
+**Remaining cells' exact re-prove commands (to run once the box is quiet or the next serialization window opens):**
+```sh
+# CPU-only llama-bench reference (killed after 20+ min with zero output this session)
+/Users/brianbruggeman/repos/others/llama.cpp/build/bin/llama-bench -m /Users/brianbruggeman/.lmstudio/models/TheBloke/openchat-3.5-1210-GGUF/openchat-3.5-1210.Q4_K_S.gguf -n 32 -p 0 -r 5 -t 8 -ngl 0
+
+# proxima Metal decode harness, 3 rounds (not run this session)
+cd /Users/brianbruggeman/repos/slot-0/proxima-wt-s6e2-envelope
+CARGO_TARGET_DIR=/Users/brianbruggeman/repos/slot-0/proxima-wt-s6e2-envelope/target CARGO_TERM_COLOR=never PROXIMA_MAX_TOKENS=8 cargo test --release -p proxima-model-interop --features metal,instrument --lib -- --exact --nocapture --ignored \
+  bind::real_openchat_file::runs_the_cached_decode_loop_on_the_metal_backend_and_reports_the_plan_cache
+
+# proxima CPU-only decode harness, 1 round (not run this session)
+cd /Users/brianbruggeman/repos/slot-0/proxima-wt-s6e2-envelope
+CARGO_TARGET_DIR=/Users/brianbruggeman/repos/slot-0/proxima-wt-s6e2-envelope/target CARGO_TERM_COLOR=never PROXIMA_MAX_TOKENS=8 cargo test --release -p proxima-model-interop --features instrument --lib -- --exact --nocapture --ignored \
+  bind::real_openchat_file::runs_a_cached_greedy_decode_loop_and_reports_per_token_wall_clock
+```
+Confirm the no-knob finding is unchanged by re-running:
+```sh
+grep -n 'pub ' /Users/brianbruggeman/repos/slot-0/proxima-wt-s6e2-envelope/proxima-model-interop/src/serving.rs | sed -n '1,40p'
+grep -rn 'std::thread::spawn\|rayon::' /Users/brianbruggeman/repos/slot-0/proxima-wt-s6e2-envelope/proxima-model-interop/src /Users/brianbruggeman/repos/slot-0/proxima-wt-s6e2-envelope/omega/src
+```
+
+### Changelog
+| Date | Change | Δ vs prior | CoV / runs | Host loadout |
+| --- | --- | --- | --- | --- |
+| 2026-09-04 | measurement only, no feature change; llama-bench `-t` sweep (1/2/4/8/10) at `-ngl 99`; CPU-only reference and both proxima harnesses NOT run, cut by 30-minute measurement cap | no prior thread-envelope row exists; baseline itself | sweep CoV 4.5-16.0% per point (above 5% trust threshold on 4 of 5 points); non-monotonic across `-t`, mechanism not traced | **LOUD BOX**: `uptime` load averages 131.33/105.47/100.14 at 19:54 CDT, 10-core host 13x oversubscribed; 3 sibling worktrees (`proxima-wt-s6e2-ablation`, `-ceiling`, `-backend`) running concurrent `cargo`/`rustc` builds during this window; CPU-only llama-bench run starved at 71-244% CPU despite `-t 8` |
