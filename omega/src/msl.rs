@@ -1095,6 +1095,25 @@ pub(crate) fn kernel_cache_key(
             'S'
         },
     );
+    // `push_packed_row_blocked_body`'s STRIDE-FREE SPECIALIZATION (see that
+    // function's own doc) renders different source text for the SAME 'B'
+    // structural shape depending on a CONCRETE resolved stride, not just op
+    // structure — two ops agreeing on every field checked above (including
+    // `packed_row_block` matching at all) can still emit different bodies
+    // if only one of them has a unit-stride activation. Pushed whenever
+    // `packed_row_block` matches at all (so it also fires alongside 'G',
+    // harmlessly — the tiled path does not vary on this axis, but a stray
+    // extra key character never causes a wrong cache hit, only an
+    // unnecessary miss).
+    if let BoundOpKind::Reduce { .. } = &resolved.kind
+        && let Some(block) = packed_row_block(resolved, &quantized)
+    {
+        let other_stride_is_one = resolved.operands()[block.other]
+            .1
+            .stride(block.reduce_dim as u16)
+            == 1;
+        key.push(if other_stride_is_one { '1' } else { 'N' });
+    }
     if let BoundOpKind::Reduce { output_axes, .. } = &resolved.kind {
         key.push_str("_ax");
         for axis in output_axes {
@@ -3402,6 +3421,20 @@ fn push_packed_row_blocked_body(
         source.push_str("        weight_base[q] = wb;\n");
         source.push_str("        other_base[q] = ob;\n");
         source.push_str("    }\n");
+        // STRIDE-FREE SPECIALIZATION (`docs/discipline.md` perf/packed-row-
+        // addressing row): ggml's own row-blocked kernel assumes a
+        // contiguous activation and addresses it with pure element offsets
+        // (`ggml-metal.metal:5132`'s `y4 += 4*QK_K`, no per-element stride
+        // multiply anywhere). This op's activation is not always
+        // contiguous along the reduce axis, but `resolved`'s `Layout`
+        // already carries the answer here at EMIT time -- this function
+        // renders one op's kernel text once, not once per dispatch -- so
+        // every activation address below drops the runtime `other_stride`
+        // multiply entirely in the source text whenever the layout proves
+        // it would multiply by 1. `other_stride` itself stays unconditional
+        // (`push_q4k_ggml_port_body`/`push_q4k_single_fetch_body`, the two
+        // alternate bodies rendered instead of this one, both read it).
+        let other_stride_is_one = resolved.operands()[other].1.stride(reduce_dim as u16) == 1;
         source.push_str(&format!(
             "    long other_stride = u.operand_strides[{other}][{reduce_dim}];\n"
         ));
@@ -3528,23 +3561,53 @@ fn push_packed_row_blocked_body(
             "        blk_ptr[q] = in{weight} + ((long)((int)weight_base[q] / {Q4K_BLOCK_ELEMENTS}) + (long)ib_first) * {block_bytes};\n"
         ));
         source.push_str("    }\n");
-        if plain_product {
+        if plain_product && other_stride_is_one {
+            source.push_str(&format!(
+                "    long y4_step = (long)ib_step * {Q4K_BLOCK_ELEMENTS};\n"
+            ));
+            source.push_str(&format!("    device const float *y4 = in{other} + other_base[0] + (long)ib_first * {Q4K_BLOCK_ELEMENTS} + (long)(64u * iq + 8u * ir);\n"));
+        } else if plain_product {
             source.push_str(&format!(
                 "    long y4_step = (long)ib_step * {Q4K_BLOCK_ELEMENTS} * other_stride;\n"
             ));
             source.push_str(&format!("    device const float *y4 = in{other} + other_base[0] + (long)ib_first * {Q4K_BLOCK_ELEMENTS} * other_stride + (long)(64u * iq + 8u * ir) * other_stride;\n"));
+        } else if other_stride_is_one {
+            // SAME HOIST, generic (non-plain-product) arm: `elem0 = ib*256 +
+            // slot` was rebuilt every `ib` purely to feed `(elem0+j)*
+            // other_stride` -- the identical 64-bit multiply-add-per-
+            // iteration shape arm1 already removed from the plain-product
+            // `y4` pointer above. `other_stride_is_one` additionally drops
+            // the multiply itself, same as the `y4` arm just above.
+            source.push_str(&format!(
+                "    long acts_step = (long)ib_step * {Q4K_BLOCK_ELEMENTS};\n"
+            ));
+            source.push_str(&format!("    device const {element_type} *acts_row = in{other} + other_base[0] + (long)ib_first * {Q4K_BLOCK_ELEMENTS} + (long)slot;\n"));
+        } else {
+            source.push_str(&format!(
+                "    long acts_step = (long)ib_step * {Q4K_BLOCK_ELEMENTS} * other_stride;\n"
+            ));
+            source.push_str(&format!("    device const {element_type} *acts_row = in{other} + other_base[0] + (long)ib_first * {Q4K_BLOCK_ELEMENTS} * other_stride + (long)slot * other_stride;\n"));
         }
         source.push_str("    for (int ib = ib_first; ib < super_blocks; ib += ib_step) {\n");
-        source.push_str(&format!(
-            "        int elem0 = ib * {Q4K_BLOCK_ELEMENTS} + (int)slot;\n"
-        ));
-        if plain_product {
+        if plain_product && other_stride_is_one {
             source.push_str("        for (uint i = 0u; i < 8u; ++i) { yl[i] = y4[i]; yl[i + 8u] = y4[i + 32u]; yh[i] = y4[i + 128u]; yh[i + 8u] = y4[i + 160u]; }\n");
+        } else if plain_product {
+            // CORRECTNESS FIX, not part of the stride-free specialization
+            // above: this arm's `y4[i]`/`y4[i+32]`/... reads were pure
+            // element offsets regardless of `other_stride` before this
+            // landing -- correct only by accident, for every caller that
+            // happened to hand this path a contiguous activation. Ported
+            // from `push_q4k_ggml_port_body`'s own already-stride-aware
+            // form (`y4_base + (long)i * other_stride`, below in this
+            // file), the one sibling body that already got this right.
+            source.push_str("        for (uint i = 0u; i < 8u; ++i) { yl[i] = y4[(long)i * other_stride]; yl[i + 8u] = y4[(long)(i + 32u) * other_stride]; yh[i] = y4[(long)(i + 128u) * other_stride]; yh[i + 8u] = y4[(long)(i + 160u) * other_stride]; }\n");
         } else {
             source.push_str(&format!("        for (int j = 0; j < {sub}; ++j) {{\n"));
-            source.push_str(&format!(
-                "            acts[j] = in{other}[other_base[0] + (long)(elem0 + j) * other_stride];\n"
-            ));
+            if other_stride_is_one {
+                source.push_str("            acts[j] = acts_row[j];\n");
+            } else {
+                source.push_str("            acts[j] = acts_row[(long)j * other_stride];\n");
+            }
             source.push_str("        }\n");
         }
         source.push_str(&format!("        for (int q = 0; q < {rows}; ++q) {{\n"));
@@ -3740,6 +3803,8 @@ fn push_packed_row_blocked_body(
         ));
         if plain_product {
             source.push_str("        y4 += y4_step;\n");
+        } else {
+            source.push_str("        acts_row += acts_step;\n");
         }
         source.push_str("    }\n");
         }
