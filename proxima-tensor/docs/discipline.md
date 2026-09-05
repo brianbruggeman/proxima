@@ -21446,7 +21446,6 @@ CARGO_TARGET_DIR=/Users/brianbruggeman/repos/slot-0/proxima-wt-s6e2-accept/targe
 cd /Users/brianbruggeman/repos/slot-0/proxima-wt-s6e2-hybrid && CARGO_TARGET_DIR=/Users/brianbruggeman/repos/slot-0/proxima-wt-s6e2-hybrid/target CARGO_TERM_COLOR=never cargo test --release -p omega --features metal --test device_streaming_ceiling -- --ignored --nocapture
 ```
 Confirm `pgrep -l 'llama-bench|llama-cli|proxima_model_i|device_streamin|matvec_roofline|omega-|^cargo$|^rustc$|nextest|cargo-nextest'` is empty (not just the narrower three-term check that missed the decode test this run) and `uptime` load average is near the core count before running; re-run at least once and report the range if any arm's CoV exceeds 5%.
-
 ### Changelog
 | Date | Change | Δ vs prior | CoV / runs | Host loadout |
 | --- | --- | --- | --- | --- |
@@ -21518,3 +21517,170 @@ Confirm `emit_calls=520` (not 616), `barriers=323` (not 419), `plan_hits=5`, `ge
 | Date | Change | Δ vs prior | CoV / runs | Host loadout |
 | --- | --- | --- | --- | --- |
 | 2026-09-04 | `reduce-epilogue-fusion` flips default-on in `metal` (both `omega` and `proxima-model-interop`) per the owner's less-work rule | `emit_calls` 616 -> 520/step (3 of 4 census-predicted sites fuse on the single-range Metal cached-forward program); `barriers` 419 -> 323; `generated_text` identical; parity `relative=5.29e-7` at kv-capacity-bucket paddings 0/1/5 | single oracle run per arm, not a bake-off; parity test is deterministic (fixed fixture, no RNG variance across runs) | `pgrep -l 'llama-bench\|proxima_model_i'` confirmed empty before the oracle pair; no llama-bench or foreign proxima_model_interop process observed. This session's own sequential cargo compiles ran on the same worktree between the two oracle invocations, so the informational `step_wall_ms`/`gpu_exec_ms` table is recorded as informational only, not a bake-off claim |
+
+
+## ROW 295 -- run 1 VOID: single 33 MB dispatch below the ~0.5 ms dispatch floor; harness amortized to 64 dispatches (2.114 GB) in 7acdd27; quiet re-run pending
+
+**Card:** `omega/tests/matvec_roofline_ladder.rs` (`perf/matvec-roofline-ladder`, worktree
+`proxima-wt-s6e2-ladder`). Four hand-written Metal kernels each add exactly one layer of
+production's own `Q4_K` matvec work on top of the last (L0 pure read-pattern -> L1 +header decode
+-> L2 +full dequant -> L3 the real production kernel via `omega::metal::plan`/`execute_plan`),
+plus an 18-cell shape sweep (3 simdgroups/threadgroup x 2 dispatch calls x 3 `MTLMathMode`s) that
+holds the per-element compute path (`q4k_pair_dot`, lifted verbatim from
+[`omega::msl::Q4K_UNPACK_MSL`]) textually identical to production while varying dispatch geometry.
+Full harness design rationale is the file's own module doc (`omega/tests/matvec_roofline_ladder.rs:1-84`).
+
+**Bug found and fixed before any number could be trusted.** The first build attempt failed:
+`l1_source()`/`l2_source()`/`l3_shape_source()` concatenated `omega::msl::Q4K_UNPACK_MSL` directly
+with each kernel body, but `Q4K_UNPACK_MSL` is bare body text -- `omega::msl::emit` itself prepends
+`#include <metal_stdlib>\nusing namespace metal;\n\n` before ever pushing it (`omega/src/msl.rs:2355-2356`).
+Every kernel body here calling unqualified `simd_sum` failed to compile
+(`error: use of undeclared identifier 'simd_sum'`). Fixed by restating the same preamble as a
+`METAL_PREAMBLE` constant prepended in all three source-assembly functions
+(`omega/tests/matvec_roofline_ladder.rs:546-561`, commit `ef27d37`). This is a harness defect, not
+a production kernel defect -- `omega::msl::emit`'s own output was never missing the preamble.
+
+**Both runs required — L3 baseline CoV was 120.29% on run 1.** Gate (`pgrep -l
+'llama-bench|proxima_model_interop-|device_streaming|llama-cli'`) was empty immediately before
+each run and immediately after; between the build finishing and run 1 starting, another agent's
+`proxima_model_interop-*` test (`bind::draft_acceptance::ngram_draft_acceptance_rate_on_real_greedy_streams`,
+worktree `proxima-wt-s6e2-accept`/`proxima-wt-land-hazard`) was actively dispatching Metal work and
+this run was held until it exited (see the gate-poll evidence below) — so the gate itself worked as
+specified. What it could not filter out is CPU-side host contention: `uptime` read load averages of
+127-158 (1/5/15-min) across both runs, with 30-48 concurrent `cargo`/`rustc`/`nextest`/`clippy`
+processes at all times (this repo's shared worktree fleet building in parallel, per project memory
+on shared-target-dir contamination). `commit()`/`waitUntilCompleted()` wall-clock timing is exposed
+to host thread-scheduling delay under that load, independent of the GPU's own execution time, and
+that is what these two runs show.
+
+**Full ladder table, both runs (GB/s and ms via `TOTAL_WEIGHT_BYTES` = 14336 rows x 2304
+bytes/row = 33.030144 MB / measured wall time; `PRODUCTION_DEFAULT` = the L3 shape-sweep cell
+matching the real dispatch shape: `math_mode=safe`, 1 simdgroup/threadgroup, `dispatchThreads`):**
+
+| arm | run1 GB/s | run1 ms | run1 CoV% | run2 GB/s | run2 ms | run2 CoV% |
+| --- | --- | --- | --- | --- | --- | --- |
+| L0_streaming | 9.54 | 3.462 | 117.21 | 28.10 | 1.175 | 58.17 |
+| L1_header_decode | 25.57 | 1.292 | 113.06 | 28.58 | 1.156 | 92.70 |
+| L2_dequant | 32.44 | 1.018 | 35.09 | 2.10 | 15.729 | 82.40 |
+| L3_shape_default (PRODUCTION_DEFAULT) | 18.46 | 1.789 | 77.50 | 4.35 | 7.593 | 47.60 |
+| L3_baseline (real `execute_plan`, end to end) | 5.80 | 5.695 | 120.29 | 1.32 | 25.023 | 37.50 |
+
+Every arm exceeds the 5% CoV re-run threshold on at least one of the two runs; most exceed it on
+both. The two runs disagree by 1.1x-15.4x per arm and, worse, disagree on **direction**: run 1 has
+L2 > L1 > L0 (monotonic rise); run 2 has L1 approx L0 but L2 collapses to 7% of L1. Neither run's
+rung ordering can be trusted as a statement about the kernels; both are consistent with a host that
+was differently loaded moment-to-moment during each arm's 5 dispatches.
+
+**Ratios (L0/L1, L1/L2, L2/L3, L3 = L3_baseline):**
+
+| run | L0/L1 | L1/L2 | L2/L3 |
+| --- | --- | --- | --- |
+| run1 | 0.373 | 0.788 | 5.593 |
+| run2 | 0.983 | 13.610 | 1.591 |
+
+A 0.373 vs 0.983 L0/L1 ratio and a 0.788 vs 13.610 L1/L2 ratio across two back-to-back runs of the
+same binary against the same mmap'd bytes is not two different measurements of the same quantity —
+it is noise dominating signal. **No rung can be named as "the limiter" from this data.** The
+harness itself (build, parity, shape-sweep plumbing) is proven correct by the parity gates below;
+what is not proven is any bandwidth number it produced today.
+
+**Parity (both runs, identical — the checkpoint bytes and activation are the same LCG-seeded
+vector every run, so parity is a correctness gate, not a timing one):**
+
+| check | run1 max_abs_error | run2 max_abs_error |
+| --- | --- | --- |
+| L3_baseline vs cpu_reference (first 64 rows) | 0.0000019073486 | 0.0000019073486 |
+| L3_shape default arm vs cpu_reference | 0.0000019073486 | 0.0000019073486 |
+| L3_shape default arm vs L3_baseline | 0 | 0 |
+
+`PARITY_MAX_ABS_ERROR` = 1e-4; both runs pass with >4 orders of magnitude headroom (the residual is
+`f32` rounding between the CPU dequant reference and the GPU `half`-decoded scale/min). Parity
+readback is taken only for the `PRODUCTION_DEFAULT` shape-sweep cell -- the other 17 shape-sweep
+cells have no independent parity check in this harness; their outputs are timed but not read back
+for correctness (documented scope limit, not a gap discovered now).
+
+**Shape sweep, all 18 cells, both runs (GB/s, CoV%) -- no per-cell parity, see above:**
+
+| math_mode | simdgroups/tg | dispatch | run1 GB/s (CoV%) | run2 GB/s (CoV%) |
+| --- | --- | --- | --- | --- |
+| safe | 1 | dispatchThreads | 18.46 (77.50) | 4.35 (47.60) |
+| safe | 1 | dispatchThreadgroups | 14.45 (81.77) | 44.92 (24.58) |
+| safe | 2 | dispatchThreads | 30.10 (32.18) | 43.71 (38.34) |
+| safe | 2 | dispatchThreadgroups | 42.28 (11.92) | 35.63 (52.98) |
+| safe | 4 | dispatchThreads | 35.06 (31.53) | 31.51 (61.70) |
+| safe | 4 | dispatchThreadgroups | 29.74 (61.55) | 29.40 (21.37) |
+| relaxed | 1 | dispatchThreads | 30.96 (49.94) | 62.69 (9.35) |
+| relaxed | 1 | dispatchThreadgroups | 50.09 (5.28) | 63.69 (34.71) |
+| relaxed | 2 | dispatchThreads | 51.08 (1.63) | 61.67 (4.27) |
+| relaxed | 2 | dispatchThreadgroups | 47.19 (12.04) | 53.84 (32.47) |
+| relaxed | 4 | dispatchThreads | 41.06 (39.81) | 32.44 (35.73) |
+| relaxed | 4 | dispatchThreadgroups | 41.81 (21.60) | 53.99 (46.19) |
+| fast | 1 | dispatchThreads | 34.97 (49.78) | 28.28 (49.54) |
+| fast | 1 | dispatchThreadgroups | 11.06 (49.77) | 64.64 (20.27) |
+| fast | 2 | dispatchThreads | 37.98 (30.96) | 54.61 (46.58) |
+| fast | 2 | dispatchThreadgroups | 27.98 (34.37) | 59.13 (42.30) |
+| fast | 4 | dispatchThreads | 39.90 (38.48) | 54.42 (7.04) |
+| fast | 4 | dispatchThreadgroups | 47.43 (4.50) | 60.58 (28.85) |
+
+Only 2 of 36 (cell, run) combinations land under the 5% CoV bar: run1 `relaxed/2sg/dispatchThreads`
+(51.08 GB/s, CoV 1.63%) and run2 `relaxed/2sg/dispatchThreads` (61.67 GB/s, CoV 4.27%) -- the same
+cell, in both runs, is the only one quiet enough to trust on its own terms. That cell beats
+`PRODUCTION_DEFAULT` by 2.77x (run1: 51.08/18.46) and 14.2x (run2: 61.67/4.35), but the second
+delta is inflated by `PRODUCTION_DEFAULT`'s own run2 sample being a 47.60%-CoV outlier low
+(4.35 GB/s vs run1's 18.46 GB/s for the textually-identical cell) -- **the two production-default
+samples disagree with each other by 4.2x**, which is the clearest single number in this row for why
+no shape-sweep or ladder claim can be sealed today. The **best cell overall differs between runs**
+(run1: `relaxed/2sg/dispatchThreads` at 51.08; run2: `fast/1sg/dispatchThreadgroups` at 64.64,
+CoV 20.27%, not the low-CoV cell) -- not a reproducible "best shape."
+
+**Math-mode deltas.** No math-mode delta is reportable at this CoV: `safe` vs `relaxed` vs `fast`
+at matched (simdgroups, dispatch) swings by more between the two runs of the SAME cell than between
+math modes within either single run (e.g. `safe/1sg/threads`: 18.46 -> 4.35 run-to-run, a 4.2x
+swing, vs `safe` (18.46) to `fast` (34.97) within run1, a 1.9x swing). Directionally, in both runs
+`safe/1sg/threads` is the lowest or near-lowest of its math-mode triple at matched geometry (run1:
+safe=18.46 < relaxed=30.96 < fast=34.97 at 1sg/threads; run2: safe=4.35 < fast=28.28 < relaxed=62.69
+at 1sg/threads) -- consistent with `safe` mode carrying overhead relative to `relaxed`/`fast`, but
+the magnitude cannot be quantified from this data and parity was never checked for the non-default
+math-mode cells, so this is a direction, not a result.
+
+**Honest read.** The harness is mechanically correct: it builds, it dispatches the real production
+kernel through the real public API, and every parity check it runs passes to 1e-4 headroom on two
+independent runs. What it demonstrates today is that **this host, at this loadout, cannot produce a
+trustworthy bandwidth number for single-dispatch Metal kernels this fast (~1-25 ms per dispatch)** --
+30-48 concurrent builder processes and one competing GPU test made wall-clock timing on 5-sample
+means noise-dominated on every arm. No rung is named as the limiter because the two runs disagree on
+which rung drops, by how much, and in which direction. No shape-sweep cell is named as best because
+the one cell that reproduced under 5% CoV in both runs (`relaxed/2sg/dispatchThreads`) is not the
+cell either run's raw "highest GB/s" column would have picked from a single run. The path to a
+sealed ladder claim is a quiet-box re-run (§ bench-metrics: isolate, verify quiet via `uptime` and
+`pgrep` for other builders before starting, not just the named-measurer gate this row's protocol
+already enforced) with the same harness -- the harness itself does not need to change.
+
+**Loadout (both runs):** MacBookPro18,2 (Apple M1 Max, `hw.ncpu`=10), macOS Darwin 24.6.0. Named
+measurer gate (`llama-bench|proxima_model_interop-|device_streaming|llama-cli`) empty immediately
+before and after each run; between build completion and run 1, `proxima_model_interop-edef1cf5a8b5df6b`
+(`--exact bind::draft_acceptance::ngram_draft_acceptance_rate_on_real_greedy_streams --ignored`,
+worktrees `proxima-wt-s6e2-accept`/`proxima-wt-land-hazard`) was live and the run was held until it
+exited. `uptime` at run 1: load averages 127.00/129.99/138.23; at run 2: unchanged order of
+magnitude. `pgrep -l 'cargo|rustc|nextest'` count: 40 (session start) / 35-48 (around the runs) --
+this repo's shared worktree fleet building concurrently throughout, never quiesced for this row.
+
+**Re-prove:**
+```sh
+cd /Users/brianbruggeman/repos/slot-0/proxima-wt-s6e2-ladder
+CARGO_TARGET_DIR=/Users/brianbruggeman/repos/slot-0/proxima-wt-s6e2-ladder/target CARGO_TERM_COLOR=never \
+  cargo test -p omega --release --features metal --test matvec_roofline_ladder --no-run
+pgrep -l 'llama-bench|proxima_model_interop-|device_streaming|llama-cli'   # must be empty
+CARGO_TARGET_DIR=/Users/brianbruggeman/repos/slot-0/proxima-wt-s6e2-ladder/target CARGO_TERM_COLOR=never \
+  cargo test -p omega --release --features metal --test matvec_roofline_ladder -- \
+  --ignored --nocapture matvec_roofline_ladder_l0_through_l3_and_shape_sweep
+```
+Requires `PROXIMA_BENCH_GGUF_PATH` (defaults to a host-local openchat-3.5-1210 Q4_K_S checkpoint)
+and a Metal device; `#[ignore]`d, same convention as `q4k_real_checkpoint_parity.rs`/
+`device_streaming_ceiling.rs`. Re-run at least 3x and report the CoV range if any arm exceeds 5% --
+per this row, expect that it will, on a loaded host.
+
+### Changelog
+| Date | Change | Δ vs prior | CoV / runs | Host loadout |
+| --- | --- | --- | --- | --- |
+| 2026-09-04 | landed the ladder harness (`d0be5c0`), fixed a metal-preamble compile bug in it (`ef27d37`), ran the L0-L3+shape-sweep ladder 2x per the CoV>5% re-run rule; harness amortized to 64 dispatches (2.114 GB) in `7acdd27`, quiet re-run pending | no prior baseline to delta against (first run of this harness); run1 vs run2 per-arm deltas of 1.1x-15.4x are HOST NOISE, not a code change between runs | every arm CoV 4.27-120.29% across the two runs; only 1 of 18 shape-sweep cells reproduced under 5% CoV in both runs | load averages 127-158 (1/5/15-min), 30-48 concurrent cargo/rustc/nextest/clippy from this repo's shared worktree fleet throughout, one competing Metal test (`proxima_model_interop-*`) held off by the named-measurer gate before run 1 |
