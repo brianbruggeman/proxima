@@ -65,10 +65,9 @@ instrument = ["proxima-tensor/instrument", "omega?/instrument", "dep:proxima-tel
 # `proxima-tensor/docs/discipline.md` ROW recorded. `kv-capacity-bucket`
 # joined on the 2026-09-04 quiet round 1 sweep (bucket 32: wall 40.89 vs
 # off 42.54 ms/token, hits 5/8; bucket 64: 41.18, hits 6/8; bucket 256:
-# 48.18, loss) -- ROW 273 has the full table. `metal-q5k-pair-dot` joined
-# per the 2026-09-04 per-op profile: paired-nibble Q5_K body 202,083 ->
-# 124,265 ns/op (1.63x) on the 8 Q5_K ops, family 6.275 -> 5.725 ms, decode
-# wall flat within noise, text identical, parity < 1e-4 (ROW 278).
+# 48.18, loss) -- ROW 273 has the full table. `omega`'s paired-nibble Q5_K
+# body (202,083 -> 124,265 ns/op, 1.63x, ROW 278) is selected by codec
+# structure there, not a passthrough feature of this crate any longer.
 # `metal-plan-stable-buffers` joins per CARD 6.5: plan-owned `BufferArena` +
 # `PlanUniforms` take a plan-cache hit from 842 allocations/step to 0;
 # op_setup 3.94-5.42 -> 0.39-0.60 ms/step, arena peak 13,967,368 B prefill
@@ -97,7 +96,6 @@ metal = [
     "metal-output-placement",
     "metal-wide-cooperative-reduce",
     "kv-capacity-bucket",
-    "metal-q5k-pair-dot",
     "metal-plan-stable-buffers",
     "cached-attention-streaming",
     "metal-concurrent-dispatch",
@@ -139,8 +137,6 @@ metal-q4k-split-k = ["omega?/metal-q4k-split-k"]
 metal-q4k-single-fetch = ["omega?/metal-q4k-single-fetch"]
 # passthrough to `omega/metal-packed-row-nsg2` so the decode harness can measure that arm.
 metal-packed-row-nsg2 = ["omega?/metal-packed-row-nsg2"]
-# passthrough to `omega/metal-q5k-pair-dot` so the decode harness can measure that arm.
-metal-q5k-pair-dot = ["omega?/metal-q5k-pair-dot"]
 # Selects `proxima-tensor`'s `cpu_mask_zero_ulp` test, the correctness
 # proof that rounding the placed-KV decode loop's growing KV extent
 # (`merged_len`) up to `ServingConfig::kv_bucket_tokens` before binding it

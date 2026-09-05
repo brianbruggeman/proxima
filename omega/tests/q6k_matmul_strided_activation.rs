@@ -15,12 +15,13 @@
 //! form) lands on a poisoned NaN slot and the comparison against the
 //! independent dequantize+dot reference fails loudly instead of silently.
 //!
-//! Under the default `metal` feature, `Q6_K` has no pair-dot arm
-//! (`metal-q6k-pair-dot` is off), so this exercises the GENERIC arm's
-//! `acts_row` hoist. Under `--all-features`, `metal-q6k-pair-dot` turns on
-//! and the SAME op instead exercises the plain-product `y4` pointer's own
-//! stride-aware path -- one test file, both specializations, depending on
-//! which gate command runs it.
+//! `Q6_K`'s pair-dot arm is selected by structure
+//! (`PackedCodec::supports_pair_dot`), not a cargo feature, so this op
+//! always exercises the plain-product `y4` pointer's own stride-aware path
+//! (`other_stride_is_one` false here) rather than the GENERIC arm's
+//! `acts_row` hoist -- both arms share the same `other_stride`-aware
+//! addressing fix this file's own module doc names, so either one proves
+//! the claim; this fixture happens to land on the plain-product one.
 
 #![cfg(all(feature = "metal", target_os = "macos"))]
 #![allow(clippy::unwrap_used, clippy::expect_used)]

@@ -511,10 +511,11 @@ static inline float q6k_element(device const uchar *block, uint index) {
 /// `omega/tests/q6k_unpack.rs`, same posture as [`Q4K_BLOCK_BYTES`].
 pub const Q6K_BLOCK_BYTES: usize = 210;
 
-/// `metal-q6k-pair-dot` (default-off): `Q6_K`'s counterpart to
-/// `q4k_pair_dot`/`q5k_pair_dot` -- routed the same way, into the SAME
-/// codec-agnostic `yl`/`yh` activation gather `push_packed_row_blocked_body`'s
-/// `plain_product` preamble already builds for `Q4_K`/`Q5_K`. The lane
+/// `Q6_K`'s counterpart to `q4k_pair_dot`/`q5k_pair_dot`, selected by
+/// `PackedCodec::supports_pair_dot` rather than a cargo feature -- routed
+/// the same way, into the SAME codec-agnostic `yl`/`yh` activation gather
+/// `push_packed_row_blocked_body`'s `plain_product` preamble already builds
+/// for `Q4_K`/`Q5_K`. The lane
 /// assignment (`iq = it/4`, `ir = it%4`) is unchanged from those two, so a
 /// lane's 32 owned elements decompose into the same four 8-element groups
 /// (`base+[0..7]`, `base+32+[0..7]`, `base+128+[0..7]`, `base+160+[0..7]`
@@ -546,7 +547,6 @@ pub const Q6K_BLOCK_BYTES: usize = 210;
 /// accumulate the same non-deferred way `q4k_pair_dot`/`q5k_pair_dot`
 /// already fold `scale*level` into each element's product immediately (no
 /// `Q4_K`-style `dmin` term to defer here at all -- `Q6_K` has none).
-#[cfg(feature = "metal-q6k-pair-dot")]
 pub const Q6K_PAIR_DOT_MSL: &str = r#"
 static inline float q6k_pair_dot(device const uchar *block, uint iq, uint ir, thread const float *yl, thread const float *yh) {
     device const uchar *ql = block;
@@ -700,8 +700,9 @@ static inline float q5k_element(device const uchar *block, uint index) {
 /// `omega/tests/q5k_unpack.rs`, same posture as [`Q4K_BLOCK_BYTES`].
 pub const Q5K_BLOCK_BYTES: usize = 176;
 
-/// `metal-q5k-pair-dot` (default-off): the same paired-nibble, packed-word-load
-/// body `q4k_pair_dot` gives `Q4_K`'s `plain_product` arm
+/// The same paired-nibble, packed-word-load body `q4k_pair_dot` gives
+/// `Q4_K`'s `plain_product` arm, selected by
+/// `PackedCodec::supports_pair_dot` rather than a cargo feature
 /// (`push_packed_row_blocked_body`) -- one `ulong` load per 8-byte `qs`/`qh`
 /// run, byte-extracted by shift rather than eight scalar `uchar` loads --
 /// extended with `Q5_K`'s `qh` high-bit plane -- ONE extra mask-select per
@@ -721,7 +722,6 @@ pub const Q5K_BLOCK_BYTES: usize = 176;
 /// element, immediately, the same non-deferred style `q4k_pair_dot` itself
 /// already uses (see `q5k_header_for`, restated per-pair here rather than
 /// shared -- same posture as `q5k_scale_min` restating `q4k_scale_min`).
-#[cfg(feature = "metal-q5k-pair-dot")]
 pub const Q5K_PAIR_DOT_MSL: &str = r#"
 static inline float q5k_pair_dot(device const uchar *block, uint iq, uint ir, thread const float *yl, thread const float *yh) {
     device const uchar *qh = block + 16;
@@ -957,6 +957,21 @@ impl PackedCodec {
             PackedCodec::Float16 => FLOAT16_BLOCK_ELEMENTS,
             PackedCodec::BFloat16 => BFLOAT16_BLOCK_ELEMENTS,
         }
+    }
+
+    /// Whether this codec's block layout has a paired-nibble/paired-lane
+    /// decode body (`q4k_pair_dot`/`q5k_pair_dot`/`q6k_pair_dot`) at all --
+    /// the structural fact `push_packed_row_blocked_body`'s `plain_product`
+    /// gate reads, in place of a `cfg!(feature = "metal-q{5,6}k-pair-dot")`
+    /// check. `Q4_K` (144 B, mult of 16), `Q5_K` (176 B, mult of 16, plus its
+    /// `qh` high-bit plane), and `Q6_K` (210 B, NOT a mult of 4, hence the
+    /// `ushort` loads in [`Q6K_PAIR_DOT_MSL`]) each have one; the flat 32-
+    /// element legacy codecs and the two non-quantized codecs do not --
+    /// `classify_packed_row_block` rejects all four before this is ever
+    /// consulted (`NotKQuantCodec`), so this only needs to be honest about
+    /// the three K-quants, not defensive about the rest.
+    pub(crate) const fn supports_pair_dot(self) -> bool {
+        matches!(self, PackedCodec::Q4K | PackedCodec::Q5K | PackedCodec::Q6K)
     }
 }
 
@@ -2521,24 +2536,16 @@ fn preamble(source: &mut String) {
     }
     source.push_str(Q5K_UNPACK_MSL);
     source.push('\n');
-    // feature-gated, same posture as `Q4K_MASK_FMA_MSL` above:
-    // `Q5K_PAIR_DOT_MSL` does not exist as a Rust symbol without
-    // `metal-q5k-pair-dot`.
-    #[cfg(feature = "metal-q5k-pair-dot")]
-    {
-        source.push_str(Q5K_PAIR_DOT_MSL);
-        source.push('\n');
-    }
+    // unconditional, same posture as `Q4K_UNPACK_MSL` above: an unused
+    // `static inline` the kernel never calls costs nothing in the compiled
+    // AIR, and the selector is now the codec's own layout
+    // ([`PackedCodec::supports_pair_dot`]), not a cargo feature.
+    source.push_str(Q5K_PAIR_DOT_MSL);
+    source.push('\n');
     source.push_str(Q6K_UNPACK_MSL);
     source.push('\n');
-    // feature-gated, same posture as `Q5K_PAIR_DOT_MSL` above:
-    // `Q6K_PAIR_DOT_MSL` does not exist as a Rust symbol without
-    // `metal-q6k-pair-dot`.
-    #[cfg(feature = "metal-q6k-pair-dot")]
-    {
-        source.push_str(Q6K_PAIR_DOT_MSL);
-        source.push('\n');
-    }
+    source.push_str(Q6K_PAIR_DOT_MSL);
+    source.push('\n');
     source.push_str(Q8_0_UNPACK_MSL);
     source.push('\n');
     source.push_str(Q4_0_UNPACK_MSL);
@@ -3454,10 +3461,16 @@ fn push_packed_row_blocked_body(
         // 32-element sub-block — the granularity the header is constant over.
         let lanes_per_block = 8;
         let sub = Q4K_BLOCK_ELEMENTS / lanes_per_block;
-        let plain_product = (matches!(codec, PackedCodec::Q4K)
-            || (matches!(codec, PackedCodec::Q5K) && cfg!(feature = "metal-q5k-pair-dot"))
-            || (matches!(codec, PackedCodec::Q6K) && cfg!(feature = "metal-q6k-pair-dot")))
-            && element_type == "float"
+        // Structural, not feature-gated: the paired-nibble/paired-lane body
+        // applies to any codec whose block layout has one
+        // ([`PackedCodec::supports_pair_dot`]) when the dtype is real
+        // `Float32` -- a `DType` match, not the `element_type == "float"`
+        // MSL-type-token comparison this replaced, which also admitted
+        // `Int32`/`UInt32`/`Bool`/`Int8`/`UInt8` (every dtype `type_token`
+        // happens to lower to the same MSL `float` storage type) and would
+        // have run the scale/minimum float algebra below on integer data.
+        let plain_product = codec.supports_pair_dot()
+            && resolved.dtype == DType::Float32
             && is_plain_product_reduce(resolved, reduce_op, weight, other);
         // `metal-q4k-single-fetch` (default-off): eliminates the redundant
         // paired-lane load the default `Q4_K` lane assignment below makes --
@@ -3679,8 +3692,7 @@ fn push_packed_row_blocked_body(
                 }
             }
             PackedCodec::Q5K if plain_product => {
-                // `metal-q5k-pair-dot` (default-off, see [`Q5K_PAIR_DOT_MSL`]):
-                // the same `yl`/`yh` two-word-load pairing `Q4_K`'s own
+                // See [`Q5K_PAIR_DOT_MSL`]: the same `yl`/`yh` two-word-load pairing `Q4_K`'s own
                 // `plain_product` arm above uses, extended with `Q5_K`'s `qh`
                 // high-bit plane. Reads the SAME `yl`/`yh` activation gather
                 // this preamble already built for `Q4_K` (`plain_product`
@@ -3699,10 +3711,9 @@ fn push_packed_row_blocked_body(
                 // `q5k_header_for` (the same granularity `q4k_header_for`
                 // amortizes over) — a follow-up optimization, not a
                 // correctness gap; see this landing's discipline row (ROW
-                // 92) for the measured cost of skipping it. `metal-q5k-pair-dot`
-                // (default-off) replaces this whole per-element loop with the
-                // paired-nibble body when the reduce is a plain product --
-                // see the `plain_product` arm above.
+                // 92) for the measured cost of skipping it. The `plain_product`
+                // arm above replaces this whole per-element loop with the
+                // paired-nibble body whenever the reduce is a plain product.
                 source.push_str("            q5k_header hdr = q5k_header_for(blk, slot);\n");
                 source.push_str(&format!("            for (int e = 0; e < {sub}; ++e) {{\n"));
                 source.push_str(&format!(
@@ -3727,8 +3738,7 @@ fn push_packed_row_blocked_body(
                 source.push_str("            }\n");
             }
             PackedCodec::Q6K if plain_product => {
-                // `metal-q6k-pair-dot` (default-off, see [`Q6K_PAIR_DOT_MSL`]):
-                // the same paired-lane body `Q4_K`/`Q5_K`'s own
+                // See [`Q6K_PAIR_DOT_MSL`]: the same paired-lane body `Q4_K`/`Q5_K`'s own
                 // `plain_product` arms use above, ported to `Q6_K`'s
                 // ql/qh/signed-scale layout. Reads the SAME `yl`/`yh`
                 // activation gather this preamble already built for
@@ -3745,10 +3755,9 @@ fn push_packed_row_blocked_body(
                 // sub-block scale byte, not one nibble out of an
                 // already-loaded word). Correct, one element at a time; `d`
                 // is still decoded ONCE per super-block via
-                // `q6k_header_for` rather than per element. `metal-q6k-pair-dot`
-                // (default-off) replaces this whole per-element loop with the
-                // paired-lane body when the reduce is a plain product -- see
-                // the `plain_product` arm above.
+                // `q6k_header_for` rather than per element. The `plain_product`
+                // arm above replaces this whole per-element loop with the
+                // paired-lane body whenever the reduce is a plain product.
                 source.push_str("            q6k_header hdr = q6k_header_for(blk);\n");
                 source.push_str(&format!("            for (int e = 0; e < {sub}; ++e) {{\n"));
                 source.push_str(&format!(
@@ -5468,7 +5477,7 @@ mod tests {
 
     /// [`matmul_op`]'s `Float16` counterpart -- `q4k_pair_dot`'s own
     /// `plain_product` arm (`push_packed_row_blocked_body`'s own gate) is
-    /// `element_type == "float"`-only, so a fixture that needs to reach a
+    /// `DType::Float32`-only, so a fixture that needs to reach a
     /// DIFFERENT row-blocked Q4_K arm (mask-fma's, single-fetch's) must NOT
     /// be plain-`Float32`-shaped, or `q4k_pair_dot` wins over it every time.
     #[cfg(all(feature = "metal-q4k-single-fetch", not(feature = "metal-q4k-split-k")))]
@@ -5549,12 +5558,12 @@ mod tests {
         );
     }
 
-    /// `Q5_K` sibling of the test above, gated on `metal-q5k-pair-dot`: the
-    /// same Add-reduce-over-plain-product shape must select `q5k_pair_dot`
-    /// (this feature's own paired-nibble body) rather than the scalar
-    /// per-element `q5k_value` loop `push_packed_row_blocked_body`'s
-    /// `PackedCodec::Q5K` arm falls back to when the feature is off.
-    #[cfg(feature = "metal-q5k-pair-dot")]
+    /// `Q5_K` sibling of the test above: the same Add-reduce-over-plain-
+    /// product shape must select `q5k_pair_dot` (`PackedCodec::supports_pair_dot`,
+    /// a structural fact of `Q5_K`'s block layout, not a cargo feature)
+    /// rather than the scalar per-element `q5k_value` loop
+    /// `push_packed_row_blocked_body`'s `PackedCodec::Q5K` arm falls back to
+    /// when the reduce is not a plain product.
     #[test]
     fn q5k_row_blocked_matmul_uses_paired_nibble_decode() {
         let bound = matmul_op(4, 256, 5);
@@ -5570,7 +5579,7 @@ mod tests {
         let source = emit(&bound, &q5k).expect("emits").source;
         assert!(
             source.contains("q5k_pair_dot"),
-            "Add-reduce over a plain weight*activation body must take the paired decode path with metal-q5k-pair-dot on:\n{source}"
+            "Add-reduce over a plain weight*activation body must take the paired decode path by default:\n{source}"
         );
         assert!(
             !source.contains("q5k_value(blk"),
@@ -5578,41 +5587,16 @@ mod tests {
         );
     }
 
-    /// Feature-off default: the SAME matmul shape must still take the
-    /// scalar `q5k_value` per-element path -- `metal-q5k-pair-dot` is
-    /// default-off and must not change production behavior until it earns
-    /// the default (see the feature's own `Cargo.toml` doc).
-    #[cfg(not(feature = "metal-q5k-pair-dot"))]
-    #[test]
-    fn q5k_row_blocked_matmul_uses_scalar_decode_by_default() {
-        let bound = matmul_op(4, 256, 5);
-        let weight_node = bound.operands()[0].0;
-        let mut q5k = BTreeMap::new();
-        q5k.insert(weight_node, PackedCodec::Q5K);
-
-        assert!(
-            packed_row_block(&bound, &operand_codecs(&bound, &q5k)).is_some(),
-            "test fixture must actually take the row-blocked path for this assertion to mean anything"
-        );
-
-        let source = emit(&bound, &q5k).expect("emits").source;
-        assert!(
-            source.contains("q5k_value(blk"),
-            "without metal-q5k-pair-dot, Q5_K must fall back to the scalar per-element path:\n{source}"
-        );
-        assert!(
-            !source.contains("q5k_pair_dot"),
-            "the paired decode path must not appear without metal-q5k-pair-dot enabled:\n{source}"
-        );
-    }
-
-    /// `Q6_K` sibling of `q5k_row_blocked_matmul_uses_paired_nibble_decode`,
-    /// gated on `metal-q6k-pair-dot`: the same Add-reduce-over-plain-product
-    /// shape must select `q6k_pair_dot` (this feature's own paired-lane
-    /// body) rather than the scalar per-element `q6k_value` loop
-    /// `push_packed_row_blocked_body`'s `PackedCodec::Q6K` arm falls back to
-    /// when the feature is off.
-    #[cfg(feature = "metal-q6k-pair-dot")]
+    /// `Q6_K` sibling of `q5k_row_blocked_matmul_uses_paired_nibble_decode`:
+    /// the same Add-reduce-over-plain-product shape must select
+    /// `q6k_pair_dot` (`PackedCodec::supports_pair_dot`, a structural fact
+    /// of `Q6_K`'s block layout, not a cargo feature) rather than the
+    /// scalar per-element `q6k_value` loop `push_packed_row_blocked_body`'s
+    /// `PackedCodec::Q6K` arm falls back to when the reduce is not a plain
+    /// product. This subsumes the pair of feature-gated marker tests this
+    /// landing replaced (`q6k_row_blocked_matmul_uses_paired_nibble_decode`/
+    /// `_uses_scalar_decode_by_default`) -- there is now exactly one
+    /// selection to assert, not a feature-on/feature-off pair.
     #[test]
     fn q6k_row_blocked_matmul_uses_paired_nibble_decode() {
         let bound = matmul_op(4, 256, 5);
@@ -5628,39 +5612,11 @@ mod tests {
         let source = emit(&bound, &q6k).expect("emits").source;
         assert!(
             source.contains("q6k_pair_dot"),
-            "Add-reduce over a plain weight*activation body must take the paired decode path with metal-q6k-pair-dot on:\n{source}"
+            "Add-reduce over a plain weight*activation body must take the paired decode path by default:\n{source}"
         );
         assert!(
             !source.contains("q6k_value(blk"),
             "the scalar per-element q6k_value dequant expression must not remain once the paired path is taken:\n{source}"
-        );
-    }
-
-    /// Feature-off default: the SAME matmul shape must still take the
-    /// scalar `q6k_value` per-element path -- `metal-q6k-pair-dot` is
-    /// default-off and must not change production behavior until it earns
-    /// the default (see the feature's own `Cargo.toml` doc).
-    #[cfg(not(feature = "metal-q6k-pair-dot"))]
-    #[test]
-    fn q6k_row_blocked_matmul_uses_scalar_decode_by_default() {
-        let bound = matmul_op(4, 256, 5);
-        let weight_node = bound.operands()[0].0;
-        let mut q6k = BTreeMap::new();
-        q6k.insert(weight_node, PackedCodec::Q6K);
-
-        assert!(
-            packed_row_block(&bound, &operand_codecs(&bound, &q6k)).is_some(),
-            "test fixture must actually take the row-blocked path for this assertion to mean anything"
-        );
-
-        let source = emit(&bound, &q6k).expect("emits").source;
-        assert!(
-            source.contains("q6k_value(blk"),
-            "without metal-q6k-pair-dot, Q6_K must fall back to the scalar per-element path:\n{source}"
-        );
-        assert!(
-            !source.contains("q6k_pair_dot"),
-            "the paired decode path must not appear without metal-q6k-pair-dot enabled:\n{source}"
         );
     }
 
@@ -5671,7 +5627,7 @@ mod tests {
     /// dichotomy holds — Add-reduce over a plain product still defers the
     /// scale, never falls back to per-element dequant. `matmul_op_f16`, not
     /// `matmul_op`: `q4k_pair_dot`'s own `plain_product` arm is
-    /// `element_type == "float"`-only and takes priority over this feature
+    /// `DType::Float32`-only and takes priority over this feature
     /// (see `metal-q4k-single-fetch`'s own Cargo.toml doc), so a `Float32`
     /// fixture would silently exercise `q4k_pair_dot` instead and this
     /// test would assert nothing about single-fetch at all.
