@@ -375,7 +375,6 @@ impl BoundOp {
     /// program (`cpu::tests::evaluate_quantized_two_layers_does_not_
     /// underflow_live_now`) hit the moment the CPU evaluator started
     /// actually reading `epilogue_operands` (`cpu::apply_reduce_epilogue`).
-    #[must_use]
     pub fn all_read_sources(&self) -> impl Iterator<Item = &(NodeId, Layout, Option<Lookup>)> {
         let epilogue: &[(NodeId, Layout, Option<Lookup>)] = match &self.kind {
             BoundOpKind::Reduce {
