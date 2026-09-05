@@ -12356,6 +12356,58 @@ value = 1.0
         // invalidate every count below.
         let bound = crate::bind::bind_with_fusion(&program, &shapes, &outputs, false)
             .expect("the program binds");
+        // `reduce-epilogue-fusion` is a bind-time REWRITE gated only by this
+        // crate feature (`bind::bind_with_fusion`'s own doc: it "runs
+        // unconditionally after this ... gated only by the crate feature"),
+        // not by the `fuse_cached_attention` bool this call passes `false`
+        // for -- so `bound` above already carries the epilogue-fused shape
+        // whenever this feature is compiled in, and every count below that
+        // depends on it must be read per-feature, never pinned to one number.
+        #[cfg(feature = "reduce-epilogue-fusion")]
+        let epilogued_reduce_count = bound
+            .iter()
+            .filter(|op| {
+                matches!(
+                    &op.kind,
+                    crate::bind::BoundOpKind::Reduce { epilogue_operands, .. }
+                        if !epilogue_operands.is_empty()
+                )
+            })
+            .count();
+        // MEASURED (this test, `reduce-epilogue-fusion` on): 128 = 4 fusions
+        // x 32 layers, one per `append_mistral_cached_layer` call
+        // (`spec.rs:2378`). Each fusion is an `Op::Elementwise` whose SOLE
+        // operand-of-interest is an `Op::Reduce` with no other consumer, read
+        // at full identity -- exactly `bind::reduce_epilogue_candidates`'s
+        // own three conditions -- so the reduce's own `BoundOp` disappears
+        // and its producer becomes the consumer's epilogue instead. The four,
+        // in per-layer source order:
+        //   1. `global_max` (`spec.rs:2678`, `Elementwise::Maximum` over
+        //      `score_max_cached`/`score_max_new`) absorbs `score_max_cached`
+        //      (the first, hence first-matching, `Reduce` operand) as its
+        //      epilogue -- the online-softmax running-max combine.
+        //   2. `residual1` (`spec.rs:2809`, `Elementwise::Add` of `attn_out`
+        //      and `x`) absorbs `attn_out`, the attention output-projection
+        //      reduce (`spec.rs:2799`).
+        //   3. `ffn_hidden` (`spec.rs:2879`, `Elementwise::Multiply` of
+        //      `silu_gate` and `up`) absorbs `up`, the FFN up-projection
+        //      reduce (`spec.rs:2839`).
+        //   4. `x_next` (`spec.rs:2902`, `Elementwise::Add` of `ffn_out` and
+        //      `residual1`) absorbs `ffn_out`, the FFN down-projection
+        //      reduce (`spec.rs:2892`).
+        // Every other `Reduce` in the layer (Q/K/V projections, the two
+        // per-range attention-score reduces, the two per-range softmax-sum
+        // reduces, the two per-range attended-value reduces) keeps a second
+        // real consumer or a non-identity/broadcast one, so none of them
+        // qualifies -- this is why the count is 4/layer, not higher.
+        #[cfg(feature = "reduce-epilogue-fusion")]
+        assert_eq!(
+            epilogued_reduce_count,
+            4 * 32,
+            "reduce-epilogue-fusion must absorb exactly 4 reduces per layer on this \
+             32-layer Mistral cached-forward program -- global_max, residual1's attn_out, \
+             ffn_hidden's up-projection, and x_next's down-projection reduce"
+        );
 
         let mut elementwise = 0_usize;
         let mut reduce_two_operand = 0_usize;
@@ -12858,10 +12910,23 @@ value = 1.0
             .filter(|op| matches!(op.kind, crate::bind::BoundOpKind::Elementwise { .. }))
             .map(|op| op.node.0)
             .collect();
+        // 419 = 547 - 128: the same 128 reduce-epilogue-fusion absorptions
+        // asserted above remove one `BoundOpKind::Elementwise` per fusion --
+        // the consumer that used to materialize on its own now IS the
+        // epilogued `Reduce`, so it drops out of this `Elementwise`-kind
+        // filter entirely.
+        #[cfg(not(feature = "reduce-epilogue-fusion"))]
         assert_eq!(
             materialized_elementwise_nodes.len(),
             547,
             "the materialized-elementwise set must have exactly 547 members, matching the bound count"
+        );
+        #[cfg(feature = "reduce-epilogue-fusion")]
+        assert_eq!(
+            materialized_elementwise_nodes.len(),
+            547 - 4 * 32,
+            "419 = 547 unfused elementwise BoundOps minus the 128 reduce-epilogue-fusion \
+             absorptions (4/layer x 32 layers) -- see epilogued_reduce_count's own doc above"
         );
         let unexplained_nodes: alloc::vec::Vec<u32> = materialized_elementwise_nodes
             .difference(&elementwise_declined_nodes)
@@ -12901,15 +12966,40 @@ value = 1.0
             "rule census recorded zero window-reduce attempts -- the counter is wired to nothing"
         );
 
+        // `total` and `elementwise` both shift by exactly the 128
+        // reduce-epilogue-fusion absorptions under that feature; every
+        // fusion removes one whole `BoundOp` (the standalone `Reduce`
+        // disappears, its consumer's `Elementwise` slot is repurposed as the
+        // SAME `Reduce`'s epilogue rather than adding a new entry) --
+        // `reduce_total`/`constant`/`iota` are untouched because the fused
+        // reduce keeps its `BoundOpKind::Reduce` kind, just gains a
+        // non-default `epilogue_body`.
+        #[cfg(not(feature = "reduce-epilogue-fusion"))]
         assert_eq!(total, 1196, "total BoundOps must match the measured forward");
+        #[cfg(feature = "reduce-epilogue-fusion")]
+        assert_eq!(
+            total,
+            1196 - 4 * 32,
+            "1068 = 1196 unfused total minus the 128 reduce-epilogue-fusion absorptions"
+        );
         assert_eq!(
             reduce_total,
             225 + 385,
             "total reduces must match the measured reduce_matmul_quantized + \
              reduce_f32_dense population, even though this test's own two-operand \
-             split is a different partition of that same 610 (see this test's own doc)"
+             split is a different partition of that same 610 (see this test's own doc); \
+             unaffected by reduce-epilogue-fusion -- an absorbed reduce keeps its \
+             BoundOpKind::Reduce kind, it only gains a non-default epilogue"
         );
+        #[cfg(not(feature = "reduce-epilogue-fusion"))]
         assert_eq!(elementwise, 547, "elementwise BoundOps must match the measured forward");
+        #[cfg(feature = "reduce-epilogue-fusion")]
+        assert_eq!(
+            elementwise,
+            547 - 4 * 32,
+            "419 = 547 unfused elementwise BoundOps minus the 128 reduce-epilogue-fusion \
+             absorptions (4/layer x 32 layers) -- see epilogued_reduce_count's own doc above"
+        );
         assert_eq!(constant, 37, "constant BoundOps must match the measured forward");
         assert_eq!(iota, 2, "iota BoundOps must match the measured forward");
         assert_eq!(
