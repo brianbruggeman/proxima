@@ -2096,6 +2096,8 @@ impl<'file> LoadedModel<'file> {
                 }
                 #[cfg(feature = "instrument")]
                 let layer_cache_append_ticks = elapsed_ticks(layer_cache_append_started);
+                #[cfg(feature = "instrument")]
+                let cached_len_before_step = cached_len;
                 cached_len += new_count;
 
                 let (logits, _shape) =
@@ -2123,7 +2125,7 @@ impl<'file> LoadedModel<'file> {
                     print_token_breakdown(&TokenBreakdown {
                         step: _step,
                         new_count,
-                        cached_len_before: cached_len,
+                        cached_len_before: cached_len_before_step,
                         step_wall_ticks: elapsed_ticks(step_started),
                         apply_serving_config_ticks,
                         build_position_inputs_ticks,
@@ -2531,6 +2533,8 @@ impl<'file> LoadedModel<'file> {
                 // one-time cost after step 0, never a hardcoded zero.
                 #[cfg(all(feature = "instrument", feature = "metal", target_os = "macos"))]
                 let metal_stage = metal_stage_totals();
+                #[cfg(feature = "instrument")]
+                let cached_len_before_step = cached_len;
                 cached_len = merged_len;
 
                 let (logits, _shape) =
@@ -2558,7 +2562,7 @@ impl<'file> LoadedModel<'file> {
                     print_token_breakdown(&TokenBreakdown {
                         step: _step,
                         new_count,
-                        cached_len_before: cached_len,
+                        cached_len_before: cached_len_before_step,
                         step_wall_ticks: elapsed_ticks(step_started),
                         apply_serving_config_ticks,
                         build_position_inputs_ticks,
