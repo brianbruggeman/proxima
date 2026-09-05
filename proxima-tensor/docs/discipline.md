@@ -21931,3 +21931,111 @@ Every gate in this row's own gate list passed. `MathMode::default() = Relaxed` s
 | Date | Change | Δ vs prior | CoV / runs | Host loadout |
 | --- | --- | --- | --- | --- |
 | 2026-09-05 | `MTLCompileOptions::mathMode` is now a per-`Plan` runtime value (`omega::MathMode`), defaulted `Relaxed` instead of hardcoded `Safe` | decode-loop steady-state (steps 3-7, real openchat 7B, 3 rounds): Safe 33.82 ms/token -> Relaxed 28.19 ms/token, 1.200x faster wall-clock; generated_text and quality (exact_match/top1/kl_mean/kl_max) identical between modes at every N measured | decode-loop CoV: Safe 0.32%, Relaxed 0.62% across 3 interleaved rounds; quality harness run once per mode at reduced N (2 prompts/3 tokens) after the brief's own 8/8 arm timed out past 5 minutes | pgrep (`llama-bench\|llama-cli\|proxima_model_i\|device_streamin\|matvec_roofline\|omega-\|^cargo$\|^rustc$\|nextest\|cargo-nextest`) empty before every timed run; `uptime` load-1 3.5-11.0 at each check, re-checked when above 10 |
+
+## ROW 298 -- ROW 288 vs ROW 297 reconciled: main's default (`Relaxed`) is not regressed; main's `Safe` mode is, by ~5.5 ms/token, entirely inside `gpu_exec_ms`
+
+**Card:** none (measurement row, no code or feature change). Detached worktrees `proxima-wt-m5`
+(`docs/m5-bakeoff`, main at `26d5ced`) and `proxima-wt-row288` (detached at `837011c`, ROW 288's own
+binary, the last commit before ROW 294's epilogue fusion and ROW 296/297's math-mode work landed).
+
+**Question.** ROW 288 (main `837011c`, 2026-09-04) measured the default Metal path at 28.54 ms/token
+steady state (`Safe` was the only mode that build had). ROW 297 (main `26d5ced`, 2026-09-05) measured
+`Safe` at 33.82 and `Relaxed` at 28.19 on a different session's box. Two candidate explanations: the 99
+commits between the two shas regressed the `Safe` path by ~5 ms and `Relaxed` merely happens to mask
+it, or the two sessions' boxes differ. This row interleaves all three arms plus `llama-bench` on one
+box in one session to decide it.
+
+**Arms, oracle `bind::real_openchat_file::runs_the_cached_decode_loop_on_the_metal_backend_and_reports_the_plan_cache`
+(release, `--features metal,instrument`, `PROXIMA_MAX_TOKENS=8`, real openchat-3.5-1210.Q4_K_S.gguf),
+3 rounds interleaved A,B,C,D x3, steady-state steps 3..7 (`plan_hits` >=1 and rising at every step,
+`prepare_calls=0`, confirming the window is post-plan-miss):**
+
+- **A** -- main `26d5ced`, `Relaxed` (the shipped default, `PROXIMA_MATH_MODE` unset).
+- **B** -- main `26d5ced`, `Safe` (`PROXIMA_MATH_MODE=safe`, the test-edge-only knob ROW 297 added).
+- **C** -- ROW 288's own binary, `837011c`, its only mode (hardcoded `Safe`, pre-ROW-297).
+- **D** -- `llama-bench -m openchat-3.5-1210.Q4_K_S.gguf -n 32 -p 0 -r 5 -t 8 -ngl 99`, the same
+  invocation ROW 288's own re-prove block names.
+
+| arm | round 1 | round 2 | round 3 | mean ms/token | CoV |
+| --- | --- | --- | --- | --- | --- |
+| A main Relaxed | 28.347 | 28.303 | 28.380 | 28.343 | 0.11% |
+| B main Safe | 34.252 | 34.286 | 33.933 | 34.157 | 0.47% |
+| C row288 (Safe) | 28.573 | 28.880 | 28.422 | 28.625 | 0.67% |
+| D llama-bench | 17.525 | 17.556 | 17.513 | 17.532 | 0.10% |
+
+`generated_text` is byte-identical -- `"Here is a simple Python function that returns"` -- across
+all nine proxima runs (A, B, C x 3 rounds each); D's `t/s` (57.06 / 56.96 / 57.10) converts to the
+ms/token column above.
+
+**Answer.** Neither hypothesis exactly as framed. Main's *default* path (A, `Relaxed`, 28.343) is
+inside 1% of ROW 288's binary (C, 28.625) and of ROW 288's own historical figure (28.54) -- the
+default path is NOT regressed. What regressed is main's `Safe` mode specifically: B (34.157) is
+5.532 ms/token slower than C (28.625) on the identical box in the identical session, CoV of that
+per-round delta 2.03% (5.679 / 5.406 / 5.511 ms across the three rounds) -- well outside noise. ROW
+297's `Safe`=33.82 was not a different box; it was this same regression, and `Relaxed` becoming the
+shipped default coincidentally lands main back near ROW 288's number by combining two independent
+effects: `Safe` got slower, and the ROW 294 epilogue fusion + ROW 297 `Relaxed` default made
+`Relaxed` fast enough to offset it.
+
+**Mechanism, traced to the field that carries it.** `token_breakdown_metal`'s own per-step fields
+(steps 3..7, 3-round means) isolate the delta to `gpu_exec_ms`, not host overhead and not dispatch
+count -- B actually issues FEWER dispatches than C (`emit_calls`=520 vs 616, `barriers`=323 vs 419,
+ROW 294's epilogue fusion landed on main between the two shas) yet spends MORE time executing them:
+
+| arm | gpu_exec_ms mean | CoV |
+| --- | --- | --- |
+| B main Safe | 32.642 | 0.74% |
+| C row288 Safe | 27.187 | 0.96% |
+| **delta (B-C)** | **5.455** | -- |
+
+5.455 ms of the 5.532 ms wall-clock delta (98.6%) is inside `gpu_exec_ms` alone -- the single batched
+command-buffer GPU execution time is what got slower under `Safe` between `837011c` and `26d5ced`,
+despite fewer, more-fused dispatches feeding it. `A`'s own `gpu_exec_ms` (26.88 ms mean across 3
+rounds) sits close to `C`'s 27.19, consistent with ROW 297's own kernel-level finding that `Relaxed`
+avoids whatever this cost is rather than main having gotten faster in `Relaxed` specifically.
+
+**Per-kind profile, B vs C -- diagnostic only, does not explain the batched-path delta.** The one
+per-kind breakdown that exists (`report_op_timings`'s `op_profile_bucket` event, `generate.rs:159`,
+driven by `PROXIMA_METAL_OP_PROFILE_STEP=3` via `profiles_one_real_decode_step_by_per_op_gpu_time`)
+switches the decode step from the production batched `execute_plan` to `execute_plan_op_timed` --
+one command buffer PER op instead of one for the whole step (that test's own doc,
+`bind.rs:3106-3122`). That is a different execution mode than the one the bake-off measured, and it
+does NOT reproduce the regression: B's op-timed total (29.677 ms) is LOWER than C's (30.173 ms), the
+opposite direction of the batched-path finding. Reported per instructions (capture if it exists, say
+so if it does not explain the claim) -- it exists, and it is the wrong instrument for this question:
+
+| kind | B gpu_ms | C gpu_ms | delta (B-C) |
+| --- | --- | --- | --- |
+| reduce-cooperative | 1.259 | 0.760 | +0.499 |
+| cached-attention | 2.128 | 2.112 | +0.016 |
+| iota | 0.007 | 0.007 | +0.0004 |
+| constant | 0.008 | 0.008 | -0.0003 |
+| reduce-packed-row-blocked | 24.317 | 24.603 | -0.286 |
+| elementwise | 1.957 | 2.683 | -0.726 |
+
+No new instrumentation was added to attribute the batched-path `gpu_exec_ms` delta to a specific
+kernel or barrier boundary -- the residual is real and unexplained past the field it lives in.
+
+**Residual.** What inside a single `MTLCommandBuffer`'s `Safe`-mode execution got slower between
+`837011c` and `26d5ced` is not isolated further by this row -- candidates include the ROW 294
+epilogue-fused kernels paying a larger `Safe`-mode NaN/Inf-checking tax per fused dispatch than the
+smaller pre-fusion kernels did, but that is a hypothesis, not a measurement; nothing in this row's
+artifacts distinguishes it from any other cause co-located in `gpu_exec_ms`.
+
+**Loadouts.** `uptime` load-1 8.82 down to 3.07-3.93 across the run (bake-off started at load 8.82,
+under the 10 ceiling); pgrep (`llama-bench\|llama-cli\|proxima_model_i\|device_streamin\|matvec_roofline\|omega-\|^cargo$\|^rustc$\|nextest\|cargo-nextest`)
+empty before the bake-off and before the two profile runs.
+
+**Re-prove:**
+```sh
+cd /Users/brianbruggeman/repos/slot-0/proxima-wt-m5
+CARGO_TARGET_DIR=./target CARGO_TERM_COLOR=never PROXIMA_MAX_TOKENS=8 [PROXIMA_MATH_MODE=safe] cargo test --release -p proxima-model-interop --features metal,instrument --lib -- --exact --nocapture --ignored \
+  bind::real_openchat_file::runs_the_cached_decode_loop_on_the_metal_backend_and_reports_the_plan_cache
+```
+against a worktree detached at `837011c` for the C arm, and
+`llama-bench -m <openchat-3.5-1210.Q4_K_S.gguf> -n 32 -p 0 -r 5 -t 8 -ngl 99` for D.
+
+### Changelog
+| Date | Change | Δ vs prior | CoV / runs | Host loadout |
+| --- | --- | --- | --- | --- |
+| 2026-09-05 | doc-only: reconciled ROW 288 (28.54, `Safe`-only build) against ROW 297 (`Safe` 33.82 / `Relaxed` 28.19) via a 4-arm interleaved bake-off on one box; no code change | main default (`Relaxed`) unregressed (28.343 vs ROW 288's 28.625 on the same box, <1% apart); main's `Safe` mode is regressed 5.532 ms/token (19.3%) vs ROW 288's binary's `Safe`, traced to `gpu_exec_ms` (5.455 ms of the 5.532, 98.6%) despite fewer dispatches (520 vs 616) | A 0.11%, B 0.47%, C 0.67%, D 0.10% CoV across 3 interleaved rounds each; B-C per-round delta CoV 2.03% | pgrep quiet-gate empty before every arm; `uptime` load-1 8.82 falling to 3.07-3.93 across the run, single measurer |
