@@ -3169,9 +3169,16 @@ mod real_openchat_file {
         #[cfg(feature = "instrument")]
         {
             let flushed = telemetry_recorder.drain_and_total();
+            let dropped = telemetry_recorder.recorder.dropped();
+            std::println!("telemetry_ring dropped={dropped} flushed={flushed}");
             assert!(
                 flushed > 0,
                 "the decode loop emitted no token_breakdown/op_profile telemetry"
+            );
+            assert_eq!(
+                dropped, 0,
+                "the 4096-slot telemetry ring dropped records -- a per-op event is \
+                 debug or louder somewhere on the placed decode path"
             );
         }
 

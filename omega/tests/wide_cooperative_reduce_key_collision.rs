@@ -80,7 +80,7 @@ const NARROW_COLS: u32 = 17;
 
 /// Runs `WIDE_COLS` then `NARROW_COLS` through `omega::execute` in the SAME
 /// thread (so both share one thread-local `metal::PIPELINE_CACHE`), captures
-/// the `pipeline cache lookup` debug log `metal::pipeline_for` emits on
+/// the `pipeline cache lookup` trace log `metal::pipeline_for` emits on
 /// every hit/miss, and asserts: (1) the two calls' `kernel_cache_key`
 /// strings differ (the fix -- pre-fix they collided), and (2) `NARROW_COLS`'s
 /// metal result still agrees with `cpu::evaluate` (pre-fix, the second call
@@ -94,7 +94,7 @@ fn cooperative_reduce_extents_never_share_a_pipeline_cache_entry() {
         .core_count(1)
         .install()
         .expect("telemetry recorder installs as process default");
-    global::install(EnvFilter::parse("debug"));
+    global::install(EnvFilter::parse("trace"));
 
     let wide_program = single_row_reduce_program(WIDE_COLS);
     let wide_input = random_vec(0x5000 + u64::from(WIDE_COLS), WIDE_COLS as usize);
