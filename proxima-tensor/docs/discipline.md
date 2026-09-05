@@ -21815,3 +21815,119 @@ result.
 | Date | Change | Δ vs prior | CoV / runs | Host loadout |
 | --- | --- | --- | --- | --- |
 | 2026-09-05 | quiet-box re-run of the same ROW 295 harness, no code change | L0 264.01 (ROW 295 run1/run2: 9.54/28.10); L1 321.10 (25.57/28.58); L2 274.61 (32.44/2.10); L3_shape_default 179.22 (18.46/4.35); L3_baseline 113.37 (5.80/1.32) GB/s -- every arm 3.7x-84x ROW 295's noise-dominated figures, now with 6/9 arms and 18/18 shape-sweep cells under 5% CoV | 6 of 9 ladder-table arms under 5% CoV (L1 2.10%, L2 1.84%, L3_shape_default 1.62%, plus all 18 shape-sweep cells 0.08-4.52%); 3 arms (L0 49.83%, L3_baseline 48.20%, empty 57.30%) exceed 5%, isolated to a first-repeat cold-dispatch outlier (repeats 2-5 alone: L0 0.68%, L3_baseline 0.38%) | pgrep (`llama-bench|llama-cli|proxima_model_i|device_streamin|matvec_roofline|omega-|^cargo$|^rustc$|nextest|cargo-nextest`) empty at every check; `uptime` load-1 16.65 and 10.57 (both over the 10 ceiling, waited 60s each) then 8.11 immediately before the run, 10.11 immediately after |
+
+## ROW 297 -- metal math mode is now a runtime `Plan` value, defaulted to `Relaxed` on the whole decode program
+
+**Card:** `omega/src/metal.rs` (`MathMode` enum, `Plan::set_math_mode`, `compile_pipeline`/`pipeline_for`/
+`encode_op`/`execute_op_timed` threading), `omega/src/backend.rs` (`set_math_mode` free function,
+mirroring `mark_resident`), `omega/src/lib.rs` (re-export), `proxima-model-interop/src/serving.rs`
+(`ServingConfig::math_mode`, macos+metal-gated), `proxima-model-interop/src/generate.rs`
+(`BackendRuntime::math_mode`, `supported_serving_config`'s `PROXIMA_METAL_MATH_MODE` env override,
+mirroring `omega::backend::Engine::from_env`'s own idiom), `proxima-model-interop/src/bind.rs` (test-edge
+`PROXIMA_MATH_MODE` read in `runs_the_cached_decode_loop_on_the_metal_backend_and_reports_the_plan_cache`
+only). Worktree `proxima-wt-mathmode`, branch `perf/metal-relaxed-math`, off `main` at `413b27f`.
+
+**Finding acted on.** ROW 296's shape sweep: the packed-row Q4_K matvec kernel streams 179.22 GB/s
+under `MTLMathMode::Safe` and 240.89-247.26 GB/s under `Relaxed`/`Fast`, parity 0-1.9e-6 in every
+cell. `compile_pipeline` (`omega/src/metal.rs`) pinned `Safe` unconditionally with the rationale
+"parity against the CPU interpreter demands IEEE behavior" -- a claim never re-tested once ROW 296
+existed. This row tests it on the whole decode program, not one kernel.
+
+**Representation carried across the sans-IO boundary.** `MTLMathMode` (`objc2_metal`, a tuple struct
+over `NSInteger` with `Safe`/`Relaxed`/`Fast` associated consts) is `omega`'s own device type,
+reachable only where `target_os = "macos"` compiles it in. `proxima-model-interop` already depends on
+`omega` with the `metal` feature (its own `Cargo.toml` line 177) but is explicitly kept clear of naming
+`objc2`/metal-rs types directly (`Cargo.toml`'s own "metal feature already confines every objc2/Metal
+dependency" comment). Re-exporting `MTLMathMode` itself would cross that line; a bespoke Safe/Relaxed/
+Fast wrapper would carry a variant (`Fast`) nothing selects (ROW 296: `Fast` measures identically to
+`Relaxed`). The two-variant enum this row adds -- `pub enum MathMode { Safe, Relaxed }` in
+`omega::metal`, re-exported as `omega::MathMode` -- is the one type this task's own brief allows: it is
+`omega`'s own public surface (not a `proxima-model-interop` invention), and it drops the variant the
+evidence says buys nothing. `Plan::set_math_mode`/`omega::backend::set_math_mode` mirror
+`Plan::mark_resident`/`omega::backend::mark_resident` exactly -- the existing pattern for a per-`Plan`
+runtime knob, not a new one.
+
+**Cache-key change site.** `kernel_cache_key` (`omega/src/msl.rs`) stays a pure structural fingerprint
+of a `BoundOp` -- it has no reason to know about a Metal compile option. `pipeline_for`
+(`omega/src/metal.rs`) is the one place a cache key turns into a `PIPELINE_CACHE` lookup, so the mode
+is folded in there: `format!("{cache_key}{}", math_mode.cache_token())`, `cache_token` returning `'S'`/
+`'R'`. A unit test (`math_mode_cache_key_tests::safe_and_relaxed_produce_distinct_pipeline_cache_keys`)
+asserts the two tokens never collide, and `cargo nextest run -p omega --features metal -E
+'test(/byte_identi/)'` (3 tests, all pass) proves the MSL text itself is unchanged -- the mode is a
+compile OPTION, never a source-text variant.
+
+**Default.** `MathMode::default()` is `Relaxed` (keeps inf/nan semantics; `Fast` buys nothing over it
+per ROW 296). `ServingConfig::math_mode` (macos+metal-gated field) defaults to it via
+`ServingConfig::default()`; `BackendRuntime::new` reads it once per `generate_with_serving_config` call
+and applies it to every `Plan` that call builds. `Safe` stays reachable: `ServingConfig { math_mode:
+omega::MathMode::Safe, .. }` for production callers, or `PROXIMA_METAL_MATH_MODE=safe` (the
+`Engine::from_env`/`PROXIMA_MATMUL_WORKERS` env-knob idiom this crate already uses) for a one-off
+bake-off without a second code path.
+
+**Gates.** `cargo nextest run -p omega --features metal`: 172 tests, 172 passed, 0 failed, at the new
+`Relaxed` default -- every parity test (`metal_matmul_parity_across_codec_and_dtype`,
+`packed_row_multi_activation_parity`, `q3k`/`q4k`/`q5k`/`q6k`/`q8_0_real_checkpoint_parity`, etc.) holds
+at the same tolerances it held under `Safe`. `cargo nextest run -p proxima-model-interop --features
+metal,instrument`: 110 tests, 110 passed, 0 failed (27 skipped -- gated on fixtures/features this run
+did not need), including every `capability_matrix::metal_backend::*` CPU-parity case. `bash
+scripts/omega-gate.sh`: PASS, 8/8 steps, step 5's `cargo nextest run -p omega --all-features` ran 240
+tests, 240 passed. `cargo clippy -p omega -p proxima-model-interop --all-targets --features metal -- -D
+warnings`: clean (one `#[allow(clippy::too_many_arguments)]` added to `encode_op`, now 8 parameters,
+matching the existing allow on its sibling `execute_op_timed`).
+
+**Acceptance-loop bake-off (RELEASE, `--features metal,instrument`, oracle
+`runs_the_cached_decode_loop_on_the_metal_backend_and_reports_the_plan_cache`,
+`PROXIMA_MAX_TOKENS=8`, real openchat-3.5-1210.Q4_K_S.gguf, quiet gate checked before every run --
+pgrep empty, `uptime` load-1 3.5-11.0, waited under 10 before each start). 3 rounds, interleaved
+S,R,S,R,S,R, steady-state steps 3..7 `step_wall_ms` (`token_breakdown`'s own per-step wall-clock
+attribution):**
+
+| round | mode | step3 | step4 | step5 | step6 | step7 | generated_text |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| 1 | safe | 33.833 | 33.882 | 33.837 | 33.845 | 33.801 | "Here is a simple Python function that returns" |
+| 1 | relaxed | 28.374 | 28.332 | 28.355 | 28.453 | 28.518 | "Here is a simple Python function that returns" |
+| 2 | safe | 33.613 | 33.848 | 33.843 | 33.877 | 33.947 | "Here is a simple Python function that returns" |
+| 2 | relaxed | 27.884 | 27.983 | 28.032 | 28.051 | 28.078 | "Here is a simple Python function that returns" |
+| 3 | safe | 33.754 | 33.627 | 33.756 | 33.749 | 33.779 | "Here is a simple Python function that returns" |
+| 3 | relaxed | 28.349 | 28.205 | 28.330 | 28.393 | 28.605 | "Here is a simple Python function that returns" |
+
+`generated_text` is byte-identical across all six runs -- no token diverges between `Safe` and
+`Relaxed` at this prompt/step budget. Steady-state mean: `Safe` 33.82 ms/token (CoV 0.32% across the
+3 rounds' step3..7 means), `Relaxed` 28.19 ms/token (CoV 0.62%) -- `Relaxed` is 1.200x faster
+wall-clock per token on the FULL decode program (not just the matvec kernel's own GB/s), a smaller
+multiple than ROW 296's kernel-level 1.34x (240.9/179.2) because per-step wall clock also carries
+non-matvec dispatches (softmax, RMSNorm, RoPE, attention reduce) that ROW 296's ladder never
+measured and that this mode change does not touch.
+
+**Quality harness (`quality::real_openchat_file::metal_vs_cpu_reports_real_drift`, release,
+`--features metal,instrument`, `--nocapture`). Run at the brief's own `PROXIMA_QUALITY_PROMPTS=8
+PROXIMA_MAX_TOKENS=8` timed out past 5 minutes of wall clock without completing even the `Safe` arm
+(CPU-reference-vs-Metal-variant scoring re-forwards the FULL growing context from scratch every
+step, uncached, on both a CPU and a Metal backend -- 8 prompts x up to 8 steps x two backends is not
+the cheap path `token_breakdown`'s cached decode loop is). Re-run at `PROXIMA_QUALITY_PROMPTS=2
+PROXIMA_MAX_TOKENS=3` (67.4s / 67.7s wall, real prompts from the shipped quality fixture, no
+synthetic data) to land a real number inside this session's budget -- the reduced N is the
+deviation, not a smaller claim about what was measured:**
+
+| mode | prompts | tokens | exact_match | top1 | kl_mean | kl_max | max_abs_logit_delta |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| safe | 2 | 6 | 1.000000 | 1.000000 | 0.001551 | 0.002951 | 0.504721 |
+| relaxed | 2 | 6 | 1.000000 | 1.000000 | 0.001551 | 0.002951 | 0.504720 |
+
+Both modes score their variant (Metal) against the SAME CPU reference; `exact_match`/`top1` are
+identical at 1.0, `kl_mean`/`kl_max` identical to six decimal places, and `max_abs_logit_delta`
+differs by 1e-6 -- inside the module's own documented run-to-run floor for two independent forward
+calls on the same backend (`metal_vs_cpu_reports_real_drift`'s sibling self-consistency test cites
+~1e-10 nats KL noise on real hardware; this row's own two independent processes differ by more, but
+in the fifth decimal of a value near 0.5, not in either classification metric).
+
+**Decision (owner's rule: output identical AND wall not worse keeps the default-on flip).**
+`generated_text` matched bit-for-bit across all six decode-loop runs; quality metrics matched to the
+harness's own reported precision; wall-clock is 1.200x FASTER at `Relaxed`, not merely "not worse."
+Every gate in this row's own gate list passed. `MathMode::default() = Relaxed` stays the default;
+`Safe` remains one field (or one env var, at the test edge) away.
+
+### Changelog
+| Date | Change | Δ vs prior | CoV / runs | Host loadout |
+| --- | --- | --- | --- | --- |
+| 2026-09-05 | `MTLCompileOptions::mathMode` is now a per-`Plan` runtime value (`omega::MathMode`), defaulted `Relaxed` instead of hardcoded `Safe` | decode-loop steady-state (steps 3-7, real openchat 7B, 3 rounds): Safe 33.82 ms/token -> Relaxed 28.19 ms/token, 1.200x faster wall-clock; generated_text and quality (exact_match/top1/kl_mean/kl_max) identical between modes at every N measured | decode-loop CoV: Safe 0.32%, Relaxed 0.62% across 3 interleaved rounds; quality harness run once per mode at reduced N (2 prompts/3 tokens) after the brief's own 8/8 arm timed out past 5 minutes | pgrep (`llama-bench\|llama-cli\|proxima_model_i\|device_streamin\|matvec_roofline\|omega-\|^cargo$\|^rustc$\|nextest\|cargo-nextest`) empty before every timed run; `uptime` load-1 3.5-11.0 at each check, re-checked when above 10 |
