@@ -23291,3 +23291,44 @@ Confirm `encode_dispatch_calls=520`, `barriers=323` (ON, current default). To re
 | Date | Change | Δ vs prior | CoV / runs | Host loadout |
 | --- | --- | --- | --- | --- |
 | 2026-09-05 | quiet bake-off of `reduce-epilogue-fusion` ON vs OFF, no default change | round 3 (only clean pair): ON +1.18%/+0.50% (gpu_exec/wall) vs OFF, an order of magnitude under ROW 312's confirmed 8-9% regression threshold on the same harness; dispatches/barriers 520/323 (ON) vs 616/419 (OFF) confirmed in all 6 runs | 3 interleaved rounds/arm, but only round 3 was quiet -- rounds 1-2 ran 15-30x slower than round 3 on gpu_exec_ms despite an empty named-process gate, so no cross-round CoV is reported | quiet gate (`pgrep -l` names-only) empty and load-1 7.40 before round 1; load-1 climbed to 20-36 during rounds 1-2 with no matching process name, then dropped for round 3 -- GPU contention from an unidentified process is the leading explanation and is reported, not hidden; round 2's ON run also produced the only non-canonical `generated_text` of the 6 runs, flagged as a separate open finding |
+
+## ROW 314 -- Q6_K output-head A/B: pair-dot body (current default) is NOT beaten by the pre-pair-dot packed-row/serial-reduce body
+
+ROW 310 flagged `output.weight` (32000x4096, 107.5 MB, Q6_K in this Q4_K_S file) at 42 GB/s / 2.58 ms per token, and noted `PackedCodec::supports_pair_dot` (`omega/src/msl.rs:1124-1128`) includes `Q6K`, routing it through the paired-lane `q6k_pair_dot` body (`omega/src/msl.rs:4504-4513`, gated by `plain_product` at `omega/src/msl.rs:4178-4180`) rather than the per-element `q6k_header_for` loop (`omega/src/msl.rs:4515-4534`) that predates it -- and that this had never been A/B'd quiet. This row does that A/B.
+
+**Arm A** = main (base `0321d46`, rebased onto `25563da` before landing), Q6K takes the pair-dot body. **Arm B** = `PackedCodec::supports_pair_dot` with `Q6K` removed from the `matmul!` (`omega/src/msl.rs:1124-1128` now `matches!(self, PackedCodec::Q3K | PackedCodec::Q4K | PackedCodec::Q5K)`), which forces `plain_product` false for `Q6K` and falls through to the pre-existing per-element `q6k_header_for` loop at `omega/src/msl.rs:4515` -- a correct, already-shipped body, not an error path (confirmed by reading the match arm before editing). Both arms build from the same `--features metal,instrument` release binary (`cargo test -p proxima-model-interop --release --features metal,instrument --no-run`, same `proxima_model_interop-bb04691ddeb98054` hash both times, confirming the change is source-only and does not touch build identity). Oracle: `bind::real_openchat_file::runs_the_cached_decode_loop_on_the_metal_backend_and_reports_the_plan_cache`, `PROXIMA_MAX_TOKENS=8`, `--exact --ignored --nocapture --test-threads=1`.
+
+**Contamination and correction.** The first 3 interleaved rounds (A,B,A,B,A,B) were gated on `pgrep -l 'proxima_model_i|llama-bench'` only and read `gpu_exec_ms` from 26 ms up to 620 ms -- `ps aux` during that window showed a live `oracle-off` process (another slice's renamed binary, PID 72492, running the same oracle test) that the name-only filter never matched, plus load-1 as high as 28.57. That set is DISCARDED, not averaged in. The gate was widened to `pgrep -fl 'proxima_model_i|llama-bench|oracle-'` (full-command match, catches renamed copied binaries) and all 6 rounds re-run; timestamps (`06:20:36`-`06:23:14`) confirmed no overlap with the other two slices' own logs (`epi-logs/round3-off.log` finished `06:19:53`, `portb-logs/round-3-D.log` finished `06:19:05`, both before this window opened). 3 interleaved rounds, `gpu_exec_ms` mean over steps 3..7 (15 datapoints/arm):
+
+| arm | body | gpu_exec mean (ms) | gpu_exec CoV | text identical (6 runs) |
+| --- | --- | --- | --- | --- |
+| A (pair-dot, current default) | `q6k_pair_dot` paired-lane | 26.6099 | 0.718% | y |
+| B (packed-row/serial reduce) | per-element `q6k_header_for` loop | 27.0448 | 2.578% | y |
+
+`generated_text="Here is a simple Python function that returns"` identical across all 6 runs.
+
+**Family-ablation (`PROXIMA_METAL_KIND_FILTER='!family:output'`, one run/arm, isolates the head's own cost):** Arm A drops to 24.0062 ms mean (head costs ~2.60 ms of the 26.61 ms full decode step). Arm B's ablation run was bimodal (23.87-23.98 ms on 2/5 steps, 29.39-29.85 ms on 3/5 steps, CoV far past 5%) -- a single run is not enough to trust that number and it is reported as unreliable, not averaged into the decision.
+
+**Mechanism.** B's own CoV (2.578%) already exceeds the 0.435 ms (1.6%) gap between the two means -- A is nominally faster, not slower, and the gap does not clear either arm's own noise band. The pair-dot body was landed to unify Q6_K with Q4_K/Q5_K's paired-lane path (ROW's own comment at `omega/src/msl.rs:4505-4510`); this A/B finds no regression from that unification on this op graph, so there is no performance case for reverting it.
+
+**Decision (owner's flip rule: B replaces A only if B's gpu_exec is lower than A's beyond both CoVs, with identical text).** Text is identical, but B is not lower -- it is directionally higher and the gap sits inside B's own CoV band. **No production change lands.** `omega/src/msl.rs`'s `supports_pair_dot` keeps `Q6K` in the set; the worktree edit that removed it was A/B tooling only, never merged.
+
+**Gates:** none run this row per explicit owner instruction (no clippy, no nextest, no omega-gate this session) -- bench-only, oracle-run exit codes were all 0 (verified per log).
+
+**Re-prove:**
+```sh
+cd /Users/brianbruggeman/repos/slot-0/proxima-wt-q6
+CARGO_TARGET_DIR=/Users/brianbruggeman/repos/slot-0/proxima-wt-q6/target CARGO_TERM_COLOR=never \
+  cargo test --release -p proxima-model-interop --features metal,instrument --no-run
+BIN=target/release/deps/proxima_model_interop-bb04691ddeb98054
+PROXIMA_MAX_TOKENS=8 "$BIN" \
+  bind::real_openchat_file::runs_the_cached_decode_loop_on_the_metal_backend_and_reports_the_plan_cache \
+  --exact --ignored --nocapture --test-threads=1
+```
+Comment out `Q6K` in `supports_pair_dot` (`omega/src/msl.rs:1124-1128`), rebuild, re-run to reproduce Arm B.
+
+### Changelog
+
+| Date | Change | Δ vs prior | CoV / runs | Host loadout |
+| --- | --- | --- | --- | --- |
+| 2026-09-05 | none landed -- `docs(tensor): row 314 q6_k head body a/b` only | B (packed-row/serial-reduce) is 1.6% SLOWER than A (pair-dot, current default), inside B's own 2.578% CoV band -- no separation, A stays as-is | 3 interleaved rounds/arm (15 datapoints/arm) after discarding a contaminated first set; CoV 0.718%/2.578% | first set contaminated by another slice's renamed oracle process outside the name-only pgrep filter (discarded); second set's quiet gate (`pgrep -fl` full-command) empty, load-1 < 12, no timestamp overlap with sibling slices |
