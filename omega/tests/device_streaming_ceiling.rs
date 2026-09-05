@@ -292,27 +292,31 @@ fn uniform_u64_pair(
     shared_buffer_from_bytes(device, bytes)
 }
 
-/// One `commit()` -> `waitUntilCompleted()` timing around exactly one
-/// dispatch of `streaming_reduce`, nothing subtracted.
-fn time_streaming_reduce(
+/// One `commit()` -> `waitUntilCompleted()` timing around `batch_count`
+/// back-to-back dispatches of `streaming_reduce` over the identical `data`
+/// buffer, encoded into ONE command buffer -- the [`MIN_TIMED_BYTES`]
+/// amortization this file's ROW 302 fix adds, same shape as
+/// `matvec_roofline_ladder.rs`'s `time_batch_l0l1l2`. `batch_count == 1`
+/// reduces to a single untimed-batched dispatch, nothing subtracted.
+/// [`MIN_TIMED_BYTES`] amortization this file's ROW 302 fix adds, same shape
+/// as `matvec_roofline_ladder.rs`'s `time_batch_l0l1l2`. Every dispatch in
+/// the batch reads the identical `data` buffer, so this changes nothing
+/// about what bytes are read, only how many timed reads are chained per
+/// `commit`.
+fn time_streaming_reduce_batch(
     queue: &ProtocolObject<dyn MTLCommandQueue>,
     pipeline: &ProtocolObject<dyn MTLComputePipelineState>,
     data: &ProtocolObject<dyn MTLBuffer>,
     partial_sums: &ProtocolObject<dyn MTLBuffer>,
     uniforms: &ProtocolObject<dyn MTLBuffer>,
     total_threads: usize,
+    batch_count: usize,
 ) -> std::time::Duration {
     let command_buffer = queue.commandBuffer().expect("command buffer");
     let encoder = command_buffer
         .computeCommandEncoder()
         .expect("command buffer refused to hand out a compute encoder");
     encoder.setComputePipelineState(pipeline);
-    unsafe {
-        encoder.setBuffer_offset_atIndex(Some(data), 0, 0);
-        encoder.setBuffer_offset_atIndex(Some(partial_sums), 0, 1);
-        encoder.setBuffer_offset_atIndex(Some(uniforms), 0, 2);
-        encoder.setBuffer_offset_atIndex(Some(uniforms), 8, 3);
-    }
     let threadgroup_width = total_threads.clamp(1, 256);
     let grid = MTLSize {
         width: total_threads,
@@ -324,7 +328,15 @@ fn time_streaming_reduce(
         height: 1,
         depth: 1,
     };
-    encoder.dispatchThreads_threadsPerThreadgroup(grid, threadgroup);
+    for _dispatch in 0..batch_count {
+        unsafe {
+            encoder.setBuffer_offset_atIndex(Some(data), 0, 0);
+            encoder.setBuffer_offset_atIndex(Some(partial_sums), 0, 1);
+            encoder.setBuffer_offset_atIndex(Some(uniforms), 0, 2);
+            encoder.setBuffer_offset_atIndex(Some(uniforms), 8, 3);
+        }
+        encoder.dispatchThreads_threadsPerThreadgroup(grid, threadgroup);
+    }
     encoder.endEncoding();
     let started = std::time::Instant::now();
     command_buffer.commit();
@@ -347,7 +359,7 @@ fn read_back_partial_sums(buffer: &ProtocolObject<dyn MTLBuffer>, threadgroups: 
 }
 
 /// Same single `commit()` -> `waitUntilCompleted()` dispatch as
-/// [`time_streaming_reduce`], but also returns the wall-clock instants
+/// [`time_streaming_reduce_batch`] with `batch_count == 1`, but also returns the wall-clock instants
 /// bracketing it and the per-threadgroup partial sums read back and summed
 /// into one `f32` -- used by the concurrent CPU+GPU arms (C2/C3) to bound
 /// "earlier start .. later finish" across both engines and to check the GPU
@@ -437,6 +449,23 @@ const GPU_CORES: usize = 32;
 const THREADGROUP: usize = 256;
 const REPEATS: usize = 5;
 
+/// ROW 295's amortization floor, same value and same reasoning as
+/// `matvec_roofline_ladder.rs`'s `MIN_TIMED_BYTES`: below this many bytes in
+/// one timed command buffer, the ~0.5 ms fixed per-dispatch cost this file's
+/// own `empty_dispatch` arm measures stops being negligible next to the
+/// timed span, and the resulting GB/s is dispatch-floor noise rather than a
+/// bandwidth measurement. 2 GB decimal (`1e9`), matching this file's own
+/// `gbps` unit, NOT 2 GiB.
+const MIN_TIMED_BYTES: u64 = 2_000_000_000;
+
+/// How many back-to-back dispatches of the same `read_bytes`-sized read,
+/// encoded into ONE command buffer, are needed to clear [`MIN_TIMED_BYTES`].
+/// The 4 GB arm already clears it solo (`batch_count == 1`, identical to a
+/// single untimed-batched dispatch); the 1 GB arm needs 2.
+fn batch_count_for(read_bytes: u64) -> usize {
+    usize::try_from(MIN_TIMED_BYTES.div_ceil(read_bytes.max(1))).expect("fits usize")
+}
+
 #[derive(Clone, Copy)]
 struct GridConfig {
     name: &'static str,
@@ -488,6 +517,8 @@ fn sweep_one_size(
     arms: &[SourceArm<'_>],
 ) -> Vec<(&'static str, &'static str, f64, f64)> {
     let vec_count = read_bytes / 16;
+    let batch_count = batch_count_for(read_bytes);
+    let timed_bytes = read_bytes * batch_count as u64;
     let mut results: Vec<(&'static str, &'static str, f64, f64)> = Vec::new();
 
     for config in GRID_CONFIGS {
@@ -509,15 +540,16 @@ fn sweep_one_size(
 
         for _repeat in 0..REPEATS {
             for (arm_index, arm) in arms.iter().enumerate() {
-                let elapsed = time_streaming_reduce(
+                let elapsed = time_streaming_reduce_batch(
                     queue,
                     pipeline,
                     arm.buffer,
                     &partial_sums[arm_index],
                     &uniforms,
                     total_threads,
+                    batch_count,
                 );
-                let gbps = read_bytes as f64 / elapsed.as_secs_f64() / 1e9;
+                let gbps = timed_bytes as f64 / elapsed.as_secs_f64() / 1e9;
                 per_arm_samples[arm_index].push(gbps);
             }
         }
@@ -526,7 +558,7 @@ fn sweep_one_size(
             let (mean, cov) = mean_and_cov(samples);
             results.push((arm.name, config.name, mean, cov));
             println!(
-                "size_bytes={read_bytes} source={:<16} grid={:<24} mean_gbps={mean:.2} cov_pct={cov:.2} samples={samples:?}",
+                "size_bytes={read_bytes} timed_bytes={timed_bytes} batch_count={batch_count} source={:<16} grid={:<24} mean_gbps={mean:.2} cov_pct={cov:.2} samples={samples:?}",
                 arm.name, config.name
             );
         }
