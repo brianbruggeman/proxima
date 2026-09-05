@@ -76,9 +76,15 @@
 //! pass. Compiled `MTLLibrary`/`MTLComputePipelineState` pairs are cached
 //! by kernel source text within one [`execute`] call, since `msl.rs`'s own
 //! module doc proves two structurally-identical `BoundOp`s emit
-//! byte-identical source. `MTLCompileOptions::mathMode` is pinned to
-//! `Safe`, never the default — parity against the CPU interpreter demands
-//! IEEE behavior, not whatever Metal's fast-math would substitute.
+//! byte-identical source. `MTLCompileOptions::mathMode` is a per-[`Plan`]
+//! runtime choice ([`MathMode`], set via [`Plan::set_math_mode`]), not a
+//! fixed compile option: `proxima-tensor/docs/discipline.md` ROW 296
+//! measured the packed-row Q4_K matvec kernel at 179.2 GB/s under `Safe`
+//! and 240.9-247.3 GB/s under `Relaxed`/`Fast`, with 0-1.9e-6 parity in
+//! every cell of the shape sweep either way — the "parity demands `Safe`"
+//! assumption this module carried until then does not hold on the
+//! evidence -- [`MathMode::default`] stays `Safe` for now, with `Relaxed`
+//! one call away, pending the whole-decode-program bake-off ROW 297 runs.
 //!
 //! # Gather fault reporting
 //!
@@ -344,6 +350,11 @@ pub struct Plan {
     /// calls -- empty until that method runs, since [`plan`] itself has no
     /// way to know a caller's residency intent from codecs/shapes alone.
     resident_nodes: BTreeSet<NodeId>,
+    /// Which [`MTLCompileOptions::mathMode`] every kernel this plan compiles
+    /// is compiled under -- [`MathMode::default`] (`Relaxed`) until a
+    /// caller overrides it with [`Plan::set_math_mode`]. See [`MathMode`]'s
+    /// own doc for the measured rationale.
+    math_mode: MathMode,
     /// CARD 6.5: whole-buffer, size-class-reused device output buffers for
     /// every position in `prepared.resolved`. Built lazily, on the first
     /// call that actually consults a placement (`arena_placement`) --
@@ -396,6 +407,15 @@ impl Plan {
             })
             .copied()
             .collect();
+    }
+
+    /// Overrides this plan's [`MathMode`] from [`MathMode::default`]
+    /// (`Relaxed`). Safe to call any time before an `execute_plan*` call --
+    /// `pipeline_for`'s cache key folds the mode in, so switching a plan's
+    /// mode between calls never hands back a pipeline compiled for the
+    /// other one.
+    pub fn set_math_mode(&mut self, math_mode: MathMode) {
+        self.math_mode = math_mode;
     }
 
     /// The arena's live-bytes high-water mark reached while it was built --
@@ -511,6 +531,7 @@ pub fn plan(
         packed_operands,
         block_dtypes,
         resident_nodes: BTreeSet::new(),
+        math_mode: MathMode::default(),
         #[cfg(feature = "metal-plan-stable-buffers")]
         arena: core::cell::OnceCell::new(),
         #[cfg(feature = "metal-plan-stable-buffers")]
@@ -660,6 +681,7 @@ pub fn execute_plan(plan: &Plan, blocks: &[QuantizedBlock<'_>]) -> Result<Evalua
             packed_operands,
             None,
             None,
+            plan.math_mode,
         )?;
         if let Some((fault_buffer, gathers)) = fault {
             pending_faults.push((bound, fault_buffer, gathers));
@@ -1287,6 +1309,7 @@ pub fn execute_plan_with_placements(
                 packed_operands,
                 placement,
                 uniform_buffer,
+                plan.math_mode,
             )?;
             if let Some((fault_buffer, gathers)) = fault {
                 pending_faults.push((bound, fault_buffer, gathers));
@@ -1473,6 +1496,7 @@ fn execute_op_timed(
     placement: Option<(&MetalBuffer, usize)>,
     plan_uniform: Option<&MetalBuffer>,
     always_live: &BTreeSet<NodeId>,
+    math_mode: MathMode,
 ) -> Result<OpGpuTiming, MetalError> {
     // this operand's own TENSOR bytes, not the shared buffer's `length()` --
     // see `operand_tensor_bytes`'s own doc: a checkpoint-mapping-offset bind
@@ -1534,6 +1558,7 @@ fn execute_op_timed(
         packed_operands,
         placement,
         plan_uniform,
+        math_mode,
     )?;
     encoder.endEncoding();
     command_buffer.commit();
@@ -1639,6 +1664,7 @@ pub fn execute_plan_op_timed(
             None,
             None,
             &no_placements,
+            plan.math_mode,
         )?;
         timings.push(timing);
     }
@@ -1771,6 +1797,7 @@ pub fn execute_plan_with_placements_op_timed(
             placement,
             uniform_buffer,
             &always_live,
+            plan.math_mode,
         )?;
         timings.push(timing);
     }
@@ -2758,13 +2785,84 @@ fn nserror_description(error: &NSError) -> String {
     error.localizedDescription().to_string()
 }
 
+/// [`MTLCompileOptions::mathMode`], narrowed to the two values this crate's
+/// kernels are ever compiled with. `Fast` is not a third variant here: ROW
+/// 296 (`proxima-tensor/docs/discipline.md`) measured it identical to
+/// `Relaxed` (240.9-247.3 GB/s vs. 179.2 GB/s for `Safe`, same 0-1.9e-6
+/// parity drift), so exposing it would be a knob nothing ever selects
+/// (guiding-principles §1: no peer for an option with no distinct use).
+///
+/// A [`Plan`] carries one of these ([`Plan::set_math_mode`]); it feeds
+/// `compile_pipeline` and folds into `pipeline_for`'s cache key so a
+/// `Safe`-compiled kernel is never handed to a caller that asked for
+/// `Relaxed`, or the reverse.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum MathMode {
+    /// IEEE-safe float math -- bit-parity with
+    /// [`proxima_tensor::cpu::evaluate`], at 179.2 GB/s on the ROW 296
+    /// packed-row Q4_K matvec kernel.
+    #[default]
+    Safe,
+    /// Metal's relaxed-math kernels. ROW 296 measured 240.9-247.3 GB/s on
+    /// the same kernel, with parity drift no worse than `Safe`'s own
+    /// run-to-run spread in every cell of that sweep.
+    Relaxed,
+}
+
+impl MathMode {
+    const fn as_mtl(self) -> MTLMathMode {
+        match self {
+            MathMode::Safe => MTLMathMode::Safe,
+            MathMode::Relaxed => MTLMathMode::Relaxed,
+        }
+    }
+
+    /// The character [`pipeline_for`] appends to a structural
+    /// [`kernel_cache_key`] so the two modes never share a compiled
+    /// pipeline -- kept next to [`Self::as_mtl`] so the two mappings this
+    /// type owns (device value, cache-key token) cannot drift apart.
+    const fn cache_token(self) -> char {
+        match self {
+            MathMode::Safe => 'S',
+            MathMode::Relaxed => 'R',
+        }
+    }
+}
+
+#[cfg(test)]
+mod math_mode_cache_key_tests {
+    //! [`pipeline_for`]'s cache key is `format!("{cache_key}{}",
+    //! math_mode.cache_token())` -- this proves the one fact that
+    //! invariant depends on: the two live [`MathMode`] variants never
+    //! collide on that token, so two `Plan`s agreeing on every structural
+    //! field [`kernel_cache_key`] checks still resolve to distinct
+    //! [`PIPELINE_CACHE`] entries when they disagree on math mode.
+
+    use super::MathMode;
+
+    #[test]
+    fn safe_and_relaxed_produce_distinct_pipeline_cache_keys() {
+        let structural_key = "elementwise_f32S_ax_0";
+        let safe_key = format!("{structural_key}{}", MathMode::Safe.cache_token());
+        let relaxed_key = format!("{structural_key}{}", MathMode::Relaxed.cache_token());
+        assert_ne!(
+            safe_key, relaxed_key,
+            "Safe and Relaxed must never share a compiled pipeline"
+        );
+    }
+}
+
 fn compile_pipeline(
     device: &ProtocolObject<dyn MTLDevice>,
     kernel: &Kernel,
+    math_mode: MathMode,
 ) -> Result<Retained<ProtocolObject<dyn MTLComputePipelineState>>, MetalError> {
     let options = MTLCompileOptions::new();
-    // parity demands IEEE-safe math, never the fast-math Metal defaults to.
-    options.setMathMode(MTLMathMode::Safe);
+    // ROW 296 (`proxima-tensor/docs/discipline.md`): `Safe` and `Relaxed`
+    // stream 179.2 vs. 240.9-247.3 GB/s with identical parity in every
+    // shape-sweep cell, so the mode is a caller choice (`Plan::set_math_mode`),
+    // not a fixed compile option.
+    options.setMathMode(math_mode.as_mtl());
 
     let source = NSString::from_str(&kernel.source);
     let library = device
@@ -2802,27 +2900,36 @@ fn pipeline_for(
     bound: &BoundOp,
     packed_operands: &PackedOperands,
     cache_key: &str,
+    math_mode: MathMode,
 ) -> Result<Retained<ProtocolObject<dyn MTLComputePipelineState>>, MetalError> {
-    if let Some(pipeline) = PIPELINE_CACHE.with(|cache| cache.borrow().get(cache_key).cloned()) {
-        trace!(cache_key = %cache_key, hit = true, "pipeline cache lookup");
+    // [`kernel_cache_key`] is a pure structural fingerprint of the `BoundOp`
+    // -- it knows nothing about compile options -- so the math mode is
+    // folded in HERE, the one place a cache key turns into a lookup, rather
+    // than teaching `msl.rs` about a Metal-only compile option. Two BoundOps
+    // agreeing on everything `kernel_cache_key` checks but compiled under
+    // different modes MUST NOT share a pipeline: `Safe`'s kernel body is
+    // byte-identical to `Relaxed`'s (`compile_pipeline` never touches
+    // source text, only `MTLCompileOptions`), so only the entry's own key
+    // can keep the two apart.
+    let mode_key = format!("{cache_key}{}", math_mode.cache_token());
+    if let Some(pipeline) = PIPELINE_CACHE.with(|cache| cache.borrow().get(&mode_key).cloned()) {
+        trace!(cache_key = %mode_key, hit = true, "pipeline cache lookup");
         #[cfg(feature = "instrument")]
         counter!(PIPELINE_HITS, 1);
         return Ok(pipeline);
     }
-    trace!(cache_key = %cache_key, hit = false, "pipeline cache lookup");
+    trace!(cache_key = %mode_key, hit = false, "pipeline cache lookup");
     #[cfg(feature = "instrument")]
     let compile_started = read_ticks();
     let kernel = emit(bound, packed_operands)?;
-    let pipeline = compile_pipeline(device, &kernel)?;
+    let pipeline = compile_pipeline(device, &kernel, math_mode)?;
     #[cfg(feature = "instrument")]
     {
         counter!(PIPELINE_MISSES, 1);
         counter!(PIPELINE_COMPILE_TICKS, elapsed_ticks(compile_started));
     }
     PIPELINE_CACHE.with(|cache| {
-        cache
-            .borrow_mut()
-            .insert(cache_key.to_string(), pipeline.clone());
+        cache.borrow_mut().insert(mode_key, pipeline.clone());
     });
     Ok(pipeline)
 }
@@ -4221,6 +4328,7 @@ fn plan_uniform_buffer(_plan: &Plan, _position: usize) -> Result<Option<&MetalBu
 /// plan-owned `buffer` in place instead -- see [`PlanUniforms`]'s own doc for
 /// why that is sound only because the buffer is keyed by PLAN POSITION, never
 /// by content.
+#[allow(clippy::too_many_arguments)]
 fn encode_op(
     device: &ProtocolObject<dyn MTLDevice>,
     encoder: &ProtocolObject<dyn MTLComputeCommandEncoder>,
@@ -4229,6 +4337,7 @@ fn encode_op(
     packed_operands: &PackedOperands,
     placement: Option<(&MetalBuffer, usize)>,
     plan_uniform: Option<&MetalBuffer>,
+    math_mode: MathMode,
 ) -> Result<Option<(MetalBuffer, usize)>, MetalError> {
     #[cfg(feature = "instrument")]
     let emit_started = read_ticks();
@@ -4246,7 +4355,7 @@ fn encode_op(
     }
     #[cfg(feature = "instrument")]
     let pipeline_started = read_ticks();
-    let pipeline = pipeline_for(device, bound, packed_operands, &cache_key)?;
+    let pipeline = pipeline_for(device, bound, packed_operands, &cache_key, math_mode)?;
     #[cfg(feature = "instrument")]
     {
         counter!(PIPELINE_LOOKUP_CALLS, 1);

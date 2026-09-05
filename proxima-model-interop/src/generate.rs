@@ -73,6 +73,11 @@ use proxima_tokenizer::{SamplingConfig, Vocab, sample_next_token};
 use omega::backend::execute_plan_named_metal_op_timed;
 #[cfg(feature = "metal")]
 use omega::backend::{Engine, Plan, execute_plan_named, mark_resident, plan_named};
+// `set_math_mode` (unlike `mark_resident` above) takes `metal::MathMode` in
+// its own signature, so unlike the ungated import above it needs the same
+// `metal`+macos gate that type itself lives behind.
+#[cfg(all(feature = "metal", target_os = "macos"))]
+use omega::backend::set_math_mode;
 #[cfg(all(feature = "instrument", feature = "metal", target_os = "macos"))]
 use omega::metal::OpGpuTiming;
 #[cfg(all(feature = "instrument", feature = "metal", target_os = "macos"))]
@@ -1217,7 +1222,30 @@ pub(crate) fn supported_serving_config(gpu_layers: i32) -> ServingConfig<'static
         ubatch_size: 0,
         gpu_layers,
         reasoning_budget: 0,
+        #[cfg(all(feature = "metal", target_os = "macos"))]
+        math_mode: math_mode_from_env(),
         ..ServingConfig::default()
+    }
+}
+
+/// `PROXIMA_METAL_MATH_MODE=safe|relaxed`, read once per process into a
+/// `OnceLock`, the identical idiom `omega::backend::Engine::from_env` uses
+/// for `OMEGA_BACKEND` and `proxima_tensor::cpu::matmul_worker_count` uses
+/// for `PROXIMA_MATMUL_WORKERS` -- a per-call `std::env::var` would read
+/// the same immutable-for-the-process value on every `supported_serving_config`
+/// call for no reason. Unset (the production default) keeps
+/// `ServingConfig::default()`'s own `Relaxed` (`proxima-tensor/docs/
+/// discipline.md` ROW 296/297's measured winner); the quality harness
+/// (`quality::real_openchat_file::metal_vs_cpu_reports_real_drift`) is the
+/// one caller that sets this today, to bake off `Safe` against `Relaxed`
+/// on the SAME decode program without a second code path.
+#[cfg(all(feature = "metal", target_os = "macos"))]
+fn math_mode_from_env() -> omega::MathMode {
+    static RAW: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    let raw = RAW.get_or_init(|| std::env::var("PROXIMA_METAL_MATH_MODE").unwrap_or_default());
+    match raw.as_str() {
+        "safe" => omega::MathMode::Safe,
+        _ => omega::MathMode::Relaxed,
     }
 }
 
@@ -1281,6 +1309,12 @@ pub(crate) struct BackendRuntime {
     /// keeps exactly the one entry the field's own rationale above says is
     /// worth keeping.
     plans: alloc::collections::BTreeMap<(usize, usize), Plan>,
+    /// `ServingConfig::math_mode`, read once at construction and applied to
+    /// every freshly-built [`Plan`] below (`set_math_mode`'s own call
+    /// sites) -- a plan-cache hit reuses a `Plan` already carrying it, same
+    /// as `resident_names`/`mark_resident` above.
+    #[cfg(all(feature = "metal", target_os = "macos"))]
+    math_mode: omega::metal::MathMode,
     /// [`Self::evaluate_with_placements`]'s own plan cache -- same
     /// `(new_count, merged_len)` keying as `plans` above, but holding
     /// `omega::metal::Plan` directly rather than the backend-polymorphic
@@ -1303,6 +1337,8 @@ impl BackendRuntime {
         Self {
             engine: select_backend(config),
             plans: alloc::collections::BTreeMap::new(),
+            #[cfg(all(feature = "metal", target_os = "macos"))]
+            math_mode: config.math_mode,
             #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
             placed_plans: alloc::collections::BTreeMap::new(),
             plan_hits: 0,
@@ -1344,6 +1380,8 @@ impl BackendRuntime {
             || {
                 let mut plan = plan_named(self.engine, None, program, symbols, named, outputs)?;
                 mark_resident(&mut plan, resident_names);
+                #[cfg(target_os = "macos")]
+                set_math_mode(&mut plan, self.math_mode);
                 Ok(plan)
             },
         )?;
@@ -1385,6 +1423,7 @@ impl BackendRuntime {
             || {
                 let mut plan = plan_named_placed(program, symbols, named, outputs)?;
                 plan.mark_resident(resident_names);
+                plan.set_math_mode(self.math_mode);
                 Ok(plan)
             },
         )?;
@@ -1549,6 +1588,7 @@ impl BackendRuntime {
             || {
                 let mut plan = plan_named(self.engine, None, program, symbols, named, outputs)?;
                 mark_resident(&mut plan, resident_names);
+                set_math_mode(&mut plan, self.math_mode);
                 Ok(plan)
             },
         )?;
