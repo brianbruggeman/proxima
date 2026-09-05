@@ -7376,15 +7376,16 @@ mod tests {
         q4k.insert(weight_node, PackedCodec::Q4K);
         let quantized = operand_codecs(&bound, &q4k);
 
-        assert!(
-            packed_row_block(&bound, &quantized).is_some(),
-            "test fixture must actually take the row-blocked path for this assertion to mean anything"
-        );
+        let block = packed_row_block(&bound, &quantized)
+            .expect("test fixture must actually take the row-blocked path for this assertion to mean anything");
 
-        let BoundOpKind::Reduce { output_axes, .. } = &bound.kind else {
-            unreachable!("matmul_op always builds a Keep::Reduce op")
-        };
-        let (_base, split) = packed_row_dispatch(output_axes, &bound.extents);
+        let feature_total: u64 = block
+            .feature_axes
+            .iter()
+            .map(|&axis| bound.extents[axis as usize])
+            .product();
+        let token_total = packed_row_block_token_total(&block, &bound.extents);
+        let (_base, split) = packed_row_dispatch(feature_total, token_total);
         let expected_width = SIMD_WIDTH * split * packed_row_nsg_factor();
 
         let width = tiled_gemm_threadgroup_width(&bound, &quantized)
