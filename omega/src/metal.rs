@@ -194,6 +194,8 @@ use half::f16;
 use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
 use objc2_foundation::{NSError, NSString};
+#[cfg(feature = "instrument")]
+use objc2_foundation::NSUInteger;
 #[cfg(feature = "metal-concurrent-dispatch")]
 use objc2_metal::{MTLBarrierScope, MTLDispatchType};
 use objc2_metal::{
@@ -207,7 +209,9 @@ use proxima_telemetry::metric::Counter;
 use proxima_telemetry::trace;
 
 #[cfg(feature = "instrument")]
-use proxima_tensor::instrument::{elapsed_ticks, read_ticks};
+use objc2_metal::{MTLCounterSampleBuffer, MTLCounterSet};
+#[cfg(feature = "instrument")]
+use proxima_tensor::instrument::{elapsed_ticks, read_ticks, ticks_to_nanos};
 use proxima_tensor::{
     BoundOp, BoundOpKind, DType, Evaluated, Keep, Lookup, NodeId, Op, QuantizedBlock, Shapes,
     TensorError, bind, block_node_ids, correct_packed_matmul_layouts, index_node_ids, infer,
@@ -1898,6 +1902,447 @@ pub fn execute_plan_named_with_placements_op_timed(
 ) -> Result<(Evaluated, Vec<OpGpuTiming>), MetalError> {
     let blocks = resolve_named_blocks(&plan.program, named)?;
     execute_plan_with_placements_op_timed(plan, &blocks, input_placements, output_placements)
+}
+
+/// Which [`MTLCounterSamplingPoint`] a device actually honors -- resolved
+/// once per [`execute_plan_with_placements_dispatch_timed`] call (this is a
+/// diagnostic-only path, never the hot loop, so re-querying every call
+/// costs nothing that matters) rather than assumed: an M1 Max reports
+/// `AtDispatchBoundary` unsupported and `AtStageBoundary` supported
+/// (verified with a standalone Metal probe against this exact device, not
+/// inferred from Apple's docs), so the dispatch-boundary branch below is
+/// exercised only on hardware that actually has it.
+#[cfg(feature = "instrument")]
+fn counter_sampling_mode(
+    device: &ProtocolObject<dyn MTLDevice>,
+) -> Option<objc2_metal::MTLCounterSamplingPoint> {
+    if device.supportsCounterSampling(objc2_metal::MTLCounterSamplingPoint::AtDispatchBoundary) {
+        Some(objc2_metal::MTLCounterSamplingPoint::AtDispatchBoundary)
+    } else if device.supportsCounterSampling(objc2_metal::MTLCounterSamplingPoint::AtStageBoundary)
+    {
+        Some(objc2_metal::MTLCounterSamplingPoint::AtStageBoundary)
+    } else {
+        None
+    }
+}
+
+/// The device's own `MTLCommonCounterSetTimestamp` counter set, by name --
+/// `device.counterSets()` returns every set the hardware exposes; this
+/// finds the one [`objc2_metal::MTLCommonCounterSetTimestamp`] names,
+/// rather than assuming index `0`.
+#[cfg(feature = "instrument")]
+fn timestamp_counter_set(
+    device: &ProtocolObject<dyn MTLDevice>,
+) -> Option<Retained<ProtocolObject<dyn objc2_metal::MTLCounterSet>>> {
+    let sets = device.counterSets()?;
+    // SAFETY: `MTLCommonCounterSetTimestamp` is a framework-provided
+    // constant `NSString`, valid for the process lifetime.
+    let timestamp_name = unsafe { objc2_metal::MTLCommonCounterSetTimestamp };
+    sets.iter().find(|set| &*set.name() == timestamp_name)
+}
+
+/// [`execute_plan_with_placements`]'s per-dispatch GPU-timestamp twin.
+/// Unlike [`execute_plan_with_placements_op_timed`] (one command buffer per
+/// op -- discipline log ROW 298's own finding that this reproduces neither
+/// the batched buffer's barrier/serialization cost nor its aggregate
+/// total), this function submits the SAME single command buffer the
+/// production path does and brackets every dispatch with Metal's
+/// `MTLCounterSampleBuffer` against `MTLCommonCounterSetTimestamp`
+/// (`sampleCountersInBuffer:atSampleIndex:withBarrier:` when the device
+/// supports `AtDispatchBoundary`; one compute encoder per position, sampled
+/// at `startOfEncoderSampleIndex`/`endOfEncoderSampleIndex`, when it only
+/// supports `AtStageBoundary` -- `AtStageBoundary`'s own granularity is
+/// per-ENCODER, so that branch degrades to "one encoder per dispatch"
+/// rather than the coarser "one encoder per kind" grouping, since this
+/// program's own dispatch sequence rarely repeats the same op kind AND
+/// shape twice in a row -- see the module-level discipline row this
+/// function's own commit lands for the measured device support and the
+/// resulting per-shape table).
+///
+/// GPU tick counts are converted to nanoseconds by calibrating against this
+/// SAME call's own CPU/GPU timestamp pair (`sampleTimestamps:gpuTimestamp:`
+/// taken once before `commit` and once after `waitUntilCompleted`): the
+/// CPU side of that pair is in the same `mach_absolute_time` domain
+/// [`ticks_to_nanos`] already converts, so `cpu_ns_delta / gpu_tick_delta`
+/// is this call's own nanoseconds-per-GPU-tick, applied uniformly to every
+/// per-position delta. No new type is introduced: the per-position record
+/// is [`OpGpuTiming`], the same type [`execute_plan_with_placements_op_timed`]
+/// already returns.
+///
+/// Returns `(evaluated, per_position_timings, sampling_mode)`, where
+/// `sampling_mode` is `"dispatch-boundary"`, `"stage-boundary"`, or
+/// `"unsupported"` -- in the last case every `gpu_ns` is `0`, never
+/// fabricated.
+///
+/// # Errors
+/// Same as [`execute_plan_with_placements`], plus a [`MetalError`] if the
+/// device refuses to allocate the counter sample buffer.
+#[cfg(all(feature = "metal-output-placement", feature = "instrument"))]
+#[allow(clippy::too_many_lines)]
+pub fn execute_plan_with_placements_dispatch_timed(
+    plan: &Plan,
+    blocks: &[QuantizedBlock<'_>],
+    input_placements: &[(NodeId, &PlacedBuffer, usize)],
+    output_placements: &[(NodeId, &PlacedBuffer, usize)],
+) -> Result<(Evaluated, Vec<OpGpuTiming>, &'static str), MetalError> {
+    let prepared = &plan.prepared;
+    let packed_operands = &plan.packed_operands;
+    let input_placed: BTreeMap<NodeId, (&PlacedBuffer, usize)> = input_placements
+        .iter()
+        .map(|(node, buffer, offset)| (*node, (*buffer, *offset)))
+        .collect();
+    let output_placed: BTreeMap<NodeId, (&PlacedBuffer, usize)> = output_placements
+        .iter()
+        .map(|(node, buffer, offset)| (*node, (*buffer, *offset)))
+        .collect();
+    let always_live: BTreeSet<NodeId> = input_placed
+        .keys()
+        .chain(output_placed.keys())
+        .copied()
+        .collect();
+    let (device, queue) = device_and_queue()?;
+
+    let mode = counter_sampling_mode(&device);
+    let counter_set = mode.and_then(|_| timestamp_counter_set(&device));
+
+    let mut device_buffers: BTreeMap<NodeId, DeviceBuffer> = BTreeMap::new();
+    for ((node, block), dtype) in prepared
+        .block_nodes
+        .iter()
+        .zip(blocks.iter())
+        .zip(plan.block_dtypes.iter())
+    {
+        if let Some((buffer, offset)) = input_placed.get(node) {
+            device_buffers.insert(*node, ((*buffer).clone(), *offset));
+            continue;
+        }
+        #[cfg(feature = "instrument")]
+        {
+            counter!(BLOCK_UPLOAD_CALLS, 1);
+            counter!(BLOCK_OFFERED_BYTES, block_byte_len(block) as u64);
+        }
+        let resident = plan.resident_nodes.contains(node);
+        let buffer = match block {
+            QuantizedBlock::Float32(data) => upload_block(&device, data, *node, *dtype, resident)?,
+            QuantizedBlock::Q3K(bytes)
+            | QuantizedBlock::Q4K(bytes)
+            | QuantizedBlock::Q5K(bytes)
+            | QuantizedBlock::Q6K(bytes)
+            | QuantizedBlock::Q8_0(bytes)
+            | QuantizedBlock::Q4_0(bytes)
+            | QuantizedBlock::Float16(bytes)
+            | QuantizedBlock::BFloat16(bytes) => upload_packed_bytes(&device, bytes, resident)?,
+        };
+        device_buffers.insert(*node, buffer);
+    }
+
+    let position_count = prepared.resolved.len();
+    let Some((sampling_point, counter_set)) = mode.zip(counter_set) else {
+        // no counter set / sampling point at all -- fall through to the
+        // production single-encoder submission with zero instrumentation
+        // rather than refusing to run: `gpu_ns` stays `0` on every entry,
+        // never fabricated, and `sampling_mode` names this plainly.
+        let evaluated = execute_plan_with_placements(plan, blocks, input_placements, output_placements)?;
+        let timings: Vec<OpGpuTiming> = prepared
+            .resolved
+            .iter()
+            .map(|bound| OpGpuTiming {
+                node: bound.node,
+                kind: classify_kind(bound, packed_operands),
+                operand_bytes: 0,
+                bound_buffer_bytes: 0,
+                gpu_ns: 0,
+                weight_name: None,
+                operand_count: bound.operands().len(),
+                packed_codec: None,
+                packed_kernel_variant: classify_packed_kernel_variant(bound, packed_operands),
+                packed_row_block_rejection: None,
+            })
+            .collect();
+        return Ok((evaluated, timings, "unsupported"));
+    };
+
+    let sample_descriptor = objc2_metal::MTLCounterSampleBufferDescriptor::new();
+    sample_descriptor.setCounterSet(Some(&counter_set));
+    // SAFETY: `2 * position_count` is a plain arithmetic value, well under
+    // any device's `maxBufferLength`-scale sample-buffer limits for the
+    // per-token dispatch counts this workspace's own decode programs emit.
+    unsafe { sample_descriptor.setSampleCount((2 * position_count) as NSUInteger) };
+    let sample_buffer = device
+        .newCounterSampleBufferWithDescriptor_error(&sample_descriptor)
+        .map_err(|error| MetalError::CompileFailed {
+            log: format!("failed to allocate a counter sample buffer: {error}"),
+        })?;
+
+    let command_buffer = queue
+        .commandBuffer()
+        .ok_or_else(|| MetalError::CompileFailed {
+            log: "command queue refused to hand out a command buffer".to_string(),
+        })?;
+
+    let dispatch_boundary = sampling_point == objc2_metal::MTLCounterSamplingPoint::AtDispatchBoundary;
+    let shared_encoder = if dispatch_boundary {
+        Some(
+            command_buffer
+                .computeCommandEncoder()
+                .ok_or_else(|| MetalError::CompileFailed {
+                    log: "command buffer refused to hand out a compute encoder".to_string(),
+                })?,
+        )
+    } else {
+        None
+    };
+
+    // one tuple per position: `(node, kind, operand_bytes, bound_buffer_bytes,
+    // weight_name, operand_count, packed_codec, packed_kernel_variant)` --
+    // every field [`OpGpuTiming`] already carries, gathered while `bound`
+    // is still live so the counter-resolve pass below only zips it against
+    // `gpu_ns`.
+    type DispatchMeta = (
+        NodeId,
+        &'static str,
+        u64,
+        u64,
+        Option<String>,
+        usize,
+        Option<PackedCodec>,
+        &'static str,
+    );
+    let mut metas: Vec<DispatchMeta> = Vec::with_capacity(position_count);
+    let mut pending_faults: Vec<PendingFault<'_>> = Vec::new();
+
+    let cpu_gpu_start = sample_timestamps(&device);
+    for (position, bound) in prepared.resolved.iter().enumerate() {
+        let placement = match output_placed.get(&bound.node).copied() {
+            Some(placement) => Some(placement),
+            None => arena_placement(plan, position)?,
+        };
+        let uniform_buffer = plan_uniform_buffer(plan, position)?;
+        let operand_bytes: u64 = bound
+            .operands()
+            .iter()
+            .map(|(source, _, _)| {
+                operand_tensor_bytes(
+                    &plan.program,
+                    &prepared.index_nodes,
+                    &prepared.shapes,
+                    packed_operands,
+                    *source,
+                )
+            })
+            .sum();
+        let bound_buffer_bytes: u64 = bound
+            .operands()
+            .iter()
+            .map(|(source, _, _)| {
+                device_buffers
+                    .get(source)
+                    .map(|(buffer, _offset)| buffer.length() as u64)
+                    .unwrap_or(0)
+            })
+            .sum();
+        let weight_name = bound
+            .operands()
+            .iter()
+            .find_map(|(source, _, _)| plan.program[source.0 as usize].name())
+            .map(ToString::to_string);
+        let packed_codec = bound
+            .operands()
+            .iter()
+            .find_map(|(source, _, _)| packed_operands.get(source).copied());
+        metas.push((
+            bound.node,
+            classify_kind(bound, packed_operands),
+            operand_bytes,
+            bound_buffer_bytes,
+            weight_name,
+            bound.operands().len(),
+            packed_codec,
+            classify_packed_kernel_variant(bound, packed_operands),
+        ));
+
+        let encoder = match &shared_encoder {
+            Some(encoder) => encoder.clone(),
+            None => {
+                let descriptor = objc2_metal::MTLComputePassDescriptor::computePassDescriptor();
+                let attachment = unsafe { descriptor.sampleBufferAttachments().objectAtIndexedSubscript(0) };
+                attachment.setSampleBuffer(Some(&sample_buffer));
+                unsafe {
+                    attachment.setStartOfEncoderSampleIndex((2 * position) as NSUInteger);
+                    attachment.setEndOfEncoderSampleIndex((2 * position + 1) as NSUInteger);
+                }
+                command_buffer
+                    .computeCommandEncoderWithDescriptor(&descriptor)
+                    .ok_or_else(|| MetalError::CompileFailed {
+                        log: "command buffer refused to hand out a stage-sampled compute encoder"
+                            .to_string(),
+                    })?
+            }
+        };
+
+        if dispatch_boundary {
+            unsafe {
+                encoder.sampleCountersInBuffer_atSampleIndex_withBarrier(
+                    &sample_buffer,
+                    (2 * position) as NSUInteger,
+                    true,
+                );
+            }
+        }
+        let fault = encode_op(
+            &device,
+            &encoder,
+            &mut device_buffers,
+            bound,
+            packed_operands,
+            placement,
+            uniform_buffer,
+            plan.math_mode,
+            None,
+        )?;
+        if dispatch_boundary {
+            unsafe {
+                encoder.sampleCountersInBuffer_atSampleIndex_withBarrier(
+                    &sample_buffer,
+                    (2 * position + 1) as NSUInteger,
+                    true,
+                );
+            }
+        }
+        if shared_encoder.is_none() {
+            encoder.endEncoding();
+        }
+        if let Some((fault_buffer, gathers)) = fault {
+            pending_faults.push((bound, fault_buffer, gathers));
+        }
+        for retired in &prepared.retires[position] {
+            if always_live.contains(retired) {
+                continue;
+            }
+            device_buffers.remove(retired);
+        }
+    }
+    if let Some(encoder) = &shared_encoder {
+        encoder.endEncoding();
+    }
+
+    command_buffer.commit();
+    command_buffer.waitUntilCompleted();
+    let cpu_gpu_end = sample_timestamps(&device);
+
+    for (bound, fault_buffer, gathers) in &pending_faults {
+        check_gather_fault(bound, fault_buffer, *gathers)?;
+    }
+
+    let cpu_ns_delta = ticks_to_nanos(cpu_gpu_end.0.wrapping_sub(cpu_gpu_start.0));
+    let gpu_tick_delta = cpu_gpu_end.1.saturating_sub(cpu_gpu_start.1).max(1);
+    let ns_per_gpu_tick = cpu_ns_delta as f64 / gpu_tick_delta as f64;
+
+    let range = objc2_foundation::NSRange {
+        location: 0,
+        length: (2 * position_count) as NSUInteger,
+    };
+    // SAFETY: `range` is bounds-checked by construction above (it spans
+    // exactly the `2 * position_count` samples this call itself wrote);
+    // `resolveCounterRange`'s own unsafety is the driver's undocumented
+    // out-of-range behavior, which this range cannot trigger.
+    let resolved = unsafe { sample_buffer.resolveCounterRange(range) }.ok_or_else(|| {
+        MetalError::CompileFailed {
+            log: "counter sample buffer resolved no data".to_string(),
+        }
+    })?;
+    let raw = resolved.to_vec();
+    let mut timings = Vec::with_capacity(position_count);
+    for (position, meta) in metas.into_iter().enumerate() {
+        let start = read_timestamp(&raw, 2 * position);
+        let end = read_timestamp(&raw, 2 * position + 1);
+        let gpu_ns = if start == u64::MAX || end == u64::MAX {
+            0
+        } else {
+            (end.wrapping_sub(start) as f64 * ns_per_gpu_tick).max(0.0) as u64
+        };
+        let (node, kind, operand_bytes, bound_buffer_bytes, weight_name, operand_count, packed_codec, packed_kernel_variant) =
+            meta;
+        timings.push(OpGpuTiming {
+            node,
+            kind,
+            operand_bytes,
+            bound_buffer_bytes,
+            gpu_ns,
+            weight_name,
+            operand_count,
+            packed_codec,
+            packed_kernel_variant,
+            packed_row_block_rejection: None,
+        });
+    }
+
+    let placed_output_nodes: BTreeSet<NodeId> = output_placed.keys().copied().collect();
+    let evaluated = finish(
+        &plan.program,
+        &prepared.index_nodes,
+        &prepared.shapes,
+        &prepared.effective_outputs,
+        &device_buffers,
+        prepared.root,
+        &placed_output_nodes,
+    )?;
+    let sampling_mode = if dispatch_boundary {
+        "dispatch-boundary"
+    } else {
+        "stage-boundary"
+    };
+    Ok((evaluated, timings, sampling_mode))
+}
+
+/// One `(cpuTimestamp, gpuTimestamp)` reading via
+/// `MTLDevice::sampleTimestamps:gpuTimestamp:` -- the CPU side is in the
+/// same `mach_absolute_time` domain [`ticks_to_nanos`] converts, which is
+/// what lets [`execute_plan_with_placements_dispatch_timed`] calibrate GPU
+/// ticks to nanoseconds without a second, unrelated conversion table.
+#[cfg(feature = "instrument")]
+fn sample_timestamps(device: &ProtocolObject<dyn MTLDevice>) -> (u64, u64) {
+    let mut cpu_timestamp: objc2_metal::MTLTimestamp = 0;
+    let mut gpu_timestamp: objc2_metal::MTLTimestamp = 0;
+    // SAFETY: both out-pointers are valid, stack-local `u64`s.
+    unsafe {
+        device.sampleTimestamps_gpuTimestamp(
+            core::ptr::NonNull::from(&mut cpu_timestamp),
+            core::ptr::NonNull::from(&mut gpu_timestamp),
+        );
+    }
+    (cpu_timestamp, gpu_timestamp)
+}
+
+/// One [`objc2_metal::MTLCounterResultTimestamp`]'s 8-byte little-endian
+/// `timestamp` field out of `resolveCounterRange`'s raw `NSData` bytes --
+/// `u64::MAX` (Metal's own `MTLCounterErrorValue`) when the driver could
+/// not take that sample, which the caller treats as "no measurement", never
+/// a real zero-length dispatch.
+#[cfg(feature = "instrument")]
+fn read_timestamp(raw: &[u8], sample_index: usize) -> u64 {
+    let start = sample_index * core::mem::size_of::<u64>();
+    raw.get(start..start + core::mem::size_of::<u64>())
+        .and_then(|bytes| bytes.try_into().ok())
+        .map(u64::from_ne_bytes)
+        .unwrap_or(u64::MAX)
+}
+
+/// [`execute_plan_with_placements_dispatch_timed`] against a name-keyed
+/// block set, mirroring [`execute_plan_named_with_placements_op_timed`]'s
+/// own name resolution.
+///
+/// # Errors
+/// Propagates name-resolution and Metal driver failures.
+#[cfg(all(feature = "metal-output-placement", feature = "instrument"))]
+pub fn execute_plan_named_with_placements_dispatch_timed(
+    plan: &Plan,
+    named: &[(&str, QuantizedBlock<'_>)],
+    input_placements: &[(NodeId, &PlacedBuffer, usize)],
+    output_placements: &[(NodeId, &PlacedBuffer, usize)],
+) -> Result<(Evaluated, Vec<OpGpuTiming>, &'static str), MetalError> {
+    let blocks = resolve_named_blocks(&plan.program, named)?;
+    execute_plan_with_placements_dispatch_timed(plan, &blocks, input_placements, output_placements)
 }
 
 /// Classifies one [`BoundOp`]'s emitted kernel body the same way

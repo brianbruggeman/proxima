@@ -379,6 +379,8 @@ objc2-metal = { version = "0.3.2", default-features = false, features = [
     "MTLComputePipeline",
     "MTLTypes",
     "MTLBlitCommandEncoder",
+    "MTLCounters",
+    "MTLComputePass",
     "block2",
     "objc2-core-foundation",
 ], optional = true }
@@ -392,6 +394,8 @@ objc2-foundation = { version = "0.3.2", default-features = false, features = [
     "NSError",
     "NSObject",
     "NSRange",
+    "NSData",
+    "NSArray",
 ], optional = true }
 # half: real IEEE-754 binary16 <-> f32 conversion (round-to-nearest-even,
 # subnormal-correct) for `upload_block`/`read_back`'s device-buffer
