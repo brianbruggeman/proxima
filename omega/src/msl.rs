@@ -3951,8 +3951,22 @@ fn push_packed_row_blocked_body(
         // same design point, and when this feature is on it is the one under
         // test. Not `metal-q4k-split-k`-aware, same posture as
         // `push_q4k_single_fetch_body` above and for the identical reason: its
-        // `ib` loop has no `sgitg`/`split` stride of its own.
+        // `ib` loop has no `sgitg`/`split` stride of its own. ALSO requires
+        // the codec itself be `Q4K`: `push_q4k_ggml_port_body` transcribes
+        // ggml's `kernel_mul_mv_q4_K_f32_impl` byte-for-byte -- fixed
+        // `blk+4`/`blk+16` scale/qs offsets and a 4-bit-nibble-only decode
+        // with no `qh` high-bit plane, which is `Q4_K`'s block layout, not
+        // `Q5_K`'s. `plain_product` alone is not codec-specific (it is also
+        // true for `Q5_K` once `metal-q5k-pair-dot` is on, and that feature
+        // rides along inside the `metal` umbrella every `metal-q4k-ggml-port`
+        // build already carries) -- without this guard, enabling
+        // `metal-q4k-ggml-port` silently routed every packed-row `Q5_K`
+        // matmul through the `Q4_K`-shaped body too (found via
+        // `metal_matmul_on_packed_q5k_weights_matches_the_dequantized_f32_cpu_path`,
+        // relative=0.977, essentially uncorrelated output -- the qh plane was
+        // simply never read).
         let use_ggml_port = plain_product
+            && matches!(codec, PackedCodec::Q4K)
             && cfg!(feature = "metal-q4k-ggml-port")
             && !cfg!(feature = "metal-q4k-split-k");
         if use_ggml_port {
