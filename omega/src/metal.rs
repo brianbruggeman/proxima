@@ -373,6 +373,36 @@ pub struct Plan {
     /// reason -- see [`PlanUniforms`]'s own doc.
     #[cfg(feature = "metal-plan-stable-buffers")]
     uniforms: core::cell::OnceCell<PlanUniforms>,
+    /// Per-position `(pipeline, bindings, grid)` resolved once, lazily, on
+    /// this plan's first [`execute_plan_with_placements`] call -- see
+    /// [`resolve_steps`]'s own doc for why a hit no longer builds
+    /// [`kernel_cache_key`]'s `String` or [`kernel_dispatch_shape`]'s `Vec`
+    /// per step. `None` until that first call. Rebuilt whole when
+    /// [`Plan::set_math_mode`] changes the mode a prior resolution used,
+    /// since [`pipeline_for`] compiles one pipeline per mode. Populated and
+    /// read only by the placement executors; every other executor leaves it
+    /// `None` for this plan's whole life, which costs nothing beyond the
+    /// one empty `RefCell`.
+    resolved_steps: RefCell<Option<ResolvedSteps>>,
+}
+
+/// [`Plan::resolved_steps`]'s payload -- the mode it was built under, so a
+/// later [`Plan::set_math_mode`] call is detected and triggers a rebuild
+/// rather than silently serving stale pipelines for the old mode.
+struct ResolvedSteps {
+    math_mode: MathMode,
+    steps: Vec<ResolvedStep>,
+}
+
+/// One [`Plan::prepared`] position's compiled pipeline plus the two other
+/// per-op values [`encode_op`] needs to dispatch it -- resolved once by
+/// [`resolve_steps`] instead of every step re-deriving [`kernel_cache_key`]
+/// (a `String`) and [`kernel_dispatch_shape`] (a `Vec<Binding>`) just to
+/// look the same pipeline up again.
+struct ResolvedStep {
+    pipeline: Retained<ProtocolObject<dyn MTLComputePipelineState>>,
+    bindings: Vec<Binding>,
+    grid: GridSpec,
 }
 
 impl Plan {
@@ -539,6 +569,7 @@ pub fn plan(
         arena: core::cell::OnceCell::new(),
         #[cfg(feature = "metal-plan-stable-buffers")]
         uniforms: core::cell::OnceCell::new(),
+        resolved_steps: RefCell::new(None),
     })
 }
 
@@ -685,6 +716,7 @@ pub fn execute_plan(plan: &Plan, blocks: &[QuantizedBlock<'_>]) -> Result<Evalua
             None,
             None,
             plan.math_mode,
+            None,
         )?;
         if let Some((fault_buffer, gathers)) = fault {
             pending_faults.push((bound, fault_buffer, gathers));
@@ -1146,6 +1178,14 @@ pub fn execute_plan_with_placements(
         .map(|(node, buffer, offset)| (*node, (*buffer, *offset)))
         .collect();
     let (device, queue) = device_and_queue()?;
+    // On a plan-cache HIT this is a no-op (`resolve_steps` checks staleness
+    // and returns immediately): the per-position loop below indexes
+    // `plan.resolved_steps` instead of every step re-deriving
+    // `kernel_cache_key`/`kernel_dispatch_shape`/`pipeline_for`'s own cache
+    // key. Only a genuine plan-cache MISS or a `set_math_mode` change pays
+    // this once, up front, rather than once per op per step.
+    resolve_steps(&device, plan)?;
+    let resolved_steps = plan.resolved_steps.borrow();
 
     let mut device_buffers: BTreeMap<NodeId, DeviceBuffer> = BTreeMap::new();
     for ((node, block), dtype) in prepared
@@ -1304,6 +1344,9 @@ pub fn execute_plan_with_placements(
             #[cfg(feature = "metal-concurrent-dispatch")]
             let placement = Some((&resolved_output.0, resolved_output.1));
             let uniform_buffer = plan_uniform_buffer(plan, position)?;
+            let resolved_step = resolved_steps
+                .as_ref()
+                .and_then(|resolved| resolved.steps.get(position));
             let fault = encode_op(
                 &device,
                 &encoder,
@@ -1313,6 +1356,7 @@ pub fn execute_plan_with_placements(
                 placement,
                 uniform_buffer,
                 plan.math_mode,
+                resolved_step,
             )?;
             if let Some((fault_buffer, gathers)) = fault {
                 pending_faults.push((bound, fault_buffer, gathers));
@@ -1562,6 +1606,7 @@ fn execute_op_timed(
         placement,
         plan_uniform,
         math_mode,
+        None,
     )?;
     encoder.endEncoding();
     command_buffer.commit();
@@ -4305,6 +4350,46 @@ fn plan_uniform_buffer(_plan: &Plan, _position: usize) -> Result<Option<&MetalBu
     Ok(None)
 }
 
+/// Builds `plan.resolved_steps` on its first call, or when
+/// [`Plan::set_math_mode`] moved the mode since the last build -- every
+/// later call for the SAME mode is a no-op. Called once per
+/// [`execute_plan_with_placements`] invocation, before that function's own
+/// per-position loop, so a plan-cache HIT never pays [`kernel_cache_key`]
+/// or [`kernel_dispatch_shape`] again: the loop below indexes
+/// `plan.resolved_steps` by position instead.
+fn resolve_steps(device: &ProtocolObject<dyn MTLDevice>, plan: &Plan) -> Result<(), MetalError> {
+    let stale = plan
+        .resolved_steps
+        .borrow()
+        .as_ref()
+        .is_none_or(|resolved| resolved.math_mode != plan.math_mode);
+    if !stale {
+        return Ok(());
+    }
+    let mut steps = Vec::with_capacity(plan.prepared.resolved.len());
+    for bound in &plan.prepared.resolved {
+        let cache_key = kernel_cache_key(bound, &plan.packed_operands)?;
+        let (bindings, grid) = kernel_dispatch_shape(bound, &plan.packed_operands)?;
+        let pipeline = pipeline_for(
+            device,
+            bound,
+            &plan.packed_operands,
+            &cache_key,
+            plan.math_mode,
+        )?;
+        steps.push(ResolvedStep {
+            pipeline,
+            bindings,
+            grid,
+        });
+    }
+    *plan.resolved_steps.borrow_mut() = Some(ResolvedSteps {
+        math_mode: plan.math_mode,
+        steps,
+    });
+    Ok(())
+}
+
 /// Encodes one `BoundOp` as a compute dispatch into the CALLER's already-open
 /// `encoder` — neither opened nor `endEncoding()`d here. [`execute_plan`]
 /// opens exactly one `MTLComputeCommandEncoder` for the whole program and
@@ -4343,29 +4428,45 @@ fn encode_op(
     placement: Option<(&MetalBuffer, usize)>,
     plan_uniform: Option<&MetalBuffer>,
     math_mode: MathMode,
+    resolved: Option<&ResolvedStep>,
 ) -> Result<Option<(MetalBuffer, usize)>, MetalError> {
+    // `resolved` is `Some` only from `execute_plan_with_placements`, once
+    // `resolve_steps` has run: this whole block -- `kernel_cache_key`'s
+    // `String`, `kernel_dispatch_shape`'s `Vec<Binding>`, and
+    // `pipeline_for`'s own `format!` cache-key lookup -- is skipped on
+    // every step of a plan-cache HIT, not merely made cheaper. `None` on
+    // every other call site (`execute_plan`, the `*_op_timed` diagnostics),
+    // byte-identical to this function's behavior before `resolved` existed.
     #[cfg(feature = "instrument")]
     let emit_started = read_ticks();
-    // `kernel_cache_key`/`kernel_dispatch_shape` are the cheap halves of
-    // `emit`'s work -- structural fingerprint, bindings, grid -- with no MSL
-    // body text rendered. On a pipeline-cache HIT (the steady-decode case,
-    // `plan_hits`/`gpu_exec`'s own row) `emit` itself is never called; only a
-    // genuine miss inside `pipeline_for` pays for the full render + compile.
-    let cache_key = kernel_cache_key(bound, packed_operands)?;
-    let (bindings, grid) = kernel_dispatch_shape(bound, packed_operands)?;
-    #[cfg(feature = "instrument")]
-    {
-        counter!(EMIT_CALLS, 1);
-        counter!(EMIT_TICKS, elapsed_ticks(emit_started));
-    }
-    #[cfg(feature = "instrument")]
-    let pipeline_started = read_ticks();
-    let pipeline = pipeline_for(device, bound, packed_operands, &cache_key, math_mode)?;
-    #[cfg(feature = "instrument")]
-    {
-        counter!(PIPELINE_LOOKUP_CALLS, 1);
-        counter!(PIPELINE_LOOKUP_TICKS, elapsed_ticks(pipeline_started));
-    }
+    let owned_bindings: Vec<Binding>;
+    let (pipeline, bindings, grid) = if let Some(step) = resolved {
+        (step.pipeline.clone(), step.bindings.as_slice(), step.grid)
+    } else {
+        // `kernel_cache_key`/`kernel_dispatch_shape` are the cheap halves of
+        // `emit`'s work -- structural fingerprint, bindings, grid -- with no
+        // MSL body text rendered. On a pipeline-cache HIT (the steady-decode
+        // case, `plan_hits`/`gpu_exec`'s own row) `emit` itself is never
+        // called; only a genuine miss inside `pipeline_for` pays for the
+        // full render + compile.
+        let cache_key = kernel_cache_key(bound, packed_operands)?;
+        let (bindings, grid) = kernel_dispatch_shape(bound, packed_operands)?;
+        #[cfg(feature = "instrument")]
+        {
+            counter!(EMIT_CALLS, 1);
+            counter!(EMIT_TICKS, elapsed_ticks(emit_started));
+        }
+        #[cfg(feature = "instrument")]
+        let pipeline_started = read_ticks();
+        let pipeline = pipeline_for(device, bound, packed_operands, &cache_key, math_mode)?;
+        #[cfg(feature = "instrument")]
+        {
+            counter!(PIPELINE_LOOKUP_CALLS, 1);
+            counter!(PIPELINE_LOOKUP_TICKS, elapsed_ticks(pipeline_started));
+        }
+        owned_bindings = bindings;
+        (pipeline, owned_bindings.as_slice(), grid)
+    };
     #[cfg(feature = "instrument")]
     let op_setup_started = read_ticks();
     let (output, output_offset) = match placement {
@@ -4408,7 +4509,7 @@ fn encode_op(
     encoder.setComputePipelineState(&pipeline);
     bind_buffers(
         encoder,
-        &bindings,
+        bindings,
         device_buffers,
         (&output, output_offset),
         &uniforms,

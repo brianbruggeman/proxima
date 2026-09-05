@@ -3170,6 +3170,7 @@ dependencies = [
  "proxima-safetensors",
  "proxima-telemetry",
  "proxima-tensor",
+ "proxima-test",
  "rustix",
  "tempfile",
  "thiserror 2.0.19",
