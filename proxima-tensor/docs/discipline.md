@@ -22104,3 +22104,81 @@ against the same worktree detached one commit earlier at `989ab131f3d0fcae855da1
 | Date | Change | Δ vs prior | CoV / runs | Host loadout |
 | --- | --- | --- | --- | --- |
 | 2026-09-05 | doc-only: `git bisect` of ROW 298's Safe-mode regression across the `837011c..26d5ced` range, one build+run per candidate; no code change | first bad commit `e142f51` (q4_K/q5_K packed-word kernel-body load): parent `989ab13` 28.686 ms/token -> `e142f51` 35.310 ms/token, +6.624 ms/token (23.1%), 6.488 of it in `gpu_exec_ms`; every subsequent commit through `26d5ced` stays bad, consistent with a single-commit regression that persists | single run per commit (no step landed in the 30.5-32.0 ambiguous band across 7 candidates); `emit_calls`=616, `barriers`=419 identical across all 7 rows | pgrep quiet-gate empty before every run; single measurer, one bisect session |
+
+## ROW 300 -- byte-loads-vs-u16-word-loads bake-off on main `23eab89`: neither mode reproduces ROW 299's regression; the revert is measurably SLOWER, not faster -- not landed
+
+**Card:** none (measurement row, no code landed). Worktree
+`/Users/brianbruggeman/repos/slot-0/proxima-wt-u16` (branch `perf/byte-loads-in-pair-dot`, off main
+`23eab89`, which is `26d5ced` (ROW 298/299's base) plus two doc-only commits -- no code changed
+between the two shas).
+
+**Question.** ROW 299 bisected a 6.6 ms/token, Safe-mode-only regression to `e142f51` (q4_K/q5_K
+packed-word `ushort`/`ulong` loads replacing per-byte `uchar` loads in `q4k_pair_dot`/`q5k_pair_dot`,
+`omega/src/msl.rs`). Two things were unknown: whether the same loss exists at `Relaxed` (the shipped
+default), and the mechanism. This row reverts exactly the loads `e142f51` widened (leaving every later
+change -- s-fold, epilogue, q6k/q3k, hoisted addressing -- intact) and bakes the reverted body off
+against current main at both math modes.
+
+**Revert scope.** `omega/src/msl.rs`: `q4k_pair_dot`'s `word_low`/`word_high` `ushort` pointer loads
+restored to the pre-`e142f51` two-byte `uchar` | `uchar<<8` form; `q5k_pair_dot`'s `q1_word`/`q2_word`/
+`h_word` `ulong` loads restored to the pre-`e142f51` per-`l` `uchar` loads. `q3k_pair_dot`/`q6k_pair_dot`
+were never touched by `e142f51` and are unchanged. `cargo nextest run -p omega --features metal` on the
+reverted body: 115 passed, 1 failed (`omega::packed_row_blocked_s1_byte_identity
+single_activation_row_q4k_matvec_emits_byte_identical_msl_to_the_pre_fold_body`) -- expected, the MSL
+text changed and this fixture pins it byte-for-byte; every q4k/q5k metal-parity test passed. The fixture
+was left unrefreshed because the code was not landed.
+
+**Arms, oracle `bind::real_openchat_file::runs_the_cached_decode_loop_on_the_metal_backend_and_reports_the_plan_cache`
+(release, `--features metal,instrument`, `PROXIMA_MAX_TOKENS=8`, real openchat-3.5-1210.Q4_K_S.gguf),
+3 rounds interleaved, steps 3..7 mean of `step_wall_ms` (ms/token) and `gpu_exec_ms`, run as the raw test
+binary (not `cargo test`, to keep both variants' binaries side by side without a rebuild between rounds):**
+
+- **M-R** -- main `23eab89` (u16 word loads, `e142f51` intact), `Relaxed` (shipped default, env unset).
+- **M-S** -- main `23eab89`, `Safe` (`PROXIMA_METAL_MATH_MODE=safe`).
+- **B-S** -- reverted byte loads, `Safe`.
+- **B-R** -- reverted byte loads, `Relaxed`.
+
+| arm | round 1 | round 2 | round 3 | mean ms/token | CoV | gpu_exec_ms mean | generated_text |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| M-R (main, Relaxed) | 28.054 | 28.323 | 28.371 | 28.249 | 0.49% | 26.698 | "Here is a simple Python function that returns" |
+| M-S (main, Safe) | 28.092 | 28.436 | 28.437 | 28.322 | 0.57% | 26.852 | "Here is a simple Python function that returns" |
+| B-S (byte loads, Safe) | 28.469 | 28.968 | 28.446 | 28.628 | 0.84% | 27.068 | "Here is a simple Python function that returns" |
+| B-R (byte loads, Relaxed) | 28.844 | 28.694 | 28.828 | 28.789 | 0.23% | 27.316 | "Here is a simple Python function that returns" |
+
+`generated_text` identical across all twelve runs (all four arms, all three rounds) -- the revert is
+correctness-neutral on this prompt, as expected for a same-value narrower/wider load of the same bytes.
+
+**Decision by the owner rule ("B-R faster than M-R beyond round CoV" lands it).** B-R (28.789) is
+**slower** than M-R (28.249) by 0.540 ms/token (1.9%), with non-overlapping round ranges (M-R
+[28.054, 28.371], B-R [28.694, 28.844]) at CoV <=0.84% on every arm -- the gap is not noise. The u16
+word-load form is not costing anything at either math mode on this box right now; if anything the
+byte-load revert is measurably worse. Per "less work + same output = keep only when wall is not worse"
+and the owner's explicit B-R-vs-M-R gate: **not landed.**
+
+**Disagreement with ROW 298/299, unresolved.** ROW 299's own bisect measured `e142f51` at Safe mode as
+35.310 ms/token against parent `989ab13`'s 28.686 (+6.624, 97.9% in `gpu_exec_ms`), and ROW 298 measured
+main's Safe mode at 34.157 against Relaxed's 28.343 on `26d5ced` -- one doc commit before this row's
+`23eab89`, no code between them. This row's M-S (28.322) and M-R (28.249) on the SAME code, SAME oracle,
+SAME quiet-gate discipline, show **no** Safe-vs-Relaxed gap at all. Four candidate explanations, none
+confirmed by this row's artifacts: (1) box/session variance between bisect runs and this session
+(different physical machine or thermal state -- not logged by either row); (2) the bisect script
+(`run-step.sh`) builds via `cargo test --release ... --no-run` then execs through `cargo test` again,
+this row execs the copied binary directly -- a harness difference that could shift GPU scheduling
+context; (3) a one-off pipeline-compile-miss or thermal outlier landed in the bisect's single-run-per-
+commit sample (ROW 299 explicitly took one run per commit, no replication); (4) some interaction between
+process launch order and Metal's `MTLMathMode` compile cache that this row's back-to-back binary swaps
+did not trigger. Not resolved by the artifacts in this row -- flagged, not adjudicated.
+
+**Mechanism.** Unresolved. The diff itself gives no reason the byte-load form would be *slower* than
+the word-load form at either math mode (a narrower per-byte load doing more scalar work should, if
+anything, cost more, not less) -- the observed direction is the opposite of ROW 299's finding and the
+opposite of `e142f51`'s own landing claim, on the same source. No profiler trace was taken this session;
+the residual is real and unclosed.
+
+**Loadout.** pgrep quiet-gate (`llama-bench\|llama-cli\|proxima_model_i\|device_streamin\|matvec_roofline\|omega-\|^cargo$\|^rustc$\|nextest\|cargo-nextest`)
+empty before every timed run; single measurer, one session, one box.
+
+### Changelog
+| Date | Change | Δ vs prior | CoV / runs | Host loadout |
+| --- | --- | --- | --- | --- |
+| 2026-09-05 | doc-only: byte-load revert of `e142f51`'s q4_K/q5_K word loads baked off against main at Safe and Relaxed, code NOT landed | B-R 28.789 vs M-R 28.249 ms/token (+0.540, 1.9%, revert is SLOWER); B-S 28.628 vs M-S 28.322 (+0.306, 1.1%, also slower); ROW 298/299's Safe-mode regression (~34 ms/token) does not reproduce on this box for either arm | 3 rounds x 4 arms = 12 runs, CoV 0.23-0.84% per arm; `omega` nextest 115 passed / 1 expected-fail (s1 byte-identity fixture, unrefreshed since not landed) | pgrep quiet-gate empty before every run; single measurer, one session |
