@@ -3096,6 +3096,11 @@ pub enum QuantizedBlock<'a> {
     /// [`proxima_gguf::quant::q5_k`] for the on-disk layout this borrows
     /// unchanged.
     Q5K(&'a [u8]),
+    /// Raw packed `Q3_K` bytes -- 256 elements, 16 sub-blocks of 16, one
+    /// signed 6-bit scale per sub-block and no per-sub-block min (`x =
+    /// d*sc*q`); see [`proxima_gguf::quant::q3_k`] for the on-disk layout
+    /// this borrows unchanged.
+    Q3K(&'a [u8]),
     /// Raw packed `Q6_K` bytes -- 256 elements, 16 sub-blocks of 16, one
     /// signed 8-bit scale per sub-block and no `dmin` term; see
     /// [`proxima_gguf::quant::q6_k`] for the on-disk layout this borrows
@@ -3255,6 +3260,7 @@ pub fn evaluate_quantized_with_scratch(
             }
             QuantizedBlock::Q4K(_)
             | QuantizedBlock::Q5K(_)
+            | QuantizedBlock::Q3K(_)
             | QuantizedBlock::Q6K(_)
             | QuantizedBlock::Q8_0(_)
             | QuantizedBlock::Q4_0(_)
@@ -5479,7 +5485,7 @@ fn dequantize_row(
     dim: usize,
     output: &mut [f32],
 ) -> Result<(), TensorError> {
-    use proxima_gguf::quant::{q4_k, q5_k, q6_k, q8_0};
+    use proxima_gguf::quant::{q3_k, q4_k, q5_k, q6_k, q8_0};
     let unaligned_row = || TensorError::NotLowerable {
         node,
         reason: "quantized embedding row width does not divide the codec's own block width",
@@ -5487,6 +5493,7 @@ fn dequantize_row(
     let (data, block_bytes, block_elements): (&[u8], usize, usize) = match block {
         QuantizedBlock::Q4K(data) => (data, q4_k::BLOCK_BYTES, q4_k::QK_K),
         QuantizedBlock::Q5K(data) => (data, q5_k::BLOCK_BYTES, q5_k::QK_K),
+        QuantizedBlock::Q3K(data) => (data, q3_k::BLOCK_BYTES, q3_k::QK_K),
         QuantizedBlock::Q6K(data) => (data, q6_k::BLOCK_BYTES, q6_k::QK_K),
         QuantizedBlock::Q8_0(data) => (data, q8_0::BLOCK_BYTES, q8_0::QK8_0),
         QuantizedBlock::Float32(_)
@@ -5505,6 +5512,7 @@ fn dequantize_row(
     match block {
         QuantizedBlock::Q4K(_) => q4_k::dequantize(row_bytes_slice, output),
         QuantizedBlock::Q5K(_) => q5_k::dequantize(row_bytes_slice, output),
+        QuantizedBlock::Q3K(_) => q3_k::dequantize(row_bytes_slice, output),
         QuantizedBlock::Q6K(_) => q6_k::dequantize(row_bytes_slice, output),
         QuantizedBlock::Q8_0(_) => q8_0::dequantize(row_bytes_slice, output),
         _ => unreachable!("codec already matched above"),
@@ -6689,6 +6697,7 @@ fn build_matmul_stage_plan<'weights>(
         QuantizedBlock::Float32(_) => return Err(shape_error()),
         QuantizedBlock::Q4K(bytes) => (bytes, Q4K_BLOCK_BYTES, Q4K_BLOCK_ELEMENTS),
         QuantizedBlock::Q5K(bytes) => (bytes, Q5K_BLOCK_BYTES, Q4K_BLOCK_ELEMENTS),
+        QuantizedBlock::Q3K(bytes) => (bytes, Q3K_BLOCK_BYTES, Q4K_BLOCK_ELEMENTS),
         QuantizedBlock::Q6K(bytes) => (bytes, Q6K_BLOCK_BYTES, Q4K_BLOCK_ELEMENTS),
         QuantizedBlock::Q8_0(bytes) => (bytes, Q8_0_BLOCK_BYTES, Q8_0_BLOCK_ELEMENTS),
         QuantizedBlock::Q4_0(bytes) => (bytes, Q4_0_BLOCK_BYTES, Q4_0_BLOCK_ELEMENTS),
@@ -7237,6 +7246,7 @@ fn run_reduce_quantized<B: Deref<Target = [f32]>>(
         QuantizedBlock::Float32(_) => return Err(shape_error()),
         QuantizedBlock::Q4K(bytes) => (bytes, Q4K_BLOCK_BYTES, Q4K_BLOCK_ELEMENTS),
         QuantizedBlock::Q5K(bytes) => (bytes, Q5K_BLOCK_BYTES, Q4K_BLOCK_ELEMENTS),
+        QuantizedBlock::Q3K(bytes) => (bytes, Q3K_BLOCK_BYTES, Q4K_BLOCK_ELEMENTS),
         QuantizedBlock::Q6K(bytes) => (bytes, Q6K_BLOCK_BYTES, Q4K_BLOCK_ELEMENTS),
         QuantizedBlock::Q8_0(bytes) => (bytes, Q8_0_BLOCK_BYTES, Q8_0_BLOCK_ELEMENTS),
         QuantizedBlock::Q4_0(bytes) => (bytes, Q4_0_BLOCK_BYTES, Q4_0_BLOCK_ELEMENTS),
@@ -7502,6 +7512,12 @@ fn run_reduce_quantized<B: Deref<Target = [f32]>>(
                     matmul_q6k_f32(weights, rows, activation_row)?
                 }
             }
+            // No `q3k-int8-dot` kernel exists yet -- `dot_q3k_f32`'s
+            // dequantize-then-fold path is `Q3_K`'s only codec path,
+            // unconditionally, unlike `Q4K`/`Q5K`/`Q6K` above which fall
+            // back to this same shape only when their own int8-dot feature
+            // is off.
+            QuantizedBlock::Q3K(_) => matmul_q3k_f32(weights, rows, activation_row)?,
             QuantizedBlock::Q8_0(_) => matmul_q8_0_f32(weights, rows, activation_row)?,
             QuantizedBlock::Q4_0(_) => matmul_q4_0_f32(weights, rows, activation_row)?,
             QuantizedBlock::Float16(_) => matmul_f16_f32(weights, rows, activation_row)?,
@@ -7531,6 +7547,7 @@ fn run_reduce_quantized<B: Deref<Target = [f32]>>(
                     counter!(instrument::MATMUL_Q6K_MACS, diag_call_macs);
                     counter!(instrument::MATMUL_Q6K_CALL_TICKS, diag_call_ticks);
                 }
+                QuantizedBlock::Q3K(_) => {}
                 QuantizedBlock::Q8_0(_) => {}
                 QuantizedBlock::Q4_0(_) => {}
                 QuantizedBlock::Float16(_) | QuantizedBlock::BFloat16(_) => {}
@@ -12142,6 +12159,12 @@ const Q4K_BLOCK_ELEMENTS: usize = proxima_gguf::quant::q4_k::QK_K;
 /// dot) actually runs.
 const Q5K_BLOCK_BYTES: usize = proxima_gguf::quant::q5_k::BLOCK_BYTES;
 
+/// Packed bytes per `Q3_K` super-block — same reasoning as
+/// [`Q5K_BLOCK_BYTES`]; `Q3_K` shares the same 256-element `QK_K` super-block
+/// shape ([`Q4K_BLOCK_ELEMENTS`]) as `Q4_K`/`Q5_K`/`Q6_K`, only its packed
+/// byte count differs (no per-sub-block min, a 6-bit scale-only field).
+const Q3K_BLOCK_BYTES: usize = proxima_gguf::quant::q3_k::BLOCK_BYTES;
+
 /// Packed bytes per `Q6_K` super-block — same reasoning as
 /// [`Q5K_BLOCK_BYTES`].
 const Q6K_BLOCK_BYTES: usize = proxima_gguf::quant::q6_k::BLOCK_BYTES;
@@ -12380,6 +12403,77 @@ pub fn matmul_q5k_f32(
         );
     }
     result
+}
+
+/// [`dot_q4k_f32`]'s mechanism applied to `Q3_K`: dequantizes one
+/// super-block at a time into a reused stack buffer via
+/// [`proxima_gguf::quant::q3_k::dequantize_block`], then folds against the
+/// matching activation slice with the same [`dot_fold_fused_multiply_add`]
+/// fold. `Q3_K` has no packed int8-dot kernel yet (no `q3k-int8-dot`
+/// feature), so this dequantize-then-fold path is its only codec path,
+/// unconditionally.
+///
+/// # Errors
+/// [`TensorError::QuantizedShapeMismatch`] if `weight_row.len()` is not a
+/// whole multiple of [`Q3K_BLOCK_BYTES`], or `activation.len()` does not
+/// equal the row's block count times [`Q4K_BLOCK_ELEMENTS`].
+fn dot_q3k_f32(weight_row: &[u8], activation: &[f32]) -> Result<f32, TensorError> {
+    if !weight_row.len().is_multiple_of(Q3K_BLOCK_BYTES) {
+        return Err(TensorError::QuantizedShapeMismatch {
+            reason: "weight row length is not a whole multiple of the q3_k block size",
+        });
+    }
+    let block_count = weight_row.len() / Q3K_BLOCK_BYTES;
+    if activation.len() != block_count * Q4K_BLOCK_ELEMENTS {
+        return Err(TensorError::QuantizedShapeMismatch {
+            reason: "activation length does not match the weight row's decoded element count",
+        });
+    }
+
+    let mut scratch = [0.0f32; Q4K_BLOCK_ELEMENTS];
+    let mut acc = 0.0f32;
+    for (block, activation_chunk) in weight_row
+        .as_chunks::<Q3K_BLOCK_BYTES>()
+        .0
+        .iter()
+        .zip(activation.as_chunks::<Q4K_BLOCK_ELEMENTS>().0)
+    {
+        proxima_gguf::quant::q3_k::dequantize_block(block, &mut scratch);
+        acc = dot_fold_fused_multiply_add(
+            &scratch,
+            activation_chunk,
+            DotFold {
+                len: Q4K_BLOCK_ELEMENTS,
+                init: acc,
+                seeded: true,
+            },
+        );
+    }
+    Ok(acc)
+}
+
+/// A full `Q3_K`-quantized weight matrix (`rows` x `k`) times one `f32`
+/// activation vector — `dot_q3k_f32`'s per-row kernel through the shared
+/// [`matmul_quantized_dispatch`] pool dispatch, same shape as
+/// [`matmul_q5k_f32`].
+///
+/// # Errors
+/// Propagates `dot_q3k_f32`'s [`TensorError::QuantizedShapeMismatch`], or
+/// reports the same error if `weights.len()` is not a whole multiple of
+/// `rows`.
+pub fn matmul_q3k_f32(
+    weights: &[u8],
+    rows: usize,
+    activation: &[f32],
+) -> Result<Vec<f32>, TensorError> {
+    matmul_quantized_dispatch(
+        weights,
+        rows,
+        activation,
+        "matmul_q3k_f32 called with zero rows",
+        "weight byte length is not a whole multiple of the row count",
+        dot_q3k_f32,
+    )
 }
 
 /// [`dot_q4k_f32`]'s mechanism applied to `Q6_K`: dequantizes one
@@ -27554,6 +27648,7 @@ mod tests {
     #[case::float32("float32", 1e-6)]
     #[case::q4_k("q4_k", 0.01)]
     #[case::q5_k("q5_k", 0.01)]
+    #[case::q3_k("q3_k", 0.01)]
     #[case::q6_k("q6_k", 0.01)]
     #[case::q8_0("q8_0", 0.01)]
     // q4_0 is the coarsest codec under test here -- one scale per block, no
@@ -27626,6 +27721,27 @@ mod tests {
                 ];
                 evaluate_quantized(&program, &[], &blocks, &[sum])
                     .expect("q5_k-quantized matmul evaluates")
+                    .root()
+                    .to_vec()
+            }
+            "q3_k" => {
+                use proxima_gguf::quant::q3_k::{BLOCK_BYTES, QK_K, quantize};
+                let blocks_per_row = k as usize / QK_K;
+                let mut weight_blocks = vec![0u8; rows as usize * blocks_per_row * BLOCK_BYTES];
+                for (row_f32, row_blocks) in weight_f32
+                    .chunks_exact(k as usize)
+                    .zip(weight_blocks.chunks_exact_mut(blocks_per_row * BLOCK_BYTES))
+                {
+                    quantize(row_f32, row_blocks)
+                        .expect("row length is a whole multiple of QK_K by construction");
+                }
+                let (program, sum) = quantized_matmul_program(rows, k);
+                let blocks = [
+                    QuantizedBlock::Q3K(&weight_blocks),
+                    QuantizedBlock::Float32(&activation),
+                ];
+                evaluate_quantized(&program, &[], &blocks, &[sum])
+                    .expect("q3_k-quantized matmul evaluates")
                     .root()
                     .to_vec()
             }
@@ -27720,6 +27836,113 @@ mod tests {
             relative <= tolerance,
             "{codec}: relative diff {relative} exceeds tolerance {tolerance} -- max_diff={max_diff} \
              max_magnitude={max_magnitude}"
+        );
+    }
+
+    /// [`dot_q3k_f32`] against one REAL `Q3_K` row from a real requantized
+    /// Q3_K_M checkpoint (`PROXIMA_Q3K_GGUF`, host-local and opportunistic --
+    /// `#[ignore]`d like every other real-checkpoint test in this workspace,
+    /// e.g. `proxima-gguf`'s own `q3_k_real_dequantize_matches_llama_cpp_gguf_py_oracle`)
+    /// against a reference built by dequantizing the SAME bytes
+    /// (`proxima_gguf::quant::q3_k::dequantize`) and folding a plain `f32`
+    /// dot product by hand -- the incumbent shape every other codec's own
+    /// `dot_q{4,5,6}k_f32` parity already holds. Real weight bytes off disk,
+    /// synthetic (but deterministic, non-degenerate) activation: the codec's
+    /// correctness depends only on the weight bytes it decodes, never on
+    /// what the activation happens to be, so a real activation buys nothing
+    /// a seeded `Lcg` vector does not already cover -- reading only the
+    /// header and this one row's own byte range, never the multi-gigabyte
+    /// payload behind it.
+    #[test]
+    #[ignore = "depends on a host-local real gguf checkpoint (PROXIMA_Q3K_GGUF)"]
+    fn dot_q3k_f32_matches_dequantize_then_f32_matmul_on_a_real_checkpoint_row() {
+        use std::io::{Read, Seek, SeekFrom};
+
+        let Ok(gguf_path) = std::env::var("PROXIMA_Q3K_GGUF") else {
+            eprintln!("skipping: PROXIMA_Q3K_GGUF not set");
+            return;
+        };
+        let path = std::path::Path::new(&gguf_path);
+        if !path.exists() {
+            eprintln!("skipping: gguf ({path:?}) missing on this host");
+            return;
+        }
+
+        let mut file = std::fs::File::open(path).expect("open real gguf checkpoint");
+        let file_len = file.metadata().expect("stat real gguf checkpoint").len();
+        let mut header_buf = vec![0u8; 0];
+        let parsed = 'parse: {
+            for cap in [4usize << 20, 16 << 20, 64 << 20, 128 << 20] {
+                header_buf.resize(cap, 0);
+                file.seek(SeekFrom::Start(0)).expect("seek to file start");
+                let read = file.read(&mut header_buf).expect("read gguf header region");
+                header_buf.truncate(read);
+                if let Ok(parsed) = proxima_gguf::pipe::parse_complete(&header_buf) {
+                    break 'parse parsed;
+                }
+            }
+            panic!("gguf metadata region did not fit in 128 MiB");
+        };
+
+        let tensor_name = "blk.0.ffn_up.weight";
+        let tensor = parsed
+            .tensors
+            .iter()
+            .find(|candidate| candidate.name == tensor_name)
+            .unwrap_or_else(|| panic!("{tensor_name} not present in real checkpoint"));
+        assert_eq!(
+            tensor.ggml_type,
+            proxima_gguf::types::GgmlType::Q3_K,
+            "{tensor_name} must be Q3_K in this Q3_K_M checkpoint"
+        );
+
+        let row_elements = tensor.dims[0] as usize;
+        let row_bytes = (row_elements / proxima_gguf::quant::q3_k::QK_K)
+            * proxima_gguf::quant::q3_k::BLOCK_BYTES;
+        let full_range = parsed
+            .tensor_data_range(tensor, file_len)
+            .expect("tensor data range within real checkpoint");
+        let row_range = full_range.start..full_range.start + row_bytes as u64;
+        let mut row_packed = vec![0u8; row_bytes];
+        file.seek(SeekFrom::Start(row_range.start))
+            .expect("seek to tensor row start");
+        file.read_exact(&mut row_packed)
+            .expect("read exact tensor row bytes");
+
+        let mut row_f32 = vec![0.0f32; row_elements];
+        proxima_gguf::quant::q3_k::dequantize(&row_packed, &mut row_f32)
+            .expect("decode real Q3_K row");
+
+        let mut lcg = Lcg(99);
+        let activation: Vec<f32> = (0..row_elements).map(|_| lcg.next_unit() * 2.0 - 1.0).collect();
+
+        let expected: f32 = row_f32
+            .iter()
+            .zip(activation.iter())
+            .map(|(&weight, &value)| weight * value)
+            .sum();
+        let actual = dot_q3k_f32(&row_packed, &activation).expect("well-formed real q3_k row");
+
+        // A naive linear `sum()` reference and `dot_q3k_f32`'s own 8-lane
+        // `dot_fold_fused_multiply_add` fold legitimately disagree at
+        // roughly the `f32` ULP-accumulated noise floor on a real,
+        // non-degenerate multi-hundred-element row purely from
+        // reassociation -- measured here at ~1e-5 relative, not a codec
+        // bug: both numbers decode the identical bytes through the
+        // identical `q3_k` dequantization formula, they only sum the 256
+        // products in a different order. `5e-5` leaves headroom over that
+        // measured floor while staying two orders of magnitude tighter than
+        // this crate's own quantization-error parity bound (`0.01`,
+        // `evaluate_quantized_matmul_matches_dequantized_reference_across_every_codec`),
+        // which the `Q3_K` codec's own lossy quantization step (not this
+        // test) is responsible for.
+        let relative = (actual - expected).abs() / expected.abs();
+        eprintln!(
+            "dot_q3k_f32 real-row parity: actual={actual} expected={expected} relative={relative}"
+        );
+        assert!(
+            relative <= 5e-5,
+            "relative diff {relative} exceeds 5e-5 (actual={actual} expected={expected})"
         );
     }
 

@@ -79,7 +79,7 @@ pub struct GgmlCell {
     pub status: CellStatus,
 }
 
-const UNREPRESENTABLE: &str = "no encoder or decoder in proxima_gguf::quant (only q4_k/q5_k/q6_k/q8_0 exist); \
+const UNREPRESENTABLE: &str = "no encoder or decoder in proxima_gguf::quant (only q3_k/q4_k/q5_k/q6_k/q8_0 exist); \
 bind::gguf_tensor_as_f32 rejects it with UnrepresentableGgmlType before a forward pass can run";
 
 const F16_ACTIVATION_UNSUPPORTED: &str = "proxima_tensor::cpu::evaluate_quantized_named_with_scratch is f32-only: \
@@ -152,7 +152,7 @@ pub const GGML_CAPABILITY_TABLE: &[GgmlCell] = &[
         codec_name: "Q3_K",
         topology: Topology::Dense,
         backend: Backend::Cpu,
-        status: CellStatus::Unimplemented(UNREPRESENTABLE),
+        status: CellStatus::Supported,
     },
     GgmlCell {
         codec: GgmlType::F16,
@@ -341,12 +341,12 @@ mod tests {
     }
 
     #[test]
-    fn supported_dense_cpu_codecs_matches_the_five_hand_written_test_functions() {
+    fn supported_dense_cpu_codecs_matches_the_six_hand_written_test_functions() {
         let supported = supported_dense_cpu_codecs();
         assert_eq!(
             supported.len(),
-            5,
-            "capability_matrix.rs currently drives exactly 5 supported dense-cpu codecs"
+            6,
+            "capability_matrix.rs currently drives exactly 6 supported dense-cpu codecs"
         );
     }
 

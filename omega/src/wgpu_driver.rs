@@ -135,7 +135,12 @@ fn packed_operands_of(block_nodes: &[NodeId], blocks: &[QuantizedBlock<'_>]) -> 
             QuantizedBlock::Q4_0(_) => Some((*node, PackedCodec::Q4_0)),
             QuantizedBlock::Float16(_) => Some((*node, PackedCodec::Float16)),
             QuantizedBlock::BFloat16(_) => Some((*node, PackedCodec::BFloat16)),
-            QuantizedBlock::Float32(_) => None,
+            // No `PackedCodec::Q3K` exists yet -- `None` here routes a
+            // `Q3_K` node through `execute_plan`'s existing
+            // `WgpuError::UnsupportedBlock` path, the same "codec has no
+            // wgpu entry" rejection `crate::metal::prepare` raises
+            // explicitly for the same codec.
+            QuantizedBlock::Q3K(_) | QuantizedBlock::Float32(_) => None,
         })
         .collect()
 }
@@ -162,7 +167,8 @@ fn element_count(shape: &[u64]) -> usize {
 /// branched on that case first.
 fn packed_block_bytes_slice<'a>(block: &QuantizedBlock<'a>) -> &'a [u8] {
     match block {
-        QuantizedBlock::Q4K(bytes)
+        QuantizedBlock::Q3K(bytes)
+        | QuantizedBlock::Q4K(bytes)
         | QuantizedBlock::Q5K(bytes)
         | QuantizedBlock::Q6K(bytes)
         | QuantizedBlock::Q8_0(bytes)
@@ -188,6 +194,7 @@ fn packed_expected_bytes(codec: PackedCodec, elements: usize) -> usize {
 fn block_codec_name(block: &QuantizedBlock<'_>) -> &'static str {
     match block {
         QuantizedBlock::Float32(_) => "float32",
+        QuantizedBlock::Q3K(_) => "q3_k",
         QuantizedBlock::Q4K(_) => "q4_k",
         QuantizedBlock::Q5K(_) => "q5_k",
         QuantizedBlock::Q6K(_) => "q6_k",
