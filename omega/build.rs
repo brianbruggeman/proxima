@@ -283,18 +283,16 @@ fn emit_sizing_consts() {
         ));
     }
 
-    if env::var_os("CARGO_FEATURE_METAL_PACKED_ROW_MULTI_ACTIVATION").is_some() {
-        let group = require_power_of_two_le_32(
+    let group = require_power_of_two_le_32(
+        "packed_row_multi_activation.group",
+        require_nonzero(
             "packed_row_multi_activation.group",
-            require_nonzero(
-                "packed_row_multi_activation.group",
-                resolve_int(&root, "packed_row_multi_activation", "group"),
-            ),
-        );
-        out.push_str(&format!(
-            "pub const PACKED_ROW_ACTIVATION_GROUP: u64 = {group};\n"
-        ));
-    }
+            resolve_int(&root, "packed_row_multi_activation", "group"),
+        ),
+    );
+    out.push_str(&format!(
+        "pub const PACKED_ROW_ACTIVATION_GROUP: u64 = {group};\n"
+    ));
 
     let out_dir = PathBuf::from(env::var("OUT_DIR").expect("OUT_DIR set by cargo"));
     let out_path = out_dir.join("omega_sized.rs");

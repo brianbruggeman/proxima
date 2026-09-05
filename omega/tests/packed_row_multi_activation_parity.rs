@@ -1,5 +1,6 @@
-//! `metal-packed-row-multi-activation` parity: the row-blocked packed matvec
-//! (`msl.rs`'s `push_packed_row_multi_activation_body`) folds `s` activation
+//! packed-row multi-row fold parity: the row-blocked packed matvec
+//! (`msl.rs`'s `push_packed_row_multi_row_body`, folded into
+//! `push_packed_row_blocked_body`'s `token_total > 1` branch) folds `s` activation
 //! ("token") rows per streamed weight row instead of re-streaming the whole
 //! weight once per row -- see that function's own doc for the mechanism.
 //! This gate proves the fold is numerically transparent: for every codec
@@ -10,11 +11,7 @@
 //! the same discipline `attn_multi_axis_tiled_gemm_parity.rs` already
 //! applies to the tiled-GEMM path.
 
-#![cfg(all(
-    feature = "metal",
-    feature = "metal-packed-row-multi-activation",
-    target_os = "macos"
-))]
+#![cfg(all(feature = "metal", target_os = "macos"))]
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use proxima_tensor::cpu::evaluate_quantized;
