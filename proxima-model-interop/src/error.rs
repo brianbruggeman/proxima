@@ -131,16 +131,6 @@ pub enum InteropError {
     #[error(transparent)]
     Backend(#[from] omega::backend::BackendError),
 
-    /// `crate::generate::BackendRuntime::evaluate`/`evaluate_op_timed`'s
-    /// plan cache: `shape` was just inserted (on miss) or already present (on
-    /// hit) immediately above, so a subsequent lookup missing it means the
-    /// map lost an entry with no external mutation possible under `&mut
-    /// self` -- an interpreter/program-construction invariant violation,
-    /// surfaced instead of panicking, mirroring [`Self::MissingEvaluatedNode`].
-    #[cfg(feature = "metal")]
-    #[error("plan cache for shape {shape:?} is missing the entry inserted moments earlier")]
-    PlanCacheEntryVanished { shape: (usize, usize) },
-
     /// [`crate::generate::find_input_node`] scanned the single-range
     /// program for an [`proxima_tensor::Op::Input`] named `name` and found
     /// none -- would mean [`crate::generate::build_single_range_program`]'s
