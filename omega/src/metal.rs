@@ -337,16 +337,20 @@ pub struct Plan {
     /// way to know a caller's residency intent from codecs/shapes alone.
     resident_nodes: BTreeSet<NodeId>,
     /// CARD 6.5: whole-buffer, size-class-reused device output buffers for
-    /// every position in `prepared.resolved`, built once here rather than by
-    /// `encode_op`'s `allocate_buffer` on every call. See [`BufferArena`]'s
-    /// own doc.
+    /// every position in `prepared.resolved`. Built lazily, on the first
+    /// call that actually consults a placement (`arena_placement`) --
+    /// [`plan`] itself no longer builds this eagerly, since the ordinary
+    /// (unplaced) `execute_plan`/`execute_plan_op_timed` paths never read it
+    /// and were paying its device allocation on every miss regardless. See
+    /// [`BufferArena`]'s own doc.
     #[cfg(feature = "metal-plan-stable-buffers")]
-    arena: BufferArena,
+    arena: core::cell::OnceCell<BufferArena>,
     /// CARD 6.5: one uniform buffer per plan position, written in place by
     /// `encode_op` instead of going through the content-keyed
-    /// `UNIFORM_BUFFERS` cache. See [`PlanUniforms`]'s own doc.
+    /// `UNIFORM_BUFFERS` cache. Lazily built alongside `arena`, for the same
+    /// reason -- see [`PlanUniforms`]'s own doc.
     #[cfg(feature = "metal-plan-stable-buffers")]
-    uniforms: PlanUniforms,
+    uniforms: core::cell::OnceCell<PlanUniforms>,
 }
 
 impl Plan {
@@ -386,15 +390,17 @@ impl Plan {
             .collect();
     }
 
-    /// The arena's live-bytes high-water mark reached while `plan()` built
-    /// it -- the direct witness `build_buffer_arena`'s own `eprintln!`
-    /// already prints before allocating, kept queryable afterward for a
-    /// census line. `None` when this feature is off.
+    /// The arena's live-bytes high-water mark reached while it was built --
+    /// the direct witness `build_buffer_arena`'s own `eprintln!` already
+    /// prints before allocating, kept queryable afterward for a census
+    /// line. `None` when this feature is off, or when this plan has never
+    /// executed a placed call and so never built its arena (see
+    /// [`Self::arena`]'s own doc).
     #[must_use]
     pub fn arena_peak_bytes(&self) -> Option<usize> {
         #[cfg(feature = "metal-plan-stable-buffers")]
         {
-            Some(self.arena.peak_bytes)
+            Some(self.arena.get()?.peak_bytes)
         }
         #[cfg(not(feature = "metal-plan-stable-buffers"))]
         {
@@ -404,12 +410,13 @@ impl Plan {
 
     /// Physical device buffers the arena actually holds -- `< op_count`
     /// whenever `build_buffer_arena`'s free list reused a slot across two
-    /// or more non-overlapping positions. `None` when this feature is off.
+    /// or more non-overlapping positions. `None` when this feature is off,
+    /// or when this plan has never built its arena.
     #[must_use]
     pub fn arena_slot_count(&self) -> Option<usize> {
         #[cfg(feature = "metal-plan-stable-buffers")]
         {
-            Some(self.arena.slot_count())
+            Some(self.arena.get()?.slot_count())
         }
         #[cfg(not(feature = "metal-plan-stable-buffers"))]
         {
@@ -418,13 +425,15 @@ impl Plan {
     }
 
     /// The byte length of the physical slot backing `position`'s output --
-    /// `None` when this feature is off or `position` is out of range.
+    /// `None` when this feature is off, `position` is out of range, or this
+    /// plan has never built its arena.
     #[must_use]
     pub fn arena_position_byte_len(&self, position: usize) -> Option<usize> {
         #[cfg(feature = "metal-plan-stable-buffers")]
         {
-            let slot = *self.arena.position_slot.get(position)?;
-            Some(self.arena.slot_byte_len(slot))
+            let arena = self.arena.get()?;
+            let slot = *arena.position_slot.get(position)?;
+            Some(arena.slot_byte_len(slot))
         }
         #[cfg(not(feature = "metal-plan-stable-buffers"))]
         {
@@ -487,18 +496,6 @@ pub fn plan(
         .iter()
         .map(|node| gpu_dtype(program, &prepared.index_nodes, *node))
         .collect();
-    #[cfg(feature = "metal-plan-stable-buffers")]
-    let (arena, uniforms) = {
-        let (device, _queue) = device_and_queue()?;
-        let arena = build_buffer_arena(
-            &device,
-            &prepared.resolved,
-            &prepared.retires,
-            &prepared.effective_outputs,
-        )?;
-        let uniforms = build_plan_uniforms(&device, &prepared.resolved)?;
-        (arena, uniforms)
-    };
     Ok(Plan {
         program: program.to_vec(),
         prepared,
@@ -506,9 +503,9 @@ pub fn plan(
         block_dtypes,
         resident_nodes: BTreeSet::new(),
         #[cfg(feature = "metal-plan-stable-buffers")]
-        arena,
+        arena: core::cell::OnceCell::new(),
         #[cfg(feature = "metal-plan-stable-buffers")]
-        uniforms,
+        uniforms: core::cell::OnceCell::new(),
     })
 }
 
@@ -1209,10 +1206,10 @@ pub fn execute_plan_with_placements(
                 }
             }
         }
-        let placement = output_placed
-            .get(&bound.node)
-            .copied()
-            .or_else(|| arena_placement(plan, position));
+        let placement = match output_placed.get(&bound.node).copied() {
+            Some(placement) => Some(placement),
+            None => arena_placement(plan, position)?,
+        };
         // `ablation_skip` is `false` on every non-`instrument` build (the
         // `match` folds to the literal at compile time, so this costs
         // nothing in production) and `false` on every `instrument` build
@@ -1271,6 +1268,7 @@ pub fn execute_plan_with_placements(
             }
             #[cfg(feature = "metal-concurrent-dispatch")]
             let placement = Some((&resolved_output.0, resolved_output.1));
+            let uniform_buffer = plan_uniform_buffer(plan, position)?;
             let fault = encode_op(
                 &device,
                 &encoder,
@@ -1278,7 +1276,7 @@ pub fn execute_plan_with_placements(
                 bound,
                 packed_operands,
                 placement,
-                plan_uniform_buffer(plan, position),
+                uniform_buffer,
             )?;
             if let Some((fault_buffer, gathers)) = fault {
                 pending_faults.push((bound, fault_buffer, gathers));
@@ -1738,10 +1736,11 @@ pub fn execute_plan_with_placements_op_timed(
 
     let mut timings: Vec<OpGpuTiming> = Vec::with_capacity(prepared.resolved.len());
     for (position, bound) in prepared.resolved.iter().enumerate() {
-        let placement = output_placed
-            .get(&bound.node)
-            .copied()
-            .or_else(|| arena_placement(plan, position));
+        let placement = match output_placed.get(&bound.node).copied() {
+            Some(placement) => Some(placement),
+            None => arena_placement(plan, position)?,
+        };
+        let uniform_buffer = plan_uniform_buffer(plan, position)?;
         let timing = execute_op_timed(
             &device,
             &queue,
@@ -1752,7 +1751,7 @@ pub fn execute_plan_with_placements_op_timed(
             position,
             bound,
             placement,
-            plan_uniform_buffer(plan, position),
+            uniform_buffer,
             &always_live,
         )?;
         timings.push(timing);
@@ -3871,26 +3870,51 @@ fn read_back_uniform_bytes(buffer: &ProtocolObject<dyn MTLBuffer>, byte_len: usi
 
 /// [`encode_op`]'s arena lookup, split out so the call site reads the same
 /// three lines regardless of whether `metal-plan-stable-buffers` is
-/// compiled in -- `None` with the feature off, matching `encode_op`'s
+/// compiled in -- `Ok(None)` with the feature off, matching `encode_op`'s
 /// pre-existing "no placement, fresh `allocate_buffer`" behavior exactly.
+///
+/// Builds `plan.arena` on its first call for this `Plan` rather than
+/// requiring [`plan`] to have built it already -- only
+/// `execute_plan_with_placements`/`execute_plan_with_placements_op_timed`
+/// ever call this, so `execute_plan`/`execute_plan_op_timed` (which never
+/// do) cost this device allocation zero times, not once per miss.
 #[cfg(feature = "metal-plan-stable-buffers")]
-fn arena_placement(plan: &Plan, position: usize) -> Option<(&MetalBuffer, usize)> {
-    Some(plan.arena.placement_for(position))
+fn arena_placement(plan: &Plan, position: usize) -> Result<Option<(&MetalBuffer, usize)>, MetalError> {
+    if plan.arena.get().is_none() {
+        let (device, _queue) = device_and_queue()?;
+        let arena = build_buffer_arena(
+            &device,
+            &plan.prepared.resolved,
+            &plan.prepared.retires,
+            &plan.prepared.effective_outputs,
+        )?;
+        // a fresh, still-empty `OnceCell` can only fail to accept this set
+        // if another call already raced it in -- impossible here since
+        // `plan` is `&Plan`, never shared across a concurrent write.
+        let _ = plan.arena.set(arena);
+    }
+    Ok(plan.arena.get().map(|arena| arena.placement_for(position)))
 }
 #[cfg(not(feature = "metal-plan-stable-buffers"))]
-fn arena_placement(_plan: &Plan, _position: usize) -> Option<(&MetalBuffer, usize)> {
-    None
+fn arena_placement(_plan: &Plan, _position: usize) -> Result<Option<(&MetalBuffer, usize)>, MetalError> {
+    Ok(None)
 }
 
 /// [`encode_op`]'s plan-owned-uniform lookup -- see [`arena_placement`]'s
-/// own doc for why this is a free function rather than an inline `#[cfg]`.
+/// own doc for why this is a free function rather than an inline `#[cfg]`,
+/// and for why it builds `plan.uniforms` lazily on the same schedule.
 #[cfg(feature = "metal-plan-stable-buffers")]
-fn plan_uniform_buffer(plan: &Plan, position: usize) -> Option<&MetalBuffer> {
-    Some(&plan.uniforms.buffers[position])
+fn plan_uniform_buffer(plan: &Plan, position: usize) -> Result<Option<&MetalBuffer>, MetalError> {
+    if plan.uniforms.get().is_none() {
+        let (device, _queue) = device_and_queue()?;
+        let uniforms = build_plan_uniforms(&device, &plan.prepared.resolved)?;
+        let _ = plan.uniforms.set(uniforms);
+    }
+    Ok(plan.uniforms.get().map(|uniforms| &uniforms.buffers[position]))
 }
 #[cfg(not(feature = "metal-plan-stable-buffers"))]
-fn plan_uniform_buffer(_plan: &Plan, _position: usize) -> Option<&MetalBuffer> {
-    None
+fn plan_uniform_buffer(_plan: &Plan, _position: usize) -> Result<Option<&MetalBuffer>, MetalError> {
+    Ok(None)
 }
 
 /// Encodes one `BoundOp` as a compute dispatch into the CALLER's already-open
@@ -4483,7 +4507,10 @@ mod arena_tests {
     use objc2_metal::MTLDevice;
     use proxima_tensor::{DType, Extent, IndexMap, NodeId, Op, QuantizedBlock, ScalarOp, append, cpu, projection};
 
-    use super::{device_and_queue, execute_plan_with_placements, plan};
+    use super::{
+        arena_placement, device_and_queue, execute_plan, execute_plan_with_placements, plan,
+        plan_uniform_buffer,
+    };
 
     /// `Input(a, extent) -> Identity -> Identity -> Input(b, extent) ->
     /// Identity` -- three dispatched (non-`Input`) elementwise ops, `node[0]`
@@ -4638,7 +4665,7 @@ mod arena_tests {
             &[QuantizedBlock::Float32(&a), QuantizedBlock::Float32(&b)],
             &outputs,
         )
-        .expect("plans the chain once, with its arena and plan uniforms built");
+        .expect("plans the chain once -- its arena and plan uniforms build lazily below");
         let pooled = execute_plan_with_placements(
             &resolved_plan,
             &[QuantizedBlock::Float32(&a), QuantizedBlock::Float32(&b)],
@@ -4656,6 +4683,40 @@ mod arena_tests {
                  pooled and unpooled must agree on the real forward"
             );
         }
+    }
+
+    /// The direct witness for the fix this module carries: `execute_plan`
+    /// never binds a placement (it always passes `None, None` into
+    /// `encode_op`), so it must never trigger `arena_placement`/
+    /// `plan_uniform_buffer`'s device allocation -- before this change,
+    /// [`plan`] built the arena and plan uniforms unconditionally, so this
+    /// same call sequence would have found both `OnceCell`s already full.
+    #[test]
+    fn execute_plan_never_builds_the_arena_or_uniforms_for_the_unplaced_path() {
+        let (program, [stage_zero, stage_one, stage_two]) = three_stage_chain(4, 4);
+        let a = [1.0f32; 4];
+        let b = [2.0f32; 4];
+        let outputs = [stage_zero, stage_one, stage_two];
+        let blocks = [QuantizedBlock::Float32(&a), QuantizedBlock::Float32(&b)];
+        let resolved_plan =
+            plan(&program, &[], &blocks, &outputs).expect("plans the three-stage chain");
+
+        execute_plan(&resolved_plan, &blocks).expect("runs the unplaced program");
+
+        assert!(
+            resolved_plan.arena.get().is_none(),
+            "execute_plan took the unplaced path and must never have built the arena"
+        );
+        assert!(
+            resolved_plan.uniforms.get().is_none(),
+            "execute_plan took the unplaced path and must never have built plan uniforms"
+        );
+        assert_eq!(
+            resolved_plan.arena_peak_bytes(),
+            None,
+            "the public accessor must agree with the private field: no placed \
+             execution happened, so there is no arena peak to report"
+        );
     }
 
     #[test]
@@ -4678,8 +4739,9 @@ mod arena_tests {
             core::iter::repeat_n(QuantizedBlock::Float32(a.as_slice()), 5).collect();
         let resolved_plan =
             plan(&program, &[], &blocks, &outputs).expect("plans the five-diamond program");
+        arena_placement(&resolved_plan, 0).expect("builds the arena on first placement lookup");
 
-        let arena = &resolved_plan.arena;
+        let arena = resolved_plan.arena.get().expect("arena was just built above");
         let retires = &resolved_plan.prepared.retires;
         let resolved = &resolved_plan.prepared.resolved;
 
@@ -4733,6 +4795,8 @@ mod arena_tests {
         let blocks = [QuantizedBlock::Float32(&a), QuantizedBlock::Float32(&b)];
         let resolved_plan =
             plan(&program, &[], &blocks, &outputs).expect("plans the pinned-output chain");
+        arena_placement(&resolved_plan, 0).expect("builds the arena on first placement lookup");
+        let arena = resolved_plan.arena.get().expect("arena was just built above");
 
         let position_of = |node: NodeId| {
             resolved_plan
@@ -4742,8 +4806,8 @@ mod arena_tests {
                 .position(|bound| bound.node == node)
                 .expect("node is dispatched")
         };
-        let stage_zero_slot = resolved_plan.arena.position_slot[position_of(stage_zero)];
-        let stage_two_slot = resolved_plan.arena.position_slot[position_of(stage_two)];
+        let stage_zero_slot = arena.position_slot[position_of(stage_zero)];
+        let stage_two_slot = arena.position_slot[position_of(stage_two)];
         assert_ne!(
             stage_zero_slot, stage_two_slot,
             "a pinned program output's slot must never be handed to a later same-size op"
@@ -4764,6 +4828,8 @@ mod arena_tests {
         let blocks = [QuantizedBlock::Float32(&a), QuantizedBlock::Float32(&b)];
         let resolved_plan =
             plan(&program, &[], &blocks, &outputs).expect("plans the size-mismatched chain");
+        arena_placement(&resolved_plan, 0).expect("builds the arena on first placement lookup");
+        let arena = resolved_plan.arena.get().expect("arena was just built above");
 
         let position_of = |node: NodeId| {
             resolved_plan
@@ -4773,14 +4839,14 @@ mod arena_tests {
                 .position(|bound| bound.node == node)
                 .expect("node is dispatched")
         };
-        let stage_zero_slot = resolved_plan.arena.position_slot[position_of(stage_zero)];
-        let stage_two_slot = resolved_plan.arena.position_slot[position_of(stage_two)];
+        let stage_zero_slot = arena.position_slot[position_of(stage_zero)];
+        let stage_two_slot = arena.position_slot[position_of(stage_two)];
         assert_ne!(
             stage_zero_slot, stage_two_slot,
             "a byte-length mismatch must force a genuinely new slot, never a reused one"
         );
         assert_eq!(
-            resolved_plan.arena.slot_byte_len(stage_two_slot),
+            arena.slot_byte_len(stage_two_slot),
             8 * size_of::<f32>(),
             "the new slot must be sized to the LARGER extent's own byte length"
         );
@@ -4825,8 +4891,13 @@ mod arena_tests {
         let blocks = [QuantizedBlock::Float32(&a)];
         let resolved_plan =
             plan(&program, &[], &blocks, &outputs).expect("plans the ten-stage chain");
+        arena_placement(&resolved_plan, 0).expect("builds the arena on first placement lookup");
 
-        let slot_count = resolved_plan.arena.slot_count();
+        let slot_count = resolved_plan
+            .arena
+            .get()
+            .expect("arena was just built above")
+            .slot_count();
         assert!(
             slot_count <= 3,
             "ten same-size stages must reuse down to a small, bounded slot count via the \
@@ -4849,6 +4920,7 @@ mod arena_tests {
         let blocks = [QuantizedBlock::Float32(&a), QuantizedBlock::Float32(&b)];
         let resolved_plan =
             plan(&program, &[], &blocks, &outputs).expect("plans the identical-uniform chain");
+        plan_uniform_buffer(&resolved_plan, 0).expect("builds the uniforms on first lookup");
 
         let position_of = |node: NodeId| {
             resolved_plan
@@ -4866,10 +4938,14 @@ mod arena_tests {
             "degenerate gate: the two ops must genuinely pack identical uniform bytes"
         );
 
+        let uniforms = resolved_plan
+            .uniforms
+            .get()
+            .expect("uniforms were just built above");
         let stage_zero_uniform =
-            objc2::rc::Retained::as_ptr(&resolved_plan.uniforms.buffers[position_of(stage_zero)]);
+            objc2::rc::Retained::as_ptr(&uniforms.buffers[position_of(stage_zero)]);
         let stage_two_uniform =
-            objc2::rc::Retained::as_ptr(&resolved_plan.uniforms.buffers[position_of(stage_two)]);
+            objc2::rc::Retained::as_ptr(&uniforms.buffers[position_of(stage_two)]);
         assert_ne!(
             stage_zero_uniform, stage_two_uniform,
             "two ops with identical uniform bytes must still get DISTINCT plan-owned buffers"
