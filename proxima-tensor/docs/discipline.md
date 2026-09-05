@@ -22738,3 +22738,137 @@ PROXIMA_MAX_TOKENS=8 PROXIMA_OPENCHAT_GGUF=<path to a Q3_K_M gguf> <built-binary
 ```
 Confirm the `pgrep -l` quiet gate (names-only pattern in this row's own repo brief, never `-f`) is
 empty and load-1 under 10 immediately before each round.
+
+## ROW 308 -- in-buffer per-kind cost census (R0 of the non-matvec residual campaign): matvec's own dispatches cost 22.64 ms of FULL's 26.54 ms, a barrier/serialization residual of 0.92 ms is unexplained
+
+**Card:** none (measurement-only, no default feature changed), plus one doc-fix commit landed
+first. **Worktree/branch:** `proxima-wt-r0`, `docs/r0-residual-census`, off `main` at `25e1eb1`.
+
+**Pre-measurement fix, required before any arm could be trusted.** `classify_kind`
+(`omega/src/metal.rs:1895`) was refactored at `7009602` (`refactor(omega): classify_kind names the
+kind through the type`, already on `main` before this row's base) to delegate four of its five
+arms to `BoundOpKind::name()` (`proxima-tensor/src/bind.rs:347`) instead of restating its own
+string literals. That changed the live kind string for cached-attention from the hyphenated
+`cached-attention` ROW 287's own re-prove commands used to the underscored `cached_attention`
+`BoundOpKind::name()` returns. `KindFilter::matches` (`omega/src/metal.rs:1127`) is a pure
+substring match with no canonical vocabulary of its own and no error path: a filter value that
+matches nothing (the stale hyphenated string) makes `matches` return `false` for every op, so
+`ablation_skip` (`omega/src/metal.rs:1300`) is `true` for every op and the ENTIRE plan is dropped
+-- `encode_dispatch_calls=0`, not the intended single-kind isolation. Verified by dry run before
+trusting any arm: `PROXIMA_METAL_KIND_FILTER=cached-attention` (hyphen) on this checkpoint reads
+`encode_dispatch_calls=0`; `PROXIMA_METAL_KIND_FILTER=cached_attention` (underscore) reads
+`encode_dispatch_calls=32`, matching the isolated-attention count independently derived below.
+Fixed in `f89b7ac` (`fix(omega): kind filter speaks the classifier's names`): a doc-only change
+adding the exact live kind-string enumeration to `KindFilter`'s own doc comment
+(`omega/src/metal.rs:1094`), so a future caller reads the current strings directly off the type
+instead of carrying forward a stale convention from an old ROW's prose. No behavior changed --
+`cargo clippy -p omega --all-targets --features metal,instrument -- -D warnings` EXIT=0,
+`cargo nextest run -p omega --features metal,instrument` 176 tests run, 176 passed, 3 skipped.
+
+**Second drift found the same way, also verified by dry run, not fixed (out of this row's scope):
+`emit_calls` no longer counts what ROW 287 used it for.** ROW 303's per-position pipeline
+resolution split the old single "encoded this op" counter into two: `EMIT_CALLS`
+(`omega/src/metal.rs:3162`, incremented only on a plan-cache MISS inside `encode_op`'s cheap-path
+branch, `omega/src/metal.rs:4441`) and `ENCODE_DISPATCH_CALLS` (`omega/src/metal.rs:3193`,
+incremented on every dispatch regardless of cache hit/miss, `omega/src/metal.rs:4506`). Every run
+in this row reads `emit_calls=0` on every steady step (plan-cache HIT, as expected) and
+`encode_dispatch_calls` as the actual per-step dispatch count -- `encode_dispatch_calls` is this
+row's "filtered dispatch count," not `emit_calls`. Reported as a measured drift, not corrected in
+source: `emit_calls` is doing exactly what ROW 303 intended it to do (count cache misses), the
+drift is only in which counter answers "how many ops dispatched this step," and that is a reader
+question, not a code defect.
+
+**Program composition on this checkpoint differs from ROW 287's:** 520 total dispatches this run
+(reconciles exactly: `cached_attention` 32 + `elementwise` 194 + `iota` 2 + `constant` 2 +
+`reduce-packed-row-blocked` 224 + `reduce-cooperative` 66 = 520), not ROW 287's 616 --
+`reduce-tiled-gemm`, `reduce-generic-scalar`, `reduce-unclassified`, and `keep::scan fold` are
+present in `classify_kind`'s match arms but `encode_dispatch_calls=0` for all four on this
+checkpoint's decode program (confirmed by dry run, one arm per kind, before designing the timing
+sweep) -- reported as measured, not reconciled against ROW 287's op count, which was a different
+checkpoint/build.
+
+**Arm design.** Each arm's `PROXIMA_METAL_KIND_FILTER=!<kind>` -- the COMPLEMENT filter, dropping
+only that one kind's dispatches and keeping every other kind, mirroring ROW 287's own
+`NOT-MATVEC` arm rather than its isolated-kind arms -- so `cost of the kind = FULL - arm` measures
+that kind's own marginal contribution to the full step, not its cost in isolation (an isolated-kind
+arm was also run per kind as a cross-check on dispatch counts only, not used for the cost column).
+Harness: oracle test `bind::real_openchat_file::runs_the_cached_decode_loop_on_the_metal_backend_and_reports_the_plan_cache`,
+release binary invoked directly (the same binary `cargo nextest run --release ... --no-run` builds),
+`PROXIMA_MAX_TOKENS=8`, mean over steady steps 3..7, 3 rounds, quiet gate (`pgrep -l` names-only,
+never `-f`) empty and load-1 2.6-7.4 confirmed before each round.
+
+**ROW 308 table** (`gpu_exec_ms`, steps 3..7 mean, 3 rounds; sorted by cost descending):
+
+| arm (`!<kind>` excluded) | dispatches removed | arm `gpu_exec_ms` mean | CoV | cost of the kind = FULL - arm | % of FULL |
+| --- | --- | --- | --- | --- | --- |
+| FULL (no filter) | 0 | 26.5448 ms | 1.06% | -- | -- |
+| `reduce-packed-row-blocked` (MATVEC) | 224 | 3.9048 ms | 1.87% | 22.6400 ms | 85.29% |
+| `cached_attention` (ATTN) | 32 | 24.3534 ms | 1.11% | 2.1914 ms | 8.26% |
+| `elementwise` (ELEM) | 194 | 25.5111 ms | 0.72% | 1.0337 ms | 3.89% |
+| `reduce-cooperative` (COOP) | 66 | 25.9672 ms | 0.15% | 0.5776 ms | 2.18% |
+| `constant` (CONST) | 2 | 26.8246 ms | 0.51% | -0.2798 ms | -1.05% |
+| `iota` (IOTA) | 2 | 27.0812 ms | 0.83% | -0.5364 ms | -2.02% |
+
+CONST and IOTA's negative costs are noise, not a real speedup from removing 2 dispatches each --
+both sit inside the other arms' own CoV band (0.51%/0.83% vs FULL's 1.06%), and 2 dispatches out of
+520 is far too small a change to move `gpu_exec_ms` by a measurable amount in either direction.
+
+**Reconciliation.** Sum of the six per-kind costs = 22.6400 + 2.1914 + 1.0337 + 0.5776 - 0.2798 -
+0.5364 = 25.6266 ms, against FULL's own 26.5448 ms: **residual = 26.5448 - 25.6266 = 0.9182 ms
+(3.46% of FULL)**, reported as a number only -- this row attributes it to barrier/serialization
+cost and cross-kind overlap (ROW 287 found a comparable small residual, -0.251 ms, from the same
+mechanism: `metal-concurrent-dispatch`'s cross-kind scheduling overlap is not separable by a
+single-kind-removed arm, since removing kind A changes how much B/C/D can overlap with each other
+too) but does not trace it further; the sign here is positive (sum of costs UNDER-counts FULL)
+where ROW 287's was negative, consistent with these being different partitions of the same
+non-linear whole rather than the same effect measured twice.
+
+**MATVEC share vs the streaming-bound estimate, side by side:**
+
+| quantity | value | source |
+| --- | --- | --- |
+| MATVEC's own in-buffer cost (this row) | 22.640 ms (85.29% of FULL) | measured, `!reduce-packed-row-blocked` arm vs FULL |
+| streaming-bound estimate (ROW 296) | 16.879 ms | derived, 4.169 GB / 247 GB/s |
+| ratio, measured cost / streaming-bound | 1.341x | derived from the two rows above |
+
+MATVEC's measured in-buffer cost exceeds the pure streaming-bound estimate by 34%; the gap is not
+decomposed further here (candidates: the 224 barriers this arm's own removal also drops --
+`barriers` falls from 323 (FULL) to 99 when `reduce-packed-row-blocked` is excluded, so 224 of
+FULL's 323 barriers are on MATVEC's own account -- and/or per-dispatch fixed overhead across 224
+dispatches; ROW 296's own ladder already found dispatch/nsg style flat, so this is a residual for
+a later slice, not re-litigated here).
+
+**Order for R1..R4** (this row's stated purpose): MATVEC (85.29%) dwarfs everything else and is
+R5's own subject, not R1-R4's; among the non-matvec kinds this row was scoped to map, ATTN
+(8.26%, 2.19 ms) is the largest, ahead of ELEM (3.89%, 1.03 ms) and COOP (2.18%, 0.58 ms) --
+R1 (`attention-fusion`) is correctly ordered first, R2 (`elementwise-into-epilogue`) second; COOP
+has no assigned slice in the campaign brief and is smaller than either, consistent with not
+getting one.
+
+**Gates** (this row's own worktree, own `CARGO_TARGET_DIR`):
+```
+cargo clippy -p omega --all-targets --features metal,instrument -- -D warnings   EXIT=0
+cargo nextest run -p omega --features metal,instrument                          176 tests run, 176 passed, 3 skipped
+```
+
+**Re-prove:**
+```sh
+cd /Users/brianbruggeman/repos/slot-0/proxima-wt-r0
+CARGO_TARGET_DIR=/Users/brianbruggeman/repos/slot-0/proxima-wt-r0/target CARGO_TERM_COLOR=never \
+  cargo nextest run --release -p proxima-model-interop --features metal,instrument --run-ignored ignored-only --no-run \
+  -E 'test(runs_the_cached_decode_loop_on_the_metal_backend_and_reports_the_plan_cache)'
+BIN=$(find target/release/deps -type f -name 'proxima_model_interop-*' -perm +111 ! -name '*.d' | head -1)
+PROXIMA_MAX_TOKENS=8 "$BIN" --exact --nocapture --ignored \
+  bind::real_openchat_file::runs_the_cached_decode_loop_on_the_metal_backend_and_reports_the_plan_cache   # FULL
+PROXIMA_MAX_TOKENS=8 PROXIMA_METAL_KIND_FILTER='!reduce-packed-row-blocked' "$BIN" --exact --nocapture --ignored \
+  bind::real_openchat_file::runs_the_cached_decode_loop_on_the_metal_backend_and_reports_the_plan_cache   # MATVEC excluded
+```
+Confirm `encode_dispatch_calls=520` on the FULL run and `encode_dispatch_calls=296` on the MATVEC-excluded
+run (520 - 224 = 296) on every one of steps 3..7, and that the quiet gate (`pgrep -l` names-only,
+never `-f`) is empty with load-1 under 10 immediately before each round.
+
+### Changelog
+
+| Date | Change | Δ vs prior | CoV / runs | Host loadout |
+| --- | --- | --- | --- | --- |
+| 2026-09-05 | doc-only: `KindFilter` doc comment now enumerates `classify_kind`'s live kind strings (`f89b7ac`); measurement-only row, no default feature changed | in-buffer per-kind cost: MATVEC 22.640 ms (85.29% of FULL), ATTN 2.191 ms (8.26%), ELEM 1.034 ms (3.89%), COOP 0.578 ms (2.18%), CONST/IOTA noise-negative; reconciliation residual 0.918 ms (3.46% of FULL); MATVEC's measured cost is 1.341x ROW 296's 16.879 ms streaming-bound estimate | 3 interleaved rounds per arm, 7 arms (FULL + 6 `!<kind>` exclusions); all arm CoV 0.15-1.87%, well under 5% | quiet box confirmed via `pgrep -l 'llama-bench\|llama-cli\|proxima_model_i\|device_streamin\|matvec_roofline\|omega-\|^cargo$\|^rustc$\|nextest\|cargo-nextest'` (names-only, never `-f`) empty and load-1 2.6-7.4 before each round; single measurer, no other slice running |
