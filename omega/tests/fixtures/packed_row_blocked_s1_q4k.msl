@@ -82,6 +82,11 @@ static inline float q4k_pair_dot(device const uchar *block, uint iq, uint ir, th
     device const uchar *qs = block + 16;
     // ggml's q1/q2 pointers are uint16_t, so its +32 offset advances 64 bytes.
     uint byte_base = 32u * iq + 8u * ir;
+    // `qs` sits at offset 16 in a 144-byte block (both even), and `byte_base`
+    // is always a multiple of 8, so every `ushort` word below is 2-byte
+    // aligned -- matches ggml's `(device const uint16_t *)qs + 16*iq + 4*ir`.
+    device const ushort *word_low = (device const ushort *)(qs + byte_base);
+    device const ushort *word_high = (device const ushort *)(qs + byte_base + 64u);
     uint low_index = 64u * iq + 8u * ir;
     q4k_header h0 = q4k_header_for(block, low_index);
     q4k_header h1 = q4k_header_for(block, low_index + 32u);
@@ -89,8 +94,8 @@ static inline float q4k_pair_dot(device const uchar *block, uint iq, uint ir, th
     q4k_header h3 = q4k_header_for(block, low_index + 160u);
     float result = 0.0f;
     for (uint i = 0u; i < 4u; ++i) {
-        uint word1 = (uint)qs[byte_base + 2u * i] | ((uint)qs[byte_base + 2u * i + 1u] << 8);
-        uint word2 = (uint)qs[byte_base + 64u + 2u * i] | ((uint)qs[byte_base + 64u + 2u * i + 1u] << 8);
+        uint word1 = (uint)word_low[i];
+        uint word2 = (uint)word_high[i];
         result += (h0.scale * (float)(word1 & 0x0Fu) - h0.minimum) * yl[2u * i + 0u];
         result += (h0.scale * (float)((word1 >> 8) & 0x0Fu) - h0.minimum) * yl[2u * i + 1u];
         result += (h1.scale * (float)((word1 >> 4) & 0x0Fu) - h1.minimum) * yl[2u * i + 8u];
@@ -258,6 +263,13 @@ static inline float q5k_pair_dot(device const uchar *block, uint iq, uint ir, th
     device const uchar *qh = block + 16;
     device const uchar *qs = block + 48;
     uint byte_base = 32u * iq + 8u * ir;
+    // `qs`/`qh` start at offsets 48/16 in a 176-byte block (all multiples of
+    // 8), and `byte_base`/`8*ir` are themselves multiples of 8, so each
+    // `ulong` below reads its 8-byte run of `l` in one 8-byte-aligned load
+    // instead of eight scalar `uchar` loads.
+    ulong q1_word = *(device const ulong *)(qs + byte_base);
+    ulong q2_word = *(device const ulong *)(qs + byte_base + 64u);
+    ulong h_word = *(device const ulong *)(qh + 8u * ir);
     uint low_index = 64u * iq + 8u * ir;
     q5k_header h0 = q5k_header_for(block, low_index);
     q5k_header h1 = q5k_header_for(block, low_index + 32u);
@@ -269,9 +281,9 @@ static inline float q5k_pair_dot(device const uchar *block, uint iq, uint ir, th
     uchar hm4 = (uchar)(hm2 << 4u);
     float result = 0.0f;
     for (uint l = 0u; l < 8u; ++l) {
-        uchar q1 = qs[byte_base + l];
-        uchar q2 = qs[byte_base + 64u + l];
-        uchar h = qh[8u * ir + l];
+        uchar q1 = (uchar)((q1_word >> (8u * l)) & 0xFFu);
+        uchar q2 = (uchar)((q2_word >> (8u * l)) & 0xFFu);
+        uchar h = (uchar)((h_word >> (8u * l)) & 0xFFu);
         float low0 = (float)(q1 & 0x0Fu) + ((h & hm1) != 0u ? 16.0f : 0.0f);
         float low1 = (float)(q1 >> 4u) + ((h & hm2) != 0u ? 16.0f : 0.0f);
         float high0 = (float)(q2 & 0x0Fu) + ((h & hm3) != 0u ? 16.0f : 0.0f);
@@ -328,6 +340,69 @@ static inline float q6k_value(device const uchar *block, uint index, q6k_header 
 // path's `q6k_header_for` decoded once per super-block.
 static inline float q6k_element(device const uchar *block, uint index) {
     return q6k_value(block, index, q6k_header_for(block));
+}
+
+
+static inline float q6k_pair_dot(device const uchar *block, uint iq, uint ir, thread const float *yl, thread const float *yh) {
+    device const uchar *ql = block;
+    device const uchar *qh = block + 128u;
+    device const uchar *scales = block + 192u;
+    q6k_header hdr = q6k_header_for(block);
+
+    uint l_base = 8u * ir;
+    // `l_base` (0/8/16/24) and its +32/+64/+96 siblings are all even, and
+    // `block` itself always lands on an even byte (210-byte stride, always
+    // even) -- so every `ushort` load below is 2-byte aligned. A `uint`
+    // load would need `l_base` 4-byte aligned AND `block` 4-byte aligned;
+    // neither holds for every super-block index, so `ushort` is the
+    // widest load this layout can support unconditionally (see this
+    // constant's own doc).
+    device const ushort *ql_a = (device const ushort *)(ql + l_base);
+    device const ushort *ql_b = (device const ushort *)(ql + 32u + l_base);
+    device const ushort *ql_c = (device const ushort *)(ql + 64u + l_base);
+    device const ushort *ql_d = (device const ushort *)(ql + 96u + l_base);
+    device const ushort *qh_0 = (device const ushort *)(qh + l_base);
+    device const ushort *qh_1 = (device const ushort *)(qh + 32u + l_base);
+
+    uint sub = (l_base < 16u) ? 0u : 1u;
+    float scale_a = (float)(char)scales[sub + 4u * iq];
+    float scale_b = (float)(char)scales[sub + 4u * iq + 2u];
+    float scale_c = (float)(char)scales[8u + sub + 4u * iq];
+    float scale_d = (float)(char)scales[8u + sub + 4u * iq + 2u];
+
+    uint shift_lo = 4u * iq;
+    uint shift_hi = shift_lo + 2u;
+    uchar nibble_shift = (iq == 0u) ? 0u : 4u;
+
+    float result = 0.0f;
+    for (uint w = 0u; w < 4u; ++w) {
+        ushort ql_a_word = ql_a[w];
+        ushort ql_b_word = ql_b[w];
+        ushort ql_c_word = ql_c[w];
+        ushort ql_d_word = ql_d[w];
+        ushort qh_0_word = qh_0[w];
+        ushort qh_1_word = qh_1[w];
+        for (uint bshift = 0u; bshift < 16u; bshift += 8u) {
+            uint i = 2u * w + (bshift / 8u);
+            uchar ql_a_byte = (uchar)((ql_a_word >> bshift) & 0xFFu);
+            uchar ql_b_byte = (uchar)((ql_b_word >> bshift) & 0xFFu);
+            uchar ql_c_byte = (uchar)((ql_c_word >> bshift) & 0xFFu);
+            uchar ql_d_byte = (uchar)((ql_d_word >> bshift) & 0xFFu);
+            uchar qh_0_byte = (uchar)((qh_0_word >> bshift) & 0xFFu);
+            uchar qh_1_byte = (uchar)((qh_1_word >> bshift) & 0xFFu);
+
+            float level_a = (float)(((ql_a_byte >> nibble_shift) & 0x0Fu) | (((qh_0_byte >> shift_lo) & 0x03u) << 4u)) - 32.0f;
+            float level_b = (float)(((ql_b_byte >> nibble_shift) & 0x0Fu) | (((qh_0_byte >> shift_hi) & 0x03u) << 4u)) - 32.0f;
+            float level_c = (float)(((ql_c_byte >> nibble_shift) & 0x0Fu) | (((qh_1_byte >> shift_lo) & 0x03u) << 4u)) - 32.0f;
+            float level_d = (float)(((ql_d_byte >> nibble_shift) & 0x0Fu) | (((qh_1_byte >> shift_hi) & 0x03u) << 4u)) - 32.0f;
+
+            result += (hdr.d * scale_a * level_a) * yl[i];
+            result += (hdr.d * scale_b * level_b) * yl[i + 8u];
+            result += (hdr.d * scale_c * level_c) * yh[i];
+            result += (hdr.d * scale_d * level_d) * yh[i + 8u];
+        }
+    }
+    return result;
 }
 
 
@@ -409,14 +484,23 @@ kernel void omega_reduce_r3_o2_n2_multiply_add_zero(
     uint iq = it / 4u; uint ir = it % 4u;
     float yl[16]; float yh[16];
     int super_blocks = (int)u.reduction_total / 256;
-    for (int ib = (int)ix; ib < super_blocks; ib += 4) {
-        int elem0 = ib * 256 + (int)slot;
-        device const float *y4 = in1 + other_base[0] + (long)ib * 256 * other_stride + (long)(64u * iq + 8u * ir) * other_stride;
+    int ib_first = (int)ix;
+    int ib_step = 4;
+    long blk_step = (long)ib_step * 144;
+    device const uchar *blk_ptr[4];
+    for (int q = 0; q < 4; ++q) {
+        blk_ptr[q] = in0 + ((long)((int)weight_base[q] / 256) + (long)ib_first) * 144;
+    }
+    long y4_step = (long)ib_step * 256;
+    device const float *y4 = in1 + other_base[0] + (long)ib_first * 256 + (long)(64u * iq + 8u * ir);
+    for (int ib = ib_first; ib < super_blocks; ib += ib_step) {
         for (uint i = 0u; i < 8u; ++i) { yl[i] = y4[i]; yl[i + 8u] = y4[i + 32u]; yh[i] = y4[i + 128u]; yh[i + 8u] = y4[i + 160u]; }
         for (int q = 0; q < 4; ++q) {
-            device const uchar *blk = in0 + ((int)weight_base[q] / 256 + ib) * 144;
+            device const uchar *blk = blk_ptr[q];
             sumf[q] = sumf[q] + q4k_pair_dot(blk, iq, ir, yl, yh);
         }
+        for (int q = 0; q < 4; ++q) { blk_ptr[q] += blk_step; }
+        y4 += y4_step;
     }
     for (int q = 0; q < 4; ++q) {
         float reduced = simd_sum(sumf[q]);
