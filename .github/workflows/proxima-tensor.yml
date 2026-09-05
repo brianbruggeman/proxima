@@ -188,6 +188,32 @@ jobs:
         uses: taiki-e/install-action@nextest
       - run: bash scripts/omega-gate.sh
 
+  # Audit finding (2026-09-04): omega carries 13 behavior-changing `metal-*`
+  # flags whose cross-feature correctness dependencies were documented only
+  # in Cargo.toml doc-comment prose -- no gate built any of the combinations.
+  # `omega-gate.sh` above proves the default set and `--all-features`;
+  # `omega-feature-matrix.sh` proves every `metal-*` flag ALONE, the
+  # default-minus-one combinations Cargo's additive features allow, and
+  # names the ones they do not allow. Same macOS-runner justification as
+  # `omega-gate` above: `metal`'s objc2 deps only resolve on
+  # `target_os = "macos"`, and GH's macos-latest runners are real Apple
+  # Silicon, so every cell here compiles and runs rather than being an
+  # unreachable local-only lane.
+  omega-feature-matrix:
+    name: omega-feature-matrix.sh (macos-latest)
+    needs: changes
+    if: needs.changes.outputs.tensor == 'true'
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: install nextest
+        uses: taiki-e/install-action@nextest
+      - run: bash scripts/omega-feature-matrix.sh
+
   # Compare-bench (Metal vs CPU, same evaluator). Smoke-runs the incumbent
   # bench so it can never again sit registered-but-unexecuted; `--quick`
   # keeps CI fast and, like proxima-telemetry's compare-bench job, this
