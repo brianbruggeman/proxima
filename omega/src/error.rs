@@ -126,9 +126,10 @@ pub enum EmitError {
 
     /// A cooperative-reduce combine helper (`shuffle_combine_expr`/
     /// `cooperative_identity_token`/`subgroup_combine_fn` across the cuda and
-    /// wgsl backends) reached with a `reduce_op` its own caller's
-    /// `is_cooperative_reduce_op`/`reduce_is_cooperative` gate should have
-    /// excluded already -- the same internal-contract class as
+    /// wgsl backends, and `simd_combine_fn`/`cooperative_identity_token` here
+    /// in the metal `msl` backend) reached with a `reduce_op` its own
+    /// caller's `is_cooperative_reduce_op`/`reduce_is_cooperative` gate
+    /// should have excluded already -- the same internal-contract class as
     /// [`Self::RenderKindMismatch`], scoped to the op axis instead of the
     /// kind axis, so it earns its own variant rather than overloading that
     /// one with an unrelated `found` field.
@@ -136,4 +137,33 @@ pub enum EmitError {
         "node {node} reached a cooperative-reduce combine with op {op}, which is not associative-commutative"
     )]
     NonCooperativeReduceOp { node: NodeId, op: &'static str },
+
+    /// `classify_packed_row_block`'s `NotKQuantCodec` gate already rejects
+    /// `PackedCodec::Q8_0`/`PackedCodec::Q4_0`/`PackedCodec::Float16`/
+    /// `PackedCodec::BFloat16` before `packed_row_block` can ever return
+    /// `Some` for one of them, so the row-blocked body's per-codec match
+    /// never legitimately reaches one of these four arms.
+    #[error("node {node} packed operand codec {codec} never reaches the row-blocked path")]
+    NonKQuantPackedCodec { node: NodeId, codec: &'static str },
+
+    /// `classify_tiled_gemm`'s own `token_axes.is_empty() ||
+    /// feature_axes.is_empty()` gate already rejects an empty group before
+    /// returning `Some`, so `crate::msl::push_tiled_gemm_body` never
+    /// legitimately observes an empty `group`.
+    #[error("node {node} tiled-GEMM {group} axis group is empty")]
+    EmptyAxisGroup { node: NodeId, group: &'static str },
+
+    /// `classify_tiled_gemm` builds `token_axes`/`feature_axes` as a subset
+    /// of `output_axes` by construction, so every axis in either group is
+    /// guaranteed to appear in `output_axes` when the render side looks it
+    /// back up.
+    #[error("node {node} tiled-GEMM axis {axis} is not one of the op's output axes")]
+    AxisNotInOutputAxes { node: NodeId, axis: u16 },
+
+    /// `classify_tiled_gemm`'s `#[cfg(not(feature = "metal-tiled-gemm"))]`
+    /// arm always returns `Err(TiledGemmRejection::FeatureDisabled)`, so no
+    /// caller in that build ever holds a `TiledGemmBlock` to render or
+    /// dispatch threadgroups for.
+    #[error("node {node} reached the tiled-GEMM path without the metal-tiled-gemm feature")]
+    TiledGemmFeatureDisabled { node: NodeId },
 }
