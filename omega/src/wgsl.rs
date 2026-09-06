@@ -500,6 +500,10 @@ fn entry_name(resolved: &BoundOp, packed_operands: &PackedOperands) -> String {
         resolved,
         packed_operands,
         crate::identity::MetalOnlyExtras::default(),
+        // Wgpu has no `BoundOpKind::CachedAttention` renderer either (same
+        // `fuse_cached_attention: false` call in `wgpu_driver.rs`), so a
+        // policy value never actually varies this identity string.
+        proxima_tensor::NumericPolicy::default(),
     )
 }
 

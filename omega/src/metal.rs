@@ -212,9 +212,9 @@ use objc2_metal::{MTLCounterSampleBuffer, MTLCounterSet};
 #[cfg(feature = "instrument")]
 use proxima_tensor::instrument::{elapsed_ticks, read_ticks, ticks_to_nanos};
 use proxima_tensor::{
-    BoundOp, BoundOpKind, DType, Evaluated, Keep, Lookup, NodeId, Op, QuantizedBlock, Shapes,
-    TensorError, bind, block_node_ids, correct_packed_matmul_layouts, index_node_ids, infer,
-    node_retirement, prune_dead, resolve_named_blocks,
+    BoundOp, BoundOpKind, DType, Evaluated, Keep, Lookup, NodeId, NumericPolicy, Op,
+    QuantizedBlock, Shapes, TensorError, bind, block_node_ids, correct_packed_matmul_layouts,
+    index_node_ids, infer, node_retirement, prune_dead, resolve_named_blocks,
 };
 
 use crate::error::EmitError;
@@ -400,6 +400,16 @@ pub struct Plan {
     /// caller overrides it with [`Plan::set_math_mode`]. See [`MathMode`]'s
     /// own doc for the measured rationale.
     math_mode: MathMode,
+    /// Which bit-changing rewrites `msl::context_chunks_for` (the
+    /// cross-simdgroup attention context-chunk merge) may apply --
+    /// `NumericPolicy::ReassociationPermitted` until a caller overrides it
+    /// with [`Plan::set_numeric_policy`]. Default matches this plan's own
+    /// pre-existing, always-on chunk merge exactly (no silent behavior
+    /// change); [`Plan::set_math_mode`] narrows into this field too, so the
+    /// two axes never drift the way an unconsulted `is_associative` call
+    /// would (`proxima_tensor::op::ScalarOp::is_associative`'s only caller
+    /// today is a dtype accumulator-width check, not a reassociation gate).
+    numeric_policy: NumericPolicy,
     /// Which [`MTLDispatchType`] [`execute_plan_with_placements`] opens its
     /// compute encoder with -- [`DispatchType::default`] (`Concurrent`)
     /// until a caller overrides it with [`Plan::set_dispatch_type`]. See
@@ -628,8 +638,45 @@ impl Plan {
     /// `pipeline_for`'s cache key folds the mode in, so switching a plan's
     /// mode between calls never hands back a pipeline compiled for the
     /// other one.
+    ///
+    /// [`MathMode`] is a 3-rung compiler flag; [`NumericPolicy`] is the
+    /// richer, orthogonal axis this plan actually gates rewrites on (see
+    /// [`Self::set_numeric_policy`]). This narrows the legacy 3-rung call
+    /// into the canonical representative point on that richer axis --
+    /// `Safe -> BitExact`, `Relaxed -> FusedNoReassociation`, `Fast ->
+    /// ReassociationPermitted` (the conservative pick between
+    /// `ReassociationPermitted`/`FastMath`, both of which compile under
+    /// `Fast`) -- so a caller using only the old API still gets the numeric
+    /// gate its intent implies, never a silent mismatch between the two
+    /// fields.
     pub fn set_math_mode(&mut self, math_mode: MathMode) {
         self.math_mode = math_mode;
+        self.numeric_policy = match math_mode {
+            MathMode::Safe => NumericPolicy::BitExact,
+            MathMode::Relaxed => NumericPolicy::FusedNoReassociation,
+            MathMode::Fast => NumericPolicy::ReassociationPermitted,
+        };
+    }
+
+    /// Overrides this plan's [`NumericPolicy`] from
+    /// `NumericPolicy::ReassociationPermitted` (this plan's pre-existing,
+    /// always-on context-chunk-merge behavior). The primary setter for the
+    /// numeric axis -- [`Self::set_math_mode`] is a narrower legacy
+    /// convenience over the same field. Also narrows `math_mode` via
+    /// [`numeric_policy_as_metal_math_mode`], so [`Self::math_mode`] always
+    /// reflects the last setter called, whichever axis a caller used.
+    pub fn set_numeric_policy(&mut self, numeric_policy: NumericPolicy) {
+        self.numeric_policy = numeric_policy;
+        self.math_mode = numeric_policy_as_metal_math_mode(numeric_policy);
+    }
+
+    /// This plan's currently applied [`NumericPolicy`] -- the read side of
+    /// [`Self::set_numeric_policy`]/[`Self::set_math_mode`], consulted by
+    /// `msl::context_chunks_for` before it reassociates the cross-simdgroup
+    /// attention merge.
+    #[must_use]
+    pub fn numeric_policy(&self) -> NumericPolicy {
+        self.numeric_policy
     }
 
     /// Overrides this plan's [`DispatchType`] from [`DispatchType::default`]
@@ -737,8 +784,13 @@ impl Plan {
             .resolved
             .iter()
             .map(|bound| {
-                kernel_cache_key(bound, &self.packed_operands, self.math_mode.cache_token())
-                    .map_err(MetalError::from)
+                kernel_cache_key(
+                    bound,
+                    &self.packed_operands,
+                    self.math_mode.cache_token(),
+                    self.numeric_policy,
+                )
+                .map_err(MetalError::from)
             })
             .collect()
     }
@@ -811,6 +863,7 @@ pub fn plan(
         block_dtypes,
         resident_nodes: BTreeSet::new(),
         math_mode: MathMode::default(),
+        numeric_policy: NumericPolicy::ReassociationPermitted,
         dispatch_type: DispatchType::default(),
         #[cfg(feature = "instrument")]
         encoder_split_at: None,
@@ -975,6 +1028,7 @@ pub fn execute_plan(plan: &Plan, blocks: &[QuantizedBlock<'_>]) -> Result<Evalua
             None,
             None,
             plan.math_mode,
+            plan.numeric_policy,
             None,
         )?;
         if let Some((fault_buffer, gathers)) = fault {
@@ -1821,7 +1875,8 @@ pub fn execute_plan_with_placements(
                 let bindings_for_hazard: &[Binding] = match resolved_step {
                     Some(step) => step.bindings.as_slice(),
                     None => {
-                        let (bindings, _grid) = kernel_dispatch_shape(bound, packed_operands)?;
+                        let (bindings, _grid) =
+                            kernel_dispatch_shape(bound, packed_operands, plan.numeric_policy)?;
                         owned_bindings = bindings;
                         owned_bindings.as_slice()
                     }
@@ -1883,6 +1938,7 @@ pub fn execute_plan_with_placements(
                 uniform_buffer,
                 uniform_scratch,
                 plan.math_mode,
+                plan.numeric_policy,
                 resolved_step,
             )?;
             if let Some((fault_buffer, gathers)) = fault {
@@ -2073,6 +2129,7 @@ fn execute_op_timed(
     plan_uniform: Option<&MetalBuffer>,
     always_live: &BTreeSet<NodeId>,
     math_mode: MathMode,
+    numeric_policy: NumericPolicy,
 ) -> Result<OpGpuTiming, MetalError> {
     // this operand's own TENSOR bytes, not the shared buffer's `length()` --
     // see `operand_tensor_bytes`'s own doc: a checkpoint-mapping-offset bind
@@ -2136,6 +2193,7 @@ fn execute_op_timed(
         plan_uniform,
         None,
         math_mode,
+        numeric_policy,
         None,
     )?;
     encoder.endEncoding();
@@ -2247,6 +2305,7 @@ pub fn execute_plan_op_timed(
             None,
             &no_placements,
             plan.math_mode,
+            plan.numeric_policy,
         )?;
         timings.push(timing);
     }
@@ -2376,6 +2435,7 @@ pub fn execute_plan_with_placements_op_timed(
             uniform_buffer,
             &always_live,
             plan.math_mode,
+            plan.numeric_policy,
         )?;
         timings.push(timing);
     }
@@ -2771,6 +2831,7 @@ pub fn execute_plan_with_placements_dispatch_timed(
             uniform_buffer,
             None,
             plan.math_mode,
+            plan.numeric_policy,
             None,
         )?;
         if dispatch_boundary {
@@ -2992,7 +3053,7 @@ fn classify_kind(bound: &BoundOp, packed_operands: &PackedOperands) -> &'static 
         } => bound.kind.name(),
         BoundOpKind::Reduce {
             keep: Keep::Reduce, ..
-        } => match emit(bound, packed_operands) {
+        } => match emit(bound, packed_operands, NumericPolicy::default()) {
             // Checked BEFORE the row-blocked arm below: ROW 113's
             // weight-staging fix made `push_tiled_gemm_body` call
             // `q4k_run8`/`q4k_header_for` too (the same amortized decode
@@ -3048,7 +3109,7 @@ fn classify_packed_kernel_variant(
     bound: &BoundOp,
     packed_operands: &PackedOperands,
 ) -> &'static str {
-    let Ok(kernel) = emit(bound, packed_operands) else {
+    let Ok(kernel) = emit(bound, packed_operands, NumericPolicy::default()) else {
         return "unclassified";
     };
     if kernel.source.contains("q4k_pair_dot(blk") {
@@ -3605,9 +3666,9 @@ fn pack_uniforms_byte_len(bound: &BoundOp) -> usize {
     }
 }
 
-fn pack_uniforms(bound: &BoundOp) -> Result<Vec<u8>, EmitError> {
+fn pack_uniforms(bound: &BoundOp, numeric_policy: NumericPolicy) -> Result<Vec<u8>, EmitError> {
     let mut bytes = Vec::new();
-    pack_uniforms_into(bound, &mut bytes)?;
+    pack_uniforms_into(bound, numeric_policy, &mut bytes)?;
     Ok(bytes)
 }
 
@@ -3617,10 +3678,16 @@ fn pack_uniforms(bound: &BoundOp) -> Result<Vec<u8>, EmitError> {
 /// packing allocates nothing (ROW 303's residual). `scratch` is cleared, not
 /// reallocated, so only the first call against a given buffer (or a call
 /// whose bytes grow past its previous capacity) ever allocates.
-fn pack_uniforms_into(bound: &BoundOp, scratch: &mut Vec<u8>) -> Result<(), EmitError> {
+fn pack_uniforms_into(
+    bound: &BoundOp,
+    numeric_policy: NumericPolicy,
+    scratch: &mut Vec<u8>,
+) -> Result<(), EmitError> {
     scratch.clear();
     match &bound.kind {
-        BoundOpKind::CachedAttention { .. } => pack_cached_attention_uniforms(bound, scratch),
+        BoundOpKind::CachedAttention { .. } => {
+            pack_cached_attention_uniforms(bound, numeric_policy, scratch)
+        }
         BoundOpKind::Elementwise { .. } => {
             pack_elementwise_uniforms(bound, scratch);
             Ok(())
@@ -3652,8 +3719,8 @@ mod pack_uniforms_byte_len_tests {
     use alloc::vec::Vec;
 
     use proxima_tensor::{
-        BoundOp, BoundOpKind, DType, Extent, IndexMap, Keep, Op, Reduce, ReduceInit, ScalarOp,
-        append, bind, infer, map,
+        BoundOp, BoundOpKind, DType, Extent, IndexMap, Keep, NumericPolicy, Op, Reduce,
+        ReduceInit, ScalarOp, append, bind, infer, map,
     };
 
     use super::{pack_uniforms, pack_uniforms_byte_len};
@@ -3754,7 +3821,7 @@ mod pack_uniforms_byte_len_tests {
             matches!(bound.kind, BoundOpKind::Elementwise { .. }),
             "fixture must actually lower to an Elementwise BoundOp"
         );
-        assert_eq!(pack_uniforms_byte_len(&bound), pack_uniforms(&bound).expect("packs uniforms").len());
+        assert_eq!(pack_uniforms_byte_len(&bound), pack_uniforms(&bound, NumericPolicy::default()).expect("packs uniforms").len());
     }
 
     #[test]
@@ -3770,11 +3837,15 @@ mod pack_uniforms_byte_len_tests {
             ),
             "fixture must actually lower to a Keep::Reduce BoundOp"
         );
-        assert_eq!(pack_uniforms_byte_len(&bound), pack_uniforms(&bound).expect("packs uniforms").len());
+        assert_eq!(pack_uniforms_byte_len(&bound), pack_uniforms(&bound, NumericPolicy::default()).expect("packs uniforms").len());
     }
 }
 
-fn pack_cached_attention_uniforms(bound: &BoundOp, bytes: &mut Vec<u8>) -> Result<(), EmitError> {
+fn pack_cached_attention_uniforms(
+    bound: &BoundOp,
+    numeric_policy: NumericPolicy,
+    bytes: &mut Vec<u8>,
+) -> Result<(), EmitError> {
     let BoundOpKind::CachedAttention {
         head_dim,
         cached_key_rows,
@@ -3788,7 +3859,8 @@ fn pack_cached_attention_uniforms(bound: &BoundOp, bytes: &mut Vec<u8>) -> Resul
             found: bound.kind.name(),
         });
     };
-    let chunks = crate::msl::context_chunks_for(*cached_key_rows + *new_key_rows) as i64;
+    let chunks =
+        crate::msl::context_chunks_for(*cached_key_rows + *new_key_rows, numeric_policy) as i64;
     let total: i64 = bound
         .extents
         .iter()
@@ -3992,6 +4064,29 @@ impl MathMode {
     }
 }
 
+/// `MTLCompileOptions.mathMode` only distinguishes 3 rungs -- a compiler
+/// flag governing how the SAME algebra compiles. [`NumericPolicy`] governs a
+/// richer, orthogonal question: which algebra `bind`/the emitter are
+/// permitted to choose in the first place (chunk count, contraction,
+/// reduction order). [`MathMode`] is this narrower projection, not a
+/// duplicate ladder -- `ReassociationPermitted` and `FastMath` both compile
+/// under Metal's `Fast`, since Metal has no rung between them. A free
+/// function, not an inherent `impl NumericPolicy` -- `NumericPolicy` is
+/// defined in `proxima-tensor`, and the orphan rule forbids an inherent
+/// `impl` for a foreign type from this crate.
+#[must_use]
+const fn numeric_policy_as_metal_math_mode(policy: NumericPolicy) -> MathMode {
+    match policy {
+        NumericPolicy::BitExact => MathMode::Safe,
+        NumericPolicy::FusedNoReassociation => MathMode::Relaxed,
+        // `ReassociationPermitted | FastMath`, and any rung a future,
+        // non-exhaustive addition to `NumericPolicy` introduces above them on
+        // the ladder -- Metal has no rung past `Fast`, so everything at or
+        // above `ReassociationPermitted` compiles under it.
+        _ => MathMode::Fast,
+    }
+}
+
 /// [`MTLComputeCommandEncoder`]'s dispatch-scheduling mode, narrowed to the
 /// two values [`objc2_metal::MTLDispatchType`] exposes to a compute encoder.
 /// A [`Plan`] carries one of these ([`Plan::set_dispatch_type`]); it decides
@@ -4109,6 +4204,7 @@ fn pipeline_for(
     packed_operands: &PackedOperands,
     cache_key: &str,
     math_mode: MathMode,
+    numeric_policy: NumericPolicy,
 ) -> Result<Retained<ProtocolObject<dyn MTLComputePipelineState>>, MetalError> {
     // `cache_key` ([`kernel_cache_key`]) already carries the math-mode token
     // as part of the shared identity (`crate::identity::kernel_identity`,
@@ -4128,7 +4224,7 @@ fn pipeline_for(
     trace!(cache_key = %cache_key, hit = false, "pipeline cache lookup");
     #[cfg(feature = "instrument")]
     let compile_started = read_ticks();
-    let kernel = emit(bound, packed_operands)?;
+    let kernel = emit(bound, packed_operands, numeric_policy)?;
     let pipeline = compile_pipeline(device, &kernel, math_mode)?;
     #[cfg(feature = "instrument")]
     {
@@ -5797,10 +5893,11 @@ struct PlanUniforms {
 fn build_plan_uniforms(
     device: &ProtocolObject<dyn MTLDevice>,
     resolved: &[BoundOp],
+    numeric_policy: NumericPolicy,
 ) -> Result<PlanUniforms, MetalError> {
     let mut buffers = Vec::with_capacity(resolved.len());
     for bound in resolved {
-        let bytes = pack_uniforms(bound)?;
+        let bytes = pack_uniforms(bound, numeric_policy)?;
         let buffer = device
             .newBufferWithLength_options(bytes.len().max(1), MTLResourceOptions::StorageModeShared)
             .ok_or_else(|| MetalError::CompileFailed {
@@ -5886,7 +5983,7 @@ fn arena_placement(_plan: &Plan, _position: usize) -> Result<Option<(&MetalBuffe
 fn plan_uniform_buffer(plan: &Plan, position: usize) -> Result<Option<&MetalBuffer>, MetalError> {
     if plan.uniforms.get().is_none() {
         let (device, _queue) = device_and_queue()?;
-        let uniforms = build_plan_uniforms(&device, &plan.prepared.resolved)?;
+        let uniforms = build_plan_uniforms(&device, &plan.prepared.resolved, plan.numeric_policy)?;
         let _ = plan.uniforms.set(uniforms);
     }
     Ok(plan.uniforms.get().map(|uniforms| &uniforms.buffers[position]))
@@ -5914,10 +6011,22 @@ fn resolve_steps(device: &ProtocolObject<dyn MTLDevice>, plan: &Plan) -> Result<
     }
     let mut steps = Vec::with_capacity(plan.prepared.resolved.len());
     for bound in &plan.prepared.resolved {
-        let cache_key =
-            kernel_cache_key(bound, &plan.packed_operands, plan.math_mode.cache_token())?;
-        let (bindings, grid) = kernel_dispatch_shape(bound, &plan.packed_operands)?;
-        let pipeline = pipeline_for(device, bound, &plan.packed_operands, &cache_key, plan.math_mode)?;
+        let cache_key = kernel_cache_key(
+            bound,
+            &plan.packed_operands,
+            plan.math_mode.cache_token(),
+            plan.numeric_policy,
+        )?;
+        let (bindings, grid) =
+            kernel_dispatch_shape(bound, &plan.packed_operands, plan.numeric_policy)?;
+        let pipeline = pipeline_for(
+            device,
+            bound,
+            &plan.packed_operands,
+            &cache_key,
+            plan.math_mode,
+            plan.numeric_policy,
+        )?;
         steps.push(ResolvedStep {
             pipeline,
             bindings,
@@ -5973,6 +6082,7 @@ fn encode_op(
     // arm below.
     uniform_scratch: Option<&RefCell<Vec<u8>>>,
     math_mode: MathMode,
+    numeric_policy: NumericPolicy,
     resolved: Option<&ResolvedStep>,
 ) -> Result<Option<(MetalBuffer, usize)>, MetalError> {
     // read only inside the `metal-plan-stable-buffers` arm below -- named
@@ -5998,8 +6108,9 @@ fn encode_op(
         // case, `plan_hits`/`gpu_exec`'s own row) `emit` itself is never
         // called; only a genuine miss inside `pipeline_for` pays for the
         // full render + compile.
-        let cache_key = kernel_cache_key(bound, packed_operands, math_mode.cache_token())?;
-        let (bindings, grid) = kernel_dispatch_shape(bound, packed_operands)?;
+        let cache_key =
+            kernel_cache_key(bound, packed_operands, math_mode.cache_token(), numeric_policy)?;
+        let (bindings, grid) = kernel_dispatch_shape(bound, packed_operands, numeric_policy)?;
         #[cfg(feature = "instrument")]
         {
             counter!(EMIT_CALLS, 1);
@@ -6007,7 +6118,8 @@ fn encode_op(
         }
         #[cfg(feature = "instrument")]
         let pipeline_started = read_ticks();
-        let pipeline = pipeline_for(device, bound, packed_operands, &cache_key, math_mode)?;
+        let pipeline =
+            pipeline_for(device, bound, packed_operands, &cache_key, math_mode, numeric_policy)?;
         #[cfg(feature = "instrument")]
         {
             counter!(PIPELINE_LOOKUP_CALLS, 1);
@@ -6039,16 +6151,18 @@ fn encode_op(
                 match uniform_scratch {
                     Some(scratch) => {
                         let mut bytes = scratch.borrow_mut();
-                        pack_uniforms_into(bound, &mut bytes)?;
+                        pack_uniforms_into(bound, numeric_policy, &mut bytes)?;
                         write_plan_uniform_bytes(buffer, &bytes);
                     }
-                    None => write_plan_uniform_bytes(buffer, &pack_uniforms(bound)?),
+                    None => {
+                        write_plan_uniform_bytes(buffer, &pack_uniforms(bound, numeric_policy)?)
+                    }
                 }
                 counter!(PLAN_UNIFORM_WRITES, 1);
             }
             buffer.clone()
         }
-        None => upload_uniforms(device, &pack_uniforms(bound)?)?,
+        None => upload_uniforms(device, &pack_uniforms(bound, numeric_policy)?)?,
     };
     let gathers = gather_count(bound);
     let fault = (gathers > 0)
@@ -6643,7 +6757,8 @@ mod arena_tests {
 
     use objc2_metal::MTLDevice;
     use proxima_tensor::{
-        DType, Extent, IndexMap, NodeId, Op, QuantizedBlock, ScalarOp, append, cpu, projection,
+        DType, Extent, IndexMap, NodeId, NumericPolicy, Op, QuantizedBlock, ScalarOp, append, cpu,
+        projection,
     };
 
     use super::{
@@ -7073,8 +7188,8 @@ mod arena_tests {
         let stage_zero_bound = &resolved_plan.prepared.resolved[position_of(stage_zero)];
         let stage_two_bound = &resolved_plan.prepared.resolved[position_of(stage_two)];
         assert_eq!(
-            super::pack_uniforms(stage_zero_bound).expect("packs uniforms"),
-            super::pack_uniforms(stage_two_bound).expect("packs uniforms"),
+            super::pack_uniforms(stage_zero_bound, NumericPolicy::default()).expect("packs uniforms"),
+            super::pack_uniforms(stage_two_bound, NumericPolicy::default()).expect("packs uniforms"),
             "degenerate gate: the two ops must genuinely pack identical uniform bytes"
         );
 
@@ -7257,7 +7372,8 @@ mod hazard_tracker_tests {
     use std::collections::BTreeMap;
 
     use proxima_tensor::{
-        Extent, IndexMap, Keep, Op, Reduce, ReduceInit, ScalarOp, append, bind, infer, projection,
+        Extent, IndexMap, Keep, NumericPolicy, Op, Reduce, ReduceInit, ScalarOp, append, bind,
+        infer, projection,
     };
 
     use super::{
@@ -7534,7 +7650,8 @@ mod hazard_tracker_tests {
         let mut barrier_by_node = std::collections::BTreeMap::new();
         for bound in &resolved {
             let (bindings, _grid) =
-                kernel_dispatch_shape(bound, &packed_operands).expect("fixture ops emit a shape");
+                kernel_dispatch_shape(bound, &packed_operands, NumericPolicy::default())
+                    .expect("fixture ops emit a shape");
             let reads: Vec<NodeId> = hazard_read_nodes(&bindings).collect();
             let write = hazard_write_node(&bindings).expect("every bound op writes one node");
             barrier_by_node.insert(bound.node, hazard_step(&mut hazards, &reads, write));

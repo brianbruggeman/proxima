@@ -66,8 +66,8 @@ use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
 use proxima_tensor::{
-    BoundOp, BoundOpKind, ComposedBody, DType, Keep, Layout, Lookup, NodeId, ReduceInit, ScalarOp,
-    StepArg,
+    BoundOp, BoundOpKind, ComposedBody, DType, Keep, Layout, Lookup, NodeId, NumericPolicy,
+    NumericRewrite, ReduceInit, ScalarOp, StepArg, admit,
 };
 
 use crate::error::EmitError;
@@ -172,7 +172,7 @@ pub struct GridSpec {
 /// // no packed (quantized/half-precision) operand in this program, so an
 /// // empty codec table is exactly right -- see `PackedOperands`'s own doc.
 /// let packed_operands = omega::PackedOperands::new();
-/// let kernel = omega::emit(&bound_ops[0], &packed_operands)?;
+/// let kernel = omega::emit(&bound_ops[0], &packed_operands, NumericPolicy::default())?;
 /// assert!(kernel.source.contains("kernel void"));
 /// assert!(kernel.source.contains("tanh("));
 /// assert_eq!(kernel.bindings.len(), 3); // one input, one output, uniforms
@@ -1164,12 +1164,18 @@ impl PackedCodec {
 /// before Q6_K support existed.
 pub type PackedOperands = BTreeMap<NodeId, PackedCodec>;
 
-pub fn emit(resolved: &BoundOp, packed_operands: &PackedOperands) -> Result<Kernel, EmitError> {
+pub fn emit(
+    resolved: &BoundOp,
+    packed_operands: &PackedOperands,
+    numeric_policy: NumericPolicy,
+) -> Result<Kernel, EmitError> {
     validate(resolved)?;
     let entry = entry_name(resolved);
     let quantized = operand_codecs(resolved, packed_operands);
     let source = match &resolved.kind {
-        BoundOpKind::CachedAttention { .. } => render_cached_attention(resolved, &entry),
+        BoundOpKind::CachedAttention { .. } => {
+            render_cached_attention(resolved, &entry, numeric_policy)
+        }
         BoundOpKind::Elementwise { .. } => render_elementwise(resolved, &entry, &quantized),
         BoundOpKind::Reduce {
             keep: Keep::Reduce, ..
@@ -1185,8 +1191,8 @@ pub fn emit(resolved: &BoundOp, packed_operands: &PackedOperands) -> Result<Kern
         entry,
         bindings: bindings(resolved),
         grid: GridSpec {
-            threads: grid_threads(resolved, &quantized)?,
-            threadgroup_width: tiled_gemm_threadgroup_width(resolved, &quantized),
+            threads: grid_threads(resolved, &quantized, numeric_policy)?,
+            threadgroup_width: tiled_gemm_threadgroup_width(resolved, &quantized, numeric_policy),
         },
     })
 }
@@ -1318,6 +1324,7 @@ pub(crate) fn kernel_cache_key(
     resolved: &BoundOp,
     packed_operands: &PackedOperands,
     math_mode_token: char,
+    numeric_policy: NumericPolicy,
 ) -> Result<String, EmitError> {
     // Called for its unsupported-dtype rejection alone -- `kernel_identity`
     // reads `resolved.dtype` directly for the actual half/wide classing (the
@@ -1328,7 +1335,7 @@ pub(crate) fn kernel_cache_key(
     type_token(resolved.node, resolved.dtype)?;
     let quantized = operand_codecs(resolved, packed_operands);
     let extras = crate::identity::MetalOnlyExtras {
-        cooperative_width: tiled_gemm_threadgroup_width(resolved, &quantized),
+        cooperative_width: tiled_gemm_threadgroup_width(resolved, &quantized, numeric_policy),
         packed_row_block_shape: Some(packed_row_block_shape_token(resolved, &quantized)),
         packed_row_block_stride_is_one: packed_row_block_stride_is_one(resolved, &quantized),
         packed_row_block_direct_axis: packed_row_block_direct_axis(resolved, &quantized),
@@ -1339,6 +1346,7 @@ pub(crate) fn kernel_cache_key(
         resolved,
         packed_operands,
         extras,
+        numeric_policy,
     ))
 }
 
@@ -1363,14 +1371,15 @@ pub(crate) fn kernel_cache_key(
 pub(crate) fn kernel_dispatch_shape(
     resolved: &BoundOp,
     packed_operands: &PackedOperands,
+    numeric_policy: NumericPolicy,
 ) -> Result<(Vec<Binding>, GridSpec), EmitError> {
     validate(resolved)?;
     let quantized = operand_codecs(resolved, packed_operands);
     Ok((
         bindings(resolved),
         GridSpec {
-            threads: grid_threads(resolved, &quantized)?,
-            threadgroup_width: tiled_gemm_threadgroup_width(resolved, &quantized),
+            threads: grid_threads(resolved, &quantized, numeric_policy)?,
+            threadgroup_width: tiled_gemm_threadgroup_width(resolved, &quantized, numeric_policy),
         },
     ))
 }
@@ -2299,7 +2308,11 @@ fn packed_row_dispatch(feature_total: u64, token_total: u64, codec: PackedCodec)
     (base * token_groups, split)
 }
 
-fn grid_threads(resolved: &BoundOp, quantized: &[Option<PackedCodec>]) -> Result<u64, EmitError> {
+fn grid_threads(
+    resolved: &BoundOp,
+    quantized: &[Option<PackedCodec>],
+    numeric_policy: NumericPolicy,
+) -> Result<u64, EmitError> {
     let threads = match &resolved.kind {
         BoundOpKind::CachedAttention {
             head_dim,
@@ -2307,7 +2320,7 @@ fn grid_threads(resolved: &BoundOp, quantized: &[Option<PackedCodec>]) -> Result
             new_key_rows,
             ..
         } => {
-            let chunks = context_chunks_for(*cached_key_rows + *new_key_rows);
+            let chunks = context_chunks_for(*cached_key_rows + *new_key_rows, numeric_policy);
             resolved
                 .extents
                 .iter()
@@ -2953,7 +2966,20 @@ fn msl_literal(value: f32) -> String {
 /// configurable but bind-time-deterministic function of shape alone --
 /// never a runtime read. See `omega-runtime.toml`'s
 /// `[attention_context_chunks]` for the two knobs.
-pub(crate) fn context_chunks_for(context_length: u64) -> u64 {
+///
+/// A chunk count above 1 folds partial online-softmax state across
+/// simdgroups (`render_cached_attention`'s cross-simdgroup merge) -- a
+/// reassociation of the reduce, [`NumericRewrite::ContextChunkMerge`].
+/// `policy` gates it: below [`NumericPolicy::ReassociationPermitted`],
+/// [`admit`] rejects the rewrite and this falls back to `1` (the single-pass
+/// kernel `render_cached_attention` already renders for that case) rather
+/// than failing the whole plan -- the same "reject/fallback at bind time"
+/// shape `fuse_cached_attention: false` gives wgpu/cuda
+/// (`proxima_tensor::bind::bind_with_fusion`'s own doc).
+pub(crate) fn context_chunks_for(context_length: u64, policy: NumericPolicy) -> u64 {
+    if admit(policy, NumericRewrite::ContextChunkMerge).is_err() {
+        return 1;
+    }
     context_length
         .div_ceil(crate::sized::ATTENTION_CONTEXT_KEYS_PER_CHUNK)
         .clamp(1, crate::sized::ATTENTION_CONTEXT_CHUNK_CAP)
@@ -2977,7 +3003,11 @@ pub(crate) fn context_chunks_for(context_length: u64) -> u64 {
 /// cross-simdgroup merge below, when `context_chunks > 1` splits one
 /// `(query_row, kv_head, group)` triple's key range across simdgroups that
 /// must combine their partial online-softmax state afterward.
-fn render_cached_attention(resolved: &BoundOp, entry: &str) -> Result<String, EmitError> {
+fn render_cached_attention(
+    resolved: &BoundOp,
+    entry: &str,
+    numeric_policy: NumericPolicy,
+) -> Result<String, EmitError> {
     let BoundOpKind::CachedAttention {
         query_rows,
         cached_key_rows,
@@ -3046,7 +3076,7 @@ fn render_cached_attention(resolved: &BoundOp, entry: &str) -> Result<String, Em
     // `query_row` -- see this function's doc. `tid`/`group_width` below are
     // therefore derivable from the existing `group`/`lane` split without a
     // new `[[thread_position_in_threadgroup]]` kernel parameter.
-    let context_chunks = context_chunks_for(*cached_key_rows + *new_key_rows);
+    let context_chunks = context_chunks_for(*cached_key_rows + *new_key_rows, numeric_policy);
     if context_chunks <= 1 {
         source.push_str("    long vector_index = (long)gid / 32L; uint lane = gid % 32u;\n    if (vector_index >= u.total_elements) { return; }\n    long query_index = vector_index;\n    long query_row = query_index / (kv_heads * query_groups);\n    long remainder = query_index % (kv_heads * query_groups);\n    long kv_head = remainder / query_groups;\n    long group = remainder % query_groups;\n    long query_head = kv_head * query_groups + group;\n    long qbase = query_row * (kv_heads * query_groups * (head_dim / 2)) + query_head * (head_dim / 2);\n    float maximum = -INFINITY; float sum = 0.0f; float weighted[(head_dim + 31) / 32];\n    for (long dimension = 0; dimension < (head_dim + 31) / 32; dimension++) { weighted[dimension] = 0.0f; }\n");
         // Each lane reads its own K/V elements straight from device memory
@@ -5587,6 +5617,7 @@ fn push_tiled_gemm_body(
 fn tiled_gemm_threadgroup_width(
     resolved: &BoundOp,
     quantized: &[Option<PackedCodec>],
+    numeric_policy: NumericPolicy,
 ) -> Option<u64> {
     // `query_groups * SIMD_WIDTH` threads per threadgroup -- one simdgroup
     // per query head sharing this kv_head, cooperatively loading that
@@ -5602,7 +5633,7 @@ fn tiled_gemm_threadgroup_width(
         ..
     } = &resolved.kind
     {
-        let chunks = context_chunks_for(*cached_key_rows + *new_key_rows);
+        let chunks = context_chunks_for(*cached_key_rows + *new_key_rows, numeric_policy);
         return Some(*query_groups * chunks * SIMD_WIDTH);
     }
     if let BoundOpKind::Reduce {
@@ -6670,7 +6701,7 @@ mod tests {
             "test fixture must actually take the row-blocked path for this assertion to mean anything"
         );
 
-        let source = emit(&bound, &q4k).expect("emits").source;
+        let source = emit(&bound, &q4k, NumericPolicy::default()).expect("emits").source;
         assert!(
             source.contains("q4k_pair_dot"),
             "Add-reduce over a plain weight*activation body must take the paired decode path:\n{source}"
@@ -6699,7 +6730,7 @@ mod tests {
             "test fixture must actually take the row-blocked path for this assertion to mean anything"
         );
 
-        let source = emit(&bound, &q5k).expect("emits").source;
+        let source = emit(&bound, &q5k, NumericPolicy::default()).expect("emits").source;
         assert!(
             source.contains("q5k_pair_dot"),
             "Add-reduce over a plain weight*activation body must take the paired decode path by default:\n{source}"
@@ -6732,7 +6763,7 @@ mod tests {
             "test fixture must actually take the row-blocked path for this assertion to mean anything"
         );
 
-        let source = emit(&bound, &q6k).expect("emits").source;
+        let source = emit(&bound, &q6k, NumericPolicy::default()).expect("emits").source;
         assert!(
             source.contains("q6k_pair_dot"),
             "Add-reduce over a plain weight*activation body must take the paired decode path by default:\n{source}"
@@ -6767,7 +6798,7 @@ mod tests {
             "test fixture must actually take the row-blocked path for this assertion to mean anything"
         );
 
-        let source = emit(&bound, &q4k).expect("emits").source;
+        let source = emit(&bound, &q4k, NumericPolicy::default()).expect("emits").source;
         assert!(
             source.contains("raw_low") && source.contains("raw_high"),
             "Add-reduce over a plain weight*activation body must take the scale-deferred path, split across both sub-block halves:\n{source}"
@@ -6804,7 +6835,7 @@ mod tests {
             "packed_row_block must agree with classify_packed_row_block's own rejection"
         );
 
-        let source = emit(&bound, &q4_0).expect("emits").source;
+        let source = emit(&bound, &q4_0, NumericPolicy::default()).expect("emits").source;
         assert!(
             source.contains("q4_0_element("),
             "a Q4_0 weight must render through the generic per-element accessor:\n{source}"
@@ -6845,7 +6876,7 @@ mod tests {
             "packed_row_block must agree with classify_packed_row_block's own rejection"
         );
 
-        let source = emit(&bound, &operands).expect("emits").source;
+        let source = emit(&bound, &operands, NumericPolicy::default()).expect("emits").source;
         assert!(
             source.contains(expected_read),
             "a {codec:?} weight must render through its own generic per-element accessor:\n{source}"
@@ -6876,7 +6907,7 @@ mod tests {
             "test fixture must actually take the row-blocked path for this assertion to mean anything"
         );
 
-        let source = emit(&bound, &q4k).expect("emits").source;
+        let source = emit(&bound, &q4k, NumericPolicy::default()).expect("emits").source;
         assert!(
             !source.contains("raw_acc"),
             "a Maximum reduce must never take the scale-deferred path, its identity does not hold under max:\n{source}"
@@ -6906,7 +6937,7 @@ mod tests {
             "test fixture must actually take the row-blocked path for this assertion to mean anything"
         );
 
-        let source = emit(&bound, &q4k).expect("emits").source;
+        let source = emit(&bound, &q4k, NumericPolicy::default()).expect("emits").source;
         assert!(
             !source.contains("raw_low") && !source.contains("raw_high"),
             "a Maximum reduce must never take the scale-deferred path, its identity does not hold under max:\n{source}"
@@ -7129,7 +7160,7 @@ mod tests {
         let mut q4k = BTreeMap::new();
         q4k.insert(weight_node, PackedCodec::Q4K);
 
-        let source = emit(&bound, &q4k).expect("emits").source;
+        let source = emit(&bound, &q4k, NumericPolicy::default()).expect("emits").source;
         assert!(
             !source.contains("simdgroup_multiply_accumulate"),
             "the tiled GEMM path must not exist at all without `metal-tiled-gemm`:\n{source}"
@@ -7164,7 +7195,7 @@ mod tests {
             .is_none(),
             "one token must never clear TILED_GEMM_MIN_TOKENS"
         );
-        let source = emit(&bound, &q4k).expect("emits").source;
+        let source = emit(&bound, &q4k, NumericPolicy::default()).expect("emits").source;
         assert!(
             !source.contains("simdgroup_multiply_accumulate"),
             "a one-token (decode-shaped) dispatch must not take the tiled GEMM path:\n{source}"
@@ -7198,7 +7229,7 @@ mod tests {
             .is_some(),
             "16 tokens must clear TILED_GEMM_MIN_TOKENS"
         );
-        let source = emit(&bound, &q4k).expect("emits").source;
+        let source = emit(&bound, &q4k, NumericPolicy::default()).expect("emits").source;
         assert!(
             source.contains("simdgroup_multiply_accumulate"),
             "a 16-token dispatch must take the tiled GEMM path:\n{source}"
@@ -7234,7 +7265,7 @@ mod tests {
             .is_none(),
             "a Q6_K weight must never take the tiled GEMM path"
         );
-        let source = emit(&bound, &q6k).expect("emits").source;
+        let source = emit(&bound, &q6k, NumericPolicy::default()).expect("emits").source;
         assert!(
             !source.contains("simdgroup_multiply_accumulate"),
             "a Q6_K weight must not emit the tiled GEMM kernel:\n{source}"
@@ -7271,7 +7302,7 @@ mod tests {
             tiled_gemm_block(&bound, &codecs, *reduce_op, *init, output_axes).is_none(),
             "a 3-output-axis matmul must never take the 2-D tiled GEMM path"
         );
-        let source = emit(&bound, &q4k).expect("emits").source;
+        let source = emit(&bound, &q4k, NumericPolicy::default()).expect("emits").source;
         assert!(
             !source.contains("simdgroup_multiply_accumulate"),
             "a multi-head-shaped matmul must stay on the row-blocked path:\n{source}"
@@ -7364,7 +7395,7 @@ mod tests {
     #[test]
     fn a_gather_op_emits_an_indices_binding_and_the_fetch_uniforms() {
         let bound = embedding_lookup_op(50_000, 8, 4);
-        let kernel = emit(&bound, &BTreeMap::new()).expect("gather emits");
+        let kernel = emit(&bound, &BTreeMap::new(), NumericPolicy::default()).expect("gather emits");
 
         assert_eq!(
             kernel.entry, "omega_elementwise_r2_n1_identity_g1",
@@ -7397,7 +7428,7 @@ mod tests {
     #[test]
     fn a_gather_kernel_binds_and_declares_the_fault_buffer() {
         let bound = embedding_lookup_op(50_000, 8, 4);
-        let kernel = emit(&bound, &BTreeMap::new()).expect("gather emits");
+        let kernel = emit(&bound, &BTreeMap::new(), NumericPolicy::default()).expect("gather emits");
 
         assert!(
             kernel.bindings.contains(&Binding::Fault),
@@ -7420,7 +7451,7 @@ mod tests {
     #[test]
     fn a_gather_free_op_names_and_binds_exactly_as_before_gather_existed() {
         let bound = elementwise_tanh_op(10);
-        let kernel = emit(&bound, &BTreeMap::new()).expect("gather-free elementwise emits");
+        let kernel = emit(&bound, &BTreeMap::new(), NumericPolicy::default()).expect("gather-free elementwise emits");
         assert!(
             !kernel.entry.contains("_g"),
             "a gather-free kernel's name must not grow a gather suffix"
@@ -7444,7 +7475,7 @@ mod tests {
     #[test]
     fn elementwise_op_emits_one_input_one_output_and_a_matching_grid() {
         let bound = elementwise_tanh_op(10);
-        let kernel = emit(&bound, &BTreeMap::new()).expect("elementwise emits");
+        let kernel = emit(&bound, &BTreeMap::new(), NumericPolicy::default()).expect("elementwise emits");
 
         assert_eq!(kernel.entry, "omega_elementwise_r1_n1_tanh");
         assert_eq!(
@@ -7521,15 +7552,15 @@ mod tests {
         );
 
         let empty = BTreeMap::new();
-        let key_two_axes = kernel_cache_key(&keeps_two_axes, &empty, 'R').expect("cache key builds");
-        let key_one_axis = kernel_cache_key(&keeps_one_axis, &empty, 'R').expect("cache key builds");
+        let key_two_axes = kernel_cache_key(&keeps_two_axes, &empty, 'R', NumericPolicy::default()).expect("cache key builds");
+        let key_one_axis = kernel_cache_key(&keeps_one_axis, &empty, 'R', NumericPolicy::default()).expect("cache key builds");
         assert_ne!(
             key_two_axes, key_one_axis,
             "a coarser key would let a 1-output-axis fold hit the 2-output-axis pipeline"
         );
 
-        let source_two_axes = emit(&keeps_two_axes, &empty).expect("emits").source;
-        let source_one_axis = emit(&keeps_one_axis, &empty).expect("emits").source;
+        let source_two_axes = emit(&keeps_two_axes, &empty, NumericPolicy::default()).expect("emits").source;
+        let source_one_axis = emit(&keeps_one_axis, &empty, NumericPolicy::default()).expect("emits").source;
         assert_ne!(
             source_two_axes, source_one_axis,
             "output_extents/reduction_extents array sizes must differ in the rendered source"
@@ -7552,13 +7583,13 @@ mod tests {
         let add = matmul_op_with_reduce(4, 8, 5, ScalarOp::Add);
         let max = matmul_op_with_reduce(4, 8, 5, ScalarOp::Maximum);
         assert_ne!(
-            emit(&add, &empty).expect("emits").source,
-            emit(&max, &empty).expect("emits").source,
+            emit(&add, &empty, NumericPolicy::default()).expect("emits").source,
+            emit(&max, &empty, NumericPolicy::default()).expect("emits").source,
             "reduce op must change the emitted body"
         );
         assert_ne!(
-            kernel_cache_key(&add, &empty, 'R').expect("cache key builds"),
-            kernel_cache_key(&max, &empty, 'R').expect("cache key builds"),
+            kernel_cache_key(&add, &empty, 'R', NumericPolicy::default()).expect("cache key builds"),
+            kernel_cache_key(&max, &empty, 'R', NumericPolicy::default()).expect("cache key builds"),
             "reduce op must change the identity"
         );
 
@@ -7612,13 +7643,13 @@ mod tests {
             .next()
             .expect("one bound emitted");
         assert_ne!(
-            emit(&f32_bound, &empty).expect("emits").source,
-            emit(&f16_bound, &empty).expect("emits").source,
+            emit(&f32_bound, &empty, NumericPolicy::default()).expect("emits").source,
+            emit(&f16_bound, &empty, NumericPolicy::default()).expect("emits").source,
             "dtype must change the emitted body (half vs. float declarations)"
         );
         assert_ne!(
-            kernel_cache_key(&f32_bound, &empty, 'R').expect("cache key builds"),
-            kernel_cache_key(&f16_bound, &empty, 'R').expect("cache key builds"),
+            kernel_cache_key(&f32_bound, &empty, 'R', NumericPolicy::default()).expect("cache key builds"),
+            kernel_cache_key(&f16_bound, &empty, 'R', NumericPolicy::default()).expect("cache key builds"),
             "dtype must change the identity"
         );
 
@@ -7631,13 +7662,13 @@ mod tests {
         let mut q5k = BTreeMap::new();
         q5k.insert(weight_node, PackedCodec::Q5K);
         assert_ne!(
-            emit(&bound, &q4k).expect("emits").source,
-            emit(&bound, &q5k).expect("emits").source,
+            emit(&bound, &q4k, NumericPolicy::default()).expect("emits").source,
+            emit(&bound, &q5k, NumericPolicy::default()).expect("emits").source,
             "packed codec must change the emitted body"
         );
         assert_ne!(
-            kernel_cache_key(&bound, &q4k, 'R').expect("cache key builds"),
-            kernel_cache_key(&bound, &q5k, 'R').expect("cache key builds"),
+            kernel_cache_key(&bound, &q4k, 'R', NumericPolicy::default()).expect("cache key builds"),
+            kernel_cache_key(&bound, &q5k, 'R', NumericPolicy::default()).expect("cache key builds"),
             "packed codec must change the identity"
         );
 
@@ -7645,20 +7676,20 @@ mod tests {
         // embedded in `emit`'s own source text, so no source-side assertion
         // here: `math_mode_cache_key_tests` covers the token set itself).
         assert_ne!(
-            kernel_cache_key(&bound, &q4k, 'S').expect("cache key builds"),
-            kernel_cache_key(&bound, &q4k, 'R').expect("cache key builds"),
+            kernel_cache_key(&bound, &q4k, 'S', NumericPolicy::default()).expect("cache key builds"),
+            kernel_cache_key(&bound, &q4k, 'R', NumericPolicy::default()).expect("cache key builds"),
             "math mode must change the identity, or a Safe- and a Relaxed-compiled \
              kernel could share one PIPELINE_CACHE entry"
         );
         assert_ne!(
-            kernel_cache_key(&bound, &q4k, 'S').expect("cache key builds"),
-            kernel_cache_key(&bound, &q4k, 'F').expect("cache key builds"),
+            kernel_cache_key(&bound, &q4k, 'S', NumericPolicy::default()).expect("cache key builds"),
+            kernel_cache_key(&bound, &q4k, 'F', NumericPolicy::default()).expect("cache key builds"),
             "math mode must change the identity, or a Safe- and a Fast-compiled \
              kernel could share one PIPELINE_CACHE entry"
         );
         assert_ne!(
-            kernel_cache_key(&bound, &q4k, 'R').expect("cache key builds"),
-            kernel_cache_key(&bound, &q4k, 'F').expect("cache key builds"),
+            kernel_cache_key(&bound, &q4k, 'R', NumericPolicy::default()).expect("cache key builds"),
+            kernel_cache_key(&bound, &q4k, 'F', NumericPolicy::default()).expect("cache key builds"),
             "math mode must change the identity, or a Relaxed- and a Fast-compiled \
              kernel could share one PIPELINE_CACHE entry"
         );
@@ -7670,8 +7701,8 @@ mod tests {
             let narrow = single_axis_sum_op(34);
             let wide = single_axis_sum_op(4096);
             assert_ne!(
-                kernel_cache_key(&narrow, &empty, 'R').expect("cache key builds"),
-                kernel_cache_key(&wide, &empty, 'R').expect("cache key builds"),
+                kernel_cache_key(&narrow, &empty, 'R', NumericPolicy::default()).expect("cache key builds"),
+                kernel_cache_key(&wide, &empty, 'R', NumericPolicy::default()).expect("cache key builds"),
                 "two cooperative reduces at different widths must never share a pipeline \
                  (ROW 290: a stale narrower kernel silently drops reduction terms)"
             );
@@ -7701,16 +7732,16 @@ mod tests {
             "same total rank"
         );
         let key_first_second =
-            kernel_cache_key(&keeps_first_and_second, &empty, 'R').expect("cache key builds");
+            kernel_cache_key(&keeps_first_and_second, &empty, 'R', NumericPolicy::default()).expect("cache key builds");
         let key_first_third =
-            kernel_cache_key(&keeps_first_and_third, &empty, 'R').expect("cache key builds");
+            kernel_cache_key(&keeps_first_and_third, &empty, 'R', NumericPolicy::default()).expect("cache key builds");
         assert_ne!(
             key_first_second, key_first_third,
             "output_axes.len() alone cannot tell {{0,1}} from {{0,2}}"
         );
 
-        let source_first_second = emit(&keeps_first_and_second, &empty).expect("emits").source;
-        let source_first_third = emit(&keeps_first_and_third, &empty).expect("emits").source;
+        let source_first_second = emit(&keeps_first_and_second, &empty, NumericPolicy::default()).expect("emits").source;
+        let source_first_third = emit(&keeps_first_and_third, &empty, NumericPolicy::default()).expect("emits").source;
         assert_ne!(
             source_first_second, source_first_third,
             "the reduce dim, and every operand_strides[..][dim] read, must differ"
@@ -7723,15 +7754,15 @@ mod tests {
         let descending = rank3_identity_sum_op(&[1, 0]);
         let empty = BTreeMap::new();
 
-        let key_ascending = kernel_cache_key(&ascending, &empty, 'R').expect("cache key builds");
-        let key_descending = kernel_cache_key(&descending, &empty, 'R').expect("cache key builds");
+        let key_ascending = kernel_cache_key(&ascending, &empty, 'R', NumericPolicy::default()).expect("cache key builds");
+        let key_descending = kernel_cache_key(&descending, &empty, 'R', NumericPolicy::default()).expect("cache key builds");
         assert_ne!(
             key_ascending, key_descending,
             "the SEQUENCE order of output_axes selects which u.output_extents slot each dim reads"
         );
 
-        let source_ascending = emit(&ascending, &empty).expect("emits").source;
-        let source_descending = emit(&descending, &empty).expect("emits").source;
+        let source_ascending = emit(&ascending, &empty, NumericPolicy::default()).expect("emits").source;
+        let source_descending = emit(&descending, &empty, NumericPolicy::default()).expect("emits").source;
         assert_ne!(
             source_ascending, source_descending,
             "reversing output_axes must reverse which dim each output_extents index feeds"
@@ -7748,15 +7779,15 @@ mod tests {
         let mut q6k = BTreeMap::new();
         q6k.insert(weight_node, PackedCodec::Q6K);
 
-        let key_q4k = kernel_cache_key(&bound, &q4k, 'R').expect("cache key builds");
-        let key_q6k = kernel_cache_key(&bound, &q6k, 'R').expect("cache key builds");
+        let key_q4k = kernel_cache_key(&bound, &q4k, 'R', NumericPolicy::default()).expect("cache key builds");
+        let key_q6k = kernel_cache_key(&bound, &q6k, 'R', NumericPolicy::default()).expect("cache key builds");
         assert_ne!(
             key_q4k, key_q6k,
             "entry_name alone cannot see which codec an operand reads through"
         );
 
-        let source_q4k = emit(&bound, &q4k).expect("emits").source;
-        let source_q6k = emit(&bound, &q6k).expect("emits").source;
+        let source_q4k = emit(&bound, &q4k, NumericPolicy::default()).expect("emits").source;
+        let source_q6k = emit(&bound, &q6k, NumericPolicy::default()).expect("emits").source;
         assert_ne!(
             source_q4k, source_q6k,
             "Q4_K and Q6_K unpack through different MSL functions"
@@ -7816,15 +7847,15 @@ mod tests {
             .expect("one bound emitted");
 
         let empty = BTreeMap::new();
-        let key_f32 = kernel_cache_key(&f32_bound, &empty, 'R').expect("cache key builds");
-        let key_f16 = kernel_cache_key(&f16_bound, &empty, 'R').expect("cache key builds");
+        let key_f32 = kernel_cache_key(&f32_bound, &empty, 'R', NumericPolicy::default()).expect("cache key builds");
+        let key_f16 = kernel_cache_key(&f16_bound, &empty, 'R', NumericPolicy::default()).expect("cache key builds");
         assert_ne!(
             key_f32, key_f16,
             "entry_name does not encode dtype on its own"
         );
 
-        let source_f32 = emit(&f32_bound, &empty).expect("emits").source;
-        let source_f16 = emit(&f16_bound, &empty).expect("emits").source;
+        let source_f32 = emit(&f32_bound, &empty, NumericPolicy::default()).expect("emits").source;
+        let source_f16 = emit(&f16_bound, &empty, NumericPolicy::default()).expect("emits").source;
         assert_ne!(
             source_f32, source_f16,
             "float vs half declarations must differ in source"
@@ -7838,8 +7869,8 @@ mod tests {
         let empty = BTreeMap::new();
 
         assert_eq!(
-            kernel_cache_key(&small, &empty, 'R').expect("cache key builds"),
-            kernel_cache_key(&large, &empty, 'R').expect("cache key builds"),
+            kernel_cache_key(&small, &empty, 'R', NumericPolicy::default()).expect("cache key builds"),
+            kernel_cache_key(&large, &empty, 'R', NumericPolicy::default()).expect("cache key builds"),
             "a cache keyed on structure must still hit across concrete extents"
         );
     }
@@ -7851,7 +7882,7 @@ mod tests {
             matches!(bound.kind, BoundOpKind::Reduce { .. }),
             "the elementwise op must have fused into the reduce"
         );
-        let kernel = emit(&bound, &BTreeMap::new()).expect("matmul emits");
+        let kernel = emit(&bound, &BTreeMap::new(), NumericPolicy::default()).expect("matmul emits");
 
         assert_eq!(kernel.entry, "omega_reduce_r3_o2_n2_multiply_add_zero");
         assert_eq!(kernel.bindings.len(), 4, "two inputs, one output, uniforms");
@@ -7944,7 +7975,7 @@ mod tests {
             crate::sized::COOPERATIVE_REDUCE_MIN_LEN
         );
 
-        let kernel = emit(&bound, &BTreeMap::new()).expect("single-axis sum emits");
+        let kernel = emit(&bound, &BTreeMap::new(), NumericPolicy::default()).expect("single-axis sum emits");
         assert_eq!(
             kernel.source.contains("simd_sum(accumulator)"),
             expected_cooperative,
@@ -7955,7 +7986,7 @@ mod tests {
     #[test]
     fn cached_attention_emits_one_online_softmax_dispatch() {
         let bound = cached_attention_op();
-        let kernel = emit(&bound, &BTreeMap::new()).expect("cached attention emits");
+        let kernel = emit(&bound, &BTreeMap::new(), NumericPolicy::default()).expect("cached attention emits");
 
         let BoundOpKind::CachedAttention {
             cached_key_rows,
@@ -7966,7 +7997,7 @@ mod tests {
         else {
             panic!("cached_attention_op must build a CachedAttention bound op");
         };
-        let context_chunks = context_chunks_for(*cached_key_rows + *new_key_rows);
+        let context_chunks = context_chunks_for(*cached_key_rows + *new_key_rows, NumericPolicy::default());
 
         assert!(kernel.source.contains("long relative ="));
         assert!(kernel.source.contains("simd_sum(partial_score)"));
@@ -8025,11 +8056,11 @@ mod tests {
         else {
             panic!("cached_attention_op must build a CachedAttention bound op");
         };
-        if context_chunks_for(*cached_key_rows + *new_key_rows) != 1 {
+        if context_chunks_for(*cached_key_rows + *new_key_rows, NumericPolicy::default()) != 1 {
             return;
         }
 
-        let kernel = emit(&bound, &BTreeMap::new()).expect("cached attention emits");
+        let kernel = emit(&bound, &BTreeMap::new(), NumericPolicy::default()).expect("cached attention emits");
         assert!(!kernel.source.contains("context_chunks"));
         assert!(!kernel.source.contains("long chunk ="));
         assert!(!kernel.source.contains("shared_m["));
@@ -8039,7 +8070,7 @@ mod tests {
     #[test]
     fn cumsum_op_emits_a_scan_kernel_with_one_thread_per_line() {
         let bound = cumsum_op(8);
-        let kernel = emit(&bound, &BTreeMap::new()).expect("cumsum emits");
+        let kernel = emit(&bound, &BTreeMap::new(), NumericPolicy::default()).expect("cumsum emits");
 
         assert_eq!(kernel.entry, "omega_scan_r1_o1_n1_identity_add_zero");
         assert!(kernel.source.contains("inner_len"));
@@ -8053,8 +8084,8 @@ mod tests {
     #[test]
     fn emit_is_deterministic_byte_equal() {
         let bound = matmul_op(4, 3, 5);
-        let first = emit(&bound, &BTreeMap::new()).expect("first emit succeeds");
-        let second = emit(&bound, &BTreeMap::new()).expect("second emit succeeds");
+        let first = emit(&bound, &BTreeMap::new(), NumericPolicy::default()).expect("first emit succeeds");
+        let second = emit(&bound, &BTreeMap::new(), NumericPolicy::default()).expect("second emit succeeds");
         assert_eq!(first, second);
     }
 
@@ -8063,8 +8094,8 @@ mod tests {
         let small = elementwise_tanh_op(4);
         let large = elementwise_tanh_op(4096);
 
-        let small_kernel = emit(&small, &BTreeMap::new()).expect("small emits");
-        let large_kernel = emit(&large, &BTreeMap::new()).expect("large emits");
+        let small_kernel = emit(&small, &BTreeMap::new(), NumericPolicy::default()).expect("small emits");
+        let large_kernel = emit(&large, &BTreeMap::new(), NumericPolicy::default()).expect("large emits");
 
         assert_eq!(small_kernel.source, large_kernel.source);
         assert_eq!(small_kernel.entry, large_kernel.entry);
@@ -8078,7 +8109,7 @@ mod tests {
             body.steps[0].op = ScalarOp::Add; // arity 2, but the step still carries 1 arg
         }
 
-        let error = emit(&bound, &BTreeMap::new()).expect_err("mismatched arity is rejected");
+        let error = emit(&bound, &BTreeMap::new(), NumericPolicy::default()).expect_err("mismatched arity is rejected");
         assert!(matches!(error, EmitError::ArityMismatch { .. }), "{error}");
     }
 
@@ -8089,7 +8120,7 @@ mod tests {
             *reduce_op = ScalarOp::Select;
         }
 
-        let error = emit(&bound, &BTreeMap::new()).expect_err("select reduction body is rejected");
+        let error = emit(&bound, &BTreeMap::new(), NumericPolicy::default()).expect_err("select reduction body is rejected");
         assert!(
             matches!(error, EmitError::ReductionBodyIsSelect { .. }),
             "{error}"
@@ -8104,7 +8135,7 @@ mod tests {
             output_axes.clear();
         }
 
-        let error = emit(&bound, &BTreeMap::new()).expect_err("an empty scan is rejected");
+        let error = emit(&bound, &BTreeMap::new(), NumericPolicy::default()).expect_err("an empty scan is rejected");
         assert!(matches!(error, EmitError::EmptyScan { .. }), "{error}");
     }
 
@@ -8141,7 +8172,7 @@ mod tests {
     #[test]
     fn render_cached_attention_rejects_an_elementwise_bound_op() {
         let bound = elementwise_tanh_op(8);
-        let error = render_cached_attention(&bound, "entry")
+        let error = render_cached_attention(&bound, "entry", NumericPolicy::default())
             .expect_err("an elementwise chain is not a CachedAttention op");
         assert!(matches!(
             error,
@@ -8298,7 +8329,7 @@ mod tests {
             "test fixture must actually take the row-blocked path for this assertion to mean anything"
         );
 
-        let width = tiled_gemm_threadgroup_width(&bound, &quantized)
+        let width = tiled_gemm_threadgroup_width(&bound, &quantized, NumericPolicy::default())
             .expect("a packed row-blocked reduce always has a threadgroup width");
         assert_eq!(
             width,
@@ -8329,7 +8360,7 @@ mod tests {
             "test fixture must actually take the row-blocked path for this assertion to mean anything"
         );
 
-        let width = tiled_gemm_threadgroup_width(&bound, &quantized)
+        let width = tiled_gemm_threadgroup_width(&bound, &quantized, NumericPolicy::default())
             .expect("a packed row-blocked reduce always has a threadgroup width");
         assert_eq!(
             width,
@@ -8372,12 +8403,71 @@ mod tests {
         let (_base, split) = packed_row_dispatch(feature_total, token_total, block.codec);
         let expected_width = SIMD_WIDTH * split * packed_row_nsg_factor();
 
-        let width = tiled_gemm_threadgroup_width(&bound, &quantized)
+        let width = tiled_gemm_threadgroup_width(&bound, &quantized, NumericPolicy::default())
             .expect("a packed row-blocked reduce always has a threadgroup width");
         assert_eq!(
             width, expected_width,
             "without either nsg2 feature the packed row-blocked path's width must match \
              production's own SIMD_WIDTH * split * packed_row_nsg_factor() derivation; got {width}"
+        );
+    }
+
+    /// `omega-runtime.toml`'s `[attention_context_chunks]` ships
+    /// `keys_per_chunk = 16`, so a real 64-key merged context
+    /// (`cached_key_rows + new_key_rows`) is exactly the shape
+    /// `context_chunks_for` splits across simdgroups today -- the algebra
+    /// design's own worked example (`op.rs:107`'s `is_associative` has no
+    /// caller that gates this reassociation; this is the gate).
+    #[test]
+    fn context_chunk_merge_is_gated_by_numeric_policy_for_a_real_64_key_context() {
+        let context_length: u64 = 64;
+        assert_eq!(
+            context_chunks_for(context_length, NumericPolicy::BitExact),
+            1,
+            "BitExact forbids ContextChunkMerge (a reassociation), so this falls back to the \
+             single-pass chunk<=1 kernel `render_cached_attention` already renders"
+        );
+        let chunks = context_chunks_for(context_length, NumericPolicy::ReassociationPermitted);
+        assert!(
+            chunks > 1,
+            "ReassociationPermitted clears NumericRewrite::ContextChunkMerge's minimum level, \
+             so a 64-key context (4x omega-runtime.toml's 16-key chunk) must split across more \
+             than one simdgroup; got {chunks}"
+        );
+    }
+
+    /// The same gate, exercised through the real emitter
+    /// ([`render_cached_attention`]) instead of `context_chunks_for` in
+    /// isolation -- the rendered kernel source must not contain the
+    /// cross-simdgroup merge block under `BitExact`, and must contain it
+    /// once the caller opts up.
+    #[test]
+    fn render_cached_attention_omits_the_merge_block_under_bit_exact_policy() {
+        let mut bound = cached_attention_op();
+        let BoundOpKind::CachedAttention {
+            cached_key_rows,
+            new_key_rows,
+            ..
+        } = &mut bound.kind
+        else {
+            unreachable!("cached_attention_op always returns a CachedAttention kind");
+        };
+        *cached_key_rows = 48;
+        *new_key_rows = 16;
+
+        let rejected = render_cached_attention(&bound, "entry", NumericPolicy::BitExact)
+            .expect("BitExact still renders -- it falls back to the single-pass kernel");
+        let admitted =
+            render_cached_attention(&bound, "entry", NumericPolicy::ReassociationPermitted)
+                .expect("ReassociationPermitted renders the cross-simdgroup merge kernel");
+
+        assert!(
+            !rejected.contains("merged_max"),
+            "BitExact must never reassociate the online-softmax fold across simdgroups"
+        );
+        assert!(
+            admitted.contains("merged_max"),
+            "ReassociationPermitted is expected to emit the cross-simdgroup merge block"
         );
     }
 }

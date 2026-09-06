@@ -3250,7 +3250,7 @@ fn production_reduce_kernel(
 
     let packed_operands: omega::PackedOperands = BTreeMap::from([(weight_node, codec)]);
     let kernel =
-        omega::emit(&bound, &packed_operands).expect("production reduce fold emits an MSL kernel");
+        omega::emit(&bound, &packed_operands, proxima_tensor::NumericPolicy::default()).expect("production reduce fold emits an MSL kernel");
 
     let weight_index = kernel
         .bindings

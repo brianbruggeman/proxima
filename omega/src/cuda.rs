@@ -434,6 +434,12 @@ fn entry_name(resolved: &BoundOp, packed_operands: &PackedOperands) -> String {
         resolved,
         packed_operands,
         crate::identity::MetalOnlyExtras::default(),
+        // Cuda has no `BoundOpKind::CachedAttention` renderer
+        // (`proxima_tensor::bind::bind_with_fusion`'s own doc: this driver
+        // calls it with `fuse_cached_attention: false`), so a policy value
+        // never actually varies this identity string -- the default is
+        // correct, not a placeholder.
+        proxima_tensor::NumericPolicy::default(),
     )
 }
 

@@ -39,8 +39,8 @@ use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
 use proxima_tensor::{
-    BoundOp, BoundOpKind, ComposedBody, DType, Keep, Layout, Lookup, NodeId, ReduceInit, ScalarOp,
-    StepArg,
+    BoundOp, BoundOpKind, ComposedBody, DType, Keep, Layout, Lookup, NodeId, NumericPolicy,
+    ReduceInit, ScalarOp, StepArg,
 };
 
 use crate::msl::{PackedCodec, PackedOperands};
@@ -249,6 +249,7 @@ pub(crate) fn kernel_identity(
     resolved: &BoundOp,
     packed_operands: &PackedOperands,
     metal: MetalOnlyExtras,
+    numeric_policy: NumericPolicy,
 ) -> String {
     let rank = resolved.extents.len();
     let operand_count = resolved.operands().len();
@@ -285,7 +286,7 @@ pub(crate) fn kernel_identity(
             // a distinct cache key rather than silently reusing a pipeline
             // compiled for the wrong chunk count.
             let context_chunks =
-                crate::msl::context_chunks_for(*cached_key_rows + *new_key_rows);
+                crate::msl::context_chunks_for(*cached_key_rows + *new_key_rows, numeric_policy);
             format!(
                 "{prefix}_cached_attention_q{query_rows}_c{cached_key_rows}_n{new_key_rows}_h{kv_heads}_g{query_groups}_d{head_dim}_s{:08x}_l{}_u{upper_token}_x{context_chunks}",
                 scale.to_bits(),

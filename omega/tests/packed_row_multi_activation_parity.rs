@@ -208,7 +208,7 @@ fn run_case(codec: Codec, tokens: usize) {
         .iter()
         .find(|op| op.node == sum)
         .expect("the reduce node is bound");
-    let kernel = omega::emit(resolved, &packed_operands).expect("the synthetic program emits");
+    let kernel = omega::emit(resolved, &packed_operands, proxima_tensor::NumericPolicy::default()).expect("the synthetic program emits");
     // `metal-tiled-gemm` (`crate::sized::TILED_GEMM_MIN_TOKENS`, default 8)
     // is checked FIRST in `push_cooperative_reduce_body`'s own arm order and
     // legitimately supersedes this path once `tokens` clears that
