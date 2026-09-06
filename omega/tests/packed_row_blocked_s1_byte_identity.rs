@@ -14,14 +14,29 @@
 // member of this exclusion list, and naming it here after its removal would
 // make the whole cfg gate unsatisfiable under any real build (unknown
 // `cfg(feature = ...)` just evaluates false, it does not error).
+//
+// `metal-q4k-ggml-port` and `metal-packed-row-nsg2` are no longer excluded:
+// both joined `metal`'s own default feature list (`omega/Cargo.toml`), so
+// the fixture below IS their emit -- excluding them made this file compile
+// to zero tests under every real `--features metal` build (dead since ROW
+// 311). The three still excluded are non-default and each provably changes
+// this exact op's emitted text: `metal-q4k-split-k` and
+// `metal-q4k-single-fetch` re-route `push_packed_row_blocked_body`'s own arm
+// selection (`msl.rs`'s `push_q4k_single_fetch_body`/split-K combine arms),
+// and `metal-q4k-mask-fma` swaps `push_q4k_header_decode`/
+// `push_q4k_product_reduce_body`'s scale-deferred arm for a branch-free
+// mask/FMA rewrite. `metal-tiled-gemm` is left OFF this list on purpose --
+// read, not assumed: `classify_tiled_gemm` (`msl.rs`) rejects any op below
+// `TILED_GEMM_MIN_TOKENS` regardless of whether the feature is compiled in,
+// and `TOKENS = 1` here is always below it, so enabling the feature cannot
+// change this op's emitted body -- it only unlocks a code path this fixture
+// never reaches.
 #![cfg(all(
     feature = "metal",
     target_os = "macos",
     not(any(
         feature = "metal-q4k-split-k",
         feature = "metal-q4k-single-fetch",
-        feature = "metal-q4k-ggml-port",
-        feature = "metal-packed-row-nsg2",
         feature = "metal-q4k-mask-fma",
     ))
 ))]
@@ -94,6 +109,19 @@ fn matmul_program(tokens: u32, in_dim: u32, out_dim: u32) -> (Vec<Op>, NodeId) {
 /// DEFAULT-feature body, not every combination, the same scoping
 /// `packed_row_multi_activation_parity.rs`'s own `token_group` marker
 /// assertion applies against `metal-tiled-gemm`.
+///
+/// A second assertion checks the fixture is not merely SOME body, but the
+/// DEFAULT one: `metal-q4k-ggml-port` and `metal-packed-row-nsg2` sit inside
+/// `metal`'s own default feature list, so a build that silently drops either
+/// out of that default list would still pass byte-identity against a STALE
+/// fixture forever (the fixture would simply have been captured from the old
+/// default too) -- checking for `push_q4k_ggml_port_body`'s own `sc16_0`/
+/// `acc1_0` identifiers in the source text, plus the dispatched nsg=2 width
+/// on `kernel.grid` (`tiled_gemm_threadgroup_width`'s own
+/// `SIMD_WIDTH * packed_row_nsg_factor()`, both from `omega::sized` so this
+/// assertion moves if the runtime config ever does), makes a silent default
+/// change fail loudly here instead of only showing up as a decode-step
+/// regression weeks later.
 #[test]
 fn single_activation_row_q4k_matvec_emits_byte_identical_msl_to_the_pre_fold_body() {
     const IN_DIM: usize = 512;
@@ -132,5 +160,24 @@ fn single_activation_row_q4k_matvec_emits_byte_identical_msl_to_the_pre_fold_bod
          `token_total <= 1` branch must stay byte-identical to the body \
          captured before `push_packed_row_multi_activation_body` folded into \
          `push_packed_row_blocked_body`"
+    );
+
+    assert!(
+        kernel.source.contains("sc16_0") && kernel.source.contains("acc1_0"),
+        "the fixture no longer carries `push_q4k_ggml_port_body`'s own \
+         `sc16_0`/`acc1_0` identifiers -- `metal-q4k-ggml-port` sits in \
+         `metal`'s own default feature list, so its body must be what this \
+         fixture captures; a build that silently dropped it from the \
+         default would still byte-match a stale fixture without this check"
+    );
+    let expected_nsg2_width = omega::sized::SIMD_WIDTH * omega::sized::PACKED_ROW_NSG as u64;
+    assert_eq!(
+        kernel.grid.threadgroup_width,
+        Some(expected_nsg2_width),
+        "the dispatched threadgroup width drifted from `SIMD_WIDTH * \
+         PACKED_ROW_NSG` -- `metal-packed-row-nsg2`/`metal-q4k-ggml-port`'s \
+         shared nsg=2 geometry (`tiled_gemm_threadgroup_width`'s own \
+         `packed_row_nsg_factor`) must still be what a default build \
+         dispatches"
     );
 }
