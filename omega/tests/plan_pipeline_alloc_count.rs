@@ -11,7 +11,7 @@
 #![cfg(all(feature = "alloc-count", feature = "metal", target_os = "macos"))]
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-use proxima_test::alloc_count::{CountingAllocator, allocations};
+use proxima_test::alloc_count::{CountingAllocator, allocations, recorded_sizes, reset};
 use proxima_tensor::{DType, Extent, IndexMap, Op, QuantizedBlock, ScalarOp, append, projection};
 
 #[global_allocator]
@@ -169,5 +169,62 @@ fn a_warm_call_s_allocation_count_does_not_grow_with_extra_steps() {
         one_op_allocations, two_op_allocations,
         "a warm call's allocation count must not grow with an extra plan position -- \
          report BEFORE/AFTER: one_op={one_op_allocations} two_op={two_op_allocations}"
+    );
+}
+
+/// Names ROW 303's residual: not just the COUNT of a warm step's allocations
+/// but the SIZE of each one, in order, so the fix (or its owner-documented
+/// exceptions) can be pinned to a concrete list rather than a bare integer.
+/// `reset` before the warm call isolates this call's ring window from the
+/// cold call and any earlier test in this binary.
+#[test]
+fn a_warm_plan_hit_s_allocations_are_named_by_size() {
+    const EXTENT: u32 = 4;
+    let (program, _root) = two_step_identity_chain(EXTENT);
+    let block = [1.0f32, 2.0, 3.0, 4.0];
+    let plan = omega::plan(&program, &[], &[QuantizedBlock::Float32(&block)], &[])
+        .expect("plans the two-step identity chain");
+
+    omega::execute_plan_with_placements(&plan, &[QuantizedBlock::Float32(&block)], &[], &[])
+        .expect("first (cold) call warms the plan's pipeline cache");
+
+    reset();
+    omega::execute_plan_with_placements(&plan, &[QuantizedBlock::Float32(&block)], &[], &[])
+        .expect("second (warm) call, the one under proof");
+    let warm_call_allocations = allocations();
+    let warm_call_sizes = recorded_sizes();
+
+    reset();
+    omega::execute_plan_with_placements(&plan, &[QuantizedBlock::Float32(&block)], &[], &[])
+        .expect("third (warm) call, confirms the second call's count is steady-state");
+    let third_call_allocations = allocations();
+    let third_call_sizes = recorded_sizes();
+
+    eprintln!(
+        "warm_call_allocations={warm_call_allocations} warm_call_sizes={warm_call_sizes:?}"
+    );
+    eprintln!(
+        "third_call_allocations={third_call_allocations} third_call_sizes={third_call_sizes:?}"
+    );
+    assert_eq!(
+        warm_call_allocations,
+        warm_call_sizes.len(),
+        "the ring must have captured every allocation this call made"
+    );
+    assert_eq!(
+        warm_call_sizes, third_call_sizes,
+        "two consecutive warm calls must allocate the identical sizes in the identical \
+         order -- a residual that grew or shrank between them would mean it is not yet \
+         steady-state"
+    );
+    // ROW 303's residual, named rather than merely counted: 18 allocations,
+    // steady-state, every warm call against this plan. A later landing that
+    // removes some of these updates this assertion alongside the fix that
+    // earns it -- see that landing's own commit for which sizes moved and why.
+    assert_eq!(
+        warm_call_allocations, 18,
+        "a warm plan-hit step's allocation count moved -- update this assertion \
+         alongside whatever fix (or regression) changed it: sizes in order: \
+         {warm_call_sizes:?}"
     );
 }
