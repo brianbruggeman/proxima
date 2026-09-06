@@ -1602,6 +1602,7 @@ fn bindings(resolved: &BoundOp) -> Vec<Binding> {
 /// updated to match. Walking `bindings` itself makes that drift impossible:
 /// there is only one list, and both the encoder bind loop and the hazard
 /// walk read the same one.
+#[cfg(feature = "metal")]
 pub(crate) fn hazard_read_nodes(bindings: &[Binding]) -> impl Iterator<Item = NodeId> + '_ {
     bindings.iter().filter_map(|binding| match binding {
         Binding::Input(node) | Binding::Indices(node) => Some(*node),
@@ -1614,6 +1615,7 @@ pub(crate) fn hazard_read_nodes(bindings: &[Binding]) -> impl Iterator<Item = No
 /// `bindings` list always has exactly one `Binding::Output`. `None` only if
 /// `bindings` is malformed (a validation bug upstream, not a runtime case a
 /// caller should expect to hit).
+#[cfg(feature = "metal")]
 pub(crate) fn hazard_write_node(bindings: &[Binding]) -> Option<NodeId> {
     bindings.iter().find_map(|binding| match binding {
         Binding::Output(node) => Some(*node),
