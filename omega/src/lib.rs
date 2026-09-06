@@ -41,6 +41,8 @@ extern crate alloc;
 pub mod backend;
 #[cfg(feature = "cuda")]
 pub mod cuda;
+#[cfg(feature = "alloc")]
+mod epilogue;
 pub mod error;
 #[cfg(all(feature = "metal", target_os = "macos"))]
 pub mod metal;

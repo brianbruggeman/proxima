@@ -2665,20 +2665,16 @@ fn push_body_steps(
     indent: &str,
     element_type: &str,
 ) -> String {
-    for (index, step) in body.steps.iter().enumerate() {
-        let args: Vec<String> = step
-            .args
-            .iter()
-            .map(|arg| match arg {
-                StepArg::Operand(operand_index) => format!("scratch[{operand_index}]"),
-                StepArg::Step(step_index) => format!("step{step_index}"),
-            })
-            .collect();
-        let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
-        let expr = scalar_op_expr(step.op, &arg_refs);
-        source.push_str(&format!("{indent}{element_type} step{index} = {expr};\n"));
-    }
-    format!("step{}", body.steps.len().saturating_sub(1))
+    crate::epilogue::declare_steps(
+        source,
+        body,
+        "scratch",
+        "step",
+        scalar_op_expr,
+        |source, index, expr| {
+            source.push_str(&format!("{indent}{element_type} step{index} = {expr};\n"));
+        },
+    )
 }
 
 // only the row-blocked packed-matmul path's caller ever passes `true` --
@@ -3423,22 +3419,18 @@ fn push_epilogue_body_steps(
     indent: &str,
     element_type: &str,
 ) -> String {
-    for (index, step) in body.steps.iter().enumerate() {
-        let args: Vec<String> = step
-            .args
-            .iter()
-            .map(|arg| match arg {
-                StepArg::Operand(operand_index) => format!("epi_scratch[{operand_index}]"),
-                StepArg::Step(step_index) => format!("epi_step{step_index}"),
-            })
-            .collect();
-        let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
-        let expr = scalar_op_expr(step.op, &arg_refs);
-        source.push_str(&format!(
-            "{indent}{element_type} epi_step{index} = {expr};\n"
-        ));
-    }
-    format!("epi_step{}", body.steps.len().saturating_sub(1))
+    crate::epilogue::declare_steps(
+        source,
+        body,
+        "epi_scratch",
+        "epi_step",
+        scalar_op_expr,
+        |source, index, expr| {
+            source.push_str(&format!(
+                "{indent}{element_type} epi_step{index} = {expr};\n"
+            ));
+        },
+    )
 }
 
 /// The untouched-epilogue convention [`BoundOpKind::Reduce::epilogue_body`]'s
