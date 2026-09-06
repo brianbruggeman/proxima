@@ -23575,6 +23575,65 @@ Run the resulting `target/release/deps/proxima_model_interop-*` binary's `bind::
 | --- | --- | --- | --- | --- |
 | 2026-09-06 | none landed -- `docs(tensor): row 319 llama's q6_k kernel on the output head` only | default-on Q6_K ggml port (landed at `d1bb4eb`, ahead of this row) is confirmed the right default: output-head ablation shows it 9.6% faster than the pair-dot body it replaced (45.09 vs 40.75 GB/s), full-decode pooled signal inside CoV (mixed per-round), quality unchanged on `exact_match`/`top1`, `kl_max` rises 38.3% (inside the 2x kill threshold) | 3 interleaved rounds, 5 datapoints/arm/round (15 pooled); pooled CoV A 1.235%/B 1.235% (gpu_exec); ablation (one run/arm, no CoV) head cost 2.3841ms(A)/2.6377ms(B) | quiet gate (names-only + `gpu_load_genera`, load-1<10) loud for ~6.5 of 15 allotted minutes (a concurrent ROW 318 determinism experiment's load generator), cleared to load-1 2.07 with zero matching processes before the bench window opened |
 
+## ROW 320 -- decode text DID diverge under a second decode oracle's GPU contention; the barrier counter is fixed and now reads real per-run totals
+
+**Card:** `fix(interop): determinism harness sums the loop's own per-step barrier count` (`test/determinism-round-2`, off `main` at `d403937`). **Worktree/branch:** `proxima-wt-race2`, `test/determinism-round-2`.
+
+**Question.** ROW 318's contention generator (a single streaming Metal buffer loop) never reproduced ROW 313's one-off `"<unk>\n\ndef fibonacci("` divergence, and its own `barriers_emitted` read 0 on every run -- flagged as an unresolved residual, not a negative result on the hazard-tracker theory. Root-caused separately (`barrier-counter-read.md`): `metal_stage_totals()` is a snapshot-and-reset counter, and `run_decode_loop`'s own per-step body (`generate.rs:2175`/`:2762`) already drains it every step to print `token_breakdown_metal`'s `barriers=` field, so the harness's POST-LOOP read (`bind.rs:3943`, pre-fix) always observed the residue of the last step's own drain -- 0, structurally, regardless of dispatch or contention. Two questions: (1) does the fixed harness read the real barrier count, and (2) does ROW 313's divergence reproduce when the contention generator IS a second full decode oracle (own command buffers, arena, plan cache, readback) rather than a single streaming-copy loop?
+
+**Fix (code, no code changed in this row's oracle path itself).** `LogitsSink::observe` (`generate.rs:988-1006`) gains a `barriers_step: u64` parameter -- the per-step `metal_stage.barriers_emitted` value already in scope at both call sites (`generate.rs:2286`/`:2773`, cfg-gated `feature = "instrument", feature = "metal", target_os = "macos"`, `0` otherwise). A new `#[cfg(test)]` `LogitsSink::SumBarriers(&'sink mut u64)` variant accumulates it across steps; the harness (`bind.rs:3890`) now calls `run_decode_loop_observed` with a `SumBarriers` sink instead of `run_decode_loop`'s hardcoded `Discard`, and reads its own local `barriers` total instead of a second `metal_stage_totals()` call. Chosen over returning a running total from `run_decode_loop_observed` (which would touch the 3-tuple return type at ~7 call sites across `bind.rs`/`quality.rs`/`generate.rs` instead of 2) because it changes fewer signatures. Build: `cargo test -p proxima-model-interop --release --features metal,instrument --no-run`, EXIT 0.
+
+**Setup.** Contention generator: a SECOND decode oracle, `bind::real_openchat_file::runs_the_cached_decode_loop_on_the_metal_backend_and_reports_the_plan_cache` (`PROXIMA_MAX_TOKENS=64`), looped in the background (`while true; do <oracle>; done`), its `proxima_model_i` process EXPECTED in this slice's quiet gate. Harness: the fixed `decode_text_is_deterministic_across_repeated_runs` (`PROXIMA_MAX_TOKENS=32`), same oracle prompt, hashing `generated_text` (FNV-1a) and reporting the first divergent token index against run 0.
+
+**Quiet gate.** Names-only pgrep (`llama-bench|llama-cli|proxima_model_i|device_streamin|matvec_roofline|omega-|^cargo$|^rustc$|nextest|cargo-nextest`) loud (load-1 33.12, dropping) for the first ~2 minutes of the allotted 15, cleared at load-1 9.80 with zero matching processes before the load generator (and any timed run) started.
+
+**Runs.**
+
+| block | encoder | load | runs | distinct_texts | divergent runs (first token idx) | hash | barriers/run |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| 1 | concurrent | yes (2nd decode oracle) | 20 | **3** | run 4 (idx 17), run 17 (idx 0) | `9e539d6c8e27b5a1` x17, `b4c9769ad248f1ee` x1 (run 4), `42e84b5487c561c9` x1 (run 17) | 10336 (every run) |
+| 2 | serial | yes (2nd decode oracle) | 20 | 1 | none | `9e539d6c8e27b5a1` (all 20) | 0 (every run) |
+| 3 | concurrent | no (control, oracle loop killed and confirmed dead via pgrep) | 10 | 1 | none | `9e539d6c8e27b5a1` (all 10) | 10336 (every run) |
+
+Run 4's divergent text: `"Here is a simple Python function that returns the nth Fibonacci number using a recursive approach:\n\n```python\ndef fibonacci"` -- diverges from the canonical text at token 17, a paraphrase, not a garbled token. Run 17's divergent text: `"<unk>\n\ndef fibonacci(n):\n    if n <= 0:\n        return \"Input should be a positive integer\"\n    elif"` -- an `<unk>` at token 0, the SAME failure shape ROW 313 first observed (`"<unk>\n\ndef fibonacci("`). `plan_hits=29` on every run in every block, matching every prior row.
+
+**Barrier counter, fixed.** Every concurrent run (blocks 1 and 3, loaded and unloaded) now reads `barriers=10336` -- nonzero, and identical run to run within a block, confirming the fix reads the real per-run total rather than the always-0 post-loop residue ROW 318 reported. Every serial run (block 2) reads `barriers=0`, consistent with the concurrent-dispatch-only `DispatchType::Concurrent` arm being the sole `BARRIERS_EMITTED` increment site (`omega/src/metal.rs:1517-1519`) -- serial dispatch never takes that arm, so 0 is the correct value there, not a wiring gap.
+
+**Load evidence (uptime before/after each block, load-1/5/15):**
+
+| block | before | after |
+| --- | --- | --- |
+| gate clear / load generator start | 9.80 / -- / -- | -- |
+| 1 concurrent+2nd-oracle (20) | (generator running since gate clear) | 15.03 / 27.87 / 20.64 |
+| 2 serial+2nd-oracle (20) | 15.03 / 27.87 / 20.64 | 2.73 / 8.13 / 13.15 (generator killed between blocks) |
+| 3 concurrent, control (10) | 2.73 / 8.13 / 13.15 | 4.64 / 6.97 / 11.95 |
+
+**Mechanism.** The two concurrent-block divergences (run 4's paraphrase, run 17's `<unk>` reproduction of ROW 313's own failure signature) occurred under a contention shape ROW 318's single streaming-buffer generator did not create: a second FULL decode oracle contending for the same GPU command queue, with its own command buffers, arena, plan cache, and readback -- the shape ROW 318 itself named as the untested gap ("three oracles overlapping on the GPU" per ROW 313, vs one streaming-copy loop). Serial dispatch, run alongside the identical second-oracle contention, produced 0 divergences across 20 runs and 0 barriers (the arm never inserts them) -- consistent with ROW 313/317's working theory that the concurrent-dispatch path's `HazardTracker` (`hazard_step`, `omega/src/metal.rs`) is missing a barrier the serial path does not need, since serial never overlaps dispatches for the hazard to race against. This row does not name which hazard pair is missing -- that requires the trace-every-`hazard_step`-decision-for-one-token instrument ROW 317's own slice proposed and this row's budget did not include.
+
+**Residual, named not hidden.** (1) The unloaded concurrent control (block 3, 10 runs) produced 0 divergences -- consistent with, but not proof of, a race whose window narrows without a second oracle's contention; 10 runs is a small N against a race that surfaced twice in 20 loaded runs. (2) `barriers=10336` is IDENTICAL across every concurrent run in both blocks 1 and 3, including the two divergent runs (4 and 17) -- the fixed counter counts total barrier insertions, not their placement, so an identical count does not rule out a hazard being resolved by a barrier in the wrong position/order on the divergent runs; distinguishing that needs the per-`hazard_step` trace named above. (3) This row did not re-run fusion-off, per ROW 313's own note that fusion-off never diverged in that session -- out of this row's 30-minute budget.
+
+**Re-prove command:**
+```sh
+cd /Users/brianbruggeman/repos/slot-0/proxima  # or a fresh worktree off main
+git worktree add ../proxima-wt-race2-repro -b test/determinism-round-2-repro main
+cd ../proxima-wt-race2-repro
+CARGO_TARGET_DIR=$(pwd)/target CARGO_TERM_COLOR=never \
+  cargo test -p proxima-model-interop --release --features metal,instrument --no-run
+BIN=$(find target/release/deps -maxdepth 1 -name 'proxima_model_interop-*' -perm -u+x)
+nohup bash -c "while true; do PROXIMA_MAX_TOKENS=64 \"$BIN\" \
+  bind::real_openchat_file::runs_the_cached_decode_loop_on_the_metal_backend_and_reports_the_plan_cache \
+  --exact --ignored --nocapture --test-threads=1; done" &
+PROXIMA_DISPATCH=concurrent PROXIMA_MAX_TOKENS=32 PROXIMA_DETERMINISM_RUNS=20 "$BIN" \
+  bind::real_openchat_file::decode_text_is_deterministic_across_repeated_runs \
+  --exact --ignored --nocapture --test-threads=1
+```
+
+### Changelog
+
+| Date | Change | Δ vs prior | CoV / runs | Host loadout |
+| --- | --- | --- | --- | --- |
+| 2026-09-05 | `fix(interop): determinism harness sums the loop's own per-step barrier count` + `docs(tensor): row 320 decode determinism under a second decode oracle` | ROW 318's always-0 `barriers_emitted` was a snapshot-and-reset counter read twice (once inside the loop per step, once by the harness after the loop already drained it) -- fixed by summing the loop's own per-step reads through a new `LogitsSink::SumBarriers` variant; with the fix AND a second full decode oracle as the contention generator (vs ROW 318's single streaming-buffer loop), concurrent dispatch diverged twice in 20 loaded runs (`distinct_texts=3`), including a reproduction of ROW 313's own `<unk>` failure signature; serial dispatch under identical contention stayed at `distinct_texts=1` across 20 runs with `barriers=0`; concurrent barriers now read 10336/run (nonzero) in every concurrent run, loaded and unloaded | 3 arms, 20/20/10 runs; single-run-per-config protocol (no repeated rounds), no CoV computed | quiet gate (names-only, load-1<10) loud (33.12, falling) for ~2 of 15 allotted minutes then cleared to 9.80 before the load generator and first timed run started |
+
 ## ROW 321 -- `q6k_head_and_layer_shape_roofline_ladder`'s first-ever run: head's own bandwidth reads near ROW 319's in-program figure, but the arm's own parity gate fails and aborts before the layer shape runs
 
 **Card:** `omega/tests/matvec_roofline_ladder.rs` (unchanged since it landed at `f030ccc`, `test(omega): roofline ladder arm for the q6_k output-head shape` -- this row is that arm's first execution; the box never went quiet in the landing session). **Worktree/branch:** `proxima-wt-r321`, `docs/row-321`, off `main` at `f030ccc`.
@@ -23604,6 +23663,7 @@ CARGO_TARGET_DIR=/Users/brianbruggeman/repos/slot-0/proxima-wt-r321/target CARGO
   -- --ignored --nocapture q6k_head_and_layer_shape_roofline_ladder
 ```
 (expected: `test result: FAILED`, exit 101, head arm's line printed before the panic.)
+
 
 ### Changelog
 
