@@ -106,7 +106,6 @@ workspace = true
 
 [build-dependencies]
 proxima-build.workspace = true
-toml.workspace = true
 
 [[bench]]
 name = "bench_ring"
