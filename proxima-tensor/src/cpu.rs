@@ -26285,7 +26285,7 @@ mod tests {
     #[cfg(feature = "q4k-int8-dot")]
     #[test]
     fn quant_dot_rejects_a_codec_with_no_int8_dot_kernel() {
-        let weight_row = vec![0u8; 34]; // one Q8_0 block: 2-byte f16 scale + 32 nibble-packed bytes
+        let weight_row = vec![0u8; Q8_0_BLOCK_BYTES];
         let activation_q8k = vec![0u8; Q8K_BLOCK_BYTES];
 
         let fused_error =

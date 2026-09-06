@@ -341,6 +341,10 @@ metal-q4k-ggml-port = ["metal"]
 [dependencies]
 bytemuck = { version = "1.25.2", optional = true }
 pollster = { version = "1.0.1", optional = true }
+# per-codec block byte/element geometry `msl.rs`'s `PackedCodec` reads --
+# the one place those numbers are defined; alloc-tier only, `msl.rs` never
+# needs proxima-gguf's std-only parser/config surface.
+proxima-gguf = { path = "../proxima-gguf", default-features = false, features = ["alloc"] }
 proxima-tensor = { path = "../proxima-tensor", default-features = false, features = ["alloc"] }
 thiserror = { workspace = true, default-features = false }
 # `wgsl`: this crate emits WGSL, never SPIR-V/HLSL text, so no other shader
