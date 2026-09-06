@@ -3264,17 +3264,66 @@ mod tests {
         assert_eq!(BoundOpKind::Constant { value: 0.0 }.name(), "constant");
     }
 
+    /// Whether `bound`'s `epilogue_body` differs from the identity leaf every
+    /// `BoundOpKind::Reduce` starts with -- the only witness, on the BOUND
+    /// output itself, that `reduce_epilogue_fusion` actually folded a
+    /// consumer into this reduce (as opposed to merely being a candidate the
+    /// raw-`Op`-shaped census in `reduce_epilogue_candidates` proposed but
+    /// that never applied because cached-attention fusion had already
+    /// absorbed one side of the pair).
+    #[cfg(feature = "reduce-epilogue-fusion")]
+    fn count_fused_epilogues(bound: &[BoundOp]) -> usize {
+        bound
+            .iter()
+            .filter(|op| {
+                matches!(&op.kind, BoundOpKind::Reduce { epilogue_body, .. }
+                    if *epilogue_body != ComposedBody::leaf(ScalarOp::Identity))
+            })
+            .count()
+    }
+
     #[test]
     #[cfg(feature = "cached-attention-streaming")]
     fn cached_attention_rewrite_replaces_the_bound_attention_subgraph() {
         let (program, _, _) = crate::spec::mistral_cached_forward_program(32, 16, 24, 4, 2, 4, 1)
             .expect("cached attention fixture builds");
         let shapes = crate::shape::infer(&program, &[1, 1]).expect("cached attention infers");
-        let plain = bind_plain(&program, &shapes, &[]).expect("plain bind succeeds");
-        let rewritten = bind(&program, &shapes, &[]).expect("rewritten bind succeeds");
+        let outputs: &[NodeId] = &[];
+        let plain = bind_plain(&program, &shapes, outputs).expect("plain bind succeeds");
+        let cached_only = bind_cached_attention_fusion(&program, &shapes, outputs, true)
+            .expect("cached-attention-only bind succeeds");
+        let rewritten = bind(&program, &shapes, outputs).expect("rewritten bind succeeds");
 
         assert_eq!(plain.len(), 48, "fixture baseline bound operation count");
-        assert_eq!(rewritten.len(), 26, "fixture fused bound operation count");
+        assert_eq!(
+            cached_only.len(),
+            26,
+            "fixture cached-attention-only fused bound operation count"
+        );
+        // `reduce-epilogue-fusion` is a second, independent bind-time pass
+        // that runs after the cached-attention rewrite this test targets,
+        // additionally folding an epilogue-eligible Elementwise into its
+        // Reduce whenever the feature is compiled in. Asserting the relation
+        // against `count_fused_epilogues`'s own read of `rewritten`, rather
+        // than a second hardcoded literal for the post-epilogue count, keeps
+        // this honest across that feature's on/off states instead of
+        // silently asserting the pre-epilogue number under both (the defect
+        // this row fixes: `docs/discipline.md` for the mechanism).
+        #[cfg(feature = "reduce-epilogue-fusion")]
+        assert_eq!(
+            cached_only.len() - rewritten.len(),
+            count_fused_epilogues(&rewritten),
+            "every bound op the reduce-epilogue pass removed corresponds to \
+             one reduce in the rewritten program that actually carries a \
+             fused epilogue"
+        );
+        #[cfg(not(feature = "reduce-epilogue-fusion"))]
+        assert_eq!(
+            rewritten.len(),
+            cached_only.len(),
+            "reduce-epilogue-fusion is compiled out; the cached-attention-only \
+             count is final"
+        );
         assert_eq!(
             rewritten
                 .iter()
@@ -3327,12 +3376,26 @@ mod tests {
     /// (`939`) is this exact fixture's own baseline bound-op count with the
     /// fusion matcher returning zero candidates (`cached_attention_single_
     /// range_candidates` never firing is exactly the pre-existing defect
-    /// this row fixes); `rewritten.len()` (`619`) is what fusing one
-    /// `BoundOpKind::CachedAttention` per layer actually removes -- 320
-    /// bound ops over 32 layers (10/layer), not the 6/layer a raw-`Op`
-    /// count would suggest, because `BoundOpBuilder` already fuses several
-    /// of the unfused chain's `Elementwise` nodes into their consuming
-    /// `Reduce` before this matcher ever runs.
+    /// this row fixes); the cached-attention-only fused count (`619`) is
+    /// what fusing one `BoundOpKind::CachedAttention` per layer actually
+    /// removes -- 320 bound ops over 32 layers (10/layer), not the 6/layer a
+    /// raw-`Op` count would suggest, because `BoundOpBuilder` already fuses
+    /// several of the unfused chain's `Elementwise` nodes into their
+    /// consuming `Reduce` before this matcher ever runs. When
+    /// `reduce-epilogue-fusion` is also compiled in, a second independent
+    /// bind-time pass additionally folds 96 epilogue-eligible reduces on top
+    /// of that (`619 -> 523`). The expected count below is checked against
+    /// `count_fused_epilogues`'s own read of which `rewritten` reduces
+    /// actually carry a fused epilogue body, not
+    /// `reduce_epilogue_candidates`'s raw-`Op`-shaped census directly --
+    /// that census over-counts here (225 candidates on this fixture, not
+    /// 96) because most of its matches sit on nodes the cached-attention
+    /// rewrite already absorbed into a `BoundOpKind::CachedAttention` before
+    /// `reduce_epilogue_fusion` ever runs, so they silently fail its
+    /// `by_node` lookup instead of applying. Asserting a second hardcoded
+    /// literal for the post-epilogue count instead of this relation is
+    /// exactly the defect this row fixes: it asserted the pre-epilogue `619`
+    /// against an actual `523` for a full owner-visible session.
     #[test]
     #[cfg(feature = "cached-attention-streaming")]
     fn single_range_cached_attention_fuses_one_step_per_layer_on_the_real_openchat_shape() {
@@ -3347,6 +3410,8 @@ mod tests {
         let shapes = crate::shape::infer(&program, &[1, 71])
             .expect("one new position against a 71-position merged range infers");
         let plain = bind_plain(&program, &shapes, &outputs).expect("plain bind succeeds");
+        let cached_only = bind_cached_attention_fusion(&program, &shapes, &outputs, true)
+            .expect("cached-attention-only bind succeeds");
         let rewritten = bind(&program, &shapes, &outputs).expect("fused bind succeeds");
 
         assert_eq!(
@@ -3355,9 +3420,24 @@ mod tests {
             "openchat-shaped single-range baseline bound operation count"
         );
         assert_eq!(
-            rewritten.len(),
+            cached_only.len(),
             619,
-            "openchat-shaped single-range fused bound operation count"
+            "openchat-shaped single-range cached-attention-only fused bound operation count"
+        );
+        #[cfg(feature = "reduce-epilogue-fusion")]
+        assert_eq!(
+            cached_only.len() - rewritten.len(),
+            count_fused_epilogues(&rewritten),
+            "every bound op the reduce-epilogue pass removed corresponds to \
+             one reduce in the rewritten program that actually carries a \
+             fused epilogue"
+        );
+        #[cfg(not(feature = "reduce-epilogue-fusion"))]
+        assert_eq!(
+            rewritten.len(),
+            cached_only.len(),
+            "reduce-epilogue-fusion is compiled out; the cached-attention-only \
+             count is final"
         );
         assert_eq!(
             rewritten
