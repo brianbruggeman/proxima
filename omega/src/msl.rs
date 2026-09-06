@@ -7482,11 +7482,23 @@ mod tests {
 
         // math mode -- folded into `kernel_cache_key` directly now (never
         // embedded in `emit`'s own source text, so no source-side assertion
-        // here: `math_mode_cache_key_tests` covers the token pair itself).
+        // here: `math_mode_cache_key_tests` covers the token set itself).
         assert_ne!(
             kernel_cache_key(&bound, &q4k, 'S').expect("cache key builds"),
             kernel_cache_key(&bound, &q4k, 'R').expect("cache key builds"),
             "math mode must change the identity, or a Safe- and a Relaxed-compiled \
+             kernel could share one PIPELINE_CACHE entry"
+        );
+        assert_ne!(
+            kernel_cache_key(&bound, &q4k, 'S').expect("cache key builds"),
+            kernel_cache_key(&bound, &q4k, 'F').expect("cache key builds"),
+            "math mode must change the identity, or a Safe- and a Fast-compiled \
+             kernel could share one PIPELINE_CACHE entry"
+        );
+        assert_ne!(
+            kernel_cache_key(&bound, &q4k, 'R').expect("cache key builds"),
+            kernel_cache_key(&bound, &q4k, 'F').expect("cache key builds"),
+            "math mode must change the identity, or a Relaxed- and a Fast-compiled \
              kernel could share one PIPELINE_CACHE entry"
         );
 
