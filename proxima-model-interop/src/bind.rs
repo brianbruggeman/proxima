@@ -3560,6 +3560,65 @@ mod real_openchat_file {
         );
     }
 
+    /// ROW 346 (`proxima-tensor/docs/discipline.md`): our own CPU greedy
+    /// trajectory (`gpu_layers: 0`, `Engine::Cpu`) for the quality
+    /// harness's first 8 prompts (`crate::quality::parse_prompts_jsonl`'s
+    /// own fixture, `PROXIMA_QUALITY_PROMPTS` prompts front-to-back), 8
+    /// greedy tokens each -- the exact CPU-side counterpart this row
+    /// compares against `llama-cli -ngl 0 --temp 0 -n 8`'s own generated
+    /// ids for the SAME prompts. Prints one `row346_prompt` line per
+    /// prompt with its generated token ids, so a human (or this row's own
+    /// authoring pass) reads them off `--nocapture` without parsing test
+    /// harness internals.
+    #[test]
+    #[ignore = "depends on a host-local openchat gguf checkout outside this repo"]
+    fn row346_reports_cpu_greedy_token_ids_for_the_quality_prompts() {
+        let model_path = ServingConfig::default().model_path;
+        let path = std::path::Path::new(model_path);
+        if !path.exists() {
+            eprintln!("skipping: no host-local openchat gguf fixture at {model_path}");
+            return;
+        }
+
+        let mapped = MappedGguf::open(path).expect("mmap host-local openchat gguf fixture");
+        let file_bytes = mapped.as_slice();
+        let parsed = proxima_gguf::pipe::parse_complete(file_bytes)
+            .expect("parse host-local openchat gguf fixture");
+        let model = LoadedModel::load(&parsed, file_bytes)
+            .expect("load real openchat checkpoint through the public path");
+
+        let fixture_bytes = std::fs::read(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/fixtures/quality_prompts.jsonl"
+        ))
+        .expect("quality_prompts.jsonl fixture ships in-tree");
+        let mut prompts = crate::quality::parse_prompts_jsonl(&fixture_bytes)
+            .expect("shipped fixture is well-formed jsonl");
+        let prompt_count = std::env::var("PROXIMA_QUALITY_PROMPTS")
+            .ok()
+            .and_then(|value| value.parse::<usize>().ok())
+            .unwrap_or(8);
+        prompts.truncate(prompt_count);
+        let max_tokens = decode_loop_max_tokens();
+
+        let serving_config = crate::generate::supported_serving_config(0);
+        for prompt in &prompts {
+            let mut runtime = crate::generate::BackendRuntime::new(&serving_config);
+            let (ids, text, stopped_by_eos) = model
+                .run_decode_loop(&prompt.text, max_tokens, &serving_config, &mut runtime)
+                .expect("cpu greedy decode for a quality prompt");
+            let ids_string = ids
+                .iter()
+                .map(u32::to_string)
+                .collect::<alloc::vec::Vec<_>>()
+                .join(" ");
+            std::println!(
+                "row346_prompt id={} stopped_by_eos={stopped_by_eos} ids=[{ids_string}] text={text:?}",
+                prompt.id
+            );
+        }
+    }
+
     /// Same cached decode loop, on the Metal backend instead of CPU:
     /// `gpu_layers: GPU_LAYERS_ALL` (`-ngl all`) makes `generate::select_backend`
     /// resolve `Engine::Gpu`, so `LoadedModel::run_decode_loop` (`pub(crate)`,
