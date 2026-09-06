@@ -78,6 +78,12 @@ use omega::backend::{Engine, Plan, execute_plan_named, mark_resident, plan_named
 // `metal`+macos gate that type itself lives behind.
 #[cfg(all(feature = "metal", target_os = "macos"))]
 use omega::backend::set_math_mode;
+// `set_numeric_policy` -- unlike `math_mode`/`dispatch_type`, its own
+// parameter type is not Metal-specific, but every call site threading it in
+// today lives inside this same `metal`+macos gate (`ServingConfig::
+// numeric_policy`'s own doc), so it stays gated identically for now.
+#[cfg(all(feature = "metal", target_os = "macos"))]
+use omega::backend::set_numeric_policy;
 // `set_dispatch_type` (unlike `mark_resident` above) takes `metal::DispatchType`
 // in its own signature, so it needs the same `metal`+macos gate that type
 // itself lives behind -- same reasoning as `set_math_mode` above.
@@ -1510,6 +1516,14 @@ pub(crate) struct BackendRuntime {
     /// as `resident_names`/`mark_resident` above.
     #[cfg(all(feature = "metal", target_os = "macos"))]
     math_mode: omega::metal::MathMode,
+    /// `ServingConfig::numeric_policy`, read once at construction and
+    /// applied to every freshly-built [`Plan`] below, AFTER `math_mode`
+    /// (`ServingConfig::numeric_policy`'s own doc: the declared policy,
+    /// not `math_mode`'s narrower projection of it, is what must reach the
+    /// plan) -- same read-once-apply-per-build pattern as `math_mode`
+    /// immediately above.
+    #[cfg(all(feature = "metal", target_os = "macos"))]
+    numeric_policy: proxima_tensor::NumericPolicy,
     /// `ServingConfig::dispatch_type`, read once at construction and applied
     /// to every freshly-built [`Plan`] below (`set_dispatch_type`'s own call
     /// sites) -- same pattern as `math_mode` immediately above.
@@ -1539,6 +1553,8 @@ impl BackendRuntime {
             plans: alloc::collections::BTreeMap::new(),
             #[cfg(all(feature = "metal", target_os = "macos"))]
             math_mode: config.math_mode,
+            #[cfg(all(feature = "metal", target_os = "macos"))]
+            numeric_policy: config.numeric_policy,
             #[cfg(all(feature = "metal", target_os = "macos"))]
             dispatch_type: config.dispatch_type,
             #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
@@ -1585,6 +1601,7 @@ impl BackendRuntime {
                 #[cfg(target_os = "macos")]
                 {
                     set_math_mode(&mut plan, self.math_mode);
+                    set_numeric_policy(&mut plan, self.numeric_policy);
                     set_dispatch_type(&mut plan, self.dispatch_type);
                 }
                 Ok(plan)
@@ -1621,6 +1638,7 @@ impl BackendRuntime {
     ) -> Result<Evaluated, InteropError> {
         let shape = (symbols[0] as usize, symbols[1] as usize);
         let math_mode = self.math_mode;
+        let numeric_policy = self.numeric_policy;
         let dispatch_type = self.dispatch_type;
         let plan = Self::resolve_cached_plan(
             &mut self.placed_plans,
@@ -1635,6 +1653,7 @@ impl BackendRuntime {
                     outputs,
                     resident_names,
                     math_mode,
+                    numeric_policy,
                     dispatch_type,
                 )
             },
@@ -1659,6 +1678,7 @@ impl BackendRuntime {
     /// build path correct by construction -- there is no longer a second
     /// closure body that can forget the call.
     #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
+    #[allow(clippy::too_many_arguments, reason = "same shape as this file's other build_placed_plan callers, already allowed above")]
     fn build_placed_plan(
         program: &[Op],
         symbols: &[u64],
@@ -1666,11 +1686,17 @@ impl BackendRuntime {
         outputs: &[NodeId],
         resident_names: &BTreeSet<&str>,
         math_mode: omega::metal::MathMode,
+        numeric_policy: proxima_tensor::NumericPolicy,
         dispatch_type: omega::metal::DispatchType,
     ) -> Result<omega::metal::Plan, InteropError> {
         let mut plan = plan_named_placed(program, symbols, named, outputs)?;
         plan.mark_resident(resident_names);
         plan.set_math_mode(math_mode);
+        // AFTER `set_math_mode`: `set_math_mode` also narrows
+        // `plan.numeric_policy` to its own projection of `math_mode`
+        // (`Plan::set_math_mode`'s own doc), so this call, not that one,
+        // is what makes `config.numeric_policy` the plan's numeric policy.
+        plan.set_numeric_policy(numeric_policy);
         plan.set_dispatch_type(dispatch_type);
         Ok(plan)
     }
@@ -1704,6 +1730,7 @@ impl BackendRuntime {
     ) -> Result<(Evaluated, Vec<OpGpuTiming>), InteropError> {
         let shape = (symbols[0] as usize, symbols[1] as usize);
         let math_mode = self.math_mode;
+        let numeric_policy = self.numeric_policy;
         let dispatch_type = self.dispatch_type;
         let plan = Self::resolve_cached_plan(
             &mut self.placed_plans,
@@ -1718,6 +1745,7 @@ impl BackendRuntime {
                     outputs,
                     resident_names,
                     math_mode,
+                    numeric_policy,
                     dispatch_type,
                 )
             },
@@ -1771,6 +1799,7 @@ impl BackendRuntime {
     ) -> Result<omega::metal::DispatchTimedOutcome, InteropError> {
         let shape = (symbols[0] as usize, symbols[1] as usize);
         let math_mode = self.math_mode;
+        let numeric_policy = self.numeric_policy;
         let dispatch_type = self.dispatch_type;
         let plan = Self::resolve_cached_plan(
             &mut self.placed_plans,
@@ -1785,6 +1814,7 @@ impl BackendRuntime {
                     outputs,
                     resident_names,
                     math_mode,
+                    numeric_policy,
                     dispatch_type,
                 )
             },
@@ -3617,6 +3647,7 @@ mod placed_plan_mode_tests {
             &[identity_node],
             &resident_names,
             omega::metal::MathMode::Safe,
+            proxima_tensor::NumericPolicy::BitExact,
             omega::metal::DispatchType::Serial,
         )
         .expect("plans the identity program under an explicit non-default mode");
@@ -3632,6 +3663,50 @@ mod placed_plan_mode_tests {
             omega::metal::DispatchType::Serial,
             "a freshly built placed plan must carry the caller's dispatch type, \
              not DispatchType::default() (Concurrent)"
+        );
+        assert_eq!(
+            plan.numeric_policy(),
+            proxima_tensor::NumericPolicy::BitExact,
+            "a freshly built placed plan must carry the caller's OWN numeric policy, \
+             not MathMode::Safe's own projection of it (BitExact, which happens to \
+             coincide here) -- see set_numeric_policy's ordering doc on build_placed_plan"
+        );
+    }
+
+    /// Names the regression `build_placed_plan`'s call ordering fixes: a
+    /// caller declaring `ReassociationPermitted` (this crate's own default,
+    /// `ServingConfig::numeric_policy`'s doc) alongside `MathMode::Relaxed`
+    /// must see `ReassociationPermitted` on the resulting plan, not
+    /// `set_math_mode`'s narrower projection of `Relaxed` -- the two agree
+    /// only because `set_math_mode(Relaxed)` also projects to
+    /// `ReassociationPermitted` today (`Plan::set_math_mode`'s own doc
+    /// table), so this asserts the field the caller actually asked for,
+    /// not a coincidence of the current projection.
+    #[test]
+    fn build_placed_plan_s_numeric_policy_wins_over_math_mode_s_own_projection() {
+        let (program, identity_node) = named_identity_program();
+        let data = [1.0f32, 2.0, 3.0, 4.0];
+        let named: [(&str, QuantizedBlock<'_>); 1] = [("x", QuantizedBlock::Float32(&data))];
+        let resident_names: BTreeSet<&str> = BTreeSet::new();
+
+        let plan = BackendRuntime::build_placed_plan(
+            &program,
+            &[],
+            &named,
+            &[identity_node],
+            &resident_names,
+            omega::metal::MathMode::Safe,
+            proxima_tensor::NumericPolicy::ReassociationPermitted,
+            omega::metal::DispatchType::Serial,
+        )
+        .expect("plans the identity program under a policy MathMode::Safe would never pick");
+
+        assert_eq!(
+            plan.numeric_policy(),
+            proxima_tensor::NumericPolicy::ReassociationPermitted,
+            "set_numeric_policy must win over set_math_mode's own BitExact projection of \
+             MathMode::Safe -- if this reads BitExact, the ordering in build_placed_plan \
+             regressed"
         );
     }
 }
