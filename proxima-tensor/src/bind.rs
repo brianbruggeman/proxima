@@ -3637,6 +3637,60 @@ mod tests {
             .any(|bound| matches!(bound.kind, BoundOpKind::CachedAttention { .. })));
     }
 
+    /// ROW 364's own artifact: the ACTUAL bound program the cached decode
+    /// fixture uses (`bind::bind`, fusion on -- not `bind_with_fusion(..,
+    /// false)`, which the rule-census fixture above deliberately holds off)
+    /// for the one-layer fixture, printed op-by-op so a diff against the
+    /// same test run on main names exactly which ops the epilogue-fusion
+    /// landing removed or reshaped. `--nocapture` to see the list; the
+    /// assertion below is the mechanical guard that the count does not
+    /// silently drift once this is landed as a real (non-throwaway) test.
+    #[test]
+    fn row_364_per_layer_bound_op_list() {
+        let (program, logits, roots) =
+            crate::spec::mistral_cached_forward_program(32, 16, 24, 4, 2, 4, 1)
+                .expect("one-layer cached decode fixture builds");
+        let shapes = crate::shape::infer(&program, &[1, 1]).expect("cached decode fixture infers");
+        let mut outputs = alloc::vec![logits];
+        for (even, odd, value) in &roots {
+            outputs.extend_from_slice(&[*even, *odd, *value]);
+        }
+        let bound = bind(&program, &shapes, &outputs)
+            .expect("the cached decode fixture binds through the real bind() path");
+
+        for (index, op) in bound.iter().enumerate() {
+            match &op.kind {
+                BoundOpKind::Elementwise { body, .. } => {
+                    let step_ops: Vec<ScalarOp> = body.steps.iter().map(|step| step.op).collect();
+                    std::println!(
+                        "row364 index={index} kind=elementwise step_ops={step_ops:?}"
+                    );
+                }
+                BoundOpKind::Reduce {
+                    epilogue_body,
+                    epilogue_broadcast_axes,
+                    ..
+                } => {
+                    let epilogue_ops: Vec<ScalarOp> =
+                        epilogue_body.steps.iter().map(|step| step.op).collect();
+                    std::println!(
+                        "row364 index={index} kind={} epilogue_broadcast_axes={epilogue_broadcast_axes:?} epilogue_ops={epilogue_ops:?}",
+                        op.kind.name()
+                    );
+                }
+                _ => {
+                    std::println!("row364 index={index} kind={}", op.kind.name());
+                }
+            }
+        }
+
+        assert_eq!(
+            bound.len(),
+            20,
+            "row 364 artifact: one-layer cached decode program's bound op count"
+        );
+    }
+
     #[test]
     #[cfg(feature = "cached-attention-streaming")]
     fn cached_attention_rewrite_accepts_the_omega_nonempty_cache_fixture() {
