@@ -1485,6 +1485,23 @@ fn select_backend(config: &ServingConfig) -> Engine {
 /// [`LoadedModel::generate_with_serving_config`] call. This crate never links
 /// `wgpu-backend`, so `Engine::Gpu` here always resolves to the Metal driver
 /// through [`omega::backend::GpuDriver::for_target`].
+/// [`BackendRuntime::math_mode`]/[`BackendRuntime::numeric_policy`]/
+/// [`BackendRuntime::dispatch_type`] -- the three `ServingConfig` knobs
+/// [`BackendRuntime::build_placed_plan`] applies together, in this order,
+/// to every freshly built [`omega::metal::Plan`]. A parameter struct
+/// rather than three positional arguments: every caller already copies
+/// all three off `self` in one statement before the plan-cache build
+/// closure, so one reference at the call site says what was already true
+/// by convention, and keeps `build_placed_plan` under clippy's
+/// `too_many_arguments` threshold without an `#[allow]`.
+#[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct PlanNumerics {
+    math_mode: omega::metal::MathMode,
+    numeric_policy: proxima_tensor::NumericPolicy,
+    dispatch_type: omega::metal::DispatchType,
+}
+
 #[cfg(feature = "metal")]
 pub(crate) struct BackendRuntime {
     engine: Engine,
@@ -1637,26 +1654,17 @@ impl BackendRuntime {
         output_placements: &[(NodeId, &PlacedBuffer, usize)],
     ) -> Result<Evaluated, InteropError> {
         let shape = (symbols[0] as usize, symbols[1] as usize);
-        let math_mode = self.math_mode;
-        let numeric_policy = self.numeric_policy;
-        let dispatch_type = self.dispatch_type;
+        let numerics = PlanNumerics {
+            math_mode: self.math_mode,
+            numeric_policy: self.numeric_policy,
+            dispatch_type: self.dispatch_type,
+        };
         let plan = Self::resolve_cached_plan(
             &mut self.placed_plans,
             &mut self.plan_hits,
             &mut self.plan_misses,
             shape,
-            || {
-                Self::build_placed_plan(
-                    program,
-                    symbols,
-                    named,
-                    outputs,
-                    resident_names,
-                    math_mode,
-                    numeric_policy,
-                    dispatch_type,
-                )
-            },
+            || Self::build_placed_plan(program, symbols, named, outputs, resident_names, &numerics),
         )?;
         Ok(execute_plan_named_with_placements(
             plan,
@@ -1677,27 +1685,32 @@ impl BackendRuntime {
     /// three closures through this one function makes every placed-plan
     /// build path correct by construction -- there is no longer a second
     /// closure body that can forget the call.
+    ///
+    /// Takes `numerics` as one reference rather than `math_mode`/
+    /// `numeric_policy`/`dispatch_type` as three positional copies --
+    /// [`PlanNumerics`] groups exactly the three [`ServingConfig`] knobs
+    /// every caller below already reads and threads together, so the
+    /// signature says that instead of leaving it to be true by convention
+    /// (and drops the argument count back under clippy's threshold without
+    /// an `#[allow]`).
     #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
-    #[allow(clippy::too_many_arguments, reason = "same shape as this file's other build_placed_plan callers, already allowed above")]
     fn build_placed_plan(
         program: &[Op],
         symbols: &[u64],
         named: &[(&str, QuantizedBlock<'_>)],
         outputs: &[NodeId],
         resident_names: &BTreeSet<&str>,
-        math_mode: omega::metal::MathMode,
-        numeric_policy: proxima_tensor::NumericPolicy,
-        dispatch_type: omega::metal::DispatchType,
+        numerics: &PlanNumerics,
     ) -> Result<omega::metal::Plan, InteropError> {
         let mut plan = plan_named_placed(program, symbols, named, outputs)?;
         plan.mark_resident(resident_names);
-        plan.set_math_mode(math_mode);
+        plan.set_math_mode(numerics.math_mode);
         // AFTER `set_math_mode`: `set_math_mode` also narrows
         // `plan.numeric_policy` to its own projection of `math_mode`
         // (`Plan::set_math_mode`'s own doc), so this call, not that one,
         // is what makes `config.numeric_policy` the plan's numeric policy.
-        plan.set_numeric_policy(numeric_policy);
-        plan.set_dispatch_type(dispatch_type);
+        plan.set_numeric_policy(numerics.numeric_policy);
+        plan.set_dispatch_type(numerics.dispatch_type);
         Ok(plan)
     }
 
@@ -1729,26 +1742,17 @@ impl BackendRuntime {
         output_placements: &[(NodeId, &PlacedBuffer, usize)],
     ) -> Result<(Evaluated, Vec<OpGpuTiming>), InteropError> {
         let shape = (symbols[0] as usize, symbols[1] as usize);
-        let math_mode = self.math_mode;
-        let numeric_policy = self.numeric_policy;
-        let dispatch_type = self.dispatch_type;
+        let numerics = PlanNumerics {
+            math_mode: self.math_mode,
+            numeric_policy: self.numeric_policy,
+            dispatch_type: self.dispatch_type,
+        };
         let plan = Self::resolve_cached_plan(
             &mut self.placed_plans,
             &mut self.plan_hits,
             &mut self.plan_misses,
             shape,
-            || {
-                Self::build_placed_plan(
-                    program,
-                    symbols,
-                    named,
-                    outputs,
-                    resident_names,
-                    math_mode,
-                    numeric_policy,
-                    dispatch_type,
-                )
-            },
+            || Self::build_placed_plan(program, symbols, named, outputs, resident_names, &numerics),
         )?;
         Ok(execute_plan_named_with_placements_op_timed(
             plan,
@@ -1798,26 +1802,17 @@ impl BackendRuntime {
         output_placements: &[(NodeId, &PlacedBuffer, usize)],
     ) -> Result<omega::metal::DispatchTimedOutcome, InteropError> {
         let shape = (symbols[0] as usize, symbols[1] as usize);
-        let math_mode = self.math_mode;
-        let numeric_policy = self.numeric_policy;
-        let dispatch_type = self.dispatch_type;
+        let numerics = PlanNumerics {
+            math_mode: self.math_mode,
+            numeric_policy: self.numeric_policy,
+            dispatch_type: self.dispatch_type,
+        };
         let plan = Self::resolve_cached_plan(
             &mut self.placed_plans,
             &mut self.plan_hits,
             &mut self.plan_misses,
             shape,
-            || {
-                Self::build_placed_plan(
-                    program,
-                    symbols,
-                    named,
-                    outputs,
-                    resident_names,
-                    math_mode,
-                    numeric_policy,
-                    dispatch_type,
-                )
-            },
+            || Self::build_placed_plan(program, symbols, named, outputs, resident_names, &numerics),
         )?;
         // Applied AFTER the cache lookup, not inside the build closure above:
         // this shape's `Plan` is just as likely to have been inserted by
@@ -3646,9 +3641,11 @@ mod placed_plan_mode_tests {
             &named,
             &[identity_node],
             &resident_names,
-            omega::metal::MathMode::Safe,
-            proxima_tensor::NumericPolicy::BitExact,
-            omega::metal::DispatchType::Serial,
+            &super::PlanNumerics {
+                math_mode: omega::metal::MathMode::Safe,
+                numeric_policy: proxima_tensor::NumericPolicy::BitExact,
+                dispatch_type: omega::metal::DispatchType::Serial,
+            },
         )
         .expect("plans the identity program under an explicit non-default mode");
 
@@ -3695,9 +3692,11 @@ mod placed_plan_mode_tests {
             &named,
             &[identity_node],
             &resident_names,
-            omega::metal::MathMode::Safe,
-            proxima_tensor::NumericPolicy::ReassociationPermitted,
-            omega::metal::DispatchType::Serial,
+            &super::PlanNumerics {
+                math_mode: omega::metal::MathMode::Safe,
+                numeric_policy: proxima_tensor::NumericPolicy::ReassociationPermitted,
+                dispatch_type: omega::metal::DispatchType::Serial,
+            },
         )
         .expect("plans the identity program under a policy MathMode::Safe would never pick");
 
